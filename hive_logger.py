@@ -166,3 +166,25 @@ logger = _setup_logger()
 def get_logger(name: str) -> logging.Logger:
     """获取子 logger（自动继承全局配置）"""
     return logging.getLogger(f"alpha_hive.{name}")
+
+
+def atomic_json_write(path, data, **kwargs):
+    """Atomically write JSON to *path* (write-to-tmp + os.replace)."""
+    import tempfile
+    path = Path(path)
+    kwargs.setdefault("ensure_ascii", False)
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=str(path.parent), suffix=".tmp", delete=False
+        ) as tmp:
+            json.dump(data, tmp, **kwargs)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp.name, str(path))
+    except OSError:
+        # Clean up temp file on failure
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise

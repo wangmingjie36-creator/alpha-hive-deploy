@@ -11,10 +11,13 @@ Reddit 社交情绪数据采集模块（通过 ApeWisdom API）
 
 import json
 import logging as _logging
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from hive_logger import atomic_json_write
 
 _log = _logging.getLogger("alpha_hive.reddit_sentiment")
 
@@ -89,8 +92,7 @@ class RedditSentimentClient:
                 "data": results, "timestamp": time.time()
             }
             try:
-                with open(cache_path, "w") as f:
-                    json.dump(results, f)
+                atomic_json_write(cache_path, results)
             except (OSError, TypeError) as exc:
                 _log.debug("Reddit ranking 缓存写入失败 (%s): %s", filter_name, exc)
 
@@ -227,8 +229,7 @@ class RedditSentimentClient:
         }
 
         try:
-            with open(cache_path, "w") as f:
-                json.dump(result, f, ensure_ascii=False)
+            atomic_json_write(cache_path, result)
         except (OSError, TypeError) as exc:
             _log.debug("Reddit sentiment 缓存写入失败 (%s): %s", ticker, exc)
 
@@ -262,11 +263,14 @@ class RedditSentimentClient:
 # ==================== 便捷函数 ====================
 
 _client: Optional[RedditSentimentClient] = None
+_client_lock = threading.Lock()
 
 
 def get_reddit_sentiment(ticker: str) -> Dict:
     """便捷函数：获取 Reddit 情绪数据"""
     global _client
     if _client is None:
-        _client = RedditSentimentClient()
+        with _client_lock:
+            if _client is None:
+                _client = RedditSentimentClient()
     return _client.get_ticker_sentiment(ticker)

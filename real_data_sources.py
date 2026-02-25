@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
+from hive_logger import atomic_json_write
+
 _log = _logging.getLogger("alpha_hive.real_data_sources")
 
 try:
@@ -58,8 +60,7 @@ def _read_cache(name: str, ttl: int = 3600) -> Optional[Dict]:
 def _write_cache(name: str, data: Dict):
     """写磁盘缓存"""
     try:
-        with open(CACHE_DIR / f"{name}.json", "w") as f:
-            json.dump(data, f, ensure_ascii=False)
+        atomic_json_write(CACHE_DIR / f"{name}.json", data)
     except (OSError, TypeError) as exc:
         _log.debug("缓存写入失败 %s: %s", name, exc)
 

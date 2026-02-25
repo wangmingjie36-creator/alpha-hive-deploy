@@ -8,7 +8,7 @@ import os
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
-from hive_logger import PATHS, get_logger
+from hive_logger import PATHS, get_logger, atomic_json_write
 
 _log = get_logger("data_fetcher")
 
@@ -56,8 +56,7 @@ class CacheManager:
         """保存数据到缓存"""
         cache_file = os.path.join(self.cache_dir, f"{key}.json")
         try:
-            with open(cache_file, 'w') as f:
-                json.dump(data, f, indent=2)
+            atomic_json_write(cache_file, data, indent=2)
             return True
         except (OSError, TypeError) as e:
             _log.error(f"❌ 缓存保存失败 {key}: {e}")

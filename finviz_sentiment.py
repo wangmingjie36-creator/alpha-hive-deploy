@@ -12,10 +12,13 @@ Finviz 新闻情绪分析模块
 import json
 import logging as _logging
 import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from hive_logger import atomic_json_write
 
 _log = _logging.getLogger("alpha_hive.finviz_sentiment")
 
@@ -97,8 +100,7 @@ class FinvizSentimentClient:
             titles = [t.strip() for t in titles if t.strip()][:max_titles]
 
             try:
-                with open(cache_path, "w") as f:
-                    json.dump(titles, f, ensure_ascii=False)
+                atomic_json_write(cache_path, titles)
             except (OSError, TypeError) as exc:
                 _log.debug("Finviz titles 缓存写入失败 (%s): %s", ticker, exc)
 
@@ -190,8 +192,7 @@ class FinvizSentimentClient:
         }
 
         try:
-            with open(cache_path, "w") as f:
-                json.dump(result, f, ensure_ascii=False)
+            atomic_json_write(cache_path, result)
         except (OSError, TypeError) as exc:
             _log.debug("Finviz sentiment 缓存写入失败 (%s): %s", ticker, exc)
 
@@ -213,11 +214,14 @@ class FinvizSentimentClient:
 # ==================== 便捷函数 ====================
 
 _client: Optional[FinvizSentimentClient] = None
+_client_lock = threading.Lock()
 
 
 def get_finviz_sentiment(ticker: str) -> Dict:
     """便捷函数：获取 Finviz 新闻情绪"""
     global _client
     if _client is None:
-        _client = FinvizSentimentClient()
+        with _client_lock:
+            if _client is None:
+                _client = FinvizSentimentClient()
     return _client.analyze_sentiment(ticker)

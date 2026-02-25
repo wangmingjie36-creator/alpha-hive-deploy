@@ -10,6 +10,7 @@ Polymarket 预测市场数据客户端
 """
 
 import json
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +21,7 @@ try:
 except ImportError:
     requests = None
 
-from hive_logger import PATHS, get_logger
+from hive_logger import PATHS, get_logger, atomic_json_write
 from resilience import polymarket_limiter, polymarket_breaker
 
 _log = get_logger("polymarket")
@@ -123,8 +124,7 @@ class PolymarketClient:
 
         # 保存缓存
         try:
-            with open(cache_path, "w") as f:
-                json.dump(filtered[:limit], f, ensure_ascii=False)
+            atomic_json_write(cache_path, filtered[:limit])
         except (OSError, TypeError) as e:
             _log.debug("search cache write failed: %s", e)
 
@@ -267,8 +267,7 @@ class PolymarketClient:
 
         # 保存缓存
         try:
-            with open(cache_path, "w") as f:
-                json.dump(result, f, ensure_ascii=False)
+            atomic_json_write(cache_path, result)
         except (OSError, TypeError) as e:
             _log.debug("odds cache write failed: %s", e)
 
@@ -307,8 +306,7 @@ class PolymarketClient:
                 unique.append(e)
 
         try:
-            with open(cache_path, "w") as f:
-                json.dump(unique, f, ensure_ascii=False)
+            atomic_json_write(cache_path, unique)
         except (OSError, TypeError) as e:
             _log.debug("macro cache write failed: %s", e)
 
@@ -354,11 +352,14 @@ class PolymarketClient:
 # ==================== 便捷函数 ====================
 
 _client: Optional[PolymarketClient] = None
+_client_lock = threading.Lock()
 
 
 def get_polymarket_odds(ticker: str) -> Dict:
     """便捷函数：获取 Polymarket 赔率数据"""
     global _client
     if _client is None:
-        _client = PolymarketClient()
+        with _client_lock:
+            if _client is None:
+                _client = PolymarketClient()
     return _client.get_ticker_odds(ticker)

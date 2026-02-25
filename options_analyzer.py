@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import statistics
 
-from hive_logger import PATHS, get_logger
+from hive_logger import PATHS, get_logger, atomic_json_write
 
 _log = get_logger("options")
 
@@ -70,8 +70,7 @@ class OptionsDataFetcher:
                     return obj.item()
                 return str(obj)
 
-            with open(cache_path, "w") as f:
-                json.dump(cache_data, f, default=_json_default)
+            atomic_json_write(cache_path, cache_data, default=_json_default)
         except (OSError, TypeError, ValueError) as e:
             _log.warning("缓存写入失败：%s", e)
 

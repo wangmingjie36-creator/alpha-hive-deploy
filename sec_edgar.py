@@ -11,6 +11,7 @@ SEC EDGAR 内幕交易（Form 4）数据采集模块
 
 import json
 import os
+import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
@@ -22,7 +23,7 @@ try:
 except ImportError:
     requests = None
 
-from hive_logger import PATHS, get_logger
+from hive_logger import PATHS, get_logger, atomic_json_write
 from resilience import sec_limiter, sec_breaker
 
 _log = get_logger("sec_edgar")
@@ -78,8 +79,7 @@ class SECEdgarClient:
             data = resp.json()
 
             # 写入缓存
-            with open(cache_path, "w") as f:
-                json.dump(data, f)
+            atomic_json_write(cache_path, data)
 
             self._cik_map = {
                 v["ticker"].upper(): v["cik_str"]
@@ -100,6 +100,9 @@ class SECEdgarClient:
 
     def _request_get(self, url: str, headers: Dict = None, timeout: int = 15):
         """带熔断保护的 HTTP GET"""
+        if requests is None:
+            _log.warning("requests library not available")
+            return None
         if not sec_breaker.allow_request():
             _log.warning("SEC EDGAR 熔断器已打开，跳过请求: %s", url[:80])
             return None
@@ -166,8 +169,7 @@ class SECEdgarClient:
                     })
 
             # 写入缓存
-            with open(cache_path, "w") as f:
-                json.dump(filings, f)
+            atomic_json_write(cache_path, filings)
 
             return filings
 
@@ -474,8 +476,7 @@ class SECEdgarClient:
 
         # 写入缓存
         try:
-            with open(cache_path, "w") as f:
-                json.dump(result, f, ensure_ascii=False)
+            atomic_json_write(cache_path, result)
         except (OSError, TypeError) as e:
             _log.debug("Insider summary cache write failed: %s", e)
 
@@ -529,11 +530,14 @@ class SECEdgarClient:
 # ==================== 便捷函数 ====================
 
 _client: Optional[SECEdgarClient] = None
+_client_lock = threading.Lock()
 
 
 def get_insider_trades(ticker: str, days: int = 30) -> Dict:
     """便捷函数：获取内幕交易摘要"""
     global _client
     if _client is None:
-        _client = SECEdgarClient()
+        with _client_lock:
+            if _client is None:
+                _client = SECEdgarClient()
     return _client.get_insider_trades(ticker, days=days)

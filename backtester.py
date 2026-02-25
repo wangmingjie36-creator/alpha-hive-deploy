@@ -38,6 +38,7 @@ class PredictionStore:
         self._init_table()
 
     def _init_table(self):
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute(f"""
@@ -72,9 +73,11 @@ class PredictionStore:
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_date ON {self.TABLE}(date)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_ticker ON {self.TABLE}(ticker)")
             conn.commit()
-            conn.close()
         except (sqlite3.Error, OSError) as e:
             _log.warning("预测表初始化失败: %s", e)
+        finally:
+            if conn:
+                conn.close()
 
     def save_prediction(
         self,
@@ -86,6 +89,7 @@ class PredictionStore:
         agent_directions: Dict = None,
     ) -> bool:
         """保存一条预测记录"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute(f"""
@@ -103,11 +107,13 @@ class PredictionStore:
                 json.dumps(agent_directions or {}),
             ))
             conn.commit()
-            conn.close()
             return True
         except (sqlite3.Error, OSError, TypeError) as e:
             _log.warning("保存预测失败 (%s): %s", ticker, e)
             return False
+        finally:
+            if conn:
+                conn.close()
 
     def get_pending_checks(self, period: str) -> List[Dict]:
         """
@@ -122,6 +128,7 @@ class PredictionStore:
         # 目标日期：预测日 + N 天 <= 今天
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -130,17 +137,20 @@ class PredictionStore:
                 WHERE date <= ? AND {checked_col} = 0
                 ORDER BY date ASC
             """, (cutoff,)).fetchall()
-            conn.close()
             return [dict(r) for r in rows]
         except (sqlite3.Error, OSError) as e:
             _log.warning("获取待回测记录失败: %s", e)
             return []
+        finally:
+            if conn:
+                conn.close()
 
     def update_check_result(
         self, pred_id: int, period: str,
         price: float, ret: float, correct: bool
     ) -> bool:
         """更新回测结果"""
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute(f"""
@@ -150,11 +160,13 @@ class PredictionStore:
                 WHERE id = ?
             """, (price, ret, 1 if correct else 0, pred_id))
             conn.commit()
-            conn.close()
             return True
         except (sqlite3.Error, OSError) as e:
             _log.warning("更新回测结果失败: %s", e)
             return False
+        finally:
+            if conn:
+                conn.close()
 
     def get_accuracy_stats(self, period: str = "t7", days: int = 90) -> Dict:
         """
@@ -171,6 +183,7 @@ class PredictionStore:
         correct_col = f"correct_{period}"
         return_col = f"return_{period}"
 
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -233,8 +246,6 @@ class PredictionStore:
                     "avg_score": round(r["avg_score"] or 0, 1),
                 }
 
-            conn.close()
-
             return {
                 "period": period,
                 "days_window": days,
@@ -249,10 +260,14 @@ class PredictionStore:
         except (sqlite3.Error, OSError, KeyError, TypeError) as e:
             _log.warning("获取准确率统计失败: %s", e)
             return {"overall_accuracy": 0, "total_checked": 0}
+        finally:
+            if conn:
+                conn.close()
 
     def get_all_predictions(self, days: int = 30) -> List[Dict]:
         """获取最近 N 天所有预测"""
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
@@ -260,11 +275,13 @@ class PredictionStore:
                 SELECT * FROM {self.TABLE}
                 WHERE date >= ? ORDER BY date DESC, ticker
             """, (cutoff,)).fetchall()
-            conn.close()
             return [dict(r) for r in rows]
         except (sqlite3.Error, OSError) as e:
             _log.warning("获取预测列表失败: %s", e)
             return []
+        finally:
+            if conn:
+                conn.close()
 
 
 class Backtester:
@@ -551,6 +568,7 @@ class Backtester:
         dim_accuracy = {}
         total_samples = 0
 
+        conn = None
         try:
             conn = sqlite3.connect(self.store.db_path)
             conn.row_factory = sqlite3.Row
@@ -591,11 +609,12 @@ class Backtester:
                 else:
                     dim_accuracy[dim] = 0.5  # 样本不足时用默认 50%
 
-            conn.close()
-
         except (sqlite3.Error, OSError, json.JSONDecodeError, KeyError, TypeError) as e:
             _log.warning("权重自适应失败: %s", e)
             return None
+        finally:
+            if conn:
+                conn.close()
 
         if total_samples < min_samples:
             pass  # 样本不足，保持默认
@@ -628,6 +647,7 @@ class Backtester:
         self, weights: Dict, accuracy: Dict, samples: int
     ):
         """将自适应权重持久化到 SQLite"""
+        conn = None
         try:
             conn = sqlite3.connect(self.store.db_path)
             conn.execute("""
@@ -650,9 +670,11 @@ class Backtester:
                 samples,
             ))
             conn.commit()
-            conn.close()
         except (sqlite3.Error, OSError, TypeError) as e:
             _log.warning("保存自适应权重失败: %s", e)
+        finally:
+            if conn:
+                conn.close()
 
     @staticmethod
     def load_adapted_weights(db_path: str = DB_PATH) -> Optional[Dict]:
@@ -662,13 +684,13 @@ class Backtester:
         Returns:
             {signal: 0.xx, catalyst: 0.xx, ...} 或 None
         """
+        conn = None
         try:
             conn = sqlite3.connect(db_path)
             row = conn.execute("""
                 SELECT weights, sample_count FROM adapted_weights
                 ORDER BY created_at DESC LIMIT 1
             """).fetchone()
-            conn.close()
 
             if row and row[1] >= 5:  # 至少 5 个样本才使用
                 weights = json.loads(row[0])
@@ -677,6 +699,9 @@ class Backtester:
         except (sqlite3.Error, OSError, json.JSONDecodeError, KeyError) as e:
             _log.debug("Adapted weights load failed: %s", e)
             return None
+        finally:
+            if conn:
+                conn.close()
 
 
 # ==================== 便捷函数 ====================
