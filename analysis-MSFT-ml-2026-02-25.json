@@ -1,9 +1,9 @@
 {
   "ticker": "MSFT",
-  "timestamp": "2026-02-25T09:31:36.582554",
+  "timestamp": "2026-02-25T09:52:31.468745",
   "advanced_analysis": {
     "ticker": "MSFT",
-    "timestamp": "2026-02-25T09:31:36.586271",
+    "timestamp": "2026-02-25T09:52:33.026391",
     "overview": "\u6807\u7684\u57fa\u672c\u9762\u5206\u6790",
     "industry_comparison": {},
     "historical_analysis": {
@@ -55,10 +55,10 @@
     },
     "options_analysis": {
       "ticker": "MSFT",
-      "timestamp": "2026-02-25T09:31:36.586950",
+      "timestamp": "2026-02-25T09:52:33.631855",
       "iv_rank": 100,
       "iv_percentile": 100.0,
-      "iv_current": 82.8,
+      "iv_current": 81.66,
       "put_call_ratio": 0.49,
       "total_oi": 319744,
       "gamma_exposure": 0.0,
@@ -67,73 +67,73 @@
         {
           "type": "call_sweep",
           "strike": 400.0,
-          "volume": 40972.0,
+          "volume": 43355.0,
           "oi": 7286,
-          "ratio": 5.62,
+          "ratio": 5.95,
           "bullish": true
         },
         {
           "type": "call_sweep",
           "strike": 397.5,
-          "volume": 27377.0,
+          "volume": 29474.0,
           "oi": 2137,
-          "ratio": 12.81,
+          "ratio": 13.79,
           "bullish": true
         },
         {
           "type": "put_sweep",
           "strike": 395.0,
-          "volume": 24200.0,
+          "volume": 26415.0,
           "oi": 228,
-          "ratio": 106.14,
+          "ratio": 115.86,
           "bullish": false
         },
         {
           "type": "large_call_volume",
           "strike": 400.0,
-          "volume": 18230.0,
+          "volume": 19969.0,
           "bullish": true
         },
         {
           "type": "call_sweep",
           "strike": 402.5,
-          "volume": 17046.0,
+          "volume": 17556.0,
           "oi": 3275,
-          "ratio": 5.2,
+          "ratio": 5.36,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 395.0,
-          "volume": 15535.0,
+          "volume": 16094.0,
           "bullish": true
         },
         {
           "type": "put_sweep",
           "strike": 397.5,
-          "volume": 13275.0,
+          "volume": 13766.0,
           "oi": 334,
-          "ratio": 39.75,
+          "ratio": 41.22,
           "bullish": false
         },
         {
           "type": "call_sweep",
           "strike": 405.0,
-          "volume": 11271.0,
+          "volume": 11444.0,
           "oi": 2192,
-          "ratio": 5.14,
+          "ratio": 5.22,
           "bullish": true
         },
         {
           "type": "large_put_volume",
           "strike": 395.0,
-          "volume": 10412.0,
+          "volume": 10831.0,
           "bullish": false
         },
         {
           "type": "large_call_volume",
           "strike": 395.0,
-          "volume": 10114.0,
+          "volume": 10321.0,
           "bullish": true
         }
       ],
@@ -142,34 +142,34 @@
           {
             "strike": 375.0,
             "oi": 7818,
-            "iv": 0.35938140625
+            "iv": 0.35547519531249994
           },
           {
             "strike": 400.0,
             "oi": 6885,
-            "iv": 0.29456271850585936
+            "iv": 0.28089098022460934
           },
           {
             "strike": 380.0,
             "oi": 6180,
-            "iv": 0.3789124609375
+            "iv": 0.39063109375
           }
         ],
         "resistance": [
           {
             "strike": 400.0,
             "oi": 14284,
-            "iv": 0.2430495617675781
+            "iv": 0.24976336181640624
           },
           {
             "strike": 410.0,
             "oi": 11998,
-            "iv": 0.2563550927734375
+            "iv": 0.2561109545898438
           },
           {
             "strike": 390.0,
             "oi": 11464,
-            "iv": 0.2512281909179687
+            "iv": 0.24536887451171874
           }
         ]
       },
@@ -185,7 +185,7 @@
   },
   "ml_prediction": {
     "ticker": "MSFT",
-    "date": "2026-02-25T09:31:36.586988",
+    "date": "2026-02-25T09:52:33.631934",
     "input": {
       "crowding_score": 63.5,
       "catalyst_quality": "A",

@@ -1,9 +1,9 @@
 {
   "ticker": "TSLA",
-  "timestamp": "2026-02-25T09:44:52.950593",
+  "timestamp": "2026-02-25T09:52:31.468745",
   "advanced_analysis": {
     "ticker": "TSLA",
-    "timestamp": "2026-02-25T09:44:52.952054",
+    "timestamp": "2026-02-25T09:52:32.420268",
     "overview": "EV \u6210\u672c\u9886\u5bfc\u8005\uff0c\u4ea7\u80fd\u6269\u5f20\u5feb\uff0c\u4f46\u7ade\u4e89\u52a0\u5267\uff0c\u5229\u6da6\u7387\u627f\u538b",
     "industry_comparison": {
       "industry": "EV",
@@ -102,10 +102,10 @@
     },
     "options_analysis": {
       "ticker": "TSLA",
-      "timestamp": "2026-02-25T09:44:52.953199",
+      "timestamp": "2026-02-25T09:52:33.025150",
       "iv_rank": 0,
       "iv_percentile": 0.0,
-      "iv_current": 1.29,
+      "iv_current": 1.02,
       "put_call_ratio": 0.98,
       "total_oi": 845134,
       "gamma_exposure": 0.0,
@@ -114,77 +114,77 @@
         {
           "type": "call_sweep",
           "strike": 420.0,
-          "volume": 109032.0,
+          "volume": 113168.0,
           "oi": 8421,
-          "ratio": 12.95,
+          "ratio": 13.44,
           "bullish": true
         },
         {
           "type": "call_sweep",
           "strike": 415.0,
-          "volume": 90227.0,
+          "volume": 95748.0,
           "oi": 13657,
-          "ratio": 6.61,
+          "ratio": 7.01,
           "bullish": true
         },
         {
           "type": "call_sweep",
           "strike": 417.5,
-          "volume": 65501.0,
+          "volume": 70567.0,
           "oi": 4272,
-          "ratio": 15.33,
+          "ratio": 16.52,
           "bullish": true
         },
         {
           "type": "put_sweep",
           "strike": 410.0,
-          "volume": 60985.0,
+          "volume": 62772.0,
           "oi": 4121,
-          "ratio": 14.8,
+          "ratio": 15.23,
           "bullish": false
         },
         {
           "type": "put_sweep",
           "strike": 415.0,
-          "volume": 55305.0,
+          "volume": 60511.0,
           "oi": 900,
-          "ratio": 61.45,
+          "ratio": 67.23,
           "bullish": false
         },
         {
           "type": "put_sweep",
           "strike": 412.5,
-          "volume": 51156.0,
+          "volume": 53731.0,
           "oi": 594,
-          "ratio": 86.12,
+          "ratio": 90.46,
           "bullish": false
         },
         {
           "type": "large_call_volume",
           "strike": 420.0,
-          "volume": 38644.0,
+          "volume": 39813.0,
           "bullish": true
         },
         {
           "type": "call_sweep",
           "strike": 425.0,
-          "volume": 36347.0,
+          "volume": 37077.0,
           "oi": 4608,
-          "ratio": 7.89,
-          "bullish": true
-        },
-        {
-          "type": "call_sweep",
-          "strike": 422.5,
-          "volume": 34851.0,
-          "oi": 2941,
-          "ratio": 11.85,
+          "ratio": 8.05,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 400.0,
-          "volume": 34710.0,
+          "volume": 35820.0,
+          "bullish": true
+        },
+        {
+          "type": "call_sweep",
+          "strike": 422.5,
+          "volume": 35603.0,
+          "oi": 2941,
+          "ratio": 12.11,
           "bullish": true
         }
       ],
@@ -198,12 +198,12 @@
           {
             "strike": 375.0,
             "oi": 22173,
-            "iv": 0.569340244140625
+            "iv": 0.57617611328125
           },
           {
             "strike": 315.0,
             "oi": 14531,
-            "iv": 1.1367230664062502
+            "iv": 1.140629296875
           }
         ],
         "resistance": [
@@ -220,7 +220,7 @@
           {
             "strike": 435.0,
             "oi": 18853,
-            "iv": 0.372076591796875
+            "iv": 0.3398503515625
           }
         ]
       },
@@ -236,7 +236,7 @@
   },
   "ml_prediction": {
     "ticker": "TSLA",
-    "date": "2026-02-25T09:44:52.953250",
+    "date": "2026-02-25T09:52:33.025452",
     "input": {
       "crowding_score": 63.5,
       "catalyst_quality": "A",

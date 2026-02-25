@@ -1,9 +1,9 @@
 {
   "ticker": "VKTX",
-  "timestamp": "2026-02-25T09:44:52.950593",
+  "timestamp": "2026-02-25T09:52:31.468745",
   "advanced_analysis": {
     "ticker": "VKTX",
-    "timestamp": "2026-02-25T09:44:52.953732",
+    "timestamp": "2026-02-25T09:52:34.708918",
     "overview": "GLP-1 \u9886\u5148\u8005\uff0c\u4e34\u5e8a\u8fdb\u5c55\u826f\u597d\uff0c\u4f46\u8d22\u52a1\u538b\u529b\u5927\uff0c\u5931\u8d25\u98ce\u9669\u9700\u9632\u8303",
     "industry_comparison": {
       "industry": "Biotech",
@@ -123,10 +123,10 @@
     },
     "options_analysis": {
       "ticker": "VKTX",
-      "timestamp": "2026-02-25T09:44:52.954146",
+      "timestamp": "2026-02-25T09:52:35.119116",
       "iv_rank": 0,
       "iv_percentile": 0.0,
-      "iv_current": 1.15,
+      "iv_current": 1.13,
       "put_call_ratio": 0.13,
       "total_oi": 16879,
       "gamma_exposure": 0.0,
@@ -146,12 +146,12 @@
           {
             "strike": 30.0,
             "oi": 283,
-            "iv": 0.7939473730468749
+            "iv": 0.7919942675781251
           },
           {
             "strike": 32.0,
             "oi": 243,
-            "iv": 0.68555001953125
+            "iv": 0.6875031250000001
           },
           {
             "strike": 25.0,
@@ -163,7 +163,7 @@
           {
             "strike": 35.0,
             "oi": 2798,
-            "iv": 0.7656273437500001
+            "iv": 0.77929908203125
           },
           {
             "strike": 50.0,
@@ -173,7 +173,7 @@
           {
             "strike": 32.0,
             "oi": 1062,
-            "iv": 0.9511723632812499
+            "iv": 0.9609378906249999
           }
         ]
       },
@@ -189,7 +189,7 @@
   },
   "ml_prediction": {
     "ticker": "VKTX",
-    "date": "2026-02-25T09:44:52.954167",
+    "date": "2026-02-25T09:52:35.119154",
     "input": {
       "crowding_score": 63.5,
       "catalyst_quality": "A+",

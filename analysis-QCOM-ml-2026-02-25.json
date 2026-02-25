@@ -1,9 +1,9 @@
 {
   "ticker": "QCOM",
-  "timestamp": "2026-02-25T09:31:36.582554",
+  "timestamp": "2026-02-25T09:52:31.468745",
   "advanced_analysis": {
     "ticker": "QCOM",
-    "timestamp": "2026-02-25T09:31:36.588671",
+    "timestamp": "2026-02-25T09:52:34.206201",
     "overview": "\u6807\u7684\u57fa\u672c\u9762\u5206\u6790",
     "industry_comparison": {
       "industry": "GPU",
@@ -67,10 +67,10 @@
     },
     "options_analysis": {
       "ticker": "QCOM",
-      "timestamp": "2026-02-25T09:31:36.589236",
-      "iv_rank": 96.67,
+      "timestamp": "2026-02-25T09:52:34.707755",
+      "iv_rank": 95.59,
       "iv_percentile": 99.57,
-      "iv_current": 85.16,
+      "iv_current": 84.4,
       "put_call_ratio": 0.57,
       "total_oi": 54062,
       "gamma_exposure": 0.0,
@@ -86,29 +86,29 @@
           {
             "strike": 139.0,
             "oi": 1725,
-            "iv": 0.44434149414062496
+            "iv": 0.41602146484374997
           },
           {
             "strike": 138.0,
             "oi": 1680,
-            "iv": 0.446294599609375
+            "iv": 0.432622861328125
           }
         ],
         "resistance": [
           {
             "strike": 140.0,
             "oi": 6032,
-            "iv": 0.47852083984375
+            "iv": 0.5395553857421876
           },
           {
             "strike": 138.0,
             "oi": 6002,
-            "iv": 0.8051777294921875
+            "iv": 0.5493209130859377
           },
           {
             "strike": 155.0,
             "oi": 2767,
-            "iv": 0.32080757324218745
+            "iv": 0.3276434423828125
           }
         ]
       },
@@ -124,7 +124,7 @@
   },
   "ml_prediction": {
     "ticker": "QCOM",
-    "date": "2026-02-25T09:31:36.589259",
+    "date": "2026-02-25T09:52:34.707919",
     "input": {
       "crowding_score": 63.5,
       "catalyst_quality": "A",

@@ -1,9 +1,9 @@
 {
   "ticker": "NVDA",
-  "timestamp": "2026-02-25T09:44:52.950593",
+  "timestamp": "2026-02-25T09:52:31.468745",
   "advanced_analysis": {
     "ticker": "NVDA",
-    "timestamp": "2026-02-25T09:44:52.950890",
+    "timestamp": "2026-02-25T09:52:31.469126",
     "overview": "AI \u82af\u7247\u9f99\u5934\uff0cCUDA \u751f\u6001\u62a4\u57ce\u6cb3\u6df1\u539a\uff0c\u4f46\u4f30\u503c\u5df2\u9ad8\uff0c\u76d1\u7ba1\u98ce\u9669\u9700\u5173\u6ce8",
     "industry_comparison": {
       "industry": "GPU",
@@ -125,10 +125,10 @@
     },
     "options_analysis": {
       "ticker": "NVDA",
-      "timestamp": "2026-02-25T09:44:52.951542",
+      "timestamp": "2026-02-25T09:52:32.419134",
       "iv_rank": 0,
       "iv_percentile": 0.0,
-      "iv_current": 1.41,
+      "iv_current": 1.5,
       "put_call_ratio": 0.7,
       "total_oi": 1366331,
       "gamma_exposure": 0.0,
@@ -137,61 +137,61 @@
         {
           "type": "large_call_volume",
           "strike": 200.0,
-          "volume": 70104.0,
+          "volume": 71725.0,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 215.0,
-          "volume": 60535.0,
+          "volume": 61161.0,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 210.0,
-          "volume": 50334.0,
+          "volume": 52966.0,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 195.0,
-          "volume": 45348.0,
+          "volume": 46984.0,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 205.0,
-          "volume": 31320.0,
+          "volume": 33233.0,
+          "bullish": true
+        },
+        {
+          "type": "large_call_volume",
+          "strike": 220.0,
+          "volume": 30464.0,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 207.5,
-          "volume": 29744.0,
+          "volume": 30149.0,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 220.0,
-          "volume": 29503.0,
-          "bullish": true
-        },
-        {
-          "type": "large_call_volume",
-          "strike": 220.0,
-          "volume": 28340.0,
+          "volume": 28551.0,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 197.5,
-          "volume": 24683.0,
+          "volume": 25740.0,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 230.0,
-          "volume": 23687.0,
+          "volume": 24530.0,
           "bullish": true
         }
       ],
@@ -200,7 +200,7 @@
           {
             "strike": 190.0,
             "oi": 36950,
-            "iv": 0.8422867333984375
+            "iv": 0.8303239624023437
           },
           {
             "strike": 105.0,
@@ -210,24 +210,24 @@
           {
             "strike": 180.0,
             "oi": 30026,
-            "iv": 0.901368173828125
+            "iv": 0.8901378173828124
           }
         ],
         "resistance": [
           {
             "strike": 200.0,
             "oi": 109267,
-            "iv": 0.8095722167968749
+            "iv": 0.8308122387695311
           },
           {
             "strike": 195.0,
             "oi": 98625,
-            "iv": 0.8374039697265624
+            "iv": 0.8540053662109376
           },
           {
             "strike": 202.5,
             "oi": 66913,
-            "iv": 0.8022480712890624
+            "iv": 0.8159198095703124
           }
         ]
       },
@@ -243,7 +243,7 @@
   },
   "ml_prediction": {
     "ticker": "NVDA",
-    "date": "2026-02-25T09:44:52.951572",
+    "date": "2026-02-25T09:52:32.419244",
     "input": {
       "crowding_score": 63.5,
       "catalyst_quality": "A",

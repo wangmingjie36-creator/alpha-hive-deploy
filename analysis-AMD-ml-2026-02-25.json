@@ -1,9 +1,9 @@
 {
   "ticker": "AMD",
-  "timestamp": "2026-02-25T09:31:36.582554",
+  "timestamp": "2026-02-25T09:52:31.468745",
   "advanced_analysis": {
     "ticker": "AMD",
-    "timestamp": "2026-02-25T09:31:36.587554",
+    "timestamp": "2026-02-25T09:52:33.632529",
     "overview": "GPU \u8ffd\u8d76\u8005\uff0c\u6027\u4ef7\u6bd4\u4f18\u52bf\uff0c\u4f46\u9ad8\u7aef\u5e02\u573a\u4efd\u989d\u4ecd\u4f4e",
     "industry_comparison": {
       "industry": "GPU",
@@ -76,10 +76,10 @@
     },
     "options_analysis": {
       "ticker": "AMD",
-      "timestamp": "2026-02-25T09:31:36.588376",
-      "iv_rank": 58.62,
-      "iv_percentile": 76.72,
-      "iv_current": 78.46,
+      "timestamp": "2026-02-25T09:52:34.205703",
+      "iv_rank": 0,
+      "iv_percentile": 0.0,
+      "iv_current": 1.17,
       "put_call_ratio": 1.81,
       "total_oi": 634066,
       "gamma_exposure": 0.0,
@@ -88,25 +88,25 @@
         {
           "type": "large_call_volume",
           "strike": 215.0,
-          "volume": 19487.0,
+          "volume": 20165.0,
           "bullish": true
         },
         {
           "type": "large_put_volume",
           "strike": 210.0,
-          "volume": 13222.0,
+          "volume": 13523.0,
           "bullish": false
         },
         {
           "type": "large_call_volume",
           "strike": 212.5,
-          "volume": 10507.0,
+          "volume": 11093.0,
           "bullish": true
         },
         {
           "type": "large_call_volume",
           "strike": 220.0,
-          "volume": 10094.0,
+          "volume": 10798.0,
           "bullish": true
         }
       ],
@@ -115,40 +115,40 @@
           {
             "strike": 192.5,
             "oi": 73028,
-            "iv": 0.8173846386718748
+            "iv": 0.788088056640625
           },
           {
             "strike": 170.0,
             "oi": 46195,
-            "iv": 1.01953615234375
+            "iv": 1.0078174609375
           },
           {
             "strike": 167.5,
             "oi": 28234,
-            "iv": 1.0468797656250002
+            "iv": 1.015629921875
           }
         ],
         "resistance": [
           {
             "strike": 230.0,
             "oi": 12688,
-            "iv": 0.5918009570312501
+            "iv": 0.6171913281250001
           },
           {
             "strike": 210.0,
             "oi": 10203,
-            "iv": 0.5661664477539063
+            "iv": 0.6469761865234375
           },
           {
             "strike": 220.0,
             "oi": 8845,
-            "iv": 0.56836369140625
+            "iv": 0.6247596118164063
           }
         ]
       },
       "flow_direction": "bearish",
-      "options_score": 5.5,
-      "signal_summary": "IV \u5904\u4e8e\u7406\u60f3\u6c34\u4f4d | \u68c0\u6d4b\u5230 3 \u4e2a\u770b\u6da8\u5f02\u52a8",
+      "options_score": 3.5,
+      "signal_summary": "\u68c0\u6d4b\u5230 3 \u4e2a\u770b\u6da8\u5f02\u52a8",
       "expiration_dates": [
         "2026-02-27",
         "2026-03-06",
@@ -158,7 +158,7 @@
   },
   "ml_prediction": {
     "ticker": "AMD",
-    "date": "2026-02-25T09:31:36.588419",
+    "date": "2026-02-25T09:52:34.205784",
     "input": {
       "crowding_score": 63.5,
       "catalyst_quality": "A",
