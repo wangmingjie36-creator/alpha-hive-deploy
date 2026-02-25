@@ -5,6 +5,7 @@
 
 import os
 import json
+import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
@@ -14,6 +15,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as GoogleCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 import googleapiclient.discovery as discovery
+
+_log = logging.getLogger("alpha_hive.calendar")
 
 
 class CalendarIntegrator:
@@ -58,9 +61,9 @@ class CalendarIntegrator:
             self._authenticate()
             # 注意：由于使用 Gmail scope，Calendar API 可能不可用
             # 但认证本身会成功，降级模式下以模拟数据返回结果
-            print("ℹ️ 【临时模式】使用 Gmail 权限运行，Calendar 功能部分可用")
-        except Exception as e:
-            print(f"⚠️ Calendar 认证失败，降级运行（无日历功能）: {e}")
+            _log.info("Calendar 临时模式：Gmail 权限运行")
+        except (FileNotFoundError, OSError, ValueError, RuntimeError) as e:
+            _log.warning("Calendar 认证失败，降级运行: %s", e)
             self.service = None
 
     def _authenticate(self):
@@ -96,10 +99,10 @@ class CalendarIntegrator:
 
             # 【临时方案】使用 Gmail service 而不是 Calendar
             self.service = discovery.build('gmail', 'v1', credentials=creds)
-            print("✅ Gmail 认证成功（Calendar 功能使用本地缓存）")
+            _log.info("Gmail 认证成功（Calendar 使用本地缓存）")
 
-        except Exception as e:
-            print(f"❌ 认证失败: {e}")
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as e:
+            _log.error("认证失败: %s", e)
             raise
 
     def sync_catalysts(self, catalysts: Dict = None, tickers: List[str] = None) -> Dict[str, Any]:
@@ -148,14 +151,14 @@ class CalendarIntegrator:
                             'timezone': catalyst.get('time_zone', 'US/Eastern')
                         }
                         stats['created'] += 1
-                        print(f"✅ 已缓存催化剂: {ticker} - {catalyst['event']}")
+                        _log.info("已缓存催化剂: %s - %s", ticker, catalyst['event'])
 
-                    except Exception as e:
+                    except (KeyError, ValueError, TypeError) as e:
                         stats['errors'] += 1
-                        print(f"⚠️ 缓存失败 {ticker}: {str(e)[:50]}")
+                        _log.warning("缓存失败 %s: %s", ticker, e)
 
-        except Exception as e:
-            print(f"❌ 同步催化剂失败: {e}")
+        except (KeyError, ValueError, TypeError, AttributeError) as e:
+            _log.error("同步催化剂失败: %s", e)
             stats['errors'] += 1
 
         print(f"📝 【本地方案】催化剂已缓存到内存 (仅当前会话生效)")
@@ -201,8 +204,8 @@ class CalendarIntegrator:
             print(f"   📧 提醒已记录，可通过邮件同步发送")
             return reminder_id
 
-        except Exception as e:
-            print(f"⚠️ 添加提醒失败 {ticker}: {str(e)[:50]}")
+        except (KeyError, ValueError, TypeError, OSError) as e:
+            _log.warning("添加提醒失败 %s: %s", ticker, e)
             return None
 
     def get_upcoming_events(self, days_ahead: int = 7) -> List[Dict]:
@@ -254,15 +257,16 @@ class CalendarIntegrator:
                                 'date': dt_with_tz.isoformat(),
                                 'days_until': days_until
                             })
-                    except Exception:
+                    except (ValueError, KeyError, TypeError, pytz.exceptions.UnknownTimeZoneError) as e:
+                        _log.debug("Catalyst date parse skipped: %s", e)
                         continue
 
             # 按日期排序
             result.sort(key=lambda x: x['days_until'])
             return result
 
-        except Exception as e:
-            print(f"⚠️ 获取催化剂事件失败: {str(e)[:50]}")
+        except (ValueError, KeyError, TypeError) as e:
+            _log.warning("获取催化剂事件失败: %s", e)
             return []
 
     # ==================== 私有方法 ====================
@@ -293,7 +297,8 @@ class CalendarIntegrator:
             dt = datetime.fromisoformat(f"{date_str}T{time_str}:00")
             tz = pytz.timezone(tz_str)
             dt = tz.localize(dt)
-        except Exception:
+        except (ValueError, TypeError, pytz.exceptions.UnknownTimeZoneError) as e:
+            _log.debug("Catalyst date parse fallback: %s", e)
             dt = datetime.now(pytz.timezone(tz_str))
 
         return {
@@ -332,8 +337,8 @@ class CalendarIntegrator:
                 # 移除 emoji 和空格
                 ticker = ticker_part.replace('📅', '').strip()
                 return ticker
-        except Exception:
-            pass
+        except (ValueError, IndexError, AttributeError) as e:
+            _log.debug("Ticker extraction failed from summary: %s", e)
         return ""
 
 
@@ -375,7 +380,7 @@ def test_calendar_integration():
 
         print("\n✅ 测试完成！")
 
-    except Exception as e:
+    except (FileNotFoundError, OSError, ValueError, RuntimeError, ConnectionError) as e:
         print(f"❌ 测试失败: {e}")
 
 
