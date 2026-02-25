@@ -977,13 +977,26 @@ class BearBeeContrarian(BeeAgent):
     """看空对冲蜂 - 专门寻找看空信号，平衡蜂群的系统性看多偏差
     独立维度：contrarian（不参与 5 维评分，但影响方向投票）
 
+    **二阶段执行**：在其他 6 个 Agent 完成后运行，从信息素板读取已有数据，
+    避免重复 API 调用导致限流失败。
+
     分析维度：
-    1. 内幕卖出强度（大额抛售 = 强看空）
-    2. 估值泡沫（P/E 过高、涨幅过大）
-    3. 期权看跌信号（P/C > 1.2、高 IV）
-    4. 动量衰减（涨后回落、量能萎缩）
-    5. 宏观风险（利率、地缘、行业逆风）
+    1. 内幕卖出强度（从 ScoutBeeNova 信息素板读取，回退 SEC 直查）
+    2. 估值泡沫（P/E 过高、涨幅过大 — 使用预取 yfinance 数据）
+    3. 期权看跌信号（从 OracleBeeEcho 信息素板读取，回退期权模块）
+    4. 动量衰减（使用预取 yfinance 数据）
+    5. 新闻看空信号（从 BuzzBeeWhisper 信息素板读取，回退 Finviz）
     """
+
+    def _read_board_entry(self, ticker: str, agent_id_prefix: str) -> Optional[PheromoneEntry]:
+        """从信息素板读取指定 Agent 对指定 ticker 的最新条目"""
+        if not self.board:
+            return None
+        entries = self.board.get_top_signals(ticker=ticker, n=20)
+        for e in entries:
+            if e.agent_id.startswith(agent_id_prefix):
+                return e
+        return None
 
     def analyze(self, ticker: str) -> Dict:
         try:
@@ -992,37 +1005,82 @@ class BearBeeContrarian(BeeAgent):
             bearish_signals = []
             bearish_score = 0.0  # 看空严重程度 0-10
             total_weight = 0.0
+            data_sources = {}  # 跟踪数据来源
 
-            # ===== 1. 内幕卖出强度 =====
+            # ===== 1. 内幕卖出强度（优先从 ScoutBeeNova 信息素板读取）=====
             insider_bear = 0.0
-            try:
-                from sec_edgar import SECEdgarClient
-                sec = SECEdgarClient()
-                insider = sec.get_insider_trading(ticker)
-                if insider:
-                    sold = insider.get("dollar_sold", 0)
-                    bought = insider.get("dollar_bought", 0)
-                    sentiment = insider.get("insider_sentiment", "neutral")
-                    if sentiment == "bearish":
-                        insider_bear = 7.0
-                        bearish_signals.append(f"内幕人净卖出 ${sold:,.0f}")
-                    elif sold > bought * 3 and sold > 1_000_000:
+            insider_data = None
+
+            # 先尝试从信息素板读取 ScoutBeeNova 已发布的内幕数据
+            scout_entry = self._read_board_entry(ticker, "ScoutBee")
+            if scout_entry and scout_entry.discovery:
+                disc = scout_entry.discovery
+                data_sources["insider"] = "pheromone_board"
+                # 解析 ScoutBeeNova 的 discovery 文本提取内幕数据
+                import re
+                # 匹配 "内幕卖出 $150,000,000" 格式
+                sell_match = re.search(r'内幕卖出\s*\$?([\d,]+)', disc)
+                buy_match = re.search(r'内幕买入\s*\$?([\d,]+)', disc)
+                sold = int(sell_match.group(1).replace(',', '')) if sell_match else 0
+                bought = int(buy_match.group(1).replace(',', '')) if buy_match else 0
+
+                if sold > 0 or bought > 0:
+                    insider_data = {"dollar_sold": sold, "dollar_bought": bought}
+                    if sold > bought * 3 and sold > 1_000_000:
                         insider_bear = 8.0
                         bearish_signals.append(f"内幕大额抛售 ${sold:,.0f}（买入仅 ${bought:,.0f}）")
-                    elif sold > bought * 2:
-                        insider_bear = 5.5
+                    elif sold > bought * 2 and sold > 500_000:
+                        insider_bear = 6.5
                         bearish_signals.append(f"内幕卖多买少 卖${sold:,.0f}/买${bought:,.0f}")
-            except Exception:
-                pass
+                    elif sold > bought and sold > 100_000:
+                        insider_bear = 5.0
+                        bearish_signals.append(f"内幕净卖出 ${sold:,.0f}")
+
+                # 也检查 ScoutBeeNova 方向（bearish = 内幕看空信号强）
+                if scout_entry.direction == "bearish" and insider_bear < 6.0:
+                    insider_bear = max(insider_bear, 6.0)
+                    if not any("内幕" in s for s in bearish_signals):
+                        bearish_signals.append(f"Scout 内幕信号看空（{scout_entry.self_score:.1f}分）")
+
+            # 回退：直接调用 SEC API
+            if not insider_data:
+                try:
+                    from sec_edgar import get_insider_trades
+                    insider_data = get_insider_trades(ticker, days=90)
+                    if insider_data:
+                        data_sources["insider"] = "sec_api"
+                        sold = insider_data.get("dollar_sold", 0)
+                        bought = insider_data.get("dollar_bought", 0)
+                        sentiment = insider_data.get("insider_sentiment", "neutral")
+                        if sentiment == "bearish":
+                            insider_bear = 7.0
+                            bearish_signals.append(f"内幕人净卖出 ${sold:,.0f}")
+                        elif sold > bought * 3 and sold > 1_000_000:
+                            insider_bear = 8.0
+                            bearish_signals.append(f"内幕大额抛售 ${sold:,.0f}（买入仅 ${bought:,.0f}）")
+                        elif sold > bought * 2:
+                            insider_bear = 5.5
+                            bearish_signals.append(f"内幕卖多买少 卖${sold:,.0f}/买${bought:,.0f}")
+                except Exception:
+                    data_sources["insider"] = "unavailable"
+
             bearish_score += insider_bear * 0.25
             total_weight += 0.25
 
-            # ===== 2. 估值/涨幅过热 =====
+            # ===== 2. 估值/涨幅过热（使用预取 yfinance 数据）=====
             overval_bear = 0.0
             mom_5d = stock.get("momentum_5d", 0)
-            mom_20d = stock.get("momentum_20d", 0) if "momentum_20d" in stock else mom_5d * 2
-            price = stock.get("current_price", 0)
+            price = stock.get("price", 0) or stock.get("current_price", 0)
+
+            # 获取 P/E（从 yfinance 缓存）
             pe = stock.get("pe_ratio", 0)
+            if not pe and price > 0:
+                try:
+                    import yfinance as yf
+                    info = yf.Ticker(ticker).fast_info
+                    pe = getattr(info, 'pe_ratio', 0) or 0
+                except Exception:
+                    pe = 0
 
             if mom_5d > 15:
                 overval_bear = 8.0
@@ -1030,74 +1088,177 @@ class BearBeeContrarian(BeeAgent):
             elif mom_5d > 8:
                 overval_bear = 6.0
                 bearish_signals.append(f"5日涨幅过大 {mom_5d:+.1f}%")
+            elif mom_5d > 5:
+                overval_bear = 4.0
+                bearish_signals.append(f"5日涨幅 {mom_5d:+.1f}%（关注回调风险）")
 
             if pe and pe > 80:
                 overval_bear = max(overval_bear, 7.0)
-                bearish_signals.append(f"P/E 极高 {pe:.1f}")
+                bearish_signals.append(f"P/E 极高 {pe:.1f}（估值泡沫风险）")
             elif pe and pe > 50:
                 overval_bear = max(overval_bear, 5.0)
                 bearish_signals.append(f"P/E 偏高 {pe:.1f}")
+            elif pe and pe > 35:
+                overval_bear = max(overval_bear, 3.5)
+                bearish_signals.append(f"P/E {pe:.1f}（高于市场中位数）")
+
+            data_sources["valuation"] = "yfinance"
             bearish_score += overval_bear * 0.20
             total_weight += 0.20
 
-            # ===== 3. 期权看跌信号 =====
+            # ===== 3. 期权看跌信号（优先从 OracleBeeEcho 信息素板读取）=====
             options_bear = 0.0
-            try:
-                from options_analyzer import OptionsAnalyzer
-                opt = OptionsAnalyzer()
-                result = opt.analyze_options(ticker, stock_price=price if price > 0 else None)
-                if result:
-                    pc_ratio = result.get("put_call_ratio", 1.0)
-                    iv_rank = result.get("iv_rank", 50)
-                    if pc_ratio > 1.5:
-                        options_bear = 8.0
-                        bearish_signals.append(f"P/C Ratio {pc_ratio:.2f}（强看跌）")
-                    elif pc_ratio > 1.2:
-                        options_bear = 6.0
-                        bearish_signals.append(f"P/C Ratio {pc_ratio:.2f}（偏看跌）")
-                    if iv_rank > 80:
-                        options_bear = max(options_bear, 7.0)
-                        bearish_signals.append(f"IV Rank {iv_rank:.0f}（恐慌高位）")
-            except Exception:
-                pass
+            options_data = None
+
+            # 先尝试从信息素板读取 OracleBeeEcho 已发布的期权数据
+            oracle_entry = self._read_board_entry(ticker, "OracleBee")
+            if oracle_entry and oracle_entry.discovery:
+                disc = oracle_entry.discovery
+                data_sources["options"] = "pheromone_board"
+                import re
+                # 解析 P/C Ratio、IV Rank 等
+                pc_match = re.search(r'P/C[:\s]*Ratio[:\s]*([\d.]+)', disc)
+                if not pc_match:
+                    pc_match = re.search(r'P/C[:\s]*([\d.]+)', disc)
+                iv_match = re.search(r'IV[:\s]*(?:Rank)?[:\s]*([\d.]+)', disc)
+
+                pc_ratio = float(pc_match.group(1)) if pc_match else None
+                iv_rank = float(iv_match.group(1)) if iv_match else None
+
+                if pc_ratio and pc_ratio > 1.5:
+                    options_bear = 8.0
+                    bearish_signals.append(f"P/C Ratio {pc_ratio:.2f}（强看跌信号）")
+                elif pc_ratio and pc_ratio > 1.2:
+                    options_bear = 6.0
+                    bearish_signals.append(f"P/C Ratio {pc_ratio:.2f}（偏看跌）")
+                elif pc_ratio and pc_ratio > 1.0:
+                    options_bear = 4.0
+                    bearish_signals.append(f"P/C Ratio {pc_ratio:.2f}（略偏空）")
+
+                if iv_rank and iv_rank > 80:
+                    options_bear = max(options_bear, 7.0)
+                    bearish_signals.append(f"IV Rank {iv_rank:.0f}（恐慌高位）")
+                elif iv_rank and iv_rank > 60:
+                    options_bear = max(options_bear, 5.0)
+                    bearish_signals.append(f"IV Rank {iv_rank:.0f}（波动偏高）")
+
+                # 检查 OracleBeeEcho 的方向
+                if oracle_entry.direction == "bearish" and options_bear < 5.0:
+                    options_bear = max(options_bear, 5.5)
+                    if not any("P/C" in s for s in bearish_signals):
+                        bearish_signals.append(f"Oracle 期权信号看空（{oracle_entry.self_score:.1f}分）")
+
+                options_data = {"pc_ratio": pc_ratio, "iv_rank": iv_rank}
+
+            # 回退：直接调用期权分析模块
+            if not options_data:
+                try:
+                    from options_analyzer import OptionsAnalyzer
+                    opt = OptionsAnalyzer()
+                    result = opt.analyze(ticker, stock_price=price if price > 0 else None)
+                    if result:
+                        data_sources["options"] = "options_api"
+                        pc_ratio = result.get("put_call_ratio", 1.0)
+                        iv_rank = result.get("iv_rank", 50)
+                        if pc_ratio > 1.5:
+                            options_bear = 8.0
+                            bearish_signals.append(f"P/C Ratio {pc_ratio:.2f}（强看跌）")
+                        elif pc_ratio > 1.2:
+                            options_bear = 6.0
+                            bearish_signals.append(f"P/C Ratio {pc_ratio:.2f}（偏看跌）")
+                        if iv_rank > 80:
+                            options_bear = max(options_bear, 7.0)
+                            bearish_signals.append(f"IV Rank {iv_rank:.0f}（恐慌高位）")
+                except Exception:
+                    data_sources["options"] = "unavailable"
+
             bearish_score += options_bear * 0.25
             total_weight += 0.25
 
-            # ===== 4. 动量衰减 / 量能萎缩 =====
+            # ===== 4. 动量衰减 / 量能萎缩（使用预取 yfinance 数据）=====
             momentum_bear = 0.0
-            vol_ratio = stock.get("volume", 0) / stock.get("avg_volume", 1) if stock.get("avg_volume", 0) > 0 else 1.0
+            vol_ratio = stock.get("volume_ratio", 1.0)
+            volatility = stock.get("volatility_20d", 0)
+
             if mom_5d < -5:
                 momentum_bear = 7.5
                 bearish_signals.append(f"5日下跌 {mom_5d:+.1f}%")
             elif mom_5d < -2:
                 momentum_bear = 5.5
                 bearish_signals.append(f"动量转弱 {mom_5d:+.1f}%")
+            elif mom_5d < 0:
+                momentum_bear = 3.0
+                bearish_signals.append(f"近期小幅回调 {mom_5d:+.1f}%")
+
             if 0.01 < vol_ratio < 0.5:
                 momentum_bear = max(momentum_bear, 5.0)
-                bearish_signals.append(f"量能萎缩 {vol_ratio:.1f}x")
+                bearish_signals.append(f"量能萎缩 {vol_ratio:.1f}x（参与度下降）")
             elif vol_ratio > 3.0 and mom_5d < 0:
                 momentum_bear = max(momentum_bear, 7.0)
                 bearish_signals.append(f"放量下跌 {vol_ratio:.1f}x | {mom_5d:+.1f}%")
+            elif vol_ratio > 2.0 and mom_5d < 0:
+                momentum_bear = max(momentum_bear, 5.5)
+                bearish_signals.append(f"量增价跌 {vol_ratio:.1f}x | {mom_5d:+.1f}%")
+
+            if volatility > 50:
+                momentum_bear = max(momentum_bear, 5.5)
+                bearish_signals.append(f"高波动率 {volatility:.0f}%（年化）")
+
+            data_sources["momentum"] = "yfinance"
             bearish_score += momentum_bear * 0.15
             total_weight += 0.15
 
-            # ===== 5. 综合看空 Finviz 新闻 =====
+            # ===== 5. 新闻看空信号（优先从 BuzzBeeWhisper 信息素板读取）=====
             news_bear = 0.0
-            try:
-                from finviz_sentiment import FinvizSentimentAnalyzer
-                fv = FinvizSentimentAnalyzer()
-                news = fv.get_ticker_sentiment(ticker)
-                if news and isinstance(news, dict):
-                    neg = news.get("bearish", 0) or news.get("negative", 0)
-                    pos = news.get("bullish", 0) or news.get("positive", 0)
-                    if neg > pos * 2 and neg >= 3:
-                        news_bear = 7.0
-                        bearish_signals.append(f"新闻偏空（{neg}空 vs {pos}多）")
-                    elif neg > pos and neg >= 2:
-                        news_bear = 5.0
-                        bearish_signals.append(f"新闻略空（{neg}空/{pos}多）")
-            except Exception:
-                pass
+
+            # 先尝试从信息素板读取 BuzzBeeWhisper 的情绪数据
+            buzz_entry = self._read_board_entry(ticker, "BuzzBee")
+            if buzz_entry and buzz_entry.discovery:
+                disc = buzz_entry.discovery
+                data_sources["news"] = "pheromone_board"
+                import re
+                # 解析 "情绪 42%" 或 "情绪 38%" 格式
+                sent_match = re.search(r'情绪\s*(\d+)%', disc)
+                if sent_match:
+                    sentiment_pct = int(sent_match.group(1))
+                    if sentiment_pct < 30:
+                        news_bear = 7.5
+                        bearish_signals.append(f"市场情绪极度悲观 {sentiment_pct}%")
+                    elif sentiment_pct < 40:
+                        news_bear = 6.0
+                        bearish_signals.append(f"市场情绪偏空 {sentiment_pct}%")
+                    elif sentiment_pct < 45:
+                        news_bear = 4.0
+                        bearish_signals.append(f"市场情绪略偏谨慎 {sentiment_pct}%")
+
+                # 检查 BuzzBeeWhisper 的方向
+                if buzz_entry.direction == "bearish" and news_bear < 5.0:
+                    news_bear = max(news_bear, 5.5)
+                    bearish_signals.append(f"Buzz 情绪分析看空（{buzz_entry.self_score:.1f}分）")
+
+            # 回退：直接调用 Finviz
+            if news_bear == 0.0:
+                try:
+                    from finviz_sentiment import get_finviz_sentiment
+                    finviz = get_finviz_sentiment(ticker)
+                    if finviz and isinstance(finviz, dict):
+                        data_sources["news"] = "finviz_api"
+                        news_score = finviz.get("news_score", 5.0)
+                        neg = len(finviz.get("top_bearish", []))
+                        pos = len(finviz.get("top_bullish", []))
+                        if news_score < 3.5:
+                            news_bear = 7.0
+                            bearish_signals.append(f"新闻情绪偏空（评分 {news_score:.1f}/10）")
+                        elif news_score < 4.5:
+                            news_bear = 5.0
+                            bearish_signals.append(f"新闻略偏空（评分 {news_score:.1f}/10）")
+                        if neg > pos * 2 and neg >= 3:
+                            news_bear = max(news_bear, 6.5)
+                            bearish_signals.append(f"负面新闻主导（{neg}空 vs {pos}多）")
+                except Exception:
+                    if "news" not in data_sources:
+                        data_sources["news"] = "unavailable"
+
             bearish_score += news_bear * 0.15
             total_weight += 0.15
 
@@ -1106,6 +1267,15 @@ class BearBeeContrarian(BeeAgent):
                 final_bear_score = bearish_score / total_weight
             else:
                 final_bear_score = 5.0
+
+            # 若完全无数据但其他 Agent 都看多，给出温和的"谨慎提醒"
+            if not bearish_signals:
+                # 检查价格本身是否存在过热风险
+                if price > 0 and mom_5d >= 0:
+                    bearish_signals.append(f"当前价 ${price:.2f} | 暂无明显看空信号，但建议设置止损")
+                    final_bear_score = 3.0
+                else:
+                    final_bear_score = 2.0
 
             # 反转为看空分：bear_score 越高 → 越看空 → 给蜂群一个低分
             # score 代表"该标的的吸引力"：看空信号强 = 低分
@@ -1119,7 +1289,7 @@ class BearBeeContrarian(BeeAgent):
                 direction = "bullish"  # 找不到看空理由 = 确认看多
 
             if bearish_signals:
-                discovery = " | ".join(bearish_signals[:4])
+                discovery = " | ".join(bearish_signals[:6])
             else:
                 discovery = "未发现显著看空信号"
 
@@ -1129,6 +1299,9 @@ class BearBeeContrarian(BeeAgent):
             self._publish(ticker, discovery, "bear_contrarian", round(score, 2), direction)
 
             confidence = min(1.0, 0.3 + len(bearish_signals) * 0.1)
+            # 信息素板数据可用时增加置信度
+            board_sources = sum(1 for v in data_sources.values() if v == "pheromone_board")
+            confidence = min(1.0, confidence + board_sources * 0.1)
 
             return {
                 "score": round(score, 2),
@@ -1137,11 +1310,7 @@ class BearBeeContrarian(BeeAgent):
                 "discovery": discovery,
                 "source": "BearBeeContrarian",
                 "dimension": "contrarian",
-                "data_quality": {
-                    "insider": "real" if insider_bear > 0 else "fallback",
-                    "options": "real" if options_bear > 0 else "fallback",
-                    "momentum": "real",
-                },
+                "data_quality": data_sources,
                 "details": {
                     "bear_score": round(final_bear_score, 2),
                     "bearish_signals": bearish_signals,
@@ -1150,6 +1319,7 @@ class BearBeeContrarian(BeeAgent):
                     "options_bear": round(options_bear, 1),
                     "momentum_bear": round(momentum_bear, 1),
                     "news_bear": round(news_bear, 1),
+                    "data_sources": data_sources,
                 }
             }
 

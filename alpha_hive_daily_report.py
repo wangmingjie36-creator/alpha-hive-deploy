@@ -337,32 +337,34 @@ class AlphaHiveDailyReporter:
         # 创建共享的信息素板
         board = PheromoneBoard(memory_store=self.memory_store, session_id=self._session_id)
 
-        # 实例化 7 个 Agent（含看空对冲蜂）
+        # 实例化 Agent：第一阶段 6 个核心 Agent，第二阶段 BearBeeContrarian（读取信息素板）
         retriever = self.vector_memory if (self.vector_memory and self.vector_memory.enabled) else None
-        agents = [
+        phase1_agents = [
             ScoutBeeNova(board, retriever=retriever),
             OracleBeeEcho(board, retriever=retriever),
             BuzzBeeWhisper(board, retriever=retriever),
             ChronosBeeHorizon(board, retriever=retriever),
             RivalBeeVanguard(board, retriever=retriever),
             GuardBeeSentinel(board, retriever=retriever),
-            BearBeeContrarian(board, retriever=retriever),
         ]
+        # 看空对冲蜂：二阶段执行（等其他 Agent 写入信息素板后再分析）
+        bear_agent = BearBeeContrarian(board, retriever=retriever)
 
         # Phase 3 P4: 动态注入 CodeExecutorAgent
         if self.code_executor_agent and CODE_EXECUTION_CONFIG.get("add_to_swarm"):
             self.code_executor_agent.board = board
-            agents.append(self.code_executor_agent)
+            phase1_agents.append(self.code_executor_agent)
 
         # Phase 6: 自适应权重
         adapted_w = Backtester.load_adapted_weights() if Backtester else None
         queen = QueenDistiller(board, adapted_weights=adapted_w)
 
-        _log.info("%d Agent | 预取数据中...", len(agents))
+        all_agents = phase1_agents + [bear_agent]
+        _log.info("%d Agent（含二阶段看空蜂）| 预取数据中...", len(all_agents))
 
         # ⚡ 优化 #1+#2: 批量预取 yfinance + VectorMemory（每 ticker 仅 1 次）
         prefetched = prefetch_shared_data(targets, retriever)
-        inject_prefetched(agents, prefetched)
+        inject_prefetched(all_agents, prefetched)
         prefetch_elapsed = time.time() - start_time
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
 
@@ -389,14 +391,26 @@ class AlphaHiveDailyReporter:
                 _log.info("[%d/%d] %s: %.1f/10 (已缓存) %s", idx, len(targets), ticker, swarm_results[ticker]['final_score'], res)
                 continue
 
-            with ThreadPoolExecutor(max_workers=len(agents)) as executor:
-                futures = {executor.submit(agent.analyze, ticker): agent for agent in agents}
+            # 第一阶段：6 个核心 Agent 并行分析
+            with ThreadPoolExecutor(max_workers=len(phase1_agents)) as executor:
+                futures = {executor.submit(agent.analyze, ticker): agent for agent in phase1_agents}
                 agent_results = []
                 for future in as_completed(futures):
                     try:
                         agent_results.append(future.result(timeout=60))
                     except Exception:
                         agent_results.append(None)
+
+            # 第二阶段：BearBeeContrarian 读取信息素板后分析（此时其他 Agent 数据已可用）
+            try:
+                bear_result = bear_agent.analyze(ticker)
+                agent_results.append(bear_result)
+                _log.info("  🐻 看空蜂: %s %s (%.1f分, %d信号)",
+                          ticker, bear_result.get("direction", "?"),
+                          bear_result.get("details", {}).get("bear_score", 0),
+                          len(bear_result.get("details", {}).get("bearish_signals", [])))
+            except Exception:
+                agent_results.append(None)
 
             distilled = queen.distill(ticker, agent_results)
             swarm_results[ticker] = distilled
@@ -457,13 +471,13 @@ class AlphaHiveDailyReporter:
                 self.metrics.record_scan(
                     ticker_count=len(swarm_results),
                     duration_seconds=elapsed,
-                    agent_count=len(agents),
+                    agent_count=len(all_agents),
                     prefetch_seconds=prefetch_elapsed,
                     avg_score=sum(scores) / len(scores) if scores else 5.0,
                     max_score=max(scores) if scores else 5.0,
                     min_score=min(scores) if scores else 5.0,
                     agent_errors=agent_errors,
-                    agent_total=len(swarm_results) * len(agents),
+                    agent_total=len(swarm_results) * len(all_agents),
                     data_real_pct=avg_real,
                     resonance_count=resonance_n,
                     llm_calls=llm_c,
@@ -922,11 +936,13 @@ class AlphaHiveDailyReporter:
             direction = agent.get("direction", "neutral")
 
             if direction == "bearish":
-                severity = "**看空**"
+                severity = "**看空警告**"
             elif direction == "neutral":
-                severity = "中性"
+                severity = "需关注风险点"
+            elif signals:
+                severity = "风险提示"
             else:
-                severity = "未发现看空信号"
+                severity = "暂无看空信号"
 
             md.append(f"### {ticker} ({severity} | 看空强度 {bear_score:.1f}/10)")
             if signals:
@@ -936,6 +952,14 @@ class AlphaHiveDailyReporter:
                 md.append(f"- {discovery}")
             else:
                 md.append("- 未发现显著看空信号")
+            # 数据来源标注
+            sources = details.get("data_sources", {})
+            if sources:
+                src_labels = {"pheromone_board": "蜂群共享", "sec_api": "SEC直查",
+                              "options_api": "期权直查", "finviz_api": "Finviz",
+                              "yfinance": "yfinance", "unavailable": "不可用"}
+                src_parts = [f"{k}={src_labels.get(v, v)}" for k, v in sources.items()]
+                md.append(f"- *数据来源*：{' | '.join(src_parts)}")
             md.append("")
 
         # ====== 版块 7：综合判断 & 信号强度（GuardBeeSentinel + 全体投票） ======
