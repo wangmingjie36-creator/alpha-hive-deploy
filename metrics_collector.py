@@ -329,12 +329,16 @@ class MetricsCollector:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    VALID_TABLES = {"scan_metrics", "ticker_metrics", "slo_violations"}
+
     def cleanup(self, retention_days: int = 90):
         """清理过期数据"""
         cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat()
         with self._lock:
             with self._connect() as conn:
                 for table in ("scan_metrics", "ticker_metrics", "slo_violations"):
+                    if table not in self.VALID_TABLES:
+                        raise ValueError(f"Invalid table name: {table}")
                     conn.execute(f"DELETE FROM {table} WHERE timestamp < ?", (cutoff,))
                 conn.commit()
         _log.info("metrics cleanup: removed entries older than %d days", retention_days)

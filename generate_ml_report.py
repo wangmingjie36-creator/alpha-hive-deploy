@@ -3,6 +3,7 @@
 将机器学习预测集成到高级分析报告
 """
 
+import atexit
 import json
 import argparse
 from datetime import datetime
@@ -43,7 +44,7 @@ class MLEnhancedReportGenerator:
         # ⭐ Task 3: 初始化异步文件写入线程池（全局单例）
         if MLEnhancedReportGenerator._file_writer_pool is None:
             MLEnhancedReportGenerator._file_writer_pool = ThreadPoolExecutor(max_workers=3)
-            # print("🚀 异步文件写入线程池已初始化（3 workers）")
+            atexit.register(MLEnhancedReportGenerator._file_writer_pool.shutdown, wait=True)
 
         # ⭐ Task 2: 智能缓存策略（内存 + 磁盘）
         today = datetime.now().strftime("%Y-%m-%d")

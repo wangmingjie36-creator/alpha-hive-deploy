@@ -98,7 +98,7 @@ params = {{
 }}
 
 try:
-    response = requests.get(url, params=params, headers={{"User-Agent": "Mozilla/5.0"}})
+    response = requests.get(url, params=params, headers={{"User-Agent": "Mozilla/5.0"}}, timeout=15)
 
     if response.status_code == 200:
         data = response.json()
@@ -133,7 +133,7 @@ params = {{
 }}
 
 try:
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=params, timeout=15)
 
     if response.status_code == 200:
         markets = response.json()
@@ -170,7 +170,7 @@ ticker = "{ticker}"
 url = f"https://api.stocktwits.com/api/2/streams/symbols/{{ticker}}.json"
 
 try:
-    response = requests.get(url, headers={{"User-Agent": "Mozilla/5.0"}})
+    response = requests.get(url, headers={{"User-Agent": "Mozilla/5.0"}}, timeout=15)
 
     if response.status_code == 200:
         data = response.json()
@@ -270,7 +270,7 @@ ticker = "{ticker}"
 try:
     # 从 StockTwits 获取情绪
     url = f"https://api.stocktwits.com/api/2/streams/symbols/{{ticker}}.json"
-    response = requests.get(url)
+    response = requests.get(url, timeout=15)
     data = response.json()
 
     messages = data.get("messages", [])

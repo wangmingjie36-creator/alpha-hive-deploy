@@ -22,7 +22,7 @@ def print_header(title):
 def get_crontab():
     """获取当前 crontab"""
     try:
-        result = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
+        result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=10)
         return result.stdout if result.returncode == 0 else ""
     except (subprocess.SubprocessError, OSError) as e:
         logger.warning("Failed to read crontab: %s", e)
@@ -33,7 +33,7 @@ def set_crontab(crontab_content):
     """设置 crontab"""
     try:
         process = subprocess.Popen(['crontab', '-'], stdin=subprocess.PIPE, text=True)
-        process.communicate(crontab_content)
+        process.communicate(crontab_content, timeout=10)
         return process.returncode == 0
     except (subprocess.SubprocessError, OSError) as e:
         logger.warning("Failed to set crontab: %s", e)
@@ -181,7 +181,7 @@ def main():
         print("Cron 任务已添加。\n")
 
         print("📝 验证配置:")
-        result = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
+        result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=10)
         alpha_hive_tasks = [line for line in result.stdout.split('\n') if 'alpha_hive' in line]
         for task in alpha_hive_tasks:
             print(f"  ✅ {task}")

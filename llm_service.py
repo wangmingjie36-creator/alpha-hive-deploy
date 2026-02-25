@@ -90,7 +90,8 @@ def is_available() -> bool:
 
 def get_usage() -> Dict:
     """获取 token 使用统计"""
-    return dict(_token_usage)
+    with _lock:
+        return dict(_token_usage)
 
 
 def call(
@@ -144,10 +145,11 @@ def call(
         pricing = _PRICING.get(model, {"input": 1.0 / 1_000_000, "output": 5.0 / 1_000_000})
         cost = usage.input_tokens * pricing["input"] + usage.output_tokens * pricing["output"]
 
-        _token_usage["input_tokens"] += usage.input_tokens
-        _token_usage["output_tokens"] += usage.output_tokens
-        _token_usage["total_cost_usd"] += cost
-        _token_usage["call_count"] += 1
+        with _lock:
+            _token_usage["input_tokens"] += usage.input_tokens
+            _token_usage["output_tokens"] += usage.output_tokens
+            _token_usage["total_cost_usd"] += cost
+            _token_usage["call_count"] += 1
 
         return text
 

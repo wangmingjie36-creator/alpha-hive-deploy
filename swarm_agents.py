@@ -20,6 +20,7 @@ from typing import Dict, List, Optional
 from pheromone_board import PheromoneBoard, PheromoneEntry
 import json
 import logging as _logging
+import math
 
 _log = _logging.getLogger("alpha_hive.swarm")
 
@@ -47,9 +48,10 @@ def _fetch_stock_data(ticker: str) -> Dict:
     失败时返回默认值，不会抛出异常
     """
     # 检查缓存
-    cached = _yf_cache.get(ticker)
-    if cached and (_time.time() - _yf_cache_ts.get(ticker, 0)) < _YF_CACHE_TTL:
-        return cached
+    with _yf_lock:
+        cached = _yf_cache.get(ticker)
+        if cached and (_time.time() - _yf_cache_ts.get(ticker, 0)) < _YF_CACHE_TTL:
+            return cached
 
     data = {
         "price": 100.0,
@@ -74,7 +76,8 @@ def _fetch_stock_data(ticker: str) -> Dict:
                     continue
                 return data
 
-            data["price"] = float(hist["Close"].iloc[-1])
+            if len(hist) >= 1:
+                data["price"] = float(hist["Close"].iloc[-1])
 
             if len(hist) >= 5:
                 data["momentum_5d"] = (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100
@@ -82,6 +85,8 @@ def _fetch_stock_data(ticker: str) -> Dict:
             if len(hist) >= 2:
                 recent_vol = float(hist["Volume"].iloc[-1])
                 avg_vol = float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20 else float(hist["Volume"].mean())
+                if math.isnan(avg_vol) or avg_vol <= 0:
+                    avg_vol = 1.0
                 data["avg_volume"] = int(avg_vol)
                 data["volume_ratio"] = recent_vol / avg_vol if avg_vol > 0 else 1.0
 
@@ -90,8 +95,9 @@ def _fetch_stock_data(ticker: str) -> Dict:
                 data["volatility_20d"] = float(returns.std() * (252 ** 0.5) * 100)
 
             # 写入缓存
-            _yf_cache[ticker] = data
-            _yf_cache_ts[ticker] = _time.time()
+            with _yf_lock:
+                _yf_cache[ticker] = data
+                _yf_cache_ts[ticker] = _time.time()
             yfinance_breaker.record_success()
             break
 

@@ -79,8 +79,8 @@ class MemoryStore:
                 _log.warning("数据库完整性检查失败: %s", integrity[0])
 
             # 表 1: agent_memory - Agent 级别跨会话记忆
-            cursor.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.TABLE_AGENT_MEMORY} (
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS agent_memory (
                     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
                     memory_id           TEXT UNIQUE NOT NULL,
                     session_id          TEXT NOT NULL,
@@ -102,14 +102,14 @@ class MemoryStore:
             """)
 
             # 索引
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_am_ticker ON {self.TABLE_AGENT_MEMORY}(ticker)")
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_am_agent_id ON {self.TABLE_AGENT_MEMORY}(agent_id)")
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_am_date ON {self.TABLE_AGENT_MEMORY}(date)")
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_am_session ON {self.TABLE_AGENT_MEMORY}(session_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_am_ticker ON agent_memory(ticker)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_am_agent_id ON agent_memory(agent_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_am_date ON agent_memory(date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_am_session ON agent_memory(session_id)")
 
             # 表 2: reasoning_sessions - 会话级别聚合
-            cursor.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.TABLE_SESSIONS} (
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS reasoning_sessions (
                     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id               TEXT UNIQUE NOT NULL,
                     date                     TEXT NOT NULL,
@@ -127,12 +127,12 @@ class MemoryStore:
             """)
 
             # 索引
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_rs_date ON {self.TABLE_SESSIONS}(date)")
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_rs_mode ON {self.TABLE_SESSIONS}(run_mode)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_rs_date ON reasoning_sessions(date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_rs_mode ON reasoning_sessions(run_mode)")
 
             # 表 3: agent_weights - Agent 动态权重
-            cursor.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.TABLE_WEIGHTS} (
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS agent_weights (
                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
                     agent_id        TEXT UNIQUE NOT NULL,
                     base_weight     REAL NOT NULL DEFAULT 1.0,
@@ -154,8 +154,8 @@ class MemoryStore:
             ]
 
             for agent_id in agent_ids:
-                cursor.execute(f"""
-                    INSERT OR IGNORE INTO {self.TABLE_WEIGHTS} (agent_id, base_weight, adjusted_weight)
+                cursor.execute("""
+                    INSERT OR IGNORE INTO agent_weights (agent_id, base_weight, adjusted_weight)
                     VALUES (?, 1.0, 1.0)
                 """, (agent_id,))
 
@@ -179,8 +179,8 @@ class MemoryStore:
             now_ms = int(datetime.now().timestamp() * 1000)
             memory_id = f"{entry['date']}_{entry['ticker']}_{entry['agent_id']}_{now_ms}"
 
-            cursor.execute(f"""
-                INSERT INTO {self.TABLE_AGENT_MEMORY} (
+            cursor.execute("""
+                INSERT INTO agent_memory (
                     memory_id, session_id, date, ticker, agent_id, direction, discovery,
                     source, self_score, pheromone_strength, support_count
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -224,8 +224,8 @@ class MemoryStore:
                 {"top_ticker": top_opp, "top_score": top_score, "total_tickers": len(tickers)}
             )[:500]
 
-            cursor.execute(f"""
-                INSERT OR REPLACE INTO {self.TABLE_SESSIONS} (
+            cursor.execute("""
+                INSERT OR REPLACE INTO reasoning_sessions (
                     session_id, date, run_mode, tickers, agent_count,
                     resonances_detected, top_opportunity_ticker, top_opportunity_score,
                     final_report_summary, pheromone_snapshot, total_duration_seconds
@@ -255,14 +255,14 @@ class MemoryStore:
             cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
             if agent_id:
-                cursor.execute(f"""
-                    SELECT * FROM {self.TABLE_AGENT_MEMORY}
+                cursor.execute("""
+                    SELECT * FROM agent_memory
                     WHERE ticker = ? AND date >= ? AND agent_id = ?
                     ORDER BY created_at DESC LIMIT ?
                 """, (ticker, cutoff_date, agent_id, limit))
             else:
-                cursor.execute(f"""
-                    SELECT * FROM {self.TABLE_AGENT_MEMORY}
+                cursor.execute("""
+                    SELECT * FROM agent_memory
                     WHERE ticker = ? AND date >= ?
                     ORDER BY created_at DESC LIMIT ?
                 """, (ticker, cutoff_date, limit))
@@ -276,20 +276,25 @@ class MemoryStore:
             if conn:
                 conn.close()
 
+    VALID_PERIODS = {"t1": "outcome_return_t1", "t7": "outcome_return_t7", "t30": "outcome_return_t30"}
+
     def get_agent_accuracy(self, agent_id: str, period: str = "t7") -> Dict:
         """获取 Agent 准确率统计"""
         conn = None
         try:
+            if period not in self.VALID_PERIODS:
+                raise ValueError(f"Invalid period: {period}")
+            outcome_col = self.VALID_PERIODS[period]
+
             conn = self._connect()
             cursor = conn.cursor()
-            outcome_col = f"outcome_return_{period}"
 
             cursor.execute(f"""
                 SELECT COUNT(*) as total,
                     SUM(CASE WHEN actual_outcome = 'correct' THEN 1 ELSE 0 END) as correct_count,
                     AVG({outcome_col}) as avg_return,
                     MIN({outcome_col}) as min_return, MAX({outcome_col}) as max_return
-                FROM {self.TABLE_AGENT_MEMORY}
+                FROM agent_memory
                 WHERE agent_id = ? AND actual_outcome IS NOT NULL
             """, (agent_id,))
 
@@ -317,8 +322,8 @@ class MemoryStore:
         try:
             conn = self._connect()
             cursor = conn.cursor()
-            cursor.execute(f"""
-                UPDATE {self.TABLE_AGENT_MEMORY}
+            cursor.execute("""
+                UPDATE agent_memory
                 SET actual_outcome = ?, outcome_return_t1 = ?, outcome_return_t7 = ?, outcome_return_t30 = ?
                 WHERE memory_id = ?
             """, (outcome, t1, t7, t30, memory_id))
@@ -352,7 +357,7 @@ class MemoryStore:
         try:
             conn = self._connect()
             cursor = conn.cursor()
-            cursor.execute(f"SELECT agent_id, adjusted_weight FROM {self.TABLE_WEIGHTS} ORDER BY agent_id")
+            cursor.execute("SELECT agent_id, adjusted_weight FROM agent_weights ORDER BY agent_id")
             return {row[0]: row[1] for row in cursor.fetchall()}
         except (sqlite3.Error, OSError) as e:
             _log.warning("get_agent_weights 失败: %s", e)
@@ -367,8 +372,8 @@ class MemoryStore:
         try:
             conn = self._connect()
             cursor = conn.cursor()
-            cursor.execute(f"""
-                UPDATE {self.TABLE_WEIGHTS}
+            cursor.execute("""
+                UPDATE agent_weights
                 SET adjusted_weight = ?, last_updated = CURRENT_TIMESTAMP WHERE agent_id = ?
             """, (adjusted_weight, agent_id))
             conn.commit()
