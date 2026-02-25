@@ -4,7 +4,7 @@
 """
 
 import json
-import pickle
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import statistics
@@ -409,8 +409,8 @@ class SimpleMLModel:
             "expected_30d": expected_7d * 1.2,
         }
 
-    def save_model(self, filename: str = "ml_model.pkl"):
-        """保存模型"""
+    def save_model(self, filename: str = "ml_model.json"):
+        """保存模型（JSON 格式，安全序列化）"""
         model_data = {
             "weights": self.weights,
             "feature_stats": self.feature_stats,
@@ -418,16 +418,19 @@ class SimpleMLModel:
             "is_trained": self.is_trained,
         }
 
-        with open(filename, "wb") as f:
-            pickle.dump(model_data, f)
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(model_data, f, ensure_ascii=False, indent=2)
 
         print(f"✅ 模型已保存：{filename}")
 
-    def load_model(self, filename: str = "ml_model.pkl"):
-        """加载模型"""
+    def load_model(self, filename: str = "ml_model.json"):
+        """加载模型（JSON 格式，安全反序列化）"""
+        # 兼容旧版 pickle 文件
+        if filename.endswith(".pkl") and not os.path.exists(filename):
+            filename = filename.replace(".pkl", ".json")
         try:
-            with open(filename, "rb") as f:
-                model_data = pickle.load(f)
+            with open(filename, "r", encoding="utf-8") as f:
+                model_data = json.load(f)
 
             self.weights = model_data["weights"]
             self.feature_stats = model_data["feature_stats"]

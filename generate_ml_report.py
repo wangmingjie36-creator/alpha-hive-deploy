@@ -29,7 +29,7 @@ class MLEnhancedReportGenerator:
     _model_cache = {}          # 内存缓存（同一进程内）
     _cache_date = None         # 缓存日期
     _training_lock = Lock()    # 防止并发重复训练
-    _model_file = PATHS.home / "ml_model_cache.pkl"  # 磁盘缓存文件
+    _model_file = PATHS.home / "ml_model_cache.json"  # 磁盘缓存文件（JSON，安全序列化）
 
     # ⭐ Task 3: 异步 HTML 生成（后台文件写入）
     _file_writer_pool = None   # 异步文件写入线程池
@@ -97,22 +97,34 @@ class MLEnhancedReportGenerator:
             return False
 
     def _load_model_from_disk(self):
-        """从磁盘加载模型"""
+        """从磁盘加载模型（JSON 格式，安全反序列化）"""
         try:
-            import pickle
-            with open(self._model_file, "rb") as f:
-                self.ml_service.model = pickle.load(f)
-        except Exception as e:
+            import json as _json
+            with open(self._model_file, "r", encoding="utf-8") as f:
+                model_data = _json.load(f)
+            model = self.ml_service.model
+            model.weights = model_data["weights"]
+            model.feature_stats = model_data.get("feature_stats", {})
+            model.is_trained = model_data["is_trained"]
+            model.training_accuracy = model_data.get("training_accuracy", 0.0)
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError) as e:
             _log.warning("磁盘缓存加载失败：%s，将重新训练", e)
             self.ml_service.train_model()
 
     def _save_model_to_disk(self):
-        """保存模型到磁盘"""
+        """保存模型到磁盘（JSON 格式，安全序列化）"""
         try:
-            import pickle
-            with open(self._model_file, "wb") as f:
-                pickle.dump(self.ml_service.model, f)
-        except Exception as e:
+            import json as _json
+            model = self.ml_service.model
+            model_data = {
+                "weights": model.weights,
+                "feature_stats": model.feature_stats,
+                "is_trained": model.is_trained,
+                "training_accuracy": model.training_accuracy,
+            }
+            with open(self._model_file, "w", encoding="utf-8") as f:
+                _json.dump(model_data, f, ensure_ascii=False, indent=2)
+        except (TypeError, OSError) as e:
             _log.warning("磁盘缓存保存失败：%s", e)
 
     # ⭐ Task 3: 异步文件写入方法
