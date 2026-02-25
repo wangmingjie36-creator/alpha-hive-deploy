@@ -19,6 +19,9 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 from pheromone_board import PheromoneBoard, PheromoneEntry
 import json
+import logging as _logging
+
+_log = _logging.getLogger("alpha_hive.swarm")
 
 
 # ==================== 工具函数 ====================
@@ -92,7 +95,8 @@ def _fetch_stock_data(ticker: str) -> Dict:
             yfinance_breaker.record_success()
             break
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+            _log.warning("yfinance fetch %s attempt %d failed: %s", ticker, attempt, e)
             if attempt < _YF_MAX_RETRIES:
                 _time.sleep(1.0 * (2 ** attempt))
             else:
@@ -158,7 +162,8 @@ class BeeAgent(ABC):
                 )
             from datetime import datetime
             return self.retriever.get_context_summary(ticker, datetime.now().strftime("%Y-%m-%d"))
-        except Exception:
+        except (AttributeError, TypeError, ValueError) as e:
+            _log.debug("History context unavailable for %s: %s", ticker, e)
             return ""
 
 
@@ -181,7 +186,8 @@ def prefetch_shared_data(tickers: list, retriever=None) -> Dict:
         for t in tickers:
             try:
                 contexts[t] = retriever.get_context_for_agent(t, "BeeAgent")
-            except Exception:
+            except (AttributeError, TypeError, ValueError) as e:
+                _log.debug("Prefetch context failed for %s: %s", t, e)
                 contexts[t] = ""
 
     return {"stock_data": stock_data, "contexts": contexts}
@@ -224,7 +230,8 @@ class ScoutBeeNova(BeeAgent):
                 insider_data = get_insider_trades(ticker, days=90)
                 insider_score = insider_data.get("sentiment_score", 5.0)
                 insider_summary = insider_data.get("summary", "")
-            except Exception as e:
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.warning("ScoutBeeNova SEC data unavailable for %s: %s", ticker, e)
                 insider_summary = f"SEC 数据不可用: {e}"
 
             # ---- 2. 拥挤度分析（真实数据源）----
@@ -322,7 +329,8 @@ class ScoutBeeNova(BeeAgent):
                 }
             }
 
-        except Exception as e:
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.error("ScoutBeeNova failed for %s: %s", ticker, e, exc_info=True)
             return {"error": str(e), "source": "ScoutBeeNova", "score": 5.0, "dimension": "signal"}
 
 
@@ -351,7 +359,8 @@ class OracleBeeEcho(BeeAgent):
                 result = agent.analyze(ticker, stock_price=current_price)
                 options_score = result.get("options_score", 5.0)
                 signal_summary = result.get("signal_summary", "平衡")
-            except Exception:
+            except (ImportError, ConnectionError, ValueError, KeyError, TypeError) as e:
+                _log.warning("OracleBeeEcho options unavailable for %s: %s", ticker, e)
                 result = {}
 
             # ---- Polymarket 赔率（40%）----
@@ -363,7 +372,8 @@ class OracleBeeEcho(BeeAgent):
                 poly_score = poly.get("odds_score", 5.0)
                 poly_signal = poly.get("odds_signal", "")
                 poly_markets = poly.get("markets_found", 0)
-            except Exception:
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.warning("OracleBeeEcho Polymarket unavailable for %s: %s", ticker, e)
                 poly_markets = 0
 
             # ---- 融合评分 ----
@@ -412,7 +422,8 @@ class OracleBeeEcho(BeeAgent):
                 "polymarket_markets": poly_markets,
             }
 
-        except Exception as e:
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.error("OracleBeeEcho failed for %s: %s", ticker, e, exc_info=True)
             return {"error": str(e), "source": "OracleBeeEcho", "score": 5.0, "dimension": "odds"}
 
 
@@ -479,7 +490,8 @@ class BuzzBeeWhisper(BeeAgent):
                     reddit_desc = f"Reddit #{rank}({buzz},{mentions}提及)"
                 else:
                     reddit_desc = f"Reddit 无热度"
-            except Exception:
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.warning("BuzzBeeWhisper Reddit unavailable for %s: %s", ticker, e)
                 reddit_desc = "Reddit 不可用"
 
             # 5. Finviz 新闻情绪（关键词基础 + LLM 语义增强）
@@ -501,8 +513,8 @@ class BuzzBeeWhisper(BeeAgent):
                         from finviz_sentiment import _client as fv_client
                         if fv_client:
                             headlines = fv_client.get_news_titles(ticker, max_titles=10)
-                    except Exception:
-                        pass
+                    except (ImportError, AttributeError, ConnectionError) as e:
+                        _log.debug("Finviz client headlines fallback for %s: %s", ticker, e)
 
                 if headlines:
                     try:
@@ -516,9 +528,10 @@ class BuzzBeeWhisper(BeeAgent):
                                 news_desc = llm_news.get("key_theme", news_desc)
                                 news_reasoning = llm_news.get("reasoning", "")
                                 news_mode = "llm_enhanced"
-                    except Exception:
-                        pass
-            except Exception:
+                    except (ImportError, ConnectionError, ValueError, KeyError) as e:
+                        _log.debug("LLM news analysis unavailable for %s: %s", ticker, e)
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.warning("BuzzBeeWhisper Finviz news unavailable for %s: %s", ticker, e)
                 news_desc = "新闻不可用"
 
             # 5 通道加权综合（新闻情绪权重最高）
@@ -604,7 +617,8 @@ class BuzzBeeWhisper(BeeAgent):
                 }
             }
 
-        except Exception as e:
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.error("BuzzBeeWhisper failed for %s: %s", ticker, e, exc_info=True)
             return {"error": str(e), "source": "BuzzBeeWhisper", "score": 5.0, "dimension": "sentiment"}
 
 
@@ -692,8 +706,8 @@ class ChronosBeeHorizon(BeeAgent):
                                     "type": "dividend",
                                     "severity": "medium",
                                 })
-            except Exception:
-                pass
+            except (ConnectionError, TimeoutError, ValueError, KeyError, AttributeError, OSError) as e:
+                _log.warning("ChronosBeeHorizon yfinance calendar unavailable for %s: %s", ticker, e)
 
             # 2. 补充 CatalystTimeline（已有的硬编码催化剂）
             try:
@@ -714,8 +728,8 @@ class ChronosBeeHorizon(BeeAgent):
                             "type": cat.catalyst_type.value,
                             "severity": cat.severity.value,
                         })
-            except Exception:
-                pass
+            except (ImportError, ValueError, AttributeError) as e:
+                _log.debug("CatalystTimeline unavailable for %s: %s", ticker, e)
 
             # 评分逻辑
             if catalysts_found:
@@ -776,7 +790,8 @@ class ChronosBeeHorizon(BeeAgent):
                 "details": {"catalysts": catalysts_found[:5]}
             }
 
-        except Exception as e:
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.error("ChronosBeeHorizon failed for %s: %s", ticker, e, exc_info=True)
             return {"error": str(e), "source": "ChronosBeeHorizon", "score": 5.0, "dimension": "catalyst"}
 
 
@@ -817,8 +832,8 @@ class RivalBeeVanguard(BeeAgent):
                     win_30d=False,
                 )
                 prediction = service.predict_for_opportunity(opportunity)
-            except Exception:
-                pass
+            except (ImportError, ValueError, KeyError, TypeError) as e:
+                _log.warning("RivalBeeVanguard ML prediction unavailable for %s: %s", ticker, e)
 
             if prediction:
                 prob = prediction.get("probability", 0.5)
@@ -862,7 +877,8 @@ class RivalBeeVanguard(BeeAgent):
                 "details": prediction if prediction else {"momentum_5d": stock["momentum_5d"]}
             }
 
-        except Exception as e:
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.error("RivalBeeVanguard failed for %s: %s", ticker, e, exc_info=True)
             return {"error": str(e), "source": "RivalBeeVanguard", "score": 5.0, "dimension": "ml_auxiliary"}
 
 
@@ -907,8 +923,8 @@ class GuardBeeSentinel(BeeAgent):
                 real_metrics["bullish_agents"] = bull
                 crowd, _ = detector.calculate_crowding_score(real_metrics)
                 adj_factor = detector.get_adjustment_factor(crowd)
-            except Exception:
-                pass
+            except (ImportError, ValueError, KeyError, TypeError) as e:
+                _log.warning("GuardBeeSentinel crowding analysis unavailable for %s: %s", ticker, e)
 
             # 5. 综合评分
             if resonance["resonance_detected"]:
@@ -967,7 +983,8 @@ class GuardBeeSentinel(BeeAgent):
                 }
             }
 
-        except Exception as e:
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.error("GuardBeeSentinel failed for %s: %s", ticker, e, exc_info=True)
             return {"error": str(e), "source": "GuardBeeSentinel", "score": 5.0, "dimension": "risk_adj"}
 
 
@@ -1061,7 +1078,8 @@ class BearBeeContrarian(BeeAgent):
                         elif sold > bought * 2:
                             insider_bear = 5.5
                             bearish_signals.append(f"内幕卖多买少 卖${sold:,.0f}/买${bought:,.0f}")
-                except Exception:
+                except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                    _log.warning("BearBeeContrarian SEC fallback failed for %s: %s", ticker, e)
                     data_sources["insider"] = "unavailable"
 
             bearish_score += insider_bear * 0.25
@@ -1079,7 +1097,8 @@ class BearBeeContrarian(BeeAgent):
                     import yfinance as yf
                     info = yf.Ticker(ticker).fast_info
                     pe = getattr(info, 'pe_ratio', 0) or 0
-                except Exception:
+                except (ConnectionError, TimeoutError, ValueError, KeyError, AttributeError, OSError) as e:
+                    _log.debug("BearBeeContrarian PE ratio unavailable for %s: %s", ticker, e)
                     pe = 0
 
             if mom_5d > 15:
@@ -1169,7 +1188,8 @@ class BearBeeContrarian(BeeAgent):
                         if iv_rank > 80:
                             options_bear = max(options_bear, 7.0)
                             bearish_signals.append(f"IV Rank {iv_rank:.0f}（恐慌高位）")
-                except Exception:
+                except (ImportError, ConnectionError, ValueError, KeyError, TypeError) as e:
+                    _log.warning("BearBeeContrarian options fallback failed for %s: %s", ticker, e)
                     data_sources["options"] = "unavailable"
 
             bearish_score += options_bear * 0.25
@@ -1255,7 +1275,8 @@ class BearBeeContrarian(BeeAgent):
                         if neg > pos * 2 and neg >= 3:
                             news_bear = max(news_bear, 6.5)
                             bearish_signals.append(f"负面新闻主导（{neg}空 vs {pos}多）")
-                except Exception:
+                except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                    _log.warning("BearBeeContrarian Finviz news fallback failed for %s: %s", ticker, e)
                     if "news" not in data_sources:
                         data_sources["news"] = "unavailable"
 
@@ -1323,7 +1344,8 @@ class BearBeeContrarian(BeeAgent):
                 }
             }
 
-        except Exception as e:
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.error("BearBeeContrarian failed for %s: %s", ticker, e, exc_info=True)
             return {"error": str(e), "source": "BearBeeContrarian", "score": 5.0, "dimension": "contrarian"}
 
 
@@ -1488,8 +1510,8 @@ class QueenDistiller:
                         rule_score=rule_score,
                         rule_direction=rule_direction,
                     )
-            except Exception:
-                pass
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.warning("QueenDistiller LLM service unavailable: %s", e)
 
         if llm_result:
             distill_mode = "llm_enhanced"
