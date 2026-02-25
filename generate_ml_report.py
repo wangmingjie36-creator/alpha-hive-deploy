@@ -92,7 +92,7 @@ class MLEnhancedReportGenerator:
             mtime = os.path.getmtime(str(self._model_file))
             file_date = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
             return file_date == today
-        except Exception as e:
+        except (FileNotFoundError, OSError, KeyError, ValueError, json.JSONDecodeError) as e:
             # 缓存检查失败，重新训练
             return False
 
@@ -140,7 +140,7 @@ class MLEnhancedReportGenerator:
                     # 文本内容：直接写入
                     with open(filepath, "w") as f:
                         f.write(content)
-        except Exception as e:
+        except (OSError, TypeError, ValueError) as e:
             _log.warning("文件写入失败 %s: %s", filepath.name, str(e)[:50])
 
     def save_html_and_json_async(
@@ -772,7 +772,7 @@ def main():
         try:
             with open(realtime_file) as f:
                 metrics = json.load(f)
-        except Exception as e:
+        except (json.JSONDecodeError, OSError) as e:
             _log.warning("加载实时数据失败: %s，继续使用空数据", e)
     else:
         _log.warning("未找到 realtime_metrics.json，将使用样本数据")
@@ -789,8 +789,8 @@ def main():
             with open(swarm_json) as f:
                 swarm_data = json.load(f)
             _log.info("已加载蜂群扫描数据: %d 标的", len(swarm_data))
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            _log.debug("蜂群 JSON 加载失败: %s", e)
     if not swarm_data:
         # 尝试从 checkpoint 恢复
         for ckpt in report_dir.glob(".checkpoint_*.json"):
@@ -801,8 +801,8 @@ def main():
                     if swarm_data:
                         _log.info("从 checkpoint 加载蜂群数据: %d 标的", len(swarm_data))
                         break
-            except Exception:
-                pass
+            except (json.JSONDecodeError, OSError, KeyError) as e:
+                _log.debug("checkpoint 加载失败: %s", e)
 
     _log.info("生成 ML 增强报告...")
     _log.info("=" * 60)
@@ -827,8 +827,8 @@ def main():
                         _real_price = float(_hist["Close"].iloc[-1])
                         if len(_hist) >= 2:
                             _real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[-2] - 1) * 100
-                except Exception:
-                    pass
+                except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, IndexError) as e:
+                    _log.debug("yfinance price fetch failed for ticker: %s", e)
                 ticker_data = {
                     "ticker": ticker,
                     "sources": {
@@ -869,7 +869,7 @@ def main():
             _log.info("数据已提交异步保存：%s", json_filename)
             successful_count += 1
 
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
             _log.warning("%s 分析失败: %s", ticker, str(e)[:100])
 
     # ⭐ Task 3: 等待所有异步文件写入完成

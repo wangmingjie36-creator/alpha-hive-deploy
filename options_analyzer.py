@@ -49,7 +49,8 @@ class OptionsDataFetcher:
                     return None
 
             return data.get("data")
-        except Exception:
+        except (json.JSONDecodeError, OSError, KeyError, TypeError) as e:
+            _log.debug("options cache read failed: %s", e)
             return None
 
     def _write_cache(self, ticker: str, data_type: str, data: Dict) -> None:
@@ -71,7 +72,7 @@ class OptionsDataFetcher:
 
             with open(cache_path, "w") as f:
                 json.dump(cache_data, f, default=_json_default)
-        except Exception as e:
+        except (OSError, TypeError, ValueError) as e:
             _log.warning("缓存写入失败：%s", e)
 
     def fetch_options_chain(self, ticker: str) -> Dict:
@@ -116,7 +117,7 @@ class OptionsDataFetcher:
 
                     calls_list.append(calls)
                     puts_list.append(puts)
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
                     _log.warning("获取 %s %s 期权链失败：%s", ticker, expiry, e)
                     continue
 
@@ -148,7 +149,7 @@ class OptionsDataFetcher:
             pass  # {ticker} 期权链数据来自 yfinance")
             return result
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             _log.warning("获取 %s 期权数据失败：%s，使用样本数据", ticker, e)
             return self._get_sample_options_chain(ticker)
 
@@ -189,7 +190,7 @@ class OptionsDataFetcher:
             self._write_cache(ticker, "hist_iv_v2", iv_list)
             return iv_list
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
             _log.warning("获取 %s 历史 IV 失败：%s，使用样本数据", ticker, e)
             return self._get_sample_historical_iv(ticker)
 
@@ -210,7 +211,7 @@ class OptionsDataFetcher:
             pass  # {ticker} 期权到期日来自 yfinance")
             return expirations
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, AttributeError) as e:
             _log.warning("获取 %s 期权到期日失败：%s", ticker, e)
             return self._get_sample_expirations(ticker)
 
@@ -643,7 +644,7 @@ class OptionsAgent:
             try:
                 exp_date = datetime.strptime(str(expiry_str)[:10], "%Y-%m-%d")
                 return (exp_date - today).days >= min_expiry_days
-            except Exception:
+            except (ValueError, TypeError):
                 return True
 
         raw_ivs = []
