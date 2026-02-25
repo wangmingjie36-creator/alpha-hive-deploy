@@ -388,23 +388,238 @@ class MLEnhancedReportGenerator:
     def generate_html_report(
         self, ticker: str, enhanced_report: dict
     ) -> str:
-        """生成 ML 增强的 HTML 报告（优化：极简 HTML）"""
+        """生成 ML 增强的 HTML 报告（完整版）"""
         combined = enhanced_report['combined_recommendation']
-        options = enhanced_report['advanced_analysis'].get('options_analysis', {})
-        # ⭐ 优化：极简 HTML（无 CSS，节省 85%）
+        analysis = enhanced_report.get('advanced_analysis', {})
+        ml_pred = enhanced_report.get('ml_prediction', {})
+        options = analysis.get('options_analysis') or {}
+        recommendation = analysis.get('recommendation', {})
+        prob = analysis.get('probability_analysis', {})
+
+        # 评级颜色
+        rating = combined.get('rating', 'HOLD')
+        if rating == 'STRONG BUY':
+            rating_color = '#28a745'
+        elif rating == 'BUY':
+            rating_color = '#17a2b8'
+        elif rating == 'AVOID':
+            rating_color = '#dc3545'
+        else:
+            rating_color = '#ffc107'
+
+        # 期权部分
+        options_html = self._generate_options_section_html(options) if options else ""
+
+        # ML 预测部分
+        pred = ml_pred.get('prediction', {})
+        ml_prob_val = pred.get('probability', 0.5) * 100
+        ml_features = ml_pred.get('feature_importance', {})
+        ml_html = ""
+        if ml_features:
+            feat_rows = "".join(
+                f"<tr><td>{k}</td><td>{v:.3f}</td></tr>"
+                for k, v in sorted(ml_features.items(), key=lambda x: -abs(x[1]))[:8]
+            )
+            ml_html = f"""
+            <div class="section">
+                <h2>ML 特征重要度</h2>
+                <table><tr><th>特征</th><th>权重</th></tr>{feat_rows}</table>
+            </div>"""
+
+        # 概率与风控
+        win_prob = prob.get('win_probability_pct', 50)
+        risk_reward = prob.get('risk_reward_ratio', 1.0)
+        position = analysis.get('position_management', {})
+        stop_loss = position.get('stop_loss', {})
+        take_profit = position.get('take_profit', {})
+        holding = position.get('optimal_holding_time', '')
+
+        # 止损止盈 HTML
+        position_html = ""
+        if stop_loss or take_profit:
+            sl_rows = ""
+            if isinstance(stop_loss, dict):
+                for k, v in stop_loss.items():
+                    sl_rows += f"<tr><td>{k}</td><td>${v:.2f}</td></tr>" if isinstance(v, (int, float)) else f"<tr><td>{k}</td><td>{v}</td></tr>"
+            elif isinstance(stop_loss, list):
+                for item in stop_loss:
+                    if isinstance(item, dict):
+                        sl_rows += f"<tr><td>{item.get('level','')}</td><td>${item.get('price',0):.2f}</td></tr>"
+            tp_rows = ""
+            if isinstance(take_profit, dict):
+                for k, v in take_profit.items():
+                    tp_rows += f"<tr><td>{k}</td><td>${v:.2f}</td></tr>" if isinstance(v, (int, float)) else f"<tr><td>{k}</td><td>{v}</td></tr>"
+            elif isinstance(take_profit, list):
+                for item in take_profit:
+                    if isinstance(item, dict):
+                        tp_rows += f"<tr><td>{item.get('level','')}</td><td>${item.get('price',0):.2f}</td></tr>"
+            position_html = f"""
+            <div class="section">
+                <h2>止损 / 止盈位</h2>
+                <div class="grid-2">
+                    <div>
+                        <h3 style="color:#dc3545;">止损位</h3>
+                        <table>{sl_rows}</table>
+                    </div>
+                    <div>
+                        <h3 style="color:#28a745;">止盈位</h3>
+                        <table>{tp_rows}</table>
+                    </div>
+                </div>
+                {f'<p style="margin-top:15px;">最佳持仓周期：<strong>{holding}</strong></p>' if holding else ''}
+            </div>"""
+
+        # 投资建议详情
+        rec_reasoning = recommendation.get('reasoning', '')
+        rec_risks = recommendation.get('risks', [])
+        rec_catalysts = recommendation.get('catalysts', [])
+        rec_html = ""
+        if rec_reasoning or rec_risks or rec_catalysts:
+            risks_li = "".join(f"<li>{r}</li>" for r in rec_risks[:5]) if isinstance(rec_risks, list) else ""
+            cats_li = "".join(f"<li>{c}</li>" for c in rec_catalysts[:5]) if isinstance(rec_catalysts, list) else ""
+            rec_html = f"""
+            <div class="section">
+                <h2>投资建议详情</h2>
+                {f'<p>{rec_reasoning}</p>' if isinstance(rec_reasoning, str) and rec_reasoning else ''}
+                {f'<h3>催化剂</h3><ul>{cats_li}</ul>' if cats_li else ''}
+                {f'<h3>风险因素</h3><ul>{risks_li}</ul>' if risks_li else ''}
+            </div>"""
+
         html = f"""<!DOCTYPE html>
-<html><head><meta charset='UTF-8'><title>{ticker} - AlphaHive</title></head><body>
-<h1>{ticker} 分析</h1>
-<table border='1' cellpadding='5'>
-<tr><th>指标</th><th>数值</th></tr>
-<tr><td>综合分数</td><td>{combined['combined_probability']:.1f}%</td></tr>
-<tr><td>推荐</td><td>{combined['rating']}</td></tr>
-<tr><td>行动</td><td>{combined['action']}</td></tr>
-<tr><td>人工%</td><td>{combined['human_probability']:.1f}%</td></tr>
-<tr><td>ML%</td><td>{combined['ml_probability']:.1f}%</td></tr>
-</table>
-<p>时间：{self.timestamp.strftime('%Y-%m-%d %H:%M:%S')}</p>
-</body></html>"""
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{ticker} ML 增强分析 - Alpha Hive</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh; padding: 20px;
+        }}
+        .container {{ max-width: 900px; margin: 0 auto; }}
+        .header {{
+            background: white; border-radius: 15px; padding: 35px;
+            margin-bottom: 25px; box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            text-align: center;
+        }}
+        .header h1 {{ font-size: 2.2em; color: #667eea; margin-bottom: 8px; }}
+        .header .rating {{
+            display: inline-block; padding: 8px 25px; border-radius: 25px;
+            color: white; font-size: 1.3em; font-weight: bold;
+            background: {rating_color}; margin: 10px 0;
+        }}
+        .section {{
+            background: white; border-radius: 12px; padding: 25px;
+            margin-bottom: 20px; box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+        }}
+        .section h2 {{
+            color: #667eea; font-size: 1.4em; margin-bottom: 18px;
+            padding-bottom: 10px; border-bottom: 2px solid #f0f0f0;
+        }}
+        .section h3 {{ color: #555; margin: 15px 0 10px; font-size: 1.1em; }}
+        .grid-4 {{
+            display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px;
+        }}
+        .grid-2 {{
+            display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+        }}
+        .stat {{
+            text-align: center; padding: 15px; border-radius: 10px;
+            background: linear-gradient(135deg, #f8f9fa, #fff);
+            border: 1px solid #e8e8e8;
+        }}
+        .stat .num {{ font-size: 1.8em; font-weight: bold; color: #667eea; }}
+        .stat .lbl {{ font-size: 0.85em; color: #888; margin-top: 5px; }}
+        .metric {{
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 0; border-bottom: 1px solid #f5f5f5;
+        }}
+        .metric-label {{ color: #666; font-weight: 500; }}
+        .metric-value {{ font-weight: bold; color: #333; }}
+        table {{
+            width: 100%; border-collapse: collapse; margin-top: 10px;
+        }}
+        th, td {{
+            padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee;
+        }}
+        th {{
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white; font-weight: 600; font-size: 0.9em;
+        }}
+        ul {{ padding-left: 20px; margin: 10px 0; }}
+        li {{ margin: 6px 0; color: #444; line-height: 1.6; }}
+        .footer {{
+            text-align: center; color: rgba(255,255,255,0.85);
+            margin-top: 20px; font-size: 0.9em;
+        }}
+        @media (max-width: 600px) {{
+            .grid-4 {{ grid-template-columns: repeat(2, 1fr); }}
+            .grid-2 {{ grid-template-columns: 1fr; }}
+        }}
+    </style>
+</head>
+<body>
+<div class="container">
+    <!-- 头部 -->
+    <div class="header">
+        <h1>{ticker} ML 增强分析</h1>
+        <div class="rating">{rating} - {combined['action']}</div>
+        <p style="color:#888; margin-top:10px;">
+            {self.timestamp.strftime('%Y-%m-%d %H:%M')} | Alpha Hive
+        </p>
+    </div>
+
+    <!-- 核心指标 -->
+    <div class="section">
+        <h2>核心指标</h2>
+        <div class="grid-4">
+            <div class="stat">
+                <div class="num">{combined['combined_probability']:.1f}%</div>
+                <div class="lbl">综合胜率</div>
+            </div>
+            <div class="stat">
+                <div class="num">{win_prob:.1f}%</div>
+                <div class="lbl">人工分析</div>
+            </div>
+            <div class="stat">
+                <div class="num">{ml_prob_val:.1f}%</div>
+                <div class="lbl">ML 预测</div>
+            </div>
+            <div class="stat">
+                <div class="num">{risk_reward:.2f}</div>
+                <div class="lbl">风险回报比</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 期权信号 -->
+    {options_html}
+
+    <!-- 止损止盈 -->
+    {position_html}
+
+    <!-- 投资建议 -->
+    {rec_html}
+
+    <!-- ML 特征 -->
+    {ml_html}
+
+    <!-- 免责声明 -->
+    <div class="section" style="background:#fff3cd; border:1px solid #ffc107;">
+        <p style="color:#856404; font-size:0.9em;">
+            <strong>免责声明</strong>：本报告为 AI 自动生成，不构成投资建议。
+            所有交易决策需自行判断和风控。预测存在误差，过往表现不代表未来收益。
+        </p>
+    </div>
+
+    <div class="footer">
+        <p><a href="index.html" style="color:white;">返回仪表板</a></p>
+    </div>
+</div>
+</body>
+</html>"""
         return html
 
 

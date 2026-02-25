@@ -1,13 +1,205 @@
 <!DOCTYPE html>
-<html><head><meta charset='UTF-8'><title>NVDA - AlphaHive</title></head><body>
-<h1>NVDA 分析</h1>
-<table border='1' cellpadding='5'>
-<tr><th>指标</th><th>数值</th></tr>
-<tr><td>综合分数</td><td>72.4%</td></tr>
-<tr><td>推荐</td><td>BUY</td></tr>
-<tr><td>行动</td><td>分批建仓</td></tr>
-<tr><td>人工%</td><td>65.0%</td></tr>
-<tr><td>ML%</td><td>89.7%</td></tr>
-</table>
-<p>时间：2026-02-25 09:10:29</p>
-</body></html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NVDA ML 增强分析 - Alpha Hive</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh; padding: 20px;
+        }
+        .container { max-width: 900px; margin: 0 auto; }
+        .header {
+            background: white; border-radius: 15px; padding: 35px;
+            margin-bottom: 25px; box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .header h1 { font-size: 2.2em; color: #667eea; margin-bottom: 8px; }
+        .header .rating {
+            display: inline-block; padding: 8px 25px; border-radius: 25px;
+            color: white; font-size: 1.3em; font-weight: bold;
+            background: #17a2b8; margin: 10px 0;
+        }
+        .section {
+            background: white; border-radius: 12px; padding: 25px;
+            margin-bottom: 20px; box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+        }
+        .section h2 {
+            color: #667eea; font-size: 1.4em; margin-bottom: 18px;
+            padding-bottom: 10px; border-bottom: 2px solid #f0f0f0;
+        }
+        .section h3 { color: #555; margin: 15px 0 10px; font-size: 1.1em; }
+        .grid-4 {
+            display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px;
+        }
+        .grid-2 {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+        }
+        .stat {
+            text-align: center; padding: 15px; border-radius: 10px;
+            background: linear-gradient(135deg, #f8f9fa, #fff);
+            border: 1px solid #e8e8e8;
+        }
+        .stat .num { font-size: 1.8em; font-weight: bold; color: #667eea; }
+        .stat .lbl { font-size: 0.85em; color: #888; margin-top: 5px; }
+        .metric {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 0; border-bottom: 1px solid #f5f5f5;
+        }
+        .metric-label { color: #666; font-weight: 500; }
+        .metric-value { font-weight: bold; color: #333; }
+        table {
+            width: 100%; border-collapse: collapse; margin-top: 10px;
+        }
+        th, td {
+            padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee;
+        }
+        th {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white; font-weight: 600; font-size: 0.9em;
+        }
+        ul { padding-left: 20px; margin: 10px 0; }
+        li { margin: 6px 0; color: #444; line-height: 1.6; }
+        .footer {
+            text-align: center; color: rgba(255,255,255,0.85);
+            margin-top: 20px; font-size: 0.9em;
+        }
+        @media (max-width: 600px) {
+            .grid-4 { grid-template-columns: repeat(2, 1fr); }
+            .grid-2 { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <!-- 头部 -->
+    <div class="header">
+        <h1>NVDA ML 增强分析</h1>
+        <div class="rating">BUY - 分批建仓</div>
+        <p style="color:#888; margin-top:10px;">
+            2026-02-25 09:14 | Alpha Hive
+        </p>
+    </div>
+
+    <!-- 核心指标 -->
+    <div class="section">
+        <h2>核心指标</h2>
+        <div class="grid-4">
+            <div class="stat">
+                <div class="num">72.4%</div>
+                <div class="lbl">综合胜率</div>
+            </div>
+            <div class="stat">
+                <div class="num">65.0%</div>
+                <div class="lbl">人工分析</div>
+            </div>
+            <div class="stat">
+                <div class="num">89.7%</div>
+                <div class="lbl">ML 预测</div>
+            </div>
+            <div class="stat">
+                <div class="num">9.00</div>
+                <div class="lbl">风险回报比</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 期权信号 -->
+    
+            <div class="section">
+                <h2>📈 期权信号分析</h2>
+
+                <div class="ml-section">
+                    <h3 style="color: #667eea; margin-bottom: 15px;">⚡ 核心指标</h3>
+
+                    <div class="metric">
+                        <span class="metric-label">IV Rank</span>
+                        <span class="metric-value" style="color: #28a745;">
+                            0.0 (低 IV)
+                        </span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">当前 IV</span>
+                        <span class="metric-value">1.63%</span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">IV 百分位数</span>
+                        <span class="metric-value">0.0%</span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">Put/Call Ratio</span>
+                        <span class="metric-value">0.70</span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">流向</span>
+                        <span class="metric-value" style="color: #28a745;">
+                            BULLISH
+                        </span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">Gamma Squeeze 风险</span>
+                        <span class="metric-value">MEDIUM</span>
+                    </div>
+
+                    <h3 style="color: #667eea; margin-top: 20px; margin-bottom: 15px;">📊 期权综合评分</h3>
+
+                    <div style="text-align: center; padding: 20px; background: #f8f9fa; border-radius: 10px;">
+                        <div style="font-size: 3.5em; font-weight: bold; color: #667eea; margin-bottom: 10px;">
+                            6.0
+                        </div>
+                        <div style="font-size: 1.2em; color: #333; margin-bottom: 10px;">/ 10.0</div>
+                        <div style="color: #666; font-size: 0.95em;">检测到 10 个看涨异动</div>
+                    </div>
+
+                    <div style='margin-top: 15px;'><strong>异动信号：</strong><ul style='margin: 10px 0; padding-left: 20px;'><li>large_call_volume @ $200.0 (成交量: 59,975.0)</li><li>large_call_volume @ $215.0 (成交量: 57,326.0)</li><li>large_call_volume @ $195.0 (成交量: 43,090.0)</li><li>large_call_volume @ $210.0 (成交量: 42,154.0)</li><li>large_call_volume @ $207.5 (成交量: 27,970.0)</li></ul></div>
+                    <div style='margin-top: 15px;'><strong>支撑位：</strong><ul style='margin: 10px 0; padding-left: 20px;'><li>$190.0 (OI: 36,950)</li><li>$105.0 (OI: 34,118)</li><li>$180.0 (OI: 30,026)</li></ul></div>
+                    <div style='margin-top: 15px;'><strong>阻力位：</strong><ul style='margin: 10px 0; padding-left: 20px;'><li>$200.0 (OI: 109,267)</li><li>$195.0 (OI: 98,625)</li><li>$202.5 (OI: 66,913)</li></ul></div>
+                </div>
+            </div>
+
+
+    <!-- 止损止盈 -->
+    
+            <div class="section">
+                <h2>止损 / 止盈位</h2>
+                <div class="grid-2">
+                    <div>
+                        <h3 style="color:#dc3545;">止损位</h3>
+                        <table><tr><td>conservative</td><td>$188.99</td></tr><tr><td>moderate</td><td>$183.21</td></tr><tr><td>aggressive</td><td>$177.42</td></tr></table>
+                    </div>
+                    <div>
+                        <h3 style="color:#28a745;">止盈位</h3>
+                        <table><tr><td>level_1</td><td>{'price': 200.37, 'gain_pct': 30, 'sell_ratio': 0.33, 'reason': '锁定初步收益'}</td></tr><tr><td>level_2</td><td>{'price': 207.89, 'gain_pct': 60, 'sell_ratio': 0.33, 'reason': '追踪止损，保护利润'}</td></tr><tr><td>level_3</td><td>{'price': 217.92, 'gain_pct': 13.0, 'sell_ratio': 0.34, 'reason': '达到目标收益，全部清仓'}</td></tr></table>
+                    </div>
+                </div>
+                <p style="margin-top:15px;">最佳持仓周期：<strong>{'recommended_holding_days': 7, 'note': '基于 1 次类似机会的平均持仓时间', 'holding_time_range': {'minimum': 3, 'optimal': 7, 'maximum': 30}, 'expected_gain_at_optimal_time': 18.9}</strong></p>
+            </div>
+
+    <!-- 投资建议 -->
+    
+
+    <!-- ML 特征 -->
+    
+
+    <!-- 免责声明 -->
+    <div class="section" style="background:#fff3cd; border:1px solid #ffc107;">
+        <p style="color:#856404; font-size:0.9em;">
+            <strong>免责声明</strong>：本报告为 AI 自动生成，不构成投资建议。
+            所有交易决策需自行判断和风控。预测存在误差，过往表现不代表未来收益。
+        </p>
+    </div>
+
+    <div class="footer">
+        <p><a href="index.html" style="color:white;">返回仪表板</a></p>
+    </div>
+</div>
+</body>
+</html>

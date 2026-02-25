@@ -560,15 +560,7 @@ class AdvancedAnalyzer:
         else:
             analysis["options_analysis"] = None
 
-        # ⭐ 优化 3：精简 JSON 输出（删除冗余字段，节省 token）
-        # 保留核心字段，移除详细的中间数据
-        fields_to_keep = [
-            "ticker", "timestamp", "recommendation", "probability_analysis",
-            "crowding_analysis", "catalyst_analysis", "options_analysis"
-        ]
-        simplified_analysis = {k: v for k, v in analysis.items() if k in fields_to_keep}
-
-        return simplified_analysis
+        return analysis
 
     def _generate_overview(self, ticker: str) -> str:
         """生成概述"""
