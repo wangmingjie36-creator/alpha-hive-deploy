@@ -31,6 +31,7 @@ from pheromone_board import PheromoneBoard
 from swarm_agents import (
     ScoutBeeNova, OracleBeeEcho, BuzzBeeWhisper,
     ChronosBeeHorizon, RivalBeeVanguard, GuardBeeSentinel,
+    BearBeeContrarian,
     QueenDistiller, prefetch_shared_data, inject_prefetched
 )
 from concurrent.futures import as_completed
@@ -336,7 +337,7 @@ class AlphaHiveDailyReporter:
         # 创建共享的信息素板
         board = PheromoneBoard(memory_store=self.memory_store, session_id=self._session_id)
 
-        # 实例化 6 个 Agent
+        # 实例化 7 个 Agent（含看空对冲蜂）
         retriever = self.vector_memory if (self.vector_memory and self.vector_memory.enabled) else None
         agents = [
             ScoutBeeNova(board, retriever=retriever),
@@ -344,7 +345,8 @@ class AlphaHiveDailyReporter:
             BuzzBeeWhisper(board, retriever=retriever),
             ChronosBeeHorizon(board, retriever=retriever),
             RivalBeeVanguard(board, retriever=retriever),
-            GuardBeeSentinel(board, retriever=retriever)
+            GuardBeeSentinel(board, retriever=retriever),
+            BearBeeContrarian(board, retriever=retriever),
         ]
 
         # Phase 3 P4: 动态注入 CodeExecutorAgent
@@ -904,6 +906,36 @@ class AlphaHiveDailyReporter:
                 peers = details.get("peer_comparison") or details.get("peers", [])
                 if isinstance(peers, list) and peers:
                     md.append(f"- 同业对标：{', '.join(str(p) for p in peers[:5])}")
+            md.append("")
+
+        # ====== 版块 6.5：看空对冲观点（BearBeeContrarian） ======
+        md.append("## 6.5) 看空对冲观点")
+        md.append("")
+        md.append("> BearBeeContrarian 专门寻找看空信号，平衡蜂群系统性看多偏差")
+        md.append("")
+        for ticker, data in sorted_results:
+            agent = data.get("agent_details", {}).get("BearBeeContrarian", {})
+            discovery = agent.get("discovery", "")
+            details = agent.get("details", {})
+            bear_score = details.get("bear_score", 0)
+            signals = details.get("bearish_signals", [])
+            direction = agent.get("direction", "neutral")
+
+            if direction == "bearish":
+                severity = "**看空**"
+            elif direction == "neutral":
+                severity = "中性"
+            else:
+                severity = "未发现看空信号"
+
+            md.append(f"### {ticker} ({severity} | 看空强度 {bear_score:.1f}/10)")
+            if signals:
+                for sig in signals:
+                    md.append(f"- {sig}")
+            elif discovery:
+                md.append(f"- {discovery}")
+            else:
+                md.append("- 未发现显著看空信号")
             md.append("")
 
         # ====== 版块 7：综合判断 & 信号强度（GuardBeeSentinel + 全体投票） ======
