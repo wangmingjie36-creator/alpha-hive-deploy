@@ -165,7 +165,7 @@ class MemoryStore:
             _log.info("MemoryStore schema_migrate 成功")
             return True
 
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             _log.error("MemoryStore schema_migrate 失败: %s", e)
             return False
 
@@ -195,7 +195,7 @@ class MemoryStore:
             conn.commit()
             return memory_id
 
-        except Exception as e:
+        except (sqlite3.Error, OSError, TypeError, ValueError) as e:
             _log.warning("save_agent_memory 失败: %s", e)
             return None
         finally:
@@ -237,7 +237,7 @@ class MemoryStore:
             conn.commit()
             return True
 
-        except Exception as e:
+        except (sqlite3.Error, OSError, TypeError, ValueError) as e:
             _log.warning("save_session 失败: %s", e)
             return False
         finally:
@@ -269,7 +269,7 @@ class MemoryStore:
 
             return [dict(row) for row in cursor.fetchall()]
 
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             _log.warning("get_recent_memories 失败: %s", e)
             return []
         finally:
@@ -302,7 +302,7 @@ class MemoryStore:
                 "sample_count": row[0], "correct_count": row[1],
                 "avg_return": row[2] or 0.0, "min_return": row[3] or 0.0, "max_return": row[4] or 0.0
             }
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             _log.warning("get_agent_accuracy 失败: %s", e)
             return {"accuracy": 0.5, "sample_count": 0, "avg_return": 0.0}
         finally:
@@ -324,7 +324,7 @@ class MemoryStore:
             """, (outcome, t1, t7, t30, memory_id))
             conn.commit()
             return cursor.rowcount > 0
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             _log.warning("update_memory_outcome 失败: %s", e)
             return False
         finally:
@@ -354,7 +354,7 @@ class MemoryStore:
             cursor = conn.cursor()
             cursor.execute(f"SELECT agent_id, adjusted_weight FROM {self.TABLE_WEIGHTS} ORDER BY agent_id")
             return {row[0]: row[1] for row in cursor.fetchall()}
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             _log.warning("get_agent_weights 失败: %s", e)
             return {}
         finally:
@@ -373,7 +373,7 @@ class MemoryStore:
             """, (adjusted_weight, agent_id))
             conn.commit()
             return True
-        except Exception as e:
+        except (sqlite3.Error, OSError) as e:
             _log.warning("update_agent_weight 失败: %s", e)
             return False
         finally:

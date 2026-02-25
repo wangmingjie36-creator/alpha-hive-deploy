@@ -65,7 +65,7 @@ class PolymarketClient:
             resp.raise_for_status()
             polymarket_breaker.record_success()
             return resp.json()
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
             polymarket_breaker.record_failure()
             _log.warning("Polymarket API 请求失败: %s", e)
             return None
@@ -86,8 +86,8 @@ class PolymarketClient:
                 try:
                     with open(cache_path) as f:
                         return json.load(f)
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    _log.debug("search cache read failed: %s", e)
 
         data = self._get("/markets", params={
             "limit": limit,
@@ -125,8 +125,8 @@ class PolymarketClient:
         try:
             with open(cache_path, "w") as f:
                 json.dump(filtered[:limit], f, ensure_ascii=False)
-        except Exception:
-            pass
+        except (OSError, TypeError) as e:
+            _log.debug("search cache write failed: %s", e)
 
         return filtered[:limit]
 
@@ -150,8 +150,8 @@ class PolymarketClient:
                 try:
                     with open(cache_path) as f:
                         return json.load(f)
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    _log.debug("odds cache read failed: %s", e)
 
         ticker_upper = ticker.upper()
         ticker_lower = ticker.lower()
@@ -269,8 +269,8 @@ class PolymarketClient:
         try:
             with open(cache_path, "w") as f:
                 json.dump(result, f, ensure_ascii=False)
-        except Exception:
-            pass
+        except (OSError, TypeError) as e:
+            _log.debug("odds cache write failed: %s", e)
 
         return result
 
@@ -287,8 +287,8 @@ class PolymarketClient:
                 try:
                     with open(cache_path) as f:
                         return json.load(f)
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    _log.debug("macro cache read failed: %s", e)
 
         events = []
         for keyword in ["fed rate", "inflation", "recession", "gdp"]:
@@ -309,8 +309,8 @@ class PolymarketClient:
         try:
             with open(cache_path, "w") as f:
                 json.dump(unique, f, ensure_ascii=False)
-        except Exception:
-            pass
+        except (OSError, TypeError) as e:
+            _log.debug("macro cache write failed: %s", e)
 
         return unique
 
@@ -320,7 +320,7 @@ class PolymarketClient:
         if isinstance(prices, str):
             try:
                 prices = json.loads(prices)
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 prices = []
         if isinstance(prices, list):
             prices = [float(p) if p else 0.0 for p in prices]
