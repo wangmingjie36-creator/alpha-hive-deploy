@@ -17,6 +17,9 @@ from ml_predictor import (
     HistoricalDataBuilder,
 )
 from config import WATCHLIST
+from hive_logger import PATHS, get_logger
+
+_log = get_logger("ml_report")
 
 
 class MLEnhancedReportGenerator:
@@ -26,7 +29,7 @@ class MLEnhancedReportGenerator:
     _model_cache = {}          # 内存缓存（同一进程内）
     _cache_date = None         # 缓存日期
     _training_lock = Lock()    # 防止并发重复训练
-    _model_file = Path("/Users/igg/.claude/reports/ml_model_cache.pkl")  # 磁盘缓存文件
+    _model_file = PATHS.home / "ml_model_cache.pkl"  # 磁盘缓存文件
 
     # ⭐ Task 3: 异步 HTML 生成（后台文件写入）
     _file_writer_pool = None   # 异步文件写入线程池
@@ -47,12 +50,12 @@ class MLEnhancedReportGenerator:
 
         # 策略 1：检查内存缓存（同一进程内的快速复用）
         if today in self._model_cache:
-            print("✅ 复用内存缓存 ML 模型（无需重新训练）")
+            _log.info("复用内存缓存 ML 模型（无需重新训练）")
             self.ml_service.model = self._model_cache[today]
 
         # 策略 2：检查磁盘缓存（跨进程的缓存）
         elif self._check_disk_cache(today):
-            print("✅ 复用磁盘缓存 ML 模型（昨日已训练）")
+            _log.info("复用磁盘缓存 ML 模型（昨日已训练）")
             self._load_model_from_disk()
             # 同时更新内存缓存
             self._model_cache[today] = self.ml_service.model
@@ -63,7 +66,7 @@ class MLEnhancedReportGenerator:
             with self._training_lock:
                 # 双重检查（防止并发重复训练）
                 if today not in self._model_cache and not self._check_disk_cache(today):
-                    print("🤖 初始化 ML 模型（首次训练）...")
+                    _log.info("初始化 ML 模型（首次训练）...")
                     self.ml_service.train_model()
                     # 缓存到内存
                     self._model_cache[today] = self.ml_service.model
@@ -100,7 +103,7 @@ class MLEnhancedReportGenerator:
             with open(self._model_file, "rb") as f:
                 self.ml_service.model = pickle.load(f)
         except Exception as e:
-            print(f"⚠️  磁盘缓存加载失败：{e}，将重新训练")
+            _log.warning("磁盘缓存加载失败：%s，将重新训练", e)
             self.ml_service.train_model()
 
     def _save_model_to_disk(self):
@@ -110,7 +113,7 @@ class MLEnhancedReportGenerator:
             with open(self._model_file, "wb") as f:
                 pickle.dump(self.ml_service.model, f)
         except Exception as e:
-            print(f"⚠️  磁盘缓存保存失败：{e}")
+            _log.warning("磁盘缓存保存失败：%s", e)
 
     # ⭐ Task 3: 异步文件写入方法
     def _write_file_async(self, filepath: Path, content: str, is_json: bool = False) -> None:
@@ -126,7 +129,7 @@ class MLEnhancedReportGenerator:
                     with open(filepath, "w") as f:
                         f.write(content)
         except Exception as e:
-            print(f"⚠️  文件写入失败 {filepath.name}: {str(e)[:50]}")
+            _log.warning("文件写入失败 %s: %s", filepath.name, str(e)[:50])
 
     def save_html_and_json_async(
         self,
@@ -436,13 +439,13 @@ def main():
     # 确定要分析的标的
     if args.all_watchlist:
         tickers = list(WATCHLIST.keys())[:10]  # 默认最多10个
-        print(f"🎯 分析全部监控列表（最多10个）: {tickers}")
+        _log.info("分析全部监控列表（最多10个）: %s", tickers)
     else:
         tickers = args.tickers
-        print(f"🎯 分析指定标的: {tickers}")
+        _log.info("分析指定标的: %s", tickers)
 
     # 加载实时数据（如果存在）
-    report_dir = Path("/Users/igg/.claude/reports")
+    report_dir = PATHS.home
     realtime_file = report_dir / "realtime_metrics.json"
 
     metrics = {}
@@ -451,21 +454,21 @@ def main():
             with open(realtime_file) as f:
                 metrics = json.load(f)
         except Exception as e:
-            print(f"⚠️  加载实时数据失败: {e}，继续使用空数据")
+            _log.warning("加载实时数据失败: %s，继续使用空数据", e)
     else:
-        print(f"⚠️  未找到 realtime_metrics.json，将使用样本数据")
+        _log.warning("未找到 realtime_metrics.json，将使用样本数据")
 
     # 创建生成器
     report_gen = MLEnhancedReportGenerator()
 
-    print("🤖 生成 ML 增强报告...")
-    print("=" * 60)
+    _log.info("生成 ML 增强报告...")
+    _log.info("=" * 60)
 
     # 为每个标的生成报告
     successful_count = 0
     for ticker in tickers:
         try:
-            print(f"\n📊 生成 {ticker} ML 增强报告...")
+            _log.info("生成 %s ML 增强报告...", ticker)
 
             # 获取该标的的数据（如果没有则使用样本）
             ticker_data = metrics.get(ticker, {
@@ -499,21 +502,21 @@ def main():
                 report_gen.timestamp
             )
 
-            print(f"   ✅ 报告已提交异步生成：{filename}")
-            print(f"   ✅ 数据已提交异步保存：{json_filename}")
+            _log.info("报告已提交异步生成：%s", filename)
+            _log.info("数据已提交异步保存：%s", json_filename)
             successful_count += 1
 
         except Exception as e:
-            print(f"   ⚠️  {ticker} 分析失败: {str(e)[:100]}")
+            _log.warning("%s 分析失败: %s", ticker, str(e)[:100])
 
     # ⭐ Task 3: 等待所有异步文件写入完成
     if MLEnhancedReportGenerator._file_writer_pool:
         MLEnhancedReportGenerator._file_writer_pool.shutdown(wait=True)
 
-    print("\n" + "=" * 60)
-    print(f"✅ ML 增强报告生成完毕！成功: {successful_count}/{len(tickers)}")
-    print(f"📁 所有文件已完成写入")
-    print("=" * 60)
+    _log.info("=" * 60)
+    _log.info("ML 增强报告生成完毕！成功: %d/%d", successful_count, len(tickers))
+    _log.info("所有文件已完成写入")
+    _log.info("=" * 60)
 
 
 if __name__ == "__main__":

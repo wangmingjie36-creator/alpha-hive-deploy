@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from enum import Enum
 
+from hive_logger import PATHS, get_logger
+
+_log = get_logger("alerts")
+
 
 class AlertLevel(Enum):
     """告警级别"""
@@ -83,7 +87,7 @@ class AlertAnalyzer:
     """告警分析引擎"""
 
     def __init__(self, report_dir: Path = None, perf_baseline_seconds: float = 5.0):
-        self.report_dir = report_dir or Path("/Users/igg/.claude/reports")
+        self.report_dir = report_dir or PATHS.home
         self.perf_baseline = perf_baseline_seconds
         self.alerts: List[Alert] = []
 
@@ -268,9 +272,9 @@ class AlertDispatcher:
         }
 
         if test_mode:
-            print(f"[TEST MODE] Would dispatch {len(alerts)} alerts")
+            _log.info("[TEST MODE] Would dispatch %d alerts", len(alerts))
             for alert in alerts:
-                print(f"  - {alert.level.value}: {alert.message}")
+                _log.info("  - %s: %s", alert.level.value, alert.message)
             return results
 
         for alert in alerts:
@@ -300,8 +304,8 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Alpha Hive Alert Manager")
-    parser.add_argument('--status-json', default='/Users/igg/.claude/reports/status.json')
-    parser.add_argument('--output-dir', default='/Users/igg/.claude/logs')
+    parser.add_argument('--status-json', default=str(PATHS.home / 'status.json'))
+    parser.add_argument('--output-dir', default=str(PATHS.logs_dir))
     parser.add_argument('--test-mode', action='store_true')
     parser.add_argument('--dispatch', action='store_true', help='Send alerts via configured channels')
 
@@ -312,25 +316,25 @@ def main():
     alerts = analyzer.analyze(Path(args.status_json))
 
     if not alerts:
-        print("✅ No alerts detected - system healthy")
+        _log.info("No alerts detected - system healthy")
         return
 
     # 2. 保存告警
     output_path = Path(args.output_dir) / f"alerts-{datetime.now().strftime('%Y-%m-%d')}.json"
     analyzer.save_alerts(output_path)
-    print(f"✅ Alerts saved: {output_path}")
-    print(f"   Critical: {len(analyzer.get_critical_alerts())}")
-    print(f"   High: {len(analyzer.get_high_alerts())}")
-    print(f"   Medium: {len(analyzer.get_medium_alerts())}")
+    _log.info("Alerts saved: %s", output_path)
+    _log.info("   Critical: %d", len(analyzer.get_critical_alerts()))
+    _log.info("   High: %d", len(analyzer.get_high_alerts()))
+    _log.info("   Medium: %d", len(analyzer.get_medium_alerts()))
 
     # 3. 分发告警（可选）
     if args.dispatch:
         from config import ALERT_CONFIG
         dispatcher = AlertDispatcher(ALERT_CONFIG)
         result = dispatcher.dispatch(alerts, test_mode=args.test_mode)
-        print(f"✅ Dispatch result:")
-        print(f"   Sent: {result['dispatched']}")
-        print(f"   Failed: {result['failed']}")
+        _log.info("Dispatch result:")
+        _log.info("   Sent: %d", result['dispatched'])
+        _log.info("   Failed: %d", result['failed'])
 
 
 if __name__ == "__main__":

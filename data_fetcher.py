@@ -8,20 +8,15 @@ import os
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
-import logging
+from hive_logger import PATHS, get_logger
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+_log = get_logger("data_fetcher")
 
 
 class CacheManager:
     """缓存管理器 - 避免重复请求"""
 
-    def __init__(self, cache_dir: str = "/Users/igg/.claude/reports/cache"):
+    def __init__(self, cache_dir: str = str(PATHS.cache_dir)):
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
 
@@ -54,7 +49,7 @@ class CacheManager:
             with open(cache_file, 'r') as f:
                 return json.load(f)
         except Exception as e:
-            logger.warning(f"❌ 缓存加载失败 {key}: {e}")
+            _log.warning(f"❌ 缓存加载失败 {key}: {e}")
             return None
 
     def save(self, key: str, data: Dict) -> bool:
@@ -65,7 +60,7 @@ class CacheManager:
                 json.dump(data, f, indent=2)
             return True
         except Exception as e:
-            logger.error(f"❌ 缓存保存失败 {key}: {e}")
+            _log.error(f"❌ 缓存保存失败 {key}: {e}")
             return False
 
 
@@ -97,13 +92,13 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key("stocktwits", ticker)
         cached = self.cache.load(cache_key, ttl=3600)
         if cached:
-            logger.info(f"📦 使用 StockTwits 缓存: {ticker}")
+            _log.info(f"📦 使用 StockTwits 缓存: {ticker}")
             return cached
 
         try:
             # 实际实现：调用 StockTwits API
             # 这里提供示例实现
-            logger.info(f"🔄 获取 StockTwits 数据: {ticker}")
+            _log.info(f"🔄 获取 StockTwits 数据: {ticker}")
 
             # 如果安装了 requests 库，可以这样做：
             # import requests
@@ -125,7 +120,7 @@ class DataFetcher:
             return metrics
 
         except Exception as e:
-            logger.error(f"❌ StockTwits 获取失败 {ticker}: {e}")
+            _log.error(f"❌ StockTwits 获取失败 {ticker}: {e}")
             return {"messages_per_day": 0, "bullish_ratio": 0.5}
 
     # ==================== Polymarket 赔率 ====================
@@ -146,11 +141,11 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key("polymarket", ticker)
         cached = self.cache.load(cache_key, ttl=300)  # 5 分钟缓存
         if cached:
-            logger.info(f"📦 使用 Polymarket 缓存: {ticker}")
+            _log.info(f"📦 使用 Polymarket 缓存: {ticker}")
             return cached
 
         try:
-            logger.info(f"🔄 获取 Polymarket 赔率: {ticker}")
+            _log.info(f"🔄 获取 Polymarket 赔率: {ticker}")
 
             # 实际实现：调用 Polymarket CLOB API
             # import requests
@@ -175,7 +170,7 @@ class DataFetcher:
             return odds_data
 
         except Exception as e:
-            logger.error(f"❌ Polymarket 获取失败 {ticker}: {e}")
+            _log.error(f"❌ Polymarket 获取失败 {ticker}: {e}")
             return {"yes_odds": 0.5, "no_odds": 0.5}
 
     # ==================== Yahoo Finance 数据 ====================
@@ -196,11 +191,11 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key("yahoo", ticker)
         cached = self.cache.load(cache_key, ttl=300)
         if cached:
-            logger.info(f"📦 使用 Yahoo Finance 缓存: {ticker}")
+            _log.info(f"📦 使用 Yahoo Finance 缓存: {ticker}")
             return cached
 
         try:
-            logger.info(f"🔄 获取 Yahoo Finance 数据: {ticker}")
+            _log.info(f"🔄 获取 Yahoo Finance 数据: {ticker}")
 
             # 尝试使用 yfinance 库
             try:
@@ -221,11 +216,11 @@ class DataFetcher:
                 return metrics
 
             except ImportError:
-                logger.warning("⚠️ yfinance 未安装，使用示例数据")
+                _log.warning("⚠️ yfinance 未安装，使用示例数据")
                 return self._get_sample_yahoo_data(ticker)
 
         except Exception as e:
-            logger.error(f"❌ Yahoo Finance 获取失败 {ticker}: {e}")
+            _log.error(f"❌ Yahoo Finance 获取失败 {ticker}: {e}")
             return self._get_sample_yahoo_data(ticker)
 
     # ==================== Google Trends ====================
@@ -244,11 +239,11 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key("gtrends", ticker)
         cached = self.cache.load(cache_key, ttl=86400)  # 24 小时
         if cached:
-            logger.info(f"📦 使用 Google Trends 缓存: {ticker}")
+            _log.info(f"📦 使用 Google Trends 缓存: {ticker}")
             return cached
 
         try:
-            logger.info(f"🔄 获取 Google Trends: {ticker}")
+            _log.info(f"🔄 获取 Google Trends: {ticker}")
 
             # 尝试使用 pytrends 库
             try:
@@ -267,11 +262,11 @@ class DataFetcher:
                 return trends_data
 
             except ImportError:
-                logger.warning("⚠️ pytrends 未安装，使用示例数据")
+                _log.warning("⚠️ pytrends 未安装，使用示例数据")
                 return self._get_sample_trends(ticker)
 
         except Exception as e:
-            logger.error(f"❌ Google Trends 获取失败: {e}")
+            _log.error(f"❌ Google Trends 获取失败: {e}")
             return self._get_sample_trends(ticker)
 
     # ==================== SEC EDGAR 文件 ====================
@@ -295,11 +290,11 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key(f"sec_form{form_type}", ticker)
         cached = self.cache.load(cache_key, ttl=604800)  # 7 天
         if cached:
-            logger.info(f"📦 使用 SEC 缓存: {ticker} Form {form_type}")
+            _log.info(f"📦 使用 SEC 缓存: {ticker} Form {form_type}")
             return cached
 
         try:
-            logger.info(f"🔄 获取 SEC Form {form_type}: {ticker}")
+            _log.info(f"🔄 获取 SEC Form {form_type}: {ticker}")
 
             # 实际实现：爬取 SEC EDGAR
             # import requests
@@ -316,7 +311,7 @@ class DataFetcher:
             return filings
 
         except Exception as e:
-            logger.error(f"❌ SEC 获取失败 {ticker}: {e}")
+            _log.error(f"❌ SEC 获取失败 {ticker}: {e}")
             return []
 
     # ==================== Seeking Alpha ====================
@@ -335,11 +330,11 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key("seekingalpha", ticker)
         cached = self.cache.load(cache_key, ttl=86400)
         if cached:
-            logger.info(f"📦 使用 Seeking Alpha 缓存: {ticker}")
+            _log.info(f"📦 使用 Seeking Alpha 缓存: {ticker}")
             return cached
 
         try:
-            logger.info(f"🔄 获取 Seeking Alpha: {ticker}")
+            _log.info(f"🔄 获取 Seeking Alpha: {ticker}")
 
             # 实际实现：爬取或调用 API
             # import requests
@@ -352,7 +347,7 @@ class DataFetcher:
             return data
 
         except Exception as e:
-            logger.error(f"❌ Seeking Alpha 获取失败: {e}")
+            _log.error(f"❌ Seeking Alpha 获取失败: {e}")
             return {"page_views_week": 0, "article_count_week": 0}
 
     # ==================== 辅助方法 ====================
@@ -392,8 +387,8 @@ class DataFetcher:
             hist = stock.history(period="5d")
             if len(hist) > 1:
                 return ((hist['Close'].iloc[-1] - hist['Close'].iloc[0]) / hist['Close'].iloc[0]) * 100
-        except:
-            pass
+        except Exception as e:
+            _log.warning(f"5 日价格变化计算失败: {e}")
         return 0
 
     def _get_sample_yahoo_data(self, ticker: str) -> Dict:
@@ -469,11 +464,11 @@ class DataFetcher:
         cached_data = self.cache.get(cache_key)
         if cached_data:
             self.cache_hits += 1
-            logger.info(f"✅ {ticker} 缓存命中（节省数据采集）")
+            _log.info(f"✅ {ticker} 缓存命中（节省数据采集）")
             return cached_data
 
         self.cache_misses += 1
-        logger.info(f"📊 开始采集 {ticker} 的所有数据...")
+        _log.info(f"📊 开始采集 {ticker} 的所有数据...")
         start_time = time.time()
 
         metrics = {
@@ -502,7 +497,7 @@ class DataFetcher:
         }
 
         elapsed = time.time() - start_time
-        logger.info(f"✅ 数据采集完成 {ticker} ({elapsed:.2f}秒)")
+        _log.info(f"✅ 数据采集完成 {ticker} ({elapsed:.2f}秒)")
 
         # ⭐ 优化 2：保存到缓存（24 小时）
         self.cache.set(cache_key, metrics, ttl=self.api_cache_ttl)
@@ -512,7 +507,7 @@ class DataFetcher:
 
 # ==================== 脚本示例 ====================
 if __name__ == "__main__":
-    logger.info("🚀 启动实时数据采集系统")
+    _log.info("🚀 启动实时数据采集系统")
 
     fetcher = DataFetcher()
 
@@ -525,8 +520,8 @@ if __name__ == "__main__":
         all_metrics[ticker] = metrics
 
     # 保存汇总数据
-    with open("/Users/igg/.claude/reports/realtime_metrics.json", "w") as f:
+    with open(str(PATHS.home / "realtime_metrics.json"), "w") as f:
         json.dump(all_metrics, f, indent=2)
 
-    logger.info(f"✅ 数据采集完成！已保存到 realtime_metrics.json")
-    print(json.dumps(all_metrics, indent=2))
+    _log.info("数据采集完成！已保存到 realtime_metrics.json")
+    _log.debug(json.dumps(all_metrics, indent=2))

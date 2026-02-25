@@ -17,16 +17,82 @@ from threading import Lock
 
 # 导入现有模块
 from config import WATCHLIST, EVALUATION_WEIGHTS
+from hive_logger import get_logger, PATHS, set_correlation_id
+
+_log = get_logger("daily_report")
+
+# Week 4: 指标收集器
+try:
+    from metrics_collector import MetricsCollector
+except ImportError:
+    MetricsCollector = None
 from generate_ml_report import MLEnhancedReportGenerator
-from adaptive_spawner import AdaptiveSpawner
 from pheromone_board import PheromoneBoard
 from swarm_agents import (
     ScoutBeeNova, OracleBeeEcho, BuzzBeeWhisper,
     ChronosBeeHorizon, RivalBeeVanguard, GuardBeeSentinel,
-    QueenDistiller
+    QueenDistiller, prefetch_shared_data, inject_prefetched
 )
 from concurrent.futures import as_completed
 from agent_toolbox import AgentHelper
+
+# Phase 2: Import memory store
+try:
+    from memory_store import MemoryStore
+except ImportError:
+    MemoryStore = None
+
+# Phase 3 P2: Import Calendar integrator
+try:
+    from calendar_integrator import CalendarIntegrator
+except ImportError:
+    CalendarIntegrator = None
+
+# Phase 3 P4: Import Code Execution Agent
+try:
+    from code_executor_agent import CodeExecutorAgent
+    from config import CODE_EXECUTION_CONFIG
+except ImportError:
+    CodeExecutorAgent = None
+    CODE_EXECUTION_CONFIG = {"enabled": False}
+
+# Phase 3 P5: Import CrewAI 多 Agent 框架
+try:
+    from crewai_adapter import AlphaHiveCrew
+    from config import CREWAI_CONFIG
+except (ImportError, TypeError) as e:
+    AlphaHiveCrew = None
+    CREWAI_CONFIG = {"enabled": False}
+    _log.info("CrewAI 模块导入失败: %s (降级到原始蜂群)", type(e).__name__)
+
+# Phase 3 P6: Import Slack 报告通知器（替代 Gmail）
+try:
+    from slack_report_notifier import SlackReportNotifier
+except ImportError:
+    SlackReportNotifier = None
+
+# Phase 3 内存优化: 向量记忆层（Chroma 长期记忆）
+try:
+    from vector_memory import VectorMemory
+    from config import VECTOR_MEMORY_CONFIG
+except ImportError:
+    VectorMemory = None
+    VECTOR_MEMORY_CONFIG = {"enabled": False}
+
+# Phase 6: 回测反馈循环
+try:
+    from backtester import Backtester, run_full_backtest
+except ImportError:
+    Backtester = None
+    run_full_backtest = None
+
+
+# 免责声明常量（去重，全局引用）
+DISCLAIMER_FULL = (
+    "本报告为蜂群 AI 分析，不构成投资建议，不替代持牌投顾。"
+    "预测存在误差，所有交易决策需自行判断和风控。"
+)
+DISCLAIMER_SHORT = "非投资建议，仅数据分析与情景推演。"
 
 
 @dataclass
@@ -52,7 +118,7 @@ class AlphaHiveDailyReporter:
     """Alpha Hive 日报生成引擎"""
 
     def __init__(self):
-        self.report_dir = Path("/Users/igg/.claude/reports")
+        self.report_dir = PATHS.home
         self.timestamp = datetime.now()
         self.date_str = self.timestamp.strftime("%Y-%m-%d")
 
@@ -62,6 +128,16 @@ class AlphaHiveDailyReporter:
         # 初始化 Agent 工具集（新增）
         self.agent_helper = AgentHelper()
 
+        # Phase 2: 初始化持久化记忆存储
+        self.memory_store = None
+        self._session_id = None
+        if MemoryStore:
+            try:
+                self.memory_store = MemoryStore()
+                self._session_id = self.memory_store.generate_session_id(run_mode="daily_scan")
+            except Exception as e:
+                _log.warning("MemoryStore 初始化失败，继续运行: %s", e)
+
         # 结果存储
         self.opportunities: List[OpportunityItem] = []
         self.observations: List[Dict] = []
@@ -69,6 +145,76 @@ class AlphaHiveDailyReporter:
 
         # 线程安全锁（用于并行执行时保护共享数据）
         self._results_lock = Lock()
+
+        # Phase 3 P2: 初始化 Google Calendar 集成（失败时降级）
+        self.calendar = None
+        if CalendarIntegrator:
+            try:
+                self.calendar = CalendarIntegrator()
+            except Exception as e:
+                _log.warning("Calendar 初始化失败: %s", e)
+
+        # Phase 3 P4: 初始化代码执行 Agent（失败时降级）
+        self.code_executor_agent = None
+        if CodeExecutorAgent and CODE_EXECUTION_CONFIG.get("enabled"):
+            try:
+                self.code_executor_agent = CodeExecutorAgent(board=None)
+                # board 在 run_swarm_scan 时注入
+            except Exception as e:
+                _log.warning("CodeExecutorAgent 初始化失败: %s", e)
+
+        # Phase 3 内存优化: 初始化向量记忆层（Chroma 长期记忆）
+        self.vector_memory = None
+        if VectorMemory and VECTOR_MEMORY_CONFIG.get("enabled"):
+            try:
+                self.vector_memory = VectorMemory(
+                    db_path=VECTOR_MEMORY_CONFIG.get("db_path"),
+                    retention_days=VECTOR_MEMORY_CONFIG.get("retention_days", 90)
+                )
+                if self.vector_memory.enabled:
+                    if VECTOR_MEMORY_CONFIG.get("cleanup_on_startup"):
+                        self.vector_memory.cleanup()
+            except Exception as e:
+                _log.warning("向量记忆初始化失败: %s", e)
+
+        # Week 4: 指标收集器
+        self.metrics = None
+        if MetricsCollector:
+            try:
+                self.metrics = MetricsCollector()
+            except Exception as e:
+                _log.warning("MetricsCollector 初始化失败: %s", e)
+
+        # Phase 2: 共享线程池（替代所有 daemon 线程，退出时等待完成）
+        import atexit
+        self._bg_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="hive_bg")
+        self._bg_futures = []
+        atexit.register(self._shutdown_bg)
+
+        # Phase 3 P6: 初始化 Slack 报告通知器（替代 Gmail）
+        self.slack_notifier = None
+        if SlackReportNotifier:
+            try:
+                self.slack_notifier = SlackReportNotifier()
+                pass  # Slack 就绪
+            except Exception as e:
+                _log.warning("Slack 通知器初始化失败: %s", e)
+
+    def _shutdown_bg(self) -> None:
+        """atexit 处理器：等待后台任务完成"""
+        for f in self._bg_futures:
+            try:
+                f.result(timeout=10)
+            except Exception:
+                pass
+        self._bg_executor.shutdown(wait=True)
+
+    def _submit_bg(self, fn, *args) -> None:
+        """提交后台任务到共享线程池（替代 daemon 线程）"""
+        future = self._bg_executor.submit(fn, *args)
+        self._bg_futures.append(future)
+        # 清理已完成的 futures（防止内存泄漏）
+        self._bg_futures = [f for f in self._bg_futures if not f.done()]
 
     def _analyze_ticker_safe(self, ticker: str, index: int, total: int) -> Tuple[str, OpportunityItem, str]:
         """
@@ -129,58 +275,42 @@ class AlphaHiveDailyReporter:
         Returns:
             完整的日报数据结构
         """
-        print(f"\n🐝 Alpha Hive 日报生成启动")
-        print(f"📅 日期：{self.date_str}")
-        print(f"⏰ 时间：{self.timestamp.strftime('%H:%M:%S')}")
-        print("=" * 70)
+        _log.info("Alpha Hive 日报 %s", self.date_str)
 
-        # 确定扫描标的
-        if focus_tickers:
-            targets = focus_tickers
-        else:
-            targets = list(WATCHLIST.keys())[:10]  # 默认扫描前10个
-
-        print(f"🎯 扫描标的数：{len(targets)}")
-
-        # Week 3: 动态蜂群扩展 - 根据标的数量自动调整 Agent 数量
-        spawner = AdaptiveSpawner()
-        spawn_recommendation = spawner.recommend(targets, market_type="us_market")
-        recommended_agents = spawn_recommendation.get("recommended_agents", 10)
-        print(f"🐝 动态蜂群推荐：{recommended_agents} 个 Agents")
-        print(f"   计算：{spawn_recommendation['calculation'].get('base_agents', 10)} × "
-              f"{spawn_recommendation['calculation'].get('complexity_factor', 1.0)} × "
-              f"{spawn_recommendation['calculation'].get('ticker_factor', 1.0)} × "
-              f"{spawn_recommendation['calculation'].get('load_factor', 1.0)} = "
-              f"{recommended_agents}\n")
-
-        # ⭐ Task 1: 并行执行标的分析（新增）
-        print(f"🚀 使用 {len(targets)} 个线程并行分析\n")
+        targets = focus_tickers or list(WATCHLIST.keys())[:10]
+        _log.info("标的：%s", " ".join(targets))
 
         start_parallel = time.time()
 
         with ThreadPoolExecutor(max_workers=len(targets)) as executor:
-            # 提交所有任务
             futures = [
                 executor.submit(self._analyze_ticker_safe, ticker, i + 1, len(targets))
                 for i, ticker in enumerate(targets)
             ]
 
-            # 收集结果并显示进度
             for i, future in enumerate(futures, 1):
                 ticker, opportunity, error = future.result()
                 if error:
-                    print(f"[{i}/{len(targets)}] {ticker}: ⚠️  ({error[:40]})")
+                    _log.warning("[%d/%d] %s 分析失败: %s", i, len(targets), ticker, error[:60])
                 else:
-                    print(f"[{i}/{len(targets)}] {ticker}: ✅ ({opportunity.opportunity_score:.1f}/10)")
+                    _log.info("[%d/%d] %s: %.1f/10", i, len(targets), ticker, opportunity.opportunity_score)
 
         elapsed_parallel = time.time() - start_parallel
-        print(f"\n📊 并行分析耗时：{elapsed_parallel:.2f}s")
+        _log.info("分析耗时：%.1fs", elapsed_parallel)
 
         # 排序机会
         self.opportunities.sort(key=lambda x: x.opportunity_score, reverse=True)
 
         # 构建报告
         report = self._build_report()
+
+        # Phase 2: 异步保存会话（使用共享线程池，退出时等待完成）
+        if self.memory_store and self._session_id:
+            self._submit_bg(
+                self.memory_store.save_session,
+                self._session_id, self.date_str, "daily_scan",
+                targets, {}, [], elapsed_parallel
+            )
 
         return report
 
@@ -194,73 +324,346 @@ class AlphaHiveDailyReporter:
         Returns:
             完整的蜂群分析报告
         """
-        print(f"\n🐝 Alpha Hive 蜂群协作启动 (完全去中心化模式)")
-        print(f"📅 日期：{self.date_str}")
-        print("=" * 70)
+        # Week 4: 设置 correlation_id 追踪本次扫描
+        set_correlation_id(self._session_id or f"swarm_{self.date_str}")
+        _log.info("蜂群协作启动 %s", self.date_str)
 
-        # 确定扫描标的
-        if focus_tickers:
-            targets = focus_tickers
-        else:
-            targets = list(WATCHLIST.keys())[:10]  # 默认扫描前10个
+        targets = focus_tickers or list(WATCHLIST.keys())[:10]
+        _log.info("标的：%s", " ".join(targets))
 
-        print(f"🎯 扫描标的数：{len(targets)}")
-
-        # 创建共享的信息素板
-        board = PheromoneBoard()
-
-        # 实例化 6 个 Agent（共享同一信息素板）
-        agents = [
-            ScoutBeeNova(board),
-            OracleBeeEcho(board),
-            BuzzBeeWhisper(board),
-            ChronosBeeHorizon(board),
-            RivalBeeVanguard(board),
-            GuardBeeSentinel(board)
-        ]
-
-        queen = QueenDistiller(board)
-
-        print(f"🐝 蜂群配置：{len(agents)} 个自治 Agent")
-        for agent in agents:
-            print(f"   ✓ {agent.__class__.__name__}")
-
-        print("\n🚀 并行采集开始...\n")
-
-        # 每个标的：并行跑所有 Agent → 信息素板实时更新 → QueenDistiller 汇总
-        swarm_results = {}
         start_time = time.time()
 
-        for i, ticker in enumerate(targets, 1):
-            print(f"[{i}/{len(targets)}] 分析 {ticker}...")
+        # 创建共享的信息素板
+        board = PheromoneBoard(memory_store=self.memory_store, session_id=self._session_id)
+
+        # 实例化 6 个 Agent
+        retriever = self.vector_memory if (self.vector_memory and self.vector_memory.enabled) else None
+        agents = [
+            ScoutBeeNova(board, retriever=retriever),
+            OracleBeeEcho(board, retriever=retriever),
+            BuzzBeeWhisper(board, retriever=retriever),
+            ChronosBeeHorizon(board, retriever=retriever),
+            RivalBeeVanguard(board, retriever=retriever),
+            GuardBeeSentinel(board, retriever=retriever)
+        ]
+
+        # Phase 3 P4: 动态注入 CodeExecutorAgent
+        if self.code_executor_agent and CODE_EXECUTION_CONFIG.get("add_to_swarm"):
+            self.code_executor_agent.board = board
+            agents.append(self.code_executor_agent)
+
+        # Phase 6: 自适应权重
+        adapted_w = Backtester.load_adapted_weights() if Backtester else None
+        queen = QueenDistiller(board, adapted_weights=adapted_w)
+
+        _log.info("%d Agent | 预取数据中...", len(agents))
+
+        # ⚡ 优化 #1+#2: 批量预取 yfinance + VectorMemory（每 ticker 仅 1 次）
+        prefetched = prefetch_shared_data(targets, retriever)
+        inject_prefetched(agents, prefetched)
+        prefetch_elapsed = time.time() - start_time
+        _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
+
+        # ⚡ 优化 #3: 单层线程池，按 ticker 串行、Agent 并行
+        swarm_results = {}
+
+        # Phase 2: 崩溃恢复 checkpoint
+        checkpoint_file = self.report_dir / f".checkpoint_{self._session_id or 'default'}.json"
+        completed_tickers = set()
+        if checkpoint_file.exists():
+            try:
+                with open(checkpoint_file, "r") as f:
+                    ckpt = json.load(f)
+                    swarm_results = ckpt.get("results", {})
+                    completed_tickers = set(swarm_results.keys())
+                    if completed_tickers:
+                        _log.info("恢复 checkpoint：%d 标的已完成", len(completed_tickers))
+            except Exception:
+                pass
+
+        for idx, ticker in enumerate(targets, 1):
+            if ticker in completed_tickers:
+                res = "✅" if swarm_results[ticker]["resonance"]["resonance_detected"] else "—"
+                _log.info("[%d/%d] %s: %.1f/10 (已缓存) %s", idx, len(targets), ticker, swarm_results[ticker]['final_score'], res)
+                continue
 
             with ThreadPoolExecutor(max_workers=len(agents)) as executor:
                 futures = {executor.submit(agent.analyze, ticker): agent for agent in agents}
                 agent_results = []
-
                 for future in as_completed(futures):
-                    agent = futures[future]
                     try:
-                        result = future.result(timeout=30)
-                        agent_results.append(result)
-                        print(f"    ✓ {agent.__class__.__name__}: {result.get('score', '?'):.1f}/10")
-                    except Exception as e:
-                        print(f"    ⚠ {agent.__class__.__name__}: 错误 - {str(e)[:30]}")
+                        agent_results.append(future.result(timeout=60))
+                    except Exception:
                         agent_results.append(None)
 
-            # QueenDistiller 最终汇总（包含共振检测）
             distilled = queen.distill(ticker, agent_results)
             swarm_results[ticker] = distilled
 
-            resonance_indicator = "✅" if distilled["resonance"]["resonance_detected"] else "❌"
-            print(f"  📊 最终评分：{distilled['final_score']:.1f}/10 | "
-                  f"方向：{distilled['direction']} | 共振：{resonance_indicator}\n")
+            res = "✅" if distilled["resonance"]["resonance_detected"] else "—"
+            _log.info("[%d/%d] %s: %.1f/10 %s %s", idx, len(targets), ticker, distilled['final_score'], distilled['direction'], res)
+
+            # 写入 checkpoint（每个 ticker 完成后）
+            try:
+                with open(checkpoint_file, "w") as f:
+                    json.dump({"results": swarm_results, "targets": targets}, f, default=str)
+            except Exception:
+                pass
+
+        # 扫描完成，清理 checkpoint
+        try:
+            checkpoint_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         elapsed = time.time() - start_time
-        print(f"⏱️  蜂群采集耗时：{elapsed:.2f}s\n")
+
+        # LLM Token 使用统计
+        try:
+            import llm_service
+            usage = llm_service.get_usage()
+            if usage["call_count"] > 0:
+                _log.info("蜂群耗时：%.1fs | LLM: %d调用 $%.4f", elapsed, usage['call_count'], usage['total_cost_usd'])
+            else:
+                _log.info("蜂群耗时：%.1fs | 规则引擎模式", elapsed)
+        except Exception:
+            _log.info("蜂群耗时：%.1fs", elapsed)
+
+        # Week 4: 记录扫描指标 + SLO 检查
+        if self.metrics:
+            try:
+                scores = [d.get("final_score", 5.0) for d in swarm_results.values()]
+                agent_errors = sum(
+                    1 for d in swarm_results.values()
+                    if d.get("supporting_agents", 0) == 0
+                )
+                resonance_n = sum(
+                    1 for d in swarm_results.values()
+                    if d.get("resonance", {}).get("resonance_detected")
+                )
+                avg_real = (
+                    sum(d.get("data_real_pct", 0) for d in swarm_results.values()) / len(swarm_results)
+                    if swarm_results else 0
+                )
+                llm_c, llm_cost = 0, 0.0
+                try:
+                    import llm_service as _ls
+                    _u = _ls.get_usage()
+                    llm_c, llm_cost = _u.get("call_count", 0), _u.get("total_cost_usd", 0.0)
+                except Exception:
+                    pass
+
+                self.metrics.record_scan(
+                    ticker_count=len(swarm_results),
+                    duration_seconds=elapsed,
+                    agent_count=len(agents),
+                    prefetch_seconds=prefetch_elapsed,
+                    avg_score=sum(scores) / len(scores) if scores else 5.0,
+                    max_score=max(scores) if scores else 5.0,
+                    min_score=min(scores) if scores else 5.0,
+                    agent_errors=agent_errors,
+                    agent_total=len(swarm_results) * len(agents),
+                    data_real_pct=avg_real,
+                    resonance_count=resonance_n,
+                    llm_calls=llm_c,
+                    llm_cost_usd=llm_cost,
+                    session_id=self._session_id or "",
+                    scan_mode="swarm",
+                )
+                for ticker, data in swarm_results.items():
+                    self.metrics.record_ticker(
+                        ticker=ticker,
+                        final_score=data.get("final_score", 5.0),
+                        direction=data.get("direction", "neutral"),
+                        supporting_agents=data.get("supporting_agents", 0),
+                        data_real_pct=data.get("data_real_pct", 0),
+                        resonance_detected=data.get("resonance", {}).get("resonance_detected", False),
+                        session_id=self._session_id or "",
+                    )
+
+                # SLO 检查
+                violations = self.metrics.check_slo(days=1)
+                if violations:
+                    _log.warning("SLO 违规 %d 条: %s",
+                                 len(violations),
+                                 "; ".join(v["details"] for v in violations))
+            except Exception as e:
+                _log.warning("指标收集异常: %s", e)
+
+        # Phase 6: 回测反馈循环
+        if Backtester:
+            try:
+                bt = Backtester()
+                bt.save_predictions(swarm_results)
+                bt.run_backtest()
+                bt.adapt_weights(min_samples=5)
+            except Exception as e:
+                _log.warning("回测异常: %s", e)
+
+        # Phase 6: Slack 推送高分机会 + 异常信号
+        if self.slack_notifier and self.slack_notifier.enabled:
+            for ticker, data in swarm_results.items():
+                score = data.get("final_score", 0)
+                direction = data.get("direction", "neutral")
+                dir_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(direction, direction)
+
+                # 高分机会推送（>= 7.5）
+                if score >= 7.5:
+                    self._submit_bg(
+                        self.slack_notifier.send_opportunity_alert,
+                        ticker, score, dir_cn,
+                        data.get("discovery", "高分机会"),
+                        [f"评分 {score:.1f}/10"]
+                    )
+
+                # 异常信号推送：强看空 或 内幕大额交易
+                elif score <= 3.0:
+                    self._submit_bg(
+                        self.slack_notifier.send_risk_alert,
+                        f"{ticker} 低分预警",
+                        f"蜂群评分仅 {score:.1f}/10，方向 {dir_cn}",
+                        "HIGH"
+                    )
 
         # 生成综合报告
         report = self._build_swarm_report(swarm_results, board)
+
+        # Phase 3 P2: 为高分机会添加日历提醒（后台线程池，退出时等待完成）
+        if self.calendar and report.get('opportunities'):
+            for opp in report['opportunities']:
+                if opp.opportunity_score >= 7.5:
+                    self._submit_bg(
+                        self.calendar.add_opportunity_reminder,
+                        opp.ticker, opp.opportunity_score, opp.direction,
+                        f"{opp.key_catalysts[0] if opp.key_catalysts else '高分机会'}"
+                    )
+
+        # Phase 2: 异步保存会话（使用共享线程池，退出时等待完成）
+        if self.memory_store and self._session_id:
+            snapshot = board.compact_snapshot()  # 在主线程取快照（线程安全）
+            self._submit_bg(
+                self.memory_store.save_session,
+                self._session_id, self.date_str, "swarm",
+                targets, swarm_results, snapshot, elapsed
+            )
+
+        # Phase 3 内存优化: 将高价值发现存入向量记忆（长期记忆）
+        if self.vector_memory and self.vector_memory.enabled:
+            stored = 0
+            # 1. 存储 Queen 的最终评分
+            for ticker, data in swarm_results.items():
+                if data.get("final_score", 0) >= 5.0:
+                    self.vector_memory.store(
+                        ticker=ticker,
+                        agent_id="QueenDistiller",
+                        discovery=f"评分{data['final_score']:.1f} {data['direction']} "
+                                  f"支持{data.get('supporting_agents', 0)}Agent",
+                        direction=data["direction"],
+                        score=data["final_score"],
+                        source="swarm_scan",
+                        session_id=self._session_id or ""
+                    )
+                    stored += 1
+            # 2. 存储信息素板上每个 Agent 的高价值发现
+            for entry in board.snapshot():
+                if entry.get("self_score", 0) >= 6.0:
+                    self.vector_memory.store(
+                        ticker=entry.get("ticker", ""),
+                        agent_id=entry.get("agent_id", ""),
+                        discovery=entry.get("discovery", "")[:300],
+                        direction=entry.get("direction", "neutral"),
+                        score=entry.get("self_score", 5.0),
+                        source=entry.get("source", ""),
+                        session_id=self._session_id or ""
+                    )
+                    stored += 1
+            if stored > 0:
+                _log.info("已存入 %d 条长期记忆 (Chroma)", stored)
+
+        # Slack 推送
+        if self.slack_notifier and self.slack_notifier.enabled:
+            try:
+                self.slack_notifier.send_daily_report(report)
+                _log.info("Slack 日报已发送")
+            except Exception as e:
+                _log.error("Slack 日报发送失败: %s", e, exc_info=True)
+
+        return report
+
+    def run_crew_scan(self, focus_tickers: List[str] = None) -> Dict:
+        """
+        CrewAI 模式蜂群扫描 - 使用 Process.hierarchical 主-子 Agent 递归调度
+        若 crewai 未安装，自动降级到 run_swarm_scan()
+
+        Args:
+            focus_tickers: 重点关注标的（如为None则扫描全部watchlist）
+
+        Returns:
+            完整的蜂群分析报告
+        """
+        # 检查 CrewAI 是否可用
+        if not AlphaHiveCrew or not CREWAI_CONFIG.get("enabled"):
+            _log.info("CrewAI 未安装或未启用，降级到标准蜂群模式")
+            return self.run_swarm_scan(focus_tickers)
+
+        _log.info("CrewAI 模式 %s", self.date_str)
+
+        targets = focus_tickers or list(WATCHLIST.keys())[:10]
+        _log.info("标的：%s", " ".join(targets))
+
+        # 创建共享的信息素板
+        board = PheromoneBoard(memory_store=self.memory_store, session_id=self._session_id)
+
+        # 构建 CrewAI Crew
+        crew = AlphaHiveCrew(board=board, memory_store=self.memory_store)
+        crew.build(targets)
+
+        _log.info("CrewAI %d Agent", crew.get_agents_count())
+
+        swarm_results = {}
+        start_time = time.time()
+
+        # 使用 CrewAI 分析每个标的
+        for i, ticker in enumerate(targets, 1):
+            _log.info("[%d/%d] CrewAI 分析 %s", i, len(targets), ticker)
+
+            try:
+                result = crew.analyze(ticker)
+                swarm_results[ticker] = result
+
+                _log.info("  %s: %.1f/10 %s", ticker, result.get('final_score', 0), result.get('direction', 'neutral'))
+
+            except Exception as e:
+                _log.warning("  %s 分析失败: %s", ticker, str(e)[:80])
+                swarm_results[ticker] = {
+                    "ticker": ticker,
+                    "final_score": 0.0,
+                    "direction": "neutral",
+                    "discovery": f"CrewAI 分析失败: {str(e)}",
+                    "error": str(e)
+                }
+
+        elapsed = time.time() - start_time
+        _log.info("CrewAI 耗时：%.1fs", elapsed)
+
+        # 转换为标准报告格式（兼容 run_swarm_scan 输出）
+        report = self._build_swarm_report(swarm_results, board)
+
+        # 异步保存会话（使用共享线程池，退出时等待完成）
+        if self.memory_store and self._session_id:
+            snapshot = board.compact_snapshot()
+            self._submit_bg(
+                self.memory_store.save_session,
+                self._session_id, self.date_str, "crew_scan",
+                targets, swarm_results, snapshot, elapsed
+            )
+
+        # Slack 推送
+        if self.slack_notifier and self.slack_notifier.enabled:
+            try:
+                self.slack_notifier.send_daily_report(report)
+                _log.info("Slack 日报已发送")
+            except Exception as e:
+                _log.error("Slack 日报发送失败: %s", e, exc_info=True)
 
         return report
 
@@ -368,26 +771,47 @@ class AlphaHiveDailyReporter:
 
         for i, (ticker, data) in enumerate(sorted_results[:3], 1):
             resonance_emoji = "✅" if data["resonance"]["resonance_detected"] else "❌"
+            distill_mode = data.get("distill_mode", "rule_engine")
+            mode_label = "AI推理" if distill_mode == "llm_enhanced" else "规则引擎"
+
             md.append(f"### {i}. **{ticker}** - {data['direction'].upper()}")
-            md.append(f"- **蜂群评分**：{data['final_score']:.1f}/10")
+            md.append(f"- **蜂群评分**：{data['final_score']:.1f}/10（{mode_label}）")
             md.append(f"- **信号共振**：{resonance_emoji} ({data['resonance']['supporting_agents']} Agent)")
             md.append(f"- **Agent 投票**：看多 {data['agent_breakdown']['bullish']} | "
                      f"看空 {data['agent_breakdown']['bearish']} | "
                      f"中性 {data['agent_breakdown']['neutral']}")
+
+            # LLM 推理链（有则显示）
+            reasoning = data.get("reasoning", "")
+            key_insight = data.get("key_insight", "")
+            risk_flag = data.get("risk_flag", "")
+            if reasoning:
+                md.append(f"- **AI推理**：{reasoning}")
+            if key_insight:
+                md.append(f"- **核心洞察**：{key_insight}")
+            if risk_flag:
+                md.append(f"- **风险标记**：{risk_flag}")
+
+            # 数据真实度
+            data_pct = data.get("data_real_pct", 0)
+            if data_pct > 0:
+                md.append(f"- **数据真实度**：{data_pct:.0f}%")
             md.append("")
 
         # 完整机会清单
         md.append("## 🎯 完整机会清单")
         md.append("")
-        md.append("| 排序 | 标的 | 方向 | 综合分 | 共振 | Agent 支持 | 置信度 |")
-        md.append("|------|------|------|--------|------|-----------|--------|")
+        md.append("| 排序 | 标的 | 方向 | 综合分 | 共振 | Agent | 数据% | 模式 |")
+        md.append("|------|------|------|--------|------|-------|-------|------|")
 
         for i, (ticker, data) in enumerate(sorted_results[:5], 1):
             resonance_emoji = "✅" if data["resonance"]["resonance_detected"] else "❌"
+            mode = "AI" if data.get("distill_mode") == "llm_enhanced" else "规则"
+            data_pct = data.get("data_real_pct", 0)
             md.append(
                 f"| {i} | **{ticker}** | {data['direction'].upper()} | "
                 f"{data['final_score']:.1f} | {resonance_emoji} | "
-                f"{data['supporting_agents']}/6 | {'高' if data['final_score'] >= 7.5 else '中'} |"
+                f"{data['supporting_agents']}/6 | {data_pct:.0f}% | {mode} |"
             )
 
         md.append("")
@@ -404,10 +828,7 @@ class AlphaHiveDailyReporter:
         md.append("- 🛡️ **GuardBeeSentinel**：交叉验证（共振检测）")
         md.append("")
         md.append("**免责声明**：")
-        md.append(
-            "本报告为多 Agent 蜂群分析，不构成投资建议。"
-            "AI 预测存在误差，所有交易决策需自行判断和风控。"
-        )
+        md.append(DISCLAIMER_FULL)
         md.append("")
 
         return "\n".join(md)
@@ -427,16 +848,20 @@ class AlphaHiveDailyReporter:
         main_thread.append(
             f"【Alpha Hive 蜂群日报 {self.date_str}】"
             f"6 个自治 Agent 协作分析，多数投票共振信号。"
-            f"不构成投资建议，仅数据分析与情景推演。👇"
+            f"{DISCLAIMER_SHORT}👇"
         )
 
         for i, (ticker, data) in enumerate(sorted_results[:3], 1):
             resonance_emoji = "✅" if data["resonance"]["resonance_detected"] else "❌"
-            main_thread.append(
+            insight = data.get("key_insight", "")
+            tweet = (
                 f"{i}. **{ticker}** {data['direction'].upper()}\n"
                 f"蜂群评分：{data['final_score']:.1f}/10 | 共振：{resonance_emoji}\n"
                 f"Agent 投票：看多{data['agent_breakdown']['bullish']} vs 看空{data['agent_breakdown']['bearish']}"
             )
+            if insight:
+                tweet += f"\nAI洞察：{insight}"
+            main_thread.append(tweet)
 
         main_thread.append(
             f"🐝 6 个 Agent 独立分析 → 信息素板实时交换 → 多数投票汇总\n"
@@ -470,14 +895,15 @@ class AlphaHiveDailyReporter:
             options_score = 5.0
             options_signal = "期权数据不可用"
 
-        # 计算综合 Opportunity Score
+        # 计算综合 Opportunity Score（与 CLAUDE.md 5 维公式一致）
+        # options_score 合并入 odds 维度（取平均）
+        odds_combined = (odds_score + options_score) / 2.0
         opp_score = (
-            0.25 * signal_score +
+            0.30 * signal_score +
             0.20 * catalyst_score +
-            0.15 * sentiment_score +
-            0.15 * odds_score +
-            0.15 * risk_score +
-            0.10 * options_score
+            0.20 * sentiment_score +
+            0.15 * odds_combined +
+            0.15 * risk_score
         )
 
         # 判断方向
@@ -592,10 +1018,7 @@ class AlphaHiveDailyReporter:
         md.append("- **期权链数据**（yFinance，每5分钟缓存）")
         md.append("")
         md.append("**免责声明**：")
-        md.append(
-            "本报告为自动化数据分析，不构成投资建议，不替代持牌投顾服务。"
-            "机器学习预测存在误差，所有交易决策需自行判断和风控。"
-        )
+        md.append(DISCLAIMER_FULL)
         md.append("")
 
         return "\n".join(md)
@@ -609,7 +1032,7 @@ class AlphaHiveDailyReporter:
         main_thread = []
         main_thread.append(
             f"【Alpha Hive 日报 {self.date_str}】"
-            f"以下为公开信息研究与情景推演，不构成投资建议。"
+            f"{DISCLAIMER_SHORT}"
             f"今天最值得跟踪的 3 个机会 👇"
         )
 
@@ -635,36 +1058,36 @@ class AlphaHiveDailyReporter:
 
         新功能：使用 AgentHelper 自动执行 Git 提交和通知
         """
-        print("\n🤖 Auto-commit & Notify 启动 (Agent Toolbox)...\n")
+        _log.info("Auto-commit & Notify 启动")
 
         results = {}
 
         # 1. Git 提交报告
-        print("1️⃣ 提交到 Git...")
+        _log.info("Git commit...")
         status = self.agent_helper.git.status()
         if status.get("modified_files"):
             commit_result = self.agent_helper.git.commit(
-                f"🤖 Alpha Hive 蜂群日报 {self.date_str}"
+                f"Alpha Hive 蜂群日报 {self.date_str}"
             )
             results["git_commit"] = commit_result
             if commit_result["success"]:
-                print(f"✅ 提交成功")
+                _log.info("Git commit 成功")
             else:
-                print(f"⚠️ 提交失败：{commit_result.get('message')}")
+                _log.warning("Git commit 失败：%s", commit_result.get('message'))
         else:
-            print("ℹ️ 无需提交（工作目录干净）")
+            _log.info("无需提交（工作目录干净）")
 
         # 2. Git 推送
-        print("\n2️⃣ 推送到远程...")
+        _log.info("Git push...")
         push_result = self.agent_helper.git.push("main")
         results["git_push"] = push_result
         if push_result["success"]:
-            print(f"✅ 推送成功")
+            _log.info("Git push 成功")
         else:
-            print(f"⚠️ 推送失败（可能已是最新）")
+            _log.warning("Git push 失败")
 
         # 3. Slack 通知
-        print("\n3️⃣ 发送 Slack 通知...")
+        _log.info("发送 Slack 通知...")
         top_opp = self.opportunities[0] if self.opportunities else None
         if top_opp:
             message = (
@@ -679,11 +1102,11 @@ class AlphaHiveDailyReporter:
             )
             results["slack_notification"] = slack_result
             if slack_result.get("success"):
-                print(f"✅ Slack 通知已发送")
+                _log.info("Slack 通知已发送")
             else:
-                print(f"⚠️ Slack 通知失败：{slack_result.get('error')}")
+                _log.warning("Slack 通知失败：%s", slack_result.get('error'))
 
-        print("\n✅ Auto-commit & Notify 完成")
+        _log.info("Auto-commit & Notify 完成")
         return results
 
     def save_report(self, report: Dict) -> str:
@@ -705,10 +1128,7 @@ class AlphaHiveDailyReporter:
             with open(thread_file, "w", encoding="utf-8") as f:
                 f.write(thread)
 
-        print(f"\n✅ 报告已保存：")
-        print(f"  📄 {json_file.name}")
-        print(f"  📝 {md_file.name}")
-        print(f"  🐦 {len(report['twitter_threads'])} 条 X 线程")
+        _log.info("报告已保存：%s", md_file.name)
 
         return str(md_file)
 
@@ -755,32 +1175,17 @@ def main():
     reporter = AlphaHiveDailyReporter()
 
     # 确定扫描标的
-    if args.all_watchlist:
-        focus_tickers = list(WATCHLIST.keys())[:10]  # 默认最多10个
-        print(f"🎯 扫描全部监控列表（最多10个）: {focus_tickers}")
-    else:
-        focus_tickers = args.tickers
-        print(f"🎯 扫描指定标的: {focus_tickers}")
+    focus_tickers = list(WATCHLIST.keys())[:10] if args.all_watchlist else args.tickers
 
-    # 选择扫描模式
     if args.swarm:
-        print("🐝 使用蜂群协作模式...")
         report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
     else:
-        print("📊 使用传统 ML 模式...")
         report = reporter.run_daily_scan(focus_tickers=focus_tickers)
 
     # 保存报告
     report_path = reporter.save_report(report)
 
-    # 显示摘要
-    print("\n" + "=" * 70)
-    print("📋 报告摘要")
-    print("=" * 70)
-    print(report["markdown_report"][:500] + "...")
-
-    print("\n🎉 Alpha Hive 日报生成完成！")
-    print(f"📂 完整报告位置：{report_path}")
+    _log.info("完成！报告：%s", report_path)
 
     return report
 

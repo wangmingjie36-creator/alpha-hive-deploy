@@ -1,17 +1,17 @@
 {
   "date": "2026-02-24",
-  "timestamp": "2026-02-24T18:28:56.611362",
+  "timestamp": "2026-02-24T18:29:19.326554",
   "system_status": "✅ 蜂群协作完成",
   "phase_completed": "完整蜂群流程 (Swarm Mode)",
   "swarm_metadata": {
     "total_agents": 6,
-    "tickers_analyzed": 1,
+    "tickers_analyzed": 3,
     "resonances_detected": 0,
-    "pheromone_board_entries": 3
+    "pheromone_board_entries": 9
   },
-  "markdown_report": "# 【2026-02-24】Alpha Hive 蜂群协作日报\n\n**自动生成于**：2026-02-24 18:28:56\n**系统模式**：🐝 完全去中心化蜂群协作 | 6 个自治 Agent\n\n## 🐝 蜂群协作统计\n\n- **检测到的共振信号**：0/1\n- **高置信度机会**（共振✅）：0 个\n\n## 📊 今日摘要（Top 3）\n\n### 1. **NVDA** - BULLISH\n- **蜂群评分**：5.6/10\n- **信号共振**：❌ (1 Agent)\n- **Agent 投票**：看多 1 | 看空 0 | 中性 2\n\n## 🎯 完整机会清单\n\n| 排序 | 标的 | 方向 | 综合分 | 共振 | Agent 支持 | 置信度 |\n|------|------|------|--------|------|-----------|--------|\n| 1 | **NVDA** | BULLISH | 5.6 | ❌ | 3/6 | 中 |\n\n## 📝 蜂群信息源 & 免责声明\n\n**蜂群分工**：\n- 🔍 **ScoutBeeNova**：聪明钱侦察（拥挤度）\n- 🎲 **OracleBeeEcho**：市场预期（期权 IV/P/C/Gamma）\n- 💬 **BuzzBeeWhisper**：社交情绪（X/StockTwits）\n- ⏰ **ChronosBeeHorizon**：催化剂追踪（财报/事件）\n- 🤖 **RivalBeeVanguard**：ML 预测（行业对标）\n- 🛡️ **GuardBeeSentinel**：交叉验证（共振检测）\n\n**免责声明**：\n本报告为多 Agent 蜂群分析，不构成投资建议。AI 预测存在误差，所有交易决策需自行判断和风控。\n",
+  "markdown_report": "# 【2026-02-24】Alpha Hive 蜂群协作日报\n\n**自动生成于**：2026-02-24 18:29:19\n**系统模式**：🐝 完全去中心化蜂群协作 | 6 个自治 Agent\n\n## 🐝 蜂群协作统计\n\n- **检测到的共振信号**：0/3\n- **高置信度机会**（共振✅）：0 个\n\n## 📊 今日摘要（Top 3）\n\n### 1. **NVDA** - BULLISH\n- **蜂群评分**：5.6/10\n- **信号共振**：❌ (1 Agent)\n- **Agent 投票**：看多 1 | 看空 0 | 中性 2\n\n### 2. **TSLA** - BULLISH\n- **蜂群评分**：5.6/10\n- **信号共振**：❌ (1 Agent)\n- **Agent 投票**：看多 1 | 看空 0 | 中性 2\n\n### 3. **VKTX** - BULLISH\n- **蜂群评分**：5.3/10\n- **信号共振**：❌ (2 Agent)\n- **Agent 投票**：看多 2 | 看空 0 | 中性 1\n\n## 🎯 完整机会清单\n\n| 排序 | 标的 | 方向 | 综合分 | 共振 | Agent 支持 | 置信度 |\n|------|------|------|--------|------|-----------|--------|\n| 1 | **NVDA** | BULLISH | 5.6 | ❌ | 3/6 | 中 |\n| 2 | **TSLA** | BULLISH | 5.6 | ❌ | 3/6 | 中 |\n| 3 | **VKTX** | BULLISH | 5.3 | ❌ | 3/6 | 中 |\n\n## 📝 蜂群信息源 & 免责声明\n\n**蜂群分工**：\n- 🔍 **ScoutBeeNova**：聪明钱侦察（拥挤度）\n- 🎲 **OracleBeeEcho**：市场预期（期权 IV/P/C/Gamma）\n- 💬 **BuzzBeeWhisper**：社交情绪（X/StockTwits）\n- ⏰ **ChronosBeeHorizon**：催化剂追踪（财报/事件）\n- 🤖 **RivalBeeVanguard**：ML 预测（行业对标）\n- 🛡️ **GuardBeeSentinel**：交叉验证（共振检测）\n\n**免责声明**：\n本报告为多 Agent 蜂群分析，不构成投资建议。AI 预测存在误差，所有交易决策需自行判断和风控。\n",
   "twitter_threads": [
-    "【Alpha Hive 蜂群日报 2026-02-24】6 个自治 Agent 协作分析，多数投票共振信号。不构成投资建议，仅数据分析与情景推演。👇\n\n1. **NVDA** BULLISH\n蜂群评分：5.6/10 | 共振：❌\nAgent 投票：看多1 vs 看空0\n\n🐝 6 个 Agent 独立分析 → 信息素板实时交换 → 多数投票汇总\n高共振信号优先级最高。风险提示：控制仓位。\n下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
+    "【Alpha Hive 蜂群日报 2026-02-24】6 个自治 Agent 协作分析，多数投票共振信号。不构成投资建议，仅数据分析与情景推演。👇\n\n1. **NVDA** BULLISH\n蜂群评分：5.6/10 | 共振：❌\nAgent 投票：看多1 vs 看空0\n\n2. **TSLA** BULLISH\n蜂群评分：5.6/10 | 共振：❌\nAgent 投票：看多1 vs 看空0\n\n3. **VKTX** BULLISH\n蜂群评分：5.3/10 | 共振：❌\nAgent 投票：看多2 vs 看空0\n\n🐝 6 个 Agent 独立分析 → 信息素板实时交换 → 多数投票汇总\n高共振信号优先级最高。风险提示：控制仓位。\n下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
   ],
   "opportunities": [
     {
@@ -19,6 +19,26 @@
       "ticker": "NVDA",
       "direction": "看多",
       "opp_score": 5.6,
+      "confidence": "60%",
+      "resonance": false,
+      "supporting_agents": 3,
+      "thesis_break": "信号分散"
+    },
+    {
+      "rank": 2,
+      "ticker": "TSLA",
+      "direction": "看多",
+      "opp_score": 5.6,
+      "confidence": "60%",
+      "resonance": false,
+      "supporting_agents": 3,
+      "thesis_break": "信号分散"
+    },
+    {
+      "rank": 3,
+      "ticker": "VKTX",
+      "direction": "看多",
+      "opp_score": 5.3,
       "confidence": "60%",
       "resonance": false,
       "supporting_agents": 3,

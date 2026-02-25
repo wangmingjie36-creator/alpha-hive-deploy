@@ -1,402 +1,352 @@
 #!/usr/bin/env python3
 """
-📊 Alpha Hive 性能监控系统 (Week 2)
-记录每次运行的性能指标到 SQLite 时序数据库
+Alpha Hive - 指标收集器 (Week 4 可观测性)
+
+收集、持久化和查询蜂群扫描性能/质量指标。
+支持 SLO 检查和异常自动告警。
+
+用法：
+    from metrics_collector import MetricsCollector
+    mc = MetricsCollector()
+    mc.record_scan(ticker_count=5, duration=3.2, agent_count=6, ...)
+    mc.check_slo()  # 返回违规列表
+    summary = mc.get_summary(days=7)
 """
 
 import json
-import sqlite3
-import argparse
 import os
-import sys
+import sqlite3
+import time
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
-import traceback
 
-# 导入配置
-sys.path.insert(0, str(Path(__file__).parent))
-try:
-    from config import METRICS_CONFIG
-except ImportError:
-    METRICS_CONFIG = {
-        "enabled": True,
-        "db_path": "/Users/igg/.claude/reports/metrics.db",
-        "retention_days": 90,
-    }
+from hive_logger import PATHS, get_logger
+
+_log = get_logger("metrics")
+
+
+# ==================== SLO 定义 ====================
+
+DEFAULT_SLO = {
+    "scan_latency_p95_seconds": 30.0,    # 95% 扫描耗时 < 30s
+    "agent_error_rate_max": 0.05,        # Agent 错误率 < 5%
+    "data_real_pct_min": 50.0,           # 真实数据占比 > 50%
+    "min_supporting_agents": 3,          # 最少支持 Agent 数
+    "max_consecutive_failures": 3,       # 最大连续失败数
+}
 
 
 class MetricsCollector:
-    """性能指标收集器"""
+    """指标收集、持久化和 SLO 检查"""
 
-    def __init__(self, db_path: str = None):
-        """
-        初始化指标收集器
-
-        Args:
-            db_path: SQLite 数据库路径
-        """
-        self.db_path = db_path or METRICS_CONFIG["db_path"]
-        self.retention_days = METRICS_CONFIG.get("retention_days", 90)
+    def __init__(self, db_path: str = None, slo: Dict = None):
+        self._db_path = db_path or str(PATHS.home / "metrics.db")
+        self._slo = slo or dict(DEFAULT_SLO)
+        self._lock = threading.Lock()
         self._init_db()
 
     def _init_db(self):
-        """初始化数据库和表"""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-
-            # 创建 run_metrics 表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS run_metrics (
+        """创建指标表"""
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS scan_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id TEXT UNIQUE,
-                    date TEXT,
-                    timestamp TEXT,
-                    tickers TEXT,
-                    status TEXT,
-                    total_duration_seconds REAL,
-                    step1_duration REAL,
-                    step2_duration REAL,
-                    step3_duration REAL,
-                    step4_duration REAL,
-                    step5_duration REAL,
-                    step6_duration REAL,
-                    step7_duration REAL,
-                    step1_status TEXT,
-                    step2_status TEXT,
-                    step3_status TEXT,
-                    step4_status TEXT,
-                    step5_status TEXT,
-                    step6_status TEXT,
-                    step7_status TEXT,
-                    report_quality_score REAL,
-                    agent_count INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    timestamp TEXT NOT NULL,
+                    session_id TEXT,
+                    scan_mode TEXT DEFAULT 'swarm',
+                    ticker_count INTEGER DEFAULT 0,
+                    agent_count INTEGER DEFAULT 0,
+                    duration_seconds REAL DEFAULT 0.0,
+                    prefetch_seconds REAL DEFAULT 0.0,
+                    avg_score REAL DEFAULT 5.0,
+                    max_score REAL DEFAULT 5.0,
+                    min_score REAL DEFAULT 5.0,
+                    agent_errors INTEGER DEFAULT 0,
+                    agent_total INTEGER DEFAULT 0,
+                    data_real_pct REAL DEFAULT 0.0,
+                    resonance_count INTEGER DEFAULT 0,
+                    llm_calls INTEGER DEFAULT 0,
+                    llm_cost_usd REAL DEFAULT 0.0,
+                    memory_mb REAL DEFAULT 0.0
                 )
             """)
-
-            # 创建索引以加快查询
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_date ON run_metrics(date)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_timestamp ON run_metrics(timestamp)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_status ON run_metrics(status)")
-
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ticker_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    session_id TEXT,
+                    ticker TEXT NOT NULL,
+                    final_score REAL DEFAULT 5.0,
+                    direction TEXT DEFAULT 'neutral',
+                    supporting_agents INTEGER DEFAULT 0,
+                    data_real_pct REAL DEFAULT 0.0,
+                    resonance_detected INTEGER DEFAULT 0,
+                    analysis_seconds REAL DEFAULT 0.0
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS slo_violations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    slo_name TEXT NOT NULL,
+                    threshold REAL,
+                    actual REAL,
+                    details TEXT
+                )
+            """)
             conn.commit()
-            conn.close()
-            print(f"✅ 数据库已初始化：{self.db_path}")
-        except Exception as e:
-            print(f"⚠️ 数据库初始化失败：{str(e)}")
-            traceback.print_exc()
 
-    def record(self, status_json_path: str, agent_count: int = 10, report_quality_score: float = 7.0) -> bool:
+    def _connect(self) -> sqlite3.Connection:
+        os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
+        conn = sqlite3.connect(self._db_path, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    # ==================== 记录指标 ====================
+
+    def record_scan(
+        self,
+        ticker_count: int,
+        duration_seconds: float,
+        agent_count: int = 6,
+        prefetch_seconds: float = 0.0,
+        avg_score: float = 5.0,
+        max_score: float = 5.0,
+        min_score: float = 5.0,
+        agent_errors: int = 0,
+        agent_total: int = 0,
+        data_real_pct: float = 0.0,
+        resonance_count: int = 0,
+        llm_calls: int = 0,
+        llm_cost_usd: float = 0.0,
+        session_id: str = "",
+        scan_mode: str = "swarm",
+    ):
+        """记录一次完整扫描的指标"""
+        now = datetime.now().isoformat()
+        memory_mb = self._get_memory_mb()
+
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("""
+                    INSERT INTO scan_metrics (
+                        timestamp, session_id, scan_mode,
+                        ticker_count, agent_count, duration_seconds, prefetch_seconds,
+                        avg_score, max_score, min_score,
+                        agent_errors, agent_total, data_real_pct,
+                        resonance_count, llm_calls, llm_cost_usd, memory_mb
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    now, session_id, scan_mode,
+                    ticker_count, agent_count, duration_seconds, prefetch_seconds,
+                    avg_score, max_score, min_score,
+                    agent_errors, agent_total, data_real_pct,
+                    resonance_count, llm_calls, llm_cost_usd, memory_mb,
+                ))
+                conn.commit()
+
+        _log.info(
+            "metrics: scan %s | %d tickers %.1fs | err=%d/%d | real=%.0f%%",
+            scan_mode, ticker_count, duration_seconds,
+            agent_errors, agent_total, data_real_pct,
+        )
+
+    def record_ticker(
+        self,
+        ticker: str,
+        final_score: float,
+        direction: str = "neutral",
+        supporting_agents: int = 0,
+        data_real_pct: float = 0.0,
+        resonance_detected: bool = False,
+        analysis_seconds: float = 0.0,
+        session_id: str = "",
+    ):
+        """记录单个 ticker 的分析指标"""
+        now = datetime.now().isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("""
+                    INSERT INTO ticker_metrics (
+                        timestamp, session_id, ticker,
+                        final_score, direction, supporting_agents,
+                        data_real_pct, resonance_detected, analysis_seconds
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    now, session_id, ticker,
+                    final_score, direction, supporting_agents,
+                    data_real_pct, int(resonance_detected), analysis_seconds,
+                ))
+                conn.commit()
+
+    # ==================== SLO 检查 ====================
+
+    def check_slo(self, days: int = 1) -> List[Dict]:
         """
-        记录一次运行的性能指标
-
-        Args:
-            status_json_path: status.json 文件路径
-            agent_count: 本次运行的 Agent 数量
-            report_quality_score: 报告质量评分（0-10）
+        检查最近 N 天的 SLO 违规
 
         Returns:
-            是否成功记录
+            违规列表 [{slo_name, threshold, actual, details}]
         """
-        try:
-            # 读取 status.json
-            if not os.path.exists(status_json_path):
-                print(f"⚠️ 状态文件不存在：{status_json_path}")
-                return False
+        violations = []
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
 
-            with open(status_json_path, "r") as f:
-                status_data = json.load(f)
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM scan_metrics WHERE timestamp > ? ORDER BY timestamp DESC",
+                (cutoff,)
+            ).fetchall()
 
-            # 解析数据
-            last_run_date = status_data.get("last_run_date", datetime.now().strftime("%Y-%m-%d"))
-            last_run = status_data.get("last_run", datetime.now().isoformat())
-            overall_status = status_data.get("status", "unknown")
-            total_duration = status_data.get("total_duration_seconds", 0)
-            steps_result = status_data.get("steps_result", {})
-            tickers = status_data.get("tickers", [])
+        if not rows:
+            return violations
 
-            # 生成 run_id
-            run_id = f"{last_run_date}_{int(datetime.fromisoformat(last_run.replace('Z', '+00:00')).timestamp())}"
-
-            # 提取各步骤的耗时和状态
-            step_durations = {}
-            step_statuses = {}
-            for i in range(1, 8):
-                step_key = f"step{i}_"
-                step_data = {}
-                for k, v in steps_result.items():
-                    if k.startswith(step_key):
-                        step_data = v
-                        break
-
-                step_durations[f"step{i}_duration"] = step_data.get("duration_seconds", 0.0)
-                step_statuses[f"step{i}_status"] = step_data.get("status", "unknown")
-
-            # 插入到数据库
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                INSERT OR REPLACE INTO run_metrics (
-                    run_id, date, timestamp, tickers, status, total_duration_seconds,
-                    step1_duration, step2_duration, step3_duration, step4_duration,
-                    step5_duration, step6_duration, step7_duration,
-                    step1_status, step2_status, step3_status, step4_status,
-                    step5_status, step6_status, step7_status,
-                    report_quality_score, agent_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                run_id,
-                last_run_date,
-                last_run,
-                json.dumps(tickers),
-                overall_status,
-                total_duration,
-                step_durations.get("step1_duration", 0),
-                step_durations.get("step2_duration", 0),
-                step_durations.get("step3_duration", 0),
-                step_durations.get("step4_duration", 0),
-                step_durations.get("step5_duration", 0),
-                step_durations.get("step6_duration", 0),
-                step_durations.get("step7_duration", 0),
-                step_statuses.get("step1_status", "unknown"),
-                step_statuses.get("step2_status", "unknown"),
-                step_statuses.get("step3_status", "unknown"),
-                step_statuses.get("step4_status", "unknown"),
-                step_statuses.get("step5_status", "unknown"),
-                step_statuses.get("step6_status", "unknown"),
-                step_statuses.get("step7_status", "unknown"),
-                report_quality_score,
-                agent_count,
-            ))
-
-            conn.commit()
-            conn.close()
-
-            print(f"✅ 性能指标已记录：{run_id}")
-            print(f"   耗时：{total_duration}s | 状态：{overall_status} | Agents：{agent_count} | 报告分：{report_quality_score}")
-            return True
-
-        except Exception as e:
-            print(f"❌ 记录失败：{str(e)}")
-            traceback.print_exc()
-            return False
-
-    def get_trend(self, days: int = 7) -> List[Dict]:
-        """
-        获取近 N 天的趋势数据
-
-        Args:
-            days: 回溯天数
-
-        Returns:
-            趋势数据列表
-        """
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-
-            start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-
-            cursor.execute("""
-                SELECT date, AVG(total_duration_seconds) as avg_duration,
-                       AVG(report_quality_score) as avg_quality,
-                       COUNT(*) as run_count,
-                       SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count
-                FROM run_metrics
-                WHERE date >= ?
-                GROUP BY date
-                ORDER BY date DESC
-            """, (start_date,))
-
-            rows = cursor.fetchall()
-            conn.close()
-
-            trend = []
-            for row in rows:
-                trend.append({
-                    "date": row[0],
-                    "avg_duration_seconds": round(row[1], 2),
-                    "avg_quality_score": round(row[2], 1),
-                    "total_runs": row[3],
-                    "successful_runs": row[4],
-                    "success_rate": f"{(row[4] / row[3] * 100):.1f}%"
+        # 1. P95 延迟检查
+        durations = sorted(r["duration_seconds"] for r in rows)
+        if durations:
+            p95_idx = int(len(durations) * 0.95)
+            p95 = durations[min(p95_idx, len(durations) - 1)]
+            threshold = self._slo["scan_latency_p95_seconds"]
+            if p95 > threshold:
+                violations.append({
+                    "slo_name": "scan_latency_p95",
+                    "threshold": threshold,
+                    "actual": round(p95, 2),
+                    "details": f"P95 延迟 {p95:.1f}s > {threshold:.0f}s",
                 })
 
-            return trend
+        # 2. Agent 错误率
+        total_errors = sum(r["agent_errors"] for r in rows)
+        total_agents = sum(r["agent_total"] for r in rows)
+        if total_agents > 0:
+            error_rate = total_errors / total_agents
+            threshold = self._slo["agent_error_rate_max"]
+            if error_rate > threshold:
+                violations.append({
+                    "slo_name": "agent_error_rate",
+                    "threshold": threshold,
+                    "actual": round(error_rate, 4),
+                    "details": f"错误率 {error_rate:.1%} > {threshold:.0%} ({total_errors}/{total_agents})",
+                })
 
-        except Exception as e:
-            print(f"⚠️ 趋势查询失败：{str(e)}")
-            return []
+        # 3. 数据真实率
+        avg_real_pct = sum(r["data_real_pct"] for r in rows) / len(rows)
+        threshold = self._slo["data_real_pct_min"]
+        if avg_real_pct < threshold:
+            violations.append({
+                "slo_name": "data_real_pct",
+                "threshold": threshold,
+                "actual": round(avg_real_pct, 1),
+                "details": f"真实数据 {avg_real_pct:.0f}% < {threshold:.0f}%",
+            })
+
+        # 持久化违规记录
+        if violations:
+            now = datetime.now().isoformat()
+            with self._lock:
+                with self._connect() as conn:
+                    for v in violations:
+                        conn.execute(
+                            "INSERT INTO slo_violations (timestamp, slo_name, threshold, actual, details) VALUES (?,?,?,?,?)",
+                            (now, v["slo_name"], v["threshold"], v["actual"], v["details"]),
+                        )
+                    conn.commit()
+
+        return violations
+
+    # ==================== 查询/汇总 ====================
 
     def get_summary(self, days: int = 7) -> Dict:
-        """
-        获取 N 天内的汇总统计
+        """获取最近 N 天的指标汇总"""
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
 
-        Args:
-            days: 回溯天数
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
 
-        Returns:
-            汇总统计数据
-        """
+            scans = conn.execute(
+                "SELECT * FROM scan_metrics WHERE timestamp > ? ORDER BY timestamp DESC",
+                (cutoff,)
+            ).fetchall()
+
+            tickers = conn.execute(
+                "SELECT * FROM ticker_metrics WHERE timestamp > ? ORDER BY timestamp DESC",
+                (cutoff,)
+            ).fetchall()
+
+            violations = conn.execute(
+                "SELECT * FROM slo_violations WHERE timestamp > ? ORDER BY timestamp DESC",
+                (cutoff,)
+            ).fetchall()
+
+        if not scans:
+            return {
+                "period_days": days,
+                "total_scans": 0,
+                "total_tickers": 0,
+                "avg_duration": 0.0,
+                "p95_duration": 0.0,
+                "avg_score": 5.0,
+                "error_rate": 0.0,
+                "slo_violations": 0,
+            }
+
+        durations = [r["duration_seconds"] for r in scans]
+        scores = [r["avg_score"] for r in scans]
+        total_errors = sum(r["agent_errors"] for r in scans)
+        total_agents = sum(r["agent_total"] for r in scans)
+
+        p95_idx = int(len(durations) * 0.95)
+        p95 = sorted(durations)[min(p95_idx, len(durations) - 1)]
+
+        return {
+            "period_days": days,
+            "total_scans": len(scans),
+            "total_tickers": len(tickers),
+            "avg_duration": round(sum(durations) / len(durations), 2),
+            "p95_duration": round(p95, 2),
+            "max_duration": round(max(durations), 2),
+            "avg_score": round(sum(scores) / len(scores), 2),
+            "max_score": round(max(r["max_score"] for r in scans), 2),
+            "error_rate": round(total_errors / total_agents, 4) if total_agents > 0 else 0.0,
+            "total_llm_calls": sum(r["llm_calls"] for r in scans),
+            "total_llm_cost": round(sum(r["llm_cost_usd"] for r in scans), 4),
+            "resonance_count": sum(r["resonance_count"] for r in scans),
+            "avg_memory_mb": round(sum(r["memory_mb"] for r in scans) / len(scans), 1),
+            "slo_violations": len(violations),
+            "violation_details": [dict(v) for v in violations[:10]],
+        }
+
+    def get_ticker_history(self, ticker: str, days: int = 30) -> List[Dict]:
+        """获取单个 ticker 的历史指标"""
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM ticker_metrics WHERE ticker = ? AND timestamp > ? ORDER BY timestamp DESC",
+                (ticker, cutoff),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def cleanup(self, retention_days: int = 90):
+        """清理过期数据"""
+        cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat()
+        with self._lock:
+            with self._connect() as conn:
+                for table in ("scan_metrics", "ticker_metrics", "slo_violations"):
+                    conn.execute(f"DELETE FROM {table} WHERE timestamp < ?", (cutoff,))
+                conn.commit()
+        _log.info("metrics cleanup: removed entries older than %d days", retention_days)
+
+    # ==================== 内部工具 ====================
+
+    @staticmethod
+    def _get_memory_mb() -> float:
+        """获取当前进程内存使用（MB）"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-
-            start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-
-            cursor.execute("""
-                SELECT
-                    COUNT(*) as total_runs,
-                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successful_runs,
-                    AVG(total_duration_seconds) as avg_duration,
-                    MAX(total_duration_seconds) as max_duration,
-                    MIN(total_duration_seconds) as min_duration,
-                    AVG(report_quality_score) as avg_quality,
-                    AVG(agent_count) as avg_agent_count
-                FROM run_metrics
-                WHERE date >= ?
-            """, (start_date,))
-
-            row = cursor.fetchone()
-            conn.close()
-
-            if row and row[0] > 0:
-                return {
-                    "period_days": days,
-                    "total_runs": row[0],
-                    "successful_runs": row[1],
-                    "success_rate": f"{(row[1] / row[0] * 100):.1f}%",
-                    "avg_duration_seconds": round(row[2], 2),
-                    "max_duration_seconds": round(row[3], 2) if row[3] else 0,
-                    "min_duration_seconds": round(row[4], 2) if row[4] else 0,
-                    "avg_quality_score": round(row[5], 1),
-                    "avg_agent_count": round(row[6], 0)
-                }
-            else:
-                return {
-                    "period_days": days,
-                    "total_runs": 0,
-                    "message": "No data available"
-                }
-
-        except Exception as e:
-            print(f"⚠️ 汇总查询失败：{str(e)}")
-            return {"error": str(e)}
-
-    def cleanup(self, retention_days: int = None) -> int:
-        """
-        清理旧数据，仅保留指定天数内的记录
-
-        Args:
-            retention_days: 保留天数（默认使用配置值）
-
-        Returns:
-            删除的记录数
-        """
-        retention_days = retention_days or self.retention_days
-
-        try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-
-            cutoff_date = (datetime.now() - timedelta(days=retention_days)).strftime("%Y-%m-%d")
-
-            cursor.execute("DELETE FROM run_metrics WHERE date < ?", (cutoff_date,))
-            deleted_count = cursor.rowcount
-
-            conn.commit()
-            conn.close()
-
-            if deleted_count > 0:
-                print(f"✅ 清理完成：删除了 {deleted_count} 条旧记录（>{retention_days}天）")
-            else:
-                print(f"✅ 无需清理（所有记录都在 {retention_days} 天内）")
-
-            return deleted_count
-
-        except Exception as e:
-            print(f"⚠️ 清理失败：{str(e)}")
-            return 0
-
-    def print_summary(self, days: int = 7):
-        """打印汇总信息"""
-        summary = self.get_summary(days)
-        print("\n" + "=" * 70)
-        print(f"📊 性能指标统计（最近 {days} 天）")
-        print("=" * 70)
-        for key, value in summary.items():
-            print(f"  {key}: {value}")
-        print("=" * 70 + "\n")
-
-
-def main():
-    """主入口"""
-    parser = argparse.ArgumentParser(
-        description="Alpha Hive 性能监控系统",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例用法：
-  # 记录本次运行的性能指标
-  python3 metrics_collector.py --record --status-json /path/to/status.json
-
-  # 查看近 7 天的趋势
-  python3 metrics_collector.py --trend --days 7
-
-  # 查看近 30 天的汇总统计
-  python3 metrics_collector.py --summary --days 30
-
-  # 清理超过 90 天的数据
-  python3 metrics_collector.py --cleanup --retention-days 90
-        """
-    )
-
-    parser.add_argument('--record', action='store_true', help='记录一次运行的性能指标')
-    parser.add_argument('--status-json', type=str, help='status.json 文件路径')
-    parser.add_argument('--agent-count', type=int, default=10, help='本次 Agent 数量')
-    parser.add_argument('--quality-score', type=float, default=7.0, help='报告质量分（0-10）')
-
-    parser.add_argument('--trend', action='store_true', help='显示性能趋势')
-    parser.add_argument('--summary', action='store_true', help='显示汇总统计')
-    parser.add_argument('--cleanup', action='store_true', help='清理旧数据')
-    parser.add_argument('--days', type=int, default=7, help='回溯天数或保留天数')
-    parser.add_argument('--retention-days', type=int, default=90, help='数据保留天数')
-
-    args = parser.parse_args()
-
-    collector = MetricsCollector()
-
-    # 执行操作
-    if args.record:
-        if not args.status_json:
-            print("❌ --record 需要指定 --status-json")
-            sys.exit(1)
-        collector.record(args.status_json, args.agent_count, args.quality_score)
-
-    elif args.trend:
-        trend = collector.get_trend(args.days)
-        print("\n📈 性能趋势（最近 {} 天）".format(args.days))
-        print("=" * 70)
-        for item in trend:
-            print(f"  📅 {item['date']}: 平均耗时 {item['avg_duration_seconds']}s | "
-                  f"质量分 {item['avg_quality_score']}/10 | "
-                  f"成功率 {item['success_rate']} ({item['successful_runs']}/{item['total_runs']})")
-        print("=" * 70 + "\n")
-
-    elif args.summary:
-        collector.print_summary(args.days)
-
-    elif args.cleanup:
-        collector.cleanup(args.retention_days)
-
-    else:
-        # 默认显示汇总
-        collector.print_summary(7)
-
-
-if __name__ == "__main__":
-    main()
+            import resource
+            rusage = resource.getrusage(resource.RUSAGE_SELF)
+            return rusage.ru_maxrss / (1024 * 1024)  # macOS: bytes -> MB
+        except Exception:
+            return 0.0

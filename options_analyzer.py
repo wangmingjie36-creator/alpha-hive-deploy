@@ -9,6 +9,10 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import statistics
 
+from hive_logger import PATHS, get_logger
+
+_log = get_logger("options")
+
 try:
     import yfinance as yf
 except ImportError:
@@ -18,7 +22,7 @@ except ImportError:
 class OptionsDataFetcher:
     """期权数据采集器 - 支持多源降级策略"""
 
-    def __init__(self, cache_dir: str = "/Users/igg/.claude/reports/cache"):
+    def __init__(self, cache_dir: str = str(PATHS.cache_dir)):
         self.cache_dir = cache_dir
         self.cache_ttl = 300  # 5 分钟缓存
         os.makedirs(cache_dir, exist_ok=True)
@@ -56,22 +60,31 @@ class OptionsDataFetcher:
                 "timestamp": datetime.now().isoformat(),
                 "data": data,
             }
+
+            def _json_default(obj):
+                """处理 pandas Timestamp 等不可序列化类型"""
+                if hasattr(obj, "isoformat"):
+                    return obj.isoformat()
+                if hasattr(obj, "item"):  # numpy scalar
+                    return obj.item()
+                return str(obj)
+
             with open(cache_path, "w") as f:
-                json.dump(cache_data, f)
+                json.dump(cache_data, f, default=_json_default)
         except Exception as e:
-            print(f"⚠️  缓存写入失败：{e}")
+            _log.warning("缓存写入失败：%s", e)
 
     def fetch_options_chain(self, ticker: str) -> Dict:
         """获取期权链数据 - 支持多源降级（yfinance > 样本数据）"""
         # 尝试读取缓存
         cached = self._read_cache(ticker, "chain")
         if cached:
-            print(f"✓ {ticker} 期权链数据来自缓存")
+            pass  # {ticker} 期权链数据来自缓存")
             return cached
 
         # 主来源：yfinance
         if yf is None:
-            print(f"⚠️  yfinance 未安装，使用样本数据")
+            _log.warning("yfinance 未安装，使用样本数据")
             return self._get_sample_options_chain(ticker)
 
         try:
@@ -79,7 +92,7 @@ class OptionsDataFetcher:
 
             # 获取最近的到期日
             if not hasattr(stock, "options") or not stock.options:
-                print(f"⚠️  {ticker} 期权数据不可用，使用样本数据")
+                _log.warning("%s 期权数据不可用，使用样本数据", ticker)
                 return self._get_sample_options_chain(ticker)
 
             # 获取最近的两个到期日
@@ -94,9 +107,9 @@ class OptionsDataFetcher:
                     calls = chain.calls
                     puts = chain.puts
 
-                    # 只保留 OI > 100 的行权价
-                    calls = calls[calls["openInterest"] > 100]
-                    puts = puts[puts["openInterest"] > 100]
+                    # 过滤无效数据（保留 OI >= 0，不再要求 > 100）
+                    calls = calls[calls["openInterest"] >= 0]
+                    puts = puts[puts["openInterest"] >= 0]
 
                     calls["expiry"] = expiry
                     puts["expiry"] = expiry
@@ -104,11 +117,11 @@ class OptionsDataFetcher:
                     calls_list.append(calls)
                     puts_list.append(puts)
                 except Exception as e:
-                    print(f"⚠️  获取 {ticker} {expiry} 期权链失败：{e}")
+                    _log.warning("获取 %s %s 期权链失败：%s", ticker, expiry, e)
                     continue
 
             if not calls_list or not puts_list:
-                print(f"⚠️  {ticker} 期权数据不足，使用样本数据")
+                _log.warning("%s 期权数据不足，使用样本数据", ticker)
                 return self._get_sample_options_chain(ticker)
 
             # 合并所有到期日的数据
@@ -116,6 +129,12 @@ class OptionsDataFetcher:
 
             calls_df = pd.concat(calls_list, ignore_index=True) if calls_list else None
             puts_df = pd.concat(puts_list, ignore_index=True) if puts_list else None
+
+            # NaN → 0 以保证 JSON 序列化 + 下游计算不出错
+            if calls_df is not None:
+                calls_df = calls_df.fillna(0)
+            if puts_df is not None:
+                puts_df = puts_df.fillna(0)
 
             result = {
                 "ticker": ticker,
@@ -126,22 +145,22 @@ class OptionsDataFetcher:
             }
 
             self._write_cache(ticker, "chain", result)
-            print(f"✓ {ticker} 期权链数据来自 yfinance")
+            pass  # {ticker} 期权链数据来自 yfinance")
             return result
 
         except Exception as e:
-            print(f"⚠️  获取 {ticker} 期权数据失败：{e}，使用样本数据")
+            _log.warning("获取 %s 期权数据失败：%s，使用样本数据", ticker, e)
             return self._get_sample_options_chain(ticker)
 
     def fetch_historical_iv(self, ticker: str, days: int = 252) -> List[float]:
         """获取历史 IV 数据 - 用历史波动率代替"""
         cached = self._read_cache(ticker, "hist_iv")
         if cached:
-            print(f"✓ {ticker} 历史 IV 来自缓存")
+            pass  # {ticker} 历史 IV 来自缓存")
             return cached
 
         if yf is None:
-            print(f"⚠️  yfinance 未安装，使用样本 IV 数据")
+            _log.warning("yfinance 未安装，使用样本 IV 数据")
             return self._get_sample_historical_iv(ticker)
 
         try:
@@ -149,7 +168,7 @@ class OptionsDataFetcher:
             hist = stock.history(period="1y")
 
             if hist.empty:
-                print(f"⚠️  {ticker} 历史数据不可用，使用样本数据")
+                _log.warning("%s 历史数据不可用，使用样本数据", ticker)
                 return self._get_sample_historical_iv(ticker)
 
             # 计算历史波动率（近端期权的隐含波动率代理）
@@ -163,32 +182,32 @@ class OptionsDataFetcher:
             iv_list = iv_list[-days:]
 
             self._write_cache(ticker, "hist_iv", iv_list)
-            print(f"✓ {ticker} 历史 IV 来自 yfinance")
+            pass  # {ticker} 历史 IV 来自 yfinance")
             return iv_list
 
         except Exception as e:
-            print(f"⚠️  获取 {ticker} 历史 IV 失败：{e}，使用样本数据")
+            _log.warning("获取 %s 历史 IV 失败：%s，使用样本数据", ticker, e)
             return self._get_sample_historical_iv(ticker)
 
     def fetch_expirations(self, ticker: str) -> List[str]:
         """获取期权到期日列表"""
         if yf is None:
-            print(f"⚠️  yfinance 未安装，使用样本到期日")
+            _log.warning("yfinance 未安装，使用样本到期日")
             return self._get_sample_expirations(ticker)
 
         try:
             stock = yf.Ticker(ticker)
 
             if not hasattr(stock, "options") or not stock.options:
-                print(f"⚠️  {ticker} 期权到期日不可用")
+                _log.warning("%s 期权到期日不可用", ticker)
                 return self._get_sample_expirations(ticker)
 
             expirations = list(stock.options)[:5]  # 返回前 5 个到期日
-            print(f"✓ {ticker} 期权到期日来自 yfinance")
+            pass  # {ticker} 期权到期日来自 yfinance")
             return expirations
 
         except Exception as e:
-            print(f"⚠️  获取 {ticker} 期权到期日失败：{e}")
+            _log.warning("获取 %s 期权到期日失败：%s", ticker, e)
             return self._get_sample_expirations(ticker)
 
     # ==================== 样本数据降级策略 ====================
@@ -208,7 +227,7 @@ class OptionsDataFetcher:
                     "gamma": 0.0082,
                     "vega": 42.5,
                     "theta": -3.2,
-                    "iv": 28.5,
+                    "impliedVolatility": 0.285,
                     "expiry": "2026-03-21",
                 },
                 {
@@ -220,7 +239,7 @@ class OptionsDataFetcher:
                     "gamma": 0.0095,
                     "vega": 38.2,
                     "theta": -2.8,
-                    "iv": 27.8,
+                    "impliedVolatility": 0.278,
                     "expiry": "2026-03-21",
                 },
                 {
@@ -232,7 +251,7 @@ class OptionsDataFetcher:
                     "gamma": 0.0078,
                     "vega": 32.1,
                     "theta": -2.2,
-                    "iv": 27.2,
+                    "impliedVolatility": 0.272,
                     "expiry": "2026-03-21",
                 },
             ],
@@ -246,7 +265,7 @@ class OptionsDataFetcher:
                     "gamma": 0.0081,
                     "vega": 41.2,
                     "theta": -2.5,
-                    "iv": 28.2,
+                    "impliedVolatility": 0.282,
                     "expiry": "2026-03-21",
                 },
                 {
@@ -258,7 +277,7 @@ class OptionsDataFetcher:
                     "gamma": 0.0092,
                     "vega": 36.8,
                     "theta": -2.0,
-                    "iv": 27.5,
+                    "impliedVolatility": 0.275,
                     "expiry": "2026-03-21",
                 },
                 {
@@ -270,7 +289,7 @@ class OptionsDataFetcher:
                     "gamma": 0.0065,
                     "vega": 38.5,
                     "theta": -3.1,
-                    "iv": 29.1,
+                    "impliedVolatility": 0.291,
                     "expiry": "2026-03-21",
                 },
             ],
@@ -352,7 +371,7 @@ class OptionsAnalyzer:
         self, calls_df: List[Dict], puts_df: List[Dict]
     ) -> float:
         """
-        计算 Put/Call Ratio (开仓量权重)
+        计算 Put/Call Ratio (开仓量权重，OI 优先，OI 全零时用 volume)
         P/C < 0.7 → 强多头信号
         0.7-1.5 → 中立
         > 1.5 → 强空头信号
@@ -360,11 +379,25 @@ class OptionsAnalyzer:
         if not calls_df or not puts_df:
             return 1.0  # 默认中立
 
-        total_call_oi = sum(c.get("openInterest", 0) for c in calls_df)
-        total_put_oi = sum(p.get("openInterest", 0) for p in puts_df)
+        import math
+
+        def _safe_sum(data, key):
+            return sum(
+                v for v in (d.get(key, 0) for d in data)
+                if v and not (isinstance(v, float) and math.isnan(v))
+            )
+
+        # 优先使用 openInterest
+        total_call_oi = _safe_sum(calls_df, "openInterest")
+        total_put_oi = _safe_sum(puts_df, "openInterest")
+
+        # OI 全零时降级为 volume
+        if total_call_oi == 0 and total_put_oi == 0:
+            total_call_oi = _safe_sum(calls_df, "volume")
+            total_put_oi = _safe_sum(puts_df, "volume")
 
         if total_call_oi == 0:
-            return 0.0
+            return 1.0  # 无数据时返回中立而非 0
 
         ratio = total_put_oi / total_call_oi
         return round(ratio, 2)
@@ -477,7 +510,7 @@ class OptionsAnalyzer:
                     {
                         "strike": call.get("strike"),
                         "oi": call.get("openInterest"),
-                        "iv": call.get("iv"),
+                        "iv": call.get("impliedVolatility"),
                     }
                 )
 
@@ -491,7 +524,7 @@ class OptionsAnalyzer:
                     {
                         "strike": put.get("strike"),
                         "oi": put.get("openInterest"),
-                        "iv": put.get("iv"),
+                        "iv": put.get("impliedVolatility"),
                     }
                 )
 
@@ -574,7 +607,7 @@ class OptionsAgent:
         执行完整期权分析
         返回标准化分析结果字典
         """
-        print(f"\n🎯 {ticker} 期权分析开始...")
+        # 期权分析
 
         # 1. 获取期权链数据
         options_chain = self.fetcher.fetch_options_chain(ticker)
@@ -585,10 +618,19 @@ class OptionsAgent:
         hist_iv = self.fetcher.fetch_historical_iv(ticker)
 
         # 计算当前 IV（从期权链中获取）
-        current_ivs = [
-            c.get("iv", 25) for c in calls_df if c.get("iv")
+        # yfinance 返回小数格式 (0.285 = 28.5%)，需要转换为百分比格式以匹配历史 IV
+        # 过滤掉深度 ITM/OTM 的 IV ≈ 0 噪音（< 0.005 = 0.5%）
+        raw_ivs = [
+            c.get("impliedVolatility") for c in calls_df
+            if c.get("impliedVolatility") and c.get("impliedVolatility") > 0.005
         ]
-        current_iv = statistics.mean(current_ivs) if current_ivs else 25.0
+        if raw_ivs:
+            current_iv = statistics.mean(raw_ivs)
+            # 自动检测并统一为百分比格式（>1 已是百分比，<1 是小数需×100）
+            if current_iv < 1.0:
+                current_iv *= 100
+        else:
+            current_iv = 25.0
 
         # 3. 计算各项指标
         iv_rank, iv_current = self.analyzer.calculate_iv_rank(current_iv, hist_iv)
@@ -641,10 +683,7 @@ class OptionsAgent:
             "expiration_dates": options_chain.get("expirations", [])[:3],
         }
 
-        print(f"✅ {ticker} 期权分析完成")
-        print(f"   • IV Rank: {iv_rank}")
-        print(f"   • P/C Ratio: {put_call_ratio}")
-        print(f"   • Options Score: {options_score}/10")
+        # 分析完成
 
         return result
 
@@ -656,7 +695,7 @@ if __name__ == "__main__":
     # 测试单个标的
     result = agent.analyze("NVDA", stock_price=145.0)
 
-    print("\n" + "=" * 60)
-    print("📊 期权分析结果")
-    print("=" * 60)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    _log.info("=" * 60)
+    _log.info("期权分析结果")
+    _log.info("=" * 60)
+    _log.info(json.dumps(result, indent=2, ensure_ascii=False))

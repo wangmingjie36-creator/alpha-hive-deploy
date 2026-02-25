@@ -5,6 +5,11 @@
 
 import os
 from datetime import datetime
+from pathlib import Path
+
+from hive_logger import PATHS, get_logger
+
+_log = get_logger("config")
 
 # ==================== API 配置 ====================
 API_KEYS = {
@@ -53,7 +58,7 @@ API_KEYS = {
 # ==================== 缓存配置 ====================
 CACHE_CONFIG = {
     "enabled": True,
-    "cache_dir": "/Users/igg/.claude/reports/cache",
+    "cache_dir": str(PATHS.cache_dir),
     "ttl": {  # 缓存过期时间（秒）
         "stocktwits": 3600,  # 1 小时
         "polymarket": 300,   # 5 分钟（频繁变化）
@@ -204,7 +209,7 @@ DATA_SOURCE_PRIORITY = {
 # ==================== 运行配置 ====================
 RUNTIME_CONFIG = {
     "debug": True,
-    "log_file": "/Users/igg/.claude/reports/logs/data_fetcher.log",
+    "log_file": str(PATHS.logs_dir / "data_fetcher.log"),
     "max_retries": 3,
     "timeout": 10,  # 请求超时（秒）
     "rate_limit_delay": 1,  # 请求间延迟（秒）
@@ -438,7 +443,7 @@ ALERT_CONFIG = {
     "email_config": {
         "sender_email": "iggissexy0511@gmail.com",
         "recipient_emails": ["iggissexy0511@gmail.com"],
-        "credentials_file": "/Users/igg/.alpha_hive_gmail_credentials.json"
+        "credentials_file": PATHS.google_credentials
     },
 
     # 告警阈值
@@ -457,13 +462,13 @@ ALERT_CONFIG = {
 
     # 告警输出
     "save_alerts_json": True,  # 保存告警到 JSON 文件
-    "alerts_log_dir": "/Users/igg/.claude/logs",
+    "alerts_log_dir": str(PATHS.logs_dir),
 }
 
 # ==================== 性能监控配置 (Phase 2) ====================
 METRICS_CONFIG = {
     "enabled": True,
-    "db_path": "/Users/igg/.claude/reports/metrics.db",
+    "db_path": str(PATHS.home / "metrics.db"),
     "retention_days": 90,  # 保留 90 天数据
     "collect_metrics": {
         "execution_time": True,
@@ -477,7 +482,7 @@ METRICS_CONFIG = {
 # ==================== 信息素板持久化配置 (Phase 2) ====================
 PHEROMONE_CONFIG = {
     "enabled": True,
-    "db_path": "/Users/igg/.claude/reports/pheromone.db",
+    "db_path": PATHS.db,
     "retention_days": 30,  # 保留 30 天信息素数据
     "decay_rate": 0.1,     # 每日衰减 10%
     "accuracy_tracking": {
@@ -507,11 +512,90 @@ SWARM_CONFIG = {
     }
 }
 
+# ==================== 持久化记忆配置 (Phase 2) ====================
+MEMORY_CONFIG = {
+    "enabled": True,
+    "db_path": PATHS.db,
+    "agent_memory": {
+        "retention_days": 90,  # 保留 90 天历史记忆
+        "max_similar_results": 5,  # 检索时返回最多 5 条相似记忆
+    },
+    "retriever": {
+        "cache_ttl_seconds": 300,  # 检索缓存 5 分钟
+        "min_similarity": 0.1,  # 相似度最低阈值
+        "top_k": 5,  # 默认返回 top 5
+    },
+    "weight_manager": {
+        "min_weight": 0.3,  # 权重下限
+        "max_weight": 3.0,  # 权重上限
+        "min_samples_for_dynamic": 10,  # 样本不足时保持平等权重
+        "accuracy_weight": 2.0,  # 准确率对权重的影响系数
+    },
+    "session_tracking": {
+        "enable_session_save": True,  # 自动保存会话聚合
+        "async_io": True,  # 后台异步写入 DB
+    }
+}
+
+# ==================== Google Calendar 配置 (Phase 3 P2) ====================
+CALENDAR_CONFIG = {
+    "enabled": True,
+    "credentials_file": PATHS.google_credentials,
+    "token_file": PATHS.calendar_token,
+    "calendar_id": "primary",
+    "sync_catalysts_on_startup": True,   # 每次日报运行时同步 CATALYSTS
+    "add_opportunity_reminders": True,   # 高分机会自动添加提醒
+    "opportunity_score_threshold": 7.5,  # 触发提醒的分数阈值
+    "reminder_advance_minutes": 30,      # 事件前多少分钟提醒
+    "upcoming_days_context": 7,          # 注入 Agent 的未来几天事件
+}
+
+# ==================== 向量记忆配置 (Phase 3 内存优化) ====================
+VECTOR_MEMORY_CONFIG = {
+    "enabled": True,
+    "db_path": PATHS.chroma_db,
+    "retention_days": 90,          # 长期记忆保留 90 天
+    "short_term_window": 20,       # 短期记忆：PheromoneBoard 最多 20 条
+    "max_context_chars": 200,      # Agent 注入上下文最大字符数
+    "max_cache_tickers": 50,       # LRU 缓存最多 50 个 ticker
+    "cleanup_on_startup": True,    # 启动时自动清理过期记忆
+}
+
+# ==================== 代码执行配置 (Phase 3 P1) ====================
+CODE_EXECUTION_CONFIG = {
+    "enabled": True,
+    "max_timeout": 30,           # 单次执行超时（秒）
+    "max_retries": 3,            # 自动调试最大重试次数
+    "sandbox_dir": str(PATHS.sandbox_dir),
+    "enable_network": False,     # 禁止网络访问
+    "enable_file_write": True,   # 允许写入沙箱目录
+    "add_to_swarm": True,        # 是否将 CodeExecutorAgent 加入蜂群
+}
+
+# ==================== CrewAI 多 Agent 配置 (Phase 3 P5) ====================
+CREWAI_CONFIG = {
+    "enabled": True,  # CrewAI 框架启用（需先 pip install crewai）
+    "process_type": "hierarchical",  # hierarchical 或 sequential
+    "manager_verbose": True,
+    "timeout_seconds": 300,  # 单个分析超时
+}
+
+# ==================== LLM 智能层配置 (Phase 1) ====================
+LLM_CONFIG = {
+    "enabled": True,                    # 总开关（False = 完全规则引擎模式）
+    "model": "claude-haiku-4-5-20251001",  # 默认模型（最低成本）
+    "max_tokens_distill": 512,          # QueenDistiller 蒸馏 max_tokens
+    "max_tokens_news": 256,             # 新闻情绪分析 max_tokens
+    "temperature": 0.3,                 # 推理温度
+    "score_blend_ratio": 0.6,           # 规则引擎 vs LLM 混合比：0.6 = 规则 60% + LLM 40%
+    "daily_budget_usd": 1.0,            # 每日 token 预算上限（美元）
+    "api_key_file": "~/.anthropic_api_key",  # API Key 文件路径
+    # 降级策略
+    "fallback_on_error": True,          # API 失败时降级到规则引擎
+    "fallback_on_budget": True,         # 超预算时降级到规则引擎
+}
+
 if __name__ == "__main__":
     init_cache()
-    print("✅ 配置已加载")
-    print(f"📊 监控标的数: {len(WATCHLIST)}")
-    print(f"📅 催化剂数: {sum(len(v) for v in CATALYSTS.values())}")
-    print(f"🔔 告警系统: {'启用' if ALERT_CONFIG.get('slack_enabled') or ALERT_CONFIG.get('email_enabled') else '未启用'}")
-    print(f"📊 指标收集: {'启用' if METRICS_CONFIG.get('enabled') else '禁用'}")
-    print(f"💾 信息素板: {'启用' if PHEROMONE_CONFIG.get('enabled') else '禁用'}")
+    _log.info("配置已加载 | 标的 %d | 催化剂 %d | HOME=%s",
+              len(WATCHLIST), sum(len(v) for v in CATALYSTS.values()), PATHS.home)

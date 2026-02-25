@@ -453,51 +453,42 @@ class CrowdingDetector:
         return filename
 
 
-# 创建具体标的的拥挤度数据
-def get_nvda_crowding_metrics() -> Dict:
-    """NVDA 拥挤度指标"""
-    return {
-        "stocktwits_messages_per_day": 45000,  # 极度拥挤
-        "google_trends_percentile": 84,  # 84 百分位
-        "bullish_agents": 6,  # 6/6 一致看多
-        "polymarket_odds_change_24h": 8.2,  # 赔率快速变化
-        "seeking_alpha_page_views": 85000,  # 高浏览量
-        "short_float_ratio": 0.02,  # 做空比例低
-        "price_momentum_5d": 6.8  # 温和上升
-    }
+def get_crowding_metrics(ticker: str, board=None) -> Dict:
+    """
+    获取指定标的的真实拥挤度指标
 
+    Args:
+        ticker: 股票代码
+        board: PheromoneBoard 实例（可选）
 
-def get_vktx_crowding_metrics() -> Dict:
-    """VKTX 拥挤度指标"""
-    return {
-        "stocktwits_messages_per_day": 3200,  # 低拥挤
-        "google_trends_percentile": 32,  # 低热度
-        "bullish_agents": 4,  # 4/6 看多（有分歧）
-        "polymarket_odds_change_24h": 2.1,  # 赔率缓慢变化
-        "seeking_alpha_page_views": 12000,  # 中等浏览
-        "short_float_ratio": 0.15,  # 适度做空
-        "price_momentum_5d": 3.2  # 温和上升
-    }
+    Returns:
+        真实拥挤度指标字典
+    """
+    from real_data_sources import get_real_crowding_metrics
+
+    # 获取 yfinance 基础数据
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        hist = t.history(period="1mo")
+        stock_data = {
+            "price": float(hist["Close"].iloc[-1]) if not hist.empty else 100.0,
+            "momentum_5d": (float(hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100) if len(hist) >= 5 else 0.0,
+            "avg_volume": int(hist["Volume"].mean()) if not hist.empty else 0,
+            "volume_ratio": float(hist["Volume"].iloc[-1] / hist["Volume"].mean()) if not hist.empty and hist["Volume"].mean() > 0 else 1.0,
+            "volatility_20d": float(hist["Close"].pct_change().std() * (252 ** 0.5) * 100) if len(hist) >= 20 else 0.0,
+        }
+    except Exception:
+        stock_data = {"price": 100.0, "momentum_5d": 0.0, "avg_volume": 0, "volume_ratio": 1.0, "volatility_20d": 0.0}
+
+    return get_real_crowding_metrics(ticker, stock_data, board)
 
 
 # 使用示例
 if __name__ == "__main__":
-    # NVDA 拥挤度分析
-    nvda_detector = CrowdingDetector("NVDA")
-    nvda_metrics = get_nvda_crowding_metrics()
-    nvda_score, _ = nvda_detector.calculate_crowding_score(nvda_metrics)
-    print(f"✅ NVDA 拥挤度: {nvda_score:.1f}/100")
-
-    # VKTX 拥挤度分析
-    vktx_detector = CrowdingDetector("VKTX")
-    vktx_metrics = get_vktx_crowding_metrics()
-    vktx_score, _ = vktx_detector.calculate_crowding_score(vktx_metrics)
-    print(f"✅ VKTX 拥挤度: {vktx_score:.1f}/100")
-
-    # 生成 HTML
-    html = nvda_detector.generate_html_section(nvda_metrics, 8.52)
-    print("✅ HTML 已生成")
-
-    # 保存到 JSON
-    nvda_detector.save_to_json(nvda_metrics, 8.52)
-    print("✅ 拥挤度分析已保存")
+    metrics = get_crowding_metrics("NVDA")
+    detector = CrowdingDetector("NVDA")
+    score, components = detector.calculate_crowding_score(metrics)
+    dq = metrics.get("data_quality", {})
+    print(f"NVDA 拥挤度: {score:.1f}/100")
+    print(f"数据质量: {dq}")

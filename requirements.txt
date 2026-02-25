@@ -1,0 +1,36 @@
+# Alpha Hive - 核心依赖
+yfinance>=0.2.40
+requests>=2.31.0
+schedule>=1.2.0
+pandas>=2.1.0
+pytz>=2024.1
+
+# 可视化
+matplotlib>=3.8.0
+plotly>=5.17.0
+seaborn>=0.13.0
+
+# 数值计算
+numpy>=1.24.0
+
+# HTML 解析（SEC EDGAR）
+beautifulsoup4>=4.12.0
+
+# ========== 可选依赖 ==========
+# LLM 服务（Claude API）
+# anthropic>=0.25.0
+
+# 多 Agent 框架（CrewAI）
+# crewai>=0.1.0
+
+# 向量数据库（长期记忆）
+# chromadb>=0.4.0
+
+# Google Calendar 集成
+# google-auth>=2.25.0
+# google-auth-oauthlib>=1.2.0
+# google-api-python-client>=2.100.0
+
+# ML 预测
+# scikit-learn>=1.3.0
+# joblib>=1.3.0

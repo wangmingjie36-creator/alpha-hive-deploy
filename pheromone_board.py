@@ -4,10 +4,13 @@
 实时信号发布、共振检测、动态衰减
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional
 from threading import RLock
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import atexit
+import json
 
 
 @dataclass
@@ -31,9 +34,15 @@ class PheromoneBoard:
     DECAY_RATE = 0.1
     MIN_STRENGTH = 0.2
 
-    def __init__(self):
+    def __init__(self, memory_store=None, session_id=None):
         self._lock = RLock()
         self._entries: List[PheromoneEntry] = []
+        self._memory_store = memory_store
+        self._session_id = session_id or "default_session"
+        # Phase 2: 使用线程池替代 daemon 线程，确保退出时等待写入完成
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pheromone_db")
+        self._pending_futures = []
+        atexit.register(self._shutdown)
 
     def publish(self, entry: PheromoneEntry) -> None:
         """
@@ -65,6 +74,26 @@ class PheromoneBoard:
             if len(self._entries) > self.MAX_ENTRIES:
                 self._entries.sort(key=lambda x: x.pheromone_strength)
                 self._entries = self._entries[-self.MAX_ENTRIES:]
+
+            # 异步持久化到 DB（使用线程池，退出时会等待完成）
+            if self._memory_store:
+                entry_dict = {
+                    'agent_id': entry.agent_id,
+                    'ticker': entry.ticker,
+                    'discovery': entry.discovery,
+                    'source': entry.source,
+                    'self_score': entry.self_score,
+                    'direction': entry.direction,
+                    'pheromone_strength': entry.pheromone_strength,
+                    'support_count': entry.support_count,
+                    'date': datetime.now().strftime("%Y-%m-%d")
+                }
+                future = self._executor.submit(
+                    self._memory_store.save_agent_memory, entry_dict, self._session_id
+                )
+                self._pending_futures.append(future)
+                # 清理已完成的 futures（防止内存泄漏）
+                self._pending_futures = [f for f in self._pending_futures if not f.done()]
 
     def get_top_signals(self, ticker: str = None, n: int = 5) -> List[PheromoneEntry]:
         """
@@ -129,10 +158,44 @@ class PheromoneBoard:
                 for e in self._entries
             ]
 
+    def compact_snapshot(self, ticker: str = None) -> List[Dict]:
+        """
+        紧凑快照：仅传递核心字段，避免 Agent 间 token 爆炸
+
+        相比 snapshot() 减少 ~60% 数据量：
+        - 去掉 discovery（大文本）、timestamp、source
+        - 仅保留评分和方向信号
+        """
+        with self._lock:
+            entries = self._entries
+            if ticker:
+                entries = [e for e in entries if e.ticker == ticker]
+            return [
+                {
+                    "a": e.agent_id[:8],  # 缩写 agent_id
+                    "t": e.ticker,
+                    "d": e.direction[0],  # "b"/"n"/"b" (首字母)
+                    "s": round(e.self_score, 1),
+                    "p": round(e.pheromone_strength, 2),
+                    "c": e.support_count,
+                }
+                for e in entries
+            ]
+
     def get_entry_count(self) -> int:
         """获取当前板上的条目数"""
         with self._lock:
             return len(self._entries)
+
+    def _shutdown(self) -> None:
+        """atexit 处理器：等待所有异步写入完成后关闭线程池"""
+        # 等待所有 pending futures 完成（最多 10 秒）
+        for f in self._pending_futures:
+            try:
+                f.result(timeout=10)
+            except Exception:
+                pass
+        self._executor.shutdown(wait=True)
 
     def clear(self) -> None:
         """清空信息素板"""

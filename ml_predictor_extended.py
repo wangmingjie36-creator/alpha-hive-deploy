@@ -571,8 +571,7 @@ class SimpleMLModel:
         if not training_data:
             return {"status": "error", "message": "no training data"}
 
-        print("🤖 开始训练 ML 模型（扩展版）...")
-        print(f"📊 训练样本数：{len(training_data)}")
+        # 训练 ML 模型（扩展版）
 
         # 提取特征
         crowding_scores = [d.crowding_score for d in training_data]
@@ -606,7 +605,7 @@ class SimpleMLModel:
             for key in correlations:
                 self.weights[key] = abs(correlations[key]) / total_corr
 
-        print(f"✅ 权重更新：{self.weights}")
+        # 权重已更新
 
         # 先标记模型为已训练
         self.is_trained = True
@@ -619,7 +618,7 @@ class SimpleMLModel:
         )
         self.training_accuracy = correct / len(win_7d) * 100
 
-        print(f"📈 训练准确率：{self.training_accuracy:.1f}%（{correct}/{len(win_7d)}）")
+        # 训练完成
 
         return {
             "status": "success",
@@ -739,7 +738,7 @@ class SimpleMLModel:
         }
         with open(filename, "wb") as f:
             pickle.dump(model_data, f)
-        print(f"✅ 模型已保存到 {filename}")
+        pass  # 模型已保存
 
     def load_model(self, filename: str = "ml_model_extended.pkl"):
         """加载模型"""
@@ -749,7 +748,7 @@ class SimpleMLModel:
         self.feature_stats = model_data.get("feature_stats", {})
         self.is_trained = model_data["is_trained"]
         self.training_accuracy = model_data.get("training_accuracy", 0.0)
-        print(f"✅ 模型已加载从 {filename}")
+        pass  # 模型已加载
 
 
 class MLPredictionService:
