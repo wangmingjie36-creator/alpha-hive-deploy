@@ -3,11 +3,14 @@
 优化 7：准确度回溯、权重自动优化
 """
 
+import logging as _logging
 import json
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 from statistics import mean, stdev
+
+_log = _logging.getLogger("alpha_hive.feedback_loop")
 
 
 class ReportSnapshot:
@@ -142,8 +145,8 @@ class BacktestAnalyzer:
                         os.path.join(self.directory, filename)
                     )
                     snapshots.append(snapshot)
-                except Exception as e:
-                    print(f"❌ 加载 {filename} 失败: {e}")
+                except (json.JSONDecodeError, OSError, KeyError, ValueError) as e:
+                    _log.error("加载 %s 失败: %s", filename, e, exc_info=True)
 
         return snapshots
 

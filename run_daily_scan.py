@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Alpha Hive 每日扫描入口（由 run_alpha_hive_daily.sh 调用）"""
 
+import logging as _logging
 import sys
 import os
 from datetime import datetime
+
+_log = _logging.getLogger("alpha_hive.run_daily_scan")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -48,7 +51,8 @@ try:
 
     print("\n蜂群扫描完成！")
 
-except Exception as e:
+except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
+    _log.error("扫描失败: %s", e, exc_info=True)
     print(f"\n扫描失败: {e}\n")
     import traceback
     traceback.print_exc()
@@ -62,7 +66,7 @@ except Exception as e:
                 alert_message=f"错误: {str(e)[:200]}\n请检查日志",
                 severity="CRITICAL"
             )
-    except Exception:
-        pass
+    except (ConnectionError, TimeoutError, OSError, ValueError) as exc:
+        _log.debug("Slack 失败通知发送失败: %s", exc)
 
     sys.exit(1)

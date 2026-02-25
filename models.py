@@ -5,10 +5,13 @@ Alpha Hive - 数据模型层
 不依赖 Pydantic（保持零外部依赖），使用 dataclass + __post_init__ 验证。
 """
 
+import logging as _logging
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import math
+
+_log = _logging.getLogger("alpha_hive.models")
 
 
 # ==================== 数据清洗工具 ====================
@@ -105,7 +108,8 @@ class AgentResult:
                 details=d.get("details", {}),
                 error=d.get("error"),
             )
-        except Exception:
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            _log.debug("AgentResult.from_dict 失败: %s", exc)
             return None
 
     def to_dict(self) -> Dict:

@@ -49,8 +49,8 @@ class ReportScheduler:
             else:
                 logger.error(f"❌ 数据采集失败: {result.stderr}")
                 self.data_collected = False
-        except Exception as e:
-            logger.error(f"❌ 数据采集异常: {e}")
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.error(f"❌ 数据采集异常: {e}", exc_info=True)
             self.data_collected = False
 
     def generate_reports(self):
@@ -73,8 +73,8 @@ class ReportScheduler:
             else:
                 logger.error(f"❌ 报告生成失败: {result.stderr}")
                 self.report_generated = False
-        except Exception as e:
-            logger.error(f"❌ 报告生成异常: {e}")
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.error(f"❌ 报告生成异常: {e}", exc_info=True)
             self.report_generated = False
 
     def upload_to_github(self):
@@ -98,8 +98,8 @@ class ReportScheduler:
                     return
 
             logger.info("✅ 报告已上传到 GitHub")
-        except Exception as e:
-            logger.error(f"❌ 上传异常: {e}")
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.error(f"❌ 上传异常: {e}", exc_info=True)
 
     def full_pipeline(self):
         """完整的数据采集 -> 报告生成 -> 上传流程"""
@@ -140,8 +140,8 @@ class ReportScheduler:
             else:
                 logger.warning("⚠️ 部分文件缺失")
 
-        except Exception as e:
-            logger.error(f"❌ 健康检查失败: {e}")
+        except (OSError, ValueError) as e:
+            logger.error(f"❌ 健康检查失败: {e}", exc_info=True)
 
 
 def setup_scheduler():

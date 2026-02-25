@@ -4,12 +4,15 @@
 将 Alpha Hive 告警发送到邮箱（支持汇总）
 """
 
+import logging as _logging
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional, List
 from alert_manager import Alert, AlertLevel
 from datetime import datetime
+
+_log = _logging.getLogger("alpha_hive.email_notifier")
 
 
 class EmailNotifier:
@@ -89,8 +92,8 @@ class EmailNotifier:
             self._smtp_send(msg)
             return True
 
-        except Exception as e:
-            print(f"❌ Email send failed: {e}")
+        except (smtplib.SMTPException, ConnectionError, TimeoutError, OSError) as e:
+            _log.error("Email send failed: %s", e, exc_info=True)
             return False
 
     def _smtp_send(self, msg: MIMEMultipart) -> None:
@@ -137,8 +140,8 @@ class EmailNotifier:
             self.alert_queue.clear()
             return True
 
-        except Exception as e:
-            print(f"❌ Digest send failed: {e}")
+        except (smtplib.SMTPException, ConnectionError, TimeoutError, OSError) as e:
+            _log.error("Digest send failed: %s", e, exc_info=True)
             return False
 
     def _build_email_body(self, alert: Alert) -> str:

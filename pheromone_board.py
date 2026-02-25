@@ -4,6 +4,7 @@
 实时信号发布、共振检测、动态衰减
 """
 
+import logging as _logging
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional
 from threading import RLock
@@ -11,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import atexit
 import json
+
+_log = _logging.getLogger("alpha_hive.pheromone_board")
 
 
 @dataclass
@@ -193,8 +196,8 @@ class PheromoneBoard:
         for f in self._pending_futures:
             try:
                 f.result(timeout=10)
-            except Exception:
-                pass
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                _log.debug("pheromone future failed during shutdown: %s", exc)
         self._executor.shutdown(wait=True)
 
     def clear(self) -> None:

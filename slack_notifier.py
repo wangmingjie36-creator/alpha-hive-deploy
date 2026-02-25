@@ -4,11 +4,14 @@
 将 Alpha Hive 告警推送到 Slack 频道
 """
 
+import logging as _logging
 import json
 import os
 import requests
 from typing import Optional
 from alert_manager import Alert, AlertLevel
+
+_log = _logging.getLogger("alpha_hive.slack_notifier")
 
 
 class SlackNotifier:
@@ -159,7 +162,8 @@ class SlackNotifier:
             os.chmod(file_path, 0o600)
             print(f"✅ Slack webhook saved to {file_path}")
             return True
-        except Exception as e:
+        except OSError as e:
+            _log.error("Failed to save webhook: %s", e, exc_info=True)
             print(f"❌ Failed to save webhook: {e}")
             return False
 

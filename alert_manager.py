@@ -98,8 +98,9 @@ class AlertAnalyzer:
         try:
             with open(status_json_path, 'r', encoding='utf-8') as f:
                 status = json.load(f)
-        except Exception as e:
+        except (json.JSONDecodeError, OSError) as e:
             # 无法读取 status.json
+            _log.error("Failed to read status.json: %s", e, exc_info=True)
             self.alerts.append(Alert(
                 AlertLevel.HIGH,
                 "Cannot read status.json",
@@ -199,9 +200,9 @@ class AlertAnalyzer:
                             },
                             ["data_quality"]
                         ))
-        except Exception as e:
+        except (json.JSONDecodeError, OSError, KeyError, ValueError, TypeError) as e:
             # JSON 报告解析失败（不中断）
-            pass
+            _log.debug("JSON report parsing skipped: %s", e)
 
         # 6. 检测 P1/P2: GitHub 部署失败
         if status.get('deploy_status') == 'failed':
@@ -287,7 +288,8 @@ class AlertDispatcher:
                         "alert": alert.message,
                         "status": "success"
                     })
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError, ValueError, RuntimeError) as e:
+                    _log.error("Alert dispatch failed via %s: %s", notifier.__class__.__name__, e, exc_info=True)
                     results["failed"] += 1
                     results["details"].append({
                         "notifier": notifier.__class__.__name__,

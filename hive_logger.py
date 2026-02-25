@@ -141,8 +141,8 @@ def _setup_logger() -> logging.Logger:
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
         log.addHandler(fh)
-    except Exception:
-        pass
+    except OSError as _fh_err:
+        logging.getLogger(__name__).debug("Cannot create rotating file handler: %s", _fh_err)
 
     # JSON Lines 文件输出（结构化，2MB x 5，机器可读）
     try:
@@ -154,8 +154,8 @@ def _setup_logger() -> logging.Logger:
         jh.setLevel(logging.DEBUG)
         jh.setFormatter(JSONFormatter())
         log.addHandler(jh)
-    except Exception:
-        pass
+    except OSError as _jh_err:
+        logging.getLogger(__name__).debug("Cannot create JSON file handler: %s", _jh_err)
 
     return log
 

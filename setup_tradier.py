@@ -165,7 +165,7 @@ def test_tradier_connection():
         print("   请检查 URL 和网络连接")
         return False
 
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError, ValueError) as e:
         print(f"❌ 错误：{e}")
         return False
 
@@ -197,7 +197,7 @@ def test_options_analysis():
 
         return True
 
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
         print(f"❌ 期权分析失败：{e}")
         import traceback
         traceback.print_exc()

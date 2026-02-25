@@ -109,7 +109,7 @@ def test_config_parsing():
 
         return sum(EVALUATION_WEIGHTS.values()) == 1.0
 
-    except Exception as e:
+    except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
         print(f"  ✗ 配置解析失败：{e}")
         return False
 
@@ -177,7 +177,7 @@ def test_tradier_connectivity():
         print(f"  ✗ 连接失败（网络问题）")
         return False
 
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError, ValueError) as e:
         print(f"  ✗ 异常：{e}")
         return False
 
@@ -219,13 +219,13 @@ def test_options_agent():
                 print(f"      • Flow: {result['flow_direction']}")
                 print(f"      • 数据源: {result.get('source', 'Unknown')}")
 
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
                 print(f"    ✗ 分析失败：{e}")
                 return False
 
         return True
 
-    except Exception as e:
+    except (ImportError, ValueError, KeyError, TypeError, AttributeError, OSError) as e:
         print(f"  ✗ OptionsAgent 加载失败：{e}")
         return False
 
@@ -269,7 +269,7 @@ def test_advanced_analyzer_integration():
 
         return True
 
-    except Exception as e:
+    except (ImportError, ValueError, KeyError, TypeError, AttributeError, OSError) as e:
         print(f"  ✗ 集成测试失败：{e}")
         import traceback
         traceback.print_exc()
@@ -316,7 +316,7 @@ def test_html_report_generation():
 
         return True
 
-    except Exception as e:
+    except (ImportError, ValueError, KeyError, TypeError, AttributeError, OSError) as e:
         print(f"  ✗ HTML 生成失败：{e}")
         import traceback
         traceback.print_exc()
@@ -345,7 +345,7 @@ def test_fallback_mechanisms():
 
         return True
 
-    except Exception as e:
+    except (ImportError, ValueError, KeyError, TypeError, AttributeError, OSError) as e:
         print(f"  ✗ 容错测试异常：{e}")
         return False
 
@@ -375,7 +375,7 @@ def main():
         try:
             result = test_func()
             results[name] = result
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
             print(f"❌ {name} 异常：{e}")
             results[name] = False
 

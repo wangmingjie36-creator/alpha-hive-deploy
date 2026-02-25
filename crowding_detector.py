@@ -3,9 +3,12 @@
 优化 4：检测市场拥挤度，识别过度定价
 """
 
+import logging as _logging
 import json
 from datetime import datetime
 from typing import Dict, Tuple, List
+
+_log = _logging.getLogger("alpha_hive.crowding_detector")
 
 
 class CrowdingDetector:
@@ -478,7 +481,8 @@ def get_crowding_metrics(ticker: str, board=None) -> Dict:
             "volume_ratio": float(hist["Volume"].iloc[-1] / hist["Volume"].mean()) if not hist.empty and hist["Volume"].mean() > 0 else 1.0,
             "volatility_20d": float(hist["Close"].pct_change().std() * (252 ** 0.5) * 100) if len(hist) >= 20 else 0.0,
         }
-    except Exception:
+    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as exc:
+        _log.debug("yfinance data fetch failed for %s: %s", ticker, exc)
         stock_data = {"price": 100.0, "momentum_5d": 0.0, "avg_volume": 0, "volume_ratio": 1.0, "volatility_20d": 0.0}
 
     return get_real_crowding_metrics(ticker, stock_data, board)

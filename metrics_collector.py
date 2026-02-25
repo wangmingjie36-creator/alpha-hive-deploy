@@ -348,5 +348,6 @@ class MetricsCollector:
             import resource
             rusage = resource.getrusage(resource.RUSAGE_SELF)
             return rusage.ru_maxrss / (1024 * 1024)  # macOS: bytes -> MB
-        except Exception:
+        except (ImportError, OSError, ValueError) as exc:
+            _log.debug("_get_memory_mb 失败: %s", exc)
             return 0.0

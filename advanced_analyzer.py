@@ -3,11 +3,14 @@
 支持行业对标、历史回溯、概率计算、止损止盈建议
 """
 
+import logging as _logging
 import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 import statistics
+
+_log = _logging.getLogger("alpha_hive.advanced_analyzer")
 
 # 动态导入期权分析模块
 try:
@@ -554,8 +557,8 @@ class AdvancedAnalyzer:
                 analysis["options_analysis"] = options_agent.analyze(
                     ticker, stock_price=current_price if current_price > 0 else None
                 )
-            except Exception as e:
-                print(f"⚠️  期权分析异常：{e}")
+            except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+                _log.error("期权分析异常: %s", e, exc_info=True)
                 analysis["options_analysis"] = None
         else:
             analysis["options_analysis"] = None
