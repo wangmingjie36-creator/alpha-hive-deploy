@@ -16,6 +16,9 @@ from threading import Thread, Lock
 from pathlib import Path
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging as _logging
+
+_log = _logging.getLogger("alpha_hive.app")
 
 # 确保项目目录在 import 路径中
 _PROJECT_ROOT = os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__)))
@@ -573,8 +576,8 @@ class LiveMonitor:
                     self._check_catalysts()
                     self._last_catalyst_check = now
 
-            except Exception:
-                pass
+            except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+                _log.debug("DataFeed cycle %d error: %s", cycle, e)
 
             # 30-45 秒随机间隔（避免完全规律的请求）
             _time.sleep(self.REFRESH_INTERVAL + random.randint(0, 15))
@@ -647,8 +650,8 @@ class LiveMonitor:
                     {"state": "publishing", "score": 5 + change_pct * 0.3}
                 )
 
-        except Exception:
-            pass
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+            _log.debug("Ticker check failed for %s: %s", ticker, e)
 
     def _check_catalysts(self):
         """检查催化剂倒计时"""
@@ -685,10 +688,10 @@ class LiveMonitor:
                                         {"state": "working", "say": f"{days_until}天!"} if days_until <= 3 else None
                                     )
                                     break
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except (ConnectionError, TimeoutError, ValueError, KeyError, AttributeError) as e:
+                    _log.debug("Catalyst check failed for %s: %s", ticker, e)
+        except (ImportError, ConnectionError, TimeoutError, OSError) as e:
+            _log.debug("Catalyst check unavailable: %s", e)
 
 
 # ==================== 蜂巢背景 ====================
@@ -750,8 +753,8 @@ class InteractionManager:
                 break
             try:
                 action(*args, **kwargs)
-            except Exception as e:
-                print(f"[UI Queue] 操作执行异常: {e}")
+            except (ValueError, TypeError, AttributeError, RuntimeError, tk.TclError) as e:
+                _log.warning("UI queue action failed: %s", e)
 
     def _log(self, sender, text, msg_type="chat"):
         """记录到聊天框（线程安全）"""
@@ -882,8 +885,8 @@ class InteractionManager:
         def real_scan():
             try:
                 self._run_real_scan(focus_tickers)
-            except Exception as e:
-                print(f"[Scan] 扫描异常: {e}")
+            except (ImportError, ValueError, KeyError, TypeError, AttributeError, OSError, RuntimeError) as e:
+                _log.error("Scan failed: %s", e, exc_info=True)
                 self._enqueue(self._log, "System", f"扫描出错：{str(e)[:80]}", "alert")
                 self._enqueue(self.disperse_all)
                 self.scan_phase = "idle"
@@ -914,8 +917,8 @@ class InteractionManager:
         try:
             from memory_store import MemoryStore
             memory_store = MemoryStore()
-        except Exception:
-            pass
+        except (ImportError, OSError, ValueError, RuntimeError) as e:
+            _log.debug("MemoryStore unavailable in scan: %s", e)
 
         bee_ids = list(self.bees.keys())
 
@@ -958,8 +961,8 @@ class InteractionManager:
         try:
             from backtester import Backtester
             adapted_w = Backtester.load_adapted_weights()
-        except Exception:
-            pass
+        except (ImportError, OSError, ValueError, KeyError) as e:
+            _log.debug("Adapted weights unavailable: %s", e)
         queen = QueenDistiller(board, adapted_weights=adapted_w)
 
         agent_name_map = {
@@ -1034,7 +1037,8 @@ class InteractionManager:
                         for tid in msg_targets:
                             self._enqueue(self.send_message, agent_name, tid, mtype)
 
-                    except Exception as e:
+                    except (ImportError, ValueError, KeyError, TypeError, AttributeError, ConnectionError) as e:
+                        _log.warning("Agent %s failed for %s: %s", agent_name, ticker, e)
                         self._enqueue(self._log, agent_name, f"{ticker} 分析失败：{str(e)[:50]}", "alert")
                         agent_results.append(None)
                         if bee:
@@ -1204,9 +1208,10 @@ class InteractionManager:
                     adapted_w = Backtester.load_adapted_weights()
                     if adapted_w:
                         self._app_ref.system_data["adapted_weights"] = adapted_w
-                except Exception:
-                    pass
-        except Exception as e:
+                except (OSError, ValueError, KeyError, AttributeError) as e:
+                    _log.debug("Phase6 panel update failed: %s", e)
+        except (ImportError, OSError, ValueError, KeyError, TypeError) as e:
+            _log.warning("Phase6 backtest failed: %s", e)
             self._enqueue(self._log, "System", f"Phase6 回测异常：{str(e)[:50]}", "alert")
 
         # 提示简报快捷键
@@ -1958,8 +1963,8 @@ class AlphaHiveApp:
         try:
             # 激活 Python 进程（macOS 需要这一步才能显示窗口）
             os.system('''/usr/bin/osascript -e 'tell app "System Events" to set frontmost of first process whose unix id is %d to true' ''' % os.getpid())
-        except Exception:
-            pass
+        except OSError as e:
+            _log.debug("macOS window activation failed: %s", e)
 
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -2150,8 +2155,8 @@ class AlphaHiveApp:
                     first = next((d for d in data.values() if isinstance(d, dict) and d.get("dimension_scores")), None)
                     if first:
                         self.system_data["dimension_scores"] = {k: float(v) for k, v in first["dimension_scores"].items()}
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError, KeyError, ValueError, TypeError) as e:
+            _log.debug("Last swarm results load failed: %s", e)
 
     def _on_ticker_submit(self):
         """输入框回车或扫描按钮：扫描自定义标的"""
@@ -2223,12 +2228,12 @@ class AlphaHiveApp:
                         "return_t7": pr[4], "correct_t7": pr[5],
                     })
                 self.system_data["prediction_history"] = history
-            except Exception:
-                pass
+            except sqlite3.OperationalError as e:
+                _log.debug("Prediction history query failed: %s", e)
 
             conn.close()
-        except Exception:
-            pass
+        except (sqlite3.Error, OSError) as e:
+            _log.debug("System data DB load failed: %s", e)
         try:
             chroma_path = os.path.join(_PROJECT_ROOT, "chroma_db")
             if os.path.exists(chroma_path):
@@ -2236,8 +2241,8 @@ class AlphaHiveApp:
                 client = chromadb.PersistentClient(path=chroma_path)
                 col = client.get_or_create_collection("alpha_hive_memories")
                 self.system_data["memory_docs"] = col.count()
-        except Exception:
-            pass
+        except (ImportError, OSError, ValueError, RuntimeError) as e:
+            _log.debug("ChromaDB load failed: %s", e)
         webhook = os.path.expanduser("~/.alpha_hive_slack_webhook")
         self.system_data["slack"] = "connected" if os.path.exists(webhook) else "offline"
 
@@ -2261,8 +2266,8 @@ class AlphaHiveApp:
             # 每 10 帧刷新聊天框（平衡性能和实时性）
             if self.tick % 10 == 0:
                 self.chat_log.draw()
-        except Exception as e:
-            print(f"[AnimLoop] 异常（已恢复）: {e}")
+        except (ValueError, TypeError, AttributeError, RuntimeError, tk.TclError) as e:
+            _log.warning("AnimLoop recovered from: %s", e)
         finally:
             # 确保动画循环永远不会中断
             self.root.after(1000 // self.FPS, self._animation_loop)
