@@ -136,7 +136,7 @@ class AlphaHiveDailyReporter:
             try:
                 self.memory_store = MemoryStore()
                 self._session_id = self.memory_store.generate_session_id(run_mode="daily_scan")
-            except Exception as e:
+            except (OSError, ValueError, RuntimeError) as e:
                 _log.warning("MemoryStore 初始化失败，继续运行: %s", e)
 
         # 结果存储
@@ -152,7 +152,7 @@ class AlphaHiveDailyReporter:
         if CalendarIntegrator:
             try:
                 self.calendar = CalendarIntegrator()
-            except Exception as e:
+            except (OSError, ValueError, RuntimeError) as e:
                 _log.warning("Calendar 初始化失败: %s", e)
 
         # Phase 3 P4: 初始化代码执行 Agent（失败时降级）
@@ -161,7 +161,7 @@ class AlphaHiveDailyReporter:
             try:
                 self.code_executor_agent = CodeExecutorAgent(board=None)
                 # board 在 run_swarm_scan 时注入
-            except Exception as e:
+            except (OSError, ValueError, RuntimeError, TypeError) as e:
                 _log.warning("CodeExecutorAgent 初始化失败: %s", e)
 
         # Phase 3 内存优化: 初始化向量记忆层（Chroma 长期记忆）
@@ -175,7 +175,7 @@ class AlphaHiveDailyReporter:
                 if self.vector_memory.enabled:
                     if VECTOR_MEMORY_CONFIG.get("cleanup_on_startup"):
                         self.vector_memory.cleanup()
-            except Exception as e:
+            except (ImportError, OSError, ValueError, RuntimeError) as e:
                 _log.warning("向量记忆初始化失败: %s", e)
 
         # Week 4: 指标收集器
@@ -183,7 +183,7 @@ class AlphaHiveDailyReporter:
         if MetricsCollector:
             try:
                 self.metrics = MetricsCollector()
-            except Exception as e:
+            except (OSError, ValueError, RuntimeError) as e:
                 _log.warning("MetricsCollector 初始化失败: %s", e)
 
         # Phase 2: 共享线程池（替代所有 daemon 线程，退出时等待完成）
@@ -197,17 +197,17 @@ class AlphaHiveDailyReporter:
         if SlackReportNotifier:
             try:
                 self.slack_notifier = SlackReportNotifier()
-                pass  # Slack 就绪
-            except Exception as e:
+            except (OSError, ValueError, RuntimeError, ConnectionError) as e:
                 _log.warning("Slack 通知器初始化失败: %s", e)
 
     def _shutdown_bg(self) -> None:
         """atexit 处理器：等待后台任务完成"""
+        from concurrent.futures import TimeoutError as FuturesTimeout, CancelledError
         for f in self._bg_futures:
             try:
                 f.result(timeout=10)
-            except Exception:
-                pass
+            except (FuturesTimeout, CancelledError, OSError, RuntimeError) as e:
+                _log.debug("Background task cleanup: %s", e)
         self._bg_executor.shutdown(wait=True)
 
     def _submit_bg(self, fn, *args) -> None:
@@ -255,7 +255,8 @@ class AlphaHiveDailyReporter:
 
             return ticker, opportunity, None
 
-        except Exception as e:
+        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
+            _log.error("Ticker analysis failed for %s: %s", ticker, e, exc_info=True)
             error_msg = str(e)
             # 线程安全地添加观察项
             with self._results_lock:
@@ -382,8 +383,8 @@ class AlphaHiveDailyReporter:
                     completed_tickers = set(swarm_results.keys())
                     if completed_tickers:
                         _log.info("恢复 checkpoint：%d 标的已完成", len(completed_tickers))
-            except Exception:
-                pass
+            except (json.JSONDecodeError, KeyError, OSError) as e:
+                _log.warning("Checkpoint 恢复失败，重新开始: %s", e)
 
         for idx, ticker in enumerate(targets, 1):
             if ticker in completed_tickers:
@@ -398,7 +399,8 @@ class AlphaHiveDailyReporter:
                 for future in as_completed(futures):
                     try:
                         agent_results.append(future.result(timeout=60))
-                    except Exception:
+                    except (TimeoutError, ValueError, KeyError, TypeError, RuntimeError) as e:
+                        _log.warning("Agent future failed: %s", e)
                         agent_results.append(None)
 
             # 第二阶段：BearBeeContrarian 读取信息素板后分析（此时其他 Agent 数据已可用）
@@ -409,7 +411,8 @@ class AlphaHiveDailyReporter:
                           ticker, bear_result.get("direction", "?"),
                           bear_result.get("details", {}).get("bear_score", 0),
                           len(bear_result.get("details", {}).get("bearish_signals", [])))
-            except Exception:
+            except (ValueError, KeyError, TypeError, AttributeError) as e:
+                _log.warning("BearBeeContrarian failed for %s: %s", ticker, e)
                 agent_results.append(None)
 
             distilled = queen.distill(ticker, agent_results)
@@ -422,21 +425,21 @@ class AlphaHiveDailyReporter:
             try:
                 with open(checkpoint_file, "w") as f:
                     json.dump({"results": swarm_results, "targets": targets}, f, default=str)
-            except Exception:
-                pass
+            except (OSError, TypeError) as e:
+                _log.warning("Checkpoint 写入失败: %s", e)
 
         # 扫描完成，保存蜂群结果供 ML 报告同步使用
         try:
             swarm_json = self.report_dir / f".swarm_results_{self.date_str}.json"
             with open(swarm_json, "w") as f:
                 json.dump(swarm_results, f, default=str, ensure_ascii=False)
-        except Exception:
-            pass
+        except (OSError, TypeError) as e:
+            _log.warning("Swarm results 保存失败: %s", e)
         # 清理 checkpoint
         try:
             checkpoint_file.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except OSError as e:
+            _log.debug("Checkpoint 清理失败: %s", e)
 
         elapsed = time.time() - start_time
 
@@ -448,8 +451,8 @@ class AlphaHiveDailyReporter:
                 _log.info("蜂群耗时：%.1fs | LLM: %d调用 $%.4f", elapsed, usage['call_count'], usage['total_cost_usd'])
             else:
                 _log.info("蜂群耗时：%.1fs | 规则引擎模式", elapsed)
-        except Exception:
-            _log.info("蜂群耗时：%.1fs", elapsed)
+        except (ImportError, AttributeError, KeyError) as e:
+            _log.info("蜂群耗时：%.1fs (LLM stats unavailable: %s)", elapsed, e)
 
         # Week 4: 记录扫描指标 + SLO 检查
         if self.metrics:
@@ -472,7 +475,7 @@ class AlphaHiveDailyReporter:
                     import llm_service as _ls
                     _u = _ls.get_usage()
                     llm_c, llm_cost = _u.get("call_count", 0), _u.get("total_cost_usd", 0.0)
-                except Exception:
+                except (ImportError, AttributeError, KeyError):
                     pass
 
                 self.metrics.record_scan(
@@ -509,7 +512,7 @@ class AlphaHiveDailyReporter:
                     _log.warning("SLO 违规 %d 条: %s",
                                  len(violations),
                                  "; ".join(v["details"] for v in violations))
-            except Exception as e:
+            except (OSError, ValueError, KeyError, TypeError) as e:
                 _log.warning("指标收集异常: %s", e)
 
         # Phase 6: 回测反馈循环
@@ -519,7 +522,7 @@ class AlphaHiveDailyReporter:
                 bt.save_predictions(swarm_results)
                 bt.run_backtest()
                 bt.adapt_weights(min_samples=5)
-            except Exception as e:
+            except (OSError, ValueError, KeyError, TypeError) as e:
                 _log.warning("回测异常: %s", e)
 
         # Phase 6: Slack 推送高分机会 + 异常信号
@@ -607,7 +610,7 @@ class AlphaHiveDailyReporter:
             try:
                 self.slack_notifier.send_daily_report(report)
                 _log.info("Slack 日报已发送")
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError, ValueError) as e:
                 _log.error("Slack 日报发送失败: %s", e, exc_info=True)
 
         return report
@@ -655,8 +658,8 @@ class AlphaHiveDailyReporter:
 
                 _log.info("  %s: %.1f/10 %s", ticker, result.get('final_score', 0), result.get('direction', 'neutral'))
 
-            except Exception as e:
-                _log.warning("  %s 分析失败: %s", ticker, str(e)[:80])
+            except (ValueError, KeyError, TypeError, RuntimeError, ConnectionError) as e:
+                _log.warning("  %s CrewAI 分析失败: %s", ticker, str(e)[:80])
                 swarm_results[ticker] = {
                     "ticker": ticker,
                     "final_score": 0.0,
@@ -685,7 +688,7 @@ class AlphaHiveDailyReporter:
             try:
                 self.slack_notifier.send_daily_report(report)
                 _log.info("Slack 日报已发送")
-            except Exception as e:
+            except (ConnectionError, TimeoutError, OSError, ValueError) as e:
                 _log.error("Slack 日报发送失败: %s", e, exc_info=True)
 
         return report
