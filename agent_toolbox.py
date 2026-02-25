@@ -5,6 +5,7 @@
 可直接用于蜂群系统，后续升级为真正的 MCP 服务器
 """
 
+import logging as _logging
 import os
 import json
 import subprocess
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import sys
+
+_log = _logging.getLogger("alpha_hive.toolbox")
 
 # ==================== 文件系统工具 ====================
 
@@ -41,8 +44,8 @@ class FilesystemTool:
                 return f.read()
         except FileNotFoundError:
             raise FileNotFoundError(f"File not found: {file_path}")
-        except Exception as e:
-            raise Exception(f"Error reading file: {str(e)}")
+        except (OSError, UnicodeDecodeError) as e:
+            raise OSError(f"Error reading file: {e}") from e
 
     @classmethod
     def write_file(cls, file_path: str, content: str) -> str:
@@ -56,8 +59,8 @@ class FilesystemTool:
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             return f"✅ File written: {file_path}"
-        except Exception as e:
-            raise Exception(f"Error writing file: {str(e)}")
+        except OSError as e:
+            raise OSError(f"Error writing file: {e}") from e
 
     @classmethod
     def list_directory(cls, dir_path: str) -> List[Dict[str, Any]]:
@@ -77,8 +80,8 @@ class FilesystemTool:
             return sorted(entries, key=lambda x: x["name"])
         except FileNotFoundError:
             raise FileNotFoundError(f"Directory not found: {dir_path}")
-        except Exception as e:
-            raise Exception(f"Error listing directory: {str(e)}")
+        except OSError as e:
+            raise OSError(f"Error listing directory: {e}") from e
 
     @classmethod
     def search_files(cls, pattern: str, root: str = None) -> List[str]:
@@ -93,8 +96,8 @@ class FilesystemTool:
                 if file_path.is_file() and pattern.lower() in file_path.name.lower():
                     results.append(str(file_path))
             return results[:100]  # 限制结果数
-        except Exception as e:
-            raise Exception(f"Error searching files: {str(e)}")
+        except OSError as e:
+            raise OSError(f"Error searching files: {e}") from e
 
 
 # ==================== GitHub 工具 ====================
@@ -121,7 +124,7 @@ class GitHubTool:
                 "stderr": result.stderr,
                 "returncode": result.returncode
             }
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError) as e:
             return {"success": False, "error": str(e)}
 
     def status(self) -> Dict[str, Any]:
@@ -218,8 +221,8 @@ class NotificationTool:
             if os.path.exists(creds_path):
                 with open(creds_path, "r") as f:
                     return json.load(f)
-        except Exception:
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            _log.debug("Gmail creds load failed: %s", e)
         return None
 
     def send_slack_message(self, channel: str, text: str, blocks: List[Dict] = None) -> Dict[str, Any]:
@@ -244,7 +247,7 @@ class NotificationTool:
             }
         except ImportError:
             return {"error": "requests library not installed"}
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
             return {"error": str(e)}
 
     def send_email(self, to: str, subject: str, body: str) -> Dict[str, Any]:
@@ -275,7 +278,7 @@ class NotificationTool:
             server.quit()
 
             return {"success": True, "message": f"Email sent to {to}"}
-        except Exception as e:
+        except (ImportError, ConnectionError, TimeoutError, OSError, ValueError) as e:
             return {"error": str(e)}
 
     def notify_all(self, message: str, channels: List[str] = None) -> Dict[str, Any]:
@@ -339,7 +342,7 @@ def main():
     try:
         files = helper.fs.list_directory(os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__))))
         print(f"✅ 列出 {len(files)} 个文件")
-    except Exception as e:
+    except (OSError, FileNotFoundError) as e:
         print(f"❌ {e}")
 
     # 测试 GitHub

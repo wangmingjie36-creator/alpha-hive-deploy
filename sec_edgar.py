@@ -61,8 +61,8 @@ class SECEdgarClient:
                         for v in data.values()
                     }
                     return
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, OSError, KeyError) as e:
+                    _log.debug("CIK cache read failed, will re-download: %s", e)
 
         # 从 SEC 下载
         if requests is None:
@@ -85,7 +85,7 @@ class SECEdgarClient:
                 v["ticker"].upper(): v["cik_str"]
                 for v in data.values()
             }
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
             _log.warning("加载 SEC CIK 映射失败: %s", e)
 
     def get_cik(self, ticker: str) -> Optional[int]:
@@ -109,7 +109,7 @@ class SECEdgarClient:
             resp.raise_for_status()
             sec_breaker.record_success()
             return resp
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
             sec_breaker.record_failure()
             raise
 
@@ -135,8 +135,8 @@ class SECEdgarClient:
                 try:
                     with open(cache_path) as f:
                         return json.load(f)
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    _log.debug("Form4 cache read failed: %s", e)
 
         if requests is None:
             return []
@@ -171,7 +171,7 @@ class SECEdgarClient:
 
             return filings
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
             _log.warning("获取 %s Form 4 列表失败: %s", ticker, e)
             return []
 
@@ -210,7 +210,7 @@ class SECEdgarClient:
 
             return self._parse_xml_content(resp.text)
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, ET.ParseError) as e:
             # 尝试备用路径（直接使用完整 primaryDocument）
             try:
                 acc_no_dashes = accession_number.replace("-", "")
@@ -221,7 +221,8 @@ class SECEdgarClient:
                 if resp is None:
                     return None
                 return self._parse_xml_content(resp.text)
-            except Exception:
+            except (ConnectionError, TimeoutError, OSError, ValueError, ET.ParseError) as e2:
+                _log.debug("Form4 XML fallback also failed: %s", e2)
                 return None
 
     def _parse_xml_content(self, xml_text: str) -> Optional[Dict]:
@@ -359,8 +360,8 @@ class SECEdgarClient:
                 try:
                     with open(cache_path) as f:
                         return json.load(f)
-                except Exception:
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    _log.debug("Insider summary cache read failed: %s", e)
 
         filings = self.get_recent_form4_filings(ticker, limit=max_filings)
 
@@ -475,8 +476,8 @@ class SECEdgarClient:
         try:
             with open(cache_path, "w") as f:
                 json.dump(result, f, ensure_ascii=False)
-        except Exception:
-            pass
+        except (OSError, TypeError) as e:
+            _log.debug("Insider summary cache write failed: %s", e)
 
         return result
 

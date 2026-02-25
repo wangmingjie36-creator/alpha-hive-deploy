@@ -48,7 +48,7 @@ class CacheManager:
         try:
             with open(cache_file, 'r') as f:
                 return json.load(f)
-        except Exception as e:
+        except (json.JSONDecodeError, OSError) as e:
             _log.warning(f"❌ 缓存加载失败 {key}: {e}")
             return None
 
@@ -59,7 +59,7 @@ class CacheManager:
             with open(cache_file, 'w') as f:
                 json.dump(data, f, indent=2)
             return True
-        except Exception as e:
+        except (OSError, TypeError) as e:
             _log.error(f"❌ 缓存保存失败 {key}: {e}")
             return False
 
@@ -119,7 +119,7 @@ class DataFetcher:
             self.cache.save(cache_key, metrics)
             return metrics
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
             _log.error(f"❌ StockTwits 获取失败 {ticker}: {e}")
             return {"messages_per_day": 0, "bullish_ratio": 0.5}
 
@@ -169,7 +169,7 @@ class DataFetcher:
             self.cache.save(cache_key, odds_data)
             return odds_data
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
             _log.error(f"❌ Polymarket 获取失败 {ticker}: {e}")
             return {"yes_odds": 0.5, "no_odds": 0.5}
 
@@ -219,7 +219,7 @@ class DataFetcher:
                 _log.warning("⚠️ yfinance 未安装，使用示例数据")
                 return self._get_sample_yahoo_data(ticker)
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
             _log.error(f"❌ Yahoo Finance 获取失败 {ticker}: {e}")
             return self._get_sample_yahoo_data(ticker)
 
@@ -265,7 +265,7 @@ class DataFetcher:
                 _log.warning("⚠️ pytrends 未安装，使用示例数据")
                 return self._get_sample_trends(ticker)
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
             _log.error(f"❌ Google Trends 获取失败: {e}")
             return self._get_sample_trends(ticker)
 
@@ -310,7 +310,7 @@ class DataFetcher:
             self.cache.save(cache_key, filings)
             return filings
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
             _log.error(f"❌ SEC 获取失败 {ticker}: {e}")
             return []
 
@@ -346,7 +346,7 @@ class DataFetcher:
             self.cache.save(cache_key, data)
             return data
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
             _log.error(f"❌ Seeking Alpha 获取失败: {e}")
             return {"page_views_week": 0, "article_count_week": 0}
 
@@ -387,7 +387,7 @@ class DataFetcher:
             hist = stock.history(period="5d")
             if len(hist) > 1:
                 return ((hist['Close'].iloc[-1] - hist['Close'].iloc[0]) / hist['Close'].iloc[0]) * 100
-        except Exception as e:
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
             _log.warning(f"5 日价格变化计算失败: {e}")
         return 0
 
