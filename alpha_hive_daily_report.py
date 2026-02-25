@@ -72,6 +72,12 @@ try:
 except ImportError:
     SlackReportNotifier = None
 
+# 财报自动监控器
+try:
+    from earnings_watcher import EarningsWatcher
+except ImportError:
+    EarningsWatcher = None
+
 # Phase 3 内存优化: 向量记忆层（Chroma 长期记忆）
 try:
     from vector_memory import VectorMemory
@@ -191,6 +197,14 @@ class AlphaHiveDailyReporter:
         self._bg_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="hive_bg")
         self._bg_futures = []
         atexit.register(self._shutdown_bg)
+
+        # 财报自动监控器
+        self.earnings_watcher = None
+        if EarningsWatcher:
+            try:
+                self.earnings_watcher = EarningsWatcher()
+            except (OSError, ValueError, RuntimeError) as e:
+                _log.warning("EarningsWatcher 初始化失败: %s", e)
 
         # Phase 3 P6: 初始化 Slack 报告通知器（替代 Gmail）
         self.slack_notifier = None
@@ -1296,6 +1310,71 @@ class AlphaHiveDailyReporter:
         _log.info("Auto-commit & Notify 完成")
         return results
 
+    def check_earnings_updates(self, report_path: str = None, tickers: List[str] = None) -> Dict:
+        """
+        检查 watchlist 中今日是否有标的发布了财报，若有则自动抓取结果并更新简报
+
+        Args:
+            report_path: 简报文件路径（默认今日简报）
+            tickers: 要检查的标的（默认 WATCHLIST 全部）
+
+        Returns:
+            {reporting_today: [], updated: [], earnings_data: {}, errors: []}
+        """
+        if not self.earnings_watcher:
+            _log.info("EarningsWatcher 不可用，跳过财报检查")
+            return {"reporting_today": [], "updated": [], "earnings_data": {}, "errors": ["EarningsWatcher not available"]}
+
+        if tickers is None:
+            tickers = list(WATCHLIST.keys())
+
+        if report_path is None:
+            # 查找今日简报
+            candidates = [
+                self.report_dir / "reports" / f"alpha_hive_daily_{self.date_str}.md",
+                self.report_dir / f"alpha-hive-daily-{self.date_str}.md",
+            ]
+            for c in candidates:
+                if c.exists():
+                    report_path = str(c)
+                    break
+
+        if report_path is None:
+            _log.warning("未找到今日简报文件，跳过财报更新")
+            return {"reporting_today": [], "updated": [], "earnings_data": {}, "errors": ["no report file found"]}
+
+        result = self.earnings_watcher.check_and_update(tickers, report_path)
+
+        # 如果有更新，通过 Slack 发送通知
+        if result.get("updated") and self.slack_notifier and self.slack_notifier.enabled:
+            for ticker in result["updated"]:
+                ed = result["earnings_data"].get(ticker, {})
+                rev = ed.get("revenue_actual")
+                eps = ed.get("eps_actual")
+                yoy = ed.get("yoy_revenue_growth")
+
+                msg_parts = [f"{ticker} 财报数据已自动更新"]
+                if rev:
+                    rev_str = f"${rev / 1e9:.1f}B" if abs(rev) >= 1e9 else f"${rev / 1e6:.0f}M"
+                    msg_parts.append(f"营收 {rev_str}")
+                if yoy is not None:
+                    msg_parts.append(f"YoY {'+' if yoy > 0 else ''}{yoy * 100:.1f}%")
+                if eps is not None:
+                    msg_parts.append(f"EPS ${eps:.2f}")
+
+                try:
+                    self.slack_notifier.send_opportunity_alert(
+                        ticker,
+                        0,  # score placeholder
+                        "财报更新",
+                        " | ".join(msg_parts),
+                        ["自动抓取", f"完整度: {ed.get('data_completeness', 'N/A')}"]
+                    )
+                except (OSError, ValueError, RuntimeError) as e:
+                    _log.warning("Slack 财报通知发送失败: %s", e)
+
+        return result
+
     def save_report(self, report: Dict) -> str:
         """保存报告到文件"""
 
@@ -1355,11 +1434,28 @@ def main():
         action='store_true',
         help='启用蜂群协作模式（6 个自治 Agent 并行分析）'
     )
+    parser.add_argument(
+        '--check-earnings',
+        action='store_true',
+        help='检查今日财报并自动更新简报（可单独运行，不需要重新扫描）'
+    )
 
     args = parser.parse_args()
 
     # 创建报告生成器
     reporter = AlphaHiveDailyReporter()
+
+    # 如果只是检查财报更新
+    if args.check_earnings:
+        focus_tickers = list(WATCHLIST.keys())[:10] if args.all_watchlist else args.tickers
+        result = reporter.check_earnings_updates(tickers=focus_tickers)
+        reporting = result.get("reporting_today", [])
+        updated = result.get("updated", [])
+        if reporting:
+            _log.info("今日财报: %s | 已更新: %s", reporting, updated)
+        else:
+            _log.info("今日无 watchlist 标的发布财报")
+        return result
 
     # 确定扫描标的
     focus_tickers = list(WATCHLIST.keys())[:10] if args.all_watchlist else args.tickers

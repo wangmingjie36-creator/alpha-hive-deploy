@@ -580,6 +580,17 @@ CREWAI_CONFIG = {
     "timeout_seconds": 300,  # 单个分析超时
 }
 
+# ==================== 财报自动监控配置 ====================
+EARNINGS_WATCHER_CONFIG = {
+    "enabled": True,
+    "auto_update_report": True,       # 财报发布后自动更新当日简报
+    "check_times_et": ["07:00", "17:30", "19:00"],  # ET 时间检查点
+    "data_source": "yfinance",        # 主数据源
+    "cache_ttl_results": 1800,        # 财报结果缓存 30 分钟
+    "cache_ttl_dates": 43200,         # 财报日期缓存 12 小时
+    "slack_notify_on_update": True,   # 更新后发送 Slack 通知
+}
+
 # ==================== LLM 智能层配置 (Phase 1) ====================
 LLM_CONFIG = {
     "enabled": True,                    # 总开关（False = 完全规则引擎模式）

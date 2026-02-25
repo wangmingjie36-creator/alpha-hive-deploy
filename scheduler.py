@@ -32,6 +32,17 @@ class ReportScheduler:
     def __init__(self):
         self.data_collected = False
         self.report_generated = False
+        self._earnings_watcher = None
+
+    def _get_earnings_watcher(self):
+        """懒加载 EarningsWatcher"""
+        if self._earnings_watcher is None:
+            try:
+                from earnings_watcher import EarningsWatcher
+                self._earnings_watcher = EarningsWatcher()
+            except ImportError:
+                logger.warning("earnings_watcher 模块不可用")
+        return self._earnings_watcher
 
     def collect_data(self):
         """采集实时数据"""
@@ -101,14 +112,40 @@ class ReportScheduler:
         except (subprocess.SubprocessError, OSError) as e:
             logger.error(f"❌ 上传异常: {e}", exc_info=True)
 
+    def check_earnings(self):
+        """检查今日是否有 watchlist 标的发布财报，若有则抓取结果并更新简报"""
+        logger.info("📊 检查今日财报...")
+        watcher = self._get_earnings_watcher()
+        if watcher is None:
+            return
+
+        try:
+            from config import WATCHLIST
+            tickers = list(WATCHLIST.keys())
+            result = watcher.check_and_update(tickers)
+
+            reporting = result.get("reporting_today", [])
+            updated = result.get("updated", [])
+            if reporting:
+                logger.info("📊 今日财报标的: %s", ", ".join(reporting))
+                if updated:
+                    logger.info("✅ 简报已自动更新: %s", ", ".join(updated))
+                    # 更新后自动推送到 GitHub
+                    self.upload_to_github()
+            else:
+                logger.info("📊 今日无 watchlist 财报")
+        except (ImportError, OSError, ValueError) as e:
+            logger.error(f"❌ 财报检查异常: {e}", exc_info=True)
+
     def full_pipeline(self):
-        """完整的数据采集 -> 报告生成 -> 上传流程"""
+        """完整的数据采集 -> 报告生成 -> 财报检查 -> 上传流程"""
         logger.info("=" * 60)
         logger.info("🔄 启动完整流程")
         logger.info("=" * 60)
 
         self.collect_data()
         self.generate_reports()
+        self.check_earnings()
         self.upload_to_github()
 
         logger.info("=" * 60)
@@ -160,6 +197,13 @@ def setup_scheduler():
     # 每小时执行一次完整流程
     schedule.every(1).hours.do(scheduler.full_pipeline)
 
+    # 盘后财报检查（每日 17:30 和 19:00 ET 各检查一次，覆盖 AMC 财报发布窗口）
+    schedule.every().day.at("17:30").do(scheduler.check_earnings)
+    schedule.every().day.at("19:00").do(scheduler.check_earnings)
+
+    # 盘前财报检查（每日 07:00 ET，覆盖 BMO 财报）
+    schedule.every().day.at("07:00").do(scheduler.check_earnings)
+
     # 每 6 小时执行一次健康检查
     schedule.every(6).hours.do(scheduler.health_check)
 
@@ -168,6 +212,7 @@ def setup_scheduler():
     logger.info("  📝 报告生成: 每 15 分钟")
     logger.info("  🚀 GitHub 上传: 每 30 分钟")
     logger.info("  🔄 完整流程: 每 1 小时")
+    logger.info("  💰 财报检查: 07:00 / 17:30 / 19:00 ET")
     logger.info("  🏥 健康检查: 每 6 小时")
 
     return scheduler
