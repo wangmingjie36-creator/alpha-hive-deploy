@@ -10,13 +10,16 @@ import json
 import subprocess
 from datetime import datetime
 import logging
+import os
+
+_PROJECT_ROOT = os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__)))
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('/Users/igg/.claude/reports/scheduler.log'),
+        logging.FileHandler(os.path.join(_PROJECT_ROOT, 'scheduler.log')),
         logging.StreamHandler()
     ]
 )

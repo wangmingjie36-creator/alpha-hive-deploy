@@ -44,7 +44,7 @@ class _HivePaths:
 
     @property
     def home(self) -> Path:
-        return Path(os.environ.get("ALPHA_HIVE_HOME", "/Users/igg/.claude/reports"))
+        return Path(os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__))))
 
     @property
     def logs_dir(self) -> Path:

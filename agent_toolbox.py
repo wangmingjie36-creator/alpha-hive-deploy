@@ -19,8 +19,8 @@ class FilesystemTool:
     """文件系统操作（替代 Filesystem MCP）"""
 
     ALLOWED_ROOTS = [
-        "/Users/igg/.claude/reports",
-        "/Users/igg/.claude/projects",
+        os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__))),
+        os.path.expanduser("~/.claude/projects"),
         "/tmp"
     ]
 
@@ -103,7 +103,7 @@ class GitHubTool:
     """GitHub 操作（替代 GitHub MCP）"""
 
     def __init__(self, repo_path: str = None):
-        self.repo_path = repo_path or "/Users/igg/.claude/reports"
+        self.repo_path = repo_path or os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__)))
 
     def run_git_cmd(self, cmd: str) -> Dict[str, Any]:
         """执行 Git 命令"""
@@ -287,7 +287,7 @@ class NotificationTool:
 
         if "email" in (channels or []):
             results["email"] = self.send_email(
-                "iggissexy0511@gmail.com",
+                os.environ.get("ALPHA_HIVE_EMAIL_SENDER", ""),
                 "Alpha Hive Alert",
                 message
             )
@@ -337,7 +337,7 @@ def main():
     # 测试文件系统
     print("\n测试文件系统...")
     try:
-        files = helper.fs.list_directory("/Users/igg/.claude/reports")
+        files = helper.fs.list_directory(os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__))))
         print(f"✅ 列出 {len(files)} 个文件")
     except Exception as e:
         print(f"❌ {e}")

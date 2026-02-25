@@ -18,7 +18,8 @@ from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 确保项目目录在 import 路径中
-sys.path.insert(0, "/Users/igg/.claude/reports")
+_PROJECT_ROOT = os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _PROJECT_ROOT)
 
 
 # ==================== 蜂群消息（Agent 间通信） ====================
@@ -2125,13 +2126,13 @@ class AlphaHiveApp:
         import glob as _glob
         try:
             today = _dt.now().strftime("%Y-%m-%d")
-            pattern = f"/Users/igg/.claude/reports/.swarm_results_{today}.json"
+            pattern = os.path.join(_PROJECT_ROOT, f".swarm_results_{today}.json")
             files = _glob.glob(pattern)
             if not files:
                 # 尝试最近 3 天
                 for d in range(1, 4):
                     past = (_dt.now() - __import__('datetime').timedelta(days=d)).strftime("%Y-%m-%d")
-                    files = _glob.glob(f"/Users/igg/.claude/reports/.swarm_results_{past}.json")
+                    files = _glob.glob(os.path.join(_PROJECT_ROOT, f".swarm_results_{past}.json"))
                     if files:
                         break
             if files:
@@ -2178,7 +2179,7 @@ class AlphaHiveApp:
         Thread(target=refresh, daemon=True).start()
 
     def _load_system_data(self):
-        db_path = "/Users/igg/.claude/reports/pheromone.db"
+        db_path = os.path.join(_PROJECT_ROOT, "pheromone.db")
         try:
             if not os.path.exists(db_path):
                 return
@@ -2229,7 +2230,7 @@ class AlphaHiveApp:
         except Exception:
             pass
         try:
-            chroma_path = "/Users/igg/.claude/reports/chroma_db"
+            chroma_path = os.path.join(_PROJECT_ROOT, "chroma_db")
             if os.path.exists(chroma_path):
                 import chromadb
                 client = chromadb.PersistentClient(path=chroma_path)

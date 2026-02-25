@@ -441,8 +441,8 @@ ALERT_CONFIG = {
     "email_enabled": True,  # 改为 True 后启用邮件通知
     "email_provider": "gmail_api",  # 使用 Gmail API 而不是 SMTP
     "email_config": {
-        "sender_email": "iggissexy0511@gmail.com",
-        "recipient_emails": ["iggissexy0511@gmail.com"],
+        "sender_email": os.environ.get("ALPHA_HIVE_EMAIL_SENDER", ""),
+        "recipient_emails": [e.strip() for e in os.environ.get("ALPHA_HIVE_EMAIL_RECIPIENTS", "").split(",") if e.strip()],
         "credentials_file": PATHS.google_credentials
     },
 
