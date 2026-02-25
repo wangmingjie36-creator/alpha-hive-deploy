@@ -5,686 +5,457 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Alpha Hive - 投资简报仪表板</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
+            min-height: 100vh; padding: 20px;
         }
-
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-        }
-
+        .container { max-width: 1400px; margin: 0 auto; }
         .header {
-            background: white;
-            border-radius: 15px;
-            padding: 40px;
-            margin-bottom: 30px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            background: white; border-radius: 15px; padding: 40px;
+            margin-bottom: 30px; box-shadow: 0 10px 40px rgba(0,0,0,0.1);
             text-align: center;
         }
-
-        .header h1 {
-            font-size: 2.5em;
-            color: #667eea;
-            margin-bottom: 10px;
+        .header h1 { font-size: 2.5em; color: #667eea; margin-bottom: 10px; }
+        .header p { color: #666; font-size: 1.1em; }
+        .header .update-time {
+            display: inline-block; margin-top: 12px; padding: 6px 18px;
+            background: #f0f0ff; border-radius: 20px; color: #667eea;
+            font-size: 0.95em; font-weight: 500;
         }
-
-        .header p {
-            color: #666;
-            font-size: 1.1em;
-        }
-
         .main-grid {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 30px;
-            margin-bottom: 30px;
+            display: grid; grid-template-columns: 2fr 1fr;
+            gap: 30px; margin-bottom: 30px;
         }
-
         .section {
-            background: white;
-            border-radius: 15px;
-            padding: 30px;
+            background: white; border-radius: 15px; padding: 30px;
             box-shadow: 0 10px 40px rgba(0,0,0,0.1);
         }
-
         .section h2 {
-            color: #667eea;
-            font-size: 1.8em;
-            margin-bottom: 25px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
+            color: #667eea; font-size: 1.6em; margin-bottom: 20px;
+            display: flex; align-items: center; gap: 10px;
         }
-
         .section h2::before {
-            content: '';
-            display: inline-block;
-            width: 4px;
-            height: 28px;
+            content: ''; display: inline-block; width: 4px; height: 28px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             border-radius: 2px;
         }
-
-        .opportunities-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        .opp-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
             gap: 20px;
         }
-
-        .opportunity-card {
-            border: 1px solid #e0e0e0;
-            border-radius: 10px;
-            padding: 20px;
-            background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
-            position: relative;
-            overflow: hidden;
-            transition: transform 0.3s, box-shadow 0.3s;
+        .opp-card {
+            border: 1px solid #e0e0e0; border-radius: 12px; padding: 22px;
+            background: linear-gradient(135deg, #f8f9fa 0%, #fff 100%);
+            position: relative; transition: transform 0.3s, box-shadow 0.3s;
         }
-
-        .opportunity-card:hover {
+        .opp-card:hover {
             transform: translateY(-5px);
-            box-shadow: 0 15px 35px rgba(102, 126, 234, 0.2);
+            box-shadow: 0 15px 35px rgba(102,126,234,0.2);
         }
-
         .card-rank {
-            position: absolute;
-            top: 10px;
-            right: 15px;
-            font-size: 0.85em;
-            font-weight: bold;
-            color: #667eea;
-            background: #f0f0f0;
-            padding: 4px 8px;
-            border-radius: 5px;
+            position: absolute; top: 10px; right: 15px; font-size: 0.85em;
+            font-weight: bold; color: #667eea; background: #f0f0f0;
+            padding: 4px 8px; border-radius: 5px;
         }
-
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid #eee;
+        .card-hd {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #eee;
         }
-
-        .card-header h3 {
-            font-size: 1.5em;
-            color: #333;
+        .card-hd h3 { font-size: 1.5em; color: #333; }
+        .dir-badge {
+            padding: 4px 14px; border-radius: 20px; color: white;
+            font-size: 0.85em; font-weight: bold;
         }
-
-        .direction {
-            padding: 4px 12px;
-            border-radius: 20px;
-            color: white;
-            font-size: 0.85em;
-            font-weight: bold;
+        .dir-bullish { background: #28a745; }
+        .dir-neutral { background: #ffc107; color: #333; }
+        .dir-bearish { background: #dc3545; }
+        .card-body { display: flex; flex-direction: column; gap: 8px; }
+        .mr { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 0.93em; }
+        .mr .lbl { color: #666; font-weight: 500; }
+        .mr .val { color: #333; font-weight: bold; }
+        .sc-h { color: #28a745; } .sc-m { color: #fd7e14; } .sc-l { color: #dc3545; }
+        .res-badge {
+            display: inline-block; padding: 2px 10px; border-radius: 10px;
+            font-size: 0.8em; font-weight: bold;
         }
-
-        .card-content {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
+        .res-y { background: #d4edda; color: #155724; }
+        .res-n { background: #f8d7da; color: #721c24; }
+        .bear-bar {
+            height: 6px; border-radius: 3px; background: #eee; margin-top: 4px;
         }
-
-        .metric-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 8px 0;
-            font-size: 0.95em;
+        .bear-fill {
+            height: 100%; border-radius: 3px;
+            background: linear-gradient(90deg, #ffc107, #dc3545);
         }
-
-        .label {
-            color: #666;
-            font-weight: 500;
-        }
-
-        .value {
-            color: #333;
-            font-weight: bold;
-            font-size: 1.05em;
-        }
-
-        .score-high { color: #28a745; }
-        .score-mid { color: #fd7e14; }
-        .score-low { color: #dc3545; }
-
-        .resonance-badge {
-            display: inline-block;
-            padding: 2px 8px;
-            border-radius: 10px;
-            font-size: 0.8em;
-            font-weight: bold;
-        }
-        .resonance-yes { background: #d4edda; color: #155724; }
-        .resonance-no { background: #f8d7da; color: #721c24; }
-
         .status-card {
-            border: 2px solid #28a745;
-            border-radius: 10px;
-            padding: 20px;
-            background: linear-gradient(135deg, rgba(102, 126, 234, 0.05) 0%, rgba(118, 75, 162, 0.05) 100%);
+            border: 2px solid #28a745; border-radius: 10px; padding: 20px;
+            background: linear-gradient(135deg, rgba(102,126,234,0.05), rgba(118,75,162,0.05));
         }
-
-        .status-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 15px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid #eee;
+        .status-hd {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #eee;
         }
-
-        .status-header h3 {
-            color: #667eea;
-            font-size: 1.2em;
+        .status-hd h3 { color: #667eea; font-size: 1.2em; }
+        .status-ind {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 1.1em; font-weight: bold; color: #28a745;
         }
-
-        .status-indicator {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 1.1em;
-            font-weight: bold;
-            color: #28a745;
-        }
-
         .status-dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background-color: #28a745;
-            animation: pulse 2s infinite;
+            width: 12px; height: 12px; border-radius: 50%;
+            background-color: #28a745; animation: pulse 2s infinite;
         }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-
-        .status-info {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            font-size: 0.95em;
-        }
-
-        .status-row {
-            display: flex;
-            justify-content: space-between;
-        }
-
-        .status-label {
-            color: #666;
-        }
-
-        .status-value {
-            color: #333;
-            font-weight: bold;
-        }
-
-        .full-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 10px;
-        }
-
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+        .si { display: flex; flex-direction: column; gap: 10px; font-size: 0.95em; }
+        .sr { display: flex; justify-content: space-between; }
+        .sr .sl { color: #666; } .sr .sv { color: #333; font-weight: bold; }
+        .full-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         .full-table th, .full-table td {
-            padding: 12px 15px;
-            text-align: left;
-            border-bottom: 1px solid #eee;
+            padding: 11px 12px; text-align: left; border-bottom: 1px solid #eee;
         }
-
         .full-table th {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            font-weight: 600;
-            font-size: 0.9em;
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white; font-weight: 600; font-size: 0.88em;
         }
-
-        .full-table tr:hover {
-            background-color: #f8f9fa;
-        }
-
-        .full-table td {
-            font-size: 0.95em;
-        }
-
-        .reports-list {
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-
+        .full-table tr:hover { background-color: #f8f9fa; }
+        .full-table td { font-size: 0.93em; }
+        .reports-list { display: flex; flex-direction: column; gap: 12px; }
         .report-item {
-            border: 1px solid #e0e0e0;
-            border-radius: 8px;
-            padding: 12px;
-            background: #f8f9fa;
+            border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; background: #f8f9fa;
         }
-
-        .report-date {
-            font-weight: bold;
-            color: #333;
-            margin-bottom: 8px;
-            font-size: 0.95em;
+        .report-date { font-weight: bold; color: #333; margin-bottom: 8px; font-size: 0.95em; }
+        .report-links { display: flex; gap: 8px; flex-wrap: wrap; }
+        .rl {
+            flex: 1; padding: 6px 10px; border-radius: 5px; text-align: center;
+            text-decoration: none; font-size: 0.85em; font-weight: bold;
+            transition: all 0.3s; min-width: 70px;
         }
-
-        .report-links {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
-        .report-link {
-            flex: 1;
-            padding: 6px 10px;
-            border-radius: 5px;
-            text-align: center;
-            text-decoration: none;
-            font-size: 0.85em;
-            font-weight: bold;
-            transition: all 0.3s;
-            min-width: 80px;
-        }
-
-        .report-link.md { background-color: #667eea; color: white; }
-        .report-link.md:hover { background-color: #5568d3; }
-        .report-link.json { background-color: #764ba2; color: white; }
-        .report-link.json:hover { background-color: #653d89; }
-        .report-link.ml { background-color: #28a745; color: white; }
-        .report-link.ml:hover { background-color: #218838; }
-
+        .rl.md { background: #667eea; color: white; }
+        .rl.md:hover { background: #5568d3; }
+        .rl.ml { background: #28a745; color: white; }
+        .rl.ml:hover { background: #218838; }
         .footer {
-            text-align: center;
-            color: white;
-            margin-top: 30px;
-            font-size: 0.95em;
+            text-align: center; color: white; margin-top: 30px; font-size: 0.95em;
         }
-
-        .footer p {
-            margin: 5px 0;
-        }
-
+        .footer p { margin: 5px 0; }
         @media (max-width: 768px) {
-            .main-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .header {
-                padding: 20px;
-            }
-
-            .header h1 {
-                font-size: 1.8em;
-            }
-
-            .opportunities-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .full-table {
-                font-size: 0.85em;
-            }
-
-            .full-table th, .full-table td {
-                padding: 8px;
-            }
+            .main-grid { grid-template-columns: 1fr; }
+            .header { padding: 20px; }
+            .header h1 { font-size: 1.8em; }
+            .opp-grid { grid-template-columns: 1fr; }
+            .full-table { font-size: 0.82em; }
+            .full-table th, .full-table td { padding: 8px 6px; }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <!-- 页头 -->
-        <div class="header">
-            <h1>Alpha Hive 每日投资简报</h1>
-            <p>去中心化蜂群智能投资研究平台 | 6 个自治 Agent 协作分析</p>
+<div class="container">
+    <!-- 页头 -->
+    <div class="header">
+        <h1>Alpha Hive 每日投资简报</h1>
+        <p>去中心化蜂群智能投资研究平台 | 7 个自治 Agent + 二阶段看空对冲</p>
+        <div class="update-time">2026-02-25 10:56 UTC+8 | 蜂群耗时 19.1s | 数据真实度 60%</div>
+    </div>
+
+    <!-- 主内容 -->
+    <div class="main-grid">
+        <!-- 主区域：Top 机会 -->
+        <div class="section">
+            <h2>今日 Top 6 机会</h2>
+            <div class="opp-grid">
+
+                <!-- MSFT -->
+                <div class="opp-card">
+                    <div class="card-rank">#1</div>
+                    <div class="card-hd">
+                        <h3>MSFT</h3>
+                        <div class="dir-badge dir-bullish">看多</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="mr"><span class="lbl">综合分</span><span class="val sc-h">7.1/10</span></div>
+                        <div class="mr"><span class="lbl">共振信号</span><span class="res-badge res-y">5 Agent 共振</span></div>
+                        <div class="mr"><span class="lbl">投票</span><span class="val">5多 / 0空 / 2中</span></div>
+                        <div class="mr"><span class="lbl">IV Rank</span><span class="val">51.0</span></div>
+                        <div class="mr"><span class="lbl">P/C Ratio</span><span class="val sc-h">0.49</span></div>
+                        <div class="mr">
+                            <span class="lbl">看空强度</span>
+                            <span class="val">3.0/10</span>
+                        </div>
+                        <div class="bear-bar"><div class="bear-fill" style="width:30%"></div></div>
+                        <div class="mr"><span class="lbl">ML 报告</span><span class="val"><a href="alpha-hive-MSFT-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span></div>
+                    </div>
+                </div>
+
+                <!-- NVDA -->
+                <div class="opp-card">
+                    <div class="card-rank">#2</div>
+                    <div class="card-hd">
+                        <h3>NVDA</h3>
+                        <div class="dir-badge dir-bullish">看多</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="mr"><span class="lbl">综合分</span><span class="val sc-h">6.8/10</span></div>
+                        <div class="mr"><span class="lbl">共振信号</span><span class="res-badge res-y">5 Agent 共振</span></div>
+                        <div class="mr"><span class="lbl">投票</span><span class="val">5多 / 1空 / 1中</span></div>
+                        <div class="mr"><span class="lbl">IV Rank</span><span class="val">54.0</span></div>
+                        <div class="mr"><span class="lbl">P/C Ratio</span><span class="val">0.70</span></div>
+                        <div class="mr">
+                            <span class="lbl">看空强度</span>
+                            <span class="val">2.0/10</span>
+                        </div>
+                        <div class="bear-bar"><div class="bear-fill" style="width:20%"></div></div>
+                        <div class="mr"><span class="lbl">ML 报告</span><span class="val"><a href="alpha-hive-NVDA-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span></div>
+                    </div>
+                </div>
+
+                <!-- QCOM -->
+                <div class="opp-card">
+                    <div class="card-rank">#3</div>
+                    <div class="card-hd">
+                        <h3>QCOM</h3>
+                        <div class="dir-badge dir-bullish">看多</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="mr"><span class="lbl">综合分</span><span class="val sc-m">6.1/10</span></div>
+                        <div class="mr"><span class="lbl">共振信号</span><span class="res-badge res-y">4 Agent 共振</span></div>
+                        <div class="mr"><span class="lbl">投票</span><span class="val">4多 / 0空 / 3中</span></div>
+                        <div class="mr"><span class="lbl">IV Rank</span><span class="val">14.7</span></div>
+                        <div class="mr"><span class="lbl">P/C Ratio</span><span class="val sc-h">0.57</span></div>
+                        <div class="mr">
+                            <span class="lbl">看空强度</span>
+                            <span class="val">2.8/10</span>
+                        </div>
+                        <div class="bear-bar"><div class="bear-fill" style="width:28%"></div></div>
+                        <div class="mr"><span class="lbl">ML 报告</span><span class="val"><a href="alpha-hive-QCOM-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span></div>
+                    </div>
+                </div>
+
+                <!-- TSLA -->
+                <div class="opp-card">
+                    <div class="card-rank">#4</div>
+                    <div class="card-hd">
+                        <h3>TSLA</h3>
+                        <div class="dir-badge dir-bullish">看多</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="mr"><span class="lbl">综合分</span><span class="val sc-m">5.6/10</span></div>
+                        <div class="mr"><span class="lbl">共振信号</span><span class="res-badge res-y">3 Agent 共振</span></div>
+                        <div class="mr"><span class="lbl">投票</span><span class="val">3多 / 0空 / 4中</span></div>
+                        <div class="mr"><span class="lbl">IV Rank</span><span class="val">0.8</span></div>
+                        <div class="mr"><span class="lbl">P/C Ratio</span><span class="val">0.98</span></div>
+                        <div class="mr">
+                            <span class="lbl">看空强度</span>
+                            <span class="val">2.0/10</span>
+                        </div>
+                        <div class="bear-bar"><div class="bear-fill" style="width:20%"></div></div>
+                        <div class="mr"><span class="lbl">ML 报告</span><span class="val"><a href="alpha-hive-TSLA-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span></div>
+                    </div>
+                </div>
+
+                <!-- VKTX -->
+                <div class="opp-card">
+                    <div class="card-rank">#5</div>
+                    <div class="card-hd">
+                        <h3>VKTX</h3>
+                        <div class="dir-badge dir-neutral">中性</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="mr"><span class="lbl">综合分</span><span class="val sc-l">4.8/10</span></div>
+                        <div class="mr"><span class="lbl">共振信号</span><span class="res-badge res-n">无共振</span></div>
+                        <div class="mr"><span class="lbl">投票</span><span class="val">2多 / 0空 / 5中</span></div>
+                        <div class="mr"><span class="lbl">IV Rank</span><span class="val">20.2</span></div>
+                        <div class="mr"><span class="lbl">P/C Ratio</span><span class="val sc-h">0.13</span></div>
+                        <div class="mr">
+                            <span class="lbl">看空强度</span>
+                            <span class="val sc-m">4.0/10</span>
+                        </div>
+                        <div class="bear-bar"><div class="bear-fill" style="width:40%"></div></div>
+                        <div class="mr"><span class="lbl">ML 报告</span><span class="val"><a href="alpha-hive-VKTX-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span></div>
+                    </div>
+                </div>
+
+                <!-- AMD -->
+                <div class="opp-card">
+                    <div class="card-rank">#6</div>
+                    <div class="card-hd">
+                        <h3>AMD</h3>
+                        <div class="dir-badge dir-neutral">中性</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="mr"><span class="lbl">综合分</span><span class="val sc-l">4.0/10</span></div>
+                        <div class="mr"><span class="lbl">共振信号</span><span class="res-badge res-n">无共振</span></div>
+                        <div class="mr"><span class="lbl">投票</span><span class="val">2多 / 0空 / 5中</span></div>
+                        <div class="mr"><span class="lbl">IV Rank</span><span class="val">21.6</span></div>
+                        <div class="mr"><span class="lbl">P/C Ratio</span><span class="val sc-l">1.81</span></div>
+                        <div class="mr">
+                            <span class="lbl">看空强度</span>
+                            <span class="val">2.8/10</span>
+                        </div>
+                        <div class="bear-bar"><div class="bear-fill" style="width:28%"></div></div>
+                        <div class="mr"><span class="lbl">ML 报告</span><span class="val"><a href="alpha-hive-AMD-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span></div>
+                    </div>
+                </div>
+
+            </div>
         </div>
 
-        <!-- 主内容区域 -->
-        <div class="main-grid">
-            <!-- 主要机会 -->
+        <!-- 侧边栏 -->
+        <div>
+            <!-- 系统状态 -->
+            <div class="section" style="margin-bottom: 30px;">
+                <div class="status-card">
+                    <div class="status-hd">
+                        <h3>系统状态</h3>
+                        <div class="status-ind"><div class="status-dot"></div>运行正常</div>
+                    </div>
+                    <div class="si">
+                        <div class="sr"><span class="sl">更新日期</span><span class="sv">2026-02-25</span></div>
+                        <div class="sr"><span class="sl">更新时间</span><span class="sv">10:56 UTC+8</span></div>
+                        <div class="sr"><span class="sl">扫描耗时</span><span class="sv">19.1s</span></div>
+                        <div class="sr"><span class="sl">Agent 架构</span><span class="sv">7 Agent + 二阶段</span></div>
+                        <div class="sr"><span class="sl">共振检测</span><span class="sv">4/6 标的</span></div>
+                        <div class="sr"><span class="sl">数据真实度</span><span class="sv">60%</span></div>
+                        <div class="sr"><span class="sl">期权 IV 修正</span><span class="sv">ATM + 中位数</span></div>
+                        <div class="sr"><span class="sl">Agent 错误</span><span class="sv">0/48</span></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 最近报告 -->
             <div class="section">
-                <h2>今日 Top 5 机会</h2>
-                <div class="opportunities-grid">
-
-                    <div class="opportunity-card">
-                        <div class="card-rank">#1</div>
-                        <div class="card-header">
-                            <h3>MSFT</h3>
-                            <div class="direction" style="background-color: #28a745;">看多</div>
+                <h2>最近报告</h2>
+                <div class="reports-list">
+                    <div class="report-item">
+                        <div class="report-date">2026-02-25 (Today)</div>
+                        <div class="report-links">
+                            <a href="alpha-hive-daily-2026-02-25.md" class="rl md">Markdown 日报</a>
                         </div>
-                        <div class="card-content">
-                            <div class="metric-row">
-                                <span class="label">综合分</span>
-                                <span class="value score-high">7.1/10</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">置信度</span>
-                                <span class="value">60%</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">共振信号</span>
-                                <span class="resonance-badge resonance-yes">4 Agent 共振</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">支持 Agent</span>
-                                <span class="value">6/6</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">ML 报告</span>
-                                <span class="value"><a href="alpha-hive-MSFT-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span>
-                            </div>
+                        <div class="report-links" style="margin-top:6px;">
+                            <a href="alpha-hive-MSFT-ml-enhanced-2026-02-25.html" class="rl ml">MSFT</a>
+                            <a href="alpha-hive-NVDA-ml-enhanced-2026-02-25.html" class="rl ml">NVDA</a>
+                            <a href="alpha-hive-QCOM-ml-enhanced-2026-02-25.html" class="rl ml">QCOM</a>
+                        </div>
+                        <div class="report-links" style="margin-top:6px;">
+                            <a href="alpha-hive-TSLA-ml-enhanced-2026-02-25.html" class="rl ml">TSLA</a>
+                            <a href="alpha-hive-VKTX-ml-enhanced-2026-02-25.html" class="rl ml">VKTX</a>
+                            <a href="alpha-hive-AMD-ml-enhanced-2026-02-25.html" class="rl ml">AMD</a>
                         </div>
                     </div>
-
-                    <div class="opportunity-card">
-                        <div class="card-rank">#2</div>
-                        <div class="card-header">
-                            <h3>NVDA</h3>
-                            <div class="direction" style="background-color: #28a745;">看多</div>
-                        </div>
-                        <div class="card-content">
-                            <div class="metric-row">
-                                <span class="label">综合分</span>
-                                <span class="value score-high">6.8/10</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">置信度</span>
-                                <span class="value">60%</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">共振信号</span>
-                                <span class="resonance-badge resonance-yes">4 Agent 共振</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">支持 Agent</span>
-                                <span class="value">6/6</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">ML 报告</span>
-                                <span class="value"><a href="alpha-hive-NVDA-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="opportunity-card">
-                        <div class="card-rank">#3</div>
-                        <div class="card-header">
-                            <h3>QCOM</h3>
-                            <div class="direction" style="background-color: #28a745;">看多</div>
-                        </div>
-                        <div class="card-content">
-                            <div class="metric-row">
-                                <span class="label">综合分</span>
-                                <span class="value score-mid">6.2/10</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">置信度</span>
-                                <span class="value">60%</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">共振信号</span>
-                                <span class="resonance-badge resonance-yes">3 Agent 共振</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">支持 Agent</span>
-                                <span class="value">6/6</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">ML 报告</span>
-                                <span class="value"><a href="alpha-hive-QCOM-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="opportunity-card">
-                        <div class="card-rank">#4</div>
-                        <div class="card-header">
-                            <h3>TSLA</h3>
-                            <div class="direction" style="background-color: #fd7e14;">看多</div>
-                        </div>
-                        <div class="card-content">
-                            <div class="metric-row">
-                                <span class="label">综合分</span>
-                                <span class="value score-mid">5.6/10</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">置信度</span>
-                                <span class="value">60%</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">共振信号</span>
-                                <span class="resonance-badge resonance-yes">共振</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">支持 Agent</span>
-                                <span class="value">6/6</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">ML 报告</span>
-                                <span class="value"><a href="alpha-hive-TSLA-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="opportunity-card">
-                        <div class="card-rank">#5</div>
-                        <div class="card-header">
-                            <h3>VKTX</h3>
-                            <div class="direction" style="background-color: #fd7e14;">看多</div>
-                        </div>
-                        <div class="card-content">
-                            <div class="metric-row">
-                                <span class="label">综合分</span>
-                                <span class="value score-low">4.7/10</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">置信度</span>
-                                <span class="value">60%</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">共振信号</span>
-                                <span class="resonance-badge resonance-no">无共振</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">支持 Agent</span>
-                                <span class="value">6/6</span>
-                            </div>
-                            <div class="metric-row">
-                                <span class="label">ML 报告</span>
-                                <span class="value"><a href="alpha-hive-VKTX-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看详情</a></span>
-                            </div>
-                        </div>
-                    </div>
-
-                </div>
-            </div>
-
-            <!-- 侧边栏 -->
-            <div>
-                <!-- 系统状态 -->
-                <div class="section" style="margin-bottom: 30px;">
-                    <div class="status-card">
-                        <div class="status-header">
-                            <h3>系统状态</h3>
-                            <div class="status-indicator">
-                                <div class="status-dot"></div>
-                                运行正常
-                            </div>
-                        </div>
-                        <div class="status-info">
-                            <div class="status-row">
-                                <span class="status-label">更新日期</span>
-                                <span class="status-value">2026-02-25</span>
-                            </div>
-                            <div class="status-row">
-                                <span class="status-label">更新时间</span>
-                                <span class="status-value">08:44 UTC+8</span>
-                            </div>
-                            <div class="status-row">
-                                <span class="status-label">扫描耗时</span>
-                                <span class="status-value">19.1s</span>
-                            </div>
-                            <div class="status-row">
-                                <span class="status-label">Agent 数量</span>
-                                <span class="status-value">6 个自治 Agent</span>
-                            </div>
-                            <div class="status-row">
-                                <span class="status-label">共振检测</span>
-                                <span class="status-value">4/6 标的</span>
-                            </div>
-                            <div class="status-row">
-                                <span class="status-label">数据真实度</span>
-                                <span class="status-value">75%</span>
-                            </div>
-                            <div class="status-row">
-                                <span class="status-label">Agent 错误</span>
-                                <span class="status-value">0</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- 历史报告 -->
-                <div class="section">
-                    <h2>最近报告</h2>
-                    <div class="reports-list">
-                        <div class="report-item">
-                            <div class="report-date">2026-02-25 (Today)</div>
-                            <div class="report-links">
-                                <a href="alpha-hive-daily-2026-02-25.md" class="report-link md">Markdown</a>
-                                <a href="alpha-hive-daily-2026-02-25.json" class="report-link json">JSON</a>
-                            </div>
-                            <div class="report-links" style="margin-top: 6px;">
-                                <a href="alpha-hive-NVDA-ml-enhanced-2026-02-25.html" class="report-link ml">NVDA ML</a>
-                                <a href="alpha-hive-TSLA-ml-enhanced-2026-02-25.html" class="report-link ml">TSLA ML</a>
-                                <a href="alpha-hive-MSFT-ml-enhanced-2026-02-25.html" class="report-link ml">MSFT ML</a>
-                            </div>
-                            <div class="report-links" style="margin-top: 6px;">
-                                <a href="alpha-hive-AMD-ml-enhanced-2026-02-25.html" class="report-link ml">AMD ML</a>
-                                <a href="alpha-hive-QCOM-ml-enhanced-2026-02-25.html" class="report-link ml">QCOM ML</a>
-                                <a href="alpha-hive-VKTX-ml-enhanced-2026-02-25.html" class="report-link ml">VKTX ML</a>
-                            </div>
-                        </div>
-                        <div class="report-item">
-                            <div class="report-date">2026-02-24</div>
-                            <div class="report-links">
-                                <a href="alpha-hive-daily-2026-02-24.md" class="report-link md">Markdown</a>
-                                <a href="alpha-hive-daily-2026-02-24.json" class="report-link json">JSON</a>
-                            </div>
+                    <div class="report-item">
+                        <div class="report-date">2026-02-24</div>
+                        <div class="report-links">
+                            <a href="alpha-hive-daily-2026-02-24.md" class="rl md">Markdown 日报</a>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
-
-        <!-- 完整机会表格 -->
-        <div class="section" style="margin-bottom: 30px;">
-            <h2>完整机会清单</h2>
-            <table class="full-table">
-                <thead>
-                    <tr>
-                        <th>排序</th>
-                        <th>标的</th>
-                        <th>方向</th>
-                        <th>综合分</th>
-                        <th>共振</th>
-                        <th>支持 Agent</th>
-                        <th>置信度</th>
-                        <th>失效条件</th>
-                        <th>ML 详情</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>1</td>
-                        <td><strong>MSFT</strong></td>
-                        <td style="color:#28a745; font-weight:bold;">看多</td>
-                        <td class="score-high"><strong>7.1</strong>/10</td>
-                        <td><span class="resonance-badge resonance-yes">4 Agent</span></td>
-                        <td>6/6</td>
-                        <td>60%</td>
-                        <td>信号分散</td>
-                        <td><a href="alpha-hive-MSFT-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
-                    </tr>
-                    <tr>
-                        <td>2</td>
-                        <td><strong>NVDA</strong></td>
-                        <td style="color:#28a745; font-weight:bold;">看多</td>
-                        <td class="score-high"><strong>6.8</strong>/10</td>
-                        <td><span class="resonance-badge resonance-yes">4 Agent</span></td>
-                        <td>6/6</td>
-                        <td>60%</td>
-                        <td>信号分散</td>
-                        <td><a href="alpha-hive-NVDA-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
-                    </tr>
-                    <tr>
-                        <td>3</td>
-                        <td><strong>QCOM</strong></td>
-                        <td style="color:#28a745; font-weight:bold;">看多</td>
-                        <td class="score-mid"><strong>6.2</strong>/10</td>
-                        <td><span class="resonance-badge resonance-yes">3 Agent</span></td>
-                        <td>6/6</td>
-                        <td>60%</td>
-                        <td>信号分散</td>
-                        <td><a href="alpha-hive-QCOM-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
-                    </tr>
-                    <tr>
-                        <td>4</td>
-                        <td><strong>TSLA</strong></td>
-                        <td style="color:#fd7e14; font-weight:bold;">看多</td>
-                        <td class="score-mid"><strong>5.6</strong>/10</td>
-                        <td><span class="resonance-badge resonance-yes">共振</span></td>
-                        <td>6/6</td>
-                        <td>60%</td>
-                        <td>信号分散</td>
-                        <td><a href="alpha-hive-TSLA-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
-                    </tr>
-                    <tr>
-                        <td>5</td>
-                        <td><strong>VKTX</strong></td>
-                        <td style="color:#fd7e14; font-weight:bold;">看多</td>
-                        <td class="score-low"><strong>4.7</strong>/10</td>
-                        <td><span class="resonance-badge resonance-no">无</span></td>
-                        <td>6/6</td>
-                        <td>60%</td>
-                        <td>信号分散</td>
-                        <td><a href="alpha-hive-VKTX-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
-                    </tr>
-                    <tr>
-                        <td>6</td>
-                        <td><strong>AMD</strong></td>
-                        <td style="color:#fd7e14; font-weight:bold;">看多</td>
-                        <td class="score-low"><strong>4.4</strong>/10</td>
-                        <td><span class="resonance-badge resonance-no">无</span></td>
-                        <td>6/6</td>
-                        <td>60%</td>
-                        <td>信号分散</td>
-                        <td><a href="alpha-hive-AMD-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
-
-        <!-- 页脚 -->
-        <div class="footer">
-            <p>Alpha Hive - 完全自动化投资研究平台</p>
-            <p>最后更新：2026-02-25 08:44 UTC+8 | 本仪表板每日自动更新</p>
-            <p style="font-size: 0.9em; margin-top: 10px; opacity: 0.8;">
-                声明：本报告为 AI 蜂群自动生成，仅供参考，不构成投资建议。预测存在误差，所有交易决策需自行判断和风控。
-            </p>
         </div>
     </div>
+
+    <!-- 完整机会表格 -->
+    <div class="section" style="margin-bottom: 30px;">
+        <h2>完整机会清单</h2>
+        <table class="full-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>标的</th>
+                    <th>方向</th>
+                    <th>综合分</th>
+                    <th>共振</th>
+                    <th>投票(多/空/中)</th>
+                    <th>IV Rank</th>
+                    <th>P/C Ratio</th>
+                    <th>看空强度</th>
+                    <th>ML 详情</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>1</td>
+                    <td><strong>MSFT</strong></td>
+                    <td style="color:#28a745;font-weight:bold;">看多</td>
+                    <td class="sc-h"><strong>7.1</strong>/10</td>
+                    <td><span class="res-badge res-y">5 Agent</span></td>
+                    <td>5 / 0 / 2</td>
+                    <td>51.0</td>
+                    <td style="color:#28a745;font-weight:bold;">0.49</td>
+                    <td>3.0/10</td>
+                    <td><a href="alpha-hive-MSFT-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
+                </tr>
+                <tr>
+                    <td>2</td>
+                    <td><strong>NVDA</strong></td>
+                    <td style="color:#28a745;font-weight:bold;">看多</td>
+                    <td class="sc-h"><strong>6.8</strong>/10</td>
+                    <td><span class="res-badge res-y">5 Agent</span></td>
+                    <td>5 / 1 / 1</td>
+                    <td>54.0</td>
+                    <td>0.70</td>
+                    <td>2.0/10</td>
+                    <td><a href="alpha-hive-NVDA-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
+                </tr>
+                <tr>
+                    <td>3</td>
+                    <td><strong>QCOM</strong></td>
+                    <td style="color:#28a745;font-weight:bold;">看多</td>
+                    <td class="sc-m"><strong>6.1</strong>/10</td>
+                    <td><span class="res-badge res-y">4 Agent</span></td>
+                    <td>4 / 0 / 3</td>
+                    <td>14.7</td>
+                    <td style="color:#28a745;font-weight:bold;">0.57</td>
+                    <td>2.8/10</td>
+                    <td><a href="alpha-hive-QCOM-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
+                </tr>
+                <tr>
+                    <td>4</td>
+                    <td><strong>TSLA</strong></td>
+                    <td style="color:#28a745;font-weight:bold;">看多</td>
+                    <td class="sc-m"><strong>5.6</strong>/10</td>
+                    <td><span class="res-badge res-y">3 Agent</span></td>
+                    <td>3 / 0 / 4</td>
+                    <td>0.8</td>
+                    <td>0.98</td>
+                    <td>2.0/10</td>
+                    <td><a href="alpha-hive-TSLA-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
+                </tr>
+                <tr>
+                    <td>5</td>
+                    <td><strong>VKTX</strong></td>
+                    <td style="color:#ffc107;font-weight:bold;">中性</td>
+                    <td class="sc-l"><strong>4.8</strong>/10</td>
+                    <td><span class="res-badge res-n">无</span></td>
+                    <td>2 / 0 / 5</td>
+                    <td>20.2</td>
+                    <td style="color:#28a745;font-weight:bold;">0.13</td>
+                    <td style="color:#fd7e14;">4.0/10</td>
+                    <td><a href="alpha-hive-VKTX-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
+                </tr>
+                <tr>
+                    <td>6</td>
+                    <td><strong>AMD</strong></td>
+                    <td style="color:#ffc107;font-weight:bold;">中性</td>
+                    <td class="sc-l"><strong>4.0</strong>/10</td>
+                    <td><span class="res-badge res-n">无</span></td>
+                    <td>2 / 0 / 5</td>
+                    <td>21.6</td>
+                    <td style="color:#dc3545;font-weight:bold;">1.81</td>
+                    <td>2.8/10</td>
+                    <td><a href="alpha-hive-AMD-ml-enhanced-2026-02-25.html" style="color:#667eea;">查看</a></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- 页脚 -->
+    <div class="footer">
+        <p>Alpha Hive - 完全自动化蜂群智能投资研究平台</p>
+        <p>最后更新：2026-02-25 10:56 UTC+8 | 7 Agent 二阶段架构 | 期权 IV ATM 修正</p>
+        <p style="font-size:0.9em;margin-top:10px;opacity:0.8;">
+            声明：本报告为 AI 蜂群自动生成，仅供参考，不构成投资建议。预测存在误差，所有交易决策需自行判断和风控。
+        </p>
+    </div>
+</div>
 </body>
 </html>
