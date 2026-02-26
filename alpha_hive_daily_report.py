@@ -1557,7 +1557,7 @@ class AlphaHiveDailyReporter:
         return result
 
     def save_report(self, report: Dict) -> str:
-        """保存报告到文件"""
+        """保存报告到文件（MD / JSON / X线程 / index.html GitHub Pages）"""
 
         # 保存 JSON 版本
         json_file = self.report_dir / f"alpha-hive-daily-{self.date_str}.json"
@@ -1579,9 +1579,311 @@ class AlphaHiveDailyReporter:
             with open(thread_file, "w", encoding="utf-8") as f:
                 f.write(thread)
 
+        # 更新 GitHub Pages 仪表板
+        try:
+            html = self._generate_index_html(report)
+            index_file = self.report_dir / "index.html"
+            with open(index_file, "w", encoding="utf-8") as f:
+                f.write(html)
+            _log.info("index.html 已更新（GitHub Pages）")
+        except Exception as e:
+            _log.warning("index.html 生成失败: %s", e)
+
         _log.info("报告已保存：%s", md_file.name)
 
         return str(md_file)
+
+    def _generate_index_html(self, report: Dict) -> str:
+        """从 swarm report + .swarm_results_*.json 生成完整 GitHub Pages 仪表板"""
+        from datetime import datetime as _dt
+        import html as _html
+        from pathlib import Path as _Path
+
+        now_str = _dt.now().strftime("%Y-%m-%d %H:%M PST")
+        date_str = self.date_str
+        opps = report.get("opportunities", [])
+        meta = report.get("swarm_metadata", {})
+        n_tickers = meta.get("tickers_analyzed", len(opps))
+        n_agents = meta.get("total_agents", 7)
+        n_resonance = meta.get("resonances_detected", 0)
+
+        # 读取详细 swarm_results（含 IV Rank、P/C Ratio、内幕信号等）
+        swarm_detail: Dict = {}
+        try:
+            sr_path = self.report_dir / f".swarm_results_{date_str}.json"
+            if sr_path.exists():
+                with open(sr_path) as _f:
+                    swarm_detail = json.load(_f)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        # 将 opportunities 按 ticker 建立索引，并补充 swarm 详细数据
+        opp_by_ticker = {o.get("ticker"): o for o in opps}
+        # 若 swarm_detail 有更多 ticker（超过 opportunities 的 5 个），全部纳入
+        all_tickers_sorted = [o.get("ticker") for o in opps]
+        for t in swarm_detail:
+            if t not in all_tickers_sorted:
+                all_tickers_sorted.append(t)
+
+        dir_map = {"bullish": ("看多", "bullish", "#28a745"),
+                   "bearish": ("看空", "bearish", "#dc3545"),
+                   "neutral": ("中性", "neutral", "#ffc107")}
+
+        def sc_cls(score):
+            return "sc-h" if score >= 7.0 else ("sc-m" if score >= 5.5 else "sc-l")
+
+        def _detail(ticker):
+            """提取单个 ticker 的详细指标"""
+            sd = swarm_detail.get(ticker, {})
+            ad = sd.get("agent_details", {})
+            oracle = ad.get("OracleBeeEcho", {}).get("details", {})
+            scout_disc = ad.get("ScoutBeeNova", {}).get("discovery", "")
+            bear_score = ad.get("BearBeeContrarian", {}).get("score", 0.0)
+            ab = sd.get("agent_breakdown", {})
+            iv_rank = oracle.get("iv_rank", None)
+            pc = oracle.get("put_call_ratio", None)
+            real_pct = sd.get("data_real_pct", None)
+            # 内幕信号：取 ScoutBeeNova discovery 第一个 | 段
+            insider_hint = scout_disc.split("|")[0].strip() if scout_disc else ""
+            # 是否有内幕买入/卖出
+            insider_color = "#28a745" if "买入" in insider_hint else ("#dc3545" if "卖出" in insider_hint else "#666")
+            return {
+                "iv_rank": f"{iv_rank:.1f}" if iv_rank is not None else "-",
+                "pc": f"{pc:.2f}" if pc is not None else "-",
+                "bear_score": float(bear_score),
+                "bullish": ab.get("bullish", 0),
+                "bearish_v": ab.get("bearish", 0),
+                "neutral_v": ab.get("neutral", 0),
+                "insider_hint": _html.escape(insider_hint[:35]) if insider_hint else "",
+                "insider_color": insider_color,
+                "real_pct": f"{real_pct:.0f}%" if real_pct is not None else "-",
+            }
+
+        # 计算 avg real_pct
+        real_pcts = [swarm_detail[t].get("data_real_pct", 0) for t in swarm_detail if swarm_detail[t].get("data_real_pct")]
+        avg_real = f"{sum(real_pcts)/len(real_pcts):.0f}%" if real_pcts else "-"
+
+        # ── 机会卡片（Top 6）──
+        cards_html = ""
+        for i, ticker in enumerate(all_tickers_sorted[:6], 1):
+            opp = opp_by_ticker.get(ticker, {})
+            score = float(opp.get("opp_score") or swarm_detail.get(ticker, {}).get("final_score", 0))
+            direction = str(opp.get("direction") or swarm_detail.get(ticker, {}).get("direction", "neutral")).lower()
+            if direction not in dir_map:
+                direction = "bullish" if "多" in direction else ("bearish" if "空" in direction else "neutral")
+            resonance = opp.get("resonance", swarm_detail.get(ticker, {}).get("resonance", {}).get("resonance_detected", False))
+            supporting = int(opp.get("supporting_agents") or swarm_detail.get(ticker, {}).get("supporting_agents", 0))
+            dir_label, dir_cls, dir_color = dir_map[direction]
+            border = " style=\"border-color:#28a745;border-width:2px;\"" if i == 1 else ""
+            rank_style = " style=\"background:#28a745;color:white;\"" if i == 1 else ""
+            sc = sc_cls(score)
+            res_badge = (f'<span class="res-badge res-y">{supporting} Agent 共振</span>'
+                         if resonance else '<span class="res-badge res-n">无共振</span>')
+            d = _detail(ticker)
+            pc_color = ' style="color:#28a745;font-weight:bold;"' if d["pc"] != "-" and float(d["pc"]) < 0.7 else (
+                       ' style="color:#dc3545;font-weight:bold;"' if d["pc"] != "-" and float(d["pc"]) > 1.5 else "")
+            bear_pct = min(100, int(d["bear_score"] * 10))
+            insider_row = (f'<div class="mr"><span class="lbl">内幕信号</span>'
+                           f'<span class="val" style="color:{d["insider_color"]};">{d["insider_hint"]}</span></div>'
+                           if d["insider_hint"] else "")
+            ml_link = _Path(self.report_dir / f"alpha-hive-{ticker}-ml-enhanced-{date_str}.html")
+            ml_row = (f'<div class="mr"><span class="lbl">ML 报告</span>'
+                      f'<span class="val"><a href="alpha-hive-{ticker}-ml-enhanced-{date_str}.html" style="color:#667eea;">查看详情</a></span></div>'
+                      if ml_link.exists() else "")
+            cards_html += f"""
+                <div class="opp-card"{border}>
+                    <div class="card-rank"{rank_style}>#{i}</div>
+                    <div class="card-hd">
+                        <h3>{_html.escape(ticker)}</h3>
+                        <div class="dir-badge dir-{dir_cls}">{dir_label}</div>
+                    </div>
+                    <div class="card-body">
+                        <div class="mr"><span class="lbl">综合分</span><span class="val {sc}">{score:.1f}/10</span></div>
+                        <div class="mr"><span class="lbl">共振信号</span>{res_badge}</div>
+                        <div class="mr"><span class="lbl">投票</span><span class="val">{d['bullish']}多 / {d['bearish_v']}空 / {d['neutral_v']}中</span></div>
+                        <div class="mr"><span class="lbl">IV Rank</span><span class="val">{d['iv_rank']}</span></div>
+                        <div class="mr"><span class="lbl">P/C Ratio</span><span class="val"{pc_color}>{d['pc']}</span></div>
+                        {insider_row}
+                        <div class="mr"><span class="lbl">看空强度</span><span class="val">{d['bear_score']:.1f}/10</span></div>
+                        <div class="bear-bar"><div class="bear-fill" style="width:{bear_pct}%"></div></div>
+                        {ml_row}
+                    </div>
+                </div>"""
+
+        # ── 完整表格（全部 ticker）──
+        rows_html = ""
+        for i, ticker in enumerate(all_tickers_sorted, 1):
+            opp = opp_by_ticker.get(ticker, {})
+            score = float(opp.get("opp_score") or swarm_detail.get(ticker, {}).get("final_score", 0))
+            direction = str(opp.get("direction") or swarm_detail.get(ticker, {}).get("direction", "neutral")).lower()
+            if direction not in dir_map:
+                direction = "bullish" if "多" in direction else ("bearish" if "空" in direction else "neutral")
+            resonance = opp.get("resonance", swarm_detail.get(ticker, {}).get("resonance", {}).get("resonance_detected", False))
+            supporting = int(opp.get("supporting_agents") or swarm_detail.get(ticker, {}).get("supporting_agents", 0))
+            dir_label, _, dir_color = dir_map[direction]
+            sc = sc_cls(score)
+            d = _detail(ticker)
+            res_html = (f'<span class="res-badge res-y">{supporting} Agent</span>'
+                        if resonance else '<span class="res-badge res-n">无</span>')
+            row_style = " style=\"background:#f0fff0;\"" if i == 1 else ""
+            ml_link = _Path(self.report_dir / f"alpha-hive-{ticker}-ml-enhanced-{date_str}.html")
+            ml_td = (f'<a href="alpha-hive-{ticker}-ml-enhanced-{date_str}.html" style="color:#667eea;">查看</a>'
+                     if ml_link.exists() else "-")
+            pc_style = (' style="color:#28a745;font-weight:bold;"' if d["pc"] != "-" and float(d["pc"]) < 0.7
+                        else (' style="color:#dc3545;font-weight:bold;"' if d["pc"] != "-" and float(d["pc"]) > 1.5 else ""))
+            rows_html += f"""
+                <tr{row_style}>
+                    <td>{i}</td>
+                    <td><strong>{_html.escape(ticker)}</strong></td>
+                    <td style="color:{dir_color};font-weight:bold;">{dir_label}</td>
+                    <td class="{sc}"><strong>{score:.1f}</strong>/10</td>
+                    <td>{res_html}</td>
+                    <td>{d['bullish']} / {d['bearish_v']} / {d['neutral_v']}</td>
+                    <td>{d['iv_rank']}</td>
+                    <td{pc_style}>{d['pc']}</td>
+                    <td style="color:#fd7e14;">{d['bear_score']:.1f}/10</td>
+                    <td>{ml_td}</td>
+                </tr>"""
+
+        return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alpha Hive - 投资简报仪表板</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+               min-height: 100vh; padding: 20px; }}
+        .container {{ max-width: 1400px; margin: 0 auto; }}
+        .header {{ background: white; border-radius: 15px; padding: 40px;
+                   margin-bottom: 30px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); text-align: center; }}
+        .header h1 {{ font-size: 2.5em; color: #667eea; margin-bottom: 10px; }}
+        .header p {{ color: #666; font-size: 1.1em; }}
+        .header .update-time {{ display: inline-block; margin-top: 12px; padding: 6px 18px;
+            background: #f0f0ff; border-radius: 20px; color: #667eea; font-size: 0.95em; font-weight: 500; }}
+        .main-grid {{ display: grid; grid-template-columns: 2fr 1fr; gap: 30px; margin-bottom: 30px; }}
+        .section {{ background: white; border-radius: 15px; padding: 30px; box-shadow: 0 10px 40px rgba(0,0,0,0.1); }}
+        .section h2 {{ color: #667eea; font-size: 1.6em; margin-bottom: 20px;
+                       display: flex; align-items: center; gap: 10px; }}
+        .section h2::before {{ content: ''; display: inline-block; width: 4px; height: 28px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 2px; }}
+        .opp-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }}
+        .opp-card {{ border: 1px solid #e0e0e0; border-radius: 12px; padding: 22px;
+            background: linear-gradient(135deg, #f8f9fa 0%, #fff 100%); position: relative;
+            transition: transform 0.3s, box-shadow 0.3s; }}
+        .opp-card:hover {{ transform: translateY(-5px); box-shadow: 0 15px 35px rgba(102,126,234,0.2); }}
+        .card-rank {{ position: absolute; top: 10px; right: 15px; font-size: 0.85em;
+            font-weight: bold; color: #667eea; background: #f0f0f0; padding: 4px 8px; border-radius: 5px; }}
+        .card-hd {{ display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #eee; }}
+        .card-hd h3 {{ font-size: 1.5em; color: #333; }}
+        .dir-badge {{ padding: 4px 14px; border-radius: 20px; color: white; font-size: 0.85em; font-weight: bold; }}
+        .dir-bullish {{ background: #28a745; }} .dir-neutral {{ background: #ffc107; color: #333; }}
+        .dir-bearish {{ background: #dc3545; }}
+        .card-body {{ display: flex; flex-direction: column; gap: 8px; }}
+        .mr {{ display: flex; justify-content: space-between; align-items: center; padding: 6px 0; font-size: 0.93em; }}
+        .mr .lbl {{ color: #666; font-weight: 500; }} .mr .val {{ color: #333; font-weight: bold; }}
+        .sc-h {{ color: #28a745; }} .sc-m {{ color: #fd7e14; }} .sc-l {{ color: #dc3545; }}
+        .res-badge {{ display: inline-block; padding: 2px 10px; border-radius: 10px; font-size: 0.8em; font-weight: bold; }}
+        .res-y {{ background: #d4edda; color: #155724; }} .res-n {{ background: #f8d7da; color: #721c24; }}
+        .bear-bar {{ height: 6px; border-radius: 3px; background: #eee; margin-top: 4px; }}
+        .bear-fill {{ height: 100%; border-radius: 3px; background: linear-gradient(90deg, #ffc107, #dc3545); }}
+        .status-card {{ border: 2px solid #28a745; border-radius: 10px; padding: 20px;
+            background: linear-gradient(135deg, rgba(102,126,234,0.05), rgba(118,75,162,0.05)); }}
+        .status-hd {{ display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #eee; }}
+        .status-hd h3 {{ color: #667eea; font-size: 1.2em; }}
+        .status-ind {{ display: flex; align-items: center; gap: 8px; font-size: 1.1em; font-weight: bold; color: #28a745; }}
+        .status-dot {{ width: 12px; height: 12px; border-radius: 50%; background-color: #28a745; animation: pulse 2s infinite; }}
+        @keyframes pulse {{ 0%,100% {{ opacity:1; }} 50% {{ opacity:0.5; }} }}
+        .si {{ display: flex; flex-direction: column; gap: 10px; font-size: 0.95em; }}
+        .sr {{ display: flex; justify-content: space-between; }}
+        .sr .sl {{ color: #666; }} .sr .sv {{ color: #333; font-weight: bold; }}
+        .full-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+        .full-table th, .full-table td {{ padding: 11px 12px; text-align: left; border-bottom: 1px solid #eee; }}
+        .full-table th {{ background: linear-gradient(135deg, #667eea, #764ba2); color: white; font-weight: 600; font-size: 0.88em; }}
+        .full-table tr:hover {{ background-color: #f8f9fa; }}
+        .full-table td {{ font-size: 0.93em; }}
+        .footer {{ text-align: center; color: white; margin-top: 30px; font-size: 0.95em; }}
+        .footer p {{ margin: 5px 0; }}
+        @media (max-width: 768px) {{
+            .main-grid {{ grid-template-columns: 1fr; }}
+            .header {{ padding: 20px; }} .header h1 {{ font-size: 1.8em; }}
+            .opp-grid {{ grid-template-columns: 1fr; }}
+            .full-table {{ font-size: 0.82em; }} .full-table th, .full-table td {{ padding: 8px 6px; }}
+        }}
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>Alpha Hive 每日投资简报</h1>
+        <p>去中心化蜂群智能投资研究平台 | {n_agents} 个自治工蜂 + 二阶段看空对冲</p>
+        <div class="update-time">{now_str} | {n_tickers} 标的扫描 | SEC 真实数据 | 数据真实度 {avg_real}</div>
+    </div>
+    <div class="main-grid">
+        <div class="section">
+            <h2>今日 Top 6 机会</h2>
+            <div class="opp-grid">{cards_html}
+            </div>
+        </div>
+        <div>
+            <div class="section" style="margin-bottom: 30px;">
+                <div class="status-card">
+                    <div class="status-hd">
+                        <h3>系统状态</h3>
+                        <div class="status-ind"><div class="status-dot"></div>运行正常</div>
+                    </div>
+                    <div class="si">
+                        <div class="sr"><span class="sl">更新日期</span><span class="sv">{date_str}</span></div>
+                        <div class="sr"><span class="sl">最后更新</span><span class="sv">{now_str.split()[1]}</span></div>
+                        <div class="sr"><span class="sl">扫描标的</span><span class="sv">{n_tickers} 个</span></div>
+                        <div class="sr"><span class="sl">Agent 架构</span><span class="sv">{n_agents} Agent + 看空蜂</span></div>
+                        <div class="sr"><span class="sl">共振检测</span><span class="sv" style="color:#28a745;">{n_resonance}/{n_tickers} 标的</span></div>
+                        <div class="sr"><span class="sl">数据真实度</span><span class="sv" style="color:#28a745;">{avg_real}</span></div>
+                        <div class="sr"><span class="sl">SEC 数据</span><span class="sv" style="color:#28a745;">真实 EDGAR API</span></div>
+                    </div>
+                </div>
+            </div>
+            <div class="section">
+                <h2>今日报告</h2>
+                <div class="reports-list">
+                    <div class="report-item">
+                        <div class="report-date">{now_str} - 蜂群扫描 ({n_tickers}标的)</div>
+                        <div class="report-links">
+                            <a href="alpha-hive-daily-{date_str}.md" class="rl md">完整简报</a>
+                            <a href="alpha-hive-daily-{date_str}.json" class="rl" style="background:#764ba2;color:white;">JSON</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="section" style="margin-bottom: 30px;">
+        <h2>完整机会清单</h2>
+        <table class="full-table">
+            <thead>
+                <tr>
+                    <th>#</th><th>标的</th><th>方向</th><th>综合分</th><th>共振</th>
+                    <th>投票(多/空/中)</th><th>IV Rank</th><th>P/C Ratio</th><th>看空强度</th><th>ML 详情</th>
+                </tr>
+            </thead>
+            <tbody>{rows_html}
+            </tbody>
+        </table>
+    </div>
+    <div class="footer">
+        <p>Alpha Hive - 完全自动化蜂群智能投资研究平台</p>
+        <p>最后更新：{now_str} | {n_tickers} 标的蜂群扫描 | SEC 真实数据 | 数据真实度 {avg_real}</p>
+        <p style="font-size:0.9em;margin-top:10px;opacity:0.8;">
+            声明：本报告为 AI 蜂群自动生成，仅供参考，不构成投资建议。预测存在误差，所有交易决策需自行判断和风控。
+        </p>
+    </div>
+</div>
+</body>
+</html>"""
 
 
 def main():
