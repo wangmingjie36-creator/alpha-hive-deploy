@@ -91,12 +91,16 @@ class PheromoneBoard:
                     'support_count': entry.support_count,
                     'date': datetime.now().strftime("%Y-%m-%d")
                 }
-                future = self._executor.submit(
-                    self._memory_store.save_agent_memory, entry_dict, self._session_id
-                )
-                self._pending_futures.append(future)
-                # 清理已完成的 futures（防止内存泄漏）
-                self._pending_futures = [f for f in self._pending_futures if not f.done()]
+                try:
+                    future = self._executor.submit(
+                        self._memory_store.save_agent_memory, entry_dict, self._session_id
+                    )
+                    self._pending_futures.append(future)
+                    # 清理已完成的 futures（防止内存泄漏）
+                    self._pending_futures = [f for f in self._pending_futures if not f.done()]
+                except RuntimeError:
+                    # 执行器已被 atexit 关闭（多次实例化场景），跳过异步写入
+                    _log.debug("PheromoneBoard executor shut down, skipping async DB write")
 
     def get_top_signals(self, ticker: str = None, n: int = 5) -> List[PheromoneEntry]:
         """

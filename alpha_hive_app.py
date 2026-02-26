@@ -5,6 +5,7 @@ Alpha Hive Desktop - 像素蜂群动画桌面应用
 """
 
 import sys
+import json
 import tkinter as tk
 import math
 import time
@@ -220,6 +221,7 @@ class PixelBee:
         self.gather_y = 0
         self.speech_bubble = ""        # 头顶气泡文字
         self.speech_timer = 0
+        self.last_analysis = {}        # B1: 存储最近一次分析结果（供点击弹窗使用）
 
     def set_state(self, state, score=0.0, direction=""):
         self.state = state
@@ -736,6 +738,10 @@ class InteractionManager:
         # 线程安全 UI 操作队列：后台线程只往队列推操作，主线程消费
         self._ui_queue = Queue()
 
+        # A2: 取消扫描标志
+        self._cancel_requested = False
+        # A1: 扫描进度状态
+        self.scan_progress = {"current": 0, "total": 0, "ticker": "", "phase": ""}
         # 启动实时监控引擎
         self.monitor = LiveMonitor()
         self.monitor.start()
@@ -895,380 +901,241 @@ class InteractionManager:
         thread.start()
 
     def _run_real_scan(self, focus_tickers=None):
-        """真实扫描的核心逻辑（在后台线程执行）
-        所有 UI 操作通过 _enqueue 交给主线程执行，避免 tkinter 线程安全问题。
+        """真实扫描：直接调用 AlphaHiveDailyReporter.run_swarm_scan()
+        确保 App / CLI / GitHub 三端数据完全一致：
+          - 相同 7 个 Agent（含 BearBeeContrarian 看空对冲蜂）
+          - 相同 prefetch / VectorMemory / QueenDistiller 逻辑
+          - 扫描完成后自动保存报告 + git push 到 GitHub
         """
 
-        # ---- 导入后端模块 ----
+        # ---- 导入完整日报引擎 ----
         try:
-            from pheromone_board import PheromoneBoard
-            from swarm_agents import (
-                ScoutBeeNova, OracleBeeEcho, BuzzBeeWhisper,
-                ChronosBeeHorizon, RivalBeeVanguard, GuardBeeSentinel,
-                QueenDistiller
-            )
+            from alpha_hive_daily_report import AlphaHiveDailyReporter
             from config import WATCHLIST
         except ImportError as e:
-            self._enqueue(self._log, "System", f"导入后端模块失败：{e}", "alert")
+            self._enqueue(self._log, "System", f"日报引擎导入失败：{e}", "alert")
+            self.scan_phase = "idle"
             return
 
-        # 可选：导入记忆层
-        memory_store = None
-        try:
-            from memory_store import MemoryStore
-            memory_store = MemoryStore()
-        except (ImportError, OSError, ValueError, RuntimeError) as e:
-            _log.debug("MemoryStore unavailable in scan: %s", e)
+        targets = focus_tickers or list(WATCHLIST.keys())[:10]
+        self.scan_progress = {"current": 0, "total": len(targets), "ticker": "", "phase": "foraging"}
 
-        bee_ids = list(self.bees.keys())
-
-        # ===== 阶段 1：任务分解 =====
+        # ===== 阶段 1：任务分解 + 动画准备 =====
         self.scan_phase = "decomposing"
-        self._enqueue(self._log, "System", "--- 阶段 1：任务分解（真实数据）---", "phase")
+        self._enqueue(self._log, "System", "--- Alpha Hive 完整蜂群引擎启动 ---", "phase")
+        self._enqueue(self._log, "System", f"模式：7 Agent（含 BearBeeContrarian 看空蜂）| 标的：{len(targets)} 个", "system")
+        self._enqueue(self._log, "ScoutBeeNova", f"目标：{', '.join(targets)}", "system")
 
-        # 确定扫描标的
-        if focus_tickers:
-            targets = focus_tickers
-        else:
-            targets = list(WATCHLIST.keys())[:5]
-
-        self._enqueue(self._log, "ScoutBeeNova", f"启动真实扫描，目标：{', '.join(targets)}", "system")
-
-        leader = self.bees.get("ScoutBeeNova")
-        if leader:
-            self._enqueue(leader.say, "出发!", 50)
-            self._enqueue(leader.set_state, "working")
-        time.sleep(0.5)
-
-        self._enqueue(self.broadcast, "ScoutBeeNova", "signal", "全员出动！开始采集真实数据")
-        time.sleep(0.5)
-
-        # 创建真实的信息素板
-        session_id = f"desktop_{int(time.time())}"
-        board = PheromoneBoard(memory_store=memory_store, session_id=session_id)
-
-        # 实例化真实 Agent
-        real_agents = [
-            ScoutBeeNova(board),
-            OracleBeeEcho(board),
-            BuzzBeeWhisper(board),
-            ChronosBeeHorizon(board),
-            RivalBeeVanguard(board),
-            GuardBeeSentinel(board),
-        ]
-        # Phase 6: 加载自适应权重（如有历史回测数据）
-        adapted_w = None
-        try:
-            from backtester import Backtester
-            adapted_w = Backtester.load_adapted_weights()
-        except (ImportError, OSError, ValueError, KeyError) as e:
-            _log.debug("Adapted weights unavailable: %s", e)
-        queen = QueenDistiller(board, adapted_weights=adapted_w)
-
-        agent_name_map = {
-            "ScoutBeeNova":      "收到，正在拉取 SEC 披露和机构持仓",
-            "OracleBeeEcho":     "收到，正在拉取期权链和 IV 数据",
-            "BuzzBeeWhisper":    "了解，扫描 X 平台情绪中",
-            "ChronosBeeHorizon": "检查催化剂日历和财报日期中",
-            "RivalBeeVanguard":  "分析竞争格局中",
+        agent_readymap = {
+            "ScoutBeeNova":      "拉取 SEC 披露和机构持仓",
+            "OracleBeeEcho":     "拉取期权链和 IV 数据",
+            "BuzzBeeWhisper":    "扫描 X/Reddit 情绪",
+            "ChronosBeeHorizon": "检查催化剂和财报日历",
+            "RivalBeeVanguard":  "分析竞争格局 + ML 预测",
             "GuardBeeSentinel":  "待命，准备交叉验证",
+            "CodeExecutorAgent": "代码执行分析就绪",
         }
-        for agent in real_agents:
-            name = agent.__class__.__name__
+        for name, msg in agent_readymap.items():
             bee = self.bees.get(name)
             if bee:
                 self._enqueue(bee.set_state, "working")
-            msg = agent_name_map.get(name, "已就绪")
+                self._enqueue(bee.say, "就绪", 40)
             self._enqueue(self._log, name, msg, "chat")
-            time.sleep(0.05)
+            time.sleep(0.04)
 
-        self._enqueue(self._log, "System", f"蜂群配置：{len(real_agents)} 个真实 Agent，{len(targets)} 个标的", "system")
+        self._enqueue(self.broadcast, "ScoutBeeNova", "signal", "全员出动！调用完整蜂群引擎")
+        time.sleep(0.5)
 
-        # ===== 阶段 2：觅食采集（真实并行执行）=====
-        self.scan_phase = "foraging"
-        self._enqueue(self._log, "System", "--- 阶段 2：觅食采集（调用真实 API）---", "phase")
+        # ===== 阶段 2：实例化报告引擎 =====
+        try:
+            reporter = AlphaHiveDailyReporter()
+        except Exception as e:
+            self._enqueue(self._log, "System", f"日报引擎初始化失败：{e}", "alert")
+            self._enqueue(self.disperse_all)
+            self.scan_phase = "idle"
+            self.scan_progress = {"current": 0, "total": 0, "ticker": "", "phase": ""}
+            return
 
+        # ===== 阶段 3：进度回调（每完成一个 ticker 触发动画）=====
         all_swarm_results = {}
-        scan_start = time.time()
+        bee_ids = list(self.bees.keys())
 
-        for t_idx, ticker in enumerate(targets, 1):
-            self._enqueue(self._log, "System", f"[{t_idx}/{len(targets)}] 开始分析 {ticker}...", "system")
-
-            # 并行执行所有 Agent
-            with ThreadPoolExecutor(max_workers=len(real_agents)) as executor:
-                futures = {
-                    executor.submit(agent.analyze, ticker): agent
-                    for agent in real_agents
-                }
-                agent_results = []
-
-                for future in as_completed(futures):
-                    agent = futures[future]
-                    agent_name = agent.__class__.__name__
-                    bee = self.bees.get(agent_name)
-
-                    try:
-                        result = future.result(timeout=30)
-                        agent_results.append(result)
-
-                        score = result.get("score", 0)
-                        direction = result.get("direction", "neutral")
-                        discovery = result.get("discovery", "")
-                        error = result.get("error", "")
-
-                        # 更新蜜蜂视觉状态（通过队列）
-                        if bee:
-                            self._enqueue(bee.set_state, "publishing", score)
-                            self._enqueue(bee.say, f"{ticker} {score:.1f}", 50)
-
-                        # 方向映射为中文
-                        dir_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(direction, direction)
-
-                        # 日志输出真实发现
-                        if error:
-                            self._enqueue(self._log, agent_name, f"{ticker} ({score:.1f}) 降级 - {error[:60]}", "alert")
-                        else:
-                            self._enqueue(self._log, agent_name, f"{ticker} ({score:.1f}) {dir_cn} - {discovery[:60]}", "discovery")
-
-                        # 向随机 2 个蜜蜂发送消息动画
-                        other_ids = [a for a in bee_ids if a != agent_name]
-                        msg_targets = random.sample(other_ids, min(2, len(other_ids)))
-                        mtype = "alert" if score >= 7.0 else "signal"
-                        for tid in msg_targets:
-                            self._enqueue(self.send_message, agent_name, tid, mtype)
-
-                    except (ImportError, ValueError, KeyError, TypeError, AttributeError, ConnectionError) as e:
-                        _log.warning("Agent %s failed for %s: %s", agent_name, ticker, e)
-                        self._enqueue(self._log, agent_name, f"{ticker} 分析失败：{str(e)[:50]}", "alert")
-                        agent_results.append(None)
-                        if bee:
-                            self._enqueue(bee.say, "ERR", 30)
-
-                    time.sleep(0.15)  # 短暂间隔让动画可见
-
-            # ===== 阶段 3：交叉共振（真实共振检测）=====
-            self.scan_phase = "resonating"
-            if t_idx == 1:
-                self._enqueue(self._log, "System", "--- 阶段 3：交叉共振检测 ---", "phase")
-
-            self._enqueue(self._log, "GuardBeeSentinel", f"正在检测 {ticker} 信号一致性...", "chat")
-
-            # 检测真实共振
-            resonance = board.detect_resonance(ticker)
-            if resonance.get("resonance_detected"):
-                supporting = resonance.get("supporting_agents", 0)
-                res_dir = resonance.get("direction", "?")
-                dir_cn = {"bullish": "看多", "bearish": "看空"}.get(res_dir, res_dir)
-                boost = resonance.get("confidence_boost", 0)
-
-                self._enqueue(self._log, "GuardBeeSentinel",
-                              f"{ticker} 共振确认！{supporting} Agent 同向{dir_cn}，加成 +{boost}%",
-                              "resonance")
-
-                # 找出同向 Agent，画共振连线
-                valid = [r for r in agent_results if r and r.get("direction") == res_dir]
-                res_agents = [r.get("source", "") for r in valid]
-                for i in range(len(res_agents)):
-                    for j in range(i + 1, len(res_agents)):
-                        a_id = res_agents[i]
-                        b_id = res_agents[j]
-                        if a_id in self.bees and b_id in self.bees:
-                            self._enqueue(self.create_resonance, a_id, b_id, 0.9, ticker)
-
-                self._enqueue(self.broadcast, "GuardBeeSentinel", "resonance",
-                              f"{ticker} 共振 - {supporting} Agent 同向{dir_cn}")
-            else:
-                self._enqueue(self._log, "GuardBeeSentinel", f"{ticker} 未检测到共振（信号分散）", "chat")
-
-            time.sleep(0.3)
-
-            # ===== QueenDistiller 蒸馏（真实汇总）=====
-            distilled = queen.distill(ticker, agent_results)
+        def on_ticker_done(idx, total, ticker, distilled):
+            """run_swarm_scan 每完成一个 ticker 时回调，同步更新 UI 动画"""
             all_swarm_results[ticker] = distilled
+            self.scan_progress = {"current": idx, "total": total, "ticker": ticker, "phase": "distilling"}
 
             final_score = distilled.get("final_score", 0)
-            final_dir = distilled.get("direction", "neutral")
-            dir_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(final_dir, final_dir)
+            direction = distilled.get("direction", "neutral")
+            dir_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(direction, direction)
+            resonance = distilled.get("resonance", {})
+            res_tag = "共振✅" if resonance.get("resonance_detected") else "无共振"
             breakdown = distilled.get("agent_breakdown", {})
 
-            self._enqueue(self._log, "System",
-                          f"{ticker} 蒸馏完成：{final_score:.1f}/10 {dir_cn} "
-                          f"(多{breakdown.get('bullish',0)}/空{breakdown.get('bearish',0)}/中{breakdown.get('neutral',0)})",
-                          "system")
+            # 更新每只蜜蜂状态（来自 agent_details）
+            for agent_name, agent_data in distilled.get("agent_details", {}).items():
+                bee = self.bees.get(agent_name)
+                if bee:
+                    score = agent_data.get("score", 0)
+                    self._enqueue(bee.set_state, "publishing", score)
+                    self._enqueue(bee.say, f"{ticker} {score:.1f}", 50)
+                    bee.last_analysis = dict(agent_data)  # B1: 供点击弹窗
 
-            # 高分标的触发摆尾舞
+            # 聊天日志：结果摘要
+            self._enqueue(self._log, "System",
+                f"[{idx}/{total}] {ticker}：{final_score:.1f}/10 {dir_cn} | {res_tag} "
+                f"(多{breakdown.get('bullish',0)}/空{breakdown.get('bearish',0)}/中{breakdown.get('neutral',0)})",
+                "alert")
+
+            # 共振可视化
+            if resonance.get("resonance_detected"):
+                supporting = resonance.get("supporting_agents", 0)
+                boost = resonance.get("confidence_boost", 0)
+                self._enqueue(self._log, "GuardBeeSentinel",
+                    f"{ticker} 共振！{supporting} Agent 同向{dir_cn}，置信+{boost}%", "resonance")
+                # 画共振连线（随机取 3 对）
+                agents_list = list(self.bees.keys())
+                for i in range(min(3, len(agents_list))):
+                    for j in range(i+1, min(4, len(agents_list))):
+                        self._enqueue(self.create_resonance, agents_list[i], agents_list[j], 0.85, ticker)
+                self._enqueue(self.broadcast, "GuardBeeSentinel", "resonance",
+                    f"{ticker} 共振 - {supporting} Agent 同向{dir_cn}")
+
+            # D2: 高分音效 + 摆尾舞
+            if final_score >= 7.5:
+                os.system("afplay /System/Library/Sounds/Glass.aiff &")
             if final_score >= 7.0:
-                best_agent = max(
-                    [r for r in agent_results if r],
-                    key=lambda r: r.get("score", 0),
-                    default=None
-                )
-                if best_agent:
-                    dancer_id = best_agent.get("source", "ScoutBeeNova")
-                    if dancer_id in self.bees:
-                        self.scan_phase = "dancing"
-                        self._enqueue(self._log, "System", f"--- {ticker} 高价值信号！摆尾舞 ---", "phase")
-                        self._enqueue(self.start_waggle_dance, dancer_id, ticker, final_score)
-                        time.sleep(1.5)
-                        self._enqueue(self.bees[dancer_id].stop_dance)
+                self.scan_phase = "dancing"
+                self._enqueue(self._log, "System", f"--- {ticker} 高分！摆尾舞 ---", "phase")
+                self._enqueue(self.start_waggle_dance, "ScoutBeeNova", ticker, final_score)
+                time.sleep(1.2)
+                scout = self.bees.get("ScoutBeeNova")
+                if scout:
+                    self._enqueue(scout.stop_dance)
+                self.scan_phase = "foraging"
 
             time.sleep(0.2)
+
+        # ===== 阶段 4：执行完整蜂群扫描（委托给 AlphaHiveDailyReporter）=====
+        self.scan_phase = "foraging"
+        self._enqueue(self._log, "System", "--- 阶段 2-4：7 Agent 并行觅食→共振→蒸馏 ---", "phase")
+        scan_start = time.time()
+
+        try:
+            report = reporter.run_swarm_scan(
+                focus_tickers=focus_tickers,
+                progress_callback=on_ticker_done,
+            )
+        except Exception as e:
+            self._enqueue(self._log, "System", f"蜂群扫描出错：{str(e)[:80]}", "alert")
+            self._enqueue(self.disperse_all)
+            self.scan_phase = "idle"
+            self.scan_progress = {"current": 0, "total": 0, "ticker": "", "phase": ""}
+            return
+
+        # A2: 取消检测（扫描完成后检查）
+        if self._cancel_requested:
+            self._cancel_requested = False
+            self._enqueue(self._log, "System", "⚠ 扫描已取消", "alert")
+            self._enqueue(self.disperse_all)
+            self.scan_phase = "idle"
+            self.scan_progress = {"current": 0, "total": 0, "ticker": "", "phase": ""}
+            return
+
+        elapsed = time.time() - scan_start
 
         # ===== 阶段 5：最终蒸馏汇总 =====
         self.scan_phase = "distilling"
         self._enqueue(self._log, "System", "--- 阶段 5：最终蒸馏汇总 ---", "phase")
+        self._enqueue(self.gather_all, 250, 200)
+        self._enqueue(self._log, "System", "女王蒸馏蜂汇总完成，共振计数结束", "system")
+        time.sleep(1.2)
 
-        center_x, center_y = 250, 200
-        self._enqueue(self.gather_all, center_x, center_y)
-        self._enqueue(self._log, "System", "全员聚集，女王蒸馏蜂开始汇总...", "system")
-        time.sleep(1.5)
-
-        # 投票汇总
-        for bee in self.bees.values():
-            self._enqueue(bee.say, "", 0)
-
-        for ticker, data in all_swarm_results.items():
-            score = data.get("final_score", 0)
-            direction = data.get("direction", "neutral")
-            dir_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(direction, direction)
-            res = data.get("resonance", {})
-            res_tag = "共振" if res.get("resonance_detected") else "无共振"
-            agents_n = data.get("supporting_agents", 0)
-
-            priority = "高优先级" if score >= 7.5 else ("观察名单" if score >= 6.0 else "暂不行动")
-            self._enqueue(self._log, "System", f"{ticker}：{score:.1f}/10 {dir_cn} | {res_tag} | {agents_n} Agent | {priority}", "alert")
-
-            # 更新所有蜜蜂的最终评分
+        # 结果排序 + 摘要输出
+        self._enqueue(self._log, "System", "─── 蜂群简报 ───", "phase")
+        for ticker, data in sorted(all_swarm_results.items(), key=lambda x: x[1].get("final_score", 0), reverse=True):
+            s = data.get("final_score", 0)
+            d_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(data.get("direction", ""), "中性")
+            tag = "高优先" if s >= 7.5 else ("观察" if s >= 6.0 else "暂不动")
+            res = "共振✅" if data.get("resonance", {}).get("resonance_detected") else ""
+            self._enqueue(self._log, "System", f"【{ticker}】{s:.1f}/10 {d_cn} [{tag}] {res}", "alert")
             for bee in self.bees.values():
-                self._enqueue(bee.set_state, "publishing", score)
-                self._enqueue(bee.say, f"{score:.1f}!", 30)
-            time.sleep(0.3)
+                self._enqueue(bee.set_state, "publishing", s)
+                self._enqueue(bee.say, f"{s:.1f}!", 25)
+            time.sleep(0.2)
 
-        elapsed = time.time() - scan_start
-        self._enqueue(self._log, "System", f"扫描耗时：{elapsed:.1f}s，共分析 {len(targets)} 个标的", "system")
+        self._enqueue(self._log, "System", "─── 简报结束 ───", "phase")
+        self._enqueue(self._log, "System", f"耗时 {elapsed:.1f}s | {len(targets)} 标的 | 按 [R] 查看完整简报", "system")
 
-        # 全员共振效果
+        # 全员共振庆祝动画
         all_ids = list(self.bees.keys())
         for i in range(len(all_ids)):
             for j in range(i + 1, len(all_ids)):
                 if random.random() < 0.3:
                     self._enqueue(self.create_resonance, all_ids[i], all_ids[j], 1.0)
-        time.sleep(1.5)
+        time.sleep(1.2)
 
-        # ===== 阶段 6：散开 =====
-        self._enqueue(self._log, "System", "--- 阶段 6：扫描完成 ---", "phase")
+        # ===== 阶段 6：保存报告 + 推送 GitHub（保持三端一致）=====
+        self._enqueue(self._log, "System", "--- 阶段 6：保存报告 + GitHub 同步 ---", "phase")
+        try:
+            reporter.save_report(report)
+            self._enqueue(self._log, "System", "报告文件已保存（MD/JSON/X线程）", "system")
+        except Exception as e:
+            self._enqueue(self._log, "System", f"报告保存失败：{str(e)[:60]}", "alert")
+
+        try:
+            reporter.auto_commit_and_notify(report)
+            self._enqueue(self._log, "System", "✅ GitHub 推送完成，网站已同步", "system")
+        except Exception as e:
+            self._enqueue(self._log, "System", f"GitHub 推送失败：{str(e)[:60]}", "alert")
 
         # 更新面板数据
+        has_ref = hasattr(self, '_app_ref') and self._app_ref
         opps = []
         top_dims = None
         for ticker, data in sorted(all_swarm_results.items(), key=lambda x: x[1].get("final_score", 0), reverse=True):
             opps.append({"ticker": ticker, "score": data.get("final_score", 0), "direction": data.get("direction", "neutral")})
             if top_dims is None and data.get("dimension_scores"):
-                raw_dims = data["dimension_scores"]
-                top_dims = {k: float(v) for k, v in raw_dims.items()}
-
-        has_ref = hasattr(self, '_app_ref') and self._app_ref
+                top_dims = {k: float(v) for k, v in data["dimension_scores"].items()}
         if opps and has_ref:
             self._app_ref.system_data["opportunities"] = opps[:4]
             if top_dims:
                 self._app_ref.system_data["dimension_scores"] = top_dims
-            # 保存扫描结果供简报视图使用
             self._app_ref.last_swarm_results = dict(all_swarm_results)
 
-        # ===== Phase 6：反馈进化（保存预测 + 回测 + 权重自适应）=====
+        # 更新历史预测面板
         try:
             from backtester import Backtester
             bt = Backtester()
-            saved = bt.save_predictions(all_swarm_results)
-            bt_result = bt.run_backtest()
-            bt.adapt_weights(min_samples=5)
-
-            # 汇总回测结果
-            bt_parts = []
-            for period in ["t1", "t7", "t30"]:
-                r = bt_result.get(period, {})
-                checked = r.get("checked", 0)
-                correct = r.get("correct", 0)
-                if checked > 0:
-                    acc = correct / checked * 100
-                    bt_parts.append(f"T+{period[1:]}:{correct}/{checked}({acc:.0f}%)")
-            if bt_parts:
-                self._enqueue(self._log, "System",
-                    f"Phase6 回测：{' | '.join(bt_parts)}", "system")
-            else:
-                self._enqueue(self._log, "System",
-                    f"Phase6 已保存 {saved} 条预测（待回测）", "system")
-
-            # 更新面板：加载历史预测记录
             if has_ref:
-                try:
-                    preds = bt.store.get_all_predictions(days=7)
-                    self._app_ref.system_data["prediction_history"] = preds[:5]
-                    # 加载自适应权重到面板显示
-                    adapted_w = Backtester.load_adapted_weights()
-                    if adapted_w:
-                        self._app_ref.system_data["adapted_weights"] = adapted_w
-                except (OSError, ValueError, KeyError, AttributeError) as e:
-                    _log.debug("Phase6 panel update failed: %s", e)
-        except (ImportError, OSError, ValueError, KeyError, TypeError) as e:
-            _log.warning("Phase6 backtest failed: %s", e)
-            self._enqueue(self._log, "System", f"Phase6 回测异常：{str(e)[:50]}", "alert")
+                preds = bt.store.get_all_predictions(days=7)
+                self._app_ref.system_data["prediction_history"] = preds[:5]
+                adapted_w = Backtester.load_adapted_weights()
+                if adapted_w:
+                    self._app_ref.system_data["adapted_weights"] = adapted_w
+        except (ImportError, OSError, ValueError, KeyError, AttributeError):
+            pass
 
-        # 提示简报快捷键
-        self._enqueue(self._log, "System", "按 [R] 键查看完整 8 版块简报", "system")
-
-        summary_parts = []
-        for ticker, data in sorted(all_swarm_results.items(), key=lambda x: x[1].get("final_score", 0), reverse=True):
-            s = data.get("final_score", 0)
-            d_cn = {"bullish": "多", "bearish": "空", "neutral": "中"}.get(data.get("direction", ""), "?")
-            summary_parts.append(f"{ticker} {s:.1f}{d_cn}")
-        self._enqueue(self._log, "System", f"简报已生成：{' | '.join(summary_parts)}", "system")
-
-        # ===== 详细报告输出到聊天框 =====
-        self._enqueue(self._log, "System", "─── 蜂群简报 ───", "phase")
-        for ticker, data in sorted(all_swarm_results.items(), key=lambda x: x[1].get("final_score", 0), reverse=True):
-            s = data.get("final_score", 0)
-            d = data.get("direction", "neutral")
-            d_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(d, d)
-            res = data.get("resonance", {})
-            dims = data.get("dimension_scores", {})
-            breakdown = data.get("agent_breakdown", {})
-
-            # 优先级标签
-            if s >= 7.5:
-                tag = "高优先"
-            elif s >= 6.0:
-                tag = "观察"
-            else:
-                tag = "暂不动"
-
-            self._enqueue(self._log, "System",
-                f"【{ticker}】{s:.1f}/10 {d_cn} [{tag}]", "alert")
-
-            # 5 维明细
-            dim_names = {"signal": "信号", "catalyst": "催化", "sentiment": "情绪", "odds": "赔率", "risk_adj": "风控"}
-            dim_parts = [f"{dim_names.get(k,k)}{float(v):.1f}" for k, v in dims.items()]
-            if dim_parts:
-                self._enqueue(self._log, "System",
-                    f"  五维: {' | '.join(dim_parts)}", "system")
-
-            # 投票结果
-            if breakdown:
-                self._enqueue(self._log, "System",
-                    f"  投票: 多{breakdown.get('bullish',0)} 空{breakdown.get('bearish',0)} 中{breakdown.get('neutral',0)}"
-                    + (" | 共振确认" if res.get("resonance_detected") else ""), "system")
-
-        self._enqueue(self._log, "System", "─── 简报结束 ───", "phase")
-
+        # 散开 + 恢复 idle
         for bee in self.bees.values():
             self._enqueue(bee.say, "完成", 40)
-        time.sleep(1.0)
-
-        # 最终恢复：散开 + 所有蜜蜂回到 idle
+        time.sleep(0.8)
         self._enqueue(self.disperse_all)
         for bee in self.bees.values():
             self._enqueue(bee.set_state, "idle")
         self._enqueue(self._log, "System", "全员返回待命，下次扫描：08:00（周一至周五）", "system")
+        # C2: macOS 系统通知（扫描完成）
+        try:
+            best = max(all_swarm_results.items(), key=lambda x: x[1].get("final_score", 0))
+            b_ticker, b_data = best
+            b_score = b_data.get("final_score", 0)
+            b_dir = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(b_data.get("direction", ""), "")
+            notif = f"最高：{b_ticker} {b_score:.1f}/10 {b_dir}"
+            os.system(f'osascript -e \'display notification "{notif}" with title "Alpha Hive 扫描完成" sound name "Glass"\' &')
+        except (ValueError, OSError):
+            pass
+        # A1: 重置进度
+        self.scan_progress = {"current": 0, "total": 0, "ticker": "", "phase": ""}
         self.scan_phase = "idle"
 
     def _random_idle_interaction(self):
@@ -1372,6 +1239,7 @@ class InfoPanel:
         self.width = width
         self.height = height
         self.items = []
+        self.opportunity_regions = []  # B2: [(y1, y2, ticker), ...] 供点击跳转简报
 
     def update(self, data, scan_phase="idle"):
         for item in self.items:
@@ -1420,6 +1288,7 @@ class InfoPanel:
         y += 15
         self._text(self.x+10, y, "LATEST SCAN", "#FFB800", 10, "bold")
 
+        self.opportunity_regions = []  # B2: 重置可点击区域
         for opp in data.get("opportunities", [])[:4]:
             y += 16
             ticker = opp.get("ticker", "???")
@@ -1427,7 +1296,9 @@ class InfoPanel:
             direction = opp.get("direction", "neutral")
             sym = {"bullish": "+", "bearish": "-", "neutral": "~"}.get(direction, "?")
             clr = {"bullish": "#27AE60", "bearish": "#E74C3C", "neutral": "#7F8C8D"}.get(direction, "#888")
-            self._text(self.x+10, y, f"  {sym} {ticker:5s} {score:.1f}/10", clr, 10)
+            # B2: 记录可点击区域（含悬浮提示标记）
+            self.opportunity_regions.append((y - 8, y + 8, ticker))
+            self._text(self.x+10, y, f"  {sym} {ticker:5s} {score:.1f}/10 »", clr, 10)
 
         y += 20
         self._line(y)
@@ -1629,6 +1500,13 @@ class ReportView:
         self.scroll_y = max(0, min(self.scroll_y + delta, max(0, self.content_height - self.height + 60)))
         self.draw()
 
+    def scroll_to_ticker(self, ticker_idx):
+        """B2: 滚动到指定 ticker 章节（按排序索引）"""
+        # 粗估：标题约 40px，摘要约 5行×14px，每个 ticker 约 80px
+        estimated_offset = 80 + ticker_idx * 80
+        self.scroll_y = max(0, estimated_offset - 40)
+        self.draw()
+
     def clear(self):
         for item in self.items:
             self.canvas.delete(item)
@@ -1647,7 +1525,7 @@ class ReportView:
 
         # 标题栏
         y = self._draw_text(self.width // 2, y, "蜂群投资简报", "#FFD700", 14, "bold", "center")
-        y = self._draw_text(self.width // 2, y + 3, "[R] 返回蜂巢  |  [↑↓] 滚动", "#555500", 9, anchor="center")
+        y = self._draw_text(self.width // 2, y + 3, "[R] 返回  |  [↑↓] 滚动  |  [C] 复制", "#555500", 9, anchor="center")
         y += 8
 
         # 按分数排序
@@ -1943,17 +1821,19 @@ class ChatLog:
 
 class AlphaHiveApp:
     CANVAS_WIDTH = 720
-    CANVAS_HEIGHT = 680      # 增高以容纳输入框
+    CANVAS_HEIGHT = 712      # 680 + 32 收藏栏
     PANEL_WIDTH = 200
     HIVE_HEIGHT = 480        # 蜂巢区域高度
     CHAT_HEIGHT = 160        # 聊天框高度
     INPUT_HEIGHT = 40        # 输入框高度
+    PRESET_HEIGHT = 32       # C1: 收藏栏高度
     FPS = 30
 
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Alpha Hive")
-        self.root.resizable(False, False)
+        self.root.resizable(False, True)   # D1: 允许垂直拉伸
+        self.root.minsize(720, 640)
         self.root.configure(bg="#0A0A0A")
 
         # macOS .app 启动时强制窗口前置
@@ -1971,6 +1851,7 @@ class AlphaHiveApp:
         x = (screen_w - self.CANVAS_WIDTH) // 2
         y = (screen_h - self.CANVAS_HEIGHT) // 2
         self.root.geometry(f"{self.CANVAS_WIDTH}x{self.CANVAS_HEIGHT}+{x}+{y}")
+        self._last_window_height = self.CANVAS_HEIGHT  # D1: 跟踪上次高度
 
         self.canvas = tk.Canvas(
             self.root, width=self.CANVAS_WIDTH, height=self.CANVAS_HEIGHT,
@@ -2044,15 +1925,22 @@ class AlphaHiveApp:
         self.root.bind("<Up>", lambda e: self.chat_log.scroll_up())
         self.root.bind("<Down>", lambda e: self.chat_log.scroll_down())
 
+        # A3: 鼠标滚轮
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+        # B1/B2: 画布点击
+        self.canvas.bind("<Button-1>", self._on_canvas_click)
+        # D1: 窗口高度变化
+        self.root.bind("<Configure>", self._on_window_resize)
+
         # ====== 输入框（自定义 ticker 扫描）======
         input_y = self.HIVE_HEIGHT + self.CHAT_HEIGHT
-        # 背景
-        self.canvas.create_rectangle(
+        # 背景（D1: 保存 ID 供 resize 时移动）
+        self._input_bg_id = self.canvas.create_rectangle(
             0, input_y, hive_w, input_y + self.INPUT_HEIGHT,
             fill="#0A0A00", outline="#333300"
         )
         # 标签
-        self.canvas.create_text(
+        self._input_label_id = self.canvas.create_text(
             8, input_y + self.INPUT_HEIGHT // 2,
             text="标的:", fill="#888800", font=("Monaco", 11),
             anchor="w"
@@ -2064,13 +1952,13 @@ class AlphaHiveApp:
             font=("Monaco", 12), relief="flat", highlightthickness=1,
             highlightbackground="#444400", highlightcolor="#FFB800",
         )
-        self.canvas.create_window(
+        self._ticker_win_id = self.canvas.create_window(
             50, input_y + self.INPUT_HEIGHT // 2,
             window=self.ticker_entry,
             width=hive_w - 130, height=24,
             anchor="w"
         )
-        self.ticker_entry.insert(0, "NVDA TSLA MSFT")
+        self.ticker_entry.insert(0, self._load_last_tickers())  # C3: 加载上次标的
         # 回车键触发扫描
         self.ticker_entry.bind("<Return>", lambda e: self._on_ticker_submit())
         # 扫描按钮
@@ -2080,17 +1968,59 @@ class AlphaHiveApp:
             relief="flat", activebackground="#554400", activeforeground="#FFD700",
             command=self._on_ticker_submit,
         )
-        self.canvas.create_window(
+        self._scan_btn_win_id = self.canvas.create_window(
             hive_w - 45, input_y + self.INPUT_HEIGHT // 2,
             window=self.scan_btn,
             width=60, height=26,
         )
 
+        # ====== C1: 收藏栏（常用标的预设）======
+        preset_y = input_y + self.INPUT_HEIGHT
+        self._preset_bg_id = self.canvas.create_rectangle(
+            0, preset_y, hive_w, preset_y + self.PRESET_HEIGHT,
+            fill="#050500", outline="#1A1A00"
+        )
+        self._preset_label_id = self.canvas.create_text(
+            8, preset_y + self.PRESET_HEIGHT // 2,
+            text="⭐", fill="#554400", font=("Monaco", 10), anchor="w"
+        )
+        self._presets = self._load_presets()
+        self._preset_btns = []
+        self._preset_btn_windows = []
+        for i in range(3):
+            label = (self._presets[i] if i < len(self._presets) else f"槽{i+1}")[:16]
+            btn = tk.Button(
+                self.root, text=label,
+                bg="#1A1200", fg="#AA8800", font=("Monaco", 9),
+                relief="flat", activebackground="#2A2000", activeforeground="#FFB800",
+                command=lambda idx=i: self._on_preset_click(idx),
+            )
+            btn.bind("<Button-3>", lambda e, idx=i: self._on_preset_right_click(e, idx))
+            wid = self.canvas.create_window(
+                30 + i * 158, preset_y + self.PRESET_HEIGHT // 2,
+                window=btn, width=150, height=22, anchor="w"
+            )
+            self._preset_btns.append(btn)
+            self._preset_btn_windows.append(wid)
+
         # 操作提示
         self.canvas.create_text(
             hive_w // 2, self.HIVE_HEIGHT - 15,
-            text="[SPACE] 扫描  |  [R] 简报  |  输入框回车  |  [ESC] 退出",
+            text="[SPACE] 扫描  |  [R] 简报  |  [C] 复制  |  [ESC] 退出",
             fill="#444400", font=("Monaco", 9)
+        )
+
+        # A1: 进度条（扫描时显示，初始隐藏）
+        pb_y = self.HIVE_HEIGHT - 30
+        self._pb_bg = self.canvas.create_rectangle(
+            0, pb_y, hive_w, pb_y + 14, fill="#111100", outline="#333300", state="hidden"
+        )
+        self._pb_fill = self.canvas.create_rectangle(
+            0, pb_y + 1, 0, pb_y + 13, fill="#FFB800", outline="", state="hidden"
+        )
+        self._pb_text = self.canvas.create_text(
+            hive_w // 2, pb_y + 7, text="", fill="#000000",
+            font=("Monaco", 8, "bold"), state="hidden"
         )
 
         # 启动时加载上次扫描结果（如有）
@@ -2105,9 +2035,13 @@ class AlphaHiveApp:
             self.chat_log.add("System", "按空格键扫描默认标的，或输入框输入自定义标的后回车", "system")
 
     def _on_space(self):
-        """空格键：用默认 watchlist 扫描"""
+        """空格键：扫描默认 watchlist，或取消进行中的扫描"""
+        if self.interactions.scan_phase != "idle":
+            self.interactions._cancel_requested = True
+            self.chat_log.add("System", "⚠ 正在取消扫描...", "alert")
+            return
         if self.report_view.visible:
-            self.report_view.toggle()  # 先关闭简报视图
+            self.report_view.toggle()
         self.interactions.run_scan_sequence(focus_tickers=None)
 
     def _toggle_report(self):
@@ -2117,13 +2051,17 @@ class AlphaHiveApp:
             return
         self.report_view.toggle(self.last_swarm_results)
         if self.report_view.visible:
-            # 简报模式：上下键滚动简报
+            # 简报模式：上下键滚动简报，C 键复制
             self.root.bind("<Up>", lambda e: self.report_view.scroll(-30))
             self.root.bind("<Down>", lambda e: self.report_view.scroll(30))
+            self.root.bind("c", lambda e: self._copy_results())
+            self.root.bind("C", lambda e: self._copy_results())
         else:
-            # 恢复：上下键滚动聊天框
+            # 恢复
             self.root.bind("<Up>", lambda e: self.chat_log.scroll_up())
             self.root.bind("<Down>", lambda e: self.chat_log.scroll_down())
+            self.root.unbind("c")
+            self.root.unbind("C")
 
     def _load_last_swarm_results(self):
         """启动时加载上次 .swarm_results JSON（如有）"""
@@ -2159,7 +2097,13 @@ class AlphaHiveApp:
             _log.debug("Last swarm results load failed: %s", e)
 
     def _on_ticker_submit(self):
-        """输入框回车或扫描按钮：扫描自定义标的"""
+        """输入框回车或扫描按钮：扫描自定义标的，或取消进行中的扫描"""
+        # A2: 扫描中点击 → 取消
+        if self.interactions.scan_phase != "idle":
+            self.interactions._cancel_requested = True
+            self.chat_log.add("System", "⚠ 正在取消扫描...", "alert")
+            return
+
         text = self.ticker_entry.get().strip()
         if not text:
             self.chat_log.add("System", "请输入标的代码（空格分隔，如 NVDA TSLA MSFT）", "system")
@@ -2173,8 +2117,260 @@ class AlphaHiveApp:
             self.chat_log.add("System", "无法解析标的代码", "system")
             return
 
+        self._save_last_tickers(tickers)  # C3: 持久化上次标的
         self.chat_log.add("System", f"开始扫描自定义标的: {', '.join(tickers)}", "system")
         self.interactions.run_scan_sequence(focus_tickers=tickers)
+
+    # ==================== A3: 鼠标滚轮 ====================
+
+    def _on_mousewheel(self, event):
+        """鼠标滚轮在聊天区域内滚动"""
+        x, y = event.x, event.y
+        hive_w = self.CANVAS_WIDTH - self.PANEL_WIDTH
+        chat_y0 = self.HIVE_HEIGHT
+        chat_y1 = chat_y0 + self.chat_log.height
+        if 0 <= x <= hive_w and chat_y0 <= y <= chat_y1:
+            if event.delta > 0:
+                self.chat_log.scroll_up()
+            else:
+                self.chat_log.scroll_down()
+
+    # ==================== B1/B2: 画布点击 ====================
+
+    def _on_canvas_click(self, event):
+        """画布点击：蜜蜂详情弹窗 / 面板机会跳简报"""
+        x, y = event.x, event.y
+        hive_w = self.CANVAS_WIDTH - self.PANEL_WIDTH
+
+        # B2: 点击面板区域 → 检查机会列表
+        if x >= hive_w:
+            for y1, y2, ticker in getattr(self.panel, "opportunity_regions", []):
+                if y1 <= y <= y2 and ticker:
+                    self._open_report_for_ticker(ticker)
+                    return
+            return
+
+        # B1: 点击蜂巢区域 → 检查是否点中某只蜜蜂
+        for agent_id, bee in self.bees.items():
+            if bee.home_x - 6 <= x <= bee.home_x + 46 and bee.home_y - 6 <= y <= bee.home_y + 42:
+                self._show_bee_popup(bee)
+                return
+
+    def _show_bee_popup(self, bee):
+        """B1: 弹出蜜蜂最近分析详情"""
+        if not bee.last_analysis:
+            self.chat_log.add("System", f"{bee.colors.get('label', bee.agent_id)} 尚无分析数据，请先运行扫描", "system")
+            return
+
+        popup = tk.Toplevel(self.root)
+        popup.title(f"{bee.colors.get('label', bee.agent_id)}  分析详情")
+        popup.configure(bg="#0A0A00")
+        popup.resizable(True, True)
+        popup.geometry(f"420x320+{self.root.winfo_x()+120}+{self.root.winfo_y()+80}")
+
+        a = bee.last_analysis
+        ticker = a.get("ticker", "N/A")
+        score = a.get("score", 0)
+        direction = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(a.get("direction", ""), a.get("direction", ""))
+        c = bee.colors
+
+        tk.Label(popup, text=f"  {c.get('label', bee.agent_id)}  ",
+                 bg=c.get("body", "#FFB800"), fg="#000000",
+                 font=("Monaco", 12, "bold")).pack(fill=tk.X)
+
+        tk.Label(popup, text=f"{ticker}  {score:.1f}/10  {direction}",
+                 bg="#0A0A00", fg="#FFB800", font=("Monaco", 11, "bold")).pack(pady=(6, 2))
+
+        frame = tk.Frame(popup, bg="#0A0A00")
+        frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        txt = tk.Text(frame, bg="#0D0D00", fg="#CCCCCC", font=("Monaco", 9),
+                      wrap=tk.WORD, relief="flat", padx=6, pady=6)
+        sb = tk.Scrollbar(frame, command=txt.yview, bg="#222200")
+        txt.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        discovery = a.get("discovery", "（无发现摘要）")
+        txt.insert(tk.END, f"发现：\n{discovery}\n\n")
+        source = a.get("source", "")
+        if source:
+            txt.insert(tk.END, f"来源：{source}\n\n")
+        for k, v in a.items():
+            if k not in ("discovery", "source", "ticker", "error", "direction", "score"):
+                txt.insert(tk.END, f"{k}: {v}\n")
+        if a.get("error"):
+            txt.insert(tk.END, f"\n⚠ 错误：{a['error']}")
+        txt.configure(state=tk.DISABLED)
+
+        tk.Button(popup, text="关闭", command=popup.destroy,
+                  bg="#221100", fg="#FFB800", relief="flat",
+                  font=("Monaco", 10)).pack(pady=6)
+        popup.transient(self.root)
+
+    def _open_report_for_ticker(self, ticker):
+        """B2: 点击面板机会 → 打开简报并跳到该 ticker"""
+        if not self.last_swarm_results:
+            self.chat_log.add("System", "暂无扫描数据", "system")
+            return
+        if not self.report_view.visible:
+            self.report_view.toggle(self.last_swarm_results)
+            self.root.bind("<Up>", lambda e: self.report_view.scroll(-30))
+            self.root.bind("<Down>", lambda e: self.report_view.scroll(30))
+            self.root.bind("c", lambda e: self._copy_results())
+            self.root.bind("C", lambda e: self._copy_results())
+        sorted_tickers = sorted(
+            self.last_swarm_results.keys(),
+            key=lambda t: self.last_swarm_results[t].get("final_score", 0),
+            reverse=True
+        )
+        idx = sorted_tickers.index(ticker) if ticker in sorted_tickers else 0
+        self.report_view.scroll_to_ticker(idx)
+        self.chat_log.add("System", f"已跳转到 {ticker} 章节", "system")
+
+    # ==================== B3: 复制结果 ====================
+
+    def _copy_results(self):
+        """B3: 复制扫描结果到系统剪贴板"""
+        if not self.last_swarm_results:
+            return
+        lines = [f"Alpha Hive 扫描结果 {datetime.now().strftime('%Y-%m-%d %H:%M')}", ""]
+        for ticker, data in sorted(self.last_swarm_results.items(),
+                                   key=lambda x: x[1].get("final_score", 0), reverse=True):
+            score = data.get("final_score", 0)
+            d_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(data.get("direction", ""), "")
+            tag = "【高优先】" if score >= 7.5 else ("【观察】" if score >= 6.0 else "【暂不动】")
+            lines.append(f"{tag} {ticker}: {score:.1f}/10 {d_cn}")
+            discovery = data.get("discovery", "")
+            if discovery:
+                lines.append(f"  → {discovery[:120]}")
+        lines += ["", "⚠ 本报告为公开信息研究，不构成投资建议"]
+        text = "\n".join(lines)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.chat_log.add("System", f"✓ 已复制 {len(self.last_swarm_results)} 标的结果到剪贴板", "system")
+
+    # ==================== A1: 进度条 ====================
+
+    def _update_progress_bar(self):
+        """A1: 更新扫描进度条"""
+        hive_w = self.CANVAS_WIDTH - self.PANEL_WIDTH
+        prog = self.interactions.scan_progress
+        is_scanning = self.interactions.scan_phase != "idle"
+        state = "normal" if is_scanning else "hidden"
+        self.canvas.itemconfig(self._pb_bg, state=state)
+        self.canvas.itemconfig(self._pb_fill, state=state)
+        self.canvas.itemconfig(self._pb_text, state=state)
+        if is_scanning:
+            total = max(1, prog.get("total", 1))
+            current = prog.get("current", 0)
+            ratio = min(1.0, current / total)
+            pb_y = self.HIVE_HEIGHT - 30
+            self.canvas.coords(self._pb_fill, 0, pb_y + 1, hive_w * ratio, pb_y + 13)
+            phase_cn = {
+                "foraging": "采集中", "resonating": "共振中",
+                "distilling": "蒸馏中", "dancing": "摆尾舞", "decomposing": "分解中",
+            }.get(prog.get("phase", ""), prog.get("phase", ""))
+            label = f"{prog.get('ticker', '')}  {current}/{total}  {phase_cn}"
+            self.canvas.itemconfig(self._pb_text, text=label)
+
+    # ==================== C1: 收藏预设 ====================
+
+    def _load_presets(self) -> list:
+        """C1: 加载收藏标的预设"""
+        try:
+            p = Path(os.path.expanduser("~/.alphahive_presets.json"))
+            if p.exists():
+                data = json.loads(p.read_text())
+                if isinstance(data, list) and data:
+                    return data
+        except (OSError, json.JSONDecodeError):
+            pass
+        return ["NVDA MSFT AAPL", "TSLA AMD QCOM", "JNJ BIIB MRNA"]
+
+    def _save_presets(self):
+        """C1: 保存收藏预设"""
+        try:
+            Path(os.path.expanduser("~/.alphahive_presets.json")).write_text(
+                json.dumps(self._presets, ensure_ascii=False)
+            )
+        except OSError:
+            pass
+
+    def _on_preset_click(self, idx):
+        """C1: 点击收藏按钮 → 填充输入框"""
+        if idx < len(self._presets):
+            self.ticker_entry.delete(0, tk.END)
+            self.ticker_entry.insert(0, self._presets[idx])
+
+    def _on_preset_right_click(self, event, idx):
+        """C1: 右键收藏按钮 → 保存当前输入为新预设"""
+        current = self.ticker_entry.get().strip()
+        if not current:
+            return
+        self._presets[idx] = current
+        label = current[:16]
+        self._preset_btns[idx].configure(text=label)
+        self._save_presets()
+        self.chat_log.add("System", f"⭐ 收藏槽 {idx+1} 已保存：{current}", "system")
+
+    # ==================== C3: 记住标的 ====================
+
+    def _load_last_tickers(self) -> str:
+        """C3: 加载上次使用的标的"""
+        try:
+            p = Path(os.path.expanduser("~/.alphahive_last_tickers"))
+            if p.exists():
+                text = p.read_text().strip()
+                if text:
+                    return text
+        except OSError:
+            pass
+        return "NVDA TSLA MSFT"
+
+    def _save_last_tickers(self, tickers):
+        """C3: 持久化当前标的"""
+        try:
+            Path(os.path.expanduser("~/.alphahive_last_tickers")).write_text(" ".join(tickers))
+        except OSError:
+            pass
+
+    # ==================== D1: 窗口拉伸响应 ====================
+
+    def _on_window_resize(self, event):
+        """D1: 窗口高度变化 → 聊天框扩展，底部控件下移"""
+        if event.widget != self.root:
+            return
+        new_h = event.height
+        if abs(new_h - self._last_window_height) < 2 or new_h < 640:
+            return
+        delta = new_h - self._last_window_height
+        self._last_window_height = new_h
+        hive_w = self.CANVAS_WIDTH - self.PANEL_WIDTH
+
+        # 扩展聊天框
+        self.chat_log.height = max(80, self.chat_log.height + delta)
+
+        # 重新计算各行 y 坐标
+        new_input_y = self.HIVE_HEIGHT + self.chat_log.height
+        new_preset_y = new_input_y + self.INPUT_HEIGHT
+
+        # 移动输入行
+        self.canvas.coords(self._input_bg_id, 0, new_input_y, hive_w, new_input_y + self.INPUT_HEIGHT)
+        self.canvas.coords(self._input_label_id, 8, new_input_y + self.INPUT_HEIGHT // 2)
+        self.canvas.coords(self._ticker_win_id, 50, new_input_y + self.INPUT_HEIGHT // 2)
+        self.canvas.coords(self._scan_btn_win_id, hive_w - 45, new_input_y + self.INPUT_HEIGHT // 2)
+
+        # 移动收藏行
+        self.canvas.coords(self._preset_bg_id, 0, new_preset_y, hive_w, new_preset_y + self.PRESET_HEIGHT)
+        self.canvas.coords(self._preset_label_id, 8, new_preset_y + self.PRESET_HEIGHT // 2)
+        for i, wid in enumerate(self._preset_btn_windows):
+            self.canvas.coords(wid, 30 + i * 158, new_preset_y + self.PRESET_HEIGHT // 2)
+
+        # 扩展 canvas
+        self.canvas.configure(height=new_h)
+        # 扩展右侧面板
+        self.panel.height = new_h
 
     def _start_data_refresh(self):
         def refresh():
@@ -2262,6 +2458,19 @@ class AlphaHiveApp:
 
             if self.tick % 30 == 0:
                 self.panel.update(self.system_data, self.interactions.scan_phase)
+
+            # A1: 进度条更新（每 5 帧）
+            if self.tick % 5 == 0:
+                self._update_progress_bar()
+
+            # A2: 扫描按钮文字切换（扫描中 → 取消）
+            if self.tick % 15 == 0:
+                is_scanning = self.interactions.scan_phase != "idle"
+                new_text = "取消" if is_scanning else "扫描"
+                new_fg = "#FF6666" if is_scanning else "#FFB800"
+                if self.scan_btn.cget("text") != new_text:
+                    self.scan_btn.configure(text=new_text, fg=new_fg,
+                                            activeforeground="#FF8888" if is_scanning else "#FFD700")
 
             # 每 10 帧刷新聊天框（平衡性能和实时性）
             if self.tick % 10 == 0:

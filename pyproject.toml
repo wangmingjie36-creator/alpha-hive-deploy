@@ -1,0 +1,28 @@
+[project]
+name = "alpha-hive"
+version = "4.0.0"
+description = "Decentralized swarm-intelligence investment research agent cluster"
+requires-python = ">=3.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--timeout=30",
+    "-x",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks integration tests requiring external APIs",
+]
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "test_*.py", "setup_*.py", "alpha_hive_app.py"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 40

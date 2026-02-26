@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# 缓存和临时文件
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+*.egg-info
+
+# 本地数据（挂载为 volume）
+reports/
+logs/
+cache/
+reddit_cache/
+finviz_cache/
+stocktwits_cache/
+*.db
+chroma_db/
+
+# 密钥文件（通过环境变量注入）
+*.key
+*_token
+.env
+
+# 开发文件
+*.md
+TASK*.md
+.coverage
+coverage.xml

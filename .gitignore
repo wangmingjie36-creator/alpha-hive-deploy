@@ -1,3 +1,6 @@
+# ==================== GitHub Actions（PAT 无 workflow scope，不提交）====================
+.github/
+
 # ==================== Python ====================
 __pycache__/
 *.py[cod]

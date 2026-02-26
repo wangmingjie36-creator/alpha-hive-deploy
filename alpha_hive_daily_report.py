@@ -330,9 +330,9 @@ class AlphaHiveDailyReporter:
 
         return report
 
-    def run_swarm_scan(self, focus_tickers: List[str] = None) -> Dict:
+    def run_swarm_scan(self, focus_tickers: List[str] = None, progress_callback=None) -> Dict:
         """
-        真正的蜂群协作扫描 - 6 个 Agent 并行运行，实时通过信息素板交换发现
+        真正的蜂群协作扫描 - 7 个自治工蜂并行运行（6 核心 + BearBeeContrarian），实时通过信息素板交换发现
 
         Args:
             focus_tickers: 重点关注标的（如为None则扫描全部watchlist）
@@ -352,7 +352,7 @@ class AlphaHiveDailyReporter:
         # 创建共享的信息素板
         board = PheromoneBoard(memory_store=self.memory_store, session_id=self._session_id)
 
-        # 实例化 Agent：第一阶段 6 个核心 Agent，第二阶段 BearBeeContrarian（读取信息素板）
+        # 实例化 Agent：第一阶段 6 个核心 Agent（可选+CodeExecutor），第二阶段 BearBeeContrarian（读取信息素板后分析）
         retriever = self.vector_memory if (self.vector_memory and self.vector_memory.enabled) else None
         phase1_agents = [
             ScoutBeeNova(board, retriever=retriever),
@@ -406,7 +406,7 @@ class AlphaHiveDailyReporter:
                 _log.info("[%d/%d] %s: %.1f/10 (已缓存) %s", idx, len(targets), ticker, swarm_results[ticker]['final_score'], res)
                 continue
 
-            # 第一阶段：6 个核心 Agent 并行分析
+            # 第一阶段：6 个核心 Agent 并行分析（含可选 CodeExecutorAgent）
             with ThreadPoolExecutor(max_workers=len(phase1_agents)) as executor:
                 futures = {executor.submit(agent.analyze, ticker): agent for agent in phase1_agents}
                 agent_results = []
@@ -434,6 +434,13 @@ class AlphaHiveDailyReporter:
 
             res = "✅" if distilled["resonance"]["resonance_detected"] else "—"
             _log.info("[%d/%d] %s: %.1f/10 %s %s", idx, len(targets), ticker, distilled['final_score'], distilled['direction'], res)
+
+            # 进度回调（供桌面 App 实时动画使用）
+            if progress_callback:
+                try:
+                    progress_callback(idx, len(targets), ticker, distilled)
+                except Exception as _cb_err:
+                    _log.debug("Progress callback error: %s", _cb_err)
 
             # 写入 checkpoint（每个 ticker 完成后）
             try:
@@ -565,7 +572,7 @@ class AlphaHiveDailyReporter:
                     )
 
         # 生成综合报告
-        report = self._build_swarm_report(swarm_results, board)
+        report = self._build_swarm_report(swarm_results, board, agent_count=len(all_agents))
 
         # Phase 3 P2: 为高分机会添加日历提醒（后台线程池，退出时等待完成）
         if self.calendar and report.get('opportunities'):
@@ -686,7 +693,8 @@ class AlphaHiveDailyReporter:
         _log.info("CrewAI 耗时：%.1fs", elapsed)
 
         # 转换为标准报告格式（兼容 run_swarm_scan 输出）
-        report = self._build_swarm_report(swarm_results, board)
+        # CrewAI 模式：6 核心 BeeAgent + BearBeeContrarian = 7
+        report = self._build_swarm_report(swarm_results, board, agent_count=7)
 
         # 异步保存会话（使用共享线程池，退出时等待完成）
         if self.memory_store and self._session_id:
@@ -707,13 +715,15 @@ class AlphaHiveDailyReporter:
 
         return report
 
-    def _build_swarm_report(self, swarm_results: Dict, board: PheromoneBoard) -> Dict:
+    def _build_swarm_report(self, swarm_results: Dict, board: PheromoneBoard,
+                            agent_count: int = 7) -> Dict:
         """
         将蜂群分析结果转换为标准报告格式
 
         Args:
             swarm_results: QueenDistiller 的所有汇总结果
             board: 信息素板（用于提取全局信息）
+            agent_count: 实际运行的 Agent 总数（Phase-1 + BearBeeContrarian + 可选 CodeExecutor）
 
         Returns:
             标准报告格式
@@ -750,6 +760,35 @@ class AlphaHiveDailyReporter:
 
         self.opportunities = opportunities
 
+        # ── P4: 投资组合集中度分析（板块重叠 + 相关性矩阵）──
+        concentration = {}
+        try:
+            from portfolio_concentration import analyze_concentration
+            from config import WATCHLIST
+            concentration = analyze_concentration(swarm_results, WATCHLIST)
+            _log.info("P4 集中度分析：%s（风险=%s）",
+                      concentration.get("summary", ""), concentration.get("concentration_risk", ""))
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.debug("P4 portfolio_concentration 不可用: %s", e)
+
+        # ── P5: 宏观环境快照（附加到报告元数据）──
+        macro_snapshot = {}
+        try:
+            from fred_macro import get_macro_context
+            macro_snapshot = get_macro_context()
+            _log.info("P5 宏观环境：%s", macro_snapshot.get("summary", ""))
+        except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+            _log.debug("P5 fred_macro 不可用: %s", e)
+
+        # ── P3: 获取回测准确率统计（附加到报告）──
+        backtest_stats = {}
+        try:
+            if Backtester:
+                _bt = Backtester()
+                backtest_stats = _bt.store.get_accuracy_stats("t7", days=30)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            _log.debug("Backtest stats unavailable: %s", e)
+
         # 构建标准报告
         report = {
             "date": self.date_str,
@@ -757,12 +796,15 @@ class AlphaHiveDailyReporter:
             "system_status": "✅ 蜂群协作完成",
             "phase_completed": "完整蜂群流程 (Swarm Mode)",
             "swarm_metadata": {
-                "total_agents": 6,
+                "total_agents": agent_count,
                 "tickers_analyzed": len(swarm_results),
                 "resonances_detected": sum(1 for r in swarm_results.values() if r["resonance"]["resonance_detected"]),
                 "pheromone_board_entries": board.get_entry_count()
             },
-            "markdown_report": self._generate_swarm_markdown_report(swarm_results),
+            "concentration_analysis": concentration,
+            "macro_context": macro_snapshot,
+            "backtest_stats": backtest_stats,
+            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count),
             "twitter_threads": self._generate_swarm_twitter_threads(swarm_results),
             "opportunities": [
                 {
@@ -781,14 +823,18 @@ class AlphaHiveDailyReporter:
 
         return report
 
-    def _generate_swarm_markdown_report(self, swarm_results: Dict) -> str:
-        """生成蜂群模式的 Markdown 报告（8 版块完整结构）"""
+    def _generate_swarm_markdown_report(self, swarm_results: Dict,
+                                         concentration: Dict = None,
+                                         macro_context: Dict = None,
+                                         backtest_stats: Dict = None,
+                                         agent_count: int = 7) -> str:
+        """生成蜂群模式的 Markdown 报告（8 版块 + P4集中度 + P5宏观 + P3回测）"""
 
         md = []
         md.append(f"# 【{self.date_str}】Alpha Hive 蜂群协作日报")
         md.append("")
         md.append(f"**自动生成于**：{self.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-        md.append(f"**系统模式**：完全去中心化蜂群协作 | 6 个自治 Agent")
+        md.append(f"**系统模式**：完全去中心化蜂群协作 | {agent_count} 个自治工蜂（6 核心 + BearBeeContrarian）")
         md.append("")
 
         sorted_results = sorted(
@@ -1017,6 +1063,99 @@ class AlphaHiveDailyReporter:
                 md.append(f"- **{ticker}**：{discovery}")
         md.append("")
 
+        # ====== 版块 P4：投资组合集中度风险 ======
+        if concentration and concentration.get("sector_breakdown"):
+            risk_level = concentration.get("concentration_risk", "low")
+            risk_emoji = {"low": "✅", "medium": "⚠️", "high": "🚨"}.get(risk_level, "")
+            md.append(f"## 📊 投资组合集中度分析 {risk_emoji}")
+            md.append("")
+            md.append(f"**集中度风险**：{risk_level.upper()} | **综合评分**：{concentration.get('risk_score', 0):.1f}/10")
+            md.append("")
+
+            # 板块分布
+            md.append("**板块分布**：")
+            for sector, info in concentration.get("sector_breakdown", {}).items():
+                tickers_str = " / ".join(info.get("tickers", []))
+                md.append(f"- {sector}：{info.get('pct', 0):.0f}%（{tickers_str}）")
+            md.append("")
+
+            # 相关性警告
+            corr_warns = concentration.get("correlation_warnings", [])
+            if corr_warns:
+                md.append("**高相关对（≥0.70）**：")
+                for w in corr_warns[:4]:
+                    md.append(f"- {w['pair']}：相关系数 {w['correlation']:.2f} [{w['risk'].upper()}]")
+                md.append("")
+
+            # 建议
+            md.append("**分散化建议**：")
+            for rec in concentration.get("recommendations", []):
+                md.append(f"- {rec}")
+            md.append("")
+
+        # ====== 版块 P5：宏观环境 ======
+        if macro_context and macro_context.get("data_source") != "fallback":
+            regime = macro_context.get("macro_regime", "neutral")
+            regime_emoji = {"risk_on": "🟢", "risk_off": "🔴", "neutral": "🟡"}.get(regime, "")
+            md.append(f"## 🌐 宏观环境 {regime_emoji}")
+            md.append("")
+            md.append(f"**宏观政体**：{regime.upper()} | **评分**：{macro_context.get('macro_score', 5):.1f}/10")
+            md.append("")
+            md.append(f"| 指标 | 数值 | 状态 |")
+            md.append(f"|------|------|------|")
+            md.append(f"| VIX | {macro_context.get('vix', 0):.1f} | {macro_context.get('vix_regime', '')} |")
+            md.append(f"| 10Y利率 | {macro_context.get('treasury_10y', 0):.2f}% | {macro_context.get('rate_environment', '')} |")
+            md.append(f"| 大盘(5日) | {macro_context.get('spx_change_pct', 0):+.2f}% | {macro_context.get('market_trend', '')} |")
+            md.append(f"| 美元 | — | {macro_context.get('dollar_trend', '')} |")
+            md.append("")
+            headwinds = macro_context.get("macro_headwinds", [])
+            tailwinds = macro_context.get("macro_tailwinds", [])
+            if headwinds:
+                md.append("**逆风**：" + " | ".join(headwinds[:3]))
+                md.append("")
+            if tailwinds:
+                md.append("**顺风**：" + " | ".join(tailwinds[:3]))
+                md.append("")
+
+        # ====== 版块 P3：历史预测准确率（T+7 回测反馈）======
+        if backtest_stats and backtest_stats.get("total_checked", 0) > 0:
+            acc = backtest_stats["overall_accuracy"]
+            total = backtest_stats["total_checked"]
+            correct = backtest_stats["correct_count"]
+            avg_ret = backtest_stats["avg_return"]
+            md.append("## 📈 历史预测准确率（T+7，近30天）")
+            md.append("")
+            md.append(
+                f"**样本**：{total} 条 | "
+                f"**准确率**：{acc * 100:.1f}% ({correct}/{total}) | "
+                f"**平均收益**：{avg_ret:+.2f}%"
+            )
+            md.append("")
+            by_ticker = backtest_stats.get("by_ticker", {})
+            if by_ticker:
+                md.append("| 标的 | 方向准确率 | 预测次数 | 平均收益 |")
+                md.append("|------|-----------|---------|---------|")
+                for t, info in sorted(
+                    by_ticker.items(), key=lambda x: x[1]["total"], reverse=True
+                )[:6]:
+                    md.append(
+                        f"| {t} | {info['accuracy'] * 100:.0f}% "
+                        f"| {info['total']} | {info['avg_return']:+.2f}% |"
+                    )
+                md.append("")
+            by_dir = backtest_stats.get("by_direction", {})
+            if by_dir:
+                parts = []
+                for d, label in [("bullish", "看多"), ("bearish", "看空"), ("neutral", "中性")]:
+                    info = by_dir.get(d, {})
+                    if info.get("total", 0) > 0:
+                        parts.append(
+                            f"{label}:{info['accuracy']*100:.0f}%({info['total']}次)"
+                        )
+                if parts:
+                    md.append("**按方向**：" + " | ".join(parts))
+                    md.append("")
+
         # ====== 版块 8：数据来源 & 免责声明 ======
         md.append("## 8) 数据来源 & 免责声明")
         md.append("")
@@ -1048,7 +1187,7 @@ class AlphaHiveDailyReporter:
         main_thread = []
         main_thread.append(
             f"【Alpha Hive 蜂群日报 {self.date_str}】"
-            f"6 个自治 Agent 协作分析，多数投票共振信号。"
+            f"7 个自治工蜂协作分析，多数投票共振信号。"
             f"{DISCLAIMER_SHORT}👇"
         )
 
@@ -1065,7 +1204,7 @@ class AlphaHiveDailyReporter:
             main_thread.append(tweet)
 
         main_thread.append(
-            f"🐝 6 个 Agent 独立分析 → 信息素板实时交换 → 多数投票汇总\n"
+            f"🐝 7 个工蜂独立分析（6 核心 + 看空对冲蜂）→ 信息素板实时交换 → 多数投票汇总\n"
             f"高共振信号优先级最高。风险提示：控制仓位。\n"
             f"下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
         )
@@ -1263,24 +1402,45 @@ class AlphaHiveDailyReporter:
 
         results = {}
 
+        # 检查最近一次提交是否已是今日报告（决定 commit vs amend）
+        today_commit_msg = f"Alpha Hive 蜂群日报 {self.date_str}"
+        last_r = self.agent_helper.git.run_git_cmd("git log -1 --pretty=%s")
+        last_msg = last_r.get("stdout", "").strip()
+        is_amend = (last_msg == today_commit_msg)
+        did_amend = False
+
         # 1. Git 提交报告
-        _log.info("Git commit...")
+        _log.info("Git commit... (mode: %s)", "amend" if is_amend else "new")
         status = self.agent_helper.git.status()
         if status.get("modified_files"):
-            commit_result = self.agent_helper.git.commit(
-                f"Alpha Hive 蜂群日报 {self.date_str}"
-            )
+            if is_amend:
+                # 今日已有提交 → amend 覆盖，不叠加新 commit
+                self.agent_helper.git.run_git_cmd("git add -A")
+                r = self.agent_helper.git.run_git_cmd(
+                    f"git commit --amend -m '{today_commit_msg}'"
+                )
+                commit_result = {"success": r["success"], "mode": "amend",
+                                 "message": r.get("stdout", "") or r.get("stderr", "")}
+                did_amend = True
+            else:
+                commit_result = self.agent_helper.git.commit(today_commit_msg)
             results["git_commit"] = commit_result
             if commit_result["success"]:
-                _log.info("Git commit 成功")
+                _log.info("Git commit 成功（%s）", "amend" if is_amend else "new")
             else:
                 _log.warning("Git commit 失败：%s", commit_result.get('message'))
         else:
             _log.info("无需提交（工作目录干净）")
 
-        # 2. Git 推送
+        # 2. Git 推送（amend 后需要 force-with-lease 强制推送）
         _log.info("Git push...")
-        push_result = self.agent_helper.git.push("main")
+        if did_amend:
+            r = self.agent_helper.git.run_git_cmd("git push origin main --force-with-lease")
+            push_result = {"success": r["success"],
+                           "output": r.get("stdout", "") or r.get("stderr", ""),
+                           "mode": "force-with-lease"}
+        else:
+            push_result = self.agent_helper.git.push("main")
         results["git_push"] = push_result
         if push_result["success"]:
             _log.info("Git push 成功")
@@ -1409,6 +1569,10 @@ class AlphaHiveDailyReporter:
         with open(md_file, "w", encoding="utf-8") as f:
             f.write(report["markdown_report"])
 
+        # 清理当天旧的 X 线程文件（防止多次运行时数量不同导致残留叠加）
+        for old in self.report_dir.glob(f"alpha-hive-thread-{self.date_str}-*.txt"):
+            old.unlink()
+
         # 保存 X 线程版本
         for i, thread in enumerate(report["twitter_threads"], 1):
             thread_file = self.report_dir / f"alpha-hive-thread-{self.date_str}-{i}.txt"
@@ -1434,7 +1598,7 @@ def main():
   python3 alpha_hive_daily_report.py --tickers NVDA TSLA VKTX
   python3 alpha_hive_daily_report.py --all-watchlist
 
-  # 蜂群协作模式（6 个自治 Agent）
+  # 蜂群协作模式（7 个自治工蜂：6 核心 + BearBeeContrarian）
   python3 alpha_hive_daily_report.py --swarm --tickers NVDA TSLA VKTX
   python3 alpha_hive_daily_report.py --swarm --all-watchlist
         """
@@ -1453,7 +1617,7 @@ def main():
     parser.add_argument(
         '--swarm',
         action='store_true',
-        help='启用蜂群协作模式（6 个自治 Agent 并行分析）'
+        help='启用蜂群协作模式（7 个自治工蜂：6 核心并行 + BearBeeContrarian 看空对冲）'
     )
     parser.add_argument(
         '--check-earnings',
@@ -1486,10 +1650,23 @@ def main():
     else:
         report = reporter.run_daily_scan(focus_tickers=focus_tickers)
 
-    # 保存报告
+    # 保存报告（Hive app 通过 .swarm_results_{date}.json 自动同步）
     report_path = reporter.save_report(report)
+    _log.info("报告已保存：%s", report_path)
 
-    _log.info("完成！报告：%s", report_path)
+    # 三端同步：GitHub 提交推送 + Slack 总结通知
+    # （Slack 日报正文已在 run_swarm_scan/run_daily_scan 内推送；此处补发精简摘要+触发 GitHub 同步）
+    print("\n📡 同步三端：GitHub / Hive App / Slack...")
+    try:
+        sync_results = reporter.auto_commit_and_notify(report)
+        git_ok = sync_results.get("git_push", {}).get("success", False)
+        slack_ok = sync_results.get("slack_notification", {}).get("success", False)
+        print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败（见日志）'}")
+        print(f"   Hive App    : ✅ .swarm_results 已落盘，下次启动自动加载")
+        print(f"   Slack 摘要  : {'✅' if slack_ok else '⚠️  失败（日报正文已在扫描期间推送）'}")
+    except (OSError, ValueError, KeyError, RuntimeError) as e:
+        _log.warning("三端同步部分失败: %s", e)
+        print(f"   ⚠️  三端同步出错：{e}")
 
     return report
 

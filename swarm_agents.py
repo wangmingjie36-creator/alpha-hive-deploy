@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🐝 Alpha Hive 蜂群 Agent 系统 - 6 个自治工蜂 + QueenDistiller
+🐝 Alpha Hive 蜂群 Agent 系统 - 7 个自治工蜂（6 核心 + BearBeeContrarian）+ QueenDistiller
 实现真正的多 Agent 并行协作与信息素驱动决策
 
 5 维加权评分公式（CLAUDE.md）：
@@ -196,6 +196,23 @@ def prefetch_shared_data(tickers: list, retriever=None) -> Dict:
                 _log.debug("Prefetch context failed for %s: %s", t, e)
                 contexts[t] = ""
 
+    # 3. P5: 批量预取历史预测准确率（给所有 Agent 注入反馈上下文）
+    try:
+        from backtester import Backtester
+        _bt = Backtester()
+        _bt_stats = _bt.store.get_accuracy_stats("t7", days=90)
+        _by_ticker = _bt_stats.get("by_ticker", {})
+        for t in tickers:
+            if t in _by_ticker and _by_ticker[t].get("total", 0) >= 2:
+                info = _by_ticker[t]
+                acc_ctx = (
+                    f"|历史T+7准确率{info['accuracy']*100:.0f}%"
+                    f"({info['total']}次,均收益{info['avg_return']:+.2f}%)"
+                )
+                contexts[t] = (contexts.get(t, "") + acc_ctx).strip("|")
+    except (ImportError, OSError, ValueError, KeyError, TypeError) as e:
+        _log.debug("Prefetch backtest context failed: %s", e)
+
     return {"stock_data": stock_data, "contexts": contexts}
 
 
@@ -239,6 +256,21 @@ class ScoutBeeNova(BeeAgent):
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.warning("ScoutBeeNova SEC data unavailable for %s: %s", ticker, e)
                 insider_summary = f"SEC 数据不可用: {e}"
+
+            # ---- 1b. P2: EDGAR RSS 实时流（当日新鲜 Form 4，先于 REST API 反应）----
+            try:
+                from edgar_rss import get_today_form4_alerts
+                from sec_edgar import SECEdgarClient as _SEC
+                _cik = str(_SEC()._cik_map.get(ticker.upper(), "")) or None
+                rss_alerts = get_today_form4_alerts(ticker, cik=_cik)
+                if rss_alerts.get("has_fresh_filings"):
+                    fresh_n = rss_alerts["fresh_filings_count"]
+                    # 当日新鲜申报信号：提升 insider_score 并在 summary 前注明
+                    insider_score = min(10.0, insider_score + 0.5 * fresh_n)
+                    rss_note = f"[今日{fresh_n}份实时Form4] "
+                    insider_summary = rss_note + insider_summary
+            except (ImportError, ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+                _log.debug("ScoutBeeNova RSS check skipped for %s: %s", ticker, e)
 
             # ---- 2. 拥挤度分析（真实数据源）----
             stock = self._get_stock_data(ticker)
@@ -298,15 +330,40 @@ class ScoutBeeNova(BeeAgent):
             if ctx:
                 discovery = f"{discovery} | {ctx}"
 
+            # ── P1: LLM 内幕交易意图解读（规则引擎无法区分计划性卖出 vs 信心丧失）──
+            llm_intent = None
+            try:
+                import llm_service
+                if llm_service.is_available() and insider_data and insider_data.get("total_filings", 0) > 0:
+                    llm_intent = llm_service.interpret_insider_trades(ticker, insider_data, stock)
+                    if llm_intent:
+                        llm_score = llm_intent.get("intent_score", score)
+                        # 混合：规则 55% + LLM 意图解读 45%
+                        score = round(score * 0.55 + float(llm_score) * 0.45, 2)
+                        score = max(1.0, min(10.0, score))
+                        intent_label = llm_intent.get("intent_label", "")
+                        intent_reason = llm_intent.get("intent_reasoning", "")
+                        if intent_reason:
+                            discovery = f"{discovery} | LLM意图:{intent_reason}"
+                        # LLM 识别到计划性卖出时修正方向
+                        if intent_label == "planned_exit" and direction == "bearish":
+                            direction = "neutral"
+                        elif intent_label == "accumulation" and direction != "bullish":
+                            direction = "bullish"
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.debug("ScoutBeeNova LLM unavailable for %s: %s", ticker, e)
+
             self._publish(ticker, discovery, "sec_edgar+crowding", score, direction)
 
-            # Phase 2: confidence = 数据完整度（内幕数据可用 + 拥挤度可用）
+            # Phase 2: confidence = 数据完整度（内幕数据可用 + 拥挤度可用 + LLM 加成）
             confidence = 0.5
             if insider_data and insider_data.get("total_filings", 0) > 0:
                 confidence += 0.3
             dq = metrics.get("data_quality", {})
             real_fields = sum(1 for v in dq.values() if v == "real")
-            confidence += min(0.2, real_fields * 0.04)
+            confidence += min(0.1, real_fields * 0.02)
+            if llm_intent:
+                confidence += 0.1
             confidence = min(1.0, confidence)
 
             return {
@@ -382,14 +439,35 @@ class OracleBeeEcho(BeeAgent):
                 _log.warning("OracleBeeEcho Polymarket unavailable for %s: %s", ticker, e)
                 poly_markets = 0
 
-            # ---- 融合评分 ----
-            if poly_markets > 0:
-                score = options_score * 0.6 + poly_score * 0.4
-            else:
-                score = options_score  # 无 Polymarket 数据时完全依赖期权
+            # ---- P2: 异常期权流检测（大单 OTM 买入 / 短期扫单）----
+            unusual_flow = {}
+            unusual_score_adj = 0.0
+            try:
+                from unusual_options import detect_unusual_flow
+                unusual_flow = detect_unusual_flow(ticker, stock_price=current_price)
+                if unusual_flow.get("data_source") != "fallback":
+                    uf_score = unusual_flow.get("unusual_score", 5.0)
+                    uf_dir = unusual_flow.get("unusual_direction", "neutral")
+                    # 异常流作为额外调整项（±1.5 分最大影响）
+                    unusual_score_adj = (uf_score - 5.0) * 0.3
+                    if unusual_flow.get("signals"):
+                        top_sig = unusual_flow["signals"][0]
+                        signal_summary = f"{signal_summary} | 异常流:{unusual_flow['summary']}"
+            except (ImportError, ConnectionError, ValueError, KeyError, TypeError) as e:
+                _log.debug("P2 unusual_options 不可用 %s: %s", ticker, e)
 
-            # 从 signal_summary 推断方向
-            if "多" in signal_summary or "增强" in signal_summary or "看涨" in signal_summary:
+            # ---- 融合评分（期权 + Polymarket + 异常流）----
+            if poly_markets > 0:
+                score = options_score * 0.55 + poly_score * 0.35 + 5.0 * 0.10
+            else:
+                score = options_score
+            # 叠加异常流调整
+            score = max(1.0, min(10.0, score + unusual_score_adj))
+
+            # 从 signal_summary 推断方向（异常流可覆盖）
+            if unusual_flow.get("unusual_direction") in ("bullish", "bearish"):
+                direction = unusual_flow["unusual_direction"]
+            elif "多" in signal_summary or "增强" in signal_summary or "看涨" in signal_summary:
                 direction = "bullish"
             elif "空" in signal_summary or "看跌" in signal_summary:
                 direction = "bearish"
@@ -402,13 +480,38 @@ class OracleBeeEcho(BeeAgent):
             if ctx:
                 discovery += f" | {ctx}"
 
+            # ── P1: LLM 期权流结构解读（识别聪明钱意图，超越阈值规则）──
+            llm_options = None
+            try:
+                import llm_service
+                if llm_service.is_available() and result:
+                    llm_options = llm_service.interpret_options_flow(ticker, result, stock)
+                    if llm_options:
+                        llm_score = llm_options.get("smart_money_score", score)
+                        llm_dir = llm_options.get("smart_money_direction", direction)
+                        # 混合：规则 60% + LLM 聪明钱解读 40%
+                        score = round(score * 0.6 + float(llm_score) * 0.4, 2)
+                        score = max(1.0, min(10.0, score))
+                        if llm_dir in ("bullish", "bearish", "neutral"):
+                            direction = llm_dir
+                        flow_reason = llm_options.get("flow_reasoning", "")
+                        signal_type = llm_options.get("signal_type", "")
+                        if flow_reason:
+                            discovery = f"{discovery} | LLM期权:{flow_reason}"
+                        if signal_type:
+                            discovery = f"{discovery}[{signal_type}]"
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.debug("OracleBeeEcho LLM unavailable for %s: %s", ticker, e)
+
             self._publish(ticker, discovery, "options+polymarket", score, direction)
 
-            # Phase 2: confidence = 期权数据可用 + Polymarket 可用
+            # Phase 2: confidence = 期权数据可用 + Polymarket 可用 + LLM 加成
             confidence = 0.4
             if result:
-                confidence += 0.4
+                confidence += 0.3
             if poly_markets > 0:
+                confidence += 0.1
+            if llm_options:
                 confidence += 0.2
             confidence = min(1.0, confidence)
 
@@ -439,12 +542,14 @@ class BuzzBeeWhisper(BeeAgent):
     """情绪分析蜂 - 多源市场情绪量化
     对应维度：Sentiment (权重 0.20)
 
-    情绪信号来源（5 通道加权）：
+    情绪信号来源（7 通道加权）：
     1. 价格动量（5日/20日）→ 市场参与者实际行为（20%）
-    2. 成交量异动（今日 vs 20日均量）→ 关注度（15%）
-    3. 波动率水平 → 恐惧/贪婪指标（10%）
+    2. 成交量异动（今日 vs 20日均量）→ 关注度（10%）
+    3. 波动率水平 → 恐惧/贪婪指标（5%）
     4. Reddit 社交情绪（ApeWisdom）→ 散户关注度和动量（25%）
-    5. Finviz 新闻情绪 → 媒体叙事方向（30%）
+    5. Finviz 新闻情绪 → 媒体叙事方向（25%）
+    6. Yahoo Finance 热搜榜 → 市场关注度（5%，免费实时）
+    7. Fear & Greed Index → 市场整体贪婪度（10%，免费实时）
     """
 
     def analyze(self, ticker: str) -> Dict:
@@ -540,13 +645,54 @@ class BuzzBeeWhisper(BeeAgent):
                 _log.warning("BuzzBeeWhisper Finviz news unavailable for %s: %s", ticker, e)
                 news_desc = "新闻不可用"
 
-            # 5 通道加权综合（新闻情绪权重最高）
+            # 5b. P4: Yahoo Finance + AV 新闻摘要（增强新闻面，与 Finviz 加权融合）
+            try:
+                from newsapi_client import get_ticker_news
+                news_ext = get_ticker_news(ticker, max_articles=8)
+                if news_ext.get("is_real_data") and news_ext.get("total_articles", 0) >= 3:
+                    ext_signal = news_ext["sentiment_score"] * 10
+                    # 融合：Finviz 60% + 扩展新闻 40%（扩展新闻覆盖更广）
+                    news_signal = news_signal * 0.60 + ext_signal * 0.40
+                    if not news_desc or "不可用" in news_desc:
+                        news_desc = news_ext.get("dominant_theme", "")
+                    _log.debug("BuzzBeeWhisper news extended for %s: src=%s articles=%d",
+                               ticker, news_ext.get("source"), news_ext["total_articles"])
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.debug("BuzzBeeWhisper extended news unavailable for %s: %s", ticker, e)
+
+            # 6. Yahoo Finance 热搜榜（散户关注度，免费无需注册）
+            yahoo_signal = 50.0
+            yahoo_desc = ""
+            try:
+                from yahoo_trending import get_ticker_attention
+                yt = get_ticker_attention(ticker)
+                if yt.get("is_real_data"):
+                    yahoo_signal = yt["attention_score"] * 10
+                    yahoo_desc = yt.get("description", "")
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.debug("Yahoo Trending unavailable for %s: %s", ticker, e)
+
+            # 7. Fear & Greed Index（市场整体情绪背景，免费无需 Key）
+            fg_signal = 50.0
+            fg_desc = ""
+            try:
+                from fear_greed import get_fear_greed
+                fg = get_fear_greed()
+                if fg.get("is_real_data"):
+                    fg_signal = fg["sentiment_score"] * 10
+                    fg_desc = f"F&G {fg['value']}({fg['classification']})"
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.debug("Fear & Greed unavailable: %s", e)
+
+            # 7 通道加权综合（全部免费无需注册）
             sentiment_composite = (
                 momentum_sentiment * 0.20 +
-                volume_signal * 0.15 +
-                vol_sentiment * 0.10 +
-                reddit_signal * 0.25 +
-                news_signal * 0.30
+                volume_signal      * 0.10 +
+                vol_sentiment      * 0.05 +
+                reddit_signal      * 0.25 +
+                news_signal        * 0.25 +
+                yahoo_signal       * 0.05 +
+                fg_signal          * 0.10
             )
 
             # 转换为 0-10 分
@@ -568,6 +714,8 @@ class BuzzBeeWhisper(BeeAgent):
                 f"量比 {vol_ratio:.1f}x",
                 reddit_desc,
                 news_desc,
+                yahoo_desc,
+                fg_desc,
             ]
             if news_reasoning:
                 discovery_parts.append(news_reasoning)
@@ -578,14 +726,18 @@ class BuzzBeeWhisper(BeeAgent):
 
             self._publish(ticker, discovery, "market_sentiment+reddit", round(score, 2), direction)
 
-            # Phase 2: confidence = 基础 0.5（yfinance）+ Reddit + Finviz + LLM
-            confidence = 0.5  # yfinance momentum/volume always available
+            # confidence = 基础 0.5（yfinance）+ Reddit + Finviz + Yahoo + F&G + LLM
+            confidence = 0.5
             if reddit_data and reddit_data.get("rank"):
-                confidence += 0.2
+                confidence += 0.15
             if news_desc and "不可用" not in news_desc:
-                confidence += 0.2
+                confidence += 0.15
+            if yahoo_desc and "不可用" not in yahoo_desc:
+                confidence += 0.05
+            if fg_desc:
+                confidence += 0.05
             if news_mode == "llm_enhanced":
-                confidence += 0.1
+                confidence += 0.10
             confidence = min(1.0, confidence)
 
             return {
@@ -770,16 +922,43 @@ class ChronosBeeHorizon(BeeAgent):
             if ctx:
                 discovery = f"{discovery} | {ctx}"
 
+            # ── P1: LLM 催化剂影响力解读（规则引擎不知道财报方向是利多还是利空）──
+            llm_catalyst = None
+            try:
+                import llm_service
+                stock_for_llm = self._get_stock_data(ticker)
+                if llm_service.is_available() and catalysts_found:
+                    llm_catalyst = llm_service.interpret_catalyst_impact(
+                        ticker, catalysts_found, stock_for_llm
+                    )
+                    if llm_catalyst:
+                        llm_score = llm_catalyst.get("impact_score", score)
+                        llm_dir = llm_catalyst.get("impact_direction", direction)
+                        # 混合：规则 50% + LLM 催化剂解读 50%（催化剂判断最依赖语义理解）
+                        score = round(score * 0.5 + float(llm_score) * 0.5, 2)
+                        score = max(1.0, min(10.0, score))
+                        if llm_dir in ("bullish", "bearish", "neutral"):
+                            direction = llm_dir
+                        impact_reason = llm_catalyst.get("impact_reasoning", "")
+                        key_cat = llm_catalyst.get("key_catalyst", "")
+                        if impact_reason:
+                            discovery = f"{discovery} | LLM催化剂:{impact_reason}"
+                        if key_cat:
+                            discovery = f"{discovery}[关注:{key_cat}]"
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.debug("ChronosBeeHorizon LLM unavailable for %s: %s", ticker, e)
+
             self._publish(ticker, discovery, "catalyst_timeline", score, direction)
 
-            # Phase 2: confidence = 催化剂数量和来源多样性
+            # Phase 2: confidence = 催化剂数量和来源多样性 + LLM 加成
             confidence = 0.3  # baseline
             if catalysts_found:
-                confidence += min(0.4, len(catalysts_found) * 0.1)
-                # 有 yfinance 实时日历数据加分
+                confidence += min(0.3, len(catalysts_found) * 0.08)
                 has_yf = any(c.get("type") == "earnings" for c in catalysts_found)
                 if has_yf:
-                    confidence += 0.2
+                    confidence += 0.15
+            if llm_catalyst:
+                confidence += 0.2
             confidence = min(1.0, confidence)
 
             return {
@@ -792,6 +971,7 @@ class ChronosBeeHorizon(BeeAgent):
                 "data_quality": {
                     "yfinance_calendar": "real" if catalysts_found else "empty",
                     "catalyst_refinement": "real",
+                    "llm_impact": "llm_enhanced" if llm_catalyst else "rule_only",
                 },
                 "details": {"catalysts": catalysts_found[:5]}
             }
@@ -958,15 +1138,61 @@ class GuardBeeSentinel(BeeAgent):
             if ctx:
                 discovery = f"{discovery} | {ctx}"
 
+            # ── P5: FRED 宏观环境过滤（risk_off 时主动降权，risk_on 时小幅增强）──
+            macro_adj = 0.0
+            macro_desc = ""
+            try:
+                from fred_macro import get_macro_context, get_macro_risk_adjustment
+                macro = get_macro_context()
+                macro_adj, macro_desc = get_macro_risk_adjustment(macro)
+                if macro_adj != 0.0:
+                    score = max(1.0, min(10.0, score + macro_adj))
+                    discovery = f"{discovery} | 宏观:{macro.get('summary', '')}"
+                    if macro_desc:
+                        discovery = f"{discovery}({macro_desc[:40]})"
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.debug("P5 fred_macro 不可用 %s: %s", ticker, e)
+
+            # ── P1: LLM 冲突合成（识别哪种矛盾更危险，规则引擎只看一致性百分比）──
+            llm_guard = None
+            try:
+                import llm_service
+                if llm_service.is_available() and top_signals:
+                    pheromone_snap = self.board.snapshot()
+                    ticker_snap = [e for e in pheromone_snap if e.get("ticker") == ticker]
+                    if ticker_snap:
+                        llm_guard = llm_service.synthesize_agent_conflicts(
+                            ticker, ticker_snap, resonance
+                        )
+                        if llm_guard:
+                            llm_risk = llm_guard.get("risk_score", 5.0)
+                            conflict_type = llm_guard.get("conflict_type", "coherent")
+                            guard_reason = llm_guard.get("guard_reasoning", "")
+                            rec_action = llm_guard.get("recommended_action", "proceed")
+                            # risk_score 高 → 降低 guard 分（对蜂群总分施加保守修正）
+                            if conflict_type == "major_conflict":
+                                score = max(1.0, score * 0.75)
+                                direction = "neutral"
+                            elif conflict_type == "minor_divergence":
+                                score = max(1.0, score * 0.9)
+                            if guard_reason:
+                                discovery = f"{discovery} | LLM冲突检测:{guard_reason}"
+                            if rec_action == "avoid":
+                                discovery = f"{discovery}[⚠建议回避]"
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.debug("GuardBeeSentinel LLM unavailable for %s: %s", ticker, e)
+
             self._publish(ticker, discovery, "guard_bee_sentinel", round(score, 2), direction)
 
-            # Phase 2: confidence = 信号板有数据 + 一致性高
+            # Phase 2: confidence = 信号板有数据 + 一致性高 + LLM 冲突评估
             confidence = 0.4
             if top_signals:
-                confidence += 0.3
+                confidence += 0.25
             if consistency >= 0.7:
-                confidence += 0.2
+                confidence += 0.15
             if resonance["resonance_detected"]:
+                confidence += 0.1
+            if llm_guard:
                 confidence += 0.1
             confidence = min(1.0, confidence)
 
@@ -980,12 +1206,15 @@ class GuardBeeSentinel(BeeAgent):
                 "data_quality": {
                     "pheromone_board": "real",
                     "crowding": "real",
+                    "llm_conflict": "llm_enhanced" if llm_guard else "rule_only",
                 },
                 "details": {
                     "resonance": resonance,
                     "top_signals_count": len(top_signals),
                     "consistency": consistency,
                     "adjustment_factor": adj_factor,
+                    "llm_conflict_type": llm_guard.get("conflict_type", "") if llm_guard else "",
+                    "llm_recommended_action": llm_guard.get("recommended_action", "") if llm_guard else "",
                 }
             }
 

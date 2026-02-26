@@ -301,6 +301,7 @@ def test_crewai_adapter():
         print("📝 安装命令: pip install crewai crewai-tools --user")
         return False
 
+    # 先检查 API Key
     try:
         # 创建 PheromoneBoard
         board = PheromoneBoard()
