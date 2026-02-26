@@ -2169,8 +2169,8 @@ def main():
     parser.add_argument(
         '--tickers',
         nargs='+',
-        default=["NVDA", "TSLA", "VKTX", "META", "MSFT", "RKLB", "BILI"],
-        help='要扫描的股票代码列表（空格分隔，默认：NVDA TSLA VKTX META MSFT RKLB BILI）'
+        default=["NVDA", "TSLA", "VKTX", "META", "MSFT", "RKLB", "BILI", "AMZN"],
+        help='要扫描的股票代码列表（空格分隔，默认：NVDA TSLA VKTX META MSFT RKLB BILI AMZN）'
     )
     parser.add_argument(
         '--all-watchlist',

@@ -214,6 +214,12 @@ WATCHLIST = {
         "polymarket_slug": "bilibili-user-growth",
         "monitor_events": ["earnings", "monthly_active_users", "regulatory"],
     },
+    "AMZN": {
+        "name": "Amazon.com Inc",
+        "sector": "Technology",
+        "polymarket_slug": "amazon-aws-revenue",
+        "monitor_events": ["earnings", "aws_growth", "prime_day", "regulatory"],
+    },
 }
 
 # ==================== 数据源优先级 ====================
