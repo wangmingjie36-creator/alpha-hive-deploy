@@ -1540,6 +1540,70 @@ class AlphaHiveDailyReporter:
 
         return result
 
+    def _generate_ml_reports(self, report: Dict) -> List[str]:
+        """为扫描标的批量生成 ML 增强 HTML 报告（同步写入，供 _generate_index_html 检测到文件后添加链接）"""
+        opps = report.get("opportunities", [])
+        tickers = [o.get("ticker") for o in opps if o.get("ticker")]
+        if not tickers:
+            return []
+
+        # 加载蜂群详细数据（save_report 已写入 .swarm_results_*.json）
+        swarm_data: Dict = {}
+        sr_path = self.report_dir / f".swarm_results_{self.date_str}.json"
+        if sr_path.exists():
+            try:
+                with open(sr_path) as f:
+                    swarm_data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        generated = []
+        for ticker in tickers:
+            try:
+                # 从 yfinance 获取当前价格
+                real_price, real_change = 100.0, 0.0
+                try:
+                    import yfinance as _yf
+                    _hist = _yf.Ticker(ticker).history(period="5d")
+                    if not _hist.empty:
+                        real_price = float(_hist["Close"].iloc[-1])
+                        if len(_hist) >= 2:
+                            real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[-2] - 1) * 100
+                except Exception:
+                    pass
+
+                ticker_data = {
+                    "ticker": ticker,
+                    "sources": {
+                        "yahoo_finance": {
+                            "current_price": real_price,
+                            "price_change_5d": real_change,
+                            "change_pct": real_change,
+                        }
+                    },
+                }
+
+                # 生成 ML 增强分析
+                enhanced = self.ml_generator.generate_ml_enhanced_report(ticker, ticker_data)
+
+                # 注入蜂群数据
+                if ticker in swarm_data:
+                    enhanced["swarm_results"] = swarm_data[ticker]
+
+                # 同步写入 HTML（必须在 _generate_index_html 前完成，以便文件存在性检测通过）
+                html = self.ml_generator.generate_html_report(ticker, enhanced)
+                html_path = self.report_dir / f"alpha-hive-{ticker}-ml-enhanced-{self.date_str}.html"
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(html)
+
+                generated.append(ticker)
+                _log.info("ML 增强报告已生成：%s", html_path.name)
+
+            except Exception as e:
+                _log.warning("ML 报告生成失败 %s: %s", ticker, e)
+
+        return generated
+
     def save_report(self, report: Dict) -> str:
         """保存报告到文件（MD / JSON / X线程 / index.html GitHub Pages）"""
 
@@ -1562,6 +1626,15 @@ class AlphaHiveDailyReporter:
             thread_file = self.report_dir / f"alpha-hive-thread-{self.date_str}-{i}.txt"
             with open(thread_file, "w", encoding="utf-8") as f:
                 f.write(thread)
+
+        # 生成 ML 增强 HTML 报告（必须在 _generate_index_html 前完成，以便 ML 链接自动出现）
+        try:
+            ml_tickers = self._generate_ml_reports(report)
+            if ml_tickers:
+                _log.info("ML 增强报告完成：%s", ml_tickers)
+                print(f"   ML 报告     : ✅ {', '.join(ml_tickers)}")
+        except Exception as e:
+            _log.warning("ML 报告批量生成出错: %s", e)
 
         # 更新 GitHub Pages 仪表板
         try:
