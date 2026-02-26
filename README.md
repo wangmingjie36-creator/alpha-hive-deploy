@@ -3,7 +3,7 @@
 > 去中心化蜂群智能驱动的投资研究平台
 > 实时扫描市场机会，生成结构化投资简报
 
-**在线访问**: [https://wangmingjie36-creator.github.io/alpha-hive-report/](https://wangmingjie36-creator.github.io/alpha-hive- deploy/)
+**在线访问**: [https://wangmingjie36-creator.github.io/alpha-hive-report/](https://wangmingjie36-creator.github.io/alpha-hive-deploy/)
 
 ---
 
