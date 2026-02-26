@@ -1386,45 +1386,25 @@ class AlphaHiveDailyReporter:
 
         results = {}
 
-        # 检查最近一次提交是否已是今日报告（决定 commit vs amend）
-        today_commit_msg = f"Alpha Hive 蜂群日报 {self.date_str}"
-        last_r = self.agent_helper.git.run_git_cmd("git log -1 --pretty=%s")
-        last_msg = last_r.get("stdout", "").strip()
-        is_amend = (last_msg == today_commit_msg)
-        did_amend = False
-
-        # 1. Git 提交报告
-        _log.info("Git commit... (mode: %s)", "amend" if is_amend else "new")
+        # 1. Git 提交报告（始终新 commit，不 amend，避免 GitHub Pages 部署冲突）
+        from datetime import datetime as _dt2
+        timestamp = _dt2.now().strftime("%H:%M")
+        today_commit_msg = f"Alpha Hive 蜂群日报 {self.date_str} {timestamp}"
+        _log.info("Git commit... (mode: new)")
         status = self.agent_helper.git.status()
         if status.get("modified_files"):
-            if is_amend:
-                # 今日已有提交 → amend 覆盖，不叠加新 commit
-                self.agent_helper.git.run_git_cmd("git add -A")
-                r = self.agent_helper.git.run_git_cmd(
-                    f"git commit --amend -m '{today_commit_msg}'"
-                )
-                commit_result = {"success": r["success"], "mode": "amend",
-                                 "message": r.get("stdout", "") or r.get("stderr", "")}
-                did_amend = True
-            else:
-                commit_result = self.agent_helper.git.commit(today_commit_msg)
+            commit_result = self.agent_helper.git.commit(today_commit_msg)
             results["git_commit"] = commit_result
             if commit_result["success"]:
-                _log.info("Git commit 成功（%s）", "amend" if is_amend else "new")
+                _log.info("Git commit 成功（new）")
             else:
                 _log.warning("Git commit 失败：%s", commit_result.get('message'))
         else:
             _log.info("无需提交（工作目录干净）")
 
-        # 2. Git 推送（amend 后需要 force-with-lease 强制推送）
+        # 2. Git 推送（普通 push，不再需要 force）
         _log.info("Git push...")
-        if did_amend:
-            r = self.agent_helper.git.run_git_cmd("git push origin main --force-with-lease")
-            push_result = {"success": r["success"],
-                           "output": r.get("stdout", "") or r.get("stderr", ""),
-                           "mode": "force-with-lease"}
-        else:
-            push_result = self.agent_helper.git.push("main")
+        push_result = self.agent_helper.git.push("main")
         results["git_push"] = push_result
         if push_result["success"]:
             _log.info("Git push 成功")
