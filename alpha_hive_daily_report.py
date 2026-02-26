@@ -1402,14 +1402,30 @@ class AlphaHiveDailyReporter:
         else:
             _log.info("无需提交（工作目录干净）")
 
-        # 2. Git 推送（普通 push，不再需要 force）
-        _log.info("Git push...")
-        push_result = self.agent_helper.git.push("main")
-        results["git_push"] = push_result
-        if push_result["success"]:
-            _log.info("Git push 成功")
+        # 2. Git 推送：LLM 模式 → 生产（origin），规则模式 → 测试（test remote）
+        import llm_service as _llm_check
+        _using_llm = _llm_check.is_available()
+        remote = "origin" if _using_llm else "test"
+        env_label = "🧠 生产（LLM）" if _using_llm else "🔧 测试（规则引擎）"
+        _log.info("Git push → %s remote [%s]", remote, env_label)
+
+        # 检查 test remote 是否存在
+        _remote_check = self.agent_helper.git.run_git_cmd("git remote")
+        _remotes = _remote_check.get("stdout", "")
+        if remote == "test" and "test" not in _remotes:
+            _log.warning("test remote 不存在，跳过推送（请先配置测试仓库）")
+            push_result = {"success": False, "error": "test remote not configured"}
         else:
-            _log.warning("Git push 失败")
+            r = self.agent_helper.git.run_git_cmd(f"git push {remote} main")
+            push_result = {"success": r["success"],
+                           "remote": remote,
+                           "output": r.get("stdout", "") or r.get("stderr", "")}
+        results["git_push"] = push_result
+        results["deploy_env"] = "production" if _using_llm else "test"
+        if push_result["success"]:
+            _log.info("Git push 成功 → %s", remote)
+        else:
+            _log.warning("Git push 失败：%s", push_result.get("error") or push_result.get("output", ""))
 
         # 3. Slack 通知（由 Claude Code MCP 工具推送，不用 webhook bot）
         _log.info("Slack 推送由 Claude Code 负责（用户账号）")
@@ -2222,12 +2238,17 @@ def main():
     report_path = reporter.save_report(report)
     _log.info("报告已保存：%s", report_path)
 
-    # 三端同步：GitHub 提交推送 + Hive App + Slack 下午2点（温哥华 PST）
+    # 三端同步：GitHub 提交推送 + Hive App + Slack
     print("\n📡 同步三端：GitHub / Hive App / Slack...")
     try:
         sync_results = reporter.auto_commit_and_notify(report)
         git_ok = sync_results.get("git_push", {}).get("success", False)
-        print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败（见日志）'}")
+        deploy_env = sync_results.get("deploy_env", "production")
+        remote_label = sync_results.get("git_push", {}).get("remote", "origin")
+        if deploy_env == "test":
+            print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败'} → 🔧 测试环境 https://wangmingjie36-creator.github.io/alpha-hive-test/")
+        else:
+            print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败'} → 🧠 生产环境 https://wangmingjie36-creator.github.io/alpha-hive-deploy/")
         print(f"   Hive App    : ✅ .swarm_results 已落盘，下次启动自动加载")
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         _log.warning("三端同步部分失败: %s", e)
