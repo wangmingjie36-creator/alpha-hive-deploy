@@ -51,11 +51,18 @@ class PredictionStore:
                     price_at_predict   REAL,
                     dimension_scores   TEXT,
                     agent_directions   TEXT,
+                    -- 期权分析字段
+                    options_score      REAL,
+                    iv_rank            REAL,
+                    put_call_ratio     REAL,
+                    gamma_exposure     REAL,
+                    flow_direction     TEXT,
                     -- T+1 回测
                     price_t1           REAL,
                     return_t1          REAL,
                     correct_t1         INTEGER,
                     checked_t1         INTEGER DEFAULT 0,
+                    iv_rank_t1         REAL,
                     -- T+7 回测
                     price_t7           REAL,
                     return_t7          REAL,
@@ -72,12 +79,30 @@ class PredictionStore:
             """)
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_date ON {self.TABLE}(date)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_ticker ON {self.TABLE}(ticker)")
+            # 迁移：如果旧表缺少期权字段，添加它们
+            self._migrate_options_columns(conn)
             conn.commit()
         except (sqlite3.Error, OSError) as e:
             _log.warning("预测表初始化失败: %s", e)
         finally:
             if conn:
                 conn.close()
+
+    def _migrate_options_columns(self, conn):
+        """为旧表添加期权相关字段（兼容已有数据库）"""
+        new_columns = [
+            ("options_score", "REAL"),
+            ("iv_rank", "REAL"),
+            ("put_call_ratio", "REAL"),
+            ("gamma_exposure", "REAL"),
+            ("flow_direction", "TEXT"),
+            ("iv_rank_t1", "REAL"),
+        ]
+        for col_name, col_type in new_columns:
+            try:
+                conn.execute(f"ALTER TABLE {self.TABLE} ADD COLUMN {col_name} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
 
     def save_prediction(
         self,
@@ -87,16 +112,19 @@ class PredictionStore:
         price: float,
         dimension_scores: Dict = None,
         agent_directions: Dict = None,
+        options_data: Dict = None,
     ) -> bool:
-        """保存一条预测记录"""
+        """保存一条预测记录（含期权分析数据）"""
         conn = None
+        opts = options_data or {}
         try:
             conn = sqlite3.connect(self.db_path)
             conn.execute(f"""
                 INSERT OR REPLACE INTO {self.TABLE}
                 (date, ticker, final_score, direction, price_at_predict,
-                 dimension_scores, agent_directions)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                 dimension_scores, agent_directions,
+                 options_score, iv_rank, put_call_ratio, gamma_exposure, flow_direction)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 datetime.now().strftime("%Y-%m-%d"),
                 ticker,
@@ -105,6 +133,11 @@ class PredictionStore:
                 price,
                 json.dumps(dimension_scores or {}),
                 json.dumps(agent_directions or {}),
+                opts.get("options_score"),
+                opts.get("iv_rank"),
+                opts.get("put_call_ratio"),
+                opts.get("gamma_exposure"),
+                opts.get("flow_direction"),
             ))
             conn.commit()
             return True
@@ -327,6 +360,9 @@ class Backtester:
             except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, AttributeError) as e:
                 _log.debug("Price fetch failed for %s: %s", ticker, e)
 
+            # 提取期权分析数据（如果蜂群结果中包含）
+            options_data = data.get("options_data") or {}
+
             ok = self.store.save_prediction(
                 ticker=ticker,
                 final_score=data.get("final_score", 5.0),
@@ -334,6 +370,7 @@ class Backtester:
                 price=price,
                 dimension_scores=data.get("dimension_scores"),
                 agent_directions=agent_dirs,
+                options_data=options_data,
             )
             if ok:
                 saved += 1
@@ -394,6 +431,10 @@ class Backtester:
                     pred["id"], period, actual_price, round(ret, 3), is_correct
                 )
 
+                # T+1 期权回验：记录 T+1 的 IV Rank 变化
+                if period == "t1" and pred.get("iv_rank") is not None:
+                    self._check_options_t1(pred)
+
                 checked += 1
                 if is_correct:
                     correct += 1
@@ -436,6 +477,35 @@ class Backtester:
         except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
             _log.debug("Future price fetch failed for %s +%dd: %s", ticker, days_ahead, e)
             return None
+
+    def _check_options_t1(self, pred: Dict):
+        """T+1 期权回验：获取 T+1 的 IV Rank 用于对比"""
+        ticker = pred["ticker"]
+        try:
+            from options_analyzer import OptionsAgent
+            agent = OptionsAgent()
+            result = agent.analyze(ticker)
+            iv_rank_t1 = result.get("iv_rank")
+
+            if iv_rank_t1 is not None:
+                conn = None
+                try:
+                    conn = sqlite3.connect(self.store.db_path)
+                    conn.execute(f"""
+                        UPDATE {PredictionStore.TABLE}
+                        SET iv_rank_t1 = ?
+                        WHERE id = ?
+                    """, (iv_rank_t1, pred["id"]))
+                    conn.commit()
+                except (sqlite3.Error, OSError) as e:
+                    _log.debug("IV Rank T+1 update failed: %s", e)
+                finally:
+                    if conn:
+                        conn.close()
+
+        except (ImportError, ConnectionError, TimeoutError, OSError,
+                ValueError, KeyError, TypeError) as e:
+            _log.debug("Options T+1 check skipped for %s: %s", ticker, e)
 
     def _check_direction(self, direction: str, actual_return: float) -> bool:
         """
@@ -503,18 +573,56 @@ class Backtester:
                         f"平均收益 {info['avg_return']:+.2f}%"
                     )
 
+        # 期权分析回验统计
+        lines.append("\n  [期权信号回验]")
+        try:
+            conn = sqlite3.connect(self.store.db_path)
+            conn.row_factory = sqlite3.Row
+            opts_row = conn.execute(f"""
+                SELECT COUNT(*) as total,
+                       AVG(options_score) as avg_opts_score,
+                       AVG(iv_rank) as avg_iv_rank,
+                       AVG(put_call_ratio) as avg_pc_ratio
+                FROM {PredictionStore.TABLE}
+                WHERE options_score IS NOT NULL AND date >= ?
+            """, ((datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),)).fetchone()
+
+            if opts_row and opts_row["total"] > 0:
+                lines.append(f"  期权数据记录: {opts_row['total']} 条")
+                lines.append(f"  平均期权评分: {opts_row['avg_opts_score']:.1f}/10")
+                lines.append(f"  平均 IV Rank: {opts_row['avg_iv_rank']:.1f}")
+                lines.append(f"  平均 P/C Ratio: {opts_row['avg_pc_ratio']:.2f}")
+
+                # IV Rank 变化（T+1）
+                iv_change_row = conn.execute(f"""
+                    SELECT COUNT(*) as cnt,
+                           AVG(iv_rank_t1 - iv_rank) as avg_iv_change
+                    FROM {PredictionStore.TABLE}
+                    WHERE iv_rank IS NOT NULL AND iv_rank_t1 IS NOT NULL AND date >= ?
+                """, ((datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d"),)).fetchone()
+
+                if iv_change_row and iv_change_row["cnt"] > 0:
+                    lines.append(f"  IV Rank T+1 均值变化: {iv_change_row['avg_iv_change']:+.1f}")
+            else:
+                lines.append("  暂无期权分析数据")
+
+            conn.close()
+        except (sqlite3.Error, OSError, KeyError, TypeError) as e:
+            lines.append(f"  期权回验查询失败: {e}")
+
         # 最近预测列表
         recent = self.store.get_all_predictions(days=14)
         if recent:
             lines.append(f"\n  最近预测记录 ({len(recent)} 条):")
             lines.append(f"  {'日期':<12} {'标的':<6} {'评分':>5} {'方向':<8} "
-                         f"{'价格':>8} {'T+1':>8} {'T+7':>8} {'T+30':>8}")
-            lines.append("  " + "-" * 66)
+                         f"{'价格':>8} {'T+1':>8} {'T+7':>8} {'T+30':>8} {'OPT':>5}")
+            lines.append("  " + "-" * 76)
 
             for p in recent[:20]:
                 t1_str = f"{p['return_t1']:+.1f}%" if p.get("checked_t1") else "待检"
                 t7_str = f"{p['return_t7']:+.1f}%" if p.get("checked_t7") else "待检"
                 t30_str = f"{p['return_t30']:+.1f}%" if p.get("checked_t30") else "待检"
+                opt_str = f"{p['options_score']:.0f}" if p.get("options_score") else "-"
                 dir_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(
                     p["direction"], p["direction"]
                 )
@@ -522,7 +630,7 @@ class Backtester:
                     f"  {p['date']:<12} {p['ticker']:<6} "
                     f"{p['final_score']:5.1f} {dir_cn:<8} "
                     f"${p.get('price_at_predict', 0):7.1f} "
-                    f"{t1_str:>8} {t7_str:>8} {t30_str:>8}"
+                    f"{t1_str:>8} {t7_str:>8} {t30_str:>8} {opt_str:>5}"
                 )
 
         lines.append("\n" + "=" * 70)

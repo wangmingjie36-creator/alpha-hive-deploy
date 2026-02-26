@@ -1373,6 +1373,27 @@ class AlphaHiveDailyReporter:
                 except (OSError, ValueError, RuntimeError) as e:
                     _log.warning("Slack 财报通知发送失败: %s", e)
 
+        # D1: 自动同步财报日期到催化剂日历
+        try:
+            auto_catalysts = self.earnings_watcher.get_catalysts_for_calendar(tickers)
+            if auto_catalysts and hasattr(self, 'calendar') and self.calendar:
+                # 合并自动获取的财报日期与 config.CATALYSTS
+                from config import CATALYSTS
+                merged = dict(CATALYSTS)
+                for t, events in auto_catalysts.items():
+                    if t in merged:
+                        # 去重：只添加尚未存在的 earnings 事件
+                        existing_dates = {e.get("scheduled_date") for e in merged[t]}
+                        for ev in events:
+                            if ev.get("scheduled_date") not in existing_dates:
+                                merged[t].append(ev)
+                    else:
+                        merged[t] = events
+                self.calendar.sync_catalysts(catalysts=merged, tickers=tickers)
+                _log.info("已自动同步 %d 个标的的财报日期到催化剂日历", len(auto_catalysts))
+        except (ImportError, OSError, ValueError, TypeError, AttributeError) as e:
+            _log.debug("催化剂日历自动同步跳过: %s", e)
+
         return result
 
     def save_report(self, report: Dict) -> str:

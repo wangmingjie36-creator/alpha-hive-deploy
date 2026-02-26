@@ -166,6 +166,43 @@ class EarningsWatcher:
                 reporting_today.append(ticker)
         return reporting_today
 
+    def get_catalysts_for_calendar(self, tickers: List[str]) -> Dict[str, List[Dict]]:
+        """
+        将自动获取的财报日期转换为 calendar_integrator.sync_catalysts() 格式
+
+        返回: {
+            "NVDA": [{"event": "Q4 Earnings", "scheduled_date": "2026-02-25",
+                      "scheduled_time": "16:30", "time_zone": "US/Eastern"}],
+            ...
+        }
+
+        可直接传入 CalendarIntegrator.sync_catalysts(catalysts=result)
+        """
+        all_dates = self.get_all_earnings_dates(tickers)
+        catalysts = {}
+
+        for ticker, info in all_dates.items():
+            earnings_date = info.get("earnings_date")
+            if not earnings_date:
+                continue
+
+            # 推断时间（AMC=盘后16:30, BMO=盘前08:00）
+            earnings_time = info.get("earnings_time", "AMC")
+            if earnings_time == "BMO":
+                time_str = "08:00"
+            else:
+                time_str = "16:30"
+
+            catalysts[ticker] = [{
+                "event": f"Earnings Release ({earnings_date})",
+                "scheduled_date": earnings_date,
+                "scheduled_time": time_str,
+                "time_zone": "US/Eastern",
+                "source": "earnings_watcher_auto",
+            }]
+
+        return catalysts
+
     # ==================== 财报结果抓取 ====================
 
     def fetch_earnings_results(self, ticker: str) -> Optional[Dict]:

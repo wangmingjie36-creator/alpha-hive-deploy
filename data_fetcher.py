@@ -272,7 +272,10 @@ class DataFetcher:
 
     def get_sec_filings(self, ticker: str, form_type: str = "4") -> List[Dict]:
         """
-        获取 SEC 文件（Form 4 / 13F）
+        获取 SEC 文件（Form 4 内幕交易）
+
+        使用 sec_edgar.py 的真实 SEC EDGAR API 实现。
+        包含内幕交易摘要：买入/卖出金额、情绪判断、重要交易明细。
 
         Args:
             ticker: 股票代码
@@ -284,6 +287,10 @@ class DataFetcher:
                 "form_type": str,
                 "url": str,
                 "title": str,
+                "insider_sentiment": str,
+                "sentiment_score": float,
+                "notable_trades": list,
+                "summary": str,
             }]
         """
         cache_key = self.cache.get_cache_key(f"sec_form{form_type}", ticker)
@@ -295,23 +302,49 @@ class DataFetcher:
         try:
             _log.info(f"🔄 获取 SEC Form {form_type}: {ticker}")
 
-            # 实际实现：爬取 SEC EDGAR
-            # import requests
-            # from bs4 import BeautifulSoup
-            # cik = self._get_cik(ticker)
-            # url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&type={form_type}"
-            # response = requests.get(url, headers={"User-Agent": "..."})
-            # soup = BeautifulSoup(response.text, 'html.parser')
-            # # 解析表格获取文件列表
+            # 使用 sec_edgar.py 的真实 API 实现
+            from sec_edgar import SECEdgarClient
+            client = SECEdgarClient()
 
-            # 示例数据
+            if form_type == "4":
+                # 获取完整的内幕交易分析
+                insider_data = client.get_insider_trades(ticker, days=30)
+
+                if insider_data and insider_data.get("total_filings", 0) > 0:
+                    # 同时获取原始 filing 列表用于构建文件链接
+                    raw_filings = client.get_recent_form4_filings(ticker, limit=10)
+
+                    filings = []
+                    for f in raw_filings[:10]:
+                        acc = f.get("accessionNumber", "").replace("-", "")
+                        cik = f.get("cik", "")
+                        filings.append({
+                            "filing_date": f.get("filingDate", ""),
+                            "form_type": "4",
+                            "url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/" if cik else "",
+                            "title": f"Form 4 - {ticker} Insider Transaction",
+                        })
+
+                    # 附加内幕交易分析摘要
+                    if filings:
+                        filings[0]["insider_sentiment"] = insider_data.get("insider_sentiment", "neutral")
+                        filings[0]["sentiment_score"] = insider_data.get("sentiment_score", 5.0)
+                        filings[0]["notable_trades"] = insider_data.get("notable_trades", [])[:5]
+                        filings[0]["summary"] = insider_data.get("summary", "")
+                        filings[0]["net_dollar_value"] = insider_data.get("net_dollar_value", 0)
+
+                    self.cache.save(cache_key, filings)
+                    return filings
+
+            # 无数据或非 Form 4，使用样本数据
+            _log.info(f"SEC EDGAR 无 {ticker} Form {form_type} 数据，使用样本")
             filings = self._get_sample_sec_filings(ticker, form_type)
             self.cache.save(cache_key, filings)
             return filings
 
-        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
-            _log.error(f"❌ SEC 获取失败 {ticker}: {e}")
-            return []
+        except (ImportError, ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+            _log.warning(f"SEC EDGAR 实时获取失败 {ticker}: {e}，降级为样本数据")
+            return self._get_sample_sec_filings(ticker, form_type)
 
     # ==================== Seeking Alpha ====================
 

@@ -124,7 +124,7 @@ class OptionsDataFetcher:
                 _log.warning("%s 期权数据不足，使用样本数据", ticker)
                 return self._get_sample_options_chain(ticker)
 
-            # 合并所有到期日的数据
+            # 合并所有到期日的数据，并按 DTE 加权
             import pandas as pd
 
             calls_df = pd.concat(calls_list, ignore_index=True) if calls_list else None
@@ -135,6 +135,25 @@ class OptionsDataFetcher:
                 calls_df = calls_df.fillna(0)
             if puts_df is not None:
                 puts_df = puts_df.fillna(0)
+
+            # DTE 加权：近期到期的期权权重更高（1/sqrt(DTE)）
+            # 用于下游 P/C ratio、GEX 等聚合计算
+            today = datetime.now()
+            for df in [calls_df, puts_df]:
+                if df is not None and not df.empty and "expiry" in df.columns:
+                    dte_values = []
+                    for exp_str in df["expiry"]:
+                        try:
+                            exp_date = datetime.strptime(str(exp_str)[:10], "%Y-%m-%d")
+                            dte = max(1, (exp_date - today).days)
+                        except (ValueError, TypeError):
+                            dte = 30  # 默认
+                        dte_values.append(dte)
+                    df["dte"] = dte_values
+                    # 权重 = 1/sqrt(DTE)，归一化使最大权重=1.0
+                    raw_weights = [1.0 / (d ** 0.5) for d in dte_values]
+                    max_w = max(raw_weights) if raw_weights else 1.0
+                    df["dte_weight"] = [w / max_w for w in raw_weights]
 
             result = {
                 "ticker": ticker,
@@ -153,13 +172,20 @@ class OptionsDataFetcher:
             return self._get_sample_options_chain(ticker)
 
     def fetch_historical_iv(self, ticker: str, days: int = 252) -> List[float]:
-        """获取历史 IV 数据 - 用历史已实现波动率 + IV 溢价估算
+        """获取历史 IV 数据 - 用历史已实现波动率 + 动态 IV 溢价估算
 
-        IV 通常比 HV 高 20-40%（Volatility Risk Premium），
-        直接用 HV 会导致 IV Rank 严重偏高。
-        修正：HV * 1.25 作为历史 IV 代理。
+        方法：
+        1. 获取当前期权链中的实际隐含波动率（ATM 中位数）
+        2. 计算当前 20 日已实现波动率
+        3. 算出动态 IV/HV 比率（典型范围 1.05-1.60）
+        4. 用该比率 × 历史 HV 滚动序列 = 更准确的历史 IV 代理
+
+        相比固定 HV × 1.25 的优势：
+        - 高波动期（如财报季前），IV premium 可能高达 1.6+
+        - 低波动期，IV premium 可能低至 1.05
+        - 动态比率让 IV Rank 更贴合实际市场状态
         """
-        cached = self._read_cache(ticker, "hist_iv_v2")
+        cached = self._read_cache(ticker, "hist_iv_v3")
         if cached:
             return cached
 
@@ -178,20 +204,81 @@ class OptionsDataFetcher:
             # 计算历史已实现波动率（20日滚动）
             returns = hist["Close"].pct_change().dropna()
             rolling_vol = returns.rolling(window=20).std() * 100 * (252 ** 0.5)
+            hv_values = rolling_vol.dropna().tolist()
 
-            # 修正：加上典型的 IV premium（HV * 1.25），使历史 IV 与当前隐含 IV 量级匹配
-            iv_premium = 1.25
-            iv_list = [v * iv_premium for v in rolling_vol.dropna().tolist()]
+            if not hv_values:
+                return self._get_sample_historical_iv(ticker)
+
+            # 动态 IV premium：从当前期权链获取实际 IV，与当前 HV 对比
+            current_hv = hv_values[-1] if hv_values else 25.0
+            iv_premium = self._estimate_iv_premium(stock, current_hv)
+
+            iv_list = [v * iv_premium for v in hv_values]
 
             # 保留最后 252 个数据点
             iv_list = iv_list[-days:]
 
-            self._write_cache(ticker, "hist_iv_v2", iv_list)
+            self._write_cache(ticker, "hist_iv_v3", iv_list)
             return iv_list
 
         except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
             _log.warning("获取 %s 历史 IV 失败：%s，使用样本数据", ticker, e)
             return self._get_sample_historical_iv(ticker)
+
+    def _estimate_iv_premium(self, stock, current_hv: float) -> float:
+        """
+        从当前期权链估算 IV/HV 比率（动态 IV premium）
+
+        - 取 ATM ±20% 范围内的 call IV 中位数
+        - 计算 IV / HV 比率，clamp 到 [1.05, 2.0]
+        - 无法获取时降级为 1.25
+        """
+        try:
+            if not hasattr(stock, "options") or not stock.options:
+                return 1.25
+
+            # 取最近的到期日
+            expiry = stock.options[0]
+            chain = stock.option_chain(expiry)
+            calls = chain.calls
+
+            # 获取当前股价
+            try:
+                price = stock.fast_info.get("lastPrice", 0) or stock.fast_info.get("previousClose", 0)
+            except (AttributeError, TypeError):
+                price = 0
+
+            if not price:
+                all_strikes = calls["strike"].tolist()
+                price = statistics.median(all_strikes) if all_strikes else 100.0
+
+            # ATM ±20% 范围
+            atm_lower = price * 0.80
+            atm_upper = price * 1.20
+
+            atm_calls = calls[
+                (calls["strike"] >= atm_lower) &
+                (calls["strike"] <= atm_upper) &
+                (calls["impliedVolatility"] > 0.005)
+            ]
+
+            if atm_calls.empty:
+                return 1.25
+
+            # 中位数 IV（yfinance 返回小数，×100 转百分比）
+            current_iv = float(atm_calls["impliedVolatility"].median()) * 100
+
+            if current_hv <= 0:
+                return 1.25
+
+            ratio = current_iv / current_hv
+            # clamp 到合理范围
+            return max(1.05, min(2.0, ratio))
+
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError,
+                TypeError, AttributeError, IndexError) as e:
+            _log.debug("IV premium 估算降级: %s", e)
+            return 1.25
 
     def fetch_expirations(self, ticker: str) -> List[str]:
         """获取期权到期日列表"""
@@ -391,14 +478,23 @@ class OptionsAnalyzer:
                 if v and not (isinstance(v, float) and math.isnan(v))
             )
 
-        # 优先使用 openInterest
-        total_call_oi = _safe_sum(calls_df, "openInterest")
-        total_put_oi = _safe_sum(puts_df, "openInterest")
+        # DTE 加权 OI（近期到期权重更高）
+        def _weighted_sum(data, key):
+            return sum(
+                v * d.get("dte_weight", 1.0)
+                for d in data
+                for v in [d.get(key, 0)]
+                if v and not (isinstance(v, float) and math.isnan(v))
+            )
+
+        # 优先使用 DTE 加权 openInterest
+        total_call_oi = _weighted_sum(calls_df, "openInterest")
+        total_put_oi = _weighted_sum(puts_df, "openInterest")
 
         # OI 全零时降级为 volume
         if total_call_oi == 0 and total_put_oi == 0:
-            total_call_oi = _safe_sum(calls_df, "volume")
-            total_put_oi = _safe_sum(puts_df, "volume")
+            total_call_oi = _weighted_sum(calls_df, "volume")
+            total_put_oi = _weighted_sum(puts_df, "volume")
 
         if total_call_oi == 0:
             return 1.0  # 无数据时返回中立而非 0
@@ -410,23 +506,46 @@ class OptionsAnalyzer:
         self, calls_df: List[Dict], puts_df: List[Dict], stock_price: float
     ) -> float:
         """
-        计算 Gamma Exposure
-        正 GEX：做市商对冲压制波动（对多头有利）
-        负 GEX：做市商放大波动（对趋势跟踪有利）
+        计算 Notional Gamma Exposure（标准做市商 delta-hedge 模型）
+
+        公式：GEX = Σ(stock_price × 100 × gamma × OI × dte_weight)
+        - stock_price: 标的股票当前价格
+        - 100: 每份合约对应 100 股
+        - gamma: 该行权价的 gamma
+        - OI: 未平仓合约数
+        - dte_weight: DTE 权重（近期期权权重更大）
+
+        做市商在 call 上做多 gamma（买入 call → long gamma），
+        在 put 上做空 gamma（卖出 put → short gamma），
+        因此 net GEX = call_gamma - put_gamma
+
+        正 GEX：做市商对冲压制波动（稳定市场）
+        负 GEX：做市商放大波动（利于趋势跟踪）
+
+        返回值单位：百万美元 notional gamma
         """
         if not calls_df or not puts_df:
             return 0.0
 
-        # 简化版：用 OI * gamma 计算
+        if stock_price <= 0:
+            return 0.0
+
+        # 标准 notional GEX 计算
         call_gamma = sum(
-            c.get("openInterest", 0) * c.get("gamma", 0) for c in calls_df
+            stock_price * 100 * c.get("gamma", 0) * c.get("openInterest", 0)
+            * c.get("dte_weight", 1.0)
+            for c in calls_df
         )
         put_gamma = sum(
-            p.get("openInterest", 0) * p.get("gamma", 0) for p in puts_df
+            stock_price * 100 * p.get("gamma", 0) * p.get("openInterest", 0)
+            * p.get("dte_weight", 1.0)
+            for p in puts_df
         )
 
-        # 正数 = 看多，负数 = 看空
-        gex = (call_gamma - put_gamma) / 1000000 if (call_gamma + put_gamma) > 0 else 0.0
+        # 正数 = net long gamma（压制波动），负数 = net short gamma（放大波动）
+        # 除以 1e6 转为百万美元
+        total = call_gamma + put_gamma
+        gex = (call_gamma - put_gamma) / 1e6 if total > 0 else 0.0
 
         return round(gex, 4)
 
