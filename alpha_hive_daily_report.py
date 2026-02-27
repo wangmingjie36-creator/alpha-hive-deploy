@@ -2354,7 +2354,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Alpha Hive 投资仪表板</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"><\/script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 {new_css}
 </style>
@@ -2594,7 +2594,7 @@ document.addEventListener('DOMContentLoaded',function(){{
     }});
   }});
 }});
-<\/script>
+</script>
 </body>
 </html>"""
 
