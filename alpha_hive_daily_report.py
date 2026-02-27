@@ -1387,7 +1387,16 @@ class AlphaHiveDailyReporter:
         results = {}
 
         # 1. Git 提交报告（始终新 commit，不 amend，避免 GitHub Pages 部署冲突）
+        #
+        # ⚠️ 架构说明：
+        #   - LLM 模式：commit 所有变更 → git push origin main → 生产页面更新
+        #   - 测试模式：commit 所有变更 → 仅推 test remote（临时分支）→ git reset --hard origin/main
+        #              local main 完全回滚，origin/main 不受任何影响
+        #   - 禁止在测试模式外手动 `git add index.html && git push origin main`，
+        #     生成物（index.html / md / json / ML html）只能通过 LLM 扫描进入 origin
         from datetime import datetime as _dt2
+        import llm_service as _llm_check
+        _using_llm = _llm_check.is_available()
         timestamp = _dt2.now().strftime("%H:%M")
         today_commit_msg = f"Alpha Hive 蜂群日报 {self.date_str} {timestamp}"
         _log.info("Git commit... (mode: new)")
@@ -1404,8 +1413,6 @@ class AlphaHiveDailyReporter:
 
         # 2. Git 推送：LLM 模式 → 生产（origin main），规则模式 → 测试（test remote）
         #    规则模式使用临时分支，不污染本地 main，推完即删除
-        import llm_service as _llm_check
-        _using_llm = _llm_check.is_available()
         env_label = "🧠 生产（LLM）" if _using_llm else "🔧 测试（规则引擎）"
         _log.info("Git push → [%s]", env_label)
 
