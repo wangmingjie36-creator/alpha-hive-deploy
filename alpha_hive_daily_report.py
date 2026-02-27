@@ -2208,6 +2208,33 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 ::-webkit-scrollbar-thumb{background:rgba(102,126,234,.4);border-radius:3px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .status-dot{width:10px;height:10px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite;display:inline-block}
+/* HISTORY */
+.hist-list{display:flex;flex-direction:column;gap:14px}
+.hist-card{display:flex;align-items:center;gap:20px;padding:18px 20px;
+           border:1px solid var(--border);border-radius:12px;background:var(--surface2);
+           transition:border-color .2s,box-shadow .2s}
+.hist-card:hover{border-color:var(--acc2);box-shadow:0 4px 16px rgba(102,126,234,.1)}
+.hist-left{min-width:110px}
+.hist-date{font-size:.95em;font-weight:800;color:var(--tp)}
+.hist-meta{font-size:.78em;color:var(--ts);margin-top:3px}
+.hist-mid{display:flex;flex-wrap:wrap;gap:8px;flex:1}
+.htop-chip{display:flex;align-items:center;gap:5px;background:var(--bg);
+           border:1px solid var(--border);border-radius:8px;padding:5px 10px}
+.hticker{font-weight:800;font-size:.88em;color:var(--tp)}
+.hscore{font-size:.82em;font-weight:700}
+.hdir{font-size:.85em}
+.hist-right{display:flex;flex-wrap:wrap;gap:6px;min-width:220px;justify-content:flex-end}
+.hlink{display:inline-block;padding:4px 10px;border-radius:6px;font-size:.76em;
+       font-weight:700;text-decoration:none;transition:opacity .2s}
+.hlink:hover{opacity:.8}
+.hlink-md{background:rgba(102,126,234,.15);color:var(--acc2)}
+.hlink-json{background:rgba(118,75,162,.15);color:var(--acc3)}
+.hlink-ml{background:rgba(244,165,50,.15);color:var(--acc)}
+.hist-empty{text-align:center;color:var(--ts);padding:32px;font-size:.92em}
+@media(max-width:768px){
+  .hist-card{flex-direction:column;align-items:flex-start;gap:12px}
+  .hist-right{justify-content:flex-start}
+}
 """
 
         # ── Build new Top-6 cards ──
@@ -2344,6 +2371,80 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
               </div>
             </div>"""
 
+        # ── 历史简报回溯 ──
+        _hist_entries = []
+        try:
+            import glob as _glob
+            _hist_files = sorted(
+                _glob.glob(str(self.report_dir / "alpha-hive-daily-*.json")),
+                reverse=True  # 最新在前
+            )
+            for _hf in _hist_files:
+                _hdate = _Path(_hf).stem.replace("alpha-hive-daily-", "")
+                if _hdate == date_str:
+                    continue  # 今天已在主面板展示
+                try:
+                    with open(_hf, encoding="utf-8") as _hfp:
+                        _hrpt = _json.load(_hfp)
+                    _hopps = _hrpt.get("opportunities", [])
+                    _hmeta = _hrpt.get("swarm_metadata", {})
+                    _hn    = _hmeta.get("tickers_analyzed", len(_hopps))
+                    # 按 opp_score 降序取 Top 3
+                    _htop3 = sorted(
+                        [{"ticker": o.get("ticker",""), "score": float(o.get("opp_score",0)),
+                          "direction": str(o.get("direction","neutral")).lower()}
+                         for o in _hopps if o.get("ticker")],
+                        key=lambda x: x["score"], reverse=True
+                    )[:3]
+                    _havg  = sum(o["score"] for o in _htop3) / len(_htop3) if _htop3 else 0
+                    # 可用的 ML 报告
+                    _hml   = [t for t in [o["ticker"] for o in _hopps]
+                              if _Path(self.report_dir / f"alpha-hive-{t}-ml-enhanced-{_hdate}.html").exists()]
+                    _hist_entries.append({
+                        "date": _hdate, "n": _hn, "top3": _htop3,
+                        "avg": _havg, "ml_tickers": _hml,
+                        "has_md":   _Path(self.report_dir / f"alpha-hive-daily-{_hdate}.md").exists(),
+                        "has_json": _Path(self.report_dir / f"alpha-hive-daily-{_hdate}.json").exists(),
+                    })
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 生成历史时间线 HTML
+        _dir_icon = {"bullish": "🟢", "bearish": "🔴", "neutral": "🟡"}
+        _dir_cn   = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
+        _hist_html = ""
+        if _hist_entries:
+            for _he in _hist_entries:
+                _top3_html = ""
+                for _ht in _he["top3"]:
+                    _hscls = "sc-h" if _ht["score"] >= 7.0 else ("sc-m" if _ht["score"] >= 5.5 else "sc-l")
+                    _hdir  = _ht["direction"] if _ht["direction"] in _dir_icon else "neutral"
+                    _top3_html += f"""<div class="htop-chip">
+                      <span class="hticker">{_html.escape(_ht['ticker'])}</span>
+                      <span class="hscore {_hscls}">{_ht['score']:.1f}</span>
+                      <span class="hdir">{_dir_icon.get(_hdir,'🟡')}</span>
+                    </div>"""
+                _hlinks = ""
+                if _he["has_md"]:
+                    _hlinks += f'<a href="alpha-hive-daily-{_he["date"]}.md" class="hlink hlink-md">📄 简报</a>'
+                if _he["has_json"]:
+                    _hlinks += f'<a href="alpha-hive-daily-{_he["date"]}.json" class="hlink hlink-json">📊 JSON</a>'
+                for _hmt in _he["ml_tickers"][:4]:
+                    _hlinks += f'<a href="alpha-hive-{_hmt}-ml-enhanced-{_he["date"]}.html" class="hlink hlink-ml">{_html.escape(_hmt)}</a>'
+                _hist_html += f"""
+                <div class="hist-card">
+                  <div class="hist-left">
+                    <div class="hist-date">{_he['date']}</div>
+                    <div class="hist-meta">{_he['n']} 标的 · 均分 <span class="{'sc-h' if _he['avg']>=7 else ('sc-m' if _he['avg']>=5.5 else 'sc-l')}">{_he['avg']:.1f}</span></div>
+                  </div>
+                  <div class="hist-mid">{_top3_html}</div>
+                  <div class="hist-right">{_hlinks}</div>
+                </div>"""
+        else:
+            _hist_html = '<div class="hist-empty">暂无历史记录，第一份历史简报将在明天出现 📅</div>'
+
         # ── Avg Score formatted ──
         _avg_score_str = f"{_avg_score:.1f}"
         _fg_str2 = _fg_str  # already computed above
@@ -2364,11 +2465,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 <nav class="nav">
   <a href="#" class="nav-logo">🐝 Alpha Hive</a>
   <div class="nav-links">
-    <a href="#today"  class="nav-link">今日简报</a>
-    <a href="#charts" class="nav-link">图表</a>
-    <a href="#list"   class="nav-link">完整清单</a>
-    <a href="#deep"   class="nav-link">个股深度</a>
-    <a href="#report" class="nav-link">完整简报</a>
+    <a href="#today"   class="nav-link">今日简报</a>
+    <a href="#charts"  class="nav-link">图表</a>
+    <a href="#list"    class="nav-link">完整清单</a>
+    <a href="#deep"    class="nav-link">个股深度</a>
+    <a href="#report"  class="nav-link">完整简报</a>
+    <a href="#history" class="nav-link">📅 历史简报</a>
   </div>
   <button class="dark-btn" id="darkBtn" onclick="toggleDark()">🌙 暗黑</button>
 </nav>
@@ -2476,6 +2578,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   <div class="section" id="report">
     <div class="sec-title">完整蜂群简报</div>
     <div class="report-body">{_rpt_body}</div>
+  </div>
+
+  <!-- ── Historical Reports ── -->
+  <div class="section" id="history">
+    <div class="sec-title">📅 历史简报回溯</div>
+    <div class="hist-list">{_hist_html}</div>
   </div>
 </div>
 
