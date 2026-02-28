@@ -1613,7 +1613,18 @@ class QueenDistiller:
         if adapted_weights:
             self.DIMENSION_WEIGHTS = adapted_weights
         else:
-            self.DIMENSION_WEIGHTS = dict(self.DEFAULT_WEIGHTS)
+            # 优先从 config.EVALUATION_WEIGHTS 读取，确保权重配置单一入口
+            try:
+                from config import EVALUATION_WEIGHTS
+                valid_dims = set(self.DEFAULT_WEIGHTS.keys())
+                # 只保留已实现的维度（防止 config 中存在未对应 Agent 的维度）
+                cfg_weights = {k: v for k, v in EVALUATION_WEIGHTS.items() if k in valid_dims}
+                # 用 DEFAULT_WEIGHTS 补全缺失维度
+                merged = dict(self.DEFAULT_WEIGHTS)
+                merged.update(cfg_weights)
+                self.DIMENSION_WEIGHTS = merged
+            except (ImportError, AttributeError):
+                self.DIMENSION_WEIGHTS = dict(self.DEFAULT_WEIGHTS)
 
     def distill(self, ticker: str, agent_results: List[Dict]) -> Dict:
         """
@@ -1675,6 +1686,27 @@ class QueenDistiller:
             rule_score = adjusted_score
 
         rule_score = round(max(0.0, min(10.0, rule_score)), 2)
+
+        # 6.5. BearBeeContrarian 看空强度上限
+        # 反对蜂的 score = 10 - bear_strength（反向映射），bear_strength 越高看空越强
+        # bear_strength > 7.0 时对 rule_score 施加软上限，防止强看空信号下评分虚高
+        contrarian_result = next(
+            (r for r in valid_results if r.get("dimension") == "contrarian"), None
+        )
+        bear_strength = 0.0
+        bear_cap_applied = False
+        if contrarian_result is not None:
+            bear_strength = round(10.0 - contrarian_result.get("score", 5.0), 2)
+            if bear_strength > 7.0:
+                # bear=7.5 → cap=9.75; bear=8.0 → cap=9.5; bear=9.0 → cap=9.0; bear=10.0 → cap=8.5
+                bear_cap = round(10.0 - (bear_strength - 7.0) * 0.5, 2)
+                if rule_score > bear_cap:
+                    _log.info(
+                        "%s BearBee 看空强度 %.1f → 上限 %.2f（原 %.2f）",
+                        ticker, bear_strength, bear_cap, rule_score,
+                    )
+                    rule_score = bear_cap
+                    bear_cap_applied = True
 
         # 7. 多数投票（需要 >40% 才算多数，否则中性）
         directions = [r.get("direction", "neutral") for r in valid_results]
@@ -1817,4 +1849,6 @@ class QueenDistiller:
             "llm_confidence": llm_confidence,
             "rule_score": rule_score,
             "rule_direction": rule_direction,
+            "bear_strength": bear_strength,
+            "bear_cap_applied": bear_cap_applied,
         }

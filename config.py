@@ -410,14 +410,15 @@ CATALYSTS = {
     ],
 }
 
-# ==================== 评分权重（6维评估，含期权信号）====================
+# ==================== 评分权重（5维评估）====================
+# 键名必须与 QueenDistiller.DEFAULT_WEIGHTS 一致（risk_adj 不是 risk_adjustment）
+# OracleBeeEcho 的期权信号已归入 odds 维度，无需单独 options 维度
 EVALUATION_WEIGHTS = {
-    "signal": 0.25,           # -0.05（为期权腾出空间）
-    "catalyst": 0.20,         # 不变
-    "sentiment": 0.15,        # -0.05（为期权腾出空间）
-    "odds": 0.15,             # 不变
-    "risk_adjustment": 0.15,  # 不变
-    "options": 0.10,          # 新增：期权信号维度
+    "signal":    0.30,   # ScoutBeeNova: SEC 披露 + 聪明钱 + 拥挤度
+    "catalyst":  0.20,   # ChronosBeeHorizon: 催化剂与时间线
+    "sentiment": 0.20,   # BuzzBeeWhisper: 情绪与叙事
+    "odds":      0.15,   # OracleBeeEcho: 期权 IV + 市场赔率
+    "risk_adj":  0.15,   # GuardBeeSentinel: 交叉验证 + 风险调整
 }
 
 # ==================== 期权评分阈值 ====================
