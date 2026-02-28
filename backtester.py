@@ -97,6 +97,7 @@ class PredictionStore:
             ("gamma_exposure", "REAL"),
             ("flow_direction", "TEXT"),
             ("iv_rank_t1", "REAL"),
+            ("pheromone_compact", "TEXT"),  # NA5: Agent 自评分快照
         ]
         for col_name, col_type in new_columns:
             try:
@@ -113,8 +114,9 @@ class PredictionStore:
         dimension_scores: Dict = None,
         agent_directions: Dict = None,
         options_data: Dict = None,
+        pheromone_compact: list = None,
     ) -> bool:
-        """保存一条预测记录（含期权分析数据）"""
+        """保存一条预测记录（含期权分析数据 + Agent 自评分快照）"""
         conn = None
         opts = options_data or {}
         try:
@@ -123,8 +125,9 @@ class PredictionStore:
                 INSERT OR REPLACE INTO {self.TABLE}
                 (date, ticker, final_score, direction, price_at_predict,
                  dimension_scores, agent_directions,
-                 options_score, iv_rank, put_call_ratio, gamma_exposure, flow_direction)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 options_score, iv_rank, put_call_ratio, gamma_exposure, flow_direction,
+                 pheromone_compact)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 datetime.now().strftime("%Y-%m-%d"),
                 ticker,
@@ -138,6 +141,7 @@ class PredictionStore:
                 opts.get("put_call_ratio"),
                 opts.get("gamma_exposure"),
                 opts.get("flow_direction"),
+                json.dumps(pheromone_compact or []),
             ))
             conn.commit()
             return True
@@ -371,6 +375,7 @@ class Backtester:
                 dimension_scores=data.get("dimension_scores"),
                 agent_directions=agent_dirs,
                 options_data=options_data,
+                pheromone_compact=data.get("pheromone_compact", []),
             )
             if ok:
                 saved += 1
@@ -641,6 +646,83 @@ class Backtester:
 
     # ==================== 权重自适应 ====================
 
+    def analyze_self_score_bias(
+        self, period: str = "t1", min_samples: int = 5
+    ) -> Dict[str, float]:
+        """
+        NA5：分析各 Agent 的 self_score 系统性偏差
+
+        偏差定义：Agent 预测错误时 self_score 的均值 - 预测正确时 self_score 的均值
+          正值（>0）= 系统性乐观：高分时经常错，overconfident
+          负值（<0）= 系统性保守：低分时反而对，underconfident
+          ~0       = 自评校准良好
+
+        返回: {agent_id_abbrev_8chars: bias_float}，样本不足的 Agent 返回 0.0
+        """
+        # agent 全名 → 缩写（pheromone_compact 用 agent_id[:8]）
+        agent_abbrevs = {
+            "ScoutBeeNova":      "ScoutBee",
+            "OracleBeeEcho":     "OracleBee",
+            "BuzzBeeWhisper":    "BuzzBeeW",
+            "ChronosBeeHorizon": "ChronosB",
+            "GuardBeeSentinel":  "GuardBee",
+            "RivalBeeVanguard":  "RivalBee",
+        }
+
+        bias: Dict[str, float] = {abbrev: 0.0 for abbrev in agent_abbrevs.values()}
+        conn = None
+        try:
+            conn = sqlite3.connect(self.store.db_path)
+            conn.row_factory = sqlite3.Row
+            cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+            rows = conn.execute(f"""
+                SELECT pheromone_compact, correct_{period}, return_{period}
+                FROM {PredictionStore.TABLE}
+                WHERE checked_{period} = 1
+                  AND pheromone_compact IS NOT NULL
+                  AND date >= ?
+            """, (cutoff,)).fetchall()
+
+            # {abbrev: {correct: [self_scores], wrong: [self_scores]}}
+            buckets: Dict[str, Dict[str, list]] = {
+                a: {"correct": [], "wrong": []} for a in agent_abbrevs.values()
+            }
+
+            for row in rows:
+                try:
+                    compact = json.loads(row["pheromone_compact"] or "[]")
+                    correct = bool(row[f"correct_{period}"])
+                    ret = row[f"return_{period}"]
+                    if ret is None:
+                        continue
+                    for entry in compact:
+                        abbrev = entry.get("a", "")
+                        if abbrev in buckets:
+                            ss = entry.get("s", 5.0)
+                            bucket_key = "correct" if correct else "wrong"
+                            buckets[abbrev][bucket_key].append(ss)
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    continue
+
+            for abbrev, b in buckets.items():
+                n_correct = len(b["correct"])
+                n_wrong = len(b["wrong"])
+                if n_correct + n_wrong < min_samples:
+                    continue
+                mean_correct = sum(b["correct"]) / n_correct if n_correct else 5.0
+                mean_wrong = sum(b["wrong"]) / n_wrong if n_wrong else 5.0
+                # 乐观偏差 = 错误时均值 - 正确时均值（越大表示越倾向在错误时给高分）
+                bias[abbrev] = round(mean_wrong - mean_correct, 3)
+
+        except (sqlite3.Error, OSError) as e:
+            _log.warning("self_score 偏差分析失败: %s", e)
+        finally:
+            if conn:
+                conn.close()
+
+        _log.info("Agent self_score 偏差分析: %s", {k: f"{v:+.3f}" for k, v in bias.items()})
+        return bias
+
     def adapt_weights(self, min_samples: int = 10, period: str = "t7") -> Optional[Dict]:
         """
         根据历史方向准确率自动调整 5 维公式权重
@@ -742,6 +824,35 @@ class Backtester:
         # 归一化确保总和 = 1.0
         s = sum(smoothed.values())
         smoothed = {dim: round(v / s, 3) for dim, v in smoothed.items()}
+
+        # NA5：self_score 偏差校正
+        # 若某 Agent 系统性乐观（高分时经常错），小幅下调其维度权重
+        # 规则：|bias| > 0.5 才修正，最大修正幅度 ±10%，避免震荡
+        dim_to_abbrev = {
+            "signal":    "ScoutBee",
+            "odds":      "OracleBee",
+            "sentiment": "BuzzBeeW",
+            "catalyst":  "ChronosB",
+            "risk_adj":  "GuardBee",
+        }
+        try:
+            bias_map = self.analyze_self_score_bias(period=period, min_samples=3)
+            bias_applied = {}
+            for dim, abbrev in dim_to_abbrev.items():
+                bias = bias_map.get(abbrev, 0.0)
+                if abs(bias) > 0.5:
+                    # 乐观偏差（bias>0）→ 降权；保守偏差（bias<0）→ 小幅升权
+                    correction = -bias * 0.05   # 每1分偏差调整 5%，最大 ±10%
+                    correction = max(-0.10, min(0.05, correction))
+                    smoothed[dim] = round(smoothed[dim] * (1.0 + correction), 3)
+                    bias_applied[dim] = round(correction, 4)
+            if bias_applied:
+                # 再次归一化
+                s2 = sum(smoothed.values())
+                smoothed = {dim: round(v / s2, 3) for dim, v in smoothed.items()}
+                _log.info("NA5 self_score 偏差校正: %s", bias_applied)
+        except Exception as e:  # pylint: disable=broad-except
+            _log.debug("self_score 偏差校正跳过（样本不足或异常）: %s", e)
 
         _log.info(
             "权重自适应（%s，%d 样本）: %s | 各维度准确率: %s",
