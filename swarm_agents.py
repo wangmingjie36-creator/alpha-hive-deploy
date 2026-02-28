@@ -1772,16 +1772,44 @@ class QueenDistiller:
                     rule_score = bear_cap
                     bear_cap_applied = True
 
-        # 7. 多数投票（需要 >40% 才算多数，否则中性）
+        # 6.7. GuardBeeSentinel 风险关门（NA4）
+        # risk_adj < 4.0 时施加额外折扣，防止高风险标的被虚高评分淹没
+        # 折扣公式：penalty = (4.0 - guard_score) / 4.0 * 0.8，最大 -0.8 分
+        # guard=3.9 → -0.02（可忽略）；guard=2.0 → -0.40；guard=0.0 → -0.80
+        guard_result = next(
+            (r for r in valid_results if r.get("dimension") == "risk_adj"), None
+        )
+        guard_penalty = 0.0
+        guard_penalty_applied = False
+        if guard_result is not None:
+            guard_score = guard_result.get("score", 5.0)
+            if guard_score < 4.0:
+                guard_penalty = round((4.0 - guard_score) / 4.0 * 0.8, 3)
+                pre_guard = rule_score
+                rule_score = round(max(rule_score - guard_penalty, 2.0), 2)
+                if rule_score < pre_guard:
+                    guard_penalty_applied = True
+                    _log.info(
+                        "%s GuardBee 风险关门: guard_score=%.1f penalty=%.3f %.2f→%.2f",
+                        ticker, guard_score, guard_penalty, pre_guard, rule_score,
+                    )
+
+        # 7. 置信度加权多数投票（NA3）
+        # 旧逻辑：原始计数，2个高置信度看多会被5个低置信度看空淹没
+        # 新逻辑：各 Agent 票重 = 其 confidence，高置信度 Agent 影响力更大
         directions = [r.get("direction", "neutral") for r in valid_results]
         bullish_count = directions.count("bullish")
         bearish_count = directions.count("bearish")
         neutral_count = directions.count("neutral")
-        total_votes = len(directions) if directions else 1
 
-        if bullish_count > bearish_count and bullish_count / total_votes >= 0.4:
+        bullish_w = sum(r.get("confidence", 0.5) for r in valid_results if r.get("direction") == "bullish")
+        bearish_w = sum(r.get("confidence", 0.5) for r in valid_results if r.get("direction") == "bearish")
+        neutral_w = sum(r.get("confidence", 0.5) for r in valid_results if r.get("direction") == "neutral")
+        total_w = bullish_w + bearish_w + neutral_w or 1.0
+
+        if bullish_w > bearish_w and bullish_w / total_w >= 0.4:
             rule_direction = "bullish"
-        elif bearish_count > bullish_count and bearish_count / total_votes >= 0.4:
+        elif bearish_w > bullish_w and bearish_w / total_w >= 0.4:
             rule_direction = "bearish"
         else:
             rule_direction = "neutral"
@@ -1934,6 +1962,13 @@ class QueenDistiller:
             "rule_direction": rule_direction,
             "bear_strength": bear_strength,
             "bear_cap_applied": bear_cap_applied,
+            "guard_penalty": guard_penalty,
+            "guard_penalty_applied": guard_penalty_applied,
+            "direction_vote_weights": {
+                "bullish": round(bullish_w, 3),
+                "bearish": round(bearish_w, 3),
+                "neutral": round(neutral_w, 3),
+            },
             "dq_quality_factor": quality_factor,
             "dq_penalty_applied": dq_penalty_applied,
             # NA1: 维度状态可视化

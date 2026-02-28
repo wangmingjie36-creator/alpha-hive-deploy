@@ -846,6 +846,11 @@ class AlphaHiveDailyReporter:
             rs = data.get("rule_score", data.get("final_score", 0.0))
             parts.append(f"⚠️ 反对蜂看空强度{bs:.1f} → 封顶{rs:.2f}")
 
+        # GuardBee 风险折扣
+        if data.get("guard_penalty_applied"):
+            gp = data.get("guard_penalty", 0.0)
+            parts.append(f"🛡️ 风控折扣-{gp:.2f}")
+
         # 数据质量折扣
         if data.get("dq_penalty_applied"):
             rp = data.get("data_real_pct", 0.0)
