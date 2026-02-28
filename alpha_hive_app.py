@@ -2478,8 +2478,12 @@ class AlphaHiveApp:
         except (ValueError, TypeError, AttributeError, RuntimeError, tk.TclError) as e:
             _log.warning("AnimLoop recovered from: %s", e)
         finally:
-            # 确保动画循环永远不会中断
-            self.root.after(1000 // self.FPS, self._animation_loop)
+            # 仅在 running 时重新调度，防止 root 已销毁时触发 TclError
+            if self.running:
+                try:
+                    self._after_id = self.root.after(1000 // self.FPS, self._animation_loop)
+                except tk.TclError:
+                    pass
 
     def run(self):
         print("\n" + "=" * 50)
@@ -2495,7 +2499,17 @@ class AlphaHiveApp:
 
     def quit(self):
         self.running = False
-        self.root.destroy()
+        # 取消待执行的动画帧，防止 root 销毁后触发 TclError
+        after_id = getattr(self, "_after_id", None)
+        if after_id:
+            try:
+                self.root.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
 
 if __name__ == "__main__":
