@@ -1701,6 +1701,9 @@ class QueenDistiller:
         REAL_SOURCES = {
             "real", "yfinance", "finviz_api", "options_api",
             "keyword", "llm_enhanced", "reddit_apewisdom",
+            "rule_only",   # 规则引擎是系统设计行为，非降级
+            "sec_api",     # SEC 直查 API
+            "SEC直查", "Finviz", "finviz",
         }
         PROXY_SOURCES = {
             "proxy_volume", "proxy_momentum", "proxy_social",

@@ -126,7 +126,7 @@ def get_social_buzz(ticker: str) -> Dict:
             "messages_per_day": equiv_messages,
             "bullish_pct": round(bullish_pct, 1),
             "bearish_pct": round(100.0 - bullish_pct, 1),
-            "data_quality": "real" if rank else "fallback",
+            "data_quality": "real",  # API 成功返回即为真实数据，不在榜≠降级
             "source": "reddit_apewisdom",
         }
 
