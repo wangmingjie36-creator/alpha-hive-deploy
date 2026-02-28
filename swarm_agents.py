@@ -1708,6 +1708,7 @@ class QueenDistiller:
         PROXY_SOURCES = {
             "proxy_volume", "proxy_momentum", "proxy_social",
             "pheromone_board",
+            "unavailable",  # API 未接入是结构设计，非运行失败，给 0.7 分
         }
         data_quality_summary = {}
         quality_score = 0.0
