@@ -787,6 +787,33 @@ class ChronosBeeHorizon(BeeAgent):
     对应维度：Catalyst (权重 0.20)
     """
 
+    # 催化剂类型基础权重（1.0 = 原始近期事件加分 +1.0 的标准）
+    CATALYST_TYPE_WEIGHTS: Dict[str, float] = {
+        "earnings":        1.5,   # 财报（价格波动最大，±5~15%）
+        "fda_approval":    1.4,   # FDA 批准/拒绝（二元事件，影响极大）
+        "merger":          1.3,   # 并购
+        "product_launch":  1.2,   # 重大产品发布
+        "regulatory":      1.1,   # 监管决定
+        "guidance":        1.0,   # 业绩指引更新
+        "economic_event":  0.9,   # 宏观经济事件
+        "investor_day":    0.7,   # 投资者日/分析师日
+        "analyst_day":     0.7,   # 同上
+        "conference":      0.5,   # 行业会议（信息量有限）
+        "split":           0.8,   # 股票拆分
+        "dividend":        0.4,   # 股息（稳定性高，但价格冲击小）
+        "exDividendDate":  0.4,   # 除息日
+        "dividendDate":    0.3,   # 分红到账日
+    }
+    _CATALYST_TYPE_DEFAULT = 0.7   # 未知类型默认权重
+
+    # 催化剂严重程度乘数（与 CatalystSeverity 对应）
+    CATALYST_SEVERITY_MULT: Dict[str, float] = {
+        "critical": 1.3,
+        "high":     1.1,
+        "medium":   1.0,
+        "low":      0.8,
+    }
+
     def analyze(self, ticker: str) -> Dict:
         try:
             ctx = self._get_history_context(ticker)
@@ -894,21 +921,34 @@ class ChronosBeeHorizon(BeeAgent):
                 # 按天数排序
                 catalysts_found.sort(key=lambda c: c.get("days_until", 999))
 
-                # 基础分 + 催化剂数量加成
+                # 基础分 + 按事件类型 × 严重程度的加权加分
+                # 近期（7天内）× 1.0；中期（8~30天）× 0.3；超出 30 天不计分
                 base = 5.5
-                # 近期催化剂（7天内）额外加分
-                imminent = [c for c in catalysts_found if c.get("days_until", 999) <= 7]
-                medium = [c for c in catalysts_found if 7 < c.get("days_until", 999) <= 30]
-
-                score = base + len(imminent) * 1.0 + len(medium) * 0.3
+                score = base
+                imminent = []
+                for c in catalysts_found:
+                    days = c.get("days_until", 999)
+                    event_type = c.get("type", "")
+                    severity = c.get("severity", "medium")
+                    type_w = self.CATALYST_TYPE_WEIGHTS.get(event_type, self._CATALYST_TYPE_DEFAULT)
+                    sev_m = self.CATALYST_SEVERITY_MULT.get(severity, 1.0)
+                    if days <= 7:
+                        score += 1.0 * type_w * sev_m
+                        imminent.append(c)
+                    elif days <= 30:
+                        score += 0.3 * type_w * sev_m
                 score = min(10.0, score)
 
                 nearest = catalysts_found[0]
                 discovery = f"催化剂 {len(catalysts_found)} 个 | 最近：{nearest['event']}（{nearest.get('days_until', '?')}天后）"
 
-                # 催化剂不决定方向，方向由催化剂类型+市场反应判断
-                # 仅存在催化剂=中性（事件可好可坏），有明确利好才看多
-                if score >= 7.5 and len(imminent) >= 2:
+                # 方向：需要有高影响力的近期催化剂（type_w >= 1.2）才 bullish
+                # 普通事件（会议/股息）不足以推断看多方向
+                high_impact_imminent = [
+                    c for c in imminent
+                    if self.CATALYST_TYPE_WEIGHTS.get(c.get("type", ""), self._CATALYST_TYPE_DEFAULT) >= 1.2
+                ]
+                if score >= 7.5 and high_impact_imminent:
                     direction = "bullish"
                 elif score <= 4.5:
                     direction = "bearish"
@@ -1658,17 +1698,21 @@ class QueenDistiller:
                 ml_adjustment = (ml_score - 5.0) * 0.1 * ml_conf
 
         # 4. 5 维 confidence-weighted 评分
-        # 低 confidence Agent 的评分向 5.0（中性）收缩
+        # 新逻辑：低 confidence 缩小该维度的有效权重，而非把分拉向 5.0
+        # conf >= 0.5 → 全权重（不干预）
+        # conf <  0.5 → 线性缩小（conf=0.5 全权重；conf=0 权重=0）
+        # 优势：保留维度的实际观点（8.0 就是 8.0），高分+低置信度不会被错误地拉到 6 分
         weighted_sum = 0.0
         weight_total = 0.0
         for dim, weight in self.DIMENSION_WEIGHTS.items():
             if dim in dim_scores:
                 conf = dim_confidence.get(dim, 0.5)
-                # 按 confidence 混合：高 confidence 用原始分，低 confidence 拉向 5.0
-                effective_score = dim_scores[dim] * conf + 5.0 * (1.0 - conf)
-                weighted_sum += effective_score * weight
-                weight_total += weight
+                # conf < 0.5 时线性缩小权重；conf >= 0.5 保持全权重
+                effective_weight = weight * min(1.0, conf * 2)
+                weighted_sum += dim_scores[dim] * effective_weight
+                weight_total += effective_weight
             else:
+                # 缺失维度：5.0 中性分，全权重锚定（与旧逻辑一致）
                 weighted_sum += 5.0 * weight
                 weight_total += weight
 
