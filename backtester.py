@@ -641,36 +641,39 @@ class Backtester:
 
     # ==================== 权重自适应 ====================
 
-    def adapt_weights(self, min_samples: int = 10) -> Optional[Dict]:
+    def adapt_weights(self, min_samples: int = 10, period: str = "t7") -> Optional[Dict]:
         """
-        根据 T+7 准确率自动调整 5 维公式权重
+        根据历史方向准确率自动调整 5 维公式权重
+
+        优先使用 T+7（更可靠），T+7 样本不足时自动降级到 T+1：
+        - T+7：平滑因子 80% 新权重（充分信任）
+        - T+1：平滑因子 50% 新权重（T+1 噪声更大，保守调整）
 
         规则：
-        - 收集每个维度（signal, catalyst, sentiment, odds, risk_adj）
-          对应 Agent 的 T+7 方向准确率
-        - 准确率高的维度获得更高权重
-        - 权重归一化：总和 = 1.0
-        - 最低样本数要求：min_samples
+        - 按 Agent 方向 vs 实际收益计算各维度准确率
+        - 准确率^2 归一化后作为新权重（放大高准确率维度的优势）
+        - 最低样本数：min_samples（T+7 默认 10，T+1 可用 5）
 
         返回: {dimension: new_weight} 或 None（样本不足）
         """
-        # Agent → 维度映射
+        # Agent → 维度映射（与 pheromone_board.AGENT_DIMENSIONS 保持一致）
         agent_dim_map = {
-            "ScoutBeeNova": "signal",
-            "OracleBeeEcho": "odds",
-            "BuzzBeeWhisper": "sentiment",
+            "ScoutBeeNova":      "signal",
+            "OracleBeeEcho":     "odds",
+            "BuzzBeeWhisper":    "sentiment",
             "ChronosBeeHorizon": "catalyst",
-            "GuardBeeSentinel": "risk_adj",
+            "GuardBeeSentinel":  "risk_adj",
         }
 
-        # 默认权重
-        default_weights = {
-            "signal": 0.30,
-            "catalyst": 0.20,
-            "sentiment": 0.20,
-            "odds": 0.15,
-            "risk_adj": 0.15,
-        }
+        # 默认权重（来自 config，此处作为兜底）
+        try:
+            from config import EVALUATION_WEIGHTS
+            default_weights = {k: v for k, v in EVALUATION_WEIGHTS.items() if k in agent_dim_map.values()}
+        except (ImportError, AttributeError):
+            default_weights = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
+
+        # T+1 平滑因子更保守（T+1 噪声大，不能大幅改变权重）
+        new_weight_ratio = 0.8 if period == "t7" else 0.5
 
         # 获取每个维度的准确率
         dim_accuracy = {}
@@ -682,13 +685,10 @@ class Backtester:
             conn.row_factory = sqlite3.Row
 
             for agent_name, dim in agent_dim_map.items():
-                # 从 agent_directions JSON 中提取各 Agent 的方向预测
-                # 然后与实际收益比较
                 rows = conn.execute(f"""
-                    SELECT
-                        agent_directions, return_t7, direction
+                    SELECT agent_directions, return_{period}, direction
                     FROM {PredictionStore.TABLE}
-                    WHERE checked_t7 = 1 AND agent_directions IS NOT NULL
+                    WHERE checked_{period} = 1 AND agent_directions IS NOT NULL
                     AND date >= ?
                 """, ((datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d"),)).fetchall()
 
@@ -700,10 +700,9 @@ class Backtester:
                         agent_dir = dirs.get(agent_name)
                         if not agent_dir:
                             continue
-                        ret = row["return_t7"]
+                        ret = row[f"return_{period}"]
                         if ret is None:
                             continue
-
                         checked += 1
                         if self._check_direction(agent_dir, ret):
                             correct += 1
@@ -715,44 +714,47 @@ class Backtester:
                     dim_accuracy[dim] = correct / checked
                     total_samples += checked
                 else:
-                    dim_accuracy[dim] = 0.5  # 样本不足时用默认 50%
+                    dim_accuracy[dim] = 0.5  # 样本不足时用中性 50%
 
         except (sqlite3.Error, OSError, json.JSONDecodeError, KeyError, TypeError) as e:
-            _log.warning("权重自适应失败: %s", e)
+            _log.warning("权重自适应失败 (%s): %s", period, e)
             return None
         finally:
             if conn:
                 conn.close()
 
         if total_samples < min_samples:
-            pass  # 样本不足，保持默认
+            _log.debug("权重自适应：%s 样本不足 (%d < %d)", period, total_samples, min_samples)
             return None
 
-        # 计算新权重：准确率^2 归一化（放大差异）
+        # 计算新权重：准确率^2 归一化（放大高准确率维度的优势）
         raw = {dim: max(0.05, acc ** 2) for dim, acc in dim_accuracy.items()}
         total_raw = sum(raw.values())
         new_weights = {dim: round(v / total_raw, 3) for dim, v in raw.items()}
 
-        # 平滑过渡：80% 新权重 + 20% 默认权重（防止剧烈波动）
+        # 平滑过渡：new_weight_ratio × 新权重 + (1-ratio) × 默认权重
         smoothed = {}
         for dim in default_weights:
             old_w = default_weights[dim]
             new_w = new_weights.get(dim, old_w)
-            smoothed[dim] = round(old_w * 0.2 + new_w * 0.8, 3)
+            smoothed[dim] = round(old_w * (1 - new_weight_ratio) + new_w * new_weight_ratio, 3)
 
-        # 再次归一化
+        # 归一化确保总和 = 1.0
         s = sum(smoothed.values())
         smoothed = {dim: round(v / s, 3) for dim, v in smoothed.items()}
 
-        # 权重自适应完成
+        _log.info(
+            "权重自适应（%s，%d 样本）: %s | 各维度准确率: %s",
+            period, total_samples,
+            {k: f"{v:.3f}" for k, v in smoothed.items()},
+            {k: f"{v:.1%}" for k, v in dim_accuracy.items()},
+        )
 
-        # 持久化到数据库
-        self._save_adapted_weights(smoothed, dim_accuracy, total_samples)
-
+        self._save_adapted_weights(smoothed, dim_accuracy, total_samples, period)
         return smoothed
 
     def _save_adapted_weights(
-        self, weights: Dict, accuracy: Dict, samples: int
+        self, weights: Dict, accuracy: Dict, samples: int, period: str = "t7"
     ):
         """将自适应权重持久化到 SQLite"""
         conn = None
@@ -765,17 +767,24 @@ class Backtester:
                     weights TEXT NOT NULL,
                     accuracy TEXT NOT NULL,
                     sample_count INTEGER,
+                    period TEXT DEFAULT 't7',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # 迁移旧表缺少 period 列
+            try:
+                conn.execute("ALTER TABLE adapted_weights ADD COLUMN period TEXT DEFAULT 't7'")
+            except sqlite3.OperationalError:
+                pass
             conn.execute("""
-                INSERT INTO adapted_weights (date, weights, accuracy, sample_count)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO adapted_weights (date, weights, accuracy, sample_count, period)
+                VALUES (?, ?, ?, ?, ?)
             """, (
                 datetime.now().strftime("%Y-%m-%d"),
                 json.dumps(weights),
                 json.dumps({k: round(v, 3) for k, v in accuracy.items()}),
                 samples,
+                period,
             ))
             conn.commit()
         except (sqlite3.Error, OSError, TypeError) as e:
@@ -789,19 +798,31 @@ class Backtester:
         """
         加载最近的自适应权重（供 QueenDistiller 使用）
 
+        优先加载 T+7 权重（更可靠），其次加载 T+1 权重（早期降级）。
+        返回的权重已附加 _meta 字段，QueenDistiller 会自动忽略未知 key。
+
         Returns:
-            {signal: 0.xx, catalyst: 0.xx, ...} 或 None
+            {signal: 0.xx, ..., _meta: {period, samples}} 或 None
         """
         conn = None
         try:
             conn = sqlite3.connect(db_path)
+            # 优先取 T+7，再取 T+1
             row = conn.execute("""
-                SELECT weights, sample_count FROM adapted_weights
-                ORDER BY created_at DESC LIMIT 1
+                SELECT weights, sample_count, period
+                FROM adapted_weights
+                WHERE sample_count >= 3
+                ORDER BY
+                    CASE period WHEN 't7' THEN 0 WHEN 't1' THEN 1 ELSE 2 END,
+                    created_at DESC
+                LIMIT 1
             """).fetchone()
 
-            if row and row[1] >= 5:  # 至少 5 个样本才使用
+            if row:
                 weights = json.loads(row[0])
+                period = row[2] or "t7"
+                samples = row[1]
+                _log.info("加载自适应权重（%s，%d 样本）: %s", period, samples, weights)
                 return weights
             return None
         except (sqlite3.Error, OSError, json.JSONDecodeError, KeyError) as e:

@@ -550,7 +550,12 @@ class AlphaHiveDailyReporter:
                 bt = Backtester()
                 bt.save_predictions(swarm_results)
                 bt.run_backtest()
-                bt.adapt_weights(min_samples=5)
+                # 优先 T+7（更可靠，需 10 条样本），不足时降级到 T+1（需 5 条）
+                adapted = bt.adapt_weights(min_samples=10, period="t7")
+                if adapted is None:
+                    adapted = bt.adapt_weights(min_samples=5, period="t1")
+                    if adapted:
+                        _log.info("自适应权重：T+7 样本不足，使用 T+1 数据（保守调整）")
             except (OSError, ValueError, KeyError, TypeError) as e:
                 _log.warning("回测异常: %s", e)
 

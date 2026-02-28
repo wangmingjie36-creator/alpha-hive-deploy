@@ -37,6 +37,18 @@ class PheromoneBoard:
     DECAY_RATE = 0.1
     MIN_STRENGTH = 0.2
 
+    # Agent → 数据维度映射（用于跨维度共振检测）
+    # 真正的共振需要来自不同数据源维度的 Agent 同向，而非同一份数据的多个解读
+    AGENT_DIMENSIONS: Dict[str, str] = {
+        "ScoutBeeNova":      "signal",       # SEC 披露 + 聪明钱
+        "OracleBeeEcho":     "odds",         # 期权 IV + 市场赔率
+        "BuzzBeeWhisper":    "sentiment",    # 新闻 + Reddit 情绪
+        "ChronosBeeHorizon": "catalyst",     # 催化剂与时间线
+        "GuardBeeSentinel":  "risk_adj",     # 交叉验证 + 风险
+        "RivalBeeVanguard":  "ml_auxiliary", # ML 预测 + 竞争格局
+        "BearBeeContrarian": "contrarian",   # 看空对冲（排除在外）
+    }
+
     def __init__(self, memory_store=None, session_id=None):
         self._lock = RLock()
         self._entries: List[PheromoneEntry] = []
@@ -119,13 +131,16 @@ class PheromoneBoard:
 
     def detect_resonance(self, ticker: str) -> Dict:
         """
-        检测信号共振：同向信号 >= 3 个则触发增强
+        检测信号共振：同向信号来自 >= 3 个不同数据维度时才触发增强
+
+        旧逻辑：同向 Agent 数量 >= 3（存在虚假放大：多个 Agent 基于相同 yfinance 数据）
+        新逻辑：同向 Agent 覆盖 >= 3 个不同数据维度（真正的多源独立印证）
 
         Args:
             ticker: 标的代码
 
         Returns:
-            共振检测结果字典
+            共振检测结果字典，新增 cross_dim_count / resonant_dimensions 字段
         """
         with self._lock:
             ticker_entries = [e for e in self._entries if e.ticker == ticker]
@@ -133,13 +148,29 @@ class PheromoneBoard:
             bearish = [e for e in ticker_entries if e.direction == "bearish"]
 
             dominant = "bullish" if len(bullish) >= len(bearish) else "bearish"
-            count = max(len(bullish), len(bearish))
+            dominant_entries = bullish if dominant == "bullish" else bearish
+
+            # 统计同向 Agent 覆盖的不同数据维度数
+            # 排除 contrarian（看空蜂不参与正向共振）和 unknown
+            unique_dims = {
+                self.AGENT_DIMENSIONS.get(e.agent_id, "unknown")
+                for e in dominant_entries
+            } - {"contrarian", "unknown"}
+
+            cross_dim_count = len(unique_dims)
+
+            # 触发条件：至少 3 个不同数据维度同向（而非 3 个不同 Agent）
+            # 例：ScoutBee(signal) + BuzzBee(sentiment) + OracleBee(odds) = 真共振
+            # 反例：3 个 Agent 都只看了动量 → 不触发（共 1 个维度）
+            resonance_detected = cross_dim_count >= 3
 
             return {
-                "resonance_detected": count >= 3,
+                "resonance_detected": resonance_detected,
                 "direction": dominant,
-                "supporting_agents": count,
-                "confidence_boost": min(count * 5, 20)  # 最多 +20% 置信度
+                "supporting_agents": len(dominant_entries),
+                "cross_dim_count": cross_dim_count,
+                "resonant_dimensions": sorted(unique_dims),
+                "confidence_boost": min(cross_dim_count * 5, 20) if resonance_detected else 0,
             }
 
     def snapshot(self) -> List[Dict]:
