@@ -22,11 +22,11 @@ try:
     if notifier.enabled:
         notifier.send_risk_alert(
             alert_title="Alpha Hive 每日扫描开始",
-            alert_message=f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n扫描标的: NVDA, TSLA, MSFT, AMD, QCOM, VKTX",
+            alert_message=f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n扫描标的: NVDA, TSLA, MSFT, QCOM, VKTX, META, BILI, AMZN, RKLB, CRCL",
             severity="MEDIUM"
         )
 
-    SCAN_TICKERS = ['NVDA', 'TSLA', 'MSFT', 'AMD', 'QCOM', 'VKTX']
+    SCAN_TICKERS = ['NVDA', 'TSLA', 'MSFT', 'QCOM', 'VKTX', 'META', 'BILI', 'AMZN', 'RKLB', 'CRCL']
     print(f"扫描标的: {', '.join(SCAN_TICKERS)}\n")
 
     report = reporter.run_swarm_scan(SCAN_TICKERS)
