@@ -449,11 +449,19 @@ class AlphaHiveDailyReporter:
             except (OSError, TypeError) as e:
                 _log.warning("Checkpoint 写入失败: %s", e)
 
-        # 扫描完成，保存蜂群结果供 ML 报告同步使用
+        # 扫描完成，保存蜂群结果（合并当日已有结果，支持分批运行）
         try:
             swarm_json = self.report_dir / f".swarm_results_{self.date_str}.json"
+            merged_swarm = {}
+            if swarm_json.exists():
+                try:
+                    with open(swarm_json, encoding="utf-8") as _f:
+                        merged_swarm = json.load(_f)
+                except (OSError, json.JSONDecodeError):
+                    pass
+            merged_swarm.update(swarm_results)  # 新批次覆盖同名标的
             with open(swarm_json, "w") as f:
-                json.dump(swarm_results, f, default=str, ensure_ascii=False)
+                json.dump(merged_swarm, f, default=str, ensure_ascii=False)
         except (OSError, TypeError) as e:
             _log.warning("Swarm results 保存失败: %s", e)
         # 清理 checkpoint
@@ -1613,15 +1621,40 @@ class AlphaHiveDailyReporter:
     def save_report(self, report: Dict) -> str:
         """保存报告到文件（MD / JSON / X线程 / index.html GitHub Pages）"""
 
-        # 保存 JSON 版本
         json_file = self.report_dir / f"alpha-hive-daily-{self.date_str}.json"
+        md_file = self.report_dir / f"alpha-hive-daily-{self.date_str}.md"
+
+        # 如果今日已有报告，合并 opportunities（支持分批运行，避免互相覆盖）
+        if json_file.exists():
+            try:
+                with open(json_file, encoding="utf-8") as _f:
+                    existing = json.load(_f)
+                existing_by_ticker = {o.get("ticker"): o for o in existing.get("opportunities", [])}
+                new_by_ticker = {o.get("ticker"): o for o in report.get("opportunities", [])}
+                existing_by_ticker.update(new_by_ticker)  # 新批次结果优先
+                merged_opps = sorted(existing_by_ticker.values(),
+                                     key=lambda x: x.get("opportunity_score", 0), reverse=True)
+                report["opportunities"] = merged_opps
+                if "swarm_metadata" in report:
+                    report["swarm_metadata"]["tickers_analyzed"] = len(merged_opps)
+                _log.info("合并今日已有报告：共 %d 标的", len(merged_opps))
+            except Exception as e:
+                _log.warning("合并已有报告失败，使用新报告: %s", e)
+
+        # 保存 JSON 版本
         with open(json_file, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
 
-        # 保存 Markdown 版本
-        md_file = self.report_dir / f"alpha-hive-daily-{self.date_str}.md"
-        with open(md_file, "w", encoding="utf-8") as f:
-            f.write(report["markdown_report"])
+        # 保存 Markdown 版本（新批次追加到已有文件末尾）
+        if md_file.exists():
+            existing_md = md_file.read_text(encoding="utf-8")
+            combined_md = existing_md + "\n\n---\n\n" + report["markdown_report"]
+            with open(md_file, "w", encoding="utf-8") as f:
+                f.write(combined_md)
+            report["markdown_report"] = combined_md
+        else:
+            with open(md_file, "w", encoding="utf-8") as f:
+                f.write(report["markdown_report"])
 
         # 清理当天旧的 X 线程文件（防止多次运行时数量不同导致残留叠加）
         for old in self.report_dir.glob(f"alpha-hive-thread-{self.date_str}-*.txt"):

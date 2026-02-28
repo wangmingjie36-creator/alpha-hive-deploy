@@ -5,7 +5,7 @@
   "phase_completed": "完整蜂群流程 (Swarm Mode)",
   "swarm_metadata": {
     "total_agents": 8,
-    "tickers_analyzed": 5,
+    "tickers_analyzed": 11,
     "resonances_detected": 3,
     "pheromone_board_entries": 9
   },
@@ -84,6 +84,56 @@
     "【Alpha Hive 蜂群日报 2026-02-27】7 个自治工蜂协作分析，多数投票共振信号。非投资建议，仅数据分析与情景推演。👇\n\n1. **META** BULLISH\n蜂群评分：5.9/10 | 共振：✅\nAgent 投票：看多4 vs 看空0\n\n2. **BILI** BULLISH\n蜂群评分：5.8/10 | 共振：✅\nAgent 投票：看多3 vs 看空0\n\n3. **AMZN** BULLISH\n蜂群评分：5.6/10 | 共振：✅\nAgent 投票：看多3 vs 看空0\n\n🐝 7 个工蜂独立分析（6 核心 + 看空对冲蜂）→ 信息素板实时交换 → 多数投票汇总\n高共振信号优先级最高。风险提示：控制仓位。\n下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
   ],
   "opportunities": [
+    {
+      "rank": 1,
+      "ticker": "MSFT",
+      "direction": "看多",
+      "opp_score": 7.4,
+      "confidence": "60%",
+      "resonance": true,
+      "supporting_agents": 7,
+      "thesis_break": "信号分散"
+    },
+    {
+      "rank": 2,
+      "ticker": "QCOM",
+      "direction": "看多",
+      "opp_score": 5.8,
+      "confidence": "60%",
+      "resonance": true,
+      "supporting_agents": 7,
+      "thesis_break": "信号分散"
+    },
+    {
+      "rank": 3,
+      "ticker": "NVDA",
+      "direction": "看多",
+      "opp_score": 5.0,
+      "confidence": "60%",
+      "resonance": true,
+      "supporting_agents": 7,
+      "thesis_break": "信号分散"
+    },
+    {
+      "rank": 4,
+      "ticker": "TSLA",
+      "direction": "看多",
+      "opp_score": 5.0,
+      "confidence": "60%",
+      "resonance": true,
+      "supporting_agents": 7,
+      "thesis_break": "信号分散"
+    },
+    {
+      "rank": 5,
+      "ticker": "VKTX",
+      "direction": "中性",
+      "opp_score": 4.5,
+      "confidence": "60%",
+      "resonance": false,
+      "supporting_agents": 7,
+      "thesis_break": "信号分散"
+    },
     {
       "rank": 1,
       "ticker": "META",
