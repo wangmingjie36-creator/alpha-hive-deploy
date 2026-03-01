@@ -406,6 +406,18 @@ class AlphaHiveDailyReporter:
                 _log.info("[%d/%d] %s: %.1f/10 (已缓存) %s", idx, len(targets), ticker, swarm_results[ticker]['final_score'], res)
                 continue
 
+            # ── #18: Ticker 有效性检测（退市/停牌/拆股）──
+            try:
+                from swarm_agents import check_ticker_validity
+                _validity = check_ticker_validity(ticker)
+                if not _validity["valid"]:
+                    _log.warning("[%d/%d] ⏭️ 跳过 %s（%s）", idx, len(targets), ticker, _validity["warning"])
+                    continue
+                if _validity.get("warning"):
+                    _log.warning("[%d/%d] ⚠️ %s 异常：%s", idx, len(targets), ticker, _validity["warning"])
+            except Exception as _ve:
+                _log.debug("ticker validity check error for %s: %s", ticker, _ve)
+
             # 第一阶段：6 个核心 Agent 并行分析（含可选 CodeExecutorAgent）
             with ThreadPoolExecutor(max_workers=len(phase1_agents)) as executor:
                 futures = {executor.submit(agent.analyze, ticker): agent for agent in phase1_agents}

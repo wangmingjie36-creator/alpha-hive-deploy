@@ -40,6 +40,75 @@ _yf_lock = _threading.Lock()
 _YF_CACHE_TTL = 120  # 缓存 2 分钟
 _YF_MAX_RETRIES = 2
 
+# ── Ticker 有效性缓存（退市/拆股检测，#18）──
+_ticker_validity: Dict[str, Dict] = {}
+_TICKER_VALIDITY_TTL = 3600  # 1 小时内不重复检查
+
+
+def check_ticker_validity(ticker: str) -> Dict:
+    """
+    检测 ticker 是否存在退市/停牌/拆股风险
+
+    返回:
+        {
+            "valid": bool,          # False = 退市/停牌，应跳过扫描
+            "warning": str | None,  # 告警信息（分割/低价等）
+            "split_ratio": float | None,  # 近期拆股比例
+        }
+    """
+    now = _time.time()
+    cached = _ticker_validity.get(ticker)
+    if cached and (now - cached.get("_checked_at", 0)) < _TICKER_VALIDITY_TTL:
+        return {k: v for k, v in cached.items() if not k.startswith("_")}
+
+    result: Dict = {"valid": True, "warning": None, "split_ratio": None}
+
+    try:
+        import yfinance as _yf
+        t = _yf.Ticker(ticker)
+        hist = t.history(period="5d")
+
+        # 无交易数据 → 退市/停牌
+        if hist.empty:
+            result["valid"] = False
+            result["warning"] = f"{ticker} 无交易数据（可能已退市或停牌），已跳过扫描"
+            _log.warning("⚠️ %s", result["warning"])
+            _ticker_validity[ticker] = {**result, "_checked_at": now}
+            return result
+
+        # 价格极低 → 退市风险
+        price = float(hist["Close"].iloc[-1])
+        if price < 0.10:
+            result["warning"] = f"{ticker} 价格极低 (${price:.4f})，存在退市风险"
+            _log.warning("⚠️ %s", result["warning"])
+
+        # 近30天拆股检测
+        try:
+            splits = t.splits
+            if len(splits) > 0:
+                cutoff_ts = now - 30 * 86400
+                recent = [
+                    (str(idx)[:10], float(ratio))
+                    for idx, ratio in splits.items()
+                    if hasattr(idx, "timestamp") and idx.timestamp() > cutoff_ts
+                ]
+                if recent:
+                    date_str, ratio = recent[-1]
+                    result["split_ratio"] = ratio
+                    msg = f"{ticker} 近30天股票分割 ({ratio:.2f}x on {date_str})"
+                    # 不覆盖退市告警
+                    if not result["warning"]:
+                        result["warning"] = msg
+                    _log.warning("⚠️ %s", msg)
+        except Exception:
+            pass
+
+    except Exception as e:
+        _log.debug("ticker validity check failed for %s: %s", ticker, e)
+
+    _ticker_validity[ticker] = {**result, "_checked_at": now}
+    return result
+
 
 def _fetch_stock_data(ticker: str) -> Dict:
     """

@@ -32,6 +32,47 @@ _lock = threading.Lock()
 _last_st_request = 0.0
 _ST_MIN_INTERVAL = 2.0  # StockTwits: 200 req/hr ≈ 每 18s, 用 2s 保守
 
+# ── 数据源健康追踪（#7）──
+_HEALTH_FAIL_THRESHOLD = 3
+_src_fail_counts: Dict[str, int] = {}
+_src_degraded: Dict[str, bool] = {}
+
+
+def _record_src_failure(source: str):
+    """记录数据源连续失败，达到阈值时发出告警"""
+    _src_fail_counts[source] = _src_fail_counts.get(source, 0) + 1
+    count = _src_fail_counts[source]
+    if count == _HEALTH_FAIL_THRESHOLD:
+        _log.warning("⚠️ 数据源 [%s] 连续失败 %d 次，触发降级告警", source, count)
+        _src_degraded[source] = True
+        _try_src_slack_alert(source, count)
+    elif count > _HEALTH_FAIL_THRESHOLD and count % 5 == 0:
+        _log.warning("⚠️ 数据源 [%s] 持续降级，累计失败 %d 次", source, count)
+
+
+def _record_src_success(source: str):
+    """记录数据源成功，重置计数器"""
+    prev = _src_fail_counts.get(source, 0)
+    if prev >= _HEALTH_FAIL_THRESHOLD:
+        _log.info("✅ 数据源 [%s] 已恢复（之前连续失败 %d 次）", source, prev)
+    _src_fail_counts[source] = 0
+    _src_degraded[source] = False
+
+
+def _try_src_slack_alert(source: str, fail_count: int):
+    """尝试通过 Slack 发送降级告警（静默失败）"""
+    try:
+        from slack_report_notifier import SlackReportNotifier
+        n = SlackReportNotifier()
+        if getattr(n, "enabled", False):
+            n.send_risk_alert(
+                alert_title=f"数据源降级：{source}",
+                alert_message=f"*{source}* 已连续失败 {fail_count} 次，进入降级模式，数据质量受影响。",
+                severity="MEDIUM",
+            )
+    except Exception:
+        pass
+
 
 def _st_throttle():
     global _last_st_request
@@ -131,9 +172,11 @@ def get_social_buzz(ticker: str) -> Dict:
         }
 
         _write_cache(cache_key, result)
+        _record_src_success("reddit_apewisdom")
         return result
 
     except (ImportError, ConnectionError, TimeoutError, OSError, ValueError, KeyError) as exc:
+        _record_src_failure("reddit_apewisdom")
         _log.debug("get_social_buzz 降级为 fallback (%s): %s", ticker, exc)
         return fallback
 
@@ -181,9 +224,11 @@ def get_short_interest(ticker: str) -> Dict:
         }
 
         _write_cache(cache_key, result)
+        _record_src_success("yfinance_short_interest")
         return result
 
     except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as exc:
+        _record_src_failure("yfinance_short_interest")
         _log.debug("get_short_interest 降级为 fallback (%s): %s", ticker, exc)
         return fallback
 

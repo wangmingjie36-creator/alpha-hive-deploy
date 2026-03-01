@@ -449,6 +449,28 @@ class SECEdgarClient:
             score = min(10.0, score + len(officer_buys) * 1.0)
             sentiment = "bullish"
 
+        # ── 去重：同人同日同类型交易合并（避免修正申报 Form4/A 重复计算）──
+        if notable_trades:
+            _seen_keys: Dict[str, int] = {}
+            _deduped: List[Dict] = []
+            for _t in notable_trades:
+                _key = f"{_t['insider']}|{_t['date']}|{_t['code']}|{_t['security']}"
+                if _key in _seen_keys:
+                    _idx = _seen_keys[_key]
+                    _old = _deduped[_idx]
+                    _new_shares = _old["shares"] + _t["shares"]
+                    _new_val = _old["total_value"] + _t["total_value"]
+                    _deduped[_idx] = {
+                        **_old,
+                        "shares": _new_shares,
+                        "total_value": round(_new_val, 2),
+                        "price": round(_new_val / _new_shares, 4) if _new_shares else _old["price"],
+                    }
+                else:
+                    _seen_keys[_key] = len(_deduped)
+                    _deduped.append(dict(_t))
+            notable_trades = _deduped
+
         # 排序：按金额降序
         notable_trades.sort(key=lambda x: x["total_value"], reverse=True)
         notable_trades = notable_trades[:10]  # 最多保留 10 条

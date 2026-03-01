@@ -42,6 +42,26 @@ _CACHE_PATH = Path(PATHS.home) / "sec_cache" / "edgar_rss.json"
 _CACHE_TTL = 900   # 15 分钟
 _lock = threading.Lock()
 
+# ── RSS 健康追踪（#7）──
+_RSS_FAIL_THRESHOLD = 3
+_rss_fail_count = 0
+_rss_degraded = False
+
+
+def _try_rss_slack_alert(fail_count: int):
+    """尝试通过 Slack 发送 EDGAR RSS 降级告警（静默失败）"""
+    try:
+        from slack_report_notifier import SlackReportNotifier
+        n = SlackReportNotifier()
+        if getattr(n, "enabled", False):
+            n.send_risk_alert(
+                alert_title="EDGAR RSS 降级",
+                alert_message=f"SEC EDGAR Form4 RSS 已连续失败 {fail_count} 次，实时内幕交易告警不可用。",
+                severity="MEDIUM",
+            )
+    except Exception:
+        pass
+
 
 class EdgarRSSClient:
     """SEC EDGAR Form 4 RSS 实时告警客户端"""
@@ -79,6 +99,8 @@ class EdgarRSSClient:
             if _req is None:
                 return self._cache
 
+            # 健康追踪（一次声明，两个分支共用）
+            global _rss_fail_count, _rss_degraded
             try:
                 resp = _req.get(_FEED_URL, headers=_SEC_HEADERS, timeout=12)
                 if not resp.ok:
@@ -97,10 +119,22 @@ class EdgarRSSClient:
                     pass
 
                 _log.debug("EDGAR RSS: %d entries", len(entries))
+                # 成功：重置计数器
+                if _rss_fail_count >= _RSS_FAIL_THRESHOLD:
+                    _log.info("✅ EDGAR RSS 已恢复（之前连续失败 %d 次）", _rss_fail_count)
+                _rss_fail_count = 0
+                _rss_degraded = False
                 return entries
 
             except (ConnectionError, TimeoutError, OSError, ValueError) as e:
                 _log.debug("EDGAR RSS fetch error: %s", e)
+                _rss_fail_count += 1
+                if _rss_fail_count == _RSS_FAIL_THRESHOLD and not _rss_degraded:
+                    _rss_degraded = True
+                    _log.warning("⚠️ EDGAR RSS 连续失败 %d 次，进入降级模式", _rss_fail_count)
+                    _try_rss_slack_alert(_rss_fail_count)
+                elif _rss_fail_count > _RSS_FAIL_THRESHOLD and _rss_fail_count % 5 == 0:
+                    _log.warning("⚠️ EDGAR RSS 持续降级，累计失败 %d 次", _rss_fail_count)
                 return self._cache
 
     # ==================== Atom 解析 ====================
