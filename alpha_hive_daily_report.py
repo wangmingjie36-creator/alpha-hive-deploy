@@ -385,6 +385,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 .dq-bar{flex:1;height:5px;border-radius:3px;background:#eee;overflow:hidden}
 .dq-fill{height:100%;border-radius:3px;transition:width .4s}
 .dq-val{font-size:.65em;color:#666;min-width:28px;text-align:right}
+/* PIXEL BEE ICON */
+.px-bee{display:inline-block;width:1.2em;height:1.2em;vertical-align:middle;
+  background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23F4A532'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3C/svg%3E") no-repeat center/contain;
+  image-rendering:pixelated}
+.px-bee-lg{display:block;width:48px;height:48px;margin:0 auto}
+.px-bee-hero{display:inline-block;width:40px;height:40px;vertical-align:middle;
+  background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23F4A532'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3C/svg%3E") no-repeat center/contain;
+  image-rendering:pixelated}
 """
 
     def __init__(self):
@@ -2938,7 +2946,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 <body>
 <!-- ── Fixed Nav ── -->
 <nav class="nav">
-  <a href="#" class="nav-logo">🐝 Alpha Hive</a>
+  <a href="#" class="nav-logo"><span class="px-bee"></span> Alpha Hive</a>
   <div class="nav-links">
     <a href="#today"   class="nav-link">今日简报</a>
     <a href="#charts"  class="nav-link">图表</a>
@@ -2955,7 +2963,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 <section class="hero">
   <div class="hero-inner">
     <div class="hero-left">
-      <div class="hero-badge">🐝 Alpha Hive Intelligence · 蜂群驱动</div>
+      <div class="hero-badge"><span class="px-bee"></span> Alpha Hive Intelligence · 蜂群驱动</div>
       <h1 class="hero-title">去中心化<span>蜂群智能</span><br>投资研究平台</h1>
       <p class="hero-sub">{n_agents} 自治工蜂协作 · SEC EDGAR 真实数据 · 每日自动扫描</p>
       <div class="hero-meta">
@@ -2970,7 +2978,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
           <path id="orb-o" d="M 238,112 A 98,56 0 1 0 42,112 A 98,56 0 1 0 238,112"/>
         </defs>
         <polygon points="140,55 180,78 180,124 140,147 100,124 100,78" fill="#F4A532" opacity=".9"/>
-        <text x="140" y="112" text-anchor="middle" font-size="40" fill="white">🐝</text>
+        <foreignObject x="96" y="72" width="88" height="88"><div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><span class="px-bee-hero"></span></div></foreignObject>
         <polygon class="hex-p" points="140,5 170,22 170,57 140,74 110,57 110,22" fill="none" stroke="#F4A532" stroke-width="1.5" opacity=".55" style="animation-delay:.3s"/>
         <polygon class="hex-p" points="190,32 220,49 220,84 190,101 160,84 160,49" fill="rgba(244,165,50,.12)" stroke="#F4A532" stroke-width="1" opacity=".5" style="animation-delay:.7s"/>
         <polygon class="hex-p" points="190,107 220,124 220,159 190,176 160,159 160,124" fill="rgba(102,126,234,.18)" stroke="#667eea" stroke-width="1" opacity=".45" style="animation-delay:1.1s"/>
@@ -3077,7 +3085,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 </div>
 
 <footer class="footer">
-  <p>🐝 Alpha Hive — 去中心化蜂群智能投资研究平台</p>
+  <p><span class="px-bee"></span> Alpha Hive — 去中心化蜂群智能投资研究平台</p>
   <p>更新：{now_str} | {n_tickers} 标的 | SEC 真实数据 | 真实度 {avg_real}</p>
   <p style="margin-top:8px;font-size:.82em;opacity:.6">
     声明：本报告由 AI 蜂群自动生成，仅供研究参考，不构成投资建议。所有决策请自行判断。
