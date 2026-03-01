@@ -1927,6 +1927,30 @@ class QueenDistiller:
 
         data_real_pct = round(quality_score / total_fields * 100, 1) if total_fields > 0 else 0.0
 
+        # ── 按维度分拆数据质量（#3）──
+        _DIM_SOURCES = {
+            "signal":    "ScoutBeeNova",
+            "catalyst":  "ChronosBeeHorizon",
+            "sentiment": "BuzzBeeWhisper",
+            "odds":      "OracleBeeEcho",
+            "risk_adj":  "GuardBeeSentinel",
+        }
+        dim_data_quality: Dict[str, Optional[float]] = {}
+        for _dim, _src in _DIM_SOURCES.items():
+            _qs = 0.0
+            _tf = 0
+            for r in valid_results:
+                if r.get("source") == _src:
+                    _dq = r.get("data_quality", {})
+                    if isinstance(_dq, dict):
+                        for v in _dq.values():
+                            _tf += 1
+                            if v in REAL_SOURCES:
+                                _qs += 1.0
+                            elif v in PROXY_SOURCES:
+                                _qs += 0.7
+            dim_data_quality[_dim] = round(_qs / _tf * 100, 1) if _tf > 0 else None
+
         # ===== LLM 引擎（可用时叠加）=====
         llm_result = None
         reasoning = ""
@@ -2028,6 +2052,7 @@ class QueenDistiller:
             "pheromone_compact": self.board.compact_snapshot(ticker),
             "data_quality": data_quality_summary,
             "data_real_pct": data_real_pct,
+            "dim_data_quality": dim_data_quality,
             # Phase 1: LLM 推理增强
             "distill_mode": distill_mode,
             "reasoning": reasoning,

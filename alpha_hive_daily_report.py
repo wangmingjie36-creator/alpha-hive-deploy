@@ -1851,7 +1851,7 @@ class AlphaHiveDailyReporter:
             return "sc-h" if score >= 7.0 else ("sc-m" if score >= 5.5 else "sc-l")
 
         def _detail(ticker):
-            """提取单个 ticker 的详细指标"""
+            """提取单个 ticker 的详细指标（含 GEX / 期权流向 / 维度数据质量）"""
             sd = swarm_detail.get(ticker, {})
             ad = sd.get("agent_details", {})
             oracle = ad.get("OracleBeeEcho", {}).get("details", {})
@@ -1861,10 +1861,27 @@ class AlphaHiveDailyReporter:
             iv_rank = oracle.get("iv_rank", None)
             pc = oracle.get("put_call_ratio", None)
             real_pct = sd.get("data_real_pct", None)
+            # ── 新增期权信号字段（#1）──
+            gex = oracle.get("gamma_exposure", None)
+            flow_dir = oracle.get("flow_direction", None)
+            gsr = oracle.get("gamma_squeeze_risk", None)
+            iv_current = oracle.get("iv_current", None)
+            signal_sum = oracle.get("signal_summary", "")
+            # ── 维度数据质量（#3）──
+            dim_dq = sd.get("dim_data_quality", {})
             # 内幕信号：取 ScoutBeeNova discovery 第一个 | 段
             insider_hint = scout_disc.split("|")[0].strip() if scout_disc else ""
-            # 是否有内幕买入/卖出
             insider_color = "#28a745" if "买入" in insider_hint else ("#dc3545" if "卖出" in insider_hint else "#666")
+            # 期权流向颜色
+            _flow_colors = {"bullish": "#28a745", "bearish": "#dc3545", "neutral": "#666"}
+            flow_color = _flow_colors.get(flow_dir, "#666")
+            # GEX 格式化（已除以1e6，≥1 显示 M，否则显示 k）
+            if gex is None:
+                gex_str = "-"
+            elif abs(gex) >= 1.0:
+                gex_str = f"{gex:+.1f}M"
+            else:
+                gex_str = f"{gex*1000:+.1f}k"
             return {
                 "iv_rank": f"{iv_rank:.1f}" if iv_rank is not None else "-",
                 "pc": f"{pc:.2f}" if pc is not None else "-",
@@ -1875,7 +1892,43 @@ class AlphaHiveDailyReporter:
                 "insider_hint": _html.escape(insider_hint[:35]) if insider_hint else "",
                 "insider_color": insider_color,
                 "real_pct": f"{real_pct:.0f}%" if real_pct is not None else "-",
+                # 新期权字段
+                "gex": gex_str,
+                "flow_dir": flow_dir or "-",
+                "flow_color": flow_color,
+                "gsr": gsr or "-",
+                "iv_current": f"{iv_current:.1f}%" if iv_current is not None else "-",
+                "signal_sum": _html.escape(signal_sum[:45]) if signal_sum else "",
+                # 维度数据质量
+                "dim_dq": dim_dq,
             }
+
+        # ── 维度数据质量 HTML 构建器（#3）──
+        _DIM_DQ_LABELS = {
+            "signal": "信号", "catalyst": "催化", "sentiment": "情绪",
+            "odds": "赔率", "risk_adj": "风险",
+        }
+
+        def _build_dim_dq_html(dim_dq: dict) -> str:
+            """生成维度数据质量迷你条形图"""
+            if not dim_dq:
+                return ""
+            items = []
+            for dim, label in _DIM_DQ_LABELS.items():
+                pct = dim_dq.get(dim)
+                if pct is None:
+                    continue
+                color = "#28a745" if pct >= 80 else ("#ffc107" if pct >= 50 else "#dc3545")
+                items.append(
+                    f'<span class="dq-item" title="{label} 数据质量 {pct:.0f}%">'
+                    f'<span class="dq-lbl">{label}</span>'
+                    f'<span class="dq-bar"><span class="dq-fill" style="width:{pct:.0f}%;background:{color};"></span></span>'
+                    f'<span class="dq-val">{pct:.0f}%</span>'
+                    f'</span>'
+                )
+            if not items:
+                return ""
+            return '<div class="dim-dq-row">' + "".join(items) + '</div>'
 
         # 计算 avg real_pct
         real_pcts = [swarm_detail[t].get("data_real_pct", 0) for t in swarm_detail if swarm_detail[t].get("data_real_pct")]
@@ -1919,8 +1972,10 @@ class AlphaHiveDailyReporter:
                         <div class="mr"><span class="lbl">综合分</span><span class="val {sc}">{score:.1f}/10</span></div>
                         <div class="mr"><span class="lbl">共振信号</span>{res_badge}</div>
                         <div class="mr"><span class="lbl">投票</span><span class="val">{d['bullish']}多 / {d['bearish_v']}空 / {d['neutral_v']}中</span></div>
-                        <div class="mr"><span class="lbl">IV Rank</span><span class="val">{d['iv_rank']}</span></div>
+                        <div class="mr"><span class="lbl">IV Rank</span><span class="val">{d['iv_rank']}</span>{f'<span class="lbl" style="margin-left:8px;">当前IV</span><span class="val">{d["iv_current"]}</span>' if d["iv_current"] != "-" else ""}</div>
                         <div class="mr"><span class="lbl">P/C Ratio</span><span class="val"{pc_color}>{d['pc']}</span></div>
+                        {f'<div class="mr"><span class="lbl">期权流向</span><span class="val" style="color:{d["flow_color"]};font-weight:bold;">{d["flow_dir"]}</span></div>' if d["flow_dir"] != "-" else ""}
+                        {f'<div class="mr"><span class="lbl">GEX</span><span class="val">{d["gex"]}</span></div>' if d["gex"] != "-" else ""}
                         {insider_row}
                         <div class="mr"><span class="lbl">看空强度</span><span class="val">{d['bear_score']:.1f}/10</span></div>
                         <div class="bear-bar"><div class="bear-fill" style="width:{bear_pct}%"></div></div>
@@ -2078,7 +2133,10 @@ class AlphaHiveDailyReporter:
                         <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">{_det3['iv_rank']}</span></div>
                         <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">{_det3['pc']}</span></div>
                         <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">{_det3['bear_score']:.1f}/10</span></div>
+                        {f'<div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:{_det3["flow_color"]};font-weight:bold;">{_det3["flow_dir"]}</span></div>' if _det3["flow_dir"] != "-" else ""}
+                        {f'<div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">{_det3["gex"]}</span></div>' if _det3["gex"] != "-" else ""}
                     </div>
+                    {_build_dim_dq_html(_det3['dim_dq'])}
                     <ul class="cc-signals">
                         {_bhtml3}
                     </ul>
@@ -2497,6 +2555,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 .full-table th::after{content:' ↕';font-size:.7em;opacity:.25}
 .full-table th[data-sort="asc"]::after{content:' ↑';opacity:.8}
 .full-table th[data-sort="desc"]::after{content:' ↓';opacity:.8}
+/* DIM DATA QUALITY BARS (#3) */
+.dim-dq-row{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;padding:6px 0 2px;
+  border-top:1px solid rgba(0,0,0,.06)}
+.dq-item{display:flex;align-items:center;gap:3px;flex:1 0 30%}
+.dq-lbl{font-size:.65em;color:#888;min-width:22px}
+.dq-bar{flex:1;height:5px;border-radius:3px;background:#eee;overflow:hidden}
+.dq-fill{height:100%;border-radius:3px;transition:width .4s}
+.dq-val{font-size:.65em;color:#666;min-width:28px;text-align:right}
 """
 
         # ── Build new Top-6 cards ──
@@ -2661,12 +2727,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
                   <div class="cc-metrics-col">
                     <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">{_detd['iv_rank']}</span></div>
                     <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">{_detd['pc']}</span></div>
+                    {f'<div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:{_detd["flow_color"]};font-weight:bold;">{_detd["flow_dir"]}</span></div>' if _detd["flow_dir"] != "-" else ""}
+                    {f'<div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">{_detd["gex"]}</span></div>' if _detd["gex"] != "-" else ""}
                     <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">{_detd['bear_score']:.1f}/10</span></div>
                     <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">{_detd['bullish']}多/{_detd['bearish_v']}空</span></div>
                   </div>
                   <div class="radar-wrap"><canvas id="radar-{_html.escape(_tkrd)}" width="160" height="160"></canvas></div>
                 </div>
                 <ul class="cc-signals">{_bhtmld}</ul>
+                {_build_dim_dq_html(_detd['dim_dq'])}
                 {_tb_html}
                 <div class="cc-footer">{_rss_badge}{_mlbtnd}</div>
               </div>

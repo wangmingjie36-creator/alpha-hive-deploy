@@ -18,6 +18,13 @@ try:
 except ImportError:
     yf = None
 
+# ── 期权数据断路器（#9）──
+try:
+    from resilience import yfinance_limiter as _opt_rl, yfinance_breaker as _opt_cb
+except ImportError:
+    _opt_rl = None
+    _opt_cb = None
+
 
 class OptionsDataFetcher:
     """期权数据采集器 - 支持多源降级策略"""
@@ -109,6 +116,11 @@ class OptionsDataFetcher:
             pass  # {ticker} 期权链数据来自缓存")
             return cached
 
+        # 断路器检查（#9）：yfinance 最近连续失败时快速降级
+        if _opt_cb and not _opt_cb.allow_request():
+            _log.warning("%s 期权链跳过：yfinance 断路器开路（近期连续失败）", ticker)
+            return self._get_sample_options_chain(ticker)
+
         # 主来源：yfinance
         if yf is None:
             _log.warning("yfinance 未安装，使用样本数据")
@@ -156,7 +168,9 @@ class OptionsDataFetcher:
                     continue
 
             if not calls_list or not puts_list:
-                _log.warning("%s 期权数据不足，使用样本数据", ticker)
+                _log.warning("%s 期权数据不足，降级为样本数据（yfinance 返回空链）", ticker)
+                if _opt_cb:
+                    _opt_cb.record_failure()
                 return self._get_sample_options_chain(ticker)
 
             # 合并所有到期日的数据，并按 DTE 加权
@@ -199,11 +213,14 @@ class OptionsDataFetcher:
             }
 
             self._write_cache(ticker, "chain", result)
-            pass  # {ticker} 期权链数据来自 yfinance")
+            if _opt_cb:
+                _opt_cb.record_success()
             return result
 
         except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-            _log.warning("获取 %s 期权数据失败：%s，使用样本数据", ticker, e)
+            _log.warning("获取 %s 期权链失败：%s，降级为样本数据", ticker, e)
+            if _opt_cb:
+                _opt_cb.record_failure()
             return self._get_sample_options_chain(ticker)
 
     def fetch_historical_iv(self, ticker: str, days: int = 252) -> List[float]:
@@ -847,7 +864,7 @@ class OptionsAgent:
         if not _market_open or current_iv < _MIN_VALID_IV:
             last_valid = self.fetcher._read_last_valid_iv(ticker)
             if last_valid:
-                _log.debug(
+                _log.info(
                     "%s IV 降级→缓存 %.2f%% (市场%s, raw_iv=%.2f%%)",
                     ticker, last_valid,
                     "已关闭" if not _market_open else "异常数据", current_iv
