@@ -111,7 +111,7 @@ class EdgarRSSClient:
                     _log.debug("EDGAR RSS HTTP %s", resp.status_code)
                     return self._cache
 
-                entries = self._parse_atom(resp.text)
+                entries = self._parse_atom(resp.text)[:200]  # 限制缓存大小防止内存膨胀
                 self._cache = entries
                 self._cache_ts = now
 

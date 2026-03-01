@@ -7,6 +7,7 @@ Agent 级别跨会话记忆 + 会话聚合 + 动态权重管理
 import sqlite3
 import os
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass
@@ -175,8 +176,7 @@ class MemoryStore:
             conn = self._connect()
             cursor = conn.cursor()
 
-            now_ms = int(datetime.now().timestamp() * 1000)
-            memory_id = f"{entry['date']}_{entry['ticker']}_{entry['agent_id']}_{now_ms}"
+            memory_id = f"{entry['date']}_{entry['ticker']}_{entry['agent_id']}_{uuid.uuid4().hex[:12]}"
 
             cursor.execute("""
                 INSERT INTO agent_memory (

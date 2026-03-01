@@ -22,7 +22,7 @@ class CacheManager:
 
     def get_cache_key(self, source: str, ticker: str) -> str:
         """生成缓存键"""
-        return f"{source}_{ticker}".lower()
+        return f"{source}#{ticker}".lower()
 
     def load(self, key: str, ttl: int = 3600) -> Optional[Dict]:
         """

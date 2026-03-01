@@ -49,59 +49,55 @@ class PredictionStore:
         self._init_table()
 
     def _init_table(self):
-        conn = None
         try:
-            conn = sqlite3.connect(self.db_path)
-            conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS {self.TABLE} (
-                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date               TEXT NOT NULL,
-                    ticker             TEXT NOT NULL,
-                    final_score        REAL NOT NULL,
-                    direction          TEXT NOT NULL,
-                    price_at_predict   REAL,
-                    dimension_scores   TEXT,
-                    agent_directions   TEXT,
-                    -- 期权分析字段
-                    options_score      REAL,
-                    iv_rank            REAL,
-                    put_call_ratio     REAL,
-                    gamma_exposure     REAL,
-                    flow_direction     TEXT,
-                    -- T+1 回测
-                    price_t1           REAL,
-                    return_t1          REAL,
-                    correct_t1         INTEGER,
-                    checked_t1         INTEGER DEFAULT 0,
-                    iv_rank_t1         REAL,
-                    -- T+7 回测
-                    price_t7           REAL,
-                    return_t7          REAL,
-                    correct_t7         INTEGER,
-                    checked_t7         INTEGER DEFAULT 0,
-                    -- T+30 回测
-                    price_t30          REAL,
-                    return_t30         REAL,
-                    correct_t30        INTEGER,
-                    checked_t30        INTEGER DEFAULT 0,
-                    created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(date, ticker)
-                )
-            """)
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_date ON {self.TABLE}(date)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_ticker ON {self.TABLE}(ticker)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_checked_t7_date "
-                         f"ON {self.TABLE}(checked_t7, date)")
-            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_date_ticker "
-                         f"ON {self.TABLE}(date, ticker)")
-            # 迁移：如果旧表缺少期权字段，添加它们
-            self._migrate_options_columns(conn)
-            conn.commit()
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {self.TABLE} (
+                        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                        date               TEXT NOT NULL,
+                        ticker             TEXT NOT NULL,
+                        final_score        REAL NOT NULL,
+                        direction          TEXT NOT NULL,
+                        price_at_predict   REAL,
+                        dimension_scores   TEXT,
+                        agent_directions   TEXT,
+                        -- 期权分析字段
+                        options_score      REAL,
+                        iv_rank            REAL,
+                        put_call_ratio     REAL,
+                        gamma_exposure     REAL,
+                        flow_direction     TEXT,
+                        -- T+1 回测
+                        price_t1           REAL,
+                        return_t1          REAL,
+                        correct_t1         INTEGER,
+                        checked_t1         INTEGER DEFAULT 0,
+                        iv_rank_t1         REAL,
+                        -- T+7 回测
+                        price_t7           REAL,
+                        return_t7          REAL,
+                        correct_t7         INTEGER,
+                        checked_t7         INTEGER DEFAULT 0,
+                        -- T+30 回测
+                        price_t30          REAL,
+                        return_t30         REAL,
+                        correct_t30        INTEGER,
+                        checked_t30        INTEGER DEFAULT 0,
+                        created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(date, ticker)
+                    )
+                """)
+                conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_date ON {self.TABLE}(date)")
+                conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_ticker ON {self.TABLE}(ticker)")
+                conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_checked_t7_date "
+                             f"ON {self.TABLE}(checked_t7, date)")
+                conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_date_ticker "
+                             f"ON {self.TABLE}(date, ticker)")
+                # 迁移：如果旧表缺少期权字段，添加它们
+                self._migrate_options_columns(conn)
+                conn.commit()
         except (sqlite3.Error, OSError) as e:
             _log.warning("预测表初始化失败: %s", e)
-        finally:
-            if conn:
-                conn.close()
 
     def _migrate_options_columns(self, conn):
         """为旧表添加期权相关字段（兼容已有数据库）"""
@@ -141,40 +137,36 @@ class PredictionStore:
         pheromone_compact: list = None,
     ) -> bool:
         """保存一条预测记录（含期权分析数据 + Agent 自评分快照）"""
-        conn = None
         opts = options_data or {}
         try:
-            conn = sqlite3.connect(self.db_path)
-            conn.execute(f"""
-                INSERT OR REPLACE INTO {self.TABLE}
-                (date, ticker, final_score, direction, price_at_predict,
-                 dimension_scores, agent_directions,
-                 options_score, iv_rank, put_call_ratio, gamma_exposure, flow_direction,
-                 pheromone_compact)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                datetime.now().strftime("%Y-%m-%d"),
-                ticker,
-                final_score,
-                direction,
-                price,
-                json.dumps(dimension_scores or {}, cls=SafeJSONEncoder),
-                json.dumps(agent_directions or {}, cls=SafeJSONEncoder),
-                opts.get("options_score"),
-                opts.get("iv_rank"),
-                opts.get("put_call_ratio"),
-                opts.get("gamma_exposure"),
-                opts.get("flow_direction"),
-                json.dumps(pheromone_compact or [], cls=SafeJSONEncoder),
-            ))
-            conn.commit()
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(f"""
+                    INSERT OR REPLACE INTO {self.TABLE}
+                    (date, ticker, final_score, direction, price_at_predict,
+                     dimension_scores, agent_directions,
+                     options_score, iv_rank, put_call_ratio, gamma_exposure, flow_direction,
+                     pheromone_compact)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    datetime.now().strftime("%Y-%m-%d"),
+                    ticker,
+                    final_score,
+                    direction,
+                    price,
+                    json.dumps(dimension_scores or {}, cls=SafeJSONEncoder),
+                    json.dumps(agent_directions or {}, cls=SafeJSONEncoder),
+                    opts.get("options_score"),
+                    opts.get("iv_rank"),
+                    opts.get("put_call_ratio"),
+                    opts.get("gamma_exposure"),
+                    opts.get("flow_direction"),
+                    json.dumps(pheromone_compact or [], cls=SafeJSONEncoder),
+                ))
+                conn.commit()
             return True
         except (sqlite3.Error, OSError, TypeError) as e:
             _log.warning("保存预测失败 (%s): %s", ticker, e)
             return False
-        finally:
-            if conn:
-                conn.close()
 
     def get_pending_checks(self, period: str) -> List[Dict]:
         """
@@ -193,45 +185,37 @@ class PredictionStore:
         else:
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
-        conn = None
         try:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(f"""
-                SELECT * FROM {self.TABLE}
-                WHERE date <= ? AND {checked_col} = 0
-                ORDER BY date ASC
-            """, (cutoff,)).fetchall()
-            return [dict(r) for r in rows]
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(f"""
+                    SELECT * FROM {self.TABLE}
+                    WHERE date <= ? AND {checked_col} = 0
+                    ORDER BY date ASC
+                """, (cutoff,)).fetchall()
+                return [dict(r) for r in rows]
         except (sqlite3.Error, OSError) as e:
             _log.warning("获取待回测记录失败: %s", e)
             return []
-        finally:
-            if conn:
-                conn.close()
 
     def update_check_result(
         self, pred_id: int, period: str,
         price: float, ret: float, correct: bool
     ) -> bool:
         """更新回测结果"""
-        conn = None
         try:
-            conn = sqlite3.connect(self.db_path)
-            conn.execute(f"""
-                UPDATE {self.TABLE}
-                SET price_{period} = ?, return_{period} = ?,
-                    correct_{period} = ?, checked_{period} = 1
-                WHERE id = ?
-            """, (price, ret, 1 if correct else 0, pred_id))
-            conn.commit()
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(f"""
+                    UPDATE {self.TABLE}
+                    SET price_{period} = ?, return_{period} = ?,
+                        correct_{period} = ?, checked_{period} = 1
+                    WHERE id = ?
+                """, (price, ret, 1 if correct else 0, pred_id))
+                conn.commit()
             return True
         except (sqlite3.Error, OSError) as e:
             _log.warning("更新回测结果失败: %s", e)
             return False
-        finally:
-            if conn:
-                conn.close()
 
     def get_accuracy_stats(self, period: str = "t7", days: int = 90) -> Dict:
         """
@@ -248,105 +232,97 @@ class PredictionStore:
         correct_col = f"correct_{period}"
         return_col = f"return_{period}"
 
-        conn = None
         try:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
 
-            # 总体准确率
-            row = conn.execute(f"""
-                SELECT
-                    COUNT(*) as total,
-                    SUM({correct_col}) as correct,
-                    AVG({return_col}) as avg_ret,
-                    AVG(final_score) as avg_score
-                FROM {self.TABLE}
-                WHERE {checked_col} = 1 AND date >= ?
-            """, (cutoff,)).fetchone()
-
-            total = row["total"] or 0
-            correct = row["correct"] or 0
-            overall_acc = correct / total if total > 0 else 0.0
-
-            # 按方向分组
-            by_direction = {}
-            for direction in ["bullish", "bearish", "neutral"]:
-                r = conn.execute(f"""
+                # 总体准确率
+                row = conn.execute(f"""
                     SELECT
                         COUNT(*) as total,
                         SUM({correct_col}) as correct,
-                        AVG({return_col}) as avg_ret
+                        AVG({return_col}) as avg_ret,
+                        AVG(final_score) as avg_score
                     FROM {self.TABLE}
-                    WHERE {checked_col} = 1 AND direction = ? AND date >= ?
-                """, (direction, cutoff)).fetchone()
-                t = r["total"] or 0
-                by_direction[direction] = {
-                    "total": t,
-                    "correct": r["correct"] or 0,
-                    "accuracy": (r["correct"] or 0) / t if t > 0 else 0.0,
-                    "avg_return": round(r["avg_ret"] or 0, 2),
-                }
+                    WHERE {checked_col} = 1 AND date >= ?
+                """, (cutoff,)).fetchone()
 
-            # 按标的分组
-            by_ticker = {}
-            rows = conn.execute(f"""
-                SELECT
-                    ticker,
-                    COUNT(*) as total,
-                    SUM({correct_col}) as correct,
-                    AVG({return_col}) as avg_ret,
-                    AVG(final_score) as avg_score
-                FROM {self.TABLE}
-                WHERE {checked_col} = 1 AND date >= ?
-                GROUP BY ticker
-                ORDER BY total DESC
-            """, (cutoff,)).fetchall()
-            for r in rows:
-                t = r["total"] or 0
-                by_ticker[r["ticker"]] = {
-                    "total": t,
-                    "correct": r["correct"] or 0,
-                    "accuracy": (r["correct"] or 0) / t if t > 0 else 0.0,
-                    "avg_return": round(r["avg_ret"] or 0, 2),
-                    "avg_score": round(r["avg_score"] or 0, 1),
-                }
+                total = row["total"] or 0
+                correct = row["correct"] or 0
+                overall_acc = correct / total if total > 0 else 0.0
 
-            return {
-                "period": period,
-                "days_window": days,
-                "overall_accuracy": round(overall_acc, 3),
-                "total_checked": total,
-                "correct_count": correct,
-                "avg_return": round(row["avg_ret"] or 0, 3),
-                "avg_score": round(row["avg_score"] or 0, 1),
-                "by_direction": by_direction,
-                "by_ticker": by_ticker,
-            }
+                # 按方向分组
+                by_direction = {}
+                for direction in ["bullish", "bearish", "neutral"]:
+                    r = conn.execute(f"""
+                        SELECT
+                            COUNT(*) as total,
+                            SUM({correct_col}) as correct,
+                            AVG({return_col}) as avg_ret
+                        FROM {self.TABLE}
+                        WHERE {checked_col} = 1 AND direction = ? AND date >= ?
+                    """, (direction, cutoff)).fetchone()
+                    t = r["total"] or 0
+                    by_direction[direction] = {
+                        "total": t,
+                        "correct": r["correct"] or 0,
+                        "accuracy": (r["correct"] or 0) / t if t > 0 else 0.0,
+                        "avg_return": round(r["avg_ret"] or 0, 2),
+                    }
+
+                # 按标的分组
+                by_ticker = {}
+                rows = conn.execute(f"""
+                    SELECT
+                        ticker,
+                        COUNT(*) as total,
+                        SUM({correct_col}) as correct,
+                        AVG({return_col}) as avg_ret,
+                        AVG(final_score) as avg_score
+                    FROM {self.TABLE}
+                    WHERE {checked_col} = 1 AND date >= ?
+                    GROUP BY ticker
+                    ORDER BY total DESC
+                """, (cutoff,)).fetchall()
+                for r in rows:
+                    t = r["total"] or 0
+                    by_ticker[r["ticker"]] = {
+                        "total": t,
+                        "correct": r["correct"] or 0,
+                        "accuracy": (r["correct"] or 0) / t if t > 0 else 0.0,
+                        "avg_return": round(r["avg_ret"] or 0, 2),
+                        "avg_score": round(r["avg_score"] or 0, 1),
+                    }
+
+                return {
+                    "period": period,
+                    "days_window": days,
+                    "overall_accuracy": round(overall_acc, 3),
+                    "total_checked": total,
+                    "correct_count": correct,
+                    "avg_return": round(row["avg_ret"] or 0, 3),
+                    "avg_score": round(row["avg_score"] or 0, 1),
+                    "by_direction": by_direction,
+                    "by_ticker": by_ticker,
+                }
         except (sqlite3.Error, OSError, KeyError, TypeError) as e:
             _log.warning("获取准确率统计失败: %s", e)
             return {"overall_accuracy": 0, "total_checked": 0}
-        finally:
-            if conn:
-                conn.close()
 
     def get_all_predictions(self, days: int = 30) -> List[Dict]:
         """获取最近 N 天所有预测"""
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        conn = None
         try:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(f"""
-                SELECT * FROM {self.TABLE}
-                WHERE date >= ? ORDER BY date DESC, ticker
-            """, (cutoff,)).fetchall()
-            return [dict(r) for r in rows]
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(f"""
+                    SELECT * FROM {self.TABLE}
+                    WHERE date >= ? ORDER BY date DESC, ticker
+                """, (cutoff,)).fetchall()
+                return [dict(r) for r in rows]
         except (sqlite3.Error, OSError) as e:
             _log.warning("获取预测列表失败: %s", e)
             return []
-        finally:
-            if conn:
-                conn.close()
 
 
 class Backtester:
@@ -530,20 +506,16 @@ class Backtester:
             iv_rank_t1 = result.get("iv_rank")
 
             if iv_rank_t1 is not None:
-                conn = None
                 try:
-                    conn = sqlite3.connect(self.store.db_path)
-                    conn.execute(f"""
-                        UPDATE {PredictionStore.TABLE}
-                        SET iv_rank_t1 = ?
-                        WHERE id = ?
-                    """, (iv_rank_t1, pred["id"]))
-                    conn.commit()
+                    with sqlite3.connect(self.store.db_path) as conn:
+                        conn.execute(f"""
+                            UPDATE {PredictionStore.TABLE}
+                            SET iv_rank_t1 = ?
+                            WHERE id = ?
+                        """, (iv_rank_t1, pred["id"]))
+                        conn.commit()
                 except (sqlite3.Error, OSError) as e:
                     _log.debug("IV Rank T+1 update failed: %s", e)
-                finally:
-                    if conn:
-                        conn.close()
 
         except (ImportError, ConnectionError, TimeoutError, OSError,
                 ValueError, KeyError, TypeError) as e:
@@ -618,7 +590,7 @@ class Backtester:
         # 期权分析回验统计
         lines.append("\n  [期权信号回验]")
         try:
-            conn = sqlite3.connect(self.store.db_path)
+          with sqlite3.connect(self.store.db_path) as conn:
             conn.row_factory = sqlite3.Row
             opts_row = conn.execute(f"""
                 SELECT COUNT(*) as total,
@@ -648,7 +620,6 @@ class Backtester:
             else:
                 lines.append("  暂无期权分析数据")
 
-            conn.close()
         except (sqlite3.Error, OSError, KeyError, TypeError) as e:
             lines.append(f"  期权回验查询失败: {e}")
 
@@ -708,55 +679,50 @@ class Backtester:
         }
 
         bias: Dict[str, float] = {abbrev: 0.0 for abbrev in agent_abbrevs.values()}
-        conn = None
         try:
-            conn = sqlite3.connect(self.store.db_path)
-            conn.row_factory = sqlite3.Row
-            cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
-            rows = conn.execute(f"""
-                SELECT pheromone_compact, correct_{period}, return_{period}
-                FROM {PredictionStore.TABLE}
-                WHERE checked_{period} = 1
-                  AND pheromone_compact IS NOT NULL
-                  AND date >= ?
-            """, (cutoff,)).fetchall()
+            with sqlite3.connect(self.store.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+                rows = conn.execute(f"""
+                    SELECT pheromone_compact, correct_{period}, return_{period}
+                    FROM {PredictionStore.TABLE}
+                    WHERE checked_{period} = 1
+                      AND pheromone_compact IS NOT NULL
+                      AND date >= ?
+                """, (cutoff,)).fetchall()
 
-            # {abbrev: {correct: [self_scores], wrong: [self_scores]}}
-            buckets: Dict[str, Dict[str, list]] = {
-                a: {"correct": [], "wrong": []} for a in agent_abbrevs.values()
-            }
+                # {abbrev: {correct: [self_scores], wrong: [self_scores]}}
+                buckets: Dict[str, Dict[str, list]] = {
+                    a: {"correct": [], "wrong": []} for a in agent_abbrevs.values()
+                }
 
-            for row in rows:
-                try:
-                    compact = json.loads(row["pheromone_compact"] or "[]")
-                    correct = bool(row[f"correct_{period}"])
-                    ret = row[f"return_{period}"]
-                    if ret is None:
+                for row in rows:
+                    try:
+                        compact = json.loads(row["pheromone_compact"] or "[]")
+                        correct = bool(row[f"correct_{period}"])
+                        ret = row[f"return_{period}"]
+                        if ret is None:
+                            continue
+                        for entry in compact:
+                            abbrev = entry.get("a", "")
+                            if abbrev in buckets:
+                                ss = entry.get("s", 5.0)
+                                bucket_key = "correct" if correct else "wrong"
+                                buckets[abbrev][bucket_key].append(ss)
+                    except (json.JSONDecodeError, KeyError, TypeError):
                         continue
-                    for entry in compact:
-                        abbrev = entry.get("a", "")
-                        if abbrev in buckets:
-                            ss = entry.get("s", 5.0)
-                            bucket_key = "correct" if correct else "wrong"
-                            buckets[abbrev][bucket_key].append(ss)
-                except (json.JSONDecodeError, KeyError, TypeError):
-                    continue
 
-            for abbrev, b in buckets.items():
-                n_correct = len(b["correct"])
-                n_wrong = len(b["wrong"])
-                if n_correct + n_wrong < min_samples:
-                    continue
-                mean_correct = sum(b["correct"]) / n_correct if n_correct else 5.0
-                mean_wrong = sum(b["wrong"]) / n_wrong if n_wrong else 5.0
-                # 乐观偏差 = 错误时均值 - 正确时均值（越大表示越倾向在错误时给高分）
-                bias[abbrev] = round(mean_wrong - mean_correct, 3)
+                for abbrev, b in buckets.items():
+                    n_correct = len(b["correct"])
+                    n_wrong = len(b["wrong"])
+                    if n_correct + n_wrong < min_samples:
+                        continue
+                    mean_correct = sum(b["correct"]) / n_correct if n_correct else 5.0
+                    mean_wrong = sum(b["wrong"]) / n_wrong if n_wrong else 5.0
+                    bias[abbrev] = round(mean_wrong - mean_correct, 3)
 
         except (sqlite3.Error, OSError) as e:
             _log.warning("self_score 偏差分析失败: %s", e)
-        finally:
-            if conn:
-                conn.close()
 
         _log.info("Agent self_score 偏差分析: %s", {k: f"{v:+.3f}" for k, v in bias.items()})
         return bias
@@ -802,49 +768,45 @@ class Backtester:
         dim_accuracy = {}
         total_samples = 0
 
-        conn = None
         try:
-            conn = sqlite3.connect(self.store.db_path)
-            conn.row_factory = sqlite3.Row
+            with sqlite3.connect(self.store.db_path) as conn:
+                conn.row_factory = sqlite3.Row
 
-            for agent_name, dim in agent_dim_map.items():
-                rows = conn.execute(f"""
-                    SELECT agent_directions, return_{period}, direction
-                    FROM {PredictionStore.TABLE}
-                    WHERE checked_{period} = 1 AND agent_directions IS NOT NULL
-                    AND date >= ?
-                """, ((datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d"),)).fetchall()
+                for agent_name, dim in agent_dim_map.items():
+                    rows = conn.execute(f"""
+                        SELECT agent_directions, return_{period}, direction
+                        FROM {PredictionStore.TABLE}
+                        WHERE checked_{period} = 1 AND agent_directions IS NOT NULL
+                        AND date >= ?
+                    """, ((datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d"),)).fetchall()
 
-                correct = 0
-                checked = 0
-                for row in rows:
-                    try:
-                        dirs = json.loads(row["agent_directions"])
-                        agent_dir = dirs.get(agent_name)
-                        if not agent_dir:
+                    correct = 0
+                    checked = 0
+                    for row in rows:
+                        try:
+                            dirs = json.loads(row["agent_directions"])
+                            agent_dir = dirs.get(agent_name)
+                            if not agent_dir:
+                                continue
+                            ret = row[f"return_{period}"]
+                            if ret is None:
+                                continue
+                            checked += 1
+                            if self._check_direction(agent_dir, ret):
+                                correct += 1
+                        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                            _log.debug("Agent direction parse error: %s", e)
                             continue
-                        ret = row[f"return_{period}"]
-                        if ret is None:
-                            continue
-                        checked += 1
-                        if self._check_direction(agent_dir, ret):
-                            correct += 1
-                    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-                        _log.debug("Agent direction parse error: %s", e)
-                        continue
 
-                if checked >= min_samples:
-                    dim_accuracy[dim] = correct / checked
-                    total_samples += checked
-                else:
-                    dim_accuracy[dim] = 0.5  # 样本不足时用中性 50%
+                    if checked >= min_samples:
+                        dim_accuracy[dim] = correct / checked
+                        total_samples += checked
+                    else:
+                        dim_accuracy[dim] = 0.5  # 样本不足时用中性 50%
 
         except (sqlite3.Error, OSError, json.JSONDecodeError, KeyError, TypeError) as e:
             _log.warning("权重自适应失败 (%s): %s", period, e)
             return None
-        finally:
-            if conn:
-                conn.close()
 
         if total_samples < min_samples:
             _log.debug("权重自适应：%s 样本不足 (%d < %d)", period, total_samples, min_samples)
@@ -909,41 +871,37 @@ class Backtester:
         self, weights: Dict, accuracy: Dict, samples: int, period: str = "t7"
     ):
         """将自适应权重持久化到 SQLite"""
-        conn = None
         try:
-            conn = sqlite3.connect(self.store.db_path)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS adapted_weights (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date TEXT NOT NULL,
-                    weights TEXT NOT NULL,
-                    accuracy TEXT NOT NULL,
-                    sample_count INTEGER,
-                    period TEXT DEFAULT 't7',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            # 迁移旧表缺少 period 列
-            try:
-                conn.execute("ALTER TABLE adapted_weights ADD COLUMN period TEXT DEFAULT 't7'")
-            except sqlite3.OperationalError:
-                pass
-            conn.execute("""
-                INSERT INTO adapted_weights (date, weights, accuracy, sample_count, period)
-                VALUES (?, ?, ?, ?, ?)
-            """, (
-                datetime.now().strftime("%Y-%m-%d"),
-                json.dumps(weights),
-                json.dumps({k: round(v, 3) for k, v in accuracy.items()}),
-                samples,
-                period,
-            ))
-            conn.commit()
+            with sqlite3.connect(self.store.db_path) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS adapted_weights (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        date TEXT NOT NULL,
+                        weights TEXT NOT NULL,
+                        accuracy TEXT NOT NULL,
+                        sample_count INTEGER,
+                        period TEXT DEFAULT 't7',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                # 迁移旧表缺少 period 列
+                try:
+                    conn.execute("ALTER TABLE adapted_weights ADD COLUMN period TEXT DEFAULT 't7'")
+                except sqlite3.OperationalError:
+                    pass
+                conn.execute("""
+                    INSERT INTO adapted_weights (date, weights, accuracy, sample_count, period)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    datetime.now().strftime("%Y-%m-%d"),
+                    json.dumps(weights),
+                    json.dumps({k: round(v, 3) for k, v in accuracy.items()}),
+                    samples,
+                    period,
+                ))
+                conn.commit()
         except (sqlite3.Error, OSError, TypeError) as e:
             _log.warning("保存自适应权重失败: %s", e)
-        finally:
-            if conn:
-                conn.close()
 
     @staticmethod
     def load_adapted_weights(db_path: str = DB_PATH) -> Optional[Dict]:
@@ -956,33 +914,29 @@ class Backtester:
         Returns:
             {signal: 0.xx, ..., _meta: {period, samples}} 或 None
         """
-        conn = None
         try:
-            conn = sqlite3.connect(db_path)
-            # 优先取 T+7，再取 T+1
-            row = conn.execute("""
-                SELECT weights, sample_count, period
-                FROM adapted_weights
-                WHERE sample_count >= 3
-                ORDER BY
-                    CASE period WHEN 't7' THEN 0 WHEN 't1' THEN 1 ELSE 2 END,
-                    created_at DESC
-                LIMIT 1
-            """).fetchone()
+            with sqlite3.connect(db_path) as conn:
+                # 优先取 T+7，再取 T+1
+                row = conn.execute("""
+                    SELECT weights, sample_count, period
+                    FROM adapted_weights
+                    WHERE sample_count >= 3
+                    ORDER BY
+                        CASE period WHEN 't7' THEN 0 WHEN 't1' THEN 1 ELSE 2 END,
+                        created_at DESC
+                    LIMIT 1
+                """).fetchone()
 
-            if row:
-                weights = json.loads(row[0])
-                period = row[2] or "t7"
-                samples = row[1]
-                _log.info("加载自适应权重（%s，%d 样本）: %s", period, samples, weights)
-                return weights
-            return None
+                if row:
+                    weights = json.loads(row[0])
+                    period = row[2] or "t7"
+                    samples = row[1]
+                    _log.info("加载自适应权重（%s，%d 样本）: %s", period, samples, weights)
+                    return weights
+                return None
         except (sqlite3.Error, OSError, json.JSONDecodeError, KeyError) as e:
             _log.debug("Adapted weights load failed: %s", e)
             return None
-        finally:
-            if conn:
-                conn.close()
 
 
 # ==================== 便捷函数 ====================

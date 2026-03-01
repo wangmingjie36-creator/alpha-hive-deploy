@@ -381,6 +381,8 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
   .hist-card{flex-direction:column;align-items:flex-start;gap:12px}
   .hist-right{justify-content:flex-start}
 }
+@media(max-width:600px){.cc-two{grid-template-columns:1fr}.radar-wrap{height:140px}}
+@media(max-width:480px){.acc-kpi-row{grid-template-columns:repeat(2,1fr)}}
 /* ── ACCURACY DASHBOARD ── */
 #accuracy{margin:32px 0}
 .acc-section-title{font-size:1.15em;font-weight:700;color:var(--tp);margin-bottom:16px;padding-bottom:6px;border-bottom:2px solid rgba(102,126,234,.2)}
@@ -2650,7 +2652,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
             _fcls6 = "fill-h" if _sc6 >= 7.0 else ("fill-m" if _sc6 >= 5.5 else "fill-l")
             _pct6  = int(_sc6 * 10)
             _dom6  = _DOMAINS.get(_tc6, "")
-            _logo6 = (f'<img class="slogo" src="https://logo.clearbit.com/{_dom6}" '
+            _logo6 = (f'<img class="slogo" src="https://logo.clearbit.com/{_dom6}" loading="lazy" '
                       f'alt="{_html.escape(_tc6)}" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'">'
                       f'<div class="slogo-fb" style="display:none">{_html.escape(_tc6[:2])}</div>') if _dom6 else \
                      f'<div class="slogo-fb">{_html.escape(_tc6[:2])}</div>'
@@ -2999,9 +3001,14 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 <meta property="og:title" content="Alpha Hive 投资仪表板">
 <meta property="og:description" content="蜂群智能驱动的去中心化投资研究，{n_tickers} 标的每日扫描">
 <meta property="og:type" content="website">
+<meta property="og:url" content="https://wangmingjie36-creator.github.io/alpha-hive-deploy/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Alpha Hive 投资仪表板">
+<link rel="canonical" href="https://wangmingjie36-creator.github.io/alpha-hive-deploy/">
+<meta name="robots" content="index, follow">
 <title>Alpha Hive 投资仪表板</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><polygon points='50,5 93,28 93,72 50,95 7,72 7,28' fill='%23F4A532'/><text x='50' y='62' font-size='42' text-anchor='middle' fill='%23fff'>🐝</text></svg>">
-<script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous"></script>
 <style>
 {new_css}
 </style>
@@ -3102,15 +3109,15 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
     <div class="charts-grid">
       <div class="chart-box">
         <div class="chart-ttl">😨 Fear &amp; Greed 指数</div>
-        <div class="chart-canvas-wrap" style="height:180px"><canvas id="fgChart"></canvas></div>
+        <div class="chart-canvas-wrap" style="height:180px"><canvas id="fgChart" role="img" aria-label="Fear and Greed 指数图表"></canvas></div>
       </div>
       <div class="chart-box">
         <div class="chart-ttl">📊 各标的综合评分</div>
-        <div class="chart-canvas-wrap" style="height:{'{}px'.format(max(160, len(all_tickers_sorted)*28))}"><canvas id="scoresChart"></canvas></div>
+        <div class="chart-canvas-wrap" style="height:{'{}px'.format(max(160, len(all_tickers_sorted)*28))}"><canvas id="scoresChart" role="img" aria-label="各标的综合评分柱状图"></canvas></div>
       </div>
       <div class="chart-box">
         <div class="chart-ttl">🗳 看多 / 看空 / 中性</div>
-        <div class="chart-canvas-wrap" style="height:180px"><canvas id="dirChart"></canvas></div>
+        <div class="chart-canvas-wrap" style="height:180px"><canvas id="dirChart" role="img" aria-label="看多看空中性方向分布图"></canvas></div>
       </div>
     </div>
   </div>
@@ -3264,6 +3271,8 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
   function renderChart(id){{
     if(rendered[id])return;
     rendered[id]=true;
+    if(typeof Chart==='undefined')return;
+    try{{
 
     if(id==='fgChart'){{
       var fgCtx=document.getElementById('fgChart');
@@ -3324,6 +3333,8 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
       }}));
       markDone('dirChart');
     }}
+
+    }}catch(e){{console.warn('Chart render error ('+id+'):',e);}}
   }}
 
   // Radar per ticker (lazy)
