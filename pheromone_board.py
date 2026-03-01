@@ -262,7 +262,7 @@ class PheromoneBoard:
                     f.result(timeout=0)
                 except Exception as exc:
                     _log.warning("PheromoneBoard shutdown 写入失败: %s", exc)
-        self._executor.shutdown(wait=False)
+        self._executor.shutdown(wait=True)
 
     def clear(self) -> None:
         """清空信息素板"""

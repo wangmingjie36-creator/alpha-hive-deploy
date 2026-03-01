@@ -98,7 +98,7 @@ class EmailNotifier:
 
     def _smtp_send(self, msg: MIMEMultipart) -> None:
         """通过 SMTP 发送邮件"""
-        server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'])
+        server = smtplib.SMTP(self.config['smtp_server'], self.config['smtp_port'], timeout=30)
 
         if self.config.get('use_tls', True):
             server.starttls()
