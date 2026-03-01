@@ -139,12 +139,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
      display:flex;align-items:center;justify-content:space-between;padding:0 28px}
 .nav-logo{display:flex;align-items:center;gap:8px;font-weight:900;font-size:1.1em;color:var(--acc);text-decoration:none}
 .nav-links{display:flex;gap:2px}
-.nav-link{padding:7px 12px;border-radius:6px;font-size:.85em;font-weight:500;
-          color:rgba(255,255,255,.7);text-decoration:none;transition:all .2s}
+.nav-link{padding:10px 12px;border-radius:6px;font-size:.85em;font-weight:500;min-height:44px;
+          color:rgba(255,255,255,.7);text-decoration:none;transition:all .2s;display:inline-flex;align-items:center}
 .nav-link:hover,.nav-link.active{background:rgba(244,165,50,.15);color:var(--acc)}
 .nav-link.active{background:rgba(244,165,50,.22);color:var(--acc)}
 .dark-btn{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);
-          color:#fff;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:.82em;transition:all .2s}
+          color:#fff;padding:10px 14px;border-radius:8px;cursor:pointer;font-size:.82em;transition:all .2s;min-height:44px}
 .dark-btn:hover{background:rgba(244,165,50,.2);border-color:var(--acc)}
 @media(max-width:768px){.nav-links{display:none}
   .full-table th:nth-child(7),.full-table td:nth-child(7),
@@ -348,7 +348,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
   .footer{background:#f0f0f0!important;color:#333}
 }
 /* F17: Scroll-to-top */
-.scroll-top{position:fixed;bottom:24px;right:24px;z-index:999;width:40px;height:40px;
+.scroll-top{position:fixed;bottom:24px;right:24px;z-index:999;width:44px;height:44px;
   border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--acc);
   font-size:1.1em;cursor:pointer;opacity:0;pointer-events:none;
   transition:opacity .3s,transform .3s;box-shadow:0 2px 10px rgba(0,0,0,.12)}
@@ -3000,10 +3000,14 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 <meta property="og:description" content="蜂群智能驱动的去中心化投资研究，{n_tickers} 标的每日扫描">
 <meta property="og:type" content="website">
 <title>Alpha Hive 投资仪表板</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><polygon points='50,5 93,28 93,72 50,95 7,72 7,28' fill='%23F4A532'/><text x='50' y='62' font-size='42' text-anchor='middle' fill='%23fff'>🐝</text></svg>">
+<script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
 {new_css}
 </style>
+<script type="application/ld+json">
+{{"@context":"https://schema.org","@type":"WebPage","name":"Alpha Hive 投资仪表板","description":"去中心化蜂群智能投资研究平台 — {n_tickers} 标的每日扫描","dateModified":"{now_str}"}}
+</script>
 </head>
 <body>
 <a href="#today" class="skip-link">跳转到主内容</a>
@@ -3022,6 +3026,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
   <button class="dark-btn" id="darkBtn" onclick="toggleDark()" aria-label="切换暗黑模式">🌙 暗黑</button>
 </nav>
 
+<main id="main-content">
 <!-- ── Hero Banner ── -->
 <section class="hero">
   <div class="hero-inner">
@@ -3035,7 +3040,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
       </div>
     </div>
     <div class="hero-right">
-      <svg class="hero-svg hive-anim" viewBox="0 0 280 260" xmlns="http://www.w3.org/2000/svg">
+      <svg class="hero-svg hive-anim" viewBox="0 0 280 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Alpha Hive 蜂群六角形动画图标">
         <defs>
           <path id="orb-i" d="M 215,101 A 75,45 0 1 0 65,101 A 75,45 0 1 0 215,101"/>
           <path id="orb-o" d="M 238,112 A 98,56 0 1 0 42,112 A 98,56 0 1 0 238,112"/>
@@ -3091,6 +3096,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
   </div>
 
   <!-- ── Charts ── -->
+  <noscript><div style="padding:16px;background:rgba(245,158,11,.1);border-radius:8px;margin:12px 0;text-align:center;color:var(--ts)">图表需要 JavaScript 支持，请启用 JavaScript 查看交互式图表。</div></noscript>
   <div class="section" id="charts">
     <div class="sec-title">市场可视化</div>
     <div class="charts-grid">
@@ -3155,6 +3161,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
     声明：本报告由 AI 蜂群自动生成，仅供研究参考，不构成投资建议。所有决策请自行判断。
   </p>
 </footer>
+</main>
 <button class="scroll-top" id="scrollTop" onclick="window.scrollTo({{top:0,behavior:'smooth'}})" aria-label="返回顶部">↑</button>
 
 <script>
@@ -3250,6 +3257,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
   var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
   var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
   var rendered={{}};
+  var chartInstances=[];
 
   function markDone(id){{var c=document.getElementById(id);if(c)c.classList.add('rendered');}}
 
@@ -3263,7 +3271,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
       var fv={_fv3};
       var fc=fv<=25?'#ef4444':fv<=45?'#f97316':fv<=55?'#f59e0b':fv<=75?'#22c55e':'#16a34a';
       var fl='{_fg_label}';
-      new Chart(fgCtx,{{
+      chartInstances.push(new Chart(fgCtx,{{
         type:'doughnut',
         data:{{datasets:[{{data:[fv,100-fv],backgroundColor:[fc,dark?'#2a3050':'#e8ecf3'],
                            borderWidth:0,circumference:180,rotation:-90}}]}},
@@ -3277,7 +3285,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
           cx.font='11px system-ui';cx.fillStyle=tc;cx.fillText(fl,w/2,h*.60+20);
           cx.restore();
         }}}}]
-      }});
+      }}));
       markDone('fgChart');
     }}
 
@@ -3286,7 +3294,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
       if(!scCtx)return;
       var sc={_scores_js};
       var clrs=sc.map(function(x){{return x[1]>=7?'rgba(34,197,94,.85)':x[1]>=5.5?'rgba(245,158,11,.85)':'rgba(239,68,68,.85)';}});
-      new Chart(scCtx,{{
+      chartInstances.push(new Chart(scCtx,{{
         type:'bar',
         data:{{labels:sc.map(function(x){{return x[0];}}),
                datasets:[{{data:sc.map(function(x){{return x[1];}}),backgroundColor:clrs,borderRadius:5,borderSkipped:false}}]}},
@@ -3296,7 +3304,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
                    x:{{min:0,max:10,grid:{{color:gc}},ticks:{{color:tc,font:{{size:10}}}}}},
                    y:{{grid:{{display:false}},ticks:{{color:tc,font:{{size:10,weight:'bold'}}}}}}
                  }}}}
-      }});
+      }}));
       markDone('scoresChart');
     }}
 
@@ -3304,7 +3312,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
       var dirCtx=document.getElementById('dirChart');
       if(!dirCtx)return;
       var dd={_dir_js};
-      new Chart(dirCtx,{{
+      chartInstances.push(new Chart(dirCtx,{{
         type:'doughnut',
         data:{{labels:['看多','看空','中性'],
                datasets:[{{data:dd,
@@ -3313,7 +3321,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
         options:{{responsive:true,maintainAspectRatio:false,cutout:'58%',
                  plugins:{{legend:{{position:'bottom',labels:{{color:tc,font:{{size:10}},boxWidth:11,padding:10}}}},
                            tooltip:{{callbacks:{{label:function(c){{return' '+c.label+': '+c.raw+' 只';}}}}}}}}}}
-      }});
+      }}));
       markDone('dirChart');
     }}
   }}
@@ -3326,7 +3334,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
     rendered['radar-'+tk]=true;
     var cv=document.getElementById('radar-'+tk);
     if(!cv)return;
-    new Chart(cv,{{
+    chartInstances.push(new Chart(cv,{{
       type:'radar',
       data:{{labels:rl,datasets:[{{data:rd[tk],fill:true,
                backgroundColor:'rgba(102,126,234,.13)',borderColor:'#667eea',
@@ -3337,7 +3345,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
                             ticks:{{display:false}},
                             pointLabels:{{color:tc,font:{{size:8}}}}}}}},
                plugins:{{legend:{{display:false}}}}}}
-    }});
+    }}));
     markDone('radar-'+tk);
   }}
 
@@ -3380,7 +3388,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
   var dirs  = {_acc_dir_labels_js_safe};
   var accs  = {_acc_dir_accs_js_safe};
   var tots  = {_acc_dir_tots_js_safe};
-  new Chart(ctx, {{
+  chartInstances.push(new Chart(ctx, {{
     type: 'bar',
     data: {{
       labels: dirs,
@@ -3403,7 +3411,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
         y: {{ grid: {{ display: false }} }}
       }}
     }}
-  }});
+  }}));
 }})();
 
 // ── Accuracy Ticker Table Sort ──
@@ -3428,6 +3436,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
     }});
   }});
 }})();
+window.addEventListener('pagehide',function(){{chartInstances.forEach(function(c){{try{{c.destroy()}}catch(e){{}}}});chartInstances=[];}});
 </script>
 </body>
 </html>"""
