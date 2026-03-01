@@ -461,6 +461,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
         self._bg_futures = []
         atexit.register(self._shutdown_bg)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._shutdown_bg()
+
         # 财报自动监控器
         self.earnings_watcher = None
         if EarningsWatcher:

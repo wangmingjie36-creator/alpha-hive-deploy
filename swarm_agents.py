@@ -127,10 +127,10 @@ def check_ticker_validity(ticker: str) -> Dict:
                     if not result["warning"]:
                         result["warning"] = msg
                     _log.warning("⚠️ %s", msg)
-        except Exception:
+        except (AttributeError, KeyError, IndexError, TypeError, ValueError):
             pass
 
-    except Exception as e:
+    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
         _log.debug("ticker validity check failed for %s: %s", ticker, e)
 
     _ticker_validity[ticker] = {**result, "_checked_at": now}
@@ -143,11 +143,11 @@ def _fetch_stock_data(ticker: str) -> Dict:
     内置缓存（2 分钟 TTL）+ RateLimiter + CircuitBreaker + 指数退避重试
     失败时返回默认值，不会抛出异常
     """
-    # 检查缓存
+    # 检查缓存（持有锁返回副本，防止外部修改）
     with _yf_lock:
         cached = _yf_cache.get(ticker)
         if cached and (_time.time() - _yf_cache_ts.get(ticker, 0)) < _YF_CACHE_TTL:
-            return cached
+            return dict(cached)
 
     data = {
         "price": 100.0,
@@ -305,7 +305,7 @@ def prefetch_shared_data(tickers: list, retriever=None) -> Dict:
                 t = _yf_futs[fut]
                 try:
                     stock_data[t] = fut.result(timeout=30)
-                except Exception as e:
+                except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
                     _log.debug("Prefetch yfinance failed for %s: %s", t, e)
                     stock_data[t] = _fetch_stock_data(t)
 
@@ -724,7 +724,7 @@ def _upsert_sentiment(ticker: str, date_str: str, pct: int):
         )
         conn.commit()
         conn.close()
-    except Exception as _e:
+    except (OSError, ValueError, TypeError) as _e:
         _log.debug("sentiment_baseline upsert error: %s", _e)
 
 
@@ -741,7 +741,7 @@ def _get_sentiment_baseline(ticker: str, days: int = 30) -> Optional[float]:
         conn.close()
         if row and row[0] is not None:
             return float(row[0])
-    except Exception as _e:
+    except (OSError, ValueError, TypeError) as _e:
         _log.debug("sentiment_baseline query error: %s", _e)
     return None
 

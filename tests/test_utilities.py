@@ -114,6 +114,40 @@ class TestSafeJSONEncoder:
         assert result["a"][1] is None
         assert result["a"][2]["b"] == "Inf"
 
+    def test_numpy_int64(self):
+        pytest.importorskip("numpy")
+        import numpy as np
+        from hive_logger import SafeJSONEncoder
+        data = {"count": np.int64(42), "flag": np.bool_(True)}
+        result = json.loads(json.dumps(data, cls=SafeJSONEncoder))
+        assert result["count"] == 42
+        assert result["flag"] is True
+
+    def test_numpy_float_nan(self):
+        pytest.importorskip("numpy")
+        import numpy as np
+        from hive_logger import SafeJSONEncoder
+        data = {"val": np.float64(3.14), "bad": np.float64("nan")}
+        result = json.loads(json.dumps(data, cls=SafeJSONEncoder))
+        assert abs(result["val"] - 3.14) < 0.001
+        assert result["bad"] is None
+
+    def test_numpy_array(self):
+        pytest.importorskip("numpy")
+        import numpy as np
+        from hive_logger import SafeJSONEncoder
+        data = {"arr": np.array([1, 2, 3])}
+        result = json.loads(json.dumps(data, cls=SafeJSONEncoder))
+        assert result["arr"] == [1, 2, 3]
+
+    def test_pandas_timestamp(self):
+        pytest.importorskip("pandas")
+        import pandas as pd
+        from hive_logger import SafeJSONEncoder
+        data = {"ts": pd.Timestamp("2026-03-01 12:00:00")}
+        result = json.loads(json.dumps(data, cls=SafeJSONEncoder))
+        assert "2026-03-01" in result["ts"]
+
 
 # ==================== FeatureRegistry ====================
 

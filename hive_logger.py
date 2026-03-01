@@ -180,6 +180,36 @@ class SafeJSONEncoder(json.JSONEncoder):
             return o.decode("utf-8", errors="replace")
         if isinstance(o, Path):
             return str(o)
+        # numpy 标量 → Python 原生类型
+        try:
+            import numpy as _np
+            if isinstance(o, (_np.integer,)):
+                return int(o)
+            if isinstance(o, (_np.floating,)):
+                v = float(o)
+                import math as _m
+                if _m.isnan(v):
+                    return None
+                if _m.isinf(v):
+                    return "Inf" if v > 0 else "-Inf"
+                return v
+            if isinstance(o, _np.bool_):
+                return bool(o)
+            if isinstance(o, _np.ndarray):
+                return o.tolist()
+        except ImportError:
+            pass
+        # pandas 类型 → Python 原生类型
+        try:
+            import pandas as _pd
+            if isinstance(o, _pd.Timestamp):
+                return o.isoformat()
+            if isinstance(o, (_pd.Series, _pd.DataFrame)):
+                return o.to_dict()
+            if isinstance(o, _pd.Categorical):
+                return o.tolist()
+        except ImportError:
+            pass
         try:
             return super().default(o)
         except TypeError:
@@ -189,7 +219,7 @@ class SafeJSONEncoder(json.JSONEncoder):
         return super().encode(self._sanitize(o))
 
     def _sanitize(self, obj):
-        """递归清洗数据：NaN → None, Inf → 'Inf'"""
+        """递归清洗数据：NaN → None, Inf → 'Inf'，numpy/pandas → 原生类型"""
         import math as _m
         if isinstance(obj, float):
             if _m.isnan(obj):
@@ -197,6 +227,20 @@ class SafeJSONEncoder(json.JSONEncoder):
             if _m.isinf(obj):
                 return "Inf" if obj > 0 else "-Inf"
             return obj
+        # numpy 标量在 _sanitize 阶段提前转换
+        try:
+            import numpy as _np
+            if isinstance(obj, _np.floating):
+                v = float(obj)
+                return self._sanitize(v)
+            if isinstance(obj, _np.integer):
+                return int(obj)
+            if isinstance(obj, _np.bool_):
+                return bool(obj)
+            if isinstance(obj, _np.ndarray):
+                return [self._sanitize(v) for v in obj.tolist()]
+        except ImportError:
+            pass
         if isinstance(obj, dict):
             return {k: self._sanitize(v) for k, v in obj.items()}
         if isinstance(obj, (list, tuple)):

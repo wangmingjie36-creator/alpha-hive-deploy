@@ -9,6 +9,7 @@ import os
 from datetime import datetime
 from typing import Dict, List
 from statistics import mean, stdev
+from hive_logger import SafeJSONEncoder
 
 _log = _logging.getLogger("alpha_hive.feedback_loop")
 
@@ -96,7 +97,7 @@ class ReportSnapshot:
                     "t30": self.actual_price_t30
                 },
                 "created_at": datetime.now().isoformat()
-            }, f, ensure_ascii=False, indent=2)
+            }, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
 
         return filename
 

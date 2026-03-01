@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from threading import Lock
-from hive_logger import get_logger, PATHS
+from hive_logger import get_logger, PATHS, SafeJSONEncoder
 
 _log = get_logger("memory_store")
 
@@ -57,6 +57,7 @@ class MemoryStore:
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA wal_autocheckpoint=1000")
         return conn
 
     def schema_migrate(self) -> bool:
@@ -219,7 +220,8 @@ class MemoryStore:
                         top_score = score
 
             summary = json.dumps(
-                {"top_ticker": top_opp, "top_score": top_score, "total_tickers": len(tickers)}
+                {"top_ticker": top_opp, "top_score": top_score, "total_tickers": len(tickers)},
+                cls=SafeJSONEncoder
             )[:500]
 
             cursor.execute("""
@@ -228,9 +230,9 @@ class MemoryStore:
                     resonances_detected, top_opportunity_ticker, top_opportunity_score,
                     final_report_summary, pheromone_snapshot, total_duration_seconds
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (session_id, date, run_mode, json.dumps(tickers), len(tickers),
+            """, (session_id, date, run_mode, json.dumps(tickers, cls=SafeJSONEncoder), len(tickers),
                   len([e for e in pheromone_snapshot if e.get('support_count', 0) >= 3]),
-                  top_opp, top_score, summary, json.dumps(pheromone_snapshot)[:5000], duration))
+                  top_opp, top_score, summary, json.dumps(pheromone_snapshot, cls=SafeJSONEncoder)[:5000], duration))
 
             conn.commit()
             return True

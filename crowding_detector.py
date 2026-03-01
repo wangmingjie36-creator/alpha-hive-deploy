@@ -7,6 +7,7 @@ import logging as _logging
 import json
 from datetime import datetime
 from typing import Dict, Tuple, List
+from hive_logger import SafeJSONEncoder
 
 _log = _logging.getLogger("alpha_hive.crowding_detector")
 
@@ -451,7 +452,7 @@ class CrowdingDetector:
                 "final_score": initial_score * self.get_adjustment_factor(crowding_score),
                 "metrics": metrics,
                 "created_at": datetime.now().isoformat()
-            }, f, ensure_ascii=False, indent=2)
+            }, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
 
         return filename
 

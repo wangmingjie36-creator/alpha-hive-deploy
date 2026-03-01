@@ -86,6 +86,25 @@ CACHE_CONFIG = {
     }
 }
 
+def get_cache_ttl(source: str) -> int:
+    """获取缓存 TTL（交易时段感知：非交易时段延长高频源 TTL）"""
+    base_ttl = CACHE_CONFIG["ttl"].get(source, 300)
+    # 高频源在非交易时段无需频繁刷新
+    _HIGH_FREQ_SOURCES = {"stocktwits", "yahoo_finance", "unusual_options", "reddit_memory", "finviz", "edgar_rss"}
+    if source not in _HIGH_FREQ_SOURCES:
+        return base_ttl
+    try:
+        from datetime import datetime as _dt, timezone, timedelta as _td, time as _dtime
+        _utc = _dt.now(timezone.utc)
+        _et = _utc + _td(hours=-4 if 3 <= _utc.month <= 11 else -5)
+        _market_open = _et.weekday() < 5 and _dtime(9, 30) <= _et.time() < _dtime(16, 0)
+        if not _market_open:
+            return max(base_ttl, 3600)  # 非交易时段至少 1 小时
+    except (ImportError, ValueError):
+        pass
+    return base_ttl
+
+
 # ==================== 监控标的 ====================
 WATCHLIST = {
     # 科技板块 (Technology) - 5 个

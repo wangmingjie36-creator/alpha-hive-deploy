@@ -104,7 +104,7 @@ class OptionsDataFetcher:
                 if age > self._LAST_VALID_IV_TTL:
                     return None
             return float(data["iv"])
-        except Exception:
+        except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
             return None
 
     def _save_last_valid_iv(self, ticker: str, iv: float) -> None:
@@ -112,7 +112,7 @@ class OptionsDataFetcher:
         try:
             cache_path = self._get_cache_path(ticker, "last_valid_iv")
             atomic_json_write(cache_path, {"iv": iv, "timestamp": datetime.now().isoformat()})
-        except Exception:
+        except (OSError, TypeError, ValueError):
             pass
 
     def fetch_options_chain(self, ticker: str) -> Dict:
@@ -376,6 +376,7 @@ class OptionsDataFetcher:
         """样本期权链数据"""
         return {
             "ticker": ticker,
+            "source": "sample",
             "timestamp": datetime.now().isoformat(),
             "calls": [
                 {
@@ -919,10 +920,21 @@ class OptionsAgent:
         else:
             flow_direction = "neutral"
 
-        # 7. 汇总结果
+        # 7. 数据质量判定
+        _is_sample = options_chain.get("source") == "sample"
+        _has_real_iv = bool(raw_ivs)
+        if _is_sample:
+            data_quality = "unavailable"
+        elif not _has_real_iv or current_iv < _MIN_VALID_IV:
+            data_quality = "degraded"
+        else:
+            data_quality = "real"
+
+        # 8. 汇总结果
         result = {
             "ticker": ticker,
             "timestamp": datetime.now().isoformat(),
+            "data_quality": data_quality,  # "real" | "degraded" | "unavailable"
             "iv_rank": iv_rank,  # 0-100
             "iv_percentile": iv_percentile,  # 0-100
             "iv_current": iv_current,  # 当前 IV

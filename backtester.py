@@ -14,7 +14,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-from hive_logger import PATHS, get_logger, FeatureRegistry
+from hive_logger import PATHS, get_logger, FeatureRegistry, SafeJSONEncoder
 
 try:
     import pandas as _pd
@@ -158,14 +158,14 @@ class PredictionStore:
                 final_score,
                 direction,
                 price,
-                json.dumps(dimension_scores or {}),
-                json.dumps(agent_directions or {}),
+                json.dumps(dimension_scores or {}, cls=SafeJSONEncoder),
+                json.dumps(agent_directions or {}, cls=SafeJSONEncoder),
                 opts.get("options_score"),
                 opts.get("iv_rank"),
                 opts.get("put_call_ratio"),
                 opts.get("gamma_exposure"),
                 opts.get("flow_direction"),
-                json.dumps(pheromone_compact or []),
+                json.dumps(pheromone_compact or [], cls=SafeJSONEncoder),
             ))
             conn.commit()
             return True

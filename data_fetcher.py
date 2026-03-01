@@ -8,7 +8,7 @@ import os
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
-from hive_logger import PATHS, get_logger, atomic_json_write
+from hive_logger import PATHS, get_logger, atomic_json_write, SafeJSONEncoder
 
 _log = get_logger("data_fetcher")
 
@@ -553,7 +553,7 @@ if __name__ == "__main__":
 
     # 保存汇总数据
     with open(str(PATHS.home / "realtime_metrics.json"), "w") as f:
-        json.dump(all_metrics, f, indent=2)
+        json.dump(all_metrics, f, indent=2, cls=SafeJSONEncoder)
 
     _log.info("数据采集完成！已保存到 realtime_metrics.json")
-    _log.debug(json.dumps(all_metrics, indent=2))
+    _log.debug(json.dumps(all_metrics, indent=2, cls=SafeJSONEncoder))

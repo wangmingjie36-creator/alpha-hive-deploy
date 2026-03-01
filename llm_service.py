@@ -176,7 +176,8 @@ def call(
         return text
 
     except (ConnectionError, TimeoutError, OSError, ValueError) as e:
-        _log.error("LLM API call failed: %s", e, exc_info=True)
+        _log.error("LLM API call failed: %s", type(e).__name__)
+        _log.debug("LLM API call details:", exc_info=True)
         return None
 
 
