@@ -99,22 +99,35 @@ class SECEdgarClient:
         sec_limiter.acquire()
 
     def _request_get(self, url: str, headers: Dict = None, timeout: int = 15):
-        """带熔断保护的 HTTP GET"""
+        """带熔断保护 + 429 自动退避的 HTTP GET"""
         if requests is None:
             _log.warning("requests library not available")
             return None
         if not sec_breaker.allow_request():
             _log.warning("SEC EDGAR 熔断器已打开，跳过请求: %s", url[:80])
             return None
-        try:
-            self._throttle()
-            resp = requests.get(url, headers=headers or SEC_HEADERS, timeout=timeout)
-            resp.raise_for_status()
-            sec_breaker.record_success()
-            return resp
-        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
-            sec_breaker.record_failure()
-            raise
+        _max_retries = 2
+        for _attempt in range(_max_retries + 1):
+            try:
+                self._throttle()
+                resp = requests.get(url, headers=headers or SEC_HEADERS, timeout=timeout)
+                if resp.status_code == 429:
+                    _wait = min(float(resp.headers.get("Retry-After", 2)), 10)
+                    _log.info("SEC 429 限流，等待 %.1fs 后重试 (%d/%d)", _wait, _attempt + 1, _max_retries)
+                    time.sleep(_wait)
+                    continue
+                resp.raise_for_status()
+                sec_breaker.record_success()
+                return resp
+            except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+                if _attempt < _max_retries:
+                    time.sleep(1.5)
+                    continue
+                sec_breaker.record_failure()
+                raise
+        # 所有重试都是 429
+        sec_breaker.record_failure()
+        return None
 
     # ==================== Form 4 列表 ====================
 
@@ -335,7 +348,7 @@ class SECEdgarClient:
     # ==================== 高层接口 ====================
 
     def get_insider_trades(
-        self, ticker: str, days: int = 30, max_filings: int = 10
+        self, ticker: str, days: int = 30, max_filings: int = 5
     ) -> Dict:
         """
         获取指定标的最近 N 天的内幕交易摘要

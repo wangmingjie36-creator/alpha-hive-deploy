@@ -220,9 +220,9 @@ def retry(
 
 # ==================== 预置实例（各数据源共享） ====================
 
-# SEC EDGAR: 10 req/s
-sec_limiter = RateLimiter(rate=8.0, burst=3)
-sec_breaker = CircuitBreaker("sec_edgar", failure_threshold=3, recovery_timeout=120.0)
+# SEC EDGAR: 10 req/s（留 30% 余量防 429）
+sec_limiter = RateLimiter(rate=6.0, burst=2)
+sec_breaker = CircuitBreaker("sec_edgar", failure_threshold=6, recovery_timeout=120.0)
 
 # Polymarket: 保守 2 req/s
 polymarket_limiter = RateLimiter(rate=2.0, burst=2)
