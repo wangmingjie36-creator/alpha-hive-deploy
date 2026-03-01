@@ -264,3 +264,23 @@ def atomic_json_write(path, data, **kwargs):
         except OSError:
             pass
         raise
+
+
+def read_json_cache(path, ttl: int = 300):
+    """Read JSON cache from *path* if it exists and is younger than *ttl* seconds.
+
+    Returns the parsed data on cache hit, or ``None`` on miss / expired / corrupt.
+    Paired with :func:`atomic_json_write` for a complete cache read/write cycle.
+    """
+    import time as _t
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        age = _t.time() - path.stat().st_mtime
+        if age >= ttl:
+            return None
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, date
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from hive_logger import PATHS, get_logger, atomic_json_write
+from hive_logger import PATHS, get_logger, atomic_json_write, read_json_cache
 
 _log = get_logger("earnings_watcher")
 
@@ -83,16 +83,10 @@ class EarningsWatcher:
         """
         # 磁盘缓存 12 小时
         cache_path = CACHE_DIR / f"{ticker.upper()}_date.json"
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if age < _EARN_DATE_TTL:
-                try:
-                    with open(cache_path) as f:
-                        data = json.load(f)
-                        data["cached"] = True
-                        return data
-                except (json.JSONDecodeError, OSError) as exc:
-                    _log.debug("earnings date cache read failed: %s", exc)
+        cached = read_json_cache(cache_path, _EARN_DATE_TTL)
+        if cached is not None:
+            cached["cached"] = True
+            return cached
 
         if yf is None:
             _log.warning("yfinance 未安装，无法获取财报日期")
@@ -227,14 +221,9 @@ class EarningsWatcher:
         """
         # 缓存
         cache_path = CACHE_DIR / f"{ticker.upper()}_results.json"
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if age < _EARN_RESULTS_TTL:
-                try:
-                    with open(cache_path) as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, OSError) as exc:
-                    _log.debug("earnings results cache read failed: %s", exc)
+        cached = read_json_cache(cache_path, _EARN_RESULTS_TTL)
+        if cached is not None:
+            return cached
 
         if yf is None:
             _log.warning("yfinance 未安装")

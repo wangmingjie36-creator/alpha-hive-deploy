@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
-from hive_logger import atomic_json_write
+from hive_logger import atomic_json_write, read_json_cache
 
 _log = _logging.getLogger("alpha_hive.fear_greed")
 
@@ -46,14 +46,9 @@ def get_fear_greed() -> Dict:
     }
     """
     with _lock:
-        if _CACHE_PATH.exists():
-            age = time.time() - _CACHE_PATH.stat().st_mtime
-            if age < _CACHE_TTL:
-                try:
-                    with open(_CACHE_PATH) as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, OSError):
-                    pass
+        cached = read_json_cache(_CACHE_PATH, _CACHE_TTL)
+        if cached is not None:
+            return cached
 
         if _req is None:
             return _default_result()

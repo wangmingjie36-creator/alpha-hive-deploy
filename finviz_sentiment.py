@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from hive_logger import atomic_json_write
+from hive_logger import atomic_json_write, read_json_cache
 
 _log = _logging.getLogger("alpha_hive.finviz_sentiment")
 
@@ -71,14 +71,9 @@ class FinvizSentimentClient:
     def get_news_titles(self, ticker: str, max_titles: int = 30) -> List[str]:
         """抓取 Finviz 新闻标题"""
         cache_path = CACHE_DIR / f"{ticker.upper()}_titles.json"
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if age < _FINVIZ_TTL:
-                try:
-                    with open(cache_path) as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, OSError) as exc:
-                    _log.debug("Finviz titles 缓存读取失败 (%s): %s", ticker, exc)
+        cached = read_json_cache(cache_path, _FINVIZ_TTL)
+        if cached is not None:
+            return cached
 
         if requests is None:
             return []
@@ -139,14 +134,9 @@ class FinvizSentimentClient:
         }
         """
         cache_path = CACHE_DIR / f"{ticker.upper()}_sentiment.json"
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if age < 900:
-                try:
-                    with open(cache_path) as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, OSError) as exc:
-                    _log.debug("Finviz sentiment 缓存读取失败 (%s): %s", ticker, exc)
+        cached = read_json_cache(cache_path, _FINVIZ_TTL)
+        if cached is not None:
+            return cached
 
         titles = self.get_news_titles(ticker)
         if not titles:

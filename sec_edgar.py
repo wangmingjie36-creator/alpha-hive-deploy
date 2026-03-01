@@ -21,7 +21,7 @@ try:
 except ImportError:
     requests = None
 
-from hive_logger import PATHS, get_logger, atomic_json_write
+from hive_logger import PATHS, get_logger, atomic_json_write, read_json_cache
 from resilience import sec_limiter, sec_breaker
 
 _log = get_logger("sec_edgar")
@@ -54,19 +54,16 @@ class SECEdgarClient:
         cache_path = CACHE_DIR / "company_tickers.json"
 
         # 缓存有效期 24 小时
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if age < _SEC_CIK_TTL:
-                try:
-                    with open(cache_path) as f:
-                        data = json.load(f)
-                    self._cik_map = {
-                        v["ticker"].upper(): v["cik_str"]
-                        for v in data.values()
-                    }
-                    return
-                except (json.JSONDecodeError, OSError, KeyError) as e:
-                    _log.debug("CIK cache read failed, will re-download: %s", e)
+        data = read_json_cache(cache_path, _SEC_CIK_TTL)
+        if data is not None:
+            try:
+                self._cik_map = {
+                    v["ticker"].upper(): v["cik_str"]
+                    for v in data.values()
+                }
+                return
+            except (KeyError, AttributeError) as e:
+                _log.debug("CIK cache parse failed, will re-download: %s", e)
 
         # 从 SEC 下载
         if requests is None:
@@ -135,14 +132,9 @@ class SECEdgarClient:
 
         # 检查缓存（5 分钟有效）
         cache_path = CACHE_DIR / f"{ticker}_form4_list.json"
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if age < 300:
-                try:
-                    with open(cache_path) as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, OSError) as e:
-                    _log.debug("Form4 cache read failed: %s", e)
+        cached = read_json_cache(cache_path, 300)
+        if cached is not None:
+            return cached
 
         if requests is None:
             return []
@@ -359,14 +351,9 @@ class SECEdgarClient:
         """
         # 检查缓存（30 分钟有效）
         cache_path = CACHE_DIR / f"{ticker}_insider_summary.json"
-        if cache_path.exists():
-            age = time.time() - cache_path.stat().st_mtime
-            if age < 1800:
-                try:
-                    with open(cache_path) as f:
-                        return json.load(f)
-                except (json.JSONDecodeError, OSError) as e:
-                    _log.debug("Insider summary cache read failed: %s", e)
+        cached = read_json_cache(cache_path, 1800)
+        if cached is not None:
+            return cached
 
         filings = self.get_recent_form4_filings(ticker, limit=max_filings)
 

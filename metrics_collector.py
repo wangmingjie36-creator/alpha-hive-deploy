@@ -66,9 +66,15 @@ class MetricsCollector:
                     resonance_count INTEGER DEFAULT 0,
                     llm_calls INTEGER DEFAULT 0,
                     llm_cost_usd REAL DEFAULT 0.0,
-                    memory_mb REAL DEFAULT 0.0
+                    memory_mb REAL DEFAULT 0.0,
+                    thread_count INTEGER DEFAULT 0
                 )
             """)
+            # 迁移：为已有 DB 添加 thread_count 列
+            try:
+                conn.execute("ALTER TABLE scan_metrics ADD COLUMN thread_count INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ticker_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,6 +130,7 @@ class MetricsCollector:
         """记录一次完整扫描的指标"""
         now = datetime.now().isoformat()
         memory_mb = self._get_memory_mb()
+        thread_count = self.get_thread_count()
 
         with self._lock:
             with self._connect() as conn:
@@ -133,21 +140,23 @@ class MetricsCollector:
                         ticker_count, agent_count, duration_seconds, prefetch_seconds,
                         avg_score, max_score, min_score,
                         agent_errors, agent_total, data_real_pct,
-                        resonance_count, llm_calls, llm_cost_usd, memory_mb
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        resonance_count, llm_calls, llm_cost_usd, memory_mb,
+                        thread_count
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     now, session_id, scan_mode,
                     ticker_count, agent_count, duration_seconds, prefetch_seconds,
                     avg_score, max_score, min_score,
                     agent_errors, agent_total, data_real_pct,
                     resonance_count, llm_calls, llm_cost_usd, memory_mb,
+                    thread_count,
                 ))
                 conn.commit()
 
         _log.info(
-            "metrics: scan %s | %d tickers %.1fs | err=%d/%d | real=%.0f%%",
+            "metrics: scan %s | %d tickers %.1fs | err=%d/%d | real=%.0f%% | threads=%d",
             scan_mode, ticker_count, duration_seconds,
-            agent_errors, agent_total, data_real_pct,
+            agent_errors, agent_total, data_real_pct, thread_count,
         )
 
     def record_ticker(
@@ -311,6 +320,8 @@ class MetricsCollector:
             "total_llm_cost": round(sum(r["llm_cost_usd"] for r in scans), 4),
             "resonance_count": sum(r["resonance_count"] for r in scans),
             "avg_memory_mb": round(sum(r["memory_mb"] for r in scans) / len(scans), 1),
+            "max_thread_count": max((r["thread_count"] or 0) for r in scans),
+            "avg_thread_count": round(sum((r["thread_count"] or 0) for r in scans) / len(scans), 1),
             "slo_violations": len(violations),
             "violation_details": [dict(v) for v in violations[:10]],
         }
@@ -352,3 +363,8 @@ class MetricsCollector:
         except (ImportError, OSError, ValueError) as exc:
             _log.debug("_get_memory_mb 失败: %s", exc)
             return 0.0
+
+    @staticmethod
+    def get_thread_count() -> int:
+        """获取当前活跃线程数"""
+        return threading.active_count()
