@@ -40,6 +40,7 @@ class MLEnhancedReportGenerator:
         self.analyzer = AdvancedAnalyzer()
         self.ml_service = MLPredictionService()
         self.timestamp = datetime.now()
+        self._training_data_source = "unknown"  # "real" | "sample" | "unknown"
 
         # ⭐ Task 3: 初始化异步文件写入线程池（全局单例）
         if MLEnhancedReportGenerator._file_writer_pool is None:
@@ -71,11 +72,23 @@ class MLEnhancedReportGenerator:
                     MIN_REAL_SAMPLES = 10
                     real_data = self._build_real_training_data()
                     if len(real_data) >= MIN_REAL_SAMPLES:
-                        _log.info("使用 %d 条真实验证数据训练 ML 模型", len(real_data))
+                        _log.info("✅ [ML-REAL] 使用 %d 条真实验证数据训练 ML 模型", len(real_data))
+                        self._training_data_source = "real"
                         self.ml_service.data_builder.historical_records = real_data
                     else:
                         if real_data:
-                            _log.info("真实数据仅 %d 条（不足 %d），使用内置样本", len(real_data), MIN_REAL_SAMPLES)
+                            _log.warning(
+                                "⚠️ [ML-MIXED] 真实数据仅 %d 条（不足 %d），"
+                                "回退到硬编码样本训练，预测置信度受限",
+                                len(real_data), MIN_REAL_SAMPLES,
+                            )
+                        else:
+                            _log.warning(
+                                "⚠️ [ML-SAMPLE] 无真实验证数据，使用硬编码样本训练，"
+                                "预测结果仅供参考（请积累 %d+ 条 T+7 验证记录后重训）",
+                                MIN_REAL_SAMPLES,
+                            )
+                        self._training_data_source = "sample"
                     self.ml_service.train_model()
                     # 缓存到内存
                     self._model_cache[today] = self.ml_service.model
@@ -245,7 +258,10 @@ class MLEnhancedReportGenerator:
             "ticker": ticker,
             "timestamp": self.timestamp.isoformat(),
             "advanced_analysis": advanced_analysis,
-            "ml_prediction": ml_prediction,
+            "ml_prediction": {
+                **ml_prediction,
+                "training_data_source": self._training_data_source,  # "real"/"sample"/"unknown"
+            },
             "combined_recommendation": self._combine_recommendations(
                 advanced_analysis, ml_prediction
             ),

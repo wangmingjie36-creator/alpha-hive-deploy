@@ -241,6 +241,22 @@ class BeeAgent(ABC):
             _log.debug("History context unavailable for %s: %s", ticker, e)
             return ""
 
+    def _validate_ticker(self, ticker: str) -> Optional[Dict]:
+        """验证 ticker 格式（1~5 大写字母，无特殊字符）；无效时返回标准错误结构"""
+        import re as _re
+        if not ticker or not _re.match(r'^[A-Z]{1,5}$', str(ticker).strip()):
+            _log.warning("%s.analyze() 收到无效 ticker: %r", self.__class__.__name__, ticker)
+            return {
+                "error": "invalid_ticker",
+                "source": self.__class__.__name__,
+                "score": 5.0,
+                "direction": "neutral",
+                "confidence": 0.0,
+                "discovery": f"无效 ticker 格式: {ticker!r}（需 1~5 位大写字母）",
+                "dimension": "validation",
+            }
+        return None
+
 
 def prefetch_shared_data(tickers: list, retriever=None) -> Dict:
     """
@@ -310,6 +326,9 @@ class ScoutBeeNova(BeeAgent):
     """
 
     def analyze(self, ticker: str) -> Dict:
+        _err = self._validate_ticker(ticker)
+        if _err:
+            return _err
         try:
             ctx = self._get_history_context(ticker)
 
@@ -481,6 +500,9 @@ class OracleBeeEcho(BeeAgent):
     """
 
     def analyze(self, ticker: str) -> Dict:
+        _err = self._validate_ticker(ticker)
+        if _err:
+            return _err
         try:
             ctx = self._get_history_context(ticker)
 
@@ -613,6 +635,106 @@ class OracleBeeEcho(BeeAgent):
 
 # ==================== BuzzBeeWhisper (Sentiment 维度) ====================
 
+# ── 情绪基线 SQLite 存储（#13）──
+def _sentiment_db_path():
+    from pathlib import Path
+    from hive_logger import PATHS
+    return Path(PATHS.home) / "sentiment_baseline.db"
+
+
+def _init_sentiment_db():
+    """初始化情绪基线 DB（幂等）"""
+    import sqlite3 as _sq
+    db = _sentiment_db_path()
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = _sq.connect(str(db))
+    conn.execute("""CREATE TABLE IF NOT EXISTS sentiment_baseline (
+        ticker TEXT NOT NULL,
+        date   TEXT NOT NULL,
+        sentiment_pct INTEGER NOT NULL,
+        PRIMARY KEY (ticker, date)
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def _upsert_sentiment(ticker: str, date_str: str, pct: int):
+    """写入或更新当日情绪值"""
+    import sqlite3 as _sq
+    try:
+        _init_sentiment_db()
+        conn = _sq.connect(str(_sentiment_db_path()))
+        conn.execute(
+            "INSERT OR REPLACE INTO sentiment_baseline (ticker, date, sentiment_pct) VALUES (?,?,?)",
+            (ticker, date_str, pct),
+        )
+        conn.commit()
+        conn.close()
+        # 清理 60 天以上的旧数据（保持 DB 精简）
+        conn = _sq.connect(str(_sentiment_db_path()))
+        conn.execute(
+            "DELETE FROM sentiment_baseline WHERE date < date('now', '-60 days')"
+        )
+        conn.commit()
+        conn.close()
+    except Exception as _e:
+        _log.debug("sentiment_baseline upsert error: %s", _e)
+
+
+def _get_sentiment_baseline(ticker: str, days: int = 30) -> Optional[float]:
+    """获取过去 N 天的平均情绪值（排除今日），无数据返回 None"""
+    import sqlite3 as _sq
+    try:
+        conn = _sq.connect(str(_sentiment_db_path()))
+        row = conn.execute(
+            f"SELECT AVG(sentiment_pct) FROM sentiment_baseline "
+            f"WHERE ticker=? AND date < date('now') AND date >= date('now', '-{days} days')",
+            (ticker,),
+        ).fetchone()
+        conn.close()
+        if row and row[0] is not None:
+            return float(row[0])
+    except Exception as _e:
+        _log.debug("sentiment_baseline query error: %s", _e)
+    return None
+
+
+_SENTIMENT_SPIKE_THRESHOLD = 20   # 偏差超过 20 个百分点触发告警
+_SENTIMENT_MIN_DAYS = 5            # 至少 5 天基线才触发告警
+
+
+def _check_sentiment_spike(ticker: str, current_pct: int, today: str) -> Optional[str]:
+    """
+    对比当日情绪与 30 天基线，偏差 >THRESHOLD 时触发 Slack 告警。
+    返回告警描述字符串（无告警时返回 None）。
+    """
+    baseline = _get_sentiment_baseline(ticker, days=30)
+    if baseline is None:
+        return None
+    delta = current_pct - baseline
+    if abs(delta) < _SENTIMENT_SPIKE_THRESHOLD:
+        return None
+
+    direction_str = "看多骤升" if delta > 0 else "看空骤降"
+    msg = (
+        f"{ticker} 情绪突变 [{direction_str}]：当日 {current_pct}%，"
+        f"30日均值 {baseline:.1f}%，偏差 {delta:+.1f}ppt"
+    )
+    _log.warning("📡 情绪突变告警 %s", msg)
+    try:
+        from slack_report_notifier import SlackReportNotifier
+        n = SlackReportNotifier()
+        if getattr(n, "enabled", False):
+            n.send_risk_alert(
+                alert_title=f"{ticker} 情绪突变告警",
+                alert_message=msg,
+                severity="HIGH" if abs(delta) >= 30 else "MEDIUM",
+            )
+    except Exception:
+        pass
+    return msg
+
+
 class BuzzBeeWhisper(BeeAgent):
     """情绪分析蜂 - 多源市场情绪量化
     对应维度：Sentiment (权重 0.20)
@@ -628,6 +750,9 @@ class BuzzBeeWhisper(BeeAgent):
     """
 
     def analyze(self, ticker: str) -> Dict:
+        _err = self._validate_ticker(ticker)
+        if _err:
+            return _err
         try:
             ctx = self._get_history_context(ticker)
             stock = self._get_stock_data(ticker)
@@ -815,6 +940,12 @@ class BuzzBeeWhisper(BeeAgent):
                 confidence += 0.10
             confidence = min(1.0, confidence)
 
+            # ── 情绪基线更新 + 突变检测（#13）──
+            from datetime import datetime as _dt
+            _today_str = _dt.now().strftime("%Y-%m-%d")
+            _upsert_sentiment(ticker, _today_str, bullish_pct)
+            _spike_msg = _check_sentiment_spike(ticker, bullish_pct, _today_str)
+
             return {
                 "score": round(score, 2),
                 "direction": direction,
@@ -822,6 +953,7 @@ class BuzzBeeWhisper(BeeAgent):
                 "discovery": discovery,
                 "source": "BuzzBeeWhisper",
                 "dimension": "sentiment",
+                "sentinel_spike": _spike_msg,   # None 或突变告警描述
                 "data_quality": {
                     "momentum": "real",
                     "volume": "real",
@@ -890,6 +1022,9 @@ class ChronosBeeHorizon(BeeAgent):
     }
 
     def analyze(self, ticker: str) -> Dict:
+        _err = self._validate_ticker(ticker)
+        if _err:
+            return _err
         try:
             ctx = self._get_history_context(ticker)
 
@@ -1104,6 +1239,9 @@ class RivalBeeVanguard(BeeAgent):
     """
 
     def analyze(self, ticker: str) -> Dict:
+        _err = self._validate_ticker(ticker)
+        if _err:
+            return _err
         try:
             ctx = self._get_history_context(ticker)
 
@@ -1191,6 +1329,9 @@ class GuardBeeSentinel(BeeAgent):
     """
 
     def analyze(self, ticker: str) -> Dict:
+        _err = self._validate_ticker(ticker)
+        if _err:
+            return _err
         try:
             ctx = self._get_history_context(ticker)
 
@@ -1366,6 +1507,9 @@ class BearBeeContrarian(BeeAgent):
         return None
 
     def analyze(self, ticker: str) -> Dict:
+        _err = self._validate_ticker(ticker)
+        if _err:
+            return _err
         try:
             ctx = self._get_history_context(ticker)
             stock = self._get_stock_data(ticker)
