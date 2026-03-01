@@ -142,6 +142,16 @@ def call(
     if client is None:
         return None
 
+    # 预算硬限制：超过每日上限后停止调用，防止意外费用
+    try:
+        from config import LLM_CONFIG as _llm_cfg
+        _budget = _llm_cfg.get("daily_budget_usd", 1.0)
+    except (ImportError, KeyError):
+        _budget = 1.0
+    if _token_usage["total_cost_usd"] >= _budget:
+        _log.warning("LLM 每日预算已耗尽（$%.3f >= $%.2f），自动降级", _token_usage["total_cost_usd"], _budget)
+        return None
+
     try:
         messages = [{"role": "user", "content": prompt}]
 

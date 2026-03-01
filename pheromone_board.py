@@ -107,11 +107,19 @@ class PheromoneBoard:
                         self._memory_store.save_agent_memory, entry_dict, self._session_id
                     )
                     self._pending_futures.append(future)
-                    # 清理已完成的 futures（防止内存泄漏）
-                    self._pending_futures = [f for f in self._pending_futures if not f.done()]
+                    # 清理已完成的 futures + 检查失败的写入
+                    _alive = []
+                    for f in self._pending_futures:
+                        if not f.done():
+                            _alive.append(f)
+                        elif f.exception() is not None:
+                            _log.warning("PheromoneBoard 异步写入失败: %s", f.exception())
+                            self._save_fallback(entry_dict)
+                    self._pending_futures = _alive
                 except RuntimeError:
-                    # 执行器已被 atexit 关闭（多次实例化场景），跳过异步写入
-                    _log.debug("PheromoneBoard executor shut down, skipping async DB write")
+                    # 执行器已被 atexit 关闭（多次实例化场景），同步写入降级
+                    _log.debug("PheromoneBoard executor shut down, fallback to sync")
+                    self._save_fallback(entry_dict)
 
     def get_top_signals(self, ticker: str = None, n: int = 5) -> List[PheromoneEntry]:
         """
@@ -224,6 +232,17 @@ class PheromoneBoard:
         with self._lock:
             return len(self._entries)
 
+    def _save_fallback(self, entry_dict: dict) -> None:
+        """异步写入失败时保存到 fallback JSON 文件，防止数据丢失"""
+        import json
+        from pathlib import Path
+        try:
+            fb_path = Path("pheromone_fallback.jsonl")
+            with open(fb_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry_dict, ensure_ascii=False, default=str) + "\n")
+        except OSError as e:
+            _log.error("PheromoneBoard fallback 写入也失败: %s", e)
+
     def _shutdown(self) -> None:
         """atexit 处理器：等待所有异步写入完成后关闭线程池"""
         pending = [f for f in self._pending_futures if not f.done()]
@@ -237,12 +256,12 @@ class PheromoneBoard:
                 )
                 for f in not_done:
                     f.cancel()
-            # 检查已完成的 future 是否有异常
+            # 检查已完成的 future 是否有异常，失败的写入保存到 fallback
             for f in done:
                 try:
                     f.result(timeout=0)
                 except Exception as exc:
-                    _log.debug("pheromone future failed during shutdown: %s", exc)
+                    _log.warning("PheromoneBoard shutdown 写入失败: %s", exc)
         self._executor.shutdown(wait=False)
 
     def clear(self) -> None:

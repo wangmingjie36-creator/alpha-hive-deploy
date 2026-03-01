@@ -719,20 +719,14 @@ def _upsert_sentiment(ticker: str, date_str: str, pct: int):
     import sqlite3 as _sq
     try:
         _init_sentiment_db()
-        conn = _sq.connect(str(_sentiment_db_path()))
-        conn.execute(
-            "INSERT OR REPLACE INTO sentiment_baseline (ticker, date, sentiment_pct) VALUES (?,?,?)",
-            (ticker, date_str, pct),
-        )
-        conn.commit()
-        conn.close()
-        # 清理 60 天以上的旧数据（保持 DB 精简）
-        conn = _sq.connect(str(_sentiment_db_path()))
-        conn.execute(
-            "DELETE FROM sentiment_baseline WHERE date < date('now', '-60 days')"
-        )
-        conn.commit()
-        conn.close()
+        with _sq.connect(str(_sentiment_db_path())) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sentiment_baseline (ticker, date, sentiment_pct) VALUES (?,?,?)",
+                (ticker, date_str, pct),
+            )
+            conn.execute(
+                "DELETE FROM sentiment_baseline WHERE date < date('now', '-60 days')"
+            )
     except (OSError, ValueError, TypeError) as _e:
         _log.debug("sentiment_baseline upsert error: %s", _e)
 
@@ -741,15 +735,14 @@ def _get_sentiment_baseline(ticker: str, days: int = 30) -> Optional[float]:
     """获取过去 N 天的平均情绪值（排除今日），无数据返回 None"""
     import sqlite3 as _sq
     try:
-        conn = _sq.connect(str(_sentiment_db_path()))
-        row = conn.execute(
-            f"SELECT AVG(sentiment_pct) FROM sentiment_baseline "
-            f"WHERE ticker=? AND date < date('now') AND date >= date('now', '-{days} days')",
-            (ticker,),
-        ).fetchone()
-        conn.close()
-        if row and row[0] is not None:
-            return float(row[0])
+        with _sq.connect(str(_sentiment_db_path())) as conn:
+            row = conn.execute(
+                f"SELECT AVG(sentiment_pct) FROM sentiment_baseline "
+                f"WHERE ticker=? AND date < date('now') AND date >= date('now', '-{days} days')",
+                (ticker,),
+            ).fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
     except (OSError, ValueError, TypeError) as _e:
         _log.debug("sentiment_baseline query error: %s", _e)
     return None

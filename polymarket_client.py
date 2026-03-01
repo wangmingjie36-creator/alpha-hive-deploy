@@ -55,27 +55,42 @@ class PolymarketClient:
         self._market_cache: Dict[str, Dict] = {}  # slug -> {data, ts}
 
     def _get(self, endpoint: str, params: Dict = None) -> Optional[Dict]:
-        """发送 GET 请求（带限流 + 熔断保护）"""
+        """发送 GET 请求（带限流 + 熔断 + 重试）"""
         if requests is None:
             return None
         if not polymarket_breaker.allow_request():
             _log.warning("Polymarket 熔断器已打开，跳过请求")
             return None
-        try:
-            polymarket_limiter.acquire()
-            resp = requests.get(
-                f"{GAMMA_BASE}{endpoint}",
-                params=params,
-                timeout=15,
-                headers={"Accept": "application/json"},
-            )
-            resp.raise_for_status()
-            polymarket_breaker.record_success()
-            return resp.json()
-        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
-            polymarket_breaker.record_failure()
-            _log.warning("Polymarket API 请求失败: %s", e)
-            return None
+        _max_retries = 2
+        for _attempt in range(_max_retries + 1):
+            try:
+                polymarket_limiter.acquire()
+                resp = requests.get(
+                    f"{GAMMA_BASE}{endpoint}",
+                    params=params,
+                    timeout=15,
+                    headers={"Accept": "application/json"},
+                )
+                if resp.status_code == 429:
+                    _wait = min(float(resp.headers.get("Retry-After", 2)), 10)
+                    _log.info("Polymarket 429，等待 %.1fs 重试 (%d/%d)", _wait, _attempt + 1, _max_retries)
+                    time.sleep(_wait)
+                    continue
+                resp.raise_for_status()
+                polymarket_breaker.record_success()
+                return resp.json()
+            except (ConnectionError, TimeoutError, OSError) as e:
+                if _attempt < _max_retries:
+                    time.sleep(1.0 * (_attempt + 1))
+                    continue
+                polymarket_breaker.record_failure()
+                _log.warning("Polymarket API 请求失败（重试耗尽）: %s", e)
+                return None
+            except ValueError as e:
+                _log.warning("Polymarket API 响应解析失败: %s", e)
+                return None
+        polymarket_breaker.record_failure()
+        return None
 
     def search_markets(self, query: str, limit: int = 20) -> List[Dict]:
         """
