@@ -141,7 +141,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 .nav-links{display:flex;gap:2px}
 .nav-link{padding:7px 12px;border-radius:6px;font-size:.85em;font-weight:500;
           color:rgba(255,255,255,.7);text-decoration:none;transition:all .2s}
-.nav-link:hover{background:rgba(244,165,50,.15);color:var(--acc)}
+.nav-link:hover,.nav-link.active{background:rgba(244,165,50,.15);color:var(--acc)}
+.nav-link.active{background:rgba(244,165,50,.22);color:var(--acc)}
 .dark-btn{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);
           color:#fff;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:.82em;transition:all .2s}
 .dark-btn:hover{background:rgba(244,165,50,.2);border-color:var(--acc)}
@@ -176,6 +177,12 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .hero-dbadge{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);
              color:#4ade80;padding:3px 12px;border-radius:12px;font-size:.8em;font-weight:700}
 .hero-right{flex-shrink:0;width:260px}
+@media(max-width:768px){.hero-inner{flex-direction:column-reverse;gap:16px;padding-bottom:20px}
+  .hero-right{width:160px;margin:0 auto}
+  .hero-stats{grid-template-columns:repeat(2,1fr)}
+  .hstat{padding:14px 10px}
+  .hstat-val{font-size:1.5em}
+}
 .hero-svg{width:100%;height:auto}
 @keyframes hive-float{0%,100%{transform:translateY(0) rotate(0deg)}50%{transform:translateY(-8px) rotate(2deg)}}
 @keyframes hex-pulse{0%,100%{opacity:.6}50%{opacity:1}}
@@ -200,7 +207,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 /* TOP 6 CARDS */
 .top6-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
 @media(max-width:1024px){.top6-grid{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:600px){.top6-grid{grid-template-columns:1fr}}
+@media(max-width:500px){.top6-grid{grid-template-columns:1fr}}
 .scard{border:1px solid var(--border);border-radius:13px;overflow:hidden;
        background:var(--surface2);transition:transform .2s,box-shadow .2s,border-color .2s;position:relative}
 .scard:hover{transform:translateY(-4px);box-shadow:0 12px 36px rgba(244,165,50,.14);border-color:var(--acc)}
@@ -3153,73 +3160,98 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
   }});
 }});
 
-// ── Charts ──
-document.addEventListener('DOMContentLoaded',function(){{
+// ── Active Nav (IntersectionObserver) ──
+(function(){{
+  var links=document.querySelectorAll('.nav-link[href^="#"]');
+  if(!links.length||!('IntersectionObserver' in window))return;
+  var ids=[].map.call(links,function(a){{return a.getAttribute('href').slice(1);}});
+  var obs=new IntersectionObserver(function(entries){{
+    entries.forEach(function(en){{
+      if(en.isIntersecting){{
+        links.forEach(function(l){{l.classList.remove('active');}});
+        var hit=[].find.call(links,function(l){{return l.getAttribute('href')==='#'+en.target.id;}});
+        if(hit)hit.classList.add('active');
+      }}
+    }});
+  }},{{rootMargin:'-40% 0px -55% 0px'}});
+  ids.forEach(function(id){{var el=document.getElementById(id);if(el)obs.observe(el);}});
+}})();
+
+// ── Charts (lazy via IntersectionObserver) ──
+(function(){{
   var dark=document.documentElement.classList.contains('dark');
   var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
   var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  var rendered={{}};
 
-  // F&G Gauge
-  var fgCtx=document.getElementById('fgChart');
-  if(fgCtx){{
-    var fv={_fv3};
-    var fc=fv<=25?'#ef4444':fv<=45?'#f97316':fv<=55?'#f59e0b':fv<=75?'#22c55e':'#16a34a';
-    var fl='{_fg_label}';
-    new Chart(fgCtx,{{
-      type:'doughnut',
-      data:{{datasets:[{{data:[fv,100-fv],backgroundColor:[fc,dark?'#2a3050':'#e8ecf3'],
-                         borderWidth:0,circumference:180,rotation:-90}}]}},
-      options:{{responsive:true,maintainAspectRatio:false,cutout:'72%',
-               plugins:{{legend:{{display:false}},tooltip:{{enabled:false}}}}}},
-      plugins:[{{id:'fgTxt',afterDraw:function(ch){{
-        var cx=ch.ctx,w=ch.width,h=ch.height;
-        cx.save();
-        cx.font='bold 26px system-ui';cx.fillStyle=fc;cx.textAlign='center';cx.textBaseline='middle';
-        cx.fillText(fv,w/2,h*.60);
-        cx.font='11px system-ui';cx.fillStyle=tc;cx.fillText(fl,w/2,h*.60+20);
-        cx.restore();
-      }}}}]
-    }});
+  function renderChart(id){{
+    if(rendered[id])return;
+    rendered[id]=true;
+
+    if(id==='fgChart'){{
+      var fgCtx=document.getElementById('fgChart');
+      if(!fgCtx)return;
+      var fv={_fv3};
+      var fc=fv<=25?'#ef4444':fv<=45?'#f97316':fv<=55?'#f59e0b':fv<=75?'#22c55e':'#16a34a';
+      var fl='{_fg_label}';
+      new Chart(fgCtx,{{
+        type:'doughnut',
+        data:{{datasets:[{{data:[fv,100-fv],backgroundColor:[fc,dark?'#2a3050':'#e8ecf3'],
+                           borderWidth:0,circumference:180,rotation:-90}}]}},
+        options:{{responsive:true,maintainAspectRatio:false,cutout:'72%',
+                 plugins:{{legend:{{display:false}},tooltip:{{enabled:false}}}}}},
+        plugins:[{{id:'fgTxt',afterDraw:function(ch){{
+          var cx=ch.ctx,w=ch.width,h=ch.height;
+          cx.save();
+          cx.font='bold 26px system-ui';cx.fillStyle=fc;cx.textAlign='center';cx.textBaseline='middle';
+          cx.fillText(fv,w/2,h*.60);
+          cx.font='11px system-ui';cx.fillStyle=tc;cx.fillText(fl,w/2,h*.60+20);
+          cx.restore();
+        }}}}]
+      }});
+    }}
+
+    if(id==='scoresChart'){{
+      var scCtx=document.getElementById('scoresChart');
+      if(!scCtx)return;
+      var sc={_scores_js};
+      var clrs=sc.map(function(x){{return x[1]>=7?'rgba(34,197,94,.85)':x[1]>=5.5?'rgba(245,158,11,.85)':'rgba(239,68,68,.85)';}});
+      new Chart(scCtx,{{
+        type:'bar',
+        data:{{labels:sc.map(function(x){{return x[0];}}),
+               datasets:[{{data:sc.map(function(x){{return x[1];}}),backgroundColor:clrs,borderRadius:5,borderSkipped:false}}]}},
+        options:{{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+                 plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:function(c){{return' '+c.raw+'/10';}}}}}}}},
+                 scales:{{
+                   x:{{min:0,max:10,grid:{{color:gc}},ticks:{{color:tc,font:{{size:10}}}}}},
+                   y:{{grid:{{display:false}},ticks:{{color:tc,font:{{size:10,weight:'bold'}}}}}}
+                 }}}}
+      }});
+    }}
+
+    if(id==='dirChart'){{
+      var dirCtx=document.getElementById('dirChart');
+      if(!dirCtx)return;
+      var dd={_dir_js};
+      new Chart(dirCtx,{{
+        type:'doughnut',
+        data:{{labels:['看多','看空','中性'],
+               datasets:[{{data:dd,
+                           backgroundColor:['rgba(34,197,94,.85)','rgba(239,68,68,.85)','rgba(245,158,11,.85)'],
+                           borderColor:[dark?'#141928':'#fff'],borderWidth:2}}]}},
+        options:{{responsive:true,maintainAspectRatio:false,cutout:'58%',
+                 plugins:{{legend:{{position:'bottom',labels:{{color:tc,font:{{size:10}},boxWidth:11,padding:10}}}},
+                           tooltip:{{callbacks:{{label:function(c){{return' '+c.label+': '+c.raw+' 只';}}}}}}}}}}
+      }});
+    }}
   }}
 
-  // Scores Bar
-  var scCtx=document.getElementById('scoresChart');
-  if(scCtx){{
-    var sc={_scores_js};
-    var clrs=sc.map(function(x){{return x[1]>=7?'rgba(34,197,94,.85)':x[1]>=5.5?'rgba(245,158,11,.85)':'rgba(239,68,68,.85)';}});
-    new Chart(scCtx,{{
-      type:'bar',
-      data:{{labels:sc.map(function(x){{return x[0];}}),
-             datasets:[{{data:sc.map(function(x){{return x[1];}}),backgroundColor:clrs,borderRadius:5,borderSkipped:false}}]}},
-      options:{{indexAxis:'y',responsive:true,maintainAspectRatio:false,
-               plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:function(c){{return' '+c.raw+'/10';}}}}}}}},
-               scales:{{
-                 x:{{min:0,max:10,grid:{{color:gc}},ticks:{{color:tc,font:{{size:10}}}}}},
-                 y:{{grid:{{display:false}},ticks:{{color:tc,font:{{size:10,weight:'bold'}}}}}}
-               }}}}
-    }});
-  }}
-
-  // Direction Donut
-  var dirCtx=document.getElementById('dirChart');
-  if(dirCtx){{
-    var dd={_dir_js};
-    new Chart(dirCtx,{{
-      type:'doughnut',
-      data:{{labels:['看多','看空','中性'],
-             datasets:[{{data:dd,
-                         backgroundColor:['rgba(34,197,94,.85)','rgba(239,68,68,.85)','rgba(245,158,11,.85)'],
-                         borderColor:[dark?'#141928':'#fff'],borderWidth:2}}]}},
-      options:{{responsive:true,maintainAspectRatio:false,cutout:'58%',
-               plugins:{{legend:{{position:'bottom',labels:{{color:tc,font:{{size:10}},boxWidth:11,padding:10}}}},
-                         tooltip:{{callbacks:{{label:function(c){{return' '+c.label+': '+c.raw+' 只';}}}}}}}}}}
-    }});
-  }}
-
-  // Radar per ticker
+  // Radar per ticker (lazy)
   var rd={_radar_js};
   var rl=['信号强度','催化剂','情绪','赔率','风险控制'];
-  Object.keys(rd).forEach(function(tk){{
+  function renderRadar(tk){{
+    if(rendered['radar-'+tk])return;
+    rendered['radar-'+tk]=true;
     var cv=document.getElementById('radar-'+tk);
     if(!cv)return;
     new Chart(cv,{{
@@ -3234,8 +3266,39 @@ document.addEventListener('DOMContentLoaded',function(){{
                             pointLabels:{{color:tc,font:{{size:8}}}}}}}},
                plugins:{{legend:{{display:false}}}}}}
     }});
+  }}
+
+  if(!('IntersectionObserver' in window)){{
+    // fallback: render all immediately
+    ['fgChart','scoresChart','dirChart'].forEach(renderChart);
+    Object.keys(rd).forEach(renderRadar);
+    return;
+  }}
+
+  var cobs=new IntersectionObserver(function(entries,observer){{
+    entries.forEach(function(en){{
+      if(!en.isIntersecting)return;
+      var el=en.target;
+      var id=el.id||el.getAttribute('data-chart-id');
+      if(id&&id.indexOf('radar-')===0){{
+        renderRadar(id.replace('radar-',''));
+      }}else if(id){{
+        renderChart(id);
+      }}
+      observer.unobserve(el);
+    }});
+  }},{{rootMargin:'200px 0px'}});
+
+  // Observe chart canvases
+  ['fgChart','scoresChart','dirChart'].forEach(function(cid){{
+    var el=document.getElementById(cid);
+    if(el)cobs.observe(el);
   }});
-}});
+  Object.keys(rd).forEach(function(tk){{
+    var el=document.getElementById('radar-'+tk);
+    if(el)cobs.observe(el);
+  }});
+}})();
 
 // ── Accuracy Direction Chart ──
 (function(){{
