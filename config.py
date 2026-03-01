@@ -639,6 +639,72 @@ LLM_CONFIG = {
     "fallback_on_budget": True,         # 超预算时降级到规则引擎
 }
 
+# ==================== Agent 评分阈值（提取自 swarm_agents.py）====================
+AGENT_SCORING = {
+    # ── 缓存 TTL ──
+    "yfinance_cache_ttl": 120,           # yfinance 数据缓存（秒）
+    "ticker_validity_ttl": 3600,         # ticker 有效性检查缓存（秒）
+    "penny_stock_threshold": 0.10,       # 极低价告警阈值（美元）
+
+    # ── ScoutBeeNova 权重 ──
+    "scout_insider_weight": 0.6,         # 内幕交易评分权重
+    "scout_crowding_weight": 0.4,        # 拥挤度评分权重
+    "scout_rss_boost": 0.5,              # RSS 新鲜 Form4 每份加分
+    "scout_min_insider_records": 2,      # insider 记录最少样本量
+
+    # ── OracleBeeEcho 权重 ──
+    "oracle_options_weight": 0.55,       # 期权信号权重
+    "oracle_poly_weight": 0.35,          # Polymarket 信号权重
+    "oracle_unusual_weight": 0.10,       # 异常流向权重
+
+    # ── BuzzBeeWhisper 7 通道权重 ──
+    "buzz_weights": {
+        "momentum": 0.20,
+        "volume": 0.10,
+        "volatility": 0.05,
+        "reddit": 0.25,
+        "news": 0.25,
+        "yahoo": 0.05,
+        "fear_greed": 0.10,
+    },
+
+    # ── BuzzBeeWhisper 信号阈值 ──
+    "volume_thresholds": {
+        "very_high": 2.0,    # > 2.0x → 80
+        "high": 1.5,         # > 1.5x → 65
+        "normal": 1.0,       # > 1.0x → 50
+        "low": 0.5,          # > 0.5x → 35
+    },
+    "volatility_thresholds": {
+        "extreme": 60,       # > 60% → 恐慌
+        "high": 40,          # > 40% → 紧张
+        "moderate": 20,      # > 20% → 正常
+    },
+
+    # ── 方向判断阈值 ──
+    "direction_bullish_min": 60,         # sentiment_composite > 60 → bullish
+    "direction_bearish_max": 40,         # sentiment_composite < 40 → bearish
+
+    # ── 拥挤度阈值 ──
+    "crowding_high": 70,                 # 拥挤度 > 70 → bearish
+    "crowding_low": 30,                  # 拥挤度 < 30 → bullish
+    "crowding_sell_neutral": 50,         # 卖出但拥挤度 < 50 → 计划性减持（neutral）
+
+    # ── 评分边界 ──
+    "score_min": 1.0,
+    "score_max": 10.0,
+}
+
+# ==================== Dashboard 颜色方案 ====================
+COLOR_SCHEME = {
+    "bullish": "#28a745",
+    "bearish": "#dc3545",
+    "neutral": "#ffc107",
+    "score_high_threshold": 7.0,         # >= 此值用 bullish 色
+    "score_low_threshold": 5.5,          # < 此值用 bearish 色
+}
+
+
 if __name__ == "__main__":
     init_cache()
     _log.info("配置已加载 | 标的 %d | 催化剂 %d | HOME=%s",

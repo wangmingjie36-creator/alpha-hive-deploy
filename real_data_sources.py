@@ -70,8 +70,8 @@ def _try_src_slack_alert(source: str, fail_count: int):
                 alert_message=f"*{source}* 已连续失败 {fail_count} 次，进入降级模式，数据质量受影响。",
                 severity="MEDIUM",
             )
-    except Exception:
-        pass
+    except Exception as _se:
+        _log.debug("Slack 数据源降级告警发送失败: %s", _se)
 
 
 def _st_throttle():

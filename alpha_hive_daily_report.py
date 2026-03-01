@@ -625,8 +625,8 @@ class AlphaHiveDailyReporter:
                     if _tk in swarm_results:
                         swarm_results[_tk]["thesis_break_l1"] = _l1
                         swarm_results[_tk]["thesis_break_l2"] = _l2
-        except Exception:
-            pass
+        except Exception as _tbe:
+            _log.warning("thesis_break 配置加载失败: %s", _tbe)
 
         # Phase 3 P2: 为高分机会添加日历提醒（后台线程池，退出时等待完成）
         if self.calendar and report.get('opportunities'):
@@ -1688,8 +1688,8 @@ class AlphaHiveDailyReporter:
                         real_price = float(_hist["Close"].iloc[-1])
                         if len(_hist) >= 2:
                             real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[-2] - 1) * 100
-                except Exception:
-                    pass
+                except Exception as _yfe:
+                    _log.debug("yfinance 价格获取失败 %s: %s", ticker, _yfe)
 
                 ticker_data = {
                     "ticker": ticker,
@@ -1806,8 +1806,8 @@ class AlphaHiveDailyReporter:
             from backtester import PredictionStore
             _ps = PredictionStore()
             _acc_stats = _ps.get_accuracy_stats(period="t7", days=90) or {}
-        except Exception:
-            pass
+        except Exception as _ace:
+            _log.debug("准确率统计加载失败: %s", _ace)
         _acc_total_checked = _acc_stats.get("total_checked", 0)
         _acc_overall       = _acc_stats.get("overall_accuracy", 0.0)
         _acc_avg_return    = _acc_stats.get("avg_return", 0.0)
@@ -2776,10 +2776,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
                         "has_md":   _Path(self.report_dir / f"alpha-hive-daily-{_hdate}.md").exists(),
                         "has_json": _Path(self.report_dir / f"alpha-hive-daily-{_hdate}.json").exists(),
                     })
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as _he:
+                    _log.debug("历史报告 %s 解析失败: %s", _hdate, _he)
+        except Exception as _hle:
+            _log.debug("历史时间线加载失败: %s", _hle)
 
         # 生成历史时间线 HTML
         _dir_icon = {"bullish": "🟢", "bearish": "🔴", "neutral": "🟡"}
@@ -2857,8 +2857,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
             import sqlite3 as _sq3
             with _sq3.connect(_ps2.db_path) as _conn:
                 _acc_pending = _conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
-        except Exception:
-            pass
+        except Exception as _dbe:
+            _log.debug("预测记录统计查询失败: %s", _dbe)
 
         # 准确率百分比（格式化）
         _acc_overall_pct = _acc_overall * 100

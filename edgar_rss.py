@@ -59,8 +59,8 @@ def _try_rss_slack_alert(fail_count: int):
                 alert_message=f"SEC EDGAR Form4 RSS 已连续失败 {fail_count} 次，实时内幕交易告警不可用。",
                 severity="MEDIUM",
             )
-    except Exception:
-        pass
+    except Exception as _se:
+        _log.debug("Slack RSS 降级告警发送失败: %s", _se)
 
 
 class EdgarRSSClient:

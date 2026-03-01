@@ -34,15 +34,43 @@ import threading as _threading
 from resilience import yfinance_limiter, yfinance_breaker
 from models import DataQualityChecker as _DQChecker
 
+# ── Agent 评分配置（从 config.py 读取，消除 magic numbers）──
+try:
+    from config import AGENT_SCORING as _AS
+except ImportError:
+    _AS = {}
+
+def _safe_score(value, default: float = 5.0, lo: float = 0.0, hi: float = 100.0, label: str = "") -> float:
+    """
+    验证数值安全性：非 None、非 NaN、在 [lo, hi] 范围内。
+    不满足条件时返回 default 并记录 debug 日志。
+    """
+    if value is None:
+        if label:
+            _log.debug("_safe_score: %s 为 None，使用默认值 %s", label, default)
+        return default
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        if label:
+            _log.debug("_safe_score: %s=%r 无法转为 float，使用默认值 %s", label, value, default)
+        return default
+    if math.isnan(f) or math.isinf(f):
+        if label:
+            _log.debug("_safe_score: %s=%r 为 NaN/Inf，使用默认值 %s", label, f, default)
+        return default
+    return max(lo, min(hi, f))
+
+
 _yf_cache: Dict[str, Dict] = {}
 _yf_cache_ts: Dict[str, float] = {}
 _yf_lock = _threading.Lock()
-_YF_CACHE_TTL = 120  # 缓存 2 分钟
+_YF_CACHE_TTL = _AS.get("yfinance_cache_ttl", 120)
 _YF_MAX_RETRIES = 2
 
 # ── Ticker 有效性缓存（退市/拆股检测，#18）──
 _ticker_validity: Dict[str, Dict] = {}
-_TICKER_VALIDITY_TTL = 3600  # 1 小时内不重复检查
+_TICKER_VALIDITY_TTL = _AS.get("ticker_validity_ttl", 3600)
 
 
 def check_ticker_validity(ticker: str) -> Dict:
@@ -339,7 +367,7 @@ class ScoutBeeNova(BeeAgent):
             try:
                 from sec_edgar import get_insider_trades
                 insider_data = get_insider_trades(ticker, days=90)
-                insider_score = insider_data.get("sentiment_score", 5.0)
+                insider_score = _safe_score(insider_data.get("sentiment_score"), 5.0, 0, 10, "insider_score")
                 insider_summary = insider_data.get("summary", "")
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.warning("ScoutBeeNova SEC data unavailable for %s: %s", ticker, e)
@@ -376,21 +404,26 @@ class ScoutBeeNova(BeeAgent):
             crowding_score, component_scores = detector.calculate_crowding_score(metrics)
             crowding_signal = max(1.0, 10.0 - crowding_score / 10.0)
 
-            # ---- 3. 综合评分：内幕交易 60% + 拥挤度 40% ----
-            score = insider_score * 0.6 + crowding_signal * 0.4
-            score = max(1.0, min(10.0, score))
+            # ---- 3. 综合评分：内幕交易 + 拥挤度 ----
+            _iw = _AS.get("scout_insider_weight", 0.6)
+            _cw = _AS.get("scout_crowding_weight", 0.4)
+            score = insider_score * _iw + crowding_signal * _cw
+            score = max(_AS.get("score_min", 1.0), min(_AS.get("score_max", 10.0), score))
 
             # 方向判断
+            _ch = _AS.get("crowding_high", 70)
+            _cl = _AS.get("crowding_low", 30)
+            _cn = _AS.get("crowding_sell_neutral", 50)
             if insider_data and insider_data.get("insider_sentiment") == "bullish":
                 direction = "bullish"
             elif insider_data and insider_data.get("insider_sentiment") == "bearish":
-                if crowding_score > 50:
+                if crowding_score > _cn:
                     direction = "bearish"
                 else:
                     direction = "neutral"  # 卖出但不拥挤，可能只是计划性减持
-            elif crowding_score > 70:
+            elif crowding_score > _ch:
                 direction = "bearish"
-            elif crowding_score < 30:
+            elif crowding_score < _cl:
                 direction = "bullish"
             else:
                 direction = "neutral"
@@ -517,7 +550,7 @@ class OracleBeeEcho(BeeAgent):
                 from options_analyzer import OptionsAgent
                 agent = OptionsAgent()
                 result = agent.analyze(ticker, stock_price=current_price)
-                options_score = result.get("options_score", 5.0)
+                options_score = _safe_score(result.get("options_score"), 5.0, 0, 10, "options_score")
                 signal_summary = result.get("signal_summary", "平衡")
             except (ImportError, ConnectionError, ValueError, KeyError, TypeError) as e:
                 _log.warning("OracleBeeEcho options unavailable for %s: %s", ticker, e)
@@ -529,7 +562,7 @@ class OracleBeeEcho(BeeAgent):
             try:
                 from polymarket_client import get_polymarket_odds
                 poly = get_polymarket_odds(ticker)
-                poly_score = poly.get("odds_score", 5.0)
+                poly_score = _safe_score(poly.get("odds_score"), 5.0, 0, 10, "poly_score")
                 poly_signal = poly.get("odds_signal", "")
                 poly_markets = poly.get("markets_found", 0)
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
@@ -554,8 +587,11 @@ class OracleBeeEcho(BeeAgent):
                 _log.debug("P2 unusual_options 不可用 %s: %s", ticker, e)
 
             # ---- 融合评分（期权 + Polymarket + 异常流）----
+            _ow = _AS.get("oracle_options_weight", 0.55)
+            _pw = _AS.get("oracle_poly_weight", 0.35)
+            _uw = _AS.get("oracle_unusual_weight", 0.10)
             if poly_markets > 0:
-                score = options_score * 0.55 + poly_score * 0.35 + 5.0 * 0.10
+                score = options_score * _ow + poly_score * _pw + 5.0 * _uw
             else:
                 score = options_score
             # 叠加异常流调整
@@ -730,8 +766,8 @@ def _check_sentiment_spike(ticker: str, current_pct: int, today: str) -> Optiona
                 alert_message=msg,
                 severity="HIGH" if abs(delta) >= 30 else "MEDIUM",
             )
-    except Exception:
-        pass
+    except Exception as _se:
+        _log.debug("Slack 情绪突变告警发送失败: %s", _se)
     return msg
 
 
@@ -761,26 +797,28 @@ class BuzzBeeWhisper(BeeAgent):
             momentum_pct = max(-10, min(10, stock["momentum_5d"]))
             momentum_sentiment = (momentum_pct + 10) / 20 * 100  # 0~100
 
-            # 2. 成交量异动（>1.5 倍 = 高关注）
+            # 2. 成交量异动（阈值从 config AGENT_SCORING 读取）
             vol_ratio = stock["volume_ratio"]
-            if vol_ratio > 2.0:
+            _vt = _AS.get("volume_thresholds", {})
+            if vol_ratio > _vt.get("very_high", 2.0):
                 volume_signal = 80
-            elif vol_ratio > 1.5:
+            elif vol_ratio > _vt.get("high", 1.5):
                 volume_signal = 65
-            elif vol_ratio > 1.0:
+            elif vol_ratio > _vt.get("normal", 1.0):
                 volume_signal = 50
-            elif vol_ratio > 0.5:
+            elif vol_ratio > _vt.get("low", 0.5):
                 volume_signal = 35
             else:
                 volume_signal = 20
 
             # 3. 波动率信号（高波动 = 恐惧，低波动 = 贪婪/稳定）
             vol20 = stock["volatility_20d"]
-            if vol20 > 60:
+            _vlt = _AS.get("volatility_thresholds", {})
+            if vol20 > _vlt.get("extreme", 60):
                 vol_sentiment = 25
-            elif vol20 > 40:
+            elif vol20 > _vlt.get("high", 40):
                 vol_sentiment = 40
-            elif vol20 > 20:
+            elif vol20 > _vlt.get("moderate", 20):
                 vol_sentiment = 60
             else:
                 vol_sentiment = 75
@@ -793,7 +831,7 @@ class BuzzBeeWhisper(BeeAgent):
                 from reddit_sentiment import get_reddit_sentiment
                 reddit_data = get_reddit_sentiment(ticker)
                 # 将 sentiment_score (1-10) 转为 0-100
-                reddit_signal = reddit_data["sentiment_score"] * 10
+                reddit_signal = _safe_score(reddit_data.get("sentiment_score"), 5.0, 0, 10, "reddit_score") * 10
                 buzz = reddit_data.get("reddit_buzz", "quiet")
                 mentions = reddit_data.get("mentions", 0)
                 rank = reddit_data.get("rank")
@@ -884,26 +922,27 @@ class BuzzBeeWhisper(BeeAgent):
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.debug("Fear & Greed unavailable: %s", e)
 
-            # 7 通道加权综合（全部免费无需注册）
+            # 7 通道加权综合（权重从 config AGENT_SCORING 读取）
+            _bw = _AS.get("buzz_weights", {})
             sentiment_composite = (
-                momentum_sentiment * 0.20 +
-                volume_signal      * 0.10 +
-                vol_sentiment      * 0.05 +
-                reddit_signal      * 0.25 +
-                news_signal        * 0.25 +
-                yahoo_signal       * 0.05 +
-                fg_signal          * 0.10
+                momentum_sentiment * _bw.get("momentum", 0.20) +
+                volume_signal      * _bw.get("volume", 0.10) +
+                vol_sentiment      * _bw.get("volatility", 0.05) +
+                reddit_signal      * _bw.get("reddit", 0.25) +
+                news_signal        * _bw.get("news", 0.25) +
+                yahoo_signal       * _bw.get("yahoo", 0.05) +
+                fg_signal          * _bw.get("fear_greed", 0.10)
             )
 
             # 转换为 0-10 分
             score = sentiment_composite / 10.0
-            score = max(1.0, min(10.0, score))
+            score = max(_AS.get("score_min", 1.0), min(_AS.get("score_max", 10.0), score))
 
             # 方向判定
             bullish_pct = int(sentiment_composite)
-            if sentiment_composite > 60:
+            if sentiment_composite > _AS.get("direction_bullish_min", 60):
                 direction = "bullish"
-            elif sentiment_composite < 40:
+            elif sentiment_composite < _AS.get("direction_bearish_max", 40):
                 direction = "bearish"
             else:
                 direction = "neutral"
@@ -1905,8 +1944,8 @@ class QueenDistiller:
         for r in valid_results:
             dim = r.get("dimension", "")
             if dim in self.DIMENSION_WEIGHTS:
-                dim_scores[dim] = r.get("score", 5.0)
-                dim_confidence[dim] = r.get("confidence", 0.5)
+                dim_scores[dim] = _safe_score(r.get("score"), 5.0, 0, 10, f"dim_{dim}")
+                dim_confidence[dim] = _safe_score(r.get("confidence"), 0.5, 0, 1.0, f"conf_{dim}")
 
         # 2.5 维度状态追踪（NA1：可视化哪些维度缺失及原因）
         dim_status: Dict[str, str] = {}    # present / absent / error
@@ -1964,7 +2003,7 @@ class QueenDistiller:
         # 6. 共振增强
         resonance = self.board.detect_resonance(ticker)
         if resonance["resonance_detected"]:
-            boost_pct = resonance["confidence_boost"]
+            boost_pct = _safe_score(resonance.get("confidence_boost"), 0.0, -50, 50, "resonance_boost")
             rule_score = adjusted_score * (1.0 + boost_pct / 100.0)
         else:
             rule_score = adjusted_score
@@ -2002,7 +2041,7 @@ class QueenDistiller:
         guard_penalty = 0.0
         guard_penalty_applied = False
         if guard_result is not None:
-            guard_score = guard_result.get("score", 5.0)
+            guard_score = _safe_score(guard_result.get("score"), 5.0, 0, 10, "guard_score")
             if guard_score < 4.0:
                 guard_penalty = round((4.0 - guard_score) / 4.0 * 0.8, 3)
                 pre_guard = rule_score
@@ -2150,6 +2189,7 @@ class QueenDistiller:
         # 40%:    factor = 0.75；0%: factor = 0.5（最大压缩，偏差减半）
         dq_penalty_applied = False
         quality_factor = 1.0
+        data_real_pct = _safe_score(data_real_pct, 50.0, 0, 100, "data_real_pct")
         if data_real_pct < 80.0:
             quality_factor = round(0.5 + 0.5 * (data_real_pct / 80.0), 3)
             pre_dq = final_score

@@ -154,8 +154,8 @@ class CodeExecutorAgent(BeeAgent):
                         }
                     }
 
-                except json.JSONDecodeError:
-                    pass
+                except json.JSONDecodeError as _jde:
+                    _log.warning("代码执行分析结果解析失败: %s", _jde)
 
             # 6. 如果分析失败，返回原始数据结果
             price = data.get("current_price")
