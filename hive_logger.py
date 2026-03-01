@@ -204,6 +204,36 @@ class SafeJSONEncoder(json.JSONEncoder):
         return obj
 
 
+# ==================== 可选模块注册表 ====================
+
+class FeatureRegistry:
+    """轻量级注册表：跟踪可选模块的加载状态，启动时一次性汇报"""
+
+    _features: dict = {}
+
+    @classmethod
+    def register(cls, name: str, available: bool, reason: str = ""):
+        """注册一个可选模块的加载状态"""
+        cls._features[name] = {"available": available, "reason": reason}
+
+    @classmethod
+    def summary(cls) -> dict:
+        """返回全部模块状态"""
+        return dict(cls._features)
+
+    @classmethod
+    def log_status(cls):
+        """一次性打印所有降级模块（仅 WARNING 级别）"""
+        degraded = {k: v for k, v in cls._features.items() if not v["available"]}
+        if degraded:
+            log = logging.getLogger("alpha_hive.features")
+            names = ", ".join(sorted(degraded.keys()))
+            log.warning("[FeatureRegistry] %d 个可选模块未加载: %s", len(degraded), names)
+            for name, info in sorted(degraded.items()):
+                log.info("  ↳ %s: %s", name, info.get("reason", "ImportError"))
+        return degraded
+
+
 def safe_json_dumps(data, **kwargs) -> str:
     """json.dumps 的安全版本，自动处理 NaN/Inf/datetime 等"""
     kwargs.setdefault("ensure_ascii", False)

@@ -343,6 +343,12 @@ class AlphaHiveDailyReporter:
         # Week 4: 设置 correlation_id 追踪本次扫描
         set_correlation_id(self._session_id or f"swarm_{self.date_str}")
         _log.info("蜂群协作启动 %s", self.date_str)
+        # 汇报可选模块降级状态
+        try:
+            from hive_logger import FeatureRegistry
+            FeatureRegistry.log_status()
+        except ImportError:
+            pass
 
         targets = focus_tickers or list(WATCHLIST.keys())[:10]
         _log.info("标的：%s", " ".join(targets))

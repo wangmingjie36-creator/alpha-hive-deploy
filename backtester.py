@@ -16,6 +16,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from hive_logger import PATHS, get_logger, FeatureRegistry
+
 try:
     import pandas as _pd
     from pandas.tseries.holiday import USFederalHolidayCalendar as _USCal
@@ -24,13 +26,15 @@ try:
     _BDAY_AVAILABLE = True
 except Exception:
     _BDAY_AVAILABLE = False
+FeatureRegistry.register("pandas_bday", _BDAY_AVAILABLE,
+                          "T+N 交易日计算降级为自然日" if not _BDAY_AVAILABLE else "")
 
 try:
     import yfinance as yf
 except ImportError:
     yf = None
-
-from hive_logger import PATHS, get_logger
+FeatureRegistry.register("yfinance", yf is not None,
+                          "回测/价格获取不可用" if yf is None else "")
 
 _log = get_logger("backtester")
 
@@ -184,8 +188,12 @@ class PredictionStore:
         days = days_map.get(period, 7)
         checked_col = f"checked_{period}"
 
-        # 目标日期：预测日 + N 天 <= 今天
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        # 目标日期：预测日 + N 个交易日 <= 今天（跳过周末和联邦假日）
+        if _BDAY_AVAILABLE:
+            cutoff_dt = _pd.Timestamp.now() - days * _US_BDAY
+            cutoff = cutoff_dt.strftime("%Y-%m-%d")
+        else:
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
         conn = None
         try:

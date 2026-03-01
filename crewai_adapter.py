@@ -22,7 +22,14 @@ try:
     CREWAI_AVAILABLE = True
 except (ImportError, TypeError) as e:
     CREWAI_AVAILABLE = False
-    print(f"⚠️ CrewAI 导入失败 (可能因 Python 版本不兼容): {type(e).__name__}")
+    _log.info("CrewAI 导入失败 (%s)，使用自研 Agent 调度", type(e).__name__)
+
+try:
+    from hive_logger import FeatureRegistry
+    FeatureRegistry.register("crewai", CREWAI_AVAILABLE,
+                              "CrewAI 多 Agent 调度不可用" if not CREWAI_AVAILABLE else "")
+except ImportError:
+    pass
     # 定义虚拟基类，使得代码不会因为缺少依赖而崩溃
     class BaseTool:
         pass

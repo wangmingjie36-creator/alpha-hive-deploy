@@ -296,18 +296,31 @@ def prefetch_shared_data(tickers: list, retriever=None) -> Dict:
     stock_data = {}
     contexts = {}
 
-    # 1. 批量预取 yfinance（串行但有全局缓存，只请求一次/ticker）
-    for t in tickers:
-        stock_data[t] = _fetch_stock_data(t)
+    # 1+2. 并行预取 yfinance + VectorMemory（I/O bound，并行比串行快 N 倍）
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+    _max_w = min(len(tickers), 8)
+    if _max_w > 0:
+        with ThreadPoolExecutor(max_workers=_max_w, thread_name_prefix="prefetch") as _pex:
+            # yfinance 并行
+            _yf_futs = {_pex.submit(_fetch_stock_data, t): t for t in tickers}
+            for fut in _as_completed(_yf_futs):
+                t = _yf_futs[fut]
+                try:
+                    stock_data[t] = fut.result(timeout=30)
+                except Exception as e:
+                    _log.debug("Prefetch yfinance failed for %s: %s", t, e)
+                    stock_data[t] = _fetch_stock_data(t)
 
-    # 2. 批量预取 VectorMemory 上下文（一次查询/ticker，而非 6 次）
-    if retriever and hasattr(retriever, 'get_context_for_agent'):
-        for t in tickers:
-            try:
-                contexts[t] = retriever.get_context_for_agent(t, "BeeAgent")
-            except (AttributeError, TypeError, ValueError) as e:
-                _log.debug("Prefetch context failed for %s: %s", t, e)
-                contexts[t] = ""
+            # VectorMemory 并行
+            if retriever and hasattr(retriever, 'get_context_for_agent'):
+                _vm_futs = {_pex.submit(retriever.get_context_for_agent, t, "BeeAgent"): t for t in tickers}
+                for fut in _as_completed(_vm_futs):
+                    t = _vm_futs[fut]
+                    try:
+                        contexts[t] = fut.result(timeout=10)
+                    except (AttributeError, TypeError, ValueError, Exception) as e:
+                        _log.debug("Prefetch context failed for %s: %s", t, e)
+                        contexts[t] = ""
 
     # 3. P5: 批量预取历史预测准确率（给所有 Agent 注入反馈上下文）
     try:

@@ -28,6 +28,13 @@ try:
 except ImportError:
     CHROMA_AVAILABLE = False
 
+try:
+    from hive_logger import FeatureRegistry
+    FeatureRegistry.register("chromadb", CHROMA_AVAILABLE,
+                              "语义向量记忆不可用，降级为 TF-IDF" if not CHROMA_AVAILABLE else "")
+except ImportError:
+    pass
+
 
 class VectorMemory:
     """

@@ -25,6 +25,13 @@ except ImportError:
     _opt_rl = None
     _opt_cb = None
 
+try:
+    from hive_logger import FeatureRegistry
+    FeatureRegistry.register("yfinance_options", yf is not None,
+                              "期权分析不可用" if yf is None else "")
+except ImportError:
+    pass
+
 
 class OptionsDataFetcher:
     """期权数据采集器 - 支持多源降级策略"""
