@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 from typing import Dict, List
 from statistics import mean, stdev
-from hive_logger import SafeJSONEncoder
+from hive_logger import SafeJSONEncoder, atomic_json_write
 
 _log = _logging.getLogger("alpha_hive.feedback_loop")
 
@@ -80,24 +80,23 @@ class ReportSnapshot:
         os.makedirs(directory, exist_ok=True)
         filename = os.path.join(directory, f"{self.report_id}.json")
 
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump({
-                "ticker": self.ticker,
-                "date": self.date,
-                "composite_score": self.composite_score,
-                "direction": self.direction,
-                "price_target": self.price_target,
-                "stop_loss": self.stop_loss,
-                "entry_price": self.entry_price,
-                "agent_votes": self.agent_votes,
-                "weights_used": self.weights_used,
-                "actual_prices": {
-                    "t1": self.actual_price_t1,
-                    "t7": self.actual_price_t7,
-                    "t30": self.actual_price_t30
-                },
-                "created_at": datetime.now().isoformat()
-            }, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
+        atomic_json_write(filename, {
+            "ticker": self.ticker,
+            "date": self.date,
+            "composite_score": self.composite_score,
+            "direction": self.direction,
+            "price_target": self.price_target,
+            "stop_loss": self.stop_loss,
+            "entry_price": self.entry_price,
+            "agent_votes": self.agent_votes,
+            "weights_used": self.weights_used,
+            "actual_prices": {
+                "t1": self.actual_price_t1,
+                "t7": self.actual_price_t7,
+                "t30": self.actual_price_t30
+            },
+            "created_at": datetime.now().isoformat()
+        }, indent=2, default=lambda o: SafeJSONEncoder().default(o))
 
         return filename
 

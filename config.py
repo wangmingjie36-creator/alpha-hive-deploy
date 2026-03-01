@@ -90,14 +90,17 @@ def get_secret(name: str) -> str:
     file_path = _SECRET_REGISTRY.get(name)
     if not file_path:
         return ""
-    expanded = _os.path.expanduser(file_path)
+    expanded = _os.path.realpath(_os.path.expanduser(file_path))
     try:
         st = _os.stat(expanded)
         if st.st_mode & 0o077:
             _log.warning("Secret file %s has insecure permissions, skipping", expanded)
             return ""
+        if st.st_size > 10240:
+            _log.warning("Secret file %s too large (%d bytes), skipping", expanded, st.st_size)
+            return ""
         with open(expanded) as f:
-            return f.read().strip()
+            return f.read(10240).strip()
     except (OSError, UnicodeDecodeError):
         return ""
 

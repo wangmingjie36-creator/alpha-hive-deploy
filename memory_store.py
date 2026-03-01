@@ -307,7 +307,7 @@ class MemoryStore:
                 "sample_count": row[0], "correct_count": row[1],
                 "avg_return": row[2] or 0.0, "min_return": row[3] or 0.0, "max_return": row[4] or 0.0
             }
-        except (sqlite3.Error, OSError) as e:
+        except (sqlite3.Error, OSError, ValueError) as e:
             _log.warning("get_agent_accuracy 失败: %s", e)
             return {"accuracy": 0.5, "sample_count": 0, "avg_return": 0.0}
         finally:

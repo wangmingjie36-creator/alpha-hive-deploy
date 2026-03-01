@@ -347,7 +347,7 @@ class PolymarketClient:
             except (json.JSONDecodeError, ValueError):
                 prices = []
         if isinstance(prices, list):
-            prices = [float(p) if p else 0.0 for p in prices]
+            prices = [float(p) if p else 0.0 for p in prices[:10]]
 
         return {
             "slug": raw.get("slug", ""),

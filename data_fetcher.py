@@ -477,7 +477,7 @@ class DataFetcher:
         """
         # ⭐ 优化 2：检查缓存（24 小时 TTL）
         cache_key = f"metrics_{ticker}_{datetime.now().strftime('%Y-%m-%d')}"
-        cached_data = self.cache.get(cache_key)
+        cached_data = self.cache.load(cache_key, ttl=self.api_cache_ttl)
         if cached_data:
             self.cache_hits += 1
             _log.info(f"✅ {ticker} 缓存命中（节省数据采集）")
@@ -516,7 +516,7 @@ class DataFetcher:
         _log.info(f"✅ 数据采集完成 {ticker} ({elapsed:.2f}秒)")
 
         # ⭐ 优化 2：保存到缓存（24 小时）
-        self.cache.set(cache_key, metrics, ttl=self.api_cache_ttl)
+        self.cache.save(cache_key, metrics)
 
         return metrics
 

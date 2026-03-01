@@ -92,12 +92,15 @@ class BeeAgentTool(BaseTool):
             else:
                 data = result
 
+            def _safe_default(obj):
+                _log.debug("JSON 序列化降级: %s -> str", type(obj).__name__)
+                return str(obj)
             return json.dumps({
                 "success": True,
                 "ticker": ticker,
                 "agent_name": self.bee_agent.__class__.__name__,
                 "data": data
-            }, ensure_ascii=False, default=str)
+            }, ensure_ascii=False, default=_safe_default)
 
         except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
             _log.error("BeeAgentTool._run failed for %s: %s", ticker, e, exc_info=True)

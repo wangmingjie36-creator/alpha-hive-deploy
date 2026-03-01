@@ -148,8 +148,10 @@ def call(
         _budget = _llm_cfg.get("daily_budget_usd", 1.0)
     except (ImportError, KeyError):
         _budget = 1.0
-    if _token_usage["total_cost_usd"] >= _budget:
-        _log.warning("LLM 每日预算已耗尽（$%.3f >= $%.2f），自动降级", _token_usage["total_cost_usd"], _budget)
+    with _lock:
+        _current_cost = _token_usage["total_cost_usd"]
+    if _current_cost >= _budget:
+        _log.warning("LLM 每日预算已耗尽（$%.3f >= $%.2f），自动降级", _current_cost, _budget)
         return None
 
     try:
