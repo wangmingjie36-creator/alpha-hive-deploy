@@ -145,7 +145,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 .dark-btn{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);
           color:#fff;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:.82em;transition:all .2s}
 .dark-btn:hover{background:rgba(244,165,50,.2);border-color:var(--acc)}
-@media(max-width:768px){.nav-links{display:none}}
+@media(max-width:768px){.nav-links{display:none}
+  .full-table th:nth-child(7),.full-table td:nth-child(7),
+  .full-table th:nth-child(8),.full-table td:nth-child(8),
+  .full-table th:nth-child(9),.full-table td:nth-child(9){display:none}
+}
+/* FOCUS & A11Y */
+button:focus-visible,a:focus-visible,input:focus-visible,
+th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px}
+.skip-link{position:absolute;top:-50px;left:0;z-index:9999;padding:8px 16px;
+  background:#000;color:#fff;font-size:.85em;border-radius:0 0 6px 0;transition:top .2s}
+.skip-link:focus{top:0}
 /* HERO */
 .hero{background:linear-gradient(135deg,#0A0F1C 0%,#141928 55%,#1a1040 100%);
       padding:calc(var(--nav-h) + 36px) 32px 0;position:relative;overflow:hidden}
@@ -280,7 +290,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
            border-radius:7px;font-size:.76em;font-weight:700;text-decoration:none}
 /* REPORT */
 .report-body{max-height:750px;overflow-y:auto;padding-right:8px;font-size:.88em;
-             line-height:1.8;color:var(--tp)}
+             line-height:1.8;color:var(--tp);position:relative}
+.report-body-wrap{position:relative}
+.report-body-wrap::after{content:'';position:sticky;bottom:0;display:block;
+  height:28px;background:linear-gradient(transparent,var(--surface));pointer-events:none}
+@media(max-width:768px){.report-body{max-height:none}
+  .report-body-wrap::after{display:none}}
 .report-body h1{font-size:1.35em;color:var(--acc2);border-bottom:2px solid var(--acc2);
                 padding-bottom:6px;margin:16px 0 8px}
 .report-body h2{font-size:1.1em;color:var(--acc2);border-left:4px solid var(--acc2);
@@ -2944,8 +2959,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 </style>
 </head>
 <body>
+<a href="#today" class="skip-link">跳转到主内容</a>
 <!-- ── Fixed Nav ── -->
-<nav class="nav">
+<nav class="nav" role="navigation" aria-label="主导航">
   <a href="#" class="nav-logo"><span class="px-bee"></span> Alpha Hive</a>
   <div class="nav-links">
     <a href="#today"   class="nav-link">今日简报</a>
@@ -2956,7 +2972,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
     <a href="#history" class="nav-link">📅 历史简报</a>
     <a href="#accuracy" class="nav-link">📈 准确率</a>
   </div>
-  <button class="dark-btn" id="darkBtn" onclick="toggleDark()">🌙 暗黑</button>
+  <button class="dark-btn" id="darkBtn" onclick="toggleDark()" aria-label="切换暗黑模式">🌙 暗黑</button>
 </nav>
 
 <!-- ── Hero Banner ── -->
@@ -3050,13 +3066,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   <div class="section" id="list">
     <div class="sec-title">完整机会清单</div>
     <div class="tbl-search-row">
-      <input class="tbl-search" id="tableSearch" type="text" placeholder="🔍 搜索标的..." oninput="filterTable()">
+      <label for="tableSearch" class="skip-link" style="position:absolute">搜索标的</label>
+      <input class="tbl-search" id="tableSearch" type="text" placeholder="🔍 搜索标的..." oninput="filterTable()" aria-label="搜索标的">
     </div>
     <div class="tbl-wrap">
       <table class="full-table" id="oppTable">
         <thead><tr>
-          <th>#</th><th>标的</th><th>方向</th><th>综合分</th><th>共振</th>
-          <th>投票(多/空/中)</th><th>IV Rank</th><th>P/C</th><th>看空强度</th><th>ML 详情</th>
+          <th aria-sort="none">#</th><th aria-sort="none">标的</th><th aria-sort="none">方向</th><th aria-sort="none">综合分</th><th aria-sort="none">共振</th>
+          <th aria-sort="none">投票(多/空/中)</th><th aria-sort="none">IV Rank</th><th aria-sort="none">P/C</th><th aria-sort="none">看空强度</th><th>ML 详情</th>
         </tr></thead>
         <tbody>{new_rows_html}</tbody>
       </table>
@@ -3072,7 +3089,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   <!-- ── Markdown Report ── -->
   <div class="section" id="report">
     <div class="sec-title">完整蜂群简报</div>
-    <div class="report-body">{_rpt_body}</div>
+    <div class="report-body-wrap"><div class="report-body">{_rpt_body}</div></div>
   </div>
 
   <!-- ── Historical Reports ── -->
@@ -3122,8 +3139,9 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
     var tbody=document.querySelector('#oppTable tbody');
     var rows=Array.from(tbody.rows).filter(function(r){{return r.style.display!=='none';}});
     var asc=th.getAttribute('data-sort')!=='asc';
-    document.querySelectorAll('#oppTable thead th').forEach(function(t){{t.removeAttribute('data-sort');}});
+    document.querySelectorAll('#oppTable thead th').forEach(function(t){{t.removeAttribute('data-sort');t.setAttribute('aria-sort','none');}});
     th.setAttribute('data-sort',asc?'asc':'desc');
+    th.setAttribute('aria-sort',asc?'ascending':'descending');
     rows.sort(function(a,b){{
       var av=a.cells[i].textContent.trim();
       var bv=b.cells[i].textContent.trim();
