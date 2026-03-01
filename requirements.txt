@@ -1,24 +1,24 @@
-# Alpha Hive - 核心依赖
-yfinance>=0.2.40
-requests>=2.31.0
-schedule>=1.2.0
-pandas>=2.1.0
+# Alpha Hive - 核心依赖（版本已锁定上限，防止破坏性更新）
+yfinance>=0.2.40,<0.3
+requests>=2.31.0,<3
+schedule>=1.2.0,<2
+pandas>=2.1.0,<3
 pytz>=2024.1
 
 # 可视化
-matplotlib>=3.8.0
-plotly>=5.17.0
-seaborn>=0.13.0
+matplotlib>=3.8.0,<4
+plotly>=5.17.0,<6
+seaborn>=0.13.0,<1
 
 # 数值计算
-numpy>=1.24.0
+numpy>=1.24.0,<2
 
 # HTML 解析（SEC EDGAR）
-beautifulsoup4>=4.12.0
+beautifulsoup4>=4.12.0,<5
 
 # ========== 可选依赖 ==========
 # LLM 服务（Claude API）
-# anthropic>=0.25.0
+# anthropic>=0.25.0,<1
 
 # 多 Agent 框架（CrewAI）
 # crewai>=0.1.0

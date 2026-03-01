@@ -22,9 +22,7 @@ _log = logging.getLogger("alpha_hive.calendar")
 class CalendarIntegrator:
     """Google Calendar 集成 - 催化剂同步 + 机会提醒"""
 
-    # 暂时使用 Gmail scope（Calendar API 验证问题）
-    # TODO: 在 Google Cloud Console 完成 Calendar API 配置后，改为：
-    # SCOPES = ['https://www.googleapis.com/auth/calendar']
+    # 使用 Gmail scope（Calendar API 需要 Google Cloud Console 额外配置）
     SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
     CREDENTIALS_FILE = os.environ.get(

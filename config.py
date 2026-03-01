@@ -57,6 +57,51 @@ API_KEYS = {
     },
 }
 
+# ==================== 集中 Key/Secret 管理 ====================
+
+# 注册表：env_var → 降级文件路径
+_SECRET_REGISTRY = {
+    "ANTHROPIC_API_KEY": "~/.anthropic_api_key",
+    "SLACK_WEBHOOK_URL": "~/.alpha_hive_slack_webhook",
+    "FRED_API_KEY": None,
+    "AV_API_KEY": None,
+    "ALPHA_VANTAGE_KEY": None,
+    "STOCKTWITS_TOKEN": None,
+    "GMAIL_APP_PASSWORD": None,
+    "TRADIER_API_KEY": "~/.alpha_hive_tradier_key",
+}
+
+
+def get_secret(name: str) -> str:
+    """
+    集中获取 API key / secret（优先环境变量 → 降级文件）
+
+    Args:
+        name: 注册表中的 key 名称（如 "ANTHROPIC_API_KEY"）
+    Returns:
+        key 值，未找到返回空字符串
+    """
+    import os as _os, stat as _stat
+    # 1. 环境变量优先
+    val = _os.environ.get(name, "").strip()
+    if val:
+        return val
+    # 2. 降级到文件
+    file_path = _SECRET_REGISTRY.get(name)
+    if not file_path:
+        return ""
+    expanded = _os.path.expanduser(file_path)
+    try:
+        st = _os.stat(expanded)
+        if st.st_mode & 0o077:
+            _log.warning("Secret file %s has insecure permissions, skipping", expanded)
+            return ""
+        with open(expanded) as f:
+            return f.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
 # ==================== 缓存配置 ====================
 CACHE_CONFIG = {
     "enabled": True,

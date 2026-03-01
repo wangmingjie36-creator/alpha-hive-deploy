@@ -20,8 +20,18 @@ from typing import Dict, List, Optional
 from pheromone_board import PheromoneBoard, PheromoneEntry
 import logging as _logging
 import math
+import re as _re
 
 _log = _logging.getLogger("alpha_hive.swarm")
+
+# 预编译正则表达式（#32 性能优化）
+_RE_TICKER = _re.compile(r'^[A-Z]{1,5}$')
+_RE_INSIDER_SELL = _re.compile(r'内幕卖出\s*\$?([\d,]+)')
+_RE_INSIDER_BUY = _re.compile(r'内幕买入\s*\$?([\d,]+)')
+_RE_PC_RATIO = _re.compile(r'P/C[:\s]*Ratio[:\s]*([\d.]+)')
+_RE_PC_SHORT = _re.compile(r'P/C[:\s]*([\d.]+)')
+_RE_IV_RANK = _re.compile(r'IV[:\s]*(?:Rank)?[:\s]*([\d.]+)')
+_RE_SENTIMENT = _re.compile(r'情绪\s*(\d+)%')
 
 
 # ==================== 工具函数 ====================
@@ -269,8 +279,7 @@ class BeeAgent(ABC):
 
     def _validate_ticker(self, ticker: str) -> Optional[Dict]:
         """验证 ticker 格式（1~5 大写字母，无特殊字符）；无效时返回标准错误结构"""
-        import re as _re
-        if not ticker or not _re.match(r'^[A-Z]{1,5}$', str(ticker).strip()):
+        if not ticker or not _RE_TICKER.match(str(ticker).strip()):
             _log.warning("%s.analyze() 收到无效 ticker: %r", self.__class__.__name__, ticker)
             return {
                 "error": "invalid_ticker",
@@ -1578,10 +1587,8 @@ class BearBeeContrarian(BeeAgent):
                 disc = scout_entry.discovery
                 data_sources["insider"] = "real"  # ScoutBee 真实 SEC 数据（经信息素板中转）
                 # 解析 ScoutBeeNova 的 discovery 文本提取内幕数据
-                import re
-                # 匹配 "内幕卖出 $150,000,000" 格式
-                sell_match = re.search(r'内幕卖出\s*\$?([\d,]+)', disc)
-                buy_match = re.search(r'内幕买入\s*\$?([\d,]+)', disc)
+                sell_match = _RE_INSIDER_SELL.search(disc)
+                buy_match = _RE_INSIDER_BUY.search(disc)
                 sold = int(sell_match.group(1).replace(',', '')) if sell_match else 0
                 bought = int(buy_match.group(1).replace(',', '')) if buy_match else 0
 
@@ -1678,12 +1685,10 @@ class BearBeeContrarian(BeeAgent):
             if oracle_entry and oracle_entry.discovery:
                 disc = oracle_entry.discovery
                 data_sources["options"] = "real"  # OracleBee 真实期权数据（经信息素板中转）
-                import re
-                # 解析 P/C Ratio、IV Rank 等
-                pc_match = re.search(r'P/C[:\s]*Ratio[:\s]*([\d.]+)', disc)
+                pc_match = _RE_PC_RATIO.search(disc)
                 if not pc_match:
-                    pc_match = re.search(r'P/C[:\s]*([\d.]+)', disc)
-                iv_match = re.search(r'IV[:\s]*(?:Rank)?[:\s]*([\d.]+)', disc)
+                    pc_match = _RE_PC_SHORT.search(disc)
+                iv_match = _RE_IV_RANK.search(disc)
 
                 pc_ratio = float(pc_match.group(1)) if pc_match else None
                 iv_rank = float(iv_match.group(1)) if iv_match else None
@@ -1780,9 +1785,7 @@ class BearBeeContrarian(BeeAgent):
             if buzz_entry and buzz_entry.discovery:
                 disc = buzz_entry.discovery
                 data_sources["news"] = "real"  # BuzzBee 真实情绪数据（经信息素板中转）
-                import re
-                # 解析 "情绪 42%" 或 "情绪 38%" 格式
-                sent_match = re.search(r'情绪\s*(\d+)%', disc)
+                sent_match = _RE_SENTIMENT.search(disc)
                 if sent_match:
                     sentiment_pct = int(sent_match.group(1))
                     if sentiment_pct < 30:

@@ -99,13 +99,7 @@ class DataFetcher:
             # 这里提供示例实现
             _log.info(f"🔄 获取 StockTwits 数据: {ticker}")
 
-            # 如果安装了 requests 库，可以这样做：
-            # import requests
-            # response = requests.get(
-            #     f"https://api.stocktwits.com/api/2/streams/symbols/{ticker}.json",
-            #     timeout=10
-            # )
-            # data = response.json()
+            # StockTwits API 实时路径已迁移到 stocktwits_sentiment.py
 
             # 暂时返回合理的示例数据
             metrics = {
@@ -146,13 +140,7 @@ class DataFetcher:
         try:
             _log.info(f"🔄 获取 Polymarket 赔率: {ticker}")
 
-            # 实际实现：调用 Polymarket CLOB API
-            # import requests
-            # response = requests.get(
-            #     "https://clob.polymarket.com/markets",
-            #     params={"tag": ticker},
-            #     timeout=10
-            # )
+            # Polymarket 实时路径已迁移到 polymarket_client.py
 
             # 示例数据
             odds_data = {
@@ -368,11 +356,7 @@ class DataFetcher:
         try:
             _log.info(f"🔄 获取 Seeking Alpha: {ticker}")
 
-            # 实际实现：爬取或调用 API
-            # import requests
-            # from bs4 import BeautifulSoup
-            # url = f"https://seekingalpha.com/symbol/{ticker}"
-            # response = requests.get(url)
+            # Seeking Alpha 爬取路径待实现（需要认证）
 
             data = self._get_sample_seeking_alpha(ticker)
             self.cache.save(cache_key, data)
