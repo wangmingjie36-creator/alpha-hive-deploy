@@ -1768,6 +1768,21 @@ class AlphaHiveDailyReporter:
         import html as _html
         from pathlib import Path as _Path
 
+        # --- 准确率数据加载 ---
+        _acc_stats = {}
+        try:
+            from backtester import PredictionStore
+            _ps = PredictionStore()
+            _acc_stats = _ps.get_accuracy_stats(period="t7", days=90) or {}
+        except Exception:
+            pass
+        _acc_total_checked = _acc_stats.get("total_checked", 0)
+        _acc_overall       = _acc_stats.get("overall_accuracy", 0.0)
+        _acc_avg_return    = _acc_stats.get("avg_return", 0.0)
+        _acc_correct       = _acc_stats.get("correct_count", 0)
+        _acc_by_dir        = _acc_stats.get("by_direction", {})
+        _acc_by_ticker     = _acc_stats.get("by_ticker", {})
+
         now_str = _dt.now().strftime("%Y-%m-%d %H:%M PST")
         date_str = self.date_str
         opps = report.get("opportunities", [])
@@ -2348,6 +2363,31 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   .hist-card{flex-direction:column;align-items:flex-start;gap:12px}
   .hist-right{justify-content:flex-start}
 }
+/* ── ACCURACY DASHBOARD ── */
+#accuracy{margin:32px 0}
+.acc-section-title{font-size:1.15em;font-weight:700;color:var(--tp);margin-bottom:16px;padding-bottom:6px;border-bottom:2px solid rgba(102,126,234,.2)}
+.acc-kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+.acc-kpi{background:var(--card);border-radius:12px;padding:16px 12px;text-align:center;border:1px solid rgba(102,126,234,.12)}
+.acc-kpi .kv{font-size:1.8em;font-weight:800;color:var(--tp)}
+.acc-kpi .kl{font-size:.75em;color:var(--ts);margin-top:2px}
+.acc-two-col{display:grid;grid-template-columns:1fr 1.6fr;gap:16px;margin-bottom:16px}
+.acc-dir-box,.acc-ticker-box{background:var(--card);border-radius:12px;padding:18px;border:1px solid rgba(102,126,234,.12)}
+.acc-box-title{font-size:.85em;font-weight:600;color:var(--ts);margin-bottom:12px}
+.acc-canvas-wrap{position:relative;height:140px}
+.acc-table{width:100%;border-collapse:collapse;font-size:.82em}
+.acc-table th{text-align:left;padding:6px 8px;color:var(--ts);font-weight:600;border-bottom:1px solid rgba(0,0,0,.08);cursor:pointer;user-select:none}
+.acc-table th::after{content:' ↕';opacity:.25;font-size:.7em}
+.acc-table th[data-sort="asc"]::after{content:' ↑';opacity:.8}
+.acc-table th[data-sort="desc"]::after{content:' ↓';opacity:.8}
+.acc-table td{padding:5px 8px;border-bottom:1px solid rgba(0,0,0,.05)}
+.acc-table tr:last-child td{border-bottom:none}
+.acc-pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:.75em;font-weight:600}
+.pill-green{background:#dcfce7;color:#15803d}
+.pill-red{background:#fee2e2;color:#b91c1c}
+.pill-gray{background:#f1f5f9;color:#64748b}
+.acc-cold{text-align:center;padding:40px 20px;color:var(--ts)}
+.acc-cold .cold-icon{font-size:2.5em;margin-bottom:8px}
+.acc-cold .cold-msg{font-size:.9em;line-height:1.6}
 """
 
         # ── Build new Top-6 cards ──
@@ -2562,6 +2602,99 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
         _avg_score_str = f"{_avg_score:.1f}"
         _fg_str2 = _fg_str  # already computed above
 
+        # ── 准确率 Dashboard 数据拼装 ──
+        import json as _json
+
+        # 方向图数据（JSON 格式，直接注入 JS）
+        _dir_map_acc = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
+        _acc_dir_labels_js = _json.dumps([_dir_map_acc.get(d, d) for d in ["bullish", "bearish", "neutral"]])
+        _acc_dir_accs_js   = _json.dumps([
+            round(_acc_by_dir.get(d, {}).get("accuracy", 0) * 100, 1)
+            for d in ["bullish", "bearish", "neutral"]
+        ])
+        _acc_dir_tots_js   = _json.dumps([
+            _acc_by_dir.get(d, {}).get("total", 0)
+            for d in ["bullish", "bearish", "neutral"]
+        ])
+
+        # 个股行表格
+        _acc_ticker_rows = ""
+        for _tk, _tv in sorted(_acc_by_ticker.items(), key=lambda x: -x[1].get("accuracy", 0)):
+            _tacc  = _tv.get("accuracy", 0)
+            _tpill = "pill-green" if _tacc >= 0.6 else ("pill-red" if _tacc < 0.4 else "pill-gray")
+            _tret  = _tv.get("avg_return", 0)
+            _tret_color = "#16a34a" if _tret > 0 else "#dc2626"
+            _acc_ticker_rows += (
+                f'<tr><td><strong>{_tk}</strong></td>'
+                f'<td>{_tv.get("total", 0)}</td>'
+                f'<td>{_tv.get("correct", 0)}</td>'
+                f'<td><span class="acc-pill {_tpill}">{_tacc*100:.0f}%</span></td>'
+                f'<td style="color:{_tret_color}">{_tret:+.1f}%</td></tr>'
+            )
+
+        # 冷启动：统计 pending 预测数（直接查真实 DB）
+        _acc_pending = 0
+        try:
+            from backtester import PredictionStore as _PS2
+            _ps2 = _PS2()
+            import sqlite3 as _sq3
+            with _sq3.connect(_ps2.db_path) as _conn:
+                _acc_pending = _conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0]
+        except Exception:
+            pass
+
+        # 准确率百分比（格式化）
+        _acc_overall_pct = _acc_overall * 100
+
+        # 生成准确率 HTML Section
+        if _acc_total_checked > 0:
+            _acc_section_html = f"""
+  <!-- ── Accuracy Dashboard ── -->
+  <div class="section" id="accuracy">
+    <div class="acc-section-title">📈 预测准确率追踪（T+7 验证）</div>
+    <div class="acc-kpi-row">
+      <div class="acc-kpi"><div class="kv">{_acc_overall_pct:.0f}%</div><div class="kl">综合准确率</div></div>
+      <div class="acc-kpi"><div class="kv">{_acc_total_checked}</div><div class="kl">已验证预测</div></div>
+      <div class="acc-kpi"><div class="kv">{_acc_correct}</div><div class="kl">预测正确数</div></div>
+      <div class="acc-kpi"><div class="kv">{_acc_avg_return:+.1f}%</div><div class="kl">平均收益率</div></div>
+    </div>
+    <div class="acc-two-col">
+      <div class="acc-dir-box">
+        <div class="acc-box-title">方向准确率分布</div>
+        <div class="acc-canvas-wrap"><canvas id="accDirChart"></canvas></div>
+      </div>
+      <div class="acc-ticker-box">
+        <div class="acc-box-title">个股准确率明细</div>
+        <table class="acc-table" id="accTickerTable">
+          <thead><tr>
+            <th>标的</th><th>预测数</th><th>正确数</th><th>准确率</th><th>均收益%</th>
+          </tr></thead>
+          <tbody>
+            {_acc_ticker_rows}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>"""
+        elif _acc_pending > 0:
+            _acc_section_html = f"""
+  <!-- ── Accuracy Dashboard (cold start) ── -->
+  <div class="section" id="accuracy">
+    <div class="acc-section-title">📈 预测准确率追踪（T+7 验证）</div>
+    <div class="acc-dir-box acc-cold">
+      <div class="cold-icon">🕐</div>
+      <div class="cold-msg">系统正在积累预测记录，准确率数据将在 T+7 后自动显示<br>
+      当前已保存 <strong>{_acc_pending}</strong> 条预测，等待价格验证中...</div>
+    </div>
+  </div>"""
+        else:
+            _acc_section_html = ""
+
+        # JS 数据（安全转义，用于 f-string 外注入）
+        _acc_dir_labels_js_safe = _acc_dir_labels_js
+        _acc_dir_accs_js_safe   = _acc_dir_accs_js
+        _acc_dir_tots_js_safe   = _acc_dir_tots_js
+
         return f"""<!DOCTYPE html>
 <html lang="zh-CN" class="">
 <head>
@@ -2584,6 +2717,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
     <a href="#deep"    class="nav-link">个股深度</a>
     <a href="#report"  class="nav-link">完整简报</a>
     <a href="#history" class="nav-link">📅 历史简报</a>
+    <a href="#accuracy" class="nav-link">📈 准确率</a>
   </div>
   <button class="dark-btn" id="darkBtn" onclick="toggleDark()">🌙 暗黑</button>
 </nav>
@@ -2698,6 +2832,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
     <div class="sec-title">📅 历史简报回溯</div>
     <div class="hist-list">{_hist_html}</div>
   </div>
+
+{_acc_section_html}
 </div>
 
 <footer class="footer">
@@ -2815,6 +2951,62 @@ document.addEventListener('DOMContentLoaded',function(){{
     }});
   }});
 }});
+
+// ── Accuracy Direction Chart ──
+(function(){{
+  var ctx = document.getElementById('accDirChart');
+  if (!ctx) return;
+  var dirs  = {_acc_dir_labels_js_safe};
+  var accs  = {_acc_dir_accs_js_safe};
+  var tots  = {_acc_dir_tots_js_safe};
+  new Chart(ctx, {{
+    type: 'bar',
+    data: {{
+      labels: dirs,
+      datasets: [{{
+        label: '准确率 %',
+        data: accs,
+        backgroundColor: ['#22c55e','#ef4444','#94a3b8'],
+        borderRadius: 6,
+        maxBarThickness: 40,
+      }}]
+    }},
+    options: {{
+      indexAxis: 'y',
+      responsive: true, maintainAspectRatio: false,
+      plugins: {{ legend: {{ display: false }}, tooltip: {{
+        callbacks: {{ label: function(c){{ return c.raw.toFixed(1)+'% ('+tots[c.dataIndex]+' 次)'; }} }}
+      }} }},
+      scales: {{
+        x: {{ min:0, max:100, ticks:{{ callback: function(v){{ return v+'%'; }} }} }},
+        y: {{ grid: {{ display: false }} }}
+      }}
+    }}
+  }});
+}})();
+
+// ── Accuracy Ticker Table Sort ──
+(function(){{
+  var tbl = document.getElementById('accTickerTable');
+  if (!tbl) return;
+  tbl.querySelectorAll('thead th').forEach(function(th, i){{
+    th.addEventListener('click', function(){{
+      var tbody = tbl.querySelector('tbody');
+      var rows  = Array.from(tbody.rows);
+      var asc   = th.getAttribute('data-sort') !== 'asc';
+      tbl.querySelectorAll('thead th').forEach(function(t){{ t.removeAttribute('data-sort'); }});
+      th.setAttribute('data-sort', asc ? 'asc' : 'desc');
+      rows.sort(function(a, b){{
+        var av = a.cells[i].textContent.trim();
+        var bv = b.cells[i].textContent.trim();
+        var an = parseFloat(av), bn = parseFloat(bv);
+        if (!isNaN(an) && !isNaN(bn)) return asc ? an - bn : bn - an;
+        return asc ? av.localeCompare(bv, 'zh') : bv.localeCompare(av, 'zh');
+      }});
+      rows.forEach(function(r){{ tbody.appendChild(r); }});
+    }});
+  }});
+}})();
 </script>
 </body>
 </html>"""
