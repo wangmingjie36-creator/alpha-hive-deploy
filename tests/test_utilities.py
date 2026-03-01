@@ -247,3 +247,79 @@ class TestSlackWebhookEnvVar:
         n = SlackNotifier()
         # Should fall through to file (which may or may not exist)
         assert n.webhook_url != ""  or n.webhook_url is None
+
+
+# ==================== ConfigLoader hot-reload (#22) ====================
+
+class TestConfigLoader:
+    def test_reload_no_file_returns_builtin(self):
+        from config import ConfigLoader
+        result = ConfigLoader.reload()
+        assert result["source"] == "builtin"
+        assert result["watchlist_count"] > 0
+
+    def test_reload_json_override(self, tmp_path, monkeypatch):
+        import config as _cfg
+        # Save originals to restore later
+        orig_wl = dict(_cfg.WATCHLIST)
+        orig_cat = dict(_cfg.CATALYSTS)
+        try:
+            override = tmp_path / "watchlist_override.json"
+            override.write_text(json.dumps({
+                "watchlist": {
+                    "TEST": {"name": "Test Corp", "sector": "Test", "monitor_events": ["earnings"]}
+                },
+                "catalysts": {
+                    "TEST": [{"event": "Q1 Earnings", "scheduled_date": "2026-06-01",
+                              "scheduled_time": "16:00", "time_zone": "US/Eastern"}]
+                }
+            }))
+            monkeypatch.setattr(_cfg.ConfigLoader, "_OVERRIDE_JSON", str(override))
+            monkeypatch.setattr(_cfg.ConfigLoader, "_OVERRIDE_YAML", str(tmp_path / "nope.yaml"))
+
+            result = _cfg.ConfigLoader.reload()
+            assert result["source"] == "watchlist_override.json"
+            assert _cfg.WATCHLIST == {"TEST": {"name": "Test Corp", "sector": "Test",
+                                               "monitor_events": ["earnings"]}}
+            assert "TEST" in _cfg.CATALYSTS
+        finally:
+            # Restore originals
+            _cfg.WATCHLIST.clear()
+            _cfg.WATCHLIST.update(orig_wl)
+            _cfg.CATALYSTS.clear()
+            _cfg.CATALYSTS.update(orig_cat)
+
+    def test_reload_if_changed_skips_when_unchanged(self, tmp_path, monkeypatch):
+        import config as _cfg
+        override = tmp_path / "watchlist_override.json"
+        override.write_text(json.dumps({"watchlist": {}}))
+        monkeypatch.setattr(_cfg.ConfigLoader, "_OVERRIDE_JSON", str(override))
+        monkeypatch.setattr(_cfg.ConfigLoader, "_OVERRIDE_YAML", str(tmp_path / "nope.yaml"))
+
+        # First call sets mtime
+        _cfg.ConfigLoader._last_mtime = os.path.getmtime(str(override))
+        # Second call should detect no change
+        assert _cfg.ConfigLoader.reload_if_changed() is False
+
+    def test_reload_if_changed_detects_update(self, tmp_path, monkeypatch):
+        import config as _cfg
+        orig_wl = dict(_cfg.WATCHLIST)
+        try:
+            override = tmp_path / "watchlist_override.json"
+            override.write_text(json.dumps({"watchlist": {"ZZZ": {
+                "name": "Zzz", "sector": "Test", "monitor_events": ["x"]}}}))
+            monkeypatch.setattr(_cfg.ConfigLoader, "_OVERRIDE_JSON", str(override))
+            monkeypatch.setattr(_cfg.ConfigLoader, "_OVERRIDE_YAML", str(tmp_path / "nope.yaml"))
+            _cfg.ConfigLoader._last_mtime = 0.0  # Force stale
+
+            assert _cfg.ConfigLoader.reload_if_changed() is True
+            assert "ZZZ" in _cfg.WATCHLIST
+        finally:
+            _cfg.WATCHLIST.clear()
+            _cfg.WATCHLIST.update(orig_wl)
+
+    def test_reload_convenience_function(self):
+        from config import reload_config
+        result = reload_config()
+        assert "watchlist_count" in result
+        assert "source" in result

@@ -1,9 +1,13 @@
 """
 🐝 Alpha Hive - 配置管理
 存储 API 密钥、数据源配置、缓存策略
+
+支持热更新：将 watchlist_override.yaml 放在项目目录下，
+调用 reload_config() 即可热加载 WATCHLIST/CATALYSTS，无需重启。
 """
 
 import os
+import threading
 
 from hive_logger import PATHS, get_logger
 
@@ -767,7 +771,111 @@ COLOR_SCHEME = {
 }
 
 
+# ==================== 配置热更新 ====================
+
+class ConfigLoader:
+    """支持从外部 YAML/JSON 文件热加载 WATCHLIST 和 CATALYSTS。
+
+    外部文件优先于内置 Python dict；文件不存在时保持内置值。
+    使用 .clear() + .update() 就地修改全局 dict，确保已有的
+    ``from config import WATCHLIST`` 引用自动获得新数据。
+    """
+
+    _OVERRIDE_YAML = str(PATHS.home / "watchlist_override.yaml")
+    _OVERRIDE_JSON = str(PATHS.home / "watchlist_override.json")
+    _last_mtime: float = 0.0
+    _lock = threading.Lock()
+
+    @classmethod
+    def _find_override_file(cls):
+        for path in (cls._OVERRIDE_YAML, cls._OVERRIDE_JSON):
+            if os.path.isfile(path):
+                return path
+        return None
+
+    @classmethod
+    def _load_file(cls, path: str) -> dict:
+        """加载 YAML 或 JSON 文件，返回原始 dict"""
+        if path.endswith((".yaml", ".yml")):
+            try:
+                import yaml
+            except ImportError:
+                _log.warning("watchlist_override.yaml 存在但 PyYAML 未安装，跳过热加载")
+                return {}
+            with open(path, encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        else:
+            import json
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+
+    @classmethod
+    def reload(cls) -> dict:
+        """热加载外部配置文件，就地更新 WATCHLIST 和 CATALYSTS。
+
+        Returns:
+            {"watchlist_count": int, "catalysts_count": int, "source": str}
+        """
+        with cls._lock:
+            path = cls._find_override_file()
+            if not path:
+                return {"watchlist_count": len(WATCHLIST),
+                        "catalysts_count": len(CATALYSTS),
+                        "source": "builtin"}
+            try:
+                mtime = os.path.getmtime(path)
+                data = cls._load_file(path)
+            except (OSError, ValueError) as exc:
+                _log.error("配置热加载失败 (%s): %s", path, exc)
+                return {"watchlist_count": len(WATCHLIST),
+                        "catalysts_count": len(CATALYSTS),
+                        "source": "builtin (load error)"}
+
+            new_wl = data.get("watchlist") or data.get("WATCHLIST") or {}
+            new_cat = data.get("catalysts") or data.get("CATALYSTS") or {}
+
+            if new_wl:
+                WATCHLIST.clear()
+                WATCHLIST.update(new_wl)
+                _log.info("WATCHLIST 热更新: %d 个标的 ← %s", len(WATCHLIST), path)
+            if new_cat:
+                CATALYSTS.clear()
+                CATALYSTS.update(new_cat)
+                _log.info("CATALYSTS 热更新: %d 个催化剂 ← %s", len(CATALYSTS), path)
+
+            cls._last_mtime = mtime
+            return {"watchlist_count": len(WATCHLIST),
+                    "catalysts_count": len(CATALYSTS),
+                    "source": os.path.basename(path)}
+
+    @classmethod
+    def reload_if_changed(cls) -> bool:
+        """仅当外部文件 mtime 变化时才重载（适合定期调用）。
+
+        Returns:
+            True 如果发生了重载
+        """
+        path = cls._find_override_file()
+        if not path:
+            return False
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return False
+        if mtime <= cls._last_mtime:
+            return False
+        cls.reload()
+        return True
+
+
+def reload_config() -> dict:
+    """便捷函数：热加载外部 WATCHLIST/CATALYSTS 配置"""
+    return ConfigLoader.reload()
+
+
 if __name__ == "__main__":
     init_cache()
-    _log.info("配置已加载 | 标的 %d | 催化剂 %d | HOME=%s",
-              len(WATCHLIST), sum(len(v) for v in CATALYSTS.values()), PATHS.home)
+    result = reload_config()
+    _log.info("配置已加载 | 标的 %d | 催化剂 %d | HOME=%s | source=%s",
+              len(WATCHLIST), sum(len(v) for v in CATALYSTS.values()),
+              PATHS.home, result["source"])
