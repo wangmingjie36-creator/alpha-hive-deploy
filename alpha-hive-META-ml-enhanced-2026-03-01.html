@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>META ML 增强分析 - Alpha Hive</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh; padding: 20px;
+        }
+        .container { max-width: 900px; margin: 0 auto; }
+        .header {
+            background: white; border-radius: 15px; padding: 35px;
+            margin-bottom: 25px; box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .header h1 { font-size: 2.2em; color: #667eea; margin-bottom: 8px; }
+        .header .rating {
+            display: inline-block; padding: 8px 25px; border-radius: 25px;
+            color: white; font-size: 1.3em; font-weight: bold;
+            background: #ffc107; margin: 10px 0;
+        }
+        .section {
+            background: white; border-radius: 12px; padding: 25px;
+            margin-bottom: 20px; box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+        }
+        .section h2 {
+            color: #667eea; font-size: 1.4em; margin-bottom: 18px;
+            padding-bottom: 10px; border-bottom: 2px solid #f0f0f0;
+        }
+        .section h3 { color: #555; margin: 15px 0 10px; font-size: 1.1em; }
+        .grid-4 {
+            display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px;
+        }
+        .grid-2 {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+        }
+        .stat {
+            text-align: center; padding: 15px; border-radius: 10px;
+            background: linear-gradient(135deg, #f8f9fa, #fff);
+            border: 1px solid #e8e8e8;
+        }
+        .stat .num { font-size: 1.8em; font-weight: bold; color: #667eea; }
+        .stat .lbl { font-size: 0.85em; color: #888; margin-top: 5px; }
+        .metric {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 0; border-bottom: 1px solid #f5f5f5;
+        }
+        .metric-label { color: #666; font-weight: 500; }
+        .metric-value { font-weight: bold; color: #333; }
+        table {
+            width: 100%; border-collapse: collapse; margin-top: 10px;
+        }
+        th, td {
+            padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee;
+        }
+        th {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white; font-weight: 600; font-size: 0.9em;
+        }
+        ul { padding-left: 20px; margin: 10px 0; }
+        li { margin: 6px 0; color: #444; line-height: 1.6; }
+        .footer {
+            text-align: center; color: rgba(255,255,255,0.85);
+            margin-top: 20px; font-size: 0.9em;
+        }
+        @media (max-width: 600px) {
+            .grid-4 { grid-template-columns: repeat(2, 1fr); }
+            .grid-2 { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <!-- 头部 -->
+    <div class="header">
+        <h1>META ML 增强分析</h1>
+        <div class="rating">HOLD - 观察等待</div>
+        <p style="color:#888; margin-top:10px;">
+            2026-03-01 00:56 | Alpha Hive
+        </p>
+    </div>
+
+    <!-- 核心指标 -->
+    <div class="section">
+        <h2>核心指标</h2>
+        <div class="grid-4">
+            <div class="stat">
+                <div class="num">52.2%</div>
+                <div class="lbl">综合胜率</div>
+            </div>
+            <div class="stat">
+                <div class="num">65.0%</div>
+                <div class="lbl">人工分析</div>
+            </div>
+            <div class="stat">
+                <div class="num">22.3%</div>
+                <div class="lbl">ML 预测</div>
+            </div>
+            <div class="stat">
+                <div class="num">2.00</div>
+                <div class="lbl">风险回报比</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 蜂群智能 -->
+    
+        <div class="section">
+            <h2>蜂群智能分析</h2>
+            <div style="text-align:center;margin-bottom:18px;">
+                <span style="font-size:2.5em;font-weight:bold;color:#28a745;">4.9</span>
+                <span style="font-size:1.2em;color:#888;">/10</span>
+                <div style="margin-top:6px;">
+                    <span style="background:#28a745;color:white;padding:4px 18px;border-radius:15px;font-weight:bold;">看多</span>
+                    
+                </div>
+                <div style="margin-top:8px;color:#888;font-size:0.9em;">投票：3多 / 0空 / 4中</div>
+            </div>
+            <table>
+                <tr><th>Agent</th><th>方向</th><th>评分</th><th>发现摘要</th></tr>
+                <tr>
+                <td><strong>聪明钱侦察</strong></td>
+                <td style="color:#888">中性</td>
+                <td>3.9</td>
+                <td style="font-size:0.85em;color:#555">内幕卖出 $54,249,805 | LI SUSAN J 卖出 55,702股 | 拥挤度 18/100（低拥挤度） | 动量 +1.7% | 历史5条:多5/空0,均分5.7</td>
+            </tr><tr>
+                <td><strong>期权 & 赔率</strong></td>
+                <td style="color:#28a745">看多</td>
+                <td>7.3</td>
+                <td style="font-size:0.85em;color:#555">做多气氛浓厚（P/C低） | 异常流:混合期权流 Call:66 Put:61 | $648.2 | 预测市场看多（隐含概率 96%） | 历史5条:多5/空0,均分5.7</td>
+            </tr><tr>
+                <td><strong>市场情绪</strong></td>
+                <td style="color:#888">中性</td>
+                <td>5.2</td>
+                <td style="font-size:0.85em;color:#555">情绪 51% | 动量 +1.7% | 量比 1.1x | Reddit #53(cooling,7提及) | 新闻偏多（6多/2空） | 未上 Yahoo 热搜 | F&G 14(Extreme Fear) | 历史5条:多5/空0,均分</td>
+            </tr><tr>
+                <td><strong>催化剂 & 时间线</strong></td>
+                <td style="color:#888">中性</td>
+                <td>6.3</td>
+                <td style="font-size:0.85em;color:#555">催化剂 3 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多5/空0,均分5.7</td>
+            </tr><tr>
+                <td><strong>竞争格局 / ML</strong></td>
+                <td style="color:#28a745">看多</td>
+                <td>1.6</td>
+                <td style="font-size:0.85em;color:#555">ML 胜率 16% | 7d +0.53% | 30d +0.74% | 历史5条:多5/空0,均分5.7</td>
+            </tr><tr>
+                <td><strong>交叉验证</strong></td>
+                <td style="color:#888">中性</td>
+                <td>4.8</td>
+                <td style="font-size:0.85em;color:#555">信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分5.7</td>
+            </tr><tr>
+                <td><strong>看空对冲</strong></td>
+                <td style="color:#28a745">看多</td>
+                <td>8.0</td>
+                <td style="font-size:0.85em;color:#555">内幕大额抛售 $54,249,805（买入仅 $0） | 历史5条:多5/空0,均分5.7</td>
+            </tr>
+            </table>
+            
+                <div style="margin-top:15px;padding:12px;background:#fff5f5;border-left:4px solid #dc3545;border-radius:4px;">
+                    <strong style="color:#dc3545;">看空对冲观点（看空强度 2.0/10）</strong>
+                    <ul style="margin:8px 0 0 15px;color:#555"><li>内幕大额抛售 $54,249,805（买入仅 $0）</li></ul>
+                </div>
+        </div>
+
+    <!-- 期权信号 -->
+    
+            <div class="section">
+                <h2>📈 期权信号分析</h2>
+
+                <div class="ml-section">
+                    <h3 style="color: #667eea; margin-bottom: 15px;">⚡ 核心指标</h3>
+
+                    <div class="metric">
+                        <span class="metric-label">IV Rank</span>
+                        <span class="metric-value" style="color: #28a745;">
+                            14.5 (低 IV)
+                        </span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">当前 IV</span>
+                        <span class="metric-value">34.23%</span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">IV 百分位数</span>
+                        <span class="metric-value">37.2%</span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">Put/Call Ratio</span>
+                        <span class="metric-value">0.68</span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">流向</span>
+                        <span class="metric-value" style="color: #28a745;">
+                            BULLISH
+                        </span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">Gamma Squeeze 风险</span>
+                        <span class="metric-value">MEDIUM</span>
+                    </div>
+
+                    <h3 style="color: #667eea; margin-top: 20px; margin-bottom: 15px;">📊 期权综合评分</h3>
+
+                    <div style="text-align: center; padding: 20px; background: #f8f9fa; border-radius: 10px;">
+                        <div style="font-size: 3.5em; font-weight: bold; color: #667eea; margin-bottom: 10px;">
+                            5.0
+                        </div>
+                        <div style="font-size: 1.2em; color: #333; margin-bottom: 10px;">/ 10.0</div>
+                        <div style="color: #666; font-size: 0.95em;">做多气氛浓厚（P/C低）</div>
+                    </div>
+
+                    <div style='margin-top: 15px;'><strong>异动信号：</strong><ul style='margin: 10px 0; padding-left: 20px;'><li>put_sweep @ $760.0 (成交量: 1,397.0)</li><li>put_sweep @ $765.0 (成交量: 1,050.0)</li><li>put_sweep @ $800.0 (成交量: 663.0)</li><li>put_sweep @ $780.0 (成交量: 370.0)</li><li>put_sweep @ $470.0 (成交量: 332.0)</li></ul></div>
+                    <div style='margin-top: 15px;'><strong>支撑位：</strong><ul style='margin: 10px 0; padding-left: 20px;'><li>$600.0 (OI: 9,101)</li><li>$650.0 (OI: 6,183)</li><li>$500.0 (OI: 5,597)</li></ul></div>
+                    <div style='margin-top: 15px;'><strong>阻力位：</strong><ul style='margin: 10px 0; padding-left: 20px;'><li>$700.0 (OI: 20,083)</li><li>$800.0 (OI: 12,356)</li><li>$750.0 (OI: 10,855)</li></ul></div>
+                </div>
+            </div>
+
+
+    <!-- 止损止盈 -->
+    
+            <div class="section">
+                <h2>止损 / 止盈位</h2>
+                <div class="grid-2">
+                    <div>
+                        <h3 style="color:#dc3545;">止损位</h3>
+                        <table><tr><td>conservative</td><td>$635.22</td></tr><tr><td>moderate</td><td>$615.77</td></tr><tr><td>aggressive</td><td>$596.33</td></tr></table>
+                    </div>
+                    <div>
+                        <h3 style="color:#28a745;">止盈位</h3>
+                        <table><tr><td>level_1</td><td>$687.07</td><td>+30%</td><td>33% | 锁定初步收益</td></tr><tr><td>level_2</td><td>$725.96</td><td>+60%</td><td>33% | 追踪止损，保护利润</td></tr><tr><td>level_3</td><td>$777.82</td><td>+20%</td><td>34% | 达到目标收益，全部清仓</td></tr></table>
+                    </div>
+                </div>
+                <p style="margin-top:15px;">最佳持仓周期：<strong>数据不足</strong></p>
+            </div>
+
+    <!-- 投资建议 -->
+    
+
+    <!-- ML 特征 -->
+    
+
+    <!-- 免责声明 -->
+    <div class="section" style="background:#fff3cd; border:1px solid #ffc107;">
+        <p style="color:#856404; font-size:0.9em;">
+            <strong>免责声明</strong>：本报告为 AI 自动生成，不构成投资建议。
+            所有交易决策需自行判断和风控。预测存在误差，过往表现不代表未来收益。
+        </p>
+    </div>
+
+    <div class="footer">
+        <p><a href="index.html" style="color:white;">返回仪表板</a></p>
+    </div>
+</div>
+</body>
+</html>

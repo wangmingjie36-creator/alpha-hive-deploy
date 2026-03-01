@@ -239,13 +239,50 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 .acc-cold{text-align:center;padding:40px 20px;color:var(--ts)}
 .acc-cold .cold-icon{font-size:2.5em;margin-bottom:8px}
 .acc-cold .cold-msg{font-size:.9em;line-height:1.6}
+.thesis-break-box{margin-top:10px;padding:10px;border-radius:8px;
+  background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.18)}
+.tb-title{font-size:.78em;font-weight:700;color:#dc2626;margin-bottom:6px}
+.tb-level{font-size:.72em;font-weight:600;padding:2px 6px;border-radius:4px;
+  display:inline-block;margin-bottom:4px}
+.tb-l1{background:rgba(245,158,11,.15);color:#b45309}
+.tb-l2{background:rgba(239,68,68,.15);color:#b91c1c}
+.tb-list{padding-left:14px;margin:0 0 6px}
+.tb-list li{font-size:.74em;color:var(--ts);margin-bottom:2px;line-height:1.4}
+.rss-badge{display:inline-block;padding:2px 7px;border-radius:5px;font-size:.72em;
+  font-weight:700;background:rgba(239,68,68,.12);color:#b91c1c;margin-left:6px}
+/* DIMENSION MINI-BARS */
+.dim-bars{display:flex;gap:3px;align-items:flex-end;height:38px;margin:8px 0 4px;padding:0 2px}
+.dim-b-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;height:100%}
+.dim-b{width:100%;min-height:3px;border-radius:2px 2px 0 0;transition:height .4s}
+.dim-lbl{font-size:.58em;color:var(--ts);line-height:1;text-align:center}
+/* TABLE SORT */
+.full-table th{cursor:pointer;user-select:none}
+.full-table th::after{content:' ↕';font-size:.7em;opacity:.25}
+.full-table th[data-sort="asc"]::after{content:' ↑';opacity:.8}
+.full-table th[data-sort="desc"]::after{content:' ↓';opacity:.8}
+/* DIM DATA QUALITY BARS (#3) */
+.dim-dq-row{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;padding:6px 0 2px;
+  border-top:1px solid rgba(0,0,0,.06)}
+.dq-item{display:flex;align-items:center;gap:3px;flex:1 0 30%}
+.dq-lbl{font-size:.65em;color:#888;min-width:22px}
+.dq-bar{flex:1;height:5px;border-radius:3px;background:#eee;overflow:hidden}
+.dq-fill{height:100%;border-radius:3px;transition:width .4s}
+.dq-val{font-size:.65em;color:#666;min-width:28px;text-align:right}
+/* PIXEL BEE ICON */
+.px-bee{display:inline-block;width:1.2em;height:1.2em;vertical-align:middle;
+  background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23F4A532'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3C/svg%3E") no-repeat center/contain;
+  image-rendering:pixelated}
+.px-bee-lg{display:block;width:48px;height:48px;margin:0 auto}
+.px-bee-hero{display:inline-block;width:40px;height:40px;vertical-align:middle;
+  background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23F4A532'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3C/svg%3E") no-repeat center/contain;
+  image-rendering:pixelated}
 
 </style>
 </head>
 <body>
 <!-- ── Fixed Nav ── -->
 <nav class="nav">
-  <a href="#" class="nav-logo">🐝 Alpha Hive</a>
+  <a href="#" class="nav-logo"><span class="px-bee"></span> Alpha Hive</a>
   <div class="nav-links">
     <a href="#today"   class="nav-link">今日简报</a>
     <a href="#charts"  class="nav-link">图表</a>
@@ -262,18 +299,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 <section class="hero">
   <div class="hero-inner">
     <div class="hero-left">
-      <div class="hero-badge">🐝 Alpha Hive Intelligence · 蜂群驱动</div>
+      <div class="hero-badge"><span class="px-bee"></span> Alpha Hive Intelligence · 蜂群驱动</div>
       <h1 class="hero-title">去中心化<span>蜂群智能</span><br>投资研究平台</h1>
-      <p class="hero-sub">7 自治工蜂协作 · SEC EDGAR 真实数据 · 每日自动扫描</p>
+      <p class="hero-sub">8 自治工蜂协作 · SEC EDGAR 真实数据 · 每日自动扫描</p>
       <div class="hero-meta">
-        <span class="hero-time">🕐 2026-02-28 20:39 PST</span>
-        <span class="hero-dbadge">📊 数据真实度 82%</span>
+        <span class="hero-time">🕐 2026-03-01 00:56 PST</span>
+        <span class="hero-dbadge">📊 数据真实度 95%</span>
       </div>
     </div>
     <div class="hero-right">
       <svg class="hero-svg hive-anim" viewBox="0 0 280 260" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <path id="orb-i" d="M 215,101 A 75,45 0 1 0 65,101 A 75,45 0 1 0 215,101"/>
+          <path id="orb-o" d="M 238,112 A 98,56 0 1 0 42,112 A 98,56 0 1 0 238,112"/>
+        </defs>
         <polygon points="140,55 180,78 180,124 140,147 100,124 100,78" fill="#F4A532" opacity=".9"/>
-        <text x="140" y="112" text-anchor="middle" font-size="40" fill="white">🐝</text>
+        <foreignObject x="96" y="72" width="88" height="88"><div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><span class="px-bee-hero"></span></div></foreignObject>
         <polygon class="hex-p" points="140,5 170,22 170,57 140,74 110,57 110,22" fill="none" stroke="#F4A532" stroke-width="1.5" opacity=".55" style="animation-delay:.3s"/>
         <polygon class="hex-p" points="190,32 220,49 220,84 190,101 160,84 160,49" fill="rgba(244,165,50,.12)" stroke="#F4A532" stroke-width="1" opacity=".5" style="animation-delay:.7s"/>
         <polygon class="hex-p" points="190,107 220,124 220,159 190,176 160,159 160,124" fill="rgba(102,126,234,.18)" stroke="#667eea" stroke-width="1" opacity=".45" style="animation-delay:1.1s"/>
@@ -282,25 +323,32 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
         <polygon class="hex-p" points="90,182 120,199 120,234 90,251 60,234 60,199" fill="none" stroke="#667eea" stroke-width="1" opacity=".35" style="animation-delay:2.3s"/>
         <polygon class="hex-p" points="90,107 120,124 120,159 90,176 60,159 60,124" fill="rgba(102,126,234,.13)" stroke="#667eea" stroke-width="1" opacity=".45" style="animation-delay:2.7s"/>
         <polygon class="hex-p" points="90,32 120,49 120,84 90,101 60,84 60,49" fill="none" stroke="#764ba2" stroke-width="1" opacity=".35" style="animation-delay:3.1s"/>
+        <!-- Orbit rings -->
+        <ellipse cx="140" cy="101" rx="75" ry="45" fill="none" stroke="#F4A532" stroke-width="0.7" stroke-dasharray="3,6" opacity="0.25"/>
+        <ellipse cx="140" cy="112" rx="98" ry="56" fill="none" stroke="#667eea" stroke-width="0.7" stroke-dasharray="3,8" opacity="0.18"/>
+        <!-- Orbiting bees (animateMotion along ellipse paths) -->
+        <g><circle r="5.5" fill="#F4A532" opacity="0.9"/><circle r="2.8" fill="#fff8e7" opacity="0.75"/><animateMotion dur="9s" repeatCount="indefinite" begin="0s"><mpath href="#orb-i"/></animateMotion></g>
+        <g><circle r="4.8" fill="#fbbf24" opacity="0.85"/><circle r="2.4" fill="#fff8e7" opacity="0.65"/><animateMotion dur="9s" repeatCount="indefinite" begin="-4.5s"><mpath href="#orb-i"/></animateMotion></g>
+        <g><circle r="5" fill="#667eea" opacity="0.85"/><circle r="2.5" fill="#c7d2fe" opacity="0.7"/><animateMotion dur="14s" repeatCount="indefinite" begin="-5s"><mpath href="#orb-o"/></animateMotion></g>
       </svg>
     </div>
   </div>
   <!-- Stats Row -->
   <div class="hero-stats">
     <div class="hstat">
-      <div class="hstat-val">7</div>
+      <div class="hstat-val">1</div>
       <div class="hstat-lbl">共振信号</div>
     </div>
     <div class="hstat">
-      <div class="hstat-val" style="color:#dc3545">11</div>
+      <div class="hstat-val" style="color:#dc3545">14</div>
       <div class="hstat-lbl">Fear & Greed</div>
     </div>
     <div class="hstat">
-      <div class="hstat-val">5</div>
+      <div class="hstat-val">9</div>
       <div class="hstat-lbl">扫描标的</div>
     </div>
     <div class="hstat">
-      <div class="hstat-val">5.4</div>
+      <div class="hstat-val">5.0</div>
       <div class="hstat-lbl">平均综合分</div>
     </div>
   </div>
@@ -326,26 +374,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
                     <div class="sbar"><div class="sbar-fill fill-h" style="width:76%"></div></div>
                   </div>
                 </div>
+                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:87%;background:#22c55e"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:63%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:50%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:89%;background:#22c55e"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
                 <div class="sinsight">内幕买入 $1,986,750</div>
-                <span style="font-size:.75em;color:var(--ts);">ML 报告生成中</span>
+                <a href="alpha-hive-MSFT-ml-enhanced-2026-03-01.html" class="ml-btn">ML 详情 →</a>
               </div>
             </div>
             <div class="scard">
               <div class="scard-head">
-                <div class="slogo-wrap"><div class="slogo-fb">QC</div><span class="srank">#2</span></div>
+                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/bilibili.com" alt="BILI" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">BI</div><span class="srank">#2</span></div>
                 <span class="sdir sdir-bull">🟢 看多</span>
               </div>
               <div class="scard-body">
-                <div class="sticker">QCOM</div>
+                <div class="sticker">BILI</div>
                 <div class="score-row">
-                  <span class="score-big sc-m">6.1</span>
+                  <span class="score-big sc-l">5.4</span>
                   <div class="sbar-wrap">
                     <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                    <div class="sbar"><div class="sbar-fill fill-m" style="width:61%"></div></div>
+                    <div class="sbar"><div class="sbar-fill fill-l" style="width:54%"></div></div>
                   </div>
                 </div>
-                <div class="sinsight">内幕卖出 $3,672,555</div>
-                <span style="font-size:.75em;color:var(--ts);">ML 报告生成中</span>
+                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:61%;background:#f59e0b"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:74%;background:#22c55e"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:43%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:60%;background:#f59e0b"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
+                <div class="sinsight">无近期内幕交易</div>
+                <a href="alpha-hive-BILI-ml-enhanced-2026-03-01.html" class="ml-btn">ML 详情 →</a>
               </div>
             </div>
             <div class="scard">
@@ -356,68 +406,72 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
               <div class="scard-body">
                 <div class="sticker">META</div>
                 <div class="score-row">
-                  <span class="score-big sc-m">5.9</span>
+                  <span class="score-big sc-l">4.9</span>
                   <div class="sbar-wrap">
                     <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                    <div class="sbar"><div class="sbar-fill fill-m" style="width:59%"></div></div>
+                    <div class="sbar"><div class="sbar-fill fill-l" style="width:49%"></div></div>
                   </div>
                 </div>
+                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:38%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:63%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:51%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:73%;background:#22c55e"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
                 <div class="sinsight">内幕卖出 $54,249,805</div>
-                <span style="font-size:.75em;color:var(--ts);">ML 报告生成中</span>
+                <a href="alpha-hive-META-ml-enhanced-2026-03-01.html" class="ml-btn">ML 详情 →</a>
               </div>
             </div>
             <div class="scard">
               <div class="scard-head">
-                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/bilibili.com" alt="BILI" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">BI</div><span class="srank">#4</span></div>
-                <span class="sdir sdir-bull">🟢 看多</span>
-              </div>
-              <div class="scard-body">
-                <div class="sticker">BILI</div>
-                <div class="score-row">
-                  <span class="score-big sc-m">5.8</span>
-                  <div class="sbar-wrap">
-                    <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                    <div class="sbar"><div class="sbar-fill fill-m" style="width:58%"></div></div>
-                  </div>
-                </div>
-                <div class="sinsight">无近期内幕交易</div>
-                <span style="font-size:.75em;color:var(--ts);">ML 报告生成中</span>
-              </div>
-            </div>
-            <div class="scard">
-              <div class="scard-head">
-                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/amazon.com" alt="AMZN" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">AM</div><span class="srank">#5</span></div>
+                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/amazon.com" alt="AMZN" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">AM</div><span class="srank">#4</span></div>
                 <span class="sdir sdir-bull">🟢 看多</span>
               </div>
               <div class="scard-body">
                 <div class="sticker">AMZN</div>
                 <div class="score-row">
-                  <span class="score-big sc-m">5.6</span>
+                  <span class="score-big sc-l">4.9</span>
                   <div class="sbar-wrap">
                     <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                    <div class="sbar"><div class="sbar-fill fill-m" style="width:56%"></div></div>
+                    <div class="sbar"><div class="sbar-fill fill-l" style="width:49%"></div></div>
                   </div>
                 </div>
+                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:36%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:55%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:47%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:81%;background:#22c55e"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
                 <div class="sinsight">内幕卖出 $14,459,993</div>
-                <span style="font-size:.75em;color:var(--ts);">ML 报告生成中</span>
+                <a href="alpha-hive-AMZN-ml-enhanced-2026-03-01.html" class="ml-btn">ML 详情 →</a>
               </div>
             </div>
             <div class="scard">
               <div class="scard-head">
-                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/rocketlabusa.com" alt="RKLB" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">RK</div><span class="srank">#6</span></div>
+                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/vikingtherapeutics.com" alt="VKTX" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">VK</div><span class="srank">#5</span></div>
                 <span class="sdir sdir-neut">🟡 中性</span>
               </div>
               <div class="scard-body">
-                <div class="sticker">RKLB</div>
+                <div class="sticker">VKTX</div>
+                <div class="score-row">
+                  <span class="score-big sc-l">4.8</span>
+                  <div class="sbar-wrap">
+                    <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
+                    <div class="sbar"><div class="sbar-fill fill-l" style="width:48%"></div></div>
+                  </div>
+                </div>
+                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:39%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:55%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:78%;background:#22c55e"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
+                <div class="sinsight">内幕卖出 $12,052,190</div>
+                <a href="alpha-hive-VKTX-ml-enhanced-2026-03-01.html" class="ml-btn">ML 详情 →</a>
+              </div>
+            </div>
+            <div class="scard">
+              <div class="scard-head">
+                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/nvidia.com" alt="NVDA" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">NV</div><span class="srank">#6</span></div>
+                <span class="sdir sdir-bull">🟢 看多</span>
+              </div>
+              <div class="scard-body">
+                <div class="sticker">NVDA</div>
                 <div class="score-row">
                   <span class="score-big sc-l">4.2</span>
                   <div class="sbar-wrap">
                     <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                    <div class="sbar"><div class="sbar-fill fill-l" style="width:42%"></div></div>
+                    <div class="sbar"><div class="sbar-fill fill-l" style="width:41%"></div></div>
                   </div>
                 </div>
-                <div class="sinsight">内幕卖出 $124,636,378</div>
-                <span style="font-size:.75em;color:var(--ts);">ML 报告生成中</span>
+                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:26%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:68%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:59%;background:#f59e0b"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:38%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
+                <div class="sinsight">内幕卖出 $150,452,443</div>
+                <a href="alpha-hive-NVDA-ml-enhanced-2026-03-01.html" class="ml-btn">ML 详情 →</a>
               </div>
             </div>
     </div>
@@ -433,7 +487,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
       </div>
       <div class="chart-box">
         <div class="chart-ttl">📊 各标的综合评分</div>
-        <div class="chart-canvas-wrap" style="height:280px"><canvas id="scoresChart"></canvas></div>
+        <div class="chart-canvas-wrap" style="height:252px"><canvas id="scoresChart"></canvas></div>
       </div>
       <div class="chart-box">
         <div class="chart-ttl">🗳 看多 / 看空 / 中性</div>
@@ -461,119 +515,107 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
               <td><span class="dcell-bull">看多</span></td>
               <td class="sc-h"><strong>7.6</strong>/10</td>
               <td><span class="res-y">7A</span></td>
-              <td>5/0/2</td>
-              <td>44.0</td>
+              <td>4/0/3</td>
+              <td>45.9</td>
               <td style="color:var(--bull);font-weight:700">0.64</td>
               <td style="color:var(--neut)">7.0</td>
-              <td>-</td>
+              <td><a href="alpha-hive-MSFT-ml-enhanced-2026-03-01.html" class="ml-btn-sm">查看</a></td>
             </tr>
             <tr>
               <td>2</td>
-              <td><strong>QCOM</strong></td>
+              <td><strong>BILI</strong></td>
               <td><span class="dcell-bull">看多</span></td>
-              <td class="sc-m"><strong>6.1</strong>/10</td>
-              <td><span class="res-y">7A</span></td>
-              <td>4/0/3</td>
-              <td>23.0</td>
-              <td style="color:var(--bull);font-weight:700">0.64</td>
-              <td style="color:var(--neut)">8.0</td>
-              <td>-</td>
+              <td class="sc-l"><strong>5.4</strong>/10</td>
+              <td><span class="res-n">无</span></td>
+              <td>3/0/4</td>
+              <td>38.9</td>
+              <td>0.76</td>
+              <td style="color:var(--neut)">8.3</td>
+              <td><a href="alpha-hive-BILI-ml-enhanced-2026-03-01.html" class="ml-btn-sm">查看</a></td>
             </tr>
             <tr>
               <td>3</td>
               <td><strong>META</strong></td>
               <td><span class="dcell-bull">看多</span></td>
-              <td class="sc-m"><strong>5.9</strong>/10</td>
-              <td><span class="res-y">7A</span></td>
-              <td>4/0/3</td>
-              <td>15.9</td>
+              <td class="sc-l"><strong>4.9</strong>/10</td>
+              <td><span class="res-n">无</span></td>
+              <td>3/0/4</td>
+              <td>14.5</td>
               <td style="color:var(--bull);font-weight:700">0.68</td>
               <td style="color:var(--neut)">8.0</td>
-              <td>-</td>
+              <td><a href="alpha-hive-META-ml-enhanced-2026-03-01.html" class="ml-btn-sm">查看</a></td>
             </tr>
             <tr>
               <td>4</td>
-              <td><strong>BILI</strong></td>
+              <td><strong>AMZN</strong></td>
               <td><span class="dcell-bull">看多</span></td>
-              <td class="sc-m"><strong>5.8</strong>/10</td>
-              <td><span class="res-y">7A</span></td>
+              <td class="sc-l"><strong>4.9</strong>/10</td>
+              <td><span class="res-n">无</span></td>
               <td>3/0/4</td>
-              <td>48.7</td>
-              <td>0.76</td>
-              <td style="color:var(--neut)">8.3</td>
-              <td>-</td>
+              <td>28.8</td>
+              <td style="color:var(--bull);font-weight:700">0.64</td>
+              <td style="color:var(--neut)">8.0</td>
+              <td><a href="alpha-hive-AMZN-ml-enhanced-2026-03-01.html" class="ml-btn-sm">查看</a></td>
             </tr>
             <tr>
               <td>5</td>
-              <td><strong>AMZN</strong></td>
-              <td><span class="dcell-bull">看多</span></td>
-              <td class="sc-m"><strong>5.6</strong>/10</td>
-              <td><span class="res-y">7A</span></td>
-              <td>3/0/4</td>
-              <td>25.9</td>
-              <td style="color:var(--bull);font-weight:700">0.64</td>
-              <td style="color:var(--neut)">8.0</td>
-              <td>-</td>
+              <td><strong>VKTX</strong></td>
+              <td><span class="dcell-neut">中性</span></td>
+              <td class="sc-l"><strong>4.8</strong>/10</td>
+              <td><span class="res-n">无</span></td>
+              <td>2/0/5</td>
+              <td>26.0</td>
+              <td style="color:var(--bull);font-weight:700">0.32</td>
+              <td style="color:var(--neut)">7.2</td>
+              <td><a href="alpha-hive-VKTX-ml-enhanced-2026-03-01.html" class="ml-btn-sm">查看</a></td>
             </tr>
             <tr>
               <td>6</td>
-              <td><strong>RKLB</strong></td>
-              <td><span class="dcell-neut">中性</span></td>
+              <td><strong>NVDA</strong></td>
+              <td><span class="dcell-bull">看多</span></td>
               <td class="sc-l"><strong>4.2</strong>/10</td>
               <td><span class="res-n">无</span></td>
-              <td>2/0/5</td>
-              <td>79.4</td>
-              <td>1.02</td>
-              <td style="color:var(--neut)">6.6</td>
-              <td>-</td>
+              <td>3/0/4</td>
+              <td>33.7</td>
+              <td>0.71</td>
+              <td style="color:var(--neut)">6.9</td>
+              <td><a href="alpha-hive-NVDA-ml-enhanced-2026-03-01.html" class="ml-btn-sm">查看</a></td>
             </tr>
             <tr>
               <td>7</td>
-              <td><strong>CRCL</strong></td>
-              <td><span class="dcell-neut">中性</span></td>
-              <td class="sc-l"><strong>4.2</strong>/10</td>
+              <td><strong>TSLA</strong></td>
+              <td><span class="dcell-bull">看多</span></td>
+              <td class="sc-l"><strong>4.4</strong>/10</td>
               <td><span class="res-n">无</span></td>
-              <td>1/1/5</td>
-              <td>14.2</td>
-              <td style="color:var(--bull);font-weight:700">0.60</td>
-              <td style="color:var(--neut)">6.2</td>
-              <td>-</td>
+              <td>3/0/4</td>
+              <td>3.0</td>
+              <td>0.96</td>
+              <td style="color:var(--neut)">7.4</td>
+              <td><a href="alpha-hive-TSLA-ml-enhanced-2026-03-01.html" class="ml-btn-sm">查看</a></td>
             </tr>
             <tr>
               <td>8</td>
-              <td><strong>NVDA</strong></td>
-              <td><span class="dcell-bull">看多</span></td>
-              <td class="sc-l"><strong>5.2</strong>/10</td>
-              <td><span class="res-y">7A</span></td>
-              <td>4/1/2</td>
-              <td>31.7</td>
-              <td>0.71</td>
-              <td style="color:var(--neut)">6.3</td>
-              <td>-</td>
+              <td><strong>RKLB</strong></td>
+              <td><span class="dcell-neut">中性</span></td>
+              <td class="sc-l"><strong>4.5</strong>/10</td>
+              <td><span class="res-n">无</span></td>
+              <td>2/0/5</td>
+              <td>65.2</td>
+              <td>1.02</td>
+              <td style="color:var(--neut)">6.6</td>
+              <td><a href="alpha-hive-RKLB-ml-enhanced-2026-03-01.html" class="ml-btn-sm">查看</a></td>
             </tr>
             <tr>
               <td>9</td>
-              <td><strong>TSLA</strong></td>
-              <td><span class="dcell-bull">看多</span></td>
-              <td class="sc-l"><strong>5.1</strong>/10</td>
-              <td><span class="res-y">7A</span></td>
-              <td>3/0/4</td>
-              <td>2.2</td>
-              <td>0.95</td>
-              <td style="color:var(--neut)">8.0</td>
-              <td>-</td>
-            </tr>
-            <tr>
-              <td>10</td>
-              <td><strong>VKTX</strong></td>
+              <td><strong>CRCL</strong></td>
               <td><span class="dcell-neut">中性</span></td>
-              <td class="sc-l"><strong>4.6</strong>/10</td>
+              <td class="sc-l"><strong>4.5</strong>/10</td>
               <td><span class="res-n">无</span></td>
-              <td>2/0/5</td>
-              <td>24.8</td>
-              <td style="color:var(--bull);font-weight:700">0.32</td>
-              <td style="color:var(--neut)">7.2</td>
-              <td>-</td>
+              <td>1/1/5</td>
+              <td>14.0</td>
+              <td style="color:var(--bull);font-weight:700">0.60</td>
+              <td style="color:var(--neut)">6.2</td>
+              <td><a href="alpha-hive-CRCL-ml-enhanced-2026-03-01.html" class="ml-btn-sm">查看</a></td>
             </tr></tbody>
       </table>
     </div>
@@ -592,100 +634,91 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
               <div class="cc-body">
                 <div class="cc-two">
                   <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">44.0</span></div>
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">45.9</span></div>
                     <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.64</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
                     <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">7.0/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">5多/0空</span></div>
+                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">4多/0空</span></div>
                   </div>
                   <div class="radar-wrap"><canvas id="radar-MSFT" width="160" height="160"></canvas></div>
                 </div>
                 <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕买入 $1,986,750</li>
                     <li>📊 <strong>期权：</strong>IV 处于理想水位</li>
-                    <li>💬 <strong>情绪：</strong>情绪 48%</li>
+                    <li>💬 <strong>情绪：</strong>情绪 50%</li>
                     <li>🐻 <strong>风险：</strong>当前价 $392.74</li></ul>
-                <div class="cc-footer"><span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span></div>
-              </div>
-            </div>
-            <div class="company-card">
-              <div class="cc-header" style="background:#1a7a3a;">
-                <span class="cc-ticker">QCOM</span>
-                <span class="cc-dir">看多 ↑</span>
-                <span class="cc-score">6.1/10</span>
-              </div>
-              <div class="cc-body">
-                <div class="cc-two">
-                  <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">23.0</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.64</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">8.0/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">4多/0空</span></div>
-                  </div>
-                  <div class="radar-wrap"><canvas id="radar-QCOM" width="160" height="160"></canvas></div>
-                </div>
-                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $3,672,555</li>
-                    <li>📊 <strong>期权：</strong>做多气氛浓厚（P/C低）</li>
-                    <li>💬 <strong>情绪：</strong>情绪 49%</li>
-                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $3,672,555（买入仅 $0）</li></ul>
-                <div class="cc-footer"><span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span></div>
-              </div>
-            </div>
-            <div class="company-card">
-              <div class="cc-header" style="background:#1a7a3a;">
-                <span class="cc-ticker">META</span>
-                <span class="cc-dir">看多 ↑</span>
-                <span class="cc-score">5.9/10</span>
-              </div>
-              <div class="cc-body">
-                <div class="cc-two">
-                  <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">15.9</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.68</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">8.0/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">4多/0空</span></div>
-                  </div>
-                  <div class="radar-wrap"><canvas id="radar-META" width="160" height="160"></canvas></div>
-                </div>
-                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $54,249,805</li>
-                    <li>📊 <strong>期权：</strong>做多气氛浓厚（P/C低）</li>
-                    <li>💬 <strong>情绪：</strong>情绪 52%</li>
-                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $54,249,805（买入仅 $0）</li></ul>
-                <div class="cc-footer"><span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span></div>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 100%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>Azure 收入增速：季度 YoY 增速低于 20%</li><li>Copilot 商业化进展：付费席位季度净增 &lt; 5%</li><li>反垄断监管：EU/DOJ 提起重大诉讼或强制拆分令</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>云市场份额：Azure 份额季度环比下降 &gt; 2pp</li><li>EPS 大幅低于预期：实际 &lt; 预期 15%+</li></ul></div>
+                <div class="cc-footer"><a href="alpha-hive-MSFT-ml-enhanced-2026-03-01.html" class="ml-btn-cc">ML 增强分析 →</a></div>
               </div>
             </div>
             <div class="company-card">
               <div class="cc-header" style="background:#1a7a3a;">
                 <span class="cc-ticker">BILI</span>
                 <span class="cc-dir">看多 ↑</span>
-                <span class="cc-score">5.8/10</span>
+                <span class="cc-score">5.4/10</span>
               </div>
               <div class="cc-body">
                 <div class="cc-two">
                   <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">48.7</span></div>
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">38.9</span></div>
                     <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.76</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
                     <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">8.3/10</span></div>
                     <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/0空</span></div>
                   </div>
                   <div class="radar-wrap"><canvas id="radar-BILI" width="160" height="160"></canvas></div>
                 </div>
                 <ul class="cc-signals"><li>📋 <strong>内幕：</strong>无近期内幕交易</li>
-                    <li>📊 <strong>期权：</strong>IV 处于理想水位</li>
+                    <li>📊 <strong>期权：</strong>信号平衡</li>
                     <li>💬 <strong>情绪：</strong>情绪 43%</li>
                     <li>🐻 <strong>风险：</strong>5日下跌 -6.5%</li></ul>
-                <div class="cc-footer"><span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span></div>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 80%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:80%;background:#28a745;"></span></span><span class="dq-val">80%</span></span><span class="dq-item" title="赔率 数据质量 100%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>月活跃用户：季度 MAU 同比下滑 &gt; 3%</li><li>商业化能力：ARPU 季度同比下降 &gt; 10%</li><li>内容监管：监管要求下架核心内容分类或限制直播</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>退市风险：SEC 或纳斯达克发出退市警告</li><li>现金消耗：自由现金流连续 3 季度为负且无明确改善路径</li></ul></div>
+                <div class="cc-footer"><a href="alpha-hive-BILI-ml-enhanced-2026-03-01.html" class="ml-btn-cc">ML 增强分析 →</a></div>
+              </div>
+            </div>
+            <div class="company-card">
+              <div class="cc-header" style="background:#1a7a3a;">
+                <span class="cc-ticker">META</span>
+                <span class="cc-dir">看多 ↑</span>
+                <span class="cc-score">4.9/10</span>
+              </div>
+              <div class="cc-body">
+                <div class="cc-two">
+                  <div class="cc-metrics-col">
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">14.5</span></div>
+                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.68</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
+                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">8.0/10</span></div>
+                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/0空</span></div>
+                  </div>
+                  <div class="radar-wrap"><canvas id="radar-META" width="160" height="160"></canvas></div>
+                </div>
+                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $54,249,805</li>
+                    <li>📊 <strong>期权：</strong>做多气氛浓厚（P/C低）</li>
+                    <li>💬 <strong>情绪：</strong>情绪 51%</li>
+                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $54,249,805（买入仅 $0）</li></ul>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 100%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>日活跃用户增速：全球 DAU 季度 QoQ 增速 &lt; 1%</li><li>广告收入增速：广告收入 YoY 增速 &lt; 10%</li><li>监管/隐私风险：EU/FTC 裁定重大罚款（&gt; $5B）或强制拆分</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>Reality Labs 亏损：单季亏损超 $6B 且无改善路径</li><li>TikTok 解禁：TikTok 在美恢复全面运营</li></ul></div>
+                <div class="cc-footer"><a href="alpha-hive-META-ml-enhanced-2026-03-01.html" class="ml-btn-cc">ML 增强分析 →</a></div>
               </div>
             </div>
             <div class="company-card">
               <div class="cc-header" style="background:#1a7a3a;">
                 <span class="cc-ticker">AMZN</span>
                 <span class="cc-dir">看多 ↑</span>
-                <span class="cc-score">5.6/10</span>
+                <span class="cc-score">4.9/10</span>
               </div>
               <div class="cc-body">
                 <div class="cc-two">
                   <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">25.9</span></div>
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">28.8</span></div>
                     <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.64</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
                     <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">8.0/10</span></div>
                     <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/0空</span></div>
                   </div>
@@ -693,114 +726,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
                 </div>
                 <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $14,459,993</li>
                     <li>📊 <strong>期权：</strong>做多气氛浓厚（P/C低）</li>
-                    <li>💬 <strong>情绪：</strong>情绪 56%</li>
+                    <li>💬 <strong>情绪：</strong>情绪 47%</li>
                     <li>🐻 <strong>风险：</strong>内幕大额抛售 $14,459,993（买入仅 $0）</li></ul>
-                <div class="cc-footer"><span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span></div>
-              </div>
-            </div>
-            <div class="company-card">
-              <div class="cc-header" style="background:#7a5c1a;">
-                <span class="cc-ticker">RKLB</span>
-                <span class="cc-dir">中性 →</span>
-                <span class="cc-score">4.2/10</span>
-              </div>
-              <div class="cc-body">
-                <div class="cc-two">
-                  <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">79.4</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">1.02</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">6.6/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">2多/0空</span></div>
-                  </div>
-                  <div class="radar-wrap"><canvas id="radar-RKLB" width="160" height="160"></canvas></div>
-                </div>
-                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $124,636,378</li>
-                    <li>📊 <strong>期权：</strong>检测到 2 个看涨异动</li>
-                    <li>💬 <strong>情绪：</strong>情绪 42%</li>
-                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $124,636,378（买入仅 $0）</li></ul>
-                <div class="cc-footer"><span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span></div>
-              </div>
-            </div>
-            <div class="company-card">
-              <div class="cc-header" style="background:#7a5c1a;">
-                <span class="cc-ticker">CRCL</span>
-                <span class="cc-dir">中性 →</span>
-                <span class="cc-score">4.2/10</span>
-              </div>
-              <div class="cc-body">
-                <div class="cc-two">
-                  <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">14.2</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.60</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">6.2/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">1多/1空</span></div>
-                  </div>
-                  <div class="radar-wrap"><canvas id="radar-CRCL" width="160" height="160"></canvas></div>
-                </div>
-                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $91,315</li>
-                    <li>📊 <strong>期权：</strong>做多气氛浓厚（P/C低）</li>
-                    <li>💬 <strong>情绪：</strong>情绪 54%</li>
-                    <li>🐻 <strong>风险：</strong>5日暴涨 +36.4%（超买）</li></ul>
-                <div class="cc-footer"><span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span></div>
-              </div>
-            </div>
-            <div class="company-card">
-              <div class="cc-header" style="background:#1a7a3a;">
-                <span class="cc-ticker">NVDA</span>
-                <span class="cc-dir">看多 ↑</span>
-                <span class="cc-score">5.2/10</span>
-              </div>
-              <div class="cc-body">
-                <div class="cc-two">
-                  <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">31.7</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.71</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">6.3/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">4多/1空</span></div>
-                  </div>
-                  <div class="radar-wrap"><canvas id="radar-NVDA" width="160" height="160"></canvas></div>
-                </div>
-                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $150,452,443</li>
-                    <li>📊 <strong>期权：</strong>检测到 7 个看涨异动</li>
-                    <li>💬 <strong>情绪：</strong>情绪 43%</li>
-                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $150,452,443（买入仅 $0）</li></ul>
-                <div class="cc-footer"><span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span></div>
-              </div>
-            </div>
-            <div class="company-card">
-              <div class="cc-header" style="background:#1a7a3a;">
-                <span class="cc-ticker">TSLA</span>
-                <span class="cc-dir">看多 ↑</span>
-                <span class="cc-score">5.1/10</span>
-              </div>
-              <div class="cc-body">
-                <div class="cc-two">
-                  <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">2.2</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.95</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">8.0/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/0空</span></div>
-                  </div>
-                  <div class="radar-wrap"><canvas id="radar-TSLA" width="160" height="160"></canvas></div>
-                </div>
-                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $64,193,732</li>
-                    <li>📊 <strong>期权：</strong>检测到 5 个看涨异动</li>
-                    <li>💬 <strong>情绪：</strong>情绪 52%</li>
-                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $64,193,732（买入仅 $0）</li></ul>
-                <div class="cc-footer"><span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span></div>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 100%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>AWS 收入增速：季度 YoY 增速低于 15%</li><li>北美零售利润率：营业利润率 QoQ 下降 &gt; 150bps</li><li>FTC 反垄断：法院要求拆分零售或云业务</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>AWS 主要客户流失：前 10 大客户中超 3 家迁移至 Azure/GCP</li><li>综合 EPS 大幅低于预期：实际 EPS &lt; 预期 20%+</li></ul></div>
+                <div class="cc-footer"><a href="alpha-hive-AMZN-ml-enhanced-2026-03-01.html" class="ml-btn-cc">ML 增强分析 →</a></div>
               </div>
             </div>
             <div class="company-card">
               <div class="cc-header" style="background:#7a5c1a;">
                 <span class="cc-ticker">VKTX</span>
                 <span class="cc-dir">中性 →</span>
-                <span class="cc-score">4.6/10</span>
+                <span class="cc-score">4.8/10</span>
               </div>
               <div class="cc-body">
                 <div class="cc-two">
                   <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">24.8</span></div>
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">26.0</span></div>
                     <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.32</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
                     <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">7.2/10</span></div>
                     <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">2多/0空</span></div>
                   </div>
@@ -808,9 +753,119 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
                 </div>
                 <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $12,052,190</li>
                     <li>📊 <strong>期权：</strong>做多气氛浓厚（P/C低）</li>
-                    <li>💬 <strong>情绪：</strong>情绪 49%</li>
+                    <li>💬 <strong>情绪：</strong>情绪 48%</li>
                     <li>🐻 <strong>风险：</strong>内幕大额抛售 $12,052,190（买入仅 $0）</li></ul>
-                <div class="cc-footer"><span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span></div>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 80%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:80%;background:#28a745;"></span></span><span class="dq-val">80%</span></span><span class="dq-item" title="赔率 数据质量 100%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>临床试验患者脱落：关键患者脱落 &gt; 15%</li><li>竞争对手试验数据：发布更优越的数据</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>FDA 临床试验暂停：IND Hold（试验中止令）</li><li>Phase 3 试验失败：关键终点未达到统计学意义</li></ul></div>
+                <div class="cc-footer"><a href="alpha-hive-VKTX-ml-enhanced-2026-03-01.html" class="ml-btn-cc">ML 增强分析 →</a></div>
+              </div>
+            </div>
+            <div class="company-card">
+              <div class="cc-header" style="background:#1a7a3a;">
+                <span class="cc-ticker">NVDA</span>
+                <span class="cc-dir">看多 ↑</span>
+                <span class="cc-score">4.2/10</span>
+              </div>
+              <div class="cc-body">
+                <div class="cc-two">
+                  <div class="cc-metrics-col">
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">33.7</span></div>
+                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.71</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
+                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">6.9/10</span></div>
+                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/0空</span></div>
+                  </div>
+                  <div class="radar-wrap"><canvas id="radar-NVDA" width="160" height="160"></canvas></div>
+                </div>
+                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $150,452,443</li>
+                    <li>📊 <strong>期权：</strong>检测到 7 个看涨异动</li>
+                    <li>💬 <strong>情绪：</strong>情绪 48%</li>
+                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $150,452,443（买入仅 $0）</li></ul>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 100%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                
+                <div class="cc-footer"><a href="alpha-hive-NVDA-ml-enhanced-2026-03-01.html" class="ml-btn-cc">ML 增强分析 →</a></div>
+              </div>
+            </div>
+            <div class="company-card">
+              <div class="cc-header" style="background:#1a7a3a;">
+                <span class="cc-ticker">TSLA</span>
+                <span class="cc-dir">看多 ↑</span>
+                <span class="cc-score">4.4/10</span>
+              </div>
+              <div class="cc-body">
+                <div class="cc-two">
+                  <div class="cc-metrics-col">
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">3.0</span></div>
+                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.96</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#666;font-weight:bold;">neutral</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
+                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">7.4/10</span></div>
+                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/0空</span></div>
+                  </div>
+                  <div class="radar-wrap"><canvas id="radar-TSLA" width="160" height="160"></canvas></div>
+                </div>
+                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $64,193,732</li>
+                    <li>📊 <strong>期权：</strong>检测到 5 个看涨异动</li>
+                    <li>💬 <strong>情绪：</strong>情绪 44%</li>
+                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $64,193,732（买入仅 $0）</li></ul>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 100%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                
+                <div class="cc-footer"><a href="alpha-hive-TSLA-ml-enhanced-2026-03-01.html" class="ml-btn-cc">ML 增强分析 →</a></div>
+              </div>
+            </div>
+            <div class="company-card">
+              <div class="cc-header" style="background:#7a5c1a;">
+                <span class="cc-ticker">RKLB</span>
+                <span class="cc-dir">中性 →</span>
+                <span class="cc-score">4.5/10</span>
+              </div>
+              <div class="cc-body">
+                <div class="cc-two">
+                  <div class="cc-metrics-col">
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">65.2</span></div>
+                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">1.02</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#666;font-weight:bold;">neutral</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
+                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">6.6/10</span></div>
+                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">2多/0空</span></div>
+                  </div>
+                  <div class="radar-wrap"><canvas id="radar-RKLB" width="160" height="160"></canvas></div>
+                </div>
+                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $121,425,633</li>
+                    <li>📊 <strong>期权：</strong>IV 处于理想水位</li>
+                    <li>💬 <strong>情绪：</strong>情绪 42%</li>
+                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $121,425,633（买入仅 $0）</li></ul>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 100%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                
+                <div class="cc-footer"><a href="alpha-hive-RKLB-ml-enhanced-2026-03-01.html" class="ml-btn-cc">ML 增强分析 →</a></div>
+              </div>
+            </div>
+            <div class="company-card">
+              <div class="cc-header" style="background:#7a5c1a;">
+                <span class="cc-ticker">CRCL</span>
+                <span class="cc-dir">中性 →</span>
+                <span class="cc-score">4.5/10</span>
+              </div>
+              <div class="cc-body">
+                <div class="cc-two">
+                  <div class="cc-metrics-col">
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">14.0</span></div>
+                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.60</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
+                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">6.2/10</span></div>
+                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">1多/1空</span></div>
+                  </div>
+                  <div class="radar-wrap"><canvas id="radar-CRCL" width="160" height="160"></canvas></div>
+                </div>
+                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $91,315</li>
+                    <li>📊 <strong>期权：</strong>做多气氛浓厚（P/C低）</li>
+                    <li>💬 <strong>情绪：</strong>情绪 57%</li>
+                    <li>🐻 <strong>风险：</strong>5日暴涨 +36.4%（超买）</li></ul>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 80%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:80%;background:#28a745;"></span></span><span class="dq-val">80%</span></span><span class="dq-item" title="赔率 数据质量 100%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                
+                <div class="cc-footer"><a href="alpha-hive-CRCL-ml-enhanced-2026-03-01.html" class="ml-btn-cc">ML 增强分析 →</a></div>
               </div>
             </div></div>
   </div>
@@ -818,13 +873,611 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   <!-- ── Markdown Report ── -->
   <div class="section" id="report">
     <div class="sec-title">完整蜂群简报</div>
-    <div class="report-body"></div>
+    <div class="report-body"><h1>【2026-03-01】Alpha Hive 蜂群协作日报</h1>
+<br>
+<p><strong>自动生成于</strong>：2026-03-01 00:56:25</p>
+<p><strong>系统模式</strong>：完全去中心化蜂群协作 | 8 个自治工蜂（6 核心 + BearBeeContrarian）</p>
+<br>
+<h2>1) 今日摘要</h2>
+<br>
+<ul>
+<li>扫描标的：9 个 | 共振信号：1/9</li>
+<li><strong>MSFT</strong> BULLISH 7.6/10 共振</li>
+<li><strong>BILI</strong> BULLISH 5.4/10 </li>
+<li><strong>META</strong> BULLISH 4.9/10 </li>
+</ul>
+<br>
+<h2>2) 今日聪明钱动向</h2>
+<br>
+<h3>MSFT</h3>
+<ul>
+<li>内幕买入 $1,986,750 | STANTON JOHN W 买入 5,000股 | 拥挤度 30/100（中等拥挤度） | 动量 +2.2% | 历史5条:多5/空0,均分7.5</li>
+<li>内幕交易情绪：<strong>bullish</strong> | 申报数：10</li>
+<li>内幕买入金额：$1,986,750</li>
+<ul class="sub-ul">
+<li>STANTON JOHN W：买入 5,000 股</li>
+</ul>
+<li>拥挤度：30/100</li>
+</ul>
+<br>
+<h3>BILI</h3>
+<ul>
+<li>无近期内幕交易 | 拥挤度 22/100（低拥挤度） | 动量 -6.5% | 历史5条:多5/空0,均分5.8</li>
+<li>内幕交易情绪：<strong>neutral</strong> | 申报数：0</li>
+<li>拥挤度：22/100</li>
+</ul>
+<br>
+<h3>META</h3>
+<ul>
+<li>内幕卖出 $54,249,805 | LI SUSAN J 卖出 55,702股 | 拥挤度 18/100（低拥挤度） | 动量 +1.7% | 历史5条:多5/空0,均分5.7</li>
+<li>内幕交易情绪：<strong>bearish</strong> | 申报数：10</li>
+<li>内幕卖出金额：$54,249,805</li>
+<ul class="sub-ul">
+<li>LI SUSAN J：卖出 55,702 股</li>
+<li>LI SUSAN J：卖出 18,789 股</li>
+</ul>
+<li>拥挤度：18/100</li>
+</ul>
+<br>
+<h3>AMZN</h3>
+<ul>
+<li>内幕卖出 $14,459,993 | Jassy Andrew R 卖出 19,514股 | 拥挤度 25/100（低拥挤度） | 动量 +2.3% | 历史5条:多5/空0,均分5.2</li>
+<li>内幕交易情绪：<strong>bearish</strong> | 申报数：10</li>
+<li>内幕卖出金额：$14,459,993</li>
+<ul class="sub-ul">
+<li>Jassy Andrew R：卖出 19,514 股</li>
+<li>Garman Matthew S：卖出 17,751 股</li>
+</ul>
+<li>拥挤度：25/100</li>
+</ul>
+<br>
+<h3>VKTX</h3>
+<ul>
+<li>内幕卖出 $12,052,190 | Lian Brian 卖出 233,409股 | 拥挤度 16/100（低拥挤度） | 动量 -1.8% | 历史5条:多5/空0,均分6.0</li>
+<li>内幕交易情绪：<strong>bearish</strong> | 申报数：9</li>
+<li>内幕卖出金额：$12,052,190</li>
+<ul class="sub-ul">
+<li>Lian Brian：卖出 233,409 股</li>
+<li>ZANTE GREG：卖出 56,161 股</li>
+</ul>
+<li>拥挤度：16/100</li>
+</ul>
+<br>
+<h3>RKLB</h3>
+<ul>
+<li>内幕卖出 $121,425,633 | Spice Adam C. 卖出 1,365,665股 | 拥挤度 16/100（低拥挤度） | 动量 -1.6%</li>
+<li>内幕交易情绪：<strong>bearish</strong> | 申报数：10</li>
+<li>内幕卖出金额：$121,425,633</li>
+<ul class="sub-ul">
+<li>Spice Adam C.：卖出 1,365,665 股</li>
+<li>Saintil Merline：卖出 96,000 股</li>
+</ul>
+<li>拥挤度：16/100</li>
+</ul>
+<br>
+<h3>CRCL</h3>
+<ul>
+<li>内幕卖出 $91,315 | Chandhok Nikhil 税费扣股 14,479股 | 拥挤度 27/100（低拥挤度） | 动量 +36.4% | 历史5条:多5/空0,均分6.2</li>
+<li>内幕交易情绪：<strong>bearish</strong> | 申报数：10</li>
+<li>内幕卖出金额：$91,315</li>
+<ul class="sub-ul">
+<li>Chandhok Nikhil：税费扣股 14,479 股</li>
+<li>Allaire Jeremy：税费扣股 8,404 股</li>
+</ul>
+<li>拥挤度：27/100</li>
+</ul>
+<br>
+<h3>TSLA</h3>
+<ul>
+<li>内幕卖出 $64,193,732 | MURDOCH JAMES R 卖出 60,000股 | 拥挤度 21/100（低拥挤度） | 动量 +0.7% | 历史5条:多5/空0,均分5.4</li>
+<li>内幕交易情绪：<strong>bearish</strong> | 申报数：6</li>
+<li>内幕卖出金额：$64,193,732</li>
+<ul class="sub-ul">
+<li>MURDOCH JAMES R：卖出 60,000 股</li>
+<li>Musk Kimbal：卖出 56,820 股</li>
+</ul>
+<li>拥挤度：21/100</li>
+</ul>
+<br>
+<h3>NVDA</h3>
+<ul>
+<li>内幕卖出 $150,452,443 | STEVENS MARK A 卖出 222,500股 | 拥挤度 48/100（中等拥挤度） | 动量 -7.5% | 历史5条:多5/空0,均分6.8</li>
+<li>内幕交易情绪：<strong>bearish</strong> | 申报数：10</li>
+<li>内幕卖出金额：$150,452,443</li>
+<ul class="sub-ul">
+<li>STEVENS MARK A：卖出 222,500 股</li>
+<li>Puri Ajay K：卖出 199,800 股</li>
+</ul>
+<li>拥挤度：48/100</li>
+</ul>
+<br>
+<h2>3) 市场隐含预期</h2>
+<br>
+<h3>MSFT</h3>
+<ul>
+<li>IV 处于理想水位 | 做多气氛浓厚（P/C低） | 检测到 1 个看涨异动 | 异常流:混合期权流 Call:72 Put:50 | $392.7 | 预测市场看多（隐含概率 96%） | 历史5条:多5/空0,均分7.5</li>
+<li>IV Rank：45.93</li>
+<li>Put/Call Ratio：0.64</li>
+<li>Gamma Exposure：0.0</li>
+<li>异常活动：10 个信号</li>
+<ul class="sub-ul">
+<li>看跌 put sweep $490.0 (24,490手)</li>
+<li>看跌 put sweep $480.0 (24,100手)</li>
+<li>看跌 put sweep $500.0 (22,040手)</li>
+</ul>
+</ul>
+<br>
+<h3>BILI</h3>
+<ul>
+<li>信号平衡 | $27.9 | 预测市场看多（隐含概率 96%） | 历史5条:多5/空0,均分5.8</li>
+<li>IV Rank：38.88</li>
+<li>Put/Call Ratio：0.76</li>
+<li>Gamma Exposure：0.0</li>
+</ul>
+<br>
+<h3>META</h3>
+<ul>
+<li>做多气氛浓厚（P/C低） | 异常流:混合期权流 Call:66 Put:61 | $648.2 | 预测市场看多（隐含概率 96%） | 历史5条:多5/空0,均分5.7</li>
+<li>IV Rank：14.52</li>
+<li>Put/Call Ratio：0.68</li>
+<li>Gamma Exposure：0.0</li>
+<li>异常活动：10 个信号</li>
+<ul class="sub-ul">
+<li>看跌 put sweep $760.0 (1,397手)</li>
+<li>看跌 put sweep $765.0 (1,050手)</li>
+<li>看跌 put sweep $800.0 (663手)</li>
+</ul>
+</ul>
+<br>
+<h3>AMZN</h3>
+<ul>
+<li>做多气氛浓厚（P/C低） | 异常流:异常Call流 55个信号 溢价$47.1M | $210.0 | 预测市场看多（隐含概率 96%） | 历史5条:多5/空0,均分5.2</li>
+<li>IV Rank：28.83</li>
+<li>Put/Call Ratio：0.64</li>
+<li>Gamma Exposure：0.0</li>
+<li>异常活动：10 个信号</li>
+<ul class="sub-ul">
+<li>看跌 put sweep $250.0 (7,353手)</li>
+<li>看跌 put sweep $260.0 (3,130手)</li>
+<li>看跌 put sweep $245.0 (2,592手)</li>
+</ul>
+</ul>
+<br>
+<h3>VKTX</h3>
+<ul>
+<li>做多气氛浓厚（P/C低） | 异常流:异常Call流 8个信号 溢价$0.1M | $33.8 | 预测市场看多（隐含概率 96%） | 历史5条:多5/空0,均分6.0</li>
+<li>IV Rank：26.0</li>
+<li>Put/Call Ratio：0.32</li>
+<li>Gamma Exposure：0.0</li>
+</ul>
+<br>
+<h3>RKLB</h3>
+<ul>
+<li>IV 处于理想水位 | 检测到 2 个看涨异动 | 异常流:混合期权流 Call:26 Put:27 | $69.1 | 预测市场看多（隐含概率 96%）</li>
+<li>IV Rank：65.19</li>
+<li>Put/Call Ratio：1.02</li>
+<li>Gamma Exposure：0.0</li>
+<li>异常活动：3 个信号</li>
+<ul class="sub-ul">
+<li>看跌 put sweep $63.0 (942手)</li>
+<li>看涨 call sweep $63.0 (11手)</li>
+<li>看涨 call sweep $64.0 (11手)</li>
+</ul>
+</ul>
+<br>
+<h3>CRCL</h3>
+<ul>
+<li>做多气氛浓厚（P/C低） | 异常流:异常Put流 46个信号 溢价$30.0M | $83.4 | 预测市场看多（隐含概率 96%） | 历史5条:多5/空0,均分6.2</li>
+<li>IV Rank：14.01</li>
+<li>Put/Call Ratio：0.6</li>
+<li>Gamma Exposure：0.0</li>
+<li>异常活动：10 个信号</li>
+<ul class="sub-ul">
+<li>看跌 put sweep $35.0 (3,719手)</li>
+<li>看跌 put sweep $69.0 (934手)</li>
+<li>看跌 put sweep $160.0 (700手)</li>
+</ul>
+</ul>
+<br>
+<h3>TSLA</h3>
+<ul>
+<li>检测到 5 个看涨异动 | 异常流:混合期权流 Call:126 Put:168 | $402.5 | 预测市场看多（隐含概率 96%） | 历史5条:多5/空0,均分5.4</li>
+<li>IV Rank：3.02</li>
+<li>Put/Call Ratio：0.96</li>
+<li>Gamma Exposure：0.0</li>
+<li>异常活动：10 个信号</li>
+<ul class="sub-ul">
+<li>看跌 put sweep $190.0 (1,722手)</li>
+<li>看涨 call sweep $635.0 (1,527手)</li>
+<li>看跌 put sweep $170.0 (731手)</li>
+</ul>
+</ul>
+<br>
+<h3>NVDA</h3>
+<ul>
+<li>检测到 7 个看涨异动 | 异常流:混合期权流 Call:90 Put:100 | $177.2 | 预测市场看多（隐含概率 96%） | 历史5条:多5/空0,均分6.8</li>
+<li>IV Rank：33.73</li>
+<li>Put/Call Ratio：0.71</li>
+<li>Gamma Exposure：0.0</li>
+<li>异常活动：10 个信号</li>
+<ul class="sub-ul">
+<li>看涨 large call volume $200.0 (93,809手)</li>
+<li>看涨 large call volume $195.0 (31,196手)</li>
+<li>看涨 large call volume $180.0 (25,006手)</li>
+</ul>
+</ul>
+<br>
+<h2>4) X 情绪汇总</h2>
+<br>
+<h3>MSFT</h3>
+<ul>
+<li>情绪 50% | 动量 +2.2% | 量比 1.2x | Reddit #7(rising,39提及) | 新闻中性（6多/5空/19中） | 未上 Yahoo 热搜 | F&amp;G 14(Extreme Fear) | 历史5条:多5/空0,均分7.5</li>
+<li>看多情绪：50%</li>
+<li>5 日动量：+2.2%</li>
+<li>量比：1.2x</li>
+</ul>
+<br>
+<h3>BILI</h3>
+<ul>
+<li>情绪 43% | 动量 -6.5% | 量比 0.7x | Reddit 无热度 | 新闻偏多（10多/0空） | 未上 Yahoo 热搜 | F&amp;G 14(Extreme Fear) | 历史5条:多5/空0,均分5.8</li>
+<li>看多情绪：43%</li>
+<li>5 日动量：-6.5%</li>
+<li>量比：0.7x</li>
+</ul>
+<br>
+<h3>META</h3>
+<ul>
+<li>情绪 51% | 动量 +1.7% | 量比 1.1x | Reddit #53(cooling,7提及) | 新闻偏多（6多/2空） | 未上 Yahoo 热搜 | F&amp;G 14(Extreme Fear) | 历史5条:多5/空0,均分5.7</li>
+<li>看多情绪：51%</li>
+<li>5 日动量：+1.7%</li>
+<li>量比：1.1x</li>
+</ul>
+<br>
+<h3>AMZN</h3>
+<ul>
+<li>情绪 47% | 动量 +2.3% | 量比 0.9x | Reddit #23(cooling,15提及) | 新闻偏多（4多/2空） | 未上 Yahoo 热搜 | F&amp;G 14(Extreme Fear) | 历史5条:多5/空0,均分5.2</li>
+<li>看多情绪：47%</li>
+<li>5 日动量：+2.3%</li>
+<li>量比：0.9x</li>
+</ul>
+<br>
+<h3>VKTX</h3>
+<ul>
+<li>情绪 48% | 动量 -1.8% | 量比 0.6x | Reddit 无热度 | 新闻中性（9多/5空/16中） | 未上 Yahoo 热搜 | F&amp;G 14(Extreme Fear) | 历史5条:多5/空0,均分6.0</li>
+<li>看多情绪：48%</li>
+<li>5 日动量：-1.8%</li>
+<li>量比：0.6x</li>
+</ul>
+<br>
+<h3>RKLB</h3>
+<ul>
+<li>情绪 42% | 动量 -1.6% | 量比 1.4x | Reddit #98(cooling,4提及) | 新闻偏空（5多/11空） | 未上 Yahoo 热搜 | F&amp;G 14(Extreme Fear)</li>
+<li>看多情绪：42%</li>
+<li>5 日动量：-1.6%</li>
+<li>量比：1.4x</li>
+</ul>
+<br>
+<h3>CRCL</h3>
+<ul>
+<li>情绪 57% | 动量 +36.4% | 量比 1.2x | Reddit 无热度 | 新闻偏多（15多/1空） | 未上 Yahoo 热搜 | F&amp;G 14(Extreme Fear) | 历史5条:多5/空0,均分6.2</li>
+<li>看多情绪：57%</li>
+<li>5 日动量：+36.4%</li>
+<li>量比：1.2x</li>
+</ul>
+<br>
+<h3>TSLA</h3>
+<ul>
+<li>情绪 44% | 动量 +0.7% | 量比 0.9x | Reddit #26(cooling,14提及) | 新闻中性（3多/3空/24中） | 未上 Yahoo 热搜 | F&amp;G 14(Extreme Fear) | 历史5条:多5/空0,均分5.4</li>
+<li>看多情绪：44%</li>
+<li>5 日动量：+0.7%</li>
+<li>量比：0.9x</li>
+</ul>
+<br>
+<h3>NVDA</h3>
+<ul>
+<li>情绪 48% | 动量 -7.5% | 量比 1.6x | Reddit #2(hot,84提及) | 新闻偏多（7多/1空） | 未上 Yahoo 热搜 | F&amp;G 14(Extreme Fear) | 历史5条:多5/空0,均分6.8</li>
+<li>看多情绪：48%</li>
+<li>5 日动量：-7.5%</li>
+<li>量比：1.6x</li>
+</ul>
+<br>
+<h2>5) 财报/事件催化剂</h2>
+<br>
+<h3>MSFT</h3>
+<ul>
+<li>催化剂 3 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多5/空0,均分7.5</li>
+<ul class="sub-ul">
+<li>2026-02-18：Ex-Dividend Date</li>
+<li>2026-03-11：Dividend Date</li>
+<li>2026-04-29：财报发布</li>
+</ul>
+</ul>
+<br>
+<h3>BILI</h3>
+<ul>
+<li>催化剂 1 个 | 最近：财报发布（3天后） | 历史5条:多5/空0,均分5.8</li>
+<ul class="sub-ul">
+<li>2026-03-05：财报发布</li>
+</ul>
+</ul>
+<br>
+<h3>META</h3>
+<ul>
+<li>催化剂 3 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多5/空0,均分5.7</li>
+<ul class="sub-ul">
+<li>2026-03-15：Ex-Dividend Date</li>
+<li>2026-03-25：Dividend Date</li>
+<li>2026-04-29：财报发布</li>
+</ul>
+</ul>
+<br>
+<h3>AMZN</h3>
+<ul>
+<li>催化剂 1 个 | 最近：财报发布（59天后） | 历史5条:多5/空0,均分5.2</li>
+<ul class="sub-ul">
+<li>2026-04-30：财报发布</li>
+</ul>
+</ul>
+<br>
+<h3>VKTX</h3>
+<ul>
+<li>催化剂 1 个 | 最近：财报发布（58天后） | 历史5条:多5/空0,均分6.0</li>
+<ul class="sub-ul">
+<li>2026-04-29：财报发布</li>
+</ul>
+</ul>
+<br>
+<h3>RKLB</h3>
+<ul>
+<li>催化剂 1 个 | 最近：财报发布（66天后）</li>
+<ul class="sub-ul">
+<li>2026-05-07：财报发布</li>
+</ul>
+</ul>
+<br>
+<h3>CRCL</h3>
+<ul>
+<li>催化剂 1 个 | 最近：财报发布（71天后） | 历史5条:多5/空0,均分6.2</li>
+<ul class="sub-ul">
+<li>2026-05-12：财报发布</li>
+</ul>
+</ul>
+<br>
+<h3>TSLA</h3>
+<ul>
+<li>催化剂 1 个 | 最近：财报发布（50天后） | 历史5条:多5/空0,均分5.4</li>
+<ul class="sub-ul">
+<li>2026-04-21：财报发布</li>
+</ul>
+</ul>
+<br>
+<h3>NVDA</h3>
+<ul>
+<li>催化剂 4 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多5/空0,均分6.8</li>
+<ul class="sub-ul">
+<li>2026-03-10：Ex-Dividend Date</li>
+<li>2025-12-25：Dividend Date</li>
+<li>2026-03-15：Q4 FY2026 财报发布</li>
+</ul>
+</ul>
+<br>
+<h2>6) 竞争格局分析</h2>
+<br>
+<h3>MSFT</h3>
+<ul>
+<li>ML 胜率 17% | 7d +0.62% | 30d +0.83% | 历史5条:多5/空0,均分7.5</li>
+</ul>
+<br>
+<h3>BILI</h3>
+<ul>
+<li>ML 胜率 10% | 7d +0.00% | 30d +0.26% | 历史5条:多5/空0,均分5.8</li>
+</ul>
+<br>
+<h3>META</h3>
+<ul>
+<li>ML 胜率 16% | 7d +0.53% | 30d +0.74% | 历史5条:多5/空0,均分5.7</li>
+</ul>
+<br>
+<h3>AMZN</h3>
+<ul>
+<li>ML 胜率 32% | 7d +1.15% | 30d +1.52% | 历史5条:多5/空0,均分5.2</li>
+</ul>
+<br>
+<h3>VKTX</h3>
+<ul>
+<li>ML 胜率 0% | 7d +0.00% | 30d +0.00% | 历史5条:多5/空0,均分6.0</li>
+</ul>
+<br>
+<h3>RKLB</h3>
+<ul>
+<li>ML 胜率 0% | 7d +0.00% | 30d +0.00%</li>
+</ul>
+<br>
+<h3>CRCL</h3>
+<ul>
+<li>ML 胜率 0% | 7d +0.00% | 30d +0.00% | 历史5条:多5/空0,均分6.2</li>
+</ul>
+<br>
+<h3>TSLA</h3>
+<ul>
+<li>ML 胜率 27% | 7d +0.76% | 30d +1.18% | 历史5条:多5/空0,均分5.4</li>
+</ul>
+<br>
+<h3>NVDA</h3>
+<ul>
+<li>ML 胜率 5% | 7d +0.00% | 30d +0.13% | 历史5条:多5/空0,均分6.8</li>
+</ul>
+<br>
+<h2>6.5) 看空对冲观点</h2>
+<br>
+<blockquote>BearBeeContrarian 专门寻找看空信号，平衡蜂群系统性看多偏差</blockquote>
+<br>
+<h3>MSFT (风险提示 | 看空强度 3.0/10)</h3>
+<ul>
+<li>当前价 $392.74 | 暂无明显看空信号，但建议设置止损</li>
+<li><em>数据来源</em>：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz</li>
+</ul>
+<br>
+<h3>BILI (风险提示 | 看空强度 1.7/10)</h3>
+<ul>
+<li>5日下跌 -6.5%</li>
+<li>市场情绪略偏谨慎 43%</li>
+<li><em>数据来源</em>：insider=SEC直查 | valuation=yfinance | options=real | momentum=yfinance | news=real</li>
+</ul>
+<br>
+<h3>META (风险提示 | 看空强度 2.0/10)</h3>
+<ul>
+<li>内幕大额抛售 $54,249,805（买入仅 $0）</li>
+<li><em>数据来源</em>：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz</li>
+</ul>
+<br>
+<h3>AMZN (风险提示 | 看空强度 2.0/10)</h3>
+<ul>
+<li>内幕大额抛售 $14,459,993（买入仅 $0）</li>
+<li><em>数据来源</em>：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz</li>
+</ul>
+<br>
+<h3>VKTX (风险提示 | 看空强度 2.8/10)</h3>
+<ul>
+<li>内幕大额抛售 $12,052,190（买入仅 $0）</li>
+<li>近期小幅回调 -1.8%</li>
+<li>高波动率 77%（年化）</li>
+<li><em>数据来源</em>：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz</li>
+</ul>
+<br>
+<h3>RKLB (风险提示 | 看空强度 3.4/10)</h3>
+<ul>
+<li>内幕大额抛售 $121,425,633（买入仅 $0）</li>
+<li>近期小幅回调 -1.6%</li>
+<li>高波动率 94%（年化）</li>
+<li>市场情绪略偏谨慎 42%</li>
+<li><em>数据来源</em>：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=real</li>
+</ul>
+<br>
+<h3>CRCL (风险提示 | 看空强度 3.8/10)</h3>
+<ul>
+<li>5日暴涨 +36.4%（超买）</li>
+<li>Oracle 期权信号看空（4.8分）</li>
+<li>高波动率 151%（年化）</li>
+<li><em>数据来源</em>：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz</li>
+</ul>
+<br>
+<h3>TSLA (风险提示 | 看空强度 2.6/10)</h3>
+<ul>
+<li>内幕大额抛售 $64,193,732（买入仅 $0）</li>
+<li>市场情绪略偏谨慎 44%</li>
+<li><em>数据来源</em>：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=real</li>
+</ul>
+<br>
+<h3>NVDA (风险提示 | 看空强度 3.1/10)</h3>
+<ul>
+<li>内幕大额抛售 $150,452,443（买入仅 $0）</li>
+<li>5日下跌 -7.5%</li>
+<li><em>数据来源</em>：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz</li>
+</ul>
+<br>
+<h2>7) 综合判断 &amp; 信号强度</h2>
+<br>
+<p>| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |</p>
+<p>|------|------|--------|------|---------------|-------|---------|</p>
+<p>| <strong>MSFT</strong> | BULLISH | 7.6 | Y | 4/0/3 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<p>| <strong>BILI</strong> | BULLISH | 5.4 | N | 3/0/4 | 93% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<p>| <strong>META</strong> | BULLISH | 4.9 | N | 3/0/4 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<p>| <strong>AMZN</strong> | BULLISH | 4.9 | N | 3/0/4 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<p>| <strong>VKTX</strong> | NEUTRAL | 4.8 | N | 2/0/5 | 93% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<p>| <strong>RKLB</strong> | NEUTRAL | 4.5 | N | 2/0/5 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<p>| <strong>CRCL</strong> | NEUTRAL | 4.5 | N | 1/1/5 | 93% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<p>| <strong>TSLA</strong> | BULLISH | 4.4 | N | 3/0/4 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<p>| <strong>NVDA</strong> | BULLISH | 4.2 | N | 3/0/4 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<br>
+<h3>评分调整说明</h3>
+<br>
+<ul>
+<li><strong>NVDA</strong>：🛡️ 风控折扣-0.04</li>
+</ul>
+<br>
+<h3>交叉验证详情</h3>
+<br>
+<ul>
+<li><strong>MSFT</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分7.5</li>
+<li><strong>BILI</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分5.8</li>
+<li><strong>META</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分5.7</li>
+<li><strong>AMZN</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分5.2</li>
+<li><strong>VKTX</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分6.0</li>
+<li><strong>RKLB</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20</li>
+<li><strong>CRCL</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分6.2</li>
+<li><strong>TSLA</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分5.4</li>
+<li><strong>NVDA</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 0.95 | 历史5条:多5/空0,均分6.8</li>
+</ul>
+<br>
+<h2>📊 投资组合集中度分析 ⚠️</h2>
+<br>
+<p><strong>集中度风险</strong>：MEDIUM | <strong>综合评分</strong>：5.0/10</p>
+<br>
+<p><strong>板块分布</strong>：</p>
+<ul>
+<li>Technology：100%（MSFT）</li>
+</ul>
+<br>
+<p><strong>分散化建议</strong>：</p>
+<ul>
+<li>⚠ Technology板块占 100%（[&#x27;MSFT&#x27;]），建议补充其他板块标的</li>
+</ul>
+<br>
+<h2>🌐 宏观环境 🟡</h2>
+<br>
+<p><strong>宏观政体</strong>：NEUTRAL | <strong>评分</strong>：6.3/10</p>
+<br>
+<p>| 指标 | 数值 | 状态 |</p>
+<p>|------|------|------|</p>
+<p>| VIX | 19.9 | moderate |</p>
+<p>| 10Y利率 | 3.96% | moderate |</p>
+<p>| 大盘(5日) | -0.43% | neutral |</p>
+<p>| 美元 | — | neutral |</p>
+<br>
+<p><strong>顺风</strong>：VIX 19.9（低波动，风险偏好良好） | CPI同比 2.4%（通胀受控，货币政策友好）</p>
+<br>
+<h2>8) 数据来源 &amp; 免责声明</h2>
+<br>
+<p><strong>蜂群分工</strong>：</p>
+<ul>
+<li>ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）</li>
+<li>OracleBeeEcho：市场预期（期权 IV/P-C Ratio/Gamma）</li>
+<li>BuzzBeeWhisper：社交情绪（X/Reddit/Finviz）</li>
+<li>ChronosBeeHorizon：催化剂追踪（财报/事件日历）</li>
+<li>RivalBeeVanguard：竞争格局（ML 预测 + 行业对标）</li>
+<li>GuardBeeSentinel：交叉验证（共振检测 + 风险调整）</li>
+</ul>
+<br>
+<p><strong>免责声明</strong>：</p>
+<p>本报告为蜂群 AI 分析，不构成投资建议，不替代持牌投顾。预测存在误差，所有交易决策需自行判断和风控。</p>
+<br></div>
   </div>
 
   <!-- ── Historical Reports ── -->
   <div class="section" id="history">
     <div class="sec-title">📅 历史简报回溯</div>
     <div class="hist-list">
+                <div class="hist-card">
+                  <div class="hist-left">
+                    <div class="hist-date">2026-02-28</div>
+                    <div class="hist-meta">5 标的 · 均分 <span class="sc-m">6.5</span></div>
+                  </div>
+                  <div class="hist-mid"><div class="htop-chip">
+                      <span class="hticker">MSFT</span>
+                      <span class="hscore sc-h">7.6</span>
+                      <span class="hdir">🟡</span>
+                    </div><div class="htop-chip">
+                      <span class="hticker">QCOM</span>
+                      <span class="hscore sc-m">6.1</span>
+                      <span class="hdir">🟡</span>
+                    </div><div class="htop-chip">
+                      <span class="hticker">META</span>
+                      <span class="hscore sc-m">5.9</span>
+                      <span class="hdir">🟡</span>
+                    </div></div>
+                  <div class="hist-right"><a href="alpha-hive-daily-2026-02-28.json" class="hlink hlink-json">📊 JSON</a></div>
+                </div>
                 <div class="hist-card">
                   <div class="hist-left">
                     <div class="hist-date">2026-02-27</div>
@@ -894,14 +1547,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
     <div class="acc-dir-box acc-cold">
       <div class="cold-icon">🕐</div>
       <div class="cold-msg">系统正在积累预测记录，准确率数据将在 T+7 后自动显示<br>
-      当前已保存 <strong>36</strong> 条预测，等待价格验证中...</div>
+      当前已保存 <strong>45</strong> 条预测，等待价格验证中...</div>
     </div>
   </div>
 </div>
 
 <footer class="footer">
-  <p>🐝 Alpha Hive — 去中心化蜂群智能投资研究平台</p>
-  <p>更新：2026-02-28 20:39 PST | 5 标的 | SEC 真实数据 | 真实度 82%</p>
+  <p><span class="px-bee"></span> Alpha Hive — 去中心化蜂群智能投资研究平台</p>
+  <p>更新：2026-03-01 00:56 PST | 9 标的 | SEC 真实数据 | 真实度 95%</p>
   <p style="margin-top:8px;font-size:.82em;opacity:.6">
     声明：本报告由 AI 蜂群自动生成，仅供研究参考，不构成投资建议。所有决策请自行判断。
   </p>
@@ -931,6 +1584,25 @@ function filterTable(){
   });
 }
 
+// ── Table Sort ──
+document.querySelectorAll('#oppTable thead th').forEach(function(th,i){
+  th.addEventListener('click',function(){
+    var tbody=document.querySelector('#oppTable tbody');
+    var rows=Array.from(tbody.rows).filter(function(r){return r.style.display!=='none';});
+    var asc=th.getAttribute('data-sort')!=='asc';
+    document.querySelectorAll('#oppTable thead th').forEach(function(t){t.removeAttribute('data-sort');});
+    th.setAttribute('data-sort',asc?'asc':'desc');
+    rows.sort(function(a,b){
+      var av=a.cells[i].textContent.trim();
+      var bv=b.cells[i].textContent.trim();
+      var an=parseFloat(av),bn=parseFloat(bv);
+      if(!isNaN(an)&&!isNaN(bn)) return asc?an-bn:bn-an;
+      return asc?av.localeCompare(bv,'zh'):bv.localeCompare(av,'zh');
+    });
+    rows.forEach(function(r){tbody.appendChild(r);});
+  });
+});
+
 // ── Charts ──
 document.addEventListener('DOMContentLoaded',function(){
   var dark=document.documentElement.classList.contains('dark');
@@ -940,7 +1612,7 @@ document.addEventListener('DOMContentLoaded',function(){
   // F&G Gauge
   var fgCtx=document.getElementById('fgChart');
   if(fgCtx){
-    var fv=11;
+    var fv=14;
     var fc=fv<=25?'#ef4444':fv<=45?'#f97316':fv<=55?'#f59e0b':fv<=75?'#22c55e':'#16a34a';
     var fl='极度恐惧';
     new Chart(fgCtx,{
@@ -963,7 +1635,7 @@ document.addEventListener('DOMContentLoaded',function(){
   // Scores Bar
   var scCtx=document.getElementById('scoresChart');
   if(scCtx){
-    var sc=[["MSFT", 7.6], ["QCOM", 6.1], ["META", 5.9], ["BILI", 5.8], ["AMZN", 5.6], ["RKLB", 4.2], ["CRCL", 4.2], ["NVDA", 5.2], ["TSLA", 5.1], ["VKTX", 4.6]];
+    var sc=[["MSFT", 7.6], ["BILI", 5.4], ["META", 4.9], ["AMZN", 4.9], ["VKTX", 4.8], ["NVDA", 4.2], ["TSLA", 4.4], ["RKLB", 4.5], ["CRCL", 4.5]];
     var clrs=sc.map(function(x){return x[1]>=7?'rgba(34,197,94,.85)':x[1]>=5.5?'rgba(245,158,11,.85)':'rgba(239,68,68,.85)';});
     new Chart(scCtx,{
       type:'bar',
@@ -981,7 +1653,7 @@ document.addEventListener('DOMContentLoaded',function(){
   // Direction Donut
   var dirCtx=document.getElementById('dirChart');
   if(dirCtx){
-    var dd=[7, 0, 3];
+    var dd=[6, 0, 3];
     new Chart(dirCtx,{
       type:'doughnut',
       data:{labels:['看多','看空','中性'],
@@ -995,8 +1667,8 @@ document.addEventListener('DOMContentLoaded',function(){
   }
 
   // Radar per ticker
-  var rd={"MSFT": [44.0, 90.7, 48.0, 50.0, 50.0, 30.0], "QCOM": [23.0, 90.7, 49.0, 50.0, 50.0, 20.0], "META": [15.9, 88.0, 52.0, 50.0, 50.0, 20.0], "BILI": [48.7, 82.7, 43.0, 50.0, 50.0, 17.2], "AMZN": [25.9, 90.7, 56.0, 50.0, 50.0, 20.0], "RKLB": [79.4, 65.3, 42.0, 50.0, 50.0, 34.3], "CRCL": [14.2, 93.3, 54.0, 50.0, 50.0, 38.0], "NVDA": [31.7, 86.0, 43.0, 50.0, 50.0, 37.2], "TSLA": [2.2, 70.0, 52.0, 50.0, 50.0, 20.0], "VKTX": [24.8, 100.0, 49.0, 50.0, 50.0, 28.3]};
-  var rl=['IV Rank','P/C信号','情绪','聪明钱','催化剂','风险控制'];
+  var rd={"MSFT": [87.8, 63.0, 50.8, 89.3, 48.0], "BILI": [61.2, 74.5, 43.4, 60.5, 48.0], "META": [38.7, 63.0, 51.7, 73.3, 48.0], "AMZN": [36.0, 55.0, 47.8, 81.0, 48.0], "VKTX": [39.7, 55.0, 48.7, 78.3, 48.0], "NVDA": [26.9, 68.9, 48.1, 59.5, 38.0], "TSLA": [37.6, 55.0, 44.6, 54.0, 48.0], "RKLB": [39.8, 55.0, 42.7, 64.9, 48.0], "CRCL": [35.0, 55.0, 57.8, 48.5, 48.0]};
+  var rl=['信号强度','催化剂','情绪','赔率','风险控制'];
   Object.keys(rd).forEach(function(tk){
     var cv=document.getElementById('radar-'+tk);
     if(!cv)return;

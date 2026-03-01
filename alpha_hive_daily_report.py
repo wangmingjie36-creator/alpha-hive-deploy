@@ -463,18 +463,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
             except (OSError, ValueError, RuntimeError) as e:
                 _log.warning("MetricsCollector 初始化失败: %s", e)
 
-        # Phase 2: 共享线程池（替代所有 daemon 线程，退出时等待完成）
-        import atexit
-        self._bg_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="hive_bg")
-        self._bg_futures = []
-        atexit.register(self._shutdown_bg)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self._shutdown_bg()
-
         # 财报自动监控器
         self.earnings_watcher = None
         if EarningsWatcher:
@@ -490,6 +478,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
                 self.slack_notifier = SlackReportNotifier()
             except (OSError, ValueError, RuntimeError, ConnectionError) as e:
                 _log.warning("Slack 通知器初始化失败: %s", e)
+
+        # Phase 2: 共享线程池（替代所有 daemon 线程，退出时等待完成）
+        import atexit
+        self._bg_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="hive_bg")
+        self._bg_futures = []
+        atexit.register(self._shutdown_bg)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._shutdown_bg()
 
     def _shutdown_bg(self) -> None:
         """atexit 处理器：等待后台任务完成"""
