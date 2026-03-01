@@ -2765,10 +2765,16 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
             # ── edgar_rss badge ──
             _rss_n = _add.get("ScoutBeeNova", {}).get("details", {}).get("insider", {}).get("rss_fresh_today", 0)
             _rss_badge = (f'<span class="rss-badge">📋 今日Form4 {_rss_n}份 🔴</span>' if _rss_n else "")
-            # ── thesis break 面板（仅 NVDA/VKTX/TSLA 有配置）──
-            _opp_d = opp_by_ticker.get(_tkrd, {})
-            _tb_l1 = _opp_d.get("thesis_break_l1") or _sdd.get("thesis_break_l1", [])
-            _tb_l2 = _opp_d.get("thesis_break_l2") or _sdd.get("thesis_break_l2", [])
+            # ── thesis break 面板（直接查询配置，不依赖 JSON 中转）──
+            try:
+                from thesis_breaks import ThesisBreakConfig as _TBC
+                _tb_cfg = _TBC.get_breaks_config(_tkrd)
+                _tb_l1 = [c["metric"] + "：" + c["trigger"]
+                          for c in _tb_cfg.get("level_1_warning", {}).get("conditions", [])] if _tb_cfg else []
+                _tb_l2 = [c["metric"] + "：" + c["trigger"]
+                          for c in _tb_cfg.get("level_2_stop_loss", {}).get("conditions", [])] if _tb_cfg else []
+            except Exception:
+                _tb_l1, _tb_l2 = [], []
             if _tb_l1 or _tb_l2:
                 _tb_html = '<div class="thesis-break-box">'
                 _tb_html += '<div class="tb-title">⚠️ 失效条件监控</div>'
