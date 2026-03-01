@@ -258,6 +258,8 @@ class ScoutBeeNova(BeeAgent):
                 insider_summary = f"SEC 数据不可用: {e}"
 
             # ---- 1b. P2: EDGAR RSS 实时流（当日新鲜 Form 4，先于 REST API 反应）----
+            rss_fresh_today = 0
+            rss_summary_text = ""
             try:
                 from edgar_rss import get_today_form4_alerts
                 from sec_edgar import SECEdgarClient as _SEC
@@ -265,6 +267,8 @@ class ScoutBeeNova(BeeAgent):
                 rss_alerts = get_today_form4_alerts(ticker, cik=_cik)
                 if rss_alerts.get("has_fresh_filings"):
                     fresh_n = rss_alerts["fresh_filings_count"]
+                    rss_fresh_today = fresh_n
+                    rss_summary_text = rss_alerts.get("summary", "")
                     # 当日新鲜申报信号：提升 insider_score 并在 summary 前注明
                     insider_score = min(10.0, insider_score + 0.5 * fresh_n)
                     rss_note = f"[今日{fresh_n}份实时Form4] "
@@ -382,6 +386,8 @@ class ScoutBeeNova(BeeAgent):
                         "dollar_bought": insider_data.get("dollar_bought", 0) if insider_data else 0,
                         "dollar_sold": insider_data.get("dollar_sold", 0) if insider_data else 0,
                         "notable_trades": (insider_data.get("notable_trades", [])[:3]) if insider_data else [],
+                        "rss_fresh_today": rss_fresh_today,
+                        "rss_summary": rss_summary_text,
                     },
                     "crowding_score": crowding_score,
                     "crowding_signal": round(crowding_signal, 2),

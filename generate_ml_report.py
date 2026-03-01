@@ -68,6 +68,14 @@ class MLEnhancedReportGenerator:
                 # 双重检查（防止并发重复训练）
                 if today not in self._model_cache and not self._check_disk_cache(today):
                     _log.info("初始化 ML 模型（首次训练）...")
+                    MIN_REAL_SAMPLES = 10
+                    real_data = self._build_real_training_data()
+                    if len(real_data) >= MIN_REAL_SAMPLES:
+                        _log.info("使用 %d 条真实验证数据训练 ML 模型", len(real_data))
+                        self.ml_service.data_builder.historical_records = real_data
+                    else:
+                        if real_data:
+                            _log.info("真实数据仅 %d 条（不足 %d），使用内置样本", len(real_data), MIN_REAL_SAMPLES)
                     self.ml_service.train_model()
                     # 缓存到内存
                     self._model_cache[today] = self.ml_service.model
@@ -81,6 +89,55 @@ class MLEnhancedReportGenerator:
                     else:
                         self._load_model_from_disk()
                         self._model_cache[today] = self.ml_service.model
+
+    def _build_real_training_data(self) -> list:
+        """从 pheromone.db 读取真实验证数据构建训练集（T+7 已验证）"""
+        try:
+            import sqlite3 as _sq3
+            import json as _json
+            from backtester import PredictionStore
+            ps = PredictionStore()
+            conn = _sq3.connect(ps.db_path)
+            conn.row_factory = _sq3.Row
+            rows = conn.execute("""
+                SELECT ticker, date, final_score, direction,
+                       dimension_scores, iv_rank, put_call_ratio,
+                       return_t7, correct_t7
+                FROM predictions
+                WHERE checked_t7 = 1
+                ORDER BY date DESC
+                LIMIT 200
+            """).fetchall()
+            conn.close()
+
+            def _cat_qual(v):
+                if v >= 8.5: return "A+"
+                if v >= 7.5: return "A"
+                if v >= 6.5: return "B+"
+                if v >= 5.5: return "B"
+                return "C"
+
+            result = []
+            for r in rows:
+                ds = _json.loads(r["dimension_scores"] or "{}")
+                result.append(TrainingData(
+                    ticker=r["ticker"],
+                    date=r["date"],
+                    crowding_score=ds.get("signal", 5.0) * 10,
+                    catalyst_quality=_cat_qual(ds.get("catalyst", 5.0)),
+                    momentum_5d=0.0,
+                    volatility=5.0,
+                    market_sentiment=(ds.get("sentiment", 5.0) - 5) * 20,
+                    actual_return_3d=float(r["return_t7"] or 0) * 0.4,
+                    actual_return_7d=float(r["return_t7"] or 0),
+                    actual_return_30d=float(r["return_t7"] or 0) * 2.5,
+                    win_3d=bool(r["correct_t7"]),
+                    win_7d=bool(r["correct_t7"]),
+                    win_30d=bool(r["correct_t7"]),
+                ))
+            return result
+        except Exception:
+            return []
 
     def _check_disk_cache(self, today: str) -> bool:
         """检查磁盘缓存是否存在且有效"""
@@ -201,14 +258,15 @@ class MLEnhancedReportGenerator:
     ) -> TrainingData:
         """为 ML 模型准备输入数据"""
 
-        # 从实时数据中提取特征
-        crowding_score = 63.5  # 示例，可以从 metrics 中获取
+        # 从实时数据中提取特征（有则用真实值，无则降级到合理默认）
+        _yf = metrics.get("sources", {}).get("yahoo_finance", {})
+        crowding_score = metrics.get("crowding_score",
+                                     _yf.get("short_interest_ratio", 50.0) * 10)
         catalyst_quality = analysis.get("recommendation", {}).get("rating", "B")
-        momentum_5d = metrics.get("sources", {}).get("yahoo_finance", {}).get(
-            "price_change_5d", 0
-        )
-        volatility = 5.0  # 示例波动率
-        market_sentiment = 45  # 示例情绪值
+        momentum_5d = _yf.get("price_change_5d", 0.0)
+        volatility = _yf.get("volatility_20d", _yf.get("atr_pct", 5.0))
+        _raw_sentiment = metrics.get("sentiment_score", 0.0)
+        market_sentiment = _raw_sentiment * 10 if abs(_raw_sentiment) <= 10 else _raw_sentiment
 
         # 映射评级到催化剂质量
         rating_to_quality = {

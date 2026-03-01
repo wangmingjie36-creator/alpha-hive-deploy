@@ -79,6 +79,10 @@ class PredictionStore:
             """)
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_date ON {self.TABLE}(date)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_ticker ON {self.TABLE}(ticker)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_checked_t7_date "
+                         f"ON {self.TABLE}(checked_t7, date)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS idx_pred_date_ticker "
+                         f"ON {self.TABLE}(date, ticker)")
             # 迁移：如果旧表缺少期权字段，添加它们
             self._migrate_options_columns(conn)
             conn.commit()
@@ -104,6 +108,15 @@ class PredictionStore:
                 conn.execute(f"ALTER TABLE {self.TABLE} ADD COLUMN {col_name} {col_type}")
             except sqlite3.OperationalError:
                 pass  # 列已存在
+        # 新增复合索引（幂等，IF NOT EXISTS 保证安全）
+        for idx_sql in [
+            f"CREATE INDEX IF NOT EXISTS idx_pred_checked_t7_date ON {self.TABLE}(checked_t7, date)",
+            f"CREATE INDEX IF NOT EXISTS idx_pred_date_ticker ON {self.TABLE}(date, ticker)",
+        ]:
+            try:
+                conn.execute(idx_sql)
+            except sqlite3.OperationalError:
+                pass
 
     def save_prediction(
         self,

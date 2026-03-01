@@ -596,6 +596,26 @@ class AlphaHiveDailyReporter:
         # 生成综合报告
         report = self._build_swarm_report(swarm_results, board, agent_count=len(all_agents))
 
+        # ── 失效条件快照（仅有配置的标的：NVDA/VKTX/TSLA）──
+        try:
+            from thesis_breaks import ThesisBreakConfig
+            for _opp in report.get("opportunities", []):
+                _tk = _opp.get("ticker", "")
+                _tb_cfg = ThesisBreakConfig.get_breaks_config(_tk)
+                if _tb_cfg:
+                    _l1 = [c["metric"] + "：" + c["trigger"]
+                           for c in _tb_cfg.get("level_1_warning", {}).get("conditions", [])]
+                    _l2 = [c["metric"] + "：" + c["trigger"]
+                           for c in _tb_cfg.get("level_2_stop_loss", {}).get("conditions", [])]
+                    _opp["thesis_break_l1"] = _l1
+                    _opp["thesis_break_l2"] = _l2
+                    # 同步写入 swarm_results 供 .swarm_results_*.json 持久化
+                    if _tk in swarm_results:
+                        swarm_results[_tk]["thesis_break_l1"] = _l1
+                        swarm_results[_tk]["thesis_break_l2"] = _l2
+        except Exception:
+            pass
+
         # Phase 3 P2: 为高分机会添加日历提醒（后台线程池，退出时等待完成）
         if self.calendar and report.get('opportunities'):
             for opp in report['opportunities']:
@@ -2388,6 +2408,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 .acc-cold{text-align:center;padding:40px 20px;color:var(--ts)}
 .acc-cold .cold-icon{font-size:2.5em;margin-bottom:8px}
 .acc-cold .cold-msg{font-size:.9em;line-height:1.6}
+.thesis-break-box{margin-top:10px;padding:10px;border-radius:8px;
+  background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.18)}
+.tb-title{font-size:.78em;font-weight:700;color:#dc2626;margin-bottom:6px}
+.tb-level{font-size:.72em;font-weight:600;padding:2px 6px;border-radius:4px;
+  display:inline-block;margin-bottom:4px}
+.tb-l1{background:rgba(245,158,11,.15);color:#b45309}
+.tb-l2{background:rgba(239,68,68,.15);color:#b91c1c}
+.tb-list{padding-left:14px;margin:0 0 6px}
+.tb-list li{font-size:.74em;color:var(--ts);margin-bottom:2px;line-height:1.4}
+.rss-badge{display:inline-block;padding:2px 7px;border-radius:5px;font-size:.72em;
+  font-weight:700;background:rgba(239,68,68,.12);color:#b91c1c;margin-left:6px}
 """
 
         # ── Build new Top-6 cards ──
@@ -2502,6 +2533,29 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
             _ml_exd = _Path(self.report_dir / f"alpha-hive-{_tkrd}-ml-enhanced-{date_str}.html").exists()
             _mlbtnd = (f'<a href="alpha-hive-{_tkrd}-ml-enhanced-{date_str}.html" class="ml-btn-cc">ML 增强分析 →</a>'
                        if _ml_exd else '<span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span>')
+            # ── edgar_rss badge ──
+            _rss_n = _add.get("ScoutBeeNova", {}).get("details", {}).get("insider", {}).get("rss_fresh_today", 0)
+            _rss_badge = (f'<span class="rss-badge">📋 今日Form4 {_rss_n}份 🔴</span>' if _rss_n else "")
+            # ── thesis break 面板（仅 NVDA/VKTX/TSLA 有配置）──
+            _opp_d = opp_by_ticker.get(_tkrd, {})
+            _tb_l1 = _opp_d.get("thesis_break_l1") or _sdd.get("thesis_break_l1", [])
+            _tb_l2 = _opp_d.get("thesis_break_l2") or _sdd.get("thesis_break_l2", [])
+            if _tb_l1 or _tb_l2:
+                _tb_html = '<div class="thesis-break-box">'
+                _tb_html += '<div class="tb-title">⚠️ 失效条件监控</div>'
+                if _tb_l1:
+                    _tb_html += '<div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list">'
+                    for _c in _tb_l1[:3]:
+                        _tb_html += f'<li>{_html.escape(str(_c))}</li>'
+                    _tb_html += '</ul>'
+                if _tb_l2:
+                    _tb_html += '<div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list">'
+                    for _c in _tb_l2[:3]:
+                        _tb_html += f'<li>{_html.escape(str(_c))}</li>'
+                    _tb_html += '</ul>'
+                _tb_html += '</div>'
+            else:
+                _tb_html = ""
             new_company_html += f"""
             <div class="company-card">
               <div class="cc-header" style="background:{_hcd};">
@@ -2520,7 +2574,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
                   <div class="radar-wrap"><canvas id="radar-{_html.escape(_tkrd)}" width="160" height="160"></canvas></div>
                 </div>
                 <ul class="cc-signals">{_bhtmld}</ul>
-                <div class="cc-footer">{_mlbtnd}</div>
+                {_tb_html}
+                <div class="cc-footer">{_rss_badge}{_mlbtnd}</div>
               </div>
             </div>"""
 
