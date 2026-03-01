@@ -2076,46 +2076,92 @@ class AlphaHiveDailyReporter:
 
         # Markdown → HTML 轻量渲染
         def _md2html(md_text: str) -> str:
+            def _inline(s: str) -> str:
+                """处理行内格式：加粗、斜体、代码、链接"""
+                s = _html.escape(s)
+                # 链接 [text](url) — 在 escape 之后处理（url 已被 escape）
+                s = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)',
+                            r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
+                # 内联代码 `code`
+                s = _re.sub(r'`([^`]+)`', r'<code>\1</code>', s)
+                # 加粗 **text**
+                s = _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', s)
+                # 斜体 *text*（避免误伤 **)
+                s = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', s)
+                return s
+
             lines = md_text.split('\n')
-            out, in_ul, in_sub = [], False, False
+            out = []
+            in_ul = False      # 无序列表
+            in_ol = False      # 有序列表
+            in_sub = False     # 缩进嵌套列表
+            ol_counter = 0
+
+            def _close_lists():
+                nonlocal in_ul, in_ol, in_sub, ol_counter
+                if in_sub:  out.append('</ul>');  in_sub = False
+                if in_ul:   out.append('</ul>');  in_ul = False
+                if in_ol:   out.append('</ol>');  in_ol = False; ol_counter = 0
+
             for ln in lines:
-                if ln.startswith('  - ') or ln.startswith('    - '):
+                # ── 缩进嵌套列表（2/4 空格 + -/+/*)
+                if _re.match(r'^( {2,4})[*+\-] ', ln):
                     if not in_sub:
                         out.append('<ul class="sub-ul">')
                         in_sub = True
-                    out.append('<li>' + _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', ln.lstrip('- ').strip()) + '</li>')
+                    out.append('<li>' + _inline(_re.sub(r'^ {2,4}[*+\-] ', '', ln)) + '</li>')
                     continue
                 if in_sub:
                     out.append('</ul>')
                     in_sub = False
-                if ln.startswith('- '):
+
+                # ── 有序列表 1. 2. 3.
+                _ol_m = _re.match(r'^(\d+)\. (.+)', ln)
+                if _ol_m:
+                    if in_ul: out.append('</ul>'); in_ul = False
+                    if not in_ol:
+                        out.append('<ol>')
+                        in_ol = True
+                    out.append('<li>' + _inline(_ol_m.group(2)) + '</li>')
+                    continue
+
+                # ── 无序列表 - / + / *
+                if _re.match(r'^[*+\-] ', ln):
+                    if in_ol: out.append('</ol>'); in_ol = False; ol_counter = 0
                     if not in_ul:
                         out.append('<ul>')
                         in_ul = True
-                    out.append('<li>' + _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', ln[2:]) + '</li>')
+                    out.append('<li>' + _inline(ln[2:]) + '</li>')
                     continue
-                if in_ul and not ln.startswith(' '):
-                    out.append('</ul>')
-                    in_ul = False
+
+                # 非列表行：关闭打开的列表
+                if (in_ul or in_ol) and not ln.startswith(' '):
+                    _close_lists()
+
+                # ── 标题
                 if ln.startswith('#### '):
-                    out.append('<h4>' + _html.escape(ln[5:]) + '</h4>')
+                    out.append('<h4>' + _inline(ln[5:]) + '</h4>')
                 elif ln.startswith('### '):
-                    out.append('<h3>' + _html.escape(ln[4:]) + '</h3>')
+                    out.append('<h3>' + _inline(ln[4:]) + '</h3>')
                 elif ln.startswith('## '):
-                    out.append('<h2>' + _html.escape(ln[3:]) + '</h2>')
+                    out.append('<h2>' + _inline(ln[3:]) + '</h2>')
                 elif ln.startswith('# '):
-                    out.append('<h1>' + _html.escape(ln[2:]) + '</h1>')
-                elif ln.startswith('---'):
+                    out.append('<h1>' + _inline(ln[2:]) + '</h1>')
+                # ── 引用块 > text
+                elif ln.startswith('> '):
+                    out.append('<blockquote>' + _inline(ln[2:]) + '</blockquote>')
+                # ── 分隔线
+                elif _re.match(r'^-{3,}$|^\*{3,}$|^_{3,}$', ln.strip()):
                     out.append('<hr>')
+                # ── 空行
                 elif not ln.strip():
-                    if not (in_ul or in_sub):
+                    if not (in_ul or in_ol or in_sub):
                         out.append('<br>')
+                # ── 普通段落
                 else:
-                    out.append('<p>' + _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', _html.escape(ln)) + '</p>')
-            if in_sub:
-                out.append('</ul>')
-            if in_ul:
-                out.append('</ul>')
+                    out.append('<p>' + _inline(ln) + '</p>')
+
+            _close_lists()
             return '\n'.join(out)
 
         _rpt_body = ""

@@ -17,6 +17,15 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 try:
+    import pandas as _pd
+    from pandas.tseries.holiday import USFederalHolidayCalendar as _USCal
+    from pandas.tseries.offsets import CustomBusinessDay as _CBDay
+    _US_BDAY = _CBDay(calendar=_USCal())
+    _BDAY_AVAILABLE = True
+except Exception:
+    _BDAY_AVAILABLE = False
+
+try:
     import yfinance as yf
 except ImportError:
     yf = None
@@ -471,14 +480,23 @@ class Backtester:
     def _get_price_at_date(
         self, ticker: str, predict_date: str, days_ahead: int
     ) -> Optional[float]:
-        """获取预测日后 N 天的收盘价"""
+        """获取预测日后 N 个交易日的收盘价（跳过周末和美国法定假日）"""
         if yf is None:
             return None
 
         try:
-            target_date = datetime.strptime(predict_date, "%Y-%m-%d") + timedelta(days=days_ahead)
-            # 向后多取几天以覆盖周末/假日
-            end_date = target_date + timedelta(days=5)
+            start = datetime.strptime(predict_date, "%Y-%m-%d")
+            if _BDAY_AVAILABLE:
+                # 用 pandas CustomBusinessDay 计算真实交易日偏移
+                import pandas as _pd
+                target_ts = _pd.Timestamp(start) + days_ahead * _US_BDAY
+                target_date = target_ts.to_pydatetime()
+            else:
+                # 降级：自然日偏移（原行为）
+                target_date = start + timedelta(days=days_ahead)
+
+            # 向后留 10 天窗口应对节假日连休
+            end_date = target_date + timedelta(days=10)
 
             stock = yf.Ticker(ticker)
             hist = stock.history(
@@ -489,7 +507,7 @@ class Backtester:
             if hist.empty:
                 return None
 
-            # 取第一个交易日的收盘价
+            # 取目标交易日（或之后第一个交易日）的收盘价
             return float(hist["Close"].iloc[0])
 
         except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
