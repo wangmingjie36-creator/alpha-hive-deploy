@@ -5,10 +5,9 @@
 """
 
 import json
-import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict
 from enum import Enum
 
 from hive_logger import PATHS, get_logger

@@ -5,13 +5,12 @@
 """
 
 import logging as _logging
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Optional
+from dataclasses import dataclass, field
+from typing import List, Dict
 from threading import RLock
-from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait, FIRST_EXCEPTION
+from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait
 from datetime import datetime
 import atexit
-import json
 
 _log = _logging.getLogger("alpha_hive.pheromone_board")
 

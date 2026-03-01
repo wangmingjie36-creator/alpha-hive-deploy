@@ -7,7 +7,7 @@ import json
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List
 from hive_logger import PATHS, get_logger, atomic_json_write
 
 _log = get_logger("data_fetcher")

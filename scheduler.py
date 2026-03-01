@@ -6,7 +6,6 @@
 
 import schedule
 import time
-import json
 import subprocess
 from datetime import datetime
 import logging

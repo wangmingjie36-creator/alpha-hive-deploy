@@ -5,7 +5,6 @@
 """
 
 import logging as _logging
-import json
 import os
 import requests
 from typing import Optional

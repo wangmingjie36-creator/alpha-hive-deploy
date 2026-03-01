@@ -13,14 +13,11 @@ Alpha Hive - 指标收集器 (Week 4 可观测性)
     summary = mc.get_summary(days=7)
 """
 
-import json
 import os
 import sqlite3
-import time
 import threading
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from hive_logger import PATHS, get_logger
 

@@ -5,7 +5,7 @@
 
 import json
 from datetime import datetime
-from typing import List, Dict, Tuple
+from typing import Dict
 
 class ThesisBreakConfig:
     """针对不同标的的失效条件配置"""

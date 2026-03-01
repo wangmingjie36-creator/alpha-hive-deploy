@@ -5,8 +5,8 @@
 
 import json
 import os
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
+from datetime import datetime
+from typing import Dict, List
 import statistics
 from dataclasses import dataclass
 

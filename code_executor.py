@@ -9,20 +9,15 @@ import subprocess
 import os
 import sys
 import time
-import json
-import tempfile
-import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-import signal
 
 _log = _logging.getLogger("alpha_hive.code_executor")
 
 
 class ExecutionTimeout(Exception):
     """执行超时异常"""
-    pass
 
 
 class CodeExecutor:

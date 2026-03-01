@@ -10,13 +10,11 @@ SEC EDGAR 内幕交易（Form 4）数据采集模块
 """
 
 import json
-import os
 import threading
 import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 try:
     import requests

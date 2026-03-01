@@ -6,8 +6,8 @@
 import logging as _logging
 import json
 import os
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
+from datetime import datetime
+from typing import Dict, List
 from statistics import mean, stdev
 
 _log = _logging.getLogger("alpha_hive.feedback_loop")

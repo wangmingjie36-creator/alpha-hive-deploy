@@ -18,7 +18,6 @@ Agent → 维度映射：
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 from pheromone_board import PheromoneBoard, PheromoneEntry
-import json
 import logging as _logging
 import math
 
@@ -232,7 +231,6 @@ class BeeAgent(ABC):
             - source: 数据来源
             - dimension: 对应的 5 维维度名 ("signal"/"catalyst"/"sentiment"/"odds"/"risk_adj")
         """
-        pass
 
     def _publish(self, ticker: str, discovery: str, source: str, score: float, direction: str):
         """发布发现到信息素板"""
@@ -1158,7 +1156,7 @@ class ChronosBeeHorizon(BeeAgent):
 
             # 2. 补充 CatalystTimeline（已有的硬编码催化剂）
             try:
-                from catalyst_refinement import CatalystTimeline, create_nvda_catalysts, create_vktx_catalysts
+                from catalyst_refinement import create_nvda_catalysts, create_vktx_catalysts
                 if ticker == "NVDA":
                     timeline = create_nvda_catalysts()
                 elif ticker == "VKTX":

@@ -5,8 +5,8 @@
 
 import logging as _logging
 import json
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
+from datetime import datetime
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 import statistics
 

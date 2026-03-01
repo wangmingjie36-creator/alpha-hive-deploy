@@ -13,7 +13,7 @@
 
 import logging
 import math
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 _log = logging.getLogger("alpha_hive.portfolio_concentration")
 

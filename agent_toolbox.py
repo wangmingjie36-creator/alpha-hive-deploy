@@ -12,7 +12,6 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
-import sys
 
 _log = _logging.getLogger("alpha_hive.toolbox")
 

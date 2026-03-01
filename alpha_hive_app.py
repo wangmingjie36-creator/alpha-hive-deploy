@@ -13,10 +13,9 @@ import random
 import sqlite3
 import os
 from datetime import datetime
-from threading import Thread, Lock
+from threading import Thread
 from pathlib import Path
 from queue import Queue, Empty
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging as _logging
 
 _log = _logging.getLogger("alpha_hive.app")

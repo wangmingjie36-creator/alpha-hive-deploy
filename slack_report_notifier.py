@@ -5,7 +5,6 @@
 替代 Gmail，提供实时、富文本的通知体验
 """
 
-import json
 import os
 import requests
 from typing import Dict, List, Optional

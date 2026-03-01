@@ -18,7 +18,7 @@ import logging
 import os
 import time
 import threading
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 _log = logging.getLogger("alpha_hive.fred_macro")
 
@@ -358,7 +358,6 @@ def get_macro_risk_adjustment(macro: Dict) -> Tuple:
         (adjustment: float, description: str)
         adjustment: -2.0 ~ +1.5（对 guard score 的加减分）
     """
-    from typing import Tuple
     regime = macro.get("macro_regime", "neutral")
     vix_regime = macro.get("vix_regime", "elevated")
     score = macro.get("macro_score", 5.0)

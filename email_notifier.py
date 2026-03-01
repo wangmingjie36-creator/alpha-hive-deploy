@@ -8,7 +8,7 @@ import logging as _logging
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Optional, List
+from typing import List
 from alert_manager import Alert, AlertLevel
 from datetime import datetime
 

@@ -12,9 +12,8 @@
 """
 
 import logging
-import math
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Dict
 
 _log = logging.getLogger("alpha_hive.unusual_options")
 

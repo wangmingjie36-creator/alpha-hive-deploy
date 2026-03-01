@@ -11,7 +11,6 @@
 - 自动归档与清理（按保留期限）
 """
 
-import json
 import time
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
@@ -23,7 +22,6 @@ _log = get_logger("vector_memory")
 
 try:
     import chromadb
-    from chromadb.config import Settings
     CHROMA_AVAILABLE = True
 except ImportError:
     CHROMA_AVAILABLE = False

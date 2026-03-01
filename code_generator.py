@@ -4,7 +4,7 @@
 自动生成数据爬取、分析、可视化代码
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 
 
 class CodeGenerator:

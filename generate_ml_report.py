@@ -8,14 +8,12 @@ import json
 import argparse
 from datetime import datetime
 from pathlib import Path
-from threading import Lock, Thread
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import queue
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
 from advanced_analyzer import AdvancedAnalyzer
 from ml_predictor import (
     MLPredictionService,
     TrainingData,
-    HistoricalDataBuilder,
 )
 from config import WATCHLIST
 from hive_logger import PATHS, get_logger

@@ -8,7 +8,7 @@ import logging as _logging
 import json
 from typing import Dict, Any, Optional
 from swarm_agents import BeeAgent
-from pheromone_board import PheromoneBoard, PheromoneEntry
+from pheromone_board import PheromoneBoard
 from code_executor import CodeExecutor
 from code_generator import CodeGenerator
 from debugger import Debugger

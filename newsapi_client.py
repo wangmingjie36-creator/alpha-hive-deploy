@@ -34,7 +34,7 @@ except ImportError:
 
 # 导入清洗工具（与 Agent 层保持一致）
 try:
-    from models import clean_score, clean_direction, clean_string
+    from models import clean_score
     _MODELS_OK = True
 except ImportError:
     _MODELS_OK = False

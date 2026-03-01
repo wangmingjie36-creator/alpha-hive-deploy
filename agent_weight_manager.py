@@ -5,7 +5,7 @@
 """
 
 import logging as _logging
-from typing import Dict, Optional
+from typing import Dict
 from datetime import datetime
 import threading
 
@@ -81,8 +81,7 @@ class AgentWeightManager:
             if self._cache_timestamp:
                 age_seconds = (datetime.now() - self._cache_timestamp).total_seconds()
                 if age_seconds > self._cache_ttl_seconds:
-                    # 缓存过期，刷新
-                    pass
+                    _log.debug("权重缓存已过期 (%.0fs > %ds)，刷新中", age_seconds, self._cache_ttl_seconds)
                 else:
                     # 缓存有效，返回
                     return self._weights_cache.copy()
@@ -177,12 +176,28 @@ class AgentWeightManager:
                 _log.error("recalculate_all_weights(%s) 失败: %s", agent_id, e, exc_info=True)
                 new_weights[agent_id] = 1.0
 
+        # 归一化权重（保证相对比例不变但均值 = 1.0）
+        new_weights = self._rebalance_weights(new_weights)
+
         # 更新缓存
         with self._lock:
             self._weights_cache = new_weights
             self._cache_timestamp = datetime.now()
 
         return new_weights
+
+    @staticmethod
+    def _rebalance_weights(weights: Dict[str, float]) -> Dict[str, float]:
+        """归一化权重，使均值 = 1.0（保持相对比例，消除浮点误差积累）"""
+        if not weights:
+            return weights
+        n = len(weights)
+        total = sum(weights.values())
+        if total <= 0 or n == 0:
+            return {k: 1.0 for k in weights}
+        # 目标：均值 = 1.0 → 总和 = n
+        scale = n / total
+        return {k: round(v * scale, 4) for k, v in weights.items()}
 
     def print_weight_summary(self) -> None:
         """打印权重摘要"""
