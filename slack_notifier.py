@@ -28,8 +28,13 @@ class SlackNotifier:
             self.webhook_url = self._read_webhook_from_file()
 
     def _read_webhook_from_file(self) -> Optional[str]:
-        """从文件安全读取 Webhook URL"""
-        webhook_file = "~/.alpha_hive_slack_webhook".replace("~", os.path.expanduser("~"))
+        """从环境变量或文件安全读取 Webhook URL"""
+        # 优先使用环境变量
+        env_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+        if env_url:
+            return env_url
+        # 降级到文件
+        webhook_file = os.path.expanduser("~/.alpha_hive_slack_webhook")
         try:
             with open(webhook_file, 'r') as f:
                 return f.read().strip()
