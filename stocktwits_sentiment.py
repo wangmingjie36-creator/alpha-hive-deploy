@@ -31,7 +31,11 @@ CACHE_DIR = Path(__file__).parent / "stocktwits_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
 STOCKTWITS_BASE = "https://api.stocktwits.com/api/2"
-CACHE_TTL = 300  # 5 分钟
+try:
+    from config import CACHE_CONFIG as _CC
+    CACHE_TTL = _CC["ttl"].get("stocktwits", 300)
+except (ImportError, KeyError):
+    CACHE_TTL = 300
 
 
 def _load_token() -> Optional[str]:

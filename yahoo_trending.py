@@ -30,7 +30,11 @@ except ImportError:
     _req = None
 
 _CACHE_PATH = Path(__file__).parent / "cache" / "yahoo_trending.json"
-_CACHE_TTL = 900  # 15 分钟（热搜变化不快）
+try:
+    from config import CACHE_CONFIG as _CC
+    _CACHE_TTL = _CC["ttl"].get("yahoo_trending", 900)
+except (ImportError, KeyError):
+    _CACHE_TTL = 900
 _lock = threading.Lock()
 
 

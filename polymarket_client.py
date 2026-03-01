@@ -29,6 +29,13 @@ _log = get_logger("polymarket")
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 CACHE_DIR = PATHS.home / "polymarket_cache"
 CACHE_DIR.mkdir(exist_ok=True)
+try:
+    from config import CACHE_CONFIG as _CC
+    _PM_TTL = _CC["ttl"].get("polymarket", 900)
+    _PM_MACRO_TTL = _CC["ttl"].get("polymarket_macro", 1800)
+except (ImportError, KeyError):
+    _PM_TTL = 900
+    _PM_MACRO_TTL = 1800
 
 # 股票/经济事件相关关键词
 STOCK_KEYWORDS = [
@@ -78,12 +85,12 @@ class PolymarketClient:
         query: 搜索词（如 "NVDA", "Fed rate"）
         返回: [{slug, question, outcomes, prices, volume_24h, ...}]
         """
-        # 磁盘缓存 15 分钟
+        # 磁盘缓存
         cache_key = f"search_{query.lower().replace(' ', '_')}"
         cache_path = CACHE_DIR / f"{cache_key}.json"
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
-            if age < 900:
+            if age < _PM_TTL:
                 try:
                     with open(cache_path) as f:
                         return json.load(f)
@@ -142,11 +149,11 @@ class PolymarketClient:
             odds_signal: str
         }
         """
-        # 缓存 15 分钟
+        # 缓存
         cache_path = CACHE_DIR / f"{ticker.upper()}_odds.json"
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
-            if age < 900:
+            if age < _PM_TTL:
                 try:
                     with open(cache_path) as f:
                         return json.load(f)
@@ -282,7 +289,7 @@ class PolymarketClient:
         cache_path = CACHE_DIR / "macro_events.json"
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
-            if age < 1800:  # 30 分钟缓存
+            if age < _PM_MACRO_TTL:
                 try:
                     with open(cache_path) as f:
                         return json.load(f)

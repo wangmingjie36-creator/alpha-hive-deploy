@@ -42,7 +42,11 @@ def _load_fred_key() -> str:
 
 _CACHE: Dict = {}
 _CACHE_TS: float = 0.0
-_CACHE_TTL = 1800  # 宏观数据 30 分钟缓存（不频繁变化）
+try:
+    from config import CACHE_CONFIG as _CC
+    _CACHE_TTL = _CC["ttl"].get("fred_macro", 1800)
+except (ImportError, KeyError):
+    _CACHE_TTL = 1800
 _lock = threading.Lock()
 
 

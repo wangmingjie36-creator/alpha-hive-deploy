@@ -35,6 +35,11 @@ CACHE_DIR.mkdir(exist_ok=True)
 # SEC 要求的 User-Agent
 SEC_USER_AGENT = "AlphaHive research@alphahive.dev"
 SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept": "application/json"}
+try:
+    from config import CACHE_CONFIG as _CC
+    _SEC_CIK_TTL = _CC["ttl"].get("sec_cik", 86400)
+except (ImportError, KeyError):
+    _SEC_CIK_TTL = 86400
 
 
 class SECEdgarClient:
@@ -53,7 +58,7 @@ class SECEdgarClient:
         # 缓存有效期 24 小时
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
-            if age < 86400:
+            if age < _SEC_CIK_TTL:
                 try:
                     with open(cache_path) as f:
                         data = json.load(f)

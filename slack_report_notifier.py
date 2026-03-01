@@ -401,12 +401,17 @@ class SlackReportNotifier:
             return False
 
         try:
+            from resilience import slack_breaker
+            if not slack_breaker.allow_request():
+                print("⚠️  Slack circuit breaker OPEN, skipping")
+                return False
             response = requests.post(
                 self.webhook_url,
                 json=payload,
-                timeout=10
+                timeout=15
             )
             response.raise_for_status()
+            slack_breaker.record_success()
 
             if response.status_code == 200:
                 print("✅ Slack 消息发送成功")
@@ -416,6 +421,11 @@ class SlackReportNotifier:
                 return False
 
         except requests.exceptions.RequestException as e:
+            try:
+                from resilience import slack_breaker as _sb
+                _sb.record_failure()
+            except ImportError:
+                pass
             print(f"❌ Slack 发送失败: {e}")
             return False
 

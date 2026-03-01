@@ -40,6 +40,14 @@ except ImportError:
 CACHE_DIR = PATHS.home / "earnings_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
+try:
+    from config import CACHE_CONFIG as _CC
+    _EARN_DATE_TTL = _CC["ttl"].get("earnings_date", 43200)
+    _EARN_RESULTS_TTL = _CC["ttl"].get("earnings_results", 1800)
+except (ImportError, KeyError):
+    _EARN_DATE_TTL = 43200
+    _EARN_RESULTS_TTL = 1800
+
 # yfinance 请求间隔（避免限速）
 _yf_lock = threading.Lock()
 _last_yf_request = 0.0
@@ -78,7 +86,7 @@ class EarningsWatcher:
         cache_path = CACHE_DIR / f"{ticker.upper()}_date.json"
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
-            if age < 43200:  # 12h
+            if age < _EARN_DATE_TTL:
                 try:
                     with open(cache_path) as f:
                         data = json.load(f)
@@ -218,11 +226,11 @@ class EarningsWatcher:
             source, fetched_at
         }
         """
-        # 缓存 30 分钟（财报后数据短期内不变）
+        # 缓存
         cache_path = CACHE_DIR / f"{ticker.upper()}_results.json"
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
-            if age < 1800:
+            if age < _EARN_RESULTS_TTL:
                 try:
                     with open(cache_path) as f:
                         return json.load(f)

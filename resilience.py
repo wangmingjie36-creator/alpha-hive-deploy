@@ -220,3 +220,14 @@ polymarket_breaker = CircuitBreaker("polymarket", failure_threshold=5, recovery_
 # yfinance: ~3 req/s
 yfinance_limiter = RateLimiter(rate=3.0, burst=2)
 yfinance_breaker = CircuitBreaker("yfinance", failure_threshold=5, recovery_timeout=90.0)
+
+# Reddit (ApeWisdom): 保守限流
+reddit_limiter = RateLimiter(rate=1.0, burst=1)
+reddit_breaker = CircuitBreaker("reddit", failure_threshold=5, recovery_timeout=60.0)
+
+# Finviz: 限流严格
+finviz_limiter = RateLimiter(rate=0.5, burst=1)
+finviz_breaker = CircuitBreaker("finviz", failure_threshold=3, recovery_timeout=120.0)
+
+# Slack webhook: 低频发送
+slack_breaker = CircuitBreaker("slack", failure_threshold=3, recovery_timeout=300.0)

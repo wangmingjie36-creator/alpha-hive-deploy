@@ -29,6 +29,11 @@ except ImportError:
 
 CACHE_DIR = Path(__file__).parent / "finviz_cache"
 CACHE_DIR.mkdir(exist_ok=True)
+try:
+    from config import CACHE_CONFIG as _CC
+    _FINVIZ_TTL = _CC["ttl"].get("finviz", 900)
+except (ImportError, KeyError):
+    _FINVIZ_TTL = 900
 
 # 情绪关键词
 BULLISH_WORDS = [
@@ -68,7 +73,7 @@ class FinvizSentimentClient:
         cache_path = CACHE_DIR / f"{ticker.upper()}_titles.json"
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
-            if age < 900:  # 15 分钟缓存
+            if age < _FINVIZ_TTL:
                 try:
                     with open(cache_path) as f:
                         return json.load(f)
@@ -77,6 +82,14 @@ class FinvizSentimentClient:
 
         if requests is None:
             return []
+
+        try:
+            from resilience import finviz_breaker
+            if not finviz_breaker.allow_request():
+                _log.debug("Finviz circuit breaker OPEN, skipping %s", ticker)
+                return []
+        except ImportError:
+            finviz_breaker = None
 
         try:
             self._throttle()
@@ -99,6 +112,9 @@ class FinvizSentimentClient:
             titles = re.findall(r'class="tab-link-news"[^>]*>([^<]+)<', news_html)
             titles = [t.strip() for t in titles if t.strip()][:max_titles]
 
+            if finviz_breaker:
+                finviz_breaker.record_success()
+
             try:
                 atomic_json_write(cache_path, titles)
             except (OSError, TypeError) as exc:
@@ -107,6 +123,8 @@ class FinvizSentimentClient:
             return titles
 
         except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+            if finviz_breaker:
+                finviz_breaker.record_failure()
             _log.warning("Finviz 新闻抓取失败 (%s): %s", ticker, e)
             return []
 

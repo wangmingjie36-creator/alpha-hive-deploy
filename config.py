@@ -59,13 +59,28 @@ API_KEYS = {
 CACHE_CONFIG = {
     "enabled": True,
     "cache_dir": str(PATHS.cache_dir),
-    "ttl": {  # 缓存过期时间（秒）
-        "stocktwits": 3600,  # 1 小时
-        "polymarket": 300,   # 5 分钟（频繁变化）
-        "yahoo_finance": 300,  # 5 分钟
-        "google_trends": 86400,  # 24 小时
-        "seeking_alpha": 86400,  # 24 小时
-        "sec_edgar": 604800,  # 7 天
+    "ttl": {  # 缓存过期时间（秒）— 所有模块从此处读取，避免硬编码
+        # 高频数据源（5~15 分钟）
+        "stocktwits": 300,        # 5 分钟
+        "polymarket": 900,        # 15 分钟
+        "polymarket_macro": 1800, # 30 分钟
+        "yahoo_finance": 300,     # 5 分钟
+        "yahoo_trending": 900,    # 15 分钟
+        "unusual_options": 300,   # 5 分钟
+        "reddit": 600,            # 10 分钟（磁盘）
+        "reddit_memory": 300,     # 5 分钟（内存）
+        "finviz": 900,            # 15 分钟
+        "edgar_rss": 900,         # 15 分钟
+        # 中频数据源（1~24 小时）
+        "stocktwits_legacy": 3600,  # 1 小时（data_fetcher 旧路径）
+        "google_trends": 86400,   # 24 小时
+        "seeking_alpha": 86400,   # 24 小时
+        "sec_cik": 86400,         # 24 小时
+        "fred_macro": 1800,       # 30 分钟
+        "earnings_date": 43200,   # 12 小时
+        # 低频数据源（7 天+）
+        "sec_edgar": 604800,      # 7 天
+        "earnings_results": 1800,    # 30 分钟
     }
 }
 
@@ -243,9 +258,13 @@ RUNTIME_CONFIG = {
     "debug": True,
     "log_file": str(PATHS.logs_dir / "data_fetcher.log"),
     "max_retries": 3,
-    "timeout": 10,  # 请求超时（秒）
+    "timeout": 15,  # 请求超时（秒）— 全局统一 15s
     "rate_limit_delay": 1,  # 请求间延迟（秒）
 }
+
+# ==================== 网络请求统一配置 ====================
+# 所有 HTTP 请求统一使用此 timeout，避免各模块硬编码不一致
+HTTP_TIMEOUT = 15  # 秒（原各模块混用 10/12/15，统一为 15）
 
 # ==================== 催化剂日期 ====================
 CATALYSTS = {
@@ -412,13 +431,20 @@ CATALYSTS = {
 
 # ==================== 评分权重（5维评估）====================
 # 键名必须与 QueenDistiller.DEFAULT_WEIGHTS 一致（risk_adj 不是 risk_adjustment）
-# OracleBeeEcho 的期权信号已归入 odds 维度，无需单独 options 维度
+#
+# 架构说明：
+#   - 5 个主维度参与加权平均（权重和 = 1.0）
+#   - Options 数据 → OracleBeeEcho 内部融合（55% options + 35% polymarket + 10% unusual）→ odds 维度
+#   - ML 预测 → RivalBeeVanguard → dimension="ml_auxiliary" → 不参与主公式
+#     作为独立调整项附加：final_score += (ml_score - 5.0) * 0.1 * ml_confidence（最大 ±0.5 分）
+#   - 两者不存在双重计算
 EVALUATION_WEIGHTS = {
     "signal":    0.30,   # ScoutBeeNova: SEC 披露 + 聪明钱 + 拥挤度
     "catalyst":  0.20,   # ChronosBeeHorizon: 催化剂与时间线
     "sentiment": 0.20,   # BuzzBeeWhisper: 情绪与叙事
-    "odds":      0.15,   # OracleBeeEcho: 期权 IV + 市场赔率
+    "odds":      0.15,   # OracleBeeEcho: 期权 IV(55%) + Polymarket(35%) + 异动(10%)
     "risk_adj":  0.15,   # GuardBeeSentinel: 交叉验证 + 风险调整
+    # ml_auxiliary: 不在此处（RivalBeeVanguard 作为 ±0.5 独立调整项）
 }
 
 # ==================== 期权评分阈值 ====================

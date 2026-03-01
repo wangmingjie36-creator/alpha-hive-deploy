@@ -32,6 +32,13 @@ CACHE_DIR.mkdir(exist_ok=True)
 
 # ApeWisdom API
 APEWISDOM_BASE = "https://apewisdom.io/api/v1.0"
+try:
+    from config import CACHE_CONFIG as _CC
+    _REDDIT_MEM_TTL = _CC["ttl"].get("reddit_memory", 300)
+    _REDDIT_DISK_TTL = _CC["ttl"].get("reddit", 600)
+except (ImportError, KeyError):
+    _REDDIT_MEM_TTL = 300
+    _REDDIT_DISK_TTL = 600
 
 
 class RedditSentimentClient:
@@ -55,16 +62,16 @@ class RedditSentimentClient:
 
         filter_name: all-stocks | wallstreetbets | stocks | investing | options
         """
-        # 内存缓存 5 分钟
+        # 内存缓存
         cached = self._ranking_cache.get(filter_name)
-        if cached and (time.time() - cached["timestamp"]) < 300:
+        if cached and (time.time() - cached["timestamp"]) < _REDDIT_MEM_TTL:
             return cached["data"]
 
-        # 磁盘缓存 10 分钟
+        # 磁盘缓存
         cache_path = CACHE_DIR / f"ranking_{filter_name}.json"
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
-            if age < 600:
+            if age < _REDDIT_DISK_TTL:
                 try:
                     with open(cache_path) as f:
                         data = json.load(f)
@@ -79,12 +86,22 @@ class RedditSentimentClient:
             return []
 
         try:
+            from resilience import reddit_breaker
+            if not reddit_breaker.allow_request():
+                _log.debug("Reddit circuit breaker OPEN, returning cached")
+                return []
+        except ImportError:
+            reddit_breaker = None
+
+        try:
             self._throttle()
             resp = requests.get(
                 f"{APEWISDOM_BASE}/filter/{filter_name}/page/1",
                 timeout=15,
             )
             resp.raise_for_status()
+            if reddit_breaker:
+                reddit_breaker.record_success()
             results = resp.json().get("results", [])
 
             # 保存缓存
@@ -99,6 +116,8 @@ class RedditSentimentClient:
             return results
 
         except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+            if reddit_breaker:
+                reddit_breaker.record_failure()
             _log.warning("获取 Reddit 排名失败 (%s): %s", filter_name, e)
             return []
 

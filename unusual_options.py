@@ -20,7 +20,11 @@ _log = logging.getLogger("alpha_hive.unusual_options")
 
 _CACHE: Dict[str, Dict] = {}
 _CACHE_TS: Dict[str, float] = {}
-_CACHE_TTL = 300  # 5 分钟
+try:
+    from config import CACHE_CONFIG as _CC
+    _CACHE_TTL = _CC["ttl"].get("unusual_options", 300)
+except (ImportError, KeyError):
+    _CACHE_TTL = 300
 
 import time as _time
 

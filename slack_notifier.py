@@ -54,14 +54,24 @@ class SlackNotifier:
         payload = self._build_payload(alert)
 
         try:
+            from resilience import slack_breaker
+            if not slack_breaker.allow_request():
+                print("⚠️  Slack circuit breaker OPEN, skipping")
+                return False
             response = requests.post(
                 self.webhook_url,
                 json=payload,
-                timeout=10
+                timeout=15
             )
             response.raise_for_status()
+            slack_breaker.record_success()
             return True
         except requests.exceptions.RequestException as e:
+            try:
+                from resilience import slack_breaker as _sb
+                _sb.record_failure()
+            except ImportError:
+                pass
             print(f"❌ Slack notification failed: {e}")
             return False
 

@@ -2232,6 +2232,7 @@ class QueenDistiller:
             "dimension_confidence": dim_confidence,
             "dimension_weights": dict(self.DIMENSION_WEIGHTS),
             "ml_adjustment": round(ml_adjustment, 3),
+            "ml_contribution_pct": round(abs(ml_adjustment) / max(abs(final_score), 0.01) * 100, 1),
             "base_score_before_resonance": round(adjusted_score, 2),
             "pheromone_compact": self.board.compact_snapshot(ticker),
             "data_quality": data_quality_summary,

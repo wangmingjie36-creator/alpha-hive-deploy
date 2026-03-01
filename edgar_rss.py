@@ -39,7 +39,11 @@ _SEC_HEADERS = {
 }
 
 _CACHE_PATH = Path(PATHS.home) / "sec_cache" / "edgar_rss.json"
-_CACHE_TTL = 900   # 15 分钟
+try:
+    from config import CACHE_CONFIG as _CC
+    _CACHE_TTL = _CC["ttl"].get("edgar_rss", 900)
+except (ImportError, KeyError):
+    _CACHE_TTL = 900
 _lock = threading.Lock()
 
 # ── RSS 健康追踪（#7）──
@@ -102,7 +106,7 @@ class EdgarRSSClient:
             # 健康追踪（一次声明，两个分支共用）
             global _rss_fail_count, _rss_degraded
             try:
-                resp = _req.get(_FEED_URL, headers=_SEC_HEADERS, timeout=12)
+                resp = _req.get(_FEED_URL, headers=_SEC_HEADERS, timeout=15)
                 if not resp.ok:
                     _log.debug("EDGAR RSS HTTP %s", resp.status_code)
                     return self._cache
