@@ -457,12 +457,50 @@ THESIS_BREAK_THRESHOLDS = {
     "crowding_score": 75,
 }
 
+# ==================== WATCHLIST 验证 ====================
+def validate_watchlist():
+    """启动时验证 WATCHLIST 与 CATALYSTS 结构一致性，返回警告列表"""
+    import re
+    warnings = []
+    _required_fields = {"name", "sector", "monitor_events"}
+
+    for ticker, cfg in WATCHLIST.items():
+        # ticker 格式：1~5 位大写字母
+        if not re.match(r'^[A-Z]{1,5}$', ticker):
+            warnings.append(f"WATCHLIST ticker 格式异常: {ticker!r}（需 1~5 位大写字母）")
+
+        # 必填字段检查
+        missing = _required_fields - set(cfg.keys())
+        if missing:
+            warnings.append(f"WATCHLIST[{ticker}] 缺少必填字段: {missing}")
+
+        # monitor_events 必须为非空列表
+        evts = cfg.get("monitor_events")
+        if not isinstance(evts, list) or len(evts) == 0:
+            warnings.append(f"WATCHLIST[{ticker}].monitor_events 为空或非列表")
+
+    # CATALYSTS 中有但 WATCHLIST 中没有的 ticker
+    orphan_catalysts = set(CATALYSTS.keys()) - set(WATCHLIST.keys())
+    if orphan_catalysts:
+        warnings.append(f"CATALYSTS 中有 {orphan_catalysts} 不在 WATCHLIST 中")
+
+    # WATCHLIST 中没有 CATALYSTS 配置的 ticker（仅 info 级别）
+    missing_catalysts = set(WATCHLIST.keys()) - set(CATALYSTS.keys())
+    if missing_catalysts:
+        _log.info("以下 ticker 尚无 CATALYSTS 配置（不影响运行）: %s", sorted(missing_catalysts))
+
+    for w in warnings:
+        _log.warning("[CONFIG] %s", w)
+    return warnings
+
+
 # ==================== 初始化缓存目录 ====================
 def init_cache():
-    """初始化缓存目录"""
+    """初始化缓存目录 + 验证 WATCHLIST"""
     cache_dir = CACHE_CONFIG["cache_dir"]
     os.makedirs(cache_dir, exist_ok=True)
     os.makedirs(os.path.dirname(RUNTIME_CONFIG["log_file"]), exist_ok=True)
+    validate_watchlist()
 
 # ==================== 告警配置 (Phase 2) ====================
 ALERT_CONFIG = {

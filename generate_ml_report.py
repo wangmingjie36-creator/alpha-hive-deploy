@@ -206,7 +206,8 @@ class MLEnhancedReportGenerator:
                 if is_json:
                     # JSON 内容：先对象再转 JSON
                     with open(filepath, "w") as f:
-                        json.dump(content, f, indent=2, default=str)
+                        from hive_logger import SafeJSONEncoder
+                        json.dump(content, f, indent=2, cls=SafeJSONEncoder)
                 else:
                     # 文本内容：直接写入
                     with open(filepath, "w") as f:

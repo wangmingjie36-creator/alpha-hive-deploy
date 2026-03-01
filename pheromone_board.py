@@ -8,7 +8,7 @@ import logging as _logging
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional
 from threading import RLock
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait, FIRST_EXCEPTION
 from datetime import datetime
 import atexit
 import json
@@ -227,13 +227,24 @@ class PheromoneBoard:
 
     def _shutdown(self) -> None:
         """atexit 处理器：等待所有异步写入完成后关闭线程池"""
-        # 等待所有 pending futures 完成（最多 10 秒）
-        for f in self._pending_futures:
-            try:
-                f.result(timeout=10)
-            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-                _log.debug("pheromone future failed during shutdown: %s", exc)
-        self._executor.shutdown(wait=True)
+        pending = [f for f in self._pending_futures if not f.done()]
+        if pending:
+            _log.debug("PheromoneBoard shutdown: 等待 %d 个异步写入完成…", len(pending))
+            done, not_done = _futures_wait(pending, timeout=5)
+            if not_done:
+                _log.warning(
+                    "PheromoneBoard shutdown: %d 个异步写入超时未完成（已放弃）",
+                    len(not_done),
+                )
+                for f in not_done:
+                    f.cancel()
+            # 检查已完成的 future 是否有异常
+            for f in done:
+                try:
+                    f.result(timeout=0)
+                except Exception as exc:
+                    _log.debug("pheromone future failed during shutdown: %s", exc)
+        self._executor.shutdown(wait=False)
 
     def clear(self) -> None:
         """清空信息素板"""

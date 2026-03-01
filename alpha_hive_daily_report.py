@@ -17,7 +17,7 @@ from threading import Lock
 
 # 导入现有模块
 from config import WATCHLIST, EVALUATION_WEIGHTS
-from hive_logger import get_logger, PATHS, set_correlation_id
+from hive_logger import get_logger, PATHS, set_correlation_id, SafeJSONEncoder
 
 _log = get_logger("daily_report")
 
@@ -457,7 +457,7 @@ class AlphaHiveDailyReporter:
             # 写入 checkpoint（每个 ticker 完成后）
             try:
                 with open(checkpoint_file, "w") as f:
-                    json.dump({"results": swarm_results, "targets": targets}, f, default=str)
+                    json.dump({"results": swarm_results, "targets": targets}, f, cls=SafeJSONEncoder)
             except (OSError, TypeError) as e:
                 _log.warning("Checkpoint 写入失败: %s", e)
 
@@ -473,7 +473,7 @@ class AlphaHiveDailyReporter:
                     pass
             merged_swarm.update(swarm_results)  # 新批次覆盖同名标的
             with open(swarm_json, "w") as f:
-                json.dump(merged_swarm, f, default=str, ensure_ascii=False)
+                json.dump(merged_swarm, f, cls=SafeJSONEncoder, ensure_ascii=False)
         except (OSError, TypeError) as e:
             _log.warning("Swarm results 保存失败: %s", e)
         # 清理 checkpoint
@@ -1748,7 +1748,7 @@ class AlphaHiveDailyReporter:
 
         # 保存 JSON 版本
         with open(json_file, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
+            json.dump(report, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
 
         # 保存 Markdown 版本（新批次追加到已有文件末尾）
         if md_file.exists():

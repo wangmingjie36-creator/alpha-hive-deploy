@@ -168,11 +168,57 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"alpha_hive.{name}")
 
 
+class SafeJSONEncoder(json.JSONEncoder):
+    """JSON 编码器：安全处理 NaN / Inf / datetime / set / bytes 等不可序列化类型"""
+
+    def default(self, o):
+        if isinstance(o, datetime):
+            return o.isoformat()
+        if isinstance(o, set):
+            return sorted(o)
+        if isinstance(o, bytes):
+            return o.decode("utf-8", errors="replace")
+        if isinstance(o, Path):
+            return str(o)
+        try:
+            return super().default(o)
+        except TypeError:
+            return str(o)
+
+    def encode(self, o):
+        return super().encode(self._sanitize(o))
+
+    def _sanitize(self, obj):
+        """递归清洗数据：NaN → None, Inf → 'Inf'"""
+        import math as _m
+        if isinstance(obj, float):
+            if _m.isnan(obj):
+                return None
+            if _m.isinf(obj):
+                return "Inf" if obj > 0 else "-Inf"
+            return obj
+        if isinstance(obj, dict):
+            return {k: self._sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [self._sanitize(v) for v in obj]
+        return obj
+
+
+def safe_json_dumps(data, **kwargs) -> str:
+    """json.dumps 的安全版本，自动处理 NaN/Inf/datetime 等"""
+    kwargs.setdefault("ensure_ascii", False)
+    kwargs.setdefault("cls", SafeJSONEncoder)
+    return json.dumps(data, **kwargs)
+
+
 def atomic_json_write(path, data, **kwargs):
-    """Atomically write JSON to *path* (write-to-tmp + os.replace)."""
+    """Atomically write JSON to *path* (write-to-tmp + os.replace).
+    自动使用 SafeJSONEncoder 防止 NaN/Inf 序列化错误。
+    """
     import tempfile
     path = Path(path)
     kwargs.setdefault("ensure_ascii", False)
+    kwargs.setdefault("cls", SafeJSONEncoder)
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", dir=str(path.parent), suffix=".tmp", delete=False
