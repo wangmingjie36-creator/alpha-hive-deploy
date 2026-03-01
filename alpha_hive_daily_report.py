@@ -250,13 +250,20 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .chart-box{background:var(--surface2);border-radius:12px;padding:22px;border:1px solid var(--border)}
 .chart-ttl{font-size:.82em;font-weight:700;color:var(--ts);text-transform:uppercase;
            letter-spacing:.06em;margin-bottom:14px;text-align:center}
+.chart-canvas-wrap{position:relative}
+.chart-canvas-wrap::before{content:'加载中…';position:absolute;inset:0;display:flex;
+  align-items:center;justify-content:center;color:var(--ts);font-size:.82em;opacity:.5}
+.chart-canvas-wrap:has(canvas.rendered)::before{display:none}
 /* TABLE */
 .tbl-search-row{display:flex;gap:12px;margin-bottom:14px;align-items:center}
 .tbl-search{flex:1;max-width:260px;padding:9px 14px;background:var(--surface2);
             border:1px solid var(--border);border-radius:8px;color:var(--tp);
             font-size:.88em;outline:none}
 .tbl-search:focus{border-color:var(--acc2)}
-.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:8px;border:1px solid var(--border)}
+.tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:8px;border:1px solid var(--border);
+  position:relative}
+.tbl-wrap.has-scroll::after{content:'';position:sticky;right:0;top:0;bottom:0;width:28px;
+  float:right;background:linear-gradient(to right,transparent,var(--surface));pointer-events:none}
 .full-table{width:100%;border-collapse:collapse;min-width:620px}
 .full-table thead{position:sticky;top:0;z-index:5}
 .full-table th{padding:11px 13px;text-align:left;font-size:.8em;font-weight:700;
@@ -274,8 +281,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
            color:#fff;border-radius:5px;font-size:.75em;font-weight:700;text-decoration:none}
 .sc-h{color:var(--bull)}.sc-m{color:var(--neut)}.sc-l{color:var(--bear)}
 /* COMPANY DEEP CARDS */
-.company-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:20px}
-@media(max-width:600px){.company-grid{grid-template-columns:1fr}}
+.company-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));gap:20px}
 .company-card{border:1px solid var(--border);border-radius:13px;overflow:hidden;background:var(--surface2)}
 .cc-header{padding:14px 18px;color:#fff;display:flex;justify-content:space-between;align-items:center}
 .cc-ticker{font-size:1.25em;font-weight:900}
@@ -365,16 +371,16 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .acc-box-title{font-size:.85em;font-weight:600;color:var(--ts);margin-bottom:12px}
 .acc-canvas-wrap{position:relative;height:140px}
 .acc-table{width:100%;border-collapse:collapse;font-size:.82em}
-.acc-table th{text-align:left;padding:6px 8px;color:var(--ts);font-weight:600;border-bottom:1px solid rgba(0,0,0,.08);cursor:pointer;user-select:none}
+.acc-table th{text-align:left;padding:6px 8px;color:var(--ts);font-weight:600;border-bottom:1px solid var(--border);cursor:pointer;user-select:none}
 .acc-table th::after{content:' ↕';opacity:.25;font-size:.7em}
 .acc-table th[data-sort="asc"]::after{content:' ↑';opacity:.8}
 .acc-table th[data-sort="desc"]::after{content:' ↓';opacity:.8}
-.acc-table td{padding:5px 8px;border-bottom:1px solid rgba(0,0,0,.05)}
+.acc-table td{padding:5px 8px;border-bottom:1px solid var(--border)}
 .acc-table tr:last-child td{border-bottom:none}
 .acc-pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:.75em;font-weight:600}
-.pill-green{background:#dcfce7;color:#15803d}
-.pill-red{background:#fee2e2;color:#b91c1c}
-.pill-gray{background:#f1f5f9;color:#64748b}
+.pill-green{background:rgba(34,197,94,.15);color:var(--bull)}
+.pill-red{background:rgba(239,68,68,.15);color:var(--bear)}
+.pill-gray{background:rgba(100,116,139,.12);color:var(--ts)}
 .acc-cold{text-align:center;padding:40px 20px;color:var(--ts)}
 .acc-cold .cold-icon{font-size:2.5em;margin-bottom:8px}
 .acc-cold .cold-msg{font-size:.9em;line-height:1.6}
@@ -401,12 +407,12 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .full-table th[data-sort="desc"]::after{content:' ↓';opacity:.8}
 /* DIM DATA QUALITY BARS (#3) */
 .dim-dq-row{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px;padding:6px 0 2px;
-  border-top:1px solid rgba(0,0,0,.06)}
+  border-top:1px solid var(--border)}
 .dq-item{display:flex;align-items:center;gap:3px;flex:1 0 30%}
-.dq-lbl{font-size:.65em;color:#888;min-width:22px}
-.dq-bar{flex:1;height:5px;border-radius:3px;background:#eee;overflow:hidden}
+.dq-lbl{font-size:.65em;color:var(--ts);min-width:22px}
+.dq-bar{flex:1;height:5px;border-radius:3px;background:var(--border);overflow:hidden}
 .dq-fill{height:100%;border-radius:3px;transition:width .4s}
-.dq-val{font-size:.65em;color:#666;min-width:28px;text-align:right}
+.dq-val{font-size:.65em;color:var(--ts);min-width:28px;text-align:right}
 /* PIXEL BEE ICON */
 .px-bee{display:inline-block;width:1.2em;height:1.2em;vertical-align:middle;
   background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23F4A532'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3C/svg%3E") no-repeat center/contain;
@@ -3132,6 +3138,22 @@ document.addEventListener('DOMContentLoaded',function(){{
   if(b&&document.documentElement.classList.contains('dark'))b.textContent='☀️ 亮色';
 }});
 
+// ── Table scroll hint ──
+(function(){{
+  var w=document.querySelector('.tbl-wrap');
+  if(!w)return;
+  function check(){{
+    if(w.scrollWidth>w.clientWidth+2)w.classList.add('has-scroll');
+    else w.classList.remove('has-scroll');
+  }}
+  check();
+  window.addEventListener('resize',check);
+  w.addEventListener('scroll',function(){{
+    if(w.scrollLeft+w.clientWidth>=w.scrollWidth-4)w.classList.remove('has-scroll');
+    else if(w.scrollWidth>w.clientWidth+2)w.classList.add('has-scroll');
+  }});
+}})();
+
 // ── Table Search ──
 function filterTable(){{
   var q=document.getElementById('tableSearch').value.toLowerCase();
@@ -3184,6 +3206,8 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
   var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
   var rendered={{}};
 
+  function markDone(id){{var c=document.getElementById(id);if(c)c.classList.add('rendered');}}
+
   function renderChart(id){{
     if(rendered[id])return;
     rendered[id]=true;
@@ -3209,6 +3233,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
           cx.restore();
         }}}}]
       }});
+      markDone('fgChart');
     }}
 
     if(id==='scoresChart'){{
@@ -3227,6 +3252,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
                    y:{{grid:{{display:false}},ticks:{{color:tc,font:{{size:10,weight:'bold'}}}}}}
                  }}}}
       }});
+      markDone('scoresChart');
     }}
 
     if(id==='dirChart'){{
@@ -3243,6 +3269,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
                  plugins:{{legend:{{position:'bottom',labels:{{color:tc,font:{{size:10}},boxWidth:11,padding:10}}}},
                            tooltip:{{callbacks:{{label:function(c){{return' '+c.label+': '+c.raw+' 只';}}}}}}}}}}
       }});
+      markDone('dirChart');
     }}
   }}
 
@@ -3266,6 +3293,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
                             pointLabels:{{color:tc,font:{{size:8}}}}}}}},
                plugins:{{legend:{{display:false}}}}}}
     }});
+    markDone('radar-'+tk);
   }}
 
   if(!('IntersectionObserver' in window)){{
