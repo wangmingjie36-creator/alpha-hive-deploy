@@ -49,7 +49,7 @@ class CacheManager:
             with open(cache_file, 'r') as f:
                 return json.load(f)
         except (json.JSONDecodeError, OSError) as e:
-            _log.warning(f"❌ 缓存加载失败 {key}: {e}")
+            _log.warning("❌ 缓存加载失败 %s: %s", key, e)
             return None
 
     def save(self, key: str, data: Dict) -> bool:
@@ -59,7 +59,7 @@ class CacheManager:
             atomic_json_write(cache_file, data, indent=2)
             return True
         except (OSError, TypeError) as e:
-            _log.error(f"❌ 缓存保存失败 {key}: {e}")
+            _log.error("❌ 缓存保存失败 %s: %s", key, e)
             return False
 
 
@@ -91,13 +91,13 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key("stocktwits", ticker)
         cached = self.cache.load(cache_key, ttl=3600)
         if cached:
-            _log.info(f"📦 使用 StockTwits 缓存: {ticker}")
+            _log.info("📦 使用 StockTwits 缓存: %s", ticker)
             return cached
 
         try:
             # 实际实现：调用 StockTwits API
             # 这里提供示例实现
-            _log.info(f"🔄 获取 StockTwits 数据: {ticker}")
+            _log.info("🔄 获取 StockTwits 数据: %s", ticker)
 
             # StockTwits API 实时路径已迁移到 stocktwits_sentiment.py
 
@@ -113,7 +113,7 @@ class DataFetcher:
             return metrics
 
         except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
-            _log.error(f"❌ StockTwits 获取失败 {ticker}: {e}")
+            _log.error("❌ StockTwits 获取失败 %s: %s", ticker, e)
             return {"messages_per_day": 0, "bullish_ratio": 0.5}
 
     # ==================== Polymarket 赔率 ====================
@@ -134,11 +134,11 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key("polymarket", ticker)
         cached = self.cache.load(cache_key, ttl=300)  # 5 分钟缓存
         if cached:
-            _log.info(f"📦 使用 Polymarket 缓存: {ticker}")
+            _log.info("📦 使用 Polymarket 缓存: %s", ticker)
             return cached
 
         try:
-            _log.info(f"🔄 获取 Polymarket 赔率: {ticker}")
+            _log.info("🔄 获取 Polymarket 赔率: %s", ticker)
 
             # Polymarket 实时路径已迁移到 polymarket_client.py
 
@@ -157,7 +157,7 @@ class DataFetcher:
             return odds_data
 
         except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
-            _log.error(f"❌ Polymarket 获取失败 {ticker}: {e}")
+            _log.error("❌ Polymarket 获取失败 %s: %s", ticker, e)
             return {"yes_odds": 0.5, "no_odds": 0.5}
 
     # ==================== Yahoo Finance 数据 ====================
@@ -178,11 +178,11 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key("yahoo", ticker)
         cached = self.cache.load(cache_key, ttl=300)
         if cached:
-            _log.info(f"📦 使用 Yahoo Finance 缓存: {ticker}")
+            _log.info("📦 使用 Yahoo Finance 缓存: %s", ticker)
             return cached
 
         try:
-            _log.info(f"🔄 获取 Yahoo Finance 数据: {ticker}")
+            _log.info("🔄 获取 Yahoo Finance 数据: %s", ticker)
 
             # 尝试使用 yfinance 库
             try:
@@ -207,7 +207,7 @@ class DataFetcher:
                 return self._get_sample_yahoo_data(ticker)
 
         except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
-            _log.error(f"❌ Yahoo Finance 获取失败 {ticker}: {e}")
+            _log.error("❌ Yahoo Finance 获取失败 %s: %s", ticker, e)
             return self._get_sample_yahoo_data(ticker)
 
     # ==================== Google Trends ====================
@@ -226,11 +226,11 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key("gtrends", ticker)
         cached = self.cache.load(cache_key, ttl=86400)  # 24 小时
         if cached:
-            _log.info(f"📦 使用 Google Trends 缓存: {ticker}")
+            _log.info("📦 使用 Google Trends 缓存: %s", ticker)
             return cached
 
         try:
-            _log.info(f"🔄 获取 Google Trends: {ticker}")
+            _log.info("🔄 获取 Google Trends: %s", ticker)
 
             # 尝试使用 pytrends 库
             try:
@@ -253,7 +253,7 @@ class DataFetcher:
                 return self._get_sample_trends(ticker)
 
         except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
-            _log.error(f"❌ Google Trends 获取失败: {e}")
+            _log.error("❌ Google Trends 获取失败: %s", e)
             return self._get_sample_trends(ticker)
 
     # ==================== SEC EDGAR 文件 ====================
@@ -284,11 +284,11 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key(f"sec_form{form_type}", ticker)
         cached = self.cache.load(cache_key, ttl=604800)  # 7 天
         if cached:
-            _log.info(f"📦 使用 SEC 缓存: {ticker} Form {form_type}")
+            _log.info("📦 使用 SEC 缓存: %s Form %s", ticker, form_type)
             return cached
 
         try:
-            _log.info(f"🔄 获取 SEC Form {form_type}: {ticker}")
+            _log.info("🔄 获取 SEC Form %s: %s", form_type, ticker)
 
             # 使用 sec_edgar.py 的真实 API 实现
             from sec_edgar import SECEdgarClient
@@ -325,13 +325,13 @@ class DataFetcher:
                     return filings
 
             # 无数据或非 Form 4，使用样本数据
-            _log.info(f"SEC EDGAR 无 {ticker} Form {form_type} 数据，使用样本")
+            _log.info("SEC EDGAR 无 %s Form %s 数据，使用样本", ticker, form_type)
             filings = self._get_sample_sec_filings(ticker, form_type)
             self.cache.save(cache_key, filings)
             return filings
 
         except (ImportError, ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
-            _log.warning(f"SEC EDGAR 实时获取失败 {ticker}: {e}，降级为样本数据")
+            _log.warning("SEC EDGAR 实时获取失败 %s: %s，降级为样本数据", ticker, e)
             return self._get_sample_sec_filings(ticker, form_type)
 
     # ==================== Seeking Alpha ====================
@@ -350,11 +350,11 @@ class DataFetcher:
         cache_key = self.cache.get_cache_key("seekingalpha", ticker)
         cached = self.cache.load(cache_key, ttl=86400)
         if cached:
-            _log.info(f"📦 使用 Seeking Alpha 缓存: {ticker}")
+            _log.info("📦 使用 Seeking Alpha 缓存: %s", ticker)
             return cached
 
         try:
-            _log.info(f"🔄 获取 Seeking Alpha: {ticker}")
+            _log.info("🔄 获取 Seeking Alpha: %s", ticker)
 
             # Seeking Alpha 爬取路径待实现（需要认证）
 
@@ -363,7 +363,7 @@ class DataFetcher:
             return data
 
         except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
-            _log.error(f"❌ Seeking Alpha 获取失败: {e}")
+            _log.error("❌ Seeking Alpha 获取失败: %s", e)
             return {"page_views_week": 0, "article_count_week": 0}
 
     # ==================== 辅助方法 ====================
@@ -404,7 +404,7 @@ class DataFetcher:
             if len(hist) > 1:
                 return ((hist['Close'].iloc[-1] - hist['Close'].iloc[0]) / hist['Close'].iloc[0]) * 100
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
-            _log.warning(f"5 日价格变化计算失败: {e}")
+            _log.warning("5 日价格变化计算失败: %s", e)
         return 0
 
     def _get_sample_yahoo_data(self, ticker: str) -> Dict:
@@ -480,11 +480,11 @@ class DataFetcher:
         cached_data = self.cache.load(cache_key, ttl=self.api_cache_ttl)
         if cached_data:
             self.cache_hits += 1
-            _log.info(f"✅ {ticker} 缓存命中（节省数据采集）")
+            _log.info("✅ %s 缓存命中（节省数据采集）", ticker)
             return cached_data
 
         self.cache_misses += 1
-        _log.info(f"📊 开始采集 {ticker} 的所有数据...")
+        _log.info("📊 开始采集 %s 的所有数据...", ticker)
         start_time = time.time()
 
         metrics = {
@@ -513,7 +513,7 @@ class DataFetcher:
         }
 
         elapsed = time.time() - start_time
-        _log.info(f"✅ 数据采集完成 {ticker} ({elapsed:.2f}秒)")
+        _log.info("✅ 数据采集完成 %s (%.2f秒)", ticker, elapsed)
 
         # ⭐ 优化 2：保存到缓存（24 小时）
         self.cache.save(cache_key, metrics)

@@ -3448,6 +3448,8 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
   }});
 }})();
 window.addEventListener('pagehide',function(){{chartInstances.forEach(function(c){{try{{c.destroy()}}catch(e){{}}}});chartInstances=[];}});
+/* F37: Pause SVG SMIL animations when prefers-reduced-motion */
+(function(){{var mq=window.matchMedia('(prefers-reduced-motion:reduce)');function toggle(e){{var svgs=document.querySelectorAll('svg');svgs.forEach(function(s){{try{{if(e.matches)s.pauseAnimations();else s.unpauseAnimations();}}catch(ex){{}}}});}}if(mq.matches)document.addEventListener('DOMContentLoaded',function(){{toggle(mq);}});mq.addEventListener('change',toggle);}})();
 </script>
 </body>
 </html>"""
