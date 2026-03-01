@@ -232,7 +232,7 @@ class SECEdgarClient:
                     return None
                 return self._parse_xml_content(resp.text)
             except (ConnectionError, TimeoutError, OSError, ValueError, ET.ParseError) as e2:
-                _log.debug("Form4 XML fallback also failed: %s", e2)
+                _log.warning("Form4 XML 主路径+备用路径均失败: primary=%s fallback=%s", e, e2)
                 return None
 
     def _parse_xml_content(self, xml_text: str) -> Optional[Dict]:

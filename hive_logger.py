@@ -29,12 +29,20 @@ _correlation = threading.local()
 
 def set_correlation_id(cid: str = None):
     """设置当前线程的 correlation_id（用于跨模块追踪同一次扫描）"""
+    if cid is not None and not isinstance(cid, str):
+        cid = str(cid)
     _correlation.id = cid or uuid.uuid4().hex[:12]
 
 
 def get_correlation_id() -> str:
     """获取当前线程的 correlation_id"""
     return getattr(_correlation, "id", "no_corr")
+
+
+def reset_correlation_id():
+    """扫描结束后清理 correlation_id，防止线程复用时残留"""
+    if hasattr(_correlation, "id"):
+        del _correlation.id
 
 
 # ==================== 路径管理 ====================

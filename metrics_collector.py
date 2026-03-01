@@ -102,12 +102,16 @@ class MetricsCollector:
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
-        os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
-        conn = sqlite3.connect(self._db_path, timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA wal_autocheckpoint=1000")
-        return conn
+        try:
+            os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
+            conn = sqlite3.connect(self._db_path, timeout=10)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA wal_autocheckpoint=1000")
+            return conn
+        except (OSError, sqlite3.Error) as e:
+            _log.error("MetricsCollector DB 连接失败 (%s): %s", self._db_path, e)
+            raise
 
     # ==================== 记录指标 ====================
 

@@ -314,7 +314,7 @@ class OptionsDataFetcher:
             # 获取当前股价
             try:
                 price = stock.fast_info.get("lastPrice", 0) or stock.fast_info.get("previousClose", 0)
-            except (AttributeError, TypeError):
+            except (AttributeError, TypeError, KeyError, RuntimeError):
                 price = 0
 
             if not price:

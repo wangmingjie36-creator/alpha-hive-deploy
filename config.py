@@ -329,8 +329,18 @@ RUNTIME_CONFIG = {
 }
 
 # ==================== 网络请求统一配置 ====================
-# 所有 HTTP 请求统一使用此 timeout，避免各模块硬编码不一致
-HTTP_TIMEOUT = 15  # 秒（原各模块混用 10/12/15，统一为 15）
+HTTP_TIMEOUT = 15  # 秒（全局默认）
+HTTP_TIMEOUT_BY_SOURCE = {
+    "sec_edgar": 15,
+    "polymarket": 10,
+    "yfinance": 12,
+    "edgar_rss": 10,
+    "default": 15,
+}
+
+def get_http_timeout(source: str = "default") -> int:
+    """获取指定数据源的 HTTP 超时时间"""
+    return HTTP_TIMEOUT_BY_SOURCE.get(source, HTTP_TIMEOUT)
 
 # ==================== 催化剂日期 ====================
 CATALYSTS = {

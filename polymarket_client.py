@@ -99,6 +99,11 @@ class PolymarketClient:
         query: 搜索词（如 "NVDA", "Fed rate"）
         返回: [{slug, question, outcomes, prices, volume_24h, ...}]
         """
+        if not query or not isinstance(query, str):
+            return []
+        query = query.strip()[:100]  # 截断过长查询
+        if not query:
+            return []
         # 磁盘缓存
         cache_key = f"search_{query.lower().replace(' ', '_')}"
         cache_path = CACHE_DIR / f"{cache_key}.json"
