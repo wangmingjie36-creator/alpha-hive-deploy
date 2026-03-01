@@ -1828,6 +1828,8 @@ class AlphaHiveDailyReporter:
         for t in swarm_detail:
             if t not in all_tickers_sorted:
                 all_tickers_sorted.append(t)
+        # 用实际扫描数量覆盖（swarm_detail 包含全部标的，opportunities 只存前 5）
+        n_tickers = len(all_tickers_sorted) or n_tickers
 
         dir_map = {"bullish": ("看多", "bullish", "#28a745"),
                    "bearish": ("看空", "bearish", "#dc3545"),
