@@ -5,13 +5,14 @@
 """
 
 import logging as _logging
+import shlex
 import subprocess
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
 _log = _logging.getLogger("alpha_hive.code_executor")
 
@@ -78,12 +79,14 @@ class CodeExecutor:
         self._write_audit_log("Executor initialized")
 
     def _init_sandbox(self) -> None:
-        """初始化沙箱目录结构"""
+        """初始化沙箱目录结构（仅 owner 可访问）"""
         try:
             self.sandbox_dir.mkdir(parents=True, exist_ok=True)
-            (self.sandbox_dir / "scripts").mkdir(exist_ok=True)
-            (self.sandbox_dir / "data").mkdir(exist_ok=True)
-            (self.sandbox_dir / "output").mkdir(exist_ok=True)
+            self.sandbox_dir.chmod(0o700)
+            for sub in ("scripts", "data", "output"):
+                d = self.sandbox_dir / sub
+                d.mkdir(exist_ok=True)
+                d.chmod(0o700)
         except OSError as e:
             _log.warning("沙箱初始化失败: %s", e)
 
@@ -268,9 +271,17 @@ class CodeExecutor:
                 "error": str(e)
             }
 
+    # 允许的 shell 命令白名单（只允许数据分析相关）
+    ALLOWED_SHELL_COMMANDS = {
+        "python3", "python", "pip", "pip3",
+        "echo", "cat", "head", "tail", "wc", "sort", "uniq", "grep",
+        "curl", "wget",  # 数据获取
+        "ls", "pwd", "date", "env",
+    }
+
     def execute_shell(self, command: str) -> Dict[str, Any]:
         """
-        执行 Shell 命令
+        执行 Shell 命令（白名单验证 + 无 shell 模式）
 
         Args:
             command: Shell 命令
@@ -280,25 +291,36 @@ class CodeExecutor:
         """
         start_time = time.time()
 
-        # 检查危险命令
-        dangerous_commands = ['rm -rf', 'dd if=', 'fork()', ':(){:|:&;}:']
-        for dangerous in dangerous_commands:
-            if dangerous in command:
-                error_msg = "❌ 命令包含危险操作"
-                self._write_audit_log(f"EXECUTE_SHELL | BLOCKED | {command}")
-                return {
-                    "success": False,
-                    "stdout": "",
-                    "stderr": error_msg,
-                    "execution_time": 0,
-                    "exit_code": -1,
-                    "error": error_msg
-                }
+        # 白名单验证：解析命令，检查首个可执行文件
+        try:
+            parts = shlex.split(command)
+        except ValueError as e:
+            error_msg = f"❌ 命令解析失败: {e}"
+            self._write_audit_log(f"EXECUTE_SHELL | PARSE_ERROR | {command[:80]}")
+            return {
+                "success": False, "stdout": "", "stderr": error_msg,
+                "execution_time": 0, "exit_code": -1, "error": error_msg
+            }
+
+        if not parts:
+            return {
+                "success": False, "stdout": "", "stderr": "空命令",
+                "execution_time": 0, "exit_code": -1, "error": "空命令"
+            }
+
+        base_cmd = os.path.basename(parts[0])
+        if base_cmd not in self.ALLOWED_SHELL_COMMANDS:
+            error_msg = f"❌ 命令不在白名单中: {base_cmd}"
+            self._write_audit_log(f"EXECUTE_SHELL | BLOCKED | {base_cmd} not in whitelist")
+            return {
+                "success": False, "stdout": "", "stderr": error_msg,
+                "execution_time": 0, "exit_code": -1, "error": error_msg
+            }
 
         try:
             process = subprocess.Popen(
-                command,
-                shell=True,
+                parts,
+                shell=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=str(self.sandbox_dir / "data"),
@@ -382,9 +404,7 @@ class CodeExecutor:
         """清理过期的沙箱文件"""
         try:
             import shutil
-            cutoff_date = (
-                datetime.now() - __import__('datetime').timedelta(days=7)
-            ).strftime("%Y-%m-%d")
+            cutoff_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
 
             for item in Path("/tmp/alpha_hive_sandbox").iterdir():
                 if item.is_dir() and item.name < cutoff_date:

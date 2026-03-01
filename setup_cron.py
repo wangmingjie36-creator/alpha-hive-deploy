@@ -29,7 +29,24 @@ def get_crontab():
 
 
 def set_crontab(crontab_content):
-    """设置 crontab"""
+    """设置 crontab（含内容安全验证）"""
+    # 验证 crontab 内容：仅允许指向已知 Alpha Hive 脚本
+    import os
+    ALLOWED_SCRIPTS = {
+        "/Users/igg/.claude/reports/run_alpha_hive_daily.sh",
+        "/Users/igg/.claude/scripts/alpha-hive-daily.sh",
+    }
+    for line in crontab_content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        # 提取命令部分（跳过 cron 时间字段）
+        parts = stripped.split()
+        if len(parts) >= 6:
+            cmd_path = parts[5]
+            if cmd_path not in ALLOWED_SCRIPTS:
+                logger.warning("Blocked crontab entry with unknown script: %s", cmd_path)
+                return False
     try:
         process = subprocess.Popen(['crontab', '-'], stdin=subprocess.PIPE, text=True)
         process.communicate(crontab_content, timeout=10)

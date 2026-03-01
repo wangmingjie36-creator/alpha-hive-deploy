@@ -8,6 +8,7 @@
 import logging as _logging
 import os
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -107,15 +108,28 @@ class GitHubTool:
     def __init__(self, repo_path: str = None):
         self.repo_path = repo_path or os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__)))
 
+    # 允许的 git 子命令白名单
+    _ALLOWED_GIT_CMDS = {
+        "status", "log", "diff", "branch", "add", "commit", "push",
+        "pull", "fetch", "remote", "show", "tag", "stash", "rev-parse",
+    }
+
     def run_git_cmd(self, cmd: str) -> Dict[str, Any]:
-        """执行 Git 命令"""
+        """执行 Git 命令（白名单 + 无 shell 模式）"""
         try:
+            parts = shlex.split(cmd)
+            if not parts or parts[0] != "git":
+                return {"success": False, "error": "Only git commands allowed"}
+            subcmd = parts[1] if len(parts) > 1 else ""
+            if subcmd not in self._ALLOWED_GIT_CMDS:
+                return {"success": False, "error": f"Git subcommand not allowed: {subcmd}"}
+
             result = subprocess.run(
-                f'cd "{self.repo_path}" && {cmd}',
-                shell=True,
+                parts,
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                cwd=self.repo_path,
             )
             return {
                 "success": result.returncode == 0,
@@ -140,7 +154,7 @@ class GitHubTool:
         if not stage["success"]:
             return {"error": f"Failed to stage: {stage['stderr']}"}
 
-        commit = self.run_git_cmd(f"git commit -m '{message}'")
+        commit = self.run_git_cmd(f"git commit -m {shlex.quote(message)}")
         return {
             "success": commit["success"],
             "message": commit.get("stdout") or commit.get("stderr"),
