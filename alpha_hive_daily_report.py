@@ -2110,31 +2110,23 @@ class AlphaHiveDailyReporter:
         _avg_score = (sum(s for _, s in _all_scores) / len(_all_scores)) if _all_scores else 0
 
         def _radar_data(ticker):
-            sd  = swarm_detail.get(ticker, {})
-            dim = sd.get("dimension_scores", {})
-            if dim:
-                signal    = float(dim.get("signal",   5.0)) * 10
-                catalyst  = float(dim.get("catalyst", 5.0)) * 10
-                sentiment = float(dim.get("sentiment",5.0)) * 10
-                odds      = float(dim.get("odds",     5.0)) * 10
-                risk_adj  = float(dim.get("risk_adj", 5.0)) * 10
-            else:
-                ad = sd.get("agent_details", {})
-                signal   = float(ad.get("ScoutBeeNova",     {}).get("self_score", 5.0)) * 10
-                catalyst = float(ad.get("ChronosBeeHorizon",{}).get("self_score", 5.0)) * 10
-                oracle_det = ad.get("OracleBeeEcho", {}).get("details", {})
-                pc_r    = oracle_det.get("put_call_ratio", 1.0) or 1.0
-                odds    = max(0.0, min(100.0, (2.0 - float(pc_r)) / 1.5 * 100))
-                buzz_d  = ad.get("BuzzBeeWhisper", {}).get("discovery", "")
-                sm3     = _re.search(r'情绪\s*([\d.]+)%', buzz_d)
-                sentiment = float(sm3.group(1)) if sm3 else 50.0
-                bear_s  = float(ad.get("BearBeeContrarian", {}).get("score", 5.0))
-                risk_adj = max(0.0, (10.0 - bear_s) * 10)
-            return [round(min(100, max(0, signal)),   1),
-                    round(min(100, max(0, catalyst)), 1),
-                    round(min(100, max(0, sentiment)),1),
-                    round(min(100, max(0, odds)),     1),
-                    round(min(100, max(0, risk_adj)), 1)]
+            sd = swarm_detail.get(ticker, {})
+            ad = sd.get("agent_details", {})
+            oracle_det = ad.get("OracleBeeEcho", {}).get("details", {})
+            iv_r  = oracle_det.get("iv_rank", 50) or 50
+            pc_r  = oracle_det.get("put_call_ratio", 1.0) or 1.0
+            buzz_d = ad.get("BuzzBeeWhisper", {}).get("discovery", "")
+            sm3 = _re.search(r'情绪\s*([\d.]+)%', buzz_d)
+            sent_v = float(sm3.group(1)) if sm3 else 50.0
+            scout_s  = float(ad.get("ScoutBeeNova", {}).get("self_score", 5.0)) * 10
+            chron_s  = float(ad.get("ChronosBeeHorizon", {}).get("self_score", 5.0)) * 10
+            bear_s   = float(ad.get("BearBeeContrarian", {}).get("score", 5.0))
+            risk_v   = max(0.0, (10.0 - bear_s) * 10)
+            iv_n     = min(100.0, float(iv_r))
+            pc_v     = float(pc_r)
+            pc_n     = max(0.0, min(100.0, (2.0 - pc_v) / 1.5 * 100))
+            return [round(iv_n,1), round(pc_n,1), round(min(100,sent_v),1),
+                    round(min(100,scout_s),1), round(min(100,chron_s),1), round(risk_v,1)]
 
         _scores_js  = _json.dumps([[t, round(s, 1)] for t, s in _all_scores])
         _dir_js     = _json.dumps([_dir_counts["bullish"], _dir_counts["bearish"], _dir_counts["neutral"]])
@@ -2356,16 +2348,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
   .hist-card{flex-direction:column;align-items:flex-start;gap:12px}
   .hist-right{justify-content:flex-start}
 }
-/* DIMENSION MINI-BARS */
-.dim-bars{display:flex;gap:3px;align-items:flex-end;height:38px;margin:8px 0 4px;padding:0 2px}
-.dim-b-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;height:100%}
-.dim-b{width:100%;min-height:3px;border-radius:2px 2px 0 0;transition:height .4s}
-.dim-lbl{font-size:.58em;color:var(--ts);line-height:1;text-align:center}
-/* TABLE SORT */
-.full-table th{cursor:pointer;user-select:none}
-.full-table th::after{content:' ↕';font-size:.7em;opacity:.25}
-.full-table th[data-sort="asc"]::after{content:' ↑';opacity:.8}
-.full-table th[data-sort="desc"]::after{content:' ↓';opacity:.8}
 """
 
         # ── Build new Top-6 cards ──
@@ -2397,20 +2379,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
             _ml6ex = _Path(self.report_dir / f"alpha-hive-{_tc6}-ml-enhanced-{date_str}.html").exists()
             _ml6   = (f'<a href="alpha-hive-{_tc6}-ml-enhanced-{date_str}.html" class="ml-btn">ML 详情 →</a>'
                       if _ml6ex else '<span style="font-size:.75em;color:var(--ts);">ML 报告生成中</span>')
-            # Dimension mini-bars (uses dimension_scores 0-10 → height %)
-            _dims6 = swarm_detail.get(_tc6, {}).get("dimension_scores", {})
-            _dim_html6 = ""
-            if _dims6:
-                _dl6 = [("信号","signal"),("催化","catalyst"),("情绪","sentiment"),("赔率","odds"),("风险","risk_adj")]
-                _db6 = ""
-                for _dlbl6x, _dkey6 in _dl6:
-                    _dv6  = float(_dims6.get(_dkey6, 5.0))
-                    _dpct6 = max(5, int(_dv6 * 10))
-                    _dcol6 = "#22c55e" if _dv6 >= 7 else ("#f59e0b" if _dv6 >= 5.5 else "#ef4444")
-                    _db6 += (f'<div class="dim-b-item">'
-                             f'<div class="dim-b" style="height:{_dpct6}%;background:{_dcol6}"></div>'
-                             f'<span class="dim-lbl">{_dlbl6x}</span></div>')
-                _dim_html6 = f'<div class="dim-bars">{_db6}</div>'
             new_cards_html += f"""
             <div class="scard">
               <div class="scard-head">
@@ -2426,7 +2394,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
                     <div class="sbar"><div class="sbar-fill {_fcls6}" style="width:{_pct6}%"></div></div>
                   </div>
                 </div>
-                {_dim_html6}
                 {f'<div class="sinsight">{_ins6}</div>' if _ins6 else ''}
                 {_ml6}
               </div>
@@ -2635,10 +2602,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
     </div>
     <div class="hero-right">
       <svg class="hero-svg hive-anim" viewBox="0 0 280 260" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <path id="orb-i" d="M 215,101 A 75,45 0 1 0 65,101 A 75,45 0 1 0 215,101"/>
-          <path id="orb-o" d="M 238,112 A 98,56 0 1 0 42,112 A 98,56 0 1 0 238,112"/>
-        </defs>
         <polygon points="140,55 180,78 180,124 140,147 100,124 100,78" fill="#F4A532" opacity=".9"/>
         <text x="140" y="112" text-anchor="middle" font-size="40" fill="white">🐝</text>
         <polygon class="hex-p" points="140,5 170,22 170,57 140,74 110,57 110,22" fill="none" stroke="#F4A532" stroke-width="1.5" opacity=".55" style="animation-delay:.3s"/>
@@ -2649,13 +2612,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
         <polygon class="hex-p" points="90,182 120,199 120,234 90,251 60,234 60,199" fill="none" stroke="#667eea" stroke-width="1" opacity=".35" style="animation-delay:2.3s"/>
         <polygon class="hex-p" points="90,107 120,124 120,159 90,176 60,159 60,124" fill="rgba(102,126,234,.13)" stroke="#667eea" stroke-width="1" opacity=".45" style="animation-delay:2.7s"/>
         <polygon class="hex-p" points="90,32 120,49 120,84 90,101 60,84 60,49" fill="none" stroke="#764ba2" stroke-width="1" opacity=".35" style="animation-delay:3.1s"/>
-        <!-- Orbit rings -->
-        <ellipse cx="140" cy="101" rx="75" ry="45" fill="none" stroke="#F4A532" stroke-width="0.7" stroke-dasharray="3,6" opacity="0.25"/>
-        <ellipse cx="140" cy="112" rx="98" ry="56" fill="none" stroke="#667eea" stroke-width="0.7" stroke-dasharray="3,8" opacity="0.18"/>
-        <!-- Orbiting bees (animateMotion along ellipse paths) -->
-        <g><circle r="5.5" fill="#F4A532" opacity="0.9"/><circle r="2.8" fill="#fff8e7" opacity="0.75"/><animateMotion dur="9s" repeatCount="indefinite" begin="0s"><mpath href="#orb-i"/></animateMotion></g>
-        <g><circle r="4.8" fill="#fbbf24" opacity="0.85"/><circle r="2.4" fill="#fff8e7" opacity="0.65"/><animateMotion dur="9s" repeatCount="indefinite" begin="-4.5s"><mpath href="#orb-i"/></animateMotion></g>
-        <g><circle r="5" fill="#667eea" opacity="0.85"/><circle r="2.5" fill="#c7d2fe" opacity="0.7"/><animateMotion dur="14s" repeatCount="indefinite" begin="-5s"><mpath href="#orb-o"/></animateMotion></g>
       </svg>
     </div>
   </div>
@@ -2776,25 +2732,6 @@ function filterTable(){{
   }});
 }}
 
-// ── Table Sort ──
-document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
-  th.addEventListener('click',function(){{
-    var tbody=document.querySelector('#oppTable tbody');
-    var rows=Array.from(tbody.rows).filter(function(r){{return r.style.display!=='none';}});
-    var asc=th.getAttribute('data-sort')!=='asc';
-    document.querySelectorAll('#oppTable thead th').forEach(function(t){{t.removeAttribute('data-sort');}});
-    th.setAttribute('data-sort',asc?'asc':'desc');
-    rows.sort(function(a,b){{
-      var av=a.cells[i].textContent.trim();
-      var bv=b.cells[i].textContent.trim();
-      var an=parseFloat(av),bn=parseFloat(bv);
-      if(!isNaN(an)&&!isNaN(bn)) return asc?an-bn:bn-an;
-      return asc?av.localeCompare(bv,'zh'):bv.localeCompare(av,'zh');
-    }});
-    rows.forEach(function(r){{tbody.appendChild(r);}});
-  }});
-}});
-
 // ── Charts ──
 document.addEventListener('DOMContentLoaded',function(){{
   var dark=document.documentElement.classList.contains('dark');
@@ -2860,7 +2797,7 @@ document.addEventListener('DOMContentLoaded',function(){{
 
   // Radar per ticker
   var rd={_radar_js};
-  var rl=['信号强度','催化剂','情绪','赔率','风险控制'];
+  var rl=['IV Rank','P/C信号','情绪','聪明钱','催化剂','风险控制'];
   Object.keys(rd).forEach(function(tk){{
     var cv=document.getElementById('radar-'+tk);
     if(!cv)return;
