@@ -332,6 +332,28 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 ::-webkit-scrollbar-thumb{background:rgba(102,126,234,.4);border-radius:3px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .status-dot{width:10px;height:10px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite;display:inline-block}
+/* F15: prefers-reduced-motion */
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;
+    transition-duration:.01ms!important;scroll-behavior:auto!important}
+}
+/* F16: Print */
+@media print{
+  .nav,.dark-btn,.skip-link,.tbl-search-row,.ml-btn,.ml-btn-sm,.ml-btn-cc,
+  .scroll-top{display:none!important}
+  body{background:#fff;color:#000;font-size:10pt}
+  .hero{background:#f8f8f8!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .section{break-inside:avoid;border:1px solid #ccc;box-shadow:none}
+  .report-body{max-height:none;overflow:visible}
+  .footer{background:#f0f0f0!important;color:#333}
+}
+/* F17: Scroll-to-top */
+.scroll-top{position:fixed;bottom:24px;right:24px;z-index:999;width:40px;height:40px;
+  border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--acc);
+  font-size:1.1em;cursor:pointer;opacity:0;pointer-events:none;
+  transition:opacity .3s,transform .3s;box-shadow:0 2px 10px rgba(0,0,0,.12)}
+.scroll-top.show{opacity:1;pointer-events:auto}
+.scroll-top:hover{transform:scale(1.1);background:var(--acc);color:#fff}
 /* HISTORY */
 .hist-list{display:flex;flex-direction:column;gap:14px}
 .hist-card{display:flex;align-items:center;gap:20px;padding:18px 20px;
@@ -2965,6 +2987,12 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Alpha Hive — 去中心化蜂群智能投资研究平台，SEC 真实数据驱动的每日投资机会扫描。">
+<meta name="theme-color" content="#0A0F1C" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f0f4ff" media="(prefers-color-scheme: light)">
+<meta property="og:title" content="Alpha Hive 投资仪表板">
+<meta property="og:description" content="蜂群智能驱动的去中心化投资研究，{n_tickers} 标的每日扫描">
+<meta property="og:type" content="website">
 <title>Alpha Hive 投资仪表板</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
@@ -3121,8 +3149,19 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
     声明：本报告由 AI 蜂群自动生成，仅供研究参考，不构成投资建议。所有决策请自行判断。
   </p>
 </footer>
+<button class="scroll-top" id="scrollTop" onclick="window.scrollTo({{top:0,behavior:'smooth'}})" aria-label="返回顶部">↑</button>
 
 <script>
+// ── Scroll-to-top ──
+(function(){{
+  var btn=document.getElementById('scrollTop');
+  if(!btn)return;
+  window.addEventListener('scroll',function(){{
+    if(window.scrollY>400)btn.classList.add('show');
+    else btn.classList.remove('show');
+  }},{{passive:true}});
+}})();
+
 // ── Dark Mode ──
 function toggleDark(){{
   var h=document.documentElement;
