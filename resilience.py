@@ -129,17 +129,18 @@ class CircuitBreaker:
                         "CircuitBreaker[%s] -> OPEN (failures=%d)",
                         self.name, self._failure_count,
                     )
-                    # #18: 连续失败告警 → 尝试 Slack 通知
-                    try:
-                        from slack_report_notifier import SlackReportNotifier
-                        _sn = SlackReportNotifier()
-                        _sn.send_risk_alert(
-                            f"数据源 {self.name} 连续失败",
-                            f"CircuitBreaker 熔断：连续 {self._failure_count} 次失败",
-                            severity="HIGH",
-                        )
-                    except (ImportError, OSError, ValueError):
-                        pass
+                    # #18: 连续失败告警 → 尝试 Slack 通知（跳过测试用熔断器）
+                    if "test" not in self.name.lower():
+                        try:
+                            from slack_report_notifier import SlackReportNotifier
+                            _sn = SlackReportNotifier()
+                            _sn.send_risk_alert(
+                                f"数据源 {self.name} 连续失败",
+                                f"CircuitBreaker 熔断：连续 {self._failure_count} 次失败",
+                                severity="HIGH",
+                            )
+                        except (ImportError, OSError, ValueError):
+                            pass
                 self._state = self.OPEN
 
     def reset(self):

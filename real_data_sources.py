@@ -59,7 +59,9 @@ def _record_src_success(source: str):
 
 
 def _try_src_slack_alert(source: str, fail_count: int):
-    """尝试通过 Slack 发送降级告警（静默失败）"""
+    """尝试通过 Slack 发送降级告警（静默失败，跳过测试数据源）"""
+    if "test" in source.lower():
+        return
     try:
         from slack_report_notifier import SlackReportNotifier
         n = SlackReportNotifier()
