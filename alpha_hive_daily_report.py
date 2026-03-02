@@ -131,12 +131,16 @@ html.dark{--bg:#0A0F1C;--surface:#141928;--surface2:#1a2035;--border:#2a3050;--t
 *{margin:0;padding:0;box-sizing:border-box}
 html{scroll-behavior:smooth}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-     background:var(--bg);color:var(--tp);min-height:100vh;transition:background .3s,color .3s}
+     background:var(--bg);color:var(--tp);min-height:100vh;transition:background .3s,color .3s;
+     overflow-x:hidden}
+button,a,.nav-link,.filter-btn,.trend-chip,.scard,.share-btn,.gs-item{touch-action:manipulation}
 /* NAV */
-.nav{position:fixed;top:0;left:0;right:0;z-index:1000;height:var(--nav-h);
+.nav{position:fixed;top:0;left:0;right:0;z-index:1000;height:calc(var(--nav-h) + env(safe-area-inset-top,0px));
+     padding-top:env(safe-area-inset-top,0px);
      background:rgba(10,15,28,.96);backdrop-filter:blur(10px);
      border-bottom:1px solid rgba(244,165,50,.2);
-     display:flex;align-items:center;justify-content:space-between;padding:0 28px}
+     display:flex;align-items:center;justify-content:space-between;
+     padding-left:max(28px,env(safe-area-inset-left,0px));padding-right:max(28px,env(safe-area-inset-right,0px))}
 .nav-logo{display:flex;align-items:center;gap:8px;font-weight:900;font-size:1.1em;color:var(--acc);text-decoration:none}
 .nav-links{display:flex;gap:2px}
 .nav-link{padding:10px 12px;border-radius:6px;font-size:.85em;font-weight:500;min-height:44px;
@@ -146,7 +150,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
 .dark-btn{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);
           color:#fff;padding:10px 14px;border-radius:8px;cursor:pointer;font-size:.82em;transition:all .2s;min-height:44px}
 .dark-btn:hover{background:rgba(244,165,50,.2);border-color:var(--acc)}
-@media(max-width:768px){.nav-links{display:none}
+@media(max-width:768px){.nav-links:not(.open){display:none}
   .full-table th:nth-child(7),.full-table td:nth-child(7),
   .full-table th:nth-child(8),.full-table td:nth-child(8),
   .full-table th:nth-child(9),.full-table td:nth-child(9){display:none}
@@ -159,7 +163,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .skip-link:focus{top:0}
 /* HERO */
 .hero{background:linear-gradient(135deg,#0A0F1C 0%,#141928 55%,#1a1040 100%);
-      padding:calc(var(--nav-h) + 36px) 32px 0;position:relative;overflow:hidden}
+      padding:calc(var(--nav-h) + env(safe-area-inset-top,0px) + 36px) 32px 0;position:relative;overflow:hidden}
 .hero-inner{max-width:1280px;margin:0 auto;display:flex;align-items:center;
             justify-content:space-between;padding-bottom:36px;gap:40px}
 .hero-left{flex:1}
@@ -252,8 +256,9 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
            letter-spacing:.06em;margin-bottom:14px;text-align:center}
 .chart-canvas-wrap{position:relative}
 .chart-canvas-wrap::before{content:'加载中…';position:absolute;inset:0;display:flex;
-  align-items:center;justify-content:center;color:var(--ts);font-size:.82em;opacity:.5}
+  align-items:center;justify-content:center;color:var(--ts);font-size:.82em;opacity:.5;z-index:0}
 .chart-canvas-wrap:has(canvas.rendered)::before{display:none}
+.chart-canvas-wrap:has(.skeleton)::before{display:none}
 /* TABLE */
 .tbl-search-row{display:flex;gap:12px;margin-bottom:14px;align-items:center}
 .tbl-search{flex:1;max-width:260px;padding:9px 14px;background:var(--surface2);
@@ -340,15 +345,18 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 /* F16: Print */
 @media print{
   .nav,.dark-btn,.skip-link,.tbl-search-row,.ml-btn,.ml-btn-sm,.ml-btn-cc,
-  .scroll-top,#filterStatus{display:none!important}
+  .scroll-top,#filterStatus,.filter-bar,.share-bar,.toast,.scard-share,
+  .hamburger,.nav-overlay,.kb-help{display:none!important}
   body{background:#fff;color:#000;font-size:10pt}
   .hero{background:#f8f8f8!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-  .section{break-inside:avoid;border:1px solid #ccc;box-shadow:none}
+  .section{break-inside:avoid;page-break-inside:avoid;border:1px solid #ccc;box-shadow:none}
   .report-body{max-height:none;overflow:visible}
+  .charts-grid{display:none!important}
   .footer{background:#f0f0f0!important;color:#333}
 }
 /* F17: Scroll-to-top */
-.scroll-top{position:fixed;bottom:24px;right:24px;z-index:999;width:44px;height:44px;
+.scroll-top{position:fixed;bottom:max(24px,calc(24px + env(safe-area-inset-bottom,0px)));
+  right:max(24px,calc(24px + env(safe-area-inset-right,0px)));z-index:999;width:44px;height:44px;
   border-radius:50%;border:1px solid var(--border);background:var(--surface);color:var(--acc);
   font-size:1.1em;cursor:pointer;opacity:0;pointer-events:none;
   transition:opacity .3s,transform .3s;box-shadow:0 2px 10px rgba(0,0,0,.12)}
@@ -445,6 +453,145 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .px-bee-hero{display:inline-block;width:40px;height:40px;vertical-align:middle;
   background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23F4A532'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3C/svg%3E") no-repeat center/contain;
   image-rendering:pixelated}
+/* HAMBURGER MENU */
+.hamburger{display:none;background:none;border:none;color:#fff;font-size:1.5em;
+  cursor:pointer;padding:8px;min-height:44px;min-width:44px;z-index:1002}
+.nav-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:998}
+.nav-overlay.open{display:block}
+@media(max-width:768px){
+  .hamburger{display:flex;align-items:center;justify-content:center}
+  .nav-links.open{position:fixed;top:0;right:0;bottom:0;width:min(260px,75vw);display:flex;
+    flex-direction:column;background:#0A0F1C;
+    padding:calc(var(--nav-h) + env(safe-area-inset-top,0px) + 16px) 16px calc(16px + env(safe-area-inset-bottom,0px));
+    z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgba(0,0,0,.3);overflow-y:auto}
+  .nav-links.open .nav-link{padding:14px 12px;font-size:.95em;border-bottom:1px solid rgba(255,255,255,.06)}
+}
+/* SHARE BAR */
+.share-bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;align-items:center}
+.share-btn{display:inline-flex;align-items:center;gap:5px;padding:7px 15px;border-radius:20px;
+  border:1px solid var(--border);background:var(--surface2);color:var(--ts);font-size:.8em;
+  font-weight:600;cursor:pointer;transition:all .2s;text-decoration:none;min-height:44px}
+.share-btn:hover{border-color:var(--acc);color:var(--acc)}
+.share-btn-x:hover{background:#000;color:#fff}
+.scard-share{position:absolute;top:10px;right:10px;background:rgba(0,0,0,.35);color:#fff;
+  border:none;border-radius:50%;width:44px;height:44px;font-size:.85em;cursor:pointer;
+  opacity:0;transition:opacity .2s;display:flex;align-items:center;justify-content:center;z-index:2}
+.scard:hover .scard-share{opacity:1}
+@media(hover:none){.scard-share{opacity:.7}}
+.toast.show{opacity:1}
+/* FILTER BAR */
+.filter-bar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+.filter-btn{padding:7px 16px;border-radius:20px;border:1px solid var(--border);
+  background:var(--surface2);color:var(--ts);font-size:.82em;font-weight:600;
+  cursor:pointer;transition:all .2s;min-height:44px}
+.filter-btn:hover{border-color:var(--acc);color:var(--acc)}
+.filter-btn.active{background:var(--acc);color:#0A0F1C;border-color:var(--acc)}
+.filter-count{font-size:.78em;color:var(--ts);margin-top:6px}
+/* F11: Accuracy enhancements */
+.acc-extra-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px}
+@media(max-width:768px){.acc-extra-row{grid-template-columns:1fr}}
+.acc-ext-box{background:var(--surface2);border-radius:12px;padding:18px;border:1px solid var(--border)}
+.acc-ext-title{font-size:.85em;font-weight:700;color:var(--ts);margin-bottom:12px}
+.pred-list{list-style:none;padding:0;margin:0}
+.pred-item{display:flex;justify-content:space-between;align-items:center;padding:7px 0;
+  border-bottom:1px solid var(--border);font-size:.82em}
+.pred-item:last-child{border-bottom:none}
+.pred-tk{font-weight:800;color:var(--tp);min-width:50px}
+.pred-date{color:var(--ts);font-size:.9em}
+.pred-ret{font-weight:700;min-width:60px;text-align:right}
+.pred-ret-up{color:var(--bull)}.pred-ret-dn{color:var(--bear)}
+.acc-metrics-row{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+.acc-metric-pill{background:var(--surface2);border:1px solid var(--border);border-radius:10px;
+  padding:8px 14px;font-size:.82em;display:flex;flex-direction:column;align-items:center;gap:2px}
+.acc-metric-pill .mv{font-size:1.2em;font-weight:800;color:var(--tp)}
+.acc-metric-pill .ml{font-size:.72em;color:var(--ts)}
+/* F12: Global search */
+.global-search-wrap{position:relative;max-width:400px;margin:0 0 18px}
+.global-search{width:100%;padding:11px 40px 11px 14px;background:var(--surface2);
+  border:1px solid var(--border);border-radius:10px;color:var(--tp);
+  font-size:.92em;outline:none;transition:border-color .2s}
+.global-search:focus{border-color:var(--acc2);box-shadow:0 0 0 3px rgba(102,126,234,.12)}
+.gs-icon{position:absolute;right:12px;top:50%;transform:translateY(-50%);color:var(--ts);font-size:.9em;pointer-events:none}
+.gs-results{position:absolute;top:100%;left:0;right:0;background:var(--surface);
+  border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);
+  max-height:320px;overflow-y:auto;z-index:100;display:none;margin-top:4px}
+.gs-results.open{display:block}
+.gs-item{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;
+  cursor:pointer;border-bottom:1px solid var(--border);font-size:.88em;transition:background .15s;min-height:44px}
+.gs-item:last-child{border-bottom:none}
+.gs-item:hover,.gs-item.focused{background:var(--surface2)}
+.gs-item-tk{font-weight:800;color:var(--tp)}
+.gs-item-info{color:var(--ts);font-size:.85em}
+.gs-item-score{font-weight:700}
+.gs-empty{padding:14px;text-align:center;color:var(--ts);font-size:.85em}
+/* F10: Price annotation */
+.sprice-row{display:flex;align-items:baseline;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid var(--border)}
+.sprice{font-size:1.05em;font-weight:800;color:var(--tp)}
+.sprice-chg{font-size:.78em;font-weight:700;padding:1px 6px;border-radius:4px}
+.sprice-up{background:rgba(34,197,94,.12);color:var(--bull)}
+.sprice-dn{background:rgba(239,68,68,.12);color:var(--bear)}
+.sprice-flat{background:rgba(100,116,139,.1);color:var(--ts)}
+/* F6: Card click jump */
+.scard{cursor:pointer}
+.company-card:target{outline:2px solid var(--acc);outline-offset:4px;border-radius:13px}
+.company-card.highlight{animation:card-glow .8s ease-out}
+@keyframes card-glow{0%{box-shadow:0 0 0 4px rgba(244,165,50,.5)}100%{box-shadow:none}}
+/* F7b: F&G trend */
+.fg-trend-wrap{margin-top:8px;height:50px}
+/* F8: Trend & Diff */
+.trend-controls{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.trend-chip{padding:8px 14px;border-radius:16px;border:1px solid var(--border);
+  background:var(--surface2);color:var(--ts);font-size:.78em;cursor:pointer;transition:all .2s;min-height:44px;
+  display:inline-flex;align-items:center}
+.trend-chip.active{background:var(--acc2);color:#fff;border-color:var(--acc2)}
+.diff-controls{display:flex;gap:10px;align-items:center;margin:16px 0;flex-wrap:wrap}
+.diff-controls select{padding:8px 12px;border-radius:8px;border:1px solid var(--border);
+  background:var(--surface2);color:var(--tp);font-size:.85em}
+.diff-table{width:100%;border-collapse:collapse;font-size:.85em;margin-top:12px}
+.diff-table th{padding:8px;text-align:left;background:var(--surface2);font-weight:700;
+  border-bottom:2px solid var(--border);font-size:.82em}
+.diff-table td{padding:7px 8px;border-bottom:1px solid var(--border)}
+.diff-new{background:rgba(34,197,94,.08)}.diff-removed{background:rgba(239,68,68,.08)}
+.diff-up{color:var(--bull);font-weight:700}.diff-down{color:var(--bear);font-weight:700}
+/* F9: Keyboard help */
+.kb-help{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;
+  justify-content:center;background:rgba(0,0,0,.5);backdrop-filter:blur(4px)}
+.kb-help-inner{background:var(--surface);border-radius:14px;padding:28px;
+  max-width:340px;width:90%;border:1px solid var(--border)}
+.kb-help-inner h3{margin-bottom:16px;color:var(--tp)}
+.kb-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;
+  border-bottom:1px solid var(--border);font-size:.88em}
+.kb-row:last-of-type{border-bottom:none}
+.kb-row kbd{background:var(--surface2);border:1px solid var(--border);border-radius:5px;
+  padding:3px 10px;font-family:monospace;font-weight:700;min-width:36px;text-align:center}
+.kb-row span{color:var(--ts)}
+/* F15: Skeleton Screen */
+@keyframes skel-pulse{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.skeleton{position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:8px}
+.chart-canvas-wrap:has(canvas.rendered) .skeleton,
+.radar-wrap:has(canvas.rendered) .skeleton{display:none}
+.skel-done .skeleton{display:none}
+.skel-bar{width:100%;height:100%;border-radius:8px;
+  background:linear-gradient(90deg,var(--surface2) 25%,var(--border) 50%,var(--surface2) 75%);
+  background-size:200% 100%;animation:skel-pulse 1.8s ease-in-out infinite}
+.skel-circle{width:70%;aspect-ratio:1;border-radius:50%;
+  background:linear-gradient(90deg,var(--surface2) 25%,var(--border) 50%,var(--surface2) 75%);
+  background-size:200% 100%;animation:skel-pulse 1.8s ease-in-out infinite}
+.skel-half-circle{width:80%;aspect-ratio:2/1;border-radius:999px 999px 0 0;
+  background:linear-gradient(90deg,var(--surface2) 25%,var(--border) 50%,var(--surface2) 75%);
+  background-size:200% 100%;animation:skel-pulse 1.8s ease-in-out infinite}
+@supports not (aspect-ratio:1){
+  .skel-circle{height:70%}.skel-half-circle{height:50%}
+}
+/* Mobile: small screen padding + toast safe area */
+@media(max-width:480px){
+  .main{padding:24px 16px}
+  .section{padding:20px 16px}
+  .hero{padding-left:20px;padding-right:20px}
+}
+.toast{position:fixed;bottom:max(80px,calc(80px + env(safe-area-inset-bottom,0px)));left:50%;transform:translateX(-50%);
+  background:#333;color:#fff;padding:10px 22px;border-radius:8px;font-size:.85em;z-index:9999;
+  opacity:0;transition:opacity .3s;pointer-events:none}
 """
 
     def __init__(self):
@@ -2125,9 +2272,176 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         except Exception as e:
             _log.warning("index.html 生成失败: %s", e)
 
+        # 生成 PWA 文件（manifest.json + sw.js）
+        try:
+            self._write_pwa_files()
+        except Exception as e:
+            _log.warning("PWA 文件生成失败: %s", e)
+
+        # 生成 RSS 订阅源
+        try:
+            rss_xml = self._generate_rss_xml(report)
+            with open(self.report_dir / "rss.xml", "w", encoding="utf-8") as f:
+                f.write(rss_xml)
+            _log.info("rss.xml 已更新")
+        except Exception as e:
+            _log.warning("rss.xml 生成失败: %s", e)
+
         _log.info("报告已保存：%s", md_file.name)
 
         return str(md_file)
+
+    def _write_pwa_files(self):
+        """生成 manifest.json + sw.js"""
+        import json as _json2
+
+        # ── manifest.json ──
+        icon_svg = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpolygon points='50,5 93,28 93,72 50,95 7,72 7,28' fill='%23F4A532'/%3E%3Ctext x='50' y='62' font-size='42' text-anchor='middle' fill='%23fff'%3E🐝%3C/text%3E%3C/svg%3E"
+        manifest = {
+            "name": "Alpha Hive 投资仪表板",
+            "short_name": "Alpha Hive",
+            "start_url": "./",
+            "display": "standalone",
+            "theme_color": "#F4A532",
+            "background_color": "#0e1117",
+            "icons": [
+                {"src": icon_svg, "sizes": "any", "type": "image/svg+xml"}
+            ]
+        }
+        manifest_path = self.report_dir / "manifest.json"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            _json2.dump(manifest, f, ensure_ascii=False, indent=2)
+
+        # ── sw.js ──
+        cache_name = f"alpha-hive-{self.date_str}"
+        sw_content = f"""// Alpha Hive Service Worker - {self.date_str}
+var CACHE_NAME='{cache_name}';
+var PRECACHE_URLS=['./', 'index.html', 'manifest.json',
+  'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'];
+
+self.addEventListener('install', function(e){{
+  e.waitUntil(
+    caches.open(CACHE_NAME).then(function(cache){{
+      return cache.addAll(PRECACHE_URLS);
+    }})
+  );
+}});
+
+self.addEventListener('activate', function(e){{
+  e.waitUntil(
+    caches.keys().then(function(names){{
+      return Promise.all(
+        names.filter(function(n){{ return n!==CACHE_NAME; }})
+             .map(function(n){{ return caches.delete(n); }})
+      );
+    }})
+  );
+}});
+
+self.addEventListener('fetch', function(e){{
+  var url=new URL(e.request.url);
+  // JSON 数据用 network-first
+  if(url.pathname.endsWith('.json')){{
+    e.respondWith(
+      fetch(e.request).then(function(r){{
+        var rc=r.clone();
+        caches.open(CACHE_NAME).then(function(c){{ c.put(e.request, rc); }});
+        return r;
+      }}).catch(function(){{ return caches.match(e.request); }})
+    );
+    return;
+  }}
+  // HTML/CDN 用 cache-first
+  e.respondWith(
+    caches.match(e.request).then(function(r){{
+      return r || fetch(e.request).then(function(resp){{
+        var rc=resp.clone();
+        caches.open(CACHE_NAME).then(function(c){{ c.put(e.request, rc); }});
+        return resp;
+      }});
+    }})
+  );
+}});
+"""
+        sw_path = self.report_dir / "sw.js"
+        with open(sw_path, "w", encoding="utf-8") as f:
+            f.write(sw_content)
+
+        _log.info("PWA 文件已生成：manifest.json + sw.js")
+
+    def _generate_rss_xml(self, report: Dict) -> str:
+        """生成 RSS 2.0 XML 订阅源"""
+        import glob as _glob
+        from xml.sax.saxutils import escape as _esc
+
+        now_rfc = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+        base_url = "https://wangmingjie36-creator.github.io/alpha-hive-deploy/"
+
+        items_xml = ""
+        # 当前简报作为第一条 item
+        opps = report.get("opportunities", [])
+        top3 = sorted(opps, key=lambda x: float(x.get("opp_score", 0)), reverse=True)[:3]
+        top3_str = ", ".join(
+            f"{o.get('ticker','')} ({float(o.get('opp_score',0)):.1f})" for o in top3
+        ) if top3 else "无新机会"
+        desc_text = f"今日 Top 3：{top3_str}"
+        items_xml += (
+            f"    <item>\n"
+            f"      <title>{_esc('Alpha Hive 日报 ' + self.date_str)}</title>\n"
+            f"      <link>{base_url}</link>\n"
+            f"      <description>{_esc(desc_text)}</description>\n"
+            f"      <pubDate>{now_rfc}</pubDate>\n"
+            f"      <guid>{base_url}#{self.date_str}</guid>\n"
+            f"    </item>\n"
+        )
+
+        # 历史 JSON 作为 items（最多 10 条）
+        hist_files = sorted(
+            _glob.glob(str(self.report_dir / "alpha-hive-daily-*.json")),
+            reverse=True
+        )
+        count = 0
+        for hf in hist_files:
+            from pathlib import Path as _P
+            hdate = _P(hf).stem.replace("alpha-hive-daily-", "")
+            if hdate == self.date_str:
+                continue
+            try:
+                with open(hf, encoding="utf-8") as fp:
+                    hrpt = json.load(fp)
+                hopps = hrpt.get("opportunities", [])
+                htop3 = sorted(hopps, key=lambda x: float(x.get("opp_score", 0)), reverse=True)[:3]
+                htop3_str = ", ".join(
+                    f"{o.get('ticker','')} ({float(o.get('opp_score',0)):.1f})" for o in htop3
+                ) if htop3 else "无机会"
+                items_xml += (
+                    f"    <item>\n"
+                    f"      <title>{_esc('Alpha Hive 日报 ' + hdate)}</title>\n"
+                    f"      <link>{base_url}</link>\n"
+                    f"      <description>{_esc('Top 3：' + htop3_str)}</description>\n"
+                    f"      <pubDate>{hdate}</pubDate>\n"
+                    f"      <guid>{base_url}#{hdate}</guid>\n"
+                    f"    </item>\n"
+                )
+                count += 1
+                if count >= 10:
+                    break
+            except Exception:
+                continue
+
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<rss version="2.0">\n'
+            '  <channel>\n'
+            '    <title>Alpha Hive 投资日报</title>\n'
+            f'    <link>{base_url}</link>\n'
+            '    <description>去中心化蜂群智能投资研究平台 — 每日投资机会扫描</description>\n'
+            '    <language>zh-CN</language>\n'
+            f'    <lastBuildDate>{now_rfc}</lastBuildDate>\n'
+            f'{items_xml}'
+            '  </channel>\n'
+            '</rss>\n'
+        )
 
     def _generate_index_html(self, report: Dict) -> str:
         """从 swarm report + .swarm_results_*.json 生成完整 GitHub Pages 仪表板"""
@@ -2149,6 +2463,85 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         _acc_correct       = _acc_stats.get("correct_count", 0)
         _acc_by_dir        = _acc_stats.get("by_direction", {})
         _acc_by_ticker     = _acc_stats.get("by_ticker", {})
+
+        # F11: 增强准确率数据（胜率走势、最佳/最差预测、Sharpe）
+        _acc_weekly_trend = []  # [{week, accuracy, total}]
+        _acc_best3 = []   # [{ticker, date, direction, score, return_t7}]
+        _acc_worst3 = []
+        _acc_sharpe = 0.0
+        _acc_max_dd = 0.0
+        _acc_win_streak = 0
+        try:
+            from backtester import PredictionStore as _PS11
+            import sqlite3 as _sq11
+            _ps11 = _PS11()
+            with _sq11.connect(_ps11.db_path) as _cn11:
+                _cn11.row_factory = _sq11.Row
+                # 周胜率走势（最近 12 周）
+                _wrows = _cn11.execute("""
+                    SELECT strftime('%Y-W%W', date) as week,
+                           COUNT(*) as total,
+                           SUM(CASE WHEN correct_t7=1 THEN 1 ELSE 0 END) as correct,
+                           AVG(return_t7) as avg_ret
+                    FROM predictions WHERE checked_t7=1
+                    GROUP BY week ORDER BY week DESC LIMIT 12
+                """).fetchall()
+                _acc_weekly_trend = [
+                    {"week": r["week"], "accuracy": round(r["correct"]/r["total"]*100, 1) if r["total"] else 0,
+                     "total": r["total"], "avg_ret": round(r["avg_ret"] or 0, 2)}
+                    for r in reversed(_wrows)
+                ]
+                # 最佳预测 Top 3（收益最高）
+                _brows = _cn11.execute("""
+                    SELECT ticker, date, direction, final_score, return_t7, correct_t7,
+                           price_at_predict, price_t7
+                    FROM predictions WHERE checked_t7=1 AND return_t7 IS NOT NULL
+                    ORDER BY return_t7 DESC LIMIT 3
+                """).fetchall()
+                _acc_best3 = [dict(r) for r in _brows]
+                # 最差预测 Top 3（亏损最大）
+                _wrows2 = _cn11.execute("""
+                    SELECT ticker, date, direction, final_score, return_t7, correct_t7,
+                           price_at_predict, price_t7
+                    FROM predictions WHERE checked_t7=1 AND return_t7 IS NOT NULL
+                    ORDER BY return_t7 ASC LIMIT 3
+                """).fetchall()
+                _acc_worst3 = [dict(r) for r in _wrows2]
+                # Sharpe Ratio（基于 T+7 收益）
+                _ret_rows = _cn11.execute("""
+                    SELECT return_t7 FROM predictions
+                    WHERE checked_t7=1 AND return_t7 IS NOT NULL
+                """).fetchall()
+                if len(_ret_rows) >= 2:
+                    _rets = [r["return_t7"] for r in _ret_rows]
+                    _mean_r = sum(_rets) / len(_rets)
+                    _std_r = (sum((x - _mean_r)**2 for x in _rets) / (len(_rets) - 1)) ** 0.5
+                    _acc_sharpe = round(_mean_r / _std_r, 2) if _std_r > 0 else 0.0
+                    # 最大回撤（连续亏损预测累计）
+                    _cum = 0.0
+                    _peak = 0.0
+                    _max_dd_val = 0.0
+                    for _rv in _rets:
+                        _cum += _rv
+                        if _cum > _peak:
+                            _peak = _cum
+                        _dd = _peak - _cum
+                        if _dd > _max_dd_val:
+                            _max_dd_val = _dd
+                    _acc_max_dd = round(_max_dd_val, 2)
+                # 当前连胜
+                _streak_rows = _cn11.execute("""
+                    SELECT correct_t7 FROM predictions
+                    WHERE checked_t7=1 ORDER BY date DESC, id DESC
+                """).fetchall()
+                _acc_win_streak = 0
+                for _sr in _streak_rows:
+                    if _sr["correct_t7"] == 1:
+                        _acc_win_streak += 1
+                    else:
+                        break
+        except Exception as _e11:
+            _log.debug("F11 准确率增强数据加载失败: %s", _e11)
 
         now_str = _dt.now().strftime("%Y-%m-%d %H:%M PST")
         date_str = self.date_str
@@ -2202,6 +2595,10 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
             gsr = oracle.get("gamma_squeeze_risk", None)
             iv_current = oracle.get("iv_current", None)
             signal_sum = oracle.get("signal_summary", "")
+            # ── 价格数据（#10）──
+            scout_det = ad.get("ScoutBeeNova", {}).get("details", {})
+            _price_raw = scout_det.get("price")
+            _momentum_raw = scout_det.get("momentum_5d")
             # ── 维度数据质量（#3）──
             dim_dq = sd.get("dim_data_quality", {})
             # 内幕信号：取 ScoutBeeNova discovery 第一个 | 段
@@ -2236,6 +2633,9 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 "signal_sum": _html.escape(signal_sum[:45]) if signal_sum else "",
                 # 维度数据质量
                 "dim_dq": dim_dq,
+                # 价格数据
+                "price": round(float(_price_raw), 2) if _price_raw is not None else None,
+                "momentum_5d": round(float(_momentum_raw), 2) if _momentum_raw is not None else None,
             }
 
         # ── 维度数据质量 HTML 构建器（#3）──
@@ -2680,8 +3080,21 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                              f'<div class="dim-b" style="height:{_dpct6}%;background:{_dcol6}"></div>'
                              f'<span class="dim-lbl">{_dlbl6x}</span></div>')
                 _dim_html6 = f'<div class="dim-bars">{_db6}</div>'
+            # F10: 价格标注
+            _det6 = _detail(_tc6)
+            _price6_html = ""
+            if _det6["price"] is not None:
+                _p6 = _det6["price"]
+                _m6 = _det6["momentum_5d"]
+                _mstr6 = f"{_m6:+.1f}%" if _m6 is not None else ""
+                _mcls6 = "sprice-up" if _m6 and _m6 > 0 else ("sprice-dn" if _m6 and _m6 < 0 else "sprice-flat")
+                _price6_html = (f'<div class="sprice-row">'
+                                f'<span class="sprice">${_p6:,.2f}</span>'
+                                f'{f"""<span class="sprice-chg {_mcls6}">{_mstr6}</span>""" if _mstr6 else ""}'
+                                f'</div>')
             new_cards_html += f"""
-            <div class="scard">
+            <div class="scard" data-dir="{_dr6}" data-score="{_sc6:.1f}" onclick="scrollToDeep('{_html.escape(_tc6)}')">
+              <button class="scard-share" onclick="event.stopPropagation();shareCard('{_html.escape(_tc6)}',{_sc6:.1f})">𝕏</button>
               <div class="scard-head">
                 <div class="slogo-wrap">{_logo6}<span class="srank">#{_ci}</span></div>
                 <span class="sdir {_dcls6}">{_dlbl6}</span>
@@ -2696,6 +3109,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                   </div>
                 </div>
                 {_dim_html6}
+                {_price6_html}
                 {f'<div class="sinsight">{_ins6}</div>' if _ins6 else ''}
                 {_ml6}
               </div>
@@ -2722,12 +3136,19 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                       if _ml_ex_rt else "-")
             _pc_st_rt = (' style="color:var(--bull);font-weight:700"' if _det_rt["pc"] != "-" and float(_det_rt["pc"]) < 0.7
                          else (' style="color:var(--bear);font-weight:700"' if _det_rt["pc"] != "-" and float(_det_rt["pc"]) > 1.5 else ""))
+            _prt = _det_rt["price"]
+            _mrt = _det_rt["momentum_5d"]
+            _ptd_rt = f'${_prt:,.2f}' if _prt is not None else '-'
+            _mtd_rt = (f'<span class="{"sprice-up" if _mrt > 0 else "sprice-dn"}">{_mrt:+.1f}%</span>'
+                       if _mrt is not None and _mrt != 0 else ('-' if _mrt is None else '<span class="sprice-flat">0.0%</span>'))
             new_rows_html += f"""
-            <tr>
+            <tr data-dir="{_drt}" data-score="{_srt:.1f}">
               <td>{_ri}</td>
               <td><strong>{_html.escape(_trt)}</strong></td>
               <td><span class="{_dclrt}">{_dlrt}</span></td>
               <td class="{_scrt}"><strong>{_srt:.1f}</strong>/10</td>
+              <td>{_ptd_rt}</td>
+              <td>{_mtd_rt}</td>
               <td>{_res_html_rt}</td>
               <td>{_det_rt['bullish']}/{_det_rt['bearish_v']}/{_det_rt['neutral_v']}</td>
               <td>{_det_rt['iv_rank']}</td>
@@ -2750,6 +3171,17 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
             _dlbld = {"bullish":"看多 ↑","bearish":"看空 ↓","neutral":"中性 →"}[_drd]
             _hcd   = _dir_hdr3.get(_drd, "#1a3a7a")
             _detd  = _detail(_tkrd)
+            # F10: 预计算价格 HTML（避免嵌套 f-string）
+            _pd = _detd["price"]
+            _md = _detd["momentum_5d"]
+            if _pd is not None:
+                _mhtml_d = ""
+                if _md is not None:
+                    _mcls_d = "sprice-up" if _md > 0 else ("sprice-dn" if _md < 0 else "sprice-flat")
+                    _mhtml_d = f' <span class="sprice-chg {_mcls_d}">{_md:+.1f}%</span>'
+                _price_metric_d = f'<div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">${_pd:,.2f}{_mhtml_d}</span></div>'
+            else:
+                _price_metric_d = ""
             _blstd = []
             for _discd, _icod, _lbd in [
                 (_add.get("ScoutBeeNova",{}).get("discovery",""),       "📋","内幕"),
@@ -2794,7 +3226,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
             else:
                 _tb_html = ""
             new_company_html += f"""
-            <div class="company-card">
+            <div class="company-card" data-dir="{_drd}" data-score="{_scd:.1f}" id="deep-{_html.escape(_tkrd)}">
               <div class="cc-header" style="background:{_hcd};">
                 <span class="cc-ticker">{_html.escape(_tkrd)}</span>
                 <span class="cc-dir">{_dlbld}</span>
@@ -2803,6 +3235,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
               <div class="cc-body">
                 <div class="cc-two">
                   <div class="cc-metrics-col">
+                    {_price_metric_d}
                     <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">{_detd['iv_rank']}</span></div>
                     <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">{_detd['pc']}</span></div>
                     {f'<div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:{_detd["flow_color"]};font-weight:bold;">{_detd["flow_dir"]}</span></div>' if _detd["flow_dir"] != "-" else ""}
@@ -2810,7 +3243,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                     <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">{_detd['bear_score']:.1f}/10</span></div>
                     <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">{_detd['bullish']}多/{_detd['bearish_v']}空</span></div>
                   </div>
-                  <div class="radar-wrap"><canvas id="radar-{_html.escape(_tkrd)}" width="160" height="160"></canvas></div>
+                  <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-{_html.escape(_tkrd)}" width="160" height="160"></canvas></div>
                 </div>
                 <ul class="cc-signals">{_bhtmld}</ul>
                 {_build_dim_dq_html(_detd['dim_dq'])}
@@ -2819,8 +3252,20 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
               </div>
             </div>"""
 
-        # ── 历史简报回溯 ──
+        # ── 历史简报回溯 + F&G 历史 + 评分趋势数据 ──
         _hist_entries = []
+        _fg_history = [{"date": date_str, "value": _fv3}]  # 当天 F&G
+        _trend_data = {}  # {ticker: [{date, score}, ...]}
+        _hist_full = {}   # {date: [{ticker, score, direction}, ...]}  for diff
+        # 当天趋势数据
+        for _tt in all_tickers_sorted:
+            _tts = float(opp_by_ticker.get(_tt, {}).get("opp_score") or swarm_detail.get(_tt, {}).get("final_score", 0))
+            _trend_data.setdefault(_tt, []).append({"date": date_str, "score": round(_tts, 1)})
+        _hist_full[date_str] = [
+            {"ticker": _tt, "score": round(float(opp_by_ticker.get(_tt, {}).get("opp_score") or swarm_detail.get(_tt, {}).get("final_score", 0)), 1),
+             "direction": str(opp_by_ticker.get(_tt, {}).get("direction") or swarm_detail.get(_tt, {}).get("direction", "neutral")).lower()}
+            for _tt in all_tickers_sorted
+        ]
         try:
             import glob as _glob
             _hist_files = sorted(
@@ -2837,17 +3282,41 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                     _hopps = _hrpt.get("opportunities", [])
                     _hmeta = _hrpt.get("swarm_metadata", {})
                     _hn    = _hmeta.get("tickers_analyzed", len(_hopps))
+                    # 全部 opps 数据（用于趋势 + diff）
+                    _hall_opps = [
+                        {"ticker": o.get("ticker",""), "score": float(o.get("opp_score",0)),
+                         "direction": str(o.get("direction","neutral")).lower()}
+                        for o in _hopps if o.get("ticker")
+                    ]
+                    # 趋势数据：每个 ticker 每天的评分
+                    for _ho in _hall_opps:
+                        _trend_data.setdefault(_ho["ticker"], []).append(
+                            {"date": _hdate, "score": round(_ho["score"], 1)})
+                    # diff 全量数据
+                    _hist_full[_hdate] = _hall_opps
                     # 按 opp_score 降序取 Top 3
-                    _htop3 = sorted(
-                        [{"ticker": o.get("ticker",""), "score": float(o.get("opp_score",0)),
-                          "direction": str(o.get("direction","neutral")).lower()}
-                         for o in _hopps if o.get("ticker")],
-                        key=lambda x: x["score"], reverse=True
-                    )[:3]
+                    _htop3 = sorted(_hall_opps, key=lambda x: x["score"], reverse=True)[:3]
                     _havg  = sum(o["score"] for o in _htop3) / len(_htop3) if _htop3 else 0
                     # 可用的 ML 报告
                     _hml   = [t for t in [o["ticker"] for o in _hopps]
                               if _Path(self.report_dir / f"alpha-hive-{t}-ml-enhanced-{_hdate}.html").exists()]
+                    # 提取 F&G 值（从 swarm_results）
+                    _hfg_val = None
+                    try:
+                        _hsr_path = self.report_dir / f".swarm_results_{_hdate}.json"
+                        if _hsr_path.exists():
+                            with open(_hsr_path, encoding="utf-8") as _hsr_fp:
+                                _hsr = _json.load(_hsr_fp)
+                            for _htk in _hsr:
+                                _hbuzz = _hsr[_htk].get("agent_details", {}).get("BuzzBeeWhisper", {}).get("discovery", "")
+                                _hfg_m = _re.search(r'F&G\s*(\d+)', _hbuzz)
+                                if _hfg_m:
+                                    _hfg_val = int(_hfg_m.group(1))
+                                    break
+                    except Exception:
+                        pass
+                    if _hfg_val is not None:
+                        _fg_history.append({"date": _hdate, "value": _hfg_val})
                     _hist_entries.append({
                         "date": _hdate, "n": _hn, "top3": _htop3,
                         "avg": _havg, "ml_tickers": _hml,
@@ -2858,6 +3327,15 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                     _log.debug("历史报告 %s 解析失败: %s", _hdate, _he)
         except Exception as _hle:
             _log.debug("历史时间线加载失败: %s", _hle)
+
+        # 排序 F&G 历史和趋势数据（按日期升序）
+        _fg_history.sort(key=lambda x: x["date"])
+        for _tk in _trend_data:
+            _trend_data[_tk].sort(key=lambda x: x["date"])
+        # 序列化为 JS 变量
+        _fg_history_js = _json.dumps(_fg_history)
+        _trend_data_js = _json.dumps(_trend_data)
+        _hist_full_js  = _json.dumps(_hist_full)
 
         # 生成历史时间线 HTML
         _dir_icon = {"bullish": "🟢", "bearish": "🔴", "neutral": "🟡"}
@@ -2941,6 +3419,54 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         # 准确率百分比（格式化）
         _acc_overall_pct = _acc_overall * 100
 
+        # F11: 生成最佳/最差预测 HTML
+        _dir_cn11 = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
+        def _pred_list_html(preds, is_best=True):
+            if not preds:
+                return '<div style="font-size:.82em;color:var(--ts);padding:8px 0">数据积累中...</div>'
+            h = '<ul class="pred-list">'
+            for p in preds:
+                _ret = p.get("return_t7", 0) or 0
+                _rcls = "pred-ret-up" if _ret > 0 else "pred-ret-dn"
+                _dir = _dir_cn11.get(p.get("direction", ""), p.get("direction", ""))
+                h += (f'<li class="pred-item">'
+                      f'<span class="pred-tk">{p.get("ticker","")}</span>'
+                      f'<span class="pred-date">{p.get("date","")[:10]} · {_dir}</span>'
+                      f'<span class="pred-ret {_rcls}">{_ret:+.1f}%</span>'
+                      f'</li>')
+            h += '</ul>'
+            return h
+        _best3_html = _pred_list_html(_acc_best3, True)
+        _worst3_html = _pred_list_html(_acc_worst3, False)
+        _acc_weekly_js = _json.dumps(_acc_weekly_trend)
+
+        # F11: 额外指标行 HTML
+        _acc_extra_metrics = (
+            f'<div class="acc-metrics-row">'
+            f'<div class="acc-metric-pill"><span class="mv">{_acc_sharpe:+.2f}</span><span class="ml">Sharpe Ratio</span></div>'
+            f'<div class="acc-metric-pill"><span class="mv">{_acc_max_dd:.1f}%</span><span class="ml">最大回撤</span></div>'
+            f'<div class="acc-metric-pill"><span class="mv">{_acc_win_streak}</span><span class="ml">当前连胜</span></div>'
+            f'</div>'
+        ) if _acc_total_checked > 0 else ""
+
+        # F11: 增强准确率面板（胜率趋势 + 最佳/最差预测）
+        _acc_enhanced_html = ""
+        if _acc_total_checked > 0:
+            _acc_enhanced_html = f"""
+    {_acc_extra_metrics}
+    <div class="acc-extra-row">
+      <div class="acc-ext-box">
+        <div class="acc-ext-title">📈 胜率走势（按周）</div>
+        <div style="height:160px"><canvas id="accWinTrendChart"></canvas></div>
+      </div>
+      <div class="acc-ext-box">
+        <div class="acc-ext-title">🏆 最佳预测 Top 3</div>
+        {_best3_html}
+        <div class="acc-ext-title" style="margin-top:14px">💀 最差预测 Top 3</div>
+        {_worst3_html}
+      </div>
+    </div>"""
+
         # 生成准确率 HTML Section
         if _acc_total_checked > 0:
             _acc_section_html = f"""
@@ -2970,6 +3496,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         </table>
       </div>
     </div>
+    {_acc_enhanced_html}
   </div>"""
         elif _acc_pending > 0:
             _acc_section_html = f"""
@@ -2990,15 +3517,33 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         _acc_dir_accs_js_safe   = _acc_dir_accs_js
         _acc_dir_tots_js_safe   = _acc_dir_tots_js
 
+        # F12: 搜索索引数据
+        _dir_cn12 = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
+        _search_index = []
+        for _t12 in all_tickers_sorted:
+            _s12 = float(opp_by_ticker.get(_t12, {}).get("opp_score") or swarm_detail.get(_t12, {}).get("final_score", 0))
+            _d12 = str(opp_by_ticker.get(_t12, {}).get("direction") or swarm_detail.get(_t12, {}).get("direction", "neutral")).lower()
+            if "多" in _d12: _d12 = "bullish"
+            elif "空" in _d12: _d12 = "bearish"
+            elif _d12 not in ("bullish", "bearish", "neutral"): _d12 = "neutral"
+            _det12 = _detail(_t12)
+            _search_index.append({
+                "ticker": _t12,
+                "score": round(_s12, 1),
+                "direction": _dir_cn12.get(_d12, "中性"),
+                "price": _det12["price"],
+            })
+        _search_index_js = _json.dumps(_search_index)
+
         return f"""<!DOCTYPE html>
 <html lang="zh-CN" class="">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="description" content="Alpha Hive — 去中心化蜂群智能投资研究平台，SEC 真实数据驱动的每日投资机会扫描。">
 <meta name="theme-color" content="#0A0F1C" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f0f4ff" media="(prefers-color-scheme: light)">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' https://logo.clearbit.com https:; font-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://logo.clearbit.com https:; font-src 'self'">
 <meta property="og:title" content="Alpha Hive 投资仪表板">
 <meta property="og:description" content="蜂群智能驱动的去中心化投资研究，{n_tickers} 标的每日扫描">
 <meta property="og:type" content="website">
@@ -3008,6 +3553,11 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 <link rel="canonical" href="https://wangmingjie36-creator.github.io/alpha-hive-deploy/">
 <meta name="robots" content="index, follow">
 <title>Alpha Hive 投资仪表板</title>
+<link rel="alternate" type="application/rss+xml" title="Alpha Hive RSS" href="rss.xml">
+<link rel="manifest" href="manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Alpha Hive">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><polygon points='50,5 93,28 93,72 50,95 7,72 7,28' fill='%23F4A532'/><text x='50' y='62' font-size='42' text-anchor='middle' fill='%23fff'>🐝</text></svg>">
 <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous"></script>
 <style>
@@ -3022,17 +3572,22 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 <!-- ── Fixed Nav ── -->
 <nav class="nav" role="navigation" aria-label="主导航">
   <a href="#" class="nav-logo"><span class="px-bee"></span> Alpha Hive</a>
-  <div class="nav-links">
-    <a href="#today"   class="nav-link">今日简报</a>
-    <a href="#charts"  class="nav-link">图表</a>
-    <a href="#list"    class="nav-link">完整清单</a>
-    <a href="#deep"    class="nav-link">个股深度</a>
-    <a href="#report"  class="nav-link">完整简报</a>
-    <a href="#history" class="nav-link">📅 历史简报</a>
-    <a href="#accuracy" class="nav-link">📈 准确率</a>
+  <div class="nav-links" id="navLinks">
+    <a href="#/today"   class="nav-link">今日简报</a>
+    <a href="#/charts"  class="nav-link">图表</a>
+    <a href="#/list"    class="nav-link">完整清单</a>
+    <a href="#/deep"    class="nav-link">个股深度</a>
+    <a href="#/report"  class="nav-link">完整简报</a>
+    <a href="#/trend"   class="nav-link">📈 趋势</a>
+    <a href="#/history" class="nav-link">📅 历史简报</a>
+    <a href="#/accuracy" class="nav-link">📈 准确率</a>
   </div>
-  <button class="dark-btn" id="darkBtn" onclick="toggleDark()" aria-label="切换暗黑模式">🌙 暗黑</button>
+  <div style="display:flex;align-items:center;gap:8px">
+    <button class="dark-btn" id="darkBtn" onclick="toggleDark()" aria-label="切换暗黑模式">🌙 暗黑</button>
+    <button class="hamburger" id="hamburgerBtn" onclick="toggleMenu()" aria-label="打开菜单">☰</button>
+  </div>
 </nav>
+<div class="nav-overlay" id="navOverlay" onclick="toggleMenu()"></div>
 
 <main id="main-content">
 <!-- ── Hero Banner ── -->
@@ -3095,9 +3650,30 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 </section>
 
 <div class="main">
+  <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start;margin-bottom:16px">
+    <div class="global-search-wrap" style="flex:1;min-width:200px">
+      <input class="global-search" id="globalSearch" type="text" placeholder="🔍 搜索标的（输入 ticker 跳转）..." aria-label="全站搜索" autocomplete="off">
+      <span class="gs-icon">⌘K</span>
+      <div class="gs-results" id="gsResults"></div>
+    </div>
+    <div class="share-bar" style="margin:0">
+      <button class="share-btn share-btn-x" onclick="shareToX()">𝕏 Share</button>
+      <button class="share-btn" onclick="copyLink()">📋 Copy Link</button>
+      <button class="share-btn" onclick="window.print()">📄 Download PDF</button>
+      <button class="share-btn" onclick="exportCSV()">📊 Export CSV</button>
+    </div>
+  </div>
   <!-- ── Top 6 Cards ── -->
   <div class="section" id="today">
     <h2 class="sec-title">今日 Top {min(6, len(all_tickers_sorted))} 机会</h2>
+    <div class="filter-bar">
+      <button class="filter-btn active" onclick="applyFilter('all',this)">全部</button>
+      <button class="filter-btn" onclick="applyFilter('bullish',this)">🟢 看多</button>
+      <button class="filter-btn" onclick="applyFilter('bearish',this)">🔴 看空</button>
+      <button class="filter-btn" onclick="applyFilter('neutral',this)">🟡 中性</button>
+      <button class="filter-btn" onclick="applyFilter('high',this)">⭐ 高分 (≥7.5)</button>
+    </div>
+    <div class="filter-count" id="filterCount"></div>
     <div class="top6-grid">
       {new_cards_html}
     </div>
@@ -3110,15 +3686,16 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
     <div class="charts-grid">
       <div class="chart-box">
         <div class="chart-ttl">😨 Fear &amp; Greed 指数</div>
-        <div class="chart-canvas-wrap" style="height:180px"><canvas id="fgChart" width="300" height="180" role="img" aria-label="Fear and Greed 指数图表"></canvas></div>
+        <div class="chart-canvas-wrap" style="height:180px"><div class="skeleton"><div class="skel-half-circle"></div></div><canvas id="fgChart" width="300" height="180" role="img" aria-label="Fear and Greed 指数图表"></canvas></div>
+        <div class="fg-trend-wrap"><canvas id="fgTrendChart" width="300" height="50" role="img" aria-label="F&G 历史趋势"></canvas></div>
       </div>
       <div class="chart-box">
         <div class="chart-ttl">📊 各标的综合评分</div>
-        <div class="chart-canvas-wrap" style="height:{'{}px'.format(max(160, len(all_tickers_sorted)*28))}"><canvas id="scoresChart" width="600" height="300" role="img" aria-label="各标的综合评分柱状图"></canvas></div>
+        <div class="chart-canvas-wrap" style="height:{'{}px'.format(max(160, len(all_tickers_sorted)*28))}"><div class="skeleton"><div class="skel-bar"></div></div><canvas id="scoresChart" width="600" height="300" role="img" aria-label="各标的综合评分柱状图"></canvas></div>
       </div>
       <div class="chart-box">
         <div class="chart-ttl">🗳 看多 / 看空 / 中性</div>
-        <div class="chart-canvas-wrap" style="height:180px"><canvas id="dirChart" width="300" height="180" role="img" aria-label="看多看空中性方向分布图"></canvas></div>
+        <div class="chart-canvas-wrap" style="height:180px"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="dirChart" width="300" height="180" role="img" aria-label="看多看空中性方向分布图"></canvas></div>
       </div>
     </div>
   </div>
@@ -3134,7 +3711,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
     <div class="tbl-wrap">
       <table class="full-table" id="oppTable">
         <thead><tr>
-          <th scope="col" aria-sort="none">#</th><th scope="col" aria-sort="none">标的</th><th scope="col" aria-sort="none">方向</th><th scope="col" aria-sort="none">综合分</th><th scope="col" aria-sort="none">共振</th>
+          <th scope="col" aria-sort="none">#</th><th scope="col" aria-sort="none">标的</th><th scope="col" aria-sort="none">方向</th><th scope="col" aria-sort="none">综合分</th><th scope="col" aria-sort="none">价格</th><th scope="col" aria-sort="none">5日涨跌</th><th scope="col" aria-sort="none">共振</th>
           <th scope="col" aria-sort="none">投票(多/空/中)</th><th scope="col" aria-sort="none">IV Rank</th><th scope="col" aria-sort="none">P/C</th><th scope="col" aria-sort="none">看空强度</th><th scope="col">ML 详情</th>
         </tr></thead>
         <tbody>{new_rows_html}</tbody>
@@ -3154,6 +3731,23 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
     <div class="report-body-wrap"><div class="report-body">{_rpt_body}</div></div>
   </div>
 
+  <!-- ── Trend Tracking ── -->
+  <div class="section" id="trend">
+    <h2 class="sec-title">📈 评分趋势追踪</h2>
+    <div class="trend-controls" id="trendChips"></div>
+    <div class="chart-box" style="height:300px">
+      <canvas id="trendChart"></canvas>
+    </div>
+    <h3 style="margin-top:22px;font-size:.95em;font-weight:700;color:var(--tp)">📊 简报对比</h3>
+    <div class="diff-controls">
+      <select id="diffDateA"></select>
+      <span style="color:var(--ts)">vs</span>
+      <select id="diffDateB"></select>
+      <button class="filter-btn" onclick="showDiff()" style="padding:8px 18px">对比</button>
+    </div>
+    <div id="diffResult"></div>
+  </div>
+
   <!-- ── Historical Reports ── -->
   <div class="section" id="history">
     <h2 class="sec-title">📅 历史简报回溯</h2>
@@ -3166,14 +3760,35 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 <footer class="footer">
   <p><span class="px-bee"></span> Alpha Hive — 去中心化蜂群智能投资研究平台</p>
   <p>更新：{now_str} | {n_tickers} 标的 | SEC 真实数据 | 真实度 {avg_real}</p>
+  <div style="display:flex;justify-content:center;gap:10px;margin-top:10px;flex-wrap:wrap">
+    <a href="rss.xml" class="share-btn" style="color:rgba(255,255,255,.7);border-color:rgba(255,255,255,.15)">📡 RSS 订阅</a>
+    <button class="share-btn share-btn-x" style="border-color:rgba(255,255,255,.15);color:rgba(255,255,255,.7)" onclick="shareToX()">𝕏 Follow &amp; Share</button>
+  </div>
   <p style="margin-top:8px;font-size:.82em;opacity:.6">
     声明：本报告由 AI 蜂群自动生成，仅供研究参考，不构成投资建议。所有决策请自行判断。
   </p>
 </footer>
+<div id="kbHelp" class="kb-help" style="display:none">
+  <div class="kb-help-inner">
+    <h3>⌨️ 键盘快捷键</h3>
+    <div class="kb-row"><kbd>J</kbd><span>下一张卡片</span></div>
+    <div class="kb-row"><kbd>K</kbd><span>上一张卡片</span></div>
+    <div class="kb-row"><kbd>D</kbd><span>切换暗黑模式</span></div>
+    <div class="kb-row"><kbd>?</kbd><span>显示/隐藏帮助</span></div>
+    <div class="kb-row"><kbd>Esc</kbd><span>关闭帮助</span></div>
+    <button class="filter-btn" onclick="toggleKbHelp()" style="margin-top:12px;width:100%">关闭</button>
+  </div>
+</div>
 </main>
+<div class="toast" id="toast"></div>
 <button class="scroll-top" id="scrollTop" onclick="window.scrollTo({{top:0,behavior:'smooth'}})" aria-label="返回顶部">↑</button>
 
 <script>
+// ── F13: Service Worker Registration ──
+if('serviceWorker' in navigator && location.protocol==='https:'){{
+  navigator.serviceWorker.register('sw.js').catch(function(){{}});
+}}
+
 // ── Scroll-to-top ──
 (function(){{
   var btn=document.getElementById('scrollTop');
@@ -3199,6 +3814,98 @@ document.addEventListener('DOMContentLoaded',function(){{
   if(b&&document.documentElement.classList.contains('dark'))b.textContent='☀️ 亮色';
 }});
 
+// ── Hamburger Menu ──
+function toggleMenu(){{
+  var nav=document.getElementById('navLinks');
+  var ov=document.getElementById('navOverlay');
+  if(!nav||!ov)return;
+  nav.classList.toggle('open');
+  ov.classList.toggle('open');
+}}
+document.querySelectorAll('.nav-link').forEach(function(l){{
+  l.addEventListener('click',function(){{
+    var nav=document.getElementById('navLinks');
+    var ov=document.getElementById('navOverlay');
+    if(nav)nav.classList.remove('open');
+    if(ov)ov.classList.remove('open');
+  }});
+}});
+
+// ── Share Functions ──
+function showToast(msg){{
+  var t=document.getElementById('toast');
+  if(!t)return;
+  t.textContent=msg;
+  t.classList.add('show');
+  setTimeout(function(){{t.classList.remove('show');}},2200);
+}}
+function shareToX(){{
+  var txt=encodeURIComponent('【Alpha Hive 日报】去中心化蜂群智能投资研究，今日扫描完成！\\n\\n');
+  var url=encodeURIComponent(window.location.href);
+  window.open('https://twitter.com/intent/tweet?text='+txt+'&url='+url,'_blank','width=550,height=420');
+}}
+function copyLink(){{
+  if(navigator.clipboard){{
+    navigator.clipboard.writeText(window.location.href).then(function(){{
+      showToast('链接已复制到剪贴板');
+    }});
+  }}else{{
+    showToast('浏览器不支持剪贴板');
+  }}
+}}
+function shareCard(ticker,score){{
+  var txt=encodeURIComponent('Alpha Hive 蜂群信号：$'+ticker+' 综合分 '+score.toFixed(1)+'/10\\n\\n');
+  var url=encodeURIComponent(window.location.href);
+  window.open('https://twitter.com/intent/tweet?text='+txt+'&url='+url,'_blank','width=550,height=420');
+}}
+
+// ── Export CSV ──
+function exportCSV(){{
+  var tbl=document.getElementById('oppTable');
+  if(!tbl)return;
+  var rows=tbl.querySelectorAll('tr');
+  var csv='\\uFEFF';
+  rows.forEach(function(tr){{
+    if(tr.style.display==='none')return;
+    var cols=tr.querySelectorAll('th,td');
+    var line=[];
+    cols.forEach(function(c){{line.push('"'+c.textContent.trim().replace(/"/g,'""')+'"');}});
+    csv+=line.join(',')+'\\n';
+  }});
+  var blob=new Blob([csv],{{type:'text/csv;charset=utf-8'}});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='alpha-hive-opportunities.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  showToast('CSV 已导出');
+}}
+
+// ── Filter ──
+function applyFilter(f,btn){{
+  document.querySelectorAll('.filter-btn').forEach(function(b){{b.classList.remove('active');}});
+  if(btn)btn.classList.add('active');
+  var items=document.querySelectorAll('.scard[data-dir]');
+  var trs=document.querySelectorAll('#oppTable tbody tr[data-dir]');
+  var cards=document.querySelectorAll('.company-card[data-dir]');
+  var count=0;
+  function check(el){{
+    var d=el.getAttribute('data-dir');
+    var s=parseFloat(el.getAttribute('data-score'));
+    var show=false;
+    if(f==='all')show=true;
+    else if(f==='high')show=s>=7.5;
+    else show=d===f;
+    el.style.display=show?'':'none';
+    if(show)count++;
+  }}
+  items.forEach(check);
+  trs.forEach(check);
+  cards.forEach(check);
+  var fc=document.getElementById('filterCount');
+  if(fc)fc.textContent=f==='all'?'':'显示 '+count+' 条结果';
+}}
+
 // ── Table scroll hint ──
 (function(){{
   var w=document.querySelector('.tbl-wrap');
@@ -3208,11 +3915,11 @@ document.addEventListener('DOMContentLoaded',function(){{
     else w.classList.remove('has-scroll');
   }}
   check();
-  window.addEventListener('resize',check);
+  window.addEventListener('resize',check,{{passive:true}});
   w.addEventListener('scroll',function(){{
     if(w.scrollLeft+w.clientWidth>=w.scrollWidth-4)w.classList.remove('has-scroll');
     else if(w.scrollWidth>w.clientWidth+2)w.classList.add('has-scroll');
-  }});
+  }},{{passive:true}});
 }})();
 
 // ── Table Search ──
@@ -3249,32 +3956,22 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
   }});
 }});
 
-// ── Active Nav (IntersectionObserver) ──
-(function(){{
-  var links=document.querySelectorAll('.nav-link[href^="#"]');
-  if(!links.length||!('IntersectionObserver' in window))return;
-  var ids=[].map.call(links,function(a){{return a.getAttribute('href').slice(1);}});
-  var obs=new IntersectionObserver(function(entries){{
-    entries.forEach(function(en){{
-      if(en.isIntersecting){{
-        links.forEach(function(l){{l.classList.remove('active');}});
-        var hit=[].find.call(links,function(l){{return l.getAttribute('href')==='#'+en.target.id;}});
-        if(hit)hit.classList.add('active');
-      }}
-    }});
-  }},{{rootMargin:'-40% 0px -55% 0px'}});
-  ids.forEach(function(id){{var el=document.getElementById(id);if(el)obs.observe(el);}});
-}})();
-
 // ── Charts (lazy via IntersectionObserver) ──
+var chartInstances=[];
 (function(){{
   var dark=document.documentElement.classList.contains('dark');
   var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
   var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
   var rendered={{}};
-  var chartInstances=[];
 
-  function markDone(id){{var c=document.getElementById(id);if(c)c.classList.add('rendered');}}
+  function markDone(id){{
+    var c=document.getElementById(id);
+    if(c){{
+      c.classList.add('rendered');
+      var w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap');
+      if(w) w.classList.add('skel-done');
+    }}
+  }}
 
   function renderChart(id){{
     if(rendered[id])return;
@@ -3316,6 +4013,12 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
         data:{{labels:sc.map(function(x){{return x[0];}}),
                datasets:[{{data:sc.map(function(x){{return x[1];}}),backgroundColor:clrs,borderRadius:5,borderSkipped:false}}]}},
         options:{{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+                 onClick:function(evt,elems){{
+                   if(!elems.length)return;
+                   var idx=elems[0].index;
+                   var tk=sc[idx][0];
+                   scrollToDeep(tk);
+                 }},
                  plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:function(c){{return' '+c.raw+'/10';}}}}}}}},
                  scales:{{
                    x:{{min:0,max:10,grid:{{color:gc}},ticks:{{color:tc,font:{{size:10}}}}}},
@@ -3359,6 +4062,17 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
                backgroundColor:'rgba(102,126,234,.13)',borderColor:'#667eea',
                pointBackgroundColor:'#667eea',pointBorderColor:'#fff',pointRadius:2,borderWidth:1.5}}]}},
       options:{{responsive:true,maintainAspectRatio:true,
+               onClick:function(evt,elems){{
+                 if(!elems.length)return;
+                 var dimIdx=elems[0].index;
+                 var card=document.getElementById('deep-'+tk);
+                 if(!card)return;
+                 var metrics=card.querySelectorAll('.cc-metric');
+                 metrics.forEach(function(m,i){{
+                   m.style.background=i===dimIdx?'rgba(244,165,50,.15)':'';
+                 }});
+                 card.scrollIntoView({{behavior:'smooth',block:'center'}});
+               }},
                scales:{{r:{{min:0,max:100,beginAtZero:true,
                             grid:{{color:gc}},angleLines:{{color:gc}},
                             ticks:{{display:false}},
@@ -3455,9 +4169,396 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
     }});
   }});
 }})();
+
+// ── F11: Win Rate Trend Chart ──
+(function(){{
+  var cv=document.getElementById('accWinTrendChart');
+  if(!cv||typeof Chart==='undefined')return;
+  var wd={_acc_weekly_js};
+  if(!wd||!wd.length)return;
+  var dark=document.documentElement.classList.contains('dark');
+  var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
+  var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  new Chart(cv,{{
+    type:'line',
+    data:{{
+      labels:wd.map(function(d){{return d.week;}}),
+      datasets:[
+        {{label:'胜率%',data:wd.map(function(d){{return d.accuracy;}}),
+          borderColor:'#667eea',backgroundColor:'rgba(102,126,234,.1)',fill:true,
+          tension:.3,pointRadius:3,borderWidth:2,yAxisID:'y'}},
+        {{label:'均收益%',data:wd.map(function(d){{return d.avg_ret;}}),
+          borderColor:'#F4A532',backgroundColor:'transparent',
+          borderDash:[4,3],tension:.3,pointRadius:2,borderWidth:1.5,yAxisID:'y1'}}
+      ]
+    }},
+    options:{{
+      responsive:true,maintainAspectRatio:false,
+      interaction:{{mode:'index',intersect:false}},
+      plugins:{{legend:{{position:'bottom',labels:{{color:tc,font:{{size:9}},boxWidth:10,padding:6}}}}}},
+      scales:{{
+        x:{{grid:{{display:false}},ticks:{{color:tc,font:{{size:8}},maxRotation:45}}}},
+        y:{{position:'left',min:0,max:100,grid:{{color:gc}},ticks:{{color:tc,font:{{size:9}},callback:function(v){{return v+'%';}}}}}},
+        y1:{{position:'right',grid:{{display:false}},ticks:{{color:'#F4A532',font:{{size:9}},callback:function(v){{return v+'%';}}}}}}
+      }}
+    }}
+  }});
+}})();
 window.addEventListener('pagehide',function(){{chartInstances.forEach(function(c){{try{{c.destroy()}}catch(e){{}}}});chartInstances=[];}});
 /* F37: Pause SVG SMIL animations when prefers-reduced-motion */
 (function(){{var mq=window.matchMedia('(prefers-reduced-motion:reduce)');function toggle(e){{var svgs=document.querySelectorAll('svg');svgs.forEach(function(s){{try{{if(e.matches)s.pauseAnimations();else s.unpauseAnimations();}}catch(ex){{}}}});}}if(mq.matches)document.addEventListener('DOMContentLoaded',function(){{toggle(mq);}});mq.addEventListener('change',toggle);}})();
+
+// ── F6: Scroll to deep card ──
+function scrollToDeep(ticker){{
+  var el=document.getElementById('deep-'+ticker);
+  if(!el)return;
+  el.scrollIntoView({{behavior:'smooth',block:'center'}});
+  el.classList.add('highlight');
+  setTimeout(function(){{el.classList.remove('highlight');}},1000);
+}}
+
+// ── F7b: F&G Trend Mini Chart ──
+(function(){{
+  var fgHist={_fg_history_js};
+  if(!fgHist||fgHist.length<2)return;
+  var cv=document.getElementById('fgTrendChart');
+  if(!cv||typeof Chart==='undefined')return;
+  new Chart(cv,{{
+    type:'line',
+    data:{{
+      labels:fgHist.map(function(d){{return d.date.slice(5);}}),
+      datasets:[{{
+        data:fgHist.map(function(d){{return d.value;}}),
+        borderColor:'#F4A532',backgroundColor:'rgba(244,165,50,.1)',
+        fill:true,tension:.3,pointRadius:2,borderWidth:1.5
+      }}]
+    }},
+    options:{{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:function(c){{return'F&G: '+c.raw;}}}}}}}},
+      scales:{{
+        x:{{display:true,ticks:{{font:{{size:8}},maxRotation:0}},grid:{{display:false}}}},
+        y:{{display:false,min:0,max:100}}
+      }}
+    }}
+  }});
+}})();
+
+// ── F8a: Trend Chart ──
+(function(){{
+  var trendData={_trend_data_js};
+  var cv=document.getElementById('trendChart');
+  if(!cv||typeof Chart==='undefined')return;
+  var dark=document.documentElement.classList.contains('dark');
+  var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
+  var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  var colors=['#667eea','#F4A532','#22c55e','#ef4444','#764ba2','#f59e0b','#06b6d4','#ec4899','#8b5cf6','#14b8a6'];
+  var tickers=Object.keys(trendData);
+  // 收集所有日期
+  var allDates={{}};
+  tickers.forEach(function(tk){{
+    trendData[tk].forEach(function(d){{allDates[d.date]=true;}});
+  }});
+  var dates=Object.keys(allDates).sort();
+  // 默认显示前 5 个 ticker
+  var activeTickers={{}};
+  tickers.slice(0,5).forEach(function(tk){{activeTickers[tk]=true;}});
+  // 生成 chips
+  var chipWrap=document.getElementById('trendChips');
+  if(chipWrap){{
+    tickers.forEach(function(tk,i){{
+      var chip=document.createElement('button');
+      chip.className='trend-chip'+(activeTickers[tk]?' active':'');
+      chip.textContent=tk;
+      chip.onclick=function(){{
+        activeTickers[tk]=!activeTickers[tk];
+        chip.classList.toggle('active');
+        updateTrendChart();
+      }};
+      chipWrap.appendChild(chip);
+    }});
+  }}
+  var trendChart=new Chart(cv,{{
+    type:'line',
+    data:{{labels:dates.map(function(d){{return d.slice(5);}}),datasets:[]}},
+    options:{{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{{legend:{{display:true,position:'bottom',labels:{{color:tc,font:{{size:10}},boxWidth:12,padding:8}}}}}},
+      scales:{{
+        x:{{grid:{{color:gc}},ticks:{{color:tc,font:{{size:10}}}}}},
+        y:{{min:0,max:10,grid:{{color:gc}},ticks:{{color:tc,font:{{size:10}}}}}}
+      }},
+      interaction:{{mode:'index',intersect:false}}
+    }}
+  }});
+  function updateTrendChart(){{
+    var datasets=[];
+    tickers.forEach(function(tk,i){{
+      if(!activeTickers[tk])return;
+      var scoreMap={{}};
+      trendData[tk].forEach(function(d){{scoreMap[d.date]=d.score;}});
+      datasets.push({{
+        label:tk,
+        data:dates.map(function(d){{return d in scoreMap?scoreMap[d]:null;}}),
+        borderColor:colors[i%colors.length],
+        backgroundColor:colors[i%colors.length]+'22',
+        tension:.3,pointRadius:3,borderWidth:2,
+        spanGaps:true
+      }});
+    }});
+    trendChart.data.datasets=datasets;
+    trendChart.update();
+  }}
+  updateTrendChart();
+  window._updateTrendChart=updateTrendChart;
+}})();
+
+// ── F8b: Diff ──
+var _histFull={_hist_full_js};
+(function(){{
+  var dates=Object.keys(_histFull).sort().reverse();
+  var selA=document.getElementById('diffDateA');
+  var selB=document.getElementById('diffDateB');
+  if(!selA||!selB||dates.length<1)return;
+  dates.forEach(function(d,i){{
+    var oA=document.createElement('option');oA.value=d;oA.textContent=d;
+    selA.appendChild(oA);
+    var oB=document.createElement('option');oB.value=d;oB.textContent=d;
+    selB.appendChild(oB);
+  }});
+  if(dates.length>=2)selB.selectedIndex=1;
+}})();
+
+function showDiff(){{
+  var selA=document.getElementById('diffDateA');
+  var selB=document.getElementById('diffDateB');
+  var res=document.getElementById('diffResult');
+  if(!selA||!selB||!res)return;
+  var dA=selA.value,dB=selB.value;
+  var opsA=_histFull[dA]||[];
+  var opsB=_histFull[dB]||[];
+  var mapA={{}};opsA.forEach(function(o){{mapA[o.ticker]=o;}});
+  var mapB={{}};opsB.forEach(function(o){{mapB[o.ticker]=o;}});
+  var allTk={{}};opsA.forEach(function(o){{allTk[o.ticker]=true;}});opsB.forEach(function(o){{allTk[o.ticker]=true;}});
+  var tickers=Object.keys(allTk).sort();
+  var dirCn={{bullish:'看多',bearish:'看空',neutral:'中性'}};
+  var html='<table class="diff-table"><thead><tr><th>标的</th><th>'+dA+'</th><th>'+dB+'</th><th>变化</th><th>状态</th></tr></thead><tbody>';
+  tickers.forEach(function(tk){{
+    var a=mapA[tk],b=mapB[tk];
+    var cls='',status='';
+    if(a&&!b){{cls='diff-new';status='🆕 新增';}}
+    else if(!a&&b){{cls='diff-removed';status='❌ 移除';}}
+    else{{status='—';}}
+    var sA=a?a.score.toFixed(1):'-';
+    var sB=b?b.score.toFixed(1):'-';
+    var change='';
+    if(a&&b){{
+      var diff=a.score-b.score;
+      if(Math.abs(diff)>=0.1){{
+        change='<span class="'+(diff>0?'diff-up':'diff-down')+'">'+(diff>0?'↑':'↓')+Math.abs(diff).toFixed(1)+'</span>';
+      }}else{{change='—';}}
+      var dirA=(dirCn[a.direction]||a.direction);
+      var dirB=(dirCn[b.direction]||b.direction);
+      if(dirA!==dirB)status='🔄 '+dirB+'→'+dirA;
+    }}
+    html+='<tr class="'+cls+'"><td><strong>'+tk+'</strong></td><td>'+sA+'</td><td>'+sB+'</td><td>'+change+'</td><td>'+status+'</td></tr>';
+  }});
+  html+='</tbody></table>';
+  res.innerHTML=html;
+}}
+
+// ── F9: Keyboard shortcuts ──
+(function(){{
+  var cards=[];
+  var activeIdx=-1;
+  document.addEventListener('DOMContentLoaded',function(){{
+    cards=Array.from(document.querySelectorAll('.scard[data-dir]'));
+  }});
+  document.addEventListener('keydown',function(e){{
+    var tag=document.activeElement.tagName;
+    if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')return;
+    if(e.key==='j'||e.key==='J'){{
+      e.preventDefault();
+      activeIdx=Math.min(activeIdx+1,cards.length-1);
+      focusCard(activeIdx);
+    }}
+    if(e.key==='k'||e.key==='K'){{
+      e.preventDefault();
+      activeIdx=Math.max(activeIdx-1,0);
+      focusCard(activeIdx);
+    }}
+    if(e.key==='d'&&!e.ctrlKey&&!e.metaKey){{
+      toggleDark();
+    }}
+    if(e.key==='?'){{
+      toggleKbHelp();
+    }}
+    if(e.key==='Escape'){{
+      var h=document.getElementById('kbHelp');
+      if(h)h.style.display='none';
+    }}
+  }});
+  function focusCard(idx){{
+    cards.forEach(function(c){{c.style.outline='';}});
+    if(idx>=0&&idx<cards.length){{
+      cards[idx].style.outline='2px solid var(--acc)';
+      cards[idx].scrollIntoView({{behavior:'smooth',block:'center'}});
+    }}
+  }}
+}})();
+function toggleKbHelp(){{
+  var h=document.getElementById('kbHelp');
+  if(!h)return;
+  h.style.display=h.style.display==='flex'?'none':'flex';
+}}
+
+// ── Global Search (F12) ──
+(function(){{
+  var si={_search_index_js};
+  var inp=document.getElementById('globalSearch');
+  var box=document.getElementById('gsResults');
+  if(!inp||!box)return;
+  var selIdx=-1;
+
+  inp.addEventListener('input',function(){{
+    var q=inp.value.trim().toUpperCase();
+    selIdx=-1;
+    if(!q){{box.innerHTML='';box.style.display='none';return;}}
+    var hits=si.filter(function(x){{return x.ticker.toUpperCase().indexOf(q)>=0;}});
+    if(!hits.length){{
+      box.innerHTML='<div class="gs-empty">未找到匹配的标的</div>';
+      box.style.display='block';return;
+    }}
+    var html='';
+    hits.forEach(function(h,i){{
+      var dc=h.direction==='看多'?'var(--bull)':h.direction==='看空'?'var(--bear)':'var(--ts)';
+      var p=h.price?'$'+h.price:'';
+      html+='<div class="gs-item" data-idx="'+i+'" data-ticker="'+h.ticker+'">'
+        +'<span style="font-weight:700">'+h.ticker+'</span>'
+        +'<span style="color:'+dc+';font-size:.82em">'+h.direction+'</span>'
+        +'<span style="font-size:.82em;color:var(--ts)">'+h.score+'/10</span>'
+        +'<span style="font-size:.82em;color:var(--ts)">'+p+'</span>'
+        +'</div>';
+    }});
+    box.innerHTML=html;
+    box.style.display='block';
+    box.querySelectorAll('.gs-item').forEach(function(el){{
+      el.addEventListener('click',function(){{
+        pickResult(el.getAttribute('data-ticker'));
+      }});
+    }});
+  }});
+
+  inp.addEventListener('keydown',function(e){{
+    var items=box.querySelectorAll('.gs-item');
+    if(!items.length)return;
+    if(e.key==='ArrowDown'){{
+      e.preventDefault();
+      selIdx=Math.min(selIdx+1,items.length-1);
+      hlItem(items);
+    }}else if(e.key==='ArrowUp'){{
+      e.preventDefault();
+      selIdx=Math.max(selIdx-1,0);
+      hlItem(items);
+    }}else if(e.key==='Enter'){{
+      e.preventDefault();
+      if(selIdx>=0&&items[selIdx]){{
+        pickResult(items[selIdx].getAttribute('data-ticker'));
+      }}else if(items.length===1){{
+        pickResult(items[0].getAttribute('data-ticker'));
+      }}
+    }}else if(e.key==='Escape'){{
+      box.innerHTML='';box.style.display='none';
+      inp.blur();
+    }}
+  }});
+
+  function hlItem(items){{
+    items.forEach(function(el,i){{
+      el.style.background=i===selIdx?'var(--surface2)':'';
+    }});
+    if(selIdx>=0&&items[selIdx])items[selIdx].scrollIntoView({{block:'nearest'}});
+  }}
+
+  function pickResult(ticker){{
+    box.innerHTML='';box.style.display='none';
+    inp.value=ticker;
+    scrollToDeep(ticker);
+    // 同时高亮表格行
+    var rows=document.querySelectorAll('#oppTable tbody tr');
+    rows.forEach(function(r){{
+      var first=r.cells[0];
+      if(first&&first.textContent.trim()===ticker){{
+        r.style.background='rgba(244,165,50,.12)';
+        setTimeout(function(){{r.style.background='';}},2000);
+      }}
+    }});
+  }}
+
+  // Cmd+K / Ctrl+K 快捷键聚焦搜索
+  document.addEventListener('keydown',function(e){{
+    if((e.metaKey||e.ctrlKey)&&e.key==='k'){{
+      e.preventDefault();
+      inp.focus();
+      inp.select();
+    }}
+  }});
+
+  // 点击外部关闭
+  document.addEventListener('click',function(e){{
+    if(!inp.contains(e.target)&&!box.contains(e.target)){{
+      box.innerHTML='';box.style.display='none';
+    }}
+  }});
+}})();
+
+// ── F14: Hash Router ──
+(function(){{
+  var sections=['today','charts','list','deep','report','trend','history','accuracy'];
+  var sectionEls={{}};
+  sections.forEach(function(s){{ sectionEls[s]=document.getElementById(s); }});
+
+  var _orig=window.scrollToDeep;
+
+  function navigateTo(route){{
+    var m=route.match(/^\/stock\/(.+)$/);
+    if(m){{ _orig(m[1]); return; }}
+    var sec=route.replace(/^\//,'');
+    var el=sectionEls[sec];
+    if(el){{ el.scrollIntoView({{behavior:'smooth',block:'start'}}); hlNav(sec); }}
+  }}
+
+  function hlNav(sec){{
+    document.querySelectorAll('.nav-link').forEach(function(l){{
+      l.classList.toggle('active', l.getAttribute('href')==='#/'+sec);
+    }});
+  }}
+
+  function norm(h){{
+    if(!h||h==='#')return '';
+    if(h.charAt(1)!=='/'){{ var n='#/'+h.slice(1); history.replaceState(null,'',n); return n.slice(1); }}
+    return h.slice(1);
+  }}
+
+  window.addEventListener('hashchange',function(){{ var r=norm(location.hash); if(r)navigateTo(r); }});
+
+  var init=norm(location.hash);
+  if(init) setTimeout(function(){{ navigateTo(init); }},100);
+
+  window.scrollToDeep=function(tk){{ _orig(tk); history.pushState(null,'','#/stock/'+tk); }};
+
+  if('IntersectionObserver' in window){{
+    var obs=new IntersectionObserver(function(entries){{
+      entries.forEach(function(en){{
+        if(en.isIntersecting && sections.indexOf(en.target.id)>=0){{
+          history.replaceState(null,'','#/'+en.target.id);
+          hlNav(en.target.id);
+        }}
+      }});
+    }},{{rootMargin:'-40% 0px -55% 0px'}});
+    sections.forEach(function(s){{ if(sectionEls[s]) obs.observe(sectionEls[s]); }});
+  }}
+}})();
 </script>
 </body>
 </html>"""
