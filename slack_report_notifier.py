@@ -22,7 +22,12 @@ class SlackReportNotifier:
             webhook_url: Slack Webhook URL（如为 None，从文件读取）
         """
         self.webhook_url = webhook_url or self._read_webhook_from_file()
-        self.enabled = bool(self.webhook_url)
+        self.enabled = bool(self.webhook_url) and self._is_valid_webhook(self.webhook_url)
+
+    @staticmethod
+    def _is_valid_webhook(url: str) -> bool:
+        """校验 Slack Webhook URL 格式"""
+        return bool(url and url.startswith("https://hooks.slack.com/"))
 
     def _read_webhook_from_file(self) -> Optional[str]:
         """从环境变量或文件安全读取 Webhook URL"""

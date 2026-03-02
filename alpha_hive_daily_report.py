@@ -340,7 +340,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 /* F16: Print */
 @media print{
   .nav,.dark-btn,.skip-link,.tbl-search-row,.ml-btn,.ml-btn-sm,.ml-btn-cc,
-  .scroll-top{display:none!important}
+  .scroll-top,#filterStatus{display:none!important}
   body{background:#fff;color:#000;font-size:10pt}
   .hero{background:#f8f8f8!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
   .section{break-inside:avoid;border:1px solid #ccc;box-shadow:none}
@@ -2653,7 +2653,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
             _pct6  = int(_sc6 * 10)
             _dom6  = _DOMAINS.get(_tc6, "")
             _logo6 = (f'<img class="slogo" src="https://logo.clearbit.com/{_dom6}" loading="lazy" '
-                      f'alt="{_html.escape(_tc6)}" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'">'
+                      f'width="42" height="42" alt="{_html.escape(_tc6)}" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'">'
                       f'<div class="slogo-fb" style="display:none">{_html.escape(_tc6[:2])}</div>') if _dom6 else \
                      f'<div class="slogo-fb">{_html.escape(_tc6[:2])}</div>'
             # Insight: first non-empty discovery
@@ -2956,7 +2956,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
     <div class="acc-two-col">
       <div class="acc-dir-box">
         <div class="acc-box-title">方向准确率分布</div>
-        <div class="acc-canvas-wrap"><canvas id="accDirChart"></canvas></div>
+        <div class="acc-canvas-wrap"><canvas id="accDirChart" width="300" height="200"></canvas></div>
       </div>
       <div class="acc-ticker-box">
         <div class="acc-box-title">个股准确率明细</div>
@@ -2998,6 +2998,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 <meta name="description" content="Alpha Hive — 去中心化蜂群智能投资研究平台，SEC 真实数据驱动的每日投资机会扫描。">
 <meta name="theme-color" content="#0A0F1C" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f0f4ff" media="(prefers-color-scheme: light)">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' https://logo.clearbit.com https:; font-src 'self'">
 <meta property="og:title" content="Alpha Hive 投资仪表板">
 <meta property="og:description" content="蜂群智能驱动的去中心化投资研究，{n_tickers} 标的每日扫描">
 <meta property="og:type" content="website">
@@ -3017,7 +3018,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 </script>
 </head>
 <body>
-<a href="#today" class="skip-link">跳转到主内容</a>
+<a href="#main-content" class="skip-link">跳转到主内容</a>
 <!-- ── Fixed Nav ── -->
 <nav class="nav" role="navigation" aria-label="主导航">
   <a href="#" class="nav-logo"><span class="px-bee"></span> Alpha Hive</a>
@@ -3096,7 +3097,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 <div class="main">
   <!-- ── Top 6 Cards ── -->
   <div class="section" id="today">
-    <div class="sec-title">今日 Top {min(6, len(all_tickers_sorted))} 机会</div>
+    <h2 class="sec-title">今日 Top {min(6, len(all_tickers_sorted))} 机会</h2>
     <div class="top6-grid">
       {new_cards_html}
     </div>
@@ -3105,35 +3106,36 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
   <!-- ── Charts ── -->
   <noscript><div style="padding:16px;background:rgba(245,158,11,.1);border-radius:8px;margin:12px 0;text-align:center;color:var(--ts)">图表需要 JavaScript 支持，请启用 JavaScript 查看交互式图表。</div></noscript>
   <div class="section" id="charts">
-    <div class="sec-title">市场可视化</div>
+    <h2 class="sec-title">市场可视化</h2>
     <div class="charts-grid">
       <div class="chart-box">
         <div class="chart-ttl">😨 Fear &amp; Greed 指数</div>
-        <div class="chart-canvas-wrap" style="height:180px"><canvas id="fgChart" role="img" aria-label="Fear and Greed 指数图表"></canvas></div>
+        <div class="chart-canvas-wrap" style="height:180px"><canvas id="fgChart" width="300" height="180" role="img" aria-label="Fear and Greed 指数图表"></canvas></div>
       </div>
       <div class="chart-box">
         <div class="chart-ttl">📊 各标的综合评分</div>
-        <div class="chart-canvas-wrap" style="height:{'{}px'.format(max(160, len(all_tickers_sorted)*28))}"><canvas id="scoresChart" role="img" aria-label="各标的综合评分柱状图"></canvas></div>
+        <div class="chart-canvas-wrap" style="height:{'{}px'.format(max(160, len(all_tickers_sorted)*28))}"><canvas id="scoresChart" width="600" height="300" role="img" aria-label="各标的综合评分柱状图"></canvas></div>
       </div>
       <div class="chart-box">
         <div class="chart-ttl">🗳 看多 / 看空 / 中性</div>
-        <div class="chart-canvas-wrap" style="height:180px"><canvas id="dirChart" role="img" aria-label="看多看空中性方向分布图"></canvas></div>
+        <div class="chart-canvas-wrap" style="height:180px"><canvas id="dirChart" width="300" height="180" role="img" aria-label="看多看空中性方向分布图"></canvas></div>
       </div>
     </div>
   </div>
 
   <!-- ── Full Table ── -->
   <div class="section" id="list">
-    <div class="sec-title">完整机会清单</div>
+    <h2 class="sec-title">完整机会清单</h2>
     <div class="tbl-search-row">
       <label for="tableSearch" class="skip-link" style="position:absolute">搜索标的</label>
       <input class="tbl-search" id="tableSearch" type="text" placeholder="🔍 搜索标的..." oninput="filterTable()" aria-label="搜索标的">
     </div>
+    <div id="filterStatus" aria-live="polite" role="status" style="font-size:.78em;color:var(--ts);min-height:1.2em;margin-bottom:4px"></div>
     <div class="tbl-wrap">
       <table class="full-table" id="oppTable">
         <thead><tr>
-          <th aria-sort="none">#</th><th aria-sort="none">标的</th><th aria-sort="none">方向</th><th aria-sort="none">综合分</th><th aria-sort="none">共振</th>
-          <th aria-sort="none">投票(多/空/中)</th><th aria-sort="none">IV Rank</th><th aria-sort="none">P/C</th><th aria-sort="none">看空强度</th><th>ML 详情</th>
+          <th scope="col" aria-sort="none">#</th><th scope="col" aria-sort="none">标的</th><th scope="col" aria-sort="none">方向</th><th scope="col" aria-sort="none">综合分</th><th scope="col" aria-sort="none">共振</th>
+          <th scope="col" aria-sort="none">投票(多/空/中)</th><th scope="col" aria-sort="none">IV Rank</th><th scope="col" aria-sort="none">P/C</th><th scope="col" aria-sort="none">看空强度</th><th scope="col">ML 详情</th>
         </tr></thead>
         <tbody>{new_rows_html}</tbody>
       </table>
@@ -3142,19 +3144,19 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 
   <!-- ── Deep Analysis ── -->
   <div class="section" id="deep">
-    <div class="sec-title">个股深度分析（含雷达图）</div>
+    <h2 class="sec-title">个股深度分析（含雷达图）</h2>
     <div class="company-grid">{new_company_html}</div>
   </div>
 
   <!-- ── Markdown Report ── -->
   <div class="section" id="report">
-    <div class="sec-title">完整蜂群简报</div>
+    <h2 class="sec-title">完整蜂群简报</h2>
     <div class="report-body-wrap"><div class="report-body">{_rpt_body}</div></div>
   </div>
 
   <!-- ── Historical Reports ── -->
   <div class="section" id="history">
-    <div class="sec-title">📅 历史简报回溯</div>
+    <h2 class="sec-title">📅 历史简报回溯</h2>
     <div class="hist-list">{_hist_html}</div>
   </div>
 
@@ -3216,9 +3218,15 @@ document.addEventListener('DOMContentLoaded',function(){{
 // ── Table Search ──
 function filterTable(){{
   var q=document.getElementById('tableSearch').value.toLowerCase();
-  document.querySelectorAll('#oppTable tbody tr').forEach(function(tr){{
-    tr.style.display=tr.textContent.toLowerCase().includes(q)?'':'none';
+  var rows=document.querySelectorAll('#oppTable tbody tr');
+  var shown=0;
+  rows.forEach(function(tr){{
+    var vis=tr.textContent.toLowerCase().includes(q);
+    tr.style.display=vis?'':'none';
+    if(vis)shown++;
   }});
+  var st=document.getElementById('filterStatus');
+  if(st)st.textContent=q?(shown?'显示 '+shown+' 条结果':'未找到匹配的标的'):'';
 }}
 
 // ── Table Sort ──
@@ -3279,7 +3287,7 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
       if(!fgCtx)return;
       var fv={_fv3};
       var fc=fv<=25?'#ef4444':fv<=45?'#f97316':fv<=55?'#f59e0b':fv<=75?'#22c55e':'#16a34a';
-      var fl='{_fg_label}';
+      var fl={_json.dumps(_fg_label)};
       chartInstances.push(new Chart(fgCtx,{{
         type:'doughnut',
         data:{{datasets:[{{data:[fv,100-fv],backgroundColor:[fc,dark?'#2a3050':'#e8ecf3'],

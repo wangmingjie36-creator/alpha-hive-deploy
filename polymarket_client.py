@@ -124,7 +124,11 @@ class PolymarketClient:
             "ascending": False,
         })
 
-        if not data or not isinstance(data, list):
+        if data is None:
+            _log.debug("Polymarket API 返回 None（熔断或网络错误）")
+            return []
+        if not isinstance(data, list):
+            _log.warning("Polymarket API 返回非 list 类型: %s", type(data).__name__)
             return []
 
         # 客户端侧过滤（Gamma API 搜索功能有限）

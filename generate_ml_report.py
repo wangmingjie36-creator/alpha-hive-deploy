@@ -108,18 +108,17 @@ class MLEnhancedReportGenerator:
             import json as _json
             from backtester import PredictionStore
             ps = PredictionStore()
-            conn = _sq3.connect(ps.db_path)
-            conn.row_factory = _sq3.Row
-            rows = conn.execute("""
-                SELECT ticker, date, final_score, direction,
-                       dimension_scores, iv_rank, put_call_ratio,
-                       return_t7, correct_t7
-                FROM predictions
-                WHERE checked_t7 = 1
-                ORDER BY date DESC
-                LIMIT 200
-            """).fetchall()
-            conn.close()
+            with _sq3.connect(ps.db_path) as conn:
+                conn.row_factory = _sq3.Row
+                rows = conn.execute("""
+                    SELECT ticker, date, final_score, direction,
+                           dimension_scores, iv_rank, put_call_ratio,
+                           return_t7, correct_t7
+                    FROM predictions
+                    WHERE checked_t7 = 1
+                    ORDER BY date DESC
+                    LIMIT 200
+                """).fetchall()
 
             def _cat_qual(v):
                 if v >= 8.5: return "A+"
@@ -147,7 +146,8 @@ class MLEnhancedReportGenerator:
                     win_30d=bool(r["correct_t7"]),
                 ))
             return result
-        except Exception:
+        except (ImportError, KeyError, TypeError, ValueError, OSError) as e:
+            _log.debug("_build_real_training_data 失败: %s", e)
             return []
 
     def _check_disk_cache(self, today: str) -> bool:
