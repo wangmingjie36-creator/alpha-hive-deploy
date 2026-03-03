@@ -884,9 +884,9 @@ class BuzzBeeWhisper(BeeAgent):
                         if llm_service.is_available():
                             llm_news = llm_service.analyze_news_sentiment(ticker, headlines)
                             if llm_news:
-                                # LLM 分析成功：混合关键词 50% + LLM 50%
+                                # LLM 分析成功：混合关键词 30% + LLM 70%（LLM 情绪理解更强）
                                 llm_news_score = llm_news.get("sentiment_score", 5.0) * 10
-                                news_signal = news_signal * 0.5 + llm_news_score * 0.5
+                                news_signal = news_signal * 0.30 + llm_news_score * 0.70
                                 news_desc = llm_news.get("key_theme", news_desc)
                                 news_reasoning = llm_news.get("reasoning", "")
                                 news_mode = "llm_enhanced"
@@ -1236,8 +1236,8 @@ class ChronosBeeHorizon(BeeAgent):
                     if llm_catalyst:
                         llm_score = llm_catalyst.get("impact_score", score)
                         llm_dir = llm_catalyst.get("impact_direction", direction)
-                        # 混合：规则 50% + LLM 催化剂解读 50%（催化剂判断最依赖语义理解）
-                        score = round(score * 0.5 + float(llm_score) * 0.5, 2)
+                        # 混合：规则 35% + LLM 催化剂解读 65%（催化剂判断最依赖语义理解）
+                        score = round(score * 0.35 + float(llm_score) * 0.65, 2)
                         score = max(1.0, min(10.0, score))
                         if llm_dir in ("bullish", "bearish", "neutral"):
                             direction = llm_dir
@@ -1825,18 +1825,63 @@ class BearBeeContrarian(BeeAgent):
 
             # ===== 综合看空评分 =====
             if total_weight > 0:
-                final_bear_score = bearish_score / total_weight
+                rule_bear_score = bearish_score / total_weight
             else:
-                final_bear_score = 5.0
+                rule_bear_score = 5.0
 
             # 若完全无数据但其他 Agent 都看多，给出温和的"谨慎提醒"
             if not bearish_signals:
                 # 检查价格本身是否存在过热风险
                 if price > 0 and mom_5d >= 0:
                     bearish_signals.append(f"当前价 ${price:.2f} | 暂无明显看空信号，但建议设置止损")
-                    final_bear_score = 3.0
+                    rule_bear_score = 3.0
                 else:
-                    final_bear_score = 2.0
+                    rule_bear_score = 2.0
+
+            # ===== LLM 看空论点生成 =====
+            llm_thesis = ""
+            llm_key_risks = []
+            llm_contrarian_insight = ""
+            llm_thesis_break = ""
+            final_bear_score = rule_bear_score
+
+            try:
+                import llm_service
+                if llm_service.is_available():
+                    # 收集 bull_signals（从信息素板读取其他 Agent 的看多信号）
+                    bull_signals = []
+                    if self.board:
+                        for e in self.board.get_top_signals(ticker=ticker, n=20):
+                            if e.direction == "bullish" and not e.agent_id.startswith("BearBee"):
+                                bull_signals.append({
+                                    "agent": e.agent_id,
+                                    "score": e.self_score,
+                                    "discovery": e.discovery[:120],
+                                })
+
+                    llm_bear = llm_service.generate_bear_thesis(
+                        ticker=ticker,
+                        bull_signals=bull_signals,
+                        bear_signals=bearish_signals,
+                        insider_data=insider_data,
+                        options_data=options_data,
+                        news_data={"buzz_entry": buzz_entry.discovery[:200] if buzz_entry else None},
+                    )
+                    if llm_bear:
+                        llm_bear_score = llm_bear.get("bear_score")
+                        if llm_bear_score is not None and isinstance(llm_bear_score, (int, float)):
+                            # 混合：规则 55% + LLM 45%
+                            final_bear_score = round(rule_bear_score * 0.55 + float(llm_bear_score) * 0.45, 2)
+                            final_bear_score = max(0.0, min(10.0, final_bear_score))
+                        llm_thesis = llm_bear.get("thesis", "")
+                        llm_key_risks = llm_bear.get("key_risks", [])
+                        llm_contrarian_insight = llm_bear.get("contrarian_insight", "")
+                        llm_thesis_break = llm_bear.get("thesis_break", "")
+                        data_sources["llm_bear"] = "llm_enhanced"
+                        if llm_thesis:
+                            bearish_signals.append(f"LLM看空论点: {llm_thesis[:80]}")
+            except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
+                _log.debug("BearBeeContrarian LLM unavailable for %s: %s", ticker, e)
 
             # 反转为看空分：bear_score 越高 → 越看空 → 给蜂群一个低分
             # score 代表"该标的的吸引力"：看空信号强 = 低分
@@ -1863,6 +1908,9 @@ class BearBeeContrarian(BeeAgent):
             # 信息素板数据可用时增加置信度
             board_sources = sum(1 for v in data_sources.values() if v == "pheromone_board")
             confidence = min(1.0, confidence + board_sources * 0.1)
+            # LLM 可用时额外增加置信度
+            if llm_thesis:
+                confidence = min(1.0, confidence + 0.1)
 
             return {
                 "score": round(score, 2),
@@ -1872,8 +1920,13 @@ class BearBeeContrarian(BeeAgent):
                 "source": "BearBeeContrarian",
                 "dimension": "contrarian",
                 "data_quality": data_sources,
+                "llm_thesis": llm_thesis,
+                "llm_key_risks": llm_key_risks,
+                "llm_contrarian_insight": llm_contrarian_insight,
+                "llm_thesis_break": llm_thesis_break,
                 "details": {
                     "bear_score": round(final_bear_score, 2),
+                    "rule_bear_score": round(rule_bear_score, 2),
                     "bearish_signals": bearish_signals,
                     "insider_bear": round(insider_bear, 1),
                     "overval_bear": round(overval_bear, 1),
@@ -2162,9 +2215,14 @@ class QueenDistiller:
                         resonance=resonance,
                         rule_score=rule_score,
                         rule_direction=rule_direction,
+                        bear_result=contrarian_result,
                     )
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.warning("QueenDistiller LLM service unavailable: %s", e)
+
+        narrative = ""
+        bull_bear_synthesis = ""
+        contrarian_view = ""
 
         if llm_result:
             distill_mode = "llm_enhanced"
@@ -2172,13 +2230,16 @@ class QueenDistiller:
             key_insight = llm_result.get("key_insight", "")
             risk_flag = llm_result.get("risk_flag", "")
             llm_confidence = llm_result.get("confidence", 0.5)
+            narrative = llm_result.get("narrative", "")
+            bull_bear_synthesis = llm_result.get("bull_bear_synthesis", "")
+            contrarian_view = llm_result.get("contrarian_view", "")
 
             llm_score = llm_result.get("final_score")
             llm_direction = llm_result.get("direction")
 
             if llm_score is not None and isinstance(llm_score, (int, float)):
-                # 混合策略：规则引擎 60% + LLM 40%（LLM 不完全替代规则引擎）
-                final_score = round(rule_score * 0.6 + float(llm_score) * 0.4, 2)
+                # 混合策略：规则引擎 50% + LLM 50%（升级后权重对等）
+                final_score = round(rule_score * 0.5 + float(llm_score) * 0.5, 2)
                 final_score = max(0.0, min(10.0, final_score))
 
             if llm_direction in ("bullish", "bearish", "neutral"):
@@ -2221,6 +2282,12 @@ class QueenDistiller:
                 "dimension": r.get("dimension", ""),
                 "details": r.get("details") or {},
             }
+            # BearBee LLM 看空论点（升级后新增字段）
+            if src == "BearBeeContrarian":
+                agent_details[src]["llm_thesis"] = r.get("llm_thesis", "")
+                agent_details[src]["llm_key_risks"] = r.get("llm_key_risks", [])
+                agent_details[src]["llm_contrarian_insight"] = r.get("llm_contrarian_insight", "")
+                agent_details[src]["llm_thesis_break"] = r.get("llm_thesis_break", "")
 
         return {
             "ticker": ticker,
@@ -2251,6 +2318,10 @@ class QueenDistiller:
             "key_insight": key_insight,
             "risk_flag": risk_flag,
             "llm_confidence": llm_confidence,
+            # Phase 2: 叙事增强
+            "narrative": narrative,
+            "bull_bear_synthesis": bull_bear_synthesis,
+            "contrarian_view": contrarian_view,
             "rule_score": rule_score,
             "rule_direction": rule_direction,
             "bear_strength": bear_strength,

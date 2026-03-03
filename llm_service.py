@@ -239,6 +239,69 @@ def call_json(
 
 # ==================== 高级 API：蜂群专用 ====================
 
+def generate_bear_thesis(
+    ticker: str,
+    bull_signals: List[Dict],
+    bear_signals: List[str],
+    insider_data: Optional[Dict] = None,
+    options_data: Optional[Dict] = None,
+    news_data: Optional[Dict] = None,
+) -> Optional[Dict]:
+    """
+    BearBeeContrarian LLM 推理：生成投资论文级别的看空论点
+
+    规则引擎只能做阈值判断（P/E > 80 = 看空），LLM 能识别：
+    - 被市场忽视的隐藏风险
+    - 过度乐观的叙事陷阱
+    - 多维度看空信号的交叉共振
+
+    Returns:
+        {
+            "bear_score": float (0-10),
+            "thesis": str,           # 核心看空论点（1-2 句）
+            "key_risks": list[str],  # 3 条关键风险
+            "contrarian_insight": str, # 市场忽视了什么
+            "thesis_break": str,     # 看空论点失效条件
+        }
+    """
+    system = (
+        "You are a contrarian investment analyst. Your job is to find the strongest "
+        "bear case for a stock, even when the bull case looks compelling. "
+        "Focus on: hidden risks, over-optimism, valuation concerns, insider behavior "
+        "red flags, options market warnings, and narrative traps.\n\n"
+        "Output strict JSON with keys: bear_score (float 0-10), thesis (str), "
+        "key_risks (list of 3 strings), contrarian_insight (str), thesis_break (str).\n"
+        "All text in Chinese."
+    )
+
+    bull_text = json.dumps(bull_signals, ensure_ascii=False, default=str)[:1500] if bull_signals else "无"
+    bear_text = json.dumps(bear_signals, ensure_ascii=False, default=str)[:1000] if bear_signals else "无"
+    insider_text = json.dumps(insider_data, ensure_ascii=False, default=str)[:800] if insider_data else "无"
+    options_text = json.dumps(options_data, ensure_ascii=False, default=str)[:800] if options_data else "无"
+    news_text = json.dumps(news_data, ensure_ascii=False, default=str)[:800] if news_data else "无"
+
+    prompt = f"""分析 {ticker} 的看空案例。
+
+## 其他 Agent 的看多信号
+{bull_text}
+
+## 规则引擎的看空信号
+{bear_text}
+
+## 内幕交易数据
+{insider_text}
+
+## 期权流数据
+{options_text}
+
+## 新闻情绪数据
+{news_text}
+
+请从反对蜂视角，生成最强看空论点。输出 JSON："""
+
+    return call_json(prompt, system=system, max_tokens=400, temperature=0.3)
+
+
 def distill_with_reasoning(
     ticker: str,
     agent_results: List[Dict],
@@ -246,6 +309,7 @@ def distill_with_reasoning(
     resonance: Dict,
     rule_score: float,
     rule_direction: str,
+    bear_result: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """
     QueenDistiller LLM 蒸馏：基于 6 Agent 的结构化数据，用 Claude 做最终推理
@@ -257,6 +321,7 @@ def distill_with_reasoning(
         resonance: 共振检测结果
         rule_score: 规则引擎计算的基础分
         rule_direction: 规则引擎计算的方向
+        bear_result: BearBeeContrarian 的完整分析结果（含 LLM 看空论点）
 
     Returns:
         {
@@ -266,25 +331,31 @@ def distill_with_reasoning(
             "key_insight": str,        # 核心洞察（一句话）
             "risk_flag": str,          # 风险标记
             "confidence": float,       # 0-1 置信度
+            "narrative": str,          # 2-3 句投资级别叙事摘要
+            "bull_bear_synthesis": str, # 多空综合判断
+            "contrarian_view": str,    # 少数意见摘要
         }
     """
     system = """你是 Alpha Hive 的 QueenDistiller（最终蒸馏蜂）。
-你的任务是基于 6 个专业 Agent 的分析结果，做出最终投资机会评估。
+你的任务是基于 6 个专业 Agent 的分析结果，做出最终投资机会评估，并生成投资级别的叙事摘要。
 
-输出要求：
-1. 严格 JSON 格式
-2. final_score: 0-10 浮点数（可以与规则引擎不同，但需要给出理由）
-3. direction: "bullish" / "bearish" / "neutral"
-4. reasoning: 2-3 句中文推理链（因为…所以…）
-5. key_insight: 一句话核心洞察
-6. risk_flag: 主要风险（一句话）
-7. confidence: 0.0-1.0
+输出要求（严格 JSON 格式）：
+1. final_score: 0-10 浮点数（可以与规则引擎不同，但需要给出理由）
+2. direction: "bullish" / "bearish" / "neutral"
+3. reasoning: 2-3 句中文推理链（因为…所以…）
+4. key_insight: 一句话核心洞察
+5. risk_flag: 主要风险（一句话）
+6. confidence: 0.0-1.0
+7. narrative: 2-3 句投资级别叙事摘要（像投行研报的执行摘要，需包含核心催化剂和风险）
+8. bull_bear_synthesis: 一句话多空综合判断（如"短期看多但中期需警惕…"）
+9. contrarian_view: 一句话少数意见摘要（BearBee 的最强反对观点）
 
 重要：你不是简单重复 Agent 的结论，而是要：
 - 识别 Agent 之间的矛盾信号
 - 发现规则引擎可能忽略的模式
 - 对数据质量低的维度降权
-- 给出规则引擎无法做到的定性判断"""
+- 给出规则引擎无法做到的定性判断
+- 将看空论点融入综合叙事，而非忽略它"""
 
     # 构建 Agent 摘要
     agent_summaries = []
@@ -300,6 +371,19 @@ def distill_with_reasoning(
                 "discovery": r.get("discovery", "")[:150],
                 "data_real_pct": f"{real_pct:.0f}%",
             })
+
+    # 构建 BearBee 看空论点区块
+    bear_section = ""
+    if bear_result and "error" not in bear_result:
+        bear_details = bear_result.get("details", {})
+        bear_section = f"""
+## BearBeeContrarian 看空分析
+- 看空强度: {bear_details.get('bear_score', 'N/A')}/10
+- 看空信号: {', '.join(bear_details.get('bearish_signals', [])[:4])}
+- LLM 看空论点: {bear_result.get('llm_thesis', 'N/A')}
+- LLM 关键风险: {', '.join(bear_result.get('llm_key_risks', [])[:3])}
+- LLM 反对洞察: {bear_result.get('llm_contrarian_insight', 'N/A')}
+"""
 
     prompt = f"""分析 **{ticker}** 的投资机会。
 
@@ -317,10 +401,10 @@ def distill_with_reasoning(
 ## 规则引擎基础分
 - 评分: {rule_score}/10
 - 方向: {rule_direction}
-
+{bear_section}
 请输出 JSON："""
 
-    result = call_json(prompt, system=system, max_tokens=512, temperature=0.3)
+    result = call_json(prompt, system=system, max_tokens=800, temperature=0.3)
     return result
 
 

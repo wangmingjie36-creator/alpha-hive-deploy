@@ -774,7 +774,7 @@ LLM_CONFIG = {
     "max_tokens_distill": 512,          # QueenDistiller 蒸馏 max_tokens
     "max_tokens_news": 256,             # 新闻情绪分析 max_tokens
     "temperature": 0.3,                 # 推理温度
-    "score_blend_ratio": 0.6,           # 规则引擎 vs LLM 混合比：0.6 = 规则 60% + LLM 40%
+    "score_blend_ratio": 0.5,           # 规则引擎 vs LLM 混合比：0.5 = 规则 50% + LLM 50%
     "daily_budget_usd": 1.0,            # 每日 token 预算上限（美元）
     "api_key_file": "~/.anthropic_api_key",  # API Key 文件路径
     # 降级策略

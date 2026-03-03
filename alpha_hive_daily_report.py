@@ -251,7 +251,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 /* CHARTS */
 .charts-grid{display:grid;grid-template-columns:1fr 2fr 1fr;gap:20px}
 @media(max-width:900px){.charts-grid{grid-template-columns:1fr}}
-.chart-box{background:var(--surface2);border-radius:12px;padding:22px;border:1px solid var(--border)}
+.chart-box{background:var(--surface2);border-radius:12px;padding:22px;border:1px solid var(--border);overflow:hidden}
 .chart-ttl{font-size:.82em;font-weight:700;color:var(--ts);text-transform:uppercase;
            letter-spacing:.06em;margin-bottom:14px;text-align:center}
 .chart-canvas-wrap{position:relative}
@@ -396,11 +396,11 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 #accuracy{margin:32px 0}
 .acc-section-title{font-size:1.15em;font-weight:700;color:var(--tp);margin-bottom:16px;padding-bottom:6px;border-bottom:2px solid rgba(102,126,234,.2)}
 .acc-kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
-.acc-kpi{background:var(--card);border-radius:12px;padding:16px 12px;text-align:center;border:1px solid rgba(102,126,234,.12)}
+.acc-kpi{background:var(--surface2);border-radius:12px;padding:16px 12px;text-align:center;border:1px solid rgba(102,126,234,.12)}
 .acc-kpi .kv{font-size:1.8em;font-weight:800;color:var(--tp)}
 .acc-kpi .kl{font-size:.75em;color:var(--ts);margin-top:2px}
 .acc-two-col{display:grid;grid-template-columns:1fr 1.6fr;gap:16px;margin-bottom:16px}
-.acc-dir-box,.acc-ticker-box{background:var(--card);border-radius:12px;padding:18px;border:1px solid rgba(102,126,234,.12)}
+.acc-dir-box,.acc-ticker-box{background:var(--surface2);border-radius:12px;padding:18px;border:1px solid rgba(102,126,234,.12)}
 .acc-box-title{font-size:.85em;font-weight:600;color:var(--ts);margin-bottom:12px}
 .acc-canvas-wrap{position:relative;height:140px}
 .acc-table{width:100%;border-collapse:collapse;font-size:.82em}
@@ -1418,7 +1418,11 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         md.append(f"- 扫描标的：{len(swarm_results)} 个 | 共振信号：{resonances}/{len(swarm_results)}")
         for i, (ticker, data) in enumerate(sorted_results[:3], 1):
             res = "共振" if data["resonance"]["resonance_detected"] else ""
-            md.append(f"- **{ticker}** {data['direction'].upper()} {data['final_score']:.1f}/10 {res}")
+            narrative = data.get("narrative", "")
+            summary_line = f"- **{ticker}** {data['direction'].upper()} {data['final_score']:.1f}/10 {res}"
+            if narrative:
+                summary_line += f"\n  - 📝 {narrative}"
+            md.append(summary_line)
         md.append("")
 
         # ====== 版块 2：今日聪明钱动向（ScoutBeeNova） ======
@@ -1590,12 +1594,24 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 md.append(f"- {discovery}")
             else:
                 md.append("- 未发现显著看空信号")
+            # LLM 看空论点（升级后新增）
+            llm_thesis = agent.get("llm_thesis", "")
+            llm_risks = agent.get("llm_key_risks", [])
+            llm_ci = agent.get("llm_contrarian_insight", "")
+            if llm_thesis:
+                md.append(f"- 🤖 **AI看空论点**：{llm_thesis}")
+            if llm_risks:
+                for risk in llm_risks[:3]:
+                    md.append(f"  - ⚠️ {risk}")
+            if llm_ci:
+                md.append(f"- 💡 **反对洞察**：{llm_ci}")
             # 数据来源标注
             sources = details.get("data_sources", {})
             if sources:
                 src_labels = {"pheromone_board": "蜂群共享", "sec_api": "SEC直查",
                               "options_api": "期权直查", "finviz_api": "Finviz",
-                              "yfinance": "yfinance", "unavailable": "不可用"}
+                              "yfinance": "yfinance", "unavailable": "不可用",
+                              "llm_enhanced": "LLM增强"}
                 src_parts = [f"{k}={src_labels.get(v, v)}" for k, v in sources.items()]
                 md.append(f"- *数据来源*：{' | '.join(src_parts)}")
             md.append("")
@@ -1620,6 +1636,24 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 f"{data_pct:.0f}% | {thesis_break} |"
             )
         md.append("")
+
+        # LLM 多空综合叙事（升级后新增）
+        synthesis_lines = []
+        for ticker, data in sorted_results:
+            bbs = data.get("bull_bear_synthesis", "")
+            cv = data.get("contrarian_view", "")
+            if bbs or cv:
+                parts = [f"- **{ticker}**"]
+                if bbs:
+                    parts.append(f"  - 多空综合：{bbs}")
+                if cv:
+                    parts.append(f"  - 少数意见：{cv}")
+                synthesis_lines.append("\n".join(parts))
+        if synthesis_lines:
+            md.append("### AI 多空综合叙事")
+            md.append("")
+            md.extend(synthesis_lines)
+            md.append("")
 
         # NA2：评分调整注释（bear_cap / dq_penalty / llm_enhanced / 低维度覆盖）
         adj_lines = []
@@ -1774,12 +1808,15 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         for i, (ticker, data) in enumerate(sorted_results[:3], 1):
             resonance_emoji = "✅" if data["resonance"]["resonance_detected"] else "❌"
             insight = data.get("key_insight", "")
+            narrative = data.get("narrative", "")
             tweet = (
                 f"{i}. **{ticker}** {data['direction'].upper()}\n"
                 f"蜂群评分：{data['final_score']:.1f}/10 | 共振：{resonance_emoji}\n"
                 f"Agent 投票：看多{data['agent_breakdown']['bullish']} vs 看空{data['agent_breakdown']['bearish']}"
             )
-            if insight:
+            if narrative:
+                tweet += f"\n📝 {narrative}"
+            elif insight:
                 tweet += f"\nAI洞察：{insight}"
             main_thread.append(tweet)
 
@@ -3558,6 +3595,9 @@ self.addEventListener('fetch', function(e){{
 <html lang="zh-CN" class="">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="description" content="Alpha Hive — 去中心化蜂群智能投资研究平台，SEC 真实数据驱动的每日投资机会扫描。">
 <meta name="theme-color" content="#0A0F1C" media="(prefers-color-scheme: dark)">
@@ -3816,26 +3856,40 @@ if('serviceWorker' in navigator && location.protocol==='https:'){{
 function toggleDark(){{
   var h=document.documentElement;
   h.classList.toggle('dark');
-  localStorage.setItem('ahDark',h.classList.contains('dark')?'1':'0');
-  document.getElementById('darkBtn').textContent=h.classList.contains('dark')?'☀️ 亮色':'🌙 暗黑';
-  // 重新渲染图表以匹配新主题
-  if(typeof chartInstances!=='undefined'){{
-    chartInstances.forEach(function(c){{try{{c.destroy();}}catch(e){{}}}});
-    chartInstances.length=0;
+  var isDark=h.classList.contains('dark');
+  localStorage.setItem('ahDark',isDark?'1':'0');
+  document.getElementById('darkBtn').textContent=isDark?'☀️ 亮色':'🌙 暗黑';
+  chartInstances.forEach(function(c){{try{{c.destroy();}}catch(e){{}}}});
+  chartInstances.length=0;
+  if(window._ahRendered){{
+    Object.keys(window._ahRendered).forEach(function(k){{delete window._ahRendered[k];}});
   }}
-  if(typeof rendered!=='undefined'){{
-    ['fgChart','scoresChart','dirChart','fgTrendChart'].forEach(function(k){{delete rendered[k];}});
-    Object.keys(rendered).forEach(function(k){{if(k.indexOf('radar-')===0)delete rendered[k];}});
-  }}
-  document.querySelectorAll('.chart-canvas-wrap canvas, .radar-wrap canvas').forEach(function(c){{
+  document.querySelectorAll('canvas.rendered').forEach(function(c){{
     c.classList.remove('rendered');
     var w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap');
     if(w) w.classList.remove('skel-done');
   }});
   setTimeout(function(){{
-    ['fgChart','scoresChart','dirChart'].forEach(function(id){{
-      if(typeof renderChart==='function') renderChart(id);
-    }});
+    if(window._ahRenderChart){{
+      ['fgChart','scoresChart','dirChart'].forEach(window._ahRenderChart);
+    }}
+    if(window._ahRenderRadar && window._ahRadarKeys){{
+      window._ahRadarKeys.forEach(window._ahRenderRadar);
+    }}
+    if(window._ahInitFgTrend) window._ahInitFgTrend();
+    if(window._ahTrendChart){{
+      try{{
+        var tc=isDark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
+        var gc=isDark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+        var s=window._ahTrendChart.options.scales;
+        if(s.x){{s.x.grid.color=gc;s.x.ticks.color=tc;}}
+        if(s.y){{s.y.grid.color=gc;s.y.ticks.color=tc;}}
+        if(s.y1&&s.y1.ticks)s.y1.ticks.color='#F4A532';
+        var leg=window._ahTrendChart.options.plugins.legend;
+        if(leg&&leg.labels)leg.labels.color=tc;
+        window._ahTrendChart.update();
+      }}catch(e){{}}
+    }}
   }},50);
 }}
 if(localStorage.getItem('ahDark')==='1'){{
@@ -3921,7 +3975,7 @@ function applyFilter(f,btn){{
   var trs=document.querySelectorAll('#oppTable tbody tr[data-dir]');
   var cards=document.querySelectorAll('.company-card[data-dir]');
   var count=0;
-  function check(el){{
+  function check(el,doCount){{
     var d=el.getAttribute('data-dir');
     var s=parseFloat(el.getAttribute('data-score'));
     var show=false;
@@ -3929,11 +3983,11 @@ function applyFilter(f,btn){{
     else if(f==='high')show=s>=7.5;
     else show=d===f;
     el.style.display=show?'':'none';
-    if(show)count++;
+    if(show&&doCount)count++;
   }}
-  items.forEach(check);
-  trs.forEach(check);
-  cards.forEach(check);
+  items.forEach(function(el){{check(el,false);}});
+  trs.forEach(function(el){{check(el,true);}});
+  cards.forEach(function(el){{check(el,false);}});
   var fc=document.getElementById('filterCount');
   if(fc)fc.textContent=f==='all'?'':'显示 '+count+' 条结果';
 }}
@@ -4160,6 +4214,11 @@ var chartInstances=[];
     ['fgChart','scoresChart','dirChart'].forEach(renderChart);
     Object.keys(rd).forEach(renderRadar);
   }});
+  // Expose for toggleDark re-render
+  window._ahRendered=rendered;
+  window._ahRenderChart=renderChart;
+  window._ahRenderRadar=renderRadar;
+  window._ahRadarKeys=Object.keys(rd);
 }})();
 
 // ── Accuracy Direction Chart ──
@@ -4266,17 +4325,17 @@ function scrollToDeep(ticker){{
 }}
 
 // ── F7b: F&G Trend Mini Chart ──
-(function(){{
-  var fgHist={_fg_history_js};
-  if(!fgHist||fgHist.length<2)return;
+var _fgTrendHist={_fg_history_js};
+window._ahInitFgTrend=function(){{
+  if(!_fgTrendHist||_fgTrendHist.length<2)return;
   var cv=document.getElementById('fgTrendChart');
   if(!cv||typeof Chart==='undefined')return;
-  new Chart(cv,{{
+  chartInstances.push(new Chart(cv,{{
     type:'line',
     data:{{
-      labels:fgHist.map(function(d){{return d.date.slice(5);}}),
+      labels:_fgTrendHist.map(function(d){{return d.date.slice(5);}}),
       datasets:[{{
-        data:fgHist.map(function(d){{return d.value;}}),
+        data:_fgTrendHist.map(function(d){{return d.value;}}),
         borderColor:'#F4A532',backgroundColor:'rgba(244,165,50,.1)',
         fill:true,tension:.3,pointRadius:2,borderWidth:1.5
       }}]
@@ -4289,8 +4348,9 @@ function scrollToDeep(ticker){{
         y:{{display:false,min:0,max:100}}
       }}
     }}
-  }});
-}})();
+  }}));
+}};
+window._ahInitFgTrend();
 
 // ── F8a: Trend Chart ──
 (function(){{
@@ -4326,7 +4386,7 @@ function scrollToDeep(ticker){{
       chipWrap.appendChild(chip);
     }});
   }}
-  var trendChart=new Chart(cv,{{
+  var trendChart=window._ahTrendChart=new Chart(cv,{{
     type:'line',
     data:{{labels:dates.map(function(d){{return d.slice(5);}}),datasets:[]}},
     options:{{
@@ -4535,8 +4595,8 @@ function toggleKbHelp(){{
     // 同时高亮表格行
     var rows=document.querySelectorAll('#oppTable tbody tr');
     rows.forEach(function(r){{
-      var first=r.cells[0];
-      if(first&&first.textContent.trim()===ticker){{
+      var tickerCell=r.cells[1];
+      if(tickerCell&&tickerCell.textContent.trim()===ticker){{
         r.style.background='rgba(244,165,50,.12)';
         setTimeout(function(){{r.style.background='';}},2000);
       }}

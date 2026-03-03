@@ -12,36 +12,52 @@ from datetime import datetime
 
 
 class SlackReportNotifier:
-    """Slack 报告通知器"""
+    """Slack 报告通知器（支持 User Token 和 Webhook 双模式）"""
+
+    CHANNEL_ID = "C0AGUUWJXJS"  # #alpha-hive
 
     def __init__(self, webhook_url: Optional[str] = None):
         """
         初始化 Slack 报告通知器
-
-        Args:
-            webhook_url: Slack Webhook URL（如为 None，从文件读取）
+        优先使用 User Token（以用户身份发送），降级到 Webhook
         """
+        self.user_token = self._read_user_token()
         self.webhook_url = webhook_url or self._read_webhook_from_file()
-        self.enabled = bool(self.webhook_url) and self._is_valid_webhook(self.webhook_url)
+        self.use_user_token = bool(self.user_token)
+        self.enabled = bool(self.user_token) or (
+            bool(self.webhook_url) and self._is_valid_webhook(self.webhook_url)
+        )
 
     @staticmethod
     def _is_valid_webhook(url: str) -> bool:
         """校验 Slack Webhook URL 格式"""
         return bool(url and url.startswith("https://hooks.slack.com/"))
 
+    def _read_user_token(self) -> Optional[str]:
+        """读取 Slack User Token（xoxp-...）"""
+        env_tok = os.environ.get("SLACK_USER_TOKEN", "").strip()
+        if env_tok and env_tok.startswith("xoxp-"):
+            return env_tok
+        token_file = os.path.expanduser("~/.alpha_hive_slack_user_token")
+        try:
+            with open(token_file, 'r') as f:
+                tok = f.read().strip()
+                if tok.startswith("xoxp-"):
+                    return tok
+        except FileNotFoundError:
+            pass
+        return None
+
     def _read_webhook_from_file(self) -> Optional[str]:
         """从环境变量或文件安全读取 Webhook URL"""
-        # 优先使用环境变量
         env_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
         if env_url:
             return env_url
-        # 降级到文件
         webhook_file = os.path.expanduser("~/.alpha_hive_slack_webhook")
         try:
             with open(webhook_file, 'r') as f:
                 return f.read().strip()
         except FileNotFoundError:
-            print("⚠️ Slack webhook 文件未找到: ~/.alpha_hive_slack_webhook")
             return None
 
     def send_daily_report(self, report_data: Dict) -> bool:
@@ -403,8 +419,54 @@ class SlackReportNotifier:
 
         return self._send_slack_message_payload(payload)
 
+    def send_plain_text(self, text: str, channel: Optional[str] = None) -> bool:
+        """发送纯文本消息（02-27 格式，优先用 User Token）"""
+        if not self.enabled:
+            print("⚠️ Slack 未配置")
+            return False
+
+        if self.use_user_token:
+            return self._send_via_api(text, channel or self.CHANNEL_ID)
+        # 降级到 webhook
+        return self._send_slack_message_payload({"text": text})
+
+    def _send_via_api(self, text: str, channel: str) -> bool:
+        """通过 Slack API 以用户身份发送"""
+        try:
+            from resilience import slack_breaker
+            if not slack_breaker.allow_request():
+                print("⚠️  Slack circuit breaker OPEN, skipping")
+                return False
+        except ImportError:
+            slack_breaker = None
+
+        try:
+            response = requests.post(
+                "https://slack.com/api/chat.postMessage",
+                headers={"Authorization": f"Bearer {self.user_token}"},
+                json={"channel": channel, "text": text, "unfurl_links": False},
+                timeout=15,
+            )
+            data = response.json()
+            if data.get("ok"):
+                if slack_breaker:
+                    slack_breaker.record_success()
+                print("✅ Slack 消息发送成功（用户身份）")
+                return True
+            else:
+                print(f"⚠️ Slack API 错误: {data.get('error', 'unknown')}")
+                return False
+        except requests.exceptions.RequestException as e:
+            if slack_breaker:
+                try:
+                    slack_breaker.record_failure()
+                except Exception:
+                    pass
+            print(f"❌ Slack 发送失败: {e}")
+            return False
+
     def _send_slack_message_payload(self, payload: Dict) -> bool:
-        """发送 Slack 消息（完整 payload）"""
+        """发送 Slack 消息（webhook 模式）"""
 
         if not self.webhook_url:
             return False
@@ -445,28 +507,19 @@ class SlackReportNotifier:
             print("❌ Slack 未配置")
             return False
 
-        blocks = [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "✅ *Alpha Hive Slack 连接测试成功！*\n\n🐝 系统已就绪，可以接收投资简报和实时告警。"
-                }
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"🐝 测试时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    }
-                ]
-            }
-        ]
+        mode = "User Token" if self.use_user_token else "Webhook"
+        msg = f"✅ Alpha Hive Slack 连接测试成功！\n模式：{mode}\n🐝 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-        success = self._send_slack_message(blocks)
+        if self.use_user_token:
+            success = self._send_via_api(msg, self.CHANNEL_ID)
+        else:
+            blocks = [
+                {"type": "section", "text": {"type": "mrkdwn", "text": msg}}
+            ]
+            success = self._send_slack_message(blocks)
+
         if success:
-            print("✅ Slack 连接测试通过")
+            print(f"✅ Slack 连接测试通过（{mode}）")
         return success
 
 
