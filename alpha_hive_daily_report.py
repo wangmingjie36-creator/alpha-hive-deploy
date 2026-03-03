@@ -2596,10 +2596,28 @@ self.addEventListener('fetch', function(e){{
             gsr = oracle.get("gamma_squeeze_risk", None)
             iv_current = oracle.get("iv_current", None)
             signal_sum = oracle.get("signal_summary", "")
-            # ── 价格数据（#10）──
+            # ── 价格数据（#10）── fallback: ScoutBee → OracleBee discovery → yfinance
             scout_det = ad.get("ScoutBeeNova", {}).get("details", {})
             _price_raw = scout_det.get("price")
             _momentum_raw = scout_det.get("momentum_5d")
+            # Fallback 1: 从 OracleBee discovery 解析价格（格式 "... | $XX.XX"）
+            if _price_raw is None:
+                _oracle_disc = ad.get("OracleBeeEcho", {}).get("discovery", "")
+                import re as _re_mod
+                _pm = _re_mod.search(r'\$(\d+(?:\.\d+)?)', _oracle_disc)
+                if _pm:
+                    _price_raw = float(_pm.group(1))
+            # Fallback 2: 直接从 yfinance 获取
+            if _price_raw is None:
+                try:
+                    import yfinance as _yf
+                    _h = _yf.Ticker(ticker).history(period="5d")
+                    if not _h.empty:
+                        _price_raw = float(_h["Close"].iloc[-1])
+                        if len(_h) >= 2 and _momentum_raw is None:
+                            _momentum_raw = (_h["Close"].iloc[-1] / _h["Close"].iloc[0] - 1) * 100
+                except Exception:
+                    pass
             # ── 维度数据质量（#3）──
             dim_dq = sd.get("dim_data_quality", {})
             # 内幕信号：取 ScoutBeeNova discovery 第一个 | 段
