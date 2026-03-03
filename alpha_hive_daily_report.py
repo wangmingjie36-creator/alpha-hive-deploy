@@ -946,7 +946,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 
         # ==================== Phase 2: 历史类比推理（top-3 ticker）====================
         try:
-            if queen.use_llm and self.vector_memory and self.memory_store:
+            if queen.enable_llm and self.vector_memory and self.memory_store:
                 # 按 final_score 降序取 top-3
                 sorted_tickers = sorted(
                     swarm_results.keys(),

@@ -2363,7 +2363,7 @@ class QueenDistiller:
         Returns:
             修改后的 distilled dict（新增 historical_analogy 字段）
         """
-        if not self.use_llm:
+        if not self.enable_llm:
             return distilled
 
         try:
