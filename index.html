@@ -81,15 +81,15 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .hero-time{color:rgba(255,255,255,.45);font-size:.85em}
 .hero-dbadge{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);
              color:#4ade80;padding:3px 12px;border-radius:12px;font-size:.8em;font-weight:700}
-.hero-right{flex-shrink:0;width:260px}
+.hero-right{flex-shrink:0;width:260px;overflow:hidden;contain:paint}
 @media(max-width:768px){.hero-inner{flex-direction:column-reverse;gap:16px;padding-bottom:20px}
   .hero-right{width:160px;margin:0 auto}
   .hero-stats{grid-template-columns:repeat(2,1fr)}
   .hstat{padding:14px 10px}
   .hstat-val{font-size:1.5em}
 }
-.hero-svg{width:100%;height:auto}
-@keyframes hive-float{0%,100%{transform:translateY(0) rotate(0deg)}50%{transform:translateY(-8px) rotate(2deg)}}
+.hero-svg{width:100%;height:auto;overflow:hidden}
+@keyframes hive-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
 @keyframes hex-pulse{0%,100%{opacity:.6}50%{opacity:1}}
 .hive-anim{animation:hive-float 4s ease-in-out infinite}
 .hex-p{animation:hex-pulse 2s ease-in-out infinite}
@@ -496,7 +496,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 
 </style>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"WebPage","name":"Alpha Hive 投资仪表板","description":"去中心化蜂群智能投资研究平台 — 10 标的每日扫描","dateModified":"2026-03-02 14:44 PST"}
+{"@context":"https://schema.org","@type":"WebPage","name":"Alpha Hive 投资仪表板","description":"去中心化蜂群智能投资研究平台 — 10 标的每日扫描","dateModified":"2026-03-02 16:41 PST"}
 </script>
 </head>
 <body>
@@ -528,20 +528,16 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
     <div class="hero-left">
       <div class="hero-badge"><span class="px-bee"></span> Alpha Hive Intelligence · 蜂群驱动</div>
       <h1 class="hero-title">去中心化<span>蜂群智能</span><br>投资研究平台</h1>
-      <p class="hero-sub">8 自治工蜂协作 · SEC EDGAR 真实数据 · 每日自动扫描</p>
+      <p class="hero-sub">7 自治工蜂协作 · SEC EDGAR 真实数据 · 每日自动扫描</p>
       <div class="hero-meta">
-        <span class="hero-time">🕐 2026-03-02 14:44 PST</span>
+        <span class="hero-time">🕐 2026-03-02 16:41 PST</span>
         <span class="hero-dbadge">📊 数据真实度 95%</span>
       </div>
     </div>
-    <div class="hero-right">
-      <svg class="hero-svg hive-anim" viewBox="0 0 280 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Alpha Hive 蜂群六角形动画图标">
-        <defs>
-          <path id="orb-i" d="M 215,101 A 75,45 0 1 0 65,101 A 75,45 0 1 0 215,101"/>
-          <path id="orb-o" d="M 238,112 A 98,56 0 1 0 42,112 A 98,56 0 1 0 238,112"/>
-        </defs>
+    <div class="hero-right" style="overflow:hidden;contain:paint">
+      <svg class="hero-svg hive-anim" viewBox="0 0 280 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Alpha Hive 蜂群六角形动画图标" style="overflow:hidden">
         <polygon points="140,55 180,78 180,124 140,147 100,124 100,78" fill="#F4A532" opacity=".9"/>
-        <foreignObject x="96" y="72" width="88" height="88"><div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><span class="px-bee-hero"></span></div></foreignObject>
+        <text x="140" y="108" font-size="36" text-anchor="middle" dominant-baseline="central">&#x1F41D;</text>
         <polygon class="hex-p" points="140,5 170,22 170,57 140,74 110,57 110,22" fill="none" stroke="#F4A532" stroke-width="1.5" opacity=".55" style="animation-delay:.3s"/>
         <polygon class="hex-p" points="190,32 220,49 220,84 190,101 160,84 160,49" fill="rgba(244,165,50,.12)" stroke="#F4A532" stroke-width="1" opacity=".5" style="animation-delay:.7s"/>
         <polygon class="hex-p" points="190,107 220,124 220,159 190,176 160,159 160,124" fill="rgba(102,126,234,.18)" stroke="#667eea" stroke-width="1" opacity=".45" style="animation-delay:1.1s"/>
@@ -550,20 +546,18 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         <polygon class="hex-p" points="90,182 120,199 120,234 90,251 60,234 60,199" fill="none" stroke="#667eea" stroke-width="1" opacity=".35" style="animation-delay:2.3s"/>
         <polygon class="hex-p" points="90,107 120,124 120,159 90,176 60,159 60,124" fill="rgba(102,126,234,.13)" stroke="#667eea" stroke-width="1" opacity=".45" style="animation-delay:2.7s"/>
         <polygon class="hex-p" points="90,32 120,49 120,84 90,101 60,84 60,49" fill="none" stroke="#764ba2" stroke-width="1" opacity=".35" style="animation-delay:3.1s"/>
-        <!-- Orbit rings -->
         <ellipse cx="140" cy="101" rx="75" ry="45" fill="none" stroke="#F4A532" stroke-width="0.7" stroke-dasharray="3,6" opacity="0.25"/>
         <ellipse cx="140" cy="112" rx="98" ry="56" fill="none" stroke="#667eea" stroke-width="0.7" stroke-dasharray="3,8" opacity="0.18"/>
-        <!-- Orbiting bees (animateMotion along ellipse paths) -->
-        <g><circle r="5.5" fill="#F4A532" opacity="0.9"/><circle r="2.8" fill="#fff8e7" opacity="0.75"/><animateMotion dur="9s" repeatCount="indefinite" begin="0s"><mpath href="#orb-i"/></animateMotion></g>
-        <g><circle r="4.8" fill="#fbbf24" opacity="0.85"/><circle r="2.4" fill="#fff8e7" opacity="0.65"/><animateMotion dur="9s" repeatCount="indefinite" begin="-4.5s"><mpath href="#orb-i"/></animateMotion></g>
-        <g><circle r="5" fill="#667eea" opacity="0.85"/><circle r="2.5" fill="#c7d2fe" opacity="0.7"/><animateMotion dur="14s" repeatCount="indefinite" begin="-5s"><mpath href="#orb-o"/></animateMotion></g>
+        <circle cx="215" cy="101" r="5.5" fill="#F4A532" opacity="0.7"/>
+        <circle cx="65" cy="101" r="4.8" fill="#fbbf24" opacity="0.6"/>
+        <circle cx="238" cy="112" r="5" fill="#667eea" opacity="0.6"/>
       </svg>
     </div>
   </div>
   <!-- Stats Row -->
   <div class="hero-stats">
     <div class="hstat">
-      <div class="hstat-val">1</div>
+      <div class="hstat-val">0</div>
       <div class="hstat-lbl">共振信号</div>
     </div>
     <div class="hstat">
@@ -608,73 +602,10 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
     <div class="filter-count" id="filterCount"></div>
     <div class="top6-grid">
       
-            <div class="scard" data-dir="bullish" data-score="7.9" onclick="scrollToDeep('MSFT')">
-              <button class="scard-share" onclick="event.stopPropagation();shareCard('MSFT',7.9)">𝕏</button>
-              <div class="scard-head">
-                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/microsoft.com" loading="lazy" width="42" height="42" alt="MSFT" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">MS</div><span class="srank">#1</span></div>
-                <span class="sdir sdir-bull">🟢 看多</span>
-              </div>
-              <div class="scard-body">
-                <div class="sticker">MSFT</div>
-                <div class="score-row">
-                  <span class="score-big sc-h">7.9</span>
-                  <div class="sbar-wrap">
-                    <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                    <div class="sbar"><div class="sbar-fill fill-h" style="width:79%"></div></div>
-                  </div>
-                </div>
-                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:84%;background:#22c55e"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:63%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:56%;background:#f59e0b"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:76%;background:#22c55e"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
-                <div class="sprice-row"><span class="sprice">$398.55</span><span class="sprice-chg sprice-up">+2.5%</span></div>
-                <div class="sinsight">内幕买入 $1,986,750</div>
-                <a href="alpha-hive-MSFT-ml-enhanced-2026-03-02.html" class="ml-btn">ML 详情 →</a>
-              </div>
-            </div>
-            <div class="scard" data-dir="bullish" data-score="5.6" onclick="scrollToDeep('BILI')">
-              <button class="scard-share" onclick="event.stopPropagation();shareCard('BILI',5.6)">𝕏</button>
-              <div class="scard-head">
-                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/bilibili.com" loading="lazy" width="42" height="42" alt="BILI" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">BI</div><span class="srank">#2</span></div>
-                <span class="sdir sdir-bull">🟢 看多</span>
-              </div>
-              <div class="scard-body">
-                <div class="sticker">BILI</div>
-                <div class="score-row">
-                  <span class="score-big sc-m">5.6</span>
-                  <div class="sbar-wrap">
-                    <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                    <div class="sbar"><div class="sbar-fill fill-m" style="width:56%"></div></div>
-                  </div>
-                </div>
-                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:61%;background:#f59e0b"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:74%;background:#22c55e"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:44%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:50%;background:#ef4444"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
-                <div class="sprice-row"><span class="sprice">$27.23</span><span class="sprice-chg sprice-dn">-8.2%</span></div>
-                <div class="sinsight">无近期内幕交易</div>
-                <a href="alpha-hive-BILI-ml-enhanced-2026-03-02.html" class="ml-btn">ML 详情 →</a>
-              </div>
-            </div>
-            <div class="scard" data-dir="bullish" data-score="5.5" onclick="scrollToDeep('CRCL')">
-              <button class="scard-share" onclick="event.stopPropagation();shareCard('CRCL',5.5)">𝕏</button>
-              <div class="scard-head">
-                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/circle.com" loading="lazy" width="42" height="42" alt="CRCL" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">CR</div><span class="srank">#3</span></div>
-                <span class="sdir sdir-bull">🟢 看多</span>
-              </div>
-              <div class="scard-body">
-                <div class="sticker">CRCL</div>
-                <div class="score-row">
-                  <span class="score-big sc-m">5.5</span>
-                  <div class="sbar-wrap">
-                    <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                    <div class="sbar"><div class="sbar-fill fill-m" style="width:55%"></div></div>
-                  </div>
-                </div>
-                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:50%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:55%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:50%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:59%;background:#f59e0b"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:40%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
-                
-                <div class="sinsight">检测到 4 个看涨异动</div>
-                <a href="alpha-hive-CRCL-ml-enhanced-2026-03-02.html" class="ml-btn">ML 详情 →</a>
-              </div>
-            </div>
             <div class="scard" data-dir="neutral" data-score="5.2" onclick="scrollToDeep('NVDA')">
               <button class="scard-share" onclick="event.stopPropagation();shareCard('NVDA',5.2)">𝕏</button>
               <div class="scard-head">
-                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/nvidia.com" loading="lazy" width="42" height="42" alt="NVDA" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">NV</div><span class="srank">#4</span></div>
+                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/nvidia.com" loading="lazy" width="42" height="42" alt="NVDA" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">NV</div><span class="srank">#1</span></div>
                 <span class="sdir sdir-neut">🟡 中性</span>
               </div>
               <div class="scard-body">
@@ -692,31 +623,10 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 <a href="alpha-hive-NVDA-ml-enhanced-2026-03-02.html" class="ml-btn">ML 详情 →</a>
               </div>
             </div>
-            <div class="scard" data-dir="neutral" data-score="5.2" onclick="scrollToDeep('META')">
-              <button class="scard-share" onclick="event.stopPropagation();shareCard('META',5.2)">𝕏</button>
-              <div class="scard-head">
-                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/meta.com" loading="lazy" width="42" height="42" alt="META" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">ME</div><span class="srank">#5</span></div>
-                <span class="sdir sdir-neut">🟡 中性</span>
-              </div>
-              <div class="scard-body">
-                <div class="sticker">META</div>
-                <div class="score-row">
-                  <span class="score-big sc-l">5.2</span>
-                  <div class="sbar-wrap">
-                    <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                    <div class="sbar"><div class="sbar-fill fill-l" style="width:52%"></div></div>
-                  </div>
-                </div>
-                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:39%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:63%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:53%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:55%;background:#f59e0b"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
-                <div class="sprice-row"><span class="sprice">$653.56</span><span class="sprice-chg sprice-up">+2.2%</span></div>
-                <div class="sinsight">内幕卖出 $48,772,999</div>
-                <a href="alpha-hive-META-ml-enhanced-2026-03-02.html" class="ml-btn">ML 详情 →</a>
-              </div>
-            </div>
             <div class="scard" data-dir="bullish" data-score="5.0" onclick="scrollToDeep('TSLA')">
               <button class="scard-share" onclick="event.stopPropagation();shareCard('TSLA',5.0)">𝕏</button>
               <div class="scard-head">
-                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/tesla.com" loading="lazy" width="42" height="42" alt="TSLA" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">TS</div><span class="srank">#6</span></div>
+                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/tesla.com" loading="lazy" width="42" height="42" alt="TSLA" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">TS</div><span class="srank">#2</span></div>
                 <span class="sdir sdir-bull">🟢 看多</span>
               </div>
               <div class="scard-body">
@@ -732,6 +642,90 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 <div class="sprice-row"><span class="sprice">$403.32</span><span class="sprice-chg sprice-dn">-1.5%</span></div>
                 <div class="sinsight">内幕卖出 $63,023,096</div>
                 <a href="alpha-hive-TSLA-ml-enhanced-2026-03-02.html" class="ml-btn">ML 详情 →</a>
+              </div>
+            </div>
+            <div class="scard" data-dir="bullish" data-score="7.9" onclick="scrollToDeep('MSFT')">
+              <button class="scard-share" onclick="event.stopPropagation();shareCard('MSFT',7.9)">𝕏</button>
+              <div class="scard-head">
+                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/microsoft.com" loading="lazy" width="42" height="42" alt="MSFT" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">MS</div><span class="srank">#3</span></div>
+                <span class="sdir sdir-bull">🟢 看多</span>
+              </div>
+              <div class="scard-body">
+                <div class="sticker">MSFT</div>
+                <div class="score-row">
+                  <span class="score-big sc-h">7.9</span>
+                  <div class="sbar-wrap">
+                    <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
+                    <div class="sbar"><div class="sbar-fill fill-h" style="width:78%"></div></div>
+                  </div>
+                </div>
+                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:84%;background:#22c55e"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:63%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:56%;background:#f59e0b"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:76%;background:#22c55e"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
+                <div class="sprice-row"><span class="sprice">$398.55</span><span class="sprice-chg sprice-up">+2.5%</span></div>
+                <div class="sinsight">内幕买入 $1,986,750</div>
+                <a href="alpha-hive-MSFT-ml-enhanced-2026-03-02.html" class="ml-btn">ML 详情 →</a>
+              </div>
+            </div>
+            <div class="scard" data-dir="neutral" data-score="4.3" onclick="scrollToDeep('QCOM')">
+              <button class="scard-share" onclick="event.stopPropagation();shareCard('QCOM',4.3)">𝕏</button>
+              <div class="scard-head">
+                <div class="slogo-wrap"><div class="slogo-fb">QC</div><span class="srank">#4</span></div>
+                <span class="sdir sdir-neut">🟡 中性</span>
+              </div>
+              <div class="scard-body">
+                <div class="sticker">QCOM</div>
+                <div class="score-row">
+                  <span class="score-big sc-l">4.3</span>
+                  <div class="sbar-wrap">
+                    <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
+                    <div class="sbar"><div class="sbar-fill fill-l" style="width:43%"></div></div>
+                  </div>
+                </div>
+                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:38%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:63%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:45%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:32%;background:#ef4444"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
+                <div class="sprice-row"><span class="sprice">$142.36</span><span class="sprice-chg sprice-up">+1.4%</span></div>
+                <div class="sinsight">内幕卖出 $1,474,819</div>
+                <a href="alpha-hive-QCOM-ml-enhanced-2026-03-02.html" class="ml-btn">ML 详情 →</a>
+              </div>
+            </div>
+            <div class="scard" data-dir="bullish" data-score="4.9" onclick="scrollToDeep('VKTX')">
+              <button class="scard-share" onclick="event.stopPropagation();shareCard('VKTX',4.9)">𝕏</button>
+              <div class="scard-head">
+                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/vikingtherapeutics.com" loading="lazy" width="42" height="42" alt="VKTX" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">VK</div><span class="srank">#5</span></div>
+                <span class="sdir sdir-bull">🟢 看多</span>
+              </div>
+              <div class="scard-body">
+                <div class="sticker">VKTX</div>
+                <div class="score-row">
+                  <span class="score-big sc-l">4.9</span>
+                  <div class="sbar-wrap">
+                    <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
+                    <div class="sbar"><div class="sbar-fill fill-l" style="width:48%"></div></div>
+                  </div>
+                </div>
+                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:38%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:42%;background:#ef4444"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:51%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:68%;background:#f59e0b"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
+                <div class="sprice-row"><span class="sprice">$33.34</span><span class="sprice-chg sprice-dn">-1.2%</span></div>
+                <div class="sinsight">内幕卖出 $11,490,495</div>
+                <a href="alpha-hive-VKTX-ml-enhanced-2026-03-02.html" class="ml-btn">ML 详情 →</a>
+              </div>
+            </div>
+            <div class="scard" data-dir="neutral" data-score="5.2" onclick="scrollToDeep('META')">
+              <button class="scard-share" onclick="event.stopPropagation();shareCard('META',5.2)">𝕏</button>
+              <div class="scard-head">
+                <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/meta.com" loading="lazy" width="42" height="42" alt="META" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">ME</div><span class="srank">#6</span></div>
+                <span class="sdir sdir-neut">🟡 中性</span>
+              </div>
+              <div class="scard-body">
+                <div class="sticker">META</div>
+                <div class="score-row">
+                  <span class="score-big sc-l">5.2</span>
+                  <div class="sbar-wrap">
+                    <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
+                    <div class="sbar"><div class="sbar-fill fill-l" style="width:51%"></div></div>
+                  </div>
+                </div>
+                <div class="dim-bars"><div class="dim-b-item"><div class="dim-b" style="height:39%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item"><div class="dim-b" style="height:63%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item"><div class="dim-b" style="height:53%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item"><div class="dim-b" style="height:55%;background:#f59e0b"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item"><div class="dim-b" style="height:48%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
+                <div class="sprice-row"><span class="sprice">$653.56</span><span class="sprice-chg sprice-up">+2.2%</span></div>
+                <div class="sinsight">内幕卖出 $48,772,999</div>
+                <a href="alpha-hive-META-ml-enhanced-2026-03-02.html" class="ml-btn">ML 详情 →</a>
               </div>
             </div>
     </div>
@@ -773,50 +767,8 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
           <th scope="col" aria-sort="none">投票(多/空/中)</th><th scope="col" aria-sort="none">IV Rank</th><th scope="col" aria-sort="none">P/C</th><th scope="col" aria-sort="none">看空强度</th><th scope="col">ML 详情</th>
         </tr></thead>
         <tbody>
-            <tr data-dir="bullish" data-score="7.9">
-              <td>1</td>
-              <td><strong>MSFT</strong></td>
-              <td><span class="dcell-bull">看多</span></td>
-              <td class="sc-h"><strong>7.9</strong>/10</td>
-              <td>$398.55</td>
-              <td><span class="sprice-up">+2.5%</span></td>
-              <td><span class="res-y">7A</span></td>
-              <td>4/0/3</td>
-              <td>43.4</td>
-              <td style="color:var(--bull);font-weight:700">0.61</td>
-              <td style="color:var(--neut)">7.0</td>
-              <td><a href="alpha-hive-MSFT-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
-            </tr>
-            <tr data-dir="bullish" data-score="5.6">
-              <td>2</td>
-              <td><strong>BILI</strong></td>
-              <td><span class="dcell-bull">看多</span></td>
-              <td class="sc-m"><strong>5.6</strong>/10</td>
-              <td>$27.23</td>
-              <td><span class="sprice-dn">-8.2%</span></td>
-              <td><span class="res-n">无</span></td>
-              <td>3/1/3</td>
-              <td>36.8</td>
-              <td>0.76</td>
-              <td style="color:var(--neut)">6.9</td>
-              <td><a href="alpha-hive-BILI-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
-            </tr>
-            <tr data-dir="bullish" data-score="5.5">
-              <td>3</td>
-              <td><strong>CRCL</strong></td>
-              <td><span class="dcell-bull">看多</span></td>
-              <td class="sc-m"><strong>5.5</strong>/10</td>
-              <td>-</td>
-              <td>-</td>
-              <td><span class="res-n">无</span></td>
-              <td>3/0/2</td>
-              <td>16.3</td>
-              <td>0.70</td>
-              <td style="color:var(--neut)">6.7</td>
-              <td><a href="alpha-hive-CRCL-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
-            </tr>
             <tr data-dir="neutral" data-score="5.2">
-              <td>4</td>
+              <td>1</td>
               <td><strong>NVDA</strong></td>
               <td><span class="dcell-neut">中性</span></td>
               <td class="sc-l"><strong>5.2</strong>/10</td>
@@ -829,22 +781,8 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
               <td style="color:var(--neut)">6.9</td>
               <td><a href="alpha-hive-NVDA-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
             </tr>
-            <tr data-dir="neutral" data-score="5.2">
-              <td>5</td>
-              <td><strong>META</strong></td>
-              <td><span class="dcell-neut">中性</span></td>
-              <td class="sc-l"><strong>5.2</strong>/10</td>
-              <td>$653.56</td>
-              <td><span class="sprice-up">+2.2%</span></td>
-              <td><span class="res-n">无</span></td>
-              <td>3/0/4</td>
-              <td>16.7</td>
-              <td style="color:var(--bull);font-weight:700">0.68</td>
-              <td style="color:var(--neut)">8.0</td>
-              <td><a href="alpha-hive-META-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
-            </tr>
             <tr data-dir="bullish" data-score="5.0">
-              <td>6</td>
+              <td>2</td>
               <td><strong>TSLA</strong></td>
               <td><span class="dcell-bull">看多</span></td>
               <td class="sc-l"><strong>5.0</strong>/10</td>
@@ -857,8 +795,22 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
               <td style="color:var(--neut)">7.5</td>
               <td><a href="alpha-hive-TSLA-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
             </tr>
+            <tr data-dir="bullish" data-score="7.9">
+              <td>3</td>
+              <td><strong>MSFT</strong></td>
+              <td><span class="dcell-bull">看多</span></td>
+              <td class="sc-h"><strong>7.9</strong>/10</td>
+              <td>$398.55</td>
+              <td><span class="sprice-up">+2.5%</span></td>
+              <td><span class="res-y">7A</span></td>
+              <td>4/0/3</td>
+              <td>43.4</td>
+              <td style="color:var(--bull);font-weight:700">0.61</td>
+              <td style="color:var(--neut)">7.0</td>
+              <td><a href="alpha-hive-MSFT-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
+            </tr>
             <tr data-dir="neutral" data-score="4.3">
-              <td>7</td>
+              <td>4</td>
               <td><strong>QCOM</strong></td>
               <td><span class="dcell-neut">中性</span></td>
               <td class="sc-l"><strong>4.3</strong>/10</td>
@@ -866,13 +818,13 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
               <td><span class="sprice-up">+1.4%</span></td>
               <td><span class="res-n">无</span></td>
               <td>2/0/5</td>
-              <td>0.0</td>
-              <td style="color:var(--bear);font-weight:700">2.06</td>
+              <td>25.1</td>
+              <td style="color:var(--bull);font-weight:700">0.65</td>
               <td style="color:var(--neut)">8.0</td>
               <td><a href="alpha-hive-QCOM-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
             </tr>
             <tr data-dir="bullish" data-score="4.9">
-              <td>8</td>
+              <td>5</td>
               <td><strong>VKTX</strong></td>
               <td><span class="dcell-bull">看多</span></td>
               <td class="sc-l"><strong>4.9</strong>/10</td>
@@ -885,8 +837,36 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
               <td style="color:var(--neut)">7.5</td>
               <td><a href="alpha-hive-VKTX-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
             </tr>
+            <tr data-dir="neutral" data-score="5.2">
+              <td>6</td>
+              <td><strong>META</strong></td>
+              <td><span class="dcell-neut">中性</span></td>
+              <td class="sc-l"><strong>5.2</strong>/10</td>
+              <td>$653.56</td>
+              <td><span class="sprice-up">+2.2%</span></td>
+              <td><span class="res-n">无</span></td>
+              <td>3/0/4</td>
+              <td>16.7</td>
+              <td style="color:var(--bull);font-weight:700">0.68</td>
+              <td style="color:var(--neut)">8.0</td>
+              <td><a href="alpha-hive-META-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
+            </tr>
+            <tr data-dir="bullish" data-score="5.6">
+              <td>7</td>
+              <td><strong>BILI</strong></td>
+              <td><span class="dcell-bull">看多</span></td>
+              <td class="sc-m"><strong>5.6</strong>/10</td>
+              <td>$27.23</td>
+              <td><span class="sprice-dn">-8.2%</span></td>
+              <td><span class="res-n">无</span></td>
+              <td>3/1/3</td>
+              <td>36.8</td>
+              <td>0.76</td>
+              <td style="color:var(--neut)">6.9</td>
+              <td><a href="alpha-hive-BILI-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
+            </tr>
             <tr data-dir="bullish" data-score="5.2">
-              <td>9</td>
+              <td>8</td>
               <td><strong>AMZN</strong></td>
               <td><span class="dcell-bull">看多</span></td>
               <td class="sc-l"><strong>5.2</strong>/10</td>
@@ -900,7 +880,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
               <td><a href="alpha-hive-AMZN-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
             </tr>
             <tr data-dir="neutral" data-score="5.1">
-              <td>10</td>
+              <td>9</td>
               <td><strong>RKLB</strong></td>
               <td><span class="dcell-neut">中性</span></td>
               <td class="sc-l"><strong>5.1</strong>/10</td>
@@ -912,6 +892,20 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
               <td>1.02</td>
               <td style="color:var(--neut)">7.2</td>
               <td><a href="alpha-hive-RKLB-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
+            </tr>
+            <tr data-dir="bullish" data-score="5.5">
+              <td>10</td>
+              <td><strong>CRCL</strong></td>
+              <td><span class="dcell-bull">看多</span></td>
+              <td class="sc-l"><strong>5.5</strong>/10</td>
+              <td>-</td>
+              <td>-</td>
+              <td><span class="res-n">无</span></td>
+              <td>3/0/2</td>
+              <td>16.3</td>
+              <td>0.70</td>
+              <td style="color:var(--neut)">6.7</td>
+              <td><a href="alpha-hive-CRCL-ml-enhanced-2026-03-02.html" class="ml-btn-sm">查看</a></td>
             </tr></tbody>
       </table>
     </div>
@@ -921,88 +915,6 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
   <div class="section" id="deep">
     <h2 class="sec-title">个股深度分析（含雷达图）</h2>
     <div class="company-grid">
-            <div class="company-card" data-dir="bullish" data-score="7.9" id="deep-MSFT">
-              <div class="cc-header" style="background:#1a7a3a;">
-                <span class="cc-ticker">MSFT</span>
-                <span class="cc-dir">看多 ↑</span>
-                <span class="cc-score">7.9/10</span>
-              </div>
-              <div class="cc-body">
-                <div class="cc-two">
-                  <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">$398.55 <span class="sprice-chg sprice-up">+2.5%</span></span></div>
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">43.4</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.61</span></div>
-                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
-                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">7.0/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">4多/0空</span></div>
-                  </div>
-                  <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-MSFT" width="160" height="160"></canvas></div>
-                </div>
-                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕买入 $1,986,750</li>
-                    <li>📊 <strong>期权：</strong>IV 处于理想水位</li>
-                    <li>💬 <strong>情绪：</strong>情绪 56%</li>
-                    <li>🐻 <strong>风险：</strong>当前价 $398.55</li></ul>
-                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
-                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>Azure 收入增速：季度 YoY 增速低于 20%</li><li>Copilot 商业化进展：付费席位季度净增 &lt; 5%</li><li>反垄断监管：EU/DOJ 提起重大诉讼或强制拆分令</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>云市场份额：Azure 份额季度环比下降 &gt; 2pp</li><li>EPS 大幅低于预期：实际 &lt; 预期 15%+</li></ul></div>
-                <div class="cc-footer"><a href="alpha-hive-MSFT-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
-              </div>
-            </div>
-            <div class="company-card" data-dir="bullish" data-score="5.6" id="deep-BILI">
-              <div class="cc-header" style="background:#1a7a3a;">
-                <span class="cc-ticker">BILI</span>
-                <span class="cc-dir">看多 ↑</span>
-                <span class="cc-score">5.6/10</span>
-              </div>
-              <div class="cc-body">
-                <div class="cc-two">
-                  <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">$27.23 <span class="sprice-chg sprice-dn">-8.2%</span></span></div>
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">36.8</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.76</span></div>
-                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
-                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">6.9/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/1空</span></div>
-                  </div>
-                  <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-BILI" width="160" height="160"></canvas></div>
-                </div>
-                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>无近期内幕交易</li>
-                    <li>📊 <strong>期权：</strong>检测到 1 个看涨异动</li>
-                    <li>💬 <strong>情绪：</strong>情绪 44%</li>
-                    <li>🐻 <strong>风险：</strong>Oracle 期权信号看空（5.1分）</li></ul>
-                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 80%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:80%;background:#28a745;"></span></span><span class="dq-val">80%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
-                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>月活跃用户：季度 MAU 同比下滑 &gt; 3%</li><li>商业化能力：ARPU 季度同比下降 &gt; 10%</li><li>内容监管：监管要求下架核心内容分类或限制直播</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>退市风险：SEC 或纳斯达克发出退市警告</li><li>现金消耗：自由现金流连续 3 季度为负且无明确改善路径</li></ul></div>
-                <div class="cc-footer"><a href="alpha-hive-BILI-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
-              </div>
-            </div>
-            <div class="company-card" data-dir="bullish" data-score="5.5" id="deep-CRCL">
-              <div class="cc-header" style="background:#1a7a3a;">
-                <span class="cc-ticker">CRCL</span>
-                <span class="cc-dir">看多 ↑</span>
-                <span class="cc-score">5.5/10</span>
-              </div>
-              <div class="cc-body">
-                <div class="cc-two">
-                  <div class="cc-metrics-col">
-                    
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">16.3</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.70</span></div>
-                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
-                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">6.7/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/0空</span></div>
-                  </div>
-                  <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-CRCL" width="160" height="160"></canvas></div>
-                </div>
-                <ul class="cc-signals"><li>📊 <strong>期权：</strong>检测到 4 个看涨异动</li>
-                    <li>🐻 <strong>风险：</strong>内幕人净卖出 $9,260,898</li></ul>
-                <div class="dim-dq-row"><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
-                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>USDC 市场份额：USDC 全球稳定币市场份额 &lt; 20%</li><li>稳定币监管：美国国会通过限制商业稳定币运营的法案</li><li>收入集中度：利率收入占总收入比例 &gt; 80% 且利率开始下行</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>USDC 脱钩事件：USDC 价格跌破 $0.97 超过 24 小时</li><li>央行数字货币竞争：美联储正式发行 CBDC（数字美元）</li></ul></div>
-                <div class="cc-footer"><a href="alpha-hive-CRCL-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
-              </div>
-            </div>
             <div class="company-card" data-dir="neutral" data-score="5.2" id="deep-NVDA">
               <div class="cc-header" style="background:#7a5c1a;">
                 <span class="cc-ticker">NVDA</span>
@@ -1029,34 +941,6 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
                 <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>DataCenter Revenue Growth：季度环比下降 &gt; 5%</li><li>竞争对手新产品：AMD 或 Intel 发布超越 NVIDIA 的产品</li><li>中国芯片禁令：Polymarket 禁令概率 &gt; 60%</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>EPS 大幅低于预期：实际 &lt; 预期 20%+</li><li>美国芯片出口禁令：直接禁止对华 H100/H800 销售</li><li>CEO 离职：Jensen Huang 宣布离职</li></ul></div>
                 <div class="cc-footer"><a href="alpha-hive-NVDA-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
-              </div>
-            </div>
-            <div class="company-card" data-dir="neutral" data-score="5.2" id="deep-META">
-              <div class="cc-header" style="background:#7a5c1a;">
-                <span class="cc-ticker">META</span>
-                <span class="cc-dir">中性 →</span>
-                <span class="cc-score">5.2/10</span>
-              </div>
-              <div class="cc-body">
-                <div class="cc-two">
-                  <div class="cc-metrics-col">
-                    <div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">$653.56 <span class="sprice-chg sprice-up">+2.2%</span></span></div>
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">16.7</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.68</span></div>
-                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
-                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">8.0/10</span></div>
-                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/0空</span></div>
-                  </div>
-                  <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-META" width="160" height="160"></canvas></div>
-                </div>
-                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $48,772,999</li>
-                    <li>📊 <strong>期权：</strong>做多气氛浓厚（P/C低）</li>
-                    <li>💬 <strong>情绪：</strong>情绪 53%</li>
-                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $48,772,999（买入仅 $0）</li></ul>
-                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
-                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>日活跃用户增速：全球 DAU 季度 QoQ 增速 &lt; 1%</li><li>广告收入增速：广告收入 YoY 增速 &lt; 10%</li><li>监管/隐私风险：EU/FTC 裁定重大罚款（&gt; $5B）或强制拆分</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>Reality Labs 亏损：单季亏损超 $6B 且无改善路径</li><li>TikTok 解禁：TikTok 在美恢复全面运营</li></ul></div>
-                <div class="cc-footer"><a href="alpha-hive-META-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
               </div>
             </div>
             <div class="company-card" data-dir="bullish" data-score="5.0" id="deep-TSLA">
@@ -1087,6 +971,34 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 <div class="cc-footer"><a href="alpha-hive-TSLA-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
               </div>
             </div>
+            <div class="company-card" data-dir="bullish" data-score="7.9" id="deep-MSFT">
+              <div class="cc-header" style="background:#1a7a3a;">
+                <span class="cc-ticker">MSFT</span>
+                <span class="cc-dir">看多 ↑</span>
+                <span class="cc-score">7.9/10</span>
+              </div>
+              <div class="cc-body">
+                <div class="cc-two">
+                  <div class="cc-metrics-col">
+                    <div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">$398.55 <span class="sprice-chg sprice-up">+2.5%</span></span></div>
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">43.4</span></div>
+                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.61</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
+                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">7.0/10</span></div>
+                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">4多/0空</span></div>
+                  </div>
+                  <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-MSFT" width="160" height="160"></canvas></div>
+                </div>
+                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕买入 $1,986,750</li>
+                    <li>📊 <strong>期权：</strong>IV 处于理想水位</li>
+                    <li>💬 <strong>情绪：</strong>情绪 56%</li>
+                    <li>🐻 <strong>风险：</strong>当前价 $398.55</li></ul>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>Azure 收入增速：季度 YoY 增速低于 20%</li><li>Copilot 商业化进展：付费席位季度净增 &lt; 5%</li><li>反垄断监管：EU/DOJ 提起重大诉讼或强制拆分令</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>云市场份额：Azure 份额季度环比下降 &gt; 2pp</li><li>EPS 大幅低于预期：实际 &lt; 预期 15%+</li></ul></div>
+                <div class="cc-footer"><a href="alpha-hive-MSFT-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
+              </div>
+            </div>
             <div class="company-card" data-dir="neutral" data-score="4.3" id="deep-QCOM">
               <div class="cc-header" style="background:#7a5c1a;">
                 <span class="cc-ticker">QCOM</span>
@@ -1097,9 +1009,9 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 <div class="cc-two">
                   <div class="cc-metrics-col">
                     <div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">$142.36 <span class="sprice-chg sprice-up">+1.4%</span></span></div>
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">0.0</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">2.06</span></div>
-                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#dc3545;font-weight:bold;">bearish</span></div>
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">25.1</span></div>
+                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.65</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
                     <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
                     <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">8.0/10</span></div>
                     <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">2多/0空</span></div>
@@ -1141,6 +1053,62 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 80%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:80%;background:#28a745;"></span></span><span class="dq-val">80%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
                 <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>临床试验患者脱落：关键患者脱落 &gt; 15%</li><li>竞争对手试验数据：发布更优越的数据</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>FDA 临床试验暂停：IND Hold（试验中止令）</li><li>Phase 3 试验失败：关键终点未达到统计学意义</li></ul></div>
                 <div class="cc-footer"><a href="alpha-hive-VKTX-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
+              </div>
+            </div>
+            <div class="company-card" data-dir="neutral" data-score="5.2" id="deep-META">
+              <div class="cc-header" style="background:#7a5c1a;">
+                <span class="cc-ticker">META</span>
+                <span class="cc-dir">中性 →</span>
+                <span class="cc-score">5.2/10</span>
+              </div>
+              <div class="cc-body">
+                <div class="cc-two">
+                  <div class="cc-metrics-col">
+                    <div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">$653.56 <span class="sprice-chg sprice-up">+2.2%</span></span></div>
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">16.7</span></div>
+                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.68</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
+                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">8.0/10</span></div>
+                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/0空</span></div>
+                  </div>
+                  <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-META" width="160" height="160"></canvas></div>
+                </div>
+                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>内幕卖出 $48,772,999</li>
+                    <li>📊 <strong>期权：</strong>做多气氛浓厚（P/C低）</li>
+                    <li>💬 <strong>情绪：</strong>情绪 53%</li>
+                    <li>🐻 <strong>风险：</strong>内幕大额抛售 $48,772,999（买入仅 $0）</li></ul>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>日活跃用户增速：全球 DAU 季度 QoQ 增速 &lt; 1%</li><li>广告收入增速：广告收入 YoY 增速 &lt; 10%</li><li>监管/隐私风险：EU/FTC 裁定重大罚款（&gt; $5B）或强制拆分</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>Reality Labs 亏损：单季亏损超 $6B 且无改善路径</li><li>TikTok 解禁：TikTok 在美恢复全面运营</li></ul></div>
+                <div class="cc-footer"><a href="alpha-hive-META-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
+              </div>
+            </div>
+            <div class="company-card" data-dir="bullish" data-score="5.6" id="deep-BILI">
+              <div class="cc-header" style="background:#1a7a3a;">
+                <span class="cc-ticker">BILI</span>
+                <span class="cc-dir">看多 ↑</span>
+                <span class="cc-score">5.6/10</span>
+              </div>
+              <div class="cc-body">
+                <div class="cc-two">
+                  <div class="cc-metrics-col">
+                    <div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">$27.23 <span class="sprice-chg sprice-dn">-8.2%</span></span></div>
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">36.8</span></div>
+                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.76</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
+                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">6.9/10</span></div>
+                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/1空</span></div>
+                  </div>
+                  <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-BILI" width="160" height="160"></canvas></div>
+                </div>
+                <ul class="cc-signals"><li>📋 <strong>内幕：</strong>无近期内幕交易</li>
+                    <li>📊 <strong>期权：</strong>检测到 1 个看涨异动</li>
+                    <li>💬 <strong>情绪：</strong>情绪 44%</li>
+                    <li>🐻 <strong>风险：</strong>Oracle 期权信号看空（5.1分）</li></ul>
+                <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 80%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:80%;background:#28a745;"></span></span><span class="dq-val">80%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>月活跃用户：季度 MAU 同比下滑 &gt; 3%</li><li>商业化能力：ARPU 季度同比下降 &gt; 10%</li><li>内容监管：监管要求下架核心内容分类或限制直播</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>退市风险：SEC 或纳斯达克发出退市警告</li><li>现金消耗：自由现金流连续 3 季度为负且无明确改善路径</li></ul></div>
+                <div class="cc-footer"><a href="alpha-hive-BILI-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
               </div>
             </div>
             <div class="company-card" data-dir="bullish" data-score="5.2" id="deep-AMZN">
@@ -1197,6 +1165,32 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
                 <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>发射失败：Electron 连续 2 次发射失败</li><li>Neutron 火箭进度：Neutron 首飞推迟超 12 个月</li><li>发射订单积压：季度新签合同价值低于 $50M</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>SpaceX 竞争：SpaceX 开始提供类似 Electron 的小卫星专属发射服务并低价 20%+</li><li>现金耗尽：现金储备 &lt; 6 个月运营，且融资无望</li></ul></div>
                 <div class="cc-footer"><a href="alpha-hive-RKLB-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
+              </div>
+            </div>
+            <div class="company-card" data-dir="bullish" data-score="5.5" id="deep-CRCL">
+              <div class="cc-header" style="background:#1a7a3a;">
+                <span class="cc-ticker">CRCL</span>
+                <span class="cc-dir">看多 ↑</span>
+                <span class="cc-score">5.5/10</span>
+              </div>
+              <div class="cc-body">
+                <div class="cc-two">
+                  <div class="cc-metrics-col">
+                    
+                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">16.3</span></div>
+                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.70</span></div>
+                    <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
+                    <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
+                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">6.7/10</span></div>
+                    <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">3多/0空</span></div>
+                  </div>
+                  <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-CRCL" width="160" height="160"></canvas></div>
+                </div>
+                <ul class="cc-signals"><li>📊 <strong>期权：</strong>检测到 4 个看涨异动</li>
+                    <li>🐻 <strong>风险：</strong>内幕人净卖出 $9,260,898</li></ul>
+                <div class="dim-dq-row"><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 85%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:85%;background:#28a745;"></span></span><span class="dq-val">85%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
+                <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>USDC 市场份额：USDC 全球稳定币市场份额 &lt; 20%</li><li>稳定币监管：美国国会通过限制商业稳定币运营的法案</li><li>收入集中度：利率收入占总收入比例 &gt; 80% 且利率开始下行</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>USDC 脱钩事件：USDC 价格跌破 $0.97 超过 24 小时</li><li>央行数字货币竞争：美联储正式发行 CBDC（数字美元）</li></ul></div>
+                <div class="cc-footer"><a href="alpha-hive-CRCL-ml-enhanced-2026-03-02.html" class="ml-btn-cc">ML 增强分析 →</a></div>
               </div>
             </div></div>
   </div>
@@ -1918,7 +1912,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 
 <footer class="footer">
   <p><span class="px-bee"></span> Alpha Hive — 去中心化蜂群智能投资研究平台</p>
-  <p>更新：2026-03-02 14:44 PST | 10 标的 | SEC 真实数据 | 真实度 95%</p>
+  <p>更新：2026-03-02 16:41 PST | 10 标的 | SEC 真实数据 | 真实度 95%</p>
   <div style="display:flex;justify-content:center;gap:10px;margin-top:10px;flex-wrap:wrap">
     <a href="rss.xml" class="share-btn" style="color:rgba(255,255,255,.7);border-color:rgba(255,255,255,.15)">📡 RSS 订阅</a>
     <button class="share-btn share-btn-x" style="border-color:rgba(255,255,255,.15);color:rgba(255,255,255,.7)" onclick="shareToX()">𝕏 Follow &amp; Share</button>
@@ -2165,7 +2159,7 @@ var chartInstances=[];
     if(id==='scoresChart'){
       var scCtx=document.getElementById('scoresChart');
       if(!scCtx)return;
-      var sc=[["MSFT", 7.9], ["BILI", 5.6], ["CRCL", 5.5], ["NVDA", 5.2], ["META", 5.2], ["TSLA", 5.0], ["QCOM", 4.3], ["VKTX", 4.9], ["AMZN", 5.2], ["RKLB", 5.1]];
+      var sc=[["NVDA", 5.2], ["TSLA", 5.0], ["MSFT", 7.9], ["QCOM", 4.3], ["VKTX", 4.9], ["META", 5.2], ["BILI", 5.6], ["AMZN", 5.2], ["RKLB", 5.1], ["CRCL", 5.5]];
       var clrs=sc.map(function(x){return x[1]>=7?'rgba(34,197,94,.85)':x[1]>=5.5?'rgba(245,158,11,.85)':'rgba(239,68,68,.85)';});
       chartInstances.push(new Chart(scCtx,{
         type:'bar',
@@ -2208,7 +2202,7 @@ var chartInstances=[];
   }
 
   // Radar per ticker (lazy)
-  var rd={"MSFT": [84.7, 63.0, 56.1, 76.5, 48.0], "BILI": [61.0, 74.5, 44.1, 50.8, 48.0], "CRCL": [50.0, 55.0, 50.0, 59.6, 40.0], "NVDA": [27.4, 68.9, 56.5, 95.0, 38.0], "META": [39.4, 63.0, 53.6, 55.6, 48.0], "TSLA": [37.7, 47.5, 49.1, 75.0, 48.0], "QCOM": [38.9, 63.0, 45.6, 32.8, 48.0], "VKTX": [38.1, 42.5, 51.8, 68.3, 48.0], "AMZN": [38.1, 47.5, 48.9, 91.0, 48.0], "RKLB": [37.3, 47.5, 56.1, 75.0, 48.0]};
+  var rd={"NVDA": [27.4, 68.9, 56.5, 95.0, 38.0], "TSLA": [37.7, 47.5, 49.1, 75.0, 48.0], "MSFT": [84.7, 63.0, 56.1, 76.5, 48.0], "QCOM": [38.9, 63.0, 45.6, 32.8, 48.0], "VKTX": [38.1, 42.5, 51.8, 68.3, 48.0], "META": [39.4, 63.0, 53.6, 55.6, 48.0], "BILI": [61.0, 74.5, 44.1, 50.8, 48.0], "AMZN": [38.1, 47.5, 48.9, 91.0, 48.0], "RKLB": [37.3, 47.5, 56.1, 75.0, 48.0], "CRCL": [50.0, 55.0, 50.0, 59.6, 40.0]};
   var rl=['信号强度','催化剂','情绪','赔率','风险控制'];
   function renderRadar(tk){
     if(rendered['radar-'+tk])return;
@@ -2405,7 +2399,7 @@ function scrollToDeep(ticker){
 
 // ── F8a: Trend Chart ──
 (function(){
-  var trendData={"MSFT": [{"date": "2026-02-25", "score": 7.5}, {"date": "2026-02-26", "score": 7.3}, {"date": "2026-02-27", "score": 7.6}, {"date": "2026-02-28", "score": 7.6}, {"date": "2026-03-01", "score": 7.0}, {"date": "2026-03-02", "score": 7.9}], "BILI": [{"date": "2026-02-26", "score": 5.8}, {"date": "2026-02-27", "score": 5.8}, {"date": "2026-02-28", "score": 5.8}, {"date": "2026-03-01", "score": 5.2}, {"date": "2026-03-02", "score": 5.6}], "CRCL": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-01", "score": 5.0}, {"date": "2026-03-02", "score": 5.5}], "NVDA": [{"date": "2026-02-25", "score": 6.1}, {"date": "2026-02-26", "score": 5.0}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-02", "score": 5.2}], "META": [{"date": "2026-02-26", "score": 5.7}, {"date": "2026-02-27", "score": 5.9}, {"date": "2026-02-28", "score": 5.9}, {"date": "2026-03-01", "score": 4.7}, {"date": "2026-03-02", "score": 5.2}], "TSLA": [{"date": "2026-02-25", "score": 5.5}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-02", "score": 5.0}], "QCOM": [{"date": "2026-02-27", "score": 6.1}, {"date": "2026-02-28", "score": 6.1}, {"date": "2026-03-02", "score": 4.3}], "VKTX": [{"date": "2026-02-25", "score": 4.6}, {"date": "2026-02-27", "score": 4.5}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-02", "score": 4.9}], "AMZN": [{"date": "2026-02-26", "score": 5.3}, {"date": "2026-02-27", "score": 5.6}, {"date": "2026-02-28", "score": 5.6}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-02", "score": 5.2}], "RKLB": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-02", "score": 5.1}], "AMD": [{"date": "2026-02-25", "score": 4.3}]};
+  var trendData={"NVDA": [{"date": "2026-02-25", "score": 6.1}, {"date": "2026-02-26", "score": 5.0}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-02", "score": 5.2}], "TSLA": [{"date": "2026-02-25", "score": 5.5}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-02", "score": 5.0}], "MSFT": [{"date": "2026-02-25", "score": 7.5}, {"date": "2026-02-26", "score": 7.3}, {"date": "2026-02-27", "score": 7.6}, {"date": "2026-02-28", "score": 7.6}, {"date": "2026-03-01", "score": 7.0}, {"date": "2026-03-02", "score": 7.9}], "QCOM": [{"date": "2026-02-27", "score": 6.1}, {"date": "2026-02-28", "score": 6.1}, {"date": "2026-03-02", "score": 4.3}], "VKTX": [{"date": "2026-02-25", "score": 4.6}, {"date": "2026-02-27", "score": 4.5}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-02", "score": 4.9}], "META": [{"date": "2026-02-26", "score": 5.7}, {"date": "2026-02-27", "score": 5.9}, {"date": "2026-02-28", "score": 5.9}, {"date": "2026-03-01", "score": 4.7}, {"date": "2026-03-02", "score": 5.2}], "BILI": [{"date": "2026-02-26", "score": 5.8}, {"date": "2026-02-27", "score": 5.8}, {"date": "2026-02-28", "score": 5.8}, {"date": "2026-03-01", "score": 5.2}, {"date": "2026-03-02", "score": 5.6}], "AMZN": [{"date": "2026-02-26", "score": 5.3}, {"date": "2026-02-27", "score": 5.6}, {"date": "2026-02-28", "score": 5.6}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-02", "score": 5.2}], "RKLB": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-02", "score": 5.1}], "CRCL": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-01", "score": 5.0}, {"date": "2026-03-02", "score": 5.5}], "AMD": [{"date": "2026-02-25", "score": 4.3}]};
   var cv=document.getElementById('trendChart');
   if(!cv||typeof Chart==='undefined')return;
   var dark=document.documentElement.classList.contains('dark');
@@ -2473,7 +2467,7 @@ function scrollToDeep(ticker){
 })();
 
 // ── F8b: Diff ──
-var _histFull={"2026-03-02": [{"ticker": "MSFT", "score": 7.9, "direction": "\u770b\u591a"}, {"ticker": "BILI", "score": 5.6, "direction": "\u770b\u591a"}, {"ticker": "CRCL", "score": 5.5, "direction": "\u770b\u591a"}, {"ticker": "NVDA", "score": 5.2, "direction": "\u4e2d\u6027"}, {"ticker": "META", "score": 5.2, "direction": "\u4e2d\u6027"}, {"ticker": "TSLA", "score": 5.0, "direction": "bullish"}, {"ticker": "QCOM", "score": 4.3, "direction": "neutral"}, {"ticker": "VKTX", "score": 4.9, "direction": "bullish"}, {"ticker": "AMZN", "score": 5.2, "direction": "bullish"}, {"ticker": "RKLB", "score": 5.1, "direction": "neutral"}], "2026-03-01": [{"ticker": "MSFT", "score": 7.0, "direction": "\u770b\u591a"}, {"ticker": "BILI", "score": 5.2, "direction": "\u770b\u591a"}, {"ticker": "META", "score": 4.7, "direction": "\u770b\u591a"}, {"ticker": "AMZN", "score": 4.8, "direction": "\u770b\u591a"}, {"ticker": "VKTX", "score": 4.8, "direction": "\u4e2d\u6027"}, {"ticker": "CRCL", "score": 5.0, "direction": "\u4e2d\u6027"}], "2026-02-28": [{"ticker": "MSFT", "score": 7.6, "direction": "\u770b\u591a"}, {"ticker": "QCOM", "score": 6.1, "direction": "\u770b\u591a"}, {"ticker": "META", "score": 5.9, "direction": "\u770b\u591a"}, {"ticker": "BILI", "score": 5.8, "direction": "\u770b\u591a"}, {"ticker": "AMZN", "score": 5.6, "direction": "\u770b\u591a"}], "2026-02-27": [{"ticker": "MSFT", "score": 7.6, "direction": "\u770b\u591a"}, {"ticker": "META", "score": 5.9, "direction": "\u770b\u591a"}, {"ticker": "QCOM", "score": 6.1, "direction": "\u770b\u591a"}, {"ticker": "BILI", "score": 5.8, "direction": "\u770b\u591a"}, {"ticker": "AMZN", "score": 5.6, "direction": "\u770b\u591a"}, {"ticker": "NVDA", "score": 5.0, "direction": "\u770b\u591a"}, {"ticker": "TSLA", "score": 5.0, "direction": "\u770b\u591a"}, {"ticker": "VKTX", "score": 4.5, "direction": "\u4e2d\u6027"}, {"ticker": "RKLB", "score": 4.2, "direction": "\u4e2d\u6027"}, {"ticker": "CRCL", "score": 4.2, "direction": "\u4e2d\u6027"}], "2026-02-26": [{"ticker": "MSFT", "score": 7.3, "direction": "\u770b\u591a"}, {"ticker": "BILI", "score": 5.8, "direction": "\u770b\u591a"}, {"ticker": "META", "score": 5.7, "direction": "\u770b\u591a"}, {"ticker": "AMZN", "score": 5.3, "direction": "\u770b\u591a"}, {"ticker": "NVDA", "score": 5.0, "direction": "\u770b\u591a"}], "2026-02-25": [{"ticker": "MSFT", "score": 7.5, "direction": "\u770b\u591a"}, {"ticker": "NVDA", "score": 6.1, "direction": "\u770b\u591a"}, {"ticker": "TSLA", "score": 5.5, "direction": "\u770b\u591a"}, {"ticker": "VKTX", "score": 4.6, "direction": "\u4e2d\u6027"}, {"ticker": "AMD", "score": 4.3, "direction": "\u4e2d\u6027"}]};
+var _histFull={"2026-03-02": [{"ticker": "NVDA", "score": 5.2, "direction": "neutral"}, {"ticker": "TSLA", "score": 5.0, "direction": "bullish"}, {"ticker": "MSFT", "score": 7.9, "direction": "bullish"}, {"ticker": "QCOM", "score": 4.3, "direction": "neutral"}, {"ticker": "VKTX", "score": 4.9, "direction": "bullish"}, {"ticker": "META", "score": 5.2, "direction": "neutral"}, {"ticker": "BILI", "score": 5.6, "direction": "bullish"}, {"ticker": "AMZN", "score": 5.2, "direction": "bullish"}, {"ticker": "RKLB", "score": 5.1, "direction": "neutral"}, {"ticker": "CRCL", "score": 5.5, "direction": "bullish"}], "2026-03-01": [{"ticker": "MSFT", "score": 7.0, "direction": "\u770b\u591a"}, {"ticker": "BILI", "score": 5.2, "direction": "\u770b\u591a"}, {"ticker": "META", "score": 4.7, "direction": "\u770b\u591a"}, {"ticker": "AMZN", "score": 4.8, "direction": "\u770b\u591a"}, {"ticker": "VKTX", "score": 4.8, "direction": "\u4e2d\u6027"}, {"ticker": "CRCL", "score": 5.0, "direction": "\u4e2d\u6027"}], "2026-02-28": [{"ticker": "MSFT", "score": 7.6, "direction": "\u770b\u591a"}, {"ticker": "QCOM", "score": 6.1, "direction": "\u770b\u591a"}, {"ticker": "META", "score": 5.9, "direction": "\u770b\u591a"}, {"ticker": "BILI", "score": 5.8, "direction": "\u770b\u591a"}, {"ticker": "AMZN", "score": 5.6, "direction": "\u770b\u591a"}], "2026-02-27": [{"ticker": "MSFT", "score": 7.6, "direction": "\u770b\u591a"}, {"ticker": "META", "score": 5.9, "direction": "\u770b\u591a"}, {"ticker": "QCOM", "score": 6.1, "direction": "\u770b\u591a"}, {"ticker": "BILI", "score": 5.8, "direction": "\u770b\u591a"}, {"ticker": "AMZN", "score": 5.6, "direction": "\u770b\u591a"}, {"ticker": "NVDA", "score": 5.0, "direction": "\u770b\u591a"}, {"ticker": "TSLA", "score": 5.0, "direction": "\u770b\u591a"}, {"ticker": "VKTX", "score": 4.5, "direction": "\u4e2d\u6027"}, {"ticker": "RKLB", "score": 4.2, "direction": "\u4e2d\u6027"}, {"ticker": "CRCL", "score": 4.2, "direction": "\u4e2d\u6027"}], "2026-02-26": [{"ticker": "MSFT", "score": 7.3, "direction": "\u770b\u591a"}, {"ticker": "BILI", "score": 5.8, "direction": "\u770b\u591a"}, {"ticker": "META", "score": 5.7, "direction": "\u770b\u591a"}, {"ticker": "AMZN", "score": 5.3, "direction": "\u770b\u591a"}, {"ticker": "NVDA", "score": 5.0, "direction": "\u770b\u591a"}], "2026-02-25": [{"ticker": "MSFT", "score": 7.5, "direction": "\u770b\u591a"}, {"ticker": "NVDA", "score": 6.1, "direction": "\u770b\u591a"}, {"ticker": "TSLA", "score": 5.5, "direction": "\u770b\u591a"}, {"ticker": "VKTX", "score": 4.6, "direction": "\u4e2d\u6027"}, {"ticker": "AMD", "score": 4.3, "direction": "\u4e2d\u6027"}]};
 (function(){
   var dates=Object.keys(_histFull).sort().reverse();
   var selA=document.getElementById('diffDateA');
@@ -2573,7 +2567,7 @@ function toggleKbHelp(){
 
 // ── Global Search (F12) ──
 (function(){
-  var si=[{"ticker": "MSFT", "score": 7.9, "direction": "\u770b\u591a", "price": 398.55}, {"ticker": "BILI", "score": 5.6, "direction": "\u770b\u591a", "price": 27.23}, {"ticker": "CRCL", "score": 5.5, "direction": "\u770b\u591a", "price": null}, {"ticker": "NVDA", "score": 5.2, "direction": "\u4e2d\u6027", "price": 182.48}, {"ticker": "META", "score": 5.2, "direction": "\u4e2d\u6027", "price": 653.56}, {"ticker": "TSLA", "score": 5.0, "direction": "\u770b\u591a", "price": 403.32}, {"ticker": "QCOM", "score": 4.3, "direction": "\u4e2d\u6027", "price": 142.36}, {"ticker": "VKTX", "score": 4.9, "direction": "\u770b\u591a", "price": 33.34}, {"ticker": "AMZN", "score": 5.2, "direction": "\u770b\u591a", "price": 208.39}, {"ticker": "RKLB", "score": 5.1, "direction": "\u4e2d\u6027", "price": 70.97}];
+  var si=[{"ticker": "NVDA", "score": 5.2, "direction": "\u4e2d\u6027", "price": 182.48}, {"ticker": "TSLA", "score": 5.0, "direction": "\u770b\u591a", "price": 403.32}, {"ticker": "MSFT", "score": 7.9, "direction": "\u770b\u591a", "price": 398.55}, {"ticker": "QCOM", "score": 4.3, "direction": "\u4e2d\u6027", "price": 142.36}, {"ticker": "VKTX", "score": 4.9, "direction": "\u770b\u591a", "price": 33.34}, {"ticker": "META", "score": 5.2, "direction": "\u4e2d\u6027", "price": 653.56}, {"ticker": "BILI", "score": 5.6, "direction": "\u770b\u591a", "price": 27.23}, {"ticker": "AMZN", "score": 5.2, "direction": "\u770b\u591a", "price": 208.39}, {"ticker": "RKLB", "score": 5.1, "direction": "\u4e2d\u6027", "price": 70.97}, {"ticker": "CRCL", "score": 5.5, "direction": "\u770b\u591a", "price": null}];
   var inp=document.getElementById('globalSearch');
   var box=document.getElementById('gsResults');
   if(!inp||!box)return;
