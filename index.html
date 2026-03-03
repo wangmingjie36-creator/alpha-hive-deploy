@@ -156,7 +156,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .chart-ttl{font-size:.82em;font-weight:700;color:var(--ts);text-transform:uppercase;
            letter-spacing:.06em;margin-bottom:14px;text-align:center}
 .chart-canvas-wrap{position:relative}
-.radar-wrap{position:relative;overflow:hidden}
+.radar-wrap{position:relative}
 .chart-canvas-wrap::before{content:'加载中…';position:absolute;inset:0;display:flex;
   align-items:center;justify-content:center;color:var(--ts);font-size:.82em;opacity:.5;z-index:0}
 .chart-canvas-wrap:has(canvas.rendered)::before{display:none}
@@ -2227,9 +2227,13 @@ var chartInstances=[];
   function renderRadar(tk){
     if(rendered['radar-'+tk])return;
     if(typeof Chart==='undefined')return;
+    var dark=document.documentElement.classList.contains('dark');
+    var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
+    var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
     rendered['radar-'+tk]=true;
     var cv=document.getElementById('radar-'+tk);
     if(!cv)return;
+    try{
     chartInstances.push(new Chart(cv,{
       type:'radar',
       data:{labels:rl,datasets:[{data:rd[tk],fill:true,
@@ -2254,6 +2258,7 @@ var chartInstances=[];
                plugins:{legend:{display:false}}}
     }));
     markDone('radar-'+tk);
+    }catch(e){console.warn('Radar render error ('+tk+'):',e);}
   }
 
   if(!('IntersectionObserver' in window)){
