@@ -944,6 +944,33 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
             except (OSError, TypeError) as e:
                 _log.warning("Checkpoint 写入失败: %s", e)
 
+        # ==================== Phase 2: 历史类比推理（top-3 ticker）====================
+        try:
+            if queen.use_llm and self.vector_memory and self.memory_store:
+                # 按 final_score 降序取 top-3
+                sorted_tickers = sorted(
+                    swarm_results.keys(),
+                    key=lambda t: swarm_results[t].get("final_score", 0),
+                    reverse=True,
+                )[:3]
+                for tk in sorted_tickers:
+                    try:
+                        queen.enrich_with_historical_analogy(
+                            ticker=tk,
+                            distilled=swarm_results[tk],
+                            vector_memory=self.vector_memory,
+                            memory_store=self.memory_store,
+                        )
+                        ha = swarm_results[tk].get("historical_analogy")
+                        if ha and ha.get("analogy_found"):
+                            _log.info("历史类比 %s: %s (相似度 %.2f)",
+                                      tk, ha.get("analogy_summary", "")[:60],
+                                      ha.get("similarity_score", 0))
+                    except Exception as _ha_err:
+                        _log.warning("历史类比 enrichment 失败 (%s): %s", tk, _ha_err)
+        except Exception as _ha_outer:
+            _log.warning("历史类比整体跳过: %s", _ha_outer)
+
         # 扫描完成，保存蜂群结果（合并当日已有结果，支持分批运行）
         try:
             swarm_json = self.report_dir / f".swarm_results_{self.date_str}.json"
@@ -1292,6 +1319,52 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
             _log.debug("P4 portfolio_concentration 不可用: %s", e)
 
+        # ── P4b: 跨标的关联分析（LLM）──
+        cross_ticker_analysis = {}
+        try:
+            from config import WATCHLIST
+            use_llm_flag = getattr(self, '_use_llm', False) or any(
+                r.get("distill_mode") == "llm" for r in swarm_results.values()
+            )
+            if use_llm_flag and len(swarm_results) >= 2:
+                import llm_service
+                # 构建 sector_map
+                sector_map = {}
+                for tk in swarm_results:
+                    wl_entry = WATCHLIST.get(tk, {})
+                    sector_map[tk] = wl_entry.get("sector", "Other") if isinstance(wl_entry, dict) else "Other"
+                # 构建 distilled_scores
+                distilled_scores = {}
+                for tk, data in swarm_results.items():
+                    distilled_scores[tk] = {
+                        "final_score": data.get("final_score", 5.0),
+                        "direction": data.get("direction", "neutral"),
+                    }
+                board_snap = board.compact_snapshot() if board else []
+                cross_ticker_analysis = llm_service.analyze_cross_ticker_patterns(
+                    board_snapshot=board_snap,
+                    distilled_scores=distilled_scores,
+                    sector_map=sector_map,
+                ) or {}
+                if cross_ticker_analysis:
+                    _log.info("P4b 跨标的关联分析：%s",
+                              cross_ticker_analysis.get("sector_rotation_signal", "N/A"))
+                    # 将 cross_ticker_insights 注入各 ticker 的 swarm_results
+                    for insight in cross_ticker_analysis.get("cross_ticker_insights", []):
+                        for tk in insight.get("tickers", []):
+                            if tk in swarm_results:
+                                existing = swarm_results[tk].get("cross_ticker_insights", [])
+                                existing.append(insight)
+                                swarm_results[tk]["cross_ticker_insights"] = existing
+                    # 将 sector_momentum 注入各 ticker
+                    for tk in swarm_results:
+                        sec = sector_map.get(tk, "Other")
+                        mom = cross_ticker_analysis.get("sector_momentum", {}).get(sec)
+                        if mom:
+                            swarm_results[tk]["sector_momentum"] = mom
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.debug("P4b 跨标的关联分析不可用: %s", e)
+
         # ── P5: 宏观环境快照（附加到报告元数据）──
         macro_snapshot = {}
         try:
@@ -1323,9 +1396,10 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                 "pheromone_board_entries": board.get_entry_count()
             },
             "concentration_analysis": concentration,
+            "cross_ticker_analysis": cross_ticker_analysis,
             "macro_context": macro_snapshot,
             "backtest_stats": backtest_stats,
-            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count),
+            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis),
             "twitter_threads": self._generate_swarm_twitter_threads(swarm_results),
             "opportunities": [
                 {
@@ -1395,8 +1469,9 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
                                          concentration: Dict = None,
                                          macro_context: Dict = None,
                                          backtest_stats: Dict = None,
-                                         agent_count: int = 7) -> str:
-        """生成蜂群模式的 Markdown 报告（8 版块 + P4集中度 + P5宏观 + P3回测）"""
+                                         agent_count: int = 7,
+                                         cross_ticker: Dict = None) -> str:
+        """生成蜂群模式的 Markdown 报告（8 版块 + P4集中度 + P4b跨标的 + P5宏观 + P3回测）"""
 
         md = []
         md.append(f"# 【{self.date_str}】Alpha Hive 蜂群协作日报")
@@ -1655,6 +1730,31 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
             md.extend(synthesis_lines)
             md.append("")
 
+        # Phase 2: 历史类比推理子版块
+        analogy_lines = []
+        for ticker, data in sorted_results:
+            ha = data.get("historical_analogy")
+            if ha and ha.get("analogy_found"):
+                analogy_lines.append(f"**{ticker}** — {ha.get('analogy_summary', '')}")
+                outcome = ha.get("historical_outcome", {})
+                t1 = outcome.get("t1", "N/A")
+                t7 = outcome.get("t7", "N/A")
+                t30 = outcome.get("t30", "N/A")
+                analogy_lines.append(f"- 历史结果：T+1 {t1} | T+7 {t7} | T+30 {t30}")
+                sim = ha.get("similarity_score", 0)
+                analogy_lines.append(f"- 相似度：{sim:.0%} | 置信调整：{ha.get('score_adjustment_applied', 0):+.1f}分")
+                diff = ha.get("key_differences", "")
+                if diff:
+                    analogy_lines.append(f"- 关键差异：{diff}")
+                warning = ha.get("warning", "")
+                if warning:
+                    analogy_lines.append(f"- ⚠️ {warning}")
+                analogy_lines.append("")
+        if analogy_lines:
+            md.append("### 📜 历史类比推理")
+            md.append("")
+            md.extend(analogy_lines)
+
         # NA2：评分调整注释（bear_cap / dq_penalty / llm_enhanced / 低维度覆盖）
         adj_lines = []
         for ticker, data in sorted_results:
@@ -1706,6 +1806,52 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
             for rec in concentration.get("recommendations", []):
                 md.append(f"- {rec}")
             md.append("")
+
+        # ====== 版块 P4b：跨标的关联分析（LLM）======
+        if cross_ticker and isinstance(cross_ticker, dict):
+            md.append("## 🔗 跨标的关联分析")
+            md.append("")
+
+            # 板块动量
+            sector_mom = cross_ticker.get("sector_momentum", {})
+            if sector_mom:
+                mom_parts = []
+                for sec, trend in sector_mom.items():
+                    emoji = {"leading": "🟢", "lagging": "🔴", "neutral": "🟡"}.get(trend, "")
+                    mom_parts.append(f"{sec}: {trend} {emoji}")
+                md.append("**板块动量**：" + " | ".join(mom_parts))
+                md.append("")
+
+            # 跨标的洞察
+            insights = cross_ticker.get("cross_ticker_insights", [])
+            if insights:
+                md.append("**关联洞察**：")
+                for ins in insights[:5]:
+                    tks = " & ".join(ins.get("tickers", []))
+                    md.append(f"- [{ins.get('type', '')}] {tks}：{ins.get('insight', '')}")
+                md.append("")
+
+            # 关联风险警告
+            corr_warnings = cross_ticker.get("correlation_warnings", [])
+            if corr_warnings:
+                md.append("**关联风险⚠️**：")
+                for w in corr_warnings[:4]:
+                    md.append(f"- {w}")
+                md.append("")
+
+            # 轮动信号
+            rotation = cross_ticker.get("sector_rotation_signal", "")
+            if rotation:
+                md.append(f"**轮动信号**：{rotation}")
+                md.append("")
+
+            # 组合建议
+            hints = cross_ticker.get("portfolio_adjustment_hints", [])
+            if hints:
+                md.append("**组合调整建议**：")
+                for h in hints[:3]:
+                    md.append(f"- {h}")
+                md.append("")
 
         # ====== 版块 P5：宏观环境 ======
         if macro_context and macro_context.get("data_source") != "fallback":

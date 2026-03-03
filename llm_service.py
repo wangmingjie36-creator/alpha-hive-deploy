@@ -650,3 +650,177 @@ def synthesize_agent_conflicts(
 输出 JSON："""
 
     return call_json(prompt, system=system, max_tokens=256, temperature=0.2)
+
+
+# ==================== Phase 2 升级：跨标的 & 历史类比 ====================
+
+def analyze_cross_ticker_patterns(
+    board_snapshot: List[Dict],
+    distilled_scores: Dict,
+    sector_map: Dict,
+) -> Optional[Dict]:
+    """
+    跨标的关联分析：检测板块轮动、竞争动态、关联风险、板块趋势。
+    每次扫描仅调用 1 次（非逐 ticker），覆盖全部标的。
+
+    Args:
+        board_snapshot: PheromoneBoard.compact_snapshot() — 所有 ticker 的信号摘要
+        distilled_scores: {ticker: {"final_score": float, "direction": str, ...}}
+        sector_map: {ticker: sector_name} from config.WATCHLIST
+
+    Returns:
+        {
+            "sector_momentum": {"Technology": "leading", ...},
+            "cross_ticker_insights": [{"tickers": [...], "type": str, "insight": str}],
+            "correlation_warnings": [str],
+            "sector_rotation_signal": str,
+            "portfolio_adjustment_hints": [str],
+        }
+    """
+    if not distilled_scores:
+        return None
+
+    system = """你是投资组合策略分析师，专长跨标的关联分析和板块轮动检测。
+
+分析多个标的之间的关系，输出严格 JSON：
+1. sector_momentum: 各板块动量评估（leading/lagging/neutral）
+2. cross_ticker_insights: 跨标的洞察列表（竞争动态、板块联动、反向信号等）
+   每条格式: {"tickers": ["X","Y"], "type": "competitive/correlated/divergent", "insight": "中文洞察"}
+3. correlation_warnings: 关联风险警告列表（同板块同方向集中等）
+4. sector_rotation_signal: 板块轮动信号（一句话，如"资金从X流向Y"）
+5. portfolio_adjustment_hints: 组合调整建议（1-3条）
+
+所有文本用中文。关注：
+- 同板块多标的同向 = 关联风险
+- 竞争对手方向相反 = 值得深挖
+- 某板块全面看多/看空 = 板块级趋势
+- 评分差异极大的同行业标的 = 潜在配对机会"""
+
+    # 按板块分组构建紧凑摘要
+    sector_groups = {}
+    for tk, data in distilled_scores.items():
+        sector = sector_map.get(tk, "Other")
+        if sector not in sector_groups:
+            sector_groups[sector] = []
+        sector_groups[sector].append({
+            "ticker": tk,
+            "score": data.get("final_score", 5.0),
+            "dir": data.get("direction", "neutral"),
+        })
+
+    # 紧凑信息素板摘要（仅保留关键字段）
+    board_compact = []
+    if isinstance(board_snapshot, list):
+        for e in board_snapshot[:30]:
+            if isinstance(e, dict):
+                board_compact.append({
+                    "tk": e.get("ticker", "?"),
+                    "agent": e.get("agent_id", "?")[:10],
+                    "dir": e.get("direction", "?"),
+                    "s": e.get("self_score", 0),
+                })
+
+    prompt = f"""分析以下 {len(distilled_scores)} 个标的的跨标的关系。
+
+## 按板块分组的标的评分
+{json.dumps(sector_groups, ensure_ascii=False)}
+
+## 信息素板信号摘要（各 Agent 发布的关键信号）
+{json.dumps(board_compact, ensure_ascii=False)}
+
+请输出 JSON："""
+
+    return call_json(prompt, system=system, max_tokens=600, temperature=0.3)
+
+
+def find_historical_analogy(
+    ticker: str,
+    current_signals: Dict,
+    historical_memories: List[Dict],
+    historical_outcomes: List[Dict],
+) -> Optional[Dict]:
+    """
+    历史类比推理：将当前信号模式与历史场景对比，预测潜在走向。
+
+    Args:
+        ticker: 股票代码
+        current_signals: 当前分析摘要
+            {direction, final_score, key_signals: [...], bear_signals: [...]}
+        historical_memories: VectorMemory 搜索结果 (top-5 相似)
+            [{document, direction, score, date, agent_id, similarity}, ...]
+        historical_outcomes: MemoryStore 含实际回报的历史记忆
+            [{date, direction, self_score, outcome_return_t1, t7, t30}, ...]
+
+    Returns:
+        {
+            "analogy_found": bool,
+            "analogy_date": str,
+            "analogy_summary": str,
+            "historical_outcome": {"t1": str, "t7": str, "t30": str},
+            "similarity_score": float,
+            "key_differences": str,
+            "confidence_adjustment": float,
+            "warning": str,
+        }
+    """
+    if not historical_memories or len(historical_memories) < 3:
+        return None
+
+    system = """你是投资模式匹配专家，擅长从历史数据中找到与当前情况最相似的先例。
+
+分析当前信号与历史记录的相似度，输出严格 JSON：
+1. analogy_found: bool（是否找到有意义的历史类比）
+2. analogy_date: 最相似的历史日期
+3. analogy_summary: 一句话类比摘要（如"当前形态类似X月X日：内幕买入+共振看多"）
+4. historical_outcome: {"t1": "+X.X%", "t7": "+X.X%", "t30": "+X.X%"}（历史实际结果）
+5. similarity_score: 0.0-1.0（当前与历史的整体相似度）
+6. key_differences: 一句话关键差异（当前 vs 历史有何不同）
+7. confidence_adjustment: -0.1 到 +0.1（历史类比对当前置信度的调整建议）
+8. warning: 风险警示（如"历史类比T+7回撤概率高"，无则空字符串）
+
+所有文本用中文。重要：
+- 如果历史结果数据不完整（t7/t30 未知），只用已知数据
+- 相似度 < 0.5 时 analogy_found 应为 false
+- confidence_adjustment 应保守，极端情况才到 ±0.1"""
+
+    # 构建历史记忆摘要
+    mem_text = []
+    for m in historical_memories[:6]:
+        mem_text.append({
+            "date": m.get("date", "?"),
+            "dir": m.get("direction", "?"),
+            "score": m.get("score", 0),
+            "signal": m.get("document", "")[:100],
+            "sim": m.get("similarity", 0),
+        })
+
+    # 构建历史结果摘要（仅含有实际回报的记录）
+    outcomes_text = []
+    for o in historical_outcomes[:10]:
+        t1 = o.get("outcome_return_t1")
+        t7 = o.get("outcome_return_t7")
+        t30 = o.get("outcome_return_t30")
+        if t1 is not None or t7 is not None:
+            outcomes_text.append({
+                "date": o.get("date", "?"),
+                "dir": o.get("direction", "?"),
+                "score": o.get("self_score", 0),
+                "t1": f"{t1:+.1f}%" if t1 is not None else "N/A",
+                "t7": f"{t7:+.1f}%" if t7 is not None else "N/A",
+                "t30": f"{t30:+.1f}%" if t30 is not None else "N/A",
+            })
+
+    prompt = f"""为 {ticker} 寻找历史类比。
+
+## 当前信号
+{json.dumps(current_signals, ensure_ascii=False, default=str)[:500]}
+
+## 历史相似记忆（按语义相似度排序）
+{json.dumps(mem_text, ensure_ascii=False)}
+
+## 历史实际结果（T+1/7/30 回报）
+{json.dumps(outcomes_text, ensure_ascii=False) if outcomes_text else "暂无历史回报数据"}
+
+请输出 JSON："""
+
+    return call_json(prompt, system=system, max_tokens=400, temperature=0.2)

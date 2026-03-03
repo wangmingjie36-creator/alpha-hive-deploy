@@ -2340,3 +2340,102 @@ class QueenDistiller:
             "dimension_missing_reason": dim_missing_reason,
             "dimension_coverage_pct": dimension_coverage_pct,
         }
+
+    # ==================== Phase 2: 历史类比推理 ====================
+
+    def enrich_with_historical_analogy(
+        self,
+        ticker: str,
+        distilled: dict,
+        vector_memory,
+        memory_store,
+    ) -> dict:
+        """
+        用历史类比推理丰富 QueenDistiller 输出。
+        仅在 LLM 模式 + 有足够历史记忆时调用。
+
+        Args:
+            ticker: 股票代码
+            distilled: distill() 的返回结果（会被就地修改）
+            vector_memory: VectorMemory 实例
+            memory_store: MemoryStore 实例
+
+        Returns:
+            修改后的 distilled dict（新增 historical_analogy 字段）
+        """
+        if not self.use_llm:
+            return distilled
+
+        try:
+            # 1. 构建当前信号查询
+            direction = distilled.get("direction", "neutral")
+            key_insight = distilled.get("key_insight", "")
+            narrative = distilled.get("narrative", "")
+            final_score = distilled.get("final_score", 5.0)
+
+            query = f"{ticker} {direction} {key_insight}"
+
+            # 2. 从 VectorMemory 检索语义相似历史
+            vm_results = []
+            if vector_memory and hasattr(vector_memory, "search") and vector_memory.enabled:
+                vm_results = vector_memory.search(
+                    query=query,
+                    ticker=ticker,
+                    top_k=8,
+                    days=90,
+                )
+
+            # 最低门槛：需 ≥5 条历史记忆才值得做类比
+            if len(vm_results) < 5:
+                distilled["historical_analogy"] = None
+                return distilled
+
+            # 3. 从 MemoryStore 获取含实际回报的历史记忆
+            ms_results = []
+            if memory_store and hasattr(memory_store, "get_recent_memories"):
+                ms_results = memory_store.get_recent_memories(
+                    ticker=ticker,
+                    days=90,
+                    limit=50,
+                )
+
+            # 4. 构建当前信号摘要
+            current_signals = {
+                "direction": direction,
+                "final_score": final_score,
+                "key_insight": key_insight,
+                "narrative": narrative[:200] if narrative else "",
+                "bear_strength": distilled.get("bear_strength", 0),
+            }
+
+            # 5. 调用 LLM 历史类比
+            import llm_service
+            analogy = llm_service.find_historical_analogy(
+                ticker=ticker,
+                current_signals=current_signals,
+                historical_memories=vm_results,
+                historical_outcomes=ms_results,
+            )
+
+            if analogy and analogy.get("analogy_found"):
+                distilled["historical_analogy"] = analogy
+
+                # 6. 应用 confidence_adjustment 微调 final_score（±0.5 上限）
+                adj = analogy.get("confidence_adjustment", 0)
+                if isinstance(adj, (int, float)):
+                    adj = max(-0.1, min(0.1, adj))
+                    score_adj = adj * 5  # 映射 ±0.1 → ±0.5 分
+                    score_adj = max(-0.5, min(0.5, score_adj))
+                    old_score = distilled["final_score"]
+                    distilled["final_score"] = round(
+                        max(0, min(10, old_score + score_adj)), 2
+                    )
+                    distilled["historical_analogy"]["score_adjustment_applied"] = round(score_adj, 2)
+            else:
+                distilled["historical_analogy"] = analogy  # 保留 analogy_found=false 记录
+
+        except Exception as e:
+            _log.warning("enrich_with_historical_analogy 失败 (%s): %s", ticker, e)
+            distilled["historical_analogy"] = None
+
+        return distilled
