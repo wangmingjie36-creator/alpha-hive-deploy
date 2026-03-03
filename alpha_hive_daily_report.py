@@ -180,15 +180,15 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .hero-time{color:rgba(255,255,255,.45);font-size:.85em}
 .hero-dbadge{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3);
              color:#4ade80;padding:3px 12px;border-radius:12px;font-size:.8em;font-weight:700}
-.hero-right{flex-shrink:0;width:260px}
+.hero-right{flex-shrink:0;width:260px;overflow:hidden;contain:paint}
 @media(max-width:768px){.hero-inner{flex-direction:column-reverse;gap:16px;padding-bottom:20px}
   .hero-right{width:160px;margin:0 auto}
   .hero-stats{grid-template-columns:repeat(2,1fr)}
   .hstat{padding:14px 10px}
   .hstat-val{font-size:1.5em}
 }
-.hero-svg{width:100%;height:auto}
-@keyframes hive-float{0%,100%{transform:translateY(0) rotate(0deg)}50%{transform:translateY(-8px) rotate(2deg)}}
+.hero-svg{width:100%;height:auto;overflow:hidden}
+@keyframes hive-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
 @keyframes hex-pulse{0%,100%{opacity:.6}50%{opacity:1}}
 .hive-anim{animation:hive-float 4s ease-in-out infinite}
 .hex-p{animation:hex-pulse 2s ease-in-out infinite}
@@ -3602,14 +3602,10 @@ self.addEventListener('fetch', function(e){{
         <span class="hero-dbadge">📊 数据真实度 {avg_real}</span>
       </div>
     </div>
-    <div class="hero-right">
-      <svg class="hero-svg hive-anim" viewBox="0 0 280 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Alpha Hive 蜂群六角形动画图标">
-        <defs>
-          <path id="orb-i" d="M 215,101 A 75,45 0 1 0 65,101 A 75,45 0 1 0 215,101"/>
-          <path id="orb-o" d="M 238,112 A 98,56 0 1 0 42,112 A 98,56 0 1 0 238,112"/>
-        </defs>
+    <div class="hero-right" style="overflow:hidden;contain:paint">
+      <svg class="hero-svg hive-anim" viewBox="0 0 280 260" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Alpha Hive 蜂群六角形动画图标" style="overflow:hidden">
         <polygon points="140,55 180,78 180,124 140,147 100,124 100,78" fill="#F4A532" opacity=".9"/>
-        <foreignObject x="96" y="72" width="88" height="88"><div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center"><span class="px-bee-hero"></span></div></foreignObject>
+        <text x="140" y="108" font-size="36" text-anchor="middle" dominant-baseline="central">&#x1F41D;</text>
         <polygon class="hex-p" points="140,5 170,22 170,57 140,74 110,57 110,22" fill="none" stroke="#F4A532" stroke-width="1.5" opacity=".55" style="animation-delay:.3s"/>
         <polygon class="hex-p" points="190,32 220,49 220,84 190,101 160,84 160,49" fill="rgba(244,165,50,.12)" stroke="#F4A532" stroke-width="1" opacity=".5" style="animation-delay:.7s"/>
         <polygon class="hex-p" points="190,107 220,124 220,159 190,176 160,159 160,124" fill="rgba(102,126,234,.18)" stroke="#667eea" stroke-width="1" opacity=".45" style="animation-delay:1.1s"/>
@@ -3618,13 +3614,11 @@ self.addEventListener('fetch', function(e){{
         <polygon class="hex-p" points="90,182 120,199 120,234 90,251 60,234 60,199" fill="none" stroke="#667eea" stroke-width="1" opacity=".35" style="animation-delay:2.3s"/>
         <polygon class="hex-p" points="90,107 120,124 120,159 90,176 60,159 60,124" fill="rgba(102,126,234,.13)" stroke="#667eea" stroke-width="1" opacity=".45" style="animation-delay:2.7s"/>
         <polygon class="hex-p" points="90,32 120,49 120,84 90,101 60,84 60,49" fill="none" stroke="#764ba2" stroke-width="1" opacity=".35" style="animation-delay:3.1s"/>
-        <!-- Orbit rings -->
         <ellipse cx="140" cy="101" rx="75" ry="45" fill="none" stroke="#F4A532" stroke-width="0.7" stroke-dasharray="3,6" opacity="0.25"/>
         <ellipse cx="140" cy="112" rx="98" ry="56" fill="none" stroke="#667eea" stroke-width="0.7" stroke-dasharray="3,8" opacity="0.18"/>
-        <!-- Orbiting bees (animateMotion along ellipse paths) -->
-        <g><circle r="5.5" fill="#F4A532" opacity="0.9"/><circle r="2.8" fill="#fff8e7" opacity="0.75"/><animateMotion dur="9s" repeatCount="indefinite" begin="0s"><mpath href="#orb-i"/></animateMotion></g>
-        <g><circle r="4.8" fill="#fbbf24" opacity="0.85"/><circle r="2.4" fill="#fff8e7" opacity="0.65"/><animateMotion dur="9s" repeatCount="indefinite" begin="-4.5s"><mpath href="#orb-i"/></animateMotion></g>
-        <g><circle r="5" fill="#667eea" opacity="0.85"/><circle r="2.5" fill="#c7d2fe" opacity="0.7"/><animateMotion dur="14s" repeatCount="indefinite" begin="-5s"><mpath href="#orb-o"/></animateMotion></g>
+        <circle cx="215" cy="101" r="5.5" fill="#F4A532" opacity="0.7"/>
+        <circle cx="65" cy="101" r="4.8" fill="#fbbf24" opacity="0.6"/>
+        <circle cx="238" cy="112" r="5" fill="#667eea" opacity="0.6"/>
       </svg>
     </div>
   </div>
@@ -3805,6 +3799,25 @@ function toggleDark(){{
   h.classList.toggle('dark');
   localStorage.setItem('ahDark',h.classList.contains('dark')?'1':'0');
   document.getElementById('darkBtn').textContent=h.classList.contains('dark')?'☀️ 亮色':'🌙 暗黑';
+  // 重新渲染图表以匹配新主题
+  if(typeof chartInstances!=='undefined'){{
+    chartInstances.forEach(function(c){{try{{c.destroy();}}catch(e){{}}}});
+    chartInstances.length=0;
+  }}
+  if(typeof rendered!=='undefined'){{
+    ['fgChart','scoresChart','dirChart','fgTrendChart'].forEach(function(k){{delete rendered[k];}});
+    Object.keys(rendered).forEach(function(k){{if(k.indexOf('radar-')===0)delete rendered[k];}});
+  }}
+  document.querySelectorAll('.chart-canvas-wrap canvas, .radar-wrap canvas').forEach(function(c){{
+    c.classList.remove('rendered');
+    var w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap');
+    if(w) w.classList.remove('skel-done');
+  }});
+  setTimeout(function(){{
+    ['fgChart','scoresChart','dirChart'].forEach(function(id){{
+      if(typeof renderChart==='function') renderChart(id);
+    }});
+  }},50);
 }}
 if(localStorage.getItem('ahDark')==='1'){{
   document.documentElement.classList.add('dark');
@@ -3959,9 +3972,6 @@ document.querySelectorAll('#oppTable thead th').forEach(function(th,i){{
 // ── Charts (lazy via IntersectionObserver) ──
 var chartInstances=[];
 (function(){{
-  var dark=document.documentElement.classList.contains('dark');
-  var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-  var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
   var rendered={{}};
 
   function markDone(id){{
@@ -3975,8 +3985,11 @@ var chartInstances=[];
 
   function renderChart(id){{
     if(rendered[id])return;
-    rendered[id]=true;
     if(typeof Chart==='undefined')return;
+    rendered[id]=true;
+    var dark=document.documentElement.classList.contains('dark');
+    var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
+    var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
     try{{
 
     if(id==='fgChart'){{
@@ -4037,7 +4050,7 @@ var chartInstances=[];
         data:{{labels:['看多','看空','中性'],
                datasets:[{{data:dd,
                            backgroundColor:['rgba(34,197,94,.85)','rgba(239,68,68,.85)','rgba(245,158,11,.85)'],
-                           borderColor:[dark?'#141928':'#fff'],borderWidth:2}}]}},
+                           borderColor:'transparent',borderWidth:0}}]}},
         options:{{responsive:true,maintainAspectRatio:false,cutout:'58%',
                  plugins:{{legend:{{position:'bottom',labels:{{color:tc,font:{{size:10}},boxWidth:11,padding:10}}}},
                            tooltip:{{callbacks:{{label:function(c){{return' '+c.label+': '+c.raw+' 只';}}}}}}}}}}
@@ -4053,6 +4066,7 @@ var chartInstances=[];
   var rl=['信号强度','催化剂','情绪','赔率','风险控制'];
   function renderRadar(tk){{
     if(rendered['radar-'+tk])return;
+    if(typeof Chart==='undefined')return;
     rendered['radar-'+tk]=true;
     var cv=document.getElementById('radar-'+tk);
     if(!cv)return;
@@ -4094,12 +4108,15 @@ var chartInstances=[];
       if(!en.isIntersecting)return;
       var el=en.target;
       var id=el.id||el.getAttribute('data-chart-id');
+      var ok=false;
       if(id&&id.indexOf('radar-')===0){{
         renderRadar(id.replace('radar-',''));
+        ok=rendered['radar-'+id.replace('radar-','')];
       }}else if(id){{
         renderChart(id);
+        ok=rendered[id];
       }}
-      observer.unobserve(el);
+      if(ok) observer.unobserve(el);
     }});
   }},{{rootMargin:'200px 0px'}});
 
@@ -4111,6 +4128,13 @@ var chartInstances=[];
   Object.keys(rd).forEach(function(tk){{
     var el=document.getElementById('radar-'+tk);
     if(el)cobs.observe(el);
+  }});
+
+  // Fallback: when Chart.js CDN finishes loading, render any charts still pending
+  window.addEventListener('load',function(){{
+    if(typeof Chart==='undefined')return;
+    ['fgChart','scoresChart','dirChart'].forEach(renderChart);
+    Object.keys(rd).forEach(renderRadar);
   }});
 }})();
 
