@@ -2144,8 +2144,8 @@ var chartInstances=[];
 
   function renderChart(id){
     if(rendered[id])return;
-    rendered[id]=true;
     if(typeof Chart==='undefined')return;
+    rendered[id]=true;
     var dark=document.documentElement.classList.contains('dark');
     var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
     var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
@@ -2225,6 +2225,7 @@ var chartInstances=[];
   var rl=['信号强度','催化剂','情绪','赔率','风险控制'];
   function renderRadar(tk){
     if(rendered['radar-'+tk])return;
+    if(typeof Chart==='undefined')return;
     rendered['radar-'+tk]=true;
     var cv=document.getElementById('radar-'+tk);
     if(!cv)return;
@@ -2266,12 +2267,15 @@ var chartInstances=[];
       if(!en.isIntersecting)return;
       var el=en.target;
       var id=el.id||el.getAttribute('data-chart-id');
+      var ok=false;
       if(id&&id.indexOf('radar-')===0){
         renderRadar(id.replace('radar-',''));
+        ok=rendered['radar-'+id.replace('radar-','')];
       }else if(id){
         renderChart(id);
+        ok=rendered[id];
       }
-      observer.unobserve(el);
+      if(ok) observer.unobserve(el);
     });
   },{rootMargin:'200px 0px'});
 
@@ -2283,6 +2287,13 @@ var chartInstances=[];
   Object.keys(rd).forEach(function(tk){
     var el=document.getElementById('radar-'+tk);
     if(el)cobs.observe(el);
+  });
+
+  // Fallback: when Chart.js CDN finishes loading, render any charts still pending
+  window.addEventListener('load',function(){
+    if(typeof Chart==='undefined')return;
+    ['fgChart','scoresChart','dirChart'].forEach(renderChart);
+    Object.keys(rd).forEach(renderRadar);
   });
 })();
 
