@@ -682,19 +682,14 @@ def analyze_cross_ticker_patterns(
 
     system = """你是投资组合策略分析师，专长跨标的关联分析和板块轮动检测。
 
-分析多个标的之间的关系，输出严格 JSON：
-1. sector_momentum: 各板块动量评估（leading/lagging/neutral）
-2. cross_ticker_insights: 跨标的洞察列表（竞争动态、板块联动、反向信号等）
-   每条格式: {"tickers": ["X","Y"], "type": "competitive/correlated/divergent", "insight": "中文洞察"}
-3. correlation_warnings: 关联风险警告列表（同板块同方向集中等）
-4. sector_rotation_signal: 板块轮动信号（一句话，如"资金从X流向Y"）
-5. portfolio_adjustment_hints: 组合调整建议（1-3条）
+分析多个标的之间的关系，输出严格 JSON（保持简短，每条洞察不超过 20 字）：
+1. sector_momentum: {板块: "leading"/"lagging"/"neutral"}
+2. cross_ticker_insights: 最多 3 条，格式 {"tickers": ["X","Y"], "type": "competitive/correlated/divergent", "insight": "简短中文"}
+3. correlation_warnings: 风险警告字符串列表，最多 2 条，每条 ≤ 15 字
+4. sector_rotation_signal: 一句话（≤ 20 字）
+5. portfolio_adjustment_hints: 1-2 条建议，每条 ≤ 15 字
 
-所有文本用中文。关注：
-- 同板块多标的同向 = 关联风险
-- 竞争对手方向相反 = 值得深挖
-- 某板块全面看多/看空 = 板块级趋势
-- 评分差异极大的同行业标的 = 潜在配对机会"""
+所有文本用中文，追求极简。"""
 
     # 按板块分组构建紧凑摘要
     sector_groups = {}
@@ -730,7 +725,7 @@ def analyze_cross_ticker_patterns(
 
 请输出 JSON："""
 
-    return call_json(prompt, system=system, max_tokens=600, temperature=0.3)
+    return call_json(prompt, system=system, max_tokens=1000, temperature=0.3)
 
 
 def find_historical_analogy(
