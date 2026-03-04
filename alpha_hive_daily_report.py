@@ -1324,7 +1324,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         try:
             from config import WATCHLIST
             use_llm_flag = getattr(self, '_use_llm', False) or any(
-                r.get("distill_mode") == "llm" for r in swarm_results.values()
+                r.get("distill_mode") == "llm_enhanced" for r in swarm_results.values()
             )
             if use_llm_flag and len(swarm_results) >= 2:
                 import llm_service
