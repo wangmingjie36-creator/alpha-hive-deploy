@@ -1816,7 +1816,10 @@ class AlphaHiveDailyReporter:
         #     生成物（index.html / md / json / ML html）只能通过 LLM 扫描进入 origin
         from datetime import datetime as _dt2
         import llm_service as _llm_check
+        # 蜂群模式（含 --no-llm）也视为生产级报告，应推送 origin + gh-pages
+        _is_swarm = bool(report.get("swarm_metadata") or "蜂群" in report.get("system_status", ""))
         _using_llm = _llm_check.is_available()
+        _deploy_production = _using_llm or _is_swarm
         timestamp = _dt2.now().strftime("%H:%M")
         today_commit_msg = f"Alpha Hive 蜂群日报 {self.date_str} {timestamp}"
         _log.info("Git commit... (mode: new)")
@@ -1833,10 +1836,10 @@ class AlphaHiveDailyReporter:
 
         # 2. Git 推送：LLM 模式 → 生产（origin main），规则模式 → 测试（test remote）
         #    规则模式使用临时分支，不污染本地 main，推完即删除
-        env_label = "🧠 生产（LLM）" if _using_llm else "🔧 测试（规则引擎）"
-        _log.info("Git push → [%s]", env_label)
+        env_label = "🧠 生产" if _deploy_production else "🔧 测试（规则引擎）"
+        _log.info("Git push → [%s] (LLM=%s, Swarm=%s)", env_label, _using_llm, _is_swarm)
 
-        if _using_llm:
+        if _deploy_production:
             # 生产模式：推送 origin main + gh-pages（Pages 从 gh-pages 部署）
             r = self.agent_helper.git.run_git_cmd("git push origin main")
             push_result = {"success": r["success"], "remote": "origin",
@@ -1869,7 +1872,7 @@ class AlphaHiveDailyReporter:
                 _log.info("本地 main 已恢复至 origin/main（测试数据不污染生产）")
 
         results["git_push"] = push_result
-        results["deploy_env"] = "production" if _using_llm else "test"
+        results["deploy_env"] = "production" if _deploy_production else "test"
         if push_result["success"]:
             _log.info("Git push 成功 → %s", push_result.get("remote"))
         else:
