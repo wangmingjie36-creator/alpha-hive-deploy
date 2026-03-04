@@ -5,14 +5,16 @@
 替代 Gmail，提供实时、富文本的通知体验
 """
 
+import json
 import logging
 import os
 import time
 import hashlib
 import requests
+from pathlib import Path
 from resilience import get_session
 from collections import deque
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 _log = logging.getLogger("alpha_hive.slack_report_notifier")
@@ -269,6 +271,232 @@ class SlackReportNotifier:
         ])
 
         return self._send_slack_message(blocks)
+
+    # ------------------------------------------------------------------
+    # 富文本日报（March-3 格式）
+    # ------------------------------------------------------------------
+
+    def send_rich_daily_report(
+        self,
+        report_json_path: str,
+        cache_dir: str,
+        data_cache_dir: str,
+        finviz_cache_dir: str,
+        dashboard_url: str = "https://igg-wang748.github.io/alpha-hive-dashboard/",
+        *,
+        llm_mode: bool = True,
+    ) -> bool:
+        """
+        读取报告 JSON + 各级缓存，生成 March-3 富文本格式并推送到 Slack。
+
+        Args:
+            report_json_path: alpha-hive-daily-YYYY-MM-DD.json 的绝对路径
+            cache_dir:        cache/ 目录（含 metrics_*.json, fear_greed.json）
+            data_cache_dir:   data_cache/ 目录（含 social_*.json, short_*.json）
+            finviz_cache_dir: finviz_cache/ 目录（含 *_sentiment.json）
+            dashboard_url:    GitHub Pages URL
+            llm_mode:         是否为 LLM 增强模式
+        Returns:
+            是否发送成功
+        """
+        if not self.enabled:
+            _log.warning("Slack 通知未启用，跳过富文本日报")
+            return False
+
+        try:
+            text = self._format_rich_daily_mrkdwn(
+                report_json_path, cache_dir, data_cache_dir,
+                finviz_cache_dir, dashboard_url, llm_mode=llm_mode,
+            )
+        except Exception as exc:
+            _log.error("构建富文本日报失败: %s", exc, exc_info=True)
+            return False
+
+        return self.send_plain_text(text)
+
+    # ---- 内部：构建 mrkdwn 纯文本 ----
+
+    @staticmethod
+    def _load_json(path: str) -> Any:
+        """安全加载 JSON，失败返回 None"""
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _format_rich_daily_mrkdwn(
+        self,
+        report_json_path: str,
+        cache_dir: str,
+        data_cache_dir: str,
+        finviz_cache_dir: str,
+        dashboard_url: str,
+        *,
+        llm_mode: bool = True,
+    ) -> str:
+        """
+        构建 March-3 风格 Slack mrkdwn 文本。
+
+        返回一段完整的 Slack 消息文本（纯 mrkdwn，无 Block Kit）。
+        """
+        report = self._load_json(report_json_path)
+        if not report:
+            raise FileNotFoundError(f"无法加载报告: {report_json_path}")
+
+        date_str = report.get("date", datetime.now().strftime("%Y-%m-%d"))
+        opps = sorted(
+            report.get("opportunities", []),
+            key=lambda x: x.get("opp_score", 0),
+            reverse=True,
+        )
+        total_tickers = len(opps)
+        mode_label = "LLM 增强模式" if llm_mode else "规则引擎模式"
+
+        # ── 加载宏观 ──
+        fg_data = self._load_json(os.path.join(cache_dir, "fear_greed.json")) or {}
+        fg_value = fg_data.get("value", "?")
+        fg_class = fg_data.get("classification", "?")
+
+        # ── 加载每个标的的补充数据 ──
+        ticker_extras: Dict[str, Dict] = {}
+        all_tickers = [o["ticker"] for o in opps]
+
+        for ticker in all_tickers:
+            extras: Dict[str, Any] = {}
+
+            # 价格 / 5d 变动
+            metrics = self._load_json(
+                os.path.join(cache_dir, f"metrics_{ticker}_{date_str}.json")
+            )
+            if metrics:
+                yf = metrics.get("sources", {}).get("yahoo_finance", {})
+                extras["price"] = yf.get("current_price")
+                extras["chg_5d"] = yf.get("price_change_5d")
+
+            # 社交情绪
+            social = self._load_json(
+                os.path.join(data_cache_dir, f"social_{ticker}.json")
+            )
+            if social:
+                extras["bullish_pct"] = social.get("bullish_pct")
+
+            # 空头比例
+            short_data = self._load_json(
+                os.path.join(data_cache_dir, f"short_{ticker}.json")
+            )
+            if short_data:
+                extras["short_pct"] = short_data.get("short_pct_float")
+
+            ticker_extras[ticker] = extras
+
+        # ── 计算共振（score >= 6.0 且方向非中性）──
+        resonance_count = sum(
+            1 for o in opps
+            if o.get("opp_score", 0) >= 6.0 and o.get("direction", "中性") != "中性"
+        )
+
+        # ── 宏观情绪标签 ──
+        if isinstance(fg_value, (int, float)):
+            if fg_value <= 25:
+                macro_tag = "RISK_OFF"
+            elif fg_value >= 75:
+                macro_tag = "RISK_ON"
+            else:
+                macro_tag = "NEUTRAL"
+            fg_emoji = "🔴" if fg_value <= 25 else ("🟢" if fg_value >= 75 else "🟡")
+        else:
+            macro_tag = "N/A"
+            fg_emoji = "⚪"
+
+        # ── 构建消息 ──
+        lines: List[str] = []
+
+        # Header
+        lines.append(
+            f"🐝 *【{date_str}】Alpha Hive 蜂群日报*  {mode_label}"
+        )
+        lines.append(
+            f"今日摘要 | {total_tickers} 标的 | 共振 {resonance_count}/{total_tickers}"
+        )
+        lines.append("─────────────────────────")
+
+        # 标的评分列表
+        lines.append("*📊 标的评分*")
+        lines.append("")
+        for opp in opps:
+            tk = opp["ticker"]
+            score = opp.get("opp_score", 0)
+            direction = opp.get("direction", "中性")
+            opt_sig = opp.get("options_signal", "")
+            ex = ticker_extras.get(tk, {})
+
+            # 方向 emoji
+            if direction == "看多":
+                dir_label = "BULLISH 📈"
+            elif direction == "看空":
+                dir_label = "BEARISH 📉"
+            else:
+                dir_label = "中性"
+
+            # 共振标记
+            resonance_mark = ""
+            if score >= 6.0 and direction != "中性":
+                resonance_mark = "  共振"
+
+            # 价格片段
+            price_frag = ""
+            if ex.get("price"):
+                price_frag = f"  ${ex['price']}"
+                if isinstance(ex.get("chg_5d"), (int, float)):
+                    price_frag += f" (5d {ex['chg_5d']:+.1f}%)"
+
+            # short 片段
+            short_frag = ""
+            if ex.get("short_pct") and ex["short_pct"] > 0.05:
+                short_frag = f" | short {ex['short_pct']*100:.1f}%"
+
+            line = f"• *{tk}*  `{score:.1f}/10`  {dir_label}{resonance_mark}{price_frag} | {opt_sig}{short_frag}"
+            lines.append(line)
+
+        # 板块分布
+        lines.append("")
+        lines.append("*🔀 板块分布*")
+        try:
+            from config import WATCHLIST
+            sector_map: Dict[str, List[str]] = {}
+            for tk in all_tickers:
+                sector = WATCHLIST.get(tk, {}).get("sector", "Other")
+                sector_map.setdefault(sector, []).append(tk)
+            sector_parts = [f"{s}: {' '.join(ts)}" for s, ts in sector_map.items()]
+            lines.append(" | ".join(sector_parts))
+        except ImportError:
+            lines.append("N/A")
+
+        # 宏观环境
+        lines.append("")
+        lines.append(f"*🌡️ 宏观环境*  `{macro_tag}`")
+        lines.append(f"Fear & Greed: *{fg_value}* ({fg_class} {fg_emoji})")
+
+        # 社交情绪
+        lines.append("")
+        lines.append("*📡 社交情绪*")
+        social_parts = []
+        for tk in all_tickers:
+            bp = ticker_extras.get(tk, {}).get("bullish_pct")
+            if bp is not None:
+                flag = " 🟢" if bp >= 80 else (" 🔴" if bp <= 40 else "")
+                social_parts.append(f"{tk} {bp:.0f}%{flag}")
+        lines.append(" | ".join(social_parts) if social_parts else "N/A")
+
+        # 报告链接
+        lines.append("")
+        lines.append(f"📎 <{dashboard_url}|完整报告>")
+        lines.append(
+            "_⚠️ 非投资建议。蜂群 AI 分析，所有交易决策需自行判断和风控。_"
+        )
+
+        return "\n".join(lines)
 
     def _build_daily_report_blocks(self, report_data: Dict) -> List[Dict]:
         """构建每日报告 Block"""

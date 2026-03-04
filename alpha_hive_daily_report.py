@@ -229,9 +229,9 @@ class AlphaHiveDailyReporter:
                 _log.debug("Background task cleanup: %s", e)
         self._bg_executor.shutdown(wait=True)
 
-    def _submit_bg(self, fn, *args) -> None:
+    def _submit_bg(self, fn, *args, **kwargs) -> None:
         """提交后台任务到共享线程池（替代 daemon 线程）"""
-        future = self._bg_executor.submit(fn, *args)
+        future = self._bg_executor.submit(fn, *args, **kwargs)
         self._bg_futures.append(future)
         # 清理已完成的 futures（防止内存泄漏）
         self._bg_futures = [f for f in self._bg_futures if not f.done()]
