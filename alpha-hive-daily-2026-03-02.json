@@ -1,21 +1,21 @@
 {
   "date": "2026-03-02",
-  "timestamp": "2026-03-02T14:42:58.859042",
+  "timestamp": "2026-03-02T20:43:43.858839",
   "system_status": "✅ 蜂群协作完成",
   "phase_completed": "完整蜂群流程 (Swarm Mode)",
   "swarm_metadata": {
     "total_agents": 8,
-    "tickers_analyzed": 9,
+    "tickers_analyzed": 6,
     "resonances_detected": 1,
-    "pheromone_board_entries": 10
+    "pheromone_board_entries": 9
   },
   "concentration_analysis": {
     "concentration_risk": "medium",
     "risk_score": 5.0,
     "sector_breakdown": {
-      "Technology": {
+      "Unknown": {
         "tickers": [
-          "MSFT"
+          "AAPL"
         ],
         "pct": 100.0
       }
@@ -23,23 +23,24 @@
     "correlation_warnings": [],
     "factor_clusters": {
       "低动量(<0%)": [
-        "MSFT"
+        "AAPL"
       ]
     },
     "recommendations": [
-      "⚠ Technology板块占 100%（['MSFT']），建议补充其他板块标的"
+      "⚠ Unknown板块占 100%（['AAPL']），建议补充其他板块标的"
     ],
-    "summary": "1个高分标的 | Technology占100%",
+    "summary": "1个高分标的 | Unknown占100%",
     "tickers_analyzed": [
-      "MSFT"
+      "AAPL"
     ],
     "returns_data": {
-      "MSFT": {
-        "momentum_30d": -2.53,
-        "volatility": 32.83
+      "AAPL": {
+        "momentum_30d": -1.33,
+        "volatility": 32.31
       }
     }
   },
+  "cross_ticker_analysis": {},
   "macro_context": {
     "macro_regime": "neutral",
     "macro_score": 4.8,
@@ -100,9 +101,9 @@
     },
     "by_ticker": {}
   },
-  "markdown_report": "# 【2026-03-02】Alpha Hive 蜂群协作日报\n\n**自动生成于**：2026-03-02 14:42:58\n**系统模式**：完全去中心化蜂群协作 | 8 个自治工蜂（6 核心 + BearBeeContrarian）\n\n## 1) 今日摘要\n\n- 扫描标的：9 个 | 共振信号：1/9\n- **MSFT** BULLISH 7.9/10 共振\n- **BILI** BULLISH 5.6/10 \n- **CRCL** BULLISH 5.5/10 \n\n## 2) 今日聪明钱动向\n\n### MSFT\n- 内幕买入 $1,986,750 | STANTON JOHN W 买入 5,000股 | 拥挤度 29/100（低拥挤度） | 动量 +2.5% | 历史5条:多5/空0,均分7.3 | LLM意图:董事主动大额买入198万美元，无任何卖出行为，买入价格接近当前市价，显示对公司基本面的强烈信心\n- 内幕交易情绪：**bullish** | 申报数：5\n- 内幕买入金额：$1,986,750\n  - STANTON JOHN W：买入 5,000 股\n- 拥挤度：29/100\n\n### BILI\n- 无近期内幕交易 | 拥挤度 23/100（低拥挤度） | 动量 -8.3% | 历史5条:多5/空0,均分5.8\n- 内幕交易情绪：**neutral** | 申报数：0\n- 拥挤度：23/100\n\n### CRCL\n\n### NVDA\n- 内幕卖出 $90,751,595 | Puri Ajay K 卖出 199,800股 | 拥挤度 46/100（中等拥挤度） | 动量 -5.4% | 历史5条:多5/空0,均分6.8\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$90,751,595\n  - Puri Ajay K：卖出 199,800 股\n  - Puri Ajay K：卖出 200,000 股\n- 拥挤度：46/100\n\n### META\n- 内幕卖出 $48,772,999 | LI SUSAN J 卖出 55,702股 | 拥挤度 17/100（低拥挤度） | 动量 +2.2% | 历史5条:多5/空0,均分5.7\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$48,772,999\n  - LI SUSAN J：卖出 55,702 股\n  - LI SUSAN J：卖出 18,789 股\n- 拥挤度：17/100\n\n### AMZN\n- 内幕卖出 $12,772,619 | Jassy Andrew R 卖出 19,514股 | 拥挤度 20/100（低拥挤度） | 动量 -0.1% | 历史5条:多5/空0,均分5.2\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$12,772,619\n  - Jassy Andrew R：卖出 19,514 股\n  - Garman Matthew S：卖出 17,751 股\n- 拥挤度：20/100\n\n### RKLB\n- 内幕卖出 $121,232,161 | Spice Adam C. 卖出 1,365,665股 | 拥挤度 22/100（低拥挤度） | 动量 +1.4%\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$121,232,161\n  - Spice Adam C.：卖出 1,365,665 股\n  - Saintil Merline：卖出 96,000 股\n- 拥挤度：22/100\n\n### TSLA\n- 内幕卖出 $63,023,096 | MURDOCH JAMES R 卖出 60,000股 | 拥挤度 21/100（低拥挤度） | 动量 -1.5% | 历史5条:多5/空0,均分5.4\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$63,023,096\n  - MURDOCH JAMES R：卖出 60,000 股\n  - Musk Kimbal：卖出 56,820 股\n- 拥挤度：21/100\n\n### VKTX\n- 内幕卖出 $11,490,495 | Lian Brian 卖出 233,409股 | 拥挤度 20/100（低拥挤度） | 动量 -1.2% | 历史5条:多5/空0,均分6.0\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$11,490,495\n  - Lian Brian：卖出 233,409 股\n  - ZANTE GREG：卖出 56,161 股\n- 拥挤度：20/100\n\n## 3) 市场隐含预期\n\n### MSFT\n- IV 处于理想水位 | 做多气氛浓厚（P/C低） | 异常流:混合期权流 Call:60 Put:57 | $398.5 | 无相关预测市场 | 历史5条:多5/空0,均分7.3\n- IV Rank：43.38\n- Put/Call Ratio：0.61\n- Gamma Exposure：0.0\n- 异常活动：10 个信号\n  - 看跌 put sweep $490.0 (15,601手)\n  - 看跌 put sweep $480.0 (12,120手)\n  - 看跌 put sweep $470.0 (11,611手)\n\n### BILI\n- 检测到 1 个看涨异动 | 异常流:异常Put流 2个信号 溢价$0.0M | $27.2 | 无相关预测市场 | 历史5条:多5/空0,均分5.8\n- IV Rank：36.78\n- Put/Call Ratio：0.76\n- Gamma Exposure：0.0\n- 异常活动：2 个信号\n  - 看涨 call sweep $29.5 (87手)\n  - 看跌 put sweep $23.0 (60手)\n\n### CRCL\n- 检测到 4 个看涨异动 | 异常流:混合期权流 Call:58 Put:66 | $96.1 | 无相关预测市场 | 历史5条:多2/空0,均分5.5\n- IV Rank：16.29\n- Put/Call Ratio：0.7\n- Gamma Exposure：0.0\n- 异常活动：10 个信号\n  - 看跌 put sweep $84.0 (3,028手)\n  - 看涨 call sweep $105.0 (748手)\n  - 看跌 put sweep $160.0 (700手)\n\n### NVDA\n- 做多气氛浓厚（P/C低） | 检测到 7 个看涨异动 | 异常流:混合期权流 Call:72 Put:78 | $182.5 | 无相关预测市场 | 历史5条:多5/空0,均分6.8\n- IV Rank：27.71\n- Put/Call Ratio：0.68\n- Gamma Exposure：0.0\n- 异常活动：10 个信号\n  - 看涨 large call volume $160.0 (83,319手)\n  - 看涨 large call volume $200.0 (50,462手)\n  - 看涨 large call volume $210.0 (28,829手)\n\n### META\n- 做多气氛浓厚（P/C低） | 检测到 1 个看涨异动 | 异常流:混合期权流 Call:85 Put:88 | $653.6 | 无相关预测市场 | 历史5条:多5/空0,均分5.7\n- IV Rank：16.66\n- Put/Call Ratio：0.68\n- Gamma Exposure：0.0\n- 异常活动：10 个信号\n  - 看跌 put sweep $655.0 (1,398手)\n  - 看跌 put sweep $760.0 (1,397手)\n  - 看跌 put sweep $765.0 (1,050手)\n\n### AMZN\n- 做多气氛浓厚（P/C低） | 检测到 4 个看涨异动 | 异常流:混合期权流 Call:50 Put:44 | $208.4 | 无相关预测市场 | 历史5条:多5/空0,均分5.2\n- IV Rank：32.02\n- Put/Call Ratio：0.66\n- Gamma Exposure：0.0\n- 异常活动：10 个信号\n  - 看跌 put sweep $250.0 (3,657手)\n  - 看跌 put sweep $245.0 (3,100手)\n  - 看跌 put sweep $260.0 (2,844手)\n\n### RKLB\n- IV 处于理想水位 | 检测到 2 个看涨异动 | 异常流:异常Call流 34个信号 溢价$7.5M | $71.0 | 无相关预测市场\n- IV Rank：65.29\n- Put/Call Ratio：1.02\n- Gamma Exposure：0.0\n- 异常活动：3 个信号\n  - 看涨 call sweep $79.0 (1,423手)\n  - 看涨 call sweep $83.0 (218手)\n  - 看跌 put sweep $52.0 (170手)\n\n### TSLA\n- 检测到 8 个看涨异动 | 异常流:混合期权流 Call:137 Put:183 | $403.3 | 无相关预测市场 | 历史5条:多5/空0,均分5.4\n- IV Rank：1.68\n- Put/Call Ratio：0.94\n- Gamma Exposure：0.0\n- 异常活动：10 个信号\n  - 看涨 call sweep $410.0 (40,967手)\n  - 看跌 large put volume $400.0 (12,933手)\n  - 看跌 put sweep $400.0 (10,715手)\n\n### VKTX\n- 做多气氛浓厚（P/C低） | 异常流:异常Call流 5个信号 溢价$0.1M | $33.3 | 无相关预测市场 | 历史5条:多5/空0,均分6.0\n- IV Rank：29.94\n- Put/Call Ratio：0.31\n- Gamma Exposure：0.0\n- 异常活动：1 个信号\n  - 看跌 put sweep $29.5 (9手)\n\n## 4) X 情绪汇总\n\n### MSFT\n- 情绪 56% | 动量 +2.5% | 量比 0.8x | Reddit #7(rising,99提及) | 新闻中性（4多/3空/23中） | 未上 Yahoo 热搜 | F&G 10(Extreme Fear) | 历史5条:多5/空0,均分7.3\n- 看多情绪：56%\n- 5 日动量：+2.5%\n- 量比：0.8x\n\n### BILI\n- 情绪 44% | 动量 -8.3% | 量比 0.8x | Reddit 无热度 | 新闻偏多（8多/0空） | 未上 Yahoo 热搜 | F&G 10(Extreme Fear) | 历史5条:多5/空0,均分5.8\n- 看多情绪：44%\n- 5 日动量：-8.3%\n- 量比：0.8x\n\n### CRCL\n\n### NVDA\n- 情绪 56% | 动量 -5.4% | 量比 1.0x | Reddit #2(hot,218提及) | NVDA业绩超预期但股价波动，市场受地缘政治因素影响 | 未上 Yahoo 热搜 | F&G 10(Extreme Fear) | NVDA业绩大幅超预期（+73%）且光网络投资带动产业链上涨，但股价下跌、地缘冲突和宏观不确定性压制涨幅，整体呈现利好与风险并存的混合态势 | 历史5条:多5/空0,均分6.8\n- 看多情绪：56%\n- 5 日动量：-5.4%\n- 量比：1.0x\n\n### META\n- 情绪 53% | 动量 +2.2% | 量比 0.7x | Reddit #77(rising,11提及) | 地缘政治风险与AI科技热潮的市场博弈 | 未上 Yahoo 热搜 | F&G 10(Extreme Fear) | 伊朗冲突压制市场涨势，但AI概念仍存机会，整体呈现风险与机遇并存的观望态势 | 历史5条:多5/空0,均分5.7\n- 看多情绪：53%\n- 5 日动量：+2.2%\n- 量比：0.7x\n\n### AMZN\n- 情绪 48% | 动量 -0.1% | 量比 0.6x | Reddit #30(rising,29提及) | 亚马逊股价因巨额AI投资支出和市场担忧而承压 | 未上 Yahoo 热搜 | F&G 10(Extreme Fear) | 两条负面新闻（未获OpenAI提振、股价下跌12%因AI支出）权重较大，抵消了印度业务增长的正面信号，整体呈现明确看空态势 | 历史5条:多5/空0,均分5.2\n- 看多情绪：48%\n- 5 日动量：-0.1%\n- 量比：0.6x\n\n### RKLB\n- 情绪 56% | 动量 +1.4% | 量比 1.1x | Reddit #39(rising,22提及) | 火箭实验室业绩超预期增长，但市场整体承压 | 未上 Yahoo 热搜 | F&G 10(Extreme Fear) | 公司层面利好信号强劲（收入增长36%、创纪录、新合同和任务成功），但宏观市场风险（银行股下跌、科技股下滑、地缘政治风险）部分抵消乐观情绪，整体仍呈现明确看多但需谨慎的态度。\n- 看多情绪：56%\n- 5 日动量：+1.4%\n- 量比：1.1x\n\n### TSLA\n- 情绪 49% | 动量 -1.5% | 量比 0.9x | Reddit #18(rising,41提及) | 新闻中性（5多/5空/20中） | 未上 Yahoo 热搜 | F&G 10(Extreme Fear) | 历史5条:多5/空0,均分5.4\n- 看多情绪：49%\n- 5 日动量：-1.5%\n- 量比：0.9x\n\n### VKTX\n- 情绪 51% | 动量 -1.2% | 量比 0.6x | Reddit 无热度 | VKTX在GLP-1肥胖症药物赛道竞争中表现强劲，逆市上涨 | 未上 Yahoo 热搜 | F&G 10(Extreme Fear) | 3条正面新闻直接提及VKTX上涨和肥胖药物机遇，虽然竞争对手面临压力，但VKTX相对获益，整体偏看多 | 历史5条:多5/空0,均分6.0\n- 看多情绪：51%\n- 5 日动量：-1.2%\n- 量比：0.6x\n\n## 5) 财报/事件催化剂\n\n### MSFT\n- 催化剂 3 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多5/空0,均分7.3\n  - 2026-02-18：Ex-Dividend Date\n  - 2026-03-11：Dividend Date\n  - 2026-04-29：财报发布\n\n### BILI\n- 催化剂 1 个 | 最近：财报发布（2天后） | 历史5条:多5/空0,均分5.8\n  - 2026-03-05：财报发布\n\n### CRCL\n- 催化剂 1 个 | 最近：财报发布（70天后） | 历史5条:多2/空0,均分5.5\n  - 2026-05-12：财报发布\n\n### NVDA\n- 催化剂 4 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多5/空0,均分6.8\n  - 2026-03-10：Ex-Dividend Date\n  - 2025-12-25：Dividend Date\n  - 2026-03-15：Q4 FY2026 财报发布\n\n### META\n- 催化剂 3 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多5/空0,均分5.7\n  - 2026-03-15：Ex-Dividend Date\n  - 2026-03-25：Dividend Date\n  - 2026-04-29：财报发布\n\n### AMZN\n- 催化剂 1 个 | 最近：财报发布（58天后） | 历史5条:多5/空0,均分5.2 | LLM催化剂:财报距今58天时间窗口较远，近期动量持平且波动率极低，缺乏短期催化剂驱动力，需等待更近期的事件或市场情绪变化。[关注:Q1 2026财报发布]\n  - 2026-04-30：财报发布\n\n### RKLB\n- 催化剂 1 个 | 最近：财报发布（65天后） | LLM催化剂:财报催化剂时间窗口过远（65天），近期动量温和（+1.4%）且波动率极低，缺乏短期交易驱动力，需等待更近期的具体指引或市场情绪变化。[关注:2026年Q1财报发布]\n  - 2026-05-07：财报发布\n\n### TSLA\n- 催化剂 1 个 | 最近：财报发布（49天后） | 历史5条:多5/空0,均分5.4 | LLM催化剂:财报催化剂时间窗口较远（49天），近期动量弱势(-1.5%)且波动率极低，缺乏短期交易驱动力，需等待更近期的具体指引或市场情绪转变。[关注:Q1 2026财报发布]\n  - 2026-04-21：财报发布\n\n### VKTX\n- 催化剂 1 个 | 最近：财报发布（57天后） | 历史5条:多5/空0,均分6.0 | LLM催化剂:财报催化剂时间窗口过远（57天），近期动量弱且波动率极低，缺乏短期交易吸引力。[关注:2026年Q1财报发布]\n  - 2026-04-29：财报发布\n\n## 6) 竞争格局分析\n\n### MSFT\n- ML 胜率 68% | 7d +2.49% | 30d +3.25% | 历史5条:多5/空0,均分7.3\n\n### BILI\n- ML 胜率 54% | 7d +0.00% | 30d +1.15% | 历史5条:多5/空0,均分5.8\n\n### CRCL\n- ML 胜率 100% | 7d +30.78% | 30d +18.36% | 历史5条:多2/空0,均分5.5\n\n### NVDA\n- ML 胜率 57% | 7d +0.00% | 30d +1.64% | 历史5条:多5/空0,均分6.8\n\n### META\n- ML 胜率 67% | 7d +2.40% | 30d +3.20% | 历史5条:多5/空0,均分5.7\n\n### AMZN\n- ML 胜率 64% | 7d +1.55% | 30d +2.69% | 历史5条:多5/空0,均分5.2\n\n### RKLB\n- ML 胜率 66% | 7d +2.10% | 30d +3.02%\n\n### TSLA\n- ML 胜率 62% | 7d +1.07% | 30d +2.39% | 历史5条:多5/空0,均分5.4\n\n### VKTX\n- ML 胜率 63% | 7d +1.16% | 30d +2.45% | 历史5条:多5/空0,均分6.0\n\n## 6.5) 看空对冲观点\n\n> BearBeeContrarian 专门寻找看空信号，平衡蜂群系统性看多偏差\n\n### MSFT (风险提示 | 看空强度 3.0/10)\n- 当前价 $398.55 | 暂无明显看空信号，但建议设置止损\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n### BILI (风险提示 | 看空强度 3.1/10)\n- Oracle 期权信号看空（5.1分）\n- 5日下跌 -8.3%\n- 市场情绪略偏谨慎 44%\n- *数据来源*：insider=SEC直查 | valuation=yfinance | options=real | momentum=yfinance | news=real\n\n### CRCL (风险提示 | 看空强度 3.4/10)\n- 内幕人净卖出 $9,260,898\n- 5日暴涨 +56.7%（超买）\n- *数据来源*：insider=SEC直查 | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n### NVDA (风险提示 | 看空强度 3.1/10)\n- 内幕大额抛售 $90,751,595（买入仅 $0）\n- 5日下跌 -5.4%\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n### META (风险提示 | 看空强度 2.0/10)\n- 内幕大额抛售 $48,772,999（买入仅 $0）\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n### AMZN (风险提示 | 看空强度 3.4/10)\n- 内幕大额抛售 $12,772,619（买入仅 $0）\n- 近期小幅回调 -0.1%\n- 新闻略偏空（评分 4.0/10）\n- 负面新闻主导（3空 vs 1多）\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n### RKLB (风险提示 | 看空强度 2.8/10)\n- 内幕大额抛售 $121,232,161（买入仅 $0）\n- 新闻略偏空（评分 4.4/10）\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n### TSLA (风险提示 | 看空强度 2.5/10)\n- 内幕大额抛售 $63,023,096（买入仅 $0）\n- 近期小幅回调 -1.5%\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n### VKTX (风险提示 | 看空强度 2.5/10)\n- 内幕大额抛售 $11,490,495（买入仅 $0）\n- 近期小幅回调 -1.2%\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n## 7) 综合判断 & 信号强度\n\n| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |\n|------|------|--------|------|---------------|-------|---------|\n| **MSFT** | BULLISH | 7.9 | Y | 4/0/3 | 95% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n| **BILI** | BULLISH | 5.6 | N | 3/1/3 | 92% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n| **CRCL** | BULLISH | 5.5 | N | 3/0/2 | 98% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n| **NVDA** | NEUTRAL | 5.2 | N | 3/0/4 | 95% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n| **META** | NEUTRAL | 5.2 | N | 3/0/4 | 95% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n| **AMZN** | BULLISH | 5.2 | N | 3/0/4 | 95% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n| **RKLB** | NEUTRAL | 5.1 | N | 3/0/4 | 95% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n| **TSLA** | BULLISH | 5.0 | N | 3/0/4 | 95% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n| **VKTX** | BULLISH | 4.9 | N | 3/0/4 | 92% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n\n### 评分调整说明\n\n- **CRCL**：❌ 维度覆盖60%(signal/sentiment)\n- **NVDA**：🛡️ 风控折扣-0.04\n\n### 交叉验证详情\n\n- **MSFT**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分7.3\n- **BILI**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分5.8\n- **CRCL**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.00 | 历史5条:多2/空0,均分5.5\n- **NVDA**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 0.95 | 历史5条:多5/空0,均分6.8\n- **META**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分5.7\n- **AMZN**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分5.2\n- **RKLB**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20\n- **TSLA**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分5.4\n- **VKTX**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分6.0\n\n## 📊 投资组合集中度分析 ⚠️\n\n**集中度风险**：MEDIUM | **综合评分**：5.0/10\n\n**板块分布**：\n- Technology：100%（MSFT）\n\n**分散化建议**：\n- ⚠ Technology板块占 100%（['MSFT']），建议补充其他板块标的\n\n## 🌐 宏观环境 🟡\n\n**宏观政体**：NEUTRAL | **评分**：4.8/10\n\n| 指标 | 数值 | 状态 |\n|------|------|------|\n| VIX | 21.4 | elevated |\n| 10Y利率 | 4.05% | moderate |\n| 大盘(5日) | +0.04% | neutral |\n| 美元 | — | strong |\n\n**逆风**：美元走强（新兴市场 + 大宗商品承压）\n\n**顺风**：CPI同比 2.4%（通胀受控，货币政策友好）\n\n## 8) 数据来源 & 免责声明\n\n**蜂群分工**：\n- ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）\n- OracleBeeEcho：市场预期（期权 IV/P-C Ratio/Gamma）\n- BuzzBeeWhisper：社交情绪（X/Reddit/Finviz）\n- ChronosBeeHorizon：催化剂追踪（财报/事件日历）\n- RivalBeeVanguard：竞争格局（ML 预测 + 行业对标）\n- GuardBeeSentinel：交叉验证（共振检测 + 风险调整）\n\n**免责声明**：\n本报告为蜂群 AI 分析，不构成投资建议，不替代持牌投顾。预测存在误差，所有交易决策需自行判断和风控。\n",
+  "markdown_report": "# 【2026-03-02】Alpha Hive 蜂群协作日报\n\n**自动生成于**：2026-03-02 20:43:43\n**系统模式**：完全去中心化蜂群协作 | 8 个自治工蜂（6 核心 + BearBeeContrarian）\n\n## 1) 今日摘要\n\n- 扫描标的：1 个 | 共振信号：1/1\n- **AAPL** BULLISH 6.6/10 共振\n\n## 2) 今日聪明钱动向\n\n### AAPL\n- 拥挤度 24/100（低拥挤度） | 动量 -2.7% | 历史5条:多5/空0,均分6.9\n- 内幕交易情绪：**neutral** | 申报数：5\n- 拥挤度：24/100\n\n## 3) 市场隐含预期\n\n### AAPL\n- 做多气氛浓厚（P/C低） | 检测到 6 个看涨异动 | 异常流:混合期权流 Call:46 Put:49 | $264.7 | 预测市场看空（隐含概率 100%） | 历史5条:多5/空0,均分6.9\n- IV Rank：27.54\n- Put/Call Ratio：0.51\n- Gamma Exposure：0.0\n- 异常活动：10 个信号\n  - 看跌 put sweep $247.5 (2,983手)\n  - 看涨 call sweep $277.5 (2,653手)\n  - 看跌 put sweep $262.5 (1,739手)\n\n## 4) X 情绪汇总\n\n### AAPL\n- 情绪 49% | 动量 -2.7% | 量比 0.8x | Reddit #73(quiet,11提及) | 新闻偏多（7多/3空） | 未上 Yahoo 热搜 | F&G 14(Extreme Fear) | 历史5条:多5/空0,均分6.9\n- 看多情绪：49%\n- 5 日动量：-2.7%\n- 量比：0.8x\n\n## 5) 财报/事件催化剂\n\n### AAPL\n- 催化剂 3 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多5/空0,均分6.9\n  - 2026-02-08：Ex-Dividend Date\n  - 2026-02-11：Dividend Date\n  - 2026-04-30：财报发布\n\n## 6) 竞争格局分析\n\n### AAPL\n- ML 胜率 61% | 7d +0.66% | 30d +2.14% | 历史5条:多5/空0,均分6.9\n\n## 6.5) 看空对冲观点\n\n> BearBeeContrarian 专门寻找看空信号，平衡蜂群系统性看多偏差\n\n### AAPL (风险提示 | 看空强度 0.8/10)\n- 动量转弱 -2.7%\n- *数据来源*：insider=SEC直查 | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n## 7) 综合判断 & 信号强度\n\n| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |\n|------|------|--------|------|---------------|-------|---------|\n| **AAPL** | BULLISH | 6.6 | Y | 4/0/3 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n\n### 交叉验证详情\n\n- **AAPL**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 1.20 | 历史5条:多5/空0,均分6.9\n\n## 📊 投资组合集中度分析 ⚠️\n\n**集中度风险**：MEDIUM | **综合评分**：5.0/10\n\n**板块分布**：\n- Unknown：100%（AAPL）\n\n**分散化建议**：\n- ⚠ Unknown板块占 100%（['AAPL']），建议补充其他板块标的\n\n## 🌐 宏观环境 🟡\n\n**宏观政体**：NEUTRAL | **评分**：4.8/10\n\n| 指标 | 数值 | 状态 |\n|------|------|------|\n| VIX | 21.4 | elevated |\n| 10Y利率 | 4.05% | moderate |\n| 大盘(5日) | +0.04% | neutral |\n| 美元 | — | strong |\n\n**逆风**：美元走强（新兴市场 + 大宗商品承压）\n\n**顺风**：CPI同比 2.4%（通胀受控，货币政策友好）\n\n## 8) 数据来源 & 免责声明\n\n**蜂群分工**：\n- ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）\n- OracleBeeEcho：市场预期（期权 IV/P-C Ratio/Gamma）\n- BuzzBeeWhisper：社交情绪（X/Reddit/Finviz）\n- ChronosBeeHorizon：催化剂追踪（财报/事件日历）\n- RivalBeeVanguard：竞争格局（ML 预测 + 行业对标）\n- GuardBeeSentinel：交叉验证（共振检测 + 风险调整）\n\n**免责声明**：\n本报告为蜂群 AI 分析，不构成投资建议，不替代持牌投顾。预测存在误差，所有交易决策需自行判断和风控。\n",
   "twitter_threads": [
-    "【Alpha Hive 蜂群日报 2026-03-02】7 个自治工蜂协作分析，多数投票共振信号。非投资建议，仅数据分析与情景推演。👇\n\n1. **MSFT** BULLISH\n蜂群评分：7.9/10 | 共振：✅\nAgent 投票：看多4 vs 看空0\n\n2. **BILI** BULLISH\n蜂群评分：5.6/10 | 共振：❌\nAgent 投票：看多3 vs 看空1\n\n3. **CRCL** BULLISH\n蜂群评分：5.5/10 | 共振：❌\nAgent 投票：看多3 vs 看空0\n\n🐝 7 个工蜂独立分析（6 核心 + 看空对冲蜂）→ 信息素板实时交换 → 多数投票汇总\n高共振信号优先级最高。风险提示：控制仓位。\n下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
+    "【Alpha Hive 蜂群日报 2026-03-02】7 个自治工蜂协作分析，多数投票共振信号。非投资建议，仅数据分析与情景推演。👇\n\n1. **AAPL** BULLISH\n蜂群评分：6.6/10 | 共振：✅\nAgent 投票：看多4 vs 看空0\n\n🐝 7 个工蜂独立分析（6 核心 + 看空对冲蜂）→ 信息素板实时交换 → 多数投票汇总\n高共振信号优先级最高。风险提示：控制仓位。\n下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
   ],
   "opportunities": [
     {
@@ -201,6 +202,16 @@
         "Reality Labs 亏损：单季亏损超 $6B 且无改善路径",
         "TikTok 解禁：TikTok 在美恢复全面运营"
       ]
+    },
+    {
+      "rank": 1,
+      "ticker": "AAPL",
+      "direction": "看多",
+      "opp_score": 6.6,
+      "confidence": "60%",
+      "resonance": true,
+      "supporting_agents": 7,
+      "thesis_break": "信号分散"
     }
   ]
 }
