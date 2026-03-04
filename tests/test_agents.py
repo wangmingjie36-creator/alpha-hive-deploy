@@ -129,6 +129,8 @@ class TestGuardBeeSentinel:
 # ==================== 跨 Agent 集成 ====================
 
 class TestAllAgents:
+    @pytest.mark.slow
+    @pytest.mark.timeout(90)
     def test_all_agents_produce_valid_output(self, all_agents):
         """所有 Agent 对同一 ticker 都应返回有效结果"""
         for name, agent in all_agents.items():
@@ -137,6 +139,8 @@ class TestAllAgents:
             assert "score" in result, f"{name} 缺少 score"
             assert "direction" in result, f"{name} 缺少 direction"
 
+    @pytest.mark.slow
+    @pytest.mark.timeout(90)
     def test_different_tickers(self, all_agents):
         """Agent 对不同 ticker 应返回不同结果"""
         for name, agent in all_agents.items():

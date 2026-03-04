@@ -16,7 +16,7 @@ from google.oauth2.credentials import Credentials as GoogleCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 import googleapiclient.discovery as discovery
 
-_log = logging.getLogger("alpha_hive.calendar")
+_log = logging.getLogger("alpha_hive.calendar_integrator")
 
 
 class CalendarIntegrator:
@@ -159,7 +159,7 @@ class CalendarIntegrator:
             _log.error("同步催化剂失败: %s", e)
             stats['errors'] += 1
 
-        print(f"📝 【本地方案】催化剂已缓存到内存 (仅当前会话生效)")
+        _log.info("【本地方案】催化剂已缓存到内存 (仅当前会话生效)")
         return stats
 
     def add_opportunity_reminder(self, ticker: str, score: float,
@@ -198,8 +198,8 @@ class CalendarIntegrator:
 
             direction_emoji = "📈" if direction == "看多" else "📉" if direction == "看空" else "➡️"
 
-            print(f"🔔 已添加机会提醒: {ticker} {direction} ({score:.1f})")
-            print(f"   📧 提醒已记录，可通过邮件同步发送")
+            _log.info("已添加机会提醒: %s %s (%.1f)", ticker, direction, score)
+            _log.info("提醒已记录，可通过邮件同步发送")
             return reminder_id
 
         except (KeyError, ValueError, TypeError, OSError) as e:

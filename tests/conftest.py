@@ -23,6 +23,21 @@ def _isolate_env(tmp_path, monkeypatch):
     monkeypatch.setenv("ALPHA_HIVE_CACHE_DIR", str(tmp_path / "cache"))
 
 
+# ==================== 禁止测试调用真实 Anthropic API ====================
+
+@pytest.fixture(autouse=True)
+def _block_llm_api(monkeypatch):
+    """禁止所有测试调用真实 Anthropic API，避免消耗余额。
+
+    llm_service 内置 _disabled 标志：设为 True 后 is_available() 返回 False，
+    所有 Agent 自动降级到规则引擎模式。monkeypatch 在每个测试结束后自动恢复。
+    """
+    import llm_service
+    monkeypatch.setattr(llm_service, "_disabled", True)
+    # 同时清除已缓存的 client，防止之前初始化的 client 被复用
+    monkeypatch.setattr(llm_service, "_client", None)
+
+
 # ==================== Mock 股票数据 ====================
 
 MOCK_STOCK_DATA = {

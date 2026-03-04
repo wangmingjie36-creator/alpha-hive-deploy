@@ -4,11 +4,14 @@
 """
 
 import json
+import logging
 import os
 from datetime import datetime
 from typing import Dict, List
 import statistics
 from dataclasses import dataclass
+
+_log = logging.getLogger("alpha_hive.ml_predictor")
 
 
 @dataclass
@@ -228,8 +231,8 @@ class SimpleMLModel:
         if not training_data:
             return {"status": "error", "message": "no training data"}
 
-        print("🤖 开始训练 ML 模型...")
-        print(f"📊 训练样本数：{len(training_data)}")
+        _log.debug("开始训练 ML 模型...")
+        _log.debug("训练样本数：%s", len(training_data))
 
         # 提取特征
         crowding_scores = [d.crowding_score for d in training_data]
@@ -265,7 +268,7 @@ class SimpleMLModel:
             for key in correlations:
                 self.weights[key] = abs(correlations[key]) / total_corr
 
-        print(f"✅ 权重更新：{self.weights}")
+        _log.info("权重更新：%s", self.weights)
 
         # 计算训练准确率
         predictions = [self.predict_probability(d) for d in training_data]
@@ -275,7 +278,7 @@ class SimpleMLModel:
         )
         self.training_accuracy = correct / len(win_7d) * 100
 
-        print(f"📈 训练准确率：{self.training_accuracy:.1f}%")
+        _log.debug("训练准确率：%.1f%%", self.training_accuracy)
 
         self.is_trained = True
 
@@ -421,7 +424,7 @@ class SimpleMLModel:
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(model_data, f, ensure_ascii=False, indent=2)
 
-        print(f"✅ 模型已保存：{filename}")
+        _log.info("模型已保存：%s", filename)
 
     def load_model(self, filename: str = "ml_model.json"):
         """加载模型（JSON 格式，安全反序列化）"""
@@ -437,10 +440,10 @@ class SimpleMLModel:
             self.training_accuracy = model_data["training_accuracy"]
             self.is_trained = model_data["is_trained"]
 
-            print(f"✅ 模型已加载：{filename}")
+            _log.info("模型已加载：%s", filename)
             return True
         except FileNotFoundError:
-            print(f"⚠️ 模型文件不存在：{filename}")
+            _log.warning("模型文件不存在：%s", filename)
             return False
 
 

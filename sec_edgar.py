@@ -22,7 +22,7 @@ except ImportError:
     requests = None
 
 from hive_logger import PATHS, get_logger, atomic_json_write, read_json_cache
-from resilience import sec_limiter, sec_breaker
+from resilience import get_session, sec_limiter, sec_breaker
 
 _log = get_logger("sec_edgar")
 
@@ -110,7 +110,7 @@ class SECEdgarClient:
         for _attempt in range(_max_retries + 1):
             try:
                 self._throttle()
-                resp = requests.get(url, headers=headers or SEC_HEADERS, timeout=timeout)
+                resp = get_session("sec_edgar").get(url, headers=headers or SEC_HEADERS, timeout=timeout)
                 if resp.status_code == 429:
                     _wait = min(float(resp.headers.get("Retry-After", 2)), 10)
                     _log.info("SEC 429 限流，等待 %.1fs 后重试 (%d/%d)", _wait, _attempt + 1, _max_retries)

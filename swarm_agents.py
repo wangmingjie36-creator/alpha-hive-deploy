@@ -74,11 +74,12 @@ def _safe_score(value, default: float = 5.0, lo: float = 0.0, hi: float = 100.0,
 _yf_cache: Dict[str, Dict] = {}
 _yf_cache_ts: Dict[str, float] = {}
 _yf_lock = _threading.Lock()
-_YF_CACHE_TTL = _AS.get("yfinance_cache_ttl", 120)
+_YF_CACHE_TTL = _AS.get("yfinance_cache_ttl", 300)
 _YF_MAX_RETRIES = 2
 
 # ── Ticker 有效性缓存（退市/拆股检测，#18）──
 _ticker_validity: Dict[str, Dict] = {}
+_tv_lock = _threading.Lock()
 _TICKER_VALIDITY_TTL = _AS.get("ticker_validity_ttl", 3600)
 
 
@@ -94,9 +95,10 @@ def check_ticker_validity(ticker: str) -> Dict:
         }
     """
     now = _time.time()
-    cached = _ticker_validity.get(ticker)
-    if cached and (now - cached.get("_checked_at", 0)) < _TICKER_VALIDITY_TTL:
-        return {k: v for k, v in cached.items() if not k.startswith("_")}
+    with _tv_lock:
+        cached = _ticker_validity.get(ticker)
+        if cached and (now - cached.get("_checked_at", 0)) < _TICKER_VALIDITY_TTL:
+            return {k: v for k, v in cached.items() if not k.startswith("_")}
 
     result: Dict = {"valid": True, "warning": None, "split_ratio": None}
 
@@ -110,7 +112,8 @@ def check_ticker_validity(ticker: str) -> Dict:
             result["valid"] = False
             result["warning"] = f"{ticker} 无交易数据（可能已退市或停牌），已跳过扫描"
             _log.warning("⚠️ %s", result["warning"])
-            _ticker_validity[ticker] = {**result, "_checked_at": now}
+            with _tv_lock:
+                _ticker_validity[ticker] = {**result, "_checked_at": now}
             return result
 
         # 价格极低 → 退市风险
@@ -143,7 +146,8 @@ def check_ticker_validity(ticker: str) -> Dict:
     except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
         _log.debug("ticker validity check failed for %s: %s", ticker, e)
 
-    _ticker_validity[ticker] = {**result, "_checked_at": now}
+    with _tv_lock:
+        _ticker_validity[ticker] = {**result, "_checked_at": now}
     return result
 
 
@@ -482,9 +486,12 @@ class ScoutBeeNova(BeeAgent):
                 if llm_service.is_available() and insider_data and insider_data.get("total_filings", 0) > 0:
                     llm_intent = llm_service.interpret_insider_trades(ticker, insider_data, stock)
                     if llm_intent:
-                        llm_score = llm_intent.get("intent_score", score)
+                        llm_score = _safe_score(
+                            llm_intent.get("intent_score"), default=score,
+                            lo=1.0, hi=10.0, label="ScoutBee_intent",
+                        )
                         # 混合：规则 55% + LLM 意图解读 45%
-                        score = round(score * 0.55 + float(llm_score) * 0.45, 2)
+                        score = round(score * 0.55 + llm_score * 0.45, 2)
                         score = max(1.0, min(10.0, score))
                         intent_label = llm_intent.get("intent_label", "")
                         intent_reason = llm_intent.get("intent_reasoning", "")
@@ -640,10 +647,13 @@ class OracleBeeEcho(BeeAgent):
                 if llm_service.is_available() and result:
                     llm_options = llm_service.interpret_options_flow(ticker, result, stock)
                     if llm_options:
-                        llm_score = llm_options.get("smart_money_score", score)
+                        llm_score = _safe_score(
+                            llm_options.get("smart_money_score"), default=score,
+                            lo=1.0, hi=10.0, label="OracleBee_smart_money",
+                        )
                         llm_dir = llm_options.get("smart_money_direction", direction)
                         # 混合：规则 60% + LLM 聪明钱解读 40%
-                        score = round(score * 0.6 + float(llm_score) * 0.4, 2)
+                        score = round(score * 0.6 + llm_score * 0.4, 2)
                         score = max(1.0, min(10.0, score))
                         if llm_dir in ("bullish", "bearish", "neutral"):
                             direction = llm_dir
@@ -885,7 +895,10 @@ class BuzzBeeWhisper(BeeAgent):
                             llm_news = llm_service.analyze_news_sentiment(ticker, headlines)
                             if llm_news:
                                 # LLM 分析成功：混合关键词 30% + LLM 70%（LLM 情绪理解更强）
-                                llm_news_score = llm_news.get("sentiment_score", 5.0) * 10
+                                llm_news_score = _safe_score(
+                                    llm_news.get("sentiment_score"), default=5.0,
+                                    lo=0.0, hi=10.0, label="BuzzBee_llm_sentiment",
+                                ) * 10
                                 news_signal = news_signal * 0.30 + llm_news_score * 0.70
                                 news_desc = llm_news.get("key_theme", news_desc)
                                 news_reasoning = llm_news.get("reasoning", "")
@@ -901,7 +914,10 @@ class BuzzBeeWhisper(BeeAgent):
                 from newsapi_client import get_ticker_news
                 news_ext = get_ticker_news(ticker, max_articles=8)
                 if news_ext.get("is_real_data") and news_ext.get("total_articles", 0) >= 3:
-                    ext_signal = news_ext["sentiment_score"] * 10
+                    ext_signal = _safe_score(
+                        news_ext.get("sentiment_score"), default=5.0,
+                        lo=0.0, hi=10.0, label="BuzzBee_ext_sentiment",
+                    ) * 10
                     # 融合：Finviz 60% + 扩展新闻 40%（扩展新闻覆盖更广）
                     news_signal = news_signal * 0.60 + ext_signal * 0.40
                     if not news_desc or "不可用" in news_desc:
@@ -1234,10 +1250,13 @@ class ChronosBeeHorizon(BeeAgent):
                         ticker, catalysts_found, stock_for_llm
                     )
                     if llm_catalyst:
-                        llm_score = llm_catalyst.get("impact_score", score)
+                        llm_score = _safe_score(
+                            llm_catalyst.get("impact_score"), default=score,
+                            lo=1.0, hi=10.0, label="ChronosBee_impact",
+                        )
                         llm_dir = llm_catalyst.get("impact_direction", direction)
                         # 混合：规则 35% + LLM 催化剂解读 65%（催化剂判断最依赖语义理解）
-                        score = round(score * 0.35 + float(llm_score) * 0.65, 2)
+                        score = round(score * 0.35 + llm_score * 0.65, 2)
                         score = max(1.0, min(10.0, score))
                         if llm_dir in ("bullish", "bearish", "neutral"):
                             direction = llm_dir
@@ -1473,10 +1492,19 @@ class GuardBeeSentinel(BeeAgent):
                             ticker, ticker_snap, resonance
                         )
                         if llm_guard:
-                            llm_risk = llm_guard.get("risk_score", 5.0)
+                            llm_risk = _safe_score(
+                                llm_guard.get("risk_score"), default=5.0,
+                                lo=0.0, hi=10.0, label="GuardBee_risk",
+                            )
                             conflict_type = llm_guard.get("conflict_type", "coherent")
+                            _VALID_CONFLICT = {"coherent", "minor_divergence", "major_conflict", "data_quality_issue"}
+                            if conflict_type not in _VALID_CONFLICT:
+                                _log.warning("GuardBee: unknown conflict_type '%s', fallback to 'coherent'", conflict_type)
+                                conflict_type = "coherent"
                             guard_reason = llm_guard.get("guard_reasoning", "")
                             rec_action = llm_guard.get("recommended_action", "proceed")
+                            if rec_action not in ("proceed", "caution", "avoid"):
+                                rec_action = "proceed"
                             # risk_score 高 → 降低 guard 分（对蜂群总分施加保守修正）
                             if conflict_type == "major_conflict":
                                 score = max(1.0, score * 0.75)
@@ -1984,6 +2012,23 @@ class QueenDistiller:
             except (ImportError, AttributeError):
                 self.DIMENSION_WEIGHTS = dict(self.DEFAULT_WEIGHTS)
 
+    @staticmethod
+    def _polish_narrative(ticker: str, raw_narrative: str, score: float, direction: str) -> str:
+        """P3: 用 LLM 润色叙事文本（失败时返回原文）"""
+        if not raw_narrative:
+            return raw_narrative
+        try:
+            import llm_service
+            if llm_service.is_available():
+                polished = llm_service.polish_briefing_narrative(
+                    ticker, raw_narrative, score, direction,
+                )
+                if polished and len(polished) >= 10:
+                    return polished
+        except (ImportError, ConnectionError, TimeoutError, ValueError):
+            pass
+        return raw_narrative
+
     def distill(self, ticker: str, agent_results: List[Dict]) -> Dict:
         """
         5 维加权评分 + 共振增强 + 多数投票 + LLM 推理蒸馏
@@ -2318,8 +2363,8 @@ class QueenDistiller:
             "key_insight": key_insight,
             "risk_flag": risk_flag,
             "llm_confidence": llm_confidence,
-            # Phase 2: 叙事增强
-            "narrative": narrative,
+            # Phase 2: 叙事增强（P3: LLM 润色）
+            "narrative": self._polish_narrative(ticker, narrative, final_score, final_direction),
             "bull_bear_synthesis": bull_bear_synthesis,
             "contrarian_view": contrarian_view,
             "rule_score": rule_score,

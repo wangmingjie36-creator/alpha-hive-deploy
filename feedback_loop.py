@@ -308,6 +308,52 @@ class BacktestAnalyzer:
             "new_weights": new_weights
         }
 
+    def analyze_misses_with_llm(self, ticker: str, timeframe: str = "t7") -> list:
+        """LLM 增强预测复盘：对方向判断错误的预测做根因分析
+
+        仅在 LLM 可用时运行，不可用时返回空列表。
+        每次最多分析 3 条最近的失败预测（控制 API 成本）。
+
+        Returns:
+            [{miss_category, root_cause, agent_blame, lesson_learned,
+              weight_suggestion}, ...]
+        """
+        try:
+            import llm_service
+            if not llm_service.is_available():
+                return []
+        except ImportError:
+            return []
+
+        ticker_snaps = self.get_snapshots_by_ticker(ticker)
+        if not ticker_snaps:
+            return []
+
+        misses = []
+        for snap in ticker_snaps[-10:]:  # 只看最近 10 条
+            direction_acc = snap.check_direction_accuracy()
+            tf_correct = direction_acc.get(timeframe)
+            if tf_correct is False:  # 明确方向错误
+                returns = snap.calculate_returns()
+                prediction = {
+                    "date": snap.date,
+                    "direction": snap.direction,
+                    "score": getattr(snap, "final_score", None),
+                    "narrative": getattr(snap, "narrative", ""),
+                }
+                actual = {
+                    f"return_{timeframe}": returns.get(timeframe),
+                    "direction_correct": False,
+                }
+                result = llm_service.analyze_prediction_miss(ticker, prediction, actual)
+                if result:
+                    result["prediction_date"] = snap.date
+                    misses.append(result)
+                if len(misses) >= 3:  # 最多 3 条，控制 API 成本
+                    break
+
+        return misses
+
     def generate_accuracy_dashboard_html(self) -> str:
         """生成准确度看板 HTML"""
 
@@ -509,14 +555,7 @@ class BacktestAnalyzer:
             </div>
         </body>
         </html>
-        """.format(
-            accuracy_t1_dir=accuracy_t1.get("direction_accuracy", 0),
-            accuracy_t7_dir=accuracy_t7.get("direction_accuracy", 0),
-            accuracy_t30_dir=accuracy_t30.get("direction_accuracy", 0),
-            sharpe=accuracy_t7.get("sharpe_ratio", 0),
-            avg_return=accuracy_t7.get("avg_return", 0),
-            win_rate=accuracy_t7.get("win_rate", 0)
-        )
+        """
 
         return html
 

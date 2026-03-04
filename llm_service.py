@@ -14,6 +14,7 @@ import json
 import logging as _logging
 import os
 import threading
+from datetime import date, timezone
 from typing import Dict, Optional, List
 
 _log = _logging.getLogger("alpha_hive.llm_service")
@@ -23,13 +24,34 @@ _api_key: Optional[str] = None
 _client = None
 _lock = threading.Lock()
 
-# Token 使用追踪
+# Token 使用追踪（每日自动重置）
 _token_usage = {
     "input_tokens": 0,
     "output_tokens": 0,
     "total_cost_usd": 0.0,
     "call_count": 0,
 }
+_budget_date: Optional[date] = None  # 当前预算对应的日期
+
+
+def _maybe_reset_daily_budget() -> None:
+    """如果日期变更，重置 token 使用计数器（线程安全）"""
+    global _budget_date
+    today = date.today()
+    with _lock:
+        if _budget_date != today:
+            if _budget_date is not None:
+                _log.info(
+                    "LLM 每日预算重置：上一日（%s）消耗 $%.4f / %d 次调用",
+                    _budget_date,
+                    _token_usage["total_cost_usd"],
+                    _token_usage["call_count"],
+                )
+            _token_usage["input_tokens"] = 0
+            _token_usage["output_tokens"] = 0
+            _token_usage["total_cost_usd"] = 0.0
+            _token_usage["call_count"] = 0
+            _budget_date = today
 
 # 定价（claude-haiku-4-5）
 _PRICING = {
@@ -123,6 +145,7 @@ def call(
     max_tokens: int = 1024,
     temperature: float = 0.3,
     timeout: float = 30.0,
+    cache_system: bool = True,
 ) -> Optional[str]:
     """
     调用 Claude API
@@ -134,6 +157,7 @@ def call(
         max_tokens: 最大输出 token
         temperature: 温度 (0-1)
         timeout: 超时秒数
+        cache_system: 是否缓存 system prompt（减少重复 token 费用）
 
     Returns:
         模型输出文本，失败返回 None
@@ -141,6 +165,9 @@ def call(
     client = _get_client()
     if client is None:
         return None
+
+    # 每日预算重置（跨日自动清零）
+    _maybe_reset_daily_budget()
 
     # 预算硬限制：超过每日上限后停止调用，防止意外费用
     try:
@@ -164,7 +191,18 @@ def call(
             "temperature": temperature,
         }
         if system:
-            kwargs["system"] = system
+            if cache_system:
+                # Prompt caching: 相同 system prompt 在多 ticker 调用间复用缓存
+                # 首次写入缓存 1.25x 成本，后续读取 0.1x 成本 → 净省 ~60%
+                kwargs["system"] = [
+                    {
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            else:
+                kwargs["system"] = system
 
         response = client.messages.create(**kwargs)
 
@@ -174,10 +212,18 @@ def call(
             if hasattr(block, "text"):
                 text += block.text
 
-        # 追踪用量
+        # 追踪用量（含 prompt caching 计费）
         usage = response.usage
         pricing = _PRICING.get(model, {"input": 1.0 / 1_000_000, "output": 5.0 / 1_000_000})
-        cost = usage.input_tokens * pricing["input"] + usage.output_tokens * pricing["output"]
+        cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        non_cached_input = usage.input_tokens - cache_create - cache_read
+        cost = (
+            non_cached_input * pricing["input"]
+            + cache_create * pricing["input"] * 1.25   # 缓存写入 1.25x
+            + cache_read * pricing["input"] * 0.10     # 缓存读取 0.1x
+            + usage.output_tokens * pricing["output"]
+        )
 
         with _lock:
             _token_usage["input_tokens"] += usage.input_tokens
@@ -199,6 +245,7 @@ def call_json(
     model: str = "claude-haiku-4-5-20251001",
     max_tokens: int = 1024,
     temperature: float = 0.2,
+    cache_system: bool = True,
 ) -> Optional[Dict]:
     """
     调用 Claude API 并解析 JSON 响应
@@ -206,7 +253,10 @@ def call_json(
     Returns:
         解析后的 dict，失败返回 None
     """
-    text = call(prompt, system=system, model=model, max_tokens=max_tokens, temperature=temperature)
+    text = call(
+        prompt, system=system, model=model, max_tokens=max_tokens,
+        temperature=temperature, cache_system=cache_system,
+    )
     if text is None:
         return None
 
@@ -274,11 +324,11 @@ def generate_bear_thesis(
         "All text in Chinese."
     )
 
-    bull_text = json.dumps(bull_signals, ensure_ascii=False, default=str)[:1500] if bull_signals else "无"
-    bear_text = json.dumps(bear_signals, ensure_ascii=False, default=str)[:1000] if bear_signals else "无"
-    insider_text = json.dumps(insider_data, ensure_ascii=False, default=str)[:800] if insider_data else "无"
-    options_text = json.dumps(options_data, ensure_ascii=False, default=str)[:800] if options_data else "无"
-    news_text = json.dumps(news_data, ensure_ascii=False, default=str)[:800] if news_data else "无"
+    bull_text = json.dumps(bull_signals, ensure_ascii=False, default=str)[:800] if bull_signals else "无"
+    bear_text = json.dumps(bear_signals, ensure_ascii=False, default=str)[:500] if bear_signals else "无"
+    insider_text = json.dumps(insider_data, ensure_ascii=False, default=str)[:400] if insider_data else "无"
+    options_text = json.dumps(options_data, ensure_ascii=False, default=str)[:400] if options_data else "无"
+    news_text = json.dumps(news_data, ensure_ascii=False, default=str)[:400] if news_data else "无"
 
     prompt = f"""分析 {ticker} 的看空案例。
 
@@ -368,7 +418,7 @@ def distill_with_reasoning(
                 "dimension": r.get("dimension", "?"),
                 "score": r.get("score"),
                 "direction": r.get("direction"),
-                "discovery": r.get("discovery", "")[:150],
+                "discovery": r.get("discovery", "")[:100],
                 "data_real_pct": f"{real_pct:.0f}%",
             })
 
@@ -388,7 +438,7 @@ def distill_with_reasoning(
     prompt = f"""分析 **{ticker}** 的投资机会。
 
 ## 6 Agent 分析结果
-{json.dumps(agent_summaries, ensure_ascii=False, indent=2)}
+{json.dumps(agent_summaries, ensure_ascii=False)}
 
 ## 5 维评分
 {json.dumps(dim_scores, ensure_ascii=False)}
@@ -484,7 +534,7 @@ def interpret_insider_trades(
 摘要: {insider_data.get('summary', '无')}
 
 重要交易明细:
-{json.dumps(notable, ensure_ascii=False, indent=2)}
+{json.dumps(notable, ensure_ascii=False)}
 
 股票价格: ${stock_data.get('price', 0):.2f}
 5日动量: {stock_data.get('momentum_5d', 0):+.1f}%
@@ -537,7 +587,7 @@ def interpret_catalyst_impact(
 - 20日波动率: {stock_data.get('volatility_20d', 0):.1f}%
 
 即将到来的催化剂:
-{json.dumps(catalysts[:6], ensure_ascii=False, indent=2)}
+{json.dumps(catalysts[:6], ensure_ascii=False)}
 
 输出 JSON："""
 
@@ -582,7 +632,7 @@ def interpret_options_flow(
     prompt = f"""解读 {ticker} 的期权流数据：
 
 期权分析结果:
-{json.dumps({k: v for k, v in options_result.items() if k not in ('raw_chain',)}, ensure_ascii=False, indent=2)}
+{json.dumps({k: v for k, v in options_result.items() if k not in ('raw_chain',)}, ensure_ascii=False)}
 
 股票状态:
 - 价格: ${stock_data.get('price', 0):.2f}
@@ -640,7 +690,7 @@ def synthesize_agent_conflicts(
     prompt = f"""评估 {ticker} 的多 Agent 信号一致性：
 
 信息素板快照（各 Agent 发布的信号）:
-{json.dumps(snapshot_clean, ensure_ascii=False, indent=2)}
+{json.dumps(snapshot_clean, ensure_ascii=False)}
 
 共振检测:
 - 共振触发: {"是" if resonance.get("resonance_detected") else "否"}
@@ -725,7 +775,7 @@ def analyze_cross_ticker_patterns(
 
 请输出 JSON："""
 
-    return call_json(prompt, system=system, max_tokens=1000, temperature=0.3)
+    return call_json(prompt, system=system, max_tokens=600, temperature=0.3)
 
 
 def find_historical_analogy(
@@ -819,3 +869,164 @@ def find_historical_analogy(
 请输出 JSON："""
 
     return call_json(prompt, system=system, max_tokens=400, temperature=0.2)
+
+
+# ==================== P2 升级：论文失效检测 + 预测复盘 ====================
+
+
+def detect_thesis_breaks(
+    ticker: str,
+    original_thesis: Dict,
+    recent_news: List[str],
+    current_metrics: Dict,
+) -> Optional[Dict]:
+    """
+    论文失效 LLM 检测：分析最新消息和指标变化，判断原始投资论文是否已失效
+
+    Args:
+        ticker: 股票代码
+        original_thesis: 原始投资论文 {direction, key_insight, risk_flag, narrative}
+        recent_news: 最近 7 天的相关新闻标题列表
+        current_metrics: 当前关键指标 {price, momentum_5d, volatility_20d, ...}
+
+    Returns:
+        {
+            "thesis_intact": bool,          # 论文是否仍然有效
+            "break_severity": str,          # "none"/"warning"/"critical"
+            "break_reason": str,            # 中文说明
+            "new_risk_factors": list[str],  # 新发现的风险因素
+            "recommended_action": str,      # "hold"/"reduce"/"exit"
+        }
+    """
+    if not original_thesis:
+        return None
+
+    system = """你是投资论文失效检测专家。评估原始投资假设是否仍然成立。
+
+核心逻辑：
+- 论文失效 ≠ 短期波动：忽略日常噪音，关注基本面变化
+- 关键催化剂消失/延迟 = warning 级别
+- 反向重大事件（管理层变动、监管打击、财务造假）= critical 级别
+- 竞争格局根本性变化 = critical 级别
+
+输出严格 JSON：
+- thesis_intact: bool（论文是否仍有效）
+- break_severity: "none"/"warning"/"critical"
+- break_reason: 一句话中文说明
+- new_risk_factors: 新发现的风险列表（最多 3 条，中文）
+- recommended_action: "hold"/"reduce"/"exit\""""
+
+    thesis_text = json.dumps(original_thesis, ensure_ascii=False, default=str)[:400]
+    news_text = "\n".join(f"- {h}" for h in (recent_news or [])[:10])
+    metrics_text = json.dumps(current_metrics, ensure_ascii=False, default=str)[:300]
+
+    prompt = f"""评估 {ticker} 的投资论文是否失效。
+
+## 原始论文
+{thesis_text}
+
+## 最近 7 天新闻
+{news_text if news_text else "无新闻"}
+
+## 当前指标
+{metrics_text}
+
+输出 JSON："""
+
+    return call_json(prompt, system=system, max_tokens=256, temperature=0.2)
+
+
+def analyze_prediction_miss(
+    ticker: str,
+    prediction: Dict,
+    actual_outcome: Dict,
+) -> Optional[Dict]:
+    """
+    预测复盘 LLM 分析：找出预测失败的根本原因
+
+    Args:
+        ticker: 股票代码
+        prediction: 原始预测 {date, direction, score, key_insight, narrative}
+        actual_outcome: 实际结果 {return_t1, return_t7, return_t30, direction_correct}
+
+    Returns:
+        {
+            "miss_category": str,           # 失败类别
+            "root_cause": str,              # 中文根因分析
+            "agent_blame": str,             # 哪个维度判断最失误
+            "lesson_learned": str,          # 应吸取的教训
+            "weight_suggestion": dict,      # 建议权重调整 {dimension: delta}
+        }
+    """
+    if not prediction or not actual_outcome:
+        return None
+
+    system = """你是投资预测复盘分析师。分析预测失败的根本原因，提供改进建议。
+
+失败分类：
+- timing_error: 方向对但时间窗口错（催化剂延迟/提前）
+- macro_shift: 宏观环境突变（利率、地缘政治）
+- data_quality: 输入数据质量差（数据源故障、信息过时）
+- model_bias: 模型系统性偏差（过度看多/看空）
+- black_swan: 不可预见事件
+- narrative_trap: 被市场叙事误导
+
+输出严格 JSON：
+- miss_category: 如上六类之一
+- root_cause: 一句话中文根因
+- agent_blame: 哪个分析维度最失误（signal/catalyst/sentiment/odds/risk_adj）
+- lesson_learned: 一句话教训
+- weight_suggestion: 权重调整建议（如 {"sentiment": -0.05, "catalyst": +0.05}）"""
+
+    pred_text = json.dumps(prediction, ensure_ascii=False, default=str)[:400]
+    outcome_text = json.dumps(actual_outcome, ensure_ascii=False, default=str)[:300]
+
+    prompt = f"""复盘 {ticker} 的预测失败。
+
+## 原始预测
+{pred_text}
+
+## 实际结果
+{outcome_text}
+
+输出 JSON："""
+
+    return call_json(prompt, system=system, max_tokens=256, temperature=0.2)
+
+
+# ==================== P3 升级：简报叙事润色 ====================
+
+
+def polish_briefing_narrative(
+    ticker: str,
+    raw_narrative: str,
+    score: float,
+    direction: str,
+) -> Optional[str]:
+    """
+    简报叙事润色：把规则引擎拼接的投资摘要润色为投行研报风格
+
+    仅用于最终输出阶段，不影响评分或决策。
+    成本极低（输入 ~200 token，输出 ~100 token）。
+
+    Args:
+        ticker: 股票代码
+        raw_narrative: 原始拼接叙事
+        score: 综合评分
+        direction: 方向
+
+    Returns:
+        润色后的中文叙事文本，失败返回 None（调用方保留原始文本）
+    """
+    if not raw_narrative or len(raw_narrative) < 20:
+        return None
+
+    system = (
+        "你是投资简报编辑。把粗糙的分析拼接文本润色为投行研报执行摘要风格。"
+        "要求：2-3 句中文，包含核心催化剂和风险，语言精炼专业。"
+        "直接输出润色后文本，不要 JSON 包装。"
+    )
+
+    prompt = f"{ticker}（{direction} {score:.1f}/10）：{raw_narrative[:300]}"
+
+    return call(prompt, system=system, max_tokens=150, temperature=0.3)

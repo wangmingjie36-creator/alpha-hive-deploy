@@ -903,6 +903,27 @@ class Backtester:
         except (sqlite3.Error, OSError, TypeError) as e:
             _log.warning("保存自适应权重失败: %s", e)
 
+    def cleanup_old_predictions(self, days: int = 180) -> int:
+        """删除超过 days 天的旧预测记录
+
+        Returns:
+            删除的记录数
+        """
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        try:
+            with sqlite3.connect(self.store.db_path) as conn:
+                cursor = conn.execute(
+                    f"DELETE FROM {PredictionStore.TABLE} WHERE date < ?", (cutoff,)
+                )
+                deleted = cursor.rowcount
+                conn.commit()
+                if deleted:
+                    _log.info("清理旧预测 %d 条（>%d 天）", deleted, days)
+                return deleted
+        except (sqlite3.Error, OSError) as e:
+            _log.warning("cleanup_old_predictions 失败: %s", e)
+            return 0
+
     @staticmethod
     def load_adapted_weights(db_path: str = DB_PATH) -> Optional[Dict]:
         """

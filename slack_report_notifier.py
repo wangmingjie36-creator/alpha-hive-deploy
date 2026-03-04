@@ -5,10 +5,17 @@
 替代 Gmail，提供实时、富文本的通知体验
 """
 
+import logging
 import os
+import time
+import hashlib
 import requests
+from resilience import get_session
+from collections import deque
 from typing import Dict, List, Optional
 from datetime import datetime
+
+_log = logging.getLogger("alpha_hive.slack_report_notifier")
 
 
 class SlackReportNotifier:
@@ -27,6 +34,8 @@ class SlackReportNotifier:
         self.enabled = bool(self.user_token) or (
             bool(self.webhook_url) and self._is_valid_webhook(self.webhook_url)
         )
+        self._failed_queue: deque = deque(maxlen=50)
+        self._sent_hashes: Dict[str, float] = {}  # hash → timestamp, 去重用
 
     @staticmethod
     def _is_valid_webhook(url: str) -> bool:
@@ -71,7 +80,7 @@ class SlackReportNotifier:
             是否发送成功
         """
         if not self.enabled:
-            print("⚠️ Slack 通知已禁用")
+            _log.warning("Slack 通知已禁用")
             return False
 
         blocks = self._build_daily_report_blocks(report_data)
@@ -422,7 +431,7 @@ class SlackReportNotifier:
     def send_plain_text(self, text: str, channel: Optional[str] = None) -> bool:
         """发送纯文本消息（02-27 格式，优先用 User Token）"""
         if not self.enabled:
-            print("⚠️ Slack 未配置")
+            _log.warning("Slack 未配置")
             return False
 
         if self.use_user_token:
@@ -435,13 +444,13 @@ class SlackReportNotifier:
         try:
             from resilience import slack_breaker
             if not slack_breaker.allow_request():
-                print("⚠️  Slack circuit breaker OPEN, skipping")
+                _log.warning("Slack circuit breaker OPEN, skipping")
                 return False
         except ImportError:
             slack_breaker = None
 
         try:
-            response = requests.post(
+            response = get_session("slack").post(
                 "https://slack.com/api/chat.postMessage",
                 headers={"Authorization": f"Bearer {self.user_token}"},
                 json={"channel": channel, "text": text, "unfurl_links": False},
@@ -451,10 +460,10 @@ class SlackReportNotifier:
             if data.get("ok"):
                 if slack_breaker:
                     slack_breaker.record_success()
-                print("✅ Slack 消息发送成功（用户身份）")
+                _log.info("Slack 消息发送成功（用户身份）")
                 return True
             else:
-                print(f"⚠️ Slack API 错误: {data.get('error', 'unknown')}")
+                _log.warning("Slack API 错误: %s", data.get("error", "unknown"))
                 return False
         except requests.exceptions.RequestException as e:
             if slack_breaker:
@@ -462,7 +471,8 @@ class SlackReportNotifier:
                     slack_breaker.record_failure()
                 except Exception:
                     pass
-            print(f"❌ Slack 发送失败: {e}")
+            self._enqueue_failed("api", text)
+            _log.error("Slack 发送失败: %s", e)
             return False
 
     def _send_slack_message_payload(self, payload: Dict) -> bool:
@@ -474,9 +484,9 @@ class SlackReportNotifier:
         try:
             from resilience import slack_breaker
             if not slack_breaker.allow_request():
-                print("⚠️  Slack circuit breaker OPEN, skipping")
+                _log.warning("Slack circuit breaker OPEN, skipping")
                 return False
-            response = requests.post(
+            response = get_session("slack").post(
                 self.webhook_url,
                 json=payload,
                 timeout=15
@@ -485,10 +495,10 @@ class SlackReportNotifier:
             slack_breaker.record_success()
 
             if response.status_code == 200:
-                print("✅ Slack 消息发送成功")
+                _log.info("Slack 消息发送成功")
                 return True
             else:
-                print(f"⚠️ Slack 返回状态码: {response.status_code}")
+                _log.warning("Slack 返回状态码: %s", response.status_code)
                 return False
 
         except requests.exceptions.RequestException as e:
@@ -497,14 +507,50 @@ class SlackReportNotifier:
                 _sb.record_failure()
             except ImportError:
                 pass
-            print(f"❌ Slack 发送失败: {e}")
+            text = payload.get("text", "")
+            if text:
+                self._enqueue_failed("webhook", text)
+            _log.error("Slack 发送失败: %s", e)
             return False
+
+    def _enqueue_failed(self, method: str, text: str):
+        """将失败消息加入重试队列（去重：5 分钟内相同内容不重复入队）"""
+        h = hashlib.md5(text[:200].encode()).hexdigest()
+        now = time.time()
+        if h in self._sent_hashes and now - self._sent_hashes[h] < 300:
+            return  # 5 分钟内重复，跳过
+        self._sent_hashes[h] = now
+        self._failed_queue.append({"method": method, "text": text, "ts": now, "hash": h})
+
+    def retry_failed(self) -> int:
+        """重试队列中的失败消息，返回成功数"""
+        if not self._failed_queue:
+            return 0
+        succeeded = 0
+        remaining = deque(maxlen=50)
+        while self._failed_queue:
+            item = self._failed_queue.popleft()
+            # 超过 1 小时的消息丢弃
+            if time.time() - item["ts"] > 3600:
+                continue
+            ok = False
+            if item["method"] == "api" and self.use_user_token:
+                ok = self._send_via_api(item["text"], self.CHANNEL_ID)
+            elif item["method"] == "webhook":
+                ok = self._send_slack_message_payload({"text": item["text"]})
+            if ok:
+                succeeded += 1
+                self._sent_hashes[item["hash"]] = time.time()
+            else:
+                remaining.append(item)
+        self._failed_queue = remaining
+        return succeeded
 
     def test_connection(self) -> bool:
         """测试 Slack 连接"""
 
         if not self.enabled:
-            print("❌ Slack 未配置")
+            _log.error("Slack 未配置")
             return False
 
         mode = "User Token" if self.use_user_token else "Webhook"
@@ -519,7 +565,7 @@ class SlackReportNotifier:
             success = self._send_slack_message(blocks)
 
         if success:
-            print(f"✅ Slack 连接测试通过（{mode}）")
+            _log.info("Slack 连接测试通过（%s）", mode)
         return success
 
 

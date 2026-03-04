@@ -366,6 +366,34 @@ class MemoryStore:
             if conn:
                 conn.close()
 
+    def cleanup_old_data(self, retention_days: int = 180) -> int:
+        """删除超过 retention_days 的旧记忆和会话记录
+
+        Returns:
+            删除的 agent_memory 记录数
+        """
+        cutoff = (datetime.now() - timedelta(days=retention_days)).strftime("%Y-%m-%d")
+        conn = None
+        try:
+            conn = self._connect()
+            cursor = conn.execute(
+                "DELETE FROM agent_memory WHERE date < ?", (cutoff,)
+            )
+            mem_deleted = cursor.rowcount
+            conn.execute(
+                "DELETE FROM reasoning_sessions WHERE date < ?", (cutoff,)
+            )
+            conn.commit()
+            if mem_deleted:
+                _log.info("清理旧记忆 %d 条（>%d 天）", mem_deleted, retention_days)
+            return mem_deleted
+        except (sqlite3.Error, OSError) as e:
+            _log.warning("cleanup_old_data 失败: %s", e)
+            return 0
+        finally:
+            if conn:
+                conn.close()
+
     def update_agent_weight(self, agent_id: str, adjusted_weight: float) -> bool:
         """更新单个 Agent 权重"""
         conn = None

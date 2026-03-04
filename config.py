@@ -81,7 +81,7 @@ def get_secret(name: str) -> str:
     Returns:
         key 值，未找到返回空字符串
     """
-    import os as _os, stat as _stat
+    import os as _os
     # 1. 环境变量优先
     val = _os.environ.get(name, "").strip()
     if val:

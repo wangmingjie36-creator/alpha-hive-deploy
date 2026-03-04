@@ -32,8 +32,10 @@ class TestSchemaSetup:
 
 class TestAgentMemory:
     def test_save_and_retrieve(self, memory_store):
+        from datetime import date as _d
+        today = _d.today().isoformat()
         entry = {
-            "date": "2026-02-25",
+            "date": today,
             "ticker": "NVDA",
             "agent_id": "ScoutBeeNova",
             "direction": "bullish",
@@ -51,9 +53,11 @@ class TestAgentMemory:
         assert memories[0]["ticker"] == "NVDA"
 
     def test_filter_by_agent(self, memory_store):
+        from datetime import date as _d
+        today = _d.today().isoformat()
         for agent in ["ScoutBeeNova", "OracleBeeEcho"]:
             memory_store.save_agent_memory({
-                "date": "2026-02-25", "ticker": "NVDA",
+                "date": today, "ticker": "NVDA",
                 "agent_id": agent, "direction": "bullish",
                 "discovery": f"by {agent}", "source": "test",
                 "self_score": 7.0,

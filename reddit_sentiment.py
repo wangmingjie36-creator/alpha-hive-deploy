@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from hive_logger import atomic_json_write
+from resilience import get_session
 
 _log = _logging.getLogger("alpha_hive.reddit_sentiment")
 
@@ -95,7 +96,7 @@ class RedditSentimentClient:
 
         try:
             self._throttle()
-            resp = requests.get(
+            resp = get_session("reddit").get(
                 f"{APEWISDOM_BASE}/filter/{filter_name}/page/1",
                 timeout=15,
             )

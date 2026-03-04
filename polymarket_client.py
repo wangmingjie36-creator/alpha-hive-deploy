@@ -21,7 +21,7 @@ except ImportError:
     requests = None
 
 from hive_logger import PATHS, get_logger, atomic_json_write
-from resilience import polymarket_limiter, polymarket_breaker
+from resilience import get_session, polymarket_limiter, polymarket_breaker
 
 _log = get_logger("polymarket")
 
@@ -65,7 +65,7 @@ class PolymarketClient:
         for _attempt in range(_max_retries + 1):
             try:
                 polymarket_limiter.acquire()
-                resp = requests.get(
+                resp = get_session("polymarket").get(
                     f"{GAMMA_BASE}{endpoint}",
                     params=params,
                     timeout=15,

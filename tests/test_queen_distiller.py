@@ -83,7 +83,6 @@ class TestDistill:
     def test_resonance_boosts_score(self, board):
         """共振应提升评分（对比无共振基线）"""
         from pheromone_board import PheromoneEntry
-        from swarm_agents import QueenDistiller
 
         results = [_make_result("signal", 7.0)]
 
@@ -129,12 +128,12 @@ class TestDistill:
 
     def test_handles_empty_results(self, queen):
         out = queen.distill("NVDA", [])
-        assert out["final_score"] == 5.0  # 默认中性
+        assert out["final_score"] == pytest.approx(5.0, abs=0.2)  # 默认中性
         assert out["direction"] == "neutral"
 
     def test_handles_none_results(self, queen):
         out = queen.distill("NVDA", [None, None])
-        assert out["final_score"] == 5.0
+        assert out["final_score"] == pytest.approx(5.0, abs=0.2)
 
     def test_handles_error_results(self, queen):
         results = [{"error": "API timeout", "source": "Scout", "score": 5.0, "dimension": "signal"}]

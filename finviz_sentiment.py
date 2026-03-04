@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from hive_logger import atomic_json_write, read_json_cache
+from resilience import get_session
 
 _log = _logging.getLogger("alpha_hive.finviz_sentiment")
 
@@ -88,7 +89,7 @@ class FinvizSentimentClient:
 
         try:
             self._throttle()
-            resp = requests.get(
+            resp = get_session("finviz").get(
                 f"https://finviz.com/quote.ashx?t={ticker.upper()}&ty=c&p=d&b=1",
                 headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
                 timeout=15,

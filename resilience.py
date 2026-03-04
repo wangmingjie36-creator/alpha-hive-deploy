@@ -219,6 +219,58 @@ def retry(
     return decorator
 
 
+# ==================== HTTP 连接池工厂 ====================
+
+import requests as _requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry as _Retry
+
+_sessions: dict = {}
+_sessions_lock = threading.Lock()
+
+# 每个 source 的默认超时（秒）
+_SOURCE_TIMEOUTS = {
+    "sec_edgar": 15,
+    "polymarket": 15,
+    "finviz": 15,
+    "reddit": 15,
+    "slack": 20,
+    "default": 15,
+}
+
+
+def get_session(source: str = "default") -> _requests.Session:
+    """
+    获取带连接池的 requests.Session（按 source 复用）。
+
+    优势：TCP 连接复用、Keep-Alive、避免端口耗尽。
+    每个 session 配置：连接池 20、最大重试 1（仅连接级重试）。
+
+    用法：
+        from resilience import get_session
+        resp = get_session("sec_edgar").get(url, timeout=15)
+    """
+    with _sessions_lock:
+        if source not in _sessions:
+            s = _requests.Session()
+            adapter = HTTPAdapter(
+                pool_connections=10,
+                pool_maxsize=20,
+                max_retries=_Retry(total=1, backoff_factor=0.5,
+                                   status_forcelist=[502, 503, 504]),
+            )
+            s.mount("https://", adapter)
+            s.mount("http://", adapter)
+            _sessions[source] = s
+            _log.debug("创建 HTTP Session: %s (pool=20)", source)
+        return _sessions[source]
+
+
+def get_http_timeout(source: str = "default") -> int:
+    """获取指定数据源的 HTTP 超时（秒）"""
+    return _SOURCE_TIMEOUTS.get(source, _SOURCE_TIMEOUTS["default"])
+
+
 # ==================== 预置实例（各数据源共享） ====================
 
 # SEC EDGAR: 10 req/s（留 30% 余量防 429）

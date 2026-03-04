@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+from resilience import get_session
 
 _log = _logging.getLogger("alpha_hive.toolbox")
 
@@ -252,7 +253,7 @@ class NotificationTool:
             if blocks:
                 payload["blocks"] = blocks
 
-            response = requests.post(self.slack_webhook, json=payload, timeout=15)
+            response = get_session("slack").post(self.slack_webhook, json=payload, timeout=15)
             return {
                 "success": response.status_code == 200,
                 "status_code": response.status_code,

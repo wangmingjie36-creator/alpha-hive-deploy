@@ -4,8 +4,11 @@
 """
 
 import json
+import logging as _logging
 from datetime import datetime
-from typing import Dict
+from typing import Dict, List, Optional
+
+_log = _logging.getLogger("alpha_hive.thesis_breaks")
 
 class ThesisBreakConfig:
     """针对不同标的的失效条件配置"""
@@ -938,6 +941,45 @@ class ThesisBreakMonitor:
         result["score_adjusted"] = result["final_score"] != self.initial_score
 
         return result
+
+    def check_with_llm(
+        self,
+        original_thesis: Dict,
+        recent_news: Optional[List[str]] = None,
+        current_metrics: Optional[Dict] = None,
+    ) -> Optional[Dict]:
+        """LLM 增强论文失效检测：分析新闻和指标变化，判断论文是否仍然有效
+
+        与规则引擎互补——规则引擎检测已定义的硬性条件，LLM 检测未预见的叙事变化。
+        仅在 LLM 可用时运行，不可用时静默降级。
+
+        Returns:
+            {thesis_intact, break_severity, break_reason, new_risk_factors,
+             recommended_action} 或 None
+        """
+        try:
+            import llm_service
+            if not llm_service.is_available():
+                return None
+            result = llm_service.detect_thesis_breaks(
+                self.ticker, original_thesis,
+                recent_news or [], current_metrics or {},
+            )
+            if result:
+                # LLM 发现 critical 级别失效 → 额外扣分
+                severity = result.get("break_severity", "none")
+                if severity == "critical":
+                    self.adjusted_score = max(0, self.adjusted_score - 2.0)
+                    _log.warning(
+                        "ThesisBreak LLM: %s critical break — %s",
+                        self.ticker, result.get("break_reason", ""),
+                    )
+                elif severity == "warning":
+                    self.adjusted_score = max(0, self.adjusted_score - 0.5)
+            return result
+        except (ImportError, ConnectionError, TimeoutError, ValueError) as e:
+            _log.debug("ThesisBreak LLM unavailable for %s: %s", self.ticker, e)
+            return None
 
     def _check_condition(self, condition: Dict, metric_data: Dict) -> bool:
         """检查单个条件是否触发"""

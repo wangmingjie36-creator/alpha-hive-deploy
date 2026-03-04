@@ -7,6 +7,7 @@
 import logging as _logging
 import os
 import requests
+from resilience import get_session
 from typing import Optional
 from alert_manager import Alert, AlertLevel
 
@@ -62,7 +63,7 @@ class SlackNotifier:
             if not slack_breaker.allow_request():
                 print("⚠️  Slack circuit breaker OPEN, skipping")
                 return False
-            response = requests.post(
+            response = get_session("slack").post(
                 self.webhook_url,
                 json=payload,
                 timeout=15
