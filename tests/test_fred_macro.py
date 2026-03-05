@@ -198,6 +198,35 @@ class TestGoldTrend:
         hw_text = " ".join(result.get("macro_headwinds", []))
         assert "黄金飙升" in hw_text
 
+    def test_gold_rising(self, monkeypatch):
+        """金价日涨 0.3-1% → rising，加入逆风"""
+        import fred_macro
+
+        def mock_ticker(sym):
+            closes = {
+                "^VIX": [15.0] * 5,
+                "^TNX": [4.5] * 5,
+                "^FVX": [3.8] * 5,
+                "DX-Y.NYB": [103] * 5,
+                "^GSPC": [5000, 5050, 5100, 5150, 5200],
+                "TLT": [88] * 5,
+                "GLD": [200.0, 200.0, 200.0, 200.0, 201.5],  # +0.75%
+            }
+            return _mock_yf_ticker(sym, closes.get(sym, [100] * 5))
+
+        mock_yf = MagicMock()
+        mock_yf.Ticker = mock_ticker
+        monkeypatch.setattr(fred_macro, "_load_fred_key", lambda: "")
+
+        with patch.dict("sys.modules", {"yfinance": mock_yf}):
+            with patch.object(fred_macro, "_fetch_sector_rotation", return_value={"hot": [], "cold": [], "full": {}}):
+                result = fred_macro._fetch_macro_data()
+
+        assert result.get("gold_trend") == "rising"
+        assert 0.3 < result.get("gold_change_pct", 0) <= 1.0
+        hw_text = " ".join(result.get("macro_headwinds", []))
+        assert "黄金走强" in hw_text
+
     def test_gold_falling(self, monkeypatch):
         """金价日跌 >1% → falling，加入顺风"""
         import fred_macro

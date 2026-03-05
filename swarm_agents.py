@@ -1533,6 +1533,7 @@ class GuardBeeSentinel(BeeAgent):
                     discovery = f"{discovery} | ⚠️ 黄金避险飙升"
                 elif _gld == "rising":
                     score = max(1.0, min(10.0, score - 0.2))
+                    discovery = f"{discovery} | 黄金走强"
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.debug("P5 fred_macro 不可用 %s: %s", ticker, e)
 
