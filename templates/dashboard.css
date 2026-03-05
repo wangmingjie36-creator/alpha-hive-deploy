@@ -467,3 +467,38 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 .toast{position:fixed;bottom:max(80px,calc(80px + env(safe-area-inset-bottom,0px)));left:50%;transform:translateX(-50%);
   background:#333;color:#fff;padding:10px 22px;border-radius:8px;font-size:.85em;z-index:9999;
   opacity:0;transition:opacity .3s;pointer-events:none}
+/* ── 升级 B: 风险等级标签 ── */
+.risk-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72em;font-weight:700;
+  margin-left:4px;vertical-align:middle}
+.risk-low{background:rgba(34,197,94,.12);color:var(--bull)}
+.risk-med{background:rgba(245,158,11,.15);color:var(--neut)}
+.risk-high{background:rgba(239,68,68,.14);color:var(--bear)}
+.scard-badges{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
+/* ── 升级 C: Hero TL;DR ── */
+.hero-tldr{color:rgba(255,255,255,.82);font-size:.95em;font-weight:500;line-height:1.5;
+  margin-bottom:14px;padding:8px 14px;background:rgba(244,165,50,.08);
+  border:1px solid rgba(244,165,50,.2);border-radius:10px}
+/* ── 升级 D: 催化剂倒计时 ── */
+.catalyst-cd{display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:8px;
+  font-size:.78em;font-weight:600;margin:6px 0}
+.cat-icon{font-size:1em}
+.cat-text{flex:1}
+.cat-urgent{background:rgba(239,68,68,.12);color:var(--bear);border:1px solid rgba(239,68,68,.2)}
+.cat-soon{background:rgba(245,158,11,.1);color:var(--neut);border:1px solid rgba(245,158,11,.2)}
+.cat-normal{background:rgba(100,116,139,.08);color:var(--ts);border:1px solid rgba(100,116,139,.12)}
+/* ── 升级 E: Score Delta ── */
+.score-delta{display:inline-block;font-size:.6em;font-weight:700;padding:1px 6px;
+  border-radius:4px;vertical-align:middle;margin-left:4px}
+.delta-up{background:rgba(34,197,94,.12);color:var(--bull)}
+.delta-dn{background:rgba(239,68,68,.12);color:var(--bear)}
+.delta-flat{background:rgba(100,116,139,.1);color:var(--ts)}
+.delta-new{background:rgba(102,126,234,.12);color:var(--acc2)}
+/* ── 升级 F: 信号冲突预警 ── */
+.conflict-warn{display:flex;align-items:flex-start;gap:5px;padding:6px 10px;border-radius:8px;
+  background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25);
+  font-size:.76em;color:var(--neut);margin:6px 0;line-height:1.4}
+.cw-icon{font-size:1em;flex-shrink:0;margin-top:1px}
+.cw-text{flex:1}
+/* ── 升级 G: 维度数值标签 ── */
+.dim-val{font-size:.62em;font-weight:700;line-height:1;margin-bottom:1px}
+.dim-b-item{cursor:help}

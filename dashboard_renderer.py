@@ -280,6 +280,179 @@ def render_dashboard_html(report: Dict, date_str: str,
             return ""
         return '<div class="dim-dq-row">' + "".join(items) + '</div>'
 
+    # ── 升级 A: 通俗一句话解读 ──
+    def _build_plain_insight(ticker: str, sd: dict) -> str:
+        """基于 Agent 数据生成通俗中文一句话（规则模板，无需 LLM）"""
+        ad = sd.get("agent_details", {})
+        parts = []
+        # 1. 内幕信号
+        insider = ad.get("ScoutBeeNova", {}).get("details", {}).get("insider", {})
+        insider_sent = insider.get("sentiment", "neutral")
+        if insider_sent == "bullish":
+            parts.append("公司高管在买入股票")
+        elif insider_sent == "bearish":
+            amt = insider.get("dollar_sold", 0)
+            if amt and amt > 1_000_000:
+                parts.append(f"高管近期卖出${amt/1e6:.1f}M")
+            elif amt and amt > 0:
+                parts.append(f"高管近期卖出${amt:,.0f}")
+            else:
+                parts.append("高管在卖出股票")
+        # 2. 期权信号
+        oracle_dir = ad.get("OracleBeeEcho", {}).get("direction", "neutral")
+        if oracle_dir == "bullish":
+            parts.append("期权市场看涨")
+        elif oracle_dir == "bearish":
+            parts.append("期权市场偏空")
+        # 3. 催化剂（最近的未来事件）
+        cats = ad.get("ChronosBeeHorizon", {}).get("details", {}).get("catalysts", [])
+        future_cats = [c for c in cats
+                       if isinstance(c.get("days_until"), (int, float)) and c["days_until"] > 0]
+        if future_cats:
+            nearest = min(future_cats, key=lambda c: c["days_until"])
+            days = int(nearest["days_until"])
+            _emap = {"earnings": "财报", "dividend": "分红",
+                     "fda": "FDA审批", "conference": "行业大会"}
+            ename = _emap.get(nearest.get("type", ""), nearest.get("event", "")[:8])
+            if days <= 7:
+                parts.append(f"{ename}{days}天后")
+            elif days <= 30:
+                parts.append(f"{ename}约{days}天后")
+        # 4. 动量上下文
+        momentum = ad.get("BuzzBeeWhisper", {}).get("details", {}).get("momentum_5d")
+        if momentum is not None:
+            if momentum < -3:
+                parts.append("近5日大幅下跌")
+            elif momentum < -1:
+                parts.append("近期小幅回调")
+            elif momentum > 3:
+                parts.append("近5日大幅上涨")
+            elif momentum > 1:
+                parts.append("近期稳步上涨")
+        # 5. 冲突提示（内幕卖出 + 综合看多）
+        overall_dir = sd.get("direction", "neutral")
+        if insider_sent == "bearish" and overall_dir == "bullish":
+            parts.append("但高管在减持")
+        elif insider_sent == "bullish" and overall_dir == "bearish":
+            parts.append("但高管在增持")
+        if not parts:
+            # Fallback：取第一个 agent 的 discovery 首段
+            for agt in ["ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper"]:
+                d = ad.get(agt, {}).get("discovery", "")
+                if d:
+                    return d.split("|")[0].strip()[:80]
+            return ""
+        return "，".join(parts)
+
+    # ── 升级 B: 风险等级标签 ──
+    def _risk_badge(ticker: str, sd: dict) -> str:
+        """多因子风险评分 → 🟢低风险 / 🟡中风险 / 🔴高风险"""
+        risk_pts = 0
+        ad = sd.get("agent_details", {})
+        # F1: GuardBee 分数（低=高风险）
+        guard = float(ad.get("GuardBeeSentinel", {}).get("score", 5.0))
+        if guard <= 3.0:
+            risk_pts += 3
+        elif guard <= 5.0:
+            risk_pts += 1
+        # F2: 内幕卖出
+        if ad.get("ScoutBeeNova", {}).get("details", {}).get(
+                "insider", {}).get("sentiment") == "bearish":
+            risk_pts += 2
+        # F3: 拥挤度
+        crowding = ad.get("ScoutBeeNova", {}).get("details", {}).get("crowding_score")
+        if crowding is not None:
+            if crowding > 60:
+                risk_pts += 2
+            elif crowding > 40:
+                risk_pts += 1
+        # F4: IV Rank（高波动）
+        iv = ad.get("OracleBeeEcho", {}).get("details", {}).get("iv_rank")
+        if iv is not None:
+            if iv > 70:
+                risk_pts += 2
+            elif iv > 50:
+                risk_pts += 1
+        # F5: risk_adj 维度分
+        radj = float(sd.get("dimension_scores", {}).get("risk_adj", 5.0))
+        if radj <= 3.0:
+            risk_pts += 2
+        elif radj <= 5.0:
+            risk_pts += 1
+        if risk_pts >= 7:
+            return '<span class="risk-badge risk-high">高风险</span>'
+        elif risk_pts >= 4:
+            return '<span class="risk-badge risk-med">中风险</span>'
+        return '<span class="risk-badge risk-low">低风险</span>'
+
+    # ── 升级 D: 催化剂倒计时 ──
+    def _catalyst_countdown(ticker: str, sd: dict) -> str:
+        """从 ChronosBeeHorizon 提取最近催化剂，生成倒计时 HTML"""
+        cats = sd.get("agent_details", {}).get(
+            "ChronosBeeHorizon", {}).get("details", {}).get("catalysts", [])
+        future = [c for c in cats
+                  if isinstance(c.get("days_until"), (int, float)) and c["days_until"] > 0]
+        if not future:
+            return ""
+        nearest = min(future, key=lambda c: c["days_until"])
+        days = int(nearest["days_until"])
+        _emap = {"earnings": "财报", "dividend": "分红",
+                 "fda": "FDA审批", "conference": "行业大会"}
+        ename = _emap.get(nearest.get("type", ""), nearest.get("event", "")[:10])
+        if days <= 3:
+            ucls = "cat-urgent"
+        elif days <= 7:
+            ucls = "cat-soon"
+        else:
+            ucls = "cat-normal"
+        tstr = f"{days}天后" if days <= 14 else f"约{days // 7}周后"
+        return (f'<div class="catalyst-cd {ucls}">'
+                f'<span class="cat-icon">\U0001f4c5</span>'
+                f'<span class="cat-text">{_html.escape(ename)} {tstr}</span>'
+                f'</div>')
+
+    # ── 升级 F: 信号冲突预警 ──
+    def _signal_conflicts(ticker: str, sd: dict) -> str:
+        """检测 Agent 间信号矛盾，返回黄色预警 HTML"""
+        ad = sd.get("agent_details", {})
+        dirs = sd.get("agent_directions", {})
+        overall = sd.get("direction", "neutral")
+        conflicts = []
+        # C1: 内幕卖出 vs 整体看多
+        insider_sent = ad.get("ScoutBeeNova", {}).get("details", {}).get(
+            "insider", {}).get("sentiment", "neutral")
+        if insider_sent == "bearish" and overall == "bullish":
+            amt = ad.get("ScoutBeeNova", {}).get("details", {}).get(
+                "insider", {}).get("dollar_sold", 0)
+            amt_str = f"(${amt / 1e6:.1f}M)" if amt and amt > 1_000_000 else ""
+            conflicts.append(f"高管在卖出{amt_str} vs 整体看多")
+        # C2: 期权方向 vs 整体
+        oracle_dir = dirs.get("OracleBeeEcho", "neutral")
+        if oracle_dir == "bearish" and overall == "bullish":
+            conflicts.append("期权市场偏空 vs 整体看多")
+        elif oracle_dir == "bullish" and overall == "bearish":
+            conflicts.append("期权市场看涨 vs 整体看空")
+        # C3: Bear strength 高 + 综合看多
+        bear_str = float(sd.get("bear_strength", 0))
+        if bear_str >= 3.0 and overall == "bullish":
+            conflicts.append(f"看空力度较强({bear_str:.1f}/10)")
+        if not conflicts:
+            return ""
+        items = "；".join(conflicts[:2])
+        return (f'<div class="conflict-warn">'
+                f'<span class="cw-icon">\u26a0\ufe0f</span>'
+                f'<span class="cw-text">信号冲突：{_html.escape(items)}</span>'
+                f'</div>')
+
+    # ── 升级 G: 维度 Tooltip ──
+    _DIM_TOOLTIPS = {
+        "信号": "聪明钱交易信号（SEC 内幕交易、机构持仓变化）",
+        "催化": "未来催化剂事件清晰度（财报、FDA、产品发布）",
+        "情绪": "市场舆情方向与质量（新闻、Reddit）",
+        "赔率": "市场赔率错配（期权 IV、Put/Call）",
+        "风险": "风险调整评估（回撤、流动性、拥挤度）",
+    }
+
     # 计算 avg real_pct
     real_pcts = [swarm_detail[t].get("data_real_pct", 0) for t in swarm_detail if swarm_detail[t].get("data_real_pct")]
     avg_real = f"{sum(real_pcts)/len(real_pcts):.0f}%" if real_pcts else "-"
@@ -570,6 +743,19 @@ def render_dashboard_html(report: Dict, date_str: str,
     ]
     _avg_score = (sum(s for _, s in _all_scores) / len(_all_scores)) if _all_scores else 0
 
+    # ── 升级 C: Hero 一句话 ──
+    _hero_parts = []
+    _hero_parts.append(f"今天市场{_fg_label}(F&G {_fg_str})")
+    _opp_parts = []
+    if _dir_counts["bullish"]:
+        _opp_parts.append(f"{_dir_counts['bullish']}个看多")
+    if _dir_counts["bearish"]:
+        _opp_parts.append(f"{_dir_counts['bearish']}个看空")
+    if _dir_counts["neutral"]:
+        _opp_parts.append(f"{_dir_counts['neutral']}个中性")
+    _hero_parts.append(f"扫描{n_tickers}只标的发现{'、'.join(_opp_parts)}机会")
+    _hero_tldr = "，".join(_hero_parts)
+
     def _radar_data(ticker):
         sd  = swarm_detail.get(ticker, {})
         dim = sd.get("dimension_scores", {})
@@ -609,6 +795,55 @@ def render_dashboard_html(report: Dict, date_str: str,
     }
 
 
+    # ── 升级 E: 快速预计算 Score Delta（对比昨天） ──
+    _score_deltas = {}  # {ticker: {"delta": float, "html": str}}
+    try:
+        import glob as _glob_e
+        _prev_jsons = sorted(
+            _glob_e.glob(str(report_dir / "alpha-hive-daily-*.json")),
+            reverse=True
+        )
+        _prev_scores = {}
+        for _pjf in _prev_jsons:
+            _pdate = _Path(_pjf).stem.replace("alpha-hive-daily-", "")
+            if _pdate == date_str:
+                continue  # 跳过今天
+            try:
+                with open(_pjf, encoding="utf-8") as _pfp:
+                    _prpt = _json.load(_pfp)
+                for _po in _prpt.get("opportunities", []):
+                    _ptk = _po.get("ticker", "")
+                    if _ptk and _ptk not in _prev_scores:
+                        _prev_scores[_ptk] = float(_po.get("opp_score", 0))
+                break  # 只看最近一天
+            except Exception:
+                continue
+        for _tke in all_tickers_sorted:
+            _cur_e = float(opp_by_ticker.get(_tke, {}).get("opp_score") or
+                          swarm_detail.get(_tke, {}).get("final_score", 0))
+            if _tke in _prev_scores:
+                _d_e = round(_cur_e - _prev_scores[_tke], 1)
+                if _d_e > 0:
+                    _dcls_e = "delta-up"
+                    _dtxt_e = f"↑+{_d_e}"
+                elif _d_e < 0:
+                    _dcls_e = "delta-dn"
+                    _dtxt_e = f"↓{_d_e}"
+                else:
+                    _dcls_e = "delta-flat"
+                    _dtxt_e = "→0"
+                _score_deltas[_tke] = {
+                    "delta": _d_e,
+                    "html": f'<span class="score-delta {_dcls_e}">{_dtxt_e}</span>',
+                }
+            else:
+                _score_deltas[_tke] = {
+                    "delta": 0,
+                    "html": '<span class="score-delta delta-new">NEW</span>',
+                }
+    except Exception as _de_err:
+        _log.debug("Score delta 预计算失败: %s", _de_err)
+
     # ── Build new Top-6 cards ──
     new_cards_html = ""
     for _ci, _tc6 in enumerate(all_tickers_sorted[:6], 1):
@@ -628,18 +863,22 @@ def render_dashboard_html(report: Dict, date_str: str,
                   f'width="42" height="42" alt="{_html.escape(_tc6)}" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'">'
                   f'<div class="slogo-fb" style="display:none">{_html.escape(_tc6[:2])}</div>') if _dom6 else \
                  f'<div class="slogo-fb">{_html.escape(_tc6[:2])}</div>'
-        # Insight: first non-empty discovery
-        _ins6 = ""
-        for _agt6 in ["ScoutBeeNova","OracleBeeEcho","BuzzBeeWhisper","ChronosBeeHorizon"]:
-            _d6 = swarm_detail.get(_tc6,{}).get("agent_details",{}).get(_agt6,{}).get("discovery","")
-            if _d6:
-                _ins6 = _html.escape(_d6.split("|")[0].strip()[:100])
-                break
+        # 升级 A: 通俗一句话解读（替代原始 discovery 截断）
+        _sd6 = swarm_detail.get(_tc6, {})
+        _ins6 = _html.escape(_build_plain_insight(_tc6, _sd6))
+        # 升级 B: 风险标签
+        _risk6 = _risk_badge(_tc6, _sd6)
+        # 升级 D: 催化剂倒计时
+        _cat6 = _catalyst_countdown(_tc6, _sd6)
+        # 升级 E: Score Delta
+        _delta6 = _score_deltas.get(_tc6, {}).get("html", "")
+        # 升级 F: 信号冲突预警
+        _conf6 = _signal_conflicts(_tc6, _sd6)
         _ml6ex = _Path(report_dir / f"alpha-hive-{_tc6}-ml-enhanced-{date_str}.html").exists()
         _ml6   = (f'<a href="alpha-hive-{_tc6}-ml-enhanced-{date_str}.html" class="ml-btn">ML 详情 →</a>'
                   if _ml6ex else '<span style="font-size:.75em;color:var(--ts);">ML 报告生成中</span>')
-        # Dimension mini-bars (uses dimension_scores 0-10 → height %)
-        _dims6 = swarm_detail.get(_tc6, {}).get("dimension_scores", {})
+        # 升级 G: 维度 mini-bars（增强版：数值 + tooltip）
+        _dims6 = _sd6.get("dimension_scores", {})
         _dim_html6 = ""
         if _dims6:
             _dl6 = [("信号","signal"),("催化","catalyst"),("情绪","sentiment"),("赔率","odds"),("风险","risk_adj")]
@@ -648,7 +887,9 @@ def render_dashboard_html(report: Dict, date_str: str,
                 _dv6  = float(_dims6.get(_dkey6, 5.0))
                 _dpct6 = max(5, int(_dv6 * 10))
                 _dcol6 = "#22c55e" if _dv6 >= 7 else ("#f59e0b" if _dv6 >= 5.5 else "#ef4444")
-                _db6 += (f'<div class="dim-b-item">'
+                _tip6 = _DIM_TOOLTIPS.get(_dlbl6x, "")
+                _db6 += (f'<div class="dim-b-item" title="{_html.escape(_tip6)}">'
+                         f'<div class="dim-val" style="color:{_dcol6}">{_dv6:.0f}</div>'
                          f'<div class="dim-b" style="height:{_dpct6}%;background:{_dcol6}"></div>'
                          f'<span class="dim-lbl">{_dlbl6x}</span></div>')
             _dim_html6 = f'<div class="dim-bars">{_db6}</div>'
@@ -669,19 +910,21 @@ def render_dashboard_html(report: Dict, date_str: str,
           <button class="scard-share" onclick="event.stopPropagation();shareCard('{_html.escape(_tc6)}',{_sc6:.1f})">𝕏</button>
           <div class="scard-head">
             <div class="slogo-wrap">{_logo6}<span class="srank">#{_ci}</span></div>
-            <span class="sdir {_dcls6}">{_dlbl6}</span>
+            <div class="scard-badges"><span class="sdir {_dcls6}">{_dlbl6}</span>{_risk6}</div>
           </div>
           <div class="scard-body">
             <div class="sticker">{_html.escape(_tc6)}</div>
             <div class="score-row">
-              <span class="score-big {_scls6}">{_sc6:.1f}</span>
+              <span class="score-big {_scls6}">{_sc6:.1f}</span>{_delta6}
               <div class="sbar-wrap">
                 <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
                 <div class="sbar"><div class="sbar-fill {_fcls6}" style="width:{_pct6}%"></div></div>
               </div>
             </div>
             {_dim_html6}
+            {_cat6}
             {_price6_html}
+            {_conf6}
             {f'<div class="sinsight">{_ins6}</div>' if _ins6 else ''}
             {_ml6}
           </div>
@@ -713,12 +956,15 @@ def render_dashboard_html(report: Dict, date_str: str,
         _ptd_rt = f'${_prt:,.2f}' if _prt is not None else '-'
         _mtd_rt = (f'<span class="{"sprice-up" if _mrt > 0 else "sprice-dn"}">{_mrt:+.1f}%</span>'
                    if _mrt is not None and _mrt != 0 else ('-' if _mrt is None else '<span class="sprice-flat">0.0%</span>'))
+        # 升级 B/E: 表格行风险标签 + delta
+        _risk_rt = _risk_badge(_trt, swarm_detail.get(_trt, {}))
+        _delta_rt = _score_deltas.get(_trt, {}).get("html", "")
         new_rows_html += f"""
         <tr data-dir="{_drt}" data-score="{_srt:.1f}">
           <td>{_ri}</td>
           <td><strong>{_html.escape(_trt)}</strong></td>
-          <td><span class="{_dclrt}">{_dlrt}</span></td>
-          <td class="{_scrt}"><strong>{_srt:.1f}</strong>/10</td>
+          <td><span class="{_dclrt}">{_dlrt}</span> {_risk_rt}</td>
+          <td class="{_scrt}"><strong>{_srt:.1f}</strong>/10 {_delta_rt}</td>
           <td>{_ptd_rt}</td>
           <td>{_mtd_rt}</td>
           <td>{_res_html_rt}</td>
@@ -798,14 +1044,23 @@ def render_dashboard_html(report: Dict, date_str: str,
             _tb_html += '</div>'
         else:
             _tb_html = ""
+        # 升级 B/D/E/F: 深度卡片增强
+        _risk_d = _risk_badge(_tkrd, _sdd)
+        _delta_d = _score_deltas.get(_tkrd, {}).get("html", "")
+        _cat_d = _catalyst_countdown(_tkrd, _sdd)
+        _conf_d = _signal_conflicts(_tkrd, _sdd)
+        _ins_d = _html.escape(_build_plain_insight(_tkrd, _sdd))
         new_company_html += f"""
         <div class="company-card" data-dir="{_drd}" data-score="{_scd:.1f}" id="deep-{_html.escape(_tkrd)}">
           <div class="cc-header" style="background:{_hcd};">
             <span class="cc-ticker">{_html.escape(_tkrd)}</span>
-            <span class="cc-dir">{_dlbld}</span>
-            <span class="cc-score">{_scd:.1f}/10</span>
+            <span class="cc-dir">{_dlbld}</span> {_risk_d}
+            <span class="cc-score">{_scd:.1f}/10 {_delta_d}</span>
           </div>
           <div class="cc-body">
+            {f'<div class="sinsight" style="margin-bottom:10px">{_ins_d}</div>' if _ins_d else ''}
+            {_cat_d}
+            {_conf_d}
             <div class="cc-two">
               <div class="cc-metrics-col">
                 {_price_metric_d}
@@ -905,6 +1160,7 @@ def render_dashboard_html(report: Dict, date_str: str,
     _fg_history.sort(key=lambda x: x["date"])
     for _tk in _trend_data:
         _trend_data[_tk].sort(key=lambda x: x["date"])
+
     # 生成历史时间线 HTML
     _dir_icon = {"bullish": "🟢", "bearish": "🔴", "neutral": "🟡"}
     _dir_cn   = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
@@ -1136,6 +1392,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         fg_color=_fg_color,
         fg_str=_fg_str,
         avg_score_str=_avg_score_str,
+        hero_tldr=_hero_tldr,
         top_n=min(6, len(all_tickers_sorted)),
         scores_chart_height="{}px".format(max(160, len(all_tickers_sorted) * 28)),
         cards_html=new_cards_html,
