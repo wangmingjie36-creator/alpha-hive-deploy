@@ -3,121 +3,110 @@
  "fg_label": "极度恐惧",
  "scores": [
   [
-   "NVDA",
-   5.9
-  ],
-  [
-   "VKTX",
-   5.0
-  ],
-  [
-   "TSLA",
-   5.3
-  ],
-  [
-   "AMZN",
-   5.6
-  ],
-  [
-   "RKLB",
-   5.1
-  ],
-  [
-   "MSFT",
+   "BILI",
    6.1
   ],
   [
-   "CRCL",
-   6.2
+   "NVDA",
+   5.3
   ],
   [
-   "BILI",
-   7.1
+   "TSLA",
+   5.2
+  ],
+  [
+   "AMZN",
+   6.4
+  ],
+  [
+   "MSFT",
+   5.8
+  ],
+  [
+   "CRCL",
+   5.6
+  ],
+  [
+   "VKTX",
+   5.1
   ],
   [
    "META",
    5.3
   ],
   [
-   "QCOM",
-   5.5
+   "RKLB",
+   5.3
   ]
  ],
  "dir_counts": [
-  9,
+  6,
   0,
-  1
+  3
  ],
  "radar": {
-  "NVDA": [
-   52.9,
-   68.9,
-   56.6,
-   71.6,
-   38.0
+  "BILI": [
+   60.2,
+   40.0,
+   50.9,
+   56.4,
+   46.0
   ],
-  "VKTX": [
-   35.4,
-   55.0,
-   44.2,
-   72.9,
-   48.0
+  "NVDA": [
+   54.8,
+   68.9,
+   55.6,
+   54.4,
+   41.0
   ],
   "TSLA": [
    33.9,
    55.0,
-   56.5,
-   72.8,
-   48.0
+   57.6,
+   64.5,
+   46.0
   ],
   "AMZN": [
-   31.7,
+   33.3,
    55.0,
-   58.8,
-   89.6,
-   48.0
-  ],
-  "RKLB": [
-   35.8,
-   55.0,
-   49.5,
-   83.8,
-   48.0
+   62.9,
+   78.3,
+   46.0
   ],
   "MSFT": [
    54.6,
    63.0,
-   56.5,
-   89.3,
-   38.0
+   55.0,
+   78.3,
+   36.0
   ],
   "CRCL": [
    33.2,
    55.0,
    62.2,
-   57.5,
-   48.0
+   70.0,
+   46.0
   ],
-  "BILI": [
-   60.2,
-   74.5,
-   50.9,
-   70.2,
-   48.0
+  "VKTX": [
+   37.1,
+   55.0,
+   44.2,
+   75.5,
+   46.0
   ],
   "META": [
-   37.8,
+   39.2,
    63.0,
-   49.3,
-   67.8,
-   48.0
+   51.5,
+   59.0,
+   46.0
   ],
-  "QCOM": [
-   36.5,
-   63.0,
-   41.1,
-   92.0,
-   48.0
+  "RKLB": [
+   37.5,
+   55.0,
+   52.3,
+   75.5,
+   46.0
   ]
  },
  "acc_dir_labels": [
@@ -168,9 +157,47 @@
   {
    "date": "2026-03-04",
    "value": 22
+  },
+  {
+   "date": "2026-03-05",
+   "value": 22
   }
  ],
  "trend_data": {
+  "BILI": [
+   {
+    "date": "2026-02-26",
+    "score": 5.8
+   },
+   {
+    "date": "2026-02-27",
+    "score": 5.8
+   },
+   {
+    "date": "2026-02-28",
+    "score": 5.8
+   },
+   {
+    "date": "2026-03-01",
+    "score": 5.2
+   },
+   {
+    "date": "2026-03-02",
+    "score": 5.6
+   },
+   {
+    "date": "2026-03-03",
+    "score": 5.9
+   },
+   {
+    "date": "2026-03-04",
+    "score": 7.1
+   },
+   {
+    "date": "2026-03-05",
+    "score": 6.1
+   }
+  ],
   "NVDA": [
    {
     "date": "2026-02-25",
@@ -195,24 +222,10 @@
    {
     "date": "2026-03-04",
     "score": 5.9
-   }
-  ],
-  "VKTX": [
-   {
-    "date": "2026-02-25",
-    "score": 4.6
    },
    {
-    "date": "2026-02-27",
-    "score": 4.5
-   },
-   {
-    "date": "2026-03-01",
-    "score": 4.8
-   },
-   {
-    "date": "2026-03-04",
-    "score": 5.0
+    "date": "2026-03-05",
+    "score": 5.3
    }
   ],
   "TSLA": [
@@ -231,6 +244,10 @@
    {
     "date": "2026-03-04",
     "score": 5.3
+   },
+   {
+    "date": "2026-03-05",
+    "score": 5.2
    }
   ],
   "AMZN": [
@@ -257,20 +274,10 @@
    {
     "date": "2026-03-04",
     "score": 5.6
-   }
-  ],
-  "RKLB": [
-   {
-    "date": "2026-02-27",
-    "score": 4.2
    },
    {
-    "date": "2026-03-03",
-    "score": 4.6
-   },
-   {
-    "date": "2026-03-04",
-    "score": 5.1
+    "date": "2026-03-05",
+    "score": 6.4
    }
   ],
   "MSFT": [
@@ -305,6 +312,10 @@
    {
     "date": "2026-03-04",
     "score": 6.1
+   },
+   {
+    "date": "2026-03-05",
+    "score": 5.8
    }
   ],
   "CRCL": [
@@ -327,36 +338,32 @@
    {
     "date": "2026-03-04",
     "score": 6.2
+   },
+   {
+    "date": "2026-03-05",
+    "score": 5.6
    }
   ],
-  "BILI": [
+  "VKTX": [
    {
-    "date": "2026-02-26",
-    "score": 5.8
+    "date": "2026-02-25",
+    "score": 4.6
    },
    {
     "date": "2026-02-27",
-    "score": 5.8
-   },
-   {
-    "date": "2026-02-28",
-    "score": 5.8
+    "score": 4.5
    },
    {
     "date": "2026-03-01",
-    "score": 5.2
-   },
-   {
-    "date": "2026-03-02",
-    "score": 5.6
-   },
-   {
-    "date": "2026-03-03",
-    "score": 5.9
+    "score": 4.8
    },
    {
     "date": "2026-03-04",
-    "score": 7.1
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-05",
+    "score": 5.1
    }
   ],
   "META": [
@@ -385,8 +392,32 @@
     "score": 5.3
    },
    {
-    "date": "2026-03-04",
+    "date": "2026-03-05",
     "score": 5.3
+   }
+  ],
+  "RKLB": [
+   {
+    "date": "2026-02-27",
+    "score": 4.2
+   },
+   {
+    "date": "2026-03-03",
+    "score": 4.6
+   },
+   {
+    "date": "2026-03-04",
+    "score": 5.1
+   },
+   {
+    "date": "2026-03-05",
+    "score": 5.3
+   }
+  ],
+  "AAPL": [
+   {
+    "date": "2026-03-02",
+    "score": 6.6
    }
   ],
   "QCOM": [
@@ -397,16 +428,6 @@
    {
     "date": "2026-02-28",
     "score": 6.1
-   },
-   {
-    "date": "2026-03-04",
-    "score": 5.5
-   }
-  ],
-  "AAPL": [
-   {
-    "date": "2026-03-02",
-    "score": 6.6
    }
   ],
   "AMD": [
@@ -417,6 +438,53 @@
   ]
  },
  "hist_full": {
+  "2026-03-05": [
+   {
+    "ticker": "BILI",
+    "score": 6.1,
+    "direction": "看多"
+   },
+   {
+    "ticker": "NVDA",
+    "score": 5.3,
+    "direction": "中性"
+   },
+   {
+    "ticker": "TSLA",
+    "score": 5.2,
+    "direction": "中性"
+   },
+   {
+    "ticker": "AMZN",
+    "score": 6.4,
+    "direction": "看多"
+   },
+   {
+    "ticker": "MSFT",
+    "score": 5.8,
+    "direction": "看多"
+   },
+   {
+    "ticker": "CRCL",
+    "score": 5.6,
+    "direction": "看多"
+   },
+   {
+    "ticker": "VKTX",
+    "score": 5.1,
+    "direction": "bullish"
+   },
+   {
+    "ticker": "META",
+    "score": 5.3,
+    "direction": "neutral"
+   },
+   {
+    "ticker": "RKLB",
+    "score": 5.3,
+    "direction": "bullish"
+   }
+  ],
   "2026-03-04": [
    {
     "ticker": "NVDA",
@@ -457,16 +525,6 @@
     "ticker": "BILI",
     "score": 7.1,
     "direction": "看多"
-   },
-   {
-    "ticker": "META",
-    "score": 5.3,
-    "direction": "bullish"
-   },
-   {
-    "ticker": "QCOM",
-    "score": 5.5,
-    "direction": "bullish"
    }
   ],
   "2026-03-03": [
@@ -711,66 +769,60 @@
  },
  "search_index": [
   {
-   "ticker": "NVDA",
-   "score": 5.9,
+   "ticker": "BILI",
+   "score": 6.1,
    "direction": "看多",
-   "price": 183.04
+   "price": 27.5
   },
   {
-   "ticker": "VKTX",
-   "score": 5.0,
+   "ticker": "NVDA",
+   "score": 5.3,
    "direction": "中性",
-   "price": 32.14
+   "price": 182.38
   },
   {
    "ticker": "TSLA",
-   "score": 5.3,
-   "direction": "看多",
+   "score": 5.2,
+   "direction": "中性",
    "price": 405.94
   },
   {
    "ticker": "AMZN",
-   "score": 5.6,
+   "score": 6.4,
    "direction": "看多",
    "price": 216.82
   },
   {
-   "ticker": "RKLB",
-   "score": 5.1,
-   "direction": "看多",
-   "price": 71.91
-  },
-  {
    "ticker": "MSFT",
-   "score": 6.1,
+   "score": 5.8,
    "direction": "看多",
    "price": 405.2
   },
   {
    "ticker": "CRCL",
-   "score": 6.2,
+   "score": 5.6,
    "direction": "看多",
    "price": 105.27
   },
   {
-   "ticker": "BILI",
-   "score": 7.1,
+   "ticker": "VKTX",
+   "score": 5.1,
    "direction": "看多",
-   "price": 27.5
+   "price": 32.14
   },
   {
    "ticker": "META",
    "score": 5.3,
-   "direction": "看多",
+   "direction": "中性",
    "price": 667.73
   },
   {
-   "ticker": "QCOM",
-   "score": 5.5,
+   "ticker": "RKLB",
+   "score": 5.3,
    "direction": "看多",
-   "price": 139.51
+   "price": 71.91
   }
  ],
- "_generated_at": "2026-03-04 20:44 PST",
- "_date": "2026-03-04"
+ "_generated_at": "2026-03-05 07:03 PST",
+ "_date": "2026-03-05"
 }

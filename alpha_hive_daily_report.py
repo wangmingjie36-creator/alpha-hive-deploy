@@ -1818,10 +1818,11 @@ class AlphaHiveDailyReporter:
         #     生成物（index.html / md / json / ML html）只能通过 LLM 扫描进入 origin
         from datetime import datetime as _dt2
         import llm_service as _llm_check
-        # 蜂群模式（含 --no-llm）也视为生产级报告，应推送 origin + gh-pages
+        # 只有 LLM 模式才推送 gh-pages（生产网站），--no-llm 蜂群仅 commit + push main
         _is_swarm = bool(report.get("swarm_metadata") or "蜂群" in report.get("system_status", ""))
         _using_llm = _llm_check.is_available()
         _deploy_production = _using_llm or _is_swarm
+        _deploy_ghpages = _using_llm  # gh-pages 仅 LLM 模式更新
         timestamp = _dt2.now().strftime("%H:%M")
         today_commit_msg = f"Alpha Hive 蜂群日报 {self.date_str} {timestamp}"
         _log.info("Git commit... (mode: new)")
@@ -1842,15 +1843,18 @@ class AlphaHiveDailyReporter:
         _log.info("Git push → [%s] (LLM=%s, Swarm=%s)", env_label, _using_llm, _is_swarm)
 
         if _deploy_production:
-            # 生产模式：推送 origin main + gh-pages（Pages 从 gh-pages 部署）
+            # 生产模式：推送 origin main
             r = self.agent_helper.git.run_git_cmd("git push origin main")
             push_result = {"success": r["success"], "remote": "origin",
                            "output": r.get("stdout", "") or r.get("stderr", "")}
-            # 同步 gh-pages 分支（仅静态文件，GitHub Pages 部署源）
-            try:
-                self._deploy_static_to_ghpages()
-            except Exception as e:
-                _log.warning("gh-pages 部署失败: %s", e)
+            # gh-pages 仅在 LLM 模式下更新（避免 --no-llm 测试覆盖生产数据）
+            if _deploy_ghpages:
+                try:
+                    self._deploy_static_to_ghpages()
+                except Exception as e:
+                    _log.warning("gh-pages 部署失败: %s", e)
+            else:
+                _log.info("跳过 gh-pages（非 LLM 模式）")
         else:
             # 测试模式：临时分支 → test remote → 删除临时分支 → 本地 main 回滚到 origin/main
             _remote_check = self.agent_helper.git.run_git_cmd("git remote")
