@@ -539,6 +539,8 @@ window.AH.initFgTrend=function(){
   if(!_fgTrendHist||_fgTrendHist.length<2)return;
   const cv=document.getElementById('fgTrendChart');
   if(!cv||typeof Chart==='undefined')return;
+  // 销毁已有实例，防止 "Canvas already in use" 错误
+  var existing=Chart.getChart(cv);if(existing){existing.destroy();}
   chartInstances.push(new Chart(cv,{
     type:'line',
     data:{
