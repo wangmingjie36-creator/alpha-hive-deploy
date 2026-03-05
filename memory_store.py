@@ -16,6 +16,20 @@ from hive_logger import get_logger, PATHS, SafeJSONEncoder
 
 _log = get_logger("memory_store")
 
+
+def _safe_json_truncate(data, max_chars=5000):
+    """JSON 安全截断：逐步减少数组元素直到序列化结果 <= max_chars（U5）"""
+    if not isinstance(data, list):
+        s = json.dumps(data, cls=SafeJSONEncoder)
+        return s[:max_chars] if len(s) > max_chars else s
+    items = list(data)
+    while items:
+        s = json.dumps(items, cls=SafeJSONEncoder)
+        if len(s) <= max_chars:
+            return s
+        items = items[:-1]
+    return "[]"
+
 @dataclass
 class MemoryEntry:
     """Agent 级别跨会话记忆"""
@@ -219,10 +233,10 @@ class MemoryStore:
                         top_opp = ticker
                         top_score = score
 
-            summary = json.dumps(
+            summary = _safe_json_truncate(
                 {"top_ticker": top_opp, "top_score": top_score, "total_tickers": len(tickers)},
-                cls=SafeJSONEncoder
-            )[:500]
+                500
+            )
 
             cursor.execute("""
                 INSERT OR REPLACE INTO reasoning_sessions (
@@ -232,7 +246,7 @@ class MemoryStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (session_id, date, run_mode, json.dumps(tickers, cls=SafeJSONEncoder), len(tickers),
                   len([e for e in pheromone_snapshot if e.get('support_count', 0) >= 3]),
-                  top_opp, top_score, summary, json.dumps(pheromone_snapshot, cls=SafeJSONEncoder)[:5000], duration))
+                  top_opp, top_score, summary, _safe_json_truncate(pheromone_snapshot, 5000), duration))
 
             conn.commit()
             return True

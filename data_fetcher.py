@@ -42,7 +42,10 @@ class CacheManager:
         # 检查过期时间
         mod_time = os.path.getmtime(cache_file)
         if time.time() - mod_time > ttl:
-            os.remove(cache_file)
+            try:
+                os.remove(cache_file)
+            except OSError as e:
+                _log.debug("缓存文件清理失败 %s: %s", cache_file, e)
             return None
 
         try:

@@ -76,7 +76,7 @@ _yf_cache_ts: Dict[str, float] = {}
 _yf_lock = _threading.Lock()
 _YF_CACHE_TTL = _AS.get("yfinance_cache_ttl", 300)
 _YF_MAX_RETRIES = 2
-_MAX_CACHE_SIZE = 100  # LRU 上限，超限淘汰最旧条目
+_MAX_CACHE_SIZE = 500  # LRU 上限（9标的×15Agent 无驱逐压力）
 
 # ── Ticker 有效性缓存（退市/拆股检测，#18）──
 _ticker_validity: Dict[str, Dict] = {}
@@ -324,7 +324,7 @@ def prefetch_shared_data(tickers: list, retriever=None) -> Dict:
 
     # 1+2. 并行预取 yfinance + VectorMemory（I/O bound，并行比串行快 N 倍）
     from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-    _max_w = min(len(tickers), 8)
+    _max_w = min(len(tickers), 4)  # 限制并发避免 yfinance 429 限流
     if _max_w > 0:
         with ThreadPoolExecutor(max_workers=_max_w, thread_name_prefix="prefetch") as _pex:
             # yfinance 并行

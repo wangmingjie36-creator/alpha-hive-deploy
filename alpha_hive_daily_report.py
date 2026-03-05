@@ -231,10 +231,17 @@ class AlphaHiveDailyReporter:
 
     def _submit_bg(self, fn, *args, **kwargs) -> None:
         """提交后台任务到共享线程池（替代 daemon 线程）"""
-        future = self._bg_executor.submit(fn, *args, **kwargs)
-        self._bg_futures.append(future)
         # 清理已完成的 futures（防止内存泄漏）
         self._bg_futures = [f for f in self._bg_futures if not f.done()]
+        # U6: 超限保护 — 阻塞等待最旧 future 完成
+        if len(self._bg_futures) >= 20:
+            try:
+                self._bg_futures[0].result(timeout=15)
+            except Exception:
+                pass
+            self._bg_futures = [f for f in self._bg_futures if not f.done()]
+        future = self._bg_executor.submit(fn, *args, **kwargs)
+        self._bg_futures.append(future)
 
     def _analyze_ticker_safe(self, ticker: str, index: int, total: int) -> Tuple[str, OpportunityItem, str]:
         """
@@ -2151,13 +2158,16 @@ class AlphaHiveDailyReporter:
             _json2.dump(manifest, f, ensure_ascii=False, indent=2)
 
         # ── sw.js ──
-        cache_name = f"alpha-hive-{self.date_str}"
-        sw_content = f"""// Alpha Hive Service Worker - {self.date_str}
+        from datetime import datetime as _sw_dt
+        _sw_ts = _sw_dt.now().strftime("%Y%m%d-%H%M")
+        cache_name = f"alpha-hive-{_sw_ts}"
+        sw_content = f"""// Alpha Hive Service Worker - {_sw_ts}
 var CACHE_NAME='{cache_name}';
-var PRECACHE_URLS=['./', 'index.html', 'manifest.json',
+var PRECACHE_URLS=['manifest.json',
   'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'];
 
 self.addEventListener('install', function(e){{
+  self.skipWaiting();
   e.waitUntil(
     caches.open(CACHE_NAME).then(function(cache){{
       return cache.addAll(PRECACHE_URLS);
@@ -2172,14 +2182,14 @@ self.addEventListener('activate', function(e){{
         names.filter(function(n){{ return n!==CACHE_NAME; }})
              .map(function(n){{ return caches.delete(n); }})
       );
-    }})
+    }}).then(function(){{ return self.clients.claim(); }})
   );
 }});
 
 self.addEventListener('fetch', function(e){{
   var url=new URL(e.request.url);
-  // JSON 数据用 network-first
-  if(url.pathname.endsWith('.json')){{
+  // HTML 和 JSON 都用 network-first（确保内容最新）
+  if(url.pathname.endsWith('.html') || url.pathname.endsWith('.json') || url.pathname.endsWith('/')){{
     e.respondWith(
       fetch(e.request).then(function(r){{
         var rc=r.clone();
@@ -2189,7 +2199,7 @@ self.addEventListener('fetch', function(e){{
     );
     return;
   }}
-  // HTML/CDN 用 cache-first
+  // CDN/静态资源用 cache-first
   e.respondWith(
     caches.match(e.request).then(function(r){{
       return r || fetch(e.request).then(function(resp){{

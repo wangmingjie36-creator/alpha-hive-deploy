@@ -156,23 +156,35 @@ class OptionsDataFetcher:
             puts_list = []
 
             for expiry in expirations:
-                try:
-                    chain = stock.option_chain(expiry)
-                    calls = chain.calls
-                    puts = chain.puts
+                for _retry in range(3):  # 最多重试 2 次（U3: 期权链重试）
+                    try:
+                        chain = stock.option_chain(expiry)
+                        calls = chain.calls
+                        puts = chain.puts
 
-                    # 过滤无效数据（保留 OI >= 0，不再要求 > 100）
-                    calls = calls[calls["openInterest"] >= 0]
-                    puts = puts[puts["openInterest"] >= 0]
+                        # 过滤无效数据（保留 OI >= 0，不再要求 > 100）
+                        calls = calls[calls["openInterest"] >= 0]
+                        puts = puts[puts["openInterest"] >= 0]
 
-                    calls["expiry"] = expiry
-                    puts["expiry"] = expiry
+                        # U4: 内存保护 — 每个到期日最多保留 top 40 strikes（按 OI）
+                        if len(calls) > 40:
+                            calls = calls.nlargest(40, "openInterest")
+                        if len(puts) > 40:
+                            puts = puts.nlargest(40, "openInterest")
 
-                    calls_list.append(calls)
-                    puts_list.append(puts)
-                except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
-                    _log.warning("获取 %s %s 期权链失败：%s", ticker, expiry, e)
-                    continue
+                        calls["expiry"] = expiry
+                        puts["expiry"] = expiry
+
+                        calls_list.append(calls)
+                        puts_list.append(puts)
+                        break  # 成功则跳出重试
+                    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
+                        if _retry < 2:
+                            import time as _time
+                            _time.sleep(1.0 * (2 ** _retry))  # 1s, 2s 指数退避
+                            continue
+                        _log.warning("获取 %s %s 期权链失败（重试耗尽）：%s", ticker, expiry, e)
+                        break
 
             if not calls_list or not puts_list:
                 _log.warning("%s 期权数据不足，降级为样本数据（yfinance 返回空链）", ticker)
