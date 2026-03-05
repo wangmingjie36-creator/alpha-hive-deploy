@@ -1484,7 +1484,7 @@ class GuardBeeSentinel(BeeAgent):
             macro_adj = 0.0
             macro_desc = ""
             try:
-                from fred_macro import get_macro_context, get_macro_risk_adjustment
+                from fred_macro import get_macro_context, get_macro_risk_adjustment, get_sector_etf_for_ticker
                 macro = get_macro_context()
                 macro_adj, macro_desc = get_macro_risk_adjustment(macro)
                 if macro_adj != 0.0:
@@ -1492,6 +1492,37 @@ class GuardBeeSentinel(BeeAgent):
                     discovery = f"{discovery} | 宏观:{macro.get('summary', '')}"
                     if macro_desc:
                         discovery = f"{discovery}({macro_desc[:40]})"
+
+                # P5b: 精细化宏观调整 — 经济事件临近
+                try:
+                    from economic_calendar import get_next_event
+                    _nxt = get_next_event()
+                    if _nxt and _nxt.get("days_until", 99) <= 3 and _nxt.get("type") == "fomc":
+                        score = max(1.0, min(10.0, score - 0.5))
+                        discovery = f"{discovery} | ⚠️ FOMC {_nxt['days_until']}天后"
+                except (ImportError, Exception):
+                    pass
+
+                # P5c: 收益率曲线调整
+                _yc = macro.get("yield_curve", "unknown")
+                if _yc == "inverted":
+                    score = max(1.0, min(10.0, score - 0.8))
+                    discovery = f"{discovery} | ⚠️ 收益率曲线倒挂"
+                elif _yc == "flat":
+                    score = max(1.0, min(10.0, score - 0.3))
+
+                # P5d: 板块轮动调整
+                _sr = macro.get("sector_rotation", {})
+                _t_etf = get_sector_etf_for_ticker(ticker)
+                if _t_etf and _sr:
+                    _hot_etfs = [h[0] for h in _sr.get("hot", [])]
+                    _cold_etfs = [c[0] for c in _sr.get("cold", [])]
+                    if _t_etf in _hot_etfs:
+                        score = max(1.0, min(10.0, score + 0.3))
+                        discovery = f"{discovery} | 板块顺风"
+                    elif _t_etf in _cold_etfs:
+                        score = max(1.0, min(10.0, score - 0.3))
+                        discovery = f"{discovery} | 板块逆风"
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.debug("P5 fred_macro 不可用 %s: %s", ticker, e)
 

@@ -107,7 +107,20 @@
       <div class="hstat-val">{{ avg_score_str }}</div>
       <div class="hstat-lbl">平均综合分</div>
     </div>
+    <div class="hstat">
+      <div class="hstat-val">{{ macro_vix }}</div>
+      <div class="hstat-lbl">VIX 恐慌</div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-val">{{ macro_10y }}</div>
+      <div class="hstat-lbl">10Y 利率</div>
+    </div>
+    <div class="hstat">
+      <div class="hstat-val {{ macro_yc_cls }}">{{ macro_yc }}</div>
+      <div class="hstat-lbl">收益率曲线</div>
+    </div>
   </div>
+  {{ macro_sector_html }}
 </section>
 
 <div class="main">

@@ -502,3 +502,14 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 /* ── 升级 G: 维度数值标签 ── */
 .dim-val{font-size:.62em;font-weight:700;line-height:1;margin-bottom:1px}
 .dim-b-item{cursor:help}
+/* ── 第七轮: 宏观指标 ── */
+.yc-ok{color:#28a745}
+.yc-warn{color:#ffc107}
+.yc-bad{color:#dc3545;font-weight:700}
+.macro-sectors{text-align:center;padding:6px 16px;font-size:.82em;color:var(--neut);
+  display:flex;flex-wrap:wrap;gap:6px;justify-content:center;align-items:center}
+.sec-label{font-weight:600;opacity:.7;margin-right:2px}
+.sec-hot{color:#28a745;font-weight:600;background:rgba(40,167,69,.08);
+  padding:1px 7px;border-radius:10px;font-size:.92em}
+.sec-cold{color:#dc3545;font-weight:600;background:rgba(220,53,69,.08);
+  padding:1px 7px;border-radius:10px;font-size:.92em}

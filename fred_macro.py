@@ -5,13 +5,14 @@
 数据源（免费，无需 API Key）：
 - ^VIX → CBOE 恐慌指数（yfinance）
 - ^TNX → 10年期美债收益率（yfinance）
+- ^FVX → 5年期美债收益率（yfinance，收益率曲线 fallback）
 - ^DXY / DX-Y.NYB → 美元指数（yfinance）
 - ^GSPC → 标普 500（yfinance，判断大盘环境）
 - TLT → 长债 ETF（债市情绪）
-- GLD → 黄金（通胀对冲需求）
+- 11 SPDR 板块 ETF → 板块轮动跟踪
 
 可选 FRED API（免费注册 fred.stlouisfed.org 获取 key）：
-- 设置环境变量 FRED_API_KEY 可解锁 CPI、PMI 等月度数据
+- 设置环境变量 FRED_API_KEY 可解锁 CPI、PMI、2Y 国债收益率等
 """
 
 import logging
@@ -109,6 +110,7 @@ def _fetch_macro_data() -> Dict:
         symbols = {
             "VIX":    "^VIX",
             "TNX":    "^TNX",
+            "FVX":    "^FVX",      # 5Y Treasury（收益率曲线 fallback）
             "DXY":    "DX-Y.NYB",
             "SPX":    "^GSPC",
             "TLT":    "TLT",
@@ -177,6 +179,28 @@ def _fetch_macro_data() -> Dict:
         else:
             market_trend = "neutral"
 
+        # ---- 收益率曲线（2Y-10Y 利差）----
+        # 优先 FRED 2Y（精确），fallback 用 5Y 推算
+        treasury_2y = None
+        yield_spread = None
+        yield_curve = "unknown"
+        # fred_data 稍后获取，此处先用 5Y fallback
+        fvx = data.get("FVX", {}).get("last")
+        if fvx is not None and tnx > 0:
+            # 5Y 近似 2Y：通常 2Y 比 5Y 高 20-40bp（扁平化时差更小）
+            approx_2y = fvx + 0.15  # 保守近似
+            treasury_2y = round(approx_2y, 3)
+            yield_spread = round((tnx - approx_2y) * 100, 1)  # bp
+            if yield_spread < -10:
+                yield_curve = "inverted"
+            elif yield_spread < 20:
+                yield_curve = "flat"
+            else:
+                yield_curve = "normal"
+
+        # ---- 板块轮动 ----
+        sector_rotation = _fetch_sector_rotation(yf)
+
         # ---- 宏观综合评分（0-10）----
         # 越多顺风 → 分越高
         score = 5.0
@@ -209,6 +233,12 @@ def _fetch_macro_data() -> Dict:
         elif dollar_trend == "weak":
             score += 0.5
 
+        # 收益率曲线贡献
+        if yield_curve == "inverted":
+            score -= 1.5
+        elif yield_curve == "flat":
+            score -= 0.5
+
         score = max(1.0, min(10.0, score))
 
         # ---- 宏观政体判断 ----
@@ -233,6 +263,11 @@ def _fetch_macro_data() -> Dict:
             headwinds.append(f"美元走强（新兴市场 + 大宗商品承压）")
         if market_trend == "bear":
             headwinds.append(f"大盘下行（{spx_change:+.1f}%，贝塔风险放大）")
+
+        if yield_curve == "inverted":
+            headwinds.append(f"收益率曲线倒挂（2Y-10Y利差{yield_spread:+.0f}bp，衰退信号）")
+        elif yield_curve == "flat":
+            headwinds.append(f"收益率曲线趋平（2Y-10Y利差{yield_spread:+.0f}bp）")
 
         if vix_regime in ("low", "moderate"):
             tailwinds.append(f"VIX {vix:.1f}（低波动，风险偏好良好）")
@@ -266,12 +301,26 @@ def _fetch_macro_data() -> Dict:
                 elif ffr <= 2.0:
                     tailwinds.append(f"联邦基金利率 {ffr:.2f}%（宽松环境）")
 
+        # ---- FRED 精确 2Y（如有 key 则覆盖 5Y 近似）----
+        if fred_data.get("treasury_2y") is not None:
+            treasury_2y = fred_data["treasury_2y"]
+            yield_spread = round((tnx - treasury_2y) * 100, 1)
+            if yield_spread < -10:
+                yield_curve = "inverted"
+            elif yield_spread < 20:
+                yield_curve = "flat"
+            else:
+                yield_curve = "normal"
+
         summary_parts = [
             f"VIX {vix:.1f}({vix_regime})",
             f"10Y {tnx:.2f}%",
             f"大盘{spx_change:+.1f}%",
             f"宏观:{macro_regime}",
         ]
+        if yield_curve != "unknown":
+            yc_label = {"normal": "正常", "flat": "趋平", "inverted": "倒挂"}
+            summary_parts.append(f"曲线:{yc_label.get(yield_curve, yield_curve)}")
         if fred_data.get("cpi_yoy") is not None:
             summary_parts.append(f"CPI同比{fred_data['cpi_yoy']:.1f}%")
 
@@ -282,10 +331,14 @@ def _fetch_macro_data() -> Dict:
             "vix_change_pct": round(vix_change, 2),
             "vix_regime": vix_regime,
             "treasury_10y": round(tnx, 3),
+            "treasury_2y": treasury_2y,
+            "yield_spread": yield_spread,
+            "yield_curve": yield_curve,
             "rate_environment": rate_env,
             "dollar_trend": dollar_trend,
             "market_trend": market_trend,
             "spx_change_pct": round(spx_change, 2),
+            "sector_rotation": sector_rotation,
             "macro_headwinds": headwinds,
             "macro_tailwinds": tailwinds,
             "fred_extras": fred_data,
@@ -345,9 +398,80 @@ def _fetch_fred_series(api_key: str) -> Dict:
             if obs3:
                 result["fed_funds_rate"] = float(obs3[0]["value"])
 
+        # 2Y 国债收益率（收益率曲线精确数据）
+        r4 = _req.get(base, params={
+            "series_id": "DGS2", "api_key": api_key,
+            "file_type": "json", "sort_order": "desc", "limit": "1"
+        }, timeout=8)
+        if r4.ok:
+            obs4 = r4.json().get("observations", [])
+            if obs4 and obs4[0].get("value", ".") != ".":
+                result["treasury_2y"] = float(obs4[0]["value"])
+
     except Exception as e:
         _log.debug("FRED API 调用失败: %s", e)
     return result
+
+
+_SECTOR_ETFS = {
+    "XLK": "科技", "XLV": "医疗", "XLE": "能源",
+    "XLF": "金融", "XLI": "工业", "XLY": "可选消费",
+    "XLP": "必需消费", "XLU": "公用事业", "XLRE": "房地产",
+    "XLC": "通信", "XLB": "材料",
+}
+
+# 板块 ETF → config.WATCHLIST sector 映射
+_SECTOR_TO_ETF = {
+    "Technology": "XLK", "Healthcare": "XLV", "Energy": "XLE",
+    "Financial": "XLF", "Industrial": "XLI", "Consumer Discretionary": "XLY",
+    "Consumer Staples": "XLP", "Utilities": "XLU", "Real Estate": "XLRE",
+    "Communication": "XLC", "Materials": "XLB",
+    # 别名映射
+    "Automotive": "XLY", "Biotech": "XLV", "Fintech": "XLK",
+    "Semiconductor": "XLK", "E-Commerce": "XLY",
+}
+
+
+def _fetch_sector_rotation(yf_module=None) -> Dict:
+    """获取 11 个 SPDR 板块 ETF 的 5 日表现，返回板块轮动数据"""
+    result = {"hot": [], "cold": [], "full": {}}
+    try:
+        yf = yf_module
+        if yf is None:
+            import yfinance as yf
+        tickers = list(_SECTOR_ETFS.keys())
+        performances = []
+        for etf in tickers:
+            try:
+                t = yf.Ticker(etf)
+                hist = t.history(period="5d", interval="1d")
+                if hist is not None and len(hist) >= 2:
+                    first_close = float(hist["Close"].iloc[0])
+                    last_close = float(hist["Close"].iloc[-1])
+                    if first_close > 0:
+                        chg = round((last_close / first_close - 1) * 100, 2)
+                        name = _SECTOR_ETFS[etf]
+                        performances.append((etf, name, chg))
+                        result["full"][etf] = (name, chg)
+            except Exception:
+                pass
+        if performances:
+            performances.sort(key=lambda x: x[2], reverse=True)
+            result["hot"] = performances[:3]
+            result["cold"] = performances[-3:]
+    except Exception as e:
+        _log.debug("板块轮动数据获取失败: %s", e)
+    return result
+
+
+def get_sector_etf_for_ticker(ticker: str) -> str:
+    """根据 ticker 的板块返回对应的板块 ETF 代码"""
+    try:
+        from config import WATCHLIST
+        sector = WATCHLIST.get(ticker, {}).get("sector", "")
+        return _SECTOR_TO_ETF.get(sector, "")
+    except (ImportError, KeyError):
+        return ""
 
 
 def get_macro_risk_adjustment(macro: Dict) -> Tuple:

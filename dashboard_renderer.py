@@ -743,9 +743,19 @@ def render_dashboard_html(report: Dict, date_str: str,
     ]
     _avg_score = (sum(s for _, s in _all_scores) / len(_all_scores)) if _all_scores else 0
 
-    # ── 升级 C: Hero 一句话 ──
+    # ── 升级 C: Hero 一句话 + 宏观事件倒计时 ──
     _hero_parts = []
     _hero_parts.append(f"今天市场{_fg_label}(F&G {_fg_str})")
+    # 宏观事件倒计时（≤7天的最近事件）
+    try:
+        from economic_calendar import get_next_event as _get_next_event
+        _macro_evt = _get_next_event()
+        if _macro_evt and _macro_evt.get("days_until", 99) <= 7:
+            _ed = _macro_evt["days_until"]
+            _en = _macro_evt["event"]
+            _hero_parts.append(f"距{_en}还有{_ed}天" if _ed > 0 else f"{_en}今天公布")
+    except (ImportError, Exception):
+        pass
     _opp_parts = []
     if _dir_counts["bullish"]:
         _opp_parts.append(f"{_dir_counts['bullish']}个看多")
@@ -755,6 +765,40 @@ def render_dashboard_html(report: Dict, date_str: str,
         _opp_parts.append(f"{_dir_counts['neutral']}个中性")
     _hero_parts.append(f"扫描{n_tickers}只标的发现{'、'.join(_opp_parts)}机会")
     _hero_tldr = "，".join(_hero_parts)
+
+    # ── 宏观指标数据（用于 Hero Stats）──
+    _macro_vix = "—"
+    _macro_10y = "—"
+    _macro_yc = "—"
+    _macro_yc_cls = ""
+    _macro_sector_html = ""
+    try:
+        from fred_macro import get_macro_context as _get_macro_ctx
+        _mctx = _get_macro_ctx()
+        if _mctx.get("data_source") != "fallback":
+            _macro_vix = f"{_mctx.get('vix', 0):.1f}"
+            _macro_10y = f"{_mctx.get('treasury_10y', 0):.2f}%"
+            _yc = _mctx.get("yield_curve", "unknown")
+            _yc_map = {"normal": "正常", "flat": "趋平", "inverted": "⚠️倒挂"}
+            _yc_cls_map = {"normal": "yc-ok", "flat": "yc-warn", "inverted": "yc-bad"}
+            _macro_yc = _yc_map.get(_yc, "—")
+            _macro_yc_cls = _yc_cls_map.get(_yc, "")
+            # 板块轮动 HTML
+            _sr = _mctx.get("sector_rotation", {})
+            if _sr.get("hot") or _sr.get("cold"):
+                _sec_parts = []
+                for etf, name, chg in _sr.get("hot", [])[:3]:
+                    _sec_parts.append(f'<span class="sec-hot">{name}{chg:+.1f}%</span>')
+                for etf, name, chg in _sr.get("cold", [])[-2:]:
+                    _sec_parts.append(f'<span class="sec-cold">{name}{chg:+.1f}%</span>')
+                _macro_sector_html = (
+                    '<div class="macro-sectors">'
+                    '<span class="sec-label">板块轮动(5日)</span> '
+                    + " ".join(_sec_parts)
+                    + '</div>'
+                )
+    except (ImportError, Exception):
+        pass
 
     def _radar_data(ticker):
         sd  = swarm_detail.get(ticker, {})
@@ -1393,6 +1437,11 @@ def render_dashboard_html(report: Dict, date_str: str,
         fg_str=_fg_str,
         avg_score_str=_avg_score_str,
         hero_tldr=_hero_tldr,
+        macro_vix=_macro_vix,
+        macro_10y=_macro_10y,
+        macro_yc=_macro_yc,
+        macro_yc_cls=_macro_yc_cls,
+        macro_sector_html=_macro_sector_html,
         top_n=min(6, len(all_tickers_sorted)),
         scores_chart_height="{}px".format(max(160, len(all_tickers_sorted) * 28)),
         cards_html=new_cards_html,
