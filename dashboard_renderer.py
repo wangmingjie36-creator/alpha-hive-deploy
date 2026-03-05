@@ -921,12 +921,10 @@ def render_dashboard_html(report: Dict, date_str: str,
                   <span class="hdir">{_dir_icon.get(_hdir,'🟡')}</span>
                 </div>"""
             _hlinks = ""
-            if _he["has_md"]:
-                _hlinks += f'<a href="alpha-hive-daily-{_he["date"]}.md" class="hlink hlink-md">📄 简报</a>'
             if _he["has_json"]:
-                _hlinks += f'<a href="alpha-hive-daily-{_he["date"]}.json" class="hlink hlink-json">📊 JSON</a>'
+                _hlinks += f'<a href="alpha-hive-daily-{_he["date"]}.json" target="_blank" rel="noopener" class="hlink hlink-json">📊 完整数据</a>'
             for _hmt in _he["ml_tickers"][:4]:
-                _hlinks += f'<a href="alpha-hive-{_hmt}-ml-enhanced-{_he["date"]}.html" class="hlink hlink-ml">{_html.escape(_hmt)}</a>'
+                _hlinks += f'<a href="alpha-hive-{_hmt}-ml-enhanced-{_he["date"]}.html" target="_blank" rel="noopener" class="hlink hlink-ml">{_html.escape(_hmt)}</a>'
             _hist_html += f"""
             <div class="hist-card">
               <div class="hist-left">
@@ -1109,6 +1107,19 @@ def render_dashboard_html(report: Dict, date_str: str,
         "hist_full": _hist_full,
         "search_index": _search_index,
     }
+
+    # Sprint 4.1: 输出 dashboard-data.json 伴生文件（前端动态加载用）
+    _data_obj["_generated_at"] = now_str
+    _data_obj["_date"] = date_str
+    try:
+        _json_path = _Path_mod(report_dir) / "dashboard-data.json"
+        _json_path.write_text(
+            _json.dumps(_data_obj, ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        _log.info("dashboard-data.json 已生成：%s", _json_path.name)
+    except OSError as _je:
+        _log.warning("dashboard-data.json 写入失败: %s", _je)
 
     _env = Environment(autoescape=False)
     _tpl = _env.from_string(_load_tpl("dashboard.html"))

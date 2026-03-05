@@ -347,7 +347,9 @@ class AlphaHiveDailyReporter:
         env["GIT_INDEX_FILE"] = idx
         static_exts = (".html", ".json", ".xml", ".js")
         files = [f for f in os.listdir(repo)
-                 if f.endswith(static_exts) or f == ".nojekyll"]
+                 if f.endswith(static_exts)
+                 or f == ".nojekyll"
+                 or (f.endswith(".md") and f.startswith("alpha-hive-"))]
         if not files:
             _log.warning("无静态文件可部署")
             return
@@ -1991,10 +1993,9 @@ class AlphaHiveDailyReporter:
         if not tickers:
             return []
 
-        generated = []
-        for ticker in tickers:
+        def _gen_one(ticker: str) -> str | None:
+            """生成单个标的的 ML 报告（线程安全）"""
             try:
-                # 从 yfinance 获取当前价格
                 real_price, real_change = 100.0, 0.0
                 try:
                     import yfinance as _yf
@@ -2017,24 +2018,31 @@ class AlphaHiveDailyReporter:
                     },
                 }
 
-                # 生成 ML 增强分析
                 enhanced = self.ml_generator.generate_ml_enhanced_report(ticker, ticker_data)
 
-                # 注入蜂群数据
                 if ticker in swarm_data:
                     enhanced["swarm_results"] = swarm_data[ticker]
 
-                # 同步写入 HTML（必须在 _generate_index_html 前完成，以便文件存在性检测通过）
                 html = self.ml_generator.generate_html_report(ticker, enhanced)
                 html_path = self.report_dir / f"alpha-hive-{ticker}-ml-enhanced-{self.date_str}.html"
                 with open(html_path, "w", encoding="utf-8") as f:
                     f.write(html)
 
-                generated.append(ticker)
                 _log.info("ML 增强报告已生成：%s", html_path.name)
-
+                return ticker
             except Exception as e:
                 _log.warning("ML 报告生成失败 %s: %s", ticker, e)
+                return None
+
+        # 并行生成 ML 报告（yfinance + HTML 渲染，I/O 密集）
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        generated = []
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {pool.submit(_gen_one, t): t for t in tickers}
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    generated.append(result)
 
         return generated
 
@@ -2058,23 +2066,16 @@ class AlphaHiveDailyReporter:
                 if "swarm_metadata" in report:
                     report["swarm_metadata"]["tickers_analyzed"] = len(merged_opps)
                 _log.info("合并今日已有报告：共 %d 标的", len(merged_opps))
-            except Exception as e:
+            except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
                 _log.warning("合并已有报告失败，使用新报告: %s", e)
 
         # 保存 JSON 版本
         with open(json_file, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
 
-        # 保存 Markdown 版本（新批次追加到已有文件末尾）
-        if md_file.exists():
-            existing_md = md_file.read_text(encoding="utf-8")
-            combined_md = existing_md + "\n\n---\n\n" + report["markdown_report"]
-            with open(md_file, "w", encoding="utf-8") as f:
-                f.write(combined_md)
-            report["markdown_report"] = combined_md
-        else:
-            with open(md_file, "w", encoding="utf-8") as f:
-                f.write(report["markdown_report"])
+        # 保存 Markdown 版本（仅保留最新一次运行结果，覆盖旧内容）
+        with open(md_file, "w", encoding="utf-8") as f:
+            f.write(report["markdown_report"])
 
         # 清理当天旧的 X 线程文件（防止多次运行时数量不同导致残留叠加）
         for old in self.report_dir.glob(f"alpha-hive-thread-{self.date_str}-*.txt"):
@@ -2092,7 +2093,7 @@ class AlphaHiveDailyReporter:
             if ml_tickers:
                 _log.info("ML 增强报告完成：%s", ml_tickers)
                 _log.info("ML 报告: %s", ", ".join(ml_tickers))
-        except Exception as e:
+        except (OSError, ValueError, KeyError, TypeError) as e:
             _log.warning("ML 报告批量生成出错: %s", e)
 
         # 更新 GitHub Pages 仪表板
@@ -2102,13 +2103,13 @@ class AlphaHiveDailyReporter:
             with open(index_file, "w", encoding="utf-8") as f:
                 f.write(html)
             _log.info("index.html 已更新（GitHub Pages）")
-        except Exception as e:
+        except (OSError, ValueError, KeyError, TypeError) as e:
             _log.warning("index.html 生成失败: %s", e)
 
         # 生成 PWA 文件（manifest.json + sw.js）
         try:
             self._write_pwa_files()
-        except Exception as e:
+        except (OSError, ValueError) as e:
             _log.warning("PWA 文件生成失败: %s", e)
 
         # 生成 RSS 订阅源
@@ -2117,7 +2118,7 @@ class AlphaHiveDailyReporter:
             with open(self.report_dir / "rss.xml", "w", encoding="utf-8") as f:
                 f.write(rss_xml)
             _log.info("rss.xml 已更新")
-        except Exception as e:
+        except (OSError, ValueError) as e:
             _log.warning("rss.xml 生成失败: %s", e)
 
         _log.info("报告已保存：%s", md_file.name)

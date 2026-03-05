@@ -1,3 +1,31 @@
+// ── Global Error Boundary ──
+(function(){
+  var errCount=0, maxToast=3;
+  function showErrToast(msg){
+    if(errCount>=maxToast)return;
+    errCount++;
+    var t=document.createElement('div');
+    t.className='ah-err-toast';
+    t.textContent='\u26a0\ufe0f '+msg;
+    t.style.cssText='position:fixed;bottom:'+(20+errCount*50)+'px;right:20px;'
+      +'background:#ff4444;color:#fff;padding:10px 16px;border-radius:8px;'
+      +'font-size:13px;z-index:99999;opacity:0.95;max-width:350px;'
+      +'box-shadow:0 2px 8px rgba(0,0,0,.3);transition:opacity .3s';
+    document.body.appendChild(t);
+    setTimeout(function(){t.style.opacity='0';setTimeout(function(){t.remove();errCount--;},400)},6000);
+  }
+  window.onerror=function(msg,src,line){
+    console.error('[AH]',msg,src,line);
+    showErrToast((msg||'Unknown error').toString().slice(0,80));
+  };
+  window.onunhandledrejection=function(e){
+    var r=e.reason||{};
+    var msg=(r.message||r.toString()||'Promise rejected').slice(0,80);
+    console.error('[AH] Unhandled rejection:',r);
+    showErrToast(msg);
+  };
+})();
+
 // ── F13: Service Worker Registration ──
 if('serviceWorker' in navigator && location.protocol==='https:'){
   navigator.serviceWorker.register('sw.js').catch(function(){});
@@ -902,4 +930,64 @@ function toggleKbHelp(){
   // Table search input
   var tableSearch=document.getElementById('tableSearch');
   if(tableSearch) tableSearch.addEventListener('input',function(){ filterTable(); });
+})();
+
+// ── Sprint 4.2: Dynamic data refresh from dashboard-data.json ──
+(function(){
+  // 检查数据新鲜度（Sprint 4.3：>24h 显示过期警告）
+  function checkDataFreshness(){
+    var el=document.querySelector('[data-generated]');
+    if(!el)return;
+    var genStr=el.getAttribute('data-generated');
+    if(!genStr)return;
+    var genTime=new Date(genStr).getTime();
+    if(isNaN(genTime))return;
+    var ageHours=(Date.now()-genTime)/(1000*60*60);
+    if(ageHours>24){
+      var banner=document.createElement('div');
+      banner.className='ah-stale-banner';
+      banner.style.cssText='background:#f59e0b;color:#000;text-align:center;'
+        +'padding:8px 16px;font-size:14px;font-weight:600;position:sticky;top:0;z-index:9999';
+      banner.textContent='\u26a0\ufe0f \u6570\u636e\u53ef\u80fd\u5df2\u8fc7\u671f\uff08\u4e0a\u6b21\u66f4\u65b0: '
+        +new Date(genTime).toLocaleString('zh-CN')+'\uff09';
+      document.body.prepend(banner);
+    }
+  }
+
+  // 尝试从 dashboard-data.json 动态刷新（如果可用）
+  function fetchDashboardData(){
+    fetch('dashboard-data.json?_t='+Date.now())
+      .then(function(r){
+        if(!r.ok)throw new Error('HTTP '+r.status);
+        return r.json();
+      })
+      .then(function(data){
+        if(!data||!data._generated_at)return;
+        // 更新英雄区数字
+        var heroDate=document.querySelector('.hero-date,.scan-date');
+        if(heroDate&&data._date) heroDate.textContent=data._date;
+        // 检查是否有更新的数据
+        var genEl=document.querySelector('[data-generated]');
+        if(genEl){
+          var curGen=genEl.getAttribute('data-generated');
+          if(curGen&&data._generated_at&&data._generated_at>curGen){
+            console.log('[AH] \u53d1\u73b0\u65b0\u6570\u636e, \u5efa\u8bae\u5237\u65b0\u9875\u9762');
+          }
+        }
+      })
+      .catch(function(){
+        // fetch \u5931\u8d25\u65f6\u964d\u7ea7\u4e3a\u5d4c\u5165\u6570\u636e\uff08\u9ed8\u8ba4\u884c\u4e3a\uff09
+      });
+  }
+
+  // \u9875\u9762\u52a0\u8f7d\u540e\u6267\u884c
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded',function(){
+      checkDataFreshness();
+      fetchDashboardData();
+    });
+  } else {
+    checkDataFreshness();
+    fetchDashboardData();
+  }
 })();

@@ -38,12 +38,21 @@ class TestPublish:
 
     def test_publish_removes_weak_entries(self, board):
         """低强度条目在衰减后应被清除"""
-        for _ in range(12):
+        # 新条目在 <5min 内衰减 0.05/次，需要 >=17 次才能从 1.0 降到 < 0.2
+        for _ in range(20):
             board.publish(_entry(ticker="FILLER"))
-        # 连续衰减 12 次后，初始强度 1.0 - 12*0.1 = -0.2 < MIN_STRENGTH
-        # 最早的条目应被清除
+        # 最早的条目 1.0 - 19*0.05 = 0.05 < MIN_STRENGTH(0.2)，应被清除
         count = board.get_entry_count()
-        assert count < 12
+        assert count < 20
+
+    def test_same_agent_no_double_support(self, board):
+        """同一 Agent 重复发布同 ticker 不应增加 support_count"""
+        board.publish(_entry(agent="ScoutBeeNova"))
+        board.publish(_entry(agent="ScoutBeeNova"))  # 同 agent 同 ticker
+        signals = board.get_top_signals("NVDA")
+        # support_count 应该只有初始的 0（第一条自带 agent_id 在 supporting_agents）
+        # 第二次发布时检测到同 agent，不增加
+        assert signals[0].support_count == 0
 
 
 class TestGetTopSignals:

@@ -35,6 +35,9 @@ class TestSlackReportNotifierInit:
         from slack_report_notifier import SlackReportNotifier
         monkeypatch.setattr(SlackReportNotifier, "_read_webhook_from_file",
                             lambda self: "https://hooks.slack.com/services/T00/B00/xxx")
+        # Mock webhook 存活检测，避免真实网络请求
+        monkeypatch.setattr(SlackReportNotifier, "_check_webhook_alive",
+                            staticmethod(lambda url: True))
         n = SlackReportNotifier()
         assert n.enabled is True
         assert n.use_user_token is False
@@ -69,6 +72,8 @@ class TestBuildBlocks:
         monkeypatch.setattr(SlackReportNotifier, "_read_user_token", lambda self: None)
         monkeypatch.setattr(SlackReportNotifier, "_read_webhook_from_file",
                             lambda self: "https://hooks.slack.com/services/T/B/x")
+        monkeypatch.setattr(SlackReportNotifier, "_check_webhook_alive",
+                            staticmethod(lambda url: True))
         return SlackReportNotifier()
 
     def test_opportunity_alert_blocks(self, notifier):
@@ -132,6 +137,8 @@ class TestSendWithMock:
         monkeypatch.setattr(SlackReportNotifier, "_read_user_token", lambda self: None)
         monkeypatch.setattr(SlackReportNotifier, "_read_webhook_from_file",
                             lambda self: "https://hooks.slack.com/services/T/B/x")
+        monkeypatch.setattr(SlackReportNotifier, "_check_webhook_alive",
+                            staticmethod(lambda url: True))
         n = SlackReportNotifier()
 
         mock_resp = MagicMock()

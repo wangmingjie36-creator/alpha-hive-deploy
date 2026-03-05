@@ -33,9 +33,13 @@ class SlackReportNotifier:
         self.user_token = self._read_user_token()
         self.webhook_url = webhook_url or self._read_webhook_from_file()
         self.use_user_token = bool(self.user_token)
-        self.enabled = bool(self.user_token) or (
-            bool(self.webhook_url) and self._is_valid_webhook(self.webhook_url)
-        )
+
+        # Webhook 存活检测：格式合法后做 HEAD 请求验证
+        self._webhook_alive = False
+        if self.webhook_url and self._is_valid_webhook(self.webhook_url):
+            self._webhook_alive = self._check_webhook_alive(self.webhook_url)
+
+        self.enabled = bool(self.user_token) or self._webhook_alive
         self._failed_queue: deque = deque(maxlen=50)
         self._sent_hashes: Dict[str, float] = {}  # hash → timestamp, 去重用
 
@@ -43,6 +47,23 @@ class SlackReportNotifier:
     def _is_valid_webhook(url: str) -> bool:
         """校验 Slack Webhook URL 格式"""
         return bool(url and url.startswith("https://hooks.slack.com/"))
+
+    @staticmethod
+    def _check_webhook_alive(url: str) -> bool:
+        """HEAD 请求验证 webhook 是否仍然有效（404 = 已失效）"""
+        try:
+            resp = requests.head(url, timeout=5)
+            if resp.status_code == 404:
+                _log.warning(
+                    "Slack Webhook 已失效 (404)，自动禁用。"
+                    "请到 Slack App 管理页面重新生成 Webhook URL。"
+                )
+                return False
+            # 2xx/3xx/405 均视为存活（Slack webhook 对 HEAD 可能返回 405）
+            return True
+        except (requests.ConnectionError, requests.Timeout) as e:
+            _log.warning("Slack Webhook 连接失败: %s，自动禁用", e)
+            return False
 
     def _read_user_token(self) -> Optional[str]:
         """读取 Slack User Token（xoxp-...）"""

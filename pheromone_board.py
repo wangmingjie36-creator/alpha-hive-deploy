@@ -26,6 +26,7 @@ class PheromoneEntry:
     direction: str         # "bullish" / "bearish" / "neutral"
     pheromone_strength: float = 1.0  # 初始强度 (0.0~1.0)
     support_count: int = 0
+    supporting_agents: List[str] = field(default_factory=list)  # 去重：记录支持者
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
 
@@ -66,24 +67,41 @@ class PheromoneBoard:
             entry: 新的信息素条目
         """
         with self._lock:
-            # 衰减现有条目
+            # 基于年龄的比例衰减：越旧的条目衰减越快
+            now = datetime.now()
             for e in self._entries:
-                e.pheromone_strength -= self.DECAY_RATE
+                try:
+                    age_minutes = (now - datetime.fromisoformat(e.timestamp)).total_seconds() / 60
+                except (ValueError, TypeError):
+                    age_minutes = 10  # 解析失败时默认 10 分钟
+                # 衰减系数：0~5min 内 0.05，5~30min 0.1，>30min 0.15
+                if age_minutes < 5:
+                    decay = 0.05
+                elif age_minutes < 30:
+                    decay = self.DECAY_RATE
+                else:
+                    decay = self.DECAY_RATE * 1.5
+                e.pheromone_strength -= decay
 
             # 清除低强度条目
             self._entries = [e for e in self._entries if e.pheromone_strength >= self.MIN_STRENGTH]
 
-            # 若同 ticker + direction 已有条目，增加支持数
+            # 若同 ticker + direction 已有条目，增加支持数（排除同 agent 重复）
             found_resonance = False
             for e in self._entries:
                 if e.ticker == entry.ticker and e.direction == entry.direction:
-                    e.support_count += 1
-                    # 强化信息素强度（但不超过 1.0）
-                    e.pheromone_strength = min(1.0, e.pheromone_strength + 0.2)
+                    # 仅当不同 Agent 时才增加支持
+                    if entry.agent_id not in e.supporting_agents:
+                        e.support_count += 1
+                        e.supporting_agents.append(entry.agent_id)
+                        # 强化信息素强度（但不超过 1.0）
+                        e.pheromone_strength = min(1.0, e.pheromone_strength + 0.2)
                     found_resonance = True
                     break
 
             # 添加新条目（保持最大 20 条）
+            if not entry.supporting_agents:
+                entry.supporting_agents = [entry.agent_id]
             self._entries.append(entry)
             if len(self._entries) > self.MAX_ENTRIES:
                 self._entries.sort(key=lambda x: x.pheromone_strength)

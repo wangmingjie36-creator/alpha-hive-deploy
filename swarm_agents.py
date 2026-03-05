@@ -76,11 +76,21 @@ _yf_cache_ts: Dict[str, float] = {}
 _yf_lock = _threading.Lock()
 _YF_CACHE_TTL = _AS.get("yfinance_cache_ttl", 300)
 _YF_MAX_RETRIES = 2
+_MAX_CACHE_SIZE = 100  # LRU 上限，超限淘汰最旧条目
 
 # ── Ticker 有效性缓存（退市/拆股检测，#18）──
 _ticker_validity: Dict[str, Dict] = {}
+_tv_ts: Dict[str, float] = {}  # ticker → checked_at（LRU 淘汰用）
 _tv_lock = _threading.Lock()
 _TICKER_VALIDITY_TTL = _AS.get("ticker_validity_ttl", 3600)
+
+
+def _evict_oldest(cache: Dict, ts_map: Dict, limit: int = _MAX_CACHE_SIZE) -> None:
+    """淘汰最旧条目直到 cache 大小 <= limit（需在锁内调用）"""
+    while len(cache) > limit:
+        oldest_key = min(ts_map, key=ts_map.get)  # type: ignore[arg-type]
+        del cache[oldest_key]
+        del ts_map[oldest_key]
 
 
 def check_ticker_validity(ticker: str) -> Dict:
@@ -114,6 +124,8 @@ def check_ticker_validity(ticker: str) -> Dict:
             _log.warning("⚠️ %s", result["warning"])
             with _tv_lock:
                 _ticker_validity[ticker] = {**result, "_checked_at": now}
+                _tv_ts[ticker] = now
+                _evict_oldest(_ticker_validity, _tv_ts)
             return result
 
         # 价格极低 → 退市风险
@@ -148,6 +160,8 @@ def check_ticker_validity(ticker: str) -> Dict:
 
     with _tv_lock:
         _ticker_validity[ticker] = {**result, "_checked_at": now}
+        _tv_ts[ticker] = now
+        _evict_oldest(_ticker_validity, _tv_ts)
     return result
 
 
@@ -204,10 +218,11 @@ def _fetch_stock_data(ticker: str) -> Dict:
                 returns = hist["Close"].pct_change().dropna()
                 data["volatility_20d"] = float(returns.std() * (252 ** 0.5) * 100)
 
-            # 写入缓存
+            # 写入缓存（LRU 淘汰）
             with _yf_lock:
                 _yf_cache[ticker] = data
                 _yf_cache_ts[ticker] = _time.time()
+                _evict_oldest(_yf_cache, _yf_cache_ts)
             yfinance_breaker.record_success()
             break
 
