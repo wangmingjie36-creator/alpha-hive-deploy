@@ -9,6 +9,7 @@
 - ^DXY / DX-Y.NYB → 美元指数（yfinance）
 - ^GSPC → 标普 500（yfinance，判断大盘环境）
 - TLT → 长债 ETF（债市情绪）
+- GLD → SPDR 黄金 ETF（避险情绪指标）
 - 11 SPDR 板块 ETF → 板块轮动跟踪
 
 可选 FRED API（免费注册 fred.stlouisfed.org 获取 key）：
@@ -114,6 +115,7 @@ def _fetch_macro_data() -> Dict:
             "DXY":    "DX-Y.NYB",
             "SPX":    "^GSPC",
             "TLT":    "TLT",
+            "GLD":    "GLD",       # SPDR 黄金 ETF（避险指标）
         }
 
         data = {}
@@ -178,6 +180,18 @@ def _fetch_macro_data() -> Dict:
             market_trend = "bear"
         else:
             market_trend = "neutral"
+
+        # ---- 黄金趋势（避险指标）----
+        gold_price = data.get("GLD", {}).get("last")
+        gold_change = data.get("GLD", {}).get("change_pct", 0.0)
+        if gold_change > 1.0:
+            gold_trend = "surging"    # 避险需求强烈
+        elif gold_change > 0.3:
+            gold_trend = "rising"
+        elif gold_change < -1.0:
+            gold_trend = "falling"
+        else:
+            gold_trend = "stable"
 
         # ---- 收益率曲线（2Y-10Y 利差）----
         # 优先 FRED 2Y（精确），fallback 用 5Y 推算
@@ -249,6 +263,14 @@ def _fetch_macro_data() -> Dict:
         elif dollar_trend == "weak":
             score += 0.5
 
+        # 黄金贡献（上涨=避险=股市逆风）
+        if gold_trend == "surging":
+            score -= 0.8
+        elif gold_trend == "rising":
+            score -= 0.3
+        elif gold_trend == "falling":
+            score += 0.3
+
         # 收益率曲线贡献
         if yield_curve == "inverted":
             score -= 1.5
@@ -294,6 +316,13 @@ def _fetch_macro_data() -> Dict:
         if rate_env == "low":
             tailwinds.append(f"低利率环境（成长股估值友好）")
 
+        if gold_trend == "surging":
+            headwinds.append(f"黄金飙升{gold_change:+.1f}%（避险需求强烈，资金撤离风险资产）")
+        elif gold_trend == "rising":
+            headwinds.append(f"黄金走强{gold_change:+.1f}%（避险情绪升温）")
+        elif gold_trend == "falling":
+            tailwinds.append(f"黄金回落{gold_change:+.1f}%（风险偏好回升）")
+
         # ---- FRED CPI/FFR 补充评分（FRED 数据已在 score 之前获取）----
         if fred_data:
             if fred_data.get("cpi_yoy") is not None:
@@ -325,6 +354,9 @@ def _fetch_macro_data() -> Dict:
             summary_parts.append(f"曲线:{yc_label.get(yield_curve, yield_curve)}")
         if fred_data.get("cpi_yoy") is not None:
             summary_parts.append(f"CPI同比{fred_data['cpi_yoy']:.1f}%")
+        if gold_trend in ("surging", "rising", "falling"):
+            _gl = {"surging": "飙升", "rising": "走强", "falling": "回落"}
+            summary_parts.append(f"黄金{_gl[gold_trend]}{gold_change:+.1f}%")
 
         return {
             "macro_regime": macro_regime,
@@ -340,6 +372,9 @@ def _fetch_macro_data() -> Dict:
             "dollar_trend": dollar_trend,
             "market_trend": market_trend,
             "spx_change_pct": round(spx_change, 2),
+            "gold_price": round(gold_price, 2) if gold_price else None,
+            "gold_change_pct": round(gold_change, 2),
+            "gold_trend": gold_trend,
             "sector_rotation": sector_rotation,
             "macro_headwinds": headwinds,
             "macro_tailwinds": tailwinds,

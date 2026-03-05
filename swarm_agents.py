@@ -1525,6 +1525,14 @@ class GuardBeeSentinel(BeeAgent):
                     elif _t_etf in _cold_etfs:
                         score = max(1.0, min(10.0, score - 0.3))
                         discovery = f"{discovery} | 板块逆风"
+
+                # P5e: 黄金避险信号
+                _gld = macro.get("gold_trend", "stable")
+                if _gld == "surging":
+                    score = max(1.0, min(10.0, score - 0.4))
+                    discovery = f"{discovery} | ⚠️ 黄金避险飙升"
+                elif _gld == "rising":
+                    score = max(1.0, min(10.0, score - 0.2))
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.debug("P5 fred_macro 不可用 %s: %s", ticker, e)
 

@@ -771,6 +771,8 @@ def render_dashboard_html(report: Dict, date_str: str,
     _macro_10y = "—"
     _macro_yc = "—"
     _macro_yc_cls = ""
+    _macro_gld = "—"
+    _macro_gld_cls = ""
     _macro_sector_html = ""
     try:
         from fred_macro import get_macro_context as _get_macro_ctx
@@ -783,6 +785,14 @@ def render_dashboard_html(report: Dict, date_str: str,
             _yc_cls_map = {"normal": "yc-ok", "flat": "yc-warn", "inverted": "yc-bad"}
             _macro_yc = _yc_map.get(_yc, "—")
             _macro_yc_cls = _yc_cls_map.get(_yc, "")
+            # 黄金指标
+            _gld_trend = _mctx.get("gold_trend", "stable")
+            _gld_chg = _mctx.get("gold_change_pct", 0.0)
+            if _gld_trend in ("surging", "rising", "falling"):
+                _macro_gld = f"{_gld_chg:+.1f}%"
+                _macro_gld_cls = "gld-up" if _gld_chg > 0 else "gld-dn"
+            elif _mctx.get("gold_price"):
+                _macro_gld = f"${_mctx['gold_price']:.0f}"
             # 板块轮动 HTML
             _sr = _mctx.get("sector_rotation", {})
             if _sr.get("hot") or _sr.get("cold"):
@@ -1443,6 +1453,8 @@ def render_dashboard_html(report: Dict, date_str: str,
         macro_10y=_macro_10y,
         macro_yc=_macro_yc,
         macro_yc_cls=_macro_yc_cls,
+        macro_gld=_macro_gld,
+        macro_gld_cls=_macro_gld_cls,
         macro_sector_html=_macro_sector_html,
         top_n=min(6, len(all_tickers_sorted)),
         scores_chart_height="{}px".format(max(160, len(all_tickers_sorted) * 28)),
