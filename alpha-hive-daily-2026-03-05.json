@@ -1,6 +1,6 @@
 {
   "date": "2026-03-05",
-  "timestamp": "2026-03-05T07:03:24.532016",
+  "timestamp": "2026-03-05T07:22:55.197741",
   "system_status": "✅ 蜂群协作完成",
   "phase_completed": "完整蜂群流程 (Swarm Mode)",
   "swarm_metadata": {
@@ -22,108 +22,110 @@
   },
   "cross_ticker_analysis": {},
   "macro_context": {
-    "macro_regime": "neutral",
-    "macro_score": 4.8,
-    "vix": 22.11,
-    "vix_change_pct": 4.54,
+    "macro_regime": "risk_off",
+    "macro_score": 3.6,
+    "vix": 21.8,
+    "vix_change_pct": 3.07,
     "vix_regime": "elevated",
-    "treasury_10y": 4.146,
+    "treasury_10y": 4.131,
     "treasury_2y": 3.51,
-    "yield_spread": 63.6,
+    "yield_spread": 62.1,
     "yield_curve": "normal",
     "rate_environment": "moderate",
     "dollar_trend": "strong",
-    "market_trend": "neutral",
-    "spx_change_pct": -0.12,
-    "gold_price": 469.53,
-    "gold_change_pct": -0.48,
-    "gold_trend": "stable",
+    "market_trend": "bear",
+    "spx_change_pct": -0.52,
+    "gold_price": 466.83,
+    "gold_change_pct": -1.05,
+    "gold_trend": "falling",
     "sector_rotation": {
       "hot": [
         [
-          "XLK",
-          "科技",
-          1.74
-        ],
-        [
           "XLE",
           "能源",
-          1.22
+          1.55
+        ],
+        [
+          "XLK",
+          "科技",
+          1.29
         ],
         [
           "XLC",
           "通信",
-          0.75
+          0.51
         ]
       ],
       "cold": [
         [
           "XLB",
           "材料",
-          -3.33
+          -3.57
         ],
         [
           "XLV",
           "医疗",
-          -3.48
+          -3.74
         ],
         [
           "XLP",
           "必需消费",
-          -4.31
+          -4.79
         ]
       ],
       "full": {
         "XLK": [
           "科技",
-          1.74
+          1.29
         ],
         "XLV": [
           "医疗",
-          -3.48
+          -3.74
         ],
         "XLE": [
           "能源",
-          1.22
+          1.55
         ],
         "XLF": [
           "金融",
-          -0.04
+          -0.5
         ],
         "XLI": [
           "工业",
-          -1.54
+          -1.81
         ],
         "XLY": [
           "可选消费",
-          -0.03
+          -0.66
         ],
         "XLP": [
           "必需消费",
-          -4.31
+          -4.79
         ],
         "XLU": [
           "公用事业",
-          -1.89
+          -2.23
         ],
         "XLRE": [
           "房地产",
-          -1.25
+          -1.3
         ],
         "XLC": [
           "通信",
-          0.75
+          0.51
         ],
         "XLB": [
           "材料",
-          -3.33
+          -3.57
         ]
       }
     },
     "macro_headwinds": [
-      "美元走强（新兴市场 + 大宗商品承压）"
+      "美元走强（新兴市场 + 大宗商品承压）",
+      "大盘下行（-0.5%，贝塔风险放大）"
     ],
     "macro_tailwinds": [
+      "黄金回落-1.1%（风险偏好回升）",
       "CPI同比 2.4%（通胀受控，货币政策友好）"
     ],
     "fred_extras": {
@@ -137,7 +139,7 @@
     "cpi_yoy": 2.39,
     "unemployment": 4.3,
     "fed_funds_rate": 3.64,
-    "summary": "VIX 22.1(elevated) | 10Y 4.15% | 大盘-0.1% | 宏观:neutral | 曲线:正常 | CPI同比2.4%",
+    "summary": "VIX 21.8(elevated) | 10Y 4.13% | 大盘-0.5% | 宏观:risk_off | 曲线:正常 | CPI同比2.4% | 黄金回落-1.1%",
     "data_source": "yfinance+fred"
   },
   "backtest_stats": {
@@ -170,9 +172,9 @@
     },
     "by_ticker": {}
   },
-  "markdown_report": "# 【2026-03-05】Alpha Hive 蜂群协作日报\n\n**自动生成于**：2026-03-05 07:03:24\n**系统模式**：完全去中心化蜂群协作 | 8 个自治工蜂（6 核心 + BearBeeContrarian）\n\n## 1) 今日摘要\n\n- 扫描标的：1 个 | 共振信号：0/1\n- **NVDA** NEUTRAL 5.3/10 \n\n## 2) 今日聪明钱动向\n\n### NVDA\n- Puri Ajay K 授予 103,278股 | 拥挤度 38/100（中等拥挤度） | 动量 +2.9% | 历史5条:多4/空0,均分6.1\n- 内幕交易情绪：**neutral** | 申报数：5\n  - Puri Ajay K：授予 103,278 股\n  - Shoquist Debora：授予 98,328 股\n- 拥挤度：38/100\n\n## 3) 市场隐含预期\n\n### NVDA\n- 信号平衡 | 异常流:混合期权流 Call:44 Put:53 | $182.4 | 预测市场看多（隐含概率 99%） | 历史5条:多4/空0,均分6.1\n- IV Rank：24.18\n- Put/Call Ratio：0.84\n- Gamma Exposure：0.0\n- 异常活动：3 个信号\n  - 看跌 put sweep $230.0 (1,265手)\n  - 看跌 put sweep $250.0 (180手)\n  - 看跌 put sweep $210.0 (22手)\n\n## 4) X 情绪汇总\n\n### NVDA\n- 情绪 55% | 动量 +2.9% | 量比 0.1x | Reddit #4(hot,122提及) | 新闻中性（4多/3空/23中） | 未上 Yahoo 热搜 | F&G 22(Extreme Fear) | 历史5条:多4/空0,均分6.1\n- 看多情绪：55%\n- 5 日动量：+2.9%\n- 量比：0.1x\n\n## 5) 财报/事件催化剂\n\n### NVDA\n- 催化剂 4 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多4/空0,均分6.1\n  - 2026-03-10：Ex-Dividend Date\n  - 2025-12-25：Dividend Date\n  - 2026-03-15：Q4 FY2026 财报发布\n\n## 6) 竞争格局分析\n\n### NVDA\n- ML 胜率 19% | 7d +0.75% | 30d +0.95% | 历史5条:多4/空0,均分6.1\n\n## 6.5) 看空对冲观点\n\n> BearBeeContrarian 专门寻找看空信号，平衡蜂群系统性看多偏差\n\n### NVDA (风险提示 | 看空强度 0.8/10)\n- 量能萎缩 0.1x（参与度下降）\n- *数据来源*：insider=SEC直查 | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n## 7) 综合判断 & 信号强度\n\n| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |\n|------|------|--------|------|---------------|-------|---------|\n| **NVDA** | NEUTRAL | 5.3 | N | 2/0/5 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n\n### 交叉验证详情\n\n- **NVDA**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 0.95 | 历史5条:多4/空0,均分6.1 | 板块顺风\n\n## 🌐 宏观环境 🟡\n\n**宏观政体**：NEUTRAL | **评分**：4.8/10\n\n| 指标 | 数值 | 状态 |\n|------|------|------|\n| VIX | 22.1 | elevated |\n| 10Y利率 | 4.15% | moderate |\n| 大盘(5日) | -0.12% | neutral |\n| 美元 | — | strong |\n\n**逆风**：美元走强（新兴市场 + 大宗商品承压）\n\n**顺风**：CPI同比 2.4%（通胀受控，货币政策友好）\n\n## 8) 数据来源 & 免责声明\n\n**蜂群分工**：\n- ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）\n- OracleBeeEcho：市场预期（期权 IV/P-C Ratio/Gamma）\n- BuzzBeeWhisper：社交情绪（X/Reddit/Finviz）\n- ChronosBeeHorizon：催化剂追踪（财报/事件日历）\n- RivalBeeVanguard：竞争格局（ML 预测 + 行业对标）\n- GuardBeeSentinel：交叉验证（共振检测 + 风险调整）\n\n**免责声明**：\n本报告为蜂群 AI 分析，不构成投资建议，不替代持牌投顾。预测存在误差，所有交易决策需自行判断和风控。\n",
+  "markdown_report": "# 【2026-03-05】Alpha Hive 蜂群协作日报\n\n**自动生成于**：2026-03-05 07:22:55\n**系统模式**：完全去中心化蜂群协作 | 8 个自治工蜂（6 核心 + BearBeeContrarian）\n\n## 1) 今日摘要\n\n- 扫描标的：1 个 | 共振信号：0/1\n- **NVDA** NEUTRAL 4.8/10 \n\n## 2) 今日聪明钱动向\n\n### NVDA\n- Puri Ajay K 授予 103,278股 | 拥挤度 38/100（中等拥挤度） | 动量 +2.8% | 历史5条:多4/空0,均分6.6\n- 内幕交易情绪：**neutral** | 申报数：5\n  - Puri Ajay K：授予 103,278 股\n  - Shoquist Debora：授予 98,328 股\n- 拥挤度：38/100\n\n## 3) 市场隐含预期\n\n### NVDA\n- 信号平衡 | 异常流:混合期权流 Call:40 Put:56 | $182.1 | 预测市场看多（隐含概率 99%） | 历史5条:多4/空0,均分6.6\n- IV Rank：27.18\n- Put/Call Ratio：0.84\n- Gamma Exposure：0.0\n- 异常活动：3 个信号\n  - 看跌 put sweep $230.0 (1,265手)\n  - 看跌 put sweep $250.0 (180手)\n  - 看跌 put sweep $210.0 (22手)\n\n## 4) X 情绪汇总\n\n### NVDA\n- 情绪 53% | 动量 +2.8% | 量比 0.2x | Reddit #4(hot,122提及) | 新闻中性（3多/4空/23中） | 未上 Yahoo 热搜 | F&G 22(Extreme Fear) | 历史5条:多4/空0,均分6.6\n- 看多情绪：53%\n- 5 日动量：+2.8%\n- 量比：0.2x\n\n## 5) 财报/事件催化剂\n\n### NVDA\n- 催化剂 4 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多4/空0,均分6.6\n  - 2026-03-10：Ex-Dividend Date\n  - 2025-12-25：Dividend Date\n  - 2026-03-15：Q4 FY2026 财报发布\n\n## 6) 竞争格局分析\n\n### NVDA\n- ML 胜率 19% | 7d +0.73% | 30d +0.93% | 历史5条:多4/空0,均分6.6\n\n## 6.5) 看空对冲观点\n\n> BearBeeContrarian 专门寻找看空信号，平衡蜂群系统性看多偏差\n\n### NVDA (风险提示 | 看空强度 0.8/10)\n- 量能萎缩 0.2x（参与度下降）\n- *数据来源*：insider=SEC直查 | valuation=yfinance | options=real | momentum=yfinance | news=Finviz\n\n## 7) 综合判断 & 信号强度\n\n| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |\n|------|------|--------|------|---------------|-------|---------|\n| **NVDA** | NEUTRAL | 4.8 | N | 2/0/5 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |\n\n### 评分调整说明\n\n- **NVDA**：🛡️ 风控折扣-0.22\n\n### 交叉验证详情\n\n- **NVDA**：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 0.95 | 历史5条:多4/空0,均分6.6 | 宏观:VIX 21.8(elevated) | 10Y 4.13% | 大盘-0.5% | 宏观:risk_off | 曲线:正常 | CPI同比2.4% | 黄金回落-1.1%(宏观风险偏好走弱（VIX 21.8(elevated) | 10Y 4.13% ) | 板块顺风\n\n## 🌐 宏观环境 🔴\n\n**宏观政体**：RISK_OFF | **评分**：3.6/10\n\n| 指标 | 数值 | 状态 |\n|------|------|------|\n| VIX | 21.8 | elevated |\n| 10Y利率 | 4.13% | moderate |\n| 大盘(5日) | -0.52% | bear |\n| 美元 | — | strong |\n\n**逆风**：美元走强（新兴市场 + 大宗商品承压） | 大盘下行（-0.5%，贝塔风险放大）\n\n**顺风**：黄金回落-1.1%（风险偏好回升） | CPI同比 2.4%（通胀受控，货币政策友好）\n\n## 8) 数据来源 & 免责声明\n\n**蜂群分工**：\n- ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）\n- OracleBeeEcho：市场预期（期权 IV/P-C Ratio/Gamma）\n- BuzzBeeWhisper：社交情绪（X/Reddit/Finviz）\n- ChronosBeeHorizon：催化剂追踪（财报/事件日历）\n- RivalBeeVanguard：竞争格局（ML 预测 + 行业对标）\n- GuardBeeSentinel：交叉验证（共振检测 + 风险调整）\n\n**免责声明**：\n本报告为蜂群 AI 分析，不构成投资建议，不替代持牌投顾。预测存在误差，所有交易决策需自行判断和风控。\n",
   "twitter_threads": [
-    "【Alpha Hive 蜂群日报 2026-03-05】7 个自治工蜂协作分析，多数投票共振信号。非投资建议，仅数据分析与情景推演。👇\n\n1. **NVDA** NEUTRAL\n蜂群评分：5.3/10 | 共振：❌\nAgent 投票：看多2 vs 看空0\n\n🐝 7 个工蜂独立分析（6 核心 + 看空对冲蜂）→ 信息素板实时交换 → 多数投票汇总\n高共振信号优先级最高。风险提示：控制仓位。\n下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
+    "【Alpha Hive 蜂群日报 2026-03-05】7 个自治工蜂协作分析，多数投票共振信号。非投资建议，仅数据分析与情景推演。👇\n\n1. **NVDA** NEUTRAL\n蜂群评分：4.8/10 | 共振：❌\nAgent 投票：看多2 vs 看空0\n\n🐝 7 个工蜂独立分析（6 核心 + 看空对冲蜂）→ 信息素板实时交换 → 多数投票汇总\n高共振信号优先级最高。风险提示：控制仓位。\n下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
   ],
   "opportunities": [
     {
@@ -198,7 +200,7 @@
       "rank": 1,
       "ticker": "NVDA",
       "direction": "中性",
-      "opp_score": 5.3,
+      "opp_score": 4.8,
       "confidence": "60%",
       "resonance": false,
       "supporting_agents": 7,

@@ -86,9 +86,6 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .hero-right{flex-shrink:0;width:260px;overflow:hidden;contain:paint}
 @media(max-width:768px){.hero-inner{flex-direction:column-reverse;gap:16px;padding-bottom:20px}
   .hero-right{width:160px;margin:0 auto}
-  .hero-stats{grid-template-columns:repeat(2,1fr)}
-  .hstat{padding:14px 10px}
-  .hstat-val{font-size:1.5em}
 }
 .hero-svg{width:100%;height:auto;overflow:hidden}
 @keyframes hive-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
@@ -104,6 +101,11 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
 .hstat:hover{background:rgba(244,165,50,.04)}
 .hstat-val{font-size:2.1em;font-weight:900;color:var(--acc);line-height:1}
 .hstat-lbl{font-size:.78em;color:rgba(255,255,255,.45);margin-top:5px;text-transform:uppercase;letter-spacing:.05em}
+@media(max-width:768px){
+  .hero-stats{grid-template-columns:repeat(2,1fr)}
+  .hstat{padding:14px 10px}
+  .hstat-val{font-size:1.5em}
+}
 /* MAIN */
 .main{max-width:1280px;margin:0 auto;padding:36px 28px}
 .section{background:var(--surface);border-radius:14px;padding:28px;margin-bottom:24px;border:1px solid var(--border)}
@@ -547,10 +549,10 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 
 </style>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"WebPage","name":"Alpha Hive 投资仪表板","description":"去中心化蜂群智能投资研究平台 — 9 标的每日扫描","dateModified":"2026-03-05 07:03 PST"}
+{"@context":"https://schema.org","@type":"WebPage","name":"Alpha Hive 投资仪表板","description":"去中心化蜂群智能投资研究平台 — 9 标的每日扫描","dateModified":"2026-03-05 07:23 PST"}
 </script>
 </head>
-<body data-generated="2026-03-05 07:03 PST">
+<body data-generated="2026-03-05 07:23 PST">
 <a href="#main-content" class="skip-link">跳转到主内容</a>
 <!-- ── Fixed Nav ── -->
 <nav class="nav" role="navigation" aria-label="主导航">
@@ -582,7 +584,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
       <p class="hero-sub">8 自治工蜂协作 · SEC EDGAR 真实数据 · 每日自动扫描</p>
       <div class="hero-tldr">今天市场极度恐惧(F&G 22)，距非农就业报告还有1天，扫描9只标的发现6个看多、3个中性机会</div>
       <div class="hero-meta">
-        <span class="hero-time">🕐 2026-03-05 07:03 PST</span>
+        <span class="hero-time">🕐 2026-03-05 07:23 PST</span>
         <span class="hero-dbadge">📊 数据真实度 95%</span>
       </div>
     </div>
@@ -621,15 +623,15 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
       <div class="hstat-lbl">扫描标的</div>
     </div>
     <div class="hstat">
-      <div class="hstat-val">5.6</div>
+      <div class="hstat-val">5.5</div>
       <div class="hstat-lbl">平均综合分</div>
     </div>
     <div class="hstat">
-      <div class="hstat-val">22.1</div>
+      <div class="hstat-val">21.8</div>
       <div class="hstat-lbl">VIX 恐慌</div>
     </div>
     <div class="hstat">
-      <div class="hstat-val">4.15%</div>
+      <div class="hstat-val">4.13%</div>
       <div class="hstat-lbl">10Y 利率</div>
     </div>
     <div class="hstat">
@@ -637,11 +639,11 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
       <div class="hstat-lbl">收益率曲线</div>
     </div>
     <div class="hstat">
-      <div class="hstat-val ">$470</div>
+      <div class="hstat-val gld-dn">-1.1%</div>
       <div class="hstat-lbl">黄金 GLD</div>
     </div>
   </div>
-  <div class="macro-sectors"><span class="sec-label">板块轮动(5日)</span> <span class="sec-hot">科技+1.7%</span> <span class="sec-hot">能源+1.2%</span> <span class="sec-hot">通信+0.8%</span> <span class="sec-cold">医疗-3.5%</span> <span class="sec-cold">必需消费-4.3%</span></div>
+  <div class="macro-sectors"><span class="sec-label">板块轮动(5日)</span> <span class="sec-hot">能源+1.6%</span> <span class="sec-hot">科技+1.3%</span> <span class="sec-hot">通信+0.5%</span> <span class="sec-cold">医疗-3.7%</span> <span class="sec-cold">必需消费-4.8%</span></div>
 </section>
 
 <div class="main">
@@ -694,24 +696,24 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
             <a href="alpha-hive-BILI-ml-enhanced-2026-03-05.html" class="ml-btn">ML 详情 →</a>
           </div>
         </div>
-        <div class="scard" data-dir="neutral" data-score="5.3" onclick="scrollToDeep('NVDA')">
-          <button class="scard-share" onclick="event.stopPropagation();shareCard('NVDA',5.3)">𝕏</button>
+        <div class="scard" data-dir="neutral" data-score="4.8" onclick="scrollToDeep('NVDA')">
+          <button class="scard-share" onclick="event.stopPropagation();shareCard('NVDA',4.8)">𝕏</button>
           <div class="scard-head">
             <div class="slogo-wrap"><img class="slogo" src="https://logo.clearbit.com/nvidia.com" loading="lazy" width="42" height="42" alt="NVDA" onerror="this.style.display='none';this.nextSibling.style.display='flex'"><div class="slogo-fb" style="display:none">NV</div><span class="srank">#2</span></div>
-            <div class="scard-badges"><span class="sdir sdir-neut">🟡 中性</span><span class="risk-badge risk-low">低风险</span></div>
+            <div class="scard-badges"><span class="sdir sdir-neut">🟡 中性</span><span class="risk-badge risk-med">中风险</span></div>
           </div>
           <div class="scard-body">
             <div class="sticker">NVDA</div>
             <div class="score-row">
-              <span class="score-big sc-l">5.3</span><span class="score-delta delta-dn">↓-0.6</span>
+              <span class="score-big sc-l">4.8</span><span class="score-delta delta-dn">↓-1.1</span>
               <div class="sbar-wrap">
                 <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                <div class="sbar"><div class="sbar-fill fill-l" style="width:53%"></div></div>
+                <div class="sbar"><div class="sbar-fill fill-l" style="width:48%"></div></div>
               </div>
             </div>
-            <div class="dim-bars"><div class="dim-b-item" title="聪明钱交易信号（SEC 内幕交易、机构持仓变化）"><div class="dim-val" style="color:#ef4444">5</div><div class="dim-b" style="height:54%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item" title="未来催化剂事件清晰度（财报、FDA、产品发布）"><div class="dim-val" style="color:#f59e0b">7</div><div class="dim-b" style="height:68%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item" title="市场舆情方向与质量（新闻、Reddit）"><div class="dim-val" style="color:#f59e0b">6</div><div class="dim-b" style="height:55%;background:#f59e0b"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item" title="市场赔率错配（期权 IV、Put/Call）"><div class="dim-val" style="color:#ef4444">5</div><div class="dim-b" style="height:54%;background:#ef4444"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item" title="风险调整评估（回撤、流动性、拥挤度）"><div class="dim-val" style="color:#ef4444">4</div><div class="dim-b" style="height:41%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
+            <div class="dim-bars"><div class="dim-b-item" title="聪明钱交易信号（SEC 内幕交易、机构持仓变化）"><div class="dim-val" style="color:#ef4444">5</div><div class="dim-b" style="height:54%;background:#ef4444"></div><span class="dim-lbl">信号</span></div><div class="dim-b-item" title="未来催化剂事件清晰度（财报、FDA、产品发布）"><div class="dim-val" style="color:#f59e0b">7</div><div class="dim-b" style="height:68%;background:#f59e0b"></div><span class="dim-lbl">催化</span></div><div class="dim-b-item" title="市场舆情方向与质量（新闻、Reddit）"><div class="dim-val" style="color:#ef4444">5</div><div class="dim-b" style="height:53%;background:#ef4444"></div><span class="dim-lbl">情绪</span></div><div class="dim-b-item" title="市场赔率错配（期权 IV、Put/Call）"><div class="dim-val" style="color:#ef4444">5</div><div class="dim-b" style="height:49%;background:#ef4444"></div><span class="dim-lbl">赔率</span></div><div class="dim-b-item" title="风险调整评估（回撤、流动性、拥挤度）"><div class="dim-val" style="color:#ef4444">3</div><div class="dim-b" style="height:29%;background:#ef4444"></div><span class="dim-lbl">风险</span></div></div>
             <div class="catalyst-cd cat-normal"><span class="cat-icon">📅</span><span class="cat-text">财报 9天后</span></div>
-            <div class="sprice-row"><span class="sprice">$182.38</span><span class="sprice-chg sprice-up">+2.9%</span></div>
+            <div class="sprice-row"><span class="sprice">$182.15</span><span class="sprice-chg sprice-up">+2.8%</span></div>
             
             <div class="sinsight">财报约9天后，近期稳步上涨</div>
             <a href="alpha-hive-NVDA-ml-enhanced-2026-03-05.html" class="ml-btn">ML 详情 →</a>
@@ -862,16 +864,16 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
           <td style="color:var(--neut)">9.2</td>
           <td><a href="alpha-hive-BILI-ml-enhanced-2026-03-05.html" class="ml-btn-sm">查看</a></td>
         </tr>
-        <tr data-dir="neutral" data-score="5.3">
+        <tr data-dir="neutral" data-score="4.8">
           <td>2</td>
           <td><strong>NVDA</strong></td>
-          <td><span class="dcell-neut">中性</span> <span class="risk-badge risk-low">低风险</span></td>
-          <td class="sc-l"><strong>5.3</strong>/10 <span class="score-delta delta-dn">↓-0.6</span></td>
-          <td>$182.38</td>
-          <td><span class="sprice-up">+2.9%</span></td>
+          <td><span class="dcell-neut">中性</span> <span class="risk-badge risk-med">中风险</span></td>
+          <td class="sc-l"><strong>4.8</strong>/10 <span class="score-delta delta-dn">↓-1.1</span></td>
+          <td>$182.15</td>
+          <td><span class="sprice-up">+2.8%</span></td>
           <td><span class="res-n">无</span></td>
           <td>2/0/5</td>
-          <td>24.2</td>
+          <td>27.2</td>
           <td>0.84</td>
           <td style="color:var(--neut)">9.2</td>
           <td><a href="alpha-hive-NVDA-ml-enhanced-2026-03-05.html" class="ml-btn-sm">查看</a></td>
@@ -1013,11 +1015,11 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
             <div class="cc-footer"><a href="alpha-hive-BILI-ml-enhanced-2026-03-05.html" class="ml-btn-cc">ML 增强分析 →</a></div>
           </div>
         </div>
-        <div class="company-card" data-dir="neutral" data-score="5.3" id="deep-NVDA">
+        <div class="company-card" data-dir="neutral" data-score="4.8" id="deep-NVDA">
           <div class="cc-header" style="background:#7a5c1a;">
             <span class="cc-ticker">NVDA</span>
-            <span class="cc-dir">中性 →</span> <span class="risk-badge risk-low">低风险</span>
-            <span class="cc-score">5.3/10 <span class="score-delta delta-dn">↓-0.6</span></span>
+            <span class="cc-dir">中性 →</span> <span class="risk-badge risk-med">中风险</span>
+            <span class="cc-score">4.8/10 <span class="score-delta delta-dn">↓-1.1</span></span>
           </div>
           <div class="cc-body">
             <div class="sinsight" style="margin-bottom:10px">财报约9天后，近期稳步上涨</div>
@@ -1025,8 +1027,8 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
             
             <div class="cc-two">
               <div class="cc-metrics-col">
-                <div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">$182.38 <span class="sprice-chg sprice-up">+2.9%</span></span></div>
-                <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">24.2</span></div>
+                <div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">$182.15 <span class="sprice-chg sprice-up">+2.8%</span></span></div>
+                <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">27.2</span></div>
                 <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">0.84</span></div>
                 <div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:#28a745;font-weight:bold;">bullish</span></div>
                 <div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">+0.0k</span></div>
@@ -1037,8 +1039,8 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
             </div>
             <ul class="cc-signals"><li>📋 <strong>内幕：</strong>Puri Ajay K 授予 103,278股</li>
                     <li>📊 <strong>期权：</strong>信号平衡</li>
-                    <li>💬 <strong>情绪：</strong>情绪 55%</li>
-                    <li>🐻 <strong>风险：</strong>量能萎缩 0.1x（参与度下降）</li></ul>
+                    <li>💬 <strong>情绪：</strong>情绪 53%</li>
+                    <li>🐻 <strong>风险：</strong>量能萎缩 0.2x（参与度下降）</li></ul>
             <div class="dim-dq-row"><span class="dq-item" title="信号 数据质量 87%"><span class="dq-lbl">信号</span><span class="dq-bar"><span class="dq-fill" style="width:87%;background:#28a745;"></span></span><span class="dq-val">87%</span></span><span class="dq-item" title="催化 数据质量 100%"><span class="dq-lbl">催化</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="情绪 数据质量 100%"><span class="dq-lbl">情绪</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="赔率 数据质量 100%"><span class="dq-lbl">赔率</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span><span class="dq-item" title="风险 数据质量 100%"><span class="dq-lbl">风险</span><span class="dq-bar"><span class="dq-fill" style="width:100%;background:#28a745;"></span></span><span class="dq-val">100%</span></span></div>
             <div class="thesis-break-box"><div class="tb-title">⚠️ 失效条件监控</div><div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list"><li>DataCenter Revenue Growth：季度环比下降 &gt; 5%</li><li>竞争对手新产品：AMD 或 Intel 发布超越 NVIDIA 的产品</li><li>中国芯片禁令：Polymarket 禁令概率 &gt; 60%</li></ul><div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list"><li>EPS 大幅低于预期：实际 &lt; 预期 20%+</li><li>美国芯片出口禁令：直接禁止对华 H100/H800 销售</li><li>CEO 离职：Jensen Huang 宣布离职</li></ul></div>
             <div class="cc-footer"><a href="alpha-hive-NVDA-ml-enhanced-2026-03-05.html" class="ml-btn-cc">ML 增强分析 →</a></div>
@@ -1268,21 +1270,21 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
     <h2 class="sec-title">完整蜂群简报</h2>
     <div class="report-body-wrap"><div class="report-body"><h1>【2026-03-05】Alpha Hive 蜂群协作日报</h1>
 <br>
-<p><strong>自动生成于</strong>：2026-03-05 07:03:24</p>
+<p><strong>自动生成于</strong>：2026-03-05 07:22:55</p>
 <p><strong>系统模式</strong>：完全去中心化蜂群协作 | 8 个自治工蜂（6 核心 + BearBeeContrarian）</p>
 <br>
 <h2>1) 今日摘要</h2>
 <br>
 <ul>
 <li>扫描标的：1 个 | 共振信号：0/1</li>
-<li><strong>NVDA</strong> NEUTRAL 5.3/10 </li>
+<li><strong>NVDA</strong> NEUTRAL 4.8/10 </li>
 </ul>
 <br>
 <h2>2) 今日聪明钱动向</h2>
 <br>
 <h3>NVDA</h3>
 <ul>
-<li>Puri Ajay K 授予 103,278股 | 拥挤度 38/100（中等拥挤度） | 动量 +2.9% | 历史5条:多4/空0,均分6.1</li>
+<li>Puri Ajay K 授予 103,278股 | 拥挤度 38/100（中等拥挤度） | 动量 +2.8% | 历史5条:多4/空0,均分6.6</li>
 <li>内幕交易情绪：<strong>neutral</strong> | 申报数：5</li>
 <ul class="sub-ul">
 <li>Puri Ajay K：授予 103,278 股</li>
@@ -1295,8 +1297,8 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 <br>
 <h3>NVDA</h3>
 <ul>
-<li>信号平衡 | 异常流:混合期权流 Call:44 Put:53 | $182.4 | 预测市场看多（隐含概率 99%） | 历史5条:多4/空0,均分6.1</li>
-<li>IV Rank：24.18</li>
+<li>信号平衡 | 异常流:混合期权流 Call:40 Put:56 | $182.1 | 预测市场看多（隐含概率 99%） | 历史5条:多4/空0,均分6.6</li>
+<li>IV Rank：27.18</li>
 <li>Put/Call Ratio：0.84</li>
 <li>Gamma Exposure：0.0</li>
 <li>异常活动：3 个信号</li>
@@ -1311,17 +1313,17 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 <br>
 <h3>NVDA</h3>
 <ul>
-<li>情绪 55% | 动量 +2.9% | 量比 0.1x | Reddit #4(hot,122提及) | 新闻中性（4多/3空/23中） | 未上 Yahoo 热搜 | F&amp;G 22(Extreme Fear) | 历史5条:多4/空0,均分6.1</li>
-<li>看多情绪：55%</li>
-<li>5 日动量：+2.9%</li>
-<li>量比：0.1x</li>
+<li>情绪 53% | 动量 +2.8% | 量比 0.2x | Reddit #4(hot,122提及) | 新闻中性（3多/4空/23中） | 未上 Yahoo 热搜 | F&amp;G 22(Extreme Fear) | 历史5条:多4/空0,均分6.6</li>
+<li>看多情绪：53%</li>
+<li>5 日动量：+2.8%</li>
+<li>量比：0.2x</li>
 </ul>
 <br>
 <h2>5) 财报/事件催化剂</h2>
 <br>
 <h3>NVDA</h3>
 <ul>
-<li>催化剂 4 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多4/空0,均分6.1</li>
+<li>催化剂 4 个 | 最近：Ex-Dividend Date（0天后） | 历史5条:多4/空0,均分6.6</li>
 <ul class="sub-ul">
 <li>2026-03-10：Ex-Dividend Date</li>
 <li>2025-12-25：Dividend Date</li>
@@ -1333,7 +1335,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 <br>
 <h3>NVDA</h3>
 <ul>
-<li>ML 胜率 19% | 7d +0.75% | 30d +0.95% | 历史5条:多4/空0,均分6.1</li>
+<li>ML 胜率 19% | 7d +0.73% | 30d +0.93% | 历史5条:多4/空0,均分6.6</li>
 </ul>
 <br>
 <h2>6.5) 看空对冲观点</h2>
@@ -1342,7 +1344,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 <br>
 <h3>NVDA (风险提示 | 看空强度 0.8/10)</h3>
 <ul>
-<li>量能萎缩 0.1x（参与度下降）</li>
+<li>量能萎缩 0.2x（参与度下降）</li>
 <li><em>数据来源</em>：insider=SEC直查 | valuation=yfinance | options=real | momentum=yfinance | news=Finviz</li>
 </ul>
 <br>
@@ -1350,28 +1352,34 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 <br>
 <p>| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |</p>
 <p>|------|------|--------|------|---------------|-------|---------|</p>
-<p>| <strong>NVDA</strong> | NEUTRAL | 5.3 | N | 2/0/5 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<p>| <strong>NVDA</strong> | NEUTRAL | 4.8 | N | 2/0/5 | 96% | 信号分散 | 均分 5.0 | 一致性 0% | 风险调整  |</p>
+<br>
+<h3>评分调整说明</h3>
+<br>
+<ul>
+<li><strong>NVDA</strong>：🛡️ 风控折扣-0.22</li>
+</ul>
 <br>
 <h3>交叉验证详情</h3>
 <br>
 <ul>
-<li><strong>NVDA</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 0.95 | 历史5条:多4/空0,均分6.1 | 板块顺风</li>
+<li><strong>NVDA</strong>：信号分散 | 均分 5.0 | 一致性 0% | 风险调整 0.95 | 历史5条:多4/空0,均分6.6 | 宏观:VIX 21.8(elevated) | 10Y 4.13% | 大盘-0.5% | 宏观:risk_off | 曲线:正常 | CPI同比2.4% | 黄金回落-1.1%(宏观风险偏好走弱（VIX 21.8(elevated) | 10Y 4.13% ) | 板块顺风</li>
 </ul>
 <br>
-<h2>🌐 宏观环境 🟡</h2>
+<h2>🌐 宏观环境 🔴</h2>
 <br>
-<p><strong>宏观政体</strong>：NEUTRAL | <strong>评分</strong>：4.8/10</p>
+<p><strong>宏观政体</strong>：RISK_OFF | <strong>评分</strong>：3.6/10</p>
 <br>
 <p>| 指标 | 数值 | 状态 |</p>
 <p>|------|------|------|</p>
-<p>| VIX | 22.1 | elevated |</p>
-<p>| 10Y利率 | 4.15% | moderate |</p>
-<p>| 大盘(5日) | -0.12% | neutral |</p>
+<p>| VIX | 21.8 | elevated |</p>
+<p>| 10Y利率 | 4.13% | moderate |</p>
+<p>| 大盘(5日) | -0.52% | bear |</p>
 <p>| 美元 | — | strong |</p>
 <br>
-<p><strong>逆风</strong>：美元走强（新兴市场 + 大宗商品承压）</p>
+<p><strong>逆风</strong>：美元走强（新兴市场 + 大宗商品承压） | 大盘下行（-0.5%，贝塔风险放大）</p>
 <br>
-<p><strong>顺风</strong>：CPI同比 2.4%（通胀受控，货币政策友好）</p>
+<p><strong>顺风</strong>：黄金回落-1.1%（风险偏好回升） | CPI同比 2.4%（通胀受控，货币政策友好）</p>
 <br>
 <h2>8) 数据来源 &amp; 免责声明</h2>
 <br>
@@ -1587,7 +1595,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 
 <footer class="footer">
   <p><span class="px-bee"></span> Alpha Hive — 去中心化蜂群智能投资研究平台</p>
-  <p>更新：2026-03-05 07:03 PST | 9 标的 | SEC 真实数据 | 真实度 95%</p>
+  <p>更新：2026-03-05 07:23 PST | 9 标的 | SEC 真实数据 | 真实度 95%</p>
   <div style="display:flex;justify-content:center;gap:10px;margin-top:10px;flex-wrap:wrap">
     <a href="rss.xml" class="share-btn" style="color:rgba(255,255,255,.7);border-color:rgba(255,255,255,.15)">📡 RSS 订阅</a>
     <button class="share-btn share-btn-x" id="btn-share-x-footer" style="border-color:rgba(255,255,255,.15);color:rgba(255,255,255,.7)">𝕏 Follow &amp; Share</button>
@@ -1612,7 +1620,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 <button class="scroll-top" id="scrollTop" aria-label="返回顶部">↑</button>
 
 <script>
-window.__AH__ = {"fv": 22, "fg_label": "极度恐惧", "scores": [["BILI", 6.1], ["NVDA", 5.3], ["TSLA", 5.2], ["AMZN", 6.4], ["MSFT", 5.8], ["CRCL", 5.6], ["VKTX", 5.1], ["META", 5.3], ["RKLB", 5.3]], "dir_counts": [6, 0, 3], "radar": {"BILI": [60.2, 40.0, 50.9, 56.4, 46.0], "NVDA": [54.8, 68.9, 55.6, 54.4, 41.0], "TSLA": [33.9, 55.0, 57.6, 64.5, 46.0], "AMZN": [33.3, 55.0, 62.9, 78.3, 46.0], "MSFT": [54.6, 63.0, 55.0, 78.3, 36.0], "CRCL": [33.2, 55.0, 62.2, 70.0, 46.0], "VKTX": [37.1, 55.0, 44.2, 75.5, 46.0], "META": [39.2, 63.0, 51.5, 59.0, 46.0], "RKLB": [37.5, 55.0, 52.3, 75.5, 46.0]}, "acc_dir_labels": ["看多", "看空", "中性"], "acc_dir_accs": [0.0, 0.0, 0.0], "acc_dir_tots": [0, 0, 0], "acc_weekly": [], "fg_history": [{"date": "2026-02-25", "value": 11}, {"date": "2026-02-26", "value": 13}, {"date": "2026-02-27", "value": 11}, {"date": "2026-02-28", "value": 11}, {"date": "2026-03-01", "value": 14}, {"date": "2026-03-02", "value": 10}, {"date": "2026-03-03", "value": 10}, {"date": "2026-03-04", "value": 22}, {"date": "2026-03-05", "value": 22}], "trend_data": {"BILI": [{"date": "2026-02-26", "score": 5.8}, {"date": "2026-02-27", "score": 5.8}, {"date": "2026-02-28", "score": 5.8}, {"date": "2026-03-01", "score": 5.2}, {"date": "2026-03-02", "score": 5.6}, {"date": "2026-03-03", "score": 5.9}, {"date": "2026-03-04", "score": 7.1}, {"date": "2026-03-05", "score": 6.1}], "NVDA": [{"date": "2026-02-25", "score": 6.1}, {"date": "2026-02-26", "score": 5.0}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-02", "score": 5.2}, {"date": "2026-03-03", "score": 4.5}, {"date": "2026-03-04", "score": 5.9}, {"date": "2026-03-05", "score": 5.3}], "TSLA": [{"date": "2026-02-25", "score": 5.5}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-03", "score": 4.0}, {"date": "2026-03-04", "score": 5.3}, {"date": "2026-03-05", "score": 5.2}], "AMZN": [{"date": "2026-02-26", "score": 5.3}, {"date": "2026-02-27", "score": 5.6}, {"date": "2026-02-28", "score": 5.6}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-03", "score": 5.0}, {"date": "2026-03-04", "score": 5.6}, {"date": "2026-03-05", "score": 6.4}], "MSFT": [{"date": "2026-02-25", "score": 7.5}, {"date": "2026-02-26", "score": 7.3}, {"date": "2026-02-27", "score": 7.6}, {"date": "2026-02-28", "score": 7.6}, {"date": "2026-03-01", "score": 7.0}, {"date": "2026-03-02", "score": 7.9}, {"date": "2026-03-03", "score": 5.3}, {"date": "2026-03-04", "score": 6.1}, {"date": "2026-03-05", "score": 5.8}], "CRCL": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-01", "score": 5.0}, {"date": "2026-03-02", "score": 5.5}, {"date": "2026-03-03", "score": 5.8}, {"date": "2026-03-04", "score": 6.2}, {"date": "2026-03-05", "score": 5.6}], "VKTX": [{"date": "2026-02-25", "score": 4.6}, {"date": "2026-02-27", "score": 4.5}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-04", "score": 5.0}, {"date": "2026-03-05", "score": 5.1}], "META": [{"date": "2026-02-26", "score": 5.7}, {"date": "2026-02-27", "score": 5.9}, {"date": "2026-02-28", "score": 5.9}, {"date": "2026-03-01", "score": 4.7}, {"date": "2026-03-02", "score": 5.2}, {"date": "2026-03-03", "score": 5.3}, {"date": "2026-03-05", "score": 5.3}], "RKLB": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-03", "score": 4.6}, {"date": "2026-03-04", "score": 5.1}, {"date": "2026-03-05", "score": 5.3}], "AAPL": [{"date": "2026-03-02", "score": 6.6}], "QCOM": [{"date": "2026-02-27", "score": 6.1}, {"date": "2026-02-28", "score": 6.1}], "AMD": [{"date": "2026-02-25", "score": 4.3}]}, "hist_full": {"2026-03-05": [{"ticker": "BILI", "score": 6.1, "direction": "看多"}, {"ticker": "NVDA", "score": 5.3, "direction": "中性"}, {"ticker": "TSLA", "score": 5.2, "direction": "中性"}, {"ticker": "AMZN", "score": 6.4, "direction": "看多"}, {"ticker": "MSFT", "score": 5.8, "direction": "看多"}, {"ticker": "CRCL", "score": 5.6, "direction": "看多"}, {"ticker": "VKTX", "score": 5.1, "direction": "bullish"}, {"ticker": "META", "score": 5.3, "direction": "neutral"}, {"ticker": "RKLB", "score": 5.3, "direction": "bullish"}], "2026-03-04": [{"ticker": "NVDA", "score": 5.9, "direction": "看多"}, {"ticker": "VKTX", "score": 5.0, "direction": "中性"}, {"ticker": "TSLA", "score": 5.3, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}, {"ticker": "RKLB", "score": 5.1, "direction": "看多"}, {"ticker": "MSFT", "score": 6.1, "direction": "看多"}, {"ticker": "CRCL", "score": 6.2, "direction": "看多"}, {"ticker": "BILI", "score": 7.1, "direction": "看多"}], "2026-03-03": [{"ticker": "BILI", "score": 5.9, "direction": "看多"}, {"ticker": "CRCL", "score": 5.8, "direction": "看多"}, {"ticker": "MSFT", "score": 5.3, "direction": "中性"}, {"ticker": "META", "score": 5.3, "direction": "中性"}, {"ticker": "RKLB", "score": 4.6, "direction": "中性"}, {"ticker": "NVDA", "score": 4.5, "direction": "看多"}, {"ticker": "TSLA", "score": 4.0, "direction": "看多"}, {"ticker": "AMZN", "score": 5.0, "direction": "看多"}], "2026-03-02": [{"ticker": "MSFT", "score": 7.9, "direction": "看多"}, {"ticker": "BILI", "score": 5.6, "direction": "看多"}, {"ticker": "CRCL", "score": 5.5, "direction": "看多"}, {"ticker": "NVDA", "score": 5.2, "direction": "中性"}, {"ticker": "META", "score": 5.2, "direction": "中性"}, {"ticker": "AAPL", "score": 6.6, "direction": "看多"}], "2026-03-01": [{"ticker": "MSFT", "score": 7.0, "direction": "看多"}, {"ticker": "BILI", "score": 5.2, "direction": "看多"}, {"ticker": "META", "score": 4.7, "direction": "看多"}, {"ticker": "AMZN", "score": 4.8, "direction": "看多"}, {"ticker": "VKTX", "score": 4.8, "direction": "中性"}, {"ticker": "CRCL", "score": 5.0, "direction": "中性"}], "2026-02-28": [{"ticker": "MSFT", "score": 7.6, "direction": "看多"}, {"ticker": "QCOM", "score": 6.1, "direction": "看多"}, {"ticker": "META", "score": 5.9, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}], "2026-02-27": [{"ticker": "MSFT", "score": 7.6, "direction": "看多"}, {"ticker": "META", "score": 5.9, "direction": "看多"}, {"ticker": "QCOM", "score": 6.1, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}, {"ticker": "NVDA", "score": 5.0, "direction": "看多"}, {"ticker": "TSLA", "score": 5.0, "direction": "看多"}, {"ticker": "VKTX", "score": 4.5, "direction": "中性"}, {"ticker": "RKLB", "score": 4.2, "direction": "中性"}, {"ticker": "CRCL", "score": 4.2, "direction": "中性"}], "2026-02-26": [{"ticker": "MSFT", "score": 7.3, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "META", "score": 5.7, "direction": "看多"}, {"ticker": "AMZN", "score": 5.3, "direction": "看多"}, {"ticker": "NVDA", "score": 5.0, "direction": "看多"}], "2026-02-25": [{"ticker": "MSFT", "score": 7.5, "direction": "看多"}, {"ticker": "NVDA", "score": 6.1, "direction": "看多"}, {"ticker": "TSLA", "score": 5.5, "direction": "看多"}, {"ticker": "VKTX", "score": 4.6, "direction": "中性"}, {"ticker": "AMD", "score": 4.3, "direction": "中性"}]}, "search_index": [{"ticker": "BILI", "score": 6.1, "direction": "看多", "price": 27.5}, {"ticker": "NVDA", "score": 5.3, "direction": "中性", "price": 182.38}, {"ticker": "TSLA", "score": 5.2, "direction": "中性", "price": 405.94}, {"ticker": "AMZN", "score": 6.4, "direction": "看多", "price": 216.82}, {"ticker": "MSFT", "score": 5.8, "direction": "看多", "price": 405.2}, {"ticker": "CRCL", "score": 5.6, "direction": "看多", "price": 105.27}, {"ticker": "VKTX", "score": 5.1, "direction": "看多", "price": 32.14}, {"ticker": "META", "score": 5.3, "direction": "中性", "price": 667.73}, {"ticker": "RKLB", "score": 5.3, "direction": "看多", "price": 71.91}], "_generated_at": "2026-03-05 07:03 PST", "_date": "2026-03-05"};
+window.__AH__ = {"fv": 22, "fg_label": "极度恐惧", "scores": [["BILI", 6.1], ["NVDA", 4.8], ["TSLA", 5.2], ["AMZN", 6.4], ["MSFT", 5.8], ["CRCL", 5.6], ["VKTX", 5.1], ["META", 5.3], ["RKLB", 5.3]], "dir_counts": [6, 0, 3], "radar": {"BILI": [60.2, 40.0, 50.9, 56.4, 46.0], "NVDA": [54.7, 68.9, 53.0, 49.9, 29.0], "TSLA": [33.9, 55.0, 57.6, 64.5, 46.0], "AMZN": [33.3, 55.0, 62.9, 78.3, 46.0], "MSFT": [54.6, 63.0, 55.0, 78.3, 36.0], "CRCL": [33.2, 55.0, 62.2, 70.0, 46.0], "VKTX": [37.1, 55.0, 44.2, 75.5, 46.0], "META": [39.2, 63.0, 51.5, 59.0, 46.0], "RKLB": [37.5, 55.0, 52.3, 75.5, 46.0]}, "acc_dir_labels": ["看多", "看空", "中性"], "acc_dir_accs": [0.0, 0.0, 0.0], "acc_dir_tots": [0, 0, 0], "acc_weekly": [], "fg_history": [{"date": "2026-02-25", "value": 11}, {"date": "2026-02-26", "value": 13}, {"date": "2026-02-27", "value": 11}, {"date": "2026-02-28", "value": 11}, {"date": "2026-03-01", "value": 14}, {"date": "2026-03-02", "value": 10}, {"date": "2026-03-03", "value": 10}, {"date": "2026-03-04", "value": 22}, {"date": "2026-03-05", "value": 22}], "trend_data": {"BILI": [{"date": "2026-02-26", "score": 5.8}, {"date": "2026-02-27", "score": 5.8}, {"date": "2026-02-28", "score": 5.8}, {"date": "2026-03-01", "score": 5.2}, {"date": "2026-03-02", "score": 5.6}, {"date": "2026-03-03", "score": 5.9}, {"date": "2026-03-04", "score": 7.1}, {"date": "2026-03-05", "score": 6.1}], "NVDA": [{"date": "2026-02-25", "score": 6.1}, {"date": "2026-02-26", "score": 5.0}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-02", "score": 5.2}, {"date": "2026-03-03", "score": 4.5}, {"date": "2026-03-04", "score": 5.9}, {"date": "2026-03-05", "score": 4.8}], "TSLA": [{"date": "2026-02-25", "score": 5.5}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-03", "score": 4.0}, {"date": "2026-03-04", "score": 5.3}, {"date": "2026-03-05", "score": 5.2}], "AMZN": [{"date": "2026-02-26", "score": 5.3}, {"date": "2026-02-27", "score": 5.6}, {"date": "2026-02-28", "score": 5.6}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-03", "score": 5.0}, {"date": "2026-03-04", "score": 5.6}, {"date": "2026-03-05", "score": 6.4}], "MSFT": [{"date": "2026-02-25", "score": 7.5}, {"date": "2026-02-26", "score": 7.3}, {"date": "2026-02-27", "score": 7.6}, {"date": "2026-02-28", "score": 7.6}, {"date": "2026-03-01", "score": 7.0}, {"date": "2026-03-02", "score": 7.9}, {"date": "2026-03-03", "score": 5.3}, {"date": "2026-03-04", "score": 6.1}, {"date": "2026-03-05", "score": 5.8}], "CRCL": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-01", "score": 5.0}, {"date": "2026-03-02", "score": 5.5}, {"date": "2026-03-03", "score": 5.8}, {"date": "2026-03-04", "score": 6.2}, {"date": "2026-03-05", "score": 5.6}], "VKTX": [{"date": "2026-02-25", "score": 4.6}, {"date": "2026-02-27", "score": 4.5}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-04", "score": 5.0}, {"date": "2026-03-05", "score": 5.1}], "META": [{"date": "2026-02-26", "score": 5.7}, {"date": "2026-02-27", "score": 5.9}, {"date": "2026-02-28", "score": 5.9}, {"date": "2026-03-01", "score": 4.7}, {"date": "2026-03-02", "score": 5.2}, {"date": "2026-03-03", "score": 5.3}, {"date": "2026-03-05", "score": 5.3}], "RKLB": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-03", "score": 4.6}, {"date": "2026-03-04", "score": 5.1}, {"date": "2026-03-05", "score": 5.3}], "AAPL": [{"date": "2026-03-02", "score": 6.6}], "QCOM": [{"date": "2026-02-27", "score": 6.1}, {"date": "2026-02-28", "score": 6.1}], "AMD": [{"date": "2026-02-25", "score": 4.3}]}, "hist_full": {"2026-03-05": [{"ticker": "BILI", "score": 6.1, "direction": "看多"}, {"ticker": "NVDA", "score": 4.8, "direction": "中性"}, {"ticker": "TSLA", "score": 5.2, "direction": "中性"}, {"ticker": "AMZN", "score": 6.4, "direction": "看多"}, {"ticker": "MSFT", "score": 5.8, "direction": "看多"}, {"ticker": "CRCL", "score": 5.6, "direction": "看多"}, {"ticker": "VKTX", "score": 5.1, "direction": "bullish"}, {"ticker": "META", "score": 5.3, "direction": "neutral"}, {"ticker": "RKLB", "score": 5.3, "direction": "bullish"}], "2026-03-04": [{"ticker": "NVDA", "score": 5.9, "direction": "看多"}, {"ticker": "VKTX", "score": 5.0, "direction": "中性"}, {"ticker": "TSLA", "score": 5.3, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}, {"ticker": "RKLB", "score": 5.1, "direction": "看多"}, {"ticker": "MSFT", "score": 6.1, "direction": "看多"}, {"ticker": "CRCL", "score": 6.2, "direction": "看多"}, {"ticker": "BILI", "score": 7.1, "direction": "看多"}], "2026-03-03": [{"ticker": "BILI", "score": 5.9, "direction": "看多"}, {"ticker": "CRCL", "score": 5.8, "direction": "看多"}, {"ticker": "MSFT", "score": 5.3, "direction": "中性"}, {"ticker": "META", "score": 5.3, "direction": "中性"}, {"ticker": "RKLB", "score": 4.6, "direction": "中性"}, {"ticker": "NVDA", "score": 4.5, "direction": "看多"}, {"ticker": "TSLA", "score": 4.0, "direction": "看多"}, {"ticker": "AMZN", "score": 5.0, "direction": "看多"}], "2026-03-02": [{"ticker": "MSFT", "score": 7.9, "direction": "看多"}, {"ticker": "BILI", "score": 5.6, "direction": "看多"}, {"ticker": "CRCL", "score": 5.5, "direction": "看多"}, {"ticker": "NVDA", "score": 5.2, "direction": "中性"}, {"ticker": "META", "score": 5.2, "direction": "中性"}, {"ticker": "AAPL", "score": 6.6, "direction": "看多"}], "2026-03-01": [{"ticker": "MSFT", "score": 7.0, "direction": "看多"}, {"ticker": "BILI", "score": 5.2, "direction": "看多"}, {"ticker": "META", "score": 4.7, "direction": "看多"}, {"ticker": "AMZN", "score": 4.8, "direction": "看多"}, {"ticker": "VKTX", "score": 4.8, "direction": "中性"}, {"ticker": "CRCL", "score": 5.0, "direction": "中性"}], "2026-02-28": [{"ticker": "MSFT", "score": 7.6, "direction": "看多"}, {"ticker": "QCOM", "score": 6.1, "direction": "看多"}, {"ticker": "META", "score": 5.9, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}], "2026-02-27": [{"ticker": "MSFT", "score": 7.6, "direction": "看多"}, {"ticker": "META", "score": 5.9, "direction": "看多"}, {"ticker": "QCOM", "score": 6.1, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}, {"ticker": "NVDA", "score": 5.0, "direction": "看多"}, {"ticker": "TSLA", "score": 5.0, "direction": "看多"}, {"ticker": "VKTX", "score": 4.5, "direction": "中性"}, {"ticker": "RKLB", "score": 4.2, "direction": "中性"}, {"ticker": "CRCL", "score": 4.2, "direction": "中性"}], "2026-02-26": [{"ticker": "MSFT", "score": 7.3, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "META", "score": 5.7, "direction": "看多"}, {"ticker": "AMZN", "score": 5.3, "direction": "看多"}, {"ticker": "NVDA", "score": 5.0, "direction": "看多"}], "2026-02-25": [{"ticker": "MSFT", "score": 7.5, "direction": "看多"}, {"ticker": "NVDA", "score": 6.1, "direction": "看多"}, {"ticker": "TSLA", "score": 5.5, "direction": "看多"}, {"ticker": "VKTX", "score": 4.6, "direction": "中性"}, {"ticker": "AMD", "score": 4.3, "direction": "中性"}]}, "search_index": [{"ticker": "BILI", "score": 6.1, "direction": "看多", "price": 27.5}, {"ticker": "NVDA", "score": 4.8, "direction": "中性", "price": 182.15}, {"ticker": "TSLA", "score": 5.2, "direction": "中性", "price": 405.94}, {"ticker": "AMZN", "score": 6.4, "direction": "看多", "price": 216.82}, {"ticker": "MSFT", "score": 5.8, "direction": "看多", "price": 405.2}, {"ticker": "CRCL", "score": 5.6, "direction": "看多", "price": 105.27}, {"ticker": "VKTX", "score": 5.1, "direction": "看多", "price": 32.14}, {"ticker": "META", "score": 5.3, "direction": "中性", "price": 667.73}, {"ticker": "RKLB", "score": 5.3, "direction": "看多", "price": 71.91}], "_generated_at": "2026-03-05 07:23 PST", "_date": "2026-03-05"};
 // ── Global Error Boundary ──
 (function(){
   var errCount=0, maxToast=3;
