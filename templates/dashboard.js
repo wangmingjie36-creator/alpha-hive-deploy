@@ -1,3 +1,7 @@
+// ── Safe localStorage (F1: 隐私模式/配额满时不崩溃) ──
+function _ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v);}catch(e){return null;}}
+// ── Unified Namespace (F4: 减少全局污染) ──
+window.AH=window.AH||{};
 // ── Global Error Boundary ──
 (function(){
   var errCount=0, maxToast=3;
@@ -34,11 +38,11 @@ if('serviceWorker' in navigator && location.protocol==='https:'){
 // ── Auto dark mode from system preference ──
 (function(){
   var mq = window.matchMedia('(prefers-color-scheme: dark)');
-  if(mq.matches && !localStorage.getItem('ah-theme')) {
+  if(mq.matches && !_ls('ah-theme')) {
     document.documentElement.classList.add('dark');
   }
   mq.addEventListener('change', function(e) {
-    if(!localStorage.getItem('ah-theme')) {
+    if(!_ls('ah-theme')) {
       document.documentElement.classList.toggle('dark', e.matches);
     }
   });
@@ -59,13 +63,13 @@ function toggleDark(){
   const h=document.documentElement;
   h.classList.toggle('dark');
   const isDark=h.classList.contains('dark');
-  localStorage.setItem('ahDark',isDark?'1':'0');
-  localStorage.setItem('ah-theme',isDark?'dark':'light');
+  _ls('ahDark',isDark?'1':'0');
+  _ls('ah-theme',isDark?'dark':'light');
   document.getElementById('darkBtn').textContent=isDark?'☀️ 亮色':'🌙 暗黑';
   chartInstances.forEach(function(c){try{c.destroy();}catch(e){}});
   chartInstances.length=0;
-  if(window._ahRendered){
-    Object.keys(window._ahRendered).forEach(function(k){delete window._ahRendered[k];});
+  if(window.AH.rendered){
+    Object.keys(window.AH.rendered).forEach(function(k){delete window.AH.rendered[k];});
   }
   document.querySelectorAll('canvas.rendered').forEach(function(c){
     c.classList.remove('rendered');
@@ -73,29 +77,29 @@ function toggleDark(){
     if(w) w.classList.remove('skel-done');
   });
   setTimeout(function(){
-    if(window._ahRenderChart){
-      ['fgChart','scoresChart','dirChart'].forEach(window._ahRenderChart);
+    if(window.AH.renderChart){
+      ['fgChart','scoresChart','dirChart'].forEach(window.AH.renderChart);
     }
-    if(window._ahRenderRadar && window._ahRadarKeys){
-      window._ahRadarKeys.forEach(window._ahRenderRadar);
+    if(window.AH.renderRadar && window.AH.radarKeys){
+      window.AH.radarKeys.forEach(window.AH.renderRadar);
     }
-    if(window._ahInitFgTrend) window._ahInitFgTrend();
-    if(window._ahTrendChart){
+    if(window.AH.initFgTrend) window.AH.initFgTrend();
+    if(window.AH.trendChart){
       try{
         const tc=isDark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
         const gc=isDark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
-        const s=window._ahTrendChart.options.scales;
+        const s=window.AH.trendChart.options.scales;
         if(s.x){s.x.grid.color=gc;s.x.ticks.color=tc;}
         if(s.y){s.y.grid.color=gc;s.y.ticks.color=tc;}
         if(s.y1&&s.y1.ticks)s.y1.ticks.color='#F4A532';
-        const leg=window._ahTrendChart.options.plugins.legend;
+        const leg=window.AH.trendChart.options.plugins.legend;
         if(leg&&leg.labels)leg.labels.color=tc;
-        window._ahTrendChart.update();
+        window.AH.trendChart.update();
       }catch(e){}
     }
   },50);
 }
-if(localStorage.getItem('ahDark')==='1'){
+if(_ls('ahDark')==='1'){
   document.documentElement.classList.add('dark');
 }
 document.addEventListener('DOMContentLoaded',function(){
@@ -418,10 +422,10 @@ let chartInstances=[];
     Object.keys(rd).forEach(renderRadar);
   });
   // Expose for toggleDark re-render
-  window._ahRendered=rendered;
-  window._ahRenderChart=renderChart;
-  window._ahRenderRadar=renderRadar;
-  window._ahRadarKeys=Object.keys(rd);
+  window.AH.rendered=rendered;
+  window.AH.renderChart=renderChart;
+  window.AH.renderRadar=renderRadar;
+  window.AH.radarKeys=Object.keys(rd);
 })();
 
 // ── Accuracy Direction Chart ──
@@ -489,7 +493,7 @@ let chartInstances=[];
   const dark=document.documentElement.classList.contains('dark');
   const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
   const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
-  new Chart(cv,{
+  chartInstances.push(new Chart(cv,{
     type:'line',
     data:{
       labels:wd.map(function(d){return d.week;}),
@@ -512,7 +516,7 @@ let chartInstances=[];
         y1:{position:'right',grid:{display:false},ticks:{color:'#F4A532',font:{size:9},callback:function(v){return v+'%';}}}
       }
     }
-  });
+  }));
 })();
 window.addEventListener('pagehide',function(){chartInstances.forEach(function(c){try{c.destroy()}catch(e){}});chartInstances=[];});
 /* F37: Pause SVG SMIL animations when prefers-reduced-motion */
@@ -529,7 +533,7 @@ function scrollToDeep(ticker){
 
 // ── F7b: F&G Trend Mini Chart ──
 const _fgTrendHist=__AH__.fg_history;
-window._ahInitFgTrend=function(){
+window.AH.initFgTrend=function(){
   if(!_fgTrendHist||_fgTrendHist.length<2)return;
   const cv=document.getElementById('fgTrendChart');
   if(!cv||typeof Chart==='undefined')return;
@@ -553,7 +557,7 @@ window._ahInitFgTrend=function(){
     }
   }));
 };
-window._ahInitFgTrend();
+window.AH.initFgTrend();
 
 // ── F8a: Trend Chart ──
 (function(){
@@ -589,7 +593,7 @@ window._ahInitFgTrend();
       chipWrap.appendChild(chip);
     });
   }
-  const trendChart=window._ahTrendChart=new Chart(cv,{
+  const trendChart=window.AH.trendChart=new Chart(cv,{
     type:'line',
     data:{labels:dates.map(function(d){return d.slice(5);}),datasets:[]},
     options:{
@@ -602,6 +606,7 @@ window._ahInitFgTrend();
       interaction:{mode:'index',intersect:false}
     }
   });
+  chartInstances.push(trendChart);
   function updateTrendChart(){
     const datasets=[];
     tickers.forEach(function(tk,i){
@@ -621,7 +626,7 @@ window._ahInitFgTrend();
     trendChart.update();
   }
   updateTrendChart();
-  window._updateTrendChart=updateTrendChart;
+  window.AH.updateTrendChart=updateTrendChart;
 })();
 
 // ── F8b: Diff ──
@@ -929,7 +934,7 @@ function toggleKbHelp(){
 
   // Table search input
   var tableSearch=document.getElementById('tableSearch');
-  if(tableSearch) tableSearch.addEventListener('input',function(){ filterTable(); });
+  if(tableSearch){var _ftTimer;tableSearch.addEventListener('input',function(){clearTimeout(_ftTimer);_ftTimer=setTimeout(filterTable,200);});}
 })();
 
 // ── Sprint 4.2: Dynamic data refresh from dashboard-data.json ──

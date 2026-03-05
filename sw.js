@@ -1,6 +1,6 @@
-// Alpha Hive Service Worker - 20260305-0818
-var CACHE_NAME='alpha-hive-20260305-0818';
-var PRECACHE_URLS=['manifest.json',
+// Alpha Hive Service Worker - 20260305-0836
+var CACHE_NAME='alpha-hive-20260305-0836';
+var PRECACHE_URLS=['./', 'index.html', 'dashboard-data.json', 'manifest.json',
   'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'];
 
 self.addEventListener('install', function(e){

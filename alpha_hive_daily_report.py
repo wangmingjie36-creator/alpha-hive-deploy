@@ -2163,7 +2163,7 @@ class AlphaHiveDailyReporter:
         cache_name = f"alpha-hive-{_sw_ts}"
         sw_content = f"""// Alpha Hive Service Worker - {_sw_ts}
 var CACHE_NAME='{cache_name}';
-var PRECACHE_URLS=['manifest.json',
+var PRECACHE_URLS=['./', 'index.html', 'dashboard-data.json', 'manifest.json',
   'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'];
 
 self.addEventListener('install', function(e){{
