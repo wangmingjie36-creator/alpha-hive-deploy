@@ -1500,8 +1500,10 @@ class GuardBeeSentinel(BeeAgent):
                     if _nxt and _nxt.get("days_until", 99) <= 3 and _nxt.get("type") == "fomc":
                         score = max(1.0, min(10.0, score - 0.5))
                         discovery = f"{discovery} | ⚠️ FOMC {_nxt['days_until']}天后"
-                except (ImportError, Exception):
+                except ImportError:
                     pass
+                except Exception as e:
+                    _log.debug("P5b economic_calendar 失败: %s", e)
 
                 # P5c: 收益率曲线调整
                 _yc = macro.get("yield_curve", "unknown")

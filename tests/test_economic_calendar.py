@@ -42,6 +42,8 @@ class TestGetUpcomingEvents:
         events = get_upcoming_events(days=0, ref_date=date(2026, 6, 1))
         # days=0 means only events on the reference date itself
         assert isinstance(events, list)
+        # 所有返回事件的 days_until 必须为 0（当天事件）
+        assert all(e["days_until"] == 0 for e in events)
 
     def test_fomc_dates_2026(self):
         """验证 2026 FOMC 日期正确"""

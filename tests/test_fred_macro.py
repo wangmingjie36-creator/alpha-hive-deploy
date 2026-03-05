@@ -8,6 +8,15 @@ import pandas as pd
 import numpy as np
 
 
+@pytest.fixture(autouse=True)
+def _clear_fred_cache():
+    """每个测试后自动清理 fred_macro 缓存，防止测试污染"""
+    yield
+    import fred_macro
+    fred_macro._CACHE = {}
+    fred_macro._CACHE_TS = 0.0
+
+
 def _mock_yf_ticker(symbol, close_values):
     """创建模拟 yfinance Ticker 对象"""
     mock = MagicMock()
@@ -208,6 +217,36 @@ class TestSectorRotation:
         assert result["hot"] == []
         assert result["cold"] == []
 
+    def test_few_etfs_no_overlap(self):
+        """<6 个 ETF 时 hot/cold 不应重叠"""
+        from fred_macro import _fetch_sector_rotation
+
+        def mock_ticker(sym):
+            # 只有 3 个 ETF 返回有效数据
+            perf_map = {
+                "XLK": [100, 101, 102, 103, 105],   # +5%
+                "XLF": [100, 99, 98, 97, 96],        # -4%
+                "XLV": [100, 100, 100, 100, 101],    # +1%
+            }
+            if sym in perf_map:
+                return _mock_yf_ticker(sym, perf_map[sym])
+            # 其余 ETF 返回空数据
+            m = MagicMock()
+            m.history.return_value = pd.DataFrame()
+            return m
+
+        mock_yf = MagicMock()
+        mock_yf.Ticker = mock_ticker
+
+        result = _fetch_sector_rotation(mock_yf)
+        hot_set = {h[0] for h in result["hot"]}
+        cold_set = {c[0] for c in result["cold"]}
+        # 关键断言：无重叠
+        assert hot_set & cold_set == set(), f"hot/cold 重叠: {hot_set & cold_set}"
+        # 确保有输出
+        assert len(result["hot"]) >= 1
+        assert len(result["cold"]) >= 1
+
 
 class TestGetSectorEtfForTicker:
     """get_sector_etf_for_ticker() 测试"""
@@ -242,7 +281,4 @@ class TestCacheTTL:
 
         result = fred_macro.get_macro_context()
         assert result.get("test") is True  # 返回缓存版本
-
-        # 清理
-        fred_macro._CACHE = {}
-        fred_macro._CACHE_TS = 0.0
+        # 清理由 autouse fixture _clear_fred_cache 自动完成

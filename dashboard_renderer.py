@@ -797,8 +797,10 @@ def render_dashboard_html(report: Dict, date_str: str,
                     + " ".join(_sec_parts)
                     + '</div>'
                 )
-    except (ImportError, Exception):
+    except ImportError:
         pass
+    except Exception as e:
+        logging.getLogger("alpha_hive.dashboard").debug("宏观指标加载失败: %s", e)
 
     def _radar_data(ticker):
         sd  = swarm_detail.get(ticker, {})

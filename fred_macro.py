@@ -198,6 +198,22 @@ def _fetch_macro_data() -> Dict:
             else:
                 yield_curve = "normal"
 
+        # ---- FRED API（提前获取以修正 2Y 曲线数据）----
+        fred_data = {}
+        fred_key = _load_fred_key()
+        if fred_key:
+            fred_data = _fetch_fred_series(fred_key)
+            # FRED 精确 2Y 覆盖 5Y 近似
+            if fred_data.get("treasury_2y") is not None:
+                treasury_2y = fred_data["treasury_2y"]
+                yield_spread = round((tnx - treasury_2y) * 100, 1)
+                if yield_spread < -10:
+                    yield_curve = "inverted"
+                elif yield_spread < 20:
+                    yield_curve = "flat"
+                else:
+                    yield_curve = "normal"
+
         # ---- 板块轮动 ----
         sector_rotation = _fetch_sector_rotation(yf)
 
@@ -278,11 +294,8 @@ def _fetch_macro_data() -> Dict:
         if rate_env == "low":
             tailwinds.append(f"低利率环境（成长股估值友好）")
 
-        # ---- FRED API 补充（可选）----
-        fred_data = {}
-        fred_key = _load_fred_key()
-        if fred_key:
-            fred_data = _fetch_fred_series(fred_key)
+        # ---- FRED CPI/FFR 补充评分（FRED 数据已在 score 之前获取）----
+        if fred_data:
             if fred_data.get("cpi_yoy") is not None:
                 cpi = fred_data["cpi_yoy"]
                 if cpi > 4.0:
@@ -300,17 +313,6 @@ def _fetch_macro_data() -> Dict:
                     headwinds.append(f"联邦基金利率 {ffr:.2f}%（高利率压制成长估值）")
                 elif ffr <= 2.0:
                     tailwinds.append(f"联邦基金利率 {ffr:.2f}%（宽松环境）")
-
-        # ---- FRED 精确 2Y（如有 key 则覆盖 5Y 近似）----
-        if fred_data.get("treasury_2y") is not None:
-            treasury_2y = fred_data["treasury_2y"]
-            yield_spread = round((tnx - treasury_2y) * 100, 1)
-            if yield_spread < -10:
-                yield_curve = "inverted"
-            elif yield_spread < 20:
-                yield_curve = "flat"
-            else:
-                yield_curve = "normal"
 
         summary_parts = [
             f"VIX {vix:.1f}({vix_regime})",
@@ -457,8 +459,16 @@ def _fetch_sector_rotation(yf_module=None) -> Dict:
                 pass
         if performances:
             performances.sort(key=lambda x: x[2], reverse=True)
-            result["hot"] = performances[:3]
-            result["cold"] = performances[-3:]
+            if len(performances) >= 6:
+                result["hot"] = performances[:3]
+                result["cold"] = performances[-3:]
+            elif len(performances) >= 2:
+                mid = len(performances) // 2
+                result["hot"] = performances[:mid]
+                result["cold"] = performances[mid:]
+            else:
+                result["hot"] = performances[:1]
+                result["cold"] = []
     except Exception as e:
         _log.debug("板块轮动数据获取失败: %s", e)
     return result
