@@ -59,6 +59,7 @@ if('serviceWorker' in navigator && location.protocol==='https:'){
 })();
 
 // ── Dark Mode ──
+var _darkTimer;
 function toggleDark(){
   const h=document.documentElement;
   h.classList.toggle('dark');
@@ -76,7 +77,8 @@ function toggleDark(){
     const w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap');
     if(w) w.classList.remove('skel-done');
   });
-  setTimeout(function(){
+  clearTimeout(_darkTimer);
+  _darkTimer=setTimeout(function(){
     if(window.AH.renderChart){
       ['fgChart','scoresChart','dirChart'].forEach(window.AH.renderChart);
     }
