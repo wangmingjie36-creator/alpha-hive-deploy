@@ -157,14 +157,16 @@ class MemoryStore:
                 )
             """)
 
-            # 初始化 6 个 Agent 权重（如果不存在）
+            # 初始化 Agent 权重（如果不存在）—— S5: 新增 BearBee + Queen
             agent_ids = [
                 "ScoutBeeNova",
                 "OracleBeeEcho",
                 "BuzzBeeWhisper",
                 "ChronosBeeHorizon",
                 "RivalBeeVanguard",
-                "GuardBeeSentinel"
+                "GuardBeeSentinel",
+                "BearBeeContrarian",
+                "QueenDistiller",
             ]
 
             for agent_id in agent_ids:

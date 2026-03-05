@@ -28,6 +28,7 @@ class PheromoneEntry:
     support_count: int = 0
     supporting_agents: List[str] = field(default_factory=list)  # 去重：记录支持者
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    details: Dict = field(default_factory=dict)   # S3: 结构化键值对（替代正则解析）
 
 
 class PheromoneBoard:
@@ -216,7 +217,8 @@ class PheromoneBoard:
                     "direction": e.direction,
                     "pheromone_strength": round(e.pheromone_strength, 3),
                     "support_count": e.support_count,
-                    "timestamp": e.timestamp
+                    "timestamp": e.timestamp,
+                    "details": e.details,
                 }
                 for e in self._entries
             ]

@@ -261,15 +261,16 @@ class BeeAgent(ABC):
             - dimension: 对应的 5 维维度名 ("signal"/"catalyst"/"sentiment"/"odds"/"risk_adj")
         """
 
-    def _publish(self, ticker: str, discovery: str, source: str, score: float, direction: str):
-        """发布发现到信息素板"""
+    def _publish(self, ticker: str, discovery: str, source: str, score: float, direction: str, details: Dict = None):
+        """发布发现到信息素板（S3: 支持结构化 details 数据交换）"""
         entry = PheromoneEntry(
             agent_id=self.__class__.__name__,
             ticker=ticker,
             discovery=discovery,
             source=source,
             self_score=score,
-            direction=direction
+            direction=direction,
+            details=details or {},
         )
         self.board.publish(entry)
 
@@ -520,7 +521,13 @@ class ScoutBeeNova(BeeAgent):
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.debug("ScoutBeeNova LLM unavailable for %s: %s", ticker, e)
 
-            self._publish(ticker, discovery, "sec_edgar+crowding", score, direction)
+            # S3: 结构化数据交换（BearBee 可直接读取，替代正则解析）
+            _pub_details = {"crowding_score": crowding_score}
+            if insider_data:
+                _pub_details["insider_sold_usd"] = insider_data.get("dollar_sold", 0) or 0
+                _pub_details["insider_bought_usd"] = insider_data.get("dollar_bought", 0) or 0
+                _pub_details["insider_sentiment"] = insider_data.get("sentiment_score", 5.0)
+            self._publish(ticker, discovery, "sec_edgar+crowding", score, direction, details=_pub_details)
 
             # Phase 2: confidence = 数据完整度（内幕数据可用 + 拥挤度可用 + LLM 加成）
             confidence = 0.5
@@ -681,7 +688,13 @@ class OracleBeeEcho(BeeAgent):
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.debug("OracleBeeEcho LLM unavailable for %s: %s", ticker, e)
 
-            self._publish(ticker, discovery, "options+polymarket", score, direction)
+            # S3: 结构化数据交换（BearBee 可直接读取，替代正则解析）
+            _pub_details = {}
+            if result:
+                _pub_details["pc_ratio"] = result.get("put_call_ratio")
+                _pub_details["iv_rank"] = result.get("iv_rank")
+                _pub_details["gex"] = result.get("gex")
+            self._publish(ticker, discovery, "options+polymarket", score, direction, details=_pub_details)
 
             # Phase 2: confidence = 期权数据可用 + Polymarket 可用 + LLM 加成
             confidence = 0.4
@@ -1007,7 +1020,11 @@ class BuzzBeeWhisper(BeeAgent):
             if ctx:
                 discovery = f"{discovery} | {ctx}"
 
-            self._publish(ticker, discovery, "market_sentiment+reddit", round(score, 2), direction)
+            # S3: 结构化数据交换（BearBee 可直接读取，替代正则解析）
+            _pub_details = {"sentiment_score": bullish_pct}
+            if reddit_data:
+                _pub_details["reddit_momentum"] = reddit_data.get("momentum", 0)
+            self._publish(ticker, discovery, "market_sentiment+reddit", round(score, 2), direction, details=_pub_details)
 
             # confidence = 基础 0.5（yfinance）+ Reddit + Finviz + Yahoo + F&G + LLM
             confidence = 0.5
@@ -1664,11 +1681,16 @@ class BearBeeContrarian(BeeAgent):
             if scout_entry and scout_entry.discovery:
                 disc = scout_entry.discovery
                 data_sources["insider"] = "real"  # ScoutBee 真实 SEC 数据（经信息素板中转）
-                # 解析 ScoutBeeNova 的 discovery 文本提取内幕数据
-                sell_match = _RE_INSIDER_SELL.search(disc)
-                buy_match = _RE_INSIDER_BUY.search(disc)
-                sold = int(sell_match.group(1).replace(',', '')) if sell_match else 0
-                bought = int(buy_match.group(1).replace(',', '')) if buy_match else 0
+                # S3: 优先从结构化 details 读取，回退到正则解析
+                _sd = getattr(scout_entry, 'details', {}) or {}
+                if "insider_sold_usd" in _sd:
+                    sold = int(_sd.get("insider_sold_usd", 0))
+                    bought = int(_sd.get("insider_bought_usd", 0))
+                else:
+                    sell_match = _RE_INSIDER_SELL.search(disc)
+                    buy_match = _RE_INSIDER_BUY.search(disc)
+                    sold = int(sell_match.group(1).replace(',', '')) if sell_match else 0
+                    bought = int(buy_match.group(1).replace(',', '')) if buy_match else 0
 
                 if sold > 0 or bought > 0:
                     insider_data = {"dollar_sold": sold, "dollar_bought": bought}
@@ -1763,13 +1785,18 @@ class BearBeeContrarian(BeeAgent):
             if oracle_entry and oracle_entry.discovery:
                 disc = oracle_entry.discovery
                 data_sources["options"] = "real"  # OracleBee 真实期权数据（经信息素板中转）
-                pc_match = _RE_PC_RATIO.search(disc)
-                if not pc_match:
-                    pc_match = _RE_PC_SHORT.search(disc)
-                iv_match = _RE_IV_RANK.search(disc)
-
-                pc_ratio = float(pc_match.group(1)) if pc_match else None
-                iv_rank = float(iv_match.group(1)) if iv_match else None
+                # S3: 优先从结构化 details 读取，回退到正则解析
+                _od = getattr(oracle_entry, 'details', {}) or {}
+                if "pc_ratio" in _od:
+                    pc_ratio = _od.get("pc_ratio")
+                    iv_rank = _od.get("iv_rank")
+                else:
+                    pc_match = _RE_PC_RATIO.search(disc)
+                    if not pc_match:
+                        pc_match = _RE_PC_SHORT.search(disc)
+                    iv_match = _RE_IV_RANK.search(disc)
+                    pc_ratio = float(pc_match.group(1)) if pc_match else None
+                    iv_rank = float(iv_match.group(1)) if iv_match else None
 
                 if pc_ratio and pc_ratio > 1.5:
                     options_bear = 8.0
@@ -1863,9 +1890,13 @@ class BearBeeContrarian(BeeAgent):
             if buzz_entry and buzz_entry.discovery:
                 disc = buzz_entry.discovery
                 data_sources["news"] = "real"  # BuzzBee 真实情绪数据（经信息素板中转）
-                sent_match = _RE_SENTIMENT.search(disc)
-                if sent_match:
-                    sentiment_pct = int(sent_match.group(1))
+                # S3: 优先从结构化 details 读取，回退到正则解析
+                _bd = getattr(buzz_entry, 'details', {}) or {}
+                sentiment_pct = _bd.get("sentiment_score") if "sentiment_score" in _bd else None
+                if sentiment_pct is None:
+                    sent_match = _RE_SENTIMENT.search(disc)
+                    sentiment_pct = int(sent_match.group(1)) if sent_match else None
+                if sentiment_pct is not None:
                     if sentiment_pct < 30:
                         news_bear = 7.5
                         bearish_signals.append(f"市场情绪极度悲观 {sentiment_pct}%")
@@ -2139,25 +2170,41 @@ class QueenDistiller:
                 ml_adjustment = (ml_score - 5.0) * 0.1 * ml_conf
 
         # 4. 5 维 confidence-weighted 评分
-        # 新逻辑：低 confidence 缩小该维度的有效权重，而非把分拉向 5.0
-        # conf >= 0.5 → 全权重（不干预）
-        # conf <  0.5 → 线性缩小（conf=0.5 全权重；conf=0 权重=0）
-        # 优势：保留维度的实际观点（8.0 就是 8.0），高分+低置信度不会被错误地拉到 6 分
+        # 低 confidence 缩小该维度的有效权重，而非把分拉向 5.0
+        # conf >= 0.5 → 全权重；conf < 0.5 → 线性缩小
+        #
+        # S2: 缺失维度惩罚
+        # coverage >= 80%: 缺失维度填 5.0（中性，旧逻辑）
+        # coverage <  80%: 缺失维度填 4.7（-0.3 惩罚，反映信息不足）
+        _missing_dim_fill = 4.7 if dimension_coverage_pct < 80.0 else 5.0
+
         weighted_sum = 0.0
         weight_total = 0.0
         for dim, weight in self.DIMENSION_WEIGHTS.items():
             if dim in dim_scores:
                 conf = dim_confidence.get(dim, 0.5)
-                # conf < 0.5 时线性缩小权重；conf >= 0.5 保持全权重
                 effective_weight = weight * min(1.0, conf * 2)
                 weighted_sum += dim_scores[dim] * effective_weight
                 weight_total += effective_weight
             else:
-                # 缺失维度：5.0 中性分，全权重锚定（与旧逻辑一致）
-                weighted_sum += 5.0 * weight
+                # 缺失维度：按覆盖度填充（S2 升级）
+                weighted_sum += _missing_dim_fill * weight
                 weight_total += weight
 
         base_score = weighted_sum / weight_total if weight_total > 0 else 5.0
+
+        # S2: 极低覆盖度（<60%，即 <3/5 维度）→ 压缩至中性区间
+        coverage_warning = ""
+        if dimension_coverage_pct < 60.0:
+            _pre_compress = base_score
+            base_score = round(5.0 + (base_score - 5.0) * 0.1, 2)
+            coverage_warning = (
+                f"仅 {present_count}/{_n_dims} 维度可用，"
+                f"分数已压缩至中性区间（{_pre_compress:.2f}→{base_score:.2f}）"
+            )
+            _log.warning("%s %s", ticker, coverage_warning)
+        elif dimension_coverage_pct < 80.0:
+            coverage_warning = f"仅 {present_count}/{_n_dims} 维度可用，缺失维度施加 -0.3 惩罚"
 
         # 5. ML 调整
         adjusted_score = base_score + ml_adjustment
@@ -2172,31 +2219,53 @@ class QueenDistiller:
 
         rule_score = round(max(0.0, min(10.0, rule_score)), 2)
 
-        # 6.5. BearBeeContrarian 看空强度上限
-        # 反对蜂的 score = 10 - bear_strength（反向映射），bear_strength 越高看空越强
-        # bear_strength > 7.0 时对 rule_score 施加软上限，防止强看空信号下评分虚高
-        contrarian_result = next(
-            (r for r in valid_results if r.get("dimension") == "contrarian"), None
-        )
-        bear_strength = 0.0
-        bear_cap_applied = False
-        if contrarian_result is not None:
-            bear_strength = round(10.0 - contrarian_result.get("score", 5.0), 2)
-            if bear_strength > 7.0:
-                # bear=7.5 → cap=9.75; bear=8.0 → cap=9.5; bear=9.0 → cap=9.0; bear=10.0 → cap=8.5
-                bear_cap = round(10.0 - (bear_strength - 7.0) * 0.5, 2)
-                if rule_score > bear_cap:
-                    _log.info(
-                        "%s BearBee 看空强度 %.1f → 上限 %.2f（原 %.2f）",
-                        ticker, bear_strength, bear_cap, rule_score,
-                    )
-                    rule_score = bear_cap
-                    bear_cap_applied = True
+        # ===== S1: 三重惩罚形式化（DQ → Guard → Bear → 组合上限）=====
+        # 执行顺序：先修正数据质量，再施加风险惩罚，最后封顶
+        # 每步记录中间值，三重叠加不超过 -2.0
+        pre_penalty_score = rule_score
 
-        # 6.7. GuardBeeSentinel 风险关门（NA4）
-        # risk_adj < 4.0 时施加额外折扣，防止高风险标的被虚高评分淹没
-        # 折扣公式：penalty = (4.0 - guard_score) / 4.0 * 0.8，最大 -0.8 分
-        # guard=3.9 → -0.02（可忽略）；guard=2.0 → -0.40；guard=0.0 → -0.80
+        # ── 提前计算数据真实度（惩罚排序需要）──
+        REAL_SOURCES = {
+            "real", "yfinance", "finviz_api", "options_api",
+            "keyword", "llm_enhanced", "reddit_apewisdom",
+            "rule_only", "sec_api", "SEC直查", "Finviz", "finviz",
+        }
+        PROXY_SOURCES = {
+            "proxy_volume", "proxy_momentum", "proxy_social",
+            "pheromone_board", "unavailable",
+        }
+        _qs_early = 0.0
+        _tf_early = 0
+        for r in valid_results:
+            _dq_e = r.get("data_quality", {})
+            if isinstance(_dq_e, dict):
+                for v in _dq_e.values():
+                    _tf_early += 1
+                    if v in REAL_SOURCES:
+                        _qs_early += 1.0
+                    elif v in PROXY_SOURCES:
+                        _qs_early += 0.7
+        data_real_pct = round(_qs_early / _tf_early * 100, 1) if _tf_early > 0 else 0.0
+        data_real_pct = _safe_score(data_real_pct, 50.0, 0, 100, "data_real_pct")
+
+        # 步骤 1/3: 数据质量压缩（将分数向 5.0 靠拢）
+        dq_penalty_applied = False
+        quality_factor = 1.0
+        if data_real_pct < 80.0:
+            quality_factor = round(0.5 + 0.5 * (data_real_pct / 80.0), 3)
+            pre_dq = rule_score
+            rule_score = round(5.0 + (rule_score - 5.0) * quality_factor, 2)
+            rule_score = max(0.0, min(10.0, rule_score))
+            if abs(rule_score - pre_dq) >= 0.05:
+                dq_penalty_applied = True
+                _log.info(
+                    "%s [S1-1/3 DQ] real_pct=%.1f%% factor=%.3f %.2f→%.2f",
+                    ticker, data_real_pct, quality_factor, pre_dq, rule_score,
+                )
+        score_after_dq = rule_score
+
+        # 步骤 2/3: GuardBee 风险关门
+        # risk_adj < 4.0 时施加折扣：penalty = (4.0 - guard) / 4.0 * 0.8，最大 -0.8
         guard_result = next(
             (r for r in valid_results if r.get("dimension") == "risk_adj"), None
         )
@@ -2211,26 +2280,64 @@ class QueenDistiller:
                 if rule_score < pre_guard:
                     guard_penalty_applied = True
                     _log.info(
-                        "%s GuardBee 风险关门: guard_score=%.1f penalty=%.3f %.2f→%.2f",
+                        "%s [S1-2/3 Guard] guard=%.1f penalty=%.3f %.2f→%.2f",
                         ticker, guard_score, guard_penalty, pre_guard, rule_score,
                     )
+        score_after_guard = rule_score
 
-        # 7. 置信度加权多数投票（NA3）
-        # 旧逻辑：原始计数，2个高置信度看多会被5个低置信度看空淹没
-        # 新逻辑：各 Agent 票重 = 其 confidence，高置信度 Agent 影响力更大
+        # 步骤 3/3: BearBee 看空上限
+        # bear_strength > 7.0 时施加软上限，防止强看空信号下评分虚高
+        contrarian_result = next(
+            (r for r in valid_results if r.get("dimension") == "contrarian"), None
+        )
+        bear_strength = 0.0
+        bear_cap_applied = False
+        if contrarian_result is not None:
+            bear_strength = round(10.0 - contrarian_result.get("score", 5.0), 2)
+            if bear_strength > 7.0:
+                bear_cap = round(10.0 - (bear_strength - 7.0) * 0.5, 2)
+                if rule_score > bear_cap:
+                    _log.info(
+                        "%s [S1-3/3 Bear] strength=%.1f cap=%.2f（原 %.2f）",
+                        ticker, bear_strength, bear_cap, rule_score,
+                    )
+                    rule_score = bear_cap
+                    bear_cap_applied = True
+        score_after_bear = rule_score
+
+        # 组合惩罚上限：三重叠加不超过 -2.0
+        total_penalty = round(pre_penalty_score - rule_score, 2)
+        combo_cap_applied = False
+        if total_penalty > 2.0:
+            rule_score = round(max(pre_penalty_score - 2.0, 2.0), 2)
+            combo_cap_applied = True
+            _log.info(
+                "%s [S1-Combo] 总惩罚 %.2f 超限 → 截断至 -2.0，%.2f→%.2f",
+                ticker, total_penalty, pre_penalty_score, rule_score,
+            )
+
+        # 7. 置信度加权多数投票 + S4 反博弈保护
+        # 各 Agent 票重 = 其 confidence，高置信度 Agent 影响力更大
+        # S4: 单 Agent 权重上限 40% + 方向票 ≥2 Agent 才有效
         directions = [r.get("direction", "neutral") for r in valid_results]
         bullish_count = directions.count("bullish")
         bearish_count = directions.count("bearish")
         neutral_count = directions.count("neutral")
 
-        bullish_w = sum(r.get("confidence", 0.5) for r in valid_results if r.get("direction") == "bullish")
-        bearish_w = sum(r.get("confidence", 0.5) for r in valid_results if r.get("direction") == "bearish")
-        neutral_w = sum(r.get("confidence", 0.5) for r in valid_results if r.get("direction") == "neutral")
+        # S4: 计算总权重并设置单 Agent 上限（防止单一高置信 Agent 主导）
+        _all_conf = [r.get("confidence", 0.5) for r in valid_results]
+        _total_w_raw = sum(_all_conf) or 1.0
+        _weight_cap = _total_w_raw * 0.4
+
+        bullish_w = sum(min(r.get("confidence", 0.5), _weight_cap) for r in valid_results if r.get("direction") == "bullish")
+        bearish_w = sum(min(r.get("confidence", 0.5), _weight_cap) for r in valid_results if r.get("direction") == "bearish")
+        neutral_w = sum(min(r.get("confidence", 0.5), _weight_cap) for r in valid_results if r.get("direction") == "neutral")
         total_w = bullish_w + bearish_w + neutral_w or 1.0
 
-        if bullish_w > bearish_w and bullish_w / total_w >= 0.4:
+        # S4: 方向票需来自 ≥2 个不同 Agent（防止单 Agent 主导方向）
+        if bullish_w > bearish_w and bullish_w / total_w >= 0.4 and bullish_count >= 2:
             rule_direction = "bullish"
-        elif bearish_w > bullish_w and bearish_w / total_w >= 0.4:
+        elif bearish_w > bullish_w and bearish_w / total_w >= 0.4 and bearish_count >= 2:
             rule_direction = "bearish"
         else:
             rule_direction = "neutral"
@@ -2352,25 +2459,8 @@ class QueenDistiller:
                     # LLM 高置信度时覆盖规则引擎方向
                     final_direction = llm_direction
 
-        # 10. 数据质量折扣（P4 门控）
-        # 数据真实度不足时，将 final_score 向中性值 5.0 压缩，防止低质数据产生高置信结论
-        # ≥ 80%: quality_factor = 1.0（无折扣）
-        # 60–80%: 线性从 1.0 降至 0.875
-        # 40%:    factor = 0.75；0%: factor = 0.5（最大压缩，偏差减半）
-        dq_penalty_applied = False
-        quality_factor = 1.0
-        data_real_pct = _safe_score(data_real_pct, 50.0, 0, 100, "data_real_pct")
-        if data_real_pct < 80.0:
-            quality_factor = round(0.5 + 0.5 * (data_real_pct / 80.0), 3)
-            pre_dq = final_score
-            final_score = round(5.0 + (final_score - 5.0) * quality_factor, 2)
-            final_score = max(0.0, min(10.0, final_score))
-            if abs(final_score - pre_dq) >= 0.05:
-                dq_penalty_applied = True
-                _log.info(
-                    "%s 数据质量折扣: real_pct=%.1f%% factor=%.3f %.2f→%.2f",
-                    ticker, data_real_pct, quality_factor, pre_dq, final_score,
-                )
+        # 10. 数据质量折扣 → 已在 S1 三重惩罚中前置执行（步骤 1/3）
+        # dq_penalty_applied / quality_factor / data_real_pct 均已在惩罚块中计算
 
         # 保留各 Agent 的原始分析内容（discovery + details）
         agent_details = {}
@@ -2441,6 +2531,15 @@ class QueenDistiller:
             "dimension_status": dim_status,
             "dimension_missing_reason": dim_missing_reason,
             "dimension_coverage_pct": dimension_coverage_pct,
+            # S1: 三重惩罚中间值追踪
+            "pre_penalty_score": pre_penalty_score,
+            "score_after_dq": score_after_dq,
+            "score_after_guard": score_after_guard,
+            "score_after_bear": score_after_bear,
+            "total_penalty": total_penalty,
+            "combo_cap_applied": combo_cap_applied,
+            # S2: 维度覆盖度警告
+            "coverage_warning": coverage_warning,
         }
 
     # ==================== Phase 2: 历史类比推理 ====================
