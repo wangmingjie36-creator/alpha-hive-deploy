@@ -108,3 +108,69 @@ class TestWeights:
         acc = memory_store.get_agent_accuracy("ScoutBeeNova")
         assert acc["sample_count"] == 0
         assert acc["accuracy"] == 0.5  # 默认
+
+
+class TestConnectionReuse:
+    """M1: 线程本地连接复用测试"""
+
+    def test_same_thread_reuses_connection(self, memory_store):
+        """同一线程内多次 _connect() 应返回同一连接对象"""
+        conn1 = memory_store._connect()
+        conn2 = memory_store._connect()
+        assert conn1 is conn2
+
+    def test_close_invalidates_connection(self, memory_store):
+        """close() 后应创建新连接"""
+        conn1 = memory_store._connect()
+        memory_store.close()
+        conn2 = memory_store._connect()
+        assert conn1 is not conn2
+
+    def test_multiple_operations_without_error(self, memory_store):
+        """连续多次操作不应因连接复用而出错"""
+        from datetime import date as _d
+        today = _d.today().isoformat()
+        for i in range(5):
+            memory_store.save_agent_memory({
+                "date": today, "ticker": f"T{i}",
+                "agent_id": "TestAgent", "direction": "bullish",
+                "discovery": f"test {i}", "source": "test", "self_score": 5.0,
+            }, "test_session")
+        # 读取应正常
+        for i in range(5):
+            mems = memory_store.get_recent_memories(f"T{i}", days=1)
+            assert len(mems) >= 1
+
+    def test_cross_thread_gets_own_connection(self, memory_store):
+        """不同线程应获得独立连接"""
+        import threading
+        main_conn = memory_store._connect()
+        thread_conn = [None]
+
+        def worker():
+            thread_conn[0] = memory_store._connect()
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+
+        assert thread_conn[0] is not None
+        assert thread_conn[0] is not main_conn
+
+    def test_details_column_saved(self, memory_store):
+        """D5: details 列应正确保存和读取"""
+        from datetime import date as _d
+        today = _d.today().isoformat()
+        import json
+        details_json = json.dumps({"pc_ratio": 1.35, "iv_rank": 72})
+        mid = memory_store.save_agent_memory({
+            "date": today, "ticker": "NVDA",
+            "agent_id": "OracleBeeEcho", "direction": "bullish",
+            "discovery": "test", "source": "test",
+            "self_score": 7.0, "details": details_json,
+        }, "test_session")
+        assert mid is not None
+
+        mems = memory_store.get_recent_memories("NVDA", days=1)
+        assert len(mems) >= 1
+        assert mems[0]["details"] == details_json

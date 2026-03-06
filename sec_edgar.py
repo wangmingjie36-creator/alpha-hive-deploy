@@ -30,14 +30,16 @@ _log = get_logger("sec_edgar")
 CACHE_DIR = PATHS.home / "sec_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
-# SEC 要求的 User-Agent
-SEC_USER_AGENT = "AlphaHive research@alphahive.dev"
-SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept": "application/json"}
+# SEC 要求的 User-Agent（来源：config.SEC_USER_AGENT）
 try:
-    from config import CACHE_CONFIG as _CC
+    from config import SEC_USER_AGENT, CACHE_CONFIG as _CC
     _SEC_CIK_TTL = _CC["ttl"].get("sec_cik", 86400)
-except (ImportError, KeyError):
+except ImportError:
+    SEC_USER_AGENT = "AlphaHive research@alphahive.dev"
     _SEC_CIK_TTL = 86400
+except KeyError:
+    _SEC_CIK_TTL = 86400
+SEC_HEADERS = {"User-Agent": SEC_USER_AGENT, "Accept": "application/json"}
 
 
 class SECEdgarClient:

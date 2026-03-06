@@ -32,6 +32,17 @@ try:
 except ImportError:
     _req = None
 
+# 弹性层：熔断器 + 限流器 + 连接池
+try:
+    from resilience import get_session, CircuitBreaker, RateLimiter
+    _news_breaker = CircuitBreaker("newsapi", failure_threshold=5, recovery_timeout=120.0)
+    _news_limiter = RateLimiter(rate=1.0, burst=2)  # 1 req/s（AV 每日限额 25 次）
+    _RESILIENCE_OK = True
+except ImportError:
+    _news_breaker = None
+    _news_limiter = None
+    _RESILIENCE_OK = False
+
 # 导入清洗工具（与 Agent 层保持一致）
 try:
     from models import clean_score
@@ -229,16 +240,30 @@ def _fetch_yf_news(ticker: str, max_articles: int = 10) -> Dict:
     if _req is None:
         return _fallback(ticker)
 
+    # 熔断检查
+    if _news_breaker and not _news_breaker.allow_request():
+        _log.warning("newsapi 熔断中，跳过 YF 请求 (%s)", ticker)
+        return _fallback(ticker)
+
     try:
+        if _news_limiter and not _news_limiter.acquire(timeout=10):
+            _log.warning("newsapi 限流超时，跳过 YF 请求 (%s)", ticker)
+            return _fallback(ticker)
         params = {
             "q": ticker,
             "newsCount": max_articles,
             "enableFuzzyQuery": "false",
             "enableEnhancedTrivialQuery": "true",
         }
-        resp = _req.get(_YF_NEWS_URL, headers=_YF_HEADERS, params=params, timeout=8)
+        _session = get_session("newsapi") if _RESILIENCE_OK else _req
+        resp = _session.get(_YF_NEWS_URL, headers=_YF_HEADERS, params=params, timeout=8)
         if not resp.ok:
+            if _news_breaker:
+                _news_breaker.record_failure()
             return _fallback(ticker)
+
+        if _news_breaker:
+            _news_breaker.record_success()
 
         news_items = resp.json().get("news", [])
         if not news_items:
@@ -264,6 +289,8 @@ def _fetch_yf_news(ticker: str, max_articles: int = 10) -> Dict:
 
     except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
         _log.debug("YF news fetch failed for %s: %s", ticker, e)
+        if _news_breaker:
+            _news_breaker.record_failure()
         return _fallback(ticker)
 
 
@@ -271,7 +298,15 @@ def _fetch_yf_news(ticker: str, max_articles: int = 10) -> Dict:
 
 def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
     """通过 Alpha Vantage NEWS_SENTIMENT API 获取新闻（含预处理情绪分）"""
+    # 熔断检查
+    if _news_breaker and not _news_breaker.allow_request():
+        _log.warning("newsapi 熔断中，跳过 AV 请求 (%s)", ticker)
+        return _fallback(ticker)
+
     try:
+        if _news_limiter and not _news_limiter.acquire(timeout=10):
+            _log.warning("newsapi 限流超时，跳过 AV 请求 (%s)", ticker)
+            return _fallback(ticker)
         params = {
             "function": "NEWS_SENTIMENT",
             "tickers": ticker,
@@ -279,8 +314,11 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
             "limit": max_articles,
             "apikey": api_key,
         }
-        resp = _req.get(_AV_NEWS_URL, params=params, timeout=10)
+        _session = get_session("newsapi") if _RESILIENCE_OK else _req
+        resp = _session.get(_AV_NEWS_URL, params=params, timeout=10)
         if not resp.ok:
+            if _news_breaker:
+                _news_breaker.record_failure()
             return _fallback(ticker)
 
         data = resp.json()
@@ -327,10 +365,14 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
                 "sentiment_score_raw": round(sent_val, 4),
             })
 
+        if _news_breaker:
+            _news_breaker.record_success()
         return _build_result(ticker, raw_articles, source="alpha_vantage")
 
     except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
         _log.debug("AV news fetch failed for %s: %s", ticker, e)
+        if _news_breaker:
+            _news_breaker.record_failure()
         return _fallback(ticker)
 
 

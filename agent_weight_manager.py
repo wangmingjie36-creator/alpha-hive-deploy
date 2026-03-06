@@ -170,7 +170,8 @@ class AgentWeightManager:
                 # 更新数据库
                 self.memory_store.update_agent_weight(agent_id, adjusted_weight)
 
-                print(f"✅ {agent_id}: accuracy={accuracy:.2%}, samples={sample_count}, weight={adjusted_weight:.2f}x")
+                _log.info("%s: accuracy=%.2f%%, samples=%d, weight=%.2fx",
+                         agent_id, accuracy * 100, sample_count, adjusted_weight)
 
             except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
                 _log.error("recalculate_all_weights(%s) 失败: %s", agent_id, e, exc_info=True)
@@ -203,12 +204,9 @@ class AgentWeightManager:
         """打印权重摘要"""
         weights = self.get_weights()
 
-        print("\n📊 Agent 权重摘要")
-        print("=" * 60)
-
+        lines = ["Agent 权重摘要:"]
         for agent_id in self.DEFAULT_AGENTS:
             weight = weights.get(agent_id, 1.0)
-            indicator = "🔥" if weight > 1.2 else ("❄️" if weight < 0.8 else "📊")
-            print(f"{indicator} {agent_id:20s} {weight:6.2f}x")
-
-        print("=" * 60)
+            indicator = "HIGH" if weight > 1.2 else ("LOW" if weight < 0.8 else "NORM")
+            lines.append(f"  [{indicator}] {agent_id}: {weight:.2f}x")
+        _log.info("\n".join(lines))

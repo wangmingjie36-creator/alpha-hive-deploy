@@ -12,6 +12,16 @@ from hive_logger import PATHS, get_logger, atomic_json_write, SafeJSONEncoder
 
 _log = get_logger("data_fetcher")
 
+# TTL 来源：config.py CACHE_CONFIG（统一管理，避免硬编码散落）
+try:
+    from config import get_cache_ttl as _ttl
+except ImportError:
+    def _ttl(source: str) -> int:  # type: ignore[misc]
+        """降级: config 不可用时使用保守默认值"""
+        return {"stocktwits_legacy": 3600, "polymarket": 300, "yahoo_finance": 300,
+                "google_trends": 86400, "sec_edgar": 604800, "seeking_alpha": 86400,
+                }.get(source, 300)
+
 
 class CacheManager:
     """缓存管理器 - 避免重复请求"""
@@ -92,7 +102,7 @@ class DataFetcher:
             }
         """
         cache_key = self.cache.get_cache_key("stocktwits", ticker)
-        cached = self.cache.load(cache_key, ttl=3600)
+        cached = self.cache.load(cache_key, ttl=_ttl("stocktwits_legacy"))
         if cached:
             _log.info("📦 使用 StockTwits 缓存: %s", ticker)
             return cached
@@ -135,7 +145,7 @@ class DataFetcher:
             }
         """
         cache_key = self.cache.get_cache_key("polymarket", ticker)
-        cached = self.cache.load(cache_key, ttl=300)  # 5 分钟缓存
+        cached = self.cache.load(cache_key, ttl=_ttl("polymarket"))
         if cached:
             _log.info("📦 使用 Polymarket 缓存: %s", ticker)
             return cached
@@ -179,7 +189,7 @@ class DataFetcher:
             }
         """
         cache_key = self.cache.get_cache_key("yahoo", ticker)
-        cached = self.cache.load(cache_key, ttl=300)
+        cached = self.cache.load(cache_key, ttl=_ttl("yahoo_finance"))
         if cached:
             _log.info("📦 使用 Yahoo Finance 缓存: %s", ticker)
             return cached
@@ -227,7 +237,7 @@ class DataFetcher:
             }
         """
         cache_key = self.cache.get_cache_key("gtrends", ticker)
-        cached = self.cache.load(cache_key, ttl=86400)  # 24 小时
+        cached = self.cache.load(cache_key, ttl=_ttl("google_trends"))
         if cached:
             _log.info("📦 使用 Google Trends 缓存: %s", ticker)
             return cached
@@ -285,7 +295,7 @@ class DataFetcher:
             }]
         """
         cache_key = self.cache.get_cache_key(f"sec_form{form_type}", ticker)
-        cached = self.cache.load(cache_key, ttl=604800)  # 7 天
+        cached = self.cache.load(cache_key, ttl=_ttl("sec_edgar"))
         if cached:
             _log.info("📦 使用 SEC 缓存: %s Form %s", ticker, form_type)
             return cached
@@ -351,7 +361,7 @@ class DataFetcher:
             }
         """
         cache_key = self.cache.get_cache_key("seekingalpha", ticker)
-        cached = self.cache.load(cache_key, ttl=86400)
+        cached = self.cache.load(cache_key, ttl=_ttl("seeking_alpha"))
         if cached:
             _log.info("📦 使用 Seeking Alpha 缓存: %s", ticker)
             return cached
@@ -496,13 +506,25 @@ class DataFetcher:
             "sources": {},
         }
 
-        # 并行采集各数据源
-        metrics["sources"]["stocktwits"] = self.get_stocktwits_metrics(ticker)
-        metrics["sources"]["polymarket"] = self.get_polymarket_odds(ticker)
-        metrics["sources"]["yahoo_finance"] = self.get_yahoo_finance_metrics(ticker)
-        metrics["sources"]["google_trends"] = self.get_google_trends(ticker)
-        metrics["sources"]["sec_filings"] = self.get_sec_filings(ticker)
-        metrics["sources"]["seeking_alpha"] = self.get_seeking_alpha_mentions(ticker)
+        # H2: 真正并行采集各数据源（ThreadPoolExecutor）
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        _source_tasks = {
+            "stocktwits": self.get_stocktwits_metrics,
+            "polymarket": self.get_polymarket_odds,
+            "yahoo_finance": self.get_yahoo_finance_metrics,
+            "google_trends": self.get_google_trends,
+            "sec_filings": self.get_sec_filings,
+            "seeking_alpha": self.get_seeking_alpha_mentions,
+        }
+        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="data_fetch") as _pool:
+            _futures = {_pool.submit(fn, ticker): name for name, fn in _source_tasks.items()}
+            for fut in as_completed(_futures):
+                _name = _futures[fut]
+                try:
+                    metrics["sources"][_name] = fut.result(timeout=30)
+                except Exception as _e:
+                    _log.warning("collect_all_metrics %s/%s failed: %s", ticker, _name, _e)
+                    metrics["sources"][_name] = {}
 
         # 转换为拥挤度检测需要的格式
         metrics["crowding_input"] = {

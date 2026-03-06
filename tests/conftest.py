@@ -119,4 +119,6 @@ def queen(board):
 def memory_store(tmp_path):
     """创建隔离的 MemoryStore（使用临时 DB）"""
     from memory_store import MemoryStore
-    return MemoryStore(db_path=str(tmp_path / "test_memory.db"))
+    ms = MemoryStore(db_path=str(tmp_path / "test_memory.db"))
+    yield ms
+    ms.close()

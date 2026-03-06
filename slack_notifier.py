@@ -53,7 +53,7 @@ class SlackNotifier:
             是否发送成功
         """
         if not self.webhook_url:
-            print("⚠️  Slack webhook URL not configured")
+            _log.warning("Slack webhook URL not configured")
             return False
 
         payload = self._build_payload(alert)
@@ -61,7 +61,7 @@ class SlackNotifier:
         try:
             from resilience import slack_breaker
             if not slack_breaker.allow_request():
-                print("⚠️  Slack circuit breaker OPEN, skipping")
+                _log.warning("Slack circuit breaker OPEN, skipping")
                 return False
             response = get_session("slack").post(
                 self.webhook_url,
@@ -77,7 +77,7 @@ class SlackNotifier:
                 _sb.record_failure()
             except ImportError:
                 pass
-            print(f"❌ Slack notification failed: {e}")
+            _log.error("Slack notification failed: %s", e)
             return False
 
     def _build_payload(self, alert: Alert) -> dict:
@@ -175,11 +175,10 @@ class SlackNotifier:
             with open(file_path, 'w') as f:
                 f.write(webhook_url)
             os.chmod(file_path, 0o600)
-            print(f"✅ Slack webhook saved to {file_path}")
+            _log.info("Slack webhook saved to %s", file_path)
             return True
         except OSError as e:
             _log.error("Failed to save webhook: %s", e, exc_info=True)
-            print(f"❌ Failed to save webhook: {e}")
             return False
 
 

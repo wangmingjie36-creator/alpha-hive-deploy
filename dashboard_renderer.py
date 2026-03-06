@@ -1423,6 +1423,7 @@ def render_dashboard_html(report: Dict, date_str: str,
     # Sprint 4.1: 输出 dashboard-data.json 伴生文件（前端动态加载用）
     _data_obj["_generated_at"] = now_str
     _data_obj["_date"] = date_str
+    _data_obj["_deploy_ts"] = int(_dt.now().timestamp())  # D5: Unix 秒级指纹
     try:
         _json_path = _Path_mod(report_dir) / "dashboard-data.json"
         _json_path.write_text(

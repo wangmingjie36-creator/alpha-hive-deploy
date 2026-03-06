@@ -24,6 +24,15 @@ from typing import Dict, Tuple
 
 _log = logging.getLogger("alpha_hive.fred_macro")
 
+# 弹性层：熔断器 + 连接池
+try:
+    from resilience import get_session, CircuitBreaker
+    _fred_breaker = CircuitBreaker("fred", failure_threshold=5, recovery_timeout=180.0)
+    _RESILIENCE_OK = True
+except ImportError:
+    _fred_breaker = None
+    _RESILIENCE_OK = False
+
 
 def _load_fred_key() -> str:
     """加载 FRED API Key：环境变量 > ~/.alpha_hive_fred_key 文件"""
@@ -398,14 +407,23 @@ def _fetch_macro_data() -> Dict:
 
 
 def _fetch_fred_series(api_key: str) -> Dict:
-    """从 FRED API 获取 CPI（同比）、失业率等月度数据（使用 requests 解决 macOS SSL 问题）"""
+    """从 FRED API 获取 CPI（同比）、失业率等月度数据（使用 requests 解决 macOS SSL 问题）
+
+    已集成弹性层：CircuitBreaker 熔断 + get_session 连接池复用。
+    """
+    # 熔断检查
+    if _fred_breaker and not _fred_breaker.allow_request():
+        _log.warning("FRED API 熔断中，跳过请求")
+        return {}
+
     result = {}
     try:
         import requests as _req
+        _session = get_session("fred") if _RESILIENCE_OK else _req
         base = "https://api.stlouisfed.org/fred/series/observations"
 
         # CPI 同比：取最近 13 个月做真正 YoY（而非月环比年化）
-        r = _req.get(base, params={
+        r = _session.get(base, params={
             "series_id": "CPIAUCSL", "api_key": api_key,
             "file_type": "json", "sort_order": "desc", "limit": "13"
         }, timeout=8)
@@ -418,7 +436,7 @@ def _fetch_fred_series(api_key: str) -> Dict:
                 result["cpi_date"] = obs[0]["date"]
 
         # 失业率：最新值
-        r2 = _req.get(base, params={
+        r2 = _session.get(base, params={
             "series_id": "UNRATE", "api_key": api_key,
             "file_type": "json", "sort_order": "desc", "limit": "1"
         }, timeout=8)
@@ -429,7 +447,7 @@ def _fetch_fred_series(api_key: str) -> Dict:
                 result["unemployment_date"] = obs2[0]["date"]
 
         # 联邦基金利率（实际有效利率）
-        r3 = _req.get(base, params={
+        r3 = _session.get(base, params={
             "series_id": "DFF", "api_key": api_key,
             "file_type": "json", "sort_order": "desc", "limit": "1"
         }, timeout=8)
@@ -439,7 +457,7 @@ def _fetch_fred_series(api_key: str) -> Dict:
                 result["fed_funds_rate"] = float(obs3[0]["value"])
 
         # 2Y 国债收益率（收益率曲线精确数据）
-        r4 = _req.get(base, params={
+        r4 = _session.get(base, params={
             "series_id": "DGS2", "api_key": api_key,
             "file_type": "json", "sort_order": "desc", "limit": "1"
         }, timeout=8)
@@ -448,8 +466,14 @@ def _fetch_fred_series(api_key: str) -> Dict:
             if obs4 and obs4[0].get("value", ".") != ".":
                 result["treasury_2y"] = float(obs4[0]["value"])
 
+        # 至少有一个成功响应 → 记录成功
+        if _fred_breaker and result:
+            _fred_breaker.record_success()
+
     except Exception as e:
         _log.debug("FRED API 调用失败: %s", e)
+        if _fred_breaker:
+            _fred_breaker.record_failure()
     return result
 
 

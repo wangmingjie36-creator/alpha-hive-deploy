@@ -32,7 +32,8 @@ class TestPublish:
         assert max(support_counts) >= 1
 
     def test_publish_evicts_at_max(self, board):
-        for i in range(25):
+        # 插入超过 MAX_ENTRIES 条，验证截断生效
+        for i in range(PheromoneBoard.MAX_ENTRIES + 10):
             board.publish(_entry(agent=f"Agent{i}", score=float(i % 10)))
         assert board.get_entry_count() <= PheromoneBoard.MAX_ENTRIES
 
@@ -108,7 +109,36 @@ class TestSnapshot:
         board.publish(_entry())
         compact = board.compact_snapshot()
         assert len(compact) == 1
-        assert set(compact[0].keys()) == {"a", "t", "d", "s", "p", "c"}
+        assert {"a", "t", "d", "s", "p", "c"}.issubset(compact[0].keys())
+
+    def test_compact_snapshot_includes_details(self, board):
+        """D1: compact_snapshot 应包含白名单 details 字段"""
+        e = _entry()
+        e.details = {"pc_ratio": 1.35, "iv_rank": 72.0, "ignored_key": "nope"}
+        board.publish(e)
+        compact = board.compact_snapshot()
+        assert "x" in compact[0]
+        assert compact[0]["x"]["pc_ratio"] == 1.35
+        assert compact[0]["x"]["iv_rank"] == 72.0
+        assert "ignored_key" not in compact[0]["x"]
+
+    def test_compact_snapshot_no_x_when_empty_details(self, board):
+        """无 details 时不应有 x 键"""
+        board.publish(_entry())
+        compact = board.compact_snapshot()
+        assert "x" not in compact[0]
+
+    def test_compact_snapshot_direction_no_collision(self, board):
+        """bullish/bearish 方向编码不应碰撞"""
+        board.publish(_entry(direction="bullish", agent="A"))
+        board.publish(_entry(direction="bearish", agent="B"))
+        board.publish(_entry(direction="neutral", agent="C"))
+        compact = board.compact_snapshot()
+        dirs = {c["d"] for c in compact}
+        assert len(dirs) == 3, f"方向编码碰撞: {dirs}"
+        assert "+" in dirs  # bullish
+        assert "-" in dirs  # bearish
+        assert "0" in dirs  # neutral
 
 
 class TestClear:

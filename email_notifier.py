@@ -54,7 +54,7 @@ class EmailNotifier:
             是否发送成功
         """
         if not self._validate_config():
-            print("⚠️  Email config not configured")
+            _log.warning("Email config not configured")
             return False
 
         # 根据级别决定是否立即发送

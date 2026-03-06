@@ -294,9 +294,7 @@ class CodeExecutorAgent(BeeAgent):
         is_valid, warnings = self.debugger.validate_code(code)
 
         if warnings:
-            print(f"⚠️ 代码警告:")
-            for warning in warnings:
-                print(f"  {warning}")
+            _log.warning("代码警告: %s", "; ".join(warnings))
 
         # 执行代码
         result = self.executor.execute_python(code)

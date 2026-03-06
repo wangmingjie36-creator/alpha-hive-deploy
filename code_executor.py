@@ -409,7 +409,7 @@ class CodeExecutor:
             for item in Path("/tmp/alpha_hive_sandbox").iterdir():
                 if item.is_dir() and item.name < cutoff_date:
                     shutil.rmtree(item)
-                    print(f"🗑️ 清理旧沙箱：{item}")
+                    _log.info("清理旧沙箱：%s", item)
 
         except (OSError, ImportError) as e:
             _log.warning("沙箱清理失败: %s", e)

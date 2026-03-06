@@ -309,6 +309,101 @@ class PredictionStore:
             _log.warning("获取准确率统计失败: %s", e)
             return {"overall_accuracy": 0, "total_checked": 0}
 
+    def get_dimension_accuracy(self, period: str = "t7", days: int = 90) -> Dict:
+        """
+        S12：维度级精度追踪 — 按 5 个维度分别统计方向准确率
+
+        解析每条预测的 dimension_scores JSON（{signal: {score, direction}, ...}），
+        逐维度与实际收益比对，输出各维度命中率 + 建议权重微调。
+
+        返回: {
+            signal:    {accuracy: 0.72, samples: 45, suggested_weight: 0.32},
+            catalyst:  {accuracy: 0.58, samples: 38, suggested_weight: 0.18},
+            ...
+        }
+        """
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        checked_col = f"checked_{period}"
+        return_col = f"return_{period}"
+
+        # Agent → 维度映射
+        agent_dim = {
+            "ScoutBeeNova":      "signal",
+            "OracleBeeEcho":     "odds",
+            "BuzzBeeWhisper":    "sentiment",
+            "ChronosBeeHorizon": "catalyst",
+            "GuardBeeSentinel":  "risk_adj",
+        }
+        default_weights = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
+
+        dim_stats = {d: {"correct": 0, "total": 0} for d in default_weights}
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(f"""
+                    SELECT agent_directions, {return_col}
+                    FROM {self.TABLE}
+                    WHERE {checked_col} = 1 AND agent_directions IS NOT NULL AND date >= ?
+                """, (cutoff,)).fetchall()
+
+                for row in rows:
+                    try:
+                        dirs = json.loads(row["agent_directions"])
+                        ret = row[return_col]
+                        if ret is None:
+                            continue
+                        for agent_name, dim in agent_dim.items():
+                            agent_dir = dirs.get(agent_name)
+                            if not agent_dir:
+                                continue
+                            dim_stats[dim]["total"] += 1
+                            # 复用 Backtester 的方向判定逻辑
+                            if agent_dir == "bullish" and ret > -1.0:
+                                dim_stats[dim]["correct"] += 1
+                            elif agent_dir == "bearish" and ret < 1.0:
+                                dim_stats[dim]["correct"] += 1
+                            elif agent_dir == "neutral" and abs(ret) < 3.0:
+                                dim_stats[dim]["correct"] += 1
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        continue
+
+        except (sqlite3.Error, OSError) as e:
+            _log.warning("维度级精度统计失败: %s", e)
+            return {}
+
+        # 计算各维度准确率 + 建议权重
+        result = {}
+        raw_weights = {}
+        for dim in default_weights:
+            total = dim_stats[dim]["total"]
+            correct = dim_stats[dim]["correct"]
+            acc = correct / total if total > 0 else 0.5
+            result[dim] = {
+                "accuracy": round(acc, 3),
+                "samples": total,
+                "correct": correct,
+            }
+            raw_weights[dim] = max(0.05, acc ** 2)  # 准确率^2 归一化
+
+        # 建议权重（±0.05 范围内微调 + 归一化确保总和=1.0）
+        total_raw = sum(raw_weights.values())
+        if total_raw > 0:
+            suggested = {}
+            for dim in default_weights:
+                ideal = raw_weights[dim] / total_raw
+                suggested[dim] = max(default_weights[dim] - 0.05,
+                                     min(default_weights[dim] + 0.05, ideal))
+            # 归一化：clamping 后总和可能偏离 1.0
+            sw_sum = sum(suggested.values())
+            if sw_sum > 0:
+                for dim in suggested:
+                    result[dim]["suggested_weight"] = round(suggested[dim] / sw_sum, 3)
+
+        _log.info("S12 维度级精度: %s",
+                  {d: f"{v['accuracy']:.1%}({v['samples']})" for d, v in result.items()})
+        return result
+
     def get_all_predictions(self, days: int = 30) -> List[Dict]:
         """获取最近 N 天所有预测"""
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -622,6 +717,31 @@ class Backtester:
 
         except (sqlite3.Error, OSError, KeyError, TypeError) as e:
             lines.append(f"  期权回验查询失败: {e}")
+
+        # S12: 维度级精度
+        lines.append("\n  [维度级精度（S12）]")
+        try:
+            dim_acc = self.store.get_dimension_accuracy("t7", days)
+            if dim_acc:
+                # 用固定宽度标签避免中文字符宽度不一致
+                dim_cn = {"signal": "信号  ", "catalyst": "催化剂", "sentiment": "情绪  ",
+                          "odds": "赔率  ", "risk_adj": "风控  "}
+                for dim, info in dim_acc.items():
+                    label = dim_cn.get(dim, dim)
+                    if info["samples"] > 0:
+                        sw = info.get("suggested_weight", "—")
+                        sw_str = f" →建议{sw:.3f}" if isinstance(sw, float) else ""
+                        lines.append(
+                            f"  {label}: "
+                            f"{info['accuracy']*100:5.1f}% "
+                            f"({info['correct']}/{info['samples']}){sw_str}"
+                        )
+                    else:
+                        lines.append(f"  {label}: 样本不足")
+            else:
+                lines.append("  暂无维度级精度数据")
+        except (KeyError, TypeError, ValueError) as e:
+            lines.append(f"  维度精度查询失败: {e}")
 
         # 最近预测列表
         recent = self.store.get_all_predictions(days=14)

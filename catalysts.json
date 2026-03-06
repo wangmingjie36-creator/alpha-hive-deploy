@@ -1,0 +1,185 @@
+{
+  "_comment": "人工维护的催化剂配置 — ChronosBeeHorizon 启动时加载。type 对应 CATALYST_TYPE_WEIGHTS，severity 对应 CATALYST_SEVERITY_MULT。",
+  "_updated": "2026-03-05",
+
+  "NVDA": [
+    {
+      "event": "Q4 FY2026 Earnings",
+      "date": "2026-03-15",
+      "type": "earnings",
+      "severity": "critical",
+      "note": "数据中心 GPU 营收 + Blackwell ramp 关键季度"
+    },
+    {
+      "event": "GTC 2026",
+      "date": "2026-03-17",
+      "type": "product_launch",
+      "severity": "high",
+      "note": "年度 GPU 技术大会，新架构/产品发布"
+    },
+    {
+      "event": "Computex 2026",
+      "date": "2026-05-28",
+      "type": "conference",
+      "severity": "medium",
+      "note": "台北电脑展 Jensen 主题演讲"
+    }
+  ],
+
+  "TSLA": [
+    {
+      "event": "Q1 2026 Delivery Numbers",
+      "date": "2026-04-02",
+      "type": "guidance",
+      "severity": "high",
+      "note": "季度交付量公布，市场高度敏感"
+    },
+    {
+      "event": "Q1 2026 Earnings",
+      "date": "2026-04-22",
+      "type": "earnings",
+      "severity": "critical",
+      "note": "毛利率 + FSD/Robotaxi 进展"
+    },
+    {
+      "event": "Robotaxi Austin Launch Window",
+      "date": "2026-06-01",
+      "type": "product_launch",
+      "severity": "critical",
+      "note": "无人驾驶出租车 Austin 商业化时间窗口"
+    }
+  ],
+
+  "VKTX": [
+    {
+      "event": "VK2735 Phase 3 VENTURE Enrollment Complete",
+      "date": "2026-06-30",
+      "type": "fda_approval",
+      "severity": "critical",
+      "note": "GLP-1 减肥药三期入组完成里程碑"
+    },
+    {
+      "event": "VK2735 Phase 3 Topline Data",
+      "date": "2026-08-15",
+      "type": "fda_approval",
+      "severity": "critical",
+      "note": "三期顶线数据公布，二元事件"
+    }
+  ],
+
+  "META": [
+    {
+      "event": "Q1 2026 Earnings",
+      "date": "2026-04-23",
+      "type": "earnings",
+      "severity": "critical",
+      "note": "广告营收 + Reality Labs 亏损 + AI capex 指引"
+    },
+    {
+      "event": "Llama 4 Release Window",
+      "date": "2026-04-15",
+      "type": "product_launch",
+      "severity": "high",
+      "note": "开源 LLM 新版本发布"
+    }
+  ],
+
+  "MSFT": [
+    {
+      "event": "Q3 FY2026 Earnings",
+      "date": "2026-04-23",
+      "type": "earnings",
+      "severity": "critical",
+      "note": "Azure AI 增长 + Copilot 商业化数据"
+    },
+    {
+      "event": "Microsoft Build 2026",
+      "date": "2026-05-19",
+      "type": "product_launch",
+      "severity": "high",
+      "note": "年度开发者大会，AI 产品发布"
+    }
+  ],
+
+  "RKLB": [
+    {
+      "event": "Q4 2025 Earnings",
+      "date": "2026-03-25",
+      "type": "earnings",
+      "severity": "high",
+      "note": "Electron 发射量 + Neutron 开发进度"
+    },
+    {
+      "event": "Neutron First Launch Window",
+      "date": "2026-06-30",
+      "type": "product_launch",
+      "severity": "critical",
+      "note": "中型火箭首飞，里程碑事件"
+    },
+    {
+      "event": "NRO Contract Delivery",
+      "date": "2026-05-15",
+      "type": "regulatory",
+      "severity": "high",
+      "note": "美国国家侦察局卫星合同交付"
+    }
+  ],
+
+  "BILI": [
+    {
+      "event": "Q4 2025 Earnings",
+      "date": "2026-03-20",
+      "type": "earnings",
+      "severity": "critical",
+      "note": "MAU 增长 + 广告/游戏商业化 + 盈利拐点"
+    },
+    {
+      "event": "China Two Sessions Policy",
+      "date": "2026-03-12",
+      "type": "regulatory",
+      "severity": "medium",
+      "note": "两会文化/互联网政策信号"
+    }
+  ],
+
+  "AMZN": [
+    {
+      "event": "Q1 2026 Earnings",
+      "date": "2026-04-24",
+      "type": "earnings",
+      "severity": "critical",
+      "note": "AWS 增长 + 广告 + 零售利润率"
+    },
+    {
+      "event": "AWS re:Invent Spring Update",
+      "date": "2026-04-08",
+      "type": "product_launch",
+      "severity": "medium",
+      "note": "AWS AI/ML 新服务发布"
+    }
+  ],
+
+  "CRCL": [
+    {
+      "event": "IPO Lock-up Expiration",
+      "date": "2026-10-01",
+      "type": "regulatory",
+      "severity": "high",
+      "note": "IPO 锁定期到期，潜在卖压"
+    },
+    {
+      "event": "Q1 2026 Earnings (First as Public Co)",
+      "date": "2026-05-15",
+      "type": "earnings",
+      "severity": "critical",
+      "note": "上市后首份财报，USDC 储备金收入 + 合规成本"
+    },
+    {
+      "event": "US Stablecoin Regulation Update",
+      "date": "2026-06-30",
+      "type": "regulatory",
+      "severity": "critical",
+      "note": "美国稳定币立法进展窗口"
+    }
+  ]
+}

@@ -342,6 +342,64 @@ class AlphaHiveDailyReporter:
 
         return report
 
+    # ── D4: 部署后 CDN 验证 ──
+    _DEPLOY_BASE_URL = "https://wangmingjie36-creator.github.io/alpha-hive-deploy"
+
+    def _verify_cdn_deployment(self, repo: str,
+                               max_wait: int = 180, poll_interval: int = 15) -> bool:
+        """Push 成功后轮询 CDN，验证 dashboard-data.json 已更新。
+
+        纯 advisory — 超时只记 WARNING，不回滚/阻塞。
+        """
+        import json as _json_v
+        import time as _time_v
+        import urllib.request
+
+        try:
+            import os as _os_v
+            dj_path = _os_v.path.join(repo, "dashboard-data.json")
+            with open(dj_path, encoding="utf-8") as _f:
+                expected_ts = _json_v.load(_f).get("_generated_at", "")
+            if not expected_ts:
+                _log.debug("dashboard-data.json 无 _generated_at，跳过 CDN 验证")
+                return True
+        except (OSError, _json_v.JSONDecodeError) as e:
+            _log.debug("读取本地 dashboard-data.json 失败，跳过验证: %s", e)
+            return True
+
+        _log.info("验证 CDN 部署... (期望: %s, 最长等待 %ds)", expected_ts, max_wait)
+        start = _time_v.monotonic()
+        attempt = 0
+        while _time_v.monotonic() - start < max_wait:
+            attempt += 1
+            try:
+                req_url = f"{self._DEPLOY_BASE_URL}/dashboard-data.json?_verify={int(_time_v.time())}"
+                req = urllib.request.Request(req_url, headers={
+                    "Cache-Control": "no-cache", "Pragma": "no-cache",
+                })
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = _json_v.loads(resp.read().decode("utf-8"))
+                    live_ts = data.get("_generated_at", "")
+                    if live_ts == expected_ts:
+                        _log.info(
+                            "✅ CDN 验证通过 (attempt %d, %.0fs)",
+                            attempt, _time_v.monotonic() - start,
+                        )
+                        return True
+                    _log.debug(
+                        "CDN 仍旧: live='%s' expected='%s' (attempt %d)",
+                        live_ts, expected_ts, attempt,
+                    )
+            except Exception as e:
+                _log.debug("CDN 验证请求失败: %s (attempt %d)", e, attempt)
+            _time_v.sleep(poll_interval)
+
+        _log.warning(
+            "⚠️ CDN 验证超时 (%ds): live 数据未更新到 '%s'，可能需要手动刷新",
+            max_wait, expected_ts,
+        )
+        return False
+
     def _deploy_static_to_ghpages(self):
         """用 git plumbing 构建仅含静态文件的 gh-pages 提交并推送。"""
         import subprocess
@@ -352,11 +410,28 @@ class AlphaHiveDailyReporter:
             os.remove(idx)
         env = os.environ.copy()
         env["GIT_INDEX_FILE"] = idx
-        static_exts = (".html", ".json", ".xml", ".js")
-        files = [f for f in os.listdir(repo)
-                 if f.endswith(static_exts)
-                 or f == ".nojekyll"
-                 or (f.endswith(".md") and f.startswith("alpha-hive-"))]
+        # ── D2: 部署文件白名单（替代宽泛扩展名匹配，减少文件数 98→~35） ──
+        import re as _re_deploy
+        from datetime import timedelta as _td_deploy
+        _CORE_FILES = {
+            "index.html", "dashboard-data.json", "manifest.json",
+            "sw.js", "rss.xml", ".nojekyll",
+        }
+        _today_dt = datetime.strptime(self.date_str, "%Y-%m-%d")
+        _cutoff = (_today_dt - _td_deploy(days=3)).strftime("%Y-%m-%d")
+        _ml_pat = _re_deploy.compile(
+            r"^alpha-hive-\w+-ml-enhanced-(\d{4}-\d{2}-\d{2})\.html$"
+        )
+        files = []
+        for f in os.listdir(repo):
+            if f in _CORE_FILES:
+                files.append(f)
+            elif (m := _ml_pat.match(f)) and m.group(1) >= _cutoff:
+                # 最近 3 天的 ML 增强报告
+                files.append(f)
+            elif f.startswith("alpha-hive-daily-") and f.endswith((".json", ".md")):
+                # 当日+历史 daily 报告（JSON + MD）
+                files.append(f)
         if not files:
             _log.warning("无静态文件可部署")
             return
@@ -389,16 +464,40 @@ class AlphaHiveDailyReporter:
             ["git", "update-ref", "refs/heads/gh-pages", commit],
             cwd=repo, check=True
         )
-        r = subprocess.run(
-            ["git", "push", "origin", "gh-pages", "--force"],
-            cwd=repo, capture_output=True, text=True
-        )
+        # ── D3: Push 重试（指数退避，最多 3 次重试） ──
+        import time as _time_push
+        _PUSH_MAX_RETRIES = 3
+        _push_ok = False
+        for _push_attempt in range(_PUSH_MAX_RETRIES + 1):
+            r = subprocess.run(
+                ["git", "push", "origin", "gh-pages", "--force"],
+                cwd=repo, capture_output=True, text=True
+            )
+            if r.returncode == 0:
+                _push_ok = True
+                break
+            if _push_attempt < _PUSH_MAX_RETRIES:
+                _delay = min(2.0 * (2 ** _push_attempt), 16.0)
+                _log.warning(
+                    "gh-pages push attempt %d/%d failed (%s), retrying in %.0fs",
+                    _push_attempt + 1, _PUSH_MAX_RETRIES + 1,
+                    r.stderr.strip()[:120], _delay,
+                )
+                _time_push.sleep(_delay)
         if os.path.exists(idx):
             os.remove(idx)
-        if r.returncode == 0:
-            _log.info("gh-pages 部署成功 (%d 静态文件)", len(files))
+        if _push_ok:
+            _log.info(
+                "gh-pages 部署成功 (%d 静态文件, attempt %d/%d)",
+                len(files), _push_attempt + 1, _PUSH_MAX_RETRIES + 1,
+            )
+            # ── D4: 部署后 CDN 验证 ──
+            self._verify_cdn_deployment(repo)
         else:
-            _log.warning("gh-pages push 失败: %s", r.stderr)
+            _log.warning(
+                "gh-pages push 失败 (所有 %d 次尝试用尽): %s",
+                _PUSH_MAX_RETRIES + 1, r.stderr,
+            )
 
     def run_swarm_scan(self, focus_tickers: List[str] = None, progress_callback=None) -> Dict:
         """
@@ -428,7 +527,10 @@ class AlphaHiveDailyReporter:
         # 创建共享的信息素板
         board = PheromoneBoard(memory_store=self.memory_store, session_id=self._session_id)
 
-        # 实例化 Agent：第一阶段 6 个核心 Agent（可选+CodeExecutor），第二阶段 BearBeeContrarian（读取信息素板后分析）
+        # 实例化 Agent：三阶段流水线
+        # Phase 1: 5 个核心 Agent 并行（数据采集 + 独立分析）
+        # Phase 1.5: GuardBee 顺序（交叉验证需要读取已完成的 Phase-1 信息素板数据）
+        # Phase 2: BearBee 顺序（看空对冲需要读取所有 Phase-1 + Guard 数据）
         retriever = self.vector_memory if (self.vector_memory and self.vector_memory.enabled) else None
         phase1_agents = [
             ScoutBeeNova(board, retriever=retriever),
@@ -436,9 +538,10 @@ class AlphaHiveDailyReporter:
             BuzzBeeWhisper(board, retriever=retriever),
             ChronosBeeHorizon(board, retriever=retriever),
             RivalBeeVanguard(board, retriever=retriever),
-            GuardBeeSentinel(board, retriever=retriever),
         ]
-        # 看空对冲蜂：二阶段执行（等其他 Agent 写入信息素板后再分析）
+        # Phase 1.5: 交叉验证蜂（需要读取 Phase-1 信息素板，不可并行）
+        guard_agent = GuardBeeSentinel(board, retriever=retriever)
+        # Phase 2: 看空对冲蜂（需要读取所有 Phase-1 + Guard 数据）
         bear_agent = BearBeeContrarian(board, retriever=retriever)
 
         # Phase 3 P4: 动态注入 CodeExecutorAgent
@@ -451,8 +554,8 @@ class AlphaHiveDailyReporter:
         import llm_service as _llm_check_q
         queen = QueenDistiller(board, adapted_weights=adapted_w, enable_llm=_llm_check_q.is_available())
 
-        all_agents = phase1_agents + [bear_agent]
-        _log.info("%d Agent（含二阶段看空蜂）| 预取数据中...", len(all_agents))
+        all_agents = phase1_agents + [guard_agent, bear_agent]
+        _log.info("%d Agent（Phase1 %d + Guard + Bear）| 预取数据中...", len(all_agents), len(phase1_agents))
 
         # ⚡ 优化 #1+#2: 批量预取 yfinance + VectorMemory（每 ticker 仅 1 次）
         prefetched = prefetch_shared_data(targets, retriever)
@@ -495,7 +598,7 @@ class AlphaHiveDailyReporter:
             except Exception as _ve:
                 _log.debug("ticker validity check error for %s: %s", ticker, _ve)
 
-            # 第一阶段：6 个核心 Agent 并行分析（含可选 CodeExecutorAgent）
+            # Phase 1: 5 个核心 Agent 并行分析（含可选 CodeExecutorAgent）
             with ThreadPoolExecutor(max_workers=len(phase1_agents)) as executor:
                 futures = {executor.submit(agent.analyze, ticker): agent for agent in phase1_agents}
                 agent_results = []
@@ -506,7 +609,18 @@ class AlphaHiveDailyReporter:
                         _log.warning("Agent future failed: %s", e)
                         agent_results.append(None)
 
-            # 第二阶段：BearBeeContrarian 读取信息素板后分析（此时其他 Agent 数据已可用）
+            # Phase 1.5: GuardBeeSentinel 交叉验证（此时 Phase-1 数据已全部在信息素板上）
+            try:
+                guard_result = guard_agent.analyze(ticker)
+                agent_results.append(guard_result)
+                _log.info("  🛡️ 验证蜂: %s %s (%.1f分)",
+                          ticker, guard_result.get("direction", "?"),
+                          guard_result.get("score", 5.0))
+            except (ValueError, KeyError, TypeError, AttributeError) as e:
+                _log.warning("GuardBeeSentinel failed for %s: %s", ticker, e)
+                agent_results.append(None)
+
+            # Phase 2: BearBeeContrarian 看空对冲（此时 Phase-1 + Guard 数据均已可用）
             try:
                 bear_result = bear_agent.analyze(ticker)
                 agent_results.append(bear_result)
@@ -839,6 +953,35 @@ class AlphaHiveDailyReporter:
             except Exception as e:
                 _log.debug("Slack 重试失败: %s", e)
 
+        # Phase 4: 反馈循环 - 保存报告快照（供 T+1/T+7/T+30 回测）
+        try:
+            from feedback_loop import ReportSnapshot
+            import yfinance as _yf_fb
+            _snap_dir = os.path.join(self._output_dir, "report_snapshots")
+            _snap_count = 0
+            for _tk, _data in swarm_results.items():
+                if _data.get("final_score", 0) >= 5.0:
+                    _snap = ReportSnapshot(_tk, self.date_str)
+                    _snap.composite_score = _data.get("final_score", 0.0)
+                    _snap.direction = _data.get("direction", "Neutral")
+                    _snap.agent_votes = {
+                        e.get("agent_id", ""): e.get("self_score", 5.0)
+                        for e in board.snapshot()
+                        if e.get("ticker") == _tk
+                    }
+                    try:
+                        _hist = _yf_fb.Ticker(_tk).history(period="1d")
+                        if not _hist.empty:
+                            _snap.entry_price = float(_hist["Close"].iloc[-1])
+                    except Exception:
+                        pass
+                    _snap.save_to_json(_snap_dir)
+                    _snap_count += 1
+            if _snap_count:
+                _log.info("反馈循环: 已保存 %d 个标的快照", _snap_count)
+        except Exception as e:
+            _log.debug("反馈循环保存失败(非致命): %s", e)
+
         return report
 
     def run_crew_scan(self, focus_tickers: List[str] = None) -> Dict:
@@ -932,26 +1075,69 @@ class AlphaHiveDailyReporter:
             reverse=True
         )
 
-        # 构建 OpportunityItem 列表（兼容现有报告格式）
+        # 构建 OpportunityItem 列表（使用 QueenDistiller 真实维度分数）
         opportunities = []
         for ticker, swarm_data in sorted_results:
+            # H1: 使用 QueenDistiller 计算的真实维度分数，不再用 final_score × 常数伪造
+            _dim = swarm_data.get("dimension_scores", {})
+            _final = swarm_data["final_score"]
+
+            # 从 agent_details 提取真实催化剂、风险、thesis_break
+            _details = swarm_data.get("agent_details", {})
+            _catalysts = []
+            _risks = []
+            _thesis_break = ""
+            for _agent_id, _ad in _details.items():
+                if "Chronos" in _agent_id and isinstance(_ad, dict):
+                    # ChronosBeeHorizon 提供催化剂
+                    _cat_disc = _ad.get("discovery", "")
+                    if _cat_disc and _cat_disc != "未发现显著看空信号":
+                        _catalysts.append(_cat_disc[:60])
+                if "Bear" in _agent_id and isinstance(_ad, dict):
+                    # BearBeeContrarian 提供风险
+                    _bear_disc = _ad.get("discovery", "")
+                    if _bear_disc and _bear_disc != "未发现显著看空信号":
+                        for _seg in _bear_disc.split(" | ")[:3]:
+                            if _seg.strip():
+                                _risks.append(_seg.strip()[:50])
+                if "Guard" in _agent_id and isinstance(_ad, dict):
+                    # GuardBeeSentinel 提供失效条件
+                    _guard_disc = _ad.get("discovery", "")
+                    if _guard_disc:
+                        _thesis_break = _guard_disc[:80]
+
+            if not _catalysts:
+                _catalysts = ["多 Agent 共振信号"] if swarm_data["resonance"]["resonance_detected"] else ["待验证"]
+            if not _risks:
+                _risks = ["多头拥挤"] if swarm_data["resonance"]["resonance_detected"] else []
+            if not _thesis_break:
+                _thesis_break = "信号分散"
+
+            # 真实置信度：从 dimension_confidence 平均值计算
+            _dim_conf = swarm_data.get("dimension_confidence", {})
+            if _dim_conf:
+                _avg_conf = sum(_dim_conf.values()) / len(_dim_conf)
+                _confidence = min(95, max(30, round(_avg_conf * 100)))
+            else:
+                _confidence = min(95, _final * 10) if _final >= 7.5 else 60
+
             opp = OpportunityItem(
                 ticker=ticker,
                 direction="看多" if swarm_data["direction"] == "bullish" else (
                     "看空" if swarm_data["direction"] == "bearish" else "中性"
                 ),
-                signal_score=swarm_data["final_score"],
-                catalyst_score=swarm_data["final_score"] * 0.9,
-                sentiment_score=swarm_data["final_score"] * 0.85,
-                odds_score=swarm_data["final_score"] * 0.8,
-                risk_score=swarm_data["final_score"] * 0.95,
-                options_score=swarm_data["final_score"] * 0.88,
-                opportunity_score=swarm_data["final_score"],
-                confidence=min(95, swarm_data["final_score"] * 10) if swarm_data["final_score"] >= 7.5 else 60,
-                key_catalysts=["多 Agent 共振信号"] if swarm_data["resonance"]["resonance_detected"] else ["待验证"],
+                signal_score=round(_dim.get("signal", _final), 2),
+                catalyst_score=round(_dim.get("catalyst", _final * 0.9), 2),
+                sentiment_score=round(_dim.get("sentiment", _final * 0.85), 2),
+                odds_score=round(_dim.get("odds", _final * 0.8), 2),
+                risk_score=round(_dim.get("risk_adj", _final * 0.95), 2),
+                options_score=round(_dim.get("odds", _final * 0.88), 2),
+                opportunity_score=_final,
+                confidence=_confidence,
+                key_catalysts=_catalysts,
                 options_signal=f"共振信号 ({swarm_data['resonance']['supporting_agents']} Agent)",
-                risks=["多头拥挤"] if swarm_data["resonance"]["resonance_detected"] else [],
-                thesis_break="信号分散"
+                risks=_risks,
+                thesis_break=_thesis_break,
             )
             opportunities.append(opp)
 
@@ -2141,7 +2327,7 @@ class AlphaHiveDailyReporter:
         import json as _json2
 
         # ── manifest.json ──
-        icon_svg = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpolygon points='50,5 93,28 93,72 50,95 7,72 7,28' fill='%23F4A532'/%3E%3Ctext x='50' y='62' font-size='42' text-anchor='middle' fill='%23fff'%3E🐝%3C/text%3E%3C/svg%3E"
+        icon_svg = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpolygon points='50,5 93,28 93,72 50,95 7,72 7,28' fill='%23F4A532'/%3E%3Cg transform='translate(26,24) scale(3)'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23805215'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23fff'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23fff'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23fff'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23fff'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23fff' opacity='.65'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23fff' opacity='.45'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23fff' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23fff' opacity='.65'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23fff' opacity='.45'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23fff' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23805215' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23805215' opacity='.5'/%3E%3C/g%3E%3C/svg%3E"
         manifest = {
             "name": "Alpha Hive 投资仪表板",
             "short_name": "Alpha Hive",
@@ -2163,7 +2349,7 @@ class AlphaHiveDailyReporter:
         cache_name = f"alpha-hive-{_sw_ts}"
         sw_content = f"""// Alpha Hive Service Worker - {_sw_ts}
 var CACHE_NAME='{cache_name}';
-var PRECACHE_URLS=['./', 'index.html', 'dashboard-data.json', 'manifest.json',
+var PRECACHE_URLS=['./', 'index.html', 'manifest.json',
   'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'];
 
 self.addEventListener('install', function(e){{

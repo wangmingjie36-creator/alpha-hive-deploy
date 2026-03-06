@@ -688,12 +688,30 @@ class OracleBeeEcho(BeeAgent):
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.debug("OracleBeeEcho LLM unavailable for %s: %s", ticker, e)
 
+            # S14: IV Skew 信号融入评分
+            _skew_ratio = None
+            if result:
+                _skew_ratio = result.get("iv_skew_ratio")
+                _skew_sig = result.get("iv_skew_signal", "")
+                if _skew_ratio is not None:
+                    if _skew_ratio > 1.3:
+                        # 机构恐慌对冲 → bearish 渐进式惩罚（-0.25~-1.0）
+                        score = max(1.0, score - min(1.0, (_skew_ratio - 1.3) * 2.5))
+                        discovery = f"{discovery} | Skew {_skew_ratio:.2f}({_skew_sig})"
+                    elif _skew_ratio < 0.8:
+                        # call 投机过热 → bullish 渐进式加分（+0.1~+0.5）
+                        _bull_adj = min(0.5, (0.8 - _skew_ratio) * 1.5)
+                        score = min(10.0, score + _bull_adj)
+                        discovery = f"{discovery} | Skew {_skew_ratio:.2f}({_skew_sig})"
+
             # S3: 结构化数据交换（BearBee 可直接读取，替代正则解析）
             _pub_details = {}
             if result:
                 _pub_details["pc_ratio"] = result.get("put_call_ratio")
                 _pub_details["iv_rank"] = result.get("iv_rank")
-                _pub_details["gex"] = result.get("gex")
+                _pub_details["gex"] = result.get("gamma_exposure")  # A2: OptionsAgent 返回 "gamma_exposure"
+                if _skew_ratio is not None:
+                    _pub_details["iv_skew"] = _skew_ratio  # S14: 仅有值时设置
             self._publish(ticker, discovery, "options+polymarket", score, direction, details=_pub_details)
 
             # Phase 2: confidence = 期权数据可用 + Polymarket 可用 + LLM 加成
@@ -1131,6 +1149,7 @@ class ChronosBeeHorizon(BeeAgent):
             catalysts_found = []
             score = 5.0
             direction = "neutral"
+            t = None  # yfinance Ticker，步骤 1b 分析师目标价复用
 
             # 1. 从 yfinance 获取真实财报日期
             try:
@@ -1204,7 +1223,63 @@ class ChronosBeeHorizon(BeeAgent):
             except (ConnectionError, TimeoutError, ValueError, KeyError, AttributeError, OSError) as e:
                 _log.warning("ChronosBeeHorizon yfinance calendar unavailable for %s: %s", ticker, e)
 
-            # 2. 补充 CatalystTimeline（已有的硬编码催化剂）
+            # 1b. 分析师目标价（补强2：yfinance analyst_price_targets）
+            _analyst_info: Dict = {}
+            try:
+                if t is not None:  # reuse yfinance Ticker from step 1
+                    _apt = getattr(t, "analyst_price_targets", None)
+                    if _apt is not None and hasattr(_apt, "get"):
+                        _current = _apt.get("current", 0) or 0
+                        _low = _apt.get("low", 0) or 0
+                        _high = _apt.get("high", 0) or 0
+                        _mean = _apt.get("mean", 0) or 0
+                        _median = _apt.get("median", 0) or 0
+                        if _mean > 0:
+                            _analyst_info = {
+                                "target_mean": round(_mean, 2),
+                                "target_low": round(_low, 2),
+                                "target_high": round(_high, 2),
+                                "target_median": round(_median, 2),
+                                "current_price": round(_current, 2),
+                            }
+                            # 计算 upside/downside 百分比
+                            if _current > 0:
+                                _analyst_info["upside_pct"] = round(
+                                    (_mean / _current - 1) * 100, 1
+                                )
+            except (ConnectionError, TimeoutError, ValueError, KeyError, AttributeError, OSError) as e:
+                _log.debug("ChronosBeeHorizon analyst targets unavailable for %s: %s", ticker, e)
+
+            # 2. 加载外部 catalysts.json（S13：覆盖全部 WATCHLIST 标的）
+            _catalysts_json_loaded = False
+            try:
+                import json as _json_cat
+                import os as _os_cat
+                _cat_path = _os_cat.path.join(_os_cat.path.dirname(__file__), "catalysts.json")
+                if _os_cat.path.isfile(_cat_path):
+                    with open(_cat_path, "r", encoding="utf-8") as _cf:
+                        _all_cats = _json_cat.load(_cf)
+                    _catalysts_json_loaded = True
+                    for entry in _all_cats.get(ticker, []):
+                        cat_date = entry.get("date", "")
+                        if cat_date:
+                            from datetime import datetime as _dt_cat
+                            try:
+                                days_until = (_dt_cat.strptime(cat_date, "%Y-%m-%d") - _dt_cat.now()).days
+                            except ValueError:
+                                days_until = 999
+                            if days_until >= 0:
+                                catalysts_found.append({
+                                    "event": entry.get("event", "Unknown"),
+                                    "date": cat_date,
+                                    "days_until": days_until,
+                                    "type": entry.get("type", "economic_event"),
+                                    "severity": entry.get("severity", "medium"),
+                                })
+            except (OSError, ValueError, KeyError) as e:
+                _log.debug("catalysts.json unavailable for %s: %s", ticker, e)
+
+            # 2b. 回退：CatalystTimeline 硬编码（向后兼容 NVDA/VKTX 详细催化剂）
             try:
                 from catalyst_refinement import create_nvda_catalysts, create_vktx_catalysts
                 if ticker == "NVDA":
@@ -1215,14 +1290,17 @@ class ChronosBeeHorizon(BeeAgent):
                     timeline = None
 
                 if timeline:
+                    # 去重：如果 catalysts.json 已有同名事件就跳过
+                    existing_events = {c["event"] for c in catalysts_found}
                     for cat in timeline.get_upcoming_catalysts(days_ahead=30):
-                        catalysts_found.append({
-                            "event": cat.event_name,
-                            "date": cat.scheduled_date or "TBD",
-                            "days_until": cat.get_days_until_event(),
-                            "type": cat.catalyst_type.value,
-                            "severity": cat.severity.value,
-                        })
+                        if cat.event_name not in existing_events:
+                            catalysts_found.append({
+                                "event": cat.event_name,
+                                "date": cat.scheduled_date or "TBD",
+                                "days_until": cat.get_days_until_event(),
+                                "type": cat.catalyst_type.value,
+                                "severity": cat.severity.value,
+                            })
             except (ImportError, ValueError, AttributeError) as e:
                 _log.debug("CatalystTimeline unavailable for %s: %s", ticker, e)
 
@@ -1269,6 +1347,12 @@ class ChronosBeeHorizon(BeeAgent):
                 discovery = "无近期催化剂"
                 direction = "neutral"
 
+            # 分析师目标价注入 discovery
+            if _analyst_info and _analyst_info.get("upside_pct") is not None:
+                _up = _analyst_info["upside_pct"]
+                _tgt = _analyst_info["target_mean"]
+                discovery = f"{discovery} | 分析师目标${_tgt}({'↑' if _up > 0 else '↓'}{abs(_up):.1f}%)"
+
             if ctx:
                 discovery = f"{discovery} | {ctx}"
 
@@ -1301,9 +1385,16 @@ class ChronosBeeHorizon(BeeAgent):
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.debug("ChronosBeeHorizon LLM unavailable for %s: %s", ticker, e)
 
-            self._publish(ticker, discovery, "catalyst_timeline", score, direction)
+            self._publish(ticker, discovery, "catalyst_timeline", score, direction,
+                         details={
+                             "catalyst_count": len(catalysts_found),
+                             "nearest_days": catalysts_found[0].get("days_until") if catalysts_found else None,
+                             "catalyst_types": list({c.get("type", "") for c in catalysts_found}),
+                             "analyst_upside_pct": _analyst_info.get("upside_pct") if _analyst_info else None,
+                             "analyst_mean_target": _analyst_info.get("target_mean") if _analyst_info else None,
+                         })
 
-            # Phase 2: confidence = 催化剂数量和来源多样性 + LLM 加成
+            # Phase 2: confidence = 催化剂数量和来源多样性 + LLM 加成 + 分析师数据
             confidence = 0.3  # baseline
             if catalysts_found:
                 confidence += min(0.3, len(catalysts_found) * 0.08)
@@ -1312,6 +1403,8 @@ class ChronosBeeHorizon(BeeAgent):
                     confidence += 0.15
             if llm_catalyst:
                 confidence += 0.2
+            if _analyst_info:
+                confidence += 0.1  # 分析师目标价增加置信度
             confidence = min(1.0, confidence)
 
             return {
@@ -1323,10 +1416,14 @@ class ChronosBeeHorizon(BeeAgent):
                 "dimension": "catalyst",
                 "data_quality": {
                     "yfinance_calendar": "real" if catalysts_found else "empty",
-                    "catalyst_refinement": "real",
+                    "catalysts_json": "loaded" if _catalysts_json_loaded else "missing",
+                    "analyst_targets": "real" if _analyst_info else "unavailable",
                     "llm_impact": "llm_enhanced" if llm_catalyst else "rule_only",
                 },
-                "details": {"catalysts": catalysts_found[:5]}
+                "details": {
+                    "catalysts": catalysts_found[:5],
+                    "analyst_targets": _analyst_info or {},
+                }
             }
 
         except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
@@ -1400,7 +1497,13 @@ class RivalBeeVanguard(BeeAgent):
             if ctx:
                 discovery = f"{discovery} | {ctx}"
 
-            self._publish(ticker, discovery, "ml_predictor", round(score, 2), direction)
+            self._publish(ticker, discovery, "ml_predictor", round(score, 2), direction,
+                         details={
+                             "ml_probability": prediction.get("probability") if prediction else None,
+                             "expected_7d": prediction.get("expected_7d") if prediction else None,
+                             "expected_30d": prediction.get("expected_30d") if prediction else None,
+                             "momentum_5d": stock.get("momentum_5d") if stock else None,
+                         })
 
             # Phase 2: confidence = ML 模型可用性
             confidence = 0.3 if not prediction else 0.8
@@ -1592,7 +1695,13 @@ class GuardBeeSentinel(BeeAgent):
             except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
                 _log.debug("GuardBeeSentinel LLM unavailable for %s: %s", ticker, e)
 
-            self._publish(ticker, discovery, "guard_bee_sentinel", round(score, 2), direction)
+            self._publish(ticker, discovery, "guard_bee_sentinel", round(score, 2), direction,
+                         details={
+                             "consistency": consistency,
+                             "crowding_adj": adj_factor,
+                             "conflict_type": llm_guard.get("conflict_type", "") if llm_guard else "",
+                             "resonance_detected": resonance.get("resonance_detected", False),
+                         })
 
             # Phase 2: confidence = 信号板有数据 + 一致性高 + LLM 冲突评估
             confidence = 0.4
@@ -1815,19 +1924,29 @@ class BearBeeContrarian(BeeAgent):
                     options_bear = max(options_bear, 5.0)
                     bearish_signals.append(f"IV Rank {iv_rank:.0f}（波动偏高）")
 
+                # E2: 消费 OracleBee 已发布的 iv_skew / gex
+                iv_skew = _od.get("iv_skew")
+                if iv_skew is not None and iv_skew > 1.15:
+                    options_bear = max(options_bear, 6.5)
+                    bearish_signals.append(f"IV Skew {iv_skew:.2f}（看跌期权溢价偏高）")
+                gex = _od.get("gex")
+                if gex is not None and gex < 0:
+                    options_bear = max(options_bear, 5.0)
+                    bearish_signals.append(f"GEX 负值 {gex:,.0f}（做市商助跌）")
+
                 # 检查 OracleBeeEcho 的方向
                 if oracle_entry.direction == "bearish" and options_bear < 5.0:
                     options_bear = max(options_bear, 5.5)
                     if not any("P/C" in s for s in bearish_signals):
                         bearish_signals.append(f"Oracle 期权信号看空（{oracle_entry.self_score:.1f}分）")
 
-                options_data = {"pc_ratio": pc_ratio, "iv_rank": iv_rank}
+                options_data = {"pc_ratio": pc_ratio, "iv_rank": iv_rank, "iv_skew": iv_skew, "gex": gex}
 
             # 回退：直接调用期权分析模块
             if not options_data:
                 try:
-                    from options_analyzer import OptionsAnalyzer
-                    opt = OptionsAnalyzer()
+                    from options_analyzer import OptionsAgent
+                    opt = OptionsAgent()
                     result = opt.analyze(ticker, stock_price=price if price > 0 else None)
                     if result:
                         data_sources["options"] = "options_api"
@@ -1842,7 +1961,7 @@ class BearBeeContrarian(BeeAgent):
                         if iv_rank > 80:
                             options_bear = max(options_bear, 7.0)
                             bearish_signals.append(f"IV Rank {iv_rank:.0f}（恐慌高位）")
-                except (ImportError, ConnectionError, ValueError, KeyError, TypeError) as e:
+                except (ImportError, ConnectionError, ValueError, KeyError, TypeError, AttributeError) as e:
                     _log.warning("BearBeeContrarian options fallback failed for %s: %s", ticker, e)
                     data_sources["options"] = "unavailable"
 
@@ -1907,6 +2026,15 @@ class BearBeeContrarian(BeeAgent):
                         news_bear = 4.0
                         bearish_signals.append(f"市场情绪略偏谨慎 {sentiment_pct}%")
 
+                # E2: 消费 BuzzBee 已发布的 reddit_momentum
+                reddit_mom = _bd.get("reddit_momentum")
+                if reddit_mom is not None and reddit_mom < -2:
+                    news_bear = max(news_bear, 6.0)
+                    bearish_signals.append(f"Reddit 动量急跌 {reddit_mom:+.1f}（社区看空转向）")
+                elif reddit_mom is not None and reddit_mom < -0.5:
+                    news_bear = max(news_bear, 4.5)
+                    bearish_signals.append(f"Reddit 动量走弱 {reddit_mom:+.1f}")
+
                 # 检查 BuzzBeeWhisper 的方向
                 if buzz_entry.direction == "bearish" and news_bear < 5.0:
                     news_bear = max(news_bear, 5.5)
@@ -1938,6 +2066,58 @@ class BearBeeContrarian(BeeAgent):
 
             bearish_score += news_bear * 0.15
             total_weight += 0.15
+
+            # ===== 6. 催化剂风险（ChronosBeeHorizon 信息素板）=====
+            chronos_bear = 0.0
+            chronos_entry = self._read_board_entry(ticker, "Chronos")
+            if chronos_entry and chronos_entry.discovery:
+                data_sources["catalyst"] = "real"
+                _cd = getattr(chronos_entry, 'details', {}) or {}
+                nearest = _cd.get("nearest_days")
+                if nearest is not None and nearest <= 7:
+                    chronos_bear = 5.0
+                    bearish_signals.append(f"催化剂{nearest}天内到来，波动性风险↑")
+                analyst_upside = _cd.get("analyst_upside_pct")
+                if analyst_upside is not None and analyst_upside < -10:
+                    chronos_bear = max(chronos_bear, 6.0)
+                    bearish_signals.append(f"分析师目标价下方 {abs(analyst_upside):.0f}%")
+            bearish_score += chronos_bear * 0.10
+            total_weight += 0.10
+
+            # ===== 7. ML 预测看空（RivalBeeVanguard 信息素板）=====
+            ml_bear = 0.0
+            rival_entry = self._read_board_entry(ticker, "RivalBee")
+            if rival_entry and rival_entry.discovery:
+                data_sources["ml"] = "real"
+                _rd = getattr(rival_entry, 'details', {}) or {}
+                ml_prob = _rd.get("ml_probability")
+                if ml_prob is not None and ml_prob < 0.45:
+                    ml_bear = 6.0 + (0.45 - ml_prob) * 10
+                    ml_bear = min(8.5, ml_bear)
+                    bearish_signals.append(f"ML模型看空(概率{ml_prob:.0%})")
+                exp_7d = _rd.get("expected_7d")
+                if exp_7d is not None and exp_7d < -3:
+                    ml_bear = max(ml_bear, 5.5)
+                    bearish_signals.append(f"ML预测7日回报{exp_7d:+.1f}%")
+            bearish_score += ml_bear * 0.08
+            total_weight += 0.08
+
+            # ===== 8. 信号一致性风险（GuardBeeSentinel 信息素板）=====
+            guard_bear = 0.0
+            guard_entry = self._read_board_entry(ticker, "GuardBee")
+            if guard_entry and guard_entry.discovery:
+                data_sources["guard"] = "real"
+                _gd = getattr(guard_entry, 'details', {}) or {}
+                consist = _gd.get("consistency")
+                if consist is not None and consist < 0.4:
+                    guard_bear = 5.5
+                    bearish_signals.append(f"信号一致性极低({consist:.0%})，方向不确定")
+                conflict = _gd.get("conflict_type", "")
+                if conflict in ("major_conflict", "direction_conflict"):
+                    guard_bear = max(guard_bear, 6.0)
+                    bearish_signals.append(f"GuardBee检测到重大冲突: {conflict}")
+            bearish_score += guard_bear * 0.07
+            total_weight += 0.07
 
             # ===== 综合看空评分 =====
             if total_weight > 0:
@@ -2018,11 +2198,18 @@ class BearBeeContrarian(BeeAgent):
             if ctx:
                 discovery = f"{discovery} | {ctx}"
 
-            self._publish(ticker, discovery, "bear_contrarian", round(score, 2), direction)
+            self._publish(ticker, discovery, "bear_contrarian", round(score, 2), direction,
+                         details={
+                             "bear_score": round(final_bear_score, 2),
+                             "signal_count": len(bearish_signals),
+                             "top_risk": bearish_signals[0][:60] if bearish_signals else "",
+                         })
 
             confidence = min(1.0, 0.3 + len(bearish_signals) * 0.1)
-            # 信息素板数据可用时增加置信度
-            board_sources = sum(1 for v in data_sources.values() if v == "pheromone_board")
+            # M5: 信息素板数据可用时增加置信度
+            # BearBee 的数据源全部经由信息素板中转，成功读到时标记为 "real"
+            # 统计有多少个数据维度成功从信息素板获取了真实数据
+            board_sources = sum(1 for v in data_sources.values() if v == "real")
             confidence = min(1.0, confidence + board_sources * 0.1)
             # LLM 可用时额外增加置信度
             if llm_thesis:
@@ -2077,6 +2264,17 @@ class QueenDistiller:
         "sentiment": 0.20,
         "odds":      0.15,
         "risk_adj":  0.15,
+    }
+
+    # 数据来源分级（用于数据质量评分 + S1 三重惩罚）—— 唯一定义，避免重复
+    REAL_SOURCES = {
+        "real", "yfinance", "finviz_api", "options_api",
+        "keyword", "llm_enhanced", "reddit_apewisdom",
+        "rule_only", "sec_api", "SEC直查", "Finviz", "finviz",
+    }
+    PROXY_SOURCES = {
+        "proxy_volume", "proxy_momentum", "proxy_social",
+        "pheromone_board", "unavailable",
     }
 
     def __init__(self, board: PheromoneBoard, weight_manager=None, adapted_weights: Dict = None,
@@ -2165,8 +2363,8 @@ class QueenDistiller:
         ml_adjustment = 0.0
         for r in valid_results:
             if r.get("dimension") == "ml_auxiliary":
-                ml_score = r.get("score", 5.0)
-                ml_conf = r.get("confidence", 0.5)
+                ml_score = _safe_score(r.get("score", 5.0), default=5.0, lo=0.0, hi=10.0, label="ml_score")
+                ml_conf = _safe_score(r.get("confidence", 0.5), default=0.5, lo=0.0, hi=1.0, label="ml_conf")
                 ml_adjustment = (ml_score - 5.0) * 0.1 * ml_conf
 
         # 4. 5 维 confidence-weighted 评分
@@ -2225,15 +2423,7 @@ class QueenDistiller:
         pre_penalty_score = rule_score
 
         # ── 提前计算数据真实度（惩罚排序需要）──
-        REAL_SOURCES = {
-            "real", "yfinance", "finviz_api", "options_api",
-            "keyword", "llm_enhanced", "reddit_apewisdom",
-            "rule_only", "sec_api", "SEC直查", "Finviz", "finviz",
-        }
-        PROXY_SOURCES = {
-            "proxy_volume", "proxy_momentum", "proxy_social",
-            "pheromone_board", "unavailable",
-        }
+        # H4: 使用类常量 self.REAL_SOURCES / self.PROXY_SOURCES（唯一定义）
         _qs_early = 0.0
         _tf_early = 0
         for r in valid_results:
@@ -2241,9 +2431,9 @@ class QueenDistiller:
             if isinstance(_dq_e, dict):
                 for v in _dq_e.values():
                     _tf_early += 1
-                    if v in REAL_SOURCES:
+                    if v in self.REAL_SOURCES:
                         _qs_early += 1.0
-                    elif v in PROXY_SOURCES:
+                    elif v in self.PROXY_SOURCES:
                         _qs_early += 0.7
         data_real_pct = round(_qs_early / _tf_early * 100, 1) if _tf_early > 0 else 0.0
         data_real_pct = _safe_score(data_real_pct, 50.0, 0, 100, "data_real_pct")
@@ -2350,18 +2540,7 @@ class QueenDistiller:
                 per_agent_directions[src] = r.get("direction", "neutral")
 
         # 9. data_quality 汇总（三级评分：real=1.0, proxy=0.7, fallback=0）
-        REAL_SOURCES = {
-            "real", "yfinance", "finviz_api", "options_api",
-            "keyword", "llm_enhanced", "reddit_apewisdom",
-            "rule_only",   # 规则引擎是系统设计行为，非降级
-            "sec_api",     # SEC 直查 API
-            "SEC直查", "Finviz", "finviz",
-        }
-        PROXY_SOURCES = {
-            "proxy_volume", "proxy_momentum", "proxy_social",
-            "pheromone_board",
-            "unavailable",  # API 未接入是结构设计，非运行失败，给 0.7 分
-        }
+        # H4: 使用类常量 self.REAL_SOURCES / self.PROXY_SOURCES（唯一定义）
         data_quality_summary = {}
         quality_score = 0.0
         total_fields = 0
@@ -2372,9 +2551,9 @@ class QueenDistiller:
                 data_quality_summary[src] = dq
                 for v in dq.values():
                     total_fields += 1
-                    if v in REAL_SOURCES:
+                    if v in self.REAL_SOURCES:
                         quality_score += 1.0
-                    elif v in PROXY_SOURCES:
+                    elif v in self.PROXY_SOURCES:
                         quality_score += 0.7
 
         data_real_pct = round(quality_score / total_fields * 100, 1) if total_fields > 0 else 0.0
@@ -2397,9 +2576,9 @@ class QueenDistiller:
                     if isinstance(_dq, dict):
                         for v in _dq.values():
                             _tf += 1
-                            if v in REAL_SOURCES:
+                            if v in self.REAL_SOURCES:
                                 _qs += 1.0
-                            elif v in PROXY_SOURCES:
+                            elif v in self.PROXY_SOURCES:
                                 _qs += 0.7
             dim_data_quality[_dim] = round(_qs / _tf * 100, 1) if _tf > 0 else None
 

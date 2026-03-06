@@ -172,16 +172,24 @@ class TestDeployStaticToGhPages:
             mock_run.assert_not_called()
 
     def test_deploys_static_files_only(self, reporter_with_mock_git):
-        """只部署 .html/.json/.xml/.js/.nojekyll，忽略 .py"""
+        """D2: 白名单核心文件部署，排除 .py 和非核心文件"""
         reporter, tmp_path = reporter_with_mock_git
 
-        # 创建测试文件
+        # 创建测试文件（白名单核心文件 + 应排除的文件）
         (tmp_path / "index.html").write_text("<html></html>")
-        (tmp_path / "data.json").write_text("{}")
-        (tmp_path / "feed.xml").write_text("<rss></rss>")
+        (tmp_path / "dashboard-data.json").write_text("{}")
+        (tmp_path / "rss.xml").write_text("<rss></rss>")
+        (tmp_path / "sw.js").write_text("// sw")
+        (tmp_path / "manifest.json").write_text("{}")
         (tmp_path / ".nojekyll").write_text("")
+        (tmp_path / "alpha-hive-daily-2026-03-05.json").write_text("{}")
+        (tmp_path / "alpha-hive-daily-2026-03-05.md").write_text("# report")
+        # 应排除的文件
         (tmp_path / "script.py").write_text("# python")
         (tmp_path / "README.md").write_text("# readme")
+        (tmp_path / "realtime_metrics.json").write_text("{}")
+        (tmp_path / ".swarm_results_2026-03-05.json").write_text("{}")
+        (tmp_path / ".checkpoint_test.json").write_text("{}")
 
         # 收集 git 命令
         commands = []
@@ -209,15 +217,24 @@ class TestDeployStaticToGhPages:
              patch("subprocess.run", side_effect=fake_run):
             reporter._deploy_static_to_ghpages()
 
-        # 验证 hash-object 只对静态文件调用
+        # 验证 hash-object 只对白名单文件调用
         hash_cmds = [c for c in commands if "hash-object" in c]
         hashed_files = [c[-1] for c in hash_cmds]
+        # 核心文件应包含
         assert ".nojekyll" in hashed_files
         assert "index.html" in hashed_files
-        assert "data.json" in hashed_files
-        assert "feed.xml" in hashed_files
+        assert "dashboard-data.json" in hashed_files
+        assert "rss.xml" in hashed_files
+        assert "sw.js" in hashed_files
+        assert "manifest.json" in hashed_files
+        assert "alpha-hive-daily-2026-03-05.json" in hashed_files
+        assert "alpha-hive-daily-2026-03-05.md" in hashed_files
+        # 非白名单应排除
         assert "script.py" not in hashed_files
         assert "README.md" not in hashed_files
+        assert "realtime_metrics.json" not in hashed_files
+        assert ".swarm_results_2026-03-05.json" not in hashed_files
+        assert ".checkpoint_test.json" not in hashed_files
 
     def test_nojekyll_included(self, reporter_with_mock_git):
         """.nojekyll 文件应被包含"""
@@ -250,6 +267,137 @@ class TestDeployStaticToGhPages:
             reporter._deploy_static_to_ghpages()
 
         assert ".nojekyll" in deployed_files
+
+    def test_file_filter_excludes_old_ml_reports(self, reporter_with_mock_git):
+        """D2: 超过 3 天的 ML 报告应被排除"""
+        reporter, tmp_path = reporter_with_mock_git
+        reporter.date_str = "2026-03-05"
+
+        # 核心文件（必须存在否则 files 为空直接返回）
+        (tmp_path / "index.html").write_text("<html></html>")
+        # 最近的 ML 报告（应包含）
+        (tmp_path / "alpha-hive-NVDA-ml-enhanced-2026-03-05.html").write_text("ok")
+        (tmp_path / "alpha-hive-NVDA-ml-enhanced-2026-03-03.html").write_text("ok")
+        # 过旧的 ML 报告（应排除 — 超过 3 天窗口）
+        (tmp_path / "alpha-hive-NVDA-ml-enhanced-2026-03-01.html").write_text("old")
+        (tmp_path / "alpha-hive-NVDA-ml-enhanced-2026-02-25.html").write_text("old")
+
+        deployed = []
+
+        def fake_check_output(cmd, **kw):
+            if "hash-object" in cmd:
+                deployed.append(cmd[-1])
+                return b"abc123\n"
+            elif "write-tree" in cmd:
+                return b"tree456\n"
+            elif "rev-parse" in cmd:
+                raise subprocess.CalledProcessError(1, cmd)
+            elif "commit-tree" in cmd:
+                return b"commit789\n"
+            return b""
+
+        def fake_run(cmd, **kw):
+            r = MagicMock(); r.returncode = 0; r.stderr = ""; return r
+
+        with patch("subprocess.check_output", side_effect=fake_check_output), \
+             patch("subprocess.run", side_effect=fake_run):
+            reporter._deploy_static_to_ghpages()
+
+        assert "alpha-hive-NVDA-ml-enhanced-2026-03-05.html" in deployed
+        assert "alpha-hive-NVDA-ml-enhanced-2026-03-03.html" in deployed
+        assert "alpha-hive-NVDA-ml-enhanced-2026-03-01.html" not in deployed
+        assert "alpha-hive-NVDA-ml-enhanced-2026-02-25.html" not in deployed
+
+    def test_push_retries_on_failure(self, reporter_with_mock_git):
+        """D3: push 失败时应重试最多 3 次"""
+        reporter, tmp_path = reporter_with_mock_git
+        (tmp_path / "index.html").write_text("<html></html>")
+
+        push_calls = []
+
+        def fake_check_output(cmd, **kw):
+            if "hash-object" in cmd:
+                return b"abc123\n"
+            elif "write-tree" in cmd:
+                return b"tree456\n"
+            elif "rev-parse" in cmd:
+                raise subprocess.CalledProcessError(1, cmd)
+            elif "commit-tree" in cmd:
+                return b"commit789\n"
+            return b""
+
+        def fake_run(cmd, **kw):
+            r = MagicMock()
+            if "push" in cmd:
+                push_calls.append(cmd)
+                # 前 2 次失败，第 3 次成功
+                if len(push_calls) < 3:
+                    r.returncode = 1
+                    r.stderr = "simulated network error"
+                else:
+                    r.returncode = 0
+                    r.stderr = ""
+            else:
+                r.returncode = 0
+                r.stderr = ""
+            return r
+
+        with patch("subprocess.check_output", side_effect=fake_check_output), \
+             patch("subprocess.run", side_effect=fake_run), \
+             patch.object(reporter, "_verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        # 应尝试 3 次（2 次失败 + 1 次成功）
+        assert len(push_calls) == 3
+
+    def test_push_gives_up_after_max_retries(self, reporter_with_mock_git):
+        """D3: push 在 4 次全部失败后放弃"""
+        reporter, tmp_path = reporter_with_mock_git
+        (tmp_path / "index.html").write_text("<html></html>")
+
+        push_calls = []
+
+        def fake_check_output(cmd, **kw):
+            if "hash-object" in cmd:
+                return b"abc123\n"
+            elif "write-tree" in cmd:
+                return b"tree456\n"
+            elif "rev-parse" in cmd:
+                raise subprocess.CalledProcessError(1, cmd)
+            elif "commit-tree" in cmd:
+                return b"commit789\n"
+            return b""
+
+        def fake_run(cmd, **kw):
+            r = MagicMock()
+            if "push" in cmd:
+                push_calls.append(cmd)
+                r.returncode = 1
+                r.stderr = "permanent failure"
+            else:
+                r.returncode = 0
+                r.stderr = ""
+            return r
+
+        with patch("subprocess.check_output", side_effect=fake_check_output), \
+             patch("subprocess.run", side_effect=fake_run):
+            reporter._deploy_static_to_ghpages()
+
+        # 应尝试 4 次（1 初始 + 3 重试）
+        assert len(push_calls) == 4
+
+    def test_sw_no_dashboard_data_in_precache(self, reporter_with_mock_git):
+        """D1: sw.js 不应预缓存 dashboard-data.json"""
+        reporter, tmp_path = reporter_with_mock_git
+        reporter.report_dir = tmp_path
+
+        reporter._write_pwa_files()
+
+        sw_content = (tmp_path / "sw.js").read_text()
+        assert "dashboard-data.json" not in sw_content
+        # 但仍应包含其他核心文件
+        assert "index.html" in sw_content
+        assert "manifest.json" in sw_content
 
 
 # ==================== cleanup 方法测试 ====================

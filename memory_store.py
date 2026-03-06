@@ -8,26 +8,33 @@ import sqlite3
 import os
 import json
 import uuid
+import atexit
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 from dataclasses import dataclass
-from threading import Lock
+from threading import Lock, local as _thread_local
 from hive_logger import get_logger, PATHS, SafeJSONEncoder
 
 _log = get_logger("memory_store")
 
 
 def _safe_json_truncate(data, max_chars=5000):
-    """JSON 安全截断：逐步减少数组元素直到序列化结果 <= max_chars（U5）"""
+    """JSON 安全截断：按 self_score 降序排列后从低分尾部删除（S6 优先级截断）"""
     if not isinstance(data, list):
         s = json.dumps(data, cls=SafeJSONEncoder)
         return s[:max_chars] if len(s) > max_chars else s
-    items = list(data)
+    # S6: 按 (self_score, support_count) 降序，高价值信号优先保留
+    items = sorted(
+        data,
+        key=lambda x: (x.get("self_score", 0) if isinstance(x, dict) else 0,
+                        x.get("support_count", 0) if isinstance(x, dict) else 0),
+        reverse=True,
+    )
     while items:
         s = json.dumps(items, cls=SafeJSONEncoder)
         if len(s) <= max_chars:
             return s
-        items = items[:-1]
+        items = items[:-1]  # 删除最低分条目
     return "[]"
 
 @dataclass
@@ -61,19 +68,50 @@ class MemoryStore:
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or self.DB_PATH
         self._lock = Lock()
+        self._local = _thread_local()  # M1: 线程本地连接缓存
 
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
         if not self.schema_migrate():
             _log.warning("MemoryStore schema_migrate 失败，但继续运行")
 
+        atexit.register(self.close)
+
     def _connect(self) -> sqlite3.Connection:
-        """获取安全的数据库连接（WAL模式 + 超时）"""
+        """获取线程本地数据库连接（WAL模式 + 懒初始化 + 健康检查）
+
+        M1: 每个线程复用同一连接，避免每次操作都 connect/close。
+        连接失效（磁盘错误等）时自动重建。
+        """
+        conn = getattr(self._local, 'conn', None)
+        if conn is not None:
+            try:
+                conn.execute("SELECT 1")  # 健康检查
+                return conn
+            except sqlite3.Error:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                conn = None
+
         conn = sqlite3.connect(self.db_path, timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA wal_autocheckpoint=1000")
+        conn.row_factory = sqlite3.Row  # 全局 Row factory，支持 dict(row) 和 row[i]
+        self._local.conn = conn
         return conn
+
+    def close(self) -> None:
+        """关闭当前线程的数据库连接"""
+        conn = getattr(self._local, 'conn', None)
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.conn = None
 
     def schema_migrate(self) -> bool:
         """
@@ -84,7 +122,6 @@ class MemoryStore:
         """
         try:
             conn = self._connect()
-            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
             # Phase 2: 启动时完整性检查
@@ -107,6 +144,7 @@ class MemoryStore:
                     self_score          REAL NOT NULL,
                     pheromone_strength  REAL DEFAULT 1.0,
                     support_count       INTEGER DEFAULT 0,
+                    details             TEXT DEFAULT NULL,
                     actual_outcome      TEXT DEFAULT NULL,
                     outcome_return_t1   REAL DEFAULT NULL,
                     outcome_return_t7   REAL DEFAULT NULL,
@@ -120,6 +158,12 @@ class MemoryStore:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_am_agent_id ON agent_memory(agent_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_am_date ON agent_memory(date)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_am_session ON agent_memory(session_id)")
+
+            # Migration: 为旧库添加 details 列（D5 修复）
+            try:
+                cursor.execute("ALTER TABLE agent_memory ADD COLUMN details TEXT DEFAULT NULL")
+            except sqlite3.OperationalError:
+                pass  # 列已存在（新建库或已迁移）
 
             # 表 2: reasoning_sessions - 会话级别聚合
             cursor.execute("""
@@ -176,7 +220,6 @@ class MemoryStore:
                 """, (agent_id,))
 
             conn.commit()
-            conn.close()
 
             _log.info("MemoryStore schema_migrate 成功")
             return True
@@ -187,7 +230,6 @@ class MemoryStore:
 
     def save_agent_memory(self, entry: Dict, session_id: str) -> Optional[str]:
         """保存 Agent 记忆到数据库"""
-        conn = None
         try:
             conn = self._connect()
             cursor = conn.cursor()
@@ -197,14 +239,14 @@ class MemoryStore:
             cursor.execute("""
                 INSERT INTO agent_memory (
                     memory_id, session_id, date, ticker, agent_id, direction, discovery,
-                    source, self_score, pheromone_strength, support_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source, self_score, pheromone_strength, support_count, details
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 memory_id, session_id, entry.get('date'), entry.get('ticker'),
                 entry.get('agent_id'), entry.get('direction', 'neutral'),
                 entry.get('discovery', ''), entry.get('source', ''),
                 entry.get('self_score', 5.0), entry.get('pheromone_strength', 1.0),
-                entry.get('support_count', 0)
+                entry.get('support_count', 0), entry.get('details')
             ))
 
             conn.commit()
@@ -213,15 +255,11 @@ class MemoryStore:
         except (sqlite3.Error, OSError, TypeError, ValueError) as e:
             _log.warning("save_agent_memory 失败: %s", e)
             return None
-        finally:
-            if conn:
-                conn.close()
 
     def save_session(self, session_id: str, date: str, run_mode: str,
                      tickers: List[str], swarm_results: Dict,
                      pheromone_snapshot: List[Dict], duration: float) -> bool:
         """保存会话级别聚合"""
-        conn = None
         try:
             conn = self._connect()
             cursor = conn.cursor()
@@ -256,17 +294,12 @@ class MemoryStore:
         except (sqlite3.Error, OSError, TypeError, ValueError) as e:
             _log.warning("save_session 失败: %s", e)
             return False
-        finally:
-            if conn:
-                conn.close()
 
     def get_recent_memories(self, ticker: str, days: int = 30,
                             agent_id: Optional[str] = None, limit: int = 50) -> List[Dict]:
         """获取近期记忆"""
-        conn = None
         try:
             conn = self._connect()
-            conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
@@ -288,15 +321,11 @@ class MemoryStore:
         except (sqlite3.Error, OSError) as e:
             _log.warning("get_recent_memories 失败: %s", e)
             return []
-        finally:
-            if conn:
-                conn.close()
 
     VALID_PERIODS = {"t1": "outcome_return_t1", "t7": "outcome_return_t7", "t30": "outcome_return_t30"}
 
     def get_agent_accuracy(self, agent_id: str, period: str = "t7") -> Dict:
         """获取 Agent 准确率统计"""
-        conn = None
         try:
             if period not in self.VALID_PERIODS:
                 raise ValueError(f"Invalid period: {period}")
@@ -326,15 +355,11 @@ class MemoryStore:
         except (sqlite3.Error, OSError, ValueError) as e:
             _log.warning("get_agent_accuracy 失败: %s", e)
             return {"accuracy": 0.5, "sample_count": 0, "avg_return": 0.0}
-        finally:
-            if conn:
-                conn.close()
 
     def update_memory_outcome(self, memory_id: str, outcome: str,
                               t1: Optional[float] = None, t7: Optional[float] = None,
                               t30: Optional[float] = None) -> bool:
         """更新记忆的实际结果（T+1/7/30 回看）"""
-        conn = None
         try:
             conn = self._connect()
             cursor = conn.cursor()
@@ -348,9 +373,6 @@ class MemoryStore:
         except (sqlite3.Error, OSError) as e:
             _log.warning("update_memory_outcome 失败: %s", e)
             return False
-        finally:
-            if conn:
-                conn.close()
 
     def generate_session_id(self, run_mode: str = "swarm") -> str:
         """
@@ -369,7 +391,6 @@ class MemoryStore:
 
     def get_agent_weights(self) -> Dict[str, float]:
         """获取所有 Agent 的当前权重"""
-        conn = None
         try:
             conn = self._connect()
             cursor = conn.cursor()
@@ -378,9 +399,6 @@ class MemoryStore:
         except (sqlite3.Error, OSError) as e:
             _log.warning("get_agent_weights 失败: %s", e)
             return {}
-        finally:
-            if conn:
-                conn.close()
 
     def cleanup_old_data(self, retention_days: int = 180) -> int:
         """删除超过 retention_days 的旧记忆和会话记录
@@ -389,7 +407,6 @@ class MemoryStore:
             删除的 agent_memory 记录数
         """
         cutoff = (datetime.now() - timedelta(days=retention_days)).strftime("%Y-%m-%d")
-        conn = None
         try:
             conn = self._connect()
             cursor = conn.execute(
@@ -406,13 +423,9 @@ class MemoryStore:
         except (sqlite3.Error, OSError) as e:
             _log.warning("cleanup_old_data 失败: %s", e)
             return 0
-        finally:
-            if conn:
-                conn.close()
 
     def update_agent_weight(self, agent_id: str, adjusted_weight: float) -> bool:
         """更新单个 Agent 权重"""
-        conn = None
         try:
             conn = self._connect()
             cursor = conn.cursor()
@@ -425,6 +438,3 @@ class MemoryStore:
         except (sqlite3.Error, OSError) as e:
             _log.warning("update_agent_weight 失败: %s", e)
             return False
-        finally:
-            if conn:
-                conn.close()

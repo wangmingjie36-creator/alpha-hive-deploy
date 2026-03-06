@@ -2,14 +2,23 @@
 """
 🐝 Alpha Hive - 自动化定时任务调度器
 支持定时采集数据和生成报告
+
+P0: 新增 backfill_prices() —— T+1/T+7/T+30 反馈循环价格回填
+P1-d: 时区安全（zoneinfo）+ 子进程重试 + 任务防重叠
 """
 
 import schedule
 import time
 import subprocess
+import threading
 from datetime import datetime
 import logging
 import os
+
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
 
 _PROJECT_ROOT = os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__)))
 
@@ -24,6 +33,78 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ==================== 时区工具 ====================
+
+_ET = ZoneInfo("America/New_York")
+
+
+def _et_to_local(et_time_str: str) -> str:
+    """将 ET（美东）时间字符串转换为本地系统时间（HH:MM）。
+
+    例如：系统在 UTC+8 时，_et_to_local("17:30") → "05:30"（次日）
+    """
+    today = datetime.now(_ET).date()
+    et_dt = datetime.combine(
+        today,
+        datetime.strptime(et_time_str, "%H:%M").time(),
+        tzinfo=_ET,
+    )
+    local_dt = et_dt.astimezone()  # 转为系统本地时区
+    return local_dt.strftime("%H:%M")
+
+
+# ==================== 子进程重试 ====================
+
+def _run_with_retry(cmd, timeout=60, max_retries=2):
+    """带重试的 subprocess 调用（指数退避）。
+
+    Returns:
+        subprocess.CompletedProcess 或 None（全部失败后）
+    """
+    result = None
+    for attempt in range(max_retries + 1):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if result.returncode == 0:
+                return result
+            if attempt < max_retries:
+                delay = 5 * (attempt + 1)
+                logger.warning(
+                    "重试 %d/%d (%s): returncode=%d, 等待 %ds",
+                    attempt + 1, max_retries, " ".join(cmd), result.returncode, delay,
+                )
+                time.sleep(delay)
+        except (subprocess.SubprocessError, OSError) as e:
+            logger.warning("子进程异常 %d/%d (%s): %s", attempt + 1, max_retries, " ".join(cmd), e)
+            if attempt >= max_retries:
+                return None
+            time.sleep(5 * (attempt + 1))
+    return result
+
+
+# ==================== 任务防重叠 ====================
+
+_running_tasks: set = set()
+_task_lock = threading.Lock()
+
+
+def _guarded(task_name, func):
+    """防止同一任务重叠执行。若上次仍在运行则跳过本次。"""
+    def wrapper():
+        with _task_lock:
+            if task_name in _running_tasks:
+                logger.warning("跳过 %s（上次仍在运行）", task_name)
+                return
+            _running_tasks.add(task_name)
+        try:
+            func()
+        finally:
+            with _task_lock:
+                _running_tasks.discard(task_name)
+    return wrapper
+
+
+# ==================== 调度器核心 ====================
 
 class ReportScheduler:
     """报告生成调度器"""
@@ -44,47 +125,33 @@ class ReportScheduler:
         return self._earnings_watcher
 
     def collect_data(self):
-        """采集实时数据"""
+        """采集实时数据（带重试）"""
         logger.info("📊 开始采集实时数据...")
-        try:
-            result = subprocess.run(
-                ['python3', 'data_fetcher.py'],
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-            if result.returncode == 0:
-                logger.info("✅ 数据采集成功")
-                self.data_collected = True
-            else:
-                logger.error(f"❌ 数据采集失败: {result.stderr}")
-                self.data_collected = False
-        except (subprocess.SubprocessError, OSError) as e:
-            logger.error(f"❌ 数据采集异常: {e}", exc_info=True)
+        result = _run_with_retry(['python3', 'data_fetcher.py'], timeout=60)
+        if result and result.returncode == 0:
+            logger.info("✅ 数据采集成功")
+            self.data_collected = True
+        else:
+            stderr = result.stderr if result else "子进程异常"
+            logger.error("❌ 数据采集失败: %s", stderr)
             self.data_collected = False
 
     def generate_reports(self):
-        """生成优化报告"""
+        """生成优化报告（带重试）"""
         if not self.data_collected:
             logger.warning("⚠️ 跳过报告生成（数据未采集）")
             return
 
         logger.info("📝 开始生成优化报告...")
-        try:
-            result = subprocess.run(
-                ['python3', 'generate_report_with_realtime_data.py'],
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-            if result.returncode == 0:
-                logger.info("✅ 报告生成成功")
-                self.report_generated = True
-            else:
-                logger.error(f"❌ 报告生成失败: {result.stderr}")
-                self.report_generated = False
-        except (subprocess.SubprocessError, OSError) as e:
-            logger.error(f"❌ 报告生成异常: {e}", exc_info=True)
+        result = _run_with_retry(
+            ['python3', 'generate_report_with_realtime_data.py'], timeout=60,
+        )
+        if result and result.returncode == 0:
+            logger.info("✅ 报告生成成功")
+            self.report_generated = True
+        else:
+            stderr = result.stderr if result else "子进程异常"
+            logger.error("❌ 报告生成失败: %s", stderr)
             self.report_generated = False
 
     def upload_to_github(self):
@@ -155,8 +222,6 @@ class ReportScheduler:
         """系统健康检查"""
         logger.info("🏥 执行健康检查...")
         try:
-            # 检查文件是否存在
-            import os
             files = [
                 'data_fetcher.py',
                 'generate_report_with_realtime_data.py',
@@ -179,9 +244,67 @@ class ReportScheduler:
         except (OSError, ValueError) as e:
             logger.error(f"❌ 健康检查失败: {e}", exc_info=True)
 
+    # ==================== P0: 反馈循环价格回填 ====================
+
+    def backfill_prices(self):
+        """回填 T+1/T+7/T+30 实际价格到历史快照（供反馈循环回测）。
+
+        每日盘后运行一次，扫描 report_snapshots/ 中所有快照：
+        - 距今 >= 1 天且 actual_price_t1 为空 → 回填 T+1 收盘价
+        - 距今 >= 7 天且 actual_price_t7 为空 → 回填 T+7 收盘价
+        - 距今 >= 30 天且 actual_price_t30 为空 → 回填 T+30 收盘价
+        """
+        try:
+            from feedback_loop import ReportSnapshot
+            import yfinance as yf
+            from datetime import timedelta
+        except ImportError:
+            logger.debug("feedback_loop 或 yfinance 不可用，跳过价格回填")
+            return
+
+        snapshot_dir = os.path.join(_PROJECT_ROOT, "report_snapshots")
+        if not os.path.exists(snapshot_dir):
+            return
+
+        today = datetime.now().date()
+        updated = 0
+        for fn in os.listdir(snapshot_dir):
+            if not fn.endswith(".json"):
+                continue
+            try:
+                fpath = os.path.join(snapshot_dir, fn)
+                snap = ReportSnapshot.load_from_json(fpath)
+                snap_date = datetime.strptime(snap.date, "%Y-%m-%d").date()
+                days = (today - snap_date).days
+                needs_save = False
+                ticker_obj = None
+
+                for _tf, min_days, attr in [
+                    ("t1", 1, "actual_price_t1"),
+                    ("t7", 7, "actual_price_t7"),
+                    ("t30", 30, "actual_price_t30"),
+                ]:
+                    if days >= min_days and getattr(snap, attr) is None:
+                        ticker_obj = ticker_obj or yf.Ticker(snap.ticker)
+                        start = snap_date + timedelta(days=min_days - 1)
+                        end = snap_date + timedelta(days=min_days + 3)
+                        hist = ticker_obj.history(start=start, end=end)
+                        if not hist.empty:
+                            setattr(snap, attr, float(hist["Close"].iloc[0]))
+                            needs_save = True
+
+                if needs_save:
+                    snap.save_to_json(snapshot_dir)
+                    updated += 1
+            except Exception as e:
+                logger.debug("快照回填失败 %s: %s", fn, e)
+
+        if updated:
+            logger.info("反馈循环: 回填 %d 个快照价格", updated)
+
 
 def setup_scheduler():
-    """设置定时任务"""
+    """设置定时任务（所有固定时间均经 ET→本地时区转换）"""
     scheduler = ReportScheduler()
 
     # 每 5 分钟采集一次数据（高频更新关键指标）
@@ -193,15 +316,18 @@ def setup_scheduler():
     # 每 30 分钟上传一次到 GitHub
     schedule.every(30).minutes.do(scheduler.upload_to_github)
 
-    # 每小时执行一次完整流程
-    schedule.every(1).hours.do(scheduler.full_pipeline)
+    # 每小时执行一次完整流程（防重叠包装）
+    schedule.every(1).hours.do(_guarded("full_pipeline", scheduler.full_pipeline))
 
     # 盘后财报检查（每日 17:30 和 19:00 ET 各检查一次，覆盖 AMC 财报发布窗口）
-    schedule.every().day.at("17:30").do(scheduler.check_earnings)
-    schedule.every().day.at("19:00").do(scheduler.check_earnings)
+    schedule.every().day.at(_et_to_local("17:30")).do(scheduler.check_earnings)
+    schedule.every().day.at(_et_to_local("19:00")).do(scheduler.check_earnings)
 
     # 盘前财报检查（每日 07:00 ET，覆盖 BMO 财报）
-    schedule.every().day.at("07:00").do(scheduler.check_earnings)
+    schedule.every().day.at(_et_to_local("07:00")).do(scheduler.check_earnings)
+
+    # 反馈循环：盘后价格回填（每日 16:15 ET）
+    schedule.every().day.at(_et_to_local("16:15")).do(scheduler.backfill_prices)
 
     # 每 6 小时执行一次健康检查
     schedule.every(6).hours.do(scheduler.health_check)
@@ -210,8 +336,9 @@ def setup_scheduler():
     logger.info("  📊 数据采集: 每 5 分钟")
     logger.info("  📝 报告生成: 每 15 分钟")
     logger.info("  🚀 GitHub 上传: 每 30 分钟")
-    logger.info("  🔄 完整流程: 每 1 小时")
+    logger.info("  🔄 完整流程: 每 1 小时（防重叠）")
     logger.info("  💰 财报检查: 07:00 / 17:30 / 19:00 ET")
+    logger.info("  🔁 价格回填: 16:15 ET")
     logger.info("  🏥 健康检查: 每 6 小时")
 
     return scheduler

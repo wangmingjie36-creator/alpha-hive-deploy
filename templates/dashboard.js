@@ -963,7 +963,9 @@ function toggleKbHelp(){
     }
   }
 
-  // 尝试从 dashboard-data.json 动态刷新（如果可用）
+  // D5: 从 dashboard-data.json 动态刷新 + Stale 自动重试
+  var _fetchRetryCount=0;
+  var _FETCH_MAX_RETRIES=5;
   function fetchDashboardData(){
     fetch('dashboard-data.json?_t='+Date.now())
       .then(function(r){
@@ -972,6 +974,21 @@ function toggleKbHelp(){
       })
       .then(function(data){
         if(!data||!data._generated_at)return;
+        // 比对 HTML 嵌入时间戳与 JSON 时间戳（检测 CDN stale）
+        var htmlGen=document.body.getAttribute('data-generated')||'';
+        if(htmlGen&&data._generated_at&&data._generated_at<htmlGen){
+          // CDN 返回的 JSON 比 HTML 旧 → CDN 还没更新
+          _fetchRetryCount++;
+          if(_fetchRetryCount<=_FETCH_MAX_RETRIES){
+            console.log('[AH] CDN stale: JSON='+data._generated_at
+              +' HTML='+htmlGen+' (retry '+_fetchRetryCount+'/'+_FETCH_MAX_RETRIES+' in 30s)');
+            setTimeout(fetchDashboardData,30000);
+          } else {
+            console.warn('[AH] CDN \u4ecd\u672a\u66f4\u65b0\uff0c\u5df2\u8fbe\u6700\u5927\u91cd\u8bd5\u6b21\u6570');
+          }
+          return;
+        }
+        _fetchRetryCount=0; // \u6210\u529f\uff0c\u91cd\u7f6e\u8ba1\u6570\u5668
         // 更新英雄区数字
         var heroDate=document.querySelector('.hero-date,.scan-date');
         if(heroDate&&data._date) heroDate.textContent=data._date;
@@ -980,7 +997,8 @@ function toggleKbHelp(){
         if(genEl){
           var curGen=genEl.getAttribute('data-generated');
           if(curGen&&data._generated_at&&data._generated_at>curGen){
-            console.log('[AH] \u53d1\u73b0\u65b0\u6570\u636e, \u5efa\u8bae\u5237\u65b0\u9875\u9762');
+            console.log('[AH] \u53d1\u73b0\u65b0\u6570\u636e, \u81ea\u52a8\u5237\u65b0\u9875\u9762');
+            location.reload();
           }
         }
       })

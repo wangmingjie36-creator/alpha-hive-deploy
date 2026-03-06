@@ -1,0 +1,63 @@
+{
+  "date": "2026-03-06",
+  "timestamp": "2026-03-06T14:20:34.487591",
+  "system_status": "✅ 完成",
+  "phase_completed": "1-6 (完整蜂群流程)",
+  "markdown_report": "# 【2026-03-06】Alpha Hive 每日投资简报\n\n**自动生成于**：2026-03-06 14:20:34\n**系统状态**：✅ 完全激活 | Phase 1-6 完成\n\n## 📊 今日摘要（Top 3）\n\n### 1. **VKTX** - 中性\n- **机会分数**：5.2/10 | **置信度**：30%\n- **期权信号**：做多气氛浓厚（P/C低） | 检测到 3 个看涨异动\n\n### 2. **NVDA** - 中性\n- **机会分数**：5.2/10 | **置信度**：30%\n- **期权信号**：做多气氛浓厚（P/C低） | 检测到 5 个看涨异动\n\n### 3. **MSFT** - 中性\n- **机会分数**：5.1/10 | **置信度**：30%\n- **期权信号**：做多气氛浓厚（P/C低） | 检测到 1 个看涨异动\n\n## 🎯 完整机会清单\n\n| 排序 | 标的 | 方向 | 综合分 | 期权信号 | 置信度 |\n|------|------|------|--------|---------|--------|\n| 1 | **VKTX** | 中性 | 5.2 | 做多气氛浓厚（P/C低）... | 30% |\n| 2 | **NVDA** | 中性 | 5.2 | 做多气氛浓厚（P/C低）... | 30% |\n| 3 | **MSFT** | 中性 | 5.1 | 做多气氛浓厚（P/C低）... | 30% |\n| 4 | **BILI** | 中性 | 5.1 | IV 处于理想水位... | 30% |\n| 5 | **CRCL** | 中性 | 5.0 | 做多气氛浓厚（P/C低）... | 30% |\n\n## ⚠️ 风险雷达\n\n\n## 📝 数据来源 & 免责声明\n\n**数据源**：\n- StockTwits 情绪（实时）\n- Polymarket 赔率（每5分钟）\n- Yahoo Finance / yFinance（实时）\n- SEC 披露（每日更新）\n- **期权链数据**（yFinance，每5分钟缓存）\n\n**免责声明**：\n本报告为蜂群 AI 分析，不构成投资建议，不替代持牌投顾。预测存在误差，所有交易决策需自行判断和风控。\n",
+  "twitter_threads": [
+    "【Alpha Hive 日报 2026-03-06】非投资建议，仅数据分析与情景推演。今天最值得跟踪的 3 个机会 👇\n\n1. **VKTX** 中性\n综合分：5.2/10 | 期权信号：做多气氛浓厚（P/C低） | 检测到 3 个看涨异动\n主催化剂：TBD\n\n2. **NVDA** 中性\n综合分：5.2/10 | 期权信号：做多气氛浓厚（P/C低） | 检测到 5 个看涨异动\n主催化剂：TBD\n\n3. **MSFT** 中性\n综合分：5.1/10 | 期权信号：做多气氛浓厚（P/C低） | 检测到 1 个看涨异动\n主催化剂：TBD\n\n更多详情见完整日报。风险提示：高波动标的需控制仓位。下一步跟踪：T+1 验证信号强度，T+7 回看预测偏差。@igg_wang748"
+  ],
+  "opportunities": [
+    {
+      "rank": 1,
+      "ticker": "VKTX",
+      "direction": "中性",
+      "opp_score": 5.2,
+      "confidence": "30%",
+      "options_signal": "做多气氛浓厚（P/C低） | 检测到 3 个看涨异动",
+      "key_catalyst": "N/A",
+      "thesis_break": "未定义"
+    },
+    {
+      "rank": 2,
+      "ticker": "NVDA",
+      "direction": "中性",
+      "opp_score": 5.2,
+      "confidence": "30%",
+      "options_signal": "做多气氛浓厚（P/C低） | 检测到 5 个看涨异动",
+      "key_catalyst": "N/A",
+      "thesis_break": "未定义"
+    },
+    {
+      "rank": 3,
+      "ticker": "MSFT",
+      "direction": "中性",
+      "opp_score": 5.1,
+      "confidence": "30%",
+      "options_signal": "做多气氛浓厚（P/C低） | 检测到 1 个看涨异动",
+      "key_catalyst": "N/A",
+      "thesis_break": "未定义"
+    },
+    {
+      "rank": 4,
+      "ticker": "BILI",
+      "direction": "中性",
+      "opp_score": 5.1,
+      "confidence": "30%",
+      "options_signal": "IV 处于理想水位",
+      "key_catalyst": "N/A",
+      "thesis_break": "未定义"
+    },
+    {
+      "rank": 5,
+      "ticker": "CRCL",
+      "direction": "中性",
+      "opp_score": 5.0,
+      "confidence": "30%",
+      "options_signal": "做多气氛浓厚（P/C低） | 检测到 1 个看涨异动",
+      "key_catalyst": "N/A",
+      "thesis_break": "未定义"
+    }
+  ],
+  "observation_list": []
+}

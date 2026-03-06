@@ -57,6 +57,16 @@ API_KEYS = {
     },
 }
 
+# ==================== 服务配置（避免硬编码散落各模块） ====================
+
+# Slack 频道 ID（#alpha-hive）
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "C0AGUUWJXJS")
+
+# SEC EDGAR 要求的 User-Agent（SEC 政策要求包含联系方式）
+SEC_USER_AGENT = os.environ.get(
+    "SEC_USER_AGENT", "AlphaHive research@alphahive.dev"
+)
+
 # ==================== 集中 Key/Secret 管理 ====================
 
 # 注册表：env_var → 降级文件路径

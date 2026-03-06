@@ -4,6 +4,7 @@
 实时信号发布、共振检测、动态衰减
 """
 
+import json as _json
 import logging as _logging
 from dataclasses import dataclass, field
 from typing import List, Dict
@@ -34,7 +35,7 @@ class PheromoneEntry:
 class PheromoneBoard:
     """线程安全的信息素板（蜂群通信中枢）"""
 
-    MAX_ENTRIES = 20
+    MAX_ENTRIES = 80  # 7 Agent × 9 Ticker = 63 条，80 条保留完整一轮 + 余量
     DECAY_RATE = 0.1
     MIN_STRENGTH = 0.2
 
@@ -100,12 +101,12 @@ class PheromoneBoard:
                     found_resonance = True
                     break
 
-            # 添加新条目（保持最大 20 条）
+            # 添加新条目（保持最大 MAX_ENTRIES 条）— S6: 按 (score, support, strength) 优先级截断
             if not entry.supporting_agents:
                 entry.supporting_agents = [entry.agent_id]
             self._entries.append(entry)
             if len(self._entries) > self.MAX_ENTRIES:
-                self._entries.sort(key=lambda x: x.pheromone_strength)
+                self._entries.sort(key=lambda x: (x.self_score, x.support_count, x.pheromone_strength))
                 self._entries = self._entries[-self.MAX_ENTRIES:]
 
             # 异步持久化到 DB（使用线程池，退出时会等待完成）
@@ -119,6 +120,7 @@ class PheromoneBoard:
                     'direction': entry.direction,
                     'pheromone_strength': entry.pheromone_strength,
                     'support_count': entry.support_count,
+                    'details': _json.dumps(entry.details, ensure_ascii=False, default=str) if entry.details else None,
                     'date': datetime.now().strftime("%Y-%m-%d")
                 }
                 try:
@@ -223,29 +225,50 @@ class PheromoneBoard:
                 for e in self._entries
             ]
 
+    # D1: details 中对 LLM 决策最有价值的字段白名单（避免传全量）
+    _DETAIL_KEYS = {
+        "pc_ratio", "iv_rank", "iv_skew", "gex",                    # OracleBee
+        "sentiment_score", "reddit_momentum",                        # BuzzBee
+        "catalyst_count", "nearest_days", "analyst_upside_pct",      # ChronosBee
+        "ml_probability", "expected_7d",                             # RivalBee
+        "consistency", "conflict_type", "resonance_detected",        # GuardBee
+        "bear_score", "signal_count",                                # BearBee
+    }
+
     def compact_snapshot(self, ticker: str = None) -> List[Dict]:
         """
-        紧凑快照：仅传递核心字段，避免 Agent 间 token 爆炸
+        紧凑快照：核心字段 + 精选 details，供 LLM 决策
 
-        相比 snapshot() 减少 ~60% 数据量：
+        相比 snapshot() 减少 ~50% 数据量：
         - 去掉 discovery（大文本）、timestamp、source
-        - 仅保留评分和方向信号
+        - 保留评分、方向、支持数
+        - D1: 新增 details 白名单字段（仅数值/布尔，每条约 +40 token）
         """
         with self._lock:
             entries = self._entries
             if ticker:
                 entries = [e for e in entries if e.ticker == ticker]
-            return [
-                {
+            result = []
+            for e in entries:
+                item = {
                     "a": e.agent_id[:8],  # 缩写 agent_id
                     "t": e.ticker,
-                    "d": e.direction[0],  # "b"/"n"/"b" (首字母)
+                    "d": {"bullish": "+", "bearish": "-", "neutral": "0"}.get(e.direction, "?"),
                     "s": round(e.self_score, 1),
                     "p": round(e.pheromone_strength, 2),
                     "c": e.support_count,
                 }
-                for e in entries
-            ]
+                # D1: 附加精选 details（白名单过滤，仅有值时添加）
+                if e.details:
+                    detail_compact = {
+                        k: (round(v, 2) if isinstance(v, float) else v)
+                        for k, v in e.details.items()
+                        if k in self._DETAIL_KEYS and v is not None
+                    }
+                    if detail_compact:
+                        item["x"] = detail_compact  # "x" = extra details
+                result.append(item)
+            return result
 
     def get_entry_count(self) -> int:
         """获取当前板上的条目数"""
@@ -254,12 +277,12 @@ class PheromoneBoard:
 
     def _save_fallback(self, entry_dict: dict) -> None:
         """异步写入失败时保存到 fallback JSON 文件，防止数据丢失"""
-        import json
         from pathlib import Path
         try:
-            fb_path = Path("pheromone_fallback.jsonl")
+            # M4: 使用项目目录绝对路径，避免 cron 环境写到未知位置
+            fb_path = Path(__file__).parent / "pheromone_fallback.jsonl"
             with open(fb_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry_dict, ensure_ascii=False, default=str) + "\n")
+                f.write(_json.dumps(entry_dict, ensure_ascii=False, default=str) + "\n")
         except OSError as e:
             _log.error("PheromoneBoard fallback 写入也失败: %s", e)
 

@@ -19,11 +19,16 @@ from datetime import datetime
 
 _log = logging.getLogger("alpha_hive.slack_report_notifier")
 
+try:
+    from config import SLACK_CHANNEL_ID as _SLACK_CH
+except ImportError:
+    _SLACK_CH = "C0AGUUWJXJS"
+
 
 class SlackReportNotifier:
     """Slack 报告通知器（支持 User Token 和 Webhook 双模式）"""
 
-    CHANNEL_ID = "C0AGUUWJXJS"  # #alpha-hive
+    CHANNEL_ID = _SLACK_CH  # #alpha-hive（来源：config.SLACK_CHANNEL_ID）
 
     def __init__(self, webhook_url: Optional[str] = None):
         """

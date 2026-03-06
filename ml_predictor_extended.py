@@ -4,10 +4,13 @@
 """
 
 import json
+import logging as _logging
 import os
 from typing import Dict, List
 import statistics
 from dataclasses import dataclass
+
+_log = _logging.getLogger("alpha_hive.ml_predictor_extended")
 
 
 @dataclass
@@ -534,7 +537,7 @@ class HistoricalDataBuilder:
 
         with open(filename, "w") as f:
             json.dump(data, f, indent=2)
-        print(f"✅ 已保存 {len(data)} 个训练样本到 {filename}")
+        _log.info("已保存 %d 个训练样本到 %s", len(data), filename)
 
 
 class SimpleMLModel:
@@ -671,7 +674,7 @@ class SimpleMLModel:
     def predict_probability(self, data: TrainingData) -> float:
         """预测成功概率"""
         if not self.is_trained:
-            print("⚠️ 模型未训练")
+            _log.warning("模型未训练，返回默认概率 0.5")
             return 0.5
 
         # 特征归一化

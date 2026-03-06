@@ -631,6 +631,75 @@ class OptionsAnalyzer:
 
         return round(gex, 4)
 
+    def calculate_iv_skew(
+        self, calls_df: List[Dict], puts_df: List[Dict], stock_price: float
+    ) -> Dict:
+        """
+        S14：计算 IV Skew（25-delta put vs 25-delta call 的隐含波动率差）
+
+        Skew > 1.3 → 机构大量买保护性 put → bearish 信号（恐慌溢价）
+        Skew < 0.8 → call 端投机过热 → 可能过度乐观
+        0.8~1.3   → 正常范围
+
+        近似 25-delta：OTM ~5% 的行权价（put: stock_price * 0.95, call: stock_price * 1.05）
+        """
+        if not calls_df or not puts_df or stock_price <= 0:
+            return {"skew_ratio": None, "skew_signal": "数据不足"}
+
+        import math
+
+        # 近似 25-delta 行权价范围
+        put_target = stock_price * 0.95   # OTM put ~5% below
+        call_target = stock_price * 1.05  # OTM call ~5% above
+        tolerance = stock_price * 0.03    # ±3% 容差
+
+        # 找 OTM put IV（行权价 ≈ stock_price * 0.95）
+        put_ivs = []
+        for p in puts_df:
+            strike = p.get("strike", 0)
+            iv = p.get("impliedVolatility", 0)
+            try:
+                if iv and math.isfinite(iv) and iv > 0.005 and abs(strike - put_target) <= tolerance:
+                    put_ivs.append(float(iv))
+            except (TypeError, ValueError):
+                continue
+
+        # 找 OTM call IV（行权价 ≈ stock_price * 1.05）
+        call_ivs = []
+        for c in calls_df:
+            strike = c.get("strike", 0)
+            iv = c.get("impliedVolatility", 0)
+            try:
+                if iv and math.isfinite(iv) and iv > 0.005 and abs(strike - call_target) <= tolerance:
+                    call_ivs.append(float(iv))
+            except (TypeError, ValueError):
+                continue
+
+        if not put_ivs or not call_ivs:
+            return {"skew_ratio": None, "skew_signal": "OTM 期权数据不足"}
+
+        avg_put_iv = sum(put_ivs) / len(put_ivs)
+        avg_call_iv = sum(call_ivs) / len(call_ivs)
+
+        if avg_call_iv <= 0:
+            return {"skew_ratio": None, "skew_signal": "call IV 为零"}
+
+        skew_ratio = round(avg_put_iv / avg_call_iv, 3)
+
+        if skew_ratio > 1.3:
+            signal = "bearish（机构恐慌对冲）"
+        elif skew_ratio < 0.8:
+            signal = "bullish（call 投机过热）"
+        else:
+            signal = "neutral"
+
+        return {
+            "skew_ratio": skew_ratio,
+            "skew_signal": signal,
+            "otm_put_iv": round(avg_put_iv * 100, 2),
+            "otm_call_iv": round(avg_call_iv * 100, 2),
+        }
+
     def detect_unusual_activity(
         self, calls_df: List[Dict], puts_df: List[Dict]
     ) -> List[Dict]:
@@ -910,6 +979,8 @@ class OptionsAgent:
         )
         unusual_activity = self.analyzer.detect_unusual_activity(calls_df, puts_df)
         key_levels = self.analyzer.find_key_levels(calls_df, puts_df)
+        # S14: IV Skew 分析
+        iv_skew = self.analyzer.calculate_iv_skew(calls_df, puts_df, stock_price)
 
         # 4. 生成综合评分
         options_score, signal_summary = self.analyzer.generate_options_score(
@@ -961,6 +1032,10 @@ class OptionsAgent:
             "options_score": options_score,  # 0-10
             "signal_summary": signal_summary,
             "expiration_dates": options_chain.get("expirations", [])[:3],
+            # S14: IV Skew
+            "iv_skew_ratio": iv_skew.get("skew_ratio"),
+            "iv_skew_signal": iv_skew.get("skew_signal", ""),
+            "iv_skew_detail": iv_skew,
         }
 
         # 分析完成
