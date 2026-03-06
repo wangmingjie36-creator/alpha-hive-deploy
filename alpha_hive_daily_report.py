@@ -1248,7 +1248,7 @@ class AlphaHiveDailyReporter:
                     "supporting_agents": swarm_results[opp.ticker]["supporting_agents"],
                     "thesis_break": opp.thesis_break
                 }
-                for i, opp in enumerate(self.opportunities[:5])
+                for i, opp in enumerate(self.opportunities)
             ]
         }
 
@@ -1929,7 +1929,7 @@ class AlphaHiveDailyReporter:
         md.append("| 排序 | 标的 | 方向 | 综合分 | 期权信号 | 置信度 |")
         md.append("|------|------|------|--------|---------|--------|")
 
-        for i, opp in enumerate(self.opportunities[:5], 1):
+        for i, opp in enumerate(self.opportunities, 1):
             md.append(
                 f"| {i} | **{opp.ticker}** | {opp.direction} | "
                 f"{opp.opportunity_score:.1f} | {opp.options_signal[:12]}... | {opp.confidence:.0f}% |"
@@ -2269,6 +2269,37 @@ class AlphaHiveDailyReporter:
         # 保存 JSON 版本
         with open(json_file, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
+
+        # 确保 .swarm_results_{date}.json 存在（供 dashboard_renderer / ML 报告使用）
+        # run_swarm_scan() 已在扫描时写入完整版本；run_daily_scan() 路径则在此回写精简版
+        swarm_json = self.report_dir / f".swarm_results_{self.date_str}.json"
+        if not swarm_json.exists():
+            _sr_data = {}
+            for _opp in report.get("opportunities", []):
+                _tk = _opp.get("ticker")
+                if _tk:
+                    _dir_raw = _opp.get("direction", "中性")
+                    _dir_en = "bullish" if "多" in _dir_raw else ("bearish" if "空" in _dir_raw else "neutral")
+                    _sr_data[_tk] = {
+                        "ticker": _tk,
+                        "final_score": _opp.get("opp_score", 5.0),
+                        "direction": _dir_en,
+                        "supporting_agents": _opp.get("supporting_agents", 0),
+                        "resonance": {
+                            "resonance_detected": bool(_opp.get("resonance")),
+                            "supporting_agents": _opp.get("supporting_agents", 0)
+                        },
+                        "dimension_scores": {},
+                        "agent_details": {},
+                        "data_real_pct": 0,
+                    }
+            if _sr_data:
+                try:
+                    with open(swarm_json, "w", encoding="utf-8") as _sf:
+                        json.dump(_sr_data, _sf, ensure_ascii=False)
+                    _log.info("已回写 .swarm_results（%d 标的，精简版）", len(_sr_data))
+                except (OSError, TypeError) as _sre:
+                    _log.debug("swarm_results 回写失败: %s", _sre)
 
         # 保存 Markdown 版本（仅保留最新一次运行结果，覆盖旧内容）
         with open(md_file, "w", encoding="utf-8") as f:
