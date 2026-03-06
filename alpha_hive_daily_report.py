@@ -2271,33 +2271,104 @@ class AlphaHiveDailyReporter:
             json.dump(report, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
 
         # 确保 .swarm_results_{date}.json 存在（供 dashboard_renderer / ML 报告使用）
-        # run_swarm_scan() 已在扫描时写入完整版本；run_daily_scan() 路径则在此回写精简版
+        # run_swarm_scan() 已在扫描时写入完整版本；run_daily_scan() 路径则在此回写增强版
         swarm_json = self.report_dir / f".swarm_results_{self.date_str}.json"
         if not swarm_json.exists():
             _sr_data = {}
+            # ── 获取 F&G 指数（全局，仅查一次）──
+            _fg_value, _fg_class = None, ""
+            try:
+                from fear_greed import get_fear_greed
+                _fg = get_fear_greed()
+                _fg_value = _fg.get("value")
+                _fg_class = _fg.get("classification", "")
+            except Exception:
+                pass
+            # ── 初始化期权分析器（复用缓存，开销极低）──
+            _opts_agent = None
+            try:
+                from options_analyzer import OptionsAgent
+                _opts_agent = OptionsAgent()
+            except ImportError:
+                pass
             for _opp in report.get("opportunities", []):
                 _tk = _opp.get("ticker")
-                if _tk:
-                    _dir_raw = _opp.get("direction", "中性")
-                    _dir_en = "bullish" if "多" in _dir_raw else ("bearish" if "空" in _dir_raw else "neutral")
-                    _sr_data[_tk] = {
-                        "ticker": _tk,
-                        "final_score": _opp.get("opp_score", 5.0),
-                        "direction": _dir_en,
-                        "supporting_agents": _opp.get("supporting_agents", 0),
-                        "resonance": {
-                            "resonance_detected": bool(_opp.get("resonance")),
-                            "supporting_agents": _opp.get("supporting_agents", 0)
+                if not _tk:
+                    continue
+                _dir_raw = _opp.get("direction", "中性")
+                _dir_en = "bullish" if "多" in _dir_raw else ("bearish" if "空" in _dir_raw else "neutral")
+                # ── 期权数据（IV Rank / P/C Ratio / GEX 等）──
+                _oracle_details = {}
+                _opts_signal = _opp.get("options_signal", "")
+                if _opts_agent:
+                    try:
+                        _or = _opts_agent.analyze(_tk)
+                        _oracle_details = {
+                            "iv_rank": _or.get("iv_rank"),
+                            "iv_current": _or.get("iv_current"),
+                            "put_call_ratio": _or.get("put_call_ratio"),
+                            "gamma_exposure": _or.get("gamma_exposure"),
+                            "gamma_squeeze_risk": _or.get("gamma_squeeze_risk"),
+                            "flow_direction": _or.get("flow_direction"),
+                            "signal_summary": _or.get("signal_summary", _opts_signal),
+                        }
+                        _opts_signal = _or.get("signal_summary", _opts_signal)
+                    except Exception as _oe:
+                        _log.debug("期权数据获取失败 %s: %s", _tk, _oe)
+                # ── BuzzBee discovery（含 F&G）──
+                _buzz_disc = ""
+                if _fg_value is not None:
+                    _buzz_disc = f"F&G {_fg_value} ({_fg_class})"
+                # ── 价格数据 ──
+                _scout_details = {}
+                try:
+                    import yfinance as _yf_sr
+                    _h_sr = _yf_sr.Ticker(_tk).history(period="5d")
+                    if not _h_sr.empty:
+                        _scout_details["price"] = float(_h_sr["Close"].iloc[-1])
+                        if len(_h_sr) >= 2:
+                            _scout_details["momentum_5d"] = round(
+                                (_h_sr["Close"].iloc[-1] / _h_sr["Close"].iloc[0] - 1) * 100, 2
+                            )
+                except Exception:
+                    pass
+                _sr_data[_tk] = {
+                    "ticker": _tk,
+                    "final_score": _opp.get("opp_score", 5.0),
+                    "direction": _dir_en,
+                    "supporting_agents": _opp.get("supporting_agents", 0),
+                    "resonance": {
+                        "resonance_detected": bool(_opp.get("resonance")),
+                        "supporting_agents": _opp.get("supporting_agents", 0)
+                    },
+                    "dimension_scores": {},
+                    "agent_details": {
+                        "OracleBeeEcho": {
+                            "score": _opp.get("opp_score", 5.0),
+                            "details": _oracle_details,
+                            "discovery": _opts_signal,
                         },
-                        "dimension_scores": {},
-                        "agent_details": {},
-                        "data_real_pct": 0,
-                    }
+                        "BuzzBeeWhisper": {
+                            "score": 5.0,
+                            "discovery": _buzz_disc,
+                        },
+                        "ScoutBeeNova": {
+                            "score": _opp.get("opp_score", 5.0),
+                            "discovery": "",
+                            "details": _scout_details,
+                        },
+                        "BearBeeContrarian": {
+                            "score": 5.0,
+                            "discovery": "",
+                        },
+                    },
+                    "data_real_pct": 0,
+                }
             if _sr_data:
                 try:
                     with open(swarm_json, "w", encoding="utf-8") as _sf:
-                        json.dump(_sr_data, _sf, ensure_ascii=False)
-                    _log.info("已回写 .swarm_results（%d 标的，精简版）", len(_sr_data))
+                        json.dump(_sr_data, _sf, ensure_ascii=False, cls=SafeJSONEncoder)
+                    _log.info("已回写 .swarm_results（%d 标的，增强版）", len(_sr_data))
                 except (OSError, TypeError) as _sre:
                     _log.debug("swarm_results 回写失败: %s", _sre)
 
