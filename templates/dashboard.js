@@ -422,6 +422,11 @@ let chartInstances=[];
     if(typeof Chart==='undefined')return;
     ['fgChart','scoresChart','dirChart'].forEach(renderChart);
     Object.keys(rd).forEach(renderRadar);
+    // 延迟图表：Chart.js defer 加载后统一初始化
+    if(window.AH.initTrendChart) window.AH.initTrendChart();
+    if(window.AH.initAccDirChart) window.AH.initAccDirChart();
+    if(window.AH.initAccWinTrend) window.AH.initAccWinTrend();
+    if(window.AH.initFgTrend) window.AH.initFgTrend();
   });
   // Expose for toggleDark re-render
   window.AH.rendered=rendered;
@@ -431,9 +436,10 @@ let chartInstances=[];
 })();
 
 // ── Accuracy Direction Chart ──
-(function(){
+window.AH.initAccDirChart=function(){
   const ctx = document.getElementById('accDirChart');
-  if (!ctx) return;
+  if (!ctx || typeof Chart==='undefined') return;
+  if(Chart.getChart(ctx)) return; // 已初始化
   const dirs  = __AH__.acc_dir_labels;
   const accs  = __AH__.acc_dir_accs;
   const tots  = __AH__.acc_dir_tots;
@@ -461,7 +467,8 @@ let chartInstances=[];
       }
     }
   }));
-})();
+};
+window.AH.initAccDirChart();
 
 // ── Accuracy Ticker Table Sort ──
 (function(){
@@ -487,9 +494,10 @@ let chartInstances=[];
 })();
 
 // ── F11: Win Rate Trend Chart ──
-(function(){
+window.AH.initAccWinTrend=function(){
   const cv=document.getElementById('accWinTrendChart');
   if(!cv||typeof Chart==='undefined')return;
+  if(Chart.getChart(cv)) return; // 已初始化
   const wd=__AH__.acc_weekly;
   if(!wd||!wd.length)return;
   const dark=document.documentElement.classList.contains('dark');
@@ -519,7 +527,8 @@ let chartInstances=[];
       }
     }
   }));
-})();
+};
+window.AH.initAccWinTrend();
 window.addEventListener('pagehide',function(){chartInstances.forEach(function(c){try{c.destroy()}catch(e){}});chartInstances=[];});
 /* F37: Pause SVG SMIL animations when prefers-reduced-motion */
 (function(){const mq=window.matchMedia('(prefers-reduced-motion:reduce)');function toggle(e){const svgs=document.querySelectorAll('svg');svgs.forEach(function(s){try{if(e.matches)s.pauseAnimations();else s.unpauseAnimations();}catch(ex){}});}if(mq.matches)document.addEventListener('DOMContentLoaded',function(){toggle(mq);});mq.addEventListener('change',toggle);})();
@@ -564,10 +573,11 @@ window.AH.initFgTrend=function(){
 window.AH.initFgTrend();
 
 // ── F8a: Trend Chart ──
-(function(){
+window.AH.initTrendChart=function(){
   const trendData=__AH__.trend_data;
   const cv=document.getElementById('trendChart');
   if(!cv||typeof Chart==='undefined')return;
+  if(window.AH.trendChart) return; // 已初始化
   const dark=document.documentElement.classList.contains('dark');
   const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
   const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
@@ -584,7 +594,7 @@ window.AH.initFgTrend();
   tickers.slice(0,5).forEach(function(tk){activeTickers[tk]=true;});
   // 生成 chips
   const chipWrap=document.getElementById('trendChips');
-  if(chipWrap){
+  if(chipWrap && !chipWrap.children.length){
     tickers.forEach(function(tk,i){
       const chip=document.createElement('button');
       chip.className='trend-chip'+(activeTickers[tk]?' active':'');
@@ -631,7 +641,8 @@ window.AH.initFgTrend();
   }
   updateTrendChart();
   window.AH.updateTrendChart=updateTrendChart;
-})();
+};
+window.AH.initTrendChart();
 
 // ── F8b: Diff ──
 const _histFull=__AH__.hist_full;
