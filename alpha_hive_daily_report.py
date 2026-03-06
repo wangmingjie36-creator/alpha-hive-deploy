@@ -1894,7 +1894,7 @@ class AlphaHiveDailyReporter:
                     "key_catalyst": opp.key_catalysts[0] if opp.key_catalysts else "N/A",
                     "thesis_break": opp.thesis_break
                 }
-                for i, opp in enumerate(self.opportunities[:5])
+                for i, opp in enumerate(self.opportunities)
             ],
             "observation_list": self.observations
         }
