@@ -115,21 +115,21 @@
   "中性"
  ],
  "acc_dir_accs": [
-  12.5,
+  33.3,
   0.0,
-  50.0
+  100.0
  ],
  "acc_dir_tots": [
-  8,
+  3,
   0,
-  2
+  1
  ],
  "acc_weekly": [
   {
    "week": "2026-W08",
-   "accuracy": 20.0,
-   "total": 10,
-   "avg_ret": -4.0
+   "accuracy": 50.0,
+   "total": 4,
+   "avg_ret": -3.09
   }
  ],
  "fg_history": [
@@ -854,7 +854,7 @@
    "price": 644.86
   }
  ],
- "_generated_at": "2026-03-06 19:58 PST",
+ "_generated_at": "2026-03-06 20:05 PST",
  "_date": "2026-03-06",
- "_deploy_ts": 1772855915
+ "_deploy_ts": 1772856342
 }
