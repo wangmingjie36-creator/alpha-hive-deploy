@@ -97,13 +97,15 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
         display:grid;grid-template-columns:repeat(4,1fr);
         border-top:1px solid rgba(244,165,50,.12)}
 .hstat{padding:22px;text-align:center;border-right:1px solid rgba(244,165,50,.08);transition:background .2s}
-.hstat:last-child{border-right:none}
+.hstat:nth-child(4n),.hstat:last-child{border-right:none}
 .hstat:hover{background:rgba(244,165,50,.04)}
 .hstat-val{font-size:2.1em;font-weight:900;color:var(--acc);line-height:1}
 .hstat-lbl{font-size:.78em;color:rgba(255,255,255,.45);margin-top:5px;text-transform:uppercase;letter-spacing:.05em}
 @media(max-width:768px){
   .hero-stats{grid-template-columns:repeat(2,1fr)}
   .hstat{padding:14px 10px}
+  .hstat:nth-child(4n){border-right:1px solid rgba(244,165,50,.08)}
+  .hstat:nth-child(2n){border-right:none}
   .hstat-val{font-size:1.5em}
 }
 /* MAIN */
@@ -459,6 +461,13 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 .diff-table td{padding:7px 8px;border-bottom:1px solid var(--border)}
 .diff-new{background:rgba(34,197,94,.08)}.diff-removed{background:rgba(239,68,68,.08)}
 .diff-up{color:var(--bull);font-weight:700}.diff-down{color:var(--bear);font-weight:700}
+/* Markdown 表格 */
+.table-wrap{overflow-x:auto;margin:12px 0}
+.md-table{width:100%;border-collapse:collapse;font-size:.85em}
+.md-table th{padding:8px 10px;text-align:left;background:var(--surface2);font-weight:700;
+  border-bottom:2px solid var(--border);font-size:.82em;color:var(--tp)}
+.md-table td{padding:7px 10px;border-bottom:1px solid var(--border);color:var(--tp)}
+.md-table tbody tr:hover{background:var(--surface2)}
 /* F9: Keyboard help */
 .kb-help{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;
   justify-content:center;background:rgba(0,0,0,.5);backdrop-filter:blur(4px)}
@@ -549,10 +558,10 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 
 </style>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"WebPage","name":"Alpha Hive 投资仪表板","description":"去中心化蜂群智能投资研究平台 — 9 标的每日扫描","dateModified":"2026-03-06 15:41 PST"}
+{"@context":"https://schema.org","@type":"WebPage","name":"Alpha Hive 投资仪表板","description":"去中心化蜂群智能投资研究平台 — 9 标的每日扫描","dateModified":"2026-03-06 19:58 PST"}
 </script>
 </head>
-<body data-generated="2026-03-06 15:41 PST">
+<body data-generated="2026-03-06 19:58 PST">
 <a href="#main-content" class="skip-link">跳转到主内容</a>
 <!-- ── Fixed Nav ── -->
 <nav class="nav" role="navigation" aria-label="主导航">
@@ -584,7 +593,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
       <p class="hero-sub">8 自治工蜂协作 · SEC EDGAR 真实数据 · 每日自动扫描</p>
       <div class="hero-tldr">今天市场极度恐惧(F&G 18)，非农就业报告今天公布，扫描9只标的发现6个看多、3个中性机会</div>
       <div class="hero-meta">
-        <span class="hero-time">🕐 2026-03-06 15:41 PST</span>
+        <span class="hero-time">🕐 2026-03-06 19:58 PST</span>
         <span class="hero-dbadge">📊 数据真实度 93%</span>
       </div>
     </div>
@@ -1804,17 +1813,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 <br>
 <h2>7) 综合判断 &amp; 信号强度</h2>
 <br>
-<p>| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |</p>
-<p>|------|------|--------|------|---------------|-------|---------|</p>
-<p>| <strong>BILI</strong> | BULLISH | 7.1 | Y | 5/0/2 | 90% | 共振✅ 3 Agent 同向 | 一致性 40% | 风险调 |</p>
-<p>| <strong>NVDA</strong> | BULLISH | 5.5 | N | 3/1/3 | 94% | 信号分散 | 均分 5.5 | 一致性 20% | 风险调整 |</p>
-<p>| <strong>MSFT</strong> | BULLISH | 5.5 | N | 3/0/4 | 94% | 信号分散 | 均分 5.8 | 一致性 40% | 风险调整 |</p>
-<p>| <strong>VKTX</strong> | BULLISH | 5.2 | N | 3/0/4 | 90% | 信号分散 | 均分 5.9 | 一致性 40% | 风险调整 |</p>
-<p>| <strong>CRCL</strong> | BULLISH | 5.1 | N | 3/0/4 | 90% | 信号分散 | 均分 5.6 | 一致性 40% | 风险调整 |</p>
-<p>| <strong>META</strong> | NEUTRAL | 4.7 | N | 2/0/5 | 94% | 信号分散 | 均分 5.1 | 一致性 0% | 风险调整  |</p>
-<p>| <strong>RKLB</strong> | NEUTRAL | 4.6 | N | 2/0/5 | 94% | 信号分散 | 均分 5.1 | 一致性 0% | 风险调整  |</p>
-<p>| <strong>TSLA</strong> | BULLISH | 4.4 | N | 3/0/4 | 94% | 信号分散 | 均分 5.1 | 一致性 40% | 风险调整 |</p>
-<p>| <strong>AMZN</strong> | NEUTRAL | 4.2 | N | 2/1/4 | 94% | 信号分散 | 均分 4.7 | 一致性 20% | 风险调整 |</p>
+<div class="table-wrap"><table class="md-table"><thead><tr><th>标的</th><th>方向</th><th>综合分</th><th>共振</th><th>投票(多/空/中)</th><th>数据%</th><th>失效条件</th></tr></thead><tbody><tr><td><strong>BILI</strong></td><td>BULLISH</td><td>7.1</td><td>Y</td><td>5/0/2</td><td>90%</td><td>共振✅ 3 Agent 同向</td><td>一致性 40%</td><td>风险调</td></tr><tr><td><strong>NVDA</strong></td><td>BULLISH</td><td>5.5</td><td>N</td><td>3/1/3</td><td>94%</td><td>信号分散</td><td>均分 5.5</td><td>一致性 20%</td><td>风险调整</td></tr><tr><td><strong>MSFT</strong></td><td>BULLISH</td><td>5.5</td><td>N</td><td>3/0/4</td><td>94%</td><td>信号分散</td><td>均分 5.8</td><td>一致性 40%</td><td>风险调整</td></tr><tr><td><strong>VKTX</strong></td><td>BULLISH</td><td>5.2</td><td>N</td><td>3/0/4</td><td>90%</td><td>信号分散</td><td>均分 5.9</td><td>一致性 40%</td><td>风险调整</td></tr><tr><td><strong>CRCL</strong></td><td>BULLISH</td><td>5.1</td><td>N</td><td>3/0/4</td><td>90%</td><td>信号分散</td><td>均分 5.6</td><td>一致性 40%</td><td>风险调整</td></tr><tr><td><strong>META</strong></td><td>NEUTRAL</td><td>4.7</td><td>N</td><td>2/0/5</td><td>94%</td><td>信号分散</td><td>均分 5.1</td><td>一致性 0%</td><td>风险调整</td></tr><tr><td><strong>RKLB</strong></td><td>NEUTRAL</td><td>4.6</td><td>N</td><td>2/0/5</td><td>94%</td><td>信号分散</td><td>均分 5.1</td><td>一致性 0%</td><td>风险调整</td></tr><tr><td><strong>TSLA</strong></td><td>BULLISH</td><td>4.4</td><td>N</td><td>3/0/4</td><td>94%</td><td>信号分散</td><td>均分 5.1</td><td>一致性 40%</td><td>风险调整</td></tr><tr><td><strong>AMZN</strong></td><td>NEUTRAL</td><td>4.2</td><td>N</td><td>2/1/4</td><td>94%</td><td>信号分散</td><td>均分 4.7</td><td>一致性 20%</td><td>风险调整</td></tr></tbody></table></div>
 <br>
 <h3>AI 多空综合叙事</h3>
 <br>
@@ -1917,12 +1916,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 <br>
 <p><strong>宏观政体</strong>：RISK_OFF | <strong>评分</strong>：3.5/10</p>
 <br>
-<p>| 指标 | 数值 | 状态 |</p>
-<p>|------|------|------|</p>
-<p>| VIX | 29.5 | elevated |</p>
-<p>| 10Y利率 | 4.13% | moderate |</p>
-<p>| 大盘(5日) | -1.33% | bear |</p>
-<p>| 美元 | — | weak |</p>
+<div class="table-wrap"><table class="md-table"><thead><tr><th>指标</th><th>数值</th><th>状态</th></tr></thead><tbody><tr><td>VIX</td><td>29.5</td><td>elevated</td></tr><tr><td>10Y利率</td><td>4.13%</td><td>moderate</td></tr><tr><td>大盘(5日)</td><td>-1.33%</td><td>bear</td></tr><tr><td>美元</td><td>—</td><td>weak</td></tr></tbody></table></div>
 <br>
 <p><strong>逆风</strong>：VIX 单日飙升 +24.2%（波动率冲击） | 大盘下行（-1.3%，贝塔风险放大） | 黄金飙升+1.6%（避险需求强烈，资金撤离风险资产）</p>
 <br>
@@ -1932,14 +1926,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 <br>
 <p><strong>样本</strong>：10 条 | <strong>准确率</strong>：20.0% (2/10) | <strong>平均收益</strong>：-4.00%</p>
 <br>
-<p>| 标的 | 方向准确率 | 预测次数 | 平均收益 |</p>
-<p>|------|-----------|---------|---------|</p>
-<p>| VKTX | 100% | 1 | -0.42% |</p>
-<p>| TSLA | 0% | 1 | -4.95% |</p>
-<p>| REGN | 0% | 1 | -3.11% |</p>
-<p>| QCOM | 0% | 1 | -6.95% |</p>
-<p>| NVDA | 0% | 1 | -9.07% |</p>
-<p>| MSFT | 100% | 1 | +2.09% |</p>
+<div class="table-wrap"><table class="md-table"><thead><tr><th>标的</th><th>方向准确率</th><th>预测次数</th><th>平均收益</th></tr></thead><tbody><tr><td>VKTX</td><td>100%</td><td>1</td><td>-0.42%</td></tr><tr><td>TSLA</td><td>0%</td><td>1</td><td>-4.95%</td></tr><tr><td>REGN</td><td>0%</td><td>1</td><td>-3.11%</td></tr><tr><td>QCOM</td><td>0%</td><td>1</td><td>-6.95%</td></tr><tr><td>NVDA</td><td>0%</td><td>1</td><td>-9.07%</td></tr><tr><td>MSFT</td><td>100%</td><td>1</td><td>+2.09%</td></tr></tbody></table></div>
 <br>
 <p><strong>按方向</strong>：看多:12%(8次) | 中性:50%(2次)</p>
 <br>
@@ -2209,7 +2196,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 
 <footer class="footer">
   <p><span class="px-bee"></span> Alpha Hive — 去中心化蜂群智能投资研究平台</p>
-  <p>更新：2026-03-06 15:41 PST | 9 标的 | SEC 真实数据 | 真实度 93%</p>
+  <p>更新：2026-03-06 19:58 PST | 9 标的 | SEC 真实数据 | 真实度 93%</p>
   <div style="display:flex;justify-content:center;gap:10px;margin-top:10px;flex-wrap:wrap">
     <a href="rss.xml" class="share-btn" style="color:rgba(255,255,255,.7);border-color:rgba(255,255,255,.15)">📡 RSS 订阅</a>
     <button class="share-btn share-btn-x" id="btn-share-x-footer" style="border-color:rgba(255,255,255,.15);color:rgba(255,255,255,.7)">𝕏 Follow &amp; Share</button>
@@ -2234,7 +2221,7 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 <button class="scroll-top" id="scrollTop" aria-label="返回顶部">↑</button>
 
 <script>
-window.__AH__ = {"fv": 18, "fg_label": "极度恐惧", "scores": [["VKTX", 5.2], ["NVDA", 5.5], ["MSFT", 5.5], ["BILI", 7.1], ["CRCL", 5.1], ["TSLA", 4.4], ["RKLB", 4.6], ["AMZN", 4.2], ["META", 4.7]], "dir_counts": [6, 0, 3], "radar": {"VKTX": [37.3, 55.0, 48.9, 89.3, 37.6], "NVDA": [53.2, 76.3, 49.4, 59.5, 25.5], "MSFT": [57.3, 63.0, 52.0, 56.7, 28.0], "BILI": [58.5, 71.8, 44.9, 76.9, 58.1], "CRCL": [38.0, 55.0, 53.9, 65.7, 37.7], "TSLA": [34.0, 58.3, 44.7, 48.5, 25.5], "RKLB": [36.9, 60.0, 41.9, 64.2, 32.6], "AMZN": [37.7, 55.0, 49.4, 43.0, 29.1], "META": [38.8, 63.0, 48.6, 56.1, 33.2]}, "acc_dir_labels": ["看多", "看空", "中性"], "acc_dir_accs": [12.5, 0.0, 50.0], "acc_dir_tots": [8, 0, 2], "acc_weekly": [{"week": "2026-W08", "accuracy": 20.0, "total": 10, "avg_ret": -4.0}], "fg_history": [{"date": "2026-03-06", "value": 18}], "trend_data": {"VKTX": [{"date": "2026-02-25", "score": 4.6}, {"date": "2026-02-27", "score": 4.5}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-04", "score": 5.0}, {"date": "2026-03-06", "score": 5.2}], "NVDA": [{"date": "2026-02-25", "score": 6.1}, {"date": "2026-02-26", "score": 5.0}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-02", "score": 5.2}, {"date": "2026-03-03", "score": 4.5}, {"date": "2026-03-04", "score": 5.9}, {"date": "2026-03-05", "score": 5.8}, {"date": "2026-03-06", "score": 5.5}], "MSFT": [{"date": "2026-02-25", "score": 7.5}, {"date": "2026-02-26", "score": 7.3}, {"date": "2026-02-27", "score": 7.6}, {"date": "2026-02-28", "score": 7.6}, {"date": "2026-03-01", "score": 7.0}, {"date": "2026-03-02", "score": 7.9}, {"date": "2026-03-03", "score": 5.3}, {"date": "2026-03-04", "score": 6.1}, {"date": "2026-03-05", "score": 5.9}, {"date": "2026-03-06", "score": 5.5}], "BILI": [{"date": "2026-02-26", "score": 5.8}, {"date": "2026-02-27", "score": 5.8}, {"date": "2026-02-28", "score": 5.8}, {"date": "2026-03-01", "score": 5.2}, {"date": "2026-03-02", "score": 5.6}, {"date": "2026-03-03", "score": 5.9}, {"date": "2026-03-04", "score": 7.1}, {"date": "2026-03-05", "score": 5.6}, {"date": "2026-03-06", "score": 7.1}], "CRCL": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-01", "score": 5.0}, {"date": "2026-03-02", "score": 5.5}, {"date": "2026-03-03", "score": 5.8}, {"date": "2026-03-04", "score": 6.2}, {"date": "2026-03-05", "score": 6.0}, {"date": "2026-03-06", "score": 5.1}], "TSLA": [{"date": "2026-02-25", "score": 5.5}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-03", "score": 4.0}, {"date": "2026-03-04", "score": 5.3}, {"date": "2026-03-05", "score": 5.2}, {"date": "2026-03-06", "score": 4.4}], "RKLB": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-03", "score": 4.6}, {"date": "2026-03-04", "score": 5.1}, {"date": "2026-03-06", "score": 4.6}], "AMZN": [{"date": "2026-02-26", "score": 5.3}, {"date": "2026-02-27", "score": 5.6}, {"date": "2026-02-28", "score": 5.6}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-03", "score": 5.0}, {"date": "2026-03-04", "score": 5.6}, {"date": "2026-03-05", "score": 5.6}, {"date": "2026-03-06", "score": 4.2}], "META": [{"date": "2026-02-26", "score": 5.7}, {"date": "2026-02-27", "score": 5.9}, {"date": "2026-02-28", "score": 5.9}, {"date": "2026-03-01", "score": 4.7}, {"date": "2026-03-02", "score": 5.2}, {"date": "2026-03-03", "score": 5.3}, {"date": "2026-03-06", "score": 4.7}], "AAPL": [{"date": "2026-03-02", "score": 6.6}], "QCOM": [{"date": "2026-02-27", "score": 6.1}, {"date": "2026-02-28", "score": 6.1}], "AMD": [{"date": "2026-02-25", "score": 4.3}]}, "hist_full": {"2026-03-06": [{"ticker": "VKTX", "score": 5.2, "direction": "看多"}, {"ticker": "NVDA", "score": 5.5, "direction": "看多"}, {"ticker": "MSFT", "score": 5.5, "direction": "看多"}, {"ticker": "BILI", "score": 7.1, "direction": "看多"}, {"ticker": "CRCL", "score": 5.1, "direction": "看多"}, {"ticker": "TSLA", "score": 4.4, "direction": "看多"}, {"ticker": "RKLB", "score": 4.6, "direction": "中性"}, {"ticker": "AMZN", "score": 4.2, "direction": "中性"}, {"ticker": "META", "score": 4.7, "direction": "中性"}], "2026-03-05": [{"ticker": "BILI", "score": 5.6, "direction": "看多"}, {"ticker": "NVDA", "score": 5.8, "direction": "中性"}, {"ticker": "TSLA", "score": 5.2, "direction": "中性"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}, {"ticker": "MSFT", "score": 5.9, "direction": "看多"}, {"ticker": "CRCL", "score": 6.0, "direction": "看多"}], "2026-03-04": [{"ticker": "NVDA", "score": 5.9, "direction": "看多"}, {"ticker": "VKTX", "score": 5.0, "direction": "中性"}, {"ticker": "TSLA", "score": 5.3, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}, {"ticker": "RKLB", "score": 5.1, "direction": "看多"}, {"ticker": "MSFT", "score": 6.1, "direction": "看多"}, {"ticker": "CRCL", "score": 6.2, "direction": "看多"}, {"ticker": "BILI", "score": 7.1, "direction": "看多"}], "2026-03-03": [{"ticker": "BILI", "score": 5.9, "direction": "看多"}, {"ticker": "CRCL", "score": 5.8, "direction": "看多"}, {"ticker": "MSFT", "score": 5.3, "direction": "中性"}, {"ticker": "META", "score": 5.3, "direction": "中性"}, {"ticker": "RKLB", "score": 4.6, "direction": "中性"}, {"ticker": "NVDA", "score": 4.5, "direction": "看多"}, {"ticker": "TSLA", "score": 4.0, "direction": "看多"}, {"ticker": "AMZN", "score": 5.0, "direction": "看多"}], "2026-03-02": [{"ticker": "MSFT", "score": 7.9, "direction": "看多"}, {"ticker": "BILI", "score": 5.6, "direction": "看多"}, {"ticker": "CRCL", "score": 5.5, "direction": "看多"}, {"ticker": "NVDA", "score": 5.2, "direction": "中性"}, {"ticker": "META", "score": 5.2, "direction": "中性"}, {"ticker": "AAPL", "score": 6.6, "direction": "看多"}], "2026-03-01": [{"ticker": "MSFT", "score": 7.0, "direction": "看多"}, {"ticker": "BILI", "score": 5.2, "direction": "看多"}, {"ticker": "META", "score": 4.7, "direction": "看多"}, {"ticker": "AMZN", "score": 4.8, "direction": "看多"}, {"ticker": "VKTX", "score": 4.8, "direction": "中性"}, {"ticker": "CRCL", "score": 5.0, "direction": "中性"}], "2026-02-28": [{"ticker": "MSFT", "score": 7.6, "direction": "看多"}, {"ticker": "QCOM", "score": 6.1, "direction": "看多"}, {"ticker": "META", "score": 5.9, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}], "2026-02-27": [{"ticker": "MSFT", "score": 7.6, "direction": "看多"}, {"ticker": "META", "score": 5.9, "direction": "看多"}, {"ticker": "QCOM", "score": 6.1, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}, {"ticker": "NVDA", "score": 5.0, "direction": "看多"}, {"ticker": "TSLA", "score": 5.0, "direction": "看多"}, {"ticker": "VKTX", "score": 4.5, "direction": "中性"}, {"ticker": "RKLB", "score": 4.2, "direction": "中性"}, {"ticker": "CRCL", "score": 4.2, "direction": "中性"}], "2026-02-26": [{"ticker": "MSFT", "score": 7.3, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "META", "score": 5.7, "direction": "看多"}, {"ticker": "AMZN", "score": 5.3, "direction": "看多"}, {"ticker": "NVDA", "score": 5.0, "direction": "看多"}], "2026-02-25": [{"ticker": "MSFT", "score": 7.5, "direction": "看多"}, {"ticker": "NVDA", "score": 6.1, "direction": "看多"}, {"ticker": "TSLA", "score": 5.5, "direction": "看多"}, {"ticker": "VKTX", "score": 4.6, "direction": "中性"}, {"ticker": "AMD", "score": 4.3, "direction": "中性"}]}, "search_index": [{"ticker": "VKTX", "score": 5.2, "direction": "看多", "price": 32.98}, {"ticker": "NVDA", "score": 5.5, "direction": "看多", "price": 177.82}, {"ticker": "MSFT", "score": 5.5, "direction": "看多", "price": 408.96}, {"ticker": "BILI", "score": 7.1, "direction": "看多", "price": 24.67}, {"ticker": "CRCL", "score": 5.1, "direction": "看多", "price": 101.91}, {"ticker": "TSLA", "score": 4.4, "direction": "看多", "price": 396.73}, {"ticker": "RKLB", "score": 4.6, "direction": "中性", "price": 70.11}, {"ticker": "AMZN", "score": 4.2, "direction": "中性", "price": 213.21}, {"ticker": "META", "score": 4.7, "direction": "中性", "price": 644.86}], "_generated_at": "2026-03-06 15:41 PST", "_date": "2026-03-06", "_deploy_ts": 1772840481};
+window.__AH__ = {"fv": 18, "fg_label": "极度恐惧", "scores": [["VKTX", 5.2], ["NVDA", 5.5], ["MSFT", 5.5], ["BILI", 7.1], ["CRCL", 5.1], ["TSLA", 4.4], ["RKLB", 4.6], ["AMZN", 4.2], ["META", 4.7]], "dir_counts": [6, 0, 3], "radar": {"VKTX": [37.3, 55.0, 48.9, 89.3, 37.6], "NVDA": [53.2, 76.3, 49.4, 59.5, 25.5], "MSFT": [57.3, 63.0, 52.0, 56.7, 28.0], "BILI": [58.5, 71.8, 44.9, 76.9, 58.1], "CRCL": [38.0, 55.0, 53.9, 65.7, 37.7], "TSLA": [34.0, 58.3, 44.7, 48.5, 25.5], "RKLB": [36.9, 60.0, 41.9, 64.2, 32.6], "AMZN": [37.7, 55.0, 49.4, 43.0, 29.1], "META": [38.8, 63.0, 48.6, 56.1, 33.2]}, "acc_dir_labels": ["看多", "看空", "中性"], "acc_dir_accs": [12.5, 0.0, 50.0], "acc_dir_tots": [8, 0, 2], "acc_weekly": [{"week": "2026-W08", "accuracy": 20.0, "total": 10, "avg_ret": -4.0}], "fg_history": [{"date": "2026-03-06", "value": 18}], "trend_data": {"VKTX": [{"date": "2026-02-25", "score": 4.6}, {"date": "2026-02-27", "score": 4.5}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-04", "score": 5.0}, {"date": "2026-03-06", "score": 5.2}], "NVDA": [{"date": "2026-02-25", "score": 6.1}, {"date": "2026-02-26", "score": 5.0}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-02", "score": 5.2}, {"date": "2026-03-03", "score": 4.5}, {"date": "2026-03-04", "score": 5.9}, {"date": "2026-03-05", "score": 5.8}, {"date": "2026-03-06", "score": 5.5}], "MSFT": [{"date": "2026-02-25", "score": 7.5}, {"date": "2026-02-26", "score": 7.3}, {"date": "2026-02-27", "score": 7.6}, {"date": "2026-02-28", "score": 7.6}, {"date": "2026-03-01", "score": 7.0}, {"date": "2026-03-02", "score": 7.9}, {"date": "2026-03-03", "score": 5.3}, {"date": "2026-03-04", "score": 6.1}, {"date": "2026-03-05", "score": 5.9}, {"date": "2026-03-06", "score": 5.5}], "BILI": [{"date": "2026-02-26", "score": 5.8}, {"date": "2026-02-27", "score": 5.8}, {"date": "2026-02-28", "score": 5.8}, {"date": "2026-03-01", "score": 5.2}, {"date": "2026-03-02", "score": 5.6}, {"date": "2026-03-03", "score": 5.9}, {"date": "2026-03-04", "score": 7.1}, {"date": "2026-03-05", "score": 5.6}, {"date": "2026-03-06", "score": 7.1}], "CRCL": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-01", "score": 5.0}, {"date": "2026-03-02", "score": 5.5}, {"date": "2026-03-03", "score": 5.8}, {"date": "2026-03-04", "score": 6.2}, {"date": "2026-03-05", "score": 6.0}, {"date": "2026-03-06", "score": 5.1}], "TSLA": [{"date": "2026-02-25", "score": 5.5}, {"date": "2026-02-27", "score": 5.0}, {"date": "2026-03-03", "score": 4.0}, {"date": "2026-03-04", "score": 5.3}, {"date": "2026-03-05", "score": 5.2}, {"date": "2026-03-06", "score": 4.4}], "RKLB": [{"date": "2026-02-27", "score": 4.2}, {"date": "2026-03-03", "score": 4.6}, {"date": "2026-03-04", "score": 5.1}, {"date": "2026-03-06", "score": 4.6}], "AMZN": [{"date": "2026-02-26", "score": 5.3}, {"date": "2026-02-27", "score": 5.6}, {"date": "2026-02-28", "score": 5.6}, {"date": "2026-03-01", "score": 4.8}, {"date": "2026-03-03", "score": 5.0}, {"date": "2026-03-04", "score": 5.6}, {"date": "2026-03-05", "score": 5.6}, {"date": "2026-03-06", "score": 4.2}], "META": [{"date": "2026-02-26", "score": 5.7}, {"date": "2026-02-27", "score": 5.9}, {"date": "2026-02-28", "score": 5.9}, {"date": "2026-03-01", "score": 4.7}, {"date": "2026-03-02", "score": 5.2}, {"date": "2026-03-03", "score": 5.3}, {"date": "2026-03-06", "score": 4.7}], "AAPL": [{"date": "2026-03-02", "score": 6.6}], "QCOM": [{"date": "2026-02-27", "score": 6.1}, {"date": "2026-02-28", "score": 6.1}], "AMD": [{"date": "2026-02-25", "score": 4.3}]}, "hist_full": {"2026-03-06": [{"ticker": "VKTX", "score": 5.2, "direction": "看多"}, {"ticker": "NVDA", "score": 5.5, "direction": "看多"}, {"ticker": "MSFT", "score": 5.5, "direction": "看多"}, {"ticker": "BILI", "score": 7.1, "direction": "看多"}, {"ticker": "CRCL", "score": 5.1, "direction": "看多"}, {"ticker": "TSLA", "score": 4.4, "direction": "看多"}, {"ticker": "RKLB", "score": 4.6, "direction": "中性"}, {"ticker": "AMZN", "score": 4.2, "direction": "中性"}, {"ticker": "META", "score": 4.7, "direction": "中性"}], "2026-03-05": [{"ticker": "BILI", "score": 5.6, "direction": "看多"}, {"ticker": "NVDA", "score": 5.8, "direction": "中性"}, {"ticker": "TSLA", "score": 5.2, "direction": "中性"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}, {"ticker": "MSFT", "score": 5.9, "direction": "看多"}, {"ticker": "CRCL", "score": 6.0, "direction": "看多"}], "2026-03-04": [{"ticker": "NVDA", "score": 5.9, "direction": "看多"}, {"ticker": "VKTX", "score": 5.0, "direction": "中性"}, {"ticker": "TSLA", "score": 5.3, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}, {"ticker": "RKLB", "score": 5.1, "direction": "看多"}, {"ticker": "MSFT", "score": 6.1, "direction": "看多"}, {"ticker": "CRCL", "score": 6.2, "direction": "看多"}, {"ticker": "BILI", "score": 7.1, "direction": "看多"}], "2026-03-03": [{"ticker": "BILI", "score": 5.9, "direction": "看多"}, {"ticker": "CRCL", "score": 5.8, "direction": "看多"}, {"ticker": "MSFT", "score": 5.3, "direction": "中性"}, {"ticker": "META", "score": 5.3, "direction": "中性"}, {"ticker": "RKLB", "score": 4.6, "direction": "中性"}, {"ticker": "NVDA", "score": 4.5, "direction": "看多"}, {"ticker": "TSLA", "score": 4.0, "direction": "看多"}, {"ticker": "AMZN", "score": 5.0, "direction": "看多"}], "2026-03-02": [{"ticker": "MSFT", "score": 7.9, "direction": "看多"}, {"ticker": "BILI", "score": 5.6, "direction": "看多"}, {"ticker": "CRCL", "score": 5.5, "direction": "看多"}, {"ticker": "NVDA", "score": 5.2, "direction": "中性"}, {"ticker": "META", "score": 5.2, "direction": "中性"}, {"ticker": "AAPL", "score": 6.6, "direction": "看多"}], "2026-03-01": [{"ticker": "MSFT", "score": 7.0, "direction": "看多"}, {"ticker": "BILI", "score": 5.2, "direction": "看多"}, {"ticker": "META", "score": 4.7, "direction": "看多"}, {"ticker": "AMZN", "score": 4.8, "direction": "看多"}, {"ticker": "VKTX", "score": 4.8, "direction": "中性"}, {"ticker": "CRCL", "score": 5.0, "direction": "中性"}], "2026-02-28": [{"ticker": "MSFT", "score": 7.6, "direction": "看多"}, {"ticker": "QCOM", "score": 6.1, "direction": "看多"}, {"ticker": "META", "score": 5.9, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}], "2026-02-27": [{"ticker": "MSFT", "score": 7.6, "direction": "看多"}, {"ticker": "META", "score": 5.9, "direction": "看多"}, {"ticker": "QCOM", "score": 6.1, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "AMZN", "score": 5.6, "direction": "看多"}, {"ticker": "NVDA", "score": 5.0, "direction": "看多"}, {"ticker": "TSLA", "score": 5.0, "direction": "看多"}, {"ticker": "VKTX", "score": 4.5, "direction": "中性"}, {"ticker": "RKLB", "score": 4.2, "direction": "中性"}, {"ticker": "CRCL", "score": 4.2, "direction": "中性"}], "2026-02-26": [{"ticker": "MSFT", "score": 7.3, "direction": "看多"}, {"ticker": "BILI", "score": 5.8, "direction": "看多"}, {"ticker": "META", "score": 5.7, "direction": "看多"}, {"ticker": "AMZN", "score": 5.3, "direction": "看多"}, {"ticker": "NVDA", "score": 5.0, "direction": "看多"}], "2026-02-25": [{"ticker": "MSFT", "score": 7.5, "direction": "看多"}, {"ticker": "NVDA", "score": 6.1, "direction": "看多"}, {"ticker": "TSLA", "score": 5.5, "direction": "看多"}, {"ticker": "VKTX", "score": 4.6, "direction": "中性"}, {"ticker": "AMD", "score": 4.3, "direction": "中性"}]}, "search_index": [{"ticker": "VKTX", "score": 5.2, "direction": "看多", "price": 32.98}, {"ticker": "NVDA", "score": 5.5, "direction": "看多", "price": 177.82}, {"ticker": "MSFT", "score": 5.5, "direction": "看多", "price": 408.96}, {"ticker": "BILI", "score": 7.1, "direction": "看多", "price": 24.67}, {"ticker": "CRCL", "score": 5.1, "direction": "看多", "price": 101.91}, {"ticker": "TSLA", "score": 4.4, "direction": "看多", "price": 396.73}, {"ticker": "RKLB", "score": 4.6, "direction": "中性", "price": 70.11}, {"ticker": "AMZN", "score": 4.2, "direction": "中性", "price": 213.21}, {"ticker": "META", "score": 4.7, "direction": "中性", "price": 644.86}], "_generated_at": "2026-03-06 19:58 PST", "_date": "2026-03-06", "_deploy_ts": 1772855915};
 // ── Safe localStorage (F1: 隐私模式/配额满时不崩溃) ──
 function _ls(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v);}catch(e){return null;}}
 // ── Unified Namespace (F4: 减少全局污染) ──
@@ -2306,6 +2293,7 @@ function toggleDark(){
   document.getElementById('darkBtn').textContent=isDark?'☀️ 亮色':'🌙 暗黑';
   chartInstances.forEach(function(c){try{c.destroy();}catch(e){}});
   chartInstances.length=0;
+  window.AH.trendChart=null; // Bug1: 清除已销毁图表引用
   if(window.AH.rendered){
     Object.keys(window.AH.rendered).forEach(function(k){delete window.AH.rendered[k];});
   }
@@ -2323,19 +2311,10 @@ function toggleDark(){
       window.AH.radarKeys.forEach(window.AH.renderRadar);
     }
     if(window.AH.initFgTrend) window.AH.initFgTrend();
-    if(window.AH.trendChart){
-      try{
-        const tc=isDark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-        const gc=isDark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
-        const s=window.AH.trendChart.options.scales;
-        if(s.x){s.x.grid.color=gc;s.x.ticks.color=tc;}
-        if(s.y){s.y.grid.color=gc;s.y.ticks.color=tc;}
-        if(s.y1&&s.y1.ticks)s.y1.ticks.color='#F4A532';
-        const leg=window.AH.trendChart.options.plugins.legend;
-        if(leg&&leg.labels)leg.labels.color=tc;
-        window.AH.trendChart.update();
-      }catch(e){}
-    }
+    // Bug1+2: 重新初始化所有延迟图表（init 函数内部已读取 dark 状态）
+    if(window.AH.initTrendChart) window.AH.initTrendChart();
+    if(window.AH.initAccDirChart) window.AH.initAccDirChart();
+    if(window.AH.initAccWinTrend) window.AH.initAccWinTrend();
   },50);
 }
 if(_ls('ahDark')==='1'){
@@ -2782,11 +2761,12 @@ function scrollToDeep(ticker){
 // ── F7b: F&G Trend Mini Chart ──
 const _fgTrendHist=__AH__.fg_history;
 window.AH.initFgTrend=function(){
-  if(!_fgTrendHist||_fgTrendHist.length<2)return;
+  if(!_fgTrendHist||!_fgTrendHist.length)return;
   const cv=document.getElementById('fgTrendChart');
   if(!cv||typeof Chart==='undefined')return;
   // 销毁已有实例，防止 "Canvas already in use" 错误
   var existing=Chart.getChart(cv);if(existing){existing.destroy();}
+  var _fgSingle=_fgTrendHist.length===1;
   chartInstances.push(new Chart(cv,{
     type:'line',
     data:{
@@ -2794,7 +2774,7 @@ window.AH.initFgTrend=function(){
       datasets:[{
         data:_fgTrendHist.map(function(d){return d.value;}),
         borderColor:'#F4A532',backgroundColor:'rgba(244,165,50,.1)',
-        fill:true,tension:.3,pointRadius:2,borderWidth:1.5
+        fill:true,tension:.3,pointRadius:_fgSingle?5:2,borderWidth:1.5
       }]
     },
     options:{
@@ -2943,8 +2923,9 @@ function showDiff(){
     cards=Array.from(document.querySelectorAll('.scard[data-dir]'));
   });
   document.addEventListener('keydown',function(e){
-    const tag=document.activeElement.tagName;
-    if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')return;
+    const ae=document.activeElement;
+    const tag=ae.tagName;
+    if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||tag==='BUTTON'||ae.isContentEditable)return;
     if(e.key==='j'||e.key==='J'){
       e.preventDefault();
       activeIdx=Math.min(activeIdx+1,cards.length-1);

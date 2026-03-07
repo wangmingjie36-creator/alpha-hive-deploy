@@ -69,6 +69,7 @@ function toggleDark(){
   document.getElementById('darkBtn').textContent=isDark?'☀️ 亮色':'🌙 暗黑';
   chartInstances.forEach(function(c){try{c.destroy();}catch(e){}});
   chartInstances.length=0;
+  window.AH.trendChart=null; // Bug1: 清除已销毁图表引用
   if(window.AH.rendered){
     Object.keys(window.AH.rendered).forEach(function(k){delete window.AH.rendered[k];});
   }
@@ -86,19 +87,10 @@ function toggleDark(){
       window.AH.radarKeys.forEach(window.AH.renderRadar);
     }
     if(window.AH.initFgTrend) window.AH.initFgTrend();
-    if(window.AH.trendChart){
-      try{
-        const tc=isDark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
-        const gc=isDark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
-        const s=window.AH.trendChart.options.scales;
-        if(s.x){s.x.grid.color=gc;s.x.ticks.color=tc;}
-        if(s.y){s.y.grid.color=gc;s.y.ticks.color=tc;}
-        if(s.y1&&s.y1.ticks)s.y1.ticks.color='#F4A532';
-        const leg=window.AH.trendChart.options.plugins.legend;
-        if(leg&&leg.labels)leg.labels.color=tc;
-        window.AH.trendChart.update();
-      }catch(e){}
-    }
+    // Bug1+2: 重新初始化所有延迟图表（init 函数内部已读取 dark 状态）
+    if(window.AH.initTrendChart) window.AH.initTrendChart();
+    if(window.AH.initAccDirChart) window.AH.initAccDirChart();
+    if(window.AH.initAccWinTrend) window.AH.initAccWinTrend();
   },50);
 }
 if(_ls('ahDark')==='1'){
@@ -545,11 +537,12 @@ function scrollToDeep(ticker){
 // ── F7b: F&G Trend Mini Chart ──
 const _fgTrendHist=__AH__.fg_history;
 window.AH.initFgTrend=function(){
-  if(!_fgTrendHist||_fgTrendHist.length<2)return;
+  if(!_fgTrendHist||!_fgTrendHist.length)return;
   const cv=document.getElementById('fgTrendChart');
   if(!cv||typeof Chart==='undefined')return;
   // 销毁已有实例，防止 "Canvas already in use" 错误
   var existing=Chart.getChart(cv);if(existing){existing.destroy();}
+  var _fgSingle=_fgTrendHist.length===1;
   chartInstances.push(new Chart(cv,{
     type:'line',
     data:{
@@ -557,7 +550,7 @@ window.AH.initFgTrend=function(){
       datasets:[{
         data:_fgTrendHist.map(function(d){return d.value;}),
         borderColor:'#F4A532',backgroundColor:'rgba(244,165,50,.1)',
-        fill:true,tension:.3,pointRadius:2,borderWidth:1.5
+        fill:true,tension:.3,pointRadius:_fgSingle?5:2,borderWidth:1.5
       }]
     },
     options:{
@@ -706,8 +699,9 @@ function showDiff(){
     cards=Array.from(document.querySelectorAll('.scard[data-dir]'));
   });
   document.addEventListener('keydown',function(e){
-    const tag=document.activeElement.tagName;
-    if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT')return;
+    const ae=document.activeElement;
+    const tag=ae.tagName;
+    if(tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT'||tag==='BUTTON'||ae.isContentEditable)return;
     if(e.key==='j'||e.key==='J'){
       e.preventDefault();
       activeIdx=Math.min(activeIdx+1,cards.length-1);

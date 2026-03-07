@@ -140,7 +140,12 @@ def render_dashboard_html(report: Dict, date_str: str,
     except Exception as _e11:
         _log.debug("F11 准确率增强数据加载失败: %s", _e11)
 
-    now_str = _dt.now().strftime("%Y-%m-%d %H:%M PST")
+    try:
+        from zoneinfo import ZoneInfo as _ZI
+        now_str = _dt.now(_ZI("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M %Z")
+    except Exception:
+        from datetime import timezone as _tz
+        now_str = _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M UTC")
     date_str = date_str
     opps = report.get("opportunities", [])
     meta = report.get("swarm_metadata", {})
@@ -646,6 +651,9 @@ def render_dashboard_html(report: Dict, date_str: str,
         in_ol = False      # 有序列表
         in_sub = False     # 缩进嵌套列表
         ol_counter = 0
+        in_table = False   # markdown 表格
+        table_rows = []
+        table_has_header = False
 
         def _close_lists():
             nonlocal in_ul, in_ol, in_sub, ol_counter
@@ -688,6 +696,40 @@ def render_dashboard_html(report: Dict, date_str: str,
             if (in_ul or in_ol) and not ln.startswith(' '):
                 _close_lists()
 
+            # ── Markdown 表格 | col | col |
+            _stripped = ln.strip()
+            if _stripped.startswith('|') and _stripped.endswith('|') and _stripped.count('|') >= 3:
+                cells = [c.strip() for c in _stripped.strip('|').split('|')]
+                # 分隔行 |---|:---:|---:| → 标记 header
+                if all(_re.match(r'^:?-+:?$', c) for c in cells if c):
+                    table_has_header = True
+                    continue
+                if not in_table:
+                    in_table = True
+                    table_rows = []
+                    table_has_header = False
+                table_rows.append(cells)
+                continue
+            if in_table:
+                # 非表格行 → 输出已收集的表格
+                tbl = '<div class="table-wrap"><table class="md-table">'
+                if table_has_header and len(table_rows) >= 1:
+                    tbl += '<thead><tr>' + ''.join('<th>' + _inline(h) + '</th>' for h in table_rows[0]) + '</tr></thead>'
+                    tbl += '<tbody>' + ''.join(
+                        '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
+                        for r in table_rows[1:]
+                    ) + '</tbody>'
+                else:
+                    tbl += '<tbody>' + ''.join(
+                        '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
+                        for r in table_rows
+                    ) + '</tbody>'
+                tbl += '</table></div>'
+                out.append(tbl)
+                in_table = False
+                table_rows = []
+                table_has_header = False
+
             # ── 标题
             if ln.startswith('#### '):
                 out.append('<h4>' + _inline(ln[5:]) + '</h4>')
@@ -712,6 +754,22 @@ def render_dashboard_html(report: Dict, date_str: str,
                 out.append('<p>' + _inline(ln) + '</p>')
 
         _close_lists()
+        # 关闭残余表格（若表格是最后一段内容）
+        if in_table and table_rows:
+            tbl = '<div class="table-wrap"><table class="md-table">'
+            if table_has_header and len(table_rows) >= 1:
+                tbl += '<thead><tr>' + ''.join('<th>' + _inline(h) + '</th>' for h in table_rows[0]) + '</tr></thead>'
+                tbl += '<tbody>' + ''.join(
+                    '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
+                    for r in table_rows[1:]
+                ) + '</tbody>'
+            else:
+                tbl += '<tbody>' + ''.join(
+                    '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
+                    for r in table_rows
+                ) + '</tbody>'
+            tbl += '</table></div>'
+            out.append(tbl)
         return '\n'.join(out)
 
     _rpt_body = ""
