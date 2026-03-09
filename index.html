@@ -688,7 +688,7 @@ html:not(.dark) .hm-tk{background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.06)}
 {"@context":"https://schema.org","@type":"WebPage","name":"Alpha Hive 投资仪表板","description":"去中心化蜂群智能投资研究平台 — 9 标的每日扫描","dateModified":"2026-03-07 01:07 PST"}
 </script>
 </head>
-<body data-generated="2026-03-07 01:07 PST">
+<body data-generated="2026-03-07 10:22 PST">
 <a href="#main-content" class="skip-link">跳转到主内容</a>
 <!-- ── Fixed Nav ── -->
 <nav class="nav" role="navigation" aria-label="主导航">
@@ -3484,13 +3484,20 @@ function toggleKbHelp(){
         // 更新英雄区数字
         var heroDate=document.querySelector('.hero-date,.scan-date');
         if(heroDate&&data._date) heroDate.textContent=data._date;
-        // 检查是否有更新的数据
+        // 检查是否有更新的数据（带防重复刷新保护）
         var genEl=document.querySelector('[data-generated]');
         if(genEl){
           var curGen=genEl.getAttribute('data-generated');
           if(curGen&&data._generated_at&&data._generated_at>curGen){
-            console.log('[AH] \u53d1\u73b0\u65b0\u6570\u636e, \u81ea\u52a8\u5237\u65b0\u9875\u9762');
-            location.reload();
+            // 防止无限刷新：sessionStorage 记录已刷新标记
+            var reloadKey='ah_reloaded_'+data._generated_at;
+            if(!sessionStorage.getItem(reloadKey)){
+              sessionStorage.setItem(reloadKey,'1');
+              console.log('[AH] \u53d1\u73b0\u65b0\u6570\u636e, \u81ea\u52a8\u5237\u65b0\u9875\u9762');
+              location.reload();
+            } else {
+              console.log('[AH] \u65b0\u6570\u636e\u5df2\u68c0\u6d4b\u4f46 HTML \u672a\u66f4\u65b0\uff0c\u8df3\u8fc7\u91cd\u590d\u5237\u65b0');
+            }
           }
         }
       })
