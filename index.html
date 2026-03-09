@@ -2541,6 +2541,41 @@ if('serviceWorker' in navigator && location.protocol==='https:'){
 })();
 
 // ── Dark Mode ──
+// ── 共享：销毁并重建所有图表 ──
+function _destroyAllCharts(){
+  chartInstances.forEach(function(c){try{c.destroy();}catch(e){}});
+  chartInstances.length=0;
+  window.AH.trendChart=null;
+  if(window.AH.rendered){
+    Object.keys(window.AH.rendered).forEach(function(k){delete window.AH.rendered[k];});
+  }
+  document.querySelectorAll('canvas.rendered').forEach(function(c){
+    c.classList.remove('rendered');
+    var w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap');
+    if(w) w.classList.remove('skel-done');
+  });
+}
+function _rebuildAllCharts(){
+  if(window.AH.renderChart){
+    ['fgChart','scoresChart','dirChart'].forEach(window.AH.renderChart);
+  }
+  if(window.AH.renderRadar && window.AH.radarKeys){
+    window.AH.radarKeys.forEach(window.AH.renderRadar);
+  }
+  if(window.AH.initFgTrend) window.AH.initFgTrend();
+  if(window.AH.initTrendChart) window.AH.initTrendChart();
+  if(window.AH.initAccDirChart) window.AH.initAccDirChart();
+  if(window.AH.initAccWinTrend) window.AH.initAccWinTrend();
+}
+
+// ── bfcache 恢复：浏览器后退时 canvas 内容丢失，需重新渲染 ──
+window.addEventListener('pageshow',function(e){
+  if(e.persisted){
+    _destroyAllCharts();
+    setTimeout(_rebuildAllCharts,50);
+  }
+});
+
 var _darkTimer;
 function toggleDark(){
   const h=document.documentElement;
@@ -2549,31 +2584,9 @@ function toggleDark(){
   _ls('ahDark',isDark?'1':'0');
   _ls('ah-theme',isDark?'dark':'light');
   document.getElementById('darkBtn').textContent=isDark?'☀️ 亮色':'🌙 暗黑';
-  chartInstances.forEach(function(c){try{c.destroy();}catch(e){}});
-  chartInstances.length=0;
-  window.AH.trendChart=null; // Bug1: 清除已销毁图表引用
-  if(window.AH.rendered){
-    Object.keys(window.AH.rendered).forEach(function(k){delete window.AH.rendered[k];});
-  }
-  document.querySelectorAll('canvas.rendered').forEach(function(c){
-    c.classList.remove('rendered');
-    const w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap');
-    if(w) w.classList.remove('skel-done');
-  });
+  _destroyAllCharts();
   clearTimeout(_darkTimer);
-  _darkTimer=setTimeout(function(){
-    if(window.AH.renderChart){
-      ['fgChart','scoresChart','dirChart'].forEach(window.AH.renderChart);
-    }
-    if(window.AH.renderRadar && window.AH.radarKeys){
-      window.AH.radarKeys.forEach(window.AH.renderRadar);
-    }
-    if(window.AH.initFgTrend) window.AH.initFgTrend();
-    // Bug1+2: 重新初始化所有延迟图表（init 函数内部已读取 dark 状态）
-    if(window.AH.initTrendChart) window.AH.initTrendChart();
-    if(window.AH.initAccDirChart) window.AH.initAccDirChart();
-    if(window.AH.initAccWinTrend) window.AH.initAccWinTrend();
-  },50);
+  _darkTimer=setTimeout(_rebuildAllCharts,50);
 }
 if(_ls('ahDark')==='1'){
   document.documentElement.classList.add('dark');
