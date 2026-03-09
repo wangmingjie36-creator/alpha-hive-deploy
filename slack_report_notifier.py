@@ -773,7 +773,7 @@ class SlackReportNotifier:
         return self._send_slack_message_payload({"text": text})
 
     def _send_via_api(self, text: str, channel: str) -> bool:
-        """通过 Slack API 以用户身份发送"""
+        """通过 Slack API 以用户身份发送（含 DM 降级）"""
         try:
             from resilience import slack_breaker
             if not slack_breaker.allow_request():
@@ -782,21 +782,30 @@ class SlackReportNotifier:
         except ImportError:
             slack_breaker = None
 
+        # 依次尝试：指定频道 → DM 降级
+        targets = [channel]
+        if _DM_FALLBACK and _DM_FALLBACK != channel:
+            targets.append(_DM_FALLBACK)
+
         try:
-            response = get_session("slack").post(
-                "https://slack.com/api/chat.postMessage",
-                headers={"Authorization": f"Bearer {self.user_token}"},
-                json={"channel": channel, "text": text, "unfurl_links": False},
-                timeout=15,
-            )
-            data = response.json()
-            if data.get("ok"):
-                if slack_breaker:
-                    slack_breaker.record_success()
-                _log.info("Slack 消息发送成功（用户身份）")
-                return True
-            else:
-                _log.warning("Slack API 错误: %s", data.get("error", "unknown"))
+            for target_ch in targets:
+                response = get_session("slack").post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers={"Authorization": f"Bearer {self.user_token}"},
+                    json={"channel": target_ch, "text": text, "unfurl_links": False},
+                    timeout=15,
+                )
+                data = response.json()
+                if data.get("ok"):
+                    if slack_breaker:
+                        slack_breaker.record_success()
+                    _log.info("Slack 消息发送成功（用户身份 → %s）", target_ch)
+                    return True
+                err = data.get("error", "unknown")
+                if err in ("not_in_channel", "channel_not_found"):
+                    _log.warning("Slack API (%s): %s，尝试 DM 降级", target_ch, err)
+                    continue
+                _log.warning("Slack API 错误: %s", err)
                 return False
         except requests.exceptions.RequestException as e:
             if slack_breaker:
