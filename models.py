@@ -66,9 +66,19 @@ def clean_string(value, default: str = "", max_len: int = 500) -> str:
 
 # ==================== Agent 结果模型 ====================
 
+_AGENT_RESULT_CORE_KEYS = frozenset({
+    "score", "direction", "confidence", "discovery", "source",
+    "dimension", "data_quality", "details", "error", "extras",
+})
+
+
 @dataclass
 class AgentResult:
-    """单个 Agent 的分析结果（标准化输出格式）"""
+    """单个 Agent 的分析结果（标准化输出格式）
+
+    extras 字段用于存储 agent-specific 的额外 key（如 BearBee 的 llm_thesis）。
+    to_dict() 会将 extras 展平到顶层 dict，保持与消费者代码的向后兼容。
+    """
 
     score: float
     direction: str
@@ -79,6 +89,7 @@ class AgentResult:
     data_quality: Dict[str, str] = field(default_factory=dict)
     details: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
+    extras: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         self.score = clean_score(self.score)
@@ -87,15 +98,26 @@ class AgentResult:
         self.discovery = clean_string(self.discovery)
         self.source = clean_string(self.source, default="Unknown")
         self.dimension = clean_string(self.dimension, default="unknown")
+        if self.extras is None:
+            self.extras = {}
 
     @classmethod
     def from_dict(cls, d: Dict) -> Optional["AgentResult"]:
-        """从 Agent 返回的 dict 构造 AgentResult，无效数据返回 None"""
+        """从 Agent 返回的 dict 构造 AgentResult，无效数据返回 None
+
+        未知的顶层 key 会自动收集到 extras（除非 d 中已有显式 extras）。
+        """
         if not d or not isinstance(d, dict):
             return None
         if "error" in d and "score" not in d:
             return None
         try:
+            # 如果 dict 包含显式 extras key，使用它；否则收集未知 key
+            if "extras" in d:
+                extras = d["extras"]
+            else:
+                extras = {k: v for k, v in d.items()
+                          if k not in _AGENT_RESULT_CORE_KEYS}
             return cls(
                 score=d.get("score"),
                 direction=d.get("direction"),
@@ -106,13 +128,30 @@ class AgentResult:
                 data_quality=d.get("data_quality", {}),
                 details=d.get("details", {}),
                 error=d.get("error"),
+                extras=extras if isinstance(extras, dict) else {},
             )
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             _log.debug("AgentResult.from_dict 失败: %s", exc)
             return None
 
-    def to_dict(self) -> Dict:
-        return asdict(self)
+    def to_dict(self) -> Dict[str, Any]:
+        """转为 dict，将 extras 展平到顶层以保持向后兼容"""
+        d = {
+            "score": self.score,
+            "direction": self.direction,
+            "confidence": self.confidence,
+            "discovery": self.discovery,
+            "source": self.source,
+            "dimension": self.dimension,
+            "data_quality": self.data_quality,
+            "details": self.details,
+        }
+        if self.error is not None:
+            d["error"] = self.error
+        # 展平 extras 到顶层（agent-specific key 如 llm_thesis）
+        if self.extras:
+            d.update(self.extras)
+        return d
 
     @property
     def is_valid(self) -> bool:

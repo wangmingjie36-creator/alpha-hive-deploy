@@ -12,6 +12,11 @@ import statistics
 
 _log = _logging.getLogger("alpha_hive.advanced_analyzer")
 
+try:
+    from resilience import NETWORK_ERRORS
+except ImportError:
+    NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError, ValueError, KeyError)
+
 # 动态导入期权分析模块
 try:
     from options_analyzer import OptionsAgent
@@ -557,7 +562,7 @@ class AdvancedAnalyzer:
                 analysis["options_analysis"] = options_agent.analyze(
                     ticker, stock_price=current_price if current_price > 0 else None
                 )
-            except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+            except NETWORK_ERRORS as e:
                 _log.error("期权分析异常: %s", e, exc_info=True)
                 analysis["options_analysis"] = None
         else:

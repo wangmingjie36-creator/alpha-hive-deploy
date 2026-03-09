@@ -222,6 +222,16 @@ class NotificationTool:
     def _load_slack_webhook() -> Optional[str]:
         """加载 Slack Webhook"""
         try:
+            from config import get_secret
+            url = get_secret("SLACK_WEBHOOK_URL")
+            if url:
+                return url
+        except ImportError:
+            pass
+        env_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+        if env_url:
+            return env_url
+        try:
             with open(os.path.expanduser("~/.alpha_hive_slack_webhook"), "r") as f:
                 return f.read().strip()
         except FileNotFoundError:

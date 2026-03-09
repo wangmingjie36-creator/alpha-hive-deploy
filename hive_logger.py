@@ -11,6 +11,7 @@ Alpha Hive 统一日志 + 路径管理 + 结构化 JSON 日志
 结构化日志输出到 alpha_hive_structured.jsonl（每行一条 JSON）。
 """
 
+import importlib
 import json
 import logging
 import os
@@ -336,3 +337,22 @@ def read_json_cache(path, ttl: int = 300):
             return json.load(f)
     except (json.JSONDecodeError, OSError, ValueError):
         return None
+
+
+def optional_import(module: str, attr: str = None, *, default=None):
+    """尝试导入 *module*（可选 getattr *attr*），ImportError 时返回 *default*。
+
+    用于可选依赖的优雅降级，减少 try/except ImportError 样板代码。
+
+    Usage::
+
+        MetricsCollector = optional_import("metrics_collector", "MetricsCollector")
+        # MetricsCollector 为类或 None
+    """
+    try:
+        mod = importlib.import_module(module)
+        if attr is not None:
+            return getattr(mod, attr, default)
+        return mod
+    except ImportError:
+        return default

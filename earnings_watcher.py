@@ -32,6 +32,11 @@ except ImportError:
     yf = None
 
 try:
+    from resilience import yfinance_limiter
+except ImportError:
+    yfinance_limiter = None
+
+try:
     import requests as _requests
 except ImportError:
     _requests = None
@@ -46,23 +51,6 @@ try:
 except (ImportError, KeyError):
     _EARN_DATE_TTL = 43200
     _EARN_RESULTS_TTL = 1800
-
-# yfinance 请求间隔（避免限速）
-_yf_lock = threading.Lock()
-_last_yf_request = 0.0
-_YF_MIN_INTERVAL = 2.0
-
-
-def _yf_throttle():
-    """yfinance 请求限流"""
-    global _last_yf_request
-    with _yf_lock:
-        now = time.time()
-        elapsed = now - _last_yf_request
-        if elapsed < _YF_MIN_INTERVAL:
-            time.sleep(_YF_MIN_INTERVAL - elapsed)
-        _last_yf_request = time.time()
-
 
 class EarningsWatcher:
     """财报自动监控器"""
@@ -93,7 +81,8 @@ class EarningsWatcher:
             return None
 
         try:
-            _yf_throttle()
+            if yfinance_limiter:
+                yfinance_limiter.acquire()
             stock = yf.Ticker(ticker)
             cal = stock.calendar
 
@@ -231,14 +220,16 @@ class EarningsWatcher:
 
         result = {}
         try:
-            _yf_throttle()
+            if yfinance_limiter:
+                yfinance_limiter.acquire()
             stock = yf.Ticker(ticker)
 
             # 1. 基础财务数据
             info = stock.fast_info if hasattr(stock, 'fast_info') else {}
 
             # 2. 季度财务报表
-            _yf_throttle()
+            if yfinance_limiter:
+                yfinance_limiter.acquire()
             quarterly_income = stock.quarterly_income_stmt
             if quarterly_income is not None and not quarterly_income.empty:
                 latest_q = quarterly_income.iloc[:, 0]  # 最近一季
@@ -291,7 +282,8 @@ class EarningsWatcher:
                 eps_actual = None
                 eps_estimate = None
                 try:
-                    _yf_throttle()
+                    if yfinance_limiter:
+                        yfinance_limiter.acquire()
                     earnings_hist = stock.earnings_history
                     if earnings_hist is not None and not earnings_hist.empty:
                         latest_eh = earnings_hist.iloc[-1]
@@ -303,7 +295,8 @@ class EarningsWatcher:
                 # 共识预期（从 analyst info）
                 revenue_estimate = None
                 try:
-                    _yf_throttle()
+                    if yfinance_limiter:
+                        yfinance_limiter.acquire()
                     analyst_info = stock.analyst_price_targets
                     # 备用：从 earnings_estimate 获取
                 except (AttributeError, KeyError, TypeError, ValueError):

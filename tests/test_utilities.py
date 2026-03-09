@@ -357,3 +357,146 @@ class TestConfigLoader:
         result = reload_config()
         assert "watchlist_count" in result
         assert "source" in result
+
+
+# ==================== Env 辅助函数 (#E1) ====================
+
+class TestEnvHelpers:
+    def test_env_int_default(self):
+        from config import _env_int
+        assert _env_int("__AH_TEST_NONEXIST__", 42) == 42
+
+    def test_env_int_valid(self, monkeypatch):
+        from config import _env_int
+        monkeypatch.setenv("__AH_TEST_INT__", "99")
+        assert _env_int("__AH_TEST_INT__", 0) == 99
+
+    def test_env_int_invalid(self, monkeypatch):
+        from config import _env_int
+        monkeypatch.setenv("__AH_TEST_INT__", "abc")
+        assert _env_int("__AH_TEST_INT__", 7) == 7
+
+    def test_env_float_valid(self, monkeypatch):
+        from config import _env_float
+        monkeypatch.setenv("__AH_TEST_FLOAT__", "0.5")
+        assert _env_float("__AH_TEST_FLOAT__", 1.0) == 0.5
+
+    def test_env_float_invalid(self, monkeypatch):
+        from config import _env_float
+        monkeypatch.setenv("__AH_TEST_FLOAT__", "bad")
+        assert _env_float("__AH_TEST_FLOAT__", 3.14) == 3.14
+
+    def test_env_bool_true_variants(self, monkeypatch):
+        from config import _env_bool
+        for val in ("1", "true", "yes", "on", "TRUE", "Yes"):
+            monkeypatch.setenv("__AH_TEST_BOOL__", val)
+            assert _env_bool("__AH_TEST_BOOL__", False) is True, f"Failed for {val!r}"
+
+    def test_env_bool_false_default(self):
+        from config import _env_bool
+        # No env var set → returns default
+        assert _env_bool("__AH_TEST_NONEXIST_BOOL__", False) is False
+        assert _env_bool("__AH_TEST_NONEXIST_BOOL__", True) is True
+
+
+# ==================== 环境变量覆盖 (#E2) ====================
+
+class TestEnvOverrides:
+    def test_http_timeout_override(self, monkeypatch):
+        monkeypatch.setenv("ALPHA_HIVE_HTTP_TIMEOUT", "30")
+        import importlib
+        import config as _cfg
+        orig_timeout = _cfg.HTTP_TIMEOUT
+        try:
+            importlib.reload(_cfg)
+            assert _cfg.HTTP_TIMEOUT == 30
+        finally:
+            monkeypatch.delenv("ALPHA_HIVE_HTTP_TIMEOUT", raising=False)
+            importlib.reload(_cfg)
+
+    def test_debug_override(self, monkeypatch):
+        monkeypatch.setenv("ALPHA_HIVE_DEBUG", "false")
+        import importlib
+        import config as _cfg
+        try:
+            importlib.reload(_cfg)
+            assert _cfg.RUNTIME_CONFIG["debug"] is False
+        finally:
+            monkeypatch.delenv("ALPHA_HIVE_DEBUG", raising=False)
+            importlib.reload(_cfg)
+
+    def test_llm_budget_override(self, monkeypatch):
+        monkeypatch.setenv("ALPHA_HIVE_LLM_BUDGET_USD", "2.5")
+        import importlib
+        import config as _cfg
+        try:
+            importlib.reload(_cfg)
+            assert _cfg.LLM_CONFIG["daily_budget_usd"] == 2.5
+        finally:
+            monkeypatch.delenv("ALPHA_HIVE_LLM_BUDGET_USD", raising=False)
+            importlib.reload(_cfg)
+
+    def test_no_env_uses_defaults(self):
+        import config as _cfg
+        assert _cfg.HTTP_TIMEOUT == 15
+        assert _cfg.RUNTIME_CONFIG["debug"] is True
+        assert _cfg.RUNTIME_CONFIG["max_retries"] == 3
+        assert _cfg.LLM_CONFIG["daily_budget_usd"] == 1.0
+
+
+# ==================== 权重验证 (#E3) ====================
+
+class TestWeightValidation:
+    def test_current_weights_valid(self):
+        from config import validate_weights
+        warnings = validate_weights()
+        assert warnings == [], f"Current weights invalid: {warnings}"
+
+    def test_bad_eval_weights_detected(self, monkeypatch):
+        import config as _cfg
+        orig = dict(_cfg.EVALUATION_WEIGHTS)
+        try:
+            _cfg.EVALUATION_WEIGHTS["signal"] = 0.5  # 0.5+0.2+0.2+0.15+0.15 = 1.2
+            warnings = _cfg.validate_weights()
+            eval_warns = [w for w in warnings if "EVALUATION_WEIGHTS" in w]
+            assert len(eval_warns) >= 1
+        finally:
+            _cfg.EVALUATION_WEIGHTS.clear()
+            _cfg.EVALUATION_WEIGHTS.update(orig)
+
+    def test_bad_buzz_weights_detected(self, monkeypatch):
+        import config as _cfg
+        orig = dict(_cfg.AGENT_SCORING["buzz_weights"])
+        try:
+            _cfg.AGENT_SCORING["buzz_weights"]["momentum"] = 0.99
+            warnings = _cfg.validate_weights()
+            buzz_warns = [w for w in warnings if "buzz_weights" in w]
+            assert len(buzz_warns) >= 1
+        finally:
+            _cfg.AGENT_SCORING["buzz_weights"].clear()
+            _cfg.AGENT_SCORING["buzz_weights"].update(orig)
+
+
+# ==================== 诊断摘要 (#E4) ====================
+
+class TestConfigSummary:
+    def test_summary_structure(self):
+        from config import get_config_summary
+        s = get_config_summary()
+        for key in ("watchlist_count", "watchlist_tickers", "http_timeout",
+                     "debug", "llm_enabled", "evaluation_weights",
+                     "weight_validation", "env_overrides"):
+            assert key in s, f"Missing key: {key}"
+        assert isinstance(s["watchlist_tickers"], list)
+        assert s["watchlist_count"] > 0
+
+    def test_summary_no_secrets(self, monkeypatch):
+        monkeypatch.setenv("ALPHA_HIVE_SECRET_TEST", "should_not_appear")
+        monkeypatch.setenv("ALPHA_HIVE_API_KEY_X", "should_not_appear")
+        monkeypatch.setenv("ALPHA_HIVE_DEBUG", "true")
+        from config import get_config_summary
+        s = get_config_summary()
+        env_keys = list(s["env_overrides"].keys())
+        assert "ALPHA_HIVE_DEBUG" in env_keys
+        assert "ALPHA_HIVE_SECRET_TEST" not in env_keys
+        assert "ALPHA_HIVE_API_KEY_X" not in env_keys

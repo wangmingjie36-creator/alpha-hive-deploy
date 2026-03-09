@@ -20,10 +20,11 @@ except ImportError:
 
 # ── 期权数据断路器（#9）──
 try:
-    from resilience import yfinance_limiter as _opt_rl, yfinance_breaker as _opt_cb
+    from resilience import yfinance_limiter as _opt_rl, yfinance_breaker as _opt_cb, NETWORK_ERRORS
 except ImportError:
     _opt_rl = None
     _opt_cb = None
+    NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError, ValueError, KeyError)
 
 try:
     from hive_logger import FeatureRegistry
@@ -178,7 +179,7 @@ class OptionsDataFetcher:
                         calls_list.append(calls)
                         puts_list.append(puts)
                         break  # 成功则跳出重试
-                    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
+                    except (*NETWORK_ERRORS, TypeError) as e:
                         if _retry < 2:
                             import time as _time
                             _time.sleep(1.0 * (2 ** _retry))  # 1s, 2s 指数退避
@@ -236,7 +237,7 @@ class OptionsDataFetcher:
                 _opt_cb.record_success()
             return result
 
-        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        except (*NETWORK_ERRORS, TypeError, AttributeError) as e:
             _log.warning("获取 %s 期权链失败：%s，降级为样本数据", ticker, e)
             if _opt_cb:
                 _opt_cb.record_failure()
@@ -292,7 +293,7 @@ class OptionsDataFetcher:
             self._write_cache(ticker, "hist_iv_v3", iv_list)
             return iv_list
 
-        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, TypeError) as e:
+        except (*NETWORK_ERRORS, TypeError) as e:
             _log.warning("获取 %s 历史 IV 失败：%s，使用样本数据", ticker, e)
             return self._get_sample_historical_iv(ticker)
 
@@ -356,8 +357,7 @@ class OptionsDataFetcher:
             # clamp 到合理范围
             return max(1.05, min(2.0, ratio))
 
-        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError,
-                TypeError, AttributeError, IndexError) as e:
+        except (*NETWORK_ERRORS, TypeError, AttributeError, IndexError) as e:
             _log.debug("IV premium 估算降级: %s", e)
             return 1.25
 
@@ -378,7 +378,7 @@ class OptionsDataFetcher:
             pass  # {ticker} 期权到期日来自 yfinance")
             return expirations
 
-        except (ConnectionError, TimeoutError, OSError, ValueError, AttributeError) as e:
+        except (*NETWORK_ERRORS, AttributeError) as e:
             _log.warning("获取 %s 期权到期日失败：%s", ticker, e)
             return self._get_sample_expirations(ticker)
 

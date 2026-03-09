@@ -15,6 +15,7 @@ def _clear_fred_cache():
     import fred_macro
     fred_macro._CACHE = {}
     fred_macro._CACHE_TS = 0.0
+    fred_macro._etf_cache = {}
 
 
 def _mock_yf_ticker(symbol, close_values):

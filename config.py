@@ -13,6 +13,41 @@ from hive_logger import PATHS, get_logger
 
 _log = get_logger("config")
 
+
+# ==================== 环境变量分层辅助函数 ====================
+
+def _env_int(name: str, default: int) -> int:
+    """读取环境变量为 int；缺失或非法时返回 *default*。"""
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        _log.warning("env %s=%r 非有效 int，使用默认值 %d", name, raw, default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """读取环境变量为 float；缺失或非法时返回 *default*。"""
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        _log.warning("env %s=%r 非有效 float，使用默认值 %.2f", name, raw, default)
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    """读取环境变量为 bool（1/true/yes/on → True）；缺失时返回 *default*。"""
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
 # ==================== API 配置 ====================
 API_KEYS = {
     # Polymarket API（无需认证，公开数据）
@@ -61,6 +96,8 @@ API_KEYS = {
 
 # Slack 频道 ID（#alpha-hive）
 SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "C0AGUUWJXJS")
+# Slack 用户 DM 降级目标（当 bot 不在频道时自动 DM）
+SLACK_DM_FALLBACK = os.environ.get("SLACK_DM_FALLBACK", "U0AGQK74NKV")
 
 # SEC EDGAR 要求的 User-Agent（SEC 政策要求包含联系方式）
 SEC_USER_AGENT = os.environ.get(
@@ -73,8 +110,10 @@ SEC_USER_AGENT = os.environ.get(
 _SECRET_REGISTRY = {
     "ANTHROPIC_API_KEY": "~/.anthropic_api_key",
     "SLACK_WEBHOOK_URL": "~/.alpha_hive_slack_webhook",
-    "FRED_API_KEY": None,
-    "AV_API_KEY": None,
+    "SLACK_BOT_TOKEN": "~/.alpha_hive_slack_bot_token",
+    "SLACK_USER_TOKEN": "~/.alpha_hive_slack_user_token",
+    "FRED_API_KEY": "~/.alpha_hive_fred_key",
+    "AV_API_KEY": "~/.alpha_hive_av_key",
     "ALPHA_VANTAGE_KEY": None,
     "STOCKTWITS_TOKEN": None,
     "GMAIL_APP_PASSWORD": None,
@@ -334,15 +373,15 @@ DATA_SOURCE_PRIORITY = {
 
 # ==================== 运行配置 ====================
 RUNTIME_CONFIG = {
-    "debug": True,
+    "debug": _env_bool("ALPHA_HIVE_DEBUG", True),
     "log_file": str(PATHS.logs_dir / "data_fetcher.log"),
-    "max_retries": 3,
+    "max_retries": _env_int("ALPHA_HIVE_MAX_RETRIES", 3),
     "timeout": 15,  # 请求超时（秒）— 全局统一 15s
     "rate_limit_delay": 1,  # 请求间延迟（秒）
 }
 
 # ==================== 网络请求统一配置 ====================
-HTTP_TIMEOUT = 15  # 秒（全局默认）
+HTTP_TIMEOUT = _env_int("ALPHA_HIVE_HTTP_TIMEOUT", 15)  # 秒（全局默认）
 HTTP_TIMEOUT_BY_SOURCE = {
     "sec_edgar": 15,
     "polymarket": 10,
@@ -609,13 +648,66 @@ def validate_watchlist():
     return warnings
 
 
+# ==================== 权重验证 ====================
+
+def _validate_weight_sum(name: str, weights: dict, target: float = 1.0, tol: float = 0.01) -> list:
+    """验证权重 dict 的和是否等于 *target*（容差 *tol*）"""
+    total = sum(weights.values())
+    if abs(total - target) > tol:
+        return [f"{name} 权重和 {total:.4f} != {target} (容差 {tol})"]
+    return []
+
+
+def validate_weights() -> list:
+    """验证所有须归一的权重 dict。返回警告列表（空 = 全部通过）。"""
+    warnings: list = []
+    warnings += _validate_weight_sum("EVALUATION_WEIGHTS", EVALUATION_WEIGHTS)
+    warnings += _validate_weight_sum("CROWDING_WEIGHTS", CROWDING_WEIGHTS)
+    warnings += _validate_weight_sum("AGENT_SCORING.buzz_weights",
+                                     AGENT_SCORING.get("buzz_weights", {}))
+    oracle_w = {
+        "options": AGENT_SCORING.get("oracle_options_weight", 0),
+        "poly": AGENT_SCORING.get("oracle_poly_weight", 0),
+        "unusual": AGENT_SCORING.get("oracle_unusual_weight", 0),
+    }
+    warnings += _validate_weight_sum("AGENT_SCORING.oracle_weights", oracle_w)
+    for w in warnings:
+        _log.warning("[CONFIG] %s", w)
+    return warnings
+
+
+# ==================== 诊断摘要 ====================
+
+def get_config_summary() -> dict:
+    """返回当前配置诊断摘要（用于日志/调试，自动过滤敏感 key）。"""
+    return {
+        "watchlist_count": len(WATCHLIST),
+        "watchlist_tickers": sorted(WATCHLIST.keys()),
+        "catalysts_count": sum(len(v) for v in CATALYSTS.values()),
+        "http_timeout": HTTP_TIMEOUT,
+        "debug": RUNTIME_CONFIG["debug"],
+        "max_retries": RUNTIME_CONFIG["max_retries"],
+        "llm_enabled": LLM_CONFIG["enabled"],
+        "llm_model": LLM_CONFIG["model"],
+        "llm_budget_usd": LLM_CONFIG["daily_budget_usd"],
+        "evaluation_weights": dict(EVALUATION_WEIGHTS),
+        "weight_validation": validate_weights(),
+        "env_overrides": {
+            k: v for k, v in os.environ.items()
+            if k.startswith("ALPHA_HIVE_")
+            and "KEY" not in k and "TOKEN" not in k and "SECRET" not in k
+        },
+    }
+
+
 # ==================== 初始化缓存目录 ====================
 def init_cache():
-    """初始化缓存目录 + 验证 WATCHLIST"""
+    """初始化缓存目录 + 验证 WATCHLIST + 验证权重"""
     cache_dir = CACHE_CONFIG["cache_dir"]
     os.makedirs(cache_dir, exist_ok=True)
     os.makedirs(os.path.dirname(RUNTIME_CONFIG["log_file"]), exist_ok=True)
     validate_watchlist()
+    validate_weights()
 
 # ==================== 告警配置 (Phase 2) ====================
 ALERT_CONFIG = {
@@ -669,13 +761,21 @@ METRICS_CONFIG = {
 PHEROMONE_CONFIG = {
     "enabled": True,
     "db_path": PATHS.db,
-    "retention_days": 30,  # 保留 30 天信息素数据
-    "decay_rate": 0.1,     # 每日衰减 10%
+    "retention_days": _env_int("ALPHA_HIVE_PHEROMONE_RETENTION_DAYS", 30),
+    "decay_rate": _env_float("ALPHA_HIVE_PHEROMONE_DECAY_RATE", 0.1),
     "accuracy_tracking": {
         "enable_t1_tracking": True,      # T+1 准确率回看
         "enable_t7_tracking": True,      # T+7 准确率回看
         "enable_t30_tracking": True,     # T+30 准确率回看
-    }
+    },
+    # ── 内存板衰减调优 ──
+    "board_decay_rates": {
+        "fresh_minutes": 5,       # 小于此分钟数使用 fresh_decay
+        "fresh_decay": 0.05,      # <5min 条目每次 publish 衰减量
+        "medium_decay": 0.1,      # 5-30min 条目衰减量
+        "old_decay": 0.15,        # >30min 条目衰减量
+    },
+    "board_ticker_scoped_decay": True,  # 仅衰减同 ticker 条目（防止跨 ticker 误杀）
 }
 
 # ==================== 动态蜂群配置 (Phase 2) ====================
@@ -785,7 +885,7 @@ LLM_CONFIG = {
     "max_tokens_news": 256,             # 新闻情绪分析 max_tokens
     "temperature": 0.3,                 # 推理温度
     "score_blend_ratio": 0.5,           # 规则引擎 vs LLM 混合比：0.5 = 规则 50% + LLM 50%
-    "daily_budget_usd": 1.0,            # 每日 token 预算上限（美元）
+    "daily_budget_usd": _env_float("ALPHA_HIVE_LLM_BUDGET_USD", 1.0),
     "api_key_file": "~/.anthropic_api_key",  # API Key 文件路径
     # 降级策略
     "fallback_on_error": True,          # API 失败时降级到规则引擎
@@ -836,16 +936,92 @@ AGENT_SCORING = {
 
     # ── 方向判断阈值 ──
     "direction_bullish_min": 60,         # sentiment_composite > 60 → bullish
-    "direction_bearish_max": 40,         # sentiment_composite < 40 → bearish
+    "direction_bearish_max": 45,         # sentiment_composite < 45 → bearish（原 40）
 
     # ── 拥挤度阈值 ──
     "crowding_high": 70,                 # 拥挤度 > 70 → bearish
     "crowding_low": 30,                  # 拥挤度 < 30 → bullish
-    "crowding_sell_neutral": 50,         # 卖出但拥挤度 < 50 → 计划性减持（neutral）
+    "crowding_sell_neutral": 35,         # 卖出但拥挤度 < 35 → 计划性减持（neutral）（原 50）
+
+    # ── RivalBee 动量方向阈值 ──
+    "rival_bearish_momentum": -1.5,      # mom < -1.5 → bearish（原 -2.0 硬编码）
+    "rival_bullish_momentum": 2.0,       # mom > 2.0 → bullish（不变）
+
+    # ── OracleBee 数值方向回退 ──
+    "oracle_bearish_score_threshold": 4.0,  # score < 4.0 → bearish（新增数值回退）
+    "oracle_bullish_score_threshold": 6.5,  # score > 6.5 → bullish（新增数值回退）
 
     # ── 评分边界 ──
     "score_min": 1.0,
     "score_max": 10.0,
+}
+
+# ==================== 情绪关键词（统一词库，newsapi + finviz 共用）====================
+SENTIMENT_KEYWORDS = {
+    "bullish": {
+        "surge", "soar", "rally", "beat", "record", "upgrade", "buy", "growth",
+        "profit", "expand", "win", "strong", "bullish", "upbeat", "exceeds",
+        "outperform", "positive", "breakthrough", "gains", "rises", "jumped",
+        "climbed", "boosted", "optimistic", "raised", "accelerates", "momentum",
+        "breakout", "record high", "strong buy", "raise", "boost", "expansion",
+        "top pick", "upside", "higher", "gain", "exceed", "blowout",
+        "impressive", "robust", "beats", "surges", "soars", "rallies",
+        "upgrades",
+    },
+    "bearish": {
+        "drop", "fall", "miss", "downgrade", "sell", "loss", "weak", "decline",
+        "cut", "warning", "layoff", "recession", "bearish", "disappoints",
+        "underperform", "negative", "crash", "plunge", "fell", "tumbled",
+        "slumped", "fears", "risk", "concern", "lowered", "slowdown", "probe",
+        "selloff", "slash", "contraction", "headwind", "decelerate",
+        "breakdown", "lawsuit", "investigation", "recall",
+        "misses", "falls", "drops", "crashes", "downgrades", "cuts",
+        "slashed", "pessimistic", "losses",
+    },
+}
+
+# ==================== 噪声过滤配置 ====================
+NEWS_FILTER_CONFIG = {
+    "dedup_jaccard_threshold": 0.5,     # 标题 Jaccard 相似度 ≥ 0.5 视为重复
+    "recency_half_life_hours": 24.0,    # 时效衰减半衰期（小时）
+    "min_articles_for_recency": 3,      # 文章数 < 3 时不做时效衰减（样本太少）
+}
+
+# ==================== 情绪动量配置 ====================
+SENTIMENT_MOMENTUM_CONFIG = {
+    "surge_threshold": 15,              # 3d delta > 15 ppt = surging（情绪急升）
+    "rise_threshold": 5,                # 3d delta > 5 ppt = rising（情绪上升）
+    "crash_threshold": -15,             # 3d delta < -15 ppt = crashing（情绪急跌）
+    "decline_threshold": -5,            # 3d delta < -5 ppt = declining（情绪下降）
+    "divergence_bull_trap_sentiment": 65,   # 情绪 > 65% 且价格跌 → 看多陷阱
+    "divergence_hidden_opp_sentiment": 35,  # 情绪 < 35% 且价格涨 → 隐藏机会
+    "divergence_price_threshold": 3.0,      # 价格变动阈值 (%)
+    # 跨标的情绪传染
+    "sector_deviation_high": 15,            # 偏离板块 > 15 ppt = overheating/undervalued
+    "sector_deviation_mid": 8,              # 偏离板块 > 8 ppt = above/below_sector
+    # 冲突驱动增强
+    "conflict_heavy_min_agents": 2,         # 多空双方各 ≥ 2 Agent = 重度冲突
+    "conflict_dq_resolve_threshold": 0.55,  # DQ 加权占比 ≥ 55% 才能解决方向冲突
+    "conflict_discount_factor": 0.3,        # 冲突折扣系数（× 冲突比例）
+}
+
+# ==================== BearBee 看空评分配置 ====================
+BEAR_SCORING_CONFIG = {
+    # ── 评分算法 ──
+    "max_signal_boost_weight": 0.3,        # 最强信号提升权重（0=纯均值, 1=纯最大值）
+    "breadth_bonus_per_dim": 0.3,          # 每多一个活跃维度的加分（最多+0.9）
+    # ── 方向判定阈值 ──
+    "direction_bearish_min": 5.5,          # bear_score >= 5.5 → bearish（原 6.5）
+    "direction_neutral_min": 3.5,          # bear_score >= 3.5 → neutral（原 4.5）
+    # ── 无信号默认分 ──
+    "no_signal_positive_mom": 3.0,
+    "no_signal_negative_mom": 2.0,
+    # ── 投票聚合 ──
+    "voting_bearish_min_agents": 1,        # 看空最低 Agent 数（原 2）
+    "voting_bearish_min_weight_pct": 0.25, # 看空最低权重比例（原 0.40）
+    # ── Bear Cap ──
+    "bear_cap_trigger_threshold": 5.0,     # 触发阈值（原 7.0）
+    "bear_cap_slope": 0.5,                 # 上限衰减斜率
 }
 
 # ==================== Dashboard 颜色方案 ====================
@@ -897,6 +1073,40 @@ class ConfigLoader:
                 return json.load(f)
 
     @classmethod
+    def _reload_inner(cls) -> dict:
+        """内部重载逻辑 —— 调用者必须持有 _lock。"""
+        path = cls._find_override_file()
+        if not path:
+            return {"watchlist_count": len(WATCHLIST),
+                    "catalysts_count": len(CATALYSTS),
+                    "source": "builtin"}
+        try:
+            mtime = os.path.getmtime(path)
+            data = cls._load_file(path)
+        except (OSError, ValueError) as exc:
+            _log.error("配置热加载失败 (%s): %s", path, exc)
+            return {"watchlist_count": len(WATCHLIST),
+                    "catalysts_count": len(CATALYSTS),
+                    "source": "builtin (load error)"}
+
+        new_wl = data.get("watchlist") or data.get("WATCHLIST") or {}
+        new_cat = data.get("catalysts") or data.get("CATALYSTS") or {}
+
+        if new_wl:
+            WATCHLIST.clear()
+            WATCHLIST.update(new_wl)
+            _log.info("WATCHLIST 热更新: %d 个标的 ← %s", len(WATCHLIST), path)
+        if new_cat:
+            CATALYSTS.clear()
+            CATALYSTS.update(new_cat)
+            _log.info("CATALYSTS 热更新: %d 个催化剂 ← %s", len(CATALYSTS), path)
+
+        cls._last_mtime = mtime
+        return {"watchlist_count": len(WATCHLIST),
+                "catalysts_count": len(CATALYSTS),
+                "source": os.path.basename(path)}
+
+    @classmethod
     def reload(cls) -> dict:
         """热加载外部配置文件，就地更新 WATCHLIST 和 CATALYSTS。
 
@@ -904,55 +1114,29 @@ class ConfigLoader:
             {"watchlist_count": int, "catalysts_count": int, "source": str}
         """
         with cls._lock:
-            path = cls._find_override_file()
-            if not path:
-                return {"watchlist_count": len(WATCHLIST),
-                        "catalysts_count": len(CATALYSTS),
-                        "source": "builtin"}
-            try:
-                mtime = os.path.getmtime(path)
-                data = cls._load_file(path)
-            except (OSError, ValueError) as exc:
-                _log.error("配置热加载失败 (%s): %s", path, exc)
-                return {"watchlist_count": len(WATCHLIST),
-                        "catalysts_count": len(CATALYSTS),
-                        "source": "builtin (load error)"}
-
-            new_wl = data.get("watchlist") or data.get("WATCHLIST") or {}
-            new_cat = data.get("catalysts") or data.get("CATALYSTS") or {}
-
-            if new_wl:
-                WATCHLIST.clear()
-                WATCHLIST.update(new_wl)
-                _log.info("WATCHLIST 热更新: %d 个标的 ← %s", len(WATCHLIST), path)
-            if new_cat:
-                CATALYSTS.clear()
-                CATALYSTS.update(new_cat)
-                _log.info("CATALYSTS 热更新: %d 个催化剂 ← %s", len(CATALYSTS), path)
-
-            cls._last_mtime = mtime
-            return {"watchlist_count": len(WATCHLIST),
-                    "catalysts_count": len(CATALYSTS),
-                    "source": os.path.basename(path)}
+            return cls._reload_inner()
 
     @classmethod
     def reload_if_changed(cls) -> bool:
         """仅当外部文件 mtime 变化时才重载（适合定期调用）。
 
+        整个 mtime 检查 + 重载操作在同一把锁内完成，防止并发双重重载。
+
         Returns:
             True 如果发生了重载
         """
-        path = cls._find_override_file()
-        if not path:
-            return False
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
-            return False
-        if mtime <= cls._last_mtime:
-            return False
-        cls.reload()
-        return True
+        with cls._lock:
+            path = cls._find_override_file()
+            if not path:
+                return False
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                return False
+            if mtime <= cls._last_mtime:
+                return False
+            cls._reload_inner()
+            return True
 
 
 def reload_config() -> dict:

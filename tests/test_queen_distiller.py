@@ -206,3 +206,254 @@ class TestDistill:
         # catalyst/odds/sentiment/risk_adj 均未提供
         assert out["dimension_status"]["catalyst"] == "absent"
         assert out["dimension_status"]["odds"] == "absent"
+
+
+class TestBearishPipelineIntegration:
+    """端到端测试：看空信号通过 Phase-1 → 1.5 → 2 → Queen 完整流通"""
+
+    def test_bearish_signal_survives_pipeline(self, board):
+        """多个 Agent 看空 + BearBee 强看空 → 最终方向应为 bearish 或分数 < 5.0"""
+        from pheromone_board import PheromoneEntry
+
+        # Phase-1: 模拟板上数据（看空为主）
+        for agent, score, direction in [
+            ("ScoutBeeNova", 4.0, "bearish"),
+            ("OracleBeeEcho", 3.5, "bearish"),
+            ("BuzzBeeWhisper", 5.0, "neutral"),
+            ("ChronosBeeHorizon", 4.5, "bearish"),
+            ("RivalBeeVanguard", 4.0, "bearish"),
+        ]:
+            board.publish(PheromoneEntry(
+                agent_id=agent, ticker="BEAR_E2E",
+                discovery=f"test {agent}", source="test",
+                self_score=score, direction=direction,
+            ))
+
+        queen_local = QueenDistiller(board)
+        results = [
+            _make_result("signal", 4.0, direction="bearish", confidence=0.7, source="ScoutBeeNova"),
+            _make_result("odds", 3.5, direction="bearish", confidence=0.6, source="OracleBeeEcho"),
+            _make_result("sentiment", 5.0, direction="neutral", confidence=0.5, source="BuzzBeeWhisper"),
+            _make_result("catalyst", 4.5, direction="bearish", confidence=0.65, source="ChronosBeeHorizon"),
+            _make_result("ml_auxiliary", 4.0, direction="bearish", confidence=0.5, source="RivalBeeVanguard"),
+            _make_result("risk_adj", 3.0, direction="bearish", confidence=0.7, source="GuardBeeSentinel"),
+            {
+                "score": 2.0, "direction": "bearish", "confidence": 0.8,
+                "discovery": "Strong insider selling + high P/C ratio",
+                "source": "BearBeeContrarian", "dimension": "contrarian",
+                "data_quality": {"insider": "real", "options": "real"},
+                "details": {"bear_score": 8.0, "signal_count": 4},
+            },
+        ]
+
+        out = queen_local.distill("BEAR_E2E", results)
+        assert out["direction"] == "bearish" or out["final_score"] < 5.0, \
+            f"看空信号应流通至最终输出，得到 direction={out['direction']} score={out['final_score']}"
+        assert out["agent_breakdown"]["bearish"] >= 3
+
+    def test_bear_cap_limits_bullish(self, board):
+        """BearBee 强看空时 bear_cap 应限制最终看多分数"""
+        from pheromone_board import PheromoneEntry
+
+        # 在 board 上制造看多共振以提升 rule_score 超过 bear_cap
+        for agent in ["ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon"]:
+            board.publish(PheromoneEntry(
+                agent_id=agent, ticker="CAP_TEST",
+                discovery="strong bullish", source="test",
+                self_score=9.5, direction="bullish",
+            ))
+        queen_local = QueenDistiller(board)
+
+        results = [
+            _make_result("signal", 9.5, direction="bullish", confidence=0.95, source="ScoutBeeNova"),
+            _make_result("catalyst", 9.0, direction="bullish", confidence=0.9, source="ChronosBeeHorizon"),
+            _make_result("sentiment", 9.0, direction="bullish", confidence=0.9, source="BuzzBeeWhisper"),
+            _make_result("odds", 9.0, direction="bullish", confidence=0.9, source="OracleBeeEcho"),
+            _make_result("risk_adj", 7.0, direction="bullish", confidence=0.85, source="GuardBeeSentinel"),
+            {
+                "score": 1.0, "direction": "bearish", "confidence": 0.9,
+                "discovery": "Extreme bearish evidence",
+                "source": "BearBeeContrarian", "dimension": "contrarian",
+                "data_quality": {"insider": "real", "options": "real"},
+                "details": {"bear_score": 9.0, "signal_count": 5},
+            },
+        ]
+
+        out = queen_local.distill("CAP_TEST", results)
+        # bear_strength = 10 - 1.0 = 9.0 > threshold 5.0 → bear_cap = 8.0
+        # 高分看多 rule_score 应 > 8.0（共振加成后），因此 cap 应触发
+        assert out["bear_cap_applied"] is True, \
+            f"bear_cap 应已触发 (bear_strength={out.get('bear_strength')}, rule_score 应 > bear_cap)"
+        # 最终分数被限制
+        assert out["final_score"] <= 8.5, f"bear_cap 后分数应被限制，实际 {out['final_score']}"
+
+    def test_bearish_resonance_with_bearbee(self, board):
+        """看空共振中 BearBee 应参与维度计数"""
+        from pheromone_board import PheromoneEntry
+
+        for agent in ["ScoutBeeNova", "OracleBeeEcho", "BearBeeContrarian"]:
+            board.publish(PheromoneEntry(
+                agent_id=agent, ticker="RES_TEST",
+                discovery="bearish signal", source="test",
+                self_score=3.0, direction="bearish",
+            ))
+
+        res = board.detect_resonance("RES_TEST")
+        assert res["resonance_detected"] is True, "3 维度看空（含 contrarian）应触发共振"
+        assert "contrarian" in res["resonant_dimensions"]
+
+    def test_single_bearish_agent_can_push_direction(self, board):
+        """单个高置信 BearBee 可推动最终方向为 bearish（≥1 Agent + ≥25% 权重）"""
+        queen_local = QueenDistiller(board)
+
+        results = [
+            _make_result("signal", 5.0, direction="neutral", confidence=0.5, source="ScoutBeeNova"),
+            _make_result("catalyst", 5.0, direction="neutral", confidence=0.5, source="ChronosBeeHorizon"),
+            _make_result("sentiment", 5.0, direction="neutral", confidence=0.5, source="BuzzBeeWhisper"),
+            _make_result("odds", 5.0, direction="neutral", confidence=0.5, source="OracleBeeEcho"),
+            _make_result("risk_adj", 5.0, direction="neutral", confidence=0.5, source="GuardBeeSentinel"),
+            {
+                "score": 2.5, "direction": "bearish", "confidence": 0.85,
+                "discovery": "Strong bearish case", "source": "BearBeeContrarian",
+                "dimension": "contrarian",
+                "data_quality": {"insider": "real"},
+                "details": {"bear_score": 7.5, "signal_count": 3},
+            },
+        ]
+
+        out = queen_local.distill("PUSH_TEST", results)
+        # bearish_w = 0.85, total = 5*0.5 + 0.85 = 3.35
+        # bearish_w / total = 0.254 ≥ 0.25, bearish_count=1 ≥ 1, bearish_w > bullish_w(0)
+        assert out["direction"] == "bearish", \
+            f"单个高置信看空 Agent 应推动 bearish，实际 direction={out['direction']}"
+
+
+# ==================== Queen helper 方法单元测试 ====================
+
+class TestQueenHelpers:
+    """测试 QueenDistiller 提取后的私有方法"""
+
+    def test_prepare_dim_data_full_coverage(self, queen):
+        """5 维度全部返回 → coverage=100%"""
+        results = [
+            _make_result("signal", 7.0, source="ScoutBeeNova"),
+            _make_result("catalyst", 6.0, source="ChronosBeeHorizon"),
+            _make_result("sentiment", 8.0, source="BuzzBeeWhisper"),
+            _make_result("odds", 7.0, source="OracleBeeEcho"),
+            _make_result("risk_adj", 5.0, source="GuardBeeSentinel"),
+        ]
+        prep = queen._prepare_dimension_data(results)
+        assert prep["dimension_coverage_pct"] == 100.0
+        assert prep["present_count"] == 5
+        assert len(prep["dim_scores"]) == 5
+        assert all(s == "present" for s in prep["dim_status"].values())
+
+    def test_prepare_dim_data_partial(self, queen):
+        """2/5 维度 → coverage=40%"""
+        results = [
+            _make_result("signal", 7.0, source="ScoutBeeNova"),
+            _make_result("catalyst", 6.0, source="ChronosBeeHorizon"),
+        ]
+        prep = queen._prepare_dimension_data(results)
+        assert prep["dimension_coverage_pct"] == 40.0
+        assert prep["present_count"] == 2
+        assert prep["dim_status"]["sentiment"] == "absent"
+
+    def test_prepare_dim_data_error(self, queen):
+        """含 error 的结果 → dim_status="error" """
+        results = [
+            _make_result("signal", 7.0, source="ScoutBeeNova"),
+            {"dimension": "catalyst", "error": "API timeout", "source": "ChronosBeeHorizon",
+             "score": 5.0, "direction": "neutral", "confidence": 0.0,
+             "discovery": "", "data_quality": {}},
+        ]
+        prep = queen._prepare_dimension_data(results)
+        assert prep["dim_status"]["catalyst"] == "error"
+        assert "API timeout" in prep["dim_missing_reason"]["catalyst"]
+
+    def test_weighted_score_uniform(self, queen):
+        """全 8.0 + conf=1.0 → base_score≈8.0"""
+        dim_scores = {"signal": 8.0, "catalyst": 8.0, "sentiment": 8.0, "odds": 8.0, "risk_adj": 8.0}
+        dim_confidence = {"signal": 1.0, "catalyst": 1.0, "sentiment": 1.0, "odds": 1.0, "risk_adj": 1.0}
+        ws = queen._compute_weighted_score("TEST", dim_scores, dim_confidence, 100.0, 5, [])
+        assert 7.5 <= ws["base_score"] <= 8.5, f"全 8.0 输入时 base_score 应≈8.0，got {ws['base_score']}"
+        assert ws["ml_adjustment"] == 0.0
+
+    def test_weighted_score_low_coverage(self, queen):
+        """1/5 维度 → 压缩至中性区间"""
+        dim_scores = {"signal": 9.0}
+        dim_confidence = {"signal": 1.0}
+        ws = queen._compute_weighted_score("TEST", dim_scores, dim_confidence, 20.0, 1, [])
+        # 低覆盖度会被压缩到接近 5.0
+        assert 4.0 <= ws["base_score"] <= 6.0, f"极低覆盖度时应压缩至中性，got {ws['base_score']}"
+        assert ws["coverage_warning"] != ""
+
+    def test_triple_penalty_dq(self, queen):
+        """全 proxy 数据 → dq_penalty_applied=True"""
+        results = [
+            {"score": 8.0, "direction": "bullish", "confidence": 0.8,
+             "dimension": "signal", "source": "ScoutBeeNova",
+             "data_quality": {"insider": "proxy_volume", "sec": "unavailable"}},
+        ]
+        tp = queen._apply_triple_penalty("TEST", 8.0, results)
+        assert tp["dq_penalty_applied"] is True
+        assert tp["rule_score"] < 8.0
+
+    def test_triple_penalty_guard(self, queen):
+        """guard_score=2.0 → guard_penalty_applied=True"""
+        results = [
+            _make_result("risk_adj", 2.0, source="GuardBeeSentinel"),
+        ]
+        tp = queen._apply_triple_penalty("TEST", 7.0, results)
+        assert tp["guard_penalty_applied"] is True
+        assert tp["rule_score"] < 7.0
+
+    def test_triple_penalty_combo_cap(self, queen):
+        """三重惩罚 > 2.0 → 截断至 -2.0"""
+        # 使用无法识别的 data_quality 值触发强 DQ 惩罚 + 低 guard 分 → 组合超 2.0
+        results = [
+            {"score": 8.0, "direction": "bullish", "confidence": 0.8,
+             "dimension": "signal", "source": "ScoutBeeNova",
+             "discovery": "test", "data_quality": {"a": "garbage", "b": "garbage"}},
+            {"score": 0.5, "direction": "neutral", "confidence": 0.6,
+             "dimension": "risk_adj", "source": "GuardBeeSentinel",
+             "discovery": "test", "data_quality": {"c": "garbage"}},
+            {"score": 1.0, "direction": "bearish", "confidence": 0.9,
+             "dimension": "contrarian", "source": "BearBeeContrarian",
+             "discovery": "test", "data_quality": {"d": "garbage"}},
+        ]
+        tp = queen._apply_triple_penalty("TEST", 9.0, results)
+        assert tp["combo_cap_applied"] is True, "组合惩罚应触发截断"
+        actual_penalty = tp["pre_penalty_score"] - tp["rule_score"]
+        assert abs(actual_penalty - 2.0) < 0.01, f"截断后惩罚应 = 2.0，got {actual_penalty}"
+
+    def test_direction_vote_weighted(self, queen):
+        """2 高置信 bullish + 3 低置信 bearish → bullish"""
+        results = [
+            _make_result("signal", 8.0, direction="bullish", confidence=0.9, source="ScoutBeeNova"),
+            _make_result("catalyst", 7.0, direction="bullish", confidence=0.8, source="ChronosBeeHorizon"),
+            _make_result("sentiment", 4.0, direction="bearish", confidence=0.3, source="BuzzBeeWhisper"),
+            _make_result("odds", 4.5, direction="bearish", confidence=0.3, source="OracleBeeEcho"),
+            _make_result("risk_adj", 4.0, direction="bearish", confidence=0.3, source="GuardBeeSentinel"),
+        ]
+        dv = queen._compute_direction_vote("TEST", results, results, 7.0)
+        assert dv["rule_direction"] == "bullish"
+        assert dv["bullish_count"] == 2
+        assert dv["bearish_count"] == 3
+
+    def test_direction_vote_conflict(self, queen):
+        """3 bull + 3 bear → conflict_level="heavy" """
+        results = [
+            _make_result("signal", 8.0, direction="bullish", confidence=0.7, source="ScoutBeeNova"),
+            _make_result("catalyst", 7.0, direction="bullish", confidence=0.7, source="ChronosBeeHorizon"),
+            _make_result("sentiment", 7.0, direction="bullish", confidence=0.7, source="BuzzBeeWhisper"),
+            _make_result("odds", 4.0, direction="bearish", confidence=0.7, source="OracleBeeEcho"),
+            _make_result("risk_adj", 3.0, direction="bearish", confidence=0.7, source="GuardBeeSentinel"),
+            {"score": 3.0, "direction": "bearish", "confidence": 0.7,
+             "dimension": "contrarian", "source": "BearBeeContrarian",
+             "data_quality": {"bear": "real"}},
+        ]
+        dv = queen._compute_direction_vote("TEST", results, results, 7.0)
+        assert dv["conflict_level"] == "heavy"
+        assert dv["conflict_info"]["bullish_agents"] == 3
+        assert dv["conflict_info"]["bearish_agents"] == 3

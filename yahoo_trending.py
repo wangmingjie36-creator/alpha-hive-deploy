@@ -25,6 +25,12 @@ from hive_logger import atomic_json_write, read_json_cache
 _log = _logging.getLogger("alpha_hive.yahoo_trending")
 
 try:
+    from resilience import NETWORK_ERRORS, get_session
+except ImportError:
+    NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError, ValueError, KeyError)
+    get_session = None
+
+try:
     import requests as _req
 except ImportError:
     _req = None
@@ -49,7 +55,8 @@ def get_trending_tickers(count: int = 25) -> List[str]:
             return []
 
         try:
-            resp = _req.get(
+            _sess = get_session("yfinance") if get_session else _req
+            resp = _sess.get(
                 f"https://query2.finance.yahoo.com/v1/finance/trending/US?count={count}",
                 headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
                 timeout=8,
@@ -67,7 +74,7 @@ def get_trending_tickers(count: int = 25) -> List[str]:
 
             return tickers
 
-        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+        except NETWORK_ERRORS as e:
             _log.debug("Yahoo Trending 获取失败: %s", e)
             return []
 

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from hive_logger import atomic_json_write
-from resilience import get_session
+from resilience import get_session, reddit_limiter, singleton_client, NETWORK_ERRORS
 
 _log = _logging.getLogger("alpha_hive.reddit_sentiment")
 
@@ -47,15 +47,6 @@ class RedditSentimentClient:
 
     def __init__(self):
         self._ranking_cache: Dict[str, Dict] = {}  # filter -> {data, timestamp}
-        self._last_request = 0.0
-
-    def _throttle(self):
-        """限流：最快 6 秒一次"""
-        now = time.time()
-        elapsed = now - self._last_request
-        if elapsed < 6.0:
-            time.sleep(6.0 - elapsed)
-        self._last_request = time.time()
 
     def _fetch_ranking(self, filter_name: str = "all-stocks") -> List[Dict]:
         """
@@ -95,7 +86,7 @@ class RedditSentimentClient:
             reddit_breaker = None
 
         try:
-            self._throttle()
+            reddit_limiter.acquire()
             resp = get_session("reddit").get(
                 f"{APEWISDOM_BASE}/filter/{filter_name}/page/1",
                 timeout=15,
@@ -116,7 +107,7 @@ class RedditSentimentClient:
 
             return results
 
-        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+        except NETWORK_ERRORS as e:
             if reddit_breaker:
                 reddit_breaker.record_failure()
             _log.warning("获取 Reddit 排名失败 (%s): %s", filter_name, e)
@@ -282,15 +273,11 @@ class RedditSentimentClient:
 
 # ==================== 便捷函数 ====================
 
-_client: Optional[RedditSentimentClient] = None
-_client_lock = threading.Lock()
+_holder: dict = {}
+_holder_lock = threading.Lock()
 
 
 def get_reddit_sentiment(ticker: str) -> Dict:
     """便捷函数：获取 Reddit 情绪数据"""
-    global _client
-    if _client is None:
-        with _client_lock:
-            if _client is None:
-                _client = RedditSentimentClient()
-    return _client.get_ticker_sentiment(ticker)
+    client = singleton_client(_holder_lock, RedditSentimentClient, _holder)
+    return client.get_ticker_sentiment(ticker)

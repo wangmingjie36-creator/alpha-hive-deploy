@@ -91,8 +91,8 @@ class MemoryStore:
             except sqlite3.Error:
                 try:
                     conn.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log.debug("conn.close() in health check: %s", e)
                 conn = None
 
         conn = sqlite3.connect(self.db_path, timeout=10)
@@ -109,8 +109,8 @@ class MemoryStore:
         if conn:
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                _log.debug("conn.close() in close(): %s", e)
             self._local.conn = None
 
     def schema_migrate(self) -> bool:
@@ -255,6 +255,45 @@ class MemoryStore:
         except (sqlite3.Error, OSError, TypeError, ValueError) as e:
             _log.warning("save_agent_memory 失败: %s", e)
             return None
+
+    def save_agent_memories_batch(self, entries: List[Dict], session_id: str) -> int:
+        """批量保存 Agent 记忆（单次 COMMIT，替代多次 save_agent_memory 调用）
+
+        Args:
+            entries: entry_dict 列表
+            session_id: 会话 ID
+
+        Returns:
+            成功写入的条目数（0 表示失败）
+        """
+        if not entries:
+            return 0
+        try:
+            conn = self._connect()
+            rows = []
+            for entry in entries:
+                memory_id = (
+                    f"{entry['date']}_{entry['ticker']}_"
+                    f"{entry['agent_id']}_{uuid.uuid4().hex[:12]}"
+                )
+                rows.append((
+                    memory_id, session_id, entry.get('date'), entry.get('ticker'),
+                    entry.get('agent_id'), entry.get('direction', 'neutral'),
+                    entry.get('discovery', ''), entry.get('source', ''),
+                    entry.get('self_score', 5.0), entry.get('pheromone_strength', 1.0),
+                    entry.get('support_count', 0), entry.get('details'),
+                ))
+            conn.executemany("""
+                INSERT INTO agent_memory (
+                    memory_id, session_id, date, ticker, agent_id, direction, discovery,
+                    source, self_score, pheromone_strength, support_count, details
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+            conn.commit()
+            return len(rows)
+        except (sqlite3.Error, OSError, TypeError, ValueError) as e:
+            _log.warning("save_agent_memories_batch 失败 (%d 条): %s", len(entries), e)
+            return 0
 
     def save_session(self, session_id: str, date: str, run_mode: str,
                      tickers: List[str], swarm_results: Dict,

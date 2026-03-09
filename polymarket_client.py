@@ -21,7 +21,7 @@ except ImportError:
     requests = None
 
 from hive_logger import PATHS, get_logger, atomic_json_write
-from resilience import get_session, polymarket_limiter, polymarket_breaker
+from resilience import get_session, polymarket_limiter, polymarket_breaker, singleton_client, NETWORK_ERRORS
 
 _log = get_logger("polymarket")
 
@@ -79,7 +79,7 @@ class PolymarketClient:
                 resp.raise_for_status()
                 polymarket_breaker.record_success()
                 return resp.json()
-            except (ConnectionError, TimeoutError, OSError) as e:
+            except NETWORK_ERRORS as e:
                 if _attempt < _max_retries:
                     time.sleep(1.0 * (_attempt + 1))
                     continue
@@ -381,15 +381,11 @@ class PolymarketClient:
 
 # ==================== 便捷函数 ====================
 
-_client: Optional[PolymarketClient] = None
-_client_lock = threading.Lock()
+_holder: dict = {}
+_holder_lock = threading.Lock()
 
 
 def get_polymarket_odds(ticker: str) -> Dict:
     """便捷函数：获取 Polymarket 赔率数据"""
-    global _client
-    if _client is None:
-        with _client_lock:
-            if _client is None:
-                _client = PolymarketClient()
-    return _client.get_ticker_odds(ticker)
+    client = singleton_client(_holder_lock, PolymarketClient, _holder)
+    return client.get_ticker_odds(ticker)

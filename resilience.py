@@ -271,6 +271,31 @@ def get_http_timeout(source: str = "default") -> int:
     return _SOURCE_TIMEOUTS.get(source, _SOURCE_TIMEOUTS["default"])
 
 
+# ==================== 公共常量 ====================
+
+# 所有数据源通用网络异常元组（取代各模块各自重复定义）
+NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError, ValueError, KeyError)
+
+
+def singleton_client(lock: threading.Lock, factory, cache: dict, key: str = "_instance"):
+    """双重检查锁单例工厂（替代 5 个数据源文件中的重复模式）
+
+    Args:
+        lock: threading.Lock 用于线程安全
+        factory: 零参数工厂函数，返回客户端实例
+        cache: 存放实例的 dict（传入模块级 dict）
+        key: cache 中的 key 名
+
+    Returns:
+        客户端实例
+    """
+    if cache.get(key) is None:
+        with lock:
+            if cache.get(key) is None:
+                cache[key] = factory()
+    return cache[key]
+
+
 # ==================== 预置实例（各数据源共享） ====================
 
 # SEC EDGAR: 10 req/s（留 30% 余量防 429）
@@ -292,6 +317,9 @@ reddit_breaker = CircuitBreaker("reddit", failure_threshold=5, recovery_timeout=
 # Finviz: 限流严格
 finviz_limiter = RateLimiter(rate=0.5, burst=1)
 finviz_breaker = CircuitBreaker("finviz", failure_threshold=3, recovery_timeout=120.0)
+
+# StockTwits: 极保守（18s 间隔 ≈ 0.056 req/s）
+stocktwits_limiter = RateLimiter(rate=0.056, burst=1)
 
 # Slack webhook: 低频发送
 slack_breaker = CircuitBreaker("slack", failure_threshold=3, recovery_timeout=300.0)

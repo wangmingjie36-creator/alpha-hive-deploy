@@ -14,7 +14,7 @@ import json
 import logging as _logging
 import os
 import threading
-from datetime import date, timezone
+from datetime import date
 from typing import Dict, Optional, List
 
 _log = _logging.getLogger("alpha_hive.llm_service")
@@ -352,6 +352,32 @@ def generate_bear_thesis(
     return call_json(prompt, system=system, max_tokens=400, temperature=0.3)
 
 
+def _build_sentiment_section(sentiment_context: Optional[Dict]) -> str:
+    """构建情绪动态上下文区块（注入 QueenDistiller prompt）"""
+    if not sentiment_context:
+        return ""
+    parts = ["\n## 情绪动态"]
+    m3 = sentiment_context.get("momentum_3d")
+    regime = sentiment_context.get("momentum_regime", "unknown")
+    if m3 is not None:
+        parts.append(f"- 情绪动量(3d): {m3:+d} ppt ({regime})")
+    div_type = sentiment_context.get("divergence_type", "none")
+    severity = sentiment_context.get("divergence_severity", 0)
+    if div_type != "none":
+        parts.append(f"- 情绪-价格背离: {div_type} (严重度 {severity}/3)")
+    # 冲突驱动上下文
+    _cl = sentiment_context.get("conflict_level", "none")
+    _ci = sentiment_context.get("conflict_info")
+    if _cl == "heavy" and _ci:
+        parts.append(f"- ⚠️ Agent 方向冲突: 重度 ({_ci.get('bullish_agents', 0)}多 vs {_ci.get('bearish_agents', 0)}空)")
+        parts.append(f"  DQ加权再投票结果: {_ci.get('resolved_direction', 'neutral')}，折扣 {_ci.get('conflict_discount', 0)}")
+    elif _cl == "moderate":
+        parts.append("- Agent 方向冲突: 中度（需关注分歧维度）")
+    if len(parts) == 1:
+        return ""  # 无有效数据则不注入
+    return "\n".join(parts) + "\n"
+
+
 def distill_with_reasoning(
     ticker: str,
     agent_results: List[Dict],
@@ -360,6 +386,7 @@ def distill_with_reasoning(
     rule_score: float,
     rule_direction: str,
     bear_result: Optional[Dict] = None,
+    sentiment_context: Optional[Dict] = None,
 ) -> Optional[Dict]:
     """
     QueenDistiller LLM 蒸馏：基于 6 Agent 的结构化数据，用 Claude 做最终推理
@@ -400,12 +427,13 @@ def distill_with_reasoning(
 8. bull_bear_synthesis: 一句话多空综合判断（如"短期看多但中期需警惕…"）
 9. contrarian_view: 一句话少数意见摘要（BearBee 的最强反对观点）
 
-重要：你不是简单重复 Agent 的结论，而是要：
-- 识别 Agent 之间的矛盾信号
-- 发现规则引擎可能忽略的模式
-- 对数据质量低的维度降权
-- 给出规则引擎无法做到的定性判断
-- 将看空论点融入综合叙事，而非忽略它"""
+重要：你必须按以下 5 步顺序推理，在 reasoning 字段中体现全部步骤：
+
+Step 1 — 证据扫描：哪些 Agent 给出了强信号（≥7）？哪些维度数据质量低（data_real_pct < 60%）？
+Step 2 — 矛盾检测：Agent 之间是否存在方向冲突？BearBee 的反驳是否有力？情绪动量是否与价格走势背离？
+Step 3 — 数据质量折扣：对 data_real_pct < 60% 的维度降权，对 fallback 数据标注不确定性
+Step 4 — 综合判断：结合 Step 1-3，给出 final_score 和 direction，解释为什么与规则引擎一致或不同
+Step 5 — 自我验证：你的判断是否存在确认偏误？如果你错了，最可能的原因是什么？写入 risk_flag"""
 
     # 构建 Agent 摘要
     agent_summaries = []
@@ -451,7 +479,7 @@ def distill_with_reasoning(
 ## 规则引擎基础分
 - 评分: {rule_score}/10
 - 方向: {rule_direction}
-{bear_section}
+{_build_sentiment_section(sentiment_context)}{bear_section}
 请输出 JSON："""
 
     result = call_json(prompt, system=system, max_tokens=800, temperature=0.3)
@@ -648,7 +676,6 @@ def synthesize_agent_conflicts(
     ticker: str,
     pheromone_snapshot: List[Dict],
     resonance: Dict,
-    board_snapshot: List[Dict] = None,
 ) -> Optional[Dict]:
     """
     GuardBeeSentinel LLM 推理：识别 Agent 间矛盾信号，给出风险级别评估

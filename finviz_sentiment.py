@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from hive_logger import atomic_json_write, read_json_cache
-from resilience import get_session
+from resilience import get_session, finviz_limiter, singleton_client, NETWORK_ERRORS
 
 _log = _logging.getLogger("alpha_hive.finviz_sentiment")
 
@@ -36,38 +36,21 @@ try:
 except (ImportError, KeyError):
     _FINVIZ_TTL = 900
 
-# 情绪关键词
-BULLISH_WORDS = [
-    "beat", "beats", "surge", "surges", "soar", "soars", "rally", "rallies",
-    "upgrade", "upgrades", "bullish", "outperform", "breakout", "record high",
-    "buy", "strong buy", "raise", "raises", "boost", "boosted",
-    "positive", "optimistic", "growth", "expansion", "momentum",
-    "accelerate", "top pick", "upside", "higher", "gain", "gains",
-    "exceed", "exceeded", "blowout", "impressive", "robust",
-]
-
-BEARISH_WORDS = [
-    "miss", "misses", "fall", "falls", "drop", "drops", "crash", "crashes",
-    "downgrade", "downgrades", "bearish", "underperform", "breakdown",
-    "sell", "selloff", "cut", "cuts", "slash", "slashed",
-    "negative", "pessimistic", "decline", "contraction", "headwind",
-    "decelerate", "risk", "warning", "lower", "loss", "losses",
-    "disappoint", "weak", "lawsuit", "probe", "investigation", "recall",
-]
+# 情绪关键词（统一词库，来自 config.SENTIMENT_KEYWORDS）
+try:
+    from config import SENTIMENT_KEYWORDS as _SK
+    BULLISH_WORDS = sorted(_SK["bullish"])
+    BEARISH_WORDS = sorted(_SK["bearish"])
+except (ImportError, KeyError):
+    BULLISH_WORDS = ["beat", "bullish", "buy", "growth", "outperform", "rally", "surge", "upgrade"]
+    BEARISH_WORDS = ["bearish", "crash", "decline", "downgrade", "drop", "miss", "sell", "weak"]
 
 
 class FinvizSentimentClient:
     """Finviz 新闻情绪客户端"""
 
     def __init__(self):
-        self._last_request = 0.0
-
-    def _throttle(self):
-        now = time.time()
-        elapsed = now - self._last_request
-        if elapsed < 2.0:  # Finviz 限流严格，2 秒间隔
-            time.sleep(2.0 - elapsed)
-        self._last_request = time.time()
+        pass
 
     def get_news_titles(self, ticker: str, max_titles: int = 30) -> List[str]:
         """抓取 Finviz 新闻标题"""
@@ -88,7 +71,7 @@ class FinvizSentimentClient:
             finviz_breaker = None
 
         try:
-            self._throttle()
+            finviz_limiter.acquire()
             resp = get_session("finviz").get(
                 f"https://finviz.com/quote.ashx?t={ticker.upper()}&ty=c&p=d&b=1",
                 headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
@@ -118,7 +101,7 @@ class FinvizSentimentClient:
 
             return titles
 
-        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+        except NETWORK_ERRORS as e:
             if finviz_breaker:
                 finviz_breaker.record_failure()
             _log.warning("Finviz 新闻抓取失败 (%s): %s", ticker, e)
@@ -222,15 +205,11 @@ class FinvizSentimentClient:
 
 # ==================== 便捷函数 ====================
 
-_client: Optional[FinvizSentimentClient] = None
-_client_lock = threading.Lock()
+_holder: dict = {}
+_holder_lock = threading.Lock()
 
 
 def get_finviz_sentiment(ticker: str) -> Dict:
     """便捷函数：获取 Finviz 新闻情绪"""
-    global _client
-    if _client is None:
-        with _client_lock:
-            if _client is None:
-                _client = FinvizSentimentClient()
-    return _client.analyze_sentiment(ticker)
+    client = singleton_client(_holder_lock, FinvizSentimentClient, _holder)
+    return client.analyze_sentiment(ticker)

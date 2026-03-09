@@ -14,7 +14,6 @@ P4: 免费新闻全文/摘要获取客户端
 """
 
 import json
-import logging as _logging
 import math
 import os
 import threading
@@ -23,9 +22,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from hive_logger import PATHS, atomic_json_write
+from hive_logger import PATHS, atomic_json_write, get_logger
 
-_log = _logging.getLogger("alpha_hive.newsapi")
+_log = get_logger("newsapi")
 
 try:
     import requests as _req
@@ -34,7 +33,7 @@ except ImportError:
 
 # 弹性层：熔断器 + 限流器 + 连接池
 try:
-    from resilience import get_session, CircuitBreaker, RateLimiter
+    from resilience import get_session, CircuitBreaker, RateLimiter, NETWORK_ERRORS
     _news_breaker = CircuitBreaker("newsapi", failure_threshold=5, recovery_timeout=120.0)
     _news_limiter = RateLimiter(rate=1.0, burst=2)  # 1 req/s（AV 每日限额 25 次）
     _RESILIENCE_OK = True
@@ -42,6 +41,7 @@ except ImportError:
     _news_breaker = None
     _news_limiter = None
     _RESILIENCE_OK = False
+    NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError, ValueError, KeyError)
 
 # 导入清洗工具（与 Agent 层保持一致）
 try:
@@ -54,6 +54,24 @@ _CACHE_DIR = Path(PATHS.home) / "cache" / "news"
 _CACHE_TTL = 1800   # 30 分钟（AV 每天 25 次，不能太频繁）
 _lock = threading.Lock()
 
+# AV 每日配额追踪（免费 25 次/天，进程内计数，重启归零）
+_AV_DAILY_LIMIT = 25
+_av_daily: Dict = {"date": "", "count": 0}
+_av_daily_lock = threading.Lock()
+
+
+def _av_quota_ok() -> bool:
+    """检查并递增 AV 日配额计数器。配额用尽返回 False。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    with _av_daily_lock:
+        if _av_daily["date"] != today:
+            _av_daily["date"] = today
+            _av_daily["count"] = 0
+        if _av_daily["count"] >= _AV_DAILY_LIMIT:
+            return False
+        _av_daily["count"] += 1
+        return True
+
 _YF_NEWS_URL = "https://query2.finance.yahoo.com/v1/finance/search"
 _AV_NEWS_URL = "https://www.alphavantage.co/query"
 _YF_HEADERS = {
@@ -65,19 +83,16 @@ _YF_HEADERS = {
 _AV_BULL_THRESHOLD = 0.15
 _AV_BEAR_THRESHOLD = -0.15
 
-# 情绪关键词集合（用于 Yahoo Finance 标注）
-_BULLISH_KWS = {
-    "surge", "soar", "rally", "beat", "record", "upgrade", "buy", "growth",
-    "profit", "expand", "win", "strong", "bullish", "upbeat", "exceeds",
-    "outperform", "positive", "breakthrough", "gains", "rises", "jumped",
-    "climbed", "boosted", "optimistic", "raised", "accelerates", "momentum",
-}
-_BEARISH_KWS = {
-    "drop", "fall", "miss", "downgrade", "sell", "loss", "weak", "decline",
-    "cut", "warning", "layoff", "recession", "bearish", "disappoints",
-    "underperform", "negative", "crash", "plunge", "fell", "tumbled",
-    "slumped", "fears", "risk", "concern", "lowered", "slowdown", "probe",
-}
+# 情绪关键词集合（统一词库，来自 config.SENTIMENT_KEYWORDS）
+try:
+    from config import SENTIMENT_KEYWORDS as _SK
+    _BULLISH_KWS = _SK["bullish"]
+    _BEARISH_KWS = _SK["bearish"]
+except (ImportError, KeyError):
+    _BULLISH_KWS = {"surge", "soar", "rally", "beat", "record", "upgrade", "buy", "growth",
+                     "profit", "expand", "win", "strong", "bullish", "outperform", "positive"}
+    _BEARISH_KWS = {"drop", "fall", "miss", "downgrade", "sell", "loss", "weak", "decline",
+                     "cut", "warning", "bearish", "underperform", "negative", "crash"}
 
 _VALID_LABELS = {"bullish", "bearish", "neutral"}
 
@@ -85,7 +100,14 @@ _VALID_LABELS = {"bullish", "bearish", "neutral"}
 # ==================== API Key 加载 ====================
 
 def _load_av_key() -> Optional[str]:
-    """加载 AV API Key：环境变量 > ~/.alpha_hive_av_key 文件"""
+    """加载 AV API Key：config.get_secret > 环境变量 > ~/.alpha_hive_av_key 文件"""
+    try:
+        from config import get_secret
+        key = get_secret("AV_API_KEY") or get_secret("ALPHA_VANTAGE_KEY")
+        if key:
+            return key
+    except ImportError:
+        pass
     key = (
         os.environ.get("AV_API_KEY", "").strip()
         or os.environ.get("ALPHA_VANTAGE_KEY", "").strip()
@@ -287,7 +309,7 @@ def _fetch_yf_news(ticker: str, max_articles: int = 10) -> Dict:
         raw_articles = _label_sentiment(raw_articles)
         return _build_result(ticker, raw_articles, source="yahoo_finance")
 
-    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+    except NETWORK_ERRORS as e:
         _log.debug("YF news fetch failed for %s: %s", ticker, e)
         if _news_breaker:
             _news_breaker.record_failure()
@@ -301,6 +323,12 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
     # 熔断检查
     if _news_breaker and not _news_breaker.allow_request():
         _log.warning("newsapi 熔断中，跳过 AV 请求 (%s)", ticker)
+        return _fallback(ticker)
+
+    # 每日配额检查
+    if not _av_quota_ok():
+        _log.warning("AV 每日配额已耗尽 (%d/%d)，降级到 Yahoo Finance (%s)",
+                     _av_daily["count"], _AV_DAILY_LIMIT, ticker)
         return _fallback(ticker)
 
     try:
@@ -324,8 +352,8 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
         data = resp.json()
         # AV 限速/错误响应检测
         if "Information" in data or "Note" in data or "Error" in data:
-            _log.debug("AV API rate-limited or error for %s: %s",
-                       ticker, list(data.keys()))
+            _log.warning("AV API rate-limited or error for %s: %s",
+                         ticker, list(data.keys()))
             return _fallback(ticker)
 
         feed = data.get("feed", [])
@@ -369,7 +397,7 @@ def _fetch_av_news(ticker: str, api_key: str, max_articles: int = 10) -> Dict:
             _news_breaker.record_success()
         return _build_result(ticker, raw_articles, source="alpha_vantage")
 
-    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+    except NETWORK_ERRORS as e:
         _log.debug("AV news fetch failed for %s: %s", ticker, e)
         if _news_breaker:
             _news_breaker.record_failure()
@@ -393,6 +421,60 @@ def _label_sentiment(articles: List[Dict]) -> List[Dict]:
     return articles
 
 
+# ==================== 噪声过滤：去重 + 时效衰减 ====================
+
+try:
+    from config import NEWS_FILTER_CONFIG as _NF_CFG
+except ImportError:
+    _NF_CFG = {"dedup_jaccard_threshold": 0.5, "recency_half_life_hours": 24.0, "min_articles_for_recency": 3}
+
+
+def _deduplicate_articles(articles: List[Dict], threshold: float | None = None) -> List[Dict]:
+    """
+    基于标题 Jaccard 相似度去重。
+    同组重复中优先保留有明确情绪标签（非 neutral）的文章。
+    """
+    if threshold is None:
+        threshold = _NF_CFG.get("dedup_jaccard_threshold", 0.5)
+    seen: List[set] = []
+    result: List[Dict] = []
+    for art in articles:
+        title_words = set(art.get("title", "").lower().split())
+        if not title_words:
+            result.append(art)
+            continue
+        is_dup = False
+        for prev_words in seen:
+            intersection = len(title_words & prev_words)
+            union = len(title_words | prev_words)
+            if union > 0 and intersection / union >= threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            seen.append(title_words)
+            result.append(art)
+    if len(result) < len(articles):
+        _log.debug("噪声过滤: 去重 %d → %d 篇", len(articles), len(result))
+    return result
+
+
+def _recency_weight(published_str: str, half_life_hours: float | None = None) -> float:
+    """
+    指数衰减权重：半衰期默认 24 小时。
+    刚发布 → ~1.0，24h 前 → ~0.5，72h 前 → ~0.125。
+    """
+    if half_life_hours is None:
+        half_life_hours = _NF_CFG.get("recency_half_life_hours", 24.0)
+    try:
+        pub_str = published_str.replace("Z", "+00:00")
+        pub = datetime.fromisoformat(pub_str)
+        now = datetime.now(pub.tzinfo) if pub.tzinfo else datetime.now()
+        age_hours = max(0.0, (now - pub).total_seconds() / 3600.0)
+        return 0.5 ** (age_hours / half_life_hours)
+    except Exception:
+        return 0.5  # 无法解析时给中等权重
+
+
 # ==================== 结果构建 + DataQualityChecker ====================
 
 def _build_result(ticker: str, raw_articles: List[Dict], source: str) -> Dict:
@@ -411,6 +493,12 @@ def _build_result(ticker: str, raw_articles: List[Dict], source: str) -> Dict:
     if not articles:
         return _fallback(ticker)
 
+    # ── Step 1.5: 噪声过滤 — 标题去重 ──
+    raw_count = len(articles)
+    articles = _deduplicate_articles(articles)
+    if len(articles) < raw_count:
+        dq_issues.append(f"去重: {raw_count} → {len(articles)} 篇")
+
     # ── Step 2: 从清洗后的标签重新计数（防止标签被改后计数不一致）──
     bullish = sum(1 for a in articles if a["sentiment_label"] == "bullish")
     bearish = sum(1 for a in articles if a["sentiment_label"] == "bearish")
@@ -420,8 +508,18 @@ def _build_result(ticker: str, raw_articles: List[Dict], source: str) -> Dict:
     # 一致性检查（理论上此处不会触发，但留作防御）
     dq_issues.extend(_check_count_consistency(bullish, bearish, neutral, total))
 
-    # ── Step 3: 计算并清洗情绪分 ──
-    bull_ratio = bullish / total if total > 0 else 0.5
+    # ── Step 3: 计算并清洗情绪分（时效加权）──
+    min_for_recency = _NF_CFG.get("min_articles_for_recency", 3)
+    if total >= min_for_recency:
+        # 时效加权：新文章权重高，旧文章权重低
+        w_bull = sum(_recency_weight(a.get("published", "")) for a in articles if a["sentiment_label"] == "bullish")
+        w_bear = sum(_recency_weight(a.get("published", "")) for a in articles if a["sentiment_label"] == "bearish")
+        w_neut = sum(_recency_weight(a.get("published", "")) for a in articles if a["sentiment_label"] == "neutral")
+        w_total = w_bull + w_bear + w_neut
+        bull_ratio = w_bull / w_total if w_total > 0 else 0.5
+    else:
+        # 文章太少时用简单计数（避免单篇文章时效权重失真）
+        bull_ratio = bullish / total if total > 0 else 0.5
     raw_score = 1.0 + bull_ratio * 9.0          # 1.0 ~ 10.0
     sentiment_score = _clean_sentiment_score(raw_score)
 
@@ -446,6 +544,7 @@ def _build_result(ticker: str, raw_articles: List[Dict], source: str) -> Dict:
         "ticker": ticker,
         "articles": articles,
         "total_articles": total,
+        "raw_article_count": raw_count,       # 去重前数量（噪声过滤指标）
         "bullish_count": bullish,
         "bearish_count": bearish,
         "neutral_count": neutral,

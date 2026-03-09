@@ -71,8 +71,8 @@ def mock_stock_data(monkeypatch):
     def _mock_fetch(ticker):
         return MOCK_STOCK_DATA.get(ticker, MOCK_STOCK_DATA["NVDA"])
 
-    import swarm_agents
-    monkeypatch.setattr(swarm_agents, "_fetch_stock_data", _mock_fetch)
+    from swarm_agents import cache as _swarm_cache
+    monkeypatch.setattr(_swarm_cache, "_fetch_stock_data", _mock_fetch)
     return MOCK_STOCK_DATA
 
 
@@ -104,6 +104,13 @@ def all_agents(board, mock_stock_data):
         "rival": RivalBeeVanguard(board),
         "guard": GuardBeeSentinel(board),
     }
+
+
+@pytest.fixture
+def bear_bee(board, mock_stock_data):
+    """创建 BearBeeContrarian（Phase-2 看空对冲蜂）"""
+    from swarm_agents import BearBeeContrarian
+    return BearBeeContrarian(board)
 
 
 @pytest.fixture

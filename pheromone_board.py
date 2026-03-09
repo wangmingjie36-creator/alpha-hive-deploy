@@ -4,8 +4,10 @@
 实时信号发布、共振检测、动态衰减
 """
 
+import heapq as _heapq
 import json as _json
 import logging as _logging
+from collections import deque as _deque
 from dataclasses import dataclass, field
 from typing import List, Dict
 from threading import RLock
@@ -48,8 +50,10 @@ class PheromoneBoard:
         "ChronosBeeHorizon": "catalyst",     # 催化剂与时间线
         "GuardBeeSentinel":  "risk_adj",     # 交叉验证 + 风险
         "RivalBeeVanguard":  "ml_auxiliary", # ML 预测 + 竞争格局
-        "BearBeeContrarian": "contrarian",   # 看空对冲（排除在外）
+        "BearBeeContrarian": "contrarian",   # 看空对冲（仅在看空共振中参与维度计数）
     }
+
+    _BATCH_SIZE = 20  # 每 20 条刷新一次 DB（63 条 ≈ 4 次 commit，原来 63 次）
 
     def __init__(self, memory_store=None, session_id=None):
         self._lock = RLock()
@@ -58,8 +62,24 @@ class PheromoneBoard:
         self._session_id = session_id or "default_session"
         # Phase 2: 使用线程池替代 daemon 线程，确保退出时等待写入完成
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pheromone_db")
-        self._pending_futures = []
+        self._pending_futures: _deque = _deque(maxlen=32)  # 有界 deque，防止无限增长
+        self._write_buffer: List[Dict] = []  # 批量写入缓冲区
         atexit.register(self._shutdown)
+        # 可配置衰减率（从 config.PHEROMONE_CONFIG 读取，ImportError 时用默认值）
+        try:
+            from config import PHEROMONE_CONFIG as _pcfg
+            _bdr = _pcfg.get("board_decay_rates", {})
+            self._fresh_minutes = _bdr.get("fresh_minutes", 5)
+            self._fresh_decay = _bdr.get("fresh_decay", 0.05)
+            self._medium_decay = _bdr.get("medium_decay", self.DECAY_RATE)
+            self._old_decay = _bdr.get("old_decay", self.DECAY_RATE * 1.5)
+            self._ticker_scoped = _pcfg.get("board_ticker_scoped_decay", True)
+        except (ImportError, AttributeError):
+            self._fresh_minutes = 5
+            self._fresh_decay = 0.05
+            self._medium_decay = self.DECAY_RATE
+            self._old_decay = self.DECAY_RATE * 1.5
+            self._ticker_scoped = True
 
     def publish(self, entry: PheromoneEntry) -> None:
         """
@@ -69,24 +89,35 @@ class PheromoneBoard:
             entry: 新的信息素条目
         """
         with self._lock:
-            # 基于年龄的比例衰减：越旧的条目衰减越快
+            # 单遍衰减 + 存活过滤（合并两个循环，减少 datetime 解析次数）
+            # 仅衰减同 ticker 条目（避免跨 ticker 误杀：TSLA 发布不应衰减 NVDA）
             now = datetime.now()
+            _surviving = []
             for e in self._entries:
+                # 存活检查 1: 强度过低
+                if e.pheromone_strength < self.MIN_STRENGTH:
+                    continue
+                # 存活检查 2: 时间戳解析 + 超时淘汰（>60min）
                 try:
-                    age_minutes = (now - datetime.fromisoformat(e.timestamp)).total_seconds() / 60
+                    _age_s = (now - datetime.fromisoformat(e.timestamp)).total_seconds()
                 except (ValueError, TypeError):
-                    age_minutes = 10  # 解析失败时默认 10 分钟
-                # 衰减系数：0~5min 内 0.05，5~30min 0.1，>30min 0.15
-                if age_minutes < 5:
-                    decay = 0.05
-                elif age_minutes < 30:
-                    decay = self.DECAY_RATE
-                else:
-                    decay = self.DECAY_RATE * 1.5
-                e.pheromone_strength -= decay
-
-            # 清除低强度条目
-            self._entries = [e for e in self._entries if e.pheromone_strength >= self.MIN_STRENGTH]
+                    continue  # 时间戳解析失败 → 视为过期
+                if _age_s >= 3600:
+                    continue
+                # 衰减（仅同 ticker）
+                if not self._ticker_scoped or e.ticker == entry.ticker:
+                    _age_m = _age_s / 60
+                    if _age_m < self._fresh_minutes:
+                        e.pheromone_strength -= self._fresh_decay
+                    elif _age_m < 30:
+                        e.pheromone_strength -= self._medium_decay
+                    else:
+                        e.pheromone_strength -= self._old_decay
+                    # 衰减后二次检查（防止衰减到 MIN 以下）
+                    if e.pheromone_strength < self.MIN_STRENGTH:
+                        continue
+                _surviving.append(e)
+            self._entries = _surviving
 
             # 若同 ticker + direction 已有条目，增加支持数（排除同 agent 重复）
             found_resonance = False
@@ -106,10 +137,12 @@ class PheromoneBoard:
                 entry.supporting_agents = [entry.agent_id]
             self._entries.append(entry)
             if len(self._entries) > self.MAX_ENTRIES:
-                self._entries.sort(key=lambda x: (x.self_score, x.support_count, x.pheromone_strength))
-                self._entries = self._entries[-self.MAX_ENTRIES:]
+                self._entries = _heapq.nlargest(
+                    self.MAX_ENTRIES, self._entries,
+                    key=lambda x: (x.self_score, x.support_count, x.pheromone_strength),
+                )
 
-            # 异步持久化到 DB（使用线程池，退出时会等待完成）
+            # 批量异步持久化到 DB：先缓冲，达到阈值后批量提交（减少 fsync 次数）
             if self._memory_store:
                 entry_dict = {
                     'agent_id': entry.agent_id,
@@ -123,24 +156,9 @@ class PheromoneBoard:
                     'details': _json.dumps(entry.details, ensure_ascii=False, default=str) if entry.details else None,
                     'date': datetime.now().strftime("%Y-%m-%d")
                 }
-                try:
-                    future = self._executor.submit(
-                        self._memory_store.save_agent_memory, entry_dict, self._session_id
-                    )
-                    self._pending_futures.append(future)
-                    # 清理已完成的 futures + 检查失败的写入
-                    _alive = []
-                    for f in self._pending_futures:
-                        if not f.done():
-                            _alive.append(f)
-                        elif f.exception() is not None:
-                            _log.warning("PheromoneBoard 异步写入失败: %s", f.exception())
-                            self._save_fallback(entry_dict)
-                    self._pending_futures = _alive
-                except RuntimeError:
-                    # 执行器已被 atexit 关闭（多次实例化场景），同步写入降级
-                    _log.debug("PheromoneBoard executor shut down, fallback to sync")
-                    self._save_fallback(entry_dict)
+                self._write_buffer.append(entry_dict)
+                if len(self._write_buffer) >= self._BATCH_SIZE:
+                    self._flush_writes()
 
     def get_top_signals(self, ticker: str = None, n: int = 5) -> List[PheromoneEntry]:
         """
@@ -175,15 +193,35 @@ class PheromoneBoard:
             bullish = [e for e in ticker_entries if e.direction == "bullish"]
             bearish = [e for e in ticker_entries if e.direction == "bearish"]
 
-            dominant = "bullish" if len(bullish) >= len(bearish) else "bearish"
+            # 无条目时直接返回 neutral
+            if not bullish and not bearish:
+                return {
+                    "resonance_detected": False,
+                    "direction": "neutral",
+                    "supporting_agents": 0,
+                    "cross_dim_count": 0,
+                    "resonant_dimensions": [],
+                    "confidence_boost": 0,
+                }
+
+            # 平局时双向检查维度数，选择维度覆盖更广的方向（避免一律偏多）
+            if len(bullish) == len(bearish) and len(bullish) > 0:
+                _bull_dims = {self.AGENT_DIMENSIONS.get(e.agent_id, "unknown") for e in bullish} - {"unknown", "contrarian"}
+                _bear_dims = {self.AGENT_DIMENSIONS.get(e.agent_id, "unknown") for e in bearish} - {"unknown"}
+                dominant = "bearish" if len(_bear_dims) > len(_bull_dims) else "bullish"
+            else:
+                dominant = "bullish" if len(bullish) > len(bearish) else "bearish"
             dominant_entries = bullish if dominant == "bullish" else bearish
 
             # 统计同向 Agent 覆盖的不同数据维度数
-            # 排除 contrarian（看空蜂不参与正向共振）和 unknown
             unique_dims = {
                 self.AGENT_DIMENSIONS.get(e.agent_id, "unknown")
                 for e in dominant_entries
-            } - {"contrarian", "unknown"}
+            } - {"unknown"}
+            # BearBee contrarian 维度仅在看空共振中计入
+            # （看多时排除：BearBee 返回 bullish 仅表示"无看空证据"，非独立看多维度）
+            if dominant == "bullish":
+                unique_dims -= {"contrarian"}
 
             cross_dim_count = len(unique_dims)
 
@@ -275,20 +313,64 @@ class PheromoneBoard:
         with self._lock:
             return len(self._entries)
 
+    def _flush_writes(self) -> None:
+        """将缓冲区中的条目批量写入 DB（需持有 _lock 调用）"""
+        if not self._write_buffer or not self._memory_store:
+            return
+        batch = list(self._write_buffer)
+        self._write_buffer.clear()
+        # 清理已完成的 futures + 检查失败
+        _still = _deque(maxlen=32)
+        for f in self._pending_futures:
+            if not f.done():
+                _still.append(f)
+            elif f.exception() is not None:
+                _log.warning("PheromoneBoard 异步写入失败: %s", f.exception())
+        self._pending_futures = _still
+        # 提交批量写入（通过 callback 确保失败时写入 fallback，防止数据丢失）
+        try:
+            future = self._executor.submit(
+                self._memory_store.save_agent_memories_batch, batch, self._session_id
+            )
+
+            def _on_done(f, _batch=batch):
+                if f.exception() is not None:
+                    _log.warning("PheromoneBoard 异步批量写入失败: %s", f.exception())
+                    self._save_fallback_batch(_batch)
+
+            future.add_done_callback(_on_done)
+            self._pending_futures.append(future)
+        except RuntimeError:
+            _log.debug("PheromoneBoard executor shut down, fallback to sync")
+            self._save_fallback_batch(batch)
+
+    def flush_writes(self) -> None:
+        """公开接口：强制刷新缓冲区（扫描结束时调用）"""
+        with self._lock:
+            self._flush_writes()
+
     def _save_fallback(self, entry_dict: dict) -> None:
         """异步写入失败时保存到 fallback JSON 文件，防止数据丢失"""
+        self._save_fallback_batch([entry_dict])
+
+    def _save_fallback_batch(self, entries: list) -> None:
+        """批量 fallback 写入"""
         from pathlib import Path
         try:
-            # M4: 使用项目目录绝对路径，避免 cron 环境写到未知位置
             fb_path = Path(__file__).parent / "pheromone_fallback.jsonl"
             with open(fb_path, "a", encoding="utf-8") as f:
-                f.write(_json.dumps(entry_dict, ensure_ascii=False, default=str) + "\n")
+                for entry_dict in entries:
+                    f.write(_json.dumps(entry_dict, ensure_ascii=False, default=str) + "\n")
         except OSError as e:
             _log.error("PheromoneBoard fallback 写入也失败: %s", e)
 
     def _shutdown(self) -> None:
-        """atexit 处理器：等待所有异步写入完成后关闭线程池"""
-        pending = [f for f in self._pending_futures if not f.done()]
+        """atexit 处理器：刷新缓冲 + 等待异步写入完成 + 关闭线程池"""
+        # 刷新残余缓冲 + 在 lock 内复制 pending（防止与 publish 并发修改 _pending_futures）
+        with self._lock:
+            self._flush_writes()
+            pending = [f for f in self._pending_futures if not f.done()]
+        # 在 lock 外等待（callback 可能需要 lock 进行 fallback 写入）
         if pending:
             _log.debug("PheromoneBoard shutdown: 等待 %d 个异步写入完成…", len(pending))
             done, not_done = _futures_wait(pending, timeout=5)
@@ -299,7 +381,6 @@ class PheromoneBoard:
                 )
                 for f in not_done:
                     f.cancel()
-            # 检查已完成的 future 是否有异常，失败的写入保存到 fallback
             for f in done:
                 try:
                     f.result(timeout=0)

@@ -67,6 +67,7 @@
       <div class="hero-meta">
         <span class="hero-time">🕐 {{ now_str }}</span>
         <span class="hero-dbadge">📊 数据真实度 {{ avg_real }}</span>
+        <span class="freshness-badge" id="freshBadge" data-ts="{{ deploy_ts }}"></span>
       </div>
     </div>
     <div class="hero-right" style="overflow:hidden;contain:paint">
@@ -141,6 +142,7 @@
       <button class="share-btn" id="btn-export-csv">📊 Export CSV</button>
     </div>
   </div>
+  {{ changes_html }}
   <!-- ── Top 6 Cards ── -->
   <div class="section" id="today">
     <h2 class="sec-title">今日 Top {{ top_n }} 机会</h2>
@@ -177,6 +179,13 @@
       </div>
     </div>
   </div>
+
+  <!-- ── Sector Heatmap ── -->
+  {% if heatmap_html %}
+  <div class="section" id="heatmap">
+    {{ heatmap_html }}
+  </div>
+  {% endif %}
 
   <!-- ── Full Table ── -->
   <div class="section" id="list">
@@ -252,9 +261,30 @@
     <div class="kb-row"><kbd>J</kbd><span>下一张卡片</span></div>
     <div class="kb-row"><kbd>K</kbd><span>上一张卡片</span></div>
     <div class="kb-row"><kbd>D</kbd><span>切换暗黑模式</span></div>
+    <div class="kb-row"><kbd>C</kbd><span>对比模式（选2-3卡）</span></div>
     <div class="kb-row"><kbd>?</kbd><span>显示/隐藏帮助</span></div>
-    <div class="kb-row"><kbd>Esc</kbd><span>关闭帮助</span></div>
+    <div class="kb-row"><kbd>Esc</kbd><span>关闭/退出</span></div>
     <button class="filter-btn" id="btn-kb-close" style="margin-top:12px;width:100%">关闭</button>
+  </div>
+</div>
+<!-- ── Bottom Nav (Mobile) ── -->
+<nav class="bottom-nav" id="bottomNav" aria-label="移动端导航">
+  <a href="#/today" class="bnav-item active" data-sec="today"><span class="bnav-icon">📋</span><span class="bnav-label">今日</span></a>
+  <a href="#/charts" class="bnav-item" data-sec="charts"><span class="bnav-icon">📊</span><span class="bnav-label">图表</span></a>
+  <a href="#/list" class="bnav-item" data-sec="list"><span class="bnav-icon">📑</span><span class="bnav-label">清单</span></a>
+  <a href="#/deep" class="bnav-item" data-sec="deep"><span class="bnav-icon">🔬</span><span class="bnav-label">深度</span></a>
+  <a href="#/trend" class="bnav-item" data-sec="trend"><span class="bnav-icon">📈</span><span class="bnav-label">趋势</span></a>
+</nav>
+<!-- ── Compare Mode Bar ── -->
+<div class="compare-bar" id="compareBar">
+  <div class="compare-bar-left">
+    <span>🔍 对比模式</span>
+    <span id="compareCount" class="compare-badge">0/3</span>
+    <span id="compareNames" style="font-size:.82em;opacity:.8"></span>
+  </div>
+  <div style="display:flex;gap:6px">
+    <button id="compareGo">开始对比</button>
+    <button id="compareCancel">取消 (Esc)</button>
   </div>
 </div>
 </main>

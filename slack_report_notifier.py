@@ -6,7 +6,6 @@
 """
 
 import json
-import logging
 import os
 import time
 import hashlib
@@ -16,13 +15,19 @@ from resilience import get_session
 from collections import deque
 from typing import Any, Dict, List, Optional
 from datetime import datetime
+from hive_logger import get_logger
 
-_log = logging.getLogger("alpha_hive.slack_report_notifier")
+_log = get_logger("slack_report_notifier")
 
 try:
     from config import SLACK_CHANNEL_ID as _SLACK_CH
 except ImportError:
     _SLACK_CH = "C0AGUUWJXJS"
+
+try:
+    from config import SLACK_DM_FALLBACK as _DM_FALLBACK
+except ImportError:
+    _DM_FALLBACK = "U0AGQK74NKV"
 
 
 class SlackReportNotifier:
@@ -71,22 +76,44 @@ class SlackReportNotifier:
             return False
 
     def _read_user_token(self) -> Optional[str]:
-        """读取 Slack User Token（xoxp-...）"""
-        env_tok = os.environ.get("SLACK_USER_TOKEN", "").strip()
-        if env_tok and env_tok.startswith("xoxp-"):
-            return env_tok
-        token_file = os.path.expanduser("~/.alpha_hive_slack_user_token")
+        """读取 Slack Token（xoxp- User Token 或 xoxb- Bot Token）"""
+        # 0. config.get_secret（集中管理优先）
         try:
-            with open(token_file, 'r') as f:
-                tok = f.read().strip()
-                if tok.startswith("xoxp-"):
+            from config import get_secret
+            for secret_name in ("SLACK_BOT_TOKEN", "SLACK_USER_TOKEN"):
+                tok = get_secret(secret_name)
+                if tok and tok.startswith(("xoxp-", "xoxb-")):
                     return tok
-        except FileNotFoundError:
+        except ImportError:
             pass
+        # 1. 环境变量
+        for env_key in ("SLACK_BOT_TOKEN", "SLACK_USER_TOKEN"):
+            env_tok = os.environ.get(env_key, "").strip()
+            if env_tok and (env_tok.startswith("xoxp-") or env_tok.startswith("xoxb-")):
+                return env_tok
+        # 2. Token 文件（Bot Token 优先于 User Token）
+        for token_path in (
+            "~/.alpha_hive_slack_bot_token",
+            "~/.alpha_hive_slack_user_token",
+        ):
+            try:
+                with open(os.path.expanduser(token_path), 'r') as f:
+                    tok = f.read().strip()
+                    if tok.startswith(("xoxp-", "xoxb-")):
+                        return tok
+            except FileNotFoundError:
+                pass
         return None
 
     def _read_webhook_from_file(self) -> Optional[str]:
-        """从环境变量或文件安全读取 Webhook URL"""
+        """从 config.get_secret > 环境变量 > 文件安全读取 Webhook URL"""
+        try:
+            from config import get_secret
+            url = get_secret("SLACK_WEBHOOK_URL")
+            if url:
+                return url
+        except ImportError:
+            pass
         env_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
         if env_url:
             return env_url
@@ -178,17 +205,14 @@ class SlackReportNotifier:
             }
         ]
 
-        payload = {
-            "blocks": blocks,
-            "attachments": [
-                {
-                    "color": config["color"],
-                    "footer": "Alpha Hive 风险告警系统"
-                }
-            ]
-        }
+        attachments = [
+            {
+                "color": config["color"],
+                "footer": "Alpha Hive 风险告警系统"
+            }
+        ]
 
-        return self._send_slack_message_payload(payload)
+        return self._send_slack_message(blocks, attachments=attachments)
 
     def send_scan_progress(self, targets: List[str], current: int, total: int,
                            status_message: str) -> bool:
@@ -672,14 +696,69 @@ class SlackReportNotifier:
 
         return blocks
 
-    def _send_slack_message(self, blocks: List[Dict]) -> bool:
-        """发送 Slack 消息（blocks 格式）"""
+    def _send_slack_message(self, blocks: List[Dict],
+                            attachments: Optional[List[Dict]] = None) -> bool:
+        """发送 Slack 消息（blocks 格式）— 优先 Bot Token API，降级 Webhook"""
 
-        payload = {
+        # 优先通过 Bot Token API（与 send_plain_text 一致）
+        if self.use_user_token:
+            try:
+                from resilience import slack_breaker
+                if not slack_breaker.allow_request():
+                    _log.warning("Slack circuit breaker OPEN, skipping")
+                    return False
+            except ImportError:
+                slack_breaker = None
+            try:
+                # 依次尝试：频道 → DM 降级
+                targets = [self.CHANNEL_ID]
+                if _DM_FALLBACK and _DM_FALLBACK != self.CHANNEL_ID:
+                    targets.append(_DM_FALLBACK)
+
+                for target_ch in targets:
+                    api_payload: Dict[str, Any] = {
+                        "channel": target_ch,
+                        "blocks": blocks,
+                        "text": "Alpha Hive 通知",
+                        "unfurl_links": False,
+                    }
+                    if attachments:
+                        api_payload["attachments"] = attachments
+                    response = get_session("slack").post(
+                        "https://slack.com/api/chat.postMessage",
+                        headers={"Authorization": f"Bearer {self.user_token}"},
+                        json=api_payload,
+                        timeout=15,
+                    )
+                    data = response.json()
+                    if data.get("ok"):
+                        if slack_breaker:
+                            slack_breaker.record_success()
+                        _log.info("Slack 消息发送成功（Bot Token + blocks → %s）", target_ch)
+                        return True
+                    err = data.get("error", "unknown")
+                    # not_in_channel / channel_not_found → 可降级到 DM
+                    if err in ("not_in_channel", "channel_not_found"):
+                        _log.warning("Slack API (%s): %s，尝试 DM 降级", target_ch, err)
+                        continue
+                    # 其他错误不再重试
+                    _log.warning("Slack API 错误 (blocks): %s", err)
+                    break
+            except requests.exceptions.RequestException as e:
+                if slack_breaker:
+                    try:
+                        slack_breaker.record_failure()
+                    except Exception:
+                        pass
+                _log.warning("Slack API (blocks) 失败，降级到 Webhook: %s", e)
+
+        # 降级到 Webhook
+        payload: Dict[str, Any] = {
             "blocks": blocks,
-            "text": "Alpha Hive 通知"  # 备用文本
+            "text": "Alpha Hive 通知",
         }
-
+        if attachments:
+            payload["attachments"] = attachments
         return self._send_slack_message_payload(payload)
 
     def send_plain_text(self, text: str, channel: Optional[str] = None) -> bool:
@@ -723,8 +802,8 @@ class SlackReportNotifier:
             if slack_breaker:
                 try:
                     slack_breaker.record_failure()
-                except Exception:
-                    pass
+                except Exception as e2:
+                    _log.debug("circuit_breaker.record_failure() failed: %s", e2)
             self._enqueue_failed("api", text)
             _log.error("Slack 发送失败: %s", e)
             return False

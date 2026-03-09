@@ -344,3 +344,300 @@ class TestBacktesterCleanupPredictions:
         deleted = bt.cleanup_old_predictions(days=180)
         assert deleted == 0
         assert len(bt.store.get_all_predictions(days=1)) == 1
+
+
+# ==================== PredictionStore.get_dimension_accuracy 测试 ====================
+
+class TestGetDimensionAccuracy:
+    """测试 PredictionStore.get_dimension_accuracy"""
+
+    def test_no_checked_predictions_returns_zero_samples(self, tmp_path):
+        """没有已回测预测时，所有维度的样本数应为 0"""
+        from backtester import PredictionStore
+        db = str(tmp_path / "test.db")
+        ps = PredictionStore(db_path=db)
+        result = ps.get_dimension_accuracy("t7", days=90)
+        # 应返回 5 个维度，每个维度样本为 0
+        expected_dims = {"signal", "catalyst", "sentiment", "odds", "risk_adj"}
+        assert set(result.keys()) == expected_dims
+        for dim in expected_dims:
+            assert result[dim]["samples"] == 0
+
+    def test_with_agent_directions_data(self, tmp_path):
+        """有 agent_directions JSON 的已回测记录时，维度应有数据"""
+        from backtester import PredictionStore
+        db = str(tmp_path / "test.db")
+        ps = PredictionStore(db_path=db)
+        recent = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+
+        agent_dirs = json.dumps({
+            "ScoutBeeNova": "bullish",
+            "OracleBeeEcho": "bullish",
+            "BuzzBeeWhisper": "bearish",
+            "ChronosBeeHorizon": "neutral",
+            "GuardBeeSentinel": "bullish",
+        })
+        with sqlite3.connect(db) as conn:
+            # 插入两条已回测记录，return_t7 > 0（上涨）
+            conn.execute(f"""
+                INSERT INTO {ps.TABLE}
+                (date, ticker, final_score, direction, price_at_predict,
+                 agent_directions, checked_t7, correct_t7, return_t7)
+                VALUES (?, 'NVDA', 8.5, 'bullish', 140.0, ?, 1, 1, 5.0)
+            """, (recent, agent_dirs))
+            conn.execute(f"""
+                INSERT INTO {ps.TABLE}
+                (date, ticker, final_score, direction, price_at_predict,
+                 agent_directions, checked_t7, correct_t7, return_t7)
+                VALUES (?, 'TSLA', 6.0, 'bearish', 340.0, ?, 1, 0, -3.0)
+            """, (recent, agent_dirs))
+            conn.commit()
+
+        result = ps.get_dimension_accuracy("t7", days=90)
+        # signal 维度来自 ScoutBeeNova，两条记录都有数据
+        assert result["signal"]["samples"] == 2
+        assert result["odds"]["samples"] == 2
+        assert result["sentiment"]["samples"] == 2
+        assert result["catalyst"]["samples"] == 2
+        assert result["risk_adj"]["samples"] == 2
+
+    def test_accuracy_calculation_bullish_correct(self, tmp_path):
+        """bullish 方向 + 正收益(>-1%) 应算正确"""
+        from backtester import PredictionStore
+        db = str(tmp_path / "test.db")
+        ps = PredictionStore(db_path=db)
+        recent = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        agent_dirs = json.dumps({"ScoutBeeNova": "bullish"})
+        with sqlite3.connect(db) as conn:
+            conn.execute(f"""
+                INSERT INTO {ps.TABLE}
+                (date, ticker, final_score, direction, price_at_predict,
+                 agent_directions, checked_t7, correct_t7, return_t7)
+                VALUES (?, 'AAPL', 7.0, 'bullish', 180.0, ?, 1, 1, 3.0)
+            """, (recent, agent_dirs))
+            conn.commit()
+
+        result = ps.get_dimension_accuracy("t7", days=90)
+        assert result["signal"]["samples"] == 1
+        assert result["signal"]["correct"] == 1
+        assert result["signal"]["accuracy"] == 1.0
+
+    def test_suggested_weights_present_when_data_exists(self, tmp_path):
+        """有数据时，结果中应包含 suggested_weight"""
+        from backtester import PredictionStore
+        db = str(tmp_path / "test.db")
+        ps = PredictionStore(db_path=db)
+        recent = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        agent_dirs = json.dumps({
+            "ScoutBeeNova": "bullish",
+            "OracleBeeEcho": "bullish",
+            "BuzzBeeWhisper": "bullish",
+            "ChronosBeeHorizon": "bullish",
+            "GuardBeeSentinel": "bullish",
+        })
+        with sqlite3.connect(db) as conn:
+            conn.execute(f"""
+                INSERT INTO {ps.TABLE}
+                (date, ticker, final_score, direction, price_at_predict,
+                 agent_directions, checked_t7, correct_t7, return_t7)
+                VALUES (?, 'NVDA', 8.5, 'bullish', 140.0, ?, 1, 1, 5.0)
+            """, (recent, agent_dirs))
+            conn.commit()
+
+        result = ps.get_dimension_accuracy("t7", days=90)
+        for dim in result:
+            assert "suggested_weight" in result[dim]
+
+
+# ==================== Backtester.analyze_self_score_bias 测试 ====================
+
+class TestAnalyzeSelfScoreBias:
+    """测试 Backtester.analyze_self_score_bias"""
+
+    def test_no_data_returns_all_zero(self, tmp_path):
+        """没有数据时，所有 Agent 偏差应为 0.0"""
+        from backtester import Backtester
+        db = str(tmp_path / "test.db")
+        bt = Backtester(db_path=db)
+        result = bt.analyze_self_score_bias(period="t1", min_samples=5)
+        # 所有值应为 0.0
+        for key, val in result.items():
+            assert val == 0.0
+
+    def test_expected_agent_abbreviation_keys(self, tmp_path):
+        """返回的 dict 应包含预期的 8 字符缩写 key"""
+        from backtester import Backtester
+        db = str(tmp_path / "test.db")
+        bt = Backtester(db_path=db)
+        result = bt.analyze_self_score_bias(period="t7", min_samples=5)
+        expected_keys = {"ScoutBee", "OracleBe", "BuzzBeeW", "ChronosB", "GuardBee", "RivalBee"}
+        assert set(result.keys()) == expected_keys
+
+    def test_with_sufficient_samples_detects_bias(self, tmp_path):
+        """有足够数据时，应能检测出 self_score 偏差"""
+        from backtester import Backtester, PredictionStore
+        db = str(tmp_path / "test.db")
+        bt = Backtester(db_path=db)
+        recent = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+
+        with sqlite3.connect(db) as conn:
+            # 插入 6 条记录：3 correct + 3 wrong
+            # ScoutBee correct 时 self_score=5，wrong 时 self_score=9 → 正偏差（乐观）
+            for i in range(3):
+                compact = json.dumps([{"a": "ScoutBee", "s": 5.0}])
+                conn.execute(f"""
+                    INSERT INTO {PredictionStore.TABLE}
+                    (date, ticker, final_score, direction, price_at_predict,
+                     pheromone_compact, checked_t7, correct_t7, return_t7)
+                    VALUES (?, ?, 7.0, 'bullish', 100.0, ?, 1, 1, 3.0)
+                """, (recent, f"T{i}C", compact))
+            for i in range(3):
+                compact = json.dumps([{"a": "ScoutBee", "s": 9.0}])
+                conn.execute(f"""
+                    INSERT INTO {PredictionStore.TABLE}
+                    (date, ticker, final_score, direction, price_at_predict,
+                     pheromone_compact, checked_t7, correct_t7, return_t7)
+                    VALUES (?, ?, 7.0, 'bearish', 100.0, ?, 1, 0, -5.0)
+                """, (recent, f"T{i}W", compact))
+            conn.commit()
+
+        result = bt.analyze_self_score_bias(period="t7", min_samples=3)
+        # wrong 均值(9.0) - correct 均值(5.0) = 4.0 → 正偏差
+        assert result["ScoutBee"] == 4.0
+
+
+# ==================== Backtester.adapt_weights 测试 ====================
+
+class TestAdaptWeights:
+    """测试 Backtester.adapt_weights"""
+
+    def test_insufficient_samples_returns_none(self, tmp_path):
+        """样本不足时应返回 None"""
+        from backtester import Backtester
+        db = str(tmp_path / "test.db")
+        bt = Backtester(db_path=db)
+        result = bt.adapt_weights(min_samples=10, period="t7")
+        assert result is None
+
+    def test_sufficient_data_returns_five_dimensions(self, tmp_path):
+        """有足够数据时，应返回包含 5 个维度 key 的 dict"""
+        from backtester import Backtester, PredictionStore
+        db = str(tmp_path / "test.db")
+        bt = Backtester(db_path=db)
+        recent = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+
+        agent_dirs = json.dumps({
+            "ScoutBeeNova": "bullish",
+            "OracleBeeEcho": "bullish",
+            "BuzzBeeWhisper": "bullish",
+            "ChronosBeeHorizon": "bullish",
+            "GuardBeeSentinel": "bullish",
+        })
+        with sqlite3.connect(db) as conn:
+            # 插入 12 条记录（确保超过 min_samples=10），全部 bullish+正收益
+            for i in range(12):
+                conn.execute(f"""
+                    INSERT INTO {PredictionStore.TABLE}
+                    (date, ticker, final_score, direction, price_at_predict,
+                     agent_directions, checked_t7, correct_t7, return_t7)
+                    VALUES (?, ?, 8.0, 'bullish', 100.0, ?, 1, 1, 5.0)
+                """, (recent, f"TK{i:02d}", agent_dirs))
+            conn.commit()
+
+        result = bt.adapt_weights(min_samples=10, period="t7")
+        assert result is not None
+        expected_dims = {"signal", "catalyst", "sentiment", "odds", "risk_adj"}
+        assert set(result.keys()) == expected_dims
+
+    def test_weights_sum_to_one(self, tmp_path):
+        """返回的权重之和应约等于 1.0"""
+        from backtester import Backtester, PredictionStore
+        db = str(tmp_path / "test.db")
+        bt = Backtester(db_path=db)
+        recent = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+
+        agent_dirs = json.dumps({
+            "ScoutBeeNova": "bullish",
+            "OracleBeeEcho": "bearish",
+            "BuzzBeeWhisper": "neutral",
+            "ChronosBeeHorizon": "bullish",
+            "GuardBeeSentinel": "bearish",
+        })
+        with sqlite3.connect(db) as conn:
+            for i in range(15):
+                ret = 3.0 if i % 2 == 0 else -3.0
+                correct = 1 if i % 2 == 0 else 0
+                conn.execute(f"""
+                    INSERT INTO {PredictionStore.TABLE}
+                    (date, ticker, final_score, direction, price_at_predict,
+                     agent_directions, checked_t7, correct_t7, return_t7)
+                    VALUES (?, ?, 7.0, 'bullish', 100.0, ?, 1, ?, ?)
+                """, (recent, f"TK{i:02d}", agent_dirs, correct, ret))
+            conn.commit()
+
+        result = bt.adapt_weights(min_samples=10, period="t7")
+        assert result is not None
+        total = sum(result.values())
+        assert abs(total - 1.0) < 0.01, f"Weights sum to {total}, expected ~1.0"
+
+
+# ==================== Backtester.load_adapted_weights 测试 ====================
+
+class TestLoadAdaptedWeights:
+    """测试 Backtester.load_adapted_weights（静态方法）"""
+
+    def test_no_saved_weights_returns_none(self, tmp_path):
+        """没有保存过权重时应返回 None"""
+        from backtester import Backtester, PredictionStore
+        db = str(tmp_path / "test.db")
+        # 先初始化 PredictionStore 确保数据库存在
+        PredictionStore(db_path=db)
+        result = Backtester.load_adapted_weights(db_path=db)
+        assert result is None
+
+    def test_save_then_load_roundtrip(self, tmp_path):
+        """保存权重后应能正确加载"""
+        from backtester import Backtester, PredictionStore
+        db = str(tmp_path / "test.db")
+        bt = Backtester(db_path=db)
+
+        weights = {"signal": 0.28, "catalyst": 0.22, "sentiment": 0.20, "odds": 0.16, "risk_adj": 0.14}
+        accuracy = {"signal": 0.75, "catalyst": 0.60, "sentiment": 0.55, "odds": 0.50, "risk_adj": 0.65}
+        bt._save_adapted_weights(weights, accuracy, samples=25, period="t7")
+
+        loaded = Backtester.load_adapted_weights(db_path=db)
+        assert loaded is not None
+        assert loaded["signal"] == 0.28
+        assert loaded["catalyst"] == 0.22
+        assert loaded["sentiment"] == 0.20
+        assert loaded["odds"] == 0.16
+        assert loaded["risk_adj"] == 0.14
+
+    def test_load_prefers_t7_over_t1(self, tmp_path):
+        """存在 T+7 和 T+1 权重时，应优先加载 T+7"""
+        from backtester import Backtester
+        db = str(tmp_path / "test.db")
+        bt = Backtester(db_path=db)
+
+        weights_t1 = {"signal": 0.10, "catalyst": 0.20, "sentiment": 0.30, "odds": 0.25, "risk_adj": 0.15}
+        weights_t7 = {"signal": 0.35, "catalyst": 0.18, "sentiment": 0.22, "odds": 0.13, "risk_adj": 0.12}
+
+        bt._save_adapted_weights(weights_t1, {}, samples=10, period="t1")
+        bt._save_adapted_weights(weights_t7, {}, samples=20, period="t7")
+
+        loaded = Backtester.load_adapted_weights(db_path=db)
+        assert loaded is not None
+        # 应优先加载 T+7 的权重
+        assert loaded["signal"] == 0.35
+
+    def test_load_requires_min_sample_count(self, tmp_path):
+        """sample_count < 3 的权重不应被加载"""
+        from backtester import Backtester
+        db = str(tmp_path / "test.db")
+        bt = Backtester(db_path=db)
+
+        weights = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
+        bt._save_adapted_weights(weights, {}, samples=2, period="t7")
+
+        loaded = Backtester.load_adapted_weights(db_path=db)
+        assert loaded is None

@@ -6,6 +6,7 @@
 
 import json
 import argparse
+import os
 import time
 from datetime import datetime
 from typing import Dict, List, Tuple
@@ -15,15 +16,12 @@ from threading import Lock
 
 # 导入现有模块
 from config import WATCHLIST
-from hive_logger import get_logger, PATHS, set_correlation_id, SafeJSONEncoder
+from hive_logger import get_logger, PATHS, set_correlation_id, SafeJSONEncoder, optional_import
 
 _log = get_logger("daily_report")
 
-# Week 4: 指标收集器
-try:
-    from metrics_collector import MetricsCollector
-except ImportError:
-    MetricsCollector = None
+# 可选模块（optional_import 优雅降级）
+MetricsCollector = optional_import("metrics_collector", "MetricsCollector")
 from generate_ml_report import MLEnhancedReportGenerator
 from pheromone_board import PheromoneBoard
 from swarm_agents import (
@@ -35,19 +33,10 @@ from swarm_agents import (
 from concurrent.futures import as_completed
 from agent_toolbox import AgentHelper
 
-# Phase 2: Import memory store
-try:
-    from memory_store import MemoryStore
-except ImportError:
-    MemoryStore = None
+MemoryStore = optional_import("memory_store", "MemoryStore")
+CalendarIntegrator = optional_import("calendar_integrator", "CalendarIntegrator")
 
-# Phase 3 P2: Import Calendar integrator
-try:
-    from calendar_integrator import CalendarIntegrator
-except ImportError:
-    CalendarIntegrator = None
-
-# Phase 3 P4: Import Code Execution Agent
+# Phase 3 P4: Code Execution Agent（含 fallback dict，保留 try/except）
 try:
     from code_executor_agent import CodeExecutorAgent
     from config import CODE_EXECUTION_CONFIG
@@ -55,7 +44,7 @@ except ImportError:
     CodeExecutorAgent = None
     CODE_EXECUTION_CONFIG = {"enabled": False}
 
-# Phase 3 P5: Import CrewAI 多 Agent 框架
+# Phase 3 P5: CrewAI 多 Agent 框架（含错误日志，保留 try/except）
 try:
     from crewai_adapter import AlphaHiveCrew
     from config import CREWAI_CONFIG
@@ -64,19 +53,10 @@ except (ImportError, TypeError) as e:
     CREWAI_CONFIG = {"enabled": False}
     _log.info("CrewAI 模块导入失败: %s (降级到原始蜂群)", type(e).__name__)
 
-# Phase 3 P6: Import Slack 报告通知器（替代 Gmail）
-try:
-    from slack_report_notifier import SlackReportNotifier
-except ImportError:
-    SlackReportNotifier = None
+SlackReportNotifier = optional_import("slack_report_notifier", "SlackReportNotifier")
+EarningsWatcher = optional_import("earnings_watcher", "EarningsWatcher")
 
-# 财报自动监控器
-try:
-    from earnings_watcher import EarningsWatcher
-except ImportError:
-    EarningsWatcher = None
-
-# Phase 3 内存优化: 向量记忆层（Chroma 长期记忆）
+# Phase 3 内存优化: 向量记忆层（含 fallback dict，保留 try/except）
 try:
     from vector_memory import VectorMemory
     from config import VECTOR_MEMORY_CONFIG
@@ -84,12 +64,8 @@ except ImportError:
     VectorMemory = None
     VECTOR_MEMORY_CONFIG = {"enabled": False}
 
-# Phase 6: 回测反馈循环
-try:
-    from backtester import Backtester, run_full_backtest
-except ImportError:
-    Backtester = None
-    run_full_backtest = None
+Backtester = optional_import("backtester", "Backtester")
+run_full_backtest = optional_import("backtester", "run_full_backtest")
 
 
 # 免责声明常量（去重，全局引用）
@@ -117,6 +93,21 @@ class OpportunityItem:
     options_signal: str  # 期权信号摘要
     risks: List[str]
     thesis_break: str  # 失效条件
+
+
+@dataclass
+class _SwarmContext:
+    """run_swarm_scan 的跨阶段共享状态"""
+    targets: List[str]
+    board: object  # PheromoneBoard
+    phase1_agents: list
+    guard_agent: object
+    bear_agent: object
+    queen: object
+    all_agents: list
+    prefetch_elapsed: float
+    start_time: float
+    checkpoint_file: object = None  # Path
 
 
 class AlphaHiveDailyReporter:
@@ -237,8 +228,8 @@ class AlphaHiveDailyReporter:
         if len(self._bg_futures) >= 20:
             try:
                 self._bg_futures[0].result(timeout=15)
-            except Exception:
-                pass
+            except Exception as _e_bg:
+                self.logger.debug("后台任务等待超时: %s", _e_bg)
             self._bg_futures = [f for f in self._bg_futures if not f.done()]
         future = self._bg_executor.submit(fn, *args, **kwargs)
         self._bg_futures.append(future)
@@ -345,174 +336,22 @@ class AlphaHiveDailyReporter:
     # ── D4: 部署后 CDN 验证 ──
     _DEPLOY_BASE_URL = "https://wangmingjie36-creator.github.io/alpha-hive-deploy"
 
-    def _verify_cdn_deployment(self, repo: str,
-                               max_wait: int = 180, poll_interval: int = 15) -> bool:
-        """Push 成功后轮询 CDN，验证 dashboard-data.json 已更新。
+    def _verify_cdn_deployment(self, *args, **kwargs):
+        """验证 CDN 部署（委托 report_deployer）"""
+        from report_deployer import verify_cdn_deployment
+        return verify_cdn_deployment(self, *args, **kwargs)
 
-        纯 advisory — 超时只记 WARNING，不回滚/阻塞。
-        """
-        import json as _json_v
-        import time as _time_v
-        import urllib.request
+    def _deploy_static_to_ghpages(self, *args, **kwargs):
+        """部署静态文件到 gh-pages（委托 report_deployer）"""
+        from report_deployer import deploy_static_to_ghpages
+        return deploy_static_to_ghpages(self, *args, **kwargs)
 
-        try:
-            import os as _os_v
-            dj_path = _os_v.path.join(repo, "dashboard-data.json")
-            with open(dj_path, encoding="utf-8") as _f:
-                expected_ts = _json_v.load(_f).get("_generated_at", "")
-            if not expected_ts:
-                _log.debug("dashboard-data.json 无 _generated_at，跳过 CDN 验证")
-                return True
-        except (OSError, _json_v.JSONDecodeError) as e:
-            _log.debug("读取本地 dashboard-data.json 失败，跳过验证: %s", e)
-            return True
+    # ── Step 4: run_swarm_scan 拆分方法 ──
 
-        _log.info("验证 CDN 部署... (期望: %s, 最长等待 %ds)", expected_ts, max_wait)
-        start = _time_v.monotonic()
-        attempt = 0
-        while _time_v.monotonic() - start < max_wait:
-            attempt += 1
-            try:
-                req_url = f"{self._DEPLOY_BASE_URL}/dashboard-data.json?_verify={int(_time_v.time())}"
-                req = urllib.request.Request(req_url, headers={
-                    "Cache-Control": "no-cache", "Pragma": "no-cache",
-                })
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = _json_v.loads(resp.read().decode("utf-8"))
-                    live_ts = data.get("_generated_at", "")
-                    if live_ts == expected_ts:
-                        _log.info(
-                            "✅ CDN 验证通过 (attempt %d, %.0fs)",
-                            attempt, _time_v.monotonic() - start,
-                        )
-                        return True
-                    _log.debug(
-                        "CDN 仍旧: live='%s' expected='%s' (attempt %d)",
-                        live_ts, expected_ts, attempt,
-                    )
-            except Exception as e:
-                _log.debug("CDN 验证请求失败: %s (attempt %d)", e, attempt)
-            _time_v.sleep(poll_interval)
-
-        _log.warning(
-            "⚠️ CDN 验证超时 (%ds): live 数据未更新到 '%s'，可能需要手动刷新",
-            max_wait, expected_ts,
-        )
-        return False
-
-    def _deploy_static_to_ghpages(self):
-        """用 git plumbing 构建仅含静态文件的 gh-pages 提交并推送。"""
-        import subprocess
-        import os
-        repo = self.agent_helper.git.repo_path or "."
-        idx = os.path.join(repo, ".git", "gh-pages-index")
-        if os.path.exists(idx):
-            os.remove(idx)
-        env = os.environ.copy()
-        env["GIT_INDEX_FILE"] = idx
-        # ── D2: 部署文件白名单（替代宽泛扩展名匹配，减少文件数 98→~35） ──
-        import re as _re_deploy
-        from datetime import timedelta as _td_deploy
-        _CORE_FILES = {
-            "index.html", "dashboard-data.json", "manifest.json",
-            "sw.js", "rss.xml", ".nojekyll",
-        }
-        _today_dt = datetime.strptime(self.date_str, "%Y-%m-%d")
-        _cutoff = (_today_dt - _td_deploy(days=3)).strftime("%Y-%m-%d")
-        _ml_pat = _re_deploy.compile(
-            r"^alpha-hive-\w+-ml-enhanced-(\d{4}-\d{2}-\d{2})\.html$"
-        )
-        files = []
-        for f in os.listdir(repo):
-            if f in _CORE_FILES:
-                files.append(f)
-            elif (m := _ml_pat.match(f)) and m.group(1) >= _cutoff:
-                # 最近 3 天的 ML 增强报告
-                files.append(f)
-            elif f.startswith("alpha-hive-daily-") and f.endswith((".json", ".md")):
-                # 当日+历史 daily 报告（JSON + MD）
-                files.append(f)
-        if not files:
-            _log.warning("无静态文件可部署")
-            return
-        for f in sorted(files):
-            blob = subprocess.check_output(
-                ["git", "hash-object", "-w", f], cwd=repo
-            ).decode().strip()
-            subprocess.run(
-                ["git", "update-index", "--add", "--cacheinfo", "100644", blob, f],
-                env=env, cwd=repo, check=True
-            )
-        tree = subprocess.check_output(
-            ["git", "write-tree"], env=env, cwd=repo
-        ).decode().strip()
-        # 获取 gh-pages 父提交（若存在）
-        parent_args = []
-        try:
-            parent = subprocess.check_output(
-                ["git", "rev-parse", "gh-pages"], cwd=repo, stderr=subprocess.DEVNULL
-            ).decode().strip()
-            parent_args = ["-p", parent]
-        except subprocess.CalledProcessError:
-            pass
-        commit = subprocess.check_output(
-            ["git", "commit-tree", tree] + parent_args +
-            ["-m", f"Deploy: Alpha Hive static {datetime.now().strftime('%Y-%m-%d %H:%M')}"],
-            cwd=repo
-        ).decode().strip()
-        subprocess.run(
-            ["git", "update-ref", "refs/heads/gh-pages", commit],
-            cwd=repo, check=True
-        )
-        # ── D3: Push 重试（指数退避，最多 3 次重试） ──
-        import time as _time_push
-        _PUSH_MAX_RETRIES = 3
-        _push_ok = False
-        for _push_attempt in range(_PUSH_MAX_RETRIES + 1):
-            r = subprocess.run(
-                ["git", "push", "origin", "gh-pages", "--force"],
-                cwd=repo, capture_output=True, text=True
-            )
-            if r.returncode == 0:
-                _push_ok = True
-                break
-            if _push_attempt < _PUSH_MAX_RETRIES:
-                _delay = min(2.0 * (2 ** _push_attempt), 16.0)
-                _log.warning(
-                    "gh-pages push attempt %d/%d failed (%s), retrying in %.0fs",
-                    _push_attempt + 1, _PUSH_MAX_RETRIES + 1,
-                    r.stderr.strip()[:120], _delay,
-                )
-                _time_push.sleep(_delay)
-        if os.path.exists(idx):
-            os.remove(idx)
-        if _push_ok:
-            _log.info(
-                "gh-pages 部署成功 (%d 静态文件, attempt %d/%d)",
-                len(files), _push_attempt + 1, _PUSH_MAX_RETRIES + 1,
-            )
-            # ── D4: 部署后 CDN 验证 ──
-            self._verify_cdn_deployment(repo)
-        else:
-            _log.warning(
-                "gh-pages push 失败 (所有 %d 次尝试用尽): %s",
-                _PUSH_MAX_RETRIES + 1, r.stderr,
-            )
-
-    def run_swarm_scan(self, focus_tickers: List[str] = None, progress_callback=None) -> Dict:
-        """
-        真正的蜂群协作扫描 - 7 个自治工蜂并行运行（6 核心 + BearBeeContrarian），实时通过信息素板交换发现
-
-        Args:
-            focus_tickers: 重点关注标的（如为None则扫描全部watchlist）
-
-        Returns:
-            完整的蜂群分析报告
-        """
-        # Week 4: 设置 correlation_id 追踪本次扫描
+    def _init_scan_context(self, focus_tickers) -> '_SwarmContext':
+        """初始化蜂群扫描上下文：Board + Agents + 预取数据"""
         set_correlation_id(self._session_id or f"swarm_{self.date_str}")
         _log.info("蜂群协作启动 %s", self.date_str)
-        # 汇报可选模块降级状态
         try:
             from hive_logger import FeatureRegistry
             FeatureRegistry.log_status()
@@ -521,16 +360,9 @@ class AlphaHiveDailyReporter:
 
         targets = focus_tickers or list(WATCHLIST.keys())[:10]
         _log.info("标的：%s", " ".join(targets))
-
         start_time = time.time()
 
-        # 创建共享的信息素板
         board = PheromoneBoard(memory_store=self.memory_store, session_id=self._session_id)
-
-        # 实例化 Agent：三阶段流水线
-        # Phase 1: 5 个核心 Agent 并行（数据采集 + 独立分析）
-        # Phase 1.5: GuardBee 顺序（交叉验证需要读取已完成的 Phase-1 信息素板数据）
-        # Phase 2: BearBee 顺序（看空对冲需要读取所有 Phase-1 + Guard 数据）
         retriever = self.vector_memory if (self.vector_memory and self.vector_memory.enabled) else None
         phase1_agents = [
             ScoutBeeNova(board, retriever=retriever),
@@ -539,17 +371,13 @@ class AlphaHiveDailyReporter:
             ChronosBeeHorizon(board, retriever=retriever),
             RivalBeeVanguard(board, retriever=retriever),
         ]
-        # Phase 1.5: 交叉验证蜂（需要读取 Phase-1 信息素板，不可并行）
         guard_agent = GuardBeeSentinel(board, retriever=retriever)
-        # Phase 2: 看空对冲蜂（需要读取所有 Phase-1 + Guard 数据）
         bear_agent = BearBeeContrarian(board, retriever=retriever)
 
-        # Phase 3 P4: 动态注入 CodeExecutorAgent
         if self.code_executor_agent and CODE_EXECUTION_CONFIG.get("add_to_swarm"):
             self.code_executor_agent.board = board
             phase1_agents.append(self.code_executor_agent)
 
-        # Phase 6: 自适应权重
         adapted_w = Backtester.load_adapted_weights() if Backtester else None
         import llm_service as _llm_check_q
         queen = QueenDistiller(board, adapted_weights=adapted_w, enable_llm=_llm_check_q.is_available())
@@ -557,105 +385,116 @@ class AlphaHiveDailyReporter:
         all_agents = phase1_agents + [guard_agent, bear_agent]
         _log.info("%d Agent（Phase1 %d + Guard + Bear）| 预取数据中...", len(all_agents), len(phase1_agents))
 
-        # ⚡ 优化 #1+#2: 批量预取 yfinance + VectorMemory（每 ticker 仅 1 次）
         prefetched = prefetch_shared_data(targets, retriever)
         inject_prefetched(all_agents, prefetched)
         prefetch_elapsed = time.time() - start_time
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
 
-        # ⚡ 优化 #3: 单层线程池，按 ticker 串行、Agent 并行
-        swarm_results = {}
-
-        # Phase 2: 崩溃恢复 checkpoint
         checkpoint_file = self.report_dir / f".checkpoint_{self._session_id or 'default'}.json"
+
+        return _SwarmContext(
+            targets=targets, board=board,
+            phase1_agents=phase1_agents, guard_agent=guard_agent,
+            bear_agent=bear_agent, queen=queen, all_agents=all_agents,
+            prefetch_elapsed=prefetch_elapsed, start_time=start_time,
+            checkpoint_file=checkpoint_file,
+        )
+
+    def _load_checkpoint(self, ctx: '_SwarmContext'):
+        """加载崩溃恢复 checkpoint，返回 (swarm_results, completed_tickers)"""
+        swarm_results = {}
         completed_tickers = set()
-        if checkpoint_file.exists():
+        if ctx.checkpoint_file and ctx.checkpoint_file.exists():
             try:
-                with open(checkpoint_file, "r") as f:
+                with open(ctx.checkpoint_file, "r") as f:
                     ckpt = json.load(f)
                     swarm_results = ckpt.get("results", {})
-                    completed_tickers = set(swarm_results.keys())
-                    if completed_tickers:
-                        _log.info("恢复 checkpoint：%d 标的已完成", len(completed_tickers))
+                    saved_date = ckpt.get("saved_at", "")
+                    today_date = datetime.now().strftime("%Y-%m-%d")
+                    if saved_date and saved_date != today_date:
+                        _log.warning("Checkpoint 已过期 (saved: %s, today: %s)，重新开始",
+                                     saved_date, today_date)
+                        swarm_results = {}
+                    else:
+                        completed_tickers = set(swarm_results.keys())
+                        if completed_tickers:
+                            _log.info("恢复 checkpoint：%d 标的已完成", len(completed_tickers))
             except (json.JSONDecodeError, KeyError, OSError) as e:
                 _log.warning("Checkpoint 恢复失败，重新开始: %s", e)
+                swarm_results = {}
+                completed_tickers = set()
+        return swarm_results, completed_tickers
 
-        for idx, ticker in enumerate(targets, 1):
-            if ticker in completed_tickers:
-                res = "✅" if swarm_results[ticker]["resonance"]["resonance_detected"] else "—"
-                _log.info("[%d/%d] %s: %.1f/10 (已缓存) %s", idx, len(targets), ticker, swarm_results[ticker]['final_score'], res)
-                continue
-
-            # ── #18: Ticker 有效性检测（退市/停牌/拆股）──
-            try:
-                from swarm_agents import check_ticker_validity
-                _validity = check_ticker_validity(ticker)
-                if not _validity["valid"]:
-                    _log.warning("[%d/%d] ⏭️ 跳过 %s（%s）", idx, len(targets), ticker, _validity["warning"])
-                    continue
-                if _validity.get("warning"):
-                    _log.warning("[%d/%d] ⚠️ %s 异常：%s", idx, len(targets), ticker, _validity["warning"])
-            except Exception as _ve:
-                _log.debug("ticker validity check error for %s: %s", ticker, _ve)
-
-            # Phase 1: 5 个核心 Agent 并行分析（含可选 CodeExecutorAgent）
-            with ThreadPoolExecutor(max_workers=len(phase1_agents)) as executor:
-                futures = {executor.submit(agent.analyze, ticker): agent for agent in phase1_agents}
-                agent_results = []
-                for future in as_completed(futures):
-                    try:
-                        agent_results.append(future.result(timeout=60))
-                    except (TimeoutError, ValueError, KeyError, TypeError, RuntimeError) as e:
-                        _log.warning("Agent future failed: %s", e)
-                        agent_results.append(None)
-
-            # Phase 1.5: GuardBeeSentinel 交叉验证（此时 Phase-1 数据已全部在信息素板上）
-            try:
-                guard_result = guard_agent.analyze(ticker)
-                agent_results.append(guard_result)
-                _log.info("  🛡️ 验证蜂: %s %s (%.1f分)",
-                          ticker, guard_result.get("direction", "?"),
-                          guard_result.get("score", 5.0))
-            except (ValueError, KeyError, TypeError, AttributeError) as e:
-                _log.warning("GuardBeeSentinel failed for %s: %s", ticker, e)
-                agent_results.append(None)
-
-            # Phase 2: BearBeeContrarian 看空对冲（此时 Phase-1 + Guard 数据均已可用）
-            try:
-                bear_result = bear_agent.analyze(ticker)
-                agent_results.append(bear_result)
-                _log.info("  🐻 看空蜂: %s %s (%.1f分, %d信号)",
-                          ticker, bear_result.get("direction", "?"),
-                          bear_result.get("details", {}).get("bear_score", 0),
-                          len(bear_result.get("details", {}).get("bearish_signals", [])))
-            except (ValueError, KeyError, TypeError, AttributeError) as e:
-                _log.warning("BearBeeContrarian failed for %s: %s", ticker, e)
-                agent_results.append(None)
-
-            distilled = queen.distill(ticker, agent_results)
-            swarm_results[ticker] = distilled
-
-            res = "✅" if distilled["resonance"]["resonance_detected"] else "—"
-            _log.info("[%d/%d] %s: %.1f/10 %s %s", idx, len(targets), ticker, distilled['final_score'], distilled['direction'], res)
-
-            # 进度回调（供桌面 App 实时动画使用）
-            if progress_callback:
-                try:
-                    progress_callback(idx, len(targets), ticker, distilled)
-                except Exception as _cb_err:
-                    _log.debug("Progress callback error: %s", _cb_err)
-
-            # 写入 checkpoint（每个 ticker 完成后）
-            try:
-                with open(checkpoint_file, "w") as f:
-                    json.dump({"results": swarm_results, "targets": targets}, f, cls=SafeJSONEncoder)
-            except (OSError, TypeError) as e:
-                _log.warning("Checkpoint 写入失败: %s", e)
-
-        # ==================== Phase 2: 历史类比推理（top-3 ticker）====================
+    def _analyze_single_ticker(self, ctx: '_SwarmContext', ticker: str,
+                               idx: int, total: int, progress_callback=None):
+        """单标的全流程分析：有效性检测 → Phase1 并行 → Guard → Bear → Queen distill"""
+        # Ticker 有效性检测
         try:
-            if queen.enable_llm and self.vector_memory and self.memory_store:
-                # 按 final_score 降序取 top-3
+            from swarm_agents import check_ticker_validity
+            _validity = check_ticker_validity(ticker)
+            if not _validity["valid"]:
+                _log.warning("[%d/%d] ⏭️ 跳过 %s（%s）", idx, total, ticker, _validity["warning"])
+                return None
+            if _validity.get("warning"):
+                _log.warning("[%d/%d] ⚠️ %s 异常：%s", idx, total, ticker, _validity["warning"])
+        except Exception as _ve:
+            _log.debug("ticker validity check error for %s: %s", ticker, _ve)
+
+        # Phase 1: 并行分析
+        with ThreadPoolExecutor(max_workers=len(ctx.phase1_agents)) as executor:
+            futures = {executor.submit(agent.analyze, ticker): agent for agent in ctx.phase1_agents}
+            agent_results = []
+            for future in as_completed(futures):
+                try:
+                    agent_results.append(future.result(timeout=60))
+                except (TimeoutError, ValueError, KeyError, TypeError, RuntimeError) as e:
+                    _log.warning("Agent future failed: %s", e)
+                    agent_results.append(None)
+
+        # Phase 1.5: GuardBeeSentinel 交叉验证
+        try:
+            guard_result = ctx.guard_agent.analyze(ticker)
+            agent_results.append(guard_result)
+            _log.info("  🛡️ 验证蜂: %s %s (%.1f分)",
+                      ticker, guard_result.get("direction", "?"),
+                      guard_result.get("score", 5.0))
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.warning("GuardBeeSentinel failed for %s: %s", ticker, e)
+            agent_results.append(None)
+
+        # Phase 2: BearBeeContrarian 看空对冲
+        try:
+            bear_result = ctx.bear_agent.analyze(ticker)
+            agent_results.append(bear_result)
+            _log.info("  🐻 看空蜂: %s %s (%.1f分, %d信号)",
+                      ticker, bear_result.get("direction", "?"),
+                      bear_result.get("details", {}).get("bear_score", 0),
+                      len(bear_result.get("details", {}).get("bearish_signals", [])))
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.warning("BearBeeContrarian failed for %s: %s", ticker, e)
+            agent_results.append(None)
+
+        distilled = ctx.queen.distill(ticker, agent_results)
+
+        res = "✅" if distilled["resonance"]["resonance_detected"] else "—"
+        _log.info("[%d/%d] %s: %.1f/10 %s %s", idx, total, ticker, distilled['final_score'], distilled['direction'], res)
+
+        # 进度回调
+        if progress_callback:
+            try:
+                progress_callback(idx, total, ticker, distilled)
+            except Exception as _cb_err:
+                _log.debug("Progress callback error: %s", _cb_err)
+
+        # 写入 checkpoint
+        # Note: swarm_results 在编排器中更新后才写 checkpoint，这里仅返回 distilled
+        return distilled
+
+    def _post_scan_enrichment(self, ctx: '_SwarmContext', swarm_results: Dict) -> float:
+        """扫描后增强：历史类比 + 保存蜂群结果 + 清理 checkpoint，返回 elapsed"""
+        # 历史类比推理（top-3 ticker）
+        try:
+            if ctx.queen.enable_llm and self.vector_memory and self.memory_store:
                 sorted_tickers = sorted(
                     swarm_results.keys(),
                     key=lambda t: swarm_results[t].get("final_score", 0),
@@ -663,11 +502,9 @@ class AlphaHiveDailyReporter:
                 )[:3]
                 for tk in sorted_tickers:
                     try:
-                        queen.enrich_with_historical_analogy(
-                            ticker=tk,
-                            distilled=swarm_results[tk],
-                            vector_memory=self.vector_memory,
-                            memory_store=self.memory_store,
+                        ctx.queen.enrich_with_historical_analogy(
+                            ticker=tk, distilled=swarm_results[tk],
+                            vector_memory=self.vector_memory, memory_store=self.memory_store,
                         )
                         ha = swarm_results[tk].get("historical_analogy")
                         if ha and ha.get("analogy_found"):
@@ -679,7 +516,7 @@ class AlphaHiveDailyReporter:
         except Exception as _ha_outer:
             _log.warning("历史类比整体跳过: %s", _ha_outer)
 
-        # 扫描完成，保存蜂群结果（合并当日已有结果，支持分批运行）
+        # 保存蜂群结果（合并当日已有结果）
         try:
             swarm_json = self.report_dir / f".swarm_results_{self.date_str}.json"
             merged_swarm = {}
@@ -689,19 +526,22 @@ class AlphaHiveDailyReporter:
                         merged_swarm = json.load(_f)
                 except (OSError, json.JSONDecodeError):
                     pass
-            merged_swarm.update(swarm_results)  # 新批次覆盖同名标的
+            merged_swarm.update(swarm_results)
             with open(swarm_json, "w") as f:
                 json.dump(merged_swarm, f, cls=SafeJSONEncoder, ensure_ascii=False)
         except (OSError, TypeError) as e:
             _log.warning("Swarm results 保存失败: %s", e)
+
         # 清理 checkpoint
         try:
-            checkpoint_file.unlink(missing_ok=True)
+            ctx.checkpoint_file.unlink(missing_ok=True)
         except OSError as e:
             _log.debug("Checkpoint 清理失败: %s", e)
 
-        elapsed = time.time() - start_time
+        return time.time() - ctx.start_time
 
+    def _post_scan_metrics(self, ctx: '_SwarmContext', swarm_results: Dict, elapsed: float) -> None:
+        """扫描后指标：LLM 统计 + MetricsCollector + SLO 检查 + 回测 + 权重自适应 + DB 清理"""
         # LLM Token 使用统计
         try:
             import llm_service
@@ -713,7 +553,7 @@ class AlphaHiveDailyReporter:
         except (ImportError, AttributeError, KeyError) as e:
             _log.info("蜂群耗时：%.1fs (LLM stats unavailable: %s)", elapsed, e)
 
-        # Week 4: 记录扫描指标 + SLO 检查
+        # MetricsCollector 记录 + SLO
         if self.metrics:
             try:
                 scores = [d.get("final_score", 5.0) for d in swarm_results.values()]
@@ -740,13 +580,13 @@ class AlphaHiveDailyReporter:
                 self.metrics.record_scan(
                     ticker_count=len(swarm_results),
                     duration_seconds=elapsed,
-                    agent_count=len(all_agents),
-                    prefetch_seconds=prefetch_elapsed,
+                    agent_count=len(ctx.all_agents),
+                    prefetch_seconds=ctx.prefetch_elapsed,
                     avg_score=sum(scores) / len(scores) if scores else 5.0,
                     max_score=max(scores) if scores else 5.0,
                     min_score=min(scores) if scores else 5.0,
                     agent_errors=agent_errors,
-                    agent_total=len(swarm_results) * len(all_agents),
+                    agent_total=len(swarm_results) * len(ctx.all_agents),
                     data_real_pct=avg_real,
                     resonance_count=resonance_n,
                     llm_calls=llm_c,
@@ -765,7 +605,6 @@ class AlphaHiveDailyReporter:
                         session_id=self._session_id or "",
                     )
 
-                # SLO 检查 + 自动 Slack 告警
                 violations = self.metrics.check_slo(days=1)
                 if violations:
                     _vio_text = "; ".join(v["details"] for v in violations)
@@ -787,14 +626,13 @@ class AlphaHiveDailyReporter:
             except (OSError, ValueError, KeyError, TypeError) as e:
                 _log.warning("指标收集异常: %s", e)
 
-        # Phase 6: 回测反馈循环
+        # 回测反馈循环
         adapted = None
         if Backtester:
             try:
                 bt = Backtester()
                 bt.save_predictions(swarm_results)
                 bt.run_backtest()
-                # 优先 T+7（更可靠，需 10 条样本），不足时降级到 T+1（需 5 条）
                 adapted = bt.adapt_weights(min_samples=10, period="t7")
                 if adapted is None:
                     adapted = bt.adapt_weights(min_samples=5, period="t1")
@@ -803,7 +641,6 @@ class AlphaHiveDailyReporter:
             except (OSError, ValueError, KeyError, TypeError) as e:
                 _log.warning("回测异常: %s", e)
 
-        # 权重自适应 Slack 通知
         if adapted and self.slack_notifier and self.slack_notifier.enabled:
             try:
                 weight_lines = " | ".join(f"{k}: {v:.3f}" for k, v in adapted.items())
@@ -816,7 +653,7 @@ class AlphaHiveDailyReporter:
             except (OSError, ValueError, ConnectionError) as e:
                 _log.debug("权重通知发送失败: %s", e)
 
-        # 数据库清理（每日扫描末尾，保留 180 天数据）
+        # 数据库清理
         if self.memory_store:
             try:
                 self.memory_store.cleanup_old_data(180)
@@ -833,14 +670,15 @@ class AlphaHiveDailyReporter:
             except Exception as e:
                 _log.debug("预测清理失败: %s", e)
 
-        # Phase 6: Slack 推送高分机会 + 异常信号
+    def _post_scan_notify(self, ctx: '_SwarmContext', swarm_results: Dict,
+                          report: Dict, elapsed: float) -> None:
+        """扫描后通知：Slack推送 + 失效条件 + 日历 + 会话存储 + 向量记忆 + 反馈循环"""
+        # Slack 推送高分机会 + 异常信号
         if self.slack_notifier and self.slack_notifier.enabled:
             for ticker, data in swarm_results.items():
                 score = data.get("final_score", 0)
                 direction = data.get("direction", "neutral")
                 dir_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(direction, direction)
-
-                # NA2：调整说明（附加到 Slack 推送）
                 adj_note = self._format_score_adjustments(data)
                 details_list = [f"评分 {score:.1f}/10"]
                 if adj_note:
@@ -848,17 +686,12 @@ class AlphaHiveDailyReporter:
                 cov = data.get("dimension_coverage_pct", 100.0)
                 if cov < 100.0:
                     details_list.append(f"维度覆盖 {cov:.0f}%")
-
-                # 高分机会推送（>= 7.5）
                 if score >= 7.5:
                     self._submit_bg(
                         self.slack_notifier.send_opportunity_alert,
                         ticker, score, dir_cn,
-                        data.get("discovery", "高分机会"),
-                        details_list
+                        data.get("discovery", "高分机会"), details_list
                     )
-
-                # 异常信号推送：强看空 或 内幕大额交易
                 elif score <= 3.0:
                     self._submit_bg(
                         self.slack_notifier.send_risk_alert,
@@ -867,10 +700,7 @@ class AlphaHiveDailyReporter:
                         "HIGH"
                     )
 
-        # 生成综合报告
-        report = self._build_swarm_report(swarm_results, board, agent_count=len(all_agents))
-
-        # ── 失效条件快照（仅有配置的标的：NVDA/VKTX/TSLA）──
+        # 失效条件快照
         try:
             from thesis_breaks import ThesisBreakConfig
             for _opp in report.get("opportunities", []):
@@ -883,68 +713,57 @@ class AlphaHiveDailyReporter:
                            for c in _tb_cfg.get("level_2_stop_loss", {}).get("conditions", [])]
                     _opp["thesis_break_l1"] = _l1
                     _opp["thesis_break_l2"] = _l2
-                    # 同步写入 swarm_results 供 .swarm_results_*.json 持久化
                     if _tk in swarm_results:
                         swarm_results[_tk]["thesis_break_l1"] = _l1
                         swarm_results[_tk]["thesis_break_l2"] = _l2
         except Exception as _tbe:
             _log.warning("thesis_break 配置加载失败: %s", _tbe)
 
-        # Phase 3 P2: 为高分机会添加日历提醒（后台线程池，退出时等待完成）
+        # 日历提醒
         if self.calendar and report.get('opportunities'):
             for opp in report['opportunities']:
                 _opp_score = opp.get("opp_score", 0) if isinstance(opp, dict) else getattr(opp, "opportunity_score", 0)
                 if _opp_score >= 7.5:
                     _tk = opp.get("ticker", "") if isinstance(opp, dict) else getattr(opp, "ticker", "")
                     _dir = opp.get("direction", "") if isinstance(opp, dict) else getattr(opp, "direction", "")
-                    self._submit_bg(
-                        self.calendar.add_opportunity_reminder,
-                        _tk, _opp_score, _dir, "高分机会"
-                    )
+                    self._submit_bg(self.calendar.add_opportunity_reminder, _tk, _opp_score, _dir, "高分机会")
 
-        # Phase 2: 异步保存会话（使用共享线程池，退出时等待完成）
+        # 保存会话
         if self.memory_store and self._session_id:
-            snapshot = board.compact_snapshot()  # 在主线程取快照（线程安全）
+            snapshot = ctx.board.compact_snapshot()
             self._submit_bg(
                 self.memory_store.save_session,
                 self._session_id, self.date_str, "swarm",
-                targets, swarm_results, snapshot, elapsed
+                ctx.targets, swarm_results, snapshot, elapsed
             )
 
-        # Phase 3 内存优化: 将高价值发现存入向量记忆（长期记忆）
+        # 向量记忆存储
         if self.vector_memory and self.vector_memory.enabled:
             stored = 0
-            # 1. 存储 Queen 的最终评分
             for ticker, data in swarm_results.items():
                 if data.get("final_score", 0) >= 5.0:
                     self.vector_memory.store(
-                        ticker=ticker,
-                        agent_id="QueenDistiller",
+                        ticker=ticker, agent_id="QueenDistiller",
                         discovery=f"评分{data['final_score']:.1f} {data['direction']} "
                                   f"支持{data.get('supporting_agents', 0)}Agent",
-                        direction=data["direction"],
-                        score=data["final_score"],
-                        source="swarm_scan",
-                        session_id=self._session_id or ""
+                        direction=data["direction"], score=data["final_score"],
+                        source="swarm_scan", session_id=self._session_id or ""
                     )
                     stored += 1
-            # 2. 存储信息素板上每个 Agent 的高价值发现
-            for entry in board.snapshot():
+            for entry in ctx.board.snapshot():
                 if entry.get("self_score", 0) >= 6.0:
                     self.vector_memory.store(
-                        ticker=entry.get("ticker", ""),
-                        agent_id=entry.get("agent_id", ""),
+                        ticker=entry.get("ticker", ""), agent_id=entry.get("agent_id", ""),
                         discovery=entry.get("discovery", "")[:300],
                         direction=entry.get("direction", "neutral"),
                         score=entry.get("self_score", 5.0),
-                        source=entry.get("source", ""),
-                        session_id=self._session_id or ""
+                        source=entry.get("source", ""), session_id=self._session_id or ""
                     )
                     stored += 1
             if stored > 0:
                 _log.info("已存入 %d 条长期记忆 (Chroma)", stored)
 
-        # 重试失败的 Slack 消息
+        # Slack 重试
         if self.slack_notifier and self.slack_notifier.enabled:
             try:
                 retried = self.slack_notifier.retry_failed()
@@ -953,11 +772,11 @@ class AlphaHiveDailyReporter:
             except Exception as e:
                 _log.debug("Slack 重试失败: %s", e)
 
-        # Phase 4: 反馈循环 - 保存报告快照（供 T+1/T+7/T+30 回测）
+        # 反馈循环快照
         try:
             from feedback_loop import ReportSnapshot
             import yfinance as _yf_fb
-            _snap_dir = os.path.join(self._output_dir, "report_snapshots")
+            _snap_dir = os.path.join(str(self.report_dir), "report_snapshots")
             _snap_count = 0
             for _tk, _data in swarm_results.items():
                 if _data.get("final_score", 0) >= 5.0:
@@ -966,15 +785,15 @@ class AlphaHiveDailyReporter:
                     _snap.direction = _data.get("direction", "Neutral")
                     _snap.agent_votes = {
                         e.get("agent_id", ""): e.get("self_score", 5.0)
-                        for e in board.snapshot()
+                        for e in ctx.board.snapshot()
                         if e.get("ticker") == _tk
                     }
                     try:
                         _hist = _yf_fb.Ticker(_tk).history(period="1d")
                         if not _hist.empty:
                             _snap.entry_price = float(_hist["Close"].iloc[-1])
-                    except Exception:
-                        pass
+                    except Exception as _e_price:
+                        self.logger.debug("Snapshot 入场价获取失败 (%s): %s", _tk, _e_price)
                     _snap.save_to_json(_snap_dir)
                     _snap_count += 1
             if _snap_count:
@@ -982,6 +801,41 @@ class AlphaHiveDailyReporter:
         except Exception as e:
             _log.debug("反馈循环保存失败(非致命): %s", e)
 
+    def run_swarm_scan(self, focus_tickers: List[str] = None, progress_callback=None) -> Dict:
+        """
+        真正的蜂群协作扫描 - 7 个自治工蜂并行运行（6 核心 + BearBeeContrarian），实时通过信息素板交换发现
+
+        Args:
+            focus_tickers: 重点关注标的（如为None则扫描全部watchlist）
+
+        Returns:
+            完整的蜂群分析报告
+        """
+        ctx = self._init_scan_context(focus_tickers)
+        swarm_results, completed_tickers = self._load_checkpoint(ctx)
+
+        for idx, ticker in enumerate(ctx.targets, 1):
+            if ticker in completed_tickers:
+                res = "✅" if swarm_results[ticker]["resonance"]["resonance_detected"] else "—"
+                _log.info("[%d/%d] %s: %.1f/10 (已缓存) %s",
+                          idx, len(ctx.targets), ticker, swarm_results[ticker]['final_score'], res)
+                continue
+
+            distilled = self._analyze_single_ticker(ctx, ticker, idx, len(ctx.targets), progress_callback)
+            if distilled:
+                swarm_results[ticker] = distilled
+                # 写入 checkpoint（每个 ticker 完成后）
+                try:
+                    with open(ctx.checkpoint_file, "w") as f:
+                        json.dump({"results": swarm_results, "targets": ctx.targets,
+                                  "saved_at": datetime.now().strftime("%Y-%m-%d")}, f, cls=SafeJSONEncoder)
+                except (OSError, TypeError) as e:
+                    _log.warning("Checkpoint 写入失败: %s", e)
+
+        elapsed = self._post_scan_enrichment(ctx, swarm_results)
+        self._post_scan_metrics(ctx, swarm_results, elapsed)
+        report = self._build_swarm_report(swarm_results, ctx.board, agent_count=len(ctx.all_agents))
+        self._post_scan_notify(ctx, swarm_results, report, elapsed)
         return report
 
     def run_crew_scan(self, focus_tickers: List[str] = None) -> Dict:
@@ -1055,30 +909,12 @@ class AlphaHiveDailyReporter:
 
         return report
 
-    def _build_swarm_report(self, swarm_results: Dict, board: PheromoneBoard,
-                            agent_count: int = 7) -> Dict:
-        """
-        将蜂群分析结果转换为标准报告格式
+    # ── _build_swarm_report helper methods ──────────────────────────
 
-        Args:
-            swarm_results: QueenDistiller 的所有汇总结果
-            board: 信息素板（用于提取全局信息）
-            agent_count: 实际运行的 Agent 总数（Phase-1 + BearBeeContrarian + 可选 CodeExecutor）
-
-        Returns:
-            标准报告格式
-        """
-        # 排序结果
-        sorted_results = sorted(
-            swarm_results.items(),
-            key=lambda x: x[1]["final_score"],
-            reverse=True
-        )
-
-        # 构建 OpportunityItem 列表（使用 QueenDistiller 真实维度分数）
+    def _build_opportunity_items(self, sorted_results):
+        """构建 OpportunityItem 列表（使用 QueenDistiller 真实维度分数）"""
         opportunities = []
         for ticker, swarm_data in sorted_results:
-            # H1: 使用 QueenDistiller 计算的真实维度分数，不再用 final_score × 常数伪造
             _dim = swarm_data.get("dimension_scores", {})
             _final = swarm_data["final_score"]
 
@@ -1089,19 +925,16 @@ class AlphaHiveDailyReporter:
             _thesis_break = ""
             for _agent_id, _ad in _details.items():
                 if "Chronos" in _agent_id and isinstance(_ad, dict):
-                    # ChronosBeeHorizon 提供催化剂
                     _cat_disc = _ad.get("discovery", "")
                     if _cat_disc and _cat_disc != "未发现显著看空信号":
                         _catalysts.append(_cat_disc[:60])
                 if "Bear" in _agent_id and isinstance(_ad, dict):
-                    # BearBeeContrarian 提供风险
                     _bear_disc = _ad.get("discovery", "")
                     if _bear_disc and _bear_disc != "未发现显著看空信号":
                         for _seg in _bear_disc.split(" | ")[:3]:
                             if _seg.strip():
                                 _risks.append(_seg.strip()[:50])
                 if "Guard" in _agent_id and isinstance(_ad, dict):
-                    # GuardBeeSentinel 提供失效条件
                     _guard_disc = _ad.get("discovery", "")
                     if _guard_disc:
                         _thesis_break = _guard_disc[:80]
@@ -1140,21 +973,87 @@ class AlphaHiveDailyReporter:
                 thesis_break=_thesis_break,
             )
             opportunities.append(opp)
+        return opportunities
 
-        self.opportunities = opportunities
-
-        # ── P4: 投资组合集中度分析（板块重叠 + 相关性矩阵）──
-        concentration = {}
+    def _compute_sector_sentiment(self, swarm_results):
+        """P4a: 跨标的情绪传染网络（纯规则引擎，零 API 费用）— mutates swarm_results"""
+        sector_sentiment_summary = {}
         try:
-            from portfolio_concentration import analyze_concentration
-            from config import WATCHLIST
-            concentration = analyze_concentration(swarm_results, WATCHLIST)
-            _log.info("P4 集中度分析：%s（风险=%s）",
-                      concentration.get("summary", ""), concentration.get("concentration_risk", ""))
-        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
-            _log.debug("P4 portfolio_concentration 不可用: %s", e)
+            from config import WATCHLIST, SENTIMENT_MOMENTUM_CONFIG as _SMC
+            _deviation_high = _SMC.get("sector_deviation_high", 15)
+            _deviation_mid = _SMC.get("sector_deviation_mid", 8)
 
-        # ── P4b: 跨标的关联分析（LLM）──
+            # Step 1: 提取每个 ticker 的 BuzzBeeWhisper 情绪百分比
+            _sector_sentiments: dict[str, list[tuple[str, float]]] = {}
+            for _tk, _sd in swarm_results.items():
+                _wl = WATCHLIST.get(_tk, {})
+                _sector = _wl.get("sector", "Other") if isinstance(_wl, dict) else "Other"
+                _buzz_pct = None
+                for _aid, _ad in (_sd.get("agent_details") or {}).items():
+                    if "Buzz" in _aid and isinstance(_ad, dict):
+                        _det = _ad.get("details", {})
+                        if isinstance(_det, dict):
+                            _buzz_pct = _det.get("sentiment_pct")
+                        break
+                if _buzz_pct is None:
+                    _dim_s = _sd.get("dimension_scores", {}).get("sentiment")
+                    if _dim_s is not None:
+                        _buzz_pct = _dim_s * 10.0
+                if _buzz_pct is not None:
+                    _sector_sentiments.setdefault(_sector, []).append((_tk, float(_buzz_pct)))
+
+            # Step 2: 板块平均情绪（≥2 个标的才有意义）
+            _sector_avgs: dict[str, float] = {}
+            for _sec, _items in _sector_sentiments.items():
+                if len(_items) >= 2:
+                    _avg = sum(_p for _, _p in _items) / len(_items)
+                    _sector_avgs[_sec] = round(_avg, 1)
+
+            # Step 3: 计算个股偏离 & 注入 swarm_results
+            for _tk, _sd in swarm_results.items():
+                _wl = WATCHLIST.get(_tk, {})
+                _sector = _wl.get("sector", "Other") if isinstance(_wl, dict) else "Other"
+                if _sector not in _sector_avgs:
+                    continue
+                _tk_pct = None
+                for _t, _p in _sector_sentiments.get(_sector, []):
+                    if _t == _tk:
+                        _tk_pct = _p
+                        break
+                if _tk_pct is None:
+                    continue
+                _dev = round(_tk_pct - _sector_avgs[_sector], 1)
+                if _dev > _deviation_high:
+                    _sig = "overheating"
+                elif _dev > _deviation_mid:
+                    _sig = "above_sector"
+                elif _dev < -_deviation_high:
+                    _sig = "undervalued"
+                elif _dev < -_deviation_mid:
+                    _sig = "below_sector"
+                else:
+                    _sig = "in_line"
+                _sd["sector_sentiment"] = {
+                    "sector": _sector,
+                    "sector_avg_pct": _sector_avgs[_sector],
+                    "ticker_pct": round(_tk_pct, 1),
+                    "deviation_ppt": _dev,
+                    "signal": _sig,
+                    "peers": [_t for _t, _ in _sector_sentiments[_sector] if _t != _tk],
+                }
+
+            sector_sentiment_summary = {
+                sec: {"avg_pct": avg, "count": len(_sector_sentiments.get(sec, []))}
+                for sec, avg in _sector_avgs.items()
+            }
+            if _sector_avgs:
+                _log.info("P4a 跨标的情绪传染：板块均值 %s", _sector_avgs)
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.debug("P4a 情绪传染网络不可用: %s", e)
+        return sector_sentiment_summary
+
+    def _compute_cross_ticker(self, swarm_results, board):
+        """P4b: 跨标的关联分析（LLM）— mutates swarm_results"""
         cross_ticker_analysis = {}
         try:
             from config import WATCHLIST
@@ -1164,12 +1063,10 @@ class AlphaHiveDailyReporter:
             )
             if use_llm_flag and len(swarm_results) >= 2:
                 import llm_service
-                # 构建 sector_map
                 sector_map = {}
                 for tk in swarm_results:
                     wl_entry = WATCHLIST.get(tk, {})
                     sector_map[tk] = wl_entry.get("sector", "Other") if isinstance(wl_entry, dict) else "Other"
-                # 构建 distilled_scores
                 distilled_scores = {}
                 for tk, data in swarm_results.items():
                     distilled_scores[tk] = {
@@ -1185,14 +1082,12 @@ class AlphaHiveDailyReporter:
                 if cross_ticker_analysis:
                     _log.info("P4b 跨标的关联分析：%s",
                               cross_ticker_analysis.get("sector_rotation_signal", "N/A"))
-                    # 将 cross_ticker_insights 注入各 ticker 的 swarm_results
                     for insight in cross_ticker_analysis.get("cross_ticker_insights", []):
                         for tk in insight.get("tickers", []):
                             if tk in swarm_results:
                                 existing = swarm_results[tk].get("cross_ticker_insights", [])
                                 existing.append(insight)
                                 swarm_results[tk]["cross_ticker_insights"] = existing
-                    # 将 sector_momentum 注入各 ticker
                     for tk in swarm_results:
                         sec = sector_map.get(tk, "Other")
                         mom = cross_ticker_analysis.get("sector_momentum", {}).get(sec)
@@ -1200,8 +1095,20 @@ class AlphaHiveDailyReporter:
                             swarm_results[tk]["sector_momentum"] = mom
         except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
             _log.debug("P4b 跨标的关联分析不可用: %s", e)
+        return cross_ticker_analysis
 
-        # ── P5: 宏观环境快照（附加到报告元数据）──
+    def _fetch_report_context(self, swarm_results):
+        """P4 集中度 + P5 宏观 + P3 回测 — 三个独立数据源"""
+        concentration = {}
+        try:
+            from portfolio_concentration import analyze_concentration
+            from config import WATCHLIST
+            concentration = analyze_concentration(swarm_results, WATCHLIST)
+            _log.info("P4 集中度分析：%s（风险=%s）",
+                      concentration.get("summary", ""), concentration.get("concentration_risk", ""))
+        except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.debug("P4 portfolio_concentration 不可用: %s", e)
+
         macro_snapshot = {}
         try:
             from fred_macro import get_macro_context
@@ -1210,7 +1117,6 @@ class AlphaHiveDailyReporter:
         except (ImportError, ConnectionError, TimeoutError, ValueError, KeyError) as e:
             _log.debug("P5 fred_macro 不可用: %s", e)
 
-        # ── P3: 获取回测准确率统计（附加到报告）──
         backtest_stats = {}
         try:
             if Backtester:
@@ -1219,7 +1125,22 @@ class AlphaHiveDailyReporter:
         except (OSError, ValueError, KeyError, TypeError) as e:
             _log.debug("Backtest stats unavailable: %s", e)
 
-        # 构建标准报告
+        return concentration, macro_snapshot, backtest_stats
+
+    def _build_swarm_report(self, swarm_results: Dict, board: PheromoneBoard,
+                            agent_count: int = 7) -> Dict:
+        """将蜂群分析结果转换为标准报告格式"""
+        sorted_results = sorted(
+            swarm_results.items(),
+            key=lambda x: x[1]["final_score"],
+            reverse=True
+        )
+
+        self.opportunities = self._build_opportunity_items(sorted_results)
+        sector_sentiment_summary = self._compute_sector_sentiment(swarm_results)
+        cross_ticker_analysis = self._compute_cross_ticker(swarm_results, board)
+        concentration, macro_snapshot, backtest_stats = self._fetch_report_context(swarm_results)
+
         report = {
             "date": self.date_str,
             "timestamp": self.timestamp.isoformat(),
@@ -1233,6 +1154,7 @@ class AlphaHiveDailyReporter:
             },
             "concentration_analysis": concentration,
             "cross_ticker_analysis": cross_ticker_analysis,
+            "sector_sentiment_contagion": sector_sentiment_summary,
             "macro_context": macro_snapshot,
             "backtest_stats": backtest_stats,
             "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis),
@@ -1255,562 +1177,20 @@ class AlphaHiveDailyReporter:
         return report
 
     @staticmethod
-    def _format_score_adjustments(data: Dict) -> str:
-        """
-        NA2：将 distill() 返回的调整字段格式化为人类可读注释。
-        返回空字符串表示无调整发生。
+    def _format_score_adjustments(*args, **kwargs):
+        """NA2：格式化调整字段（委托 report_formatters）"""
+        from report_formatters import format_score_adjustments
+        return format_score_adjustments(*args, **kwargs)
 
-        示例输出：
-          "⚠️ 反对蜂看空 8.5 → 封顶 9.25 | ⚠️ 数据质量 60% (×0.875) | 🤖 LLM蒸馏(0.8) 基础分8.3 | ❌ 维度覆盖64%"
-        """
-        parts = []
+    def _generate_swarm_markdown_report(self, *args, **kwargs):
+        """生成蜂群 Markdown 报告（委托 report_formatters）"""
+        from report_formatters import generate_swarm_markdown_report
+        return generate_swarm_markdown_report(self, *args, **kwargs)
 
-        # BearBee 封顶
-        if data.get("bear_cap_applied"):
-            bs = data.get("bear_strength", 0.0)
-            rs = data.get("rule_score", data.get("final_score", 0.0))
-            parts.append(f"⚠️ 反对蜂看空强度{bs:.1f} → 封顶{rs:.2f}")
-
-        # GuardBee 风险折扣
-        if data.get("guard_penalty_applied"):
-            gp = data.get("guard_penalty", 0.0)
-            parts.append(f"🛡️ 风控折扣-{gp:.2f}")
-
-        # 数据质量折扣
-        if data.get("dq_penalty_applied"):
-            rp = data.get("data_real_pct", 0.0)
-            qf = data.get("dq_quality_factor", 1.0)
-            parts.append(f"⚠️ 数据质量{rp:.0f}%(×{qf:.3f})")
-
-        # LLM 蒸馏
-        if data.get("distill_mode") == "llm_enhanced":
-            lc = data.get("llm_confidence", 0.0)
-            rs = data.get("rule_score", data.get("final_score", 0.0))
-            parts.append(f"🤖 LLM蒸馏(置信{lc:.1f}) 基础分{rs:.1f}")
-
-        # 维度覆盖率不足
-        cov = data.get("dimension_coverage_pct", 100.0)
-        if cov < 80.0:
-            dim_status = data.get("dimension_status", {})
-            missing = (
-                [dim for dim, st in dim_status.items() if st != "present"]
-                if isinstance(dim_status, dict) else []
-            )
-            missing_str = "/".join(missing) if missing else ""
-            parts.append(f"❌ 维度覆盖{cov:.0f}%({missing_str})")
-
-        return " | ".join(parts)
-
-    def _generate_swarm_markdown_report(self, swarm_results: Dict,
-                                         concentration: Dict = None,
-                                         macro_context: Dict = None,
-                                         backtest_stats: Dict = None,
-                                         agent_count: int = 7,
-                                         cross_ticker: Dict = None) -> str:
-        """生成蜂群模式的 Markdown 报告（8 版块 + P4集中度 + P4b跨标的 + P5宏观 + P3回测）"""
-
-        md = []
-        md.append(f"# 【{self.date_str}】Alpha Hive 蜂群协作日报")
-        md.append("")
-        md.append(f"**自动生成于**：{self.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-        md.append(f"**系统模式**：完全去中心化蜂群协作 | {agent_count} 个自治工蜂（6 核心 + BearBeeContrarian）")
-        md.append("")
-
-        sorted_results = sorted(
-            swarm_results.items(),
-            key=lambda x: x[1]["final_score"],
-            reverse=True
-        )
-
-        # ====== 版块 1：今日摘要 ======
-        resonances = sum(1 for r in swarm_results.values() if r["resonance"]["resonance_detected"])
-        md.append("## 1) 今日摘要")
-        md.append("")
-        md.append(f"- 扫描标的：{len(swarm_results)} 个 | 共振信号：{resonances}/{len(swarm_results)}")
-        for i, (ticker, data) in enumerate(sorted_results[:3], 1):
-            res = "共振" if data["resonance"]["resonance_detected"] else ""
-            narrative = data.get("narrative", "")
-            summary_line = f"- **{ticker}** {data['direction'].upper()} {data['final_score']:.1f}/10 {res}"
-            if narrative:
-                summary_line += f"\n  - 📝 {narrative}"
-            md.append(summary_line)
-        md.append("")
-
-        # ====== 版块 2：今日聪明钱动向（ScoutBeeNova） ======
-        md.append("## 2) 今日聪明钱动向")
-        md.append("")
-        for ticker, data in sorted_results:
-            agent = data.get("agent_details", {}).get("ScoutBeeNova", {})
-            discovery = agent.get("discovery", "")
-            details = agent.get("details", {})
-            insider = details.get("insider", {})
-            md.append(f"### {ticker}")
-            if discovery:
-                md.append(f"- {discovery}")
-            if insider:
-                sentiment = insider.get("sentiment", "unknown")
-                bought = insider.get("dollar_bought", 0)
-                sold = insider.get("dollar_sold", 0)
-                filings = insider.get("filings", 0)
-                md.append(f"- 内幕交易情绪：**{sentiment}** | 申报数：{filings}")
-                if bought > 0:
-                    md.append(f"- 内幕买入金额：${bought:,.0f}")
-                if sold > 0:
-                    md.append(f"- 内幕卖出金额：${sold:,.0f}")
-                notable = insider.get("notable_trades", [])
-                for t in notable[:2]:
-                    if isinstance(t, dict):
-                        md.append(f"  - {t.get('insider', '?')}：{t.get('code_desc', '?')} {t.get('shares', 0):,.0f} 股")
-            crowding = details.get("crowding_score", "")
-            if crowding:
-                md.append(f"- 拥挤度：{crowding:.0f}/100")
-            md.append("")
-
-        # ====== 版块 3：市场隐含预期（OracleBeeEcho） ======
-        md.append("## 3) 市场隐含预期")
-        md.append("")
-        for ticker, data in sorted_results:
-            agent = data.get("agent_details", {}).get("OracleBeeEcho", {})
-            discovery = agent.get("discovery", "")
-            details = agent.get("details", {})
-            md.append(f"### {ticker}")
-            if discovery:
-                md.append(f"- {discovery}")
-            if isinstance(details, dict) and details:
-                iv = details.get("iv_rank")
-                pc = details.get("put_call_ratio")
-                gamma = details.get("gamma_exposure")
-                if iv is not None:
-                    md.append(f"- IV Rank：{iv}")
-                if pc is not None:
-                    pc_val = pc if isinstance(pc, (int, float)) else pc
-                    md.append(f"- Put/Call Ratio：{pc_val}")
-                if gamma is not None:
-                    md.append(f"- Gamma Exposure：{gamma}")
-                # 异常活动
-                unusual = details.get("unusual_activity", [])
-                if unusual:
-                    md.append(f"- 异常活动：{len(unusual)} 个信号")
-                    for u in unusual[:3]:
-                        if isinstance(u, dict):
-                            utype = u.get("type", "unknown").replace("_", " ")
-                            strike = u.get("strike", "")
-                            vol = u.get("volume", 0)
-                            bull = "看涨" if u.get("bullish") else "看跌"
-                            md.append(f"  - {bull} {utype} ${strike} ({vol:,.0f}手)")
-                        elif isinstance(u, str):
-                            md.append(f"  - {u}")
-            md.append("")
-
-        # ====== 版块 4：X 情绪汇总（BuzzBeeWhisper） ======
-        md.append("## 4) X 情绪汇总")
-        md.append("")
-        for ticker, data in sorted_results:
-            agent = data.get("agent_details", {}).get("BuzzBeeWhisper", {})
-            discovery = agent.get("discovery", "")
-            details = agent.get("details", {})
-            md.append(f"### {ticker}")
-            if discovery:
-                md.append(f"- {discovery}")
-            if isinstance(details, dict) and details:
-                sent_pct = details.get("sentiment_pct")
-                mom = details.get("momentum_5d")
-                vol = details.get("volume_ratio")
-                if sent_pct is not None:
-                    md.append(f"- 看多情绪：{sent_pct}%")
-                if mom is not None:
-                    md.append(f"- 5 日动量：{mom:+.1f}%")
-                if vol is not None:
-                    md.append(f"- 量比：{vol:.1f}x")
-                reddit = details.get("reddit_mentions") or details.get("reddit_rank")
-                if reddit:
-                    md.append(f"- Reddit 热度：{reddit}")
-            md.append("")
-
-        # ====== 版块 5：财报/事件催化剂（ChronosBeeHorizon） ======
-        md.append("## 5) 财报/事件催化剂")
-        md.append("")
-        for ticker, data in sorted_results:
-            agent = data.get("agent_details", {}).get("ChronosBeeHorizon", {})
-            discovery = agent.get("discovery", "")
-            details = agent.get("details", {})
-            md.append(f"### {ticker}")
-            if discovery:
-                md.append(f"- {discovery}")
-            if isinstance(details, dict) and details:
-                earnings = details.get("next_earnings") or details.get("earnings_date")
-                if earnings:
-                    md.append(f"- 下次财报：{earnings}")
-                events = details.get("upcoming_events") or details.get("catalysts", [])
-                if isinstance(events, list):
-                    for ev in events[:3]:
-                        if isinstance(ev, dict):
-                            md.append(f"  - {ev.get('date', '?')}：{ev.get('event', ev.get('description', '?'))}")
-                        elif isinstance(ev, str):
-                            md.append(f"  - {ev}")
-                past = details.get("recent_events", [])
-                if isinstance(past, list):
-                    for ev in past[:2]:
-                        if isinstance(ev, dict):
-                            md.append(f"  - [已发生] {ev.get('description', ev)}")
-            md.append("")
-
-        # ====== 版块 6：竞争格局分析（RivalBeeVanguard） ======
-        md.append("## 6) 竞争格局分析")
-        md.append("")
-        for ticker, data in sorted_results:
-            agent = data.get("agent_details", {}).get("RivalBeeVanguard", {})
-            discovery = agent.get("discovery", "")
-            details = agent.get("details", {})
-            md.append(f"### {ticker}")
-            if discovery:
-                md.append(f"- {discovery}")
-            if isinstance(details, dict) and details:
-                ml_pred = details.get("ml_prediction") or details.get("prediction")
-                if isinstance(ml_pred, dict):
-                    md.append(f"- ML 预测方向：{ml_pred.get('direction', '?')}")
-                    md.append(f"- ML 置信度：{ml_pred.get('confidence', '?')}")
-                peers = details.get("peer_comparison") or details.get("peers", [])
-                if isinstance(peers, list) and peers:
-                    md.append(f"- 同业对标：{', '.join(str(p) for p in peers[:5])}")
-            md.append("")
-
-        # ====== 版块 6.5：看空对冲观点（BearBeeContrarian） ======
-        md.append("## 6.5) 看空对冲观点")
-        md.append("")
-        md.append("> BearBeeContrarian 专门寻找看空信号，平衡蜂群系统性看多偏差")
-        md.append("")
-        for ticker, data in sorted_results:
-            agent = data.get("agent_details", {}).get("BearBeeContrarian", {})
-            discovery = agent.get("discovery", "")
-            details = agent.get("details", {})
-            bear_score = details.get("bear_score", 0)
-            signals = details.get("bearish_signals", [])
-            direction = agent.get("direction", "neutral")
-
-            if direction == "bearish":
-                severity = "**看空警告**"
-            elif direction == "neutral":
-                severity = "需关注风险点"
-            elif signals:
-                severity = "风险提示"
-            else:
-                severity = "暂无看空信号"
-
-            md.append(f"### {ticker} ({severity} | 看空强度 {bear_score:.1f}/10)")
-            if signals:
-                for sig in signals:
-                    md.append(f"- {sig}")
-            elif discovery:
-                md.append(f"- {discovery}")
-            else:
-                md.append("- 未发现显著看空信号")
-            # LLM 看空论点（升级后新增）
-            llm_thesis = agent.get("llm_thesis", "")
-            llm_risks = agent.get("llm_key_risks", [])
-            llm_ci = agent.get("llm_contrarian_insight", "")
-            if llm_thesis:
-                md.append(f"- 🤖 **AI看空论点**：{llm_thesis}")
-            if llm_risks:
-                for risk in llm_risks[:3]:
-                    md.append(f"  - ⚠️ {risk}")
-            if llm_ci:
-                md.append(f"- 💡 **反对洞察**：{llm_ci}")
-            # 数据来源标注
-            sources = details.get("data_sources", {})
-            if sources:
-                src_labels = {"pheromone_board": "蜂群共享", "sec_api": "SEC直查",
-                              "options_api": "期权直查", "finviz_api": "Finviz",
-                              "yfinance": "yfinance", "unavailable": "不可用",
-                              "llm_enhanced": "LLM增强"}
-                src_parts = [f"{k}={src_labels.get(v, v)}" for k, v in sources.items()]
-                md.append(f"- *数据来源*：{' | '.join(src_parts)}")
-            md.append("")
-
-        # ====== 版块 7：综合判断 & 信号强度（GuardBeeSentinel + 全体投票） ======
-        md.append("## 7) 综合判断 & 信号强度")
-        md.append("")
-        md.append("| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |")
-        md.append("|------|------|--------|------|---------------|-------|---------|")
-        for ticker, data in sorted_results:
-            res = "Y" if data["resonance"]["resonance_detected"] else "N"
-            ab = data["agent_breakdown"]
-            data_pct = data.get("data_real_pct", 0)
-            # 从 GuardBeeSentinel 获取交叉验证信息
-            guard = data.get("agent_details", {}).get("GuardBeeSentinel", {})
-            guard_discovery = guard.get("discovery", "")
-            thesis_break = "信号分散" if not guard_discovery else guard_discovery[:30]
-            md.append(
-                f"| **{ticker}** | {data['direction'].upper()} | "
-                f"{data['final_score']:.1f} | {res} | "
-                f"{ab['bullish']}/{ab['bearish']}/{ab['neutral']} | "
-                f"{data_pct:.0f}% | {thesis_break} |"
-            )
-        md.append("")
-
-        # LLM 多空综合叙事（升级后新增）
-        synthesis_lines = []
-        for ticker, data in sorted_results:
-            bbs = data.get("bull_bear_synthesis", "")
-            cv = data.get("contrarian_view", "")
-            if bbs or cv:
-                parts = [f"- **{ticker}**"]
-                if bbs:
-                    parts.append(f"  - 多空综合：{bbs}")
-                if cv:
-                    parts.append(f"  - 少数意见：{cv}")
-                synthesis_lines.append("\n".join(parts))
-        if synthesis_lines:
-            md.append("### AI 多空综合叙事")
-            md.append("")
-            md.extend(synthesis_lines)
-            md.append("")
-
-        # Phase 2: 历史类比推理子版块
-        analogy_lines = []
-        for ticker, data in sorted_results:
-            ha = data.get("historical_analogy")
-            if ha and ha.get("analogy_found"):
-                analogy_lines.append(f"**{ticker}** — {ha.get('analogy_summary', '')}")
-                outcome = ha.get("historical_outcome", {})
-                t1 = outcome.get("t1", "N/A")
-                t7 = outcome.get("t7", "N/A")
-                t30 = outcome.get("t30", "N/A")
-                analogy_lines.append(f"- 历史结果：T+1 {t1} | T+7 {t7} | T+30 {t30}")
-                sim = ha.get("similarity_score", 0)
-                analogy_lines.append(f"- 相似度：{sim:.0%} | 置信调整：{ha.get('score_adjustment_applied', 0):+.1f}分")
-                diff = ha.get("key_differences", "")
-                if diff:
-                    analogy_lines.append(f"- 关键差异：{diff}")
-                warning = ha.get("warning", "")
-                if warning:
-                    analogy_lines.append(f"- ⚠️ {warning}")
-                analogy_lines.append("")
-        if analogy_lines:
-            md.append("### 📜 历史类比推理")
-            md.append("")
-            md.extend(analogy_lines)
-
-        # NA2：评分调整注释（bear_cap / dq_penalty / llm_enhanced / 低维度覆盖）
-        adj_lines = []
-        for ticker, data in sorted_results:
-            adj = self._format_score_adjustments(data)
-            if adj:
-                adj_lines.append(f"- **{ticker}**：{adj}")
-        if adj_lines:
-            md.append("### 评分调整说明")
-            md.append("")
-            md.extend(adj_lines)
-            md.append("")
-
-        # GuardBeeSentinel 详细交叉验证
-        md.append("### 交叉验证详情")
-        md.append("")
-        for ticker, data in sorted_results:
-            guard = data.get("agent_details", {}).get("GuardBeeSentinel", {})
-            discovery = guard.get("discovery", "")
-            if discovery:
-                md.append(f"- **{ticker}**：{discovery}")
-        md.append("")
-
-        # ====== 版块 P4：投资组合集中度风险 ======
-        if concentration and concentration.get("sector_breakdown"):
-            risk_level = concentration.get("concentration_risk", "low")
-            risk_emoji = {"low": "✅", "medium": "⚠️", "high": "🚨"}.get(risk_level, "")
-            md.append(f"## 📊 投资组合集中度分析 {risk_emoji}")
-            md.append("")
-            md.append(f"**集中度风险**：{risk_level.upper()} | **综合评分**：{concentration.get('risk_score', 0):.1f}/10")
-            md.append("")
-
-            # 板块分布
-            md.append("**板块分布**：")
-            for sector, info in concentration.get("sector_breakdown", {}).items():
-                tickers_str = " / ".join(info.get("tickers", []))
-                md.append(f"- {sector}：{info.get('pct', 0):.0f}%（{tickers_str}）")
-            md.append("")
-
-            # 相关性警告
-            corr_warns = concentration.get("correlation_warnings", [])
-            if corr_warns:
-                md.append("**高相关对（≥0.70）**：")
-                for w in corr_warns[:4]:
-                    md.append(f"- {w['pair']}：相关系数 {w['correlation']:.2f} [{w['risk'].upper()}]")
-                md.append("")
-
-            # 建议
-            md.append("**分散化建议**：")
-            for rec in concentration.get("recommendations", []):
-                md.append(f"- {rec}")
-            md.append("")
-
-        # ====== 版块 P4b：跨标的关联分析（LLM）======
-        if cross_ticker and isinstance(cross_ticker, dict):
-            md.append("## 🔗 跨标的关联分析")
-            md.append("")
-
-            # 板块动量
-            sector_mom = cross_ticker.get("sector_momentum", {})
-            if sector_mom:
-                mom_parts = []
-                for sec, trend in sector_mom.items():
-                    emoji = {"leading": "🟢", "lagging": "🔴", "neutral": "🟡"}.get(trend, "")
-                    mom_parts.append(f"{sec}: {trend} {emoji}")
-                md.append("**板块动量**：" + " | ".join(mom_parts))
-                md.append("")
-
-            # 跨标的洞察
-            insights = cross_ticker.get("cross_ticker_insights", [])
-            if insights:
-                md.append("**关联洞察**：")
-                for ins in insights[:5]:
-                    tks = " & ".join(ins.get("tickers", []))
-                    md.append(f"- [{ins.get('type', '')}] {tks}：{ins.get('insight', '')}")
-                md.append("")
-
-            # 关联风险警告
-            corr_warnings = cross_ticker.get("correlation_warnings", [])
-            if corr_warnings:
-                md.append("**关联风险⚠️**：")
-                for w in corr_warnings[:4]:
-                    md.append(f"- {w}")
-                md.append("")
-
-            # 轮动信号
-            rotation = cross_ticker.get("sector_rotation_signal", "")
-            if rotation:
-                md.append(f"**轮动信号**：{rotation}")
-                md.append("")
-
-            # 组合建议
-            hints = cross_ticker.get("portfolio_adjustment_hints", [])
-            if hints:
-                md.append("**组合调整建议**：")
-                for h in hints[:3]:
-                    md.append(f"- {h}")
-                md.append("")
-
-        # ====== 版块 P5：宏观环境 ======
-        if macro_context and macro_context.get("data_source") != "fallback":
-            regime = macro_context.get("macro_regime", "neutral")
-            regime_emoji = {"risk_on": "🟢", "risk_off": "🔴", "neutral": "🟡"}.get(regime, "")
-            md.append(f"## 🌐 宏观环境 {regime_emoji}")
-            md.append("")
-            md.append(f"**宏观政体**：{regime.upper()} | **评分**：{macro_context.get('macro_score', 5):.1f}/10")
-            md.append("")
-            md.append(f"| 指标 | 数值 | 状态 |")
-            md.append(f"|------|------|------|")
-            md.append(f"| VIX | {macro_context.get('vix', 0):.1f} | {macro_context.get('vix_regime', '')} |")
-            md.append(f"| 10Y利率 | {macro_context.get('treasury_10y', 0):.2f}% | {macro_context.get('rate_environment', '')} |")
-            md.append(f"| 大盘(5日) | {macro_context.get('spx_change_pct', 0):+.2f}% | {macro_context.get('market_trend', '')} |")
-            md.append(f"| 美元 | — | {macro_context.get('dollar_trend', '')} |")
-            md.append("")
-            headwinds = macro_context.get("macro_headwinds", [])
-            tailwinds = macro_context.get("macro_tailwinds", [])
-            if headwinds:
-                md.append("**逆风**：" + " | ".join(headwinds[:3]))
-                md.append("")
-            if tailwinds:
-                md.append("**顺风**：" + " | ".join(tailwinds[:3]))
-                md.append("")
-
-        # ====== 版块 P3：历史预测准确率（T+7 回测反馈）======
-        if backtest_stats and backtest_stats.get("total_checked", 0) > 0:
-            acc = backtest_stats["overall_accuracy"]
-            total = backtest_stats["total_checked"]
-            correct = backtest_stats["correct_count"]
-            avg_ret = backtest_stats["avg_return"]
-            md.append("## 📈 历史预测准确率（T+7，近30天）")
-            md.append("")
-            md.append(
-                f"**样本**：{total} 条 | "
-                f"**准确率**：{acc * 100:.1f}% ({correct}/{total}) | "
-                f"**平均收益**：{avg_ret:+.2f}%"
-            )
-            md.append("")
-            by_ticker = backtest_stats.get("by_ticker", {})
-            if by_ticker:
-                md.append("| 标的 | 方向准确率 | 预测次数 | 平均收益 |")
-                md.append("|------|-----------|---------|---------|")
-                for t, info in sorted(
-                    by_ticker.items(), key=lambda x: x[1]["total"], reverse=True
-                )[:6]:
-                    md.append(
-                        f"| {t} | {info['accuracy'] * 100:.0f}% "
-                        f"| {info['total']} | {info['avg_return']:+.2f}% |"
-                    )
-                md.append("")
-            by_dir = backtest_stats.get("by_direction", {})
-            if by_dir:
-                parts = []
-                for d, label in [("bullish", "看多"), ("bearish", "看空"), ("neutral", "中性")]:
-                    info = by_dir.get(d, {})
-                    if info.get("total", 0) > 0:
-                        parts.append(
-                            f"{label}:{info['accuracy']*100:.0f}%({info['total']}次)"
-                        )
-                if parts:
-                    md.append("**按方向**：" + " | ".join(parts))
-                    md.append("")
-
-        # ====== 版块 8：数据来源 & 免责声明 ======
-        md.append("## 8) 数据来源 & 免责声明")
-        md.append("")
-        md.append("**蜂群分工**：")
-        md.append("- ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）")
-        md.append("- OracleBeeEcho：市场预期（期权 IV/P-C Ratio/Gamma）")
-        md.append("- BuzzBeeWhisper：社交情绪（X/Reddit/Finviz）")
-        md.append("- ChronosBeeHorizon：催化剂追踪（财报/事件日历）")
-        md.append("- RivalBeeVanguard：竞争格局（ML 预测 + 行业对标）")
-        md.append("- GuardBeeSentinel：交叉验证（共振检测 + 风险调整）")
-        md.append("")
-        md.append("**免责声明**：")
-        md.append(DISCLAIMER_FULL)
-        md.append("")
-
-        return "\n".join(md)
-
-    def _generate_swarm_twitter_threads(self, swarm_results: Dict) -> List[str]:
-        """生成蜂群模式的 X 线程版本"""
-
-        threads = []
-        sorted_results = sorted(
-            swarm_results.items(),
-            key=lambda x: x[1]["final_score"],
-            reverse=True
-        )
-
-        # 主线程
-        main_thread = []
-        main_thread.append(
-            f"【Alpha Hive 蜂群日报 {self.date_str}】"
-            f"7 个自治工蜂协作分析，多数投票共振信号。"
-            f"{DISCLAIMER_SHORT}👇"
-        )
-
-        for i, (ticker, data) in enumerate(sorted_results[:3], 1):
-            resonance_emoji = "✅" if data["resonance"]["resonance_detected"] else "❌"
-            insight = data.get("key_insight", "")
-            narrative = data.get("narrative", "")
-            tweet = (
-                f"{i}. **{ticker}** {data['direction'].upper()}\n"
-                f"蜂群评分：{data['final_score']:.1f}/10 | 共振：{resonance_emoji}\n"
-                f"Agent 投票：看多{data['agent_breakdown']['bullish']} vs 看空{data['agent_breakdown']['bearish']}"
-            )
-            if narrative:
-                tweet += f"\n📝 {narrative}"
-            elif insight:
-                tweet += f"\nAI洞察：{insight}"
-            main_thread.append(tweet)
-
-        main_thread.append(
-            f"🐝 7 个工蜂独立分析（6 核心 + 看空对冲蜂）→ 信息素板实时交换 → 多数投票汇总\n"
-            f"高共振信号优先级最高。风险提示：控制仓位。\n"
-            f"下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
-        )
-
-        threads.append("\n\n".join(main_thread))
-
-        return threads
+    def _generate_swarm_twitter_threads(self, *args, **kwargs):
+        """生成蜂群 X 线程版本（委托 report_formatters）"""
+        from report_formatters import generate_swarm_twitter_threads
+        return generate_swarm_twitter_threads(self, *args, **kwargs)
 
     def _parse_ml_report_to_opportunity(self, ticker: str, ml_report: Dict) -> OpportunityItem:
         """将 ML 报告解析为 OpportunityItem"""
@@ -1901,188 +1281,20 @@ class AlphaHiveDailyReporter:
 
         return report
 
-    def _generate_markdown_report(self) -> str:
-        """生成中文 Markdown 报告"""
+    def _generate_markdown_report(self, *args, **kwargs):
+        """生成中文 Markdown 报告（委托 report_formatters）"""
+        from report_formatters import generate_markdown_report
+        return generate_markdown_report(self, *args, **kwargs)
 
-        md = []
-        md.append(f"# 【{self.date_str}】Alpha Hive 每日投资简报")
-        md.append("")
-        md.append(f"**自动生成于**：{self.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-        md.append(f"**系统状态**：✅ 完全激活 | Phase 1-6 完成")
-        md.append("")
+    def _generate_twitter_threads(self, *args, **kwargs):
+        """生成 X 线程版本（委托 report_formatters）"""
+        from report_formatters import generate_twitter_threads
+        return generate_twitter_threads(self, *args, **kwargs)
 
-        # 1. 今日摘要
-        md.append("## 📊 今日摘要（Top 3）")
-        md.append("")
-
-        for i, opp in enumerate(self.opportunities[:3], 1):
-            md.append(f"### {i}. **{opp.ticker}** - {opp.direction}")
-            md.append(f"- **机会分数**：{opp.opportunity_score:.1f}/10 | **置信度**：{opp.confidence:.0f}%")
-            md.append(f"- **期权信号**：{opp.options_signal}")
-            if opp.key_catalysts:
-                md.append(f"- **关键催化剂**：{', '.join(opp.key_catalysts[:2])}")
-            md.append("")
-
-        # 2. 机会清单
-        md.append("## 🎯 完整机会清单")
-        md.append("")
-        md.append("| 排序 | 标的 | 方向 | 综合分 | 期权信号 | 置信度 |")
-        md.append("|------|------|------|--------|---------|--------|")
-
-        for i, opp in enumerate(self.opportunities, 1):
-            md.append(
-                f"| {i} | **{opp.ticker}** | {opp.direction} | "
-                f"{opp.opportunity_score:.1f} | {opp.options_signal[:12]}... | {opp.confidence:.0f}% |"
-            )
-
-        md.append("")
-
-        # 3. 风险雷达
-        md.append("## ⚠️ 风险雷达")
-        md.append("")
-        for opp in self.opportunities[:3]:
-            if opp.risks:
-                md.append(f"**{opp.ticker}**：{', '.join(opp.risks)}")
-
-        md.append("")
-
-        # 4. 数据来源与免责
-        md.append("## 📝 数据来源 & 免责声明")
-        md.append("")
-        md.append("**数据源**：")
-        md.append("- StockTwits 情绪（实时）")
-        md.append("- Polymarket 赔率（每5分钟）")
-        md.append("- Yahoo Finance / yFinance（实时）")
-        md.append("- SEC 披露（每日更新）")
-        md.append("- **期权链数据**（yFinance，每5分钟缓存）")
-        md.append("")
-        md.append("**免责声明**：")
-        md.append(DISCLAIMER_FULL)
-        md.append("")
-
-        return "\n".join(md)
-
-    def _generate_twitter_threads(self) -> List[str]:
-        """生成 X 线程版本"""
-
-        threads = []
-
-        # 主线程
-        main_thread = []
-        main_thread.append(
-            f"【Alpha Hive 日报 {self.date_str}】"
-            f"{DISCLAIMER_SHORT}"
-            f"今天最值得跟踪的 3 个机会 👇"
-        )
-
-        for i, opp in enumerate(self.opportunities[:3], 1):
-            main_thread.append(
-                f"{i}. **{opp.ticker}** {opp.direction}\n"
-                f"综合分：{opp.opportunity_score:.1f}/10 | 期权信号：{opp.options_signal}\n"
-                f"主催化剂：{opp.key_catalysts[0] if opp.key_catalysts else 'TBD'}"
-            )
-
-        main_thread.append(
-            f"更多详情见完整日报。风险提示：高波动标的需控制仓位。"
-            f"下一步跟踪：T+1 验证信号强度，T+7 回看预测偏差。@igg_wang748"
-        )
-
-        threads.append("\n\n".join(main_thread))
-
-        return threads
-
-    def auto_commit_and_notify(self, report: Dict) -> Dict:
-        """
-        自动提交报告到 Git + Slack 通知（Agent Toolbox 演示）
-
-        新功能：使用 AgentHelper 自动执行 Git 提交和通知
-        """
-        _log.info("Auto-commit & Notify 启动")
-
-        results = {}
-
-        # 1. Git 提交报告（始终新 commit，不 amend，避免 GitHub Pages 部署冲突）
-        #
-        # ⚠️ 架构说明：
-        #   - LLM 模式：commit 所有变更 → git push origin main → 生产页面更新
-        #   - 测试模式：commit 所有变更 → 仅推 test remote（临时分支）→ git reset --hard origin/main
-        #              local main 完全回滚，origin/main 不受任何影响
-        #   - 禁止在测试模式外手动 `git add index.html && git push origin main`，
-        #     生成物（index.html / md / json / ML html）只能通过 LLM 扫描进入 origin
-        from datetime import datetime as _dt2
-        import llm_service as _llm_check
-        # 只有 LLM 模式才推送 gh-pages（生产网站），--no-llm 蜂群仅 commit + push main
-        _is_swarm = bool(report.get("swarm_metadata") or "蜂群" in report.get("system_status", ""))
-        _using_llm = _llm_check.is_available()
-        _deploy_production = _using_llm or _is_swarm
-        _deploy_ghpages = _using_llm  # gh-pages 仅 LLM 模式更新
-        timestamp = _dt2.now().strftime("%H:%M")
-        today_commit_msg = f"Alpha Hive 蜂群日报 {self.date_str} {timestamp}"
-        _log.info("Git commit... (mode: new)")
-        status = self.agent_helper.git.status()
-        if status.get("modified_files"):
-            commit_result = self.agent_helper.git.commit(today_commit_msg)
-            results["git_commit"] = commit_result
-            if commit_result["success"]:
-                _log.info("Git commit 成功（new）")
-            else:
-                _log.warning("Git commit 失败：%s", commit_result.get('message'))
-        else:
-            _log.info("无需提交（工作目录干净）")
-
-        # 2. Git 推送：LLM 模式 → 生产（origin main），规则模式 → 测试（test remote）
-        #    规则模式使用临时分支，不污染本地 main，推完即删除
-        env_label = "🧠 生产" if _deploy_production else "🔧 测试（规则引擎）"
-        _log.info("Git push → [%s] (LLM=%s, Swarm=%s)", env_label, _using_llm, _is_swarm)
-
-        if _deploy_production:
-            # 生产模式：推送 origin main
-            r = self.agent_helper.git.run_git_cmd("git push origin main")
-            push_result = {"success": r["success"], "remote": "origin",
-                           "output": r.get("stdout", "") or r.get("stderr", "")}
-            # gh-pages 仅在 LLM 模式下更新（避免 --no-llm 测试覆盖生产数据）
-            if _deploy_ghpages:
-                try:
-                    self._deploy_static_to_ghpages()
-                except Exception as e:
-                    _log.warning("gh-pages 部署失败: %s", e)
-            else:
-                _log.info("跳过 gh-pages（非 LLM 模式）")
-        else:
-            # 测试模式：临时分支 → test remote → 删除临时分支 → 本地 main 回滚到 origin/main
-            _remote_check = self.agent_helper.git.run_git_cmd("git remote")
-            if "test" not in _remote_check.get("stdout", ""):
-                _log.warning("test remote 不存在，跳过推送")
-                push_result = {"success": False, "error": "test remote not configured"}
-            else:
-                _tmp = "_test_snapshot"
-                # 从当前 HEAD 创建临时分支并推送到 test:main
-                self.agent_helper.git.run_git_cmd(f"git branch -D {_tmp}")
-                self.agent_helper.git.run_git_cmd(f"git checkout -b {_tmp}")
-                r = self.agent_helper.git.run_git_cmd(f"git push test {_tmp}:main --force")
-                push_result = {"success": r["success"], "remote": "test",
-                               "output": r.get("stdout", "") or r.get("stderr", "")}
-                # 回到 main 并删除临时分支，本地 main 恢复干净状态
-                self.agent_helper.git.run_git_cmd("git checkout main")
-                self.agent_helper.git.run_git_cmd(f"git branch -D {_tmp}")
-                # 重置本地 main 到 origin/main，撤销测试数据对本地 main 的污染
-                self.agent_helper.git.run_git_cmd("git fetch origin")
-                self.agent_helper.git.run_git_cmd("git reset --hard origin/main")
-                _log.info("本地 main 已恢复至 origin/main（测试数据不污染生产）")
-
-        results["git_push"] = push_result
-        results["deploy_env"] = "production" if _deploy_production else "test"
-        if push_result["success"]:
-            _log.info("Git push 成功 → %s", push_result.get("remote"))
-        else:
-            _log.warning("Git push 失败：%s", push_result.get("error") or push_result.get("output", ""))
-
-        # 3. Slack 通知（由 Claude Code MCP 工具推送，不用 webhook bot）
-        _log.info("Slack 推送由 Claude Code 负责（用户账号）")
-        results["slack_notification"] = {"skipped": "handled_by_claude_mcp"}
-
-        _log.info("Auto-commit & Notify 完成")
-        return results
+    def auto_commit_and_notify(self, *args, **kwargs):
+        """自动提交报告 + 通知（委托 report_deployer）"""
+        from report_deployer import auto_commit_and_notify
+        return auto_commit_and_notify(self, *args, **kwargs)
 
     def check_earnings_updates(self, report_path: str = None, tickers: List[str] = None) -> Dict:
         """
@@ -2243,150 +1455,147 @@ class AlphaHiveDailyReporter:
 
         return generated
 
-    def save_report(self, report: Dict) -> str:
-        """保存报告到文件（MD / JSON / X线程 / index.html GitHub Pages）"""
+    # ── save_report helper methods ──────────────────────────────────
 
-        json_file = self.report_dir / f"alpha-hive-daily-{self.date_str}.json"
-        md_file = self.report_dir / f"alpha-hive-daily-{self.date_str}.md"
+    def _merge_existing_report(self, report, json_file):
+        """合并今日已有报告的 opportunities（支持分批运行）— mutates report"""
+        if not json_file.exists():
+            return
+        try:
+            with open(json_file, encoding="utf-8") as _f:
+                existing = json.load(_f)
+            existing_by_ticker = {o.get("ticker"): o for o in existing.get("opportunities", [])}
+            new_by_ticker = {o.get("ticker"): o for o in report.get("opportunities", [])}
+            existing_by_ticker.update(new_by_ticker)  # 新批次结果优先
+            merged_opps = sorted(existing_by_ticker.values(),
+                                 key=lambda x: x.get("opp_score", 0), reverse=True)
+            report["opportunities"] = merged_opps
+            if "swarm_metadata" in report:
+                report["swarm_metadata"]["tickers_analyzed"] = len(merged_opps)
+            _log.info("合并今日已有报告：共 %d 标的", len(merged_opps))
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
+            _log.warning("合并已有报告失败，使用新报告: %s", e)
 
-        # 如果今日已有报告，合并 opportunities（支持分批运行，避免互相覆盖）
-        if json_file.exists():
-            try:
-                with open(json_file, encoding="utf-8") as _f:
-                    existing = json.load(_f)
-                existing_by_ticker = {o.get("ticker"): o for o in existing.get("opportunities", [])}
-                new_by_ticker = {o.get("ticker"): o for o in report.get("opportunities", [])}
-                existing_by_ticker.update(new_by_ticker)  # 新批次结果优先
-                merged_opps = sorted(existing_by_ticker.values(),
-                                     key=lambda x: x.get("opportunity_score", 0), reverse=True)
-                report["opportunities"] = merged_opps
-                if "swarm_metadata" in report:
-                    report["swarm_metadata"]["tickers_analyzed"] = len(merged_opps)
-                _log.info("合并今日已有报告：共 %d 标的", len(merged_opps))
-            except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
-                _log.warning("合并已有报告失败，使用新报告: %s", e)
-
-        # 保存 JSON 版本
-        with open(json_file, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
-
-        # 确保 .swarm_results_{date}.json 存在（供 dashboard_renderer / ML 报告使用）
-        # run_swarm_scan() 已在扫描时写入完整版本；run_daily_scan() 路径则在此回写增强版
+    def _generate_synthetic_swarm_results(self, report):
+        """确保 .swarm_results 存在（回退路径：从 opportunities 合成）"""
         swarm_json = self.report_dir / f".swarm_results_{self.date_str}.json"
-        if not swarm_json.exists():
-            _sr_data = {}
-            # ── 获取 F&G 指数（全局，仅查一次）──
-            _fg_value, _fg_class = None, ""
-            try:
-                from fear_greed import get_fear_greed
-                _fg = get_fear_greed()
-                _fg_value = _fg.get("value")
-                _fg_class = _fg.get("classification", "")
-            except Exception:
-                pass
-            # ── 初始化期权分析器（复用缓存，开销极低）──
-            _opts_agent = None
-            try:
-                from options_analyzer import OptionsAgent
-                _opts_agent = OptionsAgent()
-            except ImportError:
-                pass
-            for _opp in report.get("opportunities", []):
-                _tk = _opp.get("ticker")
-                if not _tk:
-                    continue
-                _dir_raw = _opp.get("direction", "中性")
-                _dir_en = "bullish" if "多" in _dir_raw else ("bearish" if "空" in _dir_raw else "neutral")
-                # ── 期权数据（IV Rank / P/C Ratio / GEX 等）──
-                _oracle_details = {}
-                _opts_signal = _opp.get("options_signal", "")
-                if _opts_agent:
-                    try:
-                        _or = _opts_agent.analyze(_tk)
-                        _oracle_details = {
-                            "iv_rank": _or.get("iv_rank"),
-                            "iv_current": _or.get("iv_current"),
-                            "put_call_ratio": _or.get("put_call_ratio"),
-                            "gamma_exposure": _or.get("gamma_exposure"),
-                            "gamma_squeeze_risk": _or.get("gamma_squeeze_risk"),
-                            "flow_direction": _or.get("flow_direction"),
-                            "signal_summary": _or.get("signal_summary", _opts_signal),
-                        }
-                        _opts_signal = _or.get("signal_summary", _opts_signal)
-                    except Exception as _oe:
-                        _log.debug("期权数据获取失败 %s: %s", _tk, _oe)
-                # ── BuzzBee discovery（含 F&G）──
-                _buzz_disc = ""
-                if _fg_value is not None:
-                    _buzz_disc = f"F&G {_fg_value} ({_fg_class})"
-                # ── 价格数据 ──
-                _scout_details = {}
+        if swarm_json.exists():
+            return
+        _sr_data = {}
+        # ── 获取 F&G 指数（全局，仅查一次）──
+        _fg_value, _fg_class = None, ""
+        try:
+            from fear_greed import get_fear_greed
+            _fg = get_fear_greed()
+            _fg_value = _fg.get("value")
+            _fg_class = _fg.get("classification", "")
+        except Exception as _e_fg:
+            logging.getLogger("alpha_hive").debug("Fear & Greed 指数获取失败: %s", _e_fg)
+        # ── 初始化期权分析器（复用缓存，开销极低）──
+        _opts_agent = None
+        try:
+            from options_analyzer import OptionsAgent
+            _opts_agent = OptionsAgent()
+        except ImportError:
+            pass
+        for _opp in report.get("opportunities", []):
+            _tk = _opp.get("ticker")
+            if not _tk:
+                continue
+            _dir_raw = _opp.get("direction", "中性")
+            _dir_en = "bullish" if "多" in _dir_raw else ("bearish" if "空" in _dir_raw else "neutral")
+            # ── 期权数据（IV Rank / P/C Ratio / GEX 等）──
+            _oracle_details = {}
+            _opts_signal = _opp.get("options_signal", "")
+            if _opts_agent:
                 try:
-                    import yfinance as _yf_sr
-                    _h_sr = _yf_sr.Ticker(_tk).history(period="5d")
-                    if not _h_sr.empty:
-                        _scout_details["price"] = float(_h_sr["Close"].iloc[-1])
-                        if len(_h_sr) >= 2:
-                            _scout_details["momentum_5d"] = round(
-                                (_h_sr["Close"].iloc[-1] / _h_sr["Close"].iloc[0] - 1) * 100, 2
-                            )
-                except Exception:
-                    pass
-                _sr_data[_tk] = {
-                    "ticker": _tk,
-                    "final_score": _opp.get("opp_score", 5.0),
-                    "direction": _dir_en,
-                    "supporting_agents": _opp.get("supporting_agents", 0),
-                    "resonance": {
-                        "resonance_detected": bool(_opp.get("resonance")),
-                        "supporting_agents": _opp.get("supporting_agents", 0)
+                    _or = _opts_agent.analyze(_tk)
+                    _oracle_details = {
+                        "iv_rank": _or.get("iv_rank"),
+                        "iv_current": _or.get("iv_current"),
+                        "put_call_ratio": _or.get("put_call_ratio"),
+                        "gamma_exposure": _or.get("gamma_exposure"),
+                        "gamma_squeeze_risk": _or.get("gamma_squeeze_risk"),
+                        "flow_direction": _or.get("flow_direction"),
+                        "signal_summary": _or.get("signal_summary", _opts_signal),
+                    }
+                    _opts_signal = _or.get("signal_summary", _opts_signal)
+                except Exception as _oe:
+                    _log.debug("期权数据获取失败 %s: %s", _tk, _oe)
+            # ── BuzzBee discovery（含 F&G）──
+            _buzz_disc = ""
+            if _fg_value is not None:
+                _buzz_disc = f"F&G {_fg_value} ({_fg_class})"
+            # ── 价格数据 ──
+            _scout_details = {}
+            try:
+                import yfinance as _yf_sr
+                _h_sr = _yf_sr.Ticker(_tk).history(period="5d")
+                if not _h_sr.empty:
+                    _scout_details["price"] = float(_h_sr["Close"].iloc[-1])
+                    if len(_h_sr) >= 2:
+                        _scout_details["momentum_5d"] = round(
+                            (_h_sr["Close"].iloc[-1] / _h_sr["Close"].iloc[0] - 1) * 100, 2
+                        )
+            except Exception as _e_sr:
+                logging.getLogger("alpha_hive").debug("闪电模式价格获取失败 (%s): %s", _tk, _e_sr)
+            _sr_data[_tk] = {
+                "ticker": _tk,
+                "final_score": _opp.get("opp_score", 5.0),
+                "direction": _dir_en,
+                "supporting_agents": _opp.get("supporting_agents", 0),
+                "resonance": {
+                    "resonance_detected": bool(_opp.get("resonance")),
+                    "supporting_agents": _opp.get("supporting_agents", 0)
+                },
+                "dimension_scores": {},
+                "agent_details": {
+                    "OracleBeeEcho": {
+                        "score": _opp.get("opp_score", 5.0),
+                        "details": _oracle_details,
+                        "discovery": _opts_signal,
                     },
-                    "dimension_scores": {},
-                    "agent_details": {
-                        "OracleBeeEcho": {
-                            "score": _opp.get("opp_score", 5.0),
-                            "details": _oracle_details,
-                            "discovery": _opts_signal,
-                        },
-                        "BuzzBeeWhisper": {
-                            "score": 5.0,
-                            "discovery": _buzz_disc,
-                        },
-                        "ScoutBeeNova": {
-                            "score": _opp.get("opp_score", 5.0),
-                            "discovery": "",
-                            "details": _scout_details,
-                        },
-                        "BearBeeContrarian": {
-                            "score": 5.0,
-                            "discovery": "",
-                        },
+                    "BuzzBeeWhisper": {
+                        "score": 5.0,
+                        "discovery": _buzz_disc,
                     },
-                    "data_real_pct": 0,
-                }
-            if _sr_data:
-                try:
-                    with open(swarm_json, "w", encoding="utf-8") as _sf:
-                        json.dump(_sr_data, _sf, ensure_ascii=False, cls=SafeJSONEncoder)
-                    _log.info("已回写 .swarm_results（%d 标的，增强版）", len(_sr_data))
-                except (OSError, TypeError) as _sre:
-                    _log.debug("swarm_results 回写失败: %s", _sre)
+                    "ScoutBeeNova": {
+                        "score": _opp.get("opp_score", 5.0),
+                        "discovery": "",
+                        "details": _scout_details,
+                    },
+                    "BearBeeContrarian": {
+                        "score": 5.0,
+                        "discovery": "",
+                    },
+                },
+                "data_real_pct": 0,
+            }
+        if _sr_data:
+            try:
+                with open(swarm_json, "w", encoding="utf-8") as _sf:
+                    json.dump(_sr_data, _sf, ensure_ascii=False, cls=SafeJSONEncoder)
+                _log.info("已回写 .swarm_results（%d 标的，增强版）", len(_sr_data))
+            except (OSError, TypeError) as _sre:
+                _log.debug("swarm_results 回写失败: %s", _sre)
 
-        # 保存 Markdown 版本（仅保留最新一次运行结果，覆盖旧内容）
+    def _save_output_files(self, report, md_file):
+        """保存 MD + X 线程 + ML HTML + index.html + PWA + RSS"""
+        # Markdown
         with open(md_file, "w", encoding="utf-8") as f:
             f.write(report["markdown_report"])
 
-        # 清理当天旧的 X 线程文件（防止多次运行时数量不同导致残留叠加）
+        # 清理当天旧的 X 线程文件
         for old in self.report_dir.glob(f"alpha-hive-thread-{self.date_str}-*.txt"):
             old.unlink()
 
-        # 保存 X 线程版本
+        # X 线程
         for i, thread in enumerate(report["twitter_threads"], 1):
             thread_file = self.report_dir / f"alpha-hive-thread-{self.date_str}-{i}.txt"
             with open(thread_file, "w", encoding="utf-8") as f:
                 f.write(thread)
 
-        # 生成 ML 增强 HTML 报告（必须在 _generate_index_html 前完成，以便 ML 链接自动出现）
+        # ML 增强 HTML 报告（必须在 index.html 前完成）
         try:
             ml_tickers = self._generate_ml_reports(report)
             if ml_tickers:
@@ -2395,7 +1604,7 @@ class AlphaHiveDailyReporter:
         except (OSError, ValueError, KeyError, TypeError) as e:
             _log.warning("ML 报告批量生成出错: %s", e)
 
-        # 更新 GitHub Pages 仪表板
+        # GitHub Pages 仪表板
         try:
             html = self._generate_index_html(report)
             index_file = self.report_dir / "index.html"
@@ -2405,13 +1614,13 @@ class AlphaHiveDailyReporter:
         except (OSError, ValueError, KeyError, TypeError) as e:
             _log.warning("index.html 生成失败: %s", e)
 
-        # 生成 PWA 文件（manifest.json + sw.js）
+        # PWA 文件
         try:
             self._write_pwa_files()
         except (OSError, ValueError) as e:
             _log.warning("PWA 文件生成失败: %s", e)
 
-        # 生成 RSS 订阅源
+        # RSS
         try:
             rss_xml = self._generate_rss_xml(report)
             with open(self.report_dir / "rss.xml", "w", encoding="utf-8") as f:
@@ -2420,177 +1629,36 @@ class AlphaHiveDailyReporter:
         except (OSError, ValueError) as e:
             _log.warning("rss.xml 生成失败: %s", e)
 
-        _log.info("报告已保存：%s", md_file.name)
+    def save_report(self, report: Dict) -> str:
+        """保存报告到文件（MD / JSON / X线程 / index.html GitHub Pages）"""
+        json_file = self.report_dir / f"alpha-hive-daily-{self.date_str}.json"
+        md_file = self.report_dir / f"alpha-hive-daily-{self.date_str}.md"
 
+        self._merge_existing_report(report, json_file)
+
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
+
+        self._generate_synthetic_swarm_results(report)
+        self._save_output_files(report, md_file)
+
+        _log.info("报告已保存：%s", md_file.name)
         return str(md_file)
 
-    def _write_pwa_files(self):
-        """生成 manifest.json + sw.js"""
-        import json as _json2
+    def _write_pwa_files(self, *args, **kwargs):
+        """生成 PWA 文件（委托 report_web_assets）"""
+        from report_web_assets import write_pwa_files
+        return write_pwa_files(self, *args, **kwargs)
 
-        # ── manifest.json ──
-        icon_svg = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpolygon points='50,5 93,28 93,72 50,95 7,72 7,28' fill='%23F4A532'/%3E%3Cg transform='translate(26,24) scale(3)'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23805215'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23fff'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23fff'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23fff'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23fff'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23fff' opacity='.65'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23fff' opacity='.45'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23fff' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23fff' opacity='.65'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23fff' opacity='.45'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23fff' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23805215' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23805215' opacity='.5'/%3E%3C/g%3E%3C/svg%3E"
-        manifest = {
-            "name": "Alpha Hive 投资仪表板",
-            "short_name": "Alpha Hive",
-            "start_url": "./",
-            "display": "standalone",
-            "theme_color": "#F4A532",
-            "background_color": "#0e1117",
-            "icons": [
-                {"src": icon_svg, "sizes": "any", "type": "image/svg+xml"}
-            ]
-        }
-        manifest_path = self.report_dir / "manifest.json"
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            _json2.dump(manifest, f, ensure_ascii=False, indent=2)
+    def _generate_rss_xml(self, *args, **kwargs):
+        """生成 RSS XML（委托 report_web_assets）"""
+        from report_web_assets import generate_rss_xml
+        return generate_rss_xml(self, *args, **kwargs)
 
-        # ── sw.js ──
-        from datetime import datetime as _sw_dt
-        _sw_ts = _sw_dt.now().strftime("%Y%m%d-%H%M")
-        cache_name = f"alpha-hive-{_sw_ts}"
-        sw_content = f"""// Alpha Hive Service Worker - {_sw_ts}
-var CACHE_NAME='{cache_name}';
-var PRECACHE_URLS=['./', 'index.html', 'manifest.json',
-  'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'];
-
-self.addEventListener('install', function(e){{
-  self.skipWaiting();
-  e.waitUntil(
-    caches.open(CACHE_NAME).then(function(cache){{
-      return cache.addAll(PRECACHE_URLS);
-    }})
-  );
-}});
-
-self.addEventListener('activate', function(e){{
-  e.waitUntil(
-    caches.keys().then(function(names){{
-      return Promise.all(
-        names.filter(function(n){{ return n!==CACHE_NAME; }})
-             .map(function(n){{ return caches.delete(n); }})
-      );
-    }}).then(function(){{ return self.clients.claim(); }})
-  );
-}});
-
-self.addEventListener('fetch', function(e){{
-  var url=new URL(e.request.url);
-  // HTML 和 JSON 都用 network-first（确保内容最新）
-  if(url.pathname.endsWith('.html') || url.pathname.endsWith('.json') || url.pathname.endsWith('/')){{
-    e.respondWith(
-      fetch(e.request).then(function(r){{
-        var rc=r.clone();
-        caches.open(CACHE_NAME).then(function(c){{ c.put(e.request, rc); }});
-        return r;
-      }}).catch(function(){{ return caches.match(e.request); }})
-    );
-    return;
-  }}
-  // CDN/静态资源用 cache-first
-  e.respondWith(
-    caches.match(e.request).then(function(r){{
-      return r || fetch(e.request).then(function(resp){{
-        var rc=resp.clone();
-        caches.open(CACHE_NAME).then(function(c){{ c.put(e.request, rc); }});
-        return resp;
-      }});
-    }})
-  );
-}});
-"""
-        sw_path = self.report_dir / "sw.js"
-        with open(sw_path, "w", encoding="utf-8") as f:
-            f.write(sw_content)
-
-        _log.info("PWA 文件已生成：manifest.json + sw.js")
-
-    def _generate_rss_xml(self, report: Dict) -> str:
-        """生成 RSS 2.0 XML 订阅源"""
-        import glob as _glob
-        from xml.sax.saxutils import escape as _esc
-
-        from datetime import timezone as _tz
-        now_rfc = datetime.now(_tz.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
-        base_url = "https://wangmingjie36-creator.github.io/alpha-hive-deploy/"
-
-        items_xml = ""
-        # 当前简报作为第一条 item
-        opps = report.get("opportunities", [])
-        top3 = sorted(opps, key=lambda x: float(x.get("opp_score", 0)), reverse=True)[:3]
-        top3_str = ", ".join(
-            f"{o.get('ticker','')} ({float(o.get('opp_score',0)):.1f})" for o in top3
-        ) if top3 else "无新机会"
-        desc_text = f"今日 Top 3：{top3_str}"
-        items_xml += (
-            f"    <item>\n"
-            f"      <title>{_esc('Alpha Hive 日报 ' + self.date_str)}</title>\n"
-            f"      <link>{base_url}</link>\n"
-            f"      <description>{_esc(desc_text)}</description>\n"
-            f"      <pubDate>{now_rfc}</pubDate>\n"
-            f"      <guid>{base_url}#{self.date_str}</guid>\n"
-            f"    </item>\n"
-        )
-
-        # 历史 JSON 作为 items（最多 10 条）
-        hist_files = sorted(
-            _glob.glob(str(self.report_dir / "alpha-hive-daily-*.json")),
-            reverse=True
-        )
-        count = 0
-        for hf in hist_files:
-            from pathlib import Path as _P
-            hdate = _P(hf).stem.replace("alpha-hive-daily-", "")
-            if hdate == self.date_str:
-                continue
-            try:
-                with open(hf, encoding="utf-8") as fp:
-                    hrpt = json.load(fp)
-                hopps = hrpt.get("opportunities", [])
-                htop3 = sorted(hopps, key=lambda x: float(x.get("opp_score", 0)), reverse=True)[:3]
-                htop3_str = ", ".join(
-                    f"{o.get('ticker','')} ({float(o.get('opp_score',0)):.1f})" for o in htop3
-                ) if htop3 else "无机会"
-                items_xml += (
-                    f"    <item>\n"
-                    f"      <title>{_esc('Alpha Hive 日报 ' + hdate)}</title>\n"
-                    f"      <link>{base_url}</link>\n"
-                    f"      <description>{_esc('Top 3：' + htop3_str)}</description>\n"
-                    f"      <pubDate>{hdate}</pubDate>\n"
-                    f"      <guid>{base_url}#{hdate}</guid>\n"
-                    f"    </item>\n"
-                )
-                count += 1
-                if count >= 10:
-                    break
-            except (json.JSONDecodeError, KeyError, OSError, ValueError) as _rss_err:
-                _log.debug("RSS 历史条目解析失败: %s", _rss_err)
-                continue
-
-        return (
-            '<?xml version="1.0" encoding="UTF-8"?>\n'
-            '<rss version="2.0">\n'
-            '  <channel>\n'
-            '    <title>Alpha Hive 投资日报</title>\n'
-            f'    <link>{base_url}</link>\n'
-            '    <description>去中心化蜂群智能投资研究平台 — 每日投资机会扫描</description>\n'
-            '    <language>zh-CN</language>\n'
-            f'    <lastBuildDate>{now_rfc}</lastBuildDate>\n'
-            f'{items_xml}'
-            '  </channel>\n'
-            '</rss>\n'
-        )
-
-    def _generate_index_html(self, report: Dict) -> str:
-        """委托给 dashboard_renderer 模块生成仪表板 HTML"""
-        from dashboard_renderer import render_dashboard_html
-        return render_dashboard_html(
-            report=report,
-            date_str=self.date_str,
-            report_dir=self.report_dir,
-            opportunities=self.opportunities,
-        )
-
+    def _generate_index_html(self, *args, **kwargs):
+        """生成 index.html（委托 report_web_assets）"""
+        from report_web_assets import generate_index_html
+        return generate_index_html(self, *args, **kwargs)
 
 def main():
     """主入口"""

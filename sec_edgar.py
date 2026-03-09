@@ -22,7 +22,7 @@ except ImportError:
     requests = None
 
 from hive_logger import PATHS, get_logger, atomic_json_write, read_json_cache
-from resilience import get_session, sec_limiter, sec_breaker
+from resilience import get_session, sec_limiter, sec_breaker, singleton_client, NETWORK_ERRORS
 
 _log = get_logger("sec_edgar")
 
@@ -87,7 +87,7 @@ class SECEdgarClient:
                 v["ticker"].upper(): v["cik_str"]
                 for v in data.values()
             }
-        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+        except NETWORK_ERRORS as e:
             _log.warning("加载 SEC CIK 映射失败: %s", e)
 
     def get_cik(self, ticker: str) -> Optional[int]:
@@ -121,7 +121,7 @@ class SECEdgarClient:
                 resp.raise_for_status()
                 sec_breaker.record_success()
                 return resp
-            except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+            except NETWORK_ERRORS as e:
                 if _attempt < _max_retries:
                     time.sleep(1.5)
                     continue
@@ -183,7 +183,7 @@ class SECEdgarClient:
 
             return filings
 
-        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+        except NETWORK_ERRORS as e:
             _log.warning("获取 %s Form 4 列表失败: %s", ticker, e)
             return []
 
@@ -222,7 +222,7 @@ class SECEdgarClient:
 
             return self._parse_xml_content(resp.text)
 
-        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, ET.ParseError) as e:
+        except (*NETWORK_ERRORS, ET.ParseError) as e:
             # 尝试备用路径（直接使用完整 primaryDocument）
             try:
                 acc_no_dashes = accession_number.replace("-", "")
@@ -233,7 +233,7 @@ class SECEdgarClient:
                 if resp is None:
                     return None
                 return self._parse_xml_content(resp.text)
-            except (ConnectionError, TimeoutError, OSError, ValueError, ET.ParseError) as e2:
+            except (*NETWORK_ERRORS, ET.ParseError) as e2:
                 _log.warning("Form4 XML 主路径+备用路径均失败: primary=%s fallback=%s", e, e2)
                 return None
 
@@ -556,15 +556,11 @@ class SECEdgarClient:
 
 # ==================== 便捷函数 ====================
 
-_client: Optional[SECEdgarClient] = None
-_client_lock = threading.Lock()
+_holder: dict = {}
+_holder_lock = threading.Lock()
 
 
 def get_insider_trades(ticker: str, days: int = 30) -> Dict:
     """便捷函数：获取内幕交易摘要"""
-    global _client
-    if _client is None:
-        with _client_lock:
-            if _client is None:
-                _client = SECEdgarClient()
-    return _client.get_insider_trades(ticker, days=days)
+    client = singleton_client(_holder_lock, SECEdgarClient, _holder)
+    return client.get_insider_trades(ticker, days=days)

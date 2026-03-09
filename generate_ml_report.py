@@ -887,22 +887,33 @@ def main():
         try:
             _log.info("生成 %s ML 增强报告...", ticker)
 
-            # 获取该标的的数据（优先 realtime_metrics，回退 yfinance 实时）
+            # 获取该标的的数据（优先 realtime_metrics → swarm 缓存 → yfinance 实时）
             ticker_data = metrics.get(ticker)
             if not ticker_data or not ticker_data.get("sources", {}).get("yahoo_finance", {}).get("current_price"):
-                # 从 yfinance 获取真实价格
                 _real_price = 100.0
                 _real_change = 0.0
+                # 优先复用 swarm 的 yfinance 缓存（避免重复 API 调用）
                 try:
-                    import yfinance as _yf
-                    _t = _yf.Ticker(ticker)
-                    _hist = _t.history(period="5d")
-                    if not _hist.empty:
-                        _real_price = float(_hist["Close"].iloc[-1])
-                        if len(_hist) >= 2:
-                            _real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[-2] - 1) * 100
-                except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, IndexError) as e:
-                    _log.debug("yfinance price fetch failed for ticker: %s", e)
+                    from swarm_agents import get_cached_stock_data as _get_cached
+                    _cached = _get_cached(ticker)
+                except ImportError:
+                    _cached = None
+                if _cached and _cached.get("price", 0) > 0:
+                    _real_price = _cached["price"]
+                    _real_change = _cached.get("momentum_5d", 0.0)
+                else:
+                    try:
+                        import yfinance as _yf
+                        _t = _yf.Ticker(ticker)
+                        _hist = _t.history(period="5d")
+                        if not _hist.empty:
+                            _real_price = float(_hist["Close"].iloc[-1])
+                            if len(_hist) >= 5:
+                                _real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[-5] - 1) * 100
+                            elif len(_hist) >= 2:
+                                _real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[0] - 1) * 100
+                    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, IndexError) as e:
+                        _log.debug("yfinance price fetch failed for ticker: %s", e)
                 ticker_data = {
                     "ticker": ticker,
                     "sources": {

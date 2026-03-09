@@ -8,6 +8,8 @@ Alpha Hive Dashboard Renderer
 import json
 import logging
 from typing import Dict, List
+import html as _html
+import re as _re
 
 _log = logging.getLogger("alpha_hive.dashboard_renderer")
 
@@ -27,27 +29,506 @@ def _load_tpl(name: str) -> str:
 # 预加载 CSS（模块级缓存）
 _DASHBOARD_CSS = _load_tpl("dashboard.css")
 
-def render_dashboard_html(report: Dict, date_str: str,
-                         report_dir, opportunities: List,
-                         dashboard_css: str = None) -> str:
-    """
-    从 swarm report + .swarm_results_*.json 生成完整 GitHub Pages 仪表板。
+# ── 共享方向标签映射 ──
+_DIR_CN   = {"bullish": "看多", "bearish": "看空", "neutral": "中性",
+             "看多": "看多", "看空": "看空", "中性": "中性"}  # 同时接受中英文 key
+_DIR_ICON = {"bullish": "🟢", "bearish": "🔴", "neutral": "🟡"}
 
-    Args:
-        report: 蜂群扫描报告 dict
-        date_str: 日期字符串 (YYYY-MM-DD)
-        report_dir: 报告目录 (Path)
-        opportunities: OpportunityItem 列表
-        dashboard_css: CSS 字符串（默认使用 DASHBOARD_CSS）
-    """
-    dashboard_css = dashboard_css or _DASHBOARD_CSS
+# ── 方向归一化（中文/英文 → 统一英文） ──
+_DIR_TO_EN = {"看多": "bullish", "看空": "bearish", "中性": "neutral",
+              "bullish": "bullish", "bearish": "bearish", "neutral": "neutral"}
+def _norm_dir(d: str) -> str:
+    """Normalize direction to English canonical form."""
+    return _DIR_TO_EN.get(str(d).strip().lower(), str(d).strip().lower())
 
-    from datetime import datetime as _dt
-    import html as _html
-    from pathlib import Path as _Path
+# ── 维度数据质量标签 ──
+_DIM_DQ_LABELS = {
+    "signal": "信号", "catalyst": "催化", "sentiment": "情绪",
+    "odds": "赔率", "risk_adj": "风险",
+}
 
-    # --- 准确率数据加载 ---
-    _acc_stats = {}
+# ── 维度 Tooltip ──
+_DIM_TOOLTIPS = {
+    "信号": "聪明钱交易信号（SEC 内幕交易、机构持仓变化）",
+    "催化": "未来催化剂事件清晰度（财报、FDA、产品发布）",
+    "情绪": "市场舆情方向与质量（新闻、Reddit）",
+    "赔率": "市场赔率错配（期权 IV、Put/Call）",
+    "风险": "风险调整评估（回撤、流动性、拥挤度）",
+}
+
+# ── 域名映射 ──
+_DOMAINS = {
+    "MSFT": "microsoft.com", "NVDA": "nvidia.com",  "TSLA": "tesla.com",
+    "META": "meta.com",       "AMZN": "amazon.com",  "RKLB": "rocketlabusa.com",
+    "BILI": "bilibili.com",   "VKTX": "vikingtherapeutics.com", "CRCL": "circle.com",
+    "GOOGL": "google.com",    "AAPL": "apple.com",   "NFLX": "netflix.com",
+}
+
+
+def _sc_cls(score):
+    return "sc-h" if score >= 7.0 else ("sc-m" if score >= 5.5 else "sc-l")
+
+
+def _build_dim_dq_html(dim_dq: dict) -> str:
+    """生成维度数据质量迷你条形图"""
+    if not dim_dq:
+        return ""
+    items = []
+    for dim, label in _DIM_DQ_LABELS.items():
+        pct = dim_dq.get(dim)
+        if pct is None:
+            continue
+        color = "#28a745" if pct >= 80 else ("#ffc107" if pct >= 50 else "#dc3545")
+        items.append(
+            f'<span class="dq-item" title="{label} 数据质量 {pct:.0f}%">'
+            f'<span class="dq-lbl">{label}</span>'
+            f'<span class="dq-bar"><span class="dq-fill" style="width:{pct:.0f}%;background:{color};"></span></span>'
+            f'<span class="dq-val">{pct:.0f}%</span>'
+            f'</span>'
+        )
+    if not items:
+        return ""
+    return '<div class="dim-dq-row">' + "".join(items) + '</div>'
+
+
+def _build_plain_insight(ticker: str, sd: dict) -> str:
+    """基于 Agent 数据生成通俗中文一句话（规则模板，无需 LLM）"""
+    ad = sd.get("agent_details", {})
+    parts = []
+    # 1. 内幕信号
+    insider = ad.get("ScoutBeeNova", {}).get("details", {}).get("insider", {})
+    insider_sent = insider.get("sentiment", "neutral")
+    if insider_sent == "bullish":
+        parts.append("公司高管在买入股票")
+    elif insider_sent == "bearish":
+        amt = insider.get("dollar_sold", 0)
+        if amt and amt > 1_000_000:
+            parts.append(f"高管近期卖出${amt/1e6:.1f}M")
+        elif amt and amt > 0:
+            parts.append(f"高管近期卖出${amt:,.0f}")
+        else:
+            parts.append("高管在卖出股票")
+    # 2. 期权信号
+    oracle_dir = ad.get("OracleBeeEcho", {}).get("direction", "neutral")
+    if oracle_dir == "bullish":
+        parts.append("期权市场看涨")
+    elif oracle_dir == "bearish":
+        parts.append("期权市场偏空")
+    # 3. 催化剂（最近的未来事件）
+    cats = ad.get("ChronosBeeHorizon", {}).get("details", {}).get("catalysts", [])
+    future_cats = [c for c in cats
+                   if isinstance(c.get("days_until"), (int, float)) and c["days_until"] > 0]
+    if future_cats:
+        nearest = min(future_cats, key=lambda c: c["days_until"])
+        days = int(nearest["days_until"])
+        _emap = {"earnings": "财报", "dividend": "分红",
+                 "fda": "FDA审批", "conference": "行业大会"}
+        ename = _emap.get(nearest.get("type", ""), nearest.get("event", "")[:20])
+        if days <= 7:
+            parts.append(f"{ename}{days}天后")
+        elif days <= 30:
+            parts.append(f"{ename}约{days}天后")
+    # 4. 动量上下文
+    momentum = ad.get("BuzzBeeWhisper", {}).get("details", {}).get("momentum_5d")
+    if momentum is not None:
+        if momentum < -3:
+            parts.append("近5日大幅下跌")
+        elif momentum < -1:
+            parts.append("近期小幅回调")
+        elif momentum > 3:
+            parts.append("近5日大幅上涨")
+        elif momentum > 1:
+            parts.append("近期稳步上涨")
+    # 5. 冲突提示（内幕卖出 + 综合看多）
+    overall_dir = sd.get("direction", "neutral")
+    if insider_sent == "bearish" and overall_dir == "bullish":
+        parts.append("但高管在减持")
+    elif insider_sent == "bullish" and overall_dir == "bearish":
+        parts.append("但高管在增持")
+    if not parts:
+        # Fallback：取第一个 agent 的 discovery 首段
+        for agt in ["ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper"]:
+            d = ad.get(agt, {}).get("discovery", "")
+            if d:
+                return d.split("|")[0].strip()[:80]
+        return ""
+    return "，".join(parts)
+
+
+def _risk_badge(ticker: str, sd: dict) -> str:
+    """多因子风险评分 -> low/med/high risk badge"""
+    risk_pts = 0
+    ad = sd.get("agent_details", {})
+    # F1: GuardBee 分数（低=高风险）
+    guard = float(ad.get("GuardBeeSentinel", {}).get("score", 5.0))
+    if guard <= 3.0:
+        risk_pts += 3
+    elif guard <= 5.0:
+        risk_pts += 1
+    # F2: 内幕卖出
+    if ad.get("ScoutBeeNova", {}).get("details", {}).get(
+            "insider", {}).get("sentiment") == "bearish":
+        risk_pts += 2
+    # F3: 拥挤度
+    crowding = ad.get("ScoutBeeNova", {}).get("details", {}).get("crowding_score")
+    if crowding is not None:
+        if crowding > 60:
+            risk_pts += 2
+        elif crowding > 40:
+            risk_pts += 1
+    # F4: IV Rank（高波动）
+    iv = ad.get("OracleBeeEcho", {}).get("details", {}).get("iv_rank")
+    if iv is not None:
+        if iv > 70:
+            risk_pts += 2
+        elif iv > 50:
+            risk_pts += 1
+    # F5: risk_adj 维度分
+    radj = float(sd.get("dimension_scores", {}).get("risk_adj", 5.0))
+    if radj <= 3.0:
+        risk_pts += 2
+    elif radj <= 5.0:
+        risk_pts += 1
+    if risk_pts >= 7:
+        return '<span class="risk-badge risk-high">高风险</span>'
+    elif risk_pts >= 4:
+        return '<span class="risk-badge risk-med">中风险</span>'
+    return '<span class="risk-badge risk-low">低风险</span>'
+
+
+def _catalyst_countdown(ticker: str, sd: dict) -> str:
+    """从 ChronosBeeHorizon 提取最近催化剂，生成倒计时 HTML"""
+    cats = sd.get("agent_details", {}).get(
+        "ChronosBeeHorizon", {}).get("details", {}).get("catalysts", [])
+    future = [c for c in cats
+              if isinstance(c.get("days_until"), (int, float)) and c["days_until"] > 0]
+    if not future:
+        return ""
+    nearest = min(future, key=lambda c: c["days_until"])
+    days = int(nearest["days_until"])
+    _emap = {"earnings": "财报", "dividend": "分红",
+             "fda": "FDA审批", "conference": "行业大会"}
+    ename = _emap.get(nearest.get("type", ""), nearest.get("event", "")[:25])
+    if days <= 3:
+        ucls = "cat-urgent"
+    elif days <= 7:
+        ucls = "cat-soon"
+    else:
+        ucls = "cat-normal"
+    tstr = f"{days}天后" if days <= 14 else f"约{days // 7}周后"
+    return (f'<div class="catalyst-cd {ucls}">'
+            f'<span class="cat-icon">\U0001f4c5</span>'
+            f'<span class="cat-text">{_html.escape(ename)} {tstr}</span>'
+            f'</div>')
+
+
+def _signal_conflicts(ticker: str, sd: dict) -> str:
+    """检测 Agent 间信号矛盾，返回黄色预警 HTML"""
+    ad = sd.get("agent_details", {})
+    dirs = sd.get("agent_directions", {})
+    overall = sd.get("direction", "neutral")
+    conflicts = []
+    # C1: 内幕卖出 vs 整体看多
+    insider_sent = ad.get("ScoutBeeNova", {}).get("details", {}).get(
+        "insider", {}).get("sentiment", "neutral")
+    if insider_sent == "bearish" and overall == "bullish":
+        amt = ad.get("ScoutBeeNova", {}).get("details", {}).get(
+            "insider", {}).get("dollar_sold", 0)
+        amt_str = f"(${amt / 1e6:.1f}M)" if amt and amt > 1_000_000 else ""
+        conflicts.append(f"高管在卖出{amt_str} vs 整体看多")
+    # C2: 期权方向 vs 整体
+    oracle_dir = dirs.get("OracleBeeEcho", "neutral")
+    if oracle_dir == "bearish" and overall == "bullish":
+        conflicts.append("期权市场偏空 vs 整体看多")
+    elif oracle_dir == "bullish" and overall == "bearish":
+        conflicts.append("期权市场看涨 vs 整体看空")
+    # C3: Bear strength 高 + 综合看多
+    bear_str = float(sd.get("bear_strength", 0))
+    if bear_str >= 3.0 and overall == "bullish":
+        conflicts.append(f"看空力度较强({bear_str:.1f}/10)")
+    if not conflicts:
+        return ""
+    items = "；".join(conflicts[:2])
+    return (f'<div class="conflict-warn">'
+            f'<span class="cw-icon">\u26a0\ufe0f</span>'
+            f'<span class="cw-text">信号冲突：{_html.escape(items)}</span>'
+            f'</div>')
+
+
+def _md2html(md_text: str) -> str:
+    """Markdown -> HTML 轻量渲染"""
+    def _inline(s: str) -> str:
+        """处理行内格式：加粗、斜体、代码、链接"""
+        s = _html.escape(s)
+        # 链接 [text](url) — 在 escape 之后处理（url 已被 escape）
+        s = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)',
+                    r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
+        # 内联代码 `code`
+        s = _re.sub(r'`([^`]+)`', r'<code>\1</code>', s)
+        # 加粗 **text**
+        s = _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', s)
+        # 斜体 *text*（避免误伤 **)
+        s = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', s)
+        return s
+
+    lines = md_text.split('\n')
+    out = []
+    in_ul = False      # 无序列表
+    in_ol = False      # 有序列表
+    in_sub = False     # 缩进嵌套列表
+    in_table = False   # markdown 表格
+    table_rows = []
+    table_has_header = False
+
+    def _close_lists():
+        nonlocal in_ul, in_ol, in_sub
+        if in_sub:  out.append('</ul>');  in_sub = False
+        if in_ul:   out.append('</ul>');  in_ul = False
+        if in_ol:   out.append('</ol>');  in_ol = False
+
+    for ln in lines:
+        # ── 缩进嵌套列表（2/4 空格 + -/+/*)
+        if _re.match(r'^( {2,4})[*+\-] ', ln):
+            if not in_sub:
+                out.append('<ul class="sub-ul">')
+                in_sub = True
+            out.append('<li>' + _inline(_re.sub(r'^ {2,4}[*+\-] ', '', ln)) + '</li>')
+            continue
+        if in_sub:
+            out.append('</ul>')
+            in_sub = False
+
+        # ── 有序列表 1. 2. 3.
+        _ol_m = _re.match(r'^(\d+)\. (.+)', ln)
+        if _ol_m:
+            if in_ul: out.append('</ul>'); in_ul = False
+            if not in_ol:
+                out.append('<ol>')
+                in_ol = True
+            out.append('<li>' + _inline(_ol_m.group(2)) + '</li>')
+            continue
+
+        # ── 无序列表 - / + / *
+        if _re.match(r'^[*+\-] ', ln):
+            if in_ol: out.append('</ol>'); in_ol = False
+            if not in_ul:
+                out.append('<ul>')
+                in_ul = True
+            out.append('<li>' + _inline(ln[2:]) + '</li>')
+            continue
+
+        # 非列表行：关闭打开的列表
+        if (in_ul or in_ol) and not ln.startswith(' '):
+            _close_lists()
+
+        # ── Markdown 表格 | col | col |
+        _stripped = ln.strip()
+        if _stripped.startswith('|') and _stripped.endswith('|') and _stripped.count('|') >= 3:
+            cells = [c.strip() for c in _stripped.strip('|').split('|')]
+            # 分隔行 |---|:---:|---:| → 标记 header
+            if all(_re.match(r'^:?-+:?$', c) for c in cells if c):
+                table_has_header = True
+                continue
+            if not in_table:
+                in_table = True
+                table_rows = []
+                table_has_header = False
+            table_rows.append(cells)
+            continue
+        if in_table:
+            # 非表格行 → 输出已收集的表格
+            tbl = '<div class="table-wrap"><table class="md-table">'
+            if table_has_header and len(table_rows) >= 1:
+                tbl += '<thead><tr>' + ''.join('<th>' + _inline(h) + '</th>' for h in table_rows[0]) + '</tr></thead>'
+                tbl += '<tbody>' + ''.join(
+                    '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
+                    for r in table_rows[1:]
+                ) + '</tbody>'
+            else:
+                tbl += '<tbody>' + ''.join(
+                    '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
+                    for r in table_rows
+                ) + '</tbody>'
+            tbl += '</table></div>'
+            out.append(tbl)
+            in_table = False
+            table_rows = []
+            table_has_header = False
+
+        # ── 标题
+        if ln.startswith('#### '):
+            out.append('<h4>' + _inline(ln[5:]) + '</h4>')
+        elif ln.startswith('### '):
+            out.append('<h3>' + _inline(ln[4:]) + '</h3>')
+        elif ln.startswith('## '):
+            out.append('<h2>' + _inline(ln[3:]) + '</h2>')
+        elif ln.startswith('# '):
+            out.append('<h1>' + _inline(ln[2:]) + '</h1>')
+        # ── 引用块 > text
+        elif ln.startswith('> '):
+            out.append('<blockquote>' + _inline(ln[2:]) + '</blockquote>')
+        # ── 分隔线
+        elif _re.match(r'^-{3,}$|^\*{3,}$|^_{3,}$', ln.strip()):
+            out.append('<hr>')
+        # ── 空行
+        elif not ln.strip():
+            if not (in_ul or in_ol or in_sub):
+                out.append('<br>')
+        # ── 普通段落
+        else:
+            out.append('<p>' + _inline(ln) + '</p>')
+
+    _close_lists()
+    # 关闭残余表格（若表格是最后一段内容）
+    if in_table and table_rows:
+        tbl = '<div class="table-wrap"><table class="md-table">'
+        if table_has_header and len(table_rows) >= 1:
+            tbl += '<thead><tr>' + ''.join('<th>' + _inline(h) + '</th>' for h in table_rows[0]) + '</tr></thead>'
+            tbl += '<tbody>' + ''.join(
+                '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
+                for r in table_rows[1:]
+            ) + '</tbody>'
+        else:
+            tbl += '<tbody>' + ''.join(
+                '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
+                for r in table_rows
+            ) + '</tbody>'
+        tbl += '</table></div>'
+        out.append(tbl)
+    return '\n'.join(out)
+
+
+def _pred_list_html(preds, is_best=True):
+    if not preds:
+        return '<div style="font-size:.82em;color:var(--ts);padding:8px 0">数据积累中...</div>'
+    h = '<ul class="pred-list">'
+    for p in preds:
+        _ret = p.get("return_t7", 0) or 0
+        _rcls = "pred-ret-up" if _ret > 0 else "pred-ret-dn"
+        _dir = _DIR_CN.get(p.get("direction", ""), p.get("direction", ""))
+        h += (f'<li class="pred-item">'
+              f'<span class="pred-tk">{p.get("ticker","")}</span>'
+              f'<span class="pred-date">{p.get("date","")[:10]} · {_dir}</span>'
+              f'<span class="pred-ret {_rcls}">{_ret:+.1f}%</span>'
+              f'</li>')
+    h += '</ul>'
+    return h
+
+
+def _detail(ticker: str, swarm_detail: dict) -> dict:
+    """提取单个 ticker 的详细指标（含 GEX / 期权流向 / 维度数据质量）"""
+    sd = swarm_detail.get(ticker, {})
+    ad = sd.get("agent_details", {})
+    oracle = ad.get("OracleBeeEcho", {}).get("details", {})
+    scout_disc = ad.get("ScoutBeeNova", {}).get("discovery", "")
+    bear_score = ad.get("BearBeeContrarian", {}).get("score", 0.0)
+    ab = sd.get("agent_breakdown", {})
+    iv_rank = oracle.get("iv_rank", None)
+    pc = oracle.get("put_call_ratio", None)
+    real_pct = sd.get("data_real_pct", None)
+    # ── 新增期权信号字段（#1）──
+    gex = oracle.get("gamma_exposure", None)
+    flow_dir = oracle.get("flow_direction", None)
+    gsr = oracle.get("gamma_squeeze_risk", None)
+    iv_current = oracle.get("iv_current", None)
+    signal_sum = oracle.get("signal_summary", "")
+    # ── 价格数据（#10）── fallback: ScoutBee → OracleBee discovery → yfinance
+    scout_det = ad.get("ScoutBeeNova", {}).get("details", {})
+    _price_raw = scout_det.get("price")
+    _momentum_raw = scout_det.get("momentum_5d")
+    # Fallback 1: 从 OracleBee discovery 解析价格（格式 "... | $XX.XX"）
+    if _price_raw is None:
+        _oracle_disc = ad.get("OracleBeeEcho", {}).get("discovery", "")
+        _pm = _re.search(r'\$(\d+(?:\.\d+)?)', _oracle_disc)
+        if _pm:
+            _price_raw = float(_pm.group(1))
+    # Fallback 2: 直接从 yfinance 获取
+    if _price_raw is None:
+        try:
+            import yfinance as _yf
+            _h = _yf.Ticker(ticker).history(period="5d")
+            if not _h.empty:
+                _price_raw = float(_h["Close"].iloc[-1])
+                if len(_h) >= 2 and _momentum_raw is None:
+                    _momentum_raw = (_h["Close"].iloc[-1] / _h["Close"].iloc[0] - 1) * 100
+        except (ValueError, IndexError, KeyError, AttributeError):
+            pass
+    # ── 维度数据质量（#3）──
+    dim_dq = sd.get("dim_data_quality", {})
+    # 内幕信号：取 ScoutBeeNova discovery 第一个 | 段
+    insider_hint = scout_disc.split("|")[0].strip() if scout_disc else ""
+    insider_color = "#28a745" if "买入" in insider_hint else ("#dc3545" if "卖出" in insider_hint else "#666")
+    # 期权流向颜色
+    _flow_colors = {"bullish": "#28a745", "bearish": "#dc3545", "neutral": "#666"}
+    flow_color = _flow_colors.get(flow_dir, "#666")
+    # GEX 格式化（已除以1e6，≥1 显示 M，否则显示 k）
+    if gex is None:
+        gex_str = "-"
+    elif abs(gex) >= 1.0:
+        gex_str = f"{gex:+.1f}M"
+    else:
+        gex_str = f"{gex*1000:+.1f}k"
+    return {
+        "iv_rank": f"{iv_rank:.1f}" if iv_rank is not None else "-",
+        "pc": f"{pc:.2f}" if pc is not None else "-",
+        "bear_score": float(bear_score),
+        "bullish": ab.get("bullish", 0),
+        "bearish_v": ab.get("bearish", 0),
+        "neutral_v": ab.get("neutral", 0),
+        "insider_hint": _html.escape(insider_hint[:35]) if insider_hint else "",
+        "insider_color": insider_color,
+        "real_pct": f"{real_pct:.0f}%" if real_pct is not None else "-",
+        # 新期权字段
+        "gex": gex_str,
+        "flow_dir": flow_dir or "-",
+        "flow_color": flow_color,
+        "gsr": gsr or "-",
+        "iv_current": f"{iv_current:.1f}%" if iv_current is not None else "-",
+        "signal_sum": _html.escape(signal_sum[:45]) if signal_sum else "",
+        # 维度数据质量
+        "dim_dq": dim_dq,
+        # 价格数据
+        "price": round(float(_price_raw), 2) if _price_raw is not None else None,
+        "momentum_5d": round(float(_momentum_raw), 2) if _momentum_raw is not None else None,
+    }
+
+
+def _radar_data(ticker: str, swarm_detail: dict) -> list:
+    """生成单个 ticker 的雷达图 5 维数据 [signal, catalyst, sentiment, odds, risk_adj]"""
+    sd  = swarm_detail.get(ticker, {})
+    dim = sd.get("dimension_scores", {})
+    if dim:
+        signal    = float(dim.get("signal",   5.0)) * 10
+        catalyst  = float(dim.get("catalyst", 5.0)) * 10
+        sentiment = float(dim.get("sentiment",5.0)) * 10
+        odds      = float(dim.get("odds",     5.0)) * 10
+        risk_adj  = float(dim.get("risk_adj", 5.0)) * 10
+    else:
+        ad = sd.get("agent_details", {})
+        signal   = float(ad.get("ScoutBeeNova",     {}).get("self_score", 5.0)) * 10
+        catalyst = float(ad.get("ChronosBeeHorizon",{}).get("self_score", 5.0)) * 10
+        oracle_det = ad.get("OracleBeeEcho", {}).get("details", {})
+        pc_r    = oracle_det.get("put_call_ratio", 1.0) or 1.0
+        odds    = max(0.0, min(100.0, (2.0 - float(pc_r)) / 1.5 * 100))
+        buzz_d  = ad.get("BuzzBeeWhisper", {}).get("discovery", "")
+        sm3     = _re.search(r'情绪\s*([\d.]+)%', buzz_d)
+        sentiment = float(sm3.group(1)) if sm3 else 50.0
+        bear_s  = float(ad.get("BearBeeContrarian", {}).get("score", 5.0))
+        risk_adj = max(0.0, (10.0 - bear_s) * 10)
+    return [round(min(100, max(0, signal)),   1),
+            round(min(100, max(0, catalyst)), 1),
+            round(min(100, max(0, sentiment)),1),
+            round(min(100, max(0, odds)),     1),
+            round(min(100, max(0, risk_adj)), 1)]
+
+
+# ---------------------------------------------------------------------------
+# Extracted helpers (formerly inlined in render_dashboard_html)
+# ---------------------------------------------------------------------------
+
+def _load_accuracy_data() -> dict:
+    """Load backtester accuracy stats and enhanced metrics."""
+    _acc_stats: dict = {}
     try:
         from backtester import PredictionStore
         _ps = PredictionStore()
@@ -62,9 +543,9 @@ def render_dashboard_html(report: Dict, date_str: str,
     _acc_by_ticker     = _acc_stats.get("by_ticker", {})
 
     # F11: 增强准确率数据（胜率走势、最佳/最差预测、Sharpe）
-    _acc_weekly_trend = []  # [{week, accuracy, total}]
-    _acc_best3 = []   # [{ticker, date, direction, score, return_t7}]
-    _acc_worst3 = []
+    _acc_weekly_trend: list = []  # [{week, accuracy, total}]
+    _acc_best3: list = []   # [{ticker, date, direction, score, return_t7}]
+    _acc_worst3: list = []
     _acc_sharpe = 0.0
     _acc_max_dd = 0.0
     _acc_win_streak = 0
@@ -140,13 +621,522 @@ def render_dashboard_html(report: Dict, date_str: str,
     except Exception as _e11:
         _log.debug("F11 准确率增强数据加载失败: %s", _e11)
 
+    return {
+        "stats": _acc_stats,
+        "total_checked": _acc_total_checked,
+        "overall": _acc_overall,
+        "avg_return": _acc_avg_return,
+        "correct": _acc_correct,
+        "by_dir": _acc_by_dir,
+        "by_ticker": _acc_by_ticker,
+        "weekly_trend": _acc_weekly_trend,
+        "best3": _acc_best3,
+        "worst3": _acc_worst3,
+        "sharpe": _acc_sharpe,
+        "max_dd": _acc_max_dd,
+        "win_streak": _acc_win_streak,
+    }
+
+
+def _load_historical_data(report_dir, date_str: str,
+                          all_tickers_sorted: list,
+                          opp_by_ticker: dict,
+                          swarm_detail: dict,
+                          fg_value) -> dict:
+    """Load historical report JSON files, build trend data and F&G history."""
+    _hist_entries: list = []
+    _fg_history = [{"date": date_str, "value": fg_value}]  # 当天 F&G
+    _trend_data: dict = {}  # {ticker: [{date, score}, ...]}
+    _hist_full: dict = {}   # {date: [{ticker, score, direction}, ...]}  for diff
+    # 当天趋势数据
+    for _tt in all_tickers_sorted:
+        _tts = float(opp_by_ticker.get(_tt, {}).get("opp_score") or swarm_detail.get(_tt, {}).get("final_score", 0))
+        _trend_data.setdefault(_tt, []).append({"date": date_str, "score": round(_tts, 1)})
+    _hist_full[date_str] = [
+        {"ticker": _tt, "score": round(float(opp_by_ticker.get(_tt, {}).get("opp_score") or swarm_detail.get(_tt, {}).get("final_score", 0)), 1),
+         "direction": _norm_dir(opp_by_ticker.get(_tt, {}).get("direction") or swarm_detail.get(_tt, {}).get("direction", "neutral"))}
+        for _tt in all_tickers_sorted
+    ]
+    try:
+        import glob as _glob
+        _hist_files = sorted(
+            _glob.glob(str(report_dir / "alpha-hive-daily-*.json")),
+            reverse=True  # 最新在前
+        )
+        for _hf in _hist_files:
+            _hdate = _Path_mod(_hf).stem.replace("alpha-hive-daily-", "")
+            if _hdate == date_str:
+                continue  # 今天已在主面板展示
+            try:
+                with open(_hf, encoding="utf-8") as _hfp:
+                    _hrpt = json.load(_hfp)
+                _hopps = _hrpt.get("opportunities", [])
+                _hmeta = _hrpt.get("swarm_metadata", {})
+                _hn    = _hmeta.get("tickers_analyzed", len(_hopps))
+                # 全部 opps 数据（用于趋势 + diff）
+                _hall_opps = [
+                    {"ticker": o.get("ticker",""), "score": float(o.get("opp_score",0)),
+                     "direction": _norm_dir(o.get("direction","neutral"))}
+                    for o in _hopps if o.get("ticker")
+                ]
+                # 趋势数据：每个 ticker 每天的评分
+                for _ho in _hall_opps:
+                    _trend_data.setdefault(_ho["ticker"], []).append(
+                        {"date": _hdate, "score": round(_ho["score"], 1)})
+                # diff 全量数据
+                _hist_full[_hdate] = _hall_opps
+                # 按 opp_score 降序取 Top 3
+                _htop3 = sorted(_hall_opps, key=lambda x: x["score"], reverse=True)[:3]
+                _havg  = sum(o["score"] for o in _htop3) / len(_htop3) if _htop3 else 0
+                # 可用的 ML 报告
+                _hml   = [t for t in [o["ticker"] for o in _hopps]
+                          if _Path_mod(report_dir / f"alpha-hive-{t}-ml-enhanced-{_hdate}.html").exists()]
+                # 提取 F&G 值（从 swarm_results）
+                _hfg_val = None
+                try:
+                    _hsr_path = report_dir / f".swarm_results_{_hdate}.json"
+                    if _hsr_path.exists():
+                        with open(_hsr_path, encoding="utf-8") as _hsr_fp:
+                            _hsr = json.load(_hsr_fp)
+                        for _htk in _hsr:
+                            _hbuzz = _hsr[_htk].get("agent_details", {}).get("BuzzBeeWhisper", {}).get("discovery", "")
+                            _hfg_m = _re.search(r'F&G\s*(\d+)', _hbuzz)
+                            if _hfg_m:
+                                _hfg_val = int(_hfg_m.group(1))
+                                break
+                except (KeyError, ValueError, IndexError, TypeError):
+                    pass
+                if _hfg_val is not None:
+                    _fg_history.append({"date": _hdate, "value": _hfg_val})
+                _hist_entries.append({
+                    "date": _hdate, "n": _hn, "top3": _htop3,
+                    "avg": _havg, "ml_tickers": _hml,
+                    "has_md":   _Path_mod(report_dir / f"alpha-hive-daily-{_hdate}.md").exists(),
+                    "has_json": _Path_mod(report_dir / f"alpha-hive-daily-{_hdate}.json").exists(),
+                })
+            except Exception as _he:
+                _log.debug("历史报告 %s 解析失败: %s", _hdate, _he)
+    except Exception as _hle:
+        _log.debug("历史时间线加载失败: %s", _hle)
+
+    # 排序 F&G 历史和趋势数据（按日期升序）
+    _fg_history.sort(key=lambda x: x["date"])
+    for _tk in _trend_data:
+        _trend_data[_tk].sort(key=lambda x: x["date"])
+
+    return {
+        "hist_entries": _hist_entries,
+        "fg_history": _fg_history,
+        "trend_data": _trend_data,
+        "hist_full": _hist_full,
+    }
+
+
+def _render_hist_card(entry: dict) -> str:
+    """Render a single historical report card as HTML."""
+    _top3_html = ""
+    for _ht in entry["top3"]:
+        _hscls = "sc-h" if _ht["score"] >= 7.0 else ("sc-m" if _ht["score"] >= 5.5 else "sc-l")
+        _hdir  = _norm_dir(_ht["direction"])
+        _top3_html += f"""<div class="htop-chip">
+          <span class="hticker">{_html.escape(_ht['ticker'])}</span>
+          <span class="hscore {_hscls}">{_ht['score']:.1f}</span>
+          <span class="hdir">{_DIR_ICON.get(_hdir,'🟡')}</span>
+        </div>"""
+    _hlinks = ""
+    _safe_date = _html.escape(entry["date"])
+    if entry["has_json"]:
+        _hlinks += f'<a href="alpha-hive-daily-{_safe_date}.json" target="_blank" rel="noopener" class="hlink hlink-json">📊 完整数据</a>'
+    for _hmt in entry["ml_tickers"][:4]:
+        _safe_tk = _html.escape(_hmt)
+        _hlinks += f'<a href="alpha-hive-{_safe_tk}-ml-enhanced-{_safe_date}.html" target="_blank" rel="noopener" class="hlink hlink-ml">{_safe_tk}</a>'
+    return f"""
+        <div class="hist-card">
+          <div class="hist-left">
+            <div class="hist-date">{entry['date']}</div>
+            <div class="hist-meta">{entry['n']} 标的 · 均分 <span class="{'sc-h' if entry['avg']>=7 else ('sc-m' if entry['avg']>=5.5 else 'sc-l')}">{entry['avg']:.1f}</span></div>
+          </div>
+          <div class="hist-mid">{_top3_html}</div>
+          <div class="hist-right">{_hlinks}</div>
+        </div>"""
+
+
+# ---------------------------------------------------------------------------
+# Extracted HTML builder helpers (Step 4 of refactor)
+# ---------------------------------------------------------------------------
+
+def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
+                          report_dir, date_str, score_deltas, hist_full) -> str:
+    """Build Top-6 opportunity cards HTML."""
+    new_cards_html = ""
+    for _ci, _tc6 in enumerate(all_tickers_sorted[:6], 1):
+        _oc6   = opp_by_ticker.get(_tc6, {})
+        _sc6   = float(_oc6.get("opp_score") or swarm_detail.get(_tc6, {}).get("final_score", 0))
+        _dr6   = str(_oc6.get("direction") or swarm_detail.get(_tc6, {}).get("direction", "neutral")).lower()
+        if "多" in _dr6: _dr6 = "bullish"
+        elif "空" in _dr6: _dr6 = "bearish"
+        elif _dr6 not in ("bullish","bearish","neutral"): _dr6 = "neutral"
+        _dlbl6 = {"bullish":"🟢 看多","bearish":"🔴 看空","neutral":"🟡 中性"}[_dr6]
+        _dcls6 = {"bullish":"sdir-bull","bearish":"sdir-bear","neutral":"sdir-neut"}[_dr6]
+        _scls6 = _sc_cls(_sc6)
+        _fcls6 = "fill-h" if _sc6 >= 7.0 else ("fill-m" if _sc6 >= 5.5 else "fill-l")
+        _pct6  = int(_sc6 * 10)
+        _dom6  = _DOMAINS.get(_tc6, "")
+        _logo6 = (f'<img class="slogo" src="https://logo.clearbit.com/{_dom6}" loading="lazy" '
+                  f'width="42" height="42" alt="{_html.escape(_tc6)}" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'">'
+                  f'<div class="slogo-fb" style="display:none">{_html.escape(_tc6[:2])}</div>') if _dom6 else \
+                 f'<div class="slogo-fb">{_html.escape(_tc6[:2])}</div>'
+        # 升级 A: 通俗一句话解读（替代原始 discovery 截断）
+        _sd6 = swarm_detail.get(_tc6, {})
+        _ins6 = _html.escape(_build_plain_insight(_tc6, _sd6))
+        # 升级 B: 风险标签
+        _risk6 = _risk_badge(_tc6, _sd6)
+        # 升级 D: 催化剂倒计时
+        _cat6 = _catalyst_countdown(_tc6, _sd6)
+        # 升级 E: Score Delta
+        _delta6 = score_deltas.get(_tc6, {}).get("html", "")
+        # 升级 F: 信号冲突预警
+        _conf6 = _signal_conflicts(_tc6, _sd6)
+        _ml6ex = _Path_mod(report_dir / f"alpha-hive-{_tc6}-ml-enhanced-{date_str}.html").exists()
+        _ml6   = (f'<a href="alpha-hive-{_tc6}-ml-enhanced-{date_str}.html" target="_blank" rel="noopener" class="ml-btn">ML 详情 →</a>'
+                  if _ml6ex else '<span style="font-size:.75em;color:var(--ts);">ML 报告生成中</span>')
+        # 升级 G: 维度 mini-bars（增强版：数值 + tooltip）
+        _dims6 = _sd6.get("dimension_scores", {})
+        _dim_html6 = ""
+        if _dims6:
+            _dl6 = [("信号","signal"),("催化","catalyst"),("情绪","sentiment"),("赔率","odds"),("风险","risk_adj")]
+            _db6 = ""
+            for _dlbl6x, _dkey6 in _dl6:
+                _dv6  = float(_dims6.get(_dkey6, 5.0))
+                _dpct6 = max(5, int(_dv6 * 10))
+                _dcol6 = "#22c55e" if _dv6 >= 7 else ("#f59e0b" if _dv6 >= 5.5 else "#ef4444")
+                _tip6 = _DIM_TOOLTIPS.get(_dlbl6x, "")
+                _db6 += (f'<div class="dim-b-item" title="{_html.escape(_tip6)}">'
+                         f'<div class="dim-val" style="color:{_dcol6}">{_dv6:.0f}</div>'
+                         f'<div class="dim-b" style="height:{_dpct6}%;background:{_dcol6}"></div>'
+                         f'<span class="dim-lbl">{_dlbl6x}</span></div>')
+            _dim_html6 = f'<div class="dim-bars">{_db6}</div>'
+        # 升级 D2: 情绪 Sparkline（7 天得分趋势 SVG）
+        _spark6 = ""
+        try:
+            _hist_scores6 = []
+            for _hd6 in sorted(hist_full.keys()):
+                for _hi6 in hist_full[_hd6]:
+                    if _hi6["ticker"] == _tc6:
+                        _hist_scores6.append(round(float(_hi6["score"]), 1))
+                        break
+            if len(_hist_scores6) >= 2:
+                _svgw, _svgh = 120, 24
+                _smin = max(0, min(_hist_scores6) - 0.5)
+                _smax = min(10, max(_hist_scores6) + 0.5)
+                _srange = _smax - _smin if _smax > _smin else 1
+                _npts = len(_hist_scores6)
+                _pts = []
+                for _si6, _sv6 in enumerate(_hist_scores6):
+                    _sx = round(_si6 / max(1, _npts - 1) * _svgw, 1)
+                    _sy = round(max(0, min(_svgh, _svgh - (_sv6 - _smin) / _srange * _svgh)), 1)
+                    _pts.append(f"{_sx},{_sy}")
+                _polyline = " ".join(_pts)
+                _scol = "#22c55e" if _hist_scores6[-1] >= 7 else ("#f59e0b" if _hist_scores6[-1] >= 5.5 else "#ef4444")
+                _area_pts = f"0,{_svgh} {_polyline} {_svgw},{_svgh}"
+                _last_x, _last_y = _pts[-1].split(",")
+                _spark6 = (f'<div class="spark-wrap">'
+                           f'<svg class="spark-svg" viewBox="0 0 {_svgw} {_svgh}" preserveAspectRatio="none">'
+                           f'<polygon class="spark-area" points="{_area_pts}" fill="{_scol}"/>'
+                           f'<polyline class="spark-line" points="{_polyline}" stroke="{_scol}"/>'
+                           f'<circle class="spark-dot" cx="{_last_x}" cy="{_last_y}" fill="{_scol}"/>'
+                           f'</svg></div>')
+        except Exception as _e_spark:
+            _log.debug("Sparkline 生成失败 (%s): %s", _tc6, _e_spark)
+        # 升级 B3: Agent 共识环形图（CSS conic-gradient）
+        _donut6 = ""
+        try:
+            _ab6 = _sd6.get("agent_breakdown", {})
+            _bv6 = int(_ab6.get("bullish", 0))
+            _ev6 = int(_ab6.get("bearish", 0))
+            _nv6 = int(_ab6.get("neutral", 0))
+            _tv6 = _bv6 + _ev6 + _nv6
+            if _tv6 > 0:
+                _bp6 = round(_bv6 / _tv6 * 100)
+                _ep6 = round(_ev6 / _tv6 * 100)
+                _np6 = 100 - _bp6 - _ep6
+                # 边缘情况：只有一种票型时用纯色，避免零宽 conic-gradient 段
+                _active_segs = sum(1 for x in (_bp6, _ep6, _np6) if x > 0)
+                if _active_segs <= 1:
+                    _solo_col = "#22c55e" if _bp6 > 0 else ("#ef4444" if _ep6 > 0 else "#f59e0b")
+                    _cg6 = _solo_col
+                else:
+                    # 构建仅包含非零段的 conic-gradient
+                    _stops = []
+                    _cur = 0
+                    if _bp6 > 0:
+                        _stops.append(f"#22c55e {_cur}% {_cur + _bp6}%")
+                        _cur += _bp6
+                    if _ep6 > 0:
+                        _stops.append(f"#ef4444 {_cur}% {_cur + _ep6}%")
+                        _cur += _ep6
+                    if _np6 > 0:
+                        _stops.append(f"#f59e0b {_cur}% 100%")
+                    _cg6 = f"conic-gradient({', '.join(_stops)})"
+                _donut6 = (f'<div class="consensus-wrap">'
+                           f'<div class="consensus-donut" style="background:{_cg6}" '
+                           f'title="看多:{_bv6} 看空:{_ev6} 中性:{_nv6}"></div>'
+                           f'<div class="consensus-labels">{_bv6}多 {_ev6}空 {_nv6}中</div>'
+                           f'</div>')
+        except Exception as _e_donut:
+            _log.debug("共识环形图生成失败 (%s): %s", _tc6, _e_donut)
+        # F10: 价格标注
+        _det6 = _detail(_tc6, swarm_detail)
+        _price6_html = ""
+        if _det6["price"] is not None:
+            _p6 = _det6["price"]
+            _m6 = _det6["momentum_5d"]
+            _mstr6 = f"{_m6:+.1f}%" if _m6 is not None else ""
+            _mcls6 = "sprice-up" if _m6 and _m6 > 0 else ("sprice-dn" if _m6 and _m6 < 0 else "sprice-flat")
+            _price6_html = (f'<div class="sprice-row">'
+                            f'<span class="sprice">${_p6:,.2f}</span>'
+                            f'{f"""<span class="sprice-chg {_mcls6}">{_mstr6}</span>""" if _mstr6 else ""}'
+                            f'</div>')
+        new_cards_html += f"""
+        <div class="scard" data-dir="{_dr6}" data-score="{_sc6:.1f}" data-ticker="{_html.escape(_tc6)}">
+          <button class="scard-share" onclick="event.stopPropagation();shareCard('{_html.escape(_tc6)}',{_sc6:.1f})">𝕏</button>
+          <div class="scard-head">
+            <div class="slogo-wrap">{_logo6}<span class="srank">#{_ci}</span></div>
+            <div class="scard-badges"><span class="sdir {_dcls6}">{_dlbl6}</span>{_risk6}</div>
+          </div>
+          <div class="scard-body">
+            <div class="sticker">{_html.escape(_tc6)}</div>
+            <div class="score-row">
+              <span class="score-big {_scls6}">{_sc6:.1f}</span>{_delta6}
+              <div class="sbar-wrap">
+                <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
+                <div class="sbar"><div class="sbar-fill {_fcls6}" style="width:{_pct6}%"></div></div>
+              </div>
+            </div>
+            {_dim_html6}
+            {_spark6}
+            {_donut6}
+            {_cat6}
+            {_price6_html}
+            {_conf6}
+            {f'<div class="sinsight">{_ins6}</div>' if _ins6 else ''}
+            {_ml6}
+          </div>
+          <div class="scard-expand" id="expand-{_html.escape(_tc6)}">
+            <div class="detail-grid">
+              <div class="dg-item"><span class="dg-label">IV Rank</span><span class="dg-value">{_det6['iv_rank']}</span></div>
+              <div class="dg-item"><span class="dg-label">P/C Ratio</span><span class="dg-value">{_det6['pc']}</span></div>
+              <div class="dg-item"><span class="dg-label">看空强度</span><span class="dg-value">{_det6['bear_score']:.1f}</span></div>
+              <div class="dg-item"><span class="dg-label">数据真实度</span><span class="dg-value">{_det6['real_pct']}</span></div>
+              <div class="dg-item"><span class="dg-label">GEX</span><span class="dg-value">{_det6['gex']}</span></div>
+              <div class="dg-item"><span class="dg-label">期权流向</span><span class="dg-value" style="color:{_det6['flow_color']}">{_det6['flow_dir']}</span></div>
+            </div>
+            <div class="radar-mini"><canvas id="radar-expand-{_html.escape(_tc6)}" width="200" height="160"></canvas></div>
+            <a href="javascript:void(0)" class="ml-btn" onclick="event.stopPropagation();scrollToDeep('{_html.escape(_tc6)}')">查看完整深度分析 →</a>
+          </div>
+          <button class="scard-expand-close" title="收起">✕</button>
+        </div>"""
+    return new_cards_html
+
+
+def _build_table_rows_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
+                           report_dir, date_str, score_deltas) -> str:
+    """Build full table rows HTML for all tickers."""
+    new_rows_html = ""
+    for _ri, _trt in enumerate(all_tickers_sorted, 1):
+        _ort = opp_by_ticker.get(_trt, {})
+        _srt = float(_ort.get("opp_score") or swarm_detail.get(_trt, {}).get("final_score", 0))
+        _drt = str(_ort.get("direction") or swarm_detail.get(_trt, {}).get("direction","neutral")).lower()
+        if "多" in _drt: _drt = "bullish"
+        elif "空" in _drt: _drt = "bearish"
+        elif _drt not in ("bullish","bearish","neutral"): _drt = "neutral"
+        _dlrt = _DIR_CN[_drt]
+        _dclrt = {"bullish":"dcell-bull","bearish":"dcell-bear","neutral":"dcell-neut"}[_drt]
+        _scrt = _sc_cls(_srt)
+        _det_rt = _detail(_trt, swarm_detail)
+        _res_rt = swarm_detail.get(_trt,{}).get("resonance",{}).get("resonance_detected",False)
+        _sup_rt = int(_ort.get("supporting_agents") or swarm_detail.get(_trt,{}).get("supporting_agents",0))
+        _res_html_rt = (f'<span class="res-y">{_sup_rt}A</span>' if _res_rt else '<span class="res-n">无</span>')
+        _ml_ex_rt = _Path_mod(report_dir / f"alpha-hive-{_trt}-ml-enhanced-{date_str}.html").exists()
+        _ml_rt = (f'<a href="alpha-hive-{_trt}-ml-enhanced-{date_str}.html" target="_blank" rel="noopener" class="ml-btn-sm">查看</a>'
+                  if _ml_ex_rt else "-")
+        _pc_st_rt = (' style="color:var(--bull);font-weight:700"' if _det_rt["pc"] != "-" and float(_det_rt["pc"]) < 0.7
+                     else (' style="color:var(--bear);font-weight:700"' if _det_rt["pc"] != "-" and float(_det_rt["pc"]) > 1.5 else ""))
+        _prt = _det_rt["price"]
+        _mrt = _det_rt["momentum_5d"]
+        _ptd_rt = f'${_prt:,.2f}' if _prt is not None else '-'
+        _mtd_rt = (f'<span class="{"sprice-up" if _mrt > 0 else "sprice-dn"}">{_mrt:+.1f}%</span>'
+                   if _mrt is not None and _mrt != 0 else ('-' if _mrt is None else '<span class="sprice-flat">0.0%</span>'))
+        # 升级 B/E: 表格行风险标签 + delta
+        _risk_rt = _risk_badge(_trt, swarm_detail.get(_trt, {}))
+        _delta_rt = score_deltas.get(_trt, {}).get("html", "")
+        new_rows_html += f"""
+        <tr data-dir="{_drt}" data-score="{_srt:.1f}">
+          <td>{_ri}</td>
+          <td><strong>{_html.escape(_trt)}</strong></td>
+          <td><span class="{_dclrt}">{_dlrt}</span> {_risk_rt}</td>
+          <td class="{_scrt}"><strong>{_srt:.1f}</strong>/10 {_delta_rt}</td>
+          <td>{_ptd_rt}</td>
+          <td>{_mtd_rt}</td>
+          <td>{_res_html_rt}</td>
+          <td>{_det_rt['bullish']}/{_det_rt['bearish_v']}/{_det_rt['neutral_v']}</td>
+          <td>{_det_rt['iv_rank']}</td>
+          <td{_pc_st_rt}>{_det_rt['pc']}</td>
+          <td style="color:var(--neut)">{_det_rt['bear_score']:.1f}</td>
+          <td>{_ml_rt}</td>
+        </tr>"""
+    return new_rows_html
+
+
+def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
+                              report_dir, date_str, score_deltas) -> str:
+    """Build Deep Analysis cards HTML with radar canvas."""
+    _dir_hdr3 = {"bullish":"#1a7a3a","bearish":"#8b1a1a","neutral":"#7a5c1a"}
+    new_company_html = ""
+    for _tkrd in all_tickers_sorted:
+        _sdd = swarm_detail.get(_tkrd, {})
+        _add = _sdd.get("agent_details", {})
+        _scd = float(opp_by_ticker.get(_tkrd,{}).get("opp_score") or _sdd.get("final_score", 0))
+        _drd = str(opp_by_ticker.get(_tkrd,{}).get("direction") or _sdd.get("direction","neutral")).lower()
+        if "多" in _drd: _drd = "bullish"
+        elif "空" in _drd: _drd = "bearish"
+        elif _drd not in ("bullish","bearish","neutral"): _drd = "neutral"
+        _dlbld = {"bullish":"看多 ↑","bearish":"看空 ↓","neutral":"中性 →"}[_drd]
+        _hcd   = _dir_hdr3.get(_drd, "#1a3a7a")
+        _detd  = _detail(_tkrd, swarm_detail)
+        # F10: 预计算价格 HTML（避免嵌套 f-string）
+        _pd = _detd["price"]
+        _md = _detd["momentum_5d"]
+        if _pd is not None:
+            _mhtml_d = ""
+            if _md is not None:
+                _mcls_d = "sprice-up" if _md > 0 else ("sprice-dn" if _md < 0 else "sprice-flat")
+                _mhtml_d = f' <span class="sprice-chg {_mcls_d}">{_md:+.1f}%</span>'
+            _price_metric_d = f'<div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">${_pd:,.2f}{_mhtml_d}</span></div>'
+        else:
+            _price_metric_d = ""
+        _blstd = []
+        for _discd, _icod, _lbd in [
+            (_add.get("ScoutBeeNova",{}).get("discovery",""),       "📋","内幕"),
+            (_add.get("OracleBeeEcho",{}).get("discovery",""),      "📊","期权"),
+            (_add.get("BuzzBeeWhisper",{}).get("discovery",""),     "💬","情绪"),
+            (_add.get("BearBeeContrarian",{}).get("discovery",""),  "🐻","风险"),
+        ]:
+            _fd = _discd.split("|")[0].strip()[:85] if _discd else ""
+            if _fd:
+                _blstd.append(f'<li>{_icod} <strong>{_lbd}：</strong>{_html.escape(_fd)}</li>')
+        _bhtmld = "\n                    ".join(_blstd) if _blstd else "<li>数据采集中</li>"
+        _ml_exd = _Path_mod(report_dir / f"alpha-hive-{_tkrd}-ml-enhanced-{date_str}.html").exists()
+        _mlbtnd = (f'<a href="alpha-hive-{_tkrd}-ml-enhanced-{date_str}.html" target="_blank" rel="noopener" class="ml-btn-cc">ML 增强分析 →</a>'
+                   if _ml_exd else '<span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span>')
+        # ── edgar_rss badge ──
+        _rss_n = _add.get("ScoutBeeNova", {}).get("details", {}).get("insider", {}).get("rss_fresh_today", 0)
+        _rss_badge = (f'<span class="rss-badge">📋 今日Form4 {_rss_n}份 🔴</span>' if _rss_n else "")
+        # ── thesis break 面板（直接查询配置，不依赖 JSON 中转）──
+        try:
+            from thesis_breaks import ThesisBreakConfig as _TBC
+            _tb_cfg = _TBC.get_breaks_config(_tkrd)
+            _tb_l1 = [c["metric"] + "：" + c["trigger"]
+                      for c in _tb_cfg.get("level_1_warning", {}).get("conditions", [])] if _tb_cfg else []
+            _tb_l2 = [c["metric"] + "：" + c["trigger"]
+                      for c in _tb_cfg.get("level_2_stop_loss", {}).get("conditions", [])] if _tb_cfg else []
+        except (KeyError, TypeError, ImportError, AttributeError) as _tb_err:
+            _log.debug("thesis-break 配置解析失败: %s", _tb_err)
+            _tb_l1, _tb_l2 = [], []
+        if _tb_l1 or _tb_l2:
+            _tb_html = '<div class="thesis-break-box">'
+            _tb_html += '<div class="tb-title">⚠️ 失效条件监控</div>'
+            if _tb_l1:
+                _tb_html += '<div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list">'
+                for _c in _tb_l1[:3]:
+                    _tb_html += f'<li>{_html.escape(str(_c))}</li>'
+                _tb_html += '</ul>'
+            if _tb_l2:
+                _tb_html += '<div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list">'
+                for _c in _tb_l2[:3]:
+                    _tb_html += f'<li>{_html.escape(str(_c))}</li>'
+                _tb_html += '</ul>'
+            _tb_html += '</div>'
+        else:
+            _tb_html = ""
+        # 升级 B/D/E/F: 深度卡片增强
+        _risk_d = _risk_badge(_tkrd, _sdd)
+        _delta_d = score_deltas.get(_tkrd, {}).get("html", "")
+        _cat_d = _catalyst_countdown(_tkrd, _sdd)
+        _conf_d = _signal_conflicts(_tkrd, _sdd)
+        _ins_d = _html.escape(_build_plain_insight(_tkrd, _sdd))
+        new_company_html += f"""
+        <div class="company-card" data-dir="{_drd}" data-score="{_scd:.1f}" id="deep-{_html.escape(_tkrd)}">
+          <div class="cc-header" style="background:{_hcd};">
+            <span class="cc-ticker">{_html.escape(_tkrd)}</span>
+            <span class="cc-dir">{_dlbld}</span> {_risk_d}
+            <span class="cc-score">{_scd:.1f}/10 {_delta_d}</span>
+          </div>
+          <div class="cc-body">
+            {f'<div class="sinsight" style="margin-bottom:10px">{_ins_d}</div>' if _ins_d else ''}
+            {_cat_d}
+            {_conf_d}
+            <div class="cc-two">
+              <div class="cc-metrics-col">
+                {_price_metric_d}
+                <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">{_detd['iv_rank']}</span></div>
+                <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">{_detd['pc']}</span></div>
+                {f'<div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:{_detd["flow_color"]};font-weight:bold;">{_detd["flow_dir"]}</span></div>' if _detd["flow_dir"] != "-" else ""}
+                {f'<div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">{_detd["gex"]}</span></div>' if _detd["gex"] != "-" else ""}
+                <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">{_detd['bear_score']:.1f}/10</span></div>
+                <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">{_detd['bullish']}多/{_detd['bearish_v']}空</span></div>
+              </div>
+              <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-{_html.escape(_tkrd)}" width="160" height="160"></canvas></div>
+            </div>
+            <ul class="cc-signals">{_bhtmld}</ul>
+            {_build_dim_dq_html(_detd['dim_dq'])}
+            {_tb_html}
+            <div class="cc-footer">{_rss_badge}{_mlbtnd}</div>
+          </div>
+        </div>"""
+    return new_company_html
+
+
+def render_dashboard_html(report: Dict, date_str: str,
+                         report_dir, opportunities: List,
+                         dashboard_css: str = None) -> str:
+    """
+    从 swarm report + .swarm_results_*.json 生成完整 GitHub Pages 仪表板。
+
+    Args:
+        report: 蜂群扫描报告 dict
+        date_str: 日期字符串 (YYYY-MM-DD)
+        report_dir: 报告目录 (Path)
+        opportunities: OpportunityItem 列表
+        dashboard_css: CSS 字符串（默认使用 DASHBOARD_CSS）
+    """
+    dashboard_css = dashboard_css or _DASHBOARD_CSS
+
+    from datetime import datetime as _dt
+    _Path = _Path_mod  # 复用模块级 pathlib.Path 别名
+
+    # --- 准确率数据加载 ---
+    _acc = _load_accuracy_data()
+    _acc_stats = _acc["stats"]
+    _acc_total_checked = _acc["total_checked"]
+    _acc_overall = _acc["overall"]
+    _acc_avg_return = _acc["avg_return"]
+    _acc_correct = _acc["correct"]
+    _acc_by_dir = _acc["by_dir"]
+    _acc_by_ticker = _acc["by_ticker"]
+    _acc_weekly_trend = _acc["weekly_trend"]
+    _acc_best3 = _acc["best3"]
+    _acc_worst3 = _acc["worst3"]
+    _acc_sharpe = _acc["sharpe"]
+    _acc_max_dd = _acc["max_dd"]
+    _acc_win_streak = _acc["win_streak"]
+
     try:
         from zoneinfo import ZoneInfo as _ZI
         now_str = _dt.now(_ZI("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M %Z")
     except Exception:
         from datetime import timezone as _tz
         now_str = _dt.now(_tz.utc).strftime("%Y-%m-%d %H:%M UTC")
-    date_str = date_str
     opps = report.get("opportunities", [])
     meta = report.get("swarm_metadata", {})
     n_tickers = meta.get("tickers_analyzed", len(opps))
@@ -173,381 +1163,12 @@ def render_dashboard_html(report: Dict, date_str: str,
     # 用实际扫描数量覆盖（swarm_detail 包含全部标的，opportunities 只存前 5）
     n_tickers = len(all_tickers_sorted) or n_tickers
 
-    dir_map = {"bullish": ("看多", "bullish", "#28a745"),
-               "bearish": ("看空", "bearish", "#dc3545"),
-               "neutral": ("中性", "neutral", "#ffc107")}
-
-    def sc_cls(score):
-        return "sc-h" if score >= 7.0 else ("sc-m" if score >= 5.5 else "sc-l")
-
-    def _detail(ticker):
-        """提取单个 ticker 的详细指标（含 GEX / 期权流向 / 维度数据质量）"""
-        sd = swarm_detail.get(ticker, {})
-        ad = sd.get("agent_details", {})
-        oracle = ad.get("OracleBeeEcho", {}).get("details", {})
-        scout_disc = ad.get("ScoutBeeNova", {}).get("discovery", "")
-        bear_score = ad.get("BearBeeContrarian", {}).get("score", 0.0)
-        ab = sd.get("agent_breakdown", {})
-        iv_rank = oracle.get("iv_rank", None)
-        pc = oracle.get("put_call_ratio", None)
-        real_pct = sd.get("data_real_pct", None)
-        # ── 新增期权信号字段（#1）──
-        gex = oracle.get("gamma_exposure", None)
-        flow_dir = oracle.get("flow_direction", None)
-        gsr = oracle.get("gamma_squeeze_risk", None)
-        iv_current = oracle.get("iv_current", None)
-        signal_sum = oracle.get("signal_summary", "")
-        # ── 价格数据（#10）── fallback: ScoutBee → OracleBee discovery → yfinance
-        scout_det = ad.get("ScoutBeeNova", {}).get("details", {})
-        _price_raw = scout_det.get("price")
-        _momentum_raw = scout_det.get("momentum_5d")
-        # Fallback 1: 从 OracleBee discovery 解析价格（格式 "... | $XX.XX"）
-        if _price_raw is None:
-            _oracle_disc = ad.get("OracleBeeEcho", {}).get("discovery", "")
-            import re as _re_mod
-            _pm = _re_mod.search(r'\$(\d+(?:\.\d+)?)', _oracle_disc)
-            if _pm:
-                _price_raw = float(_pm.group(1))
-        # Fallback 2: 直接从 yfinance 获取
-        if _price_raw is None:
-            try:
-                import yfinance as _yf
-                _h = _yf.Ticker(ticker).history(period="5d")
-                if not _h.empty:
-                    _price_raw = float(_h["Close"].iloc[-1])
-                    if len(_h) >= 2 and _momentum_raw is None:
-                        _momentum_raw = (_h["Close"].iloc[-1] / _h["Close"].iloc[0] - 1) * 100
-            except (ValueError, IndexError, KeyError, AttributeError):
-                pass
-        # ── 维度数据质量（#3）──
-        dim_dq = sd.get("dim_data_quality", {})
-        # 内幕信号：取 ScoutBeeNova discovery 第一个 | 段
-        insider_hint = scout_disc.split("|")[0].strip() if scout_disc else ""
-        insider_color = "#28a745" if "买入" in insider_hint else ("#dc3545" if "卖出" in insider_hint else "#666")
-        # 期权流向颜色
-        _flow_colors = {"bullish": "#28a745", "bearish": "#dc3545", "neutral": "#666"}
-        flow_color = _flow_colors.get(flow_dir, "#666")
-        # GEX 格式化（已除以1e6，≥1 显示 M，否则显示 k）
-        if gex is None:
-            gex_str = "-"
-        elif abs(gex) >= 1.0:
-            gex_str = f"{gex:+.1f}M"
-        else:
-            gex_str = f"{gex*1000:+.1f}k"
-        return {
-            "iv_rank": f"{iv_rank:.1f}" if iv_rank is not None else "-",
-            "pc": f"{pc:.2f}" if pc is not None else "-",
-            "bear_score": float(bear_score),
-            "bullish": ab.get("bullish", 0),
-            "bearish_v": ab.get("bearish", 0),
-            "neutral_v": ab.get("neutral", 0),
-            "insider_hint": _html.escape(insider_hint[:35]) if insider_hint else "",
-            "insider_color": insider_color,
-            "real_pct": f"{real_pct:.0f}%" if real_pct is not None else "-",
-            # 新期权字段
-            "gex": gex_str,
-            "flow_dir": flow_dir or "-",
-            "flow_color": flow_color,
-            "gsr": gsr or "-",
-            "iv_current": f"{iv_current:.1f}%" if iv_current is not None else "-",
-            "signal_sum": _html.escape(signal_sum[:45]) if signal_sum else "",
-            # 维度数据质量
-            "dim_dq": dim_dq,
-            # 价格数据
-            "price": round(float(_price_raw), 2) if _price_raw is not None else None,
-            "momentum_5d": round(float(_momentum_raw), 2) if _momentum_raw is not None else None,
-        }
-
-    # ── 维度数据质量 HTML 构建器（#3）──
-    _DIM_DQ_LABELS = {
-        "signal": "信号", "catalyst": "催化", "sentiment": "情绪",
-        "odds": "赔率", "risk_adj": "风险",
-    }
-
-    def _build_dim_dq_html(dim_dq: dict) -> str:
-        """生成维度数据质量迷你条形图"""
-        if not dim_dq:
-            return ""
-        items = []
-        for dim, label in _DIM_DQ_LABELS.items():
-            pct = dim_dq.get(dim)
-            if pct is None:
-                continue
-            color = "#28a745" if pct >= 80 else ("#ffc107" if pct >= 50 else "#dc3545")
-            items.append(
-                f'<span class="dq-item" title="{label} 数据质量 {pct:.0f}%">'
-                f'<span class="dq-lbl">{label}</span>'
-                f'<span class="dq-bar"><span class="dq-fill" style="width:{pct:.0f}%;background:{color};"></span></span>'
-                f'<span class="dq-val">{pct:.0f}%</span>'
-                f'</span>'
-            )
-        if not items:
-            return ""
-        return '<div class="dim-dq-row">' + "".join(items) + '</div>'
-
-    # ── 升级 A: 通俗一句话解读 ──
-    def _build_plain_insight(ticker: str, sd: dict) -> str:
-        """基于 Agent 数据生成通俗中文一句话（规则模板，无需 LLM）"""
-        ad = sd.get("agent_details", {})
-        parts = []
-        # 1. 内幕信号
-        insider = ad.get("ScoutBeeNova", {}).get("details", {}).get("insider", {})
-        insider_sent = insider.get("sentiment", "neutral")
-        if insider_sent == "bullish":
-            parts.append("公司高管在买入股票")
-        elif insider_sent == "bearish":
-            amt = insider.get("dollar_sold", 0)
-            if amt and amt > 1_000_000:
-                parts.append(f"高管近期卖出${amt/1e6:.1f}M")
-            elif amt and amt > 0:
-                parts.append(f"高管近期卖出${amt:,.0f}")
-            else:
-                parts.append("高管在卖出股票")
-        # 2. 期权信号
-        oracle_dir = ad.get("OracleBeeEcho", {}).get("direction", "neutral")
-        if oracle_dir == "bullish":
-            parts.append("期权市场看涨")
-        elif oracle_dir == "bearish":
-            parts.append("期权市场偏空")
-        # 3. 催化剂（最近的未来事件）
-        cats = ad.get("ChronosBeeHorizon", {}).get("details", {}).get("catalysts", [])
-        future_cats = [c for c in cats
-                       if isinstance(c.get("days_until"), (int, float)) and c["days_until"] > 0]
-        if future_cats:
-            nearest = min(future_cats, key=lambda c: c["days_until"])
-            days = int(nearest["days_until"])
-            _emap = {"earnings": "财报", "dividend": "分红",
-                     "fda": "FDA审批", "conference": "行业大会"}
-            ename = _emap.get(nearest.get("type", ""), nearest.get("event", "")[:8])
-            if days <= 7:
-                parts.append(f"{ename}{days}天后")
-            elif days <= 30:
-                parts.append(f"{ename}约{days}天后")
-        # 4. 动量上下文
-        momentum = ad.get("BuzzBeeWhisper", {}).get("details", {}).get("momentum_5d")
-        if momentum is not None:
-            if momentum < -3:
-                parts.append("近5日大幅下跌")
-            elif momentum < -1:
-                parts.append("近期小幅回调")
-            elif momentum > 3:
-                parts.append("近5日大幅上涨")
-            elif momentum > 1:
-                parts.append("近期稳步上涨")
-        # 5. 冲突提示（内幕卖出 + 综合看多）
-        overall_dir = sd.get("direction", "neutral")
-        if insider_sent == "bearish" and overall_dir == "bullish":
-            parts.append("但高管在减持")
-        elif insider_sent == "bullish" and overall_dir == "bearish":
-            parts.append("但高管在增持")
-        if not parts:
-            # Fallback：取第一个 agent 的 discovery 首段
-            for agt in ["ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper"]:
-                d = ad.get(agt, {}).get("discovery", "")
-                if d:
-                    return d.split("|")[0].strip()[:80]
-            return ""
-        return "，".join(parts)
-
-    # ── 升级 B: 风险等级标签 ──
-    def _risk_badge(ticker: str, sd: dict) -> str:
-        """多因子风险评分 → 🟢低风险 / 🟡中风险 / 🔴高风险"""
-        risk_pts = 0
-        ad = sd.get("agent_details", {})
-        # F1: GuardBee 分数（低=高风险）
-        guard = float(ad.get("GuardBeeSentinel", {}).get("score", 5.0))
-        if guard <= 3.0:
-            risk_pts += 3
-        elif guard <= 5.0:
-            risk_pts += 1
-        # F2: 内幕卖出
-        if ad.get("ScoutBeeNova", {}).get("details", {}).get(
-                "insider", {}).get("sentiment") == "bearish":
-            risk_pts += 2
-        # F3: 拥挤度
-        crowding = ad.get("ScoutBeeNova", {}).get("details", {}).get("crowding_score")
-        if crowding is not None:
-            if crowding > 60:
-                risk_pts += 2
-            elif crowding > 40:
-                risk_pts += 1
-        # F4: IV Rank（高波动）
-        iv = ad.get("OracleBeeEcho", {}).get("details", {}).get("iv_rank")
-        if iv is not None:
-            if iv > 70:
-                risk_pts += 2
-            elif iv > 50:
-                risk_pts += 1
-        # F5: risk_adj 维度分
-        radj = float(sd.get("dimension_scores", {}).get("risk_adj", 5.0))
-        if radj <= 3.0:
-            risk_pts += 2
-        elif radj <= 5.0:
-            risk_pts += 1
-        if risk_pts >= 7:
-            return '<span class="risk-badge risk-high">高风险</span>'
-        elif risk_pts >= 4:
-            return '<span class="risk-badge risk-med">中风险</span>'
-        return '<span class="risk-badge risk-low">低风险</span>'
-
-    # ── 升级 D: 催化剂倒计时 ──
-    def _catalyst_countdown(ticker: str, sd: dict) -> str:
-        """从 ChronosBeeHorizon 提取最近催化剂，生成倒计时 HTML"""
-        cats = sd.get("agent_details", {}).get(
-            "ChronosBeeHorizon", {}).get("details", {}).get("catalysts", [])
-        future = [c for c in cats
-                  if isinstance(c.get("days_until"), (int, float)) and c["days_until"] > 0]
-        if not future:
-            return ""
-        nearest = min(future, key=lambda c: c["days_until"])
-        days = int(nearest["days_until"])
-        _emap = {"earnings": "财报", "dividend": "分红",
-                 "fda": "FDA审批", "conference": "行业大会"}
-        ename = _emap.get(nearest.get("type", ""), nearest.get("event", "")[:10])
-        if days <= 3:
-            ucls = "cat-urgent"
-        elif days <= 7:
-            ucls = "cat-soon"
-        else:
-            ucls = "cat-normal"
-        tstr = f"{days}天后" if days <= 14 else f"约{days // 7}周后"
-        return (f'<div class="catalyst-cd {ucls}">'
-                f'<span class="cat-icon">\U0001f4c5</span>'
-                f'<span class="cat-text">{_html.escape(ename)} {tstr}</span>'
-                f'</div>')
-
-    # ── 升级 F: 信号冲突预警 ──
-    def _signal_conflicts(ticker: str, sd: dict) -> str:
-        """检测 Agent 间信号矛盾，返回黄色预警 HTML"""
-        ad = sd.get("agent_details", {})
-        dirs = sd.get("agent_directions", {})
-        overall = sd.get("direction", "neutral")
-        conflicts = []
-        # C1: 内幕卖出 vs 整体看多
-        insider_sent = ad.get("ScoutBeeNova", {}).get("details", {}).get(
-            "insider", {}).get("sentiment", "neutral")
-        if insider_sent == "bearish" and overall == "bullish":
-            amt = ad.get("ScoutBeeNova", {}).get("details", {}).get(
-                "insider", {}).get("dollar_sold", 0)
-            amt_str = f"(${amt / 1e6:.1f}M)" if amt and amt > 1_000_000 else ""
-            conflicts.append(f"高管在卖出{amt_str} vs 整体看多")
-        # C2: 期权方向 vs 整体
-        oracle_dir = dirs.get("OracleBeeEcho", "neutral")
-        if oracle_dir == "bearish" and overall == "bullish":
-            conflicts.append("期权市场偏空 vs 整体看多")
-        elif oracle_dir == "bullish" and overall == "bearish":
-            conflicts.append("期权市场看涨 vs 整体看空")
-        # C3: Bear strength 高 + 综合看多
-        bear_str = float(sd.get("bear_strength", 0))
-        if bear_str >= 3.0 and overall == "bullish":
-            conflicts.append(f"看空力度较强({bear_str:.1f}/10)")
-        if not conflicts:
-            return ""
-        items = "；".join(conflicts[:2])
-        return (f'<div class="conflict-warn">'
-                f'<span class="cw-icon">\u26a0\ufe0f</span>'
-                f'<span class="cw-text">信号冲突：{_html.escape(items)}</span>'
-                f'</div>')
-
-    # ── 升级 G: 维度 Tooltip ──
-    _DIM_TOOLTIPS = {
-        "信号": "聪明钱交易信号（SEC 内幕交易、机构持仓变化）",
-        "催化": "未来催化剂事件清晰度（财报、FDA、产品发布）",
-        "情绪": "市场舆情方向与质量（新闻、Reddit）",
-        "赔率": "市场赔率错配（期权 IV、Put/Call）",
-        "风险": "风险调整评估（回撤、流动性、拥挤度）",
-    }
 
     # 计算 avg real_pct
     real_pcts = [swarm_detail[t].get("data_real_pct", 0) for t in swarm_detail if swarm_detail[t].get("data_real_pct")]
     avg_real = f"{sum(real_pcts)/len(real_pcts):.0f}%" if real_pcts else "-"
 
-    # ── 机会卡片（Top 6）──
-    cards_html = ""
-    for i, ticker in enumerate(all_tickers_sorted[:6], 1):
-        opp = opp_by_ticker.get(ticker, {})
-        score = float(opp.get("opp_score") or swarm_detail.get(ticker, {}).get("final_score", 0))
-        direction = str(opp.get("direction") or swarm_detail.get(ticker, {}).get("direction", "neutral")).lower()
-        if direction not in dir_map:
-            direction = "bullish" if "多" in direction else ("bearish" if "空" in direction else "neutral")
-        resonance = opp.get("resonance", swarm_detail.get(ticker, {}).get("resonance", {}).get("resonance_detected", False))
-        supporting = int(opp.get("supporting_agents") or swarm_detail.get(ticker, {}).get("supporting_agents", 0))
-        dir_label, dir_cls, dir_color = dir_map[direction]
-        border = " style=\"border-color:#28a745;border-width:2px;\"" if i == 1 else ""
-        rank_style = " style=\"background:#28a745;color:white;\"" if i == 1 else ""
-        sc = sc_cls(score)
-        res_badge = (f'<span class="res-badge res-y">{supporting} Agent 共振</span>'
-                     if resonance else '<span class="res-badge res-n">无共振</span>')
-        d = _detail(ticker)
-        pc_color = ' style="color:#28a745;font-weight:bold;"' if d["pc"] != "-" and float(d["pc"]) < 0.7 else (
-                   ' style="color:#dc3545;font-weight:bold;"' if d["pc"] != "-" and float(d["pc"]) > 1.5 else "")
-        bear_pct = min(100, int(d["bear_score"] * 10))
-        insider_row = (f'<div class="mr"><span class="lbl">内幕信号</span>'
-                       f'<span class="val" style="color:{d["insider_color"]};">{d["insider_hint"]}</span></div>'
-                       if d["insider_hint"] else "")
-        ml_link = _Path(report_dir / f"alpha-hive-{ticker}-ml-enhanced-{date_str}.html")
-        ml_row = (f'<div class="mr"><span class="lbl">ML 报告</span>'
-                  f'<span class="val"><a href="alpha-hive-{ticker}-ml-enhanced-{date_str}.html" style="color:#667eea;">查看详情</a></span></div>'
-                  if ml_link.exists() else "")
-        cards_html += f"""
-            <div class="opp-card"{border}>
-                <div class="card-rank"{rank_style}>#{i}</div>
-                <div class="card-hd">
-                    <h3>{_html.escape(ticker)}</h3>
-                    <div class="dir-badge dir-{dir_cls}">{dir_label}</div>
-                </div>
-                <div class="card-body">
-                    <div class="mr"><span class="lbl">综合分</span><span class="val {sc}">{score:.1f}/10</span></div>
-                    <div class="mr"><span class="lbl">共振信号</span>{res_badge}</div>
-                    <div class="mr"><span class="lbl">投票</span><span class="val">{d['bullish']}多 / {d['bearish_v']}空 / {d['neutral_v']}中</span></div>
-                    <div class="mr"><span class="lbl">IV Rank</span><span class="val">{d['iv_rank']}</span>{f'<span class="lbl" style="margin-left:8px;">当前IV</span><span class="val">{d["iv_current"]}</span>' if d["iv_current"] != "-" else ""}</div>
-                    <div class="mr"><span class="lbl">P/C Ratio</span><span class="val"{pc_color}>{d['pc']}</span></div>
-                    {f'<div class="mr"><span class="lbl">期权流向</span><span class="val" style="color:{d["flow_color"]};font-weight:bold;">{d["flow_dir"]}</span></div>' if d["flow_dir"] != "-" else ""}
-                    {f'<div class="mr"><span class="lbl">GEX</span><span class="val">{d["gex"]}</span></div>' if d["gex"] != "-" else ""}
-                    {insider_row}
-                    <div class="mr"><span class="lbl">看空强度</span><span class="val">{d['bear_score']:.1f}/10</span></div>
-                    <div class="bear-bar"><div class="bear-fill" style="width:{bear_pct}%"></div></div>
-                    {ml_row}
-                </div>
-            </div>"""
-
-    # ── 完整表格（全部 ticker）──
-    rows_html = ""
-    for i, ticker in enumerate(all_tickers_sorted, 1):
-        opp = opp_by_ticker.get(ticker, {})
-        score = float(opp.get("opp_score") or swarm_detail.get(ticker, {}).get("final_score", 0))
-        direction = str(opp.get("direction") or swarm_detail.get(ticker, {}).get("direction", "neutral")).lower()
-        if direction not in dir_map:
-            direction = "bullish" if "多" in direction else ("bearish" if "空" in direction else "neutral")
-        resonance = opp.get("resonance", swarm_detail.get(ticker, {}).get("resonance", {}).get("resonance_detected", False))
-        supporting = int(opp.get("supporting_agents") or swarm_detail.get(ticker, {}).get("supporting_agents", 0))
-        dir_label, _, dir_color = dir_map[direction]
-        sc = sc_cls(score)
-        d = _detail(ticker)
-        res_html = (f'<span class="res-badge res-y">{supporting} Agent</span>'
-                    if resonance else '<span class="res-badge res-n">无</span>')
-        row_style = " style=\"background:#f0fff0;\"" if i == 1 else ""
-        ml_link = _Path(report_dir / f"alpha-hive-{ticker}-ml-enhanced-{date_str}.html")
-        ml_td = (f'<a href="alpha-hive-{ticker}-ml-enhanced-{date_str}.html" style="color:#667eea;">查看</a>'
-                 if ml_link.exists() else "-")
-        pc_style = (' style="color:#28a745;font-weight:bold;"' if d["pc"] != "-" and float(d["pc"]) < 0.7
-                    else (' style="color:#dc3545;font-weight:bold;"' if d["pc"] != "-" and float(d["pc"]) > 1.5 else ""))
-        rows_html += f"""
-            <tr{row_style}>
-                <td>{i}</td>
-                <td><strong>{_html.escape(ticker)}</strong></td>
-                <td style="color:{dir_color};font-weight:bold;">{dir_label}</td>
-                <td class="{sc}"><strong>{score:.1f}</strong>/10</td>
-                <td>{res_html}</td>
-                <td>{d['bullish']} / {d['bearish_v']} / {d['neutral_v']}</td>
-                <td>{d['iv_rank']}</td>
-                <td{pc_style}>{d['pc']}</td>
-                <td style="color:#fd7e14;">{d['bear_score']:.1f}/10</td>
-                <td>{ml_td}</td>
-            </tr>"""
-
     # ── Phase 3 增强：宏观面板 + 深度卡片 + Markdown 渲染 ──
-    import re as _re
 
 
     # F&G 指数 + 平均情绪
@@ -568,210 +1189,6 @@ def render_dashboard_html(report: Dict, date_str: str,
     _fg_label = (("极度恐惧" if _fv3 <= 25 else "恐惧") if _fv3 <= 45
                  else (("中性" if _fv3 <= 55 else "贪婪") if _fv3 <= 75 else "极度贪婪"))
     _fg_str = str(_fg_val) if _fg_val is not None else "?"
-    _avg_sent_str = f"{_avg_sent/_sent_cnt:.0f}%" if _sent_cnt else "-"
-
-    # ML 快捷链接
-    _ml_ql = ""
-    for _t3 in all_tickers_sorted:
-        if _Path(report_dir / f"alpha-hive-{_t3}-ml-enhanced-{date_str}.html").exists():
-            _ml_ql += (f'<a href="alpha-hive-{_t3}-ml-enhanced-{date_str}.html"'
-                       f' class="rl ml-rl">{_html.escape(_t3)}</a> ')
-
-    # 个股深度分析卡片
-    _dir_hdr = {"bullish": "#28a745", "bearish": "#dc3545", "neutral": "#e67e22"}
-    company_cards_html = ""
-    for _tkr3 in all_tickers_sorted:
-        _sd3 = swarm_detail.get(_tkr3, {})
-        _ad3 = _sd3.get("agent_details", {})
-        _sc3 = float(opp_by_ticker.get(_tkr3, {}).get("opp_score") or _sd3.get("final_score", 0))
-        _dr3 = str(opp_by_ticker.get(_tkr3, {}).get("direction") or _sd3.get("direction", "neutral")).lower()
-        if _dr3 not in dir_map:
-            _dr3 = "bullish" if "多" in _dr3 else ("bearish" if "空" in _dr3 else "neutral")
-        _dlbl3, _, _ = dir_map[_dr3]
-        _hc3 = _dir_hdr.get(_dr3, "#667eea")
-        _scls3 = sc_cls(_sc3)
-        _det3 = _detail(_tkr3)
-        _blist = []
-        for _disc3, _ico3, _lb3 in [
-            (_ad3.get("ScoutBeeNova", {}).get("discovery", ""), "📋", "内幕"),
-            (_ad3.get("OracleBeeEcho", {}).get("discovery", ""), "📊", "期权"),
-            (_ad3.get("BuzzBeeWhisper", {}).get("discovery", ""), "💬", "情绪"),
-            (_ad3.get("ChronosBeeHorizon", {}).get("discovery", ""), "📅", "催化剂"),
-            (_ad3.get("BearBeeContrarian", {}).get("discovery", ""), "🐻", "风险"),
-        ]:
-            _f3 = _disc3.split("|")[0].strip()[:90] if _disc3 else ""
-            if _f3:
-                _blist.append(f'<li>{_ico3} <strong>{_lb3}：</strong>{_html.escape(_f3)}</li>')
-        _bhtml3 = "\n                        ".join(_blist) if _blist else "<li>数据采集中...</li>"
-        _ml3ex = _Path(report_dir / f"alpha-hive-{_tkr3}-ml-enhanced-{date_str}.html").exists()
-        _mlbtn3 = (f'<a href="alpha-hive-{_tkr3}-ml-enhanced-{date_str}.html" class="ml-btn">ML 增强分析 →</a>'
-                   if _ml3ex else '<span class="ml-btn-na">ML 报告生成中</span>')
-        company_cards_html += f"""
-        <div class="company-card">
-            <div class="cc-header" style="background:{_hc3};">
-                <span class="cc-ticker">{_html.escape(_tkr3)}</span>
-                <span class="cc-dir">{_dlbl3}</span>
-                <span class="cc-score {_scls3}">{_sc3:.1f}/10</span>
-            </div>
-            <div class="cc-body">
-                <div class="cc-metrics">
-                    <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">{_det3['iv_rank']}</span></div>
-                    <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">{_det3['pc']}</span></div>
-                    <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">{_det3['bear_score']:.1f}/10</span></div>
-                    {f'<div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:{_det3["flow_color"]};font-weight:bold;">{_det3["flow_dir"]}</span></div>' if _det3["flow_dir"] != "-" else ""}
-                    {f'<div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">{_det3["gex"]}</span></div>' if _det3["gex"] != "-" else ""}
-                </div>
-                {_build_dim_dq_html(_det3['dim_dq'])}
-                <ul class="cc-signals">
-                    {_bhtml3}
-                </ul>
-                <div class="cc-footer">{_mlbtn3}</div>
-            </div>
-        </div>"""
-
-    # Markdown → HTML 轻量渲染
-    def _md2html(md_text: str) -> str:
-        def _inline(s: str) -> str:
-            """处理行内格式：加粗、斜体、代码、链接"""
-            s = _html.escape(s)
-            # 链接 [text](url) — 在 escape 之后处理（url 已被 escape）
-            s = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)',
-                        r'<a href="\2" target="_blank" rel="noopener">\1</a>', s)
-            # 内联代码 `code`
-            s = _re.sub(r'`([^`]+)`', r'<code>\1</code>', s)
-            # 加粗 **text**
-            s = _re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', s)
-            # 斜体 *text*（避免误伤 **)
-            s = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', s)
-            return s
-
-        lines = md_text.split('\n')
-        out = []
-        in_ul = False      # 无序列表
-        in_ol = False      # 有序列表
-        in_sub = False     # 缩进嵌套列表
-        ol_counter = 0
-        in_table = False   # markdown 表格
-        table_rows = []
-        table_has_header = False
-
-        def _close_lists():
-            nonlocal in_ul, in_ol, in_sub, ol_counter
-            if in_sub:  out.append('</ul>');  in_sub = False
-            if in_ul:   out.append('</ul>');  in_ul = False
-            if in_ol:   out.append('</ol>');  in_ol = False; ol_counter = 0
-
-        for ln in lines:
-            # ── 缩进嵌套列表（2/4 空格 + -/+/*)
-            if _re.match(r'^( {2,4})[*+\-] ', ln):
-                if not in_sub:
-                    out.append('<ul class="sub-ul">')
-                    in_sub = True
-                out.append('<li>' + _inline(_re.sub(r'^ {2,4}[*+\-] ', '', ln)) + '</li>')
-                continue
-            if in_sub:
-                out.append('</ul>')
-                in_sub = False
-
-            # ── 有序列表 1. 2. 3.
-            _ol_m = _re.match(r'^(\d+)\. (.+)', ln)
-            if _ol_m:
-                if in_ul: out.append('</ul>'); in_ul = False
-                if not in_ol:
-                    out.append('<ol>')
-                    in_ol = True
-                out.append('<li>' + _inline(_ol_m.group(2)) + '</li>')
-                continue
-
-            # ── 无序列表 - / + / *
-            if _re.match(r'^[*+\-] ', ln):
-                if in_ol: out.append('</ol>'); in_ol = False; ol_counter = 0
-                if not in_ul:
-                    out.append('<ul>')
-                    in_ul = True
-                out.append('<li>' + _inline(ln[2:]) + '</li>')
-                continue
-
-            # 非列表行：关闭打开的列表
-            if (in_ul or in_ol) and not ln.startswith(' '):
-                _close_lists()
-
-            # ── Markdown 表格 | col | col |
-            _stripped = ln.strip()
-            if _stripped.startswith('|') and _stripped.endswith('|') and _stripped.count('|') >= 3:
-                cells = [c.strip() for c in _stripped.strip('|').split('|')]
-                # 分隔行 |---|:---:|---:| → 标记 header
-                if all(_re.match(r'^:?-+:?$', c) for c in cells if c):
-                    table_has_header = True
-                    continue
-                if not in_table:
-                    in_table = True
-                    table_rows = []
-                    table_has_header = False
-                table_rows.append(cells)
-                continue
-            if in_table:
-                # 非表格行 → 输出已收集的表格
-                tbl = '<div class="table-wrap"><table class="md-table">'
-                if table_has_header and len(table_rows) >= 1:
-                    tbl += '<thead><tr>' + ''.join('<th>' + _inline(h) + '</th>' for h in table_rows[0]) + '</tr></thead>'
-                    tbl += '<tbody>' + ''.join(
-                        '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
-                        for r in table_rows[1:]
-                    ) + '</tbody>'
-                else:
-                    tbl += '<tbody>' + ''.join(
-                        '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
-                        for r in table_rows
-                    ) + '</tbody>'
-                tbl += '</table></div>'
-                out.append(tbl)
-                in_table = False
-                table_rows = []
-                table_has_header = False
-
-            # ── 标题
-            if ln.startswith('#### '):
-                out.append('<h4>' + _inline(ln[5:]) + '</h4>')
-            elif ln.startswith('### '):
-                out.append('<h3>' + _inline(ln[4:]) + '</h3>')
-            elif ln.startswith('## '):
-                out.append('<h2>' + _inline(ln[3:]) + '</h2>')
-            elif ln.startswith('# '):
-                out.append('<h1>' + _inline(ln[2:]) + '</h1>')
-            # ── 引用块 > text
-            elif ln.startswith('> '):
-                out.append('<blockquote>' + _inline(ln[2:]) + '</blockquote>')
-            # ── 分隔线
-            elif _re.match(r'^-{3,}$|^\*{3,}$|^_{3,}$', ln.strip()):
-                out.append('<hr>')
-            # ── 空行
-            elif not ln.strip():
-                if not (in_ul or in_ol or in_sub):
-                    out.append('<br>')
-            # ── 普通段落
-            else:
-                out.append('<p>' + _inline(ln) + '</p>')
-
-        _close_lists()
-        # 关闭残余表格（若表格是最后一段内容）
-        if in_table and table_rows:
-            tbl = '<div class="table-wrap"><table class="md-table">'
-            if table_has_header and len(table_rows) >= 1:
-                tbl += '<thead><tr>' + ''.join('<th>' + _inline(h) + '</th>' for h in table_rows[0]) + '</tr></thead>'
-                tbl += '<tbody>' + ''.join(
-                    '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
-                    for r in table_rows[1:]
-                ) + '</tbody>'
-            else:
-                tbl += '<tbody>' + ''.join(
-                    '<tr>' + ''.join('<td>' + _inline(c) + '</td>' for c in r) + '</tr>'
-                    for r in table_rows
-                ) + '</tbody>'
-            tbl += '</table></div>'
-            out.append(tbl)
-        return '\n'.join(out)
-
     _rpt_body = ""
     _md_path3 = _Path(report_dir) / f"alpha-hive-daily-{date_str}.md"
     if _md_path3.exists():
@@ -812,8 +1229,8 @@ def render_dashboard_html(report: Dict, date_str: str,
             _ed = _macro_evt["days_until"]
             _en = _macro_evt["event"]
             _hero_parts.append(f"距{_en}还有{_ed}天" if _ed > 0 else f"{_en}今天公布")
-    except (ImportError, Exception):
-        pass
+    except Exception as _e_cal:
+        _log.debug("宏观事件日历加载失败: %s", _e_cal)
     _opp_parts = []
     if _dir_counts["bullish"]:
         _opp_parts.append(f"{_dir_counts['bullish']}个看多")
@@ -870,45 +1287,6 @@ def render_dashboard_html(report: Dict, date_str: str,
     except Exception as e:
         logging.getLogger("alpha_hive.dashboard").debug("宏观指标加载失败: %s", e)
 
-    def _radar_data(ticker):
-        sd  = swarm_detail.get(ticker, {})
-        dim = sd.get("dimension_scores", {})
-        if dim:
-            signal    = float(dim.get("signal",   5.0)) * 10
-            catalyst  = float(dim.get("catalyst", 5.0)) * 10
-            sentiment = float(dim.get("sentiment",5.0)) * 10
-            odds      = float(dim.get("odds",     5.0)) * 10
-            risk_adj  = float(dim.get("risk_adj", 5.0)) * 10
-        else:
-            ad = sd.get("agent_details", {})
-            signal   = float(ad.get("ScoutBeeNova",     {}).get("self_score", 5.0)) * 10
-            catalyst = float(ad.get("ChronosBeeHorizon",{}).get("self_score", 5.0)) * 10
-            oracle_det = ad.get("OracleBeeEcho", {}).get("details", {})
-            pc_r    = oracle_det.get("put_call_ratio", 1.0) or 1.0
-            odds    = max(0.0, min(100.0, (2.0 - float(pc_r)) / 1.5 * 100))
-            buzz_d  = ad.get("BuzzBeeWhisper", {}).get("discovery", "")
-            sm3     = _re.search(r'情绪\s*([\d.]+)%', buzz_d)
-            sentiment = float(sm3.group(1)) if sm3 else 50.0
-            bear_s  = float(ad.get("BearBeeContrarian", {}).get("score", 5.0))
-            risk_adj = max(0.0, (10.0 - bear_s) * 10)
-        return [round(min(100, max(0, signal)),   1),
-                round(min(100, max(0, catalyst)), 1),
-                round(min(100, max(0, sentiment)),1),
-                round(min(100, max(0, odds)),     1),
-                round(min(100, max(0, risk_adj)), 1)]
-
-    _scores_js  = _json.dumps([[t, round(s, 1)] for t, s in _all_scores])
-    _dir_js     = _json.dumps([_dir_counts["bullish"], _dir_counts["bearish"], _dir_counts["neutral"]])
-    _radar_js   = _json.dumps({t: _radar_data(t) for t in all_tickers_sorted})
-
-    _DOMAINS = {
-        "MSFT": "microsoft.com", "NVDA": "nvidia.com",  "TSLA": "tesla.com",
-        "META": "meta.com",       "AMZN": "amazon.com",  "RKLB": "rocketlabusa.com",
-        "BILI": "bilibili.com",   "VKTX": "vikingtherapeutics.com", "CRCL": "circle.com",
-        "GOOGL": "google.com",    "AAPL": "apple.com",   "NFLX": "netflix.com",
-    }
-
-
     # ── 升级 E: 快速预计算 Score Delta（对比昨天） ──
     _score_deltas = {}  # {ticker: {"delta": float, "html": str}}
     try:
@@ -930,7 +1308,8 @@ def render_dashboard_html(report: Dict, date_str: str,
                     if _ptk and _ptk not in _prev_scores:
                         _prev_scores[_ptk] = float(_po.get("opp_score", 0))
                 break  # 只看最近一天
-            except Exception:
+            except Exception as _e_prev:
+                _log.debug("历史评分加载失败 (%s): %s", _pjf, _e_prev)
                 continue
         for _tke in all_tickers_sorted:
             _cur_e = float(opp_by_ticker.get(_tke, {}).get("opp_score") or
@@ -958,364 +1337,50 @@ def render_dashboard_html(report: Dict, date_str: str,
     except Exception as _de_err:
         _log.debug("Score delta 预计算失败: %s", _de_err)
 
-    # ── Build new Top-6 cards ──
-    new_cards_html = ""
-    for _ci, _tc6 in enumerate(all_tickers_sorted[:6], 1):
-        _oc6   = opp_by_ticker.get(_tc6, {})
-        _sc6   = float(_oc6.get("opp_score") or swarm_detail.get(_tc6, {}).get("final_score", 0))
-        _dr6   = str(_oc6.get("direction") or swarm_detail.get(_tc6, {}).get("direction", "neutral")).lower()
-        if "多" in _dr6: _dr6 = "bullish"
-        elif "空" in _dr6: _dr6 = "bearish"
-        elif _dr6 not in ("bullish","bearish","neutral"): _dr6 = "neutral"
-        _dlbl6 = {"bullish":"🟢 看多","bearish":"🔴 看空","neutral":"🟡 中性"}[_dr6]
-        _dcls6 = {"bullish":"sdir-bull","bearish":"sdir-bear","neutral":"sdir-neut"}[_dr6]
-        _scls6 = sc_cls(_sc6)
-        _fcls6 = "fill-h" if _sc6 >= 7.0 else ("fill-m" if _sc6 >= 5.5 else "fill-l")
-        _pct6  = int(_sc6 * 10)
-        _dom6  = _DOMAINS.get(_tc6, "")
-        _logo6 = (f'<img class="slogo" src="https://logo.clearbit.com/{_dom6}" loading="lazy" '
-                  f'width="42" height="42" alt="{_html.escape(_tc6)}" onerror="this.style.display=\'none\';this.nextSibling.style.display=\'flex\'">'
-                  f'<div class="slogo-fb" style="display:none">{_html.escape(_tc6[:2])}</div>') if _dom6 else \
-                 f'<div class="slogo-fb">{_html.escape(_tc6[:2])}</div>'
-        # 升级 A: 通俗一句话解读（替代原始 discovery 截断）
-        _sd6 = swarm_detail.get(_tc6, {})
-        _ins6 = _html.escape(_build_plain_insight(_tc6, _sd6))
-        # 升级 B: 风险标签
-        _risk6 = _risk_badge(_tc6, _sd6)
-        # 升级 D: 催化剂倒计时
-        _cat6 = _catalyst_countdown(_tc6, _sd6)
-        # 升级 E: Score Delta
-        _delta6 = _score_deltas.get(_tc6, {}).get("html", "")
-        # 升级 F: 信号冲突预警
-        _conf6 = _signal_conflicts(_tc6, _sd6)
-        _ml6ex = _Path(report_dir / f"alpha-hive-{_tc6}-ml-enhanced-{date_str}.html").exists()
-        _ml6   = (f'<a href="alpha-hive-{_tc6}-ml-enhanced-{date_str}.html" class="ml-btn">ML 详情 →</a>'
-                  if _ml6ex else '<span style="font-size:.75em;color:var(--ts);">ML 报告生成中</span>')
-        # 升级 G: 维度 mini-bars（增强版：数值 + tooltip）
-        _dims6 = _sd6.get("dimension_scores", {})
-        _dim_html6 = ""
-        if _dims6:
-            _dl6 = [("信号","signal"),("催化","catalyst"),("情绪","sentiment"),("赔率","odds"),("风险","risk_adj")]
-            _db6 = ""
-            for _dlbl6x, _dkey6 in _dl6:
-                _dv6  = float(_dims6.get(_dkey6, 5.0))
-                _dpct6 = max(5, int(_dv6 * 10))
-                _dcol6 = "#22c55e" if _dv6 >= 7 else ("#f59e0b" if _dv6 >= 5.5 else "#ef4444")
-                _tip6 = _DIM_TOOLTIPS.get(_dlbl6x, "")
-                _db6 += (f'<div class="dim-b-item" title="{_html.escape(_tip6)}">'
-                         f'<div class="dim-val" style="color:{_dcol6}">{_dv6:.0f}</div>'
-                         f'<div class="dim-b" style="height:{_dpct6}%;background:{_dcol6}"></div>'
-                         f'<span class="dim-lbl">{_dlbl6x}</span></div>')
-            _dim_html6 = f'<div class="dim-bars">{_db6}</div>'
-        # F10: 价格标注
-        _det6 = _detail(_tc6)
-        _price6_html = ""
-        if _det6["price"] is not None:
-            _p6 = _det6["price"]
-            _m6 = _det6["momentum_5d"]
-            _mstr6 = f"{_m6:+.1f}%" if _m6 is not None else ""
-            _mcls6 = "sprice-up" if _m6 and _m6 > 0 else ("sprice-dn" if _m6 and _m6 < 0 else "sprice-flat")
-            _price6_html = (f'<div class="sprice-row">'
-                            f'<span class="sprice">${_p6:,.2f}</span>'
-                            f'{f"""<span class="sprice-chg {_mcls6}">{_mstr6}</span>""" if _mstr6 else ""}'
-                            f'</div>')
-        new_cards_html += f"""
-        <div class="scard" data-dir="{_dr6}" data-score="{_sc6:.1f}" onclick="scrollToDeep('{_html.escape(_tc6)}')">
-          <button class="scard-share" onclick="event.stopPropagation();shareCard('{_html.escape(_tc6)}',{_sc6:.1f})">𝕏</button>
-          <div class="scard-head">
-            <div class="slogo-wrap">{_logo6}<span class="srank">#{_ci}</span></div>
-            <div class="scard-badges"><span class="sdir {_dcls6}">{_dlbl6}</span>{_risk6}</div>
-          </div>
-          <div class="scard-body">
-            <div class="sticker">{_html.escape(_tc6)}</div>
-            <div class="score-row">
-              <span class="score-big {_scls6}">{_sc6:.1f}</span>{_delta6}
-              <div class="sbar-wrap">
-                <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
-                <div class="sbar"><div class="sbar-fill {_fcls6}" style="width:{_pct6}%"></div></div>
-              </div>
-            </div>
-            {_dim_html6}
-            {_cat6}
-            {_price6_html}
-            {_conf6}
-            {f'<div class="sinsight">{_ins6}</div>' if _ins6 else ''}
-            {_ml6}
-          </div>
-        </div>"""
+    # ── 历史简报回溯 + F&G 历史 + 评分趋势数据（提前加载，供 sparkline 使用）──
+    _hist = _load_historical_data(report_dir, date_str, all_tickers_sorted, opp_by_ticker, swarm_detail, _fv3)
+    _hist_entries = _hist["hist_entries"]
+    _fg_history = _hist["fg_history"]
+    _trend_data = _hist["trend_data"]
+    _hist_full = _hist["hist_full"]
 
-    # ── Build Full Table rows ──
-    new_rows_html = ""
-    for _ri, _trt in enumerate(all_tickers_sorted, 1):
-        _ort = opp_by_ticker.get(_trt, {})
-        _srt = float(_ort.get("opp_score") or swarm_detail.get(_trt, {}).get("final_score", 0))
-        _drt = str(_ort.get("direction") or swarm_detail.get(_trt, {}).get("direction","neutral")).lower()
-        if "多" in _drt: _drt = "bullish"
-        elif "空" in _drt: _drt = "bearish"
-        elif _drt not in ("bullish","bearish","neutral"): _drt = "neutral"
-        _dlrt = {"bullish":"看多","bearish":"看空","neutral":"中性"}[_drt]
-        _dclrt = {"bullish":"dcell-bull","bearish":"dcell-bear","neutral":"dcell-neut"}[_drt]
-        _scrt = sc_cls(_srt)
-        _det_rt = _detail(_trt)
-        _res_rt = swarm_detail.get(_trt,{}).get("resonance",{}).get("resonance_detected",False)
-        _sup_rt = int(_ort.get("supporting_agents") or swarm_detail.get(_trt,{}).get("supporting_agents",0))
-        _res_html_rt = (f'<span class="res-y">{_sup_rt}A</span>' if _res_rt else '<span class="res-n">无</span>')
-        _ml_ex_rt = _Path(report_dir / f"alpha-hive-{_trt}-ml-enhanced-{date_str}.html").exists()
-        _ml_rt = (f'<a href="alpha-hive-{_trt}-ml-enhanced-{date_str}.html" class="ml-btn-sm">查看</a>'
-                  if _ml_ex_rt else "-")
-        _pc_st_rt = (' style="color:var(--bull);font-weight:700"' if _det_rt["pc"] != "-" and float(_det_rt["pc"]) < 0.7
-                     else (' style="color:var(--bear);font-weight:700"' if _det_rt["pc"] != "-" and float(_det_rt["pc"]) > 1.5 else ""))
-        _prt = _det_rt["price"]
-        _mrt = _det_rt["momentum_5d"]
-        _ptd_rt = f'${_prt:,.2f}' if _prt is not None else '-'
-        _mtd_rt = (f'<span class="{"sprice-up" if _mrt > 0 else "sprice-dn"}">{_mrt:+.1f}%</span>'
-                   if _mrt is not None and _mrt != 0 else ('-' if _mrt is None else '<span class="sprice-flat">0.0%</span>'))
-        # 升级 B/E: 表格行风险标签 + delta
-        _risk_rt = _risk_badge(_trt, swarm_detail.get(_trt, {}))
-        _delta_rt = _score_deltas.get(_trt, {}).get("html", "")
-        new_rows_html += f"""
-        <tr data-dir="{_drt}" data-score="{_srt:.1f}">
-          <td>{_ri}</td>
-          <td><strong>{_html.escape(_trt)}</strong></td>
-          <td><span class="{_dclrt}">{_dlrt}</span> {_risk_rt}</td>
-          <td class="{_scrt}"><strong>{_srt:.1f}</strong>/10 {_delta_rt}</td>
-          <td>{_ptd_rt}</td>
-          <td>{_mtd_rt}</td>
-          <td>{_res_html_rt}</td>
-          <td>{_det_rt['bullish']}/{_det_rt['bearish_v']}/{_det_rt['neutral_v']}</td>
-          <td>{_det_rt['iv_rank']}</td>
-          <td{_pc_st_rt}>{_det_rt['pc']}</td>
-          <td style="color:var(--neut)">{_det_rt['bear_score']:.1f}</td>
-          <td>{_ml_rt}</td>
-        </tr>"""
+    new_cards_html = _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail, report_dir, date_str, _score_deltas, _hist_full)
 
-    # ── Build Deep Analysis cards (with radar canvas) ──
-    _dir_hdr3 = {"bullish":"#1a7a3a","bearish":"#8b1a1a","neutral":"#7a5c1a"}
-    new_company_html = ""
-    for _tkrd in all_tickers_sorted:
-        _sdd = swarm_detail.get(_tkrd, {})
-        _add = _sdd.get("agent_details", {})
-        _scd = float(opp_by_ticker.get(_tkrd,{}).get("opp_score") or _sdd.get("final_score", 0))
-        _drd = str(opp_by_ticker.get(_tkrd,{}).get("direction") or _sdd.get("direction","neutral")).lower()
-        if "多" in _drd: _drd = "bullish"
-        elif "空" in _drd: _drd = "bearish"
-        elif _drd not in ("bullish","bearish","neutral"): _drd = "neutral"
-        _dlbld = {"bullish":"看多 ↑","bearish":"看空 ↓","neutral":"中性 →"}[_drd]
-        _hcd   = _dir_hdr3.get(_drd, "#1a3a7a")
-        _detd  = _detail(_tkrd)
-        # F10: 预计算价格 HTML（避免嵌套 f-string）
-        _pd = _detd["price"]
-        _md = _detd["momentum_5d"]
-        if _pd is not None:
-            _mhtml_d = ""
-            if _md is not None:
-                _mcls_d = "sprice-up" if _md > 0 else ("sprice-dn" if _md < 0 else "sprice-flat")
-                _mhtml_d = f' <span class="sprice-chg {_mcls_d}">{_md:+.1f}%</span>'
-            _price_metric_d = f'<div class="cc-metric"><span class="cm-l">当前价格</span><span class="cm-v">${_pd:,.2f}{_mhtml_d}</span></div>'
-        else:
-            _price_metric_d = ""
-        _blstd = []
-        for _discd, _icod, _lbd in [
-            (_add.get("ScoutBeeNova",{}).get("discovery",""),       "📋","内幕"),
-            (_add.get("OracleBeeEcho",{}).get("discovery",""),      "📊","期权"),
-            (_add.get("BuzzBeeWhisper",{}).get("discovery",""),     "💬","情绪"),
-            (_add.get("BearBeeContrarian",{}).get("discovery",""),  "🐻","风险"),
-        ]:
-            _fd = _discd.split("|")[0].strip()[:85] if _discd else ""
-            if _fd:
-                _blstd.append(f'<li>{_icod} <strong>{_lbd}：</strong>{_html.escape(_fd)}</li>')
-        _bhtmld = "\n                    ".join(_blstd) if _blstd else "<li>数据采集中</li>"
-        _ml_exd = _Path(report_dir / f"alpha-hive-{_tkrd}-ml-enhanced-{date_str}.html").exists()
-        _mlbtnd = (f'<a href="alpha-hive-{_tkrd}-ml-enhanced-{date_str}.html" class="ml-btn-cc">ML 增强分析 →</a>'
-                   if _ml_exd else '<span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span>')
-        # ── edgar_rss badge ──
-        _rss_n = _add.get("ScoutBeeNova", {}).get("details", {}).get("insider", {}).get("rss_fresh_today", 0)
-        _rss_badge = (f'<span class="rss-badge">📋 今日Form4 {_rss_n}份 🔴</span>' if _rss_n else "")
-        # ── thesis break 面板（直接查询配置，不依赖 JSON 中转）──
-        try:
-            from thesis_breaks import ThesisBreakConfig as _TBC
-            _tb_cfg = _TBC.get_breaks_config(_tkrd)
-            _tb_l1 = [c["metric"] + "：" + c["trigger"]
-                      for c in _tb_cfg.get("level_1_warning", {}).get("conditions", [])] if _tb_cfg else []
-            _tb_l2 = [c["metric"] + "：" + c["trigger"]
-                      for c in _tb_cfg.get("level_2_stop_loss", {}).get("conditions", [])] if _tb_cfg else []
-        except (KeyError, TypeError, ImportError, AttributeError) as _tb_err:
-            _log.debug("thesis-break 配置解析失败: %s", _tb_err)
-            _tb_l1, _tb_l2 = [], []
-        if _tb_l1 or _tb_l2:
-            _tb_html = '<div class="thesis-break-box">'
-            _tb_html += '<div class="tb-title">⚠️ 失效条件监控</div>'
-            if _tb_l1:
-                _tb_html += '<div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list">'
-                for _c in _tb_l1[:3]:
-                    _tb_html += f'<li>{_html.escape(str(_c))}</li>'
-                _tb_html += '</ul>'
-            if _tb_l2:
-                _tb_html += '<div class="tb-level tb-l2">Level 2 止损</div><ul class="tb-list">'
-                for _c in _tb_l2[:3]:
-                    _tb_html += f'<li>{_html.escape(str(_c))}</li>'
-                _tb_html += '</ul>'
-            _tb_html += '</div>'
-        else:
-            _tb_html = ""
-        # 升级 B/D/E/F: 深度卡片增强
-        _risk_d = _risk_badge(_tkrd, _sdd)
-        _delta_d = _score_deltas.get(_tkrd, {}).get("html", "")
-        _cat_d = _catalyst_countdown(_tkrd, _sdd)
-        _conf_d = _signal_conflicts(_tkrd, _sdd)
-        _ins_d = _html.escape(_build_plain_insight(_tkrd, _sdd))
-        new_company_html += f"""
-        <div class="company-card" data-dir="{_drd}" data-score="{_scd:.1f}" id="deep-{_html.escape(_tkrd)}">
-          <div class="cc-header" style="background:{_hcd};">
-            <span class="cc-ticker">{_html.escape(_tkrd)}</span>
-            <span class="cc-dir">{_dlbld}</span> {_risk_d}
-            <span class="cc-score">{_scd:.1f}/10 {_delta_d}</span>
-          </div>
-          <div class="cc-body">
-            {f'<div class="sinsight" style="margin-bottom:10px">{_ins_d}</div>' if _ins_d else ''}
-            {_cat_d}
-            {_conf_d}
-            <div class="cc-two">
-              <div class="cc-metrics-col">
-                {_price_metric_d}
-                <div class="cc-metric"><span class="cm-l">IV Rank</span><span class="cm-v">{_detd['iv_rank']}</span></div>
-                <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">{_detd['pc']}</span></div>
-                {f'<div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:{_detd["flow_color"]};font-weight:bold;">{_detd["flow_dir"]}</span></div>' if _detd["flow_dir"] != "-" else ""}
-                {f'<div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">{_detd["gex"]}</span></div>' if _detd["gex"] != "-" else ""}
-                <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">{_detd['bear_score']:.1f}/10</span></div>
-                <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">{_detd['bullish']}多/{_detd['bearish_v']}空</span></div>
-              </div>
-              <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-{_html.escape(_tkrd)}" width="160" height="160"></canvas></div>
-            </div>
-            <ul class="cc-signals">{_bhtmld}</ul>
-            {_build_dim_dq_html(_detd['dim_dq'])}
-            {_tb_html}
-            <div class="cc-footer">{_rss_badge}{_mlbtnd}</div>
-          </div>
-        </div>"""
+    new_rows_html = _build_table_rows_html(all_tickers_sorted, opp_by_ticker, swarm_detail, report_dir, date_str, _score_deltas)
 
-    # ── 历史简报回溯 + F&G 历史 + 评分趋势数据 ──
-    _hist_entries = []
-    _fg_history = [{"date": date_str, "value": _fv3}]  # 当天 F&G
-    _trend_data = {}  # {ticker: [{date, score}, ...]}
-    _hist_full = {}   # {date: [{ticker, score, direction}, ...]}  for diff
-    # 当天趋势数据
-    for _tt in all_tickers_sorted:
-        _tts = float(opp_by_ticker.get(_tt, {}).get("opp_score") or swarm_detail.get(_tt, {}).get("final_score", 0))
-        _trend_data.setdefault(_tt, []).append({"date": date_str, "score": round(_tts, 1)})
-    _hist_full[date_str] = [
-        {"ticker": _tt, "score": round(float(opp_by_ticker.get(_tt, {}).get("opp_score") or swarm_detail.get(_tt, {}).get("final_score", 0)), 1),
-         "direction": str(opp_by_ticker.get(_tt, {}).get("direction") or swarm_detail.get(_tt, {}).get("direction", "neutral")).lower()}
-        for _tt in all_tickers_sorted
-    ]
-    try:
-        import glob as _glob
-        _hist_files = sorted(
-            _glob.glob(str(report_dir / "alpha-hive-daily-*.json")),
-            reverse=True  # 最新在前
-        )
-        for _hf in _hist_files:
-            _hdate = _Path(_hf).stem.replace("alpha-hive-daily-", "")
-            if _hdate == date_str:
-                continue  # 今天已在主面板展示
-            try:
-                with open(_hf, encoding="utf-8") as _hfp:
-                    _hrpt = _json.load(_hfp)
-                _hopps = _hrpt.get("opportunities", [])
-                _hmeta = _hrpt.get("swarm_metadata", {})
-                _hn    = _hmeta.get("tickers_analyzed", len(_hopps))
-                # 全部 opps 数据（用于趋势 + diff）
-                _hall_opps = [
-                    {"ticker": o.get("ticker",""), "score": float(o.get("opp_score",0)),
-                     "direction": str(o.get("direction","neutral")).lower()}
-                    for o in _hopps if o.get("ticker")
-                ]
-                # 趋势数据：每个 ticker 每天的评分
-                for _ho in _hall_opps:
-                    _trend_data.setdefault(_ho["ticker"], []).append(
-                        {"date": _hdate, "score": round(_ho["score"], 1)})
-                # diff 全量数据
-                _hist_full[_hdate] = _hall_opps
-                # 按 opp_score 降序取 Top 3
-                _htop3 = sorted(_hall_opps, key=lambda x: x["score"], reverse=True)[:3]
-                _havg  = sum(o["score"] for o in _htop3) / len(_htop3) if _htop3 else 0
-                # 可用的 ML 报告
-                _hml   = [t for t in [o["ticker"] for o in _hopps]
-                          if _Path(report_dir / f"alpha-hive-{t}-ml-enhanced-{_hdate}.html").exists()]
-                # 提取 F&G 值（从 swarm_results）
-                _hfg_val = None
-                try:
-                    _hsr_path = report_dir / f".swarm_results_{_hdate}.json"
-                    if _hsr_path.exists():
-                        with open(_hsr_path, encoding="utf-8") as _hsr_fp:
-                            _hsr = _json.load(_hsr_fp)
-                        for _htk in _hsr:
-                            _hbuzz = _hsr[_htk].get("agent_details", {}).get("BuzzBeeWhisper", {}).get("discovery", "")
-                            _hfg_m = _re.search(r'F&G\s*(\d+)', _hbuzz)
-                            if _hfg_m:
-                                _hfg_val = int(_hfg_m.group(1))
-                                break
-                except (KeyError, ValueError, IndexError, TypeError):
-                    pass
-                if _hfg_val is not None:
-                    _fg_history.append({"date": _hdate, "value": _hfg_val})
-                _hist_entries.append({
-                    "date": _hdate, "n": _hn, "top3": _htop3,
-                    "avg": _havg, "ml_tickers": _hml,
-                    "has_md":   _Path(report_dir / f"alpha-hive-daily-{_hdate}.md").exists(),
-                    "has_json": _Path(report_dir / f"alpha-hive-daily-{_hdate}.json").exists(),
-                })
-            except Exception as _he:
-                _log.debug("历史报告 %s 解析失败: %s", _hdate, _he)
-    except Exception as _hle:
-        _log.debug("历史时间线加载失败: %s", _hle)
+    new_company_html = _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail, report_dir, date_str, _score_deltas)
 
-    # 排序 F&G 历史和趋势数据（按日期升序）
-    _fg_history.sort(key=lambda x: x["date"])
-    for _tk in _trend_data:
-        _trend_data[_tk].sort(key=lambda x: x["date"])
+    # （历史数据已在 cards 循环前加载，此处直接使用）
 
-    # 生成历史时间线 HTML
-    _dir_icon = {"bullish": "🟢", "bearish": "🔴", "neutral": "🟡"}
-    _dir_cn   = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
+    # 生成历史时间线 HTML（可折叠：最近 3 条展示，其余折叠）
+    _HIST_VISIBLE = 3  # 默认展示条数
     _hist_html = ""
+
     if _hist_entries:
-        for _he in _hist_entries:
-            _top3_html = ""
-            for _ht in _he["top3"]:
-                _hscls = "sc-h" if _ht["score"] >= 7.0 else ("sc-m" if _ht["score"] >= 5.5 else "sc-l")
-                _hdir  = _ht["direction"] if _ht["direction"] in _dir_icon else "neutral"
-                _top3_html += f"""<div class="htop-chip">
-                  <span class="hticker">{_html.escape(_ht['ticker'])}</span>
-                  <span class="hscore {_hscls}">{_ht['score']:.1f}</span>
-                  <span class="hdir">{_dir_icon.get(_hdir,'🟡')}</span>
-                </div>"""
-            _hlinks = ""
-            if _he["has_json"]:
-                _hlinks += f'<a href="alpha-hive-daily-{_he["date"]}.json" target="_blank" rel="noopener" class="hlink hlink-json">📊 完整数据</a>'
-            for _hmt in _he["ml_tickers"][:4]:
-                _hlinks += f'<a href="alpha-hive-{_hmt}-ml-enhanced-{_he["date"]}.html" target="_blank" rel="noopener" class="hlink hlink-ml">{_html.escape(_hmt)}</a>'
+        # 最近 N 条直接展示
+        for _he in _hist_entries[:_HIST_VISIBLE]:
+            _hist_html += _render_hist_card(_he)
+        # 超出部分包裹在可折叠区域
+        _hidden_entries = _hist_entries[_HIST_VISIBLE:]
+        if _hidden_entries:
+            _hidden_count = len(_hidden_entries)
+            _collapsed_cards = "".join(_render_hist_card(_he) for _he in _hidden_entries)
             _hist_html += f"""
-            <div class="hist-card">
-              <div class="hist-left">
-                <div class="hist-date">{_he['date']}</div>
-                <div class="hist-meta">{_he['n']} 标的 · 均分 <span class="{'sc-h' if _he['avg']>=7 else ('sc-m' if _he['avg']>=5.5 else 'sc-l')}">{_he['avg']:.1f}</span></div>
-              </div>
-              <div class="hist-mid">{_top3_html}</div>
-              <div class="hist-right">{_hlinks}</div>
+            <button class="hist-toggle" id="histToggleBtn"
+              onclick="var c=document.getElementById('histCollapsed');c.classList.toggle('hist-expanded');this.classList.toggle('hist-open');this.querySelector('.hist-toggle-text').textContent=c.classList.contains('hist-expanded')?'收起历史简报':'展开更早 {_hidden_count} 份简报'">
+              <span class="hist-toggle-text">展开更早 {_hidden_count} 份简报</span>
+              <span class="hist-arrow">▼</span>
+            </button>
+            <div class="hist-collapsed" id="histCollapsed">
+              {_collapsed_cards}
             </div>"""
     else:
         _hist_html = '<div class="hist-empty">暂无历史记录，第一份历史简报将在明天出现 📅</div>'
 
-    # ── Avg Score formatted ──
-    _avg_score_str = f"{_avg_score:.1f}"
-    _fg_str2 = _fg_str  # already computed above
-
     # ── 准确率 Dashboard 数据拼装 ──
-    import json as _json
 
     # 方向图数据
-    _dir_map_acc = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
+    _dir_map_acc = _DIR_CN
 
     # 个股行表格
     _acc_ticker_rows = ""
@@ -1347,22 +1412,6 @@ def render_dashboard_html(report: Dict, date_str: str,
     _acc_overall_pct = _acc_overall * 100
 
     # F11: 生成最佳/最差预测 HTML
-    _dir_cn11 = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
-    def _pred_list_html(preds, is_best=True):
-        if not preds:
-            return '<div style="font-size:.82em;color:var(--ts);padding:8px 0">数据积累中...</div>'
-        h = '<ul class="pred-list">'
-        for p in preds:
-            _ret = p.get("return_t7", 0) or 0
-            _rcls = "pred-ret-up" if _ret > 0 else "pred-ret-dn"
-            _dir = _dir_cn11.get(p.get("direction", ""), p.get("direction", ""))
-            h += (f'<li class="pred-item">'
-                  f'<span class="pred-tk">{p.get("ticker","")}</span>'
-                  f'<span class="pred-date">{p.get("date","")[:10]} · {_dir}</span>'
-                  f'<span class="pred-ret {_rcls}">{_ret:+.1f}%</span>'
-                  f'</li>')
-        h += '</ul>'
-        return h
     _best3_html = _pred_list_html(_acc_best3, True)
     _worst3_html = _pred_list_html(_acc_worst3, False)
 
@@ -1440,7 +1489,7 @@ def render_dashboard_html(report: Dict, date_str: str,
 
 
     # F12: 搜索索引数据
-    _dir_cn12 = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}
+    _dir_cn12 = _DIR_CN
     _search_index = []
     for _t12 in all_tickers_sorted:
         _s12 = float(opp_by_ticker.get(_t12, {}).get("opp_score") or swarm_detail.get(_t12, {}).get("final_score", 0))
@@ -1448,13 +1497,156 @@ def render_dashboard_html(report: Dict, date_str: str,
         if "多" in _d12: _d12 = "bullish"
         elif "空" in _d12: _d12 = "bearish"
         elif _d12 not in ("bullish", "bearish", "neutral"): _d12 = "neutral"
-        _det12 = _detail(_t12)
+        _det12 = _detail(_t12, swarm_detail)
         _search_index.append({
             "ticker": _t12,
             "score": round(_s12, 1),
             "direction": _dir_cn12.get(_d12, "中性"),
             "price": _det12["price"],
         })
+
+    # ── 升级 C: "今日变化" 摘要卡 ──
+    _changes_html = ""
+    try:
+        # 取最近一天的历史数据对比
+        _prev_date = None
+        _prev_data = {}
+        for _cd in sorted(_hist_full.keys(), reverse=True):
+            if _cd != date_str:
+                _prev_date = _cd
+                _prev_data = {item["ticker"]: item for item in _hist_full[_cd]}
+                break
+        if _prev_date and _prev_data:
+            _cur_data = {item["ticker"]: item for item in _hist_full.get(date_str, [])}
+            _up_items = []    # (ticker, delta)
+            _dn_items = []
+            _flip_items = []  # (ticker, old_dir, new_dir)
+            _new_tickers = []
+            _dir_cn_c = _DIR_CN
+            _prev_avg = 0.0
+            _cur_avg = 0.0
+            _prev_cnt = 0
+            _cur_cnt = 0
+            for _tk_c, _cd_c in _cur_data.items():
+                _cur_avg += _cd_c["score"]
+                _cur_cnt += 1
+                if _tk_c in _prev_data:
+                    _pd_c = _prev_data[_tk_c]
+                    _delta_c = round(_cd_c["score"] - _pd_c["score"], 1)
+                    if _delta_c >= 0.8:
+                        _up_items.append((_tk_c, _delta_c))
+                    elif _delta_c <= -0.8:
+                        _dn_items.append((_tk_c, _delta_c))
+                    if _cd_c["direction"] != _pd_c["direction"]:
+                        _flip_items.append((_tk_c, _dir_cn_c.get(_pd_c["direction"], "?"),
+                                            _dir_cn_c.get(_cd_c["direction"], "?")))
+                else:
+                    _new_tickers.append(_tk_c)
+            for _tk_p, _pd_p in _prev_data.items():
+                _prev_avg += _pd_p["score"]
+                _prev_cnt += 1
+            _prev_avg = round(_prev_avg / _prev_cnt, 1) if _prev_cnt else 0
+            _cur_avg = round(_cur_avg / _cur_cnt, 1) if _cur_cnt else 0
+            _avg_delta = round(_cur_avg - _prev_avg, 1)
+            _up_items.sort(key=lambda x: x[1], reverse=True)
+            _dn_items.sort(key=lambda x: x[1])
+            _parts_c = []
+            if _up_items:
+                _chips = " ".join(f'<span class="chg-chip chg-up">⬆ {t} {d:+.1f}</span>' for t, d in _up_items[:4])
+                _parts_c.append(_chips)
+            if _dn_items:
+                _chips = " ".join(f'<span class="chg-chip chg-dn">⬇ {t} {d:+.1f}</span>' for t, d in _dn_items[:4])
+                _parts_c.append(_chips)
+            if _flip_items:
+                _chips = " ".join(f'<span class="chg-chip chg-flip">🔄 {t} {o}→{n}</span>' for t, o, n in _flip_items[:3])
+                _parts_c.append(_chips)
+            if _new_tickers:
+                _chips = " ".join(f'<span class="chg-chip chg-new">🆕 {t}</span>' for t in _new_tickers[:3])
+                _parts_c.append(_chips)
+            _n_up = sum(1 for _, d in [(t, _cur_data[t]["score"] - _prev_data[t]["score"])
+                        for t in _cur_data if t in _prev_data] if d > 0.1)
+            _n_dn = sum(1 for _, d in [(t, _cur_data[t]["score"] - _prev_data[t]["score"])
+                        for t in _cur_data if t in _prev_data] if d < -0.1)
+            _n_flat = len([t for t in _cur_data if t in _prev_data]) - _n_up - _n_dn
+            _avg_cls = "chg-up" if _avg_delta > 0 else ("chg-dn" if _avg_delta < 0 else "")
+            _summary_line = (f'<div class="chg-summary">'
+                             f'整体：<span class="chg-up">{_n_up}↑</span> '
+                             f'<span class="chg-dn">{_n_dn}↓</span> '
+                             f'<span>{_n_flat}→</span> · '
+                             f'均分 {_prev_avg}→{_cur_avg}'
+                             f'(<span class="{_avg_cls}">{_avg_delta:+.1f}</span>)'
+                             f'</div>')
+            if _parts_c or _flip_items:
+                _inner = "\n".join(_parts_c) + _summary_line
+                _changes_html = (f'<div class="changes-card">'
+                                 f'<div class="chg-title">🔔 与{_prev_date}对比</div>'
+                                 f'<div class="chg-body">{_inner}</div>'
+                                 f'</div>')
+    except Exception as _chg_err:
+        _log.debug("今日变化摘要生成失败: %s", _chg_err)
+
+    # ── 升级 A: 板块热力图数据 ──
+    _heatmap_html = ""
+    try:
+        from config import WATCHLIST as _WL_A
+        _sectors_a: dict = {}  # {sector: {tickers: [...], avg_momentum, avg_sentiment, direction_dominant}}
+        for _tk_a in all_tickers_sorted:
+            _wl_a = _WL_A.get(_tk_a, {})
+            _sec_a = _wl_a.get("sector", "Other") if isinstance(_wl_a, dict) else "Other"
+            _sd_a = swarm_detail.get(_tk_a, {})
+            _m5d_a = _sd_a.get("agent_details", {}).get("ScoutBeeNova", {}).get("details", {}).get("momentum_5d", 0) or 0
+            _buzz_a = _sd_a.get("agent_details", {}).get("BuzzBeeWhisper", {}).get("details", {})
+            _sent_a = _buzz_a.get("sentiment_pct", 50) if isinstance(_buzz_a, dict) else 50
+            _dir_a = str(_sd_a.get("direction", "neutral")).lower()
+            _sectors_a.setdefault(_sec_a, {"tickers": [], "momentums": [], "sentiments": [], "dirs": []})
+            _sectors_a[_sec_a]["tickers"].append(_tk_a)
+            _sectors_a[_sec_a]["momentums"].append(float(_m5d_a))
+            _sectors_a[_sec_a]["sentiments"].append(float(_sent_a))
+            _sectors_a[_sec_a]["dirs"].append(_dir_a)
+        if _sectors_a:
+            _hm_cells = ""
+            for _sec_name, _sec_data in sorted(_sectors_a.items(), key=lambda x: len(x[1]["tickers"]), reverse=True):
+                _n_tk = len(_sec_data["tickers"])
+                _avg_mom = sum(_sec_data["momentums"]) / _n_tk if _n_tk else 0
+                _avg_sent = sum(_sec_data["sentiments"]) / _n_tk if _n_tk else 50
+                _bull_n = sum(1 for d in _sec_data["dirs"] if d == "bullish")
+                _bear_n = sum(1 for d in _sec_data["dirs"] if d == "bearish")
+                # 颜色：基于动量 + 情绪综合
+                if _avg_mom > 1.5 and _avg_sent > 55:
+                    _hm_bg = "rgba(34,197,94,.18)"
+                    _hm_border = "rgba(34,197,94,.35)"
+                elif _avg_mom < -1.5 and _avg_sent < 45:
+                    _hm_bg = "rgba(239,68,68,.14)"
+                    _hm_border = "rgba(239,68,68,.3)"
+                elif _avg_mom > 0.5 or _avg_sent > 52:
+                    _hm_bg = "rgba(34,197,94,.08)"
+                    _hm_border = "rgba(34,197,94,.2)"
+                elif _avg_mom < -0.5 or _avg_sent < 48:
+                    _hm_bg = "rgba(239,68,68,.07)"
+                    _hm_border = "rgba(239,68,68,.18)"
+                else:
+                    _hm_bg = "rgba(100,116,139,.06)"
+                    _hm_border = "var(--border)"
+                _mom_cls = "hm-up" if _avg_mom > 0 else ("hm-dn" if _avg_mom < 0 else "")
+                _tk_chips = " ".join(f'<span class="hm-tk">{t}</span>' for t in _sec_data["tickers"][:5])
+                _dir_bar = (f'<div class="hm-dir-bar">'
+                            f'<div class="hm-dir-fill hm-dir-bull" style="width:{_bull_n/_n_tk*100:.0f}%"></div>'
+                            f'<div class="hm-dir-fill hm-dir-bear" style="width:{_bear_n/_n_tk*100:.0f}%"></div>'
+                            f'</div>' if _n_tk > 1 else "")
+                _hm_cells += (f'<div class="hm-cell" style="background:{_hm_bg};border-color:{_hm_border};'
+                              f'flex:{max(1, _n_tk)}">'
+                              f'<div class="hm-sec-name">{_html.escape(_sec_name)}</div>'
+                              f'<div class="hm-mom {_mom_cls}">{_avg_mom:+.1f}%</div>'
+                              f'<div class="hm-tks">{_tk_chips}</div>'
+                              f'{_dir_bar}'
+                              f'<div class="hm-sent">情绪 {_avg_sent:.0f}%</div>'
+                              f'</div>')
+            _heatmap_html = (f'<div class="chart-box">'
+                             f'<div class="chart-ttl">🔥 板块情绪热力图</div>'
+                             f'<div class="hm-grid">{_hm_cells}</div>'
+                             f'</div>')
+    except Exception as _hm_err:
+        _log.debug("板块热力图生成失败: %s", _hm_err)
 
     # ── Jinja2 渲染 ──
     _avg_score_str = f"{_avg_score:.1f}" if _all_scores else "0"
@@ -1465,7 +1657,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         "fg_label": _fg_label,
         "scores": [[t, round(s, 1)] for t, s in _all_scores],
         "dir_counts": [_dir_counts["bullish"], _dir_counts["bearish"], _dir_counts["neutral"]],
-        "radar": {t: _radar_data(t) for t in all_tickers_sorted},
+        "radar": {t: _radar_data(t, swarm_detail) for t in all_tickers_sorted},
         "acc_dir_labels": [_dir_map_acc.get(d, d) for d in ["bullish", "bearish", "neutral"]],
         "acc_dir_accs": [round(_acc_by_dir.get(d, {}).get("accuracy", 0) * 100, 1)
                          for d in ["bullish", "bearish", "neutral"]],
@@ -1515,6 +1707,9 @@ def render_dashboard_html(report: Dict, date_str: str,
         macro_gld=_macro_gld,
         macro_gld_cls=_macro_gld_cls,
         macro_sector_html=_macro_sector_html,
+        deploy_ts=_data_obj.get("_deploy_ts", 0),
+        changes_html=_changes_html,
+        heatmap_html=_heatmap_html,
         top_n=min(6, len(all_tickers_sorted)),
         scores_chart_height="{}px".format(max(160, len(all_tickers_sorted) * 28)),
         cards_html=new_cards_html,

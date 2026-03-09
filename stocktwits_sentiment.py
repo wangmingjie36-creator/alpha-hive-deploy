@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from hive_logger import atomic_json_write
+from resilience import get_session, stocktwits_limiter, singleton_client, NETWORK_ERRORS
 
 _log = _logging.getLogger("alpha_hive.stocktwits_sentiment")
 
@@ -59,16 +60,6 @@ class StockTwitsClient:
 
     def __init__(self):
         self._token = _load_token()
-        self._last_request = 0.0
-        self._lock = threading.Lock()
-
-    def _throttle(self):
-        """限流：最快 18 秒/次（免费层 200 次/小时 ≈ 18s 间隔）"""
-        with self._lock:
-            elapsed = time.time() - self._last_request
-            if elapsed < 18.0:
-                time.sleep(18.0 - elapsed)
-            self._last_request = time.time()
 
     def get_symbol_sentiment(self, ticker: str) -> Dict:
         """
@@ -97,9 +88,9 @@ class StockTwitsClient:
             return self._no_token_result(ticker)
 
         try:
-            self._throttle()
+            stocktwits_limiter.acquire()
             params = {"access_token": self._token, "limit": 30}
-            resp = _req.get(
+            resp = get_session("stocktwits").get(
                 f"{STOCKTWITS_BASE}/streams/symbol/{ticker.upper()}.json",
                 params=params,
                 headers={"User-Agent": "AlphaHive/1.0"},
@@ -156,7 +147,7 @@ class StockTwitsClient:
 
             return result
 
-        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+        except NETWORK_ERRORS as e:
             _log.warning("StockTwits 请求失败 (%s): %s", ticker, e)
             return self._no_token_result(ticker)
 
@@ -179,18 +170,14 @@ class StockTwitsClient:
         return bool(self._token) and _req is not None
 
 
-_client: Optional[StockTwitsClient] = None
-_client_lock = threading.Lock()
+_holder: dict = {}
+_holder_lock = threading.Lock()
 
 
 def get_stocktwits_sentiment(ticker: str) -> Dict:
     """便捷函数：获取 StockTwits 情绪"""
-    global _client
-    if _client is None:
-        with _client_lock:
-            if _client is None:
-                _client = StockTwitsClient()
-    return _client.get_symbol_sentiment(ticker)
+    client = singleton_client(_holder_lock, StockTwitsClient, _holder)
+    return client.get_symbol_sentiment(ticker)
 
 
 def is_available() -> bool:

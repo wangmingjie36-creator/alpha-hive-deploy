@@ -16,13 +16,15 @@
 - 设置环境变量 FRED_API_KEY 可解锁 CPI、PMI、2Y 国债收益率等
 """
 
-import logging
 import os
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Tuple
 
-_log = logging.getLogger("alpha_hive.fred_macro")
+from hive_logger import get_logger
+
+_log = get_logger("fred_macro")
 
 # 弹性层：熔断器 + 连接池
 try:
@@ -59,6 +61,10 @@ try:
 except (ImportError, KeyError):
     _CACHE_TTL = 1800
 _lock = threading.Lock()
+
+# 板块 ETF 单独缓存（复用 _CACHE_TTL 30min）
+_etf_cache: Dict[str, tuple] = {}   # etf -> (timestamp, (name, chg))
+_etf_lock = threading.Lock()
 
 
 def get_macro_context() -> Dict:
@@ -497,15 +503,30 @@ _SECTOR_TO_ETF = {
 
 
 def _fetch_sector_rotation(yf_module=None) -> Dict:
-    """获取 11 个 SPDR 板块 ETF 的 5 日表现，返回板块轮动数据"""
+    """获取 11 个 SPDR 板块 ETF 的 5 日表现，返回板块轮动数据（并行 + 单 ETF 缓存）"""
     result = {"hot": [], "cold": [], "full": {}}
     try:
         yf = yf_module
         if yf is None:
             import yfinance as yf
         tickers = list(_SECTOR_ETFS.keys())
+        now = time.time()
+
+        # 分离：已缓存 vs 需拉取
+        to_fetch = []
         performances = []
-        for etf in tickers:
+        with _etf_lock:
+            for etf in tickers:
+                cached = _etf_cache.get(etf)
+                if cached and (now - cached[0]) < _CACHE_TTL:
+                    name, chg = cached[1]
+                    performances.append((etf, name, chg))
+                    result["full"][etf] = (name, chg)
+                else:
+                    to_fetch.append(etf)
+
+        # 并行拉取缺失 ETF
+        def _fetch_one(etf):
             try:
                 t = yf.Ticker(etf)
                 hist = t.history(period="5d", interval="1d")
@@ -515,10 +536,23 @@ def _fetch_sector_rotation(yf_module=None) -> Dict:
                     if first_close > 0:
                         chg = round((last_close / first_close - 1) * 100, 2)
                         name = _SECTOR_ETFS[etf]
-                        performances.append((etf, name, chg))
+                        return (etf, name, chg)
+            except Exception as e:
+                _log.debug("Sector ETF %s fetch failed: %s", etf, e)
+            return None
+
+        if to_fetch:
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="etf") as pool:
+                futures = {pool.submit(_fetch_one, etf): etf for etf in to_fetch}
+                for fut in as_completed(futures):
+                    fetched = fut.result()
+                    if fetched:
+                        etf, name, chg = fetched
+                        performances.append(fetched)
                         result["full"][etf] = (name, chg)
-            except Exception:
-                pass
+                        with _etf_lock:
+                            _etf_cache[etf] = (time.time(), (name, chg))
+
         if performances:
             performances.sort(key=lambda x: x[2], reverse=True)
             if len(performances) >= 6:

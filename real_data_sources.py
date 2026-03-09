@@ -20,6 +20,11 @@ from hive_logger import atomic_json_write
 _log = _logging.getLogger("alpha_hive.real_data_sources")
 
 try:
+    from resilience import NETWORK_ERRORS
+except ImportError:
+    NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError, ValueError, KeyError)
+
+try:
     import requests
 except ImportError:
     requests = None
@@ -28,8 +33,6 @@ CACHE_DIR = Path(__file__).parent / "data_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
 _lock = threading.Lock()
-_last_st_request = 0.0
-_ST_MIN_INTERVAL = 2.0  # StockTwits: 200 req/hr ≈ 每 18s, 用 2s 保守
 
 # ── 数据源健康追踪（#7）──
 _HEALTH_FAIL_THRESHOLD = 3
@@ -73,16 +76,6 @@ def _try_src_slack_alert(source: str, fail_count: int):
             )
     except Exception as _se:
         _log.debug("Slack 数据源降级告警发送失败: %s", _se)
-
-
-def _st_throttle():
-    global _last_st_request
-    with _lock:
-        now = time.time()
-        elapsed = now - _last_st_request
-        if elapsed < _ST_MIN_INTERVAL:
-            time.sleep(_ST_MIN_INTERVAL - elapsed)
-        _last_st_request = time.time()
 
 
 def _read_cache(name: str, ttl: int = 3600) -> Optional[Dict]:
@@ -176,7 +169,7 @@ def get_social_buzz(ticker: str) -> Dict:
         _record_src_success("reddit_apewisdom")
         return result
 
-    except (ImportError, ConnectionError, TimeoutError, OSError, ValueError, KeyError) as exc:
+    except (*NETWORK_ERRORS, ImportError) as exc:
         _record_src_failure("reddit_apewisdom")
         _log.debug("get_social_buzz 降级为 fallback (%s): %s", ticker, exc)
         return fallback
@@ -228,7 +221,7 @@ def get_short_interest(ticker: str) -> Dict:
         _record_src_success("yfinance_short_interest")
         return result
 
-    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as exc:
+    except NETWORK_ERRORS as exc:
         _record_src_failure("yfinance_short_interest")
         _log.debug("get_short_interest 降级为 fallback (%s): %s", ticker, exc)
         return fallback

@@ -25,6 +25,12 @@ from hive_logger import PATHS, atomic_json_write
 _log = _logging.getLogger("alpha_hive.edgar_rss")
 
 try:
+    from resilience import NETWORK_ERRORS, get_session
+except ImportError:
+    NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError, ValueError, KeyError)
+    get_session = None
+
+try:
     import requests as _req
 except ImportError:
     _req = None
@@ -106,7 +112,8 @@ class EdgarRSSClient:
             # 健康追踪（一次声明，两个分支共用）
             global _rss_fail_count, _rss_degraded
             try:
-                resp = _req.get(_FEED_URL, headers=_SEC_HEADERS, timeout=15)
+                _sess = get_session("sec_edgar") if get_session else _req
+                resp = _sess.get(_FEED_URL, headers=_SEC_HEADERS, timeout=15)
                 if not resp.ok:
                     _log.debug("EDGAR RSS HTTP %s", resp.status_code)
                     return self._cache
@@ -130,7 +137,7 @@ class EdgarRSSClient:
                 _rss_degraded = False
                 return entries
 
-            except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+            except NETWORK_ERRORS as e:
                 _log.debug("EDGAR RSS fetch error: %s", e)
                 _rss_fail_count += 1
                 if _rss_fail_count == _RSS_FAIL_THRESHOLD and not _rss_degraded:

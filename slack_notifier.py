@@ -4,14 +4,14 @@
 将 Alpha Hive 告警推送到 Slack 频道
 """
 
-import logging as _logging
 import os
 import requests
 from resilience import get_session
 from typing import Optional
 from alert_manager import Alert, AlertLevel
+from hive_logger import get_logger
 
-_log = _logging.getLogger("alpha_hive.slack_notifier")
+_log = get_logger("slack_notifier")
 
 
 class SlackNotifier:
@@ -29,7 +29,14 @@ class SlackNotifier:
             self.webhook_url = self._read_webhook_from_file()
 
     def _read_webhook_from_file(self) -> Optional[str]:
-        """从环境变量或文件安全读取 Webhook URL"""
+        """从 config.get_secret > 环境变量 > 文件安全读取 Webhook URL"""
+        try:
+            from config import get_secret
+            url = get_secret("SLACK_WEBHOOK_URL")
+            if url:
+                return url
+        except ImportError:
+            pass
         # 优先使用环境变量
         env_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
         if env_url:

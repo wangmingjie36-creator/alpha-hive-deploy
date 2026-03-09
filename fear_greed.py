@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict
 
 from hive_logger import atomic_json_write, read_json_cache
+from resilience import get_session, NETWORK_ERRORS
 
 _log = _logging.getLogger("alpha_hive.fear_greed")
 
@@ -54,7 +55,7 @@ def get_fear_greed() -> Dict:
             return _default_result()
 
         try:
-            resp = _req.get(
+            resp = get_session("fear_greed").get(
                 "https://api.alternative.me/fng/?limit=1",
                 headers={"User-Agent": "AlphaHive/1.0"},
                 timeout=8,
@@ -84,7 +85,7 @@ def get_fear_greed() -> Dict:
 
             return result
 
-        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
+        except NETWORK_ERRORS as e:
             _log.debug("Fear & Greed 获取失败: %s", e)
             return _default_result()
 

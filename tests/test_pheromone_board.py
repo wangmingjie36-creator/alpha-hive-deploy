@@ -17,11 +17,15 @@ class TestPublish:
         assert board.get_entry_count() == 1
 
     def test_publish_decays_existing(self, board):
-        board.publish(_entry(score=8.0))
+        """同 ticker 后续发布（不同方向）应衰减已有条目"""
+        board.publish(_entry(agent="First", score=8.0, direction="bullish"))
         first_strength = board.get_top_signals("NVDA")[0].pheromone_strength
-        board.publish(_entry(ticker="TSLA", score=6.0))
-        after_strength = board.get_top_signals("NVDA")[0].pheromone_strength
-        assert after_strength < first_strength
+        # 用不同方向避免共振增强（+0.2），确保只有衰减效果
+        board.publish(_entry(ticker="NVDA", agent="Second", score=6.0, direction="bearish"))
+        # 找回第一条目（agent_id="First"）检查其强度
+        all_nvda = board.get_top_signals("NVDA", n=10)
+        original = [e for e in all_nvda if e.agent_id == "First"][0]
+        assert original.pheromone_strength < first_strength
 
     def test_publish_resonance_increments_support(self, board):
         board.publish(_entry(agent="Agent1"))
@@ -54,6 +58,36 @@ class TestPublish:
         # support_count 应该只有初始的 0（第一条自带 agent_id 在 supporting_agents）
         # 第二次发布时检测到同 agent，不增加
         assert signals[0].support_count == 0
+
+    def test_cross_ticker_no_decay(self, board):
+        """发布不同 ticker 的条目不应衰减已有条目（ticker 隔离衰减）"""
+        board.publish(_entry(ticker="NVDA", score=8.0))
+        nvda_before = board.get_top_signals("NVDA")[0].pheromone_strength
+        board.publish(_entry(ticker="TSLA", score=6.0))
+        nvda_after = board.get_top_signals("NVDA")[0].pheromone_strength
+        assert nvda_after == nvda_before, "跨 ticker 发布不应衰减 NVDA 条目"
+
+    def test_same_ticker_decay_accumulates(self, board):
+        """同 ticker 多次发布（不同方向）应累积衰减"""
+        board.publish(_entry(ticker="NVDA", agent="Target", score=8.0, direction="bullish"))
+        initial = board.get_top_signals("NVDA")[0].pheromone_strength
+        # 用 bearish 方向发布避免共振增强
+        for i in range(6):
+            board.publish(_entry(ticker="NVDA", agent=f"Agent{i + 1}", score=7.0, direction="bearish"))
+        all_nvda = board.get_top_signals("NVDA", n=20)
+        target = [e for e in all_nvda if e.agent_id == "Target"][0]
+        assert target.pheromone_strength < initial, "同 ticker 多次发布应累积衰减"
+
+    def test_entry_survives_full_scan(self, board):
+        """首条目在完整 9-ticker 扫描后应存活（跨 ticker 不衰减）"""
+        board.publish(_entry(ticker="NVDA", agent="ScoutBeeNova", score=8.0))
+        # 模拟 8 个其他 ticker，每个 7 个 Agent = 56 次跨 ticker 发布
+        for i, ticker in enumerate(["TSLA", "MSFT", "AMD", "QCOM", "META", "AMZN", "JNJ", "COIN"]):
+            for j in range(7):
+                board.publish(_entry(ticker=ticker, agent=f"Agent{i}_{j}", score=5.0 + j * 0.5))
+        nvda_signals = board.get_top_signals("NVDA")
+        assert len(nvda_signals) > 0, "NVDA 条目应在跨 ticker 发布后存活"
+        assert nvda_signals[0].pheromone_strength >= board.MIN_STRENGTH
 
 
 class TestGetTopSignals:
@@ -89,6 +123,25 @@ class TestResonance:
         assert res["resonance_detected"]
         assert res["direction"] == "bullish"
         assert res["cross_dim_count"] >= 3
+
+    def test_bearish_resonance_includes_contrarian(self, board):
+        """看空共振中 BearBee(contrarian) 应计入维度数"""
+        for agent in ["ScoutBeeNova", "OracleBeeEcho", "BearBeeContrarian"]:
+            board.publish(_entry(agent=agent, direction="bearish", score=3.0))
+        res = board.detect_resonance("NVDA")
+        assert res["resonance_detected"], "3 维度看空（含 contrarian）应触发共振"
+        assert res["direction"] == "bearish"
+        assert "contrarian" in res["resonant_dimensions"]
+        assert res["cross_dim_count"] >= 3
+
+    def test_bullish_resonance_excludes_contrarian(self, board):
+        """看多共振中 BearBee(contrarian) 不应计入维度数"""
+        for agent in ["ScoutBeeNova", "OracleBeeEcho", "BearBeeContrarian"]:
+            board.publish(_entry(agent=agent, direction="bullish", score=8.0))
+        res = board.detect_resonance("NVDA")
+        # 仅 2 个有效维度（signal + odds），contrarian 被排除
+        assert not res["resonance_detected"], "看多方向下 contrarian 不应计入共振"
+        assert res["cross_dim_count"] == 2
 
     def test_confidence_boost_capped(self, board):
         for i in range(10):
@@ -139,6 +192,46 @@ class TestSnapshot:
         assert "+" in dirs  # bullish
         assert "-" in dirs  # bearish
         assert "0" in dirs  # neutral
+
+
+class TestEviction:
+    def test_bad_timestamp_does_not_break_eviction(self, board):
+        """时间戳解析失败的条目不应阻止整个清理流程"""
+        # 手动插入一条正常 + 一条坏时间戳条目
+        good = _entry(agent="GoodAgent")
+        bad = _entry(agent="BadAgent")
+        bad.timestamp = "not-a-date"
+        board._entries.extend([good, bad])
+        assert board.get_entry_count() == 2
+        # publish 触发清理，坏时间戳条目应被安全移除
+        board.publish(_entry(agent="Trigger"))
+        # 坏时间戳条目应被移除（视为过期）
+        remaining_agents = {e.agent_id for e in board._entries}
+        assert "BadAgent" not in remaining_agents, "坏时间戳条目应在清理中移除"
+
+    def test_normal_entries_survive_eviction(self, board):
+        """正常条目在 60 分钟内应存活"""
+        board.publish(_entry(agent="Survivor", score=8.0))
+        board.publish(_entry(agent="Trigger", score=5.0, direction="bearish"))
+        agents = {e.agent_id for e in board._entries}
+        assert "Survivor" in agents
+
+
+class TestEmptyBoardResonance:
+    def test_empty_board_returns_neutral(self, board):
+        """空板共振检测应返回 neutral 方向"""
+        res = board.detect_resonance("NVDA")
+        assert not res["resonance_detected"]
+        assert res["direction"] == "neutral"
+        assert res["supporting_agents"] == 0
+        assert res["cross_dim_count"] == 0
+
+    def test_single_entry_returns_correct_direction(self, board):
+        """仅 1 条 bearish 条目应返回 bearish 方向（而非默认 bullish）"""
+        board.publish(_entry(agent="ScoutBeeNova", direction="bearish"))
+        res = board.detect_resonance("NVDA")
+        assert res["direction"] == "bearish"
+        assert not res["resonance_detected"]
 
 
 class TestClear:
