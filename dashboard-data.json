@@ -488,313 +488,313 @@
    {
     "ticker": "BILI",
     "score": 5.6,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "NVDA",
     "score": 5.8,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "TSLA",
     "score": 5.2,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "AMZN",
     "score": 5.6,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "MSFT",
     "score": 5.9,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "CRCL",
     "score": 6.0,
-    "direction": "看多"
+    "direction": "bullish"
    }
   ],
   "2026-03-04": [
    {
     "ticker": "NVDA",
     "score": 5.9,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "VKTX",
     "score": 5.0,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "TSLA",
     "score": 5.3,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "AMZN",
     "score": 5.6,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "RKLB",
     "score": 5.1,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "MSFT",
     "score": 6.1,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "CRCL",
     "score": 6.2,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "BILI",
     "score": 7.1,
-    "direction": "看多"
+    "direction": "bullish"
    }
   ],
   "2026-03-03": [
    {
     "ticker": "BILI",
     "score": 5.9,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "CRCL",
     "score": 5.8,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "MSFT",
     "score": 5.3,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "META",
     "score": 5.3,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "RKLB",
     "score": 4.6,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "NVDA",
     "score": 4.5,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "TSLA",
     "score": 4.0,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "AMZN",
     "score": 5.0,
-    "direction": "看多"
+    "direction": "bullish"
    }
   ],
   "2026-03-02": [
    {
     "ticker": "MSFT",
     "score": 7.9,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "BILI",
     "score": 5.6,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "CRCL",
     "score": 5.5,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "NVDA",
     "score": 5.2,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "META",
     "score": 5.2,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "AAPL",
     "score": 6.6,
-    "direction": "看多"
+    "direction": "bullish"
    }
   ],
   "2026-03-01": [
    {
     "ticker": "MSFT",
     "score": 7.0,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "BILI",
     "score": 5.2,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "META",
     "score": 4.7,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "AMZN",
     "score": 4.8,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "VKTX",
     "score": 4.8,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "CRCL",
     "score": 5.0,
-    "direction": "中性"
+    "direction": "neutral"
    }
   ],
   "2026-02-28": [
    {
     "ticker": "MSFT",
     "score": 7.6,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "QCOM",
     "score": 6.1,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "META",
     "score": 5.9,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "BILI",
     "score": 5.8,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "AMZN",
     "score": 5.6,
-    "direction": "看多"
+    "direction": "bullish"
    }
   ],
   "2026-02-27": [
    {
     "ticker": "MSFT",
     "score": 7.6,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "META",
     "score": 5.9,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "QCOM",
     "score": 6.1,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "BILI",
     "score": 5.8,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "AMZN",
     "score": 5.6,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "NVDA",
     "score": 5.0,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "TSLA",
     "score": 5.0,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "VKTX",
     "score": 4.5,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "RKLB",
     "score": 4.2,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "CRCL",
     "score": 4.2,
-    "direction": "中性"
+    "direction": "neutral"
    }
   ],
   "2026-02-26": [
    {
     "ticker": "MSFT",
     "score": 7.3,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "BILI",
     "score": 5.8,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "META",
     "score": 5.7,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "AMZN",
     "score": 5.3,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "NVDA",
     "score": 5.0,
-    "direction": "看多"
+    "direction": "bullish"
    }
   ],
   "2026-02-25": [
    {
     "ticker": "MSFT",
     "score": 7.5,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "NVDA",
     "score": 6.1,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "TSLA",
     "score": 5.5,
-    "direction": "看多"
+    "direction": "bullish"
    },
    {
     "ticker": "VKTX",
     "score": 4.6,
-    "direction": "中性"
+    "direction": "neutral"
    },
    {
     "ticker": "AMD",
     "score": 4.3,
-    "direction": "中性"
+    "direction": "neutral"
    }
   ]
  },
