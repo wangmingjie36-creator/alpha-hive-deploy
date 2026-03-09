@@ -22,6 +22,7 @@ ml_model*.json
 *.log
 logs/*.log
 logs/*.jsonl
+logs/*.jsonl.*
 
 # ==================== Cache Directories ====================
 cache/
