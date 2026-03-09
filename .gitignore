@@ -34,6 +34,7 @@ reddit_cache/
 earnings_cache/
 chroma_db/
 backups/
+db_backups/
 
 # ==================== Temp / Internal ====================
 .swarm_results_*.json

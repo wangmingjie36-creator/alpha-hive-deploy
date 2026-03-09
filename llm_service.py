@@ -169,17 +169,23 @@ def call(
     # 每日预算重置（跨日自动清零）
     _maybe_reset_daily_budget()
 
-    # 预算硬限制：超过每日上限后停止调用，防止意外费用
+    # 预算硬限制：调用前估算本次费用，原子比较防止超支
     try:
         from config import LLM_CONFIG as _llm_cfg
         _budget = _llm_cfg.get("daily_budget_usd", 1.0)
     except (ImportError, KeyError):
         _budget = 1.0
+    pricing = _PRICING.get(model, {"input": 1.0 / 1_000_000, "output": 5.0 / 1_000_000})
+    # 保守估算：假设输出填满 max_tokens（实际通常远小于此）
+    _estimated_cost = max_tokens * pricing["output"]
     with _lock:
         _current_cost = _token_usage["total_cost_usd"]
-    if _current_cost >= _budget:
-        _log.warning("LLM 每日预算已耗尽（$%.3f >= $%.2f），自动降级", _current_cost, _budget)
-        return None
+        if _current_cost + _estimated_cost >= _budget:
+            _log.warning(
+                "LLM 预算预检不通过（已用 $%.3f + 预估 $%.4f >= 上限 $%.2f），自动降级",
+                _current_cost, _estimated_cost, _budget,
+            )
+            return None
 
     try:
         messages = [{"role": "user", "content": prompt}]
@@ -212,9 +218,8 @@ def call(
             if hasattr(block, "text"):
                 text += block.text
 
-        # 追踪用量（含 prompt caching 计费）
+        # 追踪用量（含 prompt caching 计费），pricing 已在预算预检处定义
         usage = response.usage
-        pricing = _PRICING.get(model, {"input": 1.0 / 1_000_000, "output": 5.0 / 1_000_000})
         cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
         cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
         non_cached_input = usage.input_tokens - cache_create - cache_read

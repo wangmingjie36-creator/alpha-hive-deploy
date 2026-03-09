@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from typing import Dict, List, Tuple
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
 # 导入现有模块
@@ -30,7 +30,6 @@ from swarm_agents import (
     BearBeeContrarian,
     QueenDistiller, prefetch_shared_data, inject_prefetched
 )
-from concurrent.futures import as_completed
 from agent_toolbox import AgentHelper
 
 MemoryStore = optional_import("memory_store", "MemoryStore")
@@ -813,24 +812,47 @@ class AlphaHiveDailyReporter:
         """
         ctx = self._init_scan_context(focus_tickers)
         swarm_results, completed_tickers = self._load_checkpoint(ctx)
+        _ckpt_lock = Lock()  # checkpoint 写入锁
 
-        for idx, ticker in enumerate(ctx.targets, 1):
-            if ticker in completed_tickers:
-                res = "✅" if swarm_results[ticker]["resonance"]["resonance_detected"] else "—"
+        # 过滤出需要分析的标的
+        pending_tickers = [
+            (idx, tk) for idx, tk in enumerate(ctx.targets, 1)
+            if tk not in completed_tickers
+        ]
+        for idx, tk in enumerate(ctx.targets, 1):
+            if tk in completed_tickers:
+                res = "✅" if swarm_results[tk]["resonance"]["resonance_detected"] else "—"
                 _log.info("[%d/%d] %s: %.1f/10 (已缓存) %s",
-                          idx, len(ctx.targets), ticker, swarm_results[ticker]['final_score'], res)
-                continue
+                          idx, len(ctx.targets), tk, swarm_results[tk]['final_score'], res)
 
+        def _analyze_and_save(item):
+            """并行分析单个标的并安全写入 checkpoint"""
+            idx, ticker = item
             distilled = self._analyze_single_ticker(ctx, ticker, idx, len(ctx.targets), progress_callback)
             if distilled:
-                swarm_results[ticker] = distilled
-                # 写入 checkpoint（每个 ticker 完成后）
-                try:
-                    with open(ctx.checkpoint_file, "w") as f:
-                        json.dump({"results": swarm_results, "targets": ctx.targets,
-                                  "saved_at": datetime.now().strftime("%Y-%m-%d")}, f, cls=SafeJSONEncoder)
-                except (OSError, TypeError) as e:
-                    _log.warning("Checkpoint 写入失败: %s", e)
+                with _ckpt_lock:
+                    swarm_results[ticker] = distilled
+                    try:
+                        with open(ctx.checkpoint_file, "w") as f:
+                            json.dump({"results": swarm_results, "targets": ctx.targets,
+                                      "saved_at": datetime.now().strftime("%Y-%m-%d")}, f, cls=SafeJSONEncoder)
+                    except (OSError, TypeError) as e:
+                        _log.warning("Checkpoint 写入失败: %s", e)
+            return ticker, distilled
+
+        # 并行分析（max_workers=4 平衡吞吐与 API 限流）
+        if len(pending_tickers) > 1:
+            _log.info("🚀 并行分析 %d 个标的（max_workers=4）", len(pending_tickers))
+            with ThreadPoolExecutor(max_workers=min(4, len(pending_tickers))) as pool:
+                futures = {pool.submit(_analyze_and_save, item): item for item in pending_tickers}
+                for future in as_completed(futures):
+                    try:
+                        future.result(timeout=180)  # 每个标的最多 3 分钟
+                    except Exception as e:
+                        _, tk = futures[future]
+                        _log.warning("标的 %s 并行分析失败: %s", tk, e)
+        elif pending_tickers:
+            _analyze_and_save(pending_tickers[0])
 
         elapsed = self._post_scan_enrichment(ctx, swarm_results)
         self._post_scan_metrics(ctx, swarm_results, elapsed)
