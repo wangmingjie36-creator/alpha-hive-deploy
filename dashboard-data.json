@@ -36,7 +36,7 @@
   ],
   [
    "TSLA",
-   5.8
+   5.9
   ]
  ],
  "dir_counts": [
@@ -450,7 +450,7 @@
    },
    {
     "date": "2026-03-09",
-    "score": 5.8
+    "score": 5.9
    }
   ],
   "AAPL": [
@@ -520,7 +520,7 @@
    },
    {
     "ticker": "TSLA",
-    "score": 5.8,
+    "score": 5.9,
     "direction": "neutral"
    }
   ],
@@ -936,12 +936,12 @@
   },
   {
    "ticker": "TSLA",
-   "score": 5.8,
+   "score": 5.9,
    "direction": "中性",
    "price": 398.68
   }
  ],
  "_generated_at": "2026-03-09 14:15 PDT",
  "_date": "2026-03-09",
- "_deploy_ts": 1773090941
+ "_deploy_ts": 1773090951
 }
