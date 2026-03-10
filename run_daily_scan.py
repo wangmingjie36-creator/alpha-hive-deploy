@@ -176,16 +176,6 @@ def _run_scan(tickers: list[str]) -> None:
     reporter = AlphaHiveDailyReporter()
     notifier = SlackReportNotifier()
 
-    if notifier.enabled:
-        notifier.send_risk_alert(
-            alert_title="Alpha Hive 每日扫描开始",
-            alert_message=(
-                f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"扫描标的: {', '.join(tickers)}"
-            ),
-            severity="MEDIUM",
-        )
-
     print(f"扫描标的: {', '.join(tickers)}\n")
 
     report = reporter.run_swarm_scan(tickers)
@@ -215,16 +205,6 @@ def _run_scan(tickers: list[str]) -> None:
         n_opportunities=n_opps,
         error=error_msg,
     )
-
-    if notifier.enabled:
-        notifier.send_risk_alert(
-            alert_title="Alpha Hive 每日扫描完成",
-            alert_message=(
-                f"完成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                f"耗时: {duration:.0f}s | 机会: {n_opps}"
-            ),
-            severity="LOW",
-        )
 
     print("\n蜂群扫描完成！")
 
@@ -293,18 +273,7 @@ def main() -> None:
             error=str(e),
         )
 
-        try:
-            from slack_report_notifier import SlackReportNotifier
-            n = SlackReportNotifier()
-            if n.enabled:
-                n.send_risk_alert(
-                    alert_title="Alpha Hive 扫描失败",
-                    alert_message=f"错误: {str(e)[:200]}\n请检查日志",
-                    severity="CRITICAL",
-                )
-        except (ConnectionError, TimeoutError, OSError, ValueError) as exc:
-            _log.debug("Slack 失败通知发送失败: %s", exc)
-
+        # 扫描失败仅写日志，不发 Slack DM
         sys.exit(1)
 
 

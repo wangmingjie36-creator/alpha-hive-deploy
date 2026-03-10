@@ -751,7 +751,9 @@ class SGDMLModel:
                     self._scaler.mean_ = sc_mean
                     self._scaler.var_ = np.array(sc["var"])
                     self._scaler.scale_ = np.array(sc["scale"])
-                    self._scaler.n_samples_seen_ = sc.get("n_samples_seen", 1)
+                    # partial_fit 需要 numpy 类型（有 .shape 属性），不能用纯 int
+                    self._scaler.n_samples_seen_ = np.int64(sc.get("n_samples_seen", 1))
+                    self._scaler.n_features_in_ = n_expected  # sklearn 1.x 兼容
                     self._scaler_fitted = True
                 else:
                     _log.info("Scaler 维度不匹配，跳过加载")

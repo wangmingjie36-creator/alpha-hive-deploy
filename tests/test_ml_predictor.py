@@ -970,3 +970,91 @@ class TestHistoricalDataBuilder:
             assert "direction_encoded" in saved[0]
         finally:
             os.unlink(path)
+
+
+class TestScalerSerializationBug:
+    """回归测试：save → load → incremental_train 不因 n_samples_seen_ 类型丢失而崩溃
+    根因：JSON 反序列化后 n_samples_seen_ 是纯 int，sklearn partial_fit 需要 numpy 类型（.shape）"""
+
+    def test_load_then_incremental_train_no_crash(self):
+        """save → load → incremental_train 应正常工作（不抛 'int has no attribute shape'）"""
+        import tempfile
+        from ml_predictor import SGDMLModel, MLPredictionService
+
+        svc = MLPredictionService()
+        svc.train_model()
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        try:
+            svc.model.save_model(path)
+
+            # 加载到新实例（此时 n_samples_seen_ 来自 JSON 反序列化）
+            model2 = SGDMLModel()
+            model2.load_model(path)
+
+            # 增量学习：这一步以前会崩溃
+            new_data = [_make_sample(win=True, crowding_score=70, momentum_5d=3.0)]
+            result = model2.incremental_train(new_data)
+            assert result["status"] == "success"
+            assert result["new_samples"] == 1
+
+            # 预测仍正常
+            prob = model2.predict_probability(_make_sample())
+            assert 0.0 <= prob <= 1.0
+        finally:
+            os.unlink(path)
+
+    def test_scaler_n_samples_seen_is_numpy_after_load(self):
+        """加载后 scaler.n_samples_seen_ 应为 numpy 类型（有 .shape 属性）"""
+        import tempfile
+        import numpy as np
+        from ml_predictor import SGDMLModel, MLPredictionService
+
+        svc = MLPredictionService()
+        svc.train_model()
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        try:
+            svc.model.save_model(path)
+
+            model2 = SGDMLModel()
+            model2.load_model(path)
+
+            # 验证类型：必须有 .shape 属性
+            assert hasattr(model2._scaler.n_samples_seen_, "shape"), \
+                f"n_samples_seen_ type {type(model2._scaler.n_samples_seen_)} 缺少 .shape"
+            # 验证值正确
+            assert int(model2._scaler.n_samples_seen_) == int(svc.model._scaler.n_samples_seen_)
+        finally:
+            os.unlink(path)
+
+    def test_multiple_save_load_incremental_cycles(self):
+        """多轮 save→load→incremental→save 循环不退化"""
+        import tempfile
+        from ml_predictor import SGDMLModel, MLPredictionService
+
+        svc = MLPredictionService()
+        svc.train_model()
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        try:
+            for cycle in range(3):
+                svc.model.save_model(path)
+
+                model2 = SGDMLModel()
+                model2.load_model(path)
+
+                new_data = [_make_sample(
+                    win=cycle % 2 == 0,
+                    crowding_score=50 + cycle * 10,
+                )]
+                result = model2.incremental_train(new_data)
+                assert result["status"] == "success", f"cycle {cycle} failed"
+
+                # 替换为更新后的模型继续下一轮
+                svc.model = model2
+        finally:
+            os.unlink(path)

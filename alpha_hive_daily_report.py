@@ -638,20 +638,8 @@ class AlphaHiveDailyReporter:
                 if violations:
                     _vio_text = "; ".join(v["details"] for v in violations)
                     _log.warning("SLO 违规 %d 条: %s", len(violations), _vio_text)
-                    if self.slack_notifier:
-                        try:
-                            _n = len(violations)
-                            _sev = "CRITICAL" if _n > 3 else ("HIGH" if _n > 1 else "MEDIUM")
-                            _body = f"最近 24h 检测到 {_n} 条 SLO 违规：\n"
-                            for _v in violations:
-                                _body += f"  - [{_v['slo_name']}] {_v['details']}\n"
-                            self.slack_notifier.send_risk_alert(
-                                alert_title=f"SLO 违规告警（{_n} 条）",
-                                alert_message=_body,
-                                severity=_sev,
-                            )
-                        except (OSError, ValueError, ConnectionError) as _se:
-                            _log.warning("SLO Slack 告警发送失败: %s", _se)
+                    # SLO 违规仅写日志，不发 Slack DM（减少噪音）
+                    pass
             except (OSError, ValueError, KeyError, TypeError) as e:
                 _log.warning("指标收集异常: %s", e)
 
@@ -776,17 +764,7 @@ class AlphaHiveDailyReporter:
             except (ImportError, OSError, ValueError, TypeError, KeyError, AttributeError) as e:
                 _log.warning("ML 增量学习异常: %s", e)
 
-        if adapted and self.slack_notifier and self.slack_notifier.enabled:
-            try:
-                weight_lines = " | ".join(f"{k}: {v:.3f}" for k, v in adapted.items())
-                self._submit_bg(
-                    self.slack_notifier.send_risk_alert,
-                    alert_title="权重自适应更新",
-                    alert_message=f"回测反馈已更新 5 维权重：\n{weight_lines}",
-                    severity="info",
-                )
-            except (OSError, ValueError, ConnectionError) as e:
-                _log.debug("权重通知发送失败: %s", e)
+        # 权重自适应仅写日志，不发 Slack DM（减少噪音）
 
         # 数据库清理
         if self.memory_store:
@@ -808,52 +786,8 @@ class AlphaHiveDailyReporter:
     def _post_scan_notify(self, ctx: '_SwarmContext', swarm_results: Dict,
                           report: Dict, elapsed: float) -> None:
         """扫描后通知：Slack推送 + 失效条件 + 日历 + 会话存储 + 向量记忆 + 反馈循环"""
-        # Slack 推送高分机会 + 异常信号
-        if self.slack_notifier and self.slack_notifier.enabled:
-            # ── 方案9: 报告级数据质量降级预警 ──────────────
-            _dq = report.get("data_quality_summary", {})
-            if _dq.get("has_quality_issue"):
-                _dq_msg = (
-                    f"⚠️ 数据质量降级预警：{_dq.get('degraded_count', 0)}/{_dq.get('total_tickers', 0)} "
-                    f"个标的维度覆盖不足（{_dq.get('degraded_pct', 0):.0f}%），"
-                    f"其中 {_dq.get('critical_count', 0)} 个严重不足。"
-                    "报告结论可靠性降低，请结合其他来源交叉验证。"
-                )
-                self._submit_bg(
-                    self.slack_notifier.send_risk_alert,
-                    "数据质量降级", _dq_msg, "HIGH"
-                )
-
-            for ticker, data in swarm_results.items():
-                score = data.get("final_score", 0)
-                direction = data.get("direction", "neutral")
-                dir_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(direction, direction)
-                adj_note = self._format_score_adjustments(data)
-                details_list = [f"评分 {score:.1f}/10"]
-                if adj_note:
-                    details_list.append(adj_note)
-                cov = data.get("dimension_coverage_pct", 100.0)
-                if cov < 100.0:
-                    details_list.append(f"维度覆盖 {cov:.0f}%")
-                # 方案9: 降级标的添加警告前缀
-                _grade = data.get("data_quality_grade", "normal")
-                if _grade == "critical":
-                    details_list.insert(0, "🔴 数据严重不足")
-                elif _grade == "degraded":
-                    details_list.insert(0, "⚠️ 数据降级")
-                if score >= 7.5:
-                    self._submit_bg(
-                        self.slack_notifier.send_opportunity_alert,
-                        ticker, score, dir_cn,
-                        data.get("discovery", "高分机会"), details_list
-                    )
-                elif score <= 3.0:
-                    self._submit_bg(
-                        self.slack_notifier.send_risk_alert,
-                        f"{ticker} 低分预警",
-                        f"蜂群评分仅 {score:.1f}/10，方向 {dir_cn}" + (f" | {adj_note}" if adj_note else ""),
-                        "HIGH"
-                    )
+        # 逐标的机会/风险通知已禁用（减少 Slack DM 噪音）
+        # Bot 只发：1) LLM 确认提示  2) 富文本日报推送成功
 
         # 失效条件快照 + Thesis Break 日历提醒
         try:
@@ -1983,8 +1917,8 @@ def main():
     parser.add_argument(
         '--tickers',
         nargs='+',
-        default=["NVDA", "TSLA", "VKTX", "META", "MSFT", "RKLB", "BILI", "AMZN", "CRCL"],
-        help='要扫描的股票代码列表（空格分隔，默认：NVDA TSLA VKTX META MSFT RKLB BILI AMZN CRCL）'
+        default=["NVDA", "TSLA", "MSFT", "QCOM", "VKTX", "META", "BILI", "AMZN", "RKLB", "CRCL"],
+        help='要扫描的股票代码列表（空格分隔，默认：NVDA TSLA MSFT QCOM VKTX META BILI AMZN RKLB CRCL）'
     )
     parser.add_argument(
         '--all-watchlist',
