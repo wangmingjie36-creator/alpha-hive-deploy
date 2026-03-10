@@ -1,6 +1,7 @@
-"""QueenDistiller 集成测试 - 5 维加权评分 + 共振 + confidence"""
+"""QueenDistiller 集成测试 - 5 维加权评分 + 共振 + confidence + 三增强"""
 
 import pytest
+from unittest.mock import MagicMock
 from swarm_agents import QueenDistiller
 
 
@@ -206,6 +207,41 @@ class TestDistill:
         # catalyst/odds/sentiment/risk_adj 均未提供
         assert out["dimension_status"]["catalyst"] == "absent"
         assert out["dimension_status"]["odds"] == "absent"
+
+    # ── 方案9: data_quality_grade 测试 ─────────────────────────────
+    def test_data_quality_grade_normal(self, queen):
+        """5/5 维度 → grade=normal"""
+        results = [
+            _make_result("signal", 7.0), _make_result("catalyst", 6.0),
+            _make_result("sentiment", 8.0), _make_result("odds", 7.0),
+            _make_result("risk_adj", 5.0),
+        ]
+        out = queen.distill("NVDA", results)
+        assert out["data_quality_grade"] == "normal"
+
+    def test_data_quality_grade_degraded(self, queen):
+        """2/5 维度(40%) → 应低于 60% 阈值但 >= 40% → degraded"""
+        results = [_make_result("signal", 7.0), _make_result("catalyst", 6.0)]
+        out = queen.distill("NVDA", results)
+        assert out["dimension_coverage_pct"] == 40.0
+        assert out["data_quality_grade"] == "degraded"
+
+    def test_data_quality_grade_critical(self, queen):
+        """1/5 维度(20%) → 应低于 40% 阈值 → critical"""
+        results = [_make_result("signal", 7.0)]
+        out = queen.distill("NVDA", results)
+        assert out["dimension_coverage_pct"] == 20.0
+        assert out["data_quality_grade"] == "critical"
+
+    def test_data_quality_grade_boundary_60(self, queen):
+        """3/5 维度(60%) → 恰好 60% 边界 → normal"""
+        results = [
+            _make_result("signal", 7.0), _make_result("catalyst", 6.0),
+            _make_result("sentiment", 8.0),
+        ]
+        out = queen.distill("NVDA", results)
+        assert out["dimension_coverage_pct"] == 60.0
+        assert out["data_quality_grade"] == "normal"
 
 
 class TestBearishPipelineIntegration:
@@ -457,3 +493,413 @@ class TestQueenHelpers:
         assert dv["conflict_level"] == "heavy"
         assert dv["conflict_info"]["bullish_agents"] == 3
         assert dv["conflict_info"]["bearish_agents"] == 3
+
+
+# ==================== Enhancement A: 冲突仲裁 ====================
+
+class TestConflictArbitration:
+    """S4.5 冲突仲裁：票差过小时提升 GuardBee/BearBee 异议权重"""
+
+    def test_arbitration_not_triggered_clear_majority(self, queen):
+        """多数明确时不触发仲裁"""
+        results = [
+            _make_result("signal", 8.0, direction="bullish", confidence=0.9, source="ScoutBeeNova"),
+            _make_result("catalyst", 7.0, direction="bullish", confidence=0.8, source="ChronosBeeHorizon"),
+            _make_result("sentiment", 7.5, direction="bullish", confidence=0.85, source="BuzzBeeWhisper"),
+            _make_result("odds", 4.0, direction="bearish", confidence=0.3, source="OracleBeeEcho"),
+            _make_result("risk_adj", 5.0, direction="neutral", confidence=0.5, source="GuardBeeSentinel"),
+        ]
+        out = queen.distill("TEST", results)
+        assert out["arbitration_triggered"] is False
+        assert out["arbitration_flipped"] is False
+
+    def test_arbitration_triggered_close_vote(self, queen):
+        """票差 < 15% 且双方都有票时触发仲裁"""
+        # 设计非常接近的票：bullish_w ≈ bearish_w
+        results = [
+            _make_result("signal", 7.0, direction="bullish", confidence=0.5, source="ScoutBeeNova"),
+            _make_result("catalyst", 6.0, direction="bullish", confidence=0.45, source="ChronosBeeHorizon"),
+            _make_result("sentiment", 4.0, direction="bearish", confidence=0.5, source="BuzzBeeWhisper"),
+            _make_result("odds", 4.5, direction="bearish", confidence=0.45, source="OracleBeeEcho"),
+            _make_result("risk_adj", 5.0, direction="neutral", confidence=0.3, source="GuardBeeSentinel"),
+        ]
+        dv = queen._compute_direction_vote("TEST", results, results, 6.0)
+        assert dv["arbitration_triggered"] is True
+        assert dv["pre_arbitration_margin"] < 0.15
+
+    def test_arbitration_flip_direction(self, board):
+        """仲裁导致方向翻转：GuardBee 看空的 1.5x boost 足以翻转 bullish→bearish"""
+        queen_local = QueenDistiller(board)
+        # 3 bullish (低 conf) vs 2 bearish (高 conf, 含 GuardBee)
+        # 初始 bull_w=1.14 vs bear_w=1.07 → margin≈0.032 < 0.15 → 触发仲裁
+        # 仲裁后 GuardBee bear 0.52→0.78 → bear_w=1.33 > bull_w=1.14 → 翻转
+        results = [
+            _make_result("signal", 7.0, direction="bullish", confidence=0.40, source="ScoutBeeNova"),
+            _make_result("catalyst", 6.0, direction="bullish", confidence=0.38, source="ChronosBeeHorizon"),
+            _make_result("sentiment", 6.5, direction="bullish", confidence=0.36, source="BuzzBeeWhisper"),
+            _make_result("odds", 4.0, direction="bearish", confidence=0.55, source="OracleBeeEcho"),
+            # GuardBee 看空 — 仲裁时 dissent_boost 1.5x: 0.52→0.78
+            _make_result("risk_adj", 3.0, direction="bearish", confidence=0.52, source="GuardBeeSentinel"),
+        ]
+        dv = queen_local._compute_direction_vote("TEST", results, results, 6.0)
+        assert dv["arbitration_triggered"] is True, \
+            f"接近的票差应触发仲裁 (margin={dv['pre_arbitration_margin']:.4f})"
+        assert dv["arbitration_flipped"] is True, \
+            "GuardBee dissent boost 应导致方向从 bullish 翻转为 bearish"
+
+    def test_arbitration_no_flip(self, queen):
+        """仲裁触发但方向不变：GuardBee neutral → 无异议提升，方向维持"""
+        # bullish 稍微优势，GuardBee neutral → 无异议提升
+        results = [
+            _make_result("signal", 7.0, direction="bullish", confidence=0.50, source="ScoutBeeNova"),
+            _make_result("catalyst", 6.0, direction="bullish", confidence=0.48, source="ChronosBeeHorizon"),
+            _make_result("sentiment", 4.0, direction="bearish", confidence=0.45, source="BuzzBeeWhisper"),
+            _make_result("odds", 4.5, direction="bearish", confidence=0.43, source="OracleBeeEcho"),
+            _make_result("risk_adj", 5.0, direction="neutral", confidence=0.3, source="GuardBeeSentinel"),
+        ]
+        dv = queen._compute_direction_vote("TEST", results, results, 6.0)
+        assert dv["arbitration_triggered"] is True, \
+            f"接近的票差应触发仲裁 (margin={dv['pre_arbitration_margin']:.4f})"
+        assert dv["arbitration_flipped"] is False, \
+            "GuardBee neutral 无异议提升，方向不应翻转"
+
+    def test_distill_output_has_arbitration_fields(self, queen):
+        """distill() 输出包含仲裁字段"""
+        results = [_make_result("signal", 7.0)]
+        out = queen.distill("TEST", results)
+        assert "arbitration_triggered" in out
+        assert "arbitration_flipped" in out
+        assert "pre_arbitration_margin" in out
+        assert isinstance(out["arbitration_triggered"], bool)
+        assert isinstance(out["pre_arbitration_margin"], float)
+
+
+# ==================== Enhancement B: 置信度校准 ====================
+
+class TestConfidenceCalibration:
+    """Enhancement B: 基于维度分散度计算置信区间"""
+
+    def test_confidence_high_agreement(self, queen):
+        """维度一致 → band_width 小 → discrimination="high" """
+        results = [
+            _make_result("signal", 7.5, confidence=0.8),
+            _make_result("catalyst", 7.3, confidence=0.8),
+            _make_result("sentiment", 7.4, confidence=0.8),
+            _make_result("odds", 7.6, confidence=0.8),
+            _make_result("risk_adj", 7.5, confidence=0.8),
+        ]
+        out = queen.distill("TEST", results)
+        cc = out["confidence_calibration"]
+        assert cc["discrimination"] == "high"
+        assert cc["band_width"] < 0.5
+        assert cc["dimension_std"] < 0.5
+
+    def test_confidence_high_disagreement(self, queen):
+        """维度分散 → band_width 大 → discrimination 不是 "high" """
+        results = [
+            _make_result("signal", 9.0, confidence=0.8),
+            _make_result("catalyst", 2.0, confidence=0.8),
+            _make_result("sentiment", 8.0, confidence=0.8),
+            _make_result("odds", 3.0, confidence=0.8),
+            _make_result("risk_adj", 7.0, confidence=0.8),
+        ]
+        out = queen.distill("TEST", results)
+        cc = out["confidence_calibration"]
+        assert cc["discrimination"] in ("medium", "low")
+        assert cc["band_width"] > 0.5
+        assert cc["dimension_std"] > 1.0
+
+    def test_confidence_low_coverage_amplifier(self, queen):
+        """覆盖维度 < 3 → band_width 被 coverage_amplifier 放大"""
+        # 只有 2 个维度 → present_count=2 < low_coverage_threshold=3
+        results = [
+            _make_result("signal", 9.0, confidence=0.8),
+            _make_result("catalyst", 3.0, confidence=0.8),
+        ]
+        out = queen.distill("TEST", results)
+        cc = out["confidence_calibration"]
+        # 低覆盖度应放大 band_width
+        assert cc["band_width"] > 0.0
+
+    def test_confidence_band_max_cap(self, queen):
+        """band_width 不超过 MAX_BAND (2.0)"""
+        results = [
+            _make_result("signal", 10.0, confidence=0.8),
+            _make_result("catalyst", 0.0, confidence=0.8),
+        ]
+        out = queen.distill("TEST", results)
+        cc = out["confidence_calibration"]
+        assert cc["band_width"] <= 2.0
+
+    def test_confidence_band_structure(self, queen):
+        """confidence_band 是 (lower, upper) 元组，范围在 [0, 10]"""
+        results = [_make_result("signal", 7.0)]
+        out = queen.distill("TEST", results)
+        cc = out["confidence_calibration"]
+        assert "confidence_band" in cc
+        lo, hi = cc["confidence_band"]
+        assert 0.0 <= lo <= hi <= 10.0
+
+    def test_distill_output_has_calibration(self, queen):
+        """distill() 输出包含 confidence_calibration 子 dict"""
+        results = [_make_result("signal", 7.0)]
+        out = queen.distill("TEST", results)
+        assert "confidence_calibration" in out
+        cc = out["confidence_calibration"]
+        assert "confidence_band" in cc
+        assert "band_width" in cc
+        assert "discrimination" in cc
+        assert "dimension_std" in cc
+
+
+# ==================== Enhancement C: ML 反馈权重 ====================
+
+class TestMLFeedbackWeighting:
+    """Enhancement C: ML 特征重要性 → 维度权重 + Agent 投票调整"""
+
+    def _make_mock_ml_model(self, importance=None):
+        """创建 mock ML model，返回指定的 feature_importance"""
+        model = MagicMock()
+        if importance is None:
+            # 默认：odds 维度最重要，signal 次之
+            importance = {
+                "crowding": {"weight": 0.15, "coefficient": 0.5, "direction": "positive"},
+                "catalyst": {"weight": 0.08, "coefficient": 0.3, "direction": "positive"},
+                "momentum": {"weight": 0.06, "coefficient": 0.2, "direction": "positive"},
+                "sentiment": {"weight": 0.05, "coefficient": 0.15, "direction": "positive"},
+                "volatility": {"weight": 0.04, "coefficient": -0.1, "direction": "negative"},
+                "iv_rank": {"weight": 0.20, "coefficient": 0.8, "direction": "positive"},
+                "put_call_ratio": {"weight": 0.12, "coefficient": -0.5, "direction": "negative"},
+                "odds_score": {"weight": 0.10, "coefficient": 0.4, "direction": "positive"},
+                "risk_adj_score": {"weight": 0.05, "coefficient": 0.2, "direction": "positive"},
+                "final_score": {"weight": 0.05, "coefficient": 0.15, "direction": "positive"},
+                "agent_agreement": {"weight": 0.05, "coefficient": 0.18, "direction": "positive"},
+                "direction_encoded": {"weight": 0.05, "coefficient": 0.12, "direction": "positive"},
+            }
+        model.get_feature_importance.return_value = importance
+        model.is_trained = True
+        return model
+
+    def test_ml_feedback_no_model(self, board):
+        """ml_model=None → 空调整 → 原始权重不变"""
+        queen_no_ml = QueenDistiller(board, ml_model=None)
+        assert queen_no_ml.ml_feedback_enabled is False
+        assert queen_no_ml.ml_adjustments == {}
+
+    def test_ml_feedback_adjustments(self, board):
+        """有 ml_model → 维度权重归一化调整"""
+        model = self._make_mock_ml_model()
+        queen_ml = QueenDistiller(board, ml_model=model)
+        assert queen_ml.ml_feedback_enabled is True
+        assert len(queen_ml.ml_adjustments) > 0
+        # 权重应该已归一化
+        total = sum(queen_ml.DIMENSION_WEIGHTS.values())
+        assert abs(total - 1.0) < 0.01, f"权重总和应 ≈ 1.0，got {total}"
+
+    def test_ml_feedback_clamp(self, board):
+        """调整因子被 clamp 到 [0.5, 2.0]"""
+        # 极端 importance：一个维度占 99%
+        extreme = {
+            "crowding": {"weight": 0.99, "coefficient": 5.0, "direction": "positive"},
+            "catalyst": {"weight": 0.002, "coefficient": 0.01, "direction": "positive"},
+            "momentum": {"weight": 0.001, "coefficient": 0.005, "direction": "positive"},
+            "sentiment": {"weight": 0.001, "coefficient": 0.005, "direction": "positive"},
+            "volatility": {"weight": 0.001, "coefficient": 0.005, "direction": "negative"},
+            "iv_rank": {"weight": 0.001, "coefficient": 0.005, "direction": "positive"},
+            "put_call_ratio": {"weight": 0.001, "coefficient": 0.005, "direction": "negative"},
+            "odds_score": {"weight": 0.001, "coefficient": 0.005, "direction": "positive"},
+            "risk_adj_score": {"weight": 0.001, "coefficient": 0.005, "direction": "positive"},
+        }
+        model = self._make_mock_ml_model(importance=extreme)
+        queen_ml = QueenDistiller(board, ml_model=model)
+        for dim, adj in queen_ml.ml_adjustments.items():
+            assert 0.5 <= adj <= 2.0, f"{dim} adjustment {adj} out of clamp range"
+
+    def test_ml_feedback_untrained_model(self, board):
+        """未训练模型 → get_feature_importance() 返回空 → 不激活"""
+        model = MagicMock()
+        model.get_feature_importance.return_value = {}
+        model.is_trained = False
+        queen_ml = QueenDistiller(board, ml_model=model)
+        assert queen_ml.ml_feedback_enabled is False
+        assert queen_ml.ml_adjustments == {}
+
+    def test_ml_vote_boost(self, board):
+        """有 ML 模型时 Agent 投票权重应受 ml_adjustments 影响"""
+        model = self._make_mock_ml_model()
+        queen_ml = QueenDistiller(board, ml_model=model)
+        assert queen_ml.ml_feedback_enabled is True
+
+        # 使用明确的多数方向（3 bullish vs 1 bearish）避免触发仲裁
+        results = [
+            _make_result("signal", 8.0, direction="bullish", confidence=0.8, source="ScoutBeeNova"),
+            _make_result("catalyst", 7.0, direction="bullish", confidence=0.7, source="ChronosBeeHorizon"),
+            _make_result("sentiment", 7.5, direction="bullish", confidence=0.75, source="BuzzBeeWhisper"),
+            _make_result("odds", 4.0, direction="bearish", confidence=0.7, source="OracleBeeEcho"),
+            _make_result("risk_adj", 5.0, direction="neutral", confidence=0.5, source="GuardBeeSentinel"),
+        ]
+        dv_ml = queen_ml._compute_direction_vote("TEST", results, results, 7.0)
+
+        # 对比无 ML 的投票
+        queen_no_ml = QueenDistiller(board, ml_model=None)
+        dv_no_ml = queen_no_ml._compute_direction_vote("TEST", results, results, 7.0)
+
+        # ML boost 使得不同维度的 Agent 有不同的有效置信度
+        # signal 维度 adjustment > odds 维度 adjustment → ScoutBeeNova 的权重变化 ≠ OracleBeeEcho
+        ml_weights = dv_ml["direction_vote_weights"]
+        no_ml_weights = dv_no_ml["direction_vote_weights"]
+        # 至少有一个方向的权重应不同
+        changed = any(
+            abs(ml_weights[d] - no_ml_weights[d]) > 0.001
+            for d in ("bullish", "bearish", "neutral")
+        )
+        assert changed, \
+            f"ML 反馈应改变投票权重: ml={ml_weights} vs no_ml={no_ml_weights}"
+
+    def test_distill_output_has_ml_fields(self, queen):
+        """distill() 输出包含 ML 反馈字段"""
+        results = [_make_result("signal", 7.0)]
+        out = queen.distill("TEST", results)
+        assert "ml_weight_adjustments" in out
+        assert "ml_feedback_enabled" in out
+        assert isinstance(out["ml_weight_adjustments"], dict)
+        assert isinstance(out["ml_feedback_enabled"], bool)
+
+
+# ==================== 向后兼容性 ====================
+
+class TestBackwardCompatibility:
+    """验证三增强不破坏现有行为"""
+
+    def test_backward_compat_no_ml_model(self, queen):
+        """不传 ml_model 时一切照旧（queen fixture 不传 ml_model）"""
+        results = [
+            _make_result("signal", 8.0, direction="bullish"),
+            _make_result("catalyst", 7.0, direction="bullish"),
+            _make_result("sentiment", 6.0, direction="bullish"),
+        ]
+        out = queen.distill("TEST", results)
+        # 基本字段仍存在
+        assert "final_score" in out
+        assert "direction" in out
+        assert out["ml_feedback_enabled"] is False
+        assert out["ml_weight_adjustments"] == {}
+        # 新字段也存在
+        assert "arbitration_triggered" in out
+        assert "confidence_calibration" in out
+
+
+class TestDataRealPct:
+    """方案22: data_real_pct 回归测试 — 确保数据准确度 >= 95%"""
+
+    @staticmethod
+    def _typical_results():
+        """构造 7 个 Agent 的典型 data_quality dict（--no-llm, 全 API 可用）"""
+        return [
+            {"score": 7.0, "direction": "bullish", "confidence": 0.8,
+             "dimension": "signal", "source": "ScoutBeeNova",
+             "discovery": "test signal",
+             "data_quality": {
+                 "social_buzz": "real", "google_trends": "proxy_volume",
+                 "bullish_agents": "real", "polymarket": "proxy_momentum",
+                 "seeking_alpha": "proxy_social", "short_interest": "real",
+                 "momentum": "real",
+             }},
+            {"score": 6.0, "direction": "bullish", "confidence": 0.7,
+             "dimension": "odds", "source": "OracleBeeEcho",
+             "discovery": "test odds",
+             "data_quality": {"options": "real", "polymarket": "unavailable"}},
+            {"score": 7.0, "direction": "bullish", "confidence": 0.8,
+             "dimension": "sentiment", "source": "BuzzBeeWhisper",
+             "discovery": "test sentiment",
+             "data_quality": {
+                 "momentum": "real", "volume": "real", "volatility": "real",
+                 "reddit": "real", "finviz_news": "keyword",
+             }},
+            {"score": 6.0, "direction": "neutral", "confidence": 0.7,
+             "dimension": "catalyst", "source": "ChronosBeeHorizon",
+             "discovery": "test catalyst",
+             "data_quality": {
+                 "yfinance_calendar": "real", "catalysts_json": "loaded",
+                 "analyst_targets": "real", "llm_impact": "rule_only",
+             }},
+            {"score": 5.0, "direction": "neutral", "confidence": 0.6,
+             "dimension": "risk_adj", "source": "GuardBeeSentinel",
+             "discovery": "test risk",
+             "data_quality": {
+                 "pheromone_board": "real", "crowding": "real",
+                 "llm_conflict": "rule_only",
+             }},
+            {"score": 6.0, "direction": "bullish", "confidence": 0.6,
+             "dimension": "ml_auxiliary", "source": "RivalBeeVanguard",
+             "discovery": "test ml",
+             "data_quality": {"ml_prediction": "real"}},
+            {"score": 4.0, "direction": "bearish", "confidence": 0.7,
+             "dimension": "contrarian", "source": "BearBeeContrarian",
+             "discovery": "test bear",
+             "data_quality": {
+                 "insider": "real", "valuation": "yfinance", "options": "real",
+                 "momentum": "yfinance", "news": "real", "catalyst": "real",
+                 "ml": "real", "guard": "real",
+             }},
+        ]
+
+    def test_happy_path_above_95(self, queen):
+        """典型 --no-llm 扫描（全 API 可用）data_real_pct >= 95%"""
+        results = self._typical_results()
+        tp = queen._apply_triple_penalty("TEST", 7.0, results)
+        assert tp["data_real_pct"] >= 95.0, \
+            f"Happy-path data_real_pct should be >= 95%, got {tp['data_real_pct']}"
+
+    def test_empty_calendar_still_high(self, queen):
+        """ChronosBee 日历为空时 data_real_pct 仍 >= 93%"""
+        results = self._typical_results()
+        results[3]["data_quality"]["yfinance_calendar"] = "empty"
+        tp = queen._apply_triple_penalty("TEST", 7.0, results)
+        assert tp["data_real_pct"] >= 93.0, \
+            f"Empty calendar data_real_pct should be >= 93%, got {tp['data_real_pct']}"
+
+    def test_ml_fallback_recognized(self, queen):
+        """RivalBee fallback_momentum 应被识别为 PROXY（0.7），非 0"""
+        results = self._typical_results()
+        results[5]["data_quality"]["ml_prediction"] = "fallback_momentum"
+        tp = queen._apply_triple_penalty("TEST", 7.0, results)
+        assert tp["data_real_pct"] >= 93.0, \
+            f"ML fallback data_real_pct should be >= 93%, got {tp['data_real_pct']}"
+
+    def test_degraded_scenario_above_85(self, queen):
+        """多重降级（Reddit + 日历空 + catalysts 缺失 + ML 降级）仍 >= 85%"""
+        results = self._typical_results()
+        results[2]["data_quality"]["reddit"] = "fallback"
+        results[3]["data_quality"]["yfinance_calendar"] = "empty"
+        results[3]["data_quality"]["catalysts_json"] = "missing"
+        results[5]["data_quality"]["ml_prediction"] = "fallback_momentum"
+        tp = queen._apply_triple_penalty("TEST", 7.0, results)
+        assert tp["data_real_pct"] >= 85.0, \
+            f"Degraded scenario data_real_pct should be >= 85%, got {tp['data_real_pct']}"
+
+    def test_all_known_values_classified(self):
+        """所有已知 data_quality 值都必须在 REAL 或 PROXY 中"""
+        from swarm_agents.queen_distiller import QueenDistiller
+        all_known = {
+            # ScoutBee (via real_data_sources)
+            "real", "proxy_volume", "proxy_momentum", "proxy_social", "default",
+            # OracleBee
+            "options_api", "fallback", "unavailable",
+            # BuzzBee
+            "keyword", "reddit_apewisdom",
+            # ChronosBee
+            "loaded", "empty", "missing", "llm_enhanced", "rule_only",
+            # GuardBee
+            "pheromone_board",
+            # RivalBee
+            "fallback_momentum",
+            # BearBee
+            "sec_api", "yfinance", "finviz_api",
+            # 其他
+            "SEC直查", "Finviz", "finviz",
+        }
+        classified = QueenDistiller.REAL_SOURCES | QueenDistiller.PROXY_SOURCES
+        unclassified = all_known - classified
+        assert unclassified == set(), \
+            f"未分类的 data_quality 值: {unclassified}"

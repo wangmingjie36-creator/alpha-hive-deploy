@@ -239,3 +239,98 @@ class TestClear:
         board.publish(_entry())
         board.clear()
         assert board.get_entry_count() == 0
+
+
+# ==================== 方案13: 输入验证测试 ====================
+
+
+class TestValidateEntry:
+    """方案13: 验证 _validate_entry() 防垃圾数据"""
+
+    def test_score_clamped_to_10(self, board):
+        """self_score > 10 → clamp 到 10"""
+        e = _entry(score=15.0)
+        board.publish(e)
+        assert e.self_score == 10.0
+
+    def test_score_clamped_to_0(self, board):
+        """self_score < 0 → clamp 到 0"""
+        e = _entry(score=-3.0)
+        board.publish(e)
+        assert e.self_score == 0.0
+
+    def test_score_nan_becomes_5(self, board):
+        """self_score = NaN → 设为 5.0"""
+        e = _entry(score=float("nan"))
+        board.publish(e)
+        assert e.self_score == 5.0
+
+    def test_score_inf_becomes_5(self, board):
+        """self_score = Inf → 设为 5.0"""
+        e = _entry(score=float("inf"))
+        board.publish(e)
+        assert e.self_score == 5.0
+
+    def test_score_normal_passes(self, board):
+        """正常 self_score 不变"""
+        e = _entry(score=7.5)
+        board.publish(e)
+        assert e.self_score == 7.5
+
+    def test_invalid_direction_becomes_neutral(self, board):
+        """无效 direction → 'neutral'"""
+        e = PheromoneEntry(
+            agent_id="TestAgent", ticker="NVDA", discovery="test",
+            source="test", self_score=5.0, direction="SUPER_BULLISH"
+        )
+        board.publish(e)
+        assert e.direction == "neutral"
+
+    def test_empty_direction_becomes_neutral(self, board):
+        """空 direction → 'neutral'"""
+        e = PheromoneEntry(
+            agent_id="TestAgent", ticker="NVDA", discovery="test",
+            source="test", self_score=5.0, direction=""
+        )
+        board.publish(e)
+        assert e.direction == "neutral"
+
+    def test_valid_directions_pass(self, board):
+        """合法 direction 不变"""
+        for d in ("bullish", "bearish", "neutral"):
+            e = PheromoneEntry(
+                agent_id="TestAgent", ticker="NVDA", discovery="test",
+                source="test", self_score=5.0, direction=d
+            )
+            board.publish(e)
+            assert e.direction == d
+
+    def test_pheromone_strength_clamped_high(self, board):
+        """pheromone_strength > 1 → clamp 到 1"""
+        e = PheromoneEntry(
+            agent_id="TestAgent", ticker="NVDA", discovery="test",
+            source="test", self_score=5.0, direction="bullish",
+            pheromone_strength=2.5
+        )
+        board.publish(e)
+        assert e.pheromone_strength <= 1.0
+
+    def test_pheromone_strength_clamped_low(self, board):
+        """pheromone_strength < 0 → clamp 到 0"""
+        e = PheromoneEntry(
+            agent_id="TestAgent", ticker="NVDA", discovery="test",
+            source="test", self_score=5.0, direction="bullish",
+            pheromone_strength=-0.5
+        )
+        board.publish(e)
+        assert e.pheromone_strength == 0.0
+
+    def test_pheromone_strength_nan_becomes_1(self, board):
+        """pheromone_strength = NaN → 设为 1.0"""
+        e = PheromoneEntry(
+            agent_id="TestAgent", ticker="NVDA", discovery="test",
+            source="test", self_score=5.0, direction="bullish",
+            pheromone_strength=float("nan")
+        )
+        board.publish(e)
+        assert e.pheromone_strength == 1.0

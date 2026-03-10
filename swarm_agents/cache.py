@@ -203,7 +203,11 @@ def _fetch_stock_data(ticker: str) -> Dict:
 
             if len(hist) >= 20:
                 returns = hist["Close"].pct_change().dropna()
-                data["volatility_20d"] = float(returns.std() * (252 ** 0.5) * 100)
+                if len(returns) >= 2:
+                    _vol = float(returns.std() * (252 ** 0.5) * 100)
+                    if not (math.isnan(_vol) or math.isinf(_vol)):
+                        data["volatility_20d"] = _vol
+                    # else: 保留默认值 0.0（L172）
 
             # 写入缓存（O(1) LRU 淘汰）
             with _yf_lock:

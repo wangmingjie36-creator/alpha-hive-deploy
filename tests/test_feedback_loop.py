@@ -179,9 +179,12 @@ class TestBacktestAnalyzer:
     def test_suggest_weight_adjustments_normalized(self):
         from feedback_loop import BacktestAnalyzer
         with tempfile.TemporaryDirectory() as tmpdir:
-            # 创建足够多的快照并带 agent_votes
-            votes = {"Scout": 8.0, "SentimentBee": 7.0, "OddsBee": 6.0,
-                     "CatalystBee": 7.5, "CrossBee": 8.5, "ValidatorBee": 7.0}
+            # 创建足够多的快照并带新版 agent_votes
+            votes = {
+                "ScoutBeeNova": 8.0, "BuzzBeeWhisper": 7.0, "OracleBeeEcho": 6.0,
+                "ChronosBeeHorizon": 7.5, "RivalBeeVanguard": 8.5,
+                "GuardBeeSentinel": 7.0,
+            }
             for i in range(5):
                 s = self._make_snapshot(
                     "AAPL", f"2026-01-{i+1:02d}", "Long", 100.0,
@@ -192,11 +195,39 @@ class TestBacktestAnalyzer:
             analyzer = BacktestAnalyzer(tmpdir)
             result = analyzer.suggest_weight_adjustments()
 
-            if result:  # 有足够数据时
-                new_w = result.get("new_weights", {})
-                if new_w:
-                    total = sum(new_w.values())
-                    assert abs(total - 1.0) < 0.01, f"权重总和应为 1.0, 实际 {total}"
+            assert result, "有 agent_votes 数据时 suggest_weight_adjustments 不应返回空"
+            new_w = result.get("new_weights", {})
+            assert new_w, "new_weights 不应为空"
+            total = sum(new_w.values())
+            assert abs(total - 1.0) < 0.01, f"权重总和应为 1.0, 实际 {total}"
+            # 5 维都应存在
+            for dim in ("signal", "catalyst", "sentiment", "odds", "risk_adj"):
+                assert dim in new_w, f"缺少维度 {dim}"
+
+    def test_suggest_weight_adjustments_legacy_agent_names(self):
+        """旧版 agent_votes 名称（兼容性测试）"""
+        from feedback_loop import BacktestAnalyzer
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 使用旧版名称，验证兼容映射
+            legacy_votes = {
+                "Scout": 8.0, "SentimentBee": 7.0, "OddsBee": 6.0,
+                "CatalystBee": 7.5, "CrossBee": 8.5, "ValidatorBee": 7.0,
+            }
+            for i in range(5):
+                s = self._make_snapshot(
+                    "TSLA", f"2026-02-{i+1:02d}", "Long", 200.0,
+                    220.0 if i < 3 else 180.0, agent_votes=legacy_votes,
+                )
+                s.save_to_json(tmpdir)
+
+            analyzer = BacktestAnalyzer(tmpdir)
+            result = analyzer.suggest_weight_adjustments()
+
+            assert result, "旧名称通过兼容映射后也应产生有效结果"
+            new_w = result.get("new_weights", {})
+            assert new_w, "旧名称映射后 new_weights 不应为空"
+            total = sum(new_w.values())
+            assert abs(total - 1.0) < 0.01, f"权重总和应为 1.0, 实际 {total}"
 
     def test_calculate_sharpe_edge_cases(self):
         from feedback_loop import BacktestAnalyzer

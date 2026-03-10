@@ -124,8 +124,14 @@ class InfoPanel:
             self._text(self.x+10, y, "自适应权重", "#FFB800", 10, "bold")
             dim_labels = {"signal": "信号", "catalyst": "催化", "sentiment": "情绪",
                          "odds": "赔率", "risk_adj": "风控"}
-            default_w = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20,
-                        "odds": 0.15, "risk_adj": 0.15}
+            # 方案10: 从 config 统一读取权重
+            _fallback_w = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20,
+                          "odds": 0.15, "risk_adj": 0.15}
+            try:
+                from config import EVALUATION_WEIGHTS as _EW
+                default_w = {k: _EW.get(k, _fallback_w[k]) for k in _fallback_w}
+            except (ImportError, AttributeError):
+                default_w = _fallback_w
             for dim_key, label in dim_labels.items():
                 y += 13
                 w = adapted_w.get(dim_key, default_w.get(dim_key, 0.2))

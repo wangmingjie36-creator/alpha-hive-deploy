@@ -405,10 +405,12 @@ class SECEdgarClient:
                 code = txn.get("code", "")
                 ad = txn.get("acquired_disposed", "")
 
-                # 只关注有意义的交易（P=买入, S=卖出）
-                # F=税费扣股, M=行权, A=授予 不计入净买卖
-                is_buy = code == "P" or (ad == "A" and code not in ("F", "M", "A", "G"))
-                is_sell = code == "S" or (ad == "D" and code == "S")
+                # 只关注主动市场交易（方案17: 白名单替代黑名单）
+                # P=公开市场买入, S=公开市场卖出
+                # 排除: F=税费扣股, M=行权, A=授予, G=赠与,
+                #       I=自主决定, J=其他取得, K=股权互换, W=继承, C=转换
+                is_buy = code == "P"
+                is_sell = code == "S"
 
                 if is_buy:
                     total_bought += shares
@@ -541,14 +543,14 @@ class SECEdgarClient:
             parts.append(f"内幕卖出 ${dollar_sold:,.0f}")
 
         if officer_buys:
-            names = ", ".join(t["insider"] for t in officer_buys[:3])
+            names = ", ".join(t.get("insider", "?") for t in officer_buys[:3])
             parts.append(f"高管主动买入：{names}")
 
         if notable_trades:
             top = notable_trades[0]
             parts.append(
-                f"最大交易：{top['insider']} {top['code_desc']} "
-                f"{top['shares']:,.0f} 股 @ ${top['price']:.2f}"
+                f"最大交易：{top.get('insider', '?')} {top.get('code_desc', '?')} "
+                f"{top.get('shares', 0):,.0f} 股 @ ${top.get('price', 0):.2f}"
             )
 
         return " | ".join(parts)

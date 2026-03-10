@@ -20,8 +20,14 @@ try:
 except ImportError:
     requests = None
 
+import re as _re
+
 from hive_logger import PATHS, get_logger, atomic_json_write
 from resilience import get_session, polymarket_limiter, polymarket_breaker, singleton_client, NETWORK_ERRORS
+
+# 方案11: 预编译正则（模块级，避免循环内重复编译）
+_RE_BULLISH = _re.compile(r'\b(?:above|higher|beat|exceed|rise|up|bull|hit|rally|surge|gain)\b')
+_RE_BEARISH = _re.compile(r'\b(?:below|lower|miss|fall|drop|down|crash|bear|decline|sink|lose)\b')
 
 _log = get_logger("polymarket")
 
@@ -116,8 +122,11 @@ class PolymarketClient:
                 except (json.JSONDecodeError, OSError) as e:
                     _log.debug("search cache read failed: %s", e)
 
+        # 多策略搜索：服务端过滤 + 增大拉取量提高客户端过滤命中率
+        # Gamma API 的 slug_contains 参数经测试不可靠，改为拉取更多数据做客户端匹配
+        _fetch_limit = max(limit * 5, 100)  # 拉取 5x 数据量，提高命中率
         data = self._get("/markets", params={
-            "limit": limit,
+            "limit": _fetch_limit,
             "active": True,
             "closed": False,
             "order": "volume24hr",
@@ -186,15 +195,26 @@ class PolymarketClient:
         ticker_upper = ticker.upper()
         ticker_lower = ticker.lower()
 
-        # 搜索相关市场
+        # 搜索相关市场（个股名/ticker + 公司全称）
+        _company_names = {
+            "NVDA": "nvidia", "TSLA": "tesla", "AAPL": "apple", "MSFT": "microsoft",
+            "GOOG": "google", "GOOGL": "google", "AMZN": "amazon", "META": "meta",
+            "AMD": "amd", "VKTX": "viking", "NFLX": "netflix", "JPM": "jpmorgan",
+        }
         markets = self.search_markets(ticker_lower, limit=30)
+        # 用公司全称再搜一次（ticker=nvda 可能搜不到但 nvidia 能搜到）
+        _full_name = _company_names.get(ticker_upper, "")
+        if _full_name and len(markets) < 2:
+            _seen_slugs = {m.get("slug") for m in markets}
+            for _m2 in self.search_markets(_full_name, limit=20):
+                if _m2.get("slug") not in _seen_slugs:
+                    _seen_slugs.add(_m2.get("slug"))
+                    markets.append(_m2)
 
-        # 如果搜索不到具体标的，搜索经济相关事件
-        if len(markets) < 2:
-            econ_markets = self.search_markets("fed rate", limit=10)
-            markets.extend(econ_markets)
-
+        # 关键修复：如果没有找到个股相关市场，返回"无数据"而非混入不相关的 Fed 市场
+        # 宏观数据应通过 get_macro_events() 单独获取，不能冒充个股赔率
         if not markets:
+            _log.info("Polymarket: %s 无相关个股预测市场", ticker_upper)
             return self._default_result(ticker)
 
         # 分析市场数据
@@ -219,15 +239,16 @@ class PolymarketClient:
                 yes_price = prices[0]
                 no_price = prices[1]
 
-                # 判断 YES 代表什么方向
-                is_bullish_market = any(
-                    w in question for w in
-                    ["above", "higher", "beat", "exceed", "rise", "up", "bull", "hit"]
-                )
-                is_bearish_market = any(
-                    w in question for w in
-                    ["below", "lower", "miss", "fall", "drop", "down", "crash", "bear"]
-                )
+                # 方案11: 改用 \b 词边界匹配，防止子串误判
+                # e.g. "update" 不再匹配 "up"，"mission" 不再匹配 "miss"
+                # question 已在 L228 lower()，此处直接使用
+                is_bullish_market = bool(_RE_BULLISH.search(question))
+                is_bearish_market = bool(_RE_BEARISH.search(question))
+
+                # 双向冲突检测：如果同时匹配看涨和看空，视为中性
+                if is_bullish_market and is_bearish_market:
+                    is_bullish_market = False
+                    is_bearish_market = False
 
                 if is_bullish_market:
                     bullish_signals.append(yes_price)
@@ -272,13 +293,11 @@ class PolymarketClient:
 
         score = max(1.0, min(10.0, score))
 
-        # 信号描述
+        # 信号描述（注意：len(markets)==0 已在 L216 提前返回 _default_result）
         if score >= 7.0:
             signal = f"预测市场看多（隐含概率 {avg_bullish:.0%}）"
         elif score <= 3.5:
             signal = f"预测市场看空（隐含概率 {avg_bearish:.0%}）"
-        elif len(markets) == 0:
-            signal = "无相关预测市场"
         else:
             signal = f"预测市场中性（{len(markets)} 个市场）"
 
@@ -351,7 +370,13 @@ class PolymarketClient:
             except (json.JSONDecodeError, ValueError):
                 prices = []
         if isinstance(prices, list):
-            prices = [float(p) if p else 0.0 for p in prices[:10]]
+            try:
+                prices = [float(p) if p else 0.0 for p in prices[:10]]
+            except (TypeError, ValueError):
+                prices = []
+        else:
+            # 兜底：非 str/list 类型（int/float/dict/None）→ 空列表
+            prices = []
 
         return {
             "slug": raw.get("slug", ""),

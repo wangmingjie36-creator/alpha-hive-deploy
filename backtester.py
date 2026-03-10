@@ -217,6 +217,30 @@ class PredictionStore:
             _log.warning("更新回测结果失败: %s", e)
             return False
 
+    def get_recently_verified_t7(self, limit: int = 50) -> List[Dict]:
+        """获取最近一批已被 T+7 验证的记录（按日期倒序）
+
+        用于增量 ML 训练：每次 run_backtest() 之后调用，
+        获取 checked_t7=1 且 return_t7 IS NOT NULL 的最新记录。
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(f"""
+                    SELECT ticker, date, final_score, direction,
+                           dimension_scores, iv_rank, put_call_ratio,
+                           agent_directions,
+                           return_t7, correct_t7
+                    FROM {self.TABLE}
+                    WHERE checked_t7 = 1 AND return_t7 IS NOT NULL
+                    ORDER BY date DESC
+                    LIMIT ?
+                """, (limit,)).fetchall()
+                return [dict(r) for r in rows]
+        except (sqlite3.Error, OSError) as e:
+            _log.warning("获取已验证 T+7 记录失败: %s", e)
+            return []
+
     def get_accuracy_stats(self, period: str = "t7", days: int = 90) -> Dict:
         """
         获取准确率统计
@@ -334,7 +358,13 @@ class PredictionStore:
             "ChronosBeeHorizon": "catalyst",
             "GuardBeeSentinel":  "risk_adj",
         }
-        default_weights = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
+        # 方案10: 从 config 统一读取权重，消除硬编码 drift
+        _fallback_w = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
+        try:
+            from config import EVALUATION_WEIGHTS as _EW
+            default_weights = {k: _EW.get(k, _fallback_w[k]) for k in _fallback_w}
+        except (ImportError, AttributeError):
+            default_weights = _fallback_w
 
         dim_stats = {d: {"correct": 0, "total": 0} for d in default_weights}
 
@@ -358,12 +388,9 @@ class PredictionStore:
                             if not agent_dir:
                                 continue
                             dim_stats[dim]["total"] += 1
-                            # 复用 Backtester 的方向判定逻辑
-                            if agent_dir == "bullish" and ret > -1.0:
-                                dim_stats[dim]["correct"] += 1
-                            elif agent_dir == "bearish" and ret < 1.0:
-                                dim_stats[dim]["correct"] += 1
-                            elif agent_dir == "neutral" and abs(ret) < 3.0:
+                            # 方案12: 统一使用共享判定函数
+                            from outcome_utils import determine_correctness_bool
+                            if determine_correctness_bool(agent_dir, ret):
                                 dim_stats[dim]["correct"] += 1
                     except (json.JSONDecodeError, KeyError, TypeError):
                         continue
@@ -618,19 +645,17 @@ class Backtester:
 
     def _check_direction(self, direction: str, actual_return: float) -> bool:
         """
-        检查预测方向是否正确
+        检查预测方向是否正确（方案12: 统一标准）
 
-        规则:
-        - bullish: 实际收益 > -1%（允许小幅回调）
-        - bearish: 实际收益 < +1%
-        - neutral: 实际收益在 ±3% 内
+        使用 outcome_utils.determine_correctness_bool 共享逻辑，
+        默认容差 1%（允许小幅逆向波动）。
+
+        Args:
+            direction: "bullish" / "bearish" / "neutral"
+            actual_return: 实际收益率（百分比，如 5.0 = +5%）
         """
-        if direction == "bullish":
-            return actual_return > -1.0
-        elif direction == "bearish":
-            return actual_return < 1.0
-        else:  # neutral
-            return abs(actual_return) < 3.0
+        from outcome_utils import determine_correctness_bool
+        return determine_correctness_bool(direction, actual_return)
 
     # ==================== 准确率报告 ====================
 

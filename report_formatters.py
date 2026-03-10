@@ -547,6 +547,25 @@ def generate_swarm_markdown_report(reporter, swarm_results: Dict,
     md.append(f"**系统模式**：完全去中心化蜂群协作 | {agent_count} 个自治工蜂（6 核心 + BearBeeContrarian）")
     md.append("")
 
+    # ── 方案9: 数据质量警告横幅 ──────────────────────────
+    _n_tickers = len(swarm_results)
+    _n_degraded = sum(
+        1 for r in swarm_results.values()
+        if r.get("data_quality_grade", "normal") in ("degraded", "critical")
+    )
+    _n_critical = sum(
+        1 for r in swarm_results.values()
+        if r.get("data_quality_grade", "normal") == "critical"
+    )
+    if _n_tickers > 0 and (_n_degraded / _n_tickers > 0.5 or _n_critical >= _n_tickers * 0.5):
+        if _n_critical >= _n_tickers * 0.5:
+            md.append("> 🔴 **数据严重不足警告**：多数标的仅有 1-2 个维度数据可用"
+                      f"（{_n_critical}/{_n_tickers} 严重不足），报告结论可靠性极低，请勿作为决策依据。")
+        else:
+            md.append("> ⚠️ **数据质量降级**：超过半数标的维度覆盖不足"
+                      f"（{_n_degraded}/{_n_tickers} 降级），报告结论仅供参考，请结合其他来源交叉验证。")
+        md.append("")
+
     sorted_results = sorted(
         swarm_results.items(),
         key=lambda x: x[1]["final_score"],

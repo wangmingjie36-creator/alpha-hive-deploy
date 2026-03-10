@@ -12,6 +12,7 @@
 """
 
 import logging
+import threading as _threading
 from datetime import datetime
 from typing import Dict
 
@@ -19,6 +20,7 @@ _log = logging.getLogger("alpha_hive.unusual_options")
 
 _CACHE: Dict[str, Dict] = {}
 _CACHE_TS: Dict[str, float] = {}
+_cache_lock = _threading.Lock()
 try:
     from config import CACHE_CONFIG as _CC
     _CACHE_TTL = _CC["ttl"].get("unusual_options", 300)
@@ -29,7 +31,8 @@ import time as _time
 
 
 def _is_cached(ticker: str) -> bool:
-    return ticker in _CACHE and (_time.time() - _CACHE_TS.get(ticker, 0)) < _CACHE_TTL
+    with _cache_lock:
+        return ticker in _CACHE and (_time.time() - _CACHE_TS.get(ticker, 0)) < _CACHE_TTL
 
 
 def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
@@ -45,8 +48,9 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
             "data_source": str,
         }
     """
-    if _is_cached(ticker):
-        return _CACHE[ticker]
+    with _cache_lock:
+        if ticker in _CACHE and (_time.time() - _CACHE_TS.get(ticker, 0)) < _CACHE_TTL:
+            return dict(_CACHE[ticker])  # 返回副本，防止外部修改
 
     result = {
         "unusual_score": 5.0,
@@ -264,8 +268,9 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
             "data_source": "yfinance_chain",
         }
 
-        _CACHE[ticker] = result
-        _CACHE_TS[ticker] = _time.time()
+        with _cache_lock:
+            _CACHE[ticker] = result
+            _CACHE_TS[ticker] = _time.time()
         return result
 
     except ImportError:

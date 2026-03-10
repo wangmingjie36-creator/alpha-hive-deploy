@@ -30,16 +30,15 @@ class ReportSnapshot:
         self.entry_price = 0.0
 
         # Agent 评分
-        self.agent_votes = {}  # {"Scout": 8.2, "SentimentBee": 7.5, ...}
+        self.agent_votes = {}  # {"ScoutBeeNova": 8.2, "BuzzBeeWhisper": 7.5, ...}
 
-        # 使用的权重
-        self.weights_used = {
-            "signal": 0.30,
-            "catalyst": 0.20,
-            "sentiment": 0.20,
-            "odds": 0.15,
-            "risk_adj": 0.15
-        }
+        # 使用的权重（从 config 读取，带兜底）
+        _fallback_w = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
+        try:
+            from config import EVALUATION_WEIGHTS as _EW
+            self.weights_used = {k: _EW.get(k, _fallback_w[k]) for k in _fallback_w}
+        except (ImportError, AttributeError):
+            self.weights_used = dict(_fallback_w)
 
         # 实际结果（后续填充）
         self.actual_price_t1 = None  # T+1 的价格
@@ -216,16 +215,26 @@ class BacktestAnalyzer:
         # 简化 Sharpe（年化）
         return (mean(returns) / std_dev) * (252 ** 0.5)
 
+    # 旧名称 → 新名称兼容映射（旧快照可能用旧名存储 agent_votes）
+    _LEGACY_AGENT_MAP = {
+        "Scout": "ScoutBeeNova",
+        "SentimentBee": "BuzzBeeWhisper",
+        "OddsBee": "OracleBeeEcho",
+        "CatalystBee": "ChronosBeeHorizon",
+        "CrossBee": "RivalBeeVanguard",
+        "ValidatorBee": "GuardBeeSentinel",
+    }
+
     def calculate_agent_contribution(self) -> Dict:
         """计算每个 Agent 的准确度贡献"""
 
         agent_scores = {
-            "Scout": [],
-            "SentimentBee": [],
-            "OddsBee": [],
-            "CatalystBee": [],
-            "CrossBee": [],
-            "ValidatorBee": []
+            "ScoutBeeNova": [],
+            "BuzzBeeWhisper": [],
+            "OracleBeeEcho": [],
+            "ChronosBeeHorizon": [],
+            "RivalBeeVanguard": [],
+            "GuardBeeSentinel": []
         }
 
         for snapshot in self.snapshots:
@@ -235,10 +244,12 @@ class BacktestAnalyzer:
                 is_correct = direction_accuracy["t7"]
 
                 for agent_name, agent_score in snapshot.agent_votes.items():
-                    if agent_name in agent_scores:
+                    # 兼容旧名称：将旧 key 映射到新 Agent ID
+                    canonical = self._LEGACY_AGENT_MAP.get(agent_name, agent_name)
+                    if canonical in agent_scores:
                         # 如果 Agent 评分高且预测正确，记 1；否则记 0
                         score_correct = 1 if (agent_score > 5 and is_correct) or (agent_score <= 5 and not is_correct) else 0
-                        agent_scores[agent_name].append(score_correct)
+                        agent_scores[canonical].append(score_correct)
 
         # 计算平均准确度
         agent_accuracy = {}
@@ -265,32 +276,35 @@ class BacktestAnalyzer:
             for agent, score in agent_accuracy.items()
         }
 
-        # 分配新权重
+        # 分配新权重（维度 → Agent ID 映射，与 pheromone_board.AGENT_DIMENSIONS 一致）
         new_weights = {}
         weight_mapping = {
-            "signal": ["Scout", "CrossBee"],
-            "sentiment": ["SentimentBee"],
-            "odds": ["OddsBee"],
-            "catalyst": ["CatalystBee"],
-            "risk_adj": ["ValidatorBee"]
+            "signal": ["ScoutBeeNova", "RivalBeeVanguard"],
+            "sentiment": ["BuzzBeeWhisper"],
+            "odds": ["OracleBeeEcho"],
+            "catalyst": ["ChronosBeeHorizon"],
+            "risk_adj": ["GuardBeeSentinel"]
         }
 
         for category, agents in weight_mapping.items():
             category_accuracy = sum(normalized_accuracy.get(agent, 0) for agent in agents)
             new_weights[category] = min(0.35, max(0.10, category_accuracy))
 
-        # 归一化使总和 = 1
+        # 归一化使总和 = 1（方案19: 除零守卫）
         total = sum(new_weights.values())
-        new_weights = {k: v / total for k, v in new_weights.items()}
+        if total > 0:
+            new_weights = {k: v / total for k, v in new_weights.items()}
+        else:
+            _log.warning("feedback_loop: 权重总和为零，回退默认权重")
+            new_weights = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
 
-        # 对比旧权重
-        old_weights = {
-            "signal": 0.30,
-            "catalyst": 0.20,
-            "sentiment": 0.20,
-            "odds": 0.15,
-            "risk_adj": 0.15
-        }
+        # 对比旧权重（从 config 读取，带兜底）
+        _fallback_w = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
+        try:
+            from config import EVALUATION_WEIGHTS as _EW
+            old_weights = {k: _EW.get(k, _fallback_w[k]) for k in _fallback_w}
+        except (ImportError, AttributeError):
+            old_weights = dict(_fallback_w)
 
         comparison = {}
         for key in old_weights:
@@ -476,30 +490,35 @@ class BacktestAnalyzer:
                         <tbody>
         """
 
-        old_weights = {
-            "Scout": 0.30,
-            "SentimentBee": 0.20,
-            "OddsBee": 0.15,
-            "CatalystBee": 0.20,
-            "CrossBee": 0.10,
-            "ValidatorBee": 0.05
+        # Agent → 维度 → 显示权重（用于 HTML 报表）
+        _AGENT_TO_DIM = {
+            "ScoutBeeNova": "signal",
+            "BuzzBeeWhisper": "sentiment",
+            "OracleBeeEcho": "odds",
+            "ChronosBeeHorizon": "catalyst",
+            "RivalBeeVanguard": "signal",  # 辅助 signal 维度
+            "GuardBeeSentinel": "risk_adj",
         }
+        _fallback_dw = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
+        try:
+            from config import EVALUATION_WEIGHTS as _EW
+            _DIM_WEIGHTS = {k: _EW.get(k, _fallback_dw[k]) for k in _fallback_dw}
+        except (ImportError, AttributeError):
+            _DIM_WEIGHTS = dict(_fallback_dw)
 
         for agent, accuracy in agent_accuracy.items():
-            adjustment = weight_adjustments.get("weight_adjustments", {})
-            change = ""
-            if adjustment:
-                for key, val in adjustment.items():
-                    if agent in key or key in agent.lower():
-                        change = f"{val['direction']} {val['change']}"
-                        break
+            dim = _AGENT_TO_DIM.get(agent, "")
+            adj_detail = weight_adjustments.get("weight_adjustments", {}).get(dim, {})
+            change = f"{adj_detail['direction']} {adj_detail['change']}" if adj_detail else ""
 
+            old_w = _DIM_WEIGHTS.get(dim, 0)
+            new_w = weight_adjustments.get("new_weights", {}).get(dim, old_w)
             html += f"""
                             <tr>
                                 <td>{agent}</td>
                                 <td>{accuracy:.0f}%</td>
-                                <td>{old_weights.get(agent, 0):.0%}</td>
-                                <td>{old_weights.get(agent, 0):.0%}</td>
+                                <td>{old_w:.0%}</td>
+                                <td>{new_w:.0%}</td>
                                 <td>{change}</td>
                             </tr>
             """
@@ -580,12 +599,12 @@ if __name__ == "__main__":
     snapshot.entry_price = 640
 
     snapshot.agent_votes = {
-        "Scout": 8.5,
-        "SentimentBee": 8.2,
-        "OddsBee": 8.8,
-        "CatalystBee": 8.7,
-        "CrossBee": 8.6,
-        "ValidatorBee": 8.3
+        "ScoutBeeNova": 8.5,
+        "BuzzBeeWhisper": 8.2,
+        "OracleBeeEcho": 8.8,
+        "ChronosBeeHorizon": 8.7,
+        "RivalBeeVanguard": 8.6,
+        "GuardBeeSentinel": 8.3,
     }
 
     # 保存

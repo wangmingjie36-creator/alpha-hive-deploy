@@ -147,6 +147,65 @@ class TestRecalculateAllWeights:
             f"ScoutBeeNova ({scout_weight}) should be > others ({other_weights})"
         )
 
+
+# ==================== TestApplyDimensionFeedback ====================
+
+class TestApplyDimensionFeedback:
+    """Tests for AgentWeightManager.apply_dimension_feedback"""
+
+    def test_apply_dimension_feedback_mapping(self, memory_store):
+        """signal→ScoutBeeNova 维度映射正确"""
+        mgr = AgentWeightManager(memory_store)
+        dim_w = {"signal": 0.35, "catalyst": 0.20, "sentiment": 0.20,
+                 "odds": 0.15, "risk_adj": 0.10}
+        result = mgr.apply_dimension_feedback(dim_w)
+        assert result is True
+
+        # signal=0.35, 0.35/0.20 = 1.75 → ScoutBeeNova 应获得 1.75x 权重
+        # 验证 update_agent_weight 被调用
+        weights = mgr.get_weights()
+        assert "ScoutBeeNova" in weights
+
+    def test_apply_dimension_feedback_clamping(self, memory_store):
+        """极端权重被钳位到 [MIN_WEIGHT, MAX_WEIGHT]"""
+        mgr = AgentWeightManager(memory_store)
+        # 极端值：signal=0.90 → 0.90/0.20 = 4.5，应被钳位到 MAX_WEIGHT=3.0
+        dim_w = {"signal": 0.90}
+        mgr.apply_dimension_feedback(dim_w)
+        weights = mgr.get_weights()
+        scout_w = weights.get("ScoutBeeNova", 1.0)
+        assert scout_w <= AgentWeightManager.MAX_WEIGHT, (
+            f"ScoutBeeNova weight {scout_w} should be <= {AgentWeightManager.MAX_WEIGHT}"
+        )
+
+    def test_apply_dimension_feedback_partial_dims(self, memory_store):
+        """不完整维度 dict 安全处理"""
+        mgr = AgentWeightManager(memory_store)
+        # 只传 2 个维度
+        result = mgr.apply_dimension_feedback({"signal": 0.25, "odds": 0.30})
+        assert result is True
+
+    def test_apply_dimension_feedback_empty_dict(self, memory_store):
+        """空 dict → False"""
+        mgr = AgentWeightManager(memory_store)
+        result = mgr.apply_dimension_feedback({})
+        assert result is False
+
+    def test_apply_dimension_feedback_invalid_values(self, memory_store):
+        """无效值被安全跳过"""
+        mgr = AgentWeightManager(memory_store)
+        result = mgr.apply_dimension_feedback({"signal": -1.0, "odds": None})
+        assert result is False
+
+    def test_apply_dimension_feedback_nan_rejected(self, memory_store):
+        """回归测试: NaN 值不应写入数据库"""
+        mgr = AgentWeightManager(memory_store)
+        result = mgr.apply_dimension_feedback({"signal": float("nan"), "odds": float("nan")})
+        assert result is False
+        # 确认权重未被污染（NaN != NaN 的特性用于检测）
+        w = mgr.get_weight("ScoutBeeNova")
+        assert w == w, "Weight should not be NaN"
+
     def test_updates_cache_after_recalculation(self, memory_store):
         mgr = AgentWeightManager(memory_store)
         weights = mgr.recalculate_all_weights()

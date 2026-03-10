@@ -219,6 +219,59 @@ class TestUpdateCheckResult:
         assert row["correct_t7"] == 0
 
 
+class TestGetRecentlyVerifiedT7:
+    """测试 PredictionStore.get_recently_verified_t7"""
+
+    @pytest.fixture
+    def store_verified(self, tmp_path):
+        from backtester import PredictionStore
+        store = PredictionStore(db_path=str(tmp_path / "test.db"))
+        # 插入 3 条预测
+        for i, (tk, score, direction) in enumerate([
+            ("NVDA", 8.5, "bullish"),
+            ("TSLA", 6.0, "neutral"),
+            ("AMD", 7.2, "bullish"),
+        ], 1):
+            store.save_prediction(
+                ticker=tk, final_score=score, direction=direction, price=100.0 + i,
+                dimension_scores={"signal": 7.0, "catalyst": 8.0, "sentiment": 6.0},
+            )
+        # T+7 验证前 2 条
+        store.update_check_result(1, "t7", 112.0, 10.89, True)
+        store.update_check_result(2, "t7", 95.0, -5.94, False)
+        return store
+
+    def test_returns_verified_records(self, store_verified):
+        rows = store_verified.get_recently_verified_t7()
+        assert len(rows) == 2
+        tickers = {r["ticker"] for r in rows}
+        assert tickers == {"NVDA", "TSLA"}
+
+    def test_excludes_unchecked(self, store_verified):
+        """AMD (id=3) 未被 T+7 验证，不应出现"""
+        rows = store_verified.get_recently_verified_t7()
+        assert all(r["ticker"] != "AMD" for r in rows)
+
+    def test_limit(self, store_verified):
+        rows = store_verified.get_recently_verified_t7(limit=1)
+        assert len(rows) == 1
+
+    def test_correct_fields(self, store_verified):
+        rows = store_verified.get_recently_verified_t7()
+        for r in rows:
+            assert "ticker" in r
+            assert "date" in r
+            assert "dimension_scores" in r
+            assert "return_t7" in r
+            assert "correct_t7" in r
+
+    def test_empty_when_none_verified(self, tmp_path):
+        from backtester import PredictionStore
+        store = PredictionStore(db_path=str(tmp_path / "empty.db"))
+        store.save_prediction("NVDA", 8.0, "bullish", 100.0)
+        assert store.get_recently_verified_t7() == []
+
+
 class TestGetAccuracyStats:
     """测试 PredictionStore.get_accuracy_stats"""
 

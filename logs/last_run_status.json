@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-03-10T15:46:07.499378",
+  "status": "success",
+  "duration_seconds": 133.5,
+  "tickers": [
+    "NVDA",
+    "TSLA",
+    "MSFT",
+    "QCOM",
+    "VKTX",
+    "META",
+    "BILI",
+    "AMZN",
+    "RKLB",
+    "CRCL"
+  ],
+  "n_tickers": 10,
+  "n_opportunities": 9
+}

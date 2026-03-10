@@ -48,7 +48,7 @@ class RivalBeeVanguard(BeeAgent):
                     win_30d=False,
                 )
                 prediction = service.predict_for_opportunity(opportunity)
-            except (ImportError, ValueError, KeyError, TypeError) as e:
+            except (ImportError, ValueError, KeyError, TypeError, AttributeError) as e:
                 _log.warning("RivalBeeVanguard ML prediction unavailable for %s: %s", ticker, e)
 
             if prediction:

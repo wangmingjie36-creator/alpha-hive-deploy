@@ -131,6 +131,171 @@ class TestBuildSwarmReport:
         assert report["opportunities"][0]["direction"] == "中性"
 
 
+# ==================== 方案9: 数据质量关卡测试 ====================
+
+class TestDataQualityGate:
+    """方案9: _build_swarm_report 数据质量关卡"""
+
+    @pytest.fixture
+    def reporter(self, monkeypatch, tmp_path):
+        import alpha_hive_daily_report as mod
+        monkeypatch.setattr(mod, "MemoryStore", None)
+        monkeypatch.setattr(mod, "CalendarIntegrator", None)
+        monkeypatch.setattr(mod, "CodeExecutorAgent", None)
+        monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
+        monkeypatch.setattr(mod, "VectorMemory", None)
+        monkeypatch.setattr(mod, "VECTOR_MEMORY_CONFIG", {"enabled": False})
+        monkeypatch.setattr(mod, "MetricsCollector", None)
+        monkeypatch.setattr(mod, "EarningsWatcher", None)
+        monkeypatch.setattr(mod, "SlackReportNotifier", None)
+        monkeypatch.setattr(mod, "Backtester", None)
+        from alpha_hive_daily_report import AlphaHiveDailyReporter
+        return AlphaHiveDailyReporter()
+
+    def _make_result(self, ticker, score, direction, grade="normal"):
+        """构建一条 swarm_result，含 data_quality_grade"""
+        bull = 4 if direction == "bullish" else 1
+        bear = 4 if direction == "bearish" else 1
+        return {
+            "final_score": score,
+            "direction": direction,
+            "resonance": {"resonance_detected": score >= 7.0, "supporting_agents": 3, "confidence_boost": 0},
+            "supporting_agents": 3,
+            "distill_mode": "rule_only",
+            "agent_breakdown": {"bullish": bull, "bearish": bear, "neutral": 6 - bull - bear},
+            "data_real_pct": 80.0,
+            "agent_details": {},
+            "data_quality_grade": grade,
+            "dimension_coverage_pct": {"normal": 100.0, "degraded": 50.0, "critical": 20.0}.get(grade, 100.0),
+        }
+
+    def test_all_normal_status_ok(self, reporter):
+        """所有标的 normal → system_status = ✅"""
+        from pheromone_board import PheromoneBoard
+        board = PheromoneBoard()
+        swarm = {
+            "NVDA": self._make_result("NVDA", 8.0, "bullish", "normal"),
+            "TSLA": self._make_result("TSLA", 6.0, "bearish", "normal"),
+        }
+        report = reporter._build_swarm_report(swarm, board)
+        assert "✅" in report["system_status"]
+        assert report["data_quality_summary"]["has_quality_issue"] is False
+
+    def test_majority_degraded_triggers_warning(self, reporter):
+        """2/3 标的 degraded → system_status = ⚠️"""
+        from pheromone_board import PheromoneBoard
+        board = PheromoneBoard()
+        swarm = {
+            "NVDA": self._make_result("NVDA", 8.0, "bullish", "degraded"),
+            "TSLA": self._make_result("TSLA", 6.0, "bearish", "degraded"),
+            "AAPL": self._make_result("AAPL", 7.0, "bullish", "normal"),
+        }
+        report = reporter._build_swarm_report(swarm, board)
+        assert "⚠️" in report["system_status"]
+        assert "降级" in report["system_status"]
+        dq = report["data_quality_summary"]
+        assert dq["degraded_count"] == 2
+        assert dq["has_quality_issue"] is True
+
+    def test_majority_critical_triggers_red_alert(self, reporter):
+        """2/3 标的 critical → system_status = 🔴"""
+        from pheromone_board import PheromoneBoard
+        board = PheromoneBoard()
+        swarm = {
+            "NVDA": self._make_result("NVDA", 8.0, "bullish", "critical"),
+            "TSLA": self._make_result("TSLA", 6.0, "bearish", "critical"),
+            "AAPL": self._make_result("AAPL", 7.0, "bullish", "normal"),
+        }
+        report = reporter._build_swarm_report(swarm, board)
+        assert "🔴" in report["system_status"]
+        assert "严重不足" in report["system_status"]
+
+    def test_minority_degraded_no_warning(self, reporter):
+        """1/3 标的 degraded → 不触发 → system_status = ✅"""
+        from pheromone_board import PheromoneBoard
+        board = PheromoneBoard()
+        swarm = {
+            "NVDA": self._make_result("NVDA", 8.0, "bullish", "degraded"),
+            "TSLA": self._make_result("TSLA", 6.0, "bearish", "normal"),
+            "AAPL": self._make_result("AAPL", 7.0, "bullish", "normal"),
+        }
+        report = reporter._build_swarm_report(swarm, board)
+        assert "✅" in report["system_status"]
+        dq = report["data_quality_summary"]
+        assert dq["degraded_count"] == 1
+        assert dq["has_quality_issue"] is False
+
+    def test_empty_results_no_crash(self, reporter):
+        """空 swarm_results → 不崩溃"""
+        from pheromone_board import PheromoneBoard
+        board = PheromoneBoard()
+        report = reporter._build_swarm_report({}, board)
+        assert "✅" in report["system_status"]
+        dq = report["data_quality_summary"]
+        assert dq["degraded_pct"] == 0
+
+    def test_data_quality_summary_in_report(self, reporter):
+        """data_quality_summary 应出现在 report 顶层"""
+        from pheromone_board import PheromoneBoard
+        board = PheromoneBoard()
+        swarm = {"NVDA": self._make_result("NVDA", 8.0, "bullish", "normal")}
+        report = reporter._build_swarm_report(swarm, board)
+        assert "data_quality_summary" in report
+        dq = report["data_quality_summary"]
+        assert "total_tickers" in dq
+        assert "degraded_count" in dq
+        assert "critical_count" in dq
+        assert "degraded_pct" in dq
+        assert "has_quality_issue" in dq
+
+    def test_markdown_contains_warning_banner(self, reporter):
+        """多数 degraded → markdown 报告中应包含警告横幅"""
+        from pheromone_board import PheromoneBoard
+        board = PheromoneBoard()
+        swarm = {
+            "NVDA": self._make_result("NVDA", 8.0, "bullish", "degraded"),
+            "TSLA": self._make_result("TSLA", 6.0, "bearish", "degraded"),
+            "AAPL": self._make_result("AAPL", 7.0, "bullish", "degraded"),
+        }
+        report = reporter._build_swarm_report(swarm, board)
+        md = report["markdown_report"]
+        assert "⚠️" in md
+        assert "降级" in md
+
+    def test_markdown_no_banner_when_normal(self, reporter):
+        """全 normal → markdown 中无降级警告"""
+        from pheromone_board import PheromoneBoard
+        board = PheromoneBoard()
+        swarm = {
+            "NVDA": self._make_result("NVDA", 8.0, "bullish", "normal"),
+            "TSLA": self._make_result("TSLA", 6.0, "bearish", "normal"),
+        }
+        report = reporter._build_swarm_report(swarm, board)
+        md = report["markdown_report"]
+        assert "数据质量降级" not in md
+        assert "数据严重不足" not in md
+
+    def test_exact_50pct_critical_still_triggers(self, reporter):
+        """恰好 50% critical 的边界场景 — 🔴 + Slack + Markdown 全部同步触发"""
+        from pheromone_board import PheromoneBoard
+        board = PheromoneBoard()
+        swarm = {
+            "NVDA": self._make_result("NVDA", 8.0, "bullish", "critical"),
+            "TSLA": self._make_result("TSLA", 6.0, "bearish", "critical"),
+            "AAPL": self._make_result("AAPL", 7.0, "bullish", "normal"),
+            "GOOG": self._make_result("GOOG", 5.0, "neutral", "normal"),
+        }
+        report = reporter._build_swarm_report(swarm, board)
+        # system_status 应为 🔴
+        assert "🔴" in report["system_status"]
+        # has_quality_issue 必须为 True（确保 Slack 同步触发）
+        assert report["data_quality_summary"]["has_quality_issue"] is True
+        # markdown 中也应有 🔴 横幅
+        md = report["markdown_report"]
+        assert "🔴" in md
+        assert "严重不足" in md
+
+
 # ==================== _deploy_static_to_ghpages 测试 ====================
 
 class TestDeployStaticToGhPages:

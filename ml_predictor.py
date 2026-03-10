@@ -33,6 +33,15 @@ class TrainingData:
     win_7d: bool  # 7 日是否赚钱
     win_30d: bool  # 30 日是否赚钱
 
+    # === v2 新特征（均有默认值，旧代码无需改动）===
+    iv_rank: float = 50.0             # 0-100, IV 百分位
+    put_call_ratio: float = 1.0       # Put/Call ratio
+    final_score: float = 5.0          # 蜂群综合分 (0-10)
+    odds_score: float = 5.0           # 赔率维度分 (0-10)
+    risk_adj_score: float = 5.0       # 风险调整分 (0-10)
+    agent_agreement: float = 0.5      # Agent 共识度 (0-1)
+    direction_encoded: float = 0.0    # bullish=1, neutral=0, bearish=-1
+
 
 class HistoricalDataBuilder:
     """构建训练数据集"""
@@ -42,127 +51,79 @@ class HistoricalDataBuilder:
         self.historical_records: List[TrainingData] = [
             # NVDA 记录
             TrainingData(
-                ticker="NVDA",
-                date="2023-10-18",
-                crowding_score=68.0,
-                catalyst_quality="A",
-                momentum_5d=5.2,
-                volatility=4.8,
-                market_sentiment=45,
-                actual_return_3d=8.5,
-                actual_return_7d=18.9,
-                actual_return_30d=32.1,
-                win_3d=True,
-                win_7d=True,
-                win_30d=True,
+                ticker="NVDA", date="2023-10-18",
+                crowding_score=68.0, catalyst_quality="A",
+                momentum_5d=5.2, volatility=4.8, market_sentiment=45,
+                actual_return_3d=8.5, actual_return_7d=18.9, actual_return_30d=32.1,
+                win_3d=True, win_7d=True, win_30d=True,
+                iv_rank=62.0, put_call_ratio=0.8, final_score=8.2,
+                odds_score=7.5, risk_adj_score=6.8, agent_agreement=0.85, direction_encoded=1.0,
             ),
             TrainingData(
-                ticker="NVDA",
-                date="2023-04-19",
-                crowding_score=72.0,
-                catalyst_quality="A",
-                momentum_5d=3.8,
-                volatility=5.1,
-                market_sentiment=35,
-                actual_return_3d=12.8,
-                actual_return_7d=22.3,
-                actual_return_30d=18.5,
-                win_3d=True,
-                win_7d=True,
-                win_30d=True,
+                ticker="NVDA", date="2023-04-19",
+                crowding_score=72.0, catalyst_quality="A",
+                momentum_5d=3.8, volatility=5.1, market_sentiment=35,
+                actual_return_3d=12.8, actual_return_7d=22.3, actual_return_30d=18.5,
+                win_3d=True, win_7d=True, win_30d=True,
+                iv_rank=55.0, put_call_ratio=0.75, final_score=7.8,
+                odds_score=7.0, risk_adj_score=7.2, agent_agreement=0.71, direction_encoded=1.0,
             ),
             TrainingData(
-                ticker="NVDA",
-                date="2024-01-24",
-                crowding_score=75.0,
-                catalyst_quality="A+",
-                momentum_5d=6.5,
-                volatility=6.1,
-                market_sentiment=55,
-                actual_return_3d=5.2,
-                actual_return_7d=15.6,
-                actual_return_30d=38.9,
-                win_3d=True,
-                win_7d=True,
-                win_30d=True,
+                ticker="NVDA", date="2024-01-24",
+                crowding_score=75.0, catalyst_quality="A+",
+                momentum_5d=6.5, volatility=6.1, market_sentiment=55,
+                actual_return_3d=5.2, actual_return_7d=15.6, actual_return_30d=38.9,
+                win_3d=True, win_7d=True, win_30d=True,
+                iv_rank=70.0, put_call_ratio=0.65, final_score=8.8,
+                odds_score=8.0, risk_adj_score=7.5, agent_agreement=0.86, direction_encoded=1.0,
             ),
             # VKTX 记录
             TrainingData(
-                ticker="VKTX",
-                date="2023-06-15",
-                crowding_score=58.0,
-                catalyst_quality="A+",
-                momentum_5d=2.1,
-                volatility=12.3,
-                market_sentiment=60,
-                actual_return_3d=42.1,
-                actual_return_7d=38.5,
-                actual_return_30d=22.3,
-                win_3d=True,
-                win_7d=True,
-                win_30d=True,
+                ticker="VKTX", date="2023-06-15",
+                crowding_score=58.0, catalyst_quality="A+",
+                momentum_5d=2.1, volatility=12.3, market_sentiment=60,
+                actual_return_3d=42.1, actual_return_7d=38.5, actual_return_30d=22.3,
+                win_3d=True, win_7d=True, win_30d=True,
+                iv_rank=78.0, put_call_ratio=0.55, final_score=8.5,
+                odds_score=7.8, risk_adj_score=5.5, agent_agreement=0.71, direction_encoded=1.0,
             ),
             TrainingData(
-                ticker="VKTX",
-                date="2023-11-22",
-                crowding_score=42.0,
-                catalyst_quality="A",
-                momentum_5d=1.5,
-                volatility=8.9,
-                market_sentiment=40,
-                actual_return_3d=8.2,
-                actual_return_7d=12.5,
-                actual_return_30d=15.8,
-                win_3d=True,
-                win_7d=True,
-                win_30d=True,
+                ticker="VKTX", date="2023-11-22",
+                crowding_score=42.0, catalyst_quality="A",
+                momentum_5d=1.5, volatility=8.9, market_sentiment=40,
+                actual_return_3d=8.2, actual_return_7d=12.5, actual_return_30d=15.8,
+                win_3d=True, win_7d=True, win_30d=True,
+                iv_rank=65.0, put_call_ratio=0.90, final_score=7.5,
+                odds_score=6.5, risk_adj_score=6.0, agent_agreement=0.57, direction_encoded=1.0,
             ),
             # TSLA 记录
             TrainingData(
-                ticker="TSLA",
-                date="2024-01-17",
-                crowding_score=71.0,
-                catalyst_quality="B+",
-                momentum_5d=4.2,
-                volatility=7.8,
-                market_sentiment=30,
-                actual_return_3d=12.3,
-                actual_return_7d=18.2,
-                actual_return_30d=12.5,
-                win_3d=True,
-                win_7d=True,
-                win_30d=True,
+                ticker="TSLA", date="2024-01-17",
+                crowding_score=71.0, catalyst_quality="B+",
+                momentum_5d=4.2, volatility=7.8, market_sentiment=30,
+                actual_return_3d=12.3, actual_return_7d=18.2, actual_return_30d=12.5,
+                win_3d=True, win_7d=True, win_30d=True,
+                iv_rank=58.0, put_call_ratio=1.10, final_score=7.2,
+                odds_score=6.0, risk_adj_score=5.8, agent_agreement=0.57, direction_encoded=1.0,
             ),
             # 负例（失败的交易）
             TrainingData(
-                ticker="NVDA",
-                date="2023-08-01",
-                crowding_score=82.0,
-                catalyst_quality="B",
-                momentum_5d=8.5,
-                volatility=7.2,
-                market_sentiment=70,
-                actual_return_3d=-2.3,
-                actual_return_7d=1.2,
-                actual_return_30d=-5.8,
-                win_3d=False,
-                win_7d=False,
-                win_30d=False,
+                ticker="NVDA", date="2023-08-01",
+                crowding_score=82.0, catalyst_quality="B",
+                momentum_5d=8.5, volatility=7.2, market_sentiment=70,
+                actual_return_3d=-2.3, actual_return_7d=1.2, actual_return_30d=-5.8,
+                win_3d=False, win_7d=False, win_30d=False,
+                iv_rank=85.0, put_call_ratio=1.35, final_score=6.0,
+                odds_score=4.5, risk_adj_score=4.0, agent_agreement=0.43, direction_encoded=1.0,
             ),
             TrainingData(
-                ticker="VKTX",
-                date="2023-09-15",
-                crowding_score=65.0,
-                catalyst_quality="C",
-                momentum_5d=-3.2,
-                volatility=11.5,
-                market_sentiment=-20,
-                actual_return_3d=-8.5,
-                actual_return_7d=-12.3,
-                actual_return_30d=-18.9,
-                win_3d=False,
-                win_7d=False,
-                win_30d=False,
+                ticker="VKTX", date="2023-09-15",
+                crowding_score=65.0, catalyst_quality="C",
+                momentum_5d=-3.2, volatility=11.5, market_sentiment=-20,
+                actual_return_3d=-8.5, actual_return_7d=-12.3, actual_return_30d=-18.9,
+                win_3d=False, win_7d=False, win_30d=False,
+                iv_rank=72.0, put_call_ratio=1.50, final_score=4.8,
+                odds_score=3.5, risk_adj_score=3.2, agent_agreement=0.29, direction_encoded=1.0,
             ),
         ]
 
@@ -191,6 +152,14 @@ class HistoricalDataBuilder:
                 "win_3d": r.win_3d,
                 "win_7d": r.win_7d,
                 "win_30d": r.win_30d,
+                # v2 新特征
+                "iv_rank": r.iv_rank,
+                "put_call_ratio": r.put_call_ratio,
+                "final_score": r.final_score,
+                "odds_score": r.odds_score,
+                "risk_adj_score": r.risk_adj_score,
+                "agent_agreement": r.agent_agreement,
+                "direction_encoded": r.direction_encoded,
             }
             for r in self.historical_records
         ]
@@ -204,14 +173,23 @@ class SimpleMLModel:
 
     def __init__(self):
         self.weights = {
-            "crowding": 0.30,
-            "catalyst": 0.25,
-            "momentum": 0.20,
-            "volatility": 0.15,
-            "sentiment": 0.10,
+            "crowding": 0.18,
+            "catalyst": 0.15,
+            "momentum": 0.12,
+            "volatility": 0.09,
+            "sentiment": 0.06,
+            # v2 新特征
+            "iv_rank": 0.10,
+            "put_call_ratio": 0.08,
+            "final_score": 0.07,
+            "odds_score": 0.05,
+            "risk_adj_score": 0.04,
+            "agent_agreement": 0.04,
+            "direction_encoded": 0.02,
         }
         self.is_trained = False
         self.training_accuracy = 0.0
+        self.feature_stats: Dict = {}
 
     def encode_catalyst_quality(self, quality: str) -> float:
         """编码催化剂质量"""
@@ -242,19 +220,34 @@ class SimpleMLModel:
         momentums = [d.momentum_5d for d in training_data]
         volatilities = [d.volatility for d in training_data]
         sentiments = [d.market_sentiment for d in training_data]
+        iv_ranks = [d.iv_rank for d in training_data]
+        put_call_ratios = [d.put_call_ratio for d in training_data]
+        final_scores = [d.final_score for d in training_data]
+        odds_scores = [d.odds_score for d in training_data]
+        risk_adj_scores = [d.risk_adj_score for d in training_data]
+        agent_agreements = [d.agent_agreement for d in training_data]
+        direction_encodeds = [d.direction_encoded for d in training_data]
         win_7d = [d.win_7d for d in training_data]  # 目标：7 日是否赚钱
+
+        def _safe_stats(vals, name):
+            return {"min": min(vals), "max": max(vals),
+                    "mean": statistics.mean(vals)} if vals else {"min": 0, "max": 1, "mean": 0.5}
 
         # 计算特征的统计信息
         self.feature_stats = {
-            "crowding": {
-                "min": min(crowding_scores),
-                "max": max(crowding_scores),
-                "mean": statistics.mean(crowding_scores),
-            },
-            "catalyst": {"min": 0.4, "max": 1.0},
-            "momentum": {"min": min(momentums), "max": max(momentums)},
-            "volatility": {"min": min(volatilities), "max": max(volatilities)},
-            "sentiment": {"min": min(sentiments), "max": max(sentiments)},
+            "crowding": _safe_stats(crowding_scores, "crowding"),
+            "catalyst": {"min": 0.4, "max": 1.0, "mean": 0.7},
+            "momentum": _safe_stats(momentums, "momentum"),
+            "volatility": _safe_stats(volatilities, "volatility"),
+            "sentiment": _safe_stats(sentiments, "sentiment"),
+            # v2
+            "iv_rank": _safe_stats(iv_ranks, "iv_rank"),
+            "put_call_ratio": _safe_stats(put_call_ratios, "put_call_ratio"),
+            "final_score": _safe_stats(final_scores, "final_score"),
+            "odds_score": _safe_stats(odds_scores, "odds_score"),
+            "risk_adj_score": _safe_stats(risk_adj_scores, "risk_adj_score"),
+            "agent_agreement": _safe_stats(agent_agreements, "agent_agreement"),
+            "direction_encoded": _safe_stats(direction_encodeds, "direction_encoded"),
         }
 
         # 计算每个特征与目标的相关性（简单相关系数）
@@ -291,37 +284,26 @@ class SimpleMLModel:
 
     def _calculate_correlations(self, data: List[TrainingData], target: List[bool]) -> Dict:
         """计算特征与目标的相关性"""
-        correlations = {}
-
-        # 将 True/False 转换为 1/0
         target_numeric = [1.0 if x else 0.0 for x in target]
 
-        # 计算每个特征的简单相关性
-        crowding_vals = [d.crowding_score for d in data]
-        catalyst_vals = [
-            self.encode_catalyst_quality(d.catalyst_quality) for d in data
-        ]
-        momentum_vals = [d.momentum_5d for d in data]
-        volatility_vals = [d.volatility for d in data]
-        sentiment_vals = [d.market_sentiment for d in data]
+        feature_vals = {
+            "crowding": [d.crowding_score for d in data],
+            "catalyst": [self.encode_catalyst_quality(d.catalyst_quality) for d in data],
+            "momentum": [d.momentum_5d for d in data],
+            "volatility": [d.volatility for d in data],
+            "sentiment": [d.market_sentiment for d in data],
+            # v2
+            "iv_rank": [d.iv_rank for d in data],
+            "put_call_ratio": [d.put_call_ratio for d in data],
+            "final_score": [d.final_score for d in data],
+            "odds_score": [d.odds_score for d in data],
+            "risk_adj_score": [d.risk_adj_score for d in data],
+            "agent_agreement": [d.agent_agreement for d in data],
+            "direction_encoded": [d.direction_encoded for d in data],
+        }
 
-        correlations["crowding"] = self._simple_correlation(
-            crowding_vals, target_numeric
-        )
-        correlations["catalyst"] = self._simple_correlation(
-            catalyst_vals, target_numeric
-        )
-        correlations["momentum"] = self._simple_correlation(
-            momentum_vals, target_numeric
-        )
-        correlations["volatility"] = self._simple_correlation(
-            volatility_vals, target_numeric
-        )
-        correlations["sentiment"] = self._simple_correlation(
-            sentiment_vals, target_numeric
-        )
-
-        return correlations
+        return {name: self._simple_correlation(vals, target_numeric)
+                for name, vals in feature_vals.items()}
 
     def _simple_correlation(self, x: List[float], y: List[float]) -> float:
         """计算简单皮尔逊相关系数"""
@@ -345,43 +327,39 @@ class SimpleMLModel:
 
     def predict_probability(self, data: TrainingData) -> float:
         """预测赚钱概率（0-1）"""
-        # 特征归一化
-        crowding_norm = self.normalize_feature(
-            data.crowding_score,
-            self.feature_stats["crowding"]["min"],
-            self.feature_stats["crowding"]["max"],
-        )
-        catalyst_norm = self.normalize_feature(
-            self.encode_catalyst_quality(data.catalyst_quality),
-            self.feature_stats["catalyst"]["min"],
-            self.feature_stats["catalyst"]["max"],
-        )
-        momentum_norm = self.normalize_feature(
-            data.momentum_5d,
-            self.feature_stats["momentum"]["min"],
-            self.feature_stats["momentum"]["max"],
-        )
-        volatility_norm = self.normalize_feature(
-            data.volatility,
-            self.feature_stats["volatility"]["min"],
-            self.feature_stats["volatility"]["max"],
-        )
-        sentiment_norm = self.normalize_feature(
-            data.market_sentiment,
-            self.feature_stats["sentiment"]["min"],
-            self.feature_stats["sentiment"]["max"],
-        )
 
-        # 计算预测概率（反向拥挤度：拥挤度越高，概率越低）
-        crowding_score = 1.0 - crowding_norm * 0.3
+        def _norm(feat_name, raw_val):
+            stats = self.feature_stats.get(feat_name, {"min": 0, "max": 1})
+            return self.normalize_feature(raw_val, stats["min"], stats["max"])
 
-        # 加权求和
+        crowding_norm = _norm("crowding", data.crowding_score)
+        catalyst_norm = _norm("catalyst", self.encode_catalyst_quality(data.catalyst_quality))
+        momentum_norm = _norm("momentum", data.momentum_5d)
+        volatility_norm = _norm("volatility", data.volatility)
+        sentiment_norm = _norm("sentiment", data.market_sentiment)
+        iv_rank_norm = _norm("iv_rank", data.iv_rank)
+        pcr_norm = _norm("put_call_ratio", data.put_call_ratio)
+        final_score_norm = _norm("final_score", data.final_score)
+        odds_norm = _norm("odds_score", data.odds_score)
+        risk_adj_norm = _norm("risk_adj_score", data.risk_adj_score)
+        agreement_norm = _norm("agent_agreement", data.agent_agreement)
+        direction_norm = _norm("direction_encoded", data.direction_encoded)
+
+        # 加权求和（各特征方向性处理）
         probability = (
-            self.weights["crowding"] * crowding_score
-            + self.weights["catalyst"] * catalyst_norm
-            + self.weights["momentum"] * (momentum_norm + 0.5)  # 正动量更好
-            + self.weights["volatility"] * (1.0 - volatility_norm * 0.5)  # 适度波动
-            + self.weights["sentiment"] * (sentiment_norm + 0.5)  # 正情绪更好
+            self.weights.get("crowding", 0) * (1.0 - crowding_norm * 0.3)
+            + self.weights.get("catalyst", 0) * catalyst_norm
+            + self.weights.get("momentum", 0) * (momentum_norm + 0.5)
+            + self.weights.get("volatility", 0) * (1.0 - volatility_norm * 0.5)
+            + self.weights.get("sentiment", 0) * (sentiment_norm + 0.5)
+            # v2 新特征
+            + self.weights.get("iv_rank", 0) * (1.0 - iv_rank_norm * 0.3)  # 高IV→略降
+            + self.weights.get("put_call_ratio", 0) * (1.0 - pcr_norm * 0.4)  # 高P/C→看空
+            + self.weights.get("final_score", 0) * final_score_norm
+            + self.weights.get("odds_score", 0) * odds_norm
+            + self.weights.get("risk_adj_score", 0) * risk_adj_norm
+            + self.weights.get("agent_agreement", 0) * (agreement_norm + 0.3)  # 高共识加分
+            + self.weights.get("direction_encoded", 0) * (direction_norm + 0.5)
         )
 
         return max(0.0, min(1.0, probability))
@@ -411,6 +389,22 @@ class SimpleMLModel:
             "expected_7d": expected_7d * 0.8,
             "expected_30d": expected_7d * 1.2,
         }
+
+    def get_feature_importance(self) -> dict:
+        """获取特征重要度（基于相关性权重）"""
+        if not self.is_trained:
+            return {}
+        total = sum(abs(v) for v in self.weights.values())
+        if total == 0:
+            return {}
+        importance = {}
+        for name, w in self.weights.items():
+            importance[name] = {
+                "weight": round(abs(w) / total, 4),
+                "coefficient": round(w, 4),
+                "direction": "positive" if w > 0 else ("negative" if w < 0 else "neutral"),
+            }
+        return dict(sorted(importance.items(), key=lambda x: -x[1]["weight"]))
 
     def save_model(self, filename: str = "ml_model.json"):
         """保存模型（JSON 格式，安全序列化）"""
@@ -447,16 +441,507 @@ class SimpleMLModel:
             return False
 
 
+# ---------------------------------------------------------------------------
+# 特征名定义（SGDMLModel 与 SimpleMLModel 共享）
+# ---------------------------------------------------------------------------
+FEATURE_NAMES = [
+    "crowding", "catalyst", "momentum", "volatility", "sentiment",  # v1: 原始 5 维
+    "iv_rank", "put_call_ratio", "final_score",                     # v2: DB 直取
+    "odds_score", "risk_adj_score",                                  # v2: dimension_scores
+    "agent_agreement", "direction_encoded",                          # v2: 派生
+]
+FEATURE_NAMES_V1 = ["crowding", "catalyst", "momentum", "volatility", "sentiment"]
+
+
+def _encode_catalyst(quality: str) -> float:
+    """编码催化剂质量（共享工具函数）"""
+    return {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}.get(quality, 0.5)
+
+
+def _extract_features(data: TrainingData) -> list:
+    """从 TrainingData 提取 12 维特征向量"""
+    return [
+        data.crowding_score,
+        _encode_catalyst(data.catalyst_quality),
+        data.momentum_5d,
+        data.volatility,
+        data.market_sentiment,
+        # v2 新特征
+        data.iv_rank,
+        data.put_call_ratio,
+        data.final_score,
+        data.odds_score,
+        data.risk_adj_score,
+        data.agent_agreement,
+        data.direction_encoded,
+    ]
+
+
+class SGDMLModel:
+    """
+    sklearn SGDClassifier 在线学习模型（JSON 序列化，无 pickle）。
+
+    支持：
+    - train(data)           全量训练（多轮 partial_fit 收敛）
+    - incremental_train(data) 增量学习（仅新数据 partial_fit 1 轮）
+    - predict_probability(data) → float 0~1
+    - predict_return(data) → dict（公式与 SimpleMLModel 一致）
+    - save_model / load_model（JSON 往返，向下兼容旧格式）
+    """
+
+    def __init__(self):
+        from sklearn.linear_model import SGDClassifier
+        from sklearn.preprocessing import StandardScaler
+
+        self._clf = SGDClassifier(
+            loss="log_loss",
+            penalty="l2",
+            alpha=0.001,
+            learning_rate="optimal",
+            random_state=42,
+        )
+        self._scaler = StandardScaler()
+        self._scaler_fitted = False
+        self._clf_fitted = False
+        self._n_samples_seen = 0
+
+        # 兼容 SimpleMLModel 接口
+        self.is_trained = False
+        self.training_accuracy = 0.0
+        self.feature_stats: Dict = {}
+
+    # ---- 属性兼容 SimpleMLModel ----
+    @property
+    def weights(self) -> dict:
+        """将 SGD 系数绝对值归一化为权重 dict"""
+        n = len(FEATURE_NAMES)
+        uniform = 1.0 / n
+        if not self._clf_fitted:
+            return dict(zip(FEATURE_NAMES, [uniform] * n))
+        raw = self._clf.coef_[0]
+        if len(raw) != n:
+            # 维度不匹配（旧模型），返回均匀权重
+            return dict(zip(FEATURE_NAMES, [uniform] * n))
+        abs_sum = sum(abs(w) for w in raw)
+        if abs_sum == 0:
+            return dict(zip(FEATURE_NAMES, [uniform] * n))
+        return {name: abs(raw[i]) / abs_sum for i, name in enumerate(FEATURE_NAMES)}
+
+    @weights.setter
+    def weights(self, value):
+        """允许外部赋值（加载旧格式时兼容）"""
+        pass  # SGD 权重由 coef_ 驱动，忽略手动设置
+
+    # ---- 训练 ----
+    def train(self, training_data: List[TrainingData]) -> Dict:
+        """全量训练（多轮 partial_fit 直到收敛）"""
+        import numpy as np
+
+        if len(training_data) < 2:
+            _log.warning("SGD 训练样本不足 (%d)，跳过", len(training_data))
+            return {"status": "error", "message": "need >= 2 samples"}
+
+        X = np.array([_extract_features(d) for d in training_data], dtype=np.float64)
+        y = np.array([1 if d.win_7d else 0 for d in training_data])
+
+        # 拟合 scaler
+        self._scaler.fit(X)
+        self._scaler_fitted = True
+        X_scaled = self._scaler.transform(X)
+
+        # 多轮 partial_fit 收敛
+        classes = np.array([0, 1])
+        for _ in range(20):
+            self._clf.partial_fit(X_scaled, y, classes=classes)
+        self._clf_fitted = True
+        self._n_samples_seen = len(training_data)
+
+        # 计算特征统计（兼容 SimpleMLModel）
+        self.feature_stats = {
+            name: {
+                "min": float(X[:, i].min()),
+                "max": float(X[:, i].max()),
+                "mean": float(X[:, i].mean()),
+            }
+            for i, name in enumerate(FEATURE_NAMES)
+        }
+
+        # 计算训练准确率
+        preds = self._clf.predict(X_scaled)
+        self.training_accuracy = float((preds == y).mean() * 100)
+        self.is_trained = True
+
+        _log.info(
+            "SGD 训练完成：%d 样本，准确率 %.1f%%，权重 %s",
+            len(training_data),
+            self.training_accuracy,
+            {k: f"{v:.2f}" for k, v in self.weights.items()},
+        )
+
+        return {
+            "status": "success",
+            "samples": len(training_data),
+            "accuracy": self.training_accuracy,
+            "weights": self.weights,
+        }
+
+    def incremental_train(self, new_data: List[TrainingData]) -> Dict:
+        """增量学习：仅对新数据 partial_fit 一次"""
+        import numpy as np
+
+        if not new_data:
+            return {"status": "skip", "message": "no new data"}
+
+        if not self._scaler_fitted:
+            # 冷启动：降级为全量训练
+            return self.train(new_data)
+
+        X = np.array([_extract_features(d) for d in new_data], dtype=np.float64)
+        y = np.array([1 if d.win_7d else 0 for d in new_data])
+
+        # 增量更新 scaler（partial_fit）
+        self._scaler.partial_fit(X)
+        X_scaled = self._scaler.transform(X)
+
+        classes = np.array([0, 1])
+        self._clf.partial_fit(X_scaled, y, classes=classes)
+        self._clf_fitted = True
+        self._n_samples_seen += len(new_data)
+
+        # 更新准确率（仅在新数据上评估）
+        preds = self._clf.predict(X_scaled)
+        batch_acc = float((preds == y).mean() * 100)
+
+        _log.info(
+            "SGD 增量学习：+%d 样本（累计 %d），本批准确率 %.1f%%",
+            len(new_data), self._n_samples_seen, batch_acc,
+        )
+
+        return {
+            "status": "success",
+            "new_samples": len(new_data),
+            "total_samples": self._n_samples_seen,
+            "batch_accuracy": batch_acc,
+        }
+
+    # ---- 预测 ----
+    def predict_probability(self, data: TrainingData) -> float:
+        """预测赚钱概率 (0~1)"""
+        import numpy as np
+
+        if not self._clf_fitted:
+            return 0.5  # 未训练时返回默认值
+
+        X = np.array([_extract_features(data)], dtype=np.float64)
+        X_scaled = self._scaler.transform(X)
+        prob = self._clf.predict_proba(X_scaled)[0]
+
+        # prob 是 [P(class=0), P(class=1)]
+        return float(prob[1]) if len(prob) > 1 else float(prob[0])
+
+    def predict_return(self, data: TrainingData) -> Dict:
+        """预测收益（公式与 SimpleMLModel 完全一致）"""
+        probability = self.predict_probability(data)
+
+        catalyst_bonus = {
+            "A+": 25, "A": 20, "B+": 15, "B": 10, "C": 5,
+        }.get(data.catalyst_quality, 10)
+
+        momentum_bonus = data.momentum_5d
+        crowding_penalty = data.crowding_score * 0.1
+        expected_7d = catalyst_bonus + momentum_bonus - crowding_penalty
+
+        return {
+            "probability": probability,
+            "expected_3d": expected_7d * 0.3,
+            "expected_7d": expected_7d * 0.8,
+            "expected_30d": expected_7d * 1.2,
+        }
+
+    # ---- 序列化（JSON，无 pickle）----
+    def save_model(self, filename: str = "ml_model.json"):
+        """保存模型到 JSON"""
+        import numpy as np
+
+        model_data: Dict = {
+            "model_type": "sgd",
+            "feature_count": len(FEATURE_NAMES),
+            "feature_names": FEATURE_NAMES,
+            "is_trained": self.is_trained,
+            "training_accuracy": self.training_accuracy,
+            "n_samples_seen": self._n_samples_seen,
+            "feature_stats": self.feature_stats,
+            "weights": self.weights,
+            "feature_importance": self.get_feature_importance(),
+        }
+
+        # SGD 分类器参数
+        if self._clf_fitted:
+            model_data["sgd"] = {
+                "coef": self._clf.coef_.tolist(),
+                "intercept": self._clf.intercept_.tolist(),
+                "classes": self._clf.classes_.tolist(),
+                "t": float(getattr(self._clf, "t_", 0)),
+            }
+
+        # StandardScaler 参数
+        if self._scaler_fitted:
+            model_data["scaler"] = {
+                "mean": self._scaler.mean_.tolist(),
+                "var": self._scaler.var_.tolist(),
+                "scale": self._scaler.scale_.tolist(),
+                "n_samples_seen": int(self._scaler.n_samples_seen_),
+            }
+
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(model_data, f, ensure_ascii=False, indent=2)
+
+        _log.info("SGD 模型已保存：%s", filename)
+
+    def load_model(self, filename: str = "ml_model.json"):
+        """从 JSON 加载模型（兼容旧 SimpleMLModel 格式）"""
+        import numpy as np
+
+        if filename.endswith(".pkl") and not os.path.exists(filename):
+            filename = filename.replace(".pkl", ".json")
+
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                model_data = json.load(f)
+        except FileNotFoundError:
+            _log.warning("模型文件不存在：%s", filename)
+            return False
+
+        # 检测格式类型
+        if model_data.get("model_type") == "sgd":
+            # SGD 格式
+            self.training_accuracy = model_data.get("training_accuracy", 0.0)
+            self._n_samples_seen = model_data.get("n_samples_seen", 0)
+            self.feature_stats = model_data.get("feature_stats", {})
+
+            # 检测特征维度兼容性
+            n_expected = len(FEATURE_NAMES)
+            sgd_data = model_data.get("sgd", {})
+            saved_coef = sgd_data.get("coef", [[]])
+            saved_n = len(saved_coef[0]) if saved_coef and saved_coef[0] else 0
+
+            if saved_n > 0 and saved_n != n_expected:
+                _log.info(
+                    "模型特征维度不匹配 (saved=%d, expected=%d)，需重新训练",
+                    saved_n, n_expected,
+                )
+                self.is_trained = False  # 强制重训
+                return True
+
+            self.is_trained = model_data["is_trained"]
+
+            if "sgd" in model_data and saved_n == n_expected:
+                sgd = model_data["sgd"]
+                self._clf.coef_ = np.array(sgd["coef"])
+                self._clf.intercept_ = np.array(sgd["intercept"])
+                self._clf.classes_ = np.array(sgd["classes"])
+                if "t" in sgd:
+                    self._clf.t_ = sgd["t"]
+                self._clf_fitted = True
+
+            if "scaler" in model_data:
+                sc = model_data["scaler"]
+                sc_mean = np.array(sc["mean"])
+                if len(sc_mean) == n_expected:
+                    self._scaler.mean_ = sc_mean
+                    self._scaler.var_ = np.array(sc["var"])
+                    self._scaler.scale_ = np.array(sc["scale"])
+                    self._scaler.n_samples_seen_ = sc.get("n_samples_seen", 1)
+                    self._scaler_fitted = True
+                else:
+                    _log.info("Scaler 维度不匹配，跳过加载")
+
+            _log.info("SGD 模型已加载：%s", filename)
+            return True
+        else:
+            # 旧格式（SimpleMLModel）—— 加载基础属性，需要重新训练 SGD
+            _log.info("检测到旧格式模型，加载基础信息后需重新训练 SGD")
+            self.feature_stats = model_data.get("feature_stats", {})
+            self.training_accuracy = model_data.get("training_accuracy", 0.0)
+            # 标记为未训练，让 Service 自动重训
+            self.is_trained = False
+            return True
+
+    def get_feature_importance(self) -> dict:
+        """获取特征重要度（基于 SGD 系数绝对值归一化）
+
+        Returns:
+            {feature_name: {"weight": float, "coefficient": float, "direction": str}}
+            按重要度降序排列；未训练时返回空 dict。
+        """
+        if not self._clf_fitted:
+            return {}
+        raw = self._clf.coef_[0]
+        n = len(FEATURE_NAMES)
+        if len(raw) != n:
+            return {}
+        abs_vals = [abs(w) for w in raw]
+        total = sum(abs_vals)
+        if total == 0:
+            return {name: {"weight": 0.0, "coefficient": 0.0, "direction": "neutral"}
+                    for name in FEATURE_NAMES}
+        importance = {}
+        for i, name in enumerate(FEATURE_NAMES):
+            importance[name] = {
+                "weight": round(abs_vals[i] / total, 4),
+                "coefficient": round(float(raw[i]), 4),
+                "direction": "positive" if raw[i] > 0 else ("negative" if raw[i] < 0 else "neutral"),
+            }
+        return dict(sorted(importance.items(), key=lambda x: -x[1]["weight"]))
+
+    def encode_catalyst_quality(self, quality: str) -> float:
+        """兼容 SimpleMLModel 接口"""
+        return _encode_catalyst(quality)
+
+
+def build_training_data_from_db(
+    db_path: str = None,
+    min_samples: int = 30,
+    max_rows: int = 500,
+) -> List[TrainingData]:
+    """从 backtester.predictions 表构建真实训练数据
+
+    仅使用 checked_t7=1 且 return_t7 IS NOT NULL 的已验证记录。
+    样本不足 min_samples 时返回空列表（调用方降级到硬编码数据）。
+
+    Args:
+        db_path: SQLite 数据库路径（默认使用 config.PATHS.db）
+        min_samples: 最少样本数
+        max_rows: 最多训练行数
+
+    Returns:
+        TrainingData 列表（可能为空）
+    """
+    import sqlite3
+
+    if db_path is None:
+        try:
+            from hive_logger import PATHS
+            db_path = str(PATHS.db)
+        except (ImportError, AttributeError):
+            _log.debug("build_training_data_from_db: 无法获取 DB 路径")
+            return []
+
+    if not os.path.exists(db_path):
+        return []
+
+    def _cat_qual(v: float) -> str:
+        if v >= 8.5: return "A+"
+        if v >= 7.5: return "A"
+        if v >= 6.5: return "B+"
+        if v >= 5.5: return "B"
+        return "C"
+
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM predictions "
+            "WHERE checked_t7 = 1 AND return_t7 IS NOT NULL "
+            "ORDER BY date DESC LIMIT ?",
+            (max_rows,),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+    except (sqlite3.Error, OSError) as e:
+        _log.debug("build_training_data_from_db 查询失败: %s", e)
+        return []
+
+    if len(rows) < min_samples:
+        _log.debug("真实数据不足: %d < %d", len(rows), min_samples)
+        return []
+
+    direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
+    result = []
+    for r in rows:
+        try:
+            ds = json.loads(r["dimension_scores"] or "{}")
+            ad = json.loads(r["agent_directions"] or "{}")
+
+            _dir = r["direction"] or "neutral"
+            if ad:
+                _majority = sum(1 for d in ad.values() if d == _dir)
+                _agree = _majority / len(ad)
+            else:
+                _agree = 0.5
+
+            return_t7 = float(r["return_t7"])
+            # 使用 backtester 的方向感知正确性标记（非简单 return>0）
+            is_correct = bool(r["correct_t7"]) if r["correct_t7"] is not None else (return_t7 > 0)
+
+            result.append(TrainingData(
+                ticker=r["ticker"],
+                date=r["date"],
+                crowding_score=ds.get("signal", 5.0) * 10,
+                catalyst_quality=_cat_qual(ds.get("catalyst", 5.0)),
+                momentum_5d=0.0,
+                volatility=5.0,
+                market_sentiment=(ds.get("sentiment", 5.0) - 5) * 20,
+                actual_return_3d=return_t7 * 0.4,
+                actual_return_7d=return_t7,
+                actual_return_30d=return_t7 * 2.5,
+                win_3d=is_correct,
+                win_7d=is_correct,
+                win_30d=is_correct,
+                iv_rank=float(r["iv_rank"]) if r["iv_rank"] is not None else 50.0,
+                put_call_ratio=float(r["put_call_ratio"]) if r["put_call_ratio"] is not None else 1.0,
+                final_score=float(r["final_score"]) if r["final_score"] is not None else 5.0,
+                odds_score=ds.get("odds", 5.0),
+                risk_adj_score=ds.get("risk_adj", 5.0),
+                agent_agreement=_agree,
+                direction_encoded=direction_map.get(_dir, 0.0),
+            ))
+        except (KeyError, ValueError, TypeError) as e:
+            _log.debug("build_training_data_from_db: 跳过行: %s", e)
+            continue
+
+    _log.info("build_training_data_from_db: 成功构建 %d 条真实训练数据", len(result))
+    return result
+
+
+def create_ml_model():
+    """工厂函数：优先使用 SGDMLModel，sklearn 不可用时降级到 SimpleMLModel"""
+    try:
+        from sklearn.linear_model import SGDClassifier  # noqa: F401
+        return SGDMLModel()
+    except ImportError:
+        _log.info("sklearn 不可用，降级使用 SimpleMLModel")
+        return SimpleMLModel()
+
+
 class MLPredictionService:
     """ML 预测服务"""
 
     def __init__(self):
-        self.model = SimpleMLModel()
+        self.model = create_ml_model()
         self.data_builder = HistoricalDataBuilder()
 
     def train_model(self) -> Dict:
-        """训练模型"""
-        training_data = self.data_builder.get_training_data()
+        """训练模型 — 优先使用真实数据，不足时降级到硬编码"""
+        real_data = []
+        try:
+            from config import ML_TRAINING_CONFIG as _MTC
+            if _MTC.get("use_real_data", True):
+                real_data = build_training_data_from_db(
+                    min_samples=_MTC.get("min_real_samples", 30),
+                    max_rows=_MTC.get("max_training_rows", 500),
+                )
+        except (ImportError, OSError) as e:
+            _log.debug("真实训练数据加载失败: %s", e)
+
+        if real_data:
+            _log.info("使用 %d 条真实数据训练 ML 模型", len(real_data))
+            training_data = real_data
+        else:
+            training_data = self.data_builder.get_training_data()
+            _log.info("真实数据不足，使用 %d 条硬编码数据", len(training_data))
+
         result = self.model.train(training_data)
 
         # 保存模型
@@ -464,6 +949,14 @@ class MLPredictionService:
             self.model.save_model()
 
         return result
+
+    def incremental_train(self, new_data: List[TrainingData]) -> Dict:
+        """增量学习（仅 SGDMLModel 支持，SimpleMLModel 降级为全量重训）"""
+        if hasattr(self.model, "incremental_train"):
+            return self.model.incremental_train(new_data)
+        # SimpleMLModel fallback: 追加数据后全量重训
+        self.data_builder.historical_records.extend(new_data)
+        return self.model.train(self.data_builder.get_training_data())
 
     def predict_for_opportunity(self, data: TrainingData) -> Dict:
         """为某个机会预测"""

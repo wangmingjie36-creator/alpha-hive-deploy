@@ -36,6 +36,13 @@ class TrainingData:
     iv_rank: float = 50.0  # IV Rank (0-100)，默认中立
     put_call_ratio: float = 1.0  # P/C Ratio，默认中立
 
+    # === v2 新特征（与 ml_predictor.TrainingData 保持一致）===
+    final_score: float = 5.0          # 蜂群综合分 (0-10)
+    odds_score: float = 5.0           # 赔率维度分 (0-10)
+    risk_adj_score: float = 5.0       # 风险调整分 (0-10)
+    agent_agreement: float = 0.5      # Agent 共识度 (0-1)
+    direction_encoded: float = 0.0    # bullish=1, neutral=0, bearish=-1
+
 
 class HistoricalDataBuilder:
     """构建训练数据集 - 扩展版本（25+ 样本）"""
@@ -753,12 +760,21 @@ class SimpleMLModel:
         self.training_accuracy = model_data.get("training_accuracy", 0.0)
 
 
+def _create_ml_model():
+    """工厂函数：优先使用 SGDMLModel，sklearn 不可用时降级"""
+    try:
+        from ml_predictor import create_ml_model
+        return create_ml_model()
+    except ImportError:
+        return SimpleMLModel()
+
+
 class MLPredictionService:
     """ML 预测服务"""
 
     def __init__(self):
         self.data_builder = HistoricalDataBuilder()
-        self.model = SimpleMLModel()
+        self.model = _create_ml_model()
 
     def train_model(self) -> Dict:
         """训练模型"""

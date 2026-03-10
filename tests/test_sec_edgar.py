@@ -557,16 +557,31 @@ class TestSecEdgarClient:
 
     def test_request_get_with_breaker(self, _mock_sec_client, monkeypatch):
         """When circuit breaker is open, _request_get returns None."""
+        import time as _time
+        import sec_edgar
         import resilience
 
         # Force breaker to open state
         monkeypatch.setattr(resilience.sec_breaker, "_state", resilience.CircuitBreaker.OPEN)
-        monkeypatch.setattr(resilience.sec_breaker, "_last_failure_time", 0.0)
+        # 关键修复：用 time.monotonic()（当前时刻），而非 0.0（epoch）
+        # 否则 monotonic() - 0.0 可能 > recovery_timeout，导致熔断器自动转 HALF_OPEN
+        monkeypatch.setattr(resilience.sec_breaker, "_last_failure_time", _time.monotonic())
         # Also set recovery timeout very high so it stays OPEN
         monkeypatch.setattr(resilience.sec_breaker, "_recovery_timeout", 999999.0)
 
+        # 安全网：mock get_session 防止任何真实 HTTP 请求泄漏
+        _real_request_leaked = {"called": False}
+
+        def _fail_if_called(*args, **kwargs):
+            _real_request_leaked["called"] = True
+            raise AssertionError("不应发出真实 HTTP 请求！熔断器应拦截")
+
+        mock_session = types.SimpleNamespace(get=_fail_if_called)
+        monkeypatch.setattr(sec_edgar, "get_session", lambda source: mock_session)
+
         result = _mock_sec_client._request_get("https://example.com/test")
         assert result is None
+        assert not _real_request_leaked["called"], "熔断器未拦截，真实请求被发出"
 
     def test_rate_limiter_called(self, _mock_sec_client, monkeypatch):
         """sec_limiter.acquire() is called during _request_get."""

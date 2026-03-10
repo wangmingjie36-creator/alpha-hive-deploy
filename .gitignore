@@ -18,9 +18,11 @@ build/
 ml_model*.pkl
 ml_model*.json
 
-# 日志
+# 日志（含轮转文件 .log.1, .log.2 等）
 *.log
+*.log.*
 logs/*.log
+logs/*.log.*
 logs/*.jsonl
 logs/*.jsonl.*
 

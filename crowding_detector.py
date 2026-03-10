@@ -5,6 +5,7 @@
 
 import logging as _logging
 import json
+import math as _math
 from datetime import datetime
 from typing import Dict, Tuple, List
 from hive_logger import SafeJSONEncoder
@@ -480,8 +481,15 @@ def get_crowding_metrics(ticker: str, board=None) -> Dict:
             "momentum_5d": (float(hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100) if len(hist) >= 5 else 0.0,
             "avg_volume": int(hist["Volume"].mean()) if not hist.empty else 0,
             "volume_ratio": float(hist["Volume"].iloc[-1] / hist["Volume"].mean()) if not hist.empty and hist["Volume"].mean() > 0 else 1.0,
-            "volatility_20d": float(hist["Close"].pct_change().std() * (252 ** 0.5) * 100) if len(hist) >= 20 else 0.0,
+            "volatility_20d": 0.0,
         }
+        # 安全计算 volatility（NaN/Inf 守卫，方案16）
+        if len(hist) >= 20:
+            _returns = hist["Close"].pct_change().dropna()
+            if len(_returns) >= 2:
+                _vol = float(_returns.std() * (252 ** 0.5) * 100)
+                if not (_math.isnan(_vol) or _math.isinf(_vol)):
+                    stock_data["volatility_20d"] = _vol
     except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as exc:
         _log.debug("yfinance data fetch failed for %s: %s", ticker, exc)
         stock_data = {"price": 100.0, "momentum_5d": 0.0, "avg_volume": 0, "volume_ratio": 1.0, "volatility_20d": 0.0}

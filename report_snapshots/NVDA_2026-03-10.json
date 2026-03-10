@@ -1,0 +1,32 @@
+{
+  "ticker": "NVDA",
+  "date": "2026-03-10",
+  "composite_score": 8.69,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 184.77000427246094,
+  "agent_votes": {
+    "RivalBeeVanguard": 10.0,
+    "ChronosBeeHorizon": 10.0,
+    "GuardBeeSentinel": 7.69,
+    "OracleBeeEcho": 5.8,
+    "BuzzBeeWhisper": 5.79,
+    "ScoutBeeNova": 5.6208,
+    "CodeExecutorAgent": 2.0,
+    "BearBeeContrarian": 3.5
+  },
+  "weights_used": {
+    "signal": 0.3,
+    "catalyst": 0.2,
+    "sentiment": 0.2,
+    "odds": 0.15,
+    "risk_adj": 0.15
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-03-10T15:48:56.913408"
+}

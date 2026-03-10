@@ -778,6 +778,13 @@ PHEROMONE_CONFIG = {
     "board_ticker_scoped_decay": True,  # 仅衰减同 ticker 条目（防止跨 ticker 误杀）
 }
 
+# ==================== T+N 实际价格回填配置 (Phase 6 闭环) ====================
+OUTCOMES_CONFIG = {
+    "enabled": True,
+    "rate_limit_seconds": 0.5,        # yfinance 请求间隔（秒）
+    "max_snapshots_per_run": 50,      # 单次最多处理快照数
+}
+
 # ==================== 动态蜂群配置 (Phase 2) ====================
 SWARM_CONFIG = {
     "enabled": True,
@@ -834,6 +841,13 @@ CALENDAR_CONFIG = {
     "opportunity_score_threshold": 7.5,  # 触发提醒的分数阈值
     "reminder_advance_minutes": 30,      # 事件前多少分钟提醒
     "upcoming_days_context": 7,          # 注入 Agent 的未来几天事件
+    # 回测提醒 (Phase 3 P2+)
+    "add_feedback_reminders": True,       # T+1/T+7/T+30 回测提醒
+    # 经济日历同步
+    "sync_economic_calendar": True,       # 宏观事件同步到 Calendar
+    "economic_calendar_days_ahead": 60,   # 前瞻天数
+    # Thesis Break 紧急提醒
+    "thesis_break_calendar_alerts": True, # Thesis Break 触发时创建日历事件
 }
 
 # ==================== 向量记忆配置 (Phase 3 内存优化) ====================
@@ -1003,6 +1017,39 @@ SENTIMENT_MOMENTUM_CONFIG = {
     "conflict_heavy_min_agents": 2,         # 多空双方各 ≥ 2 Agent = 重度冲突
     "conflict_dq_resolve_threshold": 0.55,  # DQ 加权占比 ≥ 55% 才能解决方向冲突
     "conflict_discount_factor": 0.3,        # 冲突折扣系数（× 冲突比例）
+}
+
+# ==================== 冲突仲裁配置 (QueenDistiller Enhancement A) ====================
+CONFLICT_ARBITRATION_CONFIG = {
+    "close_vote_threshold": 0.15,   # margin 低于此值触发仲裁
+    "dissent_boost": 1.5,           # GuardBee/BearBee 异议权重倍数
+    "dissent_agents": ["GuardBeeSentinel", "BearBeeContrarian"],
+}
+
+# ==================== 置信度校准配置 (QueenDistiller Enhancement B) ====================
+CONFIDENCE_CALIBRATION_CONFIG = {
+    "std_multiplier": 0.3,          # 维度 std → band_width 的系数
+    "low_coverage_threshold": 3,    # 覆盖维度 < 此值时放大不确定性
+    "coverage_amplifier": 1.5,      # 低覆盖放大系数
+    "conflict_amplifier": 1.3,      # 冲突放大系数
+    "max_band": 2.0,                # band_width 上限
+}
+
+# ==================== ML 反馈权重配置 (QueenDistiller Enhancement C) ====================
+ML_FEEDBACK_CONFIG = {
+    "min_adjustment": 0.5,          # 维度调整因子下限
+    "max_adjustment": 2.0,          # 维度调整因子上限
+    "enable_dimension_weighting": True,   # 是否启用维度权重调整
+    "enable_vote_boosting": True,         # 是否启用 Agent 投票置信度调整
+}
+
+# ==================== ML 真实数据训练配置 ====================
+ML_TRAINING_CONFIG = {
+    "use_real_data": True,             # 优先使用真实数据训练
+    "min_real_samples": 30,            # 真实数据最少样本数
+    "daily_retrain": True,             # 每日重训
+    "max_training_rows": 500,          # 训练数据行数上限
+    "blend_hardcoded_when_sparse": True,  # 真实数据不足时混入硬编码数据
 }
 
 # ==================== BearBee 看空评分配置 ====================

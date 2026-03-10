@@ -187,6 +187,45 @@ class AgentWeightManager:
 
         return new_weights
 
+    def apply_dimension_feedback(self, dimension_weights: Dict[str, float]) -> bool:
+        """将 feedback_loop 的 5 维权重映射到 Agent 级别权重
+
+        维度 → Agent 映射:
+          signal    → ScoutBeeNova
+          catalyst  → ChronosBeeHorizon
+          sentiment → BuzzBeeWhisper
+          odds      → OracleBeeEcho
+          risk_adj  → GuardBeeSentinel
+
+        Args:
+            dimension_weights: 如 {"signal": 0.35, "catalyst": 0.20, ...}
+
+        Returns:
+            是否成功更新至少一个 Agent 权重
+        """
+        _DIM_TO_AGENT = {
+            "signal": "ScoutBeeNova",
+            "catalyst": "ChronosBeeHorizon",
+            "sentiment": "BuzzBeeWhisper",
+            "odds": "OracleBeeEcho",
+            "risk_adj": "GuardBeeSentinel",
+        }
+        updated = 0
+        for dim, agent_id in _DIM_TO_AGENT.items():
+            if dim in dimension_weights:
+                # 维度权重 / 平均权重(0.20) → Agent 乘数
+                raw = dimension_weights[dim]
+                if not isinstance(raw, (int, float)) or raw != raw or raw <= 0:
+                    continue  # 跳过非数字、NaN、非正值
+                base = raw / 0.20
+                clamped = max(self.MIN_WEIGHT, min(self.MAX_WEIGHT, base))
+                try:
+                    self.memory_store.update_agent_weight(agent_id, round(clamped, 3))
+                    updated += 1
+                except (OSError, ValueError, TypeError) as e:
+                    _log.warning("apply_dimension_feedback(%s) 失败: %s", agent_id, e)
+        return updated > 0
+
     @staticmethod
     def _rebalance_weights(weights: Dict[str, float]) -> Dict[str, float]:
         """归一化权重，使均值 = 1.0（保持相对比例，消除浮点误差积累）"""

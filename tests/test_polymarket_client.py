@@ -557,3 +557,162 @@ class TestPolymarketClient:
 
         assert result is not None
         assert attempt_count["n"] == 3  # 2 retries + 1 success
+
+
+# ==================== 方案11: 关键词匹配回归测试 ====================
+
+
+class TestWordBoundaryMatching:
+    """方案11: 验证 \\b 词边界匹配修复，防止子串误判"""
+
+    @staticmethod
+    def _classify(question: str):
+        """复制方向分类逻辑用于单元测试"""
+        import re
+        _q_lower = question.lower()
+        _BULLISH_WORDS = r'\b(?:above|higher|beat|exceed|rise|up|bull|hit|rally|surge|gain)\b'
+        _BEARISH_WORDS = r'\b(?:below|lower|miss|fall|drop|down|crash|bear|decline|sink|lose)\b'
+        is_bullish = bool(re.search(_BULLISH_WORDS, _q_lower))
+        is_bearish = bool(re.search(_BEARISH_WORDS, _q_lower))
+        if is_bullish and is_bearish:
+            return "neutral"
+        if is_bullish:
+            return "bullish"
+        if is_bearish:
+            return "bearish"
+        return "neutral"
+
+    # --- 正确匹配用例 ---
+    def test_above_detected_as_bullish(self):
+        assert self._classify("Will NVDA be above $150?") == "bullish"
+
+    def test_below_detected_as_bearish(self):
+        assert self._classify("Will AAPL fall below $200?") == "bearish"
+
+    def test_rise_detected_as_bullish(self):
+        assert self._classify("Will Tesla stock rise this quarter?") == "bullish"
+
+    def test_drop_detected_as_bearish(self):
+        assert self._classify("Will oil prices drop below $60?") == "bearish"
+
+    # --- 方案11 核心: 子串误判修复 ---
+    def test_update_not_matched_as_up(self):
+        """'update' 包含 'up' 但不应匹配看涨"""
+        assert self._classify("Will NVDA release a driver update?") == "neutral"
+
+    def test_breakdown_not_matched_as_down(self):
+        """'breakdown' 包含 'down' 但不应匹配看空"""
+        assert self._classify("Full breakdown of AAPL earnings report") == "neutral"
+
+    def test_mission_not_matched_as_miss(self):
+        """'mission' 包含 'miss' 但不应匹配看空"""
+        assert self._classify("Will SpaceX complete its mission?") == "neutral"
+
+    def test_enterprise_not_matched_as_rise(self):
+        """'enterprise' 包含 'rise' 但不应匹配看涨"""
+        assert self._classify("Will enterprise software demand stay flat?") == "neutral"
+
+    def test_bulletin_not_matched_as_bull(self):
+        """'bulletin' 包含 'bull' 但不应匹配看涨"""
+        assert self._classify("Economic bulletin for Q2 release date?") == "neutral"
+
+    def test_bearing_not_matched_as_bear(self):
+        """'bearing' 包含 'bear' 但不应匹配看空"""
+        assert self._classify("Will ball bearing demand increase?") == "neutral"
+
+    def test_upload_not_matched_as_up(self):
+        """'upload' 包含 'up' 但不应匹配看涨"""
+        assert self._classify("Will the upload speed exceed 100Mbps?") == "bullish"  # 'exceed' is bullish
+
+    def test_whiteboard_not_matched_as_hit(self):
+        """'whiteboard' 不应触发 hit"""
+        assert self._classify("Will the whiteboard feature launch?") == "neutral"
+
+    # --- 双向冲突检测 ---
+    def test_conflicting_signals_become_neutral(self):
+        """同时包含看涨和看空词 → 中性"""
+        assert self._classify("Will price rise above or drop below target?") == "neutral"
+
+    def test_up_and_down_conflict(self):
+        """同时含 up 和 down → 中性"""
+        assert self._classify("Will the stock go up or down?") == "neutral"
+
+    # --- 新增关键词 ---
+    def test_rally_detected_as_bullish(self):
+        assert self._classify("Will crypto rally in March?") == "bullish"
+
+    def test_decline_detected_as_bearish(self):
+        assert self._classify("Will housing prices decline?") == "bearish"
+
+
+# ==================== Bug 修复回归测试 ====================
+
+
+class TestBugfixRegressions:
+    """Polymarket 二次审查发现的 Bug 回归测试"""
+
+    def test_company_name_search_deduplicates(self, monkeypatch):
+        """二次搜索（ticker + 公司名）不应产生重复市场。"""
+        import polymarket_client
+
+        # 两次搜索返回重叠数据：都包含 nvda-above-130
+        overlap_markets = SAMPLE_BULLISH_MARKETS  # 含 nvda-above-130, nvda-beat-earnings, nvda-hit-160
+
+        resp = _make_response(overlap_markets)
+        session = types.SimpleNamespace(get=lambda *a, **kw: resp)
+        monkeypatch.setattr(polymarket_client, "get_session", lambda name: session)
+
+        client = polymarket_client.PolymarketClient()
+        result = client.get_ticker_odds("NVDA")
+
+        # 验证 top_markets 无重复（每个 question 只出现一次）
+        questions = [m["question"] for m in result["top_markets"]]
+        assert len(questions) == len(set(questions)), f"重复市场: {questions}"
+
+    def test_normalize_market_none_prices(self):
+        """outcomePrices=None 应返回空列表，不崩溃。"""
+        from polymarket_client import PolymarketClient
+
+        client = PolymarketClient()
+        raw = {
+            "slug": "null-prices",
+            "question": "Null prices?",
+            "outcomePrices": None,
+            "volume24hr": 100,
+            "liquidity": 200,
+            "outcomes": ["Yes", "No"],
+        }
+        normalized = client._normalize_market(raw)
+        assert normalized["outcome_prices"] == []
+
+    def test_normalize_market_int_prices(self):
+        """outcomePrices=42（非 str/list）应返回空列表。"""
+        from polymarket_client import PolymarketClient
+
+        client = PolymarketClient()
+        raw = {
+            "slug": "int-prices",
+            "question": "Int prices?",
+            "outcomePrices": 42,
+            "volume24hr": 100,
+            "liquidity": 200,
+            "outcomes": [],
+        }
+        normalized = client._normalize_market(raw)
+        assert normalized["outcome_prices"] == []
+
+    def test_normalize_market_list_with_non_numeric(self):
+        """outcomePrices 列表中含非数值元素应不崩溃。"""
+        from polymarket_client import PolymarketClient
+
+        client = PolymarketClient()
+        raw = {
+            "slug": "bad-list",
+            "question": "Bad list?",
+            "outcomePrices": ["abc", "def"],
+            "volume24hr": 0,
+            "liquidity": 0,
+            "outcomes": [],
+        }
+        normalized = client._normalize_market(raw)
+        assert normalized["outcome_prices"] == []

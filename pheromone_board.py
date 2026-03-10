@@ -81,6 +81,51 @@ class PheromoneBoard:
             self._old_decay = self.DECAY_RATE * 1.5
             self._ticker_scoped = True
 
+    # 方案13: 输入验证 — 保护核心通信通道
+    _VALID_DIRECTIONS = {"bullish", "bearish", "neutral"}
+
+    @staticmethod
+    def _validate_entry(entry: 'PheromoneEntry') -> None:
+        """
+        验证并修正 PheromoneEntry 字段，防止垃圾数据污染信息素板。
+
+        规则：
+        - self_score: clamp 到 [0, 10]，NaN/非数字 → 5.0
+        - direction: 必须为 bullish/bearish/neutral，其他 → "neutral"
+        - pheromone_strength: clamp 到 [0, 1]，NaN → 1.0
+        """
+        import math
+        # self_score
+        try:
+            s = float(entry.self_score)
+            if math.isnan(s) or math.isinf(s):
+                _log.warning("PheromoneBoard: self_score 为 NaN/Inf (agent=%s, ticker=%s) → 设为 5.0",
+                             entry.agent_id, entry.ticker)
+                entry.self_score = 5.0
+            else:
+                entry.self_score = max(0.0, min(10.0, s))
+        except (TypeError, ValueError):
+            _log.warning("PheromoneBoard: self_score 不是数字 (agent=%s, ticker=%s) → 设为 5.0",
+                         entry.agent_id, entry.ticker)
+            entry.self_score = 5.0
+
+        # direction
+        if entry.direction not in PheromoneBoard._VALID_DIRECTIONS:
+            _log.warning("PheromoneBoard: direction '%s' 无效 (agent=%s, ticker=%s) → 设为 'neutral'",
+                         entry.direction, entry.agent_id, entry.ticker)
+            entry.direction = "neutral"
+
+        # pheromone_strength
+        try:
+            p = float(entry.pheromone_strength)
+            if math.isnan(p) or math.isinf(p):
+                _log.warning("PheromoneBoard: pheromone_strength 为 NaN/Inf → 设为 1.0")
+                entry.pheromone_strength = 1.0
+            else:
+                entry.pheromone_strength = max(0.0, min(1.0, p))
+        except (TypeError, ValueError):
+            entry.pheromone_strength = 1.0
+
     def publish(self, entry: PheromoneEntry) -> None:
         """
         发布新发现，自动衰减旧条目
@@ -88,6 +133,7 @@ class PheromoneBoard:
         Args:
             entry: 新的信息素条目
         """
+        self._validate_entry(entry)  # 方案13: 入口验证
         with self._lock:
             # 单遍衰减 + 存活过滤（合并两个循环，减少 datetime 解析次数）
             # 仅衰减同 ticker 条目（避免跨 ticker 误杀：TSLA 发布不应衰减 NVDA）

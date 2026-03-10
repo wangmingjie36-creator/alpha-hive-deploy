@@ -1,11 +1,29 @@
 """QueenDistiller - 王后蒸馏蜂（5 维加权评分 + LLM 蒸馏）"""
 
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 from pheromone_board import PheromoneBoard
 from models import DataQualityChecker as _DQChecker
 from swarm_agents._config import _log
 from swarm_agents.cache import _safe_score
 from swarm_agents.utils import LLM_ERRORS
+
+# ML 特征 → 蜂群维度映射（Enhancement C: ML 反馈权重）
+FEATURE_TO_DIMENSION: Dict[str, Optional[str]] = {
+    "crowding": "signal",
+    "catalyst": "catalyst",
+    "momentum": "sentiment",
+    "sentiment": "sentiment",
+    "volatility": "risk_adj",
+    "iv_rank": "odds",
+    "put_call_ratio": "odds",
+    "odds_score": "odds",
+    "risk_adj_score": "risk_adj",
+    "final_score": None,        # 元特征，不映射
+    "agent_agreement": None,    # 元特征，不映射
+    "direction_encoded": None,  # 元特征，不映射
+}
+
 
 
 class QueenDistiller:
@@ -27,22 +45,29 @@ class QueenDistiller:
         "risk_adj":  0.15,
     }
 
-    # 数据来源分级（用于数据质量评分 + S1 三重惩罚）—— 唯一定义，避免重复
+    # 数据质量源分类契约（_apply_triple_penalty 评分用）
+    # REAL_SOURCES (1.0)：API 调用成功 / 文件加载成功 / 真实数据
+    # PROXY_SOURCES (0.7)：降级/代理数据，仍有参考价值
+    # 其他 (0.0)：未分类 — 表示遗漏了分类，应视为 Bug
+    # → 新增 agent data_quality 值时，务必加入对应集合
     REAL_SOURCES = {
         "real", "yfinance", "finviz_api", "options_api",
         "keyword", "llm_enhanced", "reddit_apewisdom",
         "rule_only", "sec_api", "SEC直查", "Finviz", "finviz",
+        "loaded", "empty",  # ChronosBee: catalysts.json 加载成功 / 日历查询成功但无事件
     }
     PROXY_SOURCES = {
         "proxy_volume", "proxy_momentum", "proxy_social",
         "pheromone_board", "unavailable",
+        "fallback", "fallback_momentum", "default", "missing",  # 降级回退仍有参考价值
     }
 
     def __init__(self, board: PheromoneBoard, weight_manager=None, adapted_weights: Dict = None,
-                 enable_llm: bool = True):
+                 enable_llm: bool = True, ml_model=None):
         self.board = board
         self.weight_manager = weight_manager
         self.enable_llm = enable_llm
+        self.ml_model = ml_model
         if adapted_weights:
             self.DIMENSION_WEIGHTS = adapted_weights
         else:
@@ -58,6 +83,75 @@ class QueenDistiller:
                 self.DIMENSION_WEIGHTS = merged
             except (ImportError, AttributeError):
                 self.DIMENSION_WEIGHTS = dict(self.DEFAULT_WEIGHTS)
+
+        # Enhancement C: ML 反馈权重调整
+        self.ml_adjustments: Dict[str, float] = {}
+        self.ml_feedback_enabled = False
+        if ml_model:
+            self.ml_adjustments = self._compute_ml_weight_adjustments()
+            if self.ml_adjustments:
+                self.ml_feedback_enabled = True
+                try:
+                    from config import ML_FEEDBACK_CONFIG as _MFC
+                except ImportError:
+                    _MFC = {}
+                if _MFC.get("enable_dimension_weighting", True):
+                    for dim, factor in self.ml_adjustments.items():
+                        if dim in self.DIMENSION_WEIGHTS:
+                            self.DIMENSION_WEIGHTS[dim] *= factor
+                    # 归一化使权重总和 = 1.0
+                    _total = sum(self.DIMENSION_WEIGHTS.values())
+                    if _total > 0:
+                        self.DIMENSION_WEIGHTS = {
+                            k: round(v / _total, 4)
+                            for k, v in self.DIMENSION_WEIGHTS.items()
+                        }
+                    _log.info(
+                        "[ML-Feedback] 维度权重已调整: %s",
+                        {k: round(v, 3) for k, v in self.DIMENSION_WEIGHTS.items()},
+                    )
+
+    def _compute_ml_weight_adjustments(self) -> Dict[str, float]:
+        """Enhancement C: 从 ML 模型特征重要性计算维度调整因子。
+
+        Returns:
+            {dimension: adjustment_factor} 例如 {"signal": 1.3, "odds": 0.8}
+            空 dict 表示无 ML 模型或模型未训练。
+        """
+        if not self.ml_model or not hasattr(self.ml_model, "get_feature_importance"):
+            return {}
+        importance = self.ml_model.get_feature_importance()
+        if not importance:
+            return {}
+
+        try:
+            from config import ML_FEEDBACK_CONFIG as _MFC
+        except ImportError:
+            _MFC = {}
+        _min_adj = _MFC.get("min_adjustment", 0.5)
+        _max_adj = _MFC.get("max_adjustment", 2.0)
+
+        # 1. 聚合特征重要性到维度
+        dim_importance: Dict[str, List[float]] = defaultdict(list)
+        for feat, info in importance.items():
+            dim = FEATURE_TO_DIMENSION.get(feat)
+            if dim:
+                dim_importance[dim].append(info["weight"])
+
+        if not dim_importance:
+            return {}
+
+        # 2. 维度平均重要性 → 调整因子
+        # 基准：如果 5 个维度权重均等，则每个维度的特征重要性应约为 1/5 = 0.20
+        _baseline = 1.0 / len(self.DEFAULT_WEIGHTS)  # 0.20
+        dim_adjustments: Dict[str, float] = {}
+        for dim, weights in dim_importance.items():
+            avg = sum(weights) / len(weights)
+            adjustment = avg / _baseline if _baseline > 0 else 1.0
+            adjustment = max(_min_adj, min(_max_adj, adjustment))
+            dim_adjustments[dim] = round(adjustment, 3)
+
+        return dim_adjustments
 
     @staticmethod
     def _polish_narrative(ticker: str, raw_narrative: str, score: float, direction: str) -> str:
@@ -294,6 +388,64 @@ class QueenDistiller:
             "contrarian_result": contrarian_result,
         }
 
+    def _compute_confidence_calibration(self, final_score: float,
+                                        dim_scores: Dict,
+                                        vote_result: Dict,
+                                        present_count: int) -> Dict:
+        """Enhancement B: 置信度校准 — 基于维度分散度计算置信区间。
+
+        Returns:
+            dict with confidence_band, band_width, discrimination, dimension_std
+        """
+        import statistics as _stats
+
+        try:
+            from config import CONFIDENCE_CALIBRATION_CONFIG as _CCC
+        except ImportError:
+            _CCC = {}
+        _std_mult = _CCC.get("std_multiplier", 0.3)
+        _low_cov_thresh = _CCC.get("low_coverage_threshold", 3)
+        _cov_amp = _CCC.get("coverage_amplifier", 1.5)
+        _conf_amp = _CCC.get("conflict_amplifier", 1.3)
+        _max_band = _CCC.get("max_band", 2.0)
+
+        values = list(dim_scores.values())
+        dim_std = _stats.stdev(values) if len(values) > 1 else 0.0
+
+        band_width = dim_std * _std_mult
+
+        # 放大因子
+        if present_count < _low_cov_thresh:
+            band_width *= _cov_amp
+            # 当维度 ≤ 1 时 stdev=0（乘法放大无效），但缺乏数据本身意味着高不确定性
+            if len(values) <= 1:
+                band_width = max(band_width, 1.0)
+        if vote_result.get("conflict_info", {}).get("conflict_discount", 0) > 0:
+            band_width *= _conf_amp
+
+        band_width = min(band_width, _max_band)
+
+        # 置信区间
+        confidence_band = (
+            round(max(0.0, final_score - band_width), 2),
+            round(min(10.0, final_score + band_width), 2),
+        )
+
+        # 区分度标签
+        if band_width < 0.5:
+            discrimination = "high"
+        elif band_width < 1.2:
+            discrimination = "medium"
+        else:
+            discrimination = "low"
+
+        return {
+            "confidence_band": confidence_band,
+            "band_width": round(band_width, 2),
+            "discrimination": discrimination,
+            "dimension_std": round(dim_std, 2),
+        }
+
     def _compute_direction_vote(self, ticker: str, valid_results: List[Dict],
                                 all_results: List[Dict],
                                 rule_score: float) -> Dict:
@@ -307,9 +459,29 @@ class QueenDistiller:
         _total_w_raw = sum(_all_conf) or 1.0
         _weight_cap = _total_w_raw * 0.4
 
-        bullish_w = sum(min(r.get("confidence", 0.5), _weight_cap) for r in valid_results if r.get("direction") == "bullish")
-        bearish_w = sum(min(r.get("confidence", 0.5), _weight_cap) for r in valid_results if r.get("direction") == "bearish")
-        neutral_w = sum(min(r.get("confidence", 0.5), _weight_cap) for r in valid_results if r.get("direction") == "neutral")
+        # Enhancement C: ML 反馈 → Agent 投票置信度调整
+        try:
+            from config import ML_FEEDBACK_CONFIG as _MFC_vote
+        except ImportError:
+            _MFC_vote = {}
+        _ml_vote_boost_enabled = (
+            self.ml_feedback_enabled
+            and _MFC_vote.get("enable_vote_boosting", True)
+            and self.ml_adjustments
+        )
+
+        def _effective_conf(r):
+            conf = min(r.get("confidence", 0.5), _weight_cap)
+            if _ml_vote_boost_enabled:
+                from pheromone_board import PheromoneBoard as _PB
+                _agent_dim = _PB.AGENT_DIMENSIONS.get(r.get("source", ""))
+                if _agent_dim:
+                    conf *= self.ml_adjustments.get(_agent_dim, 1.0)
+            return conf
+
+        bullish_w = sum(_effective_conf(r) for r in valid_results if r.get("direction") == "bullish")
+        bearish_w = sum(_effective_conf(r) for r in valid_results if r.get("direction") == "bearish")
+        neutral_w = sum(_effective_conf(r) for r in valid_results if r.get("direction") == "neutral")
         total_w = bullish_w + bearish_w + neutral_w or 1.0
 
         try:
@@ -325,6 +497,64 @@ class QueenDistiller:
             rule_direction = "bearish"
         else:
             rule_direction = "neutral"
+
+        # S4.5: 冲突仲裁 — 票差过小时提升 GuardBee/BearBee 异议权重
+        try:
+            from config import CONFLICT_ARBITRATION_CONFIG as _CAC
+        except ImportError:
+            _CAC = {}
+        _close_vote_thresh = _CAC.get("close_vote_threshold", 0.15)
+        _dissent_boost = _CAC.get("dissent_boost", 1.5)
+        _dissent_agents = set(_CAC.get("dissent_agents", ["GuardBeeSentinel", "BearBeeContrarian"]))
+
+        _pre_arb_margin = abs(bullish_w - bearish_w) / total_w if total_w > 0 else 0.0
+        _arb_triggered = False
+        _arb_flipped = False
+
+        if _pre_arb_margin < _close_vote_thresh and (bullish_count >= 1 and bearish_count >= 1):
+            _arb_triggered = True
+            _pre_arb_direction = rule_direction
+            # 重新计算加权票，基于 ML 提升后的基础置信度 + 异议方 dissent_agents 额外 boost
+            _arb_bull_w = 0.0
+            _arb_bear_w = 0.0
+            _arb_neut_w = 0.0
+            for r in valid_results:
+                _dir = r.get("direction", "neutral")
+                _conf = _effective_conf(r)  # 使用 ML 提升后的置信度作为基础
+                _src = r.get("source", "")
+                # 如果该 Agent 是 dissent_agent 且投的方向与当前多数方向相反，提升其权重
+                if _src in _dissent_agents:
+                    if (rule_direction == "bullish" and _dir == "bearish") or \
+                       (rule_direction == "bearish" and _dir == "bullish") or \
+                       (rule_direction == "neutral"):
+                        _conf = _conf * _dissent_boost
+                if _dir == "bullish":
+                    _arb_bull_w += _conf
+                elif _dir == "bearish":
+                    _arb_bear_w += _conf
+                else:
+                    _arb_neut_w += _conf
+
+            # 重新判定方向
+            _arb_total = _arb_bull_w + _arb_bear_w + _arb_neut_w or 1.0
+            if _arb_bull_w > _arb_bear_w and _arb_bull_w / _arb_total >= 0.4 and bullish_count >= 2:
+                rule_direction = "bullish"
+            elif _arb_bear_w > _arb_bull_w and _arb_bear_w / _arb_total >= _bear_min_wpct and bearish_count >= _bear_min_agents:
+                rule_direction = "bearish"
+            else:
+                rule_direction = "neutral"
+
+            if rule_direction != _pre_arb_direction:
+                _arb_flipped = True
+                _log.info(
+                    "%s [S4.5-Arb] 仲裁翻转: %s→%s (margin %.3f < %.2f)",
+                    ticker, _pre_arb_direction, rule_direction, _pre_arb_margin, _close_vote_thresh,
+                )
+            # 更新投票权重（用于返回值）
+            bullish_w = _arb_bull_w
+            bearish_w = _arb_bear_w
+            neutral_w = _arb_neut_w
+            total_w = _arb_total
 
         # S5: 冲突驱动增强
         from config import SENTIMENT_MOMENTUM_CONFIG as _SMC5
@@ -437,6 +667,10 @@ class QueenDistiller:
             "conflict_info": conflict_info,
             "data_quality_summary": data_quality_summary,
             "dim_data_quality": dim_data_quality,
+            # S4.5 冲突仲裁
+            "arbitration_triggered": _arb_triggered,
+            "arbitration_flipped": _arb_flipped,
+            "pre_arbitration_margin": round(_pre_arb_margin, 4),
         }
 
     def _run_llm_engine(self, ticker: str, valid_results: List[Dict],
@@ -598,6 +832,10 @@ class QueenDistiller:
         final_score = llm["final_score"]
         final_direction = llm["final_direction"]
 
+        # ===== 6. 置信度校准 =====
+        confidence_calibration = self._compute_confidence_calibration(
+            final_score, dim_scores, dv, present_count)
+
         return {
             "ticker": ticker,
             "final_score": final_score,
@@ -654,9 +892,24 @@ class QueenDistiller:
             "combo_cap_applied": tp["combo_cap_applied"],
             # S2: 维度覆盖度警告
             "coverage_warning": coverage_warning,
+            # 方案9: 数据质量关卡（Phase-Level Circuit Breaker）
+            "data_quality_grade": (
+                "critical" if dimension_coverage_pct < 40.0 else
+                "degraded" if dimension_coverage_pct < 60.0 else
+                "normal"
+            ),
             # S5: 冲突驱动增强
             "conflict_level": dv["conflict_level"],
             "conflict_info": dv["conflict_info"],
+            # S4.5: 冲突仲裁
+            "arbitration_triggered": dv["arbitration_triggered"],
+            "arbitration_flipped": dv["arbitration_flipped"],
+            "pre_arbitration_margin": dv["pre_arbitration_margin"],
+            # Enhancement B: 置信度校准
+            "confidence_calibration": confidence_calibration,
+            # Enhancement C: ML 反馈权重
+            "ml_weight_adjustments": dict(self.ml_adjustments),
+            "ml_feedback_enabled": self.ml_feedback_enabled,
         }
 
     # ==================== Phase 2: 历史类比推理 ====================

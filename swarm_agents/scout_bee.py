@@ -113,7 +113,7 @@ class ScoutBeeNova(BeeAgent):
                 notable = insider_data.get("notable_trades", [])
                 if notable:
                     top = notable[0]
-                    parts.append(f"{top['insider']} {top['code_desc']} {top['shares']:,.0f}股")
+                    parts.append(f"{top.get('insider', '?')} {top.get('code_desc', '?')} {top.get('shares', 0):,.0f}股")
             else:
                 parts.append("无近期内幕交易")
 

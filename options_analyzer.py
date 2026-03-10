@@ -4,6 +4,7 @@
 """
 
 import json
+import math as _math
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
@@ -869,6 +870,21 @@ class OptionsAnalyzer:
         return total_score, summary
 
 
+def _sanitize_result(result: Dict) -> None:
+    """方案21: 遍历结果 dict，将 NaN/Inf float 替换为 0.0（就地修改）"""
+    for key, val in result.items():
+        if isinstance(val, float) and (_math.isnan(val) or _math.isinf(val)):
+            result[key] = 0.0
+        elif isinstance(val, dict):
+            _sanitize_result(val)  # 递归处理嵌套 dict（如 iv_skew_detail）
+        elif isinstance(val, list):
+            for i, item in enumerate(val):
+                if isinstance(item, float) and (_math.isnan(item) or _math.isinf(item)):
+                    val[i] = 0.0
+                elif isinstance(item, dict):
+                    _sanitize_result(item)  # 递归处理 list 内嵌套 dict（如 unusual_activity）
+
+
 class OptionsAgent:
     """期权分析 Agent - 统一接口"""
 
@@ -1038,7 +1054,8 @@ class OptionsAgent:
             "iv_skew_detail": iv_skew,
         }
 
-        # 分析完成
+        # 方案21: 出口消毒 — 遍历结果 dict，NaN/Inf → 安全默认值
+        _sanitize_result(result)
 
         return result
 

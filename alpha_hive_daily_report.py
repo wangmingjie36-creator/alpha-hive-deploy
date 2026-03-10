@@ -147,8 +147,8 @@ class AlphaHiveDailyReporter:
         if CalendarIntegrator:
             try:
                 self.calendar = CalendarIntegrator()
-            except (OSError, ValueError, RuntimeError) as e:
-                _log.warning("Calendar 初始化失败: %s", e)
+            except Exception as e:
+                _log.warning("Calendar 初始化失败（降级运行）: %s", e)
 
         # Phase 3 P4: 初始化代码执行 Agent（失败时降级）
         self.code_executor_agent = None
@@ -379,7 +379,37 @@ class AlphaHiveDailyReporter:
 
         adapted_w = Backtester.load_adapted_weights() if Backtester else None
         import llm_service as _llm_check_q
-        queen = QueenDistiller(board, adapted_weights=adapted_w, enable_llm=_llm_check_q.is_available())
+
+        # Enhancement C: 尝试加载已训练的 ML 模型用于 QueenDistiller 维度权重反馈
+        _ml_model_for_queen = None
+        try:
+            from ml_predictor import MLPredictionService as _MPS
+            _ml_svc_tmp = _MPS()
+            _ml_model_file = PATHS.home / "ml_model_cache.json"
+            if _ml_model_file.exists():
+                _ml_svc_tmp.model.load_model(str(_ml_model_file))
+                if _ml_svc_tmp.model.is_trained:
+                    _ml_model_for_queen = _ml_svc_tmp.model
+                    _log.info("ML 模型已加载用于 QueenDistiller 维度权重反馈")
+        except (ImportError, OSError, ValueError, TypeError) as e:
+            _log.debug("ML 模型加载跳过: %s", e)
+
+        # ── ML 每日重训（用真实数据替换硬编码假数据）──
+        try:
+            from config import ML_TRAINING_CONFIG as _MTC
+            if _MTC.get("daily_retrain", True) and _ml_svc_tmp:
+                _retrain_result = _ml_svc_tmp.train_model()
+                if _retrain_result.get("status") == "success" and _ml_svc_tmp.model.is_trained:
+                    _ml_model_for_queen = _ml_svc_tmp.model
+                    _log.info("ML 模型已用真实数据重训")
+        except (ImportError, OSError, ValueError, TypeError, NameError) as e:
+            _log.debug("ML 每日重训跳过: %s", e)
+
+        queen = QueenDistiller(
+            board, adapted_weights=adapted_w,
+            enable_llm=_llm_check_q.is_available(),
+            ml_model=_ml_model_for_queen,
+        )
 
         all_agents = phase1_agents + [guard_agent, bear_agent]
         _log.info("%d Agent（Phase1 %d + Guard + Bear）| 预取数据中...", len(all_agents), len(phase1_agents))
@@ -640,6 +670,112 @@ class AlphaHiveDailyReporter:
             except (OSError, ValueError, KeyError, TypeError) as e:
                 _log.warning("回测异常: %s", e)
 
+        # ── feedback_loop 路径的权重建议合并 ──
+        try:
+            from feedback_loop import BacktestAnalyzer as _FBAnalyzer
+            _snap_dir = os.path.join(str(self.report_dir), "report_snapshots")
+            _fb_analyzer = _FBAnalyzer(directory=_snap_dir)
+            if _fb_analyzer.snapshots:
+                _suggestion = _fb_analyzer.suggest_weight_adjustments()
+                if _suggestion and _suggestion.get("new_weights"):
+                    _new_w = _suggestion["new_weights"]
+                    # 安全钳位 [0.05, 0.50] + 归一化
+                    _clamped = {k: max(0.05, min(0.50, v)) for k, v in _new_w.items()}
+                    _total = sum(_clamped.values())
+                    if _total > 0:
+                        _clamped = {k: round(v / _total, 4) for k, v in _clamped.items()}
+                        if adapted:
+                            for k in adapted:
+                                if k in _clamped:
+                                    adapted[k] = round((adapted[k] + _clamped[k]) / 2, 4)
+                        else:
+                            adapted = _clamped
+                        _log.info("feedback_loop 权重建议已合并: %s", _clamped)
+        except (ImportError, OSError, ValueError, KeyError, TypeError, ZeroDivisionError) as e:
+            _log.debug("feedback_loop 权重合并跳过: %s", e)
+
+        # ── AgentWeightManager: 按 Agent 准确率更新投票权重 ──
+        if self.memory_store and adapted:
+            try:
+                from agent_weight_manager import AgentWeightManager
+                _wm = AgentWeightManager(self.memory_store)
+                _wm.recalculate_all_weights()
+                _wm.apply_dimension_feedback(adapted)
+                _log.info("Agent 权重已按准确率更新")
+            except (ImportError, OSError, ValueError, TypeError, AttributeError) as e:
+                _log.debug("AgentWeightManager 更新跳过: %s", e)
+
+        # ---- ML 增量学习（利用新验证的 T+7 数据）----
+        if Backtester and bt:
+            try:
+                verified_rows = bt.store.get_recently_verified_t7(limit=50)
+                if len(verified_rows) >= 5:
+                    from ml_predictor import MLPredictionService, TrainingData
+
+                    def _cat_qual(v):
+                        if v >= 8.5: return "A+"
+                        if v >= 7.5: return "A"
+                        if v >= 6.5: return "B+"
+                        if v >= 5.5: return "B"
+                        return "C"
+
+                    new_training = []
+                    direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
+                    for r in verified_rows:
+                        ds = json.loads(r.get("dimension_scores") or "{}")
+                        # 计算 agent_agreement（共识度）
+                        _ad = json.loads(r.get("agent_directions") or "{}")
+                        _dir = r.get("direction", "neutral")
+                        if _ad:
+                            _majority = sum(1 for d in _ad.values() if d == _dir)
+                            _agree = _majority / len(_ad)
+                        else:
+                            _agree = 0.5
+                        new_training.append(TrainingData(
+                            ticker=r["ticker"], date=r["date"],
+                            crowding_score=ds.get("signal", 5.0) * 10,
+                            catalyst_quality=_cat_qual(ds.get("catalyst", 5.0)),
+                            momentum_5d=0.0, volatility=5.0,
+                            market_sentiment=(ds.get("sentiment", 5.0) - 5) * 20,
+                            actual_return_3d=float(r["return_t7"] or 0) * 0.4,
+                            actual_return_7d=float(r["return_t7"] or 0),
+                            actual_return_30d=float(r["return_t7"] or 0) * 2.5,
+                            win_3d=bool(r["correct_t7"]),
+                            win_7d=bool(r["correct_t7"]),
+                            win_30d=bool(r["correct_t7"]),
+                            # v2 新特征
+                            iv_rank=float(r.get("iv_rank")) if r.get("iv_rank") is not None else 50.0,
+                            put_call_ratio=float(r.get("put_call_ratio")) if r.get("put_call_ratio") is not None else 1.0,
+                            final_score=float(r.get("final_score")) if r.get("final_score") is not None else 5.0,
+                            odds_score=ds.get("odds", 5.0),
+                            risk_adj_score=ds.get("risk_adj", 5.0),
+                            agent_agreement=_agree,
+                            direction_encoded=direction_map.get(_dir, 0.0),
+                        ))
+
+                    ml_svc = MLPredictionService()
+                    model_file = PATHS.home / "ml_model_cache.json"
+                    if model_file.exists():
+                        ml_svc.model.load_model(str(model_file))
+
+                    if not ml_svc.model.is_trained:
+                        ml_svc.model.train(new_training)
+                    else:
+                        ml_svc.model.incremental_train(new_training)
+
+                    ml_svc.model.save_model(str(model_file))
+                    _log.info(
+                        "🧠 ML 增量学习完成：%d 条验证数据 → 模型已更新",
+                        len(new_training),
+                    )
+                elif verified_rows:
+                    _log.info(
+                        "ML 增量学习跳过：仅 %d 条验证数据（需 ≥ 5）",
+                        len(verified_rows),
+                    )
+            except (ImportError, OSError, ValueError, TypeError, KeyError, AttributeError) as e:
+                _log.warning("ML 增量学习异常: %s", e)
+
         if adapted and self.slack_notifier and self.slack_notifier.enabled:
             try:
                 weight_lines = " | ".join(f"{k}: {v:.3f}" for k, v in adapted.items())
@@ -674,6 +810,20 @@ class AlphaHiveDailyReporter:
         """扫描后通知：Slack推送 + 失效条件 + 日历 + 会话存储 + 向量记忆 + 反馈循环"""
         # Slack 推送高分机会 + 异常信号
         if self.slack_notifier and self.slack_notifier.enabled:
+            # ── 方案9: 报告级数据质量降级预警 ──────────────
+            _dq = report.get("data_quality_summary", {})
+            if _dq.get("has_quality_issue"):
+                _dq_msg = (
+                    f"⚠️ 数据质量降级预警：{_dq.get('degraded_count', 0)}/{_dq.get('total_tickers', 0)} "
+                    f"个标的维度覆盖不足（{_dq.get('degraded_pct', 0):.0f}%），"
+                    f"其中 {_dq.get('critical_count', 0)} 个严重不足。"
+                    "报告结论可靠性降低，请结合其他来源交叉验证。"
+                )
+                self._submit_bg(
+                    self.slack_notifier.send_risk_alert,
+                    "数据质量降级", _dq_msg, "HIGH"
+                )
+
             for ticker, data in swarm_results.items():
                 score = data.get("final_score", 0)
                 direction = data.get("direction", "neutral")
@@ -685,6 +835,12 @@ class AlphaHiveDailyReporter:
                 cov = data.get("dimension_coverage_pct", 100.0)
                 if cov < 100.0:
                     details_list.append(f"维度覆盖 {cov:.0f}%")
+                # 方案9: 降级标的添加警告前缀
+                _grade = data.get("data_quality_grade", "normal")
+                if _grade == "critical":
+                    details_list.insert(0, "🔴 数据严重不足")
+                elif _grade == "degraded":
+                    details_list.insert(0, "⚠️ 数据降级")
                 if score >= 7.5:
                     self._submit_bg(
                         self.slack_notifier.send_opportunity_alert,
@@ -699,9 +855,14 @@ class AlphaHiveDailyReporter:
                         "HIGH"
                     )
 
-        # 失效条件快照
+        # 失效条件快照 + Thesis Break 日历提醒
         try:
-            from thesis_breaks import ThesisBreakConfig
+            from thesis_breaks import ThesisBreakConfig, ThesisBreakMonitor
+            from config import CALENDAR_CONFIG as _CC_tb
+            _tb_alert_enabled = (
+                _CC_tb.get("thesis_break_calendar_alerts", True)
+                and hasattr(self, 'calendar') and self.calendar
+            )
             for _opp in report.get("opportunities", []):
                 _tk = _opp.get("ticker", "")
                 _tb_cfg = ThesisBreakConfig.get_breaks_config(_tk)
@@ -715,6 +876,25 @@ class AlphaHiveDailyReporter:
                     if _tk in swarm_results:
                         swarm_results[_tk]["thesis_break_l1"] = _l1
                         swarm_results[_tk]["thesis_break_l2"] = _l2
+                    # Thesis Break 日历提醒
+                    if _tb_alert_enabled and _tk in swarm_results:
+                        _metric = swarm_results[_tk].get("metric_data", {})
+                        if _metric:
+                            _initial = swarm_results[_tk].get("final_score", 5.0)
+                            _monitor = ThesisBreakMonitor(_tk, _initial)
+                            _tb_res = _monitor.check_all_conditions(_metric)
+                            if _tb_res.get("level_2_stops"):
+                                self._submit_bg(
+                                    self.calendar.add_thesis_break_alert,
+                                    _tk, 2, _tb_res["level_2_stops"],
+                                    _tb_res["score_adjustment"], _initial,
+                                )
+                            elif _tb_res.get("level_1_warnings"):
+                                self._submit_bg(
+                                    self.calendar.add_thesis_break_alert,
+                                    _tk, 1, _tb_res["level_1_warnings"],
+                                    _tb_res["score_adjustment"], _initial,
+                                )
         except Exception as _tbe:
             _log.warning("thesis_break 配置加载失败: %s", _tbe)
 
@@ -726,6 +906,14 @@ class AlphaHiveDailyReporter:
                     _tk = opp.get("ticker", "") if isinstance(opp, dict) else getattr(opp, "ticker", "")
                     _dir = opp.get("direction", "") if isinstance(opp, dict) else getattr(opp, "direction", "")
                     self._submit_bg(self.calendar.add_opportunity_reminder, _tk, _opp_score, _dir, "高分机会")
+                    # T+1/T+7/T+30 回测提醒
+                    try:
+                        from config import CALENDAR_CONFIG as _CC_fb
+                        if _CC_fb.get("add_feedback_reminders", True):
+                            _evidence = (opp.get("discovery") or opp.get("key_evidence") or "")[:200] if isinstance(opp, dict) else ""
+                            self._submit_bg(self.calendar.add_feedback_reminders, _tk, _opp_score, _dir, _evidence)
+                    except Exception:
+                        pass
 
         # 保存会话
         if self.memory_store and self._session_id:
@@ -800,6 +988,22 @@ class AlphaHiveDailyReporter:
         except Exception as e:
             _log.debug("反馈循环保存失败(非致命): %s", e)
 
+        # ── T+1/T+7/T+30 实际价格回填（后台执行，不阻塞主流程）──
+        try:
+            from outcomes_fetcher import OutcomesFetcher
+            from config import OUTCOMES_CONFIG as _OC
+            if _OC.get("enabled", True):
+                _snap_dir = os.path.join(str(self.report_dir), "report_snapshots")
+                _fetcher = OutcomesFetcher(
+                    snapshots_dir=_snap_dir,
+                    memory_store=self.memory_store,
+                    rate_limit=_OC.get("rate_limit_seconds", 0.5),
+                    max_snapshots=_OC.get("max_snapshots_per_run", 50),
+                )
+                self._submit_bg(_fetcher.run)
+        except (ImportError, OSError) as e:
+            _log.debug("outcomes_fetcher 跳过: %s", e)
+
     def run_swarm_scan(self, focus_tickers: List[str] = None, progress_callback=None) -> Dict:
         """
         真正的蜂群协作扫描 - 7 个自治工蜂并行运行（6 核心 + BearBeeContrarian），实时通过信息素板交换发现
@@ -855,7 +1059,10 @@ class AlphaHiveDailyReporter:
             _analyze_and_save(pending_tickers[0])
 
         elapsed = self._post_scan_enrichment(ctx, swarm_results)
-        self._post_scan_metrics(ctx, swarm_results, elapsed)
+        try:
+            self._post_scan_metrics(ctx, swarm_results, elapsed)
+        except Exception as e:
+            _log.warning("扫描后指标收集异常（不影响报告生成）: %s", e)
         report = self._build_swarm_report(swarm_results, ctx.board, agent_count=len(ctx.all_agents))
         self._post_scan_notify(ctx, swarm_results, report, elapsed)
         return report
@@ -1163,14 +1370,42 @@ class AlphaHiveDailyReporter:
         cross_ticker_analysis = self._compute_cross_ticker(swarm_results, board)
         concentration, macro_snapshot, backtest_stats = self._fetch_report_context(swarm_results)
 
+        # ── 方案9: 数据质量关卡 ──────────────────────────────
+        _n_tickers = len(swarm_results)
+        _n_degraded = sum(
+            1 for r in swarm_results.values()
+            if r.get("data_quality_grade", "normal") in ("degraded", "critical")
+        )
+        _n_critical = sum(
+            1 for r in swarm_results.values()
+            if r.get("data_quality_grade", "normal") == "critical"
+        )
+        _degraded_pct = (_n_degraded / _n_tickers * 100) if _n_tickers else 0
+        _has_quality_issue = _degraded_pct > 50.0
+
+        if _n_critical > 0 and _n_critical >= _n_tickers * 0.5:
+            _sys_status = "🔴 数据严重不足 — 报告结论可靠性极低，请勿依赖"
+            _has_quality_issue = True  # 确保 Slack 警告同步触发
+        elif _has_quality_issue:
+            _sys_status = "⚠️ 数据质量降级 — 多数标的维度覆盖不足，结论仅供参考"
+        else:
+            _sys_status = "✅ 蜂群协作完成"
+
         report = {
             "date": self.date_str,
             "timestamp": self.timestamp.isoformat(),
-            "system_status": "✅ 蜂群协作完成",
+            "system_status": _sys_status,
             "phase_completed": "完整蜂群流程 (Swarm Mode)",
+            "data_quality_summary": {
+                "total_tickers": _n_tickers,
+                "degraded_count": _n_degraded,
+                "critical_count": _n_critical,
+                "degraded_pct": round(_degraded_pct, 1),
+                "has_quality_issue": _has_quality_issue,
+            },
             "swarm_metadata": {
                 "total_agents": agent_count,
-                "tickers_analyzed": len(swarm_results),
+                "tickers_analyzed": _n_tickers,
                 "resonances_detected": sum(1 for r in swarm_results.values() if r["resonance"]["resonance_detected"]),
                 "pheromone_board_entries": board.get_entry_count()
             },
@@ -1239,13 +1474,48 @@ class AlphaHiveDailyReporter:
         # 计算综合 Opportunity Score（与 CLAUDE.md 5 维公式一致）
         # options_score 合并入 odds 维度（取平均）
         odds_combined = (odds_score + options_score) / 2.0
+        # 方案10: 从 config 统一读取权重，消除硬编码 drift
+        _fallback_w = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
+        try:
+            from config import EVALUATION_WEIGHTS as _EW
+            _w = {k: _EW.get(k, _fallback_w[k]) for k in _fallback_w}
+        except (ImportError, AttributeError):
+            _w = _fallback_w
         opp_score = (
-            0.30 * signal_score +
-            0.20 * catalyst_score +
-            0.20 * sentiment_score +
-            0.15 * odds_combined +
-            0.15 * risk_score
+            _w["signal"] * signal_score +
+            _w["catalyst"] * catalyst_score +
+            _w["sentiment"] * sentiment_score +
+            _w["odds"] * odds_combined +
+            _w["risk_adj"] * risk_score
         )
+
+        # 方案15: ML 路径简化版 bear_cap — 用 risk_score + ML 预测作为 BearBee 代理
+        # 正常蜂群路径有 BearBeeContrarian 对冲，ML 路径需要等效保护
+        _combined_rec = ml_report.get("combined_recommendation", {})
+        _ml_prob = _combined_rec.get("ml_probability", 50.0)
+        _rating = _combined_rec.get("rating", "HOLD")
+
+        # bear_strength 估算: risk_score 越低 → 风险越大 → 看空越强
+        # 补充: ML 预测概率低也是看空信号
+        _bear_proxy = (10.0 - risk_score)  # risk_score=2 → bear_proxy=8
+        if _ml_prob < 40:
+            _bear_proxy += 1.0  # ML 也看空时加强
+        if _rating == "AVOID":
+            _bear_proxy += 1.0  # 综合评级也看空时加强
+
+        try:
+            from config import BEAR_SCORING_CONFIG as _BSC
+        except ImportError:
+            _BSC = {}
+        _bear_cap_thresh = _BSC.get("bear_cap_trigger_threshold", 5.0)
+        _bear_cap_slope = _BSC.get("bear_cap_slope", 0.5)
+
+        if _bear_proxy > _bear_cap_thresh:
+            _bear_cap = max(3.0, 10.0 - (_bear_proxy - _bear_cap_thresh) * _bear_cap_slope)  # 下限 3.0 防极端
+            if opp_score > _bear_cap:
+                _log.info("ML bear_cap: %s bear_proxy=%.1f cap=%.2f（原 %.2f）",
+                          ticker, _bear_proxy, _bear_cap, opp_score)
+                opp_score = _bear_cap
 
         # 判断方向
         if opp_score >= 7.5:
@@ -1401,6 +1671,15 @@ class AlphaHiveDailyReporter:
                 _log.info("已自动同步 %d 个标的的财报日期到催化剂日历", len(auto_catalysts))
         except (ImportError, OSError, ValueError, TypeError, AttributeError) as e:
             _log.debug("催化剂日历自动同步跳过: %s", e)
+
+        # D2: 经济日历同步到 Google Calendar
+        try:
+            from config import CALENDAR_CONFIG as _CC_econ
+            if hasattr(self, 'calendar') and self.calendar and _CC_econ.get("sync_economic_calendar", True):
+                _econ_days = _CC_econ.get("economic_calendar_days_ahead", 60)
+                self._submit_bg(self.calendar.sync_economic_calendar, _econ_days)
+        except Exception:
+            pass
 
         return result
 

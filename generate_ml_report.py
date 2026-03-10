@@ -113,6 +113,7 @@ class MLEnhancedReportGenerator:
                 rows = conn.execute("""
                     SELECT ticker, date, final_score, direction,
                            dimension_scores, iv_rank, put_call_ratio,
+                           agent_directions,
                            return_t7, correct_t7
                     FROM predictions
                     WHERE checked_t7 = 1
@@ -127,9 +128,17 @@ class MLEnhancedReportGenerator:
                 if v >= 5.5: return "B"
                 return "C"
 
+            direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
             result = []
             for r in rows:
                 ds = _json.loads(r["dimension_scores"] or "{}")
+                _ad = _json.loads(r["agent_directions"] or "{}") if r["agent_directions"] else {}
+                _dir = r["direction"] or "neutral"
+                if _ad:
+                    _majority = sum(1 for d in _ad.values() if d == _dir)
+                    _agree = _majority / len(_ad)
+                else:
+                    _agree = 0.5
                 result.append(TrainingData(
                     ticker=r["ticker"],
                     date=r["date"],
@@ -144,6 +153,14 @@ class MLEnhancedReportGenerator:
                     win_3d=bool(r["correct_t7"]),
                     win_7d=bool(r["correct_t7"]),
                     win_30d=bool(r["correct_t7"]),
+                    # v2 新特征
+                    iv_rank=float(r["iv_rank"]) if r["iv_rank"] is not None else 50.0,
+                    put_call_ratio=float(r["put_call_ratio"]) if r["put_call_ratio"] is not None else 1.0,
+                    final_score=float(r["final_score"]) if r["final_score"] is not None else 5.0,
+                    odds_score=ds.get("odds", 5.0),
+                    risk_adj_score=ds.get("risk_adj", 5.0),
+                    agent_agreement=_agree,
+                    direction_encoded=direction_map.get(_dir, 0.0),
                 ))
             return result
         except (ImportError, KeyError, TypeError, ValueError, OSError) as e:
@@ -166,33 +183,20 @@ class MLEnhancedReportGenerator:
             return False
 
     def _load_model_from_disk(self):
-        """从磁盘加载模型（JSON 格式，安全反序列化）"""
+        """从磁盘加载模型（委托给 model.load_model，兼容 SGD/Simple 格式）"""
         try:
-            import json as _json
-            with open(self._model_file, "r", encoding="utf-8") as f:
-                model_data = _json.load(f)
-            model = self.ml_service.model
-            model.weights = model_data["weights"]
-            model.feature_stats = model_data.get("feature_stats", {})
-            model.is_trained = model_data["is_trained"]
-            model.training_accuracy = model_data.get("training_accuracy", 0.0)
+            result = self.ml_service.model.load_model(str(self._model_file))
+            if not result:
+                _log.warning("磁盘缓存加载返回 False，将重新训练")
+                self.ml_service.train_model()
         except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError) as e:
             _log.warning("磁盘缓存加载失败：%s，将重新训练", e)
             self.ml_service.train_model()
 
     def _save_model_to_disk(self):
-        """保存模型到磁盘（JSON 格式，安全序列化）"""
+        """保存模型到磁盘（委托给 model.save_model，SGD/Simple 均支持 JSON）"""
         try:
-            import json as _json
-            model = self.ml_service.model
-            model_data = {
-                "weights": model.weights,
-                "feature_stats": model.feature_stats,
-                "is_trained": model.is_trained,
-                "training_accuracy": model.training_accuracy,
-            }
-            with open(self._model_file, "w", encoding="utf-8") as f:
-                _json.dump(model_data, f, ensure_ascii=False, indent=2)
+            self.ml_service.model.save_model(str(self._model_file))
         except (TypeError, OSError) as e:
             _log.warning("磁盘缓存保存失败：%s", e)
 
@@ -294,6 +298,12 @@ class MLEnhancedReportGenerator:
             analysis.get("recommendation", {}).get("rating", "B"), "B"
         )
 
+        # v2 新特征（从 analysis 上下文提取）
+        _opts = analysis.get("options_analysis", {})
+        _rec = analysis.get("recommendation", {})
+        _ds = analysis.get("dimension_scores", {})
+        _rating_dir = {"STRONG BUY": 1.0, "BUY": 0.5, "HOLD": 0.0, "AVOID": -1.0}
+
         return TrainingData(
             ticker=ticker,
             date=datetime.now().isoformat(),
@@ -308,6 +318,14 @@ class MLEnhancedReportGenerator:
             win_3d=False,
             win_7d=False,
             win_30d=False,
+            # v2
+            iv_rank=_opts.get("iv_rank", 50.0),
+            put_call_ratio=_opts.get("put_call_ratio", 1.0),
+            final_score=_rec.get("score", 5.0),
+            odds_score=_ds.get("odds", 5.0),
+            risk_adj_score=_ds.get("risk_adj", 5.0),
+            agent_agreement=0.5,  # 预测时无蜂群上下文
+            direction_encoded=_rating_dir.get(_rec.get("rating", "HOLD"), 0.0),
         )
 
     def _generate_options_section_html(self, options: dict) -> str:
