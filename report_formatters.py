@@ -68,19 +68,34 @@ def format_score_adjustments(data: Dict) -> str:
 # ---------- section builders (return List[str]) ----------
 
 def _build_summary(sorted_results: list, total_count: int) -> List[str]:
-    """版块 1：今日摘要"""
+    """版块 1：今日摘要（全部标的按综合分降序）"""
     md: List[str] = []
     resonances = sum(1 for _, r in sorted_results if r["resonance"]["resonance_detected"])
     md.append("## 1) 今日摘要")
     md.append("")
     md.append(f"- 扫描标的：{total_count} 个 | 共振信号：{resonances}/{total_count}")
-    for i, (ticker, data) in enumerate(sorted_results[:3], 1):
-        res = "共振" if data["resonance"]["resonance_detected"] else ""
-        narrative = data.get("narrative", "")
-        summary_line = f"- **{ticker}** {data['direction'].upper()} {data['final_score']:.1f}/10 {res}"
-        if narrative:
-            summary_line += f"\n  - 📝 {narrative}"
-        md.append(summary_line)
+    md.append("")
+    # 所有标的按综合分降序展示，≥7.5 高优先级，6.0~7.4 观察名单，<6.0 不行动
+    high, watch, low = [], [], []
+    for ticker, data in sorted_results:
+        score = data["final_score"]
+        res = "共振✅" if data["resonance"]["resonance_detected"] else ""
+        line = f"  - **{ticker}** {data['direction'].upper()} {score:.1f}/10 {res}"
+        if score >= 7.5:
+            high.append(line)
+        elif score >= 6.0:
+            watch.append(line)
+        else:
+            low.append(line)
+    if high:
+        md.append("- 🟢 **高优先级**（≥7.5）：")
+        md.extend(high)
+    if watch:
+        md.append("- 🟡 **观察名单**（6.0~7.4）：")
+        md.extend(watch)
+    if low:
+        md.append("- ⚫ **暂不行动**（<6.0）：")
+        md.extend(low)
     md.append("")
     return md
 

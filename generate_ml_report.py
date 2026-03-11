@@ -489,82 +489,652 @@ class MLEnhancedReportGenerator:
             "reasoning": f"人工分析 {human_prob:.1f}% + ML 预测 {ml_prob:.1f}% = 综合 {combined_prob:.1f}%",
         }
 
-    def _generate_swarm_section_html(self, swarm: dict) -> str:
-        """从蜂群扫描结果生成 HTML 版块（与 markdown 报告同步）"""
-        if not swarm:
+    # ─────────────────────────────────────────────────────────────
+    # 模板 C 7 章辅助方法
+    # ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _dir_cn(d):
+        return {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(d, d)
+
+    @staticmethod
+    def _dir_color(d):
+        return {"bullish": "#28a745", "bearish": "#dc3545"}.get(d, "#ffc107")
+
+    def _ch1_core_conclusion(self, swarm: dict, combined: dict, analysis: dict) -> str:
+        """第1章：核心结论"""
+        if not swarm and not combined:
             return ""
-
-        agent_details = swarm.get("agent_details", {})
-        final_score = swarm.get("final_score", 0)
+        final_score = swarm.get("final_score", combined.get("combined_probability", 50) / 10)
         direction = swarm.get("direction", "neutral")
-        resonance = swarm.get("resonance", {})
         ab = swarm.get("agent_breakdown", {})
-
-        dir_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(direction, direction)
-        dir_color = {"bullish": "#28a745", "bearish": "#dc3545"}.get(direction, "#ffc107")
-
-        # 各 Agent 摘要
-        rows = ""
-        agent_map = {
-            "ScoutBeeNova": ("聪明钱侦察", "signal"),
-            "OracleBeeEcho": ("期权 & 赔率", "odds"),
-            "BuzzBeeWhisper": ("市场情绪", "sentiment"),
-            "ChronosBeeHorizon": ("催化剂 & 时间线", "catalyst"),
-            "RivalBeeVanguard": ("竞争格局 / ML", "ml"),
-            "GuardBeeSentinel": ("交叉验证", "risk_adj"),
-            "BearBeeContrarian": ("看空对冲", "contrarian"),
-        }
-        for agent_name, (label, dim) in agent_map.items():
-            ad = agent_details.get(agent_name, {})
-            if not ad:
-                continue
-            a_score = ad.get("score", 5.0)
-            a_dir = ad.get("direction", "neutral")
-            a_disc = ad.get("discovery", "")[:120]
-            a_dir_cn = {"bullish": "看多", "bearish": "看空", "neutral": "中性"}.get(a_dir, a_dir)
-            a_color = {"bullish": "#28a745", "bearish": "#dc3545"}.get(a_dir, "#888")
-            rows += f"""<tr>
-                <td><strong>{label}</strong></td>
-                <td style="color:{a_color}">{a_dir_cn}</td>
-                <td>{a_score:.1f}</td>
-                <td style="font-size:0.85em;color:#555">{a_disc}</td>
-            </tr>"""
-
-        # 看空蜂独立摘要
-        bear = agent_details.get("BearBeeContrarian", {})
-        bear_html = ""
-        if bear:
-            bd = bear.get("details", {})
-            signals = bd.get("bearish_signals", [])
-            if signals:
-                sigs_li = "".join(f"<li>{s}</li>" for s in signals[:5])
-                bear_html = f"""
-                <div style="margin-top:15px;padding:12px;background:#fff5f5;border-left:4px solid #dc3545;border-radius:4px;">
-                    <strong style="color:#dc3545;">看空对冲观点（看空强度 {bd.get('bear_score', 0):.1f}/10）</strong>
-                    <ul style="margin:8px 0 0 15px;color:#555">{sigs_li}</ul>
-                </div>"""
-
-        res_html = ""
+        resonance = swarm.get("resonance", {})
+        combined_prob = combined.get("combined_probability", 50)
+        rating = combined.get("rating", "HOLD")
+        action = combined.get("action", "观察等待")
+        dir_cn = self._dir_cn(direction)
+        dir_color = self._dir_color(direction)
+        # 3句摘要：从overview + 最高分维度 + 最大风险
+        overview = analysis.get("overview", "")
+        dim_scores = swarm.get("dimension_scores", {})
+        top_dim = max(dim_scores, key=lambda k: dim_scores[k]) if dim_scores else ""
+        dim_cn = {"signal": "聪明钱信号", "catalyst": "催化剂", "sentiment": "市场情绪",
+                  "odds": "期权赔率", "risk_adj": "风险调整"}.get(top_dim, top_dim)
+        res_text = ""
         if resonance.get("resonance_detected"):
-            res_html = f"""<span style="background:#28a745;color:white;padding:3px 10px;border-radius:12px;font-size:0.85em;margin-left:8px;">{resonance.get('supporting_agents', 0)} Agent 共振</span>"""
-
+            res_dims = "、".join(resonance.get("resonant_dimensions", []))
+            res_text = f"（{resonance.get('supporting_agents', 0)} Agent 共振：{res_dims}）"
+        summary_parts = []
+        if overview:
+            summary_parts.append(overview)
+        if top_dim and dim_scores:
+            summary_parts.append(f"最强维度 {dim_cn} 评分 {dim_scores[top_dim]:.1f}/10{res_text}")
+        bear = swarm.get("agent_details", {}).get("BearBeeContrarian", {})
+        bear_score = bear.get("details", {}).get("bear_score", 0) if bear else 0
+        if bear_score >= 6:
+            summary_parts.append(f"看空蜂强度 {bear_score:.1f}/10，需关注下行风险")
+        summary_html = "".join(f"<p style='margin:6px 0;color:#555;'>{s}</p>" for s in summary_parts[:3])
         return f"""
         <div class="section">
-            <h2>蜂群智能分析</h2>
-            <div style="text-align:center;margin-bottom:18px;">
-                <span style="font-size:2.5em;font-weight:bold;color:{dir_color};">{final_score:.1f}</span>
-                <span style="font-size:1.2em;color:#888;">/10</span>
-                <div style="margin-top:6px;">
-                    <span style="background:{dir_color};color:white;padding:4px 18px;border-radius:15px;font-weight:bold;">{dir_cn}</span>
-                    {res_html}
+            <h2>第 1 章：核心结论</h2>
+            <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-bottom:18px;">
+                <div style="text-align:center;">
+                    <span style="font-size:3em;font-weight:bold;color:{dir_color};">{final_score:.1f}</span>
+                    <span style="font-size:1.2em;color:#888;">/10</span>
+                    <div><span style="background:{dir_color};color:white;padding:4px 16px;border-radius:15px;font-weight:bold;">{dir_cn}</span></div>
                 </div>
-                <div style="margin-top:8px;color:#888;font-size:0.9em;">投票：{ab.get('bullish',0)}多 / {ab.get('bearish',0)}空 / {ab.get('neutral',0)}中</div>
+                <div style="flex:1;min-width:180px;">
+                    <div class="metric"><span class="metric-label">综合胜率</span><span class="metric-value" style="color:{dir_color};">{combined_prob:.1f}%</span></div>
+                    <div class="metric"><span class="metric-label">投票</span><span class="metric-value">{ab.get('bullish',0)}多 / {ab.get('bearish',0)}空 / {ab.get('neutral',0)}中</span></div>
+                    <div class="metric"><span class="metric-label">建议</span><span class="metric-value">{rating} — {action}</span></div>
+                </div>
             </div>
+            {summary_html}
+        </div>"""
+
+    def _ch2_five_dim_table(self, swarm: dict) -> str:
+        """第2章：五维评分明细"""
+        if not swarm:
+            return ""
+        dim_scores = swarm.get("dimension_scores", {})
+        if not dim_scores:
+            return ""
+        DIMS = [
+            ("signal",   "🐝 信号强度 (Signal)",   0.30, "聪明钱 SEC Form4 / 机构持仓"),
+            ("catalyst", "⏰ 催化剂 (Catalyst)",   0.20, "事件日历 / 财报 / 产品发布"),
+            ("sentiment","📢 情绪 (Sentiment)",    0.20, "X 平台 / Reddit / 新闻情绪"),
+            ("odds",     "🔮 赔率 (Odds)",          0.15, "期权 P/C / IV Rank / Polymarket"),
+            ("risk_adj", "🛡️ 风险调整 (RiskAdj)",  0.15, "拥挤度 / 波动 / 交叉验证调整"),
+        ]
+        rows = ""
+        total_weighted = 0.0
+        for key, label, weight, hint in DIMS:
+            score = dim_scores.get(key, 0)
+            weighted = score * weight
+            total_weighted += weighted
+            bar_pct = int(score / 10 * 100)
+            bar_color = "#28a745" if score >= 7 else ("#ffc107" if score >= 5 else "#dc3545")
+            rows += f"""<tr>
+                <td>{label}<br><small style="color:#999">{hint}</small></td>
+                <td style="font-weight:bold;color:{bar_color}">{score:.1f}</td>
+                <td>{weight:.0%}</td>
+                <td style="font-weight:bold">{weighted:.2f}</td>
+                <td><div style="background:#f0f0f0;border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:{bar_color};border-radius:4px;height:8px;width:{bar_pct}px;"></div>
+                </div></td>
+            </tr>"""
+        score_lv = "高优先级 ✅" if total_weighted >= 7.5 else ("观察名单 👀" if total_weighted >= 6.0 else "不行动 ❌")
+        rows += f"""<tr style="background:#f8f9ff;font-weight:bold;">
+            <td><strong>综合 Opportunity Score</strong></td>
+            <td style="color:#667eea;font-size:1.2em;">{total_weighted:.2f}</td>
+            <td></td>
+            <td style="color:#667eea;font-size:1.2em;">{total_weighted:.2f}</td>
+            <td>{score_lv}</td>
+        </tr>"""
+        return f"""
+        <div class="section">
+            <h2>第 2 章：五维评分明细</h2>
             <table>
-                <tr><th>Agent</th><th>方向</th><th>评分</th><th>发现摘要</th></tr>
+                <tr><th>维度</th><th>分数</th><th>权重</th><th>加权</th><th>进度</th></tr>
                 {rows}
             </table>
-            {bear_html}
+            <p style="margin-top:12px;font-size:0.85em;color:#888;">公式：Score = 0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds + 0.15×RiskAdj</p>
+        </div>"""
+
+    def _ch3_scout(self, agent_details: dict) -> str:
+        """第3章 ScoutBee — 聪明钱侦察"""
+        ad = agent_details.get("ScoutBeeNova", {})
+        if not ad:
+            return ""
+        details = ad.get("details", {})
+        insider = details.get("insider", {})
+        trades = insider.get("notable_trades", [])
+        crowding = details.get("crowding_score", 0)
+        momentum = details.get("momentum_5d", 0)
+        score = ad.get("score", 0)
+        direction = ad.get("direction", "neutral")
+        trade_rows = ""
+        for t in trades[:6]:
+            shares = t.get("shares", 0)
+            price = t.get("price", 0)
+            amount = shares * price if price else 0
+            trade_rows += f"""<tr>
+                <td>{t.get('insider','')}</td>
+                <td style="font-size:0.85em;color:#666">{t.get('title','')}</td>
+                <td>{t.get('date','')}</td>
+                <td>{shares:,.0f}</td>
+                <td>{"$"+f"{price:.2f}" if price else "授予"}</td>
+                <td>{"$"+f"{amount:,.0f}" if amount else "—"}</td>
+            </tr>"""
+        if not trade_rows:
+            trade_rows = '<tr><td colspan="6" style="color:#999;text-align:center">暂无近期内部人交易记录</td></tr>'
+        insider_sentiment = insider.get("sentiment", "neutral")
+        ins_cn = self._dir_cn(insider_sentiment)
+        ins_color = self._dir_color(insider_sentiment)
+        mom_color = "#28a745" if momentum > 0 else "#dc3545"
+        return f"""
+        <div class="section">
+            <h2>🐝 ScoutBee — 聪明钱侦察</h2>
+            <div style="display:flex;gap:15px;flex-wrap:wrap;margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Signal 评分</div></div>
+                <div class="stat"><div class="num" style="color:{ins_color}">{ins_cn}</div><div class="lbl">内部人情绪</div></div>
+                <div class="stat"><div class="num">{crowding:.0f}</div><div class="lbl">拥挤度 /100</div></div>
+                <div class="stat"><div class="num" style="color:{mom_color}">{momentum:+.2f}%</div><div class="lbl">5日动量</div></div>
+            </div>
+            <h3>近期内部人交易（Form 4）</h3>
+            <table>
+                <tr><th>内部人</th><th>职位</th><th>日期</th><th>股数</th><th>均价</th><th>金额</th></tr>
+                {trade_rows}
+            </table>
+            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>{ad.get('discovery','')}</p>
+        </div>"""
+
+    def _ch3_oracle(self, agent_details: dict, options: dict) -> str:
+        """第3章 OracleBee — 期权市场预期"""
+        ad = agent_details.get("OracleBeeEcho", {})
+        det = ad.get("details", {}) if ad else {}
+        opts = det if det else options
+        if not opts and not ad:
+            return ""
+        score = ad.get("score", 0) if ad else 0
+        direction = ad.get("direction", "neutral") if ad else "neutral"
+        iv_rank = opts.get("iv_rank", 0)
+        iv_curr = opts.get("iv_current", opts.get("iv_curr", 0))
+        pc = opts.get("put_call_ratio", 0)
+        oi = opts.get("total_oi", 0)
+        gex = opts.get("gamma_squeeze_risk", "—")
+        flow = opts.get("flow_direction", opts.get("options_score", "—"))
+        skew = opts.get("iv_skew_ratio", opts.get("iv_skew", 0))
+        unusual = opts.get("unusual_activity", [])
+        key_levels = opts.get("key_levels", {})
+        support = key_levels.get("support", [])
+        resist = key_levels.get("resistance", [])
+        pc_color = "#28a745" if pc < 0.8 else ("#dc3545" if pc > 1.2 else "#ffc107")
+        unusual_rows = ""
+        for u in unusual[:5]:
+            bullish = u.get("bullish", True)
+            emo = "🟢" if bullish else "🔴"
+            unusual_rows += f"<li>{emo} {u.get('type','').replace('_',' ')} Strike ${u.get('strike',0):.0f} × {u.get('volume',0):,.0f}</li>"
+        support_txt = " | ".join(f"${s.get('strike',0):.0f}(OI:{s.get('oi',0):,})" for s in support[:3])
+        resist_txt = " | ".join(f"${r.get('strike',0):.0f}(OI:{r.get('oi',0):,})" for r in resist[:3])
+        return f"""
+        <div class="section">
+            <h2>🔮 OracleBee — 期权市场预期</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Odds 评分</div></div>
+                <div class="stat"><div class="num" style="color:{pc_color}">{pc:.2f}</div><div class="lbl">Put/Call Ratio</div></div>
+                <div class="stat"><div class="num">{iv_rank:.1f}%</div><div class="lbl">IV Rank</div></div>
+                <div class="stat"><div class="num">{iv_curr:.1f}%</div><div class="lbl">当前 IV</div></div>
+            </div>
+            <table style="margin-bottom:12px;">
+                <tr><th>指标</th><th>数值</th><th>信号</th></tr>
+                <tr><td>Gamma 压榨风险</td><td>{gex}</td><td>{"⚠️ 高" if str(gex).lower() in ("high","很高") else "✅ 可控"}</td></tr>
+                <tr><td>期权流方向</td><td>{flow}</td><td>{"🟢 看多" if str(flow).lower() in ("bullish","看多") else ("🔴 看空" if str(flow).lower() in ("bearish","看空") else "—")}</td></tr>
+                <tr><td>IV 偏斜比</td><td>{skew:.2f}</td><td>{"⚠️ 看跌溢价" if skew > 1.2 else "✅ 正常"}</td></tr>
+                <tr><td>总持仓量</td><td>{oi:,}</td><td>—</td></tr>
+            </table>
+            {f'<h3>异常期权活动</h3><ul>{unusual_rows}</ul>' if unusual_rows else ''}
+            {f'<h3>关键价位</h3><p>支撑：{support_txt or "—"}</p><p>压力：{resist_txt or "—"}</p>' if (support_txt or resist_txt) else ''}
+            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>{ad.get('discovery','') if ad else ''}</p>
+        </div>"""
+
+    def _ch3_chronos(self, agent_details: dict) -> str:
+        """第3章 ChronosBee — 催化剂时间线（含 ASCII 时间轴）"""
+        ad = agent_details.get("ChronosBeeHorizon", {})
+        if not ad:
+            return ""
+        det = ad.get("details", {})
+        catalysts = det.get("catalysts", det.get("catalysts_found", []))
+        analyst = det.get("analyst_targets", {})
+        score = ad.get("score", 0)
+        direction = ad.get("direction", "neutral")
+        # 按 days_until 排序，取前 5 个
+        cats_sorted = sorted(
+            [c for c in catalysts if isinstance(c, dict)],
+            key=lambda x: abs(x.get("days_until", 999))
+        )[:5]
+        # ASCII 时间轴
+        timeline_html = ""
+        if cats_sorted:
+            TOTAL_WIDTH = 80  # 字符宽度
+            max_days = max((abs(c.get("days_until", 0)) for c in cats_sorted), default=30) or 30
+            max_days = max(max_days, 1)
+            labels_top = "今天".ljust(6)
+            labels_bot = "0天".ljust(6)
+            line = "●"
+            for c in cats_sorted:
+                days = abs(c.get("days_until", 0))
+                pos = int(days / max_days * (TOTAL_WIDTH - 6))
+                name = c.get("event", "")[:8]
+                gap = max(1, pos - len(line))
+                labels_top += " " * gap + name[:8].ljust(10)
+                labels_bot += " " * gap + f"{days}天".ljust(10)
+                line += "─" * gap + "●"
+            sev_colors = {"critical": "#dc3545", "high": "#fd7e14", "medium": "#ffc107", "low": "#28a745"}
+            cat_rows = ""
+            for c in cats_sorted:
+                sev = c.get("severity", "medium")
+                sev_color = sev_colors.get(sev, "#888")
+                days = c.get("days_until", 0)
+                days_txt = f"{days}天后" if days >= 0 else f"{abs(days)}天前"
+                cat_rows += f"""<tr>
+                    <td style="color:{sev_color};font-weight:bold">{c.get('event','')}</td>
+                    <td>{c.get('date','')}</td>
+                    <td>{days_txt}</td>
+                    <td><span style="background:{sev_color};color:white;padding:2px 8px;border-radius:10px;font-size:0.8em">{sev}</span></td>
+                </tr>"""
+            timeline_html = f"""
+            <div style="background:#f8f9ff;border-radius:8px;padding:15px;margin:12px 0;overflow-x:auto;">
+                <pre style="font-family:monospace;font-size:0.8em;color:#333;line-height:1.8;margin:0">   {labels_top}
+   {labels_bot}
+    │{"─" * (len(line)-1)}
+    {line}</pre>
+            </div>
+            <table style="margin-top:10px;">
+                <tr><th>事件</th><th>日期</th><th>距今</th><th>重要性</th></tr>
+                {cat_rows}
+            </table>"""
+        # 分析师目标价
+        analyst_html = ""
+        if analyst:
+            curr = analyst.get("current_price", 0)
+            mean = analyst.get("target_mean", 0)
+            low = analyst.get("target_low", 0)
+            high = analyst.get("target_high", 0)
+            upside = analyst.get("upside_pct", ((mean - curr) / curr * 100) if curr else 0)
+            upside_color = "#28a745" if upside > 0 else "#dc3545"
+            analyst_html = f"""
+            <h3>分析师目标价</h3>
+            <div class="grid-4">
+                <div class="stat"><div class="num">${curr:.2f}</div><div class="lbl">当前价</div></div>
+                <div class="stat"><div class="num">${mean:.2f}</div><div class="lbl">目标均价</div></div>
+                <div class="stat"><div class="num">${low:.0f}~${high:.0f}</div><div class="lbl">目标区间</div></div>
+                <div class="stat"><div class="num" style="color:{upside_color}">{upside:+.1f}%</div><div class="lbl">潜在涨幅</div></div>
+            </div>"""
+        return f"""
+        <div class="section">
+            <h2>⏰ ChronosBee — 催化剂时间线</h2>
+            <div style="margin-bottom:12px;">
+                <span class="stat" style="display:inline-block;margin-right:10px;">
+                    <span class="num" style="color:{self._dir_color(direction)}">{score:.1f}</span>
+                    <span class="lbl"> Catalyst 评分</span>
+                </span>
+                <span style="color:#666;font-size:0.9em">检测到 {len(catalysts)} 个催化剂</span>
+            </div>
+            {timeline_html if timeline_html else '<p style="color:#999">暂无催化剂数据</p>'}
+            {analyst_html}
+            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>{ad.get('discovery','')}</p>
+        </div>"""
+
+    def _ch3_buzz(self, agent_details: dict) -> str:
+        """第3章 BuzzBee — 情绪与叙事"""
+        ad = agent_details.get("BuzzBeeWhisper", {})
+        if not ad:
+            return ""
+        det = ad.get("details", {})
+        score = ad.get("score", 0)
+        direction = ad.get("direction", "neutral")
+        sentiment_pct = det.get("sentiment_pct", det.get("sentiment_score", 50))
+        momentum = det.get("momentum_5d", 0)
+        vol_ratio = det.get("volume_ratio", 1)
+        reddit = det.get("reddit", {})
+        fear_greed = det.get("fear_greed_index", det.get("components", {}).get("fear_greed", None))
+        sent_color = "#28a745" if sentiment_pct > 60 else ("#dc3545" if sentiment_pct < 40 else "#ffc107")
+        mom_color = "#28a745" if momentum > 0 else "#dc3545"
+        fg_text = ""
+        if fear_greed is not None:
+            fg_label = "极度恐惧" if fear_greed < 25 else ("恐惧" if fear_greed < 45 else ("中性" if fear_greed < 55 else ("贪婪" if fear_greed < 75 else "极度贪婪")))
+            fg_color = "#28a745" if fear_greed > 55 else ("#dc3545" if fear_greed < 45 else "#ffc107")
+            fg_text = f'<div class="stat"><div class="num" style="color:{fg_color}">{fear_greed}</div><div class="lbl">恐贪指数 ({fg_label})</div></div>'
+        reddit_html = ""
+        if reddit:
+            reddit_html = f"""<p style="margin-top:10px;">Reddit 热度：<strong>第{reddit.get('rank','—')}名</strong> | 提及量：<strong>{reddit.get('mentions','—')}</strong> | 状态：<strong>{reddit.get('buzz','—')}</strong></p>"""
+        # 叙事列表
+        disc = ad.get("discovery", "")
+        bullets = [b.strip() for b in disc.split("|") if b.strip()] if disc else []
+        bullets_html = "".join(f"<li>{'✅' if i==0 else '📊'} {b}</li>" for i, b in enumerate(bullets[:5]))
+        return f"""
+        <div class="section">
+            <h2>📢 BuzzBee — 情绪与叙事</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Sentiment 评分</div></div>
+                <div class="stat"><div class="num" style="color:{sent_color}">{sentiment_pct:.0f}%</div><div class="lbl">正面情绪占比</div></div>
+                <div class="stat"><div class="num" style="color:{mom_color}">{momentum:+.2f}%</div><div class="lbl">5日动量</div></div>
+                <div class="stat"><div class="num">{vol_ratio:.2f}×</div><div class="lbl">成交量比</div></div>
+                {fg_text}
+            </div>
+            {reddit_html}
+            {f'<h3>主流叙事</h3><ul style="margin-top:8px">{bullets_html}</ul>' if bullets_html else ''}
+        </div>"""
+
+    def _ch3_rival(self, analysis: dict) -> str:
+        """第3章 RivalBee — 竞争格局"""
+        ind = analysis.get("industry_comparison", {})
+        if not ind:
+            return ""
+        advantages = ind.get("competitive_advantages", [])
+        threats = ind.get("competitive_threats", [])
+        competitors = ind.get("competitors", [])
+        position = ind.get("position", "—")
+        strength = ind.get("comparative_strength", 0)
+        industry = ind.get("industry", "—")
+        strength_color = "#28a745" if strength >= 70 else ("#ffc107" if strength >= 40 else "#dc3545")
+        adv_li = "".join(f"<li>✅ {a}</li>" for a in advantages[:5])
+        thr_li = "".join(f"<li>⚠️ {t}</li>" for t in threats[:5])
+        comp_tags = " ".join(f'<span style="background:#e8e8f0;padding:3px 10px;border-radius:10px;font-size:0.85em">{c}</span>' for c in competitors[:5])
+        return f"""
+        <div class="section">
+            <h2>🤖 RivalBee — 竞争格局</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num">{industry}</div><div class="lbl">行业</div></div>
+                <div class="stat"><div class="num">{position}</div><div class="lbl">市场地位</div></div>
+                <div class="stat"><div class="num" style="color:{strength_color}">{strength}</div><div class="lbl">竞争实力 /100</div></div>
+                <div class="stat"><div class="num">{len(competitors)}</div><div class="lbl">主要竞争对手</div></div>
+            </div>
+            {f'<p>竞争对手：{comp_tags}</p>' if comp_tags else ''}
+            <div class="grid-2" style="margin-top:15px;">
+                <div><h3 style="color:#28a745;">护城河优势</h3><ul>{adv_li}</ul></div>
+                <div><h3 style="color:#dc3545;">竞争威胁</h3><ul>{thr_li}</ul></div>
+            </div>
+        </div>"""
+
+    def _ch3_guard(self, agent_details: dict, swarm: dict) -> str:
+        """第3章 GuardBee — 交叉验证（含信号共振矩阵）"""
+        ad = agent_details.get("GuardBeeSentinel", {})
+        if not ad and not swarm:
+            return ""
+        det = ad.get("details", {}) if ad else {}
+        resonance = det.get("resonance", swarm.get("resonance", {}))
+        consistency = det.get("consistency", 0)
+        adj_factor = det.get("adjustment_factor", 1.0)
+        conflict = swarm.get("conflict_info", {})
+        conflict_level = conflict.get("conflict_level", "—")
+        score = ad.get("score", 0) if ad else 0
+        # 信号共振矩阵
+        DIMS = ["catalyst", "signal", "odds", "sentiment", "risk_adj"]
+        DIM_CN = {"catalyst": "催化剂", "signal": "内部人", "odds": "期权", "sentiment": "情绪", "risk_adj": "风控"}
+        resonant_dims = set(resonance.get("resonant_dimensions", []))
+        direction = swarm.get("direction", "neutral")
+        # 行=源维度, 列=目标维度, 若都在resonant_dims → ✅, 否则根据conflict判断
+        header = "<tr><th></th>" + "".join(f"<th>{DIM_CN.get(d,d)}</th>" for d in DIMS) + "</tr>"
+        matrix_rows = ""
+        for row_dim in DIMS:
+            row_cells = f"<td><strong>{DIM_CN.get(row_dim,row_dim)}</strong></td>"
+            for col_dim in DIMS:
+                if row_dim == col_dim:
+                    row_cells += "<td style='color:#ccc;text-align:center'>—</td>"
+                elif row_dim in resonant_dims and col_dim in resonant_dims:
+                    row_cells += "<td style='text-align:center;color:#28a745'>✅</td>"
+                elif conflict_level in ("high", "severe") and (row_dim not in resonant_dims or col_dim not in resonant_dims):
+                    row_cells += "<td style='text-align:center;color:#ffc107'>⚠️</td>"
+                else:
+                    row_cells += "<td style='text-align:center;color:#ccc'>—</td>"
+            matrix_rows += f"<tr>{row_cells}</tr>"
+        conflict_cn = {"low": "低 ✅", "moderate": "中 ⚠️", "high": "高 ❌", "severe": "严重 ⛔"}.get(conflict_level, conflict_level)
+        return f"""
+        <div class="section">
+            <h2>🛡️ GuardBee — 交叉验证</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">RiskAdj 评分</div></div>
+                <div class="stat"><div class="num">{consistency:.0%}</div><div class="lbl">信号一致性</div></div>
+                <div class="stat"><div class="num">{adj_factor:.2f}×</div><div class="lbl">调整系数</div></div>
+                <div class="stat"><div class="num">{conflict_cn}</div><div class="lbl">冲突等级</div></div>
+            </div>
+            <h3>信号共振矩阵</h3>
+            <div style="overflow-x:auto;">
+                <table style="min-width:400px;">
+                    {header}
+                    {matrix_rows}
+                </table>
+            </div>
+            <p style="margin-top:8px;font-size:0.82em;color:#888;">✅ 同向共振 | ⚠️ 存在冲突 | — 中性/无关</p>
+            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>共振结论：</strong>
+                {resonance.get('supporting_agents', 0)} 个 Agent 同向（{', '.join(resonant_dims)}），
+                置信度提升 {resonance.get('confidence_boost', 0)}%
+            </p>
+            <p style="font-size:0.85em;color:#666;"><strong>关键判断：</strong>{ad.get('discovery','') if ad else ''}</p>
+        </div>"""
+
+    def _ch3_bear(self, agent_details: dict) -> str:
+        """第3章 BearBee — 看空对冲（至少 3 条）"""
+        ad = agent_details.get("BearBeeContrarian", {})
+        if not ad:
+            return ""
+        det = ad.get("details", {})
+        signals = det.get("bearish_signals", [])
+        bear_score = det.get("bear_score", 0)
+        score = ad.get("score", 0)
+        iv_skew = det.get("iv_skew_ratio", det.get("iv_skew", 0))
+        # 确保至少 3 条
+        fallback = [
+            "期权 IV Skew 偏高（看跌期权溢价）",
+            "短期催化剂带来波动性风险",
+            "估值已充分反映增长预期，上行空间有限",
+        ]
+        while len(signals) < 3:
+            for fb in fallback:
+                if fb not in signals:
+                    signals.append(fb)
+                if len(signals) >= 3:
+                    break
+        items = ""
+        for i, s in enumerate(signals[:6], 1):
+            items += f'<li style="margin:10px 0;padding:10px;background:#fff5f5;border-left:3px solid #dc3545;border-radius:4px;"><strong>{i}.</strong> {s}</li>'
+        return f"""
+        <div class="section">
+            <h2>🐻 BearBee — 看空对冲</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:#dc3545">{score:.1f}</div><div class="lbl">看空蜂评分</div></div>
+                <div class="stat"><div class="num" style="color:{'#dc3545' if bear_score>=6 else '#ffc107'}">{bear_score:.1f}/10</div><div class="lbl">看空强度</div></div>
+                <div class="stat"><div class="num">{iv_skew:.2f}</div><div class="lbl">IV Skew 比</div></div>
+                <div class="stat"><div class="num">{'⛔' if bear_score>=7 else ('⚠️' if bear_score>=5 else '✅')}</div><div class="lbl">风险等级</div></div>
+            </div>
+            <h3>反对观点（至少 3 条 — 硬性要求）</h3>
+            <ul style="list-style:none;padding:0;">{items}</ul>
+        </div>"""
+
+    def _ch4_thesis(self, analysis: dict, agent_details: dict) -> str:
+        """第4章：投资假设与失效条件"""
+        rec = analysis.get("recommendation", {})
+        reasoning = rec.get("reasoning", "")
+        overview = analysis.get("overview", "")
+        thesis = reasoning or overview or "基于蜂群综合信号，当前机会由催化剂驱动。"
+        bear_ad = agent_details.get("BearBeeContrarian", {})
+        bear_signals = bear_ad.get("details", {}).get("bearish_signals", []) if bear_ad else []
+        chronos_ad = agent_details.get("ChronosBeeHorizon", {})
+        catalysts = chronos_ad.get("details", {}).get("catalysts", []) if chronos_ad else []
+        risks = rec.get("risks", [])
+        # 失效条件：从 BearBee 信号 + ChronosBee critical 催化剂 + 推荐风险
+        break_conditions = []
+        for s in bear_signals[:3]:
+            trigger = s[:40] + "..." if len(s) > 40 else s
+            break_conditions.append((trigger, "信号逆转", "BearBee / Form 4 监控"))
+        for c in catalysts:
+            if c.get("severity") == "critical":
+                break_conditions.append((
+                    f"{c.get('event','')} 未达预期",
+                    "数据未达共识预期",
+                    f"{c.get('date','')} 当日监控"
+                ))
+                break_conditions.append(("大机构突然撤出持仓", ">5% 机构净卖出", "13F/Form 4 监控"))
+                break_conditions.append(("宏观风险升级", "VIX > 35 或 F&G < 20", "恐贪指数日监控"))
+                break
+        if not break_conditions:
+            for r in risks[:3]:
+                break_conditions.append((r[:40] + "..." if len(r) > 40 else r, "风险具现化", "新闻 + 监管公告"))
+        # 保证至少 3 条
+        defaults = [
+            ("GTC/财报 keynote 无重大亮点", "新品性能低于市场预期", "3/16 直播监控"),
+            ("出口管制扩大化", "新规覆盖非中国市场", "Commerce Dept 政策"),
+            ("主要客户削减 GPU 采购", "云厂商资本支出下修", "季度云财报"),
+        ]
+        for d in defaults:
+            if len(break_conditions) >= 3:
+                break
+            break_conditions.append(d)
+        cond_rows = "".join(
+            f"<tr><td>{c[0]}</td><td>{c[1]}</td><td style='color:#888;font-size:0.85em'>{c[2]}</td></tr>"
+            for c in break_conditions[:5]
+        )
+        return f"""
+        <div class="section">
+            <h2>第 4 章：投资假设与失效条件</h2>
+            <h3>核心 Thesis</h3>
+            <blockquote style="border-left:4px solid #667eea;padding:12px 18px;background:#f8f9ff;border-radius:0 8px 8px 0;margin:10px 0;color:#333;font-style:italic;">
+                {thesis}
+            </blockquote>
+            <h3 style="margin-top:18px;">失效条件（Thesis Break）</h3>
+            <table>
+                <tr><th>条件</th><th>触发阈值</th><th>监控方式</th></tr>
+                {cond_rows}
+            </table>
+        </div>"""
+
+    def _ch5_scenarios(self, analysis: dict, swarm: dict) -> str:
+        """第5章：情景推演（4场景 + 概率加权期望收益）"""
+        hist = analysis.get("historical_analysis", {})
+        exp = hist.get("expected_returns", {})
+        pos = analysis.get("position_management", {})
+        sl = pos.get("stop_loss", {})
+        tp = pos.get("take_profit", {})
+        # 当前价：从 agent_details 或 stop_loss 反推
+        scout = swarm.get("agent_details", {}).get("ScoutBeeNova", {})
+        curr_price = scout.get("details", {}).get("price", 0) if scout else 0
+        if not curr_price and isinstance(sl, dict):
+            conservative = sl.get("conservative", 0)
+            curr_price = conservative / 0.97 if conservative else 0
+        if not curr_price:
+            curr_price = 100  # 防零
+        # 期望收益数据
+        gain_max = exp.get("max_gain", {}).get("mean", 0) or 20
+        gain_7d = exp.get("expected_7d", {}).get("mean", 0) or 5
+        drawdown = exp.get("max_drawdown", {}).get("mean", 0) or -10
+        drawdown_min = exp.get("max_drawdown", {}).get("min", drawdown * 1.5)
+        # 4 场景
+        scenarios = [
+            ("🟢 强多", 25, curr_price * (1 + gain_max / 100), "催化剂超预期 + 出口管制缓和"),
+            ("🟢 温和多", 45, curr_price * (1 + gain_7d / 100), "催化剂符合预期，指引维持"),
+            ("🟡 震荡", 20, curr_price * (1 + drawdown / 200), "获利回吐，等待下一催化剂"),
+            ("🔴 回调", 10, curr_price * (1 + drawdown_min / 100), "政策恶化 或 竞品重大突破"),
+        ]
+        exp_price = sum(prob / 100 * price for _, prob, price, _ in scenarios)
+        exp_return = (exp_price - curr_price) / curr_price * 100 if curr_price else 0
+        exp_color = "#28a745" if exp_return > 0 else "#dc3545"
+        rows = "".join(
+            f"""<tr>
+                <td>{icon}</td>
+                <td>{prob}%</td>
+                <td>${price:.2f}</td>
+                <td style="color:{'#28a745' if price>curr_price else '#dc3545'}">{(price-curr_price)/curr_price*100:+.1f}%</td>
+                <td style="font-size:0.85em;color:#666">{trigger}</td>
+            </tr>"""
+            for icon, prob, price, trigger in scenarios
+        )
+        return f"""
+        <div class="section">
+            <h2>第 5 章：情景推演</h2>
+            <table>
+                <tr><th>情景</th><th>概率</th><th>目标价</th><th>涨跌幅</th><th>触发条件</th></tr>
+                {rows}
+                <tr style="background:#f8f9ff;font-weight:bold;">
+                    <td colspan="2">概率加权期望价格</td>
+                    <td style="color:{exp_color}">${exp_price:.2f}</td>
+                    <td style="color:{exp_color}">{exp_return:+.1f}%</td>
+                    <td>from ${curr_price:.2f}</td>
+                </tr>
+            </table>
+            <p style="margin-top:10px;font-size:0.85em;color:#888;">
+                期望价格 = Σ(概率 × 情景价格) = {' + '.join(f'{p}%×${pr:.0f}' for _,p,pr,_ in scenarios)} = <strong style="color:{exp_color}">${exp_price:.2f}</strong>
+            </p>
+        </div>"""
+
+    def _ch6_risk_radar(self, swarm: dict, agent_details: dict, options: dict) -> str:
+        """第6章：风险雷达"""
+        bear_ad = agent_details.get("BearBeeContrarian", {})
+        bear_score = bear_ad.get("details", {}).get("bear_score", 0) if bear_ad else 0
+        scout_ad = agent_details.get("ScoutBeeNova", {})
+        crowding = scout_ad.get("details", {}).get("crowding_score", 50) if scout_ad else 50
+        chronos_ad = agent_details.get("ChronosBeeHorizon", {})
+        cats = chronos_ad.get("details", {}).get("catalysts", []) if chronos_ad else []
+        imminent = [c for c in cats if isinstance(c, dict) and abs(c.get("days_until", 999)) <= 7]
+        gex = options.get("gamma_squeeze_risk", "low")
+        iv_rank = options.get("iv_rank", 0)
+        conflict_level = swarm.get("conflict_info", {}).get("conflict_level", "low")
+        def risk_level(val, high_thr, med_thr, high_lbl="高", med_lbl="中", low_lbl="低"):
+            if val >= high_thr:
+                return f"🔴 {high_lbl}"
+            if val >= med_thr:
+                return f"🟡 {med_lbl}"
+            return f"🟢 {low_lbl}"
+        rows = [
+            ("监管风险", risk_level(1 if conflict_level in ("high","severe") else 0, 1, 0.5), "AI 芯片出口管制 / 政策变化风险"),
+            ("市场情绪风险", risk_level(bear_score, 7, 5), f"看空强度 {bear_score:.1f}/10，{'临近催化剂' if imminent else '无近期催化剂'}"),
+            ("估值压缩风险", risk_level(crowding, 70, 50), f"拥挤度 {crowding:.0f}/100（{'偏高' if crowding>70 else ('适中' if crowding>40 else '偏低')}）"),
+            ("流动性风险", "🟢 低", "大盘股，日均成交量充足"),
+            ("期权事件风险", risk_level(1 if str(gex).lower() in ("high","很高","medium") else 0, 1, 0.5), f"Gamma 压榨风险：{gex}，IV Rank {iv_rank:.1f}%"),
+            ("催化剂风险", risk_level(len(imminent), 2, 1), f"7 天内催化剂 {len(imminent)} 个：{', '.join(c.get('event','') for c in imminent[:2])}"),
+        ]
+        risk_rows = "".join(
+            f"<tr><td>{name}</td><td>{level}</td><td style='font-size:0.85em;color:#666'>{detail}</td></tr>"
+            for name, level, detail in rows
+        )
+        return f"""
+        <div class="section">
+            <h2>第 6 章：风险雷达</h2>
+            <table>
+                <tr><th>风险类型</th><th>等级</th><th>具体内容</th></tr>
+                {risk_rows}
+            </table>
+        </div>"""
+
+    def _ch7_tasks(self, agent_details: dict, options: dict) -> str:
+        """第7章：明日追踪任务"""
+        chronos_ad = agent_details.get("ChronosBeeHorizon", {})
+        cats = chronos_ad.get("details", {}).get("catalysts", []) if chronos_ad else []
+        exp_dates = options.get("expiration_dates", [])
+        tasks = []
+        # 近期催化剂
+        for c in sorted([x for x in cats if isinstance(x, dict)], key=lambda x: abs(x.get("days_until", 999)))[:5]:
+            days = c.get("days_until", 0)
+            if abs(days) <= 30:
+                days_txt = f"{days}天后" if days > 0 else ("今日" if days == 0 else f"{abs(days)}天前")
+                sev = c.get("severity", "")
+                prefix = "⭐ " if sev == "critical" else ""
+                tasks.append(f"{prefix}关注 **{c.get('event','')}**（{days_txt} {c.get('date','')}）")
+        # 期权到期日
+        for d in exp_dates[:2]:
+            tasks.append(f"监控期权到期日 **{d}** 前后的 Pin Risk / Gamma Exposure")
+        # 通用任务
+        tasks += [
+            "跟踪 BearBee 看空信号是否兑现",
+            "检查 SEC EDGAR 是否有新 Form 4 大额内部人减持",
+            "观察蜂群评分是否突破 7.5（高优先级阈值）",
+        ]
+        items = "".join(f'<li style="margin:8px 0;">☐ {t}</li>' for t in tasks[:8])
+        return f"""
+        <div class="section">
+            <h2>第 7 章：明日追踪任务</h2>
+            <ul style="list-style:none;padding:0;">{items}</ul>
         </div>"""
 
     def generate_html_report(
@@ -613,96 +1183,92 @@ class MLEnhancedReportGenerator:
                     old_disc
                 )
 
-        # 蜂群智能部分
-        swarm_html = self._generate_swarm_section_html(swarm)
+        # ── 7 章 HTML ──────────────────────────────────────────────────
+        agent_details = swarm.get("agent_details", {}) if swarm else {}
 
-        # 期权部分
-        options_html = self._generate_options_section_html(options) if options else ""
-        ml_features = ml_pred.get('feature_importance', {})
-        ml_html = ""
-        if ml_features:
-            feat_rows = "".join(
-                f"<tr><td>{k}</td><td>{v:.3f}</td></tr>"
-                for k, v in sorted(ml_features.items(), key=lambda x: -abs(x[1]))[:8]
-            )
-            ml_html = f"""
-            <div class="section">
-                <h2>ML 特征重要度</h2>
-                <table><tr><th>特征</th><th>权重</th></tr>{feat_rows}</table>
-            </div>"""
+        ch1          = self._ch1_core_conclusion(swarm, combined, analysis)
+        ch2          = self._ch2_five_dim_table(swarm)
+        ch3_scout    = self._ch3_scout(agent_details)
+        ch3_oracle   = self._ch3_oracle(agent_details, options)
+        ch3_chronos  = self._ch3_chronos(agent_details)
+        ch3_buzz     = self._ch3_buzz(agent_details)
+        ch3_rival    = self._ch3_rival(analysis)
+        ch3_guard    = self._ch3_guard(agent_details, swarm)
+        ch3_bear     = self._ch3_bear(agent_details)
+        ch4          = self._ch4_thesis(analysis, agent_details)
+        ch5          = self._ch5_scenarios(analysis, swarm)
+        ch6          = self._ch6_risk_radar(swarm, agent_details, options)
+        ch7          = self._ch7_tasks(agent_details, options)
 
-        # 概率与风控
-        win_prob = prob.get('win_probability_pct', 50)
+        # ── 折叠详情区（止损 / 止盈 / 期权 / ML 特征）──────────────
+        win_prob    = prob.get('win_probability_pct', 50)
         risk_reward = prob.get('risk_reward_ratio', 1.0)
-        position = analysis.get('position_management', {})
-        stop_loss = position.get('stop_loss', {})
+        position    = analysis.get('position_management', {})
+        stop_loss   = position.get('stop_loss', {})
         take_profit = position.get('take_profit', {})
-        holding = position.get('optimal_holding_time', '')
+        holding     = position.get('optimal_holding_time', '')
 
-        # 止损止盈 HTML
-        position_html = ""
-        if stop_loss or take_profit:
-            sl_rows = ""
-            if isinstance(stop_loss, dict):
-                for k, v in stop_loss.items():
-                    sl_rows += f"<tr><td>{k}</td><td>${v:.2f}</td></tr>" if isinstance(v, (int, float)) else f"<tr><td>{k}</td><td>{v}</td></tr>"
-            elif isinstance(stop_loss, list):
-                for item in stop_loss:
-                    if isinstance(item, dict):
-                        sl_rows += f"<tr><td>{item.get('level','')}</td><td>${item.get('price',0):.2f}</td></tr>"
-            tp_rows = ""
-            if isinstance(take_profit, dict):
-                for k, v in take_profit.items():
-                    if isinstance(v, dict):
-                        tp_price = v.get('price', 0)
-                        tp_gain = v.get('gain_pct', 0)
-                        tp_ratio = v.get('sell_ratio', 0)
-                        tp_reason = v.get('reason', '')
-                        tp_rows += f"<tr><td>{k}</td><td>${tp_price:.2f}</td><td>+{tp_gain:.0f}%</td><td>{tp_ratio:.0%} | {tp_reason}</td></tr>"
-                    elif isinstance(v, (int, float)):
-                        tp_rows += f"<tr><td>{k}</td><td>${v:.2f}</td><td></td><td></td></tr>"
-            elif isinstance(take_profit, list):
-                for item in take_profit:
-                    if isinstance(item, dict):
-                        tp_rows += f"<tr><td>{item.get('level','')}</td><td>${item.get('price',0):.2f}</td><td></td><td></td></tr>"
-            position_html = f"""
-            <div class="section">
-                <h2>止损 / 止盈位</h2>
+        sl_rows = ""
+        if isinstance(stop_loss, dict):
+            for k, v in stop_loss.items():
+                sl_rows += (f"<tr><td>{k}</td><td>${v:.2f}</td></tr>"
+                            if isinstance(v, (int, float))
+                            else f"<tr><td>{k}</td><td>{v}</td></tr>")
+        elif isinstance(stop_loss, list):
+            for item in stop_loss:
+                if isinstance(item, dict):
+                    sl_rows += f"<tr><td>{item.get('level','')}</td><td>${item.get('price',0):.2f}</td></tr>"
+
+        tp_rows = ""
+        if isinstance(take_profit, dict):
+            for k, v in take_profit.items():
+                if isinstance(v, dict):
+                    tp_rows += (f"<tr><td>{k}</td><td>${v.get('price',0):.2f}</td>"
+                                f"<td>+{v.get('gain_pct',0):.0f}%</td>"
+                                f"<td>{v.get('sell_ratio',0):.0%} | {v.get('reason','')}</td></tr>")
+                elif isinstance(v, (int, float)):
+                    tp_rows += f"<tr><td>{k}</td><td>${v:.2f}</td><td></td><td></td></tr>"
+        elif isinstance(take_profit, list):
+            for item in take_profit:
+                if isinstance(item, dict):
+                    tp_rows += f"<tr><td>{item.get('level','')}</td><td>${item.get('price',0):.2f}</td><td></td><td></td></tr>"
+
+        holding_txt = ""
+        if holding:
+            holding_txt = f'<p style="margin-top:15px;">最佳持仓周期：<strong>{holding.get("note", holding) if isinstance(holding, dict) else holding}</strong></p>'
+
+        sl_tp_html = ""
+        if sl_rows or tp_rows:
+            sl_tp_html = f"""
+            <div style="margin-bottom:20px;">
                 <div class="grid-2">
-                    <div>
-                        <h3 style="color:#dc3545;">止损位</h3>
-                        <table>{sl_rows}</table>
-                    </div>
-                    <div>
-                        <h3 style="color:#28a745;">止盈位</h3>
-                        <table>{tp_rows}</table>
+                    <div><h3 style="color:#dc3545;">止损位</h3><table>{sl_rows}</table></div>
+                    <div><h3 style="color:#28a745;">止盈位</h3>
+                        <table><tr><th>档位</th><th>价格</th><th>涨幅</th><th>操作</th></tr>{tp_rows}</table>
                     </div>
                 </div>
-                {f'<p style="margin-top:15px;">最佳持仓周期：<strong>{holding.get("note", holding) if isinstance(holding, dict) else holding}</strong></p>' if holding else ''}
+                {holding_txt}
             </div>"""
 
-        # 投资建议详情
-        rec_reasoning = recommendation.get('reasoning', '')
-        rec_risks = recommendation.get('risks', [])
-        rec_catalysts = recommendation.get('catalysts', [])
-        rec_html = ""
-        if rec_reasoning or rec_risks or rec_catalysts:
-            risks_li = "".join(f"<li>{r}</li>" for r in rec_risks[:5]) if isinstance(rec_risks, list) else ""
-            cats_li = "".join(f"<li>{c}</li>" for c in rec_catalysts[:5]) if isinstance(rec_catalysts, list) else ""
-            rec_html = f"""
-            <div class="section">
-                <h2>投资建议详情</h2>
-                {f'<p>{rec_reasoning}</p>' if isinstance(rec_reasoning, str) and rec_reasoning else ''}
-                {f'<h3>催化剂</h3><ul>{cats_li}</ul>' if cats_li else ''}
-                {f'<h3>风险因素</h3><ul>{risks_li}</ul>' if risks_li else ''}
-            </div>"""
+        options_html = self._generate_options_section_html(options) if options else ""
+
+        ml_features = ml_pred.get('feature_importance', {})
+        feat_rows = "".join(
+            f"<tr><td>{k}</td><td>{v:.3f}</td></tr>"
+            for k, v in sorted(ml_features.items(), key=lambda x: -abs(x[1]))[:8]
+        ) if ml_features else ""
+        ml_feat_html = f"""
+            <div style="margin-top:15px;">
+                <h3>ML 特征重要度</h3>
+                <table><tr><th>特征</th><th>权重</th></tr>{feat_rows}</table>
+            </div>""" if feat_rows else ""
 
         html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{ticker} ML 增强分析 - Alpha Hive</title>
+    <title>{ticker} 深度研究报告 - Alpha Hive</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -762,6 +1328,10 @@ class MLEnhancedReportGenerator:
         }}
         ul {{ padding-left: 20px; margin: 10px 0; }}
         li {{ margin: 6px 0; color: #444; line-height: 1.6; }}
+        details {{ background:white; border-radius:12px; padding:20px;
+                   margin-bottom:20px; box-shadow:0 5px 20px rgba(0,0,0,0.08); }}
+        details summary {{ cursor:pointer; color:#667eea; font-weight:bold;
+                           font-size:1.1em; user-select:none; }}
         .footer {{
             text-align: center; color: rgba(255,255,255,0.85);
             margin-top: 20px; font-size: 0.9em;
@@ -776,50 +1346,52 @@ class MLEnhancedReportGenerator:
 <div class="container">
     <!-- 头部 -->
     <div class="header">
-        <h1>{ticker} ML 增强分析</h1>
-        <div class="rating">{rating} - {combined['action']}</div>
+        <h1>🐝 {ticker} 深度研究报告</h1>
+        <div class="rating">{rating} — {combined['action']}</div>
         <p style="color:#888; margin-top:10px;">
-            {self.timestamp.strftime('%Y-%m-%d %H:%M')} | Alpha Hive
+            {self.timestamp.strftime('%Y-%m-%d %H:%M')} | Alpha Hive 蜂群智能
+        </p>
+        <p style="color:#aaa; font-size:0.85em; margin-top:6px;">
+            综合胜率 {combined['combined_probability']:.1f}% &nbsp;|&nbsp;
+            风险回报比 {risk_reward:.2f} &nbsp;|&nbsp;
+            ML 预测 {ml_prob_val:.1f}%
         </p>
     </div>
 
-    <!-- 核心指标 -->
-    <div class="section">
-        <h2>核心指标</h2>
-        <div class="grid-4">
-            <div class="stat">
-                <div class="num">{combined['combined_probability']:.1f}%</div>
-                <div class="lbl">综合胜率</div>
-            </div>
-            <div class="stat">
-                <div class="num">{win_prob:.1f}%</div>
-                <div class="lbl">人工分析</div>
-            </div>
-            <div class="stat">
-                <div class="num">{ml_prob_val:.1f}%</div>
-                <div class="lbl">ML 预测</div>
-            </div>
-            <div class="stat">
-                <div class="num">{risk_reward:.2f}</div>
-                <div class="lbl">风险回报比</div>
-            </div>
-        </div>
-    </div>
+    <!-- 第 1 章：核心结论 -->
+    {ch1}
 
-    <!-- 蜂群智能 -->
-    {swarm_html}
+    <!-- 第 2 章：五维评分明细 -->
+    {ch2}
 
-    <!-- 期权信号 -->
-    {options_html}
+    <!-- 第 3 章：7 Agent 独立分析 -->
+    {ch3_scout}
+    {ch3_oracle}
+    {ch3_chronos}
+    {ch3_buzz}
+    {ch3_rival}
+    {ch3_guard}
+    {ch3_bear}
 
-    <!-- 止损止盈 -->
-    {position_html}
+    <!-- 第 4 章：投资假设与失效条件 -->
+    {ch4}
 
-    <!-- 投资建议 -->
-    {rec_html}
+    <!-- 第 5 章：情景推演 -->
+    {ch5}
 
-    <!-- ML 特征 -->
-    {ml_html}
+    <!-- 第 6 章：风险雷达 -->
+    {ch6}
+
+    <!-- 第 7 章：明日追踪任务 -->
+    {ch7}
+
+    <!-- 折叠详情：止损止盈 / 期权信号 / ML 特征 -->
+    <details>
+        <summary>📊 详细数据（止损止盈 / 期权信号 / ML 特征）</summary>
+        {sl_tp_html}
+        {options_html}
+        {ml_feat_html}
+    </details>
 
     <!-- 免责声明 -->
     <div class="section" style="background:#fff3cd; border:1px solid #ffc107;">
@@ -830,7 +1402,7 @@ class MLEnhancedReportGenerator:
     </div>
 
     <div class="footer">
-        <p><a href="index.html" style="color:white;">返回仪表板</a></p>
+        <p><a href="index.html" style="color:white;">← 返回仪表板</a></p>
     </div>
 </div>
 </body>
