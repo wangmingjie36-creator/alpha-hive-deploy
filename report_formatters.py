@@ -245,6 +245,15 @@ def _build_competitive(sorted_results: list) -> List[str]:
         details = agent.get("details", {})
         md.append(f"### {ticker}")
         if discovery:
+            # 修正存量数据中 ML 胜率显示 100% 的问题（小样本过拟合）
+            # 若 details.probability 存在且 ≤ 0.95，用它替换 discovery 中的概率文本
+            import re as _re
+            det_prob = details.get("probability") if isinstance(details, dict) else None
+            if det_prob is not None and det_prob > 0.95:
+                # details 中的概率也超标，替换为 95%
+                det_prob = 0.95
+            if det_prob is not None:
+                discovery = _re.sub(r"ML 胜率 \d+%", f"ML 胜率 {det_prob*100:.0f}%", discovery)
             md.append(f"- {discovery}")
         if isinstance(details, dict) and details:
             ml_pred = details.get("ml_prediction") or details.get("prediction")

@@ -53,6 +53,9 @@ class RivalBeeVanguard(BeeAgent):
 
             if prediction:
                 prob = prediction.get("probability", 0.5)
+                # 硬限制：ML 模型过度自信时（小样本场景），概率不应超过 95%
+                prob = min(prob, 0.95)
+                prediction["probability"] = prob   # 回写，保持 details 一致
                 ret_7d = prediction.get("expected_7d", 0.0)
                 ret_30d = prediction.get("expected_30d", 0.0)
                 avg_ret = (ret_7d + ret_30d) / 2
