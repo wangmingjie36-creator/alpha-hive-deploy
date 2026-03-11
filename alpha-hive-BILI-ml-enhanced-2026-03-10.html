@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BILI ML 增强分析 - Alpha Hive</title>
+    <title>BILI 深度研究报告 - Alpha Hive</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -21,7 +21,7 @@
         .header .rating {
             display: inline-block; padding: 8px 25px; border-radius: 25px;
             color: white; font-size: 1.3em; font-weight: bold;
-            background: #28a745; margin: 10px 0;
+            background: #ffc107; margin: 10px 0;
         }
         .section {
             background: white; border-radius: 12px; padding: 25px;
@@ -63,6 +63,10 @@
         }
         ul { padding-left: 20px; margin: 10px 0; }
         li { margin: 6px 0; color: #444; line-height: 1.6; }
+        details { background:white; border-radius:12px; padding:20px;
+                   margin-bottom:20px; box-shadow:0 5px 20px rgba(0,0,0,0.08); }
+        details summary { cursor:pointer; color:#667eea; font-weight:bold;
+                           font-size:1.1em; user-select:none; }
         .footer {
             text-align: center; color: rgba(255,255,255,0.85);
             margin-top: 20px; font-size: 0.9em;
@@ -77,97 +81,316 @@
 <div class="container">
     <!-- 头部 -->
     <div class="header">
-        <h1>BILI ML 增强分析</h1>
-        <div class="rating">STRONG BUY - 积极布局</div>
+        <h1>🐝 BILI 深度研究报告</h1>
+        <div class="rating">HOLD — 观察等待</div>
         <p style="color:#888; margin-top:10px;">
-            2026-03-10 15:48 | Alpha Hive
+            2026-03-10 19:58 | Alpha Hive 蜂群智能
+        </p>
+        <p style="color:#aaa; font-size:0.85em; margin-top:6px;">
+            综合胜率 62.4% &nbsp;|&nbsp;
+            风险回报比 2.00 &nbsp;|&nbsp;
+            ML 预测 56.5%
         </p>
     </div>
 
-    <!-- 核心指标 -->
-    <div class="section">
-        <h2>核心指标</h2>
-        <div class="grid-4">
-            <div class="stat">
-                <div class="num">75.5%</div>
-                <div class="lbl">综合胜率</div>
-            </div>
-            <div class="stat">
-                <div class="num">65.0%</div>
-                <div class="lbl">人工分析</div>
-            </div>
-            <div class="stat">
-                <div class="num">100.0%</div>
-                <div class="lbl">ML 预测</div>
-            </div>
-            <div class="stat">
-                <div class="num">2.00</div>
-                <div class="lbl">风险回报比</div>
-            </div>
-        </div>
-    </div>
-
-    <!-- 蜂群智能 -->
+    <!-- 第 1 章：核心结论 -->
     
         <div class="section">
-            <h2>蜂群智能分析</h2>
-            <div style="text-align:center;margin-bottom:18px;">
-                <span style="font-size:2.5em;font-weight:bold;color:#ffc107;">7.3</span>
-                <span style="font-size:1.2em;color:#888;">/10</span>
-                <div style="margin-top:6px;">
-                    <span style="background:#ffc107;color:white;padding:4px 18px;border-radius:15px;font-weight:bold;">中性</span>
-                    <span style="background:#28a745;color:white;padding:3px 10px;border-radius:12px;font-size:0.85em;margin-left:8px;">3 Agent 共振</span>
+            <h2>第 1 章：核心结论</h2>
+            <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-bottom:18px;">
+                <div style="text-align:center;">
+                    <span style="font-size:3em;font-weight:bold;color:#ffc107;">7.3</span>
+                    <span style="font-size:1.2em;color:#888;">/10</span>
+                    <div><span style="background:#ffc107;color:white;padding:4px 16px;border-radius:15px;font-weight:bold;">中性</span></div>
                 </div>
-                <div style="margin-top:8px;color:#888;font-size:0.9em;">投票：3多 / 1空 / 3中</div>
+                <div style="flex:1;min-width:180px;">
+                    <div class="metric"><span class="metric-label">综合胜率</span><span class="metric-value" style="color:#ffc107;">62.4%</span></div>
+                    <div class="metric"><span class="metric-label">投票</span><span class="metric-value">3多 / 1空 / 3中</span></div>
+                    <div class="metric"><span class="metric-label">建议</span><span class="metric-value">HOLD — 观察等待</span></div>
+                </div>
             </div>
-            <table>
-                <tr><th>Agent</th><th>方向</th><th>评分</th><th>发现摘要</th></tr>
-                <tr>
-                <td><strong>聪明钱侦察</strong></td>
-                <td style="color:#28a745">看多</td>
-                <td>6.3</td>
-                <td style="font-size:0.85em;color:#555">无近期内幕交易 | 拥挤度 18/100（低拥挤度） | 动量 -3.3% | 历史5条:多5/空0,均分6.0|历史T+7准确率0%(2次,均收益-6.42%)</td>
-            </tr><tr>
-                <td><strong>期权 & 赔率</strong></td>
-                <td style="color:#888">中性</td>
-                <td>6.3</td>
-                <td style="font-size:0.85em;color:#555">IV 处于理想水位 | 异常流:混合期权流 Call:3 Put:3 | $26.6 | 预测市场看多（隐含概率 68%） | 历史5条:多5/空0,均分6.0|历史T+7准确率0%(2次,均收益-6.42%)</td>
-            </tr><tr>
-                <td><strong>市场情绪</strong></td>
-                <td style="color:#888">中性</td>
-                <td>4.8</td>
-                <td style="font-size:0.85em;color:#555">情绪 47% | 动量 -3.3% | 量比 1.4x | Reddit 无热度 | 新闻偏多（8多/0空） | 未上 Yahoo 热搜 | F&G 13(Extreme Fear) | 历史5条:多5/空0,均分6.0|历史T+7准确率0</td>
-            </tr><tr>
-                <td><strong>催化剂 & 时间线</strong></td>
-                <td style="color:#888">中性</td>
-                <td>7.2</td>
-                <td style="font-size:0.85em;color:#555">催化剂 3 个 | 最近：China Two Sessions Policy（1天后） | 分析师目标$30.7(↑15.5%) | 历史5条:多5/空0,均分6.0|历史T+7准确率0%(2次,均收益-6.42%)</td>
-            </tr><tr>
-                <td><strong>竞争格局 / ML</strong></td>
-                <td style="color:#28a745">看多</td>
-                <td>10.0</td>
-                <td style="font-size:0.85em;color:#555">ML 胜率 100% | 7d +5.32% | 30d +7.99% | 历史5条:多5/空0,均分6.0|历史T+7准确率0%(2次,均收益-6.42%)</td>
-            </tr><tr>
-                <td><strong>交叉验证</strong></td>
-                <td style="color:#28a745">看多</td>
-                <td>5.0</td>
-                <td style="font-size:0.85em;color:#555">信号分散 | 均分 5.4 | 一致性 20% | 风险调整 1.20 | 历史5条:多5/空0,均分6.0|历史T+7准确率0%(2次,均收益-6.42%) | 板块顺风 | ⚠️ 黄金避险飙升</td>
-            </tr><tr>
-                <td><strong>看空对冲</strong></td>
-                <td style="color:#dc3545">看空</td>
-                <td>4.0</td>
-                <td style="font-size:0.85em;color:#555">动量转弱 -3.3% | 催化剂1天内到来，波动性风险↑ | 信号一致性极低(20%)，方向不确定 | 历史5条:多5/空0,均分6.0|历史T+7准确率0%(2次,均收益-6.42%)</td>
-            </tr>
-            </table>
-            
-                <div style="margin-top:15px;padding:12px;background:#fff5f5;border-left:4px solid #dc3545;border-radius:4px;">
-                    <strong style="color:#dc3545;">看空对冲观点（看空强度 6.0/10）</strong>
-                    <ul style="margin:8px 0 0 15px;color:#555"><li>动量转弱 -3.3%</li><li>催化剂1天内到来，波动性风险↑</li><li>信号一致性极低(20%)，方向不确定</li></ul>
-                </div>
+            <p style='margin:6px 0;color:#555;'>标的基本面分析</p><p style='margin:6px 0;color:#555;'>最强维度 催化剂 评分 7.2/10（3 Agent 共振：ml_auxiliary、risk_adj、signal）</p>
         </div>
 
-    <!-- 期权信号 -->
+    <!-- 第 2 章：五维评分明细 -->
     
+        <div class="section">
+            <h2>第 2 章：五维评分明细</h2>
+            <table>
+                <tr><th>维度</th><th>分数</th><th>权重</th><th>加权</th><th>进度</th></tr>
+                <tr>
+                <td>🐝 信号强度 (Signal)<br><small style="color:#999">聪明钱 SEC Form4 / 机构持仓</small></td>
+                <td style="font-weight:bold;color:#ffc107">6.3</td>
+                <td>30%</td>
+                <td style="font-weight:bold">1.88</td>
+                <td><div style="background:#f0f0f0;border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:#ffc107;border-radius:4px;height:8px;width:62px;"></div>
+                </div></td>
+            </tr><tr>
+                <td>⏰ 催化剂 (Catalyst)<br><small style="color:#999">事件日历 / 财报 / 产品发布</small></td>
+                <td style="font-weight:bold;color:#28a745">7.2</td>
+                <td>20%</td>
+                <td style="font-weight:bold">1.44</td>
+                <td><div style="background:#f0f0f0;border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:#28a745;border-radius:4px;height:8px;width:71px;"></div>
+                </div></td>
+            </tr><tr>
+                <td>📢 情绪 (Sentiment)<br><small style="color:#999">X 平台 / Reddit / 新闻情绪</small></td>
+                <td style="font-weight:bold;color:#dc3545">4.8</td>
+                <td>20%</td>
+                <td style="font-weight:bold">0.95</td>
+                <td><div style="background:#f0f0f0;border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:#dc3545;border-radius:4px;height:8px;width:47px;"></div>
+                </div></td>
+            </tr><tr>
+                <td>🔮 赔率 (Odds)<br><small style="color:#999">期权 P/C / IV Rank / Polymarket</small></td>
+                <td style="font-weight:bold;color:#ffc107">6.3</td>
+                <td>15%</td>
+                <td style="font-weight:bold">0.95</td>
+                <td><div style="background:#f0f0f0;border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:#ffc107;border-radius:4px;height:8px;width:63px;"></div>
+                </div></td>
+            </tr><tr>
+                <td>🛡️ 风险调整 (RiskAdj)<br><small style="color:#999">拥挤度 / 波动 / 交叉验证调整</small></td>
+                <td style="font-weight:bold;color:#ffc107">5.0</td>
+                <td>15%</td>
+                <td style="font-weight:bold">0.76</td>
+                <td><div style="background:#f0f0f0;border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:#ffc107;border-radius:4px;height:8px;width:50px;"></div>
+                </div></td>
+            </tr><tr style="background:#f8f9ff;font-weight:bold;">
+            <td><strong>综合 Opportunity Score</strong></td>
+            <td style="color:#667eea;font-size:1.2em;">5.97</td>
+            <td></td>
+            <td style="color:#667eea;font-size:1.2em;">5.97</td>
+            <td>不行动 ❌</td>
+        </tr>
+            </table>
+            <p style="margin-top:12px;font-size:0.85em;color:#888;">公式：Score = 0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds + 0.15×RiskAdj</p>
+        </div>
+
+    <!-- 第 3 章：7 Agent 独立分析 -->
+    
+        <div class="section">
+            <h2>🐝 ScoutBee — 聪明钱侦察</h2>
+            <div style="display:flex;gap:15px;flex-wrap:wrap;margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:#28a745">6.3</div><div class="lbl">Signal 评分</div></div>
+                <div class="stat"><div class="num" style="color:#ffc107">中性</div><div class="lbl">内部人情绪</div></div>
+                <div class="stat"><div class="num">18</div><div class="lbl">拥挤度 /100</div></div>
+                <div class="stat"><div class="num" style="color:#dc3545">-3.35%</div><div class="lbl">5日动量</div></div>
+            </div>
+            <h3>近期内部人交易（Form 4）</h3>
+            <table>
+                <tr><th>内部人</th><th>职位</th><th>日期</th><th>股数</th><th>均价</th><th>金额</th></tr>
+                <tr><td colspan="6" style="color:#999;text-align:center">暂无近期内部人交易记录</td></tr>
+            </table>
+            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>无近期内幕交易 | 拥挤度 18/100（低拥挤度） | 动量 -3.3% | 历史5条:多5/空0,均分6.0|历史T+7准确率0%(2次,均收益-6.42%)</p>
+        </div>
+    
+        <div class="section">
+            <h2>🔮 OracleBee — 期权市场预期</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:#ffc107">6.3</div><div class="lbl">Odds 评分</div></div>
+                <div class="stat"><div class="num" style="color:#ffc107">0.85</div><div class="lbl">Put/Call Ratio</div></div>
+                <div class="stat"><div class="num">51.1%</div><div class="lbl">IV Rank</div></div>
+                <div class="stat"><div class="num">59.6%</div><div class="lbl">当前 IV</div></div>
+            </div>
+            <table style="margin-bottom:12px;">
+                <tr><th>指标</th><th>数值</th><th>信号</th></tr>
+                <tr><td>Gamma 压榨风险</td><td>medium</td><td>✅ 可控</td></tr>
+                <tr><td>期权流方向</td><td>neutral</td><td>—</td></tr>
+                <tr><td>IV 偏斜比</td><td>0.91</td><td>✅ 正常</td></tr>
+                <tr><td>总持仓量</td><td>76,003</td><td>—</td></tr>
+            </table>
+            
+            <h3>关键价位</h3><p>支撑：$30(OI:7,870) | $25(OI:5,742) | $21(OI:3,212)</p><p>压力：$22(OI:10,316) | $20(OI:5,310) | $32(OI:4,049)</p>
+            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>IV 处于理想水位 | 异常流:混合期权流 Call:3 Put:3 | $26.6 | 预测市场看多（隐含概率 68%） | 历史5条:多5/空0,均分6.0|历史T+7准确率0%(2次,均收益-6.42%)</p>
+        </div>
+    
+        <div class="section">
+            <h2>⏰ ChronosBee — 催化剂时间线</h2>
+            <div style="margin-bottom:12px;">
+                <span class="stat" style="display:inline-block;margin-right:10px;">
+                    <span class="num" style="color:#ffc107">7.2</span>
+                    <span class="lbl"> Catalyst 评分</span>
+                </span>
+                <span style="color:#666;font-size:0.9em">检测到 3 个催化剂</span>
+            </div>
+            
+            <div style="background:#f8f9ff;border-radius:8px;padding:15px;margin:12px 0;overflow-x:auto;">
+                <pre style="font-family:monospace;font-size:0.8em;color:#333;line-height:1.8;margin:0">   今天     China Tw        Q4 2025                                                                   财报发布      
+   0天     1天              9天                                                                        69天       
+    │──────────────────────────────────────────────────────────────────────────
+    ●─●──────●────────────────────────────────────────────────────────────────●</pre>
+            </div>
+            <table style="margin-top:10px;">
+                <tr><th>事件</th><th>日期</th><th>距今</th><th>重要性</th></tr>
+                <tr>
+                    <td style="color:#ffc107;font-weight:bold">China Two Sessions Policy</td>
+                    <td>2026-03-12</td>
+                    <td>1天后</td>
+                    <td><span style="background:#ffc107;color:white;padding:2px 8px;border-radius:10px;font-size:0.8em">medium</span></td>
+                </tr><tr>
+                    <td style="color:#dc3545;font-weight:bold">Q4 2025 Earnings</td>
+                    <td>2026-03-20</td>
+                    <td>9天后</td>
+                    <td><span style="background:#dc3545;color:white;padding:2px 8px;border-radius:10px;font-size:0.8em">critical</span></td>
+                </tr><tr>
+                    <td style="color:#fd7e14;font-weight:bold">财报发布</td>
+                    <td>2026-05-19</td>
+                    <td>69天后</td>
+                    <td><span style="background:#fd7e14;color:white;padding:2px 8px;border-radius:10px;font-size:0.8em">high</span></td>
+                </tr>
+            </table>
+            
+            <h3>分析师目标价</h3>
+            <div class="grid-4">
+                <div class="stat"><div class="num">$26.58</div><div class="lbl">当前价</div></div>
+                <div class="stat"><div class="num">$30.70</div><div class="lbl">目标均价</div></div>
+                <div class="stat"><div class="num">$21~$41</div><div class="lbl">目标区间</div></div>
+                <div class="stat"><div class="num" style="color:#28a745">+15.5%</div><div class="lbl">潜在涨幅</div></div>
+            </div>
+            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>催化剂 3 个 | 最近：China Two Sessions Policy（1天后） | 分析师目标$30.7(↑15.5%) | 历史5条:多5/空0,均分6.0|历史T+7准确率0%(2次,均收益-6.42%)</p>
+        </div>
+    
+        <div class="section">
+            <h2>📢 BuzzBee — 情绪与叙事</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:#ffc107">4.8</div><div class="lbl">Sentiment 评分</div></div>
+                <div class="stat"><div class="num" style="color:#ffc107">47%</div><div class="lbl">正面情绪占比</div></div>
+                <div class="stat"><div class="num" style="color:#dc3545">-3.35%</div><div class="lbl">5日动量</div></div>
+                <div class="stat"><div class="num">1.37×</div><div class="lbl">成交量比</div></div>
+                
+            </div>
+            <p style="margin-top:10px;">Reddit 热度：<strong>第None名</strong> | 提及量：<strong>0</strong> | 状态：<strong>quiet</strong></p>
+            <h3>主流叙事</h3><ul style="margin-top:8px"><li>✅ 情绪 47%</li><li>📊 动量 -3.3%</li><li>📊 量比 1.4x</li><li>📊 Reddit 无热度</li><li>📊 新闻偏多（8多/0空）</li></ul>
+        </div>
+    
+    
+        <div class="section">
+            <h2>🛡️ GuardBee — 交叉验证</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:#ffc107">5.0</div><div class="lbl">RiskAdj 评分</div></div>
+                <div class="stat"><div class="num">20%</div><div class="lbl">信号一致性</div></div>
+                <div class="stat"><div class="num">1.20×</div><div class="lbl">调整系数</div></div>
+                <div class="stat"><div class="num">中 ⚠️</div><div class="lbl">冲突等级</div></div>
+            </div>
+            <h3>信号共振矩阵</h3>
+            <div style="overflow-x:auto;">
+                <table style="min-width:400px;">
+                    <tr><th></th><th>催化剂</th><th>内部人</th><th>期权</th><th>情绪</th><th>风控</th></tr>
+                    <tr><td><strong>催化剂</strong></td><td style='color:#ccc;text-align:center'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td></tr><tr><td><strong>内部人</strong></td><td style='text-align:center;color:#ccc'>—</td><td style='color:#ccc;text-align:center'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td></tr><tr><td><strong>期权</strong></td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='color:#ccc;text-align:center'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td></tr><tr><td><strong>情绪</strong></td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='color:#ccc;text-align:center'>—</td><td style='text-align:center;color:#ccc'>—</td></tr><tr><td><strong>风控</strong></td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='text-align:center;color:#ccc'>—</td><td style='color:#ccc;text-align:center'>—</td></tr>
+                </table>
+            </div>
+            <p style="margin-top:8px;font-size:0.82em;color:#888;">✅ 同向共振 | ⚠️ 存在冲突 | — 中性/无关</p>
+            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>共振结论：</strong>
+                2 个 Agent 同向（signal, ml_auxiliary），
+                置信度提升 0%
+            </p>
+            <p style="font-size:0.85em;color:#666;"><strong>关键判断：</strong>信号分散 | 均分 5.4 | 一致性 20% | 风险调整 1.20 | 历史5条:多5/空0,均分6.0|历史T+7准确率0%(2次,均收益-6.42%) | 板块顺风 | ⚠️ 黄金避险飙升</p>
+        </div>
+    
+        <div class="section">
+            <h2>🐻 BearBee — 看空对冲</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:#dc3545">4.0</div><div class="lbl">看空蜂评分</div></div>
+                <div class="stat"><div class="num" style="color:#ffc107">6.0/10</div><div class="lbl">看空强度</div></div>
+                <div class="stat"><div class="num">0.00</div><div class="lbl">IV Skew 比</div></div>
+                <div class="stat"><div class="num">⚠️</div><div class="lbl">风险等级</div></div>
+            </div>
+            <h3>反对观点（至少 3 条 — 硬性要求）</h3>
+            <ul style="list-style:none;padding:0;"><li style="margin:10px 0;padding:10px;background:#fff5f5;border-left:3px solid #dc3545;border-radius:4px;"><strong>1.</strong> 动量转弱 -3.3%</li><li style="margin:10px 0;padding:10px;background:#fff5f5;border-left:3px solid #dc3545;border-radius:4px;"><strong>2.</strong> 催化剂1天内到来，波动性风险↑</li><li style="margin:10px 0;padding:10px;background:#fff5f5;border-left:3px solid #dc3545;border-radius:4px;"><strong>3.</strong> 信号一致性极低(20%)，方向不确定</li></ul>
+        </div>
+
+    <!-- 第 4 章：投资假设与失效条件 -->
+    
+        <div class="section">
+            <h2>第 4 章：投资假设与失效条件</h2>
+            <h3>核心 Thesis</h3>
+            <blockquote style="border-left:4px solid #667eea;padding:12px 18px;background:#f8f9ff;border-radius:0 8px 8px 0;margin:10px 0;color:#333;font-style:italic;">
+                标的基本面分析
+            </blockquote>
+            <h3 style="margin-top:18px;">失效条件（Thesis Break）</h3>
+            <table>
+                <tr><th>条件</th><th>触发阈值</th><th>监控方式</th></tr>
+                <tr><td>动量转弱 -3.3%</td><td>信号逆转</td><td style='color:#888;font-size:0.85em'>BearBee / Form 4 监控</td></tr><tr><td>催化剂1天内到来，波动性风险↑</td><td>信号逆转</td><td style='color:#888;font-size:0.85em'>BearBee / Form 4 监控</td></tr><tr><td>信号一致性极低(20%)，方向不确定</td><td>信号逆转</td><td style='color:#888;font-size:0.85em'>BearBee / Form 4 监控</td></tr><tr><td>Q4 2025 Earnings 未达预期</td><td>数据未达共识预期</td><td style='color:#888;font-size:0.85em'>2026-03-20 当日监控</td></tr><tr><td>大机构突然撤出持仓</td><td>>5% 机构净卖出</td><td style='color:#888;font-size:0.85em'>13F/Form 4 监控</td></tr>
+            </table>
+        </div>
+
+    <!-- 第 5 章：情景推演 -->
+    
+        <div class="section">
+            <h2>第 5 章：情景推演</h2>
+            <table>
+                <tr><th>情景</th><th>概率</th><th>目标价</th><th>涨跌幅</th><th>触发条件</th></tr>
+                <tr>
+                <td>🟢 强多</td>
+                <td>25%</td>
+                <td>$31.90</td>
+                <td style="color:#28a745">+20.0%</td>
+                <td style="font-size:0.85em;color:#666">催化剂超预期 + 出口管制缓和</td>
+            </tr><tr>
+                <td>🟢 温和多</td>
+                <td>45%</td>
+                <td>$27.91</td>
+                <td style="color:#28a745">+5.0%</td>
+                <td style="font-size:0.85em;color:#666">催化剂符合预期，指引维持</td>
+            </tr><tr>
+                <td>🟡 震荡</td>
+                <td>20%</td>
+                <td>$25.25</td>
+                <td style="color:#dc3545">-5.0%</td>
+                <td style="font-size:0.85em;color:#666">获利回吐，等待下一催化剂</td>
+            </tr><tr>
+                <td>🔴 回调</td>
+                <td>10%</td>
+                <td>$22.59</td>
+                <td style="color:#dc3545">-15.0%</td>
+                <td style="font-size:0.85em;color:#666">政策恶化 或 竞品重大突破</td>
+            </tr>
+                <tr style="background:#f8f9ff;font-weight:bold;">
+                    <td colspan="2">概率加权期望价格</td>
+                    <td style="color:#28a745">$27.84</td>
+                    <td style="color:#28a745">+4.8%</td>
+                    <td>from $26.58</td>
+                </tr>
+            </table>
+            <p style="margin-top:10px;font-size:0.85em;color:#888;">
+                期望价格 = Σ(概率 × 情景价格) = 25%×$32 + 45%×$28 + 20%×$25 + 10%×$23 = <strong style="color:#28a745">$27.84</strong>
+            </p>
+        </div>
+
+    <!-- 第 6 章：风险雷达 -->
+    
+        <div class="section">
+            <h2>第 6 章：风险雷达</h2>
+            <table>
+                <tr><th>风险类型</th><th>等级</th><th>具体内容</th></tr>
+                <tr><td>监管风险</td><td>🟢 低</td><td style='font-size:0.85em;color:#666'>AI 芯片出口管制 / 政策变化风险</td></tr><tr><td>市场情绪风险</td><td>🟡 中</td><td style='font-size:0.85em;color:#666'>看空强度 6.0/10，临近催化剂</td></tr><tr><td>估值压缩风险</td><td>🟢 低</td><td style='font-size:0.85em;color:#666'>拥挤度 18/100（偏低）</td></tr><tr><td>流动性风险</td><td>🟢 低</td><td style='font-size:0.85em;color:#666'>大盘股，日均成交量充足</td></tr><tr><td>期权事件风险</td><td>🔴 高</td><td style='font-size:0.85em;color:#666'>Gamma 压榨风险：medium，IV Rank 49.6%</td></tr><tr><td>催化剂风险</td><td>🟡 中</td><td style='font-size:0.85em;color:#666'>7 天内催化剂 1 个：China Two Sessions Policy</td></tr>
+            </table>
+        </div>
+
+    <!-- 第 7 章：明日追踪任务 -->
+    
+        <div class="section">
+            <h2>第 7 章：明日追踪任务</h2>
+            <ul style="list-style:none;padding:0;"><li style="margin:8px 0;">☐ 关注 **China Two Sessions Policy**（1天后 2026-03-12）</li><li style="margin:8px 0;">☐ ⭐ 关注 **Q4 2025 Earnings**（9天后 2026-03-20）</li><li style="margin:8px 0;">☐ 监控期权到期日 **2026-03-20** 前后的 Pin Risk / Gamma Exposure</li><li style="margin:8px 0;">☐ 监控期权到期日 **2026-03-27** 前后的 Pin Risk / Gamma Exposure</li><li style="margin:8px 0;">☐ 跟踪 BearBee 看空信号是否兑现</li><li style="margin:8px 0;">☐ 检查 SEC EDGAR 是否有新 Form 4 大额内部人减持</li><li style="margin:8px 0;">☐ 观察蜂群评分是否突破 7.5（高优先级阈值）</li></ul>
+        </div>
+
+    <!-- 折叠详情：止损止盈 / 期权信号 / ML 特征 -->
+    <details>
+        <summary>📊 详细数据（止损止盈 / 期权信号 / ML 特征）</summary>
+        
+            <div style="margin-bottom:20px;">
+                <div class="grid-2">
+                    <div><h3 style="color:#dc3545;">止损位</h3><table><tr><td>conservative</td><td>$26.05</td></tr><tr><td>moderate</td><td>$25.25</td></tr><tr><td>aggressive</td><td>$24.45</td></tr></table></div>
+                    <div><h3 style="color:#28a745;">止盈位</h3>
+                        <table><tr><th>档位</th><th>价格</th><th>涨幅</th><th>操作</th></tr><tr><td>level_1</td><td>$28.17</td><td>+30%</td><td>33% | 锁定初步收益</td></tr><tr><td>level_2</td><td>$29.77</td><td>+60%</td><td>33% | 追踪止损，保护利润</td></tr><tr><td>level_3</td><td>$31.90</td><td>+20%</td><td>34% | 达到目标收益，全部清仓</td></tr></table>
+                    </div>
+                </div>
+                <p style="margin-top:15px;">最佳持仓周期：<strong>数据不足</strong></p>
+            </div>
+        
             <div class="section">
                 <h2>📈 期权信号分析</h2>
 
@@ -177,18 +400,18 @@
                     <div class="metric">
                         <span class="metric-label">IV Rank</span>
                         <span class="metric-value" style="color: #ffc107;">
-                            51.1 (中等 IV)
+                            49.6 (中等 IV)
                         </span>
                     </div>
 
                     <div class="metric">
                         <span class="metric-label">当前 IV</span>
-                        <span class="metric-value">59.57%</span>
+                        <span class="metric-value">61.33%</span>
                     </div>
 
                     <div class="metric">
                         <span class="metric-label">IV 百分位数</span>
-                        <span class="metric-value">30.7%</span>
+                        <span class="metric-value">26.8%</span>
                     </div>
 
                     <div class="metric">
@@ -224,29 +447,8 @@
                 </div>
             </div>
 
-
-    <!-- 止损止盈 -->
-    
-            <div class="section">
-                <h2>止损 / 止盈位</h2>
-                <div class="grid-2">
-                    <div>
-                        <h3 style="color:#dc3545;">止损位</h3>
-                        <table><tr><td>conservative</td><td>$26.05</td></tr><tr><td>moderate</td><td>$25.25</td></tr><tr><td>aggressive</td><td>$24.45</td></tr></table>
-                    </div>
-                    <div>
-                        <h3 style="color:#28a745;">止盈位</h3>
-                        <table><tr><td>level_1</td><td>$28.17</td><td>+30%</td><td>33% | 锁定初步收益</td></tr><tr><td>level_2</td><td>$29.77</td><td>+60%</td><td>33% | 追踪止损，保护利润</td></tr><tr><td>level_3</td><td>$31.90</td><td>+20%</td><td>34% | 达到目标收益，全部清仓</td></tr></table>
-                    </div>
-                </div>
-                <p style="margin-top:15px;">最佳持仓周期：<strong>数据不足</strong></p>
-            </div>
-
-    <!-- 投资建议 -->
-    
-
-    <!-- ML 特征 -->
-    
+        
+    </details>
 
     <!-- 免责声明 -->
     <div class="section" style="background:#fff3cd; border:1px solid #ffc107;">
@@ -257,7 +459,7 @@
     </div>
 
     <div class="footer">
-        <p><a href="index.html" style="color:white;">返回仪表板</a></p>
+        <p><a href="index.html" style="color:white;">← 返回仪表板</a></p>
     </div>
 </div>
 </body>
