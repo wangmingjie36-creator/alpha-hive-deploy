@@ -590,15 +590,34 @@ class MLEnhancedReportGenerator:
         else:
             rating_color = '#ffc107'
 
+        # ML 预测部分（提前计算，用于修正蜂群表中 RivalBee 的旧概率值）
+        pred = ml_pred.get('prediction', {})
+        ml_prob_val = pred.get('probability', 0.5) * 100
+
+        # 用 fresh ML 概率修正 swarm 里 RivalBeeVanguard 的历史缓存值（防止旧扫描结果显示 100%）
+        import re as _re
+        if swarm and 'agent_details' in swarm and 'RivalBeeVanguard' in swarm['agent_details']:
+            rival = swarm['agent_details']['RivalBeeVanguard']
+            rival_details = rival.get('details', {})
+            old_prob = rival_details.get('probability', None)
+            # 只在概率明显异常（>0.95）时覆盖，避免误改正常值
+            if old_prob is not None and old_prob > 0.95:
+                fresh_prob = pred.get('probability', 0.5)
+                rival_details['probability'] = fresh_prob
+                rival['details'] = rival_details
+                rival['score'] = round(min(9.5, max(0.5, fresh_prob * 10)), 1)
+                old_disc = rival.get('discovery', '')
+                rival['discovery'] = _re.sub(
+                    r'ML 胜率 \d+%',
+                    f'ML 胜率 {fresh_prob*100:.0f}%',
+                    old_disc
+                )
+
         # 蜂群智能部分
         swarm_html = self._generate_swarm_section_html(swarm)
 
         # 期权部分
         options_html = self._generate_options_section_html(options) if options else ""
-
-        # ML 预测部分
-        pred = ml_pred.get('prediction', {})
-        ml_prob_val = pred.get('probability', 0.5) * 100
         ml_features = ml_pred.get('feature_importance', {})
         ml_html = ""
         if ml_features:
