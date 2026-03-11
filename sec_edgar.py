@@ -478,8 +478,11 @@ class SECEdgarClient:
                     _deduped.append(dict(_t))
             notable_trades = _deduped
 
-        # 排序：按金额降序
-        notable_trades.sort(key=lambda x: x["total_value"], reverse=True)
+        # 排序：金额>0 的按金额降序；金额=0（如 Code A 授予）的按股数降序，确保 CEO 等高管不被截断
+        notable_trades.sort(
+            key=lambda x: (x["total_value"] if x["total_value"] > 0 else x["shares"]),
+            reverse=True
+        )
         notable_trades = notable_trades[:10]  # 最多保留 10 条
 
         # 生成摘要

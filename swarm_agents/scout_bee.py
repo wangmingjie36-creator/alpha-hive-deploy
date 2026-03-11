@@ -176,7 +176,12 @@ class ScoutBeeNova(BeeAgent):
                         "filings": insider_data.get("total_filings", 0) if insider_data else 0,
                         "dollar_bought": insider_data.get("dollar_bought", 0) if insider_data else 0,
                         "dollar_sold": insider_data.get("dollar_sold", 0) if insider_data else 0,
-                        "notable_trades": (insider_data.get("notable_trades", [])[:3]) if insider_data else [],
+                        "notable_trades": (sorted(
+                            insider_data.get("notable_trades", []),
+                            key=lambda t: (t.get("total_value", 0) if t.get("total_value", 0) > 0
+                                          else t.get("shares", 0)),
+                            reverse=True
+                        )[:5]) if insider_data else [],
                         "rss_fresh_today": rss_fresh_today,
                         "rss_summary": rss_summary_text,
                     },
