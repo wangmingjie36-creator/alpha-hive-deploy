@@ -346,20 +346,22 @@ class SimpleMLModel:
         direction_norm = _norm("direction_encoded", data.direction_encoded)
 
         # 加权求和（各特征方向性处理）
+        # 注意：每个分项必须在 [0, 1] 范围内，权重总和 = 1.0，
+        # 这样加权和自然在 [0, 1]，不需要截断。
         probability = (
             self.weights.get("crowding", 0) * (1.0 - crowding_norm * 0.3)
             + self.weights.get("catalyst", 0) * catalyst_norm
-            + self.weights.get("momentum", 0) * (momentum_norm + 0.5)
+            + self.weights.get("momentum", 0) * (0.3 + momentum_norm * 0.7)  # 正动量加分，范围 [0.3, 1.0]
             + self.weights.get("volatility", 0) * (1.0 - volatility_norm * 0.5)
-            + self.weights.get("sentiment", 0) * (sentiment_norm + 0.5)
+            + self.weights.get("sentiment", 0) * (0.3 + sentiment_norm * 0.7)  # 正情绪加分，范围 [0.3, 1.0]
             # v2 新特征
             + self.weights.get("iv_rank", 0) * (1.0 - iv_rank_norm * 0.3)  # 高IV→略降
             + self.weights.get("put_call_ratio", 0) * (1.0 - pcr_norm * 0.4)  # 高P/C→看空
             + self.weights.get("final_score", 0) * final_score_norm
             + self.weights.get("odds_score", 0) * odds_norm
             + self.weights.get("risk_adj_score", 0) * risk_adj_norm
-            + self.weights.get("agent_agreement", 0) * (agreement_norm + 0.3)  # 高共识加分
-            + self.weights.get("direction_encoded", 0) * (direction_norm + 0.5)
+            + self.weights.get("agent_agreement", 0) * (0.3 + agreement_norm * 0.7)  # 高共识加分，范围 [0.3, 1.0]
+            + self.weights.get("direction_encoded", 0) * (0.3 + direction_norm * 0.7)  # 看多方向加分，范围 [0.3, 1.0]
         )
 
         return max(0.0, min(1.0, probability))
@@ -626,7 +628,7 @@ class SGDMLModel:
 
     # ---- 预测 ----
     def predict_probability(self, data: TrainingData) -> float:
-        """预测赚钱概率 (0~1)"""
+        """预测赚钱概率 (0~1)，含小样本校准"""
         import numpy as np
 
         if not self._clf_fitted:
@@ -637,7 +639,19 @@ class SGDMLModel:
         prob = self._clf.predict_proba(X_scaled)[0]
 
         # prob 是 [P(class=0), P(class=1)]
-        return float(prob[1]) if len(prob) > 1 else float(prob[0])
+        raw_prob = float(prob[1]) if len(prob) > 1 else float(prob[0])
+
+        # --- 小样本校准（防止极端概率 0%/100%）---
+        # 样本 < MIN_CONFIDENT 时，按比例混合先验 50%
+        # 随着样本增加，逐步信任模型原始输出
+        MIN_CONFIDENT = 100
+        confidence_ratio = min(self._n_samples_seen / MIN_CONFIDENT, 1.0)
+        calibrated = raw_prob * confidence_ratio + 0.5 * (1 - confidence_ratio)
+
+        # 硬裁剪：永不超过 [5%, 95%] 区间（即使 100+ 样本也不该过度自信）
+        calibrated = max(0.05, min(0.95, calibrated))
+
+        return calibrated
 
     def predict_return(self, data: TrainingData) -> Dict:
         """预测收益（公式与 SimpleMLModel 完全一致）"""
