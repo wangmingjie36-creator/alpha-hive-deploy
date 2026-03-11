@@ -1,0 +1,162 @@
+{
+  "ticker": "BIIB",
+  "timestamp": "2026-03-10T19:58:07.363803",
+  "advanced_analysis": {
+    "ticker": "BIIB",
+    "timestamp": "2026-03-10T19:58:16.937717",
+    "overview": "\u6807\u7684\u57fa\u672c\u9762\u5206\u6790",
+    "industry_comparison": {
+      "industry": "Biotech",
+      "leader": "VKTX",
+      "position": "Challenger",
+      "competitors": [
+        "AMGN",
+        "BIIB",
+        "REGN"
+      ],
+      "comparative_strength": 50,
+      "competitive_advantages": [],
+      "competitive_threats": []
+    },
+    "historical_analysis": {
+      "similar_opportunities": [],
+      "expected_returns": {
+        "note": "\u5386\u53f2\u6570\u636e\u4e0d\u8db3",
+        "sample_size": 0
+      }
+    },
+    "probability_analysis": {
+      "win_probability_pct": 65.0,
+      "risk_reward_ratio": 2.0
+    },
+    "position_management": {
+      "stop_loss": {
+        "conservative": 184.64,
+        "moderate": 178.99,
+        "aggressive": 173.34
+      },
+      "take_profit": {
+        "level_1": {
+          "price": 199.71,
+          "gain_pct": 30,
+          "sell_ratio": 0.33,
+          "reason": "\u9501\u5b9a\u521d\u6b65\u6536\u76ca"
+        },
+        "level_2": {
+          "price": 211.02,
+          "gain_pct": 60,
+          "sell_ratio": 0.33,
+          "reason": "\u8ffd\u8e2a\u6b62\u635f\uff0c\u4fdd\u62a4\u5229\u6da6"
+        },
+        "level_3": {
+          "price": 226.09,
+          "gain_pct": 20.0,
+          "sell_ratio": 0.34,
+          "reason": "\u8fbe\u5230\u76ee\u6807\u6536\u76ca\uff0c\u5168\u90e8\u6e05\u4ed3"
+        }
+      },
+      "optimal_holding_time": {
+        "note": "\u6570\u636e\u4e0d\u8db3"
+      }
+    },
+    "recommendation": {
+      "rating": "BUY",
+      "action": "\u5206\u6279\u5efa\u4ed3",
+      "confidence": "65.0%",
+      "rationale": "\u8d5a\u94b1\u6982\u7387 65.0%\uff0c\u98ce\u9669\u6536\u76ca\u6bd4 2.0:1"
+    },
+    "options_analysis": {
+      "ticker": "BIIB",
+      "timestamp": "2026-03-10T19:58:18.163948",
+      "data_quality": "real",
+      "iv_rank": 13.56,
+      "iv_percentile": 9.09,
+      "iv_current": 45.05,
+      "put_call_ratio": 0.61,
+      "total_oi": 19077,
+      "gamma_exposure": 0.0,
+      "gamma_squeeze_risk": "medium",
+      "unusual_activity": [],
+      "key_levels": {
+        "support": [
+          {
+            "strike": 125.0,
+            "oi": 2018,
+            "iv": 0.92187578125
+          },
+          {
+            "strike": 160.0,
+            "oi": 843,
+            "iv": 0.5371140039062501
+          },
+          {
+            "strike": 145.0,
+            "oi": 800,
+            "iv": 0.7226590234375
+          }
+        ],
+        "resistance": [
+          {
+            "strike": 160.0,
+            "oi": 3030,
+            "iv": 0.50586431640625
+          },
+          {
+            "strike": 170.0,
+            "oi": 1131,
+            "iv": 0.6562534375000001
+          },
+          {
+            "strike": 165.0,
+            "oi": 1109,
+            "iv": 0.8217791259765624
+          }
+        ]
+      },
+      "flow_direction": "bullish",
+      "options_score": 5.0,
+      "signal_summary": "\u505a\u591a\u6c14\u6c1b\u6d53\u539a\uff08P/C\u4f4e\uff09",
+      "expiration_dates": [
+        "2026-03-20",
+        "2026-03-27",
+        "2026-04-02"
+      ],
+      "iv_skew_ratio": 1.21,
+      "iv_skew_signal": "neutral",
+      "iv_skew_detail": {
+        "skew_ratio": 1.21,
+        "skew_signal": "neutral",
+        "otm_put_iv": 46.03,
+        "otm_call_iv": 38.04
+      }
+    }
+  },
+  "ml_prediction": {
+    "ticker": "BIIB",
+    "date": "2026-03-10T19:58:18.164204",
+    "input": {
+      "crowding_score": 500.0,
+      "catalyst_quality": "A",
+      "momentum_5d": -0.8055168788201228,
+      "volatility": 5.0,
+      "market_sentiment": 0.0
+    },
+    "prediction": {
+      "probability": 0.565,
+      "expected_3d": -9.241655063646036,
+      "expected_7d": -24.6444135030561,
+      "expected_30d": -36.96662025458414
+    },
+    "recommendation": "HOLD - \u7b49\u5f85\u66f4\u597d\u673a\u4f1a",
+    "training_data_source": "unknown"
+  },
+  "combined_recommendation": {
+    "human_probability": 65.0,
+    "ml_probability": 56.5,
+    "combined_probability": 62.4,
+    "rating": "HOLD",
+    "action": "\u89c2\u5bdf\u7b49\u5f85",
+    "confidence": "62.4%",
+    "reasoning": "\u4eba\u5de5\u5206\u6790 65.0% + ML \u9884\u6d4b 56.5% = \u7efc\u5408 62.4%"
+  }
+}

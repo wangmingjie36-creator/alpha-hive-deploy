@@ -1,0 +1,195 @@
+{
+  "ticker": "AMGN",
+  "timestamp": "2026-03-10T19:58:07.363803",
+  "advanced_analysis": {
+    "ticker": "AMGN",
+    "timestamp": "2026-03-10T19:58:15.584716",
+    "overview": "\u6807\u7684\u57fa\u672c\u9762\u5206\u6790",
+    "industry_comparison": {
+      "industry": "Biotech",
+      "leader": "VKTX",
+      "position": "Challenger",
+      "competitors": [
+        "AMGN",
+        "BIIB",
+        "REGN"
+      ],
+      "comparative_strength": 50,
+      "competitive_advantages": [],
+      "competitive_threats": []
+    },
+    "historical_analysis": {
+      "similar_opportunities": [],
+      "expected_returns": {
+        "note": "\u5386\u53f2\u6570\u636e\u4e0d\u8db3",
+        "sample_size": 0
+      }
+    },
+    "probability_analysis": {
+      "win_probability_pct": 65.0,
+      "risk_reward_ratio": 2.0
+    },
+    "position_management": {
+      "stop_loss": {
+        "conservative": 367.92,
+        "moderate": 356.66,
+        "aggressive": 345.4
+      },
+      "take_profit": {
+        "level_1": {
+          "price": 397.96,
+          "gain_pct": 30,
+          "sell_ratio": 0.33,
+          "reason": "\u9501\u5b9a\u521d\u6b65\u6536\u76ca"
+        },
+        "level_2": {
+          "price": 420.48,
+          "gain_pct": 60,
+          "sell_ratio": 0.33,
+          "reason": "\u8ffd\u8e2a\u6b62\u635f\uff0c\u4fdd\u62a4\u5229\u6da6"
+        },
+        "level_3": {
+          "price": 450.52,
+          "gain_pct": 20.0,
+          "sell_ratio": 0.34,
+          "reason": "\u8fbe\u5230\u76ee\u6807\u6536\u76ca\uff0c\u5168\u90e8\u6e05\u4ed3"
+        }
+      },
+      "optimal_holding_time": {
+        "note": "\u6570\u636e\u4e0d\u8db3"
+      }
+    },
+    "recommendation": {
+      "rating": "BUY",
+      "action": "\u5206\u6279\u5efa\u4ed3",
+      "confidence": "65.0%",
+      "rationale": "\u8d5a\u94b1\u6982\u7387 65.0%\uff0c\u98ce\u9669\u6536\u76ca\u6bd4 2.0:1"
+    },
+    "options_analysis": {
+      "ticker": "AMGN",
+      "timestamp": "2026-03-10T19:58:16.804173",
+      "data_quality": "real",
+      "iv_rank": 34.67,
+      "iv_percentile": 16.45,
+      "iv_current": 35.57,
+      "put_call_ratio": 0.89,
+      "total_oi": 28569,
+      "gamma_exposure": 0.0,
+      "gamma_squeeze_risk": "medium",
+      "unusual_activity": [
+        {
+          "type": "call_sweep",
+          "strike": 290.0,
+          "volume": 39703.0,
+          "oi": 10,
+          "ratio": 3970.3,
+          "bullish": true
+        },
+        {
+          "type": "call_sweep",
+          "strike": 240.0,
+          "volume": 24600.0,
+          "oi": 6,
+          "ratio": 4100.0,
+          "bullish": true
+        },
+        {
+          "type": "call_sweep",
+          "strike": 405.0,
+          "volume": 213.0,
+          "oi": 9,
+          "ratio": 23.67,
+          "bullish": true
+        },
+        {
+          "type": "put_sweep",
+          "strike": 345.0,
+          "volume": 171.0,
+          "oi": 10,
+          "ratio": 17.1,
+          "bullish": false
+        }
+      ],
+      "key_levels": {
+        "support": [
+          {
+            "strike": 300.0,
+            "oi": 1816,
+            "iv": 0.6743196630859377
+          },
+          {
+            "strike": 250.0,
+            "oi": 1284,
+            "iv": 1.276859084472656
+          },
+          {
+            "strike": 280.0,
+            "oi": 966,
+            "iv": 0.9345709667968749
+          }
+        ],
+        "resistance": [
+          {
+            "strike": 405.0,
+            "oi": 1503,
+            "iv": 0.3407048352050781
+          },
+          {
+            "strike": 350.0,
+            "oi": 1436,
+            "iv": 0.5152636364746093
+          },
+          {
+            "strike": 360.0,
+            "oi": 1319,
+            "iv": 0.3737855590820312
+          }
+        ]
+      },
+      "flow_direction": "neutral",
+      "options_score": 6.5,
+      "signal_summary": "\u68c0\u6d4b\u5230 3 \u4e2a\u770b\u6da8\u5f02\u52a8",
+      "expiration_dates": [
+        "2026-03-20",
+        "2026-03-27",
+        "2026-04-02"
+      ],
+      "iv_skew_ratio": 1.141,
+      "iv_skew_signal": "neutral",
+      "iv_skew_detail": {
+        "skew_ratio": 1.141,
+        "skew_signal": "neutral",
+        "otm_put_iv": 35.92,
+        "otm_call_iv": 31.48
+      }
+    }
+  },
+  "ml_prediction": {
+    "ticker": "AMGN",
+    "date": "2026-03-10T19:58:16.804572",
+    "input": {
+      "crowding_score": 500.0,
+      "catalyst_quality": "A",
+      "momentum_5d": -1.012470390256004,
+      "volatility": 5.0,
+      "market_sentiment": 0.0
+    },
+    "prediction": {
+      "probability": 0.565,
+      "expected_3d": -9.303741117076802,
+      "expected_7d": -24.809976312204807,
+      "expected_30d": -37.21496446830721
+    },
+    "recommendation": "HOLD - \u7b49\u5f85\u66f4\u597d\u673a\u4f1a",
+    "training_data_source": "unknown"
+  },
+  "combined_recommendation": {
+    "human_probability": 65.0,
+    "ml_probability": 56.5,
+    "combined_probability": 62.4,
+    "rating": "HOLD",
+    "action": "\u89c2\u5bdf\u7b49\u5f85",
+    "confidence": "62.4%",
+    "reasoning": "\u4eba\u5de5\u5206\u6790 65.0% + ML \u9884\u6d4b 56.5% = \u7efc\u5408 62.4%"
+  }
+}

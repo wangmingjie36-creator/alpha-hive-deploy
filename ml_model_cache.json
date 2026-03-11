@@ -1,0 +1,230 @@
+{
+  "model_type": "sgd",
+  "feature_count": 12,
+  "feature_names": [
+    "crowding",
+    "catalyst",
+    "momentum",
+    "volatility",
+    "sentiment",
+    "iv_rank",
+    "put_call_ratio",
+    "final_score",
+    "odds_score",
+    "risk_adj_score",
+    "agent_agreement",
+    "direction_encoded"
+  ],
+  "is_trained": true,
+  "training_accuracy": 100.0,
+  "n_samples_seen": 13,
+  "feature_stats": {
+    "crowding": {
+      "min": 24.700000000000003,
+      "max": 84.5,
+      "mean": 43.65384615384615
+    },
+    "catalyst": {
+      "min": 0.4,
+      "max": 0.85,
+      "mean": 0.6423076923076922
+    },
+    "momentum": {
+      "min": 0.0,
+      "max": 0.0,
+      "mean": 0.0
+    },
+    "volatility": {
+      "min": 5.0,
+      "max": 5.0,
+      "mean": 5.0
+    },
+    "sentiment": {
+      "min": -14.000000000000004,
+      "max": 36.400000000000006,
+      "mean": 3.1538461538461537
+    },
+    "iv_rank": {
+      "min": 50.0,
+      "max": 50.0,
+      "mean": 50.0
+    },
+    "put_call_ratio": {
+      "min": 1.0,
+      "max": 1.0,
+      "mean": 1.0
+    },
+    "final_score": {
+      "min": 4.11,
+      "max": 7.54,
+      "mean": 5.458461538461539
+    },
+    "odds_score": {
+      "min": 3.0,
+      "max": 7.08,
+      "mean": 5.71923076923077
+    },
+    "risk_adj_score": {
+      "min": 3.8,
+      "max": 5.8,
+      "mean": 4.723076923076922
+    },
+    "agent_agreement": {
+      "min": 0.375,
+      "max": 0.75,
+      "mean": 0.5769230769230769
+    },
+    "direction_encoded": {
+      "min": 0.0,
+      "max": 1.0,
+      "mean": 0.6923076923076923
+    }
+  },
+  "weights": {
+    "crowding": 0.10326328487403143,
+    "catalyst": 0.15523004169929663,
+    "momentum": 0.0,
+    "volatility": 0.0,
+    "sentiment": 0.09013312298903443,
+    "iv_rank": 0.0,
+    "put_call_ratio": 0.0,
+    "final_score": 0.021199340240092634,
+    "odds_score": 0.289964368678782,
+    "risk_adj_score": 0.14683270766444903,
+    "agent_agreement": 0.024808089363499916,
+    "direction_encoded": 0.16856904449081395
+  },
+  "feature_importance": {
+    "odds_score": {
+      "weight": 0.29,
+      "coefficient": 14.8789,
+      "direction": "positive"
+    },
+    "direction_encoded": {
+      "weight": 0.1686,
+      "coefficient": -8.6498,
+      "direction": "negative"
+    },
+    "catalyst": {
+      "weight": 0.1552,
+      "coefficient": -7.9653,
+      "direction": "negative"
+    },
+    "risk_adj_score": {
+      "weight": 0.1468,
+      "coefficient": -7.5344,
+      "direction": "negative"
+    },
+    "crowding": {
+      "weight": 0.1033,
+      "coefficient": 5.2987,
+      "direction": "positive"
+    },
+    "sentiment": {
+      "weight": 0.0901,
+      "coefficient": -4.625,
+      "direction": "negative"
+    },
+    "agent_agreement": {
+      "weight": 0.0248,
+      "coefficient": 1.273,
+      "direction": "positive"
+    },
+    "final_score": {
+      "weight": 0.0212,
+      "coefficient": -1.0878,
+      "direction": "negative"
+    },
+    "momentum": {
+      "weight": 0.0,
+      "coefficient": 0.0,
+      "direction": "neutral"
+    },
+    "volatility": {
+      "weight": 0.0,
+      "coefficient": 0.0,
+      "direction": "neutral"
+    },
+    "iv_rank": {
+      "weight": 0.0,
+      "coefficient": 0.0,
+      "direction": "neutral"
+    },
+    "put_call_ratio": {
+      "weight": 0.0,
+      "coefficient": 0.0,
+      "direction": "neutral"
+    }
+  },
+  "sgd": {
+    "coef": [
+      [
+        5.298730543354419,
+        -7.965291479944877,
+        0.0,
+        0.0,
+        -4.6249848853105915,
+        0.0,
+        0.0,
+        -1.0877979696866085,
+        14.878890001194678,
+        -7.5344005743584885,
+        1.2729730706610536,
+        -8.649753354225977
+      ]
+    ],
+    "intercept": [
+      -0.06016324665071619
+    ],
+    "classes": [
+      0,
+      1
+    ],
+    "t": 261.0
+  },
+  "scaler": {
+    "mean": [
+      43.65384615384615,
+      0.6423076923076922,
+      0.0,
+      5.0,
+      3.1538461538461537,
+      50.0,
+      1.0,
+      5.458461538461539,
+      5.71923076923077,
+      4.723076923076922,
+      0.5769230769230769,
+      0.6923076923076923
+    ],
+    "var": [
+      372.4932544378699,
+      0.029556213017751472,
+      0.0,
+      0.0,
+      197.40402366863913,
+      0.0,
+      0.0,
+      1.0407514792899408,
+      1.8820378698224853,
+      0.37869822485207105,
+      0.020525147928994084,
+      0.21301775147928995
+    ],
+    "scale": [
+      19.300084311677757,
+      0.17191920491251544,
+      1.0,
+      1.0,
+      14.050054222978613,
+      1.0,
+      1.0,
+      1.0201722792204957,
+      1.3718738534655748,
+      0.6153846153846154,
+      0.1432660040937629,
+      0.46153846153846156
+    ],
+    "n_samples_seen": 13
+  }
+}

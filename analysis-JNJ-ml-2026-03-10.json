@@ -1,0 +1,183 @@
+{
+  "ticker": "JNJ",
+  "timestamp": "2026-03-10T19:58:07.363803",
+  "advanced_analysis": {
+    "ticker": "JNJ",
+    "timestamp": "2026-03-10T19:58:18.379675",
+    "overview": "\u6807\u7684\u57fa\u672c\u9762\u5206\u6790",
+    "industry_comparison": {},
+    "historical_analysis": {
+      "similar_opportunities": [],
+      "expected_returns": {
+        "note": "\u5386\u53f2\u6570\u636e\u4e0d\u8db3",
+        "sample_size": 0
+      }
+    },
+    "probability_analysis": {
+      "win_probability_pct": 65.0,
+      "risk_reward_ratio": 2.0
+    },
+    "position_management": {
+      "stop_loss": {
+        "conservative": 238.84,
+        "moderate": 231.52,
+        "aggressive": 224.21
+      },
+      "take_profit": {
+        "level_1": {
+          "price": 258.33,
+          "gain_pct": 30,
+          "sell_ratio": 0.33,
+          "reason": "\u9501\u5b9a\u521d\u6b65\u6536\u76ca"
+        },
+        "level_2": {
+          "price": 272.96,
+          "gain_pct": 60,
+          "sell_ratio": 0.33,
+          "reason": "\u8ffd\u8e2a\u6b62\u635f\uff0c\u4fdd\u62a4\u5229\u6da6"
+        },
+        "level_3": {
+          "price": 292.45,
+          "gain_pct": 20.0,
+          "sell_ratio": 0.34,
+          "reason": "\u8fbe\u5230\u76ee\u6807\u6536\u76ca\uff0c\u5168\u90e8\u6e05\u4ed3"
+        }
+      },
+      "optimal_holding_time": {
+        "note": "\u6570\u636e\u4e0d\u8db3"
+      }
+    },
+    "recommendation": {
+      "rating": "BUY",
+      "action": "\u5206\u6279\u5efa\u4ed3",
+      "confidence": "65.0%",
+      "rationale": "\u8d5a\u94b1\u6982\u7387 65.0%\uff0c\u98ce\u9669\u6536\u76ca\u6bd4 2.0:1"
+    },
+    "options_analysis": {
+      "ticker": "JNJ",
+      "timestamp": "2026-03-10T19:58:20.138620",
+      "data_quality": "real",
+      "iv_rank": 27.77,
+      "iv_percentile": 55.41,
+      "iv_current": 33.5,
+      "put_call_ratio": 1.93,
+      "total_oi": 74378,
+      "gamma_exposure": 0.0,
+      "gamma_squeeze_risk": "medium",
+      "unusual_activity": [
+        {
+          "type": "call_sweep",
+          "strike": 155.0,
+          "volume": 16900.0,
+          "oi": 4,
+          "ratio": 4225.0,
+          "bullish": true
+        },
+        {
+          "type": "call_sweep",
+          "strike": 160.0,
+          "volume": 11420.0,
+          "oi": 11,
+          "ratio": 1038.18,
+          "bullish": true
+        },
+        {
+          "type": "call_sweep",
+          "strike": 170.0,
+          "volume": 10817.0,
+          "oi": 3,
+          "ratio": 3605.67,
+          "bullish": true
+        },
+        {
+          "type": "put_sweep",
+          "strike": 217.5,
+          "volume": 8.0,
+          "oi": 1,
+          "ratio": 8.0,
+          "bullish": false
+        }
+      ],
+      "key_levels": {
+        "support": [
+          {
+            "strike": 200.0,
+            "oi": 11119,
+            "iv": 0.5449264257812501
+          },
+          {
+            "strike": 230.0,
+            "oi": 3766,
+            "iv": 0.3186103295898437
+          },
+          {
+            "strike": 210.0,
+            "oi": 3047,
+            "iv": 0.5136767382812499
+          }
+        ],
+        "resistance": [
+          {
+            "strike": 250.0,
+            "oi": 5499,
+            "iv": 0.2574537145996094
+          },
+          {
+            "strike": 220.0,
+            "oi": 4427,
+            "iv": 0.5754436987304687
+          },
+          {
+            "strike": 230.0,
+            "oi": 4213,
+            "iv": 0.4699760034179688
+          }
+        ]
+      },
+      "flow_direction": "bearish",
+      "options_score": 4.5,
+      "signal_summary": "\u68c0\u6d4b\u5230 3 \u4e2a\u770b\u6da8\u5f02\u52a8",
+      "expiration_dates": [
+        "2026-03-20",
+        "2026-03-27",
+        "2026-04-02"
+      ],
+      "iv_skew_ratio": 1.198,
+      "iv_skew_signal": "neutral",
+      "iv_skew_detail": {
+        "skew_ratio": 1.198,
+        "skew_signal": "neutral",
+        "otm_put_iv": 31.56,
+        "otm_call_iv": 26.35
+      }
+    }
+  },
+  "ml_prediction": {
+    "ticker": "JNJ",
+    "date": "2026-03-10T19:58:20.138883",
+    "input": {
+      "crowding_score": 500.0,
+      "catalyst_quality": "A",
+      "momentum_5d": -0.6481843938481835,
+      "volatility": 5.0,
+      "market_sentiment": 0.0
+    },
+    "prediction": {
+      "probability": 0.565,
+      "expected_3d": -9.194455318154455,
+      "expected_7d": -24.51854751507855,
+      "expected_30d": -36.77782127261782
+    },
+    "recommendation": "HOLD - \u7b49\u5f85\u66f4\u597d\u673a\u4f1a",
+    "training_data_source": "unknown"
+  },
+  "combined_recommendation": {
+    "human_probability": 65.0,
+    "ml_probability": 56.5,
+    "combined_probability": 62.4,
+    "rating": "HOLD",
+    "action": "\u89c2\u5bdf\u7b49\u5f85",
+    "confidence": "62.4%",
+    "reasoning": "\u4eba\u5de5\u5206\u6790 65.0% + ML \u9884\u6d4b 56.5% = \u7efc\u5408 62.4%"
+  }
+}

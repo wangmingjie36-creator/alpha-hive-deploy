@@ -1,0 +1,784 @@
+{
+  "ticker": "CRCL",
+  "timestamp": "2026-03-10T19:58:40.940199",
+  "advanced_analysis": {
+    "ticker": "CRCL",
+    "timestamp": "2026-03-10T19:58:46.997321",
+    "overview": "\u6807\u7684\u57fa\u672c\u9762\u5206\u6790",
+    "industry_comparison": {},
+    "historical_analysis": {
+      "similar_opportunities": [],
+      "expected_returns": {
+        "note": "\u5386\u53f2\u6570\u636e\u4e0d\u8db3",
+        "sample_size": 0
+      }
+    },
+    "probability_analysis": {
+      "win_probability_pct": 65.0,
+      "risk_reward_ratio": 2.0
+    },
+    "position_management": {
+      "stop_loss": {
+        "conservative": 115.73,
+        "moderate": 112.19,
+        "aggressive": 108.64
+      },
+      "take_profit": {
+        "level_1": {
+          "price": 125.18,
+          "gain_pct": 30,
+          "sell_ratio": 0.33,
+          "reason": "\u9501\u5b9a\u521d\u6b65\u6536\u76ca"
+        },
+        "level_2": {
+          "price": 132.26,
+          "gain_pct": 60,
+          "sell_ratio": 0.33,
+          "reason": "\u8ffd\u8e2a\u6b62\u635f\uff0c\u4fdd\u62a4\u5229\u6da6"
+        },
+        "level_3": {
+          "price": 141.71,
+          "gain_pct": 20.0,
+          "sell_ratio": 0.34,
+          "reason": "\u8fbe\u5230\u76ee\u6807\u6536\u76ca\uff0c\u5168\u90e8\u6e05\u4ed3"
+        }
+      },
+      "optimal_holding_time": {
+        "note": "\u6570\u636e\u4e0d\u8db3"
+      }
+    },
+    "recommendation": {
+      "rating": "BUY",
+      "action": "\u5206\u6279\u5efa\u4ed3",
+      "confidence": "65.0%",
+      "rationale": "\u8d5a\u94b1\u6982\u7387 65.0%\uff0c\u98ce\u9669\u6536\u76ca\u6bd4 2.0:1"
+    },
+    "options_analysis": {
+      "ticker": "CRCL",
+      "timestamp": "2026-03-10T19:58:48.216873",
+      "data_quality": "real",
+      "iv_rank": 17.86,
+      "iv_percentile": 38.01,
+      "iv_current": 88.96,
+      "put_call_ratio": 0.68,
+      "total_oi": 161495,
+      "gamma_exposure": 0.0,
+      "gamma_squeeze_risk": "medium",
+      "unusual_activity": [
+        {
+          "type": "put_sweep",
+          "strike": 110.0,
+          "volume": 2337.0,
+          "oi": 117,
+          "ratio": 19.97,
+          "bullish": false
+        },
+        {
+          "type": "put_sweep",
+          "strike": 120.0,
+          "volume": 1062.0,
+          "oi": 145,
+          "ratio": 7.32,
+          "bullish": false
+        },
+        {
+          "type": "put_sweep",
+          "strike": 110.0,
+          "volume": 684.0,
+          "oi": 41,
+          "ratio": 16.68,
+          "bullish": false
+        }
+      ],
+      "key_levels": {
+        "support": [
+          {
+            "strike": 40.0,
+            "oi": 5314,
+            "iv": 2.281254296875
+          },
+          {
+            "strike": 60.0,
+            "oi": 4861,
+            "iv": 1.81640716796875
+          },
+          {
+            "strike": 90.0,
+            "oi": 4549,
+            "iv": 1.0869186279296876
+          }
+        ],
+        "resistance": [
+          {
+            "strike": 100.0,
+            "oi": 8202,
+            "iv": 0.8896495410156249
+          },
+          {
+            "strike": 80.0,
+            "oi": 6646,
+            "iv": 1.3701203369140624
+          },
+          {
+            "strike": 90.0,
+            "oi": 5405,
+            "iv": 1.0410204199218753
+          }
+        ]
+      },
+      "flow_direction": "bullish",
+      "options_score": 5.0,
+      "signal_summary": "\u505a\u591a\u6c14\u6c1b\u6d53\u539a\uff08P/C\u4f4e\uff09",
+      "expiration_dates": [
+        "2026-03-20",
+        "2026-03-27",
+        "2026-04-02"
+      ],
+      "iv_skew_ratio": 1.023,
+      "iv_skew_signal": "neutral",
+      "iv_skew_detail": {
+        "skew_ratio": 1.023,
+        "skew_signal": "neutral",
+        "otm_put_iv": 89.98,
+        "otm_call_iv": 88.0
+      }
+    }
+  },
+  "ml_prediction": {
+    "ticker": "CRCL",
+    "date": "2026-03-10T19:58:48.217240",
+    "input": {
+      "crowding_score": 500.0,
+      "catalyst_quality": "A",
+      "momentum_5d": 12.178208514903188,
+      "volatility": 5.0,
+      "market_sentiment": 0.0
+    },
+    "prediction": {
+      "probability": 0.565,
+      "expected_3d": -5.346537445529043,
+      "expected_7d": -14.25743318807745,
+      "expected_30d": -21.38614978211617
+    },
+    "recommendation": "HOLD - \u7b49\u5f85\u66f4\u597d\u673a\u4f1a",
+    "training_data_source": "unknown"
+  },
+  "combined_recommendation": {
+    "human_probability": 65.0,
+    "ml_probability": 56.5,
+    "combined_probability": 62.4,
+    "rating": "HOLD",
+    "action": "\u89c2\u5bdf\u7b49\u5f85",
+    "confidence": "62.4%",
+    "reasoning": "\u4eba\u5de5\u5206\u6790 65.0% + ML \u9884\u6d4b 56.5% = \u7efc\u5408 62.4%"
+  },
+  "swarm_results": {
+    "ticker": "CRCL",
+    "final_score": 7.07,
+    "direction": "bullish",
+    "resonance": {
+      "resonance_detected": true,
+      "direction": "bullish",
+      "supporting_agents": 4,
+      "cross_dim_count": 4,
+      "resonant_dimensions": [
+        "ml_auxiliary",
+        "odds",
+        "risk_adj",
+        "sentiment"
+      ],
+      "confidence_boost": 20
+    },
+    "supporting_agents": 7,
+    "agent_breakdown": {
+      "bullish": 4,
+      "bearish": 1,
+      "neutral": 2
+    },
+    "agent_directions": {
+      "RivalBeeVanguard": "bullish",
+      "ScoutBeeNova": "neutral",
+      "BuzzBeeWhisper": "bullish",
+      "ChronosBeeHorizon": "neutral",
+      "CodeExecutorAgent": "neutral",
+      "OracleBeeEcho": "bullish",
+      "GuardBeeSentinel": "bullish",
+      "BearBeeContrarian": "bearish"
+    },
+    "agent_details": {
+      "RivalBeeVanguard": {
+        "discovery": "ML \u80dc\u7387 56% | 7d +17.74% | 30d +26.61% | \u5386\u53f25\u6761:\u591a5/\u7a7a0,\u5747\u52069.1|\u5386\u53f2T+7\u51c6\u786e\u73870%(2\u6b21,\u5747\u6536\u76ca+34.88%)",
+        "score": 5.6,
+        "direction": "bullish",
+        "confidence": 0.8,
+        "dimension": "ml_auxiliary",
+        "details": {
+          "probability": 0.565,
+          "expected_3d": 6.65,
+          "expected_7d": 17.74,
+          "expected_30d": 26.61
+        }
+      },
+      "ScoutBeeNova": {
+        "discovery": "\u5185\u5e55\u5356\u51fa $15,288,403 | Tarbert Heath \u5356\u51fa 122,007\u80a1 | \u62e5\u6324\u5ea6 24/100\uff08\u4f4e\u62e5\u6324\u5ea6\uff09 | \u52a8\u91cf +12.2% | \u5386\u53f25\u6761:\u591a5/\u7a7a0,\u5747\u52069.1|\u5386\u53f2T+7\u51c6\u786e\u73870%(2\u6b21,\u5747\u6536\u76ca+34.88%)",
+        "score": 3.63,
+        "direction": "neutral",
+        "confidence": 0.88,
+        "dimension": "signal",
+        "details": {
+          "insider": {
+            "sentiment": "bearish",
+            "score": 1.0,
+            "filings": 5,
+            "dollar_bought": 0.0,
+            "dollar_sold": 15288403.27,
+            "notable_trades": [
+              {
+                "insider": "Tarbert Heath",
+                "title": "President",
+                "is_officer": true,
+                "is_director": false,
+                "code": "S",
+                "code_desc": "\u5356\u51fa",
+                "shares": 122007.0,
+                "price": 94.2287,
+                "date": "2026-03-02",
+                "total_value": 11496556.27,
+                "security": "Class A Common Stock"
+              },
+              {
+                "insider": "BURNS M MICHELE",
+                "title": "",
+                "is_officer": false,
+                "is_director": true,
+                "code": "S",
+                "code_desc": "\u5356\u51fa",
+                "shares": 25000.0,
+                "price": 105.0,
+                "date": "2026-03-04",
+                "total_value": 2625000.0,
+                "security": "Class A Common Stock"
+              },
+              {
+                "insider": "Tarbert Heath",
+                "title": "President",
+                "is_officer": true,
+                "is_director": false,
+                "code": "M",
+                "code_desc": "\u884c\u6743",
+                "shares": 75108.0,
+                "price": 25.09,
+                "date": "2026-03-02",
+                "total_value": 1884459.72,
+                "security": "Class A Common Stock"
+              }
+            ],
+            "rss_fresh_today": 0,
+            "rss_summary": ""
+          },
+          "crowding_score": 24.196666666666665,
+          "crowding_signal": 7.58,
+          "components": {
+            "stocktwits_volume": 0.0,
+            "google_trends": 40.2,
+            "consensus_strength": 16.666666666666664,
+            "polymarket_volatility": 60,
+            "seeking_alpha_views": 20,
+            "short_squeeze_risk": 30
+          },
+          "adjustment_factor": 1.2,
+          "momentum_5d": 12.178208514903188,
+          "price": 118.08999633789062
+        }
+      },
+      "BuzzBeeWhisper": {
+        "discovery": "\u60c5\u7eea 61% | \u52a8\u91cf +12.2% | \u91cf\u6bd4 1.1x | Reddit \u65e0\u70ed\u5ea6 | \u65b0\u95fb\u504f\u591a\uff0812\u591a/1\u7a7a\uff09 | \u672a\u4e0a Yahoo \u70ed\u641c | F&G 13(Extreme Fear) | \u60c5\u7eea\u52a8\u91cf:rising | \u5386\u53f25\u6761:\u591a5/\u7a7a0,\u5747\u52069.1|\u5386\u53f2T+7\u51c6\u786e\u73870%(2\u6b21,\u5747\u6536\u76ca+34.88%)",
+        "score": 6.32,
+        "direction": "bullish",
+        "confidence": 0.75,
+        "dimension": "sentiment",
+        "details": {
+          "sentiment_pct": 61,
+          "momentum_5d": 12.178208514903188,
+          "volume_ratio": 1.1321119573551008,
+          "volatility_20d": 0.0,
+          "reddit": {
+            "rank": null,
+            "mentions": 0,
+            "mention_delta": 0,
+            "buzz": "quiet",
+            "score": 5.0
+          },
+          "components": {
+            "momentum_signal": 100.0,
+            "volume_signal": 50,
+            "volatility_signal": 75,
+            "reddit_signal": 50.0
+          },
+          "sentiment_momentum": {
+            "delta_1d": 3,
+            "delta_3d": 8,
+            "delta_7d": 0,
+            "momentum_regime": "rising",
+            "momentum_score_adj": 0.2
+          },
+          "sentiment_divergence": {
+            "divergence_type": "none",
+            "severity": 0,
+            "score_adj": 0.0,
+            "description": ""
+          }
+        }
+      },
+      "ChronosBeeHorizon": {
+        "discovery": "\u50ac\u5316\u5242 4 \u4e2a | \u6700\u8fd1\uff1a\u8d22\u62a5\u53d1\u5e03\uff0862\u5929\u540e\uff09 | \u5206\u6790\u5e08\u76ee\u6807$124.91(\u21915.8%) | \u5386\u53f25\u6761:\u591a5/\u7a7a0,\u5747\u52069.1|\u5386\u53f2T+7\u51c6\u786e\u73870%(2\u6b21,\u5747\u6536\u76ca+34.88%)",
+        "score": 5.5,
+        "direction": "neutral",
+        "confidence": 0.85,
+        "dimension": "catalyst",
+        "details": {
+          "catalysts": [
+            {
+              "event": "\u8d22\u62a5\u53d1\u5e03",
+              "date": "2026-05-12",
+              "days_until": 62,
+              "type": "earnings",
+              "severity": "high"
+            },
+            {
+              "event": "Q1 2026 Earnings (First as Public Co)",
+              "date": "2026-05-15",
+              "days_until": 65,
+              "type": "earnings",
+              "severity": "critical"
+            },
+            {
+              "event": "US Stablecoin Regulation Update",
+              "date": "2026-06-30",
+              "days_until": 111,
+              "type": "regulatory",
+              "severity": "critical"
+            },
+            {
+              "event": "IPO Lock-up Expiration",
+              "date": "2026-10-01",
+              "days_until": 204,
+              "type": "regulatory",
+              "severity": "high"
+            }
+          ],
+          "analyst_targets": {
+            "target_mean": 124.91,
+            "target_low": 50.0,
+            "target_high": 280.0,
+            "target_median": 103.5,
+            "current_price": 118.09,
+            "upside_pct": 5.8
+          }
+        }
+      },
+      "CodeExecutorAgent": {
+        "discovery": "\u274c \u6570\u636e\u722c\u53d6\u5931\u8d25: ConnectionError",
+        "score": 2.0,
+        "direction": "neutral",
+        "confidence": 0.5,
+        "dimension": "unknown",
+        "details": {}
+      },
+      "OracleBeeEcho": {
+        "discovery": "\u505a\u591a\u6c14\u6c1b\u6d53\u539a\uff08P/C\u4f4e\uff09 | \u5f02\u5e38\u6d41:\u6df7\u5408\u671f\u6743\u6d41 Call:51 Put:66 | $118.1 | \u65e0\u76f8\u5173\u9884\u6d4b\u5e02\u573a | \u5386\u53f25\u6761:\u591a5/\u7a7a0,\u5747\u52069.1|\u5386\u53f2T+7\u51c6\u786e\u73870%(2\u6b21,\u5747\u6536\u76ca+34.88%)",
+        "score": 3.93,
+        "direction": "bullish",
+        "confidence": 0.7,
+        "dimension": "odds",
+        "details": {
+          "ticker": "CRCL",
+          "timestamp": "2026-03-10T15:48:47.371265",
+          "data_quality": "real",
+          "iv_rank": 16.21,
+          "iv_percentile": 32.75,
+          "iv_current": 85.96,
+          "put_call_ratio": 0.68,
+          "total_oi": 161495,
+          "gamma_exposure": 0.0,
+          "gamma_squeeze_risk": "medium",
+          "unusual_activity": [
+            {
+              "type": "put_sweep",
+              "strike": 110.0,
+              "volume": 2337.0,
+              "oi": 117,
+              "ratio": 19.97,
+              "bullish": false
+            },
+            {
+              "type": "put_sweep",
+              "strike": 120.0,
+              "volume": 1062.0,
+              "oi": 145,
+              "ratio": 7.32,
+              "bullish": false
+            },
+            {
+              "type": "put_sweep",
+              "strike": 110.0,
+              "volume": 684.0,
+              "oi": 41,
+              "ratio": 16.68,
+              "bullish": false
+            }
+          ],
+          "key_levels": {
+            "support": [
+              {
+                "strike": 40.0,
+                "oi": 5314,
+                "iv": 2.156254609375
+              },
+              {
+                "strike": 60.0,
+                "oi": 4861,
+                "iv": 1.7304700976562502
+              },
+              {
+                "strike": 90.0,
+                "oi": 4549,
+                "iv": 1.0361376318359379
+              }
+            ],
+            "resistance": [
+              {
+                "strike": 100.0,
+                "oi": 8202,
+                "iv": 0.8481460498046874
+              },
+              {
+                "strike": 80.0,
+                "oi": 6646,
+                "iv": 1.3066440917968747
+              },
+              {
+                "strike": 90.0,
+                "oi": 5405,
+                "iv": 0.992187578125
+              }
+            ]
+          },
+          "flow_direction": "bullish",
+          "options_score": 5.0,
+          "signal_summary": "\u505a\u591a\u6c14\u6c1b\u6d53\u539a\uff08P/C\u4f4e\uff09",
+          "expiration_dates": [
+            "2026-03-20",
+            "2026-03-27",
+            "2026-04-02"
+          ],
+          "iv_skew_ratio": 1.014,
+          "iv_skew_signal": "neutral",
+          "iv_skew_detail": {
+            "skew_ratio": 1.014,
+            "skew_signal": "neutral",
+            "otm_put_iv": 86.33,
+            "otm_call_iv": 85.16
+          }
+        }
+      },
+      "GuardBeeSentinel": {
+        "discovery": "\u5171\u632f\u2705 3 Agent \u540c\u5411 | \u4e00\u81f4\u6027 40% | \u98ce\u9669\u8c03\u6574 1.20 | \u5386\u53f25\u6761:\u591a5/\u7a7a0,\u5747\u52069.1|\u5386\u53f2T+7\u51c6\u786e\u73870%(2\u6b21,\u5747\u6536\u76ca+34.88%) | \u677f\u5757\u987a\u98ce | \u26a0\ufe0f \u9ec4\u91d1\u907f\u9669\u98d9\u5347",
+        "score": 9.26,
+        "direction": "bullish",
+        "confidence": 0.75,
+        "dimension": "risk_adj",
+        "details": {
+          "resonance": {
+            "resonance_detected": true,
+            "direction": "bullish",
+            "supporting_agents": 3,
+            "cross_dim_count": 3,
+            "resonant_dimensions": [
+              "ml_auxiliary",
+              "odds",
+              "sentiment"
+            ],
+            "confidence_boost": 15
+          },
+          "top_signals_count": 5,
+          "consistency": 0.4,
+          "adjustment_factor": 1.2,
+          "llm_conflict_type": "",
+          "llm_recommended_action": ""
+        }
+      },
+      "BearBeeContrarian": {
+        "discovery": "\u5185\u5e55\u5927\u989d\u629b\u552e $15,288,403\uff08\u4e70\u5165\u4ec5 $0\uff09 | 5\u65e5\u6da8\u5e45\u8fc7\u5927 +12.2% | \u5386\u53f25\u6761:\u591a5/\u7a7a0,\u5747\u52069.1|\u5386\u53f2T+7\u51c6\u786e\u73870%(2\u6b21,\u5747\u6536\u76ca+34.88%)",
+        "score": 2.32,
+        "direction": "bearish",
+        "confidence": 1.0,
+        "dimension": "contrarian",
+        "details": {
+          "bear_score": 7.68,
+          "rule_bear_score": 7.68,
+          "bearish_signals": [
+            "\u5185\u5e55\u5927\u989d\u629b\u552e $15,288,403\uff08\u4e70\u5165\u4ec5 $0\uff09",
+            "5\u65e5\u6da8\u5e45\u8fc7\u5927 +12.2%",
+            "\u671f\u6743 IV Skew \u504f\u9ad8\uff08\u770b\u8dcc\u671f\u6743\u6ea2\u4ef7\uff09"
+          ],
+          "insider_bear": 8.0,
+          "overval_bear": 6.0,
+          "options_bear": 0.0,
+          "momentum_bear": 0.0,
+          "news_bear": 0.0,
+          "data_sources": {
+            "insider": "real",
+            "valuation": "yfinance",
+            "options": "real",
+            "momentum": "yfinance",
+            "news": "finviz_api",
+            "catalyst": "real",
+            "ml": "real",
+            "guard": "real"
+          }
+        },
+        "llm_thesis": "",
+        "llm_key_risks": [],
+        "llm_contrarian_insight": "",
+        "llm_thesis_break": ""
+      }
+    },
+    "dimension_scores": {
+      "signal": 3.63,
+      "sentiment": 6.32,
+      "catalyst": 5.5,
+      "odds": 3.93,
+      "risk_adj": 9.26
+    },
+    "dimension_confidence": {
+      "signal": 0.88,
+      "sentiment": 0.75,
+      "catalyst": 0.85,
+      "odds": 0.7,
+      "risk_adj": 0.75
+    },
+    "dimension_weights": {
+      "signal": 0.2449,
+      "catalyst": 0.1809,
+      "sentiment": 0.1809,
+      "odds": 0.2214,
+      "risk_adj": 0.1718
+    },
+    "ml_adjustment": 0.4,
+    "ml_contribution_pct": 5.7,
+    "base_score_before_resonance": 5.89,
+    "pheromone_compact": [
+      {
+        "a": "RivalBee",
+        "t": "CRCL",
+        "d": "+",
+        "s": 10.0,
+        "p": 0.95,
+        "c": 3,
+        "x": {
+          "ml_probability": 1.0,
+          "expected_7d": 17.74
+        }
+      },
+      {
+        "a": "GuardBee",
+        "t": "CRCL",
+        "d": "+",
+        "s": 9.3,
+        "p": 0.95,
+        "c": 0,
+        "x": {
+          "consistency": 0.4,
+          "conflict_type": "",
+          "resonance_detected": true
+        }
+      },
+      {
+        "a": "BuzzBeeW",
+        "t": "CRCL",
+        "d": "+",
+        "s": 6.3,
+        "p": 0.75,
+        "c": 0,
+        "x": {
+          "sentiment_score": 61,
+          "reddit_momentum": 0
+        }
+      },
+      {
+        "a": "ChronosB",
+        "t": "CRCL",
+        "d": "0",
+        "s": 5.5,
+        "p": 0.8,
+        "c": 0,
+        "x": {
+          "catalyst_count": 4,
+          "nearest_days": 62,
+          "analyst_upside_pct": 5.8
+        }
+      },
+      {
+        "a": "CodeExec",
+        "t": "CRCL",
+        "d": "0",
+        "s": 5.0,
+        "p": 0.8,
+        "c": 2
+      },
+      {
+        "a": "OracleBe",
+        "t": "CRCL",
+        "d": "+",
+        "s": 3.9,
+        "p": 0.9,
+        "c": 0,
+        "x": {
+          "pc_ratio": 0.68,
+          "iv_rank": 16.21,
+          "gex": 0.0,
+          "iv_skew": 1.01
+        }
+      },
+      {
+        "a": "ScoutBee",
+        "t": "CRCL",
+        "d": "0",
+        "s": 3.6,
+        "p": 0.7,
+        "c": 0
+      },
+      {
+        "a": "BearBeeC",
+        "t": "CRCL",
+        "d": "-",
+        "s": 2.3,
+        "p": 1.0,
+        "c": 0,
+        "x": {
+          "bear_score": 7.68,
+          "signal_count": 2
+        }
+      }
+    ],
+    "data_quality": {
+      "RivalBeeVanguard": {
+        "ml_prediction": "real"
+      },
+      "ScoutBeeNova": {
+        "social_buzz": "real",
+        "google_trends": "proxy_volume",
+        "bullish_agents": "real",
+        "polymarket": "proxy_momentum",
+        "seeking_alpha": "proxy_social",
+        "short_interest": "real",
+        "momentum": "real"
+      },
+      "BuzzBeeWhisper": {
+        "momentum": "real",
+        "volume": "real",
+        "volatility": "real",
+        "reddit": "fallback",
+        "finviz_news": "keyword"
+      },
+      "ChronosBeeHorizon": {
+        "yfinance_calendar": "real",
+        "catalysts_json": "loaded",
+        "analyst_targets": "real",
+        "llm_impact": "rule_only"
+      },
+      "OracleBeeEcho": {
+        "options": "real",
+        "polymarket": "unavailable"
+      },
+      "GuardBeeSentinel": {
+        "pheromone_board": "real",
+        "crowding": "real",
+        "llm_conflict": "rule_only"
+      },
+      "BearBeeContrarian": {
+        "insider": "real",
+        "valuation": "yfinance",
+        "options": "real",
+        "momentum": "yfinance",
+        "news": "finviz_api",
+        "catalyst": "real",
+        "ml": "real",
+        "guard": "real"
+      }
+    },
+    "data_real_pct": 95.0,
+    "dim_data_quality": {
+      "signal": 87.1,
+      "catalyst": 100.0,
+      "sentiment": 94.0,
+      "odds": 85.0,
+      "risk_adj": 100.0
+    },
+    "distill_mode": "rule_engine",
+    "reasoning": "",
+    "key_insight": "",
+    "risk_flag": "",
+    "llm_confidence": 0.0,
+    "narrative": "",
+    "bull_bear_synthesis": "",
+    "contrarian_view": "",
+    "rule_score": 7.07,
+    "rule_direction": "bullish",
+    "bear_strength": 7.68,
+    "bear_cap_applied": false,
+    "guard_penalty": 0.0,
+    "guard_penalty_applied": false,
+    "direction_vote_weights": {
+      "bullish": 2.127,
+      "bearish": 1.0,
+      "neutral": 0.865
+    },
+    "dq_quality_factor": 1.0,
+    "dq_penalty_applied": false,
+    "dimension_status": {
+      "signal": "present",
+      "catalyst": "present",
+      "sentiment": "present",
+      "odds": "present",
+      "risk_adj": "present"
+    },
+    "dimension_missing_reason": {},
+    "dimension_coverage_pct": 100.0,
+    "pre_penalty_score": 7.07,
+    "score_after_dq": 7.07,
+    "score_after_guard": 7.07,
+    "score_after_bear": 7.07,
+    "total_penalty": 0.0,
+    "combo_cap_applied": false,
+    "coverage_warning": "",
+    "data_quality_grade": "normal",
+    "conflict_level": "moderate",
+    "conflict_info": {
+      "conflict_level": "moderate",
+      "bullish_agents": 4,
+      "bearish_agents": 1
+    },
+    "arbitration_triggered": false,
+    "arbitration_flipped": false,
+    "pre_arbitration_margin": 0.2823,
+    "confidence_calibration": {
+      "confidence_band": [
+        6.39,
+        7.75
+      ],
+      "band_width": 0.68,
+      "discrimination": "medium",
+      "dimension_std": 2.26
+    },
+    "ml_weight_adjustments": {
+      "odds": 0.824,
+      "catalyst": 0.5,
+      "signal": 0.5,
+      "risk_adj": 0.5,
+      "sentiment": 0.5
+    },
+    "ml_feedback_enabled": true
+  }
+}
