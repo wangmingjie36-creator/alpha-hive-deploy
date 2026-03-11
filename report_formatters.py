@@ -234,8 +234,30 @@ def _build_catalysts(sorted_results: list) -> List[str]:
     return md
 
 
+def _load_fresh_ml_prob(ticker: str) -> float | None:
+    """从当日 analysis-{TICKER}-ml-{DATE}.json 读取最新 ML 胜率，失败返回 None"""
+    import json as _json
+    import glob as _glob
+    from datetime import datetime as _dt
+    from pathlib import Path as _Path
+    try:
+        today = _dt.now().strftime("%Y-%m-%d")
+        base = _Path(__file__).parent
+        pattern = str(base / f"analysis-{ticker}-ml-{today}.json")
+        files = _glob.glob(pattern)
+        if not files:
+            return None
+        with open(files[0]) as _f:
+            _d = _json.load(_f)
+        prob = _d.get("ml_prediction", {}).get("prediction", {}).get("probability")
+        return float(prob) if prob is not None else None
+    except Exception:
+        return None
+
+
 def _build_competitive(sorted_results: list) -> List[str]:
     """版块 6：竞争格局分析（RivalBeeVanguard）"""
+    import re as _re
     md: List[str] = []
     md.append("## 6) 竞争格局分析")
     md.append("")
@@ -245,15 +267,21 @@ def _build_competitive(sorted_results: list) -> List[str]:
         details = agent.get("details", {})
         md.append(f"### {ticker}")
         if discovery:
-            # 修正存量数据中 ML 胜率显示 100% 的问题（小样本过拟合）
-            # 若 details.probability 存在且 ≤ 0.95，用它替换 discovery 中的概率文本
-            import re as _re
-            det_prob = details.get("probability") if isinstance(details, dict) else None
-            if det_prob is not None and det_prob > 0.95:
-                # details 中的概率也超标，替换为 95%
-                det_prob = 0.95
-            if det_prob is not None:
-                discovery = _re.sub(r"ML 胜率 \d+%", f"ML 胜率 {det_prob*100:.0f}%", discovery)
+            # 优先用当日 analysis JSON 中的真实 ML 概率替换 swarm 存量值
+            fresh_prob = _load_fresh_ml_prob(ticker)
+            if fresh_prob is not None:
+                discovery = _re.sub(
+                    r"ML 胜率 \d+%",
+                    f"ML 胜率 {fresh_prob*100:.0f}%",
+                    discovery,
+                )
+            else:
+                # 无新数据时，至少把存量的 100% 上限改为 95%
+                det_prob = details.get("probability") if isinstance(details, dict) else None
+                if det_prob is not None and det_prob > 0.95:
+                    det_prob = 0.95
+                if det_prob is not None:
+                    discovery = _re.sub(r"ML 胜率 \d+%", f"ML 胜率 {det_prob*100:.0f}%", discovery)
             md.append(f"- {discovery}")
         if isinstance(details, dict) and details:
             ml_pred = details.get("ml_prediction") or details.get("prediction")
