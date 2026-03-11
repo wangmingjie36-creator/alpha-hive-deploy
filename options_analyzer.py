@@ -154,6 +154,16 @@ class OptionsDataFetcher:
             if not expirations:
                 expirations = all_expirations[:3]
 
+            # 获取当前股价，用于 ATM 过滤（避免深度遗留低价合约污染 key levels）
+            _current_price = 0.0
+            try:
+                _fi = stock.fast_info
+                _current_price = float(
+                    _fi.get("lastPrice") or _fi.get("previousClose") or 0
+                )
+            except (AttributeError, TypeError, KeyError, RuntimeError):
+                pass
+
             calls_list = []
             puts_list = []
 
@@ -167,6 +177,14 @@ class OptionsDataFetcher:
                         # 过滤无效数据（保留 OI >= 0，不再要求 > 100）
                         calls = calls[calls["openInterest"] >= 0]
                         puts = puts[puts["openInterest"] >= 0]
+
+                        # ATM 过滤：剔除偏离当前价 >70% 的深度 OTM/ITM 遗留合约
+                        # 防止十年前低价时留下的 $5/$10 行权价污染 key levels
+                        if _current_price > 0:
+                            _lo = _current_price * 0.30
+                            _hi = _current_price * 1.70
+                            calls = calls[(calls["strike"] >= _lo) & (calls["strike"] <= _hi)]
+                            puts = puts[(puts["strike"] >= _lo) & (puts["strike"] <= _hi)]
 
                         # U4: 内存保护 — 每个到期日最多保留 top 40 strikes（按 OI）
                         if len(calls) > 40:
@@ -768,17 +786,29 @@ class OptionsAnalyzer:
         return unusual[:10]
 
     def find_key_levels(
-        self, calls_df: List[Dict], puts_df: List[Dict]
+        self, calls_df: List[Dict], puts_df: List[Dict], stock_price: float = 0.0
     ) -> Dict:
         """
         找出高 OI 的关键行权价（支撑/阻力）
+
+        stock_price: 当前股价，用于 ATM 过滤（剔除偏离 >70% 的遗留低价合约）
         """
         key_levels = {"support": [], "resistance": []}
 
+        # ATM 过滤函数：偏离当前价 >70% 的行权价视为无效（历史遗留合约）
+        def _atm_ok(item: Dict) -> bool:
+            if stock_price <= 0:
+                return True
+            s = item.get("strike", 0)
+            return stock_price * 0.30 <= s <= stock_price * 1.70
+
         if calls_df:
-            # 看涨的高 OI 是阻力
+            # 看涨的高 OI 是阻力：先 ATM 过滤，再按 OI 排序
+            calls_filtered = [c for c in calls_df if _atm_ok(c)]
             calls_sorted = sorted(
-                calls_df, key=lambda x: x.get("openInterest", 0), reverse=True
+                calls_filtered if calls_filtered else calls_df,
+                key=lambda x: x.get("openInterest", 0),
+                reverse=True,
             )
             for call in calls_sorted[:3]:
                 key_levels["resistance"].append(
@@ -790,9 +820,12 @@ class OptionsAnalyzer:
                 )
 
         if puts_df:
-            # 看跌的高 OI 是支撑
+            # 看跌的高 OI 是支撑：先 ATM 过滤，再按 OI 排序
+            puts_filtered = [p for p in puts_df if _atm_ok(p)]
             puts_sorted = sorted(
-                puts_df, key=lambda x: x.get("openInterest", 0), reverse=True
+                puts_filtered if puts_filtered else puts_df,
+                key=lambda x: x.get("openInterest", 0),
+                reverse=True,
             )
             for put in puts_sorted[:3]:
                 key_levels["support"].append(
@@ -994,7 +1027,7 @@ class OptionsAgent:
             calls_df, puts_df, stock_price
         )
         unusual_activity = self.analyzer.detect_unusual_activity(calls_df, puts_df)
-        key_levels = self.analyzer.find_key_levels(calls_df, puts_df)
+        key_levels = self.analyzer.find_key_levels(calls_df, puts_df, stock_price or 0.0)
         # S14: IV Skew 分析
         iv_skew = self.analyzer.calculate_iv_skew(calls_df, puts_df, stock_price)
 

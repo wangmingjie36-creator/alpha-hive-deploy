@@ -37,6 +37,8 @@ class QueenDistiller:
     Opportunity Score = 0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds + 0.15×RiskAdj
     """
 
+    # 硬编码备份 —— 仅在 config.EVALUATION_WEIGHTS 导入失败时由 __init__ 使用。
+    # 正常运行时权重以 config.EVALUATION_WEIGHTS 为准（单一入口）。
     DEFAULT_WEIGHTS = {
         "signal":    0.30,
         "catalyst":  0.20,
@@ -143,7 +145,7 @@ class QueenDistiller:
 
         # 2. 维度平均重要性 → 调整因子
         # 基准：如果 5 个维度权重均等，则每个维度的特征重要性应约为 1/5 = 0.20
-        _baseline = 1.0 / len(self.DEFAULT_WEIGHTS)  # 0.20
+        _baseline = 1.0 / len(self.DIMENSION_WEIGHTS)  # 当前激活维度数的均等基准（通常 = 0.20）
         dim_adjustments: Dict[str, float] = {}
         for dim, weights in dim_importance.items():
             avg = sum(weights) / len(weights)

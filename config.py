@@ -558,7 +558,8 @@ CATALYSTS = {
 }
 
 # ==================== 评分权重（5维评估）====================
-# 键名必须与 QueenDistiller.DEFAULT_WEIGHTS 一致（risk_adj 不是 risk_adjustment）
+# 此处是权重唯一入口；QueenDistiller.DEFAULT_WEIGHTS 是本配置的硬编码备份（ImportError 时使用）
+# 注意键名：risk_adj（不是 risk_adjustment）
 #
 # 架构说明：
 #   - 5 个主维度参与加权平均（权重和 = 1.0）
@@ -574,6 +575,9 @@ EVALUATION_WEIGHTS = {
     "risk_adj":  0.15,   # GuardBeeSentinel: 交叉验证 + 风险调整
     # ml_auxiliary: 不在此处（RivalBeeVanguard 作为 ±0.5 独立调整项）
 }
+
+# ML 概率上界（防止小样本过度自信，统一源，避免魔术数字散落各处）
+ML_PROB_CAP = 0.95
 
 # ==================== 期权评分阈值 ====================
 OPTIONS_SCORE_THRESHOLDS = {

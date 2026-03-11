@@ -132,6 +132,95 @@ class TestRenderDashboard:
         assert "background: red" in html
 
 
+# ==================== _ml_combined_score 测试 ====================
+
+class TestMlCombinedScore:
+    """_ml_combined_score 辅助函数的单元测试"""
+
+    def _write_ml_json(self, tmp_path, ticker, date_str, combined_probability):
+        """写入 analysis-{ticker}-ml-{date}.json 测试文件"""
+        data = {
+            "ticker": ticker,
+            "combined_recommendation": {
+                "combined_probability": combined_probability,
+            },
+        }
+        path = tmp_path / f"analysis-{ticker}-ml-{date_str}.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def test_reads_combined_probability(self, tmp_path):
+        """正常值 62.4 → 6.24"""
+        from dashboard_renderer import _ml_combined_score
+        self._write_ml_json(tmp_path, "NVDA", "2026-03-06", 62.4)
+        assert _ml_combined_score("NVDA", tmp_path, "2026-03-06") == 6.24
+
+    def test_file_missing_returns_none(self, tmp_path):
+        """文件不存在时返回 None"""
+        from dashboard_renderer import _ml_combined_score
+        assert _ml_combined_score("MISS", tmp_path, "2026-03-06") is None
+
+    def test_boundary_100_accepted(self, tmp_path):
+        """combined_probability = 100 应被接受 → 10.0"""
+        from dashboard_renderer import _ml_combined_score
+        self._write_ml_json(tmp_path, "AAA", "2026-03-06", 100.0)
+        assert _ml_combined_score("AAA", tmp_path, "2026-03-06") == 10.0
+
+    def test_zero_returns_none(self, tmp_path):
+        """combined_probability = 0 不合理，返回 None"""
+        from dashboard_renderer import _ml_combined_score
+        self._write_ml_json(tmp_path, "BBB", "2026-03-06", 0.0)
+        assert _ml_combined_score("BBB", tmp_path, "2026-03-06") is None
+
+    def test_negative_returns_none(self, tmp_path):
+        """combined_probability < 0 不合理，返回 None"""
+        from dashboard_renderer import _ml_combined_score
+        self._write_ml_json(tmp_path, "CCC", "2026-03-06", -5.0)
+        assert _ml_combined_score("CCC", tmp_path, "2026-03-06") is None
+
+    def test_over_100_returns_none(self, tmp_path):
+        """combined_probability > 100 不合理，返回 None"""
+        from dashboard_renderer import _ml_combined_score
+        self._write_ml_json(tmp_path, "DDD", "2026-03-06", 105.0)
+        assert _ml_combined_score("DDD", tmp_path, "2026-03-06") is None
+
+    def test_non_numeric_returns_none(self, tmp_path):
+        """combined_probability 为字符串时返回 None"""
+        from dashboard_renderer import _ml_combined_score
+        data = {"combined_recommendation": {"combined_probability": "bad"}}
+        path = tmp_path / "analysis-EEE-ml-2026-03-06.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        assert _ml_combined_score("EEE", tmp_path, "2026-03-06") is None
+
+    def test_missing_combined_recommendation_key_returns_none(self, tmp_path):
+        """JSON 无 combined_recommendation 键时返回 None"""
+        from dashboard_renderer import _ml_combined_score
+        path = tmp_path / "analysis-FFF-ml-2026-03-06.json"
+        path.write_text(json.dumps({"ticker": "FFF"}), encoding="utf-8")
+        assert _ml_combined_score("FFF", tmp_path, "2026-03-06") is None
+
+    def test_ml_score_used_in_dashboard_scores(self, tmp_path):
+        """render_dashboard_html 的 window.__AH__ scores 应使用 ML 分数"""
+        from dashboard_renderer import render_dashboard_html
+        # 写入 ML JSON：combined_probability = 75.0 → 7.5 分
+        self._write_ml_json(tmp_path, "NVDA", "2026-03-06", 75.0)
+        report = {
+            "opportunities": [
+                {"ticker": "NVDA", "direction": "bullish", "score": 5.0,
+                 "confidence": 0.5, "catalyst": "", "risk": "", "thesis_break": "",
+                 "dimension_scores": {}},
+            ],
+            "swarm_metadata": {},
+        }
+        html = render_dashboard_html(
+            report=report, date_str="2026-03-06",
+            report_dir=tmp_path, opportunities=report["opportunities"],
+        )
+        # scores JS 数组中应出现 7.5（而非原始 opp_score=5.0）
+        assert '"NVDA", 7.5' in html or '["NVDA", 7.5]' in html or \
+               "[\"NVDA\", 7.5]" in html
+
+
 # ==================== 模板文件检查 ====================
 
 class TestTemplates:

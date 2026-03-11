@@ -276,10 +276,14 @@ def _build_competitive(sorted_results: list) -> List[str]:
                     discovery,
                 )
             else:
-                # 无新数据时，至少把存量的 100% 上限改为 95%
+                # 无新数据时，至少把存量的超限概率裁剪到上界
                 det_prob = details.get("probability") if isinstance(details, dict) else None
-                if det_prob is not None and det_prob > 0.95:
-                    det_prob = 0.95
+                try:
+                    from config import ML_PROB_CAP as _ML_CAP
+                except ImportError:
+                    _ML_CAP = 0.95
+                if det_prob is not None and isinstance(det_prob, (int, float)) and det_prob > _ML_CAP:
+                    det_prob = _ML_CAP
                 if det_prob is not None:
                     discovery = _re.sub(r"ML 胜率 \d+%", f"ML 胜率 {det_prob*100:.0f}%", discovery)
             md.append(f"- {discovery}")

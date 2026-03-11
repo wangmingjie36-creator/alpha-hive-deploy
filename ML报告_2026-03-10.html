@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alpha Hive ML 日报 · 2026-03-10</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, 'SF Pro Text', 'Helvetica Neue', sans-serif;
+    background: #0d0f14;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 24px 16px 48px;
+  }
+  .container { max-width: 960px; margin: 0 auto; }
+
+  /* Header */
+  .header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    margin-bottom: 28px; padding-bottom: 20px;
+    border-bottom: 1px solid #1e2433;
+  }
+  .header-title { font-size: 22px; font-weight: 700; color: #f7c948; letter-spacing: -0.3px; }
+  .header-sub { font-size: 13px; color: #64748b; margin-top: 4px; }
+  .header-right { text-align: right; }
+  .gen-time { font-size: 12px; color: #475569; }
+
+  /* Macro bar */
+  .macro-bar {
+    background: #131720;
+    border: 1px solid #1e2433;
+    border-radius: 10px;
+    padding: 14px 20px;
+    display: flex; flex-wrap: wrap; gap: 20px;
+    margin-bottom: 20px;
+    align-items: center;
+  }
+  .macro-item { display: flex; flex-direction: column; gap: 2px; }
+  .macro-label { font-size: 10px; color: #475569; text-transform: uppercase; letter-spacing: 0.6px; }
+  .macro-value { font-size: 14px; font-weight: 600; }
+  .fear { color: #ef4444; }
+  .vix-high { color: #f97316; }
+  .neutral-c { color: #94a3b8; }
+  .green { color: #22c55e; }
+  .red { color: #ef4444; }
+  .yellow { color: #f7c948; }
+
+  /* Wind pills */
+  .winds { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+  .wind-pill {
+    font-size: 12px; padding: 5px 12px; border-radius: 20px;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .headwind { background: #2d1515; color: #fca5a5; border: 1px solid #7f1d1d44; }
+  .tailwind { background: #0f2d1a; color: #86efac; border: 1px solid #14532d44; }
+
+  /* Section header */
+  .section-title {
+    font-size: 11px; font-weight: 600; color: #475569;
+    text-transform: uppercase; letter-spacing: 1px;
+    margin: 24px 0 12px;
+  }
+
+  /* Ticker cards */
+  .ticker-grid { display: flex; flex-direction: column; gap: 10px; }
+  .ticker-card {
+    background: #131720;
+    border: 1px solid #1e2433;
+    border-radius: 10px;
+    padding: 16px 20px;
+    display: grid;
+    grid-template-columns: 56px 1fr auto;
+    gap: 0 16px;
+    align-items: start;
+    transition: border-color 0.15s;
+  }
+  .ticker-card:hover { border-color: #2d3a55; }
+  .ticker-card.rank-1 { border-left: 3px solid #f7c948; }
+  .ticker-card.rank-2 { border-left: 3px solid #94a3b8; }
+  .ticker-card.rank-3 { border-left: 3px solid #cd7c3a; }
+
+  .rank-badge {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 2px; padding-top: 2px;
+  }
+  .rank-num { font-size: 11px; color: #475569; font-weight: 500; }
+  .ticker-sym { font-size: 18px; font-weight: 800; color: #f1f5f9; letter-spacing: -0.5px; }
+
+  .ticker-main { display: flex; flex-direction: column; gap: 8px; }
+  .ticker-row1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .price { font-size: 14px; color: #94a3b8; font-weight: 500; }
+  .direction-pill {
+    font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 4px;
+    letter-spacing: 0.3px;
+  }
+  .bull { background: #0f2d1a; color: #4ade80; }
+  .bear { background: #2d1515; color: #f87171; }
+  .neut { background: #1a1f2e; color: #94a3b8; }
+  .conf-badge { font-size: 11px; color: #64748b; }
+
+  .ticker-row2 { display: flex; gap: 16px; flex-wrap: wrap; }
+  .mini-stat { display: flex; flex-direction: column; gap: 1px; }
+  .mini-label { font-size: 10px; color: #475569; }
+  .mini-value { font-size: 12px; font-weight: 600; }
+
+  /* Radar */
+  .radar-bars { display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
+  .radar-row { display: flex; align-items: center; gap: 7px; }
+  .radar-dim { font-size: 10px; color: #475569; width: 52px; text-align: right; flex-shrink: 0; }
+  .radar-track { flex: 1; height: 5px; background: #1e2433; border-radius: 3px; overflow: hidden; }
+  .radar-fill { height: 100%; border-radius: 3px; }
+  .radar-score { font-size: 10px; color: #64748b; width: 26px; text-align: right; }
+
+  /* Score big */
+  .score-block { text-align: right; padding-top: 2px; min-width: 68px; }
+  .score-big { font-size: 28px; font-weight: 800; line-height: 1; }
+  .score-denom { font-size: 13px; color: #475569; font-weight: 400; }
+  .score-trend { font-size: 11px; margin-top: 4px; }
+
+  /* Invalidation */
+  .inval-section { margin-top: 8px; }
+  .inval-toggle {
+    font-size: 11px; color: #475569; cursor: pointer;
+    background: none; border: none; padding: 0;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .inval-toggle:hover { color: #94a3b8; }
+  .inval-list { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+  .inval-item {
+    font-size: 11px; padding: 4px 10px; border-radius: 5px;
+    display: flex; align-items: flex-start; gap: 5px;
+  }
+  .inval-l1 { background: #1a1f0f; color: #bef264; border-left: 2px solid #65a30d; }
+  .inval-l2 { background: #2d1515; color: #fca5a5; border-left: 2px solid #dc2626; }
+  .inval-dot { margin-top: 1px; flex-shrink: 0; }
+
+  /* Backtest row */
+  .bt-row { display: flex; gap: 14px; margin-top: 6px; flex-wrap: wrap; }
+  .bt-pill {
+    font-size: 11px; padding: 3px 10px; border-radius: 4px;
+    border: 1px solid #1e2433; color: #94a3b8;
+  }
+
+  /* Summary table */
+  .summary-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  .summary-table th {
+    font-size: 10px; color: #475569; text-transform: uppercase;
+    letter-spacing: 0.6px; text-align: left; padding: 6px 10px;
+    border-bottom: 1px solid #1e2433;
+  }
+  .summary-table td { font-size: 13px; padding: 8px 10px; border-bottom: 1px solid #131720; }
+  .summary-table tr:last-child td { border-bottom: none; }
+  .summary-table tr:hover td { background: #131720; }
+
+  /* Footer */
+  .footer { margin-top: 40px; text-align: center; font-size: 11px; color: #334155; }
+
+  /* Score color */
+  .s-high { color: #f7c948; }
+  .s-med { color: #38bdf8; }
+  .s-low { color: #94a3b8; }
+  .s-bear { color: #f87171; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header -->
+  <div class="header">
+    <div>
+      <div class="header-title">🐝 Alpha Hive · ML 日报</div>
+      <div class="header-sub">2026-03-10 · Watchlist 全扫描 · 10 标的</div>
+    </div>
+    <div class="header-right">
+      <div class="macro-value fear" style="font-size:20px;">😱 13</div>
+      <div class="gen-time">Fear &amp; Greed · 极度恐惧</div>
+    </div>
+  </div>
+
+  <!-- Macro Bar -->
+  <div class="macro-bar">
+    <div class="macro-item">
+      <span class="macro-label">VIX</span>
+      <span class="macro-value vix-high">24.93 ↓2.2%</span>
+    </div>
+    <div class="macro-item">
+      <span class="macro-label">SPX</span>
+      <span class="macro-value red">-0.20%</span>
+    </div>
+    <div class="macro-item">
+      <span class="macro-label">10Y 国债</span>
+      <span class="macro-value neutral-c">4.136%</span>
+    </div>
+    <div class="macro-item">
+      <span class="macro-label">利差 2s10s</span>
+      <span class="macro-value green">+57.6bp</span>
+    </div>
+    <div class="macro-item">
+      <span class="macro-label">黄金</span>
+      <span class="macro-value yellow">$2477.86 ↑1.1%</span>
+    </div>
+    <div class="macro-item">
+      <span class="macro-label">CPI 同比</span>
+      <span class="macro-value green">2.39%</span>
+    </div>
+    <div class="macro-item">
+      <span class="macro-label">联邦基金</span>
+      <span class="macro-value neutral-c">3.64%</span>
+    </div>
+    <div class="macro-item">
+      <span class="macro-label">宏观体制</span>
+      <span class="macro-value neutral-c">Neutral 4.5/10</span>
+    </div>
+  </div>
+
+  <!-- Wind Pills -->
+  <div class="winds">
+    <div class="wind-pill headwind">⚠️ 黄金飙升 +1.1%，避险需求强烈，资金撤离风险资产</div>
+    <div class="wind-pill tailwind">✅ CPI 同比 2.4%，通胀受控，货币政策友好</div>
+  </div>
+
+  <!-- Quick Summary Table -->
+  <div class="section-title">全标的评分总览</div>
+  <table class="summary-table">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>标的</th>
+        <th>评分</th>
+        <th>方向</th>
+        <th>置信度</th>
+        <th>价格</th>
+        <th>30d 动量</th>
+        <th>年化波动</th>
+        <th>回测准确率</th>
+        <th>均收益</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td style="color:#f7c948;font-weight:700;">1</td>
+        <td style="font-weight:700;color:#f1f5f9;">NVDA</td>
+        <td><span class="s-high" style="font-weight:700;">8.7</span></td>
+        <td><span class="direction-pill bull">看多</span></td>
+        <td style="color:#94a3b8;">82%</td>
+        <td>$184.77</td>
+        <td class="red">-2.34%</td>
+        <td class="neutral-c">37.3%</td>
+        <td class="red">33.3% (3次)</td>
+        <td class="red">-2.00%</td>
+      </tr>
+      <tr>
+        <td style="color:#94a3b8;font-weight:700;">2</td>
+        <td style="font-weight:700;color:#f1f5f9;">QCOM</td>
+        <td><span class="s-high" style="font-weight:700;">7.44</span></td>
+        <td><span class="direction-pill bull">看多</span></td>
+        <td style="color:#94a3b8;">—</td>
+        <td>$135.20</td>
+        <td class="neutral-c">—</td>
+        <td class="neutral-c">—</td>
+        <td class="neutral-c">—</td>
+        <td class="neutral-c">—</td>
+      </tr>
+      <tr>
+        <td style="color:#cd7c3a;font-weight:700;">3</td>
+        <td style="font-weight:700;color:#f1f5f9;">BILI</td>
+        <td><span class="s-med" style="font-weight:700;">7.3</span></td>
+        <td><span class="direction-pill neut">中性</span></td>
+        <td style="color:#94a3b8;">71%</td>
+        <td>$26.58</td>
+        <td class="red">-17.18%</td>
+        <td class="vix-high">48.3%</td>
+        <td class="red">0.0% (2次)</td>
+        <td class="red">-6.42%</td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td style="font-weight:700;color:#f1f5f9;">CRCL</td>
+        <td><span class="s-med" style="font-weight:700;">7.1</span></td>
+        <td><span class="direction-pill bull">看多</span></td>
+        <td style="color:#94a3b8;">79%</td>
+        <td>$118.09</td>
+        <td class="green">+78.94%</td>
+        <td class="red" style="font-weight:700;">146.1%</td>
+        <td class="red">0.0% (2次)</td>
+        <td class="green">+34.88%</td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td style="font-weight:700;color:#f1f5f9;">VKTX</td>
+        <td><span class="s-med" style="font-weight:700;">6.8</span></td>
+        <td><span class="direction-pill bull">看多</span></td>
+        <td style="color:#94a3b8;">75%</td>
+        <td>$34.66</td>
+        <td class="green">+20.85%</td>
+        <td class="vix-high">64.3%</td>
+        <td class="green">100% (3次)</td>
+        <td class="green">+1.31%</td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td style="font-weight:700;color:#f1f5f9;">MSFT</td>
+        <td><span class="s-med" style="font-weight:700;">6.7</span></td>
+        <td><span class="direction-pill bull">看多</span></td>
+        <td style="color:#94a3b8;">80%</td>
+        <td>$405.76</td>
+        <td class="green">+0.75%</td>
+        <td class="green">22.7%</td>
+        <td class="green">100% (3次)</td>
+        <td class="green">+2.44%</td>
+      </tr>
+      <tr>
+        <td>7</td>
+        <td style="font-weight:700;color:#f1f5f9;">META</td>
+        <td><span class="s-med" style="font-weight:700;">6.6</span></td>
+        <td><span class="direction-pill bull">看多</span></td>
+        <td style="color:#94a3b8;">80%</td>
+        <td>$654.07</td>
+        <td class="red">-2.00%</td>
+        <td class="green">24.7%</td>
+        <td class="neutral-c">50% (2次)</td>
+        <td class="red">-0.28%</td>
+      </tr>
+      <tr>
+        <td>8</td>
+        <td style="font-weight:700;color:#f1f5f9;">AMZN</td>
+        <td><span class="s-med" style="font-weight:700;">6.6</span></td>
+        <td><span class="direction-pill bull">看多</span></td>
+        <td style="color:#94a3b8;">78%</td>
+        <td>$214.33</td>
+        <td class="green">+5.16%</td>
+        <td class="green">27.2%</td>
+        <td class="green">100% (2次)</td>
+        <td class="green">+2.37%</td>
+      </tr>
+      <tr>
+        <td>9</td>
+        <td style="font-weight:700;color:#f1f5f9;">RKLB</td>
+        <td><span class="s-low" style="font-weight:700;">6.2</span></td>
+        <td><span class="direction-pill bear">看空</span></td>
+        <td style="color:#94a3b8;">80%</td>
+        <td>$68.93</td>
+        <td class="neutral-c">+0.15%</td>
+        <td class="vix-high">58.0%</td>
+        <td class="green">100% (2次)</td>
+        <td class="red">-0.93%</td>
+      </tr>
+      <tr>
+        <td>10</td>
+        <td style="font-weight:700;color:#f1f5f9;">TSLA</td>
+        <td><span class="s-low" style="font-weight:700;">5.7</span></td>
+        <td><span class="direction-pill bull">看多</span></td>
+        <td style="color:#94a3b8;">80%</td>
+        <td>$399.23</td>
+        <td class="neutral-c">—</td>
+        <td class="neutral-c">—</td>
+        <td class="red">33.3% (3次)</td>
+        <td class="red">-2.73%</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- Detailed Cards -->
+  <div class="section-title" style="margin-top:32px;">个股详细分析</div>
+  <div class="ticker-grid">
+
+    <!-- NVDA -->
+    <div class="ticker-card rank-1">
+      <div class="rank-badge">
+        <span class="rank-num">#1</span>
+        <span class="ticker-sym">NVDA</span>
+      </div>
+      <div class="ticker-main">
+        <div class="ticker-row1">
+          <span class="price">$184.77</span>
+          <span class="direction-pill bull">看多</span>
+          <span class="conf-badge">置信度 82% · 7 Agent 支持</span>
+        </div>
+        <div class="ticker-row2">
+          <div class="mini-stat"><span class="mini-label">30d 动量</span><span class="mini-value red">-2.34%</span></div>
+          <div class="mini-stat"><span class="mini-label">年化波动</span><span class="mini-value neutral-c">37.3%</span></div>
+          <div class="mini-stat"><span class="mini-label">回测准确率</span><span class="mini-value red">33.3% (3次)</span></div>
+          <div class="mini-stat"><span class="mini-label">均收益 T+7</span><span class="mini-value red">-2.00%</span></div>
+          <div class="mini-stat"><span class="mini-label">Catalyst</span><span class="mini-value yellow">100/100 🔥</span></div>
+        </div>
+        <div class="radar-bars">
+          <div class="radar-row"><span class="radar-dim">Signal</span><div class="radar-track"><div class="radar-fill" style="width:56.2%;background:#38bdf8;"></div></div><span class="radar-score">56</span></div>
+          <div class="radar-row"><span class="radar-dim">Catalyst</span><div class="radar-track"><div class="radar-fill" style="width:100%;background:#f7c948;"></div></div><span class="radar-score">100</span></div>
+          <div class="radar-row"><span class="radar-dim">Sentiment</span><div class="radar-track"><div class="radar-fill" style="width:57.9%;background:#a78bfa;"></div></div><span class="radar-score">58</span></div>
+          <div class="radar-row"><span class="radar-dim">Odds</span><div class="radar-track"><div class="radar-fill" style="width:58%;background:#22c55e;"></div></div><span class="radar-score">58</span></div>
+          <div class="radar-row"><span class="radar-dim">RiskAdj</span><div class="radar-track"><div class="radar-fill" style="width:76.9%;background:#4ade80;"></div></div><span class="radar-score">77</span></div>
+        </div>
+        <div class="inval-list">
+          <div class="inval-item inval-l1"><span class="inval-dot">⚡</span>DataCenter 收入 QoQ &gt;-5% | AMD/Intel 新品超越 | 中国禁令 Polymarket &gt;60%</div>
+          <div class="inval-item inval-l2"><span class="inval-dot">💀</span>EPS 实际 &lt; 预期 20%+ | 出口禁令直接封杀 H100/H800 | Jensen Huang 离职</div>
+        </div>
+        <div class="bt-row">
+          <span class="bt-pill">📈 评分趋势：5.5 → 5.9 → 8.4 → <strong style="color:#f7c948;">8.7</strong>（连续 2日大幅拉升）</span>
+        </div>
+      </div>
+      <div class="score-block">
+        <div class="score-big s-high">8.7<span class="score-denom">/10</span></div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px;">共振 ✅</div>
+      </div>
+    </div>
+
+    <!-- QCOM -->
+    <div class="ticker-card rank-2">
+      <div class="rank-badge">
+        <span class="rank-num">#2</span>
+        <span class="ticker-sym">QCOM</span>
+      </div>
+      <div class="ticker-main">
+        <div class="ticker-row1">
+          <span class="price">$135.20</span>
+          <span class="direction-pill bull">看多</span>
+          <span class="conf-badge">仪表板评分（详情不在机会清单内）</span>
+        </div>
+        <div class="ticker-row2">
+          <div class="mini-stat"><span class="mini-label">状态</span><span class="mini-value neutral-c">已跟踪，未进入机会清单</span></div>
+        </div>
+        <div class="inval-list">
+          <div class="inval-item inval-l1" style="background:#1a1f2e;color:#94a3b8;border-left-color:#334155;">⚠️ 今日详细 Agent 数据不可用，仅凭仪表板得分参考</div>
+        </div>
+      </div>
+      <div class="score-block">
+        <div class="score-big s-med">7.44<span class="score-denom">/10</span></div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px;">仅总分</div>
+      </div>
+    </div>
+
+    <!-- BILI -->
+    <div class="ticker-card rank-3">
+      <div class="rank-badge">
+        <span class="rank-num">#3</span>
+        <span class="ticker-sym">BILI</span>
+      </div>
+      <div class="ticker-main">
+        <div class="ticker-row1">
+          <span class="price">$26.58</span>
+          <span class="direction-pill neut">中性</span>
+          <span class="conf-badge">置信度 71% · 7 Agent 支持</span>
+        </div>
+        <div class="ticker-row2">
+          <div class="mini-stat"><span class="mini-label">30d 动量</span><span class="mini-value red">-17.18%</span></div>
+          <div class="mini-stat"><span class="mini-label">年化波动</span><span class="mini-value vix-high">48.3%</span></div>
+          <div class="mini-stat"><span class="mini-label">回测准确率</span><span class="mini-value red">0% (2次)</span></div>
+          <div class="mini-stat"><span class="mini-label">均收益 T+7</span><span class="mini-value red">-6.42%</span></div>
+        </div>
+        <div class="radar-bars">
+          <div class="radar-row"><span class="radar-dim">Signal</span><div class="radar-track"><div class="radar-fill" style="width:62.7%;background:#38bdf8;"></div></div><span class="radar-score">63</span></div>
+          <div class="radar-row"><span class="radar-dim">Catalyst</span><div class="radar-track"><div class="radar-fill" style="width:71.8%;background:#f7c948;"></div></div><span class="radar-score">72</span></div>
+          <div class="radar-row"><span class="radar-dim">Sentiment</span><div class="radar-track"><div class="radar-fill" style="width:47.5%;background:#a78bfa;"></div></div><span class="radar-score">48</span></div>
+          <div class="radar-row"><span class="radar-dim">Odds</span><div class="radar-track"><div class="radar-fill" style="width:63.2%;background:#22c55e;"></div></div><span class="radar-score">63</span></div>
+          <div class="radar-row"><span class="radar-dim">RiskAdj</span><div class="radar-track"><div class="radar-fill" style="width:50.4%;background:#4ade80;"></div></div><span class="radar-score">50</span></div>
+        </div>
+        <div class="inval-list">
+          <div class="inval-item inval-l1"><span class="inval-dot">⚡</span>MAU 季度同比 &lt;-3% | ARPU 同比 &lt;-10% | 核心内容被下架/限播</div>
+          <div class="inval-item inval-l2"><span class="inval-dot">💀</span>SEC/纳斯达克退市警告 | 自由现金流连续3季负且无改善</div>
+        </div>
+        <div class="bt-row">
+          <span class="bt-pill">⚠️ 信号分散，历史 T+7 准确率为 0%，谨慎。评分趋势：8.4 → 7.3（昨日高点回落）</span>
+        </div>
+      </div>
+      <div class="score-block">
+        <div class="score-big s-med">7.3<span class="score-denom">/10</span></div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px;">共振 ✅</div>
+      </div>
+    </div>
+
+    <!-- CRCL -->
+    <div class="ticker-card">
+      <div class="rank-badge">
+        <span class="rank-num">#4</span>
+        <span class="ticker-sym">CRCL</span>
+      </div>
+      <div class="ticker-main">
+        <div class="ticker-row1">
+          <span class="price">$118.09</span>
+          <span class="direction-pill bull">看多</span>
+          <span class="conf-badge">置信度 79% · 7 Agent 支持</span>
+        </div>
+        <div class="ticker-row2">
+          <div class="mini-stat"><span class="mini-label">30d 动量</span><span class="mini-value green" style="font-weight:800;">+78.94%</span></div>
+          <div class="mini-stat"><span class="mini-label">年化波动</span><span class="mini-value red" style="font-weight:800;">146.1% ⚠️</span></div>
+          <div class="mini-stat"><span class="mini-label">回测准确率</span><span class="mini-value red">0% (2次)</span></div>
+          <div class="mini-stat"><span class="mini-label">均收益 T+7</span><span class="mini-value green">+34.88%</span></div>
+          <div class="mini-stat"><span class="mini-label">RiskAdj</span><span class="mini-value green">92.6/100</span></div>
+        </div>
+        <div class="radar-bars">
+          <div class="radar-row"><span class="radar-dim">Signal</span><div class="radar-track"><div class="radar-fill" style="width:36.3%;background:#38bdf8;"></div></div><span class="radar-score">36</span></div>
+          <div class="radar-row"><span class="radar-dim">Catalyst</span><div class="radar-track"><div class="radar-fill" style="width:55%;background:#f7c948;"></div></div><span class="radar-score">55</span></div>
+          <div class="radar-row"><span class="radar-dim">Sentiment</span><div class="radar-track"><div class="radar-fill" style="width:63.2%;background:#a78bfa;"></div></div><span class="radar-score">63</span></div>
+          <div class="radar-row"><span class="radar-dim">Odds</span><div class="radar-track"><div class="radar-fill" style="width:39.3%;background:#22c55e;"></div></div><span class="radar-score">39</span></div>
+          <div class="radar-row"><span class="radar-dim">RiskAdj</span><div class="radar-track"><div class="radar-fill" style="width:92.6%;background:#4ade80;"></div></div><span class="radar-score">93</span></div>
+        </div>
+        <div class="inval-list">
+          <div class="inval-item inval-l1"><span class="inval-dot">⚡</span>USDC 市场份额 &lt;20% | 稳定币限制法案通过 | 利率收入占比 &gt;80% 且利率下行</div>
+          <div class="inval-item inval-l2"><span class="inval-dot">💀</span>USDC 脱钩跌破 $0.97 超 24h | 美联储正式发行 CBDC</div>
+        </div>
+        <div class="bt-row">
+          <span class="bt-pill">🔥 极高波动（146%）+ 动量+79%，高风险高收益；Signal 分偏低（36），需配合仓位管理</span>
+        </div>
+      </div>
+      <div class="score-block">
+        <div class="score-big s-med">7.1<span class="score-denom">/10</span></div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px;">共振 ✅</div>
+      </div>
+    </div>
+
+    <!-- VKTX -->
+    <div class="ticker-card">
+      <div class="rank-badge">
+        <span class="rank-num">#5</span>
+        <span class="ticker-sym">VKTX</span>
+      </div>
+      <div class="ticker-main">
+        <div class="ticker-row1">
+          <span class="price">$34.66</span>
+          <span class="direction-pill bull">看多</span>
+          <span class="conf-badge">置信度 75% · 7 Agent 支持</span>
+        </div>
+        <div class="ticker-row2">
+          <div class="mini-stat"><span class="mini-label">30d 动量</span><span class="mini-value green">+20.85%</span></div>
+          <div class="mini-stat"><span class="mini-label">年化波动</span><span class="mini-value vix-high">64.3%</span></div>
+          <div class="mini-stat"><span class="mini-label">回测准确率</span><span class="mini-value green" style="font-weight:800;">100% (3次)</span></div>
+          <div class="mini-stat"><span class="mini-label">均收益 T+7</span><span class="mini-value green">+1.31%</span></div>
+          <div class="mini-stat"><span class="mini-label">Odds</span><span class="mini-value green">83.7/100 🎯</span></div>
+        </div>
+        <div class="radar-bars">
+          <div class="radar-row"><span class="radar-dim">Signal</span><div class="radar-track"><div class="radar-fill" style="width:34.9%;background:#38bdf8;"></div></div><span class="radar-score">35</span></div>
+          <div class="radar-row"><span class="radar-dim">Catalyst</span><div class="radar-track"><div class="radar-fill" style="width:55%;background:#f7c948;"></div></div><span class="radar-score">55</span></div>
+          <div class="radar-row"><span class="radar-dim">Sentiment</span><div class="radar-track"><div class="radar-fill" style="width:58.3%;background:#a78bfa;"></div></div><span class="radar-score">58</span></div>
+          <div class="radar-row"><span class="radar-dim">Odds</span><div class="radar-track"><div class="radar-fill" style="width:83.7%;background:#22c55e;"></div></div><span class="radar-score">84</span></div>
+          <div class="radar-row"><span class="radar-dim">RiskAdj</span><div class="radar-track"><div class="radar-fill" style="width:42.9%;background:#4ade80;"></div></div><span class="radar-score">43</span></div>
+        </div>
+        <div class="inval-list">
+          <div class="inval-item inval-l1"><span class="inval-dot">⚡</span>关键患者脱落率 &gt;15% | 竞争对手发布更优数据</div>
+          <div class="inval-item inval-l2"><span class="inval-dot">💀</span>FDA IND Hold（试验中止令） | Phase 3 关键终点未达统计学意义</div>
+        </div>
+        <div class="bt-row">
+          <span class="bt-pill">⭐ 3次回测全中（100%），Odds 维度最高（83.7），信号面偏弱但胜率最稳定</span>
+        </div>
+      </div>
+      <div class="score-block">
+        <div class="score-big s-med">6.8<span class="score-denom">/10</span></div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px;">共振 ✅</div>
+      </div>
+    </div>
+
+    <!-- MSFT -->
+    <div class="ticker-card">
+      <div class="rank-badge">
+        <span class="rank-num">#6</span>
+        <span class="ticker-sym">MSFT</span>
+      </div>
+      <div class="ticker-main">
+        <div class="ticker-row1">
+          <span class="price">$405.76</span>
+          <span class="direction-pill bull">看多</span>
+          <span class="conf-badge">置信度 80% · 7 Agent 支持</span>
+        </div>
+        <div class="ticker-row2">
+          <div class="mini-stat"><span class="mini-label">30d 动量</span><span class="mini-value neutral-c">+0.75%</span></div>
+          <div class="mini-stat"><span class="mini-label">年化波动</span><span class="mini-value green">22.7% 低</span></div>
+          <div class="mini-stat"><span class="mini-label">回测准确率</span><span class="mini-value green" style="font-weight:800;">100% (3次)</span></div>
+          <div class="mini-stat"><span class="mini-label">均收益 T+7</span><span class="mini-value green">+2.44%</span></div>
+          <div class="mini-stat"><span class="mini-label">Odds</span><span class="mini-value green">75.9/100</span></div>
+        </div>
+        <div class="radar-bars">
+          <div class="radar-row"><span class="radar-dim">Signal</span><div class="radar-track"><div class="radar-fill" style="width:32.3%;background:#38bdf8;"></div></div><span class="radar-score">32</span></div>
+          <div class="radar-row"><span class="radar-dim">Catalyst</span><div class="radar-track"><div class="radar-fill" style="width:63%;background:#f7c948;"></div></div><span class="radar-score">63</span></div>
+          <div class="radar-row"><span class="radar-dim">Sentiment</span><div class="radar-track"><div class="radar-fill" style="width:55.5%;background:#a78bfa;"></div></div><span class="radar-score">56</span></div>
+          <div class="radar-row"><span class="radar-dim">Odds</span><div class="radar-track"><div class="radar-fill" style="width:75.9%;background:#22c55e;"></div></div><span class="radar-score">76</span></div>
+          <div class="radar-row"><span class="radar-dim">RiskAdj</span><div class="radar-track"><div class="radar-fill" style="width:46%;background:#4ade80;"></div></div><span class="radar-score">46</span></div>
+        </div>
+        <div class="inval-list">
+          <div class="inval-item inval-l1"><span class="inval-dot">⚡</span>Azure YoY &lt;20% | Copilot 净增席位季度 &lt;5% | EU/DOJ 重大反垄断诉讼</div>
+          <div class="inval-item inval-l2"><span class="inval-dot">💀</span>Azure 份额 QoQ &gt;-2pp | EPS 实际 &lt; 预期 15%+</div>
+        </div>
+        <div class="bt-row">
+          <span class="bt-pill">🛡️ 低波动 + 100% 回测胜率 + 均收益 +2.44%，防御性最强；评分今日略降（7.9→6.7）</span>
+        </div>
+      </div>
+      <div class="score-block">
+        <div class="score-big s-med">6.7<span class="score-denom">/10</span></div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px;">共振 ✅</div>
+      </div>
+    </div>
+
+    <!-- META -->
+    <div class="ticker-card">
+      <div class="rank-badge">
+        <span class="rank-num">#7</span>
+        <span class="ticker-sym">META</span>
+      </div>
+      <div class="ticker-main">
+        <div class="ticker-row1">
+          <span class="price">$654.07</span>
+          <span class="direction-pill bull">看多</span>
+          <span class="conf-badge">置信度 80% · 7 Agent 支持</span>
+        </div>
+        <div class="ticker-row2">
+          <div class="mini-stat"><span class="mini-label">30d 动量</span><span class="mini-value red">-2.00%</span></div>
+          <div class="mini-stat"><span class="mini-label">年化波动</span><span class="mini-value green">24.7%</span></div>
+          <div class="mini-stat"><span class="mini-label">回测准确率</span><span class="mini-value neutral-c">50% (2次)</span></div>
+          <div class="mini-stat"><span class="mini-label">均收益 T+7</span><span class="mini-value red">-0.28%</span></div>
+        </div>
+        <div class="inval-list">
+          <div class="inval-item inval-l1"><span class="inval-dot">⚡</span>全球 DAU QoQ &lt;1% | 广告收入 YoY &lt;10% | EU/FTC 罚款 &gt;$5B 或强制拆分</div>
+          <div class="inval-item inval-l2"><span class="inval-dot">💀</span>Reality Labs 单季亏损 &gt;$6B 无改善 | TikTok 在美恢复全面运营</div>
+        </div>
+      </div>
+      <div class="score-block">
+        <div class="score-big s-med">6.6<span class="score-denom">/10</span></div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px;">共振 ✅</div>
+      </div>
+    </div>
+
+    <!-- AMZN -->
+    <div class="ticker-card">
+      <div class="rank-badge">
+        <span class="rank-num">#8</span>
+        <span class="ticker-sym">AMZN</span>
+      </div>
+      <div class="ticker-main">
+        <div class="ticker-row1">
+          <span class="price">$214.33</span>
+          <span class="direction-pill bull">看多</span>
+          <span class="conf-badge">置信度 78% · 7 Agent 支持</span>
+        </div>
+        <div class="ticker-row2">
+          <div class="mini-stat"><span class="mini-label">30d 动量</span><span class="mini-value green">+5.16%</span></div>
+          <div class="mini-stat"><span class="mini-label">年化波动</span><span class="mini-value green">27.2%</span></div>
+          <div class="mini-stat"><span class="mini-label">回测准确率</span><span class="mini-value green" style="font-weight:800;">100% (2次)</span></div>
+          <div class="mini-stat"><span class="mini-label">均收益 T+7</span><span class="mini-value green">+2.37%</span></div>
+        </div>
+        <div class="inval-list">
+          <div class="inval-item inval-l1"><span class="inval-dot">⚡</span>AWS YoY &lt;15% | 北美零售利润率 QoQ &gt;-150bps | FTC 要求拆分</div>
+          <div class="inval-item inval-l2"><span class="inval-dot">💀</span>前10大 AWS 客户超3家迁移至竞品 | EPS 实际 &lt; 预期 20%+</div>
+        </div>
+        <div class="bt-row">
+          <span class="bt-pill">✅ 100% 回测胜率 + 均收益 +2.37%，波动率低，与 MSFT 并列防御优选</span>
+        </div>
+      </div>
+      <div class="score-block">
+        <div class="score-big s-med">6.6<span class="score-denom">/10</span></div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px;">共振 ✅</div>
+      </div>
+    </div>
+
+    <!-- RKLB -->
+    <div class="ticker-card">
+      <div class="rank-badge">
+        <span class="rank-num">#9</span>
+        <span class="ticker-sym">RKLB</span>
+      </div>
+      <div class="ticker-main">
+        <div class="ticker-row1">
+          <span class="price">$68.93</span>
+          <span class="direction-pill bear">看空</span>
+          <span class="conf-badge">置信度 80% · 7 Agent 支持</span>
+        </div>
+        <div class="ticker-row2">
+          <div class="mini-stat"><span class="mini-label">30d 动量</span><span class="mini-value neutral-c">+0.15%</span></div>
+          <div class="mini-stat"><span class="mini-label">年化波动</span><span class="mini-value vix-high">58.0%</span></div>
+          <div class="mini-stat"><span class="mini-label">回测准确率</span><span class="mini-value green">100% (2次)</span></div>
+          <div class="mini-stat"><span class="mini-label">均收益 T+7</span><span class="mini-value red">-0.93%（空头盈利）</span></div>
+        </div>
+        <div class="inval-list">
+          <div class="inval-item inval-l1"><span class="inval-dot">⚡</span>Electron 连续2次发射失败 | Neutron 延误 &gt;12个月 | 季度新签 &lt;$50M</div>
+          <div class="inval-item inval-l2"><span class="inval-dot">💀</span>SpaceX 低价20%+ 抢占小卫星市场 | 现金 &lt;6个月运营且无融资</div>
+        </div>
+        <div class="bt-row">
+          <span class="bt-pill">🐻 唯一看空标的 · 100% 历史准确率 · 波动率58%，空头机会需管理止损</span>
+        </div>
+      </div>
+      <div class="score-block">
+        <div class="score-big s-low">6.2<span class="score-denom">/10</span></div>
+        <div style="font-size:11px;color:#f87171;margin-top:4px;">看空 ✅</div>
+      </div>
+    </div>
+
+    <!-- TSLA -->
+    <div class="ticker-card">
+      <div class="rank-badge">
+        <span class="rank-num">#10</span>
+        <span class="ticker-sym">TSLA</span>
+      </div>
+      <div class="ticker-main">
+        <div class="ticker-row1">
+          <span class="price">$399.23</span>
+          <span class="direction-pill bull">看多</span>
+          <span class="conf-badge">置信度 80% · 7 Agent 支持</span>
+        </div>
+        <div class="ticker-row2">
+          <div class="mini-stat"><span class="mini-label">30d 动量</span><span class="mini-value neutral-c">—</span></div>
+          <div class="mini-stat"><span class="mini-label">回测准确率</span><span class="mini-value red">33.3% (3次)</span></div>
+          <div class="mini-stat"><span class="mini-label">均收益 T+7</span><span class="mini-value red">-2.73%</span></div>
+          <div class="mini-stat"><span class="mini-label">RiskAdj</span><span class="mini-value red">38.0 最低</span></div>
+        </div>
+        <div class="inval-list">
+          <div class="inval-item inval-l1"><span class="inval-dot">⚡</span>季度交付量 YoY &lt;-5% | 毛利率 QoQ &gt;-200bps</div>
+          <div class="inval-item inval-l2"><span class="inval-dot">💀</span>Elon Musk 离职或重大丑闻 | 收入 EPS 实际 &lt; 预期 15%+</div>
+        </div>
+        <div class="bt-row">
+          <span class="bt-pill">⚠️ 风险调整分最低（38），历史胜率最差（33.3%），信号最分散，宜观望</span>
+        </div>
+      </div>
+      <div class="score-block">
+        <div class="score-big s-low">5.7<span class="score-denom">/10</span></div>
+        <div style="font-size:11px;color:#64748b;margin-top:4px;">共振 ✅</div>
+      </div>
+    </div>
+
+  </div><!-- end ticker-grid -->
+
+  <!-- Key Takeaways -->
+  <div class="section-title" style="margin-top:32px;">📌 今日关键结论</div>
+  <div style="background:#131720;border:1px solid #1e2433;border-radius:10px;padding:18px 20px;display:flex;flex-direction:column;gap:10px;">
+    <div style="font-size:13px;line-height:1.7;color:#cbd5e1;">
+      <strong style="color:#f7c948;">🏆 首选：NVDA</strong>（8.7/10）— Catalyst 满分 100，评分连续 2 日强势拉升，共振信号最强。短期回测胜率偏低（33%），但本轮蜂群评分为历史高位，建议结合止损。
+    </div>
+    <div style="font-size:13px;line-height:1.7;color:#cbd5e1;">
+      <strong style="color:#38bdf8;">🛡️ 稳健选：MSFT / AMZN</strong>（6.7 / 6.6）— 均为 100% 回测胜率 + 均收益 &gt;+2.3%，低波动，极度恐惧市场下最适合防御型布局。
+    </div>
+    <div style="font-size:13px;line-height:1.7;color:#cbd5e1;">
+      <strong style="color:#22c55e;">🎯 胜率王：VKTX</strong>（6.8/10）— 3次回测全中（100%），Odds 分 83.7 全场最高，正动量+20%，生物科技事件驱动机会，注意波动。
+    </div>
+    <div style="font-size:13px;line-height:1.7;color:#cbd5e1;">
+      <strong style="color:#f87171;">🐻 唯一空头：RKLB</strong>（6.2/10）— 全场唯一看空，历史 2 次空头均准确，波动率 58%，极度恐惧环境利于空头。
+    </div>
+    <div style="font-size:13px;line-height:1.7;color:#cbd5e1;">
+      <strong style="color:#f97316;">⚠️ 高风险：CRCL / BILI</strong> — CRCL 年化波动率 146%，历史准确率 0%（但均收益惊人 +34.88%）；BILI 动量 -17%，T+7 准确率 0%。如参与，仓位需严格控制。
+    </div>
+    <div style="font-size:13px;line-height:1.7;color:#94a3b8;">
+      <strong style="color:#ef4444;">🚫 末位观望：TSLA</strong>（5.7/10）— 风险调整分最低（38），历史胜率 33.3%，均亏 -2.73%，当前无明确入场逻辑。
+    </div>
+  </div>
+
+  <div class="footer">
+    Alpha Hive ML 日报 · 2026-03-10 · 生成时间 20:33 PDT<br>
+    本报告仅供参考，不构成投资建议。
+  </div>
+
+</div>
+</body>
+</html>

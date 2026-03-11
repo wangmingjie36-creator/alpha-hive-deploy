@@ -53,8 +53,15 @@ class RivalBeeVanguard(BeeAgent):
 
             if prediction:
                 prob = prediction.get("probability", 0.5)
-                # 硬限制：ML 模型过度自信时（小样本场景），概率不应超过 95%
-                prob = min(prob, 0.95)
+                # 双向守卫：类型检查 + NaN 检查 + 双侧边界（统一上界来自 config）
+                if not isinstance(prob, (int, float)) or prob != prob:  # NaN guard
+                    _log.warning("RivalBeeVanguard: ML prob 异常值 %r，回退 0.5", prob)
+                    prob = 0.5
+                try:
+                    from config import ML_PROB_CAP as _ML_CAP
+                except ImportError:
+                    _ML_CAP = 0.95
+                prob = max(0.0, min(float(prob), _ML_CAP))
                 prediction["probability"] = prob   # 回写，保持 details 一致
                 ret_7d = prediction.get("expected_7d", 0.0)
                 ret_30d = prediction.get("expected_30d", 0.0)

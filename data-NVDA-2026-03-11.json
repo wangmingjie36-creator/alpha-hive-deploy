@@ -1,0 +1,1109 @@
+{
+  "ticker": "NVDA",
+  "timestamp": "2026-03-11T06:50:54.526532",
+  "collect_mode": "hybrid_v1",
+  "agent_results": {
+    "chronos": {
+      "score": 10.0,
+      "direction": "bullish",
+      "confidence": 0.85,
+      "discovery": "催化剂 7 个 | 最近：Ex-Dividend Date（0天后） | 分析师目标$266.35(↑43.4%)",
+      "source": "ChronosBeeHorizon",
+      "dimension": "catalyst",
+      "data_quality": {
+        "yfinance_calendar": "real",
+        "catalysts_json": "loaded",
+        "analyst_targets": "real",
+        "llm_impact": "rule_only"
+      },
+      "details": {
+        "catalysts": [
+          {
+            "event": "Ex-Dividend Date",
+            "date": "2026-03-10",
+            "days_until": 0,
+            "type": "dividend",
+            "severity": "medium"
+          },
+          {
+            "event": "Dividend Date",
+            "date": "2025-12-25",
+            "days_until": 0,
+            "type": "dividend",
+            "severity": "medium"
+          },
+          {
+            "event": "Q4 FY2026 Earnings",
+            "date": "2026-03-15",
+            "days_until": 3,
+            "type": "earnings",
+            "severity": "critical"
+          },
+          {
+            "event": "Q4 FY2026 财报发布",
+            "date": "2026-03-15",
+            "days_until": 3,
+            "type": "earnings",
+            "severity": "critical"
+          },
+          {
+            "event": "GTC 2026",
+            "date": "2026-03-17",
+            "days_until": 5,
+            "type": "product_launch",
+            "severity": "high"
+          }
+        ],
+        "analyst_targets": {
+          "target_mean": 266.35,
+          "target_low": 140.0,
+          "target_high": 380.0,
+          "target_median": 265.0,
+          "current_price": 185.8,
+          "upside_pct": 43.4
+        }
+      },
+      "_elapsed": 0.5,
+      "_agent_key": "chronos"
+    },
+    "rival": {
+      "score": 6.5,
+      "direction": "bullish",
+      "confidence": 0.8,
+      "discovery": "ML 胜率 65% | 7d +9.07% | 30d +13.61%",
+      "source": "RivalBeeVanguard",
+      "dimension": "ml_auxiliary",
+      "data_quality": {
+        "ml_prediction": "real"
+      },
+      "details": {
+        "probability": 0.65,
+        "expected_3d": 3.4,
+        "expected_7d": 9.07,
+        "expected_30d": 13.61
+      },
+      "_elapsed": 0.7,
+      "_agent_key": "rival"
+    },
+    "bear": {
+      "score": 4.7,
+      "direction": "neutral",
+      "confidence": 0.7,
+      "discovery": "量能萎缩 0.1x（参与度下降） | 催化剂0天内到来，波动性风险↑",
+      "source": "BearBeeContrarian",
+      "dimension": "contrarian",
+      "data_quality": {
+        "insider": "sec_api",
+        "valuation": "yfinance",
+        "options": "options_api",
+        "momentum": "yfinance",
+        "news": "finviz_api",
+        "catalyst": "real",
+        "ml": "real"
+      },
+      "details": {
+        "bear_score": 5.3,
+        "rule_bear_score": 5.3,
+        "bearish_signals": [
+          "量能萎缩 0.1x（参与度下降）",
+          "催化剂0天内到来，波动性风险↑"
+        ],
+        "insider_bear": 0.0,
+        "overval_bear": 0.0,
+        "options_bear": 0.0,
+        "momentum_bear": 5.0,
+        "news_bear": 0.0,
+        "data_sources": {
+          "insider": "sec_api",
+          "valuation": "yfinance",
+          "options": "options_api",
+          "momentum": "yfinance",
+          "news": "finviz_api",
+          "catalyst": "real",
+          "ml": "real"
+        }
+      },
+      "llm_thesis": "",
+      "llm_key_risks": [],
+      "llm_contrarian_insight": "",
+      "llm_thesis_break": "",
+      "_elapsed": 2.3,
+      "_agent_key": "bear"
+    },
+    "oracle": {
+      "score": 4.8,
+      "direction": "bullish",
+      "confidence": 0.7,
+      "discovery": "检测到 6 个看涨异动 | 异常流:混合期权流 Call:61 Put:91 | $185.8 | 无相关预测市场",
+      "source": "OracleBeeEcho",
+      "dimension": "odds",
+      "data_quality": {
+        "options": "real",
+        "polymarket": "unavailable"
+      },
+      "details": {
+        "ticker": "NVDA",
+        "timestamp": "2026-03-11T06:50:48.642669",
+        "data_quality": "real",
+        "iv_rank": 0,
+        "iv_percentile": 0.0,
+        "iv_current": 6.25,
+        "put_call_ratio": 0.71,
+        "total_oi": 3186959,
+        "gamma_exposure": 0.0,
+        "gamma_squeeze_risk": "medium",
+        "unusual_activity": [
+          {
+            "type": "large_put_volume",
+            "strike": 170.0,
+            "volume": 71487.0,
+            "bullish": false
+          },
+          {
+            "type": "large_call_volume",
+            "strike": 190.0,
+            "volume": 34987.0,
+            "bullish": true
+          },
+          {
+            "type": "large_call_volume",
+            "strike": 185.0,
+            "volume": 24669.0,
+            "bullish": true
+          },
+          {
+            "type": "large_call_volume",
+            "strike": 200.0,
+            "volume": 22426.0,
+            "bullish": true
+          },
+          {
+            "type": "large_call_volume",
+            "strike": 195.0,
+            "volume": 22157.0,
+            "bullish": true
+          },
+          {
+            "type": "large_put_volume",
+            "strike": 185.0,
+            "volume": 19759.0,
+            "bullish": false
+          },
+          {
+            "type": "large_put_volume",
+            "strike": 175.0,
+            "volume": 14534.0,
+            "bullish": false
+          },
+          {
+            "type": "large_call_volume",
+            "strike": 197.5,
+            "volume": 13579.0,
+            "bullish": true
+          },
+          {
+            "type": "large_call_volume",
+            "strike": 187.5,
+            "volume": 13096.0,
+            "bullish": true
+          },
+          {
+            "type": "large_put_volume",
+            "strike": 180.0,
+            "volume": 12125.0,
+            "bullish": false
+          }
+        ],
+        "key_levels": {
+          "support": [
+            {
+              "strike": 170.0,
+              "oi": 105353,
+              "iv": 0.125
+            },
+            {
+              "strike": 180.0,
+              "oi": 89352,
+              "iv": 0.0625
+            },
+            {
+              "strike": 160.0,
+              "oi": 85950,
+              "iv": 0.25
+            }
+          ],
+          "resistance": [
+            {
+              "strike": 200.0,
+              "oi": 265665,
+              "iv": 0.125
+            },
+            {
+              "strike": 195.0,
+              "oi": 144066,
+              "iv": 0.0625
+            },
+            {
+              "strike": 190.0,
+              "oi": 127601,
+              "iv": 0.0313
+            }
+          ]
+        },
+        "flow_direction": "bullish",
+        "options_score": 6.0,
+        "signal_summary": "检测到 6 个看涨异动",
+        "expiration_dates": [
+          "2026-03-20",
+          "2026-03-23",
+          "2026-03-27"
+        ],
+        "iv_skew_ratio": 1.083,
+        "iv_skew_signal": "neutral",
+        "iv_skew_detail": {
+          "skew_ratio": 1.083,
+          "skew_signal": "neutral",
+          "otm_put_iv": 6.25,
+          "otm_call_iv": 5.77
+        }
+      },
+      "polymarket_score": 5.0,
+      "polymarket_markets": 0,
+      "_elapsed": 3.6,
+      "_agent_key": "oracle"
+    },
+    "scout": {
+      "score": 5.28,
+      "direction": "neutral",
+      "confidence": 0.88,
+      "discovery": "HUANG JEN HSUN 授予 936,771股 | 拥挤度 43/100（中等拥挤度） | 动量 +1.3%",
+      "source": "ScoutBeeNova",
+      "dimension": "signal",
+      "data_quality": {
+        "social_buzz": "real",
+        "google_trends": "proxy_volume",
+        "bullish_agents": "real",
+        "polymarket": "proxy_momentum",
+        "seeking_alpha": "proxy_social",
+        "short_interest": "real",
+        "momentum": "real"
+      },
+      "details": {
+        "insider": {
+          "sentiment": "neutral",
+          "score": 5.0,
+          "filings": 5,
+          "dollar_bought": 0.0,
+          "dollar_sold": 0.0,
+          "notable_trades": [
+            {
+              "insider": "HUANG JEN HSUN",
+              "title": "President and CEO",
+              "is_officer": true,
+              "is_director": true,
+              "code": "A",
+              "code_desc": "授予",
+              "shares": 936771.0,
+              "price": 0.0,
+              "date": "2026-03-02",
+              "total_value": 0.0,
+              "security": "Common Stock"
+            },
+            {
+              "insider": "Kress Colette",
+              "title": "EVP & Chief Financial Officer",
+              "is_officer": true,
+              "is_director": false,
+              "code": "A",
+              "code_desc": "授予",
+              "shares": 106660.0,
+              "price": 0.0,
+              "date": "2026-03-02",
+              "total_value": 0.0,
+              "security": "Common"
+            },
+            {
+              "insider": "Puri Ajay K",
+              "title": "EVP, Worldwide Field Ops",
+              "is_officer": true,
+              "is_director": false,
+              "code": "A",
+              "code_desc": "授予",
+              "shares": 103278.0,
+              "price": 0.0,
+              "date": "2026-03-02",
+              "total_value": 0.0,
+              "security": "Common Stock"
+            },
+            {
+              "insider": "Shoquist Debora",
+              "title": "EVP, Operations",
+              "is_officer": true,
+              "is_director": false,
+              "code": "A",
+              "code_desc": "授予",
+              "shares": 98328.0,
+              "price": 0.0,
+              "date": "2026-03-02",
+              "total_value": 0.0,
+              "security": "Common Stock"
+            },
+            {
+              "insider": "Teter Timothy S.",
+              "title": "EVP, General Counsel and Sec",
+              "is_officer": true,
+              "is_director": false,
+              "code": "A",
+              "code_desc": "授予",
+              "shares": 98328.0,
+              "price": 0.0,
+              "date": "2026-03-02",
+              "total_value": 0.0,
+              "security": "Common Stock"
+            }
+          ],
+          "rss_fresh_today": 0,
+          "rss_summary": ""
+        },
+        "crowding_score": 43.095,
+        "crowding_signal": 5.69,
+        "components": {
+          "stocktwits_volume": 70.0,
+          "google_trends": 7.3,
+          "consensus_strength": 50.0,
+          "polymarket_volatility": 20,
+          "seeking_alpha_views": 60,
+          "short_squeeze_risk": 30
+        },
+        "adjustment_factor": 0.95,
+        "momentum_5d": 1.3391,
+        "price": 185.7951
+      },
+      "_elapsed": 3.9,
+      "_agent_key": "scout"
+    },
+    "guard": {
+      "score": 4.1,
+      "direction": "neutral",
+      "confidence": 0.4,
+      "discovery": "信号分散 | 均分 5.0 | 一致性 0% | 风险调整 0.95 | 板块顺风",
+      "source": "GuardBeeSentinel",
+      "dimension": "risk_adj",
+      "data_quality": {
+        "pheromone_board": "real",
+        "crowding": "real",
+        "llm_conflict": "rule_only"
+      },
+      "details": {
+        "resonance": {
+          "resonance_detected": false,
+          "direction": "neutral",
+          "supporting_agents": 0,
+          "cross_dim_count": 0,
+          "resonant_dimensions": [],
+          "confidence_boost": 0
+        },
+        "top_signals_count": 0,
+        "consistency": 0,
+        "adjustment_factor": 0.95,
+        "llm_conflict_type": "",
+        "llm_recommended_action": ""
+      },
+      "_elapsed": 5.6,
+      "_agent_key": "guard"
+    },
+    "buzz": {
+      "score": 4.78,
+      "direction": "neutral",
+      "confidence": 0.9,
+      "discovery": "情绪 47% | 动量 +1.3% | 量比 0.1x | Reddit #4(hot,102提及) | 新闻偏多（6多/2空） | 未上 Yahoo 热搜 | F&G 15(Extreme Fear)",
+      "source": "BuzzBeeWhisper",
+      "dimension": "sentiment",
+      "data_quality": {
+        "momentum": "real",
+        "volume": "real",
+        "volatility": "real",
+        "reddit": "real",
+        "finviz_news": "keyword"
+      },
+      "details": {
+        "sentiment_pct": 47,
+        "momentum_5d": 1.3391,
+        "volume_ratio": 0.1042,
+        "volatility_20d": 36.3595,
+        "reddit": {
+          "rank": 4,
+          "mentions": 102,
+          "mention_delta": -2,
+          "buzz": "hot",
+          "score": 6.5
+        },
+        "components": {
+          "momentum_signal": 56.7,
+          "volume_signal": 20,
+          "volatility_signal": 60,
+          "reddit_signal": 65.0
+        },
+        "sentiment_momentum": {
+          "delta_1d": -3,
+          "delta_3d": -2,
+          "delta_7d": -9,
+          "momentum_regime": "stable",
+          "momentum_score_adj": 0.0
+        },
+        "sentiment_divergence": {
+          "divergence_type": "none",
+          "severity": 0,
+          "score_adj": 0.0,
+          "description": ""
+        }
+      },
+      "sentinel_spike": null,
+      "_elapsed": 7.6,
+      "_agent_key": "buzz"
+    }
+  },
+  "queen_result": {
+    "ticker": "NVDA",
+    "final_score": 6.96,
+    "direction": "bullish",
+    "resonance": {
+      "resonance_detected": true,
+      "direction": "bullish",
+      "supporting_agents": 3,
+      "cross_dim_count": 3,
+      "resonant_dimensions": [
+        "catalyst",
+        "ml_auxiliary",
+        "odds"
+      ],
+      "confidence_boost": 15
+    },
+    "supporting_agents": 7,
+    "agent_breakdown": {
+      "bullish": 3,
+      "bearish": 0,
+      "neutral": 4
+    },
+    "agent_directions": {
+      "ChronosBeeHorizon": "bullish",
+      "RivalBeeVanguard": "bullish",
+      "BearBeeContrarian": "neutral",
+      "OracleBeeEcho": "bullish",
+      "ScoutBeeNova": "neutral",
+      "GuardBeeSentinel": "neutral",
+      "BuzzBeeWhisper": "neutral"
+    },
+    "agent_details": {
+      "ChronosBeeHorizon": {
+        "discovery": "催化剂 7 个 | 最近：Ex-Dividend Date（0天后） | 分析师目标$266.35(↑43.4%)",
+        "score": 10.0,
+        "direction": "bullish",
+        "confidence": 0.85,
+        "dimension": "catalyst",
+        "details": {
+          "catalysts": [
+            {
+              "event": "Ex-Dividend Date",
+              "date": "2026-03-10",
+              "days_until": 0,
+              "type": "dividend",
+              "severity": "medium"
+            },
+            {
+              "event": "Dividend Date",
+              "date": "2025-12-25",
+              "days_until": 0,
+              "type": "dividend",
+              "severity": "medium"
+            },
+            {
+              "event": "Q4 FY2026 Earnings",
+              "date": "2026-03-15",
+              "days_until": 3,
+              "type": "earnings",
+              "severity": "critical"
+            },
+            {
+              "event": "Q4 FY2026 财报发布",
+              "date": "2026-03-15",
+              "days_until": 3,
+              "type": "earnings",
+              "severity": "critical"
+            },
+            {
+              "event": "GTC 2026",
+              "date": "2026-03-17",
+              "days_until": 5,
+              "type": "product_launch",
+              "severity": "high"
+            }
+          ],
+          "analyst_targets": {
+            "target_mean": 266.35,
+            "target_low": 140.0,
+            "target_high": 380.0,
+            "target_median": 265.0,
+            "current_price": 185.8,
+            "upside_pct": 43.4
+          }
+        }
+      },
+      "RivalBeeVanguard": {
+        "discovery": "ML 胜率 65% | 7d +9.07% | 30d +13.61%",
+        "score": 6.5,
+        "direction": "bullish",
+        "confidence": 0.8,
+        "dimension": "ml_auxiliary",
+        "details": {
+          "probability": 0.65,
+          "expected_3d": 3.4,
+          "expected_7d": 9.07,
+          "expected_30d": 13.61
+        }
+      },
+      "BearBeeContrarian": {
+        "discovery": "量能萎缩 0.1x（参与度下降） | 催化剂0天内到来，波动性风险↑",
+        "score": 4.7,
+        "direction": "neutral",
+        "confidence": 0.7,
+        "dimension": "contrarian",
+        "details": {
+          "bear_score": 5.3,
+          "rule_bear_score": 5.3,
+          "bearish_signals": [
+            "量能萎缩 0.1x（参与度下降）",
+            "催化剂0天内到来，波动性风险↑"
+          ],
+          "insider_bear": 0.0,
+          "overval_bear": 0.0,
+          "options_bear": 0.0,
+          "momentum_bear": 5.0,
+          "news_bear": 0.0,
+          "data_sources": {
+            "insider": "sec_api",
+            "valuation": "yfinance",
+            "options": "options_api",
+            "momentum": "yfinance",
+            "news": "finviz_api",
+            "catalyst": "real",
+            "ml": "real"
+          }
+        },
+        "llm_thesis": "",
+        "llm_key_risks": [],
+        "llm_contrarian_insight": "",
+        "llm_thesis_break": ""
+      },
+      "OracleBeeEcho": {
+        "discovery": "检测到 6 个看涨异动 | 异常流:混合期权流 Call:61 Put:91 | $185.8 | 无相关预测市场",
+        "score": 4.8,
+        "direction": "bullish",
+        "confidence": 0.7,
+        "dimension": "odds",
+        "details": {
+          "ticker": "NVDA",
+          "timestamp": "2026-03-11T06:50:48.642669",
+          "data_quality": "real",
+          "iv_rank": 0,
+          "iv_percentile": 0.0,
+          "iv_current": 6.25,
+          "put_call_ratio": 0.71,
+          "total_oi": 3186959,
+          "gamma_exposure": 0.0,
+          "gamma_squeeze_risk": "medium",
+          "unusual_activity": [
+            {
+              "type": "large_put_volume",
+              "strike": 170.0,
+              "volume": 71487.0,
+              "bullish": false
+            },
+            {
+              "type": "large_call_volume",
+              "strike": 190.0,
+              "volume": 34987.0,
+              "bullish": true
+            },
+            {
+              "type": "large_call_volume",
+              "strike": 185.0,
+              "volume": 24669.0,
+              "bullish": true
+            },
+            {
+              "type": "large_call_volume",
+              "strike": 200.0,
+              "volume": 22426.0,
+              "bullish": true
+            },
+            {
+              "type": "large_call_volume",
+              "strike": 195.0,
+              "volume": 22157.0,
+              "bullish": true
+            },
+            {
+              "type": "large_put_volume",
+              "strike": 185.0,
+              "volume": 19759.0,
+              "bullish": false
+            },
+            {
+              "type": "large_put_volume",
+              "strike": 175.0,
+              "volume": 14534.0,
+              "bullish": false
+            },
+            {
+              "type": "large_call_volume",
+              "strike": 197.5,
+              "volume": 13579.0,
+              "bullish": true
+            },
+            {
+              "type": "large_call_volume",
+              "strike": 187.5,
+              "volume": 13096.0,
+              "bullish": true
+            },
+            {
+              "type": "large_put_volume",
+              "strike": 180.0,
+              "volume": 12125.0,
+              "bullish": false
+            }
+          ],
+          "key_levels": {
+            "support": [
+              {
+                "strike": 170.0,
+                "oi": 105353,
+                "iv": 0.125
+              },
+              {
+                "strike": 180.0,
+                "oi": 89352,
+                "iv": 0.0625
+              },
+              {
+                "strike": 160.0,
+                "oi": 85950,
+                "iv": 0.25
+              }
+            ],
+            "resistance": [
+              {
+                "strike": 200.0,
+                "oi": 265665,
+                "iv": 0.125
+              },
+              {
+                "strike": 195.0,
+                "oi": 144066,
+                "iv": 0.0625
+              },
+              {
+                "strike": 190.0,
+                "oi": 127601,
+                "iv": 0.0313
+              }
+            ]
+          },
+          "flow_direction": "bullish",
+          "options_score": 6.0,
+          "signal_summary": "检测到 6 个看涨异动",
+          "expiration_dates": [
+            "2026-03-20",
+            "2026-03-23",
+            "2026-03-27"
+          ],
+          "iv_skew_ratio": 1.083,
+          "iv_skew_signal": "neutral",
+          "iv_skew_detail": {
+            "skew_ratio": 1.083,
+            "skew_signal": "neutral",
+            "otm_put_iv": 6.25,
+            "otm_call_iv": 5.77
+          }
+        }
+      },
+      "ScoutBeeNova": {
+        "discovery": "HUANG JEN HSUN 授予 936,771股 | 拥挤度 43/100（中等拥挤度） | 动量 +1.3%",
+        "score": 5.28,
+        "direction": "neutral",
+        "confidence": 0.88,
+        "dimension": "signal",
+        "details": {
+          "insider": {
+            "sentiment": "neutral",
+            "score": 5.0,
+            "filings": 5,
+            "dollar_bought": 0.0,
+            "dollar_sold": 0.0,
+            "notable_trades": [
+              {
+                "insider": "HUANG JEN HSUN",
+                "title": "President and CEO",
+                "is_officer": true,
+                "is_director": true,
+                "code": "A",
+                "code_desc": "授予",
+                "shares": 936771.0,
+                "price": 0.0,
+                "date": "2026-03-02",
+                "total_value": 0.0,
+                "security": "Common Stock"
+              },
+              {
+                "insider": "Kress Colette",
+                "title": "EVP & Chief Financial Officer",
+                "is_officer": true,
+                "is_director": false,
+                "code": "A",
+                "code_desc": "授予",
+                "shares": 106660.0,
+                "price": 0.0,
+                "date": "2026-03-02",
+                "total_value": 0.0,
+                "security": "Common"
+              },
+              {
+                "insider": "Puri Ajay K",
+                "title": "EVP, Worldwide Field Ops",
+                "is_officer": true,
+                "is_director": false,
+                "code": "A",
+                "code_desc": "授予",
+                "shares": 103278.0,
+                "price": 0.0,
+                "date": "2026-03-02",
+                "total_value": 0.0,
+                "security": "Common Stock"
+              },
+              {
+                "insider": "Shoquist Debora",
+                "title": "EVP, Operations",
+                "is_officer": true,
+                "is_director": false,
+                "code": "A",
+                "code_desc": "授予",
+                "shares": 98328.0,
+                "price": 0.0,
+                "date": "2026-03-02",
+                "total_value": 0.0,
+                "security": "Common Stock"
+              },
+              {
+                "insider": "Teter Timothy S.",
+                "title": "EVP, General Counsel and Sec",
+                "is_officer": true,
+                "is_director": false,
+                "code": "A",
+                "code_desc": "授予",
+                "shares": 98328.0,
+                "price": 0.0,
+                "date": "2026-03-02",
+                "total_value": 0.0,
+                "security": "Common Stock"
+              }
+            ],
+            "rss_fresh_today": 0,
+            "rss_summary": ""
+          },
+          "crowding_score": 43.095,
+          "crowding_signal": 5.69,
+          "components": {
+            "stocktwits_volume": 70.0,
+            "google_trends": 7.3,
+            "consensus_strength": 50.0,
+            "polymarket_volatility": 20,
+            "seeking_alpha_views": 60,
+            "short_squeeze_risk": 30
+          },
+          "adjustment_factor": 0.95,
+          "momentum_5d": 1.3391,
+          "price": 185.7951
+        }
+      },
+      "GuardBeeSentinel": {
+        "discovery": "信号分散 | 均分 5.0 | 一致性 0% | 风险调整 0.95 | 板块顺风",
+        "score": 4.1,
+        "direction": "neutral",
+        "confidence": 0.4,
+        "dimension": "risk_adj",
+        "details": {
+          "resonance": {
+            "resonance_detected": false,
+            "direction": "neutral",
+            "supporting_agents": 0,
+            "cross_dim_count": 0,
+            "resonant_dimensions": [],
+            "confidence_boost": 0
+          },
+          "top_signals_count": 0,
+          "consistency": 0,
+          "adjustment_factor": 0.95,
+          "llm_conflict_type": "",
+          "llm_recommended_action": ""
+        }
+      },
+      "BuzzBeeWhisper": {
+        "discovery": "情绪 47% | 动量 +1.3% | 量比 0.1x | Reddit #4(hot,102提及) | 新闻偏多（6多/2空） | 未上 Yahoo 热搜 | F&G 15(Extreme Fear)",
+        "score": 4.78,
+        "direction": "neutral",
+        "confidence": 0.9,
+        "dimension": "sentiment",
+        "details": {
+          "sentiment_pct": 47,
+          "momentum_5d": 1.3391,
+          "volume_ratio": 0.1042,
+          "volatility_20d": 36.3595,
+          "reddit": {
+            "rank": 4,
+            "mentions": 102,
+            "mention_delta": -2,
+            "buzz": "hot",
+            "score": 6.5
+          },
+          "components": {
+            "momentum_signal": 56.7,
+            "volume_signal": 20,
+            "volatility_signal": 60,
+            "reddit_signal": 65.0
+          },
+          "sentiment_momentum": {
+            "delta_1d": -3,
+            "delta_3d": -2,
+            "delta_7d": -9,
+            "momentum_regime": "stable",
+            "momentum_score_adj": 0.0
+          },
+          "sentiment_divergence": {
+            "divergence_type": "none",
+            "severity": 0,
+            "score_adj": 0.0,
+            "description": ""
+          }
+        }
+      }
+    },
+    "dimension_scores": {
+      "catalyst": 10,
+      "odds": 4.8,
+      "signal": 5.28,
+      "risk_adj": 4.1,
+      "sentiment": 4.78
+    },
+    "dimension_confidence": {
+      "catalyst": 0.85,
+      "odds": 0.7,
+      "signal": 0.88,
+      "risk_adj": 0.4,
+      "sentiment": 0.9
+    },
+    "dimension_weights": {
+      "signal": 0.3,
+      "catalyst": 0.2,
+      "sentiment": 0.2,
+      "odds": 0.15,
+      "risk_adj": 0.15
+    },
+    "ml_adjustment": 0.12,
+    "ml_contribution_pct": 1.7,
+    "base_score_before_resonance": 6.05,
+    "pheromone_compact": [
+      {
+        "a": "ChronosB",
+        "t": "NVDA",
+        "d": "+",
+        "s": 10.0,
+        "p": 0.85,
+        "c": 2,
+        "x": {
+          "catalyst_count": 7,
+          "nearest_days": 0,
+          "analyst_upside_pct": 43.4
+        }
+      },
+      {
+        "a": "RivalBee",
+        "t": "NVDA",
+        "d": "+",
+        "s": 6.5,
+        "p": 0.75,
+        "c": 0,
+        "x": {
+          "ml_probability": 0.65,
+          "expected_7d": 9.07
+        }
+      },
+      {
+        "a": "BearBeeC",
+        "t": "NVDA",
+        "d": "0",
+        "s": 4.7,
+        "p": 1.0,
+        "c": 3,
+        "x": {
+          "bear_score": 5.3,
+          "signal_count": 2
+        }
+      },
+      {
+        "a": "OracleBe",
+        "t": "NVDA",
+        "d": "+",
+        "s": 4.8,
+        "p": 0.85,
+        "c": 0,
+        "x": {
+          "pc_ratio": 0.71,
+          "iv_rank": 0,
+          "gex": 0.0,
+          "iv_skew": 1.08
+        }
+      },
+      {
+        "a": "ScoutBee",
+        "t": "NVDA",
+        "d": "0",
+        "s": 5.3,
+        "p": 0.9,
+        "c": 0
+      },
+      {
+        "a": "GuardBee",
+        "t": "NVDA",
+        "d": "0",
+        "s": 4.1,
+        "p": 0.95,
+        "c": 0,
+        "x": {
+          "consistency": 0,
+          "conflict_type": "",
+          "resonance_detected": false
+        }
+      },
+      {
+        "a": "BuzzBeeW",
+        "t": "NVDA",
+        "d": "0",
+        "s": 4.8,
+        "p": 1.0,
+        "c": 0,
+        "x": {
+          "sentiment_score": 47,
+          "reddit_momentum": 0
+        }
+      }
+    ],
+    "data_quality": {
+      "ChronosBeeHorizon": {
+        "yfinance_calendar": "real",
+        "catalysts_json": "loaded",
+        "analyst_targets": "real",
+        "llm_impact": "rule_only"
+      },
+      "RivalBeeVanguard": {
+        "ml_prediction": "real"
+      },
+      "BearBeeContrarian": {
+        "insider": "sec_api",
+        "valuation": "yfinance",
+        "options": "options_api",
+        "momentum": "yfinance",
+        "news": "finviz_api",
+        "catalyst": "real",
+        "ml": "real"
+      },
+      "OracleBeeEcho": {
+        "options": "real",
+        "polymarket": "unavailable"
+      },
+      "ScoutBeeNova": {
+        "social_buzz": "real",
+        "google_trends": "proxy_volume",
+        "bullish_agents": "real",
+        "polymarket": "proxy_momentum",
+        "seeking_alpha": "proxy_social",
+        "short_interest": "real",
+        "momentum": "real"
+      },
+      "GuardBeeSentinel": {
+        "pheromone_board": "real",
+        "crowding": "real",
+        "llm_conflict": "rule_only"
+      },
+      "BuzzBeeWhisper": {
+        "momentum": "real",
+        "volume": "real",
+        "volatility": "real",
+        "reddit": "real",
+        "finviz_news": "keyword"
+      }
+    },
+    "data_real_pct": 95.9,
+    "dim_data_quality": {
+      "signal": 87.1,
+      "catalyst": 100.0,
+      "sentiment": 100.0,
+      "odds": 85.0,
+      "risk_adj": 100.0
+    },
+    "distill_mode": "rule_engine",
+    "reasoning": "",
+    "key_insight": "",
+    "risk_flag": "",
+    "llm_confidence": 0.0,
+    "narrative": "",
+    "bull_bear_synthesis": "",
+    "contrarian_view": "",
+    "rule_score": 6.96,
+    "rule_direction": "bullish",
+    "bear_strength": 5.3,
+    "bear_cap_applied": false,
+    "guard_penalty": 0.0,
+    "guard_penalty_applied": false,
+    "direction_vote_weights": {
+      "bullish": 2.35,
+      "bearish": 0,
+      "neutral": 2.88
+    },
+    "dq_quality_factor": 1.0,
+    "dq_penalty_applied": false,
+    "dimension_status": {
+      "signal": "present",
+      "catalyst": "present",
+      "sentiment": "present",
+      "odds": "present",
+      "risk_adj": "present"
+    },
+    "dimension_missing_reason": {},
+    "dimension_coverage_pct": 100.0,
+    "pre_penalty_score": 6.96,
+    "score_after_dq": 6.96,
+    "score_after_guard": 6.96,
+    "score_after_bear": 6.96,
+    "total_penalty": 0.0,
+    "combo_cap_applied": false,
+    "coverage_warning": "",
+    "data_quality_grade": "normal",
+    "conflict_level": "none",
+    "conflict_info": {},
+    "arbitration_triggered": false,
+    "arbitration_flipped": false,
+    "pre_arbitration_margin": 0.4493,
+    "confidence_calibration": {
+      "confidence_band": [
+        6.24,
+        7.68
+      ],
+      "band_width": 0.72,
+      "discrimination": "medium",
+      "dimension_std": 2.39
+    },
+    "ml_weight_adjustments": {},
+    "ml_feedback_enabled": false
+  }
+}

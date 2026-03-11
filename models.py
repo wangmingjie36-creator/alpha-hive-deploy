@@ -255,6 +255,20 @@ class DataQualityChecker:
         if direction and direction not in ("bullish", "bearish", "neutral"):
             issues.append(f"invalid direction: {direction}")
 
+        # ML probability 字段检查（RivalBeeVanguard details.probability 或顶层 ml_probability）
+        # rival_bee 的 AgentResult.details = prediction dict，key 为 "probability"
+        _details = result.get("details") if isinstance(result.get("details"), dict) else {}
+        ml_prob = result.get("ml_probability") or _details.get("probability")
+        if ml_prob is not None:
+            try:
+                mp = float(ml_prob)
+                if math.isnan(mp) or math.isinf(mp):
+                    issues.append(f"ml_probability is {ml_prob}")
+                elif not (0.0 <= mp <= 1.0):
+                    issues.append(f"ml_probability out of range [0,1]: {ml_prob}")
+            except (TypeError, ValueError):
+                issues.append(f"ml_probability not numeric: {ml_prob}")
+
         return issues
 
     def clean_agent_result(self, result: Dict) -> Optional[Dict]:
