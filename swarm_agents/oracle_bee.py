@@ -76,9 +76,24 @@ class OracleBeeEcho(BeeAgent):
             _pw = _AS.get("oracle_poly_weight", 0.35)
             _uw = _AS.get("oracle_unusual_weight", 0.10)
             if poly_markets > 0:
-                score = options_score * _ow + poly_score * _pw + 5.0 * _uw
+                # BUG FIX: 原来 5.0 硬编码为 unusual_flow 的占位分，
+                # 改为使用实际 unusual_score（如无则 5.0 = 中性）
+                _unusual_base = unusual_flow.get("unusual_score", 5.0) if unusual_flow else 5.0
+                score = options_score * _ow + poly_score * _pw + _unusual_base * _uw
             else:
-                score = options_score
+                # BUG FIX: poly_markets=0 时原来直接用 options_score（weight=1.0），
+                # 完全忽略了 unusual_flow 权重。
+                # 修复：将 _ow + _uw 重新归一化，按比例混合 options + unusual，
+                # 如果 unusual 也不可用则退回纯 options_score。
+                _unusual_base = unusual_flow.get("unusual_score", None) if unusual_flow else None
+                if _unusual_base is not None:
+                    _total_w = _ow + _uw  # 无 poly 时只用这两个权重
+                    if _total_w > 0:
+                        score = (options_score * _ow + _unusual_base * _uw) / _total_w
+                    else:
+                        score = options_score
+                else:
+                    score = options_score  # 无 poly 也无 unusual，直接用 options
             # 叠加异常流调整
             score = clamp_score(score + unusual_score_adj)
 

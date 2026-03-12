@@ -871,7 +871,7 @@ CODE_EXECUTION_CONFIG = {
     "max_timeout": 30,           # 单次执行超时（秒）
     "max_retries": 3,            # 自动调试最大重试次数
     "sandbox_dir": str(PATHS.sandbox_dir),
-    "enable_network": False,     # 禁止网络访问
+    "enable_network": True,      # BUG FIX: CodeExecutorAgent 需要网络才能抓取 yfinance 数据，原 False 导致永久 ConnectionError
     "enable_file_write": True,   # 允许写入沙箱目录
     "add_to_swarm": True,        # 是否将 CodeExecutorAgent 加入蜂群
 }

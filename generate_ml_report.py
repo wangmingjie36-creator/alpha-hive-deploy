@@ -279,13 +279,29 @@ class MLEnhancedReportGenerator:
 
         # 从实时数据中提取特征（有则用真实值，无则降级到合理默认）
         _yf = metrics.get("sources", {}).get("yahoo_finance", {})
-        crowding_score = metrics.get("crowding_score",
-                                     _yf.get("short_interest_ratio", 50.0) * 10)
+        # BUG FIX: 原来的 _yf.get("short_interest_ratio", 50.0) * 10 当两个来源均缺失时
+        # 返回 50.0 * 10 = 500，严重超出 [0,100] 范围，导致 crowding_penalty = 50，
+        # 使 expected_7d = -23.24%（强烈看空），与评级矛盾。
+        # 修复：当 short_interest_ratio 缺失时使用中性默认值 5.0（5.0 * 10 = 50），
+        # 并对最终结果强制 clamp 到 [0, 100]。
+        _sir = _yf.get("short_interest_ratio")
+        _fallback_crowding = (_sir * 10) if _sir is not None else 50.0
+        crowding_score = float(metrics.get("crowding_score", _fallback_crowding))
+        crowding_score = min(100.0, max(0.0, crowding_score))  # 防御性边界保护
         catalyst_quality = analysis.get("recommendation", {}).get("rating", "B")
         momentum_5d = _yf.get("price_change_5d", 0.0)
         volatility = _yf.get("volatility_20d", _yf.get("atr_pct", 5.0))
         _raw_sentiment = metrics.get("sentiment_score", 0.0)
-        market_sentiment = _raw_sentiment * 10 if abs(_raw_sentiment) <= 10 else _raw_sentiment
+        # BUG FIX: 原来 abs(_raw_sentiment) <= 10 → *10 的逻辑无法区分 0-1（概率）量表：
+        #   0-1 范围  → *10 → 0-10（实际应 *100 → 0-100）
+        #   0-10 范围 → *10 → 0-100 ✓  |  0-100 范围 → 不变 ✓
+        # 修复：三段式量表自动识别，统一输出 -100~+100
+        if abs(_raw_sentiment) <= 1.0 and _raw_sentiment != 0.0:
+            market_sentiment = _raw_sentiment * 100   # 概率/归一化量表 (0~1 or -1~1)
+        elif abs(_raw_sentiment) <= 10.0:
+            market_sentiment = _raw_sentiment * 10    # Agent 评分量表 (0~10)
+        else:
+            market_sentiment = _raw_sentiment          # 已在 -100~+100 范围，直接使用
 
         # 映射评级到催化剂质量
         rating_to_quality = {

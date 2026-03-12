@@ -152,6 +152,113 @@ class TestCall:
         assert usage["total_cost_usd"] > 0
 
 
+# ==================== 429 限流重试测试 ====================
+
+class TestRateLimitRetry:
+    """_RATE_LIMIT_RETRY_DELAYS 重试逻辑的单元测试"""
+
+    # ── 共用 Fake 对象 ────────────────────────────────────────────────────────
+
+    class _FakeRateLimitError(Exception):
+        """模拟 anthropic.RateLimitError（不依赖真实 anthropic SDK）"""
+
+    class _FakeBlock:
+        text = "ok"
+
+    class _FakeUsage:
+        input_tokens = 5
+        output_tokens = 10
+        cache_creation_input_tokens = 0
+        cache_read_input_tokens = 0
+
+    class _FakeResponse:
+        pass  # content / usage 在下方动态赋值
+
+    def _make_response(self):
+        resp = self._FakeResponse()
+        resp.content = [self._FakeBlock()]
+        resp.usage = self._FakeUsage()
+        return resp
+
+    def _patch_rl_error(self, monkeypatch):
+        """把 anthropic.RateLimitError 替换为我们的 FakeRateLimitError"""
+        import types
+        fake_module = types.ModuleType("anthropic")
+        fake_module.RateLimitError = self._FakeRateLimitError
+        monkeypatch.setitem(__import__("sys").modules, "anthropic", fake_module)
+
+    # ── 测试用例 ──────────────────────────────────────────────────────────────
+
+    def test_retry_once_then_succeed(self, monkeypatch):
+        """第 1 次 429，第 2 次成功 → 返回文本，sleep 被调用一次"""
+        self._patch_rl_error(monkeypatch)
+
+        call_count = {"n": 0}
+        resp = self._make_response()
+
+        def _create(**kw):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise self._FakeRateLimitError("rate limit")
+            return resp
+
+        class FakeClient:
+            class messages:
+                create = staticmethod(_create)
+
+        slept = []
+        monkeypatch.setattr(llm_service, "_get_client", lambda: FakeClient())
+        monkeypatch.setattr(llm_service, "_RATE_LIMIT_RETRY_DELAYS", (0, 0))  # 不等待
+        monkeypatch.setattr(llm_service.time, "sleep", lambda s: slept.append(s))
+
+        result = llm_service.call("prompt")
+        assert result == "ok"
+        assert call_count["n"] == 2  # 1 次失败 + 1 次成功
+        assert len(slept) == 1       # sleep 调用了一次
+
+    def test_all_retries_exhausted_returns_none(self, monkeypatch):
+        """连续 429 超过重试次数 → 返回 None"""
+        self._patch_rl_error(monkeypatch)
+
+        def _create(**kw):
+            raise self._FakeRateLimitError("always rate limited")
+
+        class FakeClient:
+            class messages:
+                create = staticmethod(_create)
+
+        monkeypatch.setattr(llm_service, "_get_client", lambda: FakeClient())
+        monkeypatch.setattr(llm_service, "_RATE_LIMIT_RETRY_DELAYS", (0, 0))
+        monkeypatch.setattr(llm_service.time, "sleep", lambda s: None)
+
+        result = llm_service.call("prompt")
+        assert result is None
+
+    def test_non_rate_limit_exception_not_retried(self, monkeypatch):
+        """非 RateLimitError（如 ConnectionError）不触发重试 → 返回 None"""
+        self._patch_rl_error(monkeypatch)
+
+        call_count = {"n": 0}
+
+        def _create(**kw):
+            call_count["n"] += 1
+            raise ConnectionError("network down")
+
+        class FakeClient:
+            class messages:
+                create = staticmethod(_create)
+
+        slept = []
+        monkeypatch.setattr(llm_service, "_get_client", lambda: FakeClient())
+        monkeypatch.setattr(llm_service, "_RATE_LIMIT_RETRY_DELAYS", (0, 0))
+        monkeypatch.setattr(llm_service.time, "sleep", lambda s: slept.append(s))
+
+        result = llm_service.call("prompt")
+        assert result is None
+        assert call_count["n"] == 1  # 只调用一次，不重试
+        assert len(slept) == 0       # 不 sleep
+
+
 # ==================== call_json() ====================
 
 class TestCallJson:

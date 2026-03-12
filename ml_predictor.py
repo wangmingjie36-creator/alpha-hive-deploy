@@ -380,7 +380,11 @@ class SimpleMLModel:
         }.get(data.catalyst_quality, 10)
 
         momentum_bonus = data.momentum_5d  # 动量直接加到收益
-        crowding_penalty = data.crowding_score * 0.1  # 拥挤度降低预期收益
+        # BUG FIX: 原公式 crowding_score * 0.1 在 crowding_score=500 时产生 -50 惩罚，
+        # 导致 expected_7d 严重失真。改为百分比归一化：
+        # 中性分（50）→ 惩罚 5（参考原公式中位行为）；100 → 惩罚 10；0 → 惩罚 0。
+        _crd = min(100.0, max(0.0, data.crowding_score))  # 内层再次 clamp，防止跨层调用时绕过
+        crowding_penalty = _crd * 0.1  # 拥挤度降低预期收益（0→0, 50→5, 100→10）
 
         # 预测 3 日、7 日、30 日收益
         expected_7d = catalyst_bonus + momentum_bonus - crowding_penalty
@@ -662,7 +666,9 @@ class SGDMLModel:
         }.get(data.catalyst_quality, 10)
 
         momentum_bonus = data.momentum_5d
-        crowding_penalty = data.crowding_score * 0.1
+        # BUG FIX: 同 SimpleMLModel — clamp 后再计算 penalty，防止越界输入
+        _crd = min(100.0, max(0.0, data.crowding_score))
+        crowding_penalty = _crd * 0.1
         expected_7d = catalyst_bonus + momentum_bonus - crowding_penalty
 
         return {
@@ -978,6 +984,17 @@ class MLPredictionService:
         """为某个机会预测"""
         if not self.model.is_trained:
             self.train_model()
+
+        # 防御性输入验证：crowding_score 必须在 [0, 100]
+        # 上游若传入异常值（如 500），这里强制修正并记录警告
+        if not (0.0 <= data.crowding_score <= 100.0):
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "predict_for_opportunity: crowding_score=%.1f 超出 [0,100] 范围，"
+                "强制 clamp 到合法区间", data.crowding_score
+            )
+            from dataclasses import replace as _dc_replace
+            data = _dc_replace(data, crowding_score=min(100.0, max(0.0, data.crowding_score)))
 
         prediction = self.model.predict_return(data)
 

@@ -149,8 +149,14 @@ class AgentResult:
         if self.error is not None:
             d["error"] = self.error
         # 展平 extras 到顶层（agent-specific key 如 llm_thesis）
+        # BUG FIX: 原来 d.update(self.extras) 会无声地覆盖 score/direction/dimension 等核心字段。
+        # 改为只合并 extras 中「不与核心字段冲突」的键。
         if self.extras:
-            d.update(self.extras)
+            _CORE_KEYS = {"score", "direction", "confidence", "discovery",
+                          "source", "dimension", "data_quality", "details", "error"}
+            for k, v in self.extras.items():
+                if k not in _CORE_KEYS:
+                    d[k] = v
         return d
 
     @property

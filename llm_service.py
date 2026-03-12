@@ -14,6 +14,7 @@ import json
 import logging as _logging
 import os
 import threading
+import time
 from datetime import date
 from typing import Dict, Optional, List
 
@@ -58,6 +59,9 @@ _PRICING = {
     "claude-haiku-4-5-20251001": {"input": 1.0 / 1_000_000, "output": 5.0 / 1_000_000},
     "claude-sonnet-4-6": {"input": 3.0 / 1_000_000, "output": 15.0 / 1_000_000},
 }
+
+# 429 限流重试等待时间（秒）。TPM 窗口 60s 重置，两次重试足以覆盖大多数限流场景。
+_RATE_LIMIT_RETRY_DELAYS: tuple = (60, 60)
 
 
 def _load_api_key() -> Optional[str]:
@@ -210,7 +214,35 @@ def call(
             else:
                 kwargs["system"] = system
 
-        response = client.messages.create(**kwargs)
+        # ── 429 限流自动重试 ──────────────────────────────────────────────────
+        # TPM 窗口 60s 重置，等待后重试通常可恢复；最多重试 len(_RATE_LIMIT_RETRY_DELAYS) 次。
+        response = None
+        for _rl_attempt in range(len(_RATE_LIMIT_RETRY_DELAYS) + 1):
+            try:
+                response = client.messages.create(**kwargs)
+                break  # 成功，退出重试循环
+            except Exception as _e:
+                _is_rl = False
+                try:
+                    import anthropic as _am
+                    _is_rl = isinstance(_e, _am.RateLimitError)
+                except ImportError:
+                    pass
+                if _is_rl and _rl_attempt < len(_RATE_LIMIT_RETRY_DELAYS):
+                    _wait = _RATE_LIMIT_RETRY_DELAYS[_rl_attempt]
+                    _log.warning(
+                        "LLM 429 限流（第 %d/%d 次重试），等待 %ds 后重试...",
+                        _rl_attempt + 1, len(_RATE_LIMIT_RETRY_DELAYS), _wait,
+                    )
+                    time.sleep(_wait)
+                elif _is_rl:
+                    _log.error(
+                        "LLM 429 限流，%d 次重试全部失败，降级返回 None",
+                        len(_RATE_LIMIT_RETRY_DELAYS),
+                    )
+                    return None
+                else:
+                    raise  # 非 RateLimitError，交给外层 except 处理
 
         # 提取文本
         text = ""

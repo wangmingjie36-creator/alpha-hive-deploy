@@ -13,7 +13,16 @@ from code_executor import CodeExecutor
 from code_generator import CodeGenerator
 from debugger import Debugger
 
+# BUG FIX: 导入 CODE_EXECUTION_CONFIG，确保 CodeExecutor 使用正确的配置
+try:
+    from config import CODE_EXECUTION_CONFIG as _CE_CFG
+except ImportError:
+    _CE_CFG = {}
+
 _log = _logging.getLogger("alpha_hive.code_executor_agent")
+
+# CodeExecutorAgent 对应的蜂群维度标签
+_DIMENSION = "technical"
 
 
 class CodeExecutorAgent(BeeAgent):
@@ -34,7 +43,14 @@ class CodeExecutorAgent(BeeAgent):
             executor: 代码执行器
         """
         super().__init__(board, retriever)
-        self.executor = executor or CodeExecutor()
+        # BUG FIX: 优先使用外部传入的 executor；否则从 CODE_EXECUTION_CONFIG 读取参数，
+        # 避免使用硬编码默认值（原来 enable_network=False 导致永久 ConnectionError）
+        self.executor = executor or CodeExecutor(
+            max_timeout=_CE_CFG.get("max_timeout", 30),
+            sandbox_dir=_CE_CFG.get("sandbox_dir"),
+            enable_network=_CE_CFG.get("enable_network", True),
+            enable_file_write=_CE_CFG.get("enable_file_write", True),
+        )
         self.debugger = Debugger()
 
     def analyze(self, ticker: str) -> Dict[str, Any]:
@@ -81,6 +97,7 @@ class CodeExecutorAgent(BeeAgent):
                         "direction": "neutral",
                         "discovery": discovery,
                         "source": "CodeExecutorAgent",
+                        "dimension": _DIMENSION,   # BUG FIX: 缺失导致显示 "unknown"
                         "error": error
                     }
 
@@ -98,6 +115,7 @@ class CodeExecutorAgent(BeeAgent):
                     "direction": "neutral",
                     "discovery": discovery,
                     "source": "CodeExecutorAgent",
+                    "dimension": _DIMENSION,   # BUG FIX
                     "raw_output": fetch_result["stdout"]
                 }
 
@@ -145,6 +163,7 @@ class CodeExecutorAgent(BeeAgent):
                         "direction": direction,
                         "discovery": discovery,
                         "source": "CodeExecutorAgent",
+                        "dimension": _DIMENSION,   # BUG FIX
                         "details": {
                             "price": price,
                             "sma_20": sma_20,
@@ -177,6 +196,7 @@ class CodeExecutorAgent(BeeAgent):
                 "direction": direction,
                 "discovery": discovery,
                 "source": "CodeExecutorAgent",
+                "dimension": _DIMENSION,   # BUG FIX
                 "details": data
             }
 
@@ -188,7 +208,10 @@ class CodeExecutorAgent(BeeAgent):
             return {
                 "error": str(e),
                 "source": "CodeExecutorAgent",
-                "score": 1.0
+                "score": 1.0,
+                "dimension": _DIMENSION,   # BUG FIX
+                "direction": "neutral",
+                "discovery": discovery,
             }
 
     def generate_data_fetch_code(self, source: str, params: Dict) -> str:

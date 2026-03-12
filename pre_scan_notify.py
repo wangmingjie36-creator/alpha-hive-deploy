@@ -229,8 +229,8 @@ def _check_confirm(trigger_file: str, can_poll: bool, channel: str | None, poll_
 
 def main():
     parser = argparse.ArgumentParser(description="蜂群扫描 LLM 模式确认")
-    parser.add_argument("--wait", type=int, default=5, help="首次等待分钟数 (默认 5)")
-    parser.add_argument("--remind-interval", type=int, default=180, help="重复提醒间隔分钟数 (默认 180)")
+    parser.add_argument("--wait", type=int, default=10, help="首次等待分钟数 (默认 10)")
+    parser.add_argument("--remind-interval", type=int, default=60, help="重复提醒间隔分钟数 (默认 60)")
     parser.add_argument("--max-wait", type=int, default=1440, help="最大等待分钟数 (默认 1440=24h)")
     parser.add_argument("--tickers", nargs="+", default=[], help="标的列表")
     args = parser.parse_args()

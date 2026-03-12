@@ -90,7 +90,9 @@ class OptionsDataFetcher:
         except (OSError, TypeError, ValueError) as e:
             _log.warning("缓存写入失败：%s", e)
 
-    _LAST_VALID_IV_TTL = 172800  # 48 小时：覆盖周末 + 收市后整晚
+    # BUG FIX 根因②: 原 172800s(48h) 不覆盖美国 3 天长周末（周五收→周二开≈88h）
+    # 改为 432000s(120h/5天)，确保整个长周末期间缓存有效
+    _LAST_VALID_IV_TTL = 432000  # 120 小时（5 天）
 
     def _read_last_valid_iv(self, ticker: str) -> Optional[float]:
         """读取上次有效 IV（48 小时内），用于收市/数据缺失时降级"""
@@ -965,40 +967,60 @@ class OptionsAgent:
             except (ValueError, TypeError):
                 return True
 
+        # ── 根因③ BUG FIX: 加上 IV 上限过滤，防止盘后宽 spread 极端值污染 median ──
+        # 盘后 ATM 期权 bid/ask 暴宽，impliedVolatility 常飙到 100%-300%，
+        # 必须在计算 median 之前剔除，否则均值严重偏高
+        _IV_UPPER_RAW = 2.0   # 盘后 raw 过滤上限（小数，= 200%），去除极端噪声
         raw_ivs = []
         for c in calls_df:
             iv = c.get("impliedVolatility")
             strike = c.get("strike", 0)
             expiry = c.get("expiry", "")
-            if iv and iv > 0.005 and atm_lower <= strike <= atm_upper and _expiry_ok(expiry):
+            if iv and 0.005 < iv < _IV_UPPER_RAW and atm_lower <= strike <= atm_upper and _expiry_ok(expiry):
                 raw_ivs.append(iv)
 
-        # 如果过滤后无数据，放宽到包含短期到期
+        # 如果过滤后无数据，放宽到包含短期到期（保留上限过滤）
         if not raw_ivs:
             for c in calls_df:
                 iv = c.get("impliedVolatility")
                 strike = c.get("strike", 0)
-                if iv and iv > 0.005 and atm_lower <= strike <= atm_upper:
+                if iv and 0.005 < iv < _IV_UPPER_RAW and atm_lower <= strike <= atm_upper:
                     raw_ivs.append(iv)
 
-        _MIN_VALID_IV = 5.0  # IV < 5% 视为无效
+        _MIN_VALID_IV = 5.0    # IV < 5% 视为无效
+        _MAX_VALID_IV = 150.0  # IV > 150% 视为异常（保留极高波动标的的合理空间）
 
         if raw_ivs:
             current_iv = statistics.median(raw_ivs) * 100  # 小数 → 百分比
         else:
             current_iv = 0.0
 
-        # 判断当前是否在美股交易时段（ET 9:30-16:00，周一到周五）
+        # ── 根因④ BUG FIX: 使用精确 DST 判断，避免 3/11 月换时误判 ──
         from datetime import timezone, timedelta as _td, time as _dtime
         _utc = datetime.now(timezone.utc)
-        # 夏令时：3月第二个周日 ~ 11月第一个周日（粗略：3-11月 ET=UTC-4，其余 UTC-5）
-        _et = _utc + _td(hours=-4 if 3 <= _utc.month <= 11 else -5)
+        try:
+            # 优先使用 zoneinfo（Python 3.9+）或 pytz 精确处理夏令时
+            try:
+                from zoneinfo import ZoneInfo as _ZI
+                _et = _utc.astimezone(_ZI("America/New_York"))
+            except ImportError:
+                import pytz as _pytz
+                _et = _utc.astimezone(_pytz.timezone("America/New_York"))
+        except Exception:
+            # 最终降级到粗略近似（保留原逻辑兜底）
+            _et = _utc + _td(hours=-4 if 3 <= _utc.month <= 11 else -5)
         _market_open = (_et.weekday() < 5 and
                         _dtime(9, 30) <= _et.time() < _dtime(16, 0))
 
-        # 两种情况使用缓存（48 小时内的上次有效值）：
-        #   1. 非交易时段 —— yfinance IV 不可信（stale quotes / near-zero）
-        #   2. IV 过低 —— 即使在开市时段也视为异常数据
+        # ── 根因①②联合 BUG FIX ──
+        # 原逻辑：_save_last_valid_iv 只在 market_open=True 时执行，
+        # 但报告通常盘后运行，缓存永远不被写入，导致每次都用 stale raw IV 或硬编码 25.0。
+        # 原 TTL=48h，不覆盖美国长周末（周五收→周二开 = ~88h）。
+        # 修复策略：
+        #   A. 盘中有效 IV → 立即保存（原逻辑保留）
+        #   B. 盘后 raw IV 在合理区间 (5%~150%) → 作为"次优缓存"保存并使用，
+        #      避免直接使用极端 stale 值或硬编码 25.0
+        #   C. 缓存 TTL 从 48h 延长到 120h（覆盖 3 天长周末 + 缓冲）
         if not _market_open or current_iv < _MIN_VALID_IV:
             last_valid = self.fetcher._read_last_valid_iv(ticker)
             if last_valid:
@@ -1008,9 +1030,20 @@ class OptionsAgent:
                     "已关闭" if not _market_open else "异常数据", current_iv
                 )
                 current_iv = last_valid
+            elif _MIN_VALID_IV <= current_iv <= _MAX_VALID_IV:
+                # 盘后无缓存，但 raw IV 在合理范围内 → 作为次优缓存保存并使用
+                # （优于硬编码 25.0，下次运行直接从缓存读取）
+                _log.info(
+                    "%s 盘后无缓存，raw_iv=%.2f%% 在合理范围，保存为次优缓存", ticker, current_iv
+                )
+                self.fetcher._save_last_valid_iv(ticker, current_iv)
+                # current_iv 保持不变，直接使用
             elif current_iv < _MIN_VALID_IV:
-                current_iv = 25.0  # 无缓存兜底
-            # else: 收市但无缓存，保留 raw data（优于硬编码）
+                current_iv = 25.0  # 完全无效，最后兜底
+            # else: current_iv > MAX_VALID_IV → 极端异常，也用 25.0
+            else:
+                _log.warning("%s raw_iv=%.2f%% 超出合理上限，使用兜底 25.0%%", ticker, current_iv)
+                current_iv = 25.0
         else:
             # 开市且 IV 有效 → 保存供收市后使用
             self.fetcher._save_last_valid_iv(ticker, current_iv)
