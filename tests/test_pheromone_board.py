@@ -149,6 +149,41 @@ class TestResonance:
         res = board.detect_resonance("NVDA")
         assert res["confidence_boost"] <= 20
 
+    # ── 一致性双重门槛测试（防止 10/10 误报）────────────────────────────────────
+
+    def test_split_vote_no_resonance(self, board):
+        """3多/3空/1中 → 一致性 3/7 ≈ 43% < 50% → 无共振（TSLA/RKLB 典型场景）"""
+        # 3 个不同维度看多
+        for agent in ["ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper"]:
+            board.publish(_entry(agent=agent, direction="bullish"))
+        # 3 个不同维度看空
+        for agent in ["ChronosBeeHorizon", "RivalBeeVanguard", "BearBeeContrarian"]:
+            board.publish(_entry(agent=agent, direction="bearish", score=3.0))
+        # 1 个中性
+        board.publish(_entry(agent="GuardBeeSentinel", direction="neutral", score=5.0))
+        res = board.detect_resonance("NVDA")
+        assert not res["resonance_detected"], "3/7 一致性 < 50%，不应触发共振"
+        assert res["consistency"] < 0.5
+
+    def test_majority_vote_resonance(self, board):
+        """4多/1空/2中 → 一致性 4/7 ≈ 57% > 50% + ≥3 维 → 触发共振（BILI 典型场景）"""
+        for agent in ["ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon"]:
+            board.publish(_entry(agent=agent, direction="bullish"))
+        board.publish(_entry(agent="RivalBeeVanguard", direction="bearish", score=3.0))
+        for agent in ["GuardBeeSentinel", "BearBeeContrarian"]:
+            board.publish(_entry(agent=agent, direction="neutral", score=5.0))
+        res = board.detect_resonance("NVDA")
+        assert res["resonance_detected"], "4/7 一致性 > 50% 且 ≥3 维，应触发共振"
+        assert res["consistency"] > 0.5
+        assert res["cross_dim_count"] >= 3
+
+    def test_consistency_exposed_in_result(self, board):
+        """返回 dict 中应包含 consistency 字段"""
+        board.publish(_entry(agent="ScoutBeeNova"))
+        res = board.detect_resonance("NVDA")
+        assert "consistency" in res
+        assert 0.0 <= res["consistency"] <= 1.0
+
 
 class TestSnapshot:
     def test_snapshot_returns_all(self, board):

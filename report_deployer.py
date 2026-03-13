@@ -34,6 +34,19 @@ def verify_cdn_deployment(reporter, repo: str,
         _log.debug("读取本地 dashboard-data.json 失败，跳过验证: %s", e)
         return True
 
+    # ── 快速连通性探测：如果网络出口无法访问 github.io，直接跳过，避免浪费 3 分钟 ──
+    _deploy_host = reporter._DEPLOY_BASE_URL.split("/")[2]  # e.g. "wangmingjie36-creator.github.io"
+    try:
+        import socket as _sock
+        _sock.setdefaulttimeout(5)
+        _sock.getaddrinfo(_deploy_host, 443)
+    except OSError:
+        _log.info(
+            "CDN 验证跳过：无法解析 %s（沙箱网络限制），gh-pages 已推送成功",
+            _deploy_host,
+        )
+        return True
+
     _log.info("验证 CDN 部署... (期望: %s, 最长等待 %ds)", expected_ts, max_wait)
     start = _time_v.monotonic()
     attempt = 0

@@ -1,13 +1,13 @@
 {
   "_meta": {
     "ticker": "NVDA",
-    "report_date": "2026-03-10",
+    "report_date": "2026-03-12",
     "price": 184.77,
     "generated_by": "collect_data.py · 方案B"
   },
   "swarm": {
-    "final_score": 8.69,
-    "direction": "bullish",
+    "final_score": 4.9,
+    "direction": "bearish",
     "resonance": {
       "detected": true,
       "dimensions": [
@@ -21,9 +21,9 @@
       "direction": "bullish"
     },
     "agent_vote": {
-      "bullish": 4,
-      "bearish": 1,
-      "neutral": 2
+      "bullish": 2,
+      "bearish": 4,
+      "neutral": 1
     }
   },
   "agents": {
@@ -236,11 +236,12 @@
     "analyst_target": null
   },
   "ml": {
-    "probability_pct": 56.5,
-    "expected_3d_pct": -8.57,
-    "expected_7d_pct": -22.84,
-    "expected_30d_pct": -34.27,
-    "recommendation": "HOLD - 等待更好机会"
+    "probability_pct": 35.7,
+    "expected_3d_pct": 2.55,
+    "expected_7d_pct": 6.800000000000001,
+    "expected_30d_pct": 10.2,
+    "crowding_score_used": 45.0,
+    "recommendation": "AVOID - 风险大于收益"
   },
   "macro": {
     "fear_greed_index": 13,
@@ -277,5 +278,6 @@
     "rating": "HOLD",
     "action": "观察等待",
     "reasoning": "人工分析 65.0% + ML 预测 56.5% = 综合 62.4%"
-  }
+  },
+  "price": 183.14
 }

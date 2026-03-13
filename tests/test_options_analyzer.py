@@ -146,6 +146,9 @@ class TestOptionsAgent:
             agent.fetcher, "fetch_historical_iv",
             lambda ticker: [0.25 + i * 0.02 for i in range(20)]
         )
+        # 隔离缓存：阻止测试写入/读取生产 last_valid_iv 缓存文件
+        monkeypatch.setattr(agent.fetcher, "_save_last_valid_iv", lambda ticker, iv: None)
+        monkeypatch.setattr(agent.fetcher, "_read_last_valid_iv", lambda ticker: None)
 
         result = agent.analyze("NVDA", stock_price=145.0)
 
@@ -177,6 +180,9 @@ class TestOptionsAgent:
             agent.fetcher, "fetch_historical_iv",
             lambda ticker: [0.30] * 20
         )
+        # 隔离缓存：阻止测试写入/读取生产 last_valid_iv 缓存文件
+        monkeypatch.setattr(agent.fetcher, "_save_last_valid_iv", lambda ticker, iv: None)
+        monkeypatch.setattr(agent.fetcher, "_read_last_valid_iv", lambda ticker: None)
 
         result = agent.analyze("TEST", stock_price=145.0)
         assert result["data_quality"] == "unavailable"

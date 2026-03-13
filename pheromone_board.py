@@ -271,16 +271,23 @@ class PheromoneBoard:
 
             cross_dim_count = len(unique_dims)
 
-            # 触发条件：至少 3 个不同数据维度同向（而非 3 个不同 Agent）
-            # 例：ScoutBee(signal) + BuzzBee(sentiment) + OracleBee(odds) = 真共振
-            # 反例：3 个 Agent 都只看了动量 → 不触发（共 1 个维度）
-            resonance_detected = cross_dim_count >= 3
+            # 一致性：优势方向条目数 / 该标的全部条目数（含中性）
+            # 中性 Agent 表示"无明确信号"，应纳入分母以降低稀释后的一致性
+            consistency = len(dominant_entries) / len(ticker_entries) if ticker_entries else 0.0
+
+            # 触发条件（双重门槛）：
+            #   1. 跨维度：≥3 个不同数据维度同向（多源独立印证）
+            #   2. 一致性：优势方向票数 > 全部 Agent 票数的 50%
+            # 背景：5 Agent / 5 维度时，任意 3 票就可覆盖 3 维 → 原单一条件 10/10 全触发；
+            #       加入一致性后，3/7 = 43% < 50% 不触发（信号分散的标的正确返回 N）
+            resonance_detected = cross_dim_count >= 3 and consistency > 0.5
 
             return {
                 "resonance_detected": resonance_detected,
                 "direction": dominant,
                 "supporting_agents": len(dominant_entries),
                 "cross_dim_count": cross_dim_count,
+                "consistency": round(consistency, 3),
                 "resonant_dimensions": sorted(unique_dims),
                 "confidence_boost": min(cross_dim_count * 5, 20) if resonance_detected else 0,
             }

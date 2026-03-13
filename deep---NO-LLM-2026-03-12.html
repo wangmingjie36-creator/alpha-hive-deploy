@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>--NO-LLM 深度研究 · Alpha Hive · 2026-03-12</title>
+<style>
+*, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
+body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+        background:#0f172a; color:#e2e8f0; min-height:100vh; padding:24px 16px; }
+.container { max-width:1000px; margin:0 auto; }
+
+/* Header */
+.header { background:linear-gradient(135deg,#1e293b,#0f172a); border:1px solid #334155;
+           border-radius:16px; padding:28px 32px; margin-bottom:20px;
+           display:flex; gap:24px; align-items:center; flex-wrap:wrap; }
+.h-ticker { font-size:2em; font-weight:800; color:#f8fafc; letter-spacing:-1px; }
+.h-sub { color:#64748b; font-size:0.88em; margin-top:3px; }
+.h-stats { display:flex; gap:12px; flex-wrap:wrap; margin-top:10px; }
+.hstat { background:#0f172a; border:1px solid #334155; border-radius:8px; padding:8px 14px; text-align:center; }
+.hstat-v { font-size:1.3em; font-weight:700; }
+.hstat-l { font-size:0.72em; color:#475569; margin-top:2px; }
+
+/* Section */
+.section { background:#1e293b; border:1px solid #334155; border-radius:12px;
+            padding:22px 24px; margin-bottom:18px; }
+.ch-title { font-size:1em; font-weight:700; color:#f1f5f9; margin-bottom:16px;
+             padding-bottom:10px; border-bottom:1px solid #334155; }
+
+/* Badge */
+.badge { display:inline-block; padding:3px 10px; border-radius:20px; font-size:0.82em; font-weight:600; }
+.bull { background:#14532d; color:#86efac; }
+.bear { background:#7f1d1d; color:#fca5a5; }
+.neut { background:#1e293b; color:#94a3b8; border:1px solid #475569; }
+
+/* Summary box */
+.summary-box { background:#172554; border-left:3px solid #3b82f6; padding:12px 16px;
+                border-radius:0 8px 8px 0; color:#bfdbfe; line-height:1.7; font-size:0.95em; }
+.insight-box { background:#1e3a2f; border-left:3px solid #16a34a; padding:10px 16px;
+                border-radius:0 8px 8px 0; color:#86efac; margin-top:10px; font-size:0.9em; }
+
+/* Tables */
+.full-table { width:100%; border-collapse:collapse; font-size:0.88em; }
+.full-table th { background:#0f172a; color:#64748b; padding:8px 10px; text-align:left; font-size:0.8em; text-transform:uppercase; letter-spacing:0.04em; }
+.full-table td { padding:9px 10px; border-bottom:1px solid #0f172a; }
+.full-table tr:hover td { background:#1e293b44; }
+.tc { text-align:center; }
+.small { font-size:0.82em; color:#94a3b8; }
+.mini-table { width:100%; border-collapse:collapse; font-size:0.85em; }
+.mini-table th { color:#475569; padding:5px 8px; text-align:left; border-bottom:1px solid #334155; }
+.mini-table td { padding:5px 8px; border-bottom:1px solid #0f172a; }
+
+/* Phase 1 blocks */
+.p1-block { background:#0f172a; border-radius:10px; padding:16px; margin-bottom:14px;
+             padding-left:18px; }
+.p1-header { display:flex; gap:12px; align-items:flex-start; margin-bottom:12px; }
+.p1-name { font-size:0.95em; font-weight:700; color:#f1f5f9; }
+.p1-dim { font-size:0.8em; color:#475569; font-weight:400; margin-left:6px; }
+.p1-conf { font-size:0.78em; color:#475569; margin-left:6px; }
+.p1-time { font-size:0.75em; color:#334155; margin-left:6px; }
+.p1-row { display:flex; gap:12px; margin-bottom:8px; align-items:baseline; }
+.p1-label { font-size:0.75em; font-weight:600; color:#475569; text-transform:uppercase;
+             letter-spacing:0.05em; min-width:60px; flex-shrink:0; }
+.p1-val { font-size:0.88em; color:#e2e8f0; }
+.p1-explain { font-size:0.8em; color:#64748b; margin-left:8px; }
+.p1-pre { font-size:0.82em; color:#94a3b8; line-height:1.6; white-space:pre-wrap;
+           font-family:ui-monospace,"SF Mono",monospace; }
+.p1-dq { margin-top:8px; display:flex; flex-wrap:wrap; gap:4px; }
+
+/* Timeline */
+.timeline { font-size:0.82em; color:#64748b; line-height:1.6; background:#0f172a;
+             padding:14px 16px; border-radius:8px; font-family:ui-monospace,"SF Mono",monospace; }
+
+/* Risk radar */
+.risk-level { font-weight:600; }
+.risk-cat { color:#94a3b8; }
+
+/* Scenarios */
+.ev-box { margin-top:12px; padding:10px 16px; background:#0f172a; border-radius:8px;
+           font-size:0.9em; color:#94a3b8; }
+
+/* Tasks */
+.task-list { list-style:none; padding:0; }
+.task-list li { padding:7px 0; border-bottom:1px solid #0f172a;
+                 font-size:0.88em; color:#94a3b8; font-family:ui-monospace,"SF Mono",monospace; }
+
+/* Invalidation */
+.tag { color:#fbbf24; font-weight:600; font-size:0.85em; }
+.invalidate { color:#fca5a5; font-size:0.85em; }
+
+/* DQ badges */
+.dq-badge { font-size:0.72em; padding:2px 7px; border-radius:10px; }
+.dq-real { background:#14532d40; color:#86efac; border:1px solid #14532d; }
+.dq-fallback { background:#78350f40; color:#fcd34d; border:1px solid #78350f; }
+
+.dim-text { color:#475569; font-style:italic; }
+.footer { text-align:center; margin-top:28px; color:#334155; font-size:0.8em; }
+
+@media(max-width:600px) {
+  .header { flex-direction:column; }
+  .p1-row { flex-direction:column; gap:4px; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- ── Header ── -->
+  <div class="header">
+    <div style="flex-shrink:0"><svg width="80" height="80" viewBox="0 0 80 80">
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#e5e7eb" stroke-width="8"/>
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#9a3412" stroke-width="8"
+              stroke-dasharray="87.6 175.9" stroke-linecap="round"
+              transform="rotate(-90 40 40)"/>
+      <text x="40" y="44" text-anchor="middle" font-size="16" font-weight="bold"
+            fill="#9a3412">5.0</text>
+    </svg></div>
+    <div style="flex:1">
+      <div class="h-ticker">🐝 --NO-LLM</div>
+      <div class="h-sub">Alpha Hive 深度研究 · 2026-03-12 21:32 · 7 Agent 并行 · 规则引擎</div>
+      <div class="h-stats">
+        <div class="hstat"><div class="hstat-v" style="color:#9a3412">5.0</div><div class="hstat-l">综合评分</div></div>
+        <div class="hstat"><div class="hstat-v"><span class="badge neut">➖ 中性</span></div><div class="hstat-l">方向</div></div>
+        <div class="hstat"><div class="hstat-v" style="color:#a78bfa">规则引擎</div><div class="hstat-l">置信度</div></div>
+        <div class="hstat"><div class="hstat-v">📈0 📉0 ➖0</div><div class="hstat-l">Agent 投票</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 第1章：核心结论 ── -->
+  <div class="section">
+    <div class="ch-title">第 1 章 · 核心结论</div>
+    <div class="summary-box">基于7 Agent并行分析，综合评分 5.0/10，方向 neutral。</div>
+    
+  </div>
+
+  <!-- ── 第2章：五维评分表 ── -->
+  <div class="section">
+    <div class="ch-title">第 2 章 · 五维加权评分 &nbsp;<span style="font-size:0.85em;color:#64748b">（加权合计 = 综合分基础）</span></div>
+    <table class="full-table">
+      <thead><tr><th>维度</th><th>权重</th><th style="width:140px">分布</th><th>分数</th><th>加权贡献</th></tr></thead>
+      <tbody><tr><td>Signal 聪明钱</td><td class="tc">×30%</td><td>—</td><td class="tc">—</td><td class="small dim-text">数据不可用</td></tr><tr><td>Catalyst 催化剂</td><td class="tc">×20%</td><td>—</td><td class="tc">—</td><td class="small dim-text">数据不可用</td></tr><tr><td>Sentiment 情绪</td><td class="tc">×20%</td><td>—</td><td class="tc">—</td><td class="small dim-text">数据不可用</td></tr><tr><td>Odds 赔率</td><td class="tc">×15%</td><td>—</td><td class="tc">—</td><td class="small dim-text">数据不可用</td></tr><tr><td>RiskAdj 风险调整</td><td class="tc">×15%</td><td>—</td><td class="tc">—</td><td class="small dim-text">数据不可用</td></tr></tbody>
+      <tfoot><tr style="border-top:2px solid #334155">
+        <td colspan="3" style="text-align:right;color:#64748b;font-size:0.85em">加权合计 →</td>
+        <td colspan="2" style="color:#9a3412;font-weight:700;font-size:1.1em">0.00</td>
+      </tr></tfoot>
+    </table>
+  </div>
+
+  <!-- ── 第3章：7 Agent Phase 1 推理链 ── -->
+  <div class="section">
+    <div class="ch-title">第 3 章 · 各维度深度分析 &nbsp;<span style="font-size:0.85em;color:#64748b">（原始数据 → 异常识别 → 维度结论 → 置信度）</span></div>
+    
+    <div class="p1-block" style="border-left:3px solid #3b82f6">
+      <div class="p1-header">
+        <div style="flex-shrink:0"><svg width="80" height="80" viewBox="0 0 80 80">
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#e5e7eb" stroke-width="8"/>
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#9a3412" stroke-width="8"
+              stroke-dasharray="88.0 175.9" stroke-linecap="round"
+              transform="rotate(-90 40 40)"/>
+      <text x="40" y="44" text-anchor="middle" font-size="16" font-weight="bold"
+            fill="#9a3412">5.0</text>
+    </svg></div>
+        <div style="flex:1">
+          <div class="p1-name">🔵 ScoutBee <span class="p1-dim">聪明钱 / 内幕交易</span></div>
+          <div style="margin-top:4px"><span class="badge neut">➖ 中性</span> <span class="p1-conf">置信度 0%</span> <span class="p1-time">0.0s</span></div>
+        </div>
+      </div>
+      <div class="p1-row"><span class="p1-label">原始数据</span><pre class="p1-pre">错误: invalid_ticker</pre></div>
+      <div class="p1-row"><span class="p1-label">异常识别</span><span class="p1-val">— 内幕交易无明显异常</span></div>
+      <div class="p1-row"><span class="p1-label">维度结论</span>
+        <span class="p1-val" style="color:#9a3412;font-weight:700">聪明钱 / 内幕交易: 5.0/10</span>
+        <span class="p1-explain">← 无效 ticker 格式: '--NO-LLM'（需 1~5 位大写字母）</span>
+      </div>
+      
+    </div>
+    <div class="p1-block" style="border-left:3px solid #22c55e">
+      <div class="p1-header">
+        <div style="flex-shrink:0"><svg width="80" height="80" viewBox="0 0 80 80">
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#e5e7eb" stroke-width="8"/>
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#9a3412" stroke-width="8"
+              stroke-dasharray="88.0 175.9" stroke-linecap="round"
+              transform="rotate(-90 40 40)"/>
+      <text x="40" y="44" text-anchor="middle" font-size="16" font-weight="bold"
+            fill="#9a3412">5.0</text>
+    </svg></div>
+        <div style="flex:1">
+          <div class="p1-name">🟢 OracleBee <span class="p1-dim">期权市场预期</span></div>
+          <div style="margin-top:4px"><span class="badge neut">➖ 中性</span> <span class="p1-conf">置信度 0%</span> <span class="p1-time">0.0s</span></div>
+        </div>
+      </div>
+      <div class="p1-row"><span class="p1-label">原始数据</span><pre class="p1-pre">错误: invalid_ticker</pre></div>
+      <div class="p1-row"><span class="p1-label">异常识别</span><span class="p1-val">— 无效 ticker 格式: '--NO-LLM'（需 1~5 位大写字母）</span></div>
+      <div class="p1-row"><span class="p1-label">维度结论</span>
+        <span class="p1-val" style="color:#9a3412;font-weight:700">期权市场预期: 5.0/10</span>
+        <span class="p1-explain">← 无效 ticker 格式: '--NO-LLM'（需 1~5 位大写字母）</span>
+      </div>
+      
+    </div>
+    <div class="p1-block" style="border-left:3px solid #a855f7">
+      <div class="p1-header">
+        <div style="flex-shrink:0"><svg width="80" height="80" viewBox="0 0 80 80">
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#e5e7eb" stroke-width="8"/>
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#9a3412" stroke-width="8"
+              stroke-dasharray="88.0 175.9" stroke-linecap="round"
+              transform="rotate(-90 40 40)"/>
+      <text x="40" y="44" text-anchor="middle" font-size="16" font-weight="bold"
+            fill="#9a3412">5.0</text>
+    </svg></div>
+        <div style="flex:1">
+          <div class="p1-name">🟣 ChronosBee <span class="p1-dim">催化剂 / 财报日历</span></div>
+          <div style="margin-top:4px"><span class="badge neut">➖ 中性</span> <span class="p1-conf">置信度 0%</span> <span class="p1-time">0.0s</span></div>
+        </div>
+      </div>
+      <div class="p1-row"><span class="p1-label">原始数据</span><pre class="p1-pre">错误: invalid_ticker</pre></div>
+      <div class="p1-row"><span class="p1-label">异常识别</span><span class="p1-val">— 近期无高影响催化剂</span></div>
+      <div class="p1-row"><span class="p1-label">维度结论</span>
+        <span class="p1-val" style="color:#9a3412;font-weight:700">催化剂 / 财报日历: 5.0/10</span>
+        <span class="p1-explain">← 无效 ticker 格式: '--NO-LLM'（需 1~5 位大写字母）</span>
+      </div>
+      
+    </div>
+    <div class="p1-block" style="border-left:3px solid #eab308">
+      <div class="p1-header">
+        <div style="flex-shrink:0"><svg width="80" height="80" viewBox="0 0 80 80">
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#e5e7eb" stroke-width="8"/>
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#9a3412" stroke-width="8"
+              stroke-dasharray="88.0 175.9" stroke-linecap="round"
+              transform="rotate(-90 40 40)"/>
+      <text x="40" y="44" text-anchor="middle" font-size="16" font-weight="bold"
+            fill="#9a3412">5.0</text>
+    </svg></div>
+        <div style="flex:1">
+          <div class="p1-name">🟡 BuzzBee <span class="p1-dim">市场情绪 / 社交</span></div>
+          <div style="margin-top:4px"><span class="badge neut">➖ 中性</span> <span class="p1-conf">置信度 0%</span> <span class="p1-time">0.0s</span></div>
+        </div>
+      </div>
+      <div class="p1-row"><span class="p1-label">原始数据</span><pre class="p1-pre">错误: invalid_ticker</pre></div>
+      <div class="p1-row"><span class="p1-label">异常识别</span><span class="p1-val">— 情绪中性区间 50%</span></div>
+      <div class="p1-row"><span class="p1-label">维度结论</span>
+        <span class="p1-val" style="color:#9a3412;font-weight:700">市场情绪 / 社交: 5.0/10</span>
+        <span class="p1-explain">← 无效 ticker 格式: '--NO-LLM'（需 1~5 位大写字母）</span>
+      </div>
+      
+    </div>
+    <div class="p1-block" style="border-left:3px solid #f97316">
+      <div class="p1-header">
+        <div style="flex-shrink:0"><svg width="80" height="80" viewBox="0 0 80 80">
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#e5e7eb" stroke-width="8"/>
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#9a3412" stroke-width="8"
+              stroke-dasharray="88.0 175.9" stroke-linecap="round"
+              transform="rotate(-90 40 40)"/>
+      <text x="40" y="44" text-anchor="middle" font-size="16" font-weight="bold"
+            fill="#9a3412">5.0</text>
+    </svg></div>
+        <div style="flex:1">
+          <div class="p1-name">🟠 RivalBee <span class="p1-dim">ML 辅助预测</span></div>
+          <div style="margin-top:4px"><span class="badge neut">➖ 中性</span> <span class="p1-conf">置信度 0%</span> <span class="p1-time">0.0s</span></div>
+        </div>
+      </div>
+      <div class="p1-row"><span class="p1-label">原始数据</span><pre class="p1-pre">错误: invalid_ticker</pre></div>
+      <div class="p1-row"><span class="p1-label">异常识别</span><span class="p1-val">— 无效 ticker 格式: '--NO-LLM'（需 1~5 位大写字母）</span></div>
+      <div class="p1-row"><span class="p1-label">维度结论</span>
+        <span class="p1-val" style="color:#9a3412;font-weight:700">ML 辅助预测: 5.0/10</span>
+        <span class="p1-explain">← 无效 ticker 格式: '--NO-LLM'（需 1~5 位大写字母）</span>
+      </div>
+      
+    </div>
+    <div class="p1-block" style="border-left:3px solid #06b6d4">
+      <div class="p1-header">
+        <div style="flex-shrink:0"><svg width="80" height="80" viewBox="0 0 80 80">
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#e5e7eb" stroke-width="8"/>
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#9a3412" stroke-width="8"
+              stroke-dasharray="88.0 175.9" stroke-linecap="round"
+              transform="rotate(-90 40 40)"/>
+      <text x="40" y="44" text-anchor="middle" font-size="16" font-weight="bold"
+            fill="#9a3412">5.0</text>
+    </svg></div>
+        <div style="flex:1">
+          <div class="p1-name">🔷 GuardBee <span class="p1-dim">风险调整 / 共振</span></div>
+          <div style="margin-top:4px"><span class="badge neut">➖ 中性</span> <span class="p1-conf">置信度 0%</span> <span class="p1-time">0.0s</span></div>
+        </div>
+      </div>
+      <div class="p1-row"><span class="p1-label">原始数据</span><pre class="p1-pre">共振: ✗ 无共振
+一致性 0%  调整系数 1.00</pre></div>
+      <div class="p1-row"><span class="p1-label">异常识别</span><span class="p1-val">— 无共振，信号分散</span></div>
+      <div class="p1-row"><span class="p1-label">维度结论</span>
+        <span class="p1-val" style="color:#9a3412;font-weight:700">风险调整 / 共振: 5.0/10</span>
+        <span class="p1-explain">← 无效 ticker 格式: '--NO-LLM'（需 1~5 位大写字母）</span>
+      </div>
+      
+    </div>
+    <div class="p1-block" style="border-left:3px solid #ef4444">
+      <div class="p1-header">
+        <div style="flex-shrink:0"><svg width="80" height="80" viewBox="0 0 80 80">
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#e5e7eb" stroke-width="8"/>
+      <circle cx="40" cy="40" r="28" fill="none" stroke="#9a3412" stroke-width="8"
+              stroke-dasharray="88.0 175.9" stroke-linecap="round"
+              transform="rotate(-90 40 40)"/>
+      <text x="40" y="44" text-anchor="middle" font-size="16" font-weight="bold"
+            fill="#9a3412">5.0</text>
+    </svg></div>
+        <div style="flex:1">
+          <div class="p1-name">🔴 BearBee <span class="p1-dim">看空对冲论点</span></div>
+          <div style="margin-top:4px"><span class="badge neut">➖ 中性</span> <span class="p1-conf">置信度 0%</span> <span class="p1-time">0.0s</span></div>
+        </div>
+      </div>
+      <div class="p1-row"><span class="p1-label">原始数据</span><pre class="p1-pre">看空综合分 0.0/10</pre></div>
+      <div class="p1-row"><span class="p1-label">异常识别</span><span class="p1-val">⚡ 0 条独立看空信号（未达门控3条）</span></div>
+      <div class="p1-row"><span class="p1-label">维度结论</span>
+        <span class="p1-val" style="color:#9a3412;font-weight:700">看空对冲论点: 5.0/10</span>
+        <span class="p1-explain">← 无效 ticker 格式: '--NO-LLM'（需 1~5 位大写字母）</span>
+      </div>
+      
+    </div>
+
+    <!-- ChronosBee ASCII 时间轴 -->
+    <div style="margin-top:18px">
+      <div style="font-size:0.82em;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">ChronosBee · 催化剂时间轴</div>
+      <pre class="timeline">（无近期催化剂数据）</pre>
+    </div>
+
+    <!-- GuardBee 信号共振矩阵 -->
+    <div style="margin-top:18px">
+      <div style="font-size:0.82em;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px">GuardBee · 信号共振矩阵</div>
+      
+    <div style="margin-bottom:10px;color:#475569;font-weight:600">无共振（信号分散）</div>
+    <div style="margin-bottom:6px;color:#64748b;font-size:0.82em">一致性指数: 0%</div>
+    <table class="mini-table"><thead><tr><th>维度</th><th>均分</th><th>状态</th></tr></thead>
+    <tbody><tr><td style="color:#475569">· 聪明钱</td><td style="color:#475569">—</td><td></td></tr><tr><td style="color:#475569">· 催化剂</td><td style="color:#475569">—</td><td></td></tr><tr><td style="color:#475569">· 情绪</td><td style="color:#475569">—</td><td></td></tr><tr><td style="color:#475569">· 赔率</td><td style="color:#475569">—</td><td></td></tr><tr><td style="color:#475569">· 风险调整</td><td style="color:#475569">—</td><td></td></tr></tbody></table>
+    </div>
+  </div>
+
+  <!-- ── 第4章：投资假设 + 失效条件 ── -->
+  <div class="section">
+    <div class="ch-title">第 4 章 · 投资假设 + 失效条件</div>
+    
+    <table class="full-table">
+      <thead><tr><th style="width:10%">标记</th><th>当前假设</th><th>失效条件（触发即重新评估）</th></tr></thead>
+      <tbody><tr><td class="tag">❓ 假设 1</td><td>当前震荡区间持续</td><td class="invalidate">突破区间上沿（评分 > 7.5）或下沿（评分 < 4.0）</td></tr><tr><td class="tag">❓ 假设 2</td><td>无重大催化剂</td><td class="invalidate">ChronosBee 检测到 ? 天内高冲击催化剂</td></tr><tr><td class="tag">❓ 假设 3</td><td>情绪中性区间</td><td class="invalidate">BuzzBee 看多情绪突破 70% 或跌破 30%</td></tr><tr><td class="tag">❓ 假设 4</td><td>成交量正常</td><td class="invalidate">成交量比 > 2.5x（异常资金流入/流出）</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- ── 第5章：4情景推演 ── -->
+  <div class="section">
+    <div class="ch-title">第 5 章 · 情景推演 + 概率加权期望收益</div>
+    
+    <div style="overflow-x:auto">
+    <table class="full-table">
+      <thead><tr><th>情景</th><th>概率</th><th>预期收益</th><th>触发条件</th></tr></thead>
+      <tbody><tr><td>📈 上行情景</td><td class="tc">20%</td><td class="tc" style="color:#86efac;font-weight:600">+10~+18%</td><td class="small">催化剂触发、情绪转好、资金流入</td></tr><tr><td>➖ 中性基准</td><td class="tc">45%</td><td class="tc" style="color:#86efac;font-weight:600">-3~+5%</td><td class="small">数据维持现状，无重大变化</td></tr><tr><td>📉 下行情景</td><td class="tc">25%</td><td class="tc" style="color:#fca5a5;font-weight:600">-8~-15%</td><td class="small">宏观压力、行业逆风、信号转空</td></tr><tr><td>🐻 尾部风险</td><td class="tc">10%</td><td class="tc" style="color:#fca5a5;font-weight:600">-18~-28%</td><td class="small">黑天鹅事件、流动性冲击</td></tr></tbody>
+    </table>
+    </div>
+    <div class="ev-box">概率加权期望收益 <span style="color:#fca5a5;font-weight:700;font-size:1.1em">-1.9%</span></div>
+  </div>
+
+  <!-- ── 第6章：风险雷达 ── -->
+  <div class="section">
+    <div class="ch-title">第 6 章 · 风险雷达</div>
+    
+    <table class="full-table">
+      <thead><tr><th>风险等级</th><th>风险类型</th><th>具体描述</th></tr></thead>
+      <tbody><tr><td class="risk-level">🟢 低</td><td class="risk-cat">看空信号强度</td><td class="small">BearBee 综合看空分 0.0/10</td></tr><tr><td class="risk-level">🟢 低</td><td class="risk-cat">近期催化剂</td><td class="small">无近期高影响催化剂</td></tr><tr><td class="risk-level">🟢 中性</td><td class="risk-cat">市场情绪</td><td class="small">看多情绪 50%</td></tr><tr><td class="risk-level">🟡 分散</td><td class="risk-cat">信号共振</td><td class="small">无共振，各维度信号分散</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- ── 第7章：明日追踪任务 ── -->
+  <div class="section">
+    <div class="ch-title">第 7 章 · 明日追踪任务</div>
+    <ul class='task-list'><li>☐ [03/13] 检查 SEC EDGAR --NO-LLM 是否有新 Form 4 大额内部人交易申报</li><li>☐ [03/13] 监控 QueenDistiller 综合评分是否偏离当前 5.0（±1.5 触发重评）</li><li>☐ [03/13] 追踪 BearBee 看空信号数量（当前 0 条，≥5 条升级警戒）</li><li>☐ [03/19] 监控信号共振是否形成（GuardBee 一致性需 > 60%）</li><li>☐ [03/19] 重跑 deep_analysis.py --NO-LLM 对比评分变化</li><li>☐ [持续] 关注 BuzzBee 情绪是否突破 70% 或跌破 30%（情绪极端反转预警）</li></ul>
+  </div>
+
+  <div class="footer">Alpha Hive · 2026-03-12 21:32 · 非投资建议，仅量化规则引擎分析</div>
+</div>
+</body>
+</html>
