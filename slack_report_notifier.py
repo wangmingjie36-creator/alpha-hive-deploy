@@ -332,7 +332,7 @@ class SlackReportNotifier:
         cache_dir: str,
         data_cache_dir: str,
         finviz_cache_dir: str,
-        dashboard_url: str = "https://igg-wang748.github.io/alpha-hive-dashboard/",
+        dashboard_url: str = "https://wangmingjie36-creator.github.io/alpha-hive-deploy/",
         *,
         llm_mode: bool = True,
     ) -> bool:

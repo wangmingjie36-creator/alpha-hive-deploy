@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NVDA · Alpha Hive 深度分析 · 2026-03-13</title>
+<style>
+  :root {
+    --bg: #0a0e1a; --bg2: #111827; --bg3: #1a2234; --bg4: #1e2a3e;
+    --border: #2a3a52; --border2: #3a4e6a;
+    --gold: #f59e0b; --gold2: #fbbf24;
+    --green: #10b981; --green2: #34d399;
+    --red: #ef4444; --red2: #f87171;
+    --blue: #3b82f6; --blue2: #60a5fa;
+    --purple: #8b5cf6; --purple2: #a78bfa;
+    --cyan: #06b6d4; --cyan2: #22d3ee;
+    --text: #e2e8f0; --text2: #94a3b8; --text3: #64748b;
+    --bullish: #10b981; --bearish: #ef4444; --neutral: #f59e0b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, 'PingFang SC', 'Helvetica Neue', sans-serif; line-height: 1.6; }
+  .header { background: linear-gradient(135deg, #0d1b2e 0%, #1a2840 50%, #0d1b2e 100%); border-bottom: 1px solid var(--border2); padding: 28px 24px 22px; position: relative; overflow: hidden; }
+  .header::before { content: ''; position: absolute; top: -40px; right: -40px; width: 200px; height: 200px; background: radial-gradient(circle, rgba(245,158,11,0.12) 0%, transparent 70%); pointer-events: none; }
+  .header-top { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+  .ticker-block { display: flex; align-items: center; gap: 14px; }
+  .ticker-logo { width: 48px; height: 48px; background: linear-gradient(135deg, #3b82f6, #1d4ed8); border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 900; color: white; letter-spacing: -1px; }
+  .ticker-info h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.5px; }
+  .ticker-info .company { font-size: 13px; color: var(--text2); margin-top: 3px; font-weight: 500; }
+  .ticker-info .subtitle { font-size: 11px; color: var(--text3); margin-top: 2px; }
+  .price-block { text-align: right; }
+  .price { font-size: 32px; font-weight: 800; color: var(--gold2); }
+  .price-sub { font-size: 12px; color: var(--text3); margin-top: 2px; }
+  .verdict-banner { margin-top: 18px; background: rgba(239,68,68,0.15); border: 1px solid rgba(239,68,68,0.35); border-radius: 10px; padding: 14px 18px; display: flex; align-items: center; gap: 14px; }
+  .verdict-score { font-size: 42px; font-weight: 900; color: #ef4444; line-height: 1; }
+  .verdict-text { flex: 1; }
+  .verdict-title { font-size: 16px; font-weight: 700; color: #ef4444; }
+  .verdict-sub { font-size: 13px; color: var(--text2); margin-top: 3px; }
+  .resonance-badge { background: rgba(139,92,246,0.2); border: 1px solid rgba(139,92,246,0.5); border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: 700; color: var(--purple2); white-space: nowrap; }
+  .nav { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 16px; display: flex; overflow-x: auto; gap: 0; scrollbar-width: none; }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav a { display: flex; align-items: center; gap: 6px; padding: 12px 14px; font-size: 12px; font-weight: 600; color: var(--text3); text-decoration: none; white-space: nowrap; border-bottom: 2px solid transparent; transition: all 0.2s; }
+  .nav a:hover { color: var(--text); border-color: var(--blue); }
+  .main { max-width: 900px; margin: 0 auto; padding: 20px 16px 60px; }
+  .section { margin-bottom: 24px; background: var(--bg2); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+  .section-header { padding: 16px 20px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .section-icon { font-size: 18px; }
+  .section-title { font-size: 15px; font-weight: 700; }
+  .section-badge { margin-left: auto; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 20px; }
+  .badge-bull { background: rgba(16,185,129,0.2); color: var(--green2); border: 1px solid rgba(16,185,129,0.3); }
+  .badge-bear { background: rgba(239,68,68,0.2); color: var(--red2); border: 1px solid rgba(239,68,68,0.3); }
+  .badge-neutral { background: rgba(245,158,11,0.2); color: var(--gold2); border: 1px solid rgba(245,158,11,0.3); }
+  .badge-resonance { background: rgba(139,92,246,0.25); color: var(--purple2); border: 1px solid rgba(139,92,246,0.4); }
+  .section-body { padding: 18px 20px; }
+  .score-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 12px; }
+  .score-card { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 12px 10px; text-align: center; }
+  .score-card .bee { font-size: 11px; color: var(--text3); margin-bottom: 4px; }
+  .score-card .val { font-size: 26px; font-weight: 800; line-height: 1; }
+  .score-card .dim { font-size: 10px; color: var(--text3); margin-top: 3px; }
+  .score-card.bull { border-color: rgba(16,185,129,0.35); }
+  .score-card.bull .val { color: var(--green2); }
+  .score-card.bear { border-color: rgba(239,68,68,0.35); }
+  .score-card.bear .val { color: var(--red2); }
+  .score-card.neutral { border-color: rgba(245,158,11,0.35); }
+  .score-card.neutral .val { color: var(--gold2); }
+  .resonance-box { background: linear-gradient(135deg, rgba(139,92,246,0.1), rgba(245,158,11,0.08)); border: 1px solid rgba(139,92,246,0.35); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .resonance-title { font-size: 13px; font-weight: 700; color: var(--purple2); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+  .resonance-dims { display: flex; gap: 8px; flex-wrap: wrap; }
+  .resonance-dim { background: rgba(139,92,246,0.2); border: 1px solid rgba(139,92,246,0.35); border-radius: 6px; padding: 3px 10px; font-size: 11px; font-weight: 700; color: var(--purple2); }
+  .levels-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .level-block { background: var(--bg3); border-radius: 10px; padding: 14px; }
+  .level-block h4 { font-size: 11px; font-weight: 700; margin-bottom: 10px; }
+  .level-block.support h4 { color: var(--green2); }
+  .level-block.resistance h4 { color: var(--red2); }
+  .level-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .level-row:last-child { border-bottom: none; }
+  .level-strike { font-weight: 700; font-size: 14px; }
+  .support .level-strike { color: var(--green2); }
+  .resistance .level-strike { color: var(--red2); }
+  .level-meta { color: var(--text3); font-size: 11px; }
+  .flow-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .flow-table th { text-align: left; padding: 7px 10px; background: var(--bg3); color: var(--text3); font-weight: 600; font-size: 11px; border-bottom: 1px solid var(--border); }
+  .flow-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  .flow-table tr:last-child td { border-bottom: none; }
+  .flow-call { color: var(--green2); font-weight: 700; }
+  .flow-put { color: var(--red2); font-weight: 700; }
+  .timeline { position: relative; padding-left: 24px; }
+  .timeline::before { content: ''; position: absolute; left: 7px; top: 4px; bottom: 4px; width: 2px; background: linear-gradient(to bottom, var(--gold), var(--blue)); border-radius: 1px; }
+  .timeline-item { position: relative; margin-bottom: 14px; }
+  .timeline-dot { position: absolute; left: -20px; top: 4px; width: 10px; height: 10px; border-radius: 50%; border: 2px solid; }
+  .dot-critical { background: var(--red); border-color: var(--red2); }
+  .dot-high { background: var(--gold); border-color: var(--gold2); }
+  .dot-medium { background: var(--blue); border-color: var(--blue2); }
+  .timeline-label { font-size: 10px; color: var(--text3); font-weight: 600; }
+  .timeline-event { font-size: 13px; font-weight: 700; color: var(--text); margin: 1px 0; }
+  .timeline-meta { font-size: 11px; color: var(--text3); }
+  .timeline-item.item-critical .timeline-event { color: var(--red2); }
+  .timeline-item.item-critical .timeline-label { color: var(--red); }
+  .timeline-item.item-high .timeline-event { color: var(--gold2); }
+  .timeline-item.item-high .timeline-label { color: var(--gold); }
+  .timeline-item.item-past { opacity: 0.45; }
+  .scenario-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .scenario-card { background: var(--bg3); border-radius: 10px; padding: 14px; border: 1px solid var(--border); }
+  .scenario-card .s-label { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase; margin-bottom: 6px; }
+  .scenario-card .s-title { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .scenario-card .s-price { font-size: 18px; font-weight: 800; }
+  .scenario-card .s-prob { font-size: 11px; color: var(--text2); margin-top: 4px; }
+  .scenario-card .s-desc { font-size: 11px; color: var(--text3); margin-top: 6px; line-height: 1.5; }
+  .scenario-bull { border-color: rgba(16,185,129,0.3); }
+  .scenario-bull .s-price { color: var(--green2); }
+  .scenario-bear { border-color: rgba(239,68,68,0.3); }
+  .scenario-bear .s-price { color: var(--red2); }
+  .metrics-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; }
+  .metric-card { background: var(--bg3); border-radius: 8px; padding: 12px 10px; text-align: center; border: 1px solid var(--border); }
+  .metric-card .m-label { font-size: 10px; color: var(--text3); margin-bottom: 4px; }
+  .metric-card .m-val { font-size: 18px; font-weight: 800; }
+  .metric-card .m-sub { font-size: 10px; color: var(--text3); margin-top: 2px; }
+  .prose { font-size: 13px; color: var(--text2); line-height: 1.75; }
+  .prose p { margin-bottom: 10px; }
+  .prose strong { color: var(--text); }
+  .prose .highlight { color: var(--gold2); font-weight: 600; }
+  .prose .bull-text { color: var(--green2); font-weight: 600; }
+  .prose .bear-text { color: var(--red2); font-weight: 600; }
+  .risk-list { list-style: none; }
+  .risk-list li { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--text2); }
+  .risk-list li:last-child { border-bottom: none; }
+  .risk-icon { font-size: 14px; flex-shrink: 0; }
+  .ev-box { background: linear-gradient(135deg, rgba(16,185,129,0.12), rgba(59,130,246,0.08)); border: 1px solid rgba(16,185,129,0.3); border-radius: 10px; padding: 16px; margin-top: 14px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+  .ev-left .label { font-size: 11px; color: var(--text3); }
+  .ev-left .big { font-size: 28px; font-weight: 900; color: var(--green2); }
+  .ev-right { font-size: 12px; color: var(--text2); max-width: 300px; }
+  .disclaimer { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 14px; font-size: 11px; color: var(--text3); line-height: 1.6; margin-top: 24px; }
+  .bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 12px; }
+  .bar-label { width: 80px; color: var(--text2); flex-shrink: 0; font-size: 11px; }
+  .bar-track { flex: 1; height: 6px; background: var(--bg4); border-radius: 3px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 3px; }
+  .bar-val { width: 36px; text-align: right; font-weight: 700; font-size: 12px; }
+  .divider { height: 1px; background: var(--border); margin: 14px 0; }
+  .gen-notice { background: rgba(59,130,246,0.08); border: 1px solid rgba(59,130,246,0.25); border-radius: 8px; padding: 10px 14px; font-size: 12px; color: var(--blue2); margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+  /* ── Rich template additions ─────────────────────────────── */
+  .ch-num { font-size:11px; color:var(--text3); background:var(--bg3); border:1px solid var(--border); border-radius:4px; padding:2px 7px; font-weight:600; }
+  .score-summary { background:var(--bg3); border:1px solid var(--border); border-radius:10px; padding:14px 16px; margin-top:12px; }
+  .score-summary-row { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  .final-score-big { font-size:44px; font-weight:900; line-height:1; }
+  .final-score-big.bear-score { color:var(--red2); } .final-score-big.bull-score { color:var(--green2); } .final-score-big.neutral-score { color:var(--gold2); }
+  .final-score-label { font-size:11px; color:var(--text3); margin-top:3px; }
+  .score-divider { width:1px; height:44px; background:var(--border); align-self:stretch; }
+  .stat-pill { background:var(--bg4); border-radius:6px; padding:7px 14px; text-align:center; }
+  .stat-pill .sp-label { font-size:10px; color:var(--text3); }
+  .stat-pill .sp-val { font-size:16px; font-weight:800; }
+  .bull-pill .sp-val { color:var(--green2); } .bear-pill .sp-val { color:var(--red2); } .neut-pill .sp-val { color:var(--gold2); }
+  .opt-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:10px; margin-bottom:14px; }
+  .opt-card { background:var(--bg3); border:1px solid var(--border); border-radius:8px; padding:14px; }
+  .opt-card .oc-label { font-size:11px; color:var(--text3); margin-bottom:4px; }
+  .opt-card .oc-val { font-size:24px; font-weight:800; }
+  .opt-card .oc-sub { font-size:11px; color:var(--text3); margin-top:3px; }
+  .oc-bull .oc-val { color:var(--green2); } .oc-bear .oc-val { color:var(--red2); } .oc-neut .oc-val { color:var(--gold2); } .oc-info .oc-val { color:var(--blue2); }
+  .macro-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:10px; margin-bottom:14px; }
+  .unusual-list { display:flex; flex-direction:column; gap:6px; margin:12px 0; }
+  .unusual-item { display:flex; align-items:center; gap:10px; background:var(--bg3); border-radius:6px; padding:8px 12px; border-left:3px solid; }
+  .unusual-item.bull-item { border-color:var(--green); } .unusual-item.bear-item { border-color:var(--red); }
+  .unusual-item .ui-type { font-size:10px; font-weight:700; width:56px; flex-shrink:0; }
+  .bull-item .ui-type { color:var(--green2); } .bear-item .ui-type { color:var(--red2); }
+  .unusual-item .ui-strike { font-size:13px; font-weight:700; color:var(--text); width:52px; }
+  .unusual-item .ui-vol { font-size:12px; color:var(--text2); flex:1; }
+  .unusual-item .ui-signal { font-size:11px; font-weight:700; }
+  .bull-item .ui-signal { color:var(--green2); } .bear-item .ui-signal { color:var(--red2); }
+  .sc-card { background:var(--bg3); border:1px solid var(--border); border-radius:10px; padding:14px; }
+  .sc-card .sc-name { font-size:12px; font-weight:700; margin-bottom:5px; }
+  .sc-card .sc-prob { font-size:11px; color:var(--text2); margin-bottom:8px; }
+  .sc-card .sc-price { font-size:22px; font-weight:800; margin-bottom:3px; }
+  .sc-card .sc-gain { font-size:13px; font-weight:700; }
+  .sc-card .sc-note { font-size:11px; color:var(--text2); margin-top:7px; line-height:1.6; }
+  .sc-bull .sc-name, .sc-bull .sc-price, .sc-bull .sc-gain { color:var(--green2); }
+  .sc-meh .sc-name, .sc-meh .sc-price, .sc-meh .sc-gain { color:var(--gold2); }
+  .sc-bear .sc-name, .sc-bear .sc-price, .sc-bear .sc-gain { color:var(--red2); }
+  .risk-list { display:flex; flex-direction:column; gap:8px; }
+  .risk-item { background:var(--bg3); border:1px solid var(--border); border-radius:8px; padding:10px 14px; display:flex; gap:12px; align-items:flex-start; }
+  .risk-badge { font-size:10px; font-weight:700; padding:3px 8px; border-radius:4px; white-space:nowrap; flex-shrink:0; margin-top:2px; }
+  .risk-high .risk-badge { background:rgba(239,68,68,.2); color:var(--red2); border:1px solid rgba(239,68,68,.4); }
+  .risk-med .risk-badge { background:rgba(245,158,11,.2); color:var(--gold2); border:1px solid rgba(245,158,11,.4); }
+  .risk-low .risk-badge { background:rgba(59,130,246,.2); color:var(--blue2); border:1px solid rgba(59,130,246,.4); }
+  .risk-title { font-size:13px; font-weight:600; color:var(--text); }
+  .risk-note { font-size:12px; color:var(--text2); margin-top:3px; line-height:1.5; }
+  /* ── TRADE GRID (止盈/止损) ── */
+  .trade-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; }
+  .tp-box, .sl-box { background:var(--bg3); border:1px solid var(--border); border-radius:10px; padding:14px; }
+  .tp-box { border-color:rgba(34,197,94,0.3); }
+  .sl-box { border-color:rgba(239,68,68,0.3); }
+  .tb-title { font-size:12px; font-weight:700; margin-bottom:10px; }
+  .tp-box .tb-title { color:var(--green2); }
+  .sl-box .tb-title { color:var(--red2); }
+  .tp-row { display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid var(--border); font-size:12px; }
+  .tp-row:last-of-type { border:none; }
+  .tp-row .tr-price { font-weight:700; color:var(--text1); }
+  .tp-row .tr-pct { color:var(--green2); font-weight:600; }
+  .sl-row { display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid var(--border); font-size:12px; }
+  .sl-row:last-of-type { border:none; }
+  .sl-row .sr-label { color:var(--text2); }
+  .sl-row .sr-price { font-weight:700; color:var(--red2); }
+  @media (max-width: 600px) {
+    .levels-grid, .scenario-grid, .trade-grid { grid-template-columns: 1fr; }
+    .verdict-banner { flex-wrap: wrap; }
+    .price { font-size: 24px; }
+    .verdict-score { font-size: 32px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="header-top">
+    <div class="ticker-block">
+      <div class="ticker-logo">NV</div>
+      <div class="ticker-info">
+        <h1>NVDA</h1>
+        <div class="company">AI 芯片龙头，CUDA 生态护城河深厚，但估值已高，监管风险需关注</div>
+        <div class="subtitle">📅 2026-03-13 · Alpha Hive 深度分析 v3.0</div>
+      </div>
+    </div>
+    <div class="price-block">
+      <div class="price">$180.25</div>
+      <div class="price-sub">NASDAQ · 扫描时价格</div>
+    </div>
+  </div>
+  <div class="verdict-banner">
+    <div class="verdict-score">3.65</div>
+    <div class="verdict-text">
+      <div class="verdict-title">📉 看空 · 无共振</div>
+      <div class="verdict-sub">
+        4维共振未触发 ·
+        期权流bullish ·
+        P/C = 0.75
+      </div>
+    </div>
+    <div class="resonance-badge">○ 无共振</div>
+  </div>
+</div>
+
+<!-- NAV -->
+<nav class="nav">
+  <a href="#ch1">🐝 蜂群评分</a>
+  <a href="#ch2">⚡ 共振分析</a>
+  <a href="#ch3">📅 催化剂</a>
+  <a href="#ch4">📊 期权结构</a>
+  <a href="#ch5">🌍 宏观/情绪</a>
+  <a href="#ch6">🎯 情景推演</a>
+  <a href="#ch7">⚠️ 风险</a>
+</nav>
+
+<div class="main">
+
+  <div class="gen-notice">
+    🤖 <strong>混合模式 · Template C v3.0</strong> —— 本地 JSON 数据 + Claude API 深度推理生成 · 2026-03-13
+  </div>
+
+  <!-- CH1 -->
+  <div class="section" id="ch1">
+    <div class="section-header">
+      <span class="ch-num">CH1</span>
+      <span class="section-icon">🐝</span>
+      <span class="section-title">第一章 · 蜂群七维评分</span>
+      <span class="section-badge badge-bear">综合 3.65 · 看空</span>
+    </div>
+    <div class="section-body">
+      <div class="score-summary">
+      <div class="score-summary-row">
+        <div class="final-score-big" style="color:var(--red2);">3.65</div>
+        <span class="stat-pill bull-pill">看多 2</span>
+        <span class="stat-pill neut-pill">中性 2</span>
+        <span class="stat-pill bear-pill">看空 3</span>
+      </div>
+    </div>
+      <div class="score-grid" style="margin-top:14px;">
+        <div class="score-card bull">
+          <div class="bee">ChronosBee</div>
+          <div class="val">8.4</div>
+          <div class="dim">催化剂</div><div class="delta" style="font-size:10px;color:#ef4444;margin-top:2px;">↓1.6</div>
+        </div>
+        <div class="score-card bull">
+          <div class="bee">RivalBee</div>
+          <div class="val">6.5</div>
+          <div class="dim">ML辅助</div><div class="delta" style="font-size:10px;color:#10b981;margin-top:2px;">↑0.9</div>
+        </div>
+        <div class="score-card bear">
+          <div class="bee">OracleBee</div>
+          <div class="val">3.6</div>
+          <div class="dim">期权/赔率</div><div class="delta" style="font-size:10px;color:#ef4444;margin-top:2px;">↓2.2</div>
+        </div>
+        <div class="score-card neutral">
+          <div class="bee">BuzzBee</div>
+          <div class="val">5.3</div>
+          <div class="dim">消息/舆情</div><div class="delta" style="font-size:10px;color:#ef4444;margin-top:2px;">↓0.5</div>
+        </div>
+        <div class="score-card bear">
+          <div class="bee">ScoutBee</div>
+          <div class="val">2.9</div>
+          <div class="dim">基本面</div><div class="delta" style="font-size:10px;color:#ef4444;margin-top:2px;">↓2.7</div>
+        </div>
+        <div class="score-card bear">
+          <div class="bee">GuardBee</div>
+          <div class="val">1.7</div>
+          <div class="dim">宏观/情绪</div><div class="delta" style="font-size:10px;color:#ef4444;margin-top:2px;">↓6.0</div>
+        </div>
+        <div class="score-card bear">
+          <div class="bee">BearBee</div>
+          <div class="val">2.7</div>
+          <div class="dim">逆向</div><div class="delta" style="font-size:10px;color:#ef4444;margin-top:2px;">↓0.8</div>
+        </div></div>
+      <div class="divider"></div>
+      <div class="prose">
+<p><strong>蜂群综合评分 <span class="bear-text">3.65/10</span>，整体方向 📉 看空</strong>——这是一个充满内在矛盾的评分，数字背后隐藏着一场战役：催化剂的强烈引力 vs. 宏观环境与内幕信号的强烈警示。</p>
+
+<p>7 只 Agent 投票结果：4 空、2 多、1 中性。<strong>两极分化极为鲜明：</strong>ChronosBee（8.38）和 RivalBee（6.5）代表"做多派"——Q4 财报将在明天（3月14日）公布，GTC 2026 产品发布会在后天（3月17日）召开，分析师平均目标价 $266.35（较当前 $180.25 有 <span style="color:#22c55e;font-weight:600">+47.8%</span> 上行空间），ML 模型以 65% 胜率预判 7 日 +14.4%；而 GuardBee（1.66）、BearBee（2.66）和 ScoutBee（2.91）则代表"做空派"——VIX 27.2（高位警报）、F&amp;G 极度恐惧（15）、内幕人士大规模净卖出（<span style="color:#ef4444;font-weight:600">$5,475 万</span>，买入 $0）。</p>
+
+<p>核心矛盾点：<strong>明日财报是蜂群分裂的根源</strong>。乐观者看到历史上 NVDA 财报后的平均 7 日涨幅 +20.6%、分析师目标高达 $380；悲观者则注意到在 F&amp;G=15（极度恐惧）的宏观背景下，任何预期差（guidance 不及预期）都可能触发超预期抛售，而内幕人士的大规模提前撤离更令人警觉。评分从昨日 4.90 下滑 1.25 分至今日 3.65，是蜂群在财报前夕向谨慎倾斜的明证。</p>
+
+<p style="background:rgba(239,68,68,0.08);border-left:3px solid #ef4444;padding:8px 12px;border-radius:0 6px 6px 0;font-size:12px;">⚡ 矛盾警报：期权 P/C=0.75（Call 主导，市场在做多） / ML 预期 7日 +14.4%（看涨） / 期权流向偏多 ——但蜂群方向仍为看空。关键分歧在于时间维度：是财报前的多头下注，还是财报后的方向判断？</p>
+</div>
+      <div style="margin-top:14px;">
+        <div class="bar-row">
+          <span class="bar-label">Chronos</span>
+          <div class="bar-track"><div class="bar-fill" style="width:84%;background:var(--green2);"></div></div>
+          <span class="bar-val" style="color:var(--green2)">8.4</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Rival</span>
+          <div class="bar-track"><div class="bar-fill" style="width:65%;background:var(--green2);"></div></div>
+          <span class="bar-val" style="color:var(--green2)">6.5</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Buzz</span>
+          <div class="bar-track"><div class="bar-fill" style="width:53%;background:var(--gold2);"></div></div>
+          <span class="bar-val" style="color:var(--gold2)">5.3</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Oracle</span>
+          <div class="bar-track"><div class="bar-fill" style="width:36%;background:var(--red2);"></div></div>
+          <span class="bar-val" style="color:var(--red2)">3.6</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Scout</span>
+          <div class="bar-track"><div class="bar-fill" style="width:29%;background:var(--red2);"></div></div>
+          <span class="bar-val" style="color:var(--red2)">2.9</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Bear</span>
+          <div class="bar-track"><div class="bar-fill" style="width:27%;background:var(--red2);"></div></div>
+          <span class="bar-val" style="color:var(--red2)">2.7</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">Guard</span>
+          <div class="bar-track"><div class="bar-fill" style="width:17%;background:var(--red2);"></div></div>
+          <span class="bar-val" style="color:var(--red2)">1.7</span>
+        </div></div>
+    </div>
+  </div>
+
+  <!-- CH2 -->
+  <div class="section" id="ch2">
+    <div class="section-header">
+      <span class="ch-num">CH2</span>
+      <span class="section-icon">⚡</span>
+      <span class="section-title">第二章 · 蜂群共振分析</span>
+      <span class="section-badge badge-resonance">无共振 · +0% 信心提升</span>
+    </div>
+    <div class="section-body">
+      <div class="resonance-box">
+        <div class="resonance-title">○ 本次无共振触发</div>
+        <div class="resonance-dims"><span class="resonance-dim">contrarian</span><span class="resonance-dim">odds</span><span class="resonance-dim">risk_adj</span><span class="resonance-dim">signal</span></div>
+        <div style="margin-top:10px;font-size:12px;color:var(--text2);">
+          4 个跨维度看空信号同时触发 ·
+          置信度自动提升 +0% ·
+          历史回测显示共振信号胜率高于单维信号约 18%
+        </div>
+      </div>
+      <div class="prose">
+<p><strong>○ 共振未触发——蜂群处于"对峙僵局"状态。</strong>当前跨维度一致性仅 <span class="bear-text">40%</span>，远低于共振所需的 65% 阈值。4 个维度（逆向、期权/赔率、风险调整、信号强度）倒向看空，但催化剂维度（8.38）和 ML 辅助（6.5）的强烈看多信号阻断了完整共振的形成。</p>
+
+<p><strong>共振方向为 bearish，与蜂群整体方向一致</strong>——这意味着即使共振未形成，现有信号的倾斜方向仍指向谨慎/看空。GuardBee 给出的风险调整系数 0.95（>1 为放大，<1 为压缩）进一步拖低了综合评分。</p>
+
+<p>期权市场对共振的破坏性角色：P/C=0.75（Call 主导）本应形成看多共振，但 OracleBee 评分仅 3.61（<span class="bear-text">bearish</span>）——这表明期权流整体偏多的表象之下，蜂群识别到了矛盾的异常流结构：$200 附近的大量看涨 OI 可能是做市商对冲仓位而非真正的方向性押注；而深度虚值 Put（$125、$65、$60）的异常扫单量（78倍、33倍 OI 比）透露出有人在为黑天鹅事件购买保险。</p>
+
+<p style="background:rgba(245,158,11,0.08);border-left:3px solid #f59e0b;padding:8px 12px;border-radius:0 6px 6px 0;font-size:12px;">🔍 解读：共振缺席通常意味着市场处于"方向未定"的关键节点。结合明日财报，一旦财报超预期，多头共振可能迅速形成（拉动评分至 7+）；反之，空头共振一旦触发，回调幅度可能剧烈。建议财报后重新评估共振状态再做方向性操作。</p>
+</div>
+    </div>
+  </div>
+
+  <!-- CH3 -->
+  <div class="section" id="ch3">
+    <div class="section-header">
+      <span class="ch-num">CH3</span>
+      <span class="section-icon">📅</span>
+      <span class="section-title">第三章 · 催化剂时间线</span>
+      <span class="section-badge badge-bull">5 个催化剂 · 8.4/10</span>
+    </div>
+    <div class="section-body">
+      <div class="timeline">
+        <div class="timeline-item">
+          <div class="timeline-dot dot-medium"></div>
+          <div class="timeline-label">今日 · 2026-03-10</div>
+          <div class="timeline-event">Ex-Dividend Date</div>
+          
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-dot dot-medium"></div>
+          <div class="timeline-label">今日 · 2025-12-25</div>
+          <div class="timeline-event">Dividend Date</div>
+          
+        </div>
+        <div class="timeline-item item-critical">
+          <div class="timeline-dot dot-critical"></div>
+          <div class="timeline-label">T+1 · 2026-03-15</div>
+          <div class="timeline-event">Q4 FY2026 Earnings</div>
+          
+        </div>
+        <div class="timeline-item item-critical">
+          <div class="timeline-dot dot-critical"></div>
+          <div class="timeline-label">T+1 · 2026-03-15</div>
+          <div class="timeline-event">Q4 FY2026 财报发布</div>
+          
+        </div>
+        <div class="timeline-item item-high">
+          <div class="timeline-dot dot-high"></div>
+          <div class="timeline-label">T+3 · 2026-03-17</div>
+          <div class="timeline-event">GTC 2026</div>
+          
+        </div></div>
+      <div class="divider"></div>
+      <div class="prose">
+<p><strong>ChronosBee 评分 8.38/10（看多）——稀有的"双催化剂叠加"窗口正在今明两天打开。</strong>这是近期 NVDA 分析中催化剂评分最高的一次：</p>
+
+<ul style="margin:10px 0 10px 16px;line-height:2.0;font-size:13px;">
+  <li>🔴 <strong>Q4 FY2026 财报发布</strong>（明日，3月14日）——全年最重要事件。华尔街预期 EPS $0.89，收入 $43.2B。参考上季度（Q3 FY2026）EPS $0.81 超预期 +15%；数据中心收入 $30.8B 超预期 +17%。</li>
+  <li>🟠 <strong>GTC 2026 产品发布会</strong>（3天后，3月17日）——Jensen Huang 主旨演讲，市场预期发布 Rubin/Vera 次代架构详情及 Blackwell 产能更新。</li>
+  <li>⚪ <strong>Ex-Dividend Date</strong>（已过，3月10日）——$0.01/股，影响微弱。</li>
+</ul>
+
+<p><strong>期权数学推算：</strong>当前 IV=42.7%，以财报后 1 日（明日收盘）为基准，隐含单日波动幅度约为：<br/>
+<code style="background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:4px;">±$180.25 × 42.7% / √252 ≈ ±$4.84（约 ±2.7%）</code><br/>
+但财报日实际波动通常为隐含波动的 1.3-2.0 倍，意味着单日波动区间可能高达 <strong>±$6.3 至 ±$9.7</strong>，对应价格区间 $170.5-$190.0（向上）或 $170.6-$174.0（向下）。</p>
+
+<p>历史相似案例：2023年10月 Q3 FY2024 财报后，3 日 +8.5%，7 日 +18.9%，30 日 +32.1%（前提：财报 beat）。当前分析师平均目标 $266.35，目标价中值 $265，最高 $380——说明分析师群体对 NVDA 长期逻辑仍高度认可。</p>
+
+<p style="background:rgba(16,185,129,0.08);border-left:3px solid #10b981;padding:8px 12px;border-radius:0 6px 6px 0;font-size:12px;">💡 事件交易者注意：财报+GTC 双催化剂叠加是极佳的方向性机会窗口，但当前 IV=42.7% 处于历史偏低水平（IV Rank 仅 19），用期权做方向性赌注（买 Call/Put）的成本相对合理，Gamma 风险可控。</p>
+</div>
+    </div>
+  </div>
+
+  <!-- CH4 -->
+  <div class="section" id="ch4">
+    <div class="section-header">
+      <span class="ch-num">CH4</span>
+      <span class="section-icon">📊</span>
+      <span class="section-title">第四章 · 期权市场结构</span>
+      <span class="section-badge badge-bull">P/C=0.75 · OI=64万 · 3个看涨异动</span>
+    </div>
+    <div class="section-body">
+      <div class="opt-grid" style="margin-bottom:16px;">
+        <div class="opt-card oc-bull">
+          <div class="oc-label">Put/Call 比</div>
+          <div class="oc-val" style="color:var(--green2)">
+            0.75
+          </div>
+          <div class="oc-sub">Call主导</div>
+        </div>
+        <div class="opt-card oc-info">
+          <div class="oc-label">总开仓量</div>
+          <div class="oc-val" style="color:var(--cyan2)">64万</div>
+          <div class="oc-sub">未平仓合约</div>
+        </div>
+        <div class="opt-card oc-neut">
+          <div class="oc-label">IV Skew</div>
+          <div class="oc-val" style="color:var(--gold2)">1.14</div>
+          <div class="oc-sub">Put 46% / Call 40%</div>
+        </div>
+        <div class="opt-card oc-bull">
+          <div class="oc-label">看涨异动</div>
+          <div class="oc-val" style="color:var(--green2)">3</div>
+          <div class="oc-sub">vs 4 看跌</div>
+        </div>
+        <div class="opt-card oc-info">
+          <div class="oc-label">IV Rank</div>
+          <div class="oc-val" style="color:var(--gold2)">60th</div>
+          <div class="oc-sub">中等波动</div>
+        </div>
+      </div>
+
+      <div class="levels-grid" style="margin-bottom:16px;">
+        <div class="level-block support">
+          <h4>📗 支撑位（高OI Put）</h4>
+          
+        <div class="level-row">
+          <span class="level-strike">$160</span>
+          <span class="level-meta">OI 32,634 · IV 50%</span>
+        </div>
+        <div class="level-row">
+          <span class="level-strike">$170</span>
+          <span class="level-meta">OI 17,033 · IV 47%</span>
+        </div>
+        <div class="level-row">
+          <span class="level-strike">$90</span>
+          <span class="level-meta">OI 15,321 · IV 110%</span>
+        </div>
+        </div>
+        <div class="level-block resistance">
+          <h4>📕 阻力位（高OI Call）</h4>
+          
+        <div class="level-row">
+          <span class="level-strike">$200</span>
+          <span class="level-meta">OI 75,809 · IV 38%</span>
+        </div>
+        <div class="level-row">
+          <span class="level-strike">$200</span>
+          <span class="level-meta">OI 47,592 · IV 38%</span>
+        </div>
+        <div class="level-row">
+          <span class="level-strike">$195</span>
+          <span class="level-meta">OI 18,402 · IV 39%</span>
+        </div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">异常期权流（成交量排名）</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;"><span style="font-size:10px;color:var(--text3);align-self:center;">到期日：</span><span style="background:var(--bg4);border:1px solid var(--border);border-radius:4px;font-size:10px;font-weight:600;padding:2px 7px;color:var(--text2);">2026-03-23</span><span style="background:var(--bg4);border:1px solid var(--border);border-radius:4px;font-size:10px;font-weight:600;padding:2px 7px;color:var(--text2);">2026-03-27</span><span style="background:var(--bg4);border:1px solid var(--border);border-radius:4px;font-size:10px;font-weight:600;padding:2px 7px;color:var(--text2);">2026-04-02</span></div>
+        <div class="unusual-list">
+        <div class="unusual-item bull-item">
+          <strong style="color:var(--green2);">CALL $200</strong>
+          <span style="font-size:11px;color:var(--text2);"> · 67,864 手 · 看涨 大量</span>
+        </div>
+        <div class="unusual-item bull-item">
+          <strong style="color:var(--green2);">CALL $190</strong>
+          <span style="font-size:11px;color:var(--text2);"> · 11,726 手 · 看涨 大量</span>
+        </div>
+        <div class="unusual-item bear-item">
+          <strong style="color:var(--red2);">PUT $65</strong>
+          <span style="font-size:11px;color:var(--text2);"> · 1,961 手 · 看跌 Sweep · 量OI比5.5x</span>
+        </div>
+        <div class="unusual-item bear-item">
+          <strong style="color:var(--red2);">PUT $125</strong>
+          <span style="font-size:11px;color:var(--text2);"> · 1,498 手 · 看跌 Sweep · 量OI比78.8x</span>
+        </div>
+        <div class="unusual-item bear-item">
+          <strong style="color:var(--red2);">PUT $60</strong>
+          <span style="font-size:11px;color:var(--text2);"> · 1,164 手 · 看跌 Sweep · 量OI比33.3x</span>
+        </div>
+        <div class="unusual-item bull-item">
+          <strong style="color:var(--green2);">CALL $140</strong>
+          <span style="font-size:11px;color:var(--text2);"> · 804 手 · 看涨 Sweep · 量OI比6.8x</span>
+        </div>
+        <div class="unusual-item bear-item">
+          <strong style="color:var(--red2);">PUT $115</strong>
+          <span style="font-size:11px;color:var(--text2);"> · 100 手 · 看跌 Sweep · 量OI比50.0x</span>
+        </div></div>
+      </div>
+
+      <div class="prose">
+<p><strong>期权结构解读：多空博弈激烈，$200 是决战关卡，深度虚值 Put 暗藏"黑天鹅保险"。</strong></p>
+
+<p><strong>P/C 比 0.75</strong>（Call 主导）——市场在用期权做多。总 OI 636,589，IV 当前 42.69%，IV Rank 19.29（历史低位，期权便宜）。期权流方向整体 <span class="bull-text">看涨</span>。</p>
+
+<p><strong>关键支撑位（高 OI Put 钉住区）：</strong>$160（OI 32,634）、$170（OI 17,033）——这两个价位是大量 Put 买家的保护位，做市商被迫在此区间大量持 Delta 对冲多头，形成天然支撑。$90 超深度 OI（15,321）更像是超保守机构的灾备对冲。</p>
+
+<p><strong>关键阻力位（高 OI Call 钉住区）：</strong>$200（OI 75,809 + 47,592，合计 <span style="color:#f59e0b;font-weight:700">123,401！</span>）——这是本周期最关键的 Gamma 钉住区域。如此集中的 Call OI 意味着做市商持有大量 Delta 空头对冲，价格接近 $200 时，做市商卖压显著，需要极大的买盘才能突破。当前价格 $180.25，距 $200 还有 +11%。</p>
+
+<p><strong>异常流信号：</strong></p>
+<ul style="margin:8px 0 8px 16px;line-height:1.9;font-size:12px;">
+  <li>🟢 大量 Call 成交：$200 Call 成交量 <strong>67,864</strong>（极大，暗示市场押注财报后突破 $200）</li>
+  <li>🟢 $190 Call 成交量 11,726（支撑）</li>
+  <li>🔴 <strong>$125 Put Sweep：OI 比 78.84×</strong>（极异常！有人用 $125 Put 做大规模保护/投机押注）</li>
+  <li>🔴 $60 Put Sweep：OI 比 33.26×（极端虚值，近乎黑天鹅险）</li>
+  <li>🔴 $65 Put Sweep：OI 比 5.48×</li>
+</ul>
+
+<p><strong>IV Skew：1.153（中性偏空）</strong>，OTM Put IV 44.92% > OTM Call IV 38.97%，说明市场为下行风险支付了微小溢价——这与 F&amp;G 极度恐惧的宏观背景相符，但偏度并不极端，不是典型的崩盘恐慌。</p>
+
+<p style="background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;padding:8px 12px;border-radius:0 6px 6px 0;font-size:12px;">📊 综合判断：$200 Call 墙是本轮财报的关键关卡。若财报 beat，需要确认能否突破 $200 Gamma 压制；若 miss，$160-$170 Put 支撑区域是第一防线。深度虚值 Put 扫单暗示有机构在为尾部风险（$125 以下）买入保险，不排除大机构对宏观系统性风险的对冲需求。</p>
+</div>
+    </div>
+  </div>
+
+  <!-- CH5 -->
+  <div class="section" id="ch5">
+    <div class="section-header">
+      <span class="ch-num">CH5</span>
+      <span class="section-icon">🌍</span>
+      <span class="section-title">第五章 · 宏观环境与情绪面</span>
+      <span class="section-badge badge-bear">
+        F&G = 15 · 极度恐慌
+      </span>
+    </div>
+    <div class="section-body">
+      <div class="macro-grid" style="margin-bottom:16px;">
+        <div class="opt-card oc-neut">
+          <div class="oc-label">Fear & Greed</div>
+          <div class="oc-val" style="color:var(--red2)">15</div>
+          <div class="oc-sub">极度恐慌</div>
+        </div>
+        <div class="opt-card oc-bull">
+          <div class="oc-label">GuardBee</div>
+          <div class="oc-val" style="color:var(--red2)">
+            1.7
+          </div>
+          <div class="oc-sub">宏观阻力</div>
+        </div>
+        <div class="opt-card oc-info">
+          <div class="oc-label">共振加成</div>
+          <div class="oc-val" style="color:var(--text3)">
+            0%
+          </div>
+          <div class="oc-sub">置信提升</div>
+        </div>
+        <div class="opt-card oc-neut">
+          <div class="oc-label">Reddit 热度</div>
+          <div class="oc-val" style="color:var(--blue2)">
+            4
+          </div>
+          <div class="oc-sub">96次提及</div>
+        </div>
+      </div>
+      <div class="prose">
+<p><strong>宏观背景评级：风险规避模式（Risk-Off），GuardBee 1.66/10——红色警报级别。</strong>当前宏观环境对 NVDA 等高 Beta 科技股形成直接压制。</p>
+
+<p><strong>核心宏观指标：</strong></p>
+<ul style="margin:8px 0 8px 16px;line-height:1.9;font-size:13px;">
+  <li>📊 <strong>VIX 27.2</strong>（elevated）——恐慌指数高于正常水平（正常 <20），市场处于主动去风险状态。VIX 每上升 10 点，NVDA 典型跌幅约 3-5%。</li>
+  <li>😱 <strong>F&amp;G 指数 15</strong>（极度恐惧）——这是近年少见的恐慌水平。历史上 F&amp;G &lt;20 时，做多往往有逆向机会，但短期仍需承受波动。</li>
+  <li>📉 <strong>大盘 -0.6%</strong>，宏观模式：risk_off——机构在主动降低股票仓位，科技股首当其冲。</li>
+  <li>💰 <strong>10Y 国债利率 4.28%</strong>——处于高位，对高估值成长股估值构成压制（DCF 贴现率更高）。</li>
+  <li>🏆 <strong>CPI 同比 2.4%</strong>——通胀仍在 Fed 目标（2%）以上，降息节奏受约束，难以给市场提供流动性刺激。</li>
+  <li>🥇 <strong>黄金 -1.3%</strong>——黄金回落通常意味着避险需求减弱，但结合 VIX 高位，更可能是资金主动减仓（卖黄金、卖科技）以应对流动性压力。</li>
+</ul>
+
+<p><strong>情绪面：</strong>BuzzBee 评分 5.31（中性）。看多情绪 53%，5日动量 -1.31%，成交量比 0.8x（缩量），Reddit 热度 #4（96次提及），新闻基调 4多/2空，尚未引发社交媒体的非理性追捧。</p>
+
+<p style="background:rgba(239,68,68,0.08);border-left:3px solid #ef4444;padding:8px 12px;border-radius:0 6px 6px 0;font-size:12px;">⚠️ 宏观警示：VIX=27.2 + F&amp;G=15 的组合意味着即便财报完美 beat，整体市场情绪也可能抑制"buy the news"的反弹幅度。历史经验：在极度恐惧环境下，好财报后最初反弹往往被抹平，需要更长时间消化。反之，若财报 miss，宏观放大效应可能导致超预期下跌。</p>
+</div>
+    </div>
+  </div>
+
+  <!-- CH6 -->
+  <div class="section" id="ch6">
+    <div class="section-header">
+      <span class="ch-num">CH6</span>
+      <span class="section-icon">🎯</span>
+      <span class="section-title">第六章 · 四情景推演与期望值</span>
+      <span class="section-badge badge-bear">EV = -3.8% · 偏空</span>
+    </div>
+    <div class="section-body">
+      <div class="scenario-grid">
+        <div class="sc-card sc-bull">
+          <div class="sc-name">🚀 情景A · 最强看涨</div>
+          <div class="sc-prob">突破阻力 + 催化剂超预期 · 概率 12%</div>
+          <div class="sc-price">$204–$224</div>
+          <div class="sc-gain" style="color:var(--green2)">ML 7日预期 +14.4%</div>
+          <div class="sc-note">无共振触发，阻力位被突破后做市商Delta对冲形成加速上涨。</div>
+        </div>
+        <div class="sc-card sc-bull">
+          <div class="sc-name">📈 情景B · 温和看涨</div>
+          <div class="sc-prob">催化剂达预期 · 概率 28%</div>
+          <div class="sc-price">$186–$198</div>
+          <div class="sc-gain" style="color:var(--green2)">P/C=0.75 支持</div>
+          <div class="sc-note">期权流bullish，近端支撑稳固，温和上涨定价合理。</div>
+        </div>
+        <div class="sc-card sc-meh">
+          <div class="sc-name">📉 情景C · 温和看跌</div>
+          <div class="sc-prob">催化剂不达预期 · 概率 35%</div>
+          <div class="sc-price">$177–$158</div>
+          <div class="sc-gain" style="color:var(--gold2)">支撑 $160.0</div>
+          <div class="sc-note">OI 32,634 提供缓冲，量能萎缩限制下行弹性。</div>
+        </div>
+        <div class="sc-card sc-bear">
+          <div class="sc-name">💥 情景D · 极端风险</div>
+          <div class="sc-prob">催化剂暴雷 + 宏观恶化 · 概率 25%</div>
+          <div class="sc-price">$136–$152</div>
+          <div class="sc-gain" style="color:var(--red2)">高风险情景</div>
+          <div class="sc-note">风险：内幕大额抛售 $54,756,043（买入仅 $0）, Oracle 期权信号看空（3.6分）。深部支撑防线。</div>
+        </div>
+      </div>
+
+      <div class="trade-grid">
+      <div class="tp-box">
+        <div class="tb-title">📉 止盈计划（下行目标）</div>
+        <div class="tp-row">
+          <span class="tr-price">$173.94</span>
+          <span class="tr-pct" style="color:var(--red2)">-3.5%</span>
+          <span style="font-size:11px;color:var(--text3)">减仓 1/3</span>
+        </div>
+        <div class="tp-row">
+          <span class="tr-price">$167.63</span>
+          <span class="tr-pct" style="color:var(--red2)">-7.0%</span>
+          <span style="font-size:11px;color:var(--text3)">减仓 1/3</span>
+        </div>
+        <div class="tp-row">
+          <span class="tr-price">$157.54</span>
+          <span class="tr-pct" style="color:var(--red2)">-12.6%</span>
+          <span style="font-size:11px;color:var(--text3)">清仓剩余</span>
+        </div>
+        <div style="margin-top:8px;font-size:11px;color:var(--text3)">综合胜率 40.0% · 持仓建议 5–10天</div>
+      </div>
+      <div class="sl-box">
+        <div class="tb-title">🛡️ 止损计划（上行止损）</div>
+        <div class="sl-row">
+          <span class="sr-label">保守止损</span>
+          <span class="sr-price" style="color:var(--green2)">$185.66</span>
+        </div>
+        <div class="sl-row">
+          <span class="sr-label">标准止损</span>
+          <span class="sr-price" style="color:var(--green2)">$190.16</span>
+        </div>
+        <div class="sl-row">
+          <span class="sr-label">激进止损</span>
+          <span class="sr-price" style="color:var(--green2)">$195.57</span>
+        </div>
+        <div style="margin-top:8px;font-size:11px;color:var(--text3)">建议标准止损 $190.16 · 风险/收益比 ≈ 1:1.3</div>
+      </div>
+    </div>
+
+      <div class="ev-box">
+        <div class="ev-left">
+          <div class="label">期望收益率（EV）</div>
+          <div class="big">-3.8%</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:3px;">综合胜率 40.0%</div>
+        </div>
+        <div class="ev-right">
+          <strong>ML 预测：</strong>7日 +14.4% · 30日 +21.6%<br><br>
+          负期望值提示谨慎，建议小仓位或观望。
+        </div>
+      </div>
+
+      <div class="prose" style="margin-top:14px;">
+<p><strong>四情景推演：以明日 Q4 FY2026 财报为轴心，GTC 2026 为第二变量。</strong></p>
+
+<table style="width:100%;border-collapse:collapse;font-size:12px;margin:10px 0;">
+  <thead>
+    <tr style="background:rgba(255,255,255,0.05);">
+      <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);">情景</th>
+      <th style="padding:8px 10px;text-align:center;border-bottom:1px solid var(--border);">概率</th>
+      <th style="padding:8px 10px;text-align:center;border-bottom:1px solid var(--border);">价格目标</th>
+      <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);">触发条件</th>
+      <th style="padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);">操作建议</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="padding:8px 10px;color:#10b981;font-weight:700;border-bottom:1px solid var(--border);">🚀 强势突破</td>
+      <td style="padding:8px 10px;text-align:center;border-bottom:1px solid var(--border);">30%</td>
+      <td style="padding:8px 10px;text-align:center;color:#10b981;font-weight:700;border-bottom:1px solid var(--border);">$200-$215</td>
+      <td style="padding:8px 10px;font-size:11px;border-bottom:1px solid var(--border);">EPS 超预期 >10%，数据中心收入 >$44B，Blackwell 需求更新积极，GTC 发布突破性产品</td>
+      <td style="padding:8px 10px;font-size:11px;border-bottom:1px solid var(--border);">财报后跟多，目标 $200-$215；以 <strong>$175 或 $170 做止损参考</strong></td>
+    </tr>
+    <tr>
+      <td style="padding:8px 10px;color:#22c55e;font-weight:700;border-bottom:1px solid var(--border);">📈 温和上涨</td>
+      <td style="padding:8px 10px;text-align:center;border-bottom:1px solid var(--border);">25%</td>
+      <td style="padding:8px 10px;text-align:center;color:#22c55e;font-weight:700;border-bottom:1px solid var(--border);">$185-$200</td>
+      <td style="padding:8px 10px;font-size:11px;border-bottom:1px solid var(--border);">EPS 小幅超预期，数据中心维持增长，Guidance 持平/小增，宏观不出黑天鹅</td>
+      <td style="padding:8px 10px;font-size:11px;border-bottom:1px solid var(--border);">逢低分批建仓，目标 $195；以 <strong>$172 或 $168 做止损参考</strong></td>
+    </tr>
+    <tr>
+      <td style="padding:8px 10px;color:#f59e0b;font-weight:700;border-bottom:1px solid var(--border);">⚖️ 震荡盘整</td>
+      <td style="padding:8px 10px;text-align:center;border-bottom:1px solid var(--border);">25%</td>
+      <td style="padding:8px 10px;text-align:center;color:#f59e0b;font-weight:700;border-bottom:1px solid var(--border);">$170-$188</td>
+      <td style="padding:8px 10px;font-size:11px;border-bottom:1px solid var(--border);">EPS 达预期但 Guidance 保守，数据中心增速环比放缓，市场宏观压力持续</td>
+      <td style="padding:8px 10px;font-size:11px;border-bottom:1px solid var(--border);">观望，等待方向确认；卖 Covered Call at $195；以 <strong>$165 做止损参考</strong></td>
+    </tr>
+    <tr>
+      <td style="padding:8px 10px;color:#ef4444;font-weight:700;">💥 显著下跌</td>
+      <td style="padding:8px 10px;text-align:center;">20%</td>
+      <td style="padding:8px 10px;text-align:center;color:#ef4444;font-weight:700;">$150-$168</td>
+      <td style="padding:8px 10px;font-size:11px;">EPS miss 或 Guidance 大幅下调，数据中心需求放缓超预期，宏观系统性抛售</td>
+      <td style="padding:8px 10px;font-size:11px;">减仓/清仓；Put 持仓部分止盈；以 <strong>$185 或 $182 做止损参考</strong>（做空方向）</td>
+    </tr>
+  </tbody>
+</table>
+
+<p style="font-size:12px;color:var(--text3);margin-top:12px;"><em>注：当前入场价参考 $180.25。概率基于蜂群数据及历史财报分析，仅供参考，不构成投资建议。历史胜率 65%（人工）+ ML 95% = 综合 74%，建议分批操作以控制风险。</em></p>
+</div>
+    </div>
+  </div>
+
+  <!-- CH7 -->
+  <div class="section" id="ch7">
+    <div class="section-header">
+      <span class="ch-num">CH7</span>
+      <span class="section-icon">⚠️</span>
+      <span class="section-title">第七章 · 主要风险清单</span>
+      <span class="section-badge badge-neutral">3 项风险信号</span>
+    </div>
+    <div class="section-body">
+      <div class="risk-list">
+        
+        <div class="risk-item risk-high">
+          <div class="risk-badge">HIGH</div>
+          <div>
+            <div class="risk-title">📅 催化剂窗口 · Ex-Dividend Date（0天后）</div>
+            <div class="risk-note">Ex-Dividend Date 即将在 0 天内触发。财报/会议期间 IV 通常先扩张后骤降（IV Crush），期权多头即使方向正确也可能因 Vega 损失而亏损；事件冲击往往在盘前/盘后成交稀薄时放大，建议避免追价入场。</div>
+          </div>
+        </div>
+        <div class="risk-item risk-med">
+          <div class="risk-badge">MED</div>
+          <div>
+            <div class="risk-title">📊 IV Skew 温和偏高（Skew=1.14）</div>
+            <div class="risk-note">当前 IV Skew 1.14，看跌期权溢价略高于中性水平。市场存在一定的下行保护需求，期权策略需注意 Vega 敞口。</div>
+          </div>
+        </div>
+        <div class="risk-item risk-med">
+          <div class="risk-badge">MED</div>
+          <div>
+            <div class="risk-title">😱 宏观极度恐慌（F&G=15）</div>
+            <div class="risk-note">恐慌贪婪指数 15（极度恐慌区间 ≤25）。极度恐慌通常是买入信号，但也可能意味着系统性风险尚未出清（关税、美联储路径、地缘政治）。若宏观继续恶化，个股催化剂效应可能被市场整体情绪压制。</div>
+          </div>
+        </div>
+      </div>
+      <div class="divider"></div>
+      <div class="prose">
+<ol class="risk-list" style="padding-left:0;list-style:none;">
+  <li style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px;color:var(--text2);">
+    <span style="color:#ef4444;font-size:16px;flex-shrink:0;">🔴</span>
+    <span><strong>内幕人士大规模净卖出</strong>——ScoutBee 检测到内幕卖出金额 <strong>$54,756,044</strong>，买入 $0，Puri Ajay K 抛售 30万股。内幕人士对自家公司长期价值最了解，大规模净卖出是最重要的警示信号之一，需认真对待。</span>
+  </li>
+  <li style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px;color:var(--text2);">
+    <span style="color:#ef4444;font-size:16px;flex-shrink:0;">🔴</span>
+    <span><strong>宏观 Risk-Off 系统性压力</strong>——VIX 27.2 + F&amp;G 极度恐惧（15）的组合意味着市场整体处于主动去风险状态。在此环境下，即便基本面良好，也可能被流动性压力拖累；若财报不及预期，抛售可能被宏观因素放大 1.5-2 倍。</span>
+  </li>
+  <li style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px;color:var(--text2);">
+    <span style="color:#f59e0b;font-size:16px;flex-shrink:0;">🟡</span>
+    <span><strong>财报后 Sell-the-News 风险</strong>——NVDA 历史上曾多次出现"财报超预期但股价下跌"的情况（2024年5月Q1结果即为典型）。当预期已被充分定价，$200 Call 墙的 Gamma 钉住效应可能使反弹受限，而任何未达预期的措辞都可能触发大规模获利了结。</span>
+  </li>
+  <li style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px;color:var(--text2);">
+    <span style="color:#f59e0b;font-size:16px;flex-shrink:0;">🟡</span>
+    <span><strong>深度虚值 Put 异常扫单暗示尾部风险</strong>——$125（78.84x OI 比）、$60（33.26x）的超异常 Put 扫单显示有机构在为 NVDA 大幅下跌购买"灾难险"。不排除与宏观对冲基金的组合对冲或非公开信息有关，值得高度关注。</span>
+  </li>
+  <li style="display:flex;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);font-size:13px;color:var(--text2);">
+    <span style="color:#f59e0b;font-size:16px;flex-shrink:0;">🟡</span>
+    <span><strong>信号分散，蜂群一致性仅 40%</strong>——蜂群内部 2 多 4 空 1 中的分裂格局表明市场信号本身就存在根本性矛盾，任何单一方向的大仓位操作都面临更高不确定性。建议减小仓位规模，用期权控制最大亏损。</span>
+  </li>
+  <li style="display:flex;gap:10px;padding:10px 0;font-size:13px;color:var(--text2);">
+    <span style="color:#6b7280;font-size:16px;flex-shrink:0;">⚪</span>
+    <span><strong>高拥挤度与估值压力</strong>——拥挤度 42/100（中等），近期 5 日动量 -1.31%，成交量比 0.8x（缩量下跌）。10Y 利率 4.28% 在高位持续压制高 P/E 成长股估值，短期技术面偏弱。</span>
+  </li>
+</ol>
+</div>
+    </div>
+  </div>
+
+  <div class="disclaimer">
+    ⚠️ <strong>免责声明：</strong>本报告由 Alpha Hive 量化蜂群系统 + Claude API 混合模式生成，仅供研究参考，不构成投资建议。期权交易存在归零风险，所有交易决策需自行判断和风控。<br>
+    <span style="color:var(--text3);font-size:10px;margin-top:4px;display:block;">
+      生成时间：2026-03-13 14:41 · Template C v3.0 · 混合模式 · 数据来源：本地 JSON + Claude API
+    </span>
+  </div>
+
+</div>
+</body>
+</html>
