@@ -742,18 +742,19 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 用 <strong> 强调关键数字和价位。""",
 
         "risk": f"""
-分析 {ticker} 的风险格局，以叙事方式深度解读以下数据（**禁止输出风险卡片列表**，量化风险卡片已由蜂群规则引擎生成，请直接写叙事分析）：
+为 {ticker} 深度推理风险格局，生成带 HIGH/MED/LOW 级别标注的风险卡片（规则引擎已生成基础卡片，你的任务是生成**推理层**卡片，内容必须包含因果链分析、数据间的放大效应、具体失效阈值）：
 - 逆向信号: {', '.join(ctx['bear_signals'])}
 - Bear评分: {fmt_score(ctx['bear'].get('score'))} ({ctx['bear'].get('direction')})
 - F&G: {ctx['fg_score'] if ctx['fg_score'] else '未知'}
 - IV Skew: {ctx['iv_skew']}
+- 催化剂: {len(ctx['catalysts'])} 个，最近: {ctx['catalysts'][0].get('event','无') if ctx['catalysts'] else '无'}
 - 宏观: {ctx['guard'].get('discovery','')[:150]}{_master_block}
 
-输出**两段** HTML <p> 标签：
+生成 **3 个**推理风险卡片，必须严格使用以下 HTML 格式（禁止输出任何其他内容）：
+<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div><div class="risk-title">🔴 风险标题（含核心数据）</div><div class="risk-note">**深度推理**：说明该风险的传导机制——它如何从信号演变为亏损？与其他风险是否存在共振放大？给出具体失效阈值（价格/IV/P-C数字）。2-3句，含 <strong>关键数字</strong>。</div></div></div>
 
-第一段（风险优先级诊断）：上方哪个风险信号此刻最关键、为何在当前市场结构下最值得警惕？它与蜂群多头论点的哪个核心假设直接冲突？数据之间是否存在互相放大的共振效应？用 <strong> 标注关键数字，用 <span class="bear-text"> 标注最危险的逻辑链。
-
-第二段（失效条件与明日警戒线）：若多头论点开始失效，最先会体现在哪些可观测的市场变量上？给出**具体数字阈值**（例如：若价格收盘跌破 $XX、若 IV Rank 升至 XX% 以上、若 P/C 比超过 X.X），这些是明日须持续追踪的核心警戒线。""",
+级别规则：系统性/连锁触发风险用 risk-high+HIGH+🔴，结构性/定价偏差风险用 risk-med+MED+🟡，注意事项/边际风险用 risk-low+LOW+⚪。
+**禁止**输出 <p> 标签、纯文字段落或任何卡片格式以外的内容。每张卡片的 risk-note 必须包含推理链和数字阈值，不得只描述现象。""",
     }
 
     prompt = prompts.get(section, "")
@@ -1141,7 +1142,8 @@ def _build_scenario_narrative(ctx: dict) -> str:
 
 
 def _build_risk_narrative(ctx: dict) -> str:
-    """本地模式 fallback：输出两段 prose <p>，与 LLM risk prompt 格式一致"""
+    """本地模式 fallback：输出3张风险卡片，格式与 LLM risk prompt 一致（HIGH/MED/LOW + 推理内容）"""
+    ticker    = ctx.get('ticker', '该股')
     bear_sigs = ctx['bear_signals']
     bear_sc   = float(ctx.get('bear', {}).get('score', 5))
     skew      = ctx['iv_skew']
@@ -1153,63 +1155,119 @@ def _build_risk_narrative(ctx: dict) -> str:
     if isinstance(consistency, float) and consistency < 1:
         consistency = int(consistency * 100)
 
-    # ── 第一段：风险优先级诊断 ─────────────────────────────────
-    # 决定当前最关键风险
-    if fg and fg <= 25:
-        top_risk = (f'<span class="bear-text">宏观极度恐慌（F&G=<strong>{fg}</strong>）</span>是当前最高优先级风险'
-                    f'——系统性抛售情绪可将个股波动放大 1.5–2 倍，即使基本面数据良好也难以免疫。')
-        conflict = ('它直接威胁多头论点的核心假设：即价格在催化剂前维持稳定。'
-                    '极度恐慌期间，资金往往不分青红皂白撤离高 Beta 标的。')
-    elif skew_f > 1.2:
-        top_risk = (f'<span class="bear-text">IV Skew 偏高（当前 <strong>{skew}</strong>，>1.15 阈值）</span>'
-                    f'是最值得关注的结构性风险——Put 溢价偏高说明机构正在为下行风险定价，'
-                    f'而非简单的方向性看空。')
-        conflict = ('这与蜂群多头论点的期权信号维度形成矛盾：流向偏多，但结构性对冲需求强。'
-                    '若两者同时出现，表明主力在买 Call 的同时也在买 Put 保护，净方向并不确定。')
-    elif bear_sigs:
-        top_sig = bear_sigs[0][:60]
-        top_risk = (f'<span class="bear-text">BearBee 逆向压力（评分 <strong>{bear_sc:.1f}/10</strong>）</span>'
-                    f'是当前主要风险来源，核心信号：{top_sig}。')
-        conflict = (f'蜂群一致性仅 {consistency}%，多空论点处于拉锯状态，'
-                    f'任何催化剂的负面解读都可能快速打破平衡。')
-    else:
-        top_risk = f'当前风险处于可控区间，BearBee 评分 <strong>{bear_sc:.1f}/10</strong>，未触发高优先级警报。'
-        conflict = '主要需关注 IV Skew 和宏观情绪的边际变化。'
-
-    para1 = f'<p>{top_risk} {conflict}</p>'
-
-    # ── 第二段：失效条件与明日警戒线 ──────────────────────────
-    warns = []
     sup_list = (ctx.get('key_levels') or {}).get('support', [])
-    res_list = (ctx.get('key_levels') or {}).get('resistance', [])
-    if price and sup_list:
-        s1 = sup_list[0].get('strike')
-        if s1:
-            warns.append(f'价格收盘跌破 <strong>${s1:.0f}</strong>（最强支撑，距当前 {(s1-price)/price*100:+.1f}%）')
-    iv_pct = ctx.get('iv_percentile')
-    if iv_pct is not None:
-        iv_f = float(iv_pct)
-        if iv_f < 60:
-            warns.append(f'IV Rank 升破 <strong>60th</strong>（当前 {iv_f:.0f}th），期权成本骤升信号')
-        else:
-            warns.append(f'IV Rank 持续高于 <strong>70th</strong>（当前 {iv_f:.0f}th），做市商 Gamma 失稳风险')
+    s1_price = sup_list[0].get('strike') if sup_list else None
     pc = ctx.get('put_call_ratio')
     try:
         pc_f = float(pc)
-        if pc_f < 1.0:
-            warns.append(f'P/C 比反转升过 <strong>1.2</strong>（当前 {pc_f:.2f}），流向逆转确认信号')
     except (TypeError, ValueError):
-        pass
-    if fg and fg > 25:
-        warns.append(f'F&G 跌入极度恐慌区间（<strong>≤25</strong>，当前 {fg}）')
+        pc_f = None
+    iv_pct = ctx.get('iv_percentile')
+    iv_f = float(iv_pct) if iv_pct is not None else None
+    cats = ctx.get('catalysts', [])
+    nearest_cat = cats[0].get('event', '') if cats else ''
 
-    if warns:
-        warn_str = '；'.join(warns)
-        para2 = f'<p>论点失效的优先观测指标（<strong>明日警戒线</strong>）：{warn_str}。一旦上述任一阈值触发，应收紧止损或暂停加仓，等待市场结构重新确认。</p>'
+    cards = []
+
+    # ── 卡片1：最高优先级风险 ─────────────────────────────────
+    if fg and fg <= 25:
+        threshold = f'收盘跌破 <strong>${s1_price:.0f}</strong>' if s1_price else 'VIX 继续上行'
+        cards.append(
+            f'<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div>'
+            f'<div class="risk-title">🔴 宏观极度恐慌（F&G=<strong>{fg}</strong>）— 系统性风险</div>'
+            f'<div class="risk-note">传导机制：极度恐慌期间资金无差别撤离高 Beta 标的，'
+            f'NVDA 历史 Beta≈1.8–2.5x，大盘跌 1% 对应 {ticker} 跌 1.8–2.5%。'
+            f'与 <strong>FOMC 不确定性</strong>共振时放大效应倍增。'
+            f'失效阈值：{threshold} 则多头防线瓦解。</div>'
+            f'</div></div>'
+        )
+    elif skew_f > 1.2:
+        cards.append(
+            f'<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div>'
+            f'<div class="risk-title">🔴 IV Skew 偏高（Skew=<strong>{skew}</strong>）— Put 保护需求激增</div>'
+            f'<div class="risk-note">传导机制：机构正在高价购买 Put 保护，Skew>{skew} 表明下行定价已被推升。'
+            f'若 Call 多头同步存在（P/C={pc_f:.2f}），说明主力双向布局，净方向不确定。'
+            f'失效阈值：IV Rank 升破 <strong>60th</strong>（当前 {iv_f:.0f}th）则期权成本骤升，期权多头策略失效。</div>'
+            f'</div></div>'
+        ) if pc_f and iv_f else cards.append(
+            f'<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div>'
+            f'<div class="risk-title">🔴 IV Skew 偏高（Skew=<strong>{skew}</strong>）— 结构性风险</div>'
+            f'<div class="risk-note">Put 溢价偏高（>{skew:.2f}）显示机构在为下行保护付出超额成本。'
+            f'失效阈值：Skew 持续高于 <strong>1.3</strong> 且 OI 向 Put 端累积，则下行加速信号确认。</div>'
+            f'</div></div>'
+        )
+    elif bear_sigs:
+        top_sig = bear_sigs[0][:50]
+        cards.append(
+            f'<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div>'
+            f'<div class="risk-title">🔴 BearBee 逆向信号（评分 <strong>{bear_sc:.1f}/10</strong>）</div>'
+            f'<div class="risk-note">核心信号：{top_sig}。'
+            f'传导机制：逆向信号触发后通常在 5–10 交易日内出现价格压力，蜂群一致性 {consistency}% 偏低进一步放大不确定性。'
+            f'失效阈值：信号持续 3 天以上未收敛则多头假设需重新评估。</div>'
+            f'</div></div>'
+        )
     else:
-        para2 = '<p>当前无明确失效阈值触发，维持现有仓位管理计划，按原定止损执行。</p>'
+        cards.append(
+            f'<div class="risk-item risk-med"><div class="risk-badge">MED</div><div>'
+            f'<div class="risk-title">🟡 结构性风险处于可控区间</div>'
+            f'<div class="risk-note">BearBee 评分 <strong>{bear_sc:.1f}/10</strong>，未触发高优先级警报。'
+            f'需持续监控 IV Skew 和宏观情绪边际变化，防止低风险状态被突发事件打破。</div>'
+            f'</div></div>'
+        )
 
-    return para1 + para2
+    # ── 卡片2：催化剂/IV Crush 风险 ──────────────────────────
+    if nearest_cat:
+        days = cats[0].get('days_until', 0) if cats else 0
+        timing = f'{abs(days)}天前触发' if days < 0 else f'{days}天内' if days <= 7 else f'{days}天后'
+        cards.append(
+            f'<div class="risk-item risk-med"><div class="risk-badge">MED</div><div>'
+            f'<div class="risk-title">🟡 催化剂窗口风险 · {nearest_cat}（{timing}）</div>'
+            f'<div class="risk-note">传导机制：事件窗口内 IV 通常先扩张后 Crush（-30%~-50%），'
+            f'期权多头即使方向正确也可能因 Vega 损失亏损；盘前/盘后流动性稀薄时冲击成倍放大。'
+            f'建议：正股持有者持有穿越；期权多头等 Crush 后再建仓。</div>'
+            f'</div></div>'
+        )
+    elif iv_f and iv_f > 60:
+        cards.append(
+            f'<div class="risk-item risk-med"><div class="risk-badge">MED</div><div>'
+            f'<div class="risk-title">🟡 IV 偏高（IV Rank {iv_f:.0f}th）— Vega 风险</div>'
+            f'<div class="risk-note">IV Rank {iv_f:.0f}th 处于中高位，期权买方需承担较高 Theta 损耗。'
+            f'失效阈值：IV Rank 升破 <strong>80th</strong> 则期权策略切换为卖方更有统计优势。</div>'
+            f'</div></div>'
+        )
+    else:
+        if s1_price:
+            dist = (s1_price - price) / price * 100 if price else 0
+            cards.append(
+                f'<div class="risk-item risk-med"><div class="risk-badge">MED</div><div>'
+                f'<div class="risk-title">🟡 关键支撑防线 · ${s1_price:.0f}（距当前 {dist:+.1f}%）</div>'
+                f'<div class="risk-note">OI 集中的支撑位同时是做市商 Delta 对冲触发点——若价格有效跌穿，'
+                f'做市商被迫卖出 Delta 对冲，形成机械性卖压级联。失效条件：收盘价连续2天低于 <strong>${s1_price:.0f}</strong>。</div>'
+                f'</div></div>'
+            )
+
+    # ── 卡片3：明日警戒线（LOW 注意事项）──────────────────────
+    warn_items = []
+    if s1_price and price:
+        warn_items.append(f'价格跌破 <strong>${s1_price:.0f}</strong>（最强支撑）')
+    if iv_f:
+        thr = 70 if iv_f >= 60 else 60
+        warn_items.append(f'IV Rank 升过 <strong>{thr}th</strong>（当前 {iv_f:.0f}th）')
+    if pc_f and pc_f < 1.0:
+        warn_items.append(f'P/C 反转升过 <strong>1.2</strong>（当前 {pc_f:.2f}）')
+    if fg and fg <= 30:
+        warn_items.append(f'F&G 继续下行低于 <strong>15</strong>（当前 {fg}）')
+
+    warn_str = '；'.join(warn_items) if warn_items else '维持现有风控计划'
+    cards.append(
+        f'<div class="risk-item risk-low"><div class="risk-badge">LOW</div><div>'
+        f'<div class="risk-title">⚪ 明日警戒线 — 需持续追踪</div>'
+        f'<div class="risk-note">触发则需重新评估仓位：{warn_str}。'
+        f'任一阈值触发应收紧止损，等待信号重新收敛后再加仓。</div>'
+        f'</div></div>'
+    )
+
+    return '\n'.join(cards[:3])
 
 
 def _local_fallback(ctx: dict, section: str) -> str:
