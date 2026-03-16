@@ -742,17 +742,18 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 用 <strong> 强调关键数字和价位。""",
 
         "risk": f"""
-为 {ticker} 生成风险卡片列表：
+分析 {ticker} 的风险格局，以叙事方式深度解读以下数据（**禁止输出风险卡片列表**，量化风险卡片已由蜂群规则引擎生成，请直接写叙事分析）：
 - 逆向信号: {', '.join(ctx['bear_signals'])}
 - Bear评分: {fmt_score(ctx['bear'].get('score'))} ({ctx['bear'].get('direction')})
 - F&G: {ctx['fg_score'] if ctx['fg_score'] else '未知'}
 - IV Skew: {ctx['iv_skew']}
 - 宏观: {ctx['guard'].get('discovery','')[:150]}{_master_block}
 
-生成3-5个风险卡片，每个卡片对应一个独立风险主题，必须严格使用以下HTML格式（无其他标签）：
-<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div><div class="risk-title">🔴 风险标题</div><div class="risk-note">具体风险描述，含数据支撑，2-3句话。</div></div></div>
-级别规则：系统性/尾部风险用 risk-high+HIGH+🔴，结构性风险用 risk-med+MED+🟡，注意事项用 risk-low+LOW+⚪。
-风险须与蜂群论点形成对照，点名威胁论点成立的核心条件。""",
+输出**两段** HTML <p> 标签：
+
+第一段（风险优先级诊断）：上方哪个风险信号此刻最关键、为何在当前市场结构下最值得警惕？它与蜂群多头论点的哪个核心假设直接冲突？数据之间是否存在互相放大的共振效应？用 <strong> 标注关键数字，用 <span class="bear-text"> 标注最危险的逻辑链。
+
+第二段（失效条件与明日警戒线）：若多头论点开始失效，最先会体现在哪些可观测的市场变量上？给出**具体数字阈值**（例如：若价格收盘跌破 $XX、若 IV Rank 升至 XX% 以上、若 P/C 比超过 X.X），这些是明日须持续追踪的核心警戒线。""",
     }
 
     prompt = prompts.get(section, "")
@@ -1140,42 +1141,75 @@ def _build_scenario_narrative(ctx: dict) -> str:
 
 
 def _build_risk_narrative(ctx: dict) -> str:
-    bear_sigs = ctx['bear_signals']; bear_sc = float(ctx.get('bear',{}).get('score',5))
-    skew = ctx['iv_skew']; fg = ctx.get('fg_score',50)
-    guard_det = ctx.get('guard',{}).get('details',{}) or {}
+    """本地模式 fallback：输出两段 prose <p>，与 LLM risk prompt 格式一致"""
+    bear_sigs = ctx['bear_signals']
+    bear_sc   = float(ctx.get('bear', {}).get('score', 5))
+    skew      = ctx['iv_skew']
+    skew_f    = _sf(skew)
+    fg        = ctx.get('fg_score', 50)
+    price     = ctx.get('price') or 0
+    guard_det = ctx.get('guard', {}).get('details', {}) or {}
     consistency = guard_det.get('consistency', 0)
     if isinstance(consistency, float) and consistency < 1:
         consistency = int(consistency * 100)
-    risk_level = 'high' if bear_sc > 5 or (fg and fg <= 25) else ('med' if bear_sc > 3 else 'low')
-    badge = {'high':'HIGH','med':'MED','low':'LOW'}[risk_level]
-    icon  = {'high':'🔴','med':'🟡','low':'⚪'}[risk_level]
-    cards = []
-    # 卡片1：BearBee综合风险
-    cards.append(
-        f'<div class="risk-item risk-{risk_level}"><div class="risk-badge">{badge}</div><div>'
-        f'<div class="risk-title">{icon} 蜂群逆向压力（BearBee {bear_sc:.1f}/10）</div>'
-        f'<div class="risk-note">IV Skew {skew}（{"偏高，下行对冲溢价增加" if _sf(skew)>1.2 else "中性"}），'
-        f'蜂群一致性 {consistency}%。主要逆向信号：{bear_sigs[0] if bear_sigs else "暂无"}。</div>'
-        f'</div></div>'
-    )
-    # 卡片2：宏观情绪
+
+    # ── 第一段：风险优先级诊断 ─────────────────────────────────
+    # 决定当前最关键风险
     if fg and fg <= 25:
-        cards.append(
-            '<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div>'
-            f'<div class="risk-title">🔴 宏观极度恐慌（F&G={fg}）</div>'
-            '<div class="risk-note">极度恐慌区间（≤25），市场系统性抛售可能放大个股波动。'
-            '即使基本面良好，流动性压力也可能使下跌幅度超出预期。</div>'
-            '</div></div>'
-        )
-    # 卡片3：其余逆向信号
-    for sig in bear_sigs[1:3]:
-        cards.append(
-            '<div class="risk-item risk-med"><div class="risk-badge">MED</div><div>'
-            f'<div class="risk-title">🟡 逆向信号</div>'
-            f'<div class="risk-note">{sig}</div>'
-            '</div></div>'
-        )
-    return ''.join(cards)
+        top_risk = (f'<span class="bear-text">宏观极度恐慌（F&G=<strong>{fg}</strong>）</span>是当前最高优先级风险'
+                    f'——系统性抛售情绪可将个股波动放大 1.5–2 倍，即使基本面数据良好也难以免疫。')
+        conflict = ('它直接威胁多头论点的核心假设：即价格在催化剂前维持稳定。'
+                    '极度恐慌期间，资金往往不分青红皂白撤离高 Beta 标的。')
+    elif skew_f > 1.2:
+        top_risk = (f'<span class="bear-text">IV Skew 偏高（当前 <strong>{skew}</strong>，>1.15 阈值）</span>'
+                    f'是最值得关注的结构性风险——Put 溢价偏高说明机构正在为下行风险定价，'
+                    f'而非简单的方向性看空。')
+        conflict = ('这与蜂群多头论点的期权信号维度形成矛盾：流向偏多，但结构性对冲需求强。'
+                    '若两者同时出现，表明主力在买 Call 的同时也在买 Put 保护，净方向并不确定。')
+    elif bear_sigs:
+        top_sig = bear_sigs[0][:60]
+        top_risk = (f'<span class="bear-text">BearBee 逆向压力（评分 <strong>{bear_sc:.1f}/10</strong>）</span>'
+                    f'是当前主要风险来源，核心信号：{top_sig}。')
+        conflict = (f'蜂群一致性仅 {consistency}%，多空论点处于拉锯状态，'
+                    f'任何催化剂的负面解读都可能快速打破平衡。')
+    else:
+        top_risk = f'当前风险处于可控区间，BearBee 评分 <strong>{bear_sc:.1f}/10</strong>，未触发高优先级警报。'
+        conflict = '主要需关注 IV Skew 和宏观情绪的边际变化。'
+
+    para1 = f'<p>{top_risk} {conflict}</p>'
+
+    # ── 第二段：失效条件与明日警戒线 ──────────────────────────
+    warns = []
+    sup_list = (ctx.get('key_levels') or {}).get('support', [])
+    res_list = (ctx.get('key_levels') or {}).get('resistance', [])
+    if price and sup_list:
+        s1 = sup_list[0].get('strike')
+        if s1:
+            warns.append(f'价格收盘跌破 <strong>${s1:.0f}</strong>（最强支撑，距当前 {(s1-price)/price*100:+.1f}%）')
+    iv_pct = ctx.get('iv_percentile')
+    if iv_pct is not None:
+        iv_f = float(iv_pct)
+        if iv_f < 60:
+            warns.append(f'IV Rank 升破 <strong>60th</strong>（当前 {iv_f:.0f}th），期权成本骤升信号')
+        else:
+            warns.append(f'IV Rank 持续高于 <strong>70th</strong>（当前 {iv_f:.0f}th），做市商 Gamma 失稳风险')
+    pc = ctx.get('put_call_ratio')
+    try:
+        pc_f = float(pc)
+        if pc_f < 1.0:
+            warns.append(f'P/C 比反转升过 <strong>1.2</strong>（当前 {pc_f:.2f}），流向逆转确认信号')
+    except (TypeError, ValueError):
+        pass
+    if fg and fg > 25:
+        warns.append(f'F&G 跌入极度恐慌区间（<strong>≤25</strong>，当前 {fg}）')
+
+    if warns:
+        warn_str = '；'.join(warns)
+        para2 = f'<p>论点失效的优先观测指标（<strong>明日警戒线</strong>）：{warn_str}。一旦上述任一阈值触发，应收紧止损或暂停加仓，等待市场结构重新确认。</p>'
+    else:
+        para2 = '<p>当前无明确失效阈值触发，维持现有仓位管理计划，按原定止损执行。</p>'
+
+    return para1 + para2
 
 
 def _local_fallback(ctx: dict, section: str) -> str:
@@ -1267,7 +1301,9 @@ def _try_charts(ctx: dict) -> tuple:
 
         return conf_html, opts_html
     except Exception as _e:
+        import traceback as _tb
         print(f"  ⚠️  chart_engine 跳过: {_e}")
+        _tb.print_exc()
         return "", ""
 
 
@@ -1917,6 +1953,59 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "") -> str:
             <div class="risk-note">{note}</div>
           </div>
         </div>"""
+
+    # ── 明日追踪任务 ─────────────────────────────────────────
+    _track_tasks = []
+    _px = float(ctx.get("price") or 0)
+    _sup_list = (ctx.get("key_levels") or {}).get("support", [])
+    _res_list = (ctx.get("key_levels") or {}).get("resistance", [])
+    if _px and _sup_list:
+        _s1 = _sup_list[0].get("strike") if _sup_list else None
+        if _s1:
+            _track_tasks.append(
+                f"<strong>价位警戒</strong>：若收盘跌破 <strong>${_s1:.0f}</strong>（最强支撑 / 当前 ${_px:.1f}），多头假设需重新评估")
+    if _px and _res_list:
+        _r1 = _res_list[0].get("strike") if _res_list else None
+        if _r1:
+            _track_tasks.append(
+                f"<strong>突破确认</strong>：若价格有效收盘上穿 <strong>${_r1:.0f}</strong> 阻力（当前距离 {(_r1-_px)/_px*100:+.1f}%），可考虑加仓")
+    _iv_pct = ctx.get("iv_percentile")
+    if _iv_pct is not None:
+        _ivf = float(_iv_pct)
+        if _ivf < 50:
+            _track_tasks.append(
+                f"<strong>IV 追踪</strong>：当前 IV Rank {_ivf:.0f}th（低位），若升至 <strong>50th+</strong> 注意期权成本上升 / 可能有催化剂预期")
+        elif _ivf >= 70:
+            _track_tasks.append(
+                f"<strong>IV Crush 警戒</strong>：当前 IV Rank {_ivf:.0f}th（高位），事件后 IV 可能骤降 ≥20%，持有期权需设定 Vega 止损")
+    _cats = ctx.get("catalysts") or []
+    if _cats:
+        _nc = _cats[0]
+        _nc_title = (_nc.get("event") or _nc.get("title") or "")[:45]
+        _nc_date  = _nc.get("date", "")
+        if _nc_title:
+            _track_tasks.append(
+                f"<strong>催化剂追踪</strong>：{_nc_title}（{_nc_date}）—— 事件前注意成交量和 IV 异动")
+    if ctx.get("bear_signals"):
+        _track_tasks.append(
+            f"<strong>空头信号监控</strong>：{ctx['bear_signals'][0][:60]} —— 若信号持续升级或新增共振，减仓止损")
+
+    if _track_tasks:
+        _task_items_html = "".join(
+            f'<li style="padding:7px 0;border-bottom:1px solid var(--border2);'
+            f'color:var(--text2);font-size:13px;line-height:1.6;">'
+            f'<span style="color:var(--gold2);margin-right:8px;font-size:15px;">☐</span>{t}</li>'
+            for t in _track_tasks
+        )
+        tracking_tasks_html = (
+            f'<div style="margin-top:22px;">'
+            f'<div style="font-size:12px;font-weight:700;color:var(--text3);letter-spacing:.1em;'
+            f'text-transform:uppercase;margin-bottom:10px;">📋 明日追踪任务</div>'
+            f'<ul style="list-style:none;margin:0;padding:0;">{_task_items_html}</ul>'
+            f'</div>'
+        )
+    else:
+        tracking_tasks_html = ""
 
     # ── 主 HTML ──────────────────────────────────────────────
     # 安全转换 put_call_ratio（可能为 'N/A' 字符串）
@@ -2572,6 +2661,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "") -> str:
       </div>
       <div class="divider"></div>
       <div class="prose">{reasoning.get('risk', '')}</div>
+      {tracking_tasks_html}
     </div>
   </div>
 

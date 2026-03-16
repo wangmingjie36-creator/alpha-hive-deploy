@@ -1,262 +1,246 @@
 {
   "_meta": {
     "ticker": "NVDA",
-    "report_date": "2026-03-13",
-    "price": 180.25,
+    "report_date": "2026-03-16",
+    "price": 183.22,
     "generated_by": "collect_data.py · 方案B"
   },
-  "price": 180.25,
-  "price_source": "analysis_scout",
   "swarm": {
-    "final_score": 3.65,
-    "direction": "bearish",
+    "final_score": 3.9,
+    "direction": "bullish",
     "resonance": {
       "detected": false,
       "dimensions": [
-        "contrarian",
+        "ml_auxiliary",
         "odds",
         "risk_adj",
-        "signal"
+        "sentiment"
       ],
       "count": 4,
       "confidence_boost": 0,
-      "direction": "bearish"
+      "direction": "bullish"
     },
     "agent_vote": {
-      "bullish": 2,
-      "bearish": 4,
-      "neutral": 1
+      "bullish": 4,
+      "bearish": 2,
+      "neutral": 0
     }
   },
   "agents": {
     "ChronosBee": {
-      "score": 8.38,
-      "direction": "bullish",
-      "confidence": 1.0,
-      "discovery": "催化剂 7 个 | 最近：Ex-Dividend Date（0天后） | 分析师目标$266.35(↑47.8%) | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%) | LLM催化剂:Q4财报（1天内）+GTC产品发布会（3天内）双重催化叠加，时间窗口极近，但近期动量偏弱需谨慎[关注:Q4 FY2026财报发布 + GTC 2026产品发布会]"
+      "score": 5.0,
+      "direction": "neutral",
+      "confidence": 0.0,
+      "discovery": "Error: 'str' object has no attribute 'setdefault'"
     },
     "RivalBee": {
-      "score": 6.5,
+      "score": 6.76,
       "direction": "bullish",
       "confidence": 0.8,
-      "discovery": "ML 胜率 65% | 7d +6.95% | 30d +10.43% | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%)"
+      "discovery": "ML 胜率 65% | 7d +7.33% | 30d +11.00% | 目标价上行 +46.0%（分析师看多） | 分析师共识1.3/5（强烈看多） | 远期EPS增速 +120.3%（盈利高增长） | 历史5条:多5/空0,均分7.1|历史T+7准确率57%(7次,均收益+0.06%)"
     },
     "OracleBee": {
-      "score": 3.61,
-      "direction": "bearish",
+      "score": 4.03,
+      "direction": "bullish",
       "confidence": 0.7,
-      "discovery": "检测到 3 个看涨异动 | 异常流:异常Put流 122个信号 溢价$274.7M | $180.2 | 无相关预测市场 | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%)"
+      "discovery": "检测到 7 个看涨异动 | 异常流:混合期权流 Call:103 Put:124 | $183.2 | 无相关预测市场 | 历史5条:多5/空0,均分7.1|历史T+7准确率57%(7次,均收益+0.06%)"
     },
     "BuzzBee": {
-      "score": 5.31,
-      "direction": "neutral",
-      "confidence": 0.9,
-      "discovery": "情绪 53% | 动量 -1.3% | 量比 0.8x | Reddit #4(hot,96提及) | 新闻偏多（4多/2空） | 未上 Yahoo 热搜 | F&G 15(Extreme Fear) | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%)"
+      "score": 6.47,
+      "direction": "bullish",
+      "confidence": 1.0,
+      "discovery": "情绪 62% | 动量 -0.8% | 量比 1.1x | Reddit #2(hot,218提及) | NVIDIA与全球顶级企业扩大战略合作，芯片需求持续增长 | 未上 Yahoo 热搜 | F&G 23(Extreme Fear) | 三条新闻均为NVIDIA与知名企业（现代、Uber、罗氏）的合作扩展，体现芯片需求旺盛和市场地位稳固，整体呈现明确看多信号 | 情绪动量:rising | 历"
     },
     "ScoutBee": {
-      "score": 2.91,
+      "score": 3.02,
       "direction": "bearish",
       "confidence": 0.88,
-      "discovery": "内幕卖出 $54,756,044 | Puri Ajay K 卖出 300,000股 | 拥挤度 42/100（中等拥挤度） | 动量 -1.3% | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%)"
+      "discovery": "内幕卖出 $54,756,044 | Puri Ajay K 卖出 300,000股 | 拥挤度 40/100（中等拥挤度） | 动量 -0.8% | 历史5条:多5/空0,均分7.1|历史T+7准确率57%(7次,均收益+0.06%) | 板块相对强度 -0.4pp(科技 20D)"
     },
     "GuardBee": {
-      "score": 1.66,
-      "direction": "bearish",
+      "score": 2.59,
+      "direction": "bullish",
       "confidence": 0.65,
-      "discovery": "信号分散 | 均分 3.8 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%) | 宏观:VIX 27.2(elevated) | 10Y 4.28% | 大盘-0.6% | 宏观:risk_off | 曲线:正常 | CPI同比2.4% | 黄金回落-1.3%(宏观风险偏好走弱（VIX 27.2(elevated)"
+      "discovery": "信号分散 | 均分 4.5 | 一致性 60% | 风险调整 0.95 | 历史5条:多5/空0,均分7.1|历史T+7准确率57%(7次,均收益+0.06%) | ⚠️ FOMC 2天后 | 板块顺风 | ⚠️ VIX Backwardation（恐慌结构）"
     },
     "BearBee": {
-      "score": 2.66,
+      "score": 2.61,
       "direction": "bearish",
       "confidence": 1.0,
-      "discovery": "内幕大额抛售 $54,756,043（买入仅 $0） | Oracle 期权信号看空（3.6分） | 近期小幅回调 -1.3% | 催化剂0天内到来，波动性风险↑ | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%)"
+      "discovery": "内幕大额抛售 $54,756,043（买入仅 $0） | IV Skew 1.22（看跌期权溢价偏高） | 近期小幅回调 -0.8% | 历史5条:多5/空0,均分7.1|历史T+7准确率57%(7次,均收益+0.06%)"
     }
   },
   "options": {
-    "put_call_ratio": 0.75,
-    "total_oi": 636589,
-    "iv_rank": 19.29,
+    "put_call_ratio": 0.83,
+    "total_oi": 638209,
+    "iv_rank": 19.41,
     "iv_current_pct": 42.69,
-    "iv_skew_ratio": 1.141,
+    "iv_skew_ratio": 1.221,
     "iv_skew_signal": "neutral",
     "flow_direction": "bullish",
-    "options_score": 5.5,
-    "signal_summary": "检测到 3 个看涨异动",
-    "gamma_squeeze_risk": "medium",
+    "options_score": 6.0,
+    "signal_summary": "检测到 7 个看涨异动",
+    "gamma_squeeze_risk": "high",
     "support_levels": [
       {
         "strike": 160.0,
-        "oi": 32634,
-        "iv_pct": 50.3
+        "oi": 32751,
+        "iv_pct": 51.8
       },
       {
         "strike": 170.0,
-        "oi": 17033,
-        "iv_pct": 47.1
+        "oi": 18737,
+        "iv_pct": 49.3
       },
       {
         "strike": 90.0,
         "oi": 15321,
-        "iv_pct": 110.2
+        "iv_pct": 116.4
       }
     ],
     "resistance_levels": [
       {
         "strike": 200.0,
-        "oi": 75809,
-        "iv_pct": 38.0
+        "oi": 49282,
+        "iv_pct": 37.1
       },
       {
         "strike": 200.0,
-        "oi": 47592,
-        "iv_pct": 38.4
+        "oi": 42292,
+        "iv_pct": 36.5
       },
       {
         "strike": 195.0,
-        "oi": 18402,
-        "iv_pct": 38.6
+        "oi": 19334,
+        "iv_pct": 37.6
       }
     ],
     "unusual_activity": [
       {
+        "type": "put_sweep",
+        "strike": 175.0,
+        "volume": 54120,
+        "bullish": false,
+        "ratio": 8.23
+      },
+      {
+        "type": "put_sweep",
+        "strike": 167.5,
+        "volume": 27660,
+        "bullish": false,
+        "ratio": 8.22
+      },
+      {
+        "type": "large_put_volume",
+        "strike": 180.0,
+        "volume": 16327,
+        "bullish": false,
+        "ratio": null
+      },
+      {
         "type": "large_call_volume",
         "strike": 200.0,
-        "volume": 67864,
+        "volume": 13708,
         "bullish": true,
         "ratio": null
       },
       {
         "type": "large_call_volume",
         "strike": 190.0,
-        "volume": 11726,
+        "volume": 13401,
         "bullish": true,
         "ratio": null
       },
       {
-        "type": "put_sweep",
-        "strike": 65.0,
-        "volume": 1961,
-        "bullish": false,
-        "ratio": 5.48
+        "type": "large_call_volume",
+        "strike": 185.0,
+        "volume": 12656,
+        "bullish": true,
+        "ratio": null
       },
       {
-        "type": "put_sweep",
-        "strike": 125.0,
-        "volume": 1498,
-        "bullish": false,
-        "ratio": 78.84
+        "type": "large_call_volume",
+        "strike": 190.0,
+        "volume": 11667,
+        "bullish": true,
+        "ratio": null
       },
       {
-        "type": "put_sweep",
-        "strike": 60.0,
-        "volume": 1164,
-        "bullish": false,
-        "ratio": 33.26
+        "type": "large_call_volume",
+        "strike": 200.0,
+        "volume": 10991,
+        "bullish": true,
+        "ratio": null
+      },
+      {
+        "type": "large_call_volume",
+        "strike": 195.0,
+        "volume": 10732,
+        "bullish": true,
+        "ratio": null
       },
       {
         "type": "call_sweep",
-        "strike": 140.0,
-        "volume": 804,
+        "strike": 190.0,
+        "volume": 3397,
         "bullish": true,
-        "ratio": 6.76
-      },
-      {
-        "type": "put_sweep",
-        "strike": 115.0,
-        "volume": 100,
-        "bullish": false,
-        "ratio": 50.0
+        "ratio": 5.09
       }
     ],
     "expiration_dates": [
-      "2026-03-23",
+      "2026-03-25",
       "2026-03-27",
       "2026-04-02"
     ]
   },
   "catalysts": {
-    "count": 5,
-    "chronos_score": 8.38,
-    "events": [
-      {
-        "event": "Ex-Dividend Date",
-        "date": "2026-03-10",
-        "days_until": 0,
-        "importance": "medium",
-        "description": ""
-      },
-      {
-        "event": "Dividend Date",
-        "date": "2025-12-25",
-        "days_until": 0,
-        "importance": "medium",
-        "description": ""
-      },
-      {
-        "event": "Q4 FY2026 Earnings",
-        "date": "2026-03-15",
-        "days_until": 1,
-        "importance": "medium",
-        "description": ""
-      },
-      {
-        "event": "Q4 FY2026 财报发布",
-        "date": "2026-03-15",
-        "days_until": 1,
-        "importance": "medium",
-        "description": ""
-      },
-      {
-        "event": "GTC 2026",
-        "date": "2026-03-17",
-        "days_until": 3,
-        "importance": "medium",
-        "description": ""
-      }
-    ],
+    "count": 0,
+    "chronos_score": 5.0,
+    "events": [],
     "analyst_target": null
   },
   "ml": {
-    "probability_pct": 95.0,
-    "expected_3d_pct": 5.4,
-    "expected_7d_pct": 14.4,
-    "expected_30d_pct": 21.6,
-    "recommendation": "STRONG BUY - 高概率机会"
+    "probability_pct": 5.0,
+    "expected_3d_pct": 4.11,
+    "expected_7d_pct": 10.95,
+    "expected_30d_pct": 16.43,
+    "recommendation": "AVOID - 风险大于收益"
   },
   "macro": {
-    "fear_greed_index": 15,
-    "guard_score": 1.66,
-    "guard_direction": "bearish",
-    "guard_discovery": "信号分散 | 均分 3.8 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%) | 宏观:VIX 27.2(elevated) | 10Y 4.28% | 大盘-0.6% | 宏观:risk_off | 曲线:正常 | CPI同比2.4% | 黄金回落-1.3%(宏观风险偏好走弱（VIX 27.2(elevated) | 10Y 4.28% )",
-    "sentiment_pct": 53,
-    "reddit_rank": 4,
-    "reddit_mentions": 96,
-    "volume_ratio": 0.81,
-    "buzz_discovery": "情绪 53% | 动量 -1.3% | 量比 0.8x | Reddit #4(hot,96提及) | 新闻偏多（4多/2空） | 未上 Yahoo 热搜 | F&G 15(Extreme Fear) | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%)"
+    "fear_greed_index": 23,
+    "guard_score": 2.59,
+    "guard_direction": "bullish",
+    "guard_discovery": "信号分散 | 均分 4.5 | 一致性 60% | 风险调整 0.95 | 历史5条:多5/空0,均分7.1|历史T+7准确率57%(7次,均收益+0.06%) | ⚠️ FOMC 2天后 | 板块顺风 | ⚠️ VIX Backwardation（恐慌结构）",
+    "sentiment_pct": 62,
+    "reddit_rank": 2,
+    "reddit_mentions": 218,
+    "volume_ratio": 1.11,
+    "buzz_discovery": "情绪 62% | 动量 -0.8% | 量比 1.1x | Reddit #2(hot,218提及) | NVIDIA与全球顶级企业扩大战略合作，芯片需求持续增长 | 未上 Yahoo 热搜 | F&G 23(Extreme Fear) | 三条新闻均为NVIDIA与知名企业（现代、Uber、罗氏）的合作扩展，体现芯片需求旺盛和市场地位稳固，整体呈现明确看多信号 | 情绪动量:rising | 历"
   },
   "fundamentals": {
-    "scout_score": 2.91,
+    "scout_score": 3.02,
     "scout_direction": "bearish",
-    "scout_discovery": "内幕卖出 $54,756,044 | Puri Ajay K 卖出 300,000股 | 拥挤度 42/100（中等拥挤度） | 动量 -1.3% | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%)",
-    "crowding_score": 42.3,
-    "momentum_5d": -1.3086,
+    "scout_discovery": "内幕卖出 $54,756,044 | Puri Ajay K 卖出 300,000股 | 拥挤度 40/100（中等拥挤度） | 动量 -0.8% | 历史5条:多5/空0,均分7.1|历史T+7准确率57%(7次,均收益+0.06%) | 板块相对强度 -0.4pp(科技 20D)",
+    "crowding_score": 39.6,
+    "momentum_5d": -0.8335,
     "overview": "AI 芯片龙头，CUDA 生态护城河深厚，但估值已高，监管风险需关注"
   },
   "bearish": {
-    "bear_score": 2.66,
+    "bear_score": 2.61,
     "bear_direction": "bearish",
     "bear_signals": [
       "内幕大额抛售 $54,756,043（买入仅 $0）",
-      "Oracle 期权信号看空（3.6分）",
-      "近期小幅回调 -1.3%",
-      "催化剂0天内到来，波动性风险↑"
+      "IV Skew 1.22（看跌期权溢价偏高）",
+      "近期小幅回调 -0.8%"
     ],
-    "bear_discovery": "内幕大额抛售 $54,756,043（买入仅 $0） | Oracle 期权信号看空（3.6分） | 近期小幅回调 -1.3% | 催化剂0天内到来，波动性风险↑ | 历史5条:多5/空0,均分7.7|历史T+7准确率67%(6次,均收益+0.32%)"
+    "bear_discovery": "内幕大额抛售 $54,756,043（买入仅 $0） | IV Skew 1.22（看跌期权溢价偏高） | 近期小幅回调 -0.8% | 历史5条:多5/空0,均分7.1|历史T+7准确率57%(7次,均收益+0.06%)"
   },
   "recommendation": {
-    "combined_probability_pct": 74.0,
-    "rating": "BUY",
-    "action": "分批建仓",
-    "reasoning": "人工分析 65.0% + ML 预测 95.0% = 综合 74.0%"
-  }
+    "combined_probability_pct": 47.0,
+    "rating": "AVOID",
+    "action": "回避或减仓",
+    "reasoning": "人工分析 65.0% + ML 预测 5.0% = 综合 47.0%"
+  },
+  "price": 183.22,
+  "price_source": "analysis_scout"
 }

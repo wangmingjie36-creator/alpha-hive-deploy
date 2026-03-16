@@ -156,6 +156,9 @@ class ChronosBeeHorizon(BeeAgent):
                 _log.debug("ChronosBeeHorizon analyst targets unavailable for %s: %s", ticker, e)
 
             # 1c. IV Crush 历史数据（财报期权定价核心参考）
+            # 注意：使用独立本地变量，不写入 ctx（ctx 是 _get_history_context 返回的字符串）
+            _iv_crush_data: dict = {}
+            _iv_crush_summary: str = ""
             try:
                 import sys as _sys
                 import os as _os_iv
@@ -164,8 +167,8 @@ class ChronosBeeHorizon(BeeAgent):
                     _sys.path.insert(0, _hive_dir)
                 from iv_crush_scraper import get_iv_crush_data, format_iv_crush_summary
                 _iv_data = get_iv_crush_data(ticker)
-                ctx["iv_crush"] = _iv_data
-                ctx["iv_crush_summary"] = format_iv_crush_summary(_iv_data)
+                _iv_crush_data    = _iv_data
+                _iv_crush_summary = format_iv_crush_summary(_iv_data)
                 # 把 IV Crush 信息附加到财报催化剂（如已存在）
                 if _iv_data.get("avg_abs_move") and catalysts_found:
                     for _c in catalysts_found:
@@ -176,8 +179,6 @@ class ChronosBeeHorizon(BeeAgent):
                             break
             except Exception as _e_iv:
                 _log.debug("IV Crush unavailable for %s: %s", ticker, _e_iv)
-                ctx.setdefault("iv_crush", {})
-                ctx.setdefault("iv_crush_summary", "")
 
             # 2. 加载外部 catalysts.json（S13：覆盖全部 WATCHLIST 标的）
             _catalysts_json_loaded = False
@@ -342,8 +343,8 @@ class ChronosBeeHorizon(BeeAgent):
                 details={
                     "catalysts": catalysts_found[:5],
                     "analyst_targets": _analyst_info or {},
-                    "iv_crush": ctx.get("iv_crush", {}),
-                    "iv_crush_summary": ctx.get("iv_crush_summary", ""),
+                    "iv_crush": _iv_crush_data,
+                    "iv_crush_summary": _iv_crush_summary,
                 },
             ).to_dict()
 
