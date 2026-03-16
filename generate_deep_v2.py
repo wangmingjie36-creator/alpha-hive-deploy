@@ -633,10 +633,11 @@ Buzz {fmt_score(ctx['buzz'].get('score'))} | Chronos {fmt_score(ctx['chronos'].g
 Guard {fmt_score(ctx['guard'].get('score'))} | Bear {fmt_score(ctx['bear'].get('score'))} 信号:{', '.join(ctx['bear_signals'][:2])}{_delta_block}{_conflict_block}{_live_news_block}
 完成结构化预分析（严格按格式，无HTML）：""",
 
-        "resonance": f"""分析 {ticker} 蜂群共振信号：
-共振检测:{res.get('resonance_detected')} | 方向:{res.get('direction','N/A')} | 维度:{', '.join(res_dims)}
-支持Agent:{res.get('supporting_agents',0)} | 置信度提升:+{res.get('confidence_boost',0)}% | 期权流:{ctx['flow_direction']}
-ML 7d:{ctx['ml_7d']:+.1f}% | 30d:{ctx['ml_30d']:+.1f}%
+        "resonance": f"""分析 {ticker} 蜂群共振信号质量：
+共振检测:{res.get('resonance_detected')} | 方向:{res.get('direction','N/A')} | 维度:{', '.join(res_dims) if res_dims else '无'}
+支持Agent:{res.get('supporting_agents',0)}/7 | 置信度提升:+{res.get('confidence_boost',0)}%
+Scout:{fmt_score(ctx['scout'].get('score'))} Rival:{fmt_score(ctx['rival'].get('score'))} Buzz:{fmt_score(ctx['buzz'].get('score'))} Chronos:{fmt_score(ctx['chronos'].get('score'))} Oracle:{fmt_score(ctx['oracle'].get('score'))} Guard:{fmt_score(ctx['guard'].get('score'))} Bear:{fmt_score(ctx['bear'].get('score'))}
+期权流:{ctx['flow_direction']} | ML 7d:{ctx['ml_7d']:+.1f}% | 30d:{ctx['ml_30d']:+.1f}%
 完成结构化预分析（严格按格式，无HTML）：""",
 
         "catalyst": f"""分析 {ticker} 催化剂时间线（{len(ctx['catalysts'])}个）：
@@ -686,16 +687,25 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 若有实时新闻数据，请在分析中引用1-2条最相关的头条作为信号佐证。""",
 
         "resonance": f"""
-分析 {ticker} 的蜂群共振机制：
-- 共振检测: {res.get('resonance_detected', False)}
-- 共振方向: {res.get('direction', 'N/A')}
-- 共振维度: {', '.join(res_dims)}
-- 支持Agent数量: {res.get('supporting_agents', 0)}
-- 置信度提升: +{res.get('confidence_boost', 0)}%
-- ML 7日预期: {ctx['ml_7d']:+.1f}%，30日: {ctx['ml_30d']:+.1f}%
-- 期权流方向: {ctx['flow_direction']}
+分析 {ticker} 的蜂群共振机制与信号质量：
 
-生成2段分析，解释共振机制原理及本次共振信号的含义和有效性。输出两段 HTML <p> 标签，使用强调标签。""",
+【共振状态】
+- 共振检测: {res.get('resonance_detected', False)} | 方向: {res.get('direction', 'N/A')} | 置信度提升: +{res.get('confidence_boost', 0)}%
+- 共振维度: {', '.join(res_dims) if res_dims else '无触发维度'} | 支持Agent: {res.get('supporting_agents', 0)}/7
+
+【七蜂评分参照（用于判断哪些蜂构成共振）】
+- Scout(基本面) {fmt_score(ctx['scout'].get('score'))} | Rival(ML) {fmt_score(ctx['rival'].get('score'))} | Buzz(情绪) {fmt_score(ctx['buzz'].get('score'))}
+- Chronos(催化剂) {fmt_score(ctx['chronos'].get('score'))} | Oracle(期权) {fmt_score(ctx['oracle'].get('score'))} | Guard(宏观) {fmt_score(ctx['guard'].get('score'))} | Bear(逆向) {fmt_score(ctx['bear'].get('score'))}
+
+- ML 7日预期: {ctx['ml_7d']:+.1f}% | 30日: {ctx['ml_30d']:+.1f}% | 期权流: {ctx['flow_direction']}
+- 综合评分: {score}/10，方向: {direction}
+{_master_block}{_conflict_block}{_delta_block}
+
+生成2段深度分析：
+第一段：解释共振维度为何触发——这些维度背后的数据说明了什么市场逻辑？共振是否具有质量（支持Agent≥4为强共振）还是偏脆弱（≤2个Agent支持）？哪些蜂的评分与共振方向最一致？哪些蜂构成了潜在的反向张力？
+第二段：共振与整体论点的关系——共振方向是否强化或质疑了蜂群整体论点？共振的"失效条件"是什么——哪个关键维度一旦反转会打破当前共振结构？结合昨日对比（如有）说明共振强度变化趋势。
+输出两段 HTML <p> 标签，使用 <strong>、<span class="bull-text">、<span class="bear-text">、<span class="highlight"> 进行关键词标注。
+若检测到信号矛盾，必须在分析中明确指出共振方向与矛盾信号之间的张力及权衡判断。""",
 
         "catalyst": f"""
 分析 {ticker} 的催化剂时间线：
@@ -732,14 +742,21 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 
         "scenario": f"""
 为 {ticker} 补充情景推演叙事（情景卡片数据已由蜂群分析生成，**禁止重复输出表格或情景列表**）：
-- 当前价格: {'$'+str(ctx['price']) if ctx['price'] else '市价'}，评分: {score}/10，方向: {direction}
-- ML 7日预期: {ctx['ml_7d']:+.1f}%，催化剂 {len(ctx['catalysts'])} 个，风险信号: {', '.join(ctx['bear_signals'][:2])}
-{_master_block}
+
+【当前量化基础】
+- 价格: {'$'+str(ctx['price']) if ctx['price'] else '市价'} | 评分: {score}/10 | 方向: {direction}
+- ML 7日预期: {ctx['ml_7d']:+.1f}% | 30日: {ctx['ml_30d']:+.1f}%
+- 最大阻力: ${ctx['key_levels'].get('resistance',[{}])[0].get('strike','N/A') if ctx['key_levels'].get('resistance') else 'N/A'}
+- 最大支撑: ${ctx['key_levels'].get('support',[{}])[0].get('strike','N/A') if ctx['key_levels'].get('support') else 'N/A'}
+- 最近催化剂: {(ctx['catalysts'][0].get('event','无') + '（' + str(ctx['catalysts'][0].get('days_until','?')) + '天后）') if ctx['catalysts'] else '无'}
+- IV当前: {ctx['iv_current']:.1f}% | F&G: {ctx['fg_score'] if ctx['fg_score'] else '未知'} | 期权流: {ctx['flow_direction']}
+- 全部风险信号: {', '.join(ctx['bear_signals']) or '无'}{_master_block}{_delta_block}
 
 输出两段 HTML <p> 标签：
-第一段：核心交易逻辑——情景概率分布为何如此设置，最关键的驱动变量，与蜂群整体论点的关系。
-第二段：入场思路——分批建仓时机、仓位管理建议、论点失效信号（何时应离场）。
-用 <strong> 强调关键数字和价位。""",
+第一段：情景概率分布的内在逻辑——基准/乐观/悲观情景各自被哪些具体数据驱动？ML预期与期权市场隐含方向是否形成共鸣或分歧？催化剂时间窗口如何影响短期3-5天的概率分布（区分短期与7日/30日预期的差异）？
+第二段：交易执行框架——分批建仓的具体触发条件（价格/信号触发点）、仓位管理逻辑、以及**论点失效信号**（必须给出具体数值阈值：价格/IV/P-C等，触及时应立即离场的判断依据）。
+用 <strong> 强调关键数字和价位，用 <span class="bull-text">/<span class="bear-text"> 标注正负预期。
+若有昨日对比，请说明预期方向较昨日是否发生了实质性变化。""",
 
         "risk": f"""
 为 {ticker} 深度推理风险格局，生成带 HIGH/MED/LOW 级别标注的风险卡片（规则引擎已生成基础卡片，你的任务是生成**推理层**卡片，内容必须包含因果链分析、数据间的放大效应、具体失效阈值）：
