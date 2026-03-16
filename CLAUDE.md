@@ -1,0 +1,78 @@
+# Alpha Hive — Claude 工作记忆
+
+## 用户偏好
+
+- **报告生成模式**：本地推理（`--no-llm`），不使用 Claude API Key
+  - `generate_deep_v2.py` 默认跑本地叙事（`_local_fallback`），无需 `ANTHROPIC_API_KEY`
+  - 不要添加"未找到 API Key"警告或提示创建 key 文件
+  - 不要自动搜索 `.anthropic_api_key` 文件路径
+
+- **图表**：已嵌入 `chart_engine.py`，matplotlib 已安装在用户 Mac
+
+## 版本历史规则
+
+- **每次 session 结束前必须更新 `CHANGELOG.md`**
+- 格式：`Added` / `Changed` / `Fixed` / `Removed`，注明文件名和改动摘要
+- 版本号：patch（0.x.y+1）= bug fix；minor（0.x+1.0）= 新功能批次
+
+## 已完成的重要改动（勿重复添加）
+
+### generate_deep_v2.py
+- `_try_charts(ctx)` — 生成置信区间图 + 期权水位图，base64 嵌入 HTML
+- `_try_compute_gex(ctx)` — 报告生成阶段补算 Dealer GEX（当 JSON 里 `dealer_gex` 缺失时）
+- `ctx["_raw_data"] = data` — 原始 JSON 注入给 chart_engine 使用
+- CH1 嵌入置信区间图，CH4 嵌入期权水位图
+- `extract_simple()` — 覆盖全部 7 只蜂（含 BearBeeContrarian）
+- OI 日环比 Delta — `oi_delta` / `oi_delta_pct`，对比昨日 JSON，CH4 显示 ▲▼
+- **自学习 Gap 1** `_save_report_snapshot()` — 报告写完后保存 ReportSnapshot，供 feedback_loop T+7 回溯
+- **自学习 Gap 2** `_run_outcome_backfill()` — 启动时运行 OutcomesFetcher，回填历史 T+1/T+7/T+30 价格
+- **自学习 Gap 3** `_load_ticker_accuracy()` + `_render_accuracy_card()` — CH1 显示历史胜率卡片
+- `generate_html()` 新增 `accuracy_html` 参数
+- **CH4 IV 期限结构卡片** — `iv_term_html`，从 OracleBeeEcho details 提取，6卡 grid 下方渲染
+  - 形态配色：Contango（绿）/ Backwardation（红）/ Flat（金）；无数据静默不渲染
+
+### chart_engine.py（新文件）
+- `render_confidence_chart(data, ticker, date_str)` → base64 PNG
+- `render_options_chart(data, ticker, date_str, current_price)` → base64 PNG
+- 使用 `matplotlib.use("Agg")` 非交互后端，安全嵌入 HTML
+
+### advanced_analyzer.py
+- 新增 `DealerGEXAnalyzer` 类（BS gamma 计算真实 GEX）
+- `run_analysis()` 里 step 6 计算并存储 `analysis["dealer_gex"]`
+
+### swarm_agents/bear_bee.py
+- 新增 `_assess_short_interest()` 维度，权重 `"short_int": 0.18`
+- `si_pct = si_raw * 100.0 if si_raw <= 1.0 else float(si_raw)` — 处理 yfinance 0-1 小数
+
+### swarm_agents/scout_bee.py
+- 新增 `_assess_sector_relative_strength()` 维度
+- `discovery` 拼接用 `f"{discovery} | {rs_text}"`（非 `parts.append`）
+
+### swarm_agents/rival_bee.py
+- 新增 `_assess_eps_revision()` 维度
+- `elif rec_mean >= 4.2` 在 `>= 3.5` 之前（死代码 bug 已修）
+
+### options_analyzer.py
+- 新增 `calculate_iv_term_structure()` 方法（S15）
+- 输出 `iv_term_structure` 字段存入 OptionsAgent 结果 dict
+- `iv_term_structure` 通过 `oracle_bee → details` 传递至报告层
+
+### fred_macro.py
+- 新增 HY Spread 信号（BAMLH0A0HYM2），`limit=2` 取日环比，pct→bp `*100`
+- 三档评分阈值：>600 / >400 / >300bp；末尾 `max(1.0, min(10.0, score))` clamp
+
+### weekly_optimizer.py（新文件）
+- Track A 自动权重优化器，每周日 02:00 运行（定时任务已创建）
+- 从 report_snapshots 读 T+7 回测 → `suggest_weight_adjustments()` → clamp ±10pp → 原子写入 config.py
+- `weight_history.jsonl` 审计日志
+
+### self_analyst.py（新文件）
+- Track B 月度自我诊断，每月 1 日 03:00 运行（定时任务已创建）
+- 生成 `self_analysis_briefs/YYYY-MM.md`，无需 API Key，供 Cowork Claude 阅读分析
+
+## 已知问题 / 注意事项
+
+- `realtime_metrics` 在部分 JSON 里是空字典 `{}`，导致 `current_price = 0`
+  - 修复：`_try_compute_gex` 在报告生成时用 Scout 价格补算
+- GEX 在 Cowork VM 里用样本数据（yfinance 无法联网），在用户 Mac 上用真实数据
+- `BearBeeContrarian` 不在 `feedback_loop.calculate_agent_contribution()` 的 5 维映射中——设计如此，Bear 是元蜂不直接对应评估维度

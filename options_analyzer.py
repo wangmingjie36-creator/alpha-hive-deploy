@@ -119,7 +119,7 @@ class OptionsDataFetcher:
         except (OSError, TypeError, ValueError):
             pass
 
-    def fetch_options_chain(self, ticker: str) -> Dict:
+    def fetch_options_chain(self, ticker: str, stock_price: float = 0.0) -> Dict:
         """获取期权链数据 - 支持多源降级（yfinance > 样本数据）"""
         # 尝试读取缓存
         cached = self._read_cache(ticker, "chain")
@@ -244,6 +244,42 @@ class OptionsDataFetcher:
                     raw_weights = [1.0 / (d ** 0.5) for d in dte_values]
                     max_w = max(raw_weights) if raw_weights else 1.0
                     df["dte_weight"] = [w / max_w for w in raw_weights]
+
+            # ── 注入 BS gamma（yfinance 不返回 Greeks）──────────────
+            # 用 Black-Scholes 为每份合约计算 gamma，填入 "gamma" 字段
+            # 供下游 calculate_gamma_exposure() 使用
+            _BS_RISK_FREE = 0.045  # 参考无风险利率
+
+            def _bs_gamma_inline(S: float, K: float, T: float, sigma: float) -> float:
+                if S <= 0 or K <= 0 or T <= 1e-6 or sigma < 0.01:
+                    return 0.0
+                try:
+                    d1 = (_math.log(S / K) + (_BS_RISK_FREE + 0.5 * sigma ** 2) * T) / (sigma * _math.sqrt(T))
+                    return _math.exp(-0.5 * d1 * d1) / (_math.sqrt(2 * _math.pi) * S * sigma * _math.sqrt(T))
+                except (ValueError, ZeroDivisionError):
+                    return 0.0
+
+            # 估算股价：先用传入参数，无则从最大 OI 行权价中值推断
+            _S = stock_price or 0.0
+            if _S <= 0 and calls_df is not None and not calls_df.empty:
+                _atm_candidates = calls_df[calls_df["openInterest"] > 50]["strike"].tolist() if "openInterest" in calls_df.columns else []
+                _S = float(statistics.median(_atm_candidates)) if _atm_candidates else 0.0
+            for df in [calls_df, puts_df]:
+                if df is None or df.empty or _S <= 0:
+                    continue
+                gammas = []
+                for _, row in df.iterrows():
+                    raw_g = row.get("gamma", 0.0) if "gamma" in df.columns else 0.0
+                    if raw_g and raw_g != 0.0:
+                        gammas.append(float(raw_g))
+                        continue
+                    K     = float(row.get("strike", 0) or 0)
+                    dte   = float(row.get("dte", 30) or 30)
+                    sigma = float(row.get("impliedVolatility", 0) or 0)
+                    T     = max(dte, 0.5) / 365.0
+                    gammas.append(_bs_gamma_inline(_S, K, T, sigma))
+                df["gamma"] = gammas
+            # ── /BS gamma 注入 ────────────────────────────────────
 
             result = {
                 "ticker": ticker,
@@ -721,6 +757,109 @@ class OptionsAnalyzer:
             "otm_call_iv": round(avg_call_iv * 100, 2),
         }
 
+    def calculate_iv_term_structure(
+        self, ticker: str, stock_price: float
+    ) -> Dict:
+        """计算个股 IV 期限结构：逐到期日取 ATM IV，判断 Contango/Backwardation。
+
+        Contango  (正向期限结构): 近期 IV < 远期 IV → 正常，市场无即时恐慌
+        Backwardation (倒挂):    近期 IV > 远期 IV → 市场担忧短期事件（财报/催化剂）
+
+        Returns:
+            {
+              "term_structure": [{"expiry": str, "dte": int, "atm_iv": float}, ...],
+              "shape": "contango"|"backwardation"|"flat"|"unknown",
+              "front_iv": float|None,    # 最近 expiry ATM IV (%)
+              "back_iv": float|None,     # 较远 expiry ATM IV (%)
+              "iv_spread": float|None,   # back_iv - front_iv (pp), >0 = contango
+              "signal": str,
+            }
+        """
+        result: Dict = {"shape": "unknown", "term_structure": [], "signal": "IV期限结构数据不足"}
+        if yf is None or stock_price <= 0:
+            return result
+        try:
+            import math
+            stock_obj = yf.Ticker(ticker)
+            if not hasattr(stock_obj, "options") or not stock_obj.options:
+                return result
+
+            today_dt = datetime.now()
+            # 取 4 个跨度不同的到期日（尽量覆盖 30/60/90/180 DTE）
+            all_exps = list(stock_obj.options)
+            selected: List[str] = []
+            targets = [25, 55, 85, 150]   # 目标 DTE
+            for tgt in targets:
+                best = min(
+                    (e for e in all_exps if (datetime.strptime(e, "%Y-%m-%d") - today_dt).days >= tgt - 10),
+                    key=lambda e: abs((datetime.strptime(e, "%Y-%m-%d") - today_dt).days - tgt),
+                    default=None
+                )
+                if best and best not in selected:
+                    selected.append(best)
+            if not selected:
+                selected = all_exps[:4]
+
+            term_pts: List[Dict] = []
+            atm_tol = stock_price * 0.04   # ±4% ATM 容差
+
+            for exp in selected:
+                try:
+                    chain = stock_obj.option_chain(exp)
+                    dte = (datetime.strptime(exp, "%Y-%m-%d") - today_dt).days
+                    # ATM call IV（最接近股价的行权价）
+                    calls_list = chain.calls.to_dict("records") if chain.calls is not None else []
+                    ivs = []
+                    for c in calls_list:
+                        k = c.get("strike", 0)
+                        iv_raw = c.get("impliedVolatility", 0)
+                        if (abs(k - stock_price) <= atm_tol
+                                and iv_raw and math.isfinite(iv_raw) and 0.02 < iv_raw < 2.0):
+                            ivs.append(float(iv_raw) * 100)
+                    if ivs:
+                        term_pts.append({
+                            "expiry": exp,
+                            "dte":    dte,
+                            "atm_iv": round(sum(ivs) / len(ivs), 1),
+                        })
+                except Exception:
+                    continue
+
+            if len(term_pts) < 2:
+                result["term_structure"] = term_pts
+                return result
+
+            result["term_structure"] = term_pts
+            front_iv = term_pts[0]["atm_iv"]
+            back_iv  = term_pts[-1]["atm_iv"]
+            iv_spread = round(back_iv - front_iv, 1)
+            result["front_iv"]  = front_iv
+            result["back_iv"]   = back_iv
+            result["iv_spread"] = iv_spread
+
+            if iv_spread >= 3.0:
+                result["shape"] = "contango"
+                result["signal"] = (
+                    f"IV期限结构正向（前端{front_iv:.1f}% → 远端{back_iv:.1f}%，"
+                    f"+{iv_spread:.1f}pp），市场无短期恐慌，IV低廉适合方向性买权"
+                )
+            elif iv_spread <= -3.0:
+                result["shape"] = "backwardation"
+                result["signal"] = (
+                    f"IV期限结构倒挂（前端{front_iv:.1f}% > 远端{back_iv:.1f}%，"
+                    f"{iv_spread:.1f}pp），短期事件溢价偏高（财报/催化剂），卖短期权占优"
+                )
+            else:
+                result["shape"] = "flat"
+                result["signal"] = (
+                    f"IV期限结构平坦（前端{front_iv:.1f}% / 远端{back_iv:.1f}%，"
+                    f"利差{iv_spread:+.1f}pp），无明显方向性时间价值信号"
+                )
+
+        except Exception as e:
+            _log.debug("IV term structure unavailable for %s: %s", ticker, e)
+        return result
+
     def detect_unusual_activity(
         self, calls_df: List[Dict], puts_df: List[Dict]
     ) -> List[Dict]:
@@ -1080,6 +1219,9 @@ class OptionsAgent:
         # S14: IV Skew 分析
         iv_skew = self.analyzer.calculate_iv_skew(calls_df, puts_df, stock_price)
 
+        # S15: IV 期限结构（个股 term structure）
+        iv_term_struct = self.analyzer.calculate_iv_term_structure(ticker, stock_price)
+
         # 4. 生成综合评分
         options_score, signal_summary = self.analyzer.generate_options_score(
             iv_rank, put_call_ratio, gex, unusual_activity
@@ -1134,6 +1276,8 @@ class OptionsAgent:
             "iv_skew_ratio": iv_skew.get("skew_ratio"),
             "iv_skew_signal": iv_skew.get("skew_signal", ""),
             "iv_skew_detail": iv_skew,
+            # S15: IV 期限结构
+            "iv_term_structure": iv_term_struct,
         }
 
         # 方案21: 出口消毒 — 遍历结果 dict，NaN/Inf → 安全默认值

@@ -394,6 +394,7 @@ class SlackReportNotifier:
         if not report:
             raise FileNotFoundError(f"无法加载报告: {report_json_path}")
 
+        project_dir = os.path.dirname(os.path.abspath(report_json_path))
         date_str = report.get("date", datetime.now().strftime("%Y-%m-%d"))
         opps = sorted(
             report.get("opportunities", []),
@@ -416,12 +417,32 @@ class SlackReportNotifier:
             extras: Dict[str, Any] = {}
 
             # 价格 / 5d 变动
+            # 优先从扫描时写入的 analysis-{ticker}-ml-{date}.json 读取实时价格
+            # （避免 metrics 凌晨快照价格过时；ScoutBeeNova 在扫描时拉取真实价格）
+            analysis_json = self._load_json(
+                os.path.join(project_dir, f"analysis-{ticker}-ml-{date_str}.json")
+            )
+            if analysis_json:
+                _scout_price = (
+                    analysis_json.get("swarm_results", {})
+                    .get("agent_details", {})
+                    .get("ScoutBeeNova", {})
+                    .get("details", {})
+                    .get("price")
+                )
+                if _scout_price:
+                    extras["price"] = _scout_price
+            # {ticker}_raw.json 仅在手动 collect_data.py 运行时生成，优先级高于 analysis
+            raw_json = self._load_json(os.path.join(project_dir, f"{ticker}_raw.json"))
+            if raw_json and raw_json.get("price"):
+                extras["price"] = raw_json["price"]
             metrics = self._load_json(
                 os.path.join(cache_dir, f"metrics_{ticker}_{date_str}.json")
             )
             if metrics:
                 yf = metrics.get("sources", {}).get("yahoo_finance", {})
-                extras["price"] = yf.get("current_price")
+                if not extras.get("price"):
+                    extras["price"] = yf.get("current_price")
                 extras["chg_5d"] = yf.get("price_change_5d")
 
             # 社交情绪

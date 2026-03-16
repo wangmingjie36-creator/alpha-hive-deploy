@@ -384,6 +384,55 @@ class BearBeeContrarian(BeeAgent):
                 bearish_signals.append(f"GuardBee检测到重大冲突: {conflict}")
         return guard_bear
 
+    def _assess_short_interest(self, ticker: str,
+                               bearish_signals: List[str],
+                               data_sources: Dict[str, str]) -> tuple:
+        """评估空头仓位（Short Interest % of Float + Days to Cover）。
+        返回 (short_bear, si_data)。
+
+        高空头仓位 + 负动量 = 机构做空确认
+        高空头仓位 + 正动量 = 轧空风险（在 bearish_signals 中注明）
+        """
+        short_bear = 0.0
+        si_data: Dict[str, Any] = {}
+        try:
+            import yfinance as yf
+            info = yf.Ticker(ticker).info
+            si_raw = info.get("shortPercentOfFloat")   # yfinance 返回 0-1 的小数
+            dtc    = info.get("shortRatio")             # Days to Cover (float)
+
+            if si_raw is not None:
+                # 统一转为百分比
+                si_pct = si_raw * 100.0 if si_raw <= 1.0 else float(si_raw)
+                si_data["short_pct_float"] = round(si_pct, 1)
+                si_data["days_to_cover"]   = round(dtc, 1) if dtc else None
+                data_sources["short_interest"] = "yfinance"
+
+                if si_pct >= 20:
+                    short_bear = 7.5
+                    bearish_signals.append(
+                        f"空头仓位极高 {si_pct:.1f}%浮筹（机构重仓做空，做空压力大）")
+                elif si_pct >= 15:
+                    short_bear = 6.0
+                    bearish_signals.append(
+                        f"空头仓位偏高 {si_pct:.1f}%浮筹")
+                elif si_pct >= 10:
+                    short_bear = 4.0
+                    bearish_signals.append(
+                        f"空头仓位 {si_pct:.1f}%浮筹（有一定做空压力）")
+
+                if dtc and dtc > 10:
+                    short_bear = max(short_bear, 6.0)
+                    bearish_signals.append(f"回补天数 {dtc:.1f}天（做空拥挤）")
+                elif dtc and dtc > 5:
+                    short_bear = max(short_bear, 4.5)
+                    bearish_signals.append(f"回补天数 {dtc:.1f}天")
+
+        except (*NETWORK_ERRORS, AttributeError, KeyError, TypeError, ValueError) as e:
+            _log.debug("BearBeeContrarian short interest unavailable for %s: %s", ticker, e)
+            data_sources["short_interest"] = "unavailable"
+        return short_bear, si_data
+
     # ---------- scoring + LLM helpers ----------
 
     def _compute_bear_score(self, dim_scores: Dict[str, float],
@@ -397,7 +446,7 @@ class BearBeeContrarian(BeeAgent):
 
         _weights = {"insider": 0.25, "valuation": 0.20, "options": 0.25,
                     "momentum": 0.15, "news": 0.15, "chronos": 0.10,
-                    "ml": 0.08, "guard": 0.07}
+                    "ml": 0.08, "guard": 0.07, "short_int": 0.18}
         _active_dims = [(k, v, _weights[k]) for k, v in dim_scores.items()
                         if v > 0 and k in _weights]
 
@@ -518,12 +567,16 @@ class BearBeeContrarian(BeeAgent):
             guard_bear = self._assess_signal_consistency(
                 ticker, bearish_signals, data_sources)
 
+            # ===== 9. 空头仓位分析 =====
+            short_bear, si_data = self._assess_short_interest(
+                ticker, bearish_signals, data_sources)
+
             # ===== 综合看空评分 =====
             dim_scores = {
                 "insider": insider_bear, "valuation": overval_bear,
                 "options": options_bear, "momentum": momentum_bear,
                 "news": news_bear, "chronos": chronos_bear,
-                "ml": ml_bear, "guard": guard_bear,
+                "ml": ml_bear, "guard": guard_bear, "short_int": short_bear,
             }
             rule_bear_score = self._compute_bear_score(
                 dim_scores, bearish_signals, price, mom_5d)
@@ -596,6 +649,8 @@ class BearBeeContrarian(BeeAgent):
                     "options_bear": round(options_bear, 1),
                     "momentum_bear": round(momentum_bear, 1),
                     "news_bear": round(news_bear, 1),
+                    "short_int_bear": round(short_bear, 1),
+                    "short_interest": si_data,
                     "data_sources": data_sources,
                 },
                 extras={

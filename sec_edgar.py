@@ -307,6 +307,8 @@ class SECEdgarClient:
             "price": 0.0,
             "acquired_disposed": "",  # A=获得, D=处置
             "is_derivative": is_derivative,
+            "post_transaction_shares": None,  # 交易后剩余持股数
+            "pct_of_holding_sold": None,      # 本次卖出占总持仓 %
         }
 
         # 证券名称
@@ -344,6 +346,27 @@ class SECEdgarClient:
         ad_code = txn_elem.find(".//transactionAcquiredDisposedCode/value")
         if ad_code is not None and ad_code.text:
             t["acquired_disposed"] = ad_code.text
+
+        # ── 交易后持仓（postTransactionAmounts）──────────────────────────
+        # 非衍生品：sharesOwnedFollowingTransaction
+        # 衍生品：derivativeSecuritiesOwnedFollowingTransaction
+        _post_shares_path = (
+            ".//postTransactionAmounts/derivativeSecuritiesOwnedFollowingTransaction/value"
+            if is_derivative
+            else ".//postTransactionAmounts/sharesOwnedFollowingTransaction/value"
+        )
+        post_elem = txn_elem.find(_post_shares_path)
+        if post_elem is not None and post_elem.text:
+            try:
+                post_shares = float(post_elem.text)
+                t["post_transaction_shares"] = post_shares
+                # 计算卖出占比：只对卖出（D=处置）计算
+                if t["acquired_disposed"] == "D" and t["shares"] > 0 and post_shares >= 0:
+                    total_before = post_shares + t["shares"]
+                    if total_before > 0:
+                        t["pct_of_holding_sold"] = round(t["shares"] / total_before * 100, 1)
+            except ValueError:
+                pass
 
         return t
 
@@ -422,6 +445,8 @@ class SECEdgarClient:
                 # 记录重要交易（>$100K 或 >10000 股）
                 total_value = shares * price
                 if total_value > 100000 or shares > 10000 or code == "P":
+                    _pct_sold = txn.get("pct_of_holding_sold")
+                    _post_shares = txn.get("post_transaction_shares")
                     notable_trades.append({
                         "insider": parsed.get("insider_name", "Unknown"),
                         "title": parsed.get("insider_title", ""),
@@ -434,6 +459,15 @@ class SECEdgarClient:
                         "date": txn.get("date", filing.get("filingDate", "")),
                         "total_value": round(total_value, 2),
                         "security": txn.get("security", "Common Stock"),
+                        # ── 新增：持仓严重性字段 ──────────────────────
+                        "post_transaction_shares": _post_shares,
+                        "pct_of_holding_sold": _pct_sold,
+                        # 严重性等级：>50% 卖出为 critical，>20% 为 high，其他为 normal
+                        "severity": (
+                            "critical" if _pct_sold and _pct_sold >= 50 else
+                            "high"     if _pct_sold and _pct_sold >= 20 else
+                            "normal"
+                        ),
                     })
 
         # 计算情绪
@@ -455,6 +489,22 @@ class SECEdgarClient:
         if officer_buys:
             score = min(10.0, score + len(officer_buys) * 1.0)
             sentiment = "bullish"
+
+        # ── 持仓占比加权：大比例卖出（≥20%）进一步压低评分 ──────────────
+        _heavy_sells = [
+            t for t in notable_trades
+            if t.get("pct_of_holding_sold") and t["pct_of_holding_sold"] >= 20
+            and t.get("is_officer")
+        ]
+        if _heavy_sells:
+            _max_pct = max(t["pct_of_holding_sold"] for t in _heavy_sells)
+            _penalty = min(2.0, _max_pct / 25.0)   # 每卖出25%持仓扣1分，最多扣2分
+            score = max(1.0, score - _penalty)
+            sentiment = "bearish"
+            _log.info(
+                "高管大比例卖出检测：最高 %.1f%% 持仓处置，评分额外下调 -%.1f",
+                _max_pct, _penalty
+            )
 
         # ── 去重：同人同日同类型交易合并（避免修正申报 Form4/A 重复计算）──
         if notable_trades:

@@ -143,6 +143,21 @@ class GuardBeeSentinel(BeeAgent):
             except LLM_ERRORS as e:
                 _log.debug("P5 fred_macro 不可用 %s: %s", ticker, e)
 
+            # ── P5f: VIX 期限结构（月期权关键信号）─────────────────────────────────
+            vix_term = {}
+            try:
+                from vix_term_structure import get_vix_term_structure, format_vix_term_summary
+                vix_term = get_vix_term_structure()
+                structure = vix_term.get("structure", "")
+                if structure == "backwardation":
+                    score = clamp_score(score - 0.6)
+                    discovery = f"{discovery} | ⚠️ VIX Backwardation（恐慌结构）"
+                elif structure == "steep_contango":
+                    score = clamp_score(score + 0.2)
+                    discovery = f"{discovery} | VIX 深度Contango（平静结构）"
+            except Exception as e:
+                _log.debug("P5f vix_term_structure 不可用: %s", e)
+
             # ── P1: LLM 冲突合成（识别哪种矛盾更危险，规则引擎只看一致性百分比）──
             llm_guard = None
             try:
@@ -212,6 +227,9 @@ class GuardBeeSentinel(BeeAgent):
                     "adjustment_factor": adj_factor,
                     "llm_conflict_type": llm_guard.get("conflict_type", "") if llm_guard else "",
                     "llm_recommended_action": llm_guard.get("recommended_action", "") if llm_guard else "",
+                    "vix_term_structure": vix_term,
+                    "macro_adj": macro_adj,
+                    "macro_desc": macro_desc,
                 },
             ).to_dict()
 

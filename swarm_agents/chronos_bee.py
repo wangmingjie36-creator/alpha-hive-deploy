@@ -155,6 +155,30 @@ class ChronosBeeHorizon(BeeAgent):
             except (*NETWORK_ERRORS, AttributeError) as e:
                 _log.debug("ChronosBeeHorizon analyst targets unavailable for %s: %s", ticker, e)
 
+            # 1c. IV Crush 历史数据（财报期权定价核心参考）
+            try:
+                import sys as _sys
+                import os as _os_iv
+                _hive_dir = _os_iv.path.dirname(_os_iv.path.dirname(__file__))
+                if _hive_dir not in _sys.path:
+                    _sys.path.insert(0, _hive_dir)
+                from iv_crush_scraper import get_iv_crush_data, format_iv_crush_summary
+                _iv_data = get_iv_crush_data(ticker)
+                ctx["iv_crush"] = _iv_data
+                ctx["iv_crush_summary"] = format_iv_crush_summary(_iv_data)
+                # 把 IV Crush 信息附加到财报催化剂（如已存在）
+                if _iv_data.get("avg_abs_move") and catalysts_found:
+                    for _c in catalysts_found:
+                        if _c.get("type") == "earnings":
+                            _c["iv_crush_avg_move"] = _iv_data["avg_abs_move"]
+                            _c["implied_move"] = _iv_data.get("current_implied_move")
+                            _c["beat_rate"] = _iv_data.get("historical_beat_rate")
+                            break
+            except Exception as _e_iv:
+                _log.debug("IV Crush unavailable for %s: %s", ticker, _e_iv)
+                ctx.setdefault("iv_crush", {})
+                ctx.setdefault("iv_crush_summary", "")
+
             # 2. 加载外部 catalysts.json（S13：覆盖全部 WATCHLIST 标的）
             _catalysts_json_loaded = False
             try:
@@ -318,6 +342,8 @@ class ChronosBeeHorizon(BeeAgent):
                 details={
                     "catalysts": catalysts_found[:5],
                     "analyst_targets": _analyst_info or {},
+                    "iv_crush": ctx.get("iv_crush", {}),
+                    "iv_crush_summary": ctx.get("iv_crush_summary", ""),
                 },
             ).to_dict()
 

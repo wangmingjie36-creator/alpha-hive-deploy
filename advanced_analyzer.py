@@ -5,8 +5,9 @@
 
 import logging as _logging
 import json
+import math
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import statistics
 
@@ -24,6 +25,230 @@ try:
 except ImportError:
     OPTIONS_AGENT_AVAILABLE = False
     OptionsAgent = None
+
+
+# ─────────────────────────────────────────────────────────────────
+#  Dealer GEX Analyzer
+#  yfinance 不返回 Greeks，用 Black-Scholes 自行计算每个 strike 的
+#  gamma，再聚合出 Notional GEX profile（单位：百万美元 gamma exposure）
+# ─────────────────────────────────────────────────────────────────
+
+def _norm_pdf(x: float) -> float:
+    """标准正态分布概率密度函数"""
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _norm_cdf(x: float) -> float:
+    """标准正态累积分布函数（Abramowitz & Stegun 近似，误差 < 7.5e-8）"""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def bs_gamma(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """
+    Black-Scholes gamma（call 和 put 的 gamma 相同）
+
+    Args:
+        S: 标的当前价格
+        K: 行权价
+        T: 到期年化时间（DTE / 365）
+        r: 无风险利率（年化，e.g. 0.045）
+        sigma: 隐含波动率（年化，e.g. 0.35 = 35%）
+
+    Returns:
+        gamma（每 $1 股价变动对应 delta 的变化量）
+        返回 0.0 表示参数无效
+    """
+    if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        return 0.0
+    try:
+        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+        return _norm_pdf(d1) / (S * sigma * math.sqrt(T))
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+
+
+class DealerGEXAnalyzer:
+    """
+    做市商 Gamma Exposure（GEX）分析器
+
+    做市商假设：
+      - 做市商持有 call 的对冲头寸 → long gamma（正 GEX）
+      - 做市商持有 put 的对冲头寸 → short gamma（负 GEX）
+      - 净 GEX = call_gex - put_gex
+
+    正 GEX：做市商需要"顺势对冲"（rally→卖，跌→买）→ 压制波动
+    负 GEX：做市商需要"顺方向追"（rally→买，跌→卖）→ 放大波动
+
+    GEX flip point：净 GEX = 0 的价格，波动从压制转放大的临界点
+    """
+
+    RISK_FREE_RATE = 0.045  # 美国10年期国债参考利率
+
+    def __init__(self):
+        try:
+            from options_analyzer import OptionsDataFetcher
+            self._fetcher = OptionsDataFetcher()
+        except ImportError:
+            self._fetcher = None
+
+    # ── 核心计算 ──────────────────────────────────────────────────
+
+    def _enrich_with_bs_gamma(
+        self, contracts: List[Dict], S: float, option_type: str
+    ) -> List[Dict]:
+        """
+        为每份合约注入 BS gamma（yfinance 不返回 gamma，需自行计算）
+        原始 gamma 字段非零时保留，等于 0 则用 BS 覆盖。
+        """
+        enriched = []
+        for c in contracts:
+            raw_gamma = c.get("gamma", 0.0) or 0.0
+            if raw_gamma != 0.0:
+                enriched.append(c)
+                continue
+
+            K     = float(c.get("strike", 0) or 0)
+            dte   = float(c.get("dte", 30) or 30)
+            sigma = float(c.get("impliedVolatility", 0) or 0)
+            T     = max(dte, 0.5) / 365.0  # 最小 0.5 天，避免超短期 gamma 爆炸
+
+            if K <= 0 or sigma < 0.01:
+                enriched.append(c)
+                continue
+
+            gamma = bs_gamma(S, K, T, self.RISK_FREE_RATE, sigma)
+            enriched.append({**c, "gamma": gamma, "gamma_source": "bs"})
+        return enriched
+
+    def _notional_gex_per_strike(
+        self, contracts: List[Dict], S: float, sign: float
+    ) -> Dict[float, float]:
+        """
+        按行权价聚合 Notional GEX（百万美元）
+
+        sign = +1 for calls（做市商 long gamma），-1 for puts（做市商 short gamma）
+
+        GEX(K) = sign × price × 100 × gamma × OI
+        """
+        gex_by_strike: Dict[float, float] = {}
+        for c in contracts:
+            K      = float(c.get("strike", 0) or 0)
+            gamma  = float(c.get("gamma", 0) or 0)
+            oi     = float(c.get("openInterest", 0) or 0)
+            if K <= 0 or gamma == 0 or oi == 0:
+                continue
+            notional = sign * S * 100 * gamma * oi / 1e6  # 百万美元
+            gex_by_strike[K] = gex_by_strike.get(K, 0.0) + notional
+        return gex_by_strike
+
+    def _find_gex_flip(
+        self, gex_profile: List[Dict], S: float
+    ) -> Optional[float]:
+        """
+        寻找 GEX flip point：净 GEX 从正变负（或负变正）的最近行权价
+        返回距离当前价最近的翻转行权价，无则返回 None
+        """
+        if len(gex_profile) < 2:
+            return None
+
+        # 取行权价升序
+        sorted_profile = sorted(gex_profile, key=lambda x: x["strike"])
+        prev_gex = sorted_profile[0]["net_gex"]
+        flip_strikes = []
+        for item in sorted_profile[1:]:
+            curr_gex = item["net_gex"]
+            if prev_gex * curr_gex < 0:  # 符号变化
+                flip_strikes.append(item["strike"])
+            prev_gex = curr_gex
+
+        if not flip_strikes:
+            return None
+        # 返回距当前价最近的 flip
+        return min(flip_strikes, key=lambda k: abs(k - S))
+
+    # ── 公开接口 ──────────────────────────────────────────────────
+
+    def analyze(self, ticker: str, stock_price: float) -> Dict:
+        """
+        返回完整 Dealer GEX 分析结果：
+          - total_gex: 全市场净 GEX（百万美元）
+          - gex_profile: 每个行权价的 call/put/net GEX 列表
+          - gex_flip: GEX flip point（价格稳定→放大的临界行权价）
+          - largest_call_wall: call GEX 最大的行权价（阻力）
+          - largest_put_wall: put GEX 绝对值最大的行权价（支撑）
+          - regime: "positive_gex"（压制波动）| "negative_gex"（放大波动）
+        """
+        if self._fetcher is None:
+            return {"error": "options_analyzer 未安装", "total_gex": 0.0}
+
+        try:
+            chain = self._fetcher.fetch_options_chain(ticker)
+        except Exception as e:
+            _log.warning("DealerGEX fetch_options_chain failed for %s: %s", ticker, e)
+            return {"error": str(e), "total_gex": 0.0}
+
+        calls_raw = chain.get("calls", [])
+        puts_raw  = chain.get("puts",  [])
+
+        if not calls_raw and not puts_raw:
+            return {"error": "期权链为空", "total_gex": 0.0}
+
+        S = stock_price
+        if S <= 0:
+            return {"error": "无效股价", "total_gex": 0.0}
+
+        # 注入 BS gamma
+        calls = self._enrich_with_bs_gamma(calls_raw, S, "call")
+        puts  = self._enrich_with_bs_gamma(puts_raw,  S, "put")
+
+        # 按 strike 聚合 GEX
+        call_gex = self._notional_gex_per_strike(calls, S, sign=+1.0)
+        put_gex  = self._notional_gex_per_strike(puts,  S, sign=-1.0)
+
+        # 合并所有行权价
+        all_strikes = sorted(set(call_gex.keys()) | set(put_gex.keys()))
+        profile = []
+        for K in all_strikes:
+            cg = call_gex.get(K, 0.0)
+            pg = put_gex.get(K, 0.0)
+            profile.append({
+                "strike":   K,
+                "call_gex": round(cg, 4),
+                "put_gex":  round(pg, 4),
+                "net_gex":  round(cg + pg, 4),
+            })
+
+        total_gex = round(sum(p["net_gex"] for p in profile), 4)
+
+        # GEX walls（最大吸引力行权价）
+        call_walls = sorted(profile, key=lambda x: x["call_gex"], reverse=True)
+        put_walls  = sorted(profile, key=lambda x: x["put_gex"])  # put_gex 是负数
+        largest_call_wall = call_walls[0]["strike"] if call_walls else None
+        largest_put_wall  = put_walls[0]["strike"]  if put_walls  else None
+
+        # GEX flip point
+        gex_flip = self._find_gex_flip(profile, S)
+
+        # 机制判断
+        regime = "positive_gex" if total_gex >= 0 else "negative_gex"
+
+        # 仅保留 ±20% 行权价区间的 profile（避免极端 OTM 噪音）
+        lo, hi = S * 0.80, S * 1.20
+        profile_near = [p for p in profile if lo <= p["strike"] <= hi]
+
+        return {
+            "ticker":            ticker,
+            "stock_price":       S,
+            "total_gex":         total_gex,
+            "regime":            regime,
+            "gex_flip":          gex_flip,
+            "largest_call_wall": largest_call_wall,
+            "largest_put_wall":  largest_put_wall,
+            "gex_profile":       profile_near,
+            "call_strikes":      len(call_gex),
+            "put_strikes":       len(put_gex),
+            "gamma_source":      "bs_computed",
+        }
 
 
 @dataclass
@@ -481,6 +706,7 @@ class AdvancedAnalyzer:
         self.comparator = IndustryComparator()
         self.history = HistoricalAnalyzer()
         self.probability = ProbabilityCalculator()
+        self.dealer_gex = DealerGEXAnalyzer()
 
     def generate_comprehensive_analysis(
         self, ticker: str, realtime_metrics: Dict
@@ -555,7 +781,7 @@ class AdvancedAnalyzer:
             ticker, analysis, crowding_pct, current_price
         )
 
-        # 5. 期权分析（新增）
+        # 5. 期权分析（OptionsAgent）
         if OPTIONS_AGENT_AVAILABLE and OptionsAgent is not None:
             try:
                 options_agent = OptionsAgent()
@@ -567,6 +793,24 @@ class AdvancedAnalyzer:
                 analysis["options_analysis"] = None
         else:
             analysis["options_analysis"] = None
+
+        # 6. Dealer GEX 分析（BS gamma 计算，真实期权链）
+        if current_price > 0:
+            try:
+                gex_result = self.dealer_gex.analyze(ticker, current_price)
+                analysis["dealer_gex"] = gex_result
+                _log.info(
+                    "%s Dealer GEX: %.2f M$ | regime=%s | flip=$%.1f",
+                    ticker,
+                    gex_result.get("total_gex", 0),
+                    gex_result.get("regime", "?"),
+                    gex_result.get("gex_flip") or 0,
+                )
+            except Exception as e:
+                _log.warning("Dealer GEX 分析失败 %s: %s", ticker, e)
+                analysis["dealer_gex"] = {"error": str(e), "total_gex": 0.0}
+        else:
+            analysis["dealer_gex"] = None
 
         return analysis
 

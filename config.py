@@ -81,7 +81,7 @@ API_KEYS = {
     "SEC_EDGAR": {
         "base_url": "https://www.sec.gov/cgi-bin",
         "headers": {
-            "User-Agent": "Mozilla/5.0 (compatible; AlphaHive/1.0)"
+            "User-Agent": "AlphaHive igg wangmingjie36@gmail.com"
         }
     },
 

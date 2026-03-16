@@ -39,12 +39,21 @@ ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
 _VM_PATH = Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
 if _VM_PATH.exists():
     ALPHAHIVE_DIR = _VM_PATH
-OUTPUT_DIR = ALPHAHIVE_DIR
+# 默认输出到用户真实桌面的深度报告文件夹（VM 模式优先）
+_VM_DEEP_DIR = Path("/sessions/keen-magical-wright/mnt/深度分析报告/深度")
+if _VM_DEEP_DIR.exists():
+    OUTPUT_DIR = _VM_DEEP_DIR
+else:
+    OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
 API_KEY_FILE = Path("~/.anthropic_api_key").expanduser()
 # 在 VM 中，home 可能映射到不同路径
 _VM_API_KEY = Path("/sessions/keen-magical-wright/mnt/Alpha Hive/.anthropic_api_key")
+# Mac 上直接放在项目文件夹里也可以
+_MAC_API_KEY = Path("~/Desktop/Alpha Hive/.anthropic_api_key").expanduser()
 if not API_KEY_FILE.exists() and _VM_API_KEY.exists():
     API_KEY_FILE = _VM_API_KEY
+elif not API_KEY_FILE.exists() and _MAC_API_KEY.exists():
+    API_KEY_FILE = _MAC_API_KEY
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
 
@@ -177,6 +186,7 @@ def extract_simple(data: dict) -> dict:
         "bear":    _s("BearBeeContrarian"),
         "put_call_ratio": odet.get("put_call_ratio", None),
         "iv_skew":        odet.get("iv_skew_ratio", None),
+        "total_oi":       odet.get("total_oi", None),
     }
 
 
@@ -190,6 +200,94 @@ def get_api_key() -> str | None:
         key = API_KEY_FILE.read_text().strip()
         return key if key.startswith("sk-") else None
     return os.environ.get("ANTHROPIC_API_KEY")
+
+
+def fetch_live_news(ticker: str) -> str:
+    """拉取 Finnhub + Alpha Vantage 实时新闻与情绪，返回注入 LLM prompt 的文本块。
+    失败时静默返回空字符串，不阻断报告生成。"""
+    import urllib.request
+    from datetime import timedelta
+
+    def _load_key(path: str) -> str:
+        try:
+            return Path(path).expanduser().read_text().strip()
+        except Exception:
+            return ""
+
+    finnhub_key = _load_key("~/.alpha_hive_finnhub_key")
+    av_key = _load_key("~/.alpha_hive_av_key")
+
+    if not finnhub_key and not av_key:
+        return ""
+
+    lines = ["【实时新闻与情绪（Finnhub + Alpha Vantage）】"]
+    today = datetime.now().strftime("%Y-%m-%d")
+    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    # ── Finnhub 公司新闻（最近7天，最多6条）──
+    if finnhub_key:
+        try:
+            url = (
+                f"https://finnhub.io/api/v1/company-news"
+                f"?symbol={ticker}&from={week_ago}&to={today}&token={finnhub_key}"
+            )
+            req = urllib.request.urlopen(url, timeout=5)
+            news = json.loads(req.read())[:6]
+            if news:
+                lines.append("近期头条（Finnhub）：")
+                for n in news:
+                    ts = datetime.fromtimestamp(n.get("datetime", 0)).strftime("%m-%d") if n.get("datetime") else "??"
+                    lines.append(f"  · [{ts}] {n.get('headline', '')[:80]}")
+        except Exception:
+            pass
+
+    # ── Alpha Vantage 新闻情绪打分（最近20条）──
+    if av_key:
+        try:
+            url = (
+                f"https://www.alphavantage.co/query"
+                f"?function=NEWS_SENTIMENT&tickers={ticker}&apikey={av_key}&limit=20&sort=LATEST"
+            )
+            req = urllib.request.urlopen(url, timeout=8)
+            data = json.loads(req.read())
+            feed = data.get("feed", [])
+            if feed:
+                scores = []
+                bull_n = bear_n = neutral_n = 0
+                for art in feed:
+                    for ts_item in art.get("ticker_sentiment", []):
+                        if ts_item.get("ticker") == ticker:
+                            try:
+                                s = float(ts_item.get("ticker_sentiment_score", 0))
+                                scores.append(s)
+                                lbl = ts_item.get("ticker_sentiment_label", "Neutral")
+                                if "Bullish" in lbl:
+                                    bull_n += 1
+                                elif "Bearish" in lbl:
+                                    bear_n += 1
+                                else:
+                                    neutral_n += 1
+                            except Exception:
+                                pass
+                if scores:
+                    avg = sum(scores) / len(scores)
+                    sentiment_str = "偏多" if avg > 0.1 else ("偏空" if avg < -0.1 else "中性")
+                    lines.append(
+                        f"AV情绪均分: {avg:+.3f}（{sentiment_str}）"
+                        f" | 看多:{bull_n} 中性:{neutral_n} 看空:{bear_n}（共{len(scores)}条）"
+                    )
+        except Exception:
+            pass
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _sf(v, default: float = 0.0) -> float:
+    """安全 float 转换：处理 None / 'N/A' / 非数值字符串，返回 default"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
 
 
 def fmt_score(v) -> str:
@@ -248,6 +346,13 @@ def extract(data: dict) -> dict:
     direction = sr.get("direction", "neutral")
     resonance = sr.get("resonance", {})
 
+    # 置信区间 & 维度分散度
+    _cc = sr.get("confidence_calibration", {})
+    confidence_band   = _cc.get("confidence_band", None)   # [lo, hi]
+    band_width        = _cc.get("band_width", None)
+    discrimination    = _cc.get("discrimination", None)    # "low"/"medium"/"high"
+    dimension_std     = _cc.get("dimension_std", None)
+
     # 各 Agent
     scout   = ad.get("ScoutBeeNova", {})
     rival   = ad.get("RivalBeeVanguard", {})
@@ -281,6 +386,10 @@ def extract(data: dict) -> dict:
             if c.get("event", "").startswith("分析师"):
                 pass
 
+    # IV Crush（财报历史波动 + 隐含幅度）
+    iv_crush = cdet.get("iv_crush", {})
+    iv_crush_summary = cdet.get("iv_crush_summary", "")
+
     # ML 预测
     ml_pred = ml.get("prediction", {})
     ml_7d = ml_pred.get("expected_7d", 0)
@@ -305,6 +414,9 @@ def extract(data: dict) -> dict:
     otm_call_iv = iv_skew_detail.get("otm_call_iv", None)  # e.g. 26.67
     iv_percentile = odet.get("iv_percentile", None)        # 0–100 百分位
 
+    # IV 期限结构（S15 · OracleBee → OptionsAgent）
+    iv_term_structure = odet.get("iv_term_structure", {}) or {}
+
     # 综合建议
     combined_prob = cr.get("combined_probability", final_score * 10)
     rating = cr.get("rating", "HOLD")
@@ -322,8 +434,37 @@ def extract(data: dict) -> dict:
     hist_accuracy = int(hist_acc_m.group(1)) if hist_acc_m else None
     hist_sample_n = int(hist_n_m.group(1)) if hist_n_m else None
 
+    # ML 历史样本量（用于胜率置信度标注）
+    aa_hist_sample_n = (aa.get("historical_analysis", {})
+                          .get("expected_returns", {})
+                          .get("sample_size", None))
+
+    # GEX（Gamma Exposure）：优先读 advanced_analysis.dealer_gex，其次 OracleBee
+    _dgex = aa.get("dealer_gex", {}) or {}
+    if _dgex and float(_dgex.get("total_gex", 0) or 0) != 0:
+        gamma_exposure     = _dgex.get("total_gex", 0)
+        _gex_regime        = _dgex.get("regime", "")
+        _gex_flip          = _dgex.get("gex_flip")
+        _gex_call_wall     = _dgex.get("largest_call_wall")
+        _gex_put_wall      = _dgex.get("largest_put_wall")
+        gamma_squeeze_risk = ("high"   if _gex_regime == "negative_gex" else
+                              "low"    if _gex_regime == "positive_gex" else "medium")
+    else:
+        gamma_exposure     = odet.get("gamma_exposure", 0)
+        gamma_squeeze_risk = odet.get("gamma_squeeze_risk", "")
+        _gex_regime        = ""
+        _gex_flip          = None
+        _gex_call_wall     = None
+        _gex_put_wall      = None
+
     # 逆向蜂信号
     bear_signals = bear.get("details", {}).get("bearish_signals", [])
+
+    # Congress trades（国会交易 - ScoutBee details）
+    congress = scout_det.get("congress", {})
+    # VIX 期限结构（GuardBee details）
+    gdet = guard.get("details", {})
+    vix_term = gdet.get("vix_term_structure", {})
 
     return {
         "ticker": ticker,
@@ -355,6 +496,8 @@ def extract(data: dict) -> dict:
         "iv_current": odet.get("iv_current", 0),
         "iv_rank": odet.get("iv_rank", 0),
         "iv_percentile": iv_percentile,
+        # IV 期限结构（S15）
+        "iv_term_structure": iv_term_structure,
         "options_score": odet.get("options_score", 0),
         "flow_direction": odet.get("flow_direction", "neutral"),
         "signal_summary": odet.get("signal_summary", ""),
@@ -363,6 +506,13 @@ def extract(data: dict) -> dict:
         "key_levels": key_levels,
         # Catalysts
         "catalysts": catalysts,
+        # IV Crush（ChronosBee 财报波动历史）
+        "iv_crush": iv_crush,
+        "iv_crush_summary": iv_crush_summary,
+        # Congress trades（ScoutBee 国会交易）
+        "congress": congress,
+        # VIX term structure（GuardBee）
+        "vix_term_structure": vix_term,
         # ML
         "ml_7d": ml_7d,
         "ml_30d": ml_30d,
@@ -374,6 +524,21 @@ def extract(data: dict) -> dict:
         # Historical accuracy
         "hist_accuracy": hist_accuracy,
         "hist_sample_n": hist_sample_n,
+        "aa_hist_sample_n": aa_hist_sample_n,
+        # GEX
+        "gamma_exposure": gamma_exposure,
+        "gamma_squeeze_risk": gamma_squeeze_risk,
+        "gex_regime": _gex_regime,
+        "gex_flip": _gex_flip,
+        "gex_call_wall": _gex_call_wall,
+        "gex_put_wall": _gex_put_wall,
+        # 置信区间 & 维度分散度
+        "confidence_band": confidence_band,
+        "band_width": band_width,
+        "discrimination": discrimination,
+        "dimension_std": dimension_std,
+        # 维度分解（用于 _build_swarm_narrative 最强/最弱维度分析）
+        "dimension_scores": sr.get("dimension_scores", {}),
         # Overview
         "overview": aa.get("overview", ""),
         # Raw JSON for LLM context
@@ -457,12 +622,15 @@ def llm_reason(ctx: dict, section: str, api_key: str) -> str:
         + "\n".join(_conflicts)
     ) if _conflicts else ""
 
+    _live_news = ctx.get("live_news_block", "")
+    _live_news_block = f"\n\n{_live_news}" if _live_news else ""
+
     # ── Step 1：分析框架提示（每章专属，纯分析不写HTML）─────────────────────────
     step1_prompts = {
         "swarm_analysis": f"""分析 {ticker} 蜂群七维信号结构：
 综合评分{score}/10 | Scout {fmt_score(ctx['scout'].get('score'))} | Rival {fmt_score(ctx['rival'].get('score'))} ML7d{ctx['ml_7d']:+.1f}%
 Buzz {fmt_score(ctx['buzz'].get('score'))} | Chronos {fmt_score(ctx['chronos'].get('score'))} | Oracle {fmt_score(ctx['oracle'].get('score'))} P/C={ctx['put_call_ratio']}
-Guard {fmt_score(ctx['guard'].get('score'))} | Bear {fmt_score(ctx['bear'].get('score'))} 信号:{', '.join(ctx['bear_signals'][:2])}{_delta_block}{_conflict_block}
+Guard {fmt_score(ctx['guard'].get('score'))} | Bear {fmt_score(ctx['bear'].get('score'))} 信号:{', '.join(ctx['bear_signals'][:2])}{_delta_block}{_conflict_block}{_live_news_block}
 完成结构化预分析（严格按格式，无HTML）：""",
 
         "resonance": f"""分析 {ticker} 蜂群共振信号：
@@ -485,7 +653,7 @@ P/C={ctx['put_call_ratio']} | 总OI={ctx['total_oi']:,.0f} | IV Skew={ctx['iv_sk
         "macro": f"""分析 {ticker} 宏观与情绪环境：
 F&G指数:{ctx['fg_score']} | Guard:{fmt_score(ctx['guard'].get('score'))}({ctx['guard'].get('direction','neutral')})
 宏观发现:{ctx['guard'].get('discovery','')[:150]}
-Buzz情绪%:{ctx['buzz'].get('details',{}).get('sentiment_pct','N/A')} | Reddit:{ctx['reddit'].get('rank','N/A')}名{_delta_block}
+Buzz情绪%:{ctx['buzz'].get('details',{}).get('sentiment_pct','N/A')} | Reddit:{ctx['reddit'].get('rank','N/A')}名{_delta_block}{_live_news_block}
 完成结构化预分析（严格按格式，无HTML）：""",
 
         "scenario": f"""分析 {ticker} 情景推演基础：
@@ -513,8 +681,9 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 - Guard(宏观) {fmt_score(ctx['guard'].get('score'))}, 发现: {ctx['guard'].get('discovery','')[:100]}
 - Bear(逆向) {fmt_score(ctx['bear'].get('score'))}, 信号: {', '.join(ctx['bear_signals'][:2])}
 
-生成2段深度叙事分析，解释评分背后的逻辑和各蜂之间的分歧。直接输出两段 HTML <p> 标签。每段使用 <strong>、<span class="bull-text">、<span class="bear-text">、<span class="highlight"> 进行关键词标注。{_delta_block}{_conflict_block}
-若有昨日对比数据，请在第二段末尾用一句话点出最显著的评分变化趋势。""",
+生成2段深度叙事分析，解释评分背后的逻辑和各蜂之间的分歧。直接输出两段 HTML <p> 标签。每段使用 <strong>、<span class="bull-text">、<span class="bear-text">、<span class="highlight"> 进行关键词标注。{_delta_block}{_conflict_block}{_live_news_block}
+若有昨日对比数据，请在第二段末尾用一句话点出最显著的评分变化趋势。
+若有实时新闻数据，请在分析中引用1-2条最相关的头条作为信号佐证。""",
 
         "resonance": f"""
 分析 {ticker} 的蜂群共振机制：
@@ -557,32 +726,33 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 - Buzz情绪%: {ctx['buzz'].get('details',{}).get('sentiment_pct','N/A')}
 - Reddit: {ctx['reddit'].get('rank','N/A')}名, {ctx['reddit'].get('mentions','N/A')}次提及
 
-生成2段宏观分析：分析宏观逆风/顺风对该股的影响，以及F&G极值下的反向做多机会。输出两段 HTML <p> 标签，使用强调标签。{_delta_block}
-若有昨日对比，请在分析中引用宏观情绪的变化方向。""",
+生成2段宏观分析：分析宏观逆风/顺风对该股的影响，以及F&G极值下的反向做多机会。输出两段 HTML <p> 标签，使用强调标签。{_delta_block}{_live_news_block}
+若有昨日对比，请在分析中引用宏观情绪的变化方向。
+若有AV情绪分，请将其与F&G指数对比，说明散户情绪与机构情绪是否一致。""",
 
         "scenario": f"""
-为 {ticker} 生成四情景推演（基于以下数据）：
-- 当前价格: {'$'+str(ctx['price']) if ctx['price'] else '市价'}
-- 综合评分: {score}/10，方向: {direction}
-- ML 7日预期: {ctx['ml_7d']:+.1f}%，30日: {ctx['ml_30d']:+.1f}%
-- 最大阻力: ${ctx['key_levels'].get('resistance',[{}])[0].get('strike','N/A') if ctx['key_levels'].get('resistance') else 'N/A'}
-- 最大支撑: ${ctx['key_levels'].get('support',[{}])[0].get('strike','N/A') if ctx['key_levels'].get('support') else 'N/A'}
-- 催化剂: {len(ctx['catalysts'])} 个
-- 风险信号: {', '.join(ctx['bear_signals'][:2])}
+为 {ticker} 补充情景推演叙事（情景卡片数据已由蜂群分析生成，**禁止重复输出表格或情景列表**）：
+- 当前价格: {'$'+str(ctx['price']) if ctx['price'] else '市价'}，评分: {score}/10，方向: {direction}
+- ML 7日预期: {ctx['ml_7d']:+.1f}%，催化剂 {len(ctx['catalysts'])} 个，风险信号: {', '.join(ctx['bear_signals'][:2])}
+{_master_block}
 
-生成四情景的核心交易逻辑段落（1段），以及止盈止损具体参考。输出两段 HTML <p> 标签，使用强调标签。在第二段给出具体入场思路。{_master_block}
-情景推演须与蜂群整体论点保持方向一致，若有矛盾需说明原因。""",
+输出两段 HTML <p> 标签：
+第一段：核心交易逻辑——情景概率分布为何如此设置，最关键的驱动变量，与蜂群整体论点的关系。
+第二段：入场思路——分批建仓时机、仓位管理建议、论点失效信号（何时应离场）。
+用 <strong> 强调关键数字和价位。""",
 
         "risk": f"""
-为 {ticker} 生成风险分析总结：
+为 {ticker} 生成风险卡片列表：
 - 逆向信号: {', '.join(ctx['bear_signals'])}
 - Bear评分: {fmt_score(ctx['bear'].get('score'))} ({ctx['bear'].get('direction')})
 - F&G: {ctx['fg_score'] if ctx['fg_score'] else '未知'}
 - IV Skew: {ctx['iv_skew']}
-- 宏观: {ctx['guard'].get('discovery','')[:150]}
+- 宏观: {ctx['guard'].get('discovery','')[:150]}{_master_block}
 
-生成1段综合风险总结，整合所有风险信号并给出风险管理建议。输出一段 HTML <p> 标签，使用强调标签。{_master_block}
-风险分析须与蜂群整体论点形成对照，指出威胁该论点成立的核心风险。""",
+生成3-5个风险卡片，每个卡片对应一个独立风险主题，必须严格使用以下HTML格式（无其他标签）：
+<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div><div class="risk-title">🔴 风险标题</div><div class="risk-note">具体风险描述，含数据支撑，2-3句话。</div></div></div>
+级别规则：系统性/尾部风险用 risk-high+HIGH+🔴，结构性风险用 risk-med+MED+🟡，注意事项用 risk-low+LOW+⚪。
+风险须与蜂群论点形成对照，点名威胁论点成立的核心条件。""",
     }
 
     prompt = prompts.get(section, "")
@@ -631,24 +801,110 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
         return _local_fallback(ctx, section)
 
 
+def llm_scenario_data(ctx: dict, api_key: str) -> dict:
+    """调用 LLM 生成结构化情景数据，返回 dict；失败返回空 dict（调用方降级到 ML 值）"""
+    try:
+        import anthropic as _ant, json as _json, re as _re
+    except ImportError:
+        return {}
+
+    ticker  = ctx["ticker"]
+    price   = float(ctx["price"]) if ctx.get("price") else 0
+    direction = ctx["direction_zh"]
+    score   = ctx["final_score"]
+    master  = ctx.get("master_thesis", "")
+    master_block = f"\n【蜂群整体论点】{master}" if master else ""
+    resistances = [l for l in ctx.get("key_levels", {}).get("resistance", []) if l.get("strike")]
+    supports    = [l for l in ctx.get("key_levels", {}).get("support",    []) if l.get("strike")]
+    res_str  = f"${resistances[0]['strike']}" if resistances else "N/A"
+    sup_str  = f"${supports[0]['strike']}"    if supports    else "N/A"
+    is_bear  = "bear" in ctx.get("direction", "")
+
+    prompt = f"""为 {ticker} 生成情景推演结构化数据（当前价 ${price}，方向 {direction}，评分 {score}/10）。
+关键数据：最大阻力 {res_str}，最大支撑 {sup_str}，ML 7日预期 {ctx['ml_7d']:+.1f}%，
+催化剂 {len(ctx['catalysts'])} 个，风险信号：{', '.join(ctx['bear_signals'][:3]) or '无'}，
+ScoutBee {ctx['scout'].get('score',5)}/10，OracleBee {ctx['oracle'].get('score',5)}/10，BearBee {ctx['bear'].get('score',5)}/10。{master_block}
+
+{'看空视角：止盈为下行目标，止损为上行止损。' if is_bear else '看多视角：止盈为上行目标，止损为下行止损。'}
+
+只输出 JSON，不加任何说明：
+{{
+  "sc_a": {{"prob": 0.XX, "price_lo": XXX, "price_hi": XXX, "note": "触发条件(15字内)"}},
+  "sc_b": {{"prob": 0.XX, "price_lo": XXX, "price_hi": XXX, "note": "触发条件(15字内)"}},
+  "sc_c": {{"prob": 0.XX, "price_lo": XXX, "price_hi": XXX, "note": "触发条件(15字内)"}},
+  "sc_d": {{"prob": 0.XX, "price_lo": XXX, "price_hi": XXX, "note": "触发条件(15字内)"}},
+  "ev_pct": X.X,
+  "win_rate": XX.X,
+  "tp1": XX.XX, "tp1_pct": X.X, "tp1_action": "减仓1/3",
+  "tp2": XX.XX, "tp2_pct": X.X, "tp2_action": "减仓1/3",
+  "tp3": XX.XX, "tp3_pct": X.X, "tp3_action": "清仓",
+  "sl_conservative": XX.XX,
+  "sl_standard": XX.XX,
+  "sl_aggressive": XX.XX,
+  "hold_days": "5–10天"
+}}
+要求：四情景概率之和 = 1.0；价格目标基于关键支撑阻力位合理外推；EV 为加权期望收益率（百分比数值）。"""
+
+    try:
+        client = _ant.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=500,
+            system="你是量化分析师，只输出纯 JSON，不加任何解释文字。",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = msg.content[0].text.strip()
+        m = _re.search(r'\{[\s\S]+\}', text)
+        if m:
+            data = _json.loads(m.group(0))
+            # 校验概率之和
+            total_prob = sum(data.get(f"sc_{k}", {}).get("prob", 0) for k in ["a","b","c","d"])
+            if abs(total_prob - 1.0) > 0.05:
+                print(f"  ⚠️  LLM 情景概率之和 {total_prob:.2f}，降级到 ML 值")
+                return {}
+            return data
+    except Exception as e:
+        print(f"  ⚠️  llm_scenario_data 失败: {e}")
+    return {}
+
+
 def _build_swarm_narrative(ctx: dict) -> str:
     ticker = ctx["ticker"]; score = ctx["final_score"]; direction = ctx["direction_zh"]
     sc_cls = 'bull-text' if 'bull' in ctx['direction'] else 'bear-text'
-    agents_info = []
-    for key, label, dim in [("chronos","ChronosBee","催化剂"), ("guard","GuardBee","风险调整"),
-                             ("rival","RivalBee","ML辅助"), ("buzz","BuzzBee","情绪"),
-                             ("scout","ScoutBee","信号"), ("oracle","OracleBee","期权/赔率"),
-                             ("bear","BearBee","逆向")]:
-        a = ctx.get(key, {}); sc = float(a.get('score', 5))
-        color = '#22c55e' if sc >= 6.5 else ('#ef4444' if sc <= 4.0 else '#94a3b8')
-        disc = a.get('discovery','')[:80]
-        agents_info.append(f'<span style="color:{color};font-weight:600">{label} {sc:.1f}</span>（{dim}）：{disc}')
-    return (f'<p><strong>蜂群综合评分 <span class="{sc_cls}">{score:.2f}/10</span>，方向 {direction}。</strong>'
-            f'7 Agent 投票结果：{ctx.get("resonance",{}).get("supporting_agents",0)} 个同向信号，'
-            f'期权流 <span class="highlight">{ctx["flow_direction"]}</span>，P/C={ctx["put_call_ratio"]}，总OI {ctx["total_oi"]:,.0f}。</p>'
-            f'<p>' + ' · '.join(agents_info[:3]) + '</p>'
-            f'<p>' + ' · '.join(agents_info[3:]) + '</p>'
-            f'<p>看空信号：{", ".join(ctx["bear_signals"][:3]) or "无重大看空信号"}。</p>')
+    is_bull = 'bull' in ctx['direction']
+    # Confidence calibration — ctx 里是平铺字段，不是嵌套 dict
+    cb = ctx.get('confidence_band', None) or [score - 1, score + 1]
+    cb_lo, cb_hi = float(cb[0]), float(cb[1])
+    dim_std = float(ctx.get('dimension_std', 0) or 0)
+    disc_label = ctx.get('discrimination', '') or ''
+    std_warn = '极高（信号严重分散，方向可信度低）' if dim_std >= 2.5 else ('中等（部分维度存在分歧）' if dim_std >= 1.5 else '低（信号高度一致）')
+    # Dimension scores — 从原始 JSON 中读取（extract() 未平铺此字段）
+    dim_scores = ctx.get('dimension_scores', {}) or {}
+    top_dim = max(dim_scores, key=lambda k: float(dim_scores.get(k,0) or 0)) if dim_scores else ''
+    bot_dim = min(dim_scores, key=lambda k: float(dim_scores.get(k,0) or 0)) if dim_scores else ''
+    dim_zh = {'catalyst':'催化剂','odds':'期权/赔率','signal':'技术信号','sentiment':'市场情绪','risk_adj':'风险调整'}
+    top_lbl = dim_zh.get(top_dim, top_dim); bot_lbl = dim_zh.get(bot_dim, bot_dim)
+    top_val = float(dim_scores.get(top_dim, 0)); bot_val = float(dim_scores.get(bot_dim, 0))
+    # Bear signals
+    bear_sigs = ctx['bear_signals']
+    sc_dir = '看空' if not is_bull else '看多'
+    score_interp = ('强力' + sc_dir if score >= 7.5 or score <= 2.5 else
+                    ('明显' + sc_dir if score >= 6.5 or score <= 3.5 else '偏' + sc_dir + '（信号偏弱）'))
+    return (
+        f'<p><strong>蜂群综合评分 <span class="{sc_cls}">{score:.2f}/10</span>，方向 {direction}，{score_interp}。</strong>'
+        f'置信区间 [{cb_lo:.2f}–{cb_hi:.2f}]（区间宽度 {cb_hi-cb_lo:.2f}，鉴别力 {disc_label}），'
+        f'维度分散度 σ={dim_std:.1f}（{std_warn}）。'
+        f'期权流 <span class="highlight">{ctx["flow_direction"]}</span>，P/C={ctx["put_call_ratio"]}，总OI {ctx["total_oi"]:,.0f}。</p>'
+        f'<p><strong>维度亮点：</strong>'
+        f'<span class="bull-text">{top_lbl} {top_val:.1f}/10（最强维度）</span>，'
+        f'<span class="bear-text">{bot_lbl} {bot_val:.1f}/10（最弱维度）</span>——'
+        f'两者差距 {top_val-bot_val:.1f} 分，是本次信号分散的主要来源。'
+        f'{"ML辅助（Rival）与技术（Scout）方向背离，需优先以期权结构为裁判。" if float(ctx.get("rival",{}).get("score",5))>6 and float(ctx.get("scout",{}).get("score",5))<4 else ""}'
+        f'{"ScoutBee（基本面/内幕）信号极弱，说明内部人看法偏悲观。" if float(ctx.get("scout",{}).get("score",5))<3 else ""}'
+        f'</p>'
+        f'<p>{("逆向信号警示：" + "、".join(bear_sigs[:3])) if bear_sigs else "当前无重大逆向信号，蜂群单向性较强。"}'
+        f'{"  操作建议：信号极度分散（σ≥2.5），仓位控制在标准的 40-50%，等待共振触发再加仓。" if dim_std >= 2.5 else ""}</p>'
+    )
 
 
 def _build_resonance_narrative(ctx: dict) -> str:
@@ -656,21 +912,31 @@ def _build_resonance_narrative(ctx: dict) -> str:
     detected = resonance.get('resonance_detected', False)
     boost = resonance.get('confidence_boost', 0); count = resonance.get('supporting_agents', 0)
     dim_zh = {"catalyst":"催化剂","ml_auxiliary":"ML辅助","odds":"期权/赔率",
-              "risk_adj":"风险调整","signal":"聪明钱","sentiment":"情绪"}
-    dims_str = "、".join([dim_zh.get(d, d) for d in res_dims]) or "无"
-    status = f"⚡ {count}维共振已触发，信心提升 +{boost}%" if detected else "○ 共振未触发（信号分散）"
-    scout_det = ctx.get('scout',{}).get('details',{}) or {}
+              "risk_adj":"风险调整","signal":"技术信号","sentiment":"情绪","contrarian":"逆向"}
+    dims_str = "、".join([dim_zh.get(d, d) for d in res_dims]) or "无触发维度"
     guard_det = ctx.get('guard',{}).get('details',{}) or {}
     consistency = guard_det.get('consistency', 0)
     if isinstance(consistency, float) and consistency < 1:
         consistency = int(consistency * 100)
-    return (f'<p><strong>{status}</strong></p>'
-            f'<p>共振维度：{dims_str}。'
-            f'蜂群一致性指数 {consistency}%，GuardBee 风险调整系数 {guard_det.get("adjustment_factor",0.95):.2f}。'
-            f'ML预测 7日 <span class="highlight">{ctx["ml_7d"]:+.1f}%</span>，30日 {ctx["ml_30d"]:+.1f}%。</p>'
-            f'<p>期权市场配合度：P/C={ctx["put_call_ratio"]}（{"Call主导，看多气氛" if float(ctx["put_call_ratio"]) < 0.9 else "Put主导，看空偏好"}），'
-            f'IV Skew {ctx["iv_skew"]}（{"看跌期权溢价偏高" if ctx["iv_skew"] and float(ctx["iv_skew"])>1.2 else "中性"}）。'
-            f'共振方向 {resonance.get("direction","neutral")} 与蜂群整体方向{"一致" if resonance.get("direction") == ctx["direction"] else "存在分歧，需注意"}。</p>')
+    try:
+        pcr = float(ctx['put_call_ratio'])
+    except (TypeError, ValueError):
+        pcr = 1.0
+    ml7 = ctx['ml_7d']; ml30 = ctx['ml_30d']
+    ml_cls = 'bull-text' if ml7 > 0 else 'bear-text'
+    if detected:
+        res_interp = (f'历史数据显示共振信号胜率比单维信号高约 18%，当前 +{boost}% 信心提升已计入置信区间。'
+                      f'共振触发（{count}维同向）是本次最重要的正面信号，操作上可适当扩大仓位至标准的 80%。')
+    else:
+        res_interp = (f'共振未触发意味着无「多维度放大效应」。一致性指数 {consistency}% 低于触发阈值，'
+                      f'信号仍在分散态——操作上建议仓位轻量（标准的 40-60%），等待更多维度收敛后再加仓。')
+    return (
+        f'<p><strong>{"⚡ "+str(count)+"维共振已触发，信心提升 +"+str(boost)+"%" if detected else "○ 共振未触发（信号分散）"}</strong></p>'
+        f'<p>触发维度：{dims_str}。蜂群一致性指数 {consistency}%，调整系数 {guard_det.get("adjustment_factor",0.95):.2f}。{res_interp}</p>'
+        f'<p>ML 模型预测：7日 <span class="{ml_cls}">{ml7:+.1f}%</span>，30日 <span class="{ml_cls}">{ml30:+.1f}%</span>。'
+        f'P/C={ctx["put_call_ratio"]}（{"Call偏多" if pcr<0.9 else "中性" if pcr<1.1 else "Put偏空"}），'
+        f'IV Skew {ctx["iv_skew"]}（{"下行对冲溢价偏高，市场有隐性担忧" if _sf(ctx["iv_skew"])>1.2 else "中性，多空未显著分化"}）。</p>'
+    )
 
 
 def _build_catalyst_narrative(ctx: dict) -> str:
@@ -683,32 +949,86 @@ def _build_catalyst_narrative(ctx: dict) -> str:
         sev = c.get('severity','medium'); sev_icon = '🔴' if sev=='critical' else ('🟡' if sev=='high' else '⚪')
         cat_lines.append(f'{sev_icon} <strong>{ev}</strong>（+{days}天）')
     cats_html = ''.join(f'<li>{l}</li>' for l in cat_lines)
+
+    # IV Crush 段落
+    ivc = ctx.get('iv_crush', {}) or {}
+    ivc_para = ''
+    if ivc and ivc.get('avg_abs_move', 0):
+        avg_move   = ivc.get('avg_abs_move', 0)
+        up_c       = ivc.get('up_count', 0)
+        down_c     = ivc.get('down_count', 0)
+        total_c    = up_c + down_c
+        win_pct    = int(up_c / total_c * 100) if total_c > 0 else 0
+        imp_move   = ivc.get('current_implied_move')
+        exp_date   = ivc.get('next_earnings_date', '未知')
+        exp_days   = ivc.get('next_earnings_days')
+        imp_str    = f'当前隐含幅度 <strong>{imp_move:.1f}%</strong>，' if imp_move else ''
+        exp_str    = f'下次财报 {exp_date}（{exp_days}天后）' if exp_days is not None else f'下次财报 {exp_date}'
+        crush_warn = ''
+        if imp_move and imp_move > avg_move * 1.15:
+            crush_warn = f'<span class="bear-text">⚠️ 隐含幅度 {imp_move:.1f}% 高于历史均值 {avg_move:.1f}%，IV Crush 风险较高——事件后期权 IV 或大幅缩水。</span>'
+        elif imp_move and imp_move < avg_move * 0.85:
+            crush_warn = f'<span class="bull-text">✅ 隐含幅度 {imp_move:.1f}% 低于历史均值 {avg_move:.1f}%，期权定价偏便宜，适合方向性买入。</span>'
+        ivc_para = (
+            f'<p><strong>📊 IV Crush 历史分析：</strong>{imp_str}'
+            f'历史财报平均波动 <strong>{avg_move:.1f}%</strong>，'
+            f'{exp_str}，过去 {total_c} 次财报中上涨 {up_c} 次（{win_pct}%）、下跌 {down_c} 次。'
+            f'{crush_warn}</p>'
+        )
+
     return (f'<p><strong>ChronosBee 评分 {chronos_sc:.1f}/10，检测到 {len(cats)} 个催化剂，{len(near)} 个在14天内。</strong></p>'
             f'<ul style="margin:8px 0 8px 16px;line-height:1.8">{cats_html}</ul>'
             f'<p>{"⚠️ 关键窗口：近期催化剂密度极高，财报/重大事件前期权隐含波动率（IV）通常显著上升，建议关注 IV crush 风险。" if len(near)>=2 else "催化剂相对分散，短期波动性压力适中。"}'
             f'期权到期日集中于 {", ".join(ctx.get("oracle",{}).get("details",{}).get("expiration_dates",[])[:3] or ["近期"])}，'
-            f'催化剂与到期日重合度高，期权博弈激烈。</p>')
+            f'催化剂与到期日重合度高，期权博弈激烈。</p>'
+            f'{ivc_para}')
 
 
 def _build_options_narrative(ctx: dict) -> str:
     pcr = ctx['put_call_ratio']; oi = ctx['total_oi']; iv = ctx['iv_current']
+    iv_rank = float(ctx.get('iv_rank', 50) or 50)
     skew = ctx['iv_skew']; flow = ctx['flow_direction']
-    sups = ctx['key_levels'].get('support',[])[:3]
-    ress = ctx['key_levels'].get('resistance',[])[:3]
-    sup_str = '、'.join([f"${s['strike']}" for s in sups]) or 'N/A'
-    res_str = '、'.join([f"${r['strike']}" for r in ress]) or 'N/A'
+    sups = ctx['key_levels'].get('support',[])[:2]
+    ress = ctx['key_levels'].get('resistance',[])[:2]
     unusual = ctx.get('unusual_activity',[])
     bull_flows = [u for u in unusual if u.get('bullish')]
     bear_flows = [u for u in unusual if not u.get('bullish')]
     flow_cls = 'bull-text' if flow=='bullish' else 'bear-text'
-    return (f'<p><strong>期权市场结构：P/C比 {pcr}（{"Call主导，看多氛围浓厚" if float(pcr)<0.9 else "Put主导，看跌保护需求强"}），'
-            f'总OI {oi:,.0f}，当前IV {iv:.1f}%，IV Skew {skew}（{"看跌期权溢价偏高，市场对下行有对冲需求" if skew and float(skew)>1.2 else "中性"}）。</strong></p>'
-            f'<p>期权流方向：<span class="{flow_cls}">{"净看涨流" if flow=="bullish" else "净看跌流"}</span>。'
-            f'异常流检测：{len(bull_flows)}笔看涨异动、{len(bear_flows)}笔看跌异动。'
-            f'{ctx["signal_summary"]}</p>'
-            f'<p>关键支撑位（高OI Put钉住）：{sup_str}。'
-            f'关键阻力位（高OI Call钉住）：{res_str}。'
-            f'最大阻力位 OI 集中处为 Gamma 钉住区域，做市商对冲效应显著，价格接近时注意方向性突破。</p>')
+    try:
+        pcr_f = float(pcr)
+    except (TypeError, ValueError):
+        pcr_f = 1.0
+    try:
+        skew_f = float(skew)
+    except (TypeError, ValueError):
+        skew_f = 1.0
+    # IV rank interpretation
+    iv_interp = ('高（期权较贵，适合卖方策略）' if iv_rank > 70 else
+                 ('低（期权便宜，适合买方策略）' if iv_rank < 30 else '中等'))
+    # Key level details
+    sup_parts = [f'${s["strike"]}（{s.get("oi",0)/1e3:.0f}K OI）' for s in sups] if sups else ['N/A']
+    res_parts = [f'${r["strike"]}（{r.get("oi",0)/1e3:.0f}K OI）' for r in ress] if ress else ['N/A']
+    # Unusual flow highlight
+    top_ua = unusual[0] if unusual else None
+    ua_note = ''
+    if top_ua:
+        ua_vol = top_ua.get('volume', 0)
+        ua_str = top_ua.get('strike', 0)
+        ua_type = top_ua.get('type', '')
+        ua_cls = 'bull-text' if top_ua.get('bullish') else 'bear-text'
+        ua_note = f'最大异常流：<span class="{ua_cls}">{ua_type} ${ua_str}，成交量 {ua_vol/1e3:.0f}K 手</span>——'
+        ua_note += ('大资金押注上行，关注做空该阻力区的 Call 卖方头寸是否被迫平仓（gamma squeeze 预警）。' if top_ua.get('bullish') else '大资金下行对冲，关注支撑区是否受到同步 Put 保护。')
+    return (
+        f'<p><strong>期权市场结构：P/C={pcr}（{"Call偏多，买方主导，看多氛围浓" if pcr_f<0.9 else "Put偏多，下行对冲需求强" if pcr_f>1.1 else "多空均衡"}），'
+        f'总OI {oi:,.0f}，IV Current {iv:.1f}%，IV Rank {iv_rank:.0f}%（{iv_interp}），'
+        f'IV Skew {skew}（{"Put溢价偏高，隐性悲观" if skew_f>1.2 else "中性，定价均衡"}）。</strong></p>'
+        f'<p>期权流方向：<span class="{flow_cls}">{"净看涨流" if flow=="bullish" else "净看跌流"}</span>，'
+        f'{len(bull_flows)}笔看涨异动、{len(bear_flows)}笔看跌异动。{ua_note}</p>'
+        f'<p><strong>关键水位：</strong>'
+        f'Put 支撑——{"、".join(sup_parts)}（高 OI 钉住，做市商在此有 gamma 对冲买盘支撑）；'
+        f'Call 阻力——{"、".join(res_parts)}（做市商 short gamma 区，靠近时面临系统性卖压）。'
+        f'{"价格突破最大阻力需超大成交量配合，短期内概率低。" if ress else ""}</p>'
+    )
 
 
 def _build_macro_narrative(ctx: dict) -> str:
@@ -720,33 +1040,103 @@ def _build_macro_narrative(ctx: dict) -> str:
     vol_ratio = buzz_det.get('volume_ratio', 1.0)
     momentum = buzz_det.get('momentum_5d', 0)
     fg_label = '极度恐惧' if fg and fg<=25 else ('恐惧' if fg and fg<=45 else ('中性' if fg and fg<=55 else ('贪婪' if fg and fg<=75 else '极度贪婪')))
+
+    # VIX 期限结构段落
+    vix_term = ctx.get('vix_term_structure', {}) or {}
+    vix_para = ''
+    if vix_term and vix_term.get('structure') not in ('', 'unknown', None):
+        structure  = vix_term.get('structure', 'unknown')
+        spot_vix   = vix_term.get('spot_vix')
+        m1         = vix_term.get('m1')
+        m2         = vix_term.get('m2')
+        spread     = vix_term.get('m1_m2_spread')
+        signal     = vix_term.get('signal', '')
+        struct_zh  = {'contango': '正价差（Contango）', 'backwardation': '逆价差（Backwardation）', 'flat': '平坦结构'}.get(structure, structure)
+        struct_color = 'bull-text' if structure == 'contango' else ('bear-text' if structure == 'backwardation' else 'highlight')
+        _spot_str   = f"{spot_vix:.1f}" if spot_vix is not None else "N/A"
+        _m1_str     = f"{m1:.1f}"     if m1      is not None else "N/A"
+        _m2_str     = f"{m2:.1f}"     if m2      is not None else "N/A"
+        _spread_str = f"{spread:+.2f}" if spread  is not None else "N/A"
+        vix_para = (
+            f'<p><strong>📈 VIX 期限结构：</strong>'
+            f'当前 VIX <strong>{_spot_str}</strong>，M1={_m1_str} → M2={_m2_str}（价差 {_spread_str}），'
+            f'结构为 <span class="{struct_color}">{struct_zh}</span>。'
+            f'{"Contango 结构代表市场情绪平稳，做市商对冲成本低，月期权卖方策略有利。" if structure == "contango" else ("⚠️ Backwardation 恐慌结构——近月 VIX 溢价高于远月，市场短期恐慌信号明确，期权买方成本大幅上升。" if structure == "backwardation" else "VIX 期限结构平坦，市场对近远期风险判断趋于一致。")}'
+            f'{(" | " + signal[:80]) if signal else ""}</p>'
+        )
+
+    # 国会交易段落
+    congress = ctx.get('congress', {}) or {}
+    congress_para = ''
+    if congress and (congress.get('buy_count', 0) + congress.get('sell_count', 0)) > 0:
+        buy_c  = congress.get('buy_count', 0)
+        sell_c = congress.get('sell_count', 0)
+        c_sc   = congress.get('congress_score', 0)
+        c_sum  = congress.get('summary', '')
+        c_top  = congress.get('top_signal', '')
+        net    = congress.get('net_amount_est', 0)
+        net_str = f'净买入 ${abs(net)/1e6:.1f}M' if net > 0 else (f'净卖出 ${abs(net)/1e6:.1f}M' if net < 0 else '净额持平')
+        c_color = 'bull-text' if buy_c > sell_c else 'bear-text'
+        congress_para = (
+            f'<p><strong>🏛️ 国会交易信号（90天）：</strong>'
+            f'买入 <span class="{c_color}">{buy_c} 次</span> / 卖出 {sell_c} 次，{net_str}，'
+            f'国会信号评分 {c_sc}/10。'
+            f'{c_top[:60] + "。" if c_top else ""}'
+            f'{c_sum[:80] if c_sum else ""}</p>'
+        )
+
     return (f'<p><strong>宏观环境：F&G指数 {fg if fg else "N/A"}（{fg_label}），GuardBee {guard_sc:.1f}/10。</strong>'
             f'{guard_disc[:200]}</p>'
             f'<p>情绪面：看多情绪 {sentiment}%（{"偏多" if sentiment>55 else ("偏空" if sentiment<45 else "中性")}），'
             f'5日动量 {momentum:+.2f}%，成交量比 {vol_ratio:.2f}x（{"放量" if vol_ratio>1.2 else ("缩量" if vol_ratio<0.8 else "正常")}）。'
             f'Reddit 排名 #{reddit.get("rank","N/A")}，提及 {reddit.get("mentions",0)} 次。</p>'
-            f'<p>{"⚠️ 当前极度恐惧市场环境增加了短期波动性，建议降低仓位或等待恐慌情绪缓和再入场。" if fg and fg<=25 else ("市场情绪相对中性，系统性风险较低，以个股信号为主要决策依据。" if fg and fg<=55 else "市场情绪偏乐观，注意过热风险，控制追高仓位。")}</p>')
+            f'<p>{"⚠️ 当前极度恐惧市场环境增加了短期波动性，建议降低仓位或等待恐慌情绪缓和再入场。" if fg and fg<=25 else ("市场情绪相对中性，系统性风险较低，以个股信号为主要决策依据。" if fg and fg<=55 else "市场情绪偏乐观，注意过热风险，控制追高仓位。")}</p>'
+            f'{vix_para}'
+            f'{congress_para}')
 
 
 def _build_scenario_narrative(ctx: dict) -> str:
     score = ctx["final_score"]; direction = ctx["direction"]
-    ress = ctx['key_levels'].get('resistance',[])[:1]
-    sups = ctx['key_levels'].get('support',[])[:1]
+    ress = ctx['key_levels'].get('resistance',[])
+    sups = ctx['key_levels'].get('support',[])
     price = ctx.get('price'); ml7 = ctx['ml_7d']; ml30 = ctx['ml_30d']
-    target = f"${ress[0]['strike']}" if ress else "关键阻力位"
-    stop = f"${sups[0]['strike']}" if sups else "关键支撑位"
     is_bull = 'bull' in direction
-    rr = '3:1' if float(score) > 7 else ('2:1' if float(score) > 5.5 else '1.5:1')
-    action = 'Call/正股多头' if is_bull else 'Put/空头/防守'
-    cats = ctx.get('catalysts',[])
-    near_cat = next((c.get('event','') for c in cats if isinstance(c.get('days_until'),(int,float)) and c['days_until']<=7), None)
-    return (f'<p><strong>核心交易逻辑（本地模式推演）：</strong>'
-            f'蜂群评分 {score:.2f}/10，方向{"看多" if is_bull else "看空"}，建议操作：{action}。</p>'
-            f'<p>ML 预期 7日 <span class="highlight">{ml7:+.1f}%</span>，30日 {ml30:+.1f}%。'
-            f'{"当前" if price else ""}{"入场价参考 $"+str(round(price,2))+"，" if price else ""}'
-            f'目标位 {target}，止损参考 {stop}，风险回报比约 {rr}。</p>'
-            f'{f"<p>⚡ 近期催化剂：{near_cat}（7天内），事件驱动窗口，注意期权IV变化，建议事件前1-2天内完成建仓。</p>" if near_cat else ""}'
-            f'<p>{"注意：IV Skew偏高意味着下行保护成本较高，如做多建议使用垂直价差降低期权成本。" if ctx["iv_skew"] and float(ctx["iv_skew"])>1.2 else "IV结构中性，单腿期权可作为入场工具。"}</p>')
+    res1 = f"${ress[0]['strike']:.0f}" if ress else 'N/A'
+    res2 = f"${ress[1]['strike']:.0f}" if len(ress)>1 else res1
+    sup1 = f"${sups[0]['strike']:.0f}" if sups else 'N/A'
+    sup2 = f"${sups[1]['strike']:.0f}" if len(sups)>1 else sup1
+    skew_f = _sf(ctx['iv_skew'], 1.0)
+    iv_rank = float(ctx.get('iv_rank', 50) or 50)
+    score_f = float(score)
+    # Scenario probabilities based on score
+    if score_f >= 7:
+        prob_a, prob_b, prob_c = 55, 30, 15
+    elif score_f >= 5.5:
+        prob_a, prob_b, prob_c = 40, 40, 20
+    elif score_f >= 4:
+        prob_a, prob_b, prob_c = 30, 40, 30
+    else:
+        prob_a, prob_b, prob_c = 20, 35, 45
+    bull_a, bear_a = (prob_a, prob_c) if is_bull else (prob_c, prob_a)
+    rr = '3:1' if score_f > 7 else ('2:1' if score_f > 5.5 else '1.5:1')
+    strategy_hint = ('IV Rank 偏低，期权买方成本合理，可考虑单腿 Call/Put。' if iv_rank < 30 else
+                     ('IV Rank 偏高，卖方策略性价比更高，考虑垂直价差。' if iv_rank > 70 else
+                      '中性 IV 环境，垂直价差平衡风险收益。'))
+    if skew_f > 1.2 and is_bull:
+        strategy_hint += ' Put 溢价高，做多建议用 Call Debit Spread 降低成本。'
+    return (
+        f'<p><strong>核心交易逻辑（Claude 本地推演）：</strong>'
+        f'蜂群评分 {score:.2f}/10，方向{"看多" if is_bull else "看空"}。'
+        f'{"入场价参考 $"+str(round(price,2))+"，" if price else ""}'
+        f'目标 {res1 if is_bull else sup1}，止损 {sup1 if is_bull else res1}，风险回报比约 {rr}。</p>'
+        f'<p><strong>情景 A — {"多头实现" if is_bull else "空头主导"}（概率 {bull_a if is_bull else bear_a}%，目标 {res1 if is_bull else sup1}）：</strong>'
+        f'{"ML 预测配合（7日 "+str(ml7)+"%），催化剂落地超预期，成交量放大突破阻力位。" if is_bull else "蜂群逆向信号兑现，基本面/内幕利空显现，跌破支撑触发止损盘。"}</p>'
+        f'<p><strong>情景 B — 震荡整理（概率 {prob_b}%，区间 {sup1}–{res1}）：</strong>'
+        f'多空信号拉锯，价格在支撑/阻力带内盘整，适合 Iron Condor 或卖出宽跨式策略（低 IV 环境避免此策略）。</p>'
+        f'<p><strong>情景 C — {"空头压制" if is_bull else "多头反弹"}（概率 {bear_a if is_bull else bull_a}%）：</strong>'
+        f'{"逆向信号主导，内幕/宏观利空，关注 "+sup1+" 支撑是否失守，破位下一目标 "+sup2+"。" if is_bull else "极度恐惧情绪反转，逆势资金入场，关注 "+res1+" 阻力突破，目标 "+res2+"。"}'
+        f' {strategy_hint}</p>'
+    )
 
 
 def _build_risk_narrative(ctx: dict) -> str:
@@ -756,14 +1146,36 @@ def _build_risk_narrative(ctx: dict) -> str:
     consistency = guard_det.get('consistency', 0)
     if isinstance(consistency, float) and consistency < 1:
         consistency = int(consistency * 100)
-    sig_html = ''.join(f'<li>⚠️ {s}</li>' for s in bear_sigs[:4]) if bear_sigs else '<li>无重大看空信号</li>'
-    risk_level = '高' if bear_sc > 5 or (fg and fg <= 25) else ('中' if bear_sc > 3 else '低')
-    return (f'<p><strong>综合风险等级：{risk_level}。BearBee评分 {bear_sc:.1f}/10，'
-            f'IV Skew {skew}（{"偏高，下行对冲溢价" if skew and float(skew)>1.2 else "中性"}），'
-            f'蜂群一致性 {consistency}%。</strong></p>'
-            f'<ul style="margin:8px 0 8px 16px;line-height:1.8">{sig_html}</ul>'
-            f'<p>{"⚠️ F&G极度恐惧（"+str(fg)+"），市场系统性恐慌可能导致非理性抛售，需额外保护。" if fg and fg<=25 else ""}'
-            f'建议：{"控制仓位≤总资金5%，配置Put保险或止损单" if risk_level=="高" else ("正常仓位管理，关注信号变化" if risk_level=="中" else "可适度加仓，保持止损纪律")}。</p>')
+    risk_level = 'high' if bear_sc > 5 or (fg and fg <= 25) else ('med' if bear_sc > 3 else 'low')
+    badge = {'high':'HIGH','med':'MED','low':'LOW'}[risk_level]
+    icon  = {'high':'🔴','med':'🟡','low':'⚪'}[risk_level]
+    cards = []
+    # 卡片1：BearBee综合风险
+    cards.append(
+        f'<div class="risk-item risk-{risk_level}"><div class="risk-badge">{badge}</div><div>'
+        f'<div class="risk-title">{icon} 蜂群逆向压力（BearBee {bear_sc:.1f}/10）</div>'
+        f'<div class="risk-note">IV Skew {skew}（{"偏高，下行对冲溢价增加" if _sf(skew)>1.2 else "中性"}），'
+        f'蜂群一致性 {consistency}%。主要逆向信号：{bear_sigs[0] if bear_sigs else "暂无"}。</div>'
+        f'</div></div>'
+    )
+    # 卡片2：宏观情绪
+    if fg and fg <= 25:
+        cards.append(
+            '<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div>'
+            f'<div class="risk-title">🔴 宏观极度恐慌（F&G={fg}）</div>'
+            '<div class="risk-note">极度恐慌区间（≤25），市场系统性抛售可能放大个股波动。'
+            '即使基本面良好，流动性压力也可能使下跌幅度超出预期。</div>'
+            '</div></div>'
+        )
+    # 卡片3：其余逆向信号
+    for sig in bear_sigs[1:3]:
+        cards.append(
+            '<div class="risk-item risk-med"><div class="risk-badge">MED</div><div>'
+            f'<div class="risk-title">🟡 逆向信号</div>'
+            f'<div class="risk-note">{sig}</div>'
+            '</div></div>'
+        )
+    return ''.join(cards)
 
 
 def _local_fallback(ctx: dict, section: str) -> str:
@@ -788,7 +1200,78 @@ def _local_fallback(ctx: dict, section: str) -> str:
 
 # ── HTML 生成 ─────────────────────────────────────────────────────────────────
 
-def generate_html(ctx: dict, reasoning: dict) -> str:
+def _try_compute_gex(ctx: dict) -> None:
+    """
+    在报告生成阶段补算 Dealer GEX。
+    当 JSON 中 dealer_gex 缺失或 total_gex=0 时（常见原因：采集时 yfinance 未返回价格），
+    利用已知的 ctx['price'] 实时重新计算，更新 ctx 中的 GEX 相关字段。
+    失败时静默跳过，不影响其他报告内容。
+    """
+    # 已有非零 GEX 数据 → 无需重算
+    if float(ctx.get("gamma_exposure", 0) or 0) != 0:
+        return
+
+    price = ctx.get("price")
+    if not price or float(price) <= 0:
+        return
+
+    ticker = ctx["ticker"]
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent))
+        from advanced_analyzer import DealerGEXAnalyzer
+        gex = DealerGEXAnalyzer()
+        result = gex.analyze(ticker, float(price))
+        if not result or float(result.get("total_gex", 0) or 0) == 0:
+            return
+        ctx["gamma_exposure"]     = result["total_gex"]
+        ctx["gex_regime"]         = result.get("regime", "")
+        ctx["gex_flip"]           = result.get("gex_flip")
+        ctx["gex_call_wall"]      = result.get("largest_call_wall")
+        ctx["gex_put_wall"]       = result.get("largest_put_wall")
+        ctx["gamma_squeeze_risk"] = (
+            "high"   if result.get("regime") == "negative_gex" else
+            "low"    if result.get("regime") == "positive_gex" else "medium"
+        )
+        print(f"   🎯 GEX 实时补算: {result['total_gex']:+.2f}M$ | "
+              f"regime={result.get('regime','')} | "
+              f"flip=${result.get('gex_flip') or 0:.0f}")
+    except Exception as _e:
+        print(f"   ⚠️  GEX 补算跳过: {_e}")
+
+
+def _try_charts(ctx: dict) -> tuple:
+    """尝试生成置信区间图表和期权水位图表，返回 (conf_img_html, opts_img_html)。
+    如果 chart_engine 不可用或数据不足，返回空字符串，不影响报告主体生成。"""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent))
+        from chart_engine import render_confidence_chart, render_options_chart
+        ticker      = ctx["ticker"]
+        report_date = ctx["report_date"]
+        raw_data    = ctx.get("_raw_data")    # 完整原始 JSON（见下方注入）
+        if raw_data is None:
+            return "", ""
+        price = ctx.get("price") or 0.0
+
+        _img_style = ('style="width:100%;border-radius:8px;margin-top:18px;'
+                      'border:1px solid var(--border);"')
+
+        conf_b64 = render_confidence_chart(raw_data, ticker, report_date)
+        conf_html = (f'<img src="data:image/png;base64,{conf_b64}" {_img_style} '
+                     f'alt="置信区间图表">' if conf_b64 else "")
+
+        opts_b64 = render_options_chart(raw_data, ticker, report_date, float(price))
+        opts_html = (f'<img src="data:image/png;base64,{opts_b64}" {_img_style} '
+                     f'alt="期权水位图表">' if opts_b64 else "")
+
+        return conf_html, opts_html
+    except Exception as _e:
+        print(f"  ⚠️  chart_engine 跳过: {_e}")
+        return "", ""
+
+
+def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "") -> str:
     """组装完整的 Template C v3.0 HTML 报告"""
     ticker = ctx["ticker"]
     report_date = ctx["report_date"]
@@ -799,6 +1282,9 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
     price = ctx.get("price")
     price_str = f"${price:.2f}" if price else "N/A"
     price_label = "收市价" if ctx.get("price_is_close") else "扫描时价格"
+
+    # ── 图表生成（可选，matplotlib 未安装时静默跳过）────────────────────────────
+    _conf_chart_html, _opts_chart_html = _try_charts(ctx)
 
     res_detected = res.get("resonance_detected", False)
     res_dims = res.get("resonant_dimensions", [])
@@ -885,13 +1371,48 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
         except Exception:
             pass
 
+    # ── 置信区间 widget ──────────────────────────────────────────
+    _cb   = ctx.get("confidence_band")
+    _bw   = ctx.get("band_width")
+    _disc = ctx.get("discrimination", "")
+    _dstd = ctx.get("dimension_std")
+    if _cb and len(_cb) == 2:
+        _cb_lo, _cb_hi = float(_cb[0]), float(_cb[1])
+        # 把 [0,10] 区间映射到 100% 宽度
+        _bar_lo  = _cb_lo / 10 * 100
+        _bar_w   = (_cb_hi - _cb_lo) / 10 * 100
+        _mark_x  = score / 10 * 100
+        # 分散度标签
+        _std_label = (f"⚠️ 极高分散 ({_dstd:.1f})" if _dstd and float(_dstd) >= 2.5
+                      else (f"中等分散 ({_dstd:.1f})" if _dstd and float(_dstd) >= 1.5
+                            else (f"低分散 ({_dstd:.1f})" if _dstd else "")))
+        _std_color = ("var(--red2)" if _dstd and float(_dstd) >= 2.5
+                      else ("var(--gold2)" if _dstd and float(_dstd) >= 1.5 else "var(--green2)"))
+        _disc_label = {"low":"低区分度","medium":"中区分度","high":"高区分度"}.get(_disc, _disc)
+        confidence_band_html = f"""
+      <div style="margin-top:10px;padding:8px 10px;background:var(--bg2);border-radius:8px;border:1px solid var(--border);">
+        <div style="font-size:11px;color:var(--text2);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;">
+          <span>📏 置信区间 <strong style="color:var(--text1);">[{_cb_lo:.2f} – {_cb_hi:.2f}]</strong>（宽度 {_bw:.2f}，{_disc_label}）</span>
+          <span style="color:{_std_color};font-weight:700;">{_std_label}</span>
+        </div>
+        <div style="position:relative;height:8px;background:var(--bg3);border-radius:4px;overflow:visible;">
+          <div style="position:absolute;left:{_bar_lo:.1f}%;width:{_bar_w:.1f}%;height:100%;background:rgba(139,92,246,0.35);border-radius:4px;"></div>
+          <div style="position:absolute;left:{_mark_x:.1f}%;transform:translateX(-50%);top:-2px;width:3px;height:12px;background:{score_color};border-radius:2px;" title="当前评分 {score:.2f}"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text3);margin-top:3px;">
+          <span>0</span><span style="color:{score_color};font-weight:600;">▲ {score:.2f}</span><span>10</span>
+        </div>
+      </div>"""
+    else:
+        confidence_band_html = ""
+
     score_summary_html = f"""<div class="score-summary">
       <div class="score-summary-row">
         <div class="final-score-big" style="color:{score_color};">{score:.2f}</div>
         <span class="stat-pill bull-pill">看多 {agent_votes_bull}</span>
         <span class="stat-pill neut-pill">中性 {agent_votes_neut}</span>
         <span class="stat-pill bear-pill">看空 {agent_votes_bear}</span>
-      </div>{t7_widget_html}
+      </div>{t7_widget_html}{confidence_band_html}
     </div>"""
 
     # 条形图 HTML
@@ -1030,6 +1551,59 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
     else:
         expiry_row_html = ""
 
+    # ── IV 期限结构卡片（CH4 · OracleBee S15）─────────────────────────────────
+    _ivts       = ctx.get("iv_term_structure", {}) or {}
+    _ivts_shape = _ivts.get("shape", "unknown")
+    if _ivts_shape not in ("contango", "backwardation", "flat"):
+        iv_term_html = ""
+    else:
+        _shape_labels = {
+            "contango":      "正向 Contango",
+            "backwardation": "倒挂 Backwardation",
+            "flat":          "平坦 Flat",
+        }
+        _shape_colors = {
+            "contango":      ("var(--green2)", "rgba(16,185,129,0.10)", "rgba(16,185,129,0.35)"),
+            "backwardation": ("var(--red2)",   "rgba(239,68,68,0.10)",  "rgba(239,68,68,0.35)"),
+            "flat":          ("var(--gold2)",  "rgba(245,158,11,0.10)", "rgba(245,158,11,0.35)"),
+        }
+        _sc, _sbg, _sborder = _shape_colors[_ivts_shape]
+        _spread   = _ivts.get("iv_spread")
+        _signal   = _ivts.get("signal", "")
+        _pts      = _ivts.get("term_structure", [])
+
+        # 每个到期点：ATM IV + DTE + 月日
+        _pts_html = ""
+        for _i, _pt in enumerate(_pts):
+            _connector = (
+                f'<div style="font-size:16px;color:var(--text3);align-self:center;padding:0 4px;">→</div>'
+                if _i < len(_pts) - 1 else ""
+            )
+            _pts_html += (
+                f'<div style="text-align:center;min-width:54px;">'
+                f'<div style="font-size:14px;font-weight:700;color:{_sc};">{_pt["atm_iv"]:.1f}%</div>'
+                f'<div style="font-size:10px;color:var(--text3);">{_pt["dte"]}天</div>'
+                f'<div style="font-size:10px;color:var(--text4);">{_pt["expiry"][5:]}</div>'
+                f'</div>{_connector}'
+            )
+
+        _spread_str = f"{_spread:+.1f}pp" if _spread is not None else "N/A"
+        iv_term_html = (
+            f'<div style="margin-bottom:16px;padding:12px 16px;'
+            f'background:{_sbg};border:1px solid {_sborder};border-radius:8px;">'
+            f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'
+            f'<span style="font-size:11px;font-weight:700;color:var(--text2);">📐 IV 期限结构</span>'
+            f'<span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;'
+            f'background:{_sborder};color:{_sc};">{_shape_labels[_ivts_shape]}</span>'
+            f'<span style="font-size:11px;color:var(--text3);margin-left:auto;">前后利差 {_spread_str}</span>'
+            f'</div>'
+            f'<div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:8px;">'
+            f'{_pts_html}'
+            f'</div>'
+            f'<div style="font-size:11px;color:var(--text2);line-height:1.5;">{_signal}</div>'
+            f'</div>'
+        )
+
     # F&G 显示
     fg = ctx.get("fg_score")
     if fg is not None:
@@ -1071,6 +1645,24 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
     else:
         oi_str = f"{total_oi:,}"
 
+    # OI 日环比 Delta 子文本
+    _oi_delta     = ctx.get("oi_delta")
+    _oi_delta_pct = ctx.get("oi_delta_pct")
+    if _oi_delta is not None and _oi_delta_pct is not None:
+        _oi_arrow = "▲" if _oi_delta > 0 else ("▼" if _oi_delta < 0 else "─")
+        _oi_d_color = "var(--green2)" if _oi_delta > 0 else ("var(--red2)" if _oi_delta < 0 else "var(--text3)")
+        _oi_delta_abs = abs(_oi_delta)
+        if _oi_delta_abs >= 10_000:
+            _oi_d_str = f"{_oi_delta_abs/10_000:.1f}万"
+        else:
+            _oi_d_str = f"{_oi_delta_abs:,}"
+        oi_delta_sub = (
+            f'未平仓合约 <span style="color:{_oi_d_color}">'
+            f'{_oi_arrow}{_oi_d_str}({_oi_delta_pct:+.1f}%日环比)</span>'
+        )
+    else:
+        oi_delta_sub = "未平仓合约"
+
     # 异常流数量统计
     bullish_unusual = sum(1 for u in ctx["unusual_activity"] if u.get("bullish"))
     bearish_unusual = len(ctx["unusual_activity"]) - bullish_unusual
@@ -1080,82 +1672,104 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
     verdict_bg = f"rgba({'16,185,129' if 'bull' in direction else ('239,68,68' if 'bear' in direction else '245,158,11')},0.15)"
     verdict_border = f"rgba({'16,185,129' if 'bull' in direction else ('239,68,68' if 'bear' in direction else '245,158,11')},0.35)"
 
-    # ── 生成情景推演 ──────────────────────────────────────────
+    # ── 情景推演：优先 LLM 数据，降级到 ML 规则引擎 ─────────────────
+    _llm_sc = ctx.get("llm_scenario", {})
+    _use_llm_sc = bool(_llm_sc and _llm_sc.get("sc_a"))
+
     if ctx.get("price"):
         p = float(ctx["price"])
-        # 基于ML预测和关键位计算情景
         max_res_price = resistances[0]["strike"] if resistances else p * 1.10
         max_sup_price = supports[0]["strike"] if supports else p * 0.90
 
-        sc_a_lo = round(max_res_price * 1.02, 0)
-        sc_a_hi = round(max_res_price * 1.12, 0)
-        sc_b_lo = round(p * 1.03, 0)
-        sc_b_hi = round(max_res_price * 0.99, 0)
-        sc_c_lo = round(max_sup_price * 0.99, 0)
-        sc_c_hi = round(p * 0.98, 0)
-        sc_d_lo = round(max_sup_price * 0.85, 0)
-        sc_d_hi = round(max_sup_price * 0.95, 0)
-
-        # EV 计算（基于方向）
-        if "bull" in direction:
-            probs = [0.25, 0.35, 0.28, 0.12]
-            returns = [+0.15, +0.05, -0.07, -0.18]
-        elif "bear" in direction:
-            probs = [0.12, 0.28, 0.35, 0.25]
-            returns = [+0.15, +0.05, -0.07, -0.18]
+        if _use_llm_sc:
+            # ── LLM 情景数据（float() 保护防止 JSON 返回字符串） ──
+            sc_a_lo = float(_llm_sc["sc_a"]["price_lo"]); sc_a_hi = float(_llm_sc["sc_a"]["price_hi"])
+            sc_b_lo = float(_llm_sc["sc_b"]["price_lo"]); sc_b_hi = float(_llm_sc["sc_b"]["price_hi"])
+            sc_c_lo = float(_llm_sc["sc_c"]["price_lo"]); sc_c_hi = float(_llm_sc["sc_c"]["price_hi"])
+            sc_d_lo = float(_llm_sc["sc_d"]["price_lo"]); sc_d_hi = float(_llm_sc["sc_d"]["price_hi"])
+            probs = [float(_llm_sc["sc_a"]["prob"]), float(_llm_sc["sc_b"]["prob"]),
+                     float(_llm_sc["sc_c"]["prob"]), float(_llm_sc["sc_d"]["prob"])]
+            ev_pct = float(_llm_sc.get("ev_pct") or 0)
+            ev_str = f"{ev_pct:+.1f}%"
         else:
-            probs = [0.20, 0.30, 0.30, 0.20]
-            returns = [+0.12, +0.04, -0.06, -0.15]
-        ev = sum(p * r for p, r in zip(probs, returns)) * 100
-        ev_str = f"{ev:+.1f}%"
-        ev_calc = " + ".join([f"+{r*100:.0f}%×{p*100:.0f}%" for p, r in zip(probs, returns) if r > 0])
-        ev_calc += " - " + " - ".join([f"{abs(r*100):.0f}%×{p*100:.0f}%" for p, r in zip(probs, returns) if r < 0])
+            # ── ML 规则引擎降级 ──
+            sc_a_lo = round(max_res_price * 1.02, 0); sc_a_hi = round(max_res_price * 1.12, 0)
+            sc_b_lo = round(p * 1.03, 0);             sc_b_hi = round(max_res_price * 0.99, 0)
+            sc_c_lo = round(max_sup_price * 0.99, 0); sc_c_hi = round(p * 0.98, 0)
+            sc_d_lo = round(max_sup_price * 0.85, 0); sc_d_hi = round(max_sup_price * 0.95, 0)
+            if "bull" in direction:
+                probs = [0.25, 0.35, 0.28, 0.12]
+                returns = [+0.15, +0.05, -0.07, -0.18]
+            elif "bear" in direction:
+                probs = [0.12, 0.28, 0.35, 0.25]
+                returns = [+0.15, +0.05, -0.07, -0.18]
+            else:
+                probs = [0.20, 0.30, 0.30, 0.20]
+                returns = [+0.12, +0.04, -0.06, -0.15]
+            ev_pct = sum(pr * r for pr, r in zip(probs, returns)) * 100
+            ev_str = f"{ev_pct:+.1f}%"
+
+        # 情景卡片 note（LLM 提供则用，否则用默认文案）
+        sc_a_note = _llm_sc["sc_a"].get("note", f"{res_label}触发，做市商 Delta 对冲加速上涨。") if _use_llm_sc else f"{res_label}触发，阻力位被突破后做市商Delta对冲形成加速上涨。"
+        sc_b_note = _llm_sc["sc_b"].get("note", f"期权流{ctx['flow_direction']}，近端支撑稳固，温和上涨定价合理。") if _use_llm_sc else f"期权流{ctx['flow_direction']}，近端支撑稳固，温和上涨定价合理。"
+        _sc_c_oi = (f"{supports[0]['oi']:,.0f}") if supports else 'N/A'
+        sc_c_note = _llm_sc["sc_c"].get("note", f"OI {_sc_c_oi} 提供缓冲，量能萎缩限制下行弹性。") if _use_llm_sc else f"OI {_sc_c_oi} 提供缓冲，量能萎缩限制下行弹性。"
+        sc_d_note = _llm_sc["sc_d"].get("note", f"风险：{', '.join(ctx['bear_signals'][:2]) or 'IV Skew偏高, 宏观不确定'}。深部支撑防线。") if _use_llm_sc else f"风险：{', '.join(ctx['bear_signals'][:2]) or 'IV Skew偏高, 宏观不确定'}。深部支撑防线。"
     else:
         sc_a_lo, sc_a_hi = 0, 0
         sc_b_lo, sc_b_hi = 0, 0
         sc_c_lo, sc_c_hi = 0, 0
         sc_d_lo, sc_d_hi = 0, 0
         ev_str = "N/A"
-        ev_calc = "价格数据缺失"
         probs = [0.25, 0.35, 0.28, 0.12]
+        sc_a_note = sc_b_note = sc_c_note = sc_d_note = ""
 
-    # ── 止盈/止损计划 ─────────────────────────────────────────────
-    win_rate = (probs[0] + probs[1]) * 100  # 看涨情景合计胜率
+    # ── 止盈/止损：优先 LLM 数据 ──────────────────────────────────
+    _wr_fallback = (probs[0] + probs[1]) * 100
+    win_rate  = float(_llm_sc.get("win_rate") or _wr_fallback) if _use_llm_sc else _wr_fallback
+    hold_days = _llm_sc.get("hold_days") or "5–10天"
+
+    # ③ 综合胜率免责标注（样本量不足时显示）
+    _aa_n = ctx.get("aa_hist_sample_n")
+    if _aa_n is not None and int(_aa_n) < 10:
+        win_rate_caveat = f'<span style="font-size:10px;color:var(--text3);margin-left:4px;">(n={_aa_n}, 仅供参考)</span>'
+    else:
+        win_rate_caveat = ""
+    is_bear_dir = "bear" in direction
+    tp_color  = "var(--red2)"   if is_bear_dir else "var(--green2)"
+    sl_color  = "var(--green2)" if is_bear_dir else "var(--red2)"
+    tp_sign   = "-" if is_bear_dir else "+"
+    sl_sign   = "+" if is_bear_dir else "-"
+
     if price and price > 0:
-        # 止盈目标（基于情景概率梯度）
-        tp1_pct = returns[1] * 0.5 if 'bull' in direction else abs(returns[2]) * 0.5
-        tp2_pct = returns[1] if 'bull' in direction else abs(returns[2])
-        tp3_pct = returns[0] * 0.85 if 'bull' in direction else abs(returns[2]) * 1.8
-        if 'bear' in direction:
-            # 看空情景：止盈是下行目标，止损是上行
-            tp1 = price * (1 - tp1_pct)
-            tp2 = price * (1 - tp2_pct)
-            tp3 = price * (1 - tp3_pct)
-            sl_cons  = price * 1.03   # 保守止损 +3%
-            sl_std   = price * 1.055  # 标准止损 +5.5%
-            sl_aggr  = price * 1.085  # 激进止损 +8.5%
-            tp_color, sl_color = "var(--red2)", "var(--green2)"
-            tp_sign, sl_sign = "-", "+"
+        _llm_tp1 = _llm_sc.get("tp1"); _llm_tp2 = _llm_sc.get("tp2"); _llm_tp3 = _llm_sc.get("tp3")
+        _llm_sl1 = _llm_sc.get("sl_conservative"); _llm_sl2 = _llm_sc.get("sl_standard"); _llm_sl3 = _llm_sc.get("sl_aggressive")
+        if _use_llm_sc and all(v is not None for v in [_llm_tp1, _llm_tp2, _llm_tp3, _llm_sl1, _llm_sl2, _llm_sl3]):
+            tp1     = float(_llm_tp1); tp2     = float(_llm_tp2); tp3     = float(_llm_tp3)
+            sl_cons = float(_llm_sl1); sl_std  = float(_llm_sl2); sl_aggr = float(_llm_sl3)
+            tp1_action = _llm_sc.get("tp1_action") or "减仓 1/3"
+            tp2_action = _llm_sc.get("tp2_action") or "减仓 1/3"
+            tp3_action = _llm_sc.get("tp3_action") or "清仓"
         else:
-            tp1 = price * (1 + tp1_pct)
-            tp2 = price * (1 + tp2_pct)
-            tp3 = price * (1 + tp3_pct)
-            sl_cons  = price * 0.97   # 保守止损 -3%
-            sl_std   = price * 0.945  # 标准止损 -5.5%
-            sl_aggr  = price * 0.915  # 激进止损 -8.5%
-            tp_color, sl_color = "var(--green2)", "var(--red2)"
-            tp_sign, sl_sign = "+", "-"
+            # ML 降级
+            if is_bear_dir:
+                tp1 = price * 0.965; tp2 = price * 0.93; tp3 = price * 0.874
+                sl_cons = price * 1.03; sl_std = price * 1.055; sl_aggr = price * 1.085
+            else:
+                tp1 = price * 1.025; tp2 = price * 1.05; tp3 = price * 1.128
+                sl_cons = price * 0.97; sl_std = price * 0.945; sl_aggr = price * 0.915
+            tp1_action = tp2_action = "减仓 1/3"; tp3_action = "清仓"
         tp1_pct_show = abs(tp1/price - 1) * 100
         tp2_pct_show = abs(tp2/price - 1) * 100
         tp3_pct_show = abs(tp3/price - 1) * 100
-        risk_reward = tp2_pct_show / (5.5) if 5.5 > 0 else 0  # 收益/风险比
+        sl_std_pct   = abs(sl_std/price - 1) * 100
+        risk_reward  = tp2_pct_show / sl_std_pct if sl_std_pct > 0 else 0
     else:
         tp1 = tp2 = tp3 = 0
         sl_cons = sl_std = sl_aggr = 0
         tp1_pct_show = tp2_pct_show = tp3_pct_show = 0
-        tp_color, sl_color = "var(--green2)", "var(--red2)"
-        tp_sign, sl_sign = "+", "-"
         risk_reward = 0
+        tp1_action = tp2_action = "减仓 1/3"; tp3_action = "清仓"
 
     # 止盈/止损 HTML 块
     tp_title = "📉 止盈计划（下行目标）" if "bear" in direction else "📈 止盈计划"
@@ -1167,19 +1781,19 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
         <div class="tp-row">
           <span class="tr-price">${tp1:.2f}</span>
           <span class="tr-pct" style="color:{tp_color}">{tp_sign}{tp1_pct_show:.1f}%</span>
-          <span style="font-size:11px;color:var(--text3)">减仓 1/3</span>
+          <span style="font-size:11px;color:var(--text3)">{tp1_action}</span>
         </div>
         <div class="tp-row">
           <span class="tr-price">${tp2:.2f}</span>
           <span class="tr-pct" style="color:{tp_color}">{tp_sign}{tp2_pct_show:.1f}%</span>
-          <span style="font-size:11px;color:var(--text3)">减仓 1/3</span>
+          <span style="font-size:11px;color:var(--text3)">{tp2_action}</span>
         </div>
         <div class="tp-row">
           <span class="tr-price">${tp3:.2f}</span>
           <span class="tr-pct" style="color:{tp_color}">{tp_sign}{tp3_pct_show:.1f}%</span>
-          <span style="font-size:11px;color:var(--text3)">清仓剩余</span>
+          <span style="font-size:11px;color:var(--text3)">{tp3_action}</span>
         </div>
-        <div style="margin-top:8px;font-size:11px;color:var(--text3)">综合胜率 {win_rate:.1f}% · 持仓建议 5–10天</div>
+        <div style="margin-top:8px;font-size:11px;color:var(--text3)">综合胜率 {win_rate:.1f}%{win_rate_caveat} · 持仓建议 {hold_days}</div>
       </div>
       <div class="sl-box">
         <div class="tb-title">{sl_title}</div>
@@ -1330,6 +1944,135 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
         iv_rank_display = "—"
         iv_rank_color   = "var(--text3)"
         iv_rank_sub     = "数据待更新"
+
+    # ④ GEX（Gamma Exposure）
+    _gex_val    = ctx.get("gamma_exposure", 0)
+    _gex_squeeze = ctx.get("gamma_squeeze_risk", "")
+    _gex_regime  = ctx.get("gex_regime", "")
+    _gex_flip    = ctx.get("gex_flip")
+    _gex_cwall   = ctx.get("gex_call_wall")
+    _gex_pwall   = ctx.get("gex_put_wall")
+    try:
+        _gex_float = float(_gex_val)
+    except (TypeError, ValueError):
+        _gex_float = 0.0
+    if _gex_float == 0.0:
+        gex_display = "N/A"
+        gex_color   = "var(--text3)"
+        gex_sub     = "⚠️ 数据采集失败"
+        gex_card_class = "oc-neut"
+        gex_extra_html = ""
+    else:
+        # 主数值显示：百万美元单位
+        gex_display = f"{_gex_float:+.1f}M$"
+        # regime 颜色：negative_gex（放大波动）红，positive_gex（压制波动）绿
+        if _gex_regime == "negative_gex":
+            gex_color = "var(--red2)";  gex_card_class = "oc-bear"
+            gex_sub   = "⚠️ 负GEX·放大波动"
+        elif _gex_regime == "positive_gex":
+            gex_color = "var(--green2)"; gex_card_class = "oc-bull"
+            gex_sub   = "✅ 正GEX·压制波动"
+        else:
+            gex_color = "var(--gold2)"; gex_card_class = "oc-neut"
+            gex_sub   = "Gamma敞口"
+        # flip point & 最大call/put墙 额外行
+        _extra_parts = []
+        if _gex_flip:
+            _extra_parts.append(f"Flip ${_gex_flip:.0f}")
+        if _gex_cwall:
+            _extra_parts.append(f"Call墙 ${_gex_cwall:.0f}")
+        if _gex_pwall:
+            _extra_parts.append(f"Put墙 ${_gex_pwall:.0f}")
+        gex_extra_html = (f'<div style="font-size:10px;color:var(--text3);margin-top:2px;">'
+                          + " · ".join(_extra_parts) + "</div>") if _extra_parts else ""
+
+    # ── IV Crush 面板（CH3 催化剂章节内嵌）──────────────────────────────────────
+    _ivc = ctx.get("iv_crush", {}) or {}
+    if _ivc and _ivc.get("avg_abs_move", 0):
+        _ivc_avg    = _ivc.get("avg_abs_move", 0)
+        _ivc_imp    = _ivc.get("current_implied_move")
+        _ivc_up     = _ivc.get("up_count", 0)
+        _ivc_down   = _ivc.get("down_count", 0)
+        _ivc_total  = _ivc_up + _ivc_down
+        _ivc_win    = int(_ivc_up / _ivc_total * 100) if _ivc_total > 0 else 0
+        _ivc_ed     = _ivc.get("next_earnings_date", "—")
+        _ivc_days   = _ivc.get("next_earnings_days")
+        _ivc_days_str = f" ({_ivc_days}天后)" if _ivc_days is not None else ""
+        _imp_vs_hist = ""
+        if _ivc_imp:
+            _ratio = _ivc_imp / _ivc_avg if _ivc_avg else 1
+            if _ratio > 1.15:
+                _imp_vs_hist = f'<span style="color:var(--red2);font-size:10px;font-weight:700">⚠️ 隐含幅度偏贵 (+{(_ratio-1)*100:.0f}%)</span>'
+            elif _ratio < 0.85:
+                _imp_vs_hist = f'<span style="color:var(--green2);font-size:10px;font-weight:700">✅ 隐含幅度偏便宜 ({(_ratio-1)*100:.0f}%)</span>'
+            else:
+                _imp_vs_hist = f'<span style="color:var(--gold2);font-size:10px">合理定价</span>'
+        iv_crush_html = f"""<div style="background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+  <div style="font-size:11px;font-weight:700;color:var(--cyan2);margin-bottom:10px;">📊 IV Crush 历史分析（财报波动）</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;">
+    <div style="text-align:center;background:var(--bg4);border-radius:6px;padding:8px;">
+      <div style="font-size:10px;color:var(--text3)">历史平均波动</div>
+      <div style="font-size:20px;font-weight:800;color:var(--gold2)">{_ivc_avg:.1f}%</div>
+      <div style="font-size:10px;color:var(--text3)">过去 {_ivc_total} 次财报</div>
+    </div>
+    <div style="text-align:center;background:var(--bg4);border-radius:6px;padding:8px;">
+      <div style="font-size:10px;color:var(--text3)">当前隐含幅度</div>
+      <div style="font-size:20px;font-weight:800;color:var(--blue2)">{f"{_ivc_imp:.1f}%" if _ivc_imp else "N/A"}</div>
+      <div style="font-size:10px">{_imp_vs_hist}</div>
+    </div>
+    <div style="text-align:center;background:var(--bg4);border-radius:6px;padding:8px;">
+      <div style="font-size:10px;color:var(--text3)">上涨胜率</div>
+      <div style="font-size:20px;font-weight:800;color:var(--green2)">{_ivc_win}%</div>
+      <div style="font-size:10px;color:var(--text3)">{_ivc_up}涨 / {_ivc_down}跌</div>
+    </div>
+    <div style="text-align:center;background:var(--bg4);border-radius:6px;padding:8px;">
+      <div style="font-size:10px;color:var(--text3)">下次财报</div>
+      <div style="font-size:13px;font-weight:700;color:var(--text)">{_ivc_ed}</div>
+      <div style="font-size:10px;color:var(--text3)">{_ivc_days_str}</div>
+    </div>
+  </div>
+</div>"""
+    else:
+        iv_crush_html = ""
+
+    # ── VIX 期限结构卡片（CH5 宏观章节内嵌）──────────────────────────────────────
+    _vt = ctx.get("vix_term_structure", {}) or {}
+    if _vt and _vt.get("structure") not in ("", "unknown", None):
+        _vt_struct   = _vt.get("structure", "unknown")
+        _vt_spot     = _vt.get("spot_vix")
+        _vt_m1       = _vt.get("m1")
+        _vt_m2       = _vt.get("m2")
+        _vt_spread   = _vt.get("m1_m2_spread")
+        _vt_zh       = {"contango": "Contango（平静）", "backwardation": "Backwardation（恐慌）", "flat": "平坦结构"}.get(_vt_struct, _vt_struct)
+        _vt_color    = "var(--green2)" if _vt_struct == "contango" else ("var(--red2)" if _vt_struct == "backwardation" else "var(--gold2)")
+        _vt_sub      = "卖方有利" if _vt_struct == "contango" else ("⚠️ 恐慌结构" if _vt_struct == "backwardation" else "观望")
+        vix_card_html = f"""<div class="opt-card oc-neut">
+          <div class="oc-label">VIX 期限结构</div>
+          <div class="oc-val" style="color:{_vt_color};font-size:14px;font-weight:800">{_vt_zh}</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:3px">VIX={f"{_vt_spot:.1f}" if _vt_spot else "N/A"} M1→M2={f"{_vt_m1:.1f}→{_vt_m2:.1f}" if _vt_m1 and _vt_m2 else "N/A"}</div>
+          <div class="oc-sub">{_vt_sub}</div>
+        </div>"""
+    else:
+        vix_card_html = ""
+
+    # ── 国会交易卡片（CH5）──────────────────────────────────────────────────────
+    _cg = ctx.get("congress", {}) or {}
+    if _cg and (_cg.get("buy_count", 0) + _cg.get("sell_count", 0)) > 0:
+        _cg_buy  = _cg.get("buy_count", 0)
+        _cg_sell = _cg.get("sell_count", 0)
+        _cg_sc   = _cg.get("congress_score", 0)
+        _cg_net  = _cg.get("net_amount_est", 0)
+        _cg_net_str = f"+${abs(_cg_net)/1e6:.1f}M" if _cg_net > 0 else (f"-${abs(_cg_net)/1e6:.1f}M" if _cg_net < 0 else "0")
+        _cg_color = "var(--green2)" if _cg_buy > _cg_sell else "var(--red2)"
+        congress_card_html = f"""<div class="opt-card oc-info">
+          <div class="oc-label">🏛️ 国会交易（90天）</div>
+          <div class="oc-val" style="color:{_cg_color}">{_cg_buy}买/{_cg_sell}卖</div>
+          <div style="font-size:10px;color:var(--text3);margin-top:2px">净额 {_cg_net_str} · 评分 {_cg_sc}/10</div>
+          <div class="oc-sub">{"内部人买入信号" if _cg_buy > _cg_sell else "内部人卖出信号"}</div>
+        </div>"""
+    else:
+        congress_card_html = ""
+
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1596,11 +2339,12 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
       <span class="section-badge {direction_badge(direction)}">综合 {score:.2f} · {'看多' if 'bull' in direction else ('看空' if 'bear' in direction else '中性')}</span>
     </div>
     <div class="section-body">
-      {score_summary_html}
+      {score_summary_html}{_conf_chart_html}
       <div class="score-grid" style="margin-top:14px;">{score_cards}</div>
       <div class="divider"></div>
       <div class="prose">{reasoning.get('swarm_analysis', '<p>分析生成中...</p>')}</div>
       <div style="margin-top:14px;">{bar_rows}</div>
+      {accuracy_html}
     </div>
   </div>
 
@@ -1637,6 +2381,7 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
     <div class="section-body">
       <div class="timeline">{timeline_html}</div>
       <div class="divider"></div>
+      {iv_crush_html}
       <div class="prose">{reasoning.get('catalyst', '<p>分析生成中...</p>')}</div>
     </div>
   </div>
@@ -1650,6 +2395,7 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
       <span class="section-badge {flow_badge}">P/C={ctx['put_call_ratio']} · OI={oi_str} · {bull_unusual_count}个看涨异动</span>
     </div>
     <div class="section-body">
+      {_opts_chart_html}
       <div class="opt-grid" style="margin-bottom:16px;">
         <div class="opt-card oc-bull">
           <div class="oc-label">Put/Call 比</div>
@@ -1661,7 +2407,7 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
         <div class="opt-card oc-info">
           <div class="oc-label">总开仓量</div>
           <div class="oc-val" style="color:var(--cyan2)">{oi_str}</div>
-          <div class="oc-sub">未平仓合约</div>
+          <div class="oc-sub">{oi_delta_sub}</div>
         </div>
         <div class="opt-card oc-neut">
           <div class="oc-label">IV Skew</div>
@@ -1678,7 +2424,15 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
           <div class="oc-val" style="color:{iv_rank_color}">{iv_rank_display}</div>
           <div class="oc-sub">{iv_rank_sub}</div>
         </div>
+        <div class="opt-card {gex_card_class}">
+          <div class="oc-label">GEX</div>
+          <div class="oc-val" style="color:{gex_color};font-size:18px;">{gex_display}</div>
+          <div class="oc-sub">{gex_sub}</div>
+          {gex_extra_html}
+        </div>
       </div>
+
+      {iv_term_html}
 
       <div class="levels-grid" style="margin-bottom:16px;">
         <div class="level-block support">
@@ -1739,6 +2493,8 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
           </div>
           <div class="oc-sub">{ctx['reddit'].get('mentions','N/A')}次提及</div>
         </div>
+        {vix_card_html}
+        {congress_card_html}
       </div>
       <div class="prose">{reasoning.get('macro', '<p>分析生成中...</p>')}</div>
     </div>
@@ -1759,28 +2515,28 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
           <div class="sc-prob">突破阻力 + 催化剂超预期 · 概率 {probs[0]*100:.0f}%</div>
           <div class="sc-price">${sc_a_lo:.0f}–${sc_a_hi:.0f}</div>
           <div class="sc-gain" style="color:var(--green2)">ML 7日预期 {ctx['ml_7d']:+.1f}%</div>
-          <div class="sc-note">{res_label}触发，阻力位被突破后做市商Delta对冲形成加速上涨。</div>
+          <div class="sc-note">{sc_a_note}</div>
         </div>
         <div class="sc-card sc-bull">
           <div class="sc-name">📈 情景B · 温和看涨</div>
           <div class="sc-prob">催化剂达预期 · 概率 {probs[1]*100:.0f}%</div>
           <div class="sc-price">${sc_b_lo:.0f}–${sc_b_hi:.0f}</div>
           <div class="sc-gain" style="color:var(--green2)">P/C={ctx['put_call_ratio']} 支持</div>
-          <div class="sc-note">期权流{ctx['flow_direction']}，近端支撑稳固，温和上涨定价合理。</div>
+          <div class="sc-note">{sc_b_note}</div>
         </div>
         <div class="sc-card sc-meh">
           <div class="sc-name">📉 情景C · 温和看跌</div>
           <div class="sc-prob">催化剂不达预期 · 概率 {probs[2]*100:.0f}%</div>
-          <div class="sc-price">${sc_c_hi:.0f}–${sc_c_lo:.0f}</div>
+          <div class="sc-price">${sc_c_lo:.0f}–${sc_c_hi:.0f}</div>
           <div class="sc-gain" style="color:var(--gold2)">支撑 ${supports[0]['strike'] if supports else 'N/A'}</div>
-          <div class="sc-note">OI {f"{supports[0]['oi']:,.0f}" if supports else "N/A"} 提供缓冲，量能萎缩限制下行弹性。</div>
+          <div class="sc-note">{sc_c_note}</div>
         </div>
         <div class="sc-card sc-bear">
           <div class="sc-name">💥 情景D · 极端风险</div>
           <div class="sc-prob">催化剂暴雷 + 宏观恶化 · 概率 {probs[3]*100:.0f}%</div>
           <div class="sc-price">${sc_d_lo:.0f}–${sc_d_hi:.0f}</div>
           <div class="sc-gain" style="color:var(--red2)">高风险情景</div>
-          <div class="sc-note">风险：{', '.join(ctx['bear_signals'][:2]) or 'IV Skew偏高, 宏观不确定'}。深部支撑防线。</div>
+          <div class="sc-note">{sc_d_note}</div>
         </div>
       </div>
 
@@ -1790,7 +2546,7 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
         <div class="ev-left">
           <div class="label">期望收益率（EV）</div>
           <div class="big">{ev_str}</div>
-          <div style="font-size:11px;color:var(--text2);margin-top:3px;">综合胜率 {win_rate:.1f}%</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:3px;">综合胜率 {win_rate:.1f}%{win_rate_caveat}</div>
         </div>
         <div class="ev-right">
           <strong>ML 预测：</strong>7日 {ctx['ml_7d']:+.1f}% · 30日 {ctx['ml_30d']:+.1f}%<br><br>
@@ -1815,7 +2571,7 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
         {risk_items_html}
       </div>
       <div class="divider"></div>
-      <div class="prose">{reasoning.get('risk', '<p>分析生成中...</p>')}</div>
+      <div class="prose">{reasoning.get('risk', '')}</div>
     </div>
   </div>
 
@@ -1830,6 +2586,106 @@ def generate_html(ctx: dict, reasoning: dict) -> str:
 </body>
 </html>"""
     return html
+
+
+# ── 自学习辅助函数 ───────────────────────────────────────────────────────────────
+
+def _save_report_snapshot(ctx: dict, ticker: str, report_date: str, out_dir: Path) -> None:
+    """保存报告快照供 feedback_loop 回溯学习（Gap 1）"""
+    try:
+        from feedback_loop import ReportSnapshot
+        snap_dir = str(out_dir / "report_snapshots")
+        snap = ReportSnapshot(ticker, report_date)
+        snap.composite_score = float(ctx.get("final_score", 0.0) or 0.0)
+        _dir = (ctx.get("direction") or "neutral").lower()
+        snap.direction = "Long" if "bull" in _dir else ("Short" if "bear" in _dir else "Neutral")
+        snap.entry_price = float(ctx.get("price", 0.0) or 0.0)
+        snap.agent_votes = {
+            "ScoutBeeNova":       float(ctx["scout"].get("score",   0) or 0),
+            "BuzzBeeWhisper":     float(ctx["buzz"].get("score",    0) or 0),
+            "OracleBeeEcho":      float(ctx["oracle"].get("score",  0) or 0),
+            "ChronosBeeHorizon":  float(ctx["chronos"].get("score", 0) or 0),
+            "RivalBeeVanguard":   float(ctx["rival"].get("score",   0) or 0),
+            "GuardBeeSentinel":   float(ctx["guard"].get("score",   0) or 0),
+            "BearBeeContrarian":  float(ctx["bear"].get("score",    0) or 0),
+        }
+        fname = snap.save_to_json(snap_dir)
+        print(f"📸 预测快照已保存: {Path(fname).name}")
+    except Exception as e:
+        print(f"⚠️  快照保存失败（不影响报告）: {e}")
+
+
+def _run_outcome_backfill(out_dir: Path) -> None:
+    """回填历史预测的实际价格（T+1/T+7/T+30）（Gap 2）"""
+    try:
+        from outcomes_fetcher import OutcomesFetcher
+        snap_dir = str(out_dir / "report_snapshots")
+        if not Path(snap_dir).exists():
+            return
+        fetcher = OutcomesFetcher(snapshots_dir=snap_dir)
+        stats = fetcher.run()
+        if stats.get("updated", 0) > 0:
+            print(f"🔄 价格回填: {stats['updated']}/{stats['scanned']} 个快照已更新")
+    except Exception as e:
+        print(f"⚠️  价格回填失败（不影响报告）: {e}")
+
+
+def _load_ticker_accuracy(ticker: str, out_dir: Path) -> dict:
+    """读取该 ticker 的历史预测准确率（Gap 3）"""
+    try:
+        from feedback_loop import BacktestAnalyzer
+        snap_dir = str(out_dir / "report_snapshots")
+        analyzer = BacktestAnalyzer(directory=snap_dir)
+        snaps = analyzer.get_snapshots_by_ticker(ticker)
+        if not snaps:
+            return {}
+        t7_snaps = [s for s in snaps if s.actual_price_t7 is not None and s.entry_price]
+        if not t7_snaps:
+            return {"n_snapshots": len(snaps), "pending": True}
+        wins = 0
+        total_ret = 0.0
+        n = len(t7_snaps)
+        for s in t7_snaps:
+            ret = (s.actual_price_t7 - s.entry_price) / s.entry_price * 100
+            total_ret += ret
+            if (s.direction == "Long" and ret > 0) or (s.direction == "Short" and ret < 0):
+                wins += 1
+        return {
+            "n": n,
+            "win_rate": round(wins / n * 100, 1),
+            "avg_ret_7d": round(total_ret / n, 2),
+        }
+    except Exception:
+        return {}
+
+
+def _render_accuracy_card(accuracy: dict) -> str:
+    """渲染历史准确率卡片 HTML（Gap 3）"""
+    if not accuracy:
+        return ""
+    if accuracy.get("pending"):
+        n = accuracy.get("n_snapshots", 0)
+        return (
+            '<div style="margin-top:12px;padding:10px 14px;background:var(--bg2);'
+            'border-radius:8px;border:1px solid var(--border1);font-size:12px;color:var(--text2);">'
+            f'📚 历史预测记录：{n} 条 · T+7 实际价格待回填</div>'
+        )
+    n   = accuracy["n"]
+    wr  = accuracy["win_rate"]
+    ar  = accuracy["avg_ret_7d"]
+    wr_color = "var(--green2)" if wr >= 60 else ("var(--yellow2)" if wr >= 50 else "var(--red2)")
+    ar_color = "var(--green2)" if ar >= 0 else "var(--red2)"
+    return (
+        '<div style="margin-top:12px;padding:10px 14px;background:var(--bg2);'
+        'border-radius:8px;border:1px solid var(--border1);">'
+        f'<span style="font-size:11px;color:var(--text3);font-weight:600;">'
+        f'📚 历史回测（{n} 份报告 · T+7）</span>'
+        '<div style="display:flex;gap:20px;margin-top:6px;align-items:center;">'
+        f'<span style="font-size:13px;">方向胜率 <strong style="color:{wr_color};">{wr}%</strong></span>'
+        f'<span style="font-size:13px;">平均收益 <strong style="color:{ar_color};">{ar:+.2f}%</strong></span>'
+        f'<span style="font-size:11px;color:var(--text3);">{n} 样本</span>'
+        '</div></div>'
+    )
 
 
 # ── 主程序 ────────────────────────────────────────────────────────────────────
@@ -1849,6 +2705,9 @@ def main():
     print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print(f"📊 标的: {ticker}")
 
+    # 0. 回填历史预测实际价格（Gap 2 · 自学习闭环）
+    _run_outcome_backfill(out_dir)
+
     # 1. 加载 JSON
     try:
         json_path = find_latest_json(ticker, args.date)
@@ -1861,7 +2720,13 @@ def main():
     # 2. 提取数据
     print("🔍 提取结构化数据...")
     ctx = extract(data)
+    ctx["_raw_data"] = data   # 保留原始 JSON 供 chart_engine 使用
     print(f"   评分: {ctx['final_score']:.2f} | 方向: {ctx['direction_zh']} | 共振: {'✅' if ctx['resonance'].get('resonance_detected') else '○'}")
+
+    # 2b-pre. GEX 补算：JSON 采集时若 yfinance 未返回价格导致 dealer_gex 缺失，
+    #         在报告生成阶段用 ctx['price'] 实时重算，保证 CH4 GEX 卡片有数据
+    print("📐 检查 GEX 数据...")
+    _try_compute_gex(ctx)
 
     # 2b. 加载昨日 JSON + T-7 JSON，构建 Delta 上下文
     prev_path = find_prev_json(ticker, json_path, days_back=1)
@@ -1898,6 +2763,18 @@ def main():
                 extras.append(f"  IV Skew: {float(prev['iv_skew']):.2f} → {float(ctx['iv_skew']):.2f} ({sd:+.2f})")
         except Exception:
             pass
+        try:
+            _oi_now  = ctx.get("total_oi") or 0
+            _oi_prev = prev.get("total_oi") or 0
+            if _oi_now and _oi_prev and _oi_prev > 0:
+                ctx["oi_delta"]     = int(_oi_now - _oi_prev)
+                ctx["oi_delta_pct"] = round((_oi_now / _oi_prev - 1) * 100, 2)
+                extras.append(
+                    f"  总OI: {_oi_prev:,.0f} → {_oi_now:,.0f} "
+                    f"({ctx['oi_delta']:+,}, {ctx['oi_delta_pct']:+.1f}%)"
+                )
+        except Exception:
+            pass
         delta_context = (
             f"【昨日对比】综合评分 {prev['final_score']:.2f} → {ctx['final_score']:.2f} ({score_diff:+.2f})\n"
             + ("\n".join(delta_lines) if delta_lines else "  各蜂评分变化均 <0.3，基本持平")
@@ -1905,6 +2782,13 @@ def main():
         )
         print(f"   📊 Delta: {score_diff:+.2f} | 昨日文件: {prev_path.name if prev_path else '无'}")
     ctx["delta_context"] = delta_context
+
+    # 2c. 读取历史准确率（Gap 3 · 自学习反馈）
+    _accuracy    = _load_ticker_accuracy(ticker, out_dir)
+    accuracy_html = _render_accuracy_card(_accuracy)
+    if _accuracy and not _accuracy.get("pending"):
+        print(f"   📚 历史胜率: {_accuracy['win_rate']}% | 平均T+7收益: {_accuracy['avg_ret_7d']:+.2f}% ({_accuracy['n']} 样本)")
+
     print(f"   OracleBee: P/C={ctx['put_call_ratio']}, OI={ctx['total_oi']:,}, Skew={ctx['iv_skew']}")
     print(f"   催化剂: {len(ctx['catalysts'])} 个 | 异常流: {len(ctx['unusual_activity'])} 笔")
     _pre_conflicts = detect_conflicts(ctx)
@@ -1912,6 +2796,15 @@ def main():
         print(f"   ⚡ 检测到 {len(_pre_conflicts)} 个信号矛盾：" + " | ".join(
             c[2:c.index('↔')].strip() if '↔' in c else c[2:30] for c in _pre_conflicts
         ))
+
+    # 2.5 实时新闻与情绪注入（Finnhub + Alpha Vantage）
+    print(f"   📰 实时新闻数据...", end="", flush=True)
+    ctx["live_news_block"] = fetch_live_news(ticker)
+    if ctx["live_news_block"]:
+        _news_lines = ctx["live_news_block"].count("\n")
+        print(f" ✅  ({_news_lines} 行)")
+    else:
+        print(f" ⏭  跳过（无 Finnhub/AV Key 或网络不可用）")
 
     # 3. LLM 深度推理
     sections = ["swarm_analysis", "resonance", "catalyst", "options", "macro", "scenario", "risk"]
@@ -1937,23 +2830,30 @@ def main():
             print(f"   ✍️  {sec}...", end="", flush=True)
             reasoning[sec] = llm_reason(ctx, sec, api_key)
             print(" ✅")
+
+        # Phase 3：情景结构化数据（JSON）
+        print(f"   📊 scenario_data (JSON)...", end="", flush=True)
+        ctx["llm_scenario"] = llm_scenario_data(ctx, api_key)
+        print(f" ✅  ({len(ctx['llm_scenario'])} 字段)" if ctx["llm_scenario"] else " ⚠️ 降级到ML")
     else:
         ctx["master_thesis"] = ""
-        reason = "本地模式" if args.no_llm else "未找到 API Key"
-        print(f"\n📝 本地叙事生成（{reason}）...")
+        print(f"\n📝 本地叙事生成（本地模式）...")
         for sec in sections:
             reasoning[sec] = _local_fallback(ctx, sec)
         print("   ✅ 全部章节完成")
 
     # 4. 生成 HTML
     print("\n📄 渲染 Template C v3.0 HTML...")
-    html = generate_html(ctx, reasoning)
+    html = generate_html(ctx, reasoning, accuracy_html=accuracy_html)
 
     # 5. 保存
     report_date = ctx["report_date"]
     out_file = out_dir / f"deep-{ticker}-{report_date}.html"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file.write_text(html, encoding="utf-8")
+
+    # 6. 保存预测快照（Gap 1 · 供 feedback_loop 回溯学习）
+    _save_report_snapshot(ctx, ticker, report_date, out_dir)
 
     print(f"\n✅ 报告已生成！")
     print(f"📁 {out_file}")

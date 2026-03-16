@@ -361,6 +361,29 @@ def _fetch_macro_data() -> Dict:
                 elif ffr <= 2.0:
                     tailwinds.append(f"联邦基金利率 {ffr:.2f}%（宽松环境）")
 
+            # ---- HY 信用利差评分 ----
+            if fred_data.get("hy_spread_bp") is not None:
+                hy_bp = fred_data["hy_spread_bp"]
+                hy_chg = fred_data.get("hy_spread_chg_bp")
+                chg_str = f"({hy_chg:+.0f}bp日变)" if hy_chg is not None else ""
+                if hy_bp >= 600:
+                    headwinds.append(
+                        f"HY信用利差 {hy_bp:.0f}bp{chg_str}（系统性风险信号，信贷市场承压）")
+                    score -= 2.0
+                elif hy_bp >= 400:
+                    headwinds.append(
+                        f"HY信用利差 {hy_bp:.0f}bp{chg_str}（信用风险偏高，风险资产受压）")
+                    score -= 1.0
+                elif hy_bp >= 300:
+                    headwinds.append(
+                        f"HY信用利差 {hy_bp:.0f}bp{chg_str}（信用利差偏宽，注意边际走阔）")
+                    score -= 0.3
+                else:
+                    tailwinds.append(
+                        f"HY信用利差 {hy_bp:.0f}bp{chg_str}（信用市场平稳，风险偏好良好）")
+                    score += 0.3
+                score = max(1.0, min(10.0, score))
+
         summary_parts = [
             f"VIX {vix:.1f}({vix_regime})",
             f"10Y {tnx:.2f}%",
@@ -372,6 +395,8 @@ def _fetch_macro_data() -> Dict:
             summary_parts.append(f"曲线:{yc_label.get(yield_curve, yield_curve)}")
         if fred_data.get("cpi_yoy") is not None:
             summary_parts.append(f"CPI同比{fred_data['cpi_yoy']:.1f}%")
+        if fred_data.get("hy_spread_bp") is not None:
+            summary_parts.append(f"HY利差{fred_data['hy_spread_bp']:.0f}bp")
         if gold_trend in ("surging", "rising", "falling"):
             _gl = {"surging": "飙升", "rising": "走强", "falling": "回落"}
             summary_parts.append(f"黄金{_gl[gold_trend]}{gold_change:+.1f}%")
@@ -400,6 +425,8 @@ def _fetch_macro_data() -> Dict:
             "cpi_yoy": fred_data.get("cpi_yoy"),
             "unemployment": fred_data.get("unemployment"),
             "fed_funds_rate": fred_data.get("fed_funds_rate"),
+            "hy_spread_bp": fred_data.get("hy_spread_bp"),
+            "hy_spread_chg_bp": fred_data.get("hy_spread_chg_bp"),
             "summary": " | ".join(summary_parts),
             "data_source": "yfinance" + ("+fred" if fred_data else ""),
         }
@@ -471,6 +498,23 @@ def _fetch_fred_series(api_key: str) -> Dict:
             obs4 = r4.json().get("observations", [])
             if obs4 and obs4[0].get("value", ".") != ".":
                 result["treasury_2y"] = float(obs4[0]["value"])
+
+        # HY 信用利差（ICE BofA US HY OAS，单位: 百分点 → 转换为 bp）
+        r5 = _session.get(base, params={
+            "series_id": "BAMLH0A0HYM2", "api_key": api_key,
+            "file_type": "json", "sort_order": "desc", "limit": "2"
+        }, timeout=8)
+        if r5.ok:
+            obs5 = r5.json().get("observations", [])
+            if obs5 and obs5[0].get("value", ".") != ".":
+                # FRED 返回百分点（e.g. 3.50），乘以 100 → bp（350bp）
+                result["hy_spread_bp"] = round(float(obs5[0]["value"]) * 100, 0)
+                result["hy_spread_date"] = obs5[0]["date"]
+                # 日环比变动（bp）
+                if len(obs5) >= 2 and obs5[1].get("value", ".") != ".":
+                    prev_bp = float(obs5[1]["value"]) * 100
+                    result["hy_spread_chg_bp"] = round(
+                        result["hy_spread_bp"] - prev_bp, 1)
 
         # 至少有一个成功响应 → 记录成功
         if _fred_breaker and result:

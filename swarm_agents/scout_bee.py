@@ -142,6 +142,48 @@ class ScoutBeeNova(BeeAgent):
             except LLM_ERRORS as e:
                 _log.debug("ScoutBeeNova LLM unavailable for %s: %s", ticker, e)
 
+            # ---- 2b. 国会议员交易（Quiver Quant 免费端点）----
+            congress_data = {}
+            try:
+                import sys as _sys_ct
+                import os as _os_ct
+                _hive_dir_ct = _os_ct.path.dirname(_os_ct.path.dirname(__file__))
+                if _hive_dir_ct not in _sys_ct.path:
+                    _sys_ct.path.insert(0, _hive_dir_ct)
+                from congress_trades_scraper import get_congress_trades_for_ticker
+                congress_data = get_congress_trades_for_ticker(ticker, days_back=90)
+                if congress_data.get("trades"):
+                    c_score = congress_data.get("congress_score", 0)
+                    net = congress_data.get("net_amount_est", 0)
+                    net_label = f"净买入 ${net:,.0f}" if net > 0 else f"净卖出 ${abs(net):,.0f}"
+                    parts.append(f"国会交易: {congress_data['buy_count']}买/{congress_data['sell_count']}卖 {net_label} (信号:{c_score}/10)")
+                    # 强国会买入信号可微调综合分（权重 5%）
+                    if c_score >= 7.0:
+                        score = min(10.0, score * 1.05)
+                    elif c_score >= 5.0 and net > 100_000:
+                        score = min(10.0, score * 1.02)
+                    ctx["congress_summary"] = congress_data.get("summary", "")
+            except Exception as _e_ct:
+                _log.debug("Congress trades unavailable for %s: %s", ticker, _e_ct)
+
+            # ---- 2c. 板块相对强弱（20日回报 vs 板块 ETF）----
+            sector_rs = self._assess_sector_relative_strength(ticker)
+            if sector_rs.get("rs_signal") not in ("unknown", None):
+                rs_val  = sector_rs["relative_strength"]
+                rs_sig  = sector_rs["rs_signal"]
+                etf_lbl = sector_rs.get("sector_name") or sector_rs.get("sector_etf", "")
+                rs_text = (
+                    f"板块相对强度 {rs_val:+.1f}pp({etf_lbl} 20D)"
+                    f"{'【跑赢】' if rs_sig=='outperform' else '【跑输】' if rs_sig=='underperform' else ''}"
+                )
+                # discovery 在 line 123 已冻结，直接拼接（与 LLM意图 块保持一致）
+                discovery = f"{discovery} | {rs_text}"
+                # 跑赢板块 → 上调综合分（权重 3%）
+                if rs_sig == "outperform":
+                    score = min(10.0, score * 1.03)
+                elif rs_sig == "underperform":
+                    score = max(0.0, score * 0.97)
+
             # S3: 结构化数据交换（BearBee 可直接读取，替代正则解析）
             _pub_details = {"crowding_score": crowding_score}
             if insider_data:
@@ -191,9 +233,108 @@ class ScoutBeeNova(BeeAgent):
                     "adjustment_factor": adj_factor,
                     "momentum_5d": stock["momentum_5d"],
                     "price": stock["price"],
+                    "congress": {
+                        "buy_count": congress_data.get("buy_count", 0),
+                        "sell_count": congress_data.get("sell_count", 0),
+                        "net_amount_est": congress_data.get("net_amount_est", 0),
+                        "congress_score": congress_data.get("congress_score", 0),
+                        "top_signal": congress_data.get("top_signal", ""),
+                        "summary": congress_data.get("summary", ""),
+                    },
+                    "sector_relative_strength": sector_rs,
                 },
             ).to_dict()
 
         except AGENT_ERRORS as e:
             _log.error("ScoutBeeNova failed for %s: %s", ticker, e, exc_info=True)
             return make_error_result("ScoutBeeNova", "signal", e)
+
+    # ---------- sector relative strength ----------
+
+    def _assess_sector_relative_strength(self, ticker: str) -> Dict:
+        """计算个股 20 日回报 vs 板块 ETF 20 日回报，返回相对强弱数据。
+
+        Returns:
+            {
+              "stock_ret_20d": float,
+              "sector_ret_20d": float,
+              "relative_strength": float,   # stock - sector (pp)
+              "sector_etf": str,
+              "sector_name": str,
+              "rs_signal": "outperform"|"underperform"|"neutral"|"unknown",
+            }
+        """
+        result: Dict = {"rs_signal": "unknown"}
+        try:
+            import yfinance as yf
+
+            # 1. 找板块 ETF
+            sector_etf = ""
+            sector_name = ""
+            try:
+                from config import WATCHLIST
+                _sector_str = WATCHLIST.get(ticker, {}).get("sector", "")
+                from fred_macro import _SECTOR_TO_ETF, _SECTOR_ETFS
+                sector_etf  = _SECTOR_TO_ETF.get(_sector_str, "")
+                sector_name = _SECTOR_ETFS.get(sector_etf, "")
+            except (ImportError, KeyError):
+                pass
+
+            # 2. 若 WATCHLIST 未给出板块，用 yfinance info fallback
+            if not sector_etf:
+                try:
+                    info = yf.Ticker(ticker).info
+                    _yf_sector = info.get("sector", "")
+                    from fred_macro import _SECTOR_TO_ETF, _SECTOR_ETFS
+                    sector_etf  = _SECTOR_TO_ETF.get(_yf_sector, "")
+                    sector_name = _SECTOR_ETFS.get(sector_etf, _yf_sector or "Unknown")
+                except Exception:
+                    pass
+
+            if not sector_etf:
+                result["rs_signal"] = "unknown"
+                return result
+
+            # 3. 拉取 20 日收盘价
+            tickers_to_fetch = [ticker, sector_etf]
+            hist = yf.download(
+                tickers_to_fetch, period="25d", interval="1d",
+                progress=False, auto_adjust=True
+            )["Close"]
+
+            if hist is None or len(hist) < 5:
+                return result
+
+            # 确保两列都存在
+            if ticker not in hist.columns or sector_etf not in hist.columns:
+                return result
+
+            _stk  = hist[ticker].dropna()
+            _etf  = hist[sector_etf].dropna()
+
+            if len(_stk) < 5 or len(_etf) < 5:
+                return result
+
+            stock_ret  = round((_stk.iloc[-1] / _stk.iloc[0] - 1) * 100, 2)
+            sector_ret = round((_etf.iloc[-1] / _etf.iloc[0] - 1) * 100, 2)
+            rs = round(stock_ret - sector_ret, 2)
+
+            if rs >= 5.0:
+                rs_signal = "outperform"
+            elif rs <= -5.0:
+                rs_signal = "underperform"
+            else:
+                rs_signal = "neutral"
+
+            result.update({
+                "stock_ret_20d":  stock_ret,
+                "sector_ret_20d": sector_ret,
+                "relative_strength": rs,
+                "sector_etf":    sector_etf,
+                "sector_name":   sector_name,
+                "rs_signal":     rs_signal,
+            })
+
+        except Exception as e:
+            _log.debug("ScoutBeeNova sector RS unavailable for %s: %s", ticker, e)
+        return result
