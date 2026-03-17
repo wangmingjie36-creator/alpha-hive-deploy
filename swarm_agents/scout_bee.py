@@ -162,7 +162,6 @@ class ScoutBeeNova(BeeAgent):
                         score = min(10.0, score * 1.05)
                     elif c_score >= 5.0 and net > 100_000:
                         score = min(10.0, score * 1.02)
-                    ctx["congress_summary"] = congress_data.get("summary", "")
             except Exception as _e_ct:
                 _log.debug("Congress trades unavailable for %s: %s", ticker, _e_ct)
 
