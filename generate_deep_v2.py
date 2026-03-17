@@ -1571,7 +1571,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "") -> str:
         days = c.get("days_until", 0)
         ev = c.get("event", "催化剂事件")
         ev_date = c.get("date", "")
-        importance = c.get("importance", "medium")
+        importance = c.get("importance") or c.get("severity", "medium")
         # 智能升级
         eff_importance = smart_importance(ev, days, str(importance).lower())
         dot_cls = dot_class_map.get(eff_importance, "dot-medium")
