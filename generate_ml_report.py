@@ -1591,6 +1591,64 @@ def main():
     _log.info("所有文件已完成写入")
     _log.info("=" * 60)
 
+    # ── 自动同步 gh-pages（GitHub Pages 从此分支部署）──
+    _sync_ghpages(tickers, successful_count)
+
+
+def _sync_ghpages(tickers: list, successful_count: int) -> None:
+    """将当日 ML 增强报告同步到 gh-pages 分支并推送。"""
+    import subprocess, os, re as _re
+    if successful_count == 0:
+        return
+    repo = str(Path(__file__).parent)
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    _ml_pat = _re.compile(r"^alpha-hive-\w+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$")
+    _CORE = {"index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml", ".nojekyll"}
+    files = [f for f in os.listdir(repo) if f in _CORE or _ml_pat.match(f)
+             or (f.startswith("alpha-hive-daily-") and f.endswith((".json", ".md")))]
+    if not files:
+        _log.warning("gh-pages 同步：无静态文件")
+        return
+
+    idx = os.path.join(repo, ".git", "gh-pages-index")
+    if os.path.exists(idx):
+        os.remove(idx)
+    env = os.environ.copy()
+    env["GIT_INDEX_FILE"] = idx
+    try:
+        for f in sorted(files):
+            blob = subprocess.check_output(["git", "hash-object", "-w", f],
+                                           cwd=repo).decode().strip()
+            subprocess.run(["git", "update-index", "--add", "--cacheinfo",
+                            "100644", blob, f], env=env, cwd=repo, check=True)
+        tree = subprocess.check_output(["git", "write-tree"], env=env, cwd=repo).decode().strip()
+        parent_args = []
+        try:
+            parent = subprocess.check_output(
+                ["git", "rev-parse", "gh-pages"], cwd=repo, stderr=subprocess.DEVNULL
+            ).decode().strip()
+            parent_args = ["-p", parent]
+        except subprocess.CalledProcessError:
+            pass
+        commit = subprocess.check_output(
+            ["git", "commit-tree", tree] + parent_args +
+            ["-m", f"Deploy: ML reports {date_str} ({successful_count} tickers)"],
+            cwd=repo
+        ).decode().strip()
+        subprocess.run(["git", "update-ref", "refs/heads/gh-pages", commit],
+                       cwd=repo, check=True)
+        r = subprocess.run(["git", "push", "origin", "gh-pages", "--force"],
+                           cwd=repo, capture_output=True, text=True)
+        if r.returncode == 0:
+            _log.info("gh-pages 同步成功 (%d 文件)", len(files))
+        else:
+            _log.warning("gh-pages push 失败: %s", r.stderr.strip()[:200])
+    except Exception as e:
+        _log.warning("gh-pages 同步异常: %s", e)
+    finally:
+        if os.path.exists(idx):
+            os.remove(idx)
+
 
 if __name__ == "__main__":
     main()

@@ -70,6 +70,13 @@
 - Track B 月度自我诊断，每月 1 日 03:00 运行（定时任务已创建）
 - 生成 `self_analysis_briefs/YYYY-MM.md`，无需 API Key，供 Cowork Claude 阅读分析
 
+### GitHub Pages 部署规则（永久设置）
+
+- **GitHub Pages 从 `gh-pages` 分支部署**，不是 `main`
+- `report_deployer.py`：`_deploy_ghpages = _deploy_production`（生产模式 = LLM 或蜂群，均同步 gh-pages）
+- `generate_ml_report.py`：末尾调用 `_sync_ghpages()`，每次生成 ML 报告后自动同步 gh-pages
+- **禁止**只推 main 不推 gh-pages，否则网站不更新
+
 ## 已知问题 / 注意事项
 
 - `realtime_metrics` 在部分 JSON 里是空字典 `{}`，导致 `current_price = 0`

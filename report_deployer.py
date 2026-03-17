@@ -198,11 +198,11 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
     #     生成物（index.html / md / json / ML html）只能通过 LLM 扫描进入 origin
     from datetime import datetime as _dt2
     import llm_service as _llm_check
-    # 只有 LLM 模式才推送 gh-pages（生产网站），--no-llm 蜂群仅 commit + push main
+    # 生产模式（LLM 或 蜂群）均同步 gh-pages（GitHub Pages 从 gh-pages 分支部署）
     _is_swarm = bool(report.get("swarm_metadata") or "蜂群" in report.get("system_status", ""))
     _using_llm = _llm_check.is_available()
     _deploy_production = _using_llm or _is_swarm
-    _deploy_ghpages = _using_llm  # gh-pages 仅 LLM 模式更新
+    _deploy_ghpages = _deploy_production  # 与 main 保持一致，始终同步
     timestamp = _dt2.now().strftime("%H:%M")
     today_commit_msg = f"Alpha Hive 蜂群日报 {reporter.date_str} {timestamp}"
     _log.info("Git commit... (mode: new)")
