@@ -625,6 +625,9 @@ def llm_reason(ctx: dict, section: str, api_key: str) -> str:
     _live_news = ctx.get("live_news_block", "")
     _live_news_block = f"\n\n{_live_news}" if _live_news else ""
 
+    _cross = ctx.get("cross_context", "")
+    _cross_context_block = f"\n\n【跨章节锚点（请在本章行文中主动呼应相关条目）】\n{_cross}" if _cross else ""
+
     # ── Step 1：分析框架提示（每章专属，纯分析不写HTML）─────────────────────────
     step1_prompts = {
         "swarm_analysis": f"""分析 {ticker} 蜂群七维信号结构：
@@ -705,14 +708,14 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 第一段：解释共振维度为何触发——这些维度背后的数据说明了什么市场逻辑？共振是否具有质量（支持Agent≥4为强共振）还是偏脆弱（≤2个Agent支持）？哪些蜂的评分与共振方向最一致？哪些蜂构成了潜在的反向张力？
 第二段：共振与整体论点的关系——共振方向是否强化或质疑了蜂群整体论点？共振的"失效条件"是什么——哪个关键维度一旦反转会打破当前共振结构？结合昨日对比（如有）说明共振强度变化趋势。
 输出两段 HTML <p> 标签，使用 <strong>、<span class="bull-text">、<span class="bear-text">、<span class="highlight"> 进行关键词标注。
-若检测到信号矛盾，必须在分析中明确指出共振方向与矛盾信号之间的张力及权衡判断。""",
+若检测到信号矛盾，必须在分析中明确指出共振方向与矛盾信号之间的张力及权衡判断。{_cross_context_block}""",
 
         "catalyst": f"""
 分析 {ticker} 的催化剂时间线：
 催化剂列表（最多6个）:
 {json.dumps(ctx['catalysts'][:6], ensure_ascii=False, indent=2)}
 
-生成2段叙事，分析催化剂的密度、质量和对股价的潜在影响。特别分析最近3个催化剂的联动效应。输出两段 HTML <p> 标签，使用强调标签。""",
+生成2段叙事，分析催化剂的密度、质量和对股价的潜在影响。特别分析最近3个催化剂的联动效应。输出两段 HTML <p> 标签，使用强调标签。{_cross_context_block}""",
 
         "options": f"""
 深度分析 {ticker} 的期权市场结构：
@@ -726,7 +729,7 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 - 异常活动（前5）: {json.dumps(ctx['unusual_activity'][:5], ensure_ascii=False)}
 - 系统信号: {ctx['signal_summary']}{_conflict_block}
 
-生成3段深度期权结构分析：1)P/C与OI含义, 2)关键位分析与Gamma机制, 3)IV Skew解读。输出三段 HTML <p> 标签，使用强调标签。""",
+生成3段深度期权结构分析：1)P/C与OI含义, 2)关键位分析与Gamma机制, 3)IV Skew解读。输出三段 HTML <p> 标签，使用强调标签。{_cross_context_block}""",
 
         "macro": f"""
 分析 {ticker} 当前宏观与情绪环境：
@@ -738,7 +741,7 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 
 生成2段宏观分析：分析宏观逆风/顺风对该股的影响，以及F&G极值下的反向做多机会。输出两段 HTML <p> 标签，使用强调标签。{_delta_block}{_live_news_block}
 若有昨日对比，请在分析中引用宏观情绪的变化方向。
-若有AV情绪分，请将其与F&G指数对比，说明散户情绪与机构情绪是否一致。""",
+若有AV情绪分，请将其与F&G指数对比，说明散户情绪与机构情绪是否一致。{_cross_context_block}""",
 
         "scenario": f"""
 为 {ticker} 补充情景推演叙事（情景卡片数据已由蜂群分析生成，**禁止重复输出表格或情景列表**）：
@@ -756,7 +759,7 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 第一段：情景概率分布的内在逻辑——基准/乐观/悲观情景各自被哪些具体数据驱动？ML预期与期权市场隐含方向是否形成共鸣或分歧？催化剂时间窗口如何影响短期3-5天的概率分布（区分短期与7日/30日预期的差异）？
 第二段：交易执行框架——分批建仓的具体触发条件（价格/信号触发点）、仓位管理逻辑、以及**论点失效信号**（必须给出具体数值阈值：价格/IV/P-C等，触及时应立即离场的判断依据）。
 用 <strong> 强调关键数字和价位，用 <span class="bull-text">/<span class="bear-text"> 标注正负预期。
-若有昨日对比，请说明预期方向较昨日是否发生了实质性变化。""",
+若有昨日对比，请说明预期方向较昨日是否发生了实质性变化。{_cross_context_block}""",
 
         "risk": f"""
 为 {ticker} 深度推理风险格局，生成带 HIGH/MED/LOW 级别标注的风险卡片（规则引擎已生成基础卡片，你的任务是生成**推理层**卡片，内容必须包含因果链分析、数据间的放大效应、具体失效阈值）：
@@ -765,7 +768,7 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 - F&G: {ctx['fg_score'] if ctx['fg_score'] else '未知'}
 - IV Skew: {ctx['iv_skew']}
 - 催化剂: {len(ctx['catalysts'])} 个，最近: {ctx['catalysts'][0].get('event','无') if ctx['catalysts'] else '无'}
-- 宏观: {ctx['guard'].get('discovery','')[:150]}{_master_block}
+- 宏观: {ctx['guard'].get('discovery','')[:150]}{_master_block}{_cross_context_block}
 
 生成 **3 个**推理风险卡片，必须严格使用以下 HTML 格式（禁止输出任何其他内容）：
 <div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div><div class="risk-title">🔴 风险标题（含核心数据）</div><div class="risk-note">**深度推理**：说明该风险的传导机制——它如何从信号演变为亏损？与其他风险是否存在共振放大？给出具体失效阈值（价格/IV/P-C数字）。2-3句，含 <strong>关键数字</strong>。</div></div></div>
@@ -818,6 +821,68 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
     except Exception as e:
         print(f"  ⚠️  LLM 调用失败 ({section}): {e}")
         return _local_fallback(ctx, section)
+
+
+def llm_cross_context(ctx: dict, api_key: str) -> str:
+    """Phase 1.5: 生成跨章节锚点摘要，供后续各章节引用。
+    约 150-200 字的结构化纯文本，不含 HTML。失败时返回空字符串（各章节静默降级）。
+    """
+    try:
+        import anthropic as _ant
+    except ImportError:
+        return ""
+
+    ticker  = ctx["ticker"]
+    score   = ctx["final_score"]
+    master  = ctx.get("master_thesis", "")
+    fmt     = lambda v: f"{float(v):.1f}" if v not in (None, "") else "N/A"
+
+    # GEX 锚点
+    gex     = ctx.get("_raw_data", {}).get("advanced_analysis", {}).get("dealer_gex", {})
+    flip    = gex.get("gex_flip", "N/A")
+    c_wall  = gex.get("largest_call_wall", "N/A")
+    p_wall  = gex.get("largest_put_wall", "N/A")
+    gex_str = f"Flip=${flip} | Call Wall=${c_wall} | Put Wall=${p_wall}" if gex else "N/A"
+
+    # 最近催化剂
+    cat0    = ctx["catalysts"][0] if ctx.get("catalysts") else {}
+    cat_str = f"{cat0.get('event','无')}（{cat0.get('days_until','?')}天{'后' if (cat0.get('days_until') or 0) >= 0 else '前'}）" if cat0 else "无"
+
+    # 七蜂简版
+    def sc(key): return fmt(ctx.get(key, {}).get("score"))
+    agents_str = (f"Scout={sc('scout')} Rival={sc('rival')} Buzz={sc('buzz')} "
+                  f"Chronos={sc('chronos')} Oracle={sc('oracle')} Guard={sc('guard')} Bear={sc('bear')}")
+
+    prompt = f"""为 {ticker} 生成一份供内部各分析章节引用的跨章节锚点摘要。
+数据摘要：
+- 蜂群评分：{score}/10，方向：{ctx['direction_zh']}，ML 7d：{ctx['ml_7d']:+.1f}%，30d：{ctx['ml_30d']:+.1f}%
+- 七蜂：{agents_str}
+- 期权：P/C={ctx['put_call_ratio']} | IV={ctx.get('iv_current',0):.1f}% | Skew={ctx['iv_skew']} | 流向={ctx['flow_direction']}
+- GEX 结构：{gex_str}
+- 最近催化剂：{cat_str}
+- 逆向信号：{', '.join(ctx['bear_signals']) or '无'}
+- F&G：{ctx['fg_score'] if ctx['fg_score'] else '未知'}
+- 蜂群整体论点：{master[:120] if master else '待生成'}
+
+严格按以下4行格式输出，每行以序号开头，不超过200字总计，不含HTML：
+1.【信号张力】哪两个维度存在最显著矛盾，其含义是什么（1-2句）
+2.【价格锚点】GEX Flip/支撑/阻力的核心含义及其对走势的约束（1句）
+3.【催化剂压力】最近催化剂对7日窗口概率分布的具体影响（1句）
+4.【跨章一致性】哪几章的结论应当共同指向同一方向/矛盾，需在行文中呼应（1句）"""
+
+    try:
+        client = _ant.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=300,
+            system="你是量化分析协调器，输出结构化纯文本锚点，供各章节引用。严格按格式，不含HTML。",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        result = msg.content[0].text.strip()
+        return result
+    except Exception as e:
+        print(f"  ⚠️  llm_cross_context 失败: {e}")
+        return ""
 
 
 def llm_scenario_data(ctx: dict, api_key: str) -> dict:
@@ -2981,6 +3046,7 @@ def main():
     if use_llm:
         print(f"\n🤖 Claude API 深度推理中（两步链式 + 跨章上下文）...")
         ctx["master_thesis"] = ""  # 初始化，CH1跑完后填入
+        ctx["cross_context"] = ""  # 初始化，Phase 1.5 跑完后填入
 
         # Phase 1：CH1 先跑，提取核心论点作为后续章节的上下文
         print(f"   ✍️  swarm_analysis (Phase 1)...", end="", flush=True)
@@ -2990,7 +3056,16 @@ def main():
         _thesis_suffix  = "..." if len(ctx["master_thesis"]) > 50 else ""
         print(f" ✅  → 论点: {_thesis_preview}{_thesis_suffix}")
 
-        # Phase 2：其余章节带入 master_thesis
+        # Phase 1.5：生成跨章节锚点上下文（读全量 JSON 原始数据，直接推理）
+        print(f"   🔗 cross_context (Phase 1.5)...", end="", flush=True)
+        ctx["cross_context"] = llm_cross_context(ctx, api_key)
+        if ctx["cross_context"]:
+            _cx_preview = ctx["cross_context"][:60].replace("\n", " ")
+            print(f" ✅  → {_cx_preview}...")
+        else:
+            print(" ⚠️  生成失败，各章节独立推理")
+
+        # Phase 2：其余章节带入 master_thesis + cross_context
         for sec in ["resonance", "catalyst", "options", "macro", "scenario", "risk"]:
             print(f"   ✍️  {sec}...", end="", flush=True)
             reasoning[sec] = llm_reason(ctx, sec, api_key)
@@ -3002,6 +3077,7 @@ def main():
         print(f" ✅  ({len(ctx['llm_scenario'])} 字段)" if ctx["llm_scenario"] else " ⚠️ 降级到ML")
     else:
         ctx["master_thesis"] = ""
+        ctx["cross_context"] = ""
         print(f"\n📝 本地叙事生成（本地模式）...")
         for sec in sections:
             reasoning[sec] = _local_fallback(ctx, sec)
