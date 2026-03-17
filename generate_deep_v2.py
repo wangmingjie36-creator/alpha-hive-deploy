@@ -208,14 +208,27 @@ def fetch_live_news(ticker: str) -> str:
     import urllib.request
     from datetime import timedelta
 
-    def _load_key(path: str) -> str:
-        try:
-            return Path(path).expanduser().read_text().strip()
-        except Exception:
-            return ""
+    def _load_key(*paths: str) -> str:
+        """按优先级依次尝试多个路径，返回第一个非空 key"""
+        for path in paths:
+            try:
+                val = Path(path).expanduser().read_text().strip()
+                if val:
+                    return val
+            except Exception:
+                pass
+        return ""
 
-    finnhub_key = _load_key("~/.alpha_hive_finnhub_key")
-    av_key = _load_key("~/.alpha_hive_av_key")
+    # 优先读 Mac home，次选 workspace（Cowork VM 定时任务环境）
+    _script_dir = Path(__file__).parent
+    finnhub_key = _load_key(
+        "~/.alpha_hive_finnhub_key",
+        str(_script_dir / ".alpha_hive_finnhub_key"),
+    )
+    av_key = _load_key(
+        "~/.alpha_hive_av_key",
+        str(_script_dir / ".alpha_hive_av_key"),
+    )
 
     if not finnhub_key and not av_key:
         return ""
