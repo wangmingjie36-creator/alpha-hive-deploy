@@ -9,6 +9,42 @@
 
 ---
 
+## [0.9.6] — 2026-03-17
+
+### Added
+- **`generate_deep_v2.py`** — **Phase 1.5 跨章节锚点上下文** (`llm_cross_context()`)
+  - 新增函数：Phase 1（swarm + master_thesis）完成后，生成 150-200 字结构化纯文本摘要
+  - 4 行锚点格式：① 信号张力（多空拉力与 GEX 区间）② 价格锚点（Flip/Call/Put Wall）③ 催化剂压力（最近事件标题 + DTE）④ 跨章一致性（哪些蜂构成共振、哪些反向）
+  - `_cross_context_block` 注入 6 章 Step2 prompt（resonance/catalyst/options/macro/scenario/risk），解决定时任务7章独立 API 调用无法跨章节引用的问题
+  - no-llm 模式：`ctx["cross_context"] = ""` 静默跳过
+
+### Changed
+- **`generate_deep_v2.py`** — **CH2 resonance prompt 全面加强**（Step1 + Step2）
+  - Step1：加入七蜂全评分 `Scout/Rival/Buzz/Chronos/Oracle/Guard/Bear` 数值，分析框架中明确指向哪些蜂构成共振主力
+  - Step2：注入 `_master_block`（主论点）、`_conflict_block`（矛盾信号）、`_delta_block`（昨日变化）、`_cross_context_block`（跨章锚点）
+  - 要求第一段分析共振质量与反向张力、第二段写共振与整体论点关系及失效条件
+
+- **`generate_deep_v2.py`** — **CH5 scenario prompt 全面加强**（Step2）
+  - 新增注入：`days_until`（催化剂距今天数）、IV 当前值、F&G 数值、期权流方向、全部 bear signals
+  - 注入 `_master_block`、`_delta_block`、`_cross_context_block`
+  - 要求短期 3-5 天分布分析（概率+幅度）和具体数值失效阈值
+
+### Fixed
+- **`generate_deep_v2.py`** — **CH1 催化剂图标全显示灰点 bug**
+  - 原因：`c.get("importance", "medium")` 但 JSON 字段名为 `severity`
+  - 修复：`c.get("importance") or c.get("severity", "medium")` 双字段兜底
+
+- **`generate_deep_v2.py`** — **`fetch_live_news()` 在 VM 定时任务中找不到 key 文件**
+  - 原因：VM 的 `~` ≠ Mac 的 `~`，单路径查找失败
+  - 修复：`_load_key(*paths)` 多路径优先级查找（Mac home → workspace script dir），两个环境均能找到
+
+### Added (files)
+- **`Alpha Hive/.alpha_hive_finnhub_key`** — Finnhub API key 文件（workspace 路径，供 VM 定时任务使用）
+- **`Alpha Hive/.alpha_hive_av_key`** — Alpha Vantage API key 文件（workspace 路径）
+- **`Alpha Hive/.gitignore`** — 新增两条 key 文件排除规则（防止 key 提交到 git）
+
+---
+
 ## [0.9.4] — 2026-03-16
 
 ### Fixed

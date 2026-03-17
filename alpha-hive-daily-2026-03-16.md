@@ -260,34 +260,68 @@
 ## 5) 财报/事件催化剂
 
 ### RKLB
-- Error: 'str' object has no attribute 'setdefault'
+- 催化剂 4 个 | 最近：Q4 2025 Earnings（8天后） | 分析师目标$89.88(↑31.4%)
+  - 2026-03-25（8天后）：Q4 2025 Earnings [high]
+  - 2026-05-07（51天后）：财报发布 [high]
+  - 2026-05-15（59天后）：NRO Contract Delivery [high]
+  - 2026-06-30（105天后）：Neutron First Launch Window [critical]
 
 ### VKTX
-- Error: 'str' object has no attribute 'setdefault'
+- 催化剂 3 个 | 最近：财报发布（43天后） | 分析师目标$92.72(↑160.2%)
+  - 2026-04-29（43天后）：财报发布 [high]
+  - 2026-06-30（105天后）：VK2735 Phase 3 VENTURE Enrollment Complete [critical]
+  - 2026-08-15（151天后）：VK2735 Phase 3 Topline Data [critical]
 
 ### BILI
-- Error: 'str' object has no attribute 'setdefault'
+- 催化剂 2 个 | 最近：Q4 2025 Earnings（3天后） | 分析师目标$30.61(↑21.5%)
+  - 2026-03-20（3天后）：Q4 2025 Earnings [critical]
+  - 2026-05-19（63天后）：财报发布 [high]
 
 ### MSFT
-- Error: 'str' object has no attribute 'setdefault'
+- 催化剂 5 个 | 最近：Ex-Dividend Date（3天前） | 分析师目标$594.62(↑50.3%)
+  - 2026-05-20（-3天后）：Ex-Dividend Date [medium]
+  - 2026-03-11（-3天后）：Dividend Date [medium]
+  - 2026-04-23（37天后）：Q3 FY2026 Earnings [critical]
+  - 2026-04-29（43天后）：财报发布 [high]
 
 ### AMZN
-- Error: 'str' object has no attribute 'setdefault'
+- 催化剂 3 个 | 最近：AWS re:Invent Spring Update（22天后） | 分析师目标$280.55(↑35.1%)
+  - 2026-04-08（22天后）：AWS re:Invent Spring Update [medium]
+  - 2026-04-24（38天后）：Q1 2026 Earnings [critical]
+  - 2026-04-30（44天后）：财报发布 [high]
 
 ### CRCL
-- Error: 'str' object has no attribute 'setdefault'
+- 催化剂 4 个 | 最近：财报发布（56天后） | 分析师目标$124.91(↑8.3%)
+  - 2026-05-12（56天后）：财报发布 [high]
+  - 2026-05-15（59天后）：Q1 2026 Earnings (First as Public Co) [critical]
+  - 2026-06-30（105天后）：US Stablecoin Regulation Update [critical]
+  - 2026-10-01（198天后）：IPO Lock-up Expiration [high]
 
 ### META
-- Error: 'str' object has no attribute 'setdefault'
+- 催化剂 5 个 | 最近：Ex-Dividend Date（3天前） | 分析师目标$862.25(↑40.5%)
+  - 2026-03-15（-3天后）：Ex-Dividend Date [medium]
+  - 2026-03-25（-3天后）：Dividend Date [medium]
+  - 2026-04-15（29天后）：Llama 4 Release Window [high]
+  - 2026-04-23（37天后）：Q1 2026 Earnings [critical]
 
 ### QCOM
-- Error: 'str' object has no attribute 'setdefault'
+- 催化剂 3 个 | 最近：Ex-Dividend Date（3天前） | 分析师目标$159.15(↑22.6%)
+  - 2026-03-04（-3天后）：Ex-Dividend Date [medium]
+  - 2026-03-25（-3天后）：Dividend Date [medium]
+  - 2026-04-29（43天后）：财报发布 [high]
 
 ### NVDA
-- Error: 'str' object has no attribute 'setdefault'
+- 催化剂 3 个 | 最近：Q4 FY2026 财报发布（-2天后）
+  - 2026-03-15（-2天后）：Q4 FY2026 财报发布 [critical]
+  - 2026-03-17（0天后）：GTC 2026 [high]
+  - 2026-05-28（72天后）：Computex 2026 [medium]
 
 ### TSLA
-- Error: 'str' object has no attribute 'setdefault'
+- 催化剂 4 个 | 最近：Q1 2026 Delivery Numbers（16天后） | 分析师目标$421.61(↑7.8%)
+  - 2026-04-02（16天后）：Q1 2026 Delivery Numbers [high]
+  - 2026-04-21（35天后）：财报发布 [high]
+  - 2026-04-22（36天后）：Q1 2026 Earnings [critical]
+  - 2026-06-01（76天后）：Robotaxi Austin Launch Window [critical]
 
 ## 6) 竞争格局分析
 
