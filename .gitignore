@@ -74,3 +74,7 @@ bee_icon_*.png
 htmlcov/
 .coverage
 test_report_*.html
+
+# API Key 文件（本地敏感数据）
+.alpha_hive_finnhub_key
+.alpha_hive_av_key
