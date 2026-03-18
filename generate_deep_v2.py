@@ -35,19 +35,28 @@ from pathlib import Path
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
 ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
-# 支持 VM 路径（Cowork 模式）
-_VM_PATH = Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
-if _VM_PATH.exists():
-    ALPHAHIVE_DIR = _VM_PATH
+# 支持 VM 路径（Cowork 模式）—— 自动检测当前会话
+import glob as _glob_mod
+_VM_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/Alpha Hive"), reverse=True)
+_VM_PATH = Path(_VM_SESSIONS[0]) if _VM_SESSIONS else Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
+try:
+    if _VM_PATH.exists():
+        ALPHAHIVE_DIR = _VM_PATH
+except PermissionError:
+    pass
 # 默认输出到用户真实桌面的深度报告文件夹（VM 模式优先）
-_VM_DEEP_DIR = Path("/sessions/keen-magical-wright/mnt/深度分析报告/深度")
-if _VM_DEEP_DIR.exists():
-    OUTPUT_DIR = _VM_DEEP_DIR
-else:
+_VM_DEEP_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/深度分析报告/深度"), reverse=True)
+_VM_DEEP_DIR = Path(_VM_DEEP_SESSIONS[0]) if _VM_DEEP_SESSIONS else Path("/sessions/keen-magical-wright/mnt/深度分析报告/深度")
+try:
+    if _VM_DEEP_DIR.exists():
+        OUTPUT_DIR = _VM_DEEP_DIR
+    else:
+        OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
+except PermissionError:
     OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
 API_KEY_FILE = Path("~/.anthropic_api_key").expanduser()
 # 在 VM 中，home 可能映射到不同路径
-_VM_API_KEY = Path("/sessions/keen-magical-wright/mnt/Alpha Hive/.anthropic_api_key")
+_VM_API_KEY = Path(str(ALPHAHIVE_DIR / ".anthropic_api_key"))
 # Mac 上直接放在项目文件夹里也可以
 _MAC_API_KEY = Path("~/Desktop/Alpha Hive/.anthropic_api_key").expanduser()
 if not API_KEY_FILE.exists() and _VM_API_KEY.exists():
@@ -2938,6 +2947,7 @@ def main():
     parser.add_argument("--ticker", required=True, help="股票代码，如 NVDA、VKTX")
     parser.add_argument("--date", default=None, help="报告日期 YYYY-MM-DD（默认最新）")
     parser.add_argument("--no-llm", action="store_true", help="跳过 LLM，使用本地生成文本")
+    parser.add_argument("--use-llm", action="store_true", help="显式启用 LLM（claude-opus-4-6），需要 API Key，预计 $0.3~0.6/次")
     parser.add_argument("--out-dir", default=None, help="输出目录（默认 Alpha Hive 文件夹）")
     args = parser.parse_args()
 
@@ -3054,7 +3064,23 @@ def main():
     reasoning = {}
 
     api_key = get_api_key()
-    use_llm = not args.no_llm and api_key
+    # ── LLM 模式必须显式 --use-llm，防止 API Key 存在就自动消费 Opus ──
+    if args.no_llm:
+        use_llm = False
+    elif args.use_llm:
+        if not api_key:
+            print("❌ --use-llm 需要 ~/.anthropic_api_key，但未找到，降级为本地模式")
+            use_llm = False
+        else:
+            est_cost = 0.45
+            print(f"\n⚠️  即将调用 claude-opus-4-6，预计费用约 ${est_cost:.2f}")
+            confirm = input("确认继续？[y/N] ").strip().lower()
+            use_llm = (confirm == "y")
+            if not use_llm:
+                print("已取消，使用本地模式")
+    else:
+        # 默认：本地模式（不消费 API）
+        use_llm = False
 
     if use_llm:
         print(f"\n🤖 Claude API 深度推理中（两步链式 + 跨章上下文）...")
