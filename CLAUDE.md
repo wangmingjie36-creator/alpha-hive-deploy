@@ -2,10 +2,14 @@
 
 ## 用户偏好
 
-- **报告生成模式**：本地推理（`--no-llm`），不使用 Claude API Key
-  - `generate_deep_v2.py` 默认跑本地叙事（`_local_fallback`），无需 `ANTHROPIC_API_KEY`
+- **报告生成模式：Cowork 本地推理，永远不用 Claude API / Opus**
+  - 用户使用 Cowork 本地 LLM 推理，不是 Anthropic API
+  - `generate_deep_v2.py` 永远跑 `_local_fallback`，禁止调用 `claude-opus-4-6`
+  - 任何脚本默认必须是 `--no-llm`，只有用户在终端显式确认才允许 `--use-llm`
+  - 禁止在代码里用 `api_key 存在就自动开 LLM` 的逻辑
   - 不要添加"未找到 API Key"警告或提示创建 key 文件
   - 不要自动搜索 `.anthropic_api_key` 文件路径
+  - 2026-03-16 事故：`generate_deep_v2.py` opt-out 设计导致 NVDA deep 报告静默消费 $0.47 Opus，已修复为 opt-in
 
 - **图表**：已嵌入 `chart_engine.py`，matplotlib 已安装在用户 Mac
 
