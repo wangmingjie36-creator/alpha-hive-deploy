@@ -180,6 +180,31 @@ class ChronosBeeHorizon(BeeAgent):
             except Exception as _e_iv:
                 _log.debug("IV Crush unavailable for %s: %s", ticker, _e_iv)
 
+            # 1d. ② PEAD 历史量化（财报后价格漂移统计）
+            _pead_data: dict = {}
+            _pead_text: str = ""
+            try:
+                import sys as _sys_pead
+                import os as _os_pead
+                _hive_dir_pead = _os_pead.path.dirname(_os_pead.path.dirname(__file__))
+                if _hive_dir_pead not in _sys_pead.path:
+                    _sys_pead.path.insert(0, _hive_dir_pead)
+                from pead_analyzer import get_pead_analysis, format_pead_for_chronos
+                _pead_data = get_pead_analysis(ticker)
+                _pead_text = format_pead_for_chronos(_pead_data)
+                # PEAD 偏向对分数微调（权重 5%）
+                _pead_bias = _pead_data.get("bias", "neutral")
+                if _pead_bias == "bullish":
+                    score = min(10.0, score + 0.3)
+                    if direction == "neutral":
+                        direction = "bullish"
+                elif _pead_bias == "bearish":
+                    score = max(0.0, score - 0.3)
+                    if direction == "neutral":
+                        direction = "bearish"
+            except Exception as _e_pead:
+                _log.debug("PEAD analysis unavailable for %s: %s", ticker, _e_pead)
+
             # 2. 加载外部 catalysts.json（S13：覆盖全部 WATCHLIST 标的）
             _catalysts_json_loaded = False
             try:
@@ -285,6 +310,10 @@ class ChronosBeeHorizon(BeeAgent):
 
             discovery = append_context(discovery, ctx)
 
+            # ② PEAD 历史漂移注入 discovery
+            if _pead_text:
+                discovery = f"{discovery} | {_pead_text}"
+
             # ── P1: LLM 催化剂影响力解读（规则引擎不知道财报方向是利多还是利空）──
             llm_catalyst = None
             try:
@@ -345,6 +374,10 @@ class ChronosBeeHorizon(BeeAgent):
                     "analyst_targets": _analyst_info or {},
                     "iv_crush": _iv_crush_data,
                     "iv_crush_summary": _iv_crush_summary,
+                    # ② PEAD 历史量化
+                    "pead": _pead_data,
+                    "pead_summary": _pead_text,
+                    "pead_bias": _pead_data.get("bias", "neutral") if _pead_data else "neutral",
                 },
             ).to_dict()
 

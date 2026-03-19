@@ -47,10 +47,26 @@ class BeeAgent(ABC):
         self.board.publish(entry)
 
     def _get_stock_data(self, ticker: str) -> Dict:
-        """获取股票数据（优先使用预取缓存，回退到直接请求）"""
+        """获取股票数据（优先使用预取缓存，回退到直接请求）
+
+        增加 price<=0 保护（WARN-3）：当所有数据源不可用时，返回带
+        _data_unavailable=True 标记，下游 Agent 应检查并提前返回安全结果。
+        """
         if ticker in self._prefetched_stock:
-            return self._prefetched_stock[ticker]
-        return _cache._fetch_stock_data(ticker)
+            data = self._prefetched_stock[ticker]
+        else:
+            data = _cache._fetch_stock_data(ticker)
+
+        # WARN-3 保护：price<=0 说明所有数据源不可用
+        price = data.get("price", 0)
+        if not price or price <= 0:
+            _log.warning(
+                "%s._get_stock_data(%s): price=%s, 标记数据不可用",
+                self.__class__.__name__, ticker, price
+            )
+            data["_data_unavailable"] = True
+
+        return data
 
     def _get_history_context(self, ticker: str) -> str:
         """获取历史上下文（优先预取缓存，回退到实时查询）"""

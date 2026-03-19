@@ -480,7 +480,7 @@ class AlphaHiveDailyReporter:
                     _log.warning("Agent future failed: %s", e)
                     agent_results.append(None)
 
-        # Phase 1.5: GuardBeeSentinel 交叉验证
+        # Phase 1.5: GuardBeeSentinel 交叉验证（必须先于 BearBee，Bear 读取 Guard 的信息素条目）
         try:
             guard_result = ctx.guard_agent.analyze(ticker)
             agent_results.append(guard_result)
@@ -491,7 +491,7 @@ class AlphaHiveDailyReporter:
             _log.warning("GuardBeeSentinel failed for %s: %s", ticker, e)
             agent_results.append(None)
 
-        # Phase 2: BearBeeContrarian 看空对冲
+        # Phase 2: BearBeeContrarian 看空对冲（Guard 完成后执行，读取 Guard 信息素条目）
         try:
             bear_result = ctx.bear_agent.analyze(ticker)
             agent_results.append(bear_result)

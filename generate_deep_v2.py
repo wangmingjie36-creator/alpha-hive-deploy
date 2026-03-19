@@ -102,6 +102,17 @@ def extract_thesis(html: str) -> str:
     return thesis
 
 
+def extract_chapter_summary(html: str, max_chars: int = 120) -> str:
+    """从章节 HTML prose 中提取首句核心结论，供下一章节滚动注入。去除 HTML 标签后取第一个中文句号前的内容。"""
+    text = re.sub(r'<[^>]+>', '', html).strip()
+    text = re.sub(r'\s+', ' ', text)
+    for sep in ['。', '；']:
+        idx = text.find(sep)
+        if 0 < idx <= max_chars:
+            return text[:idx + 1].strip()
+    return (text[:max_chars] + '…').strip() if len(text) > max_chars else text.strip()
+
+
 def detect_conflicts(ctx: dict) -> list[str]:
     """自动检测蜂群信号中的矛盾对，返回中文描述列表（空列表=无矛盾）"""
     conflicts = []
@@ -563,6 +574,23 @@ def extract(data: dict) -> dict:
         "dimension_scores": sr.get("dimension_scores", {}),
         # Overview
         "overview": aa.get("overview", ""),
+        # ① IV-RV Spread（来自 options_analyzer → OptionsAgent）
+        "iv_rv_spread": odet.get("iv_rv_spread", 0.0),
+        "iv_rv_signal": odet.get("iv_rv_signal", ""),
+        "rv_30d": odet.get("rv_30d", 0.0),
+        # ⑤ Gamma 到期日历
+        "gamma_calendar": odet.get("gamma_calendar", {}),
+        # ② PEAD（来自 chronos_bee details）
+        "pead_summary": (chronos.get("details") or {}).get("pead_summary", ""),
+        "pead_bias": (chronos.get("details") or {}).get("pead_bias", "neutral"),
+        # ③ 时间周期（来自 guard_bee details）
+        "cycle_context": (guard.get("details") or {}).get("cycle_context", {}),
+        # ④ 市场政体（来自 guard_bee details）
+        "market_regime": (guard.get("details") or {}).get("market_regime", {}),
+        # ⑦ 信号拥挤度（来自 guard_bee details）
+        "signal_crowding": (guard.get("details") or {}).get("signal_crowding", {}),
+        # ⑥ 供应链信号（来自 scout_bee details）
+        "supply_chain": (scout.get("details") or {}).get("supply_chain", {}),
         # Raw JSON for LLM context
         "_raw": data,
     }
@@ -650,6 +678,12 @@ def llm_reason(ctx: dict, section: str, api_key: str) -> str:
     _cross = ctx.get("cross_context", "")
     _cross_context_block = f"\n\n【跨章节锚点（请在本章行文中主动呼应相关条目）】\n{_cross}" if _cross else ""
 
+    _prev_chs = ctx.get("prev_chapters", [])
+    _prev_block = (
+        "\n\n【前序章节核心结论（本章叙事应在此基础上递进深化，不重复，应明确呼应或提出新层次）】\n"
+        + "\n".join(_prev_chs)
+    ) if _prev_chs else ""
+
     # ── Step 1：分析框架提示（每章专属，纯分析不写HTML）─────────────────────────
     step1_prompts = {
         "swarm_analysis": f"""分析 {ticker} 蜂群七维信号结构：
@@ -671,8 +705,10 @@ Scout:{fmt_score(ctx['scout'].get('score'))} Rival:{fmt_score(ctx['rival'].get('
 
         "options": f"""分析 {ticker} 期权市场结构：
 P/C={ctx['put_call_ratio']} | 总OI={ctx['total_oi']:,.0f} | IV Skew={ctx['iv_skew']}({ctx['iv_skew_signal']}) | IV={ctx['iv_current']:.1f}%
+IV-RV价差:{ctx.get('iv_rv_spread',0):+.1f}%(期权{'昂贵' if ctx.get('iv_rv_spread',0)>3 else '便宜' if ctx.get('iv_rv_spread',0)<-3 else '合理'},{ctx.get('iv_rv_signal','')}) | HV30={ctx.get('rv_30d',0):.1f}%
 流向:{ctx['flow_direction']} | 关键阻力:{json.dumps(ctx['key_levels'].get('resistance',[])[:2],ensure_ascii=False)}
 关键支撑:{json.dumps(ctx['key_levels'].get('support',[])[:2],ensure_ascii=False)}
+Gamma日历钉子:{ctx.get('gamma_calendar',{}).get('pin_strike','N/A')} | Charm方向:{ctx.get('gamma_calendar',{}).get('charm_direction','N/A')}
 异常流:{json.dumps(ctx['unusual_activity'][:3],ensure_ascii=False)}
 完成结构化预分析（严格按格式，无HTML）：""",
 
@@ -707,7 +743,7 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 - Guard(宏观) {fmt_score(ctx['guard'].get('score'))}, 发现: {ctx['guard'].get('discovery','')[:100]}
 - Bear(逆向) {fmt_score(ctx['bear'].get('score'))}, 信号: {', '.join(ctx['bear_signals'][:2])}
 
-生成2段深度叙事分析，解释评分背后的逻辑和各蜂之间的分歧。直接输出两段 HTML <p> 标签。每段使用 <strong>、<span class="bull-text">、<span class="bear-text">、<span class="highlight"> 进行关键词标注。{_delta_block}{_conflict_block}{_live_news_block}
+只输出两段连贯叙事 HTML <p> 标签，**严禁 table/tr/td/th/ol/ul/li 标签**，数据必须嵌入散文叙述，不得单独列表。关键词使用 <strong>、<span class="bull-text">、<span class="bear-text">、<span class="highlight"> 标注。{_delta_block}{_conflict_block}{_live_news_block}
 若有昨日对比数据，请在第二段末尾用一句话点出最显著的评分变化趋势。
 若有实时新闻数据，请在分析中引用1-2条最相关的头条作为信号佐证。""",
 
@@ -726,47 +762,52 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 - 综合评分: {score}/10，方向: {direction}
 {_master_block}{_conflict_block}{_delta_block}
 
-生成2段深度分析：
+只输出两段连贯叙事 HTML <p> 标签，**严禁 table/tr/td/th/ol/ul/li 标签**，所有数据和维度名称嵌入散文，不得制表。关键词使用 <strong>、<span class="bull-text">、<span class="bear-text">、<span class="highlight"> 标注。
 第一段：解释共振维度为何触发——这些维度背后的数据说明了什么市场逻辑？共振是否具有质量（支持Agent≥4为强共振）还是偏脆弱（≤2个Agent支持）？哪些蜂的评分与共振方向最一致？哪些蜂构成了潜在的反向张力？
 第二段：共振与整体论点的关系——共振方向是否强化或质疑了蜂群整体论点？共振的"失效条件"是什么——哪个关键维度一旦反转会打破当前共振结构？结合昨日对比（如有）说明共振强度变化趋势。
-输出两段 HTML <p> 标签，使用 <strong>、<span class="bull-text">、<span class="bear-text">、<span class="highlight"> 进行关键词标注。
-若检测到信号矛盾，必须在分析中明确指出共振方向与矛盾信号之间的张力及权衡判断。{_cross_context_block}""",
+若检测到信号矛盾，必须在分析中明确指出共振方向与矛盾信号之间的张力及权衡判断。{_prev_block}{_cross_context_block}""",
 
         "catalyst": f"""
 分析 {ticker} 的催化剂时间线：
 催化剂列表（最多6个）:
 {json.dumps(ctx['catalysts'][:6], ensure_ascii=False, indent=2)}
+PEAD历史财报漂移: {ctx.get('pead_summary','暂无历史数据')}（偏向:{ctx.get('pead_bias','neutral')}）
 
-生成2段叙事，分析催化剂的密度、质量和对股价的潜在影响。特别分析最近3个催化剂的联动效应。输出两段 HTML <p> 标签，使用强调标签。{_cross_context_block}""",
+只输出两段连贯叙事 HTML <p> 标签，**严禁 table/tr/td/th/ol/ul/li 标签**，催化剂数据和时间线全部以散文形式写入，不得制表或列举。关键词使用 <strong>、<span class="bull-text">/<span class="bear-text">/<span class="highlight"> 标注。分析催化剂的密度、质量和对股价的潜在影响，特别分析最近3个催化剂的联动效应，并引用PEAD历史漂移数据说明财报后价格动能的统计规律。{_prev_block}{_cross_context_block}""",
 
         "options": f"""
 深度分析 {ticker} 的期权市场结构：
 - P/C 比: {ctx['put_call_ratio']}（{'>1 偏空' if pc_float > 1 else '<1 偏多'}）
 - 总OI: {ctx['total_oi']:,.0f}
 - IV Skew: {ctx['iv_skew']} ({ctx['iv_skew_signal']})
-- IV 当前: {ctx['iv_current']:.1f}%
+- IV 当前: {ctx['iv_current']:.1f}% | HV30（已实现波动率）: {ctx.get('rv_30d',0):.1f}%
+- IV-RV 价差: {ctx.get('iv_rv_spread',0):+.1f}%（正值=期权相对HV偏贵，卖方有优势；负值=期权便宜，方向性买入占优），信号: {ctx.get('iv_rv_signal','')}
 - 流向: {ctx['flow_direction']}
 - 关键支撑: {json.dumps(ctx['key_levels'].get('support',[])[:3], ensure_ascii=False)}
 - 关键阻力: {json.dumps(ctx['key_levels'].get('resistance',[])[:3], ensure_ascii=False)}
+- Gamma 到期日历 — Pin Risk钉子位: {ctx.get('gamma_calendar',{}).get('pin_strike','N/A')} | Charm 到期衰减方向: {ctx.get('gamma_calendar',{}).get('charm_direction','N/A')} | 最高OI到期日: {ctx.get('gamma_calendar',{}).get('pin_expiry','N/A')}
 - 异常活动（前5）: {json.dumps(ctx['unusual_activity'][:5], ensure_ascii=False)}
 - 系统信号: {ctx['signal_summary']}{_conflict_block}
 
-生成3段深度期权结构分析：1)P/C与OI含义, 2)关键位分析与Gamma机制, 3)IV Skew解读。输出三段 HTML <p> 标签，使用强调标签。{_cross_context_block}""",
+只输出三段连贯叙事 HTML <p> 标签：1)P/C与OI含义及异常流解读（含IV-RV价差对策略选择的影响）, 2)关键位分析与Gamma机制（含Pin Risk和到期日历），3)IV Skew与期限结构解读（含已实现波动率对比）。**严禁 table/tr/td/th/ol/ul/li 标签**，所有数据指标和异常流信息嵌入散文叙述，不得制表。关键词使用 <strong>、<span class="bull-text">/<span class="bear-text">/<span class="highlight"> 标注。{_prev_block}{_cross_context_block}""",
 
         "macro": f"""
 分析 {ticker} 当前宏观与情绪环境：
 - Fear & Greed 指数: {ctx['fg_score'] if ctx['fg_score'] else '未知'}
 - GuardBee 评分: {fmt_score(ctx['guard'].get('score'))} ({ctx['guard'].get('direction','neutral')})
 - 宏观发现: {ctx['guard'].get('discovery','')[:200]}
+- 市场政体（Regime）: {ctx.get('market_regime',{}).get('overall_regime','未知')} | 宏观层: {ctx.get('market_regime',{}).get('macro_regime','N/A')} | 板块层: {ctx.get('market_regime',{}).get('sector_regime','N/A')} | 个股层: {ctx.get('market_regime',{}).get('stock_regime','N/A')}
+- 时间周期: {ctx.get('cycle_context',{}).get('cycle_label','normal')} | Opex周: {ctx.get('cycle_context',{}).get('is_opex_week',False)} | 财报后窗口: {ctx.get('cycle_context',{}).get('post_earnings_window',False)}
+- 供应链信号（TSMC/AMAT/ASML vs {ticker} 5日相对强弱）: {ctx.get('supply_chain',{}).get('summary','暂无')}
 - Buzz情绪%: {ctx['buzz'].get('details',{}).get('sentiment_pct','N/A')}
 - Reddit: {ctx['reddit'].get('rank','N/A')}名, {ctx['reddit'].get('mentions','N/A')}次提及
 
-生成2段宏观分析：分析宏观逆风/顺风对该股的影响，以及F&G极值下的反向做多机会。输出两段 HTML <p> 标签，使用强调标签。{_delta_block}{_live_news_block}
+只输出两段连贯叙事 HTML <p> 标签，**严禁 table/tr/td/th/ol/ul/li 标签**，宏观数据指标嵌入散文，不得制表或列举。关键词使用 <strong>、<span class="bull-text">/<span class="bear-text">/<span class="highlight"> 标注。分析宏观逆风/顺风对该股的影响，结合市场政体（risk_on/risk_off）和时间周期判断短期宏观压力节奏，以及F&G极值下的反向机会。{_delta_block}{_live_news_block}
 若有昨日对比，请在分析中引用宏观情绪的变化方向。
-若有AV情绪分，请将其与F&G指数对比，说明散户情绪与机构情绪是否一致。{_cross_context_block}""",
+若有AV情绪分，请将其与F&G指数对比，说明散户情绪与机构情绪是否一致。{_prev_block}{_cross_context_block}""",
 
         "scenario": f"""
-为 {ticker} 补充情景推演叙事（情景卡片数据已由蜂群分析生成，**禁止重复输出表格或情景列表**）：
+为 {ticker} 补充情景推演叙事（情景卡片和止盈止损矩阵已由模板生成，**严禁输出任何 table/tr/td/th HTML 标签，严禁重复输出操作建议矩阵或情景列表**）：
 
 【当前量化基础】
 - 价格: {'$'+str(ctx['price']) if ctx['price'] else '市价'} | 评分: {score}/10 | 方向: {direction}
@@ -777,26 +818,29 @@ F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('dis
 - IV当前: {ctx['iv_current']:.1f}% | F&G: {ctx['fg_score'] if ctx['fg_score'] else '未知'} | 期权流: {ctx['flow_direction']}
 - 全部风险信号: {', '.join(ctx['bear_signals']) or '无'}{_master_block}{_delta_block}
 
-输出两段 HTML <p> 标签：
+只输出两段 HTML <p> 标签，不得包含任何 table/ol/ul/li 标签：
 第一段：情景概率分布的内在逻辑——基准/乐观/悲观情景各自被哪些具体数据驱动？ML预期与期权市场隐含方向是否形成共鸣或分歧？催化剂时间窗口如何影响短期3-5天的概率分布（区分短期与7日/30日预期的差异）？
 第二段：交易执行框架——分批建仓的具体触发条件（价格/信号触发点）、仓位管理逻辑、以及**论点失效信号**（必须给出具体数值阈值：价格/IV/P-C等，触及时应立即离场的判断依据）。
 用 <strong> 强调关键数字和价位，用 <span class="bull-text">/<span class="bear-text"> 标注正负预期。
-若有昨日对比，请说明预期方向较昨日是否发生了实质性变化。{_cross_context_block}""",
+若有昨日对比，请说明预期方向较昨日是否发生了实质性变化。{_prev_block}{_cross_context_block}""",
 
         "risk": f"""
-为 {ticker} 深度推理风险格局，生成带 HIGH/MED/LOW 级别标注的风险卡片（规则引擎已生成基础卡片，你的任务是生成**推理层**卡片，内容必须包含因果链分析、数据间的放大效应、具体失效阈值）：
+为 {ticker} 生成 3 个深度推理风险卡片。规则引擎已渲染基础风险列表，你只需生成推理层卡片（因果链+放大效应+失效阈值）。
+
+数据：
 - 逆向信号: {', '.join(ctx['bear_signals'])}
 - Bear评分: {fmt_score(ctx['bear'].get('score'))} ({ctx['bear'].get('direction')})
-- F&G: {ctx['fg_score'] if ctx['fg_score'] else '未知'}
-- IV Skew: {ctx['iv_skew']}
+- F&G: {ctx['fg_score'] if ctx['fg_score'] else '未知'} | IV Skew: {ctx['iv_skew']}
 - 催化剂: {len(ctx['catalysts'])} 个，最近: {ctx['catalysts'][0].get('event','无') if ctx['catalysts'] else '无'}
-- 宏观: {ctx['guard'].get('discovery','')[:150]}{_master_block}{_cross_context_block}
+- 宏观: {ctx['guard'].get('discovery','')[:150]}{_master_block}{_prev_block}{_cross_context_block}
 
-生成 **3 个**推理风险卡片，必须严格使用以下 HTML 格式（禁止输出任何其他内容）：
-<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div><div class="risk-title">🔴 风险标题（含核心数据）</div><div class="risk-note">**深度推理**：说明该风险的传导机制——它如何从信号演变为亏损？与其他风险是否存在共振放大？给出具体失效阈值（价格/IV/P-C数字）。2-3句，含 <strong>关键数字</strong>。</div></div></div>
+⚠️ 输出格式极严：只允许输出以下3张卡片 HTML，禁止任何 p/ol/ul/li/table/div（卡片模板本身除外）、禁止任何解释性文字。
 
-级别规则：系统性/连锁触发风险用 risk-high+HIGH+🔴，结构性/定价偏差风险用 risk-med+MED+🟡，注意事项/边际风险用 risk-low+LOW+⚪。
-**禁止**输出 <p> 标签、纯文字段落或任何卡片格式以外的内容。每张卡片的 risk-note 必须包含推理链和数字阈值，不得只描述现象。""",
+<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div><div class="risk-title">🔴 [风险标题+核心数据]</div><div class="risk-note">传导链：[信号如何演变为亏损] → [与其他风险的共振放大] → 失效阈值：<strong>[价格/IV/P-C具体数值]</strong>触及立即离场。</div></div></div>
+<div class="risk-item risk-med"><div class="risk-badge">MED</div><div><div class="risk-title">🟡 [风险标题+核心数据]</div><div class="risk-note">传导链：[信号如何演变为亏损] → [量化依据] → 警戒线：<strong>[具体数值]</strong>。</div></div></div>
+<div class="risk-item risk-low"><div class="risk-badge">LOW</div><div><div class="risk-title">⚪ [风险标题+核心数据]</div><div class="risk-note">传导链：[边际风险逻辑] → 监控指标：<strong>[具体数值]</strong>。</div></div></div>
+
+级别规则：系统性/连锁触发 → risk-high+HIGH+🔴，结构性/定价偏差 → risk-med+MED+🟡，边际/注意事项 → risk-low+LOW+⚪。""",
     }
 
     prompt = prompts.get(section, "")
@@ -2596,6 +2640,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "") -> str:
       <div class="prose">{reasoning.get('swarm_analysis', '<p>分析生成中...</p>')}</div>
       <div style="margin-top:14px;">{bar_rows}</div>
       {accuracy_html}
+      {ctx.get('thesis_break_html', '')}
     </div>
   </div>
 
@@ -3036,6 +3081,32 @@ def main():
         print(f"   📊 Delta: {score_diff:+.2f} | 昨日文件: {prev_path.name if prev_path else '无'}")
     ctx["delta_context"] = delta_context
 
+    # 2b-⑧. Thesis Break 闭环检查
+    ctx["thesis_break_html"] = ""
+    ctx["thesis_break_data"] = {}
+    try:
+        from market_intelligence import check_thesis_breaks
+        _tb_pcr = ctx.get("put_call_ratio", 1.0)
+        try:
+            _tb_pcr = float(_tb_pcr)
+        except (ValueError, TypeError):
+            _tb_pcr = 1.0
+        _tb_result = check_thesis_breaks(
+            ticker=ticker,
+            current_price=float(ctx.get("price") or 0.0),
+            iv_current=float(ctx.get("iv_current") or 0.0),
+            put_call_ratio=_tb_pcr,
+            bear_signals=ctx.get("bear_signals", []),
+            swarm_score=float(ctx.get("final_score") or 5.0),
+        )
+        ctx["thesis_break_data"] = _tb_result
+        ctx["thesis_break_html"] = _tb_result.get("alert_html", "")
+        if _tb_result.get("level"):   # "warning" or "stop_loss"
+            _nconds = len(_tb_result.get("triggered_conditions", []))
+            print(f"   ⚠️  Thesis Break: {_nconds} 个触发条件 → {_tb_result['level']}")
+    except Exception as _e_tb:
+        print(f"   ℹ️  Thesis Break 检查跳过: {_e_tb}")
+
     # 2c. 读取历史准确率（Gap 3 · 自学习反馈）
     _accuracy    = _load_ticker_accuracy(ticker, out_dir)
     accuracy_html = _render_accuracy_card(_accuracy)
@@ -3084,8 +3155,9 @@ def main():
 
     if use_llm:
         print(f"\n🤖 Claude API 深度推理中（两步链式 + 跨章上下文）...")
-        ctx["master_thesis"] = ""  # 初始化，CH1跑完后填入
-        ctx["cross_context"] = ""  # 初始化，Phase 1.5 跑完后填入
+        ctx["master_thesis"] = ""   # 初始化，CH1跑完后填入
+        ctx["cross_context"] = ""   # 初始化，Phase 1.5 跑完后填入
+        ctx["prev_chapters"] = []   # 滚动注入：每章跑完后追加摘要
 
         # Phase 1：CH1 先跑，提取核心论点作为后续章节的上下文
         print(f"   ✍️  swarm_analysis (Phase 1)...", end="", flush=True)
@@ -3104,10 +3176,18 @@ def main():
         else:
             print(" ⚠️  生成失败，各章节独立推理")
 
-        # Phase 2：其余章节带入 master_thesis + cross_context
+        # Phase 2：顺序执行，滚动注入前序章节摘要
+        _ch_labels = {
+            "resonance": "CH2共振", "catalyst": "CH3催化剂",
+            "options": "CH4期权",   "macro":    "CH5宏观",
+            "scenario": "CH6情景",  "risk":     "CH7风险",
+        }
         for sec in ["resonance", "catalyst", "options", "macro", "scenario", "risk"]:
-            print(f"   ✍️  {sec}...", end="", flush=True)
+            print(f"   ✍️  {sec}（前序摘要 {len(ctx['prev_chapters'])} 条）...", end="", flush=True)
             reasoning[sec] = llm_reason(ctx, sec, api_key)
+            # 提取本章首句结论，注入下一章上下文
+            _summary = extract_chapter_summary(reasoning[sec])
+            ctx["prev_chapters"].append(f"{_ch_labels[sec]}：{_summary}")
             print(" ✅")
 
         # Phase 3：情景结构化数据（JSON）
@@ -3117,6 +3197,7 @@ def main():
     else:
         ctx["master_thesis"] = ""
         ctx["cross_context"] = ""
+        ctx["prev_chapters"] = []
         print(f"\n📝 本地叙事生成（本地模式）...")
         for sec in sections:
             reasoning[sec] = _local_fallback(ctx, sec)

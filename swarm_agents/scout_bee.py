@@ -183,6 +183,22 @@ class ScoutBeeNova(BeeAgent):
                 elif rs_sig == "underperform":
                     score = max(0.0, score * 0.97)
 
+            # ── 2d: 跨资产供应链信号（⑥）— TSM/AMAT/ASML/SOXX 相对强弱 ──────────────
+            supply_chain_data: dict = {}
+            try:
+                from market_intelligence import get_supply_chain_signals
+                supply_chain_data = get_supply_chain_signals(ticker)
+                _sc_summary = supply_chain_data.get("summary", "")
+                if _sc_summary:
+                    discovery = f"{discovery} | {_sc_summary}"
+                _sc_signal = supply_chain_data.get("signal", "neutral")
+                if _sc_signal == "bullish":
+                    score = min(10.0, score * 1.03)
+                elif _sc_signal == "bearish":
+                    score = max(0.0, score * 0.97)
+            except Exception as _e_sc:
+                _log.debug("Supply chain signals unavailable for %s: %s", ticker, _e_sc)
+
             # S3: 结构化数据交换（BearBee 可直接读取，替代正则解析）
             _pub_details = {"crowding_score": crowding_score}
             if insider_data:
@@ -241,6 +257,8 @@ class ScoutBeeNova(BeeAgent):
                         "summary": congress_data.get("summary", ""),
                     },
                     "sector_relative_strength": sector_rs,
+                    # ⑥ 跨资产供应链信号
+                    "supply_chain": supply_chain_data,
                 },
             ).to_dict()
 

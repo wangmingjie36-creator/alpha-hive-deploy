@@ -17,6 +17,134 @@ class OracleBeeEcho(BeeAgent):
     融合：期权信号 60% + Polymarket 赔率 40%
     """
 
+    def _analyze_term_structure(self, ticker: str, stock_price: float) -> dict:
+        """IV 期限结构分析（近月 vs 远月 ATM IV）
+        Contango（远月高）= 市场平静 → 偏多
+        Backwardation（近月高）= 近期恐慌/催化剂 → 偏空
+        """
+        result = {"structure": "unknown", "spread": 0.0, "term_score_adj": 0.0, "summary": ""}
+        try:
+            import yfinance as yf
+            from datetime import datetime
+            t = yf.Ticker(ticker)
+            expirations = list(t.options) if hasattr(t, "options") else []
+            if len(expirations) < 2:
+                return result
+            ivs = []
+            for exp in expirations[:3]:
+                try:
+                    chain = t.option_chain(exp)
+                    calls = chain.calls
+                    if calls.empty:
+                        continue
+                    atm_idx = (calls["strike"] - stock_price).abs().idxmin()
+                    atm_iv = float(calls.loc[atm_idx, "impliedVolatility"])
+                    if atm_iv > 0:
+                        exp_date = datetime.strptime(exp, "%Y-%m-%d")
+                        dte = max(1, (exp_date - datetime.now()).days)
+                        ivs.append({"expiry": exp, "dte": dte, "atm_iv": round(atm_iv * 100, 2)})
+                except (KeyError, ValueError, IndexError):
+                    continue
+            if len(ivs) < 2:
+                return result
+            near_iv = ivs[0]["atm_iv"]
+            far_iv = ivs[-1]["atm_iv"]
+            spread = far_iv - near_iv
+            if spread > 2.0:
+                structure, adj = "contango", +0.3
+            elif spread > -2.0:
+                structure, adj = "flat", 0.0
+            elif spread > -5.0:
+                structure, adj = "backwardation", -0.4
+            else:
+                structure, adj = "severe_backwardation", -0.8
+            result = {
+                "structure": structure, "spread": round(spread, 2),
+                "near_iv": near_iv, "far_iv": far_iv,
+                "term_score_adj": adj,
+                "summary": f"TermStr:{structure}({near_iv:.0f}/{far_iv:.0f})",
+            }
+        except Exception as e:
+            _log.debug("OracleBee term structure failed for %s: %s", ticker, e)
+        return result
+
+    def _analyze_deep_skew(self, ticker: str, stock_price: float) -> dict:
+        """25-delta Skew 分析（OTM Put IV vs OTM Call IV）
+        Skew > 1.3 → 机构恐慌对冲 → 偏空；Skew < 0.8 → Call 投机过热 → 偏多
+        """
+        result = {"skew_25d": None, "skew_score_adj": 0.0, "summary": ""}
+        try:
+            import yfinance as yf, math
+            t = yf.Ticker(ticker)
+            expirations = list(t.options) if hasattr(t, "options") else []
+            if not expirations:
+                return result
+            chain = t.option_chain(expirations[0])
+            calls, puts = chain.calls, chain.puts
+            if calls.empty or puts.empty:
+                return result
+            otm_put_ivs = [row["impliedVolatility"] for _, row in puts.iterrows()
+                           if -20 < (row["strike"] / stock_price - 1) * 100 < -5
+                           and row.get("impliedVolatility", 0) > 0
+                           and not math.isnan(row["impliedVolatility"])]
+            otm_call_ivs = [row["impliedVolatility"] for _, row in calls.iterrows()
+                            if 5 < (row["strike"] / stock_price - 1) * 100 < 20
+                            and row.get("impliedVolatility", 0) > 0
+                            and not math.isnan(row["impliedVolatility"])]
+            if not otm_put_ivs or not otm_call_ivs:
+                return result
+            avg_put = sum(otm_put_ivs) / len(otm_put_ivs)
+            avg_call = sum(otm_call_ivs) / len(otm_call_ivs)
+            skew = avg_put / avg_call if avg_call > 0 else 1.0
+            if skew > 1.3:   adj = -0.6
+            elif skew > 1.15: adj = -0.3
+            elif skew < 0.7:  adj = +0.4
+            elif skew < 0.85: adj = +0.2
+            else:             adj = 0.0
+            result = {
+                "skew_25d": round(skew, 3),
+                "otm_put_iv": round(avg_put * 100, 1),
+                "otm_call_iv": round(avg_call * 100, 1),
+                "skew_score_adj": adj,
+                "summary": f"Skew25d:{skew:.2f}" + ("(恐慌对冲)" if skew > 1.3 else ""),
+            }
+        except Exception as e:
+            _log.debug("OracleBee deep skew failed for %s: %s", ticker, e)
+        return result
+
+    def _calc_max_pain(self, ticker: str, stock_price: float) -> dict:
+        """Max Pain 计算（期权到期时令所有持仓亏损最大的价位）"""
+        result = {"max_pain": None, "distance_pct": None, "summary": ""}
+        try:
+            import yfinance as yf
+            t = yf.Ticker(ticker)
+            expirations = list(t.options) if hasattr(t, "options") else []
+            if not expirations:
+                return result
+            chain = t.option_chain(expirations[0])
+            calls, puts = chain.calls, chain.puts
+            if calls.empty or puts.empty:
+                return result
+            call_oi = dict(zip(calls["strike"], calls["openInterest"].fillna(0).astype(int)))
+            put_oi  = dict(zip(puts["strike"],  puts["openInterest"].fillna(0).astype(int)))
+            all_strikes = sorted(set(list(call_oi.keys()) + list(put_oi.keys())))
+            if not all_strikes:
+                return result
+            min_pain, mp_strike = float("inf"), stock_price
+            for test_price in all_strikes:
+                total_pain = (sum((test_price - s) * oi * 100 for s, oi in call_oi.items() if test_price > s)
+                              + sum((s - test_price) * oi * 100 for s, oi in put_oi.items() if test_price < s))
+                if total_pain < min_pain:
+                    min_pain, mp_strike = total_pain, test_price
+            dist = (stock_price / mp_strike - 1) * 100 if mp_strike > 0 else 0
+            result = {
+                "max_pain": mp_strike, "distance_pct": round(dist, 2),
+                "summary": f"MaxPain:${mp_strike:.0f}({dist:+.1f}%)" if mp_strike else "",
+            }
+        except Exception as e:
+            _log.debug("OracleBee max pain failed for %s: %s", ticker, e)
+        return result
+
     def analyze(self, ticker: str) -> Dict:
         _err = self._validate_ticker(ticker)
         if _err:
@@ -53,6 +181,19 @@ class OracleBeeEcho(BeeAgent):
             except LLM_ERRORS as e:
                 _log.warning("OracleBeeEcho Polymarket unavailable for %s: %s", ticker, e)
                 poly_markets = 0
+
+            # ---- Phase 2: 期权深度分析（term structure / 25d skew / max pain）----
+            term_structure = self._analyze_term_structure(ticker, current_price)
+            deep_skew      = self._analyze_deep_skew(ticker, current_price)
+            max_pain       = self._calc_max_pain(ticker, current_price)
+            _deep_adj = term_structure.get("term_score_adj", 0) + deep_skew.get("skew_score_adj", 0)
+            options_score = max(0.0, min(10.0, options_score + _deep_adj))
+            _deep_parts = [s for s in [
+                term_structure.get("summary", ""), deep_skew.get("summary", ""),
+                max_pain.get("summary", ""),
+            ] if s]
+            if _deep_parts:
+                signal_summary = signal_summary + " | " + " | ".join(_deep_parts)
 
             # ---- P2: 异常期权流检测（大单 OTM 买入 / 短期扫单）----
             unusual_flow = {}
@@ -160,6 +301,14 @@ class OracleBeeEcho(BeeAgent):
                 _pub_details["gex"] = result.get("gamma_exposure")  # A2: OptionsAgent 返回 "gamma_exposure"
                 if _skew_ratio is not None:
                     _pub_details["iv_skew"] = _skew_ratio  # S14: 仅有值时设置
+                if term_structure.get("structure") != "unknown":
+                    _pub_details["term_structure"] = term_structure["structure"]
+                    _pub_details["term_spread"]    = term_structure.get("spread", 0)
+                if deep_skew.get("skew_25d") is not None:
+                    _pub_details["skew_25d"] = deep_skew["skew_25d"]
+                if max_pain.get("max_pain") is not None:
+                    _pub_details["max_pain"]          = max_pain["max_pain"]
+                    _pub_details["max_pain_dist_pct"] = max_pain.get("distance_pct", 0)
             self._publish(ticker, discovery, "options+polymarket", score, direction, details=_pub_details)
 
             # Phase 2: confidence = 期权数据可用 + Polymarket 可用 + LLM 加成
@@ -180,7 +329,8 @@ class OracleBeeEcho(BeeAgent):
                     "options": "real" if result else "fallback",
                     "polymarket": "real" if poly_markets > 0 else "unavailable",
                 },
-                details=result,
+                details={**(result or {}), "term_structure": term_structure,
+                         "deep_skew": deep_skew, "max_pain": max_pain},
                 extras={
                     "polymarket_score": poly_score,
                     "polymarket_markets": poly_markets,

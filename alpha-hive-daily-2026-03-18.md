@@ -516,7 +516,44 @@
 
 **按方向**：看多:58%(59次) | 中性:73%(26次)
 
-## 8) 数据来源 & 免责声明
+## 8) 🛠️ 系统更新日志（2026-03-18 · v0.10.0）
+
+> 本 session 完成 8 大高价值分析框架落地，新增 2 个模块，修改 5 个现有文件，修复 6 个 Bug。
+
+### 新增模块
+
+| 文件 | 功能 |
+|------|------|
+| `market_intelligence.py` | ①③④⑤⑥⑦⑧ 七项框架中央模块 |
+| `pead_analyzer.py` | ② PEAD 财报后价格漂移量化分析 |
+
+### 框架集成摘要
+
+| # | 框架 | 注入位置 | 下游影响 |
+|---|------|---------|---------|
+| ① | IV-RV Spread（期权贵/便宜） | `options_analyzer.py` → OracleBee | CH4 提示词新增 IV 定价判断维度 |
+| ② | PEAD 历史量化（财报后漂移） | `pead_analyzer.py` → ChronosBee | CH3 提示词新增历史财报统计规律 |
+| ③ | 时间周期意识（Opex/FOMC/月末） | `guard_bee.py` P6 | Opex周额外 -0.3 评分；周期标注注入 discovery |
+| ④ | Regime Detection（3层政体） | `guard_bee.py` P6 | risk_off: -0.5 / risk_on: +0.2；CH5 新增宏观/板块/个股政体数据 |
+| ⑤ | Gamma 到期日历（Pin Risk/Charm） | `options_analyzer.py` → OracleBee | CH4 新增钉子位 + Charm 方向维度 |
+| ⑥ | 供应链信号（TSM/AMAT/ASML/SOXX） | `scout_bee.py` 2d | CH5 新增跨资产供应链相对强弱 |
+| ⑦ | 信号拥挤度（alpha_decay） | `guard_bee.py` P7 | 拥挤度 > 阈值时 score 乘数折扣 |
+| ⑧ | Thesis Break 闭环 | `generate_deep_v2.py` main() | 论点失效条件触发后 CH1 显示红/橙告警卡 |
+
+### Bug 修复（6 个）
+
+| # | 文件 | 问题 | 修复 |
+|---|------|------|------|
+| 1 | `options_analyzer.py` | `iv_rv_data.get("signal")` 字段名错误 | 改为 `"iv_rv_signal"` |
+| 2 | `market_intelligence.py` | Gamma 日历用 `"expiration"` 但数据字段为 `"expiry"` | 改为双字段兼容 |
+| 3 | `generate_deep_v2.py` | LLM prompt 用 `pin_risk_strike`/`max_oi_expiry`（不存在） | 改为 `pin_strike`/`pin_expiry` |
+| 4 | `generate_deep_v2.py` | macro prompt 用 `spx_vs_200ma`/`soxx_vs_20ma`（不存在） | 改为 `macro_regime`/`sector_regime` |
+| 5 | `generate_deep_v2.py` | `put_call_ratio` 为 `"N/A"` 时传入 thesis break 会 TypeError | 加 `float()` 安全转换 |
+| 6 | `generate_deep_v2.py` | 检查 `breaks_detected` 字段但返回 dict 无此键 | 改为检查 `"level"` 字段 |
+
+---
+
+## 9) 数据来源 & 免责声明
 
 **蜂群分工**：
 - ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）

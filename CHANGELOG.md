@@ -5,6 +5,137 @@
 
 ---
 
+## [0.10.3] — 2026-03-19
+
+### Added (风险量化引擎)
+
+- **`risk_engine.py`**（新文件，项目根目录）— 完整蒙特卡洛 VaR + 压力测试引擎
+  - **Layer 1 历史模拟 VaR**：从 `report_snapshots/` 实际 T+1 收益，回退到 yfinance 日收益×√T
+  - **Layer 2 参数法 VaR**（Delta-Normal）：`volatility_20d` + 动量调整，解析 CVaR 公式
+  - **Layer 3 蒙特卡洛 VaR**：GBM 解析解 `S_T=S₀×exp((μ-½σ²)T+σ√T·Z)`，1万次模拟，向量化
+  - **组合 VaR**：Cholesky 相关矩阵分解，等权默认，输出多元化收益
+  - **5大压力情景**：VIX飙升 / 利率冲击(+100bps) / 板块崩盘(-25%) / COVID型崩盘 / 流动性危机
+  - **Beta 估算**：OLS 60日 vs SPY/板块ETF，24h 文件缓存（`.risk_cache/`）
+  - **`format_risk_html()`**：暗色主题 HTML 卡片，含 VaR 三法对比表、价格目标、压力测试柱状图
+  - **CLI**：`python risk_engine.py NVDA [--portfolio NVDA TSLA MSFT] [--json] [--sims N] [--horizon D]`
+  - 烟雾测试通过：NVDA 单股 2.3s，三标的组合 1.7s
+
+---
+
+## [0.10.2] — 2026-03-19
+
+### Added (Phase 1 模块)
+
+- **`data_pipeline.py`**（新文件，项目根目录）— 多源数据降级链
+  - `YFinanceSource` / `AlphaVantageSource` / `FinnhubSource` 三源适配器
+  - `ObservableCircuitBreaker` 熔断器（每源独立，带指标暴露）
+  - `MultiSourceFetcher`：yfinance → Alpha Vantage → Finnhub → 陈旧缓存 → 安全默认值
+  - 失败返回 `price=0.0 + _data_unavailable=True`，彻底消灭虚假 `price=100.0`
+  - LRU + 分级TTL缓存（real=5min / degraded=2min / stale=1h）
+
+- **`parallel_agent_runner.py`**（新文件，项目根目录）— Agent 并行化执行引擎
+  - `ParallelAgentRunner` 两阶段并行：5工蜂完全并行 → Guard+Bear 并行
+  - 每 Agent 独立超时（60s）+ 全局超时兜底
+  - `get_timing_report()` 输出加速比、最慢/最快 Agent 名称
+
+- **`backtest_engine.py`**（新文件，项目根目录）— 独立回测引擎（可按需单独运行）
+  - 从 `report_snapshots/` 读历史快照，计算 T+1/T+7/T+30 收益
+  - 输出 Sharpe / MaxDrawdown / WinRate 标准指标，不影响任何现有文件
+
+### Changed
+
+- **`swarm_agents/cache.py`** — `_fetch_stock_data()` 接入多源降级链
+  - 优先委托 `data_pipeline.fetch_stock_data`（三源降级 + 分级TTL）
+  - `data_pipeline` 不可用时自动回退原 yfinance 逻辑（零风险降级）
+  - fallback `price` 从虚假 `100.0` 改为 `0.0`，与 WARN-3 标记配合
+
+- **`alpha_hive_daily_report.py`** — `_analyze_single_ticker()` Guard+Bear 并行
+  - Guard + Bear 由串行改为并行（两者均只读信息素板，PheromoneBoard 已有 RLock）
+  - `ImportError` 时自动回退串行执行，零风险降级
+
+---
+
+## [0.10.1] — 2026-03-19
+
+### Added (Phase 2 v4 补丁)
+
+- **`swarm_agents/rival_bee.py`** — `_calc_technical_indicators()` 新方法
+  - 计算 RSI-14 / MACD(12/26/9) Histogram+金死叉 / Bollinger Band% 三个技术指标
+  - ML 不可用时：替代简单动量评分，方向判断更有区分度
+  - ML 可用时：权重减半作为辅助微调（±0.5 → ±0.25）
+  - 结果存入 `details.technical_indicators`
+
+- **`swarm_agents/guard_bee.py`** — `_calc_macro_adjustment()` 新方法
+  - 统一宏观 regime 投票（VIX + 收益率曲线 + 黄金 + FOMC + VIX期限结构 + 板块轮动）
+  - 取代原 P5a~P5f 共 65 行零散 if-else（最坏叠加 -3.1 → 有上限 ±1.5）
+  - 返回 regime / score_adj / signals / macro_summary / details / regime_votes 完整字典
+
+- **`swarm_agents/base.py`** — `_get_stock_data()` WARN-3 保护
+  - 当 price<=0 时设置 `_data_unavailable=True` 标记
+  - 下游 Agent 可检查该标记提前返回安全结果，避免 ZeroDivisionError
+
+### Changed
+
+- **`swarm_agents/rival_bee.py`** — `analyze()` 两处集成
+  - ML 可用分支：`discovery` 后追加 `tech['summary']`，评分叠加 `tech_score_adj * 0.5`
+  - ML 不可用分支：已使用 `_calc_technical_indicators` 增强（上次 session 已完成）
+  - `return AgentResult` details 新增 `technical_indicators` 字段
+
+- **`swarm_agents/guard_bee.py`** — `analyze()` 宏观段精简
+  - P5~P5f 65 行替换为 `macro_result = self._calc_macro_adjustment(ticker)` 共 6 行
+  - `vix_term` 变量兼容保留（`= macro_result["details"]`）
+  - `details` 新增 `macro_regime` / `macro_signals` / `macro_regime_votes` 字段
+
+---
+
+## [0.10.0] — 2026-03-18
+
+### Added (新架构模块)
+
+- **`market_intelligence.py`**（新文件）— 8 大高价值框架中央模块
+  - `calculate_iv_rv_spread()` ① — HV30 已实现波动率 vs IV 价差，判断期权定价贵/便宜
+  - `get_cycle_context()` ③ — Opex周/财报后窗口/FOMC周期/月末时间标注
+  - `detect_market_regime()` ④ — SPX 200MA / SOXX 20MA / 个股 20MA vs 50MA 三层政体识别
+  - `calculate_gamma_expiry_calendar()` ⑤ — 按到期日拆分 OI 集中度、Pin Risk 钉子位、Charm 衰减方向
+  - `get_supply_chain_signals()` ⑥ — TSM/AMAT/ASML/SOXX 与标的 5日相对强弱
+  - `calculate_signal_crowding()` ⑦ — Reddit排名+分析师共识+期权流对齐→alpha_decay_factor
+  - `check_thesis_breaks()` ⑧ — 读取 `thesis_breaks_config.json`，条件触发后生成 HTML 告警卡片
+
+- **`pead_analyzer.py`**（新文件）— ② PEAD 历史量化分析器
+  - `get_pead_analysis()` — yfinance 获取历史财报日期，计算 T+1/T+5/T+10/T+20 价格漂移
+  - `format_pead_for_chronos()` — 漂移统计格式化供 ChronosBee discovery 使用
+  - 7 天 JSON 缓存，bias 判定（bullish/bearish/neutral）
+
+### Changed (蜂群集成)
+
+- **`options_analyzer.py`** — `OptionsAgent.analyze()` 新增两项输出字段
+  - 调用 `calculate_iv_rv_spread()` → 输出 `rv_30d`、`iv_rv_spread`、`iv_rv_signal`、`iv_rv_detail`
+  - 调用 `calculate_gamma_expiry_calendar()` → 输出 `gamma_calendar`（含到期日 OI 分布、Pin Risk 钉子位、Charm 方向）
+
+- **`swarm_agents/guard_bee.py`** — 新增 P6/P7 两个分析块
+  - P6：调用 `get_cycle_context()` ③ + `detect_market_regime()` ④，Regime risk_off/risk_on 评分修正 ±0.5，Opex周额外 -0.3；cycle_label/is_opex_week 注入 discovery
+  - P7：调用 `calculate_signal_crowding()` ⑦，alpha_decay < 0.85 时乘数折扣 score
+  - `details` dict 新增 `cycle_context`、`market_regime`、`signal_crowding` 三字段
+
+- **`swarm_agents/scout_bee.py`** — 新增 2d 供应链信号块
+  - 调用 `get_supply_chain_signals()` ⑥，供应链顺风/逆风影响 score ±3%，summary 注入 discovery
+  - `details` dict 新增 `supply_chain` 字段
+
+- **`swarm_agents/chronos_bee.py`** — 新增 1d PEAD 块
+  - 调用 `get_pead_analysis()` ②，PEAD bias 微调 score ±0.3，`_pead_text` 注入 discovery
+  - `details` dict 新增 `pead`、`pead_summary`、`pead_bias` 三字段
+
+- **`generate_deep_v2.py`** — 全面扩展 ctx 字段和 LLM 提示词
+  - `extract()` 新增提取：`iv_rv_spread`、`iv_rv_signal`、`rv_30d`、`gamma_calendar`、`pead_summary`、`pead_bias`、`cycle_context`、`market_regime`、`signal_crowding`、`supply_chain`（共 10 个新字段）
+  - `main()` 新增 `check_thesis_breaks()` ⑧ 调用（2b-⑧ 步骤），论点失效时生成 HTML 告警卡
+  - `ctx["thesis_break_html"]` 注入 CH1 section body（`{accuracy_html}` 之后）
+  - **CH3 catalyst Step2 prompt** 新增 PEAD 历史漂移数据，要求引用财报后统计规律
+  - **CH4 options Step1 prompt** 新增 IV-RV 价差/HV30/Gamma 日历钉子位/Charm 方向
+  - **CH4 options Step2 prompt** 新增完整 IV-RV 价差解读逻辑和 Gamma 到期日历，第1段范围扩展含 IV-RV 策略影响，第2段含 Pin Risk 和到期日历，第3段含 HV30 对比
+  - **CH5 macro Step2 prompt** 新增市场政体（Regime）、时间周期（Cycle）、供应链信号（Supply Chain），要求结合 risk_on/risk_off 和时间节奏分析宏观压力
+
+---
+
 ## [未发布] — 进行中
 
 ---

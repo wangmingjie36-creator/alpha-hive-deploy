@@ -1222,6 +1222,24 @@ class OptionsAgent:
         # S15: IV 期限结构（个股 term structure）
         iv_term_struct = self.analyzer.calculate_iv_term_structure(ticker, stock_price)
 
+        # ① IV-RV Spread（隐含波动率 vs 已实现波动率价差）
+        iv_rv_data: Dict = {}
+        try:
+            from market_intelligence import calculate_iv_rv_spread
+            iv_rv_data = calculate_iv_rv_spread(ticker, current_iv)
+        except Exception as _e_ivr:
+            _log.debug("IV-RV Spread 计算失败 %s: %s", ticker, _e_ivr)
+
+        # ⑤ Gamma 到期日历（按到期日拆分 OI 集中度 + Pin Risk + Charm 方向）
+        gamma_calendar: Dict = {}
+        try:
+            from market_intelligence import calculate_gamma_expiry_calendar
+            gamma_calendar = calculate_gamma_expiry_calendar(
+                calls_df, puts_df, stock_price or atm_price
+            )
+        except Exception as _e_gc:
+            _log.debug("Gamma 到期日历计算失败 %s: %s", ticker, _e_gc)
+
         # 4. 生成综合评分
         options_score, signal_summary = self.analyzer.generate_options_score(
             iv_rank, put_call_ratio, gex, unusual_activity
@@ -1278,6 +1296,13 @@ class OptionsAgent:
             "iv_skew_detail": iv_skew,
             # S15: IV 期限结构
             "iv_term_structure": iv_term_struct,
+            # ① IV-RV Spread
+            "rv_30d": iv_rv_data.get("rv_30d", 0.0),
+            "iv_rv_spread": iv_rv_data.get("iv_rv_spread", 0.0),
+            "iv_rv_signal": iv_rv_data.get("iv_rv_signal", ""),
+            "iv_rv_detail": iv_rv_data,
+            # ⑤ Gamma 到期日历
+            "gamma_calendar": gamma_calendar,
         }
 
         # 方案21: 出口消毒 — 遍历结果 dict，NaN/Inf → 安全默认值

@@ -154,25 +154,35 @@ def check_ticker_validity(ticker: str) -> Dict:
 
 def _fetch_stock_data(ticker: str) -> Dict:
     """
-    从 yfinance 拉取股票实时数据（价格、动量、成交量等）
-    内置缓存（2 分钟 TTL）+ RateLimiter + CircuitBreaker + 指数退避重试
-    失败时返回默认值，不会抛出异常
+    多源数据降级链：yfinance → Alpha Vantage → Finnhub → 陈旧缓存 → 安全默认值
+    委托给 data_pipeline.MultiSourceFetcher（内置熔断器 + LRU缓存 + 分级TTL）
+
+    改动原因：原实现失败时返回 price=100.0（虚假数据），下游 Agent 会基于假数据评分。
+    新实现失败时返回 price=0.0 + _data_unavailable=True，触发 WARN-3 跳过分析。
     """
-    # 检查缓存（持有锁返回副本，防止外部修改）
+    try:
+        from data_pipeline import fetch_stock_data as _dp_fetch
+        return _dp_fetch(ticker)
+    except ImportError:
+        pass
+
+    # data_pipeline 不可用时的保守 fallback（只用 yfinance，失败返回 price=0）
     with _yf_lock:
         cached = _yf_cache.get(ticker)
         if cached and (_time.time() - _yf_cache_ts.get(ticker, 0)) < _YF_CACHE_TTL:
             return dict(cached)
 
-    data = {
-        "price": 100.0,
+    data: Dict = {
+        "price": 0.0,          # 修复：原 100.0 是虚假 fallback，改为 0.0 触发 WARN-3
         "momentum_5d": 0.0,
         "avg_volume": 0,
         "volume_ratio": 1.0,
         "volatility_20d": 0.0,
+        "data_source": "fallback",
     }
 
     if not yfinance_breaker.allow_request():
+        data["_data_unavailable"] = True
         return data
 
     for attempt in range(_YF_MAX_RETRIES + 1):
@@ -185,6 +195,7 @@ def _fetch_stock_data(ticker: str) -> Dict:
                 if attempt < _YF_MAX_RETRIES:
                     _time.sleep(1.0 * (2 ** attempt))
                     continue
+                data["_data_unavailable"] = True
                 return data
 
             if len(hist) >= 1:
@@ -207,8 +218,8 @@ def _fetch_stock_data(ticker: str) -> Dict:
                     _vol = float(returns.std() * (252 ** 0.5) * 100)
                     if not (math.isnan(_vol) or math.isinf(_vol)):
                         data["volatility_20d"] = _vol
-                    # else: 保留默认值 0.0（L172）
 
+            data["data_source"] = "real"
             # 写入缓存（O(1) LRU 淘汰）
             with _yf_lock:
                 if ticker not in _yf_cache:

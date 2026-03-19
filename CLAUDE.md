@@ -21,7 +21,22 @@
 
 ## 已完成的重要改动（勿重复添加）
 
-### generate_deep_v2.py
+### market_intelligence.py（新文件，v0.10.0）
+- `calculate_iv_rv_spread()` ① — HV30 已实现波动率 vs 隐含波动率价差
+- `get_cycle_context()` ③ — Opex周/财报后窗口/FOMC周期/月末
+- `detect_market_regime()` ④ — SPX 200MA / SOXX 20MA / 个股三层政体识别
+- `calculate_gamma_expiry_calendar()` ⑤ — 到期日 OI 集中度、Pin Risk、Charm 方向
+- `get_supply_chain_signals()` ⑥ — TSM/AMAT/ASML/SOXX 相对强弱
+- `calculate_signal_crowding()` ⑦ — 信号拥挤度元指数，alpha_decay_factor
+- `check_thesis_breaks()` ⑧ — thesis_breaks_config.json 条件触发告警 HTML 卡片
+- `_field_vals` 局部变量替代 f-string 嵌套 dict（已修复 SyntaxError）
+
+### pead_analyzer.py（新文件，v0.10.0）
+- `get_pead_analysis()` — yfinance 财报历史 → T+1/T+5/T+10/T+20 漂移统计 → 7天 JSON 缓存
+- `format_pead_for_chronos()` — 格式化摘要供 discovery 文字使用
+
+### generate_deep_v2.py（v0.10.0）
+
 - `_try_charts(ctx)` — 生成置信区间图 + 期权水位图，base64 嵌入 HTML
 - `_try_compute_gex(ctx)` — 报告生成阶段补算 Dealer GEX（当 JSON 里 `dealer_gex` 缺失时）
 - `ctx["_raw_data"] = data` — 原始 JSON 注入给 chart_engine 使用
@@ -51,6 +66,7 @@
 ### swarm_agents/scout_bee.py
 - 新增 `_assess_sector_relative_strength()` 维度
 - `discovery` 拼接用 `f"{discovery} | {rs_text}"`（非 `parts.append`）
+- v0.10.0：新增 2d 块，调用 `get_supply_chain_signals()` ⑥，supply_chain 注入 discovery + details
 
 ### swarm_agents/rival_bee.py
 - 新增 `_assess_eps_revision()` 维度
@@ -59,6 +75,8 @@
 ### options_analyzer.py
 - 新增 `calculate_iv_term_structure()` 方法（S15）
 - 输出 `iv_term_structure` 字段存入 OptionsAgent 结果 dict
+- v0.10.0：`OptionsAgent.analyze()` 调用 `calculate_iv_rv_spread()` ①，输出 `rv_30d`/`iv_rv_spread`/`iv_rv_signal`/`iv_rv_detail`
+- v0.10.0：调用 `calculate_gamma_expiry_calendar()` ⑤，输出 `gamma_calendar`
 - `iv_term_structure` 通过 `oracle_bee → details` 传递至报告层
 
 ### fred_macro.py
