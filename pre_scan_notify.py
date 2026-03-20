@@ -262,6 +262,16 @@ def main():
     def _build_slack_msg(reminder_num: int = 0) -> str:
         now_str = datetime.now().strftime("%H:%M")
         prefix = "" if reminder_num == 0 else f"⏰ *第 {reminder_num} 次提醒*\n\n"
+        # 提醒间隔：>=60 分钟显示小时，否则显示分钟
+        if args.remind_interval >= 60:
+            interval_str = f"{args.remind_interval // 60} 小时"
+        else:
+            interval_str = f"{args.remind_interval} 分钟"
+        # 最大等待时间提示（用于"不回复"提示）
+        if args.max_wait >= 60:
+            timeout_str = f"{args.max_wait // 60} 小时"
+        else:
+            timeout_str = f"{args.max_wait} 分钟"
         return (
             f"{prefix}🐝 *Alpha Hive 蜂群扫描等待确认*\n\n"
             f"📌 标的：{tickers_str}\n"
@@ -269,7 +279,7 @@ def main():
             f"*是否启用 LLM 模式？* （预估费用 ~$0.20）\n"
             f"> 回复 `llm` 或 `yes` → 启用 LLM 蜂群模式\n"
             f"> 回复 `no` → 使用规则引擎（免费）\n"
-            f"> 不回复 → 每 {args.remind_interval // 60} 小时提醒一次"
+            f"> 不回复 → 每 {interval_str} 提醒一次，{timeout_str}后自动跳过"
         )
 
     slack_ok, msg_ts, actual_channel = send_slack_notification(_build_slack_msg(0))
@@ -327,9 +337,13 @@ def main():
             _handle_reply(reply)
             time.sleep(15)
 
-    # ── 24 小时超时，放弃 ──
-    print("LLM_MODE=no (24 小时超时，今日不执行扫描)")
-    send_slack_notification("⏱️ *24 小时未收到确认，今日蜂群扫描已跳过*")
+    # ── 超时，放弃 ──
+    if args.max_wait >= 60:
+        timeout_label = f"{args.max_wait // 60} 小时"
+    else:
+        timeout_label = f"{args.max_wait} 分钟"
+    print(f"LLM_MODE=no ({timeout_label}超时，今日不执行扫描)")
+    send_slack_notification(f"⏱️ *{timeout_label}未收到确认，今日蜂群扫描已跳过*")
     sys.exit(0)
 
 
