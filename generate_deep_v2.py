@@ -675,6 +675,9 @@ def llm_reason(ctx: dict, section: str, api_key: str) -> str:
     _live_news = ctx.get("live_news_block", "")
     _live_news_block = f"\n\n{_live_news}" if _live_news else ""
 
+    _ff6 = ctx.get("ff6_block", "")
+    _ff6_block = f"\n\n{_ff6}" if _ff6 else ""
+
     _cross = ctx.get("cross_context", "")
     _cross_context_block = f"\n\n【跨章节锚点（请在本章行文中主动呼应相关条目）】\n{_cross}" if _cross else ""
 
@@ -689,7 +692,7 @@ def llm_reason(ctx: dict, section: str, api_key: str) -> str:
         "swarm_analysis": f"""分析 {ticker} 蜂群七维信号结构：
 综合评分{score}/10 | Scout {fmt_score(ctx['scout'].get('score'))} | Rival {fmt_score(ctx['rival'].get('score'))} ML7d{ctx['ml_7d']:+.1f}%
 Buzz {fmt_score(ctx['buzz'].get('score'))} | Chronos {fmt_score(ctx['chronos'].get('score'))} | Oracle {fmt_score(ctx['oracle'].get('score'))} P/C={ctx['put_call_ratio']}
-Guard {fmt_score(ctx['guard'].get('score'))} | Bear {fmt_score(ctx['bear'].get('score'))} 信号:{', '.join(ctx['bear_signals'][:2])}{_delta_block}{_conflict_block}{_live_news_block}
+Guard {fmt_score(ctx['guard'].get('score'))} | Bear {fmt_score(ctx['bear'].get('score'))} 信号:{', '.join(ctx['bear_signals'][:2])}{_delta_block}{_conflict_block}{_live_news_block}{_ff6_block}
 完成结构化预分析（严格按格式，无HTML）：""",
 
         "resonance": f"""分析 {ticker} 蜂群共振信号质量：
@@ -727,7 +730,7 @@ Buzz情绪%:{ctx['buzz'].get('details',{}).get('sentiment_pct','N/A')} | Reddit:
 
         "risk": f"""分析 {ticker} 风险信号优先级：
 逆向信号:{', '.join(ctx['bear_signals'])} | Bear评分:{fmt_score(ctx['bear'].get('score'))}
-F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('discovery','')[:120]}{_master_block}
+F&G:{ctx['fg_score']} | IV Skew:{ctx['iv_skew']} | 宏观:{ctx['guard'].get('discovery','')[:120]}{_master_block}{_ff6_block}
 完成结构化预分析（严格按格式，无HTML）：""",
     }
 
@@ -797,8 +800,8 @@ PEAD历史财报漂移: {ctx.get('pead_summary','暂无历史数据')}（偏向:
 - GuardBee 评分: {fmt_score(ctx['guard'].get('score'))} ({ctx['guard'].get('direction','neutral')})
 - 宏观发现: {ctx['guard'].get('discovery','')[:200]}
 - 市场政体（Regime）: {ctx.get('market_regime',{}).get('overall_regime','未知')} | 宏观层: {ctx.get('market_regime',{}).get('macro_regime','N/A')} | 板块层: {ctx.get('market_regime',{}).get('sector_regime','N/A')} | 个股层: {ctx.get('market_regime',{}).get('stock_regime','N/A')}
-- 时间周期: {ctx.get('cycle_context',{}).get('cycle_label','normal')} | Opex周: {ctx.get('cycle_context',{}).get('is_opex_week',False)} | 财报后窗口: {ctx.get('cycle_context',{}).get('post_earnings_window',False)}
-- 供应链信号（TSMC/AMAT/ASML vs {ticker} 5日相对强弱）: {ctx.get('supply_chain',{}).get('summary','暂无')}
+- 时间周期: {ctx.get('cycle_context',{}).get('cycle_regime','normal')} | Opex周: {ctx.get('cycle_context',{}).get('is_opex_week',False)} | 财报后窗口: {ctx.get('cycle_context',{}).get('is_post_earnings_window',False)}
+- 供应链信号（TSMC/AMAT/ASML vs {ticker} 5日相对强弱）: {ctx.get('supply_chain',{}).get('supply_chain_note','暂无')}
 - Buzz情绪%: {ctx['buzz'].get('details',{}).get('sentiment_pct','N/A')}
 - Reddit: {ctx['reddit'].get('rank','N/A')}名, {ctx['reddit'].get('mentions','N/A')}次提及
 
@@ -1513,7 +1516,8 @@ def _try_charts(ctx: dict) -> tuple:
         return "", ""
 
 
-def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "") -> str:
+def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
+                  attribution_html: str = "") -> str:
     """组装完整的 Template C v3.0 HTML 报告"""
     ticker = ctx["ticker"]
     report_date = ctx["report_date"]
@@ -2872,6 +2876,9 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "") -> str:
     </div>
   </div>
 
+  <!-- CH8 · FF6 因子归因（有数据时显示，无数据时节点隐藏）-->
+  {'<div class="section" id="ch8"><div class="section-header"><span class="ch-num">CH8</span><span class="section-icon">📐</span><span class="section-title">第八章 · Fama-French 6 因子 Alpha 归因</span></div><div class="section-body">' + attribution_html + '</div></div>' if attribution_html else ''}
+
   <div class="disclaimer">
     ⚠️ <strong>免责声明：</strong>本报告由 Alpha Hive 量化蜂群系统 + Claude API 混合模式生成，仅供研究参考，不构成投资建议。期权交易存在归零风险，所有交易决策需自行判断和风控。<br>
     <span style="color:var(--text3);font-size:10px;margin-top:4px;display:block;">
@@ -3130,6 +3137,35 @@ def main():
     else:
         print(f" ⏭  跳过（无 Finnhub/AV Key 或网络不可用）")
 
+    # 2.6 FF6 因子归因（提前计算，注入 ctx 供 CH1 prompt 读取）
+    attribution_html = ""
+    ctx["ff6_block"] = ""
+    try:
+        from factor_attribution import compute_factor_attribution, format_attribution_html as _fmt_attr
+        print("   📐 FF6 因子归因...", end="", flush=True)
+        _attr = compute_factor_attribution(ticker, lookback_days=252)
+        attribution_html = _fmt_attr(_attr)
+        if "error" not in _attr:
+            _f = _attr.get("factors", {})
+            _sig_factors = [
+                f"β_{k}={v['loading']:+.2f}{v['sig']}"
+                for k, v in _f.items() if abs(v["loading"]) > 0.2
+            ]
+            ctx["ff6_block"] = (
+                f"【FF6 因子归因（{_attr['n_obs']}日）】"
+                f"Alpha年化{_attr['alpha_annual']*100:+.1f}%"
+                f"(t={_attr['alpha_t']:+.1f}{'，显著' if _attr['alpha_p']<0.05 else '，不显著'}) | "
+                f"R²={_attr['r2']:.1%} | "
+                f"{' '.join(_sig_factors[:4])} | "
+                f"IR={_attr['information_ratio']:+.2f} | "
+                f"风险类型:{_attr['risk_level']}"
+            )
+            print(f" ✅  Alpha={_attr['alpha_annual']*100:+.1f}% R²={_attr['r2']:.1%}")
+        else:
+            print(f" ⚠️ {_attr['error']}")
+    except Exception as _e_attr:
+        print(f" ⚠️ FF6 归因跳过: {_e_attr}")
+
     # 3. LLM 深度推理
     sections = ["swarm_analysis", "resonance", "catalyst", "options", "macro", "scenario", "risk"]
     reasoning = {}
@@ -3205,7 +3241,8 @@ def main():
 
     # 4. 生成 HTML
     print("\n📄 渲染 Template C v3.0 HTML...")
-    html = generate_html(ctx, reasoning, accuracy_html=accuracy_html)
+    html = generate_html(ctx, reasoning, accuracy_html=accuracy_html,
+                         attribution_html=attribution_html)
 
     # 5. 保存
     report_date = ctx["report_date"]

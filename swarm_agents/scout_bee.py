@@ -188,13 +188,13 @@ class ScoutBeeNova(BeeAgent):
             try:
                 from market_intelligence import get_supply_chain_signals
                 supply_chain_data = get_supply_chain_signals(ticker)
-                _sc_summary = supply_chain_data.get("summary", "")
+                _sc_summary = supply_chain_data.get("supply_chain_note", "")
                 if _sc_summary:
                     discovery = f"{discovery} | {_sc_summary}"
-                _sc_signal = supply_chain_data.get("signal", "neutral")
-                if _sc_signal == "bullish":
+                _sc_signal = supply_chain_data.get("supply_chain_signal", "neutral")
+                if _sc_signal == "positive":
                     score = min(10.0, score * 1.03)
-                elif _sc_signal == "bearish":
+                elif _sc_signal == "negative":
                     score = max(0.0, score * 0.97)
             except Exception as _e_sc:
                 _log.debug("Supply chain signals unavailable for %s: %s", ticker, _e_sc)

@@ -113,7 +113,7 @@ class GuardBeeSentinel(BeeAgent):
                     score = clamp_score(score + 0.2)
                     discovery = f"{discovery} | Regime:风险偏好"
                 # 时间周期注记（Opex/FOMC/财报后窗口）
-                _cycle_label = cycle_ctx.get("cycle_label", "")
+                _cycle_label = cycle_ctx.get("cycle_regime", "")
                 if _cycle_label and _cycle_label != "normal":
                     discovery = f"{discovery} | 周期:{_cycle_label}"
                 if cycle_ctx.get("is_opex_week"):

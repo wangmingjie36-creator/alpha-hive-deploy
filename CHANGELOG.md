@@ -5,6 +5,55 @@
 
 ---
 
+## [0.10.6] — 2026-03-20
+
+### Changed（FF6 归因接入 Claude 连贯推理）
+
+- **`generate_deep_v2.py`**
+  - FF6 归因计算从步骤 3.5（LLM 后）**前移到步骤 2.6**（LLM 前），结果存入 `ctx["ff6_block"]`
+  - `_ff6_block` 注入 **`swarm_analysis`（CH1）** 和 **`risk`（CH7）** 的 step1 prompt
+  - CH1 建立 `master_thesis` 时已含 FF6 结论，后续 CH2~CH7 通过 `_master_block` 链式继承
+  - 格式：`【FF6 因子归因（244日）】Alpha年化+31.6%(t=+1.4,不显著) | R²=73.7% | β_Mkt-RF=+1.56*** ...`
+  - 归因失败时 `ctx["ff6_block"]=""` 静默跳过，不影响报告生成
+
+---
+
+## [0.10.5] — 2026-03-20
+
+### Changed（FF6 归因集成到深度报告）
+
+- **`generate_deep_v2.py`**
+  - `generate_html()` 新增 `attribution_html: str = ""` 参数
+  - 步骤 3.5 调用 `compute_factor_attribution(ticker, 252)`，失败时静默跳过（不中断报告）
+  - HTML 模板新增 **CH8 · 第八章 · Fama-French 6 因子 Alpha 归因**，位于 CH7 风险章节之后、免责声明之前
+  - CH8 节点条件渲染：`attribution_html` 为空时完全隐藏，不影响现有报告结构
+
+- **`factor_attribution.py`** — Bug 修复（5 项）
+  - **[高]** `_get_stock_returns`：`tz_localize(None)` → 改为 `pd.Timestamp(d.date())` 重建索引，修复时区偏移导致与 FF6 日期对不上（交叉日为 0）的关键 bug
+  - **[高]** `_ols` 兜底路径：`math.erf()` → `scipy.special.erf()`，修复 numpy 数组传入标量函数的 TypeError
+  - **[高]** `_build_summary`：加 `if not factors:` 守卫，修复 `max({}.items())` 空序列 ValueError
+  - **[高]** `_download_ff5/mom`：加 `threading.Lock` + double-check，修复多线程并发写 parquet 缓存冲突
+  - **[中]** MOM 列名大小写：`Mom` → rename to `MOM`（已在 v0.10.4 修复，此处补记）
+
+---
+
+## [0.10.4] — 2026-03-20
+
+### Added（因子归因引擎）
+
+- **`factor_attribution.py`**（新文件，项目根目录）— Fama-French 6 因子 Alpha 归因
+  - 数据源：Kenneth French Data Library（直接 HTTP 下载 ZIP，24h 本地缓存 `.factor_cache/`）
+  - FF6 = FF5（Mkt-RF / SMB / HML / RMW / CMA）+ MOM（动量因子），日频
+  - OLS 时间序列回归：`β=(X'X)⁻¹X'y`，纯 numpy，t 统计量用 `scipy.stats.t`
+  - 输出：Jensen Alpha（年化）/ 6因子暴露 / t统计量 / p值 / R² / Adj R² / IR / 追踪误差
+  - `compute_factor_attribution(ticker, lookback_days=252)` — 单标的
+  - `batch_attribution(tickers, lookback_days)` — ThreadPoolExecutor 并行
+  - `format_attribution_html(result)` — 暗色主题 HTML 卡片（含因子暴露条形图）
+  - 修复：MOM 列名 `Mom` vs `MOM` 大小写不一致
+  - 验证：NVDA β_mkt=1.56/HML=-1.28/MOM=+0.63，批量3标的耗时1.1s
+
+---
+
 ## [0.10.3] — 2026-03-19
 
 ### Added (风险量化引擎)
