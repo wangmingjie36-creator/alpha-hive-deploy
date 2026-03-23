@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Alpha Hive — 蜂群智能投资信号</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0a0a0f;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Helvetica Neue',sans-serif;color:#e8e8f0;min-height:100vh;overflow-x:hidden}
+
+  /* Hex bg */
+  body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='48'%3E%3Cpolygon points='28,2 50,14 50,38 28,50 6,38 6,14' fill='none' stroke='%23f0b429' stroke-width='0.5' opacity='0.08'/%3E%3C/svg%3E");pointer-events:none;z-index:0}
+
+  .wrap{max-width:960px;margin:0 auto;padding:0 24px;position:relative;z-index:1}
+
+  /* Nav */
+  nav{display:flex;align-items:center;justify-content:space-between;padding:20px 24px;max-width:960px;margin:0 auto;position:relative;z-index:1}
+  .logo{display:flex;align-items:center;gap:10px;font-size:18px;font-weight:900;letter-spacing:-0.5px}
+  .logo svg{flex-shrink:0}
+  .nav-btn{background:#f0b42915;color:#f0b429;border:1px solid #f0b42940;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;transition:all .2s;text-decoration:none}
+  .nav-btn:hover{background:#f0b42930}
+
+  /* Hero */
+  .hero{text-align:center;padding:64px 24px 48px;position:relative;z-index:1}
+  .badge{display:inline-flex;align-items:center;gap:8px;background:#f0b42910;color:#f0b429;border:1px solid #f0b42930;padding:6px 14px;border-radius:100px;font-size:12px;font-weight:600;margin-bottom:24px}
+  .badge-dot{width:6px;height:6px;border-radius:50%;background:#f0b429;animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  h1{font-size:clamp(36px,6vw,64px);font-weight:900;letter-spacing:-2px;line-height:1.05;margin-bottom:16px}
+  h1 span{color:#f0b429}
+  .subtitle{font-size:15px;color:#55556688;line-height:1.7;margin-bottom:40px;max-width:480px;margin-left:auto;margin-right:auto}
+
+  /* Email CTA */
+  .cta-row{display:flex;gap:10px;justify-content:center;max-width:420px;margin:0 auto 48px}
+  .cta-input{flex:1;padding:12px 16px;border-radius:10px;background:#12121a;border:1px solid #ffffff12;color:#e8e8f0;font-size:14px;outline:none;transition:border .2s}
+  .cta-input:focus{border-color:#f0b42966}
+  .cta-input::placeholder{color:#333355}
+  .cta-btn{padding:12px 20px;border-radius:10px;background:#f0b429;color:#0a0a0f;font-size:13px;font-weight:800;border:none;cursor:pointer;white-space:nowrap;transition:all .2s}
+  .cta-btn:hover{background:#f5c347;transform:translateY(-1px)}
+  .success-msg{background:#22c55e15;color:#22c55e;border:1px solid #22c55e33;padding:12px 20px;border-radius:10px;font-size:14px;font-weight:600;text-align:center;width:100%}
+
+  /* Track record */
+  .track{display:flex;flex-wrap:wrap;justify-content:center;gap:32px;background:#f0b42908;border:1px solid #f0b42920;border-radius:16px;padding:20px 32px;margin:0 24px 56px;max-width:912px;margin-left:auto;margin-right:auto}
+  .track-item{display:flex;flex-direction:column;align-items:center;gap:2px}
+  .track-val{font-size:22px;font-weight:900;color:#f0b429}
+  .track-lbl{font-size:11px;color:#555577;font-weight:500}
+
+  /* Signal preview */
+  .section-label{display:flex;align-items:center;gap:8px;margin-bottom:14px}
+  .live-dot{width:6px;height:6px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite}
+  .section-meta{font-size:12px;color:#444466;font-weight:500}
+  .section-tag{font-size:11px;padding:3px 10px;border-radius:100px;background:#ffffff08;color:#444455;margin-left:auto}
+
+  .signal-card-wrap{background:#0e0e18;border:1px solid #ffffff0d;border-radius:16px;overflow:hidden;margin-bottom:56px}
+  .signal-header{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid #ffffff08}
+  .signal-header-l{font-size:12px;font-weight:700;color:#f0b429}
+  .signal-header-r{font-size:11px;color:#222244}
+  .signal-list{padding:16px;display:flex;flex-direction:column;gap:10px}
+
+  .signal-row{display:flex;align-items:flex-start;gap:14px;padding:14px;border-radius:12px;background:#1a1a26;border:1px solid #ffffff0c;transition:border .2s;cursor:default}
+  .signal-row:hover{border-color:#f0b42930}
+  .signal-left{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:52px}
+  .ticker{font-size:14px;font-weight:900;color:#e8e8f0;letter-spacing:-0.5px}
+  .score-badge{display:inline-flex;align-items:center;justify-content:center;border-radius:6px;font-size:11px;font-weight:800;padding:2px 7px;min-width:38px}
+  .score-hi{background:#22c55e18;color:#22c55e;border:1px solid #22c55e44}
+  .score-md{background:#f0b42918;color:#f0b429;border:1px solid #f0b42944}
+  .score-lo{background:#ef444418;color:#ef4444;border:1px solid #ef444444}
+  .signal-right{flex:1}
+  .dir-tag{display:inline-flex;font-size:11px;font-weight:700;padding:2px 8px;border-radius:100px;margin-bottom:6px}
+  .dir-bull{background:#22c55e15;color:#22c55e}
+  .dir-neu{background:#f0b42915;color:#f0b429}
+  .signal-text{font-size:12px;color:#777799;line-height:1.5}
+
+  .signal-footer{padding:12px 20px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid #ffffff08;background:#ffffff03}
+  .signal-footer-l{font-size:11px;color:#222244}
+  .unlock-tag{font-size:11px;padding:3px 10px;border-radius:100px;background:#f0b42910;color:#f0b42980;cursor:pointer;transition:all .2s}
+  .unlock-tag:hover{background:#f0b42920;color:#f0b429}
+
+  /* Pricing */
+  #pricing{padding:0 24px 80px;max-width:960px;margin:0 auto}
+  .pricing-title{font-size:clamp(22px,4vw,32px);font-weight:900;letter-spacing:-1px;text-align:center;margin-bottom:8px}
+  .pricing-sub{text-align:center;font-size:13px;color:#444466;margin-bottom:40px}
+  .pricing-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:680px;margin:0 auto}
+  @media(max-width:600px){.pricing-grid{grid-template-columns:1fr}.cta-row{flex-direction:column}.track{gap:20px}}
+
+  .plan{display:flex;flex-direction:column;padding:28px;border-radius:20px;position:relative;transition:all .3s}
+  .plan-free{background:#12121a;border:1px solid #ffffff0d}
+  .plan-free:hover{border-color:#ffffff22}
+  .plan-pro{background:linear-gradient(145deg,#1e1b10,#12121a);border:1.5px solid #f0b42966;box-shadow:0 0 40px #f0b42910}
+  .plan-pro:hover{border-color:#f0b429;box-shadow:0 0 60px #f0b42918}
+  .plan-badge{position:absolute;top:-12px;left:50%;transform:translateX(-50%);background:#f0b429;color:#0a0a0f;font-size:11px;font-weight:800;padding:4px 12px;border-radius:100px;white-space:nowrap}
+  .plan-tier{font-size:13px;font-weight:700;margin-bottom:4px}
+  .plan-free .plan-tier{color:#666688}
+  .plan-pro .plan-tier{color:#f0b429}
+  .plan-price{font-size:36px;font-weight:900;letter-spacing:-1.5px;margin-bottom:20px}
+  .plan-price span{font-size:14px;color:#444466;font-weight:400;letter-spacing:0}
+  .plan-features{flex:1;list-style:none;margin-bottom:24px;display:flex;flex-direction:column;gap:10px}
+  .plan-features li{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:#999abb}
+  .plan-features li::before{content:'·';color:#444466;margin-top:0}
+  .plan-pro .plan-features li::before{content:'◆';color:#f0b42988;font-size:9px;margin-top:3px}
+  .plan-cta{width:100%;padding:13px;border-radius:12px;font-size:13px;font-weight:800;cursor:pointer;transition:all .2s;border:none}
+  .cta-free{background:#1e1e2e;color:#555577;border:1px solid #ffffff11}
+  .cta-free:hover{background:#252535;color:#888899}
+  .cta-stripe{background:#f0b42920;color:#f0b429;border:1.5px solid #f0b42966}
+  .cta-stripe:hover{background:#f0b429;color:#0a0a0f}
+
+  /* Footer */
+  footer{border-top:1px solid #ffffff08;padding:40px 24px;text-align:center;position:relative;z-index:1}
+  .footer-logo{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:12px;font-size:13px;font-weight:900;color:#333355}
+  .disclaimer{font-size:11px;color:#282840;line-height:1.8;max-width:540px;margin:0 auto}
+</style>
+</head>
+<body>
+
+<!-- Nav -->
+<nav>
+  <div class="logo">
+    <svg width="32" height="32" viewBox="0 0 32 32">
+      <polygon points="16,2 28,9 28,23 16,30 4,23 4,9" fill="#f0b42918" stroke="#f0b429" stroke-width="1.2"/>
+      <polygon points="16,7 24,12 24,22 16,27 8,22 8,12" fill="#f0b42930"/>
+      <text x="16" y="21" text-anchor="middle" font-size="11" fill="#f0b429">🐝</text>
+    </svg>
+    Alpha Hive
+  </div>
+  <a href="#pricing" class="nav-btn">订阅 Pro →</a>
+</nav>
+
+<!-- Hero -->
+<div class="hero">
+  <div class="badge">
+    <span class="badge-dot"></span>
+    每日凌晨自动更新 · 今日已扫描 10 标的
+  </div>
+  <h1>蜂群智能<br><span>每日投资信号</span></h1>
+  <p class="subtitle">7 个 AI Agent 并行扫描 SEC 披露、期权异动、情绪动量与宏观催化剂，涌现式判断，结构化中文简报。</p>
+
+  <div class="cta-row" id="cta-row">
+    <input class="cta-input" type="email" id="email-input" placeholder="your@email.com"/>
+    <button class="cta-btn" onclick="handleSubmit()">开始免费试用</button>
+  </div>
+</div>
+
+<!-- Track Record -->
+<div class="track">
+  <div class="track-item"><div class="track-val">61.3%</div><div class="track-lbl">T+7 胜率</div></div>
+  <div class="track-item"><div class="track-val">7天</div><div class="track-lbl">平均持仓</div></div>
+  <div class="track-item"><div class="track-val">10个</div><div class="track-lbl">覆盖标的</div></div>
+  <div class="track-item"><div class="track-val">60天</div><div class="track-lbl">回测周期</div></div>
+</div>
+
+<!-- Signal Preview -->
+<div class="wrap" style="margin-bottom:0">
+  <div class="section-label">
+    <span class="live-dot"></span>
+    <span class="section-meta">今日信号预览 — 2026-03-21</span>
+    <span class="section-tag">免费层延迟 24h · Pro 实时</span>
+  </div>
+</div>
+<div class="wrap">
+  <div class="signal-card-wrap">
+    <div class="signal-header">
+      <span class="signal-header-l">🐝 Alpha Hive 日报</span>
+      <span class="signal-header-r">7 Agent · Phase 1~6 完整执行</span>
+    </div>
+    <div class="signal-list">
+      <div class="signal-row">
+        <div class="signal-left">
+          <span class="ticker">NVDA</span>
+          <span class="score-badge score-hi">8.4</span>
+        </div>
+        <div class="signal-right">
+          <span class="dir-tag dir-bull">看多</span>
+          <div class="signal-text">GTC 2026 算力订单超预期，B300 出货加速；聪明钱连续 3 周净增仓，IV 期限结构 Contango</div>
+        </div>
+      </div>
+      <div class="signal-row">
+        <div class="signal-left">
+          <span class="ticker">META</span>
+          <span class="score-badge score-hi">7.8</span>
+        </div>
+        <div class="signal-right">
+          <span class="dir-tag dir-bull">看多</span>
+          <div class="signal-text">Llama 4 发布在即，广告 AI 工具 CTR 提升 18%；Form 4 显示内部人无抛售</div>
+        </div>
+      </div>
+      <div class="signal-row">
+        <div class="signal-left">
+          <span class="ticker">TSLA</span>
+          <span class="score-badge score-md">6.2</span>
+        </div>
+        <div class="signal-right">
+          <span class="dir-tag dir-neu">中性</span>
+          <div class="signal-text">FSD 渗透率提速，但 Q1 交付数据待观察；BearBee 警示：竞争格局恶化风险</div>
+        </div>
+      </div>
+    </div>
+    <div class="signal-footer">
+      <span class="signal-footer-l">+ 7 个标的已过滤 · GuardBee 交叉验证通过</span>
+      <span class="unlock-tag" onclick="document.getElementById('pricing').scrollIntoView({behavior:'smooth'})">Pro 解锁完整版 →</span>
+    </div>
+  </div>
+</div>
+
+<!-- Pricing -->
+<div id="pricing">
+  <h2 class="pricing-title">选择你的信号层级</h2>
+  <p class="pricing-sub">随时取消，无锁定期</p>
+  <div class="pricing-grid">
+    <div class="plan plan-free">
+      <div class="plan-tier">免费预览</div>
+      <div class="plan-price">免费</div>
+      <ul class="plan-features">
+        <li>每日摘要 1 条</li>
+        <li>延迟 24 小时推送</li>
+        <li>仅最高分标的</li>
+        <li>无 FF6 因子归因</li>
+      </ul>
+      <button class="plan-cta cta-free" onclick="document.getElementById('email-input').focus()">加入候补</button>
+    </div>
+    <div class="plan plan-pro">
+      <div class="plan-badge">推荐</div>
+      <div class="plan-tier">Pro 订阅</div>
+      <div class="plan-price">$49<span>/月</span></div>
+      <ul class="plan-features">
+        <li>完整机会清单（10 标的）</li>
+        <li>ML 深度分析报告</li>
+        <li>FF6 因子归因（Alpha 分解）</li>
+        <li>T+7 胜率追踪与回测</li>
+        <li>实时 Slack 推送</li>
+        <li>BearBee 对冲视角</li>
+      </ul>
+      <button class="plan-cta cta-stripe" onclick="handleStripe()">立即订阅 Pro</button>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<footer>
+  <div class="footer-logo">
+    <svg width="20" height="20" viewBox="0 0 32 32"><polygon points="16,2 28,9 28,23 16,30 4,23 4,9" fill="#f0b42910" stroke="#333355" stroke-width="1"/></svg>
+    Alpha Hive
+  </div>
+  <p class="disclaimer">本平台内容为公开信息研究与情景推演，不构成投资建议，不替代持牌投顾服务。<br>投资有风险，入市须谨慎。过往表现不代表未来收益。</p>
+</footer>
+
+<script>
+function handleSubmit(){
+  const v=document.getElementById('email-input').value;
+  if(!v||!v.includes('@'))return;
+  document.getElementById('cta-row').innerHTML='<div class="success-msg">✓ 已加入候补名单，我们会尽快联系你</div>';
+}
+function handleStripe(){
+  // 接 Stripe Checkout Session
+  alert('即将跳转至 Stripe 结账页面\n\n集成方式：\nnpm install stripe\nStripe Checkout Session API');
+}
+document.getElementById('email-input').addEventListener('keydown',function(e){
+  if(e.key==='Enter') handleSubmit();
+});
+</script>
+</body>
+</html>

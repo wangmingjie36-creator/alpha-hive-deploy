@@ -42,7 +42,6 @@ NARRATIVES = {
 "risk": "",
 
 }
-
 # ── 注入引擎 ──────────────────────────────────────────────────────────────────
 
 def inject_narratives(html_path: Path, narratives: dict) -> str:
