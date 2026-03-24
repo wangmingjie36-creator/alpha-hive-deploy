@@ -1293,7 +1293,7 @@ def _build_scenario_narrative(ctx: dict) -> str:
 
 
 def _build_risk_narrative(ctx: dict) -> str:
-    """本地模式 fallback：输出3张风险卡片，格式与 LLM risk prompt 一致（HIGH/MED/LOW + 推理内容）"""
+    """本地模式 fallback：输出推理层散文叙事（3段 <p>），不输出卡片 HTML（卡片已由 risk_items_html 渲染）"""
     ticker    = ctx.get('ticker', '该股')
     bear_sigs = ctx['bear_signals']
     bear_sc   = float(ctx.get('bear', {}).get('score', 5))
@@ -1318,107 +1318,112 @@ def _build_risk_narrative(ctx: dict) -> str:
     cats = ctx.get('catalysts', [])
     nearest_cat = cats[0].get('event', '') if cats else ''
 
-    cards = []
+    # v0.10.0 新增数据
+    regime = ctx.get('market_regime', {}).get('overall_regime', '未知')
+    cycle  = ctx.get('cycle_context', {}).get('cycle_regime', 'normal')
+    iv_rv  = ctx.get('iv_rv_spread', 0)
+    crowding = ctx.get('signal_crowding', {}).get('alpha_decay_factor', 1.0)
 
-    # ── 卡片1：最高优先级风险 ─────────────────────────────────
+    paras = []
+
+    # ── 段落1：核心风险因果链 ──────────────────────────────────
     if fg and fg <= 25:
         threshold = f'收盘跌破 <strong>${s1_price:.0f}</strong>' if s1_price else 'VIX 继续上行'
-        cards.append(
-            f'<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div>'
-            f'<div class="risk-title">🔴 宏观极度恐慌（F&G=<strong>{fg}</strong>）— 系统性风险</div>'
-            f'<div class="risk-note">传导机制：极度恐慌期间资金无差别撤离高 Beta 标的，'
-            f'NVDA 历史 Beta≈1.8–2.5x，大盘跌 1% 对应 {ticker} 跌 1.8–2.5%。'
-            f'与 <strong>FOMC 不确定性</strong>共振时放大效应倍增。'
-            f'失效阈值：{threshold} 则多头防线瓦解。</div>'
-            f'</div></div>'
+        paras.append(
+            f'<p>当前最大风险来自宏观层面的极度恐慌情绪。Fear & Greed 指数仅 <strong>{fg}</strong>，'
+            f'处于深度恐惧区间，资金倾向无差别撤离高 Beta 标的。{ticker} 历史 Beta 约 1.8–2.5x，'
+            f'意味着大盘每下跌 1%，{ticker} 可能承受 1.8–2.5% 的跌幅。'
+            f'市场政体当前为 <span class="bear-text">{regime}</span>，'
+            f'若与 FOMC 不确定性或月末再平衡窗口共振，冲击将成倍放大。'
+            f'关键失效阈值：{threshold}，届时多头防线全面瓦解。</p>'
         )
     elif skew_f > 1.2:
-        cards.append(
-            f'<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div>'
-            f'<div class="risk-title">🔴 IV Skew 偏高（Skew=<strong>{skew}</strong>）— Put 保护需求激增</div>'
-            f'<div class="risk-note">传导机制：机构正在高价购买 Put 保护，Skew>{skew} 表明下行定价已被推升。'
-            f'若 Call 多头同步存在（P/C={pc_f:.2f}），说明主力双向布局，净方向不确定。'
-            f'失效阈值：IV Rank 升破 <strong>60th</strong>（当前 {iv_f:.0f}th）则期权成本骤升，期权多头策略失效。</div>'
-            f'</div></div>'
-        ) if pc_f and iv_f else cards.append(
-            f'<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div>'
-            f'<div class="risk-title">🔴 IV Skew 偏高（Skew=<strong>{skew}</strong>）— 结构性风险</div>'
-            f'<div class="risk-note">Put 溢价偏高（>{skew:.2f}）显示机构在为下行保护付出超额成本。'
-            f'失效阈值：Skew 持续高于 <strong>1.3</strong> 且 OI 向 Put 端累积，则下行加速信号确认。</div>'
-            f'</div></div>'
+        skew_detail = (f'P/C 比 {pc_f:.2f} 显示多空双方同时活跃，净方向存在较大不确定性'
+                       if pc_f else 'Put 端溢价持续走高，下行对冲成本显著上升')
+        paras.append(
+            f'<p>期权市场发出结构性风险信号：IV Skew 达 <strong>{skew}</strong>，'
+            f'表明机构正在为下行保护支付超额溢价。{skew_detail}。'
+            f'IV-RV 价差为 <strong>{iv_rv:+.1f}%</strong>，'
+            f'{"期权相对历史波动率偏贵，卖方占优" if iv_rv > 3 else "期权定价合理" if iv_rv > -3 else "期权偏便宜，方向性买入有统计优势"}。'
+            f'失效阈值：Skew 持续高于 <strong>1.3</strong> 且 OI 继续向 Put 端累积，'
+            f'则下行加速信号确认。</p>'
         )
     elif bear_sigs:
-        top_sig = bear_sigs[0][:50]
-        cards.append(
-            f'<div class="risk-item risk-high"><div class="risk-badge">HIGH</div><div>'
-            f'<div class="risk-title">🔴 BearBee 逆向信号（评分 <strong>{bear_sc:.1f}/10</strong>）</div>'
-            f'<div class="risk-note">核心信号：{top_sig}。'
-            f'传导机制：逆向信号触发后通常在 5–10 交易日内出现价格压力，蜂群一致性 {consistency}% 偏低进一步放大不确定性。'
-            f'失效阈值：信号持续 3 天以上未收敛则多头假设需重新评估。</div>'
-            f'</div></div>'
+        top_sig = bear_sigs[0][:60]
+        paras.append(
+            f'<p>BearBee 逆向信号是当前首要风险来源，评分 <strong>{bear_sc:.1f}/10</strong>。'
+            f'核心触发信号：{top_sig}。逆向信号触发后通常在 5–10 个交易日内出现价格压力，'
+            f'而蜂群一致性仅 {consistency}%，多空分歧较大进一步放大了不确定性。'
+            f'传导路径：逆向信号 → 短期情绪恶化 → 期权 IV 扩张 → Theta 损耗加速。'
+            f'若信号持续 3 天以上未收敛，则当前多头假设需重新评估。</p>'
         )
     else:
-        cards.append(
-            f'<div class="risk-item risk-med"><div class="risk-badge">MED</div><div>'
-            f'<div class="risk-title">🟡 结构性风险处于可控区间</div>'
-            f'<div class="risk-note">BearBee 评分 <strong>{bear_sc:.1f}/10</strong>，未触发高优先级警报。'
-            f'需持续监控 IV Skew 和宏观情绪边际变化，防止低风险状态被突发事件打破。</div>'
-            f'</div></div>'
+        paras.append(
+            f'<p>当前结构性风险处于可控区间。BearBee 评分 <strong>{bear_sc:.1f}/10</strong>，'
+            f'未触发高优先级逆向警报。市场政体为 <strong>{regime}</strong>，'
+            f'蜂群一致性 {consistency}%，信号噪声比尚可。'
+            f'但需密切关注边际变化——低风险状态往往在突发事件面前迅速恶化，'
+            f'尤其是当前 IV Skew {skew} 暗示部分机构已在悄然增加保护。</p>'
         )
 
-    # ── 卡片2：催化剂/IV Crush 风险 ──────────────────────────
+    # ── 段落2：催化剂与波动率风险 ─────────────────────────────
     if nearest_cat:
         days = cats[0].get('days_until', 0) if cats else 0
-        timing = f'{abs(days)}天前触发' if days < 0 else f'{days}天内' if days <= 7 else f'{days}天后'
-        cards.append(
-            f'<div class="risk-item risk-med"><div class="risk-badge">MED</div><div>'
-            f'<div class="risk-title">🟡 催化剂窗口风险 · {nearest_cat}（{timing}）</div>'
-            f'<div class="risk-note">传导机制：事件窗口内 IV 通常先扩张后 Crush（-30%~-50%），'
-            f'期权多头即使方向正确也可能因 Vega 损失亏损；盘前/盘后流动性稀薄时冲击成倍放大。'
-            f'建议：正股持有者持有穿越；期权多头等 Crush 后再建仓。</div>'
-            f'</div></div>'
+        timing = f'{abs(days)} 天前触发' if days < 0 else f'{days} 天内' if days <= 7 else f'{days} 天后'
+        iv_warn = (f'当前 IV Rank <strong>{iv_f:.0f}th</strong> 处于高位，'
+                   f'期权买方需承担显著 Theta 损耗' if iv_f and iv_f > 60
+                   else '波动率水平尚可，但催化剂窗口内可能急剧扩张')
+        paras.append(
+            f'<p>催化剂维度的核心风险点是 <strong>{nearest_cat}</strong>（{timing}）。'
+            f'事件窗口内 IV 通常先扩张后骤降（IV Crush 幅度 -30%~-50%），'
+            f'期权多头即使方向判断正确也可能因 Vega 损失而亏损。{iv_warn}。'
+            f'时间周期层面，当前处于 <strong>{cycle}</strong> 阶段'
+            f'{"，Opex 周的 Charm/Vanna 效应可能压制短期波动幅度" if ctx.get("cycle_context", {}).get("is_opex_week") else ""}。'
+            f'建议：正股持有者穿越事件；期权多头等 Crush 后再建仓或使用价差策略控制 Vega 暴露。</p>'
         )
     elif iv_f and iv_f > 60:
-        cards.append(
-            f'<div class="risk-item risk-med"><div class="risk-badge">MED</div><div>'
-            f'<div class="risk-title">🟡 IV 偏高（IV Rank {iv_f:.0f}th）— Vega 风险</div>'
-            f'<div class="risk-note">IV Rank {iv_f:.0f}th 处于中高位，期权买方需承担较高 Theta 损耗。'
-            f'失效阈值：IV Rank 升破 <strong>80th</strong> 则期权策略切换为卖方更有统计优势。</div>'
-            f'</div></div>'
+        paras.append(
+            f'<p>波动率层面需要警惕：IV Rank <strong>{iv_f:.0f}th</strong> 处于中高位，'
+            f'IV-RV 价差 <strong>{iv_rv:+.1f}%</strong>'
+            f'{"表明期权相对实际波动偏贵" if iv_rv > 3 else ""}。'
+            f'期权买方在当前水平建仓将承受较高的 Theta 时间损耗，'
+            f'失效阈值：IV Rank 升破 <strong>80th</strong> 后，卖方策略具备更强的统计优势。'
+            f'时间周期当前为 <strong>{cycle}</strong>。</p>'
         )
     else:
-        if s1_price:
-            dist = (s1_price - price) / price * 100 if price else 0
-            cards.append(
-                f'<div class="risk-item risk-med"><div class="risk-badge">MED</div><div>'
-                f'<div class="risk-title">🟡 关键支撑防线 · ${s1_price:.0f}（距当前 {dist:+.1f}%）</div>'
-                f'<div class="risk-note">OI 集中的支撑位同时是做市商 Delta 对冲触发点——若价格有效跌穿，'
-                f'做市商被迫卖出 Delta 对冲，形成机械性卖压级联。失效条件：收盘价连续2天低于 <strong>${s1_price:.0f}</strong>。</div>'
-                f'</div></div>'
-            )
+        s1_note = (f'关键支撑 <strong>${s1_price:.0f}</strong>（距当前 {(s1_price - price) / price * 100:+.1f}%）'
+                   f'同时是做市商 Delta 对冲触发点，跌穿将引发机械性卖压级联'
+                   if s1_price and price else '当前无显著的单一支撑触发点，需综合监控多层位置')
+        paras.append(
+            f'<p>{s1_note}。市场政体 <strong>{regime}</strong>，'
+            f'时间周期 <strong>{cycle}</strong>。'
+            f'波动率当前处于适中水平，但需关注任何催化剂事件可能触发的 IV 急升。</p>'
+        )
 
-    # ── 卡片3：明日警戒线（LOW 注意事项）──────────────────────
+    # ── 段落3：信号拥挤度与明日警戒线 ────────────────────────
     warn_items = []
     if s1_price and price:
-        warn_items.append(f'价格跌破 <strong>${s1_price:.0f}</strong>（最强支撑）')
+        warn_items.append(f'价格跌破 ${s1_price:.0f}（最强支撑）')
     if iv_f:
         thr = 70 if iv_f >= 60 else 60
-        warn_items.append(f'IV Rank 升过 <strong>{thr}th</strong>（当前 {iv_f:.0f}th）')
+        warn_items.append(f'IV Rank 升过 {thr}th（当前 {iv_f:.0f}th）')
     if pc_f and pc_f < 1.0:
-        warn_items.append(f'P/C 反转升过 <strong>1.2</strong>（当前 {pc_f:.2f}）')
+        warn_items.append(f'P/C 比反转升过 1.2（当前 {pc_f:.2f}）')
     if fg and fg <= 30:
-        warn_items.append(f'F&G 继续下行低于 <strong>15</strong>（当前 {fg}）')
+        warn_items.append(f'F&G 继续下行低于 15（当前 {fg}）')
 
     warn_str = '；'.join(warn_items) if warn_items else '维持现有风控计划'
-    cards.append(
-        f'<div class="risk-item risk-low"><div class="risk-badge">LOW</div><div>'
-        f'<div class="risk-title">⚪ 明日警戒线 — 需持续追踪</div>'
-        f'<div class="risk-note">触发则需重新评估仓位：{warn_str}。'
-        f'任一阈值触发应收紧止损，等待信号重新收敛后再加仓。</div>'
-        f'</div></div>'
+    crowding_note = (f'值得注意的是，信号拥挤度衰减因子为 <strong>{crowding:.2f}</strong>，'
+                     f'{"同向信号过多可能导致 alpha 衰减，需警惕拥挤交易反转" if crowding < 0.85 else "信号拥挤度在正常范围"}。'
+                     ) if crowding != 1.0 else ''
+    paras.append(
+        f'<p>{crowding_note}'
+        f'综合以上风险因子，明日需重点追踪的警戒线包括：{warn_str}。'
+        f'任一阈值触发应收紧止损或降低仓位，等待蜂群信号重新收敛后再考虑加仓。'
+        f'风险管理的核心原则：在不确定性扩大时缩减暴露，而非试图预测方向。</p>'
     )
 
-    return '\n'.join(cards[:3])
+    return '\n'.join(paras)
 
 
 def _local_fallback(ctx: dict, section: str) -> str:

@@ -265,7 +265,8 @@ class ChronosBeeHorizon(BeeAgent):
                 catalysts_found.sort(key=lambda c: c.get("days_until", 999))
 
                 # 基础分 + 按事件类型 × 严重程度的加权加分
-                # 近期（7天内）× 1.0；中期（8~30天）× 0.3；超出 30 天不计分
+                # 已过期（days<0）：线性衰减，7天内全额衰减至0
+                # 未来7天内 × 1.0；未来8~30天 × 0.3；超出30天不计分
                 base = 5.5
                 score = base
                 imminent = []
@@ -275,7 +276,12 @@ class ChronosBeeHorizon(BeeAgent):
                     severity = c.get("severity", "medium")
                     type_w = self.CATALYST_TYPE_WEIGHTS.get(event_type, self._CATALYST_TYPE_DEFAULT)
                     sev_m = self.CATALYST_SEVERITY_MULT.get(severity, 1.0)
-                    if days <= 7:
+                    if days < 0:
+                        # 已过期催化剂：7天内线性衰减，超7天归零
+                        decay = max(0.0, 1.0 + days / 7.0)  # days=-1→0.86, -3→0.57, -7→0, -9→0
+                        if decay > 0:
+                            score += 0.5 * type_w * sev_m * decay  # 已过期基础权重降半
+                    elif days <= 7:
                         score += 1.0 * type_w * sev_m
                         imminent.append(c)
                     elif days <= 30:
