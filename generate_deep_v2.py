@@ -1138,15 +1138,17 @@ def _build_catalyst_narrative(ctx: dict) -> str:
 
 
 def _build_options_narrative(ctx: dict) -> str:
-    pcr = ctx['put_call_ratio']; oi = ctx['total_oi']; iv = ctx['iv_current']
-    iv_rank = float(ctx.get('iv_rank', 50) or 50)
+    # ── 基础字段 ──
+    pcr = ctx['put_call_ratio']; oi = float(ctx.get('total_oi', 0) or 0); iv = ctx['iv_current']
+    _ivr_raw = ctx.get('iv_rank', 50)
+    iv_rank = float(_ivr_raw) if _ivr_raw is not None else 50.0
     skew = ctx['iv_skew']; flow = ctx['flow_direction']
     sups = ctx['key_levels'].get('support',[])[:2]
     ress = ctx['key_levels'].get('resistance',[])[:2]
     unusual = ctx.get('unusual_activity',[])
     bull_flows = [u for u in unusual if u.get('bullish')]
     bear_flows = [u for u in unusual if not u.get('bullish')]
-    flow_cls = 'bull-text' if flow=='bullish' else 'bear-text'
+    flow_cls = 'bull-text' if flow=='bullish' else ('bear-text' if flow=='bearish' else 'neutral-text')
     try:
         pcr_f = float(pcr)
     except (TypeError, ValueError):
@@ -1155,33 +1157,151 @@ def _build_options_narrative(ctx: dict) -> str:
         skew_f = float(skew)
     except (TypeError, ValueError):
         skew_f = 1.0
+
+    # ── v0.10.0 新增字段 ──
+    iv_rv      = float(ctx.get('iv_rv_spread', 0) or 0)
+    iv_rv_sig  = ctx.get('iv_rv_signal', '')
+    rv_30d     = float(ctx.get('rv_30d', 0) or 0)
+    gc         = ctx.get('gamma_calendar', {}) or {}
+    pin_strike = gc.get('pin_strike', '')
+    pin_expiry = gc.get('pin_expiry', '')
+    charm_dir  = gc.get('charm_direction', '')
+    gex_regime = ctx.get('gex_regime', '')
+    gex_flip   = ctx.get('gex_flip', '')
+    gex_cw     = ctx.get('gex_call_wall', '')
+    gex_pw     = ctx.get('gex_put_wall', '')
+    try:
+        gamma_exp = float(ctx.get('gamma_exposure', 0) or 0)
+    except (TypeError, ValueError):
+        gamma_exp = 0.0
+    squeeze    = ctx.get('gamma_squeeze_risk', '')
+    regime     = ctx.get('market_regime', {}) or {}
+    overall_rg = regime.get('overall_regime', '')
+    crowding   = ctx.get('signal_crowding', {}) or {}
+    decay_f    = float(crowding.get('alpha_decay_factor', 1.0) or 1.0)
+    ivts       = ctx.get('iv_term_structure', {}) or {}
+    ivts_shape = ivts.get('shape', '')
+
     # IV rank interpretation
     iv_interp = ('高（期权较贵，适合卖方策略）' if iv_rank > 70 else
                  ('低（期权便宜，适合买方策略）' if iv_rank < 30 else '中等'))
     # Key level details
     sup_parts = [f'${s["strike"]}（{s.get("oi",0)/1e3:.0f}K OI）' for s in sups] if sups else ['N/A']
     res_parts = [f'${r["strike"]}（{r.get("oi",0)/1e3:.0f}K OI）' for r in ress] if ress else ['N/A']
-    # Unusual flow highlight
-    top_ua = unusual[0] if unusual else None
-    ua_note = ''
-    if top_ua:
-        ua_vol = top_ua.get('volume', 0)
-        ua_str = top_ua.get('strike', 0)
-        ua_type = top_ua.get('type', '')
-        ua_cls = 'bull-text' if top_ua.get('bullish') else 'bear-text'
-        ua_note = f'最大异常流：<span class="{ua_cls}">{ua_type} ${ua_str}，成交量 {ua_vol/1e3:.0f}K 手</span>——'
-        ua_note += ('大资金押注上行，关注做空该阻力区的 Call 卖方头寸是否被迫平仓（gamma squeeze 预警）。' if top_ua.get('bullish') else '大资金下行对冲，关注支撑区是否受到同步 Put 保护。')
-    return (
+
+    # ── P1: 市场结构总览 ──
+    p1 = (
         f'<p><strong>期权市场结构：P/C={pcr}（{"Call偏多，买方主导，看多氛围浓" if pcr_f<0.9 else "Put偏多，下行对冲需求强" if pcr_f>1.1 else "多空均衡"}），'
         f'总OI {oi:,.0f}，IV Current {iv:.1f}%，IV Rank {iv_rank:.0f}%（{iv_interp}），'
-        f'IV Skew {skew}（{"Put溢价偏高，隐性悲观" if skew_f>1.2 else "中性，定价均衡"}）。</strong></p>'
-        f'<p>期权流方向：<span class="{flow_cls}">{"净看涨流" if flow=="bullish" else "净看跌流"}</span>，'
-        f'{len(bull_flows)}笔看涨异动、{len(bear_flows)}笔看跌异动。{ua_note}</p>'
-        f'<p><strong>关键水位：</strong>'
+        f'IV Skew {skew}（{"Put溢价偏高，尾部风险定价显著" if skew_f>1.2 else "Skew中性，定价均衡" if skew_f>0.8 else "Call溢价偏高，上行投机情绪浓"}）。</strong>'
+        f'当前市场{"处于 " + overall_rg + " 政体，" if overall_rg else ""}'
+        f'{"信号拥挤度偏高（衰减因子 " + f"{decay_f:.2f}" + "），alpha 衰减风险需关注；" if decay_f < 0.8 else ""}'
+        f'期权流方向为<span class="{flow_cls}">{"净看涨流" if flow=="bullish" else "净看跌流" if flow=="bearish" else "中性流"}</span>，'
+        f'{len(bull_flows)}笔看涨异动、{len(bear_flows)}笔看跌异动。</p>'
+    )
+
+    # ── P2: IV-RV 价差与波动率深度分析 ──
+    if iv_rv != 0 or rv_30d != 0:
+        iv_rv_interp = ('期权相对历史波动率显著偏贵，做市商定价中包含较高风险溢价，卖方策略（如 short strangle、iron condor）统计优势明显'
+                        if iv_rv > 5 else
+                        '期权相对历史波动率偏贵，隐含波动率高于实际波动，卖方有一定统计优势'
+                        if iv_rv > 3 else
+                        '期权定价合理，IV 与 HV 基本匹配，无明显错价'
+                        if iv_rv > -3 else
+                        '期权相对历史波动率偏便宜，方向性买入（long call/put）有统计优势，隐含波动率被低估')
+        p2 = (
+            f'<p><strong>波动率深度：</strong>'
+            f'IV {iv:.1f}% vs HV30（30日已实现波动率）{rv_30d:.1f}%，'
+            f'IV-RV 价差 <strong>{iv_rv:+.1f}%</strong>（{iv_rv_sig}）——'
+            f'{iv_rv_interp}。'
+        )
+        # IV 期限结构
+        if ivts_shape:
+            shape_interp = {
+                'contango': '正常 Contango（远月>近月），市场预期短期平稳、远期不确定性更高',
+                'backwardation': 'Backwardation（近月>远月），市场定价近期事件风险，可能存在财报/重大事件前的 IV 跳升',
+                'flat': 'Flat（各期限 IV 接近），市场对短中期波动预期一致',
+            }
+            p2 += (f'IV 期限结构呈 <strong>{ivts_shape}</strong> 形态'
+                   f'（{shape_interp.get(ivts_shape, ivts_shape)}）。')
+        p2 += '</p>'
+    else:
+        p2 = ''
+
+    # ── P3: GEX（Gamma Exposure）与做市商行为分析 ──
+    p3_parts = []
+    if gex_regime or gamma_exp:
+        gex_interp = ''
+        if gex_regime == 'positive_gamma':
+            gex_interp = '做市商持有正 Gamma，价格波动时其对冲行为会抑制波动（买跌卖涨），市场倾向于区间震荡'
+        elif gex_regime == 'negative_gamma':
+            gex_interp = '做市商持有负 Gamma，价格波动时其对冲行为会放大波动（追涨杀跌），趋势行情一旦启动难以遏制'
+        else:
+            gex_interp = f'GEX 政体为 {gex_regime}' if gex_regime else 'GEX 数据可用'
+        p3_parts.append(
+            f'<strong>Dealer GEX 分析：</strong>'
+            f'总 Gamma 暴露 {gamma_exp:+,.0f}，'
+            f'GEX 政体为 <strong>{gex_regime or "未知"}</strong>——{gex_interp}。'
+        )
+        if gex_flip:
+            p3_parts.append(f'GEX 翻转点位于 <strong>${gex_flip}</strong>，价格跌破此水位将从正 Gamma 切换到负 Gamma 区域，波动性骤增。')
+        if gex_cw or gex_pw:
+            p3_parts.append(
+                f'做市商 Call Wall（最大阻力）：${gex_cw or "N/A"}，Put Wall（最大支撑）：${gex_pw or "N/A"}。'
+            )
+        if squeeze:
+            squeeze_interp = ('⚠️ Gamma Squeeze 风险较高，大量做市商 short gamma 头寸面临被迫追涨平仓压力' if squeeze == 'high'
+                              else 'Gamma Squeeze 风险中等，需关注成交量突增信号' if squeeze == 'medium'
+                              else 'Gamma Squeeze 风险较低')
+            p3_parts.append(f'{squeeze_interp}。')
+    p3 = f'<p>{" ".join(p3_parts)}</p>' if p3_parts else ''
+
+    # ── P4: Gamma 日历与 Pin Risk ──
+    p4 = ''
+    if pin_strike or charm_dir:
+        p4_parts = []
+        if pin_strike:
+            p4_parts.append(
+                f'<strong>Gamma 到期日历：</strong>'
+                f'最高 OI 钉子位（Pin Strike）为 <strong>${pin_strike}</strong>'
+                f'{" @ " + pin_expiry if pin_expiry else ""}，'
+                f'到期日前做市商 gamma 对冲力量将把价格向此水位"吸引"，偏离越远反弹/回落概率越高'
+            )
+        if charm_dir:
+            charm_interp = ('到期日临近时 delta 衰减偏正，做市商被动买入标的，形成向上支撑力' if charm_dir == 'positive'
+                            else '到期日临近时 delta 衰减偏负，做市商被动卖出标的，形成向下压力' if charm_dir == 'negative'
+                            else f'Charm 方向为 {charm_dir}')
+            p4_parts.append(f'Charm 到期衰减方向为 <strong>{charm_dir}</strong>——{charm_interp}')
+        p4 = f'<p>{"；".join(p4_parts)}。</p>'
+
+    # ── P5: 异常流与关键水位 ──
+    ua_notes = []
+    for ua in unusual[:3]:  # 最多展示3笔
+        ua_vol = ua.get('volume', 0)
+        ua_str = ua.get('strike', 0)
+        ua_type = ua.get('type', '')
+        ua_cls = 'bull-text' if ua.get('bullish') else 'bear-text'
+        ua_label = '看涨' if ua.get('bullish') else '看跌'
+        ua_notes.append(f'<span class="{ua_cls}">{ua_type} ${ua_str}（{ua_vol/1e3:.0f}K 手，{ua_label}）</span>')
+    ua_html = ''
+    if ua_notes:
+        ua_html = f'异常流明细：{"、".join(ua_notes)}。'
+        if bull_flows and not bear_flows:
+            ua_html += '大资金单边押注上行，关注做空阻力区的 Call 卖方头寸是否被迫平仓（gamma squeeze 预警）。'
+        elif bear_flows and not bull_flows:
+            ua_html += '大资金单边下行对冲，关注支撑区是否有同步 Put 保护堆积。'
+        elif bull_flows and bear_flows:
+            ua_html += '多空双方均有大单博弈，方向分歧明显，短期可能放大波动。'
+
+    p5 = (
+        f'<p><strong>关键水位与异常流：</strong>'
         f'Put 支撑——{"、".join(sup_parts)}（高 OI 钉住，做市商在此有 gamma 对冲买盘支撑）；'
         f'Call 阻力——{"、".join(res_parts)}（做市商 short gamma 区，靠近时面临系统性卖压）。'
+        f'{ua_html}'
         f'{"价格突破最大阻力需超大成交量配合，短期内概率低。" if ress else ""}</p>'
     )
+
+    return p1 + p2 + p3 + p4 + p5
 
 
 def _build_macro_narrative(ctx: dict) -> str:
@@ -3026,6 +3146,22 @@ def main():
     except FileNotFoundError as e:
         print(f"❌ {e}")
         sys.exit(1)
+
+    # 1b. 数据新鲜度保护：JSON 超过 1 个交易日则拒绝生成，防止覆盖已有的好报告
+    from datetime import datetime as _dt_freshness, timedelta as _td_freshness
+    try:
+        _json_date_str = json_path.stem.split("-ml-")[1]  # e.g. "2026-03-20"
+        _json_date = _dt_freshness.strptime(_json_date_str, "%Y-%m-%d").date()
+        _today = _dt_freshness.now().date()
+        _stale_days = (_today - _json_date).days
+        # 允许 1 天容差（周一用周五数据）；周末最多差 3 天
+        _is_weekend_grace = _today.weekday() == 0 and _stale_days <= 3  # 周一容忍周五数据
+        if _stale_days > 1 and not _is_weekend_grace:
+            print(f"⚠️  JSON 数据已过期 {_stale_days} 天（{_json_date_str}），跳过生成以避免覆盖已有报告。")
+            print(f"   请先运行蜂群扫描获取今天的数据：python3 run_daily_scan.py && python3 generate_ml_report.py")
+            sys.exit(0)
+    except (IndexError, ValueError):
+        pass  # 文件名解析失败时不拦截
 
     # 2. 提取数据
     print("🔍 提取结构化数据...")
