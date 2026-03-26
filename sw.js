@@ -1,6 +1,6 @@
-// Alpha Hive Service Worker - 20260325-1404
-var CACHE_NAME='alpha-hive-20260325-1404';
-var PRECACHE_URLS=['./', 'index.html', 'manifest.json',
+// Alpha Hive Service Worker - 20260326-0334
+var CACHE_NAME='alpha-hive-20260326-0334';
+var PRECACHE_URLS=['./','index.html','manifest.json',
   'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'];
 
 self.addEventListener('install', function(e){
@@ -32,18 +32,19 @@ e.respondWith(
     var rc=r.clone();
     caches.open(CACHE_NAME).then(function(c){ c.put(e.request, rc); });
     return r;
-  }).catch(function(){ return caches.match(e.request); })
+  }).catch(function(){
+    return caches.match(e.request);
+  })
 );
-return;
+  } else {
+e.respondWith(
+  caches.match(e.request).then(function(cached){
+    return cached || fetch(e.request).then(function(r){
+      var rc=r.clone();
+      caches.open(CACHE_NAME).then(function(c){ c.put(e.request, rc); });
+      return r;
+    });
+  })
+);
   }
-  // CDN/静态资源用 cache-first
-  e.respondWith(
-caches.match(e.request).then(function(r){
-  return r || fetch(e.request).then(function(resp){
-    var rc=resp.clone();
-    caches.open(CACHE_NAME).then(function(c){ c.put(e.request, rc); });
-    return resp;
-  });
-})
-  );
 });
