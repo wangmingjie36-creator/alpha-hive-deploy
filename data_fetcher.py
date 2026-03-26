@@ -203,8 +203,22 @@ class DataFetcher:
                 stock = yf.Ticker(ticker)
                 info = stock.info
 
+                # currentPrice 盘后/盘前常为 None，多级 fallback 防止 None 写入缓存
+                _price = (
+                    info.get("currentPrice")
+                    or info.get("regularMarketPrice")
+                    or info.get("previousClose")
+                    or info.get("open")
+                )
+                if not _price or _price <= 0:
+                    try:
+                        _hist = stock.history(period="2d")
+                        _price = float(_hist["Close"].iloc[-1]) if not _hist.empty else 0
+                    except Exception:
+                        _price = 0
+
                 metrics = {
-                    "current_price": info.get("currentPrice", 0),
+                    "current_price": float(_price) if _price else 0,
                     "price_change_5d": self._calculate_5d_change(stock),
                     "short_float_ratio": info.get("shortPercentOfFloat", 0),
                     "market_cap": info.get("marketCap", 0),
@@ -212,7 +226,9 @@ class DataFetcher:
                     "last_updated": datetime.now().isoformat(),
                 }
 
-                self.cache.save(cache_key, metrics)
+                # 仅在价格有效时写缓存，避免 None 污染缓存
+                if metrics["current_price"] > 0:
+                    self.cache.save(cache_key, metrics)
                 return metrics
 
             except ImportError:

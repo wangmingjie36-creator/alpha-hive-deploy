@@ -1177,6 +1177,35 @@ def render_dashboard_html(report: Dict, date_str: str,
     except (OSError, json.JSONDecodeError):
         pass
 
+    # 从 analysis-{ticker}-ml-{date}.json 补注价格（当 ScoutBee price 缺失时）
+    import glob as _inj_glob
+    for _inj_t in list(swarm_detail.keys()):
+        _inj_scout = (swarm_detail[_inj_t]
+                      .setdefault("agent_details", {})
+                      .setdefault("ScoutBeeNova", {})
+                      .setdefault("details", {}))
+        if _inj_scout.get("price") is None:
+            # 按优先级：当日 ML 文件 → 最新 ML 文件（处理 current_price=None 的旧文件）
+            _inj_candidates = [
+                _Path_mod(report_dir) / f"analysis-{_inj_t}-ml-{date_str}.json",
+            ] + [
+                _Path_mod(p) for p in sorted(_inj_glob.glob(
+                    str(_Path_mod(report_dir) / f"analysis-{_inj_t}-ml-*.json")
+                ), reverse=True)  # 最新文件优先
+            ]
+            for _inj_ml in _inj_candidates:
+                try:
+                    with open(_inj_ml) as _inj_f:
+                        _inj_data = json.load(_inj_f)
+                    _inj_price = (_inj_data.get("current_price")
+                                  or _inj_data.get("combined_recommendation", {}).get("current_price")
+                                  or _inj_data.get("ml_prediction", {}).get("current_price"))
+                    if _inj_price:
+                        _inj_scout["price"] = float(_inj_price)
+                        break
+                except (OSError, json.JSONDecodeError, ValueError, TypeError):
+                    continue
+
     # 将 opportunities 按 ticker 建立索引，并补充 swarm 详细数据
     opp_by_ticker = {o.get("ticker"): o for o in opps}
     # 若 swarm_detail 有更多 ticker（超过 opportunities 的 5 个），全部纳入

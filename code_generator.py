@@ -44,26 +44,39 @@ class CodeGenerator:
 import yfinance as yf
 import json
 
-# 获取股票数据
+# 获取股票数据（兼容新版 yfinance 多层列名）
 ticker = "{ticker}"
-data = yf.download(ticker, period="{period}", interval="{interval}")
-
-# 获取股票信息
 stock = yf.Ticker(ticker)
 info = stock.info
+
+# 优先用 history() 避免 download() 多层列名 TypeError
+try:
+    hist = stock.history(period="{period}", interval="{interval}")
+    # 兼容多层列名
+    if hasattr(hist.columns, "levels"):
+        hist.columns = hist.columns.get_level_values(0)
+    recent_close = float(hist["Close"].iloc[-1]) if len(hist) > 0 else None
+    recent_volume = int(hist["Volume"].iloc[-1]) if len(hist) > 0 else None
+except Exception:
+    recent_close = None
+    recent_volume = None
+
+# 价格 fallback：currentPrice → regularMarketPrice → previousClose
+_price = (info.get("currentPrice") or info.get("regularMarketPrice")
+          or info.get("previousClose") or recent_close or "N/A")
 
 # 构建输出
 result = {{
     "ticker": ticker,
-    "current_price": info.get("currentPrice", "N/A"),
+    "current_price": _price,
     "52_week_high": info.get("fiftyTwoWeekHigh", "N/A"),
     "52_week_low": info.get("fiftyTwoWeekLow", "N/A"),
     "market_cap": info.get("marketCap", "N/A"),
     "pe_ratio": info.get("trailingPE", "N/A"),
     "volume": info.get("volume", "N/A"),
     "avg_volume": info.get("averageVolume", "N/A"),
-    "recent_close": float(data["Close"].iloc[-1]) if len(data) > 0 else None,
-    "recent_volume": int(data["Volume"].iloc[-1]) if len(data) > 0 else None
+    "recent_close": recent_close,
+    "recent_volume": recent_volume
 }}
 
 print(json.dumps(result, indent=2))

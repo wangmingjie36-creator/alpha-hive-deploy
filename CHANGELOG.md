@@ -5,6 +5,53 @@
 
 ---
 
+## [0.11.0] — 2026-03-26
+
+### Added（投行级报告全面升级：执行摘要 / 五情景引擎 / 三图表 / 交叉引用）
+
+- **`generate_deep_v2.py`**
+  - **`_build_executive_summary(ctx)`**（新函数）— 渐变卡片，含最终评分、裁决词、ML7 置信区间、催化剂/风险/拥挤度摘要、最强维度、操作建议；注入 CH1 之前
+  - **`_build_scenario_narrative(ctx)`**（全部重写）— 三段改五情景：
+    - 动态概率引擎：评分段 → ML7 调整 → 催化剂调整 → 拥挤度调整 → PEAD 调整 → 归一化至 100%
+    - 五情景 HTML 概率表（大牛/牛/中性/熊/大熊），含因果链描述
+    - 回报区间使用真实 key_levels 行权价计算
+    - 期望值（EV）公式：`ev = (pa·ra + pb·rb + ... + pe·re) / 100`
+    - If-Then 双列决策树 div（绿色多头路径 / 红色止损路径）
+    - 期权策略匹配（基于 IV Rank / Skew / IV-RV）
+  - **`_try_charts(ctx)`**（更新）— 返回 5 元组，新增 radar / iv_term / gex_profile 三图
+  - **`generate_html()`**（更新）：
+    - 解包 5 图：`conf / opts / radar / iv_term / gex_profile`
+    - 注入 `exec_summary_html`（gen-notice 后）
+    - 注入 `dod_delta_html`（DoD 跟踪：评分 Δ / IV Current Δ / P/C Δ / 政体变化）
+    - CH1 插入雷达图；CH4 插入 IV 期限结构图 + GEX Profile 图
+    - 导航栏新增 `📋 摘要` 锚点；CH6 标题改为"五情景推演"
+  - **交叉章节引用**：所有 `_build_*` 函数末尾注入 `(见第X章...)` 显式引用链
+  - **26 闲置 ctx 字段分配**：
+    - CH1：`overview`、`hist_accuracy`
+    - CH2：`signal_summary`、`supply_chain`
+    - CH3：`pead_summary`、`pead_bias`
+    - CH4：`iv_crush_summary`、`otm_put_iv`、`otm_call_iv`、`iv_skew_signal`、`options_score`
+    - CH5：`signal_crowding`（crowding badge）、`cycle_context`、`market_regime`
+    - CH6：`band_width`（置信区间宽度）
+    - CH7：`regime` + `gex_regime` 跨维交叉
+  - **DoD Delta 扩展**：新增 IV Current 日环比 Δ、P/C Ratio 日环比 Δ、政体变化检测
+
+- **`chart_engine.py`**
+  - **`render_radar_chart(data, ticker, date_str)`** — 极坐标蜘蛛图，7只蜂归一化 [0,10] 分，金色参考环标注 final_score
+  - **`render_iv_term_chart(data, ticker, date_str)`** — IV 期限结构折线图，形态配色（Contango=绿/Backwardation=红/Flat=金），IV Current 参考线
+  - **`render_gex_profile_chart(data, ticker, date_str, current_price)`** — GEX 分布条形图，±30% 价格区间过滤，绿正红负，含当前价 + GEX flip 标记线
+
+### Fixed（`_build_options_narrative()` 5项 Bug 修复）
+
+- **`generate_deep_v2.py`**
+  - **BUG-A**：`iv_rank=0` 被 `or 50` 短路为 50 → 改为 `if _ivr_raw is not None` 显式判断
+  - **BUG-B**：`gamma_exposure='N/A'`（字符串）传入 `{:+,.0f}` 格式化崩溃 → `try/except float()` 包裹
+  - **BUG-C**：`charm_interp` 末尾含 `。`，外层拼接再加 `。` 导致双句号 → 去掉 charm_interp 内部结尾标点
+  - **BUG-D**：`flow='neutral'` 误用 `bear-text` CSS 类 → 三路判断：bull / bear / neutral-text
+  - **BUG-E**：`total_oi` 可能为字符串类型 → `float(ctx.get('total_oi', 0) or 0)` 兜底
+
+---
+
 ## [0.10.6] — 2026-03-20
 
 ### Changed（FF6 归因接入 Claude 连贯推理）

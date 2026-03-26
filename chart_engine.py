@@ -381,3 +381,290 @@ def render_options_chart(
     except Exception as e:
         print(f"[chart_engine] render_options_chart failed: {e}")
         return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Chart 3  —  蜂群七维雷达图
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def render_radar_chart(
+    data: dict,
+    ticker: str,
+    date_str: str,
+) -> Optional[str]:
+    """
+    生成蜂群7蜜蜂评分雷达图（spider chart），返回 base64 PNG 字符串。
+    数据来源：data['swarm_results']
+    返回 None 表示数据不足。
+    """
+    try:
+        import math as _math
+        plt, mpatches, fm = _get_mpl()
+
+        sr = data.get("swarm_results", {})
+        ad = sr.get("agent_details", {})
+        if not ad:
+            return None
+
+        BEE_MAP = [
+            ("ChronosBeeHorizon", "催化剂"),
+            ("OracleBeeEcho",     "期权/赔率"),
+            ("BuzzBeeWhisper",    "消息情绪"),
+            ("ScoutBeeNova",      "基本面"),
+            ("GuardBeeSentinel",  "宏观/情绪"),
+            ("RivalBeeVanguard",  "ML辅助"),
+            ("BearBeeContrarian", "逆向"),
+        ]
+
+        labels = []
+        values = []
+        for key, label in BEE_MAP:
+            raw = ad.get(key, {})
+            if isinstance(raw, dict):
+                s = float(raw.get("score") or 0)
+            else:
+                s = 0.0
+            labels.append(label)
+            values.append(s)
+
+        if not any(v > 0 for v in values):
+            return None
+
+        N = len(labels)
+        angles = [_math.pi / 2 + 2 * _math.pi * i / N for i in range(N)]
+        angles_closed = angles + [angles[0]]
+        values_closed = values + [values[0]]
+        norm_vals = [v / 10.0 for v in values]
+        norm_closed = norm_vals + [norm_vals[0]]
+
+        fig, ax = plt.subplots(figsize=(7, 6), subplot_kw=dict(polar=True), facecolor=_BG)
+        ax.set_facecolor(_CARD)
+
+        # Grid circles
+        for r in [0.2, 0.4, 0.6, 0.8, 1.0]:
+            circle = plt.Circle((0, 0), r, transform=ax.transData._b, fill=False,
+                                 color="#30363d", lw=0.7, zorder=1)
+            ax.add_artist(circle)
+
+        # Fill + line
+        final_score = float(sr.get("final_score") or 0)
+        fill_col = _score_color(final_score)
+        ax.plot([a for a in angles_closed], norm_closed,
+                color=fill_col, lw=2, zorder=3)
+        ax.fill([a for a in angles_closed], norm_closed,
+                color=fill_col, alpha=0.20, zorder=2)
+
+        # Score reference: final_score ring
+        ref_r = final_score / 10.0
+        ax.plot([a for a in angles_closed], [ref_r] * len(angles_closed),
+                color=_GOLD, lw=1, ls="--", alpha=0.5, zorder=2)
+
+        # Data points
+        for angle, nv, v in zip(angles, norm_vals, values):
+            col = _score_color(v)
+            ax.plot(angle, nv, "o", ms=7, color=col, zorder=5, mec="white", mew=1)
+
+        # Labels
+        for i, (angle, label, v) in enumerate(zip(angles, labels, values)):
+            x = (1.18) * _math.cos(angle)
+            y = (1.18) * _math.sin(angle)
+            col = _score_color(v)
+            ax.text(angle, 1.25, f"{label}\n{v:.1f}",
+                    ha="center", va="center", fontsize=8.5,
+                    color=col, fontweight="bold")
+
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_ylim(0, 1.4)
+        ax.spines["polar"].set_visible(False)
+
+        direction = sr.get("direction", "–")
+        fig.text(0.5, 0.97,
+                 f"{ticker}  ·  蜂群七蜜蜂评分雷达图  ·  {date_str}",
+                 ha="center", va="top", fontsize=12, fontweight="bold", color=_T1)
+        fig.text(0.5, 0.92,
+                 f"综合评分 {final_score:.2f}/10  ·  方向 {direction}  ·  金虚线=综合评分参考环",
+                 ha="center", va="top", fontsize=8, color=_T3)
+
+        return _fig_to_b64(fig)
+
+    except Exception as e:
+        print(f"[chart_engine] render_radar_chart failed: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Chart 4  —  IV 期限结构曲线
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def render_iv_term_chart(
+    data: dict,
+    ticker: str,
+    date_str: str,
+) -> Optional[str]:
+    """
+    生成 IV 期限结构折线图，返回 base64 PNG 字符串。
+    数据来源：oracle_bee.details.iv_term_structure.term_structure
+    返回 None 表示数据不足。
+    """
+    try:
+        plt, mpatches, fm = _get_mpl()
+
+        oracle = (data.get("swarm_results", {})
+                      .get("agent_details", {})
+                      .get("OracleBeeEcho", {}))
+        if isinstance(oracle, str):
+            return None
+        details = oracle.get("details", {})
+        if isinstance(details, str):
+            return None
+
+        ivts = details.get("iv_term_structure", {}) or {}
+        pts = ivts.get("term_structure", [])
+        if not pts or len(pts) < 2:
+            return None
+
+        dtes = [float(p.get("dte", 0)) for p in pts]
+        ivs  = [float(p.get("atm_iv", 0)) for p in pts]
+        expiries = [p.get("expiry", "")[-5:] for p in pts]
+
+        shape = ivts.get("shape", "")
+        color_map = {"contango": _GREEN, "backwardation": _RED, "flat": _GOLD}
+        line_color = color_map.get(shape, _ACCENT)
+
+        fig, ax = plt.subplots(figsize=(9, 4), facecolor=_BG)
+        ax.set_facecolor(_CARD)
+        for sp in ax.spines.values():
+            sp.set_edgecolor("#30363d")
+
+        ax.plot(dtes, ivs, color=line_color, lw=2.5, zorder=3, marker="o",
+                ms=6, mec="white", mew=1.2)
+        ax.fill_between(dtes, ivs, min(ivs) * 0.95, color=line_color, alpha=0.12, zorder=2)
+
+        # Annotations
+        for dte, iv, exp in zip(dtes, ivs, expiries):
+            ax.annotate(f"{iv:.1f}%\n{exp}",
+                        xy=(dte, iv), xytext=(0, 12), textcoords="offset points",
+                        ha="center", fontsize=8, color=line_color, fontweight="bold")
+
+        iv_current = float(details.get("iv_current", 0) or 0)
+        if iv_current:
+            ax.axhline(iv_current, color=_GOLD, lw=1.2, ls="--", alpha=0.7, zorder=4)
+            ax.text(dtes[-1] * 0.02, iv_current + 0.3,
+                    f"IV Current {iv_current:.1f}%", fontsize=8, color=_GOLD)
+
+        shape_zh = {"contango": "Contango（远月>近月，结构正常）",
+                    "backwardation": "Backwardation（近月>远月，近端风险溢价）",
+                    "flat": "Flat（各期限接近，预期一致）"}.get(shape, shape)
+        ax.set_xlabel("到期日剩余天数（DTE）", fontsize=9, color=_T3)
+        ax.set_ylabel("ATM IV (%)", fontsize=9, color=_T3)
+        ax.tick_params(colors=_T3, labelsize=8)
+        ax.grid(color="#30363d", lw=0.5, alpha=0.6)
+        ax.set_title(f"IV 期限结构  ·  {shape_zh}", fontsize=9, color=_T3, pad=6, loc="left")
+
+        fig.text(0.5, 0.97,
+                 f"{ticker}  ·  IV 期限结构曲线  ·  {date_str}",
+                 ha="center", va="top", fontsize=12, fontweight="bold", color=_T1)
+
+        return _fig_to_b64(fig)
+
+    except Exception as e:
+        print(f"[chart_engine] render_iv_term_chart failed: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Chart 5  —  GEX Profile（Gamma Exposure 分布图）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def render_gex_profile_chart(
+    data: dict,
+    ticker: str,
+    date_str: str,
+    current_price: float = 0.0,
+) -> Optional[str]:
+    """
+    生成 GEX Profile（每个行权价的 Gamma Exposure 分布），返回 base64 PNG 字符串。
+    数据来源：data['advanced_analysis']['dealer_gex']
+    返回 None 表示数据不足。
+    """
+    try:
+        plt, mpatches, fm = _get_mpl()
+
+        aa   = data.get("advanced_analysis", {}) or {}
+        dgex = aa.get("dealer_gex", {}) or {}
+        if not dgex:
+            return None
+
+        call_strikes = dgex.get("call_strikes", []) or []
+        put_strikes  = dgex.get("put_strikes",  []) or []
+        gex_profile  = dgex.get("gex_profile",  {}) or {}
+        gex_flip     = dgex.get("gex_flip")
+        total_gex    = float(dgex.get("total_gex", 0) or 0)
+        regime       = dgex.get("regime", "")
+
+        if not gex_profile:
+            return None
+
+        strikes = sorted(gex_profile.keys(), key=float)
+        gex_vals = [float(gex_profile[k]) for k in strikes]
+        strikes_f = [float(k) for k in strikes]
+
+        if not strikes:
+            return None
+
+        # Filter to ±30% around current price
+        if current_price:
+            lo, hi = current_price * 0.7, current_price * 1.3
+            filtered = [(s, g) for s, g in zip(strikes_f, gex_vals) if lo <= s <= hi]
+            if len(filtered) >= 3:
+                strikes_f, gex_vals = zip(*filtered)
+                strikes_f = list(strikes_f)
+                gex_vals  = list(gex_vals)
+
+        colors = [_GREEN if g >= 0 else _RED for g in gex_vals]
+
+        fig, ax = plt.subplots(figsize=(11, 5), facecolor=_BG)
+        ax.set_facecolor(_CARD)
+        for sp in ax.spines.values():
+            sp.set_edgecolor("#30363d")
+
+        ax.bar(strikes_f, gex_vals, width=(max(strikes_f) - min(strikes_f)) / len(strikes_f) * 0.85,
+               color=colors, alpha=0.85, zorder=3)
+        ax.axhline(0, color=_T3, lw=1, zorder=4)
+
+        if current_price:
+            ax.axvline(current_price, color=_GOLD, lw=2, ls="--", zorder=5, alpha=0.9)
+            ax.text(current_price, max(gex_vals) * 1.02,
+                    f"当前价 ${current_price:.1f}", fontsize=8, color=_GOLD,
+                    ha="center", fontweight="bold")
+
+        if gex_flip:
+            try:
+                flip_f = float(gex_flip)
+                ax.axvline(flip_f, color=_ACCENT, lw=1.5, ls=":", zorder=5, alpha=0.8)
+                ax.text(flip_f, min(gex_vals) * 1.02,
+                        f"GEX翻转 ${flip_f:.0f}", fontsize=7.5, color=_ACCENT,
+                        ha="center")
+            except Exception:
+                pass
+
+        regime_zh = {"positive_gamma": "正Gamma（做市商抑制波动）",
+                     "negative_gamma": "负Gamma（做市商放大波动）"}.get(regime, regime)
+        ax.set_xlabel("行权价（Strike）", fontsize=9, color=_T3)
+        ax.set_ylabel("Gamma Exposure", fontsize=9, color=_T3)
+        ax.tick_params(colors=_T3, labelsize=8)
+        ax.grid(axis="y", color="#30363d", lw=0.5, alpha=0.5)
+        ax.set_title(
+            f"GEX Profile  ·  总GEX {total_gex:+.0f}  ·  {regime_zh}  ·  绿=正Gamma  红=负Gamma",
+            fontsize=8.5, color=_T3, pad=6, loc="left")
+
+        fig.text(0.5, 0.97,
+                 f"{ticker}  ·  Dealer GEX Profile  ·  {date_str}",
+                 ha="center", va="top", fontsize=12, fontweight="bold", color=_T1)
+
+        return _fig_to_b64(fig)
+
+    except Exception as e:
+        print(f"[chart_engine] render_gex_profile_chart failed: {e}")
+        return None

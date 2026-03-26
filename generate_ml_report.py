@@ -256,18 +256,28 @@ class MLEnhancedReportGenerator:
         # 获取 ML 预测
         ml_prediction = self.ml_service.predict_for_opportunity(ml_input)
 
+        # 提取当前价（优先 dealer_gex → realtime_metrics → 0）
+        _current_price = (
+            advanced_analysis.get("dealer_gex", {}).get("stock_price")
+            or realtime_metrics.get("sources", {}).get("yahoo_finance", {}).get("current_price")
+            or 0.0
+        )
+
         # 合并分析
         enhanced_report = {
             "ticker": ticker,
             "timestamp": self.timestamp.isoformat(),
+            "current_price": float(_current_price) if _current_price else None,
             "advanced_analysis": advanced_analysis,
             "ml_prediction": {
                 **ml_prediction,
+                "current_price": float(_current_price) if _current_price else None,
                 "training_data_source": self._training_data_source,  # "real"/"sample"/"unknown"
             },
-            "combined_recommendation": self._combine_recommendations(
-                advanced_analysis, ml_prediction
-            ),
+            "combined_recommendation": {
+                **self._combine_recommendations(advanced_analysis, ml_prediction),
+                "current_price": float(_current_price) if _current_price else None,
+            },
         }
 
         return enhanced_report
@@ -289,9 +299,30 @@ class MLEnhancedReportGenerator:
         crowding_score = float(metrics.get("crowding_score", _fallback_crowding))
         crowding_score = min(100.0, max(0.0, crowding_score))  # 防御性边界保护
         catalyst_quality = analysis.get("recommendation", {}).get("rating", "B")
-        momentum_5d = _yf.get("price_change_5d", 0.0)
-        volatility = _yf.get("volatility_20d", _yf.get("atr_pct", 5.0))
-        _raw_sentiment = metrics.get("sentiment_score", 0.0)
+        momentum_5d = _yf.get("price_change_5d", 0.0) or 0.0
+
+        # BUG-6 修复：volatility 从 swarm BuzzBee details 提取，fallback 才用 5.0
+        _buzz_details = (
+            self._swarm_cache.get(metrics.get("_ticker", ""), {})
+            .get("agent_details", {})
+            .get("BuzzBeeWhisper", {})
+            .get("details", {})
+        ) if hasattr(self, "_swarm_cache") else {}
+        volatility = (
+            _yf.get("volatility_20d")
+            or _yf.get("atr_pct")
+            or _buzz_details.get("volatility_20d")
+            or analysis.get("options_analysis", {}).get("historical_volatility")
+            or 5.0
+        )
+
+        # BUG-7 修复：market_sentiment 从 swarm BuzzBee details 提取
+        _buzz_sentiment_raw = _buzz_details.get("sentiment_pct")  # 0-100
+        _raw_sentiment = (
+            (_buzz_sentiment_raw - 50) * 2  # 转为 -100~+100
+            if _buzz_sentiment_raw is not None
+            else metrics.get("sentiment_score", 0.0)
+        )
         # BUG FIX: 原来 abs(_raw_sentiment) <= 10 → *10 的逻辑无法区分 0-1（概率）量表：
         #   0-1 范围  → *10 → 0-10（实际应 *100 → 0-100）
         #   0-10 范围 → *10 → 0-100 ✓  |  0-100 范围 → 不变 ✓
@@ -1033,9 +1064,9 @@ class MLEnhancedReportGenerator:
         pos = analysis.get("position_management", {})
         sl = pos.get("stop_loss", {})
         tp = pos.get("take_profit", {})
-        # 当前价：从 agent_details 或 stop_loss 反推
+        # 当前价：从 agent_details 或 stop_loss 反推（防 None 污染）
         scout = swarm.get("agent_details", {}).get("ScoutBeeNova", {})
-        curr_price = scout.get("details", {}).get("price", 0) if scout else 0
+        curr_price = float(scout.get("details", {}).get("price") or 0) if scout else 0
         if not curr_price and isinstance(sl, dict):
             conservative = sl.get("conservative", 0)
             curr_price = conservative / 0.97 if conservative else 0
@@ -1557,7 +1588,20 @@ def main():
 
             # 注入蜂群数据到报告
             if ticker in swarm_data:
-                enhanced_report["swarm_results"] = swarm_data[ticker]
+                sr = swarm_data[ticker]
+                enhanced_report["swarm_results"] = sr
+
+                # BUG-10 修复：opportunity_score 从 final_score 注入
+                if sr.get("opportunity_score") is None and sr.get("final_score") is not None:
+                    enhanced_report["swarm_results"]["opportunity_score"] = sr["final_score"]
+
+                # BUG-11 修复：dimension_scores 中的 None 降级为 0.0，data_quality_grade 保守升级
+                dim = sr.get("dimension_scores", {})
+                if any(v is None for v in dim.values()):
+                    enhanced_report["swarm_results"]["dimension_scores"] = {
+                        k: (float(v) if v is not None else 0.0) for k, v in dim.items()
+                    }
+                    enhanced_report["swarm_results"]["data_quality_grade"] = "degraded"
 
             # 生成 HTML
             html = report_gen.generate_html_report(ticker, enhanced_report)

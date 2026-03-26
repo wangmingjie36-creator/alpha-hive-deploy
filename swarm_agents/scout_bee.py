@@ -118,7 +118,7 @@ class ScoutBeeNova(BeeAgent):
                 parts.append("无近期内幕交易")
 
             parts.append(f"拥挤度 {crowding_score:.0f}/100（{category}）")
-            parts.append(f"动量 {stock['momentum_5d']:+.1f}%")
+            parts.append(f"动量 {float(stock['momentum_5d'] or 0.0):+.1f}%")
 
             discovery = append_context(" | ".join(parts), ctx)
 
@@ -246,8 +246,8 @@ class ScoutBeeNova(BeeAgent):
                     "crowding_signal": round(crowding_signal, 2),
                     "components": component_scores,
                     "adjustment_factor": adj_factor,
-                    "momentum_5d": stock["momentum_5d"],
-                    "price": stock["price"],
+                    "momentum_5d": float(stock["momentum_5d"] or 0.0),
+                    "price": float(stock["price"] or 0.0) or None,
                     "congress": {
                         "buy_count": congress_data.get("buy_count", 0),
                         "sell_count": congress_data.get("sell_count", 0),

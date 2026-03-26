@@ -221,7 +221,7 @@ def get_short_interest(ticker: str) -> Dict:
         _record_src_success("yfinance_short_interest")
         return result
 
-    except NETWORK_ERRORS as exc:
+    except (*NETWORK_ERRORS, TypeError, AttributeError) as exc:
         _record_src_failure("yfinance_short_interest")
         _log.debug("get_short_interest 降级为 fallback (%s): %s", ticker, exc)
         return fallback
