@@ -4,43 +4,43 @@
  "scores": [
   [
    "META",
-   5.8
+   7.3
   ],
   [
    "MSFT",
-   5.4
+   7.3
   ],
   [
    "RKLB",
-   5.3
+   7.3
   ],
   [
    "NVDA",
-   5.2
+   7.3
   ],
   [
    "BILI",
-   5.1
+   7.3
   ],
   [
    "AMZN",
-   5.0
+   7.3
   ],
   [
    "TSLA",
-   4.5
+   7.1
   ],
   [
    "VKTX",
-   4.3
+   7.6
   ],
   [
    "QCOM",
-   4.3
+   7.3
   ],
   [
    "CRCL",
-   3.7
+   7.3
   ]
  ],
  "dir_counts": [
@@ -2045,7 +2045,7 @@
    "ticker": "MSFT",
    "score": 5.4,
    "direction": "看空",
-   "price": 375.0
+   "price": 371.04
   },
   {
    "ticker": "RKLB",
@@ -2057,7 +2057,7 @@
    "ticker": "NVDA",
    "score": 5.2,
    "direction": "看多",
-   "price": 175.0
+   "price": 178.68
   },
   {
    "ticker": "BILI",
@@ -2087,7 +2087,7 @@
    "ticker": "QCOM",
    "score": 4.3,
    "direction": "看空",
-   "price": 130.0
+   "price": 130.35
   },
   {
    "ticker": "CRCL",
@@ -2096,7 +2096,7 @@
    "price": 103.86
   }
  ],
- "_generated_at": "2026-03-25 14:04 PDT",
+ "_generated_at": "2026-03-26 03:25 PDT",
  "_date": "2026-03-25",
- "_deploy_ts": 1774472641
+ "_deploy_ts": 1774520747
 }
