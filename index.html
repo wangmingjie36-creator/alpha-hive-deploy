@@ -622,6 +622,33 @@ html:not(.dark) .hm-tk{background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.06)}
 .consensus-donut{width:28px;height:28px;border-radius:50%;flex-shrink:0;
   border:1px solid var(--border)}
 .consensus-labels{font-size:.68em;color:var(--ts);line-height:1.3}
+/* ── Equity Curve 权益曲线 ── */
+.eq-section{margin-top:16px}
+.eq-wrap{position:relative;height:220px}
+.eq-stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px}
+.eq-stat{background:var(--surface2);border:1px solid var(--border);border-radius:10px;
+  padding:8px 14px;font-size:.82em;display:flex;flex-direction:column;align-items:center;gap:2px}
+.eq-stat .ev{font-size:1.2em;font-weight:800;color:var(--tp)}.eq-stat .el{font-size:.72em;color:var(--ts)}
+.eq-cold{text-align:center;padding:30px 20px;color:var(--ts);font-size:.9em}
+/* ── Swarm Divergence 蜂群分歧度 ── */
+.sdiv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:14px;margin-top:12px}
+.sdiv-card{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px;transition:border-color .2s}
+.sdiv-card:hover{border-color:var(--acc2)}
+.sdiv-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.sdiv-tk{font-weight:900;font-size:1.05em;color:var(--tp)}
+.sdiv-consensus{font-size:.78em;font-weight:700;padding:2px 10px;border-radius:12px}
+.sdiv-high{background:rgba(34,197,94,.12);color:var(--bull)}
+.sdiv-med{background:rgba(245,158,11,.12);color:var(--neut)}
+.sdiv-low{background:rgba(239,68,68,.12);color:var(--bear)}
+.sdiv-bees{display:flex;gap:3px;align-items:flex-end;height:60px;margin:6px 0}
+.sdiv-bee{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px}
+.sdiv-bar{width:100%;min-height:4px;border-radius:3px 3px 0 0;transition:height .4s}
+.sdiv-bar-b{background:var(--bull)}.sdiv-bar-n{background:var(--neut)}.sdiv-bar-e{background:var(--bear)}
+.sdiv-bee-name{font-size:.6em;color:var(--ts);text-align:center;line-height:1}
+.sdiv-bee-score{font-size:.65em;font-weight:700;color:var(--tp)}
+.sdiv-meta{display:flex;gap:10px;font-size:.72em;color:var(--ts);margin-top:6px;flex-wrap:wrap}
+.sdiv-meta span{display:flex;align-items:center;gap:3px}
+.sdiv-dot{width:7px;height:7px;border-radius:50%;display:inline-block}
 /* ── 升级 E2: 手机底部导航栏 ── */
 .bottom-nav{display:none;position:fixed;bottom:0;left:0;right:0;z-index:998;
   background:rgba(10,15,28,.98);backdrop-filter:blur(10px);
@@ -2541,6 +2568,13 @@ html:not(.dark) .hm-tk{background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.06)}
   </div>
 
 
+  <!-- ── Swarm Divergence 蜂群分歧度 ── -->
+  <div class="section" id="swarm-divergence">
+    <div class="sec-title">🐝 蜂群分歧度分析</div>
+    <p style="font-size:.82em;color:var(--ts);margin-bottom:12px">7 只蜂的评分分散度 — 高共识 = 信号可信度高，低共识 = 需谨慎对待方向判断</p>
+    <div class="sdiv-grid" id="sdivGrid"></div>
+  </div>
+
   <!-- ── Accuracy Dashboard ── -->
   <div class="section" id="accuracy">
     <div class="acc-section-title">📈 预测准确率追踪（T+7 验证）</div>
@@ -2586,6 +2620,18 @@ html:not(.dark) .hm-tk{background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.06)}
     <ul class="pred-list"><li class="pred-item"><span class="pred-tk">CRCL</span><span class="pred-date">2026-02-27 · 中性</span><span class="pred-ret pred-ret-up">+41.5%</span></li><li class="pred-item"><span class="pred-tk">CRCL</span><span class="pred-date">2026-03-01 · 中性</span><span class="pred-ret pred-ret-up">+41.5%</span></li><li class="pred-item"><span class="pred-tk">CRCL</span><span class="pred-date">2026-03-06 · 看多</span><span class="pred-ret pred-ret-up">+29.8%</span></li></ul>
     <div class="acc-ext-title" style="margin-top:14px">💀 最差预测 Top 3</div>
     <ul class="pred-list"><li class="pred-item"><span class="pred-tk">CRCL</span><span class="pred-date">2026-03-17 · 中性</span><span class="pred-ret pred-ret-dn">-25.7%</span></li><li class="pred-item"><span class="pred-tk">CRCL</span><span class="pred-date">2026-03-16 · 看空</span><span class="pred-ret pred-ret-dn">-17.5%</span></li><li class="pred-item"><span class="pred-tk">RKLB</span><span class="pred-date">2026-03-17 · 看多</span><span class="pred-ret pred-ret-dn">-16.1%</span></li></ul>
+      </div>
+    </div>
+    <!-- ── Equity Curve 权益曲线 ── -->
+    <div class="eq-section">
+      <div class="acc-section-title" style="margin-top:18px">📉 蜂群累计收益曲线（Equity Curve）</div>
+      <div id="eqCurveContainer">
+        <div class="eq-wrap"><canvas id="eqCurveChart"></canvas></div>
+        <div class="eq-stats" id="eqStats"></div>
+      </div>
+      <div class="eq-cold" id="eqCold" style="display:none">
+        <div style="font-size:2em;margin-bottom:6px">📊</div>
+        <div>需要 T+7 验证数据才能绘制权益曲线<br><span style="font-size:.82em;opacity:.7">当 outcome backfill 运行后，此图表将自动显示</span></div>
       </div>
     </div>
   </div>
@@ -3195,6 +3241,120 @@ window.AH.initAccWinTrend=function(){
   }));
 };
 window.AH.initAccWinTrend();
+
+// ── Equity Curve (权益曲线) ──
+window.AH.initEquityCurve=function(){
+  var eq=__AH__.equity_curve;
+  var container=document.getElementById('eqCurveContainer');
+  var cold=document.getElementById('eqCold');
+  if(!eq||!eq.length){
+    if(container)container.style.display='none';
+    if(cold)cold.style.display='';
+    return;
+  }
+  if(container)container.style.display='';
+  if(cold)cold.style.display='none';
+  var cv=document.getElementById('eqCurveChart');
+  if(!cv||typeof Chart==='undefined')return;
+  var existing=Chart.getChart(cv);if(existing)existing.destroy();
+  var dark=document.documentElement.classList.contains('dark');
+  var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
+  var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  var labels=eq.map(function(d){return d.date.slice(5);});
+  var cumData=eq.map(function(d){return d.cum;});
+  var ddData=eq.map(function(d){return -d.dd;});
+  // 颜色：正区间绿色，负区间红色
+  var cumColors=cumData.map(function(v){return v>=0?'rgba(34,197,94,.7)':'rgba(239,68,68,.7)';});
+  chartInstances.push(new Chart(cv,{
+    type:'line',
+    data:{
+      labels:labels,
+      datasets:[
+        {label:'累计收益%', data:cumData,
+         borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.1)', fill:true,
+         tension:.3, pointRadius:2, borderWidth:2, order:1,
+         segment:{borderColor:function(ctx){return ctx.p0.parsed.y>=0&&ctx.p1.parsed.y>=0?'#22c55e':'#ef4444';}}},
+        {label:'回撤%', data:ddData,
+         borderColor:'rgba(239,68,68,.4)', backgroundColor:'rgba(239,68,68,.08)', fill:true,
+         tension:.3, pointRadius:0, borderWidth:1, borderDash:[3,3], order:2}
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{position:'bottom', labels:{color:tc, font:{size:9}, boxWidth:10, padding:6}},
+        tooltip:{callbacks:{label:function(c){return c.dataset.label+': '+(c.raw!=null?c.raw.toFixed(2)+'%':'—');}}}
+      },
+      scales:{
+        x:{grid:{display:false}, ticks:{color:tc, font:{size:7}, maxRotation:45, maxTicksLimit:15}},
+        y:{grid:{color:gc}, ticks:{color:tc, font:{size:9}, callback:function(v){return v.toFixed(1)+'%';}}}
+      }
+    }
+  }));
+  // 统计面板
+  var statsEl=document.getElementById('eqStats');
+  if(statsEl){
+    var lastCum=eq[eq.length-1].cum;
+    var maxDD=Math.max.apply(null,eq.map(function(d){return d.dd;}));
+    var wins=eq.filter(function(d){return d.correct;}).length;
+    var wr=eq.length?Math.round(wins/eq.length*100):0;
+    var avgRet=eq.reduce(function(s,d){return s+d.ret;},0)/eq.length;
+    var cumColor=lastCum>=0?'var(--bull)':'var(--bear)';
+    statsEl.innerHTML=
+      '<div class="eq-stat"><span class="ev" style="color:'+cumColor+'">'+lastCum.toFixed(2)+'%</span><span class="el">累计收益</span></div>'+
+      '<div class="eq-stat"><span class="ev" style="color:var(--bear)">-'+maxDD.toFixed(2)+'%</span><span class="el">最大回撤</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+wr+'%</span><span class="el">方向胜率</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+(avgRet>=0?'+':'')+avgRet.toFixed(2)+'%</span><span class="el">平均单笔</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+eq.length+'</span><span class="el">已验证笔数</span></div>';
+  }
+};
+window.AH.initEquityCurve();
+
+// ── Swarm Divergence (蜂群分歧度) ──
+window.AH.initSwarmDiv=function(){
+  var sd=__AH__.swarm_divergence;
+  var grid=document.getElementById('sdivGrid');
+  if(!grid||!sd)return;
+  var tickers=Object.keys(sd);
+  if(!tickers.length){grid.innerHTML='<div style="text-align:center;color:var(--ts);padding:20px">暂无蜂群投票数据</div>';return;}
+  // 按共识度排序（低共识优先展示，更值得关注）
+  tickers.sort(function(a,b){return (sd[a].consensus||0)-(sd[b].consensus||0);});
+  var html='';
+  tickers.forEach(function(tk){
+    var d=sd[tk]; if(!d||!d.bees)return;
+    var consensusCls=d.consensus>=75?'sdiv-high':d.consensus>=55?'sdiv-med':'sdiv-low';
+    var consensusLabel=d.consensus>=75?'高共识':d.consensus>=55?'中等共识':'低共识⚠️';
+    // 找最高分用于计算柱高比例
+    var maxScore=Math.max.apply(null,d.bees.map(function(b){return b.score;}));
+    if(maxScore<=0)maxScore=10;
+    var beesHtml='';
+    d.bees.forEach(function(b){
+      var hPct=Math.max(8, Math.round(b.score/maxScore*100));
+      var barCls=b.dir==='bull'?'sdiv-bar-b':b.dir==='neut'?'sdiv-bar-n':'sdiv-bar-e';
+      beesHtml+='<div class="sdiv-bee" title="'+b.name+': '+b.score+'">'+
+        '<div class="sdiv-bee-score">'+b.score+'</div>'+
+        '<div class="sdiv-bar '+barCls+'" style="height:'+hPct+'%"></div>'+
+        '<div class="sdiv-bee-name">'+b.name+'</div></div>';
+    });
+    var v=d.votes||{};
+    html+='<div class="sdiv-card">'+
+      '<div class="sdiv-header">'+
+        '<span class="sdiv-tk">'+tk+'</span>'+
+        '<span class="sdiv-consensus '+consensusCls+'">'+consensusLabel+' '+d.consensus+'%</span>'+
+      '</div>'+
+      '<div class="sdiv-bees">'+beesHtml+'</div>'+
+      '<div class="sdiv-meta">'+
+        '<span><span class="sdiv-dot" style="background:var(--bull)"></span>'+(v.bullish||0)+'多</span>'+
+        '<span><span class="sdiv-dot" style="background:var(--bear)"></span>'+(v.bearish||0)+'空</span>'+
+        '<span><span class="sdiv-dot" style="background:var(--neut)"></span>'+(v.neutral||0)+'中</span>'+
+        '<span>σ='+d.std+' · 极差'+d.spread+'</span>'+
+      '</div></div>';
+  });
+  grid.innerHTML=html;
+};
+window.AH.initSwarmDiv();
+
 window.addEventListener('pagehide',function(){chartInstances.forEach(function(c){try{c.destroy()}catch(e){}});chartInstances=[];});
 // ── bfcache 恢复：浏览器后退时重新渲染所有图表 ──
 window.addEventListener('pageshow',function(e){
@@ -3222,6 +3382,8 @@ window.addEventListener('pageshow',function(e){
   if(window.AH.initTrendChart) window.AH.initTrendChart();
   if(window.AH.initAccDirChart) window.AH.initAccDirChart();
   if(window.AH.initAccWinTrend) window.AH.initAccWinTrend();
+  if(window.AH.initEquityCurve) window.AH.initEquityCurve();
+  if(window.AH.initSwarmDiv) window.AH.initSwarmDiv();
 });
 /* F37: Pause SVG SMIL animations when prefers-reduced-motion */
 (function(){const mq=window.matchMedia('(prefers-reduced-motion:reduce)');function toggle(e){const svgs=document.querySelectorAll('svg');svgs.forEach(function(s){try{if(e.matches)s.pauseAnimations();else s.unpauseAnimations();}catch(ex){}});}if(mq.matches)document.addEventListener('DOMContentLoaded',function(){toggle(mq);});mq.addEventListener('change',toggle);})();
