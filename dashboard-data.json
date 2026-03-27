@@ -144,6 +144,32 @@
    "avg_ret": -7.25
   }
  ],
+ "acc_weekly_by_dir": [
+  {
+   "week": "2026-W08",
+   "bullish": 61.9,
+   "bearish": null,
+   "neutral": 70.0
+  },
+  {
+   "week": "2026-W09",
+   "bullish": 58.8,
+   "bearish": null,
+   "neutral": 81.8
+  },
+  {
+   "week": "2026-W10",
+   "bullish": 11.1,
+   "bearish": 88.2,
+   "neutral": 35.7
+  },
+  {
+   "week": "2026-W11",
+   "bullish": 25.0,
+   "bearish": 100.0,
+   "neutral": 0.0
+  }
+ ],
  "fg_history": [
   {
    "date": "2026-03-10",
@@ -2151,7 +2177,7 @@
    "price": 98.27
   }
  ],
- "_generated_at": "2026-03-27 01:09 PDT",
+ "_generated_at": "2026-03-27 01:28 PDT",
  "_date": "2026-03-26",
- "_deploy_ts": 1774598951
+ "_deploy_ts": 1774600144
 }
