@@ -1,112 +1,123 @@
 {
- "fv": 10,
+ "fv": 9,
  "fg_label": "极度恐惧",
  "scores": [
   [
    "BILI",
-   7.4
+   6.0
   ],
   [
-   "META",
-   5.4
+   "AMZN",
+   5.6
   ],
   [
    "MSFT",
+   5.3
+  ],
+  [
+   "QCOM",
    4.8
   ],
   [
    "RKLB",
-   4.6
-  ],
-  [
-   "QCOM",
-   4.1
+   4.8
   ],
   [
    "VKTX",
-   3.9
-  ],
-  [
-   "TSLA",
-   3.5
+   4.5
   ],
   [
    "CRCL",
-   3.4
+   4.4
+  ],
+  [
+   "META",
+   4.1
+  ],
+  [
+   "TSLA",
+   3.9
   ],
   [
    "NVDA",
-   3.2
+   3.4
   ]
  ],
  "dir_counts": [
-  3,
-  6,
-  0
+  4,
+  4,
+  2
  ],
  "radar": {
   "BILI": [
-   62.9,
-   38.8,
-   39.4,
-   82.3,
-   78.6
+   58.9,
+   55.0,
+   42.9,
+   66.9,
+   73.6
   ],
-  "META": [
-   25.4,
-   72.8,
-   31.9,
-   31.8,
-   61.7
+  "AMZN": [
+   38.2,
+   69.4,
+   48.7,
+   88.6,
+   43.7
   ],
   "MSFT": [
-   51.0,
-   68.9,
-   39.7,
-   71.7,
-   22.7
-  ],
-  "RKLB": [
-   38.0,
-   55.0,
-   33.8,
-   91.3,
-   24.7
+   48.6,
+   73.8,
+   55.5,
+   76.1,
+   29.1
   ],
   "QCOM": [
-   54.8,
-   63.0,
-   36.9,
-   33.5,
-   27.1
+   58.1,
+   68.0,
+   46.0,
+   38.6,
+   33.5
+  ],
+  "RKLB": [
+   36.7,
+   55.0,
+   43.4,
+   85.4,
+   26.1
   ],
   "VKTX": [
-   36.4,
-   55.0,
-   47.1,
-   44.9,
-   28.6
-  ],
-  "TSLA": [
-   31.3,
-   76.8,
-   34.2,
-   51.3,
-   15.6
+   32.8,
+   60.0,
+   40.2,
+   77.1,
+   25.0
   ],
   "CRCL": [
-   40.0,
+   40.4,
    55.0,
-   30.6,
-   53.9,
-   26.8
+   32.0,
+   44.3,
+   27.9
+  ],
+  "META": [
+   29.2,
+   77.8,
+   48.8,
+   67.4,
+   18.9
+  ],
+  "TSLA": [
+   29.1,
+   76.8,
+   50.7,
+   42.8,
+   17.9
   ],
   "NVDA": [
-   29.5,
+   25.0,
    63.0,
-   46.5,
+   50.3,
    42.8,
-   15.9
+   14.7
   ]
  },
  "acc_dir_labels": [
@@ -115,19 +126,19 @@
   "中性"
  ],
  "acc_dir_accs": [
-  46.8,
-  93.5,
-  56.8
+  45.6,
+  95.5,
+  50.0
  ],
  "acc_dir_tots": [
-  77,
-  31,
-  37
+  79,
+  44,
+  42
  ],
  "acc_dir_rets": [
-  -0.11,
-  4.39,
-  2.08
+  -0.32,
+  5.53,
+  -0.43
  ],
  "acc_weekly": [
   {
@@ -150,9 +161,9 @@
   },
   {
    "week": "2026-W11",
-   "accuracy": 75.0,
-   "total": 20,
-   "avg_ret": -7.25
+   "accuracy": 70.0,
+   "total": 40,
+   "avg_ret": -9.11
   }
  ],
  "acc_weekly_by_dir": [
@@ -176,7 +187,7 @@
   },
   {
    "week": "2026-W11",
-   "bullish": 25.0,
+   "bullish": 16.7,
    "bearish": 100.0,
    "neutral": 0.0
   }
@@ -237,6 +248,10 @@
   {
    "date": "2026-03-27",
    "value": 10
+  },
+  {
+   "date": "2026-03-30",
+   "value": 9
   }
  ],
  "trend_data": {
@@ -336,40 +351,48 @@
    {
     "date": "2026-03-27",
     "score": 7.4
+   },
+   {
+    "date": "2026-03-30",
+    "score": 6.0
    }
   ],
-  "META": [
+  "AMZN": [
    {
     "date": "2026-02-26",
-    "score": 5.7
-   },
-   {
-    "date": "2026-02-27",
-    "score": 5.9
-   },
-   {
-    "date": "2026-02-28",
-    "score": 5.9
-   },
-   {
-    "date": "2026-03-01",
-    "score": 4.7
-   },
-   {
-    "date": "2026-03-02",
-    "score": 5.2
-   },
-   {
-    "date": "2026-03-03",
     "score": 5.3
    },
    {
+    "date": "2026-02-27",
+    "score": 5.6
+   },
+   {
+    "date": "2026-02-28",
+    "score": 5.6
+   },
+   {
+    "date": "2026-03-01",
+    "score": 4.8
+   },
+   {
+    "date": "2026-03-03",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-04",
+    "score": 5.6
+   },
+   {
+    "date": "2026-03-05",
+    "score": 5.6
+   },
+   {
     "date": "2026-03-06",
-    "score": 4.7
+    "score": 4.2
    },
    {
     "date": "2026-03-09",
-    "score": 6.2
+    "score": 6.1
    },
    {
     "date": "2026-03-10",
@@ -377,39 +400,39 @@
    },
    {
     "date": "2026-03-11",
-    "score": 5.4
+    "score": 5.6
    },
    {
     "date": "2026-03-12",
-    "score": 5.0
+    "score": 4.4
    },
    {
     "date": "2026-03-13",
-    "score": 5.1
+    "score": 5.0
    },
    {
     "date": "2026-03-16",
-    "score": 4.9
+    "score": 5.0
    },
    {
     "date": "2026-03-17",
-    "score": 4.5
+    "score": 4.3
    },
    {
     "date": "2026-03-18",
-    "score": 3.6
+    "score": 4.2
    },
    {
     "date": "2026-03-19",
-    "score": 4.9
+    "score": 4.3
    },
    {
     "date": "2026-03-20",
-    "score": 4.7
+    "score": 5.0
    },
    {
     "date": "2026-03-23",
-    "score": 4.8
+    "score": 5.1
    },
    {
     "date": "2026-03-24",
@@ -417,11 +440,11 @@
    },
    {
     "date": "2026-03-25",
-    "score": 5.8
+    "score": 5.0
    },
    {
-    "date": "2026-03-27",
-    "score": 5.4
+    "date": "2026-03-30",
+    "score": 5.6
    }
   ],
   "MSFT": [
@@ -524,6 +547,76 @@
    {
     "date": "2026-03-27",
     "score": 4.8
+   },
+   {
+    "date": "2026-03-30",
+    "score": 5.3
+   }
+  ],
+  "QCOM": [
+   {
+    "date": "2026-02-27",
+    "score": 6.1
+   },
+   {
+    "date": "2026-02-28",
+    "score": 6.1
+   },
+   {
+    "date": "2026-03-11",
+    "score": 6.1
+   },
+   {
+    "date": "2026-03-12",
+    "score": 5.3
+   },
+   {
+    "date": "2026-03-13",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-16",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-17",
+    "score": 4.5
+   },
+   {
+    "date": "2026-03-18",
+    "score": 4.2
+   },
+   {
+    "date": "2026-03-19",
+    "score": 4.9
+   },
+   {
+    "date": "2026-03-20",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-23",
+    "score": 4.5
+   },
+   {
+    "date": "2026-03-24",
+    "score": 4.3
+   },
+   {
+    "date": "2026-03-25",
+    "score": 4.3
+   },
+   {
+    "date": "2026-03-26",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-27",
+    "score": 4.1
+   },
+   {
+    "date": "2026-03-30",
+    "score": 4.8
    }
   ],
   "RKLB": [
@@ -602,68 +695,10 @@
    {
     "date": "2026-03-27",
     "score": 4.6
-   }
-  ],
-  "QCOM": [
-   {
-    "date": "2026-02-27",
-    "score": 6.1
    },
    {
-    "date": "2026-02-28",
-    "score": 6.1
-   },
-   {
-    "date": "2026-03-11",
-    "score": 6.1
-   },
-   {
-    "date": "2026-03-12",
-    "score": 5.3
-   },
-   {
-    "date": "2026-03-13",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-16",
-    "score": 4.7
-   },
-   {
-    "date": "2026-03-17",
-    "score": 4.5
-   },
-   {
-    "date": "2026-03-18",
-    "score": 4.2
-   },
-   {
-    "date": "2026-03-19",
-    "score": 4.9
-   },
-   {
-    "date": "2026-03-20",
-    "score": 4.7
-   },
-   {
-    "date": "2026-03-23",
-    "score": 4.5
-   },
-   {
-    "date": "2026-03-24",
-    "score": 4.3
-   },
-   {
-    "date": "2026-03-25",
-    "score": 4.3
-   },
-   {
-    "date": "2026-03-26",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-27",
-    "score": 4.1
+    "date": "2026-03-30",
+    "score": 4.8
    }
   ],
   "VKTX": [
@@ -742,92 +777,10 @@
    {
     "date": "2026-03-27",
     "score": 3.9
-   }
-  ],
-  "TSLA": [
-   {
-    "date": "2026-02-25",
-    "score": 5.5
    },
    {
-    "date": "2026-02-27",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-03",
-    "score": 4.0
-   },
-   {
-    "date": "2026-03-04",
-    "score": 5.3
-   },
-   {
-    "date": "2026-03-05",
-    "score": 5.2
-   },
-   {
-    "date": "2026-03-06",
-    "score": 4.4
-   },
-   {
-    "date": "2026-03-09",
-    "score": 5.9
-   },
-   {
-    "date": "2026-03-10",
-    "score": 5.7
-   },
-   {
-    "date": "2026-03-11",
-    "score": 5.2
-   },
-   {
-    "date": "2026-03-12",
-    "score": 4.2
-   },
-   {
-    "date": "2026-03-13",
-    "score": 4.9
-   },
-   {
-    "date": "2026-03-16",
-    "score": 4.3
-   },
-   {
-    "date": "2026-03-17",
-    "score": 4.2
-   },
-   {
-    "date": "2026-03-18",
-    "score": 3.6
-   },
-   {
-    "date": "2026-03-19",
-    "score": 3.9
-   },
-   {
-    "date": "2026-03-20",
-    "score": 4.7
-   },
-   {
-    "date": "2026-03-23",
-    "score": 4.8
-   },
-   {
-    "date": "2026-03-24",
-    "score": 3.9
-   },
-   {
-    "date": "2026-03-25",
+    "date": "2026-03-30",
     "score": 4.5
-   },
-   {
-    "date": "2026-03-26",
-    "score": 4.2
-   },
-   {
-    "date": "2026-03-27",
-    "score": 3.5
    }
   ],
   "CRCL": [
@@ -918,6 +871,190 @@
    {
     "date": "2026-03-27",
     "score": 3.4
+   },
+   {
+    "date": "2026-03-30",
+    "score": 4.4
+   }
+  ],
+  "META": [
+   {
+    "date": "2026-02-26",
+    "score": 5.7
+   },
+   {
+    "date": "2026-02-27",
+    "score": 5.9
+   },
+   {
+    "date": "2026-02-28",
+    "score": 5.9
+   },
+   {
+    "date": "2026-03-01",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-02",
+    "score": 5.2
+   },
+   {
+    "date": "2026-03-03",
+    "score": 5.3
+   },
+   {
+    "date": "2026-03-06",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-09",
+    "score": 6.2
+   },
+   {
+    "date": "2026-03-10",
+    "score": 6.6
+   },
+   {
+    "date": "2026-03-11",
+    "score": 5.4
+   },
+   {
+    "date": "2026-03-12",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-13",
+    "score": 5.1
+   },
+   {
+    "date": "2026-03-16",
+    "score": 4.9
+   },
+   {
+    "date": "2026-03-17",
+    "score": 4.5
+   },
+   {
+    "date": "2026-03-18",
+    "score": 3.6
+   },
+   {
+    "date": "2026-03-19",
+    "score": 4.9
+   },
+   {
+    "date": "2026-03-20",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-23",
+    "score": 4.8
+   },
+   {
+    "date": "2026-03-24",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-25",
+    "score": 5.8
+   },
+   {
+    "date": "2026-03-27",
+    "score": 5.4
+   },
+   {
+    "date": "2026-03-30",
+    "score": 4.1
+   }
+  ],
+  "TSLA": [
+   {
+    "date": "2026-02-25",
+    "score": 5.5
+   },
+   {
+    "date": "2026-02-27",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-03",
+    "score": 4.0
+   },
+   {
+    "date": "2026-03-04",
+    "score": 5.3
+   },
+   {
+    "date": "2026-03-05",
+    "score": 5.2
+   },
+   {
+    "date": "2026-03-06",
+    "score": 4.4
+   },
+   {
+    "date": "2026-03-09",
+    "score": 5.9
+   },
+   {
+    "date": "2026-03-10",
+    "score": 5.7
+   },
+   {
+    "date": "2026-03-11",
+    "score": 5.2
+   },
+   {
+    "date": "2026-03-12",
+    "score": 4.2
+   },
+   {
+    "date": "2026-03-13",
+    "score": 4.9
+   },
+   {
+    "date": "2026-03-16",
+    "score": 4.3
+   },
+   {
+    "date": "2026-03-17",
+    "score": 4.2
+   },
+   {
+    "date": "2026-03-18",
+    "score": 3.6
+   },
+   {
+    "date": "2026-03-19",
+    "score": 3.9
+   },
+   {
+    "date": "2026-03-20",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-23",
+    "score": 4.8
+   },
+   {
+    "date": "2026-03-24",
+    "score": 3.9
+   },
+   {
+    "date": "2026-03-25",
+    "score": 4.5
+   },
+   {
+    "date": "2026-03-26",
+    "score": 4.2
+   },
+   {
+    "date": "2026-03-27",
+    "score": 3.5
+   },
+   {
+    "date": "2026-03-30",
+    "score": 3.9
    }
   ],
   "NVDA": [
@@ -1012,92 +1149,10 @@
    {
     "date": "2026-03-27",
     "score": 3.2
-   }
-  ],
-  "AMZN": [
-   {
-    "date": "2026-02-26",
-    "score": 5.3
    },
    {
-    "date": "2026-02-27",
-    "score": 5.6
-   },
-   {
-    "date": "2026-02-28",
-    "score": 5.6
-   },
-   {
-    "date": "2026-03-01",
-    "score": 4.8
-   },
-   {
-    "date": "2026-03-03",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-04",
-    "score": 5.6
-   },
-   {
-    "date": "2026-03-05",
-    "score": 5.6
-   },
-   {
-    "date": "2026-03-06",
-    "score": 4.2
-   },
-   {
-    "date": "2026-03-09",
-    "score": 6.1
-   },
-   {
-    "date": "2026-03-10",
-    "score": 6.6
-   },
-   {
-    "date": "2026-03-11",
-    "score": 5.6
-   },
-   {
-    "date": "2026-03-12",
-    "score": 4.4
-   },
-   {
-    "date": "2026-03-13",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-16",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-17",
-    "score": 4.3
-   },
-   {
-    "date": "2026-03-18",
-    "score": 4.2
-   },
-   {
-    "date": "2026-03-19",
-    "score": 4.3
-   },
-   {
-    "date": "2026-03-20",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-23",
-    "score": 5.1
-   },
-   {
-    "date": "2026-03-24",
-    "score": 4.7
-   },
-   {
-    "date": "2026-03-25",
-    "score": 5.0
+    "date": "2026-03-30",
+    "score": 3.4
    }
   ],
   "AAPL": [
@@ -1114,6 +1169,58 @@
   ]
  },
  "hist_full": {
+  "2026-03-30": [
+   {
+    "ticker": "BILI",
+    "score": 6.0,
+    "direction": "bullish"
+   },
+   {
+    "ticker": "AMZN",
+    "score": 5.6,
+    "direction": "neutral"
+   },
+   {
+    "ticker": "MSFT",
+    "score": 5.3,
+    "direction": "neutral"
+   },
+   {
+    "ticker": "QCOM",
+    "score": 4.8,
+    "direction": "bearish"
+   },
+   {
+    "ticker": "RKLB",
+    "score": 4.8,
+    "direction": "bearish"
+   },
+   {
+    "ticker": "VKTX",
+    "score": 4.5,
+    "direction": "bullish"
+   },
+   {
+    "ticker": "CRCL",
+    "score": 4.4,
+    "direction": "bearish"
+   },
+   {
+    "ticker": "META",
+    "score": 4.1,
+    "direction": "bullish"
+   },
+   {
+    "ticker": "TSLA",
+    "score": 3.9,
+    "direction": "bearish"
+   },
+   {
+    "ticker": "NVDA",
+    "score": 3.4,
+    "direction": "bullish"
+   }
+  ],
   "2026-03-27": [
    {
     "ticker": "BILI",
@@ -2228,57 +2335,63 @@
  "search_index": [
   {
    "ticker": "BILI",
-   "score": 7.4,
+   "score": 6.0,
    "direction": "看多",
-   "price": 22.33
+   "price": 21.69
   },
   {
-   "ticker": "META",
-   "score": 5.4,
-   "direction": "看空",
-   "price": 525.72
+   "ticker": "AMZN",
+   "score": 5.6,
+   "direction": "中性",
+   "price": 200.95
   },
   {
    "ticker": "MSFT",
-   "score": 4.8,
-   "direction": "看空",
-   "price": 356.77
-  },
-  {
-   "ticker": "RKLB",
-   "score": 4.6,
-   "direction": "看空",
-   "price": 60.93
+   "score": 5.3,
+   "direction": "中性",
+   "price": 358.96
   },
   {
    "ticker": "QCOM",
-   "score": 4.1,
+   "score": 4.8,
    "direction": "看空",
-   "price": 127.11
+   "price": 127.07
+  },
+  {
+   "ticker": "RKLB",
+   "score": 4.8,
+   "direction": "看空",
+   "price": 57.38
   },
   {
    "ticker": "VKTX",
-   "score": 3.9,
+   "score": 4.5,
    "direction": "看多",
-   "price": 32.52
-  },
-  {
-   "ticker": "TSLA",
-   "score": 3.5,
-   "direction": "看空",
-   "price": 361.83
+   "price": 29.92
   },
   {
    "ticker": "CRCL",
-   "score": 3.4,
+   "score": 4.4,
    "direction": "看空",
-   "price": 93.66
+   "price": 89.91
+  },
+  {
+   "ticker": "META",
+   "score": 4.1,
+   "direction": "看多",
+   "price": 536.38
+  },
+  {
+   "ticker": "TSLA",
+   "score": 3.9,
+   "direction": "看空",
+   "price": 355.28
   },
   {
    "ticker": "NVDA",
-   "score": 3.2,
+   "score": 3.4,
    "direction": "看多",
-   "price": 167.52
+   "price": 165.17
   }
  ],
  "equity_curve": [
@@ -3441,12 +3554,172 @@
    "cum": 204.68,
    "dd": 45.38,
    "correct": false
+  },
+  {
+   "date": "2026-03-18",
+   "ticker": "MSFT",
+   "ret": 8.94,
+   "cum": 213.61,
+   "dd": 36.44,
+   "correct": true
+  },
+  {
+   "date": "2026-03-18",
+   "ticker": "QCOM",
+   "ret": 2.58,
+   "cum": 216.19,
+   "dd": 33.87,
+   "correct": true
+  },
+  {
+   "date": "2026-03-18",
+   "ticker": "TSLA",
+   "ret": 7.88,
+   "cum": 224.07,
+   "dd": 25.99,
+   "correct": true
+  },
+  {
+   "date": "2026-03-18",
+   "ticker": "NVDA",
+   "ret": 7.14,
+   "cum": 231.21,
+   "dd": 18.85,
+   "correct": true
+  },
+  {
+   "date": "2026-03-18",
+   "ticker": "VKTX",
+   "ret": -3.07,
+   "cum": 228.14,
+   "dd": 21.92,
+   "correct": false
+  },
+  {
+   "date": "2026-03-18",
+   "ticker": "BILI",
+   "ret": 12.43,
+   "cum": 240.57,
+   "dd": 9.49,
+   "correct": true
+  },
+  {
+   "date": "2026-03-18",
+   "ticker": "META",
+   "ret": 14.61,
+   "cum": 255.18,
+   "dd": 0.0,
+   "correct": true
+  },
+  {
+   "date": "2026-03-18",
+   "ticker": "AMZN",
+   "ret": 5.02,
+   "cum": 260.2,
+   "dd": 0.0,
+   "correct": true
+  },
+  {
+   "date": "2026-03-18",
+   "ticker": "RKLB",
+   "ret": -12.31,
+   "cum": 247.89,
+   "dd": 12.31,
+   "correct": false
+  },
+  {
+   "date": "2026-03-18",
+   "ticker": "CRCL",
+   "ret": -29.49,
+   "cum": 218.4,
+   "dd": 41.8,
+   "correct": false
+  },
+  {
+   "date": "2026-03-19",
+   "ticker": "QCOM",
+   "ret": -3.21,
+   "cum": 215.19,
+   "dd": 45.01,
+   "correct": false
+  },
+  {
+   "date": "2026-03-19",
+   "ticker": "NVDA",
+   "ret": 7.5,
+   "cum": 222.69,
+   "dd": 37.51,
+   "correct": true
+  },
+  {
+   "date": "2026-03-19",
+   "ticker": "MSFT",
+   "ret": 7.73,
+   "cum": 230.42,
+   "dd": 29.78,
+   "correct": true
+  },
+  {
+   "date": "2026-03-19",
+   "ticker": "TSLA",
+   "ret": 6.58,
+   "cum": 237.0,
+   "dd": 23.2,
+   "correct": true
+  },
+  {
+   "date": "2026-03-19",
+   "ticker": "VKTX",
+   "ret": 11.79,
+   "cum": 248.79,
+   "dd": 11.41,
+   "correct": true
+  },
+  {
+   "date": "2026-03-19",
+   "ticker": "META",
+   "ret": 11.59,
+   "cum": 260.38,
+   "dd": 0.0,
+   "correct": true
+  },
+  {
+   "date": "2026-03-19",
+   "ticker": "BILI",
+   "ret": -13.69,
+   "cum": 246.69,
+   "dd": 13.69,
+   "correct": false
+  },
+  {
+   "date": "2026-03-19",
+   "ticker": "AMZN",
+   "ret": 3.74,
+   "cum": 250.43,
+   "dd": 9.95,
+   "correct": true
+  },
+  {
+   "date": "2026-03-19",
+   "ticker": "RKLB",
+   "ret": -20.23,
+   "cum": 230.2,
+   "dd": 30.18,
+   "correct": false
+  },
+  {
+   "date": "2026-03-19",
+   "ticker": "CRCL",
+   "ret": -29.94,
+   "cum": 200.26,
+   "dd": 60.11,
+   "correct": false
   }
  ],
  "swarm_divergence": {
   "BILI": {
-   "std": 1.92,
-   "spread": 5.2,
+   "std": 1.37,
+   "spread": 4.4,
    "consensus": 57.0,
    "votes": {
     "bullish": 4,
@@ -3456,32 +3729,32 @@
    "bees": [
     {
      "name": "Scout",
-     "score": 6.3,
+     "score": 5.9,
      "dir": "bull"
     },
     {
      "name": "Rival",
-     "score": 6.6,
+     "score": 6.1,
      "dir": "bull"
     },
     {
      "name": "Oracle",
-     "score": 8.2,
+     "score": 6.7,
      "dir": "bull"
     },
     {
      "name": "Chronos",
-     "score": 3.9,
+     "score": 5.5,
      "dir": "neut"
     },
     {
      "name": "Buzz",
-     "score": 3.9,
+     "score": 4.3,
      "dir": "bear"
     },
     {
      "name": "Guard",
-     "score": 7.9,
+     "score": 7.4,
      "dir": "bull"
     },
     {
@@ -3491,197 +3764,9 @@
     }
    ]
   },
-  "META": {
-   "std": 1.97,
-   "spread": 4.7,
-   "consensus": 86.0,
-   "votes": {
-    "bullish": 0,
-    "bearish": 6,
-    "neutral": 1
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 2.5,
-     "dir": "bear"
-    },
-    {
-     "name": "Rival",
-     "score": 6.9,
-     "dir": "bear"
-    },
-    {
-     "name": "Oracle",
-     "score": 3.2,
-     "dir": "bear"
-    },
-    {
-     "name": "Chronos",
-     "score": 7.3,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 3.2,
-     "dir": "bear"
-    },
-    {
-     "name": "Guard",
-     "score": 6.2,
-     "dir": "bear"
-    },
-    {
-     "name": "Bear",
-     "score": 2.5,
-     "dir": "bear"
-    }
-   ]
-  },
-  "MSFT": {
-   "std": 1.88,
-   "spread": 4.9,
-   "consensus": 43.0,
-   "votes": {
-    "bullish": 3,
-    "bearish": 2,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 5.1,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 6.9,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 7.2,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 6.9,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 4.0,
-     "dir": "bear"
-    },
-    {
-     "name": "Guard",
-     "score": 2.3,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 2.9,
-     "dir": "bear"
-    }
-   ]
-  },
-  "RKLB": {
-   "std": 2.33,
-   "spread": 7.1,
-   "consensus": 43.0,
-   "votes": {
-    "bullish": 2,
-    "bearish": 3,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 3.8,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 6.5,
-     "dir": "bear"
-    },
-    {
-     "name": "Oracle",
-     "score": 9.1,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 5.5,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 3.4,
-     "dir": "bear"
-    },
-    {
-     "name": "Guard",
-     "score": 2.5,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 2.1,
-     "dir": "bear"
-    }
-   ]
-  },
-  "QCOM": {
-   "std": 1.52,
-   "spread": 4.3,
-   "consensus": 43.0,
-   "votes": {
-    "bullish": 2,
-    "bearish": 3,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 5.5,
-     "dir": "bull"
-    },
-    {
-     "name": "Rival",
-     "score": 7.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 3.4,
-     "dir": "bear"
-    },
-    {
-     "name": "Chronos",
-     "score": 6.3,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 3.7,
-     "dir": "bear"
-    },
-    {
-     "name": "Guard",
-     "score": 2.7,
-     "dir": "neut"
-    },
-    {
-     "name": "Bear",
-     "score": 3.8,
-     "dir": "bear"
-    }
-   ]
-  },
-  "VKTX": {
-   "std": 1.38,
-   "spread": 4.2,
+  "AMZN": {
+   "std": 2.02,
+   "spread": 6.6,
    "consensus": 43.0,
    "votes": {
     "bullish": 3,
@@ -3691,27 +3776,74 @@
    "bees": [
     {
      "name": "Scout",
-     "score": 3.6,
+     "score": 3.8,
      "dir": "neut"
     },
     {
      "name": "Rival",
-     "score": 6.7,
+     "score": 6.0,
      "dir": "bull"
     },
     {
      "name": "Oracle",
-     "score": 4.5,
+     "score": 8.9,
      "dir": "bull"
     },
     {
      "name": "Chronos",
-     "score": 5.5,
+     "score": 6.9,
      "dir": "neut"
     },
     {
      "name": "Buzz",
-     "score": 4.7,
+     "score": 4.9,
+     "dir": "neut"
+    },
+    {
+     "name": "Guard",
+     "score": 4.4,
+     "dir": "bull"
+    },
+    {
+     "name": "Bear",
+     "score": 2.2,
+     "dir": "bear"
+    }
+   ]
+  },
+  "MSFT": {
+   "std": 1.69,
+   "spread": 4.7,
+   "consensus": 43.0,
+   "votes": {
+    "bullish": 3,
+    "bearish": 1,
+    "neutral": 3
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 4.9,
+     "dir": "neut"
+    },
+    {
+     "name": "Rival",
+     "score": 6.1,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 7.6,
+     "dir": "bull"
+    },
+    {
+     "name": "Chronos",
+     "score": 7.4,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 5.5,
      "dir": "neut"
     },
     {
@@ -3721,60 +3853,13 @@
     },
     {
      "name": "Bear",
-     "score": 2.4,
+     "score": 3.3,
      "dir": "bear"
     }
    ]
   },
-  "TSLA": {
-   "std": 2.15,
-   "spread": 6.1,
-   "consensus": 43.0,
-   "votes": {
-    "bullish": 2,
-    "bearish": 3,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 3.1,
-     "dir": "bear"
-    },
-    {
-     "name": "Rival",
-     "score": 6.8,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 5.1,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 7.7,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 3.4,
-     "dir": "bear"
-    },
-    {
-     "name": "Guard",
-     "score": 1.6,
-     "dir": "neut"
-    },
-    {
-     "name": "Bear",
-     "score": 2.1,
-     "dir": "bear"
-    }
-   ]
-  },
-  "CRCL": {
-   "std": 1.2,
+  "QCOM": {
+   "std": 1.29,
    "spread": 3.4,
    "consensus": 43.0,
    "votes": {
@@ -3785,17 +3870,64 @@
    "bees": [
     {
      "name": "Scout",
-     "score": 4.0,
+     "score": 5.8,
+     "dir": "bull"
+    },
+    {
+     "name": "Rival",
+     "score": 6.2,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 3.9,
+     "dir": "bear"
+    },
+    {
+     "name": "Chronos",
+     "score": 6.8,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 4.6,
+     "dir": "bear"
+    },
+    {
+     "name": "Guard",
+     "score": 3.4,
+     "dir": "neut"
+    },
+    {
+     "name": "Bear",
+     "score": 3.5,
+     "dir": "bear"
+    }
+   ]
+  },
+  "RKLB": {
+   "std": 2.04,
+   "spread": 6.4,
+   "consensus": 43.0,
+   "votes": {
+    "bullish": 2,
+    "bearish": 3,
+    "neutral": 2
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 3.7,
      "dir": "neut"
     },
     {
      "name": "Rival",
-     "score": 3.5,
+     "score": 6.0,
      "dir": "bear"
     },
     {
      "name": "Oracle",
-     "score": 5.4,
+     "score": 8.5,
      "dir": "bull"
     },
     {
@@ -3805,12 +3937,12 @@
     },
     {
      "name": "Buzz",
-     "score": 3.1,
+     "score": 4.3,
      "dir": "bear"
     },
     {
      "name": "Guard",
-     "score": 2.7,
+     "score": 2.6,
      "dir": "bull"
     },
     {
@@ -3820,9 +3952,9 @@
     }
    ]
   },
-  "NVDA": {
-   "std": 1.85,
-   "spread": 5.2,
+  "VKTX": {
+   "std": 2.02,
+   "spread": 6.1,
    "consensus": 43.0,
    "votes": {
     "bullish": 3,
@@ -3832,12 +3964,200 @@
    "bees": [
     {
      "name": "Scout",
-     "score": 3.0,
+     "score": 3.3,
+     "dir": "neut"
+    },
+    {
+     "name": "Rival",
+     "score": 6.0,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 7.7,
+     "dir": "bull"
+    },
+    {
+     "name": "Chronos",
+     "score": 6.0,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 4.0,
+     "dir": "bear"
+    },
+    {
+     "name": "Guard",
+     "score": 2.5,
+     "dir": "bull"
+    },
+    {
+     "name": "Bear",
+     "score": 1.6,
+     "dir": "bear"
+    }
+   ]
+  },
+  "CRCL": {
+   "std": 1.3,
+   "spread": 3.8,
+   "consensus": 57.0,
+   "votes": {
+    "bullish": 0,
+    "bearish": 4,
+    "neutral": 3
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 4.0,
+     "dir": "neut"
+    },
+    {
+     "name": "Rival",
+     "score": 6.0,
+     "dir": "bear"
+    },
+    {
+     "name": "Oracle",
+     "score": 4.4,
+     "dir": "neut"
+    },
+    {
+     "name": "Chronos",
+     "score": 5.5,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 3.2,
+     "dir": "bear"
+    },
+    {
+     "name": "Guard",
+     "score": 2.8,
+     "dir": "bear"
+    },
+    {
+     "name": "Bear",
+     "score": 2.1,
+     "dir": "bear"
+    }
+   ]
+  },
+  "META": {
+   "std": 2.1,
+   "spread": 5.9,
+   "consensus": 43.0,
+   "votes": {
+    "bullish": 3,
+    "bearish": 2,
+    "neutral": 2
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 2.9,
      "dir": "bear"
     },
     {
      "name": "Rival",
-     "score": 6.8,
+     "score": 6.1,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 6.7,
+     "dir": "bull"
+    },
+    {
+     "name": "Chronos",
+     "score": 7.8,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 4.9,
+     "dir": "neut"
+    },
+    {
+     "name": "Guard",
+     "score": 1.9,
+     "dir": "bull"
+    },
+    {
+     "name": "Bear",
+     "score": 2.6,
+     "dir": "bear"
+    }
+   ]
+  },
+  "TSLA": {
+   "std": 2.0,
+   "spread": 5.9,
+   "consensus": 57.0,
+   "votes": {
+    "bullish": 1,
+    "bearish": 4,
+    "neutral": 2
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 2.9,
+     "dir": "bear"
+    },
+    {
+     "name": "Rival",
+     "score": 6.0,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 4.3,
+     "dir": "bear"
+    },
+    {
+     "name": "Chronos",
+     "score": 7.7,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 5.1,
+     "dir": "neut"
+    },
+    {
+     "name": "Guard",
+     "score": 1.8,
+     "dir": "bear"
+    },
+    {
+     "name": "Bear",
+     "score": 2.0,
+     "dir": "bear"
+    }
+   ]
+  },
+  "NVDA": {
+   "std": 1.86,
+   "spread": 4.8,
+   "consensus": 43.0,
+   "votes": {
+    "bullish": 3,
+    "bearish": 2,
+    "neutral": 2
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 2.5,
+     "dir": "bear"
+    },
+    {
+     "name": "Rival",
+     "score": 6.1,
      "dir": "bull"
     },
     {
@@ -3852,23 +4172,23 @@
     },
     {
      "name": "Buzz",
-     "score": 4.7,
+     "score": 5.0,
      "dir": "neut"
     },
     {
      "name": "Guard",
-     "score": 1.6,
+     "score": 1.5,
      "dir": "bull"
     },
     {
      "name": "Bear",
-     "score": 2.1,
+     "score": 1.8,
      "dir": "bear"
     }
    ]
   }
  },
- "_generated_at": "2026-03-27 17:45 PDT",
- "_date": "2026-03-27",
- "_deploy_ts": 1774658759
+ "_generated_at": "2026-03-30 14:02 PDT",
+ "_date": "2026-03-30",
+ "_deploy_ts": 1774904555
 }
