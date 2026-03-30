@@ -27,7 +27,10 @@ from pathlib import Path
 # ── 路径 ─────────────────────────────────────────────────────────────────────
 ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
 _VM_PATH = Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
-if _VM_PATH.exists():
+_VM_PATH2 = Path("/sessions/amazing-clever-albattani/mnt/Alpha Hive")
+if _VM_PATH2.exists():
+    ALPHAHIVE_DIR = _VM_PATH2
+elif _VM_PATH.exists():
     ALPHAHIVE_DIR = _VM_PATH
 
 

@@ -668,3 +668,82 @@ def render_gex_profile_chart(
     except Exception as e:
         print(f"[chart_engine] render_gex_profile_chart failed: {e}")
         return None
+
+
+def render_deep_skew_chart(
+    data: dict,
+    ticker: str,
+    date_str: str,
+) -> Optional[str]:
+    """
+    生成 IV Skew 对比柱状图（OTM Put IV vs ATM IV vs OTM Call IV），返回 base64 PNG。
+    数据来源：oracle_bee.details.deep_skew（格式：{skew_25d, otm_put_iv, otm_call_iv}）
+    或 oracle_bee.details 顶层 iv_current + iv_skew_detail。
+    """
+    try:
+        plt, mpatches, fm = _get_mpl()
+        oracle = (data.get("swarm_results", {})
+                      .get("agent_details", {})
+                      .get("OracleBeeEcho", {}))
+        if isinstance(oracle, str):
+            return None
+        details = oracle.get("details", {})
+        if isinstance(details, str):
+            return None
+
+        ds = details.get("deep_skew", {}) or {}
+        skew_detail = details.get("iv_skew_detail", {}) or {}
+
+        # 提取三个 IV 点：OTM Put / ATM / OTM Call
+        otm_put_iv  = float(ds.get("otm_put_iv") or skew_detail.get("otm_put_iv") or 0)
+        otm_call_iv = float(ds.get("otm_call_iv") or skew_detail.get("otm_call_iv") or 0)
+        atm_iv      = float(details.get("iv_current", 0) or 0)
+        skew_25d    = ds.get("skew_25d") or details.get("iv_skew_ratio")
+
+        if not (otm_put_iv and otm_call_iv and atm_iv):
+            return None
+
+        labels = ["OTM Put\n(25Δ)", "ATM\n(50Δ)", "OTM Call\n(25Δ)"]
+        ivs = [otm_put_iv, atm_iv, otm_call_iv]
+        colors = [_RED, _GOLD, _GREEN]
+
+        fig, ax = plt.subplots(figsize=(7, 4), facecolor=_BG)
+        ax.set_facecolor(_CARD)
+        for sp in ax.spines.values():
+            sp.set_edgecolor("#30363d")
+
+        bars = ax.bar(labels, ivs, color=colors, alpha=0.85, width=0.5, zorder=3,
+                      edgecolor="white", linewidth=0.8)
+        for bar, iv in zip(bars, ivs):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+                    f"{iv:.1f}%", ha="center", fontsize=10, fontweight="bold",
+                    color=_T1)
+
+        # Skew ratio 标注
+        if skew_25d:
+            try:
+                skew_f = float(skew_25d)
+                skew_col = _RED if skew_f > 1.15 else (_GREEN if skew_f < 0.9 else _GOLD)
+                skew_label = "恐慌对冲" if skew_f > 1.15 else ("看涨溢价" if skew_f < 0.9 else "正常")
+                ax.text(0.98, 0.95, f"Skew 25Δ: {skew_f:.3f} ({skew_label})",
+                        transform=ax.transAxes, ha="right", va="top",
+                        fontsize=9, color=skew_col, fontweight="bold")
+            except (TypeError, ValueError):
+                pass
+
+        ax.set_ylabel("Implied Volatility (%)", fontsize=9, color=_T3)
+        ax.tick_params(colors=_T3, labelsize=9)
+        ax.grid(axis="y", color="#30363d", lw=0.5, alpha=0.5)
+        ax.set_ylim(0, max(ivs) * 1.2)
+
+        fig.text(0.5, 0.97,
+                 f"{ticker}  ·  IV Skew Structure  ·  {date_str}",
+                 ha="center", va="top", fontsize=12, fontweight="bold", color=_T1)
+        fig.text(0.5, 0.92,
+                 "红=OTM Put IV（下行保护溢价）  金=ATM IV  绿=OTM Call IV",
+                 ha="center", va="top", fontsize=8, color=_T3)
+
+        return _fig_to_b64(fig)
+    except Exception as e:
+        print(f"[chart_engine] render_deep_skew_chart failed: {e}")
+        return None

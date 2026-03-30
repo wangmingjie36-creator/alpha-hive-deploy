@@ -974,6 +974,47 @@ AGENT_SCORING = {
     "score_max": 10.0,
 }
 
+# ==================== v15.0 评分引擎升级配置 ====================
+
+# 升级 2: 置信度幂次衰减（替代原 min(1.0, conf*2) 线性公式）
+CONFIDENCE_WEIGHTING = {
+    "exponent": 1.5,   # 幂次：越大惩罚越重（1.0=线性, 2.0=二次方）
+    "floor": 0.3,      # 最低有效权重（防止完全忽略某维度）
+}
+
+# 升级 3: Fear & Greed 政体评分调整
+FEAR_GREED_SCORING = {
+    "extreme_fear": 25,          # F&G 值低于此 = 极度恐惧
+    "extreme_greed": 75,         # F&G 值高于此 = 极度贪婪
+    "fear_bearish_boost": 0.3,   # 恐惧 + 看空 → 加分
+    "fear_bullish_penalty": 0.4, # 恐惧 + 看多 → 惩罚（别抄底）
+    "greed_bullish_penalty": 0.3,# 贪婪 + 看多 → 惩罚（别追高）
+    "greed_bearish_boost": 0.2,  # 贪婪 + 看空 → 加分（逆向机会）
+}
+
+# 升级 4: 看多不对称门槛（看多需要更强共识，因历史看多胜率仅 46.8%）
+BULLISH_GATE_CONFIG = {
+    "min_weight_pct": 0.50,          # 加权投票占比（原 0.40）
+    "min_agents": 3,                  # 最少 Agent 数（原 2）
+    "extreme_greed_threshold": 75,    # F&G > 75 时进一步加严
+    "extreme_greed_weight_pct": 0.60, # 极度贪婪时看多需要 60% 票
+}
+
+# 升级 5: 历史胜率反馈折扣（低胜率标的分数压缩向中性）
+TICKER_ACCURACY_FEEDBACK = {
+    "enabled": True,
+    "min_samples": 5,           # 需要 5+ 笔 T+7 验证才启用
+    "discount_threshold": 0.50, # 胜率低于 50% 触发折扣
+    "min_reliability": 0.5,     # 最低可靠性系数（BILI 33% → 0.66）
+}
+
+# 升级 6: 方向惯性平滑（减少无效翻转）
+DIRECTION_STABILITY = {
+    "enabled": True,
+    "inertia_bonus": 0.1,      # 窄边际时昨日方向加权
+    "narrow_margin": 0.15,     # 投票边际 < 15% 视为窄边际
+}
+
 # ==================== 情绪关键词（统一词库，newsapi + finviz 共用）====================
 SENTIMENT_KEYWORDS = {
     "bullish": {
@@ -1045,6 +1086,18 @@ ML_FEEDBACK_CONFIG = {
     "max_adjustment": 2.0,          # 维度调整因子上限
     "enable_dimension_weighting": True,   # 是否启用维度权重调整
     "enable_vote_boosting": True,         # 是否启用 Agent 投票置信度调整
+}
+
+# ==================== ML HGB 树模型配置（v15.0 替代 SGD）====================
+ML_HGBC_CONFIG = {
+    "max_iter": 200,              # 最大迭代轮数
+    "max_depth": 4,               # 树深度（防过拟合，小样本用 3-4）
+    "learning_rate": 0.05,        # 学习率（越小越稳，需更多轮数）
+    "min_samples_leaf": 5,        # 叶节点最少样本（防止稀疏分裂）
+    "l2_regularization": 1.0,     # L2 正则化（强正则防过拟合）
+    "max_features": 0.8,          # 特征子采样 80%（每棵树只看 80% 特征）
+    "validation_fraction": 0.15,  # 验证集比例（early stopping 用）
+    "n_iter_no_change": 15,       # 连续 15 轮无改善则停止
 }
 
 # ==================== ML 真实数据训练配置 ====================

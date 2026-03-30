@@ -287,6 +287,14 @@ transition-duration:.01ms!important;scroll-behavior:auto!important}
 .acc-kpi{background:var(--surface2);border-radius:12px;padding:16px 12px;text-align:center;border:1px solid rgba(102,126,234,.12)}
 .acc-kpi .kv{font-size:1.8em;font-weight:800;color:var(--tp)}
 .acc-kpi .kl{font-size:.75em;color:var(--ts);margin-top:2px}
+.acc-dir-kpi-row{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px}
+.acc-dir-kpi{border-radius:12px;padding:14px 16px;border:1px solid;text-align:center}
+.dkpi-label{font-size:.78em;font-weight:700;letter-spacing:.04em;text-transform:uppercase;margin-bottom:6px}
+.dkpi-row{display:flex;align-items:baseline;justify-content:center;gap:8px}
+.dkpi-val{font-size:1.9em;font-weight:800;color:var(--tp);line-height:1}
+.dkpi-sub{font-size:.72em;color:var(--ts)}
+.dkpi-ret{font-size:.85em;font-weight:600;margin-top:4px}
+@media(max-width:480px){.acc-dir-kpi-row{grid-template-columns:repeat(3,1fr);gap:8px}.dkpi-val{font-size:1.4em}}
 .acc-two-col{display:grid;grid-template-columns:1fr 1.6fr;gap:16px;margin-bottom:16px}
 .acc-dir-box,.acc-ticker-box{background:var(--surface2);border-radius:12px;padding:18px;border:1px solid rgba(102,126,234,.12)}
 .acc-box-title{font-size:.85em;font-weight:600;color:var(--ts);margin-bottom:12px}
@@ -585,6 +593,33 @@ html:not(.dark) .hm-tk{background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.06)}
 .consensus-donut{width:28px;height:28px;border-radius:50%;flex-shrink:0;
   border:1px solid var(--border)}
 .consensus-labels{font-size:.68em;color:var(--ts);line-height:1.3}
+/* ── Equity Curve 权益曲线 ── */
+.eq-section{margin-top:16px}
+.eq-wrap{position:relative;height:220px}
+.eq-stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px}
+.eq-stat{background:var(--surface2);border:1px solid var(--border);border-radius:10px;
+  padding:8px 14px;font-size:.82em;display:flex;flex-direction:column;align-items:center;gap:2px}
+.eq-stat .ev{font-size:1.2em;font-weight:800;color:var(--tp)}.eq-stat .el{font-size:.72em;color:var(--ts)}
+.eq-cold{text-align:center;padding:30px 20px;color:var(--ts);font-size:.9em}
+/* ── Swarm Divergence 蜂群分歧度 ── */
+.sdiv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:14px;margin-top:12px}
+.sdiv-card{background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:14px;transition:border-color .2s}
+.sdiv-card:hover{border-color:var(--acc2)}
+.sdiv-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.sdiv-tk{font-weight:900;font-size:1.05em;color:var(--tp)}
+.sdiv-consensus{font-size:.78em;font-weight:700;padding:2px 10px;border-radius:12px}
+.sdiv-high{background:rgba(34,197,94,.12);color:var(--bull)}
+.sdiv-med{background:rgba(245,158,11,.12);color:var(--neut)}
+.sdiv-low{background:rgba(239,68,68,.12);color:var(--bear)}
+.sdiv-bees{display:flex;gap:3px;align-items:flex-end;height:60px;margin:6px 0}
+.sdiv-bee{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px}
+.sdiv-bar{width:100%;min-height:4px;border-radius:3px 3px 0 0;transition:height .4s}
+.sdiv-bar-b{background:var(--bull)}.sdiv-bar-n{background:var(--neut)}.sdiv-bar-e{background:var(--bear)}
+.sdiv-bee-name{font-size:.6em;color:var(--ts);text-align:center;line-height:1}
+.sdiv-bee-score{font-size:.65em;font-weight:700;color:var(--tp)}
+.sdiv-meta{display:flex;gap:10px;font-size:.72em;color:var(--ts);margin-top:6px;flex-wrap:wrap}
+.sdiv-meta span{display:flex;align-items:center;gap:3px}
+.sdiv-dot{width:7px;height:7px;border-radius:50%;display:inline-block}
 /* ── 升级 E2: 手机底部导航栏 ── */
 .bottom-nav{display:none;position:fixed;bottom:0;left:0;right:0;z-index:998;
   background:rgba(10,15,28,.98);backdrop-filter:blur(10px);

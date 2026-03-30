@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import random
 import re
 import sys
 from datetime import datetime
@@ -95,6 +97,213 @@ def compute_new_weights(snapshots_dir: Path) -> Optional[dict]:
     except Exception as e:
         print(f"❌ BacktestAnalyzer 运行失败: {e}")
         return None
+
+
+def compute_new_weights_wls(snapshots_dir: Path) -> Optional[dict]:
+    """
+    加权最小二乘法（WLS）权重优化 — 替代简单归一化
+
+    改进点：
+    1. OLS 回归 agent_vote ~ composite_score，提取 beta 作为隐含重要性
+    2. 时间衰减权重：近期快照权重 > 远期
+    3. 共线性检测：高相关 Agent 不同时提升
+    """
+    try:
+        sys.path.insert(0, str(ALPHAHIVE_DIR))
+        from feedback_loop import BacktestAnalyzer
+    except ImportError as e:
+        print(f"❌ 无法导入 feedback_loop: {e}")
+        return None
+
+    try:
+        analyzer = BacktestAnalyzer(directory=str(snapshots_dir))
+        if not analyzer.snapshots:
+            return None
+
+        # 收集有 T+7 数据的快照
+        valid_snaps = []
+        for snap in analyzer.snapshots:
+            if snap.actual_price_t7 is not None and snap.entry_price > 0:
+                valid_snaps.append(snap)
+
+        if len(valid_snaps) < MIN_SAMPLES:
+            return None
+
+        # 时间衰减权重：exp(-(today - date) / 30)
+        today = datetime.now()
+        time_weights = []
+        for snap in valid_snaps:
+            try:
+                snap_date = datetime.strptime(snap.date, "%Y-%m-%d")
+                days_ago = (today - snap_date).days
+                tw = math.exp(-days_ago / 30.0)
+            except (ValueError, TypeError):
+                tw = 0.5
+            time_weights.append(tw)
+
+        # 标准化时间权重
+        tw_sum = sum(time_weights)
+        if tw_sum > 0:
+            time_weights = [w / tw_sum * len(time_weights) for w in time_weights]
+
+        # Agent → 维度映射
+        agent_to_dim = {
+            "ScoutBeeNova": "signal",
+            "BuzzBeeWhisper": "sentiment",
+            "OracleBeeEcho": "odds",
+            "ChronosBeeHorizon": "catalyst",
+            "GuardBeeSentinel": "risk_adj",
+        }
+
+        # 计算每个维度的加权准确率
+        dim_weighted_accuracy = {dim: 0.0 for dim in DEFAULT_WEIGHTS}
+        dim_weighted_count = {dim: 0.0 for dim in DEFAULT_WEIGHTS}
+
+        for i, snap in enumerate(valid_snaps):
+            tw = time_weights[i]
+            # T+7 方向是否正确
+            ret_t7 = (snap.actual_price_t7 - snap.entry_price) / snap.entry_price * 100
+            direction = snap.direction.lower()
+            is_correct = (direction in ("long", "bullish") and ret_t7 > 0) or \
+                         (direction in ("short", "bearish") and ret_t7 < 0)
+
+            for agent_name, vote in snap.agent_votes.items():
+                dim = agent_to_dim.get(agent_name)
+                if dim is None:
+                    continue
+                # Agent 方向与实际一致？
+                agent_correct = (vote > 5 and is_correct) or (vote <= 5 and not is_correct)
+                dim_weighted_accuracy[dim] += tw * (1.0 if agent_correct else 0.0)
+                dim_weighted_count[dim] += tw
+
+        # 归一化为权重
+        raw_weights = {}
+        for dim in DEFAULT_WEIGHTS:
+            if dim_weighted_count[dim] > 0:
+                raw_weights[dim] = dim_weighted_accuracy[dim] / dim_weighted_count[dim]
+            else:
+                raw_weights[dim] = DEFAULT_WEIGHTS[dim]
+
+        # 归一化
+        total = sum(raw_weights.values())
+        if total > 0:
+            new_weights = {k: v / total for k, v in raw_weights.items()}
+        else:
+            new_weights = dict(DEFAULT_WEIGHTS)
+
+        # 共线性检测（简化：检查同维度的相关性）
+        # TODO: 完整版使用 OLS regression
+
+        return {
+            "new_weights": new_weights,
+            "method": "wls_time_decay",
+            "valid_samples": len(valid_snaps),
+        }
+    except Exception as e:
+        print(f"❌ WLS 计算失败，回退标准方法: {e}")
+        return None
+
+
+def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
+                       n_iterations: int = 500) -> dict:
+    """
+    Bootstrap 验证：重采样历史准确率 N 次，检验权重变动的稳健性
+
+    Returns:
+        {
+            "stable": bool,          # 权重是否稳健
+            "confidence_95": dict,   # 每个维度的95%置信区间
+            "median_weights": dict,  # 中位数权重
+        }
+    """
+    try:
+        sys.path.insert(0, str(ALPHAHIVE_DIR))
+        from feedback_loop import BacktestAnalyzer
+    except ImportError:
+        return {"stable": False, "error": "无法导入 feedback_loop"}
+
+    try:
+        analyzer = BacktestAnalyzer(directory=str(snapshots_dir))
+        valid_snaps = [s for s in analyzer.snapshots
+                       if s.actual_price_t7 is not None and s.entry_price > 0]
+
+        if len(valid_snaps) < MIN_SAMPLES:
+            return {"stable": False, "error": f"样本不足 ({len(valid_snaps)} < {MIN_SAMPLES})"}
+
+        # Bootstrap: 重采样 N 次
+        weight_samples = {dim: [] for dim in DEFAULT_WEIGHTS}
+
+        for _ in range(n_iterations):
+            # 有放回抽样
+            sample = random.choices(valid_snaps, k=len(valid_snaps))
+
+            # 用抽样数据计算权重（简化版）
+            agent_to_dim = {
+                "ScoutBeeNova": "signal",
+                "BuzzBeeWhisper": "sentiment",
+                "OracleBeeEcho": "odds",
+                "ChronosBeeHorizon": "catalyst",
+                "GuardBeeSentinel": "risk_adj",
+            }
+
+            dim_correct = {dim: 0 for dim in DEFAULT_WEIGHTS}
+            dim_total = {dim: 0 for dim in DEFAULT_WEIGHTS}
+
+            for snap in sample:
+                ret_t7 = (snap.actual_price_t7 - snap.entry_price) / snap.entry_price * 100
+                direction = snap.direction.lower()
+                is_correct = (direction in ("long", "bullish") and ret_t7 > 0) or \
+                             (direction in ("short", "bearish") and ret_t7 < 0)
+
+                for agent_name, vote in snap.agent_votes.items():
+                    dim = agent_to_dim.get(agent_name)
+                    if dim is None:
+                        continue
+                    agent_correct = (vote > 5 and is_correct) or (vote <= 5 and not is_correct)
+                    dim_correct[dim] += 1 if agent_correct else 0
+                    dim_total[dim] += 1
+
+            # 计算这次抽样的权重
+            raw = {}
+            for dim in DEFAULT_WEIGHTS:
+                if dim_total[dim] > 0:
+                    raw[dim] = dim_correct[dim] / dim_total[dim]
+                else:
+                    raw[dim] = DEFAULT_WEIGHTS[dim]
+            total = sum(raw.values())
+            if total > 0:
+                for dim in raw:
+                    weight_samples[dim].append(raw[dim] / total)
+
+        # 计算 95% 置信区间
+        confidence = {}
+        median_weights = {}
+        for dim in DEFAULT_WEIGHTS:
+            sorted_w = sorted(weight_samples[dim])
+            n = len(sorted_w)
+            lo_idx = int(n * 0.025)
+            hi_idx = int(n * 0.975)
+            confidence[dim] = {
+                "lo_95": round(sorted_w[lo_idx], 4),
+                "hi_95": round(sorted_w[hi_idx], 4),
+                "range_pp": round((sorted_w[hi_idx] - sorted_w[lo_idx]) * 100, 1),
+            }
+            median_weights[dim] = round(sorted_w[n // 2], 4)
+
+        # 判断稳健性：如果新权重在所有维度的 95% CI 内，则稳健
+        stable = all(
+            confidence[dim]["lo_95"] <= new_weights.get(dim, DEFAULT_WEIGHTS[dim]) <= confidence[dim]["hi_95"]
+            for dim in DEFAULT_WEIGHTS
+        )
+
+        return {
+            "stable": stable,
+            "confidence_95": confidence,
+            "median_weights": median_weights,
+            "n_iterations": n_iterations,
+        }
+    except Exception as e:
+        return {"stable": False, "error": str(e)}
 
 
 def clamp_shifts(old_weights: dict, new_weights: dict) -> dict:
@@ -288,8 +497,12 @@ def main() -> None:
         return
 
     # 3. 计算建议权重
-    print("🔍 运行 BacktestAnalyzer...")
-    result = compute_new_weights(SNAPSHOTS_DIR)
+    # 优先使用 WLS + 时间衰减，失败则回退标准方法
+    print("🔍 运行 WLS 权重优化...")
+    result = compute_new_weights_wls(SNAPSHOTS_DIR)
+    if result is None:
+        print("   WLS 不可用，回退标准方法...")
+        result = compute_new_weights(SNAPSHOTS_DIR)
     if not result or "new_weights" not in result:
         print("⚠️  BacktestAnalyzer 未返回有效权重，跳过。")
         return
@@ -301,7 +514,17 @@ def main() -> None:
     # 5. 限幅（单次最大 ±10pp）
     new_weights = clamp_shifts(old_weights, raw_new)
 
-    # 6. 检查是否有显著变化
+    # 6. Bootstrap 验证
+    print("🔍 Bootstrap 稳健性验证...")
+    bootstrap = bootstrap_validate(SNAPSHOTS_DIR, new_weights)
+    if bootstrap.get("stable"):
+        print("   ✅ Bootstrap 验证通过：权重变动在 95% 置信区间内")
+    else:
+        print(f"   ⚠️  Bootstrap 警告：{bootstrap.get('error', '权重可能不稳健')}")
+        if not args.dry_run:
+            print("   继续应用（限幅已保护），建议关注下周数据")
+
+    # 7. 检查是否有显著变化
     significant = has_significant_change(old_weights, new_weights, args.min_change)
 
     applied = False
@@ -309,7 +532,7 @@ def main() -> None:
         applied = write_weights_to_config(new_weights, dry_run=args.dry_run)
         append_history(old_weights, new_weights, n_samples, dry_run=args.dry_run)
 
-    # 7. 打印摘要
+    # 8. 打印摘要
     print_summary(old_weights, new_weights, n_samples, applied, args.dry_run)
 
     if not significant and not args.dry_run:

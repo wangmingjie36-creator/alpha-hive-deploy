@@ -192,16 +192,41 @@ class ChronosBeeHorizon(BeeAgent):
                 from pead_analyzer import get_pead_analysis, format_pead_for_chronos
                 _pead_data = get_pead_analysis(ticker)
                 _pead_text = format_pead_for_chronos(_pead_data)
-                # PEAD 偏向对分数微调（权重 5%）
+
+                # 升级 #6: PEAD 漂移量级联动评分
+                # 根据历史漂移幅度和一致性动态调整，而非固定 ±0.3
                 _pead_bias = _pead_data.get("bias", "neutral")
+                _pead_stats = _pead_data.get("stats", {})
+                _drift_t5 = _pead_stats.get("t5", {})
+                _drift_mean = abs(_drift_t5.get("mean", 0.0)) if _drift_t5 else 0.0
+                _drift_winrate = _drift_t5.get("positive_rate", 0.5) if _drift_t5 else 0.5
+                _sample_count = _pead_data.get("sample_count", 0)
+
+                # 基础调整 = drift幅度映射（0~2% → 0.1~0.5）
+                _pead_adj = min(0.5, max(0.1, _drift_mean * 0.25))
+
+                # 一致性加成：胜率越高（偏离50%越远），信号越强
+                _consistency_bonus = max(0.0, (abs(_drift_winrate - 0.5) - 0.1) * 1.0)
+                _pead_adj += min(0.3, _consistency_bonus)
+
+                # 样本量折扣：<4 季财报 → 减半可信度
+                if _sample_count < 4:
+                    _pead_adj *= 0.5
+
+                _pead_adj = round(min(0.8, _pead_adj), 2)
+
                 if _pead_bias == "bullish":
-                    score = min(10.0, score + 0.3)
+                    score = min(10.0, score + _pead_adj)
                     if direction == "neutral":
                         direction = "bullish"
+                    _log.debug("PEAD %s: bullish +%.2f (drift=%.1f%%, winrate=%.0f%%, n=%d)",
+                               ticker, _pead_adj, _drift_mean, _drift_winrate*100, _sample_count)
                 elif _pead_bias == "bearish":
-                    score = max(0.0, score - 0.3)
+                    score = max(0.0, score - _pead_adj)
                     if direction == "neutral":
                         direction = "bearish"
+                    _log.debug("PEAD %s: bearish -%.2f (drift=%.1f%%, winrate=%.0f%%, n=%d)",
+                               ticker, _pead_adj, _drift_mean, _drift_winrate*100, _sample_count)
             except Exception as _e_pead:
                 _log.debug("PEAD analysis unavailable for %s: %s", ticker, _e_pead)
 

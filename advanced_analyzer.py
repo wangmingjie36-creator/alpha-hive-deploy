@@ -166,6 +166,110 @@ class DealerGEXAnalyzer:
         # 返回距当前价最近的 flip
         return min(flip_strikes, key=lambda k: abs(k - S))
 
+    def _calculate_flip_acceleration(
+        self, gex_profile: List[Dict], S: float, gex_flip: Optional[float]
+    ) -> Dict:
+        """
+        计算 GEX Flip 加速度 — 股价接近 flip point 时 GEX 变化速率
+
+        dGEX/dPrice 斜率越陡，穿越 flip 后波动放大越快
+        """
+        if gex_flip is None or len(gex_profile) < 3:
+            return {"acceleration": 0.0, "urgency": "low"}
+
+        sorted_profile = sorted(gex_profile, key=lambda x: x["strike"])
+
+        # 找 flip 附近的两个 strike
+        for i in range(len(sorted_profile) - 1):
+            k1 = sorted_profile[i]["strike"]
+            k2 = sorted_profile[i + 1]["strike"]
+            if k1 <= gex_flip <= k2:
+                gex1 = sorted_profile[i]["net_gex"]
+                gex2 = sorted_profile[i + 1]["net_gex"]
+                dk = k2 - k1
+                if dk > 0:
+                    slope = (gex2 - gex1) / dk  # dGEX/dPrice
+                    distance_pct = abs(S - gex_flip) / S * 100
+
+                    if abs(slope) > 0.1 and distance_pct < 2:
+                        urgency = "critical"
+                    elif abs(slope) > 0.05 and distance_pct < 5:
+                        urgency = "high"
+                    elif distance_pct < 10:
+                        urgency = "medium"
+                    else:
+                        urgency = "low"
+
+                    return {
+                        "acceleration": round(slope, 6),
+                        "distance_to_flip_pct": round(distance_pct, 2),
+                        "urgency": urgency,
+                    }
+                break
+
+        return {"acceleration": 0.0, "urgency": "low"}
+
+    def _vanna_stress_test(
+        self, calls: List[Dict], puts: List[Dict], S: float,
+        vol_shock: float = 0.05, total_gex: float = 0.0
+    ) -> Dict:
+        """
+        Vanna 压力测试：当 IV 突变 vol_shock 时，GEX 如何变化
+
+        Vanna = dDelta/dVol = dVega/dSpot
+        在 vol 飙升时，Vanna 可以翻转 GEX 的符号
+
+        Args:
+            vol_shock: IV 变动幅度（默认 +5%）
+        """
+        def _bs_vanna(S, K, T, r, sigma):
+            """Vanna = -e^(-d1²/2) * d2 / (S * sigma * sqrt(T) * sqrt(2π))"""
+            if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+                return 0.0
+            try:
+                d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
+                d2 = d1 - sigma * math.sqrt(T)
+                return -math.exp(-0.5 * d1 ** 2) * d2 / (S * sigma * math.sqrt(T) * math.sqrt(2 * math.pi))
+            except (ValueError, ZeroDivisionError):
+                return 0.0
+
+        r = self.RISK_FREE_RATE
+        total_vanna_impact = 0.0
+        strike_impacts = []
+
+        for contracts, sign in [(calls, +1.0), (puts, -1.0)]:
+            for c in contracts:
+                K = float(c.get("strike", 0) or 0)
+                dte = float(c.get("dte", 30) or 30)
+                sigma = float(c.get("impliedVolatility", 0) or 0)
+                oi = float(c.get("openInterest", 0) or 0)
+                T = max(dte, 0.5) / 365.0
+
+                if K <= 0 or sigma < 0.01 or oi == 0:
+                    continue
+
+                vanna = _bs_vanna(S, K, T, r, sigma)
+                # Vanna impact on GEX when vol changes by vol_shock
+                impact = sign * S * 100 * vanna * oi * vol_shock / 1e6
+                total_vanna_impact += impact
+
+                if abs(impact) > 0.01:
+                    strike_impacts.append({"strike": K, "vanna_gex_delta": round(impact, 4)})
+
+        # 排序找最受影响的行权价
+        strike_impacts.sort(key=lambda x: abs(x["vanna_gex_delta"]), reverse=True)
+
+        return {
+            "vol_shock": vol_shock,
+            "total_vanna_gex_shift": round(total_vanna_impact, 4),
+            "can_flip_gex": abs(total_vanna_impact) > abs(total_gex) * 0.5 if total_gex != 0 else False,
+            "top_affected_strikes": strike_impacts[:5],
+            "interpretation": (
+                f"IV+{vol_shock*100:.0f}%时GEX将变动{total_vanna_impact:+.2f}M$ — "
+                + ("可能翻转GEX符号⚠️" if abs(total_vanna_impact) > 1.0 else "影响有限")
+            ),
+        }
+
     # ── 公开接口 ──────────────────────────────────────────────────
 
     def analyze(self, ticker: str, stock_price: float) -> Dict:
@@ -219,6 +323,7 @@ class DealerGEXAnalyzer:
             })
 
         total_gex = round(sum(p["net_gex"] for p in profile), 4)
+        total_oi = sum(float(c.get("openInterest", 0) or 0) for c in calls_raw + puts_raw)
 
         # GEX walls（最大吸引力行权价）
         call_walls = sorted(profile, key=lambda x: x["call_gex"], reverse=True)
@@ -228,6 +333,12 @@ class DealerGEXAnalyzer:
 
         # GEX flip point
         gex_flip = self._find_gex_flip(profile, S)
+
+        # Flip 加速度
+        flip_accel = self._calculate_flip_acceleration(profile, S, gex_flip)
+
+        # Vanna 压力测试（传入 total_gex 用于判断是否可翻转）
+        vanna_stress = self._vanna_stress_test(calls, puts, S, total_gex=total_gex)
 
         # 机制判断
         regime = "positive_gex" if total_gex >= 0 else "negative_gex"
@@ -240,6 +351,7 @@ class DealerGEXAnalyzer:
             "ticker":            ticker,
             "stock_price":       S,
             "total_gex":         total_gex,
+            "gex_normalized_pct": round(total_gex / (S * total_oi / 1e6) * 100, 4) if total_oi > 0 else 0.0,
             "regime":            regime,
             "gex_flip":          gex_flip,
             "largest_call_wall": largest_call_wall,
@@ -248,6 +360,8 @@ class DealerGEXAnalyzer:
             "call_strikes":      len(call_gex),
             "put_strikes":       len(put_gex),
             "gamma_source":      "bs_computed",
+            "flip_acceleration": flip_accel,
+            "vanna_stress":      vanna_stress,
         }
 
 

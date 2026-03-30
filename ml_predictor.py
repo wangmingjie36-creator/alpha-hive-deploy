@@ -897,25 +897,52 @@ def build_training_data_from_db(
             # 使用 backtester 的方向感知正确性标记（非简单 return>0）
             is_correct = bool(r["correct_t7"]) if r["correct_t7"] is not None else (return_t7 > 0)
 
+            # 修复死特征：从 dimension_scores 推导真实信号
+            _sig = ds.get("signal", 5.0)
+            _cat = ds.get("catalyst", 5.0)
+            _sent = ds.get("sentiment", 5.0)
+            _odds = ds.get("odds", 5.0)
+            _risk = ds.get("risk_adj", 5.0)
+
+            # momentum: 信号强度偏离中性的方向 × 幅度（正=看多动量，负=看空动量）
+            _momentum = (_sig - 5.0) * 2.0 + (_sent - 5.0) * 1.5
+
+            # volatility: risk_adj 低 → 高风险 → 高波动（反转映射）
+            _vol = max(1.0, (10.0 - _risk) * 2.5)
+
+            # iv_rank: 优先 DB 真实值，否则从 odds 维度推导
+            try:
+                _iv_db = float(r["iv_rank"]) if r["iv_rank"] is not None else None
+            except (ValueError, TypeError):
+                _iv_db = None
+            _iv = _iv_db if (_iv_db is not None and _iv_db != 50.0) else _odds * 10.0
+
+            # put_call_ratio: 优先 DB 真实值，否则从 odds 方向推导
+            try:
+                _pc_db = float(r["put_call_ratio"]) if r["put_call_ratio"] is not None else None
+            except (ValueError, TypeError):
+                _pc_db = None
+            _pc = _pc_db if (_pc_db is not None and _pc_db != 1.0) else (0.6 + (10.0 - _odds) * 0.15)
+
             result.append(TrainingData(
                 ticker=r["ticker"],
                 date=r["date"],
-                crowding_score=ds.get("signal", 5.0) * 10,
-                catalyst_quality=_cat_qual(ds.get("catalyst", 5.0)),
-                momentum_5d=0.0,
-                volatility=5.0,
-                market_sentiment=(ds.get("sentiment", 5.0) - 5) * 20,
+                crowding_score=_sig * 10,
+                catalyst_quality=_cat_qual(_cat),
+                momentum_5d=round(_momentum, 2),
+                volatility=round(_vol, 2),
+                market_sentiment=(_sent - 5) * 20,
                 actual_return_3d=return_t7 * 0.4,
                 actual_return_7d=return_t7,
                 actual_return_30d=return_t7 * 2.5,
                 win_3d=is_correct,
                 win_7d=is_correct,
                 win_30d=is_correct,
-                iv_rank=float(r["iv_rank"]) if r["iv_rank"] is not None else 50.0,
-                put_call_ratio=float(r["put_call_ratio"]) if r["put_call_ratio"] is not None else 1.0,
+                iv_rank=round(_iv, 2),
+                put_call_ratio=round(_pc, 2),
                 final_score=float(r["final_score"]) if r["final_score"] is not None else 5.0,
-                odds_score=ds.get("odds", 5.0),
-                risk_adj_score=ds.get("risk_adj", 5.0),
+                odds_score=_odds,
+                risk_adj_score=_risk,
                 agent_agreement=_agree,
                 direction_encoded=direction_map.get(_dir, 0.0),
             ))
@@ -927,10 +954,300 @@ def build_training_data_from_db(
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  HGBModel — HistGradientBoosting 树模型（sklearn 内置 LightGBM 等价物）
+#  v15.0 升级：替代 SGDMLModel，捕捉非线性特征交互，内置 early stopping
+# ═══════════════════════════════════════════════════════════════════════════
+
+class HGBModel:
+    """
+    sklearn HistGradientBoostingClassifier（LightGBM 等价物，无需额外安装）。
+
+    优于 SGDMLModel 的地方：
+    - 非线性特征交互（树分裂 vs 超平面）
+    - 内置 early stopping（防过拟合）
+    - 自动处理缺失值和异常值
+    - 特征重要性基于信息增益（vs SGD 系数绝对值）
+    """
+
+    def __init__(self):
+        from sklearn.ensemble import HistGradientBoostingClassifier
+
+        try:
+            from config import ML_HGBC_CONFIG as _cfg
+        except (ImportError, AttributeError):
+            _cfg = {}
+
+        self._clf = HistGradientBoostingClassifier(
+            max_iter=_cfg.get("max_iter", 200),
+            max_depth=_cfg.get("max_depth", 4),
+            learning_rate=_cfg.get("learning_rate", 0.05),
+            min_samples_leaf=_cfg.get("min_samples_leaf", 5),
+            l2_regularization=_cfg.get("l2_regularization", 1.0),
+            max_features=_cfg.get("max_features", 0.8),
+            early_stopping=True,
+            validation_fraction=_cfg.get("validation_fraction", 0.15),
+            n_iter_no_change=_cfg.get("n_iter_no_change", 15),
+            random_state=42,
+        )
+        self._fitted = False
+        self._n_samples_seen = 0
+
+        # 兼容 SimpleMLModel / SGDMLModel 接口
+        self.is_trained = False
+        self.training_accuracy = 0.0
+        self.feature_stats = {}
+
+    @property
+    def weights(self) -> dict:
+        """特征重要性（permutation importance）"""
+        n = len(FEATURE_NAMES)
+        uniform = 1.0 / n
+        if not self._fitted or not hasattr(self, "_perm_importance"):
+            return dict(zip(FEATURE_NAMES, [uniform] * n))
+        imp = self._perm_importance
+        if len(imp) != n:
+            return dict(zip(FEATURE_NAMES, [uniform] * n))
+        total = sum(abs(v) for v in imp)
+        if total == 0:
+            return dict(zip(FEATURE_NAMES, [uniform] * n))
+        return {name: abs(float(imp[i])) / total for i, name in enumerate(FEATURE_NAMES)}
+
+    @weights.setter
+    def weights(self, value):
+        pass  # 树模型权重由 feature_importances_ 驱动
+
+    # ---- 训练 ----
+    def train(self, training_data: List[TrainingData]) -> Dict:
+        """全量训练（含类别平衡 + early stopping）"""
+        import numpy as np
+
+        if len(training_data) < 2:
+            _log.warning("HGB 训练样本不足 (%d)，跳过", len(training_data))
+            return {"status": "error", "message": "need >= 2 samples"}
+
+        X = np.array([_extract_features(d) for d in training_data], dtype=np.float64)
+        y = np.array([1 if d.win_7d else 0 for d in training_data])
+
+        # 类别平衡：用 sample_weight 补偿不均匀
+        from collections import Counter
+        counts = Counter(y.tolist())
+        total_n = len(y)
+        sample_weights = np.array([total_n / (2 * counts[yi]) for yi in y])
+
+        # 样本量极小时关闭 early stopping（需要 ≥20 条验证集）
+        if len(training_data) < 30:
+            self._clf.set_params(early_stopping=False)
+        else:
+            self._clf.set_params(early_stopping=True)
+
+        self._clf.fit(X, y, sample_weight=sample_weights)
+        self._fitted = True
+        self._n_samples_seen = len(training_data)
+
+        # 特征统计
+        self.feature_stats = {
+            name: {
+                "min": float(X[:, i].min()),
+                "max": float(X[:, i].max()),
+                "mean": float(X[:, i].mean()),
+            }
+            for i, name in enumerate(FEATURE_NAMES)
+        }
+
+        # 训练准确率
+        preds = self._clf.predict(X)
+        self.training_accuracy = float((preds == y).mean() * 100)
+        self.is_trained = True
+
+        # Permutation importance（sklearn HGBC 无 feature_importances_）
+        self._perm_importance = [0.0] * len(FEATURE_NAMES)
+        try:
+            from sklearn.inspection import permutation_importance as _pi
+            _perm = _pi(self._clf, X, y, n_repeats=5, random_state=42, n_jobs=1)
+            self._perm_importance = _perm.importances_mean.tolist()
+        except Exception as _e_pi:
+            _log.debug("Permutation importance 计算失败: %s", _e_pi)
+
+        _n_iter = getattr(self._clf, "n_iter_", 0)
+        _log.info(
+            "HGB 训练完成：%d 样本，%d 轮迭代，准确率 %.1f%%，Top 特征 %s",
+            len(training_data), _n_iter, self.training_accuracy,
+            sorted(self.weights.items(), key=lambda x: x[1], reverse=True)[:3],
+        )
+
+        return {
+            "status": "success",
+            "samples": len(training_data),
+            "accuracy": self.training_accuracy,
+            "weights": self.weights,
+            "n_iter": _n_iter,
+        }
+
+    def incremental_train(self, new_data: List[TrainingData]) -> Dict:
+        """增量训练：树模型不支持真正的增量学习，降级为全量重训"""
+        if not new_data:
+            return {"status": "skip", "message": "no new data"}
+        # 树模型的 warm_start 需要完整数据集（不像 SGD 的 partial_fit）
+        # 正确做法：从 DB 拉全量数据重训
+        try:
+            all_data = build_training_data_from_db()
+            if all_data and len(all_data) >= 2:
+                result = self.train(all_data)
+                result["incremental_note"] = "tree model: full retrain with DB data"
+                return result
+        except Exception as e:
+            _log.warning("HGB incremental_train 全量重训失败: %s", e)
+        return {"status": "fallback", "message": "incremental retrain failed"}
+
+    # ---- 预测 ----
+    def predict_probability(self, data: TrainingData) -> float:
+        """预测赚钱概率 (0~1)，含小样本校准"""
+        import numpy as np
+
+        if not self._fitted:
+            return 0.5
+
+        X = np.array([_extract_features(data)], dtype=np.float64)
+        prob = self._clf.predict_proba(X)[0]
+        raw_prob = float(prob[1]) if len(prob) > 1 else float(prob[0])
+
+        # 小样本校准（与 SGDMLModel 一致）
+        MIN_CONFIDENT = 100
+        confidence_ratio = min(self._n_samples_seen / MIN_CONFIDENT, 1.0)
+        calibrated = raw_prob * confidence_ratio + 0.5 * (1 - confidence_ratio)
+
+        return max(0.05, min(0.95, calibrated))
+
+    def predict_return(self, data: TrainingData) -> Dict:
+        """预测收益（公式与 SGDMLModel 完全一致）"""
+        probability = self.predict_probability(data)
+
+        catalyst_bonus = {
+            "A+": 25, "A": 20, "B+": 15, "B": 10, "C": 5,
+        }.get(data.catalyst_quality, 10)
+
+        momentum_bonus = data.momentum_5d
+        _crd = min(100.0, max(0.0, data.crowding_score))
+        crowding_penalty = _crd * 0.1
+        expected_7d = catalyst_bonus + momentum_bonus - crowding_penalty
+
+        return {
+            "probability": probability,
+            "expected_3d": expected_7d * 0.3,
+            "expected_7d": expected_7d * 0.8,
+            "expected_30d": expected_7d * 1.2,
+        }
+
+    # ---- 序列化 ----
+    def save_model(self, filename: str = "ml_model.json"):
+        """保存模型到 JSON（pickle base64 + 元数据）"""
+        import base64
+        import pickle
+
+        model_data: Dict = {
+            "model_type": "hgb",
+            "feature_count": len(FEATURE_NAMES),
+            "feature_names": FEATURE_NAMES,
+            "is_trained": self.is_trained,
+            "training_accuracy": self.training_accuracy,
+            "n_samples_seen": self._n_samples_seen,
+            "feature_stats": self.feature_stats,
+            "weights": self.weights,
+            "feature_importance": self.get_feature_importance(),
+        }
+
+        if self._fitted:
+            # 树模型无法直接 JSON 序列化，用 pickle + base64
+            model_bytes = pickle.dumps(self._clf)
+            model_data["model_bytes"] = base64.b64encode(model_bytes).decode("ascii")
+            model_data["perm_importance"] = getattr(self, "_perm_importance", [])
+
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(model_data, f, indent=2, ensure_ascii=False)
+            _log.info("HGB 模型已保存：%s", filename)
+        except (OSError, TypeError) as e:
+            _log.warning("HGB save_model 失败：%s", e)
+
+    def load_model(self, filename: str = "ml_model.json") -> bool:
+        """加载 HGB 模型（支持 pickle base64 恢复）"""
+        import base64
+        import pickle
+
+        if not os.path.exists(filename):
+            return False
+
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return False
+
+        if data.get("model_type") != "hgb":
+            _log.debug("模型格式不匹配（%s != hgb），需重新训练", data.get("model_type"))
+            return False
+
+        if data.get("feature_count", 0) != len(FEATURE_NAMES):
+            _log.warning("特征维度不匹配（%d vs %d），需重新训练",
+                         data.get("feature_count", 0), len(FEATURE_NAMES))
+            return False
+
+        # 恢复 pickle 模型
+        model_bytes_str = data.get("model_bytes")
+        if model_bytes_str:
+            try:
+                self._clf = pickle.loads(base64.b64decode(model_bytes_str))
+                self._fitted = True
+            except (pickle.UnpicklingError, ValueError, TypeError) as e:
+                _log.warning("HGB 模型反序列化失败：%s", e)
+                return False
+
+        self.is_trained = data.get("is_trained", False)
+        self.training_accuracy = data.get("training_accuracy", 0.0)
+        self._n_samples_seen = data.get("n_samples_seen", 0)
+        self.feature_stats = data.get("feature_stats", {})
+        self._perm_importance = data.get("perm_importance", [0.0] * len(FEATURE_NAMES))
+
+        _log.info("HGB 模型已加载：%d 样本，准确率 %.1f%%", self._n_samples_seen, self.training_accuracy)
+        return True
+
+    # ---- 特征重要性 ----
+    def get_feature_importance(self) -> Dict:
+        """返回特征重要性（permutation importance）"""
+        n = len(FEATURE_NAMES)
+        uniform = 1.0 / n
+        if not self._fitted or not hasattr(self, "_perm_importance"):
+            return {name: {"weight": uniform, "coefficient": 0.0, "direction": "neutral"}
+                    for name in FEATURE_NAMES}
+
+        imp = self._perm_importance
+        abs_sum = sum(abs(v) for v in imp) or 1.0
+        return {
+            name: {
+                "weight": float(imp[i]) / abs_sum,
+                "coefficient": float(imp[i]),
+                "direction": "positive" if imp[i] > 0.01 else "neutral",
+            }
+            for i, name in enumerate(FEATURE_NAMES)
+        }
+
+    def encode_catalyst_quality(self, quality: str) -> float:
+        """兼容方法"""
+        return _encode_catalyst(quality)
+
+
 def create_ml_model():
-    """工厂函数：优先使用 SGDMLModel，sklearn 不可用时降级到 SimpleMLModel"""
+    """工厂函数：优先 HGB → SGD → Simple"""
+    try:
+        from sklearn.ensemble import HistGradientBoostingClassifier  # noqa: F401
+        _log.info("使用 HistGradientBoosting 模型（sklearn 内置 LightGBM 等价）")
+        return HGBModel()
+    except ImportError:
+        pass
     try:
         from sklearn.linear_model import SGDClassifier  # noqa: F401
+        _log.info("HGB 不可用，降级使用 SGDMLModel")
         return SGDMLModel()
     except ImportError:
         _log.info("sklearn 不可用，降级使用 SimpleMLModel")

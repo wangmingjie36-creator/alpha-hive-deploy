@@ -99,6 +99,13 @@
 - `generate_ml_report.py`：末尾调用 `_sync_ghpages()`，每次生成 ML 报告后自动同步 gh-pages
 - **禁止**只推 main 不推 gh-pages，否则网站不更新
 
+## Memory 2.0 自动更新规则
+
+- **Auto Memory 路径**：`~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/MEMORY.md`
+- 每次 session 修改了代码/新增模块/修复 bug 后，Claude 必须自动更新 MEMORY.md 对应章节
+- 控制在 200 行以内；超出时压缩旧版本历史或移除已被代码覆盖的实现细节
+- 旧记忆路径 `~/.claude/projects/-Users-igg/memory/` 已弃用，勿再写入
+
 ## 已知问题 / 注意事项
 
 - `realtime_metrics` 在部分 JSON 里是空字典 `{}`，导致 `current_price = 0`

@@ -168,6 +168,7 @@ class BacktestAnalyzer:
         total_return = 0.0
         win_count = 0
         total_count = 0
+        direction_adjusted_returns = []
 
         for snapshot in self.snapshots:
             # 方向准确性
@@ -178,10 +179,19 @@ class BacktestAnalyzer:
                 if direction_accuracy[timeframe]:
                     win_count += 1
 
-            # 收益
+            # 收益（方向调整：做空时股价下跌 = 正收益）
             returns = snapshot.calculate_returns()
             if timeframe in returns:
-                total_return += returns[timeframe]
+                _dir = snapshot.direction.lower()
+                if _dir in ("short", "bearish"):
+                    total_return += -returns[timeframe]
+                    # 收集实际每笔收益率用于 Sharpe 计算
+                    direction_adjusted_returns.append(-returns[timeframe])
+                elif _dir in ("long", "bullish"):
+                    total_return += returns[timeframe]
+                    # 收集实际每笔收益率用于 Sharpe 计算
+                    direction_adjusted_returns.append(returns[timeframe])
+                # neutral: 不计入方向性收益
 
         if not accuracies:
             return {}
@@ -194,26 +204,83 @@ class BacktestAnalyzer:
             "win_rate": (win_count / total_count) * 100 if total_count > 0 else 0,
             "avg_return": avg_return,
             "total_trades": len(accuracies),
-            "sharpe_ratio": self._calculate_sharpe(accuracies, avg_return)
+            "sharpe_ratio": self._calculate_sharpe(direction_adjusted_returns),
+            "profit_factor": self._calculate_profit_factor(direction_adjusted_returns),
+            "information_ratio": self._calculate_information_ratio(direction_adjusted_returns),
+            "max_consecutive_losses": self._calculate_max_consecutive_losses(accuracies)
         }
 
-    def _calculate_sharpe(self, accuracies: List, avg_return: float) -> float:
-        """计算 Sharpe 比率（简化版）"""
-        if len(accuracies) < 2:
+    def _calculate_sharpe(self, direction_adjusted_returns: List[float],
+                          risk_free_annual: float = 0.05,
+                          period_days: int = 7) -> float:
+        """计算 Sharpe 比率（使用实际每笔收益率，非平均值）
+
+        Args:
+            direction_adjusted_returns: 方向调整后的实际收益率列表（百分比）
+            risk_free_annual: 年化无风险利率
+            period_days: 持有期天数
+        """
+        if len(direction_adjusted_returns) < 2:
             return 0.0
 
-        # 将准确性转换为收益率
-        returns = [r if acc else -r for acc, r in zip(accuracies, [avg_return] * len(accuracies))]
+        periods_per_year = 252 / period_days
+        rf_per_period = risk_free_annual / periods_per_year
+        excess = [r / 100.0 - rf_per_period for r in direction_adjusted_returns]
 
-        if len(set(returns)) == 1:
-            return 0.0
+        mean_excess = sum(excess) / len(excess)
+        variance = sum((x - mean_excess) ** 2 for x in excess) / (len(excess) - 1)
+        std_dev = variance ** 0.5
 
-        std_dev = stdev(returns)
         if std_dev == 0:
             return 0.0
 
-        # 简化 Sharpe（年化）
-        return (mean(returns) / std_dev) * (252 ** 0.5)
+        return round((mean_excess / std_dev) * (periods_per_year ** 0.5), 3)
+
+    def _calculate_profit_factor(self, direction_adjusted_returns: List[float]) -> float:
+        """Profit Factor = 赢钱总和 / 亏钱总和，目标 >2.0"""
+        if not direction_adjusted_returns:
+            return 0.0
+        gross_profit = sum(r for r in direction_adjusted_returns if r > 0)
+        gross_loss = abs(sum(r for r in direction_adjusted_returns if r < 0))
+        if gross_loss == 0:
+            return float('inf') if gross_profit > 0 else 0.0
+        return round(gross_profit / gross_loss, 3)
+
+    def _calculate_information_ratio(self, direction_adjusted_returns: List[float],
+                                      benchmark_annual: float = 0.10) -> float:
+        """Information Ratio = (年化收益 - 基准) / 跟踪误差
+
+        Args:
+            direction_adjusted_returns: 方向调整后的收益率列表（百分比）
+            benchmark_annual: 年化基准收益率（默认 SPY ~10%）
+        """
+        if len(direction_adjusted_returns) < 5:
+            return 0.0
+        periods_per_year = 252 / 7  # T+7 周期
+        benchmark_per_period = benchmark_annual / periods_per_year
+
+        excess = [r / 100.0 - benchmark_per_period for r in direction_adjusted_returns]
+        mean_excess = sum(excess) / len(excess)
+        variance = sum((x - mean_excess) ** 2 for x in excess) / (len(excess) - 1)
+        tracking_error = variance ** 0.5
+
+        if tracking_error == 0:
+            return 0.0
+        return round((mean_excess / tracking_error) * (periods_per_year ** 0.5), 3)
+
+    def _calculate_max_consecutive_losses(self, accuracies: List[int]) -> int:
+        """最大连续亏损次数"""
+        if not accuracies:
+            return 0
+        max_streak = 0
+        current_streak = 0
+        for acc in accuracies:
+            if acc == 0:
+                current_streak += 1
+                max_streak = max(max_streak, current_streak)
+            else:
+                current_streak = 0
+        return max_streak
 
     # 旧名称 → 新名称兼容映射（旧快照可能用旧名存储 agent_votes）
     _LEGACY_AGENT_MAP = {
@@ -377,75 +444,85 @@ class BacktestAnalyzer:
         weight_adjustments = self.suggest_weight_adjustments()
         agent_accuracy = weight_adjustments.get("agent_accuracy", {})
 
-        html = """
+        # 提取指标值
+        accuracy_t1_dir = accuracy_t1.get("direction_accuracy", 0)
+        accuracy_t7_dir = accuracy_t7.get("direction_accuracy", 0)
+        accuracy_t30_dir = accuracy_t30.get("direction_accuracy", 0)
+        sharpe = accuracy_t7.get("sharpe_ratio", 0)
+        avg_return = accuracy_t7.get("avg_return", 0)
+        win_rate = accuracy_t7.get("win_rate", 0)
+        profit_factor = accuracy_t7.get("profit_factor", 0)
+        max_consecutive_losses = accuracy_t7.get("max_consecutive_losses", 0)
+
+        html = f"""
         <html>
         <head>
             <title>Alpha Hive 准确度看板</title>
             <style>
-                body {
+                body {{
                     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
                     background: #f5f5f5;
                     padding: 20px;
-                }
-                .container {
+                }}
+                .container {{
                     max-width: 1400px;
                     margin: 0 auto;
-                }
-                .metric-card {
+                }}
+                .metric-card {{
                     background: white;
                     border-radius: 8px;
                     padding: 20px;
                     margin: 20px 0;
                     box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-                }
-                .metric-grid {
+                }}
+                .metric-grid {{
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
                     gap: 20px;
-                }
-                .metric-box {
+                }}
+                .metric-box {{
                     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                     color: white;
                     padding: 20px;
                     border-radius: 8px;
                     text-align: center;
-                }
-                .metric-value {
+                }}
+                .metric-value {{
                     font-size: 32px;
                     font-weight: 700;
                     margin: 10px 0;
-                }
-                .metric-label {
+                }}
+                .metric-label {{
                     font-size: 14px;
                     opacity: 0.9;
-                }
-                table {
+                }}
+                table {{
                     width: 100%;
                     border-collapse: collapse;
                     margin: 15px 0;
-                }
-                th {
+                }}
+                th {{
                     background: #f5f5f5;
                     padding: 12px;
                     text-align: left;
                     font-weight: 600;
                     border-bottom: 2px solid #ddd;
-                }
-                td {
+                }}
+                td {{
                     padding: 12px;
                     border-bottom: 1px solid #eee;
-                }
-                .up { color: #27ae60; }
-                .down { color: #e74c3c; }
+                }}
+                .up {{ color: #27ae60; }}
+                .down {{ color: #e74c3c; }}
             </style>
         </head>
         <body>
             <div class="container">
-                <h1>📊 Alpha Hive 准确度看板</h1>
+                <h1>Alpha Hive 准确度看板</h1>
 
                 <!-- 综合指标 -->
                 <div class="metric-card">
-                    <h2>🎯 综合准确度指标</h2>
+                    <h2>综合准确度指标</h2>
                     <div class="metric-grid">
                         <div class="metric-box">
                             <div class="metric-label">T+1 方向准确度</div>
@@ -461,15 +538,23 @@ class BacktestAnalyzer:
                         </div>
                         <div class="metric-box">
                             <div class="metric-label">Sharpe 比率 (T+7)</div>
-                            <div class="metric-value">{sharpe:.2f}</div>
+                            <div class="metric-value">{sharpe:.3f}</div>
                         </div>
                         <div class="metric-box">
                             <div class="metric-label">平均收益 (T+7)</div>
-                            <div class="metric-value">{avg_return:+.1f}%</div>
+                            <div class="metric-value">{avg_return:+.2f}%</div>
                         </div>
                         <div class="metric-box">
                             <div class="metric-label">胜率</div>
                             <div class="metric-value">{win_rate:.0f}%</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-label">Profit Factor</div>
+                            <div class="metric-value">{profit_factor}</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-label">最大连续亏损</div>
+                            <div class="metric-value">{max_consecutive_losses}</div>
                         </div>
                     </div>
                 </div>

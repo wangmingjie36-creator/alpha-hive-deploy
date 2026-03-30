@@ -163,6 +163,7 @@ class BuzzBeeWhisper(BeeAgent):
             # 7. Fear & Greed Index（市场整体情绪背景，免费无需 Key）
             fg_signal = 50.0
             fg_desc = ""
+            fg = {}  # 默认空 dict，防止后续 fg.get() 抛 NameError
             try:
                 from fear_greed import get_fear_greed
                 fg = get_fear_greed()
@@ -232,6 +233,11 @@ class BuzzBeeWhisper(BeeAgent):
             _pub_details = {"sentiment_score": bullish_pct}
             if reddit_data:
                 _pub_details["reddit_momentum"] = reddit_data.get("momentum", 0)
+            # 升级 3: 导出 F&G 原始值供 QueenDistiller 评分层使用
+            try:
+                _pub_details["fear_greed_value"] = int(fg.get("value", 0)) if fg else None
+            except Exception:
+                _pub_details["fear_greed_value"] = None
             self._publish(ticker, discovery, "market_sentiment+reddit", round(score, 2), direction, details=_pub_details)
 
             # confidence = 基础 0.5（yfinance）+ Reddit + Finviz + Yahoo + F&G + LLM

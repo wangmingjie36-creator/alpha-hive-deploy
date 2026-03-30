@@ -1846,8 +1846,10 @@ class AlphaHiveDailyReporter:
             with open(index_file, "w", encoding="utf-8") as f:
                 f.write(html)
             _log.info("index.html 已更新（GitHub Pages）")
-        except (OSError, ValueError, KeyError, TypeError) as e:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             _log.warning("index.html 生成失败: %s", e)
+            # Fallback: 即使 HTML 渲染崩溃，也确保 dashboard-data.json 被更新
+            self._fallback_dashboard_data(report)
 
         # PWA 文件
         try:
@@ -1894,6 +1896,58 @@ class AlphaHiveDailyReporter:
         """生成 index.html（委托 report_web_assets）"""
         from report_web_assets import generate_index_html
         return generate_index_html(self, *args, **kwargs)
+
+    def _fallback_dashboard_data(self, report: Dict):
+        """index.html 生成崩溃时的 fallback：独立生成最小化 dashboard-data.json"""
+        try:
+            from datetime import datetime as _dt
+            opps = report.get("opportunities", [])
+            swarm_detail = {}
+            sr_path = self.report_dir / f".swarm_results_{self.date_str}.json"
+            if sr_path.exists():
+                with open(sr_path) as _f:
+                    swarm_detail = json.load(_f)
+
+            scores = []
+            for opp in opps:
+                t = opp.get("ticker", "")
+                s = float(opp.get("opp_score") or swarm_detail.get(t, {}).get("final_score", 0))
+                scores.append([t, round(s, 1)])
+            scores.sort(key=lambda x: x[1], reverse=True)
+
+            dir_counts = [0, 0, 0]  # bullish, bearish, neutral
+            for opp in opps:
+                d = str(opp.get("direction", "neutral")).lower()
+                if "多" in d or "bull" in d:
+                    dir_counts[0] += 1
+                elif "空" in d or "bear" in d:
+                    dir_counts[1] += 1
+                else:
+                    dir_counts[2] += 1
+
+            try:
+                from zoneinfo import ZoneInfo
+                now_str = _dt.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M %Z")
+            except Exception:
+                now_str = _dt.now().strftime("%Y-%m-%d %H:%M")
+
+            data = {
+                "scores": scores,
+                "dir_counts": dir_counts,
+                "fv": 50,
+                "fg_label": "数据降级",
+                "radar": {},
+                "_generated_at": now_str,
+                "_date": self.date_str,
+                "_deploy_ts": int(_dt.now().timestamp()),
+                "_fallback": True,
+            }
+
+            json_path = self.report_dir / "dashboard-data.json"
+            json_path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+            _log.info("dashboard-data.json fallback 已生成（%d 标的）", len(scores))
+        except Exception as e2:
+            _log.error("dashboard-data.json fallback 也失败: %s", e2)
 
 def main():
     """主入口"""

@@ -223,7 +223,8 @@ class QueenDistiller:
                                 dim_confidence: Dict,
                                 dimension_coverage_pct: float,
                                 present_count: int,
-                                valid_results: List[Dict]) -> Dict:
+                                valid_results: List[Dict],
+                                override_weights: Dict = None) -> Dict:
         """ML 调整 + 5D 加权 + 覆盖度压缩 + 共振增强。返回 dict。"""
         ml_adjustment = 0.0
         for r in valid_results:
@@ -232,15 +233,32 @@ class QueenDistiller:
                 ml_conf = _safe_score(r.get("confidence", 0.5), default=0.5, lo=0.0, hi=1.0, label="ml_conf")
                 ml_adjustment = (ml_score - 5.0) * 0.1 * ml_conf
 
-        _n_dims = len(self.DIMENSION_WEIGHTS)
-        _missing_dim_fill = 4.7 if dimension_coverage_pct < 80.0 else 5.0
+        _weights = override_weights if override_weights else self.DIMENSION_WEIGHTS
+        _n_dims = len(_weights)
+
+        # 升级 1: 缺失维度动态填充（消除系统性偏差）
+        # 旧：固定 4.7 → 无论市场状态都偏空。新：用已有维度均值与 5.0 的中值
+        if dim_scores:
+            _available_avg = sum(dim_scores.values()) / len(dim_scores)
+            _missing_dim_fill = round((_available_avg + 5.0) / 2, 2)
+        else:
+            _missing_dim_fill = 5.0
+
+        # 升级 2: 置信度权重配置
+        try:
+            from config import CONFIDENCE_WEIGHTING as _CONF_CFG
+        except (ImportError, AttributeError):
+            _CONF_CFG = {"exponent": 1.5, "floor": 0.3}
+        _conf_exp = _CONF_CFG.get("exponent", 1.5)
+        _conf_floor = _CONF_CFG.get("floor", 0.3)
 
         weighted_sum = 0.0
         weight_total = 0.0
-        for dim, weight in self.DIMENSION_WEIGHTS.items():
+        for dim, weight in _weights.items():
             if dim in dim_scores:
                 conf = dim_confidence.get(dim, 0.5)
-                effective_weight = weight * min(1.0, conf * 2)
+                # 升级 2: 幂次衰减——低置信惩罚更重（旧: min(1.0, conf*2)）
+                effective_weight = weight * max(_conf_floor, conf ** _conf_exp)
                 weighted_sum += dim_scores[dim] * effective_weight
                 weight_total += effective_weight
             else:
@@ -450,8 +468,10 @@ class QueenDistiller:
 
     def _compute_direction_vote(self, ticker: str, valid_results: List[Dict],
                                 all_results: List[Dict],
-                                rule_score: float) -> Dict:
+                                rule_score: float,
+                                fg_value: int = None) -> Dict:
         """S4 反博弈 + S5 冲突再投票 + data_quality 汇总。返回 dict。"""
+        _fg_value = fg_value  # 升级 4 使用
         directions = [r.get("direction", "neutral") for r in valid_results]
         bullish_count = directions.count("bullish")
         bearish_count = directions.count("bearish")
@@ -493,7 +513,38 @@ class QueenDistiller:
         _bear_min_agents = _BSC4.get("voting_bearish_min_agents", 1)
         _bear_min_wpct = _BSC4.get("voting_bearish_min_weight_pct", 0.25)
 
-        if bullish_w > bearish_w and bullish_w / total_w >= 0.4 and bullish_count >= 2:
+        # 升级 4: 看多不对称门槛（看多需要更强共识）
+        try:
+            from config import BULLISH_GATE_CONFIG as _BGC
+        except (ImportError, AttributeError):
+            _BGC = {"min_weight_pct": 0.50, "min_agents": 3,
+                     "extreme_greed_threshold": 75, "extreme_greed_weight_pct": 0.60}
+        _bull_min_wpct = _BGC.get("min_weight_pct", 0.50)
+        _bull_min_agents = _BGC.get("min_agents", 3)
+        # F&G 极度贪婪时进一步抬高看多门槛
+        if _fg_value is not None and _fg_value > _BGC.get("extreme_greed_threshold", 75):
+            _bull_min_wpct = _BGC.get("extreme_greed_weight_pct", 0.60)
+
+        # 升级 6: 方向惯性平滑（窄边际时倾向维持昨日方向）
+        try:
+            from config import DIRECTION_STABILITY as _DS_CFG
+        except (ImportError, AttributeError):
+            _DS_CFG = {"enabled": True, "inertia_bonus": 0.1, "narrow_margin": 0.15}
+        if _DS_CFG.get("enabled", True):
+            _vote_margin = abs(bullish_w - bearish_w) / total_w if total_w > 0 else 1.0
+            if _vote_margin < _DS_CFG.get("narrow_margin", 0.15):
+                _prev_entries = [e for e in self.board._entries
+                                 if e.ticker == ticker and e.agent_id == "QueenDistiller"]
+                if _prev_entries:
+                    _prev_dir = _prev_entries[-1].direction
+                    _inertia = _DS_CFG.get("inertia_bonus", 0.1)
+                    if _prev_dir == "bullish":
+                        bullish_w += _inertia
+                    elif _prev_dir == "bearish":
+                        bearish_w += _inertia
+                    total_w = bullish_w + bearish_w + neutral_w or 1.0
+
+        if bullish_w > bearish_w and bullish_w / total_w >= _bull_min_wpct and bullish_count >= _bull_min_agents:
             rule_direction = "bullish"
         elif bearish_w > bullish_w and bearish_w / total_w >= _bear_min_wpct and bearish_count >= _bear_min_agents:
             rule_direction = "bearish"
@@ -787,12 +838,88 @@ class QueenDistiller:
             "agent_details": agent_details,
         }
 
-    def distill(self, ticker: str, agent_results: List[Dict]) -> Dict:
+    def distill(self, ticker: str, agent_results: List[Dict],
+                dealer_gex: Dict = None) -> Dict:
         """
         5 维加权评分 + 共振增强 + 多数投票 + LLM 推理蒸馏
 
         双引擎：规则引擎始终运行作为基础，LLM 引擎在可用时叠加推理。
+
+        升级 #1: GEX 政体联动评分（在方向投票后施加 GEX 调整）
+        升级 #4: 政体条件权重（根据宏观/GEX/IV 动态调整 5 维权重）
         """
+        # ===== 0. GEX 政体 + 政体权重预计算 =====
+        _gex_data = {}
+        _gex_mod_result = {"gex_adjustment": 0.0, "gex_regime": "unknown",
+                           "flip_proximity_pct": None, "can_flip_vanna": False,
+                           "regime_description": "未计算", "confidence_modifier": 1.0}
+        _regime_weights_desc = ""
+        _regime_weights_used = dict(self.DIMENSION_WEIGHTS)
+        _macro_regime = "neutral"
+        _iv_rank_val = None
+
+        try:
+            from gex_regime import GexRegimeModifier, RegimeWeightAdjuster
+
+            # 优先使用传入的 dealer_gex 参数
+            _gex_data = dealer_gex or {}
+
+            # 从 GuardBee 提取宏观政体
+            for _r in agent_results:
+                if _r.get("source") == "GuardBeeSentinel":
+                    _guard_det = _r.get("details") or {}
+                    _macro_regime = _guard_det.get("macro_regime", "neutral")
+                    if not _gex_data:
+                        _gex_data = _guard_det.get("market_regime", {}).get("dealer_gex", {})
+                    break
+
+            # 从 Oracle 提取 IV Rank + GEX
+            for _r in agent_results:
+                if _r.get("source") == "OracleBeeEcho":
+                    _oracle_det = _r.get("details") or {}
+                    _iv_rank_val = _oracle_det.get("iv_rank")
+                    if not _gex_data:
+                        _gex_data = _oracle_det.get("gex", {})
+                    break
+
+            # 如果仍无 GEX 数据，尝试按需计算
+            if not _gex_data:
+                try:
+                    from advanced_analyzer import DealerGEXAnalyzer
+                    # 从 Scout 获取股价
+                    _scout_price = None
+                    for _r in agent_results:
+                        if _r.get("source") == "ScoutBeeNova":
+                            _scout_price = (_r.get("details") or {}).get("price")
+                            break
+                    if _scout_price and float(_scout_price) > 0:
+                        _gex_analyzer = DealerGEXAnalyzer()
+                        _gex_data = _gex_analyzer.analyze(ticker, float(_scout_price))
+                except Exception as _e_gex_lazy:
+                    _log.debug("按需 GEX 计算失败 (%s): %s", ticker, _e_gex_lazy)
+
+            # 升级 #4: 根据政体调整权重
+            _rwa = RegimeWeightAdjuster()
+            _gex_regime_str = _gex_data.get("regime", "unknown") if _gex_data else "unknown"
+            _regime_weights_used, _regime_weights_desc = _rwa.adjust_weights(
+                base_weights=dict(self.DIMENSION_WEIGHTS),
+                macro_regime=_macro_regime,
+                gex_regime=_gex_regime_str,
+                iv_rank=_iv_rank_val,
+            )
+            if _regime_weights_desc != "权重未调整（中性环境）":
+                _log.info("[%s] 政体权重调整: %s | %s", ticker, _regime_weights_desc,
+                          {k: f"{v:.3f}" for k, v in _regime_weights_used.items()})
+        except Exception as _e_regime:
+            _log.debug("政体权重/GEX 预计算失败 (%s): %s", ticker, _e_regime)
+
+        # ===== 0.5 提取 F&G 值（供步骤 4 门槛 + 步骤 4.6 评分调整使用）=====
+        _fg_value = None
+        for _r in agent_results:
+            if _r.get("source") == "BuzzBeeWhisper":
+                _fg_value = (_r.get("details") or {}).get("fear_greed_value")
+                break
+
         # ===== 1. 维度数据准备 =====
         prep = self._prepare_dimension_data(agent_results)
         valid_results = prep["valid_results"]
@@ -804,10 +931,11 @@ class QueenDistiller:
         dimension_coverage_pct = prep["dimension_coverage_pct"]
         present_count = prep["present_count"]
 
-        # ===== 2. 加权评分 + 共振 =====
+        # ===== 2. 加权评分 + 共振（使用政体调整后的权重）=====
         ws = self._compute_weighted_score(
             ticker, dim_scores, dim_confidence,
-            dimension_coverage_pct, present_count, valid_results)
+            dimension_coverage_pct, present_count, valid_results,
+            override_weights=_regime_weights_used)
         adjusted_score = ws["adjusted_score"]
         rule_score = ws["rule_score"]
         ml_adjustment = ws["ml_adjustment"]
@@ -821,9 +949,52 @@ class QueenDistiller:
 
         # ===== 4. 方向投票 + 冲突 =====
         dv = self._compute_direction_vote(
-            ticker, valid_results, all_results, rule_score)
+            ticker, valid_results, all_results, rule_score, fg_value=_fg_value)
         rule_direction = dv["rule_direction"]
         rule_score = dv["rule_score"]
+
+        # ===== 4.5 GEX 政体联动评分（需要 direction）=====
+        try:
+            from gex_regime import GexRegimeModifier
+            _gex_modifier = GexRegimeModifier()
+            _gex_mod_result = _gex_modifier.compute(_gex_data, direction=rule_direction)
+            _gex_adj = _gex_mod_result["gex_adjustment"]
+            if abs(_gex_adj) > 0.01:
+                _pre_gex = rule_score
+                rule_score = round(max(0.0, min(10.0, rule_score + _gex_adj)), 2)
+                _log.info("[%s] GEX政体调整: %+.2f (%.2f→%.2f) | %s",
+                          ticker, _gex_adj, _pre_gex, rule_score,
+                          _gex_mod_result["regime_description"])
+        except Exception as _e_gex:
+            _log.debug("GEX 政体调整失败 (%s): %s", ticker, _e_gex)
+
+        # ===== 4.6 Fear & Greed 政体调整（_fg_value 在步骤 0.5 已提取）=====
+        try:
+            if _fg_value is not None:
+                try:
+                    from config import FEAR_GREED_SCORING as _FG_CFG
+                except (ImportError, AttributeError):
+                    _FG_CFG = {"extreme_fear": 25, "extreme_greed": 75,
+                               "fear_bearish_boost": 0.3, "fear_bullish_penalty": 0.4,
+                               "greed_bullish_penalty": 0.3, "greed_bearish_boost": 0.2}
+                _fg_adj = 0.0
+                if _fg_value < _FG_CFG.get("extreme_fear", 25):
+                    if rule_direction == "bearish":
+                        _fg_adj = _FG_CFG.get("fear_bearish_boost", 0.3)
+                    elif rule_direction == "bullish":
+                        _fg_adj = -_FG_CFG.get("fear_bullish_penalty", 0.4)
+                elif _fg_value > _FG_CFG.get("extreme_greed", 75):
+                    if rule_direction == "bullish":
+                        _fg_adj = -_FG_CFG.get("greed_bullish_penalty", 0.3)
+                    elif rule_direction == "bearish":
+                        _fg_adj = _FG_CFG.get("greed_bearish_boost", 0.2)
+                if abs(_fg_adj) > 0.01:
+                    _pre_fg = rule_score
+                    rule_score = round(max(0.0, min(10.0, rule_score + _fg_adj)), 2)
+                    _log.info("[%s] F&G政体调整: F&G=%d, dir=%s, adj=%+.2f (%.2f→%.2f)",
+                              ticker, _fg_value, rule_direction, _fg_adj, _pre_fg, rule_score)
+        except Exception as _e_fg:
+            _log.debug("F&G 政体调整失败 (%s): %s", ticker, _e_fg)
 
         # ===== 5. LLM 引擎 =====
         llm = self._run_llm_engine(
@@ -834,11 +1005,53 @@ class QueenDistiller:
         final_score = llm["final_score"]
         final_direction = llm["final_direction"]
 
-        # ===== 6. 置信度校准 =====
+        # ===== 5.5 历史胜率反馈折扣 =====
+        _ticker_acc_discount = 0.0
+        try:
+            from config import TICKER_ACCURACY_FEEDBACK as _TAF
+        except (ImportError, AttributeError):
+            _TAF = {"enabled": True, "min_samples": 5, "discount_threshold": 0.50, "min_reliability": 0.5}
+        if _TAF.get("enabled", True):
+            try:
+                from pathlib import Path as _Path_ta
+                from feedback_loop import BacktestAnalyzer as _BA_ta
+                _snap_dir = str(_Path_ta(__file__).resolve().parent.parent / "report_snapshots")
+                # 缓存 BacktestAnalyzer 实例（避免每标的都重新扫描文件系统）
+                if not hasattr(self, "_ba_cache"):
+                    self._ba_cache = _BA_ta(directory=_snap_dir)
+                _snaps = self._ba_cache.get_snapshots_by_ticker(ticker)
+                _t7 = [s for s in (_snaps or []) if s.actual_price_t7 is not None and s.entry_price]
+                if len(_t7) >= _TAF.get("min_samples", 5):
+                    _wins = sum(1 for s in _t7
+                                if (s.direction == "Long" and (s.actual_price_t7 - s.entry_price) > 0) or
+                                   (s.direction == "Short" and (s.actual_price_t7 - s.entry_price) < 0))
+                    _win_rate = _wins / len(_t7)
+                    _threshold = _TAF.get("discount_threshold", 0.50)
+                    if _win_rate < _threshold:
+                        _reliability = max(_TAF.get("min_reliability", 0.5), _win_rate / _threshold)
+                        _pre_ta = final_score
+                        # 压缩偏离中性的幅度，但不改变方向
+                        # 即 score > 5 时向下压缩，score < 5 时向上压缩
+                        final_score = round(5.0 + (final_score - 5.0) * _reliability, 2)
+                        _ticker_acc_discount = round(abs(_pre_ta - final_score), 2)
+                        _log.info("[%s] 历史胜率折扣: winrate=%.1f%% (%d/%d), reliability=%.2f, "
+                                  "score %.2f→%.2f",
+                                  ticker, _win_rate * 100, _wins, len(_t7),
+                                  _reliability, _pre_ta, final_score)
+            except Exception as _e_ta:
+                _log.debug("历史胜率折扣失败 (%s): %s", ticker, _e_ta)
+
+        # ===== 6. 置信度校准（含 GEX confidence_modifier）=====
         confidence_calibration = self._compute_confidence_calibration(
             final_score, dim_scores, dv, present_count)
+        # GEX 政体修正置信带宽
+        _gex_conf_mod = _gex_mod_result.get("confidence_modifier", 1.0)
+        if _gex_conf_mod > 1.0 and "band_width" in confidence_calibration:
+            confidence_calibration["band_width"] = round(
+                confidence_calibration["band_width"] * _gex_conf_mod, 2)
+            confidence_calibration["gex_confidence_modifier"] = _gex_conf_mod
 
-        return {
+        _result = {
             "ticker": ticker,
             "final_score": final_score,
             "direction": final_direction,
@@ -853,7 +1066,8 @@ class QueenDistiller:
             "agent_details": llm["agent_details"],
             "dimension_scores": dim_scores,
             "dimension_confidence": dim_confidence,
-            "dimension_weights": dict(self.DIMENSION_WEIGHTS),
+            "dimension_weights": dict(_regime_weights_used),
+            "dimension_weights_base": dict(self.DIMENSION_WEIGHTS),
             "ml_adjustment": round(ml_adjustment, 3),
             "ml_contribution_pct": round(abs(ml_adjustment) / max(abs(final_score), 0.01) * 100, 1),
             "base_score_before_resonance": round(adjusted_score, 2),
@@ -912,7 +1126,32 @@ class QueenDistiller:
             # Enhancement C: ML 反馈权重
             "ml_weight_adjustments": dict(self.ml_adjustments),
             "ml_feedback_enabled": self.ml_feedback_enabled,
+            # 升级 #1: GEX 政体联动
+            "gex_regime_mod": _gex_mod_result,
+            # 升级 #4: 政体条件权重
+            "regime_weights_description": _regime_weights_desc,
+            "macro_regime": _macro_regime,
+            # 升级 5: 历史胜率折扣
+            "ticker_accuracy_discount": _ticker_acc_discount,
+            # 升级 3: F&G 原始值
+            "fear_greed_value": _fg_value,
         }
+
+        # 升级 6: 发布 Queen 方向到信息素板（供下次运行的惯性计算）
+        try:
+            from pheromone_board import PheromoneEntry
+            self.board.publish(PheromoneEntry(
+                agent_id="QueenDistiller",
+                ticker=ticker,
+                discovery=f"Queen决策: {final_direction} {final_score:.1f}/10",
+                source="queen_distiller",
+                self_score=final_score,
+                direction=final_direction,
+            ))
+        except Exception as _e_pub:
+            _log.debug("Queen 方向发布失败 (%s): %s", ticker, _e_pub)
+
+        return _result
 
     # ==================== Phase 2: 历史类比推理 ====================
 

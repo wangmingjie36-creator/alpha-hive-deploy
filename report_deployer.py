@@ -85,6 +85,14 @@ def deploy_static_to_ghpages(reporter):
     """用 git plumbing 构建仅含静态文件的 gh-pages 提交并推送。"""
     import subprocess
     import os
+    import resource as _resource
+    # 预防 Too many open files：确保 fd 上限至少 2048
+    try:
+        _soft, _hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
+        if _soft < 2048:
+            _resource.setrlimit(_resource.RLIMIT_NOFILE, (min(2048, _hard), _hard))
+    except (ValueError, OSError):
+        pass
     repo = reporter.agent_helper.git.repo_path or "."
     idx = os.path.join(repo, ".git", "gh-pages-index")
     if os.path.exists(idx):
@@ -113,13 +121,22 @@ def deploy_static_to_ghpages(reporter):
     if not files:
         _log.warning("无静态文件可部署")
         return
+    # 批量写入 blob + index（逐个 hash-object，但用 stdin 批量 update-index）
+    cache_entries = []
     for f in sorted(files):
-        blob = subprocess.check_output(
-            ["git", "hash-object", "-w", f], cwd=repo
-        ).decode().strip()
+        try:
+            blob = subprocess.check_output(
+                ["git", "hash-object", "-w", f], cwd=repo
+            ).decode().strip()
+            cache_entries.append(f"100644 {blob}\t{f}")
+        except (subprocess.CalledProcessError, OSError) as _e_blob:
+            _log.warning("hash-object 失败 (%s): %s", f, _e_blob)
+    if cache_entries:
+        # 用 --index-info 批量更新 index（一次 subprocess 代替 N 次）
+        _idx_input = "\n".join(cache_entries) + "\n"
         subprocess.run(
-            ["git", "update-index", "--add", "--cacheinfo", "100644", blob, f],
-            env=env, cwd=repo, check=True
+            ["git", "update-index", "--add", "--index-info"],
+            input=_idx_input, env=env, cwd=repo, check=True, text=True
         )
     tree = subprocess.check_output(
         ["git", "write-tree"], env=env, cwd=repo

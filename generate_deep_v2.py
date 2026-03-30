@@ -571,6 +571,14 @@ def extract(data: dict) -> dict:
         "gex_flip": _gex_flip,
         "gex_call_wall": _gex_call_wall,
         "gex_put_wall": _gex_put_wall,
+        "flip_acceleration": _dgex.get("flip_acceleration", {}),
+        "vanna_stress": _dgex.get("vanna_stress", {}),
+        "gex_normalized_pct": _dgex.get("gex_normalized_pct", None),
+        # 升级 #1/#4: GEX 政体联动 + 政体权重
+        "gex_regime_mod": sr.get("gex_regime_mod", {}),
+        "regime_weights_description": sr.get("regime_weights_description", ""),
+        "dimension_weights_effective": sr.get("dimension_weights", {}),
+        "dimension_weights_base": sr.get("dimension_weights_base", {}),
         # 置信区间 & 维度分散度
         "confidence_band": confidence_band,
         "band_width": band_width,
@@ -597,6 +605,30 @@ def extract(data: dict) -> dict:
         "signal_crowding": (guard.get("details") or {}).get("signal_crowding", {}),
         # ⑥ 供应链信号（来自 scout_bee details）
         "supply_chain": (scout.get("details") or {}).get("supply_chain", {}),
+        # P1: 仓位管理
+        "position_management": aa.get("position_management", {}),
+        # P2: 历史回测 Analog
+        "historical_analogs": (aa.get("historical_analysis", {}) or {}).get("similar_opportunities", []),
+        "expected_returns": (aa.get("historical_analysis", {}) or {}).get("expected_returns", {}),
+        # P3: Max Pain
+        "max_pain": odet.get("max_pain", None),
+        # P4: 情绪动量
+        "sentiment_pct": bdet.get("sentiment_pct", None),
+        "sentiment_momentum": bdet.get("sentiment_momentum", None),
+        "sentiment_divergence": bdet.get("sentiment_divergence", None),
+        "volume_ratio": bdet.get("volume_ratio", None),
+        # P5: 内部人 + 做空
+        "insider_trades": (scout.get("details") or {}).get("insider", {}),
+        "short_interest": (bear.get("details") or {}).get("short_interest", None),
+        # P6: 行业竞争
+        "industry_comparison": aa.get("industry_comparison", {}),
+        # P7: ML 特征透明
+        "ml_3d": ml_pred.get("expected_3d", 0),
+        "ml_input": ml.get("input", {}),
+        "ml_recommendation": ml.get("recommendation", ""),
+        "ml_probability": ml_pred.get("probability", 0),
+        # P8: Deep Skew
+        "deep_skew": odet.get("deep_skew", {}),
         # Raw JSON for LLM context
         "_raw": data,
     }
@@ -1027,6 +1059,56 @@ ScoutBee {ctx['scout'].get('score',5)}/10，OracleBee {ctx['oracle'].get('score'
     return {}
 
 
+def _render_regime_badge(ctx: dict) -> str:
+    """渲染 GEX 政体 + 权重调整徽章（CH1 底部）"""
+    gex_mod = ctx.get("gex_regime_mod", {})
+    regime_desc = ctx.get("regime_weights_description", "")
+    gex_regime = gex_mod.get("gex_regime", "unknown")
+    has_gex = gex_regime in ("positive_gex", "negative_gex")
+    has_regime = regime_desc and regime_desc != "权重未调整（中性环境）"
+    if not has_gex and not has_regime:
+        return ""
+
+    parts = []
+    gex_adj = gex_mod.get("gex_adjustment", 0)
+    flip_pct = gex_mod.get("flip_proximity_pct")
+
+    # 只在有明确 GEX 政体时渲染 GEX 徽章
+    if has_gex:
+        if gex_regime == "negative_gex":
+            badge_color = "#ef4444"
+            badge_label = "🔴 负GEX（波动放大）"
+        else:
+            badge_color = "#22c55e"
+            badge_label = "🟢 正GEX（波动压缩）"
+
+        parts.append(
+            f'<span style="display:inline-block;background:{badge_color}15;border:1px solid {badge_color}40;'
+            f'border-radius:6px;padding:2px 8px;font-size:12px;color:{badge_color};margin-right:6px;">'
+            f'{badge_label}</span>'
+        )
+
+        if flip_pct is not None and flip_pct < 10:
+            parts.append(f'<span style="font-size:12px;color:#a3a3a3;">距翻转 {flip_pct:.1f}%</span> ')
+
+        if abs(gex_adj) > 0.01:
+            adj_color = "#ef4444" if gex_adj < 0 else "#22c55e"
+            parts.append(
+                f'<span style="font-size:12px;color:{adj_color};">评分{gex_adj:+.2f}</span> '
+            )
+
+    if regime_desc and regime_desc != "权重未调整（中性环境）":
+        parts.append(
+            f'<span style="display:inline-block;background:#6366f115;border:1px solid #6366f140;'
+            f'border-radius:6px;padding:2px 8px;font-size:12px;color:#6366f1;">'
+            f'⚖️ {regime_desc}</span>'
+        )
+
+    if not parts:
+        return ""
+    return f'<p style="margin-top:6px;">{"".join(parts)}</p>'
+
+
 def _build_swarm_narrative(ctx: dict) -> str:
     ticker = ctx["ticker"]; score = ctx["final_score"]; direction = ctx["direction_zh"]
     sc_cls = 'bull-text' if 'bull' in ctx['direction'] else 'bear-text'
@@ -1051,6 +1133,84 @@ def _build_swarm_narrative(ctx: dict) -> str:
                     ('明显' + sc_dir if score >= 6.5 or score <= 3.5 else '偏' + sc_dir + '（信号偏弱）'))
     overview = ctx.get('overview', '')
     overview_para = f'<p><strong>高级综合评估：</strong>{overview[:200]}</p>' if overview else ''
+
+    # P2: Historical Analog 回测卡片
+    analogs = ctx.get('historical_analogs', [])
+    exp_ret = ctx.get('expected_returns', {})
+    analog_html = ""
+    if analogs:
+        analog_rows = ""
+        for a in analogs[:3]:
+            evt = a.get('event', '')[:25]
+            dt = a.get('date', '')[:10]
+            g7 = a.get('gain_7d_pct', 0)
+            g30 = a.get('gain_30d_pct', 0)
+            mdd = a.get('max_drawdown_pct', 0)
+            result = a.get('result', '')
+            res_col = 'var(--green2)' if result == 'beat' else ('var(--red2)' if result == 'miss' else 'var(--gold2)')
+            analog_rows += (f'<tr style="border-bottom:1px solid var(--border);">'
+                           f'<td style="padding:5px 8px;font-size:11px;">{dt}</td>'
+                           f'<td style="padding:5px 8px;font-size:11px;">{evt}</td>'
+                           f'<td style="padding:5px 8px;text-align:center;color:var(--green2);">{g7:+.1f}%</td>'
+                           f'<td style="padding:5px 8px;text-align:center;color:var(--green2);">{g30:+.1f}%</td>'
+                           f'<td style="padding:5px 8px;text-align:center;color:var(--red2);">{mdd:+.1f}%</td>'
+                           f'<td style="padding:5px 8px;text-align:center;color:{res_col};font-weight:600;">{result}</td></tr>')
+        max_dd_mean = (exp_ret.get('max_drawdown') or {}).get('mean', 0)
+        sample_n = exp_ret.get('sample_size', 0)
+        analog_html = f"""<div style="background:var(--bg3);border-radius:8px;padding:12px;margin-top:12px;border:1px solid var(--border);">
+  <div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px;">📊 历史相似信号回测（{sample_n}次样本，历史平均最大回撤 {max_dd_mean:+.1f}%）</div>
+  <table style="width:100%;border-collapse:collapse;font-size:12px;">
+    <thead><tr style="color:var(--text3);font-size:10px;border-bottom:1px solid var(--border);">
+      <th style="padding:4px 8px;text-align:left;">日期</th>
+      <th style="padding:4px 8px;text-align:left;">事件</th>
+      <th style="padding:4px 8px;text-align:center;">T+7</th>
+      <th style="padding:4px 8px;text-align:center;">T+30</th>
+      <th style="padding:4px 8px;text-align:center;">最大回撤</th>
+      <th style="padding:4px 8px;text-align:center;">结果</th>
+    </tr></thead>
+    <tbody>{analog_rows}</tbody>
+  </table>
+</div>"""
+
+    # P6: Industry Comparison 行业竞争格局
+    ic = ctx.get('industry_comparison') or {}
+    industry_html = ""
+    if ic and ic.get('competitors'):
+        comp_str = '、'.join(ic.get('competitors', [])[:4])
+        cs = ic.get('comparative_strength', 0)
+        advantages = ic.get('competitive_advantages', [])
+        threats = ic.get('competitive_threats', [])
+        adv_html = ''.join(f'<span style="background:rgba(16,185,129,0.1);padding:2px 6px;border-radius:3px;font-size:10px;color:var(--green2);margin:2px;">{a[:30]}</span>' for a in advantages[:4])
+        thr_html = ''.join(f'<span style="background:rgba(239,68,68,0.1);padding:2px 6px;border-radius:3px;font-size:10px;color:var(--red2);margin:2px;">{t[:30]}</span>' for t in threats[:4])
+        cs_col = 'var(--green2)' if cs >= 70 else ('var(--gold2)' if cs >= 40 else 'var(--red2)')
+        industry_html = f"""<div style="background:var(--bg3);border-radius:8px;padding:12px;margin-top:10px;border:1px solid var(--border);">
+  <div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px;">🏭 行业竞争格局 · 竞争力评分 <span style="color:{cs_col};font-weight:800;">{cs}/100</span></div>
+  <div style="font-size:11px;color:var(--text3);margin-bottom:6px;">竞争对手：{comp_str}</div>
+  <div style="display:flex;flex-wrap:wrap;gap:2px;margin-bottom:4px;">{adv_html}</div>
+  <div style="display:flex;flex-wrap:wrap;gap:2px;">{thr_html}</div>
+</div>"""
+
+    # P7: ML 特征透明化
+    ml_inp = ctx.get('ml_input') or {}
+    ml_rec = ctx.get('ml_recommendation', '')
+    ml_prob = ctx.get('ml_probability', 0)
+    ml_html = ""
+    if ml_inp:
+        try:
+            prob_pct = float(ml_prob) * 100 if float(ml_prob) < 1 else float(ml_prob)
+        except (TypeError, ValueError):
+            prob_pct = 0
+        prob_col = 'var(--green2)' if prob_pct > 65 else ('var(--red2)' if prob_pct < 40 else 'var(--gold2)')
+        features = []
+        for fk, fv in ml_inp.items():
+            features.append(f'<span style="background:var(--bg2);padding:2px 6px;border-radius:3px;font-size:10px;color:var(--text2);margin:2px;">{fk}={fv}</span>')
+        feat_html = ''.join(features)
+        ml_html = f"""<div style="background:var(--bg3);border-radius:8px;padding:12px;margin-top:10px;border:1px solid var(--border);">
+  <div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:6px;">🤖 ML 模型透视 · 推荐 <span style="color:{prob_col};font-weight:800;">{ml_rec}</span> · 概率 {prob_pct:.1f}%</div>
+  <div style="display:flex;flex-wrap:wrap;gap:2px;">{feat_html}</div>
+  <div style="font-size:10px;color:var(--text3);margin-top:4px;">ML 3日预期 {ctx.get("ml_3d", 0)}% · 7日预期 {ctx.get("ml_7d", 0)}% · 30日预期 {ctx.get("ml_30d", 0)}%</div>
+</div>"""
+
     return (
         f'<p><strong>蜂群综合评分 <span class="{sc_cls}">{score:.2f}/10</span>，方向 {direction}，{score_interp}。</strong>'
         f'置信区间 [{cb_lo:.2f}–{cb_hi:.2f}]（区间宽度 {cb_hi-cb_lo:.2f}，鉴别力 {disc_label}），'
@@ -1066,7 +1226,9 @@ def _build_swarm_narrative(ctx: dict) -> str:
         f'<p>{("逆向信号警示：" + "、".join(bear_sigs[:3])) if bear_sigs else "当前无重大逆向信号，蜂群单向性较强。"}'
         f'{"  操作建议：信号极度分散（σ≥2.5），仓位控制在标准的 40-50%，等待共振触发再加仓。" if dim_std >= 2.5 else ""}'
         f'（详见第六章情景推演与目标价推导）</p>'
+        f'{_render_regime_badge(ctx)}'
         f'{overview_para}'
+        f'{analog_html}{industry_html}{ml_html}'
     )
 
 
@@ -1262,6 +1424,17 @@ def _build_options_narrative(ctx: dict) -> str:
         p2 = ''
 
     # ── P3: GEX（Gamma Exposure）与做市商行为分析 ──
+    _mp_raw = ctx.get('max_pain')
+    _mp_val = None
+    if isinstance(_mp_raw, dict):
+        _mp_val = _mp_raw.get('max_pain')
+    elif isinstance(_mp_raw, (int, float)):
+        _mp_val = _mp_raw
+    try:
+        _mp_val = float(_mp_val) if _mp_val is not None else None
+    except (TypeError, ValueError):
+        _mp_val = None
+    max_pain_note = f'Max Pain 位于 <strong>${_mp_val:.0f}</strong>，做市商磁吸效应显著；' if _mp_val else ''
     p3_parts = []
     if gex_regime or gamma_exp:
         gex_interp = ''
@@ -1273,6 +1446,7 @@ def _build_options_narrative(ctx: dict) -> str:
             gex_interp = f'GEX 政体为 {gex_regime}' if gex_regime else 'GEX 数据可用'
         p3_parts.append(
             f'<strong>Dealer GEX 分析：</strong>'
+            f'{max_pain_note}'
             f'总 Gamma 暴露 {gamma_exp:+,.0f}，'
             f'GEX 政体为 <strong>{gex_regime or "未知"}</strong>——{gex_interp}。'
         )
@@ -1410,11 +1584,61 @@ def _build_macro_narrative(ctx: dict) -> str:
             f'（供应链信号亦影响第一章基本面维度评分）</p>'
         ) if sc_note or sc_signal else ''
 
+    # P4: 情绪动量数据（字段可能是 dict 或标量）
+    sent_pct = ctx.get('sentiment_pct')
+    _sm_raw = ctx.get('sentiment_momentum')
+    _sd_raw = ctx.get('sentiment_divergence')
+    vol_ratio_ctx = ctx.get('volume_ratio')
+    sent_parts = []
+    if sent_pct is not None:
+        sent_parts.append(f'舆情情绪 <strong>{sent_pct}%</strong>')
+    if _sm_raw is not None:
+        try:
+            if isinstance(_sm_raw, dict):
+                _mom_regime = _sm_raw.get('momentum_regime', '')
+                _mom_d1 = _sm_raw.get('delta_1d', 0)
+                mom_dir = '上升' if _mom_regime == 'rising' or float(_mom_d1) > 0 else '下降'
+                mom_col = 'var(--green2)' if mom_dir == '上升' else 'var(--red2)'
+                sent_parts.append(f'情绪动量 <span style="color:{mom_col};font-weight:700;">{mom_dir}（1d={_mom_d1:+d}，3d={_sm_raw.get("delta_3d",0):+d}）</span>')
+            else:
+                _mom_f = float(_sm_raw)
+                mom_dir = '上升' if _mom_f > 0 else '下降'
+                mom_col = 'var(--green2)' if _mom_f > 0 else 'var(--red2)'
+                sent_parts.append(f'情绪动量 <span style="color:{mom_col};font-weight:700;">{mom_dir}（{_mom_f:+.1f}）</span>')
+        except (TypeError, ValueError):
+            pass
+    if _sd_raw is not None:
+        try:
+            if isinstance(_sd_raw, dict):
+                _div_type = _sd_raw.get('divergence_type', 'none')
+                _div_sev = float(_sd_raw.get('severity', 0) or 0)
+                if _div_type != 'none' and _div_sev > 0.1:
+                    div_label = '看多背离（价跌情绪升）' if 'bull' in _div_type else '看空背离（价涨情绪降）'
+                    div_col = 'var(--green2)' if 'bull' in _div_type else 'var(--red2)'
+                    sent_parts.append(f'<span style="color:{div_col};">⚠️ {div_label}（强度{_div_sev:.1f}）</span>')
+            else:
+                div_f = float(_sd_raw)
+                if abs(div_f) > 0.1:
+                    div_label = '看多背离（价跌情绪升）' if div_f > 0 else '看空背离（价涨情绪降）'
+                    div_col = 'var(--green2)' if div_f > 0 else 'var(--red2)'
+                    sent_parts.append(f'<span style="color:{div_col};">⚠️ {div_label}</span>')
+        except (TypeError, ValueError):
+            pass
+    if vol_ratio_ctx is not None:
+        try:
+            vr = float(vol_ratio_ctx)
+            vr_label = '放量' if vr > 1.5 else ('缩量' if vr < 0.7 else '正常')
+            sent_parts.append(f'成交量比 {vr:.2f}x（{vr_label}）')
+        except (TypeError, ValueError):
+            pass
+    sent_html = '<p><strong>情绪动量信号：</strong>' + '；'.join(sent_parts) + '。</p>' if sent_parts else ''
+
     return (f'<p><strong>宏观环境：F&G指数 {fg if fg else "N/A"}（{fg_label}），GuardBee {guard_sc:.1f}/10。</strong>'
             f'{guard_disc[:200]}</p>'
             f'<p>情绪面：看多情绪 {sentiment}%（{"偏多" if sentiment>55 else ("偏空" if sentiment<45 else "中性")}），'
             f'5日动量 {momentum:+.2f}%，成交量比 {vol_ratio:.2f}x（{"放量" if vol_ratio>1.2 else ("缩量" if vol_ratio<0.8 else "正常")}）。'
             f'Reddit 排名 #{reddit.get("rank","N/A")}，提及 {reddit.get("mentions",0)} 次。</p>'
+            f'{sent_html}'
             f'<p>{"⚠️ 当前极度恐惧市场环境增加了短期波动性，建议降低仓位或等待恐慌情绪缓和再入场。" if fg and fg<=25 else ("市场情绪相对中性，系统性风险较低，以个股信号为主要决策依据。" if fg and fg<=55 else "市场情绪偏乐观，注意过热风险，控制追高仓位。")}</p>'
             f'{vix_para}'
             f'{congress_para}'
@@ -1661,7 +1885,58 @@ def _build_scenario_narrative(ctx: dict) -> str:
         f'{strategy}。{cat_window_note}{pin_note}</p>'
     )
 
-    return p1 + p2 + p3 + p4
+    # ── PARAGRAPH 5: Position Management ───────────────────────────────
+    pm = ctx.get('position_management') or {}
+    p5 = ""
+    if pm:
+        sl = pm.get('stop_loss', {})
+        tp = pm.get('take_profit', {})
+        oht = pm.get('optimal_holding_time', {})
+        holding_days = oht.get('recommended_holding_days', 'N/A')
+        holding_range = oht.get('holding_time_range', {})
+        sl_cons = f"${sl.get('conservative', 0):.2f}" if sl.get('conservative') else 'N/A'
+        sl_mod  = f"${sl.get('moderate', 0):.2f}" if sl.get('moderate') else 'N/A'
+        sl_agg  = f"${sl.get('aggressive', 0):.2f}" if sl.get('aggressive') else 'N/A'
+
+        tp_rows = ""
+        for lvl_key in ['level_1', 'level_2', 'level_3']:
+            lvl = tp.get(lvl_key, {})
+            if lvl:
+                tp_price = f"${lvl.get('price', 0):.2f}" if lvl.get('price') else 'N/A'
+                tp_ratio = f"{int(lvl.get('sell_ratio', 0) * 100)}%"
+                tp_reason = lvl.get('reason', '')
+                tp_rows += (f'<tr style="border-bottom:1px solid var(--border);">'
+                           f'<td style="padding:5px 8px;color:var(--green2);font-weight:600;">{tp_price}</td>'
+                           f'<td style="padding:5px 8px;text-align:center;">{tp_ratio}</td>'
+                           f'<td style="padding:5px 8px;color:var(--text3);font-size:11px;">{tp_reason}</td></tr>')
+
+        p5 = f"""<div style="background:var(--bg3);border-radius:10px;padding:16px;margin:8px 0 14px;border:1px solid var(--border);">
+  <div style="font-size:12px;font-weight:700;color:var(--text1);margin-bottom:10px;">📐 仓位管理 · 出场计划</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:12px;">
+    <div>
+      <div style="font-weight:600;color:var(--red2);margin-bottom:6px;">止损位（Stop Loss）</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <span style="background:rgba(239,68,68,0.1);padding:3px 8px;border-radius:4px;color:var(--red2);">保守 {sl_cons}</span>
+        <span style="background:rgba(239,68,68,0.15);padding:3px 8px;border-radius:4px;color:var(--red2);font-weight:700;">中等 {sl_mod}</span>
+        <span style="background:rgba(239,68,68,0.2);padding:3px 8px;border-radius:4px;color:var(--red2);">激进 {sl_agg}</span>
+      </div>
+      <div style="margin-top:8px;color:var(--text3);font-size:11px;">建议持仓 <strong style="color:var(--text1);">{holding_days}天</strong>（范围 {holding_range.get('minimum','?')}–{holding_range.get('maximum','?')} 天）</div>
+    </div>
+    <div>
+      <div style="font-weight:600;color:var(--green2);margin-bottom:6px;">分批止盈（Take Profit）</div>
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr style="color:var(--text3);font-size:10px;">
+          <th style="padding:3px 8px;text-align:left;">目标价</th>
+          <th style="padding:3px 8px;text-align:center;">减仓比例</th>
+          <th style="padding:3px 8px;text-align:left;">理由</th>
+        </tr></thead>
+        <tbody>{tp_rows}</tbody>
+      </table>
+    </div>
+  </div>
+</div>"""
+
+    return p1 + p2 + p3 + p4 + p5
 
 
 def _build_risk_narrative(ctx: dict) -> str:
@@ -1697,6 +1972,40 @@ def _build_risk_narrative(ctx: dict) -> str:
     crowding = ctx.get('signal_crowding', {}).get('alpha_decay_factor', 1.0)
 
     paras = []
+
+    # P5: 内部人交易 + 做空利息（字段均为 dict）
+    insider = ctx.get('insider_trades') or {}
+    si_raw = ctx.get('short_interest')
+    insider_si_parts = []
+    if insider and isinstance(insider, dict):
+        _ins_sent = insider.get('sentiment', '')
+        _ins_bought = float(insider.get('dollar_bought', 0) or 0)
+        _ins_sold = float(insider.get('dollar_sold', 0) or 0)
+        _ins_filings = insider.get('filings', 0)
+        if _ins_bought or _ins_sold or _ins_filings:
+            _net = _ins_bought - _ins_sold
+            net_label = '净买入' if _net > 0 else '净卖出'
+            ins_col = 'var(--green2)' if _net > 0 else 'var(--red2)'
+            _net_str = f"${abs(_net)/1e6:.1f}M" if abs(_net) >= 1e6 else f"${abs(_net):,.0f}"
+            insider_si_parts.append(
+                f'内部人 <span style="color:{ins_col};font-weight:700;">{net_label} {_net_str}</span>'
+                f'（{_ins_filings}笔申报，倾向{_ins_sent}）')
+    if si_raw is not None:
+        try:
+            if isinstance(si_raw, dict):
+                si_f = float(si_raw.get('short_pct_float', 0) or 0)
+                dtc = si_raw.get('days_to_cover')
+            else:
+                si_f = float(si_raw) if float(si_raw) > 1 else float(si_raw) * 100
+                dtc = None
+            si_col = 'var(--red2)' if si_f > 10 else ('var(--gold2)' if si_f > 5 else 'var(--text2)')
+            si_label = '高空头压力' if si_f > 10 else ('中等空头' if si_f > 5 else '空头正常')
+            dtc_note = f'，空头回补天数 {dtc:.1f}' if dtc else ''
+            insider_si_parts.append(f'做空比率 <span style="color:{si_col};font-weight:700;">{si_f:.1f}%</span>（{si_label}{dtc_note}）')
+        except (TypeError, ValueError):
+            pass
+    if insider_si_parts:
+        paras.append('<p><strong>内部人 &amp; 空头信号：</strong>' + '；'.join(insider_si_parts) + '。（见第一章蜂群评分 BearBee 逆向维度）</p>')
 
     # ── 段落1：核心风险因果链 ──────────────────────────────────
     if fg and fg <= 25:
@@ -1933,13 +2242,14 @@ def _try_compute_gex(ctx: dict) -> None:
 
 
 def _try_charts(ctx: dict) -> tuple:
-    """尝试生成5种图表，返回 (conf_img_html, opts_img_html, radar_img_html, iv_term_img_html, gex_profile_img_html)。"""
+    """尝试生成5种图表，返回 (conf, opts, iv_term, gex_profile, deep_skew)。"""
     try:
         import sys as _sys
         _sys.path.insert(0, str(Path(__file__).parent))
         from chart_engine import (render_confidence_chart, render_options_chart,
-                                   render_radar_chart, render_iv_term_chart,
-                                   render_gex_profile_chart)
+                                   render_iv_term_chart,
+                                   render_gex_profile_chart,
+                                   render_deep_skew_chart)
         ticker      = ctx["ticker"]
         report_date = ctx["report_date"]
         raw_data    = ctx.get("_raw_data")
@@ -1954,15 +2264,16 @@ def _try_charts(ctx: dict) -> tuple:
             return (f'<img src="data:image/png;base64,{b64}" {_img_style} alt="{alt}">'
                     if b64 else "")
 
-        conf_b64       = render_confidence_chart(raw_data, ticker, report_date)
-        opts_b64       = render_options_chart(raw_data, ticker, report_date, price)
-        radar_b64      = render_radar_chart(raw_data, ticker, report_date)
-        iv_term_b64    = render_iv_term_chart(raw_data, ticker, report_date)
-        gex_profile_b64= render_gex_profile_chart(raw_data, ticker, report_date, price)
+        conf_b64        = render_confidence_chart(raw_data, ticker, report_date)
+        opts_b64        = render_options_chart(raw_data, ticker, report_date, price)
+        iv_term_b64     = render_iv_term_chart(raw_data, ticker, report_date)
+        gex_profile_b64 = render_gex_profile_chart(raw_data, ticker, report_date, price)
+        skew_b64        = render_deep_skew_chart(raw_data, ticker, report_date)
 
         return (_wrap(conf_b64, "置信区间图表"), _wrap(opts_b64, "期权水位图表"),
-                _wrap(radar_b64, "蜂群雷达图"), _wrap(iv_term_b64, "IV期限结构图"),
-                _wrap(gex_profile_b64, "GEX Profile图"))
+                _wrap(iv_term_b64, "IV期限结构图"),
+                _wrap(gex_profile_b64, "GEX Profile图"),
+                _wrap(skew_b64, "IV Skew Smile"))
     except Exception as _e:
         import traceback as _tb
         print(f"  ⚠️  chart_engine 跳过: {_e}")
@@ -1984,7 +2295,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
     price_label = "收市价" if ctx.get("price_is_close") else "扫描时价格"
 
     # ── 图表生成（可选，matplotlib 未安装时静默跳过）────────────────────────────
-    _conf_chart_html, _opts_chart_html, _radar_chart_html, _iv_term_chart_html, _gex_profile_chart_html = _try_charts(ctx)
+    _conf_chart_html, _opts_chart_html, _iv_term_chart_html, _gex_profile_chart_html, _skew_chart_html = _try_charts(ctx)
 
     # ── Executive Summary ──────────────────────────────────────────────────────
     exec_summary_html = _build_executive_summary(ctx)
@@ -2360,6 +2671,63 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
             f'<div style="font-size:11px;color:var(--text2);line-height:1.5;">{_signal}</div>'
             f'</div>'
         )
+
+    # ── GEX 增强卡片（Flip Acceleration + Vanna Stress）──────────────────────
+    _gex_enhance_html = ""
+    _flip_acc = ctx.get("flip_acceleration", {})
+    _vanna_st = ctx.get("vanna_stress", {})
+    _gex_norm = ctx.get("gex_normalized_pct")
+    _gex_enh_parts = []
+
+    if _flip_acc and _flip_acc.get("urgency"):
+        _fa_urgency = _flip_acc.get("urgency", "low")
+        _fa_slope = _flip_acc.get("acceleration", 0)
+        _fa_colors = {"critical": "var(--red2)", "high": "#f97316", "medium": "var(--gold2)", "low": "var(--green2)"}
+        _fa_labels = {"critical": "极高", "high": "高", "medium": "中", "low": "低"}
+        _fa_c = _fa_colors.get(_fa_urgency, "var(--text3)")
+        _gex_enh_parts.append(
+            f'<div class="opt-card oc-neut">'
+            f'<div class="oc-label">GEX 翻转加速度</div>'
+            f'<div class="oc-val" style="color:{_fa_c};font-size:14px;">{_fa_labels.get(_fa_urgency, "N/A")}</div>'
+            f'<div style="font-size:10px;color:var(--text3);margin-top:2px;">斜率 {_fa_slope:+.4f}</div>'
+            f'<div class="oc-sub">{"⚠️ 翻转迫近" if _fa_urgency in ("critical","high") else "翻转压力" + _fa_labels.get(_fa_urgency, "")}</div>'
+            f'</div>'
+        )
+
+    if _vanna_st and _vanna_st.get("total_vanna_gex_shift"):
+        _vs_shift = _vanna_st.get("total_vanna_gex_shift", 0)
+        _vs_flip = _vanna_st.get("can_flip_gex", False)
+        _vs_shock = _vanna_st.get("vol_shock", 0.05)
+        _vs_c = "var(--red2)" if _vs_flip else "var(--green2)"
+        _gex_enh_parts.append(
+            f'<div class="opt-card oc-neut">'
+            f'<div class="oc-label">Vanna 压力测试</div>'
+            f'<div class="oc-val" style="color:{_vs_c};font-size:14px;">{_vs_shift:+.2f}M$</div>'
+            f'<div style="font-size:10px;color:var(--text3);margin-top:2px;">IV+{_vs_shock*100:.0f}% 冲击</div>'
+            f'<div class="oc-sub">{"⚠️ 可翻转GEX" if _vs_flip else "GEX 稳定"}</div>'
+            f'</div>'
+        )
+
+    if _gex_norm is not None:
+        _gn_c = "var(--gold2)"
+        _gex_enh_parts.append(
+            f'<div class="opt-card oc-neut">'
+            f'<div class="oc-label">GEX / OI 归一化</div>'
+            f'<div class="oc-val" style="color:{_gn_c};font-size:14px;">{_gex_norm:.2f}%</div>'
+            f'<div class="oc-sub">跨标的可比</div>'
+            f'</div>'
+        )
+
+    if _gex_enh_parts:
+        _gex_enhance_html = (
+            '<div class="opt-grid" style="margin-bottom:14px;">'
+            + "".join(_gex_enh_parts)
+            + '</div>'
+        )
+
+    # ── Vol Surface + Skew Alerts（来自 main() 阶段预计算）──────────────────
+    _vol_surface_html = ctx.get("vol_surface_html", "")
+    _skew_alerts_html = ctx.get("skew_alerts_html", "")
 
     # F&G 显示
     fg = ctx.get("fg_score")
@@ -3153,12 +3521,13 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
       <span class="section-badge {direction_badge(direction)}">综合 {score:.2f} · {'看多' if 'bull' in direction else ('看空' if 'bear' in direction else '中性')}</span>
     </div>
     <div class="section-body">
-      {score_summary_html}{_conf_chart_html}{_radar_chart_html}
+      {score_summary_html}{_conf_chart_html}
       <div class="score-grid" style="margin-top:14px;">{score_cards}</div>
       <div class="divider"></div>
       <div class="prose">{reasoning.get('swarm_analysis', '<p>分析生成中...</p>')}</div>
       <div style="margin-top:14px;">{bar_rows}</div>
       {accuracy_html}
+      {ctx.get('rl_insight_html', '')}
       {ctx.get('thesis_break_html', '')}
     </div>
   </div>
@@ -3210,7 +3579,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
       <span class="section-badge {flow_badge}">P/C={ctx['put_call_ratio']} · OI={oi_str} · {bull_unusual_count}个看涨异动</span>
     </div>
     <div class="section-body">
-      {_opts_chart_html}{_iv_term_chart_html}{_gex_profile_chart_html}
+      {_opts_chart_html}{_iv_term_chart_html}{_skew_chart_html}{_gex_profile_chart_html}
       <div class="opt-grid" style="margin-bottom:16px;">
         <div class="opt-card oc-bull">
           <div class="oc-label">Put/Call 比</div>
@@ -3248,6 +3617,9 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
       </div>
 
       {iv_term_html}
+      {_gex_enhance_html}
+      {_vol_surface_html}
+      {_skew_alerts_html}
 
       <div class="levels-grid" style="margin-bottom:16px;">
         <div class="level-block support">
@@ -3311,6 +3683,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
         {vix_card_html}
         {congress_card_html}
       </div>
+      {ctx.get("cboe_card_html", "")}
       <div class="prose">{reasoning.get('macro', '<p>分析生成中...</p>')}</div>
     </div>
   </div>
@@ -3368,6 +3741,8 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
           {'正期望值在共振触发环境中出现，进一步确认信号有效性。' if '+' in ev_str else '负期望值提示谨慎，建议小仓位或观望。'}
         </div>
       </div>
+
+      {ctx.get('strategy_backtest_html', '')}
 
       <div class="prose" style="margin-top:14px;">{reasoning.get('scenario', '<p>分析生成中...</p>')}</div>
     </div>
@@ -3450,7 +3825,7 @@ def _run_outcome_backfill(out_dir: Path) -> None:
 
 
 def _load_ticker_accuracy(ticker: str, out_dir: Path) -> dict:
-    """读取该 ticker 的历史预测准确率（Gap 3）"""
+    """读取该 ticker 的历史预测准确率（Gap 3），含 Sharpe / PF / 最大连败"""
     try:
         from feedback_loop import BacktestAnalyzer
         snap_dir = str(out_dir / "report_snapshots")
@@ -3463,23 +3838,56 @@ def _load_ticker_accuracy(ticker: str, out_dir: Path) -> dict:
             return {"n_snapshots": len(snaps), "pending": True}
         wins = 0
         total_ret = 0.0
+        direction_adjusted_returns = []
+        gross_profit = 0.0
+        gross_loss = 0.0
+        max_consec_loss = 0
+        cur_consec_loss = 0
         n = len(t7_snaps)
         for s in t7_snaps:
             ret = (s.actual_price_t7 - s.entry_price) / s.entry_price * 100
             total_ret += ret
-            if (s.direction == "Long" and ret > 0) or (s.direction == "Short" and ret < 0):
+            is_win = (s.direction == "Long" and ret > 0) or (s.direction == "Short" and ret < 0)
+            if is_win:
                 wins += 1
+                cur_consec_loss = 0
+            else:
+                cur_consec_loss += 1
+                max_consec_loss = max(max_consec_loss, cur_consec_loss)
+            # Direction-adjusted return
+            adj_ret = ret if s.direction == "Long" else -ret
+            direction_adjusted_returns.append(adj_ret)
+            if adj_ret > 0:
+                gross_profit += adj_ret
+            else:
+                gross_loss += abs(adj_ret)
+        # Sharpe ratio (annualized, 252/7 periods)
+        sharpe = 0.0
+        if len(direction_adjusted_returns) >= 2:
+            periods_per_year = 252 / 7
+            rf_per_period = 0.05 / periods_per_year
+            excess = [r / 100.0 - rf_per_period for r in direction_adjusted_returns]
+            mean_ex = sum(excess) / len(excess)
+            var_ex = sum((x - mean_ex) ** 2 for x in excess) / (len(excess) - 1)
+            std_ex = var_ex ** 0.5
+            if std_ex > 0:
+                sharpe = round((mean_ex / std_ex) * (periods_per_year ** 0.5), 3)
+        # Profit Factor
+        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.0
         return {
             "n": n,
             "win_rate": round(wins / n * 100, 1),
             "avg_ret_7d": round(total_ret / n, 2),
+            "sharpe": sharpe,
+            "profit_factor": profit_factor,
+            "max_consec_loss": max_consec_loss,
         }
     except Exception:
         return {}
 
 
 def _render_accuracy_card(accuracy: dict) -> str:
-    """渲染历史准确率卡片 HTML（Gap 3）"""
+    """渲染历史准确率卡片 HTML（Gap 3），含 Sharpe / PF / 最大连败"""
     if not accuracy:
         return ""
     if accuracy.get("pending"):
@@ -3492,8 +3900,25 @@ def _render_accuracy_card(accuracy: dict) -> str:
     n   = accuracy["n"]
     wr  = accuracy["win_rate"]
     ar  = accuracy["avg_ret_7d"]
-    wr_color = "var(--green2)" if wr >= 60 else ("var(--yellow2)" if wr >= 50 else "var(--red2)")
+    sharpe = accuracy.get("sharpe", 0)
+    pf = accuracy.get("profit_factor", 0)
+    mcl = accuracy.get("max_consec_loss", 0)
+    wr_color = "var(--green2)" if wr >= 60 else ("var(--gold2)" if wr >= 50 else "var(--red2)")
     ar_color = "var(--green2)" if ar >= 0 else "var(--red2)"
+    sh_color = "var(--green2)" if sharpe > 0.5 else ("var(--gold2)" if sharpe > 0 else "var(--red2)")
+    pf_color = "var(--green2)" if pf > 1.5 else ("var(--gold2)" if pf > 1.0 else "var(--red2)")
+    mcl_color = "var(--green2)" if mcl <= 3 else ("var(--gold2)" if mcl <= 5 else "var(--red2)")
+    # 第二行：新增指标
+    _row2 = ""
+    if sharpe != 0 or pf != 0:
+        _pf_str = f"{pf:.2f}" if pf < 100 else "∞"
+        _row2 = (
+            '<div style="display:flex;gap:16px;margin-top:4px;align-items:center;">'
+            f'<span style="font-size:11px;">Sharpe <strong style="color:{sh_color};">{sharpe:.2f}</strong></span>'
+            f'<span style="font-size:11px;">PF <strong style="color:{pf_color};">{_pf_str}</strong></span>'
+            f'<span style="font-size:11px;">最大连败 <strong style="color:{mcl_color};">{mcl}</strong></span>'
+            '</div>'
+        )
     return (
         '<div style="margin-top:12px;padding:10px 14px;background:var(--bg2);'
         'border-radius:8px;border:1px solid var(--border1);">'
@@ -3503,7 +3928,7 @@ def _render_accuracy_card(accuracy: dict) -> str:
         f'<span style="font-size:13px;">方向胜率 <strong style="color:{wr_color};">{wr}%</strong></span>'
         f'<span style="font-size:13px;">平均收益 <strong style="color:{ar_color};">{ar:+.2f}%</strong></span>'
         f'<span style="font-size:11px;color:var(--text3);">{n} 样本</span>'
-        '</div></div>'
+        f'</div>{_row2}</div>'
     )
 
 
@@ -3563,6 +3988,189 @@ def main():
     #         在报告生成阶段用 ctx['price'] 实时重算，保证 CH4 GEX 卡片有数据
     print("📐 检查 GEX 数据...")
     _try_compute_gex(ctx)
+
+    # 2a-2. SABR 波动率曲面分析（CH4 增强）
+    ctx["vol_surface_html"] = ""
+    ctx["skew_alerts_html"] = ""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent))
+        from vol_surface import VolSurface, format_surface_for_report, format_skew_alert
+        print("   📐 SABR 波动率曲面...", end="", flush=True)
+        # 从 JSON 原始数据中提取期权链，构造 build_surface 所需格式
+        _raw = ctx.get("_raw_data") or ctx.get("_raw") or {}
+        _odet_raw = (_raw.get("swarm_results", {}).get("agent_details", {})
+                     .get("OracleBeeEcho", {}).get("details", {}))
+        _chain_raw = _odet_raw.get("options_chain", [])
+        if _chain_raw:
+            _vs = VolSurface(ctx["ticker"])
+            _vs.build_surface(_chain_raw)  # 返回 None，数据存在 _vs.slices
+            if _vs.slices:
+                ctx["vol_surface_html"] = format_surface_for_report(_vs)
+                _anomalies = _vs.detect_surface_anomalies()
+                if _anomalies:
+                    _alert_parts = [format_skew_alert(a) for a in _anomalies[:3]]
+                    ctx["skew_alerts_html"] = "\n".join(
+                        f'<div style="margin-bottom:8px;padding:8px 12px;background:rgba(239,68,68,0.08);'
+                        f'border:1px solid rgba(239,68,68,0.25);border-radius:6px;font-size:11px;'
+                        f'color:var(--red2);">⚠️ {a}</div>' for a in _alert_parts if a
+                    )
+                    print(f" ✅  ({len(_vs.slices)} 到期日, {len(_anomalies)} 异常)")
+                else:
+                    print(f" ✅  ({len(_vs.slices)} 到期日, 无异常)")
+            else:
+                print(" ⏭  SABR 校准失败")
+        else:
+            print(" ⏭  无期权链数据")
+    except Exception as _e_vs:
+        print(f" ⏭  跳过: {_e_vs}")
+
+    # 2a-3. CBOE 市场指标（CH5 增强）
+    ctx["cboe_card_html"] = ""
+    try:
+        from cboe_fetcher import CBOEDailyFetcher, format_cboe_for_macro_card
+        print("   📊 CBOE 市场指标...", end="", flush=True)
+        _cboe = CBOEDailyFetcher()
+        _cboe_data = _cboe.fetch_all()
+        if _cboe_data and any(v for v in _cboe_data.values() if v):
+            ctx["cboe_card_html"] = format_cboe_for_macro_card(_cboe_data)
+            _cboe_parts = []
+            if _cboe_data.get("put_call_ratio"):
+                _cboe_parts.append(f"P/C={_cboe_data['put_call_ratio'].get('value', 'N/A')}")
+            if _cboe_data.get("skew"):
+                _cboe_parts.append(f"SKEW={_cboe_data['skew'].get('value', 'N/A')}")
+            if _cboe_data.get("vvix"):
+                _cboe_parts.append(f"VVIX={_cboe_data['vvix'].get('value', 'N/A')}")
+            print(f" ✅  ({' · '.join(_cboe_parts)})")
+        else:
+            print(" ⏭  无数据")
+    except Exception as _e_cboe:
+        print(f" ⏭  跳过: {_e_cboe}")
+
+    # 2a-4. Quiver 国会交易补充（如 Scout 蜂未提供 congress 数据）
+    if not ctx.get("congress") or (ctx["congress"].get("buy_count", 0) + ctx["congress"].get("sell_count", 0)) == 0:
+        try:
+            from quiver_fetcher import QuiverFetcher
+            print("   🏛️ Quiver 国会交易...", end="", flush=True)
+            _qf = QuiverFetcher()
+            _cong_sig = _qf.calculate_congressional_signal(ticker)
+            if _cong_sig and (_cong_sig.get("buy_count", 0) + _cong_sig.get("sell_count", 0)) > 0:
+                ctx["congress"] = _cong_sig
+                print(f" ✅  ({_cong_sig.get('buy_count',0)}买/{_cong_sig.get('sell_count',0)}卖)")
+            else:
+                print(" ⏭  无交易")
+        except Exception as _e_qv:
+            print(f" ⏭  跳过: {_e_qv}")
+
+    # 2a-5. FinRL 权重建议（CH1 增强，advisory only）
+    ctx["rl_insight_html"] = ""
+    try:
+        from finrl_bridge import FinRLBridge
+        _snap_dir = str(out_dir / "report_snapshots")
+        if Path(_snap_dir).exists():
+            print("   🤖 FinRL 权重建议...", end="", flush=True)
+            _rl = FinRLBridge()
+            _rl_features = _rl.prepare_features(_snap_dir)
+            if _rl_features and len(_rl_features.get("dates", [])) >= 30:
+                _rl_policy = _rl.train_weight_policy(_rl_features)
+                _rl_suggested = _rl_policy.get("suggested_weights", {})
+                _rl_conf = _rl_policy.get("confidence", 0)
+                _rl_method = _rl_policy.get("method", "unknown")
+                if _rl_suggested and _rl_conf > 0.3:
+                    # 找出偏差最大的 agent
+                    _rl_diffs = []
+                    for _agent, _w in sorted(_rl_suggested.items(), key=lambda x: x[1], reverse=True):
+                        _rl_diffs.append(f"{_agent.replace('Bee','')}: {_w:.0%}")
+                    _rl_top3 = " · ".join(_rl_diffs[:3])
+                    _rl_conf_color = "var(--green2)" if _rl_conf > 0.6 else "var(--gold2)"
+                    ctx["rl_insight_html"] = (
+                        f'<div style="margin-top:12px;padding:10px 14px;background:rgba(59,130,246,0.08);'
+                        f'border:1px solid rgba(59,130,246,0.25);border-radius:8px;">'
+                        f'<span style="font-size:11px;font-weight:700;color:var(--blue2);">🤖 RL 权重建议（{_rl_method}）</span>'
+                        f'<div style="font-size:12px;color:var(--text2);margin-top:4px;">{_rl_top3}</div>'
+                        f'<div style="font-size:10px;color:var(--text3);margin-top:3px;">'
+                        f'信心度 <span style="color:{_rl_conf_color};font-weight:700;">{_rl_conf:.0%}</span> '
+                        f'· 仅供参考，不自动应用 · 基于 {len(_rl_features["dates"])} 份快照</div>'
+                        f'</div>'
+                    )
+                    print(f" ✅  (信心{_rl_conf:.0%}, {_rl_method})")
+                else:
+                    print(f" ⏭  信心不足({_rl_conf:.0%})")
+            else:
+                _n_snaps = len(_rl_features.get("dates", [])) if _rl_features else 0
+                print(f" ⏭  快照不足({_n_snaps}/30)")
+    except Exception as _e_rl:
+        print(f" ⏭  跳过: {_e_rl}")
+
+    # 2a-6. 期权策略回测（CH6 增强）
+    ctx["strategy_backtest_html"] = ""
+    try:
+        from options_backtester import OptionsBacktester
+        _snap_dir = str(out_dir / "report_snapshots")
+        if Path(_snap_dir).exists():
+            print("   📋 期权策略回测...", end="", flush=True)
+            _bt = OptionsBacktester(snapshots_dir=_snap_dir)
+            _bt_results = _bt.backtest_all_strategies(horizon="t7")
+            _bt_regime = _bt.find_best_strategy_by_regime()
+            if _bt_results:
+                # 找当前政体的最优策略
+                _cur_regime = (ctx.get("market_regime") or {}).get("overall_regime", "neutral")
+                _regime_key = _cur_regime.lower().replace(" ", "_")
+                _best_strat = _bt_regime.get(_regime_key, {})
+                _best_name = _best_strat.get("strategy", "")
+                _best_wr = _best_strat.get("win_rate", 0)
+                _best_ret = _best_strat.get("avg_return_pct", 0)
+                # 生成全策略概览 HTML
+                _strat_rows = ""
+                for _sn, _sr in _bt_results.items():
+                    _sr_d = _sr.to_dict() if hasattr(_sr, 'to_dict') else _sr
+                    _s_wr = _sr_d.get("win_rate", 0) * 100
+                    _s_ret = _sr_d.get("avg_return_pct", _sr_d.get("avg_return", 0))
+                    _s_n = _sr_d.get("num_trades", 0)
+                    _s_pf = _sr_d.get("profit_factor", 0)
+                    if _s_n == 0:
+                        continue
+                    _is_best = (_sn == _best_name)
+                    _row_bg = "rgba(16,185,129,0.08)" if _is_best else "transparent"
+                    _strat_rows += (
+                        f'<tr style="background:{_row_bg};">'
+                        f'<td style="padding:4px 8px;font-size:11px;color:var(--text2);font-weight:{"700" if _is_best else "400"};">'
+                        f'{"⭐ " if _is_best else ""}{_sn}</td>'
+                        f'<td style="padding:4px 8px;font-size:11px;text-align:center;color:{"var(--green2)" if _s_wr >= 50 else "var(--red2)"}">{_s_wr:.0f}%</td>'
+                        f'<td style="padding:4px 8px;font-size:11px;text-align:center;color:{"var(--green2)" if _s_ret >= 0 else "var(--red2)"}">{_s_ret:+.1f}%</td>'
+                        f'<td style="padding:4px 8px;font-size:11px;text-align:center;color:var(--text3);">{_s_pf:.2f}</td>'
+                        f'<td style="padding:4px 8px;font-size:11px;text-align:center;color:var(--text3);">{_s_n}</td>'
+                        f'</tr>'
+                    )
+                if _strat_rows:
+                    _regime_note = (
+                        f'当前政体 <strong style="color:var(--blue2);">{_cur_regime}</strong>'
+                        f' → 最优: <strong style="color:var(--green2);">{_best_name}</strong>'
+                        f' (胜率{_best_wr*100:.0f}%, 均收{_best_ret:+.1f}%)'
+                    ) if _best_name else "无政体匹配"
+                    ctx["strategy_backtest_html"] = (
+                        f'<div style="margin-top:14px;padding:12px 14px;background:var(--bg2);'
+                        f'border:1px solid var(--border);border-radius:8px;">'
+                        f'<div style="font-size:11px;font-weight:700;color:var(--text2);margin-bottom:8px;">'
+                        f'📋 期权策略回测（T+7, 历史快照）</div>'
+                        f'<div style="font-size:11px;color:var(--text2);margin-bottom:8px;">{_regime_note}</div>'
+                        f'<table style="width:100%;border-collapse:collapse;border-spacing:0;">'
+                        f'<tr style="border-bottom:1px solid var(--border);">'
+                        f'<th style="padding:4px 8px;font-size:10px;color:var(--text3);text-align:left;">策略</th>'
+                        f'<th style="padding:4px 8px;font-size:10px;color:var(--text3);">胜率</th>'
+                        f'<th style="padding:4px 8px;font-size:10px;color:var(--text3);">均收</th>'
+                        f'<th style="padding:4px 8px;font-size:10px;color:var(--text3);">PF</th>'
+                        f'<th style="padding:4px 8px;font-size:10px;color:var(--text3);">样本</th>'
+                        f'</tr>{_strat_rows}</table>'
+                        f'</div>'
+                    )
+                    print(f" ✅  ({len(_bt_results)} 策略, 最优: {_best_name})")
+                else:
+                    print(" ⏭  无交易记录")
+            else:
+                print(" ⏭  回测无结果")
+    except Exception as _e_bt:
+        print(f" ⏭  跳过: {_e_bt}")
 
     # 2b. 加载昨日 JSON + T-7 JSON，构建 Delta 上下文
     prev_path = find_prev_json(ticker, json_path, days_back=1)

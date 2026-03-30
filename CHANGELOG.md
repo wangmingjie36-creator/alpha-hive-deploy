@@ -5,6 +5,223 @@
 
 ---
 
+## [0.13.0] — 2026-03-28
+
+### Added（深度报告 8 项功能升级）
+
+- **P1: 仓位管理出场计划**（`generate_deep_v2.py` `_build_scenario_narrative()`）
+  - 新增 position_management 字段提取（stop_loss/take_profit/optimal_holding_time）
+  - CH6 P5 卡片：止损位（保守/中等/激进）+ 分批止盈表格（目标价/减仓比例/理由）
+  - 建议持仓天数范围显示
+
+- **P2: 历史回测 Analog 相似机会**（`generate_deep_v2.py` `_build_swarm_narrative()`）
+  - 新增 historical_analogs + expected_returns 字段提取
+  - CH1 analog_html 卡片：历史相似信号回测表（日期/事件/T+7/T+30/最大回撤/结果）
+  - 样本统计：样本量、平均最大回撤率
+
+- **P3: Max Pain 做市商磁吸位**（`generate_deep_v2.py` `_build_options_narrative()`）
+  - 新增 max_pain 字段提取
+  - CH4 P3 GEX 段落注入：Max Pain 价位显著提升可信度
+
+- **P4: 情绪动量与背离信号**（`generate_deep_v2.py` `_build_macro_narrative()`）
+  - 新增 sentiment_pct/sentiment_momentum/sentiment_divergence/volume_ratio 字段提取
+  - CH5 新增 sent_html 卡片：舆情情绪%、动量方向（上升/下降）、看多/看空背离、成交量比
+  - 背离检测：价跌情绪升（看多背离）或价涨情绪降（看空背离）自动标记 ⚠️
+
+- **P5: 内部人交易 + 做空比率**（`generate_deep_v2.py` `_build_risk_narrative()`）
+  - 新增 insider_trades + short_interest 字段提取
+  - CH7 风险章插入内部人信息：净买入/卖出、交易笔数、做空比率等级（高/中等/正常）
+  - 颜色映射：做空>10%（红）、5-10%（金）、<5%（灰）
+
+- **P6: 行业竞争格局评分**（`generate_deep_v2.py` `_build_swarm_narrative()`）
+  - 新增 industry_comparison 字段提取（竞争对手、竞争力评分、优势/威胁）
+  - CH1 industry_html 卡片：竞争力评分（0-100）+ 竞争对手列表 + 优势/威胁标签云
+
+- **P7: ML 特征透明化**（`generate_deep_v2.py` `_build_swarm_narrative()`）
+  - 新增 ml_input/ml_recommendation/ml_probability/ml_3d 字段提取
+  - CH1 ml_html 卡片：推荐方向（bold）、概率%（含颜色）、特征列表（标签云）、预期收益（3/7/30d）
+
+- **P8: Deep Skew IV 微笑曲线**（`chart_engine.py` 新增 `render_deep_skew_chart()`）
+  - 新增 `render_deep_skew_chart(data, ticker, date_str) → base64 PNG` 函数
+  - 数据源：`oracle_bee.details.deep_skew`（dict of {delta:iv} 或 list of {delta,iv}）
+  - 曲线图：Delta vs IV，带 ATM 标记虚线、曲线下填充
+  - 可用性：深度 skew 数据不足时静默返回 None
+
+### Changed
+
+- **`extract()` 函数（generate_deep_v2.py line ~600）**：新增 8 个 P1-P8 字段到返回 dict
+- **`_build_swarm_narrative()` 返回值**：拼接 analog_html + industry_html + ml_html 三张卡片
+- **`_build_macro_narrative()` 返回值**：插入 sent_html 情绪动量卡片
+- **`_build_risk_narrative()` 前导**：添加 insider_si_parts 段落
+
+---
+
+## [0.12.1] — 2026-03-27
+
+### Added（Dashboard 高价值可视化增强）
+
+- **Equity Curve 权益曲线**（`dashboard_renderer.py` + `index.html` + `templates/dashboard.js` + `templates/dashboard.css`）
+  - `_load_accuracy_data()` 新增 `equity_curve` 字段 — 从 backtester SQLite 查询全部 T+7 验证记录
+  - 方向调整收益：bearish 预测自动取反收益，计算真实策略 P&L
+  - 累计收益曲线 + 回撤阴影（Chart.js line chart，双数据集）
+  - 分段着色：正收益区间绿色，负收益区间红色（`segment.borderColor` 回调）
+  - 统计面板：累计收益、最大回撤、方向胜率、平均单笔、已验证笔数
+  - Cold state：T+7 数据未就绪时显示等待提示，backfill 后自动激活
+  - bfcache 恢复兼容（`pageshow` 事件重建图表）
+  - 当前数据：145 笔交易，累计 +204.68%，最大回撤 58.72%，胜率 59.3%
+
+- **蜂群分歧度分析（Swarm Divergence）**（`dashboard_renderer.py` + `index.html` + `templates/`）
+  - `render_dashboard_html()` 新增蜂群分歧度计算模块
+  - 对 7 只核心蜂（Scout/Rival/Oracle/Chronos/Buzz/Guard/Bear）逐标的统计：
+    - 评分标准差（σ）、极差（spread）、共识度（majority%）
+    - 方向投票分布（bullish/bearish/neutral 计数）
+    - 每只蜂的评分 + 方向柱状图
+  - `swarm_divergence` 字段写入 `dashboard-data.json`
+  - 可视化卡片：按共识度升序排列（低共识 = 需关注的标的优先展示）
+  - 三级共识标签：高共识（≥75%，绿）/ 中等共识（≥55%，橙）/ 低共识（<55%，红⚠️）
+  - 方向颜色映射：bull→绿 / bear→红 / neut→橙（修复了初始 `dir[0]` 歧义 bug）
+
+### Fixed
+
+- 蜂群分歧度方向映射 `dir` 字段从 `"b"/"n"` 改为 `"bull"/"bear"/"neut"`，避免 bullish/bearish 首字母 `"b"` 碰撞
+
+---
+
+## [0.12.0] — 2026-03-27
+
+### Added（期权策略回溯测试框架：验证 Scout/Oracle/Bear 推荐）
+
+- **`options_backtester.py`**（新文件）
+  - **`OptionsBacktester`** 类 — 回溯测试主框架，从 report_snapshots 加载历史推荐信号
+    - `__init__(snapshots_dir)` — 初始化并加载全部快照 JSON
+    - `_load_snapshots()` — 从 report_snapshots/ 读取 64+ 份历史记录
+  - **策略定义** — 6 种期权策略回溯
+    - `StrategyType` enum: `long_call`, `long_put`, `bull_call_spread`, `bear_put_spread`, `iron_condor`, `straddle`
+    - `StrategyResult` dataclass — 单笔交易详情（入场价、出场价、DTE、IV、P&L%、最大回撤、政体）
+    - `StrategyBacktestResult` dataclass — 策略汇总统计（胜率、平均收益、夏普比、最大回撤、利润因子）
+  - **核心方法**
+    - `backtest_strategy(strategy, predictions, horizon)` → `StrategyBacktestResult` — 单策略回溯
+    - `backtest_all_strategies(predictions, horizon)` → dict — 6 策略全部回溯
+    - `find_best_strategy_by_regime(predictions)` → dict{regime → best_strategy} — 按政体优化推荐
+    - `generate_strategy_report(horizon)` → formatted string — 完整报告生成
+    - `inject_strategy_results_to_report(report_dict, horizon)` → enhanced report — 与 feedback_loop 集成（注入 CH6 场景推荐）
+  - **Black-Scholes 期权定价**
+    - `estimate_option_pnl(entry_price, exit_price, strike, dte_entry, dte_exit, iv_entry, iv_exit, option_type)` — 单腿期权P&L估算
+    - `estimate_spread_pnl(...)` — 价差策略净P&L估算
+    - 集成 `greeks_engine.py` 的 `bs_price()`；无法导入时回退到简化版本
+    - 支持 call/put 两种期权
+  - **市场政体分类** — 5 大政体
+    - `MarketRegime` enum: `low_iv_bull`, `low_iv_bear`, `high_iv_bull`, `high_iv_bear`, `neutral`
+    - `_classify_regime(snapshot)` — 根据 composite_score 和 direction 推导政体
+  - **信号-策略映射**
+    - `_map_signal_to_strategy(snapshot)` — 评分阈值映射至推荐策略
+      - score > 7.5 + bullish → bull_call_spread
+      - score < 4.0 + bearish → bear_put_spread
+      - score 5-6 + 高IV → iron_condor
+      - 其他 → long_call / long_put
+    - `_estimate_strikes_from_price(stock_price, strategy)` — ATM + OTM 行权价自动推导
+  - **性能指标计算**
+    - 胜率 (win_rate) — 盈利笔数 / 总笔数
+    - 平均收益 (avg_return) — 单笔收益百分比均值
+    - 夏普比 (sharpe_ratio) — 年化收益 / 年化波动（假设 252 交易日）
+    - 最大回撤 (max_drawdown) — 回溯期间最大负P&L
+    - 利润因子 (profit_factor) — 总盈利 / 总亏损
+  - **演示脚本** (`if __name__ == "__main__"`)
+    - 加载 64 份快照，演示 6 策略全部回溯
+    - 按政体分类输出最优策略
+    - 生成并保存 `strategy_backtest_report.txt`
+  - **测试数据**：基于真实报告快照，long_put 策略表现最佳（56.82% 胜率，5.48 夏普比）
+
+### Integration Points（集成点）
+
+- **`feedback_loop.py`** — ReportSnapshot 加载器，提供历史价格数据（actual_prices.t1/t7/t30）
+- **`generate_deep_v2.py`** — CH6 "五情景推演" 可调用 `OptionsBacktester.inject_strategy_results_to_report()` 注入最优策略建议
+- **`greeks_engine.py`** — Black-Scholes 定价，无法导入时使用内建简化模型
+- **`report_snapshots/`** — 数据源（64+ JSON 快照，包含历史推荐和实现价格）
+
+### Added（分析深度升级 + 新数据源 + RL 桥接）
+
+- **`vol_surface.py`**（新文件，~1004 行）
+  - `sabr_implied_vol()` — Hagan 2002 SABR 波动率曲面模型
+  - `_nelder_mead_minimize()` — 纯 Python Nelder-Mead 优化器（无需 scipy）
+  - `SABRCalibrator` 类 — SABR 参数校准 + smile 生成 + skew 异常检测
+  - `VolSurface` 类 — 多到期日曲面构建、25Δ Risk Reversal / Butterfly 计算、曲面异常检测
+  - `format_surface_for_report()` / `format_skew_alert()` — CH4 HTML 卡片输出
+
+- **`cboe_fetcher.py`**（新文件，~350 行）
+  - `CBOEDailyFetcher` 类 — 5 个 CBOE 市场指标
+    - `fetch_equity_putcall_ratio()` — 股票期权看跌/看涨比
+    - `fetch_vix_term_structure()` — VIX 期限结构（Contango/Backwardation）
+    - `fetch_skew_index()` — CBOE SKEW 尾部风险指数
+    - `fetch_vvix()` — VIX 的波动率（波动率之波动率）
+    - `fetch_all()` — 一键获取全部指标
+  - 智能缓存：盘中 30 分钟 / 盘后 4 小时 TTL
+  - `format_cboe_for_macro_card()` — 宏观情绪 HTML 卡片
+
+- **`quiver_fetcher.py`**（新文件）
+  - `QuiverFetcher` 类 — 国会议员交易信号
+  - `calculate_congressional_signal()` — 政客加权买卖信号（Pelosi 2x 权重）
+  - `calculate_policy_alpha()` — 交易(60%) + 合同(40%) 复合政策 alpha
+  - `format_congressional_card_html()` — Scout 蜂发现层 HTML 卡片
+  - 4 小时/24 小时分级缓存
+
+- **`finrl_bridge.py`**（新文件，~767 行）
+  - `SimpleQTable` — 纯 Python Q-learning 表格式 RL
+  - `FinRLBridge` 类 — 三层降级架构：FinRL+SB3 → Q-learning → 等权重默认
+  - `train_weight_policy()` — 从 report_snapshots 训练权重策略
+  - `compare_rl_vs_current()` — RL 建议 vs 当前权重对比
+  - `detect_regime_shift_rl()` — 基于 RL 的市场政体转换检测
+  - 最低 30 份快照才启动训练，仅输出建议不自动覆写
+
+### Changed（回测与自学习系统升级）
+
+- **`feedback_loop.py`**
+  - **[P0 关键修复]** Sharpe 比率从虚假平均值改为真实逐笔收益计算
+  - 新增 `direction_adjusted_returns` 列表收集实际 T+7 逐笔收益
+  - 新增 `_calculate_sharpe()` — 使用真实收益 + 252/7 年化周期
+  - 新增 `_calculate_profit_factor()` — 总盈利 / 总亏损
+  - 新增 `_calculate_information_ratio()` — vs SPY 基准超额收益 / 跟踪误差
+  - 新增 `_calculate_max_consecutive_losses()` — 连续亏损计数器
+  - Dashboard HTML 新增 Profit Factor 和 Max Consecutive Losses 卡片
+
+- **`weekly_optimizer.py`**
+  - 新增 `compute_new_weights_wls()` — WLS 加权最小二乘法 + 指数时间衰减 `exp(-days_ago/30)`
+  - 新增 `bootstrap_validate()` — 500 次 Bootstrap 重采样验证，95% CI 稳定性检查
+  - `main()` 优先 WLS → 标准方法回退 → Bootstrap 验证
+
+- **`advanced_analyzer.py`**
+  - 新增 `_calculate_flip_acceleration()` — GEX 翻转加速度（dGEX/dPrice 斜率 + urgency 分级）
+  - 新增 `_vanna_stress_test()` — Vanna 压力测试（vol shock → GEX 偏移 → 翻转概率判断）
+  - GEX 归一化 `gex_normalized_pct` — 占 OI 名义值百分比，跨标的可比
+  - `analyze()` 返回 `flip_acceleration` + `vanna_stress` 新字段
+
+### Changed（报告流程集成 · 6 模块接入 generate_deep_v2.py）
+
+- **`generate_deep_v2.py`** — main() 新增 6 个数据丰富步骤（2a-2 ~ 2a-6）：
+  - 2a-2: `vol_surface.py` SABR 曲面分析 → CH4 嵌入曲面卡片 + Skew 异常警报
+  - 2a-3: `cboe_fetcher.py` CBOE 市场指标 → CH5 嵌入宏观情绪卡片
+  - 2a-4: `quiver_fetcher.py` 国会交易补充 → 当 Scout 蜂未提供时自动回退 Quiver API
+  - 2a-5: `finrl_bridge.py` RL 权重建议 → CH1 嵌入建议卡片（advisory, ≥30 快照才启动）
+  - 2a-6: `options_backtester.py` 策略回测 → CH6 嵌入按政体推荐最优策略表格
+  - 全部步骤 try/except 包裹，失败静默跳过不影响报告生成
+- **`generate_deep_v2.py`** — extract() 新增 `flip_acceleration` / `vanna_stress` / `gex_normalized_pct` 字段
+- **`generate_deep_v2.py`** — generate_html() CH4 新增 GEX 增强卡片（翻转加速度 + Vanna 压力 + 归一化%）
+- **`generate_deep_v2.py`** — `_load_ticker_accuracy()` 新增 Sharpe / Profit Factor / 最大连败计算
+- **`generate_deep_v2.py`** — `_render_accuracy_card()` 第二行新增 Sharpe / PF / 最大连败展示
+
+### Fixed（Bug 修复）
+
+- **`vol_surface.py`** — SABR z 参数公式错误：`z_denominator` 多乘了一个 `alpha`，导致 IV 计算偏移；已修正为 `fk_mid` 独立计算
+- **`vol_surface.py`** — 浮点 sqrt 防护：`disc < 0` / `denom_chi ≈ 0` / `arg ≤ 0` 三重 guard，防止 `math.sqrt` 和 `math.log` 崩溃
+- **`vol_surface.py`** — D 变量死代码：else 分支中 D 被赋值两次，第二次覆盖第一次；已清除冗余计算
+- **`advanced_analyzer.py`** — `_vanna_stress_test` 签名新增 `total_gex` 参数，`can_flip_gex` 从 `!= 0`（几乎永真）改为 `abs(vanna_impact) > abs(total_gex) * 0.5`（语义正确的翻转判断）
+- **`feedback_loop.py`** — **[P0]** Sharpe 比率使用 `[avg_return] * N` 重复同一值，导致标准差趋近 0、Sharpe 虚高；已改为逐笔真实收益
+- **`generate_deep_v2.py`** — `build_surface()` 接口不匹配：无参调用 → 从 JSON options_chain 提取数据传入，返回值 `None` → 改用 `_vs.slices` 属性检查
+- **`generate_deep_v2.py`** — `options_backtester.to_dict()` key 不匹配：`"avg_return"` → `"avg_return_pct"`，修复前策略均收列永远显示 0%
+- **`generate_deep_v2.py`** — `flip_acceleration` key 不匹配：`"slope"` → `"acceleration"`，修复前翻转加速度永远显示 0
+
+---
+
 ## [0.11.0] — 2026-03-26
 
 ### Added（投行级报告全面升级：执行摘要 / 五情景引擎 / 三图表 / 交叉引用）

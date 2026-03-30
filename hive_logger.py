@@ -302,20 +302,23 @@ def atomic_json_write(path, data, **kwargs):
     path = Path(path)
     kwargs.setdefault("ensure_ascii", False)
     kwargs.setdefault("cls", SafeJSONEncoder)
+    tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", dir=str(path.parent), suffix=".tmp", delete=False
         ) as tmp:
+            tmp_path = tmp.name
             json.dump(data, tmp, **kwargs)
             tmp.flush()
             os.fsync(tmp.fileno())
-        os.replace(tmp.name, str(path))
+        os.replace(tmp_path, str(path))
     except OSError:
         # Clean up temp file on failure
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         raise
 
 

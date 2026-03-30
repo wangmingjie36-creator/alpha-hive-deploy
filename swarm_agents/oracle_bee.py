@@ -309,6 +309,20 @@ class OracleBeeEcho(BeeAgent):
                 if max_pain.get("max_pain") is not None:
                     _pub_details["max_pain"]          = max_pain["max_pain"]
                     _pub_details["max_pain_dist_pct"] = max_pain.get("distance_pct", 0)
+                # 期权大单/异动信号（合并 OptionsAgent + unusual_options 两源）
+                _ua = list(result.get("unusual_activity", []))
+                if unusual_flow.get("signals"):
+                    for _uf_sig in unusual_flow["signals"][:10]:
+                        _ua.append({
+                            "type": _uf_sig.get("type", "unusual_flow"),
+                            "strike": _uf_sig.get("strike"),
+                            "volume": _uf_sig.get("volume") or _uf_sig.get("size"),
+                            "premium": _uf_sig.get("premium"),
+                            "bullish": _uf_sig.get("sentiment", "") == "bullish",
+                            "source": "unusual_options",
+                        })
+                if _ua:
+                    _pub_details["unusual_activity"] = _ua[:15]  # 最多保留15条
             self._publish(ticker, discovery, "options+polymarket", score, direction, details=_pub_details)
 
             # Phase 2: confidence = 期权数据可用 + Polymarket 可用 + LLM 加成

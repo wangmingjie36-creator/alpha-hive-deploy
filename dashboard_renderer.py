@@ -569,6 +569,31 @@ def _load_accuracy_data() -> dict:
                  "total": r["total"], "avg_ret": round(r["avg_ret"] or 0, 2)}
                 for r in reversed(_wrows)
             ]
+            # 按方向分组的周胜率（最近 12 周）
+            _wdir_rows = _cn11.execute("""
+                SELECT strftime('%Y-W%W', date) as week,
+                       direction,
+                       COUNT(*) as total,
+                       SUM(CASE WHEN correct_t7=1 THEN 1 ELSE 0 END) as correct
+                FROM predictions WHERE checked_t7=1
+                GROUP BY week, direction ORDER BY week DESC LIMIT 48
+            """).fetchall()
+            # 重组为 {week: {bullish: acc, bearish: acc, neutral: acc}}
+            _wdir_map: dict = {}
+            for _r in _wdir_rows:
+                _wk = _r["week"]
+                _dir = _r["direction"]
+                _wdir_map.setdefault(_wk, {})
+                _wdir_map[_wk][_dir] = round(_r["correct"]/_r["total"]*100, 1) if _r["total"] else None
+            # 按周排序，只保留最近 12 周
+            _weeks_sorted = sorted(_wdir_map.keys())[-12:]
+            _acc_weekly_by_dir = [
+                {"week": _wk,
+                 "bullish": _wdir_map[_wk].get("bullish"),
+                 "bearish": _wdir_map[_wk].get("bearish"),
+                 "neutral": _wdir_map[_wk].get("neutral")}
+                for _wk in _weeks_sorted
+            ]
             # 最佳预测 Top 3（收益最高）
             _brows = _cn11.execute("""
                 SELECT ticker, date, direction, final_score, return_t7, correct_t7,
@@ -621,6 +646,41 @@ def _load_accuracy_data() -> dict:
     except Exception as _e11:
         _log.debug("F11 准确率增强数据加载失败: %s", _e11)
 
+    # ── Feature: Equity Curve（累计收益曲线）──
+    _equity_curve: list = []  # [{date, cumulative_return, return_t7, ticker, direction, correct}]
+    try:
+        from backtester import PredictionStore as _PS_eq
+        import sqlite3 as _sq_eq
+        _ps_eq = _PS_eq()
+        with _sq_eq.connect(_ps_eq.db_path) as _cn_eq:
+            _cn_eq.row_factory = _sq_eq.Row
+            _eq_rows = _cn_eq.execute("""
+                SELECT date, ticker, direction, final_score, return_t7, correct_t7
+                FROM predictions
+                WHERE checked_t7=1 AND return_t7 IS NOT NULL
+                ORDER BY date ASC, id ASC
+            """).fetchall()
+            _cum_ret = 0.0
+            _peak = 0.0
+            for _eqr in _eq_rows:
+                _r7 = _eqr["return_t7"]
+                # 方向调整收益：看空时收益取反
+                _dir_adj = -_r7 if str(_eqr["direction"]).lower() == "bearish" else _r7
+                _cum_ret += _dir_adj
+                if _cum_ret > _peak:
+                    _peak = _cum_ret
+                _dd = _peak - _cum_ret
+                _equity_curve.append({
+                    "date": _eqr["date"],
+                    "ticker": _eqr["ticker"],
+                    "ret": round(_dir_adj, 2),
+                    "cum": round(_cum_ret, 2),
+                    "dd": round(_dd, 2),
+                    "correct": bool(_eqr["correct_t7"]),
+                })
+    except Exception as _eq_err:
+        _log.debug("Equity curve 数据加载失败: %s", _eq_err)
+
     return {
         "stats": _acc_stats,
         "total_checked": _acc_total_checked,
@@ -635,6 +695,8 @@ def _load_accuracy_data() -> dict:
         "sharpe": _acc_sharpe,
         "max_dd": _acc_max_dd,
         "win_streak": _acc_win_streak,
+        "weekly_by_dir": _acc_weekly_by_dir,
+        "equity_curve": _equity_curve,
     }
 
 
@@ -1149,11 +1211,13 @@ def render_dashboard_html(report: Dict, date_str: str,
     _acc_by_dir = _acc["by_dir"]
     _acc_by_ticker = _acc["by_ticker"]
     _acc_weekly_trend = _acc["weekly_trend"]
+    _acc_weekly_by_dir = _acc.get("weekly_by_dir", [])
     _acc_best3 = _acc["best3"]
     _acc_worst3 = _acc["worst3"]
     _acc_sharpe = _acc["sharpe"]
     _acc_max_dd = _acc["max_dd"]
     _acc_win_streak = _acc["win_streak"]
+    _acc_equity_curve = _acc.get("equity_curve", [])
 
     try:
         from zoneinfo import ZoneInfo as _ZI
@@ -1264,13 +1328,12 @@ def render_dashboard_html(report: Dict, date_str: str,
         elif _drd not in ("bullish","bearish","neutral"): _drd = "neutral"
         _dir_counts[_drd] += 1
 
-    # 分数优先级：ML combined_probability（÷10）> opp_score > swarm final_score
+    # 分数来源：蜂群 opp_score > final_score（ML combined_probability 不用于排名，无区分度）
     _all_scores = []
     for _td2 in all_tickers_sorted:
-        _s_ml = _ml_combined_score(_td2, report_dir, date_str)
         _s_fallback = float(opp_by_ticker.get(_td2, {}).get("opp_score") or
                             swarm_detail.get(_td2, {}).get("final_score", 0))
-        _all_scores.append((_td2, _s_ml if _s_ml is not None else _s_fallback))
+        _all_scores.append((_td2, _s_fallback))
     _avg_score = (sum(s for _, s in _all_scores) / len(_all_scores)) if _all_scores else 0
 
     # ── 升级 C: Hero 一句话 + 宏观事件倒计时 ──
@@ -1497,6 +1560,31 @@ def render_dashboard_html(report: Dict, date_str: str,
       </div>
     </div>"""
 
+    # 方向分组 KPI 卡片
+    _dir_kpi_cfg = [
+        ("bullish", "看多", "#22c55e", "rgba(34,197,94,.08)"),
+        ("bearish", "看空", "#ef4444", "rgba(239,68,68,.08)"),
+        ("neutral", "中性", "#94a3b8", "rgba(148,163,184,.08)"),
+    ]
+    _acc_dir_kpi_html = ""
+    for _dk, _dlabel, _dcol, _dbg in _dir_kpi_cfg:
+        _di = _acc_by_dir.get(_dk, {})
+        _dacc = _di.get("accuracy", 0) * 100
+        _dtot = _di.get("total", 0)
+        _dcor = _di.get("correct", 0)
+        _dret = _di.get("avg_return", 0)
+        _dret_col = "#22c55e" if _dret >= 0 else "#ef4444"
+        _acc_dir_kpi_html += (
+            f'<div class="acc-dir-kpi" style="border-color:{_dcol};background:{_dbg}">'
+            f'<div class="dkpi-label" style="color:{_dcol}">{_dlabel}</div>'
+            f'<div class="dkpi-row">'
+            f'<span class="dkpi-val">{_dacc:.0f}%</span>'
+            f'<span class="dkpi-sub">准确率 · {_dcor}/{_dtot}次</span>'
+            f'</div>'
+            f'<div class="dkpi-ret" style="color:{_dret_col}">{_dret:+.2f}% 均收益</div>'
+            f'</div>\n'
+        )
+
     # 生成准确率 HTML Section
     if _acc_total_checked > 0:
         _acc_section_html = f"""
@@ -1509,10 +1597,14 @@ def render_dashboard_html(report: Dict, date_str: str,
       <div class="acc-kpi"><div class="kv">{_acc_correct}</div><div class="kl">预测正确数</div></div>
       <div class="acc-kpi"><div class="kv">{_acc_avg_return:+.1f}%</div><div class="kl">平均收益率</div></div>
     </div>
+    <div class="acc-dir-kpi-row">
+{_acc_dir_kpi_html}
+    </div>
     <div class="acc-two-col">
       <div class="acc-dir-box">
     <div class="acc-box-title">方向准确率分布</div>
     <div class="acc-canvas-wrap"><canvas id="accDirChart" width="300" height="200"></canvas></div>
+    <div class="acc-dir-rets" style="display:flex;gap:10px;margin-top:10px;justify-content:center;flex-wrap:wrap" id="accDirRets"></div>
       </div>
       <div class="acc-ticker-box">
     <div class="acc-box-title">个股准确率明细</div>
@@ -1527,6 +1619,18 @@ def render_dashboard_html(report: Dict, date_str: str,
       </div>
     </div>
     {_acc_enhanced_html}
+    <!-- ── Equity Curve 权益曲线 ── -->
+    <div class="eq-section">
+      <div class="acc-section-title" style="margin-top:18px">📉 蜂群累计收益曲线（Equity Curve）</div>
+      <div id="eqCurveContainer">
+        <div class="eq-wrap"><canvas id="eqCurveChart"></canvas></div>
+        <div class="eq-stats" id="eqStats"></div>
+      </div>
+      <div class="eq-cold" id="eqCold" style="display:none">
+        <div style="font-size:2em;margin-bottom:6px">📊</div>
+        <div>需要 T+7 验证数据才能绘制权益曲线<br><span style="font-size:.82em;opacity:.7">当 outcome backfill 运行后，此图表将自动显示</span></div>
+      </div>
+    </div>
   </div>"""
     elif _acc_pending > 0:
         _acc_section_html = f"""
@@ -1703,6 +1807,55 @@ def render_dashboard_html(report: Dict, date_str: str,
     except Exception as _hm_err:
         _log.debug("板块热力图生成失败: %s", _hm_err)
 
+    # ── Feature: 蜂群分歧度（Swarm Divergence）──
+    _swarm_divergence: dict = {}
+    _BEE_NAMES = [
+        "ScoutBeeNova", "RivalBeeVanguard", "OracleBeeEcho",
+        "ChronosBeeHorizon", "BuzzBeeWhisper", "GuardBeeSentinel",
+        "BearBeeContrarian",
+    ]
+    _BEE_SHORT = {
+        "ScoutBeeNova": "Scout", "RivalBeeVanguard": "Rival",
+        "OracleBeeEcho": "Oracle", "ChronosBeeHorizon": "Chronos",
+        "BuzzBeeWhisper": "Buzz", "GuardBeeSentinel": "Guard",
+        "BearBeeContrarian": "Bear",
+    }
+    for _dv_tk in all_tickers_sorted:
+        try:
+            _dv_sd = swarm_detail.get(_dv_tk, {})
+            _dv_ad = _dv_sd.get("agent_details", {})
+            _dv_scores = []
+            _dv_votes = {"bullish": 0, "bearish": 0, "neutral": 0}
+            _dv_bees = []  # [{name, score, direction}]
+            for _bn in _BEE_NAMES:
+                _ba = _dv_ad.get(_bn, {})
+                _bs = _ba.get("score")
+                _bd = str(_ba.get("direction", "neutral")).lower()
+                if _bs is not None:
+                    _dv_scores.append(float(_bs))
+                    _dv_votes[_bd] = _dv_votes.get(_bd, 0) + 1
+                    _dv_bees.append({
+                        "name": _BEE_SHORT.get(_bn, _bn),
+                        "score": round(float(_bs), 1),
+                        "dir": "bull" if _bd == "bullish" else ("bear" if _bd == "bearish" else "neut"),
+                    })
+            if _dv_scores:
+                _dv_mean = sum(_dv_scores) / len(_dv_scores)
+                _dv_std = (sum((x - _dv_mean)**2 for x in _dv_scores) / len(_dv_scores)) ** 0.5
+                _dv_max = max(_dv_scores)
+                _dv_min = min(_dv_scores)
+                _dv_total = sum(_dv_votes.values())
+                _dv_majority = max(_dv_votes.values()) / _dv_total if _dv_total else 0
+                _swarm_divergence[_dv_tk] = {
+                    "std": round(_dv_std, 2),
+                    "spread": round(_dv_max - _dv_min, 1),
+                    "consensus": round(_dv_majority * 100, 0),
+                    "votes": _dv_votes,
+                    "bees": _dv_bees,
+                }
+        except Exception:
+            pass
+
     # ── Jinja2 渲染 ──
     _avg_score_str = f"{_avg_score:.1f}" if _all_scores else "0"
 
@@ -1718,11 +1871,16 @@ def render_dashboard_html(report: Dict, date_str: str,
                          for d in ["bullish", "bearish", "neutral"]],
         "acc_dir_tots": [_acc_by_dir.get(d, {}).get("total", 0)
                          for d in ["bullish", "bearish", "neutral"]],
+        "acc_dir_rets": [round(_acc_by_dir.get(d, {}).get("avg_return", 0), 2)
+                         for d in ["bullish", "bearish", "neutral"]],
         "acc_weekly": _acc_weekly_trend,
+        "acc_weekly_by_dir": _acc_weekly_by_dir,
         "fg_history": _fg_history,
         "trend_data": _trend_data,
         "hist_full": _hist_full,
         "search_index": _search_index,
+        "equity_curve": _acc_equity_curve,
+        "swarm_divergence": _swarm_divergence,
     }
 
     # Sprint 4.1: 输出 dashboard-data.json 伴生文件（前端动态加载用）

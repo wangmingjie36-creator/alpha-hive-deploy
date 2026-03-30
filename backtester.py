@@ -287,11 +287,14 @@ class PredictionStore:
                         WHERE {checked_col} = 1 AND direction = ? AND date >= ?
                     """, (direction, cutoff)).fetchone()
                     t = r["total"] or 0
+                    raw_ret = r["avg_ret"] or 0
+                    # 做空方向：股价下跌 = 正收益，需取反
+                    adj_ret = -raw_ret if direction == "bearish" else raw_ret
                     by_direction[direction] = {
                         "total": t,
                         "correct": r["correct"] or 0,
                         "accuracy": (r["correct"] or 0) / t if t > 0 else 0.0,
-                        "avg_return": round(r["avg_ret"] or 0, 2),
+                        "avg_return": round(adj_ret, 2),
                     }
 
                 # 按标的分组
@@ -318,13 +321,25 @@ class PredictionStore:
                         "avg_score": round(r["avg_score"] or 0, 1),
                     }
 
+                # 整体 avg_return：用方向调整后的各组加权平均（排除 neutral）
+                _dir_rets = [
+                    (by_direction[d]["avg_return"], by_direction[d]["total"])
+                    for d in ("bullish", "bearish")
+                    if by_direction[d]["total"] > 0
+                ]
+                if _dir_rets:
+                    _total_w = sum(w for _, w in _dir_rets)
+                    _adj_avg = sum(r * w for r, w in _dir_rets) / _total_w
+                else:
+                    _adj_avg = row["avg_ret"] or 0
+
                 return {
                     "period": period,
                     "days_window": days,
                     "overall_accuracy": round(overall_acc, 3),
                     "total_checked": total,
                     "correct_count": correct,
-                    "avg_return": round(row["avg_ret"] or 0, 3),
+                    "avg_return": round(_adj_avg, 3),
                     "avg_score": round(row["avg_score"] or 0, 1),
                     "by_direction": by_direction,
                     "by_ticker": by_ticker,

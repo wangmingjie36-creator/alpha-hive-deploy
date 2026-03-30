@@ -91,6 +91,8 @@ function toggleDark(){
     if(window.AH.initTrendChart) window.AH.initTrendChart();
     if(window.AH.initAccDirChart) window.AH.initAccDirChart();
     if(window.AH.initAccWinTrend) window.AH.initAccWinTrend();
+    if(window.AH.initEquityCurve) window.AH.initEquityCurve();
+    if(window.AH.initSwarmDiv) window.AH.initSwarmDiv();
   },50);
 }
 if(_ls('ahDark')==='1'){
@@ -435,6 +437,7 @@ window.AH.initAccDirChart=function(){
   const dirs  = __AH__.acc_dir_labels;
   const accs  = __AH__.acc_dir_accs;
   const tots  = __AH__.acc_dir_tots;
+  const rets  = __AH__.acc_dir_rets || [];
   chartInstances.push(new Chart(ctx, {
     type: 'bar',
     data: {
@@ -451,7 +454,11 @@ window.AH.initAccDirChart=function(){
       indexAxis: 'y',
       responsive: true, maintainAspectRatio: false,
       plugins: { legend: { display: false }, tooltip: {
-        callbacks: { label: function(c){ return c.raw.toFixed(1)+'% ('+tots[c.dataIndex]+' 次)'; } }
+        callbacks: { label: function(c){
+          const ret = rets[c.dataIndex];
+          const retStr = ret !== undefined ? ' · 均收益 '+(ret>=0?'+':'')+ret.toFixed(2)+'%' : '';
+          return c.raw.toFixed(1)+'% ('+tots[c.dataIndex]+' 次)'+retStr;
+        }}
       } },
       scales: {
         x: { min:0, max:100, ticks:{ callback: function(v){ return v+'%'; } } },
@@ -459,6 +466,19 @@ window.AH.initAccDirChart=function(){
       }
     }
   }));
+  // 渲染收益率 pills
+  const pillBox = document.getElementById('accDirRets');
+  if (pillBox && rets.length) {
+    const colors = ['#22c55e','#ef4444','#94a3b8'];
+    pillBox.innerHTML = dirs.map(function(d,i){
+      const r = rets[i];
+      if (r === undefined) return '';
+      const sign = r >= 0 ? '+' : '';
+      const col = r >= 0 ? '#22c55e' : '#ef4444';
+      return '<span style="background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);border-radius:20px;padding:4px 12px;font-size:.82em;color:'+col+'">'
+        +d+' 均收益 '+sign+r.toFixed(2)+'%</span>';
+    }).join('');
+  }
 };
 window.AH.initAccDirChart();
 
@@ -491,36 +511,169 @@ window.AH.initAccWinTrend=function(){
   if(!cv||typeof Chart==='undefined')return;
   if(Chart.getChart(cv)) return; // 已初始化
   const wd=__AH__.acc_weekly;
+  const wbd=__AH__.acc_weekly_by_dir||[];
   if(!wd||!wd.length)return;
   const dark=document.documentElement.classList.contains('dark');
   const tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
   const gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  // 如果有分方向数据，用三条线；否则退回整体线
+  const useByDir = wbd.length > 0;
+  const labels = useByDir ? wbd.map(function(d){return d.week;}) : wd.map(function(d){return d.week;});
+  const datasets = useByDir ? [
+    {label:'看多胜率%', data:wbd.map(function(d){return d.bullish;}),
+      borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)', fill:false,
+      tension:.3, pointRadius:3, borderWidth:2, spanGaps:true},
+    {label:'看空胜率%', data:wbd.map(function(d){return d.bearish;}),
+      borderColor:'#ef4444', backgroundColor:'rgba(239,68,68,.08)', fill:false,
+      tension:.3, pointRadius:3, borderWidth:2, spanGaps:true},
+    {label:'中性胜率%', data:wbd.map(function(d){return d.neutral;}),
+      borderColor:'#94a3b8', backgroundColor:'transparent', fill:false,
+      borderDash:[4,3], tension:.3, pointRadius:2, borderWidth:1.5, spanGaps:true}
+  ] : [
+    {label:'胜率%', data:wd.map(function(d){return d.accuracy;}),
+      borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.1)', fill:true,
+      tension:.3, pointRadius:3, borderWidth:2}
+  ];
   chartInstances.push(new Chart(cv,{
     type:'line',
-    data:{
-      labels:wd.map(function(d){return d.week;}),
-      datasets:[
-        {label:'胜率%',data:wd.map(function(d){return d.accuracy;}),
-          borderColor:'#667eea',backgroundColor:'rgba(102,126,234,.1)',fill:true,
-          tension:.3,pointRadius:3,borderWidth:2,yAxisID:'y'},
-        {label:'均收益%',data:wd.map(function(d){return d.avg_ret;}),
-          borderColor:'#F4A532',backgroundColor:'transparent',
-          borderDash:[4,3],tension:.3,pointRadius:2,borderWidth:1.5,yAxisID:'y1'}
-      ]
-    },
+    data:{ labels:labels, datasets:datasets },
     options:{
-      responsive:true,maintainAspectRatio:false,
-      interaction:{mode:'index',intersect:false},
-      plugins:{legend:{position:'bottom',labels:{color:tc,font:{size:9},boxWidth:10,padding:6}}},
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index', intersect:false},
+      plugins:{
+        legend:{position:'bottom', labels:{color:tc, font:{size:9}, boxWidth:10, padding:6}},
+        tooltip:{callbacks:{label:function(c){
+          return c.dataset.label+': '+(c.raw!=null?c.raw.toFixed(1)+'%':'—');
+        }}}
+      },
       scales:{
-        x:{grid:{display:false},ticks:{color:tc,font:{size:8},maxRotation:45}},
-        y:{position:'left',min:0,max:100,grid:{color:gc},ticks:{color:tc,font:{size:9},callback:function(v){return v+'%';}}},
-        y1:{position:'right',grid:{display:false},ticks:{color:'#F4A532',font:{size:9},callback:function(v){return v+'%';}}}
+        x:{grid:{display:false}, ticks:{color:tc, font:{size:8}, maxRotation:45}},
+        y:{min:0, max:100, grid:{color:gc}, ticks:{color:tc, font:{size:9},
+           callback:function(v){return v+'%';}}}
       }
     }
   }));
 };
 window.AH.initAccWinTrend();
+
+// ── Equity Curve (权益曲线) ──
+window.AH.initEquityCurve=function(){
+  var eq=__AH__.equity_curve;
+  var container=document.getElementById('eqCurveContainer');
+  var cold=document.getElementById('eqCold');
+  if(!eq||!eq.length){
+    if(container)container.style.display='none';
+    if(cold)cold.style.display='';
+    return;
+  }
+  if(container)container.style.display='';
+  if(cold)cold.style.display='none';
+  var cv=document.getElementById('eqCurveChart');
+  if(!cv)return;
+  // Chart.js 可能还在 defer 加载中，等待后重试
+  if(typeof Chart==='undefined'){
+    var _eqRetry=0;
+    var _eqWait=setInterval(function(){
+      _eqRetry++;
+      if(typeof Chart!=='undefined'){clearInterval(_eqWait);window.AH.initEquityCurve();}
+      else if(_eqRetry>40){clearInterval(_eqWait);}// 4秒后放弃
+    },100);
+    return;
+  }
+  var existing=Chart.getChart(cv);if(existing)existing.destroy();
+  var dark=document.documentElement.classList.contains('dark');
+  var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
+  var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
+  var labels=eq.map(function(d){return d.date.slice(5);});
+  var cumData=eq.map(function(d){return d.cum;});
+  var ddData=eq.map(function(d){return -d.dd;});
+  chartInstances.push(new Chart(cv,{
+    type:'line',
+    data:{
+      labels:labels,
+      datasets:[
+        {label:'累计收益%', data:cumData,
+         borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.1)', fill:true,
+         tension:.3, pointRadius:2, borderWidth:2, order:1,
+         segment:{borderColor:function(ctx){return ctx.p0.parsed.y>=0&&ctx.p1.parsed.y>=0?'#22c55e':'#ef4444';}}},
+        {label:'回撤%', data:ddData,
+         borderColor:'rgba(239,68,68,.4)', backgroundColor:'rgba(239,68,68,.08)', fill:true,
+         tension:.3, pointRadius:0, borderWidth:1, borderDash:[3,3], order:2}
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{position:'bottom', labels:{color:tc, font:{size:9}, boxWidth:10, padding:6}},
+        tooltip:{callbacks:{label:function(c){return c.dataset.label+': '+(c.raw!=null?c.raw.toFixed(2)+'%':'—');}}}
+      },
+      scales:{
+        x:{grid:{display:false}, ticks:{color:tc, font:{size:7}, maxRotation:45, maxTicksLimit:15}},
+        y:{grid:{color:gc}, ticks:{color:tc, font:{size:9}, callback:function(v){return v.toFixed(1)+'%';}}}
+      }
+    }
+  }));
+  var statsEl=document.getElementById('eqStats');
+  if(statsEl){
+    var lastCum=eq[eq.length-1].cum;
+    var maxDD=Math.max.apply(null,eq.map(function(d){return d.dd;}));
+    var wins=eq.filter(function(d){return d.correct;}).length;
+    var wr=eq.length?Math.round(wins/eq.length*100):0;
+    var avgRet=eq.reduce(function(s,d){return s+d.ret;},0)/eq.length;
+    var cumColor=lastCum>=0?'var(--bull)':'var(--bear)';
+    statsEl.innerHTML=
+      '<div class="eq-stat"><span class="ev" style="color:'+cumColor+'">'+lastCum.toFixed(2)+'%</span><span class="el">累计收益</span></div>'+
+      '<div class="eq-stat"><span class="ev" style="color:var(--bear)">-'+maxDD.toFixed(2)+'%</span><span class="el">最大回撤</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+wr+'%</span><span class="el">方向胜率</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+(avgRet>=0?'+':'')+avgRet.toFixed(2)+'%</span><span class="el">平均单笔</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+eq.length+'</span><span class="el">已验证笔数</span></div>';
+  }
+};
+window.AH.initEquityCurve();
+
+// ── Swarm Divergence (蜂群分歧度) ──
+window.AH.initSwarmDiv=function(){
+  var sd=__AH__.swarm_divergence;
+  var grid=document.getElementById('sdivGrid');
+  if(!grid||!sd)return;
+  var tickers=Object.keys(sd);
+  if(!tickers.length){grid.innerHTML='<div style="text-align:center;color:var(--ts);padding:20px">暂无蜂群投票数据</div>';return;}
+  tickers.sort(function(a,b){return (sd[a].consensus||0)-(sd[b].consensus||0);});
+  var html='';
+  tickers.forEach(function(tk){
+    var d=sd[tk]; if(!d||!d.bees)return;
+    var consensusCls=d.consensus>=75?'sdiv-high':d.consensus>=55?'sdiv-med':'sdiv-low';
+    var consensusLabel=d.consensus>=75?'高共识':d.consensus>=55?'中等共识':'低共识⚠️';
+    var maxScore=Math.max.apply(null,d.bees.map(function(b){return b.score;}));
+    if(maxScore<=0)maxScore=10;
+    var beesHtml='';
+    d.bees.forEach(function(b){
+      var hPct=Math.max(8, Math.round(b.score/maxScore*100));
+      var barCls=b.dir==='bull'?'sdiv-bar-b':b.dir==='neut'?'sdiv-bar-n':'sdiv-bar-e';
+      beesHtml+='<div class="sdiv-bee" title="'+b.name+': '+b.score+'">'+
+        '<div class="sdiv-bee-score">'+b.score+'</div>'+
+        '<div class="sdiv-bar '+barCls+'" style="height:'+hPct+'%"></div>'+
+        '<div class="sdiv-bee-name">'+b.name+'</div></div>';
+    });
+    var v=d.votes||{};
+    html+='<div class="sdiv-card">'+
+      '<div class="sdiv-header">'+
+        '<span class="sdiv-tk">'+tk+'</span>'+
+        '<span class="sdiv-consensus '+consensusCls+'">'+consensusLabel+' '+d.consensus+'%</span>'+
+      '</div>'+
+      '<div class="sdiv-bees">'+beesHtml+'</div>'+
+      '<div class="sdiv-meta">'+
+        '<span><span class="sdiv-dot" style="background:var(--bull)"></span>'+(v.bullish||0)+'多</span>'+
+        '<span><span class="sdiv-dot" style="background:var(--bear)"></span>'+(v.bearish||0)+'空</span>'+
+        '<span><span class="sdiv-dot" style="background:var(--neut)"></span>'+(v.neutral||0)+'中</span>'+
+        '<span>σ='+d.std+' · 极差'+d.spread+'</span>'+
+      '</div></div>';
+  });
+  grid.innerHTML=html;
+};
+window.AH.initSwarmDiv();
+
 window.addEventListener('pagehide',function(){chartInstances.forEach(function(c){try{c.destroy()}catch(e){}});chartInstances=[];});
 // ── bfcache 恢复：浏览器后退时重新渲染所有图表 ──
 window.addEventListener('pageshow',function(e){
@@ -548,6 +701,8 @@ window.addEventListener('pageshow',function(e){
   if(window.AH.initTrendChart) window.AH.initTrendChart();
   if(window.AH.initAccDirChart) window.AH.initAccDirChart();
   if(window.AH.initAccWinTrend) window.AH.initAccWinTrend();
+  if(window.AH.initEquityCurve) window.AH.initEquityCurve();
+  if(window.AH.initSwarmDiv) window.AH.initSwarmDiv();
 });
 /* F37: Pause SVG SMIL animations when prefers-reduced-motion */
 (function(){const mq=window.matchMedia('(prefers-reduced-motion:reduce)');function toggle(e){const svgs=document.querySelectorAll('svg');svgs.forEach(function(s){try{if(e.matches)s.pauseAnimations();else s.unpauseAnimations();}catch(ex){}});}if(mq.matches)document.addEventListener('DOMContentLoaded',function(){toggle(mq);});mq.addEventListener('change',toggle);})();
