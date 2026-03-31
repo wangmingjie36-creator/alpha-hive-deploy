@@ -1,5 +1,5 @@
-// Alpha Hive Service Worker - 20260330-1402
-var CACHE_NAME='alpha-hive-20260330-1402';
+// Alpha Hive Service Worker - 20260331-0233
+var CACHE_NAME='alpha-hive-20260331-0233';
 var PRECACHE_URLS=['./', 'index.html', 'manifest.json',
   'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'];
 

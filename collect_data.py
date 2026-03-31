@@ -26,12 +26,14 @@ from pathlib import Path
 
 # ── 路径 ─────────────────────────────────────────────────────────────────────
 ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
-_VM_PATH = Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
-_VM_PATH2 = Path("/sessions/amazing-clever-albattani/mnt/Alpha Hive")
-if _VM_PATH2.exists():
-    ALPHAHIVE_DIR = _VM_PATH2
-elif _VM_PATH.exists():
-    ALPHAHIVE_DIR = _VM_PATH
+# 自动检测 Cowork VM session 路径
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if _SCRIPT_DIR.name == "Alpha Hive" and str(_SCRIPT_DIR).startswith("/sessions/"):
+    ALPHAHIVE_DIR = _SCRIPT_DIR
+else:
+    _VM_PATH = Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
+    if _VM_PATH.exists():
+        ALPHAHIVE_DIR = _VM_PATH
 
 
 def find_json(ticker: str, date_str: str = None) -> Path:
