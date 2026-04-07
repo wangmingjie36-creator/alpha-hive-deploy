@@ -568,11 +568,11 @@ CATALYSTS = {
 #     作为独立调整项附加：final_score += (ml_score - 5.0) * 0.1 * ml_confidence（最大 ±0.5 分）
 #   - 两者不存在双重计算
 EVALUATION_WEIGHTS = {
-    "signal":    0.1868,   # ScoutBeeNova: SEC 披露 + 聪明钱 + 拥挤度
-    "catalyst":    0.2801,   # ChronosBeeHorizon: 催化剂与时间线
-    "sentiment":    0.2683,   # BuzzBeeWhisper: 情绪与叙事
-    "odds":    0.1655,   # OracleBeeEcho: 期权 IV(55%) + Polymarket(35%) + 异动(10%)
-    "risk_adj":    0.0993,   # GuardBeeSentinel: 交叉验证 + 风险调整
+    "signal":    0.1132,   # ScoutBeeNova: SEC 披露 + 聪明钱 + 拥挤度
+    "catalyst":    0.3316,   # ChronosBeeHorizon: 催化剂与时间线
+    "sentiment":    0.2764,   # BuzzBeeWhisper: 情绪与叙事
+    "odds":    0.1657,   # OracleBeeEcho: 期权 IV(55%) + Polymarket(35%) + 异动(10%)
+    "risk_adj":    0.1132,   # GuardBeeSentinel: 交叉验证 + 风险调整
     # ml_auxiliary: 不在此处（RivalBeeVanguard 作为 ±0.5 独立调整项）
 }
 

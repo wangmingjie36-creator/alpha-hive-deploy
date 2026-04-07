@@ -5,6 +5,43 @@
 
 ---
 
+## [0.14.0] — 2026-04-04
+
+### Added（估值分析 + 叙事升级 7 项）
+
+- **V1: 估值快照卡片**（`generate_deep_v2.py` `extract()` + `_build_valuation_card()`）
+  - `extract()` 新增 6 个估值字段：forward_eps / trailing_eps / eps_growth / analyst_target / analyst_consensus / analyst_count（来自 RivalBee eps_revision）
+  - 新函数 `_build_valuation_card(ctx)`：4 格 grid（PE TTM / PE Forward / PEG / 分析师目标价）+ PE 倍数情景矩阵（5 档：深度衰退 18x → 泡沫 35x）
+  - PEG 颜色分级：<1 绿色（低估）/ 1-2 金色（合理）/ >2 红色（偏贵）
+  - 分析师共识映射：1-1.5 强烈看多 / 1.5-2.5 看多 / 2.5-3.5 中性 / 3.5-4.5 看空 / 4.5+ 强烈看空
+
+- **V2: 情景价格锚定至 PE 倍数**（`generate_deep_v2.py` `_build_scenario_narrative()`）
+  - 5 个情景的收益率改为 Forward EPS × PE 倍数计算（有 forward_eps 时优先）
+  - 方向感知 PE 区间：看多 32/26/18/14x，看空 28/24/16/12x
+  - 情景表格新增 "PE×EPS→$xxx" 价格标注
+  - 估值卡片嵌入 CH6 情景推演章节顶部
+
+- **N1: "So What" 推理链升级**（`generate_deep_v2.py` `_build_options_narrative()`）
+  - P1 期权结构段末新增交易含义推理（基于 IV Rank + P/C Ratio + 异常流方向）
+  - P2 IV-RV 段末新增恐慌超额/方向性机会判断（IV-RV > 5 / < -5 分支）
+  - 催化剂窗口联动：自动关联最近催化事件
+
+- **N2: Top-3 核心论点提炼**（`generate_deep_v2.py` `_build_executive_summary()`）
+  - 从 7 只蜂中提取 thesis 候选（期权/估值/催化剂/GEX/看空/情绪）
+  - 按信号强度排序取 Top-3，渲染为彩色标签 pills
+  - 嵌入 Executive Summary 底部
+
+### Fixed
+
+- **B1: GEX 政体重复文案**（`_build_options_narrative()` ~line 1453）
+  - 新增 `positive_gex` / `negative_gex` 专用解释文案，消除 "GEX 政体为 X——GEX 政体为 X" 重复
+- **B2: Charm 方向重复文案**（`_build_options_narrative()` ~line 1488）
+  - 新增 `bullish` / `bearish` 分支（与 `positive` / `negative` 并列），消除 Charm 重复
+- **估值卡片 f-string 条件拼接 bug**
+  - `f'...' if cond else '' f'...'` 模式导致仅渲染首个卡片；重构为 list append + join
+
+---
+
 ## [0.13.0] — 2026-03-28
 
 ### Added（深度报告 8 项功能升级）

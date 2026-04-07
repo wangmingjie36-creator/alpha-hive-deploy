@@ -629,6 +629,13 @@ def extract(data: dict) -> dict:
         "ml_probability": ml_pred.get("probability", 0),
         # P8: Deep Skew
         "deep_skew": odet.get("deep_skew", {}),
+        # V1: 估值数据（来自 RivalBee eps_revision）
+        "forward_eps":       float(((rival.get("details") or {}).get("eps_revision", {}) or {}).get("forward_eps", 0) or 0),
+        "trailing_eps":      float(((rival.get("details") or {}).get("eps_revision", {}) or {}).get("trailing_eps", 0) or 0),
+        "eps_growth":        float(((rival.get("details") or {}).get("eps_revision", {}) or {}).get("eps_growth_proj", 0) or 0),
+        "analyst_target":    float(((rival.get("details") or {}).get("eps_revision", {}) or {}).get("target_mean_price", 0) or 0),
+        "analyst_consensus": float(((rival.get("details") or {}).get("eps_revision", {}) or {}).get("recommendation_mean", 0) or 0),
+        "analyst_count":     int(((rival.get("details") or {}).get("eps_revision", {}) or {}).get("num_analyst_opinions", 0) or 0),
         # Raw JSON for LLM context
         "_raw": data,
     }
@@ -1390,7 +1397,14 @@ def _build_options_narrative(ctx: dict) -> str:
         f'当前市场{"处于 " + overall_rg + " 政体，" if overall_rg else ""}'
         f'{"信号拥挤度偏高（衰减因子 " + f"{decay_f:.2f}" + "），alpha 衰减风险需关注；" if decay_f < 0.8 else ""}'
         f'期权流方向为<span class="{flow_cls}">{"净看涨流" if flow=="bullish" else "净看跌流" if flow=="bearish" else "中性流"}</span>，'
-        f'{len(bull_flows)}笔看涨异动、{len(bear_flows)}笔看跌异动。</p>'
+        f'{len(bull_flows)}笔看涨异动、{len(bear_flows)}笔看跌异动。'
+        # N1: So What 推理
+        f'<strong>交易含义：</strong>'
+        f'{"IV Rank 偏低 + Call 流主导 = 买方成本低且方向明确，适合定向做多（long call / bull call spread）。" if iv_rank < 30 and pcr_f < 0.9 else ""}'
+        f'{"IV Rank 偏高 + Put Skew 显著 = 市场恐慌定价充分，卖方策略（iron condor / short put）的 theta 衰减收益丰厚。" if iv_rank > 70 and skew_f > 1.15 else ""}'
+        f'{"多空流方向分歧 → 短期波动放大概率高，优先选择跨式策略（straddle/strangle）或观望等方向明确。" if abs(len(bull_flows) - len(bear_flows)) <= 1 and len(bull_flows) + len(bear_flows) >= 4 else ""}'
+        f'{"IV Rank 中性区间，期权既不便宜也不贵——优先选价差策略（spread）控制 vega 暴露。" if 30 <= iv_rank <= 70 and not (iv_rank > 70 and skew_f > 1.15) and not (iv_rank < 30 and pcr_f < 0.9) else ""}'
+        f'</p>'
     )
 
     # ── P2: IV-RV 价差与波动率深度分析 ──
@@ -1419,6 +1433,15 @@ def _build_options_narrative(ctx: dict) -> str:
             }
             p2 += (f'IV 期限结构呈 <strong>{ivts_shape}</strong> 形态'
                    f'（{shape_interp.get(ivts_shape, ivts_shape)}）。')
+        # N1: So What — IV-RV 交易含义
+        _near_cat = next((c for c in ctx.get('catalysts', []) if 0 <= (c.get('days_until') or 99) <= 14), None)
+        _cat_name = _near_cat.get('event', '') if _near_cat else ''
+        if iv_rv > 5:
+            _iv_excess_pct = iv_rv / rv_30d * 100 if rv_30d > 0 else 0
+            p2 += (f' <strong>交易含义：</strong>期权隐含恐慌超出实际波动 {_iv_excess_pct:.0f}%，卖方策略期望值为正'
+                   f'{"；但距 " + _cat_name + " 较近，建议等催化剂落地后 IV Crush 窗口再入场" if _near_cat else ""}。')
+        elif iv_rv < -5:
+            p2 += f' <strong>交易含义：</strong>IV 被低估，方向性买入成本偏低，若配合信号共振可积极建仓。'
         p2 += '</p>'
     else:
         p2 = ''
@@ -1442,8 +1465,12 @@ def _build_options_narrative(ctx: dict) -> str:
             gex_interp = '做市商持有正 Gamma，价格波动时其对冲行为会抑制波动（买跌卖涨），市场倾向于区间震荡'
         elif gex_regime == 'negative_gamma':
             gex_interp = '做市商持有负 Gamma，价格波动时其对冲行为会放大波动（追涨杀跌），趋势行情一旦启动难以遏制'
+        elif gex_regime == 'positive_gex':
+            gex_interp = '做市商净正 Gamma，对冲行为抑制波动（买跌卖涨），价格倾向区间震荡'
+        elif gex_regime == 'negative_gex':
+            gex_interp = '做市商净负 Gamma，对冲行为放大波动（追涨杀跌），趋势行情难以遏制'
         else:
-            gex_interp = f'GEX 政体为 {gex_regime}' if gex_regime else 'GEX 数据可用'
+            gex_interp = '中性 Gamma 区域' if gex_regime else 'GEX 数据可用'
         p3_parts.append(
             f'<strong>Dealer GEX 分析：</strong>'
             f'{max_pain_note}'
@@ -1475,9 +1502,12 @@ def _build_options_narrative(ctx: dict) -> str:
                 f'到期日前做市商 gamma 对冲力量将把价格向此水位"吸引"，偏离越远反弹/回落概率越高'
             )
         if charm_dir:
-            charm_interp = ('到期日临近时 delta 衰减偏正，做市商被动买入标的，形成向上支撑力' if charm_dir == 'positive'
-                            else '到期日临近时 delta 衰减偏负，做市商被动卖出标的，形成向下压力' if charm_dir == 'negative'
-                            else f'Charm 方向为 {charm_dir}')
+            if charm_dir in ('positive', 'bullish'):
+                charm_interp = '到期日临近时 delta 衰减偏正，做市商被动买入标的，形成向上支撑力'
+            elif charm_dir in ('negative', 'bearish'):
+                charm_interp = '到期日临近时 delta 衰减偏负，做市商被动卖出标的，形成向下压力'
+            else:
+                charm_interp = '到期日前 delta 衰减方向中性'
             p4_parts.append(f'Charm 到期衰减方向为 <strong>{charm_dir}</strong>——{charm_interp}')
         p4 = f'<p>{"；".join(p4_parts)}。</p>'
 
@@ -1645,6 +1675,108 @@ def _build_macro_narrative(ctx: dict) -> str:
             f'{supply_chain_para}')
 
 
+def _build_valuation_card(ctx: dict) -> str:
+    """V1: 估值快照卡片 — PE/PEG/分析师共识 + PE倍数情景矩阵"""
+    fwd_eps  = ctx.get("forward_eps", 0)
+    ttm_eps  = ctx.get("trailing_eps", 0)
+    eps_grw  = ctx.get("eps_growth", 0)
+    tgt      = ctx.get("analyst_target", 0)
+    cons     = ctx.get("analyst_consensus", 0)
+    n_anal   = ctx.get("analyst_count", 0)
+    price    = float(ctx.get("price") or 0)
+
+    if not fwd_eps or not price:
+        return ""  # 无数据则静默不渲染
+
+    pe_ttm   = price / ttm_eps if ttm_eps else None
+    pe_fwd   = price / fwd_eps if fwd_eps else None
+    peg      = pe_fwd / eps_grw if (pe_fwd and eps_grw) else None
+    upside   = (tgt / price - 1) * 100 if (tgt and price) else None
+
+    # 分析师共识映射
+    _cons_map = {1: "强烈看多", 2: "看多", 3: "中性", 4: "看空", 5: "强烈看空"}
+    cons_label = _cons_map.get(round(cons), f"{cons:.1f}/5") if cons else "N/A"
+    if cons and cons < 1.5:
+        cons_label = "强烈看多"
+    elif cons and cons < 2.5:
+        cons_label = "看多"
+    elif cons and cons < 3.5:
+        cons_label = "中性"
+    elif cons and cons < 4.5:
+        cons_label = "看空"
+    elif cons:
+        cons_label = "强烈看空"
+
+    # PEG 颜色与解读
+    if peg is not None:
+        if peg < 0.5:
+            peg_color, peg_label = "var(--green2)", "极度低估"
+        elif peg < 1.0:
+            peg_color, peg_label = "var(--green2)", "低估"
+        elif peg < 1.5:
+            peg_color, peg_label = "#e8a838", "合理"
+        else:
+            peg_color, peg_label = "var(--red2)", "偏贵"
+    else:
+        peg_color, peg_label = "var(--text2)", "N/A"
+
+    # PE 倍数情景矩阵
+    pe_scenarios = [(18, "深度衰退"), (22, "保守"), (26, "基准"), (30, "乐观"), (35, "泡沫")]
+    scenario_rows = ""
+    for pe_m, label in pe_scenarios:
+        pt = pe_m * fwd_eps
+        chg = (pt / price - 1) * 100
+        bar_w = max(5, min(95, 50 + chg / 3))  # 粗略映射为条宽
+        color = "var(--green2)" if chg > 0 else "var(--red2)"
+        marker = " ← BofA 参考" if 24 <= pe_m <= 26 else ""
+        scenario_rows += (
+            f'<div style="display:grid;grid-template-columns:70px 40px 1fr 70px;align-items:center;gap:6px;font-size:12px;line-height:2;">'
+            f'<span style="color:var(--text2)">{label}</span>'
+            f'<span style="font-weight:600">{pe_m}x</span>'
+            f'<div style="background:var(--bg2);border-radius:4px;height:14px;overflow:hidden;">'
+            f'<div style="width:{bar_w:.0f}%;height:100%;background:{color};border-radius:4px;"></div></div>'
+            f'<span style="font-weight:600;color:{color}">${pt:.0f} ({chg:+.0f}%){marker}</span>'
+            f'</div>'
+        )
+
+    # Build metric cards
+    _cards = []
+    if pe_ttm:
+        _cards.append(
+            f'<div style="text-align:center;padding:10px;background:var(--bg2);border-radius:8px;">'
+            f'<div style="font-size:11px;color:var(--text2)">PE (TTM)</div>'
+            f'<div style="font-size:18px;font-weight:700;color:var(--text1)">{pe_ttm:.1f}x</div></div>')
+    if pe_fwd:
+        _cards.append(
+            f'<div style="text-align:center;padding:10px;background:var(--bg2);border-radius:8px;">'
+            f'<div style="font-size:11px;color:var(--text2)">PE (Forward)</div>'
+            f'<div style="font-size:18px;font-weight:700;color:var(--accent)">{pe_fwd:.1f}x</div></div>')
+    if peg is not None:
+        _cards.append(
+            f'<div style="text-align:center;padding:10px;background:var(--bg2);border-radius:8px;">'
+            f'<div style="font-size:11px;color:var(--text2)">PEG</div>'
+            f'<div style="font-size:18px;font-weight:700;color:{peg_color}">{peg:.2f}</div>'
+            f'<div style="font-size:10px;color:{peg_color}">{peg_label}</div></div>')
+    if tgt:
+        _up_col = "var(--green2)" if upside and upside > 0 else "var(--red2)"
+        _cards.append(
+            f'<div style="text-align:center;padding:10px;background:var(--bg2);border-radius:8px;">'
+            f'<div style="font-size:11px;color:var(--text2)">分析师目标价</div>'
+            f'<div style="font-size:18px;font-weight:700;color:{_up_col}">${tgt:.0f}</div>'
+            f'<div style="font-size:10px;color:var(--text2)">{n_anal}人共识 · {cons_label}</div></div>')
+    _cards_html = "".join(_cards)
+
+    return (
+        f'<div style="background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:16px;margin:16px 0;">'
+        f'<div style="font-size:13px;font-weight:700;color:var(--text1);margin-bottom:12px;">📊 估值快照</div>'
+        f'<div style="display:grid;grid-template-columns:repeat({len(_cards)},1fr);gap:10px;margin-bottom:14px;">'
+        f'{_cards_html}</div>'
+        f'<div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:6px;">PE 倍数情景矩阵（Forward EPS ${fwd_eps:.2f}）</div>'
+        f'{scenario_rows}'
+        f'</div>'
+    )
+
+
 def _build_scenario_narrative(ctx: dict) -> str:
     """CH6: 五情景推演 + 期望值 + If-Then 决策树（本地 fallback）"""
     import math as _math
@@ -1751,16 +1883,30 @@ def _build_scenario_narrative(ctx: dict) -> str:
     pe = 100 - pa - pb - pc - pd
 
     # ── RETURN ESTIMATES ─────────────────────────────────────────────
+    # V2: 优先用 PE 倍数 × Forward EPS 锚定情景价格，无 EPS 时 fallback 技术面
+    _fwd_eps = float(ctx.get("forward_eps", 0) or 0)
     def _safe_ret(target, base, pct_fallback):
         if target and base and base > 0:
             return (target - base) / base * 100
         return pct_fallback
 
-    ret_a = _safe_ret(res1, price, 10.0)
-    ret_b = ret_a * 0.4 if ret_a > 0 else _safe_ret(res1, price, 4.0) * 0.4
-    ret_c = 0.3
-    ret_d = _safe_ret(sup1, price, -5.0) * 0.4
-    ret_e = _safe_ret(sup1, price, -12.0)
+    if _fwd_eps > 0 and price > 0:
+        # PE 倍数锚定：根据方向调整基准
+        _pe_a = 32 if is_bull else 28      # 强势多头
+        _pe_b = 26 if is_bull else 24      # 温和看涨
+        _pe_d = 18 if is_bull else 16      # 温和看跌
+        _pe_e = 14 if is_bull else 12      # 强势看跌
+        ret_a = (_fwd_eps * _pe_a / price - 1) * 100
+        ret_b = (_fwd_eps * _pe_b / price - 1) * 100
+        ret_c = 0.3
+        ret_d = (_fwd_eps * _pe_d / price - 1) * 100
+        ret_e = (_fwd_eps * _pe_e / price - 1) * 100
+    else:
+        ret_a = _safe_ret(res1, price, 10.0)
+        ret_b = ret_a * 0.4 if ret_a > 0 else _safe_ret(res1, price, 4.0) * 0.4
+        ret_c = 0.3
+        ret_d = _safe_ret(sup1, price, -5.0) * 0.4
+        ret_e = _safe_ret(sup1, price, -12.0)
 
     # ── EXPECTED VALUE ────────────────────────────────────────────────
     ev = (pa * ret_a + pb * ret_b + pc * ret_c + pd * ret_d + pe * ret_e) / 100
@@ -1814,13 +1960,13 @@ def _build_scenario_narrative(ctx: dict) -> str:
   <td style="padding:7px 10px;color:var(--green2);font-weight:700;">A · 强势多头</td>
   <td style="padding:7px 8px;text-align:center;font-weight:700;color:var(--green2);">{pa}%</td>
   <td style="padding:7px 8px;text-align:center;color:var(--green2);">{ret_a:+.1f}%</td>
-  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">催化剂超预期 → 突破 {res1_s} Call Wall → 做市商被迫追涨（gamma squeeze）→ 目标 {res2_s}</td>
+  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_a) + "x×EPS→$" + f"{_fwd_eps*_pe_a:.0f}" + " | " if _fwd_eps else ""}催化剂超预期 → 突破 {res1_s} Call Wall → gamma squeeze → 目标 {res2_s}</td>
 </tr>
 <tr style="border-bottom:1px solid var(--border);">
   <td style="padding:7px 10px;color:#4ade80;font-weight:600;">B · 温和看涨</td>
   <td style="padding:7px 8px;text-align:center;font-weight:700;color:#4ade80;">{pb}%</td>
   <td style="padding:7px 8px;text-align:center;color:#4ade80;">{ret_b:+.1f}%</td>
-  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">基本面稳健 → 区间内缓慢爬升 → {sup1_s}–{res1_s} 震荡偏多 → 分批减仓</td>
+  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_b) + "x×EPS→$" + f"{_fwd_eps*_pe_b:.0f}" + " | " if _fwd_eps else ""}基本面稳健 → {sup1_s}–{res1_s} 震荡偏多 → 分批减仓</td>
 </tr>
 <tr style="border-bottom:1px solid var(--border);">
   <td style="padding:7px 10px;color:var(--gold2);font-weight:600;">C · 区间震荡</td>
@@ -1832,13 +1978,13 @@ def _build_scenario_narrative(ctx: dict) -> str:
   <td style="padding:7px 10px;color:#f87171;font-weight:600;">D · 温和看跌</td>
   <td style="padding:7px 8px;text-align:center;font-weight:700;color:#f87171;">{pd}%</td>
   <td style="padding:7px 8px;text-align:center;color:#f87171;">{ret_d:+.1f}%</td>
-  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">宏观逆风 + 内幕卖出 → Put OI 堆积 → {sup1_s} 支撑承压 → 做市商对冲加剧下行</td>
+  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_d) + "x×EPS→$" + f"{_fwd_eps*_pe_d:.0f}" + " | " if _fwd_eps else ""}宏观逆风 → Put OI 堆积 → {sup1_s} 支撑承压 → 做市商对冲加剧下行</td>
 </tr>
 <tr>
   <td style="padding:7px 10px;color:var(--red2);font-weight:700;">E · 强势看跌</td>
   <td style="padding:7px 8px;text-align:center;font-weight:700;color:var(--red2);">{pe}%</td>
   <td style="padding:7px 8px;text-align:center;color:var(--red2);">{ret_e:+.1f}%</td>
-  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">逆向信号兑现 → {sup1_s} 失守 → 止损盘触发 → 负Gamma区做市商追空 → 目标 {sup2_s}</td>
+  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_e) + "x×EPS→$" + f"{_fwd_eps*_pe_e:.0f}" + " | " if _fwd_eps else ""}逆向信号兑现 → {sup1_s} 失守 → 止损盘触发 → 负Gamma区追空 → 目标 {sup2_s}</td>
 </tr>
 </tbody>
 <tfoot>
@@ -1936,7 +2082,10 @@ def _build_scenario_narrative(ctx: dict) -> str:
   </div>
 </div>"""
 
-    return p1 + p2 + p3 + p4 + p5
+    # ── V1: 估值卡片 ──────────────────────────────────────────────────
+    val_card = _build_valuation_card(ctx)
+
+    return val_card + p1 + p2 + p3 + p4 + p5
 
 
 def _build_risk_narrative(ctx: dict) -> str:
@@ -2160,6 +2309,66 @@ def _build_executive_summary(ctx: dict) -> str:
     fg_note       = f"极度恐惧（F&G={fg}）压制上行弹性，" if (fg and fg <= 25) else ""
 
     price_str = f"${price:.2f}" if price else "N/A"
+
+    # ── N2: Top-3 核心论点提炼 ──────────────────────────────────────
+    _thesis_items = []
+    # 期权信号
+    _oracle_sc = float((ctx.get("oracle") or {}).get("score", 5) or 5)
+    _iv_rank_v = float(ctx.get("iv_rank", 50) or 50)
+    _pcr_v = ctx.get("put_call_ratio", 1.0)
+    try: _pcr_v = float(_pcr_v)
+    except (TypeError, ValueError): _pcr_v = 1.0
+    if _oracle_sc >= 7:
+        _thesis_items.append(("期权", abs(_oracle_sc - 5), f"期权结构强看涨（OracleBee {_oracle_sc:.1f}/10），IV Rank {_iv_rank_v:.0f}%，P/C {_pcr_v:.1f}"))
+    elif _oracle_sc <= 3:
+        _thesis_items.append(("期权", abs(_oracle_sc - 5), f"期权结构偏空（OracleBee {_oracle_sc:.1f}/10），Put 端保护需求旺盛"))
+    # 估值信号
+    _fwd_eps_s = float(ctx.get("forward_eps", 0) or 0)
+    _pe_fwd_s = (float(price) / _fwd_eps_s) if (_fwd_eps_s > 0 and price) else None
+    _peg_s = _pe_fwd_s / float(ctx.get("eps_growth", 1) or 1) if (_pe_fwd_s and float(ctx.get("eps_growth", 0) or 0) > 0) else None
+    if _peg_s is not None and _peg_s < 0.5:
+        _thesis_items.append(("估值", 3.0, f"Forward PE {_pe_fwd_s:.1f}x vs EPS Growth {ctx.get('eps_growth',0):.0f}% → PEG {_peg_s:.2f} 极度低估"))
+    elif _peg_s is not None and _peg_s > 2.0:
+        _thesis_items.append(("估值", 2.5, f"Forward PE {_pe_fwd_s:.1f}x vs EPS Growth {ctx.get('eps_growth',0):.0f}% → PEG {_peg_s:.2f} 偏贵"))
+    # 催化剂
+    if near_cat:
+        _thesis_items.append(("催化剂", 2.0, f"距 {near_cat['event']} {near_cat['days_until']} 天，催化窗口期 IV Crush 机会"))
+    # GEX
+    _gex_reg = ctx.get("gex_regime", "")
+    if _gex_reg in ("positive_gex", "positive_gamma"):
+        _mp = ctx.get("max_pain")
+        _mp_str = ""
+        if isinstance(_mp, dict): _mp_str = f"Max Pain ${_mp.get('max_pain',0):.0f} 磁吸"
+        elif isinstance(_mp, (int, float)): _mp_str = f"Max Pain ${_mp:.0f} 磁吸"
+        _thesis_items.append(("GEX", 1.8, f"正 Gamma 政体 + {_mp_str} → 短期下行有底"))
+    elif _gex_reg in ("negative_gex", "negative_gamma"):
+        _thesis_items.append(("GEX", 2.2, f"负 Gamma 政体——做市商追涨杀跌放大波动"))
+    # 逆向信号
+    if bear_sigs:
+        _bear_sc = float((ctx.get("bear") or {}).get("score", 5) or 5)
+        _thesis_items.append(("逆向", abs(_bear_sc - 5), f"BearBee {_bear_sc:.1f}/10，{bear_sigs[0][:40]}"))
+    # 情绪
+    if fg and fg <= 25:
+        _thesis_items.append(("情绪", 2.5, f"极度恐惧 F&G={fg}，系统性抛压风险高"))
+
+    # 排序取 Top-3
+    _thesis_items.sort(key=lambda x: x[1], reverse=True)
+    _top3 = _thesis_items[:3]
+    _thesis_html = ""
+    if _top3:
+        _thesis_lines = "".join(
+            f'<div style="display:flex;gap:8px;align-items:baseline;margin:3px 0;">'
+            f'<span style="background:var(--accent);color:white;font-size:10px;font-weight:700;'
+            f'padding:1px 6px;border-radius:3px;white-space:nowrap;">{t[0]}</span>'
+            f'<span style="font-size:12px;color:var(--text1);">{t[2]}</span></div>'
+            for t in _top3
+        )
+        _thesis_html = (
+            f'<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">'
+            f'<div style="font-size:10px;font-weight:700;color:var(--text3);margin-bottom:6px;">🎯 核心论点 Top-3</div>'
+            f'{_thesis_lines}</div>'
+        )
+
     return f"""
 <div id="exec-summary" style="background:linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%);
      border-radius:12px;padding:18px 22px;margin-bottom:20px;
@@ -2175,6 +2384,7 @@ def _build_executive_summary(ctx: dict) -> str:
     最强驱动维度：<strong>{top_dim_zh or "N/A"}</strong>。
     {action}。
   </div>
+  {_thesis_html}
 </div>"""
 
 
