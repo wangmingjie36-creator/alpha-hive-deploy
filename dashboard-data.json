@@ -137,7 +137,7 @@
  ],
  "acc_dir_rets": [
   -0.5,
-  3.97,
+  4.92,
   0.45
  ],
  "acc_weekly": [
@@ -163,7 +163,7 @@
    "week": "2026-W11",
    "accuracy": 62.5,
    "total": 24,
-   "avg_ret": -8.84
+   "avg_ret": -10.11
   },
   {
    "week": "2026-W12",
@@ -200,7 +200,7 @@
   {
    "week": "2026-W12",
    "bullish": 33.3,
-   "bearish": 0.0,
+   "bearish": null,
    "neutral": 20.0
   }
  ],
@@ -3882,201 +3882,201 @@
   {
    "date": "2026-03-17",
    "ticker": "BILI",
-   "ret": -15.25,
-   "cum": 190.42,
-   "dd": 23.35,
+   "ret": 15.25,
+   "cum": 220.91,
+   "dd": 0.0,
    "correct": true
   },
   {
    "date": "2026-03-17",
    "ticker": "RKLB",
    "ret": -16.1,
-   "cum": 174.33,
-   "dd": 39.45,
+   "cum": 204.82,
+   "dd": 16.1,
    "correct": false
   },
   {
    "date": "2026-03-18",
    "ticker": "BILI",
    "ret": 11.06,
-   "cum": 185.38,
-   "dd": 28.39,
+   "cum": 215.88,
+   "dd": 5.04,
    "correct": true
   },
   {
    "date": "2026-03-18",
    "ticker": "CRCL",
    "ret": -26.02,
-   "cum": 159.36,
-   "dd": 54.41,
+   "cum": 189.85,
+   "dd": 31.06,
    "correct": false
   },
   {
    "date": "2026-03-18",
    "ticker": "RKLB",
    "ret": -5.09,
-   "cum": 154.27,
-   "dd": 59.51,
+   "cum": 184.76,
+   "dd": 36.16,
    "correct": false
   },
   {
    "date": "2026-03-19",
    "ticker": "BILI",
    "ret": -13.69,
-   "cum": 140.58,
-   "dd": 73.2,
+   "cum": 171.07,
+   "dd": 49.84,
    "correct": false
   },
   {
    "date": "2026-03-19",
    "ticker": "CRCL",
    "ret": -29.94,
-   "cum": 110.64,
-   "dd": 103.13,
+   "cum": 141.13,
+   "dd": 79.78,
    "correct": false
   },
   {
    "date": "2026-03-19",
    "ticker": "MSFT",
    "ret": 7.73,
-   "cum": 118.37,
-   "dd": 95.41,
+   "cum": 148.86,
+   "dd": 72.06,
    "correct": true
   },
   {
    "date": "2026-03-19",
    "ticker": "RKLB",
    "ret": -20.23,
-   "cum": 98.14,
-   "dd": 115.63,
+   "cum": 128.63,
+   "dd": 92.28,
    "correct": false
   },
   {
    "date": "2026-03-19",
    "ticker": "VKTX",
    "ret": 11.79,
-   "cum": 109.93,
-   "dd": 103.84,
+   "cum": 140.42,
+   "dd": 80.49,
    "correct": true
   },
   {
    "date": "2026-03-20",
    "ticker": "BILI",
    "ret": -9.93,
-   "cum": 100.0,
-   "dd": 113.77,
+   "cum": 130.5,
+   "dd": 90.42,
    "correct": false
   },
   {
    "date": "2026-03-20",
    "ticker": "MSFT",
    "ret": 6.0,
-   "cum": 106.0,
-   "dd": 107.77,
+   "cum": 136.5,
+   "dd": 84.42,
    "correct": true
   },
   {
    "date": "2026-03-20",
    "ticker": "RKLB",
    "ret": 14.65,
-   "cum": 120.65,
-   "dd": 93.12,
+   "cum": 151.15,
+   "dd": 69.77,
    "correct": true
   },
   {
    "date": "2026-03-23",
    "ticker": "AMZN",
    "ret": 0.2,
-   "cum": 120.86,
-   "dd": 92.91,
+   "cum": 151.35,
+   "dd": 69.56,
    "correct": true
   },
   {
    "date": "2026-03-23",
    "ticker": "BILI",
    "ret": -5.65,
-   "cum": 115.21,
-   "dd": 98.56,
+   "cum": 145.71,
+   "dd": 75.21,
    "correct": false
   },
   {
    "date": "2026-03-23",
    "ticker": "MSFT",
    "ret": -3.56,
-   "cum": 111.65,
-   "dd": 102.12,
+   "cum": 142.15,
+   "dd": 78.77,
    "correct": false
   },
   {
    "date": "2026-03-24",
    "ticker": "MSFT",
    "ret": 0.19,
-   "cum": 111.85,
-   "dd": 101.93,
+   "cum": 142.34,
+   "dd": 78.57,
    "correct": true
   },
   {
    "date": "2026-03-24",
    "ticker": "RKLB",
    "ret": 2.51,
-   "cum": 114.36,
-   "dd": 99.41,
+   "cum": 144.85,
+   "dd": 76.06,
    "correct": false
   },
   {
    "date": "2026-03-25",
    "ticker": "BILI",
    "ret": -2.82,
-   "cum": 111.54,
-   "dd": 102.23,
+   "cum": 142.04,
+   "dd": 78.88,
    "correct": false
   },
   {
    "date": "2026-03-25",
    "ticker": "META",
    "ret": -3.68,
-   "cum": 107.87,
-   "dd": 105.91,
+   "cum": 138.36,
+   "dd": 82.55,
    "correct": false
   },
   {
    "date": "2026-03-25",
    "ticker": "MSFT",
    "ret": -0.5,
-   "cum": 107.37,
-   "dd": 106.4,
+   "cum": 137.86,
+   "dd": 83.05,
    "correct": false
   },
   {
    "date": "2026-03-25",
    "ticker": "NVDA",
    "ret": -0.58,
-   "cum": 106.79,
-   "dd": 106.98,
+   "cum": 137.28,
+   "dd": 83.63,
    "correct": false
   },
   {
    "date": "2026-03-25",
    "ticker": "RKLB",
    "ret": -7.15,
-   "cum": 99.64,
-   "dd": 114.13,
+   "cum": 130.13,
+   "dd": 90.78,
    "correct": false
   },
   {
    "date": "2026-03-26",
    "ticker": "BILI",
    "ret": 1.94,
-   "cum": 101.58,
-   "dd": 112.19,
+   "cum": 132.07,
+   "dd": 88.84,
    "correct": true
   },
   {
    "date": "2026-03-26",
    "ticker": "RKLB",
    "ret": 2.62,
-   "cum": 104.2,
-   "dd": 109.57,
+   "cum": 134.7,
+   "dd": 86.22,
    "correct": false
   }
  ],
@@ -4552,7 +4552,7 @@
    ]
   }
  },
- "_generated_at": "2026-04-06 17:26 PDT",
+ "_generated_at": "2026-04-06 17:34 PDT",
  "_date": "2026-04-06",
- "_deploy_ts": 1775521563
+ "_deploy_ts": 1775522063
 }
