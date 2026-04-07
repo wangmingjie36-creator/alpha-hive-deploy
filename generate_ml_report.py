@@ -206,16 +206,30 @@ class MLEnhancedReportGenerator:
         try:
             with self._writer_lock:
                 if is_json:
-                    # JSON 内容：先对象再转 JSON
+                    # JSON 内容：先对象再转 JSON（用 SafeJSONEncoder 防序列化崩溃）
+                    from hive_logger import SafeJSONEncoder
                     with open(filepath, "w") as f:
-                        from hive_logger import SafeJSONEncoder
-                        json.dump(content, f, indent=2, cls=SafeJSONEncoder)
+                        json.dump(content, f, indent=2, cls=SafeJSONEncoder, ensure_ascii=False)
                 else:
                     # 文本内容：直接写入
                     with open(filepath, "w") as f:
                         f.write(content)
-        except (OSError, TypeError, ValueError) as e:
-            _log.warning("文件写入失败 %s: %s", filepath.name, str(e)[:50])
+        except OSError as e:
+            # 磁盘 I/O 错误（权限/磁盘满）
+            _log.error("[%s] 磁盘写入失败: %s", filepath.name, e)
+        except (TypeError, ValueError) as e:
+            # JSON 序列化错误：完整记录类型 + 路径，便于定位
+            _log.error(
+                "[%s] JSON 序列化失败: %s | 内容类型: %s",
+                filepath.name, str(e), type(content).__name__
+            )
+            # 二次尝试：用 default=str 兜底序列化（牺牲精度但不丢数据）
+            try:
+                with open(filepath, "w") as f:
+                    json.dump(content, f, indent=2, default=str, ensure_ascii=False)
+                _log.warning("[%s] 已用 default=str 兜底写入", filepath.name)
+            except OSError as e2:
+                _log.error("[%s] 兜底写入也失败: %s", filepath.name, e2)
 
     def save_html_and_json_async(
         self,
@@ -703,15 +717,18 @@ class MLEnhancedReportGenerator:
         opts = det if det else options
         if not opts and not ad:
             return ""
-        score = ad.get("score", 0) if ad else 0
+        # 防 None：dict 里 key 存在但值为 None 时，.get() 返回 None，格式化会崩
+        def _safe(v, default=0):
+            return default if v is None else v
+        score = _safe(ad.get("score", 0)) if ad else 0
         direction = ad.get("direction", "neutral") if ad else "neutral"
-        iv_rank = opts.get("iv_rank", 0)
-        iv_curr = opts.get("iv_current", opts.get("iv_curr", 0))
-        pc = opts.get("put_call_ratio", 0)
-        oi = opts.get("total_oi", 0)
-        gex = opts.get("gamma_squeeze_risk", "—")
-        flow = opts.get("flow_direction", opts.get("options_score", "—"))
-        skew = opts.get("iv_skew_ratio", opts.get("iv_skew", 0))
+        iv_rank = _safe(opts.get("iv_rank", 0))
+        iv_curr = _safe(opts.get("iv_current", opts.get("iv_curr", 0)))
+        pc = _safe(opts.get("put_call_ratio", 0))
+        oi = _safe(opts.get("total_oi", 0))
+        gex = opts.get("gamma_squeeze_risk") or "—"
+        flow = opts.get("flow_direction") or opts.get("options_score") or "—"
+        skew = _safe(opts.get("iv_skew_ratio", opts.get("iv_skew", 0)))
         unusual = opts.get("unusual_activity", [])
         key_levels = opts.get("key_levels", {})
         support = key_levels.get("support", [])

@@ -643,8 +643,11 @@ window.AH.initSwarmDiv=function(){
   var html='';
   tickers.forEach(function(tk){
     var d=sd[tk]; if(!d||!d.bees)return;
-    var consensusCls=d.consensus>=75?'sdiv-high':d.consensus>=55?'sdiv-med':'sdiv-low';
-    var consensusLabel=d.consensus>=75?'高共识':d.consensus>=55?'中等共识':'低共识⚠️';
+    // 共振触发 OR 共识 ≥60% → 高共识；共识 ≥45% → 中等；其他 → 低
+    var isHigh = d.resonance===true || d.consensus>=60;
+    var isMed = !isHigh && d.consensus>=45;
+    var consensusCls=isHigh?'sdiv-high':isMed?'sdiv-med':'sdiv-low';
+    var consensusLabel=isHigh?(d.resonance?'高共识 ✅共振':'高共识'):isMed?'中等共识':'低共识⚠️';
     var maxScore=Math.max.apply(null,d.bees.map(function(b){return b.score;}));
     if(maxScore<=0)maxScore=10;
     var beesHtml='';

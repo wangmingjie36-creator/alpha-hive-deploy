@@ -544,6 +544,7 @@ def _load_accuracy_data() -> dict:
 
     # F11: 增强准确率数据（胜率走势、最佳/最差预测、Sharpe）
     _acc_weekly_trend: list = []  # [{week, accuracy, total}]
+    _acc_weekly_by_dir: list = []  # [{week, bullish, bearish, neutral}]
     _acc_best3: list = []   # [{ticker, date, direction, score, return_t7}]
     _acc_worst3: list = []
     _acc_sharpe = 0.0
@@ -579,12 +580,17 @@ def _load_accuracy_data() -> dict:
                 GROUP BY week, direction ORDER BY week DESC LIMIT 48
             """).fetchall()
             # 重组为 {week: {bullish: acc, bearish: acc, neutral: acc}}
+            # 最小样本数过滤：单周单方向 < 3 笔不显示（避免小样本"假崩盘"）
+            _MIN_WEEKLY_SAMPLES = 3
             _wdir_map: dict = {}
             for _r in _wdir_rows:
                 _wk = _r["week"]
                 _dir = _r["direction"]
                 _wdir_map.setdefault(_wk, {})
-                _wdir_map[_wk][_dir] = round(_r["correct"]/_r["total"]*100, 1) if _r["total"] else None
+                if _r["total"] and _r["total"] >= _MIN_WEEKLY_SAMPLES:
+                    _wdir_map[_wk][_dir] = round(_r["correct"]/_r["total"]*100, 1)
+                else:
+                    _wdir_map[_wk][_dir] = None  # 样本不足 → 不显示该点
             # 按周排序，只保留最近 12 周
             _weeks_sorted = sorted(_wdir_map.keys())[-12:]
             _acc_weekly_by_dir = [
@@ -1846,10 +1852,13 @@ def render_dashboard_html(report: Dict, date_str: str,
                 _dv_min = min(_dv_scores)
                 _dv_total = sum(_dv_votes.values())
                 _dv_majority = max(_dv_votes.values()) / _dv_total if _dv_total else 0
+                # 加入共振标志（与蜂群核心决策一致）
+                _dv_resonance = _dv_sd.get("resonance", {}).get("resonance_detected", False)
                 _swarm_divergence[_dv_tk] = {
                     "std": round(_dv_std, 2),
                     "spread": round(_dv_max - _dv_min, 1),
                     "consensus": round(_dv_majority * 100, 0),
+                    "resonance": _dv_resonance,
                     "votes": _dv_votes,
                     "bees": _dv_bees,
                 }

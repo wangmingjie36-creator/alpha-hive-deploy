@@ -178,18 +178,56 @@ def get_logger(name: str) -> logging.Logger:
 
 
 class SafeJSONEncoder(json.JSONEncoder):
-    """JSON 编码器：安全处理 NaN / Inf / datetime / set / bytes 等不可序列化类型"""
+    """JSON 编码器：安全处理 NaN / Inf / datetime / set / bytes / numpy / pandas / Decimal / Enum 等"""
 
     def default(self, o):
+        # ── 时间类 ──
         if isinstance(o, datetime):
             return o.isoformat()
+        try:
+            from datetime import date as _date, time as _time, timedelta as _td
+            if isinstance(o, _date):  # date 不是 datetime 的子类
+                return o.isoformat()
+            if isinstance(o, _time):
+                return o.isoformat()
+            if isinstance(o, _td):
+                return o.total_seconds()
+        except ImportError:
+            pass
+
+        # ── 容器/二进制 ──
         if isinstance(o, set):
             return sorted(o)
-        if isinstance(o, bytes):
+        if isinstance(o, frozenset):
+            return sorted(o)
+        if isinstance(o, (bytes, bytearray)):
             return o.decode("utf-8", errors="replace")
         if isinstance(o, Path):
             return str(o)
-        # numpy 标量 → Python 原生类型
+
+        # ── Decimal / complex / Enum / UUID ──
+        try:
+            from decimal import Decimal as _Decimal
+            if isinstance(o, _Decimal):
+                return float(o)
+        except ImportError:
+            pass
+        if isinstance(o, complex):
+            return [o.real, o.imag]
+        try:
+            from enum import Enum as _Enum
+            if isinstance(o, _Enum):
+                return o.value
+        except ImportError:
+            pass
+        try:
+            from uuid import UUID as _UUID
+            if isinstance(o, _UUID):
+                return str(o)
+        except ImportError:
+            pass
+
+        # ── numpy 标量 → Python 原生类型 ──
         try:
             import numpy as _np
             if isinstance(o, (_np.integer,)):
@@ -206,22 +244,53 @@ class SafeJSONEncoder(json.JSONEncoder):
                 return bool(o)
             if isinstance(o, _np.ndarray):
                 return o.tolist()
+            if hasattr(_np, "datetime64") and isinstance(o, _np.datetime64):
+                return str(o)
         except ImportError:
             pass
-        # pandas 类型 → Python 原生类型
+
+        # ── pandas 类型 ──
         try:
             import pandas as _pd
             if isinstance(o, _pd.Timestamp):
                 return o.isoformat()
+            if isinstance(o, _pd.Timedelta):
+                return o.total_seconds()
             if isinstance(o, (_pd.Series, _pd.DataFrame)):
                 return o.to_dict()
             if isinstance(o, _pd.Categorical):
                 return o.tolist()
+            if isinstance(o, _pd.Index):
+                return o.tolist()
         except ImportError:
             pass
+
+        # ── dataclass ──
+        try:
+            import dataclasses as _dc
+            if _dc.is_dataclass(o) and not isinstance(o, type):
+                return _dc.asdict(o)
+        except ImportError:
+            pass
+
+        # ── 自定义对象（有 to_dict / __dict__）──
+        if hasattr(o, "to_dict") and callable(o.to_dict):
+            try:
+                return o.to_dict()
+            except Exception:
+                pass
+
+        # ── 兜底：转字符串并记录类型（避免静默失败）──
         try:
             return super().default(o)
         except TypeError:
+            _typename = type(o).__name__
+            try:
+                logging.getLogger("alpha_hive.json_encoder").warning(
+                    "SafeJSONEncoder 兜底转字符串：未知类型 %s", _typename
+                )
+            except Exception:
+                pass
             return str(o)
 
     def encode(self, o):
