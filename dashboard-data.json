@@ -1,144 +1,32 @@
 {
- "fv": 22,
- "fg_label": "极度恐惧",
- "scores": [
-  [
-   "AMZN",
-   7.7
-  ],
-  [
-   "META",
-   7.3
-  ],
-  [
-   "QCOM",
-   7.0
-  ],
-  [
-   "VKTX",
-   6.8
-  ],
-  [
-   "BILI",
-   6.2
-  ],
-  [
-   "RKLB",
-   5.5
-  ],
-  [
-   "MSFT",
-   5.4
-  ],
-  [
-   "NVDA",
-   5.3
-  ],
-  [
-   "TSLA",
-   4.5
-  ],
-  [
-   "CRCL",
-   4.3
-  ]
- ],
+ "fv": 50,
+ "fg_label": "中性",
+ "scores": [],
  "dir_counts": [
-  5,
-  2,
-  3
+  0,
+  0,
+  0
  ],
- "radar": {
-  "AMZN": [
-   43.3,
-   77.8,
-   57.2,
-   72.3,
-   83.4
-  ],
-  "META": [
-   41.5,
-   87.0,
-   47.7,
-   53.1,
-   83.4
-  ],
-  "QCOM": [
-   60.7,
-   68.0,
-   40.6,
-   55.8,
-   83.4
-  ],
-  "VKTX": [
-   94.2,
-   60.0,
-   48.9,
-   66.6,
-   83.4
-  ],
-  "BILI": [
-   65.7,
-   55.0,
-   49.4,
-   61.8,
-   78.6
-  ],
-  "RKLB": [
-   36.7,
-   60.0,
-   50.1,
-   74.4,
-   39.1
-  ],
-  "MSFT": [
-   55.5,
-   73.8,
-   54.4,
-   81.6,
-   30.8
-  ],
-  "NVDA": [
-   37.4,
-   63.0,
-   55.3,
-   76.5,
-   38.6
-  ],
-  "TSLA": [
-   26.1,
-   66.7,
-   37.4,
-   87.1,
-   24.6
-  ],
-  "CRCL": [
-   35.5,
-   55.0,
-   40.6,
-   28.6,
-   35.9
-  ]
- },
+ "radar": {},
  "acc_dir_labels": [
   "看多",
   "看空",
   "中性"
  ],
  "acc_dir_accs": [
-  45.3,
+  46.0,
   87.9,
-  50.0
+  47.8
  ],
  "acc_dir_tots": [
-  86,
+  87,
   33,
-  44
+  46
  ],
  "acc_dir_rets": [
-  -0.46,
+  -0.32,
   4.49,
-  0.45
+  0.74
  ],
  "acc_weekly": [
   {
@@ -170,6 +58,12 @@
    "accuracy": 28.6,
    "total": 14,
    "avg_ret": -0.23
+  },
+  {
+   "week": "2026-W13",
+   "accuracy": 33.3,
+   "total": 3,
+   "avg_ret": 8.79
   }
  ],
  "acc_weekly_by_dir": [
@@ -202,6 +96,12 @@
    "bullish": 42.9,
    "bearish": null,
    "neutral": 20.0
+  },
+  {
+   "week": "2026-W13",
+   "bullish": null,
+   "bearish": null,
+   "neutral": null
   }
  ],
  "fg_history": [
@@ -284,6 +184,10 @@
   {
    "date": "2026-04-07",
    "value": 22
+  },
+  {
+   "date": "2026-04-08",
+   "value": 50
   }
  ],
  "trend_data": {
@@ -1401,6 +1305,7 @@
   ]
  },
  "hist_full": {
+  "2026-04-08": [],
   "2026-04-07": [
    {
     "ticker": "AMZN",
@@ -2824,68 +2729,7 @@
    }
   ]
  },
- "search_index": [
-  {
-   "ticker": "AMZN",
-   "score": 7.7,
-   "direction": "看多",
-   "price": 213.77
-  },
-  {
-   "ticker": "META",
-   "score": 7.3,
-   "direction": "看多",
-   "price": 575.05
-  },
-  {
-   "ticker": "QCOM",
-   "score": 7.0,
-   "direction": "看多",
-   "price": 124.07
-  },
-  {
-   "ticker": "VKTX",
-   "score": 6.8,
-   "direction": "看多",
-   "price": 33.7
-  },
-  {
-   "ticker": "BILI",
-   "score": 6.2,
-   "direction": "看多",
-   "price": 22.98
-  },
-  {
-   "ticker": "RKLB",
-   "score": 5.5,
-   "direction": "中性",
-   "price": 66.32
-  },
-  {
-   "ticker": "MSFT",
-   "score": 5.4,
-   "direction": "中性",
-   "price": 372.29
-  },
-  {
-   "ticker": "NVDA",
-   "score": 5.3,
-   "direction": "中性",
-   "price": 178.1
-  },
-  {
-   "ticker": "TSLA",
-   "score": 4.5,
-   "direction": "看空",
-   "price": 346.65
-  },
-  {
-   "ticker": "CRCL",
-   "score": 4.3,
-   "direction": "看空",
-   "price": 94.12
-  }
- ],
+ "search_index": [],
  "equity_curve": [
   {
    "date": "2026-02-25",
@@ -4190,491 +4034,34 @@
    "cum": 128.22,
    "dd": 92.69,
    "correct": false
+  },
+  {
+   "date": "2026-03-30",
+   "ticker": "AMZN",
+   "ret": 10.1,
+   "cum": 138.33,
+   "dd": 82.59,
+   "correct": false
+  },
+  {
+   "date": "2026-03-30",
+   "ticker": "BILI",
+   "ret": 11.99,
+   "cum": 150.31,
+   "dd": 70.6,
+   "correct": true
+  },
+  {
+   "date": "2026-03-30",
+   "ticker": "MSFT",
+   "ret": 4.28,
+   "cum": 154.6,
+   "dd": 66.32,
+   "correct": false
   }
  ],
- "swarm_divergence": {
-  "AMZN": {
-   "std": 1.98,
-   "spread": 6.2,
-   "consensus": 57.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 4,
-    "bearish": 1,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 4.3,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 5.8,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 7.2,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 7.8,
-     "dir": "bull"
-    },
-    {
-     "name": "Buzz",
-     "score": 5.7,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 8.3,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 2.2,
-     "dir": "bear"
-    }
-   ]
-  },
-  "META": {
-   "std": 1.94,
-   "spread": 5.6,
-   "consensus": 57.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 4,
-    "bearish": 1,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 4.2,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 6.2,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 5.3,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 8.7,
-     "dir": "bull"
-    },
-    {
-     "name": "Buzz",
-     "score": 4.8,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 8.3,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 3.1,
-     "dir": "bear"
-    }
-   ]
-  },
-  "QCOM": {
-   "std": 1.41,
-   "spread": 4.3,
-   "consensus": 57.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 4,
-    "bearish": 2,
-    "neutral": 1
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 6.1,
-     "dir": "bull"
-    },
-    {
-     "name": "Rival",
-     "score": 6.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 5.6,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 6.8,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 4.1,
-     "dir": "bear"
-    },
-    {
-     "name": "Guard",
-     "score": 8.3,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 4.0,
-     "dir": "bear"
-    }
-   ]
-  },
-  "VKTX": {
-   "std": 2.01,
-   "spread": 6.6,
-   "consensus": 57.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 4,
-    "bearish": 1,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 9.4,
-     "dir": "bull"
-    },
-    {
-     "name": "Rival",
-     "score": 5.8,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 6.7,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 6.0,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 4.9,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 8.3,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 2.8,
-     "dir": "bear"
-    }
-   ]
-  },
-  "BILI": {
-   "std": 0.96,
-   "spread": 3.0,
-   "consensus": 57.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 4,
-    "bearish": 0,
-    "neutral": 3
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 6.6,
-     "dir": "bull"
-    },
-    {
-     "name": "Rival",
-     "score": 6.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 6.2,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 5.5,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 4.9,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 7.9,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 4.9,
-     "dir": "neut"
-    }
-   ]
-  },
-  "RKLB": {
-   "std": 1.43,
-   "spread": 4.3,
-   "consensus": 43.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 3,
-    "bearish": 1,
-    "neutral": 3
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 3.7,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 6.1,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 7.4,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 6.0,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 5.0,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 3.9,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 3.2,
-     "dir": "bear"
-    }
-   ]
-  },
-  "MSFT": {
-   "std": 1.73,
-   "spread": 5.1,
-   "consensus": 43.0,
-   "resonance": false,
-   "votes": {
-    "bullish": 3,
-    "bearish": 1,
-    "neutral": 3
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 5.5,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 6.2,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 8.2,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 7.4,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 5.4,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 3.1,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 3.5,
-     "dir": "bear"
-    }
-   ]
-  },
-  "NVDA": {
-   "std": 1.71,
-   "spread": 5.5,
-   "consensus": 43.0,
-   "resonance": false,
-   "votes": {
-    "bullish": 3,
-    "bearish": 1,
-    "neutral": 3
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 3.7,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 5.8,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 7.7,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 6.3,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 5.5,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 3.9,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 2.2,
-     "dir": "bear"
-    }
-   ]
-  },
-  "TSLA": {
-   "std": 2.38,
-   "spread": 6.8,
-   "consensus": 43.0,
-   "resonance": false,
-   "votes": {
-    "bullish": 2,
-    "bearish": 3,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 2.6,
-     "dir": "bear"
-    },
-    {
-     "name": "Rival",
-     "score": 6.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 8.7,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 6.7,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 3.7,
-     "dir": "bear"
-    },
-    {
-     "name": "Guard",
-     "score": 2.5,
-     "dir": "neut"
-    },
-    {
-     "name": "Bear",
-     "score": 1.9,
-     "dir": "bear"
-    }
-   ]
-  },
-  "CRCL": {
-   "std": 1.11,
-   "spread": 3.1,
-   "consensus": 43.0,
-   "resonance": false,
-   "votes": {
-    "bullish": 2,
-    "bearish": 3,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 3.5,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 6.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 2.9,
-     "dir": "bear"
-    },
-    {
-     "name": "Chronos",
-     "score": 5.5,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 4.1,
-     "dir": "bear"
-    },
-    {
-     "name": "Guard",
-     "score": 3.6,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 3.0,
-     "dir": "bear"
-    }
-   ]
-  }
- },
- "_generated_at": "2026-04-07 15:05 PDT",
- "_date": "2026-04-07",
- "_deploy_ts": 1775599546
+ "swarm_divergence": {},
+ "_generated_at": "2026-04-08 14:03 PDT",
+ "_date": "2026-04-08",
+ "_deploy_ts": 1775682182
 }
