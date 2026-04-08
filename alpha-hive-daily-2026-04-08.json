@@ -1,0 +1,265 @@
+{
+  "date": "2026-04-08",
+  "timestamp": "2026-04-08T14:02:22.143230",
+  "system_status": "✅ 蜂群协作完成",
+  "phase_completed": "完整蜂群流程 (Swarm Mode)",
+  "data_quality_summary": {
+    "total_tickers": 0,
+    "degraded_count": 0,
+    "critical_count": 0,
+    "degraded_pct": 0,
+    "has_quality_issue": false
+  },
+  "swarm_metadata": {
+    "total_agents": 8,
+    "tickers_analyzed": 0,
+    "resonances_detected": 0,
+    "pheromone_board_entries": 31
+  },
+  "concentration_analysis": {
+    "concentration_risk": "low",
+    "risk_score": 0.0,
+    "sector_breakdown": {},
+    "correlation_warnings": [],
+    "factor_clusters": {},
+    "recommendations": [
+      "暂无高分标的，无需评估集中度"
+    ],
+    "summary": "无高分标的（分数 < 6.0）"
+  },
+  "cross_ticker_analysis": {},
+  "sector_sentiment_contagion": {},
+  "macro_context": {
+    "macro_regime": "neutral",
+    "macro_score": 6.2,
+    "vix": 21.04,
+    "vix_change_pct": -18.39,
+    "vix_regime": "elevated",
+    "treasury_10y": 4.291,
+    "treasury_2y": 3.81,
+    "yield_spread": 48.1,
+    "yield_curve": "normal",
+    "rate_environment": "moderate",
+    "dollar_trend": "weak",
+    "market_trend": "bull",
+    "spx_change_pct": 2.51,
+    "gold_price": 434.53,
+    "gold_change_pct": 0.63,
+    "gold_trend": "rising",
+    "sector_rotation": {
+      "hot": [
+        [
+          "XLK",
+          "科技",
+          5.03
+        ],
+        [
+          "XLI",
+          "工业",
+          3.66
+        ],
+        [
+          "XLRE",
+          "房地产",
+          3.64
+        ]
+      ],
+      "cold": [
+        [
+          "XLV",
+          "医疗",
+          1.31
+        ],
+        [
+          "XLY",
+          "可选消费",
+          0.93
+        ],
+        [
+          "XLE",
+          "能源",
+          -1.56
+        ]
+      ],
+      "full": {
+        "XLK": [
+          "科技",
+          5.03
+        ],
+        "XLE": [
+          "能源",
+          -1.56
+        ],
+        "XLF": [
+          "金融",
+          3.56
+        ],
+        "XLI": [
+          "工业",
+          3.66
+        ],
+        "XLY": [
+          "可选消费",
+          0.93
+        ],
+        "XLP": [
+          "必需消费",
+          1.62
+        ],
+        "XLV": [
+          "医疗",
+          1.31
+        ],
+        "XLC": [
+          "通信",
+          2.31
+        ],
+        "XLB": [
+          "材料",
+          2.56
+        ],
+        "XLRE": [
+          "房地产",
+          3.64
+        ],
+        "XLU": [
+          "公用事业",
+          1.45
+        ]
+      }
+    },
+    "macro_headwinds": [
+      "黄金走强+0.6%（避险情绪升温）",
+      "HY信用利差 312bp(+7bp日变)（信用利差偏宽，注意边际走阔）"
+    ],
+    "macro_tailwinds": [
+      "大盘上行（+2.5%，贝塔顺风）",
+      "美元偏弱（出口商 + 大宗商品受益）",
+      "CPI同比 2.4%（通胀受控，货币政策友好）"
+    ],
+    "fred_extras": {
+      "cpi_yoy": 2.43,
+      "cpi_date": "2026-02-01",
+      "unemployment": 4.3,
+      "unemployment_date": "2026-03-01",
+      "fed_funds_rate": 3.64,
+      "treasury_2y": 3.81,
+      "hy_spread_bp": 312.0,
+      "hy_spread_date": "2026-04-07",
+      "hy_spread_chg_bp": 7.0
+    },
+    "cpi_yoy": 2.43,
+    "unemployment": 4.3,
+    "fed_funds_rate": 3.64,
+    "hy_spread_bp": 312.0,
+    "hy_spread_chg_bp": 7.0,
+    "summary": "VIX 21.0(elevated) | 10Y 4.29% | 大盘+2.5% | 宏观:neutral | 曲线:正常 | CPI同比2.4% | HY利差312bp | 黄金走强+0.6%",
+    "data_source": "yfinance+fred"
+  },
+  "backtest_stats": {
+    "period": "t7",
+    "days_window": 30,
+    "overall_accuracy": 0.467,
+    "total_checked": 90,
+    "correct_count": 42,
+    "avg_return": 0.488,
+    "avg_score": 5.6,
+    "by_direction": {
+      "bullish": {
+        "total": 32,
+        "correct": 7,
+        "accuracy": 0.21875,
+        "avg_return": -3.64
+      },
+      "bearish": {
+        "total": 33,
+        "correct": 29,
+        "accuracy": 0.8787878787878788,
+        "avg_return": 4.49
+      },
+      "neutral": {
+        "total": 25,
+        "correct": 6,
+        "accuracy": 0.24,
+        "avg_return": -3.64
+      }
+    },
+    "by_ticker": {
+      "BILI": {
+        "total": 15,
+        "correct": 7,
+        "accuracy": 0.4666666666666667,
+        "avg_return": -4.79,
+        "avg_score": 6.3
+      },
+      "RKLB": {
+        "total": 13,
+        "correct": 5,
+        "accuracy": 0.38461538461538464,
+        "avg_return": -4.99,
+        "avg_score": 5.5
+      },
+      "MSFT": {
+        "total": 13,
+        "correct": 7,
+        "accuracy": 0.5384615384615384,
+        "avg_return": -4.04,
+        "avg_score": 5.4
+      },
+      "META": {
+        "total": 8,
+        "correct": 2,
+        "accuracy": 0.25,
+        "avg_return": -3.71,
+        "avg_score": 5.4
+      },
+      "CRCL": {
+        "total": 8,
+        "correct": 2,
+        "accuracy": 0.25,
+        "avg_return": -4.46,
+        "avg_score": 5.4
+      },
+      "AMZN": {
+        "total": 8,
+        "correct": 5,
+        "accuracy": 0.625,
+        "avg_return": 0.33,
+        "avg_score": 5.3
+      },
+      "VKTX": {
+        "total": 7,
+        "correct": 3,
+        "accuracy": 0.42857142857142855,
+        "avg_return": -7.06,
+        "avg_score": 6.2
+      },
+      "NVDA": {
+        "total": 7,
+        "correct": 2,
+        "accuracy": 0.2857142857142857,
+        "avg_return": -3.1,
+        "avg_score": 5.9
+      },
+      "TSLA": {
+        "total": 6,
+        "correct": 5,
+        "accuracy": 0.8333333333333334,
+        "avg_return": -4.02,
+        "avg_score": 4.7
+      },
+      "QCOM": {
+        "total": 5,
+        "correct": 4,
+        "accuracy": 0.8,
+        "avg_return": -1.66,
+        "avg_score": 5.4
+      }
+    }
+  },
+  "markdown_report": "# 【2026-04-08】Alpha Hive 蜂群协作日报\n\n**自动生成于**：2026-04-08 14:02:22\n**系统模式**：完全去中心化蜂群协作 | 8 个自治工蜂（6 核心 + BearBeeContrarian）\n\n## 1) 今日摘要\n\n- 扫描标的：0 个 | 共振信号：0/0\n\n\n## 2) 今日聪明钱动向\n\n## 3) 市场隐含预期\n\n## 4) X 情绪汇总\n\n## 5) 财报/事件催化剂\n\n## 6) 竞争格局分析\n\n## 6.5) 看空对冲观点\n\n> BearBeeContrarian 专门寻找看空信号，平衡蜂群系统性看多偏差\n\n## 7) 综合判断 & 信号强度\n\n| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |\n|------|------|--------|------|---------------|-------|---------|\n\n### 交叉验证详情\n\n\n## 🌐 宏观环境 🟡\n\n**宏观政体**：NEUTRAL | **评分**：6.2/10\n\n| 指标 | 数值 | 状态 |\n|------|------|------|\n| VIX | 21.0 | elevated |\n| 10Y利率 | 4.29% | moderate |\n| 大盘(5日) | +2.51% | bull |\n| 美元 | — | weak |\n\n**逆风**：黄金走强+0.6%（避险情绪升温） | HY信用利差 312bp(+7bp日变)（信用利差偏宽，注意边际走阔）\n\n**顺风**：大盘上行（+2.5%，贝塔顺风） | 美元偏弱（出口商 + 大宗商品受益） | CPI同比 2.4%（通胀受控，货币政策友好）\n\n## 📈 历史预测准确率（T+7，近30天）\n\n**样本**：90 条 | **准确率**：46.7% (42/90) | **平均收益**：+0.49%\n\n| 标的 | 方向准确率 | 预测次数 | 平均收益 |\n|------|-----------|---------|---------|\n| BILI | 47% | 15 | -4.79% |\n| RKLB | 38% | 13 | -4.99% |\n| MSFT | 54% | 13 | -4.04% |\n| META | 25% | 8 | -3.71% |\n| CRCL | 25% | 8 | -4.46% |\n| AMZN | 62% | 8 | +0.33% |\n\n**按方向**：看多:22%(32次) | 看空:88%(33次) | 中性:24%(25次)\n\n## 8) 数据来源 & 免责声明\n\n**蜂群分工**：\n- ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）\n- OracleBeeEcho：市场预期（期权 IV/P-C Ratio/Gamma）\n- BuzzBeeWhisper：社交情绪（X/Reddit/Finviz）\n- ChronosBeeHorizon：催化剂追踪（财报/事件日历）\n- RivalBeeVanguard：竞争格局（ML 预测 + 行业对标）\n- GuardBeeSentinel：交叉验证（共振检测 + 风险调整）\n\n**免责声明**：\n本报告为蜂群 AI 分析，不构成投资建议，不替代持牌投顾。预测存在误差，所有交易决策需自行判断和风控。\n",
+  "twitter_threads": [
+    "【Alpha Hive 蜂群日报 2026-04-08】7 个自治工蜂协作分析，多数投票共振信号。非投资建议，仅数据分析与情景推演。👇\n\n🐝 7 个工蜂独立分析（6 核心 + 看空对冲蜂）→ 信息素板实时交换 → 多数投票汇总\n高共振信号优先级最高。风险提示：控制仓位。\n下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
+  ],
+  "opportunities": []
+}
