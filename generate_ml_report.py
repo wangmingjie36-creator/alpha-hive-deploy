@@ -1539,11 +1539,19 @@ def main():
         except (json.JSONDecodeError, OSError) as e:
             _log.debug("蜂群 JSON 加载失败: %s", e)
     if not swarm_data:
-        # 尝试从 checkpoint 恢复
+        # 尝试从 checkpoint 恢复（v0.15.3: 仅接受今日 checkpoint）
+        _today = datetime.now().strftime("%Y-%m-%d")
         for ckpt in report_dir.glob(".checkpoint_*.json"):
             try:
                 with open(ckpt) as f:
                     ckpt_data = json.load(f)
+                    # 双保险：文件名日期 + 内容 saved_at 均需匹配今日
+                    if _today not in ckpt.name:
+                        _log.debug("跳过非今日 checkpoint: %s", ckpt.name)
+                        continue
+                    if ckpt_data.get("saved_at", "") != _today:
+                        _log.debug("checkpoint saved_at 不匹配今日: %s", ckpt.name)
+                        continue
                     swarm_data = ckpt_data.get("results", {})
                     if swarm_data:
                         _log.info("从 checkpoint 加载蜂群数据: %d 标的", len(swarm_data))
@@ -1619,6 +1627,73 @@ def main():
                         k: (float(v) if v is not None else 0.0) for k, v in dim.items()
                     }
                     enhanced_report["swarm_results"]["data_quality_grade"] = "degraded"
+
+                # ===== v0.15.0: Probability Boost 第 6 维融合 =====
+                # 当 advanced_analysis.probability_analysis 给出高胜率 + 高赔率时,
+                # 对 swarm final_score 做加成, 解决两条路径评分分裂问题.
+                try:
+                    _prob = (enhanced_report.get("advanced_analysis") or {}).get(
+                        "probability_analysis", {}) or {}
+                    _win = float(_prob.get("win_probability_pct", 0) or 0)
+                    _rr  = float(_prob.get("risk_reward_ratio", 0) or 0)
+                    _old_score = float(sr.get("final_score", 0) or 0)
+                    _old_dir   = sr.get("direction", "neutral")
+                    _bear_str  = float((sr.get("agent_details") or {}).get(
+                        "BearBeeContrarian", {}).get("details", {}).get("bear_score", 0) or 0)
+
+                    _boost = 0.0
+                    _reason = ""
+                    # 触发条件: win_prob >= 60 且 risk_reward >= 5
+                    if _win >= 60.0 and _rr >= 5.0 and _old_dir != "bearish":
+                        # 基础加成: (win_prob - 50) / 10, 上限 2.5
+                        # 60%→1.0, 65%→1.5, 75%→2.5, 85%→2.5(cap)
+                        _base_boost = min(2.5, max(0.0, (_win - 50.0) / 10.0))
+                        # 赔率乘数: rr 5.0→1.0x, 7.5→1.5x(cap)
+                        _rr_mult = min(1.5, _rr / 5.0)
+                        _boost = _base_boost * _rr_mult
+                        # Bear 对冲: bear_score 每超 6.0 减 0.2 (线性)
+                        _bear_hedge = 0.0
+                        if _bear_str >= 6.0:
+                            _bear_hedge = min(_boost * 0.6, (_bear_str - 6.0) * 0.2)
+                            _boost = max(0.0, _boost - _bear_hedge)
+                        _reason = (f"win {_win:.0f}% × rr {_rr:.1f}x → base +{_base_boost * _rr_mult:.2f}"
+                                   + (f" − bear {_bear_str:.1f} 对冲 -{_bear_hedge:.2f}" if _bear_hedge else "")
+                                   + f" = +{_boost:.2f}")
+                        # 加成后 clamp 到 [1, 9]
+                        _new_score = round(max(1.0, min(9.0, _old_score + _boost)), 2)
+
+                        # 若加成后越过方向门槛 (5.8), 将 neutral 翻转为 bullish
+                        _new_dir = _old_dir
+                        if _old_dir == "neutral" and _new_score >= 5.8:
+                            _new_dir = "bullish"
+                            _reason += " | direction: neutral→bullish"
+
+                        enhanced_report["swarm_results"]["final_score"] = _new_score
+                        enhanced_report["swarm_results"]["direction"] = _new_dir
+                        enhanced_report["swarm_results"]["probability_boost"] = {
+                            "applied": True,
+                            "win_probability_pct": _win,
+                            "risk_reward_ratio": _rr,
+                            "boost_value": round(_boost, 2),
+                            "score_before": _old_score,
+                            "score_after": _new_score,
+                            "direction_before": _old_dir,
+                            "direction_after": _new_dir,
+                            "bear_strength": _bear_str,
+                            "reason": _reason,
+                        }
+                        _log.info("[%s] Probability boost: %.2f→%.2f (%s)",
+                                  ticker, _old_score, _new_score, _reason)
+                    else:
+                        enhanced_report["swarm_results"]["probability_boost"] = {
+                            "applied": False,
+                            "win_probability_pct": _win,
+                            "risk_reward_ratio": _rr,
+                            "reason": (f"未触发 (win_prob {_win:.0f}%<60 或 rr {_rr:.1f}<5"
+                                       f" 或 direction=bearish)"),
+                        }
+                except Exception as _pb_err:
+                    _log.warning("[%s] Probability boost 跳过: %s", ticker, _pb_err)
 
             # 生成 HTML
             html = report_gen.generate_html_report(ticker, enhanced_report)

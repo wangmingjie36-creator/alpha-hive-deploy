@@ -1066,11 +1066,42 @@ class OptionsAgent:
         self.analyzer = OptionsAnalyzer()
         self.fetcher = OptionsDataFetcher()
 
-    def analyze(self, ticker: str, stock_price: Optional[float] = None) -> Dict:
+    def analyze(self, ticker: str, stock_price: Optional[float] = None,
+                force_refresh: bool = False) -> Dict:
         """
         执行完整期权分析
         返回标准化分析结果字典
+
+        v0.15.2: 跨进程 per-ticker-per-date snapshot 缓存
+        - 同一交易日内，任何模块（OracleBee / advanced_analyzer / BearBee 等）
+          调用本方法都会返回**同一份冻结快照**，避免 yfinance 多次独立拉取
+          产生数据分裂（iv_rank / pc_ratio / GEX 等不一致）。
+        - 首次调用执行完整计算并写入 cache/options_snapshot_{TICKER}_{YYYY-MM-DD}.json
+        - 后续调用直接读取该文件，无需重新计算
+        - 旁路方式：
+            1) 传 force_refresh=True 强制重算
+            2) 环境变量 OPTIONS_SNAPSHOT_DISABLE=1 全局禁用
         """
+        # ===== Snapshot cache 入口 =====
+        _snap_disabled = os.environ.get("OPTIONS_SNAPSHOT_DISABLE", "").lower() in ("1", "true", "yes")
+        _snap_date = datetime.now().strftime("%Y-%m-%d")
+        _snap_path = os.path.join(self.fetcher.cache_dir,
+                                  f"options_snapshot_{ticker}_{_snap_date}.json")
+        if not _snap_disabled and not force_refresh and os.path.exists(_snap_path):
+            try:
+                with open(_snap_path, "r") as _f:
+                    _cached = json.load(_f)
+                # 校验快照日期仍是今天，防止跨午夜脏数据
+                _cached_ts = _cached.get("_snapshot_timestamp", "")
+                if _cached_ts.startswith(_snap_date):
+                    _log.info("[%s] 期权快照命中: %s (冻结于 %s)",
+                              ticker, os.path.basename(_snap_path), _cached_ts[:19])
+                    return _cached
+                else:
+                    _log.warning("[%s] 期权快照日期不匹配 (%s vs %s)，忽略",
+                                 ticker, _cached_ts[:10], _snap_date)
+            except (json.JSONDecodeError, OSError) as _e:
+                _log.warning("[%s] 期权快照读取失败，重新计算: %s", ticker, _e)
         # 期权分析
 
         # 1. 获取期权链数据
@@ -1307,6 +1338,18 @@ class OptionsAgent:
 
         # 方案21: 出口消毒 — 遍历结果 dict，NaN/Inf → 安全默认值
         _sanitize_result(result)
+
+        # ===== Snapshot cache 出口：写入 per-ticker-per-date 冻结快照 =====
+        if not _snap_disabled:
+            try:
+                result["_snapshot_timestamp"] = datetime.now().isoformat()
+                result["_snapshot_ticker"] = ticker
+                result["_snapshot_stock_price"] = stock_price
+                with open(_snap_path, "w") as _f:
+                    json.dump(result, _f, default=str, indent=2)
+                _log.info("[%s] 期权快照写入: %s", ticker, os.path.basename(_snap_path))
+            except OSError as _e:
+                _log.warning("[%s] 期权快照写入失败: %s", ticker, _e)
 
         return result
 

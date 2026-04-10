@@ -419,7 +419,18 @@ class AlphaHiveDailyReporter:
         prefetch_elapsed = time.time() - start_time
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
 
-        checkpoint_file = self.report_dir / f".checkpoint_{self._session_id or 'default'}.json"
+        # v0.15.3: checkpoint 文件名加日期隔离，防止跨天 stale 复用
+        _ckpt_date = datetime.now().strftime("%Y-%m-%d")
+        checkpoint_file = self.report_dir / f".checkpoint_{self._session_id or 'default'}_{_ckpt_date}.json"
+        # 清理同 session 的历史日期 checkpoint（避免累积）
+        try:
+            _ckpt_glob = f".checkpoint_{self._session_id or 'default'}_*.json"
+            for _old in self.report_dir.glob(_ckpt_glob):
+                if _old.name != checkpoint_file.name:
+                    _old.unlink(missing_ok=True)
+                    _log.debug("清理历史 checkpoint: %s", _old.name)
+        except Exception as _e:
+            _log.debug("checkpoint 清理失败: %s", _e)
 
         return _SwarmContext(
             targets=targets, board=board,
@@ -440,9 +451,14 @@ class AlphaHiveDailyReporter:
                     swarm_results = ckpt.get("results", {})
                     saved_date = ckpt.get("saved_at", "")
                     today_date = datetime.now().strftime("%Y-%m-%d")
+                    # v0.15.3: 双保险 — 文件名已带日期，内容 saved_at 再校验一次
+                    fname = ctx.checkpoint_file.name
                     if saved_date and saved_date != today_date:
-                        _log.warning("Checkpoint 已过期 (saved: %s, today: %s)，重新开始",
+                        _log.warning("Checkpoint 内容过期 (saved: %s, today: %s)，丢弃",
                                      saved_date, today_date)
+                        swarm_results = {}
+                    elif today_date not in fname:
+                        _log.warning("Checkpoint 文件名日期不匹配 (%s)，丢弃", fname)
                         swarm_results = {}
                     else:
                         completed_tickers = set(swarm_results.keys())

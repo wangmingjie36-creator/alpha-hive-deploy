@@ -5,6 +5,94 @@
 
 ---
 
+## [0.15.3] — 2026-04-08
+
+### Changed（Checkpoint 日期隔离 — 上游根治）
+
+- **`alpha_hive_daily_report.py` checkpoint 文件名加日期后缀**
+  - 旧：`.checkpoint_{session_id}.json` → 新：`.checkpoint_{session_id}_{YYYY-MM-DD}.json`
+  - 跨天自然隔离：今天的进程根本不会打开昨天的文件，从物理层消灭 stale Oracle details（2026-04-06 timestamp 事故根因）
+  - 启动时自动清理同 session 的历史日期 checkpoint，避免 report/ 目录累积
+- **`_load_checkpoint()` 双保险日期校验**
+  - 除原有 `saved_at` 内容字段校验外，新增文件名日期匹配检查
+  - 任一不匹配即丢弃结果、从头运行
+- 与 v0.15.2 OptionsSnapshot 形成完整闭环：上游 checkpoint 隔日 + 下游 snapshot 日内共享，两层防御 swarm 数据错位
+
+---
+
+## [0.15.2] — 2026-04-08
+
+### Added（期权快照根治方案）
+
+- **`options_analyzer.py` OptionsAgent.analyze() 新增 per-ticker-per-date 冻结快照**
+  - 根治 v0.15.1 发现的两条路径期权数据分裂问题——从渲染层 fallback 升级为数据层统一
+  - 入口读取：`cache/options_snapshot_{TICKER}_{YYYY-MM-DD}.json`，命中则直接返回
+  - 出口写入：首次计算后将完整 result dict 连同 `_snapshot_timestamp/_snapshot_ticker/_snapshot_stock_price` 持久化
+  - 跨进程共享：`alpha_hive_daily_report.py`（swarm）和 `generate_ml_report.py`（advanced）两个独立进程通过文件系统共享同一快照，首个调用者"冻结"当日数据
+  - 跨午夜保护：校验 `_snapshot_timestamp` 日期与当前日期一致，过期则忽略并重算
+  - 旁路机制：
+    - `OptionsAgent.analyze(ticker, stock_price, force_refresh=True)` 强制重算
+    - 环境变量 `OPTIONS_SNAPSHOT_DISABLE=1` 全局禁用快照
+  - 失败降级：JSON 读写异常时自动 fallback 到重新计算，不阻塞主流程
+
+### Changed
+
+- **OracleBee / advanced_analyzer / BearBee 自动受益**：所有调用 `OptionsAgent.analyze()` 的模块无需修改代码，自动共享同一快照视图
+- **v0.15.1 的 extract() fallback 合并逻辑保留**：双保险设计，即使快照失效也能从 advanced_analysis 兜底
+
+---
+
+## [0.15.1] — 2026-04-08
+
+### Fixed（期权数据源分裂）
+
+- **深度报告 vs GitHub ML 报告期权数据不一致**
+  - 问题：同一份 JSON，两份报告显示完全不同的期权数值（IV Rank 29.6 vs 55.95、P/C None vs 0.79、GEX None vs 215.9、unusual_activity 2 条 vs 10 条）
+  - 根因：`swarm_agents/oracle_bee.py` 和 `advanced_analyzer.py` 分别独立调用 `OptionsAgent.analyze()`，发生在不同时刻的不同进程，yfinance 返回两个不同的期权链快照。OracleBee 经常拿到降级数据（字段缺失）
+  - 证据：hist_iv cache [min=23.93, max=57.45]，current_iv=42.69 → iv_rank=55.95；current_iv=33.85 → iv_rank=29.60。两条路径的 current_iv 相差 9 个点
+  - 修复：`generate_deep_v2.py` extract() 第 405 行，期权字段优先从 `advanced_analysis.options_analysis` 读取，OracleBee.details 仅作 fallback。合并逻辑：`odet = {**_odet_raw, **{k:v for k,v in _oa_opts.items() if v is not None}}`
+  - 影响字段：iv_rank / iv_current / put_call_ratio / total_oi / iv_skew / flow_direction / options_score / unusual_activity / key_levels / gamma_exposure
+  - 验证：NVDA 2026-04-08 所有期权字段现与 GitHub ML 报告一致
+
+---
+
+## [0.15.0] — 2026-04-08
+
+### Added（第 6 维融合：Probability Boost）
+
+- **核心修复：两条评分路径分裂**
+  - 问题：`swarm_results.final_score`（蜂群 5 维加权）和 `advanced_analysis.probability_analysis`（Kelly 胜率/赔率）互不相通，导致深度报告（4.85 中性）与 GitHub ML 报告（65.8% BUY）结论分裂
+  - 方案：在 `generate_ml_report.py` 合并 swarm_data 时注入 Probability Boost，把 probability_analysis 作为"第 6 维"对 swarm final_score 后处理加成
+
+- **`generate_ml_report.py` ~line 1622 新增 Probability Boost 逻辑**
+  - 触发条件：`win_prob ≥ 60%` 且 `risk_reward ≥ 5` 且 `direction != bearish`
+  - 公式：
+    - base_boost = `min(2.5, (win_prob - 50) / 10)`  — 60%→1.0, 65%→1.5, 75%→2.5 cap
+    - rr_mult = `min(1.5, rr / 5)`  — rr 5→1.0x, 7.5→1.5x cap
+    - raw_boost = base × mult
+    - bear_hedge = `min(raw × 0.6, (bear_strength - 6) × 0.2)` when bear ≥ 6
+    - final_boost = raw - hedge, clamp [0, score clamp [1,9]]
+  - 方向翻转：若 old_dir=neutral 且 new_score ≥ 5.8 → bullish
+  - 审计字段：`swarm_results.probability_boost` 记录 win_prob/rr/boost/before/after/reason
+
+- **`generate_deep_v2.py` extract() 新增 3 字段**
+  - `probability_boost`（审计 dict）
+  - `win_probability_pct` / `risk_reward_ratio`（从 advanced_analysis 直读）
+
+- **`_build_odds_boost_card()` 新函数**
+  - 4 格 grid：胜率 / 赔率 / 加成 / 评分 before→after
+  - 高 bear_strength 时显示"bear X.X 对冲XX%"标签
+  - 方向翻转时显示 "→ bullish" 绿色标签
+  - 未触发时渲染灰色 dashed 卡片说明原因
+  - 嵌入 Executive Summary 底部
+
+- **验证案例：NVDA 2026-04-08**
+  - 输入：win=65% rr=9.0x bear=7.61 old_score=4.85 neutral
+  - 计算：base 1.50 × mult 1.50 = 2.25 − bear hedge 0.32 = **+1.93**
+  - 输出：**4.85 → 6.78 bullish** ✅（成功抵消 Scout 3.42 + Guard 3.37 的拖累）
+
+---
+
 ## [0.14.0] — 2026-04-04
 
 ### Added（估值分析 + 叙事升级 7 项）

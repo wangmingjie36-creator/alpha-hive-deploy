@@ -385,6 +385,44 @@ def extract(data: dict) -> dict:
     direction = sr.get("direction", "neutral")
     resonance = sr.get("resonance", {})
 
+    # v0.15.3: Probability Boost 第 6 维融合（从 generate_ml_report.py 移植）
+    # 当 swarm final_score 未应用 boost 时（直接读 swarm JSON 而非 ML enhanced），
+    # 在此处补算，确保深度报告与 ML 报告评分一致。
+    _existing_pb = sr.get("probability_boost") or {}
+    if not _existing_pb:
+        _prob = aa.get("probability_analysis") or {}
+        _win = float(_prob.get("win_probability_pct", 0) or 0)
+        _rr  = float(_prob.get("risk_reward_ratio", 0) or 0)
+        _old_score = float(final_score or 0)
+        _old_dir   = direction
+        _bear_str  = float((ad.get("BearBeeContrarian", {}).get("details", {}) or {}).get("bear_score", 0) or 0)
+        if _win >= 60.0 and _rr >= 5.0 and _old_dir != "bearish":
+            _base_boost = min(2.5, max(0.0, (_win - 50.0) / 10.0))
+            _rr_mult = min(1.5, _rr / 5.0)
+            _boost = _base_boost * _rr_mult
+            _bear_hedge = 0.0
+            if _bear_str >= 6.0:
+                _bear_hedge = min(_boost * 0.6, (_bear_str - 6.0) * 0.2)
+                _boost = max(0.0, _boost - _bear_hedge)
+            _new_score = round(max(1.0, min(9.0, _old_score + _boost)), 2)
+            _new_dir = "bullish" if (_old_dir == "neutral" and _new_score >= 5.8) else _old_dir
+            final_score = _new_score
+            direction = _new_dir
+            sr["final_score"] = _new_score
+            sr["direction"] = _new_dir
+            sr["probability_boost"] = {
+                "applied": True,
+                "old_score": _old_score,
+                "new_score": _new_score,
+                "boost": round(_boost, 2),
+                "win_probability_pct": _win,
+                "risk_reward_ratio": _rr,
+                "bear_strength": _bear_str,
+                "bear_hedge": round(_bear_hedge, 2),
+                "old_direction": _old_dir,
+                "new_direction": _new_dir,
+            }
+
     # 置信区间 & 维度分散度
     _cc = sr.get("confidence_calibration", {})
     confidence_band   = _cc.get("confidence_band", None)   # [lo, hi]
@@ -401,10 +439,16 @@ def extract(data: dict) -> dict:
     guard   = ad.get("GuardBeeSentinel", {})
     bear    = ad.get("BearBeeContrarian", {})
 
-    # Oracle 详细数据
-    odet = oracle.get("details", {})
-    key_levels = odet.get("key_levels", {})
-    unusual = odet.get("unusual_activity", [])
+    # Oracle 详细数据（蜂群快照，可能降级）
+    _odet_raw = oracle.get("details", {}) or {}
+    # v0.15.1 FIX: 期权字段优先从 advanced_analysis.options_analysis 读，
+    # OracleBee 的 details 仅作 fallback。根因：两条路径独立调用 OptionsAgent.analyze()，
+    # yfinance 返回不同快照，OracleBee 常拿到降级数据（pc_ratio/GEX None）。
+    _oa_opts = aa.get("options_analysis") or {}
+    # 构造合并视图：advanced 为主，OracleBee 填补 advanced 没有的字段
+    odet = {**_odet_raw, **{k: v for k, v in _oa_opts.items() if v is not None}}
+    key_levels = odet.get("key_levels", {}) or _odet_raw.get("key_levels", {})
+    unusual = odet.get("unusual_activity", []) or _odet_raw.get("unusual_activity", [])
 
     # Chronos 催化剂
     cdet = chronos.get("details", {})
@@ -636,6 +680,10 @@ def extract(data: dict) -> dict:
         "analyst_target":    float(((rival.get("details") or {}).get("eps_revision", {}) or {}).get("target_mean_price", 0) or 0),
         "analyst_consensus": float(((rival.get("details") or {}).get("eps_revision", {}) or {}).get("recommendation_mean", 0) or 0),
         "analyst_count":     int(((rival.get("details") or {}).get("eps_revision", {}) or {}).get("num_analyst_opinions", 0) or 0),
+        # v0.15.0: Probability Boost 审计字段（来自 generate_ml_report.py 注入）
+        "probability_boost": (data.get("swarm_results") or {}).get("probability_boost", {}),
+        "win_probability_pct": float(((data.get("advanced_analysis") or {}).get("probability_analysis") or {}).get("win_probability_pct", 0) or 0),
+        "risk_reward_ratio":   float(((data.get("advanced_analysis") or {}).get("probability_analysis") or {}).get("risk_reward_ratio", 0) or 0),
         # Raw JSON for LLM context
         "_raw": data,
     }
@@ -1675,6 +1723,51 @@ def _build_macro_narrative(ctx: dict) -> str:
             f'{supply_chain_para}')
 
 
+def _build_odds_boost_card(ctx: dict) -> str:
+    """v0.15.0: Odds Boost 第 6 维融合卡片 — 展示 swarm final_score 的概率加成审计"""
+    pb = ctx.get("probability_boost") or {}
+    win = ctx.get("win_probability_pct", 0) or pb.get("win_probability_pct", 0)
+    rr  = ctx.get("risk_reward_ratio", 0) or pb.get("risk_reward_ratio", 0)
+    if not win and not rr:
+        return ""
+    applied = pb.get("applied", False)
+    if applied:
+        before = pb.get("score_before", 0)
+        after  = pb.get("score_after", 0)
+        boost  = pb.get("boost_value", 0)
+        dir_b  = pb.get("direction_before", "")
+        dir_a  = pb.get("direction_after", "")
+        bear_s = pb.get("bear_strength", 0)
+        bear_tag = (f'<span style="color:var(--red);font-size:10px;">bear {bear_s:.1f} 对冲50%</span>'
+                    if bear_s >= 7 else "")
+        dir_tag = (f'<span style="color:var(--green2);font-weight:700;">→ {dir_a}</span>'
+                   if dir_a != dir_b else f'<span style="color:var(--text2)">{dir_a}</span>')
+        return (
+            f'<div style="background:linear-gradient(135deg,var(--bg3),var(--bg2));'
+            f'border:1px solid var(--green2);border-radius:12px;padding:14px;margin:12px 0;">'
+            f'<div style="font-size:13px;font-weight:700;color:var(--green2);margin-bottom:8px;">'
+            f'⚡ Odds Boost 第6维融合（probability_analysis）</div>'
+            f'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;font-size:12px;">'
+            f'<div><div style="color:var(--text2)">胜率</div>'
+            f'<div style="font-size:18px;font-weight:700;color:var(--green2)">{win:.0f}%</div></div>'
+            f'<div><div style="color:var(--text2)">赔率</div>'
+            f'<div style="font-size:18px;font-weight:700;color:var(--accent)">{rr:.1f}x</div></div>'
+            f'<div><div style="color:var(--text2)">加成</div>'
+            f'<div style="font-size:18px;font-weight:700;color:var(--green2)">+{boost:.2f}</div>'
+            f'{bear_tag}</div>'
+            f'<div><div style="color:var(--text2)">评分</div>'
+            f'<div style="font-size:16px;font-weight:700;color:var(--text1)">'
+            f'{before:.2f} → <span style="color:var(--green2)">{after:.2f}</span></div>'
+            f'{dir_tag}</div>'
+            f'</div></div>')
+    else:
+        reason = pb.get("reason", f"win {win:.0f}% / rr {rr:.1f}x 未达阈值")
+        return (
+            f'<div style="background:var(--bg3);border:1px dashed var(--border);'
+            f'border-radius:12px;padding:12px;margin:12px 0;font-size:12px;color:var(--text2);">'
+            f'⚪ Odds Boost: 未触发 — {reason}</div>')
+
+
 def _build_valuation_card(ctx: dict) -> str:
     """V1: 估值快照卡片 — PE/PEG/分析师共识 + PE倍数情景矩阵"""
     fwd_eps  = ctx.get("forward_eps", 0)
@@ -2369,6 +2462,8 @@ def _build_executive_summary(ctx: dict) -> str:
             f'{_thesis_lines}</div>'
         )
 
+    odds_boost_html = _build_odds_boost_card(ctx)
+
     return f"""
 <div id="exec-summary" style="background:linear-gradient(135deg,var(--bg2) 0%,var(--bg3) 100%);
      border-radius:12px;padding:18px 22px;margin-bottom:20px;
@@ -2384,6 +2479,7 @@ def _build_executive_summary(ctx: dict) -> str:
     最强驱动维度：<strong>{top_dim_zh or "N/A"}</strong>。
     {action}。
   </div>
+  {odds_boost_html}
   {_thesis_html}
 </div>"""
 
