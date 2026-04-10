@@ -385,43 +385,22 @@ def extract(data: dict) -> dict:
     direction = sr.get("direction", "neutral")
     resonance = sr.get("resonance", {})
 
-    # v0.15.3: Probability Boost 第 6 维融合（从 generate_ml_report.py 移植）
-    # 当 swarm final_score 未应用 boost 时（直接读 swarm JSON 而非 ML enhanced），
-    # 在此处补算，确保深度报告与 ML 报告评分一致。
+    # v0.16.0: Probability Boost 已禁用
+    # 原因：probability_analysis 数据源不可靠（rr 来自 1 个样本，win 是硬编码启发式）
+    # 保留审计字段供 _build_odds_boost_card 展示"未启用"状态
+    # TODO: 待 probability_analysis 改用真实贝叶斯模型后重新启用
     _existing_pb = sr.get("probability_boost") or {}
     if not _existing_pb:
         _prob = aa.get("probability_analysis") or {}
         _win = float(_prob.get("win_probability_pct", 0) or 0)
         _rr  = float(_prob.get("risk_reward_ratio", 0) or 0)
-        _old_score = float(final_score or 0)
-        _old_dir   = direction
-        _bear_str  = float((ad.get("BearBeeContrarian", {}).get("details", {}) or {}).get("bear_score", 0) or 0)
-        if _win >= 60.0 and _rr >= 5.0 and _old_dir != "bearish":
-            _base_boost = min(2.5, max(0.0, (_win - 50.0) / 10.0))
-            _rr_mult = min(1.5, _rr / 5.0)
-            _boost = _base_boost * _rr_mult
-            _bear_hedge = 0.0
-            if _bear_str >= 6.0:
-                _bear_hedge = min(_boost * 0.6, (_bear_str - 6.0) * 0.2)
-                _boost = max(0.0, _boost - _bear_hedge)
-            _new_score = round(max(1.0, min(9.0, _old_score + _boost)), 2)
-            _new_dir = "bullish" if (_old_dir == "neutral" and _new_score >= 5.8) else _old_dir
-            final_score = _new_score
-            direction = _new_dir
-            sr["final_score"] = _new_score
-            sr["direction"] = _new_dir
-            sr["probability_boost"] = {
-                "applied": True,
-                "old_score": _old_score,
-                "new_score": _new_score,
-                "boost": round(_boost, 2),
-                "win_probability_pct": _win,
-                "risk_reward_ratio": _rr,
-                "bear_strength": _bear_str,
-                "bear_hedge": round(_bear_hedge, 2),
-                "old_direction": _old_dir,
-                "new_direction": _new_dir,
-            }
+        sr["probability_boost"] = {
+            "applied": False,
+            "disabled": True,
+            "win_probability_pct": _win,
+            "risk_reward_ratio": _rr,
+            "reason": "v0.16.0 已禁用: probability_analysis 数据源不可靠",
+        }
 
     # 置信区间 & 维度分散度
     _cc = sr.get("confidence_calibration", {})

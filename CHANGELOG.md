@@ -5,6 +5,26 @@
 
 ---
 
+## [0.16.0] — 2026-04-09
+
+### Removed（Probability Boost 禁用）
+
+- **`generate_ml_report.py` + `generate_deep_v2.py` Probability Boost 评分加成已禁用**
+  - 根因审计发现 `probability_analysis` 数据源不可靠：
+    - `risk_reward_ratio=9.0` 来自仅 1 条 `similar_opportunity`（sample_size=2），统计上是噪声
+    - `win_probability_pct=65.0` 是硬编码启发式公式（base 55% + 拥挤度 ± 催化剂），无实际新信息
+    - 两个值连续两天（4/8、4/9）完全相同，证明 boost 只是固定偏移量而非市场信号
+  - 影响：NVDA 4/9 评分从 9.0（撞天花板）回归蜂群原始 7.53
+  - 保留审计字段 `probability_boost.disabled=True`，报告卡片可展示"未启用"状态
+  - TODO: 待 `probability_analysis` 改用真实贝叶斯模型（sample_size≥30 + 动态校准）后重新启用
+
+### Changed
+
+- **`generate_ml_report.py:1543` checkpoint 恢复加日期校验**
+  - glob `.checkpoint_*.json` 现在双保险校验（文件名日期 + saved_at），防止跨天 stale 复用
+
+---
+
 ## [0.15.3] — 2026-04-08
 
 ### Changed（Checkpoint 日期隔离 — 上游根治）

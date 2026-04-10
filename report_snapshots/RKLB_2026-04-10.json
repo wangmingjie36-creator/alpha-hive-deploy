@@ -1,19 +1,19 @@
 {
   "ticker": "RKLB",
-  "date": "2026-04-06",
-  "composite_score": 5.0,
+  "date": "2026-04-10",
+  "composite_score": 5.71,
   "direction": "neutral",
   "price_target": 0.0,
   "stop_loss": 0.0,
-  "entry_price": 67.66999816894531,
+  "entry_price": 68.05000305175781,
   "agent_votes": {
+    "OracleBeeEcho": 6.8582307692307705,
+    "RivalBeeVanguard": 6.06,
     "CodeExecutorAgent": 5.0,
     "ChronosBeeHorizon": 5.995,
-    "RivalBeeVanguard": 5.98,
-    "OracleBeeEcho": 5.846153846153847,
-    "BuzzBeeWhisper": 5.53,
-    "QueenDistiller": 5.0,
-    "GuardBeeSentinel": 4.45
+    "GuardBeeSentinel": 5.89,
+    "BuzzBeeWhisper": 5.72,
+    "QueenDistiller": 5.71
   },
   "weights_used": {
     "signal": 0.1132,
@@ -23,9 +23,9 @@
     "risk_adj": 0.1132
   },
   "actual_prices": {
-    "t1": 66.31999969482422,
+    "t1": null,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-04-09T17:36:59.246584"
+  "created_at": "2026-04-10T15:53:42.130428"
 }
