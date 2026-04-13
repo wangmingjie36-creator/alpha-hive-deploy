@@ -1201,6 +1201,134 @@ class MLEnhancedReportGenerator:
             <ul style="list-style:none;padding:0;">{items}</ul>
         </div>"""
 
+    # ── v0.15.0: 估值快照 + Top-3 核心论点 Pills ───────────────────
+    def _build_valuation_pills(self, swarm: dict, analysis: dict,
+                                options: dict, ml_pred: dict,
+                                ticker: str = "") -> str:
+        """构建估值快照卡片 + Top-3 核心论点 pills（移植自 deep 报告）"""
+        parts = []
+
+        # ── 估值快照 ──
+        # v0.17.0: analysis.recommendation 不含估值字段，直接从 yfinance .info 获取
+        _yf = analysis.get("recommendation", {})
+        _pe_ttm = float(_yf.get("pe_ttm") or analysis.get("pe_ttm") or 0)
+        _pe_fwd = float(_yf.get("forward_pe") or analysis.get("forward_pe") or 0)
+        _peg = float(_yf.get("peg") or analysis.get("peg_ratio") or 0)
+        _target = float(_yf.get("target_price") or analysis.get("target_price") or 0)
+        _n_analysts = int(_yf.get("n_analysts") or analysis.get("n_analysts") or 0)
+
+        # v0.17.0 fallback: 若以上字段全为 0 且有 ticker，从 yfinance 实时获取
+        if _pe_ttm == 0 and _pe_fwd == 0 and ticker:
+            try:
+                import yfinance as _yf_lib
+                _info = _yf_lib.Ticker(ticker).info or {}
+                _pe_ttm = float(_info.get("trailingPE") or 0)
+                _pe_fwd = float(_info.get("forwardPE") or 0)
+                _peg = float(_info.get("pegRatio") or 0)
+                _target = float(_info.get("targetMeanPrice") or 0)
+                _n_analysts = int(_info.get("numberOfAnalystOpinions") or 0)
+            except Exception:
+                pass  # 网络失败静默降级，不影响报告生成
+
+        if _pe_fwd > 0 or _pe_ttm > 0:
+            _peg_label = ""
+            if _peg > 0:
+                if _peg < 0.5:
+                    _peg_label = "极度低估"
+                elif _peg < 1.0:
+                    _peg_label = "低估"
+                elif _peg < 2.0:
+                    _peg_label = "合理"
+                else:
+                    _peg_label = "偏贵"
+
+            _val_items = []
+            if _pe_ttm > 0:
+                _val_items.append(f"<span style='font-weight:600;'>PE (TTM):</span> {_pe_ttm:.1f}x")
+            if _pe_fwd > 0:
+                _val_items.append(f"<span style='font-weight:600;'>Forward PE:</span> {_pe_fwd:.1f}x")
+            if _peg > 0:
+                _val_items.append(f"<span style='font-weight:600;'>PEG:</span> {_peg:.2f} ({_peg_label})")
+            if _target > 0:
+                _ana_txt = f"({_n_analysts}人共识)" if _n_analysts else ""
+                _val_items.append(f"<span style='font-weight:600;'>分析师目标价:</span> ${_target:.0f} {_ana_txt}")
+
+            _val_grid = " &nbsp;·&nbsp; ".join(_val_items)
+            parts.append(
+                f'<div class="section" style="padding:18px 25px;">'
+                f'<h3 style="color:#667eea;font-size:1em;margin-bottom:10px;">📊 估值快照</h3>'
+                f'<div style="font-size:0.9em;color:#555;line-height:1.8;">{_val_grid}</div>'
+                f'</div>'
+            )
+
+        # ── Top-3 核心论点 Pills ──
+        _thesis_items = []
+
+        # 期权信号
+        oracle_ad = swarm.get("agent_details", {}).get("OracleBeeEcho", {})
+        _oracle_sc = float(oracle_ad.get("score", 5) if oracle_ad else 5)
+        _iv_rank_v = float(options.get("iv_rank", 50) or 50)
+        _pcr_v = float(options.get("put_call_ratio", 1.0) or 1.0)
+        if _oracle_sc >= 7:
+            _thesis_items.append(("期权", abs(_oracle_sc - 5),
+                                  f"期权结构强看涨（OracleBee {_oracle_sc:.1f}/10），IV Rank {_iv_rank_v:.0f}%，P/C {_pcr_v:.1f}"))
+        elif _oracle_sc <= 3:
+            _thesis_items.append(("期权", abs(_oracle_sc - 5),
+                                  f"期权结构看跌（OracleBee {_oracle_sc:.1f}/10），IV Rank {_iv_rank_v:.0f}%"))
+
+        # 估值信号
+        if _peg > 0 and _peg < 0.5:
+            _eps_g = float(analysis.get("eps_growth", 0) or 0)
+            _thesis_items.append(("估值", 3.0,
+                                  f"Forward PE {_pe_fwd:.1f}x vs EPS Growth {_eps_g:.0f}% → PEG {_peg:.2f} 极度低估"))
+        elif _peg > 2.5:
+            _thesis_items.append(("估值", 2.5,
+                                  f"PEG {_peg:.2f} 偏贵，增长预期可能已被充分定价"))
+
+        # 逆向信号
+        bear_ad = swarm.get("agent_details", {}).get("BearBeeContrarian", {})
+        _bear_sc = float(bear_ad.get("score", 5) if bear_ad else 5)
+        if _bear_sc <= 3.5:
+            _bear_detail = bear_ad.get("details", {}) if bear_ad else {}
+            _insider_net = _bear_detail.get("insider_net_value", 0)
+            _insider_txt = f"，内幕交易净值 ${abs(_insider_net):,.0f}" if _insider_net else ""
+            _thesis_items.append(("逆向", abs(_bear_sc - 5),
+                                  f"BearBee {_bear_sc:.1f}/10{_insider_txt}"))
+
+        # ML 信号
+        _ml_prob = float(ml_pred.get("prediction", {}).get("probability", 0.5)) * 100
+        if _ml_prob >= 70:
+            _thesis_items.append(("ML", 2.0, f"ML 7日胜率 {_ml_prob:.0f}%，信号偏强"))
+        elif _ml_prob <= 30:
+            _thesis_items.append(("ML", 2.0, f"ML 7日胜率 {_ml_prob:.0f}%，信号偏弱"))
+
+        # 情绪
+        guard_ad = swarm.get("agent_details", {}).get("GuardBeeShield", {})
+        _fg = float((guard_ad.get("details", {}) if guard_ad else {}).get("fear_greed", 50) or 50)
+        if _fg <= 25:
+            _thesis_items.append(("情绪", 2.5, f"极度恐惧 F&G={_fg:.0f}，系统性抛压风险高"))
+        elif _fg >= 80:
+            _thesis_items.append(("情绪", 2.0, f"极度贪婪 F&G={_fg:.0f}，回调风险上升"))
+
+        if _thesis_items:
+            _thesis_items.sort(key=lambda x: x[1], reverse=True)
+            _top3 = _thesis_items[:3]
+            _pills_html = "".join(
+                f'<div style="display:flex;gap:8px;align-items:baseline;margin:5px 0;">'
+                f'<span style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;'
+                f'font-size:0.75em;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap;">'
+                f'{t[0]}</span>'
+                f'<span style="font-size:0.88em;color:#444;">{t[2]}</span></div>'
+                for t in _top3
+            )
+            parts.append(
+                f'<div class="section" style="padding:18px 25px;">'
+                f'<h3 style="color:#667eea;font-size:1em;margin-bottom:10px;">🎯 核心论点 Top-3</h3>'
+                f'{_pills_html}</div>'
+            )
+
+        return "\n".join(parts)
+
     def generate_html_report(
         self, ticker: str, enhanced_report: dict
     ) -> str:
@@ -1246,6 +1374,11 @@ class MLEnhancedReportGenerator:
                     f'ML 胜率 {fresh_prob*100:.0f}%',
                     old_disc
                 )
+
+        # ── v0.15.0: 估值快照 + Top-3 核心论点 Pills ─────────────────
+        _valuation_pills_html = self._build_valuation_pills(
+            swarm or {}, analysis, options, ml_pred, ticker=ticker
+        )
 
         # ── 7 章 HTML ──────────────────────────────────────────────────
         agent_details = swarm.get("agent_details", {}) if swarm else {}
@@ -1424,6 +1557,9 @@ class MLEnhancedReportGenerator:
 
     <!-- 第 1 章：核心结论 -->
     {ch1}
+
+    <!-- v0.15.0: 估值快照 + Top-3 核心论点 Pills -->
+    {_valuation_pills_html}
 
     <!-- 第 2 章：五维评分明细 -->
     {ch2}

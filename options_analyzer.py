@@ -145,16 +145,28 @@ class OptionsDataFetcher:
                 _log.warning("%s 期权数据不可用，使用样本数据", ticker)
                 return self._get_sample_options_chain(ticker)
 
-            # 获取 DTE ≥ 7 的前 3 个到期日（避免 gamma 膨胀的超短期 IV 干扰 IV Rank）
-            # 若不足则降级为最近的 3 个（保证至少有数据可用）
+            # v0.17.0: 到期日选择策略优化 — 防止到期周 OI 跳变
+            # 策略：取 DTE ≥ 3 的前 4 个（扩大覆盖面），DTE < 7 的到期日标记为
+            # "near_expiry" 供下游做 OI 权重衰减（避免 total_oi 因到期结算骤降）
+            # 旧策略：DTE ≥ 7 的前 3 个 → Opex 周 OI 可能骤降 60%+
             all_expirations = list(stock.options)
             today_dt = datetime.now()
-            expirations = [
-                e for e in all_expirations
-                if (datetime.strptime(e, "%Y-%m-%d") - today_dt).days >= 7
-            ][:3]
+            _expiry_with_dte = []
+            for _e in all_expirations:
+                try:
+                    _dte = (datetime.strptime(_e, "%Y-%m-%d") - today_dt).days
+                    if _dte >= 3:  # 排除 DTE<3 的超临近到期（已进入结算态）
+                        _expiry_with_dte.append((_e, _dte))
+                except ValueError:
+                    continue
+            # 优先取 DTE ≥ 7 的前 4 个，若不足 3 个则补入 DTE 3-6 的
+            _far = [e for e, d in _expiry_with_dte if d >= 7][:4]
+            _near = [e for e, d in _expiry_with_dte if 3 <= d < 7][:2]
+            expirations = (_far + _near)[:4] if _far else [e for e, _ in _expiry_with_dte[:4]]
             if not expirations:
-                expirations = all_expirations[:3]
+                expirations = all_expirations[:3]  # 终极降级
+            # 记录哪些到期日是近期的（DTE < 7），供 total_oi 计算做权重衰减
+            _near_expiry_set = {e for e, d in _expiry_with_dte if d < 7}
 
             # 获取当前股价，用于 ATM 过滤（避免深度遗留低价合约污染 key levels）
             _current_price = 0.0
@@ -287,6 +299,8 @@ class OptionsDataFetcher:
                 "calls": calls_df.to_dict(orient="records") if calls_df is not None else [],
                 "puts": puts_df.to_dict(orient="records") if puts_df is not None else [],
                 "expirations": expirations,
+                # v0.17.0: 近期到期集合，供下游 total_oi 计算做权重衰减
+                "near_expiry_set": list(_near_expiry_set),
             }
 
             self._write_cache(ticker, "chain", result)
@@ -1066,6 +1080,37 @@ class OptionsAgent:
         self.analyzer = OptionsAnalyzer()
         self.fetcher = OptionsDataFetcher()
 
+    # ── v0.17.0: OI 稳定性口径 ──────────────────────────────────────
+    @staticmethod
+    def _calc_total_oi(calls_df: list, puts_df: list, options_chain: dict) -> int:
+        """计算 total_oi（稳定口径）：排除 DTE < 7 的近到期合约。
+
+        目的：Opex 周到期日脱落会导致 OI 日环比骤降 50-80%，产生虚假异常告警。
+        稳定口径只统计 DTE ≥ 7 的合约 OI，使日环比对比更平滑。
+        当所有合约都是 DTE < 7 时，退化为原始总和（避免返回 0）。
+        """
+        near_set = set(options_chain.get("near_expiry_set", []))
+        if not near_set:
+            # 无近期标记，退化为原始求和
+            return (sum(c.get("openInterest", 0) for c in calls_df)
+                    + sum(p.get("openInterest", 0) for p in puts_df))
+
+        stable_oi = 0
+        for c in calls_df:
+            exp = str(c.get("expiry", ""))[:10]
+            if exp not in near_set:
+                stable_oi += int(c.get("openInterest", 0) or 0)
+        for p in puts_df:
+            exp = str(p.get("expiry", ""))[:10]
+            if exp not in near_set:
+                stable_oi += int(p.get("openInterest", 0) or 0)
+
+        # 如果排除后为 0（全是近期合约），退化为原始总和
+        if stable_oi == 0:
+            return (sum(c.get("openInterest", 0) for c in calls_df)
+                    + sum(p.get("openInterest", 0) for p in puts_df))
+        return stable_oi
+
     def analyze(self, ticker: str, stock_price: Optional[float] = None,
                 force_refresh: bool = False) -> Dict:
         """
@@ -1311,8 +1356,11 @@ class OptionsAgent:
             "iv_percentile": iv_percentile,  # 0-100
             "iv_current": iv_current,  # 当前 IV
             "put_call_ratio": put_call_ratio,
-            "total_oi": sum(c.get("openInterest", 0) for c in calls_df)
-            + sum(p.get("openInterest", 0) for p in puts_df),
+            # v0.17.0: total_oi 双口径 — raw（原始总和）+ stable（排除 DTE<7 近到期）
+            # stable 口径用于日环比对比，避免 Opex 周到期日脱落导致 OI 跳变
+            "total_oi": self._calc_total_oi(calls_df, puts_df, options_chain),
+            "total_oi_raw": (sum(c.get("openInterest", 0) for c in calls_df)
+                             + sum(p.get("openInterest", 0) for p in puts_df)),
             "gamma_exposure": gex,
             "gamma_squeeze_risk": gamma_squeeze_risk,
             "unusual_activity": unusual_activity,

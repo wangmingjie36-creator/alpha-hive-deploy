@@ -5,6 +5,55 @@
 
 ---
 
+## [0.17.0] — 2026-04-10
+
+### Added（v0.14.0 复盘后 6 项高价值改进）
+
+- **`generate_deep_v2.py` 情景E卡片渲染（P0）**
+  - scenario-grid 从4卡→5卡，新增「💥 情景E · 强势看跌」HTML卡片
+  - 卡片数据：`sc_e_lo/hi` 回退公式 = max_sup_price × 0.72~0.85
+  - 修正卡片C名称：「温和看跌」→「区间震荡」以匹配概率表
+  - 所有 probs 列表统一 5 元素，LLM 路径支持 `sc_e` 可选字段
+
+- **`generate_deep_v2.py` OI 异常波动告警（P0）**
+  - 日环比 >50% 时生成红色告警卡片（`oi_anomaly` / `oi_anomaly_msg`）
+  - 告警嵌入 CH4 期权市场结构章节顶部
+  - 提示可能原因：期权到期日结算、数据源范围变更、流动性异常
+
+- **`options_analyzer.py` OI 稳定性修复 — Opex 周跳变根治**
+  - 根因：旧策略取 DTE≥7 的前 3 个到期日，Opex 周到期日脱落导致 OI 骤降 60%+
+  - 到期日选择：DTE≥3 的前 4 个（扩大覆盖面），标记 DTE<7 为 `near_expiry_set`
+  - `total_oi` 双口径：`total_oi`（stable，排除 DTE<7）+ `total_oi_raw`（原始）
+  - 稳定口径用于日环比对比，避免虚假异常告警
+  - 新增 `OptionsAgent._calc_total_oi()` 静态方法
+
+- **`generate_ml_report.py` 估值快照 + Top-3 Pills（P1）**
+  - 新增 `_build_valuation_pills()` 方法，CH1 之后渲染
+  - 估值快照：PE(TTM)/Forward PE/PEG/分析师目标价
+  - Top-3 Pills：期权/估值/逆向/ML/情绪 5 维度按权重取 Top-3
+
+### Changed
+
+- **`generate_deep_v2.py` So What 推理链增强（P1）**
+  - 交易含义新增（2）ML 7日预期 + 蜂群评分 + 信号方向判断
+  - 新增（3）历史同类信号胜率（需 ≥5 样本），显示统计优势评估
+  - IV-RV 交易含义追加 ML/蜂群评分括号注释
+  - `_load_ticker_accuracy` 结果注入 ctx（`aa_hist_win_rate/n/avg_ret_7d`）
+
+- **`generate_deep_v2.py` 情景概率历史校准（P2）**
+  - Probability Engine 新增 Bayesian blend 步骤
+  - 历史胜率 ≥65% 时微调 pa+，≤35% 时微调 pe+（最大 ±1.2pp，需 n≥10）
+
+- **`generate_deep_v2.py` Charm 方向陈旧检测（P2）**
+  - 启动时回溯 5 天 JSON 收集 charm_direction 历史
+  - 连续 ≥3 天方向不变时在 CH4 显示⚠️黄色提示
+
+### Fixed
+
+- **v0.14.0 复盘报告已生成** → `v0.14.0-复盘报告-2026-04-10.md`
+
+---
+
 ## [0.16.0] — 2026-04-09
 
 ### Removed（Probability Boost 禁用）

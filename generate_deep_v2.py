@@ -1058,6 +1058,7 @@ ScoutBee {ctx['scout'].get('score',5)}/10，OracleBee {ctx['oracle'].get('score'
   "sc_b": {{"prob": 0.XX, "price_lo": XXX, "price_hi": XXX, "note": "触发条件(15字内)"}},
   "sc_c": {{"prob": 0.XX, "price_lo": XXX, "price_hi": XXX, "note": "触发条件(15字内)"}},
   "sc_d": {{"prob": 0.XX, "price_lo": XXX, "price_hi": XXX, "note": "触发条件(15字内)"}},
+  "sc_e": {{"prob": 0.XX, "price_lo": XXX, "price_hi": XXX, "note": "极端风险触发条件(15字内)"}},
   "ev_pct": X.X,
   "win_rate": XX.X,
   "tp1": XX.XX, "tp1_pct": X.X, "tp1_action": "减仓1/3",
@@ -1068,7 +1069,7 @@ ScoutBee {ctx['scout'].get('score',5)}/10，OracleBee {ctx['oracle'].get('score'
   "sl_aggressive": XX.XX,
   "hold_days": "5–10天"
 }}
-要求：四情景概率之和 = 1.0；价格目标基于关键支撑阻力位合理外推；EV 为加权期望收益率（百分比数值）。"""
+要求：五情景(sc_a~sc_e)概率之和 = 1.0；sc_e 为极端尾部风险情景（概率通常 5-15%）；价格目标基于关键支撑阻力位合理外推；EV 为加权期望收益率（百分比数值）。"""
 
     try:
         client = _ant.Anthropic(api_key=api_key)
@@ -1083,9 +1084,12 @@ ScoutBee {ctx['scout'].get('score',5)}/10，OracleBee {ctx['oracle'].get('score'
         if m:
             data = _json.loads(m.group(0))
             # 校验概率之和
-            total_prob = sum(data.get(f"sc_{k}", {}).get("prob", 0) for k in ["a","b","c","d"])
+            # v0.17.0: 支持 4 情景或 5 情景（含 sc_e）
+            _has_e = "sc_e" in data
+            _keys = ["a","b","c","d","e"] if _has_e else ["a","b","c","d"]
+            total_prob = sum(data.get(f"sc_{k}", {}).get("prob", 0) for k in _keys)
             if abs(total_prob - 1.0) > 0.05:
-                print(f"  ⚠️  LLM 情景概率之和 {total_prob:.2f}，降级到 ML 值")
+                print(f"  ⚠️  LLM 情景概率之和 {total_prob:.2f}（{'5' if _has_e else '4'}情景），降级到 ML 值")
                 return {}
             return data
     except Exception as e:
@@ -1416,6 +1420,16 @@ def _build_options_narrative(ctx: dict) -> str:
     iv_skew_signal = ctx.get('iv_skew_signal', '')
     otm_put_iv = ctx.get('otm_put_iv', 0)
     otm_call_iv = ctx.get('otm_call_iv', 0)
+
+    # v0.15.0: 预构建历史胜率文本（避免 f-string 嵌套反斜杠问题）
+    _aa_wr = ctx.get("aa_hist_win_rate", 0)
+    _aa_n_v = ctx.get("aa_hist_n", 0)
+    if _aa_wr > 0 and _aa_n_v >= 5:
+        _wr_qual = "统计优势明显" if _aa_wr >= 60 else "胜率一般，需配合止损"
+        _sw_hist_txt = f"；（3）历史同类信号胜率 {_aa_wr:.0f}%（{_aa_n_v}次），{_wr_qual}。"
+    else:
+        _sw_hist_txt = "。"
+
     p1 = (
         f'<p><strong>期权市场结构：P/C={pcr}（{"Call偏多，买方主导，看多氛围浓" if pcr_f<0.9 else "Put偏多，下行对冲需求强" if pcr_f>1.1 else "多空均衡"}），'
         f'总OI {oi:,.0f}，IV Current {iv:.1f}%，IV Rank {iv_rank:.0f}%（{iv_interp}），'
@@ -1425,12 +1439,15 @@ def _build_options_narrative(ctx: dict) -> str:
         f'{"信号拥挤度偏高（衰减因子 " + f"{decay_f:.2f}" + "），alpha 衰减风险需关注；" if decay_f < 0.8 else ""}'
         f'期权流方向为<span class="{flow_cls}">{"净看涨流" if flow=="bullish" else "净看跌流" if flow=="bearish" else "中性流"}</span>，'
         f'{len(bull_flows)}笔看涨异动、{len(bear_flows)}笔看跌异动。'
-        # N1: So What 推理
+        # N1: So What 推理（v0.15.0 增强：加入胜率/EV/ML 量化支撑）
         f'<strong>交易含义：</strong>'
-        f'{"IV Rank 偏低 + Call 流主导 = 买方成本低且方向明确，适合定向做多（long call / bull call spread）。" if iv_rank < 30 and pcr_f < 0.9 else ""}'
-        f'{"IV Rank 偏高 + Put Skew 显著 = 市场恐慌定价充分，卖方策略（iron condor / short put）的 theta 衰减收益丰厚。" if iv_rank > 70 and skew_f > 1.15 else ""}'
-        f'{"多空流方向分歧 → 短期波动放大概率高，优先选择跨式策略（straddle/strangle）或观望等方向明确。" if abs(len(bull_flows) - len(bear_flows)) <= 1 and len(bull_flows) + len(bear_flows) >= 4 else ""}'
-        f'{"IV Rank 中性区间，期权既不便宜也不贵——优先选价差策略（spread）控制 vega 暴露。" if 30 <= iv_rank <= 70 and not (iv_rank > 70 and skew_f > 1.15) and not (iv_rank < 30 and pcr_f < 0.9) else ""}'
+        f'{"（1）IV Rank 偏低 + Call 流主导 = 买方成本低且方向明确，适合定向做多（long call / bull call spread）" if iv_rank < 30 and pcr_f < 0.9 else ""}'
+        f'{"（1）IV Rank 偏高 + Put Skew 显著 = 市场恐慌定价充分，卖方策略（iron condor / short put）的 theta 衰减收益丰厚" if iv_rank > 70 and skew_f > 1.15 else ""}'
+        f'{"（1）多空流方向分歧 → 短期波动放大概率高，优先选择跨式策略（straddle/strangle）或观望等方向明确" if abs(len(bull_flows) - len(bear_flows)) <= 1 and len(bull_flows) + len(bear_flows) >= 4 else ""}'
+        f'{"（1）IV Rank 中性区间，期权既不便宜也不贵——优先选价差策略（spread）控制 vega 暴露" if 30 <= iv_rank <= 70 and not (iv_rank > 70 and skew_f > 1.15) and not (iv_rank < 30 and pcr_f < 0.9) else ""}'
+        f'；（2）ML 7日预期 <strong>{ctx["ml_7d"]:+.1f}%</strong>，蜂群评分 <strong>{score:.1f}/10</strong>'
+        f'{"，信号偏多（>6.0）支持方向性建仓" if score >= 6.0 else "，信号偏空（<4.0）支持防守型策略" if score < 4.0 else "，信号中性（4-6），仓位宜轻"}'
+        f'{_sw_hist_txt}'
         f'</p>'
     )
 
@@ -1466,9 +1483,12 @@ def _build_options_narrative(ctx: dict) -> str:
         if iv_rv > 5:
             _iv_excess_pct = iv_rv / rv_30d * 100 if rv_30d > 0 else 0
             p2 += (f' <strong>交易含义：</strong>期权隐含恐慌超出实际波动 {_iv_excess_pct:.0f}%，卖方策略期望值为正'
+                   f'（ML 7日 {ctx["ml_7d"]:+.1f}%，蜂群 {score:.1f}/10）'
                    f'{"；但距 " + _cat_name + " 较近，建议等催化剂落地后 IV Crush 窗口再入场" if _near_cat else ""}。')
         elif iv_rv < -5:
-            p2 += f' <strong>交易含义：</strong>IV 被低估，方向性买入成本偏低，若配合信号共振可积极建仓。'
+            p2 += (f' <strong>交易含义：</strong>IV 被低估，方向性买入成本偏低'
+                   f'（ML 7日 {ctx["ml_7d"]:+.1f}%，蜂群 {score:.1f}/10）'
+                   f'，若配合信号共振可积极建仓。')
         p2 += '</p>'
     else:
         p2 = ''
@@ -1535,7 +1555,16 @@ def _build_options_narrative(ctx: dict) -> str:
                 charm_interp = '到期日临近时 delta 衰减偏负，做市商被动卖出标的，形成向下压力'
             else:
                 charm_interp = '到期日前 delta 衰减方向中性'
-            p4_parts.append(f'Charm 到期衰减方向为 <strong>{charm_dir}</strong>——{charm_interp}')
+            # v0.15.0 P2: Charm 方向陈旧检测
+            _charm_stale_note = ""
+            _charm_hist = ctx.get("_charm_history", [])  # 从日环比对比中收集
+            if _charm_hist and len(_charm_hist) >= 3:
+                if all(d == charm_dir for d in _charm_hist[-3:]):
+                    _charm_stale_note = (
+                        f' <span style="color:var(--gold2);font-size:11px;">'
+                        f'（⚠️ 连续 {len(_charm_hist)} 天方向不变，可能反映期权链结构固化而非新信息）</span>'
+                    )
+            p4_parts.append(f'Charm 到期衰减方向为 <strong>{charm_dir}</strong>——{charm_interp}{_charm_stale_note}')
         p4 = f'<p>{"；".join(p4_parts)}。</p>'
 
     # ── P5: 异常流与关键水位 ──
@@ -1944,6 +1973,22 @@ def _build_scenario_narrative(ctx: dict) -> str:
         pa = min(45, pa + 3); pe = max(3, pe - 2)
     elif pead_bias == 'bearish':
         pe = min(40, pe + 3); pa = max(3, pa - 2)
+
+    # v0.15.0 P2: 历史回测校准 — 如果有足够样本，用历史胜率微调概率
+    _hist_wr = ctx.get("aa_hist_win_rate", 0)
+    _hist_n  = ctx.get("aa_hist_n", 0)
+    if _hist_n >= 10 and _hist_wr > 0:
+        # 历史胜率高 → 适度增加看多概率；低 → 增加看跌概率
+        # Bayesian blend：权重 = min(0.15, n/100) → 最多调整15%
+        _blend_w = min(0.15, _hist_n / 100)
+        if _hist_wr >= 65:
+            _bull_boost = round(_blend_w * 8)  # 最多 +1.2pp
+            pa = min(45, pa + _bull_boost)
+            pe = max(3, pe - _bull_boost)
+        elif _hist_wr <= 35:
+            _bear_boost = round(_blend_w * 8)
+            pe = min(40, pe + _bear_boost)
+            pa = max(3, pa - _bear_boost)
 
     # Normalize to 100
     total = pa + pb + pc + pd + pe
@@ -3073,6 +3118,16 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
     else:
         oi_delta_sub = "未平仓合约"
 
+    # v0.15.0: OI 异常告警 HTML 卡片
+    _oi_anomaly_html = ""
+    if ctx.get("oi_anomaly"):
+        _oi_anomaly_html = (
+            f'<div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);'
+            f'border-radius:8px;padding:10px 14px;margin:10px 0;font-size:12px;">'
+            f'<span style="color:var(--red2);font-weight:700;">⚠️ OI 数据异常告警</span>'
+            f'<p style="color:var(--text2);margin:6px 0 0;line-height:1.6;">{ctx["oi_anomaly_msg"]}</p></div>'
+        )
+
     # 异常流数量统计
     bullish_unusual = sum(1 for u in ctx["unusual_activity"] if u.get("bullish"))
     bearish_unusual = len(ctx["unusual_activity"]) - bullish_unusual
@@ -3097,25 +3152,32 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
             sc_b_lo = float(_llm_sc["sc_b"]["price_lo"]); sc_b_hi = float(_llm_sc["sc_b"]["price_hi"])
             sc_c_lo = float(_llm_sc["sc_c"]["price_lo"]); sc_c_hi = float(_llm_sc["sc_c"]["price_hi"])
             sc_d_lo = float(_llm_sc["sc_d"]["price_lo"]); sc_d_hi = float(_llm_sc["sc_d"]["price_hi"])
+            # v0.15.0: 情景E — LLM 可选，无则回退规则
+            if "sc_e" in _llm_sc:
+                sc_e_lo = float(_llm_sc["sc_e"]["price_lo"]); sc_e_hi = float(_llm_sc["sc_e"]["price_hi"])
+            else:
+                sc_e_lo = round(max_sup_price * 0.72, 0); sc_e_hi = round(max_sup_price * 0.85, 0)
             probs = [float(_llm_sc["sc_a"]["prob"]), float(_llm_sc["sc_b"]["prob"]),
-                     float(_llm_sc["sc_c"]["prob"]), float(_llm_sc["sc_d"]["prob"])]
+                     float(_llm_sc["sc_c"]["prob"]), float(_llm_sc["sc_d"]["prob"]),
+                     float(_llm_sc.get("sc_e", {}).get("prob", 0.10))]
             ev_pct = float(_llm_sc.get("ev_pct") or 0)
             ev_str = f"{ev_pct:+.1f}%"
         else:
-            # ── ML 规则引擎降级 ──
+            # ── ML 规则引擎降级（v0.15.0: 5情景完整） ──
             sc_a_lo = round(max_res_price * 1.02, 0); sc_a_hi = round(max_res_price * 1.12, 0)
             sc_b_lo = round(p * 1.03, 0);             sc_b_hi = round(max_res_price * 0.99, 0)
             sc_c_lo = round(max_sup_price * 0.99, 0); sc_c_hi = round(p * 0.98, 0)
             sc_d_lo = round(max_sup_price * 0.85, 0); sc_d_hi = round(max_sup_price * 0.95, 0)
+            sc_e_lo = round(max_sup_price * 0.72, 0); sc_e_hi = round(max_sup_price * 0.85, 0)
             if "bull" in direction:
-                probs = [0.25, 0.35, 0.28, 0.12]
-                returns = [+0.15, +0.05, -0.07, -0.18]
+                probs = [0.25, 0.32, 0.25, 0.12, 0.06]
+                returns = [+0.15, +0.05, -0.02, -0.10, -0.18]
             elif "bear" in direction:
-                probs = [0.12, 0.28, 0.35, 0.25]
-                returns = [+0.15, +0.05, -0.07, -0.18]
+                probs = [0.06, 0.18, 0.30, 0.28, 0.18]
+                returns = [+0.15, +0.05, -0.02, -0.10, -0.18]
             else:
-                probs = [0.20, 0.30, 0.30, 0.20]
-                returns = [+0.12, +0.04, -0.06, -0.15]
+                probs = [0.15, 0.25, 0.30, 0.18, 0.12]
+                returns = [+0.12, +0.04, -0.02, -0.08, -0.15]
             ev_pct = sum(pr * r for pr, r in zip(probs, returns)) * 100
             ev_str = f"{ev_pct:+.1f}%"
 
@@ -3125,16 +3187,24 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
         _sc_c_oi = (f"{supports[0]['oi']:,.0f}") if supports else 'N/A'
         sc_c_note = _llm_sc["sc_c"].get("note", f"OI {_sc_c_oi} 提供缓冲，量能萎缩限制下行弹性。") if _use_llm_sc else f"OI {_sc_c_oi} 提供缓冲，量能萎缩限制下行弹性。"
         sc_d_note = _llm_sc["sc_d"].get("note", f"风险：{', '.join(ctx['bear_signals'][:2]) or 'IV Skew偏高, 宏观不确定'}。深部支撑防线。") if _use_llm_sc else f"风险：{', '.join(ctx['bear_signals'][:2]) or 'IV Skew偏高, 宏观不确定'}。深部支撑防线。"
+        # v0.15.0: 情景E note
+        _bear_risks = ', '.join(ctx.get('bear_signals', [])[:2]) or '系统性风险'
+        sc_e_note = (_llm_sc.get("sc_e", {}).get("note", f"逆向信号全面兑现：{_bear_risks}。止损盘连锁触发，负Gamma区追空。") if _use_llm_sc
+                     else f"逆向信号全面兑现：{_bear_risks}。止损盘连锁触发，负Gamma区追空。")
     else:
         sc_a_lo, sc_a_hi = 0, 0
         sc_b_lo, sc_b_hi = 0, 0
         sc_c_lo, sc_c_hi = 0, 0
         sc_d_lo, sc_d_hi = 0, 0
+        sc_e_lo, sc_e_hi = 0, 0
         ev_str = "N/A"
-        probs = [0.25, 0.35, 0.28, 0.12]
-        sc_a_note = sc_b_note = sc_c_note = sc_d_note = ""
+        probs = [0.20, 0.30, 0.25, 0.15, 0.10]
+        sc_a_note = sc_b_note = sc_c_note = sc_d_note = sc_e_note = ""
 
     # ── 止盈/止损：优先 LLM 数据 ──────────────────────────────────
+    # v0.17.0: 单位安全 — probs 应为 0-1 小数；若 LLM 返回 0-100 百分比则归一化
+    if any(p > 1.0 for p in probs):
+        probs = [p / 100.0 for p in probs]
     _wr_fallback = (probs[0] + probs[1]) * 100
     win_rate  = float(_llm_sc.get("win_rate") or _wr_fallback) if _use_llm_sc else _wr_fallback
     hold_days = _llm_sc.get("hold_days") or "5–10天"
@@ -3901,6 +3971,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
         </div>
       </div>
 
+      {_oi_anomaly_html}
       {iv_term_html}
       {_gex_enhance_html}
       {_vol_surface_html}
@@ -3998,18 +4069,25 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
           <div class="sc-note">{sc_b_note}</div>
         </div>
         <div class="sc-card sc-meh">
-          <div class="sc-name">📉 情景C · 温和看跌</div>
-          <div class="sc-prob">催化剂不达预期 · 概率 {probs[2]*100:.0f}%</div>
+          <div class="sc-name">⚖️ 情景C · 区间震荡</div>
+          <div class="sc-prob">多空拉锯 · 概率 {probs[2]*100:.0f}%</div>
           <div class="sc-price">${sc_c_lo:.0f}–${sc_c_hi:.0f}</div>
           <div class="sc-gain" style="color:var(--gold2)">支撑 ${supports[0]['strike'] if supports else 'N/A'}</div>
           <div class="sc-note">{sc_c_note}</div>
         </div>
         <div class="sc-card sc-bear">
-          <div class="sc-name">💥 情景D · 极端风险</div>
-          <div class="sc-prob">催化剂暴雷 + 宏观恶化 · 概率 {probs[3]*100:.0f}%</div>
+          <div class="sc-name">📉 情景D · 温和看跌</div>
+          <div class="sc-prob">宏观逆风 + 支撑承压 · 概率 {probs[3]*100:.0f}%</div>
           <div class="sc-price">${sc_d_lo:.0f}–${sc_d_hi:.0f}</div>
-          <div class="sc-gain" style="color:var(--red2)">高风险情景</div>
+          <div class="sc-gain" style="color:var(--red2)">支撑测试</div>
           <div class="sc-note">{sc_d_note}</div>
+        </div>
+        <div class="sc-card sc-bear" style="border-color:var(--red2);">
+          <div class="sc-name">💥 情景E · 强势看跌</div>
+          <div class="sc-prob">逆向信号兑现 + 止损连锁 · 概率 {probs[4]*100:.0f}%</div>
+          <div class="sc-price">${sc_e_lo:.0f}–${sc_e_hi:.0f}</div>
+          <div class="sc-gain" style="color:var(--red2)">极端风险</div>
+          <div class="sc-note">{sc_e_note}</div>
         </div>
       </div>
 
@@ -4463,6 +4541,20 @@ def main():
     ctx["prev"] = extract_simple(load_json(prev_path)) if prev_path else None
     ctx["t7"]   = extract_simple(load_json(t7_path))   if t7_path   else None
 
+    # v0.15.0 P2: Charm 方向历史收集（回溯 5 天）
+    _charm_history = []
+    for _cb in range(1, 6):
+        _cb_path = find_prev_json(ticker, json_path, days_back=_cb)
+        if _cb_path:
+            try:
+                _cb_data = load_json(_cb_path)
+                _cb_charm = (_cb_data.get("gamma_calendar") or {}).get("charm_direction", "")
+                if _cb_charm:
+                    _charm_history.append(_cb_charm)
+            except Exception:
+                pass
+    ctx["_charm_history"] = _charm_history
+
     # 计算 delta_context 供 LLM 推理使用
     delta_context = ""
     if ctx["prev"]:
@@ -4517,6 +4609,18 @@ def main():
                     f"  总OI: {_oi_prev:,.0f} → {_oi_now:,.0f} "
                     f"({ctx['oi_delta']:+,}, {ctx['oi_delta_pct']:+.1f}%)"
                 )
+                # v0.15.0: OI 异常波动告警（>50% 日环比变化）
+                _oi_abs_pct = abs(ctx["oi_delta_pct"])
+                if _oi_abs_pct > 50:
+                    _oi_dir = "暴增" if ctx["oi_delta_pct"] > 0 else "骤降"
+                    ctx["oi_anomaly"] = True
+                    ctx["oi_anomaly_msg"] = (
+                        f"⚠️ OI 日环比{_oi_dir} {_oi_abs_pct:.0f}%（{_oi_prev:,.0f} → {_oi_now:,.0f}），"
+                        f"可能原因：期权到期日结算、数据源采集范围变更、流动性异常事件。建议交叉验证。"
+                    )
+                    extras.append(f"  ⚠️ OI 异常波动告警: 日环比{_oi_dir} {_oi_abs_pct:.0f}%")
+                else:
+                    ctx["oi_anomaly"] = False
         except Exception:
             pass
         delta_context = (
@@ -4558,6 +4662,10 @@ def main():
     accuracy_html = _render_accuracy_card(_accuracy)
     if _accuracy and not _accuracy.get("pending"):
         print(f"   📚 历史胜率: {_accuracy['win_rate']}% | 平均T+7收益: {_accuracy['avg_ret_7d']:+.2f}% ({_accuracy['n']} 样本)")
+        # v0.15.0: 注入 ctx 供 So What 推理链使用
+        ctx["aa_hist_win_rate"] = float(_accuracy.get("win_rate", 0))
+        ctx["aa_hist_n"] = int(_accuracy.get("n", 0))
+        ctx["aa_hist_avg_ret_7d"] = float(_accuracy.get("avg_ret_7d", 0))
 
     print(f"   OracleBee: P/C={ctx['put_call_ratio']}, OI={ctx['total_oi']:,}, Skew={ctx['iv_skew']}")
     print(f"   催化剂: {len(ctx['catalysts'])} 个 | 异常流: {len(ctx['unusual_activity'])} 笔")
