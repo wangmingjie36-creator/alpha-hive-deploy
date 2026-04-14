@@ -220,9 +220,9 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         # --- 综合评分 ---
         all_unusual = unusual_calls + unusual_puts
 
-        # 按溢价排序取最重要的
+        # 按溢价排序，返回全部（v0.16.0: 移除 [:5] 截断）
         all_unusual.sort(key=lambda x: x["dollar_premium"], reverse=True)
-        top_signals = all_unusual[:5]
+        top_signals = all_unusual
 
         call_count = len(unusual_calls)
         put_count = len(unusual_puts)

@@ -875,70 +875,102 @@ class OptionsAnalyzer:
         return result
 
     def detect_unusual_activity(
-        self, calls_df: List[Dict], puts_df: List[Dict]
+        self, calls_df: List[Dict], puts_df: List[Dict],
+        stock_price: float = 0.0
     ) -> List[Dict]:
         """
-        检测异动信号
-        - 成交量 / 开仓量 > 5
-        - 单笔成交量 > 10000
+        检测异动信号（v0.16.0 重写：对齐 unusual_options.py 多维检测逻辑）
+
+        触发条件（满足任一即标记异常）：
+        1. Vol/OI Sweep: vol/oi >= 5 且 vol >= 200（新建仓信号）
+        2. 大单成交: vol > 10000
+        3. OTM 投机买入: OTM >= 5% 且 vol >= 100 且 vol/oi >= 2
+        4. 短期急单: 到期 <= 14 天 且 OTM >= 3% 且 vol >= 100
+        5. 大额溢价: dollar_premium >= $500K
         """
         unusual = []
+        _sp = stock_price if stock_price > 0 else 0
 
-        # 检测看涨扫货（Call Sweep）
-        for call in calls_df:
-            volume = call.get("volume", 0)
-            oi = call.get("openInterest", 1)
+        def _scan(contracts: List[Dict], is_call: bool):
+            for c in contracts:
+                volume = int(c.get("volume", 0) or 0)
+                oi = int(c.get("openInterest", 0) or 1)
+                strike = float(c.get("strike", 0) or 0)
+                last_price = float(c.get("lastPrice", 0) or 0)
+                expiry = c.get("expiry", "")
 
-            if oi > 0 and volume / oi > 5:
-                unusual.append(
-                    {
-                        "type": "call_sweep",
-                        "strike": call.get("strike"),
+                if volume < 50 or strike <= 0:
+                    continue
+
+                vol_oi = volume / max(oi, 1)
+                dollar_premium = volume * last_price * 100
+                otm_pct = 0.0
+                if _sp > 0:
+                    otm_pct = ((strike - _sp) / _sp * 100) if is_call else ((_sp - strike) / _sp * 100)
+
+                # 计算到期天数
+                days_to_exp = 30  # 默认
+                if expiry:
+                    try:
+                        from datetime import datetime as _dt
+                        exp_date = _dt.strptime(str(expiry)[:10], "%Y-%m-%d")
+                        days_to_exp = (exp_date - _dt.now()).days
+                    except (ValueError, TypeError):
+                        pass
+
+                is_unusual = False
+                reasons = []
+
+                # 条件 1: Vol/OI Sweep
+                if vol_oi >= 5 and volume >= 200:
+                    is_unusual = True
+                    reasons.append(f"Vol/OI={vol_oi:.1f}x")
+
+                # 条件 2: 大单成交
+                if volume > 10000:
+                    is_unusual = True
+                    reasons.append(f"大单{volume:,}手")
+
+                # 条件 3: OTM 投机
+                if otm_pct >= 5 and volume >= 100 and vol_oi >= 2:
+                    is_unusual = True
+                    reasons.append(f"OTM+{otm_pct:.1f}%投机")
+
+                # 条件 4: 短期急单
+                if days_to_exp <= 14 and otm_pct >= 3 and volume >= 100:
+                    is_unusual = True
+                    reasons.append(f"短期{days_to_exp}天急单")
+
+                # 条件 5: 大额溢价
+                if dollar_premium >= 500_000:
+                    is_unusual = True
+                    reasons.append(f"溢价${dollar_premium/1e6:.2f}M")
+
+                if is_unusual:
+                    _type_prefix = "call" if is_call else "put"
+                    _type = f"{_type_prefix}_sweep" if vol_oi >= 5 else f"large_{_type_prefix}_volume"
+                    entry = {
+                        "type": _type,
+                        "strike": strike,
                         "volume": volume,
                         "oi": oi,
-                        "ratio": round(volume / oi, 2),
-                        "bullish": True,
+                        "ratio": round(vol_oi, 2),
+                        "bullish": is_call,
+                        "otm_pct": round(otm_pct, 1),
+                        "dollar_premium": round(dollar_premium),
+                        "days_to_exp": days_to_exp,
+                        "reasons": reasons,
                     }
-                )
-            elif volume > 10000:
-                unusual.append(
-                    {
-                        "type": "large_call_volume",
-                        "strike": call.get("strike"),
-                        "volume": volume,
-                        "bullish": True,
-                    }
-                )
+                    if expiry:
+                        entry["expiry"] = str(expiry)[:10]
+                    unusual.append(entry)
 
-        # 检测看跌扫货（Put Sweep）
-        for put in puts_df:
-            volume = put.get("volume", 0)
-            oi = put.get("openInterest", 1)
+        _scan(calls_df, is_call=True)
+        _scan(puts_df, is_call=False)
 
-            if oi > 0 and volume / oi > 5:
-                unusual.append(
-                    {
-                        "type": "put_sweep",
-                        "strike": put.get("strike"),
-                        "volume": volume,
-                        "oi": oi,
-                        "ratio": round(volume / oi, 2),
-                        "bullish": False,
-                    }
-                )
-            elif volume > 10000:
-                unusual.append(
-                    {
-                        "type": "large_put_volume",
-                        "strike": put.get("strike"),
-                        "volume": volume,
-                        "bullish": False,
-                    }
-                )
-
-        # 按成交量排序，返回前 10 个
-        unusual.sort(key=lambda x: x.get("volume", 0), reverse=True)
-        return unusual[:10]
+        # v0.16.0: 不合并，保留每条原始明细（渲染层按到期日分组展示）
+        unusual.sort(key=lambda x: x.get("dollar_premium", 0), reverse=True)
+        return unusual
 
     def find_key_levels(
         self, calls_df: List[Dict], puts_df: List[Dict], stock_price: float = 0.0
@@ -1290,7 +1322,7 @@ class OptionsAgent:
         gex = self.analyzer.calculate_gamma_exposure(
             calls_df, puts_df, stock_price
         )
-        unusual_activity = self.analyzer.detect_unusual_activity(calls_df, puts_df)
+        unusual_activity = self.analyzer.detect_unusual_activity(calls_df, puts_df, stock_price)
         key_levels = self.analyzer.find_key_levels(calls_df, puts_df, stock_price or 0.0)
         # S14: IV Skew 分析
         iv_skew = self.analyzer.calculate_iv_skew(calls_df, puts_df, stock_price)
