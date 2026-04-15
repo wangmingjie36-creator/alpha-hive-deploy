@@ -5,6 +5,93 @@
 
 ---
 
+## [0.18.0] — 2026-04-15 — Sprint 1: 真实策略回测（v16.0 起步）
+
+### Added — P0-1 路径依赖退出（intraday 止损止盈）
+
+- **`backtester.py` 新增 `_simulate_trade_path()`**（行 ~640）
+  - 拉 T+0 → T+N 每日 OHLC，逐日检查 SL (-5%) / TP (+10%) 是否触发
+  - 触发后按阈值价 + 退出滑点（5bp）平仓，返回 `exit_reason` ∈ {TP, SL, T7_CLOSE}
+  - 看多：`Low ≤ sl_price` 止损 / `High ≥ tp_price` 止盈
+  - 看空：`High ≥ sl_price` 空头止损 / `Low ≤ tp_price` 空头止盈
+  - 同日同时触发 SL+TP 时保守假设先 SL（对策略更严格）
+- **`run_backtest()` 改造**：T+7 使用路径依赖，T+1/T+30 沿用旧 close-to-close
+
+### Added — P0-2 交易成本 + 借券费模型
+
+- **新增 `trading_costs.py`**：`apply_costs(gross_return_pct, direction, ticker, holding_days)` 一次性扣减滑点（双边）+ 佣金 + 借券费（仅 short）
+- **`config.py` 新增 `TRADING_COSTS_CONFIG`**：
+  - `slippage_bps_by_ticker`：NVDA 3bp / BILI 15bp / CRCL 25bp 等分档
+  - `borrow_rates`：VKTX 15% / CRCL 8% / BILI 4% 等（年化 %）
+  - `commission_pct_per_side`：0.01%
+- **新增 `sharpe_ratio()`**：年化 Sharpe，T+7 策略 periods_per_year=52
+- 自测验证：BILI 空头 +11% gross → net 10.67%（扣 0.39% 成本）
+
+### Added — P0-3 复利 Equity Curve + SPY 基准
+
+- **`dashboard_renderer.py::_load_accuracy_data()` 重写 Equity Curve**（行 655+）
+  - 三条曲线：Gross（不扣成本参考）/ Net（真实可交易）/ SPY（买入持有）
+  - 复利：每笔 $100k × 10% 仓位（`PORTFOLIO_CONFIG.position_size_pct`）
+  - `trading_stats` 输出 Sharpe / Profit Factor / Max DD / Alpha vs SPY / Win Rate
+- **`templates/dashboard.js` 新增 `initTradingStats()` + 3 条曲线渲染**
+  - 12 个真实交易指标卡片（Net/Gross/SPY 收益、Sharpe、PF、SL/TP 统计等）
+  - 曲线 tooltip 显示具体成交原因（SL/TP 触发）
+
+### Changed — DB schema 迁移（幂等 ALTER）
+
+- `predictions` 表新增 7 列：`net_return_t7` / `exit_reason` / `exit_date` / `exit_price` / `holding_days` / `cost_breakdown`（JSON）/ `spy_return_t7`
+- `PredictionStore.update_t7_path_result()` 一次性写入所有新字段
+
+### Added — 历史数据回填
+
+- **新增 `backfill_trading_costs.py`**：对 191 条 T+7 已验证记录重新路径模拟 + 扣成本
+- **回填结果**（2026-04-15）：
+  - 53 笔（27.7%）触发 -5% 止损，23 笔（12.0%）触发 +10% 止盈，115 笔（60.3%）持有到 T+7
+  - 真实准确率：**53.4%**（旧"T+7收盘胜率"约 67% 是纸面幻觉）
+  - Net 累计：**+9.39%**（6周），SPY 同期 **-12.78%**，**Alpha +22.18%**
+  - Sharpe (Net) 0.37，Profit Factor 1.19 — 策略微盈利但波动大
+  - 13 笔原"T+7 方向正确"记录被 SL 打断 → 证明之前指标虚高
+
+### 方法学免责声明（UI 文字）
+
+- 网站新增明确标注："Gross 曲线不扣成本（参考），Net 曲线 = 真实可拿收益"
+- 每笔按 $100k × 10% 仓位建仓，-5% 硬止损 / +10% 止盈，扣滑点 + 佣金 + 借券费
+
+---
+
+## [0.17.2] — 2026-04-15
+
+### Fixed — P6 逐到期日推理去模板化 + Bug 修复
+
+- **`generate_deep_v2.py` `_build_options_narrative()` P6 重写**（行 1948-2354）
+  - 根因：原 P6 每个到期日输出相同的 "Call 触及阻力位"、"正 Gamma 需超大成交量"、"Ex-Div 催化剂" 三段，只换数字，用户反映 "量化分析作用不足"
+  - 循环前预计算 6 个跨期排名：总溢价 / Put 笔数 / 单笔集中度 / Strike 宽度（最窄/最宽）/ 平均 OTM
+  - 六层差异化推理结构：Layer 1 独特身份（主战场 / 对冲集中 / 鲸鱼押注 / 窄带信念 / 分散投机 / 彩票型）— Layer 2 Call/Put $ 比具体倍数 — Layer 3 vs 前一到期日 delta — Layer 4 DTE 维度（≤7/≤21/≤45/>45 四档）— Layer 5 集中度（阈值 50%）— Layer 6 支撑阻力（仅 Call 溢价 #1 触发）
+  - 移除逐到期日循环中的全局重复：GEX 政体评论移至跨期综合段、宽松催化剂匹配改为严格 0-5 天匹配
+  - 跨期综合段增加 "GEX 政体为 {regime}，详见 P3" 避免漏信息
+
+### Fixed — P6 二次审计修复的 6 处真实 bug
+
+- **空 `all_strikes` 列表崩溃**：Layer 1 tightest/widest 分支添加 `_exp_metrics[_exp_date]['all_strikes']` 非空 + `len(_sorted_exps) > 1` 双重守护，避免单到期日或无 strike 数据时 `min([])` ValueError
+- **`put_count` 排名触发空数据**：添加 `put_count > 0 and bear_flows` 守护，避免全部到期日无 Put 时输出 "Put 笔数 0 笔" 无意义文本
+- **`bear_flows` sum 除零**：`_total_bear_prem_all` 预计算并守护 `> 0`，避免 `/sum()` 除零错误
+- **cp_ratio 异常哨兵值**：Layer 2 添加 `_exp_total_prem > 0` 前置守护 + 分离"仅 Call" / "仅 Put"分支，避免 cp_ratio=1.0 默认值落入错误分支、999 哨兵值输出 "999.0x" 丑陋文本
+- **Layer 3 ratio 变化语义错误**：添加 `0 < _cp_ratio < 900` 有效区间过滤 + 修正描述逻辑（0.3→1.0 不再误报 "更集中看多"）
+- **Layer 6 `_is_call_leader` 全触发**：原逻辑当所有 `bull_prem=0` 时每个到期日都判定为 leader（所有到期日都贴"核心阻力突破"，退化回模板病），添加 `_exp_bull_prem > 0` 前置守护
+
+### Fixed — v0.17.1 的 11 处 KeyError 风险（旧代码）
+
+- 将所有外部 JSON 数据的 `dict['key']` 取值改为 `.get('key', default)` 安全访问
+- 覆盖：`_build_options_narrative()` / `_build_scenario_narrative()` / `_build_risk_narrative()` / `_build_executive_summary()` / IV term structure 渲染 / scenario card HTML / LLM prompt 构建
+- 防止某些票数据缺字段时报告崩溃
+
+### Changed — 语义/措辞
+
+- Layer 3 "较近月" → "较前一到期日"（更准确，防止 idx>=2 时误导）
+- Layer 3 ratio 变化描述双向化：既区分 "多头倾向更强 / Put 主导度减弱"，也区分 "对冲增强 / 看涨信念减弱"
+
+---
+
 ## [0.17.0] — 2026-04-10
 
 ### Added（v0.14.0 复盘后 6 项高价值改进）

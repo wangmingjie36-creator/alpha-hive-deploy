@@ -652,38 +652,161 @@ def _load_accuracy_data() -> dict:
     except Exception as _e11:
         _log.debug("F11 准确率增强数据加载失败: %s", _e11)
 
-    # ── Feature: Equity Curve（累计收益曲线）──
-    _equity_curve: list = []  # [{date, cumulative_return, return_t7, ticker, direction, correct}]
+    # ── Sprint 1 / P0-3: 复利 Equity Curve（Gross/Net/SPY 三曲线）──
+    # 语义：固定仓位比例（10% 本金/笔）、日度聚合、复利累积
+    _equity_curve: list = []
+    _trading_stats: dict = {
+        "exit_tp_count": 0, "exit_sl_count": 0, "exit_close_count": 0,
+        "avg_gross_ret": 0.0, "avg_net_ret": 0.0, "avg_cost": 0.0,
+        "net_win_rate": 0.0, "sharpe_net": None,
+        "max_dd_net_pct": 0.0, "max_dd_gross_pct": 0.0,
+        "profit_factor": None,
+        "total_spy_ret": 0.0, "alpha_vs_spy": 0.0,
+        "initial_capital": 100000.0,
+    }
     try:
         from backtester import PredictionStore as _PS_eq
         import sqlite3 as _sq_eq
+        try:
+            import config as _cfg_eq
+            _PF_CFG = getattr(_cfg_eq, "PORTFOLIO_CONFIG", {})
+        except Exception:
+            _PF_CFG = {}
+        _initial_capital = float(_PF_CFG.get("initial_capital", 100000.0))
+        _pos_pct = float(_PF_CFG.get("position_size_pct", 0.10))
+        _trading_stats["initial_capital"] = _initial_capital
+
         _ps_eq = _PS_eq()
         with _sq_eq.connect(_ps_eq.db_path) as _cn_eq:
             _cn_eq.row_factory = _sq_eq.Row
             _eq_rows = _cn_eq.execute("""
-                SELECT date, ticker, direction, final_score, return_t7, correct_t7
+                SELECT date, ticker, direction, final_score,
+                       return_t7, correct_t7,
+                       net_return_t7, exit_reason, exit_date, holding_days,
+                       spy_return_t7
                 FROM predictions
                 WHERE checked_t7=1 AND return_t7 IS NOT NULL
                 ORDER BY date ASC, id ASC
             """).fetchall()
-            _cum_ret = 0.0
-            _peak = 0.0
+
+            # 初始化三条曲线：Gross / Net / SPY buy-and-hold
+            _cap_gross = _initial_capital
+            _cap_net = _initial_capital
+            _cap_spy = _initial_capital
+            _peak_gross = _initial_capital
+            _peak_net = _initial_capital
+            _max_dd_gross = 0.0
+            _max_dd_net = 0.0
+
+            _gross_rets, _net_rets, _spy_rets = [], [], []
+            _wins_net, _losses_net = [], []
+
             for _eqr in _eq_rows:
-                _r7 = _eqr["return_t7"]
-                # 方向调整收益：看空时收益取反
-                _dir_adj = -_r7 if str(_eqr["direction"]).lower() == "bearish" else _r7
-                _cum_ret += _dir_adj
-                if _cum_ret > _peak:
-                    _peak = _cum_ret
-                _dd = _peak - _cum_ret
+                _r7_raw = _eqr["return_t7"]
+                _dir_lc = str(_eqr["direction"]).lower()
+                # Gross (direction-adjusted) = strategy P&L before costs
+                _gross_dir_adj = -_r7_raw if _dir_lc == "bearish" else _r7_raw
+                _net = _eqr["net_return_t7"]
+                if _net is None:
+                    # 兼容：未回填则用 gross - 0.1% 粗估
+                    _net = _gross_dir_adj - 0.1
+                _spy = _eqr["spy_return_t7"] if _eqr["spy_return_t7"] is not None else 0.0
+
+                _gross_rets.append(_gross_dir_adj)
+                _net_rets.append(_net)
+                _spy_rets.append(_spy)
+
+                if _net > 0:
+                    _wins_net.append(_net)
+                elif _net < 0:
+                    _losses_net.append(_net)
+
+                # 复利：每笔占 pos_pct 本金，收益乘以当前资金
+                _pnl_gross = _cap_gross * _pos_pct * (_gross_dir_adj / 100.0)
+                _pnl_net = _cap_net * _pos_pct * (_net / 100.0)
+                _pnl_spy = _cap_spy * _pos_pct * (_spy / 100.0)
+                _cap_gross += _pnl_gross
+                _cap_net += _pnl_net
+                _cap_spy += _pnl_spy
+
+                if _cap_gross > _peak_gross:
+                    _peak_gross = _cap_gross
+                if _cap_net > _peak_net:
+                    _peak_net = _cap_net
+                _dd_g = (_peak_gross - _cap_gross) / _peak_gross * 100 if _peak_gross else 0
+                _dd_n = (_peak_net - _cap_net) / _peak_net * 100 if _peak_net else 0
+                if _dd_g > _max_dd_gross:
+                    _max_dd_gross = _dd_g
+                if _dd_n > _max_dd_net:
+                    _max_dd_net = _dd_n
+
                 _equity_curve.append({
                     "date": _eqr["date"],
                     "ticker": _eqr["ticker"],
-                    "ret": round(_dir_adj, 2),
-                    "cum": round(_cum_ret, 2),
-                    "dd": round(_dd, 2),
+                    "direction": _eqr["direction"],
+                    "gross_ret": round(_gross_dir_adj, 2),
+                    "net_ret": round(_net, 2),
+                    "spy_ret": round(_spy, 2),
+                    "exit_reason": _eqr["exit_reason"] or "T7_CLOSE",
+                    "cap_gross": round(_cap_gross, 2),
+                    "cap_net": round(_cap_net, 2),
+                    "cap_spy": round(_cap_spy, 2),
+                    "cum_gross_pct": round((_cap_gross / _initial_capital - 1) * 100, 2),
+                    "cum_net_pct": round((_cap_net / _initial_capital - 1) * 100, 2),
+                    "cum_spy_pct": round((_cap_spy / _initial_capital - 1) * 100, 2),
                     "correct": bool(_eqr["correct_t7"]),
                 })
+
+            # ── 填充 trading_stats ──
+            _cn_exits = _cn_eq.execute("""
+                SELECT exit_reason, COUNT(*) as n FROM predictions
+                WHERE checked_t7=1 GROUP BY exit_reason
+            """).fetchall()
+            for _er in _cn_exits:
+                _ekey = (_er["exit_reason"] or "T7_CLOSE").upper()
+                if "TP" in _ekey:
+                    _trading_stats["exit_tp_count"] = _er["n"]
+                elif "SL" in _ekey:
+                    _trading_stats["exit_sl_count"] = _er["n"]
+                else:
+                    _trading_stats["exit_close_count"] = _er["n"]
+
+            if _net_rets:
+                _n = len(_net_rets)
+                _trading_stats["avg_gross_ret"] = round(sum(_gross_rets) / _n, 3)
+                _trading_stats["avg_net_ret"] = round(sum(_net_rets) / _n, 3)
+                _trading_stats["avg_cost"] = round(
+                    (sum(_gross_rets) - sum(_net_rets)) / _n, 3
+                )
+                _trading_stats["net_win_rate"] = round(
+                    sum(1 for r in _net_rets if r > 0) / _n * 100, 1
+                )
+                # 年化 Sharpe (T+7 ≈ 52 周期/年)
+                try:
+                    from trading_costs import sharpe_ratio
+                    _trading_stats["sharpe_net"] = sharpe_ratio(_net_rets, periods_per_year=52)
+                except Exception:
+                    pass
+                # Profit Factor
+                _win_sum = sum(_wins_net)
+                _loss_sum = abs(sum(_losses_net))
+                if _loss_sum > 0:
+                    _trading_stats["profit_factor"] = round(_win_sum / _loss_sum, 2)
+                # SPY 累计 & alpha
+                _trading_stats["total_spy_ret"] = round(
+                    (_cap_spy / _initial_capital - 1) * 100, 2
+                )
+                _trading_stats["alpha_vs_spy"] = round(
+                    (_cap_net / _initial_capital - 1) * 100 -
+                    (_cap_spy / _initial_capital - 1) * 100, 2
+                )
+
+            _trading_stats["max_dd_gross_pct"] = round(_max_dd_gross, 2)
+            _trading_stats["max_dd_net_pct"] = round(_max_dd_net, 2)
+            _trading_stats["final_cap_gross"] = round(_cap_gross, 2)
+            _trading_stats["final_cap_net"] = round(_cap_net, 2)
+            _trading_stats["final_cap_spy"] = round(_cap_spy, 2)
+
     except Exception as _eq_err:
         _log.debug("Equity curve 数据加载失败: %s", _eq_err)
 
@@ -703,6 +826,7 @@ def _load_accuracy_data() -> dict:
         "win_streak": _acc_win_streak,
         "weekly_by_dir": _acc_weekly_by_dir,
         "equity_curve": _equity_curve,
+        "trading_stats": _trading_stats,
     }
 
 
@@ -1224,6 +1348,7 @@ def render_dashboard_html(report: Dict, date_str: str,
     _acc_max_dd = _acc["max_dd"]
     _acc_win_streak = _acc["win_streak"]
     _acc_equity_curve = _acc.get("equity_curve", [])
+    _acc_trading_stats = _acc.get("trading_stats", {})
 
     try:
         from zoneinfo import ZoneInfo as _ZI
@@ -1625,9 +1750,19 @@ def render_dashboard_html(report: Dict, date_str: str,
       </div>
     </div>
     {_acc_enhanced_html}
-    <!-- ── Equity Curve 权益曲线 ── -->
+    <!-- ── Sprint 1 / v16.0 Trading Stats 真实交易指标 ── -->
+    <div class="acc-section-title" style="margin-top:18px">💰 真实策略回测（扣成本 · 路径依赖 · Sprint 1）</div>
+    <div id="tradingStatsBox" style="margin:10px 0 16px">
+      <div style="font-size:.78em;color:var(--ts);margin-bottom:8px">
+        📌 <strong>方法学</strong>：每笔按 $100k × 10% 仓位建仓，-5% 硬止损 / +10% 止盈（盘中触发），
+        扣滑点 + 佣金 + 借券费。<span style="color:#e99;">Gross 曲线不扣成本（参考），Net 曲线 = 真实可拿收益。</span>
+      </div>
+      <div id="tradingStatsCards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
+    </div>
+
+    <!-- ── Equity Curve 权益曲线 (3 lines: Gross/Net/SPY) ── -->
     <div class="eq-section">
-      <div class="acc-section-title" style="margin-top:18px">📉 蜂群累计收益曲线（Equity Curve）</div>
+      <div class="acc-section-title" style="margin-top:18px">📉 资金曲线对比 · Gross · Net · SPY 基准</div>
       <div id="eqCurveContainer">
         <div class="eq-wrap"><canvas id="eqCurveChart"></canvas></div>
         <div class="eq-stats" id="eqStats"></div>
@@ -1889,6 +2024,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         "hist_full": _hist_full,
         "search_index": _search_index,
         "equity_curve": _acc_equity_curve,
+        "trading_stats": _acc_trading_stats,
         "swarm_divergence": _swarm_divergence,
     }
 

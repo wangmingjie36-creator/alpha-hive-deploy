@@ -109,6 +109,14 @@ class PredictionStore:
             ("flow_direction", "TEXT"),
             ("iv_rank_t1", "REAL"),
             ("pheromone_compact", "TEXT"),  # NA5: Agent 自评分快照
+            # Sprint 1 / v16.0 真实策略回测新增
+            ("net_return_t7", "REAL"),      # 扣成本后净收益率 (%)
+            ("exit_reason", "TEXT"),        # TP / SL / T7_CLOSE
+            ("exit_date", "TEXT"),          # 实际平仓日
+            ("exit_price", "REAL"),         # 实际平仓价
+            ("holding_days", "INTEGER"),    # 实际持仓天数
+            ("cost_breakdown", "TEXT"),     # JSON: {slippage, commission, borrow}
+            ("spy_return_t7", "REAL"),      # 同期 SPY 基准收益
         ]
         for col_name, col_type in new_columns:
             try:
@@ -215,6 +223,41 @@ class PredictionStore:
             return True
         except (sqlite3.Error, OSError) as e:
             _log.warning("更新回测结果失败: %s", e)
+            return False
+
+    def update_t7_path_result(
+        self, pred_id: int,
+        price_t7: float, return_t7: float, correct_t7: bool,
+        net_return_pct: Optional[float],
+        exit_reason: Optional[str],
+        exit_date: Optional[str],
+        exit_price: Optional[float],
+        holding_days: Optional[int],
+        cost_breakdown: Optional[Dict],
+        spy_return: Optional[float],
+    ) -> bool:
+        """Sprint 1: T+7 路径依赖 + 净收益 + 基准一次性写入。"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(f"""
+                    UPDATE {self.TABLE}
+                    SET price_t7 = ?, return_t7 = ?, correct_t7 = ?, checked_t7 = 1,
+                        net_return_t7 = ?, exit_reason = ?, exit_date = ?,
+                        exit_price = ?, holding_days = ?, cost_breakdown = ?,
+                        spy_return_t7 = ?
+                    WHERE id = ?
+                """, (
+                    price_t7, return_t7, 1 if correct_t7 else 0,
+                    net_return_pct, exit_reason, exit_date,
+                    exit_price, holding_days,
+                    json.dumps(cost_breakdown or {}, cls=SafeJSONEncoder),
+                    spy_return,
+                    pred_id,
+                ))
+                conn.commit()
+            return True
+        except (sqlite3.Error, OSError) as e:
+            _log.warning("Path result 更新失败 id=%s: %s", pred_id, e)
             return False
 
     def get_recently_verified_t7(self, limit: int = 50) -> List[Dict]:
@@ -475,6 +518,48 @@ class Backtester:
 
     def __init__(self, db_path: str = DB_PATH):
         self.store = PredictionStore(db_path)
+        self._spy_entry_cache: Dict[str, float] = {}
+
+    def _store_path_result(
+        self, pred_id, price_t7, return_t7, is_correct,
+        net_return_pct, exit_reason, exit_date, exit_price,
+        holding_days, cost_breakdown, spy_return,
+    ):
+        """代理调用 PredictionStore。"""
+        return self.store.update_t7_path_result(
+            pred_id=pred_id,
+            price_t7=price_t7,
+            return_t7=return_t7,
+            correct_t7=is_correct,
+            net_return_pct=net_return_pct,
+            exit_reason=exit_reason,
+            exit_date=exit_date,
+            exit_price=exit_price,
+            holding_days=holding_days,
+            cost_breakdown=cost_breakdown,
+            spy_return=spy_return,
+        )
+
+    def _get_spy_entry_price(self, predict_date: str) -> Optional[float]:
+        """获取 SPY 在 predict_date 的收盘价（作为 benchmark 入场价），带缓存。"""
+        if predict_date in self._spy_entry_cache:
+            return self._spy_entry_cache[predict_date]
+        if yf is None:
+            return None
+        try:
+            start = datetime.strptime(predict_date, "%Y-%m-%d")
+            end = start + timedelta(days=5)
+            hist = yf.Ticker("SPY").history(
+                start=start.strftime("%Y-%m-%d"),
+                end=end.strftime("%Y-%m-%d"),
+            )
+            if hist.empty:
+                return None
+            px = float(hist["Close"].iloc[0])
+            self._spy_entry_cache[predict_date] = px
+            return px
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError):
+            return None
 
     # ==================== 保存预测 ====================
 
@@ -558,24 +643,75 @@ class Backtester:
                     skipped += 1
                     continue
 
-                # 获取 T+N 日的实际价格
-                actual_price = self._get_price_at_date(
-                    ticker, predict_date, days
-                )
+                # ── Sprint 1 / P0-1: T+7 使用路径依赖退出；T+1/T+30 沿用旧逻辑 ──
+                if period == "t7":
+                    path = self._simulate_trade_path(
+                        ticker, predict_date, days, predict_price, direction
+                    )
+                    if not path:
+                        skipped += 1
+                        continue
 
-                if actual_price is None or actual_price <= 0:
-                    skipped += 1
-                    continue
+                    actual_price = path["exit_price"]
+                    # gross_return_pct 已经是"方向调整后"的净方向收益（看空已取反）
+                    ret = path["gross_return_pct"]
 
-                # 计算收益率
-                ret = (actual_price - predict_price) / predict_price * 100
+                    # 判断方向正确（基于"方向调整后"收益 > -tolerance）
+                    is_correct = ret > -1.0  # 使用 outcome_utils 容差
 
-                # 判断方向是否正确
-                is_correct = self._check_direction(direction, ret)
+                    # ── Sprint 1 / P0-2: 应用交易成本得到净收益 ──
+                    try:
+                        from trading_costs import apply_costs
+                        cost_res = apply_costs(
+                            gross_return_pct=ret,
+                            direction=direction,
+                            ticker=ticker,
+                            holding_days=path.get("holding_days", days),
+                        )
+                        net_ret = cost_res["net_return_pct"]
+                        cost_breakdown = cost_res["breakdown"]
+                    except Exception as _ce:
+                        _log.debug("Cost application failed %s: %s", ticker, _ce)
+                        net_ret = ret
+                        cost_breakdown = {}
 
-                self.store.update_check_result(
-                    pred["id"], period, actual_price, round(ret, 3), is_correct
-                )
+                    # SPY 同期基准
+                    spy_ret = None
+                    try:
+                        spy_close = self._get_price_at_date("SPY", predict_date, days)
+                        spy_entry = self._get_spy_entry_price(predict_date)
+                        if spy_close and spy_entry and spy_entry > 0:
+                            spy_ret = round((spy_close - spy_entry) / spy_entry * 100, 4)
+                    except Exception as _se:
+                        _log.debug("SPY benchmark fetch failed %s: %s", predict_date, _se)
+
+                    # 存路径 + 净收益 + 基准
+                    # ret 现在是方向调整后的毛收益，存到 return_t7（兼容旧代码）
+                    # 看空情况下旧代码期待"原始价格变动"，因此需要反回去存
+                    _dir_lc = (direction or "").strip().lower()
+                    raw_ret_store = -ret if _dir_lc == "bearish" else ret  # 还原原始价格变动以兼容旧显示
+
+                    self._store_path_result(
+                        pred["id"], actual_price, round(raw_ret_store, 3), is_correct,
+                        net_return_pct=net_ret,
+                        exit_reason=path["exit_reason"],
+                        exit_date=path.get("exit_date"),
+                        exit_price=actual_price,
+                        holding_days=path.get("holding_days", days),
+                        cost_breakdown=cost_breakdown,
+                        spy_return=spy_ret,
+                    )
+                else:
+                    # T+1 / T+30 沿用旧逻辑
+                    actual_price = self._get_price_at_date(ticker, predict_date, days)
+                    if actual_price is None or actual_price <= 0:
+                        skipped += 1
+                        continue
+                    ret = (actual_price - predict_price) / predict_price * 100
+                    is_correct = self._check_direction(direction, ret)
+                    self.store.update_check_result(
+                        pred["id"], period, actual_price, round(ret, 3), is_correct
+                    )
 
                 # T+1 期权回验：记录 T+1 的 IV Rank 变化
                 if period == "t1" and pred.get("iv_rank") is not None:
@@ -631,6 +767,171 @@ class Backtester:
 
         except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
             _log.debug("Future price fetch failed for %s +%dd: %s", ticker, days_ahead, e)
+            return None
+
+    # ==================== Sprint 1 / P0-1: 路径依赖退出 ====================
+
+    def _simulate_trade_path(
+        self,
+        ticker: str,
+        predict_date: str,
+        days_ahead: int,
+        entry_price: float,
+        direction: str,
+    ) -> Optional[Dict]:
+        """模拟交易路径：逐日 OHLC 检查止损/止盈触发，否则持有到 T+N 收盘。
+
+        真实交易语义：
+          - 看多：涨到 +TP% 止盈，跌到 -SL% 止损
+          - 看空：跌到 +TP%（即标的跌 TP%）止盈，涨到 +SL%（即标的涨 SL%）止损
+          - 中性：不触发任何出场，持有到期
+
+        返回:
+            {
+                "exit_date": "YYYY-MM-DD",
+                "exit_price": float,
+                "exit_reason": "TP" | "SL" | "T7_CLOSE",
+                "gross_return_pct": float,   # 方向调整后的毛收益
+                "holding_days": int,
+            }
+            or None (数据缺失)
+        """
+        if yf is None or not entry_price or entry_price <= 0:
+            return None
+
+        try:
+            import config as _cfg
+            _exit_cfg = getattr(_cfg, "TRADING_EXITS_CONFIG", {})
+            if not _exit_cfg.get("enabled", True):
+                # fallback: 用旧逻辑返回 T+N 收盘
+                close_px = self._get_price_at_date(ticker, predict_date, days_ahead)
+                if close_px is None:
+                    return None
+                raw_ret = (close_px - entry_price) / entry_price * 100
+                _dir = (direction or "").strip().lower()
+                dir_adj = -raw_ret if _dir == "bearish" else raw_ret
+                return {
+                    "exit_date": None,
+                    "exit_price": close_px,
+                    "exit_reason": "T7_CLOSE",
+                    "gross_return_pct": round(dir_adj, 4),
+                    "holding_days": days_ahead,
+                }
+
+            sl_pct = float(_exit_cfg.get("stop_loss_pct", 5.0))
+            tp_pct = float(_exit_cfg.get("take_profit_pct", 10.0))
+            exit_slip_bps = float(_exit_cfg.get("slippage_on_exit_bps", 5))
+
+            _dir = (direction or "").strip().lower()
+
+            # 拉 T+0 ~ T+N+缓冲 OHLC
+            start_dt = datetime.strptime(predict_date, "%Y-%m-%d")
+            if _BDAY_AVAILABLE:
+                import pandas as _pd
+                end_ts = _pd.Timestamp(start_dt) + (days_ahead + 3) * _US_BDAY
+                end_dt = end_ts.to_pydatetime()
+            else:
+                end_dt = start_dt + timedelta(days=int((days_ahead + 3) * 1.5))
+
+            stock = yf.Ticker(ticker)
+            hist = stock.history(
+                start=(start_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                end=(end_dt + timedelta(days=2)).strftime("%Y-%m-%d"),
+            )
+
+            if hist.empty:
+                return None
+
+            # 只取前 N 个交易日
+            hist = hist.head(days_ahead) if len(hist) > days_ahead else hist
+            if hist.empty:
+                return None
+
+            # 计算阈值价（基于 entry_price 和方向）
+            if _dir == "bullish":
+                tp_price = entry_price * (1 + tp_pct / 100.0)
+                sl_price = entry_price * (1 - sl_pct / 100.0)
+            elif _dir == "bearish":
+                tp_price = entry_price * (1 - tp_pct / 100.0)   # 标的跌到这即止盈
+                sl_price = entry_price * (1 + sl_pct / 100.0)   # 标的涨到这即止损
+            else:
+                tp_price = sl_price = None
+
+            # 逐日扫描 OHLC
+            holding = 0
+            for idx, row in hist.iterrows():
+                holding += 1
+                day_str = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+                try:
+                    hi, lo, close = float(row["High"]), float(row["Low"]), float(row["Close"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+
+                if _dir == "bullish" and tp_price and sl_price:
+                    hit_sl = lo <= sl_price
+                    hit_tp = hi >= tp_price
+                    # 保守：同日同时触发 → 假设先触发 SL（对策略更严格）
+                    if hit_sl:
+                        exit_px = sl_price * (1 - exit_slip_bps / 10000.0)
+                        return {
+                            "exit_date": day_str,
+                            "exit_price": round(exit_px, 4),
+                            "exit_reason": "SL",
+                            "gross_return_pct": round((exit_px - entry_price) / entry_price * 100, 4),
+                            "holding_days": holding,
+                        }
+                    if hit_tp:
+                        exit_px = tp_price * (1 - exit_slip_bps / 10000.0)
+                        return {
+                            "exit_date": day_str,
+                            "exit_price": round(exit_px, 4),
+                            "exit_reason": "TP",
+                            "gross_return_pct": round((exit_px - entry_price) / entry_price * 100, 4),
+                            "holding_days": holding,
+                        }
+                elif _dir == "bearish" and tp_price and sl_price:
+                    hit_sl = hi >= sl_price     # 标的涨 → 空头止损
+                    hit_tp = lo <= tp_price     # 标的跌 → 空头止盈
+                    if hit_sl:
+                        exit_px = sl_price * (1 + exit_slip_bps / 10000.0)
+                        # 空头收益 = (entry - exit) / entry
+                        gross = (entry_price - exit_px) / entry_price * 100
+                        return {
+                            "exit_date": day_str,
+                            "exit_price": round(exit_px, 4),
+                            "exit_reason": "SL",
+                            "gross_return_pct": round(gross, 4),
+                            "holding_days": holding,
+                        }
+                    if hit_tp:
+                        exit_px = tp_price * (1 + exit_slip_bps / 10000.0)
+                        gross = (entry_price - exit_px) / entry_price * 100
+                        return {
+                            "exit_date": day_str,
+                            "exit_price": round(exit_px, 4),
+                            "exit_reason": "TP",
+                            "gross_return_pct": round(gross, 4),
+                            "holding_days": holding,
+                        }
+
+            # 未触发 → 按最后一根 K 线收盘平仓
+            last_row = hist.iloc[-1]
+            last_close = float(last_row["Close"])
+            last_idx = hist.index[-1]
+            last_day_str = last_idx.strftime("%Y-%m-%d") if hasattr(last_idx, "strftime") else str(last_idx)[:10]
+            raw_ret = (last_close - entry_price) / entry_price * 100
+            dir_adj = -raw_ret if _dir == "bearish" else raw_ret
+            return {
+                "exit_date": last_day_str,
+                "exit_price": round(last_close, 4),
+                "exit_reason": "T7_CLOSE",
+                "gross_return_pct": round(dir_adj, 4),
+                "holding_days": len(hist),
+            }
+
+        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+            _log.debug("Trade path simulation failed %s %s +%dd: %s",
+                       ticker, predict_date, days_ahead, e)
             return None
 
     def _check_options_t1(self, pred: Dict):

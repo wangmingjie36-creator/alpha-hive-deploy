@@ -1015,6 +1015,50 @@ DIRECTION_STABILITY = {
     "narrow_margin": 0.15,     # 投票边际 < 15% 视为窄边际
 }
 
+# ==================== Sprint 1 (v16.0): 真实策略回测 ====================
+# P0-1: 路径依赖退出（intraday 止损止盈）
+TRADING_EXITS_CONFIG = {
+    "enabled": True,
+    "stop_loss_pct": 5.0,        # -5% 硬止损（方向调整后）
+    "take_profit_pct": 10.0,     # +10% 止盈（方向调整后）
+    "slippage_on_exit_bps": 5,   # 触发后按当日开盘价+5bp滑点退出（模拟盘中成交）
+    # 未来可扩展 trailing_stop_pct
+}
+
+# P0-2: 交易成本 + 借券费模型
+TRADING_COSTS_CONFIG = {
+    "enabled": True,
+    # 滑点（每边，bp = 0.01%），按标的覆盖；未知走 default
+    "slippage_bps_default": 10,
+    "slippage_bps_by_ticker": {
+        "NVDA": 3, "MSFT": 3, "META": 4, "AMZN": 4, "TSLA": 5,
+        "QCOM": 6, "BILI": 15, "VKTX": 18, "RKLB": 12, "CRCL": 25,
+    },
+    # 佣金（美元，按 IB 标准 ~$0.005/股 × 假设 100 股 = $0.5，折成 pct 按 $10000 仓位约 0.005%）
+    "commission_pct_per_side": 0.01,   # 双边总成本（进+出），已按 0.5bp/边换算
+    # 借券费（年化 %），仅看空承担
+    "borrow_rate_default": 3.0,
+    "borrow_rates": {
+        # 大盘蓝筹极低
+        "NVDA": 0.5, "MSFT": 0.25, "AMZN": 0.25, "META": 0.3, "TSLA": 1.0,
+        "QCOM": 0.75,
+        # 中盘波动
+        "BILI": 4.0, "RKLB": 3.5, "CRCL": 8.0,
+        # 生物科技/热门空头
+        "VKTX": 15.0,
+    },
+    # 无风险利率（benchmark 超额用）
+    "risk_free_rate_pct": 4.5,
+}
+
+# P0-3: 仓位 + 复利 Equity Curve
+PORTFOLIO_CONFIG = {
+    "initial_capital": 100000.0,    # 起始 $100k
+    "position_size_pct": 0.10,      # 每笔 10% 名义本金
+    "max_concurrent_positions": 10, # 最多同时 10 笔
+    "benchmark_ticker": "SPY",      # 基准 = SPY 买入持有
+}
+
 # ==================== 情绪关键词（统一词库，newsapi + finviz 共用）====================
 SENTIMENT_KEYWORDS = {
     "bullish": {

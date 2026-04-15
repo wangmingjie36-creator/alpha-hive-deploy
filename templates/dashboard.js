@@ -556,7 +556,47 @@ window.AH.initAccWinTrend=function(){
 };
 window.AH.initAccWinTrend();
 
-// ── Equity Curve (权益曲线) ──
+// ── Sprint 1 / v16.0: Trading Stats Panel (真实策略指标) ──
+window.AH.initTradingStats=function(){
+  var ts=__AH__.trading_stats||{};
+  var box=document.getElementById('tradingStatsCards');
+  if(!box||!ts||Object.keys(ts).length===0)return;
+
+  function card(value,label,color,sub){
+    var c=color||'var(--t)';
+    var subHtml=sub?'<div style="font-size:.72em;color:var(--ts);margin-top:2px">'+sub+'</div>':'';
+    return '<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px">'+
+      '<div style="font-size:1.25em;font-weight:700;color:'+c+'">'+value+'</div>'+
+      '<div style="font-size:.78em;color:var(--ts);margin-top:2px">'+label+'</div>'+
+      subHtml+
+      '</div>';
+  }
+
+  var netRet=(ts.final_cap_net||100000)/100000 - 1;
+  var grossRet=(ts.final_cap_gross||100000)/100000 - 1;
+  var spyRet=(ts.final_cap_spy||100000)/100000 - 1;
+  var netColor=netRet>=0?'var(--bull)':'var(--bear)';
+  var alphaColor=(ts.alpha_vs_spy||0)>=0?'var(--bull)':'var(--bear)';
+  var pfColor=ts.profit_factor>=1.5?'var(--bull)':(ts.profit_factor>=1?'#f59e0b':'var(--bear)');
+  var shColor=ts.sharpe_net>=1?'var(--bull)':(ts.sharpe_net>=0?'#f59e0b':'var(--bear)');
+
+  var html='';
+  html+=card((netRet*100).toFixed(2)+'%','💵 Net 累计收益（真实）',netColor,'$'+Math.round(ts.final_cap_net||0).toLocaleString());
+  html+=card((grossRet*100).toFixed(2)+'%','📈 Gross 累计（不扣成本）','var(--t)','纸面参考');
+  html+=card((spyRet*100).toFixed(2)+'%','📊 SPY 同期基准',(spyRet>=0?'var(--bull)':'var(--bear)'),'$'+Math.round(ts.final_cap_spy||0).toLocaleString());
+  html+=card(((ts.alpha_vs_spy||0)>=0?'+':'')+(ts.alpha_vs_spy||0).toFixed(2)+'%','🏆 vs SPY α',alphaColor,'跑赢基准');
+  html+=card((ts.sharpe_net!=null?ts.sharpe_net.toFixed(2):'—'),'Sharpe (净值)',shColor,'>1 可用');
+  html+=card((ts.profit_factor!=null?ts.profit_factor.toFixed(2):'—'),'Profit Factor',pfColor,'>1.5 好');
+  html+=card((ts.net_win_rate||0).toFixed(1)+'%','净值胜率','var(--t)','每笔扣成本后');
+  html+=card('-'+(ts.max_dd_net_pct||0).toFixed(2)+'%','最大回撤 (Net)','var(--bear)');
+  html+=card(ts.exit_sl_count||0,'❌ 止损触发',(ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
+  html+=card(ts.exit_tp_count||0,'✅ 止盈触发','var(--bull)','+10% 止盈');
+  html+=card(ts.exit_close_count||0,'⏱️ 持有到 T+7','var(--t)','未触发 SL/TP');
+  html+=card(((ts.avg_cost||0)*100).toFixed(1)+'bp','平均单笔成本','var(--ts)','滑点+佣金+借券');
+  box.innerHTML=html;
+};
+
+// ── Equity Curve (3 lines: Gross / Net / SPY, compound) ──
 window.AH.initEquityCurve=function(){
   var eq=__AH__.equity_curve;
   var container=document.getElementById('eqCurveContainer');
@@ -568,15 +608,17 @@ window.AH.initEquityCurve=function(){
   }
   if(container)container.style.display='';
   if(cold)cold.style.display='none';
+  // Trading stats cards
+  if(window.AH.initTradingStats)window.AH.initTradingStats();
+
   var cv=document.getElementById('eqCurveChart');
   if(!cv)return;
-  // Chart.js 可能还在 defer 加载中，等待后重试
   if(typeof Chart==='undefined'){
     var _eqRetry=0;
     var _eqWait=setInterval(function(){
       _eqRetry++;
       if(typeof Chart!=='undefined'){clearInterval(_eqWait);window.AH.initEquityCurve();}
-      else if(_eqRetry>40){clearInterval(_eqWait);}// 4秒后放弃
+      else if(_eqRetry>40){clearInterval(_eqWait);}
     },100);
     return;
   }
@@ -585,28 +627,36 @@ window.AH.initEquityCurve=function(){
   var tc=dark?'rgba(255,255,255,.65)':'rgba(0,0,0,.55)';
   var gc=dark?'rgba(255,255,255,.07)':'rgba(0,0,0,.06)';
   var labels=eq.map(function(d){return d.date.slice(5);});
-  var cumData=eq.map(function(d){return d.cum;});
-  var ddData=eq.map(function(d){return -d.dd;});
+  // 三条曲线：net (绿, 主), gross (蓝, 辅参考), spy (灰, 基准)
+  var netData =eq.map(function(d){return d.cum_net_pct!=null?d.cum_net_pct:d.cum;});
+  var grossData=eq.map(function(d){return d.cum_gross_pct!=null?d.cum_gross_pct:d.cum;});
+  var spyData =eq.map(function(d){return d.cum_spy_pct!=null?d.cum_spy_pct:0;});
+
   chartInstances.push(new Chart(cv,{
     type:'line',
     data:{
       labels:labels,
       datasets:[
-        {label:'累计收益%', data:cumData,
-         borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.1)', fill:true,
-         tension:.3, pointRadius:2, borderWidth:2, order:1,
-         segment:{borderColor:function(ctx){return ctx.p0.parsed.y>=0&&ctx.p1.parsed.y>=0?'#22c55e':'#ef4444';}}},
-        {label:'回撤%', data:ddData,
-         borderColor:'rgba(239,68,68,.4)', backgroundColor:'rgba(239,68,68,.08)', fill:true,
-         tension:.3, pointRadius:0, borderWidth:1, borderDash:[3,3], order:2}
+        {label:'💵 Net (真实可交易)', data:netData,
+         borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)', fill:true,
+         tension:.25, pointRadius:0, borderWidth:2.5, order:1},
+        {label:'📈 Gross (不扣成本)', data:grossData,
+         borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.0)', fill:false,
+         tension:.25, pointRadius:0, borderWidth:1.5, borderDash:[4,3], order:2},
+        {label:'📊 SPY 基准 (买入持有)', data:spyData,
+         borderColor:'rgba(150,150,150,.8)', backgroundColor:'rgba(150,150,150,.04)', fill:false,
+         tension:.25, pointRadius:0, borderWidth:1.5, order:3}
       ]
     },
     options:{
       responsive:true, maintainAspectRatio:false,
       interaction:{mode:'index',intersect:false},
       plugins:{
-        legend:{position:'bottom', labels:{color:tc, font:{size:9}, boxWidth:10, padding:6}},
-        tooltip:{callbacks:{label:function(c){return c.dataset.label+': '+(c.raw!=null?c.raw.toFixed(2)+'%':'—');}}}
+        legend:{position:'bottom', labels:{color:tc, font:{size:10}, boxWidth:14, padding:8}},
+        tooltip:{callbacks:{
+          title:function(items){var i=items[0].dataIndex;var d=eq[i];return d.date+' · '+d.ticker+' '+d.direction+(d.exit_reason&&d.exit_reason!=='T7_CLOSE'?' ('+d.exit_reason+')':'');},
+          label:function(c){return c.dataset.label+': '+(c.raw!=null?(c.raw>=0?'+':'')+c.raw.toFixed(2)+'%':'—');}
+        }}
       },
       scales:{
         x:{grid:{display:false}, ticks:{color:tc, font:{size:7}, maxRotation:45, maxTicksLimit:15}},
@@ -614,19 +664,20 @@ window.AH.initEquityCurve=function(){
       }
     }
   }));
+
   var statsEl=document.getElementById('eqStats');
   if(statsEl){
-    var lastCum=eq[eq.length-1].cum;
-    var maxDD=Math.max.apply(null,eq.map(function(d){return d.dd;}));
-    var wins=eq.filter(function(d){return d.correct;}).length;
-    var wr=eq.length?Math.round(wins/eq.length*100):0;
-    var avgRet=eq.reduce(function(s,d){return s+d.ret;},0)/eq.length;
-    var cumColor=lastCum>=0?'var(--bull)':'var(--bear)';
+    var last=eq[eq.length-1];
+    var netCum=last.cum_net_pct!=null?last.cum_net_pct:last.cum;
+    var grossCum=last.cum_gross_pct!=null?last.cum_gross_pct:last.cum;
+    var spyCum=last.cum_spy_pct!=null?last.cum_spy_pct:0;
+    var ts=__AH__.trading_stats||{};
+    var netColor=netCum>=0?'var(--bull)':'var(--bear)';
     statsEl.innerHTML=
-      '<div class="eq-stat"><span class="ev" style="color:'+cumColor+'">'+lastCum.toFixed(2)+'%</span><span class="el">累计收益</span></div>'+
-      '<div class="eq-stat"><span class="ev" style="color:var(--bear)">-'+maxDD.toFixed(2)+'%</span><span class="el">最大回撤</span></div>'+
-      '<div class="eq-stat"><span class="ev">'+wr+'%</span><span class="el">方向胜率</span></div>'+
-      '<div class="eq-stat"><span class="ev">'+(avgRet>=0?'+':'')+avgRet.toFixed(2)+'%</span><span class="el">平均单笔</span></div>'+
+      '<div class="eq-stat"><span class="ev" style="color:'+netColor+'">'+(netCum>=0?'+':'')+netCum.toFixed(2)+'%</span><span class="el">💵 Net 累计</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+(grossCum>=0?'+':'')+grossCum.toFixed(2)+'%</span><span class="el">📈 Gross 累计</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+(spyCum>=0?'+':'')+spyCum.toFixed(2)+'%</span><span class="el">📊 SPY 基准</span></div>'+
+      '<div class="eq-stat"><span class="ev" style="color:var(--bear)">-'+(ts.max_dd_net_pct||0).toFixed(2)+'%</span><span class="el">Max DD (Net)</span></div>'+
       '<div class="eq-stat"><span class="ev">'+eq.length+'</span><span class="el">已验证笔数</span></div>';
   }
 };
