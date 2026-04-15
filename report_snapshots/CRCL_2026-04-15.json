@@ -1,19 +1,19 @@
 {
-  "ticker": "RKLB",
-  "date": "2026-04-08",
-  "composite_score": 6.2,
+  "ticker": "CRCL",
+  "date": "2026-04-15",
+  "composite_score": 6.19,
   "direction": "bullish",
   "price_target": 0.0,
   "stop_loss": 0.0,
-  "entry_price": 69.08000183105469,
+  "entry_price": 105.5199966430664,
   "agent_votes": {
-    "GuardBeeSentinel": 8.31,
-    "OracleBeeEcho": 6.50876923076923,
-    "QueenDistiller": 6.2,
+    "GuardBeeSentinel": 8.19,
+    "OracleBeeEcho": 7.438846153846154,
+    "ChronosBeeHorizon": 7.18,
+    "QueenDistiller": 6.19,
     "BuzzBeeWhisper": 6.15,
-    "RivalBeeVanguard": 6.06,
     "CodeExecutorAgent": 5.0,
-    "ChronosBeeHorizon": 5.995
+    "RivalBeeVanguard": 5.61
   },
   "weights_used": {
     "signal": 0.1132,
@@ -23,9 +23,9 @@
     "risk_adj": 0.1132
   },
   "actual_prices": {
-    "t1": 66.73999786376953,
+    "t1": null,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-04-14T16:19:57.307906"
+  "created_at": "2026-04-15T14:13:43.229255"
 }
