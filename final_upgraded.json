@@ -1,0 +1,374 @@
+{
+  "config": {
+    "initial_capital": 50000.0,
+    "position_size_pct": 0.1,
+    "bull_size_pct": 0.08,
+    "bear_size_pct": 0.12,
+    "max_concurrent": 5,
+    "min_score_bull": 6.5,
+    "min_score_bear": 4.5,
+    "accept_neutral": false,
+    "take_all": false,
+    "max_agent_std": 1.5,
+    "macro_gate": true
+  },
+  "period": {
+    "start": "2026-02-25",
+    "end": "2026-04-06",
+    "trading_days": 29
+  },
+  "portfolio": {
+    "initial_nav": 50000.0,
+    "final_nav": 49829.23,
+    "total_return_pct": -0.34,
+    "total_pnl_usd": -170.77
+  },
+  "benchmark": {
+    "spy_start_price": 691.26,
+    "spy_end_price": 658.93,
+    "spy_return_pct": -4.68,
+    "spy_end_nav": 47661.36
+  },
+  "alpha": 4.34,
+  "risk_metrics": {
+    "sharpe_ratio": -0.641,
+    "profit_factor": 0.84,
+    "max_drawdown_pct": 1.31,
+    "win_rate_pct": 40.0,
+    "avg_win_pct": 5.562,
+    "avg_loss_pct": -4.456,
+    "win_loss_ratio": 1.25,
+    "avg_holding_days": 5.3
+  },
+  "trade_stats": {
+    "total_trades": 10,
+    "winners": 4,
+    "losers": 6
+  },
+  "filter_stats": {
+    "total_predictions": 191,
+    "skipped_score_filter": 71,
+    "skipped_neutral": 37,
+    "skipped_cash_limit": 0,
+    "skipped_max_positions": 5,
+    "skipped_duplicate_ticker": 7,
+    "skipped_agent_disagreement": 60,
+    "skipped_macro_gate": 1,
+    "entered": 10
+  },
+  "by_direction": {
+    "bullish": {
+      "trades": 9,
+      "win_rate": 33.3,
+      "pnl_usd": -215.11
+    },
+    "bearish": {
+      "trades": 1,
+      "win_rate": 100.0,
+      "pnl_usd": 44.34
+    }
+  },
+  "by_exit_reason": {
+    "SL": {
+      "count": 2,
+      "avg_net_pct": -7.746,
+      "total_pnl_usd": -619.9
+    },
+    "T7_CLOSE": {
+      "count": 6,
+      "avg_net_pct": -1.414,
+      "total_pnl_usd": -323.48
+    },
+    "TP": {
+      "count": 2,
+      "avg_net_pct": 9.745,
+      "total_pnl_usd": 772.61
+    }
+  },
+  "by_ticker": {
+    "AMZN": {
+      "trades": 2,
+      "win_rate": 50.0,
+      "pnl_usd": 282.12,
+      "avg_net_pct": 3.583
+    },
+    "QCOM": {
+      "trades": 1,
+      "win_rate": 100.0,
+      "pnl_usd": 44.34,
+      "avg_net_pct": 0.741
+    },
+    "NVDA": {
+      "trades": 1,
+      "win_rate": 0.0,
+      "pnl_usd": -51.73,
+      "avg_net_pct": -1.302
+    },
+    "MSFT": {
+      "trades": 2,
+      "win_rate": 50.0,
+      "pnl_usd": -93.11,
+      "avg_net_pct": -1.178
+    },
+    "BILI": {
+      "trades": 3,
+      "win_rate": 33.3,
+      "pnl_usd": -146.7,
+      "avg_net_pct": -1.2
+    },
+    "META": {
+      "trades": 1,
+      "win_rate": 0.0,
+      "pnl_usd": -205.7,
+      "avg_net_pct": -5.138
+    }
+  },
+  "monthly_pnl": {
+    "2026-03": -560.55,
+    "2026-04": 389.78
+  },
+  "equity_curve": [
+    {
+      "date": "2026-03-05",
+      "ticker": "BILI",
+      "direction": "bullish",
+      "exit_reason": "SL",
+      "net_ret_pct": -10.355,
+      "pnl_usd": -414.2,
+      "nav": 49585.8,
+      "nav_pct": -0.83
+    },
+    {
+      "date": "2026-03-06",
+      "ticker": "MSFT",
+      "direction": "bullish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": 2.0169,
+      "pnl_usd": 80.68,
+      "nav": 49666.48,
+      "nav_pct": -0.67
+    },
+    {
+      "date": "2026-03-10",
+      "ticker": "BILI",
+      "direction": "bullish",
+      "exit_reason": "TP",
+      "net_ret_pct": 9.635,
+      "pnl_usd": 382.83,
+      "nav": 50049.31,
+      "nav_pct": 0.1
+    },
+    {
+      "date": "2026-03-13",
+      "ticker": "META",
+      "direction": "bullish",
+      "exit_reason": "SL",
+      "net_ret_pct": -5.1375,
+      "pnl_usd": -205.7,
+      "nav": 49843.6,
+      "nav_pct": -0.31
+    },
+    {
+      "date": "2026-03-18",
+      "ticker": "NVDA",
+      "direction": "bullish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": -1.3019,
+      "pnl_usd": -51.73,
+      "nav": 49791.87,
+      "nav_pct": -0.42
+    },
+    {
+      "date": "2026-03-18",
+      "ticker": "MSFT",
+      "direction": "bullish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": -4.3738,
+      "pnl_usd": -173.79,
+      "nav": 49618.09,
+      "nav_pct": -0.76
+    },
+    {
+      "date": "2026-03-19",
+      "ticker": "AMZN",
+      "direction": "bullish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": -2.6888,
+      "pnl_usd": -107.66,
+      "nav": 49510.43,
+      "nav_pct": -0.98
+    },
+    {
+      "date": "2026-03-23",
+      "ticker": "BILI",
+      "direction": "bullish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": -2.8803,
+      "pnl_usd": -115.33,
+      "nav": 49395.11,
+      "nav_pct": -1.21
+    },
+    {
+      "date": "2026-03-24",
+      "ticker": "QCOM",
+      "direction": "bearish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": 0.7414,
+      "pnl_usd": 44.34,
+      "nav": 49439.45,
+      "nav_pct": -1.12
+    },
+    {
+      "date": "2026-04-09",
+      "ticker": "AMZN",
+      "direction": "bullish",
+      "exit_reason": "TP",
+      "net_ret_pct": 9.855,
+      "pnl_usd": 389.78,
+      "nav": 49829.23,
+      "nav_pct": -0.34
+    }
+  ],
+  "all_trades": [
+    {
+      "id": 372,
+      "ticker": "BILI",
+      "dir": "bullish",
+      "entry": "2026-03-04",
+      "exit": "2026-03-05",
+      "hold": 1,
+      "score": 7.1,
+      "gross_pct": -10.045,
+      "net_pct": -10.355,
+      "exit_reason": "SL",
+      "pnl_usd": -414.2,
+      "size_usd": 4000.0
+    },
+    {
+      "id": 63,
+      "ticker": "MSFT",
+      "dir": "bullish",
+      "entry": "2026-02-25",
+      "exit": "2026-03-06",
+      "hold": 7,
+      "score": 7.54,
+      "gross_pct": 2.087,
+      "net_pct": 2.0169,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": 80.68,
+      "size_usd": 4000.0
+    },
+    {
+      "id": 409,
+      "ticker": "BILI",
+      "dir": "bullish",
+      "entry": "2026-03-06",
+      "exit": "2026-03-10",
+      "hold": 2,
+      "score": 7.08,
+      "gross_pct": 9.945,
+      "net_pct": 9.635,
+      "exit_reason": "TP",
+      "pnl_usd": 382.83,
+      "size_usd": 3973.32
+    },
+    {
+      "id": 458,
+      "ticker": "META",
+      "dir": "bullish",
+      "entry": "2026-03-10",
+      "exit": "2026-03-13",
+      "hold": 3,
+      "score": 6.63,
+      "gross_pct": -5.048,
+      "net_pct": -5.1375,
+      "exit_reason": "SL",
+      "pnl_usd": -205.7,
+      "size_usd": 4003.94
+    },
+    {
+      "id": 421,
+      "ticker": "NVDA",
+      "dir": "bullish",
+      "entry": "2026-03-09",
+      "exit": "2026-03-18",
+      "hold": 7,
+      "score": 8.41,
+      "gross_pct": -1.232,
+      "net_pct": -1.3019,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": -51.73,
+      "size_usd": 3973.32
+    },
+    {
+      "id": 425,
+      "ticker": "MSFT",
+      "dir": "bullish",
+      "entry": "2026-03-09",
+      "exit": "2026-03-18",
+      "hold": 7,
+      "score": 7.86,
+      "gross_pct": -4.304,
+      "net_pct": -4.3738,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": -173.79,
+      "size_usd": 3973.32
+    },
+    {
+      "id": 464,
+      "ticker": "AMZN",
+      "dir": "bullish",
+      "entry": "2026-03-10",
+      "exit": "2026-03-19",
+      "hold": 7,
+      "score": 6.6,
+      "gross_pct": -2.599,
+      "net_pct": -2.6888,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": -107.66,
+      "size_usd": 4003.94
+    },
+    {
+      "id": 491,
+      "ticker": "BILI",
+      "dir": "bullish",
+      "entry": "2026-03-12",
+      "exit": "2026-03-23",
+      "hold": 7,
+      "score": 7.89,
+      "gross_pct": -2.57,
+      "net_pct": -2.8803,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": -115.33,
+      "size_usd": 4003.94
+    },
+    {
+      "id": 495,
+      "ticker": "QCOM",
+      "dir": "bearish",
+      "entry": "2026-03-13",
+      "exit": "2026-03-24",
+      "hold": 7,
+      "score": 3.68,
+      "gross_pct": 0.886,
+      "net_pct": 0.7414,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": 44.34,
+      "size_usd": 5981.23
+    },
+    {
+      "id": 538,
+      "ticker": "AMZN",
+      "dir": "bullish",
+      "entry": "2026-04-01",
+      "exit": "2026-04-09",
+      "hold": 5,
+      "score": 7.43,
+      "gross_pct": 9.945,
+      "net_pct": 9.855,
+      "exit_reason": "TP",
+      "pnl_usd": 389.78,
+      "size_usd": 3955.16
+    }
+  ]
+}

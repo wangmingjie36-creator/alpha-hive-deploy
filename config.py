@@ -1019,10 +1019,17 @@ DIRECTION_STABILITY = {
 # P0-1: 路径依赖退出（intraday 止损止盈）
 TRADING_EXITS_CONFIG = {
     "enabled": True,
-    "stop_loss_pct": 5.0,        # -5% 硬止损（方向调整后）
+    "stop_loss_pct": 5.0,        # -5% 默认硬止损（大盘蓝筹）
     "take_profit_pct": 10.0,     # +10% 止盈（方向调整后）
     "slippage_on_exit_bps": 5,   # 触发后按当日开盘价+5bp滑点退出（模拟盘中成交）
-    # 未来可扩展 trailing_stop_pct
+    # 升级2: Per-ticker 自适应止损（高波动标的放宽，避免频繁被打出）
+    "sl_overrides": {
+        "NVDA": 5.0, "MSFT": 5.0, "AMZN": 5.0, "META": 5.0,   # 大盘蓝筹
+        "TSLA": 7.0, "QCOM": 6.0,                                # 中等波动
+        "BILI": 10.0, "RKLB": 10.0, "CRCL": 12.0, "VKTX": 12.0, # 高波动
+    },
+    # 中性方向宽松止损（防止 CRCL -30% 类灾难，不设止盈）
+    "neutral_sl_pct": 15.0,
 }
 
 # P0-2: 交易成本 + 借券费模型

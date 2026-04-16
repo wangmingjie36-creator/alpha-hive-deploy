@@ -818,7 +818,9 @@ class Backtester:
                     "holding_days": days_ahead,
                 }
 
-            sl_pct = float(_exit_cfg.get("stop_loss_pct", 5.0))
+            # 升级2: per-ticker 自适应止损
+            _sl_overrides = _exit_cfg.get("sl_overrides") or {}
+            sl_pct = float(_sl_overrides.get(ticker, _exit_cfg.get("stop_loss_pct", 5.0)))
             tp_pct = float(_exit_cfg.get("take_profit_pct", 10.0))
             exit_slip_bps = float(_exit_cfg.get("slippage_on_exit_bps", 5))
 
@@ -855,7 +857,10 @@ class Backtester:
                 tp_price = entry_price * (1 - tp_pct / 100.0)   # 标的跌到这即止盈
                 sl_price = entry_price * (1 + sl_pct / 100.0)   # 标的涨到这即止损
             else:
-                tp_price = sl_price = None
+                # 中性方向：只有宽松止损保护（防止 CRCL -30% 类灾难），无止盈
+                _neutral_sl = float(_exit_cfg.get("neutral_sl_pct", 15.0))
+                sl_price = entry_price * (1 - _neutral_sl / 100.0)  # 下跌保护
+                tp_price = None  # 中性不设止盈
 
             # 逐日扫描 OHLC
             holding = 0
@@ -886,6 +891,17 @@ class Backtester:
                             "exit_date": day_str,
                             "exit_price": round(exit_px, 4),
                             "exit_reason": "TP",
+                            "gross_return_pct": round((exit_px - entry_price) / entry_price * 100, 4),
+                            "holding_days": holding,
+                        }
+                elif _dir not in ("bullish", "bearish") and sl_price:
+                    # 中性方向：只检查下跌止损
+                    if lo <= sl_price:
+                        exit_px = sl_price * (1 - exit_slip_bps / 10000.0)
+                        return {
+                            "exit_date": day_str,
+                            "exit_price": round(exit_px, 4),
+                            "exit_reason": "SL",
                             "gross_return_pct": round((exit_px - entry_price) / entry_price * 100, 4),
                             "holding_days": holding,
                         }

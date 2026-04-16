@@ -88,6 +88,14 @@
 - 从 report_snapshots 读 T+7 回测 → `suggest_weight_adjustments()` → clamp ±10pp → 原子写入 config.py
 - `weight_history.jsonl` 审计日志
 
+### paper_portfolio.py + ibkr_sync.py（新文件，v0.19.0）
+- $50,000 透明模拟组合：bootstrap 从 2026-03-09 起回放 snapshot → 每仓 1.5-2.5% NAV × ticker 胜率乘数
+- SL -5% / TP +10% / T+10 强平；入场门槛 bull≥6.5 / bear≤3.5 / 置信≥mid
+- 状态文件在 paper_portfolio_state/，IBKR 桥接状态在 paper_account/
+- generate_deep_v2.generate_html 顶部自动 run_for_date(report_date) 并渲染 portfolio_card_html
+- ibkr_sync：export actions JSON → 用户手动下 TWS Paper → import CSV → reconcile slippage
+- yfinance 离线时 bootstrap 仍可建仓但不触发出场；用户 Mac 联网时正常
+
 ### self_analyst.py（新文件）
 - Track B 月度自我诊断，每月 1 日 03:00 运行（定时任务已创建）
 - 生成 `self_analysis_briefs/YYYY-MM.md`，无需 API Key，供 Cowork Claude 阅读分析

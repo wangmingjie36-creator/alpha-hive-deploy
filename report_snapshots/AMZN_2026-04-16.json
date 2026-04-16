@@ -1,0 +1,32 @@
+{
+  "ticker": "AMZN",
+  "date": "2026-04-16",
+  "composite_score": 6.67,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 249.6999969482422,
+  "agent_votes": {
+    "OracleBeeEcho": 8.384615384615385,
+    "GuardBeeSentinel": 8.19,
+    "ChronosBeeHorizon": 8.035,
+    "QueenDistiller": 6.67,
+    "CodeExecutorAgent": 5.0,
+    "BuzzBeeWhisper": 5.92,
+    "ScoutBeeNova": 5.711987913333333,
+    "RivalBeeVanguard": 5.63
+  },
+  "weights_used": {
+    "signal": 0.1132,
+    "catalyst": 0.3316,
+    "sentiment": 0.2764,
+    "odds": 0.1657,
+    "risk_adj": 0.1132
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-04-16T14:28:25.956151"
+}

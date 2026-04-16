@@ -58,6 +58,16 @@ DEFAULT_WEIGHTS = {
     "risk_adj":  0.15,
 }
 
+# 升级5: 权重 clamp — 防止 optimizer 把某个维度推到极端
+# 数据发现 catalyst 被推到 0.33 → 高分看多反而胜率最低
+WEIGHT_CLAMPS = {
+    "signal":    (0.15, 0.40),
+    "catalyst":  (0.10, 0.25),   # 上限 25%，防止"有催化剂=高分"陷阱
+    "sentiment": (0.10, 0.30),
+    "odds":      (0.08, 0.25),
+    "risk_adj":  (0.10, 0.25),
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 核心函数
@@ -78,9 +88,21 @@ def count_t7_samples(snapshots_dir: Path) -> int:
     return count
 
 
+def _apply_weight_clamps(weights: dict) -> dict:
+    """对权重 dict 应用 WEIGHT_CLAMPS，并重新归一化。复用于所有优化路径。"""
+    clamped = {k: max(lo, min(hi, weights.get(k, DEFAULT_WEIGHTS.get(k, 0.2))))
+               for k, (lo, hi) in WEIGHT_CLAMPS.items()}
+    # 确保包含所有维度（CLAMPS 可能未覆盖全部）
+    for k in weights:
+        if k not in clamped:
+            clamped[k] = weights[k]
+    total = sum(clamped.values())
+    return {k: v / total for k, v in clamped.items()} if total > 0 else dict(DEFAULT_WEIGHTS)
+
+
 def compute_new_weights(snapshots_dir: Path) -> Optional[dict]:
     """
-    调用 BacktestAnalyzer 计算建议权重。
+    调用 BacktestAnalyzer 计算建议权重（带 clamp）。
     返回 suggest_weight_adjustments() 的完整结果，或 None（样本不足/失败）。
     """
     try:
@@ -93,6 +115,8 @@ def compute_new_weights(snapshots_dir: Path) -> Optional[dict]:
     try:
         analyzer = BacktestAnalyzer(directory=str(snapshots_dir))
         result = analyzer.suggest_weight_adjustments()
+        if result and "new_weights" in result:
+            result["new_weights"] = _apply_weight_clamps(result["new_weights"])
         return result if result else None
     except Exception as e:
         print(f"❌ BacktestAnalyzer 运行失败: {e}")
@@ -191,13 +215,18 @@ def compute_new_weights_wls(snapshots_dir: Path) -> Optional[dict]:
         else:
             new_weights = dict(DEFAULT_WEIGHTS)
 
-        # 共线性检测（简化：检查同维度的相关性）
-        # TODO: 完整版使用 OLS regression
+        # 升级5: clamp 每个维度的权重到安全范围（复用共享辅助函数）
+        clamped_weights = _apply_weight_clamps(new_weights)
+        any_clamped = any(
+            abs(clamped_weights.get(k, 0) - new_weights.get(k, 0)) > 1e-9
+            for k in new_weights
+        )
 
         return {
-            "new_weights": new_weights,
+            "new_weights": clamped_weights,
             "method": "wls_time_decay",
             "valid_samples": len(valid_snaps),
+            "clamped": any_clamped,
         }
     except Exception as e:
         print(f"❌ WLS 计算失败，回退标准方法: {e}")

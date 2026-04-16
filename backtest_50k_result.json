@@ -1,0 +1,428 @@
+{
+  "config": {
+    "initial_capital": 50000.0,
+    "position_size_pct": 0.1,
+    "max_concurrent": 5,
+    "min_score_bull": 6.5,
+    "min_score_bear": 3.5,
+    "accept_neutral": false,
+    "take_all": false
+  },
+  "period": {
+    "start": "2026-02-25",
+    "end": "2026-04-06",
+    "trading_days": 29
+  },
+  "portfolio": {
+    "initial_nav": 50000.0,
+    "final_nav": 50252.62,
+    "total_return_pct": 0.51,
+    "total_pnl_usd": 252.62
+  },
+  "benchmark": {
+    "spy_start_price": 691.26,
+    "spy_end_price": 658.93,
+    "spy_return_pct": -4.68,
+    "spy_end_nav": 47661.36
+  },
+  "alpha": 5.18,
+  "risk_metrics": {
+    "sharpe_ratio": 0.424,
+    "profit_factor": 1.181,
+    "max_drawdown_pct": 1.48,
+    "win_rate_pct": 41.7,
+    "avg_win_pct": 6.608,
+    "avg_loss_pct": -3.98,
+    "win_loss_ratio": 1.66,
+    "avg_holding_days": 4.8
+  },
+  "trade_stats": {
+    "total_trades": 12,
+    "winners": 5,
+    "losers": 7
+  },
+  "filter_stats": {
+    "total_predictions": 191,
+    "skipped_score_filter": 109,
+    "skipped_neutral": 54,
+    "skipped_cash_limit": 0,
+    "skipped_max_positions": 2,
+    "skipped_duplicate_ticker": 14,
+    "entered": 12
+  },
+  "by_direction": {
+    "bullish": {
+      "trades": 11,
+      "win_rate": 36.4,
+      "pnl_usd": 153.65
+    },
+    "bearish": {
+      "trades": 1,
+      "win_rate": 100.0,
+      "pnl_usd": 98.96
+    }
+  },
+  "by_exit_reason": {
+    "SL": {
+      "count": 3,
+      "avg_net_pct": -5.424,
+      "total_pnl_usd": -815.53
+    },
+    "T7_CLOSE": {
+      "count": 6,
+      "avg_net_pct": -1.268,
+      "total_pnl_usd": -379.56
+    },
+    "TP": {
+      "count": 3,
+      "avg_net_pct": 9.688,
+      "total_pnl_usd": 1447.7
+    }
+  },
+  "by_ticker": {
+    "AMZN": {
+      "trades": 1,
+      "win_rate": 100.0,
+      "pnl_usd": 490.41,
+      "avg_net_pct": 9.855
+    },
+    "VKTX": {
+      "trades": 1,
+      "win_rate": 100.0,
+      "pnl_usd": 477.15,
+      "avg_net_pct": 9.575
+    },
+    "TSLA": {
+      "trades": 1,
+      "win_rate": 100.0,
+      "pnl_usd": 98.96,
+      "avg_net_pct": 1.959
+    },
+    "NVDA": {
+      "trades": 1,
+      "win_rate": 0.0,
+      "pnl_usd": -64.88,
+      "avg_net_pct": -1.302
+    },
+    "MSFT": {
+      "trades": 2,
+      "win_rate": 50.0,
+      "pnl_usd": -117.11,
+      "avg_net_pct": -1.178
+    },
+    "QCOM": {
+      "trades": 1,
+      "win_rate": 0.0,
+      "pnl_usd": -152.42,
+      "avg_net_pct": -3.029
+    },
+    "BILI": {
+      "trades": 4,
+      "win_rate": 25.0,
+      "pnl_usd": -199.88,
+      "avg_net_pct": -0.99
+    },
+    "CRCL": {
+      "trades": 1,
+      "win_rate": 0.0,
+      "pnl_usd": -279.62,
+      "avg_net_pct": -5.558
+    }
+  },
+  "monthly_pnl": {
+    "2026-03": -237.8,
+    "2026-04": 490.41
+  },
+  "equity_curve": [
+    {
+      "date": "2026-03-05",
+      "ticker": "BILI",
+      "direction": "bullish",
+      "exit_reason": "SL",
+      "net_ret_pct": -5.3575,
+      "pnl_usd": -267.88,
+      "nav": 49732.12,
+      "nav_pct": -0.54
+    },
+    {
+      "date": "2026-03-06",
+      "ticker": "MSFT",
+      "direction": "bullish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": 2.0169,
+      "pnl_usd": 100.84,
+      "nav": 49832.97,
+      "nav_pct": -0.33
+    },
+    {
+      "date": "2026-03-10",
+      "ticker": "BILI",
+      "direction": "bullish",
+      "exit_reason": "TP",
+      "net_ret_pct": 9.635,
+      "pnl_usd": 480.14,
+      "nav": 50313.11,
+      "nav_pct": 0.63
+    },
+    {
+      "date": "2026-03-11",
+      "ticker": "CRCL",
+      "direction": "bullish",
+      "exit_reason": "SL",
+      "net_ret_pct": -5.5575,
+      "pnl_usd": -279.62,
+      "nav": 50033.5,
+      "nav_pct": 0.07
+    },
+    {
+      "date": "2026-03-13",
+      "ticker": "VKTX",
+      "direction": "bullish",
+      "exit_reason": "TP",
+      "net_ret_pct": 9.575,
+      "pnl_usd": 477.15,
+      "nav": 50510.65,
+      "nav_pct": 1.02
+    },
+    {
+      "date": "2026-03-18",
+      "ticker": "NVDA",
+      "direction": "bullish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": -1.3019,
+      "pnl_usd": -64.88,
+      "nav": 50445.77,
+      "nav_pct": 0.89
+    },
+    {
+      "date": "2026-03-18",
+      "ticker": "MSFT",
+      "direction": "bullish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": -4.3738,
+      "pnl_usd": -217.96,
+      "nav": 50227.81,
+      "nav_pct": 0.46
+    },
+    {
+      "date": "2026-03-19",
+      "ticker": "QCOM",
+      "direction": "bullish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": -3.0294,
+      "pnl_usd": -152.42,
+      "nav": 50075.39,
+      "nav_pct": 0.15
+    },
+    {
+      "date": "2026-03-23",
+      "ticker": "BILI",
+      "direction": "bullish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": -2.8803,
+      "pnl_usd": -144.11,
+      "nav": 49931.28,
+      "nav_pct": -0.14
+    },
+    {
+      "date": "2026-03-24",
+      "ticker": "TSLA",
+      "direction": "bearish",
+      "exit_reason": "T7_CLOSE",
+      "net_ret_pct": 1.9592,
+      "pnl_usd": 98.96,
+      "nav": 50030.24,
+      "nav_pct": 0.06
+    },
+    {
+      "date": "2026-03-30",
+      "ticker": "BILI",
+      "direction": "bullish",
+      "exit_reason": "SL",
+      "net_ret_pct": -5.3575,
+      "pnl_usd": -268.04,
+      "nav": 49762.2,
+      "nav_pct": -0.48
+    },
+    {
+      "date": "2026-04-09",
+      "ticker": "AMZN",
+      "direction": "bullish",
+      "exit_reason": "TP",
+      "net_ret_pct": 9.855,
+      "pnl_usd": 490.41,
+      "nav": 50252.61,
+      "nav_pct": 0.51
+    }
+  ],
+  "all_trades": [
+    {
+      "id": 372,
+      "ticker": "BILI",
+      "dir": "bullish",
+      "entry": "2026-03-04",
+      "exit": "2026-03-05",
+      "hold": 1,
+      "score": 7.1,
+      "gross_pct": -5.048,
+      "net_pct": -5.3575,
+      "exit_reason": "SL",
+      "pnl_usd": -267.88,
+      "size_usd": 5000.0
+    },
+    {
+      "id": 63,
+      "ticker": "MSFT",
+      "dir": "bullish",
+      "entry": "2026-02-25",
+      "exit": "2026-03-06",
+      "hold": 7,
+      "score": 7.54,
+      "gross_pct": 2.087,
+      "net_pct": 2.0169,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": 100.84,
+      "size_usd": 5000.0
+    },
+    {
+      "id": 409,
+      "ticker": "BILI",
+      "dir": "bullish",
+      "entry": "2026-03-06",
+      "exit": "2026-03-10",
+      "hold": 2,
+      "score": 7.08,
+      "gross_pct": 9.945,
+      "net_pct": 9.635,
+      "exit_reason": "TP",
+      "pnl_usd": 480.14,
+      "size_usd": 4983.3
+    },
+    {
+      "id": 465,
+      "ticker": "CRCL",
+      "dir": "bullish",
+      "entry": "2026-03-10",
+      "exit": "2026-03-11",
+      "hold": 1,
+      "score": 7.07,
+      "gross_pct": -5.048,
+      "net_pct": -5.5575,
+      "exit_reason": "SL",
+      "pnl_usd": -279.62,
+      "size_usd": 5031.31
+    },
+    {
+      "id": 423,
+      "ticker": "VKTX",
+      "dir": "bullish",
+      "entry": "2026-03-09",
+      "exit": "2026-03-13",
+      "hold": 4,
+      "score": 6.99,
+      "gross_pct": 9.945,
+      "net_pct": 9.575,
+      "exit_reason": "TP",
+      "pnl_usd": 477.15,
+      "size_usd": 4983.3
+    },
+    {
+      "id": 421,
+      "ticker": "NVDA",
+      "dir": "bullish",
+      "entry": "2026-03-09",
+      "exit": "2026-03-18",
+      "hold": 7,
+      "score": 8.41,
+      "gross_pct": -1.232,
+      "net_pct": -1.3019,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": -64.88,
+      "size_usd": 4983.3
+    },
+    {
+      "id": 425,
+      "ticker": "MSFT",
+      "dir": "bullish",
+      "entry": "2026-03-09",
+      "exit": "2026-03-18",
+      "hold": 7,
+      "score": 7.86,
+      "gross_pct": -4.304,
+      "net_pct": -4.3738,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": -217.96,
+      "size_usd": 4983.3
+    },
+    {
+      "id": 449,
+      "ticker": "QCOM",
+      "dir": "bullish",
+      "entry": "2026-03-10",
+      "exit": "2026-03-19",
+      "hold": 7,
+      "score": 7.86,
+      "gross_pct": -2.899,
+      "net_pct": -3.0294,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": -152.42,
+      "size_usd": 5031.31
+    },
+    {
+      "id": 491,
+      "ticker": "BILI",
+      "dir": "bullish",
+      "entry": "2026-03-12",
+      "exit": "2026-03-23",
+      "hold": 7,
+      "score": 7.89,
+      "gross_pct": -2.57,
+      "net_pct": -2.8803,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": -144.11,
+      "size_usd": 5003.35
+    },
+    {
+      "id": 497,
+      "ticker": "TSLA",
+      "dir": "bearish",
+      "entry": "2026-03-13",
+      "exit": "2026-03-24",
+      "hold": 7,
+      "score": 3.19,
+      "gross_pct": 2.088,
+      "net_pct": 1.9592,
+      "exit_reason": "T7_CLOSE",
+      "pnl_usd": 98.96,
+      "size_usd": 5051.07
+    },
+    {
+      "id": 545,
+      "ticker": "BILI",
+      "dir": "bullish",
+      "entry": "2026-03-26",
+      "exit": "2026-03-30",
+      "hold": 2,
+      "score": 7.18,
+      "gross_pct": -5.048,
+      "net_pct": -5.3575,
+      "exit_reason": "SL",
+      "pnl_usd": -268.04,
+      "size_usd": 5003.03
+    },
+    {
+      "id": 538,
+      "ticker": "AMZN",
+      "dir": "bullish",
+      "entry": "2026-04-01",
+      "exit": "2026-04-09",
+      "hold": 5,
+      "score": 7.43,
+      "gross_pct": 9.945,
+      "net_pct": 9.855,
+      "exit_reason": "TP",
+      "pnl_usd": 490.41,
+      "size_usd": 4976.22
+    }
+  ]
+}

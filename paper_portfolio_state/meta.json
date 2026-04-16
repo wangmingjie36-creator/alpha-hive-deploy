@@ -1,0 +1,34 @@
+{
+  "version": "0.19.0",
+  "starting_capital": 50000.0,
+  "starting_date": "2026-03-09",
+  "cash": 44977.05235940001,
+  "last_run_date": "2026-04-15",
+  "config_snapshot": {
+    "starting_capital": 50000.0,
+    "bootstrap_date": "2026-03-09",
+    "max_positions": 15,
+    "max_deployed_pct": 30.0,
+    "size_pct_by_tier": {
+      "high": 2.5,
+      "mid": 1.5,
+      "low": 0.0
+    },
+    "win_rate_multiplier": {
+      "strong": 1.2,
+      "normal": 1.0,
+      "weak": 0.5
+    },
+    "sl_pct": 7.0,
+    "tp_pct": 10.0,
+    "time_stop_days": 10,
+    "entry_conf_min": "mid",
+    "entry_score_bull": 6.5,
+    "entry_score_bear": 3.5,
+    "min_samples_for_win_rate": 5,
+    "live_start_date": "2026-04-16",
+    "ticker_whitelist": [
+      "NVDA"
+    ]
+  }
+}

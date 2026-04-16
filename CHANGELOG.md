@@ -5,6 +5,170 @@
 
 ---
 
+## [0.20.0] — 2026-04-15 — $50K 回测 + 5 项数据驱动升级
+
+### Added
+
+- **`portfolio_backtest.py`（新文件）** — $50K 组合级别回测脚本
+  - 从 pheromone.db 读取 191 条已验证 T+7 预测，模拟真实组合运营
+  - 支持 CLI 参数：`--capital`、`--max-pos`、`--max-std`、`--no-macro-gate`、`--bull-size`、`--bear-size`
+  - 输出：按方向/退出类型/标的/月度分维度统计 + equity curve + 每笔交易明细
+  - 口径说明：股票现货策略（非期权），含双边滑点+佣金+借券费
+
+- **升级1: Agent 共识硬门控**（`portfolio_backtest.py`）
+  - 新增 `max_agent_std` 参数（默认 1.5），从 dimension_scores 计算 5 维标准差
+  - std ≥ 1.5 的信号跳过入场（数据：std<1.5 胜率 71% vs ≥1.5 仅 29%）
+
+- **升级4: 宏观政体门控**（`portfolio_backtest.py`）
+  - SPY 20MA 计算 + risk-off 判断（SPY < 20MA × (1-3%)）
+  - risk-off 期间禁止看多入场
+
+- **升级5: Catalyst 权重 clamp**（`weekly_optimizer.py`）
+  - 新增 `WEIGHT_CLAMPS` dict，限制每个维度权重范围
+  - Catalyst 上限 25%（原被 optimizer 推到 33%，导致高分看多反而亏钱）
+
+### Changed
+
+- **升级2: Per-ticker 自适应止损**（`config.py` + `backtester.py`）
+  - `TRADING_EXITS_CONFIG` 新增 `sl_overrides` dict
+  - 大盘蓝筹 5%，TSLA/QCOM 6-7%，BILI/RKLB 10%，CRCL/VKTX 12%
+  - 结果：SL 触发率从 27.7% → 15.2%，TP 从 12% → 15.7%，准确率 53.4% → 60.2%
+
+- **升级3: 放大看空信号**（`portfolio_backtest.py`）
+  - `min_score_bear` 默认从 3.5 → 4.5（放宽看空入场门槛）
+  - 看多仓位缩小 6% NAV / 看空仓位放大 12% NAV（方向不对称）
+
+- **中性方向 SL 保护**（`backtester.py`）
+  - 中性不再免于止损，设 15% 宽松下跌保护
+  - 修复 CRCL 中性 -30% 无止损灾难（现被 -15.5% SL 拦截）
+
+- **`backfill_trading_costs.py`** 新增 `--force` 参数，支持重算所有已验证记录
+
+### 回测对比（$50K，29 个交易日）
+
+| 指标 | 升级前 | 升级后 |
+|------|--------|--------|
+| PnL | +$253 (+0.51%) | **+$871 (+1.74%)** |
+| Sharpe | 0.424 | **1.106** |
+| Win Rate | 41.7% | **52.9%** |
+| Profit Factor | 1.181 | **1.471** |
+| Alpha vs SPY | +5.18% | **+6.42%** |
+| 看多胜率 | 36.4% | **60.0%** |
+| SL 触发率 | 25.0% | **5.9%** |
+
+---
+
+## [0.19.1-param-opt] — 2026-04-15 — SL 参数优化 + 参数优化器
+
+### Added
+
+- **`param_optimizer.py`（新文件）** — SL/TP/Deploy 网格搜索工具
+  - 12 精选组合（`--quick`）或 48 全量组合（SL×TP×Deploy）
+  - 自动 backup/restore 原始状态，幂等运行
+  - 多目标排名：Alpha 40% + Sharpe 25% + PF 20% + WinRate 15%
+  - HTML 报告：推荐参数卡片 + NAV 曲线 SVG + SL×TP Alpha 热力图 + Top 15 排行榜
+  - CLI：`python3 param_optimizer.py --quick / --html`
+
+### Changed
+
+- **`paper_portfolio.py` 两层模式（bootstrap 全标的 / 实时白名单）**
+  - CONFIG 新增 `live_start_date: "2026-04-16"` 和 `ticker_whitelist: ["NVDA"]`
+  - `live_start_date` 之前：bootstrap 回放所有 ticker，建立历史 KPI 基准和胜率统计
+  - `live_start_date` 之后：只对 `ticker_whitelist` 里的 ticker 开新仓，与实际生成报告的标的对齐
+  - `ticker_whitelist` 留空 `[]` 恢复全标的模式
+  - `_should_open()` 新增 `as_of` 参数，白名单过滤仅在实时阶段激活
+
+- **`paper_portfolio.py` CONFIG `sl_pct`: 5.0 → 7.0**
+  - 参数优化结果：SL -7% 胜率从 33%→50%（+17pp），Sharpe 从 1.27→2.73
+  - 原因：NVDA/VKTX 等高波动票日内 5% 回撤为正常噪声，原 SL 过紧
+  - TP/Deploy 不变（10% / 30% 已是最优）
+
+### Fixed（v0.19.0 bug 修正，随此版本入库）
+
+- `paper_portfolio._close_position` SL 滑点反向 bug：`extra_slip=2.0`（2bp）< 默认 10bp，已修为 `20.0`
+- `paper_portfolio._open_position` rationale f-string 当 `composite_score=None` 崩溃，已修为 None→"N/A"
+- `paper_portfolio.compute_kpis` daily_rets 单位错误（小数 vs 百分比）导致 Sharpe=-213，已修为 `×100`
+- `ibkr_sync.reconcile` IBKR datetime 格式兼容（`20260415;140000` / `2026-04-15 14:00:00` 双模式）
+
+---
+
+## [0.19.0-paper-portfolio] — 2026-04-15 — $50K 策略模拟组合 + IBKR Paper Account 桥接
+
+### Added — v0.19.0 · Phase 1 PaperPortfolio
+
+- **`paper_portfolio.py`（新文件，~660 行）** — $50,000 透明模拟账户，按 Alpha Hive 策略信号自动开/平仓
+  - 资金规则：每仓 `high=2.5%` / `mid=1.5%` / `low=0%` NAV × ticker win_rate 乘数（strong 1.2 / normal 1.0 / weak 0.5）
+  - 限制：最大 15 仓位，最大部署 30% NAV，其余作现金缓冲
+  - 出场：SL -5% / TP +10% / 时间止损 T+10 天（同日 SL+TP 同触发按保守取 SL）
+  - 入场门槛：bull score ≥ 6.5、bear score ≤ 3.5、置信 ≥ mid
+  - 状态文件：`paper_portfolio_state/{positions,closed_trades,equity_curve}.jsonl + meta.json`
+  - 成本：集成 `trading_costs.apply_costs()`（滑点 + 佣金 + 借券费）
+  - 回放：`bootstrap_from_history()` 从 2026-03-09 起逐日回放（受限于 report_snapshots 最早日期，非用户最初要求的 2026-01-02）
+  - CLI：`bootstrap / run / kpi / card / reset`
+  - HTML 卡片：KPI grid（NAV/SPY/Sharpe/MDD/胜率）+ SVG sparkline + 持仓表 + 近 5 笔平仓
+
+### Added — v0.19.0 · Phase 2 IBKR 桥接
+
+- **`ibkr_sync.py`（新文件）** — JSON 导出 + CSV 导入 + 对账
+  - `export_daily_actions(date)` → `paper_account/actions/actions_YYYY-MM-DD.json`（symbol/side/qty/limit/tif 格式，IBKR TWS 手动或 ibapi 自动下单）
+  - `import_ibkr_statement(csv_path)` → 解析 Trade Confirmation CSV 追加 `real_fills.jsonl`
+  - `reconcile(date)` → 比较本地模拟 vs IBKR 真实成交，输出 slippage / fill diff 报告到 `reconcile/reconcile_*.json`
+  - CLI：`export / import / reconcile`
+  - 仅 JSON+CSV IO，不连 IBKR API（用户手动/半自动对接）
+
+### Changed
+
+- **`generate_deep_v2.py`** — `generate_html()` 顶部新增 `portfolio_card_html`，每次报告生成时自动 `paper_portfolio.run_for_date(report_date)` 幂等调用 + 渲染卡片，插入在 `exec_summary_html` 之前
+
+### Known Limitations
+
+- Cowork VM 内 yfinance 联网失败，bootstrap 只能创建仓位但无 mark-to-market / 出场触发
+- 用户 Mac 端运行时 yfinance 恢复联网，将自动补回历史 OHLC、触发 SL/TP/Time 出场
+- Sharpe 返回 None（<2 样本或方差=0）时 fallback 为 0.0
+
+---
+
+## [0.18.0-strategy] — 2026-04-15 — CH4 期权策略建议卡片 + bug 修复三连
+
+### Added — v0.18.0 · CH4 期权策略建议卡片（启发式决策树）
+
+- **`generate_deep_v2.py` 新增 `_recommend_strategy(ctx)`**：IV Rank × 方向三档决策树，9 个核心场景映射到期权结构
+  - IV Rank <30：Long Call / Long Put / Long Straddle
+  - IV Rank 30–70：Bull Call Spread / Bear Put Spread / Iron Condor
+  - IV Rank >70：Bull Put Spread / Bear Call Spread / Iron Condor（收 Premium）
+- **7 条修正器（override）**：
+  - (1) 催化剂 ≤ 5 天 + IV > 60 + Long Premium → 强制改用 Spread/Sell Premium
+  - (2) 事件窗口 + 高 IV → IV Crush 风险警告
+  - (3) GEX negative_gex → DTE 缩短到 14–21 天；positive_gex + 强方向 → 延长到 45–60 天
+  - (4) 催化剂覆盖：DTE ≥ cat_days + 7 天缓冲
+  - (5) Skew > 1.15 + 看多 + Long Call → 备选 Bull Call Spread
+  - (6) Skew > 1.15 + 看空 + Long Put → Put 溢价警告
+  - (7) 低置信 + 裸 Premium → 强制 Defined Risk + 减仓
+- **行权价保守表达**：只给 ATM±% 百分比（ATM / ATM+5% / ATM−5% / ATM+10%），不给具体 strike 数字
+- **仓位建议**：`pct_nav = conf_base(1.0/0.6/0.3) × risk_mult(1.0/0.5) × 0.8`，最大 0.8% 账户净值
+- **`_render_strategy_card()`**：渐变紫色卡片（区别于其他 CH4 元素），含结构/DTE/行权价/推理链/备选/禁忌/仓位/输入审计
+- **集成点**：`generate_html()` 中 `strategy_card_html = _render_strategy_card(_recommend_strategy(ctx))`，插入 CH4 末尾 `<div class="prose">` 后
+
+### Fixed — v0.17.4 Bug 三连
+
+- **ML 胜率小数长尾**（`generate_deep_v2.py:3052, 3760`）：`{ml7}%` → `{ml7:+.1f}%`，`18.507527010901935%` → `+18.5%`
+- **催化剂日期 `+-32天`**（`generate_deep_v2.py:1552-1562`）：硬编码 `+` 号导致负数显示异常，改为条件渲染（未来 `+N天` / 过期 `N天前`）
+- **明日任务追踪过期财报**（`generate_deep_v2.py:5031`）：`_cats[0]` → `next(c for c in _cats if days_until >= 0)`，跳过已过期催化剂
+
+### Fixed — v0.17.3 二次审计修复
+
+- **P1 `score` NameError**（`generate_deep_v2.py:3445-3450, 3470-3477`）：未定义的 `score` → `_score`
+- **P1 + P2 F&G falsy-zero bug**（`3424-3428, 1625-1634`）：`ctx.get('fg_score') or ... or 50` 丢失 valid 0 值 → 显式 None 检查
+- **P0 Oracle key 不匹配**（`3621`）：`ctx.get('agents').get('OracleBee')` → `ctx.get('oracle')`（文件其他处统一路径，否则永远回退 5.0）
+- **P2 BearBee key 不匹配**（`1618-1623`）：`ctx.get('agents')` key 不存在 → 改为 `ctx.get('bear').get('score')`
+
+### Added — v0.17.4 回测口径 disclaimer（Option A）
+
+- **`generate_deep_v2.py` 历史回测卡片**：加入黄色警示框说明"股票现货策略 vs 期权合约未建仓"的口径差异
+- 消除用户将 Net +9.39% 误读为"期权净收益"的最大风险
+
+---
+
 ## [0.18.0] — 2026-04-15 — Sprint 1: 真实策略回测（v16.0 起步）
 
 ### Added — P0-1 路径依赖退出（intraday 止损止盈）
@@ -56,6 +220,49 @@
 
 - 网站新增明确标注："Gross 曲线不扣成本（参考），Net 曲线 = 真实可拿收益"
 - 每笔按 $100k × 10% 仓位建仓，-5% 硬止损 / +10% 止盈，扣滑点 + 佣金 + 借券费
+
+---
+
+## [0.17.3] — 2026-04-15
+
+### Added — Executive Summary 多因素裁决引擎（P0）
+
+- **`_build_executive_summary()` confidence_score 计算**（行 3564-3591）
+  - 公式：`score - 0.8×dim_std - 0.6×bear_sig_count - 0.5×ml_swarm_gap + 0.3×flow_align`
+  - 结果 clamp 到 [0, 10]，替代原单变量 verdict switch
+  - dim_std 惩罚分歧度、bear_sigs 惩罚反向信号、ml_swarm_gap 惩罚时序×截面矛盾、flow_align 奖励期权流一致性
+
+- **三档置信度标识**（行 3593-3610）
+  - ⭐⭐⭐ 高置信（绿）：违反 0 项
+  - ⭐⭐ 中置信（橙）：违反 1 项
+  - ⚠️ 低置信（红）：违反 ≥2 项
+  - 违反条件：dim_std ≥ 1.5 / bear_sigs 激活 / ml_swarm_gap > 0.5
+
+- **三对矛盾检测告警卡片**（行 3612-3633）
+  - 红条：OracleBee 看多（≥6.0）vs BearBee 激活反向信号
+  - 黄条：Options Flow 看多 vs GEX 正 Gamma 抑制（或看空 vs 负 Gamma 放大）
+  - 黄条：Swarm vs ML 7d 方向分歧（时序×截面）
+  - HTML 渲染：彩色左边框 + 浅色底，内联置信 tier 胶囊
+
+### Added — Risk Narrative 正向支撑盘点（P1）
+
+- **`_build_risk_narrative()` fallback 重写**（行 3415-3456）
+  - 无风险时不再输出泛泛 "当前无高优先级风险"
+  - 改为按优先级提取 Top 3 正向支撑（GEX > ML/Swarm 共振 > IV > F&G > Flow > 催化剂缓冲期）
+  - 6 个评估维度：GEX 环境 + Call Wall / ML-Swarm 同向共振 / IV Rank 中性或偏低 / F&G 正常区间 / Flow 与 Swarm 一致 / 7 天内无催化剂
+  - 输出为有序列表，每条引用具体数值
+
+### Added — Catalyst Narrative 追加 3 个交叉维度（P2）
+
+- **`_build_catalyst_narrative()` 新增 E/F/G 条件**（行 1694-1725）
+  - (E) 催化剂 × BearBee：<4.0 防守 → 下行风险被忽视；>6.5 无信号 → 尾部风险被低估
+  - (F) 催化剂 × F&G：<25 恐慌 → 反转行情非对称上行；>75 贪婪 → "不及预期"即回调
+  - (G) 催化剂 × 信号拥挤度：decay < 0.8 → 符合一致预期时 alpha 迅速衰减
+  - 上下文新增读取：`bear_signals`、`agents.BearBee.score`、`fg_score`、`signal_crowding.alpha_decay_factor`
+
+### Changed — 版本号
+
+- 文件头 `VERSION = "0.17.3"`（第 25 行）
 
 ---
 

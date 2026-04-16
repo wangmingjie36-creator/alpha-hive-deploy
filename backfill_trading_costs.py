@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 _log = logging.getLogger("backfill")
 
 
-def run(apply_changes: bool = False, limit: int = None):
+def run(apply_changes: bool = False, limit: int = None, force: bool = False):
     from backtester import Backtester, PredictionStore
     from trading_costs import apply_costs
     from hive_logger import SafeJSONEncoder
@@ -33,13 +33,21 @@ def run(apply_changes: bool = False, limit: int = None):
     store = PredictionStore()
     bt = Backtester(store.db_path)
 
-    # 取所有已验证但未扣成本的 T+7 记录
-    query = """
-        SELECT id, date, ticker, direction, price_at_predict, return_t7, correct_t7
-        FROM predictions
-        WHERE checked_t7 = 1 AND net_return_t7 IS NULL
-        ORDER BY date ASC, id ASC
-    """
+    # --force: 重算所有 checked_t7=1（含已有 net_return_t7 的记录）
+    if force:
+        query = """
+            SELECT id, date, ticker, direction, price_at_predict, return_t7, correct_t7
+            FROM predictions
+            WHERE checked_t7 = 1
+            ORDER BY date ASC, id ASC
+        """
+    else:
+        query = """
+            SELECT id, date, ticker, direction, price_at_predict, return_t7, correct_t7
+            FROM predictions
+            WHERE checked_t7 = 1 AND net_return_t7 IS NULL
+            ORDER BY date ASC, id ASC
+        """
     if limit:
         query += f" LIMIT {limit}"
 
@@ -200,5 +208,6 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--apply", action="store_true", help="实际写入 DB（否则 dry-run）")
     p.add_argument("--limit", type=int, default=None, help="限制处理数量（测试用）")
+    p.add_argument("--force", action="store_true", help="强制重算所有已验证记录（含已有 net_return）")
     args = p.parse_args()
-    run(apply_changes=args.apply, limit=args.limit)
+    run(apply_changes=args.apply, limit=args.limit, force=args.force)
