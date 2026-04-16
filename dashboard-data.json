@@ -1,123 +1,123 @@
 {
- "fv": 56,
+ "fv": 62,
  "fg_label": "贪婪",
  "scores": [
   [
-   "NVDA",
-   6.3
+   "META",
+   6.7
   ],
   [
    "MSFT",
-   7.1
+   6.7
+  ],
+  [
+   "AMZN",
+   6.7
   ],
   [
    "TSLA",
    6.4
   ],
   [
-   "QCOM",
-   4.8
-  ],
-  [
-   "VKTX",
-   6.9
-  ],
-  [
-   "BILI",
-   6.2
-  ],
-  [
-   "META",
-   6.6
-  ],
-  [
-   "AMZN",
-   6.5
+   "NVDA",
+   6.3
   ],
   [
    "RKLB",
-   6.2
+   6.3
   ],
   [
    "CRCL",
-   6.2
+   5.8
+  ],
+  [
+   "BILI",
+   5.5
+  ],
+  [
+   "VKTX",
+   5.3
+  ],
+  [
+   "QCOM",
+   5.0
   ]
  ],
  "dir_counts": [
-  9,
+  7,
   1,
-  0
+  2
  ],
  "radar": {
-  "NVDA": [
-   25.4,
-   63.0,
-   73.2,
-   95.5,
+  "META": [
+   33.4,
+   88.4,
+   55.1,
+   100,
    81.9
   ],
   "MSFT": [
-   47.8,
+   44.8,
    88.4,
-   82.6,
-   95.5,
+   70.6,
+   57.2,
+   81.9
+  ],
+  "AMZN": [
+   57.1,
+   80.4,
+   59.2,
+   83.8,
    81.9
   ],
   "TSLA": [
-   18.8,
+   27.7,
    94.0,
-   79.9,
-   87.1,
-   64.2
+   54.8,
+   92.2,
+   76.1
   ],
-  "QCOM": [
-   36.6,
-   68.9,
-   54.3,
-   40.3,
-   52.0
-  ],
-  "VKTX": [
-   96.4,
-   60.8,
-   51.7,
-   64.3,
-   97.0
-  ],
-  "BILI": [
-   62.6,
-   48.5,
-   64.9,
-   49.5,
-   97.0
-  ],
-  "META": [
-   34.4,
-   88.4,
-   55.3,
-   100,
-   79.9
-  ],
-  "AMZN": [
-   59.1,
-   70.0,
-   55.9,
-   80.3,
-   79.9
+  "NVDA": [
+   30.7,
+   63.0,
+   65.2,
+   98.1,
+   81.9
   ],
   "RKLB": [
-   36.6,
+   27.9,
    63.6,
-   62.1,
-   77.2,
+   76.7,
+   75.4,
    76.9
   ],
   "CRCL": [
-   32.4,
-   71.8,
-   61.5,
-   74.4,
-   81.9
+   34.7,
+   65.8,
+   57.7,
+   81.2,
+   51.8
+  ],
+  "BILI": [
+   56.6,
+   55.0,
+   61.4,
+   30.0,
+   95.6
+  ],
+  "VKTX": [
+   37.9,
+   60.8,
+   54.5,
+   74.5,
+   53.3
+  ],
+  "QCOM": [
+   34.7,
+   68.9,
+   54.0,
+   40.3,
+   51.6
   ]
  },
  "acc_dir_labels": [
@@ -126,105 +126,105 @@
   "中性"
  ],
  "acc_dir_accs": [
-  42.6,
-  75.0,
-  59.3
+  55.7,
+  78.4,
+  59.6
  ],
  "acc_dir_tots": [
-  101,
-  36,
-  54
+  106,
+  37,
+  57
  ],
  "acc_dir_rets": [
-  -0.1,
-  2.24,
-  1.23
+  1.05,
+  2.03,
+  2.19
  ],
  "acc_weekly": [
   {
    "week": "2026-W08",
-   "accuracy": 64.5,
+   "accuracy": 71.0,
    "total": 31,
-   "avg_ret": 3.1
+   "avg_ret": 2.91
   },
   {
    "week": "2026-W09",
-   "accuracy": 48.9,
+   "accuracy": 62.2,
    "total": 45,
-   "avg_ret": -0.23
+   "avg_ret": 1.36
   },
   {
    "week": "2026-W10",
-   "accuracy": 40.8,
+   "accuracy": 44.9,
    "total": 49,
-   "avg_ret": -2.06
+   "avg_ret": -1.88
   },
   {
    "week": "2026-W11",
-   "accuracy": 54.2,
+   "accuracy": 58.3,
    "total": 24,
-   "avg_ret": -7.09
+   "avg_ret": -6.69
   },
   {
    "week": "2026-W12",
    "accuracy": 35.7,
    "total": 14,
-   "avg_ret": -1.59
+   "avg_ret": -3.15
   },
   {
    "week": "2026-W13",
-   "accuracy": 77.8,
+   "accuracy": 83.3,
    "total": 18,
-   "avg_ret": 5.17
+   "avg_ret": 6.01
   },
   {
    "week": "2026-W14",
-   "accuracy": 80.0,
-   "total": 10,
-   "avg_ret": 9.03
+   "accuracy": 84.2,
+   "total": 19,
+   "avg_ret": 10.43
   }
  ],
  "acc_weekly_by_dir": [
   {
    "week": "2026-W08",
-   "bullish": 52.4,
+   "bullish": 61.9,
    "bearish": null,
    "neutral": 90.0
   },
   {
    "week": "2026-W09",
-   "bullish": 41.2,
+   "bullish": 58.8,
    "bearish": null,
    "neutral": 72.7
   },
   {
    "week": "2026-W10",
-   "bullish": 11.1,
-   "bearish": 82.4,
+   "bullish": 16.7,
+   "bearish": 88.2,
    "neutral": 28.6
   },
   {
    "week": "2026-W11",
    "bullish": 16.7,
-   "bearish": 85.7,
+   "bearish": 92.9,
    "neutral": 0.0
   },
   {
    "week": "2026-W12",
-   "bullish": 14.3,
+   "bullish": 28.6,
    "bearish": null,
-   "neutral": 60.0
+   "neutral": 40.0
   },
   {
    "week": "2026-W13",
-   "bullish": 90.0,
+   "bullish": 100.0,
    "bearish": null,
    "neutral": 71.4
   },
   {
    "week": "2026-W14",
    "bullish": 100.0,
-   "bearish": null,
+   "bearish": 0.0,
    "neutral": 100.0
   }
  ],
@@ -332,21 +332,29 @@
   {
    "date": "2026-04-15",
    "value": 56
+  },
+  {
+   "date": "2026-04-16",
+   "value": 62
   }
  ],
  "trend_data": {
-  "NVDA": [
-   {
-    "date": "2026-02-25",
-    "score": 6.1
-   },
+  "META": [
    {
     "date": "2026-02-26",
-    "score": 5.0
+    "score": 5.7
    },
    {
     "date": "2026-02-27",
-    "score": 5.0
+    "score": 5.9
+   },
+   {
+    "date": "2026-02-28",
+    "score": 5.9
+   },
+   {
+    "date": "2026-03-01",
+    "score": 4.7
    },
    {
     "date": "2026-03-02",
@@ -354,51 +362,43 @@
    },
    {
     "date": "2026-03-03",
-    "score": 4.5
-   },
-   {
-    "date": "2026-03-04",
-    "score": 5.9
-   },
-   {
-    "date": "2026-03-05",
-    "score": 5.8
+    "score": 5.3
    },
    {
     "date": "2026-03-06",
-    "score": 5.5
+    "score": 4.7
    },
    {
     "date": "2026-03-09",
-    "score": 8.4
+    "score": 6.2
    },
    {
     "date": "2026-03-10",
-    "score": 8.7
+    "score": 6.6
    },
    {
     "date": "2026-03-11",
-    "score": 6.8
+    "score": 5.4
    },
    {
     "date": "2026-03-12",
-    "score": 4.9
-   },
-   {
-    "date": "2026-03-13",
     "score": 5.0
    },
    {
+    "date": "2026-03-13",
+    "score": 5.1
+   },
+   {
     "date": "2026-03-16",
-    "score": 6.3
+    "score": 4.9
    },
    {
     "date": "2026-03-17",
-    "score": 4.2
+    "score": 4.5
    },
    {
     "date": "2026-03-18",
-    "score": 4.2
+    "score": 3.6
    },
    {
     "date": "2026-03-19",
@@ -406,75 +406,75 @@
    },
    {
     "date": "2026-03-20",
-    "score": 4.6
+    "score": 4.7
    },
    {
     "date": "2026-03-23",
-    "score": 3.8
+    "score": 4.8
    },
    {
     "date": "2026-03-24",
-    "score": 3.6
+    "score": 4.7
    },
    {
     "date": "2026-03-25",
-    "score": 5.2
-   },
-   {
-    "date": "2026-03-26",
-    "score": 3.6
+    "score": 5.8
    },
    {
     "date": "2026-03-27",
-    "score": 3.2
+    "score": 5.4
    },
    {
     "date": "2026-03-30",
-    "score": 3.4
+    "score": 4.1
    },
    {
     "date": "2026-03-31",
-    "score": 5.0
-   },
-   {
-    "date": "2026-04-01",
-    "score": 4.2
-   },
-   {
-    "date": "2026-04-02",
-    "score": 5.1
-   },
-   {
-    "date": "2026-04-06",
     "score": 4.5
    },
    {
+    "date": "2026-04-01",
+    "score": 5.0
+   },
+   {
+    "date": "2026-04-02",
+    "score": 5.2
+   },
+   {
+    "date": "2026-04-06",
+    "score": 5.1
+   },
+   {
     "date": "2026-04-07",
-    "score": 5.3
+    "score": 7.3
    },
    {
     "date": "2026-04-08",
-    "score": 7.8
+    "score": 6.8
    },
    {
     "date": "2026-04-09",
-    "score": 5.6
-   },
-   {
-    "date": "2026-04-10",
-    "score": 8.1
-   },
-   {
-    "date": "2026-04-13",
-    "score": 7.2
-   },
-   {
-    "date": "2026-04-14",
     "score": 6.2
    },
    {
+    "date": "2026-04-10",
+    "score": 6.5
+   },
+   {
+    "date": "2026-04-13",
+    "score": 6.5
+   },
+   {
+    "date": "2026-04-14",
+    "score": 6.7
+   },
+   {
     "date": "2026-04-15",
-    "score": 6.3
+    "score": 6.6
+   },
+   {
+    "date": "2026-04-16",
+    "score": 6.7
    }
   ],
   "MSFT": [
@@ -625,6 +625,148 @@
    {
     "date": "2026-04-15",
     "score": 7.1
+   },
+   {
+    "date": "2026-04-16",
+    "score": 6.7
+   }
+  ],
+  "AMZN": [
+   {
+    "date": "2026-02-26",
+    "score": 5.3
+   },
+   {
+    "date": "2026-02-27",
+    "score": 5.6
+   },
+   {
+    "date": "2026-02-28",
+    "score": 5.6
+   },
+   {
+    "date": "2026-03-01",
+    "score": 4.8
+   },
+   {
+    "date": "2026-03-03",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-04",
+    "score": 5.6
+   },
+   {
+    "date": "2026-03-05",
+    "score": 5.6
+   },
+   {
+    "date": "2026-03-06",
+    "score": 4.2
+   },
+   {
+    "date": "2026-03-09",
+    "score": 6.1
+   },
+   {
+    "date": "2026-03-10",
+    "score": 6.6
+   },
+   {
+    "date": "2026-03-11",
+    "score": 5.6
+   },
+   {
+    "date": "2026-03-12",
+    "score": 4.4
+   },
+   {
+    "date": "2026-03-13",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-16",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-17",
+    "score": 4.3
+   },
+   {
+    "date": "2026-03-18",
+    "score": 4.2
+   },
+   {
+    "date": "2026-03-19",
+    "score": 4.3
+   },
+   {
+    "date": "2026-03-20",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-23",
+    "score": 5.1
+   },
+   {
+    "date": "2026-03-24",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-25",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-30",
+    "score": 5.6
+   },
+   {
+    "date": "2026-03-31",
+    "score": 5.0
+   },
+   {
+    "date": "2026-04-01",
+    "score": 7.4
+   },
+   {
+    "date": "2026-04-02",
+    "score": 4.5
+   },
+   {
+    "date": "2026-04-06",
+    "score": 7.6
+   },
+   {
+    "date": "2026-04-07",
+    "score": 7.7
+   },
+   {
+    "date": "2026-04-08",
+    "score": 6.7
+   },
+   {
+    "date": "2026-04-09",
+    "score": 6.9
+   },
+   {
+    "date": "2026-04-10",
+    "score": 6.9
+   },
+   {
+    "date": "2026-04-13",
+    "score": 6.6
+   },
+   {
+    "date": "2026-04-14",
+    "score": 6.6
+   },
+   {
+    "date": "2026-04-15",
+    "score": 6.5
+   },
+   {
+    "date": "2026-04-16",
+    "score": 6.7
    }
   ],
   "TSLA": [
@@ -759,24 +901,60 @@
    {
     "date": "2026-04-15",
     "score": 6.4
+   },
+   {
+    "date": "2026-04-16",
+    "score": 6.4
    }
   ],
-  "QCOM": [
+  "NVDA": [
    {
-    "date": "2026-02-27",
+    "date": "2026-02-25",
     "score": 6.1
    },
    {
-    "date": "2026-02-28",
-    "score": 6.1
+    "date": "2026-02-26",
+    "score": 5.0
+   },
+   {
+    "date": "2026-02-27",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-02",
+    "score": 5.2
+   },
+   {
+    "date": "2026-03-03",
+    "score": 4.5
+   },
+   {
+    "date": "2026-03-04",
+    "score": 5.9
+   },
+   {
+    "date": "2026-03-05",
+    "score": 5.8
+   },
+   {
+    "date": "2026-03-06",
+    "score": 5.5
+   },
+   {
+    "date": "2026-03-09",
+    "score": 8.4
+   },
+   {
+    "date": "2026-03-10",
+    "score": 8.7
    },
    {
     "date": "2026-03-11",
-    "score": 6.1
+    "score": 6.8
    },
    {
     "date": "2026-03-12",
-    "score": 5.3
+    "score": 4.9
    },
    {
     "date": "2026-03-13",
@@ -784,11 +962,11 @@
    },
    {
     "date": "2026-03-16",
-    "score": 4.7
+    "score": 6.3
    },
    {
     "date": "2026-03-17",
-    "score": 4.5
+    "score": 4.2
    },
    {
     "date": "2026-03-18",
@@ -800,31 +978,31 @@
    },
    {
     "date": "2026-03-20",
-    "score": 4.7
+    "score": 4.6
    },
    {
     "date": "2026-03-23",
-    "score": 4.5
+    "score": 3.8
    },
    {
     "date": "2026-03-24",
-    "score": 4.3
+    "score": 3.6
    },
    {
     "date": "2026-03-25",
-    "score": 4.3
+    "score": 5.2
    },
    {
     "date": "2026-03-26",
-    "score": 5.0
+    "score": 3.6
    },
    {
     "date": "2026-03-27",
-    "score": 4.1
+    "score": 3.2
    },
    {
     "date": "2026-03-30",
-    "score": 4.8
+    "score": 3.4
    },
    {
     "date": "2026-03-31",
@@ -832,81 +1010,223 @@
    },
    {
     "date": "2026-04-01",
-    "score": 4.0
+    "score": 4.2
    },
    {
     "date": "2026-04-02",
-    "score": 4.9
-   },
-   {
-    "date": "2026-04-06",
     "score": 5.1
    },
    {
+    "date": "2026-04-06",
+    "score": 4.5
+   },
+   {
     "date": "2026-04-07",
-    "score": 7.0
+    "score": 5.3
    },
    {
     "date": "2026-04-08",
-    "score": 5.0
+    "score": 7.8
    },
    {
     "date": "2026-04-09",
-    "score": 5.0
+    "score": 5.6
    },
    {
     "date": "2026-04-10",
-    "score": 5.2
+    "score": 8.1
    },
    {
     "date": "2026-04-13",
-    "score": 5.2
+    "score": 7.2
    },
    {
     "date": "2026-04-14",
-    "score": 4.5
+    "score": 6.2
    },
    {
     "date": "2026-04-15",
-    "score": 4.8
+    "score": 6.3
+   },
+   {
+    "date": "2026-04-16",
+    "score": 6.3
    }
   ],
-  "VKTX": [
+  "RKLB": [
    {
-    "date": "2026-02-25",
+    "date": "2026-02-27",
+    "score": 4.2
+   },
+   {
+    "date": "2026-03-03",
     "score": 4.6
    },
    {
-    "date": "2026-02-27",
-    "score": 4.5
-   },
-   {
-    "date": "2026-03-01",
-    "score": 4.8
-   },
-   {
     "date": "2026-03-04",
-    "score": 5.0
+    "score": 5.1
    },
    {
     "date": "2026-03-06",
-    "score": 5.2
+    "score": 4.6
    },
    {
     "date": "2026-03-09",
-    "score": 7.0
+    "score": 5.9
    },
    {
     "date": "2026-03-10",
-    "score": 6.8
+    "score": 6.2
    },
    {
     "date": "2026-03-11",
-    "score": 6.9
+    "score": 4.8
    },
    {
     "date": "2026-03-12",
-    "score": 7.0
+    "score": 5.8
+   },
+   {
+    "date": "2026-03-13",
+    "score": 5.1
+   },
+   {
+    "date": "2026-03-16",
+    "score": 5.7
+   },
+   {
+    "date": "2026-03-17",
+    "score": 5.4
+   },
+   {
+    "date": "2026-03-18",
+    "score": 5.1
+   },
+   {
+    "date": "2026-03-19",
+    "score": 5.8
+   },
+   {
+    "date": "2026-03-20",
+    "score": 5.1
+   },
+   {
+    "date": "2026-03-23",
+    "score": 4.6
+   },
+   {
+    "date": "2026-03-24",
+    "score": 6.0
+   },
+   {
+    "date": "2026-03-25",
+    "score": 5.3
+   },
+   {
+    "date": "2026-03-26",
+    "score": 5.2
+   },
+   {
+    "date": "2026-03-27",
+    "score": 4.6
+   },
+   {
+    "date": "2026-03-30",
+    "score": 4.8
+   },
+   {
+    "date": "2026-03-31",
+    "score": 4.8
+   },
+   {
+    "date": "2026-04-01",
+    "score": 5.2
+   },
+   {
+    "date": "2026-04-02",
+    "score": 5.9
+   },
+   {
+    "date": "2026-04-06",
+    "score": 5.0
+   },
+   {
+    "date": "2026-04-07",
+    "score": 5.5
+   },
+   {
+    "date": "2026-04-08",
+    "score": 6.2
+   },
+   {
+    "date": "2026-04-09",
+    "score": 5.6
+   },
+   {
+    "date": "2026-04-10",
+    "score": 5.7
+   },
+   {
+    "date": "2026-04-13",
+    "score": 5.5
+   },
+   {
+    "date": "2026-04-14",
+    "score": 6.1
+   },
+   {
+    "date": "2026-04-15",
+    "score": 6.2
+   },
+   {
+    "date": "2026-04-16",
+    "score": 6.3
+   }
+  ],
+  "CRCL": [
+   {
+    "date": "2026-02-27",
+    "score": 4.2
+   },
+   {
+    "date": "2026-03-01",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-02",
+    "score": 5.5
+   },
+   {
+    "date": "2026-03-03",
+    "score": 5.8
+   },
+   {
+    "date": "2026-03-04",
+    "score": 6.2
+   },
+   {
+    "date": "2026-03-05",
+    "score": 6.0
+   },
+   {
+    "date": "2026-03-06",
+    "score": 5.1
+   },
+   {
+    "date": "2026-03-09",
+    "score": 5.9
+   },
+   {
+    "date": "2026-03-10",
+    "score": 7.1
+   },
+   {
+    "date": "2026-03-11",
+    "score": 5.3
+   },
+   {
+    "date": "2026-03-12",
+    "score": 5.4
    },
    {
     "date": "2026-03-13",
@@ -914,87 +1234,95 @@
    },
    {
     "date": "2026-03-16",
-    "score": 5.0
+    "score": 4.6
    },
    {
     "date": "2026-03-17",
-    "score": 4.7
+    "score": 4.6
    },
    {
     "date": "2026-03-18",
-    "score": 4.1
+    "score": 5.0
    },
    {
     "date": "2026-03-19",
-    "score": 5.0
+    "score": 5.8
    },
    {
     "date": "2026-03-20",
-    "score": 4.7
+    "score": 4.8
    },
    {
     "date": "2026-03-23",
-    "score": 3.7
-   },
-   {
-    "date": "2026-03-25",
-    "score": 4.3
-   },
-   {
-    "date": "2026-03-26",
-    "score": 4.7
-   },
-   {
-    "date": "2026-03-27",
-    "score": 3.9
-   },
-   {
-    "date": "2026-03-30",
     "score": 4.5
    },
    {
+    "date": "2026-03-24",
+    "score": 3.5
+   },
+   {
+    "date": "2026-03-25",
+    "score": 3.7
+   },
+   {
+    "date": "2026-03-26",
+    "score": 3.5
+   },
+   {
+    "date": "2026-03-27",
+    "score": 3.4
+   },
+   {
+    "date": "2026-03-30",
+    "score": 4.4
+   },
+   {
     "date": "2026-03-31",
-    "score": 4.9
+    "score": 4.2
    },
    {
     "date": "2026-04-01",
-    "score": 5.0
+    "score": 4.2
    },
    {
     "date": "2026-04-02",
-    "score": 5.4
+    "score": 5.1
    },
    {
     "date": "2026-04-06",
-    "score": 6.4
+    "score": 4.6
    },
    {
     "date": "2026-04-07",
-    "score": 6.8
+    "score": 4.3
    },
    {
     "date": "2026-04-08",
-    "score": 6.6
+    "score": 4.8
    },
    {
     "date": "2026-04-09",
-    "score": 6.9
+    "score": 5.3
    },
    {
     "date": "2026-04-10",
-    "score": 6.7
+    "score": 5.1
    },
    {
     "date": "2026-04-13",
-    "score": 7.0
+    "score": 5.5
    },
    {
     "date": "2026-04-14",
-    "score": 6.8
+    "score": 5.9
    },
    {
     "date": "2026-04-15",
-    "score": 6.9
+    "score": 6.2
+   },
+   {
+    "date": "2026-04-16",
+    "score": 5.8
    }
   ],
   "BILI": [
@@ -1141,190 +1469,48 @@
    {
     "date": "2026-04-15",
     "score": 6.2
+   },
+   {
+    "date": "2026-04-16",
+    "score": 5.5
    }
   ],
-  "META": [
+  "VKTX": [
    {
-    "date": "2026-02-26",
-    "score": 5.7
+    "date": "2026-02-25",
+    "score": 4.6
    },
    {
     "date": "2026-02-27",
-    "score": 5.9
-   },
-   {
-    "date": "2026-02-28",
-    "score": 5.9
+    "score": 4.5
    },
    {
     "date": "2026-03-01",
-    "score": 4.7
-   },
-   {
-    "date": "2026-03-02",
-    "score": 5.2
-   },
-   {
-    "date": "2026-03-03",
-    "score": 5.3
-   },
-   {
-    "date": "2026-03-06",
-    "score": 4.7
-   },
-   {
-    "date": "2026-03-09",
-    "score": 6.2
-   },
-   {
-    "date": "2026-03-10",
-    "score": 6.6
-   },
-   {
-    "date": "2026-03-11",
-    "score": 5.4
-   },
-   {
-    "date": "2026-03-12",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-13",
-    "score": 5.1
-   },
-   {
-    "date": "2026-03-16",
-    "score": 4.9
-   },
-   {
-    "date": "2026-03-17",
-    "score": 4.5
-   },
-   {
-    "date": "2026-03-18",
-    "score": 3.6
-   },
-   {
-    "date": "2026-03-19",
-    "score": 4.9
-   },
-   {
-    "date": "2026-03-20",
-    "score": 4.7
-   },
-   {
-    "date": "2026-03-23",
     "score": 4.8
    },
    {
-    "date": "2026-03-24",
-    "score": 4.7
-   },
-   {
-    "date": "2026-03-25",
-    "score": 5.8
-   },
-   {
-    "date": "2026-03-27",
-    "score": 5.4
-   },
-   {
-    "date": "2026-03-30",
-    "score": 4.1
-   },
-   {
-    "date": "2026-03-31",
-    "score": 4.5
-   },
-   {
-    "date": "2026-04-01",
+    "date": "2026-03-04",
     "score": 5.0
    },
    {
-    "date": "2026-04-02",
+    "date": "2026-03-06",
     "score": 5.2
    },
    {
-    "date": "2026-04-06",
-    "score": 5.1
+    "date": "2026-03-09",
+    "score": 7.0
    },
    {
-    "date": "2026-04-07",
-    "score": 7.3
-   },
-   {
-    "date": "2026-04-08",
+    "date": "2026-03-10",
     "score": 6.8
    },
    {
-    "date": "2026-04-09",
-    "score": 6.2
-   },
-   {
-    "date": "2026-04-10",
-    "score": 6.5
-   },
-   {
-    "date": "2026-04-13",
-    "score": 6.5
-   },
-   {
-    "date": "2026-04-14",
-    "score": 6.7
-   },
-   {
-    "date": "2026-04-15",
-    "score": 6.6
-   }
-  ],
-  "AMZN": [
-   {
-    "date": "2026-02-26",
-    "score": 5.3
-   },
-   {
-    "date": "2026-02-27",
-    "score": 5.6
-   },
-   {
-    "date": "2026-02-28",
-    "score": 5.6
-   },
-   {
-    "date": "2026-03-01",
-    "score": 4.8
-   },
-   {
-    "date": "2026-03-03",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-04",
-    "score": 5.6
-   },
-   {
-    "date": "2026-03-05",
-    "score": 5.6
-   },
-   {
-    "date": "2026-03-06",
-    "score": 4.2
-   },
-   {
-    "date": "2026-03-09",
-    "score": 6.1
-   },
-   {
-    "date": "2026-03-10",
-    "score": 6.6
-   },
-   {
     "date": "2026-03-11",
-    "score": 5.6
+    "score": 6.9
    },
    {
     "date": "2026-03-12",
-    "score": 4.4
+    "score": 7.0
    },
    {
     "date": "2026-03-13",
@@ -1336,343 +1522,201 @@
    },
    {
     "date": "2026-03-17",
-    "score": 4.3
-   },
-   {
-    "date": "2026-03-18",
-    "score": 4.2
-   },
-   {
-    "date": "2026-03-19",
-    "score": 4.3
-   },
-   {
-    "date": "2026-03-20",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-23",
-    "score": 5.1
-   },
-   {
-    "date": "2026-03-24",
     "score": 4.7
    },
    {
-    "date": "2026-03-25",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-30",
-    "score": 5.6
-   },
-   {
-    "date": "2026-03-31",
-    "score": 5.0
-   },
-   {
-    "date": "2026-04-01",
-    "score": 7.4
-   },
-   {
-    "date": "2026-04-02",
-    "score": 4.5
-   },
-   {
-    "date": "2026-04-06",
-    "score": 7.6
-   },
-   {
-    "date": "2026-04-07",
-    "score": 7.7
-   },
-   {
-    "date": "2026-04-08",
-    "score": 6.7
-   },
-   {
-    "date": "2026-04-09",
-    "score": 6.9
-   },
-   {
-    "date": "2026-04-10",
-    "score": 6.9
-   },
-   {
-    "date": "2026-04-13",
-    "score": 6.6
-   },
-   {
-    "date": "2026-04-14",
-    "score": 6.6
-   },
-   {
-    "date": "2026-04-15",
-    "score": 6.5
-   }
-  ],
-  "RKLB": [
-   {
-    "date": "2026-02-27",
-    "score": 4.2
-   },
-   {
-    "date": "2026-03-03",
-    "score": 4.6
-   },
-   {
-    "date": "2026-03-04",
-    "score": 5.1
-   },
-   {
-    "date": "2026-03-06",
-    "score": 4.6
-   },
-   {
-    "date": "2026-03-09",
-    "score": 5.9
-   },
-   {
-    "date": "2026-03-10",
-    "score": 6.2
-   },
-   {
-    "date": "2026-03-11",
-    "score": 4.8
-   },
-   {
-    "date": "2026-03-12",
-    "score": 5.8
-   },
-   {
-    "date": "2026-03-13",
-    "score": 5.1
-   },
-   {
-    "date": "2026-03-16",
-    "score": 5.7
-   },
-   {
-    "date": "2026-03-17",
-    "score": 5.4
-   },
-   {
     "date": "2026-03-18",
-    "score": 5.1
+    "score": 4.1
    },
    {
     "date": "2026-03-19",
-    "score": 5.8
+    "score": 5.0
    },
    {
     "date": "2026-03-20",
-    "score": 5.1
+    "score": 4.7
    },
    {
     "date": "2026-03-23",
-    "score": 4.6
-   },
-   {
-    "date": "2026-03-24",
-    "score": 6.0
-   },
-   {
-    "date": "2026-03-25",
-    "score": 5.3
-   },
-   {
-    "date": "2026-03-26",
-    "score": 5.2
-   },
-   {
-    "date": "2026-03-27",
-    "score": 4.6
-   },
-   {
-    "date": "2026-03-30",
-    "score": 4.8
-   },
-   {
-    "date": "2026-03-31",
-    "score": 4.8
-   },
-   {
-    "date": "2026-04-01",
-    "score": 5.2
-   },
-   {
-    "date": "2026-04-02",
-    "score": 5.9
-   },
-   {
-    "date": "2026-04-06",
-    "score": 5.0
-   },
-   {
-    "date": "2026-04-07",
-    "score": 5.5
-   },
-   {
-    "date": "2026-04-08",
-    "score": 6.2
-   },
-   {
-    "date": "2026-04-09",
-    "score": 5.6
-   },
-   {
-    "date": "2026-04-10",
-    "score": 5.7
-   },
-   {
-    "date": "2026-04-13",
-    "score": 5.5
-   },
-   {
-    "date": "2026-04-14",
-    "score": 6.1
-   },
-   {
-    "date": "2026-04-15",
-    "score": 6.2
-   }
-  ],
-  "CRCL": [
-   {
-    "date": "2026-02-27",
-    "score": 4.2
-   },
-   {
-    "date": "2026-03-01",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-02",
-    "score": 5.5
-   },
-   {
-    "date": "2026-03-03",
-    "score": 5.8
-   },
-   {
-    "date": "2026-03-04",
-    "score": 6.2
-   },
-   {
-    "date": "2026-03-05",
-    "score": 6.0
-   },
-   {
-    "date": "2026-03-06",
-    "score": 5.1
-   },
-   {
-    "date": "2026-03-09",
-    "score": 5.9
-   },
-   {
-    "date": "2026-03-10",
-    "score": 7.1
-   },
-   {
-    "date": "2026-03-11",
-    "score": 5.3
-   },
-   {
-    "date": "2026-03-12",
-    "score": 5.4
-   },
-   {
-    "date": "2026-03-13",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-16",
-    "score": 4.6
-   },
-   {
-    "date": "2026-03-17",
-    "score": 4.6
-   },
-   {
-    "date": "2026-03-18",
-    "score": 5.0
-   },
-   {
-    "date": "2026-03-19",
-    "score": 5.8
-   },
-   {
-    "date": "2026-03-20",
-    "score": 4.8
-   },
-   {
-    "date": "2026-03-23",
-    "score": 4.5
-   },
-   {
-    "date": "2026-03-24",
-    "score": 3.5
-   },
-   {
-    "date": "2026-03-25",
     "score": 3.7
    },
    {
-    "date": "2026-03-26",
-    "score": 3.5
-   },
-   {
-    "date": "2026-03-27",
-    "score": 3.4
-   },
-   {
-    "date": "2026-03-30",
-    "score": 4.4
-   },
-   {
-    "date": "2026-03-31",
-    "score": 4.2
-   },
-   {
-    "date": "2026-04-01",
-    "score": 4.2
-   },
-   {
-    "date": "2026-04-02",
-    "score": 5.1
-   },
-   {
-    "date": "2026-04-06",
-    "score": 4.6
-   },
-   {
-    "date": "2026-04-07",
+    "date": "2026-03-25",
     "score": 4.3
    },
    {
+    "date": "2026-03-26",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-27",
+    "score": 3.9
+   },
+   {
+    "date": "2026-03-30",
+    "score": 4.5
+   },
+   {
+    "date": "2026-03-31",
+    "score": 4.9
+   },
+   {
+    "date": "2026-04-01",
+    "score": 5.0
+   },
+   {
+    "date": "2026-04-02",
+    "score": 5.4
+   },
+   {
+    "date": "2026-04-06",
+    "score": 6.4
+   },
+   {
+    "date": "2026-04-07",
+    "score": 6.8
+   },
+   {
     "date": "2026-04-08",
-    "score": 4.8
+    "score": 6.6
    },
    {
     "date": "2026-04-09",
-    "score": 5.3
+    "score": 6.9
    },
    {
     "date": "2026-04-10",
-    "score": 5.1
+    "score": 6.7
    },
    {
     "date": "2026-04-13",
-    "score": 5.5
+    "score": 7.0
    },
    {
     "date": "2026-04-14",
-    "score": 5.9
+    "score": 6.8
    },
    {
     "date": "2026-04-15",
-    "score": 6.2
+    "score": 6.9
+   },
+   {
+    "date": "2026-04-16",
+    "score": 5.3
+   }
+  ],
+  "QCOM": [
+   {
+    "date": "2026-02-27",
+    "score": 6.1
+   },
+   {
+    "date": "2026-02-28",
+    "score": 6.1
+   },
+   {
+    "date": "2026-03-11",
+    "score": 6.1
+   },
+   {
+    "date": "2026-03-12",
+    "score": 5.3
+   },
+   {
+    "date": "2026-03-13",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-16",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-17",
+    "score": 4.5
+   },
+   {
+    "date": "2026-03-18",
+    "score": 4.2
+   },
+   {
+    "date": "2026-03-19",
+    "score": 4.9
+   },
+   {
+    "date": "2026-03-20",
+    "score": 4.7
+   },
+   {
+    "date": "2026-03-23",
+    "score": 4.5
+   },
+   {
+    "date": "2026-03-24",
+    "score": 4.3
+   },
+   {
+    "date": "2026-03-25",
+    "score": 4.3
+   },
+   {
+    "date": "2026-03-26",
+    "score": 5.0
+   },
+   {
+    "date": "2026-03-27",
+    "score": 4.1
+   },
+   {
+    "date": "2026-03-30",
+    "score": 4.8
+   },
+   {
+    "date": "2026-03-31",
+    "score": 5.0
+   },
+   {
+    "date": "2026-04-01",
+    "score": 4.0
+   },
+   {
+    "date": "2026-04-02",
+    "score": 4.9
+   },
+   {
+    "date": "2026-04-06",
+    "score": 5.1
+   },
+   {
+    "date": "2026-04-07",
+    "score": 7.0
+   },
+   {
+    "date": "2026-04-08",
+    "score": 5.0
+   },
+   {
+    "date": "2026-04-09",
+    "score": 5.0
+   },
+   {
+    "date": "2026-04-10",
+    "score": 5.2
+   },
+   {
+    "date": "2026-04-13",
+    "score": 5.2
+   },
+   {
+    "date": "2026-04-14",
+    "score": 4.5
+   },
+   {
+    "date": "2026-04-15",
+    "score": 4.8
+   },
+   {
+    "date": "2026-04-16",
+    "score": 5.0
    }
   ],
   "AAPL": [
@@ -1689,15 +1733,20 @@
   ]
  },
  "hist_full": {
-  "2026-04-15": [
+  "2026-04-16": [
    {
-    "ticker": "NVDA",
-    "score": 6.3,
+    "ticker": "META",
+    "score": 6.7,
     "direction": "bullish"
    },
    {
     "ticker": "MSFT",
-    "score": 7.1,
+    "score": 6.7,
+    "direction": "bullish"
+   },
+   {
+    "ticker": "AMZN",
+    "score": 6.7,
     "direction": "bullish"
    },
    {
@@ -1706,18 +1755,45 @@
     "direction": "bullish"
    },
    {
+    "ticker": "NVDA",
+    "score": 6.3,
+    "direction": "bullish"
+   },
+   {
+    "ticker": "RKLB",
+    "score": 6.3,
+    "direction": "bullish"
+   },
+   {
+    "ticker": "CRCL",
+    "score": 5.8,
+    "direction": "neutral"
+   },
+   {
+    "ticker": "BILI",
+    "score": 5.5,
+    "direction": "bullish"
+   },
+   {
+    "ticker": "VKTX",
+    "score": 5.3,
+    "direction": "neutral"
+   },
+   {
     "ticker": "QCOM",
-    "score": 4.8,
+    "score": 5.0,
     "direction": "bearish"
+   }
+  ],
+  "2026-04-15": [
+   {
+    "ticker": "MSFT",
+    "score": 7.1,
+    "direction": "bullish"
    },
    {
     "ticker": "VKTX",
     "score": 6.9,
-    "direction": "bullish"
-   },
-   {
-    "ticker": "BILI",
-    "score": 6.2,
     "direction": "bullish"
    },
    {
@@ -1731,7 +1807,22 @@
     "direction": "bullish"
    },
    {
+    "ticker": "TSLA",
+    "score": 6.4,
+    "direction": "bullish"
+   },
+   {
+    "ticker": "NVDA",
+    "score": 6.3,
+    "direction": "bullish"
+   },
+   {
     "ticker": "RKLB",
+    "score": 6.2,
+    "direction": "bullish"
+   },
+   {
+    "ticker": "BILI",
     "score": 6.2,
     "direction": "bullish"
    },
@@ -1739,6 +1830,11 @@
     "ticker": "CRCL",
     "score": 6.2,
     "direction": "bullish"
+   },
+   {
+    "ticker": "QCOM",
+    "score": 4.8,
+    "direction": "bearish"
    }
   ],
   "2026-04-14": [
@@ -3426,64 +3522,64 @@
  },
  "search_index": [
   {
-   "ticker": "NVDA",
-   "score": 6.3,
+   "ticker": "META",
+   "score": 6.7,
    "direction": "看多",
-   "price": 198.87
+   "price": 676.87
   },
   {
    "ticker": "MSFT",
-   "score": 7.1,
+   "score": 6.7,
    "direction": "看多",
-   "price": 411.22
+   "price": 420.26
+  },
+  {
+   "ticker": "AMZN",
+   "score": 6.7,
+   "direction": "看多",
+   "price": 249.7
   },
   {
    "ticker": "TSLA",
    "score": 6.4,
    "direction": "看多",
-   "price": 391.95
+   "price": 388.9
   },
   {
-   "ticker": "QCOM",
-   "score": 4.8,
-   "direction": "看空",
-   "price": 133.05
-  },
-  {
-   "ticker": "VKTX",
-   "score": 6.9,
+   "ticker": "NVDA",
+   "score": 6.3,
    "direction": "看多",
-   "price": 35.45
-  },
-  {
-   "ticker": "BILI",
-   "score": 6.2,
-   "direction": "看多",
-   "price": 24.95
-  },
-  {
-   "ticker": "META",
-   "score": 6.6,
-   "direction": "看多",
-   "price": 671.58
-  },
-  {
-   "ticker": "AMZN",
-   "score": 6.5,
-   "direction": "看多",
-   "price": 248.5
+   "price": 198.35
   },
   {
    "ticker": "RKLB",
-   "score": 6.2,
+   "score": 6.3,
    "direction": "看多",
-   "price": 73.6
+   "price": 82.93
   },
   {
    "ticker": "CRCL",
-   "score": 6.2,
+   "score": 5.8,
+   "direction": "中性",
+   "price": 107.46
+  },
+  {
+   "ticker": "BILI",
+   "score": 5.5,
    "direction": "看多",
-   "price": 105.52
+   "price": 25.25
+  },
+  {
+   "ticker": "VKTX",
+   "score": 5.3,
+   "direction": "中性",
+   "price": 35.51
+  },
+  {
+   "ticker": "QCOM",
+   "score": 5.0,
+   "direction": "看空",
+   "price": 134.47
   }
  ],
  "equity_curve": [
@@ -3507,15 +3603,15 @@
    "date": "2026-02-25",
    "ticker": "TSLA",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.16,
+   "gross_ret": -7.05,
+   "net_ret": -7.16,
    "spy_ret": -3.0,
    "exit_reason": "SL",
-   "cap_gross": 98992.95,
-   "cap_net": 98975.14,
+   "cap_gross": 98794.16,
+   "cap_net": 98776.26,
    "cap_spy": 99401.6,
-   "cum_gross_pct": -1.01,
-   "cum_net_pct": -1.02,
+   "cum_gross_pct": -1.21,
+   "cum_net_pct": -1.22,
    "cum_spy_pct": -0.6,
    "correct": false
   },
@@ -3527,11 +3623,11 @@
    "net_ret": 2.02,
    "spy_ret": -3.0,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 99199.55,
-   "cap_net": 99174.76,
+   "cap_gross": 99000.34,
+   "cap_net": 98975.48,
    "cap_spy": 99103.74,
-   "cum_gross_pct": -0.8,
-   "cum_net_pct": -0.83,
+   "cum_gross_pct": -1.0,
+   "cum_net_pct": -1.02,
    "cum_spy_pct": -0.9,
    "correct": true
   },
@@ -3543,11 +3639,11 @@
    "net_ret": -0.79,
    "spy_ret": -3.0,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 99157.59,
-   "cap_net": 99096.15,
+   "cap_gross": 98958.46,
+   "cap_net": 98897.03,
    "cap_spy": 98806.78,
-   "cum_gross_pct": -0.84,
-   "cum_net_pct": -0.9,
+   "cum_gross_pct": -1.04,
+   "cum_net_pct": -1.1,
    "cum_spy_pct": -1.19,
    "correct": true
   },
@@ -3559,11 +3655,11 @@
    "net_ret": -5.12,
    "spy_ret": -1.6,
    "exit_reason": "SL",
-   "cap_gross": 98657.04,
-   "cap_net": 98589.02,
+   "cap_gross": 98458.92,
+   "cap_net": 98390.92,
    "cap_spy": 98648.67,
-   "cum_gross_pct": -1.34,
-   "cum_net_pct": -1.41,
+   "cum_gross_pct": -1.54,
+   "cum_net_pct": -1.61,
    "cum_spy_pct": -1.35,
    "correct": false
   },
@@ -3571,15 +3667,15 @@
    "date": "2026-02-26",
    "ticker": "TSLA",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.16,
+   "gross_ret": -2.42,
+   "net_ret": -2.53,
    "spy_ret": -1.6,
-   "exit_reason": "SL",
-   "cap_gross": 98159.02,
-   "cap_net": 98080.55,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 98220.35,
+   "cap_net": 98141.7,
    "cap_spy": 98490.81,
-   "cum_gross_pct": -1.84,
-   "cum_net_pct": -1.92,
+   "cum_gross_pct": -1.78,
+   "cum_net_pct": -1.86,
    "cum_spy_pct": -1.51,
    "correct": false
   },
@@ -3591,11 +3687,11 @@
    "net_ret": 1.57,
    "spy_ret": -1.6,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 98349.54,
-   "cap_net": 98234.65,
+   "cap_gross": 98411.0,
+   "cap_net": 98295.9,
    "cap_spy": 98333.2,
-   "cum_gross_pct": -1.65,
-   "cum_net_pct": -1.77,
+   "cum_gross_pct": -1.59,
+   "cum_net_pct": -1.7,
    "cum_spy_pct": -1.67,
    "correct": true
   },
@@ -3607,11 +3703,11 @@
    "net_ret": -1.64,
    "spy_ret": -1.6,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 98197.3,
-   "cap_net": 98073.7,
+   "cap_gross": 98258.66,
+   "cap_net": 98134.84,
    "cap_spy": 98175.85,
-   "cum_gross_pct": -1.8,
-   "cum_net_pct": -1.93,
+   "cum_gross_pct": -1.74,
+   "cum_net_pct": -1.87,
    "cum_spy_pct": -1.82,
    "correct": false
   },
@@ -3623,11 +3719,11 @@
    "net_ret": 1.84,
    "spy_ret": -1.6,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 98385.25,
-   "cap_net": 98254.57,
+   "cap_gross": 98446.73,
+   "cap_net": 98315.83,
    "cap_spy": 98018.75,
-   "cum_gross_pct": -1.61,
-   "cum_net_pct": -1.75,
+   "cum_gross_pct": -1.55,
+   "cum_net_pct": -1.68,
    "cum_spy_pct": -1.98,
    "correct": true
   },
@@ -3639,11 +3735,11 @@
    "net_ret": -1.86,
    "spy_ret": -1.6,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 98226.75,
-   "cap_net": 98071.77,
+   "cap_gross": 98288.13,
+   "cap_net": 98132.91,
    "cap_spy": 97861.9,
-   "cum_gross_pct": -1.77,
-   "cum_net_pct": -1.93,
+   "cum_gross_pct": -1.71,
+   "cum_net_pct": -1.87,
    "cum_spy_pct": -2.14,
    "correct": false
   },
@@ -3651,15 +3747,15 @@
    "date": "2026-02-26",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -10.04,
+   "net_ret": -10.36,
    "spy_ret": -1.6,
    "exit_reason": "SL",
-   "cap_gross": 97730.9,
-   "cap_net": 97546.35,
+   "cap_gross": 97300.83,
+   "cap_net": 97116.75,
    "cap_spy": 97705.3,
-   "cum_gross_pct": -2.27,
-   "cum_net_pct": -2.45,
+   "cum_gross_pct": -2.7,
+   "cum_net_pct": -2.88,
    "cum_spy_pct": -2.29,
    "correct": false
   },
@@ -3671,11 +3767,11 @@
    "net_ret": 2.59,
    "spy_ret": -1.6,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 97992.72,
-   "cap_net": 97798.89,
+   "cap_gross": 97561.49,
+   "cap_net": 97368.17,
    "cap_spy": 97548.95,
-   "cum_gross_pct": -2.01,
-   "cum_net_pct": -2.2,
+   "cum_gross_pct": -2.44,
+   "cum_net_pct": -2.63,
    "cum_spy_pct": -2.45,
    "correct": true
   },
@@ -3687,11 +3783,11 @@
    "net_ret": 27.73,
    "spy_ret": -1.6,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 100760.23,
-   "cap_net": 100511.07,
+   "cap_gross": 100316.83,
+   "cap_net": 100068.41,
    "cap_spy": 97392.86,
-   "cum_gross_pct": 0.76,
-   "cum_net_pct": 0.51,
+   "cum_gross_pct": 0.32,
+   "cum_net_pct": 0.07,
    "cum_spy_pct": -2.61,
    "correct": true
   },
@@ -3699,15 +3795,15 @@
    "date": "2026-02-27",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -10.04,
+   "net_ret": -10.36,
    "spy_ret": -1.28,
    "exit_reason": "SL",
-   "cap_gross": 100251.59,
-   "cap_net": 99972.58,
+   "cap_gross": 99309.14,
+   "cap_net": 99032.2,
    "cap_spy": 97267.77,
-   "cum_gross_pct": 0.25,
-   "cum_net_pct": -0.03,
+   "cum_gross_pct": -0.69,
+   "cum_net_pct": -0.97,
    "cum_spy_pct": -2.73,
    "correct": false
   },
@@ -3719,11 +3815,11 @@
    "net_ret": 0.73,
    "spy_ret": -1.28,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 100334.0,
-   "cap_net": 100045.8,
+   "cap_gross": 99390.78,
+   "cap_net": 99104.73,
    "cap_spy": 97142.85,
-   "cum_gross_pct": 0.33,
-   "cum_net_pct": 0.05,
+   "cum_gross_pct": -0.61,
+   "cum_net_pct": -0.9,
    "cum_spy_pct": -2.86,
    "correct": true
   },
@@ -3735,11 +3831,11 @@
    "net_ret": 1.97,
    "spy_ret": -1.28,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 100540.89,
-   "cap_net": 100243.08,
+   "cap_gross": 99595.72,
+   "cap_net": 99300.15,
    "cap_spy": 97018.09,
-   "cum_gross_pct": 0.54,
-   "cum_net_pct": 0.24,
+   "cum_gross_pct": -0.4,
+   "cum_net_pct": -0.7,
    "cum_spy_pct": -2.98,
    "correct": true
   },
@@ -3751,11 +3847,11 @@
    "net_ret": -0.5,
    "spy_ret": -1.28,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 100516.16,
-   "cap_net": 100193.36,
+   "cap_gross": 99571.22,
+   "cap_net": 99250.9,
    "cap_spy": 96893.49,
-   "cum_gross_pct": 0.52,
-   "cum_net_pct": 0.19,
+   "cum_gross_pct": -0.43,
+   "cum_net_pct": -0.75,
    "cum_spy_pct": -3.11,
    "correct": true
   },
@@ -3767,11 +3863,11 @@
    "net_ret": 41.02,
    "spy_ret": -1.28,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104690.29,
-   "cap_net": 104302.97,
+   "cap_gross": 103706.11,
+   "cap_net": 103321.85,
    "cap_spy": 96769.05,
-   "cum_gross_pct": 4.69,
-   "cum_net_pct": 4.3,
+   "cum_gross_pct": 3.71,
+   "cum_net_pct": 3.32,
    "cum_spy_pct": -3.23,
    "correct": true
   },
@@ -3783,11 +3879,11 @@
    "net_ret": 3.25,
    "spy_ret": -1.28,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105037.34,
-   "cap_net": 104641.45,
+   "cap_gross": 104049.9,
+   "cap_net": 103657.15,
    "cap_spy": 96644.77,
-   "cum_gross_pct": 5.04,
-   "cum_net_pct": 4.64,
+   "cum_gross_pct": 4.05,
+   "cum_net_pct": 3.66,
    "cum_spy_pct": -3.36,
    "correct": true
   },
@@ -3799,11 +3895,11 @@
    "net_ret": 4.2,
    "spy_ret": -1.28,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105486.06,
-   "cap_net": 105081.19,
+   "cap_gross": 104494.4,
+   "cap_net": 104092.75,
    "cap_spy": 96520.65,
-   "cum_gross_pct": 5.49,
-   "cum_net_pct": 5.08,
+   "cum_gross_pct": 4.49,
+   "cum_net_pct": 4.09,
    "cum_spy_pct": -3.48,
    "correct": true
   },
@@ -3811,17 +3907,17 @@
    "date": "2026-02-27",
    "ticker": "TSLA",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.16,
+   "gross_ret": -0.81,
+   "net_ret": -0.92,
    "spy_ret": -1.28,
-   "exit_reason": "SL",
-   "cap_gross": 104953.57,
-   "cap_net": 104539.23,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 104409.55,
+   "cap_net": 103996.74,
    "cap_spy": 96396.69,
-   "cum_gross_pct": 4.95,
-   "cum_net_pct": 4.54,
+   "cum_gross_pct": 4.41,
+   "cum_net_pct": 4.0,
    "cum_spy_pct": -3.6,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-02-27",
@@ -3831,11 +3927,11 @@
    "net_ret": 2.05,
    "spy_ret": -1.28,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105207.87,
-   "cap_net": 104753.87,
+   "cap_gross": 104662.53,
+   "cap_net": 104210.26,
    "cap_spy": 96272.89,
-   "cum_gross_pct": 5.21,
-   "cum_net_pct": 4.75,
+   "cum_gross_pct": 4.66,
+   "cum_net_pct": 4.21,
    "cum_spy_pct": -3.73,
    "correct": true
   },
@@ -3847,11 +3943,11 @@
    "net_ret": 4.2,
    "spy_ret": -1.34,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105657.32,
-   "cap_net": 105194.08,
+   "cap_gross": 105109.65,
+   "cap_net": 104648.19,
    "cap_spy": 96143.84,
-   "cum_gross_pct": 5.66,
-   "cum_net_pct": 5.19,
+   "cum_gross_pct": 5.11,
+   "cum_net_pct": 4.65,
    "cum_spy_pct": -3.86,
    "correct": true
   },
@@ -3859,17 +3955,17 @@
    "date": "2026-03-01",
    "ticker": "TSLA",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.16,
+   "gross_ret": -0.81,
+   "net_ret": -0.92,
    "spy_ret": -1.34,
-   "exit_reason": "SL",
-   "cap_gross": 105123.96,
-   "cap_net": 104651.54,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 105024.3,
+   "cap_net": 104551.66,
    "cap_spy": 96014.97,
-   "cum_gross_pct": 5.12,
-   "cum_net_pct": 4.65,
+   "cum_gross_pct": 5.02,
+   "cum_net_pct": 4.55,
    "cum_spy_pct": -3.99,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-01",
@@ -3879,11 +3975,11 @@
    "net_ret": 2.05,
    "spy_ret": -1.34,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105378.67,
-   "cap_net": 104866.41,
+   "cap_gross": 105278.78,
+   "cap_net": 104766.32,
    "cap_spy": 95886.27,
-   "cum_gross_pct": 5.38,
-   "cum_net_pct": 4.87,
+   "cum_gross_pct": 5.28,
+   "cum_net_pct": 4.77,
    "cum_spy_pct": -4.11,
    "correct": true
   },
@@ -3895,11 +3991,11 @@
    "net_ret": 0.73,
    "spy_ret": -1.34,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105465.29,
-   "cap_net": 104943.22,
+   "cap_gross": 105365.32,
+   "cap_net": 104843.06,
    "cap_spy": 95757.75,
-   "cum_gross_pct": 5.47,
-   "cum_net_pct": 4.94,
+   "cum_gross_pct": 5.37,
+   "cum_net_pct": 4.84,
    "cum_spy_pct": -4.24,
    "correct": true
   },
@@ -3911,11 +4007,11 @@
    "net_ret": 3.25,
    "spy_ret": -1.34,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105814.91,
-   "cap_net": 105283.78,
+   "cap_gross": 105714.6,
+   "cap_net": 105183.29,
    "cap_spy": 95629.39,
-   "cum_gross_pct": 5.81,
-   "cum_net_pct": 5.28,
+   "cum_gross_pct": 5.71,
+   "cum_net_pct": 5.18,
    "cum_spy_pct": -4.37,
    "correct": true
   },
@@ -3927,11 +4023,11 @@
    "net_ret": -0.5,
    "spy_ret": -1.34,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105788.88,
-   "cap_net": 105231.56,
+   "cap_gross": 105688.6,
+   "cap_net": 105131.12,
    "cap_spy": 95501.21,
-   "cum_gross_pct": 5.79,
-   "cum_net_pct": 5.23,
+   "cum_gross_pct": 5.69,
+   "cum_net_pct": 5.13,
    "cum_spy_pct": -4.5,
    "correct": true
   },
@@ -3939,15 +4035,15 @@
    "date": "2026-03-01",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -10.04,
+   "net_ret": -10.36,
    "spy_ret": -1.34,
    "exit_reason": "SL",
-   "cap_gross": 105254.86,
-   "cap_net": 104667.78,
+   "cap_gross": 104626.96,
+   "cap_net": 104042.49,
    "cap_spy": 95373.2,
-   "cum_gross_pct": 5.25,
-   "cum_net_pct": 4.67,
+   "cum_gross_pct": 4.63,
+   "cum_net_pct": 4.04,
    "cum_spy_pct": -4.63,
    "correct": false
   },
@@ -3959,11 +4055,11 @@
    "net_ret": 1.97,
    "spy_ret": -1.34,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105471.9,
-   "cap_net": 104874.17,
+   "cap_gross": 104842.7,
+   "cap_net": 104247.65,
    "cap_spy": 95245.36,
-   "cum_gross_pct": 5.47,
-   "cum_net_pct": 4.87,
+   "cum_gross_pct": 4.84,
+   "cum_net_pct": 4.25,
    "cum_spy_pct": -4.75,
    "correct": true
   },
@@ -3975,11 +4071,11 @@
    "net_ret": 41.02,
    "spy_ret": -1.34,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 109851.83,
-   "cap_net": 109175.78,
+   "cap_gross": 109196.5,
+   "cap_net": 108523.55,
    "cap_spy": 95117.7,
-   "cum_gross_pct": 9.85,
-   "cum_net_pct": 9.18,
+   "cum_gross_pct": 9.2,
+   "cum_net_pct": 8.52,
    "cum_spy_pct": -4.88,
    "correct": true
   },
@@ -3991,11 +4087,11 @@
    "net_ret": 1.88,
    "spy_ret": -1.46,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 110065.49,
-   "cap_net": 109380.52,
+   "cap_gross": 109408.89,
+   "cap_net": 108727.08,
    "cap_spy": 94978.43,
-   "cum_gross_pct": 10.07,
-   "cum_net_pct": 9.38,
+   "cum_gross_pct": 9.41,
+   "cum_net_pct": 8.73,
    "cum_spy_pct": -5.02,
    "correct": true
   },
@@ -4003,33 +4099,33 @@
    "date": "2026-03-02",
    "ticker": "TSLA",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.16,
+   "gross_ret": 1.12,
+   "net_ret": 1.01,
    "spy_ret": -1.46,
-   "exit_reason": "SL",
-   "cap_gross": 109509.88,
-   "cap_net": 108816.39,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 109530.99,
+   "cap_net": 108836.43,
    "cap_spy": 94839.36,
-   "cum_gross_pct": 9.51,
-   "cum_net_pct": 8.82,
+   "cum_gross_pct": 9.53,
+   "cum_net_pct": 8.84,
    "cum_spy_pct": -5.16,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-02",
    "ticker": "VKTX",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.42,
+   "gross_ret": 7.26,
+   "net_ret": 6.89,
    "spy_ret": -1.46,
-   "exit_reason": "SL",
-   "cap_gross": 108957.07,
-   "cap_net": 108226.88,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 110325.96,
+   "cap_net": 109586.15,
    "cap_spy": 94700.49,
-   "cum_gross_pct": 8.96,
-   "cum_net_pct": 8.23,
+   "cum_gross_pct": 10.33,
+   "cum_net_pct": 9.59,
    "cum_spy_pct": -5.3,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-02",
@@ -4039,11 +4135,11 @@
    "net_ret": 0.02,
    "spy_ret": -1.46,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 108969.38,
-   "cap_net": 108229.39,
+   "cap_gross": 110338.43,
+   "cap_net": 109588.69,
    "cap_spy": 94561.83,
-   "cum_gross_pct": 8.97,
-   "cum_net_pct": 8.23,
+   "cum_gross_pct": 10.34,
+   "cum_net_pct": 9.59,
    "cum_spy_pct": -5.44,
    "correct": true
   },
@@ -4055,11 +4151,11 @@
    "net_ret": 1.52,
    "spy_ret": -1.46,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 109142.43,
-   "cap_net": 108393.72,
+   "cap_gross": 110513.65,
+   "cap_net": 109755.08,
    "cap_spy": 94423.38,
-   "cum_gross_pct": 9.14,
-   "cum_net_pct": 8.39,
+   "cum_gross_pct": 10.51,
+   "cum_net_pct": 9.76,
    "cum_spy_pct": -5.58,
    "correct": true
   },
@@ -4071,11 +4167,11 @@
    "net_ret": 1.15,
    "spy_ret": -1.46,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 109294.68,
-   "cap_net": 108517.83,
+   "cap_gross": 110667.81,
+   "cap_net": 109880.75,
    "cap_spy": 94285.12,
-   "cum_gross_pct": 9.29,
-   "cum_net_pct": 8.52,
+   "cum_gross_pct": 10.67,
+   "cum_net_pct": 9.88,
    "cum_spy_pct": -5.71,
    "correct": true
   },
@@ -4083,15 +4179,15 @@
    "date": "2026-03-02",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -10.04,
+   "net_ret": -10.36,
    "spy_ret": -1.46,
    "exit_reason": "SL",
-   "cap_gross": 108742.96,
-   "cap_net": 107936.44,
+   "cap_gross": 109556.15,
+   "cap_net": 108742.93,
    "cap_spy": 94147.07,
-   "cum_gross_pct": 8.74,
-   "cum_net_pct": 7.94,
+   "cum_gross_pct": 9.56,
+   "cum_net_pct": 8.74,
    "cum_spy_pct": -5.85,
    "correct": false
   },
@@ -4103,11 +4199,11 @@
    "net_ret": 1.95,
    "spy_ret": -1.46,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 108965.23,
-   "cap_net": 108147.37,
+   "cap_gross": 109780.09,
+   "cap_net": 108955.44,
    "cap_spy": 94009.22,
-   "cum_gross_pct": 8.97,
-   "cum_net_pct": 8.15,
+   "cum_gross_pct": 9.78,
+   "cum_net_pct": 8.96,
    "cum_spy_pct": -5.99,
    "correct": true
   },
@@ -4115,17 +4211,17 @@
    "date": "2026-03-02",
    "ticker": "CRCL",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.56,
+   "gross_ret": 9.95,
+   "net_ret": 9.44,
    "spy_ret": -1.46,
-   "exit_reason": "SL",
-   "cap_gross": 108415.18,
-   "cap_net": 107546.34,
+   "exit_reason": "TP",
+   "cap_gross": 110871.85,
+   "cap_net": 109983.43,
    "cap_spy": 93871.57,
-   "cum_gross_pct": 8.42,
-   "cum_net_pct": 7.55,
+   "cum_gross_pct": 10.87,
+   "cum_net_pct": 9.98,
    "cum_spy_pct": -6.13,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-03",
@@ -4135,11 +4231,11 @@
    "net_ret": 1.65,
    "spy_ret": -2.1,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 108601.22,
-   "cap_net": 107723.39,
+   "cap_gross": 111062.11,
+   "cap_net": 110164.49,
    "cap_spy": 93674.68,
-   "cum_gross_pct": 8.6,
-   "cum_net_pct": 7.72,
+   "cum_gross_pct": 11.06,
+   "cum_net_pct": 10.16,
    "cum_spy_pct": -6.33,
    "correct": true
   },
@@ -4151,11 +4247,11 @@
    "net_ret": 0.55,
    "spy_ret": -2.1,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 108672.57,
-   "cap_net": 107782.35,
+   "cap_gross": 111135.07,
+   "cap_net": 110224.79,
    "cap_spy": 93478.19,
-   "cum_gross_pct": 8.67,
-   "cum_net_pct": 7.78,
+   "cum_gross_pct": 11.14,
+   "cum_net_pct": 10.22,
    "cum_spy_pct": -6.52,
    "correct": true
   },
@@ -4163,17 +4259,17 @@
    "date": "2026-03-03",
    "ticker": "VKTX",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.42,
+   "gross_ret": 9.95,
+   "net_ret": 9.57,
    "spy_ret": -2.1,
-   "exit_reason": "SL",
-   "cap_gross": 108123.99,
-   "cap_net": 107198.44,
+   "exit_reason": "TP",
+   "cap_gross": 112240.31,
+   "cap_net": 111280.19,
    "cap_spy": 93282.12,
-   "cum_gross_pct": 8.12,
-   "cum_net_pct": 7.2,
+   "cum_gross_pct": 12.24,
+   "cum_net_pct": 11.28,
    "cum_spy_pct": -6.72,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-03",
@@ -4183,11 +4279,11 @@
    "net_ret": -2.75,
    "spy_ret": -2.1,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107836.05,
-   "cap_net": 106903.3,
+   "cap_gross": 111941.42,
+   "cap_net": 110973.82,
    "cap_spy": 93086.46,
-   "cum_gross_pct": 7.84,
-   "cum_net_pct": 6.9,
+   "cum_gross_pct": 11.94,
+   "cum_net_pct": 10.97,
    "cum_spy_pct": -6.91,
    "correct": false
   },
@@ -4199,11 +4295,11 @@
    "net_ret": -0.58,
    "spy_ret": -2.1,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107780.84,
-   "cap_net": 106841.03,
+   "cap_gross": 111884.1,
+   "cap_net": 110909.17,
    "cap_spy": 92891.21,
-   "cum_gross_pct": 7.78,
-   "cum_net_pct": 6.84,
+   "cum_gross_pct": 11.88,
+   "cum_net_pct": 10.91,
    "cum_spy_pct": -7.11,
    "correct": true
   },
@@ -4215,11 +4311,11 @@
    "net_ret": -2.76,
    "spy_ret": -2.1,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107510.31,
-   "cap_net": 106546.19,
+   "cap_gross": 111603.27,
+   "cap_net": 110603.11,
    "cap_spy": 92696.37,
-   "cum_gross_pct": 7.51,
-   "cum_net_pct": 6.55,
+   "cum_gross_pct": 11.6,
+   "cum_net_pct": 10.6,
    "cum_spy_pct": -7.3,
    "correct": false
   },
@@ -4227,15 +4323,15 @@
    "date": "2026-03-03",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -6.32,
+   "net_ret": -6.63,
    "spy_ret": -2.1,
-   "exit_reason": "SL",
-   "cap_gross": 106967.6,
-   "cap_net": 105975.37,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 110897.83,
+   "cap_net": 109869.76,
    "cap_spy": 92501.94,
-   "cum_gross_pct": 6.97,
-   "cum_net_pct": 5.98,
+   "cum_gross_pct": 10.9,
+   "cum_net_pct": 9.87,
    "cum_spy_pct": -7.5,
    "correct": false
   },
@@ -4247,11 +4343,11 @@
    "net_ret": 0.29,
    "spy_ret": -2.1,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107008.57,
-   "cap_net": 106006.46,
+   "cap_gross": 110940.3,
+   "cap_net": 109901.98,
    "cap_spy": 92307.92,
-   "cum_gross_pct": 7.01,
-   "cum_net_pct": 6.01,
+   "cum_gross_pct": 10.94,
+   "cum_net_pct": 9.9,
    "cum_spy_pct": -7.69,
    "correct": true
   },
@@ -4263,11 +4359,11 @@
    "net_ret": 9.44,
    "spy_ret": -2.1,
    "exit_reason": "TP",
-   "cap_gross": 108072.77,
-   "cap_net": 107006.63,
+   "cap_gross": 112043.6,
+   "cap_net": 110938.91,
    "cap_spy": 92114.31,
-   "cum_gross_pct": 8.07,
-   "cum_net_pct": 7.01,
+   "cum_gross_pct": 12.04,
+   "cum_net_pct": 10.94,
    "cum_spy_pct": -7.89,
    "correct": true
   },
@@ -4279,11 +4375,11 @@
    "net_ret": -4.31,
    "spy_ret": -3.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107616.7,
-   "cap_net": 106545.42,
+   "cap_gross": 111570.78,
+   "cap_net": 110460.75,
    "cap_spy": 91807.22,
-   "cum_gross_pct": 7.62,
-   "cum_net_pct": 6.55,
+   "cum_gross_pct": 11.57,
+   "cum_net_pct": 10.46,
    "cum_spy_pct": -8.19,
    "correct": false
   },
@@ -4291,15 +4387,15 @@
    "date": "2026-03-04",
    "ticker": "RKLB",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.3,
+   "gross_ret": -4.87,
+   "net_ret": -5.12,
    "spy_ret": -3.33,
-   "exit_reason": "SL",
-   "cap_gross": 107073.45,
-   "cap_net": 105980.99,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 111027.77,
+   "cap_net": 109895.5,
    "cap_spy": 91501.17,
-   "cum_gross_pct": 7.07,
-   "cum_net_pct": 5.98,
+   "cum_gross_pct": 11.03,
+   "cum_net_pct": 9.9,
    "cum_spy_pct": -8.5,
    "correct": false
   },
@@ -4307,17 +4403,17 @@
    "date": "2026-03-04",
    "ticker": "VKTX",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.42,
+   "gross_ret": 9.95,
+   "net_ret": 9.57,
    "spy_ret": -3.33,
-   "exit_reason": "SL",
-   "cap_gross": 106532.95,
-   "cap_net": 105406.84,
+   "exit_reason": "TP",
+   "cap_gross": 112131.94,
+   "cap_net": 110947.75,
    "cap_spy": 91196.13,
-   "cum_gross_pct": 6.53,
-   "cum_net_pct": 5.41,
+   "cum_gross_pct": 12.13,
+   "cum_net_pct": 10.95,
    "cum_spy_pct": -8.8,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-04",
@@ -4327,11 +4423,11 @@
    "net_ret": -5.14,
    "spy_ret": -3.33,
    "exit_reason": "SL",
-   "cap_gross": 105995.17,
-   "cap_net": 104865.31,
+   "cap_gross": 111565.89,
+   "cap_net": 110377.75,
    "cap_spy": 90892.11,
-   "cum_gross_pct": 6.0,
-   "cum_net_pct": 4.87,
+   "cum_gross_pct": 11.57,
+   "cum_net_pct": 10.38,
    "cum_spy_pct": -9.11,
    "correct": false
   },
@@ -4343,11 +4439,11 @@
    "net_ret": -2.45,
    "spy_ret": -3.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105742.79,
-   "cap_net": 104608.24,
+   "cap_gross": 111300.26,
+   "cap_net": 110107.16,
    "cap_spy": 90589.1,
-   "cum_gross_pct": 5.74,
-   "cum_net_pct": 4.61,
+   "cum_gross_pct": 11.3,
+   "cum_net_pct": 10.11,
    "cum_spy_pct": -9.41,
    "correct": false
   },
@@ -4359,11 +4455,11 @@
    "net_ret": 9.44,
    "spy_ret": -3.33,
    "exit_reason": "TP",
-   "cap_gross": 106794.4,
-   "cap_net": 105595.22,
+   "cap_gross": 112407.14,
+   "cap_net": 111146.02,
    "cap_spy": 90287.1,
-   "cum_gross_pct": 6.79,
-   "cum_net_pct": 5.6,
+   "cum_gross_pct": 12.41,
+   "cum_net_pct": 11.15,
    "cum_spy_pct": -9.71,
    "correct": true
   },
@@ -4375,11 +4471,11 @@
    "net_ret": -1.59,
    "spy_ret": -3.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 106631.65,
-   "cap_net": 105426.86,
+   "cap_gross": 112235.83,
+   "cap_net": 110968.82,
    "cap_spy": 89986.11,
-   "cum_gross_pct": 6.63,
-   "cum_net_pct": 5.43,
+   "cum_gross_pct": 12.24,
+   "cum_net_pct": 10.97,
    "cum_spy_pct": -10.01,
    "correct": false
   },
@@ -4387,15 +4483,15 @@
    "date": "2026-03-04",
    "ticker": "TSLA",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.16,
+   "gross_ret": -3.63,
+   "net_ret": -3.74,
    "spy_ret": -3.33,
-   "exit_reason": "SL",
-   "cap_gross": 106093.37,
-   "cap_net": 104883.13,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 111828.3,
+   "cap_net": 110553.68,
    "cap_spy": 89686.13,
-   "cum_gross_pct": 6.09,
-   "cum_net_pct": 4.88,
+   "cum_gross_pct": 11.83,
+   "cum_net_pct": 10.55,
    "cum_spy_pct": -10.31,
    "correct": false
   },
@@ -4403,15 +4499,15 @@
    "date": "2026-03-04",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -10.04,
+   "net_ret": -10.36,
    "spy_ret": -3.33,
    "exit_reason": "SL",
-   "cap_gross": 105557.81,
-   "cap_net": 104321.21,
+   "cap_gross": 110704.99,
+   "cap_net": 109408.89,
    "cap_spy": 89387.14,
-   "cum_gross_pct": 5.56,
-   "cum_net_pct": 4.32,
+   "cum_gross_pct": 10.7,
+   "cum_net_pct": 9.41,
    "cum_spy_pct": -10.61,
    "correct": false
   },
@@ -4423,11 +4519,11 @@
    "net_ret": -0.14,
    "spy_ret": -1.8,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105550.95,
-   "cap_net": 104307.09,
+   "cap_gross": 110697.79,
+   "cap_net": 109394.08,
    "cap_spy": 89226.03,
-   "cum_gross_pct": 5.55,
-   "cum_net_pct": 4.31,
+   "cum_gross_pct": 10.7,
+   "cum_net_pct": 9.39,
    "cum_spy_pct": -10.77,
    "correct": true
   },
@@ -4435,15 +4531,15 @@
    "date": "2026-03-05",
    "ticker": "TSLA",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.16,
+   "gross_ret": -2.46,
+   "net_ret": -2.57,
    "spy_ret": -1.8,
-   "exit_reason": "SL",
-   "cap_gross": 105018.13,
-   "cap_net": 103769.13,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 110425.14,
+   "cap_net": 109112.58,
    "cap_spy": 89065.21,
-   "cum_gross_pct": 5.02,
-   "cum_net_pct": 3.77,
+   "cum_gross_pct": 10.43,
+   "cum_net_pct": 9.11,
    "cum_spy_pct": -10.93,
    "correct": false
   },
@@ -4455,11 +4551,11 @@
    "net_ret": 9.57,
    "spy_ret": -1.8,
    "exit_reason": "TP",
-   "cap_gross": 106062.54,
-   "cap_net": 104762.71,
+   "cap_gross": 111523.32,
+   "cap_net": 110157.33,
    "cap_spy": 88904.68,
-   "cum_gross_pct": 6.06,
-   "cum_net_pct": 4.76,
+   "cum_gross_pct": 11.52,
+   "cum_net_pct": 10.16,
    "cum_spy_pct": -11.1,
    "correct": true
   },
@@ -4471,11 +4567,11 @@
    "net_ret": -5.14,
    "spy_ret": -1.8,
    "exit_reason": "SL",
-   "cap_gross": 105527.13,
-   "cap_net": 104224.5,
+   "cap_gross": 110960.35,
+   "cap_net": 109591.4,
    "cap_spy": 88744.44,
-   "cum_gross_pct": 5.53,
-   "cum_net_pct": 4.22,
+   "cum_gross_pct": 10.96,
+   "cum_net_pct": 9.59,
    "cum_spy_pct": -11.26,
    "correct": false
   },
@@ -4487,11 +4583,11 @@
    "net_ret": -2.68,
    "spy_ret": -1.8,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105251.39,
-   "cap_net": 103944.89,
+   "cap_gross": 110670.41,
+   "cap_net": 109297.4,
    "cap_spy": 88584.48,
-   "cum_gross_pct": 5.25,
-   "cum_net_pct": 3.94,
+   "cum_gross_pct": 10.67,
+   "cum_net_pct": 9.3,
    "cum_spy_pct": -11.42,
    "correct": false
   },
@@ -4503,11 +4599,11 @@
    "net_ret": 1.62,
    "spy_ret": -1.8,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105448.32,
-   "cap_net": 104113.43,
+   "cap_gross": 110877.47,
+   "cap_net": 109474.61,
    "cap_spy": 88424.82,
-   "cum_gross_pct": 5.45,
-   "cum_net_pct": 4.11,
+   "cum_gross_pct": 10.88,
+   "cum_net_pct": 9.47,
    "cum_spy_pct": -11.58,
    "correct": true
   },
@@ -4519,11 +4615,11 @@
    "net_ret": -0.04,
    "spy_ret": -1.8,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105477.21,
-   "cap_net": 104109.68,
+   "cap_gross": 110907.85,
+   "cap_net": 109470.67,
    "cap_spy": 88265.44,
-   "cum_gross_pct": 5.48,
-   "cum_net_pct": 4.11,
+   "cum_gross_pct": 10.91,
+   "cum_net_pct": 9.47,
    "cum_spy_pct": -11.73,
    "correct": true
   },
@@ -4535,11 +4631,11 @@
    "net_ret": -5.14,
    "spy_ret": -1.8,
    "exit_reason": "SL",
-   "cap_gross": 104944.76,
-   "cap_net": 103574.82,
+   "cap_gross": 110347.99,
+   "cap_net": 108908.26,
    "cap_spy": 88106.35,
-   "cum_gross_pct": 4.94,
-   "cum_net_pct": 3.57,
+   "cum_gross_pct": 10.35,
+   "cum_net_pct": 8.91,
    "cum_spy_pct": -11.89,
    "correct": false
   },
@@ -4547,17 +4643,17 @@
    "date": "2026-03-05",
    "ticker": "CRCL",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.56,
+   "gross_ret": 9.95,
+   "net_ret": 9.44,
    "spy_ret": -1.8,
-   "exit_reason": "SL",
-   "cap_gross": 104415.0,
-   "cap_net": 102999.2,
+   "exit_reason": "TP",
+   "cap_gross": 111445.4,
+   "cap_net": 109935.81,
    "cap_spy": 87947.55,
-   "cum_gross_pct": 4.41,
-   "cum_net_pct": 3.0,
+   "cum_gross_pct": 11.45,
+   "cum_net_pct": 9.94,
    "cum_spy_pct": -12.05,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-06",
@@ -4567,11 +4663,11 @@
    "net_ret": 2.24,
    "spy_ret": -0.24,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104656.3,
-   "cap_net": 103230.05,
+   "cap_gross": 111702.95,
+   "cap_net": 110182.21,
    "cap_spy": 87926.75,
-   "cum_gross_pct": 4.66,
-   "cum_net_pct": 3.23,
+   "cum_gross_pct": 11.7,
+   "cum_net_pct": 10.18,
    "cum_spy_pct": -12.07,
    "correct": true
   },
@@ -4583,11 +4679,11 @@
    "net_ret": 0.53,
    "spy_ret": -0.24,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104723.28,
-   "cap_net": 103284.79,
+   "cap_gross": 111774.44,
+   "cap_net": 110240.63,
    "cap_spy": 87905.95,
-   "cum_gross_pct": 4.72,
-   "cum_net_pct": 3.28,
+   "cum_gross_pct": 11.77,
+   "cum_net_pct": 10.24,
    "cum_spy_pct": -12.09,
    "correct": true
   },
@@ -4599,11 +4695,11 @@
    "net_ret": 9.57,
    "spy_ret": -0.24,
    "exit_reason": "TP",
-   "cap_gross": 105764.76,
-   "cap_net": 104273.74,
+   "cap_gross": 112886.04,
+   "cap_net": 111296.18,
    "cap_spy": 87885.16,
-   "cum_gross_pct": 5.76,
-   "cum_net_pct": 4.27,
+   "cum_gross_pct": 12.89,
+   "cum_net_pct": 11.3,
    "cum_spy_pct": -12.11,
    "correct": true
   },
@@ -4615,11 +4711,11 @@
    "net_ret": -3.53,
    "spy_ret": -0.24,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105400.61,
-   "cap_net": 103905.38,
+   "cap_gross": 112497.37,
+   "cap_net": 110903.02,
    "cap_spy": 87864.38,
-   "cum_gross_pct": 5.4,
-   "cum_net_pct": 3.91,
+   "cum_gross_pct": 12.5,
+   "cum_net_pct": 10.9,
    "cum_spy_pct": -12.14,
    "correct": false
   },
@@ -4631,11 +4727,11 @@
    "net_ret": -2.41,
    "spy_ret": -0.24,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105154.5,
-   "cap_net": 103655.47,
+   "cap_gross": 112234.69,
+   "cap_net": 110636.28,
    "cap_spy": 87843.6,
-   "cum_gross_pct": 5.15,
-   "cum_net_pct": 3.66,
+   "cum_gross_pct": 12.23,
+   "cum_net_pct": 10.64,
    "cum_spy_pct": -12.16,
    "correct": false
   },
@@ -4647,11 +4743,11 @@
    "net_ret": 11.85,
    "spy_ret": -0.24,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 106426.34,
-   "cap_net": 104883.3,
+   "cap_gross": 113592.17,
+   "cap_net": 111946.8,
    "cap_spy": 87822.82,
-   "cum_gross_pct": 6.43,
-   "cum_net_pct": 4.88,
+   "cum_gross_pct": 13.59,
+   "cum_net_pct": 11.95,
    "cum_spy_pct": -12.18,
    "correct": true
   },
@@ -4663,11 +4759,11 @@
    "net_ret": 9.63,
    "spy_ret": -0.24,
    "exit_reason": "TP",
-   "cap_gross": 107484.75,
-   "cap_net": 105893.85,
+   "cap_gross": 114721.84,
+   "cap_net": 113025.4,
    "cap_spy": 87802.05,
-   "cum_gross_pct": 7.48,
-   "cum_net_pct": 5.89,
+   "cum_gross_pct": 14.72,
+   "cum_net_pct": 13.03,
    "cum_spy_pct": -12.2,
    "correct": true
   },
@@ -4679,11 +4775,11 @@
    "net_ret": 0.84,
    "spy_ret": -0.24,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107585.03,
-   "cap_net": 105983.15,
+   "cap_gross": 114828.88,
+   "cap_net": 113120.72,
    "cap_spy": 87781.29,
-   "cum_gross_pct": 7.59,
-   "cum_net_pct": 5.98,
+   "cum_gross_pct": 14.83,
+   "cum_net_pct": 13.12,
    "cum_spy_pct": -12.22,
    "correct": true
   },
@@ -4695,11 +4791,11 @@
    "net_ret": 9.44,
    "spy_ret": -0.24,
    "exit_reason": "TP",
-   "cap_gross": 108654.97,
-   "cap_net": 106983.1,
+   "cap_gross": 115970.85,
+   "cap_net": 114188.01,
    "cap_spy": 87760.53,
-   "cum_gross_pct": 8.65,
-   "cum_net_pct": 6.98,
+   "cum_gross_pct": 15.97,
+   "cum_net_pct": 14.19,
    "cum_spy_pct": -12.24,
    "correct": true
   },
@@ -4711,11 +4807,11 @@
    "net_ret": -1.3,
    "spy_ret": -2.48,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 108521.1,
-   "cap_net": 106843.82,
+   "cap_gross": 115827.98,
+   "cap_net": 114039.35,
    "cap_spy": 87542.64,
-   "cum_gross_pct": 8.52,
-   "cum_net_pct": 6.84,
+   "cum_gross_pct": 15.83,
+   "cum_net_pct": 14.04,
    "cum_spy_pct": -12.46,
    "correct": false
   },
@@ -4727,11 +4823,11 @@
    "net_ret": -1.59,
    "spy_ret": -2.48,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 108360.49,
-   "cap_net": 106673.95,
+   "cap_gross": 115656.55,
+   "cap_net": 113858.04,
    "cap_spy": 87325.29,
-   "cum_gross_pct": 8.36,
-   "cum_net_pct": 6.67,
+   "cum_gross_pct": 15.66,
+   "cum_net_pct": 13.86,
    "cum_spy_pct": -12.67,
    "correct": false
   },
@@ -4743,11 +4839,11 @@
    "net_ret": 9.57,
    "spy_ret": -2.48,
    "exit_reason": "TP",
-   "cap_gross": 109438.14,
-   "cap_net": 107695.35,
+   "cap_gross": 116806.76,
+   "cap_net": 114948.23,
    "cap_spy": 87108.47,
-   "cum_gross_pct": 9.44,
-   "cum_net_pct": 7.7,
+   "cum_gross_pct": 16.81,
+   "cum_net_pct": 14.95,
    "cum_spy_pct": -12.89,
    "correct": true
   },
@@ -4759,11 +4855,11 @@
    "net_ret": -4.99,
    "spy_ret": -2.48,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 108902.11,
-   "cap_net": 107158.15,
+   "cap_gross": 116234.64,
+   "cap_net": 114374.86,
    "cap_spy": 86892.2,
-   "cum_gross_pct": 8.9,
-   "cum_net_pct": 7.16,
+   "cum_gross_pct": 16.23,
+   "cum_net_pct": 14.37,
    "cum_spy_pct": -13.11,
    "correct": false
   },
@@ -4775,11 +4871,11 @@
    "net_ret": -4.37,
    "spy_ret": -2.48,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 108433.4,
-   "cap_net": 106689.47,
+   "cap_gross": 115734.36,
+   "cap_net": 113874.6,
    "cap_spy": 86676.47,
-   "cum_gross_pct": 8.43,
-   "cum_net_pct": 6.69,
+   "cum_gross_pct": 15.73,
+   "cum_net_pct": 13.87,
    "cum_spy_pct": -13.32,
    "correct": false
   },
@@ -4791,11 +4887,11 @@
    "net_ret": -3.05,
    "spy_ret": -2.48,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 108130.0,
-   "cap_net": 106364.28,
+   "cap_gross": 115410.54,
+   "cap_net": 113527.51,
    "cap_spy": 86461.27,
-   "cum_gross_pct": 8.13,
-   "cum_net_pct": 6.36,
+   "cum_gross_pct": 15.41,
+   "cum_net_pct": 13.53,
    "cum_spy_pct": -13.54,
    "correct": false
   },
@@ -4807,11 +4903,11 @@
    "net_ret": -2.83,
    "spy_ret": -2.48,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107857.19,
-   "cap_net": 106062.96,
+   "cap_gross": 115119.36,
+   "cap_net": 113205.9,
    "cap_spy": 86246.6,
-   "cum_gross_pct": 7.86,
-   "cum_net_pct": 6.06,
+   "cum_gross_pct": 15.12,
+   "cum_net_pct": 13.21,
    "cum_spy_pct": -13.75,
    "correct": false
   },
@@ -4823,11 +4919,11 @@
    "net_ret": -1.79,
    "spy_ret": -2.48,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107674.26,
-   "cap_net": 105873.57,
+   "cap_gross": 114924.11,
+   "cap_net": 113003.76,
    "cap_spy": 86032.47,
-   "cum_gross_pct": 7.67,
-   "cum_net_pct": 5.87,
+   "cum_gross_pct": 14.92,
+   "cum_net_pct": 13.0,
    "cum_spy_pct": -13.97,
    "correct": false
   },
@@ -4839,11 +4935,11 @@
    "net_ret": 18.27,
    "spy_ret": -2.48,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 109696.06,
-   "cap_net": 107807.54,
+   "cap_gross": 117082.04,
+   "cap_net": 115067.98,
    "cap_spy": 85818.87,
-   "cum_gross_pct": 9.7,
-   "cum_net_pct": 7.81,
+   "cum_gross_pct": 17.08,
+   "cum_net_pct": 15.07,
    "cum_spy_pct": -14.18,
    "correct": true
   },
@@ -4855,11 +4951,11 @@
    "net_ret": -3.03,
    "spy_ret": -2.57,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 109378.05,
-   "cap_net": 107480.95,
+   "cap_gross": 116742.62,
+   "cap_net": 114719.39,
    "cap_spy": 85598.61,
-   "cum_gross_pct": 9.38,
-   "cum_net_pct": 7.48,
+   "cum_gross_pct": 16.74,
+   "cum_net_pct": 14.72,
    "cum_spy_pct": -14.4,
    "correct": false
   },
@@ -4867,15 +4963,15 @@
    "date": "2026-03-10",
    "ticker": "VKTX",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.42,
+   "gross_ret": -2.13,
+   "net_ret": -2.5,
    "spy_ret": -2.57,
-   "exit_reason": "SL",
-   "cap_gross": 108825.91,
-   "cap_net": 106898.67,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 116493.38,
+   "cap_net": 114432.02,
    "cap_spy": 85378.92,
-   "cum_gross_pct": 8.83,
-   "cum_net_pct": 6.9,
+   "cum_gross_pct": 16.49,
+   "cum_net_pct": 14.43,
    "cum_spy_pct": -14.62,
    "correct": false
   },
@@ -4887,11 +4983,11 @@
    "net_ret": -5.14,
    "spy_ret": -2.57,
    "exit_reason": "SL",
-   "cap_gross": 108276.56,
-   "cap_net": 106349.48,
+   "cap_gross": 115905.32,
+   "cap_net": 113844.12,
    "cap_spy": 85159.8,
-   "cum_gross_pct": 8.28,
-   "cum_net_pct": 6.35,
+   "cum_gross_pct": 15.91,
+   "cum_net_pct": 13.84,
    "cum_spy_pct": -14.84,
    "correct": false
   },
@@ -4899,15 +4995,15 @@
    "date": "2026-03-10",
    "ticker": "TSLA",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.16,
+   "gross_ret": -4.74,
+   "net_ret": -4.85,
    "spy_ret": -2.57,
-   "exit_reason": "SL",
-   "cap_gross": 107729.98,
-   "cap_net": 105800.98,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 115355.58,
+   "cap_net": 113291.66,
    "cap_spy": 84941.23,
-   "cum_gross_pct": 7.73,
-   "cum_net_pct": 5.8,
+   "cum_gross_pct": 15.36,
+   "cum_net_pct": 13.29,
    "cum_spy_pct": -15.06,
    "correct": false
   },
@@ -4919,11 +5015,11 @@
    "net_ret": -3.43,
    "spy_ret": -2.57,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107367.9,
-   "cap_net": 105437.99,
+   "cap_gross": 114967.87,
+   "cap_net": 112902.97,
    "cap_spy": 84723.23,
-   "cum_gross_pct": 7.37,
-   "cum_net_pct": 5.44,
+   "cum_gross_pct": 14.97,
+   "cum_net_pct": 12.9,
    "cum_spy_pct": -15.28,
    "correct": false
   },
@@ -4931,15 +5027,15 @@
    "date": "2026-03-10",
    "ticker": "RKLB",
    "direction": "bearish",
-   "gross_ret": -5.05,
-   "net_ret": -5.31,
+   "gross_ret": -10.05,
+   "net_ret": -10.35,
    "spy_ret": -2.57,
    "exit_reason": "SL",
-   "cap_gross": 106825.37,
-   "cap_net": 104877.89,
+   "cap_gross": 113811.87,
+   "cap_net": 111734.1,
    "cap_spy": 84505.79,
-   "cum_gross_pct": 6.83,
-   "cum_net_pct": 4.88,
+   "cum_gross_pct": 13.81,
+   "cum_net_pct": 11.73,
    "cum_spy_pct": -15.49,
    "correct": false
   },
@@ -4951,11 +5047,11 @@
    "net_ret": -5.77,
    "spy_ret": -2.57,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 106242.63,
-   "cap_net": 104273.25,
+   "cap_gross": 113191.02,
+   "cap_net": 111089.93,
    "cap_spy": 84288.91,
-   "cum_gross_pct": 6.24,
-   "cum_net_pct": 4.27,
+   "cum_gross_pct": 13.19,
+   "cum_net_pct": 11.09,
    "cum_spy_pct": -15.71,
    "correct": false
   },
@@ -4967,11 +5063,11 @@
    "net_ret": -4.2,
    "spy_ret": -2.57,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105804.28,
-   "cap_net": 103835.76,
+   "cap_gross": 112724.0,
+   "cap_net": 110623.84,
    "cap_spy": 84072.58,
-   "cum_gross_pct": 5.8,
-   "cum_net_pct": 3.84,
+   "cum_gross_pct": 12.72,
+   "cum_net_pct": 10.62,
    "cum_spy_pct": -15.93,
    "correct": false
   },
@@ -4983,11 +5079,11 @@
    "net_ret": -2.69,
    "spy_ret": -2.57,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105529.29,
-   "cap_net": 103556.57,
+   "cap_gross": 112431.03,
+   "cap_net": 110326.39,
    "cap_spy": 83856.81,
-   "cum_gross_pct": 5.53,
-   "cum_net_pct": 3.56,
+   "cum_gross_pct": 12.43,
+   "cum_net_pct": 10.33,
    "cum_spy_pct": -16.14,
    "correct": false
   },
@@ -4995,31 +5091,31 @@
    "date": "2026-03-10",
    "ticker": "CRCL",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.56,
+   "gross_ret": 9.95,
+   "net_ret": 9.44,
    "spy_ret": -2.57,
-   "exit_reason": "SL",
-   "cap_gross": 104996.58,
-   "cap_net": 102981.05,
+   "exit_reason": "TP",
+   "cap_gross": 113549.16,
+   "cap_net": 111367.32,
    "cap_spy": 83641.59,
-   "cum_gross_pct": 5.0,
-   "cum_net_pct": 2.98,
+   "cum_gross_pct": 13.55,
+   "cum_net_pct": 11.37,
    "cum_spy_pct": -16.36,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-11",
    "ticker": "CRCL",
    "direction": "bearish",
-   "gross_ret": -5.05,
-   "net_ret": -5.61,
+   "gross_ret": -12.06,
+   "net_ret": -12.63,
    "spy_ret": -3.84,
    "exit_reason": "SL",
-   "cap_gross": 104466.03,
-   "cap_net": 102403.71,
+   "cap_gross": 112180.21,
+   "cap_net": 109960.55,
    "cap_spy": 83320.19,
-   "cum_gross_pct": 4.47,
-   "cum_net_pct": 2.4,
+   "cum_gross_pct": 12.18,
+   "cum_net_pct": 9.96,
    "cum_spy_pct": -16.68,
    "correct": false
   },
@@ -5031,11 +5127,11 @@
    "net_ret": -5.12,
    "spy_ret": -3.84,
    "exit_reason": "SL",
-   "cap_gross": 103938.69,
-   "cap_net": 101879.66,
+   "cap_gross": 111613.92,
+   "cap_net": 109397.83,
    "cap_spy": 83000.02,
-   "cum_gross_pct": 3.94,
-   "cum_net_pct": 1.88,
+   "cum_gross_pct": 11.61,
+   "cum_net_pct": 9.4,
    "cum_spy_pct": -17.0,
    "correct": false
   },
@@ -5047,11 +5143,11 @@
    "net_ret": 9.83,
    "spy_ret": -3.84,
    "exit_reason": "TP",
-   "cap_gross": 104973.4,
-   "cap_net": 102880.71,
+   "cap_gross": 112725.04,
+   "cap_net": 110472.75,
    "cap_spy": 82681.09,
-   "cum_gross_pct": 4.97,
-   "cum_net_pct": 2.88,
+   "cum_gross_pct": 12.73,
+   "cum_net_pct": 10.47,
    "cum_spy_pct": -17.32,
    "correct": true
   },
@@ -5063,11 +5159,11 @@
    "net_ret": 3.0,
    "spy_ret": -3.84,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105303.64,
-   "cap_net": 103189.56,
+   "cap_gross": 113079.67,
+   "cap_net": 110804.39,
    "cap_spy": 82363.37,
-   "cum_gross_pct": 5.3,
-   "cum_net_pct": 3.19,
+   "cum_gross_pct": 13.08,
+   "cum_net_pct": 10.8,
    "cum_spy_pct": -17.64,
    "correct": true
   },
@@ -5079,11 +5175,11 @@
    "net_ret": 5.61,
    "spy_ret": -3.84,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105902.08,
-   "cap_net": 103768.28,
+   "cap_gross": 113722.3,
+   "cap_net": 111425.82,
    "cap_spy": 82046.89,
-   "cum_gross_pct": 5.9,
-   "cum_net_pct": 3.77,
+   "cum_gross_pct": 13.72,
+   "cum_net_pct": 11.43,
    "cum_spy_pct": -17.95,
    "correct": true
   },
@@ -5091,15 +5187,15 @@
    "date": "2026-03-11",
    "ticker": "VKTX",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.42,
+   "gross_ret": -9.59,
+   "net_ret": -9.96,
    "spy_ret": -3.84,
-   "exit_reason": "SL",
-   "cap_gross": 105367.49,
-   "cap_net": 103206.12,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 112631.48,
+   "cap_net": 110315.83,
    "cap_spy": 81731.61,
-   "cum_gross_pct": 5.37,
-   "cum_net_pct": 3.21,
+   "cum_gross_pct": 12.63,
+   "cum_net_pct": 10.32,
    "cum_spy_pct": -18.27,
    "correct": false
   },
@@ -5111,11 +5207,11 @@
    "net_ret": 5.26,
    "spy_ret": -3.84,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105962.08,
-   "cap_net": 103748.56,
+   "cap_gross": 113267.06,
+   "cap_net": 110895.64,
    "cap_spy": 81417.55,
-   "cum_gross_pct": 5.96,
-   "cum_net_pct": 3.75,
+   "cum_gross_pct": 13.27,
+   "cum_net_pct": 10.9,
    "cum_spy_pct": -18.58,
    "correct": true
   },
@@ -5127,11 +5223,11 @@
    "net_ret": -3.51,
    "spy_ret": -3.84,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105599.27,
-   "cap_net": 103384.04,
+   "cap_gross": 112879.23,
+   "cap_net": 110506.01,
    "cap_spy": 81104.7,
-   "cum_gross_pct": 5.6,
-   "cum_net_pct": 3.38,
+   "cum_gross_pct": 12.88,
+   "cum_net_pct": 10.51,
    "cum_spy_pct": -18.9,
    "correct": false
   },
@@ -5143,11 +5239,11 @@
    "net_ret": -9.44,
    "spy_ret": -3.84,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104612.44,
-   "cap_net": 102408.56,
+   "cap_gross": 111824.37,
+   "cap_net": 109463.33,
    "cap_spy": 80793.04,
-   "cum_gross_pct": 4.61,
-   "cum_net_pct": 2.41,
+   "cum_gross_pct": 11.82,
+   "cum_net_pct": 9.46,
    "cum_spy_pct": -19.21,
    "correct": false
   },
@@ -5155,17 +5251,17 @@
    "date": "2026-03-11",
    "ticker": "RKLB",
    "direction": "bearish",
-   "gross_ret": -5.05,
-   "net_ret": -5.34,
+   "gross_ret": 6.57,
+   "net_ret": 6.26,
    "spy_ret": -3.84,
-   "exit_reason": "SL",
-   "cap_gross": 104083.83,
-   "cap_net": 101861.61,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 112559.4,
+   "cap_net": 110148.13,
    "cap_spy": 80482.59,
-   "cum_gross_pct": 4.08,
-   "cum_net_pct": 1.86,
+   "cum_gross_pct": 12.56,
+   "cum_net_pct": 10.15,
    "cum_spy_pct": -19.52,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-12",
@@ -5175,11 +5271,11 @@
    "net_ret": 1.99,
    "spy_ret": -1.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104306.05,
-   "cap_net": 102064.37,
+   "cap_gross": 112799.71,
+   "cap_net": 110367.4,
    "cap_spy": 80375.17,
-   "cum_gross_pct": 4.31,
-   "cum_net_pct": 2.06,
+   "cum_gross_pct": 12.8,
+   "cum_net_pct": 10.37,
    "cum_spy_pct": -19.62,
    "correct": true
   },
@@ -5191,11 +5287,11 @@
    "net_ret": 4.62,
    "spy_ret": -1.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104795.56,
-   "cap_net": 102535.75,
+   "cap_gross": 113329.08,
+   "cap_net": 110877.12,
    "cap_spy": 80267.89,
-   "cum_gross_pct": 4.8,
-   "cum_net_pct": 2.54,
+   "cum_gross_pct": 13.33,
+   "cum_net_pct": 10.88,
    "cum_spy_pct": -19.73,
    "correct": true
   },
@@ -5207,11 +5303,11 @@
    "net_ret": 4.02,
    "spy_ret": -1.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105224.7,
-   "cap_net": 102947.49,
+   "cap_gross": 113793.16,
+   "cap_net": 111322.35,
    "cap_spy": 80160.76,
-   "cum_gross_pct": 5.22,
-   "cum_net_pct": 2.95,
+   "cum_gross_pct": 13.79,
+   "cum_net_pct": 11.32,
    "cum_spy_pct": -19.84,
    "correct": true
   },
@@ -5223,11 +5319,11 @@
    "net_ret": 3.46,
    "spy_ret": -1.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105601.93,
-   "cap_net": 103303.22,
+   "cap_gross": 114201.11,
+   "cap_net": 111707.03,
    "cap_spy": 80053.77,
-   "cum_gross_pct": 5.6,
-   "cum_net_pct": 3.3,
+   "cum_gross_pct": 14.2,
+   "cum_net_pct": 11.71,
    "cum_spy_pct": -19.95,
    "correct": true
   },
@@ -5235,15 +5331,15 @@
    "date": "2026-03-12",
    "ticker": "VKTX",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.42,
+   "gross_ret": -8.23,
+   "net_ret": -8.6,
    "spy_ret": -1.33,
-   "exit_reason": "SL",
-   "cap_gross": 105068.85,
-   "cap_net": 102743.58,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 113261.01,
+   "cap_net": 110746.09,
    "cap_spy": 79946.92,
-   "cum_gross_pct": 5.07,
-   "cum_net_pct": 2.74,
+   "cum_gross_pct": 13.26,
+   "cum_net_pct": 10.75,
    "cum_spy_pct": -20.05,
    "correct": false
   },
@@ -5255,11 +5351,11 @@
    "net_ret": -5.44,
    "spy_ret": -1.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104507.15,
-   "cap_net": 102185.01,
+   "cap_gross": 112655.51,
+   "cap_net": 110144.02,
    "cap_spy": 79840.21,
-   "cum_gross_pct": 4.51,
-   "cum_net_pct": 2.19,
+   "cum_gross_pct": 12.66,
+   "cum_net_pct": 10.14,
    "cum_spy_pct": -20.16,
    "correct": false
   },
@@ -5271,11 +5367,11 @@
    "net_ret": -2.88,
    "spy_ret": -1.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104238.57,
-   "cap_net": 101890.69,
+   "cap_gross": 112365.99,
+   "cap_net": 109826.77,
    "cap_spy": 79733.65,
-   "cum_gross_pct": 4.24,
-   "cum_net_pct": 1.89,
+   "cum_gross_pct": 12.37,
+   "cum_net_pct": 9.83,
    "cum_spy_pct": -20.27,
    "correct": false
   },
@@ -5287,11 +5383,11 @@
    "net_ret": -0.39,
    "spy_ret": -1.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104208.24,
-   "cap_net": 101851.37,
+   "cap_gross": 112333.29,
+   "cap_net": 109784.39,
    "cap_spy": 79627.23,
-   "cum_gross_pct": 4.21,
-   "cum_net_pct": 1.85,
+   "cum_gross_pct": 12.33,
+   "cum_net_pct": 9.78,
    "cum_spy_pct": -20.37,
    "correct": true
   },
@@ -5303,11 +5399,11 @@
    "net_ret": -0.79,
    "spy_ret": -1.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104151.86,
-   "cap_net": 101770.79,
+   "cap_gross": 112272.52,
+   "cap_net": 109697.53,
    "cap_spy": 79520.95,
-   "cum_gross_pct": 4.15,
-   "cum_net_pct": 1.77,
+   "cum_gross_pct": 12.27,
+   "cum_net_pct": 9.7,
    "cum_spy_pct": -20.48,
    "correct": true
   },
@@ -5319,11 +5415,11 @@
    "net_ret": 10.4,
    "spy_ret": -1.33,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105288.47,
-   "cap_net": 102829.47,
+   "cap_gross": 113497.75,
+   "cap_net": 110838.67,
    "cap_spy": 79414.81,
-   "cum_gross_pct": 5.29,
-   "cum_net_pct": 2.83,
+   "cum_gross_pct": 13.5,
+   "cum_net_pct": 10.84,
    "cum_spy_pct": -20.59,
    "correct": true
   },
@@ -5335,11 +5431,11 @@
    "net_ret": 0.74,
    "spy_ret": -1.11,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105381.75,
-   "cap_net": 102905.7,
+   "cap_gross": 113598.31,
+   "cap_net": 110920.84,
    "cap_spy": 79326.97,
-   "cum_gross_pct": 5.38,
-   "cum_net_pct": 2.91,
+   "cum_gross_pct": 13.6,
+   "cum_net_pct": 10.92,
    "cum_spy_pct": -20.67,
    "correct": true
   },
@@ -5351,11 +5447,11 @@
    "net_ret": 5.69,
    "spy_ret": -1.11,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105989.49,
-   "cap_net": 103491.43,
+   "cap_gross": 114253.43,
+   "cap_net": 111552.19,
    "cap_spy": 79239.21,
-   "cum_gross_pct": 5.99,
-   "cum_net_pct": 3.49,
+   "cum_gross_pct": 14.25,
+   "cum_net_pct": 11.55,
    "cum_spy_pct": -20.76,
    "correct": true
   },
@@ -5367,11 +5463,11 @@
    "net_ret": 1.96,
    "spy_ret": -1.11,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 106210.8,
-   "cap_net": 103694.19,
+   "cap_gross": 114491.99,
+   "cap_net": 111770.75,
    "cap_spy": 79151.56,
-   "cum_gross_pct": 6.21,
-   "cum_net_pct": 3.69,
+   "cum_gross_pct": 14.49,
+   "cum_net_pct": 11.77,
    "cum_spy_pct": -20.85,
    "correct": true
   },
@@ -5383,11 +5479,11 @@
    "net_ret": 2.72,
    "spy_ret": -1.11,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 106508.4,
-   "cap_net": 103976.46,
+   "cap_gross": 114812.8,
+   "cap_net": 112075.0,
    "cap_spy": 79064.0,
-   "cum_gross_pct": 6.51,
-   "cum_net_pct": 3.98,
+   "cum_gross_pct": 14.81,
+   "cum_net_pct": 12.07,
    "cum_spy_pct": -20.94,
    "correct": true
   },
@@ -5399,11 +5495,11 @@
    "net_ret": 3.29,
    "spy_ret": -1.11,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 106869.25,
-   "cap_net": 104318.73,
+   "cap_gross": 115201.78,
+   "cap_net": 112443.93,
    "cap_spy": 78976.54,
-   "cum_gross_pct": 6.87,
-   "cum_net_pct": 4.32,
+   "cum_gross_pct": 15.2,
+   "cum_net_pct": 12.44,
    "cum_spy_pct": -21.02,
    "correct": true
   },
@@ -5415,11 +5511,11 @@
    "net_ret": -10.08,
    "spy_ret": -1.11,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105831.44,
-   "cap_net": 103267.1,
+   "cap_gross": 114083.06,
+   "cap_net": 111310.39,
    "cap_spy": 78889.18,
-   "cum_gross_pct": 5.83,
-   "cum_net_pct": 3.27,
+   "cum_gross_pct": 14.08,
+   "cum_net_pct": 11.31,
    "cum_spy_pct": -21.11,
    "correct": false
   },
@@ -5431,11 +5527,11 @@
    "net_ret": -0.3,
    "spy_ret": -1.11,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105809.54,
-   "cap_net": 103236.42,
+   "cap_gross": 114059.44,
+   "cap_net": 111277.32,
    "cap_spy": 78801.91,
-   "cum_gross_pct": 5.81,
-   "cum_net_pct": 3.24,
+   "cum_gross_pct": 14.06,
+   "cum_net_pct": 11.28,
    "cum_spy_pct": -21.2,
    "correct": true
   },
@@ -5443,15 +5539,15 @@
    "date": "2026-03-13",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -6.98,
+   "net_ret": -7.29,
    "spy_ret": -1.11,
-   "exit_reason": "SL",
-   "cap_gross": 105275.41,
-   "cap_net": 102683.33,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 113262.85,
+   "cap_net": 110465.65,
    "cap_spy": 78714.74,
-   "cum_gross_pct": 5.28,
-   "cum_net_pct": 2.68,
+   "cum_gross_pct": 13.26,
+   "cum_net_pct": 10.47,
    "cum_spy_pct": -21.29,
    "correct": false
   },
@@ -5463,11 +5559,11 @@
    "net_ret": 9.44,
    "spy_ret": -1.11,
    "exit_reason": "TP",
-   "cap_gross": 106322.37,
-   "cap_net": 103652.15,
+   "cap_gross": 114389.25,
+   "cap_net": 111507.9,
    "cap_spy": 78627.67,
-   "cum_gross_pct": 6.32,
-   "cum_net_pct": 3.65,
+   "cum_gross_pct": 14.39,
+   "cum_net_pct": 11.51,
    "cum_spy_pct": -21.37,
    "correct": true
   },
@@ -5479,11 +5575,11 @@
    "net_ret": -3.67,
    "spy_ret": -1.11,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105958.64,
-   "cap_net": 103271.68,
+   "cap_gross": 113997.93,
+   "cap_net": 111098.6,
    "cap_spy": 78540.69,
-   "cum_gross_pct": 5.96,
-   "cum_net_pct": 3.27,
+   "cum_gross_pct": 14.0,
+   "cum_net_pct": 11.1,
    "cum_spy_pct": -21.46,
    "correct": false
   },
@@ -5495,11 +5591,11 @@
    "net_ret": -0.89,
    "spy_ret": -1.56,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105880.02,
-   "cap_net": 103180.15,
+   "cap_gross": 113913.34,
+   "cap_net": 111000.13,
    "cap_spy": 78418.41,
-   "cum_gross_pct": 5.88,
-   "cum_net_pct": 3.18,
+   "cum_gross_pct": 13.91,
+   "cum_net_pct": 11.0,
    "cum_spy_pct": -21.58,
    "correct": true
   },
@@ -5511,11 +5607,11 @@
    "net_ret": -5.12,
    "spy_ret": -1.56,
    "exit_reason": "SL",
-   "cap_gross": 105345.54,
-   "cap_net": 102652.13,
+   "cap_gross": 113338.3,
+   "cap_net": 110432.09,
    "cap_spy": 78296.32,
-   "cum_gross_pct": 5.35,
-   "cum_net_pct": 2.65,
+   "cum_gross_pct": 13.34,
+   "cum_net_pct": 10.43,
    "cum_spy_pct": -21.7,
    "correct": false
   },
@@ -5527,11 +5623,11 @@
    "net_ret": -5.12,
    "spy_ret": -1.56,
    "exit_reason": "SL",
-   "cap_gross": 104813.76,
-   "cap_net": 102126.81,
+   "cap_gross": 112766.17,
+   "cap_net": 109866.95,
    "cap_spy": 78174.42,
-   "cum_gross_pct": 4.81,
-   "cum_net_pct": 2.13,
+   "cum_gross_pct": 12.77,
+   "cum_net_pct": 9.87,
    "cum_spy_pct": -21.83,
    "correct": false
   },
@@ -5543,11 +5639,11 @@
    "net_ret": 2.3,
    "spy_ret": -1.56,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105068.35,
-   "cap_net": 102361.73,
+   "cap_gross": 113040.08,
+   "cap_net": 110119.68,
    "cap_spy": 78052.71,
-   "cum_gross_pct": 5.07,
-   "cum_net_pct": 2.36,
+   "cum_gross_pct": 13.04,
+   "cum_net_pct": 10.12,
    "cum_spy_pct": -21.95,
    "correct": true
   },
@@ -5559,11 +5655,11 @@
    "net_ret": 9.42,
    "spy_ret": -1.56,
    "exit_reason": "TP",
-   "cap_gross": 106114.3,
-   "cap_net": 103326.04,
+   "cap_gross": 114165.4,
+   "cap_net": 111157.07,
    "cap_spy": 77931.19,
-   "cum_gross_pct": 6.11,
-   "cum_net_pct": 3.33,
+   "cum_gross_pct": 14.17,
+   "cum_net_pct": 11.16,
    "cum_spy_pct": -22.07,
    "correct": true
   },
@@ -5575,11 +5671,11 @@
    "net_ret": 6.76,
    "spy_ret": -1.56,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 106872.28,
-   "cap_net": 104024.13,
+   "cap_gross": 114980.88,
+   "cap_net": 111908.07,
    "cap_spy": 77809.86,
-   "cum_gross_pct": 6.87,
-   "cum_net_pct": 4.02,
+   "cum_gross_pct": 14.98,
+   "cum_net_pct": 11.91,
    "cum_spy_pct": -22.19,
    "correct": true
   },
@@ -5591,11 +5687,11 @@
    "net_ret": 5.09,
    "spy_ret": -1.56,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107426.84,
-   "cap_net": 104553.98,
+   "cap_gross": 115577.51,
+   "cap_net": 112478.07,
    "cap_spy": 77688.72,
-   "cum_gross_pct": 7.43,
-   "cum_net_pct": 4.55,
+   "cum_gross_pct": 15.58,
+   "cum_net_pct": 12.48,
    "cum_spy_pct": -22.31,
    "correct": true
   },
@@ -5607,11 +5703,11 @@
    "net_ret": -0.08,
    "spy_ret": -1.56,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107428.34,
-   "cap_net": 104545.55,
+   "cap_gross": 115579.13,
+   "cap_net": 112469.01,
    "cap_spy": 77567.76,
-   "cum_gross_pct": 7.43,
-   "cum_net_pct": 4.55,
+   "cum_gross_pct": 15.58,
+   "cum_net_pct": 12.47,
    "cum_spy_pct": -22.43,
    "correct": true
   },
@@ -5623,11 +5719,11 @@
    "net_ret": 9.7,
    "spy_ret": -1.56,
    "exit_reason": "TP",
-   "cap_gross": 108496.72,
-   "cap_net": 105559.12,
+   "cap_gross": 116728.57,
+   "cap_net": 113559.39,
    "cap_spy": 77447.0,
-   "cum_gross_pct": 8.5,
-   "cum_net_pct": 5.56,
+   "cum_gross_pct": 16.73,
+   "cum_net_pct": 13.56,
    "cum_spy_pct": -22.55,
    "correct": true
   },
@@ -5635,17 +5731,17 @@
    "date": "2026-03-16",
    "ticker": "CRCL",
    "direction": "bearish",
-   "gross_ret": -5.05,
-   "net_ret": -5.58,
+   "gross_ret": 9.96,
+   "net_ret": 9.31,
    "spy_ret": -1.56,
-   "exit_reason": "SL",
-   "cap_gross": 107948.48,
-   "cap_net": 104969.63,
+   "exit_reason": "TP",
+   "cap_gross": 117890.6,
+   "cap_net": 114617.03,
    "cap_spy": 77326.42,
-   "cum_gross_pct": 7.95,
-   "cum_net_pct": 4.97,
+   "cum_gross_pct": 17.89,
+   "cum_net_pct": 14.62,
    "cum_spy_pct": -22.67,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-17",
@@ -5655,11 +5751,11 @@
    "net_ret": 8.3,
    "spy_ret": -3.57,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 108852.23,
-   "cap_net": 105840.62,
+   "cap_gross": 118877.58,
+   "cap_net": 115568.06,
    "cap_spy": 77050.46,
-   "cum_gross_pct": 8.85,
-   "cum_net_pct": 5.84,
+   "cum_gross_pct": 18.88,
+   "cum_net_pct": 15.57,
    "cum_spy_pct": -22.95,
    "correct": true
   },
@@ -5671,11 +5767,11 @@
    "net_ret": 9.61,
    "spy_ret": -3.57,
    "exit_reason": "TP",
-   "cap_gross": 109935.85,
-   "cap_net": 106857.97,
+   "cap_gross": 120061.01,
+   "cap_net": 116678.92,
    "cap_spy": 76775.49,
-   "cum_gross_pct": 9.94,
-   "cum_net_pct": 6.86,
+   "cum_gross_pct": 20.06,
+   "cum_net_pct": 16.68,
    "cum_spy_pct": -23.22,
    "correct": true
   },
@@ -5683,15 +5779,15 @@
    "date": "2026-03-17",
    "ticker": "RKLB",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.3,
+   "gross_ret": -10.04,
+   "net_ret": -10.29,
    "spy_ret": -3.57,
    "exit_reason": "SL",
-   "cap_gross": 109380.9,
-   "cap_net": 106291.89,
+   "cap_gross": 118854.99,
+   "cap_net": 115477.71,
    "cap_spy": 76501.51,
-   "cum_gross_pct": 9.38,
-   "cum_net_pct": 6.29,
+   "cum_gross_pct": 18.85,
+   "cum_net_pct": 15.48,
    "cum_spy_pct": -23.5,
    "correct": false
   },
@@ -5703,11 +5799,11 @@
    "net_ret": 9.58,
    "spy_ret": -3.87,
    "exit_reason": "TP",
-   "cap_gross": 110469.78,
-   "cap_net": 107310.08,
+   "cap_gross": 120038.2,
+   "cap_net": 116583.89,
    "cap_spy": 76205.32,
-   "cum_gross_pct": 10.47,
-   "cum_net_pct": 7.31,
+   "cum_gross_pct": 20.04,
+   "cum_net_pct": 16.58,
    "cum_spy_pct": -23.79,
    "correct": true
   },
@@ -5715,15 +5811,15 @@
    "date": "2026-03-18",
    "ticker": "CRCL",
    "direction": "neutral",
-   "gross_ret": -29.49,
-   "net_ret": -30.0,
+   "gross_ret": -15.04,
+   "net_ret": -15.55,
    "spy_ret": -3.87,
-   "exit_reason": "T7_CLOSE",
-   "cap_gross": 107211.59,
-   "cap_net": 104090.34,
+   "exit_reason": "SL",
+   "cap_gross": 118232.46,
+   "cap_net": 114770.72,
    "cap_spy": 75910.27,
-   "cum_gross_pct": 7.21,
-   "cum_net_pct": 4.09,
+   "cum_gross_pct": 18.23,
+   "cum_net_pct": 14.77,
    "cum_spy_pct": -24.09,
    "correct": false
   },
@@ -5735,11 +5831,11 @@
    "net_ret": -12.56,
    "spy_ret": -3.87,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105892.24,
-   "cap_net": 102783.41,
+   "cap_gross": 116777.49,
+   "cap_net": 113329.69,
    "cap_spy": 75616.37,
-   "cum_gross_pct": 5.89,
-   "cum_net_pct": 2.78,
+   "cum_gross_pct": 16.78,
+   "cum_net_pct": 13.33,
    "cum_spy_pct": -24.38,
    "correct": false
   },
@@ -5747,15 +5843,15 @@
    "date": "2026-03-19",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -10.04,
+   "net_ret": -10.36,
    "spy_ret": -3.96,
    "exit_reason": "SL",
-   "cap_gross": 105357.7,
-   "cap_net": 102232.75,
+   "cap_gross": 115604.46,
+   "cap_net": 112156.16,
    "cap_spy": 75317.2,
-   "cum_gross_pct": 5.36,
-   "cum_net_pct": 2.23,
+   "cum_gross_pct": 15.6,
+   "cum_net_pct": 12.16,
    "cum_spy_pct": -24.68,
    "correct": false
   },
@@ -5763,15 +5859,15 @@
    "date": "2026-03-19",
    "ticker": "CRCL",
    "direction": "neutral",
-   "gross_ret": -29.94,
-   "net_ret": -30.45,
+   "gross_ret": -15.04,
+   "net_ret": -15.55,
    "spy_ret": -3.96,
-   "exit_reason": "T7_CLOSE",
-   "cap_gross": 102203.5,
-   "cap_net": 99119.93,
+   "exit_reason": "SL",
+   "cap_gross": 113865.42,
+   "cap_net": 110411.86,
    "cap_spy": 75019.22,
-   "cum_gross_pct": 2.2,
-   "cum_net_pct": -0.88,
+   "cum_gross_pct": 13.87,
+   "cum_net_pct": 10.41,
    "cum_spy_pct": -24.98,
    "correct": false
   },
@@ -5783,11 +5879,11 @@
    "net_ret": 7.65,
    "spy_ret": -3.96,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 102993.23,
-   "cap_net": 99878.42,
+   "cap_gross": 114745.26,
+   "cap_net": 111256.76,
    "cap_spy": 74722.41,
-   "cum_gross_pct": 2.99,
-   "cum_net_pct": -0.12,
+   "cum_gross_pct": 14.75,
+   "cum_net_pct": 11.26,
    "cum_spy_pct": -25.28,
    "correct": true
   },
@@ -5795,15 +5891,15 @@
    "date": "2026-03-19",
    "ticker": "RKLB",
    "direction": "neutral",
-   "gross_ret": -20.23,
-   "net_ret": -20.48,
+   "gross_ret": -15.04,
+   "net_ret": -15.29,
    "spy_ret": -3.96,
-   "exit_reason": "T7_CLOSE",
-   "cap_gross": 100909.88,
-   "cap_net": 97833.11,
+   "exit_reason": "SL",
+   "cap_gross": 113019.15,
+   "cap_net": 109555.37,
    "cap_spy": 74426.78,
-   "cum_gross_pct": 0.91,
-   "cum_net_pct": -2.17,
+   "cum_gross_pct": 13.02,
+   "cum_net_pct": 9.56,
    "cum_spy_pct": -25.57,
    "correct": false
   },
@@ -5815,11 +5911,11 @@
    "net_ret": 9.3,
    "spy_ret": -3.96,
    "exit_reason": "TP",
-   "cap_gross": 101914.44,
-   "cap_net": 98742.7,
+   "cap_gross": 114144.25,
+   "cap_net": 110573.94,
    "cap_spy": 74132.32,
-   "cum_gross_pct": 1.91,
-   "cum_net_pct": -1.26,
+   "cum_gross_pct": 14.14,
+   "cum_net_pct": 10.57,
    "cum_spy_pct": -25.87,
    "correct": true
   },
@@ -5827,15 +5923,15 @@
    "date": "2026-03-20",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -10.04,
+   "net_ret": -10.36,
    "spy_ret": 0.27,
    "exit_reason": "SL",
-   "cap_gross": 101399.97,
-   "cap_net": 98213.68,
+   "cap_gross": 112997.68,
+   "cap_net": 109428.94,
    "cap_spy": 74152.55,
-   "cum_gross_pct": 1.4,
-   "cum_net_pct": -1.79,
+   "cum_gross_pct": 13.0,
+   "cum_net_pct": 9.43,
    "cum_spy_pct": -25.85,
    "correct": false
   },
@@ -5847,11 +5943,11 @@
    "net_ret": 2.99,
    "spy_ret": 0.27,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 101710.66,
-   "cap_net": 98507.25,
+   "cap_gross": 113343.9,
+   "cap_net": 109756.04,
    "cap_spy": 74172.78,
-   "cum_gross_pct": 1.71,
-   "cum_net_pct": -1.49,
+   "cum_gross_pct": 13.34,
+   "cum_net_pct": 9.76,
    "cum_spy_pct": -25.83,
    "correct": true
   },
@@ -5859,15 +5955,15 @@
    "date": "2026-03-20",
    "ticker": "RKLB",
    "direction": "bearish",
-   "gross_ret": -5.05,
-   "net_ret": -5.33,
+   "gross_ret": -10.05,
+   "net_ret": -10.33,
    "spy_ret": 0.27,
    "exit_reason": "SL",
-   "cap_gross": 101196.72,
-   "cap_net": 97982.08,
+   "cap_gross": 112204.23,
+   "cap_net": 108621.84,
    "cap_spy": 74193.02,
-   "cum_gross_pct": 1.2,
-   "cum_net_pct": -2.02,
+   "cum_gross_pct": 12.2,
+   "cum_net_pct": 8.62,
    "cum_spy_pct": -25.81,
    "correct": false
   },
@@ -5879,11 +5975,11 @@
    "net_ret": -5.14,
    "spy_ret": -0.02,
    "exit_reason": "SL",
-   "cap_gross": 100685.88,
-   "cap_net": 97478.7,
+   "cap_gross": 111637.82,
+   "cap_net": 108063.79,
    "cap_spy": 74191.44,
-   "cum_gross_pct": 0.69,
-   "cum_net_pct": -2.52,
+   "cum_gross_pct": 11.64,
+   "cum_net_pct": 8.06,
    "cum_spy_pct": -25.81,
    "correct": false
   },
@@ -5891,15 +5987,15 @@
    "date": "2026-03-23",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -10.04,
+   "net_ret": -10.36,
    "spy_ret": -0.02,
    "exit_reason": "SL",
-   "cap_gross": 100177.61,
-   "cap_net": 96956.46,
+   "cap_gross": 110516.42,
+   "cap_net": 106944.79,
    "cap_spy": 74189.85,
-   "cum_gross_pct": 0.18,
-   "cum_net_pct": -3.04,
+   "cum_gross_pct": 10.52,
+   "cum_net_pct": 6.94,
    "cum_spy_pct": -25.81,
    "correct": false
   },
@@ -5911,11 +6007,11 @@
    "net_ret": -3.63,
    "spy_ret": -0.02,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 99821.08,
-   "cap_net": 96604.63,
+   "cap_gross": 110123.09,
+   "cap_net": 106556.72,
    "cap_spy": 74188.26,
-   "cum_gross_pct": -0.18,
-   "cum_net_pct": -3.4,
+   "cum_gross_pct": 10.12,
+   "cum_net_pct": 6.56,
    "cum_spy_pct": -25.81,
    "correct": false
   },
@@ -5927,11 +6023,11 @@
    "net_ret": 0.12,
    "spy_ret": 0.41,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 99840.35,
-   "cap_net": 96616.53,
+   "cap_gross": 110144.34,
+   "cap_net": 106569.85,
    "cap_spy": 74218.36,
-   "cum_gross_pct": -0.16,
-   "cum_net_pct": -3.38,
+   "cum_gross_pct": 10.14,
+   "cum_net_pct": 6.57,
    "cum_spy_pct": -25.78,
    "correct": true
   },
@@ -5939,31 +6035,31 @@
    "date": "2026-03-24",
    "ticker": "RKLB",
    "direction": "neutral",
-   "gross_ret": 2.51,
-   "net_ret": 2.26,
+   "gross_ret": -15.04,
+   "net_ret": -15.29,
    "spy_ret": 0.41,
-   "exit_reason": "T7_CLOSE",
-   "cap_gross": 100091.25,
-   "cap_net": 96835.13,
+   "exit_reason": "SL",
+   "cap_gross": 108487.44,
+   "cap_net": 104940.13,
    "cap_spy": 74248.47,
-   "cum_gross_pct": 0.09,
-   "cum_net_pct": -3.16,
+   "cum_gross_pct": 8.49,
+   "cum_net_pct": 4.94,
    "cum_spy_pct": -25.75,
-   "correct": true
+   "correct": false
   },
   {
    "date": "2026-03-25",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": -2.82,
+   "net_ret": -3.13,
    "spy_ret": 0.32,
-   "exit_reason": "SL",
-   "cap_gross": 99585.99,
-   "cap_net": 96316.33,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 108181.94,
+   "cap_net": 104612.06,
    "cap_spy": 74272.32,
-   "cum_gross_pct": -0.41,
-   "cum_net_pct": -3.68,
+   "cum_gross_pct": 8.18,
+   "cum_net_pct": 4.61,
    "cum_spy_pct": -25.73,
    "correct": false
   },
@@ -5975,11 +6071,11 @@
    "net_ret": -5.14,
    "spy_ret": 0.32,
    "exit_reason": "SL",
-   "cap_gross": 99083.28,
-   "cap_net": 95821.51,
+   "cap_gross": 107635.84,
+   "cap_net": 104074.61,
    "cap_spy": 74296.17,
-   "cum_gross_pct": -0.92,
-   "cum_net_pct": -4.18,
+   "cum_gross_pct": 7.64,
+   "cum_net_pct": 4.07,
    "cum_spy_pct": -25.7,
    "correct": false
   },
@@ -5991,11 +6087,11 @@
    "net_ret": -0.57,
    "spy_ret": 0.32,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 99034.13,
-   "cap_net": 95766.82,
+   "cap_gross": 107582.45,
+   "cap_net": 104015.22,
    "cap_spy": 74320.04,
-   "cum_gross_pct": -0.97,
-   "cum_net_pct": -4.23,
+   "cum_gross_pct": 7.58,
+   "cum_net_pct": 4.02,
    "cum_spy_pct": -25.68,
    "correct": true
   },
@@ -6007,11 +6103,11 @@
    "net_ret": -5.12,
    "spy_ret": 0.32,
    "exit_reason": "SL",
-   "cap_gross": 98534.21,
-   "cap_net": 95276.73,
+   "cap_gross": 107039.38,
+   "cap_net": 103482.92,
    "cap_spy": 74343.91,
-   "cum_gross_pct": -1.47,
-   "cum_net_pct": -4.72,
+   "cum_gross_pct": 7.04,
+   "cum_net_pct": 3.48,
    "cum_spy_pct": -25.66,
    "correct": false
   },
@@ -6019,15 +6115,15 @@
    "date": "2026-03-25",
    "ticker": "RKLB",
    "direction": "neutral",
-   "gross_ret": -7.15,
-   "net_ret": -7.4,
+   "gross_ret": -15.04,
+   "net_ret": -15.29,
    "spy_ret": 0.32,
-   "exit_reason": "T7_CLOSE",
-   "cap_gross": 97829.79,
-   "cap_net": 94571.81,
+   "exit_reason": "SL",
+   "cap_gross": 105429.18,
+   "cap_net": 101900.41,
    "cap_spy": 74367.79,
-   "cum_gross_pct": -2.17,
-   "cum_net_pct": -5.43,
+   "cum_gross_pct": 5.43,
+   "cum_net_pct": 1.9,
    "cum_spy_pct": -25.63,
    "correct": false
   },
@@ -6035,17 +6131,17 @@
    "date": "2026-03-26",
    "ticker": "BILI",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.36,
+   "gross_ret": 1.32,
+   "net_ret": 1.01,
    "spy_ret": 2.15,
-   "exit_reason": "SL",
-   "cap_gross": 97335.94,
-   "cap_net": 94065.14,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 105568.67,
+   "cap_net": 102003.6,
    "cap_spy": 74527.34,
-   "cum_gross_pct": -2.66,
-   "cum_net_pct": -5.93,
+   "cum_gross_pct": 5.57,
+   "cum_net_pct": 2.0,
    "cum_spy_pct": -25.47,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-03-26",
@@ -6055,11 +6151,11 @@
    "net_ret": 0.33,
    "spy_ret": 2.15,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 97392.01,
-   "cap_net": 94095.84,
+   "cap_gross": 105629.47,
+   "cap_net": 102036.89,
    "cap_spy": 74687.23,
-   "cum_gross_pct": -2.61,
-   "cum_net_pct": -5.9,
+   "cum_gross_pct": 5.63,
+   "cum_net_pct": 2.04,
    "cum_spy_pct": -25.31,
    "correct": true
   },
@@ -6071,11 +6167,11 @@
    "net_ret": 9.63,
    "spy_ret": 3.96,
    "exit_reason": "TP",
-   "cap_gross": 98360.57,
-   "cap_net": 95002.45,
+   "cap_gross": 106679.96,
+   "cap_net": 103020.01,
    "cap_spy": 74983.23,
-   "cum_gross_pct": -1.64,
-   "cum_net_pct": -5.0,
+   "cum_gross_pct": 6.68,
+   "cum_net_pct": 3.02,
    "cum_spy_pct": -25.02,
    "correct": true
   },
@@ -6087,11 +6183,11 @@
    "net_ret": -5.14,
    "spy_ret": 3.96,
    "exit_reason": "SL",
-   "cap_gross": 97863.55,
-   "cap_net": 94513.75,
+   "cap_gross": 106140.9,
+   "cap_net": 102490.07,
    "cap_spy": 75280.4,
-   "cum_gross_pct": -2.14,
-   "cum_net_pct": -5.49,
+   "cum_gross_pct": 6.14,
+   "cum_net_pct": 2.49,
    "cum_spy_pct": -24.72,
    "correct": false
   },
@@ -6103,11 +6199,11 @@
    "net_ret": 16.18,
    "spy_ret": 6.97,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 99456.09,
-   "cap_net": 96043.23,
+   "cap_gross": 107868.14,
+   "cap_net": 104148.63,
    "cap_spy": 75805.01,
-   "cum_gross_pct": -0.54,
-   "cum_net_pct": -3.96,
+   "cum_gross_pct": 7.87,
+   "cum_net_pct": 4.15,
    "cum_spy_pct": -24.19,
    "correct": true
   },
@@ -6119,11 +6215,11 @@
    "net_ret": 9.63,
    "spy_ret": 6.97,
    "exit_reason": "TP",
-   "cap_gross": 100445.18,
-   "cap_net": 96968.61,
+   "cap_gross": 108940.88,
+   "cap_net": 105152.1,
    "cap_spy": 76333.27,
-   "cum_gross_pct": 0.45,
-   "cum_net_pct": -3.03,
+   "cum_gross_pct": 8.94,
+   "cum_net_pct": 5.15,
    "cum_spy_pct": -23.67,
    "correct": true
   },
@@ -6135,11 +6231,11 @@
    "net_ret": 3.86,
    "spy_ret": 6.97,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 100840.03,
-   "cap_net": 97342.99,
+   "cap_gross": 109369.13,
+   "cap_net": 105558.07,
    "cap_spy": 76865.22,
-   "cum_gross_pct": 0.84,
-   "cum_net_pct": -2.66,
+   "cum_gross_pct": 9.37,
+   "cum_net_pct": 5.56,
    "cum_spy_pct": -23.13,
    "correct": true
   },
@@ -6151,11 +6247,11 @@
    "net_ret": 9.63,
    "spy_ret": 4.55,
    "exit_reason": "TP",
-   "cap_gross": 101842.88,
-   "cap_net": 98280.89,
+   "cap_gross": 110456.81,
+   "cap_net": 106575.13,
    "cap_spy": 77214.71,
-   "cum_gross_pct": 1.84,
-   "cum_net_pct": -1.72,
+   "cum_gross_pct": 10.46,
+   "cum_net_pct": 6.58,
    "cum_spy_pct": -22.79,
    "correct": true
   },
@@ -6167,11 +6263,11 @@
    "net_ret": 0.12,
    "spy_ret": 4.55,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 101862.13,
-   "cap_net": 98292.59,
+   "cap_gross": 110477.68,
+   "cap_net": 106587.82,
    "cap_spy": 77565.79,
-   "cum_gross_pct": 1.86,
-   "cum_net_pct": -1.71,
+   "cum_gross_pct": 10.48,
+   "cum_net_pct": 6.59,
    "cum_spy_pct": -22.43,
    "correct": true
   },
@@ -6183,11 +6279,11 @@
    "net_ret": -6.24,
    "spy_ret": 4.55,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 101237.41,
-   "cap_net": 97678.93,
+   "cap_gross": 109800.12,
+   "cap_net": 105922.37,
    "cap_spy": 77918.46,
-   "cum_gross_pct": 1.24,
-   "cum_net_pct": -2.32,
+   "cum_gross_pct": 9.8,
+   "cum_net_pct": 5.92,
    "cum_spy_pct": -22.08,
    "correct": false
   },
@@ -6199,11 +6295,11 @@
    "net_ret": 9.86,
    "spy_ret": 3.7,
    "exit_reason": "TP",
-   "cap_gross": 102244.22,
-   "cap_net": 98641.56,
+   "cap_gross": 110892.09,
+   "cap_net": 106966.24,
    "cap_spy": 78206.48,
-   "cum_gross_pct": 2.24,
-   "cum_net_pct": -1.36,
+   "cum_gross_pct": 10.89,
+   "cum_net_pct": 6.97,
    "cum_spy_pct": -21.79,
    "correct": true
   },
@@ -6215,11 +6311,11 @@
    "net_ret": 6.59,
    "spy_ret": 3.7,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 102950.01,
-   "cap_net": 99291.86,
+   "cap_gross": 111657.57,
+   "cap_net": 107671.42,
    "cap_spy": 78495.56,
-   "cum_gross_pct": 2.95,
-   "cum_net_pct": -0.71,
+   "cum_gross_pct": 11.66,
+   "cum_net_pct": 7.67,
    "cum_spy_pct": -21.5,
    "correct": true
   },
@@ -6231,11 +6327,11 @@
    "net_ret": 7.53,
    "spy_ret": 3.7,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 103751.37,
-   "cap_net": 100039.92,
+   "cap_gross": 112526.72,
+   "cap_net": 108482.61,
    "cap_spy": 78785.71,
-   "cum_gross_pct": 3.75,
-   "cum_net_pct": 0.04,
+   "cum_gross_pct": 12.53,
+   "cum_net_pct": 8.48,
    "cum_spy_pct": -21.21,
    "correct": true
   },
@@ -6247,11 +6343,11 @@
    "net_ret": -7.67,
    "spy_ret": 3.7,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 102966.6,
-   "cap_net": 99272.17,
+   "cap_gross": 111675.56,
+   "cap_net": 107650.07,
    "cap_spy": 79076.94,
-   "cum_gross_pct": 2.97,
-   "cum_net_pct": -0.73,
+   "cum_gross_pct": 11.68,
+   "cum_net_pct": 7.65,
    "cum_spy_pct": -20.92,
    "correct": false
   },
@@ -6263,11 +6359,11 @@
    "net_ret": 5.85,
    "spy_ret": 3.7,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 103607.05,
-   "cap_net": 99852.88,
+   "cap_gross": 112370.19,
+   "cap_net": 108279.79,
    "cap_spy": 79369.24,
-   "cum_gross_pct": 3.61,
-   "cum_net_pct": -0.15,
+   "cum_gross_pct": 12.37,
+   "cum_net_pct": 8.28,
    "cum_spy_pct": -20.63,
    "correct": true
   },
@@ -6279,11 +6375,11 @@
    "net_ret": 8.15,
    "spy_ret": 4.62,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 104483.56,
-   "cap_net": 100666.67,
+   "cap_gross": 113320.84,
+   "cap_net": 109162.26,
    "cap_spy": 79735.57,
-   "cum_gross_pct": 4.48,
-   "cum_net_pct": 0.67,
+   "cum_gross_pct": 13.32,
+   "cum_net_pct": 9.16,
    "cum_spy_pct": -20.26,
    "correct": true
   },
@@ -6295,11 +6391,11 @@
    "net_ret": 9.44,
    "spy_ret": 4.62,
    "exit_reason": "TP",
-   "cap_gross": 105522.65,
-   "cap_net": 101616.46,
+   "cap_gross": 114447.81,
+   "cap_net": 110192.2,
    "cap_spy": 80103.59,
-   "cum_gross_pct": 5.52,
-   "cum_net_pct": 1.62,
+   "cum_gross_pct": 14.45,
+   "cum_net_pct": 10.19,
    "cum_spy_pct": -19.9,
    "correct": true
   },
@@ -6311,11 +6407,11 @@
    "net_ret": -5.14,
    "spy_ret": 4.62,
    "exit_reason": "SL",
-   "cap_gross": 104989.45,
-   "cap_net": 101093.65,
+   "cap_gross": 113869.51,
+   "cap_net": 109625.27,
    "cap_spy": 80473.3,
-   "cum_gross_pct": 4.99,
-   "cum_net_pct": 1.09,
+   "cum_gross_pct": 13.87,
+   "cum_net_pct": 9.63,
    "cum_spy_pct": -19.53,
    "correct": false
   },
@@ -6327,11 +6423,11 @@
    "net_ret": 5.19,
    "spy_ret": 4.62,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 105541.9,
-   "cap_net": 101618.49,
+   "cap_gross": 114468.69,
+   "cap_net": 110194.4,
    "cap_spy": 80844.73,
-   "cum_gross_pct": 5.54,
-   "cum_net_pct": 1.62,
+   "cum_gross_pct": 14.47,
+   "cum_net_pct": 10.19,
    "cum_spy_pct": -19.16,
    "correct": true
   },
@@ -6343,11 +6439,11 @@
    "net_ret": 9.88,
    "spy_ret": 4.62,
    "exit_reason": "TP",
-   "cap_gross": 106591.51,
-   "cap_net": 102621.97,
+   "cap_gross": 115607.08,
+   "cap_net": 111282.57,
    "cap_spy": 81217.87,
-   "cum_gross_pct": 6.59,
-   "cum_net_pct": 2.62,
+   "cum_gross_pct": 15.61,
+   "cum_net_pct": 11.28,
    "cum_spy_pct": -18.78,
    "correct": true
   },
@@ -6355,17 +6451,17 @@
    "date": "2026-04-02",
    "ticker": "RKLB",
    "direction": "bullish",
-   "gross_ret": -5.05,
-   "net_ret": -5.3,
+   "gross_ret": 9.95,
+   "net_ret": 9.7,
    "spy_ret": 4.62,
-   "exit_reason": "SL",
-   "cap_gross": 106053.44,
-   "cap_net": 102078.33,
+   "exit_reason": "TP",
+   "cap_gross": 116756.79,
+   "cap_net": 112361.45,
    "cap_spy": 81592.73,
-   "cum_gross_pct": 6.05,
-   "cum_net_pct": 2.08,
+   "cum_gross_pct": 16.76,
+   "cum_net_pct": 12.36,
    "cum_spy_pct": -18.41,
-   "correct": false
+   "correct": true
   },
   {
    "date": "2026-04-02",
@@ -6375,11 +6471,11 @@
    "net_ret": 1.7,
    "spy_ret": 4.62,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 106272.87,
-   "cap_net": 102251.76,
+   "cap_gross": 116998.36,
+   "cap_net": 112552.35,
    "cap_spy": 81969.32,
-   "cum_gross_pct": 6.27,
-   "cum_net_pct": 2.25,
+   "cum_gross_pct": 17.0,
+   "cum_net_pct": 12.55,
    "cum_spy_pct": -18.03,
    "correct": true
   },
@@ -6391,11 +6487,11 @@
    "net_ret": 11.88,
    "spy_ret": 6.22,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 107542.93,
-   "cap_net": 103466.62,
+   "cap_gross": 118396.61,
+   "cap_net": 113889.6,
    "cap_spy": 82479.47,
-   "cum_gross_pct": 7.54,
-   "cum_net_pct": 3.47,
+   "cum_gross_pct": 18.4,
+   "cum_net_pct": 13.89,
    "cum_spy_pct": -17.52,
    "correct": true
   },
@@ -6403,15 +6499,15 @@
    "date": "2026-04-06",
    "ticker": "QCOM",
    "direction": "bearish",
-   "gross_ret": -5.05,
-   "net_ret": -5.19,
+   "gross_ret": -6.05,
+   "net_ret": -6.2,
    "spy_ret": 6.22,
    "exit_reason": "SL",
-   "cap_gross": 106999.52,
-   "cap_net": 102929.13,
+   "cap_gross": 117679.96,
+   "cap_net": 113183.78,
    "cap_spy": 82992.8,
-   "cum_gross_pct": 7.0,
-   "cum_net_pct": 2.93,
+   "cum_gross_pct": 17.68,
+   "cum_net_pct": 13.18,
    "cum_spy_pct": -17.01,
    "correct": false
   },
@@ -6423,11 +6519,11 @@
    "net_ret": 9.84,
    "spy_ret": 6.22,
    "exit_reason": "TP",
-   "cap_gross": 108063.63,
-   "cap_net": 103941.44,
+   "cap_gross": 118850.28,
+   "cap_net": 114296.94,
    "cap_spy": 83509.32,
-   "cum_gross_pct": 8.06,
-   "cum_net_pct": 3.94,
+   "cum_gross_pct": 18.85,
+   "cum_net_pct": 14.3,
    "cum_spy_pct": -16.49,
    "correct": true
   },
@@ -6439,11 +6535,11 @@
    "net_ret": 9.88,
    "spy_ret": 6.22,
    "exit_reason": "TP",
-   "cap_gross": 109138.32,
-   "cap_net": 104967.86,
+   "cap_gross": 120032.25,
+   "cap_net": 115425.62,
    "cap_spy": 84029.06,
-   "cum_gross_pct": 9.14,
-   "cum_net_pct": 4.97,
+   "cum_gross_pct": 20.03,
+   "cum_net_pct": 15.43,
    "cum_spy_pct": -15.97,
    "correct": true
   },
@@ -6455,11 +6551,11 @@
    "net_ret": 4.11,
    "spy_ret": 6.22,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 109627.26,
-   "cap_net": 105399.26,
+   "cap_gross": 120569.99,
+   "cap_net": 115900.0,
    "cap_spy": 84552.03,
-   "cum_gross_pct": 9.63,
-   "cum_net_pct": 5.4,
+   "cum_gross_pct": 20.57,
+   "cum_net_pct": 15.9,
    "cum_spy_pct": -15.45,
    "correct": true
   },
@@ -6471,11 +6567,11 @@
    "net_ret": 17.11,
    "spy_ret": 6.22,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 111512.85,
-   "cap_net": 107202.65,
+   "cap_gross": 122643.8,
+   "cap_net": 117883.06,
    "cap_spy": 85078.26,
-   "cum_gross_pct": 11.51,
-   "cum_net_pct": 7.2,
+   "cum_gross_pct": 22.64,
+   "cum_net_pct": 17.88,
    "cum_spy_pct": -14.92,
    "correct": true
   },
@@ -6487,11 +6583,11 @@
    "net_ret": 9.86,
    "spy_ret": 6.22,
    "exit_reason": "TP",
-   "cap_gross": 112621.84,
-   "cap_net": 108259.14,
+   "cap_gross": 123863.49,
+   "cap_net": 119044.8,
    "cap_spy": 85607.76,
-   "cum_gross_pct": 12.62,
-   "cum_net_pct": 8.26,
+   "cum_gross_pct": 23.86,
+   "cum_net_pct": 19.04,
    "cum_spy_pct": -14.39,
    "correct": true
   },
@@ -6503,11 +6599,11 @@
    "net_ret": 7.61,
    "spy_ret": 6.22,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 113513.25,
-   "cap_net": 109082.47,
+   "cap_gross": 124843.87,
+   "cap_net": 119950.16,
    "cap_spy": 86140.56,
-   "cum_gross_pct": 13.51,
-   "cum_net_pct": 9.08,
+   "cum_gross_pct": 24.84,
+   "cum_net_pct": 19.95,
    "cum_spy_pct": -13.86,
    "correct": true
   },
@@ -6519,11 +6615,11 @@
    "net_ret": 8.51,
    "spy_ret": 6.22,
    "exit_reason": "T7_CLOSE",
-   "cap_gross": 114507.96,
-   "cap_net": 110011.1,
+   "cap_gross": 125937.88,
+   "cap_net": 120971.3,
    "cap_spy": 86676.67,
-   "cum_gross_pct": 14.51,
-   "cum_net_pct": 10.01,
+   "cum_gross_pct": 25.94,
+   "cum_net_pct": 20.97,
    "cum_spy_pct": -13.32,
    "correct": true
   },
@@ -6531,54 +6627,198 @@
    "date": "2026-04-06",
    "ticker": "CRCL",
    "direction": "bearish",
-   "gross_ret": -5.05,
-   "net_ret": -5.61,
+   "gross_ret": -12.06,
+   "net_ret": -12.7,
    "spy_ret": 6.22,
    "exit_reason": "SL",
-   "cap_gross": 113929.35,
-   "cap_net": 109394.34,
+   "cap_gross": 124419.57,
+   "cap_net": 119435.27,
    "cap_spy": 87216.12,
-   "cum_gross_pct": 13.93,
-   "cum_net_pct": 9.39,
+   "cum_gross_pct": 24.42,
+   "cum_net_pct": 19.44,
    "cum_spy_pct": -12.78,
    "correct": false
+  },
+  {
+   "date": "2026-04-07",
+   "ticker": "NVDA",
+   "direction": "neutral",
+   "gross_ret": 11.37,
+   "net_ret": 11.3,
+   "spy_ret": 6.44,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 125834.22,
+   "cap_net": 120784.89,
+   "cap_spy": 87777.61,
+   "cum_gross_pct": 25.83,
+   "cum_net_pct": 20.78,
+   "cum_spy_pct": -12.22,
+   "correct": true
+  },
+  {
+   "date": "2026-04-07",
+   "ticker": "QCOM",
+   "direction": "bullish",
+   "gross_ret": 8.38,
+   "net_ret": 8.25,
+   "spy_ret": 6.44,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 126888.96,
+   "cap_net": 121781.66,
+   "cap_spy": 88342.71,
+   "cum_gross_pct": 26.89,
+   "cum_net_pct": 21.78,
+   "cum_spy_pct": -11.66,
+   "correct": true
+  },
+  {
+   "date": "2026-04-07",
+   "ticker": "MSFT",
+   "direction": "neutral",
+   "gross_ret": 12.88,
+   "net_ret": 12.82,
+   "spy_ret": 6.44,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 128523.93,
+   "cap_net": 123342.3,
+   "cap_spy": 88911.45,
+   "cum_gross_pct": 28.52,
+   "cum_net_pct": 23.34,
+   "cum_spy_pct": -11.09,
+   "correct": true
+  },
+  {
+   "date": "2026-04-07",
+   "ticker": "TSLA",
+   "direction": "bearish",
+   "gross_ret": -7.05,
+   "net_ret": -7.18,
+   "spy_ret": 6.44,
+   "exit_reason": "SL",
+   "cap_gross": 127617.45,
+   "cap_net": 122456.71,
+   "cap_spy": 89483.85,
+   "cum_gross_pct": 27.62,
+   "cum_net_pct": 22.46,
+   "cum_spy_pct": -10.52,
+   "correct": false
+  },
+  {
+   "date": "2026-04-07",
+   "ticker": "VKTX",
+   "direction": "bullish",
+   "gross_ret": 5.37,
+   "net_ret": 5.0,
+   "spy_ret": 6.44,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 128302.88,
+   "cap_net": 123069.11,
+   "cap_spy": 90059.94,
+   "cum_gross_pct": 28.3,
+   "cum_net_pct": 23.07,
+   "cum_spy_pct": -9.94,
+   "correct": true
+  },
+  {
+   "date": "2026-04-07",
+   "ticker": "META",
+   "direction": "bullish",
+   "gross_ret": 9.95,
+   "net_ret": 9.86,
+   "spy_ret": 6.44,
+   "exit_reason": "TP",
+   "cap_gross": 129578.85,
+   "cap_net": 124281.95,
+   "cap_spy": 90639.74,
+   "cum_gross_pct": 29.58,
+   "cum_net_pct": 24.28,
+   "cum_spy_pct": -9.36,
+   "correct": true
+  },
+  {
+   "date": "2026-04-07",
+   "ticker": "BILI",
+   "direction": "bullish",
+   "gross_ret": 9.95,
+   "net_ret": 9.63,
+   "spy_ret": 6.44,
+   "exit_reason": "TP",
+   "cap_gross": 130867.52,
+   "cap_net": 125479.41,
+   "cap_spy": 91223.27,
+   "cum_gross_pct": 30.87,
+   "cum_net_pct": 25.48,
+   "cum_spy_pct": -8.78,
+   "correct": true
+  },
+  {
+   "date": "2026-04-07",
+   "ticker": "AMZN",
+   "direction": "bullish",
+   "gross_ret": 9.95,
+   "net_ret": 9.86,
+   "spy_ret": 6.44,
+   "exit_reason": "TP",
+   "cap_gross": 132168.99,
+   "cap_net": 126716.01,
+   "cap_spy": 91810.56,
+   "cum_gross_pct": 32.17,
+   "cum_net_pct": 26.72,
+   "cum_spy_pct": -8.19,
+   "correct": true
+  },
+  {
+   "date": "2026-04-07",
+   "ticker": "RKLB",
+   "direction": "neutral",
+   "gross_ret": 25.05,
+   "net_ret": 24.8,
+   "spy_ret": 6.44,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 135479.17,
+   "cap_net": 129857.96,
+   "cap_spy": 92401.62,
+   "cum_gross_pct": 35.48,
+   "cum_net_pct": 29.86,
+   "cum_spy_pct": -7.6,
+   "correct": true
   }
  ],
  "trading_stats": {
-  "exit_tp_count": 23,
-  "exit_sl_count": 53,
-  "exit_close_count": 115,
-  "avg_gross_ret": 0.717,
-  "avg_net_ret": 0.504,
-  "avg_cost": 0.213,
-  "net_win_rate": 47.1,
-  "sharpe_net": 0.366,
-  "max_dd_net_pct": 14.0,
-  "max_dd_gross_pct": 11.89,
-  "profit_factor": 1.19,
-  "total_spy_ret": -12.78,
-  "alpha_vs_spy": 22.18,
+  "exit_tp_count": 33,
+  "exit_sl_count": 35,
+  "exit_close_count": 132,
+  "avg_gross_ret": 1.555,
+  "avg_net_ret": 1.343,
+  "avg_cost": 0.212,
+  "net_win_rate": 54.0,
+  "sharpe_net": 1.068,
+  "max_dd_net_pct": 12.67,
+  "max_dd_gross_pct": 12.19,
+  "profit_factor": 1.53,
+  "total_spy_ret": -7.6,
+  "alpha_vs_spy": 37.46,
   "initial_capital": 100000.0,
-  "final_cap_gross": 113929.35,
-  "final_cap_net": 109394.34,
-  "final_cap_spy": 87216.12
+  "final_cap_gross": 135479.17,
+  "final_cap_net": 129857.96,
+  "final_cap_spy": 92401.62
  },
  "swarm_divergence": {
-  "NVDA": {
-   "std": 2.54,
-   "spread": 7.3,
+  "META": {
+   "std": 2.6,
+   "spread": 7.4,
    "consensus": 57.0,
    "resonance": true,
    "votes": {
     "bullish": 4,
-    "bearish": 2,
-    "neutral": 1
+    "bearish": 1,
+    "neutral": 2
    },
    "bees": [
     {
      "name": "Scout",
-     "score": 2.5,
-     "dir": "bear"
+     "score": 3.3,
+     "dir": "neut"
     },
     {
      "name": "Rival",
@@ -6587,18 +6827,18 @@
     },
     {
      "name": "Oracle",
-     "score": 9.6,
+     "score": 10.0,
      "dir": "bull"
     },
     {
      "name": "Chronos",
-     "score": 6.3,
-     "dir": "neut"
+     "score": 8.8,
+     "dir": "bull"
     },
     {
      "name": "Buzz",
-     "score": 7.3,
-     "dir": "bull"
+     "score": 5.5,
+     "dir": "neut"
     },
     {
      "name": "Guard",
@@ -6607,14 +6847,14 @@
     },
     {
      "name": "Bear",
-     "score": 2.3,
+     "score": 2.6,
      "dir": "bear"
     }
    ]
   },
   "MSFT": {
-   "std": 2.04,
-   "spread": 5.6,
+   "std": 1.7,
+   "spread": 4.9,
    "consensus": 71.0,
    "resonance": true,
    "votes": {
@@ -6625,7 +6865,7 @@
    "bees": [
     {
      "name": "Scout",
-     "score": 4.8,
+     "score": 4.5,
      "dir": "neut"
     },
     {
@@ -6635,7 +6875,7 @@
     },
     {
      "name": "Oracle",
-     "score": 9.6,
+     "score": 5.7,
      "dir": "bull"
     },
     {
@@ -6645,7 +6885,7 @@
     },
     {
      "name": "Buzz",
-     "score": 8.3,
+     "score": 7.1,
      "dir": "bull"
     },
     {
@@ -6660,20 +6900,68 @@
     }
    ]
   },
-  "TSLA": {
-   "std": 2.8,
-   "spread": 7.5,
-   "consensus": 71.0,
+  "AMZN": {
+   "std": 1.33,
+   "spread": 3.4,
+   "consensus": 57.0,
    "resonance": true,
    "votes": {
-    "bullish": 5,
-    "bearish": 2,
-    "neutral": 0
+    "bullish": 4,
+    "bearish": 0,
+    "neutral": 3
    },
    "bees": [
     {
      "name": "Scout",
-     "score": 1.9,
+     "score": 5.7,
+     "dir": "neut"
+    },
+    {
+     "name": "Rival",
+     "score": 5.6,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 8.4,
+     "dir": "bull"
+    },
+    {
+     "name": "Chronos",
+     "score": 8.0,
+     "dir": "bull"
+    },
+    {
+     "name": "Buzz",
+     "score": 5.9,
+     "dir": "neut"
+    },
+    {
+     "name": "Guard",
+     "score": 8.2,
+     "dir": "bull"
+    },
+    {
+     "name": "Bear",
+     "score": 5.0,
+     "dir": "neut"
+    }
+   ]
+  },
+  "TSLA": {
+   "std": 2.65,
+   "spread": 7.1,
+   "consensus": 57.0,
+   "resonance": true,
+   "votes": {
+    "bullish": 4,
+    "bearish": 2,
+    "neutral": 1
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 2.8,
      "dir": "bear"
     },
     {
@@ -6683,7 +6971,7 @@
     },
     {
      "name": "Oracle",
-     "score": 8.7,
+     "score": 9.2,
      "dir": "bull"
     },
     {
@@ -6693,12 +6981,108 @@
     },
     {
      "name": "Buzz",
-     "score": 8.0,
+     "score": 5.5,
+     "dir": "neut"
+    },
+    {
+     "name": "Guard",
+     "score": 7.6,
+     "dir": "bull"
+    },
+    {
+     "name": "Bear",
+     "score": 2.3,
+     "dir": "bear"
+    }
+   ]
+  },
+  "NVDA": {
+   "std": 2.36,
+   "spread": 7.1,
+   "consensus": 57.0,
+   "resonance": true,
+   "votes": {
+    "bullish": 4,
+    "bearish": 2,
+    "neutral": 1
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 3.1,
+     "dir": "bear"
+    },
+    {
+     "name": "Rival",
+     "score": 5.8,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 9.8,
+     "dir": "bull"
+    },
+    {
+     "name": "Chronos",
+     "score": 6.3,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 6.5,
      "dir": "bull"
     },
     {
      "name": "Guard",
+     "score": 8.2,
+     "dir": "bull"
+    },
+    {
+     "name": "Bear",
+     "score": 2.7,
+     "dir": "bear"
+    }
+   ]
+  },
+  "RKLB": {
+   "std": 2.15,
+   "spread": 5.5,
+   "consensus": 57.0,
+   "resonance": true,
+   "votes": {
+    "bullish": 4,
+    "bearish": 1,
+    "neutral": 2
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 2.8,
+     "dir": "neut"
+    },
+    {
+     "name": "Rival",
+     "score": 5.4,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 7.5,
+     "dir": "bull"
+    },
+    {
+     "name": "Chronos",
      "score": 6.4,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 7.7,
+     "dir": "bull"
+    },
+    {
+     "name": "Guard",
+     "score": 7.7,
      "dir": "bull"
     },
     {
@@ -6708,9 +7092,153 @@
     }
    ]
   },
+  "CRCL": {
+   "std": 1.79,
+   "spread": 5.8,
+   "consensus": 43.0,
+   "resonance": true,
+   "votes": {
+    "bullish": 3,
+    "bearish": 1,
+    "neutral": 3
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 3.5,
+     "dir": "neut"
+    },
+    {
+     "name": "Rival",
+     "score": 5.8,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 8.1,
+     "dir": "bull"
+    },
+    {
+     "name": "Chronos",
+     "score": 6.6,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 5.8,
+     "dir": "neut"
+    },
+    {
+     "name": "Guard",
+     "score": 5.2,
+     "dir": "bull"
+    },
+    {
+     "name": "Bear",
+     "score": 2.3,
+     "dir": "bear"
+    }
+   ]
+  },
+  "BILI": {
+   "std": 2.06,
+   "spread": 6.6,
+   "consensus": 57.0,
+   "resonance": true,
+   "votes": {
+    "bullish": 4,
+    "bearish": 2,
+    "neutral": 1
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 5.7,
+     "dir": "bull"
+    },
+    {
+     "name": "Rival",
+     "score": 5.8,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 3.0,
+     "dir": "bear"
+    },
+    {
+     "name": "Chronos",
+     "score": 5.5,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 6.1,
+     "dir": "bull"
+    },
+    {
+     "name": "Guard",
+     "score": 9.6,
+     "dir": "bull"
+    },
+    {
+     "name": "Bear",
+     "score": 3.0,
+     "dir": "bear"
+    }
+   ]
+  },
+  "VKTX": {
+   "std": 1.65,
+   "spread": 5.5,
+   "consensus": 43.0,
+   "resonance": false,
+   "votes": {
+    "bullish": 3,
+    "bearish": 1,
+    "neutral": 3
+   },
+   "bees": [
+    {
+     "name": "Scout",
+     "score": 3.8,
+     "dir": "neut"
+    },
+    {
+     "name": "Rival",
+     "score": 6.0,
+     "dir": "bull"
+    },
+    {
+     "name": "Oracle",
+     "score": 7.5,
+     "dir": "bull"
+    },
+    {
+     "name": "Chronos",
+     "score": 6.1,
+     "dir": "neut"
+    },
+    {
+     "name": "Buzz",
+     "score": 5.5,
+     "dir": "neut"
+    },
+    {
+     "name": "Guard",
+     "score": 5.3,
+     "dir": "bull"
+    },
+    {
+     "name": "Bear",
+     "score": 2.0,
+     "dir": "bear"
+    }
+   ]
+  },
   "QCOM": {
    "std": 1.13,
-   "spread": 3.2,
+   "spread": 3.4,
    "consensus": 43.0,
    "resonance": false,
    "votes": {
@@ -6721,7 +7249,7 @@
    "bees": [
     {
      "name": "Scout",
-     "score": 3.7,
+     "score": 3.5,
      "dir": "neut"
     },
     {
@@ -6751,301 +7279,13 @@
     },
     {
      "name": "Bear",
-     "score": 3.8,
-     "dir": "bear"
-    }
-   ]
-  },
-  "VKTX": {
-   "std": 2.26,
-   "spread": 6.9,
-   "consensus": 57.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 4,
-    "bearish": 1,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 9.6,
-     "dir": "bull"
-    },
-    {
-     "name": "Rival",
-     "score": 6.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 6.4,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 6.1,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 5.2,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 9.7,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 2.8,
-     "dir": "bear"
-    }
-   ]
-  },
-  "BILI": {
-   "std": 1.69,
-   "spread": 5.6,
-   "consensus": 57.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 4,
-    "bearish": 1,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 6.3,
-     "dir": "bull"
-    },
-    {
-     "name": "Rival",
-     "score": 5.7,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 5.0,
-     "dir": "neut"
-    },
-    {
-     "name": "Chronos",
-     "score": 4.8,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 6.5,
-     "dir": "bull"
-    },
-    {
-     "name": "Guard",
-     "score": 9.7,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 4.1,
-     "dir": "bear"
-    }
-   ]
-  },
-  "META": {
-   "std": 2.39,
-   "spread": 6.6,
-   "consensus": 57.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 4,
-    "bearish": 1,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 3.4,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 6.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 10.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 8.8,
-     "dir": "bull"
-    },
-    {
-     "name": "Buzz",
-     "score": 5.5,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 8.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 3.4,
-     "dir": "bear"
-    }
-   ]
-  },
-  "AMZN": {
-   "std": 1.0,
-   "spread": 2.4,
-   "consensus": 71.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 5,
-    "bearish": 0,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 5.9,
-     "dir": "bull"
-    },
-    {
-     "name": "Rival",
-     "score": 5.6,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 8.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 7.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Buzz",
-     "score": 5.6,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 8.0,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 6.0,
-     "dir": "neut"
-    }
-   ]
-  },
-  "RKLB": {
-   "std": 1.73,
-   "spread": 4.9,
-   "consensus": 57.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 4,
-    "bearish": 1,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 3.7,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 5.5,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 7.7,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 6.4,
-     "dir": "neut"
-    },
-    {
-     "name": "Buzz",
-     "score": 6.2,
-     "dir": "bull"
-    },
-    {
-     "name": "Guard",
-     "score": 7.7,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 2.9,
-     "dir": "bear"
-    }
-   ]
-  },
-  "CRCL": {
-   "std": 2.04,
-   "spread": 5.9,
-   "consensus": 57.0,
-   "resonance": true,
-   "votes": {
-    "bullish": 4,
-    "bearish": 1,
-    "neutral": 2
-   },
-   "bees": [
-    {
-     "name": "Scout",
-     "score": 3.2,
-     "dir": "neut"
-    },
-    {
-     "name": "Rival",
-     "score": 5.6,
-     "dir": "bull"
-    },
-    {
-     "name": "Oracle",
-     "score": 7.4,
-     "dir": "bull"
-    },
-    {
-     "name": "Chronos",
-     "score": 7.2,
-     "dir": "bull"
-    },
-    {
-     "name": "Buzz",
-     "score": 6.2,
-     "dir": "neut"
-    },
-    {
-     "name": "Guard",
-     "score": 8.2,
-     "dir": "bull"
-    },
-    {
-     "name": "Bear",
-     "score": 2.3,
+     "score": 4.0,
      "dir": "bear"
     }
    ]
   }
  },
- "_generated_at": "2026-04-15 14:54 PDT",
- "_date": "2026-04-15",
- "_deploy_ts": 1776290058
+ "_generated_at": "2026-04-16 14:28 PDT",
+ "_date": "2026-04-16",
+ "_deploy_ts": 1776374909
 }
