@@ -23,9 +23,9 @@
     "risk_adj": 0.1132
   },
   "actual_prices": {
-    "t1": null,
+    "t1": 25.0,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-04-13T14:05:29.264024"
+  "created_at": "2026-04-16T14:28:39.528299"
 }
