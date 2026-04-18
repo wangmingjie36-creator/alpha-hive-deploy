@@ -42,19 +42,30 @@ from typing import Dict, List, Optional, Tuple
 
 @dataclass
 class BacktestConfig:
+    """
+    v0.22.1 方案 A — 放宽筛选（扩样本从 11 笔→ 预期 50-80 笔）
+
+    Bootstrap + FF 归因发现：过严筛选把原始信号的 α (+166% p=0.015)
+    剃成了低 beta 中性化组合（α -12% p=0.53）。本次放宽：
+      max_agent_std: 1.5 → 2.5    (允许分歧信号 = alpha 源)
+      min_score_bull: 6.5 → 5.5   (不再只要"共识最强"票)
+      min_score_bear: 4.5 → 5.5   (镜像，看空也放宽)
+      accept_neutral: False → True(中性 40 笔可能含真 alpha)
+      max_concurrent: 5 → 15      ($50K × 10% × 15 = 150% 受 gross_exposure 保护)
+    """
     initial_capital: float = 50_000.0
     position_size_pct: float = 0.10        # 每笔 = NAV × 10%
-    max_concurrent: int = 5                # 最多同时持仓
-    min_score_bull: float = 6.5            # 看多入场最低分
-    min_score_bear: float = 4.5            # 看空入场最高分（升级3：放宽看空）
-    accept_neutral: bool = False           # 是否入场中性方向
+    max_concurrent: int = 15               # v0.22.1: 5→15（gross_exposure 已防杠杆）
+    min_score_bull: float = 5.5            # v0.22.1: 6.5→5.5（放宽看多门槛）
+    min_score_bear: float = 5.5            # v0.22.1: 4.5→5.5（镜像对称）
+    accept_neutral: bool = True            # v0.22.1: False→True（中性含 alpha）
     take_all: bool = False                 # 不筛选，所有预测都入场
     benchmark_ticker: str = "SPY"
     # ── 升级 1: Agent 共识门控 ──
-    max_agent_std: float = 1.5             # dimension_scores std > 此值则跳过
+    max_agent_std: float = 2.5             # v0.22.1: 1.5→2.5（允许分歧信号）
     # ── 升级 3: 方向不对称仓位 ──
-    bull_size_pct: float = 0.08            # 看多仓位 = NAV × 8%（缩小）
-    bear_size_pct: float = 0.12            # 看空仓位 = NAV × 12%（放大）
+    bull_size_pct: float = 0.08            # 看多仓位 = NAV × 8%
+    bear_size_pct: float = 0.12            # 看空仓位 = NAV × 12%
     # ── 升级 4: 宏观门控 ──
     macro_gate: bool = True                # 启用宏观政体门控
     spy_ma_days: int = 20                  # SPY 均线天数
@@ -726,17 +737,20 @@ def print_report(result: Dict):
 
 def main():
     parser = argparse.ArgumentParser(description="Alpha Hive $50K Portfolio Backtest")
-    parser.add_argument("--capital", type=float, default=50_000, help="起始资金（默认 $50,000）")
-    parser.add_argument("--size-pct", type=float, default=0.10, help="每笔仓位占 NAV（默认 0.10 = 10%%）")
-    parser.add_argument("--max-pos", type=int, default=5, help="最多同时持仓（默认 5）")
-    parser.add_argument("--min-score-bull", type=float, default=6.5, help="看多最低分（默认 6.5）")
-    parser.add_argument("--min-score-bear", type=float, default=4.5, help="看空最高分（默认 4.5）")
-    parser.add_argument("--accept-neutral", action="store_true", help="允许中性方向入场")
+    # 所有 default 值同步到 BacktestConfig.__init__（v0.22.1 方案 A 放宽筛选后的新基线）
+    _d = BacktestConfig()
+    parser.add_argument("--capital", type=float, default=_d.initial_capital)
+    parser.add_argument("--size-pct", type=float, default=_d.position_size_pct)
+    parser.add_argument("--max-pos", type=int, default=_d.max_concurrent, help=f"最多同时持仓（默认 {_d.max_concurrent}）")
+    parser.add_argument("--min-score-bull", type=float, default=_d.min_score_bull, help=f"看多最低分（默认 {_d.min_score_bull}）")
+    parser.add_argument("--min-score-bear", type=float, default=_d.min_score_bear, help=f"看空最高分（默认 {_d.min_score_bear}）")
+    parser.add_argument("--accept-neutral", action="store_true", default=_d.accept_neutral, help=f"允许中性方向入场（默认 {_d.accept_neutral}）")
+    parser.add_argument("--reject-neutral", dest="accept_neutral", action="store_false", help="显式拒绝中性")
     parser.add_argument("--all", action="store_true", help="全入场，不筛选 score/direction")
-    parser.add_argument("--max-std", type=float, default=1.5, help="Agent 共识门控阈值（默认 1.5）")
+    parser.add_argument("--max-std", type=float, default=_d.max_agent_std, help=f"Agent 共识门控阈值（默认 {_d.max_agent_std}）")
     parser.add_argument("--no-macro-gate", action="store_true", help="禁用宏观政体门控")
-    parser.add_argument("--bull-size", type=float, default=0.08, help="看多仓位占 NAV（默认 0.08）")
-    parser.add_argument("--bear-size", type=float, default=0.12, help="看空仓位占 NAV（默认 0.12）")
+    parser.add_argument("--bull-size", type=float, default=_d.bull_size_pct)
+    parser.add_argument("--bear-size", type=float, default=_d.bear_size_pct)
     parser.add_argument("--json", action="store_true", help="输出 JSON（供其他脚本消费）")
     parser.add_argument("--save", type=str, default=None, help="保存完整结果到 JSON 文件")
     args = parser.parse_args()
