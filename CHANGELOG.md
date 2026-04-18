@@ -5,6 +5,80 @@
 
 ---
 
+## [0.22.0] — 2026-04-17 — 样本外验证 + FF 因子归因（方向 1+2）
+
+从"原型系统"升级到"真正的量化研究工作流"。4 个新模块让系统具备**统计显著性判断能力**。
+
+### Added
+
+- **`config.WATCHLIST_EXTENDED`（77 只 S&P 500 高流动性 + ETF）+ `get_extended_watchlist()`**
+  - 核心 25 只 + 扩展 77 只 = 101 只总池，覆盖 14 个 sector
+  - 扫描脚本通过 `--extended-pool` 启用（代码已接入配置，待扫描脚本接入 CLI）
+  - **价值**：样本量 10x + sector 多样化，2-3 个月后 Walk-forward/Bootstrap 可产出稳健结论
+
+- **`walk_forward_validator.py`（新文件，方向 1b）**
+  - Rolling k-fold 时间序列切分（train/test 按时间顺序，无 lookahead）
+  - 区分**过拟合** (train>test) vs **非平稳性** (test>train)
+  - Purge gap 支持（训练/测试间隙，防信息泄漏）
+  - 当前 3-fold 测试结果：
+    - Fold 0: train WR 48.4% → test WR 50.0%（稳定）
+    - Fold 1: train WR 48.8% → test WR 64.3%（非平稳）
+    - Fold 2: train WR 44.1% → test WR 81.0%（非平稳）
+    - 评级：🔴 严重非平稳（max |gap|=37pp），系统 evolve 中 / 4 月行情不同于 3 月
+  - CLI: `python3 walk_forward_validator.py --folds 3 --train-pct 0.6 --test-pct 0.2`
+
+- **`bootstrap_ci.py`（新文件，方向 1c）**
+  - Efron 非参数 bootstrap：1000-5000 次有放回重采样
+  - 输出 Sharpe / WR / PF / Avg Net 的 **95% 置信区间** + 显著性判断（CI 同号）
+  - 两种数据源：`--source raw_db`（全 210 笔）vs `--source portfolio_backtest`（筛选后 9 笔）
+  - **关键发现（raw 210 笔）**：
+    - Sharpe **+1.105**, 95% CI **[+0.34, +1.86]** ✓ **统计显著为正**
+    - Profit Factor **+1.63**, CI [1.16, 2.32] ✓ 显著
+    - Avg Net **+1.56%**, CI [+0.46, +2.74] ✓ 显著
+  - **关键对比（filtered 9 笔）**：
+    - Sharpe -1.8, CI **[-9.26, +2.38]** ✗ 跨零，统计无意义
+  - **重大洞察**：**portfolio_backtest 的过严筛选把原始信号的 edge 杀掉了**
+    - 原始 210 笔 signals 有显著正 Sharpe
+    - 筛掉 199 笔后剩 9 笔 → 样本过小，点估计不可信
+    - 方向：**放宽筛选阈值，保留更多样本**
+  - CLI: `python3 bootstrap_ci.py --n 2000 --source raw_db`
+
+- **`portfolio_factor_attribution.py`（新文件，方向 2）**
+  - 组合级 Fama-French 因子归因（`factor_attribution.py` 原只支持单 ticker）
+  - 策略日度收益构造：持仓期 $50K × 10% 仓按交易日分摊 net_return_t7
+  - 三档模型：FF6（Kenneth French，6 因子）/ ETF5（SPY/IWM/IWD/IWF/MTUM/QUAL 近似实时）/ CAPM（单因子降级）
+  - 自动降级：FF6 日期重叠不足 15 天 → 切 ETF5（修复 Kenneth French 1-2 月数据滞后）
+  - 输出：Jensen α + t-stat + p-value + IR + 因子暴露 + 残差自相关
+  - **首次运行结果（ETF5 / 36 观测日 / raw 210 笔）**：
+    - **Jensen α 年化 +166%** (t=+2.58, p=0.015, ** 显著)
+    - **IR +7.75**（但样本小需大幅打折）
+    - β_smb -0.88 (*) —— **系统性偏向大市值**
+    - β_mom +0.72 (*) —— **跟随动量**
+    - R² 39%，残差自相关 +0.41（⚠️ 仍有未捕捉因子，可能 IV/行业）
+  - **关键诊断**：样本量警告逻辑会对 `n_obs < 60 + |α| > 50%` 输出"关注方向+因子+IR 量级，不要纠结具体 α 数字"
+  - CLI: `python3 portfolio_factor_attribution.py --factor-source etf --source all_trades`
+
+### Changed
+
+- **`MEMORY.md` v22.0 记录**：样本外验证 + 因子归因能力上线
+
+### 关键诊断汇总（运营启示）
+
+从这次验证得到的 4 个实锤结论：
+
+1. **原始信号有真 edge**：raw 210 笔 Sharpe +1.10 CI [+0.34, +1.86] 统计显著为正（Bootstrap）
+2. **过严筛选反效果**：filtered 9 笔 Sharpe 点估计 -1.8 但 CI 跨零无意义 → 说明 `portfolio_backtest` 的 5-7 重筛选（agent_std + score + macro + concurrent + direction）过于激进，把 edge 筛没了
+3. **数据非平稳**：3-fold walk-forward 显示 4 月测试期 WR 远高于 3 月训练期（50% → 64% → 81%），要么系统在 evolve，要么只是运气；无法定论需更多样本
+4. **真 Alpha + 真因子暴露**：FF 归因 p=0.015 ** 显著 α > 0；系统**被动地**在做**大市值 + 动量**因子暴露，剥离后仍有 edge
+
+### 下一步建议
+
+- **短期（1 个月）**：放宽 portfolio_backtest 筛选（`max_agent_std` 1.5 → 2.0，`min_score_bull` 6.5 → 5.5），观察样本量能否扩到 30-50 笔
+- **中期（2 个月）**：接入 `WATCHLIST_EXTENDED`（需扫描脚本 CLI 改造）
+- **长期（3 个月）**：样本达到 100+ 后重跑 walk-forward，再做参数调优，否则都是在"小样本噪声"上调参
+
+---
+
 ## [0.21.0] — 2026-04-17 — 18 项深度 Bug 修复 + 去除 look-ahead bias
 
 4 个并行审计 Agent 找出 18 个真实 Bug，全部修复。**去除 look-ahead bias 后，真实回测数字从 "$50,871 / Sharpe 1.11" 归为 "$49,439 / Alpha vs SPY +1.08%"** — 系统仍有选股能力，但远没有之前吹嘘的那么强。

@@ -361,6 +361,112 @@ WATCHLIST = {
     },
 }
 
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.22.0: 扩展池（S&P 500 高流动性 + 期权活跃核心 ~75 只）
+# 方向1a：扩 watchlist 以增加样本量（原 25 只 → 100 只）
+# 用法：扫描脚本按需合并 WATCHLIST + WATCHLIST_EXTENDED（CLI --all-watchlist 或 --extended-pool）
+# ══════════════════════════════════════════════════════════════════════════════
+WATCHLIST_EXTENDED = {
+    # ── 大型科技（Mega-cap Tech）──
+    "AAPL": {"name": "Apple Inc", "sector": "Technology", "monitor_events": ["earnings", "product_launch"]},
+    "GOOGL": {"name": "Alphabet Inc", "sector": "Technology", "monitor_events": ["earnings", "ai_product", "antitrust"]},
+    "AVGO": {"name": "Broadcom Inc", "sector": "Technology", "monitor_events": ["earnings", "vmware_integration"]},
+    "ORCL": {"name": "Oracle Corp", "sector": "Technology", "monitor_events": ["earnings", "cloud_growth"]},
+    "CRM": {"name": "Salesforce Inc", "sector": "Technology", "monitor_events": ["earnings", "ai_agentforce"]},
+    "ADBE": {"name": "Adobe Inc", "sector": "Technology", "monitor_events": ["earnings", "creative_cloud"]},
+    "NOW": {"name": "ServiceNow Inc", "sector": "Technology", "monitor_events": ["earnings"]},
+    "PANW": {"name": "Palo Alto Networks", "sector": "Technology", "monitor_events": ["earnings", "security_platform"]},
+    "CRWD": {"name": "CrowdStrike Holdings", "sector": "Technology", "monitor_events": ["earnings", "incident_response"]},
+    "SNOW": {"name": "Snowflake Inc", "sector": "Technology", "monitor_events": ["earnings"]},
+    "INTC": {"name": "Intel Corp", "sector": "Technology", "monitor_events": ["earnings", "foundry"]},
+    "MU": {"name": "Micron Technology", "sector": "Technology", "monitor_events": ["earnings", "hbm_shipments"]},
+    "SMCI": {"name": "Super Micro Computer", "sector": "Technology", "monitor_events": ["earnings", "ai_server"]},
+    "ARM": {"name": "Arm Holdings", "sector": "Technology", "monitor_events": ["earnings", "ai_licensing"]},
+    "DELL": {"name": "Dell Technologies", "sector": "Technology", "monitor_events": ["earnings", "ai_server"]},
+    "HPE": {"name": "Hewlett Packard Enterprise", "sector": "Technology", "monitor_events": ["earnings"]},
+    "ASML": {"name": "ASML Holding", "sector": "Technology", "monitor_events": ["earnings", "euv_orders"]},
+    "TSM": {"name": "Taiwan Semiconductor", "sector": "Technology", "monitor_events": ["earnings", "monthly_revenue"]},
+    # ── 消费（Consumer）──
+    "COST": {"name": "Costco Wholesale", "sector": "Consumer", "monitor_events": ["monthly_sales", "earnings"]},
+    "WMT": {"name": "Walmart Inc", "sector": "Consumer", "monitor_events": ["earnings", "comp_sales"]},
+    "HD": {"name": "Home Depot", "sector": "Consumer", "monitor_events": ["earnings", "housing_starts"]},
+    "NKE": {"name": "Nike Inc", "sector": "Consumer", "monitor_events": ["earnings", "china_sales"]},
+    "MCD": {"name": "McDonald's Corp", "sector": "Consumer", "monitor_events": ["earnings", "same_store_sales"]},
+    "SBUX": {"name": "Starbucks Corp", "sector": "Consumer", "monitor_events": ["earnings", "china_traffic"]},
+    "LULU": {"name": "Lululemon Athletica", "sector": "Consumer", "monitor_events": ["earnings", "international_growth"]},
+    # ── 金融（Financials）──
+    "JPM": {"name": "JPMorgan Chase", "sector": "Financials", "monitor_events": ["earnings", "nii_guidance"]},
+    "BAC": {"name": "Bank of America", "sector": "Financials", "monitor_events": ["earnings", "nii"]},
+    "GS": {"name": "Goldman Sachs", "sector": "Financials", "monitor_events": ["earnings", "trading_revenue"]},
+    "MS": {"name": "Morgan Stanley", "sector": "Financials", "monitor_events": ["earnings", "wealth_mgmt"]},
+    "V": {"name": "Visa Inc", "sector": "Financials", "monitor_events": ["earnings", "payment_volume"]},
+    "MA": {"name": "Mastercard Inc", "sector": "Financials", "monitor_events": ["earnings", "cross_border"]},
+    "BRK-B": {"name": "Berkshire Hathaway", "sector": "Financials", "monitor_events": ["13f", "annual_meeting"]},
+    # ── 医药（Healthcare - 补充）──
+    "LLY": {"name": "Eli Lilly", "sector": "Healthcare", "monitor_events": ["earnings", "glp1_sales"]},
+    "NVO": {"name": "Novo Nordisk", "sector": "Healthcare", "monitor_events": ["earnings", "wegovy_demand"]},
+    "UNH": {"name": "UnitedHealth Group", "sector": "Healthcare", "monitor_events": ["earnings", "mlr"]},
+    "ABBV": {"name": "AbbVie Inc", "sector": "Healthcare", "monitor_events": ["earnings", "skyrizi_rinvoq"]},
+    "PFE": {"name": "Pfizer Inc", "sector": "Healthcare", "monitor_events": ["earnings", "pipeline"]},
+    "MRK": {"name": "Merck & Co", "sector": "Healthcare", "monitor_events": ["earnings", "keytruda"]},
+    "TMO": {"name": "Thermo Fisher", "sector": "Healthcare", "monitor_events": ["earnings"]},
+    "ISRG": {"name": "Intuitive Surgical", "sector": "Healthcare", "monitor_events": ["earnings", "procedure_volumes"]},
+    # ── 能源 / 工业 ──
+    "XOM": {"name": "Exxon Mobil", "sector": "Energy", "monitor_events": ["earnings", "oil_prices"]},
+    "CVX": {"name": "Chevron Corp", "sector": "Energy", "monitor_events": ["earnings", "permian_output"]},
+    "CAT": {"name": "Caterpillar Inc", "sector": "Industrials", "monitor_events": ["earnings", "dealer_inventory"]},
+    "BA": {"name": "Boeing Co", "sector": "Industrials", "monitor_events": ["earnings", "737max_deliveries", "defense"]},
+    "GE": {"name": "GE Aerospace", "sector": "Industrials", "monitor_events": ["earnings", "services_orders"]},
+    "DE": {"name": "Deere & Co", "sector": "Industrials", "monitor_events": ["earnings", "ag_equipment"]},
+    # ── 通讯 / 媒体 ──
+    "NFLX": {"name": "Netflix Inc", "sector": "Communication", "monitor_events": ["earnings", "subscriber_adds", "ad_tier"]},
+    "DIS": {"name": "Walt Disney Co", "sector": "Communication", "monitor_events": ["earnings", "parks", "dtc_profitability"]},
+    "T": {"name": "AT&T Inc", "sector": "Communication", "monitor_events": ["earnings", "postpaid_adds"]},
+    "VZ": {"name": "Verizon Communications", "sector": "Communication", "monitor_events": ["earnings", "postpaid_net_adds"]},
+    "CMCSA": {"name": "Comcast Corp", "sector": "Communication", "monitor_events": ["earnings", "broadband_subs"]},
+    "TMUS": {"name": "T-Mobile US", "sector": "Communication", "monitor_events": ["earnings", "postpaid_net_adds"]},
+    # ── 中概 / 其它高波动 ──
+    "BABA": {"name": "Alibaba Group", "sector": "Technology", "monitor_events": ["earnings", "cloud_revenue"]},
+    "PDD": {"name": "PDD Holdings", "sector": "Technology", "monitor_events": ["earnings", "temu_gmv"]},
+    "JD": {"name": "JD.com Inc", "sector": "Technology", "monitor_events": ["earnings", "618_promotion"]},
+    "NIO": {"name": "NIO Inc", "sector": "Automotive", "monitor_events": ["deliveries", "earnings"]},
+    "XPEV": {"name": "XPeng Inc", "sector": "Automotive", "monitor_events": ["deliveries", "earnings"]},
+    "LI": {"name": "Li Auto Inc", "sector": "Automotive", "monitor_events": ["deliveries", "earnings"]},
+    # ── ETF 做 sector-hedge / regime 参考 ──
+    "SPY": {"name": "SPDR S&P 500 ETF", "sector": "ETF", "monitor_events": ["macro", "fomc"]},
+    "QQQ": {"name": "Invesco QQQ Trust", "sector": "ETF", "monitor_events": ["tech_earnings"]},
+    "IWM": {"name": "iShares Russell 2000 ETF", "sector": "ETF", "monitor_events": ["small_cap_earnings"]},
+    "SOXX": {"name": "iShares Semiconductor ETF", "sector": "ETF", "monitor_events": ["chip_earnings"]},
+    "XLE": {"name": "Energy Select Sector SPDR", "sector": "ETF", "monitor_events": ["oil_prices"]},
+    "XLF": {"name": "Financial Select Sector SPDR", "sector": "ETF", "monitor_events": ["bank_earnings"]},
+    "XLV": {"name": "Health Care Select SPDR", "sector": "ETF", "monitor_events": ["healthcare_earnings"]},
+    "XLK": {"name": "Technology Select Sector SPDR", "sector": "ETF", "monitor_events": ["tech_earnings"]},
+    "VXX": {"name": "iPath VIX Short-Term Futures", "sector": "ETF", "monitor_events": ["vix_spike"]},
+    # ── 高 beta / meme（波动信号用）──
+    "GME": {"name": "GameStop Corp", "sector": "Consumer", "monitor_events": ["earnings", "retail_sentiment"]},
+    "AMC": {"name": "AMC Entertainment", "sector": "Communication", "monitor_events": ["box_office", "earnings"]},
+    "PLTR": {"name": "Palantir Technologies", "sector": "Technology", "monitor_events": ["earnings", "government_contracts"]},
+    "SOFI": {"name": "SoFi Technologies", "sector": "Financials", "monitor_events": ["earnings", "member_adds"]},
+    "HOOD": {"name": "Robinhood Markets", "sector": "Financials", "monitor_events": ["earnings", "monthly_active_users"]},
+    "RIVN": {"name": "Rivian Automotive", "sector": "Automotive", "monitor_events": ["deliveries", "earnings"]},
+    "LCID": {"name": "Lucid Group", "sector": "Automotive", "monitor_events": ["deliveries", "earnings"]},
+    "DKNG": {"name": "DraftKings Inc", "sector": "Communication", "monitor_events": ["earnings", "sports_launches"]},
+    "F": {"name": "Ford Motor Co", "sector": "Automotive", "monitor_events": ["earnings", "ev_losses"]},
+    "GM": {"name": "General Motors", "sector": "Automotive", "monitor_events": ["earnings", "ev_output"]},
+}
+
+
+def get_extended_watchlist() -> dict:
+    """返回合并后的 WATCHLIST（25 核心 + 扩展池 ~75）。
+    调用方：`python3 alpha_hive_daily_report.py --extended-pool`
+    """
+    merged = dict(WATCHLIST)
+    for tk, meta in WATCHLIST_EXTENDED.items():
+        if tk not in merged:
+            merged[tk] = meta
+    return merged
+
+
 # ==================== 数据源优先级 ====================
 DATA_SOURCE_PRIORITY = {
     "stocktwits_messages": 1,  # 可靠性最高
