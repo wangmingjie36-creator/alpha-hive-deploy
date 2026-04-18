@@ -93,19 +93,27 @@ def _metrics(rets: List[float]) -> Dict:
         return {"n": 0, "sharpe": 0.0, "wr": 0.0, "pf": 0.0, "avg": 0.0}
     n = len(rets)
     wins = [r for r in rets if r > 0]
-    losses = [r for r in rets if r <= 0]
+    losses = [r for r in rets if r < 0]   # v0.23.2 修复：r=0 不算 loss
     wr = len(wins) / n * 100.0
     avg = sum(rets) / n
     std = statistics.pstdev(rets)
     sharpe = (avg / std) * math.sqrt(T7_PERIODS_PER_YEAR) if std > 1e-9 else 0.0
     total_win = sum(wins)
     total_loss = abs(sum(losses))
-    pf = total_win / total_loss if total_loss > 1e-9 else (float("inf") if total_win > 0 else 0.0)
+    # v0.23.2 修复 #7：原 pf=inf 在上游被当成 None 静默丢弃，导致 CI 上限被低估
+    # 改为 cap 到 999（大到足以显示"极高 PF"但可参与统计）
+    PF_INF_CAP = 999.0
+    if total_loss > 1e-9:
+        pf = total_win / total_loss
+    elif total_win > 0:
+        pf = PF_INF_CAP
+    else:
+        pf = 0.0
     return {
         "n": n,
         "sharpe": round(sharpe, 3),
         "wr": round(wr, 2),
-        "pf": round(pf, 3) if pf != float("inf") else None,
+        "pf": round(min(pf, PF_INF_CAP), 3),
         "avg": round(avg, 3),
     }
 
@@ -144,11 +152,16 @@ def run_bootstrap(rets: List[float], n_iter: int = 1000, seed: int = 42) -> Boot
             if v is not None:
                 samples[k].append(v)
 
-    # 分位数
+    # 分位数 — v0.23.2 修复：用线性插值（替代 nearest-rank，减少 ±1 位置偏差）
     def _quantile(lst, q):
+        if not lst:
+            return 0.0
         s = sorted(lst)
-        idx = max(0, min(len(s) - 1, int(len(s) * q)))
-        return s[idx]
+        k = (len(s) - 1) * q
+        f = int(k)  # floor
+        c = min(f + 1, len(s) - 1)  # ceil，clamp
+        frac = k - f
+        return s[f] * (1 - frac) + s[c] * frac
 
     ci_95 = {}
     ci_68 = {}

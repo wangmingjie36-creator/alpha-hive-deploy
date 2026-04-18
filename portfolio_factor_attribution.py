@@ -249,16 +249,20 @@ def _regress(strategy_rets: pd.Series, ff: pd.DataFrame, model: str = "FF6",
     X = np.hstack([ones, ff_al[factor_cols].values])
 
     # 自动推荐 HAC lag（Newey-West 1987）
+    # v0.23.2 修复 #3：n<30 时 auto_ac 本身方差大，不做 auto-HAC 避免随机触发
     if hac_lag is None:
-        # 如果残差自相关显著（试跑一次 OLS 检查），自动启用
-        ols_pre = _ols(y, X)
-        res_pre = ols_pre["residuals"]
-        rm = res_pre - res_pre.mean()
-        auto_ac = float(np.sum(rm[:-1] * rm[1:]) / np.sum(rm * rm)) if len(rm) > 2 else 0.0
-        if abs(auto_ac) > 0.15:
-            n_obs = len(common)
-            hac_lag = max(1, int(4 * (n_obs / 100.0) ** (2.0 / 9.0)))
-            _log.info(f"残差自相关 {auto_ac:+.2f} 显著 → 自动启用 HAC(lag={hac_lag})")
+        n_obs = len(common)
+        if n_obs < 30:
+            _log.debug(f"样本 n={n_obs} < 30，跳过 HAC auto-enable（可手动 --hac-lag 强制）")
+        else:
+            # 如果残差自相关显著（试跑一次 OLS 检查），自动启用
+            ols_pre = _ols(y, X)
+            res_pre = ols_pre["residuals"]
+            rm = res_pre - res_pre.mean()
+            auto_ac = float(np.sum(rm[:-1] * rm[1:]) / np.sum(rm * rm)) if len(rm) > 2 else 0.0
+            if abs(auto_ac) > 0.15:
+                hac_lag = max(1, int(4 * (n_obs / 100.0) ** (2.0 / 9.0)))
+                _log.info(f"残差自相关 {auto_ac:+.2f} 显著 → 自动启用 HAC(lag={hac_lag})")
 
     ols = _ols(y, X, hac_lag=hac_lag)
     beta = ols["beta"]

@@ -355,7 +355,7 @@ WATCHLIST = {
     },
     "CRCL": {
         "name": "Circle Internet Financial",
-        "sector": "Fintech",
+        "sector": "FinTech",
         "polymarket_slug": "circle-ipo",
         "monitor_events": ["ipo", "earnings", "usdc_growth", "regulatory", "crypto_policy"],
     },
@@ -459,11 +459,28 @@ WATCHLIST_EXTENDED = {
 def get_extended_watchlist() -> dict:
     """返回合并后的 WATCHLIST（25 核心 + 扩展池 ~75）。
     调用方：`python3 alpha_hive_daily_report.py --extended-pool`
+
+    v0.23.2 修复：语义明确为"WATCHLIST 优先"（核心标的的 catalyst 配置不被扩展池覆盖）。
+    如需覆盖核心标的，直接改 WATCHLIST 而非往 WATCHLIST_EXTENDED 加同名。
+
+    Sector 自动规范化：Fintech/fintech → FinTech；保持其它 sector 原值
     """
-    merged = dict(WATCHLIST)
+    _SECTOR_ALIAS = {"Fintech": "FinTech", "fintech": "FinTech"}
+    merged = {}
+    for tk, meta in WATCHLIST.items():
+        m = dict(meta)
+        sec = m.get("sector")
+        if sec in _SECTOR_ALIAS:
+            m["sector"] = _SECTOR_ALIAS[sec]
+        merged[tk] = m
+    # WATCHLIST_EXTENDED 只补不覆盖
     for tk, meta in WATCHLIST_EXTENDED.items():
         if tk not in merged:
-            merged[tk] = meta
+            m = dict(meta)
+            sec = m.get("sector")
+            if sec in _SECTOR_ALIAS:
+                m["sector"] = _SECTOR_ALIAS[sec]
+            merged[tk] = m
     return merged
 
 

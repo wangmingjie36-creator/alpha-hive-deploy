@@ -2117,19 +2117,44 @@ def main():
             _log.info("今日无 watchlist 标的发布财报")
         return result
 
-    # 确定扫描标的
-    focus_tickers = list(WATCHLIST.keys())[:10] if args.all_watchlist else args.tickers
+    # 确定扫描标的（v0.23.2 修复：主扫描路径也必须接入 _resolve_focus_tickers，
+    # 否则 --extended-pool / --max-tickers 对实际扫描完全不生效）
+    focus_tickers = _resolve_focus_tickers(args)
 
     if args.swarm:
         report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
     else:
         report = reporter.run_daily_scan(focus_tickers=focus_tickers)
 
+    # v0.23.2 修复 #2：--samples-only 必须在 save_report 之前短路
+    # 否则 _save_output_files 会生成 MD/HTML/PWA/X线程/rss.xml 到 repo 根，
+    # 被下次 daily-scan 的 auto_commit_and_notify 误 commit 污染生产网站
+    if args.samples_only:
+        # 修复 #7：error dict 不应静默成功退出
+        if isinstance(report, dict) and "error" in report:
+            print(f"\n❌ 样本积累扫描失败: {report.get('error')}")
+            _log.error("samples-only scan error: %s", report.get("error"))
+            return report
+        n_results_early = len(report.get("swarm_results") or report.get("ticker_results") or {})
+        # 只保存最小 JSON 供 Hive app 读取（pheromone.db 已在 run_swarm_scan 写入）
+        try:
+            json_file = reporter.report_dir / f".samples-only-{reporter.date_str}.json"
+            with open(json_file, "w", encoding="utf-8") as f:
+                json.dump(report, f, ensure_ascii=False, indent=2, cls=SafeJSONEncoder)
+            _log.info("样本模式: 仅保存 %s", json_file.name)
+        except (OSError, TypeError) as e:
+            _log.warning("samples-only JSON 保存失败 (但 pheromone.db 已写入): %s", e)
+        print(f"\n📦 样本积累模式: 完成 {n_results_early} 标的扫描, pheromone.db 已写入")
+        print(f"   - 跳过 save_report (避免生成 HTML/MD/PWA 污染 repo)")
+        print(f"   - 跳过 auto_commit_and_notify (不推 gh-pages / Slack)")
+        return report
+
     # 保存报告（Hive app 通过 .swarm_results_{date}.json 自动同步）
     report_path = reporter.save_report(report)
     _log.info("报告已保存：%s", report_path)
 
     # v0.23.1: --samples-only 模式跳过所有部署 / Slack / gh-pages，只为积累 pheromone.db 样本
+    # （保留为死代码兜底；上方已 early return，此处不会到达）
     if args.samples_only:
         n_results = len(report.get("swarm_results") or report.get("ticker_results") or {})
         print(f"\n📦 样本积累模式：完成 {n_results} 标的扫描，已写入 pheromone.db")

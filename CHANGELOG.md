@@ -5,6 +5,84 @@
 
 ---
 
+## [0.23.2] — 2026-04-17 — 二次审计：8 Bug 修复 + 发现另一个假 alpha
+
+三个并行审计 Agent（新脚本 / 核心引擎 / 配置部署）找到 18 个问题，本次修复 7 个 P0 + 1 个 P1。
+
+### Fixed — P0 Critical（**挽救 v0.23.1 扩样本失效危机**）
+
+- **#1 `alpha_hive_daily_report.py:2122`** — 主扫描路径未接入 `_resolve_focus_tickers`
+  - 旧实现：`focus_tickers = list(WATCHLIST.keys())[:10] if args.all_watchlist else args.tickers`
+  - **影响**：v0.23.1 新增的 `--extended-pool` / `--max-tickers` 对主扫描**完全无效**
+  - sample-accumulator scheduled-task 原定明天跑 50 只，实际只会跑 10 只 → 样本翻倍计划完全失败
+  - 修复：两处 `focus_tickers =` 都改用 `_resolve_focus_tickers(args)`
+
+- **#2 `alpha_hive_daily_report.py:2128-2160`** — `--samples-only` 未在 `save_report` 前短路
+  - 旧实现：先跑 `save_report()` → `_save_output_files()` 生成 MD/HTML/PWA/X线程/rss.xml 到 repo 根
+  - **影响**：周六扩样本扫描会落盘 50 份 HTML + MD + PWA 文件；下次 daily-scan 的 `auto_commit_and_notify` 会把它们 commit 到 main 污染生产网站
+  - 修复：`args.samples_only=True` 时直接 early return，只写最小 JSON
+
+- **#3 `factor_attribution.py:275-282`** — HAC 缺少 n/(n-k) 自由度修正
+  - 旧实现：`cov_hac = XtX_inv @ S @ XtX_inv`
+  - **影响**：n=36/k=6 下 SE 被系统性低估 ~20% → 高估 t-stat 和显著性
+  - 修复：`dof_correction = n/max(n-k, 1)` 并 `cov_hac *= dof_correction`
+  - 同时 `portfolio_factor_attribution.py` 加 n<30 闸门，避免小样本 auto-HAC 随机触发
+
+- **#4 `walk_forward_validator.py:164-175`** — `train_pct+test_pct>=1.0` 时 k-fold 失效
+  - 旧实现：`available = 1.0-(train+test)`，若默认 0.70+0.30=1.0 → step=0 → **所有 fold 同一窗口**
+  - **影响**：用户跑 `--folds 3` 默认参数时完全无 walk-forward，但工具却返回"成功"
+  - 修复：默认改为 `train=0.60 test=0.20`；`available<=0` 时 fold>0 直接返回空
+
+- **#5 `swarm_agents/chronos_bee.py:379-396`** — `_dt.now()` 作 entry_date 导致 hold_days 少算 1 天
+  - 旧实现：扫描时间（21:03 PDT 收盘后）直接当 entry_date
+  - **影响**：真实交易应在下一交易日开盘入场；催化剂距离少算 1 天
+  - 修复：找 now() 之后下一个工作日作 entry_date（周五扫 → 周一入场）
+
+- **#6 `portfolio_backtest.py:177` + 149-178** — `horizon=1/30` 下 `spy_return_t7=0.0` 硬编码
+  - 旧实现：非 T+7 分支 SPY 收益永远 0
+  - **影响**：**导致 v0.22.2 "T+30 α +49%" 严重高估 alpha**（把 SPY 同期涨幅全算成策略 alpha）
+  - 修复：预拉一次 SPY 历史，按每笔 entry_date + horizon 天交易日计算真实同期收益
+  - **修复后真相**：T+30 策略 PnL -$2,073（-4.15%），SPY 同期 +2.73% → **真实 Alpha -6.88%**（不是报的 +3.00% / +49% α）
+  - 附带修复：`exit_date` 解析失败时 drop 该记录而非赋空串（避免 WINDOW_CUTOFF 静默丢 PnL）
+
+- **#7 `bootstrap_ci.py:94-111` + `_quantile`** — PF=inf 被静默丢弃 + 分位数 nearest-rank 偏差
+  - 旧实现：`pf=inf` 返回 None → 上游 `samples[k].append(v)` 丢弃 → CI 上限幸存者偏差低估
+  - 修复：PF cap 到 999.0（大到显示"极高"但参与统计）；losses 改为 `r < 0` 不含 0；quantile 改线性插值
+
+### Fixed — P1
+
+- **`config.py:358` CRCL sector "Fintech" → "FinTech"** + `get_extended_watchlist()` 加自动 sector alias normalization（Fintech/fintech → FinTech），消除 feedback_loop 三桶冲突（Fintech/FinTech/Financials）
+- `get_extended_watchlist()` 明确文档"WATCHLIST 优先，扩展池只补不覆盖"
+
+### Findings — 另一个假 alpha 被揭穿
+
+| 指标 | v0.22.2 报告 | **v0.23.2 真实** | 差距 |
+|------|-------------|-----------------|------|
+| T+30 策略收益 | -4.15% (对) | -4.15% | — |
+| SPY 同期 | 硬编码 **0%** ❌ | **+2.73%** ✅ | +2.73pp |
+| **Alpha vs SPY** | **+3.00%** 🔴 误导 | **-6.88%** 🟢 真实 | **-9.88pp** |
+| FF α 估计 | +49% | 待重跑（预计仍为正但大幅下修） | — |
+
+**诊断**：v0.22.2 的"T+30 揭示真 Alpha +49%"其实**一半是 SPY 同期上涨被错归为 alpha**。T+30 策略在这 76 笔样本上**跑输 SPY 6.88%**，并非超额收益。
+
+### 验证
+
+所有 7 修复实际跑通：
+- Portfolio backtest 默认（T+7 放宽）：38 笔入场 / PnL +$687 / Sharpe +0.18 / Alpha vs SPY -1.36%
+- Portfolio backtest T+30：**SPY +2.73% / Alpha -6.88%（真实暴露）**
+- Bootstrap raw 210 笔：Sharpe +1.105 CI [+0.305, +1.868] ✓ 仍显著为正（核心结论不变）
+
+### 对昨天结论的影响
+
+| 结论 | 修改前 | 修改后 |
+|------|--------|--------|
+| raw 210 笔 Sharpe +1.10 CI 显著 | ✅ 成立 | ✅ **仍成立** |
+| 系统有 stock-picking edge | ✅ 成立 | ✅ **仍成立** |
+| "T+30 α +49% 是真 alpha" | ❓ 可疑 | ❌ **证伪**（一半是 SPY 漂移） |
+| 扩样本 sample-accumulator 明天生效 | 🔴 **失效**（bug #1） | ✅ **真的生效** |
+
+---
+
 ## [0.23.1] — 2026-04-17 — 混合双轨：零 API 费用的扩样本管道
 
 ### 背景

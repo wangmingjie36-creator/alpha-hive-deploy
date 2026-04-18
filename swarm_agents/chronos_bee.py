@@ -369,15 +369,27 @@ class ChronosBeeHorizon(BeeAgent):
                 _log.debug("ChronosBeeHorizon LLM unavailable for %s: %s", ticker, e)
 
             # v0.23.0: 催化剂驱动的动态 exit 推荐（供 backtester 替代固定 T+7）
+            # v0.23.2 修复 #5：扫描时间（收盘后 21:03 PDT）≠ 建仓时间。真实交易
+            # 在下一交易日开盘入场，所以 entry_date 应该是 now() 的下一工作日
             _rec_hold_days = 21  # 默认 T+21
             _exit_rationale = "default"
             try:
                 from catalyst_exit_planner import plan_exit as _plan_exit
-                from datetime import datetime as _dt
+                from datetime import datetime as _dt, timedelta as _td
+                # 计算下一工作日作为 entry_date（周五扫 → 周一入场）
+                _now = _dt.now()
+                _offset = 1
+                while True:
+                    _candidate = _now + _td(days=_offset)
+                    if _candidate.weekday() < 5:  # Mon=0 .. Fri=4
+                        break
+                    _offset += 1
+                    if _offset > 7:  # safety
+                        _candidate = _now + _td(days=1)
+                        break
+                _entry_date = _candidate.strftime("%Y-%m-%d")
                 _rec_hold_days, _exit_rationale = _plan_exit(
-                    ticker,
-                    _dt.now().strftime("%Y-%m-%d"),
-                    catalysts_found,
+                    ticker, _entry_date, catalysts_found,
                 )
             except Exception as _e_plan:
                 _log.debug("catalyst_exit_planner 不可用 %s: %s", ticker, _e_plan)

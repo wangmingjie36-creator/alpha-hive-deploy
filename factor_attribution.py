@@ -273,9 +273,12 @@ def _ols(y: np.ndarray, X: np.ndarray, hac_lag: Optional[int] = None) -> Dict:
                     G_l += residuals[t_idx] * residuals[t_idx - l] * (xt @ xt_l.T)
                 S += w_l * (G_l + G_l.T)
             # Newey-West var(β̂) = (X'X)^{-1} · S · (X'X)^{-1}
-            cov_hac = XtX_inv @ S @ XtX_inv
+            # v0.23.2 修复 #3：加 n/(n-k) 小样本自由度修正（statsmodels 默认行为）
+            # 不做修正会系统性低估 SE → 高估 t/显著性，n=36/k=6 偏差 ~20%
+            dof_correction = n / max(n - k, 1)
+            cov_hac = (XtX_inv @ S @ XtX_inv) * dof_correction
             se_hac = np.sqrt(np.maximum(np.diag(cov_hac), 0.0))
-            method = f"OLS+HAC(lag={L})"
+            method = f"OLS+HAC(lag={L}, dof_adj)"
         except Exception as e:
             _log.debug(f"HAC 计算失败，退回 OLS: {e}")
             se_hac = None

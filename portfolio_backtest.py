@@ -144,6 +144,40 @@ def load_verified_predictions(horizon: int = 7) -> List[Dict]:
     if horizon != 7:
         from trading_costs import apply_costs
         from datetime import datetime as _dt, timedelta as _td
+
+        # v0.23.2 修复 #6：预拉一次 SPY 同期收益，替代原 spy_return_t7=0.0 硬编码
+        # 原实现让 Alpha vs SPY 永远等于 strategy_return 本身，严重误导结果
+        spy_same_period: Dict[tuple, float] = {}  # (entry_date, horizon) → spy_return_pct
+        try:
+            import yfinance as _yf
+            if preds:
+                min_date = min(p["date"] for p in preds if p.get("date"))
+                max_date = max(p["date"] for p in preds if p.get("date"))
+                _end_dt = _dt.strptime(max_date, "%Y-%m-%d") + _td(days=int(horizon * 1.6) + 5)
+                spy_hist = _yf.Ticker("SPY").history(
+                    start=_dt.strptime(min_date, "%Y-%m-%d").date(),
+                    end=_end_dt.date(),
+                    auto_adjust=True,
+                )
+                spy_closes = {idx.strftime("%Y-%m-%d"): float(row["Close"])
+                              for idx, row in spy_hist.iterrows()}
+                sorted_spy = sorted(spy_closes.keys())
+                for p in preds:
+                    ed = p.get("date")
+                    if not ed or ed not in spy_closes:
+                        continue
+                    # 找 ed 之后 horizon 个交易日
+                    fut = [d for d in sorted_spy if d > ed]
+                    if len(fut) < 1:
+                        continue
+                    target = fut[min(horizon - 1, len(fut) - 1)]
+                    spy_same_period[(ed, horizon)] = (
+                        (spy_closes[target] - spy_closes[ed]) / spy_closes[ed] * 100.0
+                    )
+        except Exception as _spy_e:
+            import logging as _lg
+            _lg.getLogger(__name__).debug(f"SPY horizon={horizon} 同期收益拉取失败: {_spy_e}")
+
         for p in preds:
             direction = (p.get("direction") or "").strip().lower()
             raw_ret = float(p.get("return_t7") or 0)  # 已 alias 为 horizon 日收益
@@ -164,17 +198,23 @@ def load_verified_predictions(horizon: int = 7) -> List[Dict]:
             p["net_return_t7"] = cost_result["net_return_pct"]
             p["exit_reason"] = f"T{horizon}_CLOSE"
             p["holding_days"] = horizon
-            # exit_date = entry_date + horizon 自然日（足够近似）
+            # v0.23.2 修复 #6-2：exit_date 解析失败时降级到 entry_date + horizon 自然日
+            # 且避免赋空串（会导致下游 WINDOW_CUTOFF 静默丢 PnL）
             try:
                 entry_dt = _dt.strptime(p["date"], "%Y-%m-%d")
                 exit_dt = entry_dt + _td(days=int(round(horizon * 1.4)))
                 p["exit_date"] = exit_dt.strftime("%Y-%m-%d")
             except (ValueError, TypeError, KeyError):
-                p["exit_date"] = p.get("date", "")
+                # 无法解析时强制丢弃这条（return None 让调用方跳过）
+                p["exit_date"] = None
+                continue
             p["exit_price"] = float(p.get("_price_tN") or 0)
             p["cost_breakdown"] = json.dumps(cost_result.get("breakdown", {}))
-            # spy_return_t7 未回填时用 0（不影响 ticker 维度分析）
-            p["spy_return_t7"] = 0.0
+            # v0.23.2 修复 #6：用真实 SPY 同期替代硬编码 0
+            p["spy_return_t7"] = spy_same_period.get((p.get("date"), horizon), 0.0)
+
+        # 过滤掉 exit_date=None 的（无法解析 entry_date）
+        preds = [p for p in preds if p.get("exit_date") is not None]
     return preds
 
 

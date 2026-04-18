@@ -52,8 +52,10 @@ logging.basicConfig(
 
 @dataclass
 class WalkForwardConfig:
-    train_pct: float = 0.70        # 训练期占比
-    test_pct: float = 0.30         # 测试期占比（如果 < 1-train_pct 就是 purge gap）
+    # v0.23.2 修复 #4：默认 train=0.6 / test=0.2 留出 20% 给 rolling step（覆盖 folds>1 场景）
+    # 旧默认 train=0.7 / test=0.3 在 folds>1 时会崩（available=0 → 所有 fold 同一窗口）
+    train_pct: float = 0.60        # 训练期占比
+    test_pct: float = 0.20         # 测试期占比
     folds: int = 1                 # 几折（>1 时 rolling）
     min_train_samples: int = 40    # 最少训练样本
     min_test_samples: int = 20     # 最少测试样本
@@ -160,10 +162,18 @@ def _split_by_time(
     if n == 0:
         return [], [], ("", "", "", "")
     # 步长（rolling）
+    # v0.23.2 修复 #4：train_pct + test_pct >= 1.0 时 step 退化，k-fold 失去意义
     if total_folds > 1:
         available = 1.0 - (train_pct + test_pct)
-        step = available / max(total_folds - 1, 1) if total_folds > 1 else 0
-        offset = step * fold_idx
+        if available <= 0:
+            # train+test 铺满整个区间：所有 fold 都在同一窗口，退化为 single-split
+            # 强制降为单 fold 避免误导
+            offset = 0.0
+            if fold_idx > 0:
+                return [], [], ("", "", "", "")  # 后续 fold 空返回
+        else:
+            step = available / max(total_folds - 1, 1)
+            offset = step * fold_idx
     else:
         offset = 0.0
 
