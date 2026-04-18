@@ -51,6 +51,7 @@ def apply_costs(
     ticker: str,
     holding_days: int,
     override_slippage_bps: Optional[float] = None,
+    holding_calendar_days: Optional[int] = None,
 ) -> Dict:
     """把毛收益扣成本得到净收益。
 
@@ -58,8 +59,10 @@ def apply_costs(
         gross_return_pct: 方向调整后的毛收益率（百分比，如 11.06）
         direction: "bullish" / "bearish" / "neutral"
         ticker: 标的代码（用于查滑点/借券率）
-        holding_days: 持仓自然日（通常 7）
+        holding_days: 持仓"交易日"（通常 7；backtester 按 OHLC bar 递增）
         override_slippage_bps: 覆盖滑点（例如 intraday 止损触发时要加 exit 滑点）
+        holding_calendar_days: 持仓"自然日"（可选；若 None 则按 trading_days × 1.4 换算）
+            修复 Bug #17：借券费按自然日计，旧实现用交易日导致费用低估 30-40%
 
     Returns:
         {
@@ -89,11 +92,17 @@ def apply_costs(
     # ── 2) 佣金 (pct, 双边) ──
     commission_pct = float(_COST_CFG.get("commission_pct_per_side", 0.01))
 
-    # ── 3) 借券费（仅 short）──
+    # ── 3) 借券费（仅 short）── 修复 Bug #17：按自然日而非交易日
     borrow_pct = 0.0
     if _dir == "bearish":
         annual_rate = _get_borrow_rate(ticker)
-        borrow_pct = annual_rate * max(holding_days, 1) / 365.0
+        # 交易日 → 自然日换算：1 周 5 交易日 = 7 自然日，比例 1.4
+        # 若调用方传了 calendar_days 则优先使用
+        if holding_calendar_days is not None and holding_calendar_days > 0:
+            cal_days = int(holding_calendar_days)
+        else:
+            cal_days = max(int(round(holding_days * 1.4)), 1)
+        borrow_pct = annual_rate * cal_days / 365.0
 
     total_cost = slippage_pct + commission_pct + borrow_pct
     net_ret = gross_return_pct - total_cost
@@ -111,14 +120,17 @@ def apply_costs(
 
 def sharpe_ratio(
     returns_pct: list,
-    periods_per_year: int = 52,
+    periods_per_year: int = 36,
     risk_free_pct: Optional[float] = None,
 ) -> Optional[float]:
     """年化 Sharpe ratio（返回百分比形式）。
 
+    修复 Bug #8：T+7 采样是"7 交易日"而非"7 自然日"，一年 252/7=36 次采样（不是 52 周）。
+    旧默认值 52 让 √n 放大系数错位，系统性高估 Sharpe ~20% (√52/√36 = 1.20)
+
     Args:
         returns_pct: 每笔/每周期收益率（百分比）
-        periods_per_year: T+7 策略 ≈ 52 / (T+1 ≈ 252)
+        periods_per_year: T+7 策略 ≈ 36 / T+1 ≈ 252 / 日度 ≈ 252
         risk_free_pct: 年化无风险利率（%）
     """
     if not returns_pct or len(returns_pct) < 2:
@@ -132,12 +144,9 @@ def sharpe_ratio(
     if std_r <= 0:
         return None
 
-    # 周期化：如 T+7 则 periods_per_year=52
-    # 把年化无风险率降到周期
     period_rf = risk_free_pct / periods_per_year
     excess = mean_r - period_rf
     sharpe_period = excess / std_r
-    # 年化：× √periods_per_year
     return round(sharpe_period * (periods_per_year ** 0.5), 3)
 
 

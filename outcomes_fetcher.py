@@ -143,8 +143,11 @@ class OutcomesFetcher:
             for offset, attr in self._OFFSETS.items():
                 if getattr(snap, attr, None) is not None:
                     continue  # 已有价格，跳过
-                # 目标日期是否已过？（T+N 交易日 ≈ N*1.4 自然日，+2 天余量）
-                target_date = report_date + timedelta(days=offset + 2)
+                # 修复 Bug #22：T+N 交易日 ≈ N×1.4 自然日，对 T+30 旧实现 +2 天余量不够
+                # 新实现：按 N×1.4 + 3 天缓冲（覆盖连续节假日 / 周末堆积）
+                target_date = report_date + timedelta(
+                    days=int(round(offset * 1.4)) + 3
+                )
                 if today >= target_date:
                     missing.append(offset)
 

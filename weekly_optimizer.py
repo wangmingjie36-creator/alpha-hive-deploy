@@ -88,16 +88,80 @@ def count_t7_samples(snapshots_dir: Path) -> int:
     return count
 
 
-def _apply_weight_clamps(weights: dict) -> dict:
-    """对权重 dict 应用 WEIGHT_CLAMPS，并重新归一化。复用于所有优化路径。"""
-    clamped = {k: max(lo, min(hi, weights.get(k, DEFAULT_WEIGHTS.get(k, 0.2))))
-               for k, (lo, hi) in WEIGHT_CLAMPS.items()}
-    # 确保包含所有维度（CLAMPS 可能未覆盖全部）
-    for k in weights:
-        if k not in clamped:
-            clamped[k] = weights[k]
-    total = sum(clamped.values())
-    return {k: v / total for k, v in clamped.items()} if total > 0 else dict(DEFAULT_WEIGHTS)
+def _apply_weight_clamps(weights: dict, max_iter: int = 50, tol: float = 1e-9) -> dict:
+    """
+    迭代式 clamp + 归一化 — 修复 Bug #5：
+    旧实现"先 clamp 再归一化"在多个维度触底时会让未触底维度被放大超过上限
+    （实证：catalyst raw 可触发 0.33 > 0.25 上限）。
+
+    新算法：
+      1. 目标总和 = 1.0
+      2. 循环：把当前超限的维度钳到边界并固定；剩余未固定维度按比例瓜分剩余预算
+      3. 直到无新维度触发钳制 或达到 max_iter
+    数学性质：输出严格满足 lo ≤ w[k] ≤ hi（对 CLAMPS 中所有键）且 sum(w)=1.0
+    """
+    # 初始化：未覆盖 CLAMPS 的维度用 DEFAULT_WEIGHTS 兜底
+    w = {k: float(weights.get(k, DEFAULT_WEIGHTS.get(k, 0.2))) for k in set(list(weights.keys()) + list(WEIGHT_CLAMPS.keys()))}
+    total = sum(w.values())
+    if total <= 0:
+        return dict(DEFAULT_WEIGHTS)
+    w = {k: v / total for k, v in w.items()}  # 先归一化到 1.0
+
+    fixed: dict = {}
+    for _ in range(max_iter):
+        # 识别当前超限维度
+        to_fix = {}
+        for k, (lo, hi) in WEIGHT_CLAMPS.items():
+            if k in fixed:
+                continue
+            if w[k] < lo - tol:
+                to_fix[k] = lo
+            elif w[k] > hi + tol:
+                to_fix[k] = hi
+        if not to_fix:
+            break
+        fixed.update(to_fix)
+        # 立即把 fixed 值写回 w（修复 edge case：所有维度都 fix 时要先落值再 break）
+        for k, v in fixed.items():
+            w[k] = v
+        # 剩余预算分配给未固定维度（按原比例）
+        remaining_budget = 1.0 - sum(fixed.values())
+        free_keys = [k for k in w if k not in fixed]
+        if not free_keys:
+            # 所有维度都被钳制 — 数学上 sum(fixed) 与 1.0 不等时，无可行解
+            # 降级：均匀缩放 fixed 值到 sum=1.0，允许轻微突破 clamp（这种情况表明 CLAMPS 设置本身不合理）
+            break
+        free_sum = sum(w[k] for k in free_keys)
+        if remaining_budget <= 0 or free_sum <= 0:
+            if remaining_budget > 0:
+                share = remaining_budget / len(free_keys)
+                for k in free_keys:
+                    w[k] = share
+            else:
+                for k in free_keys:
+                    w[k] = 0.0
+            break
+        for k in free_keys:
+            w[k] = w[k] / free_sum * remaining_budget
+
+    # 最终确保和为 1.0（数值稳定性）
+    s = sum(w.values())
+    if s > 0 and abs(s - 1.0) > tol:
+        w = {k: v / s for k, v in w.items()}
+    return w
+
+
+# 统一的 Agent → 维度映射（BearBee 纳入 risk_adj，修复 Bug #6）
+# 唯一入口：所有学习路径（weekly_optimizer / feedback_loop）必须使用这个字典
+AGENT_TO_DIM = {
+    "ScoutBeeNova": "signal",
+    "RivalBeeVanguard": "signal",
+    "BuzzBeeWhisper": "sentiment",
+    "OracleBeeEcho": "odds",
+    "ChronosBeeHorizon": "catalyst",
+    "GuardBeeSentinel": "risk_adj",
+    "BearBeeContrarian": "risk_adj",  # 修复 Bug #6：BearBee 参与 risk_adj 维度学习
+}
 
 
 def compute_new_weights(snapshots_dir: Path) -> Optional[dict]:
@@ -170,34 +234,32 @@ def compute_new_weights_wls(snapshots_dir: Path) -> Optional[dict]:
         if tw_sum > 0:
             time_weights = [w / tw_sum * len(time_weights) for w in time_weights]
 
-        # Agent → 维度映射
-        agent_to_dim = {
-            "ScoutBeeNova": "signal",
-            "BuzzBeeWhisper": "sentiment",
-            "OracleBeeEcho": "odds",
-            "ChronosBeeHorizon": "catalyst",
-            "GuardBeeSentinel": "risk_adj",
-        }
-
-        # 计算每个维度的加权准确率
+        # 修复 Bug #7：按"维度内 Agent 平均准确度"算权重，而非"Agent 数累加"
+        # 旧实现下 signal 维度（Scout+Rival 两蜂）比单蜂维度永远高一倍，结构性偏差
+        # 新实现：先按 (维度, 快照) 聚合，取维度内所有 Agent 的平均准确度
         dim_weighted_accuracy = {dim: 0.0 for dim in DEFAULT_WEIGHTS}
         dim_weighted_count = {dim: 0.0 for dim in DEFAULT_WEIGHTS}
 
         for i, snap in enumerate(valid_snaps):
             tw = time_weights[i]
-            # T+7 方向是否正确
             ret_t7 = (snap.actual_price_t7 - snap.entry_price) / snap.entry_price * 100
             direction = snap.direction.lower()
             is_correct = (direction in ("long", "bullish") and ret_t7 > 0) or \
                          (direction in ("short", "bearish") and ret_t7 < 0)
 
+            # 按维度聚合：同维度多只蜂取平均而非相加
+            per_dim_acc = {dim: [] for dim in DEFAULT_WEIGHTS}
             for agent_name, vote in snap.agent_votes.items():
-                dim = agent_to_dim.get(agent_name)
+                dim = AGENT_TO_DIM.get(agent_name)
                 if dim is None:
                     continue
-                # Agent 方向与实际一致？
                 agent_correct = (vote > 5 and is_correct) or (vote <= 5 and not is_correct)
-                dim_weighted_accuracy[dim] += tw * (1.0 if agent_correct else 0.0)
+                per_dim_acc[dim].append(1.0 if agent_correct else 0.0)
+
+            for dim, accs in per_dim_acc.items():
+                if not accs:
+                    continue
+                dim_weighted_accuracy[dim] += tw * (sum(accs) / len(accs))
                 dim_weighted_count[dim] += tw
 
         # 归一化为权重
@@ -266,17 +328,9 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
             # 有放回抽样
             sample = random.choices(valid_snaps, k=len(valid_snaps))
 
-            # 用抽样数据计算权重（简化版）
-            agent_to_dim = {
-                "ScoutBeeNova": "signal",
-                "BuzzBeeWhisper": "sentiment",
-                "OracleBeeEcho": "odds",
-                "ChronosBeeHorizon": "catalyst",
-                "GuardBeeSentinel": "risk_adj",
-            }
-
-            dim_correct = {dim: 0 for dim in DEFAULT_WEIGHTS}
-            dim_total = {dim: 0 for dim in DEFAULT_WEIGHTS}
+            # 修复 Bug #7：使用统一 AGENT_TO_DIM + 维度内平均（非累加）
+            dim_snap_acc = {dim: 0.0 for dim in DEFAULT_WEIGHTS}
+            dim_snap_count = {dim: 0 for dim in DEFAULT_WEIGHTS}
 
             for snap in sample:
                 ret_t7 = (snap.actual_price_t7 - snap.entry_price) / snap.entry_price * 100
@@ -284,13 +338,21 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
                 is_correct = (direction in ("long", "bullish") and ret_t7 > 0) or \
                              (direction in ("short", "bearish") and ret_t7 < 0)
 
+                per_dim = {dim: [] for dim in DEFAULT_WEIGHTS}
                 for agent_name, vote in snap.agent_votes.items():
-                    dim = agent_to_dim.get(agent_name)
+                    dim = AGENT_TO_DIM.get(agent_name)
                     if dim is None:
                         continue
                     agent_correct = (vote > 5 and is_correct) or (vote <= 5 and not is_correct)
-                    dim_correct[dim] += 1 if agent_correct else 0
-                    dim_total[dim] += 1
+                    per_dim[dim].append(1.0 if agent_correct else 0.0)
+                for dim, accs in per_dim.items():
+                    if accs:
+                        dim_snap_acc[dim] += sum(accs) / len(accs)
+                        dim_snap_count[dim] += 1
+
+            # 保持旧变量名供下游计算
+            dim_correct = dim_snap_acc
+            dim_total = dim_snap_count
 
             # 计算这次抽样的权重
             raw = {}

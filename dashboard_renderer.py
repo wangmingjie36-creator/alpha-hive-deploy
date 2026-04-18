@@ -784,7 +784,7 @@ def _load_accuracy_data() -> dict:
                 # 年化 Sharpe (T+7 ≈ 52 周期/年)
                 try:
                     from trading_costs import sharpe_ratio
-                    _trading_stats["sharpe_net"] = sharpe_ratio(_net_rets, periods_per_year=52)
+                    _trading_stats["sharpe_net"] = sharpe_ratio(_net_rets, periods_per_year=36)  # 修复 #8
                 except Exception:
                     pass
                 # Profit Factor

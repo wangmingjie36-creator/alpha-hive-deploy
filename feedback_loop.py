@@ -295,13 +295,16 @@ class BacktestAnalyzer:
     def calculate_agent_contribution(self) -> Dict:
         """计算每个 Agent 的准确度贡献"""
 
+        # 修复 Bug #6：BearBeeContrarian 纳入学习闭环（risk_adj 维度）
+        # 旧实现排除 BearBee 导致"BearBee 预警正确时其他蜂错被惩罚，系统越学越不看空"
         agent_scores = {
             "ScoutBeeNova": [],
             "BuzzBeeWhisper": [],
             "OracleBeeEcho": [],
             "ChronosBeeHorizon": [],
             "RivalBeeVanguard": [],
-            "GuardBeeSentinel": []
+            "GuardBeeSentinel": [],
+            "BearBeeContrarian": [],
         }
 
         for snapshot in self.snapshots:
@@ -333,29 +336,34 @@ class BacktestAnalyzer:
 
         agent_accuracy = self.calculate_agent_contribution()
 
-        # 标准化为 0-1
-        total_accuracy = sum(agent_accuracy.values())
-        if total_accuracy == 0:
+        if not agent_accuracy or sum(agent_accuracy.values()) == 0:
             return {}
 
-        normalized_accuracy = {
-            agent: score / total_accuracy
-            for agent, score in agent_accuracy.items()
-        }
-
-        # 分配新权重（维度 → Agent ID 映射，与 pheromone_board.AGENT_DIMENSIONS 一致）
-        new_weights = {}
+        # 修复 Bug #7：按"维度内 Agent 准确度均值"计算权重，而非"几只蜂映射到该维度就加几次"
+        # 旧实现：signal 维度 = Scout + Rival 两蜂准确率相加 → 结构性高于单蜂维度
+        # 新实现：signal 维度 = avg(Scout, Rival)，与其他单蜂维度口径一致
         weight_mapping = {
             "signal": ["ScoutBeeNova", "RivalBeeVanguard"],
             "sentiment": ["BuzzBeeWhisper"],
             "odds": ["OracleBeeEcho"],
             "catalyst": ["ChronosBeeHorizon"],
-            "risk_adj": ["GuardBeeSentinel"]
+            "risk_adj": ["GuardBeeSentinel", "BearBeeContrarian"],  # 修复 #6
         }
 
+        # 每个维度先算"维度内准确度均值"（0~100），再对维度间归一化
+        dim_avg_accuracy = {}
         for category, agents in weight_mapping.items():
-            category_accuracy = sum(normalized_accuracy.get(agent, 0) for agent in agents)
-            new_weights[category] = min(0.35, max(0.10, category_accuracy))
+            vals = [agent_accuracy.get(a, 0.0) for a in agents if agent_accuracy.get(a, 0.0) > 0]
+            dim_avg_accuracy[category] = (sum(vals) / len(vals)) if vals else 0.0
+
+        total_dim_acc = sum(dim_avg_accuracy.values())
+        if total_dim_acc <= 0:
+            return {}
+
+        new_weights = {}
+        for category in weight_mapping:
+            raw = dim_avg_accuracy[category] / total_dim_acc  # 维度间归一化
+            new_weights[category] = min(0.35, max(0.10, raw))
 
         # 归一化使总和 = 1（方案19: 除零守卫）
         total = sum(new_weights.values())

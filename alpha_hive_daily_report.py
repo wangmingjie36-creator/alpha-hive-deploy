@@ -1237,7 +1237,9 @@ class AlphaHiveDailyReporter:
         try:
             from config import WATCHLIST
             import llm_service as _llm_ct
-            use_llm_flag = _llm_ct.is_available() or any(
+            # 合规修复 (#2): 只在 swarm 结果已显式采用 LLM 时才调用 cross-ticker LLM
+            # 避免"key 存在就自动调"的反模式
+            use_llm_flag = any(
                 r.get("distill_mode") == "llm_enhanced" for r in swarm_results.values()
             )
             if use_llm_flag and len(swarm_results) >= 2:
@@ -2018,30 +2020,34 @@ def main():
 
     args = parser.parse_args()
 
-    # ── LLM 模式选择（每次跑简报前询问）──
+    # ── LLM 模式选择（opt-in；CLAUDE.md 硬约束：严禁 key 存在就自动开 LLM）──
+    # 用户事故 2026-03-16：默认 LLM 导致 $0.47 静默消费，修复为显式 --use-llm + 二次 y/N 确认
     import llm_service as _llm_svc
-    _llm_key_exists = bool(_llm_svc._load_api_key())
+    import sys as _sys
 
-    if args.no_llm:
-        use_llm = False
-    elif args.use_llm:
-        use_llm = True
-    elif _llm_key_exists:
-        print("\n┌─────────────────────────────────────────┐")
-        print("│        Alpha Hive — 分析模式选择        │")
-        print("├─────────────────────────────────────────┤")
-        print("│  [1] LLM 混合模式  Claude API（推荐）   │")
-        print("│      QueenDistiller + BuzzBee 语义增强  │")
-        print("│      耗时 ~100s / 9 标的，约 $0.10      │")
-        print("│                                         │")
-        print("│  [2] 规则引擎模式  纯规则（测试迭代）   │")
-        print("│      耗时 ~26s，$0 API 费用             │")
-        print("└─────────────────────────────────────────┘")
-        choice = input("请选择 [1/2，默认 1]：").strip()
-        use_llm = (choice != "2")
+    if args.no_llm and args.use_llm:
+        print("❌ 错误：--no-llm 与 --use-llm 不能同时指定")
+        _sys.exit(2)
+
+    if args.use_llm:
+        # 显式 opt-in 分支：key 必须存在 + 二次 y/N 确认（非交互 stdin 默认 NO）
+        if not bool(_llm_svc._load_api_key()):
+            print("❌ --use-llm 指定但未找到 API Key，终止")
+            _sys.exit(2)
+        _is_interactive = bool(getattr(_sys.stdin, "isatty", lambda: False)())
+        if _is_interactive:
+            print("\n⚠️  即将启用 LLM 混合模式（Claude API，预计 ~$0.10/9 标的）")
+            _confirm = input("确认启用 LLM？[y/N]：").strip().lower()
+            use_llm = (_confirm == "y")
+            if not use_llm:
+                print("🔧 用户取消，降级为规则引擎模式\n")
+        else:
+            # 非交互（cron/scheduled task）：即使显式 --use-llm 也拒绝，避免静默消费
+            print("⚠️  非交互环境下 --use-llm 被忽略（需 TTY 确认），降级为规则引擎模式")
+            use_llm = False
     else:
+        # 默认 = 规则引擎模式（CLAUDE.md 硬性规则）
         use_llm = False
-        print("⚠️  未检测到 API Key，使用规则引擎模式")
 
     if not use_llm:
         _llm_svc.disable()

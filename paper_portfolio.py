@@ -26,7 +26,7 @@ except Exception:
     def apply_costs(gross, direction, ticker, holding_days, override_slippage_bps=None):
         return {"net_return_pct": gross - 0.12, "cost_pct": 0.12,
                 "breakdown": {"slippage_pct": 0.06, "commission_pct": 0.02, "borrow_pct": 0.04}}
-    def sharpe_ratio(rets, periods_per_year=52):
+    def sharpe_ratio(rets, periods_per_year=36):  # 修复 #8：252/7=36
         if not rets:
             return 0.0
         m = sum(rets) / len(rets)
@@ -140,15 +140,35 @@ def _load_jsonl(path: Path) -> List[Dict]:
     return out
 
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """修复 Bug #20：tmp + fsync + os.replace 原子写，防止崩溃/断电损坏"""
+    import os as _os
+    import tempfile
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        prefix=path.name + ".tmp.", dir=str(path.parent)
+    )
+    try:
+        with _os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            _os.fsync(f.fileno())
+        _os.replace(tmp_path, path)
+    except Exception:
+        try:
+            _os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _write_jsonl(path: Path, records: List[Dict]) -> None:
-    """完整重写（用于 positions 这种会删减的）"""
-    with path.open("w", encoding="utf-8") as f:
-        for r in records:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    """完整重写（用于 positions 这种会删减的）— 原子写"""
+    content = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+    _atomic_write_text(path, content)
 
 
 def _append_jsonl(path: Path, record: Dict) -> None:
-    """追加（用于 closed_trades / equity_curve）"""
+    """追加（用于 closed_trades / equity_curve）— 单行追加对原子性需求低，保留 append"""
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -167,7 +187,8 @@ def _load_meta() -> Dict:
 
 
 def _save_meta(meta: Dict) -> None:
-    META_FILE.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 修复 Bug #20：原子写
+    _atomic_write_text(META_FILE, json.dumps(meta, ensure_ascii=False, indent=2))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

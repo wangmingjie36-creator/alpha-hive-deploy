@@ -73,13 +73,16 @@ class QueenDistiller:
         if adapted_weights:
             self.DIMENSION_WEIGHTS = adapted_weights
         else:
-            # 优先从 config.EVALUATION_WEIGHTS 读取，确保权重配置单一入口
+            # 修复 Bug #18：config 热加载 — 旧实现权重在 __init__ 时快照，
+            # weekly_optimizer 写入 config.py 后需重启才生效。
+            # 新实现：每次实例化都 importlib.reload，让长驻进程也能拿到最新权重
             try:
-                from config import EVALUATION_WEIGHTS
+                import importlib
+                import config as _cfg
+                importlib.reload(_cfg)
+                EVALUATION_WEIGHTS = _cfg.EVALUATION_WEIGHTS
                 valid_dims = set(self.DEFAULT_WEIGHTS.keys())
-                # 只保留已实现的维度（防止 config 中存在未对应 Agent 的维度）
                 cfg_weights = {k: v for k, v in EVALUATION_WEIGHTS.items() if k in valid_dims}
-                # 用 DEFAULT_WEIGHTS 补全缺失维度
                 merged = dict(self.DEFAULT_WEIGHTS)
                 merged.update(cfg_weights)
                 self.DIMENSION_WEIGHTS = merged
@@ -252,18 +255,21 @@ class QueenDistiller:
         _conf_exp = _CONF_CFG.get("exponent", 1.5)
         _conf_floor = _CONF_CFG.get("floor", 0.3)
 
+        # 修复 Bug #19：缺失维度重新归一化（而非注入中性假值）
+        # 旧实现：missing dim 加 _missing_dim_fill × weight 到和里 → 即使其他 4 维一致 8.0，
+        # 缺 signal 维度会被拉回 (8.0×0.7 + 5.0×0.3)≈6.8，错失高分标的
+        # 新实现：只用"已覆盖维度"加权平均，权重重新归一化到 1.0（对应 coverage<80% 的 warning 已独立告知）
         weighted_sum = 0.0
         weight_total = 0.0
+        missing_penalty_weight = 0.0  # 追踪缺失权重占比
         for dim, weight in _weights.items():
             if dim in dim_scores:
                 conf = dim_confidence.get(dim, 0.5)
-                # 升级 2: 幂次衰减——低置信惩罚更重（旧: min(1.0, conf*2)）
                 effective_weight = weight * max(_conf_floor, conf ** _conf_exp)
                 weighted_sum += dim_scores[dim] * effective_weight
                 weight_total += effective_weight
             else:
-                weighted_sum += _missing_dim_fill * weight
-                weight_total += weight
+                missing_penalty_weight += weight  # 仅用于外层 coverage 惩罚，不再注入中性假值
 
         base_score = weighted_sum / weight_total if weight_total > 0 else 5.0
 

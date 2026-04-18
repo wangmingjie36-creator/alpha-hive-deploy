@@ -844,7 +844,12 @@ class Backtester:
             if hist.empty:
                 return None
 
-            # 只取前 N 个交易日
+            # 修复 Bug #14：按真实交易日过滤（yfinance hist 本身已是交易日，但为防御 index 含 NaT）
+            # 旧实现 `hist.head(days_ahead)` 按行数截断，在停牌/假日裕度下可能 holding<7 却落 T7_CLOSE
+            try:
+                hist = hist[~hist.index.isna()]
+            except Exception:
+                pass
             hist = hist.head(days_ahead) if len(hist) > days_ahead else hist
             if hist.empty:
                 return None
@@ -862,22 +867,30 @@ class Backtester:
                 sl_price = entry_price * (1 - _neutral_sl / 100.0)  # 下跌保护
                 tp_price = None  # 中性不设止盈
 
+            # 修复 Bug #12/#13：Gap-aware exit_px + 显式 direction 白名单 + 方向规范化
+            # 旧实现：gap down 穿透 SL 时 exit_px=sl_price 低估亏损；`_dir not in (...)` 吞掉所有未知值
+            _valid_dirs = ("bullish", "bearish", "neutral")
+            _dir_normalized = _dir if _dir in _valid_dirs else "neutral"  # 未知值走中性保护
+
             # 逐日扫描 OHLC
             holding = 0
             for idx, row in hist.iterrows():
                 holding += 1
                 day_str = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
                 try:
+                    op = float(row["Open"])
                     hi, lo, close = float(row["High"]), float(row["Low"]), float(row["Close"])
                 except (KeyError, ValueError, TypeError):
                     continue
 
-                if _dir == "bullish" and tp_price and sl_price:
+                if _dir_normalized == "bullish" and tp_price and sl_price:
                     hit_sl = lo <= sl_price
                     hit_tp = hi >= tp_price
-                    # 保守：同日同时触发 → 假设先触发 SL（对策略更严格）
+                    # 保守：同日同时触发 → 假设先触发 SL
                     if hit_sl:
-                        exit_px = sl_price * (1 - exit_slip_bps / 10000.0)
+                        # 修复 #12：gap-aware — gap down 穿透 SL 时 open 已低于 sl_price，用 open 作成交价
+                        fill_price = min(op, sl_price)
+                        exit_px = fill_price * (1 - exit_slip_bps / 10000.0)
                         return {
                             "exit_date": day_str,
                             "exit_price": round(exit_px, 4),
@@ -886,7 +899,9 @@ class Backtester:
                             "holding_days": holding,
                         }
                     if hit_tp:
-                        exit_px = tp_price * (1 - exit_slip_bps / 10000.0)
+                        # gap up 情况：open 已高于 tp_price，按 open 成交（对策略保守）
+                        fill_price = max(op, tp_price) if op > tp_price else tp_price
+                        exit_px = fill_price * (1 - exit_slip_bps / 10000.0)
                         return {
                             "exit_date": day_str,
                             "exit_price": round(exit_px, 4),
@@ -894,10 +909,11 @@ class Backtester:
                             "gross_return_pct": round((exit_px - entry_price) / entry_price * 100, 4),
                             "holding_days": holding,
                         }
-                elif _dir not in ("bullish", "bearish") and sl_price:
-                    # 中性方向：只检查下跌止损
+                elif _dir_normalized == "neutral" and sl_price:
+                    # 中性方向：只检查下跌止损，无止盈
                     if lo <= sl_price:
-                        exit_px = sl_price * (1 - exit_slip_bps / 10000.0)
+                        fill_price = min(op, sl_price)  # gap-aware
+                        exit_px = fill_price * (1 - exit_slip_bps / 10000.0)
                         return {
                             "exit_date": day_str,
                             "exit_price": round(exit_px, 4),
@@ -905,12 +921,13 @@ class Backtester:
                             "gross_return_pct": round((exit_px - entry_price) / entry_price * 100, 4),
                             "holding_days": holding,
                         }
-                elif _dir == "bearish" and tp_price and sl_price:
+                elif _dir_normalized == "bearish" and tp_price and sl_price:
                     hit_sl = hi >= sl_price     # 标的涨 → 空头止损
                     hit_tp = lo <= tp_price     # 标的跌 → 空头止盈
                     if hit_sl:
-                        exit_px = sl_price * (1 + exit_slip_bps / 10000.0)
-                        # 空头收益 = (entry - exit) / entry
+                        # 修复 #12：gap up 穿透空头 SL 时用 open（更差价）
+                        fill_price = max(op, sl_price)
+                        exit_px = fill_price * (1 + exit_slip_bps / 10000.0)
                         gross = (entry_price - exit_px) / entry_price * 100
                         return {
                             "exit_date": day_str,
@@ -920,7 +937,8 @@ class Backtester:
                             "holding_days": holding,
                         }
                     if hit_tp:
-                        exit_px = tp_price * (1 + exit_slip_bps / 10000.0)
+                        fill_price = min(op, tp_price) if op < tp_price else tp_price
+                        exit_px = fill_price * (1 + exit_slip_bps / 10000.0)
                         gross = (entry_price - exit_px) / entry_price * 100
                         return {
                             "exit_date": day_str,

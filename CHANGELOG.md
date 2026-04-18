@@ -5,6 +5,101 @@
 
 ---
 
+## [0.21.0] — 2026-04-17 — 18 项深度 Bug 修复 + 去除 look-ahead bias
+
+4 个并行审计 Agent 找出 18 个真实 Bug，全部修复。**去除 look-ahead bias 后，真实回测数字从 "$50,871 / Sharpe 1.11" 归为 "$49,439 / Alpha vs SPY +1.08%"** — 系统仍有选股能力，但远没有之前吹嘘的那么强。
+
+### Fixed — P0 合规 / 资金安全（继承 2026-03-16 事故风险）
+
+- **#1 `alpha_hive_daily_report.py:2029`** — LLM opt-in 修复
+  - 旧：`choice != "2"` 默认选 LLM，非交互 stdin 返回空串 → 静默烧钱
+  - 新：默认规则引擎；`--use-llm` 仅在 TTY 交互下可确认；cron 环境即使显式指定也降级
+- **#2 `alpha_hive_daily_report.py:1240`** — `_compute_cross_ticker` 绕过 opt-in
+  - 旧：`_llm_ct.is_available()` 只要 key 存在就调 LLM cross-ticker 分析
+  - 新：仅当 `distill_mode == "llm_enhanced"` 已存在时才调用
+- **#3 `report_deployer.py:220`** — 生产模式判定
+  - 旧：`_using_llm = is_available()` key 存在即视为生产
+  - 新：看实际 `distill_mode` 或 swarm 标记
+- **#4 `pre_scan_notify.py:346`** — 超时 Bot DM 违反「只 2 类 DM」硬约束
+  - 旧：超时发"扫描已跳过" Slack DM
+  - 新：仅写本地日志，不打扰用户
+
+### Fixed — P0 学习闭环
+
+- **#5 `weekly_optimizer.py:91` `_apply_weight_clamps`** — **迭代 clamp 算法**
+  - 旧实现 "先 clamp 再归一化" 数学不一致，归一化后可突破 clamp 上限
+  - **实证**：config.py 当前 `catalyst=0.3316`（>0.25 上限）就是此 bug 后果
+  - 新算法：循环钳制 + 分配 slack 给未钳制维度，严格保证 `lo ≤ w[k] ≤ hi` 且 sum=1.0
+  - 新增 `AGENT_TO_DIM` 统一映射（所有学习路径唯一入口）
+- **#6 `feedback_loop.py:295`** — BearBeeContrarian 纳入学习闭环
+  - 旧：agent_scores 字典只有 6 只蜂，BearBee 被排除
+  - 新：BearBee 纳入 risk_adj 维度；BearBee 预警正确时不再被系统"忽视"
+- **#7 `feedback_loop.py:346` + `weekly_optimizer.py:186,320`** — 按维度内 Agent 平均而非累加
+  - 旧：signal 维度 = Scout + Rival 两蜂准确率相加 → 结构性高于单蜂维度
+  - 新：signal 维度 = avg(Scout, Rival)，与其他维度口径一致
+- **#8 全局 Sharpe `periods_per_year`** — T+7 周期基准
+  - 旧：多处用 52（周/年）作为 T+7 采样频率，高估 Sharpe ~20% (√52/√36=1.2)
+  - 新：252 交易日 / 7 交易日采样 = **36 次/年**
+  - 涉及文件：`portfolio_backtest.py:421` `trading_costs.py:114,141` `paper_portfolio.py:29` `dashboard_renderer.py:787`
+
+### Fixed — P0 回测 look-ahead bias（让数字真实）
+
+- **#12 `backtester.py:875`** — Gap-aware exit_px
+  - 旧：gap down 穿透 SL 时 `exit_px = sl_price`，低估真实亏损
+  - 新：`fill_price = min(open, sl_price)`（看多 SL）/ `max(open, sl_price)`（看空 SL）
+- **#13 `backtester.py:897`** — Direction 白名单
+  - 旧：`elif _dir not in ("bullish","bearish")` 吞掉 `None/""/unknown` 所有异常值
+  - 新：`_dir_normalized = _dir if _dir in {bullish, bearish, neutral} else "neutral"`
+- **#14 `backtester.py:848`** — 交易日过滤而非 head(N)
+  - 旧：`hist.head(days_ahead)` 按行数，停牌/假日可能 holding<7 却落 T7_CLOSE
+  - 新：过滤 NaT 索引后再截断
+- **#15 `portfolio_backtest.py:315`** — NAV mark-to-market + 总敞口保护
+  - 旧：`nav_est = cash + sum(size_usd)` 用建仓成本当 NAV，复利下仓位占比漂移
+  - 新：`nav_est = initial_capital + cum_realized`；增加 `gross_exposure > nav × 1.0` 检查，防 bear 12% × 10 仓 = 120% 杠杆
+- **#16 `portfolio_backtest.py:383`** — 回测末尾强平 look-ahead 消除
+  - 旧：用预计算 `net_return_pct`（完整 T+7 到期收益）结算未到期仓位 → virtualize final_nav
+  - 新：未到期仓位 PnL=0（`WINDOW_CUTOFF`），**严格无未来信息泄漏**
+- **#17 `trading_costs.py:96`** — Borrow 按自然日
+  - 旧：`borrow_pct = annual × trading_days / 365`，低估 30-40%
+  - 新：自然日换算（× 1.4 系数），可选 `holding_calendar_days` 参数
+
+### Fixed — P0 Agent 崩溃路径
+
+- **#9 `swarm_agents/oracle_bee.py:162`** — `result` 前置初始化 + 扩 except 元组
+  - 旧：`except (ImportError, ConnectionError, ValueError, KeyError, TypeError)` 漏 `OSError/URLError/AttributeError` → yfinance 抛 OSError 时 result 未定义 → 下游 NameError → OracleBee 整个返回 5.0
+  - 新：try 前 `result = {}`；except 加 `OSError, AttributeError`
+- **#10 `swarm_agents/scout_bee.py:40`** — `insider_data=None` 降级守卫
+  - 旧：`insider_data.get()` 在 `get_insider_trades` 返回 None 时抛 AttributeError → ScoutBee 整体回 5.0
+  - 新：`if insider_data and isinstance(insider_data, dict):` 守卫 + 扩 except 元组
+- **#11 `swarm_agents/oracle_bee.py:244`** — 方向判定改具体词组
+  - 旧：`"多" in signal_summary` 命中"多头/很多/许多空头"等歧义词
+  - 新：`_bull_keywords = ("看多","看涨","多头","走高","上行")` + `_bear_keywords` 计数投票
+
+### Fixed — P1 零散修补
+
+- **#18 `swarm_agents/queen_distiller.py:78`** — `importlib.reload(config)` 实现真正热加载
+- **#19 `swarm_agents/queen_distiller.py:255`** — 缺失维度不再注入中性假值，改为仅保留已覆盖维度加权
+- **#20 `paper_portfolio.py:143-170`** — `_atomic_write_text()` 原子写（tempfile + fsync + os.replace）替换 `open("w")`
+- **#21 `report_deployer.py:182`** — gh-pages push 结果写入 `.gh_pages_deploy_log.jsonl` 持久化 queue
+- **#22 `outcomes_fetcher.py:147`** — T+30 回填余量从 `+2 days` 改为 `× 1.4 + 3 days`
+
+### Changed — 真实回测结果（Plan C 修复后）
+
+| 指标 | v0.20.0 宣称 | v0.21.0 真实 | 说明 |
+|------|------------|-------------|-----|
+| Final NAV | $50,871 (+1.74%) | **$49,439 (-1.12%)** | #16 消除未来信息泄漏 |
+| Sharpe | 1.106 | **-1.804** | #8 周期基准修正 + 样本仅 11 笔统计不稳 |
+| Win Rate | 52.9% (9/17) | **27.3% (3/11)** | #15 NAV MTM 后入场门槛变紧 |
+| Bull WR | 60% | **20%** (2/10) | 看多能力被高估 |
+| Bear WR | — | **100%** (1/1) | 看空仍准（样本少） |
+| SPY 基准 | — | **-2.21%** | 回测期大盘下跌 |
+| **Alpha vs SPY** | — | **+1.08%** | **真实跑赢大盘 1%** |
+| Max Drawdown | — | -1.31% | |
+
+**诚实反思**：v0.20.0 的"优秀数字"主要来自三个 look-ahead bias（#8 Sharpe 周期 + #15 NAV 漂移 + #16 末尾强平虚增），去除后数字回到现实。系统**确实有选股能力**（Alpha +1.08% vs SPY），但远没达到 "Sharpe 1.11 投资级" 的水平。
+
+---
+
 ## [0.20.0] — 2026-04-15 — $50K 回测 + 5 项数据驱动升级
 
 ### Added

@@ -343,7 +343,15 @@ def main():
     else:
         timeout_label = f"{args.max_wait} 分钟"
     print(f"LLM_MODE=no ({timeout_label}超时，今日不执行扫描)")
-    send_slack_notification(f"⏱️ *{timeout_label}未收到确认，今日蜂群扫描已跳过*")
+    # 修复 #4: CLAUDE.md 硬约束 — Bot DM 只允许 2 类消息（扫描前 LLM 确认 + 日报推送成功）
+    # 超时通知不在白名单，仅写本地日志，不打扰用户
+    try:
+        import logging as _logging
+        _logging.getLogger("alpha_hive.pre_scan").info(
+            "pre_scan_notify timeout: %s 未收到确认，今日扫描已跳过", timeout_label
+        )
+    except Exception:
+        pass
     sys.exit(0)
 
 

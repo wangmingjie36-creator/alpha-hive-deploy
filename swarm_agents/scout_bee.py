@@ -39,10 +39,16 @@ class ScoutBeeNova(BeeAgent):
             try:
                 from sec_edgar import get_insider_trades
                 insider_data = get_insider_trades(ticker, days=90)
-                insider_score = _safe_score(insider_data.get("sentiment_score"), 5.0, 0, 10, "insider_score")
-            except LLM_ERRORS as e:
+                # 修复 Bug #10：get_insider_trades 可能返回 None（无数据 / API 失败）
+                # 旧实现 .get() 抛 AttributeError，外层 AGENT_ERRORS 捕获导致 ScoutBee 整体返回 5.0
+                # 新实现：None 时保持默认 insider_score=5.0，不影响下游拥挤度/RS/供应链分析
+                if insider_data and isinstance(insider_data, dict):
+                    insider_score = _safe_score(insider_data.get("sentiment_score"), 5.0, 0, 10, "insider_score")
+                else:
+                    insider_data = None  # 规范化
+            except (*LLM_ERRORS, AttributeError, OSError) as e:
                 _log.warning("ScoutBeeNova SEC data unavailable for %s: %s", ticker, e)
-                pass  # insider_score 保持默认 5.0
+                insider_data = None  # insider_score 保持默认 5.0
 
             # ---- 1b. P2: EDGAR RSS 实时流（当日新鲜 Form 4，先于 REST API 反应）----
             rss_fresh_today = 0

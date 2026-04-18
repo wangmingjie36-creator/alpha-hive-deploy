@@ -181,6 +181,24 @@ def deploy_static_to_ghpages(reporter):
             _time_push.sleep(_delay)
     if os.path.exists(idx):
         os.remove(idx)
+    # 修复 Bug #21：gh-pages push 成功/失败都记录到持久化 queue，
+    # 防止"连续网络差时中间几天的 dashboard 永久丢失"
+    _ghp_queue = os.path.join(repo, ".gh_pages_deploy_log.jsonl")
+    try:
+        import json as _json_q, datetime as _dt_q
+        _status = {
+            "timestamp": _dt_q.datetime.utcnow().isoformat() + "Z",
+            "date_str": reporter.date_str,
+            "file_count": len(files),
+            "status": "success" if _push_ok else "failed",
+            "attempts": _push_attempt + 1,
+            "last_error": (r.stderr or "")[:300] if not _push_ok else "",
+        }
+        with open(_ghp_queue, "a", encoding="utf-8") as _qf:
+            _qf.write(_json_q.dumps(_status, ensure_ascii=False) + "\n")
+    except Exception as _qe:
+        _log.debug("gh-pages deploy log write failed: %s", _qe)
+
     if _push_ok:
         _log.info(
             "gh-pages 部署成功 (%d 静态文件, attempt %d/%d)",
@@ -189,9 +207,11 @@ def deploy_static_to_ghpages(reporter):
         # ── D4: 部署后 CDN 验证 ──
         verify_cdn_deployment(reporter, repo)
     else:
-        _log.warning(
-            "gh-pages push 失败 (所有 %d 次尝试用尽): %s",
-            _PUSH_MAX_RETRIES + 1, r.stderr,
+        _log.error(
+            "gh-pages push 失败 (所有 %d 次尝试用尽): %s\n"
+            "→ 失败已记录到 %s，下次扫描会自动覆盖为新 commit（因为 gh-pages 是 --force push）\n"
+            "→ 如需紧急修复：检查 %s 确认 pending 日，必要时手动重跑扫描",
+            _PUSH_MAX_RETRIES + 1, r.stderr, _ghp_queue, _ghp_queue,
         )
 
 
@@ -214,10 +234,16 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
     #   - 禁止在测试模式外手动 `git add index.html && git push origin main`，
     #     生成物（index.html / md / json / ML html）只能通过 LLM 扫描进入 origin
     from datetime import datetime as _dt2
-    import llm_service as _llm_check
-    # 生产模式（LLM 或 蜂群）均同步 gh-pages（GitHub Pages 从 gh-pages 分支部署）
+    # 生产模式判定（修复 #3）：只看"实际是否使用 LLM"（distill_mode==llm_enhanced）
+    # 或是否是蜂群扫描。不再用 `api_key is_available()` 这种"key 存在即生产"反模式
     _is_swarm = bool(report.get("swarm_metadata") or "蜂群" in report.get("system_status", ""))
-    _using_llm = _llm_check.is_available()
+    _using_llm = bool(
+        report.get("distill_mode") == "llm_enhanced"
+        or any(
+            (r or {}).get("distill_mode") == "llm_enhanced"
+            for r in (report.get("swarm_results") or {}).values()
+        )
+    )
     _deploy_production = _using_llm or _is_swarm
     _deploy_ghpages = _deploy_production  # 与 main 保持一致，始终同步
     timestamp = _dt2.now().strftime("%H:%M")

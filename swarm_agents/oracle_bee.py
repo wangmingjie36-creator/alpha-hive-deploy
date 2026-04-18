@@ -159,13 +159,15 @@ class OracleBeeEcho(BeeAgent):
             # ---- 期权分析（60%）----
             options_score = 5.0
             signal_summary = "期权数据不可用"
+            result = {}  # 修复 Bug #9：前置初始化，防止 except 路径下 NameError
             try:
                 from options_analyzer import OptionsAgent
                 agent = OptionsAgent()
                 result = agent.analyze(ticker, stock_price=current_price)
                 options_score = _safe_score(result.get("options_score"), 5.0, 0, 10, "options_score")
                 signal_summary = result.get("signal_summary", "平衡")
-            except (ImportError, ConnectionError, ValueError, KeyError, TypeError) as e:
+            except (ImportError, ConnectionError, ValueError, KeyError, TypeError,
+                    OSError, AttributeError) as e:  # 修复 #9：扩展 except 元组，覆盖 yfinance 实际抛的 OSError/URLError 族
                 _log.warning("OracleBeeEcho options unavailable for %s: %s", ticker, e)
                 result = {}
 
@@ -239,11 +241,17 @@ class OracleBeeEcho(BeeAgent):
             score = clamp_score(score + unusual_score_adj)
 
             # 从 signal_summary 推断方向（异常流可覆盖）
+            # 修复 Bug #11：用具体词组而非子串 "多"/"空"（旧实现命中"多头空头很多"等混合词歧义）
+            _ss = signal_summary or ""
+            _bull_keywords = ("看多", "看涨", "多头", "走高", "上行")
+            _bear_keywords = ("看空", "看跌", "空头", "下行", "走低")
+            _bull_count = sum(1 for kw in _bull_keywords if kw in _ss)
+            _bear_count = sum(1 for kw in _bear_keywords if kw in _ss)
             if unusual_flow.get("unusual_direction") in ("bullish", "bearish"):
                 direction = unusual_flow["unusual_direction"]
-            elif "多" in signal_summary or "增强" in signal_summary or "看涨" in signal_summary:
+            elif _bull_count > _bear_count:
                 direction = "bullish"
-            elif "空" in signal_summary or "看跌" in signal_summary:
+            elif _bear_count > _bull_count:
                 direction = "bearish"
             elif score < _AS.get("oracle_bearish_score_threshold", 4.0):
                 direction = "bearish"

@@ -312,13 +312,20 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
                 continue
 
             # ── 升级 3: 方向不对称仓位 ──
-            nav_est = cash + sum(pos.size_usd for pos in active)
+            # 修复 Bug #15：NAV 用已实现 PnL 更新的真实值，而非"建仓成本 + 现金"
+            # 旧实现复利下仓位占比漂移：赚了 20% 后新仓还按初始 NAV 的 8% 开
+            nav_est = cfg.initial_capital + cum_realized  # 已实现口径 MTM
             if "bear" in direction:
                 size_usd = nav_est * cfg.bear_size_pct
             elif "bull" in direction:
                 size_usd = nav_est * cfg.bull_size_pct
             else:
                 size_usd = nav_est * cfg.position_size_pct
+            # 总敞口保护：防止 bear 12% × max_concurrent 10 = 120% 杠杆
+            gross_exposure = sum(pos.size_usd for pos in active) + size_usd
+            if gross_exposure > nav_est * 1.0:  # 不允许净敞口 > NAV
+                stats["skipped_cash_limit"] += 1
+                continue
             if size_usd > cash:
                 stats["skipped_cash_limit"] += 1
                 continue
@@ -380,9 +387,23 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
             spy_price=spy_px,
         ))
 
-    # ── 收尾：强平剩余仓位 ──
+    # ── 收尾：强平剩余仓位 ── 修复 Bug #16
+    # 旧实现：用预计算 net_return_pct 结算（这是完整 T+7 到期收益，属于未来信息）
+    # 新实现：若仓位 exit_date > last_date，按回测窗口最后一天的已实现口径处理：
+    #   (a) 回测窗口内 pos 已持有 N 天但未到 exit_date → 按比例线性估算（最保守：0% PnL）
+    #   (b) 完整到期的仓位（exit_date <= last_date）应该已在 Step 1 平掉；这里兜底
+    last_date = all_dates[-1] if all_dates else None
     for pos in active:
-        pnl = pos.size_usd * (pos.net_return_pct / 100.0)
+        if pos.exit_date and last_date and pos.exit_date <= last_date:
+            # 正常到期但被遗漏（兜底）
+            pnl = pos.size_usd * (pos.net_return_pct / 100.0)
+        else:
+            # 未到期仓位：按"回测结束日为 cutoff"处理，PnL = 0（保守不计未来收益）
+            # 严格符合"no look-ahead"，而非虚增 final_nav
+            pnl = 0.0
+            pos.exit_reason = "WINDOW_CUTOFF"
+            pos.net_return_pct = 0.0
+            pos.exit_date = last_date or pos.entry_date
         cash += pos.size_usd + pnl
         cum_realized += pnl
         closed.append(pos)
@@ -415,10 +436,13 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
     total_losses = abs(sum(t.size_usd * t.net_return_pct / 100 for t in losers))
     profit_factor = total_wins / total_losses if total_losses > 0 else float("inf")
 
-    # Sharpe
+    # Sharpe — 修复 Bug #8：T+7 采样频率是"7 交易日"，不是"7 自然日"。
+    # 一年 252 交易日 / 7 = 36 次采样（而非 52 周）。旧值 52 让 √n 放大系数错位，
+    # 系统性高估 Sharpe ~20% (√52/√36 = 1.20)
     from trading_costs import sharpe_ratio
     net_rets = [t.net_return_pct for t in closed]
-    sharpe = sharpe_ratio(net_rets, periods_per_year=52) if net_rets else None
+    T7_PERIODS_PER_YEAR = 36  # 252 交易日 / 7 交易日 per T+7 采样
+    sharpe = sharpe_ratio(net_rets, periods_per_year=T7_PERIODS_PER_YEAR) if net_rets else None
 
     # Max Drawdown（基于 daily NAV）
     peak = cfg.initial_capital
