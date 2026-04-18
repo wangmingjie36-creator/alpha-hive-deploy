@@ -55,6 +55,7 @@ class BacktestConfig:
     """
     initial_capital: float = 50_000.0
     position_size_pct: float = 0.10        # 每笔 = NAV × 10%
+    horizon: int = 7                       # v0.22.2: 持仓期 1/7/30，对比"固定 T+7 是否太死"
     max_concurrent: int = 15               # v0.22.1: 5→15（gross_exposure 已防杠杆）
     min_score_bull: float = 5.5            # v0.22.1: 6.5→5.5（放宽看多门槛）
     min_score_bear: float = 5.5            # v0.22.1: 4.5→5.5（镜像对称）
@@ -86,12 +87,20 @@ def _find_db() -> Path:
     raise FileNotFoundError("找不到 pheromone.db")
 
 
-def load_verified_predictions() -> List[Dict]:
-    """加载所有 checked_t7=1 且 net_return_t7 IS NOT NULL 的记录"""
+def load_verified_predictions(horizon: int = 7) -> List[Dict]:
+    """加载已验证的预测记录，按 horizon 决定使用哪个 price_tN / return_tN 列
+
+    horizon=7:  使用 price_t7/return_t7/net_return_t7（已有回填，路径依赖 SL/TP）
+    horizon=1:  使用 price_t1/return_t1，动态计算 net_return_t1（无路径依赖，纯 T+1 收盘）
+    horizon=30: 使用 price_t30/return_t30，动态计算 net_return_t30（样本 76 笔，2-3 月初）
+
+    统一输出字段：`return_t7`、`net_return_t7` 等，让下游 portfolio_backtest 逻辑不变
+    （只是"t7"字段里装的是 horizon 日后的真实数据）
+    """
     db = _find_db()
-    with sqlite3.connect(str(db)) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("""
+    if horizon == 7:
+        # 原有逻辑：使用 Sprint 1 回填的路径依赖 SL/TP/T7_CLOSE 数据
+        query = """
             SELECT id, date, ticker, direction, final_score,
                    price_at_predict, return_t7, net_return_t7,
                    exit_reason, exit_date, exit_price,
@@ -100,8 +109,73 @@ def load_verified_predictions() -> List[Dict]:
             FROM predictions
             WHERE checked_t7 = 1 AND net_return_t7 IS NOT NULL
             ORDER BY date ASC, id ASC
-        """).fetchall()
-    return [dict(r) for r in rows]
+        """
+    elif horizon == 1:
+        query = """
+            SELECT id, date, ticker, direction, final_score,
+                   price_at_predict,
+                   return_t1 AS return_t7,
+                   price_t1 AS _price_tN,
+                   dimension_scores
+            FROM predictions
+            WHERE checked_t1 = 1 AND return_t1 IS NOT NULL AND price_t1 IS NOT NULL
+            ORDER BY date ASC, id ASC
+        """
+    elif horizon == 30:
+        query = """
+            SELECT id, date, ticker, direction, final_score,
+                   price_at_predict,
+                   return_t30 AS return_t7,
+                   price_t30 AS _price_tN,
+                   dimension_scores
+            FROM predictions
+            WHERE checked_t30 = 1 AND return_t30 IS NOT NULL AND price_t30 > 0
+            ORDER BY date ASC, id ASC
+        """
+    else:
+        raise ValueError(f"不支持的 horizon={horizon}（仅支持 1/7/30）")
+
+    with sqlite3.connect(str(db)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(query).fetchall()
+    preds = [dict(r) for r in rows]
+
+    # horizon != 7 时：动态计算 net_return + 伪造 exit 字段（让下游逻辑不变）
+    if horizon != 7:
+        from trading_costs import apply_costs
+        from datetime import datetime as _dt, timedelta as _td
+        for p in preds:
+            direction = (p.get("direction") or "").strip().lower()
+            raw_ret = float(p.get("return_t7") or 0)  # 已 alias 为 horizon 日收益
+
+            # 方向调整的毛收益
+            if "bear" in direction:
+                gross_adj = -raw_ret
+            else:
+                gross_adj = raw_ret
+
+            # 应用交易成本（按 horizon 天数）
+            cost_result = apply_costs(
+                gross_return_pct=gross_adj,
+                direction=direction if direction in ("bullish", "bearish") else "neutral",
+                ticker=p.get("ticker", ""),
+                holding_days=horizon,
+            )
+            p["net_return_t7"] = cost_result["net_return_pct"]
+            p["exit_reason"] = f"T{horizon}_CLOSE"
+            p["holding_days"] = horizon
+            # exit_date = entry_date + horizon 自然日（足够近似）
+            try:
+                entry_dt = _dt.strptime(p["date"], "%Y-%m-%d")
+                exit_dt = entry_dt + _td(days=int(round(horizon * 1.4)))
+                p["exit_date"] = exit_dt.strftime("%Y-%m-%d")
+            except (ValueError, TypeError, KeyError):
+                p["exit_date"] = p.get("date", "")
+            p["exit_price"] = float(p.get("_price_tN") or 0)
+            p["cost_breakdown"] = json.dumps(cost_result.get("breakdown", {}))
+            # spy_return_t7 未回填时用 0（不影响 ticker 维度分析）
+            p["spy_return_t7"] = 0.0
+    return preds
 
 
 def _calc_dim_std(pred: Dict) -> Optional[float]:
@@ -209,7 +283,7 @@ class DailySnapshot:
 def run_backtest(cfg: BacktestConfig) -> Dict:
     """执行 $50K 组合回测，返回完整结果"""
 
-    preds = load_verified_predictions()
+    preds = load_verified_predictions(horizon=cfg.horizon)
     if not preds:
         return {"error": "无已验证预测数据"}
 
@@ -218,8 +292,22 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
     for p in preds:
         by_date[p["date"]].append(p)
 
-    all_dates = sorted(by_date.keys())
-    first_date, last_date = all_dates[0], all_dates[-1]
+    entry_dates = sorted(by_date.keys())
+    first_date = entry_dates[0]
+    # all_dates 必须延伸到最后一个 exit_date（否则 T+30 的仓位会被 WINDOW_CUTOFF 全吃）
+    # price_t{N} 是真实已观测价，不存在 look-ahead
+    last_exit = max(
+        (p.get("exit_date") or p["date"]) for p in preds
+    )
+    last_date = max(entry_dates[-1], last_exit)
+
+    # 生成每日序列（从 first_date 到 last_date 的所有交易日近似 — 用 entry_dates 和 exit_dates 并集）
+    exit_set = set()
+    for p in preds:
+        ed = p.get("exit_date")
+        if ed:
+            exit_set.add(ed)
+    all_dates = sorted(set(entry_dates) | exit_set)
 
     # SPY 基准
     spy_prices = _fetch_spy_prices(first_date, last_date)
@@ -751,6 +839,8 @@ def main():
     parser.add_argument("--no-macro-gate", action="store_true", help="禁用宏观政体门控")
     parser.add_argument("--bull-size", type=float, default=_d.bull_size_pct)
     parser.add_argument("--bear-size", type=float, default=_d.bear_size_pct)
+    parser.add_argument("--horizon", type=int, choices=[1, 7, 30], default=_d.horizon,
+                        help="持仓期天数：1/7/30（默认 7）")
     parser.add_argument("--json", action="store_true", help="输出 JSON（供其他脚本消费）")
     parser.add_argument("--save", type=str, default=None, help="保存完整结果到 JSON 文件")
     args = parser.parse_args()
@@ -767,6 +857,7 @@ def main():
         macro_gate=not args.no_macro_gate,
         bull_size_pct=args.bull_size,
         bear_size_pct=args.bear_size,
+        horizon=args.horizon,
     )
 
     result = run_backtest(cfg)
