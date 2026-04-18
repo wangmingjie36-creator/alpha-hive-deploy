@@ -1967,6 +1967,33 @@ class AlphaHiveDailyReporter:
         except Exception as e2:
             _log.error("dashboard-data.json fallback 也失败: %s", e2)
 
+def _resolve_focus_tickers(args) -> List[str]:
+    """
+    v0.23.0 扩样本：统一 CLI 解析优先级
+      1. 显式 --tickers 列表 → 直接用
+      2. --extended-pool → WATCHLIST + WATCHLIST_EXTENDED（约 101 只）
+      3. --all-watchlist → WATCHLIST 核心 25 只
+      4. 默认 → args.tickers 里的 10 只
+    --max-tickers 是硬上限（防止首次跑太久）
+    """
+    if getattr(args, "extended_pool", False):
+        try:
+            from config import get_extended_watchlist
+            tickers = list(get_extended_watchlist().keys())
+        except (ImportError, AttributeError):
+            _log.warning("get_extended_watchlist 不可用，降级到 WATCHLIST")
+            tickers = list(WATCHLIST.keys())
+    elif getattr(args, "all_watchlist", False):
+        tickers = list(WATCHLIST.keys())
+    else:
+        tickers = list(args.tickers)
+
+    max_n = getattr(args, "max_tickers", None)
+    if max_n and max_n > 0:
+        tickers = tickers[:max_n]
+    return tickers
+
+
 def main():
     """主入口"""
 
@@ -1995,7 +2022,18 @@ def main():
     parser.add_argument(
         '--all-watchlist',
         action='store_true',
-        help='扫描配置中的全部监控列表'
+        help='扫描配置中的全部核心监控列表（WATCHLIST，约 25 只）'
+    )
+    parser.add_argument(
+        '--extended-pool',
+        action='store_true',
+        help='v0.23.0 扩样本：扫描 WATCHLIST + WATCHLIST_EXTENDED（约 101 只，覆盖 14 sector）'
+    )
+    parser.add_argument(
+        '--max-tickers',
+        type=int,
+        default=None,
+        help='限制扫描的最大标的数（配合 --extended-pool 用，防止首次跑太久）'
     )
     parser.add_argument(
         '--swarm',
@@ -2060,7 +2098,7 @@ def main():
 
     # 如果只是检查财报更新
     if args.check_earnings:
-        focus_tickers = list(WATCHLIST.keys())[:10] if args.all_watchlist else args.tickers
+        focus_tickers = _resolve_focus_tickers(args)
         result = reporter.check_earnings_updates(tickers=focus_tickers)
         reporting = result.get("reporting_today", [])
         updated = result.get("updated", [])

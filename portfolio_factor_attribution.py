@@ -204,10 +204,13 @@ def _load_etf_factors(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
 # 3. OLS 回归（复用 factor_attribution._ols）
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _regress(strategy_rets: pd.Series, ff: pd.DataFrame, model: str = "FF6") -> Dict:
+def _regress(strategy_rets: pd.Series, ff: pd.DataFrame, model: str = "FF6",
+             hac_lag: Optional[int] = None) -> Dict:
     """
     对 strategy_rets 做因子回归
     model: "FF6" (Kenneth French 6 因子) | "FF3" (降级) | "ETF5" (ETF 近似 5 因子) | "CAPM" (SPY 单因子)
+    hac_lag: Newey-West HAC 滞后阶数（修正序列自相关高估显著性）
+             None = 标准 OLS；推荐 lag = floor(4*(n/100)^(2/9))，T+7/T+30 用 5
     """
     from factor_attribution import _ols
 
@@ -245,7 +248,19 @@ def _regress(strategy_rets: pd.Series, ff: pd.DataFrame, model: str = "FF6") -> 
     ones = np.ones((len(common), 1))
     X = np.hstack([ones, ff_al[factor_cols].values])
 
-    ols = _ols(y, X)
+    # 自动推荐 HAC lag（Newey-West 1987）
+    if hac_lag is None:
+        # 如果残差自相关显著（试跑一次 OLS 检查），自动启用
+        ols_pre = _ols(y, X)
+        res_pre = ols_pre["residuals"]
+        rm = res_pre - res_pre.mean()
+        auto_ac = float(np.sum(rm[:-1] * rm[1:]) / np.sum(rm * rm)) if len(rm) > 2 else 0.0
+        if abs(auto_ac) > 0.15:
+            n_obs = len(common)
+            hac_lag = max(1, int(4 * (n_obs / 100.0) ** (2.0 / 9.0)))
+            _log.info(f"残差自相关 {auto_ac:+.2f} 显著 → 自动启用 HAC(lag={hac_lag})")
+
+    ols = _ols(y, X, hac_lag=hac_lag)
     beta = ols["beta"]
     t_stat = ols["t_stat"]
     p_value = ols["p_value"]
@@ -277,6 +292,8 @@ def _regress(strategy_rets: pd.Series, ff: pd.DataFrame, model: str = "FF6") -> 
 
     return {
         "model": model,
+        "regression_method": ols.get("method", "OLS"),
+        "hac_lag": hac_lag,
         "n_obs": len(common),
         "date_range": [str(common[0].date()), str(common[-1].date())],
         "alpha_daily": round(alpha_daily, 6),
@@ -309,6 +326,7 @@ def run_portfolio_attribution(
     initial_capital: float = 50_000.0,
     position_size_pct: float = 0.10,
     factor_source: str = "auto",
+    hac_lag: Optional[int] = None,
 ) -> Dict:
     """
     对整个策略做因子归因
@@ -378,8 +396,8 @@ def run_portfolio_attribution(
     if ff is None:
         return {"error": "所有因子数据源都失败"}
 
-    # 回归
-    result = _regress(strategy_rets, ff, model=model_used)
+    # 回归（传入 HAC 参数）
+    result = _regress(strategy_rets, ff, model=model_used, hac_lag=hac_lag)
     if "error" not in result:
         result["factor_source"] = factor_label
 
@@ -420,7 +438,8 @@ def _print_report(r: Dict) -> None:
         return
 
     print(f"  数据源：{r.get('source', '?')}   交易笔数：{r.get('n_trades', '?')}")
-    print(f"  回归模型：{r['model']}   观测日：{r['n_obs']}   日期：{r['date_range'][0]} ~ {r['date_range'][1]}\n")
+    method_tag = r.get("regression_method", "OLS")
+    print(f"  回归模型：{r['model']} ({method_tag})   观测日：{r['n_obs']}   日期：{r['date_range'][0]} ~ {r['date_range'][1]}\n")
 
     # Alpha
     ap = r["alpha_annual"] * 100
@@ -483,14 +502,20 @@ def main():
                         help="auto: 先试 FF6 再降级 ETF；ff6: Kenneth French（可能滞后）；etf: 实时 ETF 近似")
     parser.add_argument("--capital", type=float, default=50_000.0)
     parser.add_argument("--size-pct", type=float, default=0.10)
+    parser.add_argument("--hac-lag", type=int, default=None,
+                        help="Newey-West HAC 滞后阶数。None=自动（残差自相关>0.15 时启用）；0=强制不用 HAC")
+    parser.add_argument("--no-hac", action="store_true", help="强制禁用 HAC（即使残差自相关高）")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+
+    hac_lag = 0 if args.no_hac else args.hac_lag  # 0 传下去等同不用 HAC
 
     result = run_portfolio_attribution(
         source=args.source,
         initial_capital=args.capital,
         position_size_pct=args.size_pct,
         factor_source=args.factor_source,
+        hac_lag=hac_lag if (hac_lag is None or hac_lag > 0) else None,
     )
 
     if args.json:

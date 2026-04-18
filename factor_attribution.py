@@ -208,11 +208,19 @@ def _get_stock_returns(ticker: str, start: pd.Timestamp,
 # 3. OLS 回归（纯 numpy + scipy.stats.t）
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _ols(y: np.ndarray, X: np.ndarray) -> Dict:
+def _ols(y: np.ndarray, X: np.ndarray, hac_lag: Optional[int] = None) -> Dict:
     """
-    OLS 时间序列回归。
+    OLS 时间序列回归，支持 Newey-West HAC 标准误修正。
+
     X 已含截距列（第 0 列全为 1）。
-    返回 dict：beta, se, t_stat, p_value, r2, adj_r2, residuals
+
+    Args:
+        y: 被解释变量 shape (n,)
+        X: 自变量矩阵含截距 shape (n, k)
+        hac_lag: Newey-West HAC 滞后阶数；None=标准 OLS；
+                 建议 lag = floor(4*(n/100)^(2/9))，T+30 日度推荐 5
+
+    返回 dict：beta, se, se_hac, t_stat, p_value, r2, adj_r2, residuals, method
     """
     n, k = X.shape
 
@@ -231,14 +239,49 @@ def _ols(y: np.ndarray, X: np.ndarray) -> Dict:
     r2     = max(0.0, 1.0 - ss_res / ss_tot) if ss_tot > 1e-12 else 0.0
     adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - k) if n > k else r2
 
-    # 标准误
+    # ── 标准 OLS 标准误 ──
     s2 = ss_res / max(n - k, 1)
     try:
-        cov_beta = s2 * np.linalg.inv(XtX)
-        se = np.sqrt(np.maximum(np.diag(cov_beta), 0.0))
+        XtX_inv = np.linalg.inv(XtX)
+        cov_ols = s2 * XtX_inv
+        se_ols = np.sqrt(np.maximum(np.diag(cov_ols), 0.0))
     except np.linalg.LinAlgError:
-        se = np.full(k, np.nan)
+        XtX_inv = None
+        se_ols = np.full(k, np.nan)
 
+    # ── Newey-West HAC 标准误（修正序列自相关 + 异方差）──
+    se_hac = None
+    method = "OLS"
+    if hac_lag is not None and hac_lag > 0 and XtX_inv is not None:
+        try:
+            # Bartlett kernel: w_l = 1 - l/(L+1), l = 0..L
+            L = int(hac_lag)
+            # S = Σ_l=-L..L w_l · (1/n) Σ_t X_t' e_t e_{t-l} X_{t-l}
+            # 等价于：S0 + Σ_l=1..L w_l (Γ_l + Γ_l')
+            S = np.zeros((k, k))
+            # l=0: Σ_t e_t^2 X_t X_t'
+            for t_idx in range(n):
+                xt = X[t_idx, :].reshape(-1, 1)
+                S += residuals[t_idx] ** 2 * (xt @ xt.T)
+            # l=1..L
+            for l in range(1, L + 1):
+                w_l = 1.0 - l / (L + 1.0)
+                G_l = np.zeros((k, k))
+                for t_idx in range(l, n):
+                    xt = X[t_idx, :].reshape(-1, 1)
+                    xt_l = X[t_idx - l, :].reshape(-1, 1)
+                    G_l += residuals[t_idx] * residuals[t_idx - l] * (xt @ xt_l.T)
+                S += w_l * (G_l + G_l.T)
+            # Newey-West var(β̂) = (X'X)^{-1} · S · (X'X)^{-1}
+            cov_hac = XtX_inv @ S @ XtX_inv
+            se_hac = np.sqrt(np.maximum(np.diag(cov_hac), 0.0))
+            method = f"OLS+HAC(lag={L})"
+        except Exception as e:
+            _log.debug(f"HAC 计算失败，退回 OLS: {e}")
+            se_hac = None
+
+    # 用 HAC 优先，否则用 OLS
+    se = se_hac if se_hac is not None else se_ols
     t_stat = np.where(se > 1e-12, beta / se, np.nan)
 
     # p 值（t 分布双尾）
@@ -246,13 +289,14 @@ def _ols(y: np.ndarray, X: np.ndarray) -> Dict:
         from scipy.stats import t as _t_dist
         p_value = 2.0 * (1.0 - _t_dist.cdf(np.abs(t_stat), df=n - k))
     except Exception:
-        # 正态近似兜底（用 numpy 向量化 erf，避免 math.erf 只接受标量的 TypeError）
         from scipy.special import erf as _erf
         p_value = 2.0 * (1.0 - 0.5 * (1.0 + _erf(np.abs(t_stat) / math.sqrt(2))))
 
     return {
         "beta":      beta,
         "se":        se,
+        "se_ols":    se_ols,
+        "se_hac":    se_hac,
         "t_stat":    t_stat,
         "p_value":   p_value,
         "r2":        r2,
@@ -260,6 +304,7 @@ def _ols(y: np.ndarray, X: np.ndarray) -> Dict:
         "residuals": residuals,
         "n":         n,
         "k":         k,
+        "method":    method,
     }
 
 

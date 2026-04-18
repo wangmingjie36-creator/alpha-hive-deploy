@@ -368,6 +368,20 @@ class ChronosBeeHorizon(BeeAgent):
             except LLM_ERRORS as e:
                 _log.debug("ChronosBeeHorizon LLM unavailable for %s: %s", ticker, e)
 
+            # v0.23.0: 催化剂驱动的动态 exit 推荐（供 backtester 替代固定 T+7）
+            _rec_hold_days = 21  # 默认 T+21
+            _exit_rationale = "default"
+            try:
+                from catalyst_exit_planner import plan_exit as _plan_exit
+                from datetime import datetime as _dt
+                _rec_hold_days, _exit_rationale = _plan_exit(
+                    ticker,
+                    _dt.now().strftime("%Y-%m-%d"),
+                    catalysts_found,
+                )
+            except Exception as _e_plan:
+                _log.debug("catalyst_exit_planner 不可用 %s: %s", ticker, _e_plan)
+
             self._publish(ticker, discovery, "catalyst_timeline", score, direction,
                          details={
                              "catalyst_count": len(catalysts_found),
@@ -375,6 +389,9 @@ class ChronosBeeHorizon(BeeAgent):
                              "catalyst_types": list({c.get("type", "") for c in catalysts_found}),
                              "analyst_upside_pct": _analyst_info.get("upside_pct") if _analyst_info else None,
                              "analyst_mean_target": _analyst_info.get("target_mean") if _analyst_info else None,
+                             # v0.23.0 动态 exit 推荐
+                             "recommended_hold_days": _rec_hold_days,
+                             "exit_rationale": _exit_rationale,
                          })
 
             # Phase 2: confidence = 催化剂数量和来源多样性 + LLM 加成 + 分析师数据
@@ -409,6 +426,9 @@ class ChronosBeeHorizon(BeeAgent):
                     "pead": _pead_data,
                     "pead_summary": _pead_text,
                     "pead_bias": _pead_data.get("bias", "neutral") if _pead_data else "neutral",
+                    # v0.23.0 动态 exit 推荐
+                    "recommended_hold_days": _rec_hold_days,
+                    "exit_rationale": _exit_rationale,
                 },
             ).to_dict()
 

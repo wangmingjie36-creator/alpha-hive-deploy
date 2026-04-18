@@ -5,6 +5,85 @@
 
 ---
 
+## [0.23.0] — 2026-04-17 — 动态 Exit + 扩样本 + Newey-West HAC
+
+### Added
+
+#### 🥉 Newey-West HAC 标准误（~1h 完成）
+- **`factor_attribution._ols(y, X, hac_lag=None)`** — 支持 Newey-West HAC 方差估计
+  - Bartlett kernel 权重 `w_l = 1 - l/(L+1)`
+  - 自动 lag 推荐：`floor(4·(n/100)^(2/9))`
+  - 修正序列自相关导致的显著性高估
+- **`portfolio_factor_attribution._regress` 自动启用 HAC**
+  - 残差一阶自相关 |ρ| > 0.15 时自动启用
+  - CLI: `--hac-lag N`、`--no-hac`
+  - 输出 `regression_method = "OLS+HAC(lag=N)"`
+
+**验证**：T+30 组合归因 OLS vs HAC 对比：
+| 方法 | α 年化 | t-stat | p-value | 显著性 |
+|------|-------|--------|---------|--------|
+| 朴素 OLS | +49.09% | 无 HAC | <0.0001 | *** |
+| HAC lag=3 (auto) | +49.09% | +3.13 | 0.0039 | *** |
+| HAC lag=5 | +49.09% | +2.80 | 0.0088 | *** |
+| HAC lag=10 | +49.09% | +2.56 | 0.0156 | ** |
+
+**结论**：即使修正残差 +0.82 自相关，T+30 α 仍是统计显著的（p<0.016）
+
+#### 🥇 催化剂驱动的动态 Exit（~4h 完成）
+- **`catalyst_exit_planner.py`（新文件）** — 事件驱动 exit 规划器
+  - 规则：earnings/guidance 前 2d 平仓；fda_approval/product_launch 后 3d 平仓；regulatory 后 1d；无催化剂默认 T+21
+  - 硬边界：hold_days ∈ [3, 45]
+  - `plan_exit(ticker, entry_date, catalysts) → (hold_days, rationale)`
+- **`dynamic_exit_backtest.py`（新文件）** — 历史回测验证
+  - 对 pheromone.db 每笔 checked_t7=1 预测，结合 catalysts.json 推断 hold_days
+  - yfinance 拉 entry + hold_days 的实际收盘价算 net return
+  - 三组对比：固定 T+7（DB）vs 固定 T+21（裸持）vs 动态 Exit
+- **`swarm_agents/chronos_bee.py`** — 集成 `plan_exit`
+  - details 新增 `recommended_hold_days` 和 `exit_rationale` 字段
+  - 未来扫描的 predictions 会自动带这两个字段
+
+**⚠️ 实证结果出乎意料**：
+
+| 策略 | n | Avg Net | WR | Sharpe | $50K·10% PnL |
+|------|---|---------|-----|--------|--------------|
+| **固定 T+7 + SL/TP** | 210 | **+1.56%** | 55.2% | **+1.11** | **+$16,409** |
+| 固定 T+21 裸持 | 181 | -4.28% | 29.8% | -2.99 | -$38,723 |
+| 动态 Exit | 185 | -1.39% | 42.7% | -0.77 | -$12,822 |
+
+**关键诊断**：
+1. **固定 T+7 + 路径依赖 SL/TP 在 2-4 月样本上实际最优**
+   - -5~12% SL 是熊市保护神（3 月下跌期提前止损 avoid -15% 深亏）
+   - +10% TP 在 4 月反弹期锁定利润
+2. **v0.22.2 "T+30 α +49%" 很可能是 V 型反弹运气**
+   - 76 笔 entry 都在 2-3 月初，T+30 正好跨过 3 月底部到 4 月反弹
+3. **动态 Exit "财报前 2d 平仓"在熊市中反而是"低点确认亏损"**
+   - 大部分 earnings 落在 3 月熊市中段，提前平仓没机会等反弹
+
+**修正后的结论**：
+- ChronosBee 已集成 `recommended_hold_days`（未来扫描使用）
+- 但**当前样本不支持"固定 T+7 路径依赖 SL 不够好"的结论**
+- 真正需要的是 **regime-aware exit**：熊市用 T+7+SL，牛市用 T+30+trailing
+- 这需要**更多样本**才能实现（方案 🥈）
+
+#### 🥈 扩样本（~3h 完成）
+- **`alpha_hive_daily_report.py` CLI 新增 `--extended-pool` / `--max-tickers`**
+  - `--extended-pool`：合并 WATCHLIST (24) + WATCHLIST_EXTENDED (77) = **101 只** 扫描
+  - `--max-tickers N`：硬上限（防首次跑太久）
+  - `_resolve_focus_tickers(args)`：统一 CLI 解析优先级
+- **Sector 多样化**：14 个 sector 覆盖（Tech 29、Healthcare 13、Financials 9、ETF 9、Consumer 8、Communication 8、Automotive 8、CleanEnergy 5、Industrials 4、Fintech 3、Energy 2、AI 1、Aerospace 1、Other 1）
+
+**价值**：
+- 每日扫描从 10 → 50-101 标的（按 `--max-tickers` 控成本）
+- 3 个月可累积 T+30 样本从 **76 → 500-900+**
+- 真正验证"T+30 α +49% 是运气还是技能"所需
+
+### Changed
+
+- `factor_attribution._ols` 返回值新增字段：`se_ols`、`se_hac`、`method`
+- `portfolio_factor_attribution.run_portfolio_attribution` 新增 `hac_lag` 参数
+
+---
+
 ## [0.22.2] — 2026-04-17 — T+1 / T+7 / T+30 持仓期对比（延长持仓期发现）
 
 ### Added
