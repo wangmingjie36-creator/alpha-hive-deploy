@@ -5,6 +5,36 @@
 
 ---
 
+## [0.23.3] — 2026-04-17 — sample-accumulator 改周日 18:01（减少 entry_date 漂移）
+
+### Changed
+
+- **scheduled-task `alpha-hive-sample-accumulator` cron: `0 10 * * 6` → `0 18 * * 0`**
+  - 原：每周六 PDT 10:02（下次 2026-04-18 周六）
+  - 新：**每周日 PDT 18:01**（下次 2026-04-19 周日，距周一开盘 12.5h）
+  - **理由**：周六扫描会让 `entry_date` 记为周六，但美股周六休市无法真实交易。T+N 下游日期漂移 2 天（周末摊进去）。改到周日晚后 entry_date=周日 → 最近可交易日=周一（偏差仅 1 天，对统计验证影响微乎其微）
+  - Prompt 内已加说明"周日晚 yfinance 返回周五收盘数据 — 这是预期行为"
+
+### Fixed — 文档时间戳精度错误
+
+- **MEMORY.md Scheduled Tasks 表格时间修正**
+  - `alpha-hive-daily-scan`: 原记作 "周一~五 PDT 14:03" → 实际是 **21:03 PDT**（收盘后 8 小时）
+  - `alpha-hive-weekly-optimizer`: 原记 "02:07" → 实际 **09:07 PDT**
+  - `alpha-hive-monthly-self-analysis`: 原记 "03:13" → 实际 **10:13 PDT**
+  - 所有时间已用 `list_scheduled_tasks` 返回的 `nextRunAt` UTC 反查 PDT 确认
+- **应 2026-04-17 日期事故（用户纠正）** 已在 MEMORY 里加入日期精度硬约束，强制每次提及"明天/今天/周X"前校准
+
+### 影响评估（对昨天结论无影响）
+
+| 结论 | 影响 |
+|------|------|
+| raw 210 笔 Sharpe +1.10 CI [+0.305, +1.868] 显著为正 | ✅ 不变 |
+| 固定 T+7 + SL/TP 熊市最优 | ✅ 不变 |
+| 扩样本方案继续运行 | ✅ 时间点改到周日后更精确 |
+| 第一次 sample-accumulator 扫描时间 | **2026-04-19 周日 18:01 PDT** |
+
+---
+
 ## [0.23.2] — 2026-04-17 — 二次审计：8 Bug 修复 + 发现另一个假 alpha
 
 三个并行审计 Agent（新脚本 / 核心引擎 / 配置部署）找到 18 个问题，本次修复 7 个 P0 + 1 个 P1。
