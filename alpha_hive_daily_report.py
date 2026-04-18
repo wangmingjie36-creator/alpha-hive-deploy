@@ -2036,6 +2036,15 @@ def main():
         help='限制扫描的最大标的数（配合 --extended-pool 用，防止首次跑太久）'
     )
     parser.add_argument(
+        '--samples-only',
+        action='store_true',
+        help=(
+            'v0.23.1 样本积累模式：只跑蜂群扫描写 pheromone.db，'
+            '不生成 HTML 日报 / 不推 GitHub / 不推 Slack。'
+            '用于离线积累 T+30 样本，零 API 费用（需配合 --no-llm）。'
+        )
+    )
+    parser.add_argument(
         '--swarm',
         action='store_true',
         help='启用蜂群协作模式（7 个自治工蜂：6 核心并行 + BearBeeContrarian 看空对冲）'
@@ -2119,6 +2128,16 @@ def main():
     # 保存报告（Hive app 通过 .swarm_results_{date}.json 自动同步）
     report_path = reporter.save_report(report)
     _log.info("报告已保存：%s", report_path)
+
+    # v0.23.1: --samples-only 模式跳过所有部署 / Slack / gh-pages，只为积累 pheromone.db 样本
+    if args.samples_only:
+        n_results = len(report.get("swarm_results") or report.get("ticker_results") or {})
+        print(f"\n📦 样本积累模式：完成 {n_results} 标的扫描，已写入 pheromone.db")
+        print(f"   - 跳过 HTML 报告生成")
+        print(f"   - 跳过 GitHub / gh-pages 推送")
+        print(f"   - 跳过 Slack 通知")
+        print(f"   下次回测 / Bootstrap / FF 归因 会自动读到这批新样本")
+        return report
 
     # 三端同步：GitHub 提交推送 + Hive App + Slack
     print("\n📡 同步三端：GitHub / Hive App / Slack...")

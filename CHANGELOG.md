@@ -5,6 +5,47 @@
 
 ---
 
+## [0.23.1] — 2026-04-17 — 混合双轨：零 API 费用的扩样本管道
+
+### 背景
+
+用户确认每日 LLM 模式扫描约 ¥0.2 / ~$0.10-0.20/次，扫 101 只 LLM 会把费用线性放大到 $1-2/天。
+设计"混合双轨"方案平衡成本 vs 样本量。
+
+### Added
+
+- **`alpha_hive_daily_report.py --samples-only` flag**
+  - 只跑蜂群扫描写 pheromone.db，不生成 HTML 报告 / 不推 GitHub / 不推 Slack
+  - 避免扩样本扫描污染 gh-pages 生产网站
+  - 配合 `--no-llm` 保证 $0 Anthropic API 费用
+
+- **Scheduled Task `alpha-hive-sample-accumulator`**
+  - Cron: `0 10 * * 6`（每周六 PDT 10:00）
+  - 命令：`python3 alpha_hive_daily_report.py --swarm --no-llm --extended-pool --max-tickers 50 --samples-only`
+  - 执行时长 ~25 分钟，零 API 费用
+  - 自动对比扫描前后 pheromone.db 样本数，打印新增数量
+
+### 架构：混合双轨
+
+| 轨道 | 频率 | 命令 | API 费用 | 产出 |
+|------|------|------|---------|------|
+| **1. 深度日报** | 周一~五 14:10 PDT | `--swarm --use-llm --tickers 10只` | ~$0.10-0.20/天 | 核心 HTML 报告 + Slack 推送 + gh-pages |
+| **2. 样本积累** | 周六 10:00 PDT | `--swarm --no-llm --extended-pool --max-tickers 50 --samples-only` | **$0** | 仅写 pheromone.db 用于回测验证 |
+
+### 价值预期
+
+3 个月后对比：
+
+| 方案 | 每月费用 | 3 个月 T+30 样本 |
+|------|---------|-----------------|
+| 仅日报 10 只 LLM（原状） | ~$3-6 | ~300 笔 |
+| **混合双轨** | **~$3-6（不变）** | **~700-900 笔** |
+| 每日 101 只 LLM | ~$30-60 | ~1500 笔 |
+
+**混合双轨在不增加任何费用的情况下，样本量翻倍至 2-3 倍**，足以回答 v0.22.2 遗留问题"T+30 α +49% 是运气还是技能"。
+
+---
+
 ## [0.23.0] — 2026-04-17 — 动态 Exit + 扩样本 + Newey-West HAC
 
 ### Added
