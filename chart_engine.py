@@ -606,9 +606,16 @@ def render_gex_profile_chart(
         if not gex_profile:
             return None
 
-        strikes = sorted(gex_profile.keys(), key=float)
-        gex_vals = [float(gex_profile[k]) for k in strikes]
-        strikes_f = [float(k) for k in strikes]
+        # gex_profile 兼容两种格式：
+        #   list of dicts: [{"strike": K, "net_gex": v, ...}, ...]  ← advanced_analyzer 实际产出
+        #   dict:          {strike: gex_value, ...}                  ← 旧假设
+        if isinstance(gex_profile, list):
+            strikes_f = [float(p["strike"]) for p in gex_profile if "strike" in p]
+            gex_vals  = [float(p.get("net_gex", 0)) for p in gex_profile if "strike" in p]
+        else:
+            strikes = sorted(gex_profile.keys(), key=float)
+            gex_vals = [float(gex_profile[k]) for k in strikes]
+            strikes_f = [float(k) for k in strikes]
 
         if not strikes:
             return None

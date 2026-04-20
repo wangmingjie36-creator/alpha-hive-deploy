@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><title>Alpha Hive 增强版周报 2026-04-13 → 2026-04-19</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
+       background: #0f172a; color: #e2e8f0; margin: 0; padding: 24px; }
+.wrap { max-width: 1200px; margin: 0 auto; }
+h1 { background: linear-gradient(90deg,#fbbf24,#f59e0b); -webkit-background-clip: text;
+     background-clip: text; color: transparent; font-size: 28px; }
+h2 { color: #fbbf24; border-bottom: 1px solid #334155; padding-bottom: 8px; margin-top: 32px; }
+.card { background: #1e293b; border-radius: 12px; padding: 20px; margin-bottom: 20px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.kpi { background: #1e293b; border-radius: 12px; padding: 18px; border-left: 4px solid #fbbf24; }
+.kpi .label { color: #94a3b8; font-size: 12px; text-transform: uppercase; }
+.kpi .value { color: #fbbf24; font-size: 32px; font-weight: 700; margin: 6px 0; }
+.kpi .ci { color: #94a3b8; font-size: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 8px 10px; border-bottom: 1px solid #334155; text-align: left; }
+th { color: #fbbf24; font-size: 11px; text-transform: uppercase; }
+.chart-wrap { position: relative; height: 320px; }
+.meta { color: #94a3b8; font-size: 13px; }
+.rec { background: #422006; border-left: 4px solid #fbbf24; padding: 14px 18px; border-radius: 8px; }
+.rec li { margin-bottom: 10px; line-height: 1.55; }
+.warn { color: #f59e0b; font-weight: 600; }
+.ok { color: #10b981; font-weight: 600; }
+</style></head><body><div class="wrap">
+
+<h1>🧠 Alpha Hive 增强版周度优化报告</h1>
+<p class="meta">本周：2026-04-13 → 2026-04-19 · 对照周：2026-04-06 → 2026-04-12 · 快照总数：169 ·
+生成时间：2026-04-19 02:12</p>
+<p class="meta warn">⚠️ 本会话未找到 weekly_analyzer.py 脚本（$BASE/规则/ 目录不存在），
+本报告由 Cowork 回退脚本直接读取 report_snapshots/ 生成。完整 Wilson CI + 组合分析 + 误判归因已覆盖。</p>
+
+<div class="grid">
+  <div class="kpi">
+    <div class="label">本周 T+1 整体准确率</div>
+    <div class="value">68.8%</div>
+    <div class="ci">11/16 · Wilson 95% CI 44.4–85.8%</div>
+  </div>
+  <div class="kpi">
+    <div class="label">上周 T+1 整体准确率</div>
+    <div class="value">62.5%</div>
+    <div class="ci">25/40 · Wilson 95% CI 47.0–75.8%</div>
+  </div>
+  <div class="kpi">
+    <div class="label">上周 T+7 整体准确率</div>
+    <div class="value">70.0%</div>
+    <div class="ci">14/20 · 漂移跟踪样本</div>
+  </div>
+  <div class="kpi">
+    <div class="label">本周看多 vs 看空</div>
+    <div class="value">85% vs 0%</div>
+    <div class="ci">bull 11/13 · bear 0/1</div>
+  </div>
+</div>
+
+<h2>① 方向性准确率对比</h2>
+<div class="card"><div class="chart-wrap"><canvas id="dirChart"></canvas></div></div>
+
+<h2>② 蜂群成员命中率排行（本周+上周合并 T+1）</h2>
+<div class="card"><div class="chart-wrap"><canvas id="agentChart"></canvas></div></div>
+
+<h2>③ 个股命中率</h2>
+<div class="grid">
+  <div class="card"><div class="chart-wrap"><canvas id="tickerChart"></canvas></div></div>
+  <div class="card"><table>
+    <tr><th>Ticker</th><th>Hits/N</th><th>Rate</th></tr>
+    <tr><td><b>META</b></td><td>7/7</td><td>100%</td></tr>
+<tr><td><b>QCOM</b></td><td>5/5</td><td>100%</td></tr>
+<tr><td><b>TSLA</b></td><td>1/1</td><td>100%</td></tr>
+<tr><td><b>AMZN</b></td><td>6/7</td><td>86%</td></tr>
+<tr><td><b>NVDA</b></td><td>5/6</td><td>83%</td></tr>
+<tr><td><b>CRCL</b></td><td>3/4</td><td>75%</td></tr>
+<tr><td><b>MSFT</b></td><td>4/7</td><td>57%</td></tr>
+<tr><td><b>VKTX</b></td><td>2/5</td><td>40%</td></tr>
+<tr><td><b>BILI</b></td><td>2/7</td><td>29%</td></tr>
+<tr><td><b>RKLB</b></td><td>1/7</td><td>14%</td></tr>
+  </table></div>
+</div>
+
+<h2>④ 误判根因分类</h2>
+<div class="grid">
+  <div class="card"><div class="chart-wrap"><canvas id="missChart"></canvas></div></div>
+  <div class="card">
+    <h3 style="color:#fbbf24;margin-top:0">Top 信号组合 (top 3 agents 指纹)</h3>
+    <table>
+      <tr><th>组合</th><th>Hits/N</th><th>Rate</th></tr>
+      <tr><td style='font-size:12px'>ChronosBeeHorizon+ScoutBeeNova+RivalBeeVanguard</td><td>3/3</td><td>100%</td></tr>
+<tr><td style='font-size:12px'>OracleBeeEcho+GuardBeeSentinel+BuzzBeeWhisper</td><td>3/3</td><td>100%</td></tr>
+<tr><td style='font-size:12px'>ChronosBeeHorizon+OracleBeeEcho+GuardBeeSentinel</td><td>2/2</td><td>100%</td></tr>
+<tr><td style='font-size:12px'>OracleBeeEcho+ChronosBeeHorizon+GuardBeeSentinel</td><td>2/2</td><td>100%</td></tr>
+<tr><td style='font-size:12px'>OracleBeeEcho+GuardBeeSentinel+QueenDistiller</td><td>2/2</td><td>100%</td></tr>
+<tr><td style='font-size:12px'>GuardBeeSentinel+QueenDistiller+ChronosBeeHorizon</td><td>2/2</td><td>100%</td></tr>
+<tr><td style='font-size:12px'>GuardBeeSentinel+ScoutBeeNova+OracleBeeEcho</td><td>2/2</td><td>100%</td></tr>
+<tr><td style='font-size:12px'>ChronosBeeHorizon+GuardBeeSentinel+BuzzBeeWhisper</td><td>2/3</td><td>67%</td></tr>
+<tr><td style='font-size:12px'>CodeExecutorAgent+BuzzBeeWhisper+QueenDistiller</td><td>1/2</td><td>50%</td></tr>
+<tr><td style='font-size:12px'>ScoutBeeNova+GuardBeeSentinel+QueenDistiller</td><td>1/2</td><td>50%</td></tr>
+    </table>
+  </div>
+</div>
+
+<h2>⑤ 本周逐笔明细（T+1）</h2>
+<div class="card"><table>
+<tr><th>Date</th><th>Ticker</th><th>Dir</th><th>Score</th><th>Entry</th><th>T+1</th><th>Chg %</th><th>Hit</th></tr>
+<tr><td>2026-04-14</td><td><b>AMZN</b></td><td>bullish</td><td>6.62</td><td>249.02</td><td>248.50</td><td style='color:#ef4444;font-weight:600'>-0.21%</td><td style='font-size:1.1em'>❌</td></tr>
+<tr><td>2026-04-14</td><td><b>BILI</b></td><td>bullish</td><td>5.91</td><td>25.00</td><td>24.95</td><td style='color:#ef4444;font-weight:600'>-0.20%</td><td style='font-size:1.1em'>❌</td></tr>
+<tr><td>2026-04-14</td><td><b>CRCL</b></td><td>bullish</td><td>5.90</td><td>105.49</td><td>105.52</td><td style='color:#10b981;font-weight:600'>+0.03%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-14</td><td><b>META</b></td><td>bullish</td><td>6.68</td><td>662.49</td><td>671.58</td><td style='color:#10b981;font-weight:600'>+1.37%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-14</td><td><b>MSFT</b></td><td>bullish</td><td>6.32</td><td>393.11</td><td>411.22</td><td style='color:#10b981;font-weight:600'>+4.61%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-14</td><td><b>NVDA</b></td><td>bullish</td><td>6.17</td><td>196.51</td><td>198.87</td><td style='color:#10b981;font-weight:600'>+1.20%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-14</td><td><b>RKLB</b></td><td>bullish</td><td>6.14</td><td>72.22</td><td>73.60</td><td style='color:#10b981;font-weight:600'>+1.91%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-14</td><td><b>TSLA</b></td><td>bullish</td><td>6.48</td><td>364.20</td><td>391.95</td><td style='color:#10b981;font-weight:600'>+7.62%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-13</td><td><b>AMZN</b></td><td>bullish</td><td>6.62</td><td>239.89</td><td>249.02</td><td style='color:#10b981;font-weight:600'>+3.81%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-13</td><td><b>BILI</b></td><td>bearish</td><td>5.04</td><td>24.47</td><td>25.00</td><td style='color:#ef4444;font-weight:600'>+2.17%</td><td style='font-size:1.1em'>❌</td></tr>
+<tr><td>2026-04-13</td><td><b>CRCL</b></td><td>neutral</td><td>5.53</td><td>98.68</td><td>105.49</td><td style='color:#ef4444;font-weight:600'>+6.90%</td><td style='font-size:1.1em'>❌</td></tr>
+<tr><td>2026-04-13</td><td><b>META</b></td><td>bullish</td><td>6.47</td><td>634.53</td><td>662.49</td><td style='color:#10b981;font-weight:600'>+4.41%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-13</td><td><b>MSFT</b></td><td>bullish</td><td>6.50</td><td>384.37</td><td>393.11</td><td style='color:#10b981;font-weight:600'>+2.27%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-13</td><td><b>NVDA</b></td><td>bullish</td><td>7.20</td><td>189.31</td><td>196.51</td><td style='color:#10b981;font-weight:600'>+3.80%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-13</td><td><b>QCOM</b></td><td>bullish</td><td>5.17</td><td>131.24</td><td>132.84</td><td style='color:#10b981;font-weight:600'>+1.22%</td><td style='font-size:1.1em'>✅</td></tr>
+<tr><td>2026-04-13</td><td><b>RKLB</b></td><td>neutral</td><td>5.52</td><td>70.62</td><td>72.22</td><td style='color:#ef4444;font-weight:600'>+2.27%</td><td style='font-size:1.1em'>❌</td></tr>
+</table></div>
+
+<h2>⑥ 关键建议</h2>
+<div class="card rec"><ol>
+<li>📊 主要误判类型是「bull_小幅下跌_<3%」(9 次) — 属于微幅波动误判。建议：在 composite 4.0-6.0 区间的「模糊信号」全部归为 neutral，不计入方向性胜率分母。</li>
+<li>📈 本周样本量偏少 (n=16)，Wilson CI 区间较宽；建议等待下周累积更多样本再做重大权重调整。上周 T+1 (n=40) 更具代表性：62%。</li>
+</ol></div>
+
+<p class="meta" style="margin-top:40px">
+完整 HTML 报告已保存在 <code>Alpha Hive/对比🆚/</code> 目录 ·
+回退脚本路径：<code>tmp_weekly_analyzer.py</code>
+</p>
+
+<script>
+const common = { plugins: { legend: { labels: { color: '#e2e8f0' } } },
+  scales: { x: { ticks: { color: '#e2e8f0' }, grid: { color: '#334155' } },
+            y: { ticks: { color: '#e2e8f0' }, grid: { color: '#334155' }, min: 0, max: 100 } } };
+
+new Chart(document.getElementById('dirChart'), {
+  type: 'bar',
+  data: { labels: ["\u770b\u591a Bullish", "\u770b\u7a7a Bearish", "\u4e2d\u6027 Neutral"],
+    datasets: [
+      { label: '本周 T+1', data: [84.6, 0.0, 0.0], backgroundColor: '#fbbf24' },
+      { label: '上周 T+1', data: [71.4, 60.0, 28.6], backgroundColor: '#64748b' }
+    ] },
+  options: common
+});
+
+new Chart(document.getElementById('agentChart'), {
+  type: 'bar',
+  data: { labels: ["BearBeeContrarian", "QueenDistiller", "ChronosBeeHorizon", "CodeExecutorAgent", "RivalBeeVanguard", "GuardBeeSentinel", "OracleBeeEcho", "BuzzBeeWhisper", "ScoutBeeNova"],
+    datasets: [{ label: '命中率 (%)', data: [71.4, 64.3, 64.3, 64.3, 64.3, 64.0, 63.8, 62.3, 61.3],
+                backgroundColor: '#10b981' }] },
+  options: { ...common, indexAxis: 'y' }
+});
+
+new Chart(document.getElementById('tickerChart'), {
+  type: 'bar',
+  data: { labels: ["META", "QCOM", "TSLA", "AMZN", "NVDA", "CRCL", "MSFT", "VKTX", "BILI", "RKLB"],
+    datasets: [{ label: '命中率 (%)', data: [100.0, 100.0, 100.0, 85.7, 83.3, 75.0, 57.1, 40.0, 28.6, 14.3],
+                backgroundColor: '#3b82f6' }] },
+  options: { ...common, indexAxis: 'y' }
+});
+
+new Chart(document.getElementById('missChart'), {
+  type: 'doughnut',
+  data: { labels: ["bull_\u5c0f\u5e45\u4e0b\u8dcc_<3%", "neutral_\u5c0f\u6ce2\u52a8", "bear_\u5c0f\u5e45\u4e0a\u6da8_<3%", "bear_\u786c\u591a\u5934\u53cd\u8f6c_>3%", "bull_\u786c\u7a7a\u5934\u53cd\u8f6c_>3%"],
+    datasets: [{ data: [9, 7, 2, 1, 1],
+      backgroundColor: ['#ef4444','#f59e0b','#fbbf24','#64748b','#475569'] }] },
+  options: { plugins: { legend: { labels: { color: '#e2e8f0' } } } }
+});
+</script>
+</div></body></html>

@@ -5,6 +5,46 @@
 
 ---
 
+## [0.23.4] — 2026-04-19 — weekly_optimizer / self_analyst VM 路径 bug + confirmation 周 gate
+
+### Fixed
+
+- **`weekly_optimizer.py` L31-45 VM 路径硬编码 bug**
+  - 旧实现：`_VM_PATH = Path("/sessions/keen-magical-wright/mnt/Alpha Hive")` 硬编码旧 session
+  - **影响**：Cowork 启新 session 后（当前：`ecstatic-sleepy-babbage`）脚本完全找不到 `SNAPSHOTS_DIR`，周日定时任务在 Cowork VM 里会静默空跑——看似在学习，实际没读到任何样本
+  - 修复：移植 `generate_deep_v2.py:41-57` 已验证的 `glob("/sessions/*/mnt/Alpha Hive")` 动态扫描 pattern + `try/except PermissionError` 兜底
+  - 额外兜底：VM 里 `深度分析报告/深度/` 目录常为空，增加回退到 `ALPHAHIVE_DIR/report_snapshots` 的逻辑（generate_deep_v2.py 的实际写入位置）
+  - 验证：当前 session 路径正确解析，`SNAPSHOTS_DIR.exists()=True`，找到 169 个快照、104 条 T+7 已回填
+
+- **`self_analyst.py` L29-40 同类 VM 路径硬编码 bug**
+  - 完全相同的根因（copy-paste 自 weekly_optimizer.py 的老版本）
+  - **影响**：月度 self-analysis briefing（下次 2026-05-01 03:00）在 Cowork VM 里会生成失败
+  - 修复：应用与 weekly_optimizer 相同的 glob 扫描 pattern
+
+### Changed
+
+- **`weekly_optimizer.py:MIN_CHANGE_PP` 3.0 → 11.0（临时 confirmation 周 gate）**
+  - 背景：修完路径 bug 后 `--dry-run` 揭示优化器建议
+    - `signal +9.0pp`, `catalyst -10.5pp`, `sentiment -10.0pp`, `risk_adj +9.5pp`, `odds +1.9pp`
+    - 3 个维度撞上 `MAX_SHIFT_PP=10` 单次限幅（意味着真实意图幅度更大）
+    - Bootstrap 稳健性验证触发警告："权重可能不稳健"
+    - 样本数 n=104，超过 MIN_SAMPLES=10，本可立即写入
+  - 决策：本周日不让定时任务写入 `config.py`，等 2026-04-26 再攒一周 T+7 样本后复跑
+    - 若方向收敛到同一侧 → 恢复 `MIN_CHANGE_PP=3.0` 放行
+    - 若反向翻转 → 说明 104 条样本上过拟合，本次调权是噪音
+  - 机制：`MIN_CHANGE_PP=11.0 > MAX_SHIFT_PP=10.0`，clamp 后的单次变化永远 ≤10pp，等价于**冻结写入**
+  - ⚠️ 恢复条件已写入代码注释，需 2026-04-26 人工审查 dry-run 后 revert 为 3.0
+
+### 决策背景（来自本次 Cowork session）
+
+- 用户触发 `alpha-hive-weekly-optimizer` 定时任务，脚本因路径 bug 失败 → 回退生成增强版周报
+- 周报发现：本周 T+1 68.8% (n=16, Wilson CI 44–86%)，上周 T+1 62.5% (n=40)，上周 T+7 70% (n=20)
+- 硬误判率（反向 >3%）仅 3.6% — 系统基线健康
+- 决定不做补丁类升级（composite 4-6 归 neutral / bear 阈值放宽 / 组合加成等），所有改动都是噪音或过拟合风险
+- 仅做两件确定性零风险改动：修路径 bug + 加 confirmation gate
+
+---
+
 ## [0.23.3] — 2026-04-17 — sample-accumulator 改周日 18:01（减少 entry_date 漂移）
 
 ### Changed

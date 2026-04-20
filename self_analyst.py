@@ -27,16 +27,37 @@ from pathlib import Path
 from typing import Optional
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
+# v0.10.1 修复：与 weekly_optimizer.py 同步 — VM 路径从硬编码旧 session
+# (keen-magical-wright) 改为 glob 动态扫描，任意 Cowork session 都能工作。
 ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
-_VM_PATH = Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
-if _VM_PATH.exists():
-    ALPHAHIVE_DIR = _VM_PATH
+import glob as _glob_mod
+_VM_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/Alpha Hive"), reverse=True)
+_VM_PATH = Path(_VM_SESSIONS[0]) if _VM_SESSIONS else Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
+try:
+    if _VM_PATH.exists():
+        ALPHAHIVE_DIR = _VM_PATH
+except PermissionError:
+    pass
 
-_VM_DEEP_DIR = Path("/sessions/keen-magical-wright/mnt/深度分析报告/深度")
-OUTPUT_DIR   = _VM_DEEP_DIR if _VM_DEEP_DIR.exists() else Path(
-    os.path.expanduser("~/Desktop/深度分析报告/深度"))
+_VM_DEEP_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/深度分析报告/深度"), reverse=True)
+_VM_DEEP_DIR = Path(_VM_DEEP_SESSIONS[0]) if _VM_DEEP_SESSIONS else Path("/sessions/keen-magical-wright/mnt/深度分析报告/深度")
+try:
+    OUTPUT_DIR = _VM_DEEP_DIR if _VM_DEEP_DIR.exists() else Path(
+        os.path.expanduser("~/Desktop/深度分析报告/深度"))
+except PermissionError:
+    OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
 
+# v0.10.1 兜底：VM 里 OUTPUT_DIR/report_snapshots 常为空 — 回退到
+# ALPHAHIVE_DIR/report_snapshots（generate_deep_v2.py 实际写入位置）
 SNAPSHOTS_DIR = OUTPUT_DIR / "report_snapshots"
+try:
+    if not SNAPSHOTS_DIR.exists():
+        _fallback = ALPHAHIVE_DIR / "report_snapshots"
+        if _fallback.exists():
+            SNAPSHOTS_DIR = _fallback
+except PermissionError:
+    pass
+
 BRIEFS_DIR    = ALPHAHIVE_DIR / "self_analysis_briefs"
 
 # Agent 中文名映射

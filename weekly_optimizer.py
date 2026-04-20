@@ -29,24 +29,55 @@ from pathlib import Path
 from typing import Optional
 
 # ── 路径配置（与 generate_deep_v2.py 保持一致）─────────────────────────────
+# v0.10.1 修复：VM 路径硬编码旧 session（keen-magical-wright）导致新 session
+# 找不到 snapshots 目录。改为 glob 动态扫描，任意 Cowork session 都能工作。
 ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
-_VM_PATH = Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
-if _VM_PATH.exists():
-    ALPHAHIVE_DIR = _VM_PATH
+import glob as _glob_mod
+_VM_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/Alpha Hive"), reverse=True)
+_VM_PATH = Path(_VM_SESSIONS[0]) if _VM_SESSIONS else Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
+try:
+    if _VM_PATH.exists():
+        ALPHAHIVE_DIR = _VM_PATH
+except PermissionError:
+    pass
 
-_VM_DEEP_DIR = Path("/sessions/keen-magical-wright/mnt/深度分析报告/深度")
-if _VM_DEEP_DIR.exists():
-    OUTPUT_DIR = _VM_DEEP_DIR
-else:
+_VM_DEEP_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/深度分析报告/深度"), reverse=True)
+_VM_DEEP_DIR = Path(_VM_DEEP_SESSIONS[0]) if _VM_DEEP_SESSIONS else Path("/sessions/keen-magical-wright/mnt/深度分析报告/深度")
+try:
+    if _VM_DEEP_DIR.exists():
+        OUTPUT_DIR = _VM_DEEP_DIR
+    else:
+        OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
+except PermissionError:
     OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
 
+# v0.10.1 兜底：如 OUTPUT_DIR 是 VM 深度目录但里面没有 report_snapshots（常见情况——
+# VM 里 /sessions/*/mnt/深度分析报告/ 经常是空目录），则回退到 ALPHAHIVE_DIR/report_snapshots，
+# 因为 generate_deep_v2.py 实际把 snapshots 写在 Alpha Hive 目录下。
+_candidate_snapshots = OUTPUT_DIR / "report_snapshots"
+try:
+    if not _candidate_snapshots.exists():
+        _fallback_snapshots = ALPHAHIVE_DIR / "report_snapshots"
+        if _fallback_snapshots.exists():
+            _candidate_snapshots = _fallback_snapshots
+except PermissionError:
+    pass
+
 CONFIG_PATH    = ALPHAHIVE_DIR / "config.py"
-SNAPSHOTS_DIR  = OUTPUT_DIR / "report_snapshots"
+SNAPSHOTS_DIR  = _candidate_snapshots
 HISTORY_FILE   = ALPHAHIVE_DIR / "weight_history.jsonl"
 
 # ── 优化阈值 ──────────────────────────────────────────────────────────────────
 MIN_SAMPLES    = 10    # 少于此样本数不调整权重
-MIN_CHANGE_PP  = 3.0   # 权重变化绝对值 >= 3pp 才写入（防止噪声抖动）
+# v0.10.1 临时 gate (2026-04-19)：把写入门槛从 3.0pp 提高到 11.0pp。
+# 背景：本周 dry-run 显示 signal +9pp、catalyst -10.5pp、sentiment -10pp、
+# risk_adj +9.5pp，3 个维度撞上 MAX_SHIFT_PP=10 单次限幅，且 Bootstrap
+# 稳健性警告触发（104 条 T+7 样本上权重未稳定收敛）。
+# 作用：本周日定时任务跑出 dry-run 报告但不写 config，等 2026-04-26 再攒
+# 一周 T+7 样本后复跑——若方向收敛到同一侧（signal+/catalyst-/sentiment-/
+# risk_adj+），恢复 MIN_CHANGE_PP=3.0 放行；若反向则说明过拟合。
+# ⚠️ 恢复日期：2026-04-26 之后人工审查 dry-run 再决定是否 revert 为 3.0
+MIN_CHANGE_PP  = 11.0  # 临时 gate — 见上方 v0.10.1 注释
 MAX_SHIFT_PP   = 10.0  # 单次调整上限（每个维度最多 ±10pp）
 
 # 5 维默认权重（与 config.py 保持一致，用于兜底）
