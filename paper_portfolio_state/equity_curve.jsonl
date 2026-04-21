@@ -27,3 +27,4 @@
 {"date": "2026-04-15", "cash": 44977.05, "deployed": 5247.95, "unrealized": 339.95, "nav": 50564.95, "positions_count": 5, "trades_closed_today": 1, "realized_pnl_today": 123.75}
 {"date": "2026-04-16", "cash": 44977.05, "deployed": 5247.95, "unrealized": 396.06, "nav": 50621.06, "positions_count": 5, "trades_closed_today": 0, "realized_pnl_today": 0.0}
 {"date": "2026-04-17", "cash": 47723.15, "deployed": 2749.23, "unrealized": 179.88, "nav": 50652.26, "positions_count": 3, "trades_closed_today": 2, "realized_pnl_today": 0.0}
+{"date": "2026-04-20", "cash": 46966.06, "deployed": 3506.32, "unrealized": 163.71, "nav": 50636.08, "positions_count": 4, "trades_closed_today": 0, "realized_pnl_today": 0.0}

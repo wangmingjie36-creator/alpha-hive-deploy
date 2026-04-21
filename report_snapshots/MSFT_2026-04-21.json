@@ -1,0 +1,33 @@
+{
+  "ticker": "MSFT",
+  "date": "2026-04-21",
+  "composite_score": 7.11,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 424.1600036621094,
+  "agent_votes": {
+    "ChronosBeeHorizon": 10.0,
+    "OracleBeeEcho": 8.707692307692309,
+    "GuardBeeSentinel": 8.49,
+    "QueenDistiller": 7.11,
+    "CodeExecutorAgent": 5.0,
+    "BuzzBeeWhisper": 5.98,
+    "RivalBeeVanguard": 5.85,
+    "ScoutBeeNova": 5.430981500000001,
+    "BearBeeContrarian": 5.0
+  },
+  "weights_used": {
+    "signal": 0.1132,
+    "catalyst": 0.3316,
+    "sentiment": 0.2764,
+    "odds": 0.1657,
+    "risk_adj": 0.1132
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-04-21T14:04:09.350310"
+}
