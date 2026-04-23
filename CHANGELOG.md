@@ -5,6 +5,43 @@
 
 ---
 
+## [0.23.5] — 2026-04-22 — cboe_fetcher 合成 P/C Ratio（替代 Yahoo 下架的 ^PCCE）
+
+### Fixed
+
+- **`cboe_fetcher.py:fetch_equity_putcall_ratio()` 因 Yahoo 下架 ^PCCE 报 404**
+  - 症状：2026-04-22 运行 `generate_deep_v2.py --ticker NVDA` 时 stderr 刷 `HTTP Error 404: Quote not found for symbol: ^PCCE` + `possibly delisted; no price data found`
+  - 根因：Yahoo 在 2026-04 前后清理 CBOE 官方 P/C Ratio 系列符号，`^PCCE` / `^CPCE` / `^CPC` / `^PCR` / `^PCE` 全部返回 `No data found, symbol may be delisted`（已在 `/v8/finance/chart` 端点验证全部 DEAD，仅 `^VIX` 存活）
+  - CBOE 官方 CDN（`cdn.cboe.com/.../CPCE_History.csv`）也已锁定，带 UA 仍返回 403 AccessDenied
+  - 修复：放弃依赖任何外部 P/C Ratio 符号，改为从 Yahoo 期权链 volume 合成
+
+### Changed
+
+- **`cboe_fetcher.py` 重写 `fetch_equity_putcall_ratio()` 为合成实现**
+  - 新增常量 `_SYNTHETIC_PC_TICKERS = ("SPY", "QQQ", "IWM")` + `_SYNTHETIC_PC_EXPIRIES = 3`
+  - 逻辑：对每个 ETF 取最近 3 个到期日的期权链，汇总 `calls.volume` / `puts.volume`，P/C = put_vol / call_vol
+  - 输出新增字段 `source`（"synthetic_yf_options" / "default_fallback"）和 `tickers_used`
+  - 未来 Yahoo 若再下架个别 ETF 期权数据，只需修改常量列表
+
+- **`cboe_fetcher.py:_calculate_macro_score()` PCCE 阈值上调**
+  - 原阈值（针对 CBOE 官方 PCCE，历史中位数 ~0.75）：>1.2 / >0.9 / >0.7 / >0.5
+  - 新阈值（针对 ETF 合成 P/C，历史中位数 ~0.95，系统性偏高 0.2-0.3）：>1.3 / >1.0 / >0.8 / >0.6
+  - 默认值从 0.75 改为 0.95（ETF 合成基线）
+
+### Removed
+
+- `yf.download('^PCCE')` 直接调用 — 符号已被 Yahoo 下架
+
+### 用户侧清理步骤（需在 Mac 上手动执行一次）
+
+```bash
+rm -f ~/Desktop/Alpha\ Hive/cache/cboe_daily/pcce.json
+```
+
+清理后下次运行会重新合成并缓存。Cowork VM sandbox 无写权限，未在代码中自动清理。
+
+---
+
 ## [0.23.4] — 2026-04-19 — weekly_optimizer / self_analyst VM 路径 bug + confirmation 周 gate
 
 ### Fixed

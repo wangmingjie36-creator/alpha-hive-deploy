@@ -1,18 +1,18 @@
 {
   "ticker": "CRCL",
-  "date": "2026-04-09",
-  "composite_score": 5.31,
+  "date": "2026-04-23",
+  "composite_score": 5.58,
   "direction": "bullish",
   "price_target": 0.0,
   "stop_loss": 0.0,
-  "entry_price": 85.0999984741211,
+  "entry_price": 100.01000213623047,
   "agent_votes": {
-    "OracleBeeEcho": 7.015384615384616,
+    "OracleBeeEcho": 6.722076923076923,
+    "ChronosBeeHorizon": 6.58,
     "RivalBeeVanguard": 6.06,
+    "GuardBeeSentinel": 6.03,
     "CodeExecutorAgent": 5.0,
-    "GuardBeeSentinel": 5.88,
-    "ChronosBeeHorizon": 5.5,
-    "QueenDistiller": 5.31
+    "QueenDistiller": 5.58
   },
   "weights_used": {
     "signal": 0.1132,
@@ -22,9 +22,9 @@
     "risk_adj": 0.1132
   },
   "actual_prices": {
-    "t1": 88.04000091552734,
-    "t7": 106.36000061035156,
+    "t1": null,
+    "t7": null,
     "t30": null
   },
-  "created_at": "2026-04-22T14:05:09.705291"
+  "created_at": "2026-04-23T14:17:59.591031"
 }

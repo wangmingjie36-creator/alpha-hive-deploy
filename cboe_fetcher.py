@@ -2,13 +2,17 @@
 CBOE 日度统计数据抓取器 — Alpha Hive 宏观分析层增强
 
 功能：
-1. 获取股票 Put/Call 比率（PCCE 情绪指标）
+1. 获取股票 Put/Call 比率（合成值，替代 2026-04 下架的 ^PCCE）
 2. 获取 VIX 期限结构（远期溢价 vs 现货）
 3. 获取 SKEW 指数（尾部风险偏度）
 4. 获取 VVIX（波动率之波动率）
 5. 提供宏观评分组合
 
 数据源：yfinance（优先），FRED API 备选，本地缓存 30 分钟（盘中）或 4 小时（盘后）
+
+2026-04-22 变更：因 Yahoo Finance 下架 ^PCCE / ^CPCE / ^CPC 等 CBOE 官方 P/C 比率符号，
+fetch_equity_putcall_ratio() 改为从 SPY/QQQ/IWM 期权链 volume 合成。未来 Yahoo 若再
+下架 ETF 期权数据，只需修改 _SYNTHETIC_PC_TICKERS 常量即可。
 """
 
 import os
@@ -132,18 +136,31 @@ class CBOEDailyFetcher:
         except Exception as e:
             self.logger.warning(f"写入缓存失败 {key}: {e}")
 
+    # 合成 P/C Ratio 数据源：最近 N 个到期日
+    _SYNTHETIC_PC_TICKERS = ("SPY", "QQQ", "IWM")
+    _SYNTHETIC_PC_EXPIRIES = 3
+
     def fetch_equity_putcall_ratio(self) -> Dict[str, Any]:
         """
-        获取股票 Put/Call 比率（CBOE PCCE）
+        获取合成股票 Put/Call 比率（替代已下架的 CBOE ^PCCE）
+
+        策略：因 Yahoo 2026-04 下架 ^PCCE / ^CPCE / ^CPC 等 CBOE 官方 P/C 比率符号，
+        改为聚合 SPY / QQQ / IWM 期权链的成交量合成 P/C Ratio，100% 基于 Yahoo 数据，
+        未来 Yahoo 若再下架个别 ETF 的期权数据，只需修改 _SYNTHETIC_PC_TICKERS 常量。
+
+        注意：ETF 合成 P/C Ratio 的水位通常比 CBOE 官方 PCCE 高 0.2-0.3（因 SPY 等
+        ETF 承担大量机构对冲盘），阈值已相应上调。
 
         Returns:
             {
-                'total_pc_ratio': float,      # 整体 P/C 比率
-                'call_volume': int,           # Call 成交量
-                'put_volume': int,            # Put 成交量
+                'total_pc_ratio': float,      # 合成 P/C 比率（put_vol / call_vol）
+                'call_volume': int,           # 汇总 call 成交量
+                'put_volume': int,            # 汇总 put 成交量
                 'date': str,                  # ISO 日期
                 'signal': str,                # 情绪信号
-                'error': str (optional)       # 错误信息
+                'source': str,                # 数据源标识
+                'tickers_used': list[str],    # 实际纳入合成的标的
+                'error': str (optional)
             }
         """
         # 尝试读缓存
@@ -157,64 +174,101 @@ class CBOEDailyFetcher:
             'call_volume': 0,
             'put_volume': 0,
             'date': datetime.now().isoformat()[:10],
-            'signal': 'unknown'
+            'signal': 'unknown',
+            'source': 'synthetic_yf_options',
+            'tickers_used': [],
         }
 
         try:
             if yf is None:
                 raise ImportError("yfinance 未安装")
 
-            # 尝试从 yfinance 获取 PCCE 数据
-            # 注：yfinance 可能不直接提供 PCCE，尝试替代方案
+            total_call_vol = 0.0
+            total_put_vol = 0.0
+            tickers_used = []
+
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
 
-                # 方案 1: 尝试直接获取 PCCE 指数
-                try:
-                    pcce_data = yf.download('^PCCE', period='1d', progress=False)
-                    if not pcce_data.empty:
-                        pc_ratio = float(pcce_data['Close'].iloc[-1])
-                        result['total_pc_ratio'] = pc_ratio
-                        result['call_volume'] = int(1000000)  # 占位符
-                        result['put_volume'] = int(pc_ratio * 1000000)  # 估算
+                for symbol in self._SYNTHETIC_PC_TICKERS:
+                    try:
+                        tk = yf.Ticker(symbol)
+                        expirations = list(tk.options or [])
+                        if not expirations:
+                            self.logger.debug(f"{symbol} 无期权到期日，跳过")
+                            continue
 
-                        # 根据比率确定信号
-                        if pc_ratio > 1.2:
-                            result['signal'] = 'extreme_fear'
-                        elif pc_ratio > 0.9:
-                            result['signal'] = 'fear'
-                        elif pc_ratio > 0.7:
-                            result['signal'] = 'neutral'
-                        elif pc_ratio > 0.5:
-                            result['signal'] = 'greed'
-                        else:
-                            result['signal'] = 'extreme_greed'
+                        sym_call_vol = 0.0
+                        sym_put_vol = 0.0
+                        for expiry in expirations[: self._SYNTHETIC_PC_EXPIRIES]:
+                            try:
+                                chain = tk.option_chain(expiry)
+                                # volume 列可能存在 NaN
+                                sym_call_vol += float(chain.calls["volume"].fillna(0).sum())
+                                sym_put_vol += float(chain.puts["volume"].fillna(0).sum())
+                            except Exception as e:
+                                self.logger.debug(f"{symbol}@{expiry} 期权链失败: {e}")
+                                continue
 
-                        self.logger.info(f"PCCE 数据获取成功: ratio={pc_ratio:.3f}, signal={result['signal']}")
-                    else:
-                        # 方案 2: 使用默认值和警告
-                        result['signal'] = 'neutral'
-                        result['total_pc_ratio'] = 0.75  # 历史中位数
-                        result['call_volume'] = 1000000
-                        result['put_volume'] = 750000
-                        self.logger.warning("PCCE 数据下载为空，使用默认值")
-                except NETWORK_ERRORS as ne:
-                    self.logger.warning(f"网络错误获取 PCCE: {ne}")
+                        if sym_call_vol > 0 or sym_put_vol > 0:
+                            total_call_vol += sym_call_vol
+                            total_put_vol += sym_put_vol
+                            tickers_used.append(symbol)
+                            self.logger.debug(
+                                f"{symbol}: calls={sym_call_vol:.0f}, puts={sym_put_vol:.0f}, "
+                                f"pc={sym_put_vol / max(sym_call_vol, 1):.3f}"
+                            )
+                    except NETWORK_ERRORS as ne:
+                        self.logger.debug(f"{symbol} 网络错误: {ne}")
+                        continue
+                    except Exception as e:
+                        self.logger.debug(f"{symbol} 合成失败: {e}")
+                        continue
+
+            if tickers_used and total_call_vol > 0:
+                pc_ratio = total_put_vol / total_call_vol
+                result['total_pc_ratio'] = round(pc_ratio, 3)
+                result['call_volume'] = int(total_call_vol)
+                result['put_volume'] = int(total_put_vol)
+                result['tickers_used'] = tickers_used
+
+                # 阈值上调（ETF 合成比 CBOE PCCE 系统性偏高 0.2-0.3）
+                if pc_ratio > 1.3:
+                    result['signal'] = 'extreme_fear'
+                elif pc_ratio > 1.0:
+                    result['signal'] = 'fear'
+                elif pc_ratio > 0.8:
                     result['signal'] = 'neutral'
-                    result['total_pc_ratio'] = 0.75
-                    result['call_volume'] = 1000000
-                    result['put_volume'] = 750000
-                except Exception as e:
-                    self.logger.warning(f"获取 PCCE 失败: {e}")
-                    result['signal'] = 'neutral'
-                    result['total_pc_ratio'] = 0.75
-                    result['call_volume'] = 1000000
-                    result['put_volume'] = 750000
+                elif pc_ratio > 0.6:
+                    result['signal'] = 'greed'
+                else:
+                    result['signal'] = 'extreme_greed'
 
+                self.logger.info(
+                    f"合成 P/C Ratio: {pc_ratio:.3f} "
+                    f"(calls={int(total_call_vol):,}, puts={int(total_put_vol):,}, "
+                    f"来源={tickers_used}, 信号={result['signal']})"
+                )
+            else:
+                # 所有 ETF 都失败，降级中性默认值
+                self.logger.warning("合成 P/C Ratio 所有 ETF 获取失败，使用历史中位数")
+                result['total_pc_ratio'] = 0.95  # ETF 合成历史中位数（比 PCCE 的 0.75 高）
+                result['call_volume'] = 0
+                result['put_volume'] = 0
+                result['signal'] = 'neutral'
+                result['source'] = 'default_fallback'
+
+        except NETWORK_ERRORS as ne:
+            self.logger.warning(f"合成 P/C Ratio 网络错误: {ne}")
+            result['total_pc_ratio'] = 0.95
+            result['signal'] = 'neutral'
+            result['source'] = 'default_fallback'
         except Exception as e:
-            self.logger.error(f"PCCE 抓取异常: {e}")
+            self.logger.error(f"合成 P/C Ratio 异常: {e}")
             result['error'] = str(e)
             result['signal'] = 'neutral'
+            result['total_pc_ratio'] = 0.95
+            result['source'] = 'default_fallback'
 
         # 写入缓存
         self._write_cache('pcce', result)
@@ -496,18 +550,16 @@ class CBOEDailyFetcher:
         """
         scores = {}
 
-        # PCCE 评分（0-10）
-        pc_ratio = pcce.get('total_pc_ratio', 0.75)
-        if pc_ratio > 1.2:
+        # PCCE 评分（0-10）— 阈值已针对 ETF 合成 P/C Ratio 上调 0.2-0.3
+        pc_ratio = pcce.get('total_pc_ratio', 0.95)
+        if pc_ratio > 1.3:
             scores['pcce'] = 9.0
-        elif pc_ratio > 0.9:
+        elif pc_ratio > 1.0:
             scores['pcce'] = 7.0
-        elif pc_ratio > 0.7:
+        elif pc_ratio > 0.8:
             scores['pcce'] = 5.0
-        elif pc_ratio > 0.5:
-            scores['pcce'] = 3.0
         else:
-            scores['pcce'] = 1.0
+            scores['pcce'] = 3.0 if pc_ratio > 0.6 else 1.0
 
         # VIX 期限结构评分
         vix_spot = vix_term.get('vix_spot', 15.0)
