@@ -695,10 +695,9 @@ def _load_accuracy_data() -> dict:
         with _sq_eq.connect(_ps_eq.db_path) as _cn_eq:
             _cn_eq.row_factory = _sq_eq.Row
             # v0.23.4 修复：必须过滤 net_return_t7 IS NOT NULL，否则未回填的样本会被
-            # gross-0.1 兜底污染统计（当前 DB 里 280 笔 checked_t7=1 中只有 210 笔有
-            # net_return_t7；旧代码把 70 笔未扣成本数据也算进去，导致样本数虚高 50+）
+            # gross-0.1 兜底污染统计（v0.23.5：加 id 字段供 portfolio_backtest 匹配）
             _eq_rows = _cn_eq.execute("""
-                SELECT date, ticker, direction, final_score,
+                SELECT id, date, ticker, direction, final_score,
                        return_t7, correct_t7,
                        net_return_t7, exit_reason, exit_date, holding_days,
                        spy_return_t7
@@ -721,13 +720,25 @@ def _load_accuracy_data() -> dict:
             _gross_rets, _net_rets, _spy_rets = [], [], []
             _wins_net, _losses_net = [], []
 
-            # v0.23.4 修复：固定每笔 $initial_capital × pos_pct 投入（不复利）
-            # 旧实现 _pnl = _cap × pos_pct × ret 把 NAV 复利展开 → 每笔吃当前 NAV×10%，
-            # 210 笔后 NAV 累乘到 1.7×（70% 收益 / Alpha vs SPY +56.84%）— **完全幻觉**。
-            # 真实场景下每笔最大 $5,000 投入（受现金 / 并发限制），不可能滚动复利。
-            # 正确的"虚拟权益曲线"应该等价于 portfolio_backtest 的固定每笔 fixed_size_usd
-            _fixed_size_usd = _initial_capital * _pos_pct  # 例 $50K × 10% = $5,000
+            # v0.23.5 修复：用 portfolio_backtest 实际入场的 trade_ids 子集累加曲线
+            # 旧 v0.23.4 修复仍累加全部 260 笔（"独立每笔 $5K 无并发约束"上限模型），
+            # 导致曲线显示 +54.27% 视觉幻觉。
+            # 新方案：调用 run_backtest() 拿到含 max_concurrent=15 约束的真实入场清单，
+            # 只累加这 ~48 笔，曲线对应真实可达 NAV（$52.5K / +5%）
+            _accepted_pred_ids: set = set()
+            try:
+                import portfolio_backtest as _pb_eq
+                _bt_for_eq = _pb_eq.run_backtest(_pb_eq.BacktestConfig())
+                if "error" not in _bt_for_eq:
+                    _accepted_pred_ids = {t["id"] for t in _bt_for_eq.get("all_trades", [])
+                                          if t.get("exit_reason") != "WINDOW_CUTOFF"}
+            except Exception as _bt_eq_err:
+                _log.debug("portfolio_backtest equity 曲线源加载失败，退回独立累加: %s", _bt_eq_err)
+
+            _fixed_size_usd = _initial_capital * _pos_pct  # $50K × 10% = $5,000
             for _eqr in _eq_rows:
+                # v0.23.5: 只对真实入场的 pred_id 累加曲线（其它笔贡献 0，模拟"未入场"）
+                _is_accepted = (not _accepted_pred_ids) or (_eqr["id"] in _accepted_pred_ids if "id" in _eqr.keys() else True)
                 _r7_raw = _eqr["return_t7"]
                 _dir_lc = str(_eqr["direction"]).lower()
                 # Gross (direction-adjusted) = strategy P&L before costs
@@ -745,13 +756,15 @@ def _load_accuracy_data() -> dict:
                 elif _net < 0:
                     _losses_net.append(_net)
 
-                # 固定仓位：每笔以 _fixed_size_usd 投入（避免复利幻觉）
-                _pnl_gross = _fixed_size_usd * (_gross_dir_adj / 100.0)
-                _pnl_net = _fixed_size_usd * (_net / 100.0)
-                _pnl_spy = _fixed_size_usd * (_spy / 100.0)
-                _cap_gross += _pnl_gross
-                _cap_net += _pnl_net
-                _cap_spy += _pnl_spy
+                # v0.23.5: 仅对 portfolio_backtest 真实入场（含并发约束）的笔累加
+                # 未入场的笔贡献 0（模拟"被并发限制 / 现金不足跳过"）
+                if _is_accepted:
+                    _pnl_gross = _fixed_size_usd * (_gross_dir_adj / 100.0)
+                    _pnl_net = _fixed_size_usd * (_net / 100.0)
+                    _pnl_spy = _fixed_size_usd * (_spy / 100.0)
+                    _cap_gross += _pnl_gross
+                    _cap_net += _pnl_net
+                    _cap_spy += _pnl_spy
 
                 if _cap_gross > _peak_gross:
                     _peak_gross = _cap_gross

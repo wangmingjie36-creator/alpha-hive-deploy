@@ -616,15 +616,9 @@ window.AH.initTradingStats=function(){
     html+=card(ts.exit_close_count||0,'⏱️ 持有到 T+7','var(--t)','未触发 SL/TP');
     html+=card(((ts.avg_cost||0)*100).toFixed(1)+'bp','平均单笔成本','var(--ts)','滑点+佣金+借券');
 
-    // 理论上限对比（独立每笔 $5K，无并发约束 — 仅供参考）
-    if(ts.final_cap_net!=null){
-      var theoNet=(Number(ts.final_cap_net)/initCap-1)*100;
-      html+='<div style="grid-column:1/-1;font-size:.72em;color:var(--ts);margin:6px 0 2px;border-top:1px dashed var(--border);padding-top:6px">'+
-        '⚠️ <b>理论上限参考</b>（每笔独立 $'+Math.round(initCap*0.10).toLocaleString()+
-        '，假设无并发约束、不复利）：Net '+(theoNet>=0?'+':'')+theoNet.toFixed(2)+'%，'+
-        '仅适用于单笔信号质量评估，<b>不代表实战可达</b>'+
-        '</div>';
-    }
+    // v0.23.5: 删除"理论上限"参考（避免视觉幻觉）
+    // 之前的"独立每笔 $5K，无并发约束"模型在主曲线图上仍显示 +54%，对用户误导
+    // 现在 _equity_curve 也用 portfolio_backtest 真实入场的 48 笔累加，曲线 = 卡片
   } else {
     // === 退回到独立每笔模型（理论上限）===
     var netRetT=(Number(ts.final_cap_net)||initCap)/initCap-1;
