@@ -1040,10 +1040,18 @@ AGENT_SCORING = {
     "ticker_validity_ttl": 3600,         # ticker 有效性检查缓存（秒）
     "penny_stock_threshold": 0.10,       # 极低价告警阈值（美元）
 
-    # ── ScoutBeeNova 权重 ──
-    "scout_insider_weight": 0.6,         # 内幕交易评分权重
-    "scout_crowding_weight": 0.4,        # 拥挤度评分权重
-    "scout_rss_boost": 0.5,              # RSS 新鲜 Form4 每份加分
+    # ── ScoutBeeNova 权重（v0.23.8 重平衡）──
+    # 月度审计发现：signal 维度方向准确率 45%（劣于随机 50%），
+    # ScoutBee 是反指标。根因：insider Form 4 在 T+7 时间窗口失效
+    # （内幕者交易后 30-60d 才显现影响）。重新分配权重以让 T+7 有效
+    # 的板块 RS + 供应链信号占主导：
+    "scout_insider_weight":     0.20,    # ⬇️ 60%→20%（T+7 时窗失效，但作为长期参考保留）
+    "scout_crowding_weight":    0.30,    # ⬇️ 40%→30%（已正确反转极性，保持）
+    "scout_rs_weight":          0.25,    # 🆕 板块相对强度（20D vs sector ETF）
+    "scout_supply_chain_weight": 0.15,   # 🆕 供应链信号（TSM/AMAT/ASML）
+    "scout_congress_weight":    0.10,    # 🆕 国会议员交易
+    "scout_v2_enabled":         True,    # 主开关：True=新权重，False=回退旧公式
+    "scout_rss_boost":          0.5,     # RSS 新鲜 Form4 每份加分
     "scout_min_insider_records": 2,      # insider 记录最少样本量
 
     # ── OracleBeeEcho 权重 ──

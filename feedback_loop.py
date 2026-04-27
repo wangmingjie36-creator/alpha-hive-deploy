@@ -681,6 +681,131 @@ class BacktestAnalyzer:
         return filename
 
 
+# ─────────────────────────────────────────────
+# P2-⑧ 误判 → thesis_breaks 自动回写（v0.20.0）
+# 把事后归因转化为事前预警：每条误判映射到 thesis_breaks_config 的
+# auto_misjudgment_patterns 节点，下次出现同模式时主动告警。
+# ─────────────────────────────────────────────
+
+import os as _os
+import json as _json
+from datetime import datetime as _dt
+
+
+def register_misjudgment_pattern(
+    ticker: str,
+    miss_date: str,
+    direction: str,
+    price_chg_pct: float,
+    primary_reason: str,
+    signals: dict,
+    thesis_config_path: str = None,
+) -> dict:
+    """
+    把一条误判模式注册到 thesis_breaks_config.json:auto_misjudgment_patterns。
+
+    pattern_key 由 (direction + primary_reason 关键词) 哈希得到，相同条件命中时计数+1。
+    达到 hits_threshold (默认 3) 后自动激活为 active warning。
+    """
+    if thesis_config_path is None:
+        thesis_config_path = _os.path.join(
+            _os.path.dirname(_os.path.abspath(__file__)),
+            'thesis_breaks_config.json'
+        )
+
+    # 提取触发信号的关键 key（仅 True 项）
+    sig_keys = sorted([k for k, v in (signals or {}).items() if v])
+    pattern_key = f"{direction}|{primary_reason[:20]}|{','.join(sig_keys[:3])}"
+
+    try:
+        with open(thesis_config_path, 'r', encoding='utf-8') as f:
+            cfg = _json.load(f)
+    except Exception as e:
+        _log.warning(f"thesis_config 读取失败: {e}")
+        return {'registered': False, 'error': str(e)}
+
+    if 'auto_misjudgment_patterns' not in cfg:
+        cfg['auto_misjudgment_patterns'] = {}
+
+    bucket = cfg['auto_misjudgment_patterns'].setdefault(ticker, {})
+    rec = bucket.setdefault(pattern_key, {
+        'pattern_key': pattern_key,
+        'direction': direction,
+        'reason': primary_reason,
+        'signal_keys': sig_keys[:3],
+        'hits': 0,
+        'last_hit_date': miss_date,
+        'first_hit_date': miss_date,
+        'recent_drawdowns': [],
+        'active_warning': False,
+        'hits_threshold': 3,
+    })
+    rec['hits'] = rec.get('hits', 0) + 1
+    rec['last_hit_date'] = miss_date
+    drawdowns = rec.get('recent_drawdowns', [])
+    drawdowns.append({'date': miss_date, 'price_chg_pct': price_chg_pct})
+    rec['recent_drawdowns'] = drawdowns[-10:]  # 保留最近 10 次
+    rec['avg_drawdown'] = round(
+        sum(d['price_chg_pct'] for d in rec['recent_drawdowns']) / len(rec['recent_drawdowns']), 2
+    )
+    if rec['hits'] >= rec.get('hits_threshold', 3):
+        rec['active_warning'] = True
+
+    cfg['_meta'] = cfg.get('_meta', {})
+    cfg['_meta']['auto_patterns_updated_at'] = _dt.now().isoformat()
+
+    try:
+        with open(thesis_config_path, 'w', encoding='utf-8') as f:
+            _json.dump(cfg, f, ensure_ascii=False, indent=2)
+        _log.info(f"误判模式已注册 {ticker}/{pattern_key} hits={rec['hits']} active={rec['active_warning']}")
+        return {'registered': True, 'pattern': rec}
+    except Exception as e:
+        _log.warning(f"thesis_config 写入失败: {e}")
+        return {'registered': False, 'error': str(e)}
+
+
+def check_misjudgment_warnings(ticker: str, direction: str, signals: dict,
+                               thesis_config_path: str = None) -> list:
+    """
+    在生成报告时调用：基于当前方向和信号，从 thesis_breaks_config 中查找
+    已激活的误判模式并返回警告列表。
+    """
+    if thesis_config_path is None:
+        thesis_config_path = _os.path.join(
+            _os.path.dirname(_os.path.abspath(__file__)),
+            'thesis_breaks_config.json'
+        )
+    warnings = []
+    try:
+        with open(thesis_config_path, 'r', encoding='utf-8') as f:
+            cfg = _json.load(f)
+    except Exception:
+        return warnings
+
+    bucket = (cfg.get('auto_misjudgment_patterns') or {}).get(ticker, {})
+    sig_keys = set(k for k, v in (signals or {}).items() if v)
+    for pattern_key, rec in bucket.items():
+        if not rec.get('active_warning'):
+            continue
+        if rec.get('direction') != direction:
+            continue
+        # 信号交集 ≥ 50% 视为同模式
+        rec_sigs = set(rec.get('signal_keys', []))
+        if not rec_sigs:
+            continue
+        overlap = len(rec_sigs & sig_keys)
+        if overlap / max(len(rec_sigs), 1) >= 0.5:
+            warnings.append({
+                'pattern_key': pattern_key,
+                'reason': rec.get('reason', ''),
+                'hits': rec.get('hits', 0),
+                'avg_drawdown': rec.get('avg_drawdown', 0),
+                'last_hit_date': rec.get('last_hit_date', ''),
+                'severity': 'HIGH' if rec['hits'] >= 5 else 'MEDIUM',
+            })
+    return warnings
+
+
 # 使用示例
 if __name__ == "__main__":
     # 创建快照

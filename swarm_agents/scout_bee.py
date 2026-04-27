@@ -79,13 +79,24 @@ class ScoutBeeNova(BeeAgent):
             crowding_score, component_scores = detector.calculate_crowding_score(metrics)
             crowding_signal = max(1.0, 10.0 - crowding_score / 10.0)
 
-            # ---- 3. 综合评分：内幕交易 + 拥挤度 ----
-            _iw = _AS.get("scout_insider_weight", 0.6)
-            _cw = _AS.get("scout_crowding_weight", 0.4)
-            score = insider_score * _iw + crowding_signal * _cw
+            # ---- 3. 综合评分（v0.23.8 重平衡） ----
+            # 旧实现 60% insider + 40% crowding，月度审计显示 signal 方向准确率仅 45%
+            # （劣于随机）。新实现降低 insider 权重（T+7 时窗失效）+ 提升板块 RS / 供应链
+            # 权重，并把散布的 ×1.0X 微调统一到主公式。RS / supply / congress 数据
+            # 会在下方 2b/2c/2d 节点准备好后**第二阶段**重新计算最终 score。
+            #
+            # 第一阶段（这里）：先用 insider + crowding 做粗略 score，让下游 RS / supply
+            # / congress 节点能基于此 score 做局部决策（如 LLM intent 节点要 score 作种子）
+            _iw = _AS.get("scout_insider_weight", 0.20)   # 旧 0.6
+            _cw = _AS.get("scout_crowding_weight", 0.30)  # 旧 0.4
+            # 临时归一化：第一阶段权重总和 = 0.5（剩 0.5 由 2b/2c/2d 阶段填）
+            # 用 2x 放大让此处 score 在 [0, 10] 内，同时方向判断不变形
+            _stage1_total = _iw + _cw  # 0.50
+            score = (insider_score * _iw + crowding_signal * _cw) / _stage1_total
             score = clamp_score_cfg(score)
 
-            # 方向判断
+            # 方向判断（保持基于 insider_sentiment + crowding_score 阈值的硬规则）
+            # 末尾 2e 节点会基于完整 score 做 final direction 复核
             _ch = _AS.get("crowding_high", 70)
             _cl = _AS.get("crowding_low", 30)
             _cn = _AS.get("crowding_sell_neutral", 50)
@@ -150,6 +161,7 @@ class ScoutBeeNova(BeeAgent):
 
             # ---- 2b. 国会议员交易（Quiver Quant 免费端点）----
             congress_data = {}
+            congress_score_norm = 5.0  # 默认中性
             try:
                 import sys as _sys_ct
                 import os as _os_ct
@@ -163,16 +175,14 @@ class ScoutBeeNova(BeeAgent):
                     net = congress_data.get("net_amount_est", 0)
                     net_label = f"净买入 ${net:,.0f}" if net > 0 else f"净卖出 ${abs(net):,.0f}"
                     parts.append(f"国会交易: {congress_data['buy_count']}买/{congress_data['sell_count']}卖 {net_label} (信号:{c_score}/10)")
-                    # 强国会买入信号可微调综合分（权重 5%）
-                    if c_score >= 7.0:
-                        score = min(10.0, score * 1.05)
-                    elif c_score >= 5.0 and net > 100_000:
-                        score = min(10.0, score * 1.02)
+                    # v0.23.8: c_score 已经是 0-10 标准化，直接进主公式
+                    congress_score_norm = float(c_score) if c_score is not None else 5.0
             except Exception as _e_ct:
                 _log.debug("Congress trades unavailable for %s: %s", ticker, _e_ct)
 
             # ---- 2c. 板块相对强弱（20日回报 vs 板块 ETF）----
             sector_rs = self._assess_sector_relative_strength(ticker)
+            rs_score_norm = 5.0
             if sector_rs.get("rs_signal") not in ("unknown", None):
                 rs_val  = sector_rs["relative_strength"]
                 rs_sig  = sector_rs["rs_signal"]
@@ -181,16 +191,17 @@ class ScoutBeeNova(BeeAgent):
                     f"板块相对强度 {rs_val:+.1f}pp({etf_lbl} 20D)"
                     f"{'【跑赢】' if rs_sig=='outperform' else '【跑输】' if rs_sig=='underperform' else ''}"
                 )
-                # discovery 在 line 123 已冻结，直接拼接（与 LLM意图 块保持一致）
                 discovery = f"{discovery} | {rs_text}"
-                # 跑赢板块 → 上调综合分（权重 3%）
+                # v0.23.8: rs_signal 转 0-10 分量（强弱程度按 rs_val 平滑）
+                # outperform → 6-9 / underperform → 1-4 / neutral → 5
                 if rs_sig == "outperform":
-                    score = min(10.0, score * 1.03)
+                    rs_score_norm = min(9.0, 5.0 + max(0.5, abs(rs_val) / 4.0))
                 elif rs_sig == "underperform":
-                    score = max(0.0, score * 0.97)
+                    rs_score_norm = max(1.0, 5.0 - max(0.5, abs(rs_val) / 4.0))
 
-            # ── 2d: 跨资产供应链信号（⑥）— TSM/AMAT/ASML/SOXX 相对强弱 ──────────────
+            # ── 2d: 跨资产供应链信号 — TSM/AMAT/ASML/SOXX 相对强弱 ──
             supply_chain_data: dict = {}
+            sc_score_norm = 5.0
             try:
                 from market_intelligence import get_supply_chain_signals
                 supply_chain_data = get_supply_chain_signals(ticker)
@@ -199,11 +210,42 @@ class ScoutBeeNova(BeeAgent):
                     discovery = f"{discovery} | {_sc_summary}"
                 _sc_signal = supply_chain_data.get("supply_chain_signal", "neutral")
                 if _sc_signal == "positive":
-                    score = min(10.0, score * 1.03)
+                    sc_score_norm = 7.0
                 elif _sc_signal == "negative":
-                    score = max(0.0, score * 0.97)
+                    sc_score_norm = 3.0
             except Exception as _e_sc:
                 _log.debug("Supply chain signals unavailable for %s: %s", ticker, _e_sc)
+
+            # ── 2e: v0.23.8 主公式 ── 重新计算 score（带新权重）
+            # 把所有 5 个分量按 config 中的权重加权求和，统一替代散布的 ×1.0X 微调
+            if _AS.get("scout_v2_enabled", True):
+                _w_i = _AS.get("scout_insider_weight", 0.20)
+                _w_c = _AS.get("scout_crowding_weight", 0.30)
+                _w_rs = _AS.get("scout_rs_weight", 0.25)
+                _w_sc = _AS.get("scout_supply_chain_weight", 0.15)
+                _w_ct = _AS.get("scout_congress_weight", 0.10)
+                _w_total = _w_i + _w_c + _w_rs + _w_sc + _w_ct
+                _v2_score = (
+                    insider_score * _w_i +
+                    crowding_signal * _w_c +
+                    rs_score_norm * _w_rs +
+                    sc_score_norm * _w_sc +
+                    congress_score_norm * _w_ct
+                ) / max(_w_total, 1e-6)
+                score = clamp_score_cfg(_v2_score)
+
+                # v0.23.8: direction 完全由综合 score 判断，避免 insider 单独主导
+                # 保留极拥挤的 bearish hard override（人多踩踏风险），
+                # 但移除"极冷 → bullish"override（低关注度不必然是机会，
+                # audit 显示 BILI 这类标的反而是反指标）
+                if crowding_score > _ch:
+                    direction = "bearish"  # 极拥挤强制看空（保留）
+                elif score >= 6.5:
+                    direction = "bullish"
+                elif score <= 4.5:
+                    direction = "bearish"
+                else:
+                    direction = "neutral"
 
             # S3: 结构化数据交换（BearBee 可直接读取，替代正则解析）
             _pub_details = {"crowding_score": crowding_score}
