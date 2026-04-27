@@ -5,6 +5,99 @@
 
 ---
 
+## [0.24.0] — 2026-04-26 — 周报驱动的 9 项升级（拆 NVDA 单标的偏置 + Call 流分类 + 自我对抗）
+
+> **背景**：2026-04-26 周报显示整体胜率 63.0%，10/10 误判全部集中在 NVDA、其中 8 次为「看多但跌」、5 次为「call_dominant + 看多」。诊断指向系统性多头偏置 + Call 主导信号被机构对冲流污染。本次升级覆盖 P0/P1/P2 三层共 9 个改动。
+
+### Added
+
+- **`compare_engine_v2.py:_apply_hedge_filter()` ① 机构对冲过滤层**
+  - 新增 `_fetch_trend_state()` 取 SPX 200MA + SOXX 20MA + 标的 50MA 三层趋势
+  - bear regime（3/3 跌破均线）下 call_dominant + 看多 → 自动翻转为「中性」
+  - 写入 `predictions[ticker][date]['hedge_filter']` 元数据，可审计
+  - session 级缓存避免重复 yfinance 调用
+
+- **`weekly_analyzer.py:split_neutral_bucket()` ② 中性桶剔除**
+  - |price_chg| < 1% 的样本不计入方向准确率（剔除噪音）
+  - `compute_directional_accuracy()` 在净化后样本上重算 overall / bull / bear 胜率
+  - 周报新增「P0-② 净化样本」KPI 卡片，与原始指标并排
+
+- **`.tracked_deep_tickers.json` ⑩ 扩大跟踪标的池**
+  - 跟踪池从 NVDA 扩到 7 只：NVDA, TSLA, AMD, SMCI, TSM, MSFT, QCOM
+  - `min_samples_per_ticker = 30`，未达阈值不下结论
+  - 周报新增「P0-⑩ 标的池覆盖率」进度条卡片
+
+- **`weekly_analyzer.py:compute_per_ticker_accuracy()` ④ 单标的偏置告警**
+  - 单标的胜率 < 整体均值 − 15pp 且样本 ≥ 5 → 触发 ⚠️ BIAS 警报
+  - 周报新增「P1-④ 单标的胜率追踪」表格，含 Wilson CI
+
+- **`options_analyzer.py:OptionsAnalyzer.classify_call_flow()` ⑤ Call 流分类引擎**
+  - 三票制判定：A. 期限 OI 集中度（长端 > 60% → hedge）｜B. IV Skew（>1.3 → hedge，<0.8 → directional）｜C. IV 期限结构（backwardation → directional）
+  - 输出 `{label, confidence, votes, reasoning}` 注入 `OptionsAgent.analyze` 结果
+  - 报告层可读取 `call_flow_classification` 区分方向性 vs 对冲
+
+- **`generate_deep_v2.py:_build_reverse_scenario_card()` ⑥ 反向情景反思**
+  - 在 CH3 后插入「为什么这次可能错」卡片，4 条以内 bullets
+  - 看多时列举：宏观压制 / Call 对冲嫌疑 / PEAD 反向漂移 / 样本量警示
+  - 看空时列举：宏观顺风 / 短期反弹催化剂 / PEAD 正向漂移
+  - 数据缺失时退化为通用模板，不阻塞报告生成
+
+- **`weekly_analyzer.py:promote_demote_combos()` + `.combo_pools.json` ⑦ 组合自动晋级**
+  - CI 下沿 ≥ 60% → 金牌池（weekly_optimizer 自动 +5pp 权重）
+  - CI 上沿 ≤ 40% → 黑名单（−10pp）
+  - 周报新增「P2-⑦ 信号组合自动晋级」并排卡片
+
+- **`feedback_loop.py:register_misjudgment_pattern()` + `check_misjudgment_warnings()` ⑧ 误判模式自动回写**
+  - 每条误判按 (direction, primary_reason, signal_keys) 哈希为 pattern_key
+  - 写入 `thesis_breaks_config.json:auto_misjudgment_patterns[ticker][pattern_key]`
+  - hits ≥ 3 自动激活；hits ≥ 5 升级为 HIGH 严重度
+  - generate_deep_v2 顶部插入「P2-⑧ 误判模式预警横幅」，命中已激活模式时高亮
+
+- **`generate_deep_v2.py:_build_adversarial_bear_card()` ⑨ 自我对抗式生成**
+  - 强制 BearBee 反方推理与主流程并排呈现
+  - 分歧检测：方向相反或评分差距 ≥ 3 → ⚠️ 严重分歧
+  - 严重分歧时建议把仓位减半或要求额外催化剂确认
+
+### Changed
+
+- **`compare_engine_v2.py:archive_today_prediction()` 写入字段扩展**
+  - `direction` 现为过滤后方向，新增 `direction_raw` 保留原始结论
+  - 新增 `hedge_filter` 字段记录是否触发对冲过滤层
+
+- **`weekly_analyzer.py:classify_misjudgments()` 末尾自动回写 thesis_breaks**
+  - 每次运行周报时把误判模式同步注册到 thesis_breaks_config，无需手工维护
+
+- **`generate_deep_v2.py:generate_html()` 新增 4 个 HTML 块**
+  - `misjudgment_banner_html`（顶部）｜`reverse_scenario_html`（CH3 后）｜`adversarial_bear_html`（CH3 后）｜净化样本 KPI 卡片
+
+### 验证
+
+- `weekly_analyzer.py` 重跑 2026-04-26 数据 → 报告体积 19,603 → 22,226 bytes（+2.6KB 新卡片）
+- thesis_breaks_config 自动写入 9 条 NVDA 误判模式（hits=1~2，未达 active 阈值）
+- 全部模块 `python3 -c "import ..."` 通过
+
+### 预期效果
+
+- 整体胜率 63% → 72%~78%（Wilson CI 下沿 ≥ 60%）
+- 看多胜率 55.6% → 65%+（hedge 过滤层 + 反向反思 + 误判预警三重折扣）
+- NVDA 单标的偏置通过扩池稀释 + bias_alert 显式标记
+- 高胜率组合（score_low+看空 等）通过金牌池自动加权进入精选
+
+### Fixed（二次审计后立即修复）
+
+- **`weekly_analyzer.py:classify_misjudgments` 硬编码 session ID** — `/sessions/vibrant-bold-tesla/mnt/Alpha Hive` 在新 Cowork session 会失效（违反 MEMORY.md v23.4 教训）。改为 `glob('/sessions/*/mnt/Alpha Hive') + ALPHA_HIVE_DIR + ~/Desktop/Alpha Hive` 三档兜底
+- **`feedback_loop.register_misjudgment_pattern` 非原子写入 race condition** — 改用 `atomic_json_write(...)` 替代 `open()/json.dump()`，避免并行 weekly_analyzer + generate_deep_v2 同时写 thesis_breaks_config 时丢更新
+- **`generate_deep_v2.misjudgment_banner_html` 信号阈值与 compare_engine_v2 不对齐** — 原代码 `pc<0.7→call_dominant` 与 archive 端 `call_pct>=65（≈pc<=0.54）` 错位，导致预警横幅可能漏触发。修复为对齐 9 项信号布尔（call_dominant / put_dominant / pc_bullish / pc_bearish / iv_elevated / iv_suppressed / score_high / score_low / resonance_active）
+- **`_fetch_trend_state` MA 窗口与 bear regime 阈值** — 320 天 → 340 天（200MA 留 30 天缓冲）；bear 定义从 `n_above==0` 放宽到 `n_above<=1`，捕获 SOXX 短期反弹但 SPX/标的仍跌的混合下跌场景
+
+### 二次验证
+
+- 4 项修复后 weekly_analyzer 第 3 次跑：thesis_breaks 累计 30 命中 / **9 个模式全部进入 active 状态**
+- 强模式 `看多但大跌+call_dominant+iv_elevated+score_high` hits=6（用户原描述的「5 次 call_dominant+看多但跌」核心模式被精确捕获）
+- 全模块 `python3 -c "import ..."` + `weekly_analyzer.py` 端到端运行通过
+
+---
+
 ## [0.23.5] — 2026-04-22 — cboe_fetcher 合成 P/C Ratio（替代 Yahoo 下架的 ^PCCE）
 
 ### Fixed

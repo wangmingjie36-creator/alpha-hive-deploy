@@ -755,8 +755,11 @@ def register_misjudgment_pattern(
     cfg['_meta']['auto_patterns_updated_at'] = _dt.now().isoformat()
 
     try:
-        with open(thesis_config_path, 'w', encoding='utf-8') as f:
-            _json.dump(cfg, f, ensure_ascii=False, indent=2)
+        # 原子写入避免并行调用 race condition
+        atomic_json_write(
+            thesis_config_path, cfg, indent=2,
+            default=lambda o: SafeJSONEncoder().default(o)
+        )
         _log.info(f"误判模式已注册 {ticker}/{pattern_key} hits={rec['hits']} active={rec['active_warning']}")
         return {'registered': True, 'pattern': rec}
     except Exception as e:

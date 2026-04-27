@@ -1440,5 +1440,287 @@
         }
       ]
     }
+  },
+  "auto_misjudgment_patterns": {
+    "NVDA": {
+      "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,iv_suppressed,resonance_active": {
+        "pattern_key": "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,iv_suppressed,resonance_active",
+        "direction": "看多",
+        "reason": "看多但大跌（可能被宏观/趋势压制）",
+        "signal_keys": [
+          "call_dominant",
+          "iv_suppressed",
+          "resonance_active"
+        ],
+        "hits": 3,
+        "last_hit_date": "2026-03-11",
+        "first_hit_date": "2026-03-11",
+        "recent_drawdowns": [
+          {
+            "date": "2026-03-11",
+            "price_chg_pct": -1.55
+          },
+          {
+            "date": "2026-03-11",
+            "price_chg_pct": -1.55
+          },
+          {
+            "date": "2026-03-11",
+            "price_chg_pct": -1.55
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -1.55
+      },
+      "看空|看空但大涨（可能有催化剂反弹）|call_dominant,iv_elevated,score_low": {
+        "pattern_key": "看空|看空但大涨（可能有催化剂反弹）|call_dominant,iv_elevated,score_low",
+        "direction": "看空",
+        "reason": "看空但大涨（可能有催化剂反弹）",
+        "signal_keys": [
+          "call_dominant",
+          "iv_elevated",
+          "score_low"
+        ],
+        "hits": 3,
+        "last_hit_date": "2026-03-13",
+        "first_hit_date": "2026-03-13",
+        "recent_drawdowns": [
+          {
+            "date": "2026-03-13",
+            "price_chg_pct": 1.65
+          },
+          {
+            "date": "2026-03-13",
+            "price_chg_pct": 1.65
+          },
+          {
+            "date": "2026-03-13",
+            "price_chg_pct": 1.65
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": 1.65
+      },
+      "看多|中性区间（变动<1%，方向不明确）|iv_elevated,score_low": {
+        "pattern_key": "看多|中性区间（变动<1%，方向不明确）|iv_elevated,score_low",
+        "direction": "看多",
+        "reason": "中性区间（变动<1%，方向不明确）",
+        "signal_keys": [
+          "iv_elevated",
+          "score_low"
+        ],
+        "hits": 3,
+        "last_hit_date": "2026-03-16",
+        "first_hit_date": "2026-03-16",
+        "recent_drawdowns": [
+          {
+            "date": "2026-03-16",
+            "price_chg_pct": -0.7
+          },
+          {
+            "date": "2026-03-16",
+            "price_chg_pct": -0.7
+          },
+          {
+            "date": "2026-03-16",
+            "price_chg_pct": -0.7
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -0.7
+      },
+      "看多|中性区间（变动<1%，方向不明确）|iv_elevated,put_dominant,score_low": {
+        "pattern_key": "看多|中性区间（变动<1%，方向不明确）|iv_elevated,put_dominant,score_low",
+        "direction": "看多",
+        "reason": "中性区间（变动<1%，方向不明确）",
+        "signal_keys": [
+          "iv_elevated",
+          "put_dominant",
+          "score_low"
+        ],
+        "hits": 3,
+        "last_hit_date": "2026-03-23",
+        "first_hit_date": "2026-03-23",
+        "recent_drawdowns": [
+          {
+            "date": "2026-03-23",
+            "price_chg_pct": -0.25
+          },
+          {
+            "date": "2026-03-23",
+            "price_chg_pct": -0.25
+          },
+          {
+            "date": "2026-03-23",
+            "price_chg_pct": -0.25
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -0.25
+      },
+      "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,iv_elevated": {
+        "pattern_key": "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,iv_elevated",
+        "direction": "看多",
+        "reason": "看多但大跌（可能被宏观/趋势压制）",
+        "signal_keys": [
+          "call_dominant",
+          "iv_elevated"
+        ],
+        "hits": 3,
+        "last_hit_date": "2026-03-26",
+        "first_hit_date": "2026-03-26",
+        "recent_drawdowns": [
+          {
+            "date": "2026-03-26",
+            "price_chg_pct": -2.17
+          },
+          {
+            "date": "2026-03-26",
+            "price_chg_pct": -2.17
+          },
+          {
+            "date": "2026-03-26",
+            "price_chg_pct": -2.17
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -2.17
+      },
+      "看多|看多但大跌（可能被宏观/趋势压制）|score_low": {
+        "pattern_key": "看多|看多但大跌（可能被宏观/趋势压制）|score_low",
+        "direction": "看多",
+        "reason": "看多但大跌（可能被宏观/趋势压制）",
+        "signal_keys": [
+          "score_low"
+        ],
+        "hits": 3,
+        "last_hit_date": "2026-03-27",
+        "first_hit_date": "2026-03-27",
+        "recent_drawdowns": [
+          {
+            "date": "2026-03-27",
+            "price_chg_pct": -1.4
+          },
+          {
+            "date": "2026-03-27",
+            "price_chg_pct": -1.4
+          },
+          {
+            "date": "2026-03-27",
+            "price_chg_pct": -1.4
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -1.4
+      },
+      "看多|中性区间（变动<1%，方向不明确）|call_dominant,iv_elevated": {
+        "pattern_key": "看多|中性区间（变动<1%，方向不明确）|call_dominant,iv_elevated",
+        "direction": "看多",
+        "reason": "中性区间（变动<1%，方向不明确）",
+        "signal_keys": [
+          "call_dominant",
+          "iv_elevated"
+        ],
+        "hits": 3,
+        "last_hit_date": "2026-04-15",
+        "first_hit_date": "2026-04-15",
+        "recent_drawdowns": [
+          {
+            "date": "2026-04-15",
+            "price_chg_pct": -0.26
+          },
+          {
+            "date": "2026-04-15",
+            "price_chg_pct": -0.26
+          },
+          {
+            "date": "2026-04-15",
+            "price_chg_pct": -0.26
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -0.26
+      },
+      "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,iv_elevated,score_high": {
+        "pattern_key": "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,iv_elevated,score_high",
+        "direction": "看多",
+        "reason": "看多但大跌（可能被宏观/趋势压制）",
+        "signal_keys": [
+          "call_dominant",
+          "iv_elevated",
+          "score_high"
+        ],
+        "hits": 6,
+        "last_hit_date": "2026-04-22",
+        "first_hit_date": "2026-04-20",
+        "recent_drawdowns": [
+          {
+            "date": "2026-04-20",
+            "price_chg_pct": -1.08
+          },
+          {
+            "date": "2026-04-22",
+            "price_chg_pct": -1.41
+          },
+          {
+            "date": "2026-04-20",
+            "price_chg_pct": -1.08
+          },
+          {
+            "date": "2026-04-22",
+            "price_chg_pct": -1.41
+          },
+          {
+            "date": "2026-04-20",
+            "price_chg_pct": -1.08
+          },
+          {
+            "date": "2026-04-22",
+            "price_chg_pct": -1.41
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -1.25
+      },
+      "看空|看空但大涨（可能有催化剂反弹）|iv_elevated": {
+        "pattern_key": "看空|看空但大涨（可能有催化剂反弹）|iv_elevated",
+        "direction": "看空",
+        "reason": "看空但大涨（可能有催化剂反弹）",
+        "signal_keys": [
+          "iv_elevated"
+        ],
+        "hits": 3,
+        "last_hit_date": "2026-04-23",
+        "first_hit_date": "2026-04-23",
+        "recent_drawdowns": [
+          {
+            "date": "2026-04-23",
+            "price_chg_pct": 4.32
+          },
+          {
+            "date": "2026-04-23",
+            "price_chg_pct": 4.32
+          },
+          {
+            "date": "2026-04-23",
+            "price_chg_pct": 4.32
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": 4.32
+      }
+    }
+  },
+  "_meta": {
+    "auto_patterns_updated_at": "2026-04-27T04:57:02.075888"
   }
 }

@@ -874,6 +874,108 @@ class OptionsAnalyzer:
             _log.debug("IV term structure unavailable for %s: %s", ticker, e)
         return result
 
+    def classify_call_flow(
+        self,
+        calls_df: List[Dict],
+        puts_df: List[Dict],
+        stock_price: float,
+        skew_data: Dict = None,
+        term_data: Dict = None,
+    ) -> Dict:
+        """
+        P1-⑤ Call 流分类引擎（v0.20.0）：
+        在 call_dominant 信号触发时，区分这是「方向性 call」还是「机构对冲 call」。
+
+        判别维度（综合三票制）：
+          A. OI Delta 倾向：长端 (DTE>60) 集中 → 对冲；近端 (DTE<30) 集中 → 方向性
+          B. IV Skew：>1.3 (恐慌) → 对冲；<0.8 (call 投机) → 方向性
+          C. IV 期限结构：backwardation 短期溢价 → 方向性事件押注；contango → 中性
+
+        Returns:
+            {
+              "label": "directional"|"hedge"|"mixed"|"unknown",
+              "confidence": 0~1,
+              "votes": {"A": str, "B": str, "C": str},
+              "reasoning": str,
+            }
+        """
+        votes = {"A": "unknown", "B": "unknown", "C": "unknown"}
+
+        # ── A. 期限分布：长端 vs 近端 OI 集中度 ──
+        if calls_df:
+            long_oi = 0
+            short_oi = 0
+            try:
+                from datetime import datetime as _dt
+                today = _dt.now()
+                for c in calls_df:
+                    exp = c.get("expiration") or c.get("expiry")
+                    oi = c.get("openInterest", 0) or 0
+                    if not exp or oi <= 0:
+                        continue
+                    try:
+                        dte = (_dt.strptime(str(exp), "%Y-%m-%d") - today).days
+                    except Exception:
+                        continue
+                    if dte > 60:
+                        long_oi += oi
+                    elif 0 < dte <= 30:
+                        short_oi += oi
+                total = long_oi + short_oi
+                if total > 0:
+                    long_pct = long_oi / total
+                    if long_pct >= 0.55:
+                        votes["A"] = "hedge"   # 长端 OI 集中
+                    elif long_pct <= 0.35:
+                        votes["A"] = "directional"  # 近端急单
+                    else:
+                        votes["A"] = "mixed"
+            except Exception:
+                pass
+
+        # ── B. IV Skew ──
+        if skew_data and skew_data.get("skew_ratio") is not None:
+            sr = skew_data["skew_ratio"]
+            if sr >= 1.3:
+                votes["B"] = "hedge"     # put 比 call 贵 → 恐慌对冲背景
+            elif sr <= 0.8:
+                votes["B"] = "directional"  # call 投机过热
+            else:
+                votes["B"] = "mixed"
+
+        # ── C. IV 期限结构 ──
+        if term_data and term_data.get("shape"):
+            shape = term_data["shape"]
+            if shape == "backwardation":
+                votes["C"] = "directional"  # 短期事件溢价
+            elif shape == "contango":
+                votes["C"] = "mixed"        # 正常无信号
+            else:
+                votes["C"] = "mixed"
+
+        # 投票汇总
+        labels = [v for v in votes.values() if v != "unknown"]
+        if not labels:
+            return {"label": "unknown", "confidence": 0.0, "votes": votes,
+                    "reasoning": "三维度均无数据"}
+        from collections import Counter
+        cnt = Counter(labels)
+        winner, w_n = cnt.most_common(1)[0]
+        confidence = round(w_n / len(labels), 2)
+
+        reason_bits = []
+        if votes["A"] != "unknown": reason_bits.append(f"期限({votes['A']})")
+        if votes["B"] != "unknown": reason_bits.append(f"skew({votes['B']})")
+        if votes["C"] != "unknown": reason_bits.append(f"term({votes['C']})")
+        reasoning = " · ".join(reason_bits) + f" → {winner}"
+
+        return {
+            "label": winner,
+            "confidence": confidence,
+            "votes": votes,
+            "reasoning": reasoning,
+        }
+
     def detect_unusual_activity(
         self, calls_df: List[Dict], puts_df: List[Dict],
         stock_price: float = 0.0
@@ -1348,6 +1450,18 @@ class OptionsAgent:
         except Exception as _e_gc:
             _log.debug("Gamma 到期日历计算失败 %s: %s", ticker, _e_gc)
 
+        # P1-⑤ Call 流分类（directional vs hedge vs mixed）
+        call_flow_classification: Dict = {}
+        try:
+            call_flow_classification = self.analyzer.classify_call_flow(
+                calls_df, puts_df, stock_price,
+                skew_data=iv_skew, term_data=iv_term_struct,
+            )
+        except Exception as _e_cf:
+            _log.debug("classify_call_flow 失败 %s: %s", ticker, _e_cf)
+            call_flow_classification = {"label": "unknown", "confidence": 0.0,
+                                        "reasoning": "分类失败", "votes": {}}
+
         # 4. 生成综合评分
         options_score, signal_summary = self.analyzer.generate_options_score(
             iv_rank, put_call_ratio, gex, unusual_activity
@@ -1407,6 +1521,8 @@ class OptionsAgent:
             "iv_skew_detail": iv_skew,
             # S15: IV 期限结构
             "iv_term_structure": iv_term_struct,
+            # P1-⑤ Call 流分类（directional / hedge / mixed）
+            "call_flow_classification": call_flow_classification,
             # ① IV-RV Spread
             "rv_30d": iv_rv_data.get("rv_30d", 0.0),
             "iv_rv_spread": iv_rv_data.get("iv_rv_spread", 0.0),

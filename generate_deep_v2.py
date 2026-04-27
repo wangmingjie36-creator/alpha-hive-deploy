@@ -4523,6 +4523,119 @@ def _try_charts(ctx: dict) -> tuple:
         return "", "", "", "", ""
 
 
+# ─────────────────────────────────────────────
+# P1-⑥ 反向情景反思卡片 + P2-⑨ 自我对抗 Bear 推理（v0.20.0）
+# ─────────────────────────────────────────────
+def _build_reverse_scenario_card(ctx: dict) -> str:
+    """
+    P1-⑥ 「为什么这次可能错」自动反思卡片。
+    在主结论是「看多」时，列出三条最可能的反方理由：
+      1. 宏观/趋势压制（SPX < 200MA / SOXX < 20MA）
+      2. Call 流对冲嫌疑（call_flow_classification = hedge）
+      3. PEAD 历史漂移反向
+    """
+    direction = ctx.get("direction_zh") or ctx.get("direction") or "中性"
+    raw = ctx.get("_raw_data", {}) or {}
+    options_data = raw.get("options_analysis", {}) or {}
+    classification = options_data.get("call_flow_classification", {}) or {}
+    cls_label = classification.get("label", "unknown")
+    cls_reason = classification.get("reasoning", "")
+    regime = (raw.get("market_regime") or {}).get("regime") or "unknown"
+    pead = raw.get("pead_analysis") or {}
+    if not isinstance(pead, dict):
+        pead = {}
+    pead_drift = pead.get("t_plus_5_drift_pct") or pead.get("avg_drift_pct")
+
+    bullets = []
+    if "多" in direction:
+        if regime == "bear":
+            bullets.append("🌧️ <b>宏观/趋势压制</b>：SPX 在 200MA 之下、行业指数 SOXX 也跌破 20MA — 历史上看多信号在此 regime 下胜率显著低于均值，建议要求额外的独立催化剂。")
+        if cls_label == "hedge":
+            bullets.append(f"🛡️ <b>Call 流对冲嫌疑</b>：分类引擎判定为 <span style='color:var(--red2)'>hedge</span>（{cls_reason}），call_dominant 可能是机构买保护性 call 对空头仓位对冲，而非方向性押注。")
+        if pead_drift is not None and pead_drift < 0:
+            bullets.append(f"📉 <b>PEAD 历史漂移反向</b>：该标的过去 4-8 季的财报后 T+5 平均漂移 {pead_drift:+.2f}%，与本次看多方向相悖。")
+        if not bullets:
+            bullets.append("📊 <b>样本量警示</b>：当前看多胜率 95% CI 仍宽（[34-75%]），任何看多结论都应有置信度折扣。")
+            bullets.append("⚡ <b>催化剂兑现风险</b>：若财报/事件已被 price-in，价格反应可能 sell-the-news。")
+            bullets.append("🌪️ <b>板块轮动风险</b>：高 beta 多头在 risk-off 切换中往往最先承压。")
+    elif "空" in direction:
+        if regime == "bull":
+            bullets.append("☀️ <b>宏观顺风</b>：大盘与板块仍在多头通道，看空信号在 bull regime 下需更强的个股逻辑（监管/财报暴雷）支撑。")
+        bullets.append("🎯 <b>反弹催化剂</b>：低位放量的 short squeeze、出乎意料的财报上修都可能短期反转。")
+        if pead_drift is not None and pead_drift > 0:
+            bullets.append(f"📈 <b>PEAD 漂移反向</b>：历史财报后 T+5 平均漂移 {pead_drift:+.2f}%（正向），与本次看空方向相悖。")
+    else:
+        bullets.append("⚖️ <b>中性方向，价值有限</b>：在 |Δ|<1% 的中性区间内，期权信号几乎只反映波动率而非方向，应避免过度解读。")
+
+    bullet_html = "".join(f"<li style='margin-bottom:10px'>{b}</li>" for b in bullets[:4])
+
+    return f"""
+<div class="section" style="border-left:3px solid var(--orange,#f0883e);background:rgba(240,136,62,0.04);padding:18px 22px;border-radius:10px;margin-bottom:16px">
+  <div style="font-size:13px;font-weight:700;color:var(--orange,#f0883e);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">
+    🔄 反向情景反思 · 为什么这次可能错（P1-⑥）
+  </div>
+  <ul style="list-style:none;padding-left:0;font-size:13px;line-height:1.6">{bullet_html}</ul>
+  <div style="font-size:11px;color:var(--muted);margin-top:8px">
+    本卡片由模型自动生成，目的是抵消单方向叙事偏置。执行前应主动验证以上是否成立。
+  </div>
+</div>
+"""
+
+
+def _build_adversarial_bear_card(ctx: dict) -> str:
+    """P2-⑨ 自我对抗：强制 Bear 蜂主导，与主结论并排呈现，分歧高亮。"""
+    raw = ctx.get("_raw_data", {}) or {}
+    swarm = raw.get("swarm_analysis", {}) or {}
+    bear = (swarm.get("BearBeeContrarian") or swarm.get("BearBee")
+            or swarm.get("bear_bee") or {})
+    bear_score = bear.get("score") or bear.get("contrarian_score") or 0
+    bear_disc = (bear.get("discovery") or bear.get("contrarian_discovery")
+                 or "无 BearBee 反方推理数据")
+    main_dir = ctx.get("direction_zh") or "中性"
+    main_score = ctx.get("final_score", 0)
+
+    try:
+        b_score_f = float(bear_score)
+        m_score_f = float(main_score)
+    except (TypeError, ValueError):
+        b_score_f = 0.0; m_score_f = 0.0
+
+    bear_disagrees = (("多" in main_dir and b_score_f <= 4)
+                      or ("空" in main_dir and b_score_f >= 7)
+                      or abs(b_score_f - m_score_f) >= 3)
+    badge = "⚠️ 严重分歧" if bear_disagrees else "✅ 大体一致"
+    badge_color = "var(--red2,#f85149)" if bear_disagrees else "var(--green2,#3fb950)"
+
+    bear_disc_str = str(bear_disc)
+    bear_disc_disp = bear_disc_str[:280] + ('...' if len(bear_disc_str) > 280 else '')
+
+    return f"""
+<div class="section" style="border:1px solid var(--border);border-radius:10px;padding:18px 22px;margin-bottom:16px;background:rgba(0,0,0,.15)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <div style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--purple,#bc8cff)">
+      ⚔️ 自我对抗 · BearBee 反方推理（P2-⑨）
+    </div>
+    <span style="font-size:11px;font-weight:700;color:{badge_color}">{badge}</span>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;font-size:12px;line-height:1.55">
+    <div style="padding:12px;background:rgba(63,185,80,.06);border-left:3px solid var(--green2,#3fb950);border-radius:6px">
+      <div style="font-weight:700;color:var(--green2,#3fb950);margin-bottom:6px">主流程结论</div>
+      <div>方向：<b>{main_dir}</b> · 评分：<b>{main_score}/10</b></div>
+      <div style="margin-top:6px;color:var(--muted)">蜂群 7 维加权后的综合判断。</div>
+    </div>
+    <div style="padding:12px;background:rgba(248,81,73,.06);border-left:3px solid var(--red2,#f85149);border-radius:6px">
+      <div style="font-weight:700;color:var(--red2,#f85149);margin-bottom:6px">BearBee 强制反方</div>
+      <div>反方评分：<b>{bear_score}/10</b></div>
+      <div style="margin-top:6px;color:var(--text)">{bear_disc_disp}</div>
+    </div>
+  </div>
+  <div style="font-size:11px;color:var(--muted);margin-top:10px">
+    分歧 = 主流程与 Bear 推理方向相反或评分差距 ≥ 3 分；分歧严重时，建议把仓位减半或要求额外催化剂确认。
+  </div>
+</div>
+"""
+
+
 def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
                   attribution_html: str = "") -> str:
     """组装完整的 Template C v3.0 HTML 报告"""
@@ -4542,6 +4655,63 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
     # ── Executive Summary ──────────────────────────────────────────────────────
     exec_summary_html = _build_executive_summary(ctx)
     cross_synthesis_html = _build_cross_chapter_synthesis(ctx)
+
+    # P1-⑥ 反向情景反思卡片 + P2-⑨ 自我对抗 Bear 推理（v0.20.0）
+    try:
+        reverse_scenario_html = _build_reverse_scenario_card(ctx)
+    except Exception as _e:
+        print(f"  ⚠️ reverse_scenario card 跳过: {_e}")
+        reverse_scenario_html = ""
+    try:
+        adversarial_bear_html = _build_adversarial_bear_card(ctx)
+    except Exception as _e:
+        print(f"  ⚠️ adversarial_bear card 跳过: {_e}")
+        adversarial_bear_html = ""
+
+    # P2-⑧ 误判模式预警横幅（事前警告）
+    misjudgment_banner_html = ""
+    try:
+        from feedback_loop import check_misjudgment_warnings
+        _raw = ctx.get("_raw_data", {}) or {}
+        _opts = _raw.get("options_analysis", {}) or {}
+        # 信号定义必须与 compare_engine_v2.archive_today_prediction (lines 380-392) 保持一致
+        # call_dominant 在那边定义为 call_pct >= 65（call vol / total vol）
+        # 等价 pc_ratio <= 0.538（put_vol/call_vol = 35/65）；put_dominant 同理
+        _pc = float(_opts.get('put_call_ratio', 1.0) or 1.0)
+        _ivr = float(_opts.get('iv_rank', 0) or 0)
+        _score = float(ctx.get('final_score', 0) or 0)
+        _signals = {
+            'call_dominant':  _pc <= 0.54,    # 对应 call_pct >= 65
+            'put_dominant':   _pc >= 1.86,    # 对应 call_pct <= 35
+            'pc_bullish':     _pc <= 0.7,
+            'pc_bearish':     _pc >= 1.2,
+            'iv_elevated':    _ivr >= 60,
+            'iv_suppressed':  _ivr <= 30,
+            'score_high':     _score >= 6.5,
+            'score_low':      _score <= 3.5,
+            'resonance_active': bool((ctx.get('resonance') or {}).get('triggered')),
+        }
+        warns = check_misjudgment_warnings(
+            ticker, ctx.get("direction_zh") or ctx.get("direction") or "中性", _signals
+        )
+        if warns:
+            items = []
+            for w in warns[:3]:
+                items.append(
+                    f"<li><b>⚠️ {w['severity']}</b> · {w['reason']}（同模式历史命中 {w['hits']} 次，平均回撤 {w['avg_drawdown']:+.2f}%，最近：{w['last_hit_date']}）</li>"
+                )
+            misjudgment_banner_html = (
+                '<div class="section" style="border:2px solid var(--red2,#f85149);background:rgba(248,81,73,.06);'
+                'padding:16px 22px;border-radius:10px;margin-bottom:16px">'
+                '<div style="font-size:13px;font-weight:700;color:var(--red2,#f85149);margin-bottom:8px">'
+                '🚨 误判模式预警（P2-⑧）· 当前条件命中历史误判模板</div>'
+                f'<ul style="font-size:12px;line-height:1.7;padding-left:20px">{"".join(items)}</ul>'
+                '<div style="font-size:11px;color:var(--muted);margin-top:6px">'
+                '由 thesis_breaks_config 自动维护：误判达 3 次后激活预警；命中 5 次升级为 HIGH 严重度。</div>'
+                '</div>'
+            )
+    except Exception as _e:
+        print(f"  ⚠️ misjudgment_banner 跳过: {_e}")
 
     # ── v0.18.0 · CH4 期权策略建议卡片 ────────────────────────────────────────
     try:
@@ -5859,6 +6029,8 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
   </div>
 
   {portfolio_card_html}
+  {misjudgment_banner_html}
+
   {exec_summary_html}
   {dod_delta_html}
   {cross_synthesis_html}
@@ -5920,6 +6092,10 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
       <div class="prose">{reasoning.get('catalyst', '<p>分析生成中...</p>')}</div>
     </div>
   </div>
+
+  {reverse_scenario_html}
+
+  {adversarial_bear_html}
 
   <!-- CH4 -->
   <div class="section" id="ch4">

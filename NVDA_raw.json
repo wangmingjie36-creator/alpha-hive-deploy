@@ -1,27 +1,29 @@
 {
   "_meta": {
     "ticker": "NVDA",
-    "report_date": "2026-04-23",
-    "price": 199.64,
+    "report_date": "2026-04-24",
+    "price": 208.27,
     "generated_by": "collect_data.py · 方案B"
   },
   "swarm": {
-    "final_score": 5.53,
-    "direction": "bearish",
+    "final_score": 6.62,
+    "direction": "bullish",
     "resonance": {
-      "detected": false,
+      "detected": true,
       "dimensions": [
         "ml_auxiliary",
-        "odds"
+        "odds",
+        "risk_adj",
+        "sentiment"
       ],
-      "count": 2,
-      "confidence_boost": 0,
+      "count": 4,
+      "confidence_boost": 20,
       "direction": "bullish"
     },
     "agent_vote": {
-      "bullish": 3,
+      "bullish": 5,
       "bearish": 2,
-      "neutral": 3
+      "neutral": 1
     }
   },
   "agents": {
@@ -29,166 +31,166 @@
       "score": 6.8,
       "direction": "neutral",
       "confidence": 0.85,
-      "discovery": "催化剂 5 个 | 最近：Q4 FY2026 财报发布（-40天后） | 分析师目标$268.61(↑34.5%) | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%) | 历史漂移中性 | PEAD 数据不足"
+      "discovery": "催化剂 5 个 | 最近：Q4 FY2026 财报发布（-41天后） | 分析师目标$268.61(↑29.0%) | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%) | 历史漂移中性 | PEAD 数据不足"
     },
     "RivalBee": {
-      "score": 5.96,
+      "score": 5.85,
       "direction": "bullish",
       "confidence": 0.8,
-      "discovery": "ML 胜率 57% | 7d +7.19% | 30d +10.79% | RSI:83 | MACD:多 | BB:76% | 目标价上行 +34.5%（分析师看多） | 分析师共识1.3/5（强烈看多） | 远期EPS增速 +129.4%（盈利高增长） | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%)"
+      "discovery": "ML 胜率 57% | 7d +10.46% | 30d +15.69% | RSI:87 | MACD:多 | BB:88% | 目标价上行 +29.0%（分析师看多） | 分析师共识1.3/5（强烈看多） | 远期EPS增速 +120.4%（盈利高增长） | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%)"
     },
     "OracleBee": {
-      "score": 9.49,
+      "score": 10.0,
       "direction": "bullish",
       "confidence": 0.7,
-      "discovery": "IV 处于理想水位 | 检测到 58 个看涨异动 | TermStr:contango(27/32) | Skew25d:1.42(恐慌对冲) | MaxPain:$192(+3.7%) | 异常流:混合期权流 Call:69 Put:66 | $199.6 | 无相关预测市场 | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%)"
+      "discovery": "IV 处于理想水位 | 做多气氛浓厚（P/C低） | 检测到 72 个看涨异动 | TermStr:contango(8/34) | Skew25d:1.28 | MaxPain:$192(+8.2%) | 异常流:异常Call流 100个信号 溢价$796.5M | $208.3 | 无相关预测市场 | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%)"
     },
     "BuzzBee": {
-      "score": 5.23,
-      "direction": "neutral",
+      "score": 7.72,
+      "direction": "bullish",
       "confidence": 0.9,
-      "discovery": "情绪 54% | 动量 -1.0% | 量比 0.7x | Reddit #9(rising,91提及) | 新闻偏多（9多/3空） | 未上 Yahoo 热搜 | F&G 66(Greed) | 情绪动量:declining | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%)"
+      "discovery": "情绪 75% | 动量 +3.1% | 量比 1.4x | Reddit #4(hot,360提及) | 新闻偏多（12多/1空） | Yahoo热搜 #1/25 | F&G 66(Greed) | 情绪动量:rising | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%)"
     },
     "ScoutBee": {
-      "score": 3.14,
+      "score": 2.47,
       "direction": "bearish",
       "confidence": 0.88,
-      "discovery": "内幕卖出 $42,803,017 | STEVENS MARK A 卖出 221,682股 | 拥挤度 37/100（中等拥挤度） | 动量 -1.0% | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%) | 板块相对强度 -0.9pp(科技 20D) | 供应链与 NVDA 同步波动（NVDA 5d +0.7% vs SOXX +0.5%），未发现显著领先"
+      "discovery": "内幕卖出 $42,803,017 | STEVENS MARK A 卖出 221,682股 | 拥挤度 55/100（中等拥挤度） | 动量 +3.1% | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%) | 板块相对强度 +2.0pp(科技 20D) | 供应链领先信号：TSM, AMAT, SOXX 5日涨幅领先 NVDA 超 1.5pp——上游需求强劲"
     },
     "GuardBee": {
-      "score": 5.72,
-      "direction": "neutral",
-      "confidence": 0.65,
-      "discovery": "信号分散 | 均分 5.2 | 一致性 20% | 风险调整 1.20 | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%) | Macro:risk_on(板块顺风) | Regime:风险偏好"
+      "score": 8.17,
+      "direction": "bullish",
+      "confidence": 0.9,
+      "discovery": "共振✅ 4 Agent 同向 | 一致性 80% | 风险调整 0.95 | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%) | Macro:neutral(黄金走强; 板块顺风)"
     },
     "BearBee": {
-      "score": 2.6,
+      "score": 2.3,
       "direction": "bearish",
       "confidence": 1.0,
-      "discovery": "内幕大额抛售 $42,803,017（买入仅 $0） | 近期小幅回调 -1.0% | 催化剂-40天内到来，波动性风险↑ | 信号一致性极低(20%)，方向不确定 | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%)"
+      "discovery": "内幕大额抛售 $42,803,017（买入仅 $0） | 催化剂-41天内到来，波动性风险↑ | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%)"
     }
   },
   "options": {
-    "put_call_ratio": 0.77,
-    "total_oi": 2261400,
-    "iv_rank": 54.45,
+    "put_call_ratio": 0.69,
+    "total_oi": 1917498,
+    "iv_rank": 45.42,
     "iv_current_pct": 42.69,
-    "iv_skew_ratio": 1.13,
+    "iv_skew_ratio": 1.042,
     "iv_skew_signal": "neutral",
     "flow_direction": "bullish",
-    "options_score": 8.0,
-    "signal_summary": "IV 处于理想水位 | 检测到 58 个看涨异动",
+    "options_score": 9.0,
+    "signal_summary": "IV 处于理想水位 | 做多气氛浓厚（P/C低） | 检测到 72 个看涨异动",
     "gamma_squeeze_risk": "high",
     "support_levels": [
       {
-        "strike": 150.0,
-        "oi": 68437,
-        "iv_pct": 73.0
-      },
-      {
         "strike": 180.0,
-        "oi": 62429,
-        "iv_pct": 39.8
+        "oi": 62398,
+        "iv_pct": 43.1
       },
       {
         "strike": 140.0,
-        "oi": 46095,
-        "iv_pct": 63.9
+        "oi": 46024,
+        "iv_pct": 71.3
+      },
+      {
+        "strike": 160.0,
+        "oi": 45731,
+        "iv_pct": 55.5
       }
     ],
     "resistance_levels": [
       {
         "strike": 200.0,
-        "oi": 130578,
-        "iv_pct": 35.6
+        "oi": 131150,
+        "iv_pct": 39.2
       },
       {
         "strike": 210.0,
-        "oi": 83237,
-        "iv_pct": 33.4
+        "oi": 82208,
+        "iv_pct": 37.0
       },
       {
         "strike": 195.0,
-        "oi": 77053,
-        "iv_pct": 37.2
+        "oi": 73108,
+        "iv_pct": 41.0
       }
     ],
     "unusual_activity": [
       {
+        "type": "call_sweep",
+        "strike": 215.0,
+        "volume": 57435,
+        "bullish": true,
+        "ratio": 5.1
+      },
+      {
+        "type": "large_call_volume",
+        "strike": 210.0,
+        "volume": 57031,
+        "bullish": true,
+        "ratio": 0.69
+      },
+      {
+        "type": "large_call_volume",
+        "strike": 200.0,
+        "volume": 21933,
+        "bullish": true,
+        "ratio": 0.17
+      },
+      {
+        "type": "large_call_volume",
+        "strike": 195.0,
+        "volume": 12179,
+        "bullish": true,
+        "ratio": 0.17
+      },
+      {
+        "type": "large_call_volume",
+        "strike": 205.0,
+        "volume": 21015,
+        "bullish": true,
+        "ratio": 0.45
+      },
+      {
+        "type": "large_call_volume",
+        "strike": 215.0,
+        "volume": 36660,
+        "bullish": true,
+        "ratio": 1.12
+      },
+      {
+        "type": "large_call_volume",
+        "strike": 210.0,
+        "volume": 23593,
+        "bullish": true,
+        "ratio": 0.78
+      },
+      {
         "type": "large_call_volume",
         "strike": 190.0,
-        "volume": 12346,
+        "volume": 5528,
         "bullish": true,
-        "ratio": 0.22
-      },
-      {
-        "type": "large_call_volume",
-        "strike": 200.0,
-        "volume": 9063,
-        "bullish": true,
-        "ratio": 0.07
-      },
-      {
-        "type": "large_put_volume",
-        "strike": 200.0,
-        "volume": 13507,
-        "bullish": false,
-        "ratio": 0.82
-      },
-      {
-        "type": "large_call_volume",
-        "strike": 210.0,
-        "volume": 20604,
-        "bullish": true,
-        "ratio": 0.25
-      },
-      {
-        "type": "large_put_volume",
-        "strike": 205.0,
-        "volume": 5853,
-        "bullish": false,
-        "ratio": 3.14
+        "ratio": 0.11
       },
       {
         "type": "large_call_volume",
         "strike": 205.0,
-        "volume": 23159,
+        "volume": 8582,
         "bullish": true,
-        "ratio": 1.33
+        "ratio": 0.61
       },
       {
-        "type": "large_call_volume",
-        "strike": 200.0,
-        "volume": 10705,
+        "type": "call_sweep",
+        "strike": 235.0,
+        "volume": 50020,
         "bullish": true,
-        "ratio": 0.49
-      },
-      {
-        "type": "put_sweep",
-        "strike": 207.5,
-        "volume": 4104,
-        "bullish": false,
-        "ratio": 410.4
-      },
-      {
-        "type": "large_call_volume",
-        "strike": 205.0,
-        "volume": 8902,
-        "bullish": true,
-        "ratio": 0.19
-      },
-      {
-        "type": "large_call_volume",
-        "strike": 210.0,
-        "volume": 19060,
-        "bullish": true,
-        "ratio": 0.58
+        "ratio": 14.51
       }
     ],
     "expiration_dates": [
-      "2026-05-01",
       "2026-05-04",
-      "2026-05-08"
+      "2026-05-08",
+      "2026-05-15"
     ]
   },
   "catalysts": {
@@ -198,7 +200,7 @@
       {
         "event": "Q4 FY2026 财报发布",
         "date": "2026-03-15",
-        "days_until": -40,
+        "days_until": -41,
         "importance": "medium",
         "description": ""
       },
@@ -219,14 +221,14 @@
       {
         "event": "财报发布",
         "date": "2026-05-20",
-        "days_until": 26,
+        "days_until": 25,
         "importance": "medium",
         "description": ""
       },
       {
         "event": "Computex 2026",
         "date": "2026-05-28",
-        "days_until": 34,
+        "days_until": 33,
         "importance": "medium",
         "description": ""
       }
@@ -234,47 +236,46 @@
     "analyst_target": null
   },
   "ml": {
-    "probability_pct": 62.5,
-    "expected_3d_pct": 4.2,
-    "expected_7d_pct": 11.19,
-    "expected_30d_pct": 16.79,
-    "recommendation": "HOLD - 等待更好机会"
+    "probability_pct": 46.6,
+    "expected_3d_pct": 5.42,
+    "expected_7d_pct": 14.46,
+    "expected_30d_pct": 21.69,
+    "recommendation": "AVOID - 风险大于收益"
   },
   "macro": {
     "fear_greed_index": 66,
-    "guard_score": 5.72,
-    "guard_direction": "neutral",
-    "guard_discovery": "信号分散 | 均分 5.2 | 一致性 20% | 风险调整 1.20 | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%) | Macro:risk_on(板块顺风) | Regime:风险偏好",
-    "sentiment_pct": 54,
-    "reddit_rank": 9,
-    "reddit_mentions": 91,
-    "volume_ratio": 0.73,
-    "buzz_discovery": "情绪 54% | 动量 -1.0% | 量比 0.7x | Reddit #9(rising,91提及) | 新闻偏多（9多/3空） | 未上 Yahoo 热搜 | F&G 66(Greed) | 情绪动量:declining | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%)",
-    "daily_macro_summary": "VIX 19.3(moderate) | 10Y 4.32% | 大盘-0.4% | 宏观:neutral | 曲线:正常 | CPI同比3.3% | HY利差284bp"
+    "guard_score": 8.17,
+    "guard_direction": "bullish",
+    "guard_discovery": "共振✅ 4 Agent 同向 | 一致性 80% | 风险调整 0.95 | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%) | Macro:neutral(黄金走强; 板块顺风)",
+    "sentiment_pct": 75,
+    "reddit_rank": 4,
+    "reddit_mentions": 360,
+    "volume_ratio": 1.41,
+    "buzz_discovery": "情绪 75% | 动量 +3.1% | 量比 1.4x | Reddit #4(hot,360提及) | 新闻偏多（12多/1空） | Yahoo热搜 #1/25 | F&G 66(Greed) | 情绪动量:rising | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%)",
+    "daily_macro_summary": "VIX 18.7(moderate) | 10Y 4.31% | 大盘+0.8% | 宏观:neutral | 曲线:正常 | CPI同比3.3% | HY利差286bp | 黄金走强+0.5%"
   },
   "fundamentals": {
-    "scout_score": 3.14,
+    "scout_score": 2.47,
     "scout_direction": "bearish",
-    "scout_discovery": "内幕卖出 $42,803,017 | STEVENS MARK A 卖出 221,682股 | 拥挤度 37/100（中等拥挤度） | 动量 -1.0% | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%) | 板块相对强度 -0.9pp(科技 20D) | 供应链与 NVDA 同步波动（NVDA 5d +0.7% vs SOXX +0.5%），未发现显著领先",
-    "crowding_score": 36.6,
-    "momentum_5d": -1.0115,
+    "scout_discovery": "内幕卖出 $42,803,017 | STEVENS MARK A 卖出 221,682股 | 拥挤度 55/100（中等拥挤度） | 动量 +3.1% | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%) | 板块相对强度 +2.0pp(科技 20D) | 供应链领先信号：TSM, AMAT, SOXX 5日涨幅领先 NVDA 超 1.5pp——上游需求强劲",
+    "crowding_score": 54.9,
+    "momentum_5d": 3.0733,
     "overview": "AI 芯片龙头，CUDA 生态护城河深厚，但估值已高，监管风险需关注"
   },
   "bearish": {
-    "bear_score": 2.6,
+    "bear_score": 2.3,
     "bear_direction": "bearish",
     "bear_signals": [
       "内幕大额抛售 $42,803,017（买入仅 $0）",
-      "近期小幅回调 -1.0%",
-      "催化剂-40天内到来，波动性风险↑",
-      "信号一致性极低(20%)，方向不确定"
+      "催化剂-41天内到来，波动性风险↑",
+      "期权 IV Skew 偏高（看跌期权溢价）"
     ],
-    "bear_discovery": "内幕大额抛售 $42,803,017（买入仅 $0） | 近期小幅回调 -1.0% | 催化剂-40天内到来，波动性风险↑ | 信号一致性极低(20%)，方向不确定 | 历史5条:多5/空0,均分6.5|历史T+7准确率65%(23次,均收益+1.82%)"
+    "bear_discovery": "内幕大额抛售 $42,803,017（买入仅 $0） | 催化剂-41天内到来，波动性风险↑ | 历史5条:多5/空0,均分6.5|历史T+7准确率67%(24次,均收益+1.81%)"
   },
   "recommendation": {
-    "combined_probability_pct": 64.3,
+    "combined_probability_pct": 59.5,
     "rating": "HOLD",
     "action": "观察等待",
-    "reasoning": "人工分析 65.0% + ML 预测 62.5% = 综合 64.3%"
+    "reasoning": "人工分析 65.0% + ML 预测 46.6% = 综合 59.5%"
   }
 }
