@@ -10,9 +10,13 @@ build/
 .eggs/
 
 # ==================== Runtime Data ====================
-# 数据库
+# 数据库 + SQLite WAL/SHM（v0.23.7 补充：旧 commit 里有，现在 git rm --cached 解除）
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 
 # ML 模型
 ml_model*.pkl
@@ -83,3 +87,4 @@ test_report_*.html
 # API Key 文件（本地敏感数据）
 .alpha_hive_finnhub_key
 .alpha_hive_av_key
+pheromone_fallback.jsonl

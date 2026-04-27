@@ -544,11 +544,23 @@ def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
 
 
 def append_history(old_weights: dict, new_weights: dict,
-                   n_samples: int, dry_run: bool) -> None:
-    """追加一条记录到 weight_history.jsonl"""
+                   n_samples: int, dry_run: bool,
+                   method: Optional[str] = None,
+                   clamped: Optional[bool] = None,
+                   bootstrap_stable: Optional[bool] = None,
+                   applied: Optional[bool] = None) -> None:
+    """追加一条记录到 weight_history.jsonl
+
+    v0.23.7：增加 method / clamped / bootstrap_stable / applied 字段
+    （之前 dashboard 端读 method 拿到 None，因为没记录哪个 compute path 跑的）
+    """
     record = {
         "timestamp":  datetime.now().isoformat(),
         "dry_run":    dry_run,
+        "applied":    applied,                      # 是否真正写入 config.py
+        "method":     method,                        # "wls_time_decay" 或 "standard"
+        "clamped":    clamped,                       # _apply_weight_clamps 是否调整了值
+        "bootstrap_stable": bootstrap_stable,         # Bootstrap CI 是否覆盖新权重
         "n_samples":  n_samples,
         "old_weights": old_weights,
         "new_weights": new_weights,
@@ -658,7 +670,14 @@ def main() -> None:
     applied = False
     if significant or args.dry_run:
         applied = write_weights_to_config(new_weights, dry_run=args.dry_run)
-        append_history(old_weights, new_weights, n_samples, dry_run=args.dry_run)
+        append_history(
+            old_weights, new_weights, n_samples,
+            dry_run=args.dry_run,
+            method=result.get("method"),
+            clamped=result.get("clamped"),
+            bootstrap_stable=bootstrap.get("stable"),
+            applied=applied,
+        )
 
     # 8. 打印摘要
     print_summary(old_weights, new_weights, n_samples, applied, args.dry_run)

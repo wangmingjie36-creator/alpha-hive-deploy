@@ -2,8 +2,8 @@
   "version": "0.19.0",
   "starting_capital": 50000.0,
   "starting_date": "2026-03-09",
-  "cash": 49037.32971613001,
-  "last_run_date": "2026-04-23",
+  "cash": 49842.06785341001,
+  "last_run_date": "2026-04-24",
   "config_snapshot": {
     "starting_capital": 50000.0,
     "bootstrap_date": "2026-03-09",

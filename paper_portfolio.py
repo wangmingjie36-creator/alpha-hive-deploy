@@ -140,8 +140,13 @@ def _load_jsonl(path: Path) -> List[Dict]:
     return out
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    """修复 Bug #20：tmp + fsync + os.replace 原子写，防止崩溃/断电损坏"""
+def _atomic_write_text(path: Path, content: str, mode: int = 0o644) -> None:
+    """修复 Bug #20：tmp + fsync + os.replace 原子写，防止崩溃/断电损坏
+
+    v0.23.7：增加 mode 参数。tempfile.mkstemp 默认 0o600（仅 owner 读写），
+    会让 paper_portfolio_state/meta.json 等文件无法被其他工具/用户读取。
+    显式设为 0o644 与正常文件权限一致。
+    """
     import os as _os
     import tempfile
     tmp_fd, tmp_path = tempfile.mkstemp(
@@ -152,6 +157,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
             f.write(content)
             f.flush()
             _os.fsync(f.fileno())
+        _os.chmod(tmp_path, mode)  # 修正 mkstemp 默认 0o600
         _os.replace(tmp_path, path)
     except Exception:
         try:
