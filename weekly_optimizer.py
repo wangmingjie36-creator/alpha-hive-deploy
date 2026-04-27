@@ -51,17 +51,25 @@ try:
 except PermissionError:
     OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
 
-# v0.10.1 兜底：如 OUTPUT_DIR 是 VM 深度目录但里面没有 report_snapshots（常见情况——
-# VM 里 /sessions/*/mnt/深度分析报告/ 经常是空目录），则回退到 ALPHAHIVE_DIR/report_snapshots，
-# 因为 generate_deep_v2.py 实际把 snapshots 写在 Alpha Hive 目录下。
-_candidate_snapshots = OUTPUT_DIR / "report_snapshots"
-try:
-    if not _candidate_snapshots.exists():
-        _fallback_snapshots = ALPHAHIVE_DIR / "report_snapshots"
-        if _fallback_snapshots.exists():
-            _candidate_snapshots = _fallback_snapshots
-except PermissionError:
-    pass
+# v0.23.6 修复：始终优先用 Alpha Hive 项目目录的 snapshots（数据最完整）
+# 旧实现 OUTPUT_DIR/report_snapshots 即使存在也用（即使只有 28 个旧快照），
+# 导致 weekly_optimizer 跑时只看到 28 笔样本而非 Alpha Hive 实际的 245 笔。
+# 选择策略：取两者中文件数较多的（生产中 Alpha Hive 一定多于深度分析报告）。
+def _best_snapshots_dir() -> Path:
+    candidates = []
+    for p in [ALPHAHIVE_DIR / "report_snapshots", OUTPUT_DIR / "report_snapshots"]:
+        try:
+            if p.exists():
+                n = len(list(p.glob("*.json")))
+                candidates.append((n, p))
+        except (OSError, PermissionError):
+            pass
+    if not candidates:
+        return ALPHAHIVE_DIR / "report_snapshots"  # 兜底（即使不存在）
+    # 取样本数最多的目录
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+_candidate_snapshots = _best_snapshots_dir()
 
 CONFIG_PATH    = ALPHAHIVE_DIR / "config.py"
 SNAPSHOTS_DIR  = _candidate_snapshots
@@ -69,15 +77,13 @@ HISTORY_FILE   = ALPHAHIVE_DIR / "weight_history.jsonl"
 
 # ── 优化阈值 ──────────────────────────────────────────────────────────────────
 MIN_SAMPLES    = 10    # 少于此样本数不调整权重
-# v0.10.1 临时 gate (2026-04-19)：把写入门槛从 3.0pp 提高到 11.0pp。
-# 背景：本周 dry-run 显示 signal +9pp、catalyst -10.5pp、sentiment -10pp、
-# risk_adj +9.5pp，3 个维度撞上 MAX_SHIFT_PP=10 单次限幅，且 Bootstrap
-# 稳健性警告触发（104 条 T+7 样本上权重未稳定收敛）。
-# 作用：本周日定时任务跑出 dry-run 报告但不写 config，等 2026-04-26 再攒
-# 一周 T+7 样本后复跑——若方向收敛到同一侧（signal+/catalyst-/sentiment-/
-# risk_adj+），恢复 MIN_CHANGE_PP=3.0 放行；若反向则说明过拟合。
-# ⚠️ 恢复日期：2026-04-26 之后人工审查 dry-run 再决定是否 revert 为 3.0
-MIN_CHANGE_PP  = 11.0  # 临时 gate — 见上方 v0.10.1 注释
+# v0.23.6 (2026-04-26 周日复盘) — 解除 4-19 设的临时 gate
+# 原因：临时 gate 11.0pp 已让 weekly_optimizer 冻结 7 天，期间 catalyst 维度仍
+# 卡在 0.3316（v0.21 修复 _apply_weight_clamps 前的旧产物，>0.25 上限）。
+# 必须解锁让 _apply_weight_clamps 在下次 weekly_optimizer 运行时触发归一化。
+# 同时 4-19 dry-run 的 catalyst -10.5pp 方向与 v0.22 FF 归因发现的"catalyst
+# 维度被高估"一致，方向稳健。
+MIN_CHANGE_PP  = 3.0   # 恢复 v0.21 默认值（4-26 解锁，见 CHANGELOG v0.23.6）
 MAX_SHIFT_PP   = 10.0  # 单次调整上限（每个维度最多 ±10pp）
 
 # 5 维默认权重（与 config.py 保持一致，用于兜底）

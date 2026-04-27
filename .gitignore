@@ -45,6 +45,11 @@ realtime_metrics.json
 status.json
 training_data_extended.json
 
+# v0.23.6: sample-accumulator 产出，不应进入 git（agent_toolbox `git add -A` 会误 stage）
+.samples-only-*.json
+# 部署 push 日志（每次跑都变，无版本意义）
+.gh_pages_deploy_log.jsonl
+
 # ==================== Config Backups ====================
 *.backup.*
 
