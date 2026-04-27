@@ -79,20 +79,22 @@ class ScoutBeeNova(BeeAgent):
             crowding_score, component_scores = detector.calculate_crowding_score(metrics)
             crowding_signal = max(1.0, 10.0 - crowding_score / 10.0)
 
-            # ---- 3. 综合评分（v0.23.8 重平衡） ----
-            # 旧实现 60% insider + 40% crowding，月度审计显示 signal 方向准确率仅 45%
-            # （劣于随机）。新实现降低 insider 权重（T+7 时窗失效）+ 提升板块 RS / 供应链
-            # 权重，并把散布的 ×1.0X 微调统一到主公式。RS / supply / congress 数据
-            # 会在下方 2b/2c/2d 节点准备好后**第二阶段**重新计算最终 score。
-            #
-            # 第一阶段（这里）：先用 insider + crowding 做粗略 score，让下游 RS / supply
-            # / congress 节点能基于此 score 做局部决策（如 LLM intent 节点要 score 作种子）
-            _iw = _AS.get("scout_insider_weight", 0.20)   # 旧 0.6
-            _cw = _AS.get("scout_crowding_weight", 0.30)  # 旧 0.4
-            # 临时归一化：第一阶段权重总和 = 0.5（剩 0.5 由 2b/2c/2d 阶段填）
-            # 用 2x 放大让此处 score 在 [0, 10] 内，同时方向判断不变形
-            _stage1_total = _iw + _cw  # 0.50
-            score = (insider_score * _iw + crowding_signal * _cw) / _stage1_total
+            # ---- 3. 综合评分（v0.24.2: 修复 3 个 bug） ----
+            # v0.24.1 旧实现：第一阶段永远用 v2 权重 / _stage1_total，导致
+            # scout_v2_enabled=False 时实际跑的是 "40/60" 反向版本而非旧 60/40。
+            # 修复：v2 模式下用 v2 partial 公式；非 v2 模式直接跑旧 60/40。
+            _v2_enabled = _AS.get("scout_v2_enabled", True)
+            if _v2_enabled:
+                # 第一阶段（v2）：partial 公式给 LLM intent 节点作种子
+                _iw = _AS.get("scout_insider_weight", 0.20)
+                _cw = _AS.get("scout_crowding_weight", 0.30)
+                _stage1_total = _iw + _cw
+                score = (insider_score * _iw + crowding_signal * _cw) / max(_stage1_total, 1e-6)
+            else:
+                # 真正回退到旧公式 60% insider + 40% crowding
+                _iw = 0.60
+                _cw = 0.40
+                score = insider_score * _iw + crowding_signal * _cw
             score = clamp_score_cfg(score)
 
             # 方向判断（保持基于 insider_sentiment + crowding_score 阈值的硬规则）
@@ -160,6 +162,8 @@ class ScoutBeeNova(BeeAgent):
                 _log.debug("ScoutBeeNova LLM unavailable for %s: %s", ticker, e)
 
             # ---- 2b. 国会议员交易（Quiver Quant 免费端点）----
+            # v0.24.2 修复 Bug #2: 旧实现 c_score=0 时被当极端看空（拖低 0.5pp）
+            # 实际 0 通常是 fallback 默认值（无数据/算不出），应保持中性 5.0
             congress_data = {}
             congress_score_norm = 5.0  # 默认中性
             try:
@@ -171,12 +175,14 @@ class ScoutBeeNova(BeeAgent):
                 from congress_trades_scraper import get_congress_trades_for_ticker
                 congress_data = get_congress_trades_for_ticker(ticker, days_back=90)
                 if congress_data.get("trades"):
-                    c_score = congress_data.get("congress_score", 0)
+                    # 不传默认值，用 None 区分"无数据"和"算出 0"
+                    c_score = congress_data.get("congress_score")
                     net = congress_data.get("net_amount_est", 0)
                     net_label = f"净买入 ${net:,.0f}" if net > 0 else f"净卖出 ${abs(net):,.0f}"
-                    parts.append(f"国会交易: {congress_data['buy_count']}买/{congress_data['sell_count']}卖 {net_label} (信号:{c_score}/10)")
-                    # v0.23.8: c_score 已经是 0-10 标准化，直接进主公式
-                    congress_score_norm = float(c_score) if c_score is not None else 5.0
+                    parts.append(f"国会交易: {congress_data['buy_count']}买/{congress_data['sell_count']}卖 {net_label} (信号:{c_score if c_score else 'N/A'}/10)")
+                    # 只有真实算出 ≥1 的 c_score 才覆盖中性默认；0/None 都保留 5.0
+                    if c_score is not None and float(c_score) >= 1.0:
+                        congress_score_norm = float(c_score)
             except Exception as _e_ct:
                 _log.debug("Congress trades unavailable for %s: %s", ticker, _e_ct)
 
@@ -192,12 +198,15 @@ class ScoutBeeNova(BeeAgent):
                     f"{'【跑赢】' if rs_sig=='outperform' else '【跑输】' if rs_sig=='underperform' else ''}"
                 )
                 discovery = f"{discovery} | {rs_text}"
-                # v0.23.8: rs_signal 转 0-10 分量（强弱程度按 rs_val 平滑）
-                # outperform → 6-9 / underperform → 1-4 / neutral → 5
+                # v0.24.2 修复 Bug #3: 用 rs_val 原值（带符号）而非 abs()
+                # outperform 时 rs_val 应 > 0；若矛盾（signal 错配），仍按方向加 0.5 兜底
+                # 避免"signal=outperform 但 rs_val=-2"被错算成 5.5（高于中性）
                 if rs_sig == "outperform":
-                    rs_score_norm = min(9.0, 5.0 + max(0.5, abs(rs_val) / 4.0))
+                    _delta = max(rs_val, 0.5) if rs_val > 0 else 0.5
+                    rs_score_norm = min(9.0, 5.0 + _delta / 4.0)
                 elif rs_sig == "underperform":
-                    rs_score_norm = max(1.0, 5.0 - max(0.5, abs(rs_val) / 4.0))
+                    _delta = max(-rs_val, 0.5) if rs_val < 0 else 0.5
+                    rs_score_norm = max(1.0, 5.0 - _delta / 4.0)
 
             # ── 2d: 跨资产供应链信号 — TSM/AMAT/ASML/SOXX 相对强弱 ──
             supply_chain_data: dict = {}
