@@ -625,19 +625,25 @@ def _load_accuracy_data() -> dict:
                 _rets = [r["return_t7"] for r in _ret_rows]
                 _mean_r = sum(_rets) / len(_rets)
                 _std_r = (sum((x - _mean_r)**2 for x in _rets) / (len(_rets) - 1)) ** 0.5
-                _acc_sharpe = round(_mean_r / _std_r, 2) if _std_r > 0 else 0.0
-                # 最大回撤（连续亏损预测累计）
-                _cum = 0.0
-                _peak = 0.0
-                _max_dd_val = 0.0
+                # v0.23.4 修复：Sharpe 年化（T+7 周期 → ×√36，与 trading_costs 一致）
+                # 旧实现 round(mean/std) 是单期 Sharpe，跟 dashboard 上"Sharpe Ratio +0.22"
+                # 对应 — 实际年化应为 ×√36 ≈ +1.32
+                _acc_sharpe = round((_mean_r / _std_r) * (36 ** 0.5), 2) if _std_r > 0 else 0.0
+                # v0.23.4 修复：最大回撤改为基于"虚拟 NAV"的标准 drawdown 算法
+                # 旧实现 cum += return_t7（单纯累加百分点），单位是"累积百分点"而非
+                # NAV 比例 — 累加 210 笔每笔 ~1-15% 的 return 容易达 200-300%，
+                # 这就是"325.6% 最大回撤"的来源（数学上不可能 > 100%）
+                _nav = 1.0
+                _peak_nav = 1.0
+                _max_dd_pct = 0.0
                 for _rv in _rets:
-                    _cum += _rv
-                    if _cum > _peak:
-                        _peak = _cum
-                    _dd = _peak - _cum
-                    if _dd > _max_dd_val:
-                        _max_dd_val = _dd
-                _acc_max_dd = round(_max_dd_val, 2)
+                    _nav *= (1.0 + _rv / 100.0)
+                    if _nav > _peak_nav:
+                        _peak_nav = _nav
+                    _dd_pct = (1.0 - _nav / _peak_nav) * 100.0 if _peak_nav > 0 else 0.0
+                    if _dd_pct > _max_dd_pct:
+                        _max_dd_pct = _dd_pct
+                _acc_max_dd = round(_max_dd_pct, 2)
             # 当前连胜
             _streak_rows = _cn11.execute("""
                 SELECT correct_t7 FROM predictions
@@ -667,25 +673,39 @@ def _load_accuracy_data() -> dict:
     try:
         from backtester import PredictionStore as _PS_eq
         import sqlite3 as _sq_eq
+        # v0.23.4 修复：单一真相来源 — 优先用 portfolio_backtest.BacktestConfig 默认值
+        # 旧实现：默认 100000 / pos_pct 0.10 来自不存在的 PORTFOLIO_CONFIG，与代码实际 50000 不符
         try:
-            import config as _cfg_eq
-            _PF_CFG = getattr(_cfg_eq, "PORTFOLIO_CONFIG", {})
+            from portfolio_backtest import BacktestConfig as _BC
+            _bc_default = _BC()
+            _initial_capital = float(_bc_default.initial_capital)
+            _pos_pct = float(_bc_default.position_size_pct)
         except Exception:
-            _PF_CFG = {}
-        _initial_capital = float(_PF_CFG.get("initial_capital", 100000.0))
-        _pos_pct = float(_PF_CFG.get("position_size_pct", 0.10))
+            try:
+                import config as _cfg_eq
+                _PF_CFG = getattr(_cfg_eq, "PORTFOLIO_CONFIG", {})
+            except Exception:
+                _PF_CFG = {}
+            _initial_capital = float(_PF_CFG.get("initial_capital", 50000.0))
+            _pos_pct = float(_PF_CFG.get("position_size_pct", 0.10))
         _trading_stats["initial_capital"] = _initial_capital
+        _trading_stats["position_size_pct"] = _pos_pct
 
         _ps_eq = _PS_eq()
         with _sq_eq.connect(_ps_eq.db_path) as _cn_eq:
             _cn_eq.row_factory = _sq_eq.Row
+            # v0.23.4 修复：必须过滤 net_return_t7 IS NOT NULL，否则未回填的样本会被
+            # gross-0.1 兜底污染统计（当前 DB 里 280 笔 checked_t7=1 中只有 210 笔有
+            # net_return_t7；旧代码把 70 笔未扣成本数据也算进去，导致样本数虚高 50+）
             _eq_rows = _cn_eq.execute("""
                 SELECT date, ticker, direction, final_score,
                        return_t7, correct_t7,
                        net_return_t7, exit_reason, exit_date, holding_days,
                        spy_return_t7
                 FROM predictions
-                WHERE checked_t7=1 AND return_t7 IS NOT NULL
+                WHERE checked_t7=1
+                  AND return_t7 IS NOT NULL
+                  AND net_return_t7 IS NOT NULL
                 ORDER BY date ASC, id ASC
             """).fetchall()
 
@@ -701,15 +721,19 @@ def _load_accuracy_data() -> dict:
             _gross_rets, _net_rets, _spy_rets = [], [], []
             _wins_net, _losses_net = [], []
 
+            # v0.23.4 修复：固定每笔 $initial_capital × pos_pct 投入（不复利）
+            # 旧实现 _pnl = _cap × pos_pct × ret 把 NAV 复利展开 → 每笔吃当前 NAV×10%，
+            # 210 笔后 NAV 累乘到 1.7×（70% 收益 / Alpha vs SPY +56.84%）— **完全幻觉**。
+            # 真实场景下每笔最大 $5,000 投入（受现金 / 并发限制），不可能滚动复利。
+            # 正确的"虚拟权益曲线"应该等价于 portfolio_backtest 的固定每笔 fixed_size_usd
+            _fixed_size_usd = _initial_capital * _pos_pct  # 例 $50K × 10% = $5,000
             for _eqr in _eq_rows:
                 _r7_raw = _eqr["return_t7"]
                 _dir_lc = str(_eqr["direction"]).lower()
                 # Gross (direction-adjusted) = strategy P&L before costs
                 _gross_dir_adj = -_r7_raw if _dir_lc == "bearish" else _r7_raw
                 _net = _eqr["net_return_t7"]
-                if _net is None:
-                    # 兼容：未回填则用 gross - 0.1% 粗估
-                    _net = _gross_dir_adj - 0.1
+                # net_return_t7 已在 SQL WHERE 保证 NOT NULL，无需兜底
                 _spy = _eqr["spy_return_t7"] if _eqr["spy_return_t7"] is not None else 0.0
 
                 _gross_rets.append(_gross_dir_adj)
@@ -721,10 +745,10 @@ def _load_accuracy_data() -> dict:
                 elif _net < 0:
                     _losses_net.append(_net)
 
-                # 复利：每笔占 pos_pct 本金，收益乘以当前资金
-                _pnl_gross = _cap_gross * _pos_pct * (_gross_dir_adj / 100.0)
-                _pnl_net = _cap_net * _pos_pct * (_net / 100.0)
-                _pnl_spy = _cap_spy * _pos_pct * (_spy / 100.0)
+                # 固定仓位：每笔以 _fixed_size_usd 投入（避免复利幻觉）
+                _pnl_gross = _fixed_size_usd * (_gross_dir_adj / 100.0)
+                _pnl_net = _fixed_size_usd * (_net / 100.0)
+                _pnl_spy = _fixed_size_usd * (_spy / 100.0)
                 _cap_gross += _pnl_gross
                 _cap_net += _pnl_net
                 _cap_spy += _pnl_spy
@@ -806,6 +830,46 @@ def _load_accuracy_data() -> dict:
             _trading_stats["final_cap_gross"] = round(_cap_gross, 2)
             _trading_stats["final_cap_net"] = round(_cap_net, 2)
             _trading_stats["final_cap_spy"] = round(_cap_spy, 2)
+            # 标记此组数字为"独立 $5K 假设，无并发限制"上限参考
+            _trading_stats["methodology"] = "independent_per_trade_no_concurrency"
+
+            # v0.23.4 修复：准确率板块的 max_dd 复用 trading_stats 真实 NAV-based 值
+            # 旧实现 _acc_max_dd 用 100% 仓位 NAV 复利（_nav *= (1+ret)），对实际
+            # 10% 仓位策略偏离严重（96.87% vs 真实 11.64%）
+            if _max_dd_net > 0:
+                _acc_max_dd = round(_max_dd_net, 2)
+
+        # v0.23.4 修复：用 portfolio_backtest 真实结果（含 max_concurrent=15 并发约束）
+        # 覆盖关键卡片数字。equity_curve 保留独立 $5K 模型作为"理论上限参考"
+        try:
+            import portfolio_backtest as _pb
+            _bt_cfg = _pb.BacktestConfig()
+            _bt_result = _pb.run_backtest(_bt_cfg)
+            if "error" not in _bt_result:
+                _portfolio = _bt_result.get("portfolio", {})
+                _risk = _bt_result.get("risk_metrics", {})
+                _bench = _bt_result.get("benchmark", {})
+                _trade_stats_real = _bt_result.get("trade_stats", {})
+                _trading_stats["realistic"] = {
+                    "initial_capital": _portfolio.get("initial_nav"),
+                    "final_nav": _portfolio.get("final_nav"),
+                    "total_return_pct": _portfolio.get("total_return_pct"),
+                    "total_pnl_usd": _portfolio.get("total_pnl_usd"),
+                    "spy_end_nav": _bench.get("spy_end_nav"),
+                    "spy_return_pct": _bench.get("spy_return_pct"),
+                    "alpha_vs_spy": _bt_result.get("alpha"),
+                    "sharpe_ratio": _risk.get("sharpe_ratio"),
+                    "profit_factor": _risk.get("profit_factor"),
+                    "max_drawdown_pct": _risk.get("max_drawdown_pct"),
+                    "win_rate_pct": _risk.get("win_rate_pct"),
+                    "trades_entered": _trade_stats_real.get("total_trades"),
+                    "predictions_total": _bt_result.get("filter_stats", {}).get("entered", 0)
+                                       + sum(v for k, v in _bt_result.get("filter_stats", {}).items() if "skipped" in k),
+                    "max_concurrent": _bt_cfg.max_concurrent,
+                    "methodology": "portfolio_backtest_with_concurrency_limit",
+                }
+        except Exception as _pb_err:
+            _log.debug("portfolio_backtest 真实数字加载失败（dashboard 仅显示理论上限）: %s", _pb_err)
 
     except Exception as _eq_err:
         _log.debug("Equity curve 数据加载失败: %s", _eq_err)
@@ -1349,6 +1413,10 @@ def render_dashboard_html(report: Dict, date_str: str,
     _acc_win_streak = _acc["win_streak"]
     _acc_equity_curve = _acc.get("equity_curve", [])
     _acc_trading_stats = _acc.get("trading_stats", {})
+    # v0.23.4 修复 #F：把 initial_capital / position_size_pct 提到 render_dashboard_html scope
+    # 供下方方法学描述使用（避免 NameError）
+    _initial_capital = float(_acc_trading_stats.get("initial_capital", 50000.0))
+    _pos_pct = float(_acc_trading_stats.get("position_size_pct", 0.10))
 
     try:
         from zoneinfo import ZoneInfo as _ZI
@@ -1754,8 +1822,10 @@ def render_dashboard_html(report: Dict, date_str: str,
     <div class="acc-section-title" style="margin-top:18px">💰 真实策略回测（扣成本 · 路径依赖 · Sprint 1）</div>
     <div id="tradingStatsBox" style="margin:10px 0 16px">
       <div style="font-size:.78em;color:var(--ts);margin-bottom:8px">
-        📌 <strong>方法学</strong>：每笔按 $100k × 10% 仓位建仓，-5% 硬止损 / +10% 止盈（盘中触发），
-        扣滑点 + 佣金 + 借券费。<span style="color:#e99;">Gross 曲线不扣成本（参考），Net 曲线 = 真实可拿收益。</span>
+        📌 <strong>方法学</strong>：${int(_initial_capital/1000)}K 起始资金，每笔固定 ${int(_initial_capital * _pos_pct)}（{_pos_pct*100:.0f}% 仓位、不复利），
+        -5% 硬止损 / +10% 止盈（盘中触发，跳空时 gap-aware），扣滑点 + 佣金 + 借券费（空头）。
+        <span style="color:#e99;">Gross 曲线不扣成本（参考），Net 曲线 = 真实可拿收益。</span>
+        <span style="color:var(--mt);">Sharpe 已年化（×√36，T+7 周期）。</span>
       </div>
       <div id="tradingStatsCards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
     </div>

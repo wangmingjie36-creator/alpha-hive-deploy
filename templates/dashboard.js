@@ -557,6 +557,8 @@ window.AH.initAccWinTrend=function(){
 window.AH.initAccWinTrend();
 
 // ── Sprint 1 / v16.0: Trading Stats Panel (真实策略指标) ──
+// v0.23.4 修复：分母用 ts.initial_capital（不再硬编码 100000）+ 优先显示 portfolio_backtest
+//             真实数字（含并发约束）而非每笔独立 $5K 假设的理论上限
 window.AH.initTradingStats=function(){
   var ts=__AH__.trading_stats||{};
   var box=document.getElementById('tradingStatsCards');
@@ -572,27 +574,87 @@ window.AH.initTradingStats=function(){
       '</div>';
   }
 
-  var netRet=(ts.final_cap_net||100000)/100000 - 1;
-  var grossRet=(ts.final_cap_gross||100000)/100000 - 1;
-  var spyRet=(ts.final_cap_spy||100000)/100000 - 1;
-  var netColor=netRet>=0?'var(--bull)':'var(--bear)';
-  var alphaColor=(ts.alpha_vs_spy||0)>=0?'var(--bull)':'var(--bear)';
-  var pfColor=ts.profit_factor>=1.5?'var(--bull)':(ts.profit_factor>=1?'#f59e0b':'var(--bear)');
-  var shColor=ts.sharpe_net>=1?'var(--bull)':(ts.sharpe_net>=0?'#f59e0b':'var(--bear)');
+  // 优先使用 portfolio_backtest 真实结果（含 max_concurrent 并发限制）
+  var real=ts.realistic||null;
+  var initCap=Number(ts.initial_capital)||50000;  // v0.23.4: 不再硬编码 100000
 
   var html='';
-  html+=card((netRet*100).toFixed(2)+'%','💵 Net 累计收益（真实）',netColor,'$'+Math.round(ts.final_cap_net||0).toLocaleString());
-  html+=card((grossRet*100).toFixed(2)+'%','📈 Gross 累计（不扣成本）','var(--t)','纸面参考');
-  html+=card((spyRet*100).toFixed(2)+'%','📊 SPY 同期基准',(spyRet>=0?'var(--bull)':'var(--bear)'),'$'+Math.round(ts.final_cap_spy||0).toLocaleString());
-  html+=card(((ts.alpha_vs_spy||0)>=0?'+':'')+(ts.alpha_vs_spy||0).toFixed(2)+'%','🏆 vs SPY α',alphaColor,'跑赢基准');
-  html+=card((ts.sharpe_net!=null?ts.sharpe_net.toFixed(2):'—'),'Sharpe (净值)',shColor,'>1 可用');
-  html+=card((ts.profit_factor!=null?ts.profit_factor.toFixed(2):'—'),'Profit Factor',pfColor,'>1.5 好');
-  html+=card((ts.net_win_rate||0).toFixed(1)+'%','净值胜率','var(--t)','每笔扣成本后');
-  html+=card('-'+(ts.max_dd_net_pct||0).toFixed(2)+'%','最大回撤 (Net)','var(--bear)');
-  html+=card(ts.exit_sl_count||0,'❌ 止损触发',(ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
-  html+=card(ts.exit_tp_count||0,'✅ 止盈触发','var(--bull)','+10% 止盈');
-  html+=card(ts.exit_close_count||0,'⏱️ 持有到 T+7','var(--t)','未触发 SL/TP');
-  html+=card(((ts.avg_cost||0)*100).toFixed(1)+'bp','平均单笔成本','var(--ts)','滑点+佣金+借券');
+
+  if(real && real.final_nav!=null){
+    // === 真实回测口径（含并发限制）===
+    var netPct=Number(real.total_return_pct)||0;
+    var spyPct=Number(real.spy_return_pct)||0;
+    var alphaPct=Number(real.alpha_vs_spy)||0;
+    var sharpe=real.sharpe_ratio;
+    var pf=real.profit_factor;
+    var maxDd=Number(real.max_drawdown_pct)||0;
+    var winRate=Number(real.win_rate_pct)||0;
+    var trades=Number(real.trades_entered)||0;
+    var maxConc=Number(real.max_concurrent)||15;
+
+    var netColor=netPct>=0?'var(--bull)':'var(--bear)';
+    var spyColor=spyPct>=0?'var(--bull)':'var(--bear)';
+    var alphaColor=alphaPct>=0?'var(--bull)':'var(--bear)';
+    var pfColor=pf>=1.5?'var(--bull)':(pf>=1?'#f59e0b':'var(--bear)');
+    var shColor=sharpe>=1?'var(--bull)':(sharpe>=0?'#f59e0b':'var(--bear)');
+
+    html+='<div style="grid-column:1/-1;font-size:.78em;color:var(--mt);margin:2px 0 6px">'+
+      '🎯 <b>真实回测口径</b>（max_concurrent='+maxConc+' 并发限制 / 固定每笔 $'+
+      Math.round(initCap*(Number(ts.position_size_pct)||0.10)).toLocaleString()+'）'+
+      '</div>';
+    html+=card((netPct>=0?'+':'')+netPct.toFixed(2)+'%','💵 Net 累计收益',netColor,
+      '$'+Math.round(real.final_nav).toLocaleString()+' / 起始 $'+Math.round(initCap).toLocaleString());
+    html+=card((spyPct>=0?'+':'')+spyPct.toFixed(2)+'%','📊 SPY 同期基准',spyColor,
+      '$'+Math.round(real.spy_end_nav||initCap).toLocaleString());
+    html+=card((alphaPct>=0?'+':'')+alphaPct.toFixed(2)+'%','🏆 Alpha vs SPY',alphaColor,'剥离市场后超额');
+    html+=card((sharpe!=null?(sharpe>=0?'+':'')+Number(sharpe).toFixed(2):'—'),'Sharpe (净值)',shColor,'年化 ×√36');
+    html+=card((pf!=null?Number(pf).toFixed(2):'—'),'Profit Factor',pfColor,'>1.5 好');
+    html+=card(winRate.toFixed(1)+'%','净值胜率','var(--t)',trades+' 笔入场');
+    html+=card('-'+maxDd.toFixed(2)+'%','最大回撤','var(--bear)','基于 NAV');
+    html+=card(ts.exit_sl_count||0,'❌ 止损触发',(ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
+    html+=card(ts.exit_tp_count||0,'✅ 止盈触发','var(--bull)','+10% 止盈');
+    html+=card(ts.exit_close_count||0,'⏱️ 持有到 T+7','var(--t)','未触发 SL/TP');
+    html+=card(((ts.avg_cost||0)*100).toFixed(1)+'bp','平均单笔成本','var(--ts)','滑点+佣金+借券');
+
+    // 理论上限对比（独立每笔 $5K，无并发约束 — 仅供参考）
+    if(ts.final_cap_net!=null){
+      var theoNet=(Number(ts.final_cap_net)/initCap-1)*100;
+      html+='<div style="grid-column:1/-1;font-size:.72em;color:var(--ts);margin:6px 0 2px;border-top:1px dashed var(--border);padding-top:6px">'+
+        '⚠️ <b>理论上限参考</b>（每笔独立 $'+Math.round(initCap*0.10).toLocaleString()+
+        '，假设无并发约束、不复利）：Net '+(theoNet>=0?'+':'')+theoNet.toFixed(2)+'%，'+
+        '仅适用于单笔信号质量评估，<b>不代表实战可达</b>'+
+        '</div>';
+    }
+  } else {
+    // === 退回到独立每笔模型（理论上限）===
+    var netRetT=(Number(ts.final_cap_net)||initCap)/initCap-1;
+    var grossRetT=(Number(ts.final_cap_gross)||initCap)/initCap-1;
+    var spyRetT=(Number(ts.final_cap_spy)||initCap)/initCap-1;
+    var netColorT=netRetT>=0?'var(--bull)':'var(--bear)';
+    var alphaColorT=(ts.alpha_vs_spy||0)>=0?'var(--bull)':'var(--bear)';
+    var pfColorT=ts.profit_factor>=1.5?'var(--bull)':(ts.profit_factor>=1?'#f59e0b':'var(--bear)');
+    var shColorT=ts.sharpe_net>=1?'var(--bull)':(ts.sharpe_net>=0?'#f59e0b':'var(--bear)');
+
+    html+='<div style="grid-column:1/-1;font-size:.78em;color:#f59e0b;margin:2px 0 6px">'+
+      '⚠️ <b>理论上限口径</b>（每笔独立 $'+Math.round(initCap*0.10).toLocaleString()+
+      '，无并发约束 — portfolio_backtest 真实数字暂不可用）'+
+      '</div>';
+    html+=card((netRetT*100).toFixed(2)+'%','💵 Net 累计收益（理论上限）',netColorT,
+      '$'+Math.round(ts.final_cap_net||initCap).toLocaleString());
+    html+=card((grossRetT*100).toFixed(2)+'%','📈 Gross 累计（不扣成本）','var(--t)','纸面参考');
+    html+=card((spyRetT*100).toFixed(2)+'%','📊 SPY 同期',(spyRetT>=0?'var(--bull)':'var(--bear)'),
+      '$'+Math.round(ts.final_cap_spy||initCap).toLocaleString());
+    html+=card(((ts.alpha_vs_spy||0)>=0?'+':'')+(ts.alpha_vs_spy||0).toFixed(2)+'%','🏆 vs SPY α (上限)',alphaColorT,'独立每笔假设');
+    html+=card((ts.sharpe_net!=null?ts.sharpe_net.toFixed(2):'—'),'Sharpe (净值)',shColorT,'>1 可用');
+    html+=card((ts.profit_factor!=null?ts.profit_factor.toFixed(2):'—'),'Profit Factor',pfColorT,'>1.5 好');
+    html+=card((ts.net_win_rate||0).toFixed(1)+'%','净值胜率','var(--t)','每笔扣成本后');
+    html+=card('-'+(ts.max_dd_net_pct||0).toFixed(2)+'%','最大回撤 (Net)','var(--bear)');
+    html+=card(ts.exit_sl_count||0,'❌ 止损触发',(ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
+    html+=card(ts.exit_tp_count||0,'✅ 止盈触发','var(--bull)','+10% 止盈');
+    html+=card(ts.exit_close_count||0,'⏱️ 持有到 T+7','var(--t)','未触发 SL/TP');
+    html+=card(((ts.avg_cost||0)*100).toFixed(1)+'bp','平均单笔成本','var(--ts)','滑点+佣金+借券');
+  }
+
   box.innerHTML=html;
 };
 
