@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>NVDA FF6 20年周期比对</title>
+<style>
+  :root { --bg:#fff; --bg2:#f5f4f0; --text:#1a1a1a; --muted:#666; --border:rgba(0,0,0,0.1); }
+  * { box-sizing:border-box; margin:0; padding:0; font-family: -apple-system, sans-serif; }
+  body { background:var(--bg2); color:var(--text); padding:32px 24px; }
+  .card { background:var(--bg); border:1px solid var(--border); border-radius:12px; padding:20px 24px; margin-bottom:20px; }
+  h1 { font-size:20px; font-weight:500; margin-bottom:4px; }
+  h2 { font-size:15px; font-weight:500; margin-bottom:14px; color:var(--muted); letter-spacing:.03em; text-transform:uppercase; font-size:11px; }
+  .grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:20px; }
+  .metric { background:var(--bg2); border-radius:8px; padding:14px 16px; }
+  .m-label { font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .m-val { font-size:22px; font-weight:500; }
+  .up { color:#3B6D11; } .down { color:#A32D2D; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  thead tr { border-bottom:1px solid var(--border); }
+  th { padding:8px 10px; text-align:right; font-weight:500; color:var(--muted); font-size:11px; }
+  th:first-child { text-align:left; }
+  tbody tr { border-bottom:0.5px solid var(--border); }
+  tbody tr:hover { background:var(--bg2); }
+  .chart-wrap { position:relative; height:300px; }
+  .target-box { background:#EEEDFE; border-radius:8px; padding:12px 16px; margin-bottom:16px; font-size:13px; color:#3C3489; line-height:1.7; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>NVDA · Fama-French 6因子 · 20年历史周期比对</h1>
+  <p style="font-size:13px;color:var(--muted);margin-top:6px;">筛选标准：β_mkt ∈ [1.39, 1.89] · β_hml ∈ [-1.33, -0.63] · β_mom ∈ [0.27, 0.67] · 滚动窗口 252日 · 生成时间 2026-04-27 18:04</p>
+</div>
+
+<div class="card">
+  <div class="target-box">
+    今日因子基准（2026-04-27）：β_mkt = 1.637 · β_hml = -0.98 · β_mom = 0.47 · Alpha = 14.46% · IR = 0.64
+  </div>
+  <div class="grid4">
+    <div class="metric"><div class="m-label">历史匹配窗口数</div><div class="m-val">12</div></div>
+    <div class="metric"><div class="m-label">1个月胜率</div><div class="m-val down">33.3%</div></div>
+    <div class="metric"><div class="m-label">平均1月收益</div><div class="m-val down">-6.4%</div></div>
+    <div class="metric"><div class="m-label">中位1月收益</div><div class="m-val down">-4.3%</div></div>
+    <div class="metric"><div class="m-label">最佳1月收益</div><div class="m-val up">+14.9%</div></div>
+    <div class="metric"><div class="m-label">最差1月收益</div><div class="m-val down">-50.2%</div></div>
+    <div class="metric"><div class="m-label">平均最大回撤</div><div class="m-val down">-18.0%</div></div>
+    <div class="metric"><div class="m-label">上涨/下跌</div><div class="m-val">4 / 8</div></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>各窗口后续1月收益分布</h2>
+  <div class="chart-wrap"><canvas id="barChart" role="img" aria-label="Bar chart of 1-month forward returns for each similar FF6 factor window over 20 years"></canvas></div>
+</div>
+
+<div class="card">
+  <h2>历史匹配窗口明细（最新优先）</h2>
+  <div style="overflow-x:auto;">
+  <table>
+    <thead><tr>
+      <th style="text-align:left;">日期</th>
+      <th>入场价</th>
+      <th>β_mkt</th>
+      <th>β_hml</th>
+      <th>β_mom</th>
+      <th>IR</th>
+      <th>后续1月</th>
+      <th>期间MDD</th>
+    </tr></thead>
+    <tbody>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2026-02-03</td>
+      <td style="padding:7px 10px;text-align:right;">$ 180.33</td>
+      <td style="padding:7px 10px;text-align:right;">1.553</td>
+      <td style="padding:7px 10px;text-align:right;">-1.283</td>
+      <td style="padding:7px 10px;text-align:right;">0.652</td>
+      <td style="padding:7px 10px;text-align:right;">1.31</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#E24B4A;">▼ -1.4%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-9.4%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2022-06-07</td>
+      <td style="padding:7px 10px;text-align:right;">$ 18.89</td>
+      <td style="padding:7px 10px;text-align:right;">1.789</td>
+      <td style="padding:7px 10px;text-align:right;">-0.631</td>
+      <td style="padding:7px 10px;text-align:right;">0.656</td>
+      <td style="padding:7px 10px;text-align:right;">2.15</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#A32D2D;">▼ -19.9%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-23.2%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2021-11-22</td>
+      <td style="padding:7px 10px;text-align:right;">$ 31.89</td>
+      <td style="padding:7px 10px;text-align:right;">1.426</td>
+      <td style="padding:7px 10px;text-align:right;">-0.662</td>
+      <td style="padding:7px 10px;text-align:right;">0.271</td>
+      <td style="padding:7px 10px;text-align:right;">2.52</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#A32D2D;">▼ -7.2%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-16.9%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2021-02-17</td>
+      <td style="padding:7px 10px;text-align:right;">$ 14.86</td>
+      <td style="padding:7px 10px;text-align:right;">1.459</td>
+      <td style="padding:7px 10px;text-align:right;">-0.644</td>
+      <td style="padding:7px 10px;text-align:right;">0.283</td>
+      <td style="padding:7px 10px;text-align:right;">1.30</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#A32D2D;">▼ -13.8%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-22.3%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2020-11-04</td>
+      <td style="padding:7px 10px;text-align:right;">$ 13.75</td>
+      <td style="padding:7px 10px;text-align:right;">1.494</td>
+      <td style="padding:7px 10px;text-align:right;">-0.756</td>
+      <td style="padding:7px 10px;text-align:right;">0.282</td>
+      <td style="padding:7px 10px;text-align:right;">1.88</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#E24B4A;">▼ -1.3%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-12.3%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2018-11-06</td>
+      <td style="padding:7px 10px;text-align:right;">$ 5.23</td>
+      <td style="padding:7px 10px;text-align:right;">1.656</td>
+      <td style="padding:7px 10px;text-align:right;">-0.638</td>
+      <td style="padding:7px 10px;text-align:right;">0.658</td>
+      <td style="padding:7px 10px;text-align:right;">-0.43</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#A32D2D;">▼ -28.0%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-32.3%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2008-06-09</td>
+      <td style="padding:7px 10px;text-align:right;">$ 0.54</td>
+      <td style="padding:7px 10px;text-align:right;">1.847</td>
+      <td style="padding:7px 10px;text-align:right;">-1.157</td>
+      <td style="padding:7px 10px;text-align:right;">0.285</td>
+      <td style="padding:7px 10px;text-align:right;">0.21</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#A32D2D;">▼ -50.2%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-50.2%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2008-05-01</td>
+      <td style="padding:7px 10px;text-align:right;">$ 0.49</td>
+      <td style="padding:7px 10px;text-align:right;">1.853</td>
+      <td style="padding:7px 10px;text-align:right;">-1.303</td>
+      <td style="padding:7px 10px;text-align:right;">0.283</td>
+      <td style="padding:7px 10px;text-align:right;">-0.03</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#639922;">▲ +11.4%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-5.4%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2008-01-10</td>
+      <td style="padding:7px 10px;text-align:right;">$ 0.65</td>
+      <td style="padding:7px 10px;text-align:right;">1.637</td>
+      <td style="padding:7px 10px;text-align:right;">-1.157</td>
+      <td style="padding:7px 10px;text-align:right;">0.653</td>
+      <td style="padding:7px 10px;text-align:right;">0.28</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#A32D2D;">▼ -8.1%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-19.2%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2007-11-12</td>
+      <td style="padding:7px 10px;text-align:right;">$ 0.69</td>
+      <td style="padding:7px 10px;text-align:right;">1.571</td>
+      <td style="padding:7px 10px;text-align:right;">-0.690</td>
+      <td style="padding:7px 10px;text-align:right;">0.648</td>
+      <td style="padding:7px 10px;text-align:right;">0.69</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#639922;">▲ +14.9%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-9.7%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2007-08-13</td>
+      <td style="padding:7px 10px;text-align:right;">$ 0.66</td>
+      <td style="padding:7px 10px;text-align:right;">1.654</td>
+      <td style="padding:7px 10px;text-align:right;">-0.638</td>
+      <td style="padding:7px 10px;text-align:right;">0.617</td>
+      <td style="padding:7px 10px;text-align:right;">1.11</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#639922;">▲ +14.6%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-6.1%</td>
+    </tr>
+    <tr>
+      <td style="padding:7px 10px;color:var(--text)">2006-10-27</td>
+      <td style="padding:7px 10px;text-align:right;">$ 0.49</td>
+      <td style="padding:7px 10px;text-align:right;">1.885</td>
+      <td style="padding:7px 10px;text-align:right;">-1.073</td>
+      <td style="padding:7px 10px;text-align:right;">0.666</td>
+      <td style="padding:7px 10px;text-align:right;">2.13</td>
+      <td style="padding:7px 10px;text-align:right;font-weight:500;color:#639922;">▲ +12.7%</td>
+      <td style="padding:7px 10px;text-align:right;color:#A32D2D;">-8.3%</td>
+    </tr></tbody>
+  </table>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const dates   = ['2006-10-27', '2007-08-13', '2007-11-12', '2008-01-10', '2008-05-01', '2008-06-09', '2018-11-06', '2020-11-04', '2021-02-17', '2021-11-22', '2022-06-07', '2026-02-03'];
+const rets    = [12.72, 14.56, 14.89, -8.09, 11.44, -50.23, -27.98, -1.33, -13.79, -7.24, -19.92, -1.4];
+const prices  = [0.49, 0.66, 0.69, 0.65, 0.49, 0.54, 5.23, 13.75, 14.86, 31.89, 18.89, 180.33];
+const mdds    = [-8.35, -6.1, -9.67, -19.24, -5.41, -50.23, -32.32, -12.31, -22.33, -16.94, -23.25, -9.39];
+const irs     = [2.132, 1.108, 0.693, 0.283, -0.026, 0.212, -0.43, 1.883, 1.299, 2.52, 2.15, 1.31];
+
+const bgColors = rets.map(r => r > 15 ? '#3B6D11' : r > 5 ? '#639922' : r > 0 ? '#97C459' : r > -5 ? '#F09595' : '#E24B4A');
+
+new Chart(document.getElementById('barChart'), {
+  type: 'bar',
+  data: {
+    labels: dates,
+    datasets: [{
+      label: '后续1月收益 %',
+      data: rets,
+      backgroundColor: bgColors,
+    }]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          title: ctx => dates[ctx[0].dataIndex],
+          label: ctx => [
+            ' 1月收益: ' + rets[ctx.dataIndex].toFixed(2) + '%',
+            ' 入场价: $' + prices[ctx.dataIndex].toFixed(2),
+            ' 期间MDD: ' + mdds[ctx.dataIndex].toFixed(2) + '%',
+            ' IR: ' + irs[ctx.dataIndex].toFixed(3),
+          ]
+        }
+      }
+    },
+    scales: {
+      x: { ticks: { maxRotation: 45, font: { size: 10 } }, grid: { display: false } },
+      y: {
+        title: { display: true, text: '1月收益 %', font: { size: 11 } },
+        ticks: { callback: v => v.toFixed(0) + '%' },
+        grid: { color: 'rgba(0,0,0,0.06)' }
+      }
+    }
+  }
+});
+</script>
+</body>
+</html>
