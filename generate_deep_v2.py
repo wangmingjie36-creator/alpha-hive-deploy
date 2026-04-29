@@ -525,8 +525,21 @@ def extract(data: dict) -> dict:
     # Congress trades（国会交易 - ScoutBee details）
     congress = scout_det.get("congress", {})
     # VIX 期限结构（GuardBee details）
+    # guard_bee 可能存两种格式：
+    #   新格式（vix_term_structure.py）: {structure, spot_vix, m1, m2, m1_m2_spread, signal}
+    #   旧/宏观格式（_calc_macro_adjustment details）: {vix, vix_term, yield_curve, ...}
+    # 统一规范化为新格式，避免下游字段名不匹配导致 VIX 段落静默丢失。
     gdet = guard.get("details", {})
-    vix_term = gdet.get("vix_term_structure", {})
+    vix_term = gdet.get("vix_term_structure", {}) or {}
+    if vix_term and not vix_term.get("structure"):
+        _vt_remap = {}
+        if vix_term.get("vix") is not None:
+            _vt_remap["spot_vix"] = vix_term["vix"]
+        _vt_str = vix_term.get("vix_term", "")
+        if _vt_str and _vt_str not in ("", "unknown"):
+            _vt_remap["structure"] = _vt_str
+        if _vt_remap:
+            vix_term = {**vix_term, **_vt_remap}
 
     return {
         "ticker": ticker,
@@ -2441,6 +2454,17 @@ def _build_macro_narrative(ctx: dict) -> str:
 
     # VIX 期限结构段落
     vix_term = ctx.get('vix_term_structure', {}) or {}
+    # 兼容 guard_bee 旧格式：{vix: float, vix_term: str} → 规范化为 {spot_vix, structure}
+    # 根因：guard_bee._calc_macro_adjustment() 返回 details={vix, vix_term, ...}，
+    # 但此处期望 {structure, spot_vix, m1, m2, ...}，字段名不同导致 VIX 段落静默丢失。
+    if vix_term and not vix_term.get('structure'):
+        _remap = {}
+        if vix_term.get('vix') is not None:
+            _remap['spot_vix'] = vix_term['vix']
+        if vix_term.get('vix_term') and vix_term['vix_term'] not in ('', 'unknown'):
+            _remap['structure'] = vix_term['vix_term']
+        if _remap:
+            vix_term = {**vix_term, **_remap}
     vix_para = ''
     if vix_term and vix_term.get('structure') not in ('', 'unknown', None):
         structure  = vix_term.get('structure', 'unknown')

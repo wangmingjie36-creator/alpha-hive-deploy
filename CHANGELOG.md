@@ -5,6 +5,24 @@
 
 ---
 
+## [0.24.1] — 2026-04-28 — VIX 数据静默丢失修复
+
+### Fixed
+
+- **`generate_deep_v2.py` VIX 期限结构字段名不匹配**
+  - 根因：`guard_bee._calc_macro_adjustment()` 把宏观 details 整体存入 `vix_term_structure`，
+    其 key 为 `vix`（数值）和 `vix_term`（字符串）；而 `generate_deep_v2.py` 下游读取时
+    期望 `spot_vix` 和 `structure` 两个 key，两者不一致导致条件判断恒为 False，
+    VIX 段落在 CH5 宏观章节和 F&G 交叉分析中静默不渲染。
+  - 修复位置一（~Line 529）：在 ctx 构建阶段做一次规范化，将旧格式
+    `{vix, vix_term, ...}` → 合并 `{spot_vix, structure, ...}`，下游三处读取自动生效。
+  - 修复位置二（~Line 2443）：保留第二层 remap 作冗余保险，防止其他路径写入旧格式。
+  - 新格式（`vix_term_structure.py` 直接调用路径）不受影响，条件 `not vix_term.get('structure')` 保护。
+  - 验证：`analysis-NVDA-ml-2026-04-28.json` 中 `vix = 17.83`、`vix_term = contango`，
+    修复后可正常渲染为「VIX 17.8，Contango 结构」段落。
+
+---
+
 ## [0.24.0] — 2026-04-26 — 周报驱动的 9 项升级（拆 NVDA 单标的偏置 + Call 流分类 + 自我对抗）
 
 > **背景**：2026-04-26 周报显示整体胜率 63.0%，10/10 误判全部集中在 NVDA、其中 8 次为「看多但跌」、5 次为「call_dominant + 看多」。诊断指向系统性多头偏置 + Call 主导信号被机构对冲流污染。本次升级覆盖 P0/P1/P2 三层共 9 个改动。
