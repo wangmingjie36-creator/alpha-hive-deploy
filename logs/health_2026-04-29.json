@@ -1,0 +1,70 @@
+{
+  "timestamp": "2026-04-29T18:55:45.280819",
+  "checks": [
+    {
+      "name": "daily-scan: 最近一次扫描 commit",
+      "task_id": "alpha-hive-daily-scan",
+      "severity": "ok",
+      "message": "2.6h 前 (Alpha Hive 蜂群日报 2026-04-29 16:17)",
+      "detail": {
+        "hours_ago": 2.6,
+        "limit": 30
+      }
+    },
+    {
+      "name": "daily-scan: 最新 .swarm_results 产出",
+      "task_id": "alpha-hive-daily-scan",
+      "severity": "ok",
+      "message": ".swarm_results_2026-04-29.json (475KB)",
+      "detail": null
+    },
+    {
+      "name": "weekly-optimizer: 上次写入时间",
+      "task_id": "alpha-hive-weekly-optimizer",
+      "severity": "ok",
+      "message": "2 天前 (2026-04-26 20:22)",
+      "detail": {
+        "age_days": 2,
+        "method": null,
+        "applied": null
+      }
+    },
+    {
+      "name": "weekly-optimizer: 字段完整性",
+      "task_id": "alpha-hive-weekly-optimizer",
+      "severity": "warn",
+      "message": "最新记录缺 method 字段（v0.24.2 后应补全）",
+      "detail": null
+    },
+    {
+      "name": "sample-accumulator: 上周日写入量",
+      "task_id": "alpha-hive-sample-accumulator",
+      "severity": "ok",
+      "message": "上周日 2026-04-26 写入 39 笔 ✓",
+      "detail": {
+        "last_sunday": "2026-04-26",
+        "n_predictions": 39
+      }
+    },
+    {
+      "name": "sample-accumulator: 仓库污染检查",
+      "task_id": "alpha-hive-sample-accumulator",
+      "severity": "ok",
+      "message": ".samples-only-*.json 未污染 git 仓库 ✓",
+      "detail": null
+    },
+    {
+      "name": "monthly-self-analysis: 本月 brief",
+      "task_id": "alpha-hive-monthly-self-analysis",
+      "severity": "ok",
+      "message": "self_analysis_2026-04.md (29d 前)",
+      "detail": null
+    }
+  ],
+  "summary": {
+    "ok": 6,
+    "warn": 1,
+    "fail": 0
+  },
+  "overall_status": "🟡 警告"
+}

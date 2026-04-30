@@ -1,0 +1,2 @@
+*Alpha Hive 健康巡检 🟡 警告*
+⚠️ `alpha-hive-weekly-optimizer` — weekly-optimizer: 字段完整性: 最新记录缺 method 字段（v0.24.2 后应补全）
