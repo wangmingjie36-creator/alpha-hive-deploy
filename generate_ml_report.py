@@ -772,10 +772,31 @@ class MLEnhancedReportGenerator:
         analyst = det.get("analyst_targets", {})
         score = ad.get("score", 0)
         direction = ad.get("direction", "neutral")
-        # 按 days_until 排序，取前 5 个
+        # v0.24.3 修复：渲染前对 cached catalysts 做过期过滤
+        # 旧 .swarm_results_*.json 里可能有 days_until<0 的过期事件
+        # 过滤策略：递归用真实 date 重算 days_until，过滤 < -3（容忍 3 天延迟，如周末跨过）
+        from datetime import datetime as _dt_filter
+        _now = _dt_filter.now()
+        catalysts_clean = []
+        for c in catalysts:
+            if not isinstance(c, dict):
+                continue
+            try:
+                _ev_dt = _dt_filter.strptime(c.get("date", ""), "%Y-%m-%d")
+                _real_days = (_ev_dt - _now).days
+            except (ValueError, TypeError):
+                continue
+            if _real_days < -3:
+                continue  # 过期 > 3 天的丢弃
+            # 用真实 days_until 覆盖（旧 cached 可能是 0 硬编码或负值）
+            c2 = dict(c)
+            c2["days_until"] = _real_days
+            catalysts_clean.append(c2)
+        catalysts = catalysts_clean
+        # 按 days_until 排序，取前 5 个（未来事件优先；负值绝对值小的次之）
         cats_sorted = sorted(
-            [c for c in catalysts if isinstance(c, dict)],
-            key=lambda x: abs(x.get("days_until", 999))
+            catalysts,
+            key=lambda x: (x.get("days_until", 999) < 0, abs(x.get("days_until", 999)))
         )[:5]
         # ASCII 时间轴
         timeline_html = ""

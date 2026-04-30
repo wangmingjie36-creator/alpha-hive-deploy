@@ -172,10 +172,25 @@ class CatalystTimeline:
         self.catalysts.sort(key=lambda c: c.scheduled_date if c.scheduled_date else "9999-12-31")
 
     def get_upcoming_catalysts(self, days_ahead: int = 90) -> List[Catalyst]:
-        """获取未来 N 天内的催化剂"""
-        cutoff_date = datetime.now() + timedelta(days=days_ahead)
-        return [c for c in self.catalysts
-                if c.scheduled_date and datetime.strptime(c.scheduled_date, "%Y-%m-%d") <= cutoff_date]
+        """获取未来 N 天内的催化剂
+
+        v0.24.3 修复：旧实现只检查 `<= cutoff_date`，没过滤已过期事件。
+        导致 NVDA Q4 FY2026 (2026-03-15) 在 4-29 显示距今 -46 天的报告。
+        """
+        now = datetime.now()
+        cutoff_date = now + timedelta(days=days_ahead)
+        result = []
+        for c in self.catalysts:
+            if not c.scheduled_date:
+                continue
+            try:
+                event_dt = datetime.strptime(c.scheduled_date, "%Y-%m-%d")
+            except ValueError:
+                continue
+            # 必须在 [今天, cutoff] 区间内（已过期事件不返回）
+            if now.date() <= event_dt.date() <= cutoff_date.date():
+                result.append(c)
+        return result
 
     def generate_timeline_html(self) -> str:
         """生成时间线 HTML"""

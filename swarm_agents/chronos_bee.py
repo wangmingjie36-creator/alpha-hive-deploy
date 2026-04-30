@@ -104,27 +104,37 @@ class ChronosBeeHorizon(BeeAgent):
                                     })
 
                     # 提取其他事件
+                    # v0.24.3 修复：旧实现 days_until 硬编码 0 + 不过滤过期日期
+                    # 导致 4-29 报告显示 Ex-Dividend Date 2026-03-10 "距今 0 天"
+                    # 正确做法：用真实日期算 days_until，并过滤过期事件
                     for key in ["Ex-Dividend Date", "Dividend Date"]:
                         val = cal_dict.get(key)
-                        if val:
-                            if isinstance(val, dict):
-                                for k, v in val.items():
-                                    if hasattr(v, 'strftime'):
-                                        catalysts_found.append({
-                                            "event": key,
-                                            "date": v.strftime("%Y-%m-%d"),
-                                            "days_until": 0,
-                                            "type": "dividend",
-                                            "severity": "medium",
-                                        })
-                            elif hasattr(val, 'strftime'):
-                                catalysts_found.append({
-                                    "event": key,
-                                    "date": val.strftime("%Y-%m-%d"),
-                                    "days_until": 0,
-                                    "type": "dividend",
-                                    "severity": "medium",
-                                })
+                        if not val:
+                            continue
+                        # 把可能的 dict 形式（{ticker: date}）解构为 date 列表
+                        date_objs = []
+                        if isinstance(val, dict):
+                            for v in val.values():
+                                if hasattr(v, 'strftime'):
+                                    date_objs.append(v)
+                        elif hasattr(val, 'strftime'):
+                            date_objs.append(val)
+                        for d_obj in date_objs:
+                            try:
+                                d_str = d_obj.strftime("%Y-%m-%d")
+                                from datetime import datetime as _dt_div
+                                _div_days = (_dt_div.strptime(d_str, "%Y-%m-%d") - _dt_div.now()).days
+                            except (ValueError, AttributeError):
+                                continue
+                            if _div_days < 0:
+                                continue  # 跳过过期事件
+                            catalysts_found.append({
+                                "event": key,
+                                "date": d_str,
+                                "days_until": _div_days,
+                                "type": "dividend",
+                                "severity": "medium",
+                            })
             except (*NETWORK_ERRORS, AttributeError) as e:
                 _log.warning("ChronosBeeHorizon yfinance calendar unavailable for %s: %s", ticker, e)
 
