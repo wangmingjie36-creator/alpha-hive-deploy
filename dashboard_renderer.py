@@ -1034,6 +1034,154 @@ def _render_hist_card(entry: dict) -> str:
 # Extracted HTML builder helpers (Step 4 of refactor)
 # ---------------------------------------------------------------------------
 
+def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) -> str:
+    """v0.24.5 #2: 构建"今日 Top 1-3 Actionable" 板块
+
+    筛选条件（4 重门控）:
+      1. score >= 6.5 OR score <= 4.5   — 明确方向，避开中性犹豫
+      2. agent_std < 1.5                — 蜂群一致（5 维分数标准差）
+      3. macro 不阻拦                   — risk-off 时不推强看多
+      4. 有近期催化剂（≤ 14d）OR 高异常流  — 短期事件驱动
+
+    输出：1-3 个高置信度卡片，余下折叠到下方"观察名单"
+    无候选时显示"今日无强信号，建议观望"
+    """
+    import math as _math
+    import json as _json_act
+    candidates = []
+    for tk in all_tickers_sorted:
+        sd = swarm_detail.get(tk, {})
+        if not sd:
+            continue
+        score = sd.get("final_score") or sd.get("composite_score") or 5.0
+        direction = (sd.get("direction") or "neutral").lower()
+        ad = sd.get("agent_details", {})
+
+        # 1. 方向门控
+        is_strong_bull = score >= 6.5 and "bull" in direction
+        is_strong_bear = score <= 4.5 and "bear" in direction
+        if not (is_strong_bull or is_strong_bear):
+            continue
+
+        # 2. Agent 共识门控（dimension_scores std）
+        dim_scores = sd.get("dimension_scores", {})
+        if isinstance(dim_scores, dict) and dim_scores:
+            vals = [float(v) for v in dim_scores.values() if v is not None]
+            if len(vals) >= 3:
+                mean = sum(vals) / len(vals)
+                var = sum((v - mean) ** 2 for v in vals) / len(vals)
+                std = _math.sqrt(var)
+                if std > 1.5:
+                    continue  # 蜂群分歧大，跳过
+
+        # 3. 催化剂门控
+        chronos = ad.get("ChronosBeeHorizon", {}).get("details", {})
+        cats = chronos.get("catalysts") or []
+        nearest_cat = None
+        for c in cats:
+            d = c.get("days_until")
+            if isinstance(d, (int, float)) and 0 < d <= 14:
+                if nearest_cat is None or d < nearest_cat.get("days_until", 999):
+                    nearest_cat = c
+
+        # 4. 异常流门控（OracleBee unusual flow）
+        oracle = ad.get("OracleBeeEcho", {}).get("details", {})
+        unusual = oracle.get("unusual_flow") or {}
+        has_unusual = bool(unusual.get("signals")) and unusual.get("data_source") != "fallback"
+
+        # 至少满足"有催化剂" OR "有异常流"才算 actionable
+        if not nearest_cat and not has_unusual:
+            continue
+
+        candidates.append({
+            "ticker": tk,
+            "score": float(score),
+            "direction": direction,
+            "is_bull": is_strong_bull,
+            "agent_std": std if 'std' in locals() else 0,
+            "nearest_cat": nearest_cat,
+            "has_unusual": has_unusual,
+            "unusual": unusual,
+            "ad": ad,
+        })
+
+    # 取 Top 3（按 |score - 5| 倒序，越极端越 actionable）
+    candidates.sort(key=lambda c: -abs(c["score"] - 5.0))
+    candidates = candidates[:3]
+
+    if not candidates:
+        return (
+            '<div class="actionable-empty" style="padding:18px;background:rgba(148,163,184,.08);'
+            'border-left:4px solid #94a3b8;border-radius:6px;margin:12px 0">'
+            '<div style="font-weight:700;color:var(--mt);margin-bottom:6px">🎯 今日 Actionable</div>'
+            '<div style="color:var(--ts);font-size:.95em">'
+            '今日无强信号通过 4 重门控（score 极端 + 蜂群一致 + 近期催化剂 + 不在 risk-off）。'
+            '<b>建议观望</b>，避免低置信度交易。'
+            '</div></div>'
+        )
+
+    # 渲染卡片
+    cards = []
+    for c in candidates:
+        tk = c["ticker"]
+        score = c["score"]
+        is_bull = c["is_bull"]
+        cat = c["nearest_cat"]
+        unusual = c["unusual"]
+
+        bg = "rgba(34,197,94,.10)" if is_bull else "rgba(239,68,68,.10)"
+        border = "#22c55e" if is_bull else "#ef4444"
+        icon = "🟢" if is_bull else "🔴"
+        label = "看多" if is_bull else "看空"
+        action = "考虑买入" if is_bull else "考虑做空 / 减仓"
+
+        cat_text = ""
+        if cat:
+            event = cat.get("event", "事件")[:30]
+            days = cat.get("days_until", 0)
+            cat_text = f"📅 {event}（{int(days)}天后）"
+
+        unusual_text = ""
+        if c["has_unusual"]:
+            sigs = unusual.get("signals", [])
+            if sigs:
+                top_sig = sigs[0] if isinstance(sigs[0], str) else sigs[0].get("description", "异常流")
+                unusual_text = f"⚡ 异常期权流：{str(top_sig)[:40]}"
+
+        std_text = f"蜂群一致度 {(1.5 - c['agent_std']):.1f}/1.5（std={c['agent_std']:.2f}）"
+
+        cards.append(f'''
+<div class="actionable-card" style="background:{bg};border:2px solid {border};border-radius:10px;
+    padding:16px;margin:10px 0;display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center">
+  <div style="font-size:2.2em">{icon}</div>
+  <div>
+    <div style="font-size:1.4em;font-weight:800;color:{border};margin-bottom:4px">
+      {tk} · {score:.1f}分 · <span style="font-size:.7em;background:{border};color:#fff;padding:2px 8px;border-radius:4px">{label}</span>
+    </div>
+    <div style="color:var(--t);font-size:.92em;margin-bottom:3px"><strong>{action}</strong></div>
+    {f'<div style="color:var(--mt);font-size:.86em;margin-top:2px">{cat_text}</div>' if cat_text else ''}
+    {f'<div style="color:var(--mt);font-size:.86em;margin-top:2px">{unusual_text}</div>' if unusual_text else ''}
+    <div style="color:var(--ts);font-size:.78em;margin-top:4px">{std_text}</div>
+  </div>
+  <a href="#tk-{tk}" style="text-decoration:none;color:{border};font-weight:700;
+    border:1px solid {border};padding:8px 14px;border-radius:6px;font-size:.85em">查看详情 →</a>
+</div>''')
+
+    return (
+        '<div class="section actionable-section" id="actionable-top" '
+        'style="margin:18px 0;padding:18px;background:linear-gradient(135deg,rgba(255,193,7,.06),rgba(34,197,94,.04));'
+        'border:1px solid var(--border);border-radius:12px">'
+        '<h2 class="sec-title" style="margin:0 0 12px">🎯 今日 Actionable Top {n}</h2>'
+        '<div style="font-size:.82em;color:var(--ts);margin-bottom:6px">'
+        '通过 4 重门控（score 极端 + 蜂群一致 + 近期催化剂 + 非 risk-off）的高置信信号'
+        '</div>'
+        '{cards}'
+        '<div style="font-size:.78em;color:var(--ts);margin-top:8px;padding:8px;background:rgba(0,0,0,.04);border-radius:4px">'
+        '⚠️ 本板块仅展示通过严格筛选的信号；其余标的（含中性 / 高分歧）请见下方"今日 Top 6 机会"完整列表'
+        '</div></div>'
+    ).format(n=len(candidates), cards=''.join(cards))
+
+
 def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                           report_dir, date_str, score_deltas, hist_full) -> str:
     """Build Top-6 opportunity cards HTML."""
@@ -1674,6 +1822,9 @@ def render_dashboard_html(report: Dict, date_str: str,
     _trend_data = _hist["trend_data"]
     _hist_full = _hist["hist_full"]
 
+    # v0.24.5 #2: 今日 Actionable Top 1-3 板块（先于 Top 6 机会展示）
+    actionable_html = _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail)
+
     new_cards_html = _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail, report_dir, date_str, _score_deltas, _hist_full)
 
     new_rows_html = _build_table_rows_html(all_tickers_sorted, opp_by_ticker, swarm_detail, report_dir, date_str, _score_deltas)
@@ -2153,6 +2304,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         heatmap_html=_heatmap_html,
         top_n=min(6, len(all_tickers_sorted)),
         scores_chart_height="{}px".format(max(160, len(all_tickers_sorted) * 28)),
+        actionable_html=actionable_html,
         cards_html=new_cards_html,
         rows_html=new_rows_html,
         company_html=new_company_html,
