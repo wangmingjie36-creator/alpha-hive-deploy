@@ -281,6 +281,9 @@ def check_sample_accumulator() -> List[CheckResult]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_monthly_self_analysis() -> List[CheckResult]:
+    """v0.24.6 修复：self_analyst 实际命名是 `self_analysis_YYYY-MM.md`
+    且 1 号生成的 brief 用当月 tag（分析最近 3 个月数据），不是上月 tag
+    """
     results = []
     brief_dir = PROJECT / "self_analysis_briefs"
     if not brief_dir.exists():
@@ -291,26 +294,46 @@ def check_monthly_self_analysis() -> List[CheckResult]:
         ))
         return results
 
-    # 上个月的 brief 是否存在
+    # 5-1 跑会生成 self_analysis_2026-05.md（当月 tag 含上月数据）
+    # 周一健康检查时，期望本月 brief 已存在（如果今天 ≥ 月 4 号）
     today = _now()
-    last_month = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
-    expected = brief_dir / f"{last_month}.md"
-    if expected.exists():
-        age_days = _file_age_days(expected)
+    this_month_tag = today.strftime("%Y-%m")
+    last_month_tag = (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+
+    # 优先找本月 brief；找不到再退回上月（兼容 1-3 号情况）
+    expected_this = brief_dir / f"self_analysis_{this_month_tag}.md"
+    expected_last = brief_dir / f"self_analysis_{last_month_tag}.md"
+
+    if expected_this.exists():
+        age_days = _file_age_days(expected_this)
+        sev = "ok" if age_days < 35 else "warn"
         results.append(CheckResult(
-            "monthly-self-analysis: 上月 brief",
+            "monthly-self-analysis: 本月 brief",
             "alpha-hive-monthly-self-analysis",
-            "ok" if age_days < 35 else "warn",
-            f"{expected.name} ({age_days:.0f}d 前)", None,
+            sev,
+            f"{expected_this.name} ({age_days:.0f}d 前)", None,
+        ))
+    elif expected_last.exists() and today.day <= 3:
+        # 月初 1-3 号本月 brief 还没生成是正常的
+        age_days = _file_age_days(expected_last)
+        results.append(CheckResult(
+            "monthly-self-analysis: 上月 brief（本月 brief 待生成）",
+            "alpha-hive-monthly-self-analysis",
+            "ok",
+            f"{expected_last.name} ({age_days:.0f}d 前) — 本月 brief 1 日才会生成",
+            None,
         ))
     else:
-        # 容忍：每月 1 日才生成，1-3 号缺失正常
+        # brief 真的缺失
         is_early_month = today.day <= 3
+        sev = "warn" if is_early_month else "fail"
+        msg = f"{expected_this.name} 不存在"
+        if expected_last.exists():
+            msg += f"（上月 {expected_last.name} 存在但本月未跑）"
         results.append(CheckResult(
-            "monthly-self-analysis: 上月 brief",
+            "monthly-self-analysis: 本月 brief",
             "alpha-hive-monthly-self-analysis",
-            "warn" if is_early_month else "fail",
-            f"{expected.name} 不存在", None,
+            sev, msg, None,
         ))
 
     return results
