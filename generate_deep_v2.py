@@ -432,6 +432,26 @@ def extract(data: dict) -> dict:
     # Chronos 催化剂
     cdet = chronos.get("details", {})
     catalysts = cdet.get("catalysts", [])
+    # v0.24.4 修复：渲染前过滤过期事件 + 重算 days_until（与 generate_ml_report 一致）
+    # 同样兜底 cached .swarm_results JSON 里的脏数据
+    from datetime import datetime as _dt_dv2
+    _now_dv2 = _dt_dv2.now()
+    _filtered = []
+    for c in catalysts:
+        if not isinstance(c, dict):
+            continue
+        try:
+            _ev = _dt_dv2.strptime(c.get("date", ""), "%Y-%m-%d")
+            _real_d = (_ev - _now_dv2).days
+        except (ValueError, TypeError):
+            _filtered.append(c)
+            continue
+        if _real_d < -3:
+            continue  # 过期 > 3 天的丢弃
+        c2 = dict(c)
+        c2["days_until"] = _real_d  # 用真实值覆盖 cached
+        _filtered.append(c2)
+    catalysts = _filtered
     # 去重催化剂
     seen_events = set()
     unique_catalysts = []
