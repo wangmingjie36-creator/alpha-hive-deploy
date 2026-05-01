@@ -5,6 +5,25 @@
 
 ---
 
+## [0.25.0] — 2026-05-01 — Guard 底线否决机制（月度自诊断驱动）
+
+### Added
+
+- **`generate_deep_v2.py` Guard 底线否决机制**（`extract()` 函数末尾，~Line 564）
+  - 来源：2026-05 月度自诊断——4/4 失败案例 Guard < 3.5，是唯一覆盖全部失败的共同特征
+  - 规则一：`guard_score < 3.0` → 完全封锁信号（`direction → neutral`，`final_score → 5.0`）
+  - 规则二：`guard_score < 3.5 AND direction == bull` → 置信度向 5.0 折半（`max(4.0, (score+5)/2)`）
+  - 空头方向在 Guard 极低时不触发 bull 否决（避免误封），保持原有行为
+  - `ctx` 新增 `guard_veto`（bool）和 `guard_veto_note`（str）两个字段
+  - CH1 顶部新增红色警告横幅，当 `guard_veto=True` 时渲染否决原因
+  - 验证：3 个 mock 场景（完全封锁 / 折半压低 / 不触发）全部通过
+
+- **`self_analysis_briefs/self_analysis_2026-05.md`**（月度自诊断简报）
+  - `self_analyst.py --months 3` 自动生成，分析 33 条快照，胜率 86.2%
+  - Claude 推理结果（第五节）：根因分析、信号盲区、3 个新信号假说、优先级排序
+
+---
+
 ## [0.24.1] — 2026-04-28 — VIX 数据静默丢失修复
 
 ### Fixed

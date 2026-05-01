@@ -561,6 +561,38 @@ def extract(data: dict) -> dict:
         if _vt_remap:
             vix_term = {**vix_term, **_vt_remap}
 
+    # ─────────────────────────────────────────────────────────────────
+    # Guard 底线否决机制（v0.21.0）
+    # 来源：2026-05 月度自诊断——全部 4 次失败案例 Guard < 3.5
+    # 规则：
+    #   guard < 3.0  →  完全封锁信号（direction → neutral，score → 5.0）
+    #   guard < 3.5 AND direction == bull  →  置信度减半，方向不变但加注警告
+    # ─────────────────────────────────────────────────────────────────
+    _guard_score = float(guard.get("score", 5.0) or 5.0)
+    _guard_veto  = False
+    _guard_veto_note = ""
+
+    if _guard_score < 3.0:
+        _guard_veto = True
+        _orig_dir   = direction
+        _orig_score = final_score
+        direction   = "neutral"
+        final_score = 5.0
+        _guard_veto_note = (
+            f"🚫 Guard 底线否决：Guard={_guard_score:.1f} < 3.0，"
+            f"原信号 {_orig_dir}（{_orig_score:.1f}）已封锁 → 强制中性"
+        )
+        print(f"   [guard_veto] {_guard_veto_note}")
+    elif _guard_score < 3.5 and "bull" in str(direction).lower():
+        _guard_veto = True
+        _orig_score = final_score
+        final_score = max(4.0, (final_score + 5.0) / 2.0)   # 向 5.0 折半
+        _guard_veto_note = (
+            f"⚠️ Guard 降权警告：Guard={_guard_score:.1f} < 3.5，"
+            f"Long 置信度 {_orig_score:.1f} → {final_score:.1f}（折半压低）"
+        )
+        print(f"   [guard_veto] {_guard_veto_note}")
+
     return {
         "ticker": ticker,
         "report_date": report_date,
@@ -569,6 +601,8 @@ def extract(data: dict) -> dict:
         "final_score": final_score,
         "direction": direction,
         "direction_zh": direction_zh(direction),
+        "guard_veto": _guard_veto,
+        "guard_veto_note": _guard_veto_note,
         "resonance": resonance,
         "combined_prob": combined_prob,
         "rating": rating,
@@ -4135,7 +4169,7 @@ def _build_executive_summary(ctx: dict) -> str:
     if _gex_reg in ("positive_gex", "positive_gamma"):
         _mp = ctx.get("max_pain")
         _mp_str = ""
-        if isinstance(_mp, dict): _mp_str = f"Max Pain ${_mp.get('max_pain',0):.0f} 磁吸"
+        if isinstance(_mp, dict): _mp_str = f"Max Pain ${_mp.get('max_pain') or 0:.0f} 磁吸"
         elif isinstance(_mp, (int, float)): _mp_str = f"Max Pain ${_mp:.0f} 磁吸"
         _thesis_items.append(("GEX", 1.8, f"正 Gamma 政体 + {_mp_str} → 短期下行有底"))
     elif _gex_reg in ("negative_gex", "negative_gamma"):
@@ -6088,6 +6122,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
       <span class="section-badge {direction_badge(direction)}">综合 {score:.2f} · {'看多' if 'bull' in direction else ('看空' if 'bear' in direction else '中性')}</span>
     </div>
     <div class="section-body">
+      {(f'<div style="background:#3d1a1a;border:1px solid #ff4d4d55;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:13px;color:#ff8080;font-weight:600;">{ctx["guard_veto_note"]}</div>' if ctx.get("guard_veto") else "")}
       {score_summary_html}{_conf_chart_html}
       <div class="score-grid" style="margin-top:14px;">{score_cards}</div>
       <div class="divider"></div>
