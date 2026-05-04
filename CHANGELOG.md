@@ -5,6 +5,34 @@
 
 ---
 
+## [0.25.1] — 2026-05-03 — 机构对冲过滤层三层增强（误判根因细分）
+
+### Changed
+
+- **`compare_engine_v2.py` `_apply_hedge_filter()` v0.21.0**（规则/compare_engine_v2.py）
+  - 原有：仅识别 bear regime（≤1/3 MA 上方）一种对冲形态
+  - 新增 **Layer B：OTM Call 尾部对冲**
+    - call 加权行权价 >7% 高于现价 → 识别为空头锁定上行风险的保险流，方向→中性
+    - 纯结构分析，无需 yfinance 网络调用（最快层）
+  - 新增 **Layer C：备兑开仓 / Covered Call 特征**
+    - `call_dominant(≥65%) + iv_elevated(≥60)` 且非纯 bull regime → 机构卖 Call 收权利金，方向→中性
+    - bull regime + 非 score_high 时豁免（保留真实方向性买盘）
+    - `score_high + iv_elevated + call_dominant` 额外标注"评分被卖方成交量抬高"
+  - `filter_meta` 新增字段：`hedge_type`（OTM_TAIL_HEDGE / COVERED_CALL / BEAR_REGIME）、`otm_pct`
+
+- **`compare_engine_v2.py` `archive_today_prediction()`**
+  - 新增信号字段：`covered_call_pattern`（iv_elevated + call_dominant）、`call_otm_bias`（偏离≥7%）
+  - 预测记录新增：`call_otm_pct`（call 加权行权价偏离度）、`hedge_type`（对冲类型标签）
+  - `_apply_hedge_filter` 调用传入 `current_price` 和 `call_flows`
+
+- **`weekly_analyzer.py` `classify_misjudgments()`**
+  - 原有：9 次误判全部归为"Call主导+看多但实际下跌（机构对冲 vs 方向性）"
+  - 新版：细分为 4 个子类（OTM尾部对冲 / 备兑开仓卖Call / Bear Regime宏观压制 / iv_suppressed方向性误判）
+  - 向后兼容：历史无新字段的记录通过 `iv_elevated + call_dominant` 旧信号推断子类型
+  - 效果：5 次历史误判被识别为"备兑开仓/卖Call特征"，4 次识别为"iv_suppressed 方向性误判"
+
+---
+
 ## [0.25.0] — 2026-05-01 — Guard 底线否决机制（月度自诊断驱动）
 
 ### Added

@@ -1,0 +1,23 @@
+{
+  "ticker": "JNJ",
+  "date": "2026-05-03",
+  "composite_score": 6.1,
+  "direction": "neutral",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 227.19000244140625,
+  "agent_votes": {},
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-05-03T18:04:48.427018"
+}

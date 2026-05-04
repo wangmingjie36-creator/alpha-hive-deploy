@@ -1452,10 +1452,30 @@
           "iv_suppressed",
           "resonance_active"
         ],
-        "hits": 3,
+        "hits": 8,
         "last_hit_date": "2026-03-11",
         "first_hit_date": "2026-03-11",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-11",
+            "price_chg_pct": -1.55
+          },
+          {
+            "date": "2026-03-11",
+            "price_chg_pct": -1.55
+          },
+          {
+            "date": "2026-03-11",
+            "price_chg_pct": -1.55
+          },
+          {
+            "date": "2026-03-11",
+            "price_chg_pct": -1.55
+          },
+          {
+            "date": "2026-03-11",
+            "price_chg_pct": -1.55
+          },
           {
             "date": "2026-03-11",
             "price_chg_pct": -1.55
@@ -1482,10 +1502,30 @@
           "iv_elevated",
           "score_low"
         ],
-        "hits": 3,
+        "hits": 8,
         "last_hit_date": "2026-03-13",
         "first_hit_date": "2026-03-13",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-13",
+            "price_chg_pct": 1.65
+          },
+          {
+            "date": "2026-03-13",
+            "price_chg_pct": 1.65
+          },
+          {
+            "date": "2026-03-13",
+            "price_chg_pct": 1.65
+          },
+          {
+            "date": "2026-03-13",
+            "price_chg_pct": 1.65
+          },
+          {
+            "date": "2026-03-13",
+            "price_chg_pct": 1.65
+          },
           {
             "date": "2026-03-13",
             "price_chg_pct": 1.65
@@ -1511,10 +1551,30 @@
           "iv_elevated",
           "score_low"
         ],
-        "hits": 3,
+        "hits": 8,
         "last_hit_date": "2026-03-16",
         "first_hit_date": "2026-03-16",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-16",
+            "price_chg_pct": -0.7
+          },
+          {
+            "date": "2026-03-16",
+            "price_chg_pct": -0.7
+          },
+          {
+            "date": "2026-03-16",
+            "price_chg_pct": -0.7
+          },
+          {
+            "date": "2026-03-16",
+            "price_chg_pct": -0.7
+          },
+          {
+            "date": "2026-03-16",
+            "price_chg_pct": -0.7
+          },
           {
             "date": "2026-03-16",
             "price_chg_pct": -0.7
@@ -1541,10 +1601,30 @@
           "put_dominant",
           "score_low"
         ],
-        "hits": 3,
+        "hits": 8,
         "last_hit_date": "2026-03-23",
         "first_hit_date": "2026-03-23",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-23",
+            "price_chg_pct": -0.25
+          },
+          {
+            "date": "2026-03-23",
+            "price_chg_pct": -0.25
+          },
+          {
+            "date": "2026-03-23",
+            "price_chg_pct": -0.25
+          },
+          {
+            "date": "2026-03-23",
+            "price_chg_pct": -0.25
+          },
+          {
+            "date": "2026-03-23",
+            "price_chg_pct": -0.25
+          },
           {
             "date": "2026-03-23",
             "price_chg_pct": -0.25
@@ -1570,10 +1650,30 @@
           "call_dominant",
           "iv_elevated"
         ],
-        "hits": 3,
+        "hits": 8,
         "last_hit_date": "2026-03-26",
         "first_hit_date": "2026-03-26",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-26",
+            "price_chg_pct": -2.17
+          },
+          {
+            "date": "2026-03-26",
+            "price_chg_pct": -2.17
+          },
+          {
+            "date": "2026-03-26",
+            "price_chg_pct": -2.17
+          },
+          {
+            "date": "2026-03-26",
+            "price_chg_pct": -2.17
+          },
+          {
+            "date": "2026-03-26",
+            "price_chg_pct": -2.17
+          },
           {
             "date": "2026-03-26",
             "price_chg_pct": -2.17
@@ -1598,10 +1698,30 @@
         "signal_keys": [
           "score_low"
         ],
-        "hits": 3,
+        "hits": 8,
         "last_hit_date": "2026-03-27",
         "first_hit_date": "2026-03-27",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-27",
+            "price_chg_pct": -1.4
+          },
+          {
+            "date": "2026-03-27",
+            "price_chg_pct": -1.4
+          },
+          {
+            "date": "2026-03-27",
+            "price_chg_pct": -1.4
+          },
+          {
+            "date": "2026-03-27",
+            "price_chg_pct": -1.4
+          },
+          {
+            "date": "2026-03-27",
+            "price_chg_pct": -1.4
+          },
           {
             "date": "2026-03-27",
             "price_chg_pct": -1.4
@@ -1627,10 +1747,30 @@
           "call_dominant",
           "iv_elevated"
         ],
-        "hits": 3,
+        "hits": 8,
         "last_hit_date": "2026-04-15",
         "first_hit_date": "2026-04-15",
         "recent_drawdowns": [
+          {
+            "date": "2026-04-15",
+            "price_chg_pct": -0.26
+          },
+          {
+            "date": "2026-04-15",
+            "price_chg_pct": -0.26
+          },
+          {
+            "date": "2026-04-15",
+            "price_chg_pct": -0.26
+          },
+          {
+            "date": "2026-04-15",
+            "price_chg_pct": -0.26
+          },
+          {
+            "date": "2026-04-15",
+            "price_chg_pct": -0.26
+          },
           {
             "date": "2026-04-15",
             "price_chg_pct": -0.26
@@ -1657,10 +1797,26 @@
           "iv_elevated",
           "score_high"
         ],
-        "hits": 6,
+        "hits": 16,
         "last_hit_date": "2026-04-22",
         "first_hit_date": "2026-04-20",
         "recent_drawdowns": [
+          {
+            "date": "2026-04-20",
+            "price_chg_pct": -1.08
+          },
+          {
+            "date": "2026-04-22",
+            "price_chg_pct": -1.41
+          },
+          {
+            "date": "2026-04-20",
+            "price_chg_pct": -1.08
+          },
+          {
+            "date": "2026-04-22",
+            "price_chg_pct": -1.41
+          },
           {
             "date": "2026-04-20",
             "price_chg_pct": -1.08
@@ -1697,10 +1853,30 @@
         "signal_keys": [
           "iv_elevated"
         ],
-        "hits": 3,
+        "hits": 8,
         "last_hit_date": "2026-04-23",
         "first_hit_date": "2026-04-23",
         "recent_drawdowns": [
+          {
+            "date": "2026-04-23",
+            "price_chg_pct": 4.32
+          },
+          {
+            "date": "2026-04-23",
+            "price_chg_pct": 4.32
+          },
+          {
+            "date": "2026-04-23",
+            "price_chg_pct": 4.32
+          },
+          {
+            "date": "2026-04-23",
+            "price_chg_pct": 4.32
+          },
+          {
+            "date": "2026-04-23",
+            "price_chg_pct": 4.32
+          },
           {
             "date": "2026-04-23",
             "price_chg_pct": 4.32
@@ -1717,10 +1893,259 @@
         "active_warning": true,
         "hits_threshold": 3,
         "avg_drawdown": 4.32
+      },
+      "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,iv_suppressed,pc_bullish": {
+        "pattern_key": "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,iv_suppressed,pc_bullish",
+        "direction": "看多",
+        "reason": "看多但大跌（可能被宏观/趋势压制）",
+        "signal_keys": [
+          "call_dominant",
+          "iv_suppressed",
+          "pc_bullish"
+        ],
+        "hits": 10,
+        "last_hit_date": "2026-04-29",
+        "first_hit_date": "2026-04-27",
+        "recent_drawdowns": [
+          {
+            "date": "2026-04-27",
+            "price_chg_pct": -1.59
+          },
+          {
+            "date": "2026-04-29",
+            "price_chg_pct": -4.63
+          },
+          {
+            "date": "2026-04-27",
+            "price_chg_pct": -1.59
+          },
+          {
+            "date": "2026-04-29",
+            "price_chg_pct": -4.63
+          },
+          {
+            "date": "2026-04-27",
+            "price_chg_pct": -1.59
+          },
+          {
+            "date": "2026-04-29",
+            "price_chg_pct": -4.63
+          },
+          {
+            "date": "2026-04-27",
+            "price_chg_pct": -1.59
+          },
+          {
+            "date": "2026-04-29",
+            "price_chg_pct": -4.63
+          },
+          {
+            "date": "2026-04-27",
+            "price_chg_pct": -1.59
+          },
+          {
+            "date": "2026-04-29",
+            "price_chg_pct": -4.63
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -3.11
+      },
+      "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,pc_bullish,score_high": {
+        "pattern_key": "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,pc_bullish,score_high",
+        "direction": "看多",
+        "reason": "看多但大跌（可能被宏观/趋势压制）",
+        "signal_keys": [
+          "call_dominant",
+          "pc_bullish",
+          "score_high"
+        ],
+        "hits": 5,
+        "last_hit_date": "2026-04-28",
+        "first_hit_date": "2026-04-28",
+        "recent_drawdowns": [
+          {
+            "date": "2026-04-28",
+            "price_chg_pct": -1.84
+          },
+          {
+            "date": "2026-04-28",
+            "price_chg_pct": -1.84
+          },
+          {
+            "date": "2026-04-28",
+            "price_chg_pct": -1.84
+          },
+          {
+            "date": "2026-04-28",
+            "price_chg_pct": -1.84
+          },
+          {
+            "date": "2026-04-28",
+            "price_chg_pct": -1.84
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -1.84
+      },
+      "看多|中性区间（变动<1%，方向不明确）|call_dominant,iv_elevated,pc_bullish": {
+        "pattern_key": "看多|中性区间（变动<1%，方向不明确）|call_dominant,iv_elevated,pc_bullish",
+        "direction": "看多",
+        "reason": "中性区间（变动<1%，方向不明确）",
+        "signal_keys": [
+          "call_dominant",
+          "iv_elevated",
+          "pc_bullish"
+        ],
+        "hits": 5,
+        "last_hit_date": "2026-04-30",
+        "first_hit_date": "2026-04-30",
+        "recent_drawdowns": [
+          {
+            "date": "2026-04-30",
+            "price_chg_pct": -0.56
+          },
+          {
+            "date": "2026-04-30",
+            "price_chg_pct": -0.56
+          },
+          {
+            "date": "2026-04-30",
+            "price_chg_pct": -0.56
+          },
+          {
+            "date": "2026-04-30",
+            "price_chg_pct": -0.56
+          },
+          {
+            "date": "2026-04-30",
+            "price_chg_pct": -0.56
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -0.56
+      }
+    },
+    "LEGACY": {
+      "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,iv_elevated,score_high": {
+        "pattern_key": "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,iv_elevated,score_high",
+        "direction": "看多",
+        "reason": "看多但大跌（可能被宏观/趋势压制）",
+        "signal_keys": [
+          "call_dominant",
+          "iv_elevated",
+          "score_high"
+        ],
+        "hits": 3,
+        "last_hit_date": "2026-01-01",
+        "first_hit_date": "2026-01-01",
+        "recent_drawdowns": [
+          {
+            "date": "2026-01-01",
+            "price_chg_pct": -3.0
+          },
+          {
+            "date": "2026-01-01",
+            "price_chg_pct": -3.0
+          },
+          {
+            "date": "2026-01-01",
+            "price_chg_pct": -3.0
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -3.0
+      }
+    },
+    "NEW_EXEMPT": {
+      "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,covered_call_pattern,iv_elevated": {
+        "pattern_key": "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,covered_call_pattern,iv_elevated",
+        "direction": "看多",
+        "reason": "看多但大跌（可能被宏观/趋势压制）",
+        "signal_keys": [
+          "call_dominant",
+          "covered_call_pattern",
+          "iv_elevated"
+        ],
+        "hits": 3,
+        "last_hit_date": "2026-02-01",
+        "first_hit_date": "2026-02-01",
+        "recent_drawdowns": [
+          {
+            "date": "2026-02-01",
+            "price_chg_pct": -2.0
+          },
+          {
+            "date": "2026-02-01",
+            "price_chg_pct": -2.0
+          },
+          {
+            "date": "2026-02-01",
+            "price_chg_pct": -2.0
+          }
+        ],
+        "active_warning": true,
+        "hits_threshold": 3,
+        "avg_drawdown": -2.0
+      }
+    },
+    "NEW_COVERED": {
+      "中性|高评分(7.5)过度乐观|call_dominant,covered_call_pattern,iv_elevated": {
+        "pattern_key": "中性|高评分(7.5)过度乐观|call_dominant,covered_call_pattern,iv_elevated",
+        "direction": "中性",
+        "reason": "高评分(7.5)过度乐观",
+        "signal_keys": [
+          "call_dominant",
+          "covered_call_pattern",
+          "iv_elevated"
+        ],
+        "hits": 2,
+        "last_hit_date": "2026-03-01",
+        "first_hit_date": "2026-03-01",
+        "recent_drawdowns": [
+          {
+            "date": "2026-03-01",
+            "price_chg_pct": 3.5
+          },
+          {
+            "date": "2026-03-01",
+            "price_chg_pct": 3.5
+          }
+        ],
+        "active_warning": false,
+        "hits_threshold": 3,
+        "avg_drawdown": 3.5
+      }
+    },
+    "NEW_OTM": {
+      "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,call_otm_bias": {
+        "pattern_key": "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,call_otm_bias",
+        "direction": "看多",
+        "reason": "看多但大跌（可能被宏观/趋势压制）",
+        "signal_keys": [
+          "call_dominant",
+          "call_otm_bias"
+        ],
+        "hits": 1,
+        "last_hit_date": "2026-04-01",
+        "first_hit_date": "2026-04-01",
+        "recent_drawdowns": [
+          {
+            "date": "2026-04-01",
+            "price_chg_pct": -2.0
+          }
+        ],
+        "active_warning": false,
+        "hits_threshold": 3,
+        "avg_drawdown": -2.0
       }
     }
   },
   "_meta": {
-    "auto_patterns_updated_at": "2026-04-27T04:57:02.075888"
+    "auto_patterns_updated_at": "2026-05-03T20:51:27.789933"
   }
 }
