@@ -13,6 +13,11 @@
 
 - **图表**：已嵌入 `chart_engine.py`，matplotlib 已安装在用户 Mac
 
+- **knowledge-pool 召回规则**：
+  - 召回必须调真实引擎 `weighted_recall.py`（CLI 或 `WeightedRecall().recall()`），**禁止手动简化算分**
+  - 2026-05-05 事故：`_today_recall.json` 缓存 motifs 为空时，用手动粗糙算法得到 4.485 而非真实的 123.80，导致误判"召回质量差"
+  - 缓存失效时的正确降级链：① 读 `_today_recall.json` → ② `python3 daily_recall_runner.py` → ③ `python3 weighted_recall.py --motifs "..." --today YYYY-MM-DD` → ④ `WeightedRecall().recall(motifs)` 直接调用；**任何一步都不允许自写评分逻辑**
+
 ## 版本历史规则
 
 - **每次 session 结束前必须更新 `CHANGELOG.md`**
