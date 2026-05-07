@@ -4662,10 +4662,15 @@ def _build_reverse_scenario_card(ctx: dict) -> str:
 
 def _build_adversarial_bear_card(ctx: dict) -> str:
     """P2-⑨ 自我对抗：强制 Bear 蜂主导，与主结论并排呈现，分歧高亮。"""
-    raw = ctx.get("_raw_data", {}) or {}
-    swarm = raw.get("swarm_analysis", {}) or {}
-    bear = (swarm.get("BearBeeContrarian") or swarm.get("BearBee")
-            or swarm.get("bear_bee") or {})
+    # FIX(2026-05-06): 原代码从 raw["swarm_analysis"] 取数据，但 JSON 里该 key 不存在。
+    # 正确路径是 swarm_results.agent_details，ctx["bear"] 在 build_context 已正确赋值，直接用。
+    bear = ctx.get("bear") or {}
+    # 兜底：若 ctx["bear"] 为空，再从 _raw_data 降级查找
+    if not bear:
+        raw = ctx.get("_raw_data", {}) or {}
+        sr = raw.get("swarm_results", {}) or {}
+        ad = sr.get("agent_details", {}) or {}
+        bear = (ad.get("BearBeeContrarian") or ad.get("BearBee") or {})
     bear_score = bear.get("score") or bear.get("contrarian_score") or 0
     bear_disc = (bear.get("discovery") or bear.get("contrarian_discovery")
                  or "无 BearBee 反方推理数据")

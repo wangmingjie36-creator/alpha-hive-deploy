@@ -5,6 +5,17 @@
 
 ---
 
+## [0.25.2] — 2026-05-06 — BearBee P2-⑨ 卡片评分永远为 0 的 Bug 修复
+
+### Fixed
+
+- **`generate_deep_v2.py` `_build_adversarial_bear_card()`**
+  - 根因：原代码从 `raw["swarm_analysis"]` 取 BearBeeContrarian，但 JSON 顶层根本没有 `swarm_analysis` key（数据在 `swarm_results.agent_details`），导致 `bear={}` → `score=0`
+  - 修复：改为直接使用 `ctx["bear"]`（在 `build_context()` 里已正确赋值），并以 `_raw_data.swarm_results.agent_details` 作为兜底降级链
+  - 效果：P2-⑨ 自我对抗卡片现在正确显示真实 BearBee 评分（如 2.75/10）和 discovery 文本
+
+---
+
 ## [0.25.1] — 2026-05-03 — 机构对冲过滤层三层增强（误判根因细分）
 
 ### Changed
