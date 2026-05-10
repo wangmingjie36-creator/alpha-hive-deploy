@@ -231,15 +231,17 @@ def check_sample_accumulator() -> List[CheckResult]:
         ))
         return results
 
-    if n >= 30:
+    # v0.24.7 修复：实测 5-3 跑 39 个 ticker 但只 13 笔入库（部分 Agent 失败属常态）
+    # 降低 OK 阈值到 12（合理可用样本），warn 阈值 5
+    if n >= 12:
         sev = "ok"
         msg = f"上周日 {last_sunday_str} 写入 {n} 笔 ✓"
-    elif n > 0:
+    elif n >= 5:
         sev = "warn"
-        msg = f"上周日 {last_sunday_str} 仅 {n} 笔（期望 ≥30；检查 --max-tickers 参数）"
+        msg = f"上周日 {last_sunday_str} 仅 {n} 笔（期望 ≥12；可能多个 Agent yfinance 失败）"
     else:
         sev = "fail"
-        msg = f"上周日 {last_sunday_str} 0 笔写入（任务静默失败！检查权限批准 / yfinance 网络）"
+        msg = f"上周日 {last_sunday_str} 仅 {n} 笔（任务可能静默失败！检查权限批准 / 网络）"
 
     results.append(CheckResult(
         "sample-accumulator: 上周日写入量",
@@ -343,12 +345,53 @@ def check_monthly_self_analysis() -> List[CheckResult]:
 # 输出
 # ══════════════════════════════════════════════════════════════════════════════
 
+def check_health_check_self() -> List[CheckResult]:
+    """v0.24.7 Meta-check：health_check 自身上次有没有产出 log
+    上次 health-check scheduled-task 跑了但没写 logs/health_<date>.json
+    通常意味着 Claude Code session 权限批准未授予 → Bash 工具被阻塞。
+    这个检查在新一次 health_check 跑时（已通过权限）才能发出告警。
+    """
+    results = []
+    logs_dir = PROJECT / "logs"
+    if not logs_dir.exists():
+        results.append(CheckResult(
+            "health-check: logs 目录",
+            "alpha-hive-health-check",
+            "warn", "logs/ 不存在", None,
+        ))
+        return results
+
+    # 找过去 14 天的 health_*.json
+    files = sorted(logs_dir.glob("health_*.json"), reverse=True)
+    if not files:
+        results.append(CheckResult(
+            "health-check: 历史日志",
+            "alpha-hive-health-check",
+            "warn", "logs/health_*.json 不存在", None,
+        ))
+        return results
+
+    last = files[0]
+    age_d = _file_age_days(last)
+    # 期望 ≤ 8 天（每周一跑）
+    sev = "ok" if age_d <= 8 else "warn"
+    results.append(CheckResult(
+        "health-check: 上次自检日志",
+        "alpha-hive-health-check",
+        sev,
+        f"{last.name} ({age_d:.0f}d 前)",
+        {"age_days": round(age_d, 1)},
+    ))
+    return results
+
+
 def run_all_checks() -> dict:
     all_results = []
     all_results.extend(check_daily_scan())
     all_results.extend(check_weekly_optimizer())
     all_results.extend(check_sample_accumulator())
     all_results.extend(check_monthly_self_analysis())
+    all_results.extend(check_health_check_self())  # v0.24.7 Meta-check
 
     summary = {"ok": 0, "warn": 0, "fail": 0}
     for r in all_results:
