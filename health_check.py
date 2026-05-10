@@ -102,21 +102,26 @@ def check_daily_scan() -> List[CheckResult]:
             "fail", f"无法读取 git log: {e}", None,
         ))
 
-    # 1b. .swarm_results_<today>.json 存在且 size > 50KB
-    today = _now().strftime("%Y-%m-%d")
-    yesterday = (_now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    # 1b. .swarm_results JSON 存在且 size > 50KB
+    # v0.24.7 修复：周末容忍上周五 commit 即可（5-9 周六 / 5-10 周日没扫正常）
+    today = _now()
+    # 找最近 5 天最大的 .swarm_results 文件
     candidate = None
-    for d in [today, yesterday]:
+    for offset in range(5):
+        d = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
         p = PROJECT / f".swarm_results_{d}.json"
-        if p.exists():
+        if p.exists() and p.stat().st_size > 50_000:
             candidate = p
+            candidate_age_days = offset
             break
-    if candidate and candidate.stat().st_size > 50_000:
+
+    if candidate:
+        sev = "ok" if candidate_age_days <= (3 if is_weekend else 1) else "warn"
         results.append(CheckResult(
             "daily-scan: 最新 .swarm_results 产出",
             "alpha-hive-daily-scan",
-            "ok",
-            f"{candidate.name} ({candidate.stat().st_size // 1024}KB)",
+            sev,
+            f"{candidate.name} ({candidate.stat().st_size // 1024}KB, {candidate_age_days}d 前)",
             None,
         ))
     else:
@@ -124,9 +129,7 @@ def check_daily_scan() -> List[CheckResult]:
             "daily-scan: 最新 .swarm_results 产出",
             "alpha-hive-daily-scan",
             "fail" if not is_weekend else "warn",
-            f"近 2 天无有效 .swarm_results JSON" if not candidate
-            else f"{candidate.name} 体积异常小 ({candidate.stat().st_size}B)",
-            None,
+            f"近 5 天无有效 .swarm_results JSON", None,
         ))
 
     return results
@@ -173,18 +176,32 @@ def check_weekly_optimizer() -> List[CheckResult]:
         last_ts = datetime.now() - timedelta(days=999)
     age_days = (datetime.now() - last_ts).days
 
-    # 上次写入 ≤ 8 天（每周日跑）
-    sev = "ok" if age_days <= 8 else "fail"
+    # v0.24.7 修复：weight_history 只在"变化 ≥ MIN_CHANGE_PP" 时写
+    # 长期不更新 = "权重稳定无大变化"，是正常状态而非 fail
+    # 真正 fail 是 weekly-optimizer cron lastRunAt 异常（用 scheduled-task 判断更准）
+    # 这里改成：> 14 天 = warn（提示用户可能配置漂移），> 30 天 = fail
+    if age_days <= 14:
+        sev = "ok"
+        suffix = " ✓"
+    elif age_days <= 30:
+        sev = "warn"
+        suffix = " (权重稳定无变化或 weekly-optimizer 跑了但变化 < MIN_CHANGE_PP=3pp)"
+    else:
+        sev = "fail"
+        suffix = " (异常 > 30 天无更新)"
+
     results.append(CheckResult(
-        "weekly-optimizer: 上次写入时间",
+        "weekly-optimizer: 上次 weight_history 写入",
         "alpha-hive-weekly-optimizer",
         sev,
-        f"{age_days} 天前 ({last_ts.strftime('%Y-%m-%d %H:%M')})",
+        f"{age_days} 天前 ({last_ts.strftime('%Y-%m-%d %H:%M')}){suffix}",
         {"age_days": age_days, "method": last.get("method"), "applied": last.get("applied")},
     ))
 
-    # 字段完整性（v0.24.2 修复后必须有 method 字段）
-    if "method" not in last or last.get("method") is None:
+    # 字段完整性（v0.24.2 修复后必须有 method 字段）— 但仅对 4-27 之后的记录检查
+    # 之前的旧 entry 是 v0.24.1 之前的格式，不应再警告
+    v24_2_release = datetime(2026, 4, 27)
+    if last_ts >= v24_2_release and ("method" not in last or last.get("method") is None):
         results.append(CheckResult(
             "weekly-optimizer: 字段完整性",
             "alpha-hive-weekly-optimizer",
@@ -210,10 +227,20 @@ def check_sample_accumulator() -> List[CheckResult]:
         ))
         return results
 
-    # 上周日是哪一天
+    # 上周日是哪一天 — v0.24.7 修复 bug
+    # 旧实现：今天周日 weekday=6, (6+1)%7=0, last_sunday=today
+    # 但 sample-accumulator 18:01 才跑，若今天周日 < 18:00 应看 7 天前
     today = _now()
-    days_since_sunday = (today.weekday() + 1) % 7  # Mon=1...Sun=7→0
-    last_sunday = today - timedelta(days=days_since_sunday)
+    if today.weekday() == 6 and today.hour < 18:
+        # 今天周日但还没到 sample-accumulator 时间 → 看上一个周日
+        last_sunday = today - timedelta(days=7)
+    elif today.weekday() == 6:
+        # 今天周日且已过 18:00 → 看今天
+        last_sunday = today
+    else:
+        # 工作日 → 看最近的上个周日
+        days_back = today.weekday() + 1  # Mon=0→1, Tue=1→2, ..., Sat=5→6
+        last_sunday = today - timedelta(days=days_back)
     last_sunday_str = last_sunday.strftime("%Y-%m-%d")
 
     # 周日 18:01 sample-accumulator 应该写入 ≥ 30 笔

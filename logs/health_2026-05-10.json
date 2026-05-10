@@ -1,0 +1,72 @@
+{
+  "timestamp": "2026-05-10T14:36:50.180788",
+  "checks": [
+    {
+      "name": "daily-scan: 最近一次扫描 commit",
+      "task_id": "alpha-hive-daily-scan",
+      "severity": "ok",
+      "message": "48.0h 前 (Alpha Hive 蜂群日报 2026-05-08 14:36)",
+      "detail": {
+        "hours_ago": 48.0,
+        "limit": 72
+      }
+    },
+    {
+      "name": "daily-scan: 最新 .swarm_results 产出",
+      "task_id": "alpha-hive-daily-scan",
+      "severity": "ok",
+      "message": ".swarm_results_2026-05-08.json (283KB, 2d 前)",
+      "detail": null
+    },
+    {
+      "name": "weekly-optimizer: 上次 weight_history 写入",
+      "task_id": "alpha-hive-weekly-optimizer",
+      "severity": "ok",
+      "message": "0 天前 (2026-05-10 14:35) ✓",
+      "detail": {
+        "age_days": 0,
+        "method": "wls_time_decay",
+        "applied": true
+      }
+    },
+    {
+      "name": "sample-accumulator: 上周日写入量",
+      "task_id": "alpha-hive-sample-accumulator",
+      "severity": "ok",
+      "message": "上周日 2026-05-03 写入 13 笔 ✓",
+      "detail": {
+        "last_sunday": "2026-05-03",
+        "n_predictions": 13
+      }
+    },
+    {
+      "name": "sample-accumulator: 仓库污染检查",
+      "task_id": "alpha-hive-sample-accumulator",
+      "severity": "ok",
+      "message": ".samples-only-*.json 未污染 git 仓库 ✓",
+      "detail": null
+    },
+    {
+      "name": "monthly-self-analysis: 本月 brief",
+      "task_id": "alpha-hive-monthly-self-analysis",
+      "severity": "ok",
+      "message": "self_analysis_2026-05.md (9d 前)",
+      "detail": null
+    },
+    {
+      "name": "health-check: 上次自检日志",
+      "task_id": "alpha-hive-health-check",
+      "severity": "ok",
+      "message": "health_2026-05-10.json (0d 前)",
+      "detail": {
+        "age_days": 0.0
+      }
+    }
+  ],
+  "summary": {
+    "ok": 7,
+    "warn": 0,
+    "fail": 0
+  },
+  "overall_status": "🟢 正常"
+}
