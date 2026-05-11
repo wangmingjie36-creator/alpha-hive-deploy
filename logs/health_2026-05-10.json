@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-05-10T14:36:50.180788",
+  "timestamp": "2026-05-10T14:40:43.414914",
   "checks": [
     {
       "name": "daily-scan: 最近一次扫描 commit",
       "task_id": "alpha-hive-daily-scan",
       "severity": "ok",
-      "message": "48.0h 前 (Alpha Hive 蜂群日报 2026-05-08 14:36)",
+      "message": "48.1h 前 (Alpha Hive 蜂群日报 2026-05-08 14:36)",
       "detail": {
-        "hours_ago": 48.0,
+        "hours_ago": 48.1,
         "limit": 72
       }
     },

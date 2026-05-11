@@ -1,0 +1,2 @@
+*Alpha Hive 健康巡检 🟡 警告*
+⚠️ `alpha-hive-daily-scan` — daily-scan: 最新 .swarm_results 产出: 近 2 天无有效 .swarm_results JSON

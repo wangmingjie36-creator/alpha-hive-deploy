@@ -1,0 +1,29 @@
+{
+  "ticker": "SMCI",
+  "date": "2026-05-10",
+  "composite_score": 8.69,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 35.369998931884766,
+  "agent_votes": {
+    "QueenDistiller": 8.69,
+    "GuardBeeSentinel": 8.45,
+    "OracleBeeEcho": 7.651923076923078,
+    "BuzzBeeWhisper": 6.93,
+    "ScoutBeeNova": 6.7237
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-05-10T18:05:17.549551"
+}
