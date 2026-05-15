@@ -5,6 +5,33 @@
 
 ---
 
+## [0.25.4] — 2026-05-14 — 深度报告期权章节升级为全链 OI 结构
+
+### Added
+
+- **`options_analyzer.py` `OptionsAgent._fetch_full_chain_oi()`**（v0.25.4 新增）
+  - 下载全部可用到期日（最多 12 个）完整期权链，聚合所有行权价 OI
+  - 过滤范围：当前价 ±40%
+  - Max Pain 穷举法计算（同 oi_wall.py 算法）
+  - 输出字段：`total_call_oi` / `total_put_oi` / `full_pc_ratio` / `max_pain` / `top_call_oi`（Top10） / `top_put_oi`（Top10） / `expiry_breakdown`（按到期日分布） / `oi_by_strike_call/put`
+  - 失败静默返回 `{}`，不影响主分析流程
+  - 结果存入 `OptionsAgent.analyze()` 返回 dict 的 `"full_chain_oi"` 字段，并写入期权快照 JSON
+
+- **`generate_deep_v2.py` CH4 全链 OI 结构卡片**
+  - 从 `ctx["full_chain_oi"]` 读取数据，有数据才渲染（无数据静默跳过）
+  - 显示：总 OI（全链）/ 全链 P/C 比（附看涨/中性/看空标签）/ Max Pain 及其相对于现价的方向 / Call-Put OI 拆分
+  - Top 10 Call OI + Top 10 Put OI 双列表，含行权价、OI、ITM/OTM位置、比例条形图
+  - 到期日 OI 分布（Top6）：绿色=Call / 红色=Put 横向堆叠条
+  - 插入位置：IV 期限结构卡片之后、GEX 增强之前
+  - `ctx["full_chain_oi"]` 注入路径：`odet.get("full_chain_oi", {})` → `build_context()`
+
+### Changed
+
+- **`options_analyzer.py` `OptionsAgent.analyze()`**
+  - 主流程调用 `_fetch_full_chain_oi()`，日志记录全链 OI 总量 / 到期日数 / Max Pain / P/C
+
+---
+
 ## [0.25.3] — 2026-05-14 — NVDA 历史 P/C 分析强化 + 完整 OI 墙工具
 
 ### Added

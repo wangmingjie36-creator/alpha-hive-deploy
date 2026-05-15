@@ -702,6 +702,8 @@ def extract(data: dict) -> dict:
         "expected_returns": (aa.get("historical_analysis", {}) or {}).get("expected_returns", {}),
         # P3: Max Pain
         "max_pain": odet.get("max_pain", None),
+        # v0.25.3: 全链 OI 结构（所有到期日汇总）
+        "full_chain_oi": odet.get("full_chain_oi", {}),
         # P4: 情绪动量
         "sentiment_pct": bdet.get("sentiment_pct", None),
         "sentiment_momentum": bdet.get("sentiment_momentum", None),
@@ -5194,6 +5196,158 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
     else:
         expiry_row_html = ""
 
+    # ── v0.25.3 全链 OI 结构卡片（CH4 · Max Pain + Top10 Call/Put + 到期分布）──────
+    _fc = ctx.get("full_chain_oi") or {}
+    if _fc and _fc.get("max_pain") and (_fc.get("top_call_oi") or _fc.get("top_put_oi")):
+        _fc_total_c  = _fc.get("total_call_oi", 0)
+        _fc_total_p  = _fc.get("total_put_oi", 0)
+        _fc_total    = _fc_total_c + _fc_total_p
+        _fc_pc       = _fc.get("full_pc_ratio", 0)
+        _fc_mp       = _fc.get("max_pain", 0)
+        _fc_n_exp    = _fc.get("expiry_count", 0)
+        _fc_price    = ctx.get("price", 0) or 0
+
+        # Max Pain 方向
+        if _fc_price > 0 and _fc_mp > 0:
+            _mp_gap     = _fc_mp - _fc_price
+            _mp_gap_pct = _mp_gap / _fc_price * 100
+            if abs(_mp_gap_pct) < 2:
+                _mp_rel = f'接近现价（偏差 {_mp_gap_pct:+.1f}%）'
+                _mp_color = 'var(--text2)'
+            elif _mp_gap < 0:
+                _mp_rel = f'低于现价 {abs(_mp_gap_pct):.1f}%（做市商向下磁吸）'
+                _mp_color = 'var(--red2)'
+            else:
+                _mp_rel = f'高于现价 {_mp_gap_pct:.1f}%（做市商向上磁吸）'
+                _mp_color = 'var(--green2)'
+        else:
+            _mp_rel, _mp_color = '', 'var(--text2)'
+
+        # P/C 信号
+        if _fc_pc < 0.7:
+            _pc_signal = '看多偏向'
+            _pc_color  = 'var(--green2)'
+        elif _fc_pc > 1.1:
+            _pc_signal = '看空偏向'
+            _pc_color  = 'var(--red2)'
+        else:
+            _pc_signal = '中性结构'
+            _pc_color  = 'var(--text2)'
+
+        # Top10 Call/Put 表格
+        def _oi_rows(items, is_call):
+            rows = ''
+            color = 'var(--green2)' if is_call else 'var(--red2)'
+            for item in items:
+                s   = item.get("strike", 0)
+                oi  = item.get("oi", 0)
+                pos = item.get("position", "")
+                bar_w = min(int(oi / max((items[0].get("oi", 1)), 1) * 100), 100)
+                pos_style = ('color:var(--text3)' if 'ITM' not in pos
+                             else 'color:var(--gold2);font-weight:600')
+                rows += (f'<tr>'
+                         f'<td style="font-weight:600;">${s:.0f}</td>'
+                         f'<td style="text-align:right;color:{color};font-weight:600;">{oi:,.0f}</td>'
+                         f'<td style="text-align:right;{pos_style};font-size:11px;">{pos}</td>'
+                         f'<td style="width:70px;padding:4px 8px;">'
+                         f'<div style="background:var(--bg4);border-radius:2px;height:6px;">'
+                         f'<div style="width:{bar_w}%;height:6px;border-radius:2px;background:{color};opacity:.8;"></div>'
+                         f'</div></td></tr>')
+            return rows
+
+        _call_rows = _oi_rows(_fc.get("top_call_oi", []), True)
+        _put_rows  = _oi_rows(_fc.get("top_put_oi",  []), False)
+
+        # 到期日分布（Top6，按 total 降序）
+        _exp_bk = sorted(_fc.get("expiry_breakdown", []), key=lambda x: -x.get("total", 0))[:6]
+        _exp_html = ''
+        _exp_max  = _exp_bk[0].get("total", 1) if _exp_bk else 1
+        for _eb in _exp_bk:
+            _eb_date  = _eb.get("expiry", "")
+            _eb_c     = _eb.get("call_oi", 0)
+            _eb_p     = _eb.get("put_oi", 0)
+            _eb_tot   = _eb.get("total", 0)
+            _eb_bw    = min(int(_eb_tot / _exp_max * 100), 100)
+            _eb_cw    = min(int(_eb_c / max(_eb_tot, 1) * _eb_bw), _eb_bw)
+            _exp_html += (f'<div style="margin-bottom:5px;">'
+                          f'<div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text2);margin-bottom:2px;">'
+                          f'<span style="font-weight:600;">{_eb_date}</span>'
+                          f'<span style="color:var(--text3);">C {_eb_c:,.0f} / P {_eb_p:,.0f} · 共 {_eb_tot:,.0f}</span>'
+                          f'</div>'
+                          f'<div style="background:var(--bg4);border-radius:2px;height:7px;position:relative;">'
+                          f'<div style="position:absolute;left:0;width:{_eb_cw}%;height:7px;border-radius:2px 0 0 2px;background:var(--green2);opacity:.75;"></div>'
+                          f'<div style="position:absolute;left:{_eb_cw}%;width:{_eb_bw-_eb_cw}%;height:7px;border-radius:0 2px 2px 0;background:var(--red2);opacity:.75;"></div>'
+                          f'</div></div>')
+
+        full_chain_oi_html = f"""
+<div style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:16px 20px;margin-top:16px;">
+  <div style="font-size:11px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px;">
+    全链 OI 结构 · {_fc_n_exp} 个到期日汇总
+  </div>
+
+  <!-- 顶部摘要数字 -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px;">
+    <div style="background:var(--bg2);border-radius:7px;padding:10px 12px;">
+      <div style="font-size:10px;color:var(--text3);margin-bottom:3px;">总 OI（全链）</div>
+      <div style="font-size:18px;font-weight:700;">{_fc_total:,}</div>
+    </div>
+    <div style="background:var(--bg2);border-radius:7px;padding:10px 12px;">
+      <div style="font-size:10px;color:var(--text3);margin-bottom:3px;">全链 P/C 比</div>
+      <div style="font-size:18px;font-weight:700;color:{_pc_color};">{_fc_pc:.3f}</div>
+      <div style="font-size:10px;color:{_pc_color};">{_pc_signal}</div>
+    </div>
+    <div style="background:var(--bg2);border-radius:7px;padding:10px 12px;">
+      <div style="font-size:10px;color:var(--text3);margin-bottom:3px;">Max Pain（全链）</div>
+      <div style="font-size:18px;font-weight:700;color:{_mp_color};">${_fc_mp:.0f}</div>
+      <div style="font-size:10px;color:var(--text3);">{_mp_rel}</div>
+    </div>
+    <div style="background:var(--bg2);border-radius:7px;padding:10px 12px;">
+      <div style="font-size:10px;color:var(--text3);margin-bottom:3px;">Call / Put OI</div>
+      <div style="font-size:15px;font-weight:700;">
+        <span style="color:var(--green2);">{_fc_total_c:,}</span>
+        <span style="color:var(--text3);font-size:11px;"> / </span>
+        <span style="color:var(--red2);">{_fc_total_p:,}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Top10 Call / Put OI 双列表 -->
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;">
+    <div>
+      <div style="font-size:10px;font-weight:700;color:var(--green2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Top 10 Call OI</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead><tr>
+          <th style="text-align:left;padding:3px 8px;color:var(--text3);font-size:10px;font-weight:500;">行权价</th>
+          <th style="text-align:right;padding:3px 8px;color:var(--text3);font-size:10px;font-weight:500;">OI</th>
+          <th style="text-align:right;padding:3px 8px;color:var(--text3);font-size:10px;font-weight:500;">位置</th>
+          <th style="padding:3px 8px;"></th>
+        </tr></thead>
+        <tbody>{_call_rows}</tbody>
+      </table>
+    </div>
+    <div>
+      <div style="font-size:10px;font-weight:700;color:var(--red2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Top 10 Put OI</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead><tr>
+          <th style="text-align:left;padding:3px 8px;color:var(--text3);font-size:10px;font-weight:500;">行权价</th>
+          <th style="text-align:right;padding:3px 8px;color:var(--text3);font-size:10px;font-weight:500;">OI</th>
+          <th style="text-align:right;padding:3px 8px;color:var(--text3);font-size:10px;font-weight:500;">位置</th>
+          <th style="padding:3px 8px;"></th>
+        </tr></thead>
+        <tbody>{_put_rows}</tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 到期日 OI 分布 -->
+  <div>
+    <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">OI 到期分布（Top6）· 绿=Call  红=Put</div>
+    {_exp_html}
+  </div>
+</div>"""
+    else:
+        full_chain_oi_html = ""
+
     # ── IV 期限结构卡片（CH4 · OracleBee S15）─────────────────────────────────
     _ivts       = ctx.get("iv_term_structure", {}) or {}
     _ivts_shape = _ivts.get("shape", "unknown")
@@ -6229,6 +6383,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
 
       {_oi_anomaly_html}
       {iv_term_html}
+      {full_chain_oi_html}
       {_gex_enhance_html}
       {_vol_surface_html}
       {_skew_alerts_html}

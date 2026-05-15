@@ -1216,6 +1216,134 @@ class OptionsAgent:
 
     # ── v0.17.0: OI 稳定性口径 ──────────────────────────────────────
     @staticmethod
+    # ── v0.25.3 · 全链 OI 采集（Max Pain + 全行权价 OI 分布）─────────────────────
+    @staticmethod
+    def _fetch_full_chain_oi(ticker: str, stock_price: float,
+                              max_expirations: int = 12) -> dict:
+        """下载全部到期日期权链，聚合 OI by Strike，计算 Max Pain。
+
+        此方法独立于主链路（仅取前4个到期日），专门为报告提供完整 OI 墙数据。
+        失败时静默返回空 dict，不影响主分析流程。
+
+        Returns:
+            {
+              "total_call_oi": int,          # 全链 Call OI 合计
+              "total_put_oi":  int,          # 全链 Put OI 合计
+              "full_pc_ratio": float,        # 全链 P/C OI 比
+              "max_pain":      float,        # Max Pain 行权价
+              "expiry_count":  int,          # 采集到的到期日数
+              "top_call_oi":   list[dict],   # Top10 Call OI [{strike, oi, otm_pct}]
+              "top_put_oi":    list[dict],   # Top10 Put OI  [{strike, oi, otm_pct}]
+              "expiry_breakdown": list[dict],# 按到期日 [{expiry, call_oi, put_oi, total}]
+              "oi_by_strike_call": dict,     # {strike_str: oi}（全链聚合）
+              "oi_by_strike_put":  dict,
+            }
+        """
+        try:
+            if yf is None:
+                return {}
+            # Bug fix: stock_price=0 会把所有行权价过滤掉
+            if not stock_price or stock_price <= 0:
+                return {}
+            stock = yf.Ticker(ticker)
+            all_exps = list(stock.options) if hasattr(stock, "options") else []
+            if not all_exps:
+                return {}
+
+            lo = stock_price * 0.60
+            hi = stock_price * 1.45
+
+            call_oi: dict = {}   # strike -> total call OI
+            put_oi:  dict = {}   # strike -> total put OI
+            expiry_breakdown = []
+            used_exps = 0
+
+            for exp in all_exps[:max_expirations]:
+                try:
+                    chain = stock.option_chain(exp)
+                    c_df = chain.calls[["strike", "openInterest"]].copy()
+                    p_df = chain.puts[["strike", "openInterest"]].copy()
+
+                    # 过滤到价格 ±40% 范围
+                    c_df = c_df[(c_df["strike"] >= lo) & (c_df["strike"] <= hi)]
+                    p_df = p_df[(p_df["strike"] >= lo) & (p_df["strike"] <= hi)]
+
+                    # Bug fix: yfinance openInterest 可能含 NaN，
+                    # `int(NaN or 0)` 不会返回 0（NaN 是 truthy），先 fillna
+                    c_df = c_df.copy()
+                    p_df = p_df.copy()
+                    c_df["openInterest"] = c_df["openInterest"].fillna(0).clip(lower=0)
+                    p_df["openInterest"] = p_df["openInterest"].fillna(0).clip(lower=0)
+
+                    c_exp_oi = int(c_df["openInterest"].sum())
+                    p_exp_oi = int(p_df["openInterest"].sum())
+                    expiry_breakdown.append({
+                        "expiry": exp,
+                        "call_oi": c_exp_oi,
+                        "put_oi":  p_exp_oi,
+                        "total":   c_exp_oi + p_exp_oi,
+                    })
+
+                    for _, row in c_df.iterrows():
+                        s = float(row["strike"])
+                        call_oi[s] = call_oi.get(s, 0) + int(row["openInterest"])
+                    for _, row in p_df.iterrows():
+                        s = float(row["strike"])
+                        put_oi[s]  = put_oi.get(s, 0)  + int(row["openInterest"])
+                    used_exps += 1
+                except Exception:
+                    continue
+
+            if not call_oi and not put_oi:
+                return {}
+
+            all_strikes = sorted(set(call_oi.keys()) | set(put_oi.keys()))
+            c_arr = [call_oi.get(s, 0) for s in all_strikes]
+            p_arr = [put_oi.get(s, 0)  for s in all_strikes]
+
+            # Max Pain（穷举）
+            max_pain_strike = 0.0
+            min_pain = float("inf")
+            for ep in all_strikes:
+                loss = (sum(max(0, ep - s) * oi for s, oi in zip(all_strikes, c_arr)) +
+                        sum(max(0, s - ep) * oi for s, oi in zip(all_strikes, p_arr)))
+                if loss < min_pain:
+                    min_pain = loss
+                    max_pain_strike = ep
+
+            total_call_oi = sum(c_arr)
+            total_put_oi  = sum(p_arr)
+            full_pc = round(total_put_oi / total_call_oi, 3) if total_call_oi > 0 else 0.0
+
+            # Top 10 Call / Put OI
+            top_calls = sorted(zip(all_strikes, c_arr), key=lambda x: -x[1])[:10]
+            top_puts  = sorted(zip(all_strikes, p_arr), key=lambda x: -x[1])[:10]
+
+            def _fmt(pairs, is_call):
+                out = []
+                for s, oi in pairs:
+                    otm = ((s - stock_price) / stock_price * 100) if is_call else ((stock_price - s) / stock_price * 100)
+                    pos = "ITM" if (s < stock_price if is_call else s > stock_price) else f"OTM+{otm:.1f}%"
+                    out.append({"strike": s, "oi": oi, "position": pos})
+                return out
+
+            return {
+                "total_call_oi":      total_call_oi,
+                "total_put_oi":       total_put_oi,
+                "full_pc_ratio":      full_pc,
+                "max_pain":           max_pain_strike,
+                "expiry_count":       used_exps,
+                "top_call_oi":        _fmt(top_calls, True),
+                "top_put_oi":         _fmt(top_puts, False),
+                "expiry_breakdown":   sorted(expiry_breakdown, key=lambda x: x["expiry"]),
+                "oi_by_strike_call":  {str(s): v for s, v in call_oi.items()},
+                "oi_by_strike_put":   {str(s): v for s, v in put_oi.items()},
+            }
+        except Exception as _e:
+            _log.debug("full_chain_oi 采集失败 %s: %s", ticker, _e)
+            return {}
+
+    @staticmethod
     def _calc_total_oi(calls_df: list, puts_df: list, options_chain: dict) -> int:
         """计算 total_oi（稳定口径）：排除 DTE < 7 的近到期合约。
 
@@ -1450,6 +1578,20 @@ class OptionsAgent:
         except Exception as _e_gc:
             _log.debug("Gamma 到期日历计算失败 %s: %s", ticker, _e_gc)
 
+        # v0.25.3: 全链 OI 采集（所有到期日汇总 OI 墙 + Max Pain）
+        full_chain_oi: Dict = {}
+        try:
+            full_chain_oi = self._fetch_full_chain_oi(ticker, stock_price or atm_price)
+            if full_chain_oi:
+                _log.info("[%s] 全链OI采集完成：%d到期日，总OI %s，Max Pain $%.0f，全链P/C %.3f",
+                          ticker,
+                          full_chain_oi.get("expiry_count", 0),
+                          f"{full_chain_oi.get('total_call_oi',0)+full_chain_oi.get('total_put_oi',0):,}",
+                          full_chain_oi.get("max_pain", 0),
+                          full_chain_oi.get("full_pc_ratio", 0))
+        except Exception as _e_fc:
+            _log.debug("全链OI采集失败 %s: %s", ticker, _e_fc)
+
         # P1-⑤ Call 流分类（directional vs hedge vs mixed）
         call_flow_classification: Dict = {}
         try:
@@ -1530,6 +1672,8 @@ class OptionsAgent:
             "iv_rv_detail": iv_rv_data,
             # ⑤ Gamma 到期日历
             "gamma_calendar": gamma_calendar,
+            # v0.25.3: 全链 OI 结构（所有到期日汇总）
+            "full_chain_oi": full_chain_oi,
         }
 
         # 方案21: 出口消毒 — 遍历结果 dict，NaN/Inf → 安全默认值
