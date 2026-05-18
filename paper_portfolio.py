@@ -337,10 +337,20 @@ def _should_open(snapshot: Dict, existing_tickers: set, as_of: str = "") -> Tupl
     return True, f"{direction} score={score:.1f} conf={conf}"
 
 
-def _compute_position_size(nav: float, conf: str, ticker: str, closed: List[Dict]) -> float:
+def _compute_position_size(
+    nav: float,
+    conf: str,
+    ticker: str,
+    closed: List[Dict],
+    low_conviction: bool = False,
+) -> float:
     base_pct = CONFIG["size_pct_by_tier"].get(conf, 0.0)
     mult = _size_multiplier(ticker, closed)
-    return nav * (base_pct / 100.0) * mult
+    size = nav * (base_pct / 100.0) * mult
+    # 低方向置信（v0.22.0）：IV 偏高 + 共振未触发 + 分数模糊区间 → 仓位减半
+    if low_conviction:
+        size *= 0.5
+    return size
 
 
 def _open_position(
@@ -354,7 +364,8 @@ def _open_position(
     ticker = snapshot["ticker"]
     direction = snapshot["direction"]
     conf = _infer_confidence(snapshot)
-    size_usd = _compute_position_size(nav, conf, ticker, closed)
+    low_conv = bool(snapshot.get("low_conviction", False))
+    size_usd = _compute_position_size(nav, conf, ticker, closed, low_conviction=low_conv)
     if size_usd <= 1:
         return None
 
@@ -382,6 +393,8 @@ def _open_position(
     _cs = snapshot.get("composite_score")
     _cs_txt = f"{float(_cs):.1f}" if _cs is not None else "N/A"
     rationale = f"score={_cs_txt} · {conf}"
+    if low_conv:
+        rationale += " · ⚠️低置信-减半仓"
 
     return Position(
         ticker=ticker,

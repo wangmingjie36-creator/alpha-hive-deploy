@@ -1452,10 +1452,14 @@
           "iv_suppressed",
           "resonance_active"
         ],
-        "hits": 9,
+        "hits": 11,
         "last_hit_date": "2026-03-11",
         "first_hit_date": "2026-03-11",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-11",
+            "price_chg_pct": -1.55
+          },
           {
             "date": "2026-03-11",
             "price_chg_pct": -1.55
@@ -1506,10 +1510,14 @@
           "iv_elevated",
           "score_low"
         ],
-        "hits": 9,
+        "hits": 11,
         "last_hit_date": "2026-03-13",
         "first_hit_date": "2026-03-13",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-13",
+            "price_chg_pct": 1.65
+          },
           {
             "date": "2026-03-13",
             "price_chg_pct": 1.65
@@ -1559,10 +1567,14 @@
           "iv_elevated",
           "score_low"
         ],
-        "hits": 9,
+        "hits": 11,
         "last_hit_date": "2026-03-16",
         "first_hit_date": "2026-03-16",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-16",
+            "price_chg_pct": -0.7
+          },
           {
             "date": "2026-03-16",
             "price_chg_pct": -0.7
@@ -1613,10 +1625,14 @@
           "put_dominant",
           "score_low"
         ],
-        "hits": 9,
+        "hits": 11,
         "last_hit_date": "2026-03-23",
         "first_hit_date": "2026-03-23",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-23",
+            "price_chg_pct": -0.25
+          },
           {
             "date": "2026-03-23",
             "price_chg_pct": -0.25
@@ -1666,10 +1682,14 @@
           "call_dominant",
           "iv_elevated"
         ],
-        "hits": 9,
+        "hits": 11,
         "last_hit_date": "2026-03-26",
         "first_hit_date": "2026-03-26",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-26",
+            "price_chg_pct": -2.17
+          },
           {
             "date": "2026-03-26",
             "price_chg_pct": -2.17
@@ -1718,10 +1738,14 @@
         "signal_keys": [
           "score_low"
         ],
-        "hits": 9,
+        "hits": 11,
         "last_hit_date": "2026-03-27",
         "first_hit_date": "2026-03-27",
         "recent_drawdowns": [
+          {
+            "date": "2026-03-27",
+            "price_chg_pct": -1.4
+          },
           {
             "date": "2026-03-27",
             "price_chg_pct": -1.4
@@ -1771,10 +1795,14 @@
           "call_dominant",
           "iv_elevated"
         ],
-        "hits": 9,
+        "hits": 11,
         "last_hit_date": "2026-04-15",
         "first_hit_date": "2026-04-15",
         "recent_drawdowns": [
+          {
+            "date": "2026-04-15",
+            "price_chg_pct": -0.26
+          },
           {
             "date": "2026-04-15",
             "price_chg_pct": -0.26
@@ -1825,7 +1853,7 @@
           "iv_elevated",
           "score_high"
         ],
-        "hits": 18,
+        "hits": 22,
         "last_hit_date": "2026-04-22",
         "first_hit_date": "2026-04-20",
         "recent_drawdowns": [
@@ -1881,10 +1909,14 @@
         "signal_keys": [
           "iv_elevated"
         ],
-        "hits": 9,
+        "hits": 11,
         "last_hit_date": "2026-04-23",
         "first_hit_date": "2026-04-23",
         "recent_drawdowns": [
+          {
+            "date": "2026-04-23",
+            "price_chg_pct": 4.32
+          },
           {
             "date": "2026-04-23",
             "price_chg_pct": 4.32
@@ -1935,8 +1967,8 @@
           "iv_suppressed",
           "pc_bullish"
         ],
-        "hits": 12,
-        "last_hit_date": "2026-04-29",
+        "hits": 18,
+        "last_hit_date": "2026-05-14",
         "first_hit_date": "2026-04-27",
         "recent_drawdowns": [
           {
@@ -1964,12 +1996,8 @@
             "price_chg_pct": -4.63
           },
           {
-            "date": "2026-04-27",
-            "price_chg_pct": -1.59
-          },
-          {
-            "date": "2026-04-29",
-            "price_chg_pct": -4.63
+            "date": "2026-05-14",
+            "price_chg_pct": -4.42
           },
           {
             "date": "2026-04-27",
@@ -1978,11 +2006,15 @@
           {
             "date": "2026-04-29",
             "price_chg_pct": -4.63
+          },
+          {
+            "date": "2026-05-14",
+            "price_chg_pct": -4.42
           }
         ],
         "active_warning": true,
         "hits_threshold": 3,
-        "avg_drawdown": -3.11
+        "avg_drawdown": -3.37
       },
       "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,pc_bullish,score_high": {
         "pattern_key": "看多|看多但大跌（可能被宏观/趋势压制）|call_dominant,pc_bullish,score_high",
@@ -1993,10 +2025,18 @@
           "pc_bullish",
           "score_high"
         ],
-        "hits": 6,
+        "hits": 8,
         "last_hit_date": "2026-04-28",
         "first_hit_date": "2026-04-28",
         "recent_drawdowns": [
+          {
+            "date": "2026-04-28",
+            "price_chg_pct": -1.84
+          },
+          {
+            "date": "2026-04-28",
+            "price_chg_pct": -1.84
+          },
           {
             "date": "2026-04-28",
             "price_chg_pct": -1.84
@@ -2035,10 +2075,18 @@
           "iv_elevated",
           "pc_bullish"
         ],
-        "hits": 6,
+        "hits": 8,
         "last_hit_date": "2026-04-30",
         "first_hit_date": "2026-04-30",
         "recent_drawdowns": [
+          {
+            "date": "2026-04-30",
+            "price_chg_pct": -0.56
+          },
+          {
+            "date": "2026-04-30",
+            "price_chg_pct": -0.56
+          },
           {
             "date": "2026-04-30",
             "price_chg_pct": -0.56
@@ -2077,16 +2125,24 @@
           "covered_call_pattern",
           "iv_elevated"
         ],
-        "hits": 1,
+        "hits": 3,
         "last_hit_date": "2026-05-04",
         "first_hit_date": "2026-05-04",
         "recent_drawdowns": [
           {
             "date": "2026-05-04",
             "price_chg_pct": -1.0
+          },
+          {
+            "date": "2026-05-04",
+            "price_chg_pct": -1.0
+          },
+          {
+            "date": "2026-05-04",
+            "price_chg_pct": -1.0
           }
         ],
-        "active_warning": false,
+        "active_warning": true,
         "hits_threshold": 3,
         "avg_drawdown": -1.0
       }
@@ -2208,6 +2264,6 @@
     }
   },
   "_meta": {
-    "auto_patterns_updated_at": "2026-05-10T09:07:56.117403"
+    "auto_patterns_updated_at": "2026-05-18T01:20:20.658841"
   }
 }

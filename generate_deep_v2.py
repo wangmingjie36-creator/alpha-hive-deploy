@@ -213,6 +213,13 @@ def extract_simple(data: dict) -> dict:
         "market_regime":  (ad.get("GuardBeeSentinel", {})
                               .get("details", {}) or {})
                               .get("market_regime", {}),
+        # v0.25.5: 全链 OI 日环比所需字段
+        **{
+            "fc_call_oi":  int((_fc := odet.get("full_chain_oi") or {}).get("total_call_oi", 0) or 0),
+            "fc_put_oi":   int(_fc.get("total_put_oi", 0) or 0),
+            "fc_pc":       float(_fc.get("full_pc_ratio", 0) or 0),
+            "fc_max_pain": float(_fc.get("max_pain", 0) or 0),
+        },
     }
 
 
@@ -593,6 +600,34 @@ def extract(data: dict) -> dict:
         )
         print(f"   [guard_veto] {_guard_veto_note}")
 
+    # ─────────────────────────────────────────────────────────────────
+    # 中性区间置信度降级（v0.22.0）
+    # 触发条件：iv_elevated + resonance 未触发 + score 3.5–6.5
+    # 效果：不改方向，输出 low_conviction=True，报告显示警告，
+    #        paper_portfolio 仓位减半
+    # 依据：42 次 NVDA 回测，此条件下胜率 ~38%，强行押方向得不偿失；
+    #        仓位减半在方向对时仍保留 50% 收益，错时损失也减半。
+    # ─────────────────────────────────────────────────────────────────
+    _iv_rank_now    = float(odet.get("iv_rank", 50) or 50)
+    _resonance_hit  = resonance.get("detected", False)
+    _score_mid      = 3.5 <= final_score <= 6.5
+
+    _low_conviction      = False
+    _low_conviction_note = ""
+
+    if (not _guard_veto                           # Guard 未否决（避免双重触发）
+            and not _resonance_hit                # 共振未激活
+            and _iv_rank_now > 60                 # IV 偏高（市场不确定性高）
+            and _score_mid                        # 分数处于模糊区间
+            and direction != "neutral"):          # 已是中性则跳过
+        _low_conviction = True
+        _low_conviction_note = (
+            f"⚠️ 低方向置信：IV Rank {_iv_rank_now:.0f}% 偏高 + 共振未触发 + "
+            f"评分 {final_score:.1f} 处于模糊区间（3.5–6.5）。"
+            f"历史同条件胜率约 38%，建议减仓 50% 或等待共振信号确认后再入场。"
+        )
+        print(f"   [low_conviction] {_low_conviction_note}")
+
     return {
         "ticker": ticker,
         "report_date": report_date,
@@ -603,6 +638,8 @@ def extract(data: dict) -> dict:
         "direction_zh": direction_zh(direction),
         "guard_veto": _guard_veto,
         "guard_veto_note": _guard_veto_note,
+        "low_conviction": _low_conviction,
+        "low_conviction_note": _low_conviction_note,
         "resonance": resonance,
         "combined_prob": combined_prob,
         "rating": rating,
@@ -5182,6 +5219,13 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
     if not _ua_list:
         unusual_items_html = '<div style="color:var(--text3);font-size:12px;">暂无异常期权流数据</div>'
 
+    # P3: Top5 by dollar_premium — 默认可见部分（无需按到期日分组）
+    _all_ua_by_prem = sorted(_ua_list, key=lambda x: x.get("dollar_premium", 0), reverse=True)
+    _top5_html = "".join(_render_item(u) for u in _all_ua_by_prem[:5]) if _ua_list else ""
+    _total_ua_count = len(_ua_list)
+    # 判断是否有超过5条（决定是否显示展开按钮）
+    _has_more_ua = _total_ua_count > 5
+
     # 到期日标签行（在异常流列表标题旁展示）
     exp_dates = _sorted_expiries or ctx.get("expiration_dates", [])
     if exp_dates:
@@ -5347,6 +5391,111 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
 </div>"""
     else:
         full_chain_oi_html = ""
+
+    # ── v0.25.5 全链 OI 日环比卡片（CH4 · 期权结构日变化）──────────────────────
+    _fc_c_delta    = ctx.get("fc_call_delta")
+    _fc_p_delta    = ctx.get("fc_put_delta")
+    _fc_c_dpct     = ctx.get("fc_call_delta_pct", 0)
+    _fc_p_dpct     = ctx.get("fc_put_delta_pct", 0)
+    _fc_c_prev     = ctx.get("fc_call_prev", 0)
+    _fc_p_prev     = ctx.get("fc_put_prev", 0)
+    _fc_pc_delta   = ctx.get("fc_pc_delta")
+    _fc_pc_prev    = ctx.get("fc_pc_prev", 0)
+    _fc_pc_now2    = ctx.get("fc_pc_now", 0)
+    _fc_mp_delta   = ctx.get("fc_mp_delta")
+    _fc_mp_prev    = ctx.get("fc_mp_prev", 0)
+    _fc_mp_now2    = ctx.get("fc_mp_now", 0)
+    _has_fc_cmp = (_fc_c_delta is not None) or (_fc_mp_delta is not None)
+    if _has_fc_cmp:
+        def _oi_bar(delta_pct, width_scale=15.0):
+            """返回 (arrow, color, bar_width_pct, bar_color)"""
+            if delta_pct is None:
+                return "─", "var(--text3)", 0, "var(--text4)"
+            arrow = "▲" if delta_pct > 0 else ("▼" if delta_pct < 0 else "─")
+            color = "var(--green2)" if delta_pct > 0 else ("var(--red2)" if delta_pct < 0 else "var(--text3)")
+            w = min(int(abs(delta_pct) / width_scale * 100), 100)
+            return arrow, color, w, color
+        def _fmt_k(n):
+            if n is None: return "N/A"
+            n = int(n)
+            return f"{n/10000:.1f}万" if abs(n) >= 10000 else f"{n:,}"
+        _ca, _cc, _cw, _cbg = _oi_bar(_fc_c_dpct)
+        _pa, _pc2, _pw, _pbg = _oi_bar(_fc_p_dpct)
+        # P/C 变化解读
+        if _fc_pc_delta is not None:
+            if _fc_pc_delta > 0.05:   _pc_interp = "看空压力增"
+            elif _fc_pc_delta > 0.01: _pc_interp = "小幅偏空"
+            elif _fc_pc_delta < -0.05:_pc_interp = "看多信号增"
+            elif _fc_pc_delta < -0.01:_pc_interp = "小幅偏多"
+            else:                      _pc_interp = "基本持平"
+            _pc_arr = "▲" if _fc_pc_delta > 0 else ("▼" if _fc_pc_delta < 0 else "─")
+            _pc_col = "var(--red2)" if _fc_pc_delta > 0.01 else ("var(--green2)" if _fc_pc_delta < -0.01 else "var(--text3)")
+            _pc_cell = (
+                f'<div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:4px;">'
+                f'全链 P/C</div>'
+                f'<div style="font-size:13px;font-weight:700;color:{_pc_col};">'
+                f'{_pc_arr} {_fc_pc_prev:.2f} → {_fc_pc_now2:.2f}</div>'
+                f'<div style="font-size:10px;color:{_pc_col};margin-top:2px;">{_pc_interp} ({_fc_pc_delta:+.3f})</div>'
+            )
+        else:
+            _pc_cell = '<div style="font-size:12px;color:var(--text4);">全链P/C 无昨日数据</div>'
+        # Max Pain 位移
+        if _fc_mp_delta is not None:
+            _mp_dir = "↑ 向上漂移" if _fc_mp_delta > 0 else ("↓ 向下漂移" if _fc_mp_delta < 0 else "─ 无变化")
+            _mp_col = "var(--green2)" if _fc_mp_delta > 0 else ("var(--red2)" if _fc_mp_delta < 0 else "var(--text3)")
+            _mp_note = "做市商磁吸上移" if _fc_mp_delta > 0 else ("做市商磁吸下移" if _fc_mp_delta < 0 else "")
+            _mp_cell = (
+                f'<div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:4px;">'
+                f'Max Pain 位移</div>'
+                f'<div style="font-size:13px;font-weight:700;color:{_mp_col};">'
+                f'${_fc_mp_prev:.0f} → ${_fc_mp_now2:.0f}</div>'
+                f'<div style="font-size:10px;color:{_mp_col};margin-top:2px;">{_mp_dir} {_mp_note} ({_fc_mp_delta:+.0f})</div>'
+            )
+        else:
+            _mp_cell = '<div style="font-size:12px;color:var(--text4);">Max Pain 无昨日数据</div>'
+        # Call / Put OI 变化行
+        _call_row = (
+            f'<div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:4px;">Call OI</div>'
+            f'<div style="font-size:13px;font-weight:700;color:{_cc};">'
+            f'{_ca} {_fmt_k(abs(_fc_c_delta))} ({_fc_c_dpct:+.1f}%)</div>'
+            f'<div style="height:4px;border-radius:2px;background:var(--bg3);margin-top:5px;">'
+            f'<div style="width:{_cw}%;height:100%;border-radius:2px;background:{_cbg};"></div></div>'
+            f'<div style="font-size:10px;color:var(--text4);margin-top:2px;">'
+            f'昨日 {_fmt_k(_fc_c_prev)}</div>'
+        ) if _fc_c_delta is not None else '<div style="font-size:12px;color:var(--text4);">Call OI 无昨日数据</div>'
+        _put_row = (
+            f'<div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:4px;">Put OI</div>'
+            f'<div style="font-size:13px;font-weight:700;color:{_pc2};">'
+            f'{_pa} {_fmt_k(abs(_fc_p_delta))} ({_fc_p_dpct:+.1f}%)</div>'
+            f'<div style="height:4px;border-radius:2px;background:var(--bg3);margin-top:5px;">'
+            f'<div style="width:{_pw}%;height:100%;border-radius:2px;background:{_pbg};"></div></div>'
+            f'<div style="font-size:10px;color:var(--text4);margin-top:2px;">'
+            f'昨日 {_fmt_k(_fc_p_prev)}</div>'
+        ) if _fc_p_delta is not None else '<div style="font-size:12px;color:var(--text4);">Put OI 无昨日数据</div>'
+
+        fc_compare_html = f"""
+<div style="margin-bottom:16px;padding:14px 16px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+    <span style="font-size:12px;font-weight:700;color:var(--text2);">📅 期权结构日变化</span>
+    <span style="font-size:10px;color:var(--text4);background:var(--bg3);padding:2px 7px;border-radius:4px;">vs 昨日</span>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+    <div style="padding:10px 12px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);">
+      {_call_row}
+    </div>
+    <div style="padding:10px 12px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);">
+      {_put_row}
+    </div>
+    <div style="padding:10px 12px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);">
+      {_pc_cell}
+    </div>
+    <div style="padding:10px 12px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);">
+      {_mp_cell}
+    </div>
+  </div>
+</div>"""
+    else:
+        fc_compare_html = ""
 
     # ── IV 期限结构卡片（CH4 · OracleBee S15）─────────────────────────────────
     _ivts       = ctx.get("iv_term_structure", {}) or {}
@@ -6282,6 +6431,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
     </div>
     <div class="section-body">
       {(f'<div style="background:#3d1a1a;border:1px solid #ff4d4d55;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:13px;color:#ff8080;font-weight:600;">{ctx["guard_veto_note"]}</div>' if ctx.get("guard_veto") else "")}
+      {(f'<div style="background:#2d2a14;border:1px solid #f59e0b88;border-left:4px solid #f59e0b;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:13px;color:#fcd34d;">{ctx["low_conviction_note"]}</div>' if ctx.get("low_conviction") else "")}
       {score_summary_html}{_conf_chart_html}
       <div class="score-grid" style="margin-top:14px;">{score_cards}</div>
       <div class="divider"></div>
@@ -6381,32 +6531,34 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
         </div>
       </div>
 
+      {strategy_card_html}
+
       {_oi_anomaly_html}
       {iv_term_html}
       {full_chain_oi_html}
+      {fc_compare_html}
       {_gex_enhance_html}
       {_vol_surface_html}
       {_skew_alerts_html}
 
-      <div class="levels-grid" style="margin-bottom:16px;">
-        <div class="level-block support">
-          <h4>📗 支撑位（高OI Put）</h4>
-          {support_rows or '<div class="level-row"><span class="level-meta">暂无数据</span></div>'}
-        </div>
-        <div class="level-block resistance">
-          <h4>📕 阻力位（高OI Call）</h4>
-          {resistance_rows or '<div class="level-row"><span class="level-meta">暂无数据</span></div>'}
-        </div>
-      </div>
-
       <div style="margin-bottom:14px;">
-        <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:8px;">异常期权流（成交量排名）</div>
-        {expiry_row_html}
-        <div class="unusual-list">{unusual_items_html}</div>
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:8px;">
+          <span style="font-size:12px;font-weight:700;color:var(--text2);">异常期权流</span>
+          <span style="font-size:10px;color:var(--text3);">按溢价排名 · Top 5 · 共 {_total_ua_count} 条</span>
+        </div>
+        <div class="unusual-list">{_top5_html if _top5_html else unusual_items_html}</div>
+        {f'''<details style="margin-top:8px;">
+          <summary style="cursor:pointer;font-size:11px;color:var(--text3);padding:6px 0;user-select:none;list-style:none;display:flex;align-items:center;gap:4px;">
+            <span style="font-size:13px;">▸</span> 展开全部 {_total_ua_count} 条（按到期日分组）
+          </summary>
+          <div style="margin-top:8px;">
+            {expiry_row_html}
+            <div class="unusual-list" style="margin-top:6px;">{unusual_items_html}</div>
+          </div>
+        </details>''' if _has_more_ua else ''}
       </div>
 
       <div class="prose">{reasoning.get('options', '<p>分析生成中...</p>')}</div>
-      {strategy_card_html}
     </div>
   </div>
 
@@ -7040,6 +7192,50 @@ def main():
                     extras.append(f"  ⚠️ OI 异常波动告警: 日环比{_oi_dir} {_oi_abs_pct:.0f}%")
                 else:
                     ctx["oi_anomaly"] = False
+        except Exception:
+            pass
+        # v0.25.5: 全链 OI 日环比（Call/Put 分别 + 全链P/C + Max Pain 位移）
+        try:
+            _fc_now  = ctx.get("full_chain_oi") or {}
+            _fc_c_now  = int(_fc_now.get("total_call_oi", 0) or 0)
+            _fc_p_now  = int(_fc_now.get("total_put_oi", 0)  or 0)
+            _fc_pc_now = float(_fc_now.get("full_pc_ratio", 0) or 0)
+            _fc_mp_now = float(_fc_now.get("max_pain", 0) or 0)
+            _fc_c_prev = int(prev.get("fc_call_oi", 0) or 0)
+            _fc_p_prev = int(prev.get("fc_put_oi", 0)  or 0)
+            _fc_pc_prev = float(prev.get("fc_pc", 0) or 0)
+            _fc_mp_prev = float(prev.get("fc_max_pain", 0) or 0)
+            if _fc_c_now and _fc_c_prev:
+                ctx["fc_call_delta"]     = _fc_c_now - _fc_c_prev
+                ctx["fc_put_delta"]      = _fc_p_now - _fc_p_prev
+                ctx["fc_call_delta_pct"] = round((_fc_c_now / _fc_c_prev - 1) * 100, 1) if _fc_c_prev else 0
+                ctx["fc_put_delta_pct"]  = round((_fc_p_now / _fc_p_prev - 1) * 100, 1) if _fc_p_prev else 0
+                ctx["fc_call_prev"]  = _fc_c_prev
+                ctx["fc_put_prev"]   = _fc_p_prev
+                _cd_arrow = "▲" if ctx["fc_call_delta"] > 0 else ("▼" if ctx["fc_call_delta"] < 0 else "─")
+                _pd_arrow = "▲" if ctx["fc_put_delta"]  > 0 else ("▼" if ctx["fc_put_delta"]  < 0 else "─")
+                extras.append(
+                    f"  全链Call OI: {_fc_c_prev:,.0f}→{_fc_c_now:,.0f} "
+                    f"{_cd_arrow}({ctx['fc_call_delta']:+,}, {ctx['fc_call_delta_pct']:+.1f}%)"
+                )
+                extras.append(
+                    f"  全链Put OI:  {_fc_p_prev:,.0f}→{_fc_p_now:,.0f} "
+                    f"{_pd_arrow}({ctx['fc_put_delta']:+,}, {ctx['fc_put_delta_pct']:+.1f}%)"
+                )
+            if _fc_pc_now and _fc_pc_prev:
+                ctx["fc_pc_delta"] = round(_fc_pc_now - _fc_pc_prev, 3)
+                ctx["fc_pc_prev"]  = _fc_pc_prev
+                ctx["fc_pc_now"]   = _fc_pc_now
+                extras.append(
+                    f"  全链P/C: {_fc_pc_prev:.2f}→{_fc_pc_now:.2f} ({ctx['fc_pc_delta']:+.3f})"
+                )
+            if _fc_mp_now and _fc_mp_prev:
+                ctx["fc_mp_delta"] = round(_fc_mp_now - _fc_mp_prev, 2)
+                ctx["fc_mp_prev"]  = _fc_mp_prev
+                ctx["fc_mp_now"]   = _fc_mp_now
+                extras.append(
+                    f"  Max Pain: ${_fc_mp_prev:.0f}→${_fc_mp_now:.0f} ({ctx['fc_mp_delta']:+.0f})"
+                )
         except Exception:
             pass
         delta_context = (

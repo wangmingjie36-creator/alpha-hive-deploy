@@ -5,6 +5,65 @@
 
 ---
 
+## [0.25.6] — 2026-05-16 — 全链 OI 日环比追踪（期权结构日变化卡）
+
+### Added
+
+- **`generate_deep_v2.py` CH4 "📅 期权结构日变化"卡片**（v0.25.6 新增）
+  - 前提：`full_chain_oi` 在昨日和今日 JSON 中均存在时自动渲染，否则静默跳过
+  - 2×2 网格布局：**Call OI 变化** / **Put OI 变化** / **全链 P/C 位移** / **Max Pain 位移**
+  - Call/Put OI 格子：绿▲/红▼方向 + 万手格式绝对量 + 百分比 + 横向进度条（每15%=100%条宽）
+  - 全链 P/C 格子：`旧值 → 新值`，自动判断语义（看空压力增 / 小幅偏空 / 看多信号增 / 小幅偏多 / 基本持平）
+  - Max Pain 位移格子：`$旧 → $新`，注释"向上漂移/做市商磁吸上移"或"向下漂移"
+  - 插入位置：`full_chain_oi_html`之后、`_gex_enhance_html`之前
+
+### Changed
+
+- **`generate_deep_v2.py` `extract_simple()`** — 新增 4 个全链字段
+  - `fc_call_oi`、`fc_put_oi`：全链 Call/Put OI 绝对量（int）
+  - `fc_pc`：全链 P/C ratio（float）
+  - `fc_max_pain`：Max Pain 行权价（float）
+  - 旧格式 JSON（无 `full_chain_oi`）优雅降级为 0/0.0，不报错
+
+- **`generate_deep_v2.py` delta 计算块** — 新增全链 OI delta 计算
+  - `ctx["fc_call_delta"]` / `ctx["fc_call_delta_pct"]`：全链 Call OI 日环比绝对量和百分比
+  - `ctx["fc_put_delta"]` / `ctx["fc_put_delta_pct"]`：全链 Put OI 日环比
+  - `ctx["fc_pc_delta"]`：全链 P/C ratio 位移（+正=偏空加剧）
+  - `ctx["fc_mp_delta"]`：Max Pain 行权价位移（+正=上移）
+  - `extras` 日志追加 4 行全链 OI delta 摘要，供 delta_context LLM 推理使用
+  - 昨日无 `full_chain_oi` 数据时整块跳过，不影响现有逻辑
+
+---
+
+## [0.25.5] — 2026-05-16 — CH4 期权板块信息架构重构（P1+P2+P3）
+
+### Added
+
+- **`iv_crush_analysis.py`**（新脚本，独立运行工具）
+  - 完全离线（无需 yfinance 网络），基于 8 个已知 NVDA 财报历史数据点
+  - 财报前 Pre-IV：ATM 跨式近似公式 `IV = implied_pct / (0.8 × sqrt(DTE/365)) × 100`
+  - 财报后 Post-HV30：解析估算 `sqrt((actual_move² + 29 × daily_base_var) / 30 × 252) × 100`，NVDA 基础 HV45%
+  - 统计结果：平均 Pre-IV 57.8%，平均 Post-HV30 54.3%，平均压缩 -3.5pp（-6%），卖方胜率 50%（4/8）
+  - 输出 `output/iv_crush_analysis.html` + 嵌入 matplotlib PNG
+
+### Changed
+
+- **`generate_deep_v2.py` CH4 布局优化（P1 策略结论前置）**
+  - `{strategy_card_html}` 移至 `<div class="section-body">` 第一个元素（原在底部）
+  - 打开期权板块第一眼即见"买方/卖方/方向中性"判断，无需下滑
+
+- **`generate_deep_v2.py` CH4 删除冗余 Key Levels 面板（P2）**
+  - 移除整个 `<div class="levels-grid">` 近端支撑/阻力 HTML 块
+  - 原因：全链 OI Top10 Call = 阻力位，Top10 Put = 支撑位，双重展示信息冗余
+
+- **`generate_deep_v2.py` CH4 异常期权流改为 Top5 默认展示 + 全列表折叠（P3）**
+  - 新增 `_all_ua_by_prem`（按 dollar_premium 降序排列）、`_top5_html`、`_total_ua_count`、`_has_more_ua`
+  - 默认仅显示溢价最高的 Top 5 条目
+  - 超过 5 条时，完整列表（按到期日分组，原有 `unusual_items_html`）收入 `<details><summary>▸ 展开全部 N 条（按到期日分组）...</summary>` 折叠块
+  - 无需 JavaScript，纯 HTML 实现渐进式披露
+
+---
+
 ## [0.25.4] — 2026-05-14 — 深度报告期权章节升级为全链 OI 结构
 
 ### Added
