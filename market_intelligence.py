@@ -743,11 +743,34 @@ def calculate_iv_rv_spread(
         if hist.empty or len(hist) < lookback_days // 2:
             return _empty
 
-        closes = hist["Close"].dropna().values.flatten()
+        # yfinance >= 0.2.49 对单 ticker 也返回 MultiIndex columns，需显式取列
+        close_col = hist["Close"]
+        if hasattr(close_col, "columns"):
+            # DataFrame → 取第一列（单 ticker 场景）
+            close_col = close_col.iloc[:, 0]
+        closes = close_col.dropna().values.flatten().astype(float)
+
+        # 过滤掉无效价格（0/负值/极低 ~1.0 哨兵值均来自 yfinance sample data）
+        # 用 > 5 而非 > 0，防止归一化哨兵值（~1.0）污染 HV 计算
+        closes = closes[closes > 5]
         n = min(lookback_days, len(closes) - 1)
+        if n < 5:
+            return _empty
+
         log_rets = np.log(closes[-n:] / closes[-(n + 1):-1])
-        rv_daily = float(np.std(log_rets))
+
+        # 过滤异常跳升：单日 |log_ret| > 0.5（≈ e^0.5-1=65% 日涨跌）视为数据污染
+        log_rets = log_rets[np.abs(log_rets) < 0.5]
+        if len(log_rets) < 5:
+            return _empty
+
+        rv_daily = float(np.std(log_rets, ddof=1))
         rv_annual = rv_daily * math.sqrt(252) * 100  # 转为年化百分比
+
+        # Sanity check：正常股票 HV30 不应超过 300%
+        if rv_annual <= 0 or rv_annual > 300:
+            _empty["iv_rv_note"] = f"RV 数据异常（HV30={rv_annual:.1f}%），已跳过"
+            return _empty
 
         spread = iv_current_pct - rv_annual
 

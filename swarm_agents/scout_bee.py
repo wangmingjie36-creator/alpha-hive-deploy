@@ -389,8 +389,19 @@ class ScoutBeeNova(BeeAgent):
             if len(_stk) < 5 or len(_etf) < 5:
                 return result
 
+            # 过滤 yfinance sample data 哨兵值（~1.0）：任意价格 < 5 视为数据污染
+            if _stk.min() < 5 or _etf.min() < 5:
+                _log.debug("ScoutBeeNova RS skipped: suspect sample data prices for %s", ticker)
+                return result
+
             stock_ret  = round((_stk.iloc[-1] / _stk.iloc[0] - 1) * 100, 2)
             sector_ret = round((_etf.iloc[-1] / _etf.iloc[0] - 1) * 100, 2)
+
+            # 20日涨跌幅超过 ±200% 仍视为数据异常，保守跳过
+            if abs(stock_ret) > 200 or abs(sector_ret) > 200:
+                _log.debug("ScoutBeeNova RS skipped: extreme return %s=%.1f%%", ticker, stock_ret)
+                return result
+
             rs = round(stock_ret - sector_ret, 2)
 
             if rs >= 5.0:

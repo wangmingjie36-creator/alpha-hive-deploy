@@ -577,8 +577,12 @@ def _fetch_sector_rotation(yf_module=None) -> Dict:
                 if hist is not None and len(hist) >= 2:
                     first_close = float(hist["Close"].iloc[0])
                     last_close = float(hist["Close"].iloc[-1])
-                    if first_close > 0:
+                    # < 5 防 yfinance sample data ~1.0 哨兵值（ETF 真实价格均 > $5）
+                    if first_close >= 5:
                         chg = round((last_close / first_close - 1) * 100, 2)
+                        # 5 日涨跌 ±50% 以上为数据异常，归零保守处理
+                        if abs(chg) > 50:
+                            chg = 0.0
                         name = _SECTOR_ETFS[etf]
                         return (etf, name, chg)
             except Exception as e:

@@ -1,0 +1,31 @@
+{
+  "ticker": "TSLA",
+  "date": "2026-05-19",
+  "composite_score": 5.28,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 404.1099853515625,
+  "agent_votes": {
+    "OracleBeeEcho": 9.215384615384616,
+    "CodeExecutorAgent": 5.0,
+    "ChronosBeeHorizon": 5.968,
+    "RivalBeeVanguard": 5.83,
+    "QueenDistiller": 5.28,
+    "ScoutBeeNova": 4.688275,
+    "GuardBeeSentinel": 4.43
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-05-19T14:06:36.963950"
+}

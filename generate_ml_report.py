@@ -710,8 +710,8 @@ class MLEnhancedReportGenerator:
             <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>{ad.get('discovery','')}</p>
         </div>"""
 
-    def _ch3_oracle(self, agent_details: dict, options: dict) -> str:
-        """第3章 OracleBee — 期权市场预期"""
+    def _ch3_oracle(self, agent_details: dict, options: dict, current_price: float = 0) -> str:
+        """第3章 OracleBee — 期权市场预期（v0.27.0：扩展为完整全链/近端/IV结构/Gamma日历视图）"""
         ad = agent_details.get("OracleBeeEcho", {})
         det = ad.get("details", {}) if ad else {}
         opts = det if det else options
@@ -741,24 +741,275 @@ class MLEnhancedReportGenerator:
             unusual_rows += f"<li>{emo} {u.get('type','').replace('_',' ')} Strike ${u.get('strike',0):.0f} × {u.get('volume',0):,.0f}</li>"
         support_txt = " | ".join(f"${s.get('strike',0):.0f}(OI:{s.get('oi',0):,})" for s in support[:3])
         resist_txt = " | ".join(f"${r.get('strike',0):.0f}(OI:{r.get('oi',0):,})" for r in resist[:3])
+
+        # ── v0.27.0：近端 Max Pain（来自 oracle.max_pain，OracleBee 基于近端 3-4 个到期日聚合）──
+        # 数据格式：dict `{"max_pain": 225.0, "distance_pct": -1.2, "summary": "..."}`
+        # 或纯数值 float 兜底
+        _near_max_pain_html = ""
+        _near_mp_raw = (det or {}).get("max_pain") if isinstance(det, dict) else None
+        _near_mp_val = None
+        _near_mp_dist = None
+        if isinstance(_near_mp_raw, dict):
+            _v = _near_mp_raw.get("max_pain")
+            if isinstance(_v, (int, float)) and _v > 0:
+                _near_mp_val = float(_v)
+                _d = _near_mp_raw.get("distance_pct")
+                if isinstance(_d, (int, float)):
+                    _near_mp_dist = float(_d)
+        elif isinstance(_near_mp_raw, (int, float)) and _near_mp_raw > 0:
+            _near_mp_val = float(_near_mp_raw)
+        if _near_mp_val is not None:
+            _dist_txt = f"（距现价 {_near_mp_dist:+.1f}%）" if _near_mp_dist is not None else ""
+            _near_max_pain_html = (
+                f'<div class="stat"><div class="num" style="color:#667eea">${_near_mp_val:.0f}</div>'
+                f'<div class="lbl">近端磁吸目标价{_dist_txt}</div></div>'
+            )
+
+        # ── v0.27.0：全链 OI 结构卡片 ──────────────────────────────────────
+        _full_chain = opts.get("full_chain_oi") or {}
+        _full_oi_html = ""
+        if isinstance(_full_chain, dict) and _full_chain:
+            _fc_max_pain = _safe(_full_chain.get("max_pain"), 0)
+            _fc_pc = _safe(_full_chain.get("full_pc_ratio"), 0)
+            _fc_call_oi = _safe(_full_chain.get("total_call_oi"), 0)
+            _fc_put_oi = _safe(_full_chain.get("total_put_oi"), 0)
+            _fc_expiry_count = _safe(_full_chain.get("expiry_count"), 0)
+            _fc_total = _fc_call_oi + _fc_put_oi
+
+            def _wall_rows(walls: list, is_call: bool, cur_p: float) -> str:
+                """渲染 Top OI 墙行：strike / OI / 距现价% / 主导到期日 badge"""
+                rows = ""
+                for w in (walls or [])[:5]:
+                    if not isinstance(w, dict):
+                        continue
+                    sk = w.get("strike")
+                    oi_v = w.get("oi") or 0
+                    if sk is None:
+                        continue
+                    try:
+                        sk_f = float(sk)
+                    except (ValueError, TypeError):
+                        continue
+                    if cur_p and cur_p > 0:
+                        pct = ((sk_f - cur_p) / cur_p) * 100
+                        pct_txt = f"{pct:+.1f}%"
+                    else:
+                        pct_txt = "—"
+                    dom_exp = w.get("dom_exp") or w.get("position") or ""
+                    badge = f'<span style="background:#eee;color:#666;font-size:0.75em;padding:1px 5px;border-radius:3px;margin-left:4px;">{dom_exp}</span>' if dom_exp else ""
+                    color = "#dc3545" if is_call else "#28a745"
+                    rows += (
+                        f'<tr><td style="color:{color};font-weight:600;">${sk_f:.0f}</td>'
+                        f'<td>{int(oi_v):,}</td>'
+                        f'<td style="color:#666;">{pct_txt}{badge}</td></tr>'
+                    )
+                return rows
+
+            _call_walls_html = _wall_rows(_full_chain.get("top_call_oi", []), True, current_price)
+            _put_walls_html = _wall_rows(_full_chain.get("top_put_oi", []), False, current_price)
+            _fc_pc_color = "#28a745" if _fc_pc < 0.8 else ("#dc3545" if _fc_pc > 1.2 else "#ffc107")
+
+            _full_oi_html = f"""
+            <h3 style="color:#667eea;margin-top:18px;">📊 全链 OI 结构（{_fc_expiry_count} 个到期日聚合，含 LEAPS 远期参考）</h3>
+            <div class="grid-4" style="margin-bottom:12px;">
+                <div class="stat"><div class="num" style="color:#888">${_fc_max_pain:.0f}</div><div class="lbl">全链 Max Pain（远期参考）</div></div>
+                <div class="stat"><div class="num" style="color:{_fc_pc_color}">{_fc_pc:.2f}</div><div class="lbl">全链 P/C Ratio</div></div>
+                <div class="stat"><div class="num">{_fc_total:,}</div><div class="lbl">全链总 OI</div></div>
+                <div class="stat"><div class="num">{_fc_call_oi:,} / {_fc_put_oi:,}</div><div class="lbl">Call / Put OI</div></div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px;">
+                <div>
+                    <strong style="color:#dc3545;">Top5 Call 阻力墙（全链）</strong>
+                    <table style="font-size:0.88em;margin-top:6px;">
+                        <tr><th>行权价</th><th>OI</th><th>距现价 / 主导到期</th></tr>
+                        {_call_walls_html or '<tr><td colspan="3" style="color:#999;text-align:center;">—</td></tr>'}
+                    </table>
+                </div>
+                <div>
+                    <strong style="color:#28a745;">Top5 Put 支撑墙（全链）</strong>
+                    <table style="font-size:0.88em;margin-top:6px;">
+                        <tr><th>行权价</th><th>OI</th><th>距现价 / 主导到期</th></tr>
+                        {_put_walls_html or '<tr><td colspan="3" style="color:#999;text-align:center;">—</td></tr>'}
+                    </table>
+                </div>
+            </div>
+            """
+
+        # ── v0.27.0：近端 30 天 OI 墙现场聚合（call_exp_oi/put_exp_oi 矩阵）──
+        _near_walls_html = ""
+        _call_exp_oi = (_full_chain or {}).get("call_exp_oi") or {}
+        _put_exp_oi = (_full_chain or {}).get("put_exp_oi") or {}
+        if isinstance(_call_exp_oi, dict) and _call_exp_oi and current_price and current_price > 0:
+            from datetime import datetime as _dt_oi
+            _now_oi = _dt_oi.now()
+            _NEAR_DAYS = 30
+
+            def _aggregate_near(exp_map_dict):
+                out = {}
+                for sk, exps in (exp_map_dict or {}).items():
+                    if not isinstance(exps, dict):
+                        continue
+                    try:
+                        strike_f = float(sk)
+                    except (ValueError, TypeError):
+                        continue
+                    total_near = 0
+                    for exp_str, oi_val in exps.items():
+                        try:
+                            exp_dt = _dt_oi.strptime(exp_str, "%Y-%m-%d")
+                            days_to = (exp_dt - _now_oi).days
+                        except (ValueError, TypeError):
+                            continue
+                        if 0 <= days_to <= _NEAR_DAYS:
+                            try:
+                                total_near += int(oi_val or 0)
+                            except (ValueError, TypeError):
+                                continue
+                    if total_near > 0:
+                        out[strike_f] = total_near
+                return out
+
+            _near_calls = _aggregate_near(_call_exp_oi)
+            _near_puts = _aggregate_near(_put_exp_oi)
+
+            def _top_walls_near(near_dict, is_call):
+                """从 {strike: total_oi} 取 Top3，过滤 OTM 方向（call: strike > price; put: strike < price）"""
+                if not near_dict:
+                    return []
+                items = sorted(near_dict.items(), key=lambda x: -x[1])
+                out = []
+                for sk, oi_v in items:
+                    pct = (sk - current_price) / current_price * 100
+                    if is_call and pct < -1:  # call 墙取现价附近 + 上方
+                        continue
+                    if (not is_call) and pct > 1:  # put 墙取现价附近 + 下方
+                        continue
+                    out.append({"strike": sk, "oi": oi_v, "pct": pct})
+                    if len(out) >= 3:
+                        break
+                return out
+
+            _near_call_top = _top_walls_near(_near_calls, True)
+            _near_put_top = _top_walls_near(_near_puts, False)
+
+            # 近端 P/C
+            _near_call_sum = sum(_near_calls.values())
+            _near_put_sum = sum(_near_puts.values())
+            _near_pc_str = f"{(_near_put_sum / _near_call_sum):.2f}" if _near_call_sum > 0 else "—"
+
+            if _near_call_top or _near_put_top:
+                def _row_near(walls, is_call):
+                    color = "#dc3545" if is_call else "#28a745"
+                    if not walls:
+                        return '<tr><td colspan="3" style="color:#999;text-align:center;">—</td></tr>'
+                    return "".join(
+                        f'<tr><td style="color:{color};font-weight:600;">${w["strike"]:.0f}</td>'
+                        f'<td>{int(w["oi"]):,}</td>'
+                        f'<td style="color:#666;">{w["pct"]:+.1f}%</td></tr>'
+                        for w in walls
+                    )
+                _near_walls_html = f"""
+                <h3 style="color:#667eea;margin-top:18px;">🎯 近 30 天到期 OI 墙（现场聚合，磁吸效应最强）</h3>
+                <div style="background:#fff3cd;border-left:3px solid #ffc107;padding:8px 12px;margin-bottom:10px;font-size:0.88em;color:#856404;">
+                    近端 P/C = <strong>{_near_pc_str}</strong> | Call OI {_near_call_sum:,} | Put OI {_near_put_sum:,}
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px;">
+                    <div>
+                        <strong style="color:#dc3545;">近端 Top3 Call 阻力</strong>
+                        <table style="font-size:0.88em;margin-top:6px;">
+                            <tr><th>行权价</th><th>OI</th><th>距现价</th></tr>
+                            {_row_near(_near_call_top, True)}
+                        </table>
+                    </div>
+                    <div>
+                        <strong style="color:#28a745;">近端 Top3 Put 支撑</strong>
+                        <table style="font-size:0.88em;margin-top:6px;">
+                            <tr><th>行权价</th><th>OI</th><th>距现价</th></tr>
+                            {_row_near(_near_put_top, False)}
+                        </table>
+                    </div>
+                </div>
+                """
+
+        # ── v0.27.0：IV 期限结构 + IV-RV 价差 ───────────────────────────
+        _iv_term = opts.get("iv_term_structure") or {}
+        _iv_rv_signal = opts.get("iv_rv_signal", "")
+        _iv_rv_spread = _safe(opts.get("iv_rv_spread"), 0)
+        _rv_30d = _safe(opts.get("rv_30d"), 0)
+        _iv_struct_html = ""
+        if (isinstance(_iv_term, dict) and _iv_term) or _iv_rv_signal:
+            _shape = (_iv_term or {}).get("shape") or (_iv_term or {}).get("term_shape") or "—"
+            _shape_color = {"contango": "#28a745", "backwardation": "#dc3545", "flat": "#ffc107"}.get(str(_shape).lower(), "#666")
+            _shape_cn = {"contango": "Contango（远月>近月，市场预期平稳）",
+                         "backwardation": "Backwardation（近月>远月，短期不确定性高）",
+                         "flat": "Flat（期限结构平坦）"}.get(str(_shape).lower(), str(_shape))
+            _front_iv = _safe((_iv_term or {}).get("front_iv"), 0)
+            _back_iv = _safe((_iv_term or {}).get("back_iv"), 0)
+            _iv_rv_color = "#dc3545" if _iv_rv_spread > 10 else ("#28a745" if _iv_rv_spread < -5 else "#666")
+            _iv_struct_html = f"""
+            <h3 style="color:#667eea;margin-top:18px;">📐 IV 期限结构 + IV-RV 价差</h3>
+            <div class="grid-4" style="margin-bottom:12px;">
+                <div class="stat"><div class="num" style="color:{_shape_color};font-size:1.3em;">{str(_shape).upper()}</div><div class="lbl">期限结构形态</div></div>
+                <div class="stat"><div class="num">{_front_iv:.1f}% / {_back_iv:.1f}%</div><div class="lbl">近月 IV / 远月 IV</div></div>
+                <div class="stat"><div class="num" style="color:{_iv_rv_color}">{_iv_rv_spread:+.1f}pp</div><div class="lbl">IV-RV 价差</div></div>
+                <div class="stat"><div class="num">{_rv_30d:.1f}%</div><div class="lbl">30日实现波动率</div></div>
+            </div>
+            <p style="font-size:0.86em;color:#555;margin-bottom:10px;">
+                <strong>形态解读：</strong>{_shape_cn}<br/>
+                <strong>IV-RV 信号：</strong>{_iv_rv_signal or '—'}
+            </p>
+            """
+
+        # ── v0.27.0：Gamma 到期日历 ─────────────────────────────────────
+        _gamma_cal = opts.get("gamma_calendar") or {}
+        _gamma_cal_html = ""
+        if isinstance(_gamma_cal, dict) and _gamma_cal:
+            _pin_risk = _gamma_cal.get("pin_risk") or _gamma_cal.get("pin_strike")
+            _next_exp = _gamma_cal.get("next_major_expiry") or _gamma_cal.get("nearest_expiry") or "—"
+            _charm = _gamma_cal.get("charm_direction") or _gamma_cal.get("charm") or "—"
+            _oi_concentration = _safe(_gamma_cal.get("oi_concentration_pct"), 0)
+            _pin_txt = f"${float(_pin_risk):.0f}" if isinstance(_pin_risk, (int, float)) and _pin_risk else "—"
+            _gamma_cal_html = f"""
+            <h3 style="color:#667eea;margin-top:18px;">📅 Gamma 到期日历</h3>
+            <table style="font-size:0.88em;margin-bottom:10px;">
+                <tr><th>指标</th><th>数值</th><th>含义</th></tr>
+                <tr><td>下一主要到期日</td><td>{_next_exp}</td><td>资金面集中点</td></tr>
+                <tr><td>Pin Risk 行权价</td><td>{_pin_txt}</td><td>到期日可能磁吸到此价位</td></tr>
+                <tr><td>OI 集中度</td><td>{_oi_concentration:.1f}%</td><td>下一到期占全链 OI 比例</td></tr>
+                <tr><td>Charm 方向</td><td>{_charm}</td><td>时间衰减对 Delta 的影响</td></tr>
+            </table>
+            """
+
+        # ── 头部 stat 卡片：注入近端磁吸目标价（如可用）────────────────────
+        _hero_cards = (
+            f'<div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Odds 评分</div></div>'
+            f'<div class="stat"><div class="num" style="color:{pc_color}">{pc:.2f}</div><div class="lbl">近端 P/C Ratio</div></div>'
+            f'<div class="stat"><div class="num">{iv_rank:.1f}%</div><div class="lbl">IV Rank</div></div>'
+        )
+        if _near_max_pain_html:
+            _hero_cards += _near_max_pain_html
+        else:
+            _hero_cards += f'<div class="stat"><div class="num">{iv_curr:.1f}%</div><div class="lbl">当前 IV</div></div>'
+
         return f"""
         <div class="section">
             <h2>🔮 OracleBee — 期权市场预期</h2>
             <div class="grid-4" style="margin-bottom:15px;">
-                <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Odds 评分</div></div>
-                <div class="stat"><div class="num" style="color:{pc_color}">{pc:.2f}</div><div class="lbl">Put/Call Ratio</div></div>
-                <div class="stat"><div class="num">{iv_rank:.1f}%</div><div class="lbl">IV Rank</div></div>
-                <div class="stat"><div class="num">{iv_curr:.1f}%</div><div class="lbl">当前 IV</div></div>
+                {_hero_cards}
             </div>
             <table style="margin-bottom:12px;">
                 <tr><th>指标</th><th>数值</th><th>信号</th></tr>
                 <tr><td>Gamma 压榨风险</td><td>{gex}</td><td>{"⚠️ 高" if str(gex).lower() in ("high","很高") else "✅ 可控"}</td></tr>
                 <tr><td>期权流方向</td><td>{flow}</td><td>{"🟢 看多" if str(flow).lower() in ("bullish","看多") else ("🔴 看空" if str(flow).lower() in ("bearish","看空") else "—")}</td></tr>
                 <tr><td>IV 偏斜比</td><td>{skew:.2f}</td><td>{"⚠️ 看跌溢价" if skew > 1.2 else "✅ 正常"}</td></tr>
-                <tr><td>总持仓量</td><td>{oi:,}</td><td>—</td></tr>
+                <tr><td>近端总持仓量</td><td>{oi:,}</td><td>—</td></tr>
             </table>
-            {f'<h3>异常期权活动</h3><ul>{unusual_rows}</ul>' if unusual_rows else ''}
-            {f'<h3>关键价位</h3><p>支撑：{support_txt or "—"}</p><p>压力：{resist_txt or "—"}</p>' if (support_txt or resist_txt) else ''}
+            {_near_walls_html}
+            {_full_oi_html}
+            {_iv_struct_html}
+            {_gamma_cal_html}
+            {f'<h3>异常期权活动 Top5</h3><ul>{unusual_rows}</ul>' if unusual_rows else ''}
+            {f'<h3>近端关键价位（OracleBee key_levels）</h3><p>支撑：{support_txt or "—"}</p><p>压力：{resist_txt or "—"}</p>' if (support_txt or resist_txt) else ''}
             <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>{ad.get('discovery','') if ad else ''}</p>
         </div>"""
 
@@ -1407,7 +1658,13 @@ class MLEnhancedReportGenerator:
         ch1          = self._ch1_core_conclusion(swarm, combined, analysis)
         ch2          = self._ch2_five_dim_table(swarm)
         ch3_scout    = self._ch3_scout(agent_details)
-        ch3_oracle   = self._ch3_oracle(agent_details, options)
+        # v0.27.0: 传入 current_price 用于近端/全链 OI 墙距离百分比计算
+        _curr_price_for_oracle = (
+            analysis.get("current_price")
+            or swarm.get("agent_details", {}).get("ScoutBeeNova", {}).get("details", {}).get("current_price")
+            or 0
+        )
+        ch3_oracle   = self._ch3_oracle(agent_details, options, current_price=float(_curr_price_for_oracle or 0))
         ch3_chronos  = self._ch3_chronos(agent_details)
         ch3_buzz     = self._ch3_buzz(agent_details)
         ch3_rival    = self._ch3_rival(analysis)

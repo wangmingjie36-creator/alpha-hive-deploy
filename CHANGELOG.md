@@ -5,6 +5,163 @@
 
 ---
 
+## [0.26.4] — 2026-05-18 — Dashboard 近端 OI 墙现场聚合（解决"全链墙偏远"问题）
+
+### Added
+
+- **`options_analyzer.py` `_fetch_full_chain_oi()`** — 暴露 strike × expiry OI 矩阵
+  - `max_expirations: int = 12 → 24`（覆盖更多 LEAPS 到期日）
+  - 新增 `_serialize_exp_oi(exp_map)` 辅助函数：把 `{float_strike: {expiry: oi}}` 序列化为 `{str_strike: {YYYY-MM-DD: int_oi}}`，写入 JSON 友好
+  - 返回 dict 新增 `call_exp_oi` / `put_exp_oi` 两个矩阵字段，供下游现场聚合任意时间窗
+
+- **`dashboard_renderer.py` `_aggregate_near(exp_map_dict)`** — 近端 30 天 OI 现场聚合
+  - 遍历 strike × expiry 矩阵，仅累加 `0 <= days_to_expiry <= 30` 的 OI
+  - 返回 `{float_strike: total_near_oi}` 用于生成近端 Top3 Call/Put 墙
+  - 边界保护：try/except 全包，无效数据静默跳过
+
+### Changed
+
+- **`dashboard_renderer.py` `_build_deep_analysis_html()` OI 墙渲染逻辑**
+  - 优先级：若 `near_call_walls` 或 `near_put_walls` 非空 → 标签 `近 30 天到期`
+  - Fallback：旧 JSON 缺 `call_exp_oi` 矩阵时退化为全链聚合 + 标签 `全链聚合`
+  - 解决用户反馈"全链主力墙 OI 怎么会那么少" —— NVDA 主力 42% 集中在 8-21 月度 LEAPS，掩盖了近端真实墙位
+
+### Audit
+
+- 二次审计跑了 4 项边界测试，均通过：
+  - `_aggregate_near` 当日/明天/月底/月初下月/季度边界 ✓
+  - `near_pc` None safety（put OI=0 / 全空 fallback）✓
+  - `max_expirations=24` 性能（NVDA 实测 0.09s/单次，24 个 ~2s）✓
+  - `_wall_summary.pct_diff` 边界（cur_price=0 / strike=None / oi=None）✓
+- 结论：**无 P0 critical bug**，可放心 ship
+
+### Cost
+
+- JSON 单 ticker 体积 +30~50KB（`call_exp_oi` + `put_exp_oi` 矩阵），10 ticker × 30 天 ≈ +15MB 历史快照增量，可接受
+
+---
+
+## [0.26.3] — 2026-05-18 — 近端 Max Pain 区分（区分近端 vs 全链磁吸目标价）
+
+### Fixed
+
+- **`dashboard_renderer.py` `_build_deep_analysis_html()` Max Pain 渲染单元**
+  - **根因**：v0.26.2 把全链 Max Pain（$210，含 LEAPS 聚合）作为唯一展示，但用户问"近期的磁吸目标价还有吗" —— LEAPS 含权时间太长，对短期价格无磁吸意义
+  - **修复**：主显示改为 `oracle.max_pain` dict（基于近端 3 个到期日的 Max Pain，NVDA = $225），全链 Max Pain（$210）降为"远期参考"小字
+  - 标注口径明确：近端磁吸目标价 vs 远期参考，避免误读
+
+---
+
+## [0.26.2] — 2026-05-18 — Dashboard 全链 OI + P/C ratio 展示
+
+### Added
+
+- **`dashboard_renderer.py` `_detail()` 新增字段提取**
+  - `full_chain_oi`：从 oracle.details 提取，包含 total_call_oi / total_put_oi / pc_ratio / max_pain / top_call_walls / top_put_walls
+  - 解决用户反馈：dashboard `#/deep` 板块期权信息仅显示异常流 + 近端 P/C，缺全链聚合视图
+
+- **`dashboard_renderer.py` `_build_deep_analysis_html()` 全链 OI 卡片**
+  - 新增 `_full_oi_html` 块：Max Pain / 全链 P/C / Top3 Call 墙 / Top3 Put 墙 / Call OI / Put OI / 总 OI
+  - 渲染位置：异常流面板下方，与近端 P/C 并列展示
+
+---
+
+## [0.26.1] — 2026-05-18 — 全链数据污染防御（系统性 yfinance sample data 加固）
+
+### Fixed
+
+- **`swarm_agents/scout_bee.py` `_assess_sector_relative_strength()`** — P0 修复
+  - 根因：`yf.download([ticker, sector_etf], period="25d")` 返回 sample data 时，价格序列头部 ~1.0，`(_stk.iloc[-1] / _stk.iloc[0] - 1) * 100` 计算出虚假 23000%+ 涨跌，`rs = 23408%` 写入 discovery 文字和评分
+  - 修复：计算前加 `_stk.min() < 5 or _etf.min() < 5` → 直接 `return result`（跳过本次评估）；再加 `abs(stock_ret) > 200` 二重保险
+
+- **`options_analyzer.py` `calculate_gamma_exposure()`** — P0 修复
+  - `stock_price <= 0` → `stock_price < 5`；sample data 价格 ~1.0 导致 GEX 差 235 倍
+
+- **`options_analyzer.py` `calculate_iv_skew()`** — P0 修复
+  - 同上，`stock_price <= 0` → `stock_price < 5`；~1.0 价格下 IV Skew 查不到任何行权价，静默返回"数据不足"
+
+- **`market_intelligence.py` `calculate_iv_rv_spread()`** — P1 升级
+  - `closes > 0` → `closes > 5`；`> 0` 无法过滤 ~1.0 哨兵值，`> 5` 完全排除 sample data 典型区间
+
+- **`fred_macro.py` `_fetch_sector_rotation()`** — P1 修复
+  - `if first_close > 0` → `if first_close >= 5`：ETF 真实价格均 > $5，< 5 视为污染跳过
+  - 新增 `if abs(chg) > 50: chg = 0.0`：5 日 ±50% 以上二重保险，归零保守处理
+
+### Unchanged (P2 可接受)
+
+- `rival_bee.py` `_calc_technical_indicators()` RSI：RSI 计算结果天然有界 0~100，sample data 最多误推 RSI→100（超买信号），不会产生爆炸值，保持现状
+
+---
+
+## [0.26.0] — 2026-05-18 — HV30 计算修复（数据污染防御 + Sanity Check）
+
+### Fixed
+
+- **`market_intelligence.py` `calculate_iv_rv_spread()`** — HV30 在 Cowork VM 中返回 1000%+ 的根因修复
+
+  **根因**：yfinance 在无网络的 Cowork VM 中可能返回 sample/缓存数据，价格序列头部为归一化的 ~1.0，尾部跳升到真实价格（如 $235），产生 `log(235/1) ≈ 5.46` 的虚假日收益，`np.std()` 被爆破，乘以 `√252 × 100` 后得到 1065%+。
+
+  **修复内容（4 层防御）**：
+  1. **MultiIndex columns 兼容**：`hist["Close"]` 在 yfinance ≥ 0.2.49 单 ticker 场景可能为 DataFrame，改为 `iloc[:, 0]` 显式取列
+  2. **过滤零/负价格**：`closes = closes[closes > 0]`，去除 sample data 中的哨兵值
+  3. **过滤日涨跌异常点**：`log_rets[np.abs(log_rets) < 0.5]`（单日 |对数收益| > 0.5 ≈ 65% 涨跌，视为数据污染，真实股票不可能）
+  4. **Sanity check**：`rv_annual > 300%` 时返回 `_empty` + 明确提示信息，不再用错误数据生成误导性结论
+
+  **同步修复**：`np.std()` 加 `ddof=1`（样本标准差，学术标准），最少有效点从 `lookback//2` 细化为过滤后 ≥ 5 条
+
+  **验证**：污染数据旧逻辑 HV30 = 1533% → 新逻辑 32.9%，正常数据无影响
+
+---
+
+## [0.25.9] — 2026-05-18 — Bug修复批次（综合研判 + 格式 + 近端P/C标注）
+
+### Fixed
+
+- **`generate_deep_v2.py` synthesis 层1** — 删除 `_to_pwall` 死代码（计算后从未被引用，无 crash 风险但增加噪音）
+
+- **`generate_deep_v2.py` synthesis 层3** — `gex_cw or _fc_top_c` 从 `or "N/A"` 改为条件 `:.0f` 格式化
+  - 旧行为：当 `_fc_top_c=250.0` 时输出 `Call 墙$250.0`（含小数点）
+  - 新行为：输出 `Call 墙$250`；两者均为空时显示 `N/A`
+
+- **`generate_deep_v2.py` CH1 P1 综合评分段（line 1374）** — `P/C=` 改为 `近端P/C=`
+  - 避免与 CH4 全链P/C（0.646）混淆，明确标注近端4个到期日口径
+
+- **`generate_deep_v2.py` CH6 情景B卡片（line 6727）** — `P/C=` 改为 `近端P/C=`
+  - 情景B"温和看涨"支持依据来自近端 OracleBee P/C，标注 `近端` 使口径明确
+
+---
+
+## [0.25.8] — 2026-05-16 — 跨到期日综合研判升级（全链 OI + 异常流 + GEX + IV 四层分析）
+
+### Changed
+
+- **`generate_deep_v2.py` `_build_options_narrative()` 跨到期日综合研判块**（完全重写）
+  - **旧版**：仅根据异常流方向（bull/bear/mixed）+ 一句 GEX 环境注释，约 80 字，信息片面
+  - **新版**：四层递进分析，约 250-300 字
+    - 层1（OI结构基础面）：全链 P/C 定性（Call主导/Put主导/均衡）+ Max Pain 磁力方向（相对现价 ±5% 阈值）+ 全链最大 Call/Put 阻力墙位置及现价距离
+    - 层2（异常流共识）：跨期方向分类 → 近多远空 / 近空远多 / 压倒性偏多 / 全面偏空 / 方向分歧，附实际美元溢价量（如 \$106.5M vs \$29.3M）
+    - 层3（GEX × 流共振/矛盾）：四种组合路径 — 正GEX+多/负GEX+多/正GEX+空/负GEX+空，输出波动率含义和关键价位（翻转点/Call墙）
+    - 层4（IV结构补充）：仅在 Backwardation+多/Contango+低IVR 时触发，提示策略调整（远月替代近月等）
+  - 标题从"跨到期日综合研判"更名为"跨到期日综合研判（全链视角）"
+
+---
+
+## [0.25.7] — 2026-05-16 — Top10 OI 主力到期日标签
+
+### Fixed
+
+- **`options_analyzer.py` `_fetch_full_chain_oi()`** — Top10 Call/Put OI 现在附带"主力到期日"
+  - 根因：全链 OI 跨期聚合后，NVDA 八月月度到期日 OI 巨大（备兑开仓 + 机构 LEAPS 尾险），Top10 行权价全被 Aug 仓位占满，用户看不出来 OI 来自哪个月份
+  - 修复：聚合时同步维护 `call_exp_oi[strike][expiry]` / `put_exp_oi[strike][expiry]` 字典，记录每个行权价在每个到期日的分开 OI
+  - 新增 `_dominant_exp(strike, exp_map)` → 返回该行权价 OI 最大的到期日（格式 `MM/DD`，如 `08/15`）
+  - `_fmt()` 输出字典新增 `"dom_exp"` 字段
+
+- **`generate_deep_v2.py` `_oi_rows()`** — Top10 表格每行行权价旁增加主力到期日徽章
+  - 样式：灰底小圆角标签 `08/15`，字号 10px，不抢主要信息视觉焦点
+  - 用户现在可以区分 `$250 [08/15]` 和 `$260 [06/20]`，了解 OI 主力所在月份
+
+---
+
 ## [0.25.6] — 2026-05-16 — 全链 OI 日环比追踪（期权结构日变化卡）
 
 ### Added

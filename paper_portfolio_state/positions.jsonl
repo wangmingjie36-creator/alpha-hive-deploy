@@ -1,1 +1,1 @@
-{"ticker": "NVDA", "direction": "bullish", "entry_date": "2026-05-14", "entry_price": 235.74000549316406, "sl_price": 219.2382, "tp_price": 259.314, "shares": 5.3778, "size_usd": 1267.77, "time_stop_date": "2026-05-28", "confidence": "high", "score": 6.64, "rationale": "score=6.6 · high"}
+{"ticker": "NVDA", "direction": "bullish", "entry_date": "2026-05-18", "entry_price": 222.32000732421875, "sl_price": 206.7576, "tp_price": 244.552, "shares": 1.7076, "size_usd": 379.63, "time_stop_date": "2026-06-01", "confidence": "mid", "score": 6.75, "rationale": "score=6.8 · mid"}

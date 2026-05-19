@@ -1371,7 +1371,7 @@ def _build_swarm_narrative(ctx: dict) -> str:
         f'<p><strong>蜂群综合评分 <span class="{sc_cls}">{score:.2f}/10</span>，方向 {direction}，{score_interp}。</strong>'
         f'置信区间 [{cb_lo:.2f}–{cb_hi:.2f}]（区间宽度 {cb_hi-cb_lo:.2f}，鉴别力 {disc_label}），'
         f'维度分散度 σ={dim_std:.1f}（{std_warn}）。'
-        f'期权流 <span class="highlight">{ctx["flow_direction"]}</span>，P/C={ctx["put_call_ratio"]}，总OI {ctx["total_oi"]:,.0f}。</p>')
+        f'期权流 <span class="highlight">{ctx["flow_direction"]}</span>，近端P/C={ctx["put_call_ratio"]}，总OI {ctx["total_oi"]:,.0f}。</p>')
 
     # P2: 维度交叉推理（替代固定模板）
     _dim_parts = []
@@ -1914,7 +1914,7 @@ def _build_options_narrative(ctx: dict) -> str:
         _sw_hist_txt = "。"
 
     p1 = (
-        f'<p><strong>期权市场结构：P/C={pcr}（{"Call偏多，买方主导，看多氛围浓" if pcr_f<0.9 else "Put偏多，下行对冲需求强" if pcr_f>1.1 else "多空均衡"}），'
+        f'<p><strong>期权市场结构：近端P/C={pcr}（{"Call偏多，买方主导，看多氛围浓" if pcr_f<0.9 else "Put偏多，下行对冲需求强" if pcr_f>1.1 else "多空均衡"}），'
         f'总OI {oi:,.0f}，IV Current {iv:.1f}%，IV Rank {iv_rank:.0f}%（{iv_interp}），'
         f'IV Skew {skew}（{"Put溢价偏高，尾部风险定价显著" if skew_f>1.2 else "Skew中性，定价均衡" if skew_f>0.8 else "Call溢价偏高，上行投机情绪浓"}）。</strong>'
         f'{"期权综合评分 " + f"{options_score:.1f}/10，{iv_skew_signal}；" if options_score else ""}'
@@ -2471,9 +2471,9 @@ def _build_options_narrative(ctx: dict) -> str:
                 f'<p style="margin-left:12px;">其他异常流：{"、".join(_noexp_notes)}。</p>'
             )
 
-        # ── 跨到期日综合研判 ──
+        # ── 跨到期日综合研判（v0.25.7 全链视角：OI结构 + 异常流 + GEX + IV）──
         if len(_sorted_exps) >= 2:
-            # 收集各到期日方向
+            # 1. 收集各到期日异常流方向
             _dir_seq = []
             for _exp_date in _sorted_exps:
                 _it = _ua_by_exp[_exp_date]
@@ -2481,51 +2481,140 @@ def _build_options_narrative(ctx: dict) -> str:
                 _sp = sum(u.get('dollar_premium', 0) for u in _it if not u.get('bullish'))
                 _dir_seq.append(('bull' if _bp > _sp * 1.3 else 'bear' if _sp > _bp * 1.3 else 'mixed',
                                  _bp, _sp))
-
             _near_dir = _dir_seq[0][0]
-            _far_dir = _dir_seq[-1][0]
+            _far_dir  = _dir_seq[-1][0]
+            _all_bull = all(d[0] == 'bull' for d in _dir_seq)
+            _all_bear = all(d[0] == 'bear' for d in _dir_seq)
+            _total_bull_prem = sum(d[1] for d in _dir_seq)
+            _total_bear_prem = sum(d[2] for d in _dir_seq)
+
+            # 2. 全链 OI 结构（Max Pain / Call&Put Wall / 全链P/C）
+            _fc_syn   = ctx.get("full_chain_oi") or {}
+            _fc_mp    = float(_fc_syn.get("max_pain", 0) or 0)
+            _fc_pc    = float(_fc_syn.get("full_pc_ratio", 0) or 0)
+            _fc_c_tot = int(_fc_syn.get("total_call_oi", 0) or 0)
+            _fc_p_tot = int(_fc_syn.get("total_put_oi",  0) or 0)
+            _fc_top_c = (_fc_syn.get("top_call_oi") or [{}])[0].get("strike", 0)
+            _fc_top_p = (_fc_syn.get("top_put_oi")  or [{}])[0].get("strike", 0)
+            _syn_price = float(ctx.get("price", 0) or 0)
+            _has_fc_data = bool(_fc_mp and _fc_pc and _syn_price)
 
             _synth_parts = []
+
+            # ── 层1：全链 OI 结构基础面 ─────────────────────────────────────────
+            if _has_fc_data:
+                # P/C 结构定性
+                if _fc_pc < 0.7:
+                    _oi_struct = f'全链 P/C {_fc_pc:.2f}（Call 主导），OI 结构整体偏多性建仓'
+                elif _fc_pc > 1.1:
+                    _oi_struct = f'全链 P/C {_fc_pc:.2f}（Put 主导），OI 结构整体偏空对冲'
+                else:
+                    _oi_struct = f'全链 P/C {_fc_pc:.2f}，多空 OI 结构均衡'
+
+                # Max Pain 磁力分析
+                if _syn_price > 0 and _fc_mp > 0:
+                    _mp_gap_pct = (_fc_mp - _syn_price) / _syn_price * 100
+                    if _mp_gap_pct < -5:
+                        _mp_pull = (f'Max Pain ${_fc_mp:.0f} 低于现价 {abs(_mp_gap_pct):.1f}%，'
+                                    f'做市商到期前倾向压制价格向下磁吸')
+                    elif _mp_gap_pct > 5:
+                        _mp_pull = (f'Max Pain ${_fc_mp:.0f} 高于现价 {_mp_gap_pct:.1f}%，'
+                                    f'做市商到期前存在向上磁吸效应')
+                    else:
+                        _mp_pull = (f'Max Pain ${_fc_mp:.0f} 与现价接近（偏差 {_mp_gap_pct:+.1f}%），'
+                                    f'价格处于做市商 Gamma 中性区间')
+                else:
+                    _mp_pull = ''
+
+                # OI 最大 Call/Put 墙（来自全链聚合，比 GEX 更全面）
+                _wall_note = ''
+                if _fc_top_c and _fc_top_p:
+                    _wall_note = (f'全链最大 Call 阻力墙 ${_fc_top_c:.0f}、'
+                                  f'Put 支撑墙 ${_fc_top_p:.0f}')
+                    if _syn_price > 0:
+                        _to_cwall = (_fc_top_c - _syn_price) / _syn_price * 100
+                        if _to_cwall > 0:
+                            _wall_note += f'（现价距 Call 墙 {_to_cwall:.1f}%）'
+
+                _layer1 = '。'.join(filter(None, [_oi_struct, _mp_pull, _wall_note]))
+                _synth_parts.append(_layer1)
+
+            # ── 层2：异常流方向共识 ──────────────────────────────────────────────
             if _near_dir == 'bull' and _far_dir == 'bear':
                 _synth_parts.append(
-                    f'期限结构显示"近多远空"——近期到期 Call 主导（${_dir_seq[0][1]/1e6:.2f}M）'
-                    f'但远期 Put 增厚（${_dir_seq[-1][2]/1e6:.2f}M），'
-                    f'典型的短线追涨 + 中线对冲组合，暗示资金对持续性上行信心不足'
+                    f'异常流呈"近多远空"——近期 ${_dir_seq[0][1]/1e6:.1f}M Call 主导，'
+                    f'但远期 ${_dir_seq[-1][2]/1e6:.1f}M Put 增厚，'
+                    f'典型短线追涨 + 中线对冲，资金对持续上行信心有限'
                 )
             elif _near_dir == 'bear' and _far_dir == 'bull':
                 _synth_parts.append(
-                    f'期限结构显示"近空远多"——短期 Put 密集可能是事件对冲或获利了结保护，'
-                    f'但远期 Call 建仓说明中线仍看好，回调可能是买入窗口'
+                    f'异常流呈"近空远多"——短期 Put 密集（事件/获利保护），'
+                    f'远期 Call 建仓（${_dir_seq[-1][1]/1e6:.1f}M）说明中线看涨，'
+                    f'回调或为买点'
                 )
-            elif all(d[0] == 'bull' for d in _dir_seq):
+            elif _all_bull:
+                _flow_strength = 'strong' if _total_bull_prem > _total_bear_prem * 3 else 'moderate'
+                _bull_str = '压倒性' if _flow_strength == 'strong' else '全面'
                 _synth_parts.append(
-                    '所有到期日方向一致偏多——从近期到远期的 Call 流形成"共振"，'
-                    '多头信念强，但也意味着一旦方向错误，集中平仓可能引发踩踏'
+                    f'异常流{_bull_str}偏多（${_total_bull_prem/1e6:.1f}M Call vs '
+                    f'${_total_bear_prem/1e6:.1f}M Put），跨期共振增强方向信念；'
+                    f'需警惕方向错误时集中平仓引发踩踏'
                 )
-            elif all(d[0] == 'bear' for d in _dir_seq):
+            elif _all_bear:
                 _synth_parts.append(
-                    '所有到期日方向一致偏空——跨期限的 Put 堆积构成系统性对冲墙，'
-                    '下行风险定价充分，反向来看也可能是逆向指标（极端恐慌后反弹）'
+                    f'异常流全面偏空（${_total_bear_prem/1e6:.1f}M Put vs '
+                    f'${_total_bull_prem/1e6:.1f}M Call），跨期 Put 堆积构成系统性对冲墙；'
+                    f'极端偏空时亦可能是逆向信号'
+                )
+            else:
+                _mixed_near = _dir_seq[0][0]; _mixed_far = _dir_seq[-1][0]
+                _synth_parts.append(
+                    f'异常流方向分歧（近端 {_mixed_near} / 远端 {_mixed_far}），'
+                    f'多空博弈激烈，方向性建仓需等更强催化剂确认'
                 )
 
-            # GEX + 流方向的矛盾/共振
+            # ── 层3：GEX × 流方向 矛盾/共振 ────────────────────────────────────
             if gex_regime in ('positive_gamma', 'positive_gex') and _near_dir == 'bull':
                 _synth_parts.append(
-                    '注意：做市商正 Gamma 环境倾向抑制波动，'
-                    f'近期 Call 多头需要足够的成交量突破 Call Wall ${gex_cw or "N/A"} 才能兑现收益'
+                    f'做市商正 Gamma 环境抑制波动（买跌卖涨），多头若要兑现收益，'
+                    f'需足够大成交量持续突破 Call 墙'
+                    + (f'${float(gex_cw or _fc_top_c):.0f}' if (gex_cw or _fc_top_c) else 'N/A') + '；'
+                    f'GEX 翻转点 ${gex_flip or "N/A"} 下方为多头的关键止损参考'
                 )
             elif gex_regime in ('negative_gamma', 'negative_gex') and _near_dir == 'bull':
                 _synth_parts.append(
-                    f'做市商负 Gamma + 近期 Call 集中 = 高弹性环境，'
-                    f'价格一旦突破 ${gex_flip or "翻转点"} 上方，做市商被动追买将加速上行'
+                    f'做市商负 Gamma 放大波动（买涨卖跌），Call 多头与负 Gamma 共振；'
+                    f'价格突破 ${gex_flip or "翻转点"} 将触发做市商被动追买，加速上行'
+                )
+            elif gex_regime in ('positive_gamma', 'positive_gex') and _near_dir == 'bear':
+                _synth_parts.append(
+                    f'做市商正 Gamma 与 Put 流方向背离——正 Gamma 天然抑制下行加速，'
+                    f'纯方向性空仓需额外下行动能才能打穿支撑'
+                )
+            elif gex_regime in ('negative_gamma', 'negative_gex') and _near_dir == 'bear':
+                _synth_parts.append(
+                    f'做市商负 Gamma + Put 集中 = 高风险下行加速环境；'
+                    f'跌破 ${gex_flip or "翻转点"} 将触发做市商被动卖出，跌势可能超预期'
+                )
+
+            # ── 层4：IV 结构补充（仅在有意义时加入）───────────────────────────
+            _ivts_syn = ctx.get("iv_term_structure", {}) or {}
+            _ivts_shape_syn = _ivts_syn.get("shape", "")
+            if _ivts_shape_syn == "backwardation" and _near_dir == 'bull':
+                _synth_parts.append(
+                    'IV 期限结构倒挂（近月 IV 高于远月）——市场对近期事件定价较高，'
+                    '近月期权买入成本偏贵，考虑远月价差替代近月裸多'
+                )
+            elif _ivts_shape_syn == "contango" and iv_rank < 30:
+                _synth_parts.append(
+                    f'IV Rank {iv_rank:.0f}% 低位 + Contango 结构——期权成本偏低，'
+                    f'远月方向性买入性价比最优'
                 )
 
             if _synth_parts:
                 _synth_html = '。'.join(_synth_parts) + '。'
-                # 补充 GEX 环境提示
-                _gex_note = f'GEX 政体为{gex_regime}，对上下行波动率的影响详见 P3。'
                 _exp_paragraphs.append(
-                    f'<p><strong>跨到期日综合研判：</strong>{_synth_html}{_gex_note}</p>'
+                    f'<p><strong>跨到期日综合研判（全链视角）：</strong>{_synth_html}</p>'
                 )
 
         p6 = '\n'.join(_exp_paragraphs)
@@ -5278,19 +5367,25 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
             _pc_signal = '中性结构'
             _pc_color  = 'var(--text2)'
 
-        # Top10 Call/Put 表格
+        # Top10 Call/Put 表格（含主力到期日标签）
         def _oi_rows(items, is_call):
             rows = ''
             color = 'var(--green2)' if is_call else 'var(--red2)'
             for item in items:
-                s   = item.get("strike", 0)
-                oi  = item.get("oi", 0)
-                pos = item.get("position", "")
-                bar_w = min(int(oi / max((items[0].get("oi", 1)), 1) * 100), 100)
+                s       = item.get("strike", 0)
+                oi      = item.get("oi", 0)
+                pos     = item.get("position", "")
+                dom_exp = item.get("dom_exp", "")   # v0.25.6 主力到期日
+                bar_w   = min(int(oi / max((items[0].get("oi", 1)), 1) * 100), 100)
                 pos_style = ('color:var(--text3)' if 'ITM' not in pos
                              else 'color:var(--gold2);font-weight:600')
+                exp_tag = (
+                    f'<span style="font-size:10px;color:var(--text4);'
+                    f'background:var(--bg4);border-radius:3px;padding:1px 5px;margin-left:4px;">'
+                    f'{dom_exp}</span>'
+                ) if dom_exp else ''
                 rows += (f'<tr>'
-                         f'<td style="font-weight:600;">${s:.0f}</td>'
+                         f'<td style="font-weight:600;">${s:.0f}{exp_tag}</td>'
                          f'<td style="text-align:right;color:{color};font-weight:600;">{oi:,.0f}</td>'
                          f'<td style="text-align:right;{pos_style};font-size:11px;">{pos}</td>'
                          f'<td style="width:70px;padding:4px 8px;">'
@@ -6491,17 +6586,17 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
       <span class="ch-num">CH4</span>
       <span class="section-icon">📊</span>
       <span class="section-title">第四章 · 期权市场结构</span>
-      <span class="section-badge {flow_badge}">P/C={ctx['put_call_ratio']} · OI={oi_str} · {bull_unusual_count}个看涨异动</span>
+      <span class="section-badge {flow_badge}">近端P/C={ctx['put_call_ratio']} · OI={oi_str} · {bull_unusual_count}个看涨异动</span>
     </div>
     <div class="section-body">
       {_opts_chart_html}{_iv_term_chart_html}{_skew_chart_html}{_gex_profile_chart_html}
       <div class="opt-grid" style="margin-bottom:16px;">
         <div class="opt-card oc-bull">
-          <div class="oc-label">Put/Call 比</div>
+          <div class="oc-label">近端 P/C 比</div>
           <div class="oc-val" style="color:{'var(--green2)' if pc_float < 1 else 'var(--red2)'}">
             {ctx['put_call_ratio']}
           </div>
-          <div class="oc-sub">{'Call主导' if pc_float < 1 else 'Put主导'}</div>
+          <div class="oc-sub">{'近端Call主导' if pc_float < 1 else '近端Put主导'}</div>
         </div>
         <div class="opt-card oc-info">
           <div class="oc-label">总开仓量</div>
@@ -6629,7 +6724,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
           <div class="sc-name">📈 情景B · 温和看涨</div>
           <div class="sc-prob">催化剂达预期 · 概率 {probs[1]*100:.0f}%</div>
           <div class="sc-price">${sc_b_lo:.0f}–${sc_b_hi:.0f}</div>
-          <div class="sc-gain" style="color:var(--green2)">P/C={ctx['put_call_ratio']} 支持</div>
+          <div class="sc-gain" style="color:var(--green2)">近端P/C={ctx['put_call_ratio']} 支持</div>
           <div class="sc-note">{sc_b_note}</div>
         </div>
         <div class="sc-card sc-meh">
