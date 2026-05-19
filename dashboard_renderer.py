@@ -475,6 +475,13 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     fco = oracle.get("full_chain_oi") or {}
     full_pc = fco.get("full_pc_ratio")
     max_pain = fco.get("max_pain")
+    # v0.26.1: 近端 Max Pain（基于最近 3 个到期日，真正的磁吸目标价）
+    # 全链 Max Pain（max_pain 字段）含远期 LEAPS，磁吸效应弱
+    # 近端 Max Pain（oracle.max_pain dict）来自 OptionsAgent 基于 expiration_dates 计算
+    _near_mp_dict = oracle.get("max_pain") or {}
+    near_max_pain = _near_mp_dict.get("max_pain") if isinstance(_near_mp_dict, dict) else None
+    near_max_pain_pct = _near_mp_dict.get("distance_pct") if isinstance(_near_mp_dict, dict) else None
+    near_expiry_dates = oracle.get("expiration_dates") or []  # 近端到期日列表
     total_call_oi = fco.get("total_call_oi") or 0
     total_put_oi = fco.get("total_put_oi") or 0
     top_call_oi_raw = fco.get("top_call_oi") or []
@@ -532,12 +539,16 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         "momentum_5d": round(float(_momentum_raw), 2) if _momentum_raw is not None else None,
         # v0.26.0 全链 OI 字段
         "full_pc": full_pc,
-        "max_pain": max_pain,
+        "max_pain": max_pain,        # 全链 Max Pain（含远期 LEAPS）
         "max_pain_pct": max_pain_pct,
         "total_call_oi": total_call_oi,
         "total_put_oi": total_put_oi,
         "top_call_walls": top_call_walls,
         "top_put_walls": top_put_walls,
+        # v0.26.1 近端 Max Pain（真正的磁吸目标价，基于最近 3 个到期日）
+        "near_max_pain": near_max_pain,
+        "near_max_pain_pct": near_max_pain_pct,
+        "near_expiry_dates": near_expiry_dates,
     }
 
 
@@ -1547,16 +1558,47 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             else: _pc_color = "#d97706"
             _pc_label = ("偏空" if _full_pc and _full_pc > 1.2 else
                          ("偏多" if _full_pc and _full_pc < 0.6 else "均衡"))
-            # Max Pain
-            _mp_pct = _detd.get("max_pain_pct")
-            if _mp:
-                _mp_str = f"${_mp:.0f}"
-                if _mp_pct is not None:
-                    _mp_arrow = "↑" if _mp_pct > 1 else ("↓" if _mp_pct < -1 else "→")
-                    _mp_color = "#28a745" if _mp_pct > 1 else ("#dc3545" if _mp_pct < -1 else "#94a3b8")
-                    _mp_str += f' <span style="color:{_mp_color};font-size:.85em">{_mp_arrow}{_mp_pct:+.1f}%</span>'
+            # v0.26.1: 近端 Max Pain（真正的磁吸目标价）为主显示
+            # 远期全链 Max Pain 作为参考次要显示
+            _near_mp = _detd.get("near_max_pain")
+            _near_mp_pct = _detd.get("near_max_pain_pct")
+            _near_exps = _detd.get("near_expiry_dates", [])
+
+            # 主显示：近端 MP
+            if _near_mp:
+                _mp_main_str = f"${_near_mp:.0f}"
+                if _near_mp_pct is not None:
+                    _mp_arrow = "↑" if _near_mp_pct > 1 else ("↓" if _near_mp_pct < -1 else "→")
+                    _mp_color = "#28a745" if _near_mp_pct > 1 else ("#dc3545" if _near_mp_pct < -1 else "#94a3b8")
+                    _mp_main_str += f' <span style="color:{_mp_color};font-size:.78em">{_mp_arrow}{_near_mp_pct:+.1f}%</span>'
+                # 到期日数量提示
+                _exp_label = (
+                    f"近 {len(_near_exps)} 周到期" if len(_near_exps) > 0 else "近端到期"
+                )
             else:
-                _mp_str = "-"
+                # 回退到全链 MP
+                _mp_pct = _detd.get("max_pain_pct")
+                if _mp:
+                    _mp_main_str = f"${_mp:.0f}"
+                    if _mp_pct is not None:
+                        _mp_arrow = "↑" if _mp_pct > 1 else ("↓" if _mp_pct < -1 else "→")
+                        _mp_color = "#28a745" if _mp_pct > 1 else ("#dc3545" if _mp_pct < -1 else "#94a3b8")
+                        _mp_main_str += f' <span style="color:{_mp_color};font-size:.78em">{_mp_arrow}{_mp_pct:+.1f}%</span>'
+                    _exp_label = "全链聚合"
+                else:
+                    _mp_main_str = "-"
+                    _exp_label = ""
+
+            # 次要：全链 MP 对比（仅在近端 + 全链都有时显示差异）
+            _mp_compare = ""
+            if _near_mp and _mp and abs(_near_mp - _mp) > 1:
+                _mp_compare = f'<div style="font-size:.62em;color:var(--ts);margin-top:1px">远期参考 ${_mp:.0f}</div>'
+            elif _near_mp:
+                _mp_compare = f'<div style="font-size:.62em;color:var(--ts);margin-top:1px">{_exp_label}</div>'
+            elif _mp:
+                _mp_compare = f'<div style="font-size:.62em;color:var(--ts);margin-top:1px">{_exp_label}</div>'
+
+            _mp_str = _mp_main_str
 
             # Top 阻力墙（Call OI）— 仅取 OTM（pct_diff > 0）的 3 个
             _calls = [w for w in _detd.get("top_call_walls", []) if w["pct_diff"] > -1][:3]
@@ -1598,9 +1640,9 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                   <div style="font-size:.62em;color:var(--ts);margin-top:1px">近端 {_near_pc}</div>
                 </div>
                 <div style="background:rgba(0,0,0,.18);border-radius:6px;padding:6px 8px">
-                  <div style="font-size:.7em;color:var(--ts)">Max Pain</div>
+                  <div style="font-size:.7em;color:var(--ts)">近端磁吸目标价</div>
                   <div style="font-size:1.15em;font-weight:700;color:var(--t)">{_mp_str}</div>
-                  <div style="font-size:.62em;color:var(--ts);margin-top:1px">磁吸目标价</div>
+                  {_mp_compare}
                 </div>
               </div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
