@@ -680,7 +680,7 @@ class OptionsAnalyzer:
         if not calls_df or not puts_df:
             return 0.0
 
-        if stock_price <= 0:
+        if stock_price < 5:  # < 5 同时排除零值和 yfinance sample data ~1.0 哨兵值
             return 0.0
 
         # 标准 notional GEX 计算
@@ -714,7 +714,7 @@ class OptionsAnalyzer:
 
         近似 25-delta：OTM ~5% 的行权价（put: stock_price * 0.95, call: stock_price * 1.05）
         """
-        if not calls_df or not puts_df or stock_price <= 0:
+        if not calls_df or not puts_df or stock_price < 5:  # < 5 防 sample data ~1.0
             return {"skew_ratio": None, "skew_signal": "数据不足"}
 
         import math
@@ -1219,7 +1219,7 @@ class OptionsAgent:
     # ── v0.25.3 · 全链 OI 采集（Max Pain + 全行权价 OI 分布）─────────────────────
     @staticmethod
     def _fetch_full_chain_oi(ticker: str, stock_price: float,
-                              max_expirations: int = 12) -> dict:
+                              max_expirations: int = 24) -> dict:  # v0.26.2: 12→24 覆盖更多 LEAPS
         """下载全部到期日期权链，聚合 OI by Strike，计算 Max Pain。
 
         此方法独立于主链路（仅取前4个到期日），专门为报告提供完整 OI 墙数据。
@@ -1255,6 +1255,9 @@ class OptionsAgent:
 
             call_oi: dict = {}   # strike -> total call OI
             put_oi:  dict = {}   # strike -> total put OI
+            # v0.25.6: 记录每个行权价的主力到期日（OI 最大的那个 expiry）
+            call_exp_oi: dict = {}  # strike -> {expiry -> oi}
+            put_exp_oi:  dict = {}  # strike -> {expiry -> oi}
             expiry_breakdown = []
             used_exps = 0
 
@@ -1286,10 +1289,19 @@ class OptionsAgent:
 
                     for _, row in c_df.iterrows():
                         s = float(row["strike"])
-                        call_oi[s] = call_oi.get(s, 0) + int(row["openInterest"])
+                        oi_val = int(row["openInterest"])
+                        call_oi[s] = call_oi.get(s, 0) + oi_val
+                        # 记录该行权价在此 expiry 的 OI，用于确定主力到期日
+                        if s not in call_exp_oi:
+                            call_exp_oi[s] = {}
+                        call_exp_oi[s][exp] = call_exp_oi[s].get(exp, 0) + oi_val
                     for _, row in p_df.iterrows():
                         s = float(row["strike"])
-                        put_oi[s]  = put_oi.get(s, 0)  + int(row["openInterest"])
+                        oi_val = int(row["openInterest"])
+                        put_oi[s]  = put_oi.get(s, 0)  + oi_val
+                        if s not in put_exp_oi:
+                            put_exp_oi[s] = {}
+                        put_exp_oi[s][exp] = put_exp_oi[s].get(exp, 0) + oi_val
                     used_exps += 1
                 except Exception:
                     continue
@@ -1319,14 +1331,35 @@ class OptionsAgent:
             top_calls = sorted(zip(all_strikes, c_arr), key=lambda x: -x[1])[:10]
             top_puts  = sorted(zip(all_strikes, p_arr), key=lambda x: -x[1])[:10]
 
+            def _dominant_exp(strike, exp_map):
+                """返回该行权价 OI 最大的到期日（月/日格式，如 08/15）"""
+                exps = exp_map.get(strike, {})
+                if not exps:
+                    return ""
+                best = max(exps, key=lambda e: exps[e])
+                try:  # "2026-08-15" → "08/15"
+                    return best[5:].replace("-", "/")
+                except Exception:
+                    return best
+
             def _fmt(pairs, is_call):
+                exp_map = call_exp_oi if is_call else put_exp_oi
                 out = []
                 for s, oi in pairs:
                     otm = ((s - stock_price) / stock_price * 100) if is_call else ((stock_price - s) / stock_price * 100)
                     pos = "ITM" if (s < stock_price if is_call else s > stock_price) else f"OTM+{otm:.1f}%"
-                    out.append({"strike": s, "oi": oi, "position": pos})
+                    dom_exp = _dominant_exp(s, exp_map)
+                    out.append({"strike": s, "oi": oi, "position": pos, "dom_exp": dom_exp})
                 return out
 
+            # v0.26.2: 暴露 call_exp_oi / put_exp_oi（strike × expiry 矩阵）
+            # 让 dashboard 能按时间窗口（如 ≤30d）筛选近端 OI 墙
+            # 序列化时 strike 转 str 避免 JSON key 类型问题
+            def _serialize_exp_oi(exp_map):
+                return {
+                    str(s): {exp: int(oi) for exp, oi in exps.items()}
+                    for s, exps in exp_map.items()
+                }
             return {
                 "total_call_oi":      total_call_oi,
                 "total_put_oi":       total_put_oi,
@@ -1338,6 +1371,9 @@ class OptionsAgent:
                 "expiry_breakdown":   sorted(expiry_breakdown, key=lambda x: x["expiry"]),
                 "oi_by_strike_call":  {str(s): v for s, v in call_oi.items()},
                 "oi_by_strike_put":   {str(s): v for s, v in put_oi.items()},
+                # v0.26.2: 分时段筛选用
+                "call_exp_oi":        _serialize_exp_oi(call_exp_oi),
+                "put_exp_oi":         _serialize_exp_oi(put_exp_oi),
             }
         except Exception as _e:
             _log.debug("full_chain_oi 采集失败 %s: %s", ticker, _e)

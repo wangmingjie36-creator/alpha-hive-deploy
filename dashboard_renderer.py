@@ -470,11 +470,43 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         gex_str = f"{gex*1000:+.1f}k"
 
     # ── v0.26.0: 全链 OI 字段提取（用于 #/deep 板块全链视图）──
-    # 数据源：OracleBeeEcho.details.full_chain_oi（v0.25.4 已生成）
-    # 用途：让用户判断"全市场期权压力位 / 支撑位 / 真实 P/C 比"
+    # 数据源：OracleBeeEcho.details.full_chain_oi（v0.25.4 生成 / v0.26.2 扩 expiry）
+    # v0.26.2: 区分"近端墙"(≤30 天到期，做市商真正在意的) vs "全链墙"(含远期 LEAPS)
     fco = oracle.get("full_chain_oi") or {}
     full_pc = fco.get("full_pc_ratio")
     max_pain = fco.get("max_pain")
+    # v0.26.2 近端 OI 墙（≤30 天）—— 从 call_exp_oi/put_exp_oi 现场重算
+    from datetime import datetime as _dt_oi, timedelta as _td_oi
+    _now_oi = _dt_oi.now()
+    _NEAR_WINDOW_DAYS = 30
+
+    def _aggregate_near(exp_map_dict):
+        """exp_map_dict: {strike_str: {expiry_str: oi}} → 近 30 天聚合: {strike: total_oi}"""
+        out = {}
+        if not isinstance(exp_map_dict, dict):
+            return out
+        for sk, exps in exp_map_dict.items():
+            if not isinstance(exps, dict): continue
+            try: strike_f = float(sk)
+            except (ValueError, TypeError): continue
+            total_near = 0
+            for exp_str, oi_val in exps.items():
+                try:
+                    exp_dt = _dt_oi.strptime(exp_str, "%Y-%m-%d")
+                    days_to = (exp_dt - _now_oi).days
+                except (ValueError, TypeError):
+                    continue
+                if 0 <= days_to <= _NEAR_WINDOW_DAYS:
+                    total_near += int(oi_val or 0)
+            if total_near > 0:
+                out[strike_f] = total_near
+        return out
+
+    near_call_by_strike = _aggregate_near(fco.get("call_exp_oi") or {})
+    near_put_by_strike = _aggregate_near(fco.get("put_exp_oi") or {})
+    near_call_total = sum(near_call_by_strike.values())
+    near_put_total = sum(near_put_by_strike.values())
+    near_pc = (near_put_total / near_call_total) if near_call_total > 0 else None
     # v0.26.1: 近端 Max Pain（基于最近 3 个到期日，真正的磁吸目标价）
     # 全链 Max Pain（max_pain 字段）含远期 LEAPS，磁吸效应弱
     # 近端 Max Pain（oracle.max_pain dict）来自 OptionsAgent 基于 expiration_dates 计算
@@ -509,6 +541,19 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     _cur_price = float(_price_raw) if _price_raw is not None else 0
     top_call_walls = _wall_summary(top_call_oi_raw, "C", _cur_price)
     top_put_walls = _wall_summary(top_put_oi_raw, "P", _cur_price)
+
+    # v0.26.2 近端 OI 墙（≤30 天到期，主显示）
+    def _near_wall_summary(by_strike_dict, cur_price, top_n=5):
+        out = []
+        for strike, oi_v in sorted(by_strike_dict.items(), key=lambda x: -x[1])[:top_n]:
+            try:
+                pct_diff = (strike - cur_price) / cur_price * 100 if cur_price else 0
+            except (ValueError, TypeError, ZeroDivisionError):
+                pct_diff = 0
+            out.append({"strike": strike, "oi": int(oi_v), "pct_diff": pct_diff, "dom_exp": ""})
+        return out
+    near_call_walls = _near_wall_summary(near_call_by_strike, _cur_price)
+    near_put_walls = _near_wall_summary(near_put_by_strike, _cur_price)
     # Max Pain 相对现价距离
     max_pain_pct = None
     if max_pain and _cur_price > 0:
@@ -549,6 +594,12 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         "near_max_pain": near_max_pain,
         "near_max_pain_pct": near_max_pain_pct,
         "near_expiry_dates": near_expiry_dates,
+        # v0.26.2 近端 OI 墙（≤30 天到期）
+        "near_call_walls": near_call_walls,
+        "near_put_walls": near_put_walls,
+        "near_call_total": near_call_total,
+        "near_put_total": near_put_total,
+        "near_pc": near_pc,
     }
 
 
@@ -1600,9 +1651,20 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
 
             _mp_str = _mp_main_str
 
-            # Top 阻力墙（Call OI）— 仅取 OTM（pct_diff > 0）的 3 个
-            _calls = [w for w in _detd.get("top_call_walls", []) if w["pct_diff"] > -1][:3]
-            _puts = [w for w in _detd.get("top_put_walls", []) if w["pct_diff"] < 1][:3]
+            # v0.26.2: 优先取近端墙（≤30 天到期，做市商真正在意的）
+            # 近端有数据时显示；否则 fallback 到全链
+            _near_calls_all = _detd.get("near_call_walls", [])
+            _near_puts_all = _detd.get("near_put_walls", [])
+            _is_near = bool(_near_calls_all or _near_puts_all)
+
+            if _is_near:
+                _calls = [w for w in _near_calls_all if w["pct_diff"] > -1][:3]
+                _puts = [w for w in _near_puts_all if w["pct_diff"] < 1][:3]
+                _wall_label = "近 30 天到期"
+            else:
+                _calls = [w for w in _detd.get("top_call_walls", []) if w["pct_diff"] > -1][:3]
+                _puts = [w for w in _detd.get("top_put_walls", []) if w["pct_diff"] < 1][:3]
+                _wall_label = "全链聚合"
 
             def _wall_rows(walls, side_color, side_label):
                 if not walls:
@@ -1644,6 +1706,10 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                   <div style="font-size:1.15em;font-weight:700;color:var(--t)">{_mp_str}</div>
                   {_mp_compare}
                 </div>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0 3px">
+                <div style="font-size:.7em;color:var(--ts)">OI 墙位 · <b style="color:var(--mt)">{_wall_label}</b></div>
+                <div style="font-size:.62em;color:var(--ts)">数据={int(_detd.get("near_call_total") or 0):,}C / {int(_detd.get("near_put_total") or 0):,}P {f"(近端P/C {_detd.get('near_pc'):.2f})" if _detd.get('near_pc') else ""}</div>
               </div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
                 <div>
