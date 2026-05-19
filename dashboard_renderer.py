@@ -468,6 +468,46 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         gex_str = f"{gex:+.1f}M"
     else:
         gex_str = f"{gex*1000:+.1f}k"
+
+    # ── v0.26.0: 全链 OI 字段提取（用于 #/deep 板块全链视图）──
+    # 数据源：OracleBeeEcho.details.full_chain_oi（v0.25.4 已生成）
+    # 用途：让用户判断"全市场期权压力位 / 支撑位 / 真实 P/C 比"
+    fco = oracle.get("full_chain_oi") or {}
+    full_pc = fco.get("full_pc_ratio")
+    max_pain = fco.get("max_pain")
+    total_call_oi = fco.get("total_call_oi") or 0
+    total_put_oi = fco.get("total_put_oi") or 0
+    top_call_oi_raw = fco.get("top_call_oi") or []
+    top_put_oi_raw = fco.get("top_put_oi") or []
+    # 提取 Top 5 关键墙（强阻力 / 强支撑），含 ITM/OTM 距离
+    def _wall_summary(entries, side, cur_price):
+        """side = 'C' / 'P'；返回精简 dict 列表"""
+        out = []
+        for e in (entries or [])[:5]:
+            if not isinstance(e, dict): continue
+            strike = e.get("strike")
+            oi_v = e.get("oi") or 0
+            if strike is None: continue
+            try:
+                pct_diff = (float(strike) - cur_price) / cur_price * 100 if cur_price else 0
+            except (ValueError, TypeError, ZeroDivisionError):
+                pct_diff = 0
+            out.append({
+                "strike": float(strike),
+                "oi": int(oi_v),
+                "pct_diff": pct_diff,  # 正 = OTM Call / ITM Put；负 = ITM Call / OTM Put
+                "dom_exp": e.get("dom_exp", ""),  # v0.25.7 主导到期日
+            })
+        return out
+    _cur_price = float(_price_raw) if _price_raw is not None else 0
+    top_call_walls = _wall_summary(top_call_oi_raw, "C", _cur_price)
+    top_put_walls = _wall_summary(top_put_oi_raw, "P", _cur_price)
+    # Max Pain 相对现价距离
+    max_pain_pct = None
+    if max_pain and _cur_price > 0:
+        try: max_pain_pct = (float(max_pain) - _cur_price) / _cur_price * 100
+        except (ValueError, TypeError, ZeroDivisionError): pass
+
     return {
         "iv_rank": f"{iv_rank:.1f}" if iv_rank is not None else "-",
         "pc": f"{pc:.2f}" if pc is not None else "-",
@@ -490,6 +530,14 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         # 价格数据
         "price": round(float(_price_raw), 2) if _price_raw is not None else None,
         "momentum_5d": round(float(_momentum_raw), 2) if _momentum_raw is not None else None,
+        # v0.26.0 全链 OI 字段
+        "full_pc": full_pc,
+        "max_pain": max_pain,
+        "max_pain_pct": max_pain_pct,
+        "total_call_oi": total_call_oi,
+        "total_put_oi": total_put_oi,
+        "top_call_walls": top_call_walls,
+        "top_put_walls": top_put_walls,
     }
 
 
@@ -1482,6 +1530,90 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
         _cat_d = _catalyst_countdown(_tkrd, _sdd)
         _conf_d = _signal_conflicts(_tkrd, _sdd)
         _ins_d = _html.escape(_build_plain_insight(_tkrd, _sdd))
+
+        # ── v0.26.0 全链 OI 卡片（影响价格判断核心） ─────────────────────────
+        # 用户反馈：#/deep 板块只有异常流和近端 P/C，缺全链 OI 让价格判断盲目
+        # 设计：紧凑卡片显示全链 P/C + Max Pain + Top 3 Call 阻力 + Top 3 Put 支撑
+        _full_oi_html = ""
+        _full_pc = _detd.get("full_pc")
+        _mp = _detd.get("max_pain")
+        if _full_pc is not None or _mp is not None:
+            _near_pc = _detd.get("pc", "-")
+            _full_pc_str = f"{_full_pc:.2f}" if _full_pc is not None else "-"
+            # full P/C 颜色：>1.2 偏空（红）/ <0.6 偏多（绿）/ 中间黄
+            if _full_pc is None: _pc_color = "#94a3b8"
+            elif _full_pc > 1.2: _pc_color = "#dc3545"
+            elif _full_pc < 0.6: _pc_color = "#28a745"
+            else: _pc_color = "#d97706"
+            _pc_label = ("偏空" if _full_pc and _full_pc > 1.2 else
+                         ("偏多" if _full_pc and _full_pc < 0.6 else "均衡"))
+            # Max Pain
+            _mp_pct = _detd.get("max_pain_pct")
+            if _mp:
+                _mp_str = f"${_mp:.0f}"
+                if _mp_pct is not None:
+                    _mp_arrow = "↑" if _mp_pct > 1 else ("↓" if _mp_pct < -1 else "→")
+                    _mp_color = "#28a745" if _mp_pct > 1 else ("#dc3545" if _mp_pct < -1 else "#94a3b8")
+                    _mp_str += f' <span style="color:{_mp_color};font-size:.85em">{_mp_arrow}{_mp_pct:+.1f}%</span>'
+            else:
+                _mp_str = "-"
+
+            # Top 阻力墙（Call OI）— 仅取 OTM（pct_diff > 0）的 3 个
+            _calls = [w for w in _detd.get("top_call_walls", []) if w["pct_diff"] > -1][:3]
+            _puts = [w for w in _detd.get("top_put_walls", []) if w["pct_diff"] < 1][:3]
+
+            def _wall_rows(walls, side_color, side_label):
+                if not walls:
+                    return f'<div style="font-size:.75em;color:#94a3b8;padding:4px 0">无数据</div>'
+                rows = []
+                for w in walls:
+                    pct = w["pct_diff"]
+                    pct_str = f"{pct:+.1f}%"
+                    oi_k = w["oi"] / 1000.0
+                    oi_str = f"{oi_k:.0f}k" if oi_k >= 1 else f"{w['oi']}"
+                    exp_tag = f' <span style="background:#374151;color:#cbd5e1;padding:1px 4px;border-radius:3px;font-size:.65em">{w["dom_exp"]}</span>' if w.get("dom_exp") else ""
+                    rows.append(
+                        f'<div style="display:flex;justify-content:space-between;font-size:.78em;padding:2px 0;'
+                        f'border-bottom:1px dashed rgba(148,163,184,.2)">'
+                        f'<span style="color:{side_color};font-weight:600">${w["strike"]:.0f}{exp_tag}</span>'
+                        f'<span style="color:var(--ts);font-size:.85em">{pct_str}</span>'
+                        f'<span style="color:var(--t);font-weight:500">{oi_str}</span>'
+                        f'</div>'
+                    )
+                return ''.join(rows)
+
+            _full_oi_html = f'''
+            <div class="full-oi-card" style="background:rgba(99,102,241,.06);border:1px solid rgba(99,102,241,.25);
+                border-radius:8px;padding:10px 12px;margin:10px 0">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:.85em;font-weight:700;color:var(--mt)">
+                <span>🔗 全链 OI 视图</span>
+                <span style="font-size:.7em;color:var(--ts);font-weight:400">影响价格判断核心</span>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+                <div style="background:rgba(0,0,0,.18);border-radius:6px;padding:6px 8px">
+                  <div style="font-size:.7em;color:var(--ts)">全链 P/C</div>
+                  <div style="font-size:1.15em;font-weight:700;color:{_pc_color}">{_full_pc_str}
+                    <span style="font-size:.55em;font-weight:400;color:var(--ts)">({_pc_label})</span>
+                  </div>
+                  <div style="font-size:.62em;color:var(--ts);margin-top:1px">近端 {_near_pc}</div>
+                </div>
+                <div style="background:rgba(0,0,0,.18);border-radius:6px;padding:6px 8px">
+                  <div style="font-size:.7em;color:var(--ts)">Max Pain</div>
+                  <div style="font-size:1.15em;font-weight:700;color:var(--t)">{_mp_str}</div>
+                  <div style="font-size:.62em;color:var(--ts);margin-top:1px">磁吸目标价</div>
+                </div>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+                <div>
+                  <div style="font-size:.72em;color:#dc3545;font-weight:600;margin-bottom:3px">📈 阻力墙 (Top Call OI)</div>
+                  {_wall_rows(_calls, "#dc3545", "C")}
+                </div>
+                <div>
+                  <div style="font-size:.72em;color:#28a745;font-weight:600;margin-bottom:3px">📉 支撑墙 (Top Put OI)</div>
+                  {_wall_rows(_puts, "#28a745", "P")}
+                </div>
+              </div>
+            </div>'''
         new_company_html += f"""
         <div class="company-card" data-dir="{_drd}" data-score="{_scd:.1f}" id="deep-{_html.escape(_tkrd)}">
           <div class="cc-header" style="background:{_hcd};">
@@ -1505,6 +1637,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
               </div>
               <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-{_html.escape(_tkrd)}" width="160" height="160"></canvas></div>
             </div>
+            {_full_oi_html}
             <ul class="cc-signals">{_bhtmld}</ul>
             {_build_dim_dq_html(_detd['dim_dq'])}
             {_tb_html}
