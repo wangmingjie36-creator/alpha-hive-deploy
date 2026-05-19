@@ -5655,7 +5655,7 @@
    "ticker": "QCOM",
    "score": 6.2,
    "direction": "看多",
-   "price": 201.49
+   "price": 203.64
   },
   {
    "ticker": "CRCL",
@@ -13682,7 +13682,7 @@
    ]
   }
  },
- "_generated_at": "2026-05-18 14:52 PDT",
+ "_generated_at": "2026-05-18 19:52 PDT",
  "_date": "2026-05-18",
- "_deploy_ts": 1779141170
+ "_deploy_ts": 1779159165
 }
