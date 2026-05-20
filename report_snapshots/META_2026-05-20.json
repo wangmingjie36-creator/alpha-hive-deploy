@@ -1,17 +1,17 @@
 {
-  "ticker": "QCOM",
-  "date": "2026-05-15",
+  "ticker": "META",
+  "date": "2026-05-20",
   "composite_score": 5.44,
-  "direction": "bearish",
+  "direction": "neutral",
   "price_target": 0.0,
   "stop_loss": 0.0,
-  "entry_price": 201.49000549316406,
+  "entry_price": 605.0599975585938,
   "agent_votes": {
-    "OracleBeeEcho": 9.236153846153847,
-    "ScoutBeeNova": 6.10895,
+    "OracleBeeEcho": 10.0,
     "CodeExecutorAgent": 5.0,
-    "ChronosBeeHorizon": 5.62,
-    "RivalBeeVanguard": 5.59,
+    "RivalBeeVanguard": 5.85,
+    "BuzzBeeWhisper": 5.52,
+    "ChronosBeeHorizon": 5.5,
     "QueenDistiller": 5.44
   },
   "weights_used": {
@@ -22,9 +22,9 @@
     "risk_adj": 0.225
   },
   "actual_prices": {
-    "t1": 203.63999938964844,
+    "t1": null,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-05-19T14:06:46.542526"
+  "created_at": "2026-05-20T14:01:54.942204"
 }

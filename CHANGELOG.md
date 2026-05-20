@@ -5,6 +5,59 @@
 
 ---
 
+## [0.27.1] — 2026-05-19 — v0.27.0 二次审计 P0 修复（None safety）
+
+### Fixed
+
+- **`generate_ml_report.py` `_ch3_oracle()`** — P0：`dict.get(key, default)` 在 `key` 存在但 `value=None` 时**不会**返回 default，导致 `unusual[:5]` / `key_levels.get(...)` 崩溃
+  - 旧：`unusual = opts.get("unusual_activity", [])` → 当字段 `=None` 时返回 None，slice 失败
+  - 新：`unusual = opts.get("unusual_activity") or []`（4 处：unusual / key_levels / support / resist）
+- 触发条件：options_analysis 字段在 yfinance 完全失败时全为 None（非 missing key）
+- **回归验证**：NVDA 5-18 完整数据渲染 6923b 不变；全 None 数据从崩溃 → 1111b 优雅降级
+
+### Audit (10 项边界测试)
+
+- 测试 1（空数据）✓ 返回空字符串
+- 测试 2（全 None）✗ → ✓ 修复后正常
+- 测试 3（current_price=0 + call_exp_oi）✓ 正确跳过近端墙
+- 测试 4（max_pain 纯数字）✓ 识别
+- 测试 5（max_pain dict 缺字段，4 case）✓ 全部正确不渲染
+- 测试 6（top_call_oi 含 None/字符串/缺字段）✓ 过滤
+- 测试 7（iv_term_structure 字段不全，3 case）✓ 全通过
+- 测试 8（gamma_calendar pin_strike 各类型，4 case）✓ 全通过
+- 测试 9（call_exp_oi 含无效 expiry）✓ 仅有效项参与聚合
+- 测试 10（discovery 含 HTML）⚠ 未转义，但**全项目一致行为**，不在 v0.27.x 范围内修复
+
+---
+
+## [0.27.0] — 2026-05-19 — ML 增强报告 OracleBee 板块扩充为完整期权视图
+
+### Added
+
+- **`generate_ml_report.py` `_ch3_oracle()`** — 重写期权章节，与 dashboard `#/deep` 和 generate_deep_v2 CH4 对齐
+  - **头部 hero 卡片** — 新增"近端磁吸目标价（距现价 ±x%）"，从 oracle.max_pain dict 提取（NVDA = $225）
+  - **新章节 1：全链 OI 结构** — Max Pain 远期参考 / 全链 P/C / 总 OI / Call+Put 拆分 + Top5 Call 阻力 + Top5 Put 支撑（含距现价百分比 + 主导到期日 badge）
+  - **新章节 2：近 30 天到期 OI 墙现场聚合** — 当 JSON 含 `call_exp_oi`/`put_exp_oi` 矩阵时启用，遍历 strike × expiry 仅累加 `0 ≤ days_to ≤ 30`，输出近端 P/C + Top3 Call/Put 墙
+  - **新章节 3：IV 期限结构 + IV-RV 价差** — shape 标签（Contango绿/Backwardation红/Flat金）+ 近月/远月 IV + IV-RV pp 价差 + 30日实现波动率 + 形态解读 + cheap/rich 信号
+  - **新章节 4：Gamma 到期日历** — 下一主要到期日 / Pin Risk 行权价 / OI 集中度 / Charm 方向
+
+### Changed
+
+- **`generate_ml_report.py` `generate_html_report()` 第1410行** — `_ch3_oracle()` 调用增加 `current_price` 参数（从 `analysis.current_price` 或 Scout details 兜底）
+
+### Compatibility
+
+- 旧 JSON（5-18 之前，无 `call_exp_oi`）— 自动跳过近端墙章节，其他 4 块正常渲染
+- 新 JSON（v0.26.4 起，5-19 daily-scan 后）— 4 块完整展示
+
+### Validation
+
+- 端到端测试通过：
+  - 5-18 NVDA JSON 渲染 6923 字节 HTML，近端磁吸 $225 (-1.2%)、全链 6 到期日、IV Flat、Gamma 日历齐全
+  - 注入伪造 `call_exp_oi` 验证近端墙：P/C 计算正确（56000/94000=0.60）、Top3 行渲染
+
+---
+
 ## [0.26.4] — 2026-05-18 — Dashboard 近端 OI 墙现场聚合（解决"全链墙偏远"问题）
 
 ### Added

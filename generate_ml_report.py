@@ -729,10 +729,11 @@ class MLEnhancedReportGenerator:
         gex = opts.get("gamma_squeeze_risk") or "—"
         flow = opts.get("flow_direction") or opts.get("options_score") or "—"
         skew = _safe(opts.get("iv_skew_ratio", opts.get("iv_skew", 0)))
-        unusual = opts.get("unusual_activity", [])
-        key_levels = opts.get("key_levels", {})
-        support = key_levels.get("support", [])
-        resist = key_levels.get("resistance", [])
+        # v0.27.1 bug fix: dict.get() 不会用默认值若 key 存在但 value=None；用 `or` 保护
+        unusual = opts.get("unusual_activity") or []
+        key_levels = opts.get("key_levels") or {}
+        support = key_levels.get("support") or []
+        resist = key_levels.get("resistance") or []
         pc_color = "#28a745" if pc < 0.8 else ("#dc3545" if pc > 1.2 else "#ffc107")
         unusual_rows = ""
         for u in unusual[:5]:
