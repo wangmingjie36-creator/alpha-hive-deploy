@@ -2149,6 +2149,26 @@ def main():
         print(f"   - 跳过 auto_commit_and_notify (不推 gh-pages / Slack)")
         return report
 
+    # v0.27.2 空扫描护栏：数据源全线失败（如 yfinance 429 限流触发断路器）会产出
+    # tickers_analyzed=0 / opportunities=0 的空报告。此时绝不能 save_report + 部署，
+    # 否则会用空 dashboard 覆盖 gh-pages 上一份好数据（2026-05-27 事故）。
+    # 跳过 save_report / auto_commit_and_notify，保留线上最近一份有效快照，仅记录日志。
+    _n_analyzed = 0
+    _n_opps = 0
+    if isinstance(report, dict):
+        _n_analyzed = report.get("swarm_metadata", {}).get("tickers_analyzed", 0) or 0
+        _n_opps = len(report.get("opportunities") or [])
+    if _n_analyzed == 0 and _n_opps == 0:
+        _log.error(
+            "空扫描护栏触发：tickers_analyzed=0 且 opportunities=0（疑似数据源全线失败/"
+            "断路器熔断）。跳过 save_report + gh-pages 部署，保留线上上一份有效数据。"
+        )
+        print("\n🛑 空扫描护栏触发：本次 0 标的分析，0 机会。")
+        print("   - 跳过 save_report（不覆盖本地 dashboard）")
+        print("   - 跳过 auto_commit_and_notify（不推 gh-pages，保留线上好数据）")
+        print("   - 常见原因：yfinance 429 限流 → 断路器熔断。请稍后重跑。")
+        return report
+
     # 保存报告（Hive app 通过 .swarm_results_{date}.json 自动同步）
     report_path = reporter.save_report(report)
     _log.info("报告已保存：%s", report_path)

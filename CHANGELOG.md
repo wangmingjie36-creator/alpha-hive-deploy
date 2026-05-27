@@ -5,6 +5,28 @@
 
 ---
 
+## [0.27.2] — 2026-05-27 — 空扫描部署护栏 + 5-27 空 dashboard 事故回滚
+
+### Fixed
+
+- **`alpha_hive_daily_report.py main()`** — 新增「空扫描护栏」（save_report + auto_commit_and_notify 之前）
+  - 根因：2026-05-27 20:38 daily-scan 期间 **Yahoo Finance 返回 HTTP 429（限流）**，`[CB-yfinance] closed → open` 断路器熔断 → 后续所有标的拉取被切断 → `tickers_analyzed=0` / `opportunities=0` 空报告
+  - 旧行为：空报告照常 `save_report`（生成空 dashboard）+ `auto_commit_and_notify`（force-push gh-pages），**用空数据覆盖了 5-21 的好 dashboard**
+  - 新行为：当 `swarm_metadata.tickers_analyzed == 0` 且 `opportunities` 为空时，跳过 save_report + 部署，保留线上上一份有效快照，仅记录 ERROR 日志
+  - 与已有 `--samples-only` 短路并列，置于其后
+
+### Ops（事故回滚，无代码）
+
+- **gh-pages 回滚**：`056cd58`（5-27 空部署，search_index=0）→ `f78756d`（5-24 ML reports，含 5-21 好 dashboard，search_index=10），force-push 恢复线上
+- **本地清理**：删除空的 `.swarm_results_2026-05-27.json`（2 字节 `{}`）；从 f78756d `git checkout` 恢复本地 `index.html` / `dashboard-data.json` / `manifest.json`
+- **验证**：线上 dashboard-data.json `search_index` 恢复为 10 标的（QCOM/RKLB/VKTX/AMZN/CRCL/BILI/META/TSLA/MSFT/NVDA）
+
+### Note
+
+- 本次故障**与规则模型（--no-llm）无关**，纯属 Yahoo 429 瞬时限流。护栏确保后续此类瞬时故障不会再污染线上。
+
+---
+
 ## [0.27.1] — 2026-05-19 — v0.27.0 二次审计 P0 修复（None safety）
 
 ### Fixed
