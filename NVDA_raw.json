@@ -120,7 +120,5 @@
     "rating": "HOLD",
     "action": "观察等待",
     "reasoning": "人工分析 65.0% + ML 预测 59.1% = 综合 63.2%"
-  },
-  "price": 214.28,
-  "price_source": "closing_websearch"
+  }
 }
