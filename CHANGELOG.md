@@ -25,6 +25,14 @@
 
 - 本次故障**与规则模型（--no-llm）无关**，纯属 Yahoo 429 瞬时限流。护栏确保后续此类瞬时故障不会再污染线上。
 
+### Ops 追加（2026-05-28 日期归位）
+
+- 5-27 重跑成功（Yahoo 限流已解除）拿到真实 10 标的数据，但因用户电脑当时时间设错为 5-27，`reporter.date_str` 锁定 5-27，dashboard 展示标签错为 5-27
+- 5-28 系统时间校正后：
+  1. **预清理**：备份 pheromone.db；删本次写入痕迹（`predictions date=2026-05-28` 10 行 / `agent_memory date=2026-05-27` 120 行 / `reasoning_sessions date=2026-05-27` 2 行）；保留历史 `predictions.exit_date=2026-05-27` 17 行（回测数据未动）；删除所有 5-27 错误标签文件（swarm/daily/ml-enhanced×10/report_snapshots×9）
+  2. **重跑**：`--swarm --no-llm`，`date_str` 正确锁定 `2026-05-28`，期权快照命中复用（省 yfinance 请求），0 个 429
+  3. **验证全栈一致**：13 个 5-28 文件 / predictions 10 行无重复 / agent_memory 5-27 残留 0 / gh-pages `ab50506 Deploy: Alpha Hive static 2026-05-28 21:38` / **线上 dashboard 10 标的 `_date: 2026-05-28`**
+
 ---
 
 ## [0.27.1] — 2026-05-19 — v0.27.0 二次审计 P0 修复（None safety）
