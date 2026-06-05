@@ -116,7 +116,14 @@ class AlphaHiveDailyReporter:
     def __init__(self):
         self.report_dir = PATHS.home
         self.timestamp = datetime.now()
-        self.date_str = self.timestamp.strftime("%Y-%m-%d")
+        # v0.27.3: date_str 锁定 PDT（America/Los_Angeles），与美股交易日对齐
+        # 避免用户电脑时区设为 CST/北京（已过午夜进入次日）导致 date_str 比美股日期多 1 天
+        try:
+            from zoneinfo import ZoneInfo
+            self.date_str = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+        except Exception:
+            # zoneinfo 不可用时回退本地时间（保留旧行为）
+            self.date_str = self.timestamp.strftime("%Y-%m-%d")
 
         # 初始化报告生成器
         self.ml_generator = MLEnhancedReportGenerator()
