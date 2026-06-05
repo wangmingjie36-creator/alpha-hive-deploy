@@ -5,6 +5,35 @@
 
 ---
 
+## [0.27.3] — 2026-06-06 — date_str 强制锁定 PDT（解决跨时区午夜偏移）
+
+### Fixed
+
+- **根因**：`reporter.date_str` 和 `predictions.date` 都用 `datetime.now()` 取**本地**时间。当用户电脑时区设为 CST/北京（UTC+8）且 PDT 美股交易日仍在进行时（如本地 6-6 凌晨 2:14 = PDT 6-5 11:14），date 字段会比美股实际交易日**多 1 天**，与 dashboard 显示口径错位。
+
+- **`alpha_hive_daily_report.py:__init__`** — `self.date_str` 强制使用 `America/Los_Angeles` 时区
+  ```python
+  self.date_str = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+  ```
+  zoneinfo 不可用时静默回退 local（向后兼容）
+
+- **`backtester.py`** — 新增模块级 `_pdt_today()` helper，`save_predictions` 改用此函数写 `predictions.date`，与 `reporter.date_str` 口径一致
+
+### Ops（6-5 日期归位）
+
+- 6-5 22:27 那次扫描 yfinance 429 → 空扫描护栏正确拦截（v0.27.2 生效，未污染线上）
+- 6-6 02:14 重跑（限流已解除）：
+  - 本地 CST `2026-06-06 02:14` → PDT 6-5 `date_str=2026-06-05` ✓
+  - 13 个 6-5 文件全部产出 / gh-pages `4f43c17` 部署成功 / 线上 dashboard `_date: 2026-06-05` 10 标的
+  - **但 DB 表 patch 前已写错**：备份 DB 后执行 SQL UPDATE：predictions 10 行 `2026-06-06 → 2026-06-05`，agent_memory 100 行同步；清理 6-4 残留 agent_memory 40 行（来自 6-4 那次 429 失败扫描）
+
+### Note
+
+- `options_snapshot` 文件名仍用本地时间（如 `options_snapshot_VKTX_2026-06-06.json`），不影响 dashboard 显示，仅文件命名口径。后续可统一升级。
+- `memory_store.py` 的 agent_memory date 来自 caller 传入，未修；本次通过 SQL UPDATE 修复历史，下次扫描需观察 caller 是否仍传本地日期。
+
+---
+
 ## [0.27.2] — 2026-05-27 — 空扫描部署护栏 + 5-27 空 dashboard 事故回滚
 
 ### Fixed

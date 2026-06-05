@@ -12,6 +12,16 @@ T+1 / T+7 / T+30 自动回看预测偏差：
 import json
 import sqlite3
 from datetime import datetime, timedelta
+
+# v0.27.3: 与美股交易日对齐的日期工具，避免本地时区为 CST/北京时跨午夜偏移
+try:
+    from zoneinfo import ZoneInfo
+    _PDT = ZoneInfo("America/Los_Angeles")
+    def _pdt_today() -> str:
+        return datetime.now(_PDT).strftime("%Y-%m-%d")
+except Exception:
+    def _pdt_today() -> str:
+        return datetime.now().strftime("%Y-%m-%d")
 from typing import Dict, List, Optional
 
 from hive_logger import PATHS, get_logger, FeatureRegistry, SafeJSONEncoder
@@ -156,7 +166,7 @@ class PredictionStore:
                      pheromone_compact)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    datetime.now().strftime("%Y-%m-%d"),
+                    _pdt_today(),  # v0.27.3: 美股交易日（PDT），与 reporter.date_str 对齐
                     ticker,
                     final_score,
                     direction,
