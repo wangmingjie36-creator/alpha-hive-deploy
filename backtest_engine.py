@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from collections import defaultdict
 
+from hive_logger import pdt_today  # v0.28.0: 美股交易日工具
+
 _log = logging.getLogger("alpha_hive.backtest")
 
 
@@ -109,7 +111,7 @@ class PriceBackfiller:
                     continue
 
                 target_date = self._add_business_days(pred.date, days)
-                if target_date > datetime.now().strftime("%Y-%m-%d"):
+                if target_date > pdt_today():  # v0.28.0: 美股交易日边界
                     stats["skipped"] += 1
                     continue  # 还没到日期
 

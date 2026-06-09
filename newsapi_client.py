@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from hive_logger import PATHS, atomic_json_write, get_logger
+from hive_logger import PATHS, atomic_json_write, get_logger, pdt_today
 
 _log = get_logger("newsapi")
 
@@ -61,8 +61,12 @@ _av_daily_lock = threading.Lock()
 
 
 def _av_quota_ok() -> bool:
-    """检查并递增 AV 日配额计数器。配额用尽返回 False。"""
-    today = datetime.now().strftime("%Y-%m-%d")
+    """检查并递增 AV 日配额计数器。配额用尽返回 False。
+
+    NOTE: AV 服务实际 reset 时区不确定（推测 UTC midnight）；项目内部按 PDT 美股交易日
+    配额跟单日扫描节奏对齐更直观，可能与 AV 实际配额窗口有 ±7h 偏差。
+    """
+    today = pdt_today()  # v0.28.0: 美股交易日
     with _av_daily_lock:
         if _av_daily["date"] != today:
             _av_daily["date"] = today

@@ -428,3 +428,30 @@ def optional_import(module: str, attr: str = None, *, default=None):
         return mod
     except ImportError:
         return default
+
+
+# ============================================================
+# v0.28.0 — 全局 PDT 日期工具（美股交易日对齐）
+# ============================================================
+# 使用场景：所有写入存储 / 查询参数 / 标识符的 date 字段应该用此函数，
+# 避免用户电脑时区为 CST/北京时跨午夜（本地次日，PDT 仍当日）date 偏移 1 天
+#
+# 历史：v0.27.3 / v0.27.4 在 alpha_hive_daily_report / backtester / pheromone_board
+# 各自加了本地 _pdt_today helper；v0.28.0 统一抽到 hive_logger 全局共享
+try:
+    from datetime import datetime as _datetime_pdt
+    from zoneinfo import ZoneInfo as _ZI_pdt
+    _PDT_TZ = _ZI_pdt("America/Los_Angeles")
+    def pdt_today() -> str:
+        """返回美股交易日（PDT/PST 时区的日期字符串 YYYY-MM-DD）。
+
+        Example:
+            >>> from hive_logger import pdt_today
+            >>> entry["date"] = pdt_today()  # 而非 datetime.now().strftime(...)
+        """
+        return _datetime_pdt.now(_PDT_TZ).strftime("%Y-%m-%d")
+except Exception:
+    # zoneinfo / tzdata 不可用时回退本地（保留旧行为，向后兼容）
+    from datetime import datetime as _datetime_pdt
+    def pdt_today() -> str:
+        return _datetime_pdt.now().strftime("%Y-%m-%d")

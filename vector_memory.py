@@ -16,7 +16,7 @@ from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from hive_logger import PATHS, get_logger
+from hive_logger import PATHS, get_logger, pdt_today
 
 _log = get_logger("vector_memory")
 
@@ -115,7 +115,7 @@ class VectorMemory:
                     "source": source,
                     "session_id": session_id,
                     "created_at": now,
-                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "date": pdt_today(),  # v0.28.0: 美股交易日
                     "epoch_day": int(time.time() // 86400),
                 }],
                 ids=[doc_id]

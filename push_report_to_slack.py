@@ -30,7 +30,7 @@ from pathlib import Path
 # 确保项目根目录在 sys.path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from hive_logger import get_logger
+from hive_logger import get_logger, pdt_today
 
 _log = get_logger("push_report_to_slack")
 
@@ -41,8 +41,8 @@ def main():
     parser = argparse.ArgumentParser(description="推送日报到 Slack")
     parser.add_argument(
         "--date",
-        default=datetime.now().strftime("%Y-%m-%d"),
-        help="报告日期 (默认: 今天)",
+        default=pdt_today(),  # v0.28.0: 默认美股交易日
+        help="报告日期 (默认: 今天 PDT 美股交易日)",
     )
     parser.add_argument(
         "--llm",

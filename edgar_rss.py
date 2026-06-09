@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from hive_logger import PATHS, atomic_json_write
+from hive_logger import PATHS, atomic_json_write, pdt_today
 
 _log = _logging.getLogger("alpha_hive.edgar_rss")
 
@@ -208,14 +208,18 @@ class EdgarRSSClient:
     # ==================== 过滤查询 ====================
 
     def get_today_filings_for_cik(self, cik: str) -> List[Dict]:
-        """获取今日指定 CIK 的新鲜 Form 4 申报"""
-        today = datetime.now().strftime("%Y-%m-%d")
+        """获取今日指定 CIK 的新鲜 Form 4 申报
+
+        NOTE: SEC EDGAR 服务在 ET (UTC-4/-5) 时区，与 PDT 差 3h。RSS 按日粒度查询，
+        用 PDT 接近正确（同一日历日），但 ET 末 3h 数据可能漏到次日匹配。
+        """
+        today = pdt_today()  # v0.28.0: 美股交易日
         entries = self.get_recent_form4_alerts()
         return [e for e in entries if e["filing_date"] == today and e["cik"] == str(cik)]
 
     def get_today_filings_by_name(self, ticker: str) -> List[Dict]:
         """通过公司名模糊匹配（无 CIK 时的备选）"""
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = pdt_today()  # v0.28.0: 美股交易日（SEC 实际 ET 时区，详见 get_today_filings_for_cik 注释）
         entries = self.get_recent_form4_alerts()
         ticker_upper = ticker.upper()
         return [

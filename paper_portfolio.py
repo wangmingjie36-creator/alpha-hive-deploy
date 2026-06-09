@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import math
+
+from hive_logger import pdt_today  # v0.28.0: 美股交易日工具
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -980,7 +982,7 @@ def main():
         return
 
     if args.cmd == "run":
-        as_of = args.date or datetime.now().strftime("%Y-%m-%d")
+        as_of = args.date or pdt_today()  # v0.28.0: 美股交易日
         res = run_for_date(as_of, verbose=args.verbose)
         print(f"\n📊 {as_of}  NAV=${res['nav']:,.2f}  持仓={len(res['positions'])}  "
               f"今日开仓={res['opened_today']}  已实现P&L=${res['realized_pnl_today']:+.2f}")

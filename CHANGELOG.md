@@ -5,6 +5,48 @@
 
 ---
 
+## [0.28.0] — 2026-06-09 — 全项目 PDT 日期统一审计 + 6 P0 + 4 P1 修复
+
+### Added
+
+- **`hive_logger.py`** — 新增全局 `pdt_today()` helper（模块末尾）
+  - 返回美股交易日 PDT 字符串（`America/Los_Angeles` 时区）
+  - 使用 `zoneinfo`，tzdata 缺失时回退本地
+  - 抽统一 helper 避免每个模块重复定义（v0.27.3/0.27.4 历史）
+
+### Fixed (P0: 写入存储 / 影响逻辑)
+
+- **`options_analyzer.py:1430`** `_snap_date` — options_snapshot 文件命名（已实证：6-9 扫描产出 `_2026-06-10.json` 错位）
+- **`vector_memory.py:118`** `"date"` 字段 — 向量内存 date 跨午夜偏移
+- **`swarm_agents/base.py:83`** — `retriever.get_context_summary(date)` 召回日期匹配
+- **`swarm_agents/rival_bee.py:36`** `date=` — TrainingData date 字段
+- **`paper_portfolio.py:983`** `as_of` — CLI 默认 `--date` 美股交易日
+- **`tradier_fetcher.py:488`** `validation_date` — JSON 字段时效性标识
+
+### Fixed (P1: 查询参数 / 比较边界)
+
+- **`newsapi_client.py:65`** AV 配额计数 `today` key（加注释说明 AV 实际 reset 时区不确定）
+- **`edgar_rss.py:212+218`** `today` Form 4 过滤（加注释说明 SEC 实际 ET 时区差 3h）
+- **`push_report_to_slack.py:44`** `--date` CLI 默认值
+- **`backtest_engine.py:112`** `target_date > today` 比较边界
+
+### Note (未修，设计上保留本地时间)
+
+以下 P2 用途为"何时跑/生成"语义，本地时间合理：
+- `code_executor.py:96` 执行日志 timestamp
+- `self_analyst.py:223` brief 生成时间戳
+- `vectorbt_bridge.py:492` HTML report generated 字段
+- backtester.py 其他 11 处 cutoff 计算（覆盖范围宽 1 天，不致错）
+
+### History
+
+- v0.27.3：`alpha_hive_daily_report.date_str` + `backtester._pdt_today`
+- v0.27.4：`pheromone_board._pdt_today` + `generate_ml_report` None safety
+- v0.28.0：统一抽到 `hive_logger.pdt_today` + 全项目 P0/P1 共 10 处修复
+- v0.27.3/0.27.4 的本地 helper 保留（功能等价，避免破坏现有 commit；下一次可统一迁移）
+
+---
+
 ## [0.27.4] — 2026-06-09 — ML 报告 None safety + agent_memory.date 锁 PDT（跨午夜 2 个回归 bug）
 
 ### Fixed

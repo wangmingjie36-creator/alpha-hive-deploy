@@ -31,11 +31,16 @@ except ImportError:
     requests = None
 
 try:
-    from hive_logger import get_logger, atomic_json_write
+    from hive_logger import get_logger, atomic_json_write, pdt_today
 except ImportError:
     def get_logger(name):
         import logging
         return logging.getLogger(name)
+
+    def pdt_today() -> str:
+        """fallback: hive_logger 不可用时回退本地（v0.28.0 兼容）"""
+        from datetime import datetime as _dt
+        return _dt.now().strftime("%Y-%m-%d")
 
     def atomic_json_write(path: str, data: Dict[str, Any]) -> None:
         """简单原子写入（备选）"""
@@ -485,7 +490,7 @@ class TradierFetcher:
 
         return {
             "ticker": ticker,
-            "validation_date": datetime.now().strftime("%Y-%m-%d"),
+            "validation_date": pdt_today(),  # v0.28.0: 美股交易日
             "expirations": expiration_results,
             "overall_correlation": round(overall_correlation, 3),
             "recommendation": recommendation,

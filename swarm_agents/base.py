@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
+from hive_logger import pdt_today  # v0.28.0: 美股交易日工具
 from pheromone_board import PheromoneBoard, PheromoneEntry
 from resilience import NETWORK_ERRORS
 from swarm_agents._config import _log, _RE_TICKER, _AS
@@ -79,8 +80,7 @@ class BeeAgent(ABC):
                 return self.retriever.get_context_for_agent(
                     ticker, self.__class__.__name__
                 )
-            from datetime import datetime
-            return self.retriever.get_context_summary(ticker, datetime.now().strftime("%Y-%m-%d"))
+            return self.retriever.get_context_summary(ticker, pdt_today())  # v0.28.0: 美股交易日召回
         except (AttributeError, TypeError, ValueError) as e:
             _log.debug("History context unavailable for %s: %s", ticker, e)
             return ""

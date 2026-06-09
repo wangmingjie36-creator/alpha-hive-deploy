@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import statistics
 
-from hive_logger import PATHS, get_logger, atomic_json_write
+from hive_logger import PATHS, get_logger, atomic_json_write, pdt_today
 
 _log = get_logger("options")
 
@@ -1427,7 +1427,7 @@ class OptionsAgent:
         """
         # ===== Snapshot cache 入口 =====
         _snap_disabled = os.environ.get("OPTIONS_SNAPSHOT_DISABLE", "").lower() in ("1", "true", "yes")
-        _snap_date = datetime.now().strftime("%Y-%m-%d")
+        _snap_date = pdt_today()  # v0.28.0: 美股交易日，避免跨午夜文件命名偏移
         _snap_path = os.path.join(self.fetcher.cache_dir,
                                   f"options_snapshot_{ticker}_{_snap_date}.json")
         if not _snap_disabled and not force_refresh and os.path.exists(_snap_path):

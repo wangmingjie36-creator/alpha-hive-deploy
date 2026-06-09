@@ -1,6 +1,7 @@
 """RivalBeeVanguard - 竞争分析与 ML 预测蜂 (ML 辅助维度)"""
 
 from typing import Any, Dict, List, Optional
+from hive_logger import pdt_today  # v0.28.0: 美股交易日工具
 from swarm_agents._config import _log, _AS
 from swarm_agents.cache import _safe_score
 from swarm_agents.base import BeeAgent
@@ -33,7 +34,7 @@ class RivalBeeVanguard(BeeAgent):
                 stock = self._get_stock_data(ticker)
                 opportunity = TrainingData(
                     ticker=ticker,
-                    date=datetime.now().strftime("%Y-%m-%d"),
+                    date=pdt_today(),  # v0.28.0: 美股交易日
                     crowding_score=50.0,
                     catalyst_quality="B+",
                     momentum_5d=stock["momentum_5d"],
