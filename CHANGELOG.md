@@ -5,6 +5,38 @@
 
 ---
 
+## [0.27.4] — 2026-06-09 — ML 报告 None safety + agent_memory.date 锁 PDT（跨午夜 2 个回归 bug）
+
+### Fixed
+
+- **`generate_ml_report.py:275`** — ML 报告 P0：链式 `dict.get(...)` None safety
+  - 旧：`advanced_analysis.get("dealer_gex", {}).get("stock_price")` 在 `dealer_gex=None` 时崩
+  - 新：`(advanced_analysis.get("dealer_gex") or {}).get("stock_price")` + 同款修 `realtime_metrics.sources.yahoo_finance`
+  - 触发：6-9 扫描 **10/10 ML 报告全部失败**（log `'NoneType' object has no attribute 'get'`），dashboard "ML 详情"链接全 404
+  - 与 v0.27.1 `_ch3_oracle` 同类 bug，漏修了 `generate_ml_enhanced_report`
+
+- **`pheromone_board.py:203`** — agent_memory.date 跨午夜偏移
+  - 旧：`'date': datetime.now().strftime("%Y-%m-%d")` 用本地 CST，跨午夜写成次日
+  - 新：模块级 `_pdt_today()` helper（与 backtester.py 同模式），写 PDT
+  - 触发：6-9 扫描时本地 CST `2026-06-10 00:50`，100 行 agent_memory 错写 6-10
+  - v0.27.3 漏修项：当时只修 `reporter.date_str` 和 `backtester.save_predictions`，pheromone_board caller 未覆盖
+
+### Ops（6-9 数据归位）
+
+- 备份 `pheromone.db.bak_before_69fix_*`
+- SQL UPDATE：`agent_memory` 100 行 6-10 → 6-9（DB 修复）
+- 补生成 10 个 ML 报告 HTML（`generate_ml_enhanced_report` + `generate_html_report` 直接调用，无需重跑全扫描）
+- 重生 `index.html`（让"ML 详情"链接 detection 重跑 → 显示链接）
+- 重推 gh-pages（`516529d → a3e3b5a`，CDN 验证 39s 通过）
+- **最终验证**：13 个 6-9 文件 / predictions 10 行 6-9 无重复 / agent_memory 100 行 6-9 无残留 / 线上 dashboard `_date=2026-06-09` 10 标的 / 3 个 ML 报告抽样 HTTP 200
+
+### Lessons
+
+- v0.27.3 PDT patch 应该全栈扫描所有写 date 的位置，不只是 reporter + backtester。这次 pheromone_board.py 漏网是因为 caller 调用 memory_store 时自己构造 entry dict，传 date 字段，不在我搜的范围
+- 项目里**所有 `datetime.now().strftime("%Y-%m-%d")` 都应该是嫌疑犯**。下次审计应该 grep 全项目这个 pattern，逐一确认是 PDT 还是 local 语义
+
+---
+
 ## [0.27.3] — 2026-06-06 — date_str 强制锁定 PDT（解决跨时区午夜偏移）
 
 ### Fixed
