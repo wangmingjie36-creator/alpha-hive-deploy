@@ -271,9 +271,11 @@ class MLEnhancedReportGenerator:
         ml_prediction = self.ml_service.predict_for_opportunity(ml_input)
 
         # 提取当前价（优先 dealer_gex → realtime_metrics → 0）
+        # v0.27.4: dict.get(key, default) 在 key 存在但 value=None 时返回 None，
+        # 链式调用必须每段 `or {}` 兜底（与 v0.27.1 _ch3_oracle 同类修复）
         _current_price = (
-            advanced_analysis.get("dealer_gex", {}).get("stock_price")
-            or realtime_metrics.get("sources", {}).get("yahoo_finance", {}).get("current_price")
+            (advanced_analysis.get("dealer_gex") or {}).get("stock_price")
+            or ((realtime_metrics.get("sources") or {}).get("yahoo_finance") or {}).get("current_price")
             or 0.0
         )
 

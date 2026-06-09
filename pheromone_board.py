@@ -13,6 +13,17 @@ from typing import List, Dict
 from threading import RLock
 from concurrent.futures import ThreadPoolExecutor, wait as _futures_wait
 from datetime import datetime
+
+# v0.27.4: agent_memory.date 锁 PDT（与 reporter.date_str / predictions.date 口径一致），
+# 避免本地时区为 CST/北京已过午夜时 date 比美股交易日多 1 天
+try:
+    from zoneinfo import ZoneInfo
+    _PDT = ZoneInfo("America/Los_Angeles")
+    def _pdt_today() -> str:
+        return datetime.now(_PDT).strftime("%Y-%m-%d")
+except Exception:
+    def _pdt_today() -> str:
+        return datetime.now().strftime("%Y-%m-%d")
 import atexit
 
 _log = _logging.getLogger("alpha_hive.pheromone_board")
@@ -200,7 +211,7 @@ class PheromoneBoard:
                     'pheromone_strength': entry.pheromone_strength,
                     'support_count': entry.support_count,
                     'details': _json.dumps(entry.details, ensure_ascii=False, default=str) if entry.details else None,
-                    'date': datetime.now().strftime("%Y-%m-%d")
+                    'date': _pdt_today()  # v0.27.4: PDT 美股交易日
                 }
                 self._write_buffer.append(entry_dict)
                 if len(self._write_buffer) >= self._BATCH_SIZE:
