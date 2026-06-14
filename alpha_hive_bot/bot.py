@@ -1,0 +1,255 @@
+"""Alpha Hive Bot · Telegram 命令处理器 + 主入口
+
+启动：
+  python -m alpha_hive_bot.bot
+
+需要环境变量 BOT_TOKEN + ADMIN_USER_IDS。
+
+定时推送：
+  AsyncIO scheduled task，每天 PDT push_hour_pdt 触发 run_daily_push。
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
+
+from .config import BotConfig, DISCLAIMER, HELP, WELCOME_ACTIVE, WELCOME_NEW, pdt_today
+from .push_job import run_daily_push
+from .subscriber_db import SubscriberDB
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+)
+log = logging.getLogger("alpha_hive_bot")
+
+_PDT = ZoneInfo("America/Los_Angeles")
+
+
+# ============================================================
+# 命令处理器
+# ============================================================
+
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cfg: BotConfig = ctx.application.bot_data["cfg"]
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat:
+        return
+    status = db.activate_if_whitelisted(user.id, chat.id, user.username)
+    if status in ("active", "already_active"):
+        await update.message.reply_text(WELCOME_ACTIVE, parse_mode=ParseMode.MARKDOWN)
+    elif status == "not_invited":
+        msg = WELCOME_NEW + f"\n\n你的 user_id 是 `{user.id}`（请发给管理员申请白名单）"
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    elif status == "revoked":
+        await update.message.reply_text("❌ 你的访问已被管理员撤销。")
+    elif status == "unsubscribed":
+        await update.message.reply_text(
+            "ℹ️ 你已退订。如需重新订阅请联系管理员重新加白名单。"
+        )
+
+
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    user = update.effective_user
+    if not user:
+        return
+    st = db.get_status(user.id) or "not_registered"
+    label = {
+        "active": "✅ 已订阅（每日推送中）",
+        "whitelisted": "🟡 已在白名单（请发 /start 激活）",
+        "unsubscribed": "⚪ 已退订",
+        "revoked": "❌ 访问已撤销",
+        "not_registered": "❌ 未注册（请联系管理员）",
+    }.get(st, st)
+    await update.message.reply_text(f"你的订阅状态：{label}\n\nuser_id: `{user.id}`", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    user = update.effective_user
+    if not user:
+        return
+    ok = db.unsubscribe(user.id)
+    if ok:
+        await update.message.reply_text("✅ 已退订。后续不再推送，但你的记录会保留。")
+    else:
+        await update.message.reply_text("ℹ️ 你当前不是 active 状态，无需退订。")
+
+
+async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(HELP, parse_mode=ParseMode.MARKDOWN)
+
+
+# ── 管理员命令 ─────────────────────────────────────────
+
+def _is_admin(user_id: int, cfg: BotConfig) -> bool:
+    return user_id in cfg.admin_user_ids
+
+
+async def cmd_invite(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cfg: BotConfig = ctx.application.bot_data["cfg"]
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    user = update.effective_user
+    if not user or not _is_admin(user.id, cfg):
+        return
+    if not ctx.args:
+        await update.message.reply_text("用法：/invite <user_id>")
+        return
+    try:
+        target = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("user_id 必须是整数")
+        return
+    added = db.add_whitelist(target)
+    await update.message.reply_text(
+        f"{'✓ 已加白名单' if added else 'ℹ️ 已存在'}: user_id={target}"
+    )
+
+
+async def cmd_revoke(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cfg: BotConfig = ctx.application.bot_data["cfg"]
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    user = update.effective_user
+    if not user or not _is_admin(user.id, cfg):
+        return
+    if not ctx.args:
+        await update.message.reply_text("用法：/revoke <user_id>")
+        return
+    try:
+        target = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("user_id 必须是整数")
+        return
+    ok = db.revoke(target)
+    await update.message.reply_text(
+        f"{'✓ 已撤销' if ok else '❌ 未找到该用户'}: user_id={target}"
+    )
+
+
+async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cfg: BotConfig = ctx.application.bot_data["cfg"]
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    user = update.effective_user
+    if not user or not _is_admin(user.id, cfg):
+        return
+    rows = db.list_all()
+    if not rows:
+        await update.message.reply_text("（空）")
+        return
+    lines = ["订阅者列表："]
+    for r in rows[:50]:
+        un = f"@{r['username']}" if r["username"] else "—"
+        lines.append(f"`{r['user_id']}` {un} · {r['status']} · {r['updated_at']}")
+    if len(rows) > 50:
+        lines.append(f"... 共 {len(rows)} 条，仅显示前 50")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_push_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cfg: BotConfig = ctx.application.bot_data["cfg"]
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    user = update.effective_user
+    if not user or not _is_admin(user.id, cfg):
+        return
+    await update.message.reply_text("⏳ 触发即时推送中...")
+    result = await run_daily_push(cfg, db, bot=ctx.application.bot)
+    await update.message.reply_text(
+        f"推送完成: sent={result.get('sent')} failed={result.get('failed')} "
+        f"deactivated={result.get('deactivated')} skipped={result.get('skipped')} "
+        f"date={result.get('date', pdt_today())}"
+    )
+
+
+# ============================================================
+# 定时推送 job
+# ============================================================
+
+async def _scheduler_loop(app: Application):
+    """简单 asyncio 定时器：每天 PDT push_hour:30 推一次。"""
+    cfg: BotConfig = app.bot_data["cfg"]
+    db: SubscriberDB = app.bot_data["db"]
+    last_pushed_date = None
+
+    while True:
+        try:
+            now_pdt = datetime.now(_PDT)
+            target = now_pdt.replace(hour=cfg.push_hour_pdt, minute=30, second=0, microsecond=0)
+            if now_pdt >= target:
+                today = now_pdt.strftime("%Y-%m-%d")
+                if last_pushed_date != today:
+                    log.info("定时器触发：开始 %s 推送", today)
+                    try:
+                        result = await run_daily_push(cfg, db, bot=app.bot)
+                        log.info("定时推送结果: %s", result)
+                        last_pushed_date = today
+                    except Exception as e:
+                        log.exception("定时推送失败: %s", e)
+                # 推送完睡到次日 00:05
+                tomorrow_check = (now_pdt + timedelta(days=1)).replace(
+                    hour=0, minute=5, second=0, microsecond=0
+                )
+                sleep_s = (tomorrow_check - now_pdt).total_seconds()
+            else:
+                sleep_s = (target - now_pdt).total_seconds()
+            log.debug("scheduler 睡 %.0fs", sleep_s)
+            await asyncio.sleep(max(60, sleep_s))
+        except asyncio.CancelledError:
+            log.info("scheduler 已取消")
+            return
+        except Exception as e:
+            log.exception("scheduler 异常（继续运行）: %s", e)
+            await asyncio.sleep(300)
+
+
+# ============================================================
+# 主入口
+# ============================================================
+
+def build_application() -> Application:
+    cfg = BotConfig.from_env()
+    db = SubscriberDB(cfg.db_path)
+    app = Application.builder().token(cfg.bot_token).build()
+    app.bot_data["cfg"] = cfg
+    app.bot_data["db"] = db
+
+    # 用户命令
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+    app.add_handler(CommandHandler("help", cmd_help))
+    # 管理员命令
+    app.add_handler(CommandHandler("invite", cmd_invite))
+    app.add_handler(CommandHandler("revoke", cmd_revoke))
+    app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("push_now", cmd_push_now))
+
+    # 注册启动时拉起 scheduler
+    async def _post_init(app: Application):
+        app.bot_data["_scheduler_task"] = asyncio.create_task(_scheduler_loop(app))
+        log.info("Alpha Hive Bot 启动 · admin=%s · push_hour=%d PDT", cfg.admin_user_ids, cfg.push_hour_pdt)
+
+    app.post_init = _post_init
+    return app
+
+
+def main():
+    app = build_application()
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
