@@ -5,6 +5,35 @@
 
 ---
 
+## [0.29.0] — 2026-06-16 — Alpha Hive Bot（对外 Telegram 订阅机器人）上线 + Railway 部署
+
+### Added — `alpha_hive_bot/`（新组件，invite-only MVP，无支付）
+
+- `bot.py` — Telegram 命令路由 + asyncio 定时器
+  - 用户：`/start` `/status` `/unsubscribe` `/help`
+  - 管理员：`/invite <id>` `/revoke <id>` `/list` `/push_now`
+  - 每日 PDT `PUSH_HOUR_PDT`:30 自动推送（默认 13:30，约北京 04:30）
+- `subscriber_db.py` — SQLite 状态机：whitelisted → active → unsubscribed/revoked
+- `push_job.py` — fetch gh-pages `/alpha-hive-daily-{date}.md` → HTML 格式化 → 遍历 active 推送
+- `config.py` — 环境变量解析 + 合规免责声明文案（HTML）
+- `Dockerfile` / `requirements.txt` / `.env.example` / `README.md` — Railway 部署就绪
+
+### Fixed — 部署期 4 个根因（Railway 实战逐个排查）
+
+1. **nixpacks 漏 COPY `alpha_hive_bot/`**（Console 确认 `/app` 缺该目录，`.dockerignore`/`.gitignore` 均未排除，文件在 origin/main）→ 改用**专用 Dockerfile** 显式 `COPY alpha_hive_bot/`，根治
+2. **legacy Markdown 解析崩溃**（`user_id` 单下划线被当斜体 → `BadRequest: Can't parse entities` → handler 抛错 → bot 不回复）→ 全部改 **HTML parse mode**，动态内容 `html.escape`，报告先 escape 整个 body 再安全美化
+3. **slim 镜像缺 tzdata**（`ZoneInfo("America/Los_Angeles")` 抛错回退容器本地时间 → `pdt_today()` 算错日期 → 拉错日期简报 `skipped`）→ Dockerfile 装 `tzdata`
+4. **日期边界健壮性** → `fetch_latest_md()` 当日缺失时回退最近一份可用简报（≤7 天）；`/push_now` 用 `fallback=True`，定时任务保持 `fallback=False`（不重复推旧报）
+
+### Ops
+
+- Railway 项目 `hospitable-flow`，service `worker`，US West，Volume `/data`（`DB_PATH=/data/subscribers.db`）
+- Builder 自动检测 Dockerfile；Variables：`BOT_TOKEN` / `ADMIN_USER_IDS=8624907971` / `PUSH_HOUR_PDT=13` / `DB_PATH`
+- Bot：`@AlphaHiveDailyBot`；端到端验收通过（`/start`→`/invite`→`/start`→`/push_now sent=1 date=2026-06-15`，收到 HTML 简报）
+- **⚠️ 安全待办**：`BOT_TOKEN` 曾在对话明文出现，需 `@BotFather /revoke` 换新 token 并更新 Railway Variable
+
+---
+
 ## [0.28.0] — 2026-06-09 — 全项目 PDT 日期统一审计 + 6 P0 + 4 P1 修复
 
 ### Added
