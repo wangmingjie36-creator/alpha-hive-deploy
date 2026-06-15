@@ -51,6 +51,30 @@ async def fetch_daily_md(report_base_url: str, date: str, retries: int = 3) -> O
     return None
 
 
+async def fetch_latest_md(
+    report_base_url: str, start_date: str, max_back_days: int = 7
+) -> tuple[Optional[str], Optional[str]]:
+    """从 start_date 往回找最近一份可用简报（容忍当日扫描未完成/日期边界）。
+
+    返回 (date_str, md)；全部 404 返回 (None, None)。
+    用于 /push_now：管理员手动触发时总是推送"最近一份"，而非死板要求当日。
+    """
+    from datetime import datetime as _dt, timedelta as _td
+
+    try:
+        d0 = _dt.strptime(start_date, "%Y-%m-%d")
+    except ValueError:
+        return None, None
+    for i in range(max_back_days + 1):
+        d = (d0 - _td(days=i)).strftime("%Y-%m-%d")
+        md = await fetch_daily_md(report_base_url, d, retries=1)
+        if md:
+            if i > 0:
+                log.info("当日(%s)无简报，回退到最近一份: %s", start_date, d)
+            return d, md
+    return None, None
+
+
 def format_for_telegram(md: str, date: str) -> str:
     """将完整 Markdown 简报转为 Telegram HTML，截短到单消息上限 + 头部/免责声明。
 
@@ -142,13 +166,21 @@ async def push_to_all(
     return {"sent": sent, "failed": failed, "deactivated": deactivated}
 
 
-async def run_daily_push(cfg: BotConfig, db: SubscriberDB, bot=None) -> dict:
-    """触发一次每日推送（可被定时器或 admin /push_now 调用）"""
-    date = pdt_today()
-    md = await fetch_daily_md(cfg.report_base_url, date)
+async def run_daily_push(cfg: BotConfig, db: SubscriberDB, bot=None, fallback: bool = False) -> dict:
+    """触发一次推送。
+
+    fallback=False（定时任务）：严格推当日简报，缺失则跳过（不重复推旧报）。
+    fallback=True（/push_now 手动）：当日缺失时回退到最近一份可用简报。
+    """
+    today = pdt_today()
+    if fallback:
+        date, md = await fetch_latest_md(cfg.report_base_url, today)
+    else:
+        date = today
+        md = await fetch_daily_md(cfg.report_base_url, date)
     if md is None:
-        log.warning("date=%s 简报不可用（未生成/护栏拦截），跳过推送", date)
-        return {"sent": 0, "failed": 0, "deactivated": 0, "skipped": True}
+        log.warning("date=%s 简报不可用（未生成/护栏拦截/回退耗尽），跳过推送", today)
+        return {"sent": 0, "failed": 0, "deactivated": 0, "skipped": True, "date": today}
 
     text = format_for_telegram(md, date)
     own_bot = bot is None

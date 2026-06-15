@@ -167,7 +167,8 @@ async def cmd_push_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not user or not _is_admin(user.id, cfg):
         return
     await update.message.reply_text("⏳ 触发即时推送中...")
-    result = await run_daily_push(cfg, db, bot=ctx.application.bot)
+    # 手动触发：当日缺失时回退到最近一份可用简报
+    result = await run_daily_push(cfg, db, bot=ctx.application.bot, fallback=True)
     await update.message.reply_text(
         f"推送完成: sent={result.get('sent')} failed={result.get('failed')} "
         f"deactivated={result.get('deactivated')} skipped={result.get('skipped')} "
