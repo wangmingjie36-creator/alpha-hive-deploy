@@ -1,1 +1,1 @@
-worker: python -m alpha_hive_bot.bot
+worker: PYTHONPATH=. python -m alpha_hive_bot.bot
