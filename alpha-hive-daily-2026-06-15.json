@@ -1,0 +1,490 @@
+{
+  "date": "2026-06-15",
+  "timestamp": "2026-06-16T02:06:39.033729",
+  "system_status": "✅ 蜂群协作完成",
+  "phase_completed": "完整蜂群流程 (Swarm Mode)",
+  "data_quality_summary": {
+    "total_tickers": 9,
+    "degraded_count": 0,
+    "critical_count": 0,
+    "degraded_pct": 0.0,
+    "has_quality_issue": false
+  },
+  "swarm_metadata": {
+    "total_agents": 8,
+    "tickers_analyzed": 9,
+    "resonances_detected": 1,
+    "pheromone_board_entries": 80
+  },
+  "concentration_analysis": {
+    "concentration_risk": "low",
+    "risk_score": 0.0,
+    "sector_breakdown": {},
+    "correlation_warnings": [],
+    "factor_clusters": {},
+    "recommendations": [
+      "暂无高分标的，无需评估集中度"
+    ],
+    "summary": "无高分标的（分数 < 6.0）"
+  },
+  "cross_ticker_analysis": {},
+  "sector_sentiment_contagion": {
+    "Technology": {
+      "avg_pct": 54.3,
+      "count": 6
+    }
+  },
+  "macro_context": {
+    "macro_regime": "neutral",
+    "macro_score": 5.8,
+    "vix": 16.1,
+    "vix_change_pct": -8.94,
+    "vix_regime": "moderate",
+    "treasury_10y": 4.487,
+    "treasury_2y": 4.09,
+    "yield_spread": 39.7,
+    "yield_curve": "normal",
+    "rate_environment": "moderate",
+    "dollar_trend": "neutral",
+    "market_trend": "neutral",
+    "spx_change_pct": NaN,
+    "gold_price": NaN,
+    "gold_change_pct": NaN,
+    "gold_trend": "stable",
+    "sector_rotation": {
+      "hot": [
+        [
+          "XLF",
+          "金融",
+          NaN
+        ],
+        [
+          "XLK",
+          "科技",
+          NaN
+        ],
+        [
+          "XLE",
+          "能源",
+          NaN
+        ]
+      ],
+      "cold": [
+        [
+          "XLC",
+          "通信",
+          0.64
+        ],
+        [
+          "XLRE",
+          "房地产",
+          0.04
+        ],
+        [
+          "XLB",
+          "材料",
+          NaN
+        ]
+      ],
+      "full": {
+        "XLF": [
+          "金融",
+          NaN
+        ],
+        "XLK": [
+          "科技",
+          NaN
+        ],
+        "XLE": [
+          "能源",
+          NaN
+        ],
+        "XLI": [
+          "工业",
+          NaN
+        ],
+        "XLV": [
+          "医疗",
+          NaN
+        ],
+        "XLY": [
+          "可选消费",
+          NaN
+        ],
+        "XLP": [
+          "必需消费",
+          NaN
+        ],
+        "XLU": [
+          "公用事业",
+          NaN
+        ],
+        "XLC": [
+          "通信",
+          0.64
+        ],
+        "XLRE": [
+          "房地产",
+          0.04
+        ],
+        "XLB": [
+          "材料",
+          NaN
+        ]
+      }
+    },
+    "macro_headwinds": [
+      "CPI同比 4.2%（通胀偏高，加息压力仍存）"
+    ],
+    "macro_tailwinds": [
+      "VIX 16.1（低波动，风险偏好良好）",
+      "HY信用利差 271bp(-7bp日变)（信用市场平稳，风险偏好良好）"
+    ],
+    "fred_extras": {
+      "cpi_yoy": 4.17,
+      "cpi_date": "2026-05-01",
+      "unemployment": 4.3,
+      "unemployment_date": "2026-05-01",
+      "fed_funds_rate": 3.62,
+      "treasury_2y": 4.09,
+      "hy_spread_bp": 271.0,
+      "hy_spread_date": "2026-06-12",
+      "hy_spread_chg_bp": -7.0
+    },
+    "cpi_yoy": 4.17,
+    "unemployment": 4.3,
+    "fed_funds_rate": 3.62,
+    "hy_spread_bp": 271.0,
+    "hy_spread_chg_bp": -7.0,
+    "summary": "VIX 16.1(moderate) | 10Y 4.49% | 大盘+nan% | 宏观:neutral | 曲线:正常 | CPI同比4.2% | HY利差271bp",
+    "data_source": "yfinance+fred"
+  },
+  "backtest_stats": {
+    "period": "t7",
+    "days_window": 30,
+    "overall_accuracy": 0.427,
+    "total_checked": 82,
+    "correct_count": 35,
+    "avg_return": -0.223,
+    "avg_score": 5.6,
+    "by_direction": {
+      "bullish": {
+        "total": 39,
+        "correct": 17,
+        "accuracy": 0.4358974358974359,
+        "avg_return": -0.3
+      },
+      "bearish": {
+        "total": 11,
+        "correct": 4,
+        "accuracy": 0.36363636363636365,
+        "avg_return": 0.05
+      },
+      "neutral": {
+        "total": 32,
+        "correct": 14,
+        "accuracy": 0.4375,
+        "avg_return": -2.04
+      }
+    },
+    "by_ticker": {
+      "VKTX": {
+        "total": 8,
+        "correct": 4,
+        "accuracy": 0.5,
+        "avg_return": 1.51,
+        "avg_score": 5.7
+      },
+      "TSLA": {
+        "total": 8,
+        "correct": 5,
+        "accuracy": 0.625,
+        "avg_return": 1.93,
+        "avg_score": 5.2
+      },
+      "QCOM": {
+        "total": 8,
+        "correct": 3,
+        "accuracy": 0.375,
+        "avg_return": 2.18,
+        "avg_score": 5.6
+      },
+      "NVDA": {
+        "total": 8,
+        "correct": 1,
+        "accuracy": 0.125,
+        "avg_return": -3.85,
+        "avg_score": 6.0
+      },
+      "MSFT": {
+        "total": 8,
+        "correct": 4,
+        "accuracy": 0.5,
+        "avg_return": 2.89,
+        "avg_score": 5.9
+      },
+      "RKLB": {
+        "total": 7,
+        "correct": 2,
+        "accuracy": 0.2857142857142857,
+        "avg_return": -5.71,
+        "avg_score": 5.5
+      },
+      "META": {
+        "total": 7,
+        "correct": 4,
+        "accuracy": 0.5714285714285714,
+        "avg_return": -0.01,
+        "avg_score": 5.5
+      },
+      "CRCL": {
+        "total": 7,
+        "correct": 1,
+        "accuracy": 0.14285714285714285,
+        "avg_return": -12.72,
+        "avg_score": 5.4
+      },
+      "BILI": {
+        "total": 7,
+        "correct": 4,
+        "accuracy": 0.5714285714285714,
+        "avg_return": 1.28,
+        "avg_score": 5.1
+      },
+      "AMZN": {
+        "total": 7,
+        "correct": 2,
+        "accuracy": 0.2857142857142857,
+        "avg_return": -2.13,
+        "avg_score": 5.3
+      },
+      "RUN": {
+        "total": 1,
+        "correct": 1,
+        "accuracy": 1.0,
+        "avg_return": 8.65,
+        "avg_score": 4.8
+      },
+      "REGN": {
+        "total": 1,
+        "correct": 1,
+        "accuracy": 1.0,
+        "avg_return": -11.88,
+        "avg_score": 4.7
+      },
+      "PLUG": {
+        "total": 1,
+        "correct": 0,
+        "accuracy": 0.0,
+        "avg_return": -5.05,
+        "avg_score": 8.4
+      },
+      "JNJ": {
+        "total": 1,
+        "correct": 1,
+        "accuracy": 1.0,
+        "avg_return": 2.02,
+        "avg_score": 6.5
+      },
+      "BIIB": {
+        "total": 1,
+        "correct": 0,
+        "accuracy": 0.0,
+        "avg_return": 2.08,
+        "avg_score": 5.4
+      },
+      "AMGN": {
+        "total": 1,
+        "correct": 1,
+        "accuracy": 1.0,
+        "avg_return": 2.99,
+        "avg_score": 6.6
+      },
+      "AMD": {
+        "total": 1,
+        "correct": 1,
+        "accuracy": 1.0,
+        "avg_return": 16.84,
+        "avg_score": 5.5
+      }
+    }
+  },
+  "markdown_report": "# 【2026-06-15】Alpha Hive 蜂群协作日报\n\n**自动生成于**：2026-06-16 02:06:39\n**系统模式**：完全去中心化蜂群协作 | 8 个自治工蜂（6 核心 + BearBeeContrarian）\n\n## 1) 今日摘要\n\n- 扫描标的：9 个 | 共振信号：1/9\n\n- ⚫ **暂不行动**（<6.0）：\n  - **AMZN** NEUTRAL 5.9/10 \n  - **MSFT** BULLISH 5.8/10 共振✅\n  - **CRCL** NEUTRAL 5.7/10 \n  - **RKLB** NEUTRAL 5.5/10 \n  - **META** NEUTRAL 5.5/10 \n  - **QCOM** NEUTRAL 5.4/10 \n  - **TSLA** NEUTRAL 5.3/10 \n  - **BILI** NEUTRAL 5.0/10 \n  - **NVDA** BULLISH 5.0/10 \n\n## 2) 今日聪明钱动向\n\n### AMZN\n- 内幕卖出 $15,397,179 | Jassy Andrew R 卖出 19,700股 | 拥挤度 21/100（低拥挤度） | 动量 +0.0% | 历史5条:多5/空0,均分5.6|历史T+7准确率71%(41次,均收益+2.38%) | 供应链领先信号：TSM, ASML, SOXX 5日涨幅领先 AMZN 超 1.5pp——上游需求强劲，有望传导至 AMZN 订单端。\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$15,397,179\n  - Jassy Andrew R：卖出 19,700 股\n  - Garman Matthew S：卖出 15,467 股\n- 拥挤度：21/100\n\n### MSFT\n- 拥挤度 43/100（中等拥挤度） | 动量 +0.0% | 历史5条:多5/空0,均分6.9|历史T+7准确率65%(48次,均收益+1.20%) | 板块相对强度 -10.9pp(科技 20D)【跑输】 | 供应链领先信号：TSM, ASML 5日涨幅领先 MSFT 超 1.5pp——上游需求强劲，有望传导至 MSFT 订单端。\n- 内幕交易情绪：**neutral** | 申报数：5\n- 拥挤度：43/100\n\n### CRCL\n- 内幕卖出 $10,206,890 | Neville Patrick Sean 卖出 50,000股 | 拥挤度 18/100（低拥挤度） | 动量 +0.0% | 历史5条:多5/空0,均分6.0|历史T+7准确率49%(39次,均收益+0.10%) | 供应链领先信号：TSM, AMAT, ASML, SOXX 5日涨幅领先 CRCL 超 1.5pp——上游需求强劲，有望传导至 CRCL 订单端。\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$10,206,890\n  - Neville Patrick Sean：卖出 50,000 股\n  - Tarbert Heath：卖出 38,415 股\n- 拥挤度：18/100\n\n### RKLB\n- 内幕卖出 $4,944,000 | Slusky Alexander R 卖出 40,000股 | 拥挤度 30/100（低拥挤度） | 动量 +0.9% | 历史5条:多5/空0,均分6.0|历史T+7准确率63%(43次,均收益+3.92%) | 供应链领先信号：AMAT, ASML, SOXX 5日涨幅领先 RKLB 超 1.5pp——上游需求强劲，有望传导至 RKLB 订单端。\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$4,944,000\n  - Slusky Alexander R：卖出 40,000 股\n  - Spice Adam C.：授予 275,319 股\n- 拥挤度：30/100\n\n### META\n- 内幕卖出 $3,400,490 | Powell Dina H. 税费扣股 4,384股 | 拥挤度 29/100（低拥挤度） | 动量 +1.6% | 历史5条:多5/空0,均分6.6|历史T+7准确率54%(41次,均收益-0.05%) | 供应链领先信号：TSM, AMAT, ASML, SOXX 5日涨幅领先 META 超 1.5pp——上游需求强劲，有望传导至 META 订单端。\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$3,400,490\n  - Powell Dina H.：税费扣股 4,384 股\n  - Mahoney Curtis J.：卖出 2,079 股\n- 拥挤度：29/100\n\n### QCOM\n- 内幕卖出 $4,840,388 | AMON CRISTIANO R 卖出 10,000股 | 拥挤度 18/100（低拥挤度） | 动量 +0.0% | 历史5条:多5/空0,均分6.4|历史T+7准确率59%(39次,均收益+6.23%) | 板块相对强度 -14.4pp(科技 20D)【跑输】 | 供应链领先信号：TSM, AMAT, ASML, SOXX 5日涨幅领先 QCOM 超 1.5pp——上游需求强劲，有望传导至 QCOM 订单端。\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$4,840,388\n  - AMON CRISTIANO R：卖出 10,000 股\n  - AMON CRISTIANO R：卖出 10,000 股\n- 拥挤度：18/100\n\n### TSLA\n- 内幕卖出 $12,383,314 | Musk Elon 向公司处置 96,000,000股 | 拥挤度 34/100（中等拥挤度） | 动量 +0.0% | 历史5条:多5/空0,均分6.4|历史T+7准确率60%(42次,均收益+2.98%) | 供应链领先信号：TSM, AMAT, SOXX 5日涨幅领先 TSLA 超 1.5pp——上游需求强劲，有望传导至 TSLA 订单端。\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$12,383,314\n  - Musk Elon：向公司处置 96,000,000 股\n  - Wilson-Thompson Kathleen：卖出 26,409 股\n- 拥挤度：34/100\n\n### BILI\n- 无近期内幕交易 | 拥挤度 19/100（低拥挤度） | 动量 +1.4% | 历史5条:多5/空0,均分6.5|历史T+7准确率54%(48次,均收益-3.35%) | 供应链滞后警告：TSM, AMAT, ASML 5日涨幅落后 BILI 超 1.5pp——上游景气度下行，BILI 可能存在需求前瞻性透支。\n- 内幕交易情绪：**neutral** | 申报数：0\n- 拥挤度：19/100\n\n### NVDA\n- 内幕卖出 $263,082,737 | STEVENS MARK A 卖出 500,000股 | 拥挤度 34/100（中等拥挤度） | 动量 +0.0% | 历史5条:多5/空0,均分6.2|历史T+7准确率60%(42次,均收益+2.49%) | 供应链滞后警告：TSM, AMAT, ASML, SOXX 5日涨幅落后 NVDA 超 1.5pp——上游景气度下行，NVDA 可能存在需求前瞻性透支。\n- 内幕交易情绪：**bearish** | 申报数：5\n- 内幕卖出金额：$263,082,737\n  - STEVENS MARK A：卖出 500,000 股\n  - STEVENS MARK A：卖出 500,000 股\n- 拥挤度：34/100\n\n## 3) 市场隐含预期\n\n### AMZN\n- 做多气氛浓厚（P/C低） | 检测到 51 个看涨异动 | TermStr:flat(0/0) | MaxPain:$190(-100.0%) | 异常流:混合期权流 Call:78 Put:54 | $0.0 | 无相关预测市场 | 历史5条:多5/空0,均分5.6|历史T+7准确率71%(41次,均收益+2.38%)\n- IV Rank：24.21\n- Put/Call Ratio：0.43\n- Gamma Exposure：0.0\n- 异常活动：73 个信号\n  - 看涨 call sweep $245.0 (2,479手)\n  - 看涨 call sweep $250.0 (3,006手)\n  - 看涨 call sweep $250.0 (1,824手)\n\n### MSFT\n- 做多气氛浓厚（P/C低） | 检测到 65 个看涨异动 | TermStr:flat(0/0) | MaxPain:$320(-100.0%) | $0.0 | 无相关预测市场 | 历史5条:多5/空0,均分6.9|历史T+7准确率65%(48次,均收益+1.20%)\n- IV Rank：35.43\n- Put/Call Ratio：0.33\n- Gamma Exposure：0.0\n- 异常活动：87 个信号\n  - 看涨 call sweep $400.0 (4,535手)\n  - 看涨 call sweep $382.5 (1,586手)\n  - 看涨 call sweep $382.5 (1,431手)\n\n### CRCL\n- 做多气氛浓厚（P/C低） | 检测到 21 个看涨异动 | TermStr:flat(0/0) | MaxPain:$295(-100.0%) | 异常流:异常Call流 54个信号 溢价$4.8M | $0.0 | 无相关预测市场 | 历史5条:多5/空0,均分6.0|历史T+7准确率49%(39次,均收益+0.10%)\n- IV Rank：0\n- Put/Call Ratio：0.25\n- Gamma Exposure：0.0\n- 异常活动：36 个信号\n  - 看跌 put sweep $140.0 (1,000手)\n  - 看涨 call sweep $100.0 (7,670手)\n  - 看涨 call sweep $110.0 (6,247手)\n\n### RKLB\n- 做多气氛浓厚（P/C低） | 检测到 22 个看涨异动 | TermStr:flat(0/0) | Skew25d:1.14 | MaxPain:$35(+212.1%) | 异常流:异常Call流 78个信号 溢价$25.8M | $109.2 | 无相关预测市场 | 历史5条:多5/空0,均分6.0|历史T+7准确率63%(43次,均收益+3.92%)\n- IV Rank：0\n- Put/Call Ratio：0.0\n- Gamma Exposure：0.0052\n- 异常活动：47 个信号\n  - 看跌 put sweep $110.0 (4,747手)\n  - 看涨 call sweep $125.0 (1,614手)\n  - 看涨 call sweep $110.0 (850手)\n\n### META\n- 做多气氛浓厚（P/C低） | 检测到 23 个看涨异动 | TermStr:flat(0/0) | 异常流:异常Call流 58个信号 溢价$26.7M | $593.5 | 无相关预测市场 | 历史5条:多5/空0,均分6.6|历史T+7准确率54%(41次,均收益-0.05%) | Skew 1.66(bearish（机构恐慌对冲）)\n- IV Rank：8.74\n- Put/Call Ratio：0.29\n- Gamma Exposure：0.0\n- 异常活动：30 个信号\n  - 看涨 call sweep $572.5 (601手)\n  - 看涨 call sweep $572.5 (582手)\n  - 看涨 call sweep $575.0 (461手)\n\n### QCOM\n- 检测到 23 个看涨异动 | TermStr:flat(0/0) | MaxPain:$65(-100.0%) | 异常流:混合期权流 Call:49 Put:40 | $0.0 | 无相关预测市场 | 历史5条:多5/空0,均分6.4|历史T+7准确率59%(39次,均收益+6.23%)\n- IV Rank：7.93\n- Put/Call Ratio：0.85\n- Gamma Exposure：0.0\n- 异常活动：33 个信号\n  - 看涨 call sweep $220.0 (1,442手)\n  - 看涨 call sweep $225.0 (1,299手)\n  - 看涨 call sweep $250.0 (1,352手)\n\n### TSLA\n- 检测到 43 个看涨异动 | TermStr:flat(0/0) | MaxPain:$250(-100.0%) | 异常流:混合期权流 Call:212 Put:165 | $0.0 | 无相关预测市场 | 历史5条:多5/空0,均分6.4|历史T+7准确率60%(42次,均收益+2.98%)\n- IV Rank：0\n- Put/Call Ratio：1.37\n- Gamma Exposure：0.0\n- 异常活动：70 个信号\n  - 看涨 call sweep $410.0 (2,069手)\n  - 看涨 call sweep $400.0 (1,642手)\n  - 看涨 call sweep $420.0 (1,344手)\n\n### BILI\n- 做多气氛浓厚（P/C低） | 检测到 3 个看涨异动 | TermStr:flat(3/2) | Skew25d:1.07 | MaxPain:$36(-50.4%) | 异常流:混合期权流 Call:3 Put:2 | $17.9 | 无相关预测市场 | 历史5条:多5/空0,均分6.5|历史T+7准确率54%(48次,均收益-3.35%)\n- IV Rank：0.66\n- Put/Call Ratio：0.54\n- Gamma Exposure：0.4255\n- 异常活动：3 个信号\n  - 看涨 large call volume $140.0 (8,500手)\n  - 看涨 large call volume $145.0 (12,000手)\n  - 看涨 large call volume $150.0 (6,200手)\n\n### NVDA\n- 做多气氛浓厚（P/C低） | 检测到 79 个看涨异动 | TermStr:flat(0/0) | $0.0 | 无相关预测市场 | 历史5条:多5/空0,均分6.2|历史T+7准确率60%(42次,均收益+2.49%)\n- IV Rank：6.38\n- Put/Call Ratio：0.63\n- Gamma Exposure：0.0\n- 异常活动：153 个信号\n  - 看涨 call sweep $215.0 (18,905手)\n  - 看涨 call sweep $220.0 (21,043手)\n  - 看涨 call sweep $210.0 (7,213手)\n\n## 4) X 情绪汇总\n\n### AMZN\n- 情绪 56% | 动量 +0.0% | 量比 1.0x | Reddit #19(rising,49提及) | 无新闻数据 | 未上 Yahoo 热搜 | F&G 41(Fear) | 历史5条:多5/空0,均分5.6|历史T+7准确率71%(41次,均收益+2.38%)\n- 看多情绪：56%\n- 5 日动量：+0.0%\n- 量比：1.0x\n\n### MSFT\n- 情绪 59% | 动量 +0.0% | 量比 1.0x | Reddit #4(hot,250提及) | 无新闻数据 | 未上 Yahoo 热搜 | F&G 41(Fear) | 历史5条:多5/空0,均分6.9|历史T+7准确率65%(48次,均收益+1.20%)\n- 看多情绪：59%\n- 5 日动量：+0.0%\n- 量比：1.0x\n\n### CRCL\n- 情绪 47% | 动量 +0.0% | 量比 1.0x | Reddit 无热度 | 无新闻数据 | 未上 Yahoo 热搜 | F&G 41(Fear) | 历史5条:多5/空0,均分6.0|历史T+7准确率49%(39次,均收益+0.10%)\n- 看多情绪：47%\n- 5 日动量：+0.0%\n- 量比：1.0x\n\n### RKLB\n- 情绪 54% | 动量 +0.9% | 量比 1.0x | Reddit #14(rising,80提及) | 无新闻数据 | 未上 Yahoo 热搜 | F&G 41(Fear) | 情绪动量:declining | 历史5条:多5/空0,均分6.0|历史T+7准确率63%(43次,均收益+3.92%)\n- 看多情绪：54%\n- 5 日动量：+0.9%\n- 量比：1.0x\n\n### META\n- 情绪 58% | 动量 +1.6% | 量比 1.0x | Reddit #15(rising,70提及) | 无新闻数据 | 未上 Yahoo 热搜 | F&G 41(Fear) | 历史5条:多5/空0,均分6.6|历史T+7准确率54%(41次,均收益-0.05%)\n- 看多情绪：58%\n- 5 日动量：+1.6%\n- 量比：1.0x\n\n### QCOM\n- 情绪 50% | 动量 +0.0% | 量比 1.0x | Reddit 无热度 | 无新闻数据 | 未上 Yahoo 热搜 | F&G 41(Fear) | 情绪动量:declining | 历史5条:多5/空0,均分6.4|历史T+7准确率59%(39次,均收益+6.23%)\n- 看多情绪：50%\n- 5 日动量：+0.0%\n- 量比：1.0x\n\n### TSLA\n- 情绪 55% | 动量 +0.0% | 量比 1.0x | Reddit #6(rising,149提及) | 无新闻数据 | 未上 Yahoo 热搜 | F&G 41(Fear) | 历史5条:多5/空0,均分6.4|历史T+7准确率60%(42次,均收益+2.98%)\n- 看多情绪：55%\n- 5 日动量：+0.0%\n- 量比：1.0x\n\n### BILI\n- 情绪 45% | 动量 +1.4% | 量比 0.4x | Reddit 无热度 | 无新闻数据 | 未上 Yahoo 热搜 | F&G 41(Fear) | 历史5条:多5/空0,均分6.5|历史T+7准确率54%(48次,均收益-3.35%)\n- 看多情绪：45%\n- 5 日动量：+1.4%\n- 量比：0.4x\n\n### NVDA\n- 情绪 58% | 动量 +0.0% | 量比 1.0x | Reddit #7(rising,147提及) | 无新闻数据 | 未上 Yahoo 热搜 | F&G 41(Fear) | 历史5条:多5/空0,均分6.2|历史T+7准确率60%(42次,均收益+2.49%)\n- 看多情绪：58%\n- 5 日动量：+0.0%\n- 量比：1.0x\n\n## 5) 财报/事件催化剂\n\n### AMZN\n- 催化剂 1 个 | 最近：财报发布（44天后） | 历史5条:多5/空0,均分5.6|历史T+7准确率71%(41次,均收益+2.38%) | 历史漂移中性 | PEAD 数据不足\n  - 2026-07-31：财报发布\n\n### MSFT\n- 催化剂 3 个 | 最近：财报发布（43天后） | 分析师目标$561.39(↑40.4%) | 历史5条:多5/空0,均分6.9|历史T+7准确率65%(48次,均收益+1.20%) | 历史漂移中性 | PEAD 数据不足\n  - 2026-07-30：财报发布\n  - 2026-08-20：Ex-Dividend Date\n  - 2026-09-10：Dividend Date\n\n### CRCL\n- 催化剂 3 个 | 最近：US Stablecoin Regulation Update（13天后） | 分析师目标$143.48(↑72.1%) | 历史5条:多5/空0,均分6.0|历史T+7准确率49%(39次,均收益+0.10%) | 历史漂移中性 | PEAD 数据不足\n  - 2026-06-30：US Stablecoin Regulation Update\n  - 2026-08-11：财报发布\n  - 2026-10-01：IPO Lock-up Expiration\n\n### RKLB\n- 催化剂 2 个 | 最近：Neutron First Launch Window（13天后） | 分析师目标$107.03(↓2.0%) | 历史5条:多5/空0,均分6.0|历史T+7准确率63%(43次,均收益+3.92%) | 历史漂移中性 | PEAD 数据不足\n  - 2026-06-30：Neutron First Launch Window\n  - 2026-08-07：财报发布\n\n### META\n- 催化剂 2 个 | 最近：Dividend Date（8天后） | 历史5条:多5/空0,均分6.6|历史T+7准确率54%(41次,均收益-0.05%) | 历史漂移中性 | PEAD 数据不足\n  - 2026-06-25：Dividend Date\n  - 2026-07-30：财报发布\n\n### QCOM\n- 催化剂 2 个 | 最近：Dividend Date（8天后） | 分析师目标$182.74(↓17.2%) | 历史5条:多5/空0,均分6.4|历史T+7准确率59%(39次,均收益+6.23%) | 历史漂移中性 | PEAD 数据不足\n  - 2026-06-25：Dividend Date\n  - 2026-07-30：财报发布\n\n### TSLA\n- 催化剂 1 个 | 最近：财报发布（36天后） | 分析师目标$420.55(↑2.3%) | 历史5条:多5/空0,均分6.4|历史T+7准确率60%(42次,均收益+2.98%) | 历史漂移中性 | PEAD 数据不足\n  - 2026-07-23：财报发布\n\n### BILI\n- 无近期催化剂 | 历史5条:多5/空0,均分6.5|历史T+7准确率54%(48次,均收益-3.35%) | 历史漂移中性 | PEAD 数据不足\n\n### NVDA\n- 催化剂 2 个 | 最近：Dividend Date（9天后） | 分析师目标$298.93(↑40.7%) | 历史5条:多5/空0,均分6.2|历史T+7准确率60%(42次,均收益+2.49%) | 历史漂移中性 | PEAD 数据不足\n  - 2026-06-26：Dividend Date\n  - 2026-08-27：财报发布\n\n## 6) 竞争格局分析\n\n### AMZN\n- ML 胜率 58% | 7d +8.00% | 30d +12.00% | RSI:27 | MACD:空 | BB:50% | 目标价上行 +27.0%（分析师看多） | 分析师共识1.3/5（强烈看多） | 远期EPS增速 +26.9%（盈利高增长） | 历史5条:多5/空0,均分5.6|历史T+7准确率71%(41次,均收益+2.38%)\n\n### MSFT\n- ML 胜率 58% | 7d +8.00% | 30d +12.00% | RSI:39 | MACD:空 | BB:50% | 目标价上行 +40.4%（分析师看多） | 分析师共识1.3/5（强烈看多） | 历史5条:多5/空0,均分6.9|历史T+7准确率65%(48次,均收益+1.20%)\n\n### CRCL\n- ML 胜率 58% | 7d +8.00% | 30d +12.00% | RSI:24 | MACD:空 | BB:50% | 目标价上行 +72.1%（分析师看多） | 分析师共识2.2/5（偏多） | 远期EPS增速 -1068.2%（盈利下修预警） | 历史5条:多5/空0,均分6.0|历史T+7准确率49%(39次,均收益+0.10%)\n\n### RKLB\n- ML 胜率 57% | 7d +8.75% | 30d +13.13% | RSI:33 | MACD:空 | BB:25% | 分析师共识1.5/5（强烈看多） | 远期EPS增速 -97.7%（盈利下修预警） | 历史5条:多5/空0,均分6.0|历史T+7准确率63%(43次,均收益+3.92%)\n\n### META\n- ML 胜率 57% | 7d +9.29% | 30d +13.94% | RSI:45 | MACD:空 | BB:39% | 目标价上行 +39.4%（分析师看多） | 分析师共识1.3/5（强烈看多） | 远期EPS增速 +31.9%（盈利高增长） | 历史5条:多5/空0,均分6.6|历史T+7准确率54%(41次,均收益-0.05%)\n\n### QCOM\n- ML 胜率 58% | 7d +8.00% | 30d +12.00% | RSI:42 | MACD:空 | BB:50% | 目标价低于现价 -17.2%（分析师下调） | 历史5条:多5/空0,均分6.4|历史T+7准确率59%(39次,均收益+6.23%)\n\n### TSLA\n- ML 胜率 58% | 7d +8.00% | 30d +12.00% | RSI:44 | MACD:空 | BB:50% | 分析师共识2.3/5（偏多） | 远期EPS增速 +125.2%（盈利高增长） | 历史5条:多5/空0,均分6.4|历史T+7准确率60%(42次,均收益+2.98%)\n\n### BILI\n- ML 胜率 57% | 7d +9.09% | 30d +13.64% | RSI:51 | MACD:多 | BB:44% | 历史5条:多5/空0,均分6.5|历史T+7准确率54%(48次,均收益-3.35%)\n\n### NVDA\n- ML 胜率 58% | 7d +8.00% | 30d +12.00% | RSI:42 | MACD:空 | BB:50% | 目标价上行 +40.7%（分析师看多） | 分析师共识1.3/5（强烈看多） | 远期EPS增速 +88.3%（盈利高增长） | 历史5条:多5/空0,均分6.2|历史T+7准确率60%(42次,均收益+2.49%)\n\n## 6.5) 看空对冲观点\n\n> BearBeeContrarian 专门寻找看空信号，平衡蜂群系统性看多偏差\n\n### AMZN (**看空警告** | 看空强度 8.0/10)\n- 内幕大额抛售 $15,397,179（买入仅 $0）\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz | catalyst=real | ml=real | guard=real | short_interest=不可用\n\n### MSFT (暂无看空信号 | 看空强度 2.0/10)\n- 未发现显著看空信号 | 历史5条:多5/空0,均分6.9|历史T+7准确率65%(48次,均收益+1.20%)\n- *数据来源*：insider=SEC直查 | valuation=yfinance | options=real | momentum=yfinance | news=Finviz | catalyst=real | ml=real | guard=real\n\n### CRCL (**看空警告** | 看空强度 8.0/10)\n- 内幕大额抛售 $10,206,890（买入仅 $0）\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz | catalyst=real | ml=real | guard=real | short_interest=yfinance\n\n### RKLB (**看空警告** | 看空强度 7.8/10)\n- 内幕大额抛售 $4,944,000（买入仅 $0）\n- IV Skew 1.20（看跌期权溢价偏高）\n- 高波动率 109%（年化）\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz | catalyst=real | ml=real | guard=real | short_interest=yfinance\n\n### META (**看空警告** | 看空强度 7.8/10)\n- 内幕大额抛售 $3,400,489（买入仅 $0）\n- IV Skew 1.66（看跌期权溢价偏高）\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz | catalyst=real | ml=real | guard=real | short_interest=yfinance\n\n### QCOM (**看空警告** | 看空强度 7.9/10)\n- 内幕大额抛售 $4,840,387（买入仅 $0）\n- 分析师目标价下方 17%\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz | catalyst=real | ml=real | guard=real | short_interest=不可用\n\n### TSLA (**看空警告** | 看空强度 7.6/10)\n- 内幕大额抛售 $12,383,314（买入仅 $0）\n- P/C Ratio 1.37（偏看跌）\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz | catalyst=real | ml=real | guard=real | short_interest=yfinance\n\n### BILI (**看空警告** | 看空强度 5.5/10)\n- 量能萎缩 0.4x（参与度下降）\n- 高波动率 53%（年化）\n- *数据来源*：insider=SEC直查 | valuation=yfinance | options=real | momentum=yfinance | news=Finviz | catalyst=real | ml=real | guard=real | short_interest=yfinance\n\n### NVDA (**看空警告** | 看空强度 8.0/10)\n- 内幕大额抛售 $263,082,737（买入仅 $0）\n- *数据来源*：insider=real | valuation=yfinance | options=real | momentum=yfinance | news=Finviz | catalyst=real | ml=real | guard=real | short_interest=不可用\n\n## 7) 综合判断 & 信号强度\n\n| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |\n|------|------|--------|------|---------------|-------|---------|\n| **AMZN** | NEUTRAL | 5.9 | N | 4/1/3 | 93% | 信号分散 |\n| **MSFT** | BULLISH | 5.8 | Y | 5/0/3 | 95% | 信号分散 |\n| **CRCL** | NEUTRAL | 5.7 | N | 4/1/3 | 95% | 信号分散 |\n| **RKLB** | NEUTRAL | 5.5 | N | 4/1/3 | 95% | 信号分散 |\n| **META** | NEUTRAL | 5.5 | N | 4/1/3 | 95% | 信号分散 |\n| **QCOM** | NEUTRAL | 5.4 | N | 4/1/3 | 94% | 信号分散 |\n| **TSLA** | NEUTRAL | 5.3 | N | 4/1/3 | 95% | 信号分散 |\n| **BILI** | NEUTRAL | 5.0 | N | 4/1/3 | 93% | 信号分散 |\n| **NVDA** | BULLISH | 5.0 | N | 4/2/2 | 95% | 信号分散 |\n\n### 评分调整说明\n\n- **NVDA**：🛡️ 风控折扣-0.12\n\n### 交叉验证详情\n\n- **AMZN**：信号分散 | 均分 6.3 | 一致性 40% | 风险调整 1.20 | 历史5条:多5/空0,均分5.6|历史T+7准确率71%(41次,均收益+2.38%) | Macro:neutral(FOMC 1天后; 板块顺风) | Regime:风险偏好 | 周期:opex_pin | ⚠️ Opex周(Charm/Vanna压力)\n- **MSFT**：信号分散 | 均分 5.8 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.9|历史T+7准确率65%(48次,均收益+1.20%) | Macro:neutral(FOMC 1天后; 板块顺风) | Regime:风险偏好 | 周期:opex_pin | ⚠️ Opex周(Charm/Vanna压力)\n- **CRCL**：信号分散 | 均分 6.3 | 一致性 40% | 风险调整 1.20 | 历史5条:多5/空0,均分6.0|历史T+7准确率49%(39次,均收益+0.10%) | Macro:neutral(FOMC 1天后) | Regime:风险偏好 | 周期:opex_pin | ⚠️ Opex周(Charm/Vanna压力)\n- **RKLB**：信号分散 | 均分 6.2 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.0|历史T+7准确率63%(43次,均收益+3.92%) | Macro:neutral(FOMC 1天后) | Regime:风险偏好 | 周期:opex_pin | ⚠️ Opex周(Charm/Vanna压力)\n- **META**：信号分散 | 均分 6.0 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.6|历史T+7准确率54%(41次,均收益-0.05%) | Macro:neutral(FOMC 1天后; 板块顺风) | 周期:opex_pin | ⚠️ Opex周(Charm/Vanna压力)\n- **QCOM**：信号分散 | 均分 5.8 | 一致性 40% | 风险调整 1.20 | 历史5条:多5/空0,均分6.4|历史T+7准确率59%(39次,均收益+6.23%) | Macro:neutral(FOMC 1天后; 板块顺风) | Regime:风险偏好 | 周期:opex_pin | ⚠️ Opex周(Charm/Vanna压力)\n- **TSLA**：信号分散 | 均分 5.7 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.4|历史T+7准确率60%(42次,均收益+2.98%) | Macro:neutral(FOMC 1天后) | 周期:opex_pin | ⚠️ Opex周(Charm/Vanna压力)\n- **BILI**：信号分散 | 均分 5.4 | 一致性 40% | 风险调整 1.20 | 历史5条:多5/空0,均分6.5|历史T+7准确率54%(48次,均收益-3.35%) | Macro:neutral(FOMC 1天后; 板块顺风) | Regime:风险偏好 | 周期:opex_pin | ⚠️ Opex周(Charm/Vanna压力)\n- **NVDA**：信号分散 | 均分 5.5 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.2|历史T+7准确率60%(42次,均收益+2.49%) | Macro:neutral(FOMC 1天后; 板块顺风) | ⚠️ Regime:风险规避 | 周期:opex_pin | ⚠️ Opex周(Charm/Vanna压力)\n\n## 🌐 宏观环境 🟡\n\n**宏观政体**：NEUTRAL | **评分**：5.8/10\n\n| 指标 | 数值 | 状态 |\n|------|------|------|\n| VIX | 16.1 | moderate |\n| 10Y利率 | 4.49% | moderate |\n| 大盘(5日) | +nan% | neutral |\n| 美元 | — | neutral |\n\n**逆风**：CPI同比 4.2%（通胀偏高，加息压力仍存）\n\n**顺风**：VIX 16.1（低波动，风险偏好良好） | HY信用利差 271bp(-7bp日变)（信用市场平稳，风险偏好良好）\n\n## 📈 历史预测准确率（T+7，近30天）\n\n**样本**：82 条 | **准确率**：42.7% (35/82) | **平均收益**：-0.22%\n\n| 标的 | 方向准确率 | 预测次数 | 平均收益 |\n|------|-----------|---------|---------|\n| VKTX | 50% | 8 | +1.51% |\n| TSLA | 62% | 8 | +1.93% |\n| QCOM | 38% | 8 | +2.18% |\n| NVDA | 12% | 8 | -3.85% |\n| MSFT | 50% | 8 | +2.89% |\n| RKLB | 29% | 7 | -5.71% |\n\n**按方向**：看多:44%(39次) | 看空:36%(11次) | 中性:44%(32次)\n\n## 8) 数据来源 & 免责声明\n\n**蜂群分工**：\n- ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）\n- OracleBeeEcho：市场预期（期权 IV/P-C Ratio/Gamma）\n- BuzzBeeWhisper：社交情绪（X/Reddit/Finviz）\n- ChronosBeeHorizon：催化剂追踪（财报/事件日历）\n- RivalBeeVanguard：竞争格局（ML 预测 + 行业对标）\n- GuardBeeSentinel：交叉验证（共振检测 + 风险调整）\n\n**免责声明**：\n本报告为蜂群 AI 分析，不构成投资建议，不替代持牌投顾。预测存在误差，所有交易决策需自行判断和风控。\n",
+  "twitter_threads": [
+    "【Alpha Hive 蜂群日报 2026-06-15】7 个自治工蜂协作分析，多数投票共振信号。非投资建议，仅数据分析与情景推演。👇\n\n1. **AMZN** NEUTRAL\n蜂群评分：5.9/10 | 共振：❌\nAgent 投票：看多4 vs 看空1\n\n2. **MSFT** BULLISH\n蜂群评分：5.8/10 | 共振：✅\nAgent 投票：看多5 vs 看空0\n\n3. **CRCL** NEUTRAL\n蜂群评分：5.7/10 | 共振：❌\nAgent 投票：看多4 vs 看空1\n\n🐝 7 个工蜂独立分析（6 核心 + 看空对冲蜂）→ 信息素板实时交换 → 多数投票汇总\n高共振信号优先级最高。风险提示：控制仓位。\n下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
+  ],
+  "opportunities": [
+    {
+      "rank": 1,
+      "ticker": "AMZN",
+      "direction": "中性",
+      "opp_score": 5.9,
+      "confidence": "73%",
+      "resonance": false,
+      "supporting_agents": 8,
+      "thesis_break": "信号分散 | 均分 6.3 | 一致性 40% | 风险调整 1.20 | 历史5条:多5/空0,均分5.6|历史T+7准确率71%(41次,均收益+2.38%",
+      "thesis_break_l1": [
+        "AWS 收入增速：季度 YoY 增速低于 15%",
+        "北美零售利润率：营业利润率 QoQ 下降 > 150bps",
+        "FTC 反垄断：法院要求拆分零售或云业务"
+      ],
+      "thesis_break_l2": [
+        "AWS 主要客户流失：前 10 大客户中超 3 家迁移至 Azure/GCP",
+        "综合 EPS 大幅低于预期：实际 EPS < 预期 20%+"
+      ]
+    },
+    {
+      "rank": 2,
+      "ticker": "MSFT",
+      "direction": "看多",
+      "opp_score": 5.8,
+      "confidence": "78%",
+      "resonance": true,
+      "supporting_agents": 8,
+      "thesis_break": "信号分散 | 均分 5.8 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.9|历史T+7准确率65%(48次,均收益+1.20%",
+      "thesis_break_l1": [
+        "Azure 收入增速：季度 YoY 增速低于 20%",
+        "Copilot 商业化进展：付费席位季度净增 < 5%",
+        "反垄断监管：EU/DOJ 提起重大诉讼或强制拆分令"
+      ],
+      "thesis_break_l2": [
+        "云市场份额：Azure 份额季度环比下降 > 2pp",
+        "EPS 大幅低于预期：实际 < 预期 15%+"
+      ]
+    },
+    {
+      "rank": 3,
+      "ticker": "CRCL",
+      "direction": "中性",
+      "opp_score": 5.7,
+      "confidence": "75%",
+      "resonance": false,
+      "supporting_agents": 8,
+      "thesis_break": "信号分散 | 均分 6.3 | 一致性 40% | 风险调整 1.20 | 历史5条:多5/空0,均分6.0|历史T+7准确率49%(39次,均收益+0.10%",
+      "thesis_break_l1": [
+        "USDC 市场份额：USDC 全球稳定币市场份额 < 20%",
+        "稳定币监管：美国国会通过限制商业稳定币运营的法案",
+        "收入集中度：利率收入占总收入比例 > 80% 且利率开始下行"
+      ],
+      "thesis_break_l2": [
+        "USDC 脱钩事件：USDC 价格跌破 $0.97 超过 24 小时",
+        "央行数字货币竞争：美联储正式发行 CBDC（数字美元）"
+      ]
+    },
+    {
+      "rank": 4,
+      "ticker": "RKLB",
+      "direction": "中性",
+      "opp_score": 5.5,
+      "confidence": "76%",
+      "resonance": false,
+      "supporting_agents": 8,
+      "thesis_break": "信号分散 | 均分 6.2 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.0|历史T+7准确率63%(43次,均收益+3.92%",
+      "thesis_break_l1": [
+        "发射失败：Electron 连续 2 次发射失败",
+        "Neutron 火箭进度：Neutron 首飞推迟超 12 个月",
+        "发射订单积压：季度新签合同价值低于 $50M"
+      ],
+      "thesis_break_l2": [
+        "SpaceX 竞争：SpaceX 开始提供类似 Electron 的小卫星专属发射服务并低价 20%+",
+        "现金耗尽：现金储备 < 6 个月运营，且融资无望"
+      ]
+    },
+    {
+      "rank": 5,
+      "ticker": "META",
+      "direction": "中性",
+      "opp_score": 5.5,
+      "confidence": "75%",
+      "resonance": false,
+      "supporting_agents": 8,
+      "thesis_break": "信号分散 | 均分 6.0 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.6|历史T+7准确率54%(41次,均收益-0.05%",
+      "thesis_break_l1": [
+        "日活跃用户增速：全球 DAU 季度 QoQ 增速 < 1%",
+        "广告收入增速：广告收入 YoY 增速 < 10%",
+        "监管/隐私风险：EU/FTC 裁定重大罚款（> $5B）或强制拆分"
+      ],
+      "thesis_break_l2": [
+        "Reality Labs 亏损：单季亏损超 $6B 且无改善路径",
+        "TikTok 解禁：TikTok 在美恢复全面运营"
+      ]
+    },
+    {
+      "rank": 6,
+      "ticker": "QCOM",
+      "direction": "中性",
+      "opp_score": 5.4,
+      "confidence": "74%",
+      "resonance": false,
+      "supporting_agents": 8,
+      "thesis_break": "信号分散 | 均分 5.8 | 一致性 40% | 风险调整 1.20 | 历史5条:多5/空0,均分6.4|历史T+7准确率59%(39次,均收益+6.23%",
+      "thesis_break_l1": [
+        "Apple 自研基带：Apple 正式宣布将自研基带用于旗舰 iPhone",
+        "手机芯片出货量：全球智能手机出货量 YoY 下滑 > 8%",
+        "ARM 授权纠纷：ARM 终止或限制 QCOM 授权"
+      ],
+      "thesis_break_l2": [
+        "Apple 完成基带替换：iPhone 正式搭载 Apple 自研基带",
+        "中国业务受限：中国监管禁止采购 QCOM 芯片"
+      ]
+    },
+    {
+      "rank": 7,
+      "ticker": "TSLA",
+      "direction": "中性",
+      "opp_score": 5.3,
+      "confidence": "75%",
+      "resonance": false,
+      "supporting_agents": 8,
+      "thesis_break": "信号分散 | 均分 5.7 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.4|历史T+7准确率60%(42次,均收益+2.98%",
+      "thesis_break_l1": [
+        "季度交付量：同比下降 > 5%",
+        "Gross Margin：环比下降 > 200bps"
+      ],
+      "thesis_break_l2": [
+        "Elon Musk 离职：CEO 卸任或重大丑闻",
+        "财报收入：实际 < 预期 15%+"
+      ]
+    },
+    {
+      "rank": 8,
+      "ticker": "BILI",
+      "direction": "中性",
+      "opp_score": 5.0,
+      "confidence": "59%",
+      "resonance": false,
+      "supporting_agents": 8,
+      "thesis_break": "信号分散 | 均分 5.4 | 一致性 40% | 风险调整 1.20 | 历史5条:多5/空0,均分6.5|历史T+7准确率54%(48次,均收益-3.35%",
+      "thesis_break_l1": [
+        "月活跃用户：季度 MAU 同比下滑 > 3%",
+        "商业化能力：ARPU 季度同比下降 > 10%",
+        "内容监管：监管要求下架核心内容分类或限制直播"
+      ],
+      "thesis_break_l2": [
+        "退市风险：SEC 或纳斯达克发出退市警告",
+        "现金消耗：自由现金流连续 3 季度为负且无明确改善路径"
+      ]
+    },
+    {
+      "rank": 9,
+      "ticker": "NVDA",
+      "direction": "看多",
+      "opp_score": 5.0,
+      "confidence": "77%",
+      "resonance": false,
+      "supporting_agents": 8,
+      "thesis_break": "信号分散 | 均分 5.5 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.2|历史T+7准确率60%(42次,均收益+2.49%",
+      "thesis_break_l1": [
+        "DataCenter Revenue Growth：季度环比下降 > 5%",
+        "竞争对手新产品：AMD 或 Intel 发布超越 NVIDIA 的产品",
+        "中国芯片禁令：Polymarket 禁令概率 > 60%",
+        "毛利率：季度环比下降 > 200bps"
+      ],
+      "thesis_break_l2": [
+        "EPS 大幅低于预期：实际 < 预期 20%+",
+        "美国芯片出口禁令：直接禁止对华 H100/H800 销售",
+        "CEO 离职：Jensen Huang 宣布离职"
+      ]
+    }
+  ]
+}
