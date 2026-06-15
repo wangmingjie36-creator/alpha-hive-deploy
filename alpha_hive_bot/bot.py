@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -50,10 +51,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     status = db.activate_if_whitelisted(user.id, chat.id, user.username)
     if status in ("active", "already_active"):
-        await update.message.reply_text(WELCOME_ACTIVE, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(WELCOME_ACTIVE, parse_mode=ParseMode.HTML)
     elif status == "not_invited":
-        msg = WELCOME_NEW + f"\n\n你的 user_id 是 `{user.id}`（请发给管理员申请白名单）"
-        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+        msg = WELCOME_NEW + f"\n\n你的 user_id 是 <code>{user.id}</code>（请发给管理员申请白名单）"
+        await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
     elif status == "revoked":
         await update.message.reply_text("❌ 你的访问已被管理员撤销。")
     elif status == "unsubscribed":
@@ -75,7 +76,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "revoked": "❌ 访问已撤销",
         "not_registered": "❌ 未注册（请联系管理员）",
     }.get(st, st)
-    await update.message.reply_text(f"你的订阅状态：{label}\n\nuser_id: `{user.id}`", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"你的订阅状态：{label}\n\nuser_id: <code>{user.id}</code>", parse_mode=ParseMode.HTML)
 
 
 async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -91,7 +92,7 @@ async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(HELP, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(HELP, parse_mode=ParseMode.HTML)
 
 
 # ── 管理员命令 ─────────────────────────────────────────
@@ -152,11 +153,11 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     lines = ["订阅者列表："]
     for r in rows[:50]:
-        un = f"@{r['username']}" if r["username"] else "—"
-        lines.append(f"`{r['user_id']}` {un} · {r['status']} · {r['updated_at']}")
+        un = _html.escape(f"@{r['username']}") if r["username"] else "—"
+        lines.append(f"<code>{r['user_id']}</code> {un} · {r['status']} · {r['updated_at']}")
     if len(rows) > 50:
         lines.append(f"... 共 {len(rows)} 条，仅显示前 50")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 async def cmd_push_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):

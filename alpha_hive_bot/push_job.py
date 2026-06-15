@@ -52,20 +52,36 @@ async def fetch_daily_md(report_base_url: str, date: str, retries: int = 3) -> O
 
 
 def format_for_telegram(md: str, date: str) -> str:
-    """将完整 Markdown 简报截短到 Telegram 单消息上限内 + 加头部和免责声明。"""
-    head = f"🐝 *Alpha Hive 每日简报* — {date}\n\n"
-    foot = f"\n\n{DISCLAIMER}\n\n📊 完整 dashboard: https://wangmingjie36-creator.github.io/alpha-hive-deploy"
+    """将完整 Markdown 简报转为 Telegram HTML，截短到单消息上限 + 头部/免责声明。
 
-    budget = MAX_MESSAGE_CHARS - len(head) - len(foot)
-    body = md.strip()
+    用 HTML parse mode（而非已废弃的 legacy Markdown）：先按字符预算截断，
+    再 html.escape 整个 body（杜绝任意 < > & 以及 _ * 触发的解析崩溃——
+    legacy Markdown 下 ticker/数字里的单个 _ * 会导致 BadRequest 不发送），
+    最后在已转义文本上做几处安全的 markdown→HTML 美化（无注入风险）。
+    """
+    import html as _html
 
-    # Telegram MarkdownV2 不完全兼容 GFM，简化为 Markdown legacy (V1)
-    # 主要差异：V1 用 *bold* 和 _italic_，不需要转义 .!()
-    # 仍需要清理代码块标记和特殊字符
-    body = re.sub(r"```[a-zA-Z]*\n", "```\n", body)  # 标准化代码块语言标记
+    head = f"🐝 <b>Alpha Hive 每日简报</b> — {_html.escape(date)}\n\n"
+    foot = (
+        f"\n\n{DISCLAIMER}\n\n"
+        "📊 完整 dashboard: https://wangmingjie36-creator.github.io/alpha-hive-deploy"
+    )
 
+    # 保守预算（HTML 转义会膨胀长度，预留 buffer 确保最终 < 4096）
+    budget = 3000
+    body = md.strip().replace("```", "")  # 去代码围栏标记
+
+    truncated = False
     if len(body) > budget:
-        body = body[:budget].rsplit("\n", 1)[0] + "\n\n_... (内容已截断，看完整版请访问 dashboard)_"
+        body = body[:budget].rsplit("\n", 1)[0]
+        truncated = True
+
+    body = _html.escape(body)  # 杜绝解析崩溃（核心防御）
+    # 安全美化（在已转义文本上正则，内部无 < > &，不会注入）
+    body = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", body)   # 标题行加粗
+    body = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", body)          # **粗体** → <b>
+    if truncated:
+        body += "\n\n… (内容已截断，完整版见 dashboard)"
 
     return head + body + foot
 
@@ -92,7 +108,7 @@ async def push_to_all(
             await bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.HTML,
                 disable_web_page_preview=False,
             )
             sent += 1
@@ -100,7 +116,7 @@ async def push_to_all(
             log.warning("rate limit, 等 %ds", e.retry_after)
             await asyncio.sleep(e.retry_after)
             try:
-                await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+                await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
                 sent += 1
             except TelegramError as e2:
                 log.error("重试后仍失败 chat=%d: %s", chat_id, e2)

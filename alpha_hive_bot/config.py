@@ -63,14 +63,18 @@ class BotConfig:
 # 文案（合规免责声明硬性要求）
 # ============================================================
 
+# 注意：所有文案使用 HTML parse mode（ParseMode.HTML）。
+# 仅 < > & 需转义；下划线/星号在 HTML 模式下是字面量，不会触发 legacy Markdown 解析崩溃。
+# （历史 bug：legacy Markdown 下 "user_id" 的单下划线被当斜体标记 → BadRequest 不回复）
+
 DISCLAIMER = (
-    "⚠️ *免责声明*：本简报由 Alpha Hive 蜂群系统自动生成，"
+    "⚠️ <b>免责声明</b>：本简报由 Alpha Hive 蜂群系统自动生成，"
     "仅供研究参考，不构成任何投资建议、买卖推荐或个性化理财服务。"
     "投资有风险，决策由用户自行判断并承担后果。"
 )
 
 WELCOME_NEW = (
-    "🐝 *欢迎使用 Alpha Hive 投研简报*\n\n"
+    "🐝 <b>欢迎使用 Alpha Hive 投研简报</b>\n\n"
     "本服务目前仅对受邀用户开放。\n"
     "如需订阅，请联系管理员申请白名单。\n\n"
     "命令：\n"
@@ -80,7 +84,7 @@ WELCOME_NEW = (
 )
 
 WELCOME_ACTIVE = (
-    "✅ *你已订阅 Alpha Hive 每日简报*\n\n"
+    "✅ <b>你已订阅 Alpha Hive 每日简报</b>\n\n"
     "每日美股盘后 PDT 13:30 自动推送（约北京时间 04:30）。\n"
     "/status — 订阅状态\n"
     "/unsubscribe — 取消订阅\n"
@@ -89,14 +93,14 @@ WELCOME_ACTIVE = (
 )
 
 HELP = (
-    "📖 *Alpha Hive Bot 命令*\n\n"
+    "📖 <b>Alpha Hive Bot 命令</b>\n\n"
     "/start — 开始\n"
     "/status — 订阅状态\n"
     "/unsubscribe — 取消订阅\n"
     "/help — 此帮助\n\n"
-    "_管理员命令_：\n"
-    "/invite <user_id> — 邀请用户加入白名单\n"
-    "/revoke <user_id> — 移除白名单\n"
+    "<b>管理员命令</b>：\n"
+    "/invite &lt;user_id&gt; — 邀请用户加入白名单\n"
+    "/revoke &lt;user_id&gt; — 移除白名单\n"
     "/list — 查看订阅者\n"
     "/push_now — 立即推送当日简报\n\n"
     f"{DISCLAIMER}"
