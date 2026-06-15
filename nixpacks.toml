@@ -1,0 +1,8 @@
+# Alpha Hive Bot — 显式 nixpacks 构建配置
+# 作用：① 改变 build plan hash → 强制 Railway fresh rebuild（绕过旧 image 缓存）
+#       ② 明确 install + start，确保整个 repo（含 alpha_hive_bot/）被 COPY 进镜像
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "python -m alpha_hive_bot.bot"

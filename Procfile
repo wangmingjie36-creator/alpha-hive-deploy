@@ -1,1 +1,1 @@
-worker: bash -c 'D=$(find / -maxdepth 5 -name alpha_hive_bot -type d 2>/dev/null | head -1); P=$(dirname "$D"); echo "[bootstrap] alpha_hive_bot=$D PYTHONPATH=$P"; exec env PYTHONPATH="$P" python -m alpha_hive_bot.bot'
+worker: python -m alpha_hive_bot.bot
