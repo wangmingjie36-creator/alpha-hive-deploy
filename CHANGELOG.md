@@ -29,6 +29,23 @@
 - 仅当目标日超出最新快照覆盖（未来尚未发生）时返回 None，留待后续快照生成后再补——此场景 yfinance 同样无数据。
 - 补 `import json`（模块此前未导入，新方法读快照需要）。
 
+## [0.29.3] — 2026-06-16 — Dashboard 价格污染修复（scout 价缺失时优先当天 Agent 价）
+
+### Fixed — `dashboard_renderer.py` `render_dashboard_html()` 价格补注
+
+- **用户报**：6-15 dashboard NVDA 显示 $145 实为 $212；排查发现 **9 标的中 6 只价格错误**（TSLA $189→$411、CRCL $114→$83 等）
+- **根因（两 bug 叠加）**：
+  1. 6-15 扫描期间 Yahoo 401 Invalid Crumb → 全标的 `ScoutBeeNova.price=None`
+  2. 旧降级链 scout 价 None → 读"最新 ML 文件"，但 6-15 无当日 ML 文件 → 回退到 3 周前 `analysis-*-2026-05-29.json` 的陈旧价（NVDA 还带着 5-24 的 `dealer_gex.stock_price=145.32` 污染值）
+  - 真实价 $212.45 明明在当天 swarm_results 的 Chronos/RivalBee/CodeExecutor `current_price` 里，dashboard 却没用
+- **修复**：
+  - ① scout 价缺失时**优先用当天 swarm_results 可靠 Agent 价**（`analyst_targets`/`eps_revision`/CodeExecutor 的 `current_price`），刻意排除 `OracleBee._snapshot_stock_price`（期权快照，污染源）
+  - ② ML 文件回退加 **7 天新鲜度护栏**，超期旧文件不当当日价
+- **验证**：修复后 9 标的价格与 `report_snapshots/{ticker}_2026-06-15.json` 权威 `entry_price` **完全一致**
+- **Ops**：重生 6-15 dashboard + 部署 gh-pages，线上 NVDA $145→$212 / TSLA $189→$411 等 6 只已纠正（bot `/scan` 同步修正，因同读 dashboard-data.json）
+
+---
+
 ## [0.29.2] — 2026-06-16 — Bot v0.2 查询命令（/scan /top /swarm /scorecard /fg）
 
 ### Added — `alpha_hive_bot/query_commands.py`（新模块）
