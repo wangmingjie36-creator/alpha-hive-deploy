@@ -1842,34 +1842,77 @@ def render_dashboard_html(report: Dict, date_str: str,
     except (OSError, json.JSONDecodeError):
         pass
 
-    # 从 analysis-{ticker}-ml-{date}.json 补注价格（当 ScoutBee price 缺失时）
+    # 从当日 Agent 价 / analysis-{ticker}-ml-{date}.json 补注价格（当 ScoutBee price 缺失时）
     import glob as _inj_glob
+    import re as _inj_re
+    from datetime import datetime as _inj_dt
+
+    def _inj_agent_price(_d):
+        """优先用当天 swarm_results 可靠 Agent 的真实股价（Chronos/RivalBee/CodeExecutor）。
+        刻意排除 OracleBee._snapshot_stock_price（期权快照价，可能被污染，如 NVDA 6-15
+        显示 $145 实为期权快照污染，真实 $212）。"""
+        _ad = (_d or {}).get("agent_details", {}) or {}
+        for _src in (
+            (_ad.get("ChronosBeeHorizon", {}).get("details", {}) or {}).get("analyst_targets", {}) or {},
+            (_ad.get("RivalBeeVanguard", {}).get("details", {}) or {}).get("eps_revision", {}) or {},
+            _ad.get("CodeExecutorAgent", {}).get("details", {}) or {},
+        ):
+            try:
+                _v = float((_src or {}).get("current_price"))
+                if _v > 0:
+                    return _v
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    try:
+        _inj_today = _inj_dt.strptime(date_str, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        _inj_today = None
+
     for _inj_t in list(swarm_detail.keys()):
         _inj_scout = (swarm_detail[_inj_t]
                       .setdefault("agent_details", {})
                       .setdefault("ScoutBeeNova", {})
                       .setdefault("details", {}))
-        if _inj_scout.get("price") is None:
-            # 按优先级：当日 ML 文件 → 最新 ML 文件（处理 current_price=None 的旧文件）
-            _inj_candidates = [
-                _Path_mod(report_dir) / f"analysis-{_inj_t}-ml-{date_str}.json",
-            ] + [
-                _Path_mod(p) for p in sorted(_inj_glob.glob(
-                    str(_Path_mod(report_dir) / f"analysis-{_inj_t}-ml-*.json")
-                ), reverse=True)  # 最新文件优先
-            ]
-            for _inj_ml in _inj_candidates:
-                try:
-                    with open(_inj_ml) as _inj_f:
-                        _inj_data = json.load(_inj_f)
-                    _inj_price = (_inj_data.get("current_price")
-                                  or _inj_data.get("combined_recommendation", {}).get("current_price")
-                                  or _inj_data.get("ml_prediction", {}).get("current_price"))
-                    if _inj_price:
-                        _inj_scout["price"] = float(_inj_price)
-                        break
-                except (OSError, json.JSONDecodeError, ValueError, TypeError):
-                    continue
+        if _inj_scout.get("price") is not None:
+            continue
+
+        # ① 优先：当日扫描的可靠 Agent 价（最权威，排除期权快照污染）
+        _ap = _inj_agent_price(swarm_detail[_inj_t])
+        if _ap is not None:
+            _inj_scout["price"] = _ap
+            continue
+
+        # ② 回退：ML 分析文件。当日文件无条件用；旧文件加 7 天新鲜度护栏
+        #    （避免把数周前的陈价当成当日价——6-15 曾回退到 5-29 的污染价 145.32）
+        _inj_today_file = _Path_mod(report_dir) / f"analysis-{_inj_t}-ml-{date_str}.json"
+        _inj_candidates = [_inj_today_file] + [
+            _Path_mod(p) for p in sorted(_inj_glob.glob(
+                str(_Path_mod(report_dir) / f"analysis-{_inj_t}-ml-*.json")
+            ), reverse=True)
+        ]
+        for _inj_ml in _inj_candidates:
+            # 新鲜度护栏：非当日文件，若距 date_str 超 7 天则跳过
+            if _inj_ml != _inj_today_file and _inj_today is not None:
+                _m = _inj_re.search(r"(\d{4}-\d{2}-\d{2})", _inj_ml.name)
+                if _m:
+                    try:
+                        if abs((_inj_today - _inj_dt.strptime(_m.group(1), "%Y-%m-%d")).days) > 7:
+                            continue
+                    except ValueError:
+                        pass
+            try:
+                with open(_inj_ml) as _inj_f:
+                    _inj_data = json.load(_inj_f)
+                _inj_price = (_inj_data.get("current_price")
+                              or _inj_data.get("combined_recommendation", {}).get("current_price")
+                              or _inj_data.get("ml_prediction", {}).get("current_price"))
+                if _inj_price:
+                    _inj_scout["price"] = float(_inj_price)
+                    break
+            except (OSError, json.JSONDecodeError, ValueError, TypeError):
+                continue
 
     # 将 opportunities 按 ticker 建立索引，并补充 swarm 详细数据
     opp_by_ticker = {o.get("ticker"): o for o in opps}
