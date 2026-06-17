@@ -212,7 +212,8 @@ class DataFetcher:
                 )
                 if not _price or _price <= 0:
                     try:
-                        _hist = stock.history(period="2d")
+                        from data_pipeline import _drop_forming_bar as _dfb
+                        _hist = _dfb(stock.history(period="5d"))  # v0.29.4 盘中护栏
                         _price = float(_hist["Close"].iloc[-1]) if not _hist.empty else 0
                     except Exception:
                         _price = 0

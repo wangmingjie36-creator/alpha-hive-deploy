@@ -474,8 +474,9 @@ def get_crowding_metrics(ticker: str, board=None) -> Dict:
     # 获取 yfinance 基础数据
     try:
         import yfinance as yf
+        from data_pipeline import _drop_forming_bar as _dfb
         t = yf.Ticker(ticker)
-        hist = t.history(period="1mo")
+        hist = _dfb(t.history(period="1mo"))  # v0.29.4 盘中护栏
         stock_data = {
             "price": float(hist["Close"].iloc[-1]) if not hist.empty else 100.0,
             "momentum_5d": (float(hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100) if len(hist) >= 5 else 0.0,

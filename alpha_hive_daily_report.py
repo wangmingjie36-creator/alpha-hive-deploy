@@ -933,7 +933,8 @@ class AlphaHiveDailyReporter:
                         if e.get("ticker") == _tk
                     }
                     try:
-                        _hist = _yf_fb.Ticker(_tk).history(period="1d")
+                        from data_pipeline import _drop_forming_bar as _dfb
+                        _hist = _dfb(_yf_fb.Ticker(_tk).history(period="5d"))  # v0.29.4 盘中护栏
                         if not _hist.empty:
                             _snap.entry_price = float(_hist["Close"].iloc[-1])
                     except Exception as _e_price:
@@ -1668,7 +1669,8 @@ class AlphaHiveDailyReporter:
                 real_price, real_change = 100.0, 0.0
                 try:
                     import yfinance as _yf
-                    _hist = _yf.Ticker(ticker).history(period="5d")
+                    from data_pipeline import _drop_forming_bar as _dfb
+                    _hist = _dfb(_yf.Ticker(ticker).history(period="5d"))  # v0.29.4 盘中护栏
                     if not _hist.empty:
                         real_price = float(_hist["Close"].iloc[-1])
                         if len(_hist) >= 2:
@@ -1790,7 +1792,8 @@ class AlphaHiveDailyReporter:
             _scout_details = {}
             try:
                 import yfinance as _yf_sr
-                _h_sr = _yf_sr.Ticker(_tk).history(period="5d")
+                from data_pipeline import _drop_forming_bar as _dfb
+                _h_sr = _dfb(_yf_sr.Ticker(_tk).history(period="5d"))  # v0.29.4 盘中护栏
                 if not _h_sr.empty:
                     _scout_details["price"] = float(_h_sr["Close"].iloc[-1])
                     if len(_h_sr) >= 2:
