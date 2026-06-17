@@ -93,21 +93,30 @@ WELCOME_ACTIVE = (
 )
 
 HELP = (
-    "📖 <b>Alpha Hive Bot 命令</b>\n\n"
-    "/start — 开始\n"
-    "/status — 订阅状态\n"
+    "📖 <b>Alpha Hive Bot · 命令一览</b>\n\n"
+
+    "👤 <b>账户</b>（所有人）\n"
+    "/start — 开始 / 激活订阅（需先被邀请）\n"
+    "/status — 查看我的订阅状态\n"
     "/unsubscribe — 取消订阅\n"
-    "/help — 此帮助\n\n"
-    "<b>查询命令</b>（订阅者）：\n"
-    "/scan &lt;代码&gt; — 单标的最新分析（分数/雷达/蜂群/ML报告）\n"
-    "/top — 当日机会榜\n"
-    "/swarm &lt;代码&gt; — 7 蜂分歧透视\n"
-    "/scorecard — 系统历史战绩记分牌\n"
-    "/fg — 市场恐惧贪婪指数\n\n"
-    "<b>管理员命令</b>：\n"
-    "/invite &lt;user_id&gt; — 邀请用户加入白名单\n"
-    "/revoke &lt;user_id&gt; — 移除白名单\n"
-    "/list — 查看订阅者\n"
+    "/help — 显示本帮助\n\n"
+
+    "📊 <b>查询</b>（限已订阅用户）\n"
+    "/scan &lt;代码&gt; — 单标的：综合分 + 5维雷达 + 蜂群投票 + ML报告\n"
+    "/top [N] — 当日机会榜（分数降序，可选前 N 条）\n"
+    "/swarm &lt;代码&gt; — 7蜂逐票 + 共识 + 共振分歧\n"
+    "/scorecard — 系统历史战绩（方向准确率 + 周度 + 模拟组合）\n"
+    "/fg — 市场恐惧贪婪指数 + 近期走势\n"
+    "<i>例：/scan NVDA · /top 5 · /swarm AMZN</i>\n\n"
+
+    "🔑 <b>管理员</b>\n"
+    "/invite &lt;user_id&gt; — 邀请用户加白名单\n"
+    "/revoke &lt;user_id&gt; — 撤销用户访问\n"
+    "/list — 查看所有订阅者\n"
     "/push_now — 立即推送当日简报\n\n"
+
+    "⏰ <b>自动推送</b>\n"
+    "每个美股交易日盘后 PDT 13:30（约北京 04:30）自动推送当日简报给订阅者。\n\n"
+
     f"{DISCLAIMER}"
 )
