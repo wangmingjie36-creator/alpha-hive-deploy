@@ -238,6 +238,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CommandHandler("list", cmd_list))
     app.add_handler(CommandHandler("push_now", cmd_push_now))
+    # v0.2 查询命令（/scan /top /swarm /scorecard /fg）
+    from .query_commands import register as _register_query
+    _register_query(app)
 
     # 注册启动时拉起 scheduler
     async def _post_init(app: Application):
