@@ -291,7 +291,8 @@ async def cmd_fg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     fv = data.get("fv")
     label = data.get("fg_label", "—")
     hist = data.get("fg_history") or []
-    recent = [h.get("value") for h in hist[-14:] if isinstance(h, dict)]
+    # 滤掉 None（远程 JSON 若缺 value，否则下方 min/max 抛 TypeError）
+    recent = [h.get("value") for h in hist[-14:] if isinstance(h, dict) and h.get("value") is not None]
     spark = _sparkline(recent)
     lines = [
         f"🐝 <b>市场情绪 · 恐惧贪婪指数</b>",

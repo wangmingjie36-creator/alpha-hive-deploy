@@ -1858,7 +1858,8 @@ def render_dashboard_html(report: Dict, date_str: str,
             _ad.get("CodeExecutorAgent", {}).get("details", {}) or {},
         ):
             try:
-                _v = float((_src or {}).get("current_price"))
+                # current_price（Chronos/Rival/CodeExecutor 失败路径）或 price（CodeExecutor 成功路径键名不同）
+                _v = float((_src or {}).get("current_price") or (_src or {}).get("price"))
                 if _v > 0:
                     return _v
             except (TypeError, ValueError):

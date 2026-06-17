@@ -40,23 +40,28 @@ _log = logging.getLogger("alpha_hive.data_pipeline")
 # 不能用 datetime.now() 判断"美股现在开没开盘"。改用 yfinance 的分钟数据
 # 末时间戳（来自交易所服务器，美东 tz，真实时间），一次扫描内缓存（用 SPY 探一次）。
 _EXCHANGE_NOW_CACHE = None  # None=未取 / False=取失败 / Timestamp=成功
+_EXCHANGE_NOW_LOCK = threading.Lock()  # 防 ThreadPoolExecutor 并发首批各发一次 SPY 调用
 
 def _exchange_now():
     """返回美股交易所当前时间戳（美东 tz，来自 Yahoo 服务器），失败返回 None。
-    市场开/收对所有美股相同，只需探一次（SPY），整进程缓存。"""
+    市场开/收对所有美股相同，只需探一次（SPY），整进程缓存。
+    加锁 + double-checked：并发 fetch 时只有第一个线程真正打 SPY，其余复用缓存。"""
     global _EXCHANGE_NOW_CACHE
-    if _EXCHANGE_NOW_CACHE is not None:
+    if _EXCHANGE_NOW_CACHE is not None:  # fast path：已取到直接返回，不进锁
         return _EXCHANGE_NOW_CACHE or None
-    try:
-        import yfinance as yf
-        intra = yf.Ticker("SPY").history(period="1d", interval="1m")
-        if not intra.empty:
-            _EXCHANGE_NOW_CACHE = intra.index[-1]
-            return _EXCHANGE_NOW_CACHE
-    except Exception:
-        pass
-    _EXCHANGE_NOW_CACHE = False
-    return None
+    with _EXCHANGE_NOW_LOCK:
+        if _EXCHANGE_NOW_CACHE is not None:  # double-check：进锁后再判一次
+            return _EXCHANGE_NOW_CACHE or None
+        try:
+            import yfinance as yf
+            intra = yf.Ticker("SPY").history(period="1d", interval="1m")
+            if not intra.empty:
+                _EXCHANGE_NOW_CACHE = intra.index[-1]
+                return _EXCHANGE_NOW_CACHE
+        except Exception:
+            pass
+        _EXCHANGE_NOW_CACHE = False
+        return None
 
 
 def _drop_forming_bar(hist):
