@@ -276,6 +276,15 @@ def get_http_timeout(source: str = "default") -> int:
 # 所有数据源通用网络异常元组（取代各模块各自重复定义）
 NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError, ValueError, KeyError)
 
+# yfinance 限流异常（YFRateLimitError）并不继承上述任何一类，
+# 若不显式纳入，Yahoo 429 会穿透 except 直接崩溃报告生成。
+# 动态追加，避免在 yfinance 缺失/版本无该异常时 import 失败。
+try:
+    from yfinance.exceptions import YFRateLimitError as _YFRateLimitError
+    NETWORK_ERRORS = NETWORK_ERRORS + (_YFRateLimitError,)
+except Exception:  # noqa: BLE001 — yfinance 未装或旧版本无此异常，保持原元组
+    pass
+
 
 def singleton_client(lock: threading.Lock, factory, cache: dict, key: str = "_instance"):
     """双重检查锁单例工厂（替代 5 个数据源文件中的重复模式）

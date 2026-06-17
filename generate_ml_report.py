@@ -2010,8 +2010,35 @@ def main():
                                 _real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[-5] - 1) * 100
                             elif len(_hist) >= 2:
                                 _real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[0] - 1) * 100
-                    except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, IndexError) as e:
-                        _log.debug("yfinance price fetch failed for ticker: %s", e)
+                    except Exception as e:
+                        # yfinance 取价失败（含 YFRateLimitError 限流）→ 降级读磁盘最近一次价格，
+                        # 避免整份报告因一次取价崩溃。优先 {ticker}_raw.json 的 _meta.price。
+                        _log.warning(
+                            "yfinance 取价失败（%s），改用磁盘缓存价格", type(e).__name__
+                        )
+                        try:
+                            import json as _json
+                            import os as _os
+                            _raw_path = _os.path.join(
+                                _os.path.dirname(_os.path.abspath(__file__)),
+                                "%s_raw.json" % ticker,
+                            )
+                            if _os.path.exists(_raw_path):
+                                with open(_raw_path) as _f:
+                                    _raw = _json.load(_f)
+                                _disk_price = (_raw.get("_meta") or {}).get("price", 0) or 0
+                                if _disk_price > 0:
+                                    _real_price = float(_disk_price)
+                                    _real_change = float(
+                                        (_raw.get("fundamentals") or {}).get("momentum_5d", 0.0)
+                                        or 0.0
+                                    )
+                                    _log.info(
+                                        "已复用磁盘缓存价格 %s=%.2f（来自 %s_raw.json）",
+                                        ticker, _real_price, ticker,
+                                    )
+                        except Exception as _e2:
+                            _log.debug("磁盘价格降级失败: %s", _e2)
                 ticker_data = {
                     "ticker": ticker,
                     "sources": {

@@ -10,6 +10,7 @@
   MemoryStore.agent_memory →  outcome / return_t1 / t7 / t30 更新
 """
 
+import json
 import logging as _logging
 import os
 import time
@@ -62,6 +63,8 @@ class OutcomesFetcher:
         self.memory_store = memory_store
         self.rate_limit = rate_limit
         self.max_snapshots = max_snapshots
+        # {ticker: {date_str: entry_price}} 本地快照价格索引（懒加载）
+        self._price_index_cache: Dict[str, Dict[str, float]] = {}
 
     # ──────────────────── 公开接口 ────────────────────
 
@@ -81,6 +84,7 @@ class OutcomesFetcher:
 
         _log.info("OutcomesFetcher: 发现 %d 个待回填快照", len(pending))
 
+        _rl_streak = 0  # 连续 yfinance 限流计数：达阈值则中止本次回填
         for filepath, snapshot, missing_offsets in pending:
             try:
                 prices = {}
@@ -96,10 +100,30 @@ class OutcomesFetcher:
 
                 mem_count = self._update_memory_store(snapshot, prices)
                 stats["memory_updated"] += mem_count
+                _rl_streak = 0  # 本快照成功 → 重置限流连击
 
             except Exception as e:
-                _log.warning("OutcomesFetcher: %s 处理失败: %s", filepath, e)
                 stats["errors"] += 1
+                _emsg = str(e)
+                _is_rl = (
+                    type(e).__name__ == "YFRateLimitError"
+                    or "Rate limited" in _emsg
+                    or "Too Many Requests" in _emsg
+                )
+                if _is_rl:
+                    _rl_streak += 1
+                    if _rl_streak >= 3:
+                        _log.warning(
+                            "OutcomesFetcher: 连续 %d 次 yfinance 限流，中止本次回填"
+                            "（剩余快照下次运行时再补）",
+                            _rl_streak,
+                        )
+                        break
+                    _log.warning(
+                        "OutcomesFetcher: %s 限流跳过（连击 %d/3）", filepath, _rl_streak
+                    )
+                else:
+                    _log.warning("OutcomesFetcher: %s 处理失败: %s", filepath, e)
 
         _log.info(
             "OutcomesFetcher 完成: scanned=%d updated=%d memory=%d errors=%d",
@@ -159,6 +183,85 @@ class OutcomesFetcher:
 
         return results
 
+    def _load_price_index(self, ticker: str) -> Dict[str, float]:
+        """构建 {date_str: entry_price} 本地价格索引（来自 report_snapshots）。
+
+        每份 {ticker}_{YYYY-MM-DD}.json 的 entry_price 即该交易日收盘价，
+        所有快照拼成一条按日期可查的本地价格序列。结果按 ticker 缓存。
+        """
+        if ticker in self._price_index_cache:
+            return self._price_index_cache[ticker]
+
+        index: Dict[str, float] = {}
+        snaps: List[dict] = []
+        try:
+            if os.path.isdir(self.snapshots_dir):
+                prefix = "%s_" % ticker
+                for fname in os.listdir(self.snapshots_dir):
+                    if not (fname.startswith(prefix) and fname.endswith(".json")):
+                        continue
+                    fpath = os.path.join(self.snapshots_dir, fname)
+                    try:
+                        with open(fpath) as f:
+                            snap = json.load(f)
+                        snaps.append(snap)
+                        d = snap.get("date")
+                        px = snap.get("entry_price")
+                        # 主来源：当日 entry_price 即收盘价（过滤 0.0 坏数据）
+                        if d and isinstance(px, (int, float)) and px > 0:
+                            index[str(d)[:10]] = float(px)
+                    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                        continue
+        except OSError:
+            pass
+
+        # 补缺：用已回填的 actual_prices(t1/t7/t30) 反推目标交易日，
+        # 填补 entry_price=0.0 留下的空洞（如 NVDA_2026-03-25）。entry_price 优先，不覆盖。
+        def _target_key(base_str: str, off: int) -> Optional[str]:
+            try:
+                base = datetime.strptime(str(base_str)[:10], "%Y-%m-%d")
+            except (ValueError, TypeError):
+                return None
+            if _BDAY_AVAILABLE:
+                return (_pd.Timestamp(base) + off * _US_BDAY).strftime("%Y-%m-%d")
+            return (base + timedelta(days=int(off * 1.5))).strftime("%Y-%m-%d")
+
+        for snap in snaps:
+            base = snap.get("date")
+            ap = snap.get("actual_prices") or {}
+            if not base or not isinstance(ap, dict):
+                continue
+            for off in (1, 7, 30):
+                val = ap.get("t%d" % off)
+                if not isinstance(val, (int, float)) or val <= 0:
+                    continue
+                key = _target_key(base, off)
+                if key and key not in index:
+                    index[key] = float(val)
+
+        self._price_index_cache[ticker] = index
+        return index
+
+    def _lookup_local_price(
+        self, ticker: str, target_date: datetime, end_date: datetime
+    ) -> Optional[float]:
+        """从本地快照价格索引取目标日（或其后首个有快照的交易日）的收盘价。
+
+        镜像 yfinance 行为：取 [target_date, end_date] 窗口内最早一个有价格的日期。
+        无任何覆盖时返回 None，由调用方决定是否回退 yfinance。
+        """
+        index = self._load_price_index(ticker)
+        if not index:
+            return None
+        cur = target_date.date() if hasattr(target_date, "date") else target_date
+        last = end_date.date() if hasattr(end_date, "date") else end_date
+        while cur <= last:
+            key = cur.strftime("%Y-%m-%d")
+            if key in index:
+                return index[key]
+            cur += timedelta(days=1)
+        return None
+
     def _fetch_price(
         self, ticker: str, report_date: str, offset_days: int
     ) -> Optional[float]:
@@ -172,9 +275,6 @@ class OutcomesFetcher:
         Returns:
             收盘价 or None
         """
-        if _yf is None:
-            return None
-
         try:
             start = datetime.strptime(report_date, "%Y-%m-%d")
             if _BDAY_AVAILABLE:
@@ -185,7 +285,20 @@ class OutcomesFetcher:
                 target_date = start + timedelta(days=int(offset_days * 1.5))
 
             end_date = target_date + timedelta(days=10)
+        except (ValueError, TypeError) as e:
+            _log.debug("日期解析失败 %s +%dd: %s", ticker, offset_days, e)
+            return None
 
+        # ① 本地快照优先：目标日的收盘价 = 该日快照的 entry_price，
+        #    无需联网。覆盖不到时（如 T+30 尚无未来快照）再走 yfinance。
+        _local = self._lookup_local_price(ticker, target_date, end_date)
+        if _local is not None:
+            return _local
+
+        if _yf is None:
+            return None
+
+        try:
             stock = _yf.Ticker(ticker)
             hist = stock.history(
                 start=target_date.strftime("%Y-%m-%d"),
