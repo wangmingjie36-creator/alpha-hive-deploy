@@ -25,6 +25,16 @@
 
 - 这是代码层兜底（盘中跑也取收盘价）。**根治仍需用户把 Mac 时区从 Asia/Shanghai 改为 America/Vancouver**，让定时扫描在美股盘后正确时间运行。
 
+### 二次检查补全（同日）
+
+二次审计发现 v0.29.4 初版只覆盖 `data_pipeline` 一处，其余直连 yfinance 取价点盘中仍抓盘中价（实证：TSLA 快照 entry 403.4 ≠ dashboard 404.66）。补全 5 处（全部复用 `_drop_forming_bar`，inline import + try/except 包裹零回归）：
+- `alpha_hive_daily_report.py:938` 快照 entry_price（`period 1d→5d`，feeds 回测 + v0.29.3 基准）
+- `alpha_hive_daily_report.py:1673` ML 报告 real_price
+- `alpha_hive_daily_report.py:1795` scout 价回退（直接 feeds dashboard）
+- `data_fetcher.py:216` fallback price（`period 2d→5d`）
+- `crowding_detector.py:480` crowding price
+- 审计验证：6 类单测（缓存语义/tz 一致/下游裁剪一致/边界 15:59/异常安全/多标的回归）全过；3 文件无循环导入
+
 ---
 
 ## [0.29.1] — 2026-06-16 — yfinance 限流崩溃修复
