@@ -30,9 +30,50 @@ import threading
 from typing import Dict, Optional, List, Tuple
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time as _dt_time
 
 _log = logging.getLogger("alpha_hive.data_pipeline")
+
+
+# ==================== 盘中 forming-bar 护栏（v0.29.4）====================
+# 本机时钟可能被设错时区（如温哥华机器误设上海 UTC+8，偏移 15h），
+# 不能用 datetime.now() 判断"美股现在开没开盘"。改用 yfinance 的分钟数据
+# 末时间戳（来自交易所服务器，美东 tz，真实时间），一次扫描内缓存（用 SPY 探一次）。
+_EXCHANGE_NOW_CACHE = None  # None=未取 / False=取失败 / Timestamp=成功
+
+def _exchange_now():
+    """返回美股交易所当前时间戳（美东 tz，来自 Yahoo 服务器），失败返回 None。
+    市场开/收对所有美股相同，只需探一次（SPY），整进程缓存。"""
+    global _EXCHANGE_NOW_CACHE
+    if _EXCHANGE_NOW_CACHE is not None:
+        return _EXCHANGE_NOW_CACHE or None
+    try:
+        import yfinance as yf
+        intra = yf.Ticker("SPY").history(period="1d", interval="1m")
+        if not intra.empty:
+            _EXCHANGE_NOW_CACHE = intra.index[-1]
+            return _EXCHANGE_NOW_CACHE
+    except Exception:
+        pass
+    _EXCHANGE_NOW_CACHE = False
+    return None
+
+
+def _drop_forming_bar(hist):
+    """若日线末根是"当日盘中正在形成"的 bar，返回去掉末根的 hist；否则原样返回。
+    判据（不依赖本机钟）：末根日期 == 交易所真实当日 且 当前时间 < 收盘 15:59 美东。
+    任何异常都原样返回（绝不影响主流程）。"""
+    try:
+        if hist is None or len(hist) < 3:
+            return hist
+        xnow = _exchange_now()
+        if xnow is None:
+            return hist
+        if hist.index[-1].date() == xnow.date() and xnow.time() < _dt_time(15, 59):
+            return hist.iloc[:-1]
+    except Exception:
+        pass
+    return hist
 
 
 # ==================== 数据质量标记 ====================
@@ -180,6 +221,13 @@ class YFinanceSource:
             import yfinance as yf
             t = yf.Ticker(ticker)
             hist = t.history(period="1mo")
+            if hist.empty or len(hist) < 2:
+                self.breaker.record_failure("empty_history")
+                return None
+
+            # v0.29.4 盘中护栏：丢弃"当日正在形成"的盘中 bar，确保下游
+            # 价格/动量/成交量全用已收盘日线（盘中跑扫描时取的是收盘价而非盘中价）
+            hist = _drop_forming_bar(hist)
             if hist.empty or len(hist) < 2:
                 self.breaker.record_failure("empty_history")
                 return None
