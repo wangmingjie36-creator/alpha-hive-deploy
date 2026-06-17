@@ -5,6 +5,28 @@
 
 ---
 
+## [0.29.4] — 2026-06-17 — 盘中 forming-bar 护栏（确保取已收盘日线价）
+
+### Fixed — `data_pipeline.py` `YFinanceSource.fetch()`
+
+- **用户报**：6-16 NVDA 应显示收盘价 207.41，dashboard 却显示 206.72/207.34
+- **根因（时区错位 → 盘中抓价）**：
+  - 用户在温哥华(PDT)，但 Mac 系统时区误设为 Asia/Shanghai(UTC+8，偏移 15h) → 机器时钟整体快 15 小时
+  - 系统按 PDT 锁 date_str=6-16（正确），但**实际运行时刻是美股 6-17 盘中**（美东 13:xx，市场开着）
+  - `t.history(period="1mo")["Close"].iloc[-1]` 在盘中返回的是"当日正在形成"的 6-17 盘中 bar（实时变动 206.72→207.34），而非 6-16 已收盘的 207.41
+- **修复**：
+  - `_exchange_now()` — 用 SPY 分钟数据末时间戳判断交易所真实时间（美东 tz，来自 Yahoo 服务器，**不依赖本机错钟**），整进程缓存只探一次
+  - `_drop_forming_bar()` — 末根日线日期 == 交易所真实当日 且 当前 < 15:59 收盘 → 判为盘中 forming → 丢弃；下游 price/momentum/volume 全用已收盘日线
+  - 整段 try/except 全包，探测失败/异常一律退回原 `iloc[-1]`，**零回归风险**
+- **验证**：5 场景单测全过（盘中丢弃 / 收盘后保留 / 历史保留 / 探测失败原样 / len<3 不动）；真实 NVDA 盘中 fetch 精确得 6-16 收盘 207.41
+- **Ops**：清 6-16 脏数据 + 重跑（护栏生效）→ 部署 gh-pages，线上 dashboard + bot `/scan` 全部修正为 NVDA 207.41 等精确收盘价
+
+### Note
+
+- 这是代码层兜底（盘中跑也取收盘价）。**根治仍需用户把 Mac 时区从 Asia/Shanghai 改为 America/Vancouver**，让定时扫描在美股盘后正确时间运行。
+
+---
+
 ## [0.29.1] — 2026-06-16 — yfinance 限流崩溃修复
 
 ### Fixed — `generate_ml_report.py`
