@@ -116,18 +116,18 @@
  ],
  "acc_dir_accs": [
   57.2,
-  46.0,
-  56.2
+  44.9,
+  57.0
  ],
  "acc_dir_tots": [
   320,
-  50,
-  137
+  49,
+  135
  ],
  "acc_dir_rets": [
   1.23,
-  -1.14,
-  0.51
+  -1.37,
+  0.73
  ],
  "acc_weekly": [
   {
@@ -6487,19 +6487,19 @@
    "ticker": "AMZN",
    "score": 5.9,
    "direction": "中性",
-   "price": 268.46
+   "price": 246.02
   },
   {
    "ticker": "MSFT",
    "score": 5.8,
    "direction": "看多",
-   "price": 419.09
+   "price": 399.76
   },
   {
    "ticker": "CRCL",
    "score": 5.7,
    "direction": "中性",
-   "price": 114.88
+   "price": 83.37
   },
   {
    "ticker": "RKLB",
@@ -6517,13 +6517,13 @@
    "ticker": "QCOM",
    "score": 5.4,
    "direction": "中性",
-   "price": 213.41
+   "price": 220.81
   },
   {
    "ticker": "TSLA",
    "score": 5.3,
    "direction": "中性",
-   "price": 189.45
+   "price": 411.15
   },
   {
    "ticker": "BILI",
@@ -6535,7 +6535,7 @@
    "ticker": "NVDA",
    "score": 5.0,
    "direction": "看多",
-   "price": 145.32
+   "price": 212.45
   }
  ],
  "equity_curve": [
@@ -16757,9 +16757,9 @@
    "final_nav": 53277.03,
    "total_return_pct": 6.55,
    "total_pnl_usd": 3277.03,
-   "spy_end_nav": NaN,
-   "spy_return_pct": NaN,
-   "alpha_vs_spy": NaN,
+   "spy_end_nav": 54597.95,
+   "spy_return_pct": 9.2,
+   "alpha_vs_spy": -2.64,
    "sharpe_ratio": 0.37,
    "profit_factor": 1.215,
    "max_drawdown_pct": 5.12,
@@ -17204,7 +17204,7 @@
    ]
   }
  },
- "_generated_at": "2026-06-15 11:13 PDT",
+ "_generated_at": "2026-06-16 17:54 PDT",
  "_date": "2026-06-15",
- "_deploy_ts": 1781547202
+ "_deploy_ts": 1781657684
 }
