@@ -305,6 +305,228 @@ async def cmd_fg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines) + _FOOT, parse_mode=ParseMode.HTML)
 
 
+# ═══════════════════════════════════════════════════════════
+# v0.3 个人关注列表 + 阈值告警
+# ═══════════════════════════════════════════════════════════
+import re as _re
+
+_VALID_OPS = (">=", "<=", ">", "<")  # 注意顺序：先长后短，避免 >= 被 > 抢匹配
+_MAX_WATCH = 30
+_MAX_ALERTS = 20
+
+
+def _eval_op(value: float, op: str, threshold: float) -> bool:
+    if op == ">":  return value > threshold
+    if op == "<":  return value < threshold
+    if op == ">=": return value >= threshold
+    if op == "<=": return value <= threshold
+    return False
+
+
+def _parse_alert_spec(args: list) -> Optional[tuple]:
+    """解析 /alert 参数 → (ticker, metric, op, threshold)。失败返回 None。
+    支持：/alert NVDA score>7 · /alert NVDA >7 · /alert NVDA score >= 7 · /alert nvda <4"""
+    if not args:
+        return None
+    ticker = _norm_ticker(args[0])
+    rest = "".join(args[1:]).lower().replace(" ", "")
+    if not rest:
+        return None
+    m = _re.match(r"^(score)?(>=|<=|>|<)([0-9]+(?:\.[0-9]+)?)$", rest)
+    if not m:
+        return None
+    metric = m.group(1) or "score"
+    op = m.group(2)
+    try:
+        threshold = float(m.group(3))
+    except ValueError:
+        return None
+    if metric != "score" or not (0 <= threshold <= 10):
+        return None  # 目前只支持 score（0~10）
+    return ticker, metric, op, threshold
+
+
+def _scores_map(data: dict) -> dict:
+    """从 dashboard-data.json 取 {ticker: score}。"""
+    out = {}
+    for item in (data.get("scores") or []):
+        if isinstance(item, list) and len(item) >= 2:
+            try:
+                out[item[0]] = float(item[1])
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+async def cmd_watch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    if not await _gate(update, db):
+        return
+    if not ctx.args:
+        await update.message.reply_text("用法：/watch <代码>，例如 /watch NVDA")
+        return
+    user = update.effective_user
+    ticker = _norm_ticker(ctx.args[0])
+    if not _re.match(r"^[A-Z0-9.\-]{1,12}$", ticker):
+        await update.message.reply_text("代码格式不对（仅字母数字，≤12 位）")
+        return
+    if len(db.get_watch(user.id)) >= _MAX_WATCH:
+        await update.message.reply_text(f"关注列表已满（上限 {_MAX_WATCH}），先 /unwatch 一些。")
+        return
+    added = db.add_watch(user.id, ticker)
+    await update.message.reply_text(
+        f"{'✓ 已关注' if added else 'ℹ️ 已在关注列表'}: <code>{_html.escape(ticker)}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_unwatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    if not await _gate(update, db):
+        return
+    if not ctx.args:
+        await update.message.reply_text("用法：/unwatch <代码>")
+        return
+    user = update.effective_user
+    ticker = _norm_ticker(ctx.args[0])
+    ok = db.remove_watch(user.id, ticker)
+    await update.message.reply_text(
+        f"{'✓ 已移除' if ok else 'ℹ️ 不在关注列表'}: <code>{_html.escape(ticker)}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_mywatch(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    cfg: BotConfig = ctx.application.bot_data["cfg"]
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    if not await _gate(update, db):
+        return
+    user = update.effective_user
+    watch = db.get_watch(user.id)
+    if not watch:
+        await update.message.reply_text("你的关注列表为空。用 /watch <代码> 添加。")
+        return
+    data = await fetch_dashboard(cfg.report_base_url)
+    sc = _scores_map(data) if data else {}
+    si = {x.get("ticker"): x for x in (data.get("search_index") or [])} if data else {}
+    date = data.get("_date", "") if data else ""
+    lines = [f"📌 <b>你的关注列表</b>（{len(watch)}）" + (f" — {_html.escape(date)}" if date else "")]
+    for tk in watch:
+        if tk in sc:
+            d = (si.get(tk) or {}).get("direction", "")
+            badge = DIR_BADGE.get(d, "")
+            lines.append(f"  <b>{_html.escape(tk)}</b>  {_fmt_num(sc[tk])}  {badge}")
+        else:
+            lines.append(f"  <b>{_html.escape(tk)}</b>  <i>（未在当日扫描范围）</i>")
+    lines.append("\n/scan &lt;代码&gt; 看详情 · /unwatch &lt;代码&gt; 移除")
+    await update.message.reply_text("\n".join(lines) + _FOOT, parse_mode=ParseMode.HTML)
+
+
+async def cmd_alert(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    if not await _gate(update, db):
+        return
+    user = update.effective_user
+    parsed = _parse_alert_spec(ctx.args)
+    if not parsed:
+        await update.message.reply_text(
+            "用法：/alert &lt;代码&gt; score&gt;7（或 &lt;4 / &gt;=6 等）\n"
+            "例：/alert NVDA score&gt;7 · /alert TSLA &lt;4\n"
+            "（目前支持 score 综合分 0~10；触发条件满足时主动推送）",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    ticker, metric, op, threshold = parsed
+    if len(db.get_alerts(user.id)) >= _MAX_ALERTS:
+        await update.message.reply_text(f"告警规则已满（上限 {_MAX_ALERTS}），先 /alerts 查看 + /unalert 删除。")
+        return
+    added = db.add_alert(user.id, ticker, metric, op, threshold)
+    if added:
+        await update.message.reply_text(
+            f"✓ 已订阅告警：<code>{_html.escape(ticker)}</code> {metric} {_html.escape(op)} {_fmt_num(threshold)}\n"
+            "每日新数据后命中即推送（研究信号，非买卖建议）。\n"
+            "⏰ 注意：每日盘后评估一次，非盘中实时。",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await update.message.reply_text("ℹ️ 该规则已存在。/alerts 查看全部。")
+
+
+async def cmd_alerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    if not await _gate(update, db):
+        return
+    user = update.effective_user
+    rules = db.get_alerts(user.id)
+    if not rules:
+        await update.message.reply_text("你没有告警规则。用 /alert <代码> score>7 添加。")
+        return
+    lines = ["🔔 <b>你的告警规则</b>："]
+    for r in rules:
+        lines.append(
+            f"  <code>#{r['id']}</code> {_html.escape(r['ticker'])} "
+            f"{r['metric']} {_html.escape(r['op'])} {_fmt_num(r['threshold'])}"
+        )
+    lines.append("\n/unalert &lt;编号&gt; 删除（如 /unalert 3）")
+    await update.message.reply_text("\n".join(lines) + _FOOT, parse_mode=ParseMode.HTML)
+
+
+async def cmd_unalert(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    db: SubscriberDB = ctx.application.bot_data["db"]
+    if not await _gate(update, db):
+        return
+    user = update.effective_user
+    if not ctx.args:
+        await update.message.reply_text("用法：/unalert <编号>（编号见 /alerts）")
+        return
+    try:
+        rid = int(ctx.args[0])
+    except ValueError:
+        await update.message.reply_text("编号必须是整数（见 /alerts）")
+        return
+    ok = db.remove_alert(user.id, rid)
+    await update.message.reply_text(f"{'✓ 已删除告警 #' + str(rid) if ok else '❌ 未找到该编号的规则'}")
+
+
+async def evaluate_alerts(bot, cfg: BotConfig, db: SubscriberDB) -> dict:
+    """每日推送后评估告警规则，边沿触发（false→true 才推），返回 {pushed, checked}。"""
+    from telegram.constants import ParseMode as _PM
+    from telegram.error import TelegramError as _TE
+
+    data = await fetch_dashboard(cfg.report_base_url)
+    if not data:
+        log.warning("evaluate_alerts: dashboard 不可用，跳过")
+        return {"pushed": 0, "checked": 0, "skipped": True}
+    sc = _scores_map(data)
+    date = data.get("_date", "?")
+    rules = db.list_active_alerts()
+    pushed = 0
+    for r in rules:
+        val = sc.get(r["ticker"])
+        if val is None:
+            continue  # 该标的当日未扫描，不评估（不重置状态）
+        new_state = 1 if _eval_op(val, r["op"], float(r["threshold"])) else 0
+        if new_state and not r["last_state"]:
+            # 边沿：刚满足 → 推送
+            try:
+                await bot.send_message(
+                    chat_id=r["chat_id"],
+                    text=(f"🔔 <b>告警</b> — {_html.escape(date)}\n"
+                          f"<b>{_html.escape(r['ticker'])}</b> {r['metric']} = {_fmt_num(val)} "
+                          f"已突破你的阈值 {r['metric']} {_html.escape(r['op'])} {_fmt_num(float(r['threshold']))}\n"
+                          f"（研究信号，非买卖建议）{_FOOT}"),
+                    parse_mode=_PM.HTML,
+                )
+                pushed += 1
+            except _TE as e:
+                log.warning("alert push 失败 chat=%s: %s", r.get("chat_id"), e)
+        # 状态变化才写库（含 true→false 复位，使下次再满足能再次触发）
+        if new_state != r["last_state"]:
+            db.set_alert_state(r["id"], new_state)
+    log.info("evaluate_alerts: checked=%d pushed=%d", len(rules), pushed)
+    return {"pushed": pushed, "checked": len(rules), "skipped": False}
+
+
 # ── 注册 ─────────────────────────────────────────────────
 def register(app: Application) -> None:
     app.add_handler(CommandHandler("scan", cmd_scan))
@@ -312,3 +534,10 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("swarm", cmd_swarm))
     app.add_handler(CommandHandler("scorecard", cmd_scorecard))
     app.add_handler(CommandHandler("fg", cmd_fg))
+    # v0.3 关注列表 + 告警
+    app.add_handler(CommandHandler("watch", cmd_watch))
+    app.add_handler(CommandHandler("unwatch", cmd_unwatch))
+    app.add_handler(CommandHandler("mywatch", cmd_mywatch))
+    app.add_handler(CommandHandler("alert", cmd_alert))
+    app.add_handler(CommandHandler("alerts", cmd_alerts))
+    app.add_handler(CommandHandler("unalert", cmd_unalert))

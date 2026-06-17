@@ -198,6 +198,13 @@ async def _scheduler_loop(app: Application):
                         result = await run_daily_push(cfg, db, bot=app.bot)
                         log.info("定时推送结果: %s", result)
                         last_pushed_date = today
+                        # v0.3 推送后评估告警规则（边沿触发），仅定时跑、不在 /push_now
+                        try:
+                            from .query_commands import evaluate_alerts
+                            ar = await evaluate_alerts(app.bot, cfg, db)
+                            log.info("告警评估结果: %s", ar)
+                        except Exception as ae:
+                            log.exception("告警评估失败（不影响推送）: %s", ae)
                     except Exception as e:
                         log.exception("定时推送失败: %s", e)
                 # 推送完睡到次日 00:05

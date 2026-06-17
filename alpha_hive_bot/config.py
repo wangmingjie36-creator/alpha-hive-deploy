@@ -109,6 +109,17 @@ HELP = (
     "/fg — 市场恐惧贪婪指数 + 近期走势\n"
     "<i>例：/scan NVDA · /top 5 · /swarm AMZN</i>\n\n"
 
+    "📌 <b>关注列表</b>（限已订阅用户）\n"
+    "/watch &lt;代码&gt; — 添加关注\n"
+    "/unwatch &lt;代码&gt; — 移除关注\n"
+    "/mywatch — 查看我的关注（带当日分数）\n\n"
+
+    "🔔 <b>阈值告警</b>（限已订阅用户）\n"
+    "/alert &lt;代码&gt; score&gt;7 — 订阅告警（&gt; &lt; &gt;= &lt;=，综合分 0~10）\n"
+    "/alerts — 查看我的告警规则\n"
+    "/unalert &lt;编号&gt; — 删除告警\n"
+    "<i>每日盘后评估一次，命中即推送（非盘中实时）</i>\n\n"
+
     "🔑 <b>管理员</b>\n"
     "/invite &lt;user_id&gt; — 邀请用户加白名单\n"
     "/revoke &lt;user_id&gt; — 撤销用户访问\n"
