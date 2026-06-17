@@ -5,6 +5,35 @@
 
 ---
 
+## [0.30.0] — 2026-06-17 — Bot v0.3：个人关注列表 + 阈值告警
+
+### Added — `alpha_hive_bot/`（6 新命令，限 active 订阅者）
+
+**个人关注列表**（SQLite `watchlist` 表，上限 30）：
+- `/watch <代码>` / `/unwatch <代码>` / `/mywatch`（带当日分数 + 方向徽章，未在当日扫描标注）
+
+**阈值告警**（SQLite `alert_rules` 表，上限 20，边沿触发）：
+- `/alert <代码> score>7` — 支持 `> < >= <=`，score 0~10；`_parse_alert_spec` 解析 `NVDA score>7`/`NVDA >7`/`nvda<4` 等多格式
+- `/alerts`（查看规则含编号）/ `/unalert <编号>`
+- **边沿触发**（`last_state`）：false→true 才推，持续满足不重推，true→false 复位后再满足可再推 —— 杜绝每日 spam
+
+### 集成
+- `subscriber_db.py`：加 `watchlist` / `alert_rules` 表（`CREATE TABLE IF NOT EXISTS` 免迁移，对现有 DB 安全）+ 8 方法
+- `bot.py` scheduler：定时推送后调 `evaluate_alerts`（**仅定时跑，不在 `/push_now`**，避免手动重复触发）
+- `evaluate_alerts(bot, cfg, db)`：读 gh-pages `dashboard-data.json` 的 scores，逐规则边沿评估推送
+- `config.HELP`：加「📌 关注列表」「🔔 阈值告警」两组
+
+### 测试
+- DB 方法全过（watchlist add/dup/get/remove；alert add/dup/list/state/remove；list_active_alerts 只含 active）
+- `/alert` 解析 8 例（含 >10 越界 / 无效 / 缺参 → None）
+- **边沿触发实测**：分数序列 5.5→7.2→7.5→6.0→7.1 推送 [0,1,0,0,1] 精确（仅两次跨越推送）
+- HELP HTML 标签配对 905b <4096；register 注册 11 个 handler；bot 模块导入无循环
+
+### 部署
+- 代码已 push；Railway Dockerfile 自动包含;需 Redeploy 生效（subscriber_db 新表首次连接自动建）
+
+---
+
 ## [0.29.4] — 2026-06-17 — 盘中 forming-bar 护栏（确保取已收盘日线价）
 
 ### Fixed — `data_pipeline.py` `YFinanceSource.fetch()`
