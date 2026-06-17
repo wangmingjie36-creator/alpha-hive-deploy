@@ -5,6 +5,56 @@
 
 ---
 
+## [0.29.1] — 2026-06-16 — yfinance 限流崩溃修复
+
+### Fixed — `generate_ml_report.py`
+
+- `main()` 取价 `except` 子句原先只捕获 `ConnectionError/TimeoutError/OSError/ValueError/KeyError/IndexError`，**漏掉 `YFRateLimitError`**，导致 Yahoo 限流时整份 ML 报告直接 traceback 崩溃（线索：line 2006 `_t.history(period="5d")`）。
+- 改为 `except Exception`，并新增磁盘降级：yfinance 取价失败时读 `{ticker}_raw.json` 的 `_meta.price`（及 `fundamentals.momentum_5d`）复用最近一次真实价格，替代原先写死的 `100.0` dummy 价。
+
+### Fixed — `resilience.py`（根因级修复）
+
+- `NETWORK_ERRORS` 元组原先不含 `yfinance.exceptions.YFRateLimitError`，导致 Yahoo 429 限流穿透所有 `except (*NETWORK_ERRORS, ...)` 子句（`options_analyzer` 拉期权链 line 144 `stock.options` 即崩）。
+- 动态追加 `YFRateLimitError`（`try import` 包裹，yfinance 缺失/旧版本安全降级），一次性覆盖 `options_analyzer` / `bear_bee` / `cache` / `cboe_fetcher` 等所有引用 `NETWORK_ERRORS` 的入口。限流时统一降级为样本/缓存期权数据而非崩溃。
+
+### Changed — `outcomes_fetcher.py`（自学习回填限流熔断）
+
+- `process()` 回填循环原先对每个历史快照逐个硬刚 yfinance，限流时刷屏 50+ 条 WARNING（`NVDA_2026-04-07 … 处理失败: Too Many Requests`）且无意义。
+- 新增连续限流熔断：检测到 `YFRateLimitError` / "Rate limited" / "Too Many Requests" 连续 3 次即 `break` 中止本次回填，剩余快照下次运行再补；成功一个则重置连击计数。回填为自学习可选步骤，中止不影响当日报告生成。
+
+### Changed — `outcomes_fetcher.py`（回填改本地快照优先，基本不再联网）
+
+- 新增 `_load_price_index()` / `_lookup_local_price()`：用 `report_snapshots/{ticker}_*.json` 的 `entry_price` 拼出按日期可查的本地收盘价序列，`_fetch_price()` 改为**本地优先、yfinance 仅兜底**。回填 T+1/T+7/T+30 不再逐日打 yfinance。
+- 空洞修复：`entry_price=0.0` 的坏数据日（如 `NVDA_2026-03-25`）用其他快照已回填的 `actual_prices`（如 `NVDA_2026-03-24` 的 t1=03-25 收盘）反推目标交易日补齐。验证：03-16/03-17 的 T+1/T+7/T+30 本地取值与原 yfinance 记录逐一吻合（如 03-25=178.68）。
+- 仅当目标日超出最新快照覆盖（未来尚未发生）时返回 None，留待后续快照生成后再补——此场景 yfinance 同样无数据。
+- 补 `import json`（模块此前未导入，新方法读快照需要）。
+
+## [0.29.2] — 2026-06-16 — Bot v0.2 查询命令（/scan /top /swarm /scorecard /fg）
+
+### Added — `alpha_hive_bot/query_commands.py`（新模块）
+
+5 个查询命令，全部只读 gh-pages `dashboard-data.json`（零实时扫描，仅 httpx+stdlib），限 active 订阅者：
+- `/scan <代码>` — 单标的：综合分 + 5 维雷达 + 蜂群投票 + ML 报告链接
+- `/top [N]` — 当日机会榜：分数降序 + 方向徽章 + ⚡共振标记 + 方向分布
+- `/swarm <代码>` — 7 蜂逐票 + 共识度 + 共振 + 分歧 std/spread
+- `/scorecard` — 方向准确率 + 近 8 周（诚实含 W21 5%/W22 30% 翻车周）+ $50K 模拟组合（含 vs SPY -5.1%）
+- `/fg` — 恐惧贪婪指数 + 14 日 sparkline
+
+### 工程要点
+- `_gate()` 限 active 订阅者；HTML parse mode + `html.escape`；统一 DISCLAIMER 尾
+- `_fmt_num()` 防 NaN/inf/None（`trading_stats.realistic.spy_*=NaN` 不泄漏，用 top-level `alpha_vs_spy`）
+- `fetch_dashboard()` 失败优雅降级；ticker 归一化（去 `$`/大写）；无效代码列出当日可用标的
+- `bot.py` `register(app)` 注册；`config.HELP` 列出新命令；合规措辞"研究输出，非买卖建议"
+
+### 二次检查
+- 10 命令测试 + 边界（无效代码/缺参/小写$/非订阅者拦截/NaN/inf/fetch 失败）全通过
+- 真实 6-15 数据渲染均 HTML 合法、<4096 字符；**无 P0/P1 bug**
+
+### 部署
+- 代码已 push，Railway Dockerfile 自动包含新模块；需 Redeploy 生效
+
+---
+
 ## [0.29.0] — 2026-06-16 — Alpha Hive Bot（对外 Telegram 订阅机器人）上线 + Railway 部署
 
 ### Added — `alpha_hive_bot/`（新组件，invite-only MVP，无支付）
