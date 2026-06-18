@@ -180,8 +180,34 @@ async def cmd_push_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # 定时推送 job
 # ============================================================
 
+# 简报未就绪时的重试间隔（秒）。扫描通常 PDT 21:03 才完成，远晚于 push_hour:30，
+# 故推送窗口开启后需轮询等待，而非一次失败就放弃。
+_POLL_INTERVAL = 1800  # 30 分钟
+
+
+def _scheduler_decision(now_pdt, today, last_pushed_date, push_hour):
+    """纯函数（便于单测）：返回 ('sleep', 秒) 或 ('push', None)。
+    - 未到推送窗口（push_hour:30）→ 睡到窗口
+    - 今天已成功推送 → 睡到次日 00:05
+    - 在窗口内且今天还没成功推送 → 尝试推送
+    """
+    target = now_pdt.replace(hour=push_hour, minute=30, second=0, microsecond=0)
+    if now_pdt < target:
+        return ("sleep", (target - now_pdt).total_seconds())
+    if last_pushed_date == today:
+        tomorrow = (now_pdt + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
+        return ("sleep", (tomorrow - now_pdt).total_seconds())
+    return ("push", None)
+
+
 async def _scheduler_loop(app: Application):
-    """简单 asyncio 定时器：每天 PDT push_hour:30 推一次。"""
+    """每个 PDT 交易日推送窗口（push_hour:30）开启后，轮询等待当日简报就绪即推送一次。
+
+    关键修复（v0.31）：旧逻辑在 13:30 推、但扫描 21:03 才生成简报 → 13:30 fetch 404 →
+    skip，却仍把 last_pushed_date 标成今天并睡到次日 → 当日简报永远推不出。
+    现改为：仅在「真正推送成功」后才标记 last_pushed_date；简报未就绪则 30 分钟后重试，
+    跨午夜 today 自然翻页停止当日重试（无简报的周末/假日不会推）。
+    """
     cfg: BotConfig = app.bot_data["cfg"]
     db: SubscriberDB = app.bot_data["db"]
     last_pushed_date = None
@@ -189,15 +215,18 @@ async def _scheduler_loop(app: Application):
     while True:
         try:
             now_pdt = datetime.now(_PDT)
-            target = now_pdt.replace(hour=cfg.push_hour_pdt, minute=30, second=0, microsecond=0)
-            if now_pdt >= target:
-                today = now_pdt.strftime("%Y-%m-%d")
-                if last_pushed_date != today:
-                    log.info("定时器触发：开始 %s 推送", today)
-                    try:
-                        result = await run_daily_push(cfg, db, bot=app.bot)
-                        log.info("定时推送结果: %s", result)
-                        last_pushed_date = today
+            today = now_pdt.strftime("%Y-%m-%d")
+            action, secs = _scheduler_decision(now_pdt, today, last_pushed_date, cfg.push_hour_pdt)
+            if action == "push":
+                log.info("定时器触发：尝试推送当日简报 %s", today)
+                sent_ok = False
+                try:
+                    # fallback=False：严格只推当日简报，未就绪则返回 skipped（不回退旧报）
+                    result = await run_daily_push(cfg, db, bot=app.bot, fallback=False)
+                    log.info("定时推送结果: %s", result)
+                    if not result.get("skipped"):
+                        sent_ok = True
+                        last_pushed_date = today  # 仅推送成功才标记，避免 skip 后当日不再重试
                         # v0.3 推送后评估告警规则（边沿触发），仅定时跑、不在 /push_now
                         try:
                             from .query_commands import evaluate_alerts
@@ -205,15 +234,19 @@ async def _scheduler_loop(app: Application):
                             log.info("告警评估结果: %s", ar)
                         except Exception as ae:
                             log.exception("告警评估失败（不影响推送）: %s", ae)
-                    except Exception as e:
-                        log.exception("定时推送失败: %s", e)
-                # 推送完睡到次日 00:05
-                tomorrow_check = (now_pdt + timedelta(days=1)).replace(
-                    hour=0, minute=5, second=0, microsecond=0
-                )
-                sleep_s = (tomorrow_check - now_pdt).total_seconds()
+                except Exception as e:
+                    log.exception("定时推送失败: %s", e)
+                if sent_ok:
+                    tomorrow = (now_pdt + timedelta(days=1)).replace(
+                        hour=0, minute=5, second=0, microsecond=0
+                    )
+                    sleep_s = (tomorrow - now_pdt).total_seconds()
+                else:
+                    log.info("简报 %s 未就绪（扫描通常 PDT 21:03 完成），%d 分钟后重试",
+                             today, _POLL_INTERVAL // 60)
+                    sleep_s = _POLL_INTERVAL
             else:
-                sleep_s = (target - now_pdt).total_seconds()
+                sleep_s = secs
             log.debug("scheduler 睡 %.0fs", sleep_s)
             await asyncio.sleep(max(60, sleep_s))
         except asyncio.CancelledError:

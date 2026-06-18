@@ -49,6 +49,12 @@
 - 二轮审计修复回归：4 命令对坏 search_index（list/str/None 元素）不崩有回复；全 `&`/全 `<`/混合/真实简报转义后 free+paid 均 ≤4096 且 `<b>` 平衡；告警推送失败保持 `last_state=0` 下轮重试且不错失试用、成功后才授予、`true→false` 复位总写库
 - 集成：`build_application()` 注册 24 命令无冲突；HELP HTML 标签平衡
 
+### Fixed — 定时推送从不触发（`bot.py` `_scheduler_loop`）
+- **现象**：6/16、6/17 收盘后未给任何订阅者推送（gh-pages 上 6-16/6-17 简报均存在 HTTP 200，排除缺数据）
+- **根因（两重）**：① 推送窗口设在 PDT 13:30（收盘后 30 分），但扫描在 **PDT 21:03**（收盘后 8h）才生成当日简报 → 13:30 fetch `daily-{today}.md` 恒 404；② skip 后仍把 `last_pushed_date` 标成今天并睡到次日 → 当日简报生成后也不再重试 → **定时推送实际从未成功过**（此前唯一送达的是手动 `/push_now` fallback）
+- **修复**：重写 `_scheduler_loop` 为「轮询直到就绪」——抽纯函数 `_scheduler_decision()`（窗口前 sleep / 已推 sleep 到次日 / 否则 push）；**仅在真正推送成功后才标记 `last_pushed_date`**；简报未就绪则 30 分钟后重试，跨午夜 `today` 翻页自然停止当日重试（无简报的周末/假日不会误推）。8 场景单测全过
+- **可选优化**：Railway 设 `PUSH_HOUR_PDT=20`（默认 13）可把轮询起点挪到接近扫描时间，减少无效轮询
+
 ### Added — `alpha_hive_bot/BOTFATHER_COMMANDS.md`（命令菜单清单 + 坑记录）
 - 新增可直接粘贴给 `@BotFather /setcommands` 的完整命令清单（19 条用户/查询/付费命令，排除 5 个管理员命令 `/invite /revoke /list /push_now /grant`）
 - **⚠️ 记录关键坑：`/setcommands` 整表覆盖（非追加）** —— 每次加新命令必须重贴整段，否则现有命令从菜单消失
