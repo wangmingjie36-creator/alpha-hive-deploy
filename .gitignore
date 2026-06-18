@@ -88,3 +88,7 @@ test_report_*.html
 .alpha_hive_finnhub_key
 .alpha_hive_av_key
 pheromone_fallback.jsonl
+
+# 本地 DB 备份（9.8MB+ 二进制，勿入库；扫描 git add -A 时跳过）
+pheromone.db.bak*
+*.db.bak_*
