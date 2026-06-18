@@ -1,19 +1,19 @@
 {
-  "ticker": "META",
-  "date": "2026-06-15",
-  "composite_score": 5.46,
+  "ticker": "VKTX",
+  "date": "2026-06-18",
+  "composite_score": 5.31,
   "direction": "neutral",
   "price_target": 0.0,
   "stop_loss": 0.0,
-  "entry_price": 593.47998046875,
+  "entry_price": 30.3799991607666,
   "agent_votes": {
-    "OracleBeeEcho": 8.056538461538462,
+    "OracleBeeEcho": 6.248076923076923,
+    "RivalBeeVanguard": 6.06,
+    "ChronosBeeHorizon": 6.046,
     "CodeExecutorAgent": 5.0,
     "BuzzBeeWhisper": 5.85,
-    "RivalBeeVanguard": 5.85,
-    "ChronosBeeHorizon": 5.62,
-    "QueenDistiller": 5.46,
-    "ScoutBeeNova": 5.1157
+    "ScoutBeeNova": 5.704949999999999,
+    "QueenDistiller": 5.31
   },
   "weights_used": {
     "signal": 0.2094,
@@ -23,9 +23,9 @@
     "risk_adj": 0.225
   },
   "actual_prices": {
-    "t1": 600.2100219726562,
+    "t1": null,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-06-19T00:43:26.113113"
+  "created_at": "2026-06-19T00:43:20.468064"
 }
