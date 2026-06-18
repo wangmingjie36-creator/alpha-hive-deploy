@@ -176,6 +176,34 @@ async def cmd_push_now(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_preview(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """管理员预览：只把简报发给自己（不推给其他订阅者），同时给出免费层 + Pro 两个版本。"""
+    cfg: BotConfig = ctx.application.bot_data["cfg"]
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or not _is_admin(user.id, cfg):
+        return
+    await update.message.reply_text("⏳ 生成预览（仅发给你，不推给其他订阅者）...")
+    from .push_job import fetch_latest_md, format_for_telegram
+    date, md = await fetch_latest_md(cfg.report_base_url, pdt_today())
+    if md is None:
+        await update.message.reply_text("⚠️ gh-pages 上暂无可用简报（最近 7 天都没找到）。")
+        return
+    bot = ctx.application.bot
+    # 标签与正文分开发，避免给 format 后的正文加前缀触发 4096 超限
+    await bot.send_message(chat_id=chat.id, text=f"💎 <b>【Pro/管理员 会收到的版本】</b> — {date}",
+                           parse_mode=ParseMode.HTML)
+    await bot.send_message(chat_id=chat.id, text=format_for_telegram(md, date, tier="paid"),
+                           parse_mode=ParseMode.HTML, disable_web_page_preview=False)
+    await bot.send_message(chat_id=chat.id, text="🆓 <b>【免费层 会收到的版本】</b>",
+                           parse_mode=ParseMode.HTML)
+    await bot.send_message(chat_id=chat.id, text=format_for_telegram(md, date, tier="free"),
+                           parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        f"✓ 预览完成（date={date}）。以上两条仅你可见，未推送给任何其他订阅者。\n"
+        f"确认无误后用 /push_now 广播给全部订阅者。")
+
+
 # ============================================================
 # 定时推送 job
 # ============================================================
@@ -277,6 +305,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("invite", cmd_invite))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CommandHandler("list", cmd_list))
+    app.add_handler(CommandHandler("preview", cmd_preview))
     app.add_handler(CommandHandler("push_now", cmd_push_now))
     # v0.2 查询命令（/scan /top /swarm /scorecard /fg）
     from .query_commands import register as _register_query

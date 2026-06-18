@@ -55,6 +55,10 @@
 - **修复**：重写 `_scheduler_loop` 为「轮询直到就绪」——抽纯函数 `_scheduler_decision()`（窗口前 sleep / 已推 sleep 到次日 / 否则 push）；**仅在真正推送成功后才标记 `last_pushed_date`**；简报未就绪则 30 分钟后重试，跨午夜 `today` 翻页自然停止当日重试（无简报的周末/假日不会误推）。8 场景单测全过
 - **可选优化**：Railway 设 `PUSH_HOUR_PDT=20`（默认 13）可把轮询起点挪到接近扫描时间，减少无效轮询
 
+### Added — 管理员 `/preview`（仅给自己发简报预览）
+- 新增管理员命令 `/preview`：拉最近一份简报，**只发给调用者本人**（免费层+Pro 两个版本对照），不推给其他订阅者；先自查内容再决定是否 `/push_now` 广播
+- `bot.py` 注册 + `config.HELP` 管理员段补充；10 项单测全过（仅发自己 chat / 非管理员忽略 / 无简报友好提示）
+
 ### Added — `alpha_hive_bot/BOTFATHER_COMMANDS.md`（命令菜单清单 + 坑记录）
 - 新增可直接粘贴给 `@BotFather /setcommands` 的完整命令清单（19 条用户/查询/付费命令，排除 5 个管理员命令 `/invite /revoke /list /push_now /grant`）
 - **⚠️ 记录关键坑：`/setcommands` 整表覆盖（非追加）** —— 每次加新命令必须重贴整段，否则现有命令从菜单消失

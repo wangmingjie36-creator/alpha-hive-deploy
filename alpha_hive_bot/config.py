@@ -134,7 +134,8 @@ HELP = (
     "/revoke &lt;user_id&gt; — 撤销用户访问\n"
     "/grant &lt;user_id&gt; &lt;月数&gt; — 收款后手动开通 Pro\n"
     "/list — 查看所有订阅者\n"
-    "/push_now — 立即推送当日简报\n\n"
+    "/preview — 仅给自己发简报预览（免费层+Pro 两版，不推给别人）\n"
+    "/push_now — 立即推送当日简报给<b>全部</b>订阅者\n\n"
 
     "⏰ <b>自动推送</b>\n"
     "每个美股交易日盘后 PDT 13:30（约北京 04:30）自动推送当日简报给订阅者。\n\n"
