@@ -184,23 +184,27 @@ async def cmd_preview(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not user or not chat or not _is_admin(user.id, cfg):
         return
     await update.message.reply_text("⏳ 生成预览（仅发给你，不推给其他订阅者）...")
-    from .push_job import fetch_latest_md, format_for_telegram
+    from .push_job import fetch_latest_md, format_for_telegram, format_pro_messages
     date, md = await fetch_latest_md(cfg.report_base_url, pdt_today())
     if md is None:
         await update.message.reply_text("⚠️ gh-pages 上暂无可用简报（最近 7 天都没找到）。")
         return
     bot = ctx.application.bot
+    pro_msgs = format_pro_messages(md, date)  # Pro 完整版分多条
     # 标签与正文分开发，避免给 format 后的正文加前缀触发 4096 超限
-    await bot.send_message(chat_id=chat.id, text=f"💎 <b>【Pro/管理员 会收到的版本】</b> — {date}",
-                           parse_mode=ParseMode.HTML)
-    await bot.send_message(chat_id=chat.id, text=format_for_telegram(md, date, tier="paid"),
-                           parse_mode=ParseMode.HTML, disable_web_page_preview=False)
-    await bot.send_message(chat_id=chat.id, text="🆓 <b>【免费层 会收到的版本】</b>",
+    await bot.send_message(
+        chat_id=chat.id,
+        text=f"💎 <b>【Pro/管理员 会收到的版本，共 {len(pro_msgs)} 条】</b> — {date}",
+        parse_mode=ParseMode.HTML)
+    for i, m in enumerate(pro_msgs):
+        await bot.send_message(chat_id=chat.id, text=m, parse_mode=ParseMode.HTML,
+                               disable_web_page_preview=(i < len(pro_msgs) - 1))
+    await bot.send_message(chat_id=chat.id, text="🆓 <b>【免费层 会收到的版本（单条摘要）】</b>",
                            parse_mode=ParseMode.HTML)
     await bot.send_message(chat_id=chat.id, text=format_for_telegram(md, date, tier="free"),
                            parse_mode=ParseMode.HTML)
     await update.message.reply_text(
-        f"✓ 预览完成（date={date}）。以上两条仅你可见，未推送给任何其他订阅者。\n"
+        f"✓ 预览完成（date={date}，Pro {len(pro_msgs)} 条 + 免费 1 条）。以上仅你可见，未推送给其他订阅者。\n"
         f"确认无误后用 /push_now 广播给全部订阅者。")
 
 

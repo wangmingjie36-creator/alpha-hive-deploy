@@ -7,6 +7,14 @@
 
 ## [0.31.0] — 2026-06-18 — Bot 付费分层（Free / Pro）+ 私下支付宝手动收款
 
+### Changed — Pro 简报推送改分多条（完整内容，`push_job.py` + `bot.py`）
+- **背景**：完整简报 26KB 远超单条 Telegram 4096 上限，旧 Pro 版单条截到 ~3000 字符（约 8 只标的处断）
+- `format_pro_messages(md, date, max_messages=3)` + `_paginate_lines()`：按行边界（绝不切断单行）贪心分块，Pro 最多 **3 条**（实测 26KB→3024/2912/3239 字符，覆盖摘要 + 全 10 只聪明钱 + 市场隐含预期），首条主标题/续条「续 k/n」/末条免责声明 + dashboard；超 3 条则末条标注「后续章节见 dashboard」
+- 免费版**保持单条摘要**（`format_for_telegram(tier='free')` 不变）
+- `push_to_all` 改 `paid_text:str` → `paid_texts:list`：抽 `_send_one()` 含 RetryAfter 重试；逐订阅者发多条，Forbidden 中途屏蔽即停发该用户后续分条 + 退订；返回新增 `parts_sent`（总消息条数）；`sent`=收到≥1条的订阅者数
+- `cmd_preview` 同步：Pro 多条逐发（标注「共 N 条」），免费单条
+- 测试：26KB→3 条均 ≤4096 且 `<b>` 平衡、内容无损（前 3 块拼接=body 前缀，10/10 标的覆盖）、短/空简报降级 1 条、分层投递 + Forbidden 中断 + parts_sent 全过
+
 ### Added — `alpha_hive_bot/` 会员分层（月 ¥128 / 年 ¥998，私下支付宝，管理员手动开通）
 
 **数据层**（`subscriber_db.py`）：
