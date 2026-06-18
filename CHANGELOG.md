@@ -49,9 +49,15 @@
 - 二轮审计修复回归：4 命令对坏 search_index（list/str/None 元素）不崩有回复；全 `&`/全 `<`/混合/真实简报转义后 free+paid 均 ≤4096 且 `<b>` 平衡；告警推送失败保持 `last_state=0` 下轮重试且不错失试用、成功后才授予、`true→false` 复位总写库
 - 集成：`build_application()` 注册 24 命令无冲突；HELP HTML 标签平衡
 
+### Added — `alpha_hive_bot/BOTFATHER_COMMANDS.md`（命令菜单清单 + 坑记录）
+- 新增可直接粘贴给 `@BotFather /setcommands` 的完整命令清单（19 条用户/查询/付费命令，排除 5 个管理员命令 `/invite /revoke /list /push_now /grant`）
+- **⚠️ 记录关键坑：`/setcommands` 整表覆盖（非追加）** —— 每次加新命令必须重贴整段，否则现有命令从菜单消失
+- BotFather 仅设全局菜单；管理员命令不 advertise；`/trend //movers` 保留作免费→Pro 转化入口
+
 ### 部署
 - 待 push + Railway Redeploy 生效（`_migrate` 首次连接自动 ALTER 加列）
 - ⚠️ 收款流程：用户 `/upgrade` → 私下支付宝付款 → 把 user_id 发管理员 → 管理员 `/grant <user_id> <月数>`
+- （可选）`@BotFather /setcommands` 同步命令菜单，清单见 `BOTFATHER_COMMANDS.md`
 
 ---
 
