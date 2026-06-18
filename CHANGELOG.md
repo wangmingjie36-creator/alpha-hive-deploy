@@ -5,6 +5,56 @@
 
 ---
 
+## [0.31.0] — 2026-06-18 — Bot 付费分层（Free / Pro）+ 私下支付宝手动收款
+
+### Added — `alpha_hive_bot/` 会员分层（月 ¥128 / 年 ¥998，私下支付宝，管理员手动开通）
+
+**数据层**（`subscriber_db.py`）：
+- `_migrate()` — `subscribers` 表 `ALTER ADD` 三列 `tier`(default 'free') / `tier_expires_at` / `trial_used`，`PRAGMA table_info` 检测幂等，对现有订阅数据零影响（`CREATE TABLE IF NOT EXISTS` 不会给已存在表加列，故用 ALTER）
+- tier 方法：`get_tier`（paid 过期按 UTC 字符串字典序比较自动→free）/ `get_tier_info` / `set_tier` / `has_used_trial` / `mark_trial_used`
+- `list_active_subscribers()` — 含 user_id 的 active 订阅者，供分层推送按 tier 取文案
+
+**命令层**（`query_commands.py`）：
+- 网关助手：`_effective_tier`（管理员恒为 paid）/ `_require_paid`（Pro-only 守卫）/ `_watch_cap` / `_alert_cap`
+- 命令分层：`/scan`（免费=综合分+方向；Pro=+5维雷达+7蜂投票+ML链接）、`/top`（免费=Top3；Pro=全榜+共振+方向分布）
+- **新 Pro-only 命令**：`/swarm`（七蜂分歧）、`/trend <代码>`（综合分历史走势 sparkline）、`/movers`（较上一交易日分数变动榜+方向翻转）
+- 额度上限按 tier：关注 免费 3 / Pro 30；告警 免费 1 / Pro 20（`cmd_watch` / `cmd_alert` 命中免费上限提示升级）
+- **付费命令**：`/upgrade`（展示价格+支付宝引导+回显 user_id，并 DM 通知管理员）、`/mytier`（查当前等级+到期）、管理员 `/grant <user_id> <月数>`（收款后手动开通，月数 1~60，目标不在库则自动加白名单）
+- **行为锚定试用**：免费用户的告警在 `evaluate_alerts` 边沿命中 → 自动解锁 7 天 Pro 体验（每人一次）。仅限"从未有过任何 Pro 窗口"的纯免费用户（`effective!='paid'` ∧ `trial_used=0` ∧ `expires is None`），杜绝流失付费者/已用试用者重复领取，管理员不触发
+
+**推送层**（`push_job.py`）：
+- `format_for_telegram(md, date, tier)` — 免费层短预算（900 字符）+ 升级 CTA；Pro 完整版（3000）
+- `push_to_all` 支持分层投递（`free_text` / `paid_text` / `cfg`），按每个订阅者有效 tier 选文案（管理员→paid，过期 paid→free），保留单文案模式向后兼容
+- `run_daily_push` 同时构建免费/Pro 两版
+
+**文案**（`config.py`）：`HELP` 重写，按 🆓/💎Pro 标注各命令权限 + Pro 会员说明 + `/grant` 管理员命令；保留"研究数据访问、不构成投资建议"合规口径
+
+### Fixed — 两轮对抗审计共修复 6 项
+
+**首轮（单 agent 对抗评审）3 项：**
+- **P0 试用泄漏**：原 trial 守卫仅查 `get_tier != 'paid'`，导致流失付费用户（real `/grant` 后过期）告警命中时仍能白嫖 7 天试用 → 改为 `effective != 'paid' ∧ not trial_used ∧ expires is None` 三重守卫（仅纯免费用户）
+- **P1 额度未在评估期生效**：`_watch_cap`/`_alert_cap` 仅在 add 时拦截，Pro 过期后旧的 20 条告警仍永久触发 → `evaluate_alerts` 新增按当前有效 tier 的逐用户额度（最早创建优先 `sorted(id)[:cap]`），降级后只评估免费额度内规则
+- **P1 `cmd_top` 越界**：`dir_counts` 短数组（1~2 元素）→ `dc[2]` IndexError 致 Pro 用户 `/top` 崩溃 → 改 `(list(...)+[0,0,0])[:3]` 补齐
+
+**二轮（13 agent / 6 维并行评审 + 逐条对抗验证）3 项 P2：**
+- **`search_index` 坏元素崩溃**：`/scan //top //swarm //mywatch` 用 `{x.get("ticker"):x for x ...}` 无 `isinstance` 守卫（同文件 scores/fg_history 等字段均有）→ 远程 gh-pages JSON 含非 dict 元素时 4 命令静默失败 → 抽 `_index_by_ticker(data)` helper 加 `if isinstance(x, dict)`，4 处统一
+- **推送无转义后长度钳制**：`MAX_MESSAGE_CHARS=3800` 死代码从未生效；`format_for_telegram` 仅在 escape **前**按 3000 截断，`html.escape` 膨胀（`&`→`&amp;`）后极端高特殊字符简报可超 Telegram 4096 → BadRequest 整条丢弃 → 新增 `_clamp_html()` 转义后二次钳制（保实体/标签边界 + 补齐未闭合 `<b>`），实测全 `&`/全 `<`/混合简报转义后均 ≤4096（正常简报实测最长 3367，不触发）
+- **告警推送失败错失一次性试用**：边沿 `set_alert_state` 在 try **外**，`TelegramError` 时仍写 `last_state=1` 消费边沿 → 纯免费用户错失 7 天试用 → 重构为推送成功后才在 try **内** 提交 `last_state=1`；`true→false` 复位走 `elif` 总是写库
+
+### 测试
+- DB tier free/paid/过期/trial + 迁移幂等（重复 init 不崩）
+- 38 项行为测试全过：网关分层、/scan·/top 免费 vs Pro 输出差异、/swarm·/trend·/movers Pro-only、额度上限、行为试用、/upgrade·/mytier·/grant（含非管理员忽略 + 参数校验）
+- 分层推送：免费版含 CTA 且 <4096、Pro 完整版、过期自动降级、单文案向后兼容
+- 首轮审计修复回归：trial 仅给纯免费用户（流失付费/流失试用/管理员均不触发）、eval-time 额度（Pro 期 checked=3 → 过期 checked=1）、短 dir_counts 不崩
+- 二轮审计修复回归：4 命令对坏 search_index（list/str/None 元素）不崩有回复；全 `&`/全 `<`/混合/真实简报转义后 free+paid 均 ≤4096 且 `<b>` 平衡；告警推送失败保持 `last_state=0` 下轮重试且不错失试用、成功后才授予、`true→false` 复位总写库
+- 集成：`build_application()` 注册 24 命令无冲突；HELP HTML 标签平衡
+
+### 部署
+- 待 push + Railway Redeploy 生效（`_migrate` 首次连接自动 ALTER 加列）
+- ⚠️ 收款流程：用户 `/upgrade` → 私下支付宝付款 → 把 user_id 发管理员 → 管理员 `/grant <user_id> <月数>`
+
+---
+
 ## [0.30.0] — 2026-06-17 — Bot v0.3：个人关注列表 + 阈值告警
 
 ### Added — `alpha_hive_bot/`（6 新命令，限 active 订阅者）

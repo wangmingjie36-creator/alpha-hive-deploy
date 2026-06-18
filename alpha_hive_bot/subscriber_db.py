@@ -61,6 +61,19 @@ class SubscriberDB:
         self.path = path
         with self._conn() as c:
             c.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """v0.31 付费分层：给 subscribers 加 tier 列（CREATE IF NOT EXISTS 不会改已存在表，
+        故新列需 ALTER；用 PRAGMA 检测幂等，对现有订阅数据零影响）。"""
+        with self._conn() as c:
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(subscribers)").fetchall()}
+            if "tier" not in cols:
+                c.execute("ALTER TABLE subscribers ADD COLUMN tier TEXT NOT NULL DEFAULT 'free'")
+            if "tier_expires_at" not in cols:
+                c.execute("ALTER TABLE subscribers ADD COLUMN tier_expires_at TEXT")
+            if "trial_used" not in cols:
+                c.execute("ALTER TABLE subscribers ADD COLUMN trial_used INTEGER NOT NULL DEFAULT 0")
 
     @contextmanager
     def _conn(self):
@@ -158,6 +171,15 @@ class SubscriberDB:
             ).fetchall()
             return [r["chat_id"] for r in rows]
 
+    def list_active_subscribers(self) -> list[dict]:
+        """所有 active 且有 chat_id 的订阅者（含 user_id），供分层推送按 tier 取文案。"""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT user_id, chat_id FROM subscribers "
+                "WHERE status='active' AND chat_id IS NOT NULL"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def list_all(self) -> list[dict]:
         with self._conn() as c:
             rows = c.execute(
@@ -236,3 +258,49 @@ class SubscriberDB:
     def set_alert_state(self, rule_id: int, state: int) -> None:
         with self._conn() as c:
             c.execute("UPDATE alert_rules SET last_state=? WHERE id=?", (1 if state else 0, rule_id))
+
+    # ── v0.31 付费分层 ────────────────────────────────
+    def get_tier(self, user_id: int) -> str:
+        """返回有效 tier：'paid' 或 'free'。paid 但已过期 → 视为 free。"""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT tier, tier_expires_at FROM subscribers WHERE user_id=?", (user_id,)
+            ).fetchone()
+        if not row:
+            return "free"
+        tier = row["tier"] or "free"
+        if tier == "paid" and row["tier_expires_at"]:
+            if self._now() > row["tier_expires_at"]:  # 字符串时间可直接比较（同为 UTC %Y-%m-%d %H:%M:%S）
+                return "free"
+        return tier
+
+    def get_tier_info(self, user_id: int) -> dict:
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT tier, tier_expires_at, trial_used FROM subscribers WHERE user_id=?", (user_id,)
+            ).fetchone()
+        if not row:
+            return {"tier": "free", "expires": None, "trial_used": 0, "effective": "free"}
+        return {
+            "tier": row["tier"] or "free",
+            "expires": row["tier_expires_at"],
+            "trial_used": row["trial_used"] or 0,
+            "effective": self.get_tier(user_id),
+        }
+
+    def set_tier(self, user_id: int, tier: str, expires_at: Optional[str]) -> None:
+        with self._conn() as c:
+            c.execute(
+                "UPDATE subscribers SET tier=?, tier_expires_at=?, updated_at=? WHERE user_id=?",
+                (tier, expires_at, self._now(), user_id),
+            )
+
+    def has_used_trial(self, user_id: int) -> bool:
+        with self._conn() as c:
+            row = c.execute("SELECT trial_used FROM subscribers WHERE user_id=?", (user_id,)).fetchone()
+        return bool(row and row["trial_used"])
+
+    def mark_trial_used(self, user_id: int) -> None:
+        with self._conn() as c:
+            c.execute("UPDATE subscribers SET trial_used=1, updated_at=? WHERE user_id=?",
+                      (self._now(), user_id))
