@@ -5,6 +5,37 @@
 
 ---
 
+## [0.32.0] — 2026-06-21 — 美股交易日护栏（周末/假日跳过）+ ML 报告日期 PDT 化（根治 +1 漂移）
+
+### Added — 交易日护栏接入 ML / 日报管线
+- `generate_ml_report.main()` 与 `alpha_hive_daily_report.main()` 在 parse_args 后接入 `is_trading_day`：以 **PDT 日期**判断，周末 / 美股假日（Juneteenth、Good Friday、感恩节…）直接跳过、不生成当日报告。
+- 均新增 `--force` 旗标可强制生成；**fail-open**（交易日检查异常时继续生成，绝不误跳过有效交易日）。
+- 日报护栏放行 `--samples-only`（周日 cron 样本积累，不产 dated 报告 / 不部署）与 `--check-earnings`，避免误伤 `alpha-hive-sample-accumulator`。
+- 原孤儿模块 `is_trading_day.py`（10 个 NYSE 假日 + Easter/observed 规则）首次接入主管线。
+- 验证：美西周六实跑两脚本均干净跳过（退出码 0，不进扫描、零文件生成）；交易日历 6/18 交易 / 6/19 Juneteenth / 6/20-21 周末 / 6/22 交易 逐日正确。
+
+### Fixed — `generate_ml_report.py` 全程 `datetime.now()` 致日期 +1 漂移（幽灵报告根因）
+- 用户在中国、Mac 时钟比美西快 ~15h，`datetime.now()` 把交易日整体 +1：周四收盘后跑 → 本机已周五 → 报告错标次日、撞上 6/19 Juneteenth 休市 → 生成 10 份空数据幽灵 ML 报告。
+- 6 处改用 PDT：`self.timestamp`→`_pdt_now()`（aware datetime, America/Los_Angeles）；ML 模型缓存键 / `.swarm_results_{date}` 查找 / checkpoint 匹配 / 部署 commit 日期 → `pdt_today()`。
+- 连带修复：`.swarm_results_{date}.json` 原按本机 +1 日期查找 → 找不到当日蜂群数据 → 幽灵报告才全是空的；改 PDT 后正确命中（与 [0.31.1] 的 `swarm_source` 歧义同根）。
+
+### Removed — 6/19 幽灵 ML 报告（存量清理）
+- `git rm` main + gh-pages 各 10 份 `*-ml-enhanced-2026-06-19.html`（Juneteenth 休市无交易）+ 10 份本地 `analysis-*-2026-06-19.json`。线上实测 6/19→404、6/18→200；index.html / dashboard-data.json 零引用。commit `602dc7d` / `051d54f`。
+
+---
+
+## [0.31.1] — 2026-06-21 — 修复 collect_data 读空 swarm（stale snapshot 事故）
+
+### Fixed — `collect_data.py` 蜂群分恒为 0.0（根因：读错数据源）
+- **事故**：`nvda-data-extract` 调度提炼出的 `NVDA_raw.json` 蜂群 `final_score` 全为 `0.0 / neutral`，期权字段全 null，导致误判"数据停在 6/16 / 6/19 是空快照"。实际 6/17、6/18 数据完整存在。
+- **根因**：当前管线把蜂群评分写入独立的 `.swarm_results_{date}.json`，而 `analysis-{ticker}-ml-{date}.json` 内 `swarm_results` **恒为空字典**（6/16、6/19 实测均空）。`collect_data.extract_raw` 仍按旧格式读 `data['swarm_results']` → 全 0。属长期静默 bug，非单次事故。
+- **修复**：新增 `find_swarm_results(ticker, report_date)` — 选取日期 ≤ report_date 且含该 ticker 的最新 `.swarm_results_*.json`（无则退回含该 ticker 的最新一份）；`main()` 在 `swarm_results` 为空时自动 graft 该 ticker 记录，并在 `_meta.swarm_source` 标注来源文件。`.swarm_results` 的 per-ticker 结构与 `extract_raw` 期望完全兼容（顶层 final_score/direction/resonance/agent_breakdown + agent_details.*.details）。
+- **附带修复**：`main()` 打印 `OI: {total_oi:,}` 在 `total_oi=None` 时 `TypeError` 崩溃 → 改 `isinstance` 守卫，None 显示 `—`。
+- **验证**：重跑 `collect_data.py NVDA` → `NVDA_raw.json` 补全自 `.swarm_results_2026-06-18.json`，score `5.25 / bullish`，OI 85,200，P/C 0.54，IV rank 53.45，4 笔异常流。
+- **未解**：收盘价回填仍需联网的用户 Mac 运行；Cowork VM 屏蔽 Yahoo Finance（403）。`analysis` 文件名比 `.swarm_results` 前移一天（6/19 标签对应 6/18 交易日），属管线既有命名习惯，本次以 swarm_source 显式标注规避歧义。
+
+---
+
 ## [0.31.0] — 2026-06-18 — Bot 付费分层（Free / Pro）+ 私下支付宝手动收款
 
 ### Changed — Pro 简报推送改分多条（完整内容，`push_job.py` + `bot.py`）

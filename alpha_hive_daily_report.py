@@ -2074,8 +2074,32 @@ def main():
         action='store_true',
         help='跳过询问，直接使用 LLM 混合模式'
     )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='忽略美股交易日护栏，即使周末/假日也强制生成简报'
+    )
 
     args = parser.parse_args()
+
+    # ── 美股交易日护栏 ──
+    # 周末 / 美股假日（Juneteenth、Good Friday…）跳过完整简报生成，不对无交易日产出幽灵报告。
+    # 用 PDT 日期判断（= 美股交易日），不依赖本机时区（用户在中国，Mac 时钟 +15h）。
+    # 例外：--samples-only（周日 cron 故意跑样本积累，且不生成 dated 报告/不部署）、
+    #       --check-earnings（财报检查工具）、--force 均放行。
+    # fail-open：检查本身异常时继续生成，宁可多生成也绝不误跳过有效交易日。
+    if not (args.samples_only or args.check_earnings or args.force):
+        try:
+            from datetime import date as _date_guard
+            from hive_logger import pdt_today as _pdt_today_guard
+            from is_trading_day import is_trading_day as _is_trading_day_guard
+            _trd, _rsn = _is_trading_day_guard(_date_guard.fromisoformat(_pdt_today_guard()))
+            if not _trd:
+                print(f"⏭️  跳过简报生成：{_rsn}（如需强制生成加 --force）")
+                _log.warning("交易日护栏跳过简报: %s", _rsn)
+                return {"skipped": True, "reason": _rsn}
+        except Exception as _e_guard:
+            _log.warning("交易日检查异常（%s），继续生成以防误跳过有效交易日", _e_guard)
 
     # ── LLM 模式选择（opt-in；CLAUDE.md 硬约束：严禁 key 存在就自动开 LLM）──
     # 用户事故 2026-03-16：默认 LLM 导致 $0.47 静默消费，修复为显式 --use-llm + 二次 y/N 确认

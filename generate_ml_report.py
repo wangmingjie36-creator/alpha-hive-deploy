@@ -16,9 +16,24 @@ from ml_predictor import (
     TrainingData,
 )
 from config import WATCHLIST
-from hive_logger import PATHS, get_logger
+from hive_logger import PATHS, get_logger, pdt_today
 
 _log = get_logger("ml_report")
+
+
+def _pdt_now():
+    """美西（PDT/PST）当前时间，返回 aware datetime。
+
+    用户在中国、Mac 系统时钟比美西快约 15h，本机 datetime.now() 会把美股交易日
+    整体 +1 漂移（例：周四收盘后跑，本机已是周五 → 报告被错标为次日，甚至撞上
+    Juneteenth 这类休市日，生成「幽灵报告」）。报告日期一律以交易所时区为准。
+    tzdata 不可用时回退本地，保持向后兼容。
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/Los_Angeles"))
+    except Exception:
+        return datetime.now()
 
 
 class MLEnhancedReportGenerator:
@@ -37,7 +52,7 @@ class MLEnhancedReportGenerator:
     def __init__(self):
         self.analyzer = AdvancedAnalyzer()
         self.ml_service = MLPredictionService()
-        self.timestamp = datetime.now()
+        self.timestamp = _pdt_now()  # 美西时区，避免本机 +15h 漂移导致报告日期错标
         self._training_data_source = "unknown"  # "real" | "sample" | "unknown"
 
         # ⭐ Task 3: 初始化异步文件写入线程池（全局单例）
@@ -46,7 +61,7 @@ class MLEnhancedReportGenerator:
             atexit.register(MLEnhancedReportGenerator._file_writer_pool.shutdown, wait=True)
 
         # ⭐ Task 2: 智能缓存策略（内存 + 磁盘）
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = pdt_today()
 
         # 策略 1：检查内存缓存（同一进程内的快速复用）
         if today in self._model_cache:
@@ -1916,8 +1931,28 @@ def main():
         action='store_true',
         help='分析配置中的全部监控列表'
     )
+    parser.add_argument(
+        '--force',
+        action='store_true',
+        help='忽略美股交易日护栏，即使周末/假日也强制生成'
+    )
 
     args = parser.parse_args()
+
+    # ── 美股交易日护栏 ──
+    # 周末 / 美股假日（Juneteenth、Good Friday、感恩节…）跳过，不对无交易日生成幽灵报告。
+    # 用 PDT 日期判断（= 美股交易日），不依赖本机时区（用户在中国，Mac 时钟 +15h）。
+    # fail-open：检查本身异常时继续生成，宁可多生成也绝不误跳过有效交易日。
+    if not args.force:
+        try:
+            from datetime import date as _date
+            from is_trading_day import is_trading_day as _is_trading_day
+            _trading, _reason = _is_trading_day(_date.fromisoformat(pdt_today()))
+            if not _trading:
+                _log.warning("⏭️  跳过 ML 报告生成：%s（如需强制生成加 --force）", _reason)
+                return
+        except Exception as _e:
+            _log.warning("交易日检查异常（%s），继续生成以防误跳过有效交易日", _e)
 
     # 确定要分析的标的
     if args.all_watchlist:
@@ -1946,7 +1981,7 @@ def main():
 
     # 加载今日蜂群扫描结果（与 markdown 报告同步）
     swarm_data = {}
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = pdt_today()  # PDT 日期，与 daily_report 写出的 .swarm_results_{date} 对齐
     swarm_json = report_dir / f".swarm_results_{today_str}.json"
     if swarm_json.exists():
         try:
@@ -1957,7 +1992,7 @@ def main():
             _log.debug("蜂群 JSON 加载失败: %s", e)
     if not swarm_data:
         # 尝试从 checkpoint 恢复（v0.15.3: 仅接受今日 checkpoint）
-        _today = datetime.now().strftime("%Y-%m-%d")
+        _today = pdt_today()
         for ckpt in report_dir.glob(".checkpoint_*.json"):
             try:
                 with open(ckpt) as f:
@@ -2134,7 +2169,7 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     if successful_count == 0:
         return
     repo = str(Path(__file__).parent)
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = pdt_today()
     _ml_pat = _re.compile(r"^alpha-hive-\w+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$")
     _CORE = {"index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml", ".nojekyll"}
     files = [f for f in os.listdir(repo) if f in _CORE or _ml_pat.match(f)
