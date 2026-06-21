@@ -5,6 +5,15 @@
 
 ---
 
+## [0.32.4] — 2026-06-21 — 修复 2 个老化测试 fixture（时间炸弹 / 文件名格式）
+
+### Fixed — test_pipeline.py 两个 pre-existing 失败（HEAD 上即失败，与近期改动无关，纯测试侧）
+- `test_cleanup_deletes_old_records`：写死的"新记录"日期 `2026-03-01` 随真实时间流逝掉出 `get_recent_memories(days=30)` 窗口（现已 ~111 天前）→ 改用动态 `datetime.now()` + 参数化插入。
+- `test_valid_checkpoint`：fixture 文件名 `.checkpoint_test.json` 无日期，但生产 `_load_checkpoint`(v0.15.3) 要求文件名含今天日期（防跨天 stale 复用）→ 改为 `.checkpoint_test_{today}.json`。
+- 均为测试 fixture 老化，生产逻辑本就正确。test_pipeline.py 现 **41/41 全过**。
+
+---
+
 ## [0.32.3] — 2026-06-21 — dashboard 门面只算核心实盘策略（剔除周日 sample-accumulator 样本）
 
 ### Changed — 门面业绩口径统一为核心交易日（option a 完整方案）

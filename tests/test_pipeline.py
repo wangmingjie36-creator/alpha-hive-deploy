@@ -585,12 +585,14 @@ class TestMemoryStoreCleanup:
             VALUES ('old_1', 's1', '2024-01-01', 'NVDA', 'ScoutBeeNova',
                     'bullish', 'test', 'test', 7.0)
         """)
+        # 动态"今天"，避免写死日期随真实时间流逝掉出 get_recent_memories(days=30) 窗口（时间炸弹）
+        _recent = datetime.now().strftime("%Y-%m-%d")
         conn.execute("""
             INSERT INTO agent_memory (memory_id, session_id, date, ticker, agent_id,
                                       direction, discovery, source, self_score)
-            VALUES ('new_1', 's2', '2026-03-01', 'TSLA', 'OracleBeeEcho',
+            VALUES ('new_1', 's2', ?, 'TSLA', 'OracleBeeEcho',
                     'bearish', 'test', 'test', 6.0)
-        """)
+        """, (_recent,))
         conn.commit()
         conn.close()
 
@@ -765,8 +767,9 @@ class TestLoadCheckpoint(_ReporterMixin):
     def test_valid_checkpoint(self, monkeypatch, tmp_path):
         from alpha_hive_daily_report import _SwarmContext
         reporter = self._make_reporter(monkeypatch, tmp_path)
-        ckpt_file = tmp_path / ".checkpoint_test.json"
         today = datetime.now().strftime("%Y-%m-%d")
+        # 生产 _load_checkpoint(v0.15.3) 要求文件名含今天日期（防跨天复用 stale），fixture 文件名也带上
+        ckpt_file = tmp_path / f".checkpoint_test_{today}.json"
         ckpt_data = {
             "results": {"NVDA": {"final_score": 8.5}},
             "targets": ["NVDA"],
