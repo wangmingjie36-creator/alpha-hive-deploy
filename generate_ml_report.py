@@ -188,10 +188,15 @@ class MLEnhancedReportGenerator:
             if not self._model_file.exists():
                 return False
 
-            # 检查文件修改时间是否是今天
+            # 检查文件修改时间是否是今天（PDT 口径，与 today=pdt_today() 一致）。
+            # 否则本机上海时区渲染的 file_date 与 PDT today 在晚间窗口恒不相等 → 缓存永不命中、每次重训。
             import os
             mtime = os.path.getmtime(str(self._model_file))
-            file_date = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+            try:
+                from zoneinfo import ZoneInfo
+                file_date = datetime.fromtimestamp(mtime, ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+            except Exception:
+                file_date = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
             return file_date == today
         except (FileNotFoundError, OSError, KeyError, ValueError, json.JSONDecodeError) as e:
             # 缓存检查失败，重新训练
@@ -384,7 +389,7 @@ class MLEnhancedReportGenerator:
 
         return TrainingData(
             ticker=ticker,
-            date=datetime.now().isoformat(),
+            date=_pdt_now().isoformat(),  # 与本文件其余日期口径统一为 PDT（该字段不参与下游日期逻辑）
             crowding_score=crowding_score,
             catalyst_quality=catalyst_quality,
             momentum_5d=momentum_5d,

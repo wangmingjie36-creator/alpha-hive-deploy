@@ -5,6 +5,22 @@
 
 ---
 
+## [0.32.1] — 2026-06-21 — 0.32.0 二次对抗审计修复（18 agent / 5 维度）
+
+### Fixed — 审计确认的真实缺陷
+- **`is_trading_day.py` 元旦特例 bug（P2，会误跳真实交易日，最危险方向）**：元旦落周六时 `_observed` 错误回滚到前一周五，但 NYSE 规则下 12/31 照常开盘（史实 2021-12-31 标普收 4766.18 正常交易）。改为单独处理 New Year：落周六不回滚、落周日顺延周一（1/2）、周一~五当天休市。验证 2021/2027/2032-12-31 恢复为交易日，2023-01-02 回归保护通过，2026/2027 全 10 假日无损。下次实盘命中 2027-12-31。
+- **`generate_ml_report._check_disk_cache` 缓存失效回归（P2，本次 0.32.0 引入）**：缓存键改 `pdt_today()`（PDT）后，line 194 `file_date` 仍按本机上海时区渲染 → 晚间扫描窗口 `file_date != today` 恒成立、磁盘缓存永不命中、每进程重训 ML 模型。改为 `datetime.fromtimestamp(mtime, ZoneInfo("America/Los_Angeles"))`（fallback 裸渲染），与 today 同口径。纯性能修复，结果本就正确。
+- **`generate_ml_report.py:387` 残留 `datetime.now()`（P3）**：`_prepare_ml_input` 的 `TrainingData.date`（死字段，不参与下游日期逻辑）改 `_pdt_now().isoformat()`。本文件除 `_pdt_now()` fallback 外已无裸 `datetime.now()`。
+
+### Changed — 文档准确性
+- [0.32.0] 措辞「6 处改用 PDT」更正为「5 处既有 datetime.now() 漂移点转 PDT（+ 护栏新增 1 处 pdt_today() 引用）」，与实际枚举对齐。
+
+### 待办（审计发现，需用户确认后再动，本次未改）
+- **部署 glob 无交易日过滤**：`generate_ml_report._sync_ghpages` / `report_deployer.deploy_static_to_ghpages` 用正则 glob 工作区所有日期的 ML HTML 部署 → 任意非交易日 ML 文件会被反复 push 到 gh-pages。存量幽灵残留：**2026-03-01（周日，9 份，被 index.html + dashboard-data.json 引用）** + **2026-05-24（周日，3 份，零引用）**。根治 = 两处部署 glob 加 `is_trading_day` 过滤 + 清存量（03-01 需同步清 index/dashboard 引用避免死链，05-24 可直接删）。
+- **tzdata 缺失 fallback 风险**：`pdt_today()`/`_pdt_now()` 在无 zoneinfo/tzdata 时回退本机（上海）日期判交易日，假日前夜可能误跳有效交易日。当前两脚本只在有 tzdata 的用户 Mac 跑，不可触发；属健壮性加固项（可考虑 requirements 加 tzdata 或 fallback 改 UTC 换算）。
+
+---
+
 ## [0.32.0] — 2026-06-21 — 美股交易日护栏（周末/假日跳过）+ ML 报告日期 PDT 化（根治 +1 漂移）
 
 ### Added — 交易日护栏接入 ML / 日报管线
@@ -16,7 +32,7 @@
 
 ### Fixed — `generate_ml_report.py` 全程 `datetime.now()` 致日期 +1 漂移（幽灵报告根因）
 - 用户在中国、Mac 时钟比美西快 ~15h，`datetime.now()` 把交易日整体 +1：周四收盘后跑 → 本机已周五 → 报告错标次日、撞上 6/19 Juneteenth 休市 → 生成 10 份空数据幽灵 ML 报告。
-- 6 处改用 PDT：`self.timestamp`→`_pdt_now()`（aware datetime, America/Los_Angeles）；ML 模型缓存键 / `.swarm_results_{date}` 查找 / checkpoint 匹配 / 部署 commit 日期 → `pdt_today()`。
+- 5 处既有 `datetime.now()` 漂移点转 PDT：`self.timestamp`→`_pdt_now()`（aware datetime, America/Los_Angeles）；ML 模型缓存键 / `.swarm_results_{date}` 查找 / checkpoint 匹配 / 部署 commit 日期 → `pdt_today()`（另护栏新增 1 处 `pdt_today()` 引用）。
 - 连带修复：`.swarm_results_{date}.json` 原按本机 +1 日期查找 → 找不到当日蜂群数据 → 幽灵报告才全是空的；改 PDT 后正确命中（与 [0.31.1] 的 `swarm_source` 歧义同根）。
 
 ### Removed — 6/19 幽灵 ML 报告（存量清理）

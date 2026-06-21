@@ -72,8 +72,14 @@ def us_market_holidays(year: int) -> dict[date, str]:
     """
     holidays = {}
 
-    # 1. New Year's Day (Jan 1)
-    holidays[_observed(date(year, 1, 1))] = "元旦 New Year's Day"
+    # 1. New Year's Day (Jan 1) — NYSE 特例：落周六【不】回滚到前一周五（12/31 照常开盘，
+    #    史实如 2021-12-31 正常交易）；落周日才顺延到周一（1/2）；周一~周五当天休市。
+    _ny = date(year, 1, 1)
+    if _ny.weekday() == 6:        # 周日 → 观察到 1/2（周一）
+        holidays[date(year, 1, 2)] = "元旦 New Year's Day"
+    elif _ny.weekday() < 5:       # 周一~周五 → 当天休市
+        holidays[_ny] = "元旦 New Year's Day"
+    # 周六：NYSE 不回滚，不加休市日
 
     # 2. MLK Day (3rd Monday in January)
     holidays[_nth_weekday(year, 1, 0, 3)] = "马丁·路德·金纪念日 MLK Day"
