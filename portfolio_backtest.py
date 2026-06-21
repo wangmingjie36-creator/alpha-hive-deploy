@@ -71,6 +71,11 @@ class BacktestConfig:
     macro_gate: bool = True                # 启用宏观政体门控
     spy_ma_days: int = 20                  # SPY 均线天数
     spy_below_ma_pct: float = 3.0          # SPY < MA × (1 - pct%) → risk-off
+    # ── v32.3: dashboard 门面口径 ──
+    # True = 剔除非交易日预测（周日 sample-accumulator 扩展池样本 + 漂移幽灵），
+    # 让 dashboard 净值/胜率只反映核心实盘策略。默认 False：optimizer / factor_attribution /
+    # bootstrap 等研究路径保留全样本（样本积累本就要这些数据）。仅 dashboard 调用设 True。
+    exclude_nontrading_days: bool = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -326,6 +331,24 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
     preds = load_verified_predictions(horizon=cfg.horizon)
     if not preds:
         return {"error": "无已验证预测数据"}
+
+    # v32.3: dashboard 门面口径 —— 剔除非交易日预测（周日 sample-accumulator 扩展池样本 +
+    # 漂移幽灵）。默认 False（研究路径保留全样本）。fail-open 逐行：日期解析失败的行保留。
+    if cfg.exclude_nontrading_days:
+        try:
+            from is_trading_day import is_trading_day as _itd_pb
+            from datetime import date as _d_pb
+
+            def _keep_pb(_p):
+                try:
+                    return _itd_pb(_d_pb.fromisoformat(_p.get("date", "")))[0]
+                except Exception:
+                    return True
+            preds = [_p for _p in preds if _keep_pb(_p)]
+        except Exception:
+            pass
+        if not preds:
+            return {"error": "无已验证预测数据"}
 
     # 按日期分组
     by_date: Dict[str, List[Dict]] = defaultdict(list)

@@ -5,6 +5,25 @@
 
 ---
 
+## [0.32.3] — 2026-06-21 — dashboard 门面只算核心实盘策略（剔除周日 sample-accumulator 样本）
+
+### Changed — 门面业绩口径统一为核心交易日（option a 完整方案）
+- `portfolio_backtest.BacktestConfig` 新增 `exclude_nontrading_days: bool = False`（默认不变）；`run_backtest` 按 flag 过滤非交易日预测（fail-open 逐行）。**仅 dashboard 的 2 个 run_backtest 调用设 True**；optimizer / factor_attribution / bootstrap 研究路径保留全样本（默认 False，逐字节不变）。
+- `backtester.get_accuracy_stats` 新增 `exclude_nontrading_days` 参数（`date NOT IN(非交易日)` 子句过滤 3 个聚合）；dashboard:645 设 True。其它调用者（日报/swarm/内部/测试）默认 False 不受影响。
+- `dashboard_renderer`：净值曲线 `_eq_rows` + exit 计数 + 6 个 F11 pill 查询（周胜率走势/按方向/best3/worst3/Sharpe pill/连胜）全部接入同一"排除非交易日"子句 → 准确率面板与策略块同口径，bot `/scorecard` 也一致。冷启动总数 `_acc_pending` 不过滤（活动量非业绩指标）。
+- 背景：每周日 `sample-accumulator` 扫 50 扩展池票积累研究样本（657 行预测里 110 行周日 = 101 合法样本 + 9 早期漂移），原先混入门面统计、拖低显示约 0.5pp。样本仍留 DB 供 optimizer。
+
+### Fixed — bot /scorecard 的 vs SPY 口径
+- `alpha_hive_bot/query_commands.py`：「vs SPY 超额」改用 `realistic.alpha_vs_spy`（组合买入持有，与 SPY 同基准 +0.19%），而非净值曲线"每笔 $5K 累加重叠窗口"口径（−4.76%，方法偏弱不可比）。realistic 缺失时回退。
+
+### 对账（改前→改后，三轮对抗审计 4/4/4 agent，无计算 bug / 无回归）
+- 准确率面板：已验证 513→412，综合准确率 56.3%→58.0%，正确 289→239，均收益 +0.941%→+1.189%。
+- 策略块：净胜率 50.7%→51.2%，Sharpe 0.371→0.413，盈亏比 1.22→1.24，n 657→547。
+- realistic：入场 113→110，NAV $53,030→$53,688，alpha −1.13%→+0.19%。Sharpe pill 0.54→0.52，连胜 2→2。
+- 验证：编译 + backtester 44/44 + F11 参数绑定无周日泄漏 + 默认 config 逐字节不变（优化器零影响）+ 泄漏自查仅冷启动计数未过滤（正确）。
+
+---
+
 ## [0.32.2] — 2026-06-21 — 部署/渲染管线交易日过滤 + 清非交易日幽灵报告（option A 根治）
 
 ### Added — 部署/渲染全链交易日过滤（防未来幽灵 + fail-safe）

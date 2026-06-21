@@ -294,9 +294,14 @@ class PredictionStore:
             _log.warning("获取已验证 T+7 记录失败: %s", e)
             return []
 
-    def get_accuracy_stats(self, period: str = "t7", days: int = 90) -> Dict:
+    def get_accuracy_stats(self, period: str = "t7", days: int = 90,
+                           exclude_nontrading_days: bool = False) -> Dict:
         """
         获取准确率统计
+
+        exclude_nontrading_days=True（dashboard 门面口径）：排除周末/假日预测
+        （周日 sample-accumulator 扩展池样本 + 漂移幽灵），只算核心交易日。
+        默认 False，研究/其它调用保留全样本。fail-open：构建过滤出错则不过滤。
 
         返回: {
             overall_accuracy, total_checked, correct_count,
@@ -308,6 +313,31 @@ class PredictionStore:
         checked_col = f"checked_{period}"
         correct_col = f"correct_{period}"
         return_col = f"return_{period}"
+
+        # v32.3: 门面口径 —— 构建"排除非交易日"子句（周日 sample-accumulator 样本）
+        _excl = ""
+        _excl_p: list = []
+        if exclude_nontrading_days:
+            try:
+                from is_trading_day import is_trading_day as _itd
+                from datetime import date as _d_acc
+                with sqlite3.connect(self.db_path) as _c0:
+                    _dates = [r[0] for r in _c0.execute(
+                        f"SELECT DISTINCT date FROM {self.TABLE} WHERE {checked_col}=1 AND date>=?",
+                        (cutoff,)).fetchall()]
+                _nt = []
+                for _ds in _dates:
+                    try:
+                        if _ds and not _itd(_d_acc.fromisoformat(_ds))[0]:
+                            _nt.append(_ds)
+                    except Exception:
+                        pass
+                if _nt:
+                    _excl = " AND date NOT IN (%s)" % ",".join("?" * len(_nt))
+                    _excl_p = _nt
+            except Exception:
+                _excl = ""
+                _excl_p = []
 
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -321,8 +351,8 @@ class PredictionStore:
                         AVG({return_col}) as avg_ret,
                         AVG(final_score) as avg_score
                     FROM {self.TABLE}
-                    WHERE {checked_col} = 1 AND date >= ?
-                """, (cutoff,)).fetchone()
+                    WHERE {checked_col} = 1 AND date >= ?{_excl}
+                """, (cutoff, *_excl_p)).fetchone()
 
                 total = row["total"] or 0
                 correct = row["correct"] or 0
@@ -337,8 +367,8 @@ class PredictionStore:
                             SUM({correct_col}) as correct,
                             AVG({return_col}) as avg_ret
                         FROM {self.TABLE}
-                        WHERE {checked_col} = 1 AND direction = ? AND date >= ?
-                    """, (direction, cutoff)).fetchone()
+                        WHERE {checked_col} = 1 AND direction = ? AND date >= ?{_excl}
+                    """, (direction, cutoff, *_excl_p)).fetchone()
                     t = r["total"] or 0
                     raw_ret = r["avg_ret"] or 0
                     # 做空方向：股价下跌 = 正收益，需取反
@@ -360,10 +390,10 @@ class PredictionStore:
                         AVG({return_col}) as avg_ret,
                         AVG(final_score) as avg_score
                     FROM {self.TABLE}
-                    WHERE {checked_col} = 1 AND date >= ?
+                    WHERE {checked_col} = 1 AND date >= ?{_excl}
                     GROUP BY ticker
                     ORDER BY total DESC
-                """, (cutoff,)).fetchall()
+                """, (cutoff, *_excl_p)).fetchall()
                 for r in rows:
                     t = r["total"] or 0
                     by_ticker[r["ticker"]] = {

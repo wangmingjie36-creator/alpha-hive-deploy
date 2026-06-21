@@ -642,7 +642,7 @@ def _load_accuracy_data() -> dict:
     try:
         from backtester import PredictionStore
         _ps = PredictionStore()
-        _acc_stats = _ps.get_accuracy_stats(period="t7", days=90) or {}
+        _acc_stats = _ps.get_accuracy_stats(period="t7", days=90, exclude_nontrading_days=True) or {}  # v32.3: 门面只算核心交易日
     except Exception as _ace:
         _log.debug("准确率统计加载失败: %s", _ace)
     _acc_total_checked = _acc_stats.get("total_checked", 0)
@@ -666,29 +666,51 @@ def _load_accuracy_data() -> dict:
         _ps11 = _PS11()
         with _sq11.connect(_ps11.db_path) as _cn11:
             _cn11.row_factory = _sq11.Row
+            # v32.3: 门面口径 —— 构建"排除非交易日"子句（周日 sample-accumulator 样本），
+            # 应用到下面所有 pill 查询，使准确率面板与策略块同口径。fail-open：出错则空子句。
+            _excl11 = ""
+            _excl11_p: list = []
+            try:
+                from is_trading_day import is_trading_day as _itd11
+                from datetime import date as _d11
+                _all_d11 = [r[0] for r in _cn11.execute(
+                    "SELECT DISTINCT date FROM predictions WHERE checked_t7=1").fetchall()]
+                _nt11 = []
+                for _ds11 in _all_d11:
+                    try:
+                        if _ds11 and not _itd11(_d11.fromisoformat(_ds11))[0]:
+                            _nt11.append(_ds11)
+                    except Exception:
+                        pass
+                if _nt11:
+                    _excl11 = " AND date NOT IN (%s)" % ",".join("?" * len(_nt11))
+                    _excl11_p = _nt11
+            except Exception:
+                _excl11 = ""
+                _excl11_p = []
             # 周胜率走势（最近 12 周）
-            _wrows = _cn11.execute("""
+            _wrows = _cn11.execute(f"""
                 SELECT strftime('%Y-W%W', date) as week,
                        COUNT(*) as total,
                        SUM(CASE WHEN correct_t7=1 THEN 1 ELSE 0 END) as correct,
                        AVG(return_t7) as avg_ret
-                FROM predictions WHERE checked_t7=1
+                FROM predictions WHERE checked_t7=1{_excl11}
                 GROUP BY week ORDER BY week DESC LIMIT 12
-            """).fetchall()
+            """, _excl11_p).fetchall()
             _acc_weekly_trend = [
                 {"week": r["week"], "accuracy": round(r["correct"]/r["total"]*100, 1) if r["total"] else 0,
                  "total": r["total"], "avg_ret": round(r["avg_ret"] or 0, 2)}
                 for r in reversed(_wrows)
             ]
             # 按方向分组的周胜率（最近 12 周）
-            _wdir_rows = _cn11.execute("""
+            _wdir_rows = _cn11.execute(f"""
                 SELECT strftime('%Y-W%W', date) as week,
                        direction,
                        COUNT(*) as total,
                        SUM(CASE WHEN correct_t7=1 THEN 1 ELSE 0 END) as correct
-                FROM predictions WHERE checked_t7=1
+                FROM predictions WHERE checked_t7=1{_excl11}
                 GROUP BY week, direction ORDER BY week DESC LIMIT 48
-            """).fetchall()
+            """, _excl11_p).fetchall()
             # 重组为 {week: {bullish: acc, bearish: acc, neutral: acc}}
             # 最小样本数过滤：单周单方向 < 3 笔不显示（避免小样本"假崩盘"）
             _MIN_WEEKLY_SAMPLES = 3
@@ -711,26 +733,26 @@ def _load_accuracy_data() -> dict:
                 for _wk in _weeks_sorted
             ]
             # 最佳预测 Top 3（收益最高）
-            _brows = _cn11.execute("""
+            _brows = _cn11.execute(f"""
                 SELECT ticker, date, direction, final_score, return_t7, correct_t7,
                        price_at_predict, price_t7
-                FROM predictions WHERE checked_t7=1 AND return_t7 IS NOT NULL
+                FROM predictions WHERE checked_t7=1 AND return_t7 IS NOT NULL{_excl11}
                 ORDER BY return_t7 DESC LIMIT 3
-            """).fetchall()
+            """, _excl11_p).fetchall()
             _acc_best3 = [dict(r) for r in _brows]
             # 最差预测 Top 3（亏损最大）
-            _wrows2 = _cn11.execute("""
+            _wrows2 = _cn11.execute(f"""
                 SELECT ticker, date, direction, final_score, return_t7, correct_t7,
                        price_at_predict, price_t7
-                FROM predictions WHERE checked_t7=1 AND return_t7 IS NOT NULL
+                FROM predictions WHERE checked_t7=1 AND return_t7 IS NOT NULL{_excl11}
                 ORDER BY return_t7 ASC LIMIT 3
-            """).fetchall()
+            """, _excl11_p).fetchall()
             _acc_worst3 = [dict(r) for r in _wrows2]
             # Sharpe Ratio（基于 T+7 收益）
-            _ret_rows = _cn11.execute("""
+            _ret_rows = _cn11.execute(f"""
                 SELECT return_t7 FROM predictions
-                WHERE checked_t7=1 AND return_t7 IS NOT NULL
-            """).fetchall()
+                WHERE checked_t7=1 AND return_t7 IS NOT NULL{_excl11}
+            """, _excl11_p).fetchall()
             if len(_ret_rows) >= 2:
                 _rets = [r["return_t7"] for r in _ret_rows]
                 _mean_r = sum(_rets) / len(_rets)
@@ -755,10 +777,10 @@ def _load_accuracy_data() -> dict:
                         _max_dd_pct = _dd_pct
                 _acc_max_dd = round(_max_dd_pct, 2)
             # 当前连胜
-            _streak_rows = _cn11.execute("""
+            _streak_rows = _cn11.execute(f"""
                 SELECT correct_t7 FROM predictions
-                WHERE checked_t7=1 ORDER BY date DESC, id DESC
-            """).fetchall()
+                WHERE checked_t7=1{_excl11} ORDER BY date DESC, id DESC
+            """, _excl11_p).fetchall()
             _acc_win_streak = 0
             for _sr in _streak_rows:
                 if _sr["correct_t7"] == 1:
@@ -818,6 +840,22 @@ def _load_accuracy_data() -> dict:
                 ORDER BY date ASC, id ASC
             """).fetchall()
 
+            # v32.3 option(a)：dashboard 门面只算核心实盘策略 —— 剔除非交易日预测
+            # （周日 sample-accumulator 扩展池样本 + 早期漂移幽灵）。样本仍留 DB 供 optimizer。
+            # fail-open 逐行：日期解析失败的行保留，不破坏曲线。
+            try:
+                from is_trading_day import is_trading_day as _itd_eq
+                from datetime import date as _d_eq
+
+                def _keep_eq(_r):
+                    try:
+                        return _itd_eq(_d_eq.fromisoformat(_r["date"]))[0]
+                    except Exception:
+                        return True
+                _eq_rows = [_r for _r in _eq_rows if _keep_eq(_r)]
+            except Exception:
+                pass
+
             # 初始化三条曲线：Gross / Net / SPY buy-and-hold
             _cap_gross = _initial_capital
             _cap_net = _initial_capital
@@ -838,7 +876,7 @@ def _load_accuracy_data() -> dict:
             _accepted_pred_ids: set = set()
             try:
                 import portfolio_backtest as _pb_eq
-                _bt_for_eq = _pb_eq.run_backtest(_pb_eq.BacktestConfig())
+                _bt_for_eq = _pb_eq.run_backtest(_pb_eq.BacktestConfig(exclude_nontrading_days=True))
                 if "error" not in _bt_for_eq:
                     _accepted_pred_ids = {t["id"] for t in _bt_for_eq.get("all_trades", [])
                                           if t.get("exit_reason") != "WINDOW_CUTOFF"}
@@ -905,18 +943,19 @@ def _load_accuracy_data() -> dict:
                 })
 
             # ── 填充 trading_stats ──
-            _cn_exits = _cn_eq.execute("""
-                SELECT exit_reason, COUNT(*) as n FROM predictions
-                WHERE checked_t7=1 GROUP BY exit_reason
-            """).fetchall()
-            for _er in _cn_exits:
-                _ekey = (_er["exit_reason"] or "T7_CLOSE").upper()
+            # v32.3: exit 分布从已过滤的 _eq_rows 统计，与净值/胜率同口径（核心交易日）
+            _exit_tp = _exit_sl = _exit_close = 0
+            for _eqr2 in _eq_rows:
+                _ekey = (_eqr2["exit_reason"] or "T7_CLOSE").upper()
                 if "TP" in _ekey:
-                    _trading_stats["exit_tp_count"] = _er["n"]
+                    _exit_tp += 1
                 elif "SL" in _ekey:
-                    _trading_stats["exit_sl_count"] = _er["n"]
+                    _exit_sl += 1
                 else:
-                    _trading_stats["exit_close_count"] = _er["n"]
+                    _exit_close += 1
+            _trading_stats["exit_tp_count"] = _exit_tp
+            _trading_stats["exit_sl_count"] = _exit_sl
+            _trading_stats["exit_close_count"] = _exit_close
 
             if _net_rets:
                 _n = len(_net_rets)
@@ -966,7 +1005,7 @@ def _load_accuracy_data() -> dict:
         # 覆盖关键卡片数字。equity_curve 保留独立 $5K 模型作为"理论上限参考"
         try:
             import portfolio_backtest as _pb
-            _bt_cfg = _pb.BacktestConfig()
+            _bt_cfg = _pb.BacktestConfig(exclude_nontrading_days=True)  # v32.3: 门面只算核心交易日
             _bt_result = _pb.run_backtest(_bt_cfg)
             if "error" not in _bt_result:
                 _portfolio = _bt_result.get("portfolio", {})

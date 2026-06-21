@@ -321,8 +321,11 @@ async def cmd_scorecard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"  净胜率 {_fmt_num(ts.get('net_win_rate'))}% · 夏普 {_fmt_num(ts.get('sharpe_net'), 2)} · "
         f"盈亏比 {_fmt_num(ts.get('profit_factor'), 2)}"
     )
+    # vs SPY 超额：优先用 realistic 组合买入持有口径（portfolio_backtest，与 SPY buy-and-hold 同基准），
+    # 而非净值曲线"每笔 $5K 累加重叠窗口"口径（方法偏弱、与基准不可比）。realistic 缺失时回退。
+    _alpha_disp = (ts.get('realistic') or {}).get('alpha_vs_spy', ts.get('alpha_vs_spy'))
     lines.append(
-        f"  最大回撤 {_fmt_num(ts.get('max_dd_net_pct'))}% · vs SPY 超额 {_fmt_num(ts.get('alpha_vs_spy'))}%"
+        f"  最大回撤 {_fmt_num(ts.get('max_dd_net_pct'))}% · vs SPY 超额 {_fmt_num(_alpha_disp)}%"
     )
     lines.append("\n（含亏损周与跑输大盘，不修饰；过往表现不预示未来）")
     await update.message.reply_text("\n".join(lines) + _FOOT, parse_mode=ParseMode.HTML)
