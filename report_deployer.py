@@ -108,8 +108,15 @@ def deploy_static_to_ghpages(reporter):
     _ml_pat = _re_deploy.compile(
         r"^alpha-hive-\w+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$"
     )
+    try:
+        from is_trading_day import filename_is_nontrading_day as _fnt_dep
+    except Exception:
+        _fnt_dep = lambda _n: False  # fail-safe：导入失败则不过滤，不误删
     files = []
     for f in os.listdir(repo):
+        # 非交易日（周末/假日）幽灵报告不部署（_CORE 文件无日期，永不被过滤）
+        if f not in _CORE_FILES and _fnt_dep(f):
+            continue
         if f in _CORE_FILES:
             files.append(f)
         elif _ml_pat.match(f):

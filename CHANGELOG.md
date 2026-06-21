@@ -5,6 +5,27 @@
 
 ---
 
+## [0.32.2] — 2026-06-21 — 部署/渲染管线交易日过滤 + 清非交易日幽灵报告（option A 根治）
+
+### Added — 部署/渲染全链交易日过滤（防未来幽灵 + fail-safe）
+- 新增 `is_trading_day.filename_is_nontrading_day(name)`：从文件名提取 YYYY-MM-DD 判非交易日。**fail-safe**：提取不出日期 / fromisoformat 抛错 / is_trading_day 抛错 → 返回 False（保留文件），绝不误删合法交易日文件。
+- 接入 5 处 `alpha-hive-daily-*.json` / ML glob：① `generate_ml_report._sync_ghpages` 部署 glob ② `report_deployer.deploy_static_to_ghpages` 部署循环 ③ `dashboard_renderer` 历史/趋势序列（line ~1046）④ `dashboard_renderer` Score-Delta 基准日 ⑤ `report_web_assets` RSS 历史条目。周末/假日幽灵不再进部署集合/趋势/差值/RSS。
+- ML 链接本就 `.exists()` 门控 → 删文件后重渲染自动无死链。
+
+### Removed — 存量非交易日幽灵报告（02-28/03-01/05-24）
+- `git rm` 17 份跟踪 + `rm` 3 份未跟踪：02-28(周六) daily+thread；03-01(周日) 9 ML+daily+md+thread；05-24(周日) 3 ML+3 analysis。两侧相邻交易日（02-27/03-02）报告完整，零数据丢失；过滤+删除后部署集合实测 841 文件 / 70 日期 / 0 非交易日 / 核心齐全。（6/19 已于更早提交清理）
+
+### Fixed — 测试 fixture
+- `tests/test_pipeline.py::test_file_filter_excludes_old_ml_reports`：fixture 用 2026-03-01(周日) 做「旧报告应部署」，被新过滤器正确滤掉 → 改为 2026-02-27(周五，交易日)。生产逻辑正确，是 fixture 选错日期。
+
+### 审计 & 已知残留
+- 两轮对抗审计（9+9 agent）：本批确认问题全 **P3**（cosmetic/dormant/self-healing），唯一 P2 即上述测试 fixture（已修）。
+- **pre-existing 残留（本批未动，宜单独处理）**：`equity_curve` 仍含非交易日点（来自 `predictions` DB 的 entry_date 漂移，约 110 行周日：03-01/04-26/05-03/05-10/05-17），非本次 daily-JSON 路径；过滤会改累计曲线连续性、需与 trading_stats 对账，属 DB 数据质量问题。
+- 工作区 index.html/dashboard-data.json 仍引用已删文件 → 下次扫描(6/22)重渲染（`_fnt_hist`+`.exists()`）自动消除；线上 gh-pages 当前内部一致、无死链。
+- `test_cleanup_deletes_old_records` / `test_valid_checkpoint` 在 HEAD 上即失败（日期相关 pre-existing flake），与本次无关。
+
+---
+
 ## [0.32.1] — 2026-06-21 — 0.32.0 二次对抗审计修复（18 agent / 5 维度）
 
 ### Fixed — 审计确认的真实缺陷

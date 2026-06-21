@@ -443,8 +443,9 @@ class TestDeployStaticToGhPages:
         # 最近的 ML 报告（应包含）
         (tmp_path / "alpha-hive-NVDA-ml-enhanced-2026-03-05.html").write_text("ok")
         (tmp_path / "alpha-hive-NVDA-ml-enhanced-2026-03-03.html").write_text("ok")
-        # 过旧的 ML 报告（应排除 — 超过 3 天窗口）
-        (tmp_path / "alpha-hive-NVDA-ml-enhanced-2026-03-01.html").write_text("old")
+        # 较旧的交易日 ML 报告（不再限天数，应仍部署）
+        # 注意：须用交易日，否则会被 is_trading_day 过滤（2026-03-01 是周日，故改 02-27 周五）
+        (tmp_path / "alpha-hive-NVDA-ml-enhanced-2026-02-27.html").write_text("old")
         (tmp_path / "alpha-hive-NVDA-ml-enhanced-2026-02-25.html").write_text("old")
 
         deployed = []
@@ -471,7 +472,7 @@ class TestDeployStaticToGhPages:
         # 所有 ML 增强报告都应被部署（不再限制天数，index.html 历史板块需要全部文件）
         assert "alpha-hive-NVDA-ml-enhanced-2026-03-05.html" in deployed
         assert "alpha-hive-NVDA-ml-enhanced-2026-03-03.html" in deployed
-        assert "alpha-hive-NVDA-ml-enhanced-2026-03-01.html" in deployed
+        assert "alpha-hive-NVDA-ml-enhanced-2026-02-27.html" in deployed
         assert "alpha-hive-NVDA-ml-enhanced-2026-02-25.html" in deployed
 
     def test_push_retries_on_failure(self, reporter_with_mock_git):

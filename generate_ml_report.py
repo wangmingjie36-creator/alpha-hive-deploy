@@ -2177,8 +2177,14 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     date_str = pdt_today()
     _ml_pat = _re.compile(r"^alpha-hive-\w+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$")
     _CORE = {"index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml", ".nojekyll"}
-    files = [f for f in os.listdir(repo) if f in _CORE or _ml_pat.match(f)
-             or (f.startswith("alpha-hive-daily-") and f.endswith((".json", ".md")))]
+    try:
+        from is_trading_day import filename_is_nontrading_day as _fnt_dep
+    except Exception:
+        _fnt_dep = lambda _n: False  # fail-safe：导入失败则不过滤，不误删
+    files = [f for f in os.listdir(repo)
+             if (f in _CORE or _ml_pat.match(f)
+                 or (f.startswith("alpha-hive-daily-") and f.endswith((".json", ".md"))))
+             and not _fnt_dep(f)]  # 非交易日幽灵报告（周末/假日）不部署
     if not files:
         _log.warning("gh-pages 同步：无静态文件")
         return

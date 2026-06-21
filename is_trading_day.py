@@ -143,6 +143,25 @@ def is_trading_day(d: date | None = None) -> tuple[bool, str]:
     return True, f"{d} 是交易日"
 
 
+def filename_is_nontrading_day(name: str) -> bool:
+    """从文件名/日期串中提取 YYYY-MM-DD，判断该日是否美股非交易日（周末/假日）。
+
+    用于部署 glob 与 dashboard 历史序列过滤时区漂移产生的非交易日「幽灵」文件
+    （如周日标签的 ml-enhanced / daily 报告）。
+    **fail-safe**：提取不出日期、或交易日检查抛异常 → 返回 False（视为可保留），
+    宁可漏滤一个幽灵，也绝不误删/误滤任何合法交易日文件。
+    """
+    import re as _re
+    m = _re.search(r"(\d{4}-\d{2}-\d{2})", name or "")
+    if not m:
+        return False
+    try:
+        trading, _ = is_trading_day(date.fromisoformat(m.group(1)))
+        return not trading
+    except Exception:
+        return False
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] not in ("-h", "--help"):
         try:

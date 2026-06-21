@@ -133,6 +133,13 @@ def generate_rss_xml(reporter, report: Dict) -> str:
         hdate = _P(hf).stem.replace("alpha-hive-daily-", "")
         if hdate == reporter.date_str:
             continue
+        # 跳过非交易日幽灵，与 dashboard 历史序列一致（fail-safe）
+        try:
+            from is_trading_day import filename_is_nontrading_day as _fnt_rss
+            if _fnt_rss(hdate):
+                continue
+        except Exception:
+            pass
         try:
             with open(hf, encoding="utf-8") as fp:
                 hrpt = json.load(fp)

@@ -1046,6 +1046,14 @@ def _load_historical_data(report_dir, date_str: str,
             _hdate = _Path_mod(_hf).stem.replace("alpha-hive-daily-", "")
             if _hdate == date_str:
                 continue  # 今天已在主面板展示
+            # 跳过非交易日（周末/假日）幽灵：时区漂移曾把周五/周六 scan 标到周末，
+            # 这些日期不应进入趋势/历史/F&G/ML 链接。fail-safe：解析失败时不跳过。
+            try:
+                from is_trading_day import filename_is_nontrading_day as _fnt_hist
+                if _fnt_hist(_hdate):
+                    continue
+            except Exception:
+                pass
             try:
                 with open(_hf, encoding="utf-8") as _hfp:
                     _hrpt = json.load(_hfp)
@@ -2063,6 +2071,13 @@ def render_dashboard_html(report: Dict, date_str: str,
             _pdate = _Path(_pjf).stem.replace("alpha-hive-daily-", "")
             if _pdate == date_str:
                 continue  # 跳过今天
+            # 跳过非交易日幽灵，与历史/趋势序列基准日保持一致（fail-safe）
+            try:
+                from is_trading_day import filename_is_nontrading_day as _fnt_e
+                if _fnt_e(_pdate):
+                    continue
+            except Exception:
+                pass
             try:
                 with open(_pjf, encoding="utf-8") as _pfp:
                     _prpt = _json.load(_pfp)
