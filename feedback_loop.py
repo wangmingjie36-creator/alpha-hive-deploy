@@ -40,6 +40,10 @@ class ReportSnapshot:
         except (ImportError, AttributeError):
             self.weights_used = dict(_fallback_w)
 
+        # 低方向置信（v32.5）：高分但情绪未确认 → paper_portfolio 仓位减半。不改方向/不改分。
+        self.low_conviction = False
+        self.low_conviction_reason = ""
+
         # 实际结果（后续填充）
         self.actual_price_t1 = None  # T+1 的价格
         self.actual_price_t7 = None  # T+7 的价格
@@ -89,6 +93,8 @@ class ReportSnapshot:
             "entry_price": self.entry_price,
             "agent_votes": self.agent_votes,
             "weights_used": self.weights_used,
+            "low_conviction": self.low_conviction,
+            "low_conviction_reason": self.low_conviction_reason,
             "actual_prices": {
                 "t1": self.actual_price_t1,
                 "t7": self.actual_price_t7,
@@ -114,6 +120,8 @@ class ReportSnapshot:
         snapshot.entry_price = data.get("entry_price", 0.0)
         snapshot.agent_votes = data.get("agent_votes", {})
         snapshot.weights_used = data.get("weights_used", {})
+        snapshot.low_conviction = data.get("low_conviction", False)
+        snapshot.low_conviction_reason = data.get("low_conviction_reason", "")
 
         actual_prices = data.get("actual_prices", {})
         snapshot.actual_price_t1 = actual_prices.get("t1")

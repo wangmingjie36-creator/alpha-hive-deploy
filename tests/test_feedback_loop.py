@@ -24,14 +24,14 @@ class TestReportSnapshot:
 
     def test_default_weights(self):
         from feedback_loop import ReportSnapshot
+        from config import EVALUATION_WEIGHTS as EW
         snap = ReportSnapshot("TSLA", "2026-01-01")
         w = snap.weights_used
-        assert abs(w["signal"] - 0.30) < 1e-9
-        assert abs(w["catalyst"] - 0.20) < 1e-9
-        assert abs(w["sentiment"] - 0.20) < 1e-9
-        assert abs(w["odds"] - 0.15) < 1e-9
-        assert abs(w["risk_adj"] - 0.15) < 1e-9
-        # 总和 = 1.0
+        # 契约：weights_used 以 config.EVALUATION_WEIGHTS 为准（会被 weekly_optimizer 自适应调整，
+        # 不应硬编码旧教科书默认值 0.30/0.20/…，否则优化器一动测试就红）
+        for _k in ("signal", "catalyst", "sentiment", "odds", "risk_adj"):
+            assert abs(w[_k] - EW[_k]) < 1e-9
+        # 总和 = 1.0（优化器归一化不变式）
         assert abs(sum(w.values()) - 1.0) < 1e-9
 
     def test_save_and_load_roundtrip(self):

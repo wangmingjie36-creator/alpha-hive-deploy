@@ -5,6 +5,28 @@
 
 ---
 
+## [0.32.5] — 2026-06-21 — 高分置信守卫（仓位减半）+ 自诊断显著性门控（周报方案 #1/#2/#3）
+
+### Added — #1 高分置信守卫：高分但情绪未确认 → 仓位减半（全样本验证、纯仓位层）
+- `config.SCORE_HIGH_GUARD`（score_min=6.5 / sentiment_max=6.0 / signal_min=5.0）。
+- `alpha_hive_daily_report` 写快照时算守卫 → `ReportSnapshot.low_conviction`（**新增字段**，含 save/load 往返）→ `paper_portfolio` 已有 ×0.5 通道据此减半（**此前 545/545 快照无该字段=死代码，本次激活**）。
+- 不改方向 / 不改 final_score / 不动入场门；维度缺失则不触发（保守）；删守卫即回滚。
+- **全样本(665 笔)对账**：高分单 183 笔中守卫命中 60 笔(33%) = **41.7% 胜率 / 净 -1.74%** 的劣质批，优质高分 122 笔 **58.2% / +1.43%** 保持满仓。
+
+### Added — #3 深度报告高分情绪背离警示
+- `generate_deep_v2` low_conviction 块加并联 score_high 分支（与日报快照同口径），复用现有 low_conviction 警告渲染（无需新横幅）。
+
+### Changed — #2 自诊断显著性门控（杜绝薄窗口噪声当真结论）
+- `self_analyst`：新增 `_wilson_ci()`；`compute_stats` 输出 win_rate Wilson 95% CI + n_directional + significant(CI 下界>50%) + sample_sufficient(n≥30)；brief 渲染 CI + 显著性判读（样本不足 / 含 50% 勿下重注 / 显著弱正 edge）。验证 26/45→[43.3%–71.0%]（精确复现报告 CI，含 50%=非显著）。
+
+### Fixed — pre-existing stale 测试
+- `test_feedback_loop.py::test_default_weights`：硬编码旧权重 0.30，改为对照 `config.EVALUATION_WEIGHTS`（优化器已调成 0.2094…），保留 sum=1.0 不变式。HEAD 上即失败，与本次无关。
+
+### 说明 — 全样本核实驳回的报告建议（未采纳）
+- 扩池稀释 NVDA（假偏置：NVDA 仅占误判 9%、10 标的样本均衡）、手动调权（优化器已解冻 MIN_CHANGE_PP=3.0 且收敛）、据 0%/80% 信号调逻辑（期权 motif 字段 665/665 全 NULL 不可复现）—— 均建立在假前提 / 不可复现噪声上。
+
+---
+
 ## [0.32.4] — 2026-06-21 — 修复 2 个老化测试 fixture（时间炸弹 / 文件名格式）
 
 ### Fixed — test_pipeline.py 两个 pre-existing 失败（HEAD 上即失败，与近期改动无关，纯测试侧）

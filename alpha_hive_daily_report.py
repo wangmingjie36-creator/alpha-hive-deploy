@@ -927,6 +927,26 @@ class AlphaHiveDailyReporter:
                     _snap = ReportSnapshot(_tk, self.date_str)
                     _snap.composite_score = _data.get("final_score", 0.0)
                     _snap.direction = _data.get("direction", "Neutral")
+                    # 高分置信守卫（v32.5）：高分但情绪未确认 + signal 不弱 → low_conviction，
+                    # paper_portfolio 据此仓位减半（纯仓位层，不改方向/不改分）。维度缺失则不触发（保守）。
+                    try:
+                        from config import SCORE_HIGH_GUARD as _SHG
+                        _dim = _data.get("dimension_scores", {}) or {}
+                        _sent = _dim.get("sentiment")
+                        _sig = _dim.get("signal")
+                        _fs = _data.get("final_score", 0.0)
+                        if (_sent is not None and _sig is not None
+                                and str(_data.get("direction", "")).lower() != "neutral"
+                                and _fs >= _SHG["score_min"]
+                                and float(_sent) < _SHG["sentiment_max"]
+                                and float(_sig) >= _SHG["signal_min"]):
+                            _snap.low_conviction = True
+                            _snap.low_conviction_reason = (
+                                f"score_high_guard: 高分 {_fs:.1f} 但情绪 {float(_sent):.1f}<6 未确认"
+                                f"（signal {float(_sig):.1f}）→ 仓位减半"
+                            )
+                    except Exception as _shg_e:
+                        _log.debug("score_high 守卫计算跳过 (%s): %s", _tk, _shg_e)
                     _snap.agent_votes = {
                         e.get("agent_id", ""): e.get("self_score", 5.0)
                         for e in ctx.board.snapshot()

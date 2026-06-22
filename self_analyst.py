@@ -120,6 +120,21 @@ def classify(snap: dict) -> str:
     return "neutral"
 
 
+def _wilson_ci(k: int, n: int, z: float = 1.96) -> tuple:
+    """Wilson 95% 置信区间（比例），返回 (low_pct, high_pct)。
+
+    v32.5：诊断显著性门控——避免把薄样本噪声当真结论。CI 含 50% = 与随机不可区分。
+    """
+    if n <= 0:
+        return (0.0, 100.0)
+    p = k / n
+    denom = 1.0 + z * z / n
+    center = (p + z * z / (2 * n)) / denom
+    half = (z / denom) * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
+    return (round(max(0.0, center - half) * 100, 1),
+            round(min(1.0, center + half) * 100, 1))
+
+
 def compute_stats(snaps: list) -> dict:
     """汇总统计"""
     classified = [(s, classify(s)) for s in snaps]
@@ -136,7 +151,9 @@ def compute_stats(snaps: list) -> dict:
             returns_t7.append((t7 - ep) / ep * 100)
 
     avg_ret = round(sum(returns_t7) / len(returns_t7), 2) if returns_t7 else 0.0
-    win_rate = round(len(correct) / max(len(correct) + len(wrong), 1) * 100, 1)
+    _n_dir = len(correct) + len(wrong)
+    win_rate = round(len(correct) / max(_n_dir, 1) * 100, 1)
+    _ci_low, _ci_high = _wilson_ci(len(correct), _n_dir)
 
     return {
         "total":    len(snaps),
@@ -145,6 +162,11 @@ def compute_stats(snaps: list) -> dict:
         "neutral":  len(neutral),
         "unknown":  len(unknown),
         "win_rate": win_rate,
+        # v32.5 显著性门控
+        "n_directional":     _n_dir,
+        "win_rate_ci":       [_ci_low, _ci_high],
+        "significant":       _ci_low > 50.0,   # CI 下界 >50% = 统计显著优于随机
+        "sample_sufficient": _n_dir >= 30,     # n<30 = 样本不足，不下统计定论
         "avg_ret_7d": avg_ret,
         "wrong_snaps": wrong,
         "correct_snaps": correct,
@@ -238,10 +260,19 @@ def format_briefing(stats: dict, patterns: dict,
         f"| 总预测数（T+7 已完成）| {stats['total']} |",
         f"| 方向正确 | {stats['correct']} |",
         f"| 方向错误 | {stats['wrong']} |",
-        f"| 方向胜率 | {stats['win_rate']}% |",
+        f"| 方向胜率 | {stats['win_rate']}% · Wilson 95% CI [{stats.get('win_rate_ci',[0,100])[0]}%–{stats.get('win_rate_ci',[0,100])[1]}%] · n={stats.get('n_directional','?')} |",
         f"| T+7 平均收益 | {stats['avg_ret_7d']:+.2f}% |",
         "",
     ]
+
+    # v32.5 显著性门控：避免把薄样本噪声当真结论（杜绝 n=45 弱窗口误导）
+    if not stats.get("sample_sufficient", True):
+        lines.append(f"> ⚠️ **样本不足（n={stats.get('n_directional','?')} < 30）：以下结论统计上不可靠，仅作线索，勿据此调整权重/仓位。**")
+    elif stats.get("significant"):
+        lines.append(f"> ✅ **Wilson CI 下界 > 50%：胜率统计显著优于随机（弱正 edge），结论可采信。**")
+    else:
+        lines.append(f"> ⚠️ **Wilson CI 含 50%：当前样本下胜率尚不能与「随机」区分，勿据此下重注或大改。**")
+    lines.append("")
 
     # 失败模式
     if patterns:

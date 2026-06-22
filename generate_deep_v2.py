@@ -628,6 +628,29 @@ def extract(data: dict) -> dict:
         )
         print(f"   [low_conviction] {_low_conviction_note}")
 
+    # 高分置信守卫（v32.5）：高分但情绪未确认 + signal 不弱 → 低置信（与日报快照同口径，
+    # paper_portfolio 据此减半）。全样本(665笔)验证该批 T+7 胜率约 42%/净 -0.76%。与上面 IV
+    # 模糊区并联（不同分数区间，互补）；已触发则不覆盖。维度缺失则不触发（保守）。
+    if not _low_conviction and not _guard_veto and direction != "neutral":
+        try:
+            from config import SCORE_HIGH_GUARD as _SHG_d
+            _ds_d = sr.get("dimension_scores", {}) or {}
+            _sent_d = _ds_d.get("sentiment")
+            _sig_d = _ds_d.get("signal")
+            if (_sent_d is not None and _sig_d is not None
+                    and final_score >= _SHG_d["score_min"]
+                    and float(_sent_d) < _SHG_d["sentiment_max"]
+                    and float(_sig_d) >= _SHG_d["signal_min"]):
+                _low_conviction = True
+                _low_conviction_note = (
+                    f"⚠️ 高分情绪背离：评分 {final_score:.1f} 偏高，但情绪维度 {float(_sent_d):.1f} < 6 "
+                    f"未确认（signal {float(_sig_d):.1f}）。全样本同条件 T+7 胜率约 42%，"
+                    f"建议减仓 50%——优质高分应有情绪共振支撑。"
+                )
+                print(f"   [low_conviction:score_high] {_low_conviction_note}")
+        except Exception as _shg_de:
+            print(f"   [score_high guard skip] {_shg_de}")
+
     return {
         "ticker": ticker,
         "report_date": report_date,

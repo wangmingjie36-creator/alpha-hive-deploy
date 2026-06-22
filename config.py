@@ -702,6 +702,17 @@ EVALUATION_WEIGHTS = {
 # ML 概率上界（防止小样本过度自信，统一源，避免魔术数字散落各处）
 ML_PROB_CAP = 0.95
 
+# ==================== 高分置信守卫（v32.5） ====================
+# 高分但情绪未确认 + signal 不弱 → 低置信、仓位减半（纯仓位层，不改方向/不改分/不动入场门）。
+# 全样本(665 笔)验证：final_score>=6.5 且 sentiment<6 且 signal>=5 那批 T+7 胜率仅 ~42%/净 -0.76%；
+# 优质高分(sentiment>=6 或 signal<5 之外)58%/净 +1.13% 保持满仓。机制：odds 维度机械顶分对 T+7
+# 零区分度、signal 高分反向、sentiment 才是真预测维度。维度缺失则不触发（保守=不减仓）。
+SCORE_HIGH_GUARD = {
+    "score_min": 6.5,       # 仅对高分（>= paper 入场门）生效
+    "sentiment_max": 6.0,   # sentiment < 6 = 情绪未确认
+    "signal_min": 5.0,      # signal >= 5（针对"高分但情绪背离"，signal 极弱另有逻辑）
+}
+
 # ==================== 期权评分阈值 ====================
 OPTIONS_SCORE_THRESHOLDS = {
     "iv_rank_neutral_min": 30,      # IV Rank < 30 视为低 IV
