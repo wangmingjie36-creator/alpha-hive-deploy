@@ -113,17 +113,21 @@ class AlphaHiveDailyReporter:
     """Alpha Hive 日报生成引擎"""
 
 
-    def __init__(self):
+    def __init__(self, date_override: str = None):
         self.report_dir = PATHS.home
         self.timestamp = datetime.now()
         # v0.27.3: date_str 锁定 PDT（America/Los_Angeles），与美股交易日对齐
         # 避免用户电脑时区设为 CST/北京（已过午夜进入次日）导致 date_str 比美股日期多 1 天
-        try:
-            from zoneinfo import ZoneInfo
-            self.date_str = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
-        except Exception:
-            # zoneinfo 不可用时回退本地时间（保留旧行为）
-            self.date_str = self.timestamp.strftime("%Y-%m-%d")
+        # v32.6: date_override（--date YYYY-MM-DD）显式覆盖以补跑指定交易日；未传则走默认 PDT。
+        if date_override:
+            self.date_str = date_override
+        else:
+            try:
+                from zoneinfo import ZoneInfo
+                self.date_str = datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+            except Exception:
+                # zoneinfo 不可用时回退本地时间（保留旧行为）
+                self.date_str = self.timestamp.strftime("%Y-%m-%d")
 
         # 初始化报告生成器
         self.ml_generator = MLEnhancedReportGenerator()
@@ -2099,8 +2103,25 @@ def main():
         action='store_true',
         help='忽略美股交易日护栏，即使周末/假日也强制生成简报'
     )
+    parser.add_argument(
+        '--date',
+        type=str,
+        default=None,
+        help='覆盖报告日期（YYYY-MM-DD），用于补跑指定交易日（默认自动取 PDT 当日）'
+    )
 
     args = parser.parse_args()
+
+    # v32.6: --date 覆盖校验
+    if args.date:
+        try:
+            from datetime import date as _vdate
+            _vdate.fromisoformat(args.date)
+        except ValueError:
+            print(f"❌ --date 格式错误：{args.date}（应为 YYYY-MM-DD）")
+            import sys as _s
+            _s.exit(2)
+        print(f"📅 日期覆盖：报告标记为 {args.date}（非自动 PDT 当日）")
 
     # ── 美股交易日护栏 ──
     # 周末 / 美股假日（Juneteenth、Good Friday…）跳过完整简报生成，不对无交易日产出幽灵报告。
@@ -2113,7 +2134,8 @@ def main():
             from datetime import date as _date_guard
             from hive_logger import pdt_today as _pdt_today_guard
             from is_trading_day import is_trading_day as _is_trading_day_guard
-            _trd, _rsn = _is_trading_day_guard(_date_guard.fromisoformat(_pdt_today_guard()))
+            _check_date = args.date or _pdt_today_guard()  # --date 指定时校验该日是否交易日
+            _trd, _rsn = _is_trading_day_guard(_date_guard.fromisoformat(_check_date))
             if not _trd:
                 print(f"⏭️  跳过简报生成：{_rsn}（如需强制生成加 --force）")
                 _log.warning("交易日护栏跳过简报: %s", _rsn)
@@ -2156,8 +2178,8 @@ def main():
     else:
         print("🧠 LLM 混合模式（Claude API）\n")
 
-    # 创建报告生成器
-    reporter = AlphaHiveDailyReporter()
+    # 创建报告生成器（--date 覆盖报告日期，未传则默认 PDT 当日）
+    reporter = AlphaHiveDailyReporter(date_override=args.date)
 
     # 如果只是检查财报更新
     if args.check_earnings:

@@ -67,6 +67,38 @@ def find_daily_json(date_str: str) -> dict:
     return {}
 
 
+def find_swarm_results(ticker: str, report_date: str = None):
+    """当前管线把蜂群评分写到独立的 .swarm_results_{date}.json，
+    而 analysis-{ticker}-ml-{date}.json 内的 swarm_results 恒为空。
+    本函数返回 (该 ticker 的蜂群记录 dict, 实际蜂群日期) 或 (None, None)。
+
+    选取规则：取日期 <= report_date 且包含该 ticker 的最新一份；
+    若无符合则退回到包含该 ticker 的最新一份。
+    （修复 2026-06 stale snapshot 事故：collect_data 误读空 swarm → 全 0.0）"""
+    pattern = str(ALPHAHIVE_DIR / ".swarm_results_*.json")
+    candidates = []
+    for f in glob.glob(pattern):
+        m = re.search(r"\.swarm_results_(\d{4}-\d{2}-\d{2})\.json$", f)
+        if m:
+            candidates.append((m.group(1), f))
+    if not candidates:
+        return None, None
+    pool = candidates
+    if report_date:
+        le = [c for c in candidates if c[0] <= report_date]
+        if le:
+            pool = le
+    for sdate, f in sorted(pool, reverse=True):
+        try:
+            with open(f) as fh:
+                sdata = json.load(fh)
+        except Exception:
+            continue
+        if isinstance(sdata, dict) and isinstance(sdata.get(ticker), dict):
+            return sdata[ticker], sdate
+    return None, None
+
+
 def extract_raw(data: dict) -> dict:
     """提炼出所有关键字段，压缩成 Claude 友好的 JSON"""
     sr = data.get("swarm_results", {})
@@ -303,7 +335,22 @@ def main():
     with open(json_path) as f:
         data = json.load(f)
 
+    # ── 蜂群结果补全 ─────────────────────────────────────────────────────────
+    # 当前管线把蜂群评分写到独立的 .swarm_results_{date}.json；
+    # analysis-*-ml-*.json 内 swarm_results 恒为空 → 必须 graft，
+    # 否则提炼出的 raw JSON 蜂群分全是 0.0（2026-06 stale snapshot 事故）
+    _report_date = data.get("timestamp", "")[:10]
+    if not data.get("swarm_results"):
+        swarm_rec, swarm_date = find_swarm_results(ticker, _report_date)
+        if swarm_rec:
+            data["swarm_results"] = swarm_rec
+            data["_swarm_source"] = f".swarm_results_{swarm_date}.json"
+            print(f"🔗 analysis JSON 内 swarm_results 为空，已补全自: .swarm_results_{swarm_date}.json")
+        else:
+            print(f"⚠️  未找到可用的 .swarm_results_*.json，蜂群分将为 0")
+
     raw = extract_raw(data)
+    raw["_meta"]["swarm_source"] = data.get("_swarm_source")
 
     # 尝试补充宏观日报数据
     daily_data = find_daily_json(raw["_meta"]["report_date"])
@@ -322,7 +369,9 @@ def main():
 
     print(f"✅ 提炼完成!")
     print(f"   评分: {raw['swarm']['final_score']} | 方向: {raw['swarm']['direction']} | 共振: {'✅' if raw['swarm']['resonance']['detected'] else '○'}")
-    print(f"   P/C: {raw['options']['put_call_ratio']} | OI: {raw['options']['total_oi']:,} | Skew: {raw['options']['iv_skew_ratio']}")
+    _oi = raw['options']['total_oi']
+    _oi_str = f"{_oi:,}" if isinstance(_oi, (int, float)) else "—"
+    print(f"   P/C: {raw['options']['put_call_ratio']} | OI: {_oi_str} | Skew: {raw['options']['iv_skew_ratio']}")
     print(f"   催化剂: {raw['catalysts']['count']} 个 | 异常流: {len(raw['options']['unusual_activity'])} 笔")
     print(f"   文件大小: {char_count:,} 字符 (~{char_count//4} tokens)")
     print(f"\n📁 已保存: {out_path}")
