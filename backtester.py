@@ -19,9 +19,13 @@ try:
     _PDT = ZoneInfo("America/Los_Angeles")
     def _pdt_today() -> str:
         return datetime.now(_PDT).strftime("%Y-%m-%d")
+    def _pdt_now() -> datetime:
+        return datetime.now(_PDT)
 except Exception:
     def _pdt_today() -> str:
         return datetime.now().strftime("%Y-%m-%d")
+    def _pdt_now() -> datetime:
+        return datetime.now()
 from typing import Dict, List, Optional
 
 from hive_logger import PATHS, get_logger, FeatureRegistry, SafeJSONEncoder
@@ -197,11 +201,14 @@ class PredictionStore:
         checked_col = f"checked_{period}"
 
         # 目标日期：预测日 + N 个交易日 <= 今天（跳过周末和联邦假日）
+        # v0.33.0: cutoff 锚定 PDT —— entry_date 由 save_prediction 盖 PDT(line 169)，
+        # 此处 cutoff 原用裸本地时(上海)，两者口径不一致导致当天预测被误判已满 T+N。
+        # 用 _pdt_today() 作业务日回看起点，与 date 列同历比较。
         if _BDAY_AVAILABLE:
-            cutoff_dt = _pd.Timestamp.now() - days * _US_BDAY
+            cutoff_dt = _pd.Timestamp(_pdt_today()) - days * _US_BDAY
             cutoff = cutoff_dt.strftime("%Y-%m-%d")
         else:
-            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            cutoff = (_pdt_now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -309,7 +316,7 @@ class PredictionStore:
             by_ticker: {NVDA: {}, ...}
         }
         """
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff = (_pdt_now() - timedelta(days=days)).strftime("%Y-%m-%d")  # v0.33.0: 统计窗口口径 PDT 化（对齐 date 列）
         checked_col = f"checked_{period}"
         correct_col = f"correct_{period}"
         return_col = f"return_{period}"
@@ -444,7 +451,7 @@ class PredictionStore:
             ...
         }
         """
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff = (_pdt_now() - timedelta(days=days)).strftime("%Y-%m-%d")  # v0.33.0: 统计窗口口径 PDT 化（对齐 date 列）
         checked_col = f"checked_{period}"
         return_col = f"return_{period}"
 
@@ -1428,7 +1435,7 @@ class Backtester:
                     INSERT INTO adapted_weights (date, weights, accuracy, sample_count, period)
                     VALUES (?, ?, ?, ?, ?)
                 """, (
-                    datetime.now().strftime("%Y-%m-%d"),
+                    _pdt_today(),  # v0.33.0: 写戳 PDT，与 predictions.date 同口径
                     json.dumps(weights),
                     json.dumps({k: round(v, 3) for k, v in accuracy.items()}),
                     samples,

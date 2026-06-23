@@ -5,6 +5,47 @@
 
 ---
 
+## [0.33.0] — 2026-06-23 — financial-services 四模式落地：注入护栏 / 输出 schema / 来源强制 / MD-prompt 解耦
+
+> 借鉴 anthropics/financial-services 参考架构的 5 个模式，落地其中 4 个（pattern 4「能力收口」属 headless 场景，未做）。先用并行侦察工作流在真代码核准每个 pattern 的落点，**纠正了"蜂不调 LLM"的初判**——蜂经 `llm_service` 间接调 LLM，注入面真实存在但 opt-in（默认 `--no-llm` 时各汇为惰性）。全程：零新增 LLM 调用、不改门控、无 API-key 告警。新增 34 测试，131 个相关现有测试零回归。
+
+### Added — pattern 1 提示注入护栏（`text_sanitizer.py` 新文件）
+- `sanitize_external_text()` 中和中英注入触发短语 + 控制字符/换行 → 占位符 `［已过滤］`；保守：不剥离 discovery 的 `|` 分隔符、不误伤正常金融文本。`wrap_untrusted()` 不可信数据围栏 + `UNTRUSTED_DATA_GUARDRAIL` 安全守卫常量 + `sanitize_headlines()` 批量。
+- `llm_service.py` 4 个注入汇加固（消毒+围栏+守卫）：`analyze_news_sentiment`(Finviz 头条)/`interpret_insider_trades`(SEC 摘要+明细)/`detect_thesis_breaks`(近 7 天新闻)/`distill_with_reasoning`(discovery→QueenDistiller)。
+- `generate_deep_v2.fetch_live_news`：Finnhub 头条消毒后再注入 Opus prompt（防御式导入，VM 同步竞态下回退）。
+- `pheromone_board._validate_entry`：discovery 纵深消毒（下游 snapshot 喂 QueenDistiller），保留 `|` 与原长度。
+
+### Added — pattern 2 输出 schema 校验
+- `llm_service._coerce_schema()`：LLM 返回 dict 此前「除 JSON 解析外零校验」→ 现 clamp 数值 / enum 兜底 / 截断并消毒字符串 / 截断列表；4 个 helper 各配 schema 常量。
+- `models.AGENT_RESULT_SCHEMA` 声明式契约 + `VALID_DIMENSIONS` + `AgentResult.validate(strict=)`（非破坏性，补 `__post_init__` 未覆盖的 dimension 合法集 / source 非空 / details 体积）。
+
+### Added — pattern 3 来源强制（`pheromone_board._validate_entry`）
+- 空 / 纯空白 `source` → 标记 `[UNSOURCED]`（fail-safe，标记非丢弃，不破坏蜂群协作）。**把 CLAUDE.md「禁止无来源结论进入信息素板」首次落代码**——此前 `_validate_entry` 只校验 self_score/direction/strength，从不看 source。
+
+### Added — pattern 5 MD 源 + Python 包装解耦（`prompt_loader.py` 新文件 + `prompts/`）
+- `load_prompt(name, fallback)`：从 `prompts/<name>.md` 读正文（剥 frontmatter），任何错误静默回退 fallback（无告警、不读 key）。
+- `prompts/options_strategist.md`(generate_deep_v2 SYSTEM_PROMPT) / `step1_analysis_engine.md`(STEP1_SYSTEM) / `news_sentiment_analyst.md`(llm_service)。三处改 `_load_prompt(name, fallback=原内联常量)`：**`prompts/` 缺失时字节级回退原文，行为不变**。
+
+### Added — 测试（34 新，全绿）
+- `test_text_sanitizer.py`(12)/`test_prompt_loader.py`(6)/`test_agent_result_schema.py`(6)/`test_llm_injection_guard.py`(5，mock `call()` 捕获 prompt 验围栏+守卫+消毒+coerce)/`test_pheromone_source_guard.py`(5)。
+
+### Fixed — 顺带修复的真实生产 bug：QueenDistiller 降级模式崩溃（`swarm_agents/queen_distiller.py`）
+- `distill()` 入口统一滤 None：`agent_results = [_r for _r in agent_results if _r is not None]`。
+- 根因：`alpha_hive_daily_report.py:505-531` 在蜂 future 超时/抛异常时 `append(None)`，而 `distill()` 的 GEX/F&G 预处理循环（line ~874/883/897/924）直接 `_r.get(...)`；F&G 循环（924）**无 try 保护** → 单蜂失败即整个 ticker 蒸馏崩 `AttributeError`。Yahoo 429 限流（深夜 CST 常见）是已知触发面。
+- 入口滤 None 与下游 `_prepare_dimension_data`(clean_results_batch) 同口径，不影响覆盖度/评分。修复后 4 个降级测试转绿（test_handles_none_results + 3 个 e2e degraded）。
+
+### Fixed — 顺带修复的真实生产 bug：回测 T+N 闸门日期口径不一致（`backtester.py`）
+- 根因：`save_prediction` 给 `date` 盖 **PDT**(line 169)，但 `get_pending_checks` 的 cutoff 原用裸 `datetime.now()`/`_pd.Timestamp.now()`(**上海本地时**)。上海比 PDT 快约 15-16h → 当天(PDT)预测的 `date` ≤ `本地now-1交易日` 的 cutoff → 被误判已满 T+1 而提前回填 outcome（实盘静默偏移约 1 天，污染胜率/权重）。**违反项目"判美股交易日绝不读裸 datetime.now()"铁律**。
+- 修复：新增 `_pdt_now()` 助手；`get_pending_checks` cutoff 改 PDT 锚定（`_pd.Timestamp(_pdt_today()) - days*_US_BDAY` / `_pdt_now()-timedelta`）。**核心洞察**：bug 本质是"两边口径不一致"非"绝对时间错"，改成同源 PDT 后即使系统钟仍慢 15h，相对 T+N 比较依旧正确。
+- 顺带口径统一（低危，非 bug）：accuracy/dimension 统计窗口(line 312/447 `date>=`)+ adapted_weights 写戳(1431) 一并 PDT 化。前向修正（旧误检记录 `checked=1` 不重算）。`test_backtester.py` 44 passed + `test_pipeline` 41 passed。
+- **未动**：534/1112/1126/1220/1316/1447 等同类"最近 N 天"统计窗口仍用本地时（差 ≤1 天，纯展示，低危）——留作可选的全文件 PDT 统一。
+
+### 注意 — 剩余既有失败（与本次无关，git stash 裸 HEAD 同样失败，非生产 bug）
+- **`test_queen_distiller.py::test_confidence_weighting`**：单维度输入被后加的 **P4 覆盖度压缩**(commit `c33533e`，1/5 维→砸中性 5.4)盖过 confidence 差异 → 两路都 5.2。新行为更安全（孤信号该拉中性），属过时测试。
+- **`test_queen_distiller.py::test_arbitration_no_flip`**：S4.5 仲裁（`4325fb2 v0.21.0`，晚于测试）把近平票 neutral 解析为加权多数 bullish，测试旧期望"不翻转"过时。实盘已跑 2 月，**不动评分逻辑**，留作测试期望对齐任务。已 spawn 独立任务 [task_a971f14c]。
+
+---
+
 ## [0.32.6] — 2026-06-23 — 日报 `--date` 覆盖（补跑指定交易日）+ 本机时钟 15h 偏差诊断
 
 ### Added — `alpha_hive_daily_report.py --date YYYY-MM-DD`

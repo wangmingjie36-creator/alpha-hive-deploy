@@ -26,6 +26,13 @@ except Exception:
         return datetime.now().strftime("%Y-%m-%d")
 import atexit
 
+# pattern 1: discovery 消毒（防外部/LLM 注入文本流入下游 snapshot→QueenDistiller）；
+# 防御式导入，模块缺失时降级为不消毒（不阻断信息素板）
+try:
+    import text_sanitizer as _ts
+except ImportError:
+    _ts = None
+
 _log = _logging.getLogger("alpha_hive.pheromone_board")
 
 
@@ -136,6 +143,19 @@ class PheromoneBoard:
                 entry.pheromone_strength = max(0.0, min(1.0, p))
         except (TypeError, ValueError):
             entry.pheromone_strength = 1.0
+
+        # pattern 3: 来源强制 —— CLAUDE.md「禁止无来源结论进入信息素板」此前仅文档、未落代码。
+        # 空 / 纯空白 source → 标记 [UNSOURCED]（fail-safe：标记而非丢弃，不破坏蜂群协作）
+        if not (isinstance(entry.source, str) and entry.source.strip()):
+            _log.warning("PheromoneBoard: 条目缺来源 (agent=%s, ticker=%s) → 标记 [UNSOURCED]",
+                         entry.agent_id, entry.ticker)
+            entry.source = "[UNSOURCED]"
+
+        # pattern 1: discovery 为外部 / LLM 文本，下游 snapshot 会喂给 QueenDistiller。
+        # 最小化消毒（中和注入短语 / 控制字符，保留 '|' 分隔符与原长度）
+        if _ts and isinstance(entry.discovery, str) and entry.discovery:
+            entry.discovery = _ts.sanitize_external_text(
+                entry.discovery, max_len=None, collapse_ws=False)
 
     def publish(self, entry: PheromoneEntry) -> None:
         """

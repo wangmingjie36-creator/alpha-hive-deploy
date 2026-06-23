@@ -854,6 +854,13 @@ class QueenDistiller:
         升级 #1: GEX 政体联动评分（在方向投票后施加 GEX 调整）
         升级 #4: 政体条件权重（根据宏观/GEX/IV 动态调整 5 维权重）
         """
+        # 降级护栏：蜂 future 超时 / 抛异常时 alpha_hive_daily_report 会向 agent_results
+        # append(None)，而下方 GEX/F&G 预处理循环（line ~874/883/897/924）直接 _r.get(...)，
+        # 遇 None 抛 AttributeError（F&G 循环无 try 保护 → 整个 ticker 蒸馏崩溃）。
+        # 入口统一滤 None，与 _prepare_dimension_data 的 clean_results_batch 同口径，
+        # 不影响维度覆盖度 / 评分（None 本就不是任何蜂结果）。
+        agent_results = [_r for _r in agent_results if _r is not None]
+
         # ===== 0. GEX 政体 + 政体权重预计算 =====
         _gex_data = {}
         _gex_mod_result = {"gex_adjustment": 0.0, "gex_regime": "unknown",

@@ -71,6 +71,27 @@ _AGENT_RESULT_CORE_KEYS = frozenset({
     "dimension", "data_quality", "details", "error", "extras",
 })
 
+# 7 只蜂的合法评分维度（QueenDistiller AGENT_DIMENSIONS 口径）
+VALID_DIMENSIONS = frozenset({
+    "signal", "odds", "sentiment", "catalyst",
+    "risk_adj", "ml_auxiliary", "contrarian",
+})
+
+# pattern 2: 声明式输出契约（对标 anthropics/financial-services transcript-reader
+# 的 output_schema）。__post_init__ 已做运行时 clamp/coerce；本 schema + validate()
+# 提供「显式契约 + 测试钩子」，并捕获 __post_init__ 不覆盖的项（dimension 合法集、
+# source 非空、details 体积）。
+AGENT_RESULT_SCHEMA = {
+    "score":        {"type": "number", "min": 0.0, "max": 10.0},
+    "direction":    {"type": "enum", "values": ["bullish", "bearish", "neutral"]},
+    "confidence":   {"type": "number", "min": 0.0, "max": 1.0},
+    "discovery":    {"type": "string", "max_len": 500},
+    "source":       {"type": "string", "max_len": 500, "non_empty": True},
+    "dimension":    {"type": "enum", "values": sorted(VALID_DIMENSIONS) + ["unknown"]},
+    "data_quality": {"type": "object"},
+    "details":      {"type": "object", "max_keys": 64},
+}
+
 
 @dataclass
 class AgentResult:
@@ -163,6 +184,31 @@ class AgentResult:
     def is_valid(self) -> bool:
         """是否为有效结果（无 error 且有必要字段）"""
         return self.error is None and self.dimension != "unknown"
+
+    def validate(self, strict: bool = False) -> List[str]:
+        """对照 AGENT_RESULT_SCHEMA 校验，返回问题列表（空 = 合规）。非破坏性。
+
+        __post_init__ 已 clamp/coerce 大多数字段，这里主要捕获其遗漏项：
+        - dimension 不在合法维度集（strict 时报告）
+        - source 为空 / 纯空白
+        - details key 过多（可能数据污染）
+        """
+        issues: List[str] = []
+        if not (0.0 <= self.score <= 10.0):
+            issues.append(f"score out of range: {self.score}")
+        if self.direction not in ("bullish", "bearish", "neutral"):
+            issues.append(f"invalid direction: {self.direction}")
+        if not (0.0 <= self.confidence <= 1.0):
+            issues.append(f"confidence out of range: {self.confidence}")
+        if len(self.discovery) > AGENT_RESULT_SCHEMA["discovery"]["max_len"]:
+            issues.append("discovery exceeds max_len")
+        if not (self.source and self.source.strip()):
+            issues.append("source is empty")
+        if isinstance(self.details, dict) and len(self.details) > AGENT_RESULT_SCHEMA["details"]["max_keys"]:
+            issues.append(f"details has too many keys: {len(self.details)}")
+        if strict and self.dimension not in VALID_DIMENSIONS and self.dimension != "unknown":
+            issues.append(f"unknown dimension: {self.dimension}")
+        return issues
 
 
 # ==================== 蒸馏输出模型 ====================
