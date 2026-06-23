@@ -1,7 +1,7 @@
 {
   "ticker": "MSFT",
   "date": "2026-06-23",
-  "composite_score": 5.35,
+  "composite_score": 5.09,
   "direction": "bullish",
   "price_target": 0.0,
   "stop_loss": 0.0,
@@ -10,11 +10,10 @@
     "OracleBeeEcho": 9.130769230769232,
     "RivalBeeVanguard": 6.06,
     "CodeExecutorAgent": 5.0,
-    "ScoutBeeNova": 5.63505,
     "ChronosBeeHorizon": 5.5,
-    "QueenDistiller": 5.35,
-    "GuardBeeSentinel": 4.96,
-    "BuzzBeeWhisper": 4.28
+    "QueenDistiller": 5.09,
+    "GuardBeeSentinel": 4.81,
+    "ScoutBeeNova": 4.639099999999999
   },
   "weights_used": {
     "signal": 0.2094,
@@ -30,5 +29,5 @@
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-06-24T02:13:51.001919"
+  "created_at": "2026-06-24T04:48:26.243773"
 }
