@@ -6,7 +6,6 @@ with sentiment labeling, caching, deduplication, and DataQualityChecker.
 import json
 import math
 import types
-import time
 import pytest
 from unittest.mock import MagicMock
 
@@ -258,7 +257,7 @@ class TestFetchNews:
         _noop_limiter(monkeypatch)
         import newsapi_client
         # Exhaust quota
-        newsapi_client._av_daily["date"] = time.strftime("%Y-%m-%d")
+        newsapi_client._av_daily["date"] = newsapi_client.pdt_today()  # 须与 _av_quota_ok 的 pdt_today() 同口径，否则本地日期≠PDT 触发 count 重置
         newsapi_client._av_daily["count"] = newsapi_client._AV_DAILY_LIMIT
 
         result = newsapi_client._fetch_av_news("NVDA", "test-key", max_articles=5)
@@ -394,7 +393,7 @@ class TestNewsAPIClient:
     def test_av_quota_ok_increments_and_limits(self):
         """_av_quota_ok increments count and returns False when exhausted."""
         import newsapi_client
-        newsapi_client._av_daily["date"] = time.strftime("%Y-%m-%d")
+        newsapi_client._av_daily["date"] = newsapi_client.pdt_today()  # 须与 _av_quota_ok 的 pdt_today() 同口径，否则本地日期≠PDT 触发 count 重置
         newsapi_client._av_daily["count"] = 0
 
         # Should succeed for the first _AV_DAILY_LIMIT calls
