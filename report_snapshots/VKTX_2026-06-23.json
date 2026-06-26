@@ -26,9 +26,9 @@
   "low_conviction": true,
   "low_conviction_reason": "score_high_guard: 高分 6.5 但情绪 5.9<6 未确认（signal 6.8）→ 仓位减半",
   "actual_prices": {
-    "t1": null,
+    "t1": 38.040000915527344,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-06-24T04:48:26.981558"
+  "created_at": "2026-06-27T02:48:06.360653"
 }

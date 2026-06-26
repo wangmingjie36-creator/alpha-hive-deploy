@@ -25,9 +25,9 @@
   "low_conviction": false,
   "low_conviction_reason": "",
   "actual_prices": {
-    "t1": null,
+    "t1": 234.11000061035156,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-06-23T08:53:20.484835"
+  "created_at": "2026-06-27T02:47:24.158860"
 }
