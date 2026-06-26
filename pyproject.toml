@@ -11,8 +11,13 @@ python_functions = ["test_*"]
 addopts = [
     "-v",
     "--tb=short",
-    "--timeout=30",
+    # v0.33.0: 30→60s。部分非-integration 测试打真实 API 偏慢（dashboard 渲染 42s、
+    # options 分析 32s），30s 下限流时确定性超时；60s 实测整套 0 失败（durations 验证）。
+    "--timeout=60",
     "-x",
+    # v0.33.0: 默认跳过 integration（需真实网络/OAuth 的外部依赖测试，离线必挂）。
+    # 跑它们：pytest -m integration（CLI 的 -m 覆盖此处）。
+    "-m", "not integration",
 ]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

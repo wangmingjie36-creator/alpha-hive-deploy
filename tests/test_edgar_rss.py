@@ -320,12 +320,9 @@ class TestEdgarRSSClient:
 
         # Mock datetime.now() to return 2026-03-08 so "today" matches our XML
         import edgar_rss
-        monkeypatch.setattr(
-            edgar_rss, "datetime",
-            types.SimpleNamespace(now=lambda: types.SimpleNamespace(
-                strftime=lambda fmt: "2026-03-08"
-            )),
-        )
+        # v0.33.0: 代码用 pdt_today()（hive_logger）取"今天"，非 datetime.now()；
+        # 旧 mock 打 edgar_rss.datetime 无效 → 实际用系统日期、与 XML fixture(2026-03-08)不匹配 → 空结果。
+        monkeypatch.setattr(edgar_rss, "pdt_today", lambda: "2026-03-08")
 
         client = edgar_rss.EdgarRSSClient()
         results = client.get_today_filings_for_cik("1045810")
@@ -339,12 +336,9 @@ class TestEdgarRSSClient:
         _mock_session(monkeypatch, resp)
 
         import edgar_rss
-        monkeypatch.setattr(
-            edgar_rss, "datetime",
-            types.SimpleNamespace(now=lambda: types.SimpleNamespace(
-                strftime=lambda fmt: "2026-03-08"
-            )),
-        )
+        # v0.33.0: 代码用 pdt_today()（hive_logger）取"今天"，非 datetime.now()；
+        # 旧 mock 打 edgar_rss.datetime 无效 → 实际用系统日期、与 XML fixture(2026-03-08)不匹配 → 空结果。
+        monkeypatch.setattr(edgar_rss, "pdt_today", lambda: "2026-03-08")
 
         client = edgar_rss.EdgarRSSClient()
         results = client.get_today_filings_for_cik("0000000")
@@ -357,12 +351,9 @@ class TestEdgarRSSClient:
         _mock_session(monkeypatch, resp)
 
         import edgar_rss
-        monkeypatch.setattr(
-            edgar_rss, "datetime",
-            types.SimpleNamespace(now=lambda: types.SimpleNamespace(
-                strftime=lambda fmt: "2026-03-08"
-            )),
-        )
+        # v0.33.0: 代码用 pdt_today()（hive_logger）取"今天"，非 datetime.now()；
+        # 旧 mock 打 edgar_rss.datetime 无效 → 实际用系统日期、与 XML fixture(2026-03-08)不匹配 → 空结果。
+        monkeypatch.setattr(edgar_rss, "pdt_today", lambda: "2026-03-08")
 
         client = edgar_rss.EdgarRSSClient()
         results = client.get_today_filings_by_name("nvidia")
@@ -376,12 +367,9 @@ class TestEdgarRSSClient:
         _mock_session(monkeypatch, resp)
 
         import edgar_rss
-        monkeypatch.setattr(
-            edgar_rss, "datetime",
-            types.SimpleNamespace(now=lambda: types.SimpleNamespace(
-                strftime=lambda fmt: "2026-03-08"
-            )),
-        )
+        # v0.33.0: 代码用 pdt_today()（hive_logger）取"今天"，非 datetime.now()；
+        # 旧 mock 打 edgar_rss.datetime 无效 → 实际用系统日期、与 XML fixture(2026-03-08)不匹配 → 空结果。
+        monkeypatch.setattr(edgar_rss, "pdt_today", lambda: "2026-03-08")
 
         client = edgar_rss.EdgarRSSClient()
         summary = client.summarize_ticker_alerts("NVDA", cik="1045810")
@@ -398,12 +386,9 @@ class TestEdgarRSSClient:
         _mock_session(monkeypatch, resp)
 
         import edgar_rss
-        monkeypatch.setattr(
-            edgar_rss, "datetime",
-            types.SimpleNamespace(now=lambda: types.SimpleNamespace(
-                strftime=lambda fmt: "2026-03-08"
-            )),
-        )
+        # v0.33.0: 代码用 pdt_today()（hive_logger）取"今天"，非 datetime.now()；
+        # 旧 mock 打 edgar_rss.datetime 无效 → 实际用系统日期、与 XML fixture(2026-03-08)不匹配 → 空结果。
+        monkeypatch.setattr(edgar_rss, "pdt_today", lambda: "2026-03-08")
 
         client = edgar_rss.EdgarRSSClient()
         summary = client.summarize_ticker_alerts("ZZZZ")
@@ -428,12 +413,9 @@ class TestEdgarRSSClient:
         _mock_session(monkeypatch, resp)
 
         import edgar_rss
-        monkeypatch.setattr(
-            edgar_rss, "datetime",
-            types.SimpleNamespace(now=lambda: types.SimpleNamespace(
-                strftime=lambda fmt: "2026-03-08"
-            )),
-        )
+        # v0.33.0: 代码用 pdt_today()（hive_logger）取"今天"，非 datetime.now()；
+        # 旧 mock 打 edgar_rss.datetime 无效 → 实际用系统日期、与 XML fixture(2026-03-08)不匹配 → 空结果。
+        monkeypatch.setattr(edgar_rss, "pdt_today", lambda: "2026-03-08")
 
         result = edgar_rss.get_today_form4_alerts("NVDA", cik="1045810")
 

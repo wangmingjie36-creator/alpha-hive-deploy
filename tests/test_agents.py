@@ -1,6 +1,14 @@
-"""7 个核心 Agent 单元测试（含 BearBeeContrarian）"""
+"""7 个核心 Agent 测试（含 BearBeeContrarian）
+
+注：本文件 0 mock，实例化真实蜂群、打 live API（yfinance/期权/EDGAR），本质是 integration 测试，
+网络慢/限流时会超时 flaky（v0.33.0 实测 test_has_options_data / test_analyze_returns_valid_result
+在 60s 超时下偶发失败、120s 下通过）。默认跳过，跑 live 验证用 `pytest -m integration`。
+"""
 
 import pytest
+
+# v0.33.0: 整模块标 integration（真网依赖，见上）
+pytestmark = pytest.mark.integration
 
 
 # ==================== Agent 返回值通用校验 ====================

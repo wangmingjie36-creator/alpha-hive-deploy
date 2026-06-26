@@ -599,10 +599,11 @@ class TestSGDMLModel:
 class TestCreateMLModel:
     """测试 create_ml_model() 工厂"""
 
-    def test_returns_sgd_when_sklearn_available(self):
-        from ml_predictor import SGDMLModel
+    def test_returns_hgb_when_sklearn_available(self):
+        # v0.33.0: v15.0 工厂改为优先 HGBModel（SGDMLModel 仅在 HistGradientBoosting 不可用时 fallback）
+        from ml_predictor import HGBModel
         model = create_ml_model()
-        assert isinstance(model, SGDMLModel)
+        assert isinstance(model, HGBModel)
 
     def test_model_has_required_interface(self):
         model = create_ml_model()
@@ -666,8 +667,8 @@ class TestMLPredictionService:
         svc.train_model()
         new_data = [_make_sample(win=True, crowding_score=55)]
         result = svc.incremental_train(new_data)
-        # SGDMLModel 有 incremental_train 方法
-        assert result.get("status") == "success"
+        # v0.33.0: SGD 走 partial_fit(success)，HGB(默认) 走全量重训(fallback)，两者皆为成功增量
+        assert result.get("status") in ("success", "fallback")
 
     def test_prediction_structure(self):
         """验证预测返回的完整结构"""
@@ -700,7 +701,9 @@ class TestIncrementalTrainingLoop:
         """全量训练 → 增量学习 → 序列化 → 反序列化 → 预测一致"""
         import tempfile
 
+        from ml_predictor import SGDMLModel
         svc = MLPredictionService()
+        svc.model = SGDMLModel()  # v0.33.0: 显式用 SGD fallback（工厂默认 HGB；本测试验证 SGD 增量+序列化闭环）
         svc.train_model()  # 8 个硬编码样本
 
         # 模拟 5 条新验证数据
@@ -981,7 +984,9 @@ class TestScalerSerializationBug:
         import tempfile
         from ml_predictor import SGDMLModel, MLPredictionService
 
+        # v0.33.0: 工厂默认 HGB（无 _scaler/不支持 partial_fit）；这些是 SGD fallback 序列化回归测试，显式注入 SGD
         svc = MLPredictionService()
+        svc.model = SGDMLModel()
         svc.train_model()
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
@@ -1011,7 +1016,9 @@ class TestScalerSerializationBug:
         import numpy as np
         from ml_predictor import SGDMLModel, MLPredictionService
 
+        # v0.33.0: 工厂默认 HGB（无 _scaler/不支持 partial_fit）；这些是 SGD fallback 序列化回归测试，显式注入 SGD
         svc = MLPredictionService()
+        svc.model = SGDMLModel()
         svc.train_model()
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
@@ -1035,7 +1042,9 @@ class TestScalerSerializationBug:
         import tempfile
         from ml_predictor import SGDMLModel, MLPredictionService
 
+        # v0.33.0: 工厂默认 HGB（无 _scaler/不支持 partial_fit）；这些是 SGD fallback 序列化回归测试，显式注入 SGD
         svc = MLPredictionService()
+        svc.model = SGDMLModel()
         svc.train_model()
 
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:

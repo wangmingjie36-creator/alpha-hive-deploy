@@ -104,10 +104,13 @@ class TestGetFearGreed:
         monkeypatch.setattr(mod, "get_session", lambda name: sess)
 
         r1 = mod.get_fear_greed()
+        calls_after_first = call_count["n"]  # 首次可能 1 次(CNN 命中)或 2 次(CNN 失败→Alt.me 兜底)
         r2 = mod.get_fear_greed()
         assert r1["value"] == 65
         assert r2["value"] == 65
-        assert call_count["n"] == 1  # 第二次从缓存读取
+        # v0.33.0: 缓存命中的真不变式——第二次调用不新增任何 HTTP（与首次走主源还是兜底无关）。
+        # 旧断言 ==1 假设 CNN 主源必命中，但 mock 只给 Alt.me 格式→CNN 失败→兜底→首次 2 次，脆。
+        assert call_count["n"] == calls_after_first
 
     def test_requests_missing_returns_default(self, monkeypatch):
         """requests 模块不可用 → 降级默认值"""

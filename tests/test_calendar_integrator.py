@@ -36,6 +36,7 @@ class TestCalendarInit:
         ci = CalendarIntegrator(credentials_file=str(tmp_path / "nonexistent.json"))
         assert ci.service is None
 
+    @pytest.mark.integration  # v0.33.0: 需真实 Google OAuth 凭证，后台/离线必挂
     @patch('calendar_integrator.discovery')
     @patch('calendar_integrator.InstalledAppFlow')
     def test_detects_gmail_scope_mismatch(self, mock_flow, mock_discovery, tmp_path):
@@ -71,6 +72,7 @@ class TestCalendarInit:
         mock_flow.from_client_secrets_file.assert_called()
         mock_discovery.build.assert_called_once_with('calendar', 'v3', credentials=mock_creds)
 
+    @pytest.mark.integration  # v0.33.0: 需真实 Google OAuth 凭证，后台/离线必挂
     @patch('calendar_integrator.discovery')
     @patch('calendar_integrator.InstalledAppFlow')
     def test_builds_calendar_v3_service(self, mock_flow, mock_discovery, tmp_path):

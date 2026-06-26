@@ -1802,30 +1802,8 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
     return new_company_html
 
 
-def _ml_combined_score(ticker: str, report_dir, date_str: str):
-    """读取 analysis-{ticker}-ml-{date}.json 的 combined_recommendation.combined_probability。
-
-    返回 0-10 分制浮点数；文件不存在或值异常时返回 None（调用方回退到 opp_score/final_score）。
-    combined_probability 是百分比（如 62.4），除以 10 转换为 0-10 分制。
-    """
-    try:
-        ml_path = _Path_mod(report_dir) / f"analysis-{ticker}-ml-{date_str}.json"
-        if not ml_path.exists():
-            return None
-        with open(ml_path, encoding="utf-8") as _f:
-            ml_data = json.load(_f)
-        cp = ml_data.get("combined_recommendation", {}).get("combined_probability")
-        if not isinstance(cp, (int, float)):
-            return None
-        if cp != cp:  # NaN guard
-            return None
-        if not (0.0 < cp <= 100.0):
-            return None
-        return round(cp / 10.0, 2)
-    except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
-        return None
-
-
+# 注：_ml_combined_score 已删除（v0.33.0）—— caa432d (2026-03-30) 决定 ML combined_probability
+# 不用于 dashboard 排名（无区分度），该函数自此从渲染路径移除、成为死代码，今删除。
 def render_dashboard_html(report: Dict, date_str: str,
                          report_dir, opportunities: List,
                          dashboard_css: str = None) -> str:
