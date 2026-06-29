@@ -5,6 +5,23 @@
 
 ---
 
+## [0.33.1] — 2026-06-30 — Python 3.9 兼容性修复（PEP604 注解 + jinja2 缺失）+ 6/29 补跑
+
+> 6/29 规则模式补跑时连撞两个 fatal 生产 bug，均为「代码在 Python 3.10+/有 jinja2 环境（Cowork VM）写测、在用户真实 Mac（Python 3.9.6 / 无 jinja2）跑不通」的环境漂移。两次都导致扫描蜂群分析全跑完却在产出阶段崩溃、无报告。修复后端到端跑通：commit + push + gh-pages 部署（898 静态文件）+ CDN 验证通过。
+
+### Fixed — PEP604 `X | None` 注解在 Python 3.9 崩溃（7 核心文件）
+- 根因：PEP604 union 注解（`date | None` / `float | None`）在 `def` 执行（import）时即 eager 求值，Python 3.9 不支持 → `TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'`，模块 import 直接失败。
+- 两个实测 fatal 点：`report_formatters.py:237` `float | None` → markdown 报告生成整段崩（致 6/29 首次扫描无产出）；`is_trading_day.py:115` `date | None` → 被 7 个生产模块导入的交易日护栏全线 fail-open，**v32.0/v32.2 周末/假日跳过 + 部署/dashboard/RSS 过滤在用户机上从未真正生效**（静默失效）。
+- 修复：AST 静态扫描定出核心层完整爆炸半径 = 7 文件（`alpha_hive_daily_report` / `generate_deep_v2` / `is_trading_day` / `newsapi_client` / `pre_scan_notify` / `report_formatters` / `run_daily_scan`），各加 `from __future__ import annotations`（PEP 563，3.7+，注解变惰性字符串、运行时不求值）。已确认 7 文件均无运行时注解内省（get_type_hints/pydantic/`__annotations__`）→ 安全。
+- 验证：is_trading_day 功能测试周末/Juneteenth/独立日(observed 周五)全部正确识别；AST 重扫核心层（含子目录）0 残留。commit `6c63545`。
+
+### Fixed — dashboard 渲染缺 jinja2 时崩溃阻断整个扫描（`alpha_hive_daily_report.py` + `requirements.txt`）
+- 根因：`dashboard_renderer.py:17` 顶层 `from jinja2 import Environment`（2026-03-04 起即硬依赖却从未在 requirements 声明），用户 Mac 未装 jinja2 → `ModuleNotFoundError`。而 index.html 生成本有 try/except + `_fallback_dashboard_data` 降级路径，但 except 元组 `(OSError,ValueError,KeyError,TypeError,AttributeError)` **漏了 `ImportError`**（ModuleNotFoundError 是其子类）→ 穿透崩溃，`save_report` abort、自动提交/部署未执行。本质是「降级路径设计对了但异常捕获面漏了」。
+- 修复：except 元组加 `ImportError`（dashboard 渲染任何失败含缺可选依赖都降级到独立 JSON，绝不阻断核心报告+提交/部署；已确认 `_fallback_dashboard_data` 不依赖 jinja2）；`requirements.txt` 声明 `jinja2>=3.1.0,<4`；用户 Mac 安装 jinja2 3.1.6。commit `a920f17`。
+
+### Notes — 6/29 数据质量
+- 中国深夜 Yahoo 批量限流（401 Invalid Crumb），期权 IV 降级到缓存/样本，**兜底值 run-to-run 不同 → 部分边界评分漂移 ±0.5、甚至翻转方向**（QCOM 看空↔看多、META 中性↔看多）。稳定结论：TSLA 唯一观察名单（~6.7-6.8）、无高优先级（≥7.5）、安静日。核心数据（SEC Form4 内幕 / 催化剂 / ML）均 real。
+
 ## [0.33.0] — 2026-06-23 — financial-services 四模式落地：注入护栏 / 输出 schema / 来源强制 / MD-prompt 解耦
 
 > 借鉴 anthropics/financial-services 参考架构的 5 个模式，落地其中 4 个（pattern 4「能力收口」属 headless 场景，未做）。先用并行侦察工作流在真代码核准每个 pattern 的落点，**纠正了"蜂不调 LLM"的初判**——蜂经 `llm_service` 间接调 LLM，注入面真实存在但 opt-in（默认 `--no-llm` 时各汇为惰性）。全程：零新增 LLM 调用、不改门控、无 API-key 告警。新增 34 测试，131 个相关现有测试零回归。
