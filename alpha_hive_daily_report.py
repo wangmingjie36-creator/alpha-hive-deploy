@@ -1900,7 +1900,9 @@ class AlphaHiveDailyReporter:
             with open(index_file, "w", encoding="utf-8") as f:
                 f.write(html)
             _log.info("index.html 已更新（GitHub Pages）")
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError) as e:
+            # ImportError 覆盖 ModuleNotFoundError（如缺 jinja2）：dashboard 渲染是次要步骤，
+            # 任何失败都不得阻断已生成的核心报告 + 后续提交/部署，降级到独立 JSON。
             _log.warning("index.html 生成失败: %s", e)
             # Fallback: 即使 HTML 渲染崩溃，也确保 dashboard-data.json 被更新
             self._fallback_dashboard_data(report)
