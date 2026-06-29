@@ -2,6 +2,12 @@
 
 ## 用户偏好
 
+- **⚠️ Python 解释器硬规则：扫描/脚本一律用 `/usr/local/bin/python3`（Python 3.11.1），禁用裸 `python3`**
+  - 用户 Mac 有两个 Python：`/usr/bin/python3`=3.9.6（系统自带，**无 sklearn、缺 jinja2、PEP604 `X|None` 注解 import 即崩**）；`/usr/local/bin/python3`=3.11.1（Homebrew，**真实环境**：sklearn/jinja2/yfinance 全装，PEP604 合法）
+  - 编排器 `~/.claude/scripts/alpha-hive-orchestrator.sh:54` 已显式 `PYTHON3="/usr/local/bin/python3"`；**手动/Claude 跑扫描必须同样显式用 `/usr/local/bin/python3 alpha_hive_daily_report.py ...`**，并 `export PATH="/usr/local/bin:$PATH"` 保证内部 spawn 的子 python 也走 3.11
+  - 裸 `python3` 会解析成 3.9.6 → ML 降级 SimpleMLModel + PEP604 崩 + 缺 jinja2 崩（2026-06-30 事故根因）
+  - 运行测试同理：`/usr/local/bin/python3 -m pytest`
+
 - **报告生成模式：Cowork 本地推理，永远不用 Claude API / Opus**
   - 用户使用 Cowork 本地 LLM 推理，不是 Anthropic API
   - `generate_deep_v2.py` 永远跑 `_local_fallback`，禁止调用 `claude-opus-4-6`
