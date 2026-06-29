@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 import math
 import re
+import threading
+import time
 import urllib.request
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -37,6 +39,15 @@ _OCC = re.compile(r"^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
 _BS_RISK_FREE = 0.045  # 与 options_analyzer 一致的参考无风险利率
 _ATM_LO, _ATM_HI = 0.30, 1.70  # ATM 过滤区间（±70%），与 yfinance 路径一致
 _MAX_STRIKES_PER_SIDE = 40      # 每到期日每边最多保留 40 strike（按 OI），内存保护
+
+# 本机老 SSL 栈（LibreSSL 2.8.3）扛不住并发 HTTPS：实测 4 并发拉 CBOE 每个挂 50-70s
+# 甚至 SSL EOF，而顺序拉仅 8-11s。故串行化 CBOE 网络请求（信号量限 1）。
+_CBOE_SEM = threading.Semaphore(1)
+# 进程内 payload 缓存：同一标的的主链(fetch_cboe_chain)与全链(fetch_cboe_full_chain_oi)
+# 共享一次下载，避免每标的拉 2 次大 JSON。短 TTL 防长驻进程取到陈旧数据。
+_payload_cache = {}  # ticker -> (timestamp, data)
+_cache_lock = threading.Lock()
+_CACHE_TTL = 120.0
 
 
 def _bs_gamma(S: float, K: float, T: float, sigma: float) -> float:
@@ -94,20 +105,39 @@ def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: 
     return chosen, list(near_set)
 
 
-def _fetch_cboe_payload(ticker: str, timeout: int) -> Optional[dict]:
-    """拉取 CBOE 延迟报价 JSON，返回 data 段（含 options / current_price / close）；失败返回 None。"""
-    url = _CBOE_URL.format(ticker.upper())
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        raw = urllib.request.urlopen(req, timeout=timeout).read()
-        data = (json.loads(raw) or {}).get("data") or {}
-    except Exception as e:  # 网络/解析失败 → 调用方降级
-        _log.warning("CBOE 拉取 %s 失败：%s", ticker, e)
-        return None
-    if not data.get("options"):
-        _log.warning("CBOE %s 返回空期权链", ticker)
-        return None
-    return data
+def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optional[dict]:
+    """拉取 CBOE 延迟报价 JSON，返回 data 段（含 options / current_price / close）；失败返回 None。
+
+    串行化（`_CBOE_SEM` 限 1）：本机老 SSL 栈扛不住并发 HTTPS（实测 4 并发挂 50-70s/SSL EOF），
+    顺序拉仅 8-11s。进程缓存：同标的主链+全链共享一次下载。重试退避：瞬时 SSL EOF 错开即恢复。
+    """
+    key = ticker.upper()
+    now = time.time()
+    with _cache_lock:
+        hit = _payload_cache.get(key)
+        if hit and now - hit[0] < _CACHE_TTL:
+            return hit[1]
+
+    url = _CBOE_URL.format(key)
+    last_err = None
+    for attempt in range(retries):
+        try:
+            with _CBOE_SEM:  # 串行化：避免并发压垮本机 SSL 栈
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                raw = urllib.request.urlopen(req, timeout=timeout).read()
+            data = (json.loads(raw) or {}).get("data") or {}
+            if not data.get("options"):
+                _log.warning("CBOE %s 返回空期权链", ticker)
+                return None
+            with _cache_lock:
+                _payload_cache[key] = (now, data)
+            return data
+        except Exception as e:  # 网络/SSL/解析失败 → 退避重试
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(0.7 * (attempt + 1))
+    _log.warning("CBOE 拉取 %s 失败（重试 %d 次耗尽）：%s", ticker, retries, last_err)
+    return None
 
 
 def fetch_cboe_chain(
