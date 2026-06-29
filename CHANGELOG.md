@@ -5,6 +5,28 @@
 
 ---
 
+## [0.34.0] — 2026-06-30 — 接入 CBOE 期权数据源（根治 Yahoo 限流空 OI 垃圾数据）
+
+> 用户在中国深夜跑扫描常撞 Yahoo 限流（401 Invalid Crumb），yfinance "成功"返回近空 OI（实测 NVDA 全链 OI=0）→ 静默落进样本数据，odds/Max Pain/GEX 全变垃圾。项目原 "Tradier→yfinance→样本" 降级链中 Tradier **从未实现**（tradier.py 为空、无人 import），实际只有 yfinance→样本。新增 CBOE（芝加哥期权交易所）公开延迟报价作真实兜底源。commit `991acd2`。
+
+### Added — `cboe_options.py`（新文件，312 行）
+- CBOE 端点 `cdn.cboe.com/api/global/delayed_quotes/options/{TICKER}.json`：全链逐合约 OI/IV/greeks，15min 延迟（盘后=已结算 EOD），**无 API key、无限流**。
+- `fetch_cboe_chain()`：返回与 yfinance **完全兼容**的 result dict（calls/puts 含 strike/openInterest/impliedVolatility/gamma/expiry/dte/dte_weight 等），镜像 yfinance 路径全部后处理（到期日筛选/ATM 过滤/40-cap/DTE 加权/gamma 注入，CBOE gamma 缺失时 BS 兜底）→ 下游 GEX/Max Pain/P-C/key_levels **零改动复用**。
+- `fetch_cboe_full_chain_oi()`：全链 OI 聚合（call_oi/put_oi/call_exp_oi/put_exp_oi/expiry_breakdown），复用 `_fetch_full_chain_oi` 的 Max Pain 计算。
+- OCC 符号解析 / `_pdt_now()` PDT 锚定 DTE / 解析丢弃率 >5% 告警。
+
+### Changed — `options_analyzer.py`
+- `fetch_options_chain`：5 处样本降级 → `_fetch_via_cboe_or_sample`（先 CBOE 再样本）；缓存写入前加 **OI 质量门**（yf 总 OI < `_MIN_PLAUSIBLE_OI`=1000 且 CBOE OI > 1.5× → 换 CBOE）。断路器保持开路（CBOE 成功不重置 yf 断路器，后续标的直接走 CBOE）。
+- `_fetch_full_chain_oi`：顶部重构（yfinance 取数包进 `if yf is not None`、移除早退）+ 全链 CBOE 质量门（同 1.5× 守卫）。
+
+### Fixed — 对抗审查（feature-dev:code-reviewer ×2）后修复
+- IV 缩放：实测 CBOE 每合约 iv 已是小数（删 `_normalize_iv` 百分数启发式，对高 IV biotech >300% 会误判压缩）。
+- PDT 锚定：`_pdt_now()` 替代裸 `datetime.now()`（遵守项目硬规则）。
+- 换源守卫 1.5×（避免真实薄期权标的 realtime→delayed 横向换源）+ OCC 解析丢弃告警。
+
+### 验证
+19 个 options 测试通过；端到端 `analyze("NVDA")` data_quality=real、全链 Max Pain $190（与 6/26 一致）；限流 OI=0 自动切 CBOE OI 276,854；CBOE 不覆盖标的（403）优雅退样本；字段对齐完整。**已知遗留**：CBOE 数据仍标 data_quality=real（盘后≈real，含 `_source:cboe` 溯源）；若要 "delayed" tier 需同步改 dashboard/bot 渲染。
+
 ## [0.33.1] — 2026-06-30 — Python 3.9 兼容性修复（PEP604 注解 + jinja2 缺失）+ 6/29 补跑
 
 > 6/29 规则模式补跑时连撞两个 fatal 生产 bug，均为「代码在 Python 3.10+/有 jinja2 环境（Cowork VM）写测、在用户真实 Mac（Python 3.9.6 / 无 jinja2）跑不通」的环境漂移。两次都导致扫描蜂群分析全跑完却在产出阶段崩溃、无报告。修复后端到端跑通：commit + push + gh-pages 部署（898 静态文件）+ CDN 验证通过。
