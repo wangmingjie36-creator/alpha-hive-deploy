@@ -15,6 +15,8 @@
     1  = 脚本错误（应继续运行扫描，防止误跳过）
 """
 
+from __future__ import annotations
+
 import sys
 from datetime import date, timedelta
 

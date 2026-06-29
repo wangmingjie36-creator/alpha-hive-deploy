@@ -5,6 +5,8 @@ report_formatters - 报告格式化与展示模块
 每个函数接收 reporter 实例（原 self）作为第一个参数。
 """
 
+from __future__ import annotations
+
 from typing import Dict, List
 from hive_logger import get_logger
 

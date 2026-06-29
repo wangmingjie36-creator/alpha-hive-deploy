@@ -4,6 +4,8 @@
 每日自动扫描 watchlist 并生成结构化投资简报 + X 线程版本
 """
 
+from __future__ import annotations
+
 import json
 import argparse
 import os

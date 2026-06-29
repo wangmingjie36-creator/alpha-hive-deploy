@@ -7,6 +7,8 @@
     python3 run_daily_scan.py --tickers NVDA TSLA   # 自定义标的
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging as _logging

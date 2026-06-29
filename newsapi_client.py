@@ -13,6 +13,8 @@ P4: 免费新闻全文/摘要获取客户端
 线程中调用，IO 已由线程并发覆盖，换 async 仅增加复杂度无实质收益。
 """
 
+from __future__ import annotations
+
 import json
 import math
 import os

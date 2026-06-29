@@ -22,6 +22,8 @@
   v3.5  2026-03-13  矛盾检测：detect_conflicts()自动检测5类矛盾，强制注入swarm/options prompt
 """
 
+from __future__ import annotations
+
 VERSION = "0.18.0"
 
 import json

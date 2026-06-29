@@ -16,6 +16,8 @@
     42 = 使用 --use-llm（LLM 混合模式）
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import time
