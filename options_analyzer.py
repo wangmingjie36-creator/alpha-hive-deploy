@@ -34,10 +34,6 @@ try:
 except ImportError:
     pass
 
-# yfinance 限流时常"成功"返回近空 OI（实测 NVDA 全链 OI=0）。4 个近月到期日合计
-# OI 低于此阈值即视为可疑（真实流动标的远高于此）→ 触发 CBOE 真实数据替换。
-_MIN_PLAUSIBLE_OI = 1000
-
 
 class OptionsDataFetcher:
     """期权数据采集器 - 支持多源降级策略"""
@@ -124,22 +120,30 @@ class OptionsDataFetcher:
             pass
 
     def fetch_options_chain(self, ticker: str, stock_price: float = 0.0) -> Dict:
-        """获取期权链数据 - 支持多源降级（yfinance > 样本数据）"""
+        """获取期权链数据 - 多源降级（CBOE 主源 > yfinance > 样本数据）"""
         # 尝试读取缓存
         cached = self._read_cache(ticker, "chain")
         if cached:
             pass  # {ticker} 期权链数据来自缓存")
             return cached
 
-        # 断路器检查（#9）：yfinance 最近连续失败时快速降级
+        # ── 主源：CBOE（稳定、无限流、无 key；盘后=已结算 EOD）──
+        # yfinance 对中国深夜用户几乎恒限流（401 Invalid Crumb），故 CBOE 优先；
+        # yfinance 仅作 CBOE 不覆盖该标的/CBOE 异常时的降级。
+        cboe = self._try_cboe(ticker, stock_price)
+        if cboe:
+            self._write_cache(ticker, "chain", cboe)
+            return cboe
+
+        # ── 降级：yfinance（仅 CBOE 不可用时）──
+        # 断路器检查（#9）：yfinance 最近连续失败时快速降级到样本
         if _opt_cb and not _opt_cb.allow_request():
             _log.warning("%s 期权链跳过：yfinance 断路器开路（近期连续失败）", ticker)
-            return self._fetch_via_cboe_or_sample(ticker, stock_price)
+            return self._get_sample_options_chain(ticker)
 
-        # 主来源：yfinance
         if yf is None:
             _log.warning("yfinance 未安装，使用样本数据")
-            return self._fetch_via_cboe_or_sample(ticker, stock_price)
+            return self._get_sample_options_chain(ticker)
 
         try:
             stock = yf.Ticker(ticker)
@@ -147,7 +151,7 @@ class OptionsDataFetcher:
             # 获取最近的到期日
             if not hasattr(stock, "options") or not stock.options:
                 _log.warning("%s 期权数据不可用，使用样本数据", ticker)
-                return self._fetch_via_cboe_or_sample(ticker, stock_price)
+                return self._get_sample_options_chain(ticker)
 
             # v0.17.0: 到期日选择策略优化 — 防止到期周 OI 跳变
             # 策略：取 DTE ≥ 3 的前 4 个（扩大覆盖面），DTE < 7 的到期日标记为
@@ -228,7 +232,7 @@ class OptionsDataFetcher:
                 _log.warning("%s 期权数据不足，降级为样本数据（yfinance 返回空链）", ticker)
                 if _opt_cb:
                     _opt_cb.record_failure()
-                return self._fetch_via_cboe_or_sample(ticker, stock_price)
+                return self._get_sample_options_chain(ticker)
 
             # 合并所有到期日的数据，并按 DTE 加权
             import pandas as pd
@@ -307,26 +311,13 @@ class OptionsDataFetcher:
                 "near_expiry_set": list(_near_expiry_set),
             }
 
-            # 质量门：yfinance 限流时可能"成功"返回近空 OI（实测 NVDA 全链 OI=0）
-            # → 静默落进垃圾数据。若总 OI 异常偏低，改用 CBOE 真实数据。
+            # CBOE 已作主源优先尝试过；走到这里说明 CBOE 不可用、改用 yfinance。
+            # 若 yfinance 也限流返回纯空 OI（疑垃圾），退样本而非污染下游。
             _yf_oi = sum((r.get("openInterest") or 0) for r in result["calls"]) \
                 + sum((r.get("openInterest") or 0) for r in result["puts"])
-            if _yf_oi < _MIN_PLAUSIBLE_OI:
-                try:
-                    from cboe_options import fetch_cboe_chain
-                    _cboe = fetch_cboe_chain(ticker, stock_price)
-                    if _cboe:
-                        _cboe_oi = sum((r.get("openInterest") or 0) for r in _cboe["calls"]) \
-                            + sum((r.get("openInterest") or 0) for r in _cboe["puts"])
-                        # 仅当 CBOE 明显更多（>1.5×）才换：OI=0/极低的限流场景必然触发，
-                        # 而真实薄期权标的（yf 与 CBOE 量级相当）不做 realtime→delayed 横向换源
-                        if _cboe_oi > _yf_oi * 1.5:
-                            _log.info("%s yfinance OI=%d 异常偏低（疑限流）→ 改用 CBOE（OI=%d）",
-                                      ticker, int(_yf_oi), int(_cboe_oi))
-                            self._write_cache(ticker, "chain", _cboe)
-                            return _cboe
-                except Exception as _ce:  # noqa: BLE001 — CBOE 兜底，任何失败都保留 yfinance 结果
-                    _log.warning("%s CBOE 质量门替换失败：%s", ticker, _ce)
+            if _yf_oi == 0:
+                _log.warning("%s yfinance 返回空 OI 且 CBOE 不可用 → 退样本", ticker)
+                return self._get_sample_options_chain(ticker)
 
             self._write_cache(ticker, "chain", result)
             if _opt_cb:
@@ -337,25 +328,24 @@ class OptionsDataFetcher:
             _log.warning("获取 %s 期权链失败：%s，降级为样本数据", ticker, e)
             if _opt_cb:
                 _opt_cb.record_failure()
-            return self._fetch_via_cboe_or_sample(ticker, stock_price)
+            return self._get_sample_options_chain(ticker)
 
-    def _fetch_via_cboe_or_sample(self, ticker: str, stock_price: float = 0.0) -> Dict:
-        """yfinance 不可用/限流/断路器开路时的降级：先 CBOE 真实数据，失败再退样本。
+    def _try_cboe(self, ticker: str, stock_price: float = 0.0) -> Optional[Dict]:
+        """主源：CBOE 真实期权链。成功返回 result dict（含 _source:cboe），失败返回 None
+        （调用方据此降级 yfinance）。
 
-        CBOE 延迟报价（盘后=已结算 EOD）无 key 无限流，是比样本数据好得多的真实兜底。
-        注意：不调用 _opt_cb.record_success()——CBOE 成功不代表 yfinance 恢复，
-        断路器应保持开路，让后续标的直接走 CBOE、不再撞限流的 yfinance。
+        CBOE 公开延迟报价（cdn.cboe.com，盘后=已结算 EOD）无 key、无限流，对中国深夜
+        用户比恒限流的 yfinance 稳定得多，故设为主源。缓存由调用方写入。
         """
         try:
             from cboe_options import fetch_cboe_chain
             cboe = fetch_cboe_chain(ticker, stock_price)
             if cboe and (cboe.get("calls") or cboe.get("puts")):
-                _log.info("%s 期权链降级到 CBOE 真实数据（yfinance 不可用/限流）", ticker)
-                self._write_cache(ticker, "chain", cboe)
+                _log.info("%s 期权链取自 CBOE（主源）", ticker)
                 return cboe
-        except Exception as _ce:  # noqa: BLE001 — 兜底链末端，任何失败都退样本
-            _log.warning("%s CBOE 降级失败：%s，退样本数据", ticker, _ce)
-        return self._get_sample_options_chain(ticker)
+        except Exception as _ce:  # noqa: BLE001 — CBOE 失败返回 None，降级 yfinance
+            _log.warning("%s CBOE 主源获取失败：%s，降级 yfinance", ticker, _ce)
+        return None
 
     def fetch_historical_iv(self, ticker: str, days: int = 252) -> List[float]:
         """获取历史 IV 数据 - 用历史已实现波动率 + 动态 IV 溢价估算
@@ -1298,10 +1288,20 @@ class OptionsAgent:
             expiry_breakdown = []
             used_exps = 0
 
-            # 主源 yfinance（不可用/空链则聚合 dict 保持空，由下方 CBOE 兜底覆盖
-            # yf=None / 空 options / 限流低 OI 三种情形）
+            # 主源：CBOE 全链（稳定、无限流、无 key；盘后=已结算 EOD）
+            try:
+                from cboe_options import fetch_cboe_full_chain_oi
+                _cb = fetch_cboe_full_chain_oi(ticker, stock_price, max_expirations)
+                if _cb:
+                    call_oi, put_oi = _cb["call_oi"], _cb["put_oi"]
+                    call_exp_oi, put_exp_oi = _cb["call_exp_oi"], _cb["put_exp_oi"]
+                    expiry_breakdown, used_exps = _cb["expiry_breakdown"], _cb["used_exps"]
+            except Exception as _ce:  # noqa: BLE001 — CBOE 失败则降级 yfinance
+                _log.debug("[%s] CBOE 全链主源失败：%s，降级 yfinance", ticker, _ce)
+
+            # 降级：yfinance（仅 CBOE 全链空时拉取到期日；否则 all_exps 为空、下方 loop 跳过）
             all_exps = []
-            if yf is not None:
+            if not call_oi and not put_oi and yf is not None:
                 stock = yf.Ticker(ticker)
                 all_exps = list(stock.options) if hasattr(stock, "options") else []
 
@@ -1349,23 +1349,6 @@ class OptionsAgent:
                     used_exps += 1
                 except Exception:
                     continue
-
-            # CBOE 兜底：yfinance 限流时全链 OI 为空/极低 → 用 CBOE 全链真实数据替换
-            # 仅替换聚合 dict，下方 Max Pain / OI 墙 / 主力到期计算原样复用（零重复）
-            if sum(call_oi.values()) + sum(put_oi.values()) < _MIN_PLAUSIBLE_OI:
-                try:
-                    from cboe_options import fetch_cboe_full_chain_oi
-                    _cb = fetch_cboe_full_chain_oi(ticker, stock_price, max_expirations)
-                    # 仅当 CBOE 全链明显更多（>1.5×）才换（同主链路守卫逻辑）
-                    if _cb and (sum(_cb["call_oi"].values()) + sum(_cb["put_oi"].values())
-                                > 1.5 * (sum(call_oi.values()) + sum(put_oi.values()))):
-                        call_oi, put_oi = _cb["call_oi"], _cb["put_oi"]
-                        call_exp_oi, put_exp_oi = _cb["call_exp_oi"], _cb["put_exp_oi"]
-                        expiry_breakdown = _cb["expiry_breakdown"]
-                        used_exps = _cb["used_exps"]
-                        _log.info("[%s] 全链 OI yfinance 偏低（疑限流）→ 改用 CBOE 真实全链", ticker)
-                except Exception as _ce:  # noqa: BLE001 — 兜底失败保留 yfinance 结果
-                    _log.debug("[%s] CBOE 全链兜底失败：%s", ticker, _ce)
 
             if not call_oi and not put_oi:
                 return {}

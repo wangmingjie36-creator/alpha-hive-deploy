@@ -7,7 +7,7 @@
 
 ## [0.34.0] — 2026-06-30 — 接入 CBOE 期权数据源（根治 Yahoo 限流空 OI 垃圾数据）
 
-> 用户在中国深夜跑扫描常撞 Yahoo 限流（401 Invalid Crumb），yfinance "成功"返回近空 OI（实测 NVDA 全链 OI=0）→ 静默落进样本数据，odds/Max Pain/GEX 全变垃圾。项目原 "Tradier→yfinance→样本" 降级链中 Tradier **从未实现**（tradier.py 为空、无人 import），实际只有 yfinance→样本。新增 CBOE（芝加哥期权交易所）公开延迟报价作真实兜底源。commit `991acd2`。
+> 用户在中国深夜跑扫描常撞 Yahoo 限流（401 Invalid Crumb），yfinance "成功"返回近空 OI（实测 NVDA 全链 OI=0）→ 静默落进样本数据，odds/Max Pain/GEX 全变垃圾。项目原 "Tradier→yfinance→样本" 降级链中 Tradier **从未实现**（tradier.py 为空、无人 import），实际只有 yfinance→样本。新增 CBOE（芝加哥期权交易所）公开延迟报价并**设为主源**（yfinance 对中国深夜用户恒限流，CBOE 稳定优先）。commit `991acd2` + CBOE 主源重构。
 
 ### Added — `cboe_options.py`（新文件，312 行）
 - CBOE 端点 `cdn.cboe.com/api/global/delayed_quotes/options/{TICKER}.json`：全链逐合约 OI/IV/greeks，15min 延迟（盘后=已结算 EOD），**无 API key、无限流**。
@@ -15,9 +15,9 @@
 - `fetch_cboe_full_chain_oi()`：全链 OI 聚合（call_oi/put_oi/call_exp_oi/put_exp_oi/expiry_breakdown），复用 `_fetch_full_chain_oi` 的 Max Pain 计算。
 - OCC 符号解析 / `_pdt_now()` PDT 锚定 DTE / 解析丢弃率 >5% 告警。
 
-### Changed — `options_analyzer.py`
-- `fetch_options_chain`：5 处样本降级 → `_fetch_via_cboe_or_sample`（先 CBOE 再样本）；缓存写入前加 **OI 质量门**（yf 总 OI < `_MIN_PLAUSIBLE_OI`=1000 且 CBOE OI > 1.5× → 换 CBOE）。断路器保持开路（CBOE 成功不重置 yf 断路器，后续标的直接走 CBOE）。
-- `_fetch_full_chain_oi`：顶部重构（yfinance 取数包进 `if yf is not None`、移除早退）+ 全链 CBOE 质量门（同 1.5× 守卫）。
+### Changed — `options_analyzer.py`（**CBOE 设为主源**，用户：「首先走 CBOE，cboe 稳定，yfinance 老是限流」）
+- `fetch_options_chain`：**CBOE 优先**（`_try_cboe` 主源 → yfinance 降级 → 样本）。CBOE 命中即返回，不再调 yfinance（更快、绕开限流）；yfinance 仅作 CBOE 不覆盖该标的时的降级，其返回纯空 OI（限流）则退样本。
+- `_fetch_full_chain_oi`：同样 **CBOE 全链主源**（`fetch_cboe_full_chain_oi` 优先 → 空时才 yfinance loop），复用下方 Max Pain 计算。
 
 ### Fixed — 对抗审查（feature-dev:code-reviewer ×2）后修复
 - IV 缩放：实测 CBOE 每合约 iv 已是小数（删 `_normalize_iv` 百分数启发式，对高 IV biotech >300% 会误判压缩）。
