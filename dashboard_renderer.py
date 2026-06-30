@@ -217,7 +217,7 @@ def _catalyst_countdown(ticker: str, sd: dict) -> str:
         ucls = "cat-normal"
     tstr = f"{days}天后" if days <= 14 else f"约{days // 7}周后"
     return (f'<div class="catalyst-cd {ucls}">'
-            f'<span class="cat-icon">\U0001f4c5</span>'
+            f'<span class="cat-icon"></span>'
             f'<span class="cat-text">{_html.escape(ename)} {tstr}</span>'
             f'</div>')
 
@@ -1167,7 +1167,7 @@ def _render_hist_card(entry: dict) -> str:
         _top3_html += f"""<div class="htop-chip">
           <span class="hticker">{_html.escape(_ht['ticker'])}</span>
           <span class="hscore {_hscls}">{_ht['score']:.1f}</span>
-          <span class="hdir">{_DIR_ICON.get(_hdir,'🟡')}</span>
+          <span class="hdir">{_DIR_ICON.get(_hdir,'<span class="dot-neut"></span>')}</span>
         </div>"""
     _hlinks = ""
     _safe_date = _html.escape(entry["date"])
@@ -1737,7 +1737,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             <div class="full-oi-card" style="background:rgba(99,102,241,.06);border:1px solid rgba(99,102,241,.25);
                 border-radius:8px;padding:10px 12px;margin:10px 0">
               <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:.85em;font-weight:700;color:var(--mt)">
-                <span>🔗 全链 OI 视图</span>
+                <span>全链 OI 视图</span>
                 <span style="font-size:.7em;color:var(--ts);font-weight:400">影响价格判断核心</span>
               </div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
@@ -1760,11 +1760,11 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
               </div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
                 <div>
-                  <div style="font-size:.72em;color:#dc3545;font-weight:600;margin-bottom:3px">📈 阻力墙 (Top Call OI)</div>
+                  <div style="font-size:.72em;color:#dc3545;font-weight:600;margin-bottom:3px">阻力墙 (Top Call OI)</div>
                   {_wall_rows(_calls, "#dc3545", "C")}
                 </div>
                 <div>
-                  <div style="font-size:.72em;color:#28a745;font-weight:600;margin-bottom:3px">📉 支撑墙 (Top Put OI)</div>
+                  <div style="font-size:.72em;color:#28a745;font-weight:600;margin-bottom:3px">支撑墙 (Top Put OI)</div>
                   {_wall_rows(_puts, "#28a745", "P")}
                 </div>
               </div>
@@ -2229,13 +2229,13 @@ def render_dashboard_html(report: Dict, date_str: str,
     {_acc_extra_metrics}
     <div class="acc-extra-row">
       <div class="acc-ext-box">
-    <div class="acc-ext-title">📈 胜率走势（按周）</div>
+    <div class="acc-ext-title">胜率走势（按周）</div>
     <div style="height:160px"><canvas id="accWinTrendChart"></canvas></div>
       </div>
       <div class="acc-ext-box">
-    <div class="acc-ext-title">🏆 最佳预测 Top 3</div>
+    <div class="acc-ext-title">最佳预测 Top 3</div>
     {_best3_html}
-    <div class="acc-ext-title" style="margin-top:14px">💀 最差预测 Top 3</div>
+    <div class="acc-ext-title" style="margin-top:14px">最差预测 Top 3</div>
     {_worst3_html}
       </div>
     </div>"""
@@ -2270,7 +2270,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         _acc_section_html = f"""
   <!-- ── Accuracy Dashboard ── -->
   <div class="section" id="accuracy">
-    <div class="acc-section-title">📈 预测准确率追踪（T+7 验证）</div>
+    <div class="acc-section-title">预测准确率追踪（T+7 验证）</div>
     <div class="acc-kpi-row">
       <div class="acc-kpi"><div class="kv">{_acc_overall_pct:.0f}%</div><div class="kl">综合准确率</div></div>
       <div class="acc-kpi"><div class="kv">{_acc_total_checked}</div><div class="kl">已验证预测</div></div>
@@ -2300,10 +2300,10 @@ def render_dashboard_html(report: Dict, date_str: str,
     </div>
     {_acc_enhanced_html}
     <!-- ── Sprint 1 / v16.0 Trading Stats 真实交易指标 ── -->
-    <div class="acc-section-title" style="margin-top:18px">💰 真实策略回测（扣成本 · 路径依赖 · Sprint 1）</div>
+    <div class="acc-section-title" style="margin-top:18px">真实策略回测（扣成本 · 路径依赖 · Sprint 1）</div>
     <div id="tradingStatsBox" style="margin:10px 0 16px">
       <div style="font-size:.78em;color:var(--ts);margin-bottom:8px">
-        📌 <strong>方法学</strong>：${int(_initial_capital/1000)}K 起始资金，每笔固定 ${int(_initial_capital * _pos_pct)}（{_pos_pct*100:.0f}% 仓位、不复利），
+        <strong>方法学</strong>：${int(_initial_capital/1000)}K 起始资金，每笔固定 ${int(_initial_capital * _pos_pct)}（{_pos_pct*100:.0f}% 仓位、不复利），
         -5% 硬止损 / +10% 止盈（盘中触发，跳空时 gap-aware），扣滑点 + 佣金 + 借券费（空头）。
         <span style="color:#e99;">Gross 曲线不扣成本（参考），Net 曲线 = 真实可拿收益。</span>
         <span style="color:var(--mt);">Sharpe 已年化（×√36，T+7 周期）。</span>
@@ -2313,7 +2313,7 @@ def render_dashboard_html(report: Dict, date_str: str,
 
     <!-- ── Equity Curve 权益曲线 (3 lines: Gross/Net/SPY) ── -->
     <div class="eq-section">
-      <div class="acc-section-title" style="margin-top:18px">📉 资金曲线对比 · Gross · Net · SPY 基准</div>
+      <div class="acc-section-title" style="margin-top:18px">资金曲线对比 · Gross · Net · SPY 基准</div>
       <div id="eqCurveContainer">
         <div class="eq-wrap"><canvas id="eqCurveChart"></canvas></div>
         <div class="eq-stats" id="eqStats"></div>
@@ -2327,9 +2327,9 @@ def render_dashboard_html(report: Dict, date_str: str,
         _acc_section_html = f"""
   <!-- ── Accuracy Dashboard (cold start) ── -->
   <div class="section" id="accuracy">
-    <div class="acc-section-title">📈 预测准确率追踪（T+7 验证）</div>
+    <div class="acc-section-title">预测准确率追踪（T+7 验证）</div>
     <div class="acc-dir-box acc-cold">
-      <div class="cold-icon">🕐</div>
+      <div class="cold-icon">···</div>
       <div class="cold-msg">系统正在积累预测记录，准确率数据将在 T+7 后自动显示<br>
       当前已保存 <strong>{_acc_pending}</strong> 条预测，等待价格验证中...</div>
     </div>
@@ -2492,7 +2492,7 @@ def render_dashboard_html(report: Dict, date_str: str,
                               f'<div class="hm-sent">情绪 {_avg_sent:.0f}%</div>'
                               f'</div>')
             _heatmap_html = (f'<div class="chart-box">'
-                             f'<div class="chart-ttl">🔥 板块情绪热力图</div>'
+                             f'<div class="chart-ttl">板块情绪热力图</div>'
                              f'<div class="hm-grid">{_hm_cells}</div>'
                              f'</div>')
     except Exception as _hm_err:

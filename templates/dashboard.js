@@ -66,7 +66,7 @@ function toggleDark(){
   const isDark=h.classList.contains('dark');
   _ls('ahDark',isDark?'1':'0');
   _ls('ah-theme',isDark?'dark':'light');
-  document.getElementById('darkBtn').textContent=isDark?'☀️ 亮色':'🌙 暗黑';
+  document.getElementById('darkBtn').textContent=isDark?'亮色':'暗黑';
   chartInstances.forEach(function(c){try{c.destroy();}catch(e){}});
   chartInstances.length=0;
   window.AH.trendChart=null; // Bug1: 清除已销毁图表引用
@@ -100,7 +100,7 @@ if(_ls('ahDark')==='1'){
 }
 document.addEventListener('DOMContentLoaded',function(){
   const b=document.getElementById('darkBtn');
-  if(b&&document.documentElement.classList.contains('dark'))b.textContent='☀️ 亮色';
+  if(b&&document.documentElement.classList.contains('dark'))b.textContent='亮色';
 });
 
 // ── Hamburger Menu ──
@@ -693,10 +693,10 @@ window.AH.initEquityCurve=function(){
     data:{
       labels:labels,
       datasets:[
-        {label:'💵 Net (真实可交易)', data:netData,
+        {label:'Net (真实可交易)', data:netData,
          borderColor:'#22c55e', backgroundColor:'rgba(34,197,94,.08)', fill:true,
          tension:.25, pointRadius:0, borderWidth:2.5, order:1},
-        {label:'📈 Gross (不扣成本)', data:grossData,
+        {label:'Gross (不扣成本)', data:grossData,
          borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.0)', fill:false,
          tension:.25, pointRadius:0, borderWidth:1.5, borderDash:[4,3], order:2},
         {label:'SPY 基准 (买入持有)', data:spyData,
@@ -962,8 +962,8 @@ function showDiff(){
   tickers.forEach(function(tk){
     const a=mapA[tk],b=mapB[tk];
     let cls='',status='';
-    if(a&&!b){cls='diff-new';status='🆕 新增';}
-    else if(!a&&b){cls='diff-removed';status='❌ 移除';}
+    if(a&&!b){cls='diff-new';status='+ 新增';}
+    else if(!a&&b){cls='diff-removed';status='- 移除';}
     else{status='—';}
     const sA=a?a.score.toFixed(1):'-';
     const sB=b?b.score.toFixed(1):'-';
@@ -975,7 +975,7 @@ function showDiff(){
       }else{change='—';}
       const dirA=(dirCn[a.direction]||a.direction);
       const dirB=(dirCn[b.direction]||b.direction);
-      if(dirA!==dirB)status='🔄 '+dirB+'→'+dirA;
+      if(dirA!==dirB)status='↺ '+dirB+'→'+dirA;
     }
     html+='<tr class="'+cls+'"><td><strong>'+tk+'</strong></td><td>'+sA+'</td><td>'+sB+'</td><td>'+change+'</td><td>'+status+'</td></tr>';
   });
@@ -1330,11 +1330,11 @@ function toggleKbHelp(){
   function update(){
     var age=(Date.now()/1000-ts)/60; // minutes
     var txt,cls;
-    if(age<60){txt='🟢 '+Math.round(age)+'分钟前更新';cls='fresh-ok';}
-    else if(age<360){txt='🟡 '+Math.round(age/60)+'小时前更新';cls='fresh-warn';}
-    else if(age<1440){txt='🟠 '+Math.round(age/60)+'小时前';cls='fresh-warn';}
-    else{txt='🔴 '+Math.round(age/1440)+'天前（数据可能过期）';cls='fresh-stale';}
-    badge.textContent=txt;
+    if(age<60){txt='<span class="dot-bull"></span>'+Math.round(age)+'分钟前更新';cls='fresh-ok';}
+    else if(age<360){txt='<span class="dot-neut"></span>'+Math.round(age/60)+'小时前更新';cls='fresh-warn';}
+    else if(age<1440){txt='<span class="dot-neut"></span>'+Math.round(age/60)+'小时前';cls='fresh-warn';}
+    else{txt='<span class="dot-bear"></span>'+Math.round(age/1440)+'天前（数据可能过期）';cls='fresh-stale';}
+    badge.innerHTML=txt;
     badge.className='freshness-badge '+cls;
   }
   update();

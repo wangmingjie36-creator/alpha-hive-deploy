@@ -789,7 +789,7 @@ html:not(.dark) .bnav-item.active{color:var(--acc)}
 /* Compare bar update */
 .compare-bar{background:var(--acc);border-bottom:0.5px solid var(--border)}
 
-/* Colored dot indicators (replaces emoji 🟢🔴🟡) */
+/* Colored dot indicators (B-style, replaces emoji) */
 .dot-bull{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--bull);flex-shrink:0;vertical-align:middle;margin-right:4px}
 .dot-bear{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--bear);flex-shrink:0;vertical-align:middle;margin-right:4px}
 .dot-neut{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--neut);flex-shrink:0;vertical-align:middle;margin-right:4px}
