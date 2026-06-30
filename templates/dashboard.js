@@ -599,21 +599,21 @@ window.AH.initTradingStats=function(){
     var shColor=sharpe>=1?'var(--bull)':(sharpe>=0?'#f59e0b':'var(--bear)');
 
     html+='<div style="grid-column:1/-1;font-size:.78em;color:var(--mt);margin:2px 0 6px">'+
-      '🎯 <b>真实回测口径</b>（max_concurrent='+maxConc+' 并发限制 / 固定每笔 $'+
+      '<b>真实回测口径</b>（max_concurrent='+maxConc+' 并发限制 / 固定每笔 $'+
       Math.round(initCap*(Number(ts.position_size_pct)||0.10)).toLocaleString()+'）'+
       '</div>';
-    html+=card((netPct>=0?'+':'')+netPct.toFixed(2)+'%','💵 Net 累计收益',netColor,
+    html+=card((netPct>=0?'+':'')+netPct.toFixed(2)+'%','Net 累计收益',netColor,
       '$'+Math.round(real.final_nav).toLocaleString()+' / 起始 $'+Math.round(initCap).toLocaleString());
-    html+=card((spyPct>=0?'+':'')+spyPct.toFixed(2)+'%','📊 SPY 同期基准',spyColor,
+    html+=card((spyPct>=0?'+':'')+spyPct.toFixed(2)+'%','SPY 同期基准',spyColor,
       '$'+Math.round(real.spy_end_nav||initCap).toLocaleString());
-    html+=card((alphaPct>=0?'+':'')+alphaPct.toFixed(2)+'%','🏆 Alpha vs SPY',alphaColor,'剥离市场后超额');
+    html+=card((alphaPct>=0?'+':'')+alphaPct.toFixed(2)+'%','Alpha vs SPY',alphaColor,'剥离市场后超额');
     html+=card((sharpe!=null?(sharpe>=0?'+':'')+Number(sharpe).toFixed(2):'—'),'Sharpe (净值)',shColor,'年化 ×√36');
     html+=card((pf!=null?Number(pf).toFixed(2):'—'),'Profit Factor',pfColor,'>1.5 好');
     html+=card(winRate.toFixed(1)+'%','净值胜率','var(--t)',trades+' 笔入场');
     html+=card('-'+maxDd.toFixed(2)+'%','最大回撤','var(--bear)','基于 NAV');
-    html+=card(ts.exit_sl_count||0,'❌ 止损触发',(ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
-    html+=card(ts.exit_tp_count||0,'✅ 止盈触发','var(--bull)','+10% 止盈');
-    html+=card(ts.exit_close_count||0,'⏱️ 持有到 T+7','var(--t)','未触发 SL/TP');
+    html+=card(ts.exit_sl_count||0,'止损触发',(ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
+    html+=card(ts.exit_tp_count||0,'止盈触发','var(--bull)','+10% 止盈');
+    html+=card(ts.exit_close_count||0,'持有到 T+7','var(--t)','未触发 SL/TP');
     html+=card(((ts.avg_cost||0)*100).toFixed(1)+'bp','平均单笔成本','var(--ts)','滑点+佣金+借券');
 
     // v0.23.5: 删除"理论上限"参考（避免视觉幻觉）
@@ -630,22 +630,22 @@ window.AH.initTradingStats=function(){
     var shColorT=ts.sharpe_net>=1?'var(--bull)':(ts.sharpe_net>=0?'#f59e0b':'var(--bear)');
 
     html+='<div style="grid-column:1/-1;font-size:.78em;color:#f59e0b;margin:2px 0 6px">'+
-      '⚠️ <b>理论上限口径</b>（每笔独立 $'+Math.round(initCap*0.10).toLocaleString()+
+      '<b>理论上限口径</b>（每笔独立 $'+Math.round(initCap*0.10).toLocaleString()+
       '，无并发约束 — portfolio_backtest 真实数字暂不可用）'+
       '</div>';
-    html+=card((netRetT*100).toFixed(2)+'%','💵 Net 累计收益（理论上限）',netColorT,
+    html+=card((netRetT*100).toFixed(2)+'%','Net 累计收益（理论上限）',netColorT,
       '$'+Math.round(ts.final_cap_net||initCap).toLocaleString());
-    html+=card((grossRetT*100).toFixed(2)+'%','📈 Gross 累计（不扣成本）','var(--t)','纸面参考');
-    html+=card((spyRetT*100).toFixed(2)+'%','📊 SPY 同期',(spyRetT>=0?'var(--bull)':'var(--bear)'),
+    html+=card((grossRetT*100).toFixed(2)+'%','Gross 累计（不扣成本）','var(--t)','纸面参考');
+    html+=card((spyRetT*100).toFixed(2)+'%','SPY 同期',(spyRetT>=0?'var(--bull)':'var(--bear)'),
       '$'+Math.round(ts.final_cap_spy||initCap).toLocaleString());
-    html+=card(((ts.alpha_vs_spy||0)>=0?'+':'')+(ts.alpha_vs_spy||0).toFixed(2)+'%','🏆 vs SPY α (上限)',alphaColorT,'独立每笔假设');
+    html+=card(((ts.alpha_vs_spy||0)>=0?'+':'')+(ts.alpha_vs_spy||0).toFixed(2)+'%','vs SPY Alpha (上限)',alphaColorT,'独立每笔假设');
     html+=card((ts.sharpe_net!=null?ts.sharpe_net.toFixed(2):'—'),'Sharpe (净值)',shColorT,'>1 可用');
     html+=card((ts.profit_factor!=null?ts.profit_factor.toFixed(2):'—'),'Profit Factor',pfColorT,'>1.5 好');
     html+=card((ts.net_win_rate||0).toFixed(1)+'%','净值胜率','var(--t)','每笔扣成本后');
     html+=card('-'+(ts.max_dd_net_pct||0).toFixed(2)+'%','最大回撤 (Net)','var(--bear)');
-    html+=card(ts.exit_sl_count||0,'❌ 止损触发',(ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
-    html+=card(ts.exit_tp_count||0,'✅ 止盈触发','var(--bull)','+10% 止盈');
-    html+=card(ts.exit_close_count||0,'⏱️ 持有到 T+7','var(--t)','未触发 SL/TP');
+    html+=card(ts.exit_sl_count||0,'止损触发',(ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
+    html+=card(ts.exit_tp_count||0,'止盈触发','var(--bull)','+10% 止盈');
+    html+=card(ts.exit_close_count||0,'持有到 T+7','var(--t)','未触发 SL/TP');
     html+=card(((ts.avg_cost||0)*100).toFixed(1)+'bp','平均单笔成本','var(--ts)','滑点+佣金+借券');
   }
 
@@ -699,7 +699,7 @@ window.AH.initEquityCurve=function(){
         {label:'📈 Gross (不扣成本)', data:grossData,
          borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.0)', fill:false,
          tension:.25, pointRadius:0, borderWidth:1.5, borderDash:[4,3], order:2},
-        {label:'📊 SPY 基准 (买入持有)', data:spyData,
+        {label:'SPY 基准 (买入持有)', data:spyData,
          borderColor:'rgba(150,150,150,.8)', backgroundColor:'rgba(150,150,150,.04)', fill:false,
          tension:.25, pointRadius:0, borderWidth:1.5, order:3}
       ]
@@ -730,9 +730,9 @@ window.AH.initEquityCurve=function(){
     var ts=__AH__.trading_stats||{};
     var netColor=netCum>=0?'var(--bull)':'var(--bear)';
     statsEl.innerHTML=
-      '<div class="eq-stat"><span class="ev" style="color:'+netColor+'">'+(netCum>=0?'+':'')+netCum.toFixed(2)+'%</span><span class="el">💵 Net 累计</span></div>'+
-      '<div class="eq-stat"><span class="ev">'+(grossCum>=0?'+':'')+grossCum.toFixed(2)+'%</span><span class="el">📈 Gross 累计</span></div>'+
-      '<div class="eq-stat"><span class="ev">'+(spyCum>=0?'+':'')+spyCum.toFixed(2)+'%</span><span class="el">📊 SPY 基准</span></div>'+
+      '<div class="eq-stat"><span class="ev" style="color:'+netColor+'">'+(netCum>=0?'+':'')+netCum.toFixed(2)+'%</span><span class="el">Net 累计</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+(grossCum>=0?'+':'')+grossCum.toFixed(2)+'%</span><span class="el">Gross 累计</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+(spyCum>=0?'+':'')+spyCum.toFixed(2)+'%</span><span class="el">SPY 基准</span></div>'+
       '<div class="eq-stat"><span class="ev" style="color:var(--bear)">-'+(ts.max_dd_net_pct||0).toFixed(2)+'%</span><span class="el">Max DD (Net)</span></div>'+
       '<div class="eq-stat"><span class="ev">'+eq.length+'</span><span class="el">已验证笔数</span></div>';
   }
@@ -754,7 +754,7 @@ window.AH.initSwarmDiv=function(){
     var isHigh = d.resonance===true || d.consensus>=60;
     var isMed = !isHigh && d.consensus>=45;
     var consensusCls=isHigh?'sdiv-high':isMed?'sdiv-med':'sdiv-low';
-    var consensusLabel=isHigh?(d.resonance?'高共识 ✅共振':'高共识'):isMed?'中等共识':'低共识⚠️';
+    var consensusLabel=isHigh?(d.resonance?'高共识 共振':'高共识'):isMed?'中等共识':'低共识 ▲';
     var maxScore=Math.max.apply(null,d.bees.map(function(b){return b.score;}));
     if(maxScore<=0)maxScore=10;
     var beesHtml='';

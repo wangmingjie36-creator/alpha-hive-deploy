@@ -32,7 +32,7 @@ _DASHBOARD_CSS = _load_tpl("dashboard.css")
 # ── 共享方向标签映射 ──
 _DIR_CN   = {"bullish": "看多", "bearish": "看空", "neutral": "中性",
              "看多": "看多", "看空": "看空", "中性": "中性"}  # 同时接受中英文 key
-_DIR_ICON = {"bullish": "🟢", "bearish": "🔴", "neutral": "🟡"}
+_DIR_ICON = {"bullish": '<span class="dot-bull"></span>', "bearish": '<span class="dot-bear"></span>', "neutral": '<span class="dot-neut"></span>'}
 
 # ── 方向归一化（中文/英文 → 统一英文） ──
 _DIR_TO_EN = {"看多": "bullish", "看空": "bearish", "中性": "neutral",
@@ -1172,7 +1172,7 @@ def _render_hist_card(entry: dict) -> str:
     _hlinks = ""
     _safe_date = _html.escape(entry["date"])
     if entry["has_json"]:
-        _hlinks += f'<a href="alpha-hive-daily-{_safe_date}.json" target="_blank" rel="noopener" class="hlink hlink-json">📊 完整数据</a>'
+        _hlinks += f'<a href="alpha-hive-daily-{_safe_date}.json" target="_blank" rel="noopener" class="hlink hlink-json">完整数据</a>'
     for _hmt in entry["ml_tickers"][:4]:
         _safe_tk = _html.escape(_hmt)
         _hlinks += f'<a href="alpha-hive-{_safe_tk}-ml-enhanced-{_safe_date}.html" target="_blank" rel="noopener" class="hlink hlink-ml">{_safe_tk}</a>'
@@ -1270,7 +1270,7 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
         return (
             '<div class="actionable-empty" style="padding:18px;background:rgba(148,163,184,.08);'
             'border-left:4px solid #94a3b8;border-radius:6px;margin:12px 0">'
-            '<div style="font-weight:700;color:var(--mt);margin-bottom:6px">🎯 今日 Actionable</div>'
+            '<div style="font-weight:700;color:var(--mt);margin-bottom:6px">今日 Actionable</div>'
             '<div style="color:var(--ts);font-size:.95em">'
             '今日无强信号通过 4 重门控（score 极端 + 蜂群一致 + 近期催化剂 + 不在 risk-off）。'
             '<b>建议观望</b>，避免低置信度交易。'
@@ -1288,7 +1288,7 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
 
         bg = "rgba(34,197,94,.10)" if is_bull else "rgba(239,68,68,.10)"
         border = "#22c55e" if is_bull else "#ef4444"
-        icon = "🟢" if is_bull else "🔴"
+        dot_cls = "dot-bull" if is_bull else "dot-bear"
         label = "看多" if is_bull else "看空"
         action = "考虑买入" if is_bull else "考虑做空 / 减仓"
 
@@ -1296,21 +1296,21 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
         if cat:
             event = cat.get("event", "事件")[:30]
             days = cat.get("days_until", 0)
-            cat_text = f"📅 {event}（{int(days)}天后）"
+            cat_text = f"{event}（{int(days)}天后）"
 
         unusual_text = ""
         if c["has_unusual"]:
             sigs = unusual.get("signals", [])
             if sigs:
                 top_sig = sigs[0] if isinstance(sigs[0], str) else sigs[0].get("description", "异常流")
-                unusual_text = f"⚡ 异常期权流：{str(top_sig)[:40]}"
+                unusual_text = f"异常期权流：{str(top_sig)[:40]}"
 
         std_text = f"蜂群一致度 {(1.5 - c['agent_std']):.1f}/1.5（std={c['agent_std']:.2f}）"
 
         cards.append(f'''
 <div class="actionable-card" style="background:{bg};border:2px solid {border};border-radius:10px;
     padding:16px;margin:10px 0;display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center">
-  <div style="font-size:2.2em">{icon}</div>
+  <div><span class="{dot_cls}" style="width:14px;height:14px;display:inline-block;border-radius:50%;"></span></div>
   <div>
     <div style="font-size:1.4em;font-weight:800;color:{border};margin-bottom:4px">
       {tk} · {score:.1f}分 · <span style="font-size:.7em;background:{border};color:#fff;padding:2px 8px;border-radius:4px">{label}</span>
@@ -1328,13 +1328,13 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
         '<div class="section actionable-section" id="actionable-top" '
         'style="margin:18px 0;padding:18px;background:linear-gradient(135deg,rgba(255,193,7,.06),rgba(34,197,94,.04));'
         'border:1px solid var(--border);border-radius:12px">'
-        '<h2 class="sec-title" style="margin:0 0 12px">🎯 今日 Actionable Top {n}</h2>'
+        '<h2 class="sec-title" style="margin:0 0 12px">今日 Actionable Top {n}</h2>'
         '<div style="font-size:.82em;color:var(--ts);margin-bottom:6px">'
         '通过 4 重门控（score 极端 + 蜂群一致 + 近期催化剂 + 非 risk-off）的高置信信号'
         '</div>'
         '{cards}'
         '<div style="font-size:.78em;color:var(--ts);margin-top:8px;padding:8px;background:rgba(0,0,0,.04);border-radius:4px">'
-        '⚠️ 本板块仅展示通过严格筛选的信号；其余标的（含中性 / 高分歧）请见下方"今日 Top 6 机会"完整列表'
+        '注：本板块仅展示通过严格筛选的信号；其余标的（含中性 / 高分歧）请见下方"今日 Top 6 机会"完整列表'
         '</div></div>'
     ).format(n=len(candidates), cards=''.join(cards))
 
@@ -1350,7 +1350,7 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
         if "多" in _dr6: _dr6 = "bullish"
         elif "空" in _dr6: _dr6 = "bearish"
         elif _dr6 not in ("bullish","bearish","neutral"): _dr6 = "neutral"
-        _dlbl6 = {"bullish":"🟢 看多","bearish":"🔴 看空","neutral":"🟡 中性"}[_dr6]
+        _dlbl6 = {"bullish":'<span class="dot-bull"></span>看多',"bearish":'<span class="dot-bear"></span>看空',"neutral":'<span class="dot-neut"></span>中性'}[_dr6]
         _dcls6 = {"bullish":"sdir-bull","bearish":"sdir-bear","neutral":"sdir-neut"}[_dr6]
         _scls6 = _sc_cls(_sc6)
         _fcls6 = "fill-h" if _sc6 >= 7.0 else ("fill-m" if _sc6 >= 5.5 else "fill-l")
@@ -1591,10 +1591,10 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             _price_metric_d = ""
         _blstd = []
         for _discd, _icod, _lbd in [
-            (_add.get("ScoutBeeNova",{}).get("discovery",""),       "📋","内幕"),
-            (_add.get("OracleBeeEcho",{}).get("discovery",""),      "📊","期权"),
-            (_add.get("BuzzBeeWhisper",{}).get("discovery",""),     "💬","情绪"),
-            (_add.get("BearBeeContrarian",{}).get("discovery",""),  "🐻","风险"),
+            (_add.get("ScoutBeeNova",{}).get("discovery",""),       "","内幕"),
+            (_add.get("OracleBeeEcho",{}).get("discovery",""),      "","期权"),
+            (_add.get("BuzzBeeWhisper",{}).get("discovery",""),     "","情绪"),
+            (_add.get("BearBeeContrarian",{}).get("discovery",""),  "","风险"),
         ]:
             _fd = _discd.split("|")[0].strip()[:85] if _discd else ""
             if _fd:
@@ -1605,7 +1605,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                    if _ml_exd else '<span style="font-size:.78em;color:var(--ts)">ML 报告生成中</span>')
         # ── edgar_rss badge ──
         _rss_n = _add.get("ScoutBeeNova", {}).get("details", {}).get("insider", {}).get("rss_fresh_today", 0)
-        _rss_badge = (f'<span class="rss-badge">📋 今日Form4 {_rss_n}份 🔴</span>' if _rss_n else "")
+        _rss_badge = (f'<span class="rss-badge">今日Form4 {_rss_n}份 ▲</span>' if _rss_n else "")
         # ── thesis break 面板（直接查询配置，不依赖 JSON 中转）──
         try:
             from thesis_breaks import ThesisBreakConfig as _TBC
@@ -1619,7 +1619,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             _tb_l1, _tb_l2 = [], []
         if _tb_l1 or _tb_l2:
             _tb_html = '<div class="thesis-break-box">'
-            _tb_html += '<div class="tb-title">⚠️ 失效条件监控</div>'
+            _tb_html += '<div class="tb-title">失效条件监控</div>'
             if _tb_l1:
                 _tb_html += '<div class="tb-level tb-l1">Level 1 预警</div><ul class="tb-list">'
                 for _c in _tb_l1[:3]:
@@ -2044,7 +2044,7 @@ def render_dashboard_html(report: Dict, date_str: str,
             _macro_vix = f"{_mctx.get('vix', 0):.1f}"
             _macro_10y = f"{_mctx.get('treasury_10y', 0):.2f}%"
             _yc = _mctx.get("yield_curve", "unknown")
-            _yc_map = {"normal": "正常", "flat": "趋平", "inverted": "⚠️倒挂"}
+            _yc_map = {"normal": "正常", "flat": "趋平", "inverted": "倒挂"}
             _yc_cls_map = {"normal": "yc-ok", "flat": "yc-warn", "inverted": "yc-bad"}
             _macro_yc = _yc_map.get(_yc, "—")
             _macro_yc_cls = _yc_cls_map.get(_yc, "")
@@ -2173,7 +2173,7 @@ def render_dashboard_html(report: Dict, date_str: str,
               {_collapsed_cards}
             </div>"""
     else:
-        _hist_html = '<div class="hist-empty">暂无历史记录，第一份历史简报将在明天出现 📅</div>'
+        _hist_html = '<div class="hist-empty">暂无历史记录，第一份历史简报将在明天出现</div>'
 
     # ── 准确率 Dashboard 数据拼装 ──
 
@@ -2319,7 +2319,6 @@ def render_dashboard_html(report: Dict, date_str: str,
         <div class="eq-stats" id="eqStats"></div>
       </div>
       <div class="eq-cold" id="eqCold" style="display:none">
-        <div style="font-size:2em;margin-bottom:6px">📊</div>
         <div>需要 T+7 验证数据才能绘制权益曲线<br><span style="font-size:.82em;opacity:.7">当 outcome backfill 运行后，此图表将自动显示</span></div>
       </div>
     </div>
@@ -2403,16 +2402,16 @@ def render_dashboard_html(report: Dict, date_str: str,
             _dn_items.sort(key=lambda x: x[1])
             _parts_c = []
             if _up_items:
-                _chips = " ".join(f'<span class="chg-chip chg-up">⬆ {t} {d:+.1f}</span>' for t, d in _up_items[:4])
+                _chips = " ".join(f'<span class="chg-chip chg-up">↑ {t} {d:+.1f}</span>' for t, d in _up_items[:4])
                 _parts_c.append(_chips)
             if _dn_items:
-                _chips = " ".join(f'<span class="chg-chip chg-dn">⬇ {t} {d:+.1f}</span>' for t, d in _dn_items[:4])
+                _chips = " ".join(f'<span class="chg-chip chg-dn">↓ {t} {d:+.1f}</span>' for t, d in _dn_items[:4])
                 _parts_c.append(_chips)
             if _flip_items:
-                _chips = " ".join(f'<span class="chg-chip chg-flip">🔄 {t} {o}→{n}</span>' for t, o, n in _flip_items[:3])
+                _chips = " ".join(f'<span class="chg-chip chg-flip">↺ {t} {o}→{n}</span>' for t, o, n in _flip_items[:3])
                 _parts_c.append(_chips)
             if _new_tickers:
-                _chips = " ".join(f'<span class="chg-chip chg-new">🆕 {t}</span>' for t in _new_tickers[:3])
+                _chips = " ".join(f'<span class="chg-chip chg-new">+ {t}</span>' for t in _new_tickers[:3])
                 _parts_c.append(_chips)
             _n_up = sum(1 for _, d in [(t, _cur_data[t]["score"] - _prev_data[t]["score"])
                         for t in _cur_data if t in _prev_data] if d > 0.1)
@@ -2430,7 +2429,7 @@ def render_dashboard_html(report: Dict, date_str: str,
             if _parts_c or _flip_items:
                 _inner = "\n".join(_parts_c) + _summary_line
                 _changes_html = (f'<div class="changes-card">'
-                                 f'<div class="chg-title">🔔 与{_prev_date}对比</div>'
+                                 f'<div class="chg-title">与{_prev_date}对比</div>'
                                  f'<div class="chg-body">{_inner}</div>'
                                  f'</div>')
     except Exception as _chg_err:
