@@ -5,6 +5,43 @@
 
 ---
 
+## [0.35.0] — 2026-07-01 — B-style 财经报刊仪表板重设计 + 全面去 emoji
+
+### Changed — `templates/dashboard.html`（完整重写）
+- B-style "财经报刊"风格：cream `#FAF7F2` 底色、rust `#B7410E` 强调色、零渐变、零 emoji、Playfair Display / JetBrains Mono / Noto Sans SC 字体
+- 六节 Roman numeral 结构（机会卡 Ⅰ / 图表 Ⅱ / 明细 Ⅲ / 热力图 Ⅳ / 准确率 Ⅴ / 深度 Ⅵ）
+- 底部导航 `bnav-icon` 改用 5 个极简线性 SVG（替代 📋📊📑🔬📈 emoji）
+- CSP `style-src` 新增 Google Fonts，`font-src` 新增 `fonts.gstatic.com`
+
+### Changed — `templates/dashboard.css`（大幅更新）
+- `:root` 调色板改为 cream/rust/forest-green；`html.dark` 完整覆盖
+- `.nav` 改为 sticky 浅色导航（hairline 分隔线）
+- 新增 `ah-*` 结构类：`.ah-macro-*`（宏观条）`.ah-sec-*`（节标题）`.ah-charts-grid`（双栏图表）`.ah-footer-*`（页脚）
+- 新增 `.dot-bull/.dot-bear/.dot-neut`（7px CSS 彩点，替代 🟢🔴🟡）
+
+### Fixed — `dashboard_renderer.py`（50+ 处 emoji 清除）
+- `_DIR_ICON` 从 emoji 改为 `<span class="dot-*">` CSS 彩点；`_dlbl6`（方向标签）同步
+- 清除 `🎯🔔📅⚡📋💰📈📉🏆💀🕐🔥⬆⬇🔄` 等，改为纯文字 / CSS 彩点 / Unicode 箭头（↑↓↺）
+- OI wall、失效条件卡、准确率章节、热力图标题等多处 emoji 全部移除
+
+### Fixed — `templates/dashboard.js`（20+ 处 emoji 清除）
+- 暗黑按钮文字：`☀️ 亮色/🌙 暗黑` → `亮色/暗黑`
+- 净值/SPY/Alpha/SL/TP 卡片标签、股权曲线图例等全部去 emoji
+- freshness badge 改用 `innerHTML` + CSS dot（`dot-bull/bear`）替代 `🟢🔴` + `textContent`
+- `✅共振/⚠️` → `共振/▲`；`🔄` → `↺`；`🆕` → `+`
+
+## [0.34.1] — 2026-07-01 — 修复快照采样偏差（自学习样本被 NVDA 单票绑架）
+
+### Fixed
+- `alpha_hive_daily_report.py`（`_post_scan_enrichment` 反馈循环快照段，~L931）：移除 `final_score >= 5.0` 的快照落盘门槛，改为 `final_score > 0`（成功分析即落快照）。
+  - **根因**：原门槛只记录高分预测，而高分几乎只有 NVDA → `report_snapshots/` 累积 49 条 NVDA vs 其余 9 只各 1 条（均停在首日 03-16）。导致 `self_analyst` 自诊断、背离过滤器回测全部被单票绑架、过拟合。
+  - **影响**：日常扫描现为全部 10 只标的每日各落 1 条快照（低分/Neutral 也记录，供跨标的校准）；胜率仍只按 Long/Short 方向统计，Neutral 不计入。
+  - **未动**：`vector_memory` 的 `>= 5.0` 门槛（L894）保持不变——属长期"想法记忆"策展，与回测样本是不同用途。
+
+### Notes
+- 本月自诊断结论修正：**「基本面·期权背离过滤器」经全样本回测为净有害**（触发 15 次：正确拦截 3、误伤赢家 12，含多笔 +6%~+20% 的 NVDA 上涨段），**本月不上线**。根因即上述采样偏差——Scout≤4 & Oracle≥8 实为 NVDA 该波行情的赢家画像，非失败特征。
+- 后续：待新采样跑满 2–4 周、其余 9 只标的积累 T+7 序列后，再重跑跨标的信号回测（优先验证「同向 5 日去重 / 追涨扩展惩罚」假说 C）。
+
 ## [0.34.0] — 2026-06-30 — 接入 CBOE 期权数据源（根治 Yahoo 限流空 OI 垃圾数据）
 
 > 用户在中国深夜跑扫描常撞 Yahoo 限流（401 Invalid Crumb），yfinance "成功"返回近空 OI（实测 NVDA 全链 OI=0）→ 静默落进样本数据，odds/Max Pain/GEX 全变垃圾。项目原 "Tradier→yfinance→样本" 降级链中 Tradier **从未实现**（tradier.py 为空、无人 import），实际只有 yfinance→样本。新增 CBOE（芝加哥期权交易所）公开延迟报价并**设为主源**（yfinance 对中国深夜用户恒限流，CBOE 稳定优先）。commit `991acd2` + CBOE 主源重构。
