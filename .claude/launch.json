@@ -12,6 +12,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8767", "--directory", "/tmp/rklb_preview"],
       "port": 8767
+    },
+    {
+      "name": "ah-preview",
+      "runtimeExecutable": "/usr/local/bin/python3",
+      "runtimeArgs": ["-m", "http.server", "8769", "--directory", "/private/tmp/claude-501/-Users-igg-Desktop-Alpha-Hive/4aeefe7d-125b-44c6-9932-3766a4bbe795/scratchpad"],
+      "port": 8769
     }
   ]
 }

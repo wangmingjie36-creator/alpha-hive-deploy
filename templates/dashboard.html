@@ -7,9 +7,7 @@
 <meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="description" content="Alpha Hive — 去中心化蜂群智能投资研究平台，SEC 真实数据驱动的每日投资机会扫描。">
-<meta name="theme-color" content="#0A0F1C" media="(prefers-color-scheme: dark)">
-<meta name="theme-color" content="#f0f4ff" media="(prefers-color-scheme: light)">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://logo.clearbit.com https:; font-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https://logo.clearbit.com https:; font-src 'self' https://fonts.gstatic.com">
 <meta property="og:title" content="Alpha Hive 投资仪表板">
 <meta property="og:description" content="蜂群智能驱动的去中心化投资研究，{{ n_tickers }} 标的每日扫描">
 <meta property="og:type" content="website">
@@ -24,279 +22,369 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Alpha Hive">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><polygon points='50,5 93,28 93,72 50,95 7,72 7,28' fill='%23F4A532'/><g transform='translate(26,24) scale(3)'><rect x='6' y='1' width='4' height='1' fill='%23333'/><rect x='4' y='2' width='2' height='1' fill='%23333'/><rect x='10' y='2' width='2' height='1' fill='%23333'/><rect x='5' y='3' width='1' height='1' fill='%23333'/><rect x='10' y='3' width='1' height='1' fill='%23333'/><rect x='3' y='4' width='1' height='1' fill='%23805215'/><rect x='12' y='4' width='1' height='1' fill='%23805215'/><rect x='4' y='4' width='8' height='1' fill='%23fff'/><rect x='3' y='5' width='1' height='1' fill='%23805215'/><rect x='4' y='5' width='8' height='1' fill='%23333'/><rect x='12' y='5' width='1' height='1' fill='%23805215'/><rect x='3' y='6' width='1' height='1' fill='%23805215'/><rect x='4' y='6' width='8' height='1' fill='%23fff'/><rect x='12' y='6' width='1' height='1' fill='%23805215'/><rect x='3' y='7' width='1' height='1' fill='%23805215'/><rect x='4' y='7' width='8' height='1' fill='%23333'/><rect x='12' y='7' width='1' height='1' fill='%23805215'/><rect x='3' y='8' width='1' height='1' fill='%23805215'/><rect x='4' y='8' width='8' height='1' fill='%23fff'/><rect x='12' y='8' width='1' height='1' fill='%23805215'/><rect x='4' y='9' width='8' height='1' fill='%23333'/><rect x='5' y='10' width='6' height='1' fill='%23fff'/><rect x='6' y='11' width='4' height='1' fill='%23333'/><rect x='1' y='5' width='2' height='1' fill='%23fff' opacity='.65'/><rect x='0' y='6' width='3' height='1' fill='%23fff' opacity='.45'/><rect x='1' y='7' width='2' height='1' fill='%23fff' opacity='.3'/><rect x='13' y='5' width='2' height='1' fill='%23fff' opacity='.65'/><rect x='13' y='6' width='3' height='1' fill='%23fff' opacity='.45'/><rect x='13' y='7' width='2' height='1' fill='%23fff' opacity='.3'/><rect x='6' y='12' width='1' height='2' fill='%23805215' opacity='.5'/><rect x='9' y='12' width='1' height='2' fill='%23805215' opacity='.5'/></g></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><polygon points='50,5 93,28 93,72 50,95 7,72 7,28' fill='%23B7410E'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500&display=swap" rel="stylesheet">
 <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous"></script>
-<style>
-{{ css }}
-</style>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"WebPage","name":"Alpha Hive 投资仪表板","description":"去中心化蜂群智能投资研究平台 — {{ n_tickers }} 标的每日扫描","dateModified":"{{ now_str }}"}
 </script>
+<style>{{ css }}</style>
 </head>
 <body data-generated="{{ now_str }}">
 <a href="#main-content" class="skip-link">跳转到主内容</a>
-<!-- ── Fixed Nav ── -->
+
+<!-- ── NAV ── -->
 <nav class="nav" role="navigation" aria-label="主导航">
-  <a href="#" class="nav-logo"><span class="px-bee"></span> Alpha Hive</a>
-  <div class="nav-links" id="navLinks">
-    <a href="#/today"   class="nav-link">今日简报</a>
-    <a href="#/charts"  class="nav-link">图表</a>
-    <a href="#/list"    class="nav-link">完整清单</a>
-    <a href="#/deep"    class="nav-link">个股深度</a>
-    <a href="#/report"  class="nav-link">完整简报</a>
-    <a href="#/trend"   class="nav-link">📈 趋势</a>
-    <a href="#/history" class="nav-link">📅 历史简报</a>
-    <a href="#/accuracy" class="nav-link">📈 准确率</a>
+  <div style="display:flex;align-items:center;gap:48px;">
+    <a href="#" class="nav-logo">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M8 1L14.5 4.75V11.25L8 15L1.5 11.25V4.75L8 1Z" stroke="currentColor" stroke-width="1.2" fill="none"/>
+        <path d="M8 4.5L11.5 6.5V10.5L8 12.5L4.5 10.5V6.5L8 4.5Z" fill="currentColor" fill-opacity="0.15"/>
+      </svg>
+      <span>Alpha Hive</span>
+    </a>
+    <div class="nav-links" id="navLinks">
+      <a href="#/today"    class="nav-link">今日简报</a>
+      <a href="#/charts"   class="nav-link">图表</a>
+      <a href="#/list"     class="nav-link">明细表</a>
+      <a href="#/deep"     class="nav-link">个股深度</a>
+      <a href="#/report"   class="nav-link">完整简报</a>
+      <a href="#/trend"    class="nav-link">趋势</a>
+      <a href="#/history"  class="nav-link">历史简报</a>
+      <a href="#/accuracy" class="nav-link">准确率</a>
+    </div>
   </div>
-  <div style="display:flex;align-items:center;gap:8px">
-    <button class="dark-btn" id="darkBtn" aria-label="切换暗黑模式">🌙 暗黑</button>
+  <div style="display:flex;align-items:center;gap:12px;">
+    <div style="width:5px;height:5px;border-radius:50%;background:var(--bull);flex-shrink:0;"></div>
+    <span class="hero-time">{{ now_str }}</span>
+    <button class="dark-btn" id="darkBtn" aria-label="切换暗黑模式">暗黑</button>
     <button class="hamburger" id="hamburgerBtn" aria-label="打开菜单">☰</button>
   </div>
 </nav>
 <div class="nav-overlay" id="navOverlay"></div>
 
-<main id="main-content">
-<!-- ── Hero Banner ── -->
-<section class="hero">
+<!-- ── HERO ── -->
+<div class="hero">
   <div class="hero-inner">
     <div class="hero-left">
-      <div class="hero-badge"><span class="px-bee"></span> Alpha Hive Intelligence · 蜂群驱动</div>
-      <h1 class="hero-title">去中心化<span>蜂群智能</span><br>投资研究平台</h1>
-      <p class="hero-sub">{{ n_agents }} 自治工蜂协作 · SEC EDGAR 真实数据 · 每日自动扫描</p>
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:16px;">
+        <span class="hero-badge">Alpha Hive · 投资研究平台 · 蜂群智能</span>
+        <span class="hero-time">生成于 {{ now_str }}</span>
+      </div>
+      <h1 class="hero-title">去中心化蜂群智能<br>投资研究平台</h1>
       <div class="hero-tldr">{{ hero_tldr }}</div>
       <div class="hero-meta">
-        <span class="hero-time">🕐 {{ now_str }}</span>
-        <span class="hero-dbadge">📊 数据真实度 {{ avg_real }}</span>
+        <span class="hero-dbadge">数据真实度 {{ avg_real }}</span>
         <span class="freshness-badge" id="freshBadge" data-ts="{{ deploy_ts }}"></span>
       </div>
     </div>
-    <div class="hero-right" style="overflow:hidden;contain:paint">
-      <svg class="hero-svg hive-anim" viewBox="0 0 280 260" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" role="img" aria-label="Alpha Hive 蜂群六角形动画图标" style="overflow:hidden">
-        <polygon points="140,55 180,78 180,124 140,147 100,124 100,78" fill="#F4A532" opacity=".9"/>
-        <image x="120" y="85" width="40" height="40" xlink:href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23805215'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23fff'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23fff'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23fff'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23fff'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23fff' opacity='.65'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23fff' opacity='.45'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23fff' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23fff' opacity='.65'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23fff' opacity='.45'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23fff' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23805215' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23805215' opacity='.5'/%3E%3C/svg%3E" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23805215'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23fff'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23fff'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23fff'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23fff'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23fff' opacity='.65'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23fff' opacity='.45'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23fff' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23fff' opacity='.65'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23fff' opacity='.45'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23fff' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23805215' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23805215' opacity='.5'/%3E%3C/svg%3E" style="image-rendering:pixelated"/>
-        <polygon class="hex-p" points="140,5 170,22 170,57 140,74 110,57 110,22" fill="none" stroke="#F4A532" stroke-width="1.5" opacity=".55" style="animation-delay:.3s"/>
-        <polygon class="hex-p" points="190,32 220,49 220,84 190,101 160,84 160,49" fill="rgba(244,165,50,.12)" stroke="#F4A532" stroke-width="1" opacity=".5" style="animation-delay:.7s"/>
-        <polygon class="hex-p" points="190,107 220,124 220,159 190,176 160,159 160,124" fill="rgba(102,126,234,.18)" stroke="#667eea" stroke-width="1" opacity=".45" style="animation-delay:1.1s"/>
-        <polygon class="hex-p" points="190,182 220,199 220,234 190,251 160,234 160,199" fill="none" stroke="#764ba2" stroke-width="1" opacity=".35" style="animation-delay:1.5s"/>
-        <polygon class="hex-p" points="140,155 170,172 170,207 140,224 110,207 110,172" fill="rgba(244,165,50,.09)" stroke="#F4A532" stroke-width="1.5" opacity=".45" style="animation-delay:1.9s"/>
-        <polygon class="hex-p" points="90,182 120,199 120,234 90,251 60,234 60,199" fill="none" stroke="#667eea" stroke-width="1" opacity=".35" style="animation-delay:2.3s"/>
-        <polygon class="hex-p" points="90,107 120,124 120,159 90,176 60,159 60,124" fill="rgba(102,126,234,.13)" stroke="#667eea" stroke-width="1" opacity=".45" style="animation-delay:2.7s"/>
-        <polygon class="hex-p" points="90,32 120,49 120,84 90,101 60,84 60,49" fill="none" stroke="#764ba2" stroke-width="1" opacity=".35" style="animation-delay:3.1s"/>
-        <ellipse cx="140" cy="101" rx="75" ry="45" fill="none" stroke="#F4A532" stroke-width="0.7" stroke-dasharray="3,6" opacity="0.25"/>
-        <ellipse cx="140" cy="112" rx="98" ry="56" fill="none" stroke="#667eea" stroke-width="0.7" stroke-dasharray="3,8" opacity="0.18"/>
-        <circle cx="215" cy="101" r="5.5" fill="#F4A532" opacity="0.7"/>
-        <circle cx="65" cy="101" r="4.8" fill="#fbbf24" opacity="0.6"/>
-        <circle cx="238" cy="112" r="5" fill="#667eea" opacity="0.6"/>
-      </svg>
+    <div class="hero-right">
+      <div class="hstat">
+        <div class="hstat-val">{{ n_tickers }}</div>
+        <div class="hstat-lbl">监测标的</div>
+      </div>
+      <div class="hstat">
+        <div class="hstat-val">{{ n_agents }}</div>
+        <div class="hstat-lbl">分析 Agent</div>
+      </div>
+      <div class="hstat" style="border-right:none;">
+        <div class="hstat-val" style="color:var(--acc);">{{ n_resonance }}</div>
+        <div class="hstat-lbl">共振信号</div>
+      </div>
     </div>
   </div>
-  <!-- Stats Row -->
-  <div class="hero-stats">
-    <div class="hstat">
-      <div class="hstat-val">{{ n_resonance }}</div>
-      <div class="hstat-lbl">共振信号</div>
-    </div>
-    <div class="hstat">
-      <div class="hstat-val" style="color:{{ fg_color }}">{{ fg_str }}</div>
-      <div class="hstat-lbl">Fear & Greed</div>
-    </div>
-    <div class="hstat">
-      <div class="hstat-val">{{ n_tickers }}</div>
-      <div class="hstat-lbl">扫描标的</div>
-    </div>
-    <div class="hstat">
-      <div class="hstat-val">{{ avg_score_str }}</div>
-      <div class="hstat-lbl">平均综合分</div>
-    </div>
-    <div class="hstat">
-      <div class="hstat-val">{{ macro_vix }}</div>
-      <div class="hstat-lbl">VIX 恐慌</div>
-    </div>
-    <div class="hstat">
-      <div class="hstat-val">{{ macro_10y }}</div>
-      <div class="hstat-lbl">10Y 利率</div>
-    </div>
-    <div class="hstat">
-      <div class="hstat-val {{ macro_yc_cls }}">{{ macro_yc }}</div>
-      <div class="hstat-lbl">收益率曲线</div>
-    </div>
-    <div class="hstat">
-      <div class="hstat-val {{ macro_gld_cls }}">{{ macro_gld }}</div>
-      <div class="hstat-lbl">黄金 GLD</div>
+</div>
+
+<!-- ── MACRO BAR ── -->
+<div class="ah-macro">
+  <div class="ah-macro-inner">
+    <span class="ah-macro-lbl">MACRO</span>
+    <div class="ah-macro-items">
+      <div class="ah-macro-item">
+        <div class="ah-macro-name">VIX</div>
+        <div style="display:flex;align-items:baseline;">
+          <span class="ah-macro-val">{{ macro_vix }}</span>
+        </div>
+      </div>
+      <div class="ah-macro-item">
+        <div class="ah-macro-name">10Y 利率</div>
+        <div style="display:flex;align-items:baseline;">
+          <span class="ah-macro-val">{{ macro_10y }}</span>
+        </div>
+      </div>
+      <div class="ah-macro-item">
+        <div class="ah-macro-name">收益率曲线</div>
+        <div style="display:flex;align-items:baseline;gap:4px;">
+          <span class="ah-macro-val {{ macro_yc_cls }}">{{ macro_yc }}</span>
+        </div>
+      </div>
+      <div class="ah-macro-item">
+        <div class="ah-macro-name">黄金</div>
+        <div style="display:flex;align-items:baseline;">
+          <span class="ah-macro-val {{ macro_gld_cls }}">{{ macro_gld }}</span>
+        </div>
+      </div>
+      <div class="ah-macro-item" style="border-right:none;margin-right:0;padding-right:0;">
+        <div class="ah-macro-name">恐惧贪婪</div>
+        <div style="display:flex;align-items:baseline;gap:4px;">
+          <span class="ah-macro-val" style="color:{{ fg_color }};">{{ fg_str }}</span>
+        </div>
+      </div>
     </div>
   </div>
   {{ macro_sector_html }}
-</section>
+</div>
 
+<main id="main-content">
 <div class="main">
-  <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start;margin-bottom:16px">
-    <div class="global-search-wrap" style="flex:1;min-width:200px">
-      <input class="global-search" id="globalSearch" type="text" placeholder="🔍 搜索标的（输入 ticker 跳转）..." aria-label="全站搜索" autocomplete="off">
+
+  <!-- 全站搜索 + 分享栏 -->
+  <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start;margin-bottom:32px;">
+    <div class="global-search-wrap" style="flex:1;min-width:200px;margin:0;">
+      <input class="global-search" id="globalSearch" type="text" placeholder="搜索标的（输入 ticker 跳转）…" aria-label="全站搜索" autocomplete="off">
       <span class="gs-icon">⌘K</span>
       <div class="gs-results" id="gsResults"></div>
     </div>
-    <div class="share-bar" style="margin:0">
+    <div class="share-bar" style="margin:0;">
       <button class="share-btn share-btn-x" id="btn-share-x">𝕏 Share</button>
-      <button class="share-btn" id="btn-copy-link">📋 Copy Link</button>
-      <button class="share-btn" id="btn-print">📄 Download PDF</button>
-      <button class="share-btn" id="btn-export-csv">📊 Export CSV</button>
+      <button class="share-btn" id="btn-copy-link">复制链接</button>
+      <button class="share-btn" id="btn-print">下载 PDF</button>
+      <button class="share-btn" id="btn-export-csv">导出 CSV</button>
     </div>
   </div>
-  {{ changes_html }}
-  <!-- ── Top 6 Cards ── -->
-  <div class="section" id="today">
-    {{ actionable_html }}
 
-    <h2 class="sec-title">今日 Top {{ top_n }} 机会</h2>
+  <!-- I · 机会评分卡 -->
+  <div class="section" id="today" style="padding-top:0;">
+    <div class="ah-sec-hdr">
+      <span class="ah-sec-num">I</span>
+      <h2 class="ah-sec-title">机会评分卡</h2>
+      <span class="ah-sec-meta">显示前 {{ top_n }} · 共 {{ n_tickers }} 标的</span>
+    </div>
+    <div class="ah-sec-rule"></div>
+    {{ actionable_html }}
+    {{ changes_html }}
     <div class="filter-bar">
       <button class="filter-btn active" id="filter-all">全部</button>
-      <button class="filter-btn" id="filter-bullish">🟢 看多</button>
-      <button class="filter-btn" id="filter-bearish">🔴 看空</button>
-      <button class="filter-btn" id="filter-neutral">🟡 中性</button>
-      <button class="filter-btn" id="filter-high">⭐ 高分 (≥7.5)</button>
+      <button class="filter-btn" id="filter-bullish">看多</button>
+      <button class="filter-btn" id="filter-bearish">看空</button>
+      <button class="filter-btn" id="filter-neutral">中性</button>
+      <button class="filter-btn" id="filter-high">高分 (≥7.5)</button>
     </div>
     <div class="filter-count" id="filterCount"></div>
-    <div class="top6-grid">
-      {{ cards_html }}
-    </div>
+    <div class="ah-cards-grid top6-grid">{{ cards_html }}</div>
   </div>
 
-  <!-- ── Charts ── -->
-  <noscript><div style="padding:16px;background:rgba(245,158,11,.1);border-radius:8px;margin:12px 0;text-align:center;color:var(--ts)">图表需要 JavaScript 支持，请启用 JavaScript 查看交互式图表。</div></noscript>
+  <!-- II · 净值曲线 · 评分分布 -->
   <div class="section" id="charts">
-    <h2 class="sec-title">市场可视化</h2>
-    <div class="charts-grid">
-      <div class="chart-box">
-        <div class="chart-ttl">😨 Fear &amp; Greed 指数</div>
-        <div class="chart-canvas-wrap" style="height:180px"><div class="skeleton"><div class="skel-half-circle"></div></div><canvas id="fgChart" width="300" height="180" role="img" aria-label="Fear and Greed 指数图表"></canvas></div>
-        <div class="fg-trend-wrap"><canvas id="fgTrendChart" width="300" height="50" role="img" aria-label="F&G 历史趋势"></canvas></div>
+    <div class="ah-sec-hdr">
+      <span class="ah-sec-num">II</span>
+      <h2 class="ah-sec-title">净值曲线 · 评分分布</h2>
+    </div>
+    <div class="ah-sec-rule"></div>
+    <div class="ah-charts-grid">
+      <div class="ah-chart-panel">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+          <span class="ah-chart-panel-lbl">策略净值曲线（模拟回测）</span>
+          <span class="ah-chart-panel-kpi" id="eqKpi"></span>
+        </div>
+        <noscript><div style="padding:16px;border:0.5px solid var(--border);text-align:center;color:var(--ts);font-size:.85em;">图表需要 JavaScript 支持</div></noscript>
+        <div class="eq-wrap" style="height:200px;"><div class="skeleton"><div class="skel-bar"></div></div><canvas id="equityChart" role="img" aria-label="策略净值曲线"></canvas></div>
+        <div style="display:flex;justify-content:space-between;" class="ah-chart-mono" style="margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border);">
+          <span>起始 100</span>
+          <span id="eqDateRange"></span>
+          <span id="eqCurrent"></span>
+        </div>
       </div>
-      <div class="chart-box">
-        <div class="chart-ttl">📊 各标的综合评分</div>
-        <div class="chart-canvas-wrap" style="height:{{ scores_chart_height }}"><div class="skeleton"><div class="skel-bar"></div></div><canvas id="scoresChart" width="600" height="300" role="img" aria-label="各标的综合评分柱状图"></canvas></div>
-      </div>
-      <div class="chart-box">
-        <div class="chart-ttl">🗳 看多 / 看空 / 中性</div>
-        <div class="chart-canvas-wrap" style="height:180px"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="dirChart" width="300" height="180" role="img" aria-label="看多看空中性方向分布图"></canvas></div>
+      <div class="ah-chart-panel" style="border-right:none;">
+        <div class="ah-chart-panel-lbl" style="margin-bottom:18px;">Fear &amp; Greed 指数</div>
+        <div class="chart-canvas-wrap" style="height:160px;"><div class="skeleton"><div class="skel-half-circle"></div></div><canvas id="fgChart" width="300" height="160" role="img" aria-label="Fear and Greed 指数"></canvas></div>
+        <div class="fg-trend-wrap"><canvas id="fgTrendChart" width="300" height="40" role="img" aria-label="F&G 历史趋势"></canvas></div>
+        <div class="ah-chart-panel-lbl" style="margin-top:24px;margin-bottom:14px;">各标的综合评分</div>
+        <div class="chart-canvas-wrap" style="height:{{ scores_chart_height }};"><div class="skeleton"><div class="skel-bar"></div></div><canvas id="scoresChart" width="600" height="300" role="img" aria-label="各标的综合评分柱状图"></canvas></div>
       </div>
     </div>
+    <div style="margin-top:24px;display:none;"><div class="chart-canvas-wrap" style="height:180px;"><canvas id="dirChart" width="300" height="180" role="img" aria-label="方向分布"></canvas></div></div>
   </div>
 
-  <!-- ── Sector Heatmap ── -->
-  {% if heatmap_html %}
-  <div class="section" id="heatmap">
-    {{ heatmap_html }}
-  </div>
-  {% endif %}
-
-  <!-- ── Full Table ── -->
+  <!-- III · 明细表 -->
   <div class="section" id="list">
-    <h2 class="sec-title">完整机会清单</h2>
-    <div class="tbl-search-row">
-      <label for="tableSearch" class="skip-link" style="position:absolute">搜索标的</label>
-      <input class="tbl-search" id="tableSearch" type="text" placeholder="🔍 搜索标的..." aria-label="搜索标的">
+    <div class="ah-filter-row" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+      <div class="ah-sec-hdr" style="margin-bottom:0;">
+        <span class="ah-sec-num">III</span>
+        <h2 class="ah-sec-title">明细表</h2>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <label for="tableSearch" class="skip-link" style="position:absolute;">搜索标的</label>
+        <input class="tbl-search" id="tableSearch" type="text" placeholder="搜索标的…" aria-label="搜索标的" style="max-width:160px;">
+      </div>
     </div>
-    <div id="filterStatus" aria-live="polite" role="status" style="font-size:.78em;color:var(--ts);min-height:1.2em;margin-bottom:4px"></div>
+    <div class="ah-sec-rule" style="margin-top:8px;"></div>
+    <div id="filterStatus" aria-live="polite" role="status" style="font-size:.78em;color:var(--ts);min-height:1.2em;margin-bottom:8px;"></div>
     <div class="tbl-wrap">
       <table class="full-table" id="oppTable">
         <thead><tr>
-          <th scope="col" aria-sort="none">#</th><th scope="col" aria-sort="none">标的</th><th scope="col" aria-sort="none">方向</th><th scope="col" aria-sort="none">综合分</th><th scope="col" aria-sort="none">价格</th><th scope="col" aria-sort="none">5日涨跌</th><th scope="col" aria-sort="none">共振</th>
-          <th scope="col" aria-sort="none">投票(多/空/中)</th><th scope="col" aria-sort="none">IV Rank</th><th scope="col" aria-sort="none">P/C</th><th scope="col" aria-sort="none">看空强度</th><th scope="col">ML 详情</th>
+          <th scope="col" aria-sort="none">#</th>
+          <th scope="col" aria-sort="none">标的</th>
+          <th scope="col" aria-sort="none">方向</th>
+          <th scope="col" aria-sort="none">综合分</th>
+          <th scope="col" aria-sort="none">价格</th>
+          <th scope="col" aria-sort="none">5日涨跌</th>
+          <th scope="col" aria-sort="none">共振</th>
+          <th scope="col" aria-sort="none">投票(多/空/中)</th>
+          <th scope="col" aria-sort="none">IV Rank</th>
+          <th scope="col" aria-sort="none">P/C</th>
+          <th scope="col" aria-sort="none">看空强度</th>
+          <th scope="col">ML 详情</th>
         </tr></thead>
         <tbody>{{ rows_html }}</tbody>
       </table>
     </div>
   </div>
 
-  <!-- ── Deep Analysis ── -->
+  <!-- IV · Agent 评分热力图 -->
+  {% if heatmap_html %}
+  <div class="section" id="heatmap">
+    <div class="ah-sec-hdr">
+      <span class="ah-sec-num">IV</span>
+      <h2 class="ah-sec-title">Agent 评分热力图</h2>
+    </div>
+    <div class="ah-sec-rule"></div>
+    {{ heatmap_html }}
+  </div>
+  {% endif %}
+
+  <!-- V · 历史准确率 · 近期记录 -->
+  <div class="section" id="accuracy">
+    <div class="ah-sec-hdr">
+      <span class="ah-sec-num">V</span>
+      <h2 class="ah-sec-title">历史准确率 · 近期记录</h2>
+    </div>
+    <div class="ah-sec-rule"></div>
+    {{ acc_section_html }}
+    <div class="hist-list" style="margin-top:24px;">{{ hist_html }}</div>
+  </div>
+
+  <!-- VI · 个股深度分析 -->
   <div class="section" id="deep">
-    <h2 class="sec-title">个股深度分析（含雷达图）</h2>
+    <div class="ah-sec-hdr">
+      <span class="ah-sec-num">VI</span>
+      <h2 class="ah-sec-title">个股深度分析</h2>
+    </div>
+    <div class="ah-sec-rule"></div>
     <div class="company-grid">{{ company_html }}</div>
   </div>
 
-  <!-- ── Markdown Report ── -->
-  <div class="section" id="report">
-    <h2 class="sec-title">完整蜂群简报</h2>
+  <!-- 完整简报 (report, 路由 #/report) -->
+  <div class="section" id="report" style="display:none;">
+    <div class="ah-sec-hdr">
+      <span class="ah-sec-num"></span>
+      <h2 class="ah-sec-title">完整蜂群简报</h2>
+    </div>
+    <div class="ah-sec-rule"></div>
     <div class="report-body-wrap"><div class="report-body">{{ report_body }}</div></div>
   </div>
 
-  <!-- ── Trend Tracking ── -->
-  <div class="section" id="trend">
-    <h2 class="sec-title">📈 评分趋势追踪</h2>
+  <!-- 评分趋势追踪 (路由 #/trend) -->
+  <div class="section" id="trend" style="display:none;">
+    <div class="ah-sec-hdr">
+      <span class="ah-sec-num"></span>
+      <h2 class="ah-sec-title">评分趋势追踪</h2>
+    </div>
+    <div class="ah-sec-rule"></div>
     <div class="trend-controls" id="trendChips"></div>
-    <div class="chart-box" style="height:300px">
+    <div class="chart-box" style="height:300px;border:0.5px solid var(--border);">
       <canvas id="trendChart"></canvas>
     </div>
-    <h3 style="margin-top:22px;font-size:.95em;font-weight:700;color:var(--tp)">📊 简报对比</h3>
-    <div class="diff-controls">
-      <select id="diffDateA"></select>
-      <span style="color:var(--ts)">vs</span>
-      <select id="diffDateB"></select>
-      <button class="filter-btn" id="btn-diff" style="padding:8px 18px">对比</button>
+    <div style="margin-top:22px;">
+      <h3 style="font-size:.95em;font-weight:700;color:var(--tp);margin-bottom:12px;">简报对比</h3>
+      <div class="diff-controls">
+        <select id="diffDateA"></select>
+        <span style="color:var(--ts);">vs</span>
+        <select id="diffDateB"></select>
+        <button class="filter-btn" id="btn-diff" style="padding:8px 18px;">对比</button>
+      </div>
+      <div id="diffResult"></div>
     </div>
-    <div id="diffResult"></div>
   </div>
 
-  <!-- ── Historical Reports ── -->
-  <div class="section" id="history">
-    <h2 class="sec-title">📅 历史简报回溯</h2>
+  <!-- 历史简报回溯 (路由 #/history) -->
+  <div class="section" id="history" style="display:none;">
+    <div class="ah-sec-hdr">
+      <span class="ah-sec-num"></span>
+      <h2 class="ah-sec-title">历史简报回溯</h2>
+    </div>
+    <div class="ah-sec-rule"></div>
     <div class="hist-list">{{ hist_html }}</div>
   </div>
 
-  <!-- ── Swarm Divergence 蜂群分歧度 ── -->
-  <div class="section" id="swarm-divergence">
-    <div class="sec-title">🐝 蜂群分歧度分析</div>
-    <p style="font-size:.82em;color:var(--ts);margin-bottom:12px">7 只蜂的评分分散度 — 高共识 = 信号可信度高，低共识 = 需谨慎对待方向判断</p>
+  <!-- 蜂群分歧度 -->
+  <div class="section" id="swarm-divergence" style="display:none;">
+    <div class="ah-sec-hdr">
+      <span class="ah-sec-num"></span>
+      <h2 class="ah-sec-title">蜂群分歧度分析</h2>
+    </div>
+    <div class="ah-sec-rule"></div>
+    <p style="font-size:.82em;color:var(--ts);margin-bottom:12px;">7 只蜂的评分分散度 — 高共识 = 信号可信度高，低共识 = 需谨慎对待方向判断</p>
     <div class="sdiv-grid" id="sdivGrid"></div>
   </div>
 
-{{ acc_section_html }}
 </div>
+</main>
 
+<!-- ── FOOTER ── -->
 <footer class="footer">
-  <p><span class="px-bee"></span> Alpha Hive — 去中心化蜂群智能投资研究平台</p>
-  <p>更新：{{ now_str }} | {{ n_tickers }} 标的 | SEC 真实数据 | 真实度 {{ avg_real }}</p>
-  <div style="display:flex;justify-content:center;gap:10px;margin-top:10px;flex-wrap:wrap">
-    <a href="rss.xml" class="share-btn" style="color:rgba(255,255,255,.7);border-color:rgba(255,255,255,.15)">📡 RSS 订阅</a>
-    <button class="share-btn share-btn-x" id="btn-share-x-footer" style="border-color:rgba(255,255,255,.15);color:rgba(255,255,255,.7)">𝕏 Follow &amp; Share</button>
+  <div class="ah-footer-inner">
+    <div class="ah-footer-links">
+      <a href="#/today">今日简报</a>
+      <a href="#/list">明细表</a>
+      <a href="#/accuracy">准确率</a>
+      <a href="rss.xml">RSS 订阅</a>
+    </div>
+    <span class="ah-footer-copy">ALPHA HIVE · 蜂群智能投资研究 · {{ now_str }}</span>
   </div>
-  <p style="margin-top:8px;font-size:.82em;opacity:.6">
+  <div style="max-width:1360px;margin:12px auto 0;font-size:11px;color:var(--tm);font-family:'Noto Sans SC',sans-serif;">
     声明：本报告由 AI 蜂群自动生成，仅供研究参考，不构成投资建议。所有决策请自行判断。
-  </p>
+  </div>
 </footer>
-<div id="kbHelp" class="kb-help" style="display:none">
+
+<!-- ── 键盘帮助 ── -->
+<div id="kbHelp" class="kb-help" style="display:none;">
   <div class="kb-help-inner">
-    <h3>⌨️ 键盘快捷键</h3>
+    <h3>键盘快捷键</h3>
     <div class="kb-row"><kbd>J</kbd><span>下一张卡片</span></div>
     <div class="kb-row"><kbd>K</kbd><span>上一张卡片</span></div>
     <div class="kb-row"><kbd>D</kbd><span>切换暗黑模式</span></div>
-    <div class="kb-row"><kbd>C</kbd><span>对比模式（选2-3卡）</span></div>
+    <div class="kb-row"><kbd>C</kbd><span>对比模式</span></div>
     <div class="kb-row"><kbd>?</kbd><span>显示/隐藏帮助</span></div>
     <div class="kb-row"><kbd>Esc</kbd><span>关闭/退出</span></div>
-    <button class="filter-btn" id="btn-kb-close" style="margin-top:12px;width:100%">关闭</button>
+    <button class="filter-btn" id="btn-kb-close" style="margin-top:12px;width:100%;">关闭</button>
   </div>
 </div>
-<!-- ── Bottom Nav (Mobile) ── -->
+
+<!-- ── 手机底部导航 ── -->
 <nav class="bottom-nav" id="bottomNav" aria-label="移动端导航">
-  <a href="#/today" class="bnav-item active" data-sec="today"><span class="bnav-icon">📋</span><span class="bnav-label">今日</span></a>
-  <a href="#/charts" class="bnav-item" data-sec="charts"><span class="bnav-icon">📊</span><span class="bnav-label">图表</span></a>
-  <a href="#/list" class="bnav-item" data-sec="list"><span class="bnav-icon">📑</span><span class="bnav-label">清单</span></a>
-  <a href="#/deep" class="bnav-item" data-sec="deep"><span class="bnav-icon">🔬</span><span class="bnav-label">深度</span></a>
-  <a href="#/trend" class="bnav-item" data-sec="trend"><span class="bnav-icon">📈</span><span class="bnav-label">趋势</span></a>
+  <a href="#/today"   class="bnav-item active" data-sec="today">  <span class="bnav-icon">📋</span><span class="bnav-label">今日</span></a>
+  <a href="#/charts"  class="bnav-item" data-sec="charts">         <span class="bnav-icon">📊</span><span class="bnav-label">图表</span></a>
+  <a href="#/list"    class="bnav-item" data-sec="list">           <span class="bnav-icon">📑</span><span class="bnav-label">清单</span></a>
+  <a href="#/deep"    class="bnav-item" data-sec="deep">           <span class="bnav-icon">🔬</span><span class="bnav-label">深度</span></a>
+  <a href="#/trend"   class="bnav-item" data-sec="trend">          <span class="bnav-icon">📈</span><span class="bnav-label">趋势</span></a>
 </nav>
-<!-- ── Compare Mode Bar ── -->
+
+<!-- ── 对比模式栏 ── -->
 <div class="compare-bar" id="compareBar">
   <div class="compare-bar-left">
-    <span>🔍 对比模式</span>
+    <span>对比模式</span>
     <span id="compareCount" class="compare-badge">0/3</span>
-    <span id="compareNames" style="font-size:.82em;opacity:.8"></span>
+    <span id="compareNames" style="font-size:.82em;opacity:.8;"></span>
   </div>
-  <div style="display:flex;gap:6px">
+  <div style="display:flex;gap:6px;">
     <button id="compareGo">开始对比</button>
     <button id="compareCancel">取消 (Esc)</button>
   </div>
 </div>
-</main>
+
 <div class="toast" id="toast"></div>
 <button class="scroll-top" id="scrollTop" aria-label="返回顶部">↑</button>
 
