@@ -5,6 +5,15 @@
 
 ---
 
+## [0.35.2] — 2026-07-01 — 修复"净值曲线·评分分布"面板空白（`equityChart` canvas 从未接入 JS）
+
+### Fixed — `templates/dashboard.js`
+- **根因**：v0.35.1 修的是"历史准确率"章节里的资金曲线（`#eqCurveChart`，Net/Gross/SPY 三线图，已正确接入 `initEquityCurve()`）。但用户截图显示的其实是**另一个**图表——首屏"图表"章节顶部的"策略净值曲线（模拟回测）"面板，canvas id 是 `equityChart`（单数，无 Curve）。B-style 重设计把这个面板的 HTML 骨架（`#equityChart`/`#eqKpi`/`#eqDateRange`/`#eqCurrent`）写进了模板，但**从未写对应的 JS 渲染逻辑**——`renderChart(id)` 里没有 `id==='equityChart'` 分支，骨架屏（`.skeleton`）永远不会被移除，表现为一个永久空白的米色方块。
+- **修复**：在 `renderChart()` 新增 `equityChart` 分支：读取 `__AH__.equity_curve`，把 `cum_net_pct` 换算成"起始 100"的净值指数（`100*(1+pct/100)`），渲染单线 Chart.js 折线图；同步填充 `#eqKpi`（涨跌幅徽章，涨绿跌红）、`#eqDateRange`（数据起止日期）、`#eqCurrent`（当前指数值）。
+- 把 `'equityChart'` 加入 IntersectionObserver 观察列表、无 IntersectionObserver 时的 fallback 列表、`window.load` 兜底列表、暗黑模式切换重绘列表、bfcache 恢复重建列表（共 5 处 `['fgChart','scoresChart','dirChart']` 数组统一加尾）。
+- `markDone()` 的骨架屏隐藏选择器从 `.chart-canvas-wrap`/`.radar-wrap` 扩展到 `.eq-wrap`（该面板的外层容器类名与其他图表不同，之前即使接入 JS 也不会自动隐藏骨架屏）。
+- **验证方法**：本环境截图工具在 JS 滚动后拍摄存在已知盲区（`document.hidden` 导致 Chart.js 的 rAF 绘制暂停），改用 canvas `getImageData` 直接采样像素 + 手动 `chart.draw()` 强制同步绘制验证——确认数据(576点)/Chart 实例/KPI 文案/骨架屏隐藏全部正确，图表可视内容占采样点 42%。
+
 ## [0.35.1] — 2026-07-01 — 修复"策略净值曲线加载不出来"（index.html / dashboard-data.json 时间戳失步导致无限重载）
 
 ### Fixed

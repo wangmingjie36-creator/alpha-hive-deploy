@@ -75,13 +75,13 @@ function toggleDark(){
   }
   document.querySelectorAll('canvas.rendered').forEach(function(c){
     c.classList.remove('rendered');
-    const w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap');
+    const w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap')||c.closest('.eq-wrap');
     if(w) w.classList.remove('skel-done');
   });
   clearTimeout(_darkTimer);
   _darkTimer=setTimeout(function(){
     if(window.AH.renderChart){
-      ['fgChart','scoresChart','dirChart'].forEach(window.AH.renderChart);
+      ['fgChart','scoresChart','dirChart','equityChart'].forEach(window.AH.renderChart);
     }
     if(window.AH.renderRadar && window.AH.radarKeys){
       window.AH.radarKeys.forEach(window.AH.renderRadar);
@@ -254,7 +254,7 @@ let chartInstances=[];
     const c=document.getElementById(id);
     if(c){
       c.classList.add('rendered');
-      const w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap');
+      const w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap')||c.closest('.eq-wrap');
       if(w) w.classList.add('skel-done');
     }
   }
@@ -334,6 +334,50 @@ let chartInstances=[];
       markDone('dirChart');
     }
 
+    if(id==='equityChart'){
+      const eqCtx=document.getElementById('equityChart');
+      if(!eqCtx)return;
+      const eq=__AH__.equity_curve;
+      if(!eq||!eq.length){markDone('equityChart');return;}
+      const labels=eq.map(function(d){return d.date.slice(5);});
+      const idxData=eq.map(function(d){
+        const p=d.cum_net_pct!=null?d.cum_net_pct:d.cum;
+        return 100*(1+(p||0)/100);
+      });
+      const lastVal=idxData[idxData.length-1];
+      const totalRet=lastVal-100;
+      const up=totalRet>=0;
+      const kpiEl=document.getElementById('eqKpi');
+      if(kpiEl){
+        kpiEl.textContent=(up?'+':'')+totalRet.toFixed(2)+'%';
+        kpiEl.style.color=up?'var(--bull)':'var(--bear)';
+      }
+      const dateEl=document.getElementById('eqDateRange');
+      if(dateEl) dateEl.textContent=eq[0].date+' ~ '+eq[eq.length-1].date;
+      const curEl=document.getElementById('eqCurrent');
+      if(curEl) curEl.textContent=lastVal.toFixed(2);
+      const lineColor=up?'#22c55e':'#ef4444';
+      const fillColor=up?'rgba(34,197,94,.08)':'rgba(239,68,68,.08)';
+      chartInstances.push(new Chart(eqCtx,{
+        type:'line',
+        data:{labels:labels,datasets:[{data:idxData,
+          borderColor:lineColor,backgroundColor:fillColor,fill:true,
+          tension:.25,pointRadius:0,borderWidth:2}]},
+        options:{responsive:true,maintainAspectRatio:false,
+          interaction:{mode:'index',intersect:false},
+          plugins:{legend:{display:false},
+            tooltip:{callbacks:{
+              title:function(items){return eq[items[0].dataIndex].date;},
+              label:function(c){return '净值指数: '+c.raw.toFixed(2);}
+            }}},
+          scales:{
+            x:{grid:{display:false},ticks:{color:tc,font:{size:8},maxRotation:0,maxTicksLimit:8}},
+            y:{grid:{color:gc},ticks:{color:tc,font:{size:9}}}
+          }}
+      }));
+      markDone('equityChart');
+    }
+
     }catch(e){console.warn('Chart render error ('+id+'):',e);}
   }
 
@@ -379,7 +423,7 @@ let chartInstances=[];
 
   if(!('IntersectionObserver' in window)){
     // fallback: render all immediately
-    ['fgChart','scoresChart','dirChart'].forEach(renderChart);
+    ['fgChart','scoresChart','dirChart','equityChart'].forEach(renderChart);
     Object.keys(rd).forEach(renderRadar);
     return;
   }
@@ -402,7 +446,7 @@ let chartInstances=[];
   },{rootMargin:'200px 0px'});
 
   // Observe chart canvases
-  ['fgChart','scoresChart','dirChart'].forEach(function(cid){
+  ['fgChart','scoresChart','dirChart','equityChart'].forEach(function(cid){
     const el=document.getElementById(cid);
     if(el)cobs.observe(el);
   });
@@ -414,7 +458,7 @@ let chartInstances=[];
   // Fallback: when Chart.js CDN finishes loading, render any charts still pending
   window.addEventListener('load',function(){
     if(typeof Chart==='undefined')return;
-    ['fgChart','scoresChart','dirChart'].forEach(renderChart);
+    ['fgChart','scoresChart','dirChart','equityChart'].forEach(renderChart);
     Object.keys(rd).forEach(renderRadar);
     // 延迟图表：Chart.js defer 加载后统一初始化
     if(window.AH.initTrendChart) window.AH.initTrendChart();
@@ -797,12 +841,12 @@ window.addEventListener('pageshow',function(e){
   }
   document.querySelectorAll('canvas.rendered').forEach(function(c){
     c.classList.remove('rendered');
-    var w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap');
+    var w=c.closest('.chart-canvas-wrap')||c.closest('.radar-wrap')||c.closest('.eq-wrap');
     if(w) w.classList.remove('skel-done');
   });
   if(typeof Chart==='undefined')return;
   if(window.AH.renderChart){
-    ['fgChart','scoresChart','dirChart'].forEach(window.AH.renderChart);
+    ['fgChart','scoresChart','dirChart','equityChart'].forEach(window.AH.renderChart);
   }
   if(window.AH.renderRadar&&window.AH.radarKeys){
     window.AH.radarKeys.forEach(window.AH.renderRadar);
