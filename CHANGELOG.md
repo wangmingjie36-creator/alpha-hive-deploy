@@ -5,6 +5,15 @@
 
 ---
 
+## [0.35.1] — 2026-07-01 — 修复"策略净值曲线加载不出来"（index.html / dashboard-data.json 时间戳失步导致无限重载）
+
+### Fixed
+- **根因**：`dashboard_renderer.render_dashboard_html()` 每次调用都会**side-effect 写入** `dashboard-data.json`（用 `now_str` 生成 `_generated_at`），即使调用方只是想读返回的 HTML 字符串做测试、并未把结果写回 `index.html`。上一 session 验证 emoji 清除时多次这样调用，导致 `dashboard-data.json` 时间戳（`2026-06-30 16:37 PDT`）比 `index.html` 里嵌入的 `data-generated`（`2026-06-30 01:12 PDT`，且仍是**清 emoji前**的旧渲染）新出一大截。
+- **触发的 bug**：`templates/dashboard.js` 的 `fetchDashboardData()` 每次加载都会拉取 `dashboard-data.json`，若其 `_generated_at` 比页面自身嵌入的时间戳新，立即 `location.reload()`。两个文件长期失步 → 页面进入**无限重载循环**。净值曲线依赖的 Chart.js 需要先从 CDN 加载再跑入场动画（约 3~5 秒），而页面每 1~2 秒就被重载打断一次，导致图表**从未有机会画完**，用户看到的就是"加载不出来"。
+- **验证过程**：直接读取 `#eqCurveChart` canvas 的像素数据（`getImageData` 采样非背景色像素占比），确认 Chart.js 实例、数据（576 笔 equity_curve + trading_stats.realistic）、DOM id（`eqCurveContainer`/`eqCurveChart`/`eqStats`/`tradingStatsCards`，均由 `dashboard_renderer.py` 的 `_acc_section_html` 正确生成注入）**全部正常**——B-style 重设计并未破坏此前的图表结构；纯粹是时间戳失步 + 重载竞速导致的可见性问题。
+- **修复**：用 `alpha-hive-daily-2026-06-29.json`（当前 `dashboard-data.json` 对应的真实扫描数据）重新调用一次 `render_dashboard_html()` 并把返回值写回 `index.html`，使两个文件时间戳重新对齐（`2026-06-30 17:23 PDT`）。**副产品**：这次重新渲染也让上一 session 的 emoji 清除修复真正生效到部署产物里——此前部署到 gh-pages 的 `index.html` 其实是清 emoji **之前**渲染的旧版本（`📅📈🏆💀💰📌📉🔗` 等仍在），从未被含修复的新渲染覆盖过。
+- **教训**：以后验证 `render_dashboard_html()` 的输出（如 grep 检查 emoji）时，要么把返回值写回 `index.html`，要么改为直接读取/grep 源码（`dashboard_renderer.py`/`templates/`），不要让"只读测试"静默污染 `dashboard-data.json` 的时间戳。
+
 ## [0.35.0] — 2026-07-01 — B-style 财经报刊仪表板重设计 + 全面去 emoji
 
 ### Changed — `templates/dashboard.html`（完整重写）
