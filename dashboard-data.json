@@ -7063,7 +7063,7 @@
    "ticker": "VKTX",
    "score": 5.5,
    "direction": "中性",
-   "price": 100.0
+   "price": 39.75
   },
   {
    "ticker": "AMZN",
@@ -7081,43 +7081,43 @@
    "ticker": "META",
    "score": 5.3,
    "direction": "中性",
-   "price": 100.0
+   "price": 618.65
   },
   {
    "ticker": "TSLA",
    "score": 5.2,
    "direction": "中性",
-   "price": 100.0
+   "price": 428.02
   },
   {
    "ticker": "MSFT",
    "score": 5.2,
    "direction": "中性",
-   "price": 100.0
+   "price": 386.05
   },
   {
    "ticker": "BILI",
    "score": 5.2,
    "direction": "看空",
-   "price": 100.0
+   "price": 17.5
   },
   {
    "ticker": "QCOM",
    "score": 5.2,
    "direction": "中性",
-   "price": 100.0
+   "price": 186.03
   },
   {
    "ticker": "RKLB",
    "score": 5.0,
    "direction": "中性",
-   "price": 100.0
+   "price": 106.86
   },
   {
    "ticker": "CRCL",
    "score": 4.9,
    "direction": "看多",
-   "price": 100.0
+   "price": 65.76
   }
  ],
  "equity_curve": [
@@ -16858,7 +16858,7 @@
    ]
   }
  },
- "_generated_at": "2026-06-30 17:54 PDT",
+ "_generated_at": "2026-06-30 18:44 PDT",
  "_date": "2026-06-29",
- "_deploy_ts": 1782867274
+ "_deploy_ts": 1782870308
 }

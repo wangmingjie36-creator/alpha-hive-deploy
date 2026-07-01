@@ -259,13 +259,16 @@ class AlphaHiveDailyReporter:
             (ticker, opportunity_item_or_none, error_message_or_none)
         """
         try:
-            # 构建最小化的实时数据结构
+            # 构建实时数据结构（真实多源降级链：yfinance → Alpha Vantage → Finnhub → 安全默认值，
+            # 与 swarm 路径共用 _fetch_stock_data，避免虚假 current_price=100.0 污染下游报告/仪表板）
+            from swarm_agents.cache import _fetch_stock_data as _dr_fetch_stock
+            _stock_data = _dr_fetch_stock(ticker)
             realtime_metrics = {
                 "ticker": ticker,
                 "sources": {
                     "yahoo_finance": {
-                        "current_price": 100.0,
-                        "change_pct": 2.5
+                        "current_price": _stock_data.get("price", 0.0),
+                        "change_pct": _stock_data.get("momentum_5d", 0.0)
                     }
                 }
             }
@@ -929,7 +932,11 @@ class AlphaHiveDailyReporter:
             _snap_dir = os.path.join(str(self.report_dir), "report_snapshots")
             _snap_count = 0
             for _tk, _data in swarm_results.items():
-                if _data.get("final_score", 0) >= 5.0:
+                # v0.34.1 采样偏差修复：移除 >=5.0 门槛。原门槛导致只记录高分预测，
+                # 而高分几乎只有 NVDA → 自学习样本被单票绑架（49 NVDA vs 其余各 1）。
+                # 现在只要成功分析（final_score>0）就为每只标的落快照，低分/Neutral 也记录，
+                # 供跨标的校准；win-rate 仍只按 Long/Short 方向统计（Neutral 不计入）。
+                if _data.get("final_score", 0) > 0:
                     _snap = ReportSnapshot(_tk, self.date_str)
                     _snap.composite_score = _data.get("final_score", 0.0)
                     _snap.direction = _data.get("direction", "Neutral")

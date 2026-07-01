@@ -5,6 +5,19 @@
 
 ---
 
+## [0.36.0] — 2026-07-01 — 修复网站股价全错（`_analyze_ticker_safe` 硬编码 100.0 假价）+ CBOE 设为股价主源
+
+### Fixed — `alpha_hive_daily_report.py`（`_analyze_ticker_safe`，~L262）
+- **根因**：非 swarm 路径（CLI 不传 `--swarm` 时调用的 `run_daily_scan()`）里，`realtime_metrics` 是硬编码的占位数据 `{"current_price": 100.0, "change_pct": 2.5}`，对**每一个**标的都一样。这行代码是 `swarm_agents/cache.py::_fetch_stock_data` 早就修过的同一个反模式的"漏网之鱼"——那边的注释写得很清楚："原实现失败时返回 price=100.0（虚假数据）...新实现失败时返回 price=0.0 + `_data_unavailable=True`"，但 `alpha_hive_daily_report.py` 里这个并行的旧代码路径从未同步更新。
+- **暴露方式**：某次手动/测试运行 `alpha_hive_daily_report.py`（未传 `--swarm`）批量覆盖了 10 只标的当天的 `analysis-{ticker}-ml-2026-06-30.json`，其中 8 只（除 NVDA/AMZN 外，这两只当天 swarm 扫描本身带了真实价格，跳过了这个注入兜底逻辑）的 `current_price` 全部变成 `100.0`。`dashboard_renderer.py` 的价格兜底注入逻辑（`_inj_price`，优先读最近 7 天的 `analysis-*-ml-*.json`）把这个假价读出来显示在了仪表板上——8/10 标的显示一模一样的 $100.00，用户发现"网站上的股价都是错的"。
+- **修复**：`_analyze_ticker_safe` 改为调用 `swarm_agents.cache._fetch_stock_data(ticker)`（与 swarm 路径共用同一个真实多源降级链），不再硬编码。
+- **数据修复**：用修复后的真实取价链重新拉取 8 只标的真实现价，patch 回 `analysis-{ticker}-ml-2026-06-30.json`（该文件属于 `.gitignore` 的 `analysis-*.json`，本地缓存不入库），重新渲染 `index.html`/`dashboard-data.json` 并部署 gh-pages。
+
+### Changed — `data_pipeline.py`（**CBOE 设为股价主源**，用户定调"股价也走 CBOE"）
+- 新增 `CBOESource` 类：复用 `cboe_options._fetch_cboe_payload()` 已经在拉的期权链响应里自带的 `current_price`/`price_change_percent` 字段，零额外网络开销；仅提供当日涨跌幅（无历史K线），`momentum_5d` 是近似值。
+- `MultiSourceFetcher._sources` 降级链顺序改为 **CBOE → yfinance → Alpha Vantage → Finnhub → 陈旧缓存 → 安全默认值**（原来是 yfinance 起头）。
+- 澄清：CBOE 优先规则原来只接入了期权链（`options_analyzer.py`），基础股价查询（`data_pipeline.MultiSourceFetcher`，swarm agents 取价用的就是这条）走的是独立的 yfinance 起头的链条，两者互不影响。本次统一后 CBOE 变成两条链共同的第一源。
+
 ## [0.35.2] — 2026-07-01 — 修复"净值曲线·评分分布"面板空白（`equityChart` canvas 从未接入 JS）
 
 ### Fixed — `templates/dashboard.js`

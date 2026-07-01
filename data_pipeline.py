@@ -212,8 +212,49 @@ class ObservableCircuitBreaker:
 
 # ==================== 数据源适配器 ====================
 
+class CBOESource:
+    """主数据源：CBOE 延迟报价（options 端点自带现价，稳定无限流；用户定调"股价也走 CBOE"）
+
+    CBOE 报价里的 current_price/price_change_percent 本来就要拉来算期权链，
+    直接复用没有额外成本；仅提供当日涨跌幅(无历史K线)，momentum_5d 是近似值。
+    """
+
+    def __init__(self):
+        self.breaker = ObservableCircuitBreaker("cboe", failure_threshold=3, recovery_timeout=60)
+        self.name = "cboe"
+
+    def fetch(self, ticker: str) -> Optional[StockData]:
+        if not self.breaker.allow_request():
+            return None
+        try:
+            from cboe_options import _fetch_cboe_payload
+            payload = _fetch_cboe_payload(ticker, timeout=15)
+            if not payload:
+                self.breaker.record_failure("no_data")
+                return None
+            price = float(payload.get("current_price") or payload.get("close") or 0.0)
+            if price <= 0:
+                self.breaker.record_failure("zero_price")
+                return None
+
+            data = StockData(
+                price=price,
+                momentum_5d=float(payload.get("price_change_percent") or 0.0),  # 近似值：仅当日涨跌幅
+                data_source=DataQuality.REAL,
+                source_name=self.name,
+                fetch_timestamp=time.time(),
+            )
+            self.breaker.record_success()
+            return data
+
+        except Exception as e:
+            self.breaker.record_failure(str(e))
+            _log.warning("[CBOE] fetch %s failed: %s", ticker, e)
+            return None
+
+
 class YFinanceSource:
-    """主数据源：yfinance（免费，实时性好）"""
+    """降级源 0：yfinance（CBOE 无数据/失败时的备用，免费，实时性好）"""
 
     def __init__(self):
         self.breaker = ObservableCircuitBreaker("yfinance", failure_threshold=3, recovery_timeout=60)
@@ -367,7 +408,7 @@ class FinnhubSource:
 
 class MultiSourceFetcher:
     """
-    多源数据降级链：yfinance → Alpha Vantage → Finnhub → 陈旧缓存 → 安全默认值
+    多源数据降级链：CBOE → yfinance → Alpha Vantage → Finnhub → 陈旧缓存 → 安全默认值
 
     核心原则：
     1. 永远不返回 price=100 的虚假数据
@@ -384,6 +425,7 @@ class MultiSourceFetcher:
 
     def __init__(self):
         self._sources: List = [
+            CBOESource(),
             YFinanceSource(),
             AlphaVantageSource(),
             FinnhubSource(),
