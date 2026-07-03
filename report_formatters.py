@@ -557,11 +557,24 @@ def _build_backtest(backtest_stats) -> List[str]:
     avg_ret = backtest_stats["avg_return"]
     md.append("## 📈 历史预测准确率（T+7，近30天）")
     md.append("")
-    md.append(
-        f"**样本**：{total} 条 | "
-        f"**准确率**：{acc * 100:.1f}% ({correct}/{total}) | "
-        f"**平均收益**：{avg_ret:+.2f}%"
-    )
+    # v0.37.0 主口径：可执行方向单（看多 score>=6 + 看空），观望档/中性不计入
+    _act = backtest_stats.get("actionable") or {}
+    if _act.get("total", 0) > 0:
+        md.append(
+            f"**可执行方向单**：{_act['total']} 条 | "
+            f"**准确率**：{_act['accuracy'] * 100:.1f}% ({_act['correct']}/{_act['total']}) | "
+            f"**均PnL**：{_act['avg_pnl']:+.2f}%"
+        )
+        md.append(
+            f"**全部预测**（含观望档/中性）：{total} 条 | "
+            f"准确率 {acc * 100:.1f}% | 平均收益 {avg_ret:+.2f}%"
+        )
+    else:
+        md.append(
+            f"**样本**：{total} 条 | "
+            f"**准确率**：{acc * 100:.1f}% ({correct}/{total}) | "
+            f"**平均收益**：{avg_ret:+.2f}%"
+        )
     md.append("")
     by_ticker = backtest_stats.get("by_ticker", {})
     if by_ticker:

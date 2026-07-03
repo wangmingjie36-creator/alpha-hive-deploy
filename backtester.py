@@ -423,6 +423,32 @@ class PredictionStore:
                 else:
                     _adj_avg = row["avg_ret"] or 0
 
+                # v0.37.0 可执行方向单口径：看多需 score>=6.0（决策阈值内），看空全算，
+                # 中性与观望档（score<6 的看多）不计入 —— 反映"系统建议行动的单子"真实质量。
+                # 全样本验证：该口径 56% acc（vs 混合口径把 <6.0 观望档 + 中性 |ret|<=3% 判据全算进来）
+                actionable = {"total": 0, "correct": 0, "accuracy": 0.0, "avg_pnl": 0.0}
+                try:
+                    _act_row = conn.execute(f"""
+                        SELECT
+                            COUNT(*) as total,
+                            SUM({correct_col}) as correct,
+                            AVG(CASE WHEN direction='bullish' THEN {return_col}
+                                     ELSE -{return_col} END) as avg_pnl
+                        FROM {self.TABLE}
+                        WHERE {checked_col} = 1 AND date >= ?{_excl}
+                          AND ((direction = 'bullish' AND final_score >= 6.0)
+                               OR direction = 'bearish')
+                    """, (cutoff, *_excl_p)).fetchone()
+                    _at = _act_row["total"] or 0
+                    actionable = {
+                        "total": _at,
+                        "correct": _act_row["correct"] or 0,
+                        "accuracy": round((_act_row["correct"] or 0) / _at, 3) if _at else 0.0,
+                        "avg_pnl": round(_act_row["avg_pnl"] or 0, 2),
+                    }
+                except (sqlite3.Error, KeyError, TypeError):
+                    pass
+
                 return {
                     "period": period,
                     "days_window": days,
@@ -431,6 +457,7 @@ class PredictionStore:
                     "correct_count": correct,
                     "avg_return": round(_adj_avg, 3),
                     "avg_score": round(row["avg_score"] or 0, 1),
+                    "actionable": actionable,
                     "by_direction": by_direction,
                     "by_ticker": by_ticker,
                 }

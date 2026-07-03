@@ -1319,6 +1319,9 @@ BEAR_SCORING_CONFIG = {
     # ── Bear Cap ──
     "bear_cap_trigger_threshold": 5.0,     # 触发阈值（原 7.0）
     "bear_cap_slope": 0.5,                 # 上限衰减斜率
+    # ── v0.37.0 Bear 强信号压制看多（回测：拦截13单均收益-1.70% vs 全体看多+3.09%）──
+    "bull_veto_enabled": True,             # BearBee 强信号时禁止 bullish 方向（降级 neutral，不翻转）
+    "bull_veto_bear_score": 7.0,           # BearBee score >= 此值触发压制
 }
 
 # ==================== Dashboard 颜色方案 ====================

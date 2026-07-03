@@ -5,6 +5,35 @@
 
 ---
 
+## [0.37.0] — 2026-07-03 — 诊断"T+7 准确率 33.7%"：口径修复（可执行方向单）+ BearBee 强信号压制看多
+
+> 用户问"解决最近胜率低的问题"。基于 545 条快照 + 536 条 swarm 历史回测的完整诊断，headline 33.7% 是三重稀释的结果，而非可执行信号失效。
+
+### 诊断结论（数据支持）
+1. **观望档污染 headline**：近30天 89 条样本里，score<6.0 的"暂不行动"档预测（本不建议行动）也计入胜率。6 月 51 条快照中仅 4 条是 score≥6 的真方向单。
+2. **中性预测占比暴涨且判据天然低命中**：中性占比从 4 月 16% → 6 月 55%；判对标准 |T+7|≤3%，但近月 61-77% 样本 |ret|>3%（高波动），中性天然只有 ~40% 命中，拉低总数。中性=不行动，零 PnL 影响。
+3. **6 月单月下跌行情看多失效**：6 月看多 16 条仅 19% 命中（均收益 -6.1%），但 4/5 月同一系统 65%/56% 有效——单月政体切换，非因子死亡。看空 6 月 86% 命中但产量极低（全样本仅 8%）。
+4. **修正后的真实质量**：可执行方向单口径（看多 score≥6 + 全部看空）近30天 50%（18条，均PnL+0.13%），全样本 56%。
+
+### 回测验证（含证伪，防重蹈 v0.34.1"背离过滤器"覆辙）
+- ❌ **宏观 risk_off 门控看多——证伪**：全样本看多@risk_off 胜率 60%/均收益+2.69%（比 neutral 政体还好），压制会净有害，不上线。
+- ❌ **F&G 恐惧区门控看多——证伪**：F&G 25-40 区看多胜率反而最高（74%）。
+- ✅ **BearBee 强信号压制看多——轻微有效**：bear_score≥7.0 历史触发 13 单，被拦截的看多均收益 -1.70% vs 全体 +3.09%，上线（保守设计：只降级 neutral 不翻转）。
+
+### Changed — `backtester.py`（`get_accuracy_stats`）
+- 新增 `actionable` 统计块：`(direction='bullish' AND final_score>=6.0) OR direction='bearish'` 的方向单准确率 + 方向调整均 PnL，随 stats dict 返回。
+
+### Changed — `report_formatters.py`（`_build_backtest`）
+- 日报"历史预测准确率"段主数字改为**可执行方向单**口径，原全样本数字降为次要行（含观望档/中性），无 actionable 数据时回退旧格式。
+
+### Added — `swarm_agents/queen_distiller.py`（`_compute_direction_vote`）+ `config.py`（`BEAR_SCORING_CONFIG`）
+- **BullVeto**：方向判定末端（S5 冲突仲裁之后），若 `rule_direction=bullish` 且 BearBeeContrarian score ≥ `bull_veto_bear_score`(7.0)，降级为 neutral（不翻转为 bearish），`conflict_info["bull_veto"]` 记录触发详情。
+- config 开关：`bull_veto_enabled: True` / `bull_veto_bear_score: 7.0`。若当日生效，7/2 的 TSLA（bear 8.3）、QCOM（bear 7.7）看多会被降级中性。
+- 测试：141 passed（queen/backtester/formatters 相关套件全绿）。
+
+### 遗留观察项
+- 看空产量过低（全样本 8%）但质量高（61%）——蜂群信息素历史"多5/空0"自我强化看多。下一步候选：信息素板方向多样性激励 / BearBee 投票权重提升,需新样本回测。
+
 ## [0.36.0] — 2026-07-01 — 修复网站股价全错（`_analyze_ticker_safe` 硬编码 100.0 假价）+ CBOE 设为股价主源
 
 ### Fixed — `alpha_hive_daily_report.py`（`_analyze_ticker_safe`，~L262）

@@ -674,6 +674,24 @@ class QueenDistiller:
                 "bearish_agents": bearish_count,
             }
 
+        # v0.37.0: Bear 强信号压制看多 —— BearBee score >= 阈值时 bullish 降级 neutral（不翻转）
+        # 回测（536 样本）：被拦截的 13 单看多均收益 -1.70% vs 全体看多 +3.09%
+        if (rule_direction == "bullish"
+                and _BSC4.get("bull_veto_enabled", False)):
+            _veto_th = _BSC4.get("bull_veto_bear_score", 7.0)
+            _bear_r = next((r for r in valid_results
+                            if r.get("source") == "BearBeeContrarian"), None)
+            if _bear_r is not None and (_bear_r.get("score") or 0) >= _veto_th:
+                rule_direction = "neutral"
+                conflict_info["bull_veto"] = {
+                    "bear_score": round(_bear_r.get("score", 0), 1),
+                    "threshold": _veto_th,
+                }
+                _log.info(
+                    "%s [BullVeto] BearBee %.1f >= %.1f，bullish 降级 neutral",
+                    ticker, _bear_r.get("score", 0), _veto_th,
+                )
+
         per_agent_directions = {}
         for r in all_results:
             src = r.get("source", "")
