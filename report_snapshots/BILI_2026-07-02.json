@@ -1,0 +1,35 @@
+{
+  "ticker": "BILI",
+  "date": "2026-07-02",
+  "composite_score": 5.6,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 17.139999389648438,
+  "agent_votes": {
+    "BearBeeContrarian": 7.0,
+    "OracleBeeEcho": 6.396923076923078,
+    "RivalBeeVanguard": 6.14,
+    "CodeExecutorAgent": 5.0,
+    "ScoutBeeNova": 5.798,
+    "QueenDistiller": 5.6,
+    "ChronosBeeHorizon": 5.5,
+    "BuzzBeeWhisper": 4.95,
+    "GuardBeeSentinel": 4.74
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-07-03T11:33:09.423593"
+}
