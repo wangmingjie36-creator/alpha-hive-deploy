@@ -12,8 +12,13 @@ from typing import Optional
 
 # 默认容差（百分比形式）：允许 ±1% 的逆向波动仍视为方向正确
 DEFAULT_TOLERANCE_PCT = 1.0
-# 中性方向容差：实际收益在 ±3% 内视为"中性正确"
-DEFAULT_NEUTRAL_TOLERANCE_PCT = 3.0
+# 中性方向容差：实际收益在 ±5% 内视为"中性正确"
+# v0.38.1: 3.0 → 5.0。全样本回放（experiments/neutral_band_replay.py，164 条中性）：
+# ±3% 命中仅 36%——高波动政体下 61-77% 样本 |T+7|>3%，"中性但 |ret|>3%"本质是
+# 该标的的正常波动而非预测错误；±5% 命中 52%，与波动率缩放口径（53%）几乎等效
+# 但实现简单（±5% ≈ 0.674×σ7 在本组合典型 σ7≈7.4% 下的近似）。
+# 仅影响准确率记账（backtester 统计 / outcomes_fetcher 回填标签），不影响交易行为。
+DEFAULT_NEUTRAL_TOLERANCE_PCT = 5.0
 
 
 def determine_correctness(

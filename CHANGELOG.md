@@ -5,6 +5,14 @@
 
 ---
 
+## [0.38.1] — 2026-07-07 — 中性判定带宽 ±3% → ±5%（落地 P2-1 回放实验结论）
+
+### Changed — `outcome_utils.py`
+- `DEFAULT_NEUTRAL_TOLERANCE_PCT` 3.0 → 5.0。依据 `experiments/neutral_band_replay.py` 全样本回放（164 条中性预测）：±3% 命中仅 36%——高波动政体下 61-77% 样本 |T+7|>3%，"中性但 |ret|>3%"本质是该标的正常波动而非预测错误；±5% 命中 52%，与更复杂的波动率缩放口径（±0.674×σ7，53%）几乎等效但实现简单。
+- **影响面**：仅准确率记账（`backtester` 统计 / `outcomes_fetcher` 回填标签），中性不开仓、不影响任何交易行为。headline 主口径仍是 v0.37.0 的可执行方向单（actionable），不受本次影响。
+- **历史备注**：用户记忆中"改过中性带宽"实为 2026-03-10 方案12（统一 OutcomesFetcher 零容差 vs Backtester 1% 容差为共享 `determine_correctness`）——±3% 中性带宽正是那次作为新常量引入的，此后首次调整。
+- `tests/test_outcome_utils.py`：中性边界测试同步更新（新增 ±4% correct 用例，边界移至 5.0）。
+
 ## [0.38.0] — 2026-07-07 — 三 agent 全面审计落地：假数据切断（P0）+ 降级透明化（P1）+ 评分链路回放实验（P2）
 
 > 用户要求"看下还有哪里可以优化，给高价值修改方案"。三个并行审计（评分链路/数据质量/产品运维）+ 本 session T+7 诊断，按 P0/P1/P2 分档全量实施。已排除项（勿再提议）：BearBee 权重/信息素多样性（定档 8/3 scheduled task）、risk_off/F&G 门控（已证伪）、odds 权重手动砍（归 Track A）。

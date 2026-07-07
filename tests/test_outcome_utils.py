@@ -48,21 +48,26 @@ class TestDetermineCorrectness:
         """看空，+1.0% 不满足 < 1.0 → incorrect"""
         assert determine_correctness("bearish", 1.0) == "incorrect"
 
-    # --- 中性方向 ---
+    # --- 中性方向（v0.38.1: 带宽 3% → 5%，依据 neutral_band_replay 回放） ---
     def test_neutral_small_move_correct(self):
-        """中性，±2% 在 3% 容差内 → correct"""
+        """中性，±2% 在 5% 容差内 → correct"""
         assert determine_correctness("neutral", 2.0) == "correct"
 
+    def test_neutral_mid_move_correct(self):
+        """中性，±4% 在 5% 容差内 → correct（v0.38.1 前为 incorrect）"""
+        assert determine_correctness("neutral", 4.0) == "correct"
+        assert determine_correctness("neutral", -4.0) == "correct"
+
     def test_neutral_large_move_incorrect(self):
-        """中性，±5% 超出 3% 容差 → incorrect"""
-        assert determine_correctness("neutral", 5.0) == "incorrect"
+        """中性，±7% 超出 5% 容差 → incorrect"""
+        assert determine_correctness("neutral", 7.0) == "incorrect"
 
     def test_neutral_exact_boundary(self):
-        """中性，3.0% 不满足 < 3.0 → incorrect"""
-        assert determine_correctness("neutral", 3.0) == "incorrect"
+        """中性，5.0% 不满足 < 5.0 → incorrect"""
+        assert determine_correctness("neutral", 5.0) == "incorrect"
 
     def test_neutral_negative_large_move_incorrect(self):
-        assert determine_correctness("neutral", -4.0) == "incorrect"
+        assert determine_correctness("neutral", -6.0) == "incorrect"
 
     # --- None / 未知 ---
     def test_none_return_is_neutral(self):
