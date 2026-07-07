@@ -199,6 +199,7 @@ class FinvizSentimentClient:
             "news_score": 5.0,
             "news_signal": "无新闻数据",
             "top_bullish": [], "top_bearish": [],
+            "is_fallback": True,  # P1-1 (v0.38.0): 抓取失败降级标志（≠真的没新闻）
             "timestamp": datetime.now().isoformat(),
         }
 

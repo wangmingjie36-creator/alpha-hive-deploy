@@ -1,0 +1,34 @@
+{
+  "ticker": "AMZN",
+  "date": "2026-07-06",
+  "composite_score": 5.62,
+  "direction": "neutral",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 244.16000366210938,
+  "agent_votes": {
+    "OracleBeeEcho": 8.287307692307692,
+    "GuardBeeSentinel": 6.14,
+    "CodeExecutorAgent": 5.0,
+    "ChronosBeeHorizon": 5.995,
+    "RivalBeeVanguard": 5.9,
+    "ScoutBeeNova": 5.652,
+    "QueenDistiller": 5.62,
+    "BuzzBeeWhisper": 5.08
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-07-07T08:22:50.008075"
+}

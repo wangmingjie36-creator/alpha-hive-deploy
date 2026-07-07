@@ -32,14 +32,18 @@ class RivalBeeVanguard(BeeAgent):
                 service = MLPredictionService()
 
                 stock = self._get_stock_data(ticker)
+                # P0-2: momentum_5d 可为 None（真实 5 日动量不可得）→ ML 特征用中性 0.0
+                _mom_ml = stock.get("momentum_5d")
+                if _mom_ml is None:
+                    _mom_ml = 0.0
                 opportunity = TrainingData(
                     ticker=ticker,
                     date=pdt_today(),  # v0.28.0: 美股交易日
                     crowding_score=50.0,
                     catalyst_quality="B+",
-                    momentum_5d=stock["momentum_5d"],
+                    momentum_5d=_mom_ml,
                     volatility=stock["volatility_20d"],
-                    market_sentiment=stock["momentum_5d"] * 5,
+                    market_sentiment=_mom_ml * 5,
                     iv_rank=50.0,
                     put_call_ratio=1.0,
                     actual_return_3d=0.0,
@@ -84,7 +88,11 @@ class RivalBeeVanguard(BeeAgent):
             else:
                 # ML 不可用 → 技术指标增强的动量评分
                 stock = self._get_stock_data(ticker)
-                mom  = stock["momentum_5d"]
+                # P0-2: momentum 为 None 时按 0（中性）参与评分，方向只看技术指标
+                mom = stock.get("momentum_5d")
+                _mom_missing = mom is None
+                if _mom_missing:
+                    mom = 0.0
                 tech = self._calc_technical_indicators(ticker)
                 score = clamp_score(5.0 + mom * 0.3 + tech["tech_score_adj"])
                 _rival_bear_m = _AS.get("rival_bearish_momentum", -1.5)
@@ -93,13 +101,14 @@ class RivalBeeVanguard(BeeAgent):
                     direction = "bullish"
                 elif tech["tech_direction"] == "bearish" and mom < 1.0:
                     direction = "bearish"
-                elif mom > _rival_bull_m:
+                elif not _mom_missing and mom > _rival_bull_m:
                     direction = "bullish"
-                elif mom < _rival_bear_m:
+                elif not _mom_missing and mom < _rival_bear_m:
                     direction = "bearish"
                 else:
                     direction = "neutral"
-                discovery = f"动量 {mom:+.1f}% | {tech['summary']} | 波动率 {stock['volatility_20d']:.0f}%"
+                _mom_txt = f"动量 {mom:+.1f}%" if not _mom_missing else "动量 N/A"
+                discovery = f"{_mom_txt} | {tech['summary']} | 波动率 {stock['volatility_20d']:.0f}%"
 
             # ---- EPS Revision Momentum（分析师共识 proxy）----
             eps_rev = self._assess_eps_revision(ticker)
@@ -141,7 +150,7 @@ class RivalBeeVanguard(BeeAgent):
                     "ml_prediction": "real" if prediction else "fallback_momentum",
                 },
                 details={
-                    **(prediction if prediction else {"momentum_5d": stock["momentum_5d"]}),
+                    **(prediction if prediction else {"momentum_5d": stock.get("momentum_5d")}),
                     "eps_revision": eps_rev,
                     "technical_indicators": tech,
                 },

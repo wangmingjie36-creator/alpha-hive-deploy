@@ -152,7 +152,10 @@ class RedditSentimentClient:
         elif wsb_match:
             primary = wsb_match
         else:
-            return self._quiet_result(ticker)
+            # P1-1 (v0.38.0): 区分"榜单拉到了但 ticker 不在前100（真安静）"
+            # vs "API 全灭（降级）"——此前两者都返回 quiet，下游无法区分
+            _fetch_failed = not all_stocks and not wsb
+            return self._quiet_result(ticker, is_fallback=_fetch_failed)
 
         mentions = primary.get("mentions", 0)
         mentions_24h = primary.get("mentions_24h_ago", 0)
@@ -253,8 +256,12 @@ class RedditSentimentClient:
                 return item
         return None
 
-    def _quiet_result(self, ticker: str) -> Dict:
-        """无数据时返回的默认结果"""
+    def _quiet_result(self, ticker: str, is_fallback: bool = False) -> Dict:
+        """无数据时返回的默认结果
+
+        is_fallback=True 表示 API 抓取失败（降级），False 表示榜单正常
+        但 ticker 不在前 100（真实的低热度）。
+        """
         return {
             "ticker": ticker,
             "rank": None,
@@ -267,6 +274,7 @@ class RedditSentimentClient:
             "sentiment_score": 5.0,
             "sources": [],
             "wsb_rank": None,
+            "is_fallback": is_fallback,  # P1-1 (v0.38.0)
             "timestamp": datetime.now().isoformat(),
         }
 

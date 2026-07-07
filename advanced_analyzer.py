@@ -297,6 +297,11 @@ class DealerGEXAnalyzer:
         if not calls_raw and not puts_raw:
             return {"error": "期权链为空", "total_gex": 0.0}
 
+        # P0-1 (v0.38.0): 样本链不算 Dealer GEX——假链算出的 GEX/flip 全是噪声
+        if chain.get("source") == "sample":
+            _log.warning("[%s] 期权链为样本数据，跳过 Dealer GEX 计算", ticker)
+            return {"error": "期权链为样本数据（真实链获取失败）", "total_gex": 0.0}
+
         S = stock_price
         if S <= 0:
             return {"error": "无效股价", "total_gex": 0.0}

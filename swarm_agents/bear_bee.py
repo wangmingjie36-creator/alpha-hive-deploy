@@ -171,8 +171,11 @@ class BearBeeContrarian(BeeAgent):
                 result = opt.analyze(ticker, stock_price=price if price > 0 else None)
                 if result:
                     data_sources["options"] = "options_api"
-                    pc_ratio = result.get("put_call_ratio", 1.0)
-                    iv_rank = result.get("iv_rank", 50)
+                    # P0-1: 样本链早退后 put_call_ratio/iv_rank 可能为 None（不可信数据）→ 中性默认
+                    pc_ratio = result.get("put_call_ratio") or 1.0
+                    iv_rank = result.get("iv_rank")
+                    if iv_rank is None:
+                        iv_rank = 50
                     if pc_ratio > 1.5:
                         options_bear = 8.0
                         bearish_signals.append(f"P/C Ratio {pc_ratio:.2f}（强看跌）")
@@ -296,7 +299,9 @@ class BearBeeContrarian(BeeAgent):
                                data_sources: Dict[str, str]) -> float:
         """评估动量衰减/量能萎缩。返回 momentum_bear。"""
         momentum_bear = 0.0
-        vol_ratio = stock.get("volume_ratio", 1.0)
+        vol_ratio = stock.get("volume_ratio")
+        if vol_ratio is None:  # P0-2: 降级源无成交量 → 中性 1.0，不触发量能萎缩信号
+            vol_ratio = 1.0
         volatility = stock.get("volatility_20d", 0)
 
         if mom_5d < -5:
@@ -538,7 +543,9 @@ class BearBeeContrarian(BeeAgent):
                 ticker, bearish_signals, data_sources)
 
             # ===== 2. 估值/涨幅过热 =====
-            mom_5d = stock.get("momentum_5d", 0)
+            mom_5d = stock.get("momentum_5d")
+            if mom_5d is None:  # P0-2: 真实 5 日动量不可得 → 中性 0，不触发涨跌信号
+                mom_5d = 0
             price = stock.get("price", 0) or stock.get("current_price", 0)
             overval_bear = self._assess_valuation(
                 ticker, stock, mom_5d, price, bearish_signals, data_sources)

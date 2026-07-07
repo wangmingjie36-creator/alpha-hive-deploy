@@ -1955,6 +1955,46 @@ def render_dashboard_html(report: Dict, date_str: str,
     real_pcts = [swarm_detail[t].get("data_real_pct", 0) for t in swarm_detail if swarm_detail[t].get("data_real_pct")]
     avg_real = f"{sum(real_pcts)/len(real_pcts):.0f}%" if real_pcts else "-"
 
+    # ── P1-1 (v0.38.0): 数据降级横幅 ─────────────────────────────
+    # 按通道聚合降级情况（unavailable/fallback/sample），真实度 <70% 或
+    # 任一通道 ≥3 标的降级时在 hero 区渲染醒目横幅——降级从静默变可见
+    dq_banner_html = ""
+    try:
+        _dqb_states = {"unavailable", "fallback", "sample", "error",
+                       "fallback_momentum", "cached_stale", "stale"}
+        # 设计性缺失通道不算降级：Polymarket 无个股预测市场（OracleBee 已自动
+        # 重分配权重），计入会让横幅永久常亮变成噪音
+        _dqb_by_design = {"polymarket"}
+        _dqb_degraded: Dict[str, list] = {}
+        for _dqb_t, _dqb_r in swarm_detail.items():
+            _dqb_dq = _dqb_r.get("data_quality") or {}
+            if not isinstance(_dqb_dq, dict):
+                continue
+            for _dqb_agent, _dqb_chans in _dqb_dq.items():
+                if not isinstance(_dqb_chans, dict):
+                    continue
+                for _dqb_ch, _dqb_v in _dqb_chans.items():
+                    if _dqb_ch in _dqb_by_design:
+                        continue
+                    if str(_dqb_v).lower() in _dqb_states:
+                        _dqb_degraded.setdefault(f"{_dqb_agent}.{_dqb_ch}", []).append(_dqb_t)
+        _dqb_avg = (sum(real_pcts) / len(real_pcts)) if real_pcts else 100.0
+        _dqb_wide = [(k, v) for k, v in _dqb_degraded.items() if len(v) >= 3]
+        if _dqb_avg < 70.0 or _dqb_wide:
+            _dqb_items = "；".join(
+                f"{_k.split('.')[-1]} 通道 {len(_v)}/{len(swarm_detail)} 标的降级"
+                for _k, _v in sorted(_dqb_wide, key=lambda x: -len(x[1]))[:4]
+            ) or f"整体数据真实度 {_dqb_avg:.0f}%"
+            dq_banner_html = (
+                '<div class="dq-banner" style="background:rgba(224,160,60,.12);'
+                'border:1px solid rgba(224,160,60,.5);border-radius:4px;'
+                'padding:10px 16px;margin:12px 0;font-size:.85em;">'
+                f'<strong>数据部分降级</strong>：{_dqb_items}。'
+                '受影响通道已按中性处理，今日结论可靠性下降，建议交叉验证。</div>'
+            )
+    except Exception as _dqb_e:
+        _log.debug("降级横幅计算失败(非致命): %s", _dqb_e)
+
     # ── Phase 3 增强：宏观面板 + 深度卡片 + Markdown 渲染 ──
 
 
@@ -2603,6 +2643,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         now_str=now_str,
         n_agents=n_agents,
         avg_real=avg_real,
+        dq_banner_html=dq_banner_html,
         n_resonance=n_resonance,
         fg_color=_fg_color,
         fg_str=_fg_str,

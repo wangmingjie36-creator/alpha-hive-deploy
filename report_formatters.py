@@ -603,6 +603,73 @@ def _build_backtest(backtest_stats) -> List[str]:
     return md
 
 
+# P1-1 (v0.38.0): 判定为"降级/不可用"的通道状态值（其余视为真实/正常）
+_DEGRADED_CHANNEL_STATES = {
+    "unavailable", "fallback", "sample", "error",
+    "fallback_momentum", "cached_stale", "stale",
+}
+
+
+def _build_data_quality_section(sorted_results) -> List[str]:
+    """P1-1 (v0.38.0): 数据质量小节——按通道聚合降级情况，让"抓取失败"
+    从静默变可见（此前 Finviz 失败显示"无新闻数据"、样本期权当真数据，
+    用户无法区分真没数据 vs 通道挂了）。"""
+    md: List[str] = []
+    degraded: Dict[str, List[str]] = {}   # "Agent.channel" -> [tickers]
+    total_ch = 0
+    real_ch = 0
+    # 设计性缺失通道不算降级（Polymarket 无个股预测市场，权重已自动重分配）
+    _by_design = {"polymarket"}
+    for ticker, r in sorted_results:
+        dq = r.get("data_quality") or {}
+        if not isinstance(dq, dict):
+            continue
+        for agent, chans in dq.items():
+            if not isinstance(chans, dict):
+                continue
+            for ch, v in chans.items():
+                if ch in _by_design:
+                    continue
+                total_ch += 1
+                if str(v).lower() in _DEGRADED_CHANNEL_STATES:
+                    degraded.setdefault(f"{agent}.{ch}", []).append(ticker)
+                else:
+                    real_ch += 1
+
+    md.append("## 数据质量")
+    md.append("")
+    if total_ch:
+        _pct = real_ch / total_ch * 100
+        md.append(f"**通道健康度**：{_pct:.0f}%（{real_ch}/{total_ch} 通道为真实数据）")
+    if degraded:
+        md.append("")
+        md.append("**降级通道**（抓取失败/落样本，评分中已按中性处理）：")
+        for key, tks in sorted(degraded.items(), key=lambda x: -len(x[1])):
+            md.append(f"- `{key}`：{len(tks)} 标的（{', '.join(sorted(set(tks))[:10])}）")
+    else:
+        md.append("")
+        md.append("全部通道数据正常，无降级。")
+
+    # 纸面组合新鲜度（落后 >2 天提示）
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        _meta_p = _Path(__file__).parent / "paper_portfolio_state" / "meta.json"
+        if _meta_p.exists():
+            _meta = _json.loads(_meta_p.read_text())
+            _last = _meta.get("last_run_date", "")
+            if _last:
+                from datetime import datetime as _dt2
+                _lag = (_dt2.now() - _dt2.strptime(_last, "%Y-%m-%d")).days
+                if _lag > 4:  # 2 个交易日 ≈ 日历 4 天（含周末）
+                    md.append("")
+                    md.append(f"> 注意：纸面组合最后更新 {_last}（滞后 {_lag} 天），净值数据可能过期。")
+    except Exception:
+        pass
+    md.append("")
+    return md
+
+
 def generate_swarm_markdown_report(reporter, swarm_results: Dict,
                                      concentration: Dict = None,
                                      macro_context: Dict = None,
@@ -656,6 +723,7 @@ def generate_swarm_markdown_report(reporter, swarm_results: Dict,
     md.extend(_build_cross_ticker(cross_ticker))
     md.extend(_build_macro(macro_context))
     md.extend(_build_backtest(backtest_stats))
+    md.extend(_build_data_quality_section(sorted_results))
 
     # ====== 版块 8：数据来源 & 免责声明 ======
     md.append("## 8) 数据来源 & 免责声明")

@@ -5,6 +5,40 @@
 
 ---
 
+## [0.38.0] — 2026-07-07 — 三 agent 全面审计落地：假数据切断（P0）+ 降级透明化（P1）+ 评分链路回放实验（P2）
+
+> 用户要求"看下还有哪里可以优化，给高价值修改方案"。三个并行审计（评分链路/数据质量/产品运维）+ 本 session T+7 诊断，按 P0/P1/P2 分档全量实施。已排除项（勿再提议）：BearBee 权重/信息素多样性（定档 8/3 scheduled task）、risk_off/F&G 门控（已证伪）、odds 权重手动砍（归 Track A）。
+
+### Fixed — P0-1 期权样本数据泄漏进评分与报告（CRITICAL）
+- **根因**：CBOE/yfinance 全挂时的硬编码样本期权链虽标 `data_quality="unavailable"`，但 unusual_activity/IV Rank/P-C/GEX 照算照进 OracleBeeEcho 评分和日报——7/2 日报 QCOM/NVDA/TSLA 显示完全相同的假异动信号（$140/$145/$150 call，8500/12000/6200 手）、NVDA IV Rank=100 / QCOM=0 假极值（样本历史 IV 区间与 fallback 现价错配）。
+- `options_analyzer.py`：`analyze()` 样本链早退（全指标 None/空/中性 5.0，不写快照以便当日 API 恢复可重算）；`fetch_historical_iv` 新增 `last_hist_iv_is_sample` 标志，历史 IV 为样本时 IV Rank/Percentile 置 None；`generate_options_score` 对 `iv_rank=None` 走中性。
+- 下游防御：`bear_bee.py`（pc_ratio/iv_rank None 中性化）、`advanced_analyzer.py`（样本链跳过 Dealer GEX）、`generate_ml_report.py`（unavailable 时显示"期权数据不可用"卡片而非假指标）。
+- **潜在红利**：odds 维度"零区分度"（v32.5 结论）可能部分源于假数据污染，切断后需重估。
+
+### Fixed — P0-2 momentum_5d 用 1 日涨跌幅冒充 5 日动量
+- **根因**：v36.0 引入的 `CBOESource` 把 `price_change_percent`（当日）塞给 momentum_5d，下游 BuzzBee 情绪映射、sentiment 背离检测（bull trap 阈 ±3%）、RivalBee 空头阈值全按 5 日语义消费；CBOE 是第一源 → 每天都在用错的动量。AlphaVantage/Finnhub 降级源同病。
+- `data_pipeline.py`：新增共用 `_fetch_history_metrics()`（yfinance 历史K线独立算 momentum/volume_ratio/volatility，含 forming-bar 护栏）；CBOESource 价格走 CBOE + 指标走历史K线，历史不可得时 momentum_5d/volume_ratio 诚实置 None + `momentum_source="unavailable"`（新字段）；AV/Finnhub 同步置 None 不再近似。
+- 下游 None 防御：`buzz_bee.py`（动量/量比 None → 中性信号 50 + discovery 显示 N/A + data_quality 标 unavailable）、`rival_bee.py`（ML 特征中性 0.0 / fallback 方向判定跳过动量分支）、`bear_bee.py`（mom_5d/vol_ratio None 中性化）。
+
+### Fixed — P0-3 纸面组合饿死（39 天没跑 + 只剩 NVDA 白名单）
+- **根因**：`run_for_date` 只挂在 `generate_deep_v2`（深度报告）里，日报流程不生成深度报告 → 组合停在 2026-05-29；且 `ticker_whitelist=["NVDA"]` 是深度报告时代遗留，只允许 NVDA 开新仓（当前仅 $379.63 在场 = 0.76% 资金）。
+- `alpha_hive_daily_report.py`：`run_for_date(date_str)` 挂进日报主流程（快照落盘后），幂等；`paper_portfolio.py`：whitelist 放开为 `[]`（全标的）。
+- 已补跑 5/30-7/02 共 12 个交易日：期间 VKTX 两次止盈、QCOM/VKTX 各一次止损，当前 NAV $50,656.54、持仓 TSLA/MSFT 2 笔。
+
+### Added — P1-1 降级透明化（is_fallback 标志 + 数据质量横幅/小节）
+- `finviz_sentiment.py`/`reddit_sentiment.py`：fallback 结果带 `is_fallback: True`；Reddit 区分"榜单正常但不在前100（真安静 quiet）"vs"API 全灭（fallback）"。
+- `buzz_bee.py`：data_quality 按 is_fallback 精确标注（reddit: real/quiet/fallback 三态；finviz 抓取失败标 fallback + "新闻不可用（抓取失败）"）。
+- `report_formatters.py`：日报新增"数据质量"小节（通道健康度 % + 降级通道清单 + 纸面组合新鲜度滞后提示）。
+- `dashboard_renderer.py`：新增 `dq_banner_html`——数据真实度 <70% 或任一通道 ≥3 标的降级时 hero 区渲染醒目横幅；Polymarket 属设计性缺失（无个股预测市场，OracleBee 已自动重分配权重）不计入，防横幅永久常亮。
+- **符合 Slack 免打扰规则**：降级只在报告/仪表板内可见，不发 DM。
+
+### Added — P1-2 模板↔JS 契约测试（防 equityChart 式死骨架复发）
+- 新增 `tests/test_dashboard_contract.py`（6 测试，纯静态文本断言零浏览器依赖）：canvas id ↔ JS 引用、`__AH__` 消费键 ↔ `_data_obj` 生产键、radar- 动态前缀存活、data_json 注入存在、模板占位符 ↔ render kwargs。
+
+### Added — P2 评分链路离线回放实验（只出报告，未改生产）
+- `experiments/neutral_band_replay.py` → 中性带宽三口径回放：固定 ±3%（现行）全样本命中 36%、±5% 52%、波动率缩放（±0.674×σ7）53%。结论：±3% 对高波动标的近乎抛硬币，建议 `outcome_utils` 支持波动率缩放带宽（上线与否等用户定）。
+- `experiments/penalty_replay.py` → **证伪审计的"罚分叠加毁掉区分度"假设**：罚分前原始分 rho 仅 +0.054（这是区分度上限），现行叠加式 +0.063 甚至略优于统一风险面 +0.052，可执行方向单命中率 57% vs 56%。**结论：勿改罚分结构，治标不治本——真正瓶颈在各蜂原始分本身**（写入"已证伪勿再提议"清单）。
+
 ## [0.37.0] — 2026-07-03 — 诊断"T+7 准确率 33.7%"：口径修复（可执行方向单）+ BearBee 强信号压制看多
 
 > 用户问"解决最近胜率低的问题"。基于 545 条快照 + 536 条 swarm 历史回测的完整诊断，headline 33.7% 是三重稀释的结果，而非可执行信号失效。

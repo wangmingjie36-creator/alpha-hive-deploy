@@ -979,6 +979,17 @@ class AlphaHiveDailyReporter:
         except Exception as e:
             _log.debug("反馈循环保存失败(非致命): %s", e)
 
+        # ── P0-3 (v0.38.0): $50K 纸面组合日更 ──
+        # 原来只挂在 generate_deep_v2（深度报告）里，日报流程不生成深度报告
+        # → 组合 5-29 后 39 天没跑。现挂进日报主流程，幂等（同日重跑无副作用）。
+        try:
+            import paper_portfolio as _pp
+            _pp_result = _pp.run_for_date(self.date_str, verbose=False)
+            _log.info("纸面组合已更新: %s (nav=%s)", self.date_str,
+                      (_pp_result or {}).get("nav", "?"))
+        except Exception as e:
+            _log.warning("纸面组合更新失败(非致命): %s", e)
+
         # ── T+1/T+7/T+30 实际价格回填（后台执行，不阻塞主流程）──
         try:
             from outcomes_fetcher import OutcomesFetcher

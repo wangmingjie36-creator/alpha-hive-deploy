@@ -38,13 +38,21 @@ class BuzzBeeWhisper(BeeAgent):
             stock = self._get_stock_data(ticker)
 
             # 1. 动量信号（-10% ~ +10% 映射到 0~100）
-            momentum_pct = max(-10, min(10, stock["momentum_5d"]))
-            momentum_sentiment = (momentum_pct + 10) / 20 * 100  # 0~100
+            # P0-2: momentum_5d 可为 None（真实 5 日动量不可得）→ 中性 50
+            _mom_raw = stock.get("momentum_5d")
+            if _mom_raw is None:
+                momentum_sentiment = 50.0
+            else:
+                momentum_pct = max(-10, min(10, _mom_raw))
+                momentum_sentiment = (momentum_pct + 10) / 20 * 100  # 0~100
 
             # 2. 成交量异动（阈值从 config AGENT_SCORING 读取）
-            vol_ratio = stock["volume_ratio"]
+            # P0-2: volume_ratio 可为 None（降级源无成交量）→ 中性 50，不当"正常量"
+            vol_ratio = stock.get("volume_ratio")
             _vt = _AS.get("volume_thresholds", {})
-            if vol_ratio > _vt.get("very_high", 2.0):
+            if vol_ratio is None:
+                volume_signal = 50
+            elif vol_ratio > _vt.get("very_high", 2.0):
                 volume_signal = 80
             elif vol_ratio > _vt.get("high", 1.5):
                 volume_signal = 65
@@ -97,6 +105,11 @@ class BuzzBeeWhisper(BeeAgent):
                 finviz = get_finviz_sentiment(ticker)
                 news_signal = finviz["news_score"] * 10  # 0-10 → 0-100
                 news_desc = finviz.get("news_signal", "")
+                # P1-1: Finviz 抓取失败的降级结果（is_fallback）→ 标注不可用，
+                # 让 data_quality 能区分"真没新闻"vs"通道挂了"
+                if finviz.get("is_fallback"):
+                    news_mode = "fallback"
+                    news_desc = "新闻不可用（抓取失败）"
 
                 # LLM 语义分析（有 API Key 时自动启用）
                 headlines = finviz.get("top_bullish", []) + finviz.get("top_bearish", [])
@@ -194,8 +207,9 @@ class BuzzBeeWhisper(BeeAgent):
             score += sent_momentum["momentum_score_adj"]
 
             # ── 情绪-价格背离检测 ──
+            # P0-2: momentum 为 None 时跳过背离检测（1 日近似曾触发假 bull trap）
             sent_divergence = _detect_sentiment_price_divergence(
-                int(sentiment_composite), stock.get("momentum_5d", 0.0), ticker
+                int(sentiment_composite), _mom_raw if _mom_raw is not None else 0.0, ticker
             )
             score += sent_divergence["score_adj"]
             score = clamp_score_cfg(score)
@@ -211,8 +225,8 @@ class BuzzBeeWhisper(BeeAgent):
 
             discovery_parts = [
                 f"情绪 {bullish_pct}%",
-                f"动量 {stock['momentum_5d']:+.1f}%",
-                f"量比 {vol_ratio:.1f}x",
+                f"动量 {_mom_raw:+.1f}%" if _mom_raw is not None else "动量 N/A",
+                f"量比 {vol_ratio:.1f}x" if vol_ratio is not None else "量比 N/A",
                 reddit_desc,
                 news_desc,
                 yahoo_desc,
@@ -268,10 +282,13 @@ class BuzzBeeWhisper(BeeAgent):
                 source="BuzzBeeWhisper",
                 dimension="sentiment",
                 data_quality={
-                    "momentum": "real",
-                    "volume": "real",
+                    "momentum": "real" if _mom_raw is not None else "unavailable",
+                    "volume": "real" if vol_ratio is not None else "unavailable",
                     "volatility": "real",
-                    "reddit": "real" if (reddit_data and reddit_data.get("rank")) else "fallback",
+                    # P1-1: 区分"榜单正常但不在前100（quiet，真实低热度）" vs "API 挂了（fallback）"
+                    "reddit": ("real" if (reddit_data and reddit_data.get("rank"))
+                               else ("fallback" if (not reddit_data or reddit_data.get("is_fallback"))
+                                     else "quiet")),
                     "finviz_news": news_mode if news_desc and "不可用" not in news_desc else "fallback",
                 },
                 details={

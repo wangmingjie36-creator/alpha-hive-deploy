@@ -416,10 +416,23 @@ class MLEnhancedReportGenerator:
         if not options:
             return ""
 
-        iv_rank = options.get("iv_rank", 50)
-        iv_percentile = options.get("iv_percentile", 50)
-        iv_current = options.get("iv_current", 25)
-        put_call_ratio = options.get("put_call_ratio", 1.0)
+        # P0-1 (v0.38.0): 期权数据不可用（样本链早退）时不渲染指标卡——
+        # 此前样本链的假异动信号（$140/$145/$150）会以真数据形式进报告
+        if options.get("data_quality") == "unavailable":
+            return (
+                '<div class="section"><h2>期权市场分析</h2>'
+                '<div style="padding:14px 16px;border:1px solid #e0c060;'
+                'background:rgba(224,192,96,.08);border-radius:8px;font-size:.9em;">'
+                '期权数据不可用（CBOE / yfinance 均获取失败），本节指标跳过，'
+                '不参与今日评分。</div></div>'
+            )
+
+        iv_rank = options.get("iv_rank")
+        if iv_rank is None:
+            iv_rank = 50
+        iv_percentile = options.get("iv_percentile") or 50
+        iv_current = options.get("iv_current") or 25
+        put_call_ratio = options.get("put_call_ratio") or 1.0
         gamma_squeeze_risk = options.get("gamma_squeeze_risk", "medium")
         flow_direction = options.get("flow_direction", "neutral")
         options_score = options.get("options_score", 5.0)

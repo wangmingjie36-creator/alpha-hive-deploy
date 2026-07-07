@@ -77,7 +77,10 @@ CONFIG = {
     # live_start_date 之后：只开 ticker_whitelist 里的新仓（跟实际报告对齐）
     # ticker_whitelist 留空 [] = 继续全标的
     "live_start_date": "2026-04-16",   # 今天之后进入实时追踪模式
-    "ticker_whitelist": ["NVDA"],       # 实时追踪标的（只跑深度报告的 ticker）
+    # P0-3 (v0.38.0): 原 ["NVDA"] 是深度报告时代的遗留——组合当时挂在
+    # generate_deep_v2、只有 NVDA 跑深度报告。现已挂进日报主流程
+    # （全 10 标的每日扫描），白名单放开，否则组合永远只有 NVDA 一仓。
+    "ticker_whitelist": [],             # 空 = 全标的可入场
 }
 
 

@@ -94,15 +94,22 @@ class DataQuality:
 
 @dataclass
 class StockData:
-    """标准化股票数据结构（所有数据源统一输出格式）"""
+    """标准化股票数据结构（所有数据源统一输出格式）
+
+    P0-2 (v0.38.0): momentum_5d 可为 None（真实 5 日动量不可得时），
+    不再用当日涨跌幅冒充——下游背离检测/情绪映射按 5 日语义消费，
+    1 日近似会触发错误的 bull trap / 空头阈值判定。
+    momentum_source: "5d_real"（yfinance 历史K线计算）| "unavailable"
+    """
     price: float = 0.0
-    momentum_5d: float = 0.0
+    momentum_5d: Optional[float] = 0.0
     avg_volume: int = 0
-    volume_ratio: float = 1.0
+    volume_ratio: Optional[float] = 1.0
     volatility_20d: float = 0.0
     # 元数据
     data_source: str = DataQuality.FALLBACK
     source_name: str = "none"
+    momentum_source: str = "none"
     fetch_timestamp: float = 0.0
     is_market_hours: bool = False
 
@@ -115,6 +122,7 @@ class StockData:
             "volatility_20d": self.volatility_20d,
             "data_source": self.data_source,
             "source_name": self.source_name,
+            "momentum_source": self.momentum_source,
             "fetch_timestamp": self.fetch_timestamp,
             "is_market_hours": self.is_market_hours,
         }
@@ -212,11 +220,56 @@ class ObservableCircuitBreaker:
 
 # ==================== 数据源适配器 ====================
 
+def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
+    """P0-2 (v0.38.0): 从 yfinance 历史K线独立计算 momentum_5d / volume_ratio /
+    avg_volume / volatility_20d（含 forming-bar 护栏）。
+
+    供 CBOESource（无历史K线）与 YFinanceSource 共用。失败返回 None——
+    调用方必须把 momentum_5d 置 None（诚实缺数据），禁止用 1 日涨跌幅冒充。
+    """
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(ticker).history(period="1mo")
+        if hist.empty or len(hist) < 2:
+            return None
+        hist = _drop_forming_bar(hist)
+        if hist.empty or len(hist) < 2:
+            return None
+
+        out: Dict = {}
+        if len(hist) >= 5:
+            out["momentum_5d"] = float(
+                (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100
+            )
+
+        recent_vol = float(hist["Volume"].iloc[-1])
+        avg_vol = (float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20
+                   else float(hist["Volume"].mean()))
+        if math.isnan(avg_vol) or avg_vol <= 0:
+            avg_vol = 1.0
+        out["avg_volume"] = int(avg_vol)
+        out["volume_ratio"] = recent_vol / avg_vol if avg_vol > 0 else 1.0
+
+        if len(hist) >= 20:
+            returns = hist["Close"].pct_change().dropna()
+            if len(returns) >= 2:
+                vol = float(returns.std() * (252 ** 0.5) * 100)
+                if not (math.isnan(vol) or math.isinf(vol)):
+                    out["volatility_20d"] = vol
+
+        out["_price_from_hist"] = float(hist["Close"].iloc[-1])
+        return out
+    except Exception as e:
+        _log.debug("_fetch_history_metrics %s failed: %s", ticker, e)
+        return None
+
+
 class CBOESource:
     """主数据源：CBOE 延迟报价（options 端点自带现价，稳定无限流；用户定调"股价也走 CBOE"）
 
-    CBOE 报价里的 current_price/price_change_percent 本来就要拉来算期权链，
-    直接复用没有额外成本；仅提供当日涨跌幅(无历史K线)，momentum_5d 是近似值。
+    价格来自 CBOE；momentum_5d/volume_ratio 从 yfinance 历史K线独立获取
+    （P0-2：CBOE 只有当日涨跌幅，1 日近似冒充 5 日动量会污染背离检测，
+    历史K线不可得时诚实置 None）。
     """
 
     def __init__(self):
@@ -239,11 +292,23 @@ class CBOESource:
 
             data = StockData(
                 price=price,
-                momentum_5d=float(payload.get("price_change_percent") or 0.0),  # 近似值：仅当日涨跌幅
                 data_source=DataQuality.REAL,
                 source_name=self.name,
                 fetch_timestamp=time.time(),
             )
+            # P0-2: 历史指标独立获取；失败时 momentum 置 None（不再 1 日近似）
+            metrics = _fetch_history_metrics(ticker)
+            if metrics and "momentum_5d" in metrics:
+                data.momentum_5d = metrics["momentum_5d"]
+                data.avg_volume = metrics.get("avg_volume", 0)
+                data.volume_ratio = metrics.get("volume_ratio", 1.0)
+                data.volatility_20d = metrics.get("volatility_20d", 0.0)
+                data.momentum_source = "5d_real"
+            else:
+                data.momentum_5d = None
+                data.volume_ratio = None
+                data.momentum_source = "unavailable"
+                _log.warning("[CBOE] %s 历史K线不可得，momentum_5d/volume_ratio 置 None", ticker)
             self.breaker.record_success()
             return data
 
@@ -287,6 +352,7 @@ class YFinanceSource:
 
             if len(hist) >= 5:
                 data.momentum_5d = (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100
+                data.momentum_source = "5d_real"
 
             recent_vol = float(hist["Volume"].iloc[-1])
             avg_vol = float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20 else float(hist["Volume"].mean())
@@ -344,11 +410,14 @@ class AlphaVantageSource:
 
             data = StockData(
                 price=price,
-                momentum_5d=change_pct,  # 近似值：日涨跌幅代替5日动量
+                # P0-2: 不再用日涨跌幅冒充 5 日动量——诚实置 None，
+                # 下游（背离检测/情绪映射）按 5 日语义消费，1 日近似会误判
+                momentum_5d=None,
                 avg_volume=volume,
-                volume_ratio=1.0,  # AV 免费版无法计算量比
+                volume_ratio=None,  # AV 免费版无法计算量比（原 1.0 会被当"正常量"消费）
                 data_source=DataQuality.DEGRADED,
                 source_name=self.name,
+                momentum_source="unavailable",
                 fetch_timestamp=time.time(),
             )
             self.breaker.record_success()
@@ -390,9 +459,11 @@ class FinnhubSource:
 
             data = StockData(
                 price=current,
-                momentum_5d=change_pct,  # 近似值
+                momentum_5d=None,  # P0-2: 不再用日涨跌幅冒充 5 日动量
+                volume_ratio=None,  # Finnhub quote 无成交量数据
                 data_source=DataQuality.DEGRADED,
                 source_name=self.name,
+                momentum_source="unavailable",
                 fetch_timestamp=time.time(),
             )
             self.breaker.record_success()

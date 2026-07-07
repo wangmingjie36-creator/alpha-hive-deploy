@@ -41,6 +41,7 @@ class OptionsDataFetcher:
     def __init__(self, cache_dir: str = str(PATHS.cache_dir)):
         self.cache_dir = cache_dir
         self.cache_ttl = 300  # 5 分钟缓存
+        self.last_hist_iv_is_sample = False  # P0-1: 最近一次 fetch_historical_iv 是否落样本
         os.makedirs(cache_dir, exist_ok=True)
 
     def _get_cache_path(self, ticker: str, data_type: str) -> str:
@@ -361,12 +362,17 @@ class OptionsDataFetcher:
         - 低波动期，IV premium 可能低至 1.05
         - 动态比率让 IV Rank 更贴合实际市场状态
         """
+        # P0-1 (v0.38.0): 标记本次历史 IV 是否为样本数据，供 analyze() 决定
+        # IV Rank 是否可信（样本历史区间与真实现价 IV 错配会产生假 0/100 极值）
+        self.last_hist_iv_is_sample = False
+
         cached = self._read_cache(ticker, "hist_iv_v3")
         if cached:
             return cached
 
         if yf is None:
             _log.warning("yfinance 未安装，使用样本 IV 数据")
+            self.last_hist_iv_is_sample = True
             return self._get_sample_historical_iv(ticker)
 
         try:
@@ -375,6 +381,7 @@ class OptionsDataFetcher:
 
             if hist.empty:
                 _log.warning("%s 历史数据不可用，使用样本数据", ticker)
+                self.last_hist_iv_is_sample = True
                 return self._get_sample_historical_iv(ticker)
 
             # 计算历史已实现波动率（20日滚动）
@@ -383,6 +390,7 @@ class OptionsDataFetcher:
             hv_values = rolling_vol.dropna().tolist()
 
             if not hv_values:
+                self.last_hist_iv_is_sample = True
                 return self._get_sample_historical_iv(ticker)
 
             # 动态 IV premium：从当前期权链获取实际 IV，与当前 HV 对比
@@ -399,6 +407,7 @@ class OptionsDataFetcher:
 
         except (*NETWORK_ERRORS, TypeError) as e:
             _log.warning("获取 %s 历史 IV 失败：%s，使用样本数据", ticker, e)
+            self.last_hist_iv_is_sample = True
             return self._get_sample_historical_iv(ticker)
 
     def _estimate_iv_premium(self, stock, current_hv: float) -> float:
@@ -1178,7 +1187,9 @@ class OptionsAnalyzer:
         """
 
         # IV Signal (0-3)：IV Rank 在 40-70 得分最高
-        if iv_rank < 20:
+        if iv_rank is None:
+            iv_signal = 2.0  # P0-1: IV Rank 不可信（样本历史）→ 中性，不奖不罚
+        elif iv_rank < 20:
             iv_signal = 1.0  # 极低 IV
         elif iv_rank < 40:
             iv_signal = 2.0  # 低 IV
@@ -1496,6 +1507,47 @@ class OptionsAgent:
         calls_df = options_chain.get("calls", [])
         puts_df = options_chain.get("puts", [])
 
+        # ===== P0-1 (v0.38.0): 样本链早退 =====
+        # 样本期权链（CBOE+yfinance 全部失败时的硬编码兜底）绝不参与指标计算——
+        # 此前样本链虽标 data_quality="unavailable"，但 unusual_activity/IV Rank/
+        # P/C/GEX 照算照进 OracleBeeEcho 评分和日报，导致多标的显示完全相同的
+        # 假异动信号（$140/$145/$150 call）和假 IV Rank 极值（0/100）。
+        if options_chain.get("source") == "sample":
+            _log.warning("[%s] 期权链为样本数据，跳过全部指标计算（中性早退）", ticker)
+            result = {
+                "ticker": ticker,
+                "timestamp": datetime.now().isoformat(),
+                "data_quality": "unavailable",
+                "iv_rank": None,
+                "iv_percentile": None,
+                "iv_current": None,
+                "put_call_ratio": None,
+                "total_oi": 0,
+                "total_oi_raw": 0,
+                "gamma_exposure": None,
+                "gamma_squeeze_risk": "unknown",
+                "unusual_activity": [],
+                "key_levels": {},
+                "flow_direction": "neutral",
+                "options_score": 5.0,
+                "signal_summary": "期权数据不可用（真实链获取失败）",
+                "expiration_dates": [],
+                "iv_skew_ratio": None,
+                "iv_skew_signal": "",
+                "iv_skew_detail": {},
+                "iv_term_structure": {},
+                "call_flow_classification": {"label": "unknown", "confidence": 0.0,
+                                             "reasoning": "期权数据不可用", "votes": {}},
+                "rv_30d": 0.0,
+                "iv_rv_spread": 0.0,
+                "iv_rv_signal": "",
+                "iv_rv_detail": {},
+                "gamma_calendar": {},
+                "full_chain_oi": {},
+            }
+            # 不写快照：样本结果不冻结，若当日稍后 API 恢复可直接重算
+            return result
+
         # 2. 获取历史 IV
         hist_iv = self.fetcher.fetch_historical_iv(ticker)
 
@@ -1624,6 +1676,12 @@ class OptionsAgent:
         # 3. 计算各项指标
         iv_rank, iv_current = self.analyzer.calculate_iv_rank(current_iv, hist_iv)
         iv_percentile = self.analyzer.calculate_iv_percentile(current_iv, hist_iv)
+        # P0-1 (v0.38.0): 历史 IV 为样本数据时，IV Rank 不可信（样本区间与真实
+        # 现价 IV 错配 → 假 0/100 极值），置 None 并在评分中走中性
+        if getattr(self.fetcher, "last_hist_iv_is_sample", False):
+            _log.warning("[%s] 历史 IV 为样本数据，IV Rank/Percentile 置 None（不可信）", ticker)
+            iv_rank = None
+            iv_percentile = None
         put_call_ratio = self.analyzer.calculate_put_call_ratio(calls_df, puts_df)
         # 估算股价（如果未提供，从期权链 ATM strike 推测）
         if not stock_price:
