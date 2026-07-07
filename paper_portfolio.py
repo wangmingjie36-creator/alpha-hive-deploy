@@ -53,10 +53,17 @@ CONFIG = {
     "starting_capital": 50_000.0,
     "bootstrap_date": "2026-03-09",  # snapshot 最早可用日期（用户请求 01-02 但数据从 03-09 起）
     "max_positions": 15,
-    "max_deployed_pct": 30.0,   # 最大部署资金 30% NAV
-    "size_pct_by_tier": {       # 基础仓位占 NAV %
-        "high": 2.5,            # ⭐⭐⭐ 高置信
-        "mid": 1.5,             # ⭐⭐ 中置信
+    # ── v0.39.0 资金利用率参数（用户拍板上线，2026-07-07）────────────────────
+    # 依据 experiments/portfolio_capacity_report.md 36 组合全历史回放：
+    # 拐点 = bull≥6.5/仓位×2/在场80%/TP15%（+6.24% vs 同口径基线 +1.99%，
+    # MaxDD -1.90%，Calmar 10.75，通过前后半段稳健性检查）。
+    # TP 10→15% 是最大红利（止盈太早砍赢单尾部 = "胜率高收益低"直接病因）；
+    # ×3 仓位 Calmar 回落、门槛 6.0 风险调整后不划算，均不采用。
+    # 样本 3.4 个月偏多头行情——上线后跑 4 周复盘（8 月初，与 bear-hypothesis 复盘同期）。
+    "max_deployed_pct": 80.0,   # 30→80：上限用于不卡好信号（回放实测平均在场仅 ~26%）
+    "size_pct_by_tier": {       # 基础仓位占 NAV %（×2）
+        "high": 5.0,            # ⭐⭐⭐ 高置信（2.5→5.0）
+        "mid": 3.0,             # ⭐⭐ 中置信（1.5→3.0）
         "low": 0.0,             # ⚠️ 低置信跳过
     },
     "win_rate_multiplier": {    # 按 ticker 历史胜率修正
@@ -65,7 +72,7 @@ CONFIG = {
         "weak": 0.5,            # < 45%
     },
     "sl_pct": 7.0,              # 止损 7%（v0.19.1 参数优化：5%→7% 胜率 33%→50% Sharpe 1.27→2.73）
-    "tp_pct": 10.0,             # 止盈 10%
+    "tp_pct": 15.0,             # 止盈 15%（v0.39.0：10→15，回放最大红利项）
     "time_stop_days": 10,       # T+10 强平
     "entry_conf_min": "mid",    # 最低置信 mid
     "entry_score_bull": 6.5,
