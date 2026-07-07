@@ -268,8 +268,41 @@ def _size_multiplier(ticker: str, closed: List[Dict]) -> float:
 _PRICE_CACHE: Dict[Tuple[str, str, str], Dict] = {}
 
 
+# v0.38.2: 全区间 OHLC 存储（replay 用）——按 ticker 一次取全程，之后按日期切片，
+# 避免 36 组合 × 每仓独立 (start,end) 组合键全部 miss 打爆 yfinance 限流
+_OHLC_FULL: Dict[str, Dict[str, Dict]] = {}
+
+
+def prefetch_ohlc(tickers: List[str], start: str, end: str) -> None:
+    """一次性预取多标的全区间 OHLC 进 _OHLC_FULL。回放前调用；生产路径不依赖。"""
+    try:
+        import yfinance as yf
+    except ImportError:
+        return
+    for tk in tickers:
+        if tk in _OHLC_FULL:
+            continue
+        try:
+            hist = yf.Ticker(tk).history(start=start, end=end, auto_adjust=False)
+            out = {}
+            for idx, row in hist.iterrows():
+                out[idx.strftime("%Y-%m-%d")] = {
+                    "Open": float(row["Open"]), "High": float(row["High"]),
+                    "Low": float(row["Low"]), "Close": float(row["Close"]),
+                }
+            _OHLC_FULL[tk] = out
+        except Exception:
+            _OHLC_FULL[tk] = {}
+
+
 def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
     """拉 [start, end] 区间的每日 OHLC。返回 {date_str: {Open, High, Low, Close}}"""
+    # v0.38.2: 优先从全区间存储切片（prefetch_ohlc 预热后零网络调用）
+    # 注意 end 排他（与 yfinance history(start,end) 语义一致，保证与直连路径行为完全相同）
+    full = _OHLC_FULL.get(ticker)
+    if full:
+        return {d: bar for d, bar in full.items() if start <= d < end}
+
     key = (ticker, start, end)
     if key in _PRICE_CACHE:
         return _PRICE_CACHE[key]
@@ -689,6 +722,58 @@ def bootstrap_from_history(verbose: bool = False) -> None:
         res = run_for_date(d, verbose=verbose)
         if verbose:
             print(f"   {d}  NAV=${res['nav']:,.2f}  持仓={len(res['positions'])}  今日开仓={res['opened_today']}")
+
+
+def run_replay(config_overrides: Dict, state_dir: Path,
+               dates: Optional[List[str]] = None) -> Dict:
+    """v0.38.2: 沙盒回放——在隔离状态目录 + 覆盖参数下重放历史 snapshot。
+
+    绝不触碰生产状态（paper_portfolio_state/）：临时重绑模块级状态路径
+    与 CONFIG 条目，try/finally 恢复。复用 run_for_date 全部逻辑，零行为改动。
+
+    Args:
+        config_overrides: 要覆盖的 CONFIG 键值（如 entry_score_bull /
+            size_pct_by_tier / max_deployed_pct / tp_pct）
+        state_dir: 沙盒状态目录（调用方负责唯一性；已存在则续跑）
+        dates: 要回放的日期列表；None = 全部 snapshot 日期（含 bootstrap_date 过滤）
+
+    Returns:
+        {"equity": [...], "closed": [...], "final_nav": float, "config": dict}
+    """
+    global POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE
+
+    if dates is None:
+        dates = [d for d in _all_snapshot_dates() if d >= CONFIG["bootstrap_date"]]
+
+    state_dir = Path(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    _orig_paths = (POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE)
+    _orig_config = {k: (dict(v) if isinstance(v, dict) else v) for k, v in CONFIG.items()}
+    try:
+        POSITIONS_FILE = state_dir / "positions.jsonl"
+        CLOSED_FILE = state_dir / "closed_trades.jsonl"
+        EQUITY_FILE = state_dir / "equity_curve.jsonl"
+        META_FILE = state_dir / "meta.json"
+        CONFIG.update(config_overrides)
+        # 回放语义：白名单不参与（回放评估的是参数，不是标的选择历史）
+        CONFIG["ticker_whitelist"] = config_overrides.get("ticker_whitelist", [])
+
+        for d in dates:
+            run_for_date(d, verbose=False)
+
+        equity = _load_jsonl(EQUITY_FILE)
+        closed = _load_jsonl(CLOSED_FILE)
+        return {
+            "equity": equity,
+            "closed": closed,
+            "final_nav": equity[-1]["nav"] if equity else CONFIG["starting_capital"],
+            "config": {k: (dict(v) if isinstance(v, dict) else v) for k, v in CONFIG.items()},
+        }
+    finally:
+        POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE = _orig_paths
+        CONFIG.clear()
+        CONFIG.update(_orig_config)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
