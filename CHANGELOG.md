@@ -5,6 +5,23 @@
 
 ---
 
+## [0.40.3] — 2026-07-08 — CLAUDE.md × 2 + MEMORY.md 除锈（防陈旧误导整治）
+
+### Changed — 项目 `CLAUDE.md`（133 → 71 行）
+- **修正主动误导**：paper_portfolio 段还写着 v0.19 时代参数（SL -5%/TP +10%/每仓 1.5-2.5%/挂在 generate_deep_v2）——与 v0.38-0.39 三次变更直接矛盾，每个新 session 都会被注入误导。改为"参数唯一真相 = 模块内 CONFIG"的指针式描述。
+- **删除 ~75 行 "已完成的重要改动" 旧清单**（v0.10-0.19 时代实现细节，与 MEMORY.md 版本历史职责重叠且多处已被覆盖），替换为查询指针（版本摘要→MEMORY 版本表，细节→CHANGELOG）。
+- 删除与 MEMORY 冲突的定时任务时刻（weekly_optimizer "周日 02:00" vs 实际 PDT 09:07 等），指向 `list_scheduled_tasks` 为唯一真相。
+- **新增文档分工原则**（防复发）：CLAUDE.md 不存易变参数值与统计数字快照——只存指针与不变式。
+
+### Changed — `MEMORY.md`（状态行 9,741 → 3,086 字符，-68%）
+- 状态行只保留 v40.0-40.3 完整叙事 + v38.2-39.0 摘要；v38.0 及以下细节归并至版本历史表（原本双份重复）。
+- **新增「定档任务与勿再提议清单」独立小节**：8/3 bear-hypothesis-backtest 定档、8 月初 v39 参数复盘、四条回测证伪记录、meta-labeling/cs_rank 样本门槛、odds 区分度重估——原先埋在巨型状态行里易在压缩中丢失的操作性约束，现集中且耐久。
+- 过时条目修正 4 处：BuzzBee 通道描述（v40 起无 Finviz/StockTwits）、期权链条目 tradier 表述（`tradier_fetcher.py` 存在但只读未接入）、yfinance 限流条目（现价+期权已 CBOE 化，影响面大幅缩小）、删除 v21 时代组合统计数字快照（立"组合级数字勿存 memory"规则）。
+- 版本历史表补 40.1-40.3 行。
+
+### Changed — 全局 `~/CLAUDE.md`
+- 数据源第二梯队移除 Finviz（通道已删 + Cloudflare 永久封）。其余身份/流程/模板/硬规则不动。
+
 ## [0.40.2] — 2026-07-08 — 修复 paper_portfolio.meta.json 的 config_snapshot 陈旧不刷新
 
 ### Fixed

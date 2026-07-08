@@ -1,5 +1,10 @@
 # Alpha Hive — Claude 工作记忆
 
+## 文档分工原则（防陈旧误导，v0.40.3 起）
+
+- **本文件只存指针与不变式，不存易变参数值与统计数字快照**——参数唯一真相在 `config.py` / 各模块 `CONFIG`，指标看 dashboard / `compute_kpis()`，历史改动看 `CHANGELOG.md` 与 MEMORY.md 版本历史表。
+- 教训：v0.19 时代的 paper_portfolio 参数快照在本文件停留数月，与 v0.39 现行配置直接矛盾，误导每个新 session。
+
 ## 用户偏好
 
 - **⚠️ Python 解释器硬规则：扫描/脚本一律用 `/usr/local/bin/python3`（Python 3.11.1），禁用裸 `python3`**
@@ -30,88 +35,21 @@
 - 格式：`Added` / `Changed` / `Fixed` / `Removed`，注明文件名和改动摘要
 - 版本号：patch（0.x.y+1）= bug fix；minor（0.x+1.0）= 新功能批次
 
-## 已完成的重要改动（勿重复添加）
+## 历史改动查询指针
 
-### market_intelligence.py（新文件，v0.10.0）
-- `calculate_iv_rv_spread()` ① — HV30 已实现波动率 vs 隐含波动率价差
-- `get_cycle_context()` ③ — Opex周/财报后窗口/FOMC周期/月末
-- `detect_market_regime()` ④ — SPX 200MA / SOXX 20MA / 个股三层政体识别
-- `calculate_gamma_expiry_calendar()` ⑤ — 到期日 OI 集中度、Pin Risk、Charm 方向
-- `get_supply_chain_signals()` ⑥ — TSM/AMAT/ASML/SOXX 相对强弱
-- `calculate_signal_crowding()` ⑦ — 信号拥挤度元指数，alpha_decay_factor
-- `check_thesis_breaks()` ⑧ — thesis_breaks_config.json 条件触发告警 HTML 卡片
-- `_field_vals` 局部变量替代 f-string 嵌套 dict（已修复 SyntaxError）
+历史改动**不在本文件维护**（v0.40.3 清理了此前 ~75 行 v0.10-0.19 时代的实现细节清单）：
+- 版本级摘要 → MEMORY.md 末尾「版本历史」表
+- 逐项细节 → `CHANGELOG.md`
+- 定时任务（daily-scan / weekly-optimizer / self-analysis / sample-accumulator）的调度时刻 → 以 `list_scheduled_tasks` 返回的 `nextRunAt` 为唯一真相，勿引用文档里的旧时刻
 
-### pead_analyzer.py（新文件，v0.10.0）
-- `get_pead_analysis()` — yfinance 财报历史 → T+1/T+5/T+10/T+20 漂移统计 → 7天 JSON 缓存
-- `format_pead_for_chronos()` — 格式化摘要供 discovery 文字使用
+## 核心组件指针（只记"在哪、归谁管"，不记参数值）
 
-### generate_deep_v2.py（v0.10.0）
+- **纸面组合** `paper_portfolio.py`：参数唯一真相 = 模块内 `CONFIG`（v0.39.0 起为回放拐点配置，历史变更查 CHANGELOG）；挂载点 = 日报主流程 `alpha_hive_daily_report._post_scan_enrichment`（v0.38.0 起，**不再**依赖 generate_deep_v2）；状态文件 `paper_portfolio_state/`（meta.json 的 config_snapshot 自 v0.40.2 每次运行刷新）；KPI 看 `compute_kpis()`
+- **权重优化** `weekly_optimizer.py`（Track A）：T+7 回测 → clamp ±10pp → 原子写 config.py，审计日志 `weight_history.jsonl`
+- **月度自诊断** `self_analyst.py`（Track B）：输出 `self_analysis_briefs/YYYY-MM.md`，含每蜂维度 rank-IC 小节（v0.40.0）
+- **IBKR 桥接** `ibkr_sync.py`：手动流程（export actions → 用户 TWS 下单 → import CSV → reconcile），状态在 `paper_account/`
 
-- `_try_charts(ctx)` — 生成置信区间图 + 期权水位图，base64 嵌入 HTML
-- `_try_compute_gex(ctx)` — 报告生成阶段补算 Dealer GEX（当 JSON 里 `dealer_gex` 缺失时）
-- `ctx["_raw_data"] = data` — 原始 JSON 注入给 chart_engine 使用
-- CH1 嵌入置信区间图，CH4 嵌入期权水位图
-- `extract_simple()` — 覆盖全部 7 只蜂（含 BearBeeContrarian）
-- OI 日环比 Delta — `oi_delta` / `oi_delta_pct`，对比昨日 JSON，CH4 显示 ▲▼
-- **自学习 Gap 1** `_save_report_snapshot()` — 报告写完后保存 ReportSnapshot，供 feedback_loop T+7 回溯
-- **自学习 Gap 2** `_run_outcome_backfill()` — 启动时运行 OutcomesFetcher，回填历史 T+1/T+7/T+30 价格
-- **自学习 Gap 3** `_load_ticker_accuracy()` + `_render_accuracy_card()` — CH1 显示历史胜率卡片
-- `generate_html()` 新增 `accuracy_html` 参数
-- **CH4 IV 期限结构卡片** — `iv_term_html`，从 OracleBeeEcho details 提取，6卡 grid 下方渲染
-  - 形态配色：Contango（绿）/ Backwardation（红）/ Flat（金）；无数据静默不渲染
-
-### chart_engine.py（新文件）
-- `render_confidence_chart(data, ticker, date_str)` → base64 PNG
-- `render_options_chart(data, ticker, date_str, current_price)` → base64 PNG
-- 使用 `matplotlib.use("Agg")` 非交互后端，安全嵌入 HTML
-
-### advanced_analyzer.py
-- 新增 `DealerGEXAnalyzer` 类（BS gamma 计算真实 GEX）
-- `run_analysis()` 里 step 6 计算并存储 `analysis["dealer_gex"]`
-
-### swarm_agents/bear_bee.py
-- 新增 `_assess_short_interest()` 维度，权重 `"short_int": 0.18`
-- `si_pct = si_raw * 100.0 if si_raw <= 1.0 else float(si_raw)` — 处理 yfinance 0-1 小数
-
-### swarm_agents/scout_bee.py
-- 新增 `_assess_sector_relative_strength()` 维度
-- `discovery` 拼接用 `f"{discovery} | {rs_text}"`（非 `parts.append`）
-- v0.10.0：新增 2d 块，调用 `get_supply_chain_signals()` ⑥，supply_chain 注入 discovery + details
-
-### swarm_agents/rival_bee.py
-- 新增 `_assess_eps_revision()` 维度
-- `elif rec_mean >= 4.2` 在 `>= 3.5` 之前（死代码 bug 已修）
-
-### options_analyzer.py
-- 新增 `calculate_iv_term_structure()` 方法（S15）
-- 输出 `iv_term_structure` 字段存入 OptionsAgent 结果 dict
-- v0.10.0：`OptionsAgent.analyze()` 调用 `calculate_iv_rv_spread()` ①，输出 `rv_30d`/`iv_rv_spread`/`iv_rv_signal`/`iv_rv_detail`
-- v0.10.0：调用 `calculate_gamma_expiry_calendar()` ⑤，输出 `gamma_calendar`
-- `iv_term_structure` 通过 `oracle_bee → details` 传递至报告层
-
-### fred_macro.py
-- 新增 HY Spread 信号（BAMLH0A0HYM2），`limit=2` 取日环比，pct→bp `*100`
-- 三档评分阈值：>600 / >400 / >300bp；末尾 `max(1.0, min(10.0, score))` clamp
-
-### weekly_optimizer.py（新文件）
-- Track A 自动权重优化器，每周日 02:00 运行（定时任务已创建）
-- 从 report_snapshots 读 T+7 回测 → `suggest_weight_adjustments()` → clamp ±10pp → 原子写入 config.py
-- `weight_history.jsonl` 审计日志
-
-### paper_portfolio.py + ibkr_sync.py（新文件，v0.19.0）
-- $50,000 透明模拟组合：bootstrap 从 2026-03-09 起回放 snapshot → 每仓 1.5-2.5% NAV × ticker 胜率乘数
-- SL -5% / TP +10% / T+10 强平；入场门槛 bull≥6.5 / bear≤3.5 / 置信≥mid
-- 状态文件在 paper_portfolio_state/，IBKR 桥接状态在 paper_account/
-- generate_deep_v2.generate_html 顶部自动 run_for_date(report_date) 并渲染 portfolio_card_html
-- ibkr_sync：export actions JSON → 用户手动下 TWS Paper → import CSV → reconcile slippage
-- yfinance 离线时 bootstrap 仍可建仓但不触发出场；用户 Mac 联网时正常
-
-### self_analyst.py（新文件）
-- Track B 月度自我诊断，每月 1 日 03:00 运行（定时任务已创建）
-- 生成 `self_analysis_briefs/YYYY-MM.md`，无需 API Key，供 Cowork Claude 阅读分析
-
-### GitHub Pages 部署规则（永久设置）
+## GitHub Pages 部署规则（永久设置）
 
 - **GitHub Pages 从 `gh-pages` 分支部署**，不是 `main`
 - `report_deployer.py`：`_deploy_ghpages = _deploy_production`（生产模式 = LLM 或蜂群，均同步 gh-pages）
@@ -125,7 +63,7 @@
 - 控制在 200 行以内；超出时压缩旧版本历史或移除已被代码覆盖的实现细节
 - 旧记忆路径 `~/.claude/projects/-Users-igg/memory/` 已弃用，勿再写入
 
-## 已知问题 / 注意事项
+## 已知问题 / 注意事项（长期有效项）
 
 - `realtime_metrics` 在部分 JSON 里是空字典 `{}`，导致 `current_price = 0`
   - 修复：`_try_compute_gex` 在报告生成时用 Scout 价格补算
