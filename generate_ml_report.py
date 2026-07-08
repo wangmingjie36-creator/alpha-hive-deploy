@@ -2041,9 +2041,12 @@ def main():
             # 获取该标的的数据（优先 realtime_metrics → swarm 缓存 → yfinance 实时）
             ticker_data = metrics.get(ticker)
             if not ticker_data or not ticker_data.get("sources", {}).get("yahoo_finance", {}).get("current_price"):
-                _real_price = 100.0
+                # v0.40.1: 与 v36.0 同一反模式的第 3 处漏网之鱼——原初始化 100.0，
+                # 深夜 yfinance 限流时假价写进 analysis-*.json。现置 0.0 哨兵
+                # （下游注入逻辑跳过 0），并优先走 CBOE 起头的多源链。
+                _real_price = 0.0
                 _real_change = 0.0
-                # 优先复用 swarm 的 yfinance 缓存（避免重复 API 调用）
+                # 优先复用 swarm 的缓存（避免重复 API 调用）
                 try:
                     from swarm_agents import get_cached_stock_data as _get_cached
                     _cached = _get_cached(ticker)
@@ -2051,18 +2054,16 @@ def main():
                     _cached = None
                 if _cached and _cached.get("price", 0) > 0:
                     _real_price = _cached["price"]
-                    _real_change = _cached.get("momentum_5d", 0.0)
+                    _real_change = _cached.get("momentum_5d") or 0.0
                 else:
                     try:
-                        import yfinance as _yf
-                        _t = _yf.Ticker(ticker)
-                        _hist = _t.history(period="5d")
-                        if not _hist.empty:
-                            _real_price = float(_hist["Close"].iloc[-1])
-                            if len(_hist) >= 5:
-                                _real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[-5] - 1) * 100
-                            elif len(_hist) >= 2:
-                                _real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[0] - 1) * 100
+                        from data_pipeline import fetch_stock_data as _fsd_ml
+                        _sd_ml = _fsd_ml(ticker)
+                        if _sd_ml.get("price", 0) > 0:
+                            _real_price = float(_sd_ml["price"])
+                            _real_change = float(_sd_ml.get("momentum_5d") or 0.0)
+                        else:
+                            raise ConnectionError("多源链全部失败")
                     except Exception as e:
                         # yfinance 取价失败（含 YFRateLimitError 限流）→ 降级读磁盘最近一次价格，
                         # 避免整份报告因一次取价崩溃。优先 {ticker}_raw.json 的 _meta.price。

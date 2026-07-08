@@ -1910,6 +1910,18 @@ def render_dashboard_html(report: Dict, date_str: str,
             _inj_scout["price"] = _ap
             continue
 
+        # ①.5 (v0.40.1): 当日反馈快照的 entry_price——每个扫描日全标的都会落
+        # （v34.1），取价链带 forming-bar 护栏，比陈旧 analysis 文件新鲜可靠
+        try:
+            _inj_snap_p = _Path_mod(report_dir) / "report_snapshots" / f"{_inj_t}_{date_str}.json"
+            if _inj_snap_p.exists():
+                _inj_snap_price = (json.loads(_inj_snap_p.read_text()) or {}).get("entry_price")
+                if _inj_snap_price and float(_inj_snap_price) > 0:
+                    _inj_scout["price"] = round(float(_inj_snap_price), 2)
+                    continue
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            pass
+
         # ② 回退：ML 分析文件。当日文件无条件用；旧文件加 7 天新鲜度护栏
         #    （避免把数周前的陈价当成当日价——6-15 曾回退到 5-29 的污染价 145.32）
         _inj_today_file = _Path_mod(report_dir) / f"analysis-{_inj_t}-ml-{date_str}.json"

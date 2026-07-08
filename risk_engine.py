@@ -762,11 +762,24 @@ def run_full_risk_analysis(
             }
             _log.info("risk_engine: %s 自动获取 price=%.2f σ=%.1f%%", ticker, price, vol)
         except Exception as e:
-            _log.warning("risk_engine: %s stock_data 获取失败，使用默认值: %s", ticker, e)
-            stock_data = {
-                "price": 100.0, "volatility_20d": 30.0,
-                "momentum_5d": 0.0,  "volume_ratio": 1.0,
-            }
+            # v0.40.1: yfinance 失败先走 CBOE 起头多源链（含陈旧缓存兜底），
+            # 不再直接编造 price=100 的假风险报告
+            _log.warning("risk_engine: %s yfinance 失败，改走多源链: %s", ticker, e)
+            try:
+                from data_pipeline import fetch_stock_data as _fsd_re
+                _sd_re = _fsd_re(ticker)
+                stock_data = {
+                    "price": float(_sd_re.get("price") or 0.0),
+                    "volatility_20d": float(_sd_re.get("volatility_20d") or 30.0),
+                    "momentum_5d": float(_sd_re.get("momentum_5d") or 0.0),
+                    "volume_ratio": float(_sd_re.get("volume_ratio") or 1.0),
+                }
+            except Exception as e2:
+                _log.error("risk_engine: %s 多源链也失败(%s)——price=0 哨兵，风险数字不可信", ticker, e2)
+                stock_data = {
+                    "price": 0.0, "volatility_20d": 30.0,
+                    "momentum_5d": 0.0, "volume_ratio": 1.0,
+                }
 
     result: Dict = {
         "ticker": ticker,

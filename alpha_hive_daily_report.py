@@ -1743,17 +1743,19 @@ class AlphaHiveDailyReporter:
         def _gen_one(ticker: str) -> str | None:
             """生成单个标的的 ML 报告（线程安全）"""
             try:
-                real_price, real_change = 100.0, 0.0
+                # v0.40.1: 与 v36.0 同一反模式的第 2 处漏网之鱼——原先初始化
+                # real_price=100.0 且只试 yfinance，深夜限流失败时假价 100.0
+                # 写进 analysis-*.json 污染仪表板（7/7 夜扫 NVDA/MSFT/TSLA 复发）。
+                # 现走 CBOE 起头的多源链；全部失败置 0.0（哨兵，下游注入会跳过）。
+                real_price, real_change = 0.0, 0.0
                 try:
-                    import yfinance as _yf
-                    from data_pipeline import _drop_forming_bar as _dfb
-                    _hist = _dfb(_yf.Ticker(ticker).history(period="5d"))  # v0.29.4 盘中护栏
-                    if not _hist.empty:
-                        real_price = float(_hist["Close"].iloc[-1])
-                        if len(_hist) >= 2:
-                            real_change = (_hist["Close"].iloc[-1] / _hist["Close"].iloc[-2] - 1) * 100
+                    from data_pipeline import fetch_stock_data as _fsd
+                    _sd = _fsd(ticker)
+                    if _sd.get("price", 0) > 0:
+                        real_price = float(_sd["price"])
+                        real_change = float(_sd.get("momentum_5d") or 0.0)
                 except Exception as _yfe:
-                    _log.debug("yfinance 价格获取失败 %s: %s", ticker, _yfe)
+                    _log.warning("多源价格获取失败 %s: %s（current_price 置 0 哨兵）", ticker, _yfe)
 
                 ticker_data = {
                     "ticker": ticker,

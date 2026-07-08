@@ -478,7 +478,7 @@ def get_crowding_metrics(ticker: str, board=None) -> Dict:
         t = yf.Ticker(ticker)
         hist = _dfb(t.history(period="1mo"))  # v0.29.4 盘中护栏
         stock_data = {
-            "price": float(hist["Close"].iloc[-1]) if not hist.empty else 100.0,
+            "price": float(hist["Close"].iloc[-1]) if not hist.empty else 0.0,  # v0.40.1: 0 哨兵替代假价 100（下游 crowding 不用 price）
             "momentum_5d": (float(hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100) if len(hist) >= 5 else 0.0,
             "avg_volume": int(hist["Volume"].mean()) if not hist.empty else 0,
             "volume_ratio": float(hist["Volume"].iloc[-1] / hist["Volume"].mean()) if not hist.empty and hist["Volume"].mean() > 0 else 1.0,

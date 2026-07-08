@@ -5,6 +5,14 @@
 
 ---
 
+## [0.40.1] — 2026-07-08 — 网站股价再次出错：根除 100.0 占位价反模式的第 2/3 处漏网 + 快照价注入
+
+### Fixed
+- **复发现场**：7/7 深夜定时扫描后，NVDA/MSFT/AMZN/TSLA 在仪表板显示 $100.0。根因与 v36.0 完全同款反模式的另外两处漏网：`alpha_hive_daily_report._gen_one`（~L1746）和 `generate_ml_report`（~L2044）都是"先初始化 real_price=100.0，yfinance 成功才覆盖"——深夜限流失败时假价写进 `analysis-*-ml-2026-07-02.json`，仪表板 7 天新鲜度兜底恰好读到。
+- **修复**：两处占位价 100.0 → **0.0 哨兵**（下游 `_inj_price` 对 0 跳过，自动落到更旧真实价），且取价改走 `data_pipeline.fetch_stock_data`（CBOE 起头多源链）而非裸 yfinance。已用 CBOE 实价 patch 回 4 个被污染的 analysis 文件。
+- **新增注入源 ①.5**：`dashboard_renderer` 价格注入在 Agent 价与 analysis 文件之间插入**当日反馈快照 entry_price**（每扫描日全标的必落、带 forming-bar 护栏）——本次重渲染后 10/10 标的显示 7/7 当日真实收盘价，陈旧 analysis 兜底基本退役。
+- **全仓 grep 又揪出 3 处同款**（一并修复）：`crowding_detector.py`（hist 空时 price=100 → 0 哨兵，下游不用 price）、`risk_engine.py`（yfinance 失败编造 price=100 的假风险报告 → 先走 CBOE 多源链，仍失败 0 哨兵+ERROR 日志）、`unusual_options.py`（假价 100 会把 OTM 距离全算错产出假异动 → 多源链兜底，仍失败诚实跳过异动检测）。至此 `100.0` 占位价反模式生产代码清零。
+
 ## [0.40.0] — 2026-07-08 — 对标主流开源量化系统差距补齐（A-E）+ Finviz 删除
 
 > 用户要求对标 GitHub 主流免费量化系统（Qlib/vectorbt/FinRL/ai-hedge-fund/TradingAgents/Zipline+Alphalens）找高价值改进，并确认删除 Finviz。对标结论：多 agent 架构（同 45k★ ai-hedge-fund 但零 LLM 成本）、T+7 真实结果闭环、FF6+HAC 归因、bootstrap CI/walk-forward 工具（CLI）均已有勿重复造；真实差距 = ML 无时序验证、无横截面排名、三重屏障标签断链、维度 IC 无例行监控。

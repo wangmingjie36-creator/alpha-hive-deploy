@@ -73,9 +73,20 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
         if not stock_price or stock_price <= 0:
             try:
                 info = t.fast_info
-                stock_price = getattr(info, "last_price", 0) or 100.0
+                stock_price = getattr(info, "last_price", 0) or 0.0
             except (AttributeError, Exception):
-                stock_price = 100.0
+                stock_price = 0.0
+            if not stock_price or stock_price <= 0:
+                # v0.40.1: 拿不到真实现价时诚实跳过——假价 100 会把 OTM 距离
+                # 全算错，产出假异动信号（同 v38.0 期权样本链教训）
+                try:
+                    from data_pipeline import fetch_stock_data as _fsd_uo
+                    stock_price = float(_fsd_uo(ticker).get("price") or 0.0)
+                except Exception:
+                    stock_price = 0.0
+            if not stock_price or stock_price <= 0:
+                result["summary"] = "现价不可得，跳过异动检测"
+                return result
 
         unusual_calls = []
         unusual_puts = []
