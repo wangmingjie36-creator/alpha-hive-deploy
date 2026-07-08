@@ -339,7 +339,9 @@ def main():
     # 当前管线把蜂群评分写到独立的 .swarm_results_{date}.json；
     # analysis-*-ml-*.json 内 swarm_results 恒为空 → 必须 graft，
     # 否则提炼出的 raw JSON 蜂群分全是 0.0（2026-06 stale snapshot 事故）
-    _report_date = data.get("timestamp", "")[:10]
+    # 用今日日期为上限（而非 analysis JSON 的时间戳），确保能拿到最新蜂群文件
+    # 修复：analysis JSON 最新只到 07-02，若蜂群当日已更新（如 07-06）会被漏掉
+    _report_date = date.today().strftime("%Y-%m-%d")
     if not data.get("swarm_results"):
         swarm_rec, swarm_date = find_swarm_results(ticker, _report_date)
         if swarm_rec:

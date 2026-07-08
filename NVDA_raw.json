@@ -1,30 +1,28 @@
 {
   "_meta": {
     "ticker": "NVDA",
-    "report_date": "2026-07-06",
-    "price": 194.44,
+    "report_date": "2026-07-02",
+    "price": 196.49,
     "generated_by": "collect_data.py · 方案B",
-    "swarm_source": ".swarm_results_2026-07-06.json"
+    "swarm_source": ".swarm_results_2026-07-07.json"
   },
   "swarm": {
-    "final_score": 5.47,
+    "final_score": 6.05,
     "direction": "neutral",
     "resonance": {
-      "resonance_detected": false,
-      "direction": "bullish",
-      "supporting_agents": 4,
-      "cross_dim_count": 3,
-      "consistency": 0.444,
-      "resonant_dimensions": [
+      "detected": true,
+      "dimensions": [
         "ml_auxiliary",
         "odds",
         "risk_adj"
       ],
-      "confidence_boost": 0
+      "count": 3,
+      "confidence_boost": 15,
+      "direction": "bullish"
     },
     "agent_vote": {
-      "bullish": 4,
-      "bearish": 1,
+      "bullish": 5,
+      "bearish": 0,
       "neutral": 3
     }
   },
@@ -33,117 +31,166 @@
       "score": 5.5,
       "direction": "neutral",
       "confidence": 0.63,
-      "discovery": "催化剂 1 个 | 最近：财报发布（54天后） | 分析师目标$301.62(↑54.8%) | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%)"
+      "discovery": "催化剂 1 个 | 最近：财报发布（50天后） | 分析师目标$301.62(↑53.2%) | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%)"
     },
     "RivalBee": {
-      "score": 6.04,
+      "score": 5.85,
       "direction": "bullish",
       "confidence": 0.8,
-      "discovery": "ML 胜率 58% | 7d +6.87% | 30d +10.31% | RSI:40 | MACD:空 | BB:18% | 目标价上行 +54.8%（分析师看多） | 分析师共识1.3/5（强烈看多） | 远期EPS增速 +95.5%（盈利高增长） | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%)"
+      "discovery": "ML 胜率 57% | 7d +6.74% | 30d +10.10% | RSI:33 | MACD:空 | BB:30% | 目标价上行 +53.2%（分析师看多） | 分析师共识1.3/5（强烈看多） | 远期EPS增速 +95.5%（盈利高增长） | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%)"
     },
     "OracleBee": {
-      "score": 5.5,
+      "score": 8.96,
       "direction": "bullish",
       "confidence": 0.7,
-      "discovery": "做多气氛浓厚（P/C低） | 检测到 3 个看涨异动 | TermStr:contango(24/35) | Skew25d:1.22 | MaxPain:$195(-0.3%) | 异常流:混合期权流 Call:104 Put:116 | $194.4 | 无相关预测市场 | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%)"
+      "discovery": "检测到 63 个看涨异动 | TermStr:contango(28/34) | Skew25d:1.16 | MaxPain:$195(+0.8%) | 异常流:异常Call流 88个信号 溢价$239.7M | $196.5 | 无相关预测市场 | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%)"
     },
     "BuzzBee": {
-      "score": 4.87,
+      "score": 4.89,
       "direction": "neutral",
-      "confidence": 0.9,
-      "discovery": "情绪 48% | 动量 -1.4% | 量比 1.0x | Reddit #7(rising,54提及) | 无新闻数据 | 未上 Yahoo 热搜 | F&G 32(Fear) | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%)"
+      "confidence": 0.75,
+      "discovery": "情绪 48% | 动量 -1.6% | 量比 0.8x | Reddit 无热度 | 看多叙事主导 | 未上 Yahoo 热搜 | F&G 43(Fear) | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%)"
     },
     "ScoutBee": {
-      "score": 5.19,
+      "score": 5.45,
       "direction": "neutral",
       "confidence": 0.88,
-      "discovery": "拥挤度 34/100（中等拥挤度） | 动量 -1.4% | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%) | 供应链滞后警告：AMAT, ASML, SOXX 5日涨幅落后 NVDA 超 1.5pp——上游景气度下行，NVDA 可能存在需求前瞻性透支。"
+      "discovery": "COXE TENCH 赠与 500,000股 | 拥挤度 25/100（低拥挤度） | 动量 -1.6% | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%) | 供应链滞后警告：TSM, AMAT, ASML, SOXX 5日涨幅落后 NVDA 超 1.5pp——上游景气度下行，NVDA 可能存在需求前瞻性透支。"
     },
     "GuardBee": {
-      "score": 3.04,
+      "score": 5.99,
       "direction": "bullish",
       "confidence": 0.65,
-      "discovery": "信号分散 | 均分 5.3 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%) | Macro:risk_off(黄金飙升（避险需求强）)"
+      "discovery": "信号分散 | 均分 6.0 | 一致性 40% | 风险调整 1.20 | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%) | Macro:neutral(板块逆风) | Regime:风险偏好"
     },
     "BearBee": {
-      "score": 3.75,
-      "direction": "bearish",
-      "confidence": 0.9,
-      "discovery": "IV Rank 100（恐慌高位） | 近期小幅回调 -1.4% | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%)"
+      "score": 7.0,
+      "direction": "bullish",
+      "confidence": 0.8,
+      "discovery": "近期小幅回调 -1.6% | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%)"
     }
   },
   "options": {
-    "put_call_ratio": 0.54,
-    "total_oi": 85200,
-    "iv_rank": 100,
+    "put_call_ratio": 0.78,
+    "total_oi": 1533837,
+    "iv_rank": 32.79,
     "iv_current_pct": 36.51,
-    "iv_skew_ratio": null,
-    "iv_skew_signal": "OTM 期权数据不足",
+    "iv_skew_ratio": 1.086,
+    "iv_skew_signal": "neutral",
     "flow_direction": "bullish",
-    "options_score": 6.5,
-    "signal_summary": "做多气氛浓厚（P/C低） | 检测到 3 个看涨异动",
+    "options_score": 7.0,
+    "signal_summary": "检测到 63 个看涨异动",
     "gamma_squeeze_risk": "high",
     "support_levels": [
       {
-        "strike": 140.0,
-        "oi": 12000,
-        "iv_pct": 28.2
+        "strike": 180.0,
+        "oi": 81721.0,
+        "iv_pct": 46.2
       },
       {
-        "strike": 145.0,
-        "oi": 9500,
-        "iv_pct": 27.5
+        "strike": 200.0,
+        "oi": 50292.0,
+        "iv_pct": 40.2
       },
       {
-        "strike": 135.0,
-        "oi": 8200,
-        "iv_pct": 29.1
+        "strike": 190.0,
+        "oi": 45617.0,
+        "iv_pct": 42.3
       }
     ],
     "resistance_levels": [
       {
-        "strike": 145.0,
-        "oi": 22000,
-        "iv_pct": 27.8
+        "strike": 250.0,
+        "oi": 95141.0,
+        "iv_pct": 54.2
       },
       {
-        "strike": 150.0,
-        "oi": 18500,
-        "iv_pct": 27.2
+        "strike": 200.0,
+        "oi": 94548.0,
+        "iv_pct": 40.0
       },
       {
-        "strike": 140.0,
-        "oi": 15000,
-        "iv_pct": 28.5
+        "strike": 220.0,
+        "oi": 86756.0,
+        "iv_pct": 41.6
       }
     ],
     "unusual_activity": [
       {
         "type": "large_call_volume",
-        "strike": 140.0,
-        "volume": 8500,
+        "strike": 200.0,
+        "volume": 69711,
         "bullish": true,
-        "ratio": 0.57
+        "ratio": 0.74
       },
       {
         "type": "large_call_volume",
-        "strike": 145.0,
-        "volume": 12000,
+        "strike": 190.0,
+        "volume": 6103,
         "bullish": true,
-        "ratio": 0.55
+        "ratio": 0.23
+      },
+      {
+        "type": "large_put_volume",
+        "strike": 200.0,
+        "volume": 7614,
+        "bullish": false,
+        "ratio": 0.15
       },
       {
         "type": "large_call_volume",
-        "strike": 150.0,
-        "volume": 6200,
+        "strike": 195.0,
+        "volume": 7584,
         "bullish": true,
-        "ratio": 0.34
+        "ratio": 0.2
+      },
+      {
+        "type": "large_put_volume",
+        "strike": 210.0,
+        "volume": 2679,
+        "bullish": false,
+        "ratio": 0.09
+      },
+      {
+        "type": "large_call_volume",
+        "strike": 205.0,
+        "volume": 12879,
+        "bullish": true,
+        "ratio": 0.45
+      },
+      {
+        "type": "large_put_volume",
+        "strike": 192.5,
+        "volume": 8535,
+        "bullish": false,
+        "ratio": 1.87
+      },
+      {
+        "type": "large_call_volume",
+        "strike": 202.5,
+        "volume": 9002,
+        "bullish": true,
+        "ratio": 1.13
+      },
+      {
+        "type": "large_call_volume",
+        "strike": 210.0,
+        "volume": 20933,
+        "bullish": true,
+        "ratio": 0.42
+      },
+      {
+        "type": "large_put_volume",
+        "strike": 190.0,
+        "volume": 9828,
+        "bullish": false,
+        "ratio": 0.22
       }
     ],
     "expiration_dates": [
-      "2026-03-21",
-      "2026-04-18",
-      "2026-05-16"
+      "2026-07-15",
+      "2026-07-17",
+      "2026-07-20"
     ]
   },
   "catalysts": {
@@ -153,7 +200,7 @@
       {
         "event": "财报发布",
         "date": "2026-08-27",
-        "days_until": 54,
+        "days_until": 50,
         "importance": "medium",
         "description": ""
       }
@@ -168,33 +215,32 @@
     "recommendation": "HOLD - 等待更好机会"
   },
   "macro": {
-    "fear_greed_index": 32,
-    "guard_score": 3.04,
+    "fear_greed_index": 43,
+    "guard_score": 5.99,
     "guard_direction": "bullish",
-    "guard_discovery": "信号分散 | 均分 5.3 | 一致性 40% | 风险调整 0.95 | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%) | Macro:risk_off(黄金飙升（避险需求强）)",
+    "guard_discovery": "信号分散 | 均分 6.0 | 一致性 40% | 风险调整 1.20 | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%) | Macro:neutral(板块逆风) | Regime:风险偏好",
     "sentiment_pct": 48,
-    "reddit_rank": 7,
-    "reddit_mentions": 54,
-    "volume_ratio": 1.0,
-    "buzz_discovery": "情绪 48% | 动量 -1.4% | 量比 1.0x | Reddit #7(rising,54提及) | 无新闻数据 | 未上 Yahoo 热搜 | F&G 32(Fear) | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%)",
+    "reddit_rank": null,
+    "reddit_mentions": 0,
+    "volume_ratio": 0.82,
+    "buzz_discovery": "情绪 48% | 动量 -1.6% | 量比 0.8x | Reddit 无热度 | 看多叙事主导 | 未上 Yahoo 热搜 | F&G 43(Fear) | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%)",
     "daily_macro_summary": "VIX 15.8(moderate) | 10Y 4.37% | 大盘+0.0% | 宏观:neutral | 曲线:正常 | CPI同比4.2% | HY利差275bp | 黄金飙升+2.0%"
   },
   "fundamentals": {
-    "scout_score": 5.19,
+    "scout_score": 5.45,
     "scout_direction": "neutral",
-    "scout_discovery": "拥挤度 34/100（中等拥挤度） | 动量 -1.4% | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%) | 供应链滞后警告：AMAT, ASML, SOXX 5日涨幅落后 NVDA 超 1.5pp——上游景气度下行，NVDA 可能存在需求前瞻性透支。",
-    "crowding_score": 33.7,
-    "momentum_5d": -1.4115,
+    "scout_discovery": "COXE TENCH 赠与 500,000股 | 拥挤度 25/100（低拥挤度） | 动量 -1.6% | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%) | 供应链滞后警告：TSM, AMAT, ASML, SOXX 5日涨幅落后 NVDA 超 1.5pp——上游景气度下行，NVDA 可能存在需求前瞻性透支。",
+    "crowding_score": 25.0,
+    "momentum_5d": -1.5793,
     "overview": "AI 芯片龙头，CUDA 生态护城河深厚，但估值已高，监管风险需关注"
   },
   "bearish": {
-    "bear_score": 3.75,
-    "bear_direction": "bearish",
+    "bear_score": 7.0,
+    "bear_direction": "bullish",
     "bear_signals": [
-      "IV Rank 100（恐慌高位）",
-      "近期小幅回调 -1.4%"
+      "近期小幅回调 -1.6%"
     ],
-    "bear_discovery": "IV Rank 100（恐慌高位） | 近期小幅回调 -1.4% | 历史5条:多5/空0,均分6.0|历史T+7准确率54%(46次,均收益+1.81%)"
+    "bear_discovery": "近期小幅回调 -1.6% | 历史5条:多5/空0,均分6.0|历史T+7准确率50%(48次,均收益+1.14%)"
   },
   "recommendation": {
     "combined_probability_pct": 66.0,
