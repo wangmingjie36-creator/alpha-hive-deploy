@@ -492,8 +492,9 @@ def get_crowding_metrics(ticker: str, board=None) -> Dict:
                 if not (_math.isnan(_vol) or _math.isinf(_vol)):
                     stock_data["volatility_20d"] = _vol
     except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as exc:
+        # v0.40.1: 契约测试抓到的第 6 处假价占位——改 0.0 哨兵（下游 crowding 不用 price）
         _log.debug("yfinance data fetch failed for %s: %s", ticker, exc)
-        stock_data = {"price": 100.0, "momentum_5d": 0.0, "avg_volume": 0, "volume_ratio": 1.0, "volatility_20d": 0.0}
+        stock_data = {"price": 0.0, "momentum_5d": 0.0, "avg_volume": 0, "volume_ratio": 1.0, "volatility_20d": 0.0}
 
     return get_real_crowding_metrics(ticker, stock_data, board)
 
