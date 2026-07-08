@@ -5,6 +5,17 @@
 
 ---
 
+## [0.40.2] — 2026-07-08 — 修复 paper_portfolio.meta.json 的 config_snapshot 陈旧不刷新
+
+### Fixed
+- `_load_meta()` 只在 `meta.json` 首次不存在时（3/9 bootstrap）写入 `config_snapshot`，之后每次 `run_for_date()` 只更新 `cash`/`last_run_date`，从未回写 `config_snapshot`——v0.39.0 改仓位参数（tp_pct 10→15、仓位×2、在场30→80、白名单清空）后，`meta.json` 里的快照字段仍停在 3/9 的旧值，误导任何读取该字段核对当前生效参数的场景（不影响实际交易，交易逻辑一直用模块内最新 `CONFIG`，纯记录展示字段滞后）。
+- `run_for_date()` 每次运行时用当前 `CONFIG` 刷新 `meta["config_snapshot"]` 再保存。
+
+### Verified — 用户核对纸面组合 vs SPY 基准
+- 现行组合（$50,615，+1.23%）vs SPY 同期 +10.24%，Alpha -9.01%——最大回撤仅 -0.56%，印证"胜率高（56%）收益低"的根因是资金利用率低（当前仅 2 笔持仓、4% 资金在场）。
+- v0.39.0 新参数（TP15%/仓位×2/在场80%）**尚未有机会实际生效**——当前仅有的 2 笔持仓（TSLA/MSFT）均开仓于 6/29，早于 7/7 的参数变更，按设计其 SL/TP 已固化用旧参数（TP 10%/仓位 2.5% 档），需等下一次过门槛信号（bull≥6.5 或 bear≤3.5）新开仓才会首次验证新参数。
+- 另确认与 `dashboard-data.json` 的 `trading_stats.realistic` 卡片（`portfolio_backtest.py` 独立回测引擎，max_concurrent=15，与 `paper_portfolio.py` 是两套不同系统，互不影响）区分开——避免混淆两处 SPY 对比数字。
+
 ## [0.40.1] — 2026-07-08 — 网站股价再次出错：根除 100.0 占位价反模式的第 2/3 处漏网 + 快照价注入
 
 ### Fixed

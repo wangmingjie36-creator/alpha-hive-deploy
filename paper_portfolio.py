@@ -749,6 +749,12 @@ def run_for_date(as_of: str, verbose: bool = False) -> Dict:
     _write_jsonl(POSITIONS_FILE, [p.to_dict() for p in positions])
     meta["cash"] = cash
     meta["last_run_date"] = as_of
+    # v0.40.2: 每次运行刷新 config_snapshot——此前只在 bootstrap 首次建 meta.json
+    # 时写入一次，之后再没更新过，导致 v0.39.0 改参数后 meta.json 里的
+    # config_snapshot 仍显示 3/9 的旧值（tp_pct=10/仓位×1/白名单=[NVDA]），
+    # 纯记录展示字段，不影响实际交易（交易一直用模块内最新 CONFIG）。
+    meta["config_snapshot"] = {k: (dict(v) if isinstance(v, dict) else v)
+                                for k, v in CONFIG.items()}
     _save_meta(meta)
 
     return {
