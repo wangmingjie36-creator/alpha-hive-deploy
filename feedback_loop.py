@@ -44,6 +44,9 @@ class ReportSnapshot:
         self.low_conviction = False
         self.low_conviction_reason = ""
 
+        # v0.40.0: 横截面排名埋点（当日 universe 内 0-1 分位，纯记账供未来 rank-IC 回测）
+        self.cs_rank = None
+
         # 实际结果（后续填充）
         self.actual_price_t1 = None  # T+1 的价格
         self.actual_price_t7 = None  # T+7 的价格
@@ -95,6 +98,7 @@ class ReportSnapshot:
             "weights_used": self.weights_used,
             "low_conviction": self.low_conviction,
             "low_conviction_reason": self.low_conviction_reason,
+            "cs_rank": self.cs_rank,
             "actual_prices": {
                 "t1": self.actual_price_t1,
                 "t7": self.actual_price_t7,

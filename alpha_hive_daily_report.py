@@ -553,6 +553,37 @@ class AlphaHiveDailyReporter:
 
     def _post_scan_enrichment(self, ctx: '_SwarmContext', swarm_results: Dict) -> float:
         """扫描后增强：历史类比 + 保存蜂群结果 + 清理 checkpoint，返回 elapsed"""
+        # ── v0.40.0 · 横截面排名埋点（纯记账，不影响方向/评分/组合）────────
+        # 对标 Qlib 的核心思想：相对排名常比绝对分稳健（各蜂绝对分 rho 仅 +0.05）。
+        # 记录 final_score 与各维度分在当日 universe 内的 0-1 分位（1=最强），
+        # 随 swarm_results / report_snapshots 落盘，4-6 周后回测 rank-IC 决定
+        # 是否升级为正式维度。
+        try:
+            def _cs_percentile(values: dict) -> dict:
+                items = [(t, v) for t, v in values.items() if v is not None]
+                n = len(items)
+                if n < 2:
+                    return {t: 0.5 for t, _ in items}
+                order = sorted(items, key=lambda x: x[1])
+                return {t: round(i / (n - 1), 3) for i, (t, _) in enumerate(order)}
+
+            _cs_final = _cs_percentile(
+                {t: r.get("final_score") for t, r in swarm_results.items()})
+            _dims = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
+            _cs_dims = {
+                d: _cs_percentile({
+                    t: (r.get("dimension_scores") or {}).get(d)
+                    for t, r in swarm_results.items()})
+                for d in _dims
+            }
+            for t, r in swarm_results.items():
+                r["cs_rank"] = {
+                    "final": _cs_final.get(t),
+                    **{d: _cs_dims[d].get(t) for d in _dims},
+                }
+        except Exception as _cs_err:
+            _log.debug("横截面排名埋点失败(非致命): %s", _cs_err)
+
         # 历史类比推理（top-3 ticker）
         try:
             if ctx.queen.enable_llm and self.vector_memory and self.memory_store:
@@ -965,6 +996,8 @@ class AlphaHiveDailyReporter:
                         for e in ctx.board.snapshot()
                         if e.get("ticker") == _tk
                     }
+                    # v0.40.0: 横截面排名埋点随快照落盘（供未来 rank-IC 回测）
+                    _snap.cs_rank = _data.get("cs_rank")
                     try:
                         from data_pipeline import _drop_forming_bar as _dfb
                         _hist = _dfb(_yf_fb.Ticker(_tk).history(period="5d"))  # v0.29.4 盘中护栏

@@ -123,8 +123,13 @@ class TestDistill:
         # 共振后评分 > 无共振基线
         assert out_boosted["final_score"] > out_baseline["final_score"]
 
-    def test_ml_auxiliary_adjustment(self, queen):
-        """ML 辅助分应调整最终评分"""
+    def test_ml_auxiliary_adjustment(self, queen, monkeypatch):
+        """ML 辅助分应调整最终评分（隔离 v0.40.0 OOS 信任系数——
+        生产 ml_model_cache.json 的 OOS<50% 时系数为 0 会正确地屏蔽调整，
+        本测试验证的是调整机制本身，固定系数=1.0）"""
+        from swarm_agents.queen_distiller import QueenDistiller
+        monkeypatch.setattr(QueenDistiller, "_ml_oos_trust_factor",
+                            classmethod(lambda cls: 1.0))
         base_results = [_make_result("signal", 7.0)]
         ml_high = base_results + [_make_result("ml_auxiliary", 9.0)]
         ml_low = base_results + [_make_result("ml_auxiliary", 2.0)]
@@ -133,6 +138,21 @@ class TestDistill:
         out_low = queen.distill("NVDA", ml_low)
 
         assert out_high["final_score"] > out_low["final_score"]
+
+    def test_ml_adjustment_zeroed_when_oos_poor(self, queen, monkeypatch):
+        """v0.40.0: OOS<50%（不如抛硬币）时 ML 调整应被置零"""
+        from swarm_agents.queen_distiller import QueenDistiller
+        monkeypatch.setattr(QueenDistiller, "_ml_oos_trust_factor",
+                            classmethod(lambda cls: 0.0))
+        base_results = [_make_result("signal", 7.0)]
+        ml_high = base_results + [_make_result("ml_auxiliary", 9.0)]
+        ml_low = base_results + [_make_result("ml_auxiliary", 2.0)]
+
+        out_high = queen.distill("NVDA", ml_high)
+        out_low = queen.distill("NVDA", ml_low)
+
+        # 信任系数 0 → ML 高低分不再产生任何差异
+        assert out_high["final_score"] == pytest.approx(out_low["final_score"], abs=0.01)
 
     def test_data_quality_aggregation(self, queen):
         results = [
@@ -838,7 +858,7 @@ class TestDataRealPct:
              "discovery": "test sentiment",
              "data_quality": {
                  "momentum": "real", "volume": "real", "volatility": "real",
-                 "reddit": "real", "finviz_news": "keyword",
+                 "reddit": "real", "news": "keyword",
              }},
             {"score": 6.0, "direction": "neutral", "confidence": 0.7,
              "dimension": "catalyst", "source": "ChronosBeeHorizon",
@@ -919,9 +939,9 @@ class TestDataRealPct:
             # RivalBee
             "fallback_momentum",
             # BearBee
-            "sec_api", "yfinance", "finviz_api",
+            "sec_api", "yfinance", "newsapi",
             # 其他
-            "SEC直查", "Finviz", "finviz",
+            "SEC直查",
         }
         classified = QueenDistiller.REAL_SOURCES | QueenDistiller.PROXY_SOURCES
         unclassified = all_known - classified

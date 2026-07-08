@@ -230,15 +230,16 @@ class BearBeeContrarian(BeeAgent):
                 news_bear = max(news_bear, 5.5)
                 bearish_signals.append(f"Buzz 情绪分析看空（{buzz_entry.self_score:.1f}分）")
 
-        if news_bear == 0.0:
+        if news_bear == 0.0 and not (buzz_entry and buzz_entry.discovery):
+            # v0.40.0: 信息素板无 BuzzBee 时回退 Yahoo/AV newsapi（Finviz 已删除）
             try:
-                from finviz_sentiment import get_finviz_sentiment
-                finviz = get_finviz_sentiment(ticker)
-                if finviz and isinstance(finviz, dict):
-                    data_sources["news"] = "finviz_api"
-                    news_score = finviz.get("news_score", 5.0)
-                    neg = len(finviz.get("top_bearish", []))
-                    pos = len(finviz.get("top_bullish", []))
+                from newsapi_client import get_ticker_news
+                news_ext = get_ticker_news(ticker, max_articles=8)
+                if news_ext.get("is_real_data") and news_ext.get("total_articles", 0) >= 3:
+                    data_sources["news"] = "newsapi"
+                    news_score = float(news_ext.get("sentiment_score") or 5.0)
+                    neg = int(news_ext.get("bearish_count") or 0)
+                    pos = int(news_ext.get("bullish_count") or 0)
                     if news_score < 3.5:
                         news_bear = 7.0
                         bearish_signals.append(f"新闻情绪偏空（评分 {news_score:.1f}/10）")
@@ -248,10 +249,11 @@ class BearBeeContrarian(BeeAgent):
                     if neg > pos * 2 and neg >= 3:
                         news_bear = max(news_bear, 6.5)
                         bearish_signals.append(f"负面新闻主导（{neg}空 vs {pos}多）")
+                else:
+                    data_sources.setdefault("news", "unavailable")
             except LLM_ERRORS as e:
-                _log.warning("BearBeeContrarian Finviz news fallback failed for %s: %s", ticker, e)
-                if "news" not in data_sources:
-                    data_sources["news"] = "unavailable"
+                _log.warning("BearBeeContrarian newsapi fallback failed for %s: %s", ticker, e)
+                data_sources.setdefault("news", "unavailable")
 
         return news_bear, buzz_entry
 

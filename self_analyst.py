@@ -105,6 +105,66 @@ def load_snapshots(snapshots_dir: Path, months_back: int = 3,
     return results
 
 
+def _spearman(xs: list, ys: list) -> float:
+    """Spearman rank 相关（无第三方依赖，与 experiments/penalty_replay.py 同实现）"""
+    def rank(v):
+        s = sorted(range(len(v)), key=lambda i: v[i])
+        r = [0] * len(v)
+        for i, idx in enumerate(s):
+            r[idx] = i
+        return r
+    if len(xs) < 3:
+        return 0.0
+    rx, ry = rank(xs), rank(ys)
+    mx = sum(rx) / len(rx)
+    my = sum(ry) / len(ry)
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    den = (sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry)) ** 0.5
+    return num / den if den else 0.0
+
+
+def compute_dimension_ic(snaps: list) -> dict:
+    """v0.40.0 (E): 每蜂原始分 vs T+7 收益的 rank-IC（Alphalens 式因子体检）。
+
+    返回 {agent: {"ic": float, "n": int, "ic_recent": float, "n_recent": int}}，
+    recent = 窗口内最近 1/3 样本（近期趋势 vs 全窗口对比）。
+    """
+    per_agent: dict = {}
+    rows = []
+    for s in snaps:
+        t7 = (s.get("actual_prices") or {}).get("t7")
+        ep = s.get("entry_price")
+        if not t7 or not ep:
+            continue
+        ret = (t7 / ep - 1) * 100
+        rows.append((s.get("date", ""), s.get("agent_votes") or {}, ret))
+    rows.sort(key=lambda x: x[0])
+    cut = len(rows) * 2 // 3
+
+    for i, (_, votes, ret) in enumerate(rows):
+        for agent, score in votes.items():
+            if not isinstance(score, (int, float)):
+                continue
+            d = per_agent.setdefault(agent, {"xs": [], "ys": [], "xs_r": [], "ys_r": []})
+            d["xs"].append(float(score))
+            d["ys"].append(ret)
+            if i >= cut:
+                d["xs_r"].append(float(score))
+                d["ys_r"].append(ret)
+
+    out = {}
+    for agent, d in per_agent.items():
+        if len(d["xs"]) < 10:
+            continue
+        out[agent] = {
+            "ic": round(_spearman(d["xs"], d["ys"]), 3),
+            "n": len(d["xs"]),
+            "ic_recent": round(_spearman(d["xs_r"], d["ys_r"]), 3) if len(d["xs_r"]) >= 10 else None,
+            "n_recent": len(d["xs_r"]),
+        }
+    return out
+
+
 def classify(snap: dict) -> str:
     """判断预测方向是否正确 → 'correct' | 'wrong' | 'neutral'"""
     direction  = snap.get("direction", "Neutral")
@@ -239,7 +299,8 @@ def analyze_failure_patterns(wrong_snaps: list) -> dict:
 def format_briefing(stats: dict, patterns: dict,
                     wrong_contexts: list,
                     months_back: int,
-                    ticker_filter: Optional[str]) -> str:
+                    ticker_filter: Optional[str],
+                    dimension_ic: Optional[dict] = None) -> str:
     """生成给 Cowork Claude 阅读的结构化 Markdown briefing"""
 
     now     = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -273,6 +334,31 @@ def format_briefing(stats: dict, patterns: dict,
     else:
         lines.append(f"> ⚠️ **Wilson CI 含 50%：当前样本下胜率尚不能与「随机」区分，勿据此下重注或大改。**")
     lines.append("")
+
+    # v0.40.0 (E): 每蜂维度 rank-IC（Alphalens 式因子体检）
+    if dimension_ic:
+        lines += [
+            "## 一.五、每蜂维度 rank-IC（原始分 vs T+7 收益）",
+            "",
+            "> IC ≈ 0 表示该蜂原始分对 T+7 无区分度；|IC| > 0.05 才有微弱信号。",
+            "> penalty_replay 已证明瓶颈在各蜂原始分——本表为 Track A 权重优化提供透明依据。",
+            "",
+            "| 蜂 | 全窗口 IC | n | 近 1/3 窗口 IC | 趋势 |",
+            "|-----|----------|---|---------------|------|",
+        ]
+        for agent, d in sorted(dimension_ic.items(), key=lambda x: -abs(x[1]["ic"])):
+            _rec = d.get("ic_recent")
+            _rec_txt = f"{_rec:+.3f}" if _rec is not None else "样本不足"
+            if _rec is None:
+                _trend = "—"
+            elif _rec > d["ic"] + 0.03:
+                _trend = "改善"
+            elif _rec < d["ic"] - 0.03:
+                _trend = "退化"
+            else:
+                _trend = "持平"
+            lines.append(f"| {agent} | {d['ic']:+.3f} | {d['n']} | {_rec_txt} | {_trend} |")
+        lines.append("")
 
     # 失败模式
     if patterns:
@@ -399,9 +485,15 @@ def main() -> None:
     # 4. 提取失败上下文
     wrong_contexts = [extract_failure_context(s) for s in stats["wrong_snaps"]]
 
+    # 4.5 v0.40.0 (E): 每蜂维度 rank-IC
+    dimension_ic = compute_dimension_ic(snaps)
+    if dimension_ic:
+        print(f"   维度 IC: {len(dimension_ic)} 蜂已计算")
+
     # 5. 生成 briefing
     briefing = format_briefing(stats, patterns, wrong_contexts,
-                               args.months, args.ticker)
+                               args.months, args.ticker,
+                               dimension_ic=dimension_ic)
 
     # 6. 写文件
     if args.out:

@@ -53,9 +53,10 @@ class QueenDistiller:
     # 其他 (0.0)：未分类 — 表示遗漏了分类，应视为 Bug
     # → 新增 agent data_quality 值时，务必加入对应集合
     REAL_SOURCES = {
-        "real", "yfinance", "finviz_api", "options_api",
+        "real", "yfinance", "options_api",
         "keyword", "llm_enhanced", "reddit_apewisdom",
-        "rule_only", "sec_api", "SEC直查", "Finviz", "finviz",
+        "newsapi",  # v0.40.0: Yahoo/AV 新闻主源（Finviz 已删除）
+        "rule_only", "sec_api", "SEC直查",
         "loaded", "empty",  # ChronosBee: catalysts.json 加载成功 / 日历查询成功但无事件
     }
     PROXY_SOURCES = {
@@ -222,6 +223,45 @@ class QueenDistiller:
             "present_count": present_count,
         }
 
+    _OOS_TRUST_CACHE: tuple = ()  # (mtime, factor) 类级缓存，避免每票读盘
+
+    @classmethod
+    def _ml_oos_trust_factor(cls) -> float:
+        """v0.40.0: 从 ml_model_cache.json 读 OOS 精度 → ML 调整信任系数。
+
+        OOS >= half_threshold: 1.0 | >= zero_threshold: 0.5 | 低于: 0.0
+        OOS 缺失（旧模型/样本<60）: 1.0（不惩罚，待下次训练产生）。
+        """
+        try:
+            from config import ML_FEEDBACK_CONFIG as _MFC
+        except (ImportError, AttributeError):
+            _MFC = {}
+        half_th = float(_MFC.get("oos_trust_half_threshold", 55.0))
+        zero_th = float(_MFC.get("oos_trust_zero_threshold", 50.0))
+        try:
+            import os as _os, json as _json
+            from hive_logger import PATHS as _PATHS
+            _path = str(_PATHS.home / "ml_model_cache.json")
+            if not _os.path.exists(_path):
+                _path = "ml_model_cache.json"
+            _mtime = _os.path.getmtime(_path)
+            if cls._OOS_TRUST_CACHE and cls._OOS_TRUST_CACHE[0] == _mtime:
+                return cls._OOS_TRUST_CACHE[1]
+            with open(_path) as _f:
+                _oos = _json.load(_f).get("oos_accuracy")
+            if _oos is None:
+                factor = 1.0
+            elif _oos >= half_th:
+                factor = 1.0
+            elif _oos >= zero_th:
+                factor = 0.5
+            else:
+                factor = 0.0
+            cls._OOS_TRUST_CACHE = (_mtime, factor)
+            return factor
+        except Exception:
+            return 1.0  # 读不到时不惩罚（fail-open）
+
     def _compute_weighted_score(self, ticker: str, dim_scores: Dict,
                                 dim_confidence: Dict,
                                 dimension_coverage_pct: float,
@@ -235,6 +275,10 @@ class QueenDistiller:
                 ml_score = _safe_score(r.get("score", 5.0), default=5.0, lo=0.0, hi=10.0, label="ml_score")
                 ml_conf = _safe_score(r.get("confidence", 0.5), default=0.5, lo=0.0, hi=1.0, label="ml_conf")
                 ml_adjustment = (ml_score - 5.0) * 0.1 * ml_conf
+                # v0.40.0: 按 OOS（时序外样本）精度缩放 ML 信任度——
+                # in-sample 精度是自考自评；OOS <55% 减半、<50%（不如抛硬币）置零。
+                # 阈值见 config.ML_FEEDBACK_CONFIG（oos_trust_*）。
+                ml_adjustment *= self._ml_oos_trust_factor()
 
         _weights = override_weights if override_weights else self.DIMENSION_WEIGHTS
         _n_dims = len(_weights)

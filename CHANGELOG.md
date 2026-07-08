@@ -5,6 +5,29 @@
 
 ---
 
+## [0.40.0] — 2026-07-08 — 对标主流开源量化系统差距补齐（A-E）+ Finviz 删除
+
+> 用户要求对标 GitHub 主流免费量化系统（Qlib/vectorbt/FinRL/ai-hedge-fund/TradingAgents/Zipline+Alphalens）找高价值改进，并确认删除 Finviz。对标结论：多 agent 架构（同 45k★ ai-hedge-fund 但零 LLM 成本）、T+7 真实结果闭环、FF6+HAC 归因、bootstrap CI/walk-forward 工具（CLI）均已有勿重复造；真实差距 = ML 无时序验证、无横截面排名、三重屏障标签断链、维度 IC 无例行监控。
+
+### Removed — A. Finviz + 僵尸模块（连带修复新闻通道被死锚拖累）
+- **删除**：`finviz_sentiment.py`（Cloudflare 按代理出口 IP 永久 403）、`stocktwits_sentiment.py`（休眠未接线）、`vectorbt_bridge.py`（孤儿零调用）、`tests/test_finviz_sentiment.py`（15 测试）。
+- **关键修复**：旧新闻通道 = "Finviz 60% + Yahoo/AV 40%" 固定融合，Finviz 永久 403 把新闻分锚死在中性 50 的 60% 权重——`buzz_bee.py` 现以 newsapi（Yahoo/AV）为 news 通道 100% 基底，LLM 语义增强块保留（仍由 `llm_service.disable()` 门控，规则模式零调用）。冒烟验证：NVDA 新闻从常年"无新闻数据"变为真实主题"看多叙事主导"。
+- `bear_bee.py` 新闻回退分支改 newsapi；`data_fetcher.get_stocktwits_metrics` 改走 `real_data_sources.get_social_buzz`（Reddit 真实代理，删除 `_estimate_*` 编造样本）；残留清理：resilience（limiter/breaker/超时表）、config（ttl/高频源/STOCKTWITS 块）、queen_distiller REAL_SOURCES（+newsapi）、report_formatters 标签映射、测试陈旧标签。
+
+### Added — B. ML 时序验证（暴露重大盲区）
+- `ml_predictor.HGBModel` 新增 `_eval_oos_purged()`：按日期排序切尾部 25% 作外样本 + 7 天 embargo（防 t+7 标签泄漏），clone 模型上评估真实泛化精度，然后才全样本重训供生产（验证与部署分离）。`oos_accuracy` 持久化进 `ml_model_cache.json`。
+- **实测结果（这就是修复的意义）**：in-sample 68.6% vs **OOS 37.6%**——模型外样本不如抛硬币，纯记忆训练集；此前日报的"HGB 准确率 75.4%"是自考自评假象。
+- `queen_distiller._ml_oos_trust_factor()`：按 OOS 缩放 ML 调整信任度（`ML_FEEDBACK_CONFIG.oos_trust_*`：≥55% 全信、≥50% 减半、<50% 置零）——当前 OOS 37.6% → RivalBee 的 ±0.5 ML 调整被正确置零。新增 2 个测试（机制验证 + 置零验证）。
+
+### Added — C. 横截面排名埋点（对标 Qlib，只记账不改评分）
+- `alpha_hive_daily_report._post_scan_enrichment`：每日对 universe 算 final_score + 5 维度的 0-1 分位（`cs_rank`），随 swarm_results 与 report_snapshots 落盘。4-6 周后回测 rank-IC 决定是否升级为正式维度。
+
+### Added — D. 三重屏障标签回流（对标 López de Prado meta-labeling）
+- `paper_portfolio._record_barrier_outcome()`：平仓时 SL/TP/TIME 结果幂等写入 `pheromone.db.barrier_outcomes` 表；`_REPLAY_MODE` 守卫防沙盒回放污染生产表。已回填 25 笔历史（TP 11 笔均+9.8% / SL 6 笔均-7.4% / TIME 8 笔均-0.2%）。本期只写不读，meta-labeling 需 ≥100 笔再启动。
+
+### Added — E. 每蜂维度 rank-IC 月度报表（对标 Alphalens）
+- `self_analyst.compute_dimension_ic()`：每蜂原始分 vs T+7 的 Spearman rank-IC + 近 1/3 窗口趋势（改善/退化/持平），并入月度 brief「一.五」节，给 Track A 权重优化提供透明依据。首跑（47 样本）：OracleBee 全窗口 +0.368 但近期退化到 -0.003、ChronosBee 近期 -0.841 严重退化——样本薄仅作线索。
+
 ## [0.39.0] — 2026-07-07 — 纸面组合资金利用率参数上线（用户拍板 v0.38.2 回放拐点配置）
 
 ### Changed — `paper_portfolio.py CONFIG`

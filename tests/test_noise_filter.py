@@ -236,7 +236,7 @@ class TestConflictDrivenEnhancement:
 
     def _make_results(self, directions, confidences=None, dq_real_counts=None):
         """构造模拟 Agent 结果"""
-        REAL_SOURCES = {"real", "api", "sec", "yfinance", "finviz", "edgar"}
+        REAL_SOURCES = {"real", "api", "sec", "yfinance", "newsapi", "edgar"}
         results = []
         for i, d in enumerate(directions):
             conf = (confidences[i] if confidences else 0.6)
@@ -269,7 +269,7 @@ class TestConflictDrivenEnhancement:
 
     def test_dq_weighted_revote_resolves_to_bullish(self):
         """DQ 加权再投票：数据质量高的看多方胜出"""
-        REAL_SOURCES = {"real", "api", "sec", "yfinance", "finviz", "edgar"}
+        REAL_SOURCES = {"real", "api", "sec", "yfinance", "newsapi", "edgar"}
         results = [
             {"direction": "bullish", "confidence": 0.7, "data_quality": {"f0": "real", "f1": "real", "f2": "real"}},
             {"direction": "bullish", "confidence": 0.6, "data_quality": {"f0": "real", "f1": "real"}},

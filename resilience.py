@@ -232,7 +232,6 @@ _sessions_lock = threading.Lock()
 _SOURCE_TIMEOUTS = {
     "sec_edgar": 15,
     "polymarket": 15,
-    "finviz": 15,
     "reddit": 15,
     "slack": 20,
     "default": 15,
@@ -323,12 +322,8 @@ yfinance_breaker = CircuitBreaker("yfinance", failure_threshold=5, recovery_time
 reddit_limiter = RateLimiter(rate=1.0, burst=1)
 reddit_breaker = CircuitBreaker("reddit", failure_threshold=5, recovery_timeout=60.0)
 
-# Finviz: 限流严格
-finviz_limiter = RateLimiter(rate=0.5, burst=1)
-finviz_breaker = CircuitBreaker("finviz", failure_threshold=3, recovery_timeout=120.0)
-
-# StockTwits: 极保守（18s 间隔 ≈ 0.056 req/s）
-stocktwits_limiter = RateLimiter(rate=0.056, burst=1)
+# v0.40.0: finviz_limiter/finviz_breaker/stocktwits_limiter 已随
+# finviz_sentiment.py / stocktwits_sentiment.py 模块删除一并移除
 
 # Slack webhook: 低频发送
 slack_breaker = CircuitBreaker("slack", failure_threshold=3, recovery_timeout=300.0)

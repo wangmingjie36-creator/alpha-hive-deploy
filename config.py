@@ -59,13 +59,7 @@ API_KEYS = {
         }
     },
 
-    # StockTwits API
-    "STOCKTWITS": {
-        "base_url": "https://api.stocktwits.com/api/2",
-        "endpoints": {
-            "streams": "/streams/symbols/{symbol}.json",
-        }
-    },
+    # v0.40.0: STOCKTWITS 配置块已删除（公开 API 停用 403，模块已移除）
 
     # Yahoo Finance（通过 yfinance 库）
     "YAHOO_FINANCE": {
@@ -160,7 +154,7 @@ CACHE_CONFIG = {
     "cache_dir": str(PATHS.cache_dir),
     "ttl": {  # 缓存过期时间（秒）— 所有模块从此处读取，避免硬编码
         # 高频数据源（5~15 分钟）
-        "stocktwits": 300,        # 5 分钟
+        # v0.40.0: "finviz"/"stocktwits" ttl 已随模块删除移除
         "polymarket": 900,        # 15 分钟
         "polymarket_macro": 1800, # 30 分钟
         "yahoo_finance": 300,     # 5 分钟
@@ -168,7 +162,6 @@ CACHE_CONFIG = {
         "unusual_options": 300,   # 5 分钟
         "reddit": 600,            # 10 分钟（磁盘）
         "reddit_memory": 300,     # 5 分钟（内存）
-        "finviz": 900,            # 15 分钟
         "edgar_rss": 900,         # 15 分钟
         # 中频数据源（1~24 小时）
         "stocktwits_legacy": 3600,  # 1 小时（data_fetcher 旧路径）
@@ -187,7 +180,7 @@ def get_cache_ttl(source: str) -> int:
     """获取缓存 TTL（交易时段感知：非交易时段延长高频源 TTL）"""
     base_ttl = CACHE_CONFIG["ttl"].get(source, 300)
     # 高频源在非交易时段无需频繁刷新
-    _HIGH_FREQ_SOURCES = {"stocktwits", "yahoo_finance", "unusual_options", "reddit_memory", "finviz", "edgar_rss"}
+    _HIGH_FREQ_SOURCES = {"yahoo_finance", "unusual_options", "reddit_memory", "edgar_rss"}
     if source not in _HIGH_FREQ_SOURCES:
         return base_ttl
     try:
@@ -1208,7 +1201,7 @@ PORTFOLIO_CONFIG = {
     "benchmark_ticker": "SPY",      # 基准 = SPY 买入持有
 }
 
-# ==================== 情绪关键词（统一词库，newsapi + finviz 共用）====================
+# ==================== 情绪关键词（统一词库，newsapi 使用）====================
 SENTIMENT_KEYWORDS = {
     "bullish": {
         "surge", "soar", "rally", "beat", "record", "upgrade", "buy", "growth",
@@ -1279,6 +1272,11 @@ ML_FEEDBACK_CONFIG = {
     "max_adjustment": 2.0,          # 维度调整因子上限
     "enable_dimension_weighting": True,   # 是否启用维度权重调整
     "enable_vote_boosting": True,         # 是否启用 Agent 投票置信度调整
+    # v0.40.0: 按 OOS（purged 时序外样本）精度缩放 QueenDistiller 的 ML 调整信任度
+    # in-sample 精度是自考自评；OOS < half 阈值 → ml_adjustment 减半，
+    # < zero 阈值（不如抛硬币）→ 置零。OOS 缺失（样本<60）不惩罚。
+    "oos_trust_half_threshold": 55.0,
+    "oos_trust_zero_threshold": 50.0,
 }
 
 # ==================== ML HGB 树模型配置（v15.0 替代 SGD）====================

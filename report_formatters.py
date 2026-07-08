@@ -348,7 +348,7 @@ def _build_bear_contrarian(sorted_results: list) -> List[str]:
         sources = details.get("data_sources", {})
         if sources:
             src_labels = {"pheromone_board": "蜂群共享", "sec_api": "SEC直查",
-                          "options_api": "期权直查", "finviz_api": "Finviz",
+                          "options_api": "期权直查", "newsapi": "Yahoo/AV新闻",
                           "yfinance": "yfinance", "unavailable": "不可用",
                           "llm_enhanced": "LLM增强"}
             src_parts = [f"{k}={src_labels.get(v, v)}" for k, v in sources.items()]
@@ -731,7 +731,7 @@ def generate_swarm_markdown_report(reporter, swarm_results: Dict,
     md.append("**蜂群分工**：")
     md.append("- ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）")
     md.append("- OracleBeeEcho：市场预期（期权 IV/P-C Ratio/Gamma）")
-    md.append("- BuzzBeeWhisper：社交情绪（X/Reddit/Finviz）")
+    md.append("- BuzzBeeWhisper：社交情绪（X/Reddit/Yahoo·AV新闻）")
     md.append("- ChronosBeeHorizon：催化剂追踪（财报/事件日历）")
     md.append("- RivalBeeVanguard：竞争格局（ML 预测 + 行业对标）")
     md.append("- GuardBeeSentinel：交叉验证（共振检测 + 风险调整）")

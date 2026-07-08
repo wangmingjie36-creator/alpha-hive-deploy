@@ -90,31 +90,24 @@ class TestRedditSentimentIntegration:
         assert isinstance(mentions, (int, float))
 
 
-# ==================== Finviz 新闻（无需 Key）====================
+# ==================== 新闻情绪（Yahoo/AV newsapi，v0.40.0 替代 Finviz）====================
 
-class TestFinvizSentimentIntegration:
-    """Finviz 新闻情绪 冒烟测试"""
+class TestNewsapiSentimentIntegration:
+    """Yahoo/AV 新闻情绪 冒烟测试"""
 
-    def test_nvda_headlines(self):
-        from finviz_sentiment import get_finviz_sentiment
-        result = get_finviz_sentiment("NVDA")
+    def test_nvda_articles(self):
+        from newsapi_client import get_ticker_news
+        result = get_ticker_news("NVDA", max_articles=8)
 
         assert isinstance(result, dict)
-        assert "news_score" in result
-        assert result["total_titles"] > 0, "应获取到真实新闻标题"
+        assert "sentiment_score" in result
+        assert result.get("is_real_data"), "应获取到真实新闻文章"
 
     def test_score_in_range(self):
-        from finviz_sentiment import get_finviz_sentiment
-        result = get_finviz_sentiment("NVDA")
+        from newsapi_client import get_ticker_news
+        result = get_ticker_news("NVDA", max_articles=8)
 
-        assert 1.0 <= result["news_score"] <= 10.0
-
-    def test_has_sentiment_counts(self):
-        from finviz_sentiment import get_finviz_sentiment
-        result = get_finviz_sentiment("AAPL")
-
-        total = result["bullish_count"] + result["bearish_count"] + result["neutral_count"]
-        assert total == result["total_titles"]
+        assert 0.0 <= result["sentiment_score"] <= 10.0
 
 
 # ==================== FRED 宏观数据（需 FRED_API_KEY）====================

@@ -996,6 +996,9 @@ class HGBModel:
         # 兼容 SimpleMLModel / SGDMLModel 接口
         self.is_trained = False
         self.training_accuracy = 0.0
+        # v0.40.0: OOS（时序 purged split 外样本）精度——真实泛化能力指标；
+        # training_accuracy 是 in-sample 自考自评，仅作参考
+        self.oos_accuracy: float | None = None
         self.feature_stats = {}
 
     @property
@@ -1017,6 +1020,52 @@ class HGBModel:
     def weights(self, value):
         pass  # 树模型权重由 feature_importances_ 驱动
 
+    # ---- v0.40.0: purged 时序切分 OOS 验证 ----
+    def _eval_oos_purged(self, training_data: List[TrainingData],
+                         test_pct: float = 0.25, embargo_days: int = 7):
+        """按日期排序切分 train/test，train 尾与 test 头之间空出 embargo，
+        在 clone 模型上评估外样本精度。返回 OOS accuracy (0-100) 或 None。"""
+        import numpy as np
+        from datetime import datetime as _dt, timedelta as _td
+        from sklearn.base import clone as _clone
+
+        rows = sorted(training_data, key=lambda d: d.date or "")
+        n_test = max(10, int(len(rows) * test_pct))
+        if len(rows) - n_test < 30:
+            return None
+        train_rows, test_rows = rows[:-n_test], rows[-n_test:]
+
+        # embargo：剔除距 test 首日不足 embargo_days 的 train 尾部样本
+        # （其 t+7 标签窗口与 test 期重叠 = 泄漏）
+        try:
+            first_test = _dt.strptime(test_rows[0].date[:10], "%Y-%m-%d")
+            cutoff = first_test - _td(days=embargo_days)
+            train_rows = [r for r in train_rows
+                          if _dt.strptime(r.date[:10], "%Y-%m-%d") <= cutoff]
+        except (ValueError, TypeError):
+            pass  # 日期不可解析时退化为纯时序切分（仍优于随机切分）
+        if len(train_rows) < 30:
+            return None
+
+        Xtr = np.array([_extract_features(d) for d in train_rows], dtype=np.float64)
+        ytr = np.array([1 if d.win_7d else 0 for d in train_rows])
+        Xte = np.array([_extract_features(d) for d in test_rows], dtype=np.float64)
+        yte = np.array([1 if d.win_7d else 0 for d in test_rows])
+        if len(set(ytr.tolist())) < 2:
+            return None  # 单一类别无法训练
+
+        from collections import Counter as _Counter
+        _c = _Counter(ytr.tolist())
+        _w = np.array([len(ytr) / (2 * _c[yi]) for yi in ytr])
+
+        clf = _clone(self._clf)
+        clf.set_params(early_stopping=len(train_rows) >= 30)
+        clf.fit(Xtr, ytr, sample_weight=_w)
+        oos = float((clf.predict(Xte) == yte).mean() * 100)
+        _log.info("HGB OOS 验证（purged 时序切分）：train=%d test=%d embargo=%dd → OOS %.1f%%",
+                  len(train_rows), len(test_rows), embargo_days, oos)
+        return oos
+
     # ---- 训练 ----
     def train(self, training_data: List[TrainingData]) -> Dict:
         """全量训练（含类别平衡 + early stopping）"""
@@ -1034,6 +1083,19 @@ class HGBModel:
         counts = Counter(y.tolist())
         total_n = len(y)
         sample_weights = np.array([total_n / (2 * counts[yi]) for yi in y])
+
+        # ── v0.40.0: OOS 时序验证（purged split，先验证后全样本部署）────────
+        # training_accuracy 是 in-sample 自考自评（曾报 75% 制造虚假安全感）；
+        # 这里按日期排序切出尾部 25% 作外样本，train 尾与 test 头之间空出
+        # embargo_days（=标签横跨期 7 天，防 t+7 标签泄漏），在 clone 模型上
+        # 评估真实泛化精度，然后才全样本重训供生产预测（验证与部署分离）。
+        self.oos_accuracy = None
+        if len(training_data) >= 60:
+            try:
+                self.oos_accuracy = self._eval_oos_purged(
+                    training_data, test_pct=0.25, embargo_days=7)
+            except Exception as _e_oos:
+                _log.warning("OOS 时序验证失败（不影响训练）: %s", _e_oos)
 
         # 样本量极小时关闭 early stopping（需要 ≥20 条验证集）
         if len(training_data) < 30:
@@ -1070,9 +1132,10 @@ class HGBModel:
             _log.debug("Permutation importance 计算失败: %s", _e_pi)
 
         _n_iter = getattr(self._clf, "n_iter_", 0)
+        _oos_txt = f"{self.oos_accuracy:.1f}%" if self.oos_accuracy is not None else "N/A(样本<60)"
         _log.info(
-            "HGB 训练完成：%d 样本，%d 轮迭代，准确率 %.1f%%，Top 特征 %s",
-            len(training_data), _n_iter, self.training_accuracy,
+            "HGB 训练完成：%d 样本，%d 轮迭代，OOS准确率 %s（in-sample %.1f%% 仅参考），Top 特征 %s",
+            len(training_data), _n_iter, _oos_txt, self.training_accuracy,
             sorted(self.weights.items(), key=lambda x: x[1], reverse=True)[:3],
         )
 
@@ -1080,6 +1143,7 @@ class HGBModel:
             "status": "success",
             "samples": len(training_data),
             "accuracy": self.training_accuracy,
+            "oos_accuracy": self.oos_accuracy,  # v0.40.0: 真实泛化精度（时序外样本）
             "weights": self.weights,
             "n_iter": _n_iter,
         }
@@ -1151,6 +1215,7 @@ class HGBModel:
             "feature_names": FEATURE_NAMES,
             "is_trained": self.is_trained,
             "training_accuracy": self.training_accuracy,
+            "oos_accuracy": self.oos_accuracy,  # v0.40.0: 时序外样本精度
             "n_samples_seen": self._n_samples_seen,
             "feature_stats": self.feature_stats,
             "weights": self.weights,
@@ -1205,6 +1270,7 @@ class HGBModel:
 
         self.is_trained = data.get("is_trained", False)
         self.training_accuracy = data.get("training_accuracy", 0.0)
+        self.oos_accuracy = data.get("oos_accuracy")  # v0.40.0
         self._n_samples_seen = data.get("n_samples_seen", 0)
         self.feature_stats = data.get("feature_stats", {})
         self._perm_importance = data.get("perm_importance", [0.0] * len(FEATURE_NAMES))

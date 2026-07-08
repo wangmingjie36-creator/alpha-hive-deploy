@@ -108,26 +108,27 @@ class DataFetcher:
             return cached
 
         try:
-            # 实际实现：调用 StockTwits API
-            # 这里提供示例实现
-            _log.info("🔄 获取 StockTwits 数据: %s", ticker)
-
-            # StockTwits API 实时路径已迁移到 stocktwits_sentiment.py
-
-            # 暂时返回合理的示例数据
+            # v0.40.0: StockTwits 公开 API 已停用(403)、stocktwits_sentiment.py 已删除。
+            # 改走 real_data_sources.get_social_buzz（Reddit ApeWisdom 真实代理），
+            # 不再返回 _estimate_* 编造的样本数据。
+            _log.info("🔄 获取社交热度数据（Reddit 代理）: %s", ticker)
+            from real_data_sources import get_social_buzz
+            buzz = get_social_buzz(ticker)
             metrics = {
-                "messages_per_day": self._estimate_stocktwits_volume(ticker),
-                "bullish_ratio": self._estimate_bullish_ratio(ticker),
-                "sentiment_trend": "positive",
+                "messages_per_day": int(buzz.get("messages_per_day") or 0),
+                "bullish_ratio": float(buzz.get("bullish_pct") or 50.0) / 100.0,
+                "sentiment_trend": "unknown",
+                "source": buzz.get("source", "reddit_apewisdom"),
+                "data_quality": buzz.get("data_quality", "fallback"),
                 "last_updated": datetime.now().isoformat(),
             }
 
             self.cache.save(cache_key, metrics)
             return metrics
 
-        except (ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
-            _log.error("❌ StockTwits 获取失败 %s: %s", ticker, e)
-            return {"messages_per_day": 0, "bullish_ratio": 0.5}
+        except (ImportError, ConnectionError, TimeoutError, OSError, ValueError, KeyError) as e:
+            _log.error("❌ 社交热度获取失败 %s: %s", ticker, e)
+            return {"messages_per_day": 0, "bullish_ratio": 0.5, "data_quality": "fallback"}
 
     # ==================== Polymarket 赔率 ====================
 
@@ -398,19 +399,8 @@ class DataFetcher:
 
     # ==================== 辅助方法 ====================
 
-    def _estimate_stocktwits_volume(self, ticker: str) -> int:
-        """估计 StockTwits 消息量"""
-        base_volumes = {
-            "NVDA": 45000,
-            "TSLA": 38000,
-            "VKTX": 8000,
-        }
-        return base_volumes.get(ticker, 15000)
-
-    def _estimate_bullish_ratio(self, ticker: str) -> float:
-        """估计看多比例"""
-        base_ratios = {"NVDA": 0.75, "TSLA": 0.68, "VKTX": 0.60}
-        return base_ratios.get(ticker, 0.55)
+    # v0.40.0: _estimate_stocktwits_volume/_estimate_bullish_ratio 已删除——
+    # 编造的样本数据反模式；社交热度改走 real_data_sources.get_social_buzz
 
     def _estimate_yes_odds(self, ticker: str) -> float:
         """估计 Polymarket YES 赔率"""

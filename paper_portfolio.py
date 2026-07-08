@@ -538,7 +538,60 @@ def _close_position(pos: Position, exit_reason: str, exit_price: float, exit_dat
         confidence=pos.confidence,
         score=pos.score,
     )
+    # v0.40.0 (D): 三重屏障标签回流——SL/TP/TIME 出场结果写入 pheromone.db，
+    # 为未来 meta-labeling（用屏障结果训练"该不该信/该下多大"）攒数据。
+    # 本期只写不读：ML 训练启用需 ≥100 笔样本（当前 ~25 笔）。失败不影响平仓。
+    # run_replay 沙盒回放不回写（_REPLAY_MODE 守卫，防实验数据污染生产表）。
+    if not _REPLAY_MODE:
+        try:
+            _record_barrier_outcome(trade)
+        except Exception as _e_bo:
+            import logging as _lg
+            _lg.getLogger("alpha_hive").debug("barrier_outcome 回写失败(非致命): %s", _e_bo)
     return trade, pnl_usd
+
+
+# v0.40.0: 回放模式标志——run_replay 期间为 True，屏障结果不回写生产 DB
+_REPLAY_MODE = False
+
+
+def _record_barrier_outcome(trade: "ClosedTrade") -> None:
+    """把三重屏障出场结果幂等写入 pheromone.db 的 barrier_outcomes 表。"""
+    import sqlite3
+    db_path = BASE_DIR / "pheromone.db"
+    con = sqlite3.connect(str(db_path), timeout=10)
+    try:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS barrier_outcomes (
+                ticker TEXT NOT NULL,
+                entry_date TEXT NOT NULL,
+                direction TEXT,
+                exit_date TEXT,
+                exit_reason TEXT,      -- SL / TP / TIME
+                net_return_pct REAL,
+                holding_days INTEGER,
+                score REAL,
+                confidence TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (ticker, entry_date)
+            )
+        """)
+        con.execute("""
+            INSERT INTO barrier_outcomes
+                (ticker, entry_date, direction, exit_date, exit_reason,
+                 net_return_pct, holding_days, score, confidence)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(ticker, entry_date) DO UPDATE SET
+                exit_date=excluded.exit_date,
+                exit_reason=excluded.exit_reason,
+                net_return_pct=excluded.net_return_pct,
+                holding_days=excluded.holding_days
+        """, (trade.ticker, trade.entry_date, trade.direction, trade.exit_date,
+              trade.exit_reason, trade.net_return_pct, trade.holding_days,
+              trade.score, trade.confidence))
+        con.commit()
+    finally:
+        con.close()
 
 
 def _mark_to_market(positions: List[Position], as_of: str) -> Tuple[float, List[Dict]]:
@@ -747,7 +800,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
     Returns:
         {"equity": [...], "closed": [...], "final_nav": float, "config": dict}
     """
-    global POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE
+    global POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE, _REPLAY_MODE
 
     if dates is None:
         dates = [d for d in _all_snapshot_dates() if d >= CONFIG["bootstrap_date"]]
@@ -757,6 +810,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
 
     _orig_paths = (POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE)
     _orig_config = {k: (dict(v) if isinstance(v, dict) else v) for k, v in CONFIG.items()}
+    _REPLAY_MODE = True  # v0.40.0: 回放期间屏障结果不回写生产 pheromone.db
     try:
         POSITIONS_FILE = state_dir / "positions.jsonl"
         CLOSED_FILE = state_dir / "closed_trades.jsonl"
@@ -781,6 +835,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
         POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE = _orig_paths
         CONFIG.clear()
         CONFIG.update(_orig_config)
+        _REPLAY_MODE = False
 
 
 # ══════════════════════════════════════════════════════════════════════════════

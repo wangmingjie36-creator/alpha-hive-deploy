@@ -95,71 +95,52 @@ class BuzzBeeWhisper(BeeAgent):
                 _log.warning("BuzzBeeWhisper Reddit unavailable for %s: %s", ticker, e)
                 reddit_desc = "Reddit 不可用"
 
-            # 5. Finviz 新闻情绪（关键词基础 + LLM 语义增强）
+            # 5. 新闻情绪（v0.40.0: Yahoo/AV newsapi 为主源；Finviz 已删除——
+            #    其被 Cloudflare 按出口 IP 永久 403，且旧 60/40 融合把新闻分
+            #    锚死在中性 50 的 60% 权重上，删除后信号更干净）
             news_signal = 50  # 默认中性
             news_desc = ""
             news_reasoning = ""
-            news_mode = "keyword"
-            try:
-                from finviz_sentiment import get_finviz_sentiment
-                finviz = get_finviz_sentiment(ticker)
-                news_signal = finviz["news_score"] * 10  # 0-10 → 0-100
-                news_desc = finviz.get("news_signal", "")
-                # P1-1: Finviz 抓取失败的降级结果（is_fallback）→ 标注不可用，
-                # 让 data_quality 能区分"真没新闻"vs"通道挂了"
-                if finviz.get("is_fallback"):
-                    news_mode = "fallback"
-                    news_desc = "新闻不可用（抓取失败）"
-
-                # LLM 语义分析（有 API Key 时自动启用）
-                headlines = finviz.get("top_bullish", []) + finviz.get("top_bearish", [])
-                if not headlines:
-                    # 尝试获取原始标题
-                    try:
-                        from finviz_sentiment import _client as fv_client
-                        if fv_client:
-                            headlines = fv_client.get_news_titles(ticker, max_titles=10)
-                    except (ImportError, AttributeError, ConnectionError) as e:
-                        _log.debug("Finviz client headlines fallback for %s: %s", ticker, e)
-
-                if headlines:
-                    try:
-                        import llm_service
-                        if llm_service.is_available():
-                            llm_news = llm_service.analyze_news_sentiment(ticker, headlines)
-                            if llm_news:
-                                # LLM 分析成功：混合关键词 30% + LLM 70%（LLM 情绪理解更强）
-                                llm_news_score = _safe_score(
-                                    llm_news.get("sentiment_score"), default=5.0,
-                                    lo=0.0, hi=10.0, label="BuzzBee_llm_sentiment",
-                                ) * 10
-                                news_signal = news_signal * 0.30 + llm_news_score * 0.70
-                                news_desc = llm_news.get("key_theme", news_desc)
-                                news_reasoning = llm_news.get("reasoning", "")
-                                news_mode = "llm_enhanced"
-                    except (ImportError, ConnectionError, ValueError, KeyError) as e:
-                        _log.debug("LLM news analysis unavailable for %s: %s", ticker, e)
-            except LLM_ERRORS as e:
-                _log.warning("BuzzBeeWhisper Finviz news unavailable for %s: %s", ticker, e)
-                news_desc = "新闻不可用"
-
-            # 5b. P4: Yahoo Finance + AV 新闻摘要（增强新闻面，与 Finviz 加权融合）
+            news_mode = "fallback"  # 拉到真实文章前视为不可用
+            headlines: list = []
             try:
                 from newsapi_client import get_ticker_news
-                news_ext = get_ticker_news(ticker, max_articles=8)
+                news_ext = get_ticker_news(ticker, max_articles=10)
                 if news_ext.get("is_real_data") and news_ext.get("total_articles", 0) >= 3:
-                    ext_signal = _safe_score(
+                    news_signal = _safe_score(
                         news_ext.get("sentiment_score"), default=5.0,
-                        lo=0.0, hi=10.0, label="BuzzBee_ext_sentiment",
+                        lo=0.0, hi=10.0, label="BuzzBee_news_sentiment",
                     ) * 10
-                    # 融合：Finviz 60% + 扩展新闻 40%（扩展新闻覆盖更广）
-                    news_signal = news_signal * 0.60 + ext_signal * 0.40
-                    if not news_desc or "不可用" in news_desc:
-                        news_desc = news_ext.get("dominant_theme", "")
-                    _log.debug("BuzzBeeWhisper news extended for %s: src=%s articles=%d",
+                    news_desc = news_ext.get("dominant_theme", "") or "新闻情绪中性"
+                    news_mode = "keyword"
+                    headlines = [a.get("title", "") for a in (news_ext.get("articles") or [])
+                                 if a.get("title")][:10]
+                    _log.debug("BuzzBeeWhisper news for %s: src=%s articles=%d",
                                ticker, news_ext.get("source"), news_ext["total_articles"])
+                else:
+                    news_desc = "无新闻数据"
             except LLM_ERRORS as e:
-                _log.debug("BuzzBeeWhisper extended news unavailable for %s: %s", ticker, e)
+                _log.warning("BuzzBeeWhisper news unavailable for %s: %s", ticker, e)
+                news_desc = "新闻不可用（抓取失败）"
+
+            # 5b. LLM 语义增强（有 API Key 时自动启用；默认 Cowork 本地不走）
+            if headlines:
+                try:
+                    import llm_service
+                    if llm_service.is_available():
+                        llm_news = llm_service.analyze_news_sentiment(ticker, headlines)
+                        if llm_news:
+                            # 混合关键词 30% + LLM 70%（LLM 情绪理解更强）
+                            llm_news_score = _safe_score(
+                                llm_news.get("sentiment_score"), default=5.0,
+                                lo=0.0, hi=10.0, label="BuzzBee_llm_sentiment",
+                            ) * 10
+                            news_signal = news_signal * 0.30 + llm_news_score * 0.70
+                            news_desc = llm_news.get("key_theme", news_desc)
+                            news_reasoning = llm_news.get("reasoning", "")
+                            news_mode = "llm_enhanced"
+                except (ImportError, ConnectionError, ValueError, KeyError) as e:
+                    _log.debug("LLM news analysis unavailable for %s: %s", ticker, e)
 
             # 6. Yahoo Finance 热搜榜（散户关注度，免费无需注册）
             yahoo_signal = 50.0
@@ -289,7 +270,8 @@ class BuzzBeeWhisper(BeeAgent):
                     "reddit": ("real" if (reddit_data and reddit_data.get("rank"))
                                else ("fallback" if (not reddit_data or reddit_data.get("is_fallback"))
                                      else "quiet")),
-                    "finviz_news": news_mode if news_desc and "不可用" not in news_desc else "fallback",
+                    # v0.40.0: 新闻通道主源 = Yahoo/AV newsapi（Finviz 已删除）
+                    "news": news_mode if news_desc and "不可用" not in news_desc else "fallback",
                 },
                 details={
                     "sentiment_pct": bullish_pct,
