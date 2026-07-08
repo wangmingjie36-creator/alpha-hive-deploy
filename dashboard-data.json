@@ -126,19 +126,19 @@
   "中性"
  ],
  "acc_dir_accs": [
-  52.7,
-  55.3,
-  47.0
+  53.2,
+  53.7,
+  47.9
  ],
  "acc_dir_tots": [
-  258,
-  38,
-  117
+  263,
+  41,
+  119
  ],
  "acc_dir_rets": [
-  0.33,
-  -0.19,
-  -0.46
+  0.38,
+  -0.52,
+  -0.32
  ],
  "acc_weekly": [
   {
@@ -209,9 +209,9 @@
   },
   {
    "week": "2026-W25",
-   "accuracy": 55.0,
-   "total": 20,
-   "avg_ret": 0.08
+   "accuracy": 60.0,
+   "total": 30,
+   "avg_ret": 1.55
   }
  ],
  "acc_weekly_by_dir": [
@@ -283,9 +283,9 @@
   },
   {
    "week": "2026-W25",
-   "bullish": 57.1,
-   "bearish": null,
-   "neutral": 50.0
+   "bullish": 63.2,
+   "bearish": 40.0,
+   "neutral": 66.7
   }
  ],
  "fg_history": [
@@ -17104,42 +17104,202 @@
    "cum_net_pct": 4.57,
    "cum_spy_pct": 12.27,
    "correct": false
+  },
+  {
+   "date": "2026-06-26",
+   "ticker": "NVDA",
+   "direction": "bullish",
+   "gross_ret": 2.29,
+   "net_ret": 2.22,
+   "spy_ret": 2.57,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 53566.9,
+   "cap_net": 52287.43,
+   "cap_spy": 56133.84,
+   "cum_gross_pct": 7.13,
+   "cum_net_pct": 4.57,
+   "cum_spy_pct": 12.27,
+   "correct": true
+  },
+  {
+   "date": "2026-06-26",
+   "ticker": "QCOM",
+   "direction": "bearish",
+   "gross_ret": 3.39,
+   "net_ret": 3.24,
+   "spy_ret": 2.57,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 53566.9,
+   "cap_net": 52287.43,
+   "cap_spy": 56133.84,
+   "cum_gross_pct": 7.13,
+   "cum_net_pct": 4.57,
+   "cum_spy_pct": 12.27,
+   "correct": true
+  },
+  {
+   "date": "2026-06-26",
+   "ticker": "TSLA",
+   "direction": "bullish",
+   "gross_ret": 9.95,
+   "net_ret": 9.84,
+   "spy_ret": 2.57,
+   "exit_reason": "TP",
+   "cap_gross": 53566.9,
+   "cap_net": 52287.43,
+   "cap_spy": 56133.84,
+   "cum_gross_pct": 7.13,
+   "cum_net_pct": 4.57,
+   "cum_spy_pct": 12.27,
+   "correct": true
+  },
+  {
+   "date": "2026-06-26",
+   "ticker": "MSFT",
+   "direction": "neutral",
+   "gross_ret": 4.25,
+   "net_ret": 4.18,
+   "spy_ret": 2.57,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 53566.9,
+   "cap_net": 52287.43,
+   "cap_spy": 56133.84,
+   "cum_gross_pct": 7.13,
+   "cum_net_pct": 4.57,
+   "cum_spy_pct": 12.27,
+   "correct": true
+  },
+  {
+   "date": "2026-06-26",
+   "ticker": "VKTX",
+   "direction": "neutral",
+   "gross_ret": 10.75,
+   "net_ret": 10.38,
+   "spy_ret": 2.57,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 53566.9,
+   "cap_net": 52287.43,
+   "cap_spy": 56133.84,
+   "cum_gross_pct": 7.13,
+   "cum_net_pct": 4.57,
+   "cum_spy_pct": 12.27,
+   "correct": true
+  },
+  {
+   "date": "2026-06-26",
+   "ticker": "BILI",
+   "direction": "bearish",
+   "gross_ret": -6.86,
+   "net_ret": -7.26,
+   "spy_ret": 2.57,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 53566.9,
+   "cap_net": 52287.43,
+   "cap_spy": 56133.84,
+   "cum_gross_pct": 7.13,
+   "cum_net_pct": 4.57,
+   "cum_spy_pct": 12.27,
+   "correct": false
+  },
+  {
+   "date": "2026-06-26",
+   "ticker": "AMZN",
+   "direction": "bullish",
+   "gross_ret": 5.71,
+   "net_ret": 5.62,
+   "spy_ret": 2.57,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 53566.9,
+   "cap_net": 52287.43,
+   "cap_spy": 56133.84,
+   "cum_gross_pct": 7.13,
+   "cum_net_pct": 4.57,
+   "cum_spy_pct": 12.27,
+   "correct": true
+  },
+  {
+   "date": "2026-06-26",
+   "ticker": "META",
+   "direction": "bullish",
+   "gross_ret": 10.42,
+   "net_ret": 10.33,
+   "spy_ret": 2.57,
+   "exit_reason": "TP",
+   "cap_gross": 53566.9,
+   "cap_net": 52287.43,
+   "cap_spy": 56133.84,
+   "cum_gross_pct": 7.13,
+   "cum_net_pct": 4.57,
+   "cum_spy_pct": 12.27,
+   "correct": true
+  },
+  {
+   "date": "2026-06-26",
+   "ticker": "RKLB",
+   "direction": "bearish",
+   "gross_ret": -10.05,
+   "net_ret": -10.31,
+   "spy_ret": 2.57,
+   "exit_reason": "SL",
+   "cap_gross": 53064.15,
+   "cap_net": 51771.7,
+   "cap_spy": 56262.24,
+   "cum_gross_pct": 6.13,
+   "cum_net_pct": 3.54,
+   "cum_spy_pct": 12.52,
+   "correct": false
+  },
+  {
+   "date": "2026-06-26",
+   "ticker": "CRCL",
+   "direction": "bullish",
+   "gross_ret": -12.04,
+   "net_ret": -12.55,
+   "spy_ret": 2.57,
+   "exit_reason": "SL",
+   "cap_gross": 53064.15,
+   "cap_net": 51771.7,
+   "cap_spy": 56262.24,
+   "cum_gross_pct": 6.13,
+   "cum_net_pct": 3.54,
+   "cum_spy_pct": 12.52,
+   "correct": false
   }
  ],
  "trading_stats": {
-  "exit_tp_count": 109,
-  "exit_sl_count": 152,
-  "exit_close_count": 345,
-  "avg_gross_ret": 0.584,
-  "avg_net_ret": 0.375,
+  "exit_tp_count": 111,
+  "exit_sl_count": 154,
+  "exit_close_count": 351,
+  "avg_gross_ret": 0.604,
+  "avg_net_ret": 0.395,
   "avg_cost": 0.209,
-  "net_win_rate": 48.8,
-  "sharpe_net": 0.175,
+  "net_win_rate": 49.2,
+  "sharpe_net": 0.189,
   "max_dd_net_pct": 9.94,
   "max_dd_gross_pct": 9.04,
   "profit_factor": 1.12,
-  "total_spy_ret": 12.27,
-  "alpha_vs_spy": -7.69,
+  "total_spy_ret": 12.52,
+  "alpha_vs_spy": -8.98,
   "initial_capital": 50000.0,
   "position_size_pct": 0.1,
-  "final_cap_gross": 53566.9,
-  "final_cap_net": 52287.43,
-  "final_cap_spy": 56133.84,
+  "final_cap_gross": 53064.15,
+  "final_cap_net": 51771.7,
+  "final_cap_spy": 56262.24,
   "methodology": "independent_per_trade_no_concurrency",
   "realistic": {
    "initial_capital": 50000.0,
-   "final_nav": 51772.43,
-   "total_return_pct": 3.54,
-   "total_pnl_usd": 1772.43,
-   "spy_end_nav": 54080.87,
-   "spy_return_pct": 8.16,
-   "alpha_vs_spy": -4.62,
-   "sharpe_ratio": 0.174,
-   "profit_factor": 1.092,
-   "max_drawdown_pct": 10.64,
-   "win_rate_pct": 47.1,
-   "trades_entered": 119,
-   "predictions_total": 606,
+   "final_nav": 51139.41,
+   "total_return_pct": 2.28,
+   "total_pnl_usd": 1139.41,
+   "spy_end_nav": 54222.29,
+   "spy_return_pct": 8.44,
+   "alpha_vs_spy": -6.17,
+   "sharpe_ratio": 0.114,
+   "profit_factor": 1.057,
+   "max_drawdown_pct": 10.71,
+   "win_rate_pct": 46.7,
+   "trades_entered": 120,
+   "predictions_total": 616,
    "max_concurrent": 15,
    "methodology": "portfolio_backtest_with_concurrency_limit"
   }
@@ -17626,7 +17786,7 @@
    ]
   }
  },
- "_generated_at": "2026-07-08 02:08 PDT",
+ "_generated_at": "2026-07-08 02:29 PDT",
  "_date": "2026-07-07",
- "_deploy_ts": 1783501739
+ "_deploy_ts": 1783502992
 }
