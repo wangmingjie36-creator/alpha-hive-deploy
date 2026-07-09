@@ -1,21 +1,20 @@
 {
   "ticker": "NVDA",
   "date": "2026-07-08",
-  "composite_score": 6.07,
+  "composite_score": 6.06,
   "direction": "bullish",
   "price_target": 0.0,
   "stop_loss": 0.0,
   "entry_price": 204.1199951171875,
   "agent_votes": {
-    "CodeExecutorAgent": 6.0,
-    "RivalBeeVanguard": 6.06,
-    "OracleBeeEcho": 6.423076923076923,
-    "ChronosBeeHorizon": 5.5,
     "BuzzBeeWhisper": 7.18,
-    "ScoutBeeNova": 4.63025,
+    "OracleBeeEcho": 6.1692307692307695,
+    "QueenDistiller": 6.06,
+    "CodeExecutorAgent": 5.0,
     "GuardBeeSentinel": 5.91,
-    "BearBeeContrarian": 3.0,
-    "QueenDistiller": 6.07
+    "RivalBeeVanguard": 5.83,
+    "ChronosBeeHorizon": 5.5,
+    "ScoutBeeNova": 5.00525
   },
   "weights_used": {
     "signal": 0.2094,
@@ -27,17 +26,17 @@
   "low_conviction": false,
   "low_conviction_reason": "",
   "cs_rank": {
-    "final": 0.5,
-    "signal": 0.5,
-    "catalyst": 0.5,
-    "sentiment": 0.5,
-    "odds": 0.5,
-    "risk_adj": 0.5
+    "final": 0.889,
+    "signal": 0.556,
+    "catalyst": 0.333,
+    "sentiment": 1.0,
+    "odds": 0.0,
+    "risk_adj": 0.889
   },
   "actual_prices": {
     "t1": null,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-07-09T11:49:18.663805"
+  "created_at": "2026-07-09T11:55:53.892931"
 }

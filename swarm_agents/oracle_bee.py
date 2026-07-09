@@ -39,7 +39,8 @@ class OracleBeeEcho(BeeAgent):
                         continue
                     atm_idx = (calls["strike"] - stock_price).abs().idxmin()
                     atm_iv = float(calls.loc[atm_idx, "impliedVolatility"])
-                    if atm_iv > 0:
+                    # 与 options_analyzer S15 同款合理性边界：过滤限流链的垃圾 IV
+                    if 0.02 < atm_iv < 2.0:
                         exp_date = datetime.strptime(exp, "%Y-%m-%d")
                         dte = max(1, (exp_date - datetime.now()).days)
                         ivs.append({"expiry": exp, "dte": dte, "atm_iv": round(atm_iv * 100, 2)})

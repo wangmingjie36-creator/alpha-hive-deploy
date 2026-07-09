@@ -5,6 +5,21 @@
 
 ---
 
+## [0.41.2] — 2026-07-09 — 修复近端磁吸目标价垃圾值（NVDA $50/+307%，v40.1 假价反模式的期权版漏网）
+
+> 用户报告 NVDA ML 页"近端磁吸目标价 $50 ↑+307.2%"（现价 $203.62）。根因：`oracle_bee._calc_max_pain` 是漏网旧实现——绕过 CBOE 裸调 yfinance 最近到期日；深夜限流返回**全零 OI 链**时每个行权价痛苦值恒为 0，`min()` 退化取链内最低行权价（NVDA 周链最低 $50）。审计 7/8 全部 10 票：**7 只垃圾**（TSLA +392%、META +504% 等）。
+
+### Fixed — `swarm_agents/oracle_bee.py`
+- `_calc_max_pain` 主源改 **CBOE**（`fetch_cboe_chain`，与期权链同源，取返回链最近到期日），yfinance 仅兜底
+- 抽出纯函数 `_max_pain_from_oi` 并加双重退化保护：① 总 OI < 500（限流空链常态）返回 None；② 结果偏离现价 >50% 视为数据垃圾返回 None——宁可诚实空缺不给假磁吸价
+- 仅影响展示与 discovery 摘要，不进评分公式，修复零评分副作用
+
+### Added — `tests/test_no_fake_price.py`
+- `test_max_pain_degenerate_guards`：全零 OI / 薄 OI / 偏离 >50% 三种退化必须返回 None，正常链算出合理值
+
+### 数据修复
+- 全量重跑 7/8 规则模式，10 票近端磁吸价用 CBOE 重算（NVDA 实测 $200 +1.9%，与远期参考 $180 相互印证），部署 gh-pages
+
 ## [0.41.1] — 2026-07-09 — 删除"对比模式"（手机端幽灵横条元凶之一）
 
 ### Removed
