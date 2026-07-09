@@ -1,10 +1,10 @@
 {
- "fv": 42,
- "fg_label": "恐惧",
+ "fv": 47,
+ "fg_label": "中性",
  "scores": [
   [
    "NVDA",
-   6.2
+   6.1
   ],
   [
    "MSFT",
@@ -50,11 +50,11 @@
  ],
  "radar": {
   "NVDA": [
-   45.0,
+   46.3,
    55.0,
-   69.8,
-   61.7,
-   74.1
+   71.8,
+   64.2,
+   59.1
   ],
   "MSFT": [
    57.3,
@@ -126,27 +126,21 @@
   "中性"
  ],
  "acc_dir_accs": [
-  52.0,
-  56.4,
-  50.8
+  51.9,
+  57.5,
+  52.1
  ],
  "acc_dir_tots": [
-  256,
-  39,
-  118
+  262,
+  40,
+  121
  ],
  "acc_dir_rets": [
-  0.18,
-  -0.27,
-  -0.62
+  0.17,
+  -0.0,
+  -0.51
  ],
  "acc_weekly": [
-  {
-   "week": "2026-W14",
-   "accuracy": 61.2,
-   "total": 49,
-   "avg_ret": 9.31
-  },
   {
    "week": "2026-W15",
    "accuracy": 54.0,
@@ -212,15 +206,15 @@
    "accuracy": 56.7,
    "total": 30,
    "avg_ret": 1.55
+  },
+  {
+   "week": "2026-W26",
+   "accuracy": 70.0,
+   "total": 10,
+   "avg_ret": 0.17
   }
  ],
  "acc_weekly_by_dir": [
-  {
-   "week": "2026-W14",
-   "bullish": 96.7,
-   "bearish": 11.1,
-   "neutral": 0.0
-  },
   {
    "week": "2026-W15",
    "bullish": 63.2,
@@ -286,6 +280,12 @@
    "bullish": 63.2,
    "bearish": 40.0,
    "neutral": 50.0
+  },
+  {
+   "week": "2026-W26",
+   "bullish": 50.0,
+   "bearish": null,
+   "neutral": 100.0
   }
  ],
  "fg_history": [
@@ -559,7 +559,7 @@
   },
   {
    "date": "2026-07-08",
-   "value": 42
+   "value": 47
   }
  ],
  "trend_data": {
@@ -874,7 +874,7 @@
    },
    {
     "date": "2026-07-08",
-    "score": 6.2
+    "score": 6.1
    }
   ],
   "MSFT": [
@@ -3568,7 +3568,7 @@
   "2026-07-08": [
    {
     "ticker": "NVDA",
-    "score": 6.2,
+    "score": 6.1,
     "direction": "bullish"
    },
    {
@@ -7445,9 +7445,9 @@
  "search_index": [
   {
    "ticker": "NVDA",
-   "score": 6.2,
+   "score": 6.1,
    "direction": "看多",
-   "price": 203.62
+   "price": 203.84
   },
   {
    "ticker": "MSFT",
@@ -17360,50 +17360,210 @@
    "cum_net_pct": 3.54,
    "cum_spy_pct": 12.52,
    "correct": false
+  },
+  {
+   "date": "2026-06-29",
+   "ticker": "AMZN",
+   "direction": "neutral",
+   "gross_ret": 1.85,
+   "net_ret": 1.76,
+   "spy_ret": 1.39,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 53156.8,
+   "cap_net": 51859.86,
+   "cap_spy": 56331.57,
+   "cum_gross_pct": 6.31,
+   "cum_net_pct": 3.72,
+   "cum_spy_pct": 12.66,
+   "correct": true
+  },
+  {
+   "date": "2026-06-29",
+   "ticker": "RKLB",
+   "direction": "bullish",
+   "gross_ret": -10.04,
+   "net_ret": -10.29,
+   "spy_ret": 1.39,
+   "exit_reason": "SL",
+   "cap_gross": 52654.55,
+   "cap_net": 51345.11,
+   "cap_spy": 56400.9,
+   "cum_gross_pct": 5.31,
+   "cum_net_pct": 2.69,
+   "cum_spy_pct": 12.8,
+   "correct": false
+  },
+  {
+   "date": "2026-06-29",
+   "ticker": "QCOM",
+   "direction": "bullish",
+   "gross_ret": -6.05,
+   "net_ret": -6.18,
+   "spy_ret": 1.39,
+   "exit_reason": "SL",
+   "cap_gross": 52654.55,
+   "cap_net": 51345.11,
+   "cap_spy": 56400.9,
+   "cum_gross_pct": 5.31,
+   "cum_net_pct": 2.69,
+   "cum_spy_pct": 12.8,
+   "correct": false
+  },
+  {
+   "date": "2026-06-29",
+   "ticker": "NVDA",
+   "direction": "neutral",
+   "gross_ret": 4.46,
+   "net_ret": 4.39,
+   "spy_ret": 1.39,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 52877.4,
+   "cap_net": 51564.46,
+   "cap_spy": 56470.23,
+   "cum_gross_pct": 5.75,
+   "cum_net_pct": 3.13,
+   "cum_spy_pct": 12.94,
+   "correct": true
+  },
+  {
+   "date": "2026-06-29",
+   "ticker": "TSLA",
+   "direction": "bullish",
+   "gross_ret": -1.14,
+   "net_ret": -1.25,
+   "spy_ret": 1.39,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 52820.4,
+   "cap_net": 51501.96,
+   "cap_spy": 56539.56,
+   "cum_gross_pct": 5.64,
+   "cum_net_pct": 3.0,
+   "cum_spy_pct": 13.08,
+   "correct": false
+  },
+  {
+   "date": "2026-06-29",
+   "ticker": "MSFT",
+   "direction": "bullish",
+   "gross_ret": 3.31,
+   "net_ret": 3.23,
+   "spy_ret": 1.39,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 52985.65,
+   "cap_net": 51663.7,
+   "cap_spy": 56608.89,
+   "cum_gross_pct": 5.97,
+   "cum_net_pct": 3.33,
+   "cum_spy_pct": 13.22,
+   "correct": true
+  },
+  {
+   "date": "2026-06-29",
+   "ticker": "META",
+   "direction": "bullish",
+   "gross_ret": 9.95,
+   "net_ret": 9.86,
+   "spy_ret": 1.39,
+   "exit_reason": "TP",
+   "cap_gross": 52985.65,
+   "cap_net": 51663.7,
+   "cap_spy": 56608.89,
+   "cum_gross_pct": 5.97,
+   "cum_net_pct": 3.33,
+   "cum_spy_pct": 13.22,
+   "correct": true
+  },
+  {
+   "date": "2026-06-29",
+   "ticker": "VKTX",
+   "direction": "bullish",
+   "gross_ret": 3.64,
+   "net_ret": 3.27,
+   "spy_ret": 1.39,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 53167.75,
+   "cap_net": 51827.29,
+   "cap_spy": 56678.22,
+   "cum_gross_pct": 6.34,
+   "cum_net_pct": 3.65,
+   "cum_spy_pct": 13.36,
+   "correct": true
+  },
+  {
+   "date": "2026-06-29",
+   "ticker": "BILI",
+   "direction": "neutral",
+   "gross_ret": 5.66,
+   "net_ret": 5.35,
+   "spy_ret": 1.39,
+   "exit_reason": "T7_CLOSE",
+   "cap_gross": 53167.75,
+   "cap_net": 51827.29,
+   "cap_spy": 56678.22,
+   "cum_gross_pct": 6.34,
+   "cum_net_pct": 3.65,
+   "cum_spy_pct": 13.36,
+   "correct": true
+  },
+  {
+   "date": "2026-06-29",
+   "ticker": "CRCL",
+   "direction": "bearish",
+   "gross_ret": 9.96,
+   "net_ret": 9.42,
+   "spy_ret": 1.39,
+   "exit_reason": "TP",
+   "cap_gross": 53665.5,
+   "cap_net": 52298.45,
+   "cap_spy": 56747.55,
+   "cum_gross_pct": 7.33,
+   "cum_net_pct": 4.6,
+   "cum_spy_pct": 13.5,
+   "correct": true
   }
  ],
  "trading_stats": {
-  "exit_tp_count": 111,
-  "exit_sl_count": 154,
-  "exit_close_count": 351,
-  "avg_gross_ret": 0.604,
-  "avg_net_ret": 0.395,
+  "exit_tp_count": 113,
+  "exit_sl_count": 156,
+  "exit_close_count": 357,
+  "avg_gross_ret": 0.629,
+  "avg_net_ret": 0.42,
   "avg_cost": 0.209,
-  "net_win_rate": 49.2,
-  "sharpe_net": 0.189,
-  "max_dd_net_pct": 9.94,
-  "max_dd_gross_pct": 9.04,
-  "profit_factor": 1.12,
-  "total_spy_ret": 12.52,
-  "alpha_vs_spy": -8.98,
+  "net_win_rate": 49.5,
+  "sharpe_net": 0.207,
+  "max_dd_net_pct": 10.26,
+  "max_dd_gross_pct": 9.19,
+  "profit_factor": 1.13,
+  "total_spy_ret": 13.5,
+  "alpha_vs_spy": -8.9,
   "initial_capital": 50000.0,
   "position_size_pct": 0.1,
-  "final_cap_gross": 53064.15,
-  "final_cap_net": 51771.7,
-  "final_cap_spy": 56262.24,
+  "final_cap_gross": 53665.5,
+  "final_cap_net": 52298.45,
+  "final_cap_spy": 56747.55,
   "methodology": "independent_per_trade_no_concurrency",
   "realistic": {
    "initial_capital": 50000.0,
-   "final_nav": 51139.41,
-   "total_return_pct": 2.28,
-   "total_pnl_usd": 1139.41,
-   "spy_end_nav": 54222.29,
-   "spy_return_pct": 8.44,
-   "alpha_vs_spy": -6.17,
-   "sharpe_ratio": 0.114,
-   "profit_factor": 1.057,
+   "final_nav": 51825.59,
+   "total_return_pct": 3.65,
+   "total_pnl_usd": 1825.59,
+   "spy_end_nav": 54481.17,
+   "spy_return_pct": 8.96,
+   "alpha_vs_spy": -5.31,
+   "sharpe_ratio": 0.161,
+   "profit_factor": 1.089,
    "max_drawdown_pct": 10.71,
-   "win_rate_pct": 46.7,
-   "trades_entered": 120,
-   "predictions_total": 616,
+   "win_rate_pct": 48.0,
+   "trades_entered": 127,
+   "predictions_total": 626,
    "max_concurrent": 15,
    "methodology": "portfolio_backtest_with_concurrency_limit"
   }
  },
  "swarm_divergence": {
   "NVDA": {
-   "std": 1.41,
-   "spread": 4.4,
+   "std": 1.26,
+   "spread": 4.2,
    "consensus": 57.0,
    "resonance": true,
    "votes": {
@@ -17414,17 +17574,17 @@
    "bees": [
     {
      "name": "Scout",
-     "score": 4.5,
+     "score": 4.6,
      "dir": "neut"
     },
     {
      "name": "Rival",
-     "score": 6.2,
+     "score": 6.1,
      "dir": "bull"
     },
     {
      "name": "Oracle",
-     "score": 6.2,
+     "score": 6.4,
      "dir": "bull"
     },
     {
@@ -17434,12 +17594,12 @@
     },
     {
      "name": "Buzz",
-     "score": 7.0,
+     "score": 7.2,
      "dir": "bull"
     },
     {
      "name": "Guard",
-     "score": 7.4,
+     "score": 5.9,
      "dir": "bull"
     },
     {
@@ -17882,7 +18042,7 @@
    ]
   }
  },
- "_generated_at": "2026-07-09 11:19 PDT",
+ "_generated_at": "2026-07-09 11:50 PDT",
  "_date": "2026-07-08",
- "_deploy_ts": 1783621207
+ "_deploy_ts": 1783623010
 }
