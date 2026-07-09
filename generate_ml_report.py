@@ -1001,9 +1001,14 @@ class MLEnhancedReportGenerator:
         _gamma_cal_html = ""
         if isinstance(_gamma_cal, dict) and _gamma_cal:
             _pin_risk = _gamma_cal.get("pin_risk") or _gamma_cal.get("pin_strike")
-            _next_exp = _gamma_cal.get("next_major_expiry") or _gamma_cal.get("nearest_expiry") or "—"
+            # v0.41.3: next_major_expiry / oi_concentration_pct 是从未存在过的字段
+            # （calculate_gamma_expiry_calendar 产出 expiry_oi 列表，按 OI 降序），
+            # 这两格自上线起恒为 — / 0.0%。改为从 expiry_oi 实际推导。
+            _exp_rows = _gamma_cal.get("expiry_oi") or []
+            _next_exp = (_exp_rows[0].get("expiry") if _exp_rows else None) or "—"
             _charm = _gamma_cal.get("charm_direction") or _gamma_cal.get("charm") or "—"
-            _oi_concentration = _safe(_gamma_cal.get("oi_concentration_pct"), 0)
+            _total_all = sum(r.get("total_oi", 0) for r in _exp_rows)
+            _oi_concentration = (_exp_rows[0].get("total_oi", 0) / _total_all * 100) if (_exp_rows and _total_all > 0) else 0.0
             _pin_txt = f"${float(_pin_risk):.0f}" if isinstance(_pin_risk, (int, float)) and _pin_risk else "—"
             _gamma_cal_html = f"""
             <h3 style="color:#667eea;margin-top:18px;">📅 Gamma 到期日历</h3>
