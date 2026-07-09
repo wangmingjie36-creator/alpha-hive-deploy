@@ -65,3 +65,18 @@ def test_no_hardcoded_price_100_placeholder():
         "规约：取不到现价用 0.0 哨兵 + data_pipeline.fetch_stock_data 多源链。\n"
         + "\n".join(violations)
     )
+
+
+def test_max_pain_degenerate_guards():
+    """v0.41.2: Max Pain 退化保护——全零/薄 OI 或偏离现价 >50% 必须返回 None。
+
+    事故：yfinance 深夜限流返回全零 OI 链时，旧实现每个行权价痛苦值恒 0，
+    取到链内最低行权价（NVDA 现价 $203 算出磁吸价 $50，+307%）。
+    """
+    from swarm_agents.oracle_bee import OracleBeeEcho
+    f = OracleBeeEcho._max_pain_from_oi
+    assert f({50.0: 0, 100.0: 0, 200.0: 0}, {50.0: 0}, 203.62) is None      # 全零 OI
+    assert f({200.0: 100}, {195.0: 100}, 203.62) is None                     # OI 太薄
+    assert f({50.0: 5000}, {55.0: 5000}, 203.62) is None                     # 偏离 >50%
+    mp = f({200.0: 5000, 210.0: 3000}, {195.0: 4000, 190.0: 2000}, 203.62)  # 正常
+    assert mp is not None and 180 <= mp <= 215

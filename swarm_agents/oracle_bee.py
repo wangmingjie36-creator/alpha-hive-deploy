@@ -112,35 +112,81 @@ class OracleBeeEcho(BeeAgent):
             _log.debug("OracleBee deep skew failed for %s: %s", ticker, e)
         return result
 
+    @staticmethod
+    def _max_pain_from_oi(call_oi: dict, put_oi: dict, stock_price: float):
+        """纯计算：给定 {strike: oi} 求 Max Pain。
+
+        v0.41.2 退化保护：① 全零/近零 OI（深夜限流常态）时每个行权价
+        痛苦值恒为 0，旧实现会取到链内最低行权价（NVDA 曾算出 $50，
+        现价 $203）——总 OI < 500 直接返回 None；② 结果偏离现价 >50%
+        视为数据垃圾同样返回 None（近端磁吸不可能离谱到这种程度）。
+        """
+        all_strikes = sorted(set(list(call_oi.keys()) + list(put_oi.keys())))
+        if not all_strikes:
+            return None
+        total_oi = sum(call_oi.values()) + sum(put_oi.values())
+        if total_oi < 500:
+            return None  # OI 太薄（多为限流空链），结果无意义
+        min_pain, mp_strike = float("inf"), None
+        for test_price in all_strikes:
+            total_pain = (sum((test_price - s) * oi * 100 for s, oi in call_oi.items() if test_price > s)
+                          + sum((s - test_price) * oi * 100 for s, oi in put_oi.items() if test_price < s))
+            if total_pain < min_pain:
+                min_pain, mp_strike = total_pain, test_price
+        if mp_strike is None or mp_strike <= 0:
+            return None
+        if stock_price > 0 and abs(mp_strike - stock_price) / stock_price > 0.50:
+            return None  # 偏离现价 >50% = 数据垃圾
+        return mp_strike
+
     def _calc_max_pain(self, ticker: str, stock_price: float) -> dict:
-        """Max Pain 计算（期权到期时令所有持仓亏损最大的价位）"""
+        """Max Pain 计算（期权到期时令所有持仓亏损最大的价位）。
+
+        v0.41.2: 主源改 CBOE（fetch_cboe_chain，与期权链同源），yfinance
+        仅兜底——旧实现裸调 yfinance 最近到期日，深夜限流全零 OI 时
+        退化取最低行权价（v40.1 同款反模式的期权版漏网）。
+        """
         result = {"max_pain": None, "distance_pct": None, "summary": ""}
+        call_oi, put_oi = {}, {}
+        # ── 主源：CBOE（取返回链中最近到期日）──
         try:
-            import yfinance as yf
-            t = yf.Ticker(ticker)
-            expirations = list(t.options) if hasattr(t, "options") else []
-            if not expirations:
-                return result
-            chain = t.option_chain(expirations[0])
-            calls, puts = chain.calls, chain.puts
-            if calls.empty or puts.empty:
-                return result
-            call_oi = dict(zip(calls["strike"], calls["openInterest"].fillna(0).astype(int)))
-            put_oi  = dict(zip(puts["strike"],  puts["openInterest"].fillna(0).astype(int)))
-            all_strikes = sorted(set(list(call_oi.keys()) + list(put_oi.keys())))
-            if not all_strikes:
-                return result
-            min_pain, mp_strike = float("inf"), stock_price
-            for test_price in all_strikes:
-                total_pain = (sum((test_price - s) * oi * 100 for s, oi in call_oi.items() if test_price > s)
-                              + sum((s - test_price) * oi * 100 for s, oi in put_oi.items() if test_price < s))
-                if total_pain < min_pain:
-                    min_pain, mp_strike = total_pain, test_price
-            dist = (stock_price / mp_strike - 1) * 100 if mp_strike > 0 else 0
-            result = {
-                "max_pain": mp_strike, "distance_pct": round(dist, 2),
-                "summary": f"MaxPain:${mp_strike:.0f}({dist:+.1f}%)" if mp_strike else "",
-            }
+            from cboe_options import fetch_cboe_chain
+            cb = fetch_cboe_chain(ticker, stock_price)
+            if cb and (cb.get("calls") or cb.get("puts")):
+                _exps = sorted({c.get("expiry") for c in (cb.get("calls") or []) if c.get("expiry")})
+                if _exps:
+                    _near = _exps[0]
+                    for c in cb.get("calls") or []:
+                        if c.get("expiry") == _near:
+                            call_oi[float(c.get("strike", 0))] = call_oi.get(float(c.get("strike", 0)), 0) + int(c.get("openInterest") or 0)
+                    for p in cb.get("puts") or []:
+                        if p.get("expiry") == _near:
+                            put_oi[float(p.get("strike", 0))] = put_oi.get(float(p.get("strike", 0)), 0) + int(p.get("openInterest") or 0)
+        except Exception as e:
+            _log.debug("OracleBee max pain CBOE 主源失败 %s: %s", ticker, e)
+        # ── 兜底：yfinance 最近到期日 ──
+        if not call_oi and not put_oi:
+            try:
+                import yfinance as yf
+                t = yf.Ticker(ticker)
+                expirations = list(t.options) if hasattr(t, "options") else []
+                if expirations:
+                    chain = t.option_chain(expirations[0])
+                    calls, puts = chain.calls, chain.puts
+                    if not calls.empty and not puts.empty:
+                        call_oi = dict(zip(calls["strike"].astype(float), calls["openInterest"].fillna(0).astype(int)))
+                        put_oi = dict(zip(puts["strike"].astype(float), puts["openInterest"].fillna(0).astype(int)))
+            except Exception as e:
+                _log.debug("OracleBee max pain yfinance 兜底失败 %s: %s", ticker, e)
+
+        try:
+            mp_strike = self._max_pain_from_oi(call_oi, put_oi, stock_price)
+            if mp_strike is not None:
+                dist = (stock_price / mp_strike - 1) * 100 if mp_strike > 0 else 0
+                result = {
+                    "max_pain": mp_strike, "distance_pct": round(dist, 2),
+                    "summary": f"MaxPain:${mp_strike:.0f}({dist:+.1f}%)",
+                }
         except Exception as e:
             _log.debug("OracleBee max pain failed for %s: %s", ticker, e)
         return result
