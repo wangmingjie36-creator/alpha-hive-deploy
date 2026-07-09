@@ -38,11 +38,14 @@ except ImportError:
 class OptionsDataFetcher:
     """期权数据采集器 - 支持多源降级策略"""
 
-    def __init__(self, cache_dir: str = str(PATHS.cache_dir)):
-        self.cache_dir = cache_dir
+    def __init__(self, cache_dir: Optional[str] = None):
+        # v0.41.3: 默认值必须在实例化时解析——`= str(PATHS.cache_dir)` 会在
+        # import 时冻结生产路径，conftest 的 ALPHA_HIVE_CACHE_DIR 隔离对其无效，
+        # 曾导致 pytest 的 mock 期权链写进生产 options_snapshot 被正式扫描复用
+        self.cache_dir = cache_dir or str(PATHS.cache_dir)
         self.cache_ttl = 300  # 5 分钟缓存
         self.last_hist_iv_is_sample = False  # P0-1: 最近一次 fetch_historical_iv 是否落样本
-        os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs(self.cache_dir, exist_ok=True)
 
     def _get_cache_path(self, ticker: str, data_type: str) -> str:
         """获取缓存文件路径"""

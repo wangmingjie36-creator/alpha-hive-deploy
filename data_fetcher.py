@@ -26,9 +26,10 @@ except ImportError:
 class CacheManager:
     """缓存管理器 - 避免重复请求"""
 
-    def __init__(self, cache_dir: str = str(PATHS.cache_dir)):
-        self.cache_dir = cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
+    def __init__(self, cache_dir: Optional[str] = None):
+        # v0.41.3: 与 options_analyzer 同款修复——import 时冻结默认路径会绕过测试环境隔离
+        self.cache_dir = cache_dir or str(PATHS.cache_dir)
+        os.makedirs(self.cache_dir, exist_ok=True)
 
     def get_cache_key(self, source: str, ticker: str) -> str:
         """生成缓存键"""

@@ -21,6 +21,10 @@ def _isolate_env(tmp_path, monkeypatch):
     monkeypatch.setenv("ALPHA_HIVE_CHROMA_PATH", str(tmp_path / "test_chroma"))
     monkeypatch.setenv("ALPHA_HIVE_LOGS_DIR", str(tmp_path / "logs"))
     monkeypatch.setenv("ALPHA_HIVE_CACHE_DIR", str(tmp_path / "cache"))
+    # v0.41.3 第二层防线：显式禁用期权快照写盘。曾发生 pytest 的 mock 期权链
+    # 经 OptionsAgent.analyze() 写进生产 cache/options_snapshot_NVDA_*.json
+    # （data_quality 标 real），被当日正式扫描按"快照命中"复用进日报
+    monkeypatch.setenv("OPTIONS_SNAPSHOT_DISABLE", "1")
 
 
 # ==================== 禁止测试调用真实 Anthropic API ====================

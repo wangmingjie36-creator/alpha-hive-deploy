@@ -4,7 +4,7 @@
  "scores": [
   [
    "NVDA",
-   6.1
+   6.5
   ],
   [
    "VKTX",
@@ -44,16 +44,16 @@
   ]
  ],
  "dir_counts": [
-  4,
+  3,
   2,
-  4
+  5
  ],
  "radar": {
   "NVDA": [
-   50.1,
+   47.6,
    55.0,
-   71.8,
-   61.7,
+   70.5,
+   98.1,
    59.1
   ],
   "VKTX": [
@@ -874,7 +874,7 @@
    },
    {
     "date": "2026-07-08",
-    "score": 6.1
+    "score": 6.5
    }
   ],
   "VKTX": [
@@ -3568,8 +3568,8 @@
   "2026-07-08": [
    {
     "ticker": "NVDA",
-    "score": 6.1,
-    "direction": "bullish"
+    "score": 6.5,
+    "direction": "neutral"
    },
    {
     "ticker": "VKTX",
@@ -7445,9 +7445,9 @@
  "search_index": [
   {
    "ticker": "NVDA",
-   "score": 6.1,
-   "direction": "看多",
-   "price": 204.06
+   "score": 6.5,
+   "direction": "中性",
+   "price": 203.52
   },
   {
    "ticker": "VKTX",
@@ -17547,7 +17547,7 @@
    "final_nav": 51825.59,
    "total_return_pct": 3.65,
    "total_pnl_usd": 1825.59,
-   "spy_end_nav": 54454.34,
+   "spy_end_nav": 54456.52,
    "spy_return_pct": 8.91,
    "alpha_vs_spy": -5.26,
    "sharpe_ratio": 0.161,
@@ -17562,29 +17562,29 @@
  },
  "swarm_divergence": {
   "NVDA": {
-   "std": 1.2,
-   "spread": 4.2,
-   "consensus": 57.0,
+   "std": 1.51,
+   "spread": 5.1,
+   "consensus": 71.0,
    "resonance": true,
    "votes": {
-    "bullish": 4,
-    "bearish": 1,
+    "bullish": 5,
+    "bearish": 0,
     "neutral": 2
    },
    "bees": [
     {
      "name": "Scout",
-     "score": 5.0,
+     "score": 4.8,
      "dir": "neut"
     },
     {
      "name": "Rival",
-     "score": 5.8,
+     "score": 6.1,
      "dir": "bull"
     },
     {
      "name": "Oracle",
-     "score": 6.2,
+     "score": 9.8,
      "dir": "bull"
     },
     {
@@ -17594,7 +17594,7 @@
     },
     {
      "name": "Buzz",
-     "score": 7.2,
+     "score": 7.0,
      "dir": "bull"
     },
     {
@@ -17604,8 +17604,8 @@
     },
     {
      "name": "Bear",
-     "score": 3.0,
-     "dir": "bear"
+     "score": 7.0,
+     "dir": "bull"
     }
    ]
   },
@@ -18042,7 +18042,7 @@
    ]
   }
  },
- "_generated_at": "2026-07-09 11:56 PDT",
+ "_generated_at": "2026-07-09 12:15 PDT",
  "_date": "2026-07-08",
- "_deploy_ts": 1783623372
+ "_deploy_ts": 1783624547
 }
