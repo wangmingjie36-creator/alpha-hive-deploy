@@ -94,3 +94,4 @@ pheromone.db.bak*
 *.db.bak_*
 design_current/
 DESIGN_BRIEF.md
+.fuse_hidden*
