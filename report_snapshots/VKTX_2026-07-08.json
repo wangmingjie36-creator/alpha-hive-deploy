@@ -1,0 +1,42 @@
+{
+  "ticker": "VKTX",
+  "date": "2026-07-08",
+  "composite_score": 5.56,
+  "direction": "neutral",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 39.959999084472656,
+  "agent_votes": {
+    "OracleBeeEcho": 8.785538461538462,
+    "CodeExecutorAgent": 5.0,
+    "ChronosBeeHorizon": 5.995,
+    "RivalBeeVanguard": 5.96,
+    "QueenDistiller": 5.56,
+    "ScoutBeeNova": 5.3604,
+    "GuardBeeSentinel": 5.23,
+    "BuzzBeeWhisper": 4.68
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.875,
+    "signal": 0.875,
+    "catalyst": 0.75,
+    "sentiment": 0.75,
+    "odds": 0.25,
+    "risk_adj": 0.625
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-07-08T23:39:08.735013"
+}

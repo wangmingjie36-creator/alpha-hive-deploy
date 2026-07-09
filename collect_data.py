@@ -265,7 +265,7 @@ def extract_raw(data: dict) -> dict:
             "sentiment_pct": bdet.get("sentiment_pct"),
             "reddit_rank": bdet.get("reddit", {}).get("rank"),
             "reddit_mentions": bdet.get("reddit", {}).get("mentions"),
-            "volume_ratio": round(float(bdet.get("volume_ratio", 1)), 2),
+            "volume_ratio": round(float(bdet.get("volume_ratio", 1) or 1), 2),
             "buzz_discovery": buzz.get("discovery", "")[:200],
         },
 
