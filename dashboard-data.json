@@ -4,7 +4,7 @@
  "scores": [
   [
    "NVDA",
-   6.5
+   6.3
   ],
   [
    "VKTX",
@@ -50,10 +50,10 @@
  ],
  "radar": {
   "NVDA": [
-   47.6,
+   45.1,
    55.0,
-   70.5,
-   98.1,
+   63.5,
+   95.5,
    59.1
   ],
   "VKTX": [
@@ -874,7 +874,7 @@
    },
    {
     "date": "2026-07-08",
-    "score": 6.5
+    "score": 6.3
    }
   ],
   "VKTX": [
@@ -3568,7 +3568,7 @@
   "2026-07-08": [
    {
     "ticker": "NVDA",
-    "score": 6.5,
+    "score": 6.3,
     "direction": "neutral"
    },
    {
@@ -7445,9 +7445,9 @@
  "search_index": [
   {
    "ticker": "NVDA",
-   "score": 6.5,
+   "score": 6.3,
    "direction": "中性",
-   "price": 203.52
+   "price": 203.1
   },
   {
    "ticker": "VKTX",
@@ -17547,9 +17547,9 @@
    "final_nav": 51825.59,
    "total_return_pct": 3.65,
    "total_pnl_usd": 1825.59,
-   "spy_end_nav": 54456.52,
-   "spy_return_pct": 8.91,
-   "alpha_vs_spy": -5.26,
+   "spy_end_nav": 54485.71,
+   "spy_return_pct": 8.97,
+   "alpha_vs_spy": -5.32,
    "sharpe_ratio": 0.161,
    "profit_factor": 1.089,
    "max_drawdown_pct": 10.71,
@@ -17562,8 +17562,8 @@
  },
  "swarm_divergence": {
   "NVDA": {
-   "std": 1.51,
-   "spread": 5.1,
+   "std": 1.46,
+   "spread": 5.0,
    "consensus": 71.0,
    "resonance": true,
    "votes": {
@@ -17574,7 +17574,7 @@
    "bees": [
     {
      "name": "Scout",
-     "score": 4.8,
+     "score": 4.5,
      "dir": "neut"
     },
     {
@@ -17584,7 +17584,7 @@
     },
     {
      "name": "Oracle",
-     "score": 9.8,
+     "score": 9.6,
      "dir": "bull"
     },
     {
@@ -17594,7 +17594,7 @@
     },
     {
      "name": "Buzz",
-     "score": 7.0,
+     "score": 6.3,
      "dir": "bull"
     },
     {
@@ -18042,7 +18042,7 @@
    ]
   }
  },
- "_generated_at": "2026-07-09 12:15 PDT",
+ "_generated_at": "2026-07-09 12:21 PDT",
  "_date": "2026-07-08",
- "_deploy_ts": 1783624547
+ "_deploy_ts": 1783624884
 }
