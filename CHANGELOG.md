@@ -5,6 +5,24 @@
 
 ---
 
+## [0.41.0] — 2026-07-09 — 修复移动端"两层页面"三症状（canvas 溢出 / 重载闪现 / 双导航）
+
+> 用户手机（微信 webview）打开仪表板出现三症状。审计发现三者同源于一个连锁：**canvas 固定 width 属性（#scoresChart 600px 等）无任何 max-width 约束 + Chart.js 从 jsdelivr 加载（大陆/微信常不可达）** → CDN 失败时 responsive 永不生效 → 600px 空 canvas 撑宽页面（右侧空白带）→ 微信 X5 把布局视口扩到内容宽 → media query 误判桌面 → 顶部链接导航不隐藏（"双导航"）+ 横向两屏；叠加微信持久缓存旧页 × dashboard.js 时间戳自动重载 → 新旧页无限闪现。
+
+### Fixed — `templates/dashboard.css`
+- 全局 `canvas{max-width:100%;height:auto}` + 四类图表包裹层 `max-width:100%;overflow:hidden`（Chart.js 加载失败时的布局兜底——模拟验证：无 Chart.js 时 600px canvas 被压至 246px，页面零横向溢出）
+- `html,body` 双重 `overflow-x:hidden`（原仅 body，微信 X5 不认）
+- `.acc-two-col` 补 768px 折叠；`.hstat` 移动端 padding 收窄
+
+### Changed — Chart.js 自托管（治本）
+- 新增 `chart.umd.min.js`（4.4.0，205KB）随仓库分发；`dashboard.html` script 改本地引用、CSP script-src 移除 jsdelivr；`report_web_assets.py` sw.js 预缓存同步改本地；**两处部署白名单**（`report_deployer._CORE_FILES` / `generate_ml_report._CORE`）加入该文件。线上验证 HTTP 200。
+
+### Fixed — `templates/dashboard.js` 重载闪现防护
+- `fetchDashboardData()` 的自动 `location.reload()` 加 sessionStorage 一次性守卫（`ah_auto_reloaded`）：每会话最多自动刷新一次，之后仅 console 提示——微信缓存旧页时从"无限闪现"退化为"最多闪一次"。
+
+### 验证
+- 375px 视口：`scrollWidth==innerWidth`、顶部链接导航正确隐藏、Chart.js 本地加载成功；模拟 CDN 被墙场景全部通过；1019 tests passed。
+
 ## [0.40.4] — 2026-07-08 — 历史中性标签一次性迁移至 ±5% 统一带宽（用户拍板）
 
 ### Fixed — `pheromone.db.predictions` 历史标签口径统一

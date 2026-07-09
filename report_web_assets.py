@@ -41,7 +41,7 @@ def write_pwa_files(reporter):
     sw_content = f"""// Alpha Hive Service Worker - {_sw_ts}
 var CACHE_NAME='{cache_name}';
 var PRECACHE_URLS=['./', 'index.html', 'manifest.json',
-  'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'];
+  'chart.umd.min.js'];  // v0.41.0: Chart.js 自托管（jsdelivr 大陆不可达）
 
 self.addEventListener('install', function(e){{
   self.skipWaiting();

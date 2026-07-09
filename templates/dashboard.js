@@ -1343,8 +1343,18 @@ function toggleKbHelp(){
         if(genEl){
           var curGen=genEl.getAttribute('data-generated');
           if(curGen&&data._generated_at&&data._generated_at>curGen){
-            console.log('[AH] \u53d1\u73b0\u65b0\u6570\u636e, \u81ea\u52a8\u5237\u65b0\u9875\u9762');
-            location.reload();
+            // v0.41.0: sessionStorage \u4e00\u6b21\u6027\u5b88\u536b\u2014\u2014\u5fae\u4fe1 webview \u6301\u4e45\u7f13\u5b58\u65e7\u9875\u65f6
+            // \u6bcf\u6b21\u52a0\u8f7d\u90fd\u68c0\u6d4b\u5230 JSON \u66f4\u65b0 \u2192 \u65e0\u9650\u91cd\u8f7d/\u65b0\u65e7\u9875\u95ea\u73b0\u3002\u6bcf\u4f1a\u8bdd\u53ea\u81ea\u52a8\u91cd\u8f7d\u4e00\u6b21\u3002
+            var _rk='ah_auto_reloaded';
+            var _already=false;
+            try{_already=sessionStorage.getItem(_rk)==='1';}catch(e){}
+            if(_already){
+              console.warn('[AH] \u9875\u9762\u7f13\u5b58\u65e7\u4e8e\u6570\u636e\uff08\u672c\u4f1a\u8bdd\u5df2\u81ea\u52a8\u5237\u65b0\u8fc7\uff0c\u4e0d\u518d\u91cd\u8f7d\uff09');
+            }else{
+              try{sessionStorage.setItem(_rk,'1');}catch(e){}
+              console.log('[AH] \u53d1\u73b0\u65b0\u6570\u636e, \u81ea\u52a8\u5237\u65b0\u9875\u9762');
+              location.reload();
+            }
           }
         }
       })

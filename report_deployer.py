@@ -104,6 +104,7 @@ def deploy_static_to_ghpages(reporter):
     _CORE_FILES = {
         "index.html", "dashboard-data.json", "manifest.json",
         "sw.js", "rss.xml", ".nojekyll",
+        "chart.umd.min.js",  # v0.41.0: Chart.js 自托管
     }
     _ml_pat = _re_deploy.compile(
         r"^alpha-hive-\w+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$"

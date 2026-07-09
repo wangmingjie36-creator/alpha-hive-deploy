@@ -5,10 +5,16 @@ html.dark{--bg:#0A0F1C;--surface:#141928;--surface2:#1a2035;--border:#2a3050;
   --tp:#e2e8f0;--ts:#94a3b8;--tm:#64748b;--acc:#E05A1F;--acc2:#22c55e;--acc3:#f59e0b;
   --bull:#22c55e;--bear:#ef4444;--neut:#f59e0b}
 *{margin:0;padding:0;box-sizing:border-box}
-html{scroll-behavior:smooth}
+/* v0.41.0 移动端修复：html+body 双重 overflow-x（微信 X5 不认 body 单独 hidden，
+   任一子元素溢出会把布局视口撑宽 → media query 误判为桌面 → 双导航+横向两屏） */
+html{scroll-behavior:smooth;overflow-x:hidden}
 body{font-family:'Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
  background:var(--bg);color:var(--tp);min-height:100vh;transition:background .3s,color .3s;
  overflow-x:hidden;font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased}
+/* v0.41.0：canvas 固定 width 属性(600/300px)是页面撑宽主源——Chart.js CDN
+   加载失败时 responsive 永不生效，600px 空 canvas 直接溢出 400px 视口 */
+canvas{max-width:100%;height:auto}
+.chart-canvas-wrap,.eq-wrap,.radar-wrap,.acc-canvas-wrap{max-width:100%;overflow:hidden}
 button,a,.nav-link,.filter-btn,.trend-chip,.scard,.share-btn,.gs-item{touch-action:manipulation}
 /* NAV — B-style light */
 .nav{position:sticky;top:0;z-index:1000;height:var(--nav-h);
@@ -77,6 +83,7 @@ th:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4
   color:var(--tp);line-height:1}
 .hstat-lbl{font-size:10px;color:var(--tm);margin-top:8px;letter-spacing:1px}
 .hstat{padding:24px 40px;text-align:center;border-right:0.5px solid var(--border)}
+@media(max-width:768px){.hstat{padding:14px 16px}}  /* v0.41.0 */
 .hstat:last-child{border-right:none}
 /* dark mode hero overrides */
 html.dark .hero{background:var(--bg)}
@@ -300,6 +307,7 @@ transition-duration:.01ms!important;scroll-behavior:auto!important}
 .dkpi-ret{font-size:.85em;font-weight:600;margin-top:4px}
 @media(max-width:480px){.acc-dir-kpi-row{grid-template-columns:repeat(3,1fr);gap:8px}.dkpi-val{font-size:1.4em}}
 .acc-two-col{display:grid;grid-template-columns:1fr 1.6fr;gap:16px;margin-bottom:16px}
+@media(max-width:768px){.acc-two-col{grid-template-columns:1fr}}  /* v0.41.0 移动端折叠 */
 .acc-dir-box,.acc-ticker-box{background:var(--surface2);border-radius:12px;padding:18px;border:1px solid rgba(102,126,234,.12)}
 .acc-box-title{font-size:.85em;font-weight:600;color:var(--ts);margin-bottom:12px}
 .acc-canvas-wrap{position:relative;height:140px}

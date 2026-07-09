@@ -2190,7 +2190,7 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     repo = str(Path(__file__).parent)
     date_str = pdt_today()
     _ml_pat = _re.compile(r"^alpha-hive-\w+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$")
-    _CORE = {"index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml", ".nojekyll"}
+    _CORE = {"index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml", ".nojekyll", "chart.umd.min.js"}  # v0.41.0
     try:
         from is_trading_day import filename_is_nontrading_day as _fnt_dep
     except Exception:
