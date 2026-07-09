@@ -1048,10 +1048,6 @@ function showDiff(){
       activeIdx=Math.max(activeIdx-1,0);
       focusCard(activeIdx);
     }
-    if(e.key==='c'&&!e.ctrlKey&&!e.metaKey&&!window.AH._compareMode){
-      if(window.AH.enterCompare)window.AH.enterCompare();
-      return;
-    }
     if(e.key==='d'&&!e.ctrlKey&&!e.metaKey){
       toggleDark();
     }
@@ -1059,7 +1055,6 @@ function showDiff(){
       toggleKbHelp();
     }
     if(e.key==='Escape'){
-      if(window.AH._compareMode&&window.AH.exitCompare){window.AH.exitCompare();return;}
       const h=document.getElementById('kbHelp');
       if(h)h.style.display='none';
     }
@@ -1442,8 +1437,6 @@ function toggleKbHelp(){
       if(e.target.closest('.scard-share')||e.target.closest('.ml-btn')||e.target.closest('.scard-expand-close'))return;
       e.preventDefault();
       e.stopPropagation();
-      // 如果在对比模式中，不展开
-      if(window.AH._compareMode)return;
       var tk=card.querySelector('.sticker');
       if(!tk)return;
       var ticker=tk.textContent.trim();
@@ -1490,141 +1483,5 @@ function toggleKbHelp(){
   });
 })();
 
-// ── 升级 H2: 按键快速对比模式 ──
-(function(){
-  window.AH._compareMode=false;
-  var selected=[];
-  var bar=document.getElementById('compareBar');
-  var countEl=document.getElementById('compareCount');
-  var namesEl=document.getElementById('compareNames');
-  var goBtn=document.getElementById('compareGo');
-  var cancelBtn=document.getElementById('compareCancel');
-  if(!bar)return;
+// v0.41.1: 对比模式（升级 H2）已删除——纯桌面键盘功能无移动端入口，隐藏机制缺陷在手机上渲染为幽灵横条
 
-  var bnav2=document.getElementById('bottomNav');
-  function enterCompare(){
-    window.AH._compareMode=true;
-    selected=[];
-    bar.classList.add('active');
-    updateBar();
-    document.querySelectorAll('.scard[data-dir]').forEach(function(c){c.classList.remove('compare-selected');});
-    // 隐藏底部导航避免 z-index 冲突
-    if(bnav2)bnav2.style.display='none';
-    showToast('\u5bf9\u6bd4\u6a21\u5f0f\uff1a\u70b9\u51fb 2-3 \u5f20\u5361\u7247\uff0c\u7136\u540e\u6309\u201c\u5f00\u59cb\u5bf9\u6bd4\u201d');
-  }
-  function exitCompare(){
-    window.AH._compareMode=false;
-    selected=[];
-    bar.classList.remove('active');
-    document.querySelectorAll('.scard.compare-selected').forEach(function(c){c.classList.remove('compare-selected');});
-    // 恢复底部导航
-    if(bnav2)bnav2.style.display='';
-    // 移除对比浮层
-    var ov=document.getElementById('compareOverlay');
-    if(ov)ov.remove();
-  }
-  function updateBar(){
-    countEl.textContent=selected.length+'/3';
-    namesEl.textContent=selected.map(function(s){return s.ticker;}).join(' vs ');
-  }
-  function toggleSelect(card){
-    var tk=card.querySelector('.sticker');
-    if(!tk)return;
-    var ticker=tk.textContent.trim();
-    var idx=-1;
-    selected.forEach(function(s,i){if(s.ticker===ticker)idx=i;});
-    if(idx>=0){
-      selected.splice(idx,1);
-      card.classList.remove('compare-selected');
-    }else if(selected.length<3){
-      selected.push({ticker:ticker,card:card});
-      card.classList.add('compare-selected');
-    }else{
-      showToast('\u6700\u591a\u9009 3 \u4e2a\u6807\u7684');
-    }
-    updateBar();
-  }
-  // HTML 转义防止 XSS
-  function _esc(s){
-    var d=document.createElement('div');
-    d.appendChild(document.createTextNode(String(s)));
-    return d.innerHTML;
-  }
-  function showCompare(){
-    if(selected.length<2){showToast('\u8bf7\u81f3\u5c11\u9009\u62e9 2 \u4e2a\u6807\u7684');return;}
-    var tickers=selected.map(function(s){return s.ticker;});
-    var cols=tickers.length;
-    // 构建对比数据
-    var si=__AH__.search_index;
-    var rd=__AH__.radar;
-    var siMap={};si.forEach(function(s){siMap[s.ticker]=s;});
-    var html='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">'
-      +'<h3 style="margin:0;font-weight:800">\ud83d\udd0d '+tickers.map(_esc).join(' vs ')+'</h3>'
-      +'</div>';
-    html+='<div class="compare-grid cols-'+cols+'">';
-    // header row
-    html+='<div class="cg-cell cg-label">\u6307\u6807</div>';
-    tickers.forEach(function(tk){html+='<div class="cg-cell cg-header">'+_esc(tk)+'</div>';});
-    // score row
-    html+='<div class="cg-cell cg-label">\u7efc\u5408\u5206</div>';
-    var scores=tickers.map(function(tk){return siMap[tk]?siMap[tk].score:0;});
-    var bestScore=Math.max.apply(null,scores);
-    tickers.forEach(function(tk,i){
-      var s=scores[i];
-      html+='<div class="cg-cell cg-val'+(s===bestScore?' cg-best':'')+'">'+_esc(s)+'/10</div>';
-    });
-    // direction row
-    html+='<div class="cg-cell cg-label">\u65b9\u5411</div>';
-    tickers.forEach(function(tk){
-      var d=siMap[tk]?siMap[tk].direction:'-';
-      html+='<div class="cg-cell cg-val">'+_esc(d)+'</div>';
-    });
-    // radar dims
-    var dimKeys=['\u4fe1\u53f7','\u50ac\u5316','\u60c5\u7eea','\u8d54\u7387','\u98ce\u63a7'];
-    dimKeys.forEach(function(dk,di){
-      html+='<div class="cg-cell cg-label">'+_esc(dk)+'</div>';
-      var vals=tickers.map(function(tk){return rd[tk]?rd[tk][di]:0;});
-      var best=Math.max.apply(null,vals);
-      tickers.forEach(function(tk,i){
-        html+='<div class="cg-cell cg-val'+(vals[i]===best&&best>0?' cg-best':'')+'">'+_esc(vals[i])+'</div>';
-      });
-    });
-    // price row
-    html+='<div class="cg-cell cg-label">\u4ef7\u683c</div>';
-    tickers.forEach(function(tk){
-      var p=siMap[tk]&&siMap[tk].price?'$'+_esc(siMap[tk].price):'-';
-      html+='<div class="cg-cell cg-val">'+p+'</div>';
-    });
-    html+='</div>';
-    html+='<div class="compare-close"><button id="compareCloseBtn">\u5173\u95ed\u5bf9\u6bd4</button></div>';
-    // 创建浮层
-    var ov=document.createElement('div');
-    ov.className='compare-overlay';
-    ov.id='compareOverlay';
-    var panel=document.createElement('div');
-    panel.className='compare-panel';
-    panel.innerHTML=html;
-    ov.appendChild(panel);
-    document.body.appendChild(ov);
-    document.getElementById('compareCloseBtn').addEventListener('click',function(){exitCompare();});
-    ov.addEventListener('click',function(e){if(e.target===ov)exitCompare();});
-  }
-
-  // 卡片点击选择（对比模式时）— 过滤交互元素避免误触
-  document.querySelectorAll('.scard[data-dir]').forEach(function(card){
-    card.addEventListener('click',function(e){
-      if(!window.AH._compareMode)return;
-      // 忽略卡片内交互元素的点击（分享按钮、ML链接、关闭按钮、展开区链接）
-      if(e.target.closest('.scard-share')||e.target.closest('.ml-btn')
-        ||e.target.closest('.scard-expand-close')||e.target.closest('a'))return;
-      toggleSelect(card);
-    });
-  });
-
-  goBtn.addEventListener('click',showCompare);
-  cancelBtn.addEventListener('click',exitCompare);
-
-  // 暴露到 window.AH 供主键盘处理器调用
-  window.AH.enterCompare=enterCompare;
-  window.AH.exitCompare=exitCompare;
-})();
