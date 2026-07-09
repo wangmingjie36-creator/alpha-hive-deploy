@@ -5,6 +5,18 @@
 
 ---
 
+## [0.41.3] — 2026-07-09 — 修复测试 mock 数据污染生产期权快照 + Gamma 日历两格恒空
+
+> 用户追问 NVDA 深度页"近端关键价位 支撑 $140(OI:600)"（现价 $203.62）。溯源：这批数字与 `tests/test_options_analyzer.py` 的 **mock 期权链一字不差**——pytest 跑 `agent.analyze("NVDA")` 时 mock 了取数函数但没挡住 analyze() 的快照写盘副作用，mock 数据（标 `data_quality: real`）写进生产 `cache/options_snapshot_NVDA_2026-07-09.json`，随后正式扫描按"当日快照命中"整份复用进日报。
+
+### Fixed — 测试隔离失效的根因（`options_analyzer.py` / `data_fetcher.py`）
+- `OptionsDataFetcher.__init__` / `CacheManager.__init__` 的默认参数 `cache_dir=str(PATHS.cache_dir)` 在 **import 时求值一次**，conftest 的 `ALPHA_HIVE_CACHE_DIR` 临时目录隔离对其永久失效（经典 Python 默认参数陷阱）。改为 `None` 默认 + 实例化时解析
+- `tests/conftest.py` 第二层防线：autouse 注入 `OPTIONS_SNAPSHOT_DISABLE=1`
+- 删除被污染的 NVDA 快照并重跑，key_levels 回归真实量级（支撑 $180 OI 7.9 万 / 压力 $250 OI 9.5 万），Gamma 日历 Pin 7/17 @ $200
+
+### Fixed — `generate_ml_report.py` Gamma 日历 schema 错位（独立老 bug）
+- "下一主要到期日"/"OI 集中度"两格读取 `next_major_expiry` / `oi_concentration_pct`——数据生产端 `calculate_gamma_expiry_calendar` **从未产出过这两个字段**，两格自上线起恒为 — / 0.0%。改为从实际的 `expiry_oi` 列表推导（NVDA 实测 2026-07-17 / 87.0%）
+
 ## [0.41.2] — 2026-07-09 — 修复近端磁吸目标价垃圾值（NVDA $50/+307%，v40.1 假价反模式的期权版漏网）
 
 > 用户报告 NVDA ML 页"近端磁吸目标价 $50 ↑+307.2%"（现价 $203.62）。根因：`oracle_bee._calc_max_pain` 是漏网旧实现——绕过 CBOE 裸调 yfinance 最近到期日；深夜限流返回**全零 OI 链**时每个行权价痛苦值恒为 0，`min()` 退化取链内最低行权价（NVDA 周链最低 $50）。审计 7/8 全部 10 票：**7 只垃圾**（TSLA +392%、META +504% 等）。
