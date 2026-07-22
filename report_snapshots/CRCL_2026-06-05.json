@@ -22,10 +22,13 @@
     "odds": 0.194,
     "risk_adj": 0.225
   },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": null,
   "actual_prices": {
     "t1": 82.52999877929688,
     "t7": 79.72000122070312,
-    "t30": null
+    "t30": 71.08000183105469
   },
-  "created_at": "2026-06-18T01:55:49.106529"
+  "created_at": "2026-07-22T01:59:24.577176"
 }
