@@ -85,8 +85,12 @@ class CrowdingDetector:
             scores["seeking_alpha_views"] = 20
 
         # 6. 短期内急速上升 + 高做空比例
-        short_ratio = metrics.get("short_float_ratio", 0.0)
-        price_momentum = metrics.get("price_momentum_5d", 0.0)
+        # v0.41.4: .get(key, default) 挡不住显式 None（上游数据不可得时的诚实标记），
+        # 同款加固，防止 price_momentum > 15 比较崩溃
+        short_ratio = metrics.get("short_float_ratio")
+        short_ratio = short_ratio if short_ratio is not None else 0.0
+        price_momentum = metrics.get("price_momentum_5d")
+        price_momentum = price_momentum if price_momentum is not None else 0.0
 
         if short_ratio > 0.3 and price_momentum > 15:
             scores["short_squeeze_risk"] = 90

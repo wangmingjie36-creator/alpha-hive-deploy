@@ -286,13 +286,19 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
 
     # 4. Google Trends — 暂不接入 pytrends（高频使用会被封 IP），
     #    改用成交量异动百分位作为"关注度"代理指标
-    vol_ratio = stock_data.get("volume_ratio", 1.0)
+    # v0.41.4: .get(key, default) 对显式 None 值无效（v36/v40.1 起 yfinance
+    # 历史K线拉取失败时 momentum_5d/volume_ratio 被诚实置 None，而非缺键）——
+    # 深夜限流命中时 vol_ratio=None 直接与 0.5 相减崩溃，ScoutBee 全体标的
+    # 报错（2026-07-21 14:02 定时扫描事故）。此处显式判 None 回落中性代理值。
+    vol_ratio = stock_data.get("volume_ratio")
+    vol_ratio = vol_ratio if vol_ratio is not None else 1.0
     # volume_ratio → 百分位映射: 0.5x=20, 1.0x=50, 2.0x=80, 3.0x=95
     google_proxy = min(100, max(0, (vol_ratio - 0.5) / 2.5 * 80 + 20))
 
     # 5. Polymarket — 暂不接入（需要搜索 market slug），
     #    改用 5 日动量绝对值作为"赔率变化速度"代理
-    poly_proxy = abs(stock_data.get("momentum_5d", 0.0)) * 0.8
+    _mom_for_proxy = stock_data.get("momentum_5d")
+    poly_proxy = abs(_mom_for_proxy if _mom_for_proxy is not None else 0.0) * 0.8
 
     # 6. Seeking Alpha — 无免费 API，
     #    改用 StockTwits 消息量 * 2 作为"页面浏览"代理
@@ -305,7 +311,7 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
         "polymarket_odds_change_24h": round(poly_proxy, 2),
         "seeking_alpha_page_views": sa_proxy,
         "short_float_ratio": short_data["short_pct_float"],
-        "price_momentum_5d": stock_data.get("momentum_5d", 0.0),
+        "price_momentum_5d": _mom_for_proxy if _mom_for_proxy is not None else 0.0,
         "data_quality": {
             "social_buzz": st_data["data_quality"],         # Reddit ApeWisdom 真实数据
             "google_trends": "proxy_volume",                # 成交量代理指标

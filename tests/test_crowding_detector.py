@@ -287,3 +287,21 @@ class TestGetHedgeRecommendations:
                 assert "description" in rec
                 assert "benefit" in rec
                 assert "suitable_for" in rec
+
+
+class TestNoneMetricsGuard:
+    """v0.41.4 回归测试：yfinance 历史K线拉取失败时 momentum_5d/volume_ratio
+    被诚实置 None（非缺键），calculate_crowding_score 不应因此崩溃。
+
+    事故：2026-07-21 14:02 定时扫描，深夜限流导致全部标的的 volume_ratio=None，
+    get_real_crowding_metrics 里 (vol_ratio - 0.5) 直接 TypeError，
+    ScoutBeeNova 对全部 9 个标的返回 make_error_result 泛化错误信息。
+    """
+
+    def test_none_price_momentum_5d_does_not_crash(self):
+        detector = CrowdingDetector("TEST")
+        metrics = _low_activity_metrics()
+        metrics["price_momentum_5d"] = None
+        metrics["short_float_ratio"] = None
+        score, components = detector.calculate_crowding_score(metrics)
+        assert isinstance(score, float)

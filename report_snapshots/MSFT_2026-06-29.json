@@ -26,10 +26,11 @@
   },
   "low_conviction": false,
   "low_conviction_reason": "",
+  "cs_rank": null,
   "actual_prices": {
     "t1": 368.57000732421875,
-    "t7": null,
+    "t7": 384.3599853515625,
     "t30": null
   },
-  "created_at": "2026-07-03T11:33:29.228335"
+  "created_at": "2026-07-22T01:59:38.621673"
 }

@@ -5,6 +5,27 @@
 
 ---
 
+## [0.41.4] — 2026-07-22 — 修复 ScoutBee 深夜限流崩溃（"今日聪明钱动向"整节报错）
+
+> 用户核对 2026-07-21 14:02 定时扫描发现"今日聪明钱动向"9/9 标的全部显示
+> `Error: unsupported operand type(s) for -: 'NoneType' and 'float'`，RKLB
+> 更是整只从扫描结果消失。结构化日志抓到完整 traceback：
+> `real_data_sources.py:291 get_real_crowding_metrics → (vol_ratio - 0.5)`，
+> `vol_ratio=None`。该函数调用点在 `scout_bee.analyze()` 里未被任何 try/except
+> 包裹，直接冒泡到最外层 `AGENT_ERRORS` 兜底，返回泛化错误信息。
+
+### Fixed — `real_data_sources.py` / `crowding_detector.py`
+- 根因：v36.0/v40.1 起 `data_pipeline._fetch_history_metrics` 拉取 yfinance
+  历史K线失败时，把 `momentum_5d`/`volume_ratio` **诚实置 None**（而非缺键，
+  设计如此——不可得就不冒充），但 `get_real_crowding_metrics` 仍用
+  `.get(key, default)` 取值——**这挡不住显式 None**，深夜限流命中时全体标的
+  同时触发（RKLB 因更严重的超时被直接剔出扫描列表）
+- `get_real_crowding_metrics`（vol_ratio/momentum_5d 两处）+
+  `calculate_crowding_score`（price_momentum_5d/short_float_ratio 两处）
+  改为显式 `is not None` 判断后回落中性代理值，不再依赖 `.get` 默认值
+- 新增 `tests/test_real_data_sources.py` + `test_crowding_detector.py` 回归测试
+- 手动重跑 7/21 规则模式验证：10/10 标的干净无报错，已部署 gh-pages（覆盖原故障数据）
+
 ## [0.41.3] — 2026-07-09 — 修复测试 mock 数据污染生产期权快照 + Gamma 日历两格恒空
 
 > 用户追问 NVDA 深度页"近端关键价位 支撑 $140(OI:600)"（现价 $203.62）。溯源：这批数字与 `tests/test_options_analyzer.py` 的 **mock 期权链一字不差**——pytest 跑 `agent.analyze("NVDA")` 时 mock 了取数函数但没挡住 analyze() 的快照写盘副作用，mock 数据（标 `data_quality: real`）写进生产 `cache/options_snapshot_NVDA_2026-07-09.json`，随后正式扫描按"当日快照命中"整份复用进日报。
