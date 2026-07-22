@@ -5,6 +5,29 @@
 
 ---
 
+## [0.41.5] — 2026-07-22 — 修复同一报告内现价不一致（Chronos/CodeExecutor 各自查 yfinance）
+
+> 用户核对 7/21 报告发现 NVDA 有两个不同现价：Scout/Oracle 走 CBOE 快照显示
+> $206.34，Chronos 的"分析师目标价"卡片显示 $207.29（yfinance `analyst_price_targets`
+> 自带的 "current" 字段）。两条链路各查各的价，同一份报告数字对不上。
+
+### Fixed — `swarm_agents/chronos_bee.py`
+- `analyst_targets.current_price` 不再信 yfinance 自带的 "current"，改用
+  `self._get_stock_data(ticker)` 取共享快照价（与 Scout/Oracle 同源）；
+  `upside_pct` 同步用统一现价重算；取不到快照价时整卡片置空，不展示半真数据
+
+### Fixed — `code_executor_agent.py`
+- 沙盒脚本抓到的 `current_price` 用共享快照价覆盖，技术指标（SMA/RSI）
+  仍用沙盒自己拉的历史K线计算，不受影响
+
+### Added
+- `tests/test_price_consistency.py`：两个 agent 的 current_price 一致性回归测试
+
+### 数据修复
+- 重跑 7/21 规则模式验证：NVDA 现在 Scout/Chronos/CodeExecutor 三者一致显示 $205.10，已部署 gh-pages
+- **范围说明**（用户确认）：只刷新 7/21 这份报告，不批量重跑历史报告——历史报告的价格是"当时扫描时刻"的快照，不应被现在的最新价覆盖；CBOE 与 yfinance 官方收盘价之间 ~0.3~0.5% 的正常延迟报价误差不算 bug，保留 CBOE 优先架构不变
+- 期权卡片（OracleBee）价格因期权快照按交易日冻结缓存（设计如此，避免 IV Rank/GEX 当日数据分裂），仍可能与 Scout/Chronos 现价有小幅出入，本次未改动该机制
+
 ## [0.41.4] — 2026-07-22 — 修复 ScoutBee 深夜限流崩溃（"今日聪明钱动向"整节报错）
 
 > 用户核对 2026-07-21 14:02 定时扫描发现"今日聪明钱动向"9/9 标的全部显示
