@@ -220,6 +220,77 @@ class ObservableCircuitBreaker:
 
 # ==================== 数据源适配器 ====================
 
+def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
+    """v0.41.6: `--date` 补跑历史交易日时，锚定该日期的真实收盘价。
+
+    根因：CBOE/AlphaVantage/Finnhub 全是"当前实时报价"源，没有免费的历史
+    快照能力；补跑过去某天的报告时，若仍走 MultiSourceFetcher.fetch()，
+    拿到的其实是"脚本运行那一刻"的实时价——同一天补跑多次，价格会跟着
+    市场实时波动而变，跟 as_of_date 的真实收盘价毫无关系（曾出现 7/21
+    的报告里现价先后显示 $206.34 / $205.10，两个都不是 7/21 收盘价 $207.29）。
+
+    只能用 yfinance 历史K线实现——这是唯一有 start=/end= 历史区间能力的源。
+    """
+    try:
+        import yfinance as yf
+        as_of = datetime.strptime(as_of_date, "%Y-%m-%d").date()
+        from datetime import timedelta
+        # 往前多拉 60 天，留够 20 日均量/5 日动量/20 日波动率的计算窗口
+        start = as_of - timedelta(days=60)
+        end = as_of + timedelta(days=1)  # yfinance end 是开区间，+1 天才含 as_of 当天
+        hist = yf.Ticker(ticker).history(start=start.isoformat(), end=end.isoformat())
+        if hist.empty:
+            fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
+            fb["_data_unavailable"] = True
+            return fb
+
+        # 只保留 <= as_of 的行（防止误传未来日期，或 yfinance 返回多余数据）
+        _idx_dates = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
+        hist = hist[_idx_dates.date <= as_of]
+        if hist.empty or hist["Close"].iloc[-1] <= 0:
+            fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
+            fb["_data_unavailable"] = True
+            return fb
+
+        data = StockData(
+            price=float(hist["Close"].iloc[-1]),
+            data_source=DataQuality.REAL,
+            source_name="yfinance_historical",
+            fetch_timestamp=time.time(),
+        )
+        if len(hist) >= 5:
+            data.momentum_5d = float((hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100)
+            data.momentum_source = "5d_real"
+        else:
+            data.momentum_5d = None
+            data.momentum_source = "unavailable"
+
+        recent_vol = float(hist["Volume"].iloc[-1])
+        avg_vol = (float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20
+                   else float(hist["Volume"].mean()))
+        if avg_vol and avg_vol > 0 and not math.isnan(avg_vol):
+            data.avg_volume = int(avg_vol)
+            data.volume_ratio = recent_vol / avg_vol
+        else:
+            data.volume_ratio = None
+
+        if len(hist) >= 20:
+            returns = hist["Close"].pct_change().dropna()
+            if len(returns) >= 2:
+                vol = float(returns.std() * (252 ** 0.5) * 100)
+                if not (math.isnan(vol) or math.isinf(vol)):
+                    data.volatility_20d = vol
+
+        result = data.to_dict()
+        result["_as_of_date"] = as_of_date
+        return result
+    except Exception as e:
+        _log.warning("[历史补跑] %s @ %s 取历史收盘价失败: %s", ticker, as_of_date, e)
+        fallback = StockData(data_source=DataQuality.FALLBACK).to_dict()
+        fallback["_data_unavailable"] = True
+        return fallback
+
+
 def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
     """P0-2 (v0.38.0): 从 yfinance 历史K线独立计算 momentum_5d / volume_ratio /
     avg_volume / volatility_20d（含 forming-bar 护栏）。
@@ -636,11 +707,24 @@ def get_fetcher() -> MultiSourceFetcher:
     return _fetcher
 
 
-def fetch_stock_data(ticker: str) -> Dict:
+def fetch_stock_data(ticker: str, as_of_date: Optional[str] = None) -> Dict:
     """
     直接替换 swarm_agents/cache.py 中的 _fetch_stock_data()
-    
+
     用法（在 swarm_agents/cache.py 中）：
         from data_pipeline import fetch_stock_data as _fetch_stock_data
+
+    v0.41.6: as_of_date 非空且不等于今天（真实 PDT 当日）时，视为 `--date`
+    补跑历史交易日——改走 yfinance 历史K线锚定该日期真实收盘价，不再命中
+    CBOE/AV/Finnhub 的"当前实时报价"缓存链。as_of_date 为 None 或等于今天时
+    行为与之前完全一致（当日实时扫描不受影响）。
     """
+    if as_of_date:
+        try:
+            from hive_logger import pdt_today
+            _today = pdt_today()
+        except ImportError:
+            _today = None
+        if _today is None or as_of_date != _today:
+            return _fetch_historical_stock_data(ticker, as_of_date)
     return get_fetcher().fetch(ticker)

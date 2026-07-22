@@ -5,6 +5,52 @@
 
 ---
 
+## [0.41.6] — 2026-07-22 — 修复 `--date` 补跑历史交易日时价格锚定错误（架构级修复）
+
+> v0.41.5 修完"同一报告内价格不一致"后，用户追问："这才是 7/21 真实收盘价
+> $207.29，怎么又变成 $205.10？"——排查发现根因比 v0.41.5 更深一层：
+> **`--date` 补跑历史交易日时，所有取价链路（CBOE/yfinance/AlphaVantage/
+> Finnhub）从来都不是查"那一天的收盘价"，而是查"脚本运行那一刻的实时
+> 报价"**。7/21 14:02 原始扫描恰好在收盘后不久跑，凑巧接近真实收盘价；
+> 之后在 7/22（已开盘）陆续重跑两次，分别抓到 $206.34（盘前）和 $205.10
+> （开盘后实时价）——这从来不是 7/21 的收盘价，是完全不同日期的实时报价。
+> 这是补跑功能一直存在的架构缺陷，不是 v0.41.5 引入的。
+
+### Added — `data_pipeline.py`
+- `_fetch_historical_stock_data(ticker, as_of_date)`：用 yfinance `history(start=, end=)`
+  锚定指定历史日期的真实收盘价（CBOE/AlphaVantage/Finnhub 都是当前实时报价源，
+  没有免费的历史快照能力，只有 yfinance 有 start=/end= 历史区间能力）
+- `fetch_stock_data(ticker, as_of_date=None)`：`as_of_date` 非空且不等于
+  `pdt_today()`（真实当日）时走历史锚定路径；为 None 或等于今天时行为完全
+  不变（当日实时扫描不受影响）
+
+### Changed — 透传链路
+- `swarm_agents/cache.py::_fetch_stock_data(ticker, target_date=None)`
+- `swarm_agents/base.py::prefetch_shared_data(tickers, retriever=None, target_date=None)`
+- `alpha_hive_daily_report.py`：`prefetch_shared_data(targets, retriever, target_date=self.date_str)`
+- 所有走 `_get_stock_data()`/共享预取快照的 Agent（Scout/Oracle/Chronos/
+  CodeExecutor 等）自动获得正确的历史锚定价，无需逐个改动
+
+### Added — `tests/test_historical_price_anchor.py`
+- 验证：过去日期走历史锚定（不碰 CBOE 等实时链）、等于今天/不传日期时行为不变、
+  空历史数据诚实返回 fallback
+
+### 验证
+- 单测：`fetch_stock_data('NVDA', as_of_date='2026-07-21')` → $207.29（与真实收盘价一致）；
+  `as_of_date='2026-07-20'` → $203.28（同样对得上）；不传 `as_of_date` 的实时路径不受影响
+- 全量 1030 测试通过；重跑 7/21 报告验证部署
+
+### 已知局限（明确记录，不在本次范围内）
+- **期权数据无法历史回填**：CBOE/yfinance 的期权链都是"当前活跃链"，没有
+  免费的历史期权链数据源——`OracleBeeEcho` 的期权信号（IV Rank/GEX/Max Pain
+  等）在补跑历史日期时仍然只能是"补跑时刻"的期权快照，这是数据源本身的
+  限制，非代码可修
+- `scout_bee.py` 的板块相对强弱（`yf.download(period="25d")`）、`rival_bee.py`
+  的技术指标（`yf.Ticker().history(period="3mo")`）仍是相对当前时间的滚动窗口，
+  未接入历史锚定——这两处独立绕过了共享快照价，理论上补跑历史日期时也会
+  用到"现在"而非"报告日期"的窗口，但影响的是衍生指标而非价格本身，本次
+  聚焦价格锚定，未来若有需要可比照本次模式扩展
+
 ## [0.41.5] — 2026-07-22 — 修复同一报告内现价不一致（Chronos/CodeExecutor 各自查 yfinance）
 
 > 用户核对 7/21 报告发现 NVDA 有两个不同现价：Scout/Oracle 走 CBOE 快照显示

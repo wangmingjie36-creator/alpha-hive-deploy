@@ -430,7 +430,9 @@ class AlphaHiveDailyReporter:
         all_agents = phase1_agents + [guard_agent, bear_agent]
         _log.info("%d Agent（Phase1 %d + Guard + Bear）| 预取数据中...", len(all_agents), len(phase1_agents))
 
-        prefetched = prefetch_shared_data(targets, retriever)
+        # v0.41.6: 传入本次报告的目标交易日——`--date` 补跑历史日期时价格锚定
+        # 该日期真实收盘价；未传 --date 时 self.date_str=当日，行为不变
+        prefetched = prefetch_shared_data(targets, retriever, target_date=self.date_str)
         inject_prefetched(all_agents, prefetched)
         prefetch_elapsed = time.time() - start_time
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)

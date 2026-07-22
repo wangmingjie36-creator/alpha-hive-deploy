@@ -101,10 +101,16 @@ class BeeAgent(ABC):
         return None
 
 
-def prefetch_shared_data(tickers: list, retriever=None) -> Dict:
+def prefetch_shared_data(tickers: list, retriever=None, target_date: Optional[str] = None) -> Dict:
     """
     批量预取所有 ticker 的共享数据（yfinance + VectorMemory），
     避免 6 个 Agent 各自重复请求。
+
+    v0.41.6: target_date 是当前报告的目标交易日（通常=调用方的 self.date_str）。
+    非当日实时扫描时（`--date` 补跑历史交易日），透传给 _fetch_stock_data 让
+    价格锚定该日期真实收盘价，而非"脚本运行那一刻"的实时报价——所有走
+    _get_stock_data()/共享快照价的 Agent（Scout/Oracle/Chronos/CodeExecutor 等）
+    自动获得一致、正确的历史价格。
 
     返回: {"stock_data": {ticker: data}, "contexts": {ticker: str}}
     """
@@ -117,14 +123,14 @@ def prefetch_shared_data(tickers: list, retriever=None) -> Dict:
     if _max_w > 0:
         with ThreadPoolExecutor(max_workers=_max_w, thread_name_prefix="prefetch") as _pex:
             # yfinance 并行
-            _yf_futs = {_pex.submit(_cache._fetch_stock_data, t): t for t in tickers}
+            _yf_futs = {_pex.submit(_cache._fetch_stock_data, t, target_date): t for t in tickers}
             for fut in _as_completed(_yf_futs):
                 t = _yf_futs[fut]
                 try:
                     stock_data[t] = fut.result(timeout=30)
                 except NETWORK_ERRORS as e:
                     _log.debug("Prefetch yfinance failed for %s: %s", t, e)
-                    stock_data[t] = _cache._fetch_stock_data(t)
+                    stock_data[t] = _cache._fetch_stock_data(t, target_date)
 
             # VectorMemory 并行
             if retriever and hasattr(retriever, 'get_context_for_agent'):

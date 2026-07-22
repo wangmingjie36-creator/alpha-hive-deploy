@@ -152,17 +152,20 @@ def check_ticker_validity(ticker: str) -> Dict:
     return result
 
 
-def _fetch_stock_data(ticker: str) -> Dict:
+def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
     """
     多源数据降级链：yfinance → Alpha Vantage → Finnhub → 陈旧缓存 → 安全默认值
     委托给 data_pipeline.MultiSourceFetcher（内置熔断器 + LRU缓存 + 分级TTL）
 
     改动原因：原实现失败时返回 price=100.0（虚假数据），下游 Agent 会基于假数据评分。
     新实现失败时返回 price=0.0 + _data_unavailable=True，触发 WARN-3 跳过分析。
+
+    v0.41.6: target_date 透传给 data_pipeline，非当日时锚定该日期真实收盘价
+    （`--date` 补跑历史交易日场景），None 或等于当日时行为不变。
     """
     try:
         from data_pipeline import fetch_stock_data as _dp_fetch
-        return _dp_fetch(ticker)
+        return _dp_fetch(ticker, as_of_date=target_date)
     except ImportError:
         pass
 
