@@ -144,7 +144,6 @@ class ChronosBeeHorizon(BeeAgent):
                 if t is not None:  # reuse yfinance Ticker from step 1
                     _apt = getattr(t, "analyst_price_targets", None)
                     if _apt is not None and hasattr(_apt, "get"):
-                        _current = _apt.get("current", 0) or 0
                         _low = _apt.get("low", 0) or 0
                         _high = _apt.get("high", 0) or 0
                         _mean = _apt.get("mean", 0) or 0
@@ -155,15 +154,24 @@ class ChronosBeeHorizon(BeeAgent):
                                 "target_low": round(_low, 2),
                                 "target_high": round(_high, 2),
                                 "target_median": round(_median, 2),
-                                "current_price": round(_current, 2),
                             }
-                            # 计算 upside/downside 百分比
-                            if _current > 0:
-                                _analyst_info["upside_pct"] = round(
-                                    (_mean / _current - 1) * 100, 1
-                                )
             except (*NETWORK_ERRORS, AttributeError) as e:
                 _log.debug("ChronosBeeHorizon analyst targets unavailable for %s: %s", ticker, e)
+
+            # v0.41.5: current_price 统一改用共享快照价（CBOE 优先），不再信
+            # yfinance analyst_price_targets 自带的 "current" ——同一次扫描里
+            # Scout/Oracle 走 CBOE、Chronos 走 yfinance 各查各的价，曾导致同一
+            # 份报告出现两个不同现价（NVDA $206.34 vs $207.29）。upside_pct 同步
+            # 用统一现价重算，不再用 yfinance 自带口径。
+            if _analyst_info:
+                _snapshot_price = self._get_stock_data(ticker).get("price")
+                if _snapshot_price:
+                    _analyst_info["current_price"] = round(float(_snapshot_price), 2)
+                    _analyst_info["upside_pct"] = round(
+                        (_analyst_info["target_mean"] / _snapshot_price - 1) * 100, 1
+                    )
+                else:
+                    _analyst_info = {}  # 无可信现价，宁可不展示目标价卡片
 
             # 1c. IV Crush 历史数据（财报期权定价核心参考）
             # 注意：使用独立本地变量，不写入 ctx（ctx 是 _get_history_context 返回的字符串）

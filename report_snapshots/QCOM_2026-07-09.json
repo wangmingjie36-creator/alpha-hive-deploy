@@ -25,18 +25,11 @@
   },
   "low_conviction": false,
   "low_conviction_reason": "",
-  "cs_rank": {
-    "final": 0.667,
-    "signal": 0.444,
-    "catalyst": 0.556,
-    "sentiment": 0.667,
-    "odds": 0.556,
-    "risk_adj": 0.556
-  },
+  "cs_rank": null,
   "actual_prices": {
-    "t1": null,
-    "t7": null,
+    "t1": 173.5,
+    "t7": 173.5,
     "t30": null
   },
-  "created_at": "2026-07-09T14:09:04.419898"
+  "created_at": "2026-07-22T06:45:08.972680"
 }

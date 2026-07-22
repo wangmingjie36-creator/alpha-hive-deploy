@@ -119,6 +119,14 @@ class CodeExecutorAgent(BeeAgent):
                     "raw_output": fetch_result["stdout"]
                 }
 
+            # v0.41.5: 生成代码里的 yfinance 抓价与 Scout/Oracle 走的 CBOE
+            # 快照价各查各的，曾导致同一次扫描出现两个不同现价。用共享快照价
+            # 覆盖沙盒脚本抓到的 current_price，SMA/RSI 等技术指标不受影响
+            # （仍用沙盒脚本自己拉的历史K线计算）。
+            _snapshot_price = self._get_stock_data(ticker).get("price")
+            if _snapshot_price:
+                data["current_price"] = round(float(_snapshot_price), 2)
+
             # 4. 生成技术分析脚本
             analysis_code = CodeGenerator.generate_analysis(
                 "technical",
