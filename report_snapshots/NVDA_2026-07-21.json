@@ -1,8 +1,8 @@
 {
   "ticker": "NVDA",
   "date": "2026-07-21",
-  "composite_score": 4.88,
-  "direction": "neutral",
+  "composite_score": 4.46,
+  "direction": "bullish",
   "price_target": 0.0,
   "stop_loss": 0.0,
   "entry_price": 207.2899932861328,
@@ -11,9 +11,8 @@
     "CodeExecutorAgent": 5.0,
     "ScoutBeeNova": 5.942699999999999,
     "ChronosBeeHorizon": 5.5,
-    "BuzzBeeWhisper": 5.48,
-    "OracleBeeEcho": 5.0,
-    "QueenDistiller": 4.88
+    "QueenDistiller": 4.46,
+    "OracleBeeEcho": 4.0106153846153845
   },
   "weights_used": {
     "signal": 0.2094,
@@ -25,10 +24,10 @@
   "low_conviction": false,
   "low_conviction_reason": "",
   "cs_rank": {
-    "final": 0.111,
-    "signal": 0.778,
-    "catalyst": 0.333,
-    "sentiment": 1.0,
+    "final": 0.0,
+    "signal": 0.75,
+    "catalyst": 0.25,
+    "sentiment": 0.125,
     "odds": 0.0,
     "risk_adj": 0.0
   },
@@ -37,5 +36,5 @@
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-07-22T06:44:59.955433"
+  "created_at": "2026-07-22T07:47:23.033863"
 }
