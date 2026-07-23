@@ -1780,6 +1780,19 @@ class AlphaHiveDailyReporter:
                 with open(html_path, "w", encoding="utf-8") as f:
                     f.write(html)
 
+                # v0.41.7: 同步落盘 analysis-{ticker}-ml-{date}.json——`enhanced`
+                # 本已含 advanced_analysis/ml_prediction/combined_recommendation/
+                # 当日 swarm_results，此前只喂给 HTML 渲染就被丢弃，导致这个文件
+                # 格式自 7/9 起再未生成过；collect_data.py（"方案B"工作流）依赖
+                # 它，长期断供后只能回退到数周前的旧文件，再拼接不同日期的
+                # swarm_results，产生跨日期混算的评分（非当日真实数值）。
+                try:
+                    json_path = self.report_dir / f"analysis-{ticker}-ml-{self.date_str}.json"
+                    with open(json_path, "w", encoding="utf-8") as f:
+                        json.dump(enhanced, f, ensure_ascii=False, indent=2, default=str)
+                except (OSError, TypeError) as _je:
+                    _log.warning("analysis-%s-ml-%s.json 写入失败: %s", ticker, self.date_str, _je)
+
                 _log.info("ML 增强报告已生成：%s", html_path.name)
                 return ticker
             except Exception as e:
