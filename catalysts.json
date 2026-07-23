@@ -1,6 +1,6 @@
 {
   "_comment": "v0.24.3 自动清理已过期事件（>= today 才保留）。yfinance calendar 自动补充未来财报。",
-  "_updated": "2026-04-29",
+  "_updated": "2026-07-23",
   "NVDA": [
     {
       "event": "Computex 2026",
@@ -21,20 +21,14 @@
   ],
   "VKTX": [
     {
-      "event": "VK2735 Phase 3 VENTURE Enrollment Complete",
-      "date": "2026-06-30",
+      "event": "VK2735 Phase 1 维持剂量数据（月度注射/口服转皮下）",
+      "date": "2026-09-30",
       "type": "fda_approval",
-      "severity": "critical",
-      "note": "GLP-1 减肥药三期入组完成里程碑"
-    },
-    {
-      "event": "VK2735 Phase 3 Topline Data",
-      "date": "2026-08-15",
-      "type": "fda_approval",
-      "severity": "critical",
-      "note": "三期顶线数据公布，二元事件"
+      "severity": "high",
+      "note": "2026-07-23 核实：公司仅给季度指引\"Q3 2026\"，未公布具体日期——本条 date 取季度末占位，实际可能落在 7~9 月任意时点，属\"待验证\"事件，不应按确定日期交易。来源：Viking IR/多家财经媒体 2026-06 报道"
     }
   ],
+  "_vktx_note": "2026-07-23 核实更正：原 'VK2735 Phase 3 VENTURE Enrollment Complete'（2026-06-30）与 'VK2735 Phase 3 Topline Data'（2026-08-15，critical）两条均为错误信息——VENTURE 实为二期口服剂型试验（已于2024-2025完成并在ECO 2026展示数据），真正的三期大型减重试验是 VANQUISH-1/VANQUISH-2（非'VENTURE'），公司自己给的顶线数据指引是 2027 年，8/21 前唯一确认的重大事件是 7/29 Q2财报（yfinance calendar 自动覆盖，无需在此重复列）。已删除错误条目，替换为验证过的 Q3 维持剂量研究占位。",
   "MSFT": [
     {
       "event": "Microsoft Build 2026",

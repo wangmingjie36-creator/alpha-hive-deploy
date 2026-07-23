@@ -571,44 +571,16 @@ def create_nvda_catalysts() -> CatalystTimeline:
 
 
 def create_vktx_catalysts() -> CatalystTimeline:
-    """创建 VKTX 的催化剂"""
+    """创建 VKTX 的催化剂
 
-    timeline = CatalystTimeline("VKTX")
-
-    # 临床试验结果
-    trial = Catalyst("VKTX", CatalystType.FDA_APPROVAL)
-    trial.event_name = "Phase 3 临床试验结果发布"
-    trial.scheduled_date = "2026-08-15"  # 预计 Q3（约 8 月中旬）
-    trial.is_confirmed = False
-    trial.time_window_days = 45
-
-    # 历史数据（生物制药行业）
-    trial.add_historical_data(
-        beat_pct=0.40,  # 生物制药成功率较低
-        miss_pct=0.45,
-        inline_pct=0.15,
-        avg_move=25.0,  # 波动更大
-        upside_ratio=3.5  # 成功时大幅上升
-    )
-
-    trial.add_market_expectation(
-        consensus="Uncertain",
-        confidence=40,
-        iv_implied=45.0,  # 高隐含波动率
-        polymarket_odds={"success": 0.55, "failure": 0.45}
-    )
-
-    trial.add_key_metric("Primary Endpoint", None, None, None, "CRITICAL")
-    trial.add_key_metric("Safety Profile", None, None, None, "CRITICAL")
-
-    trial.add_break_condition("FDA 试验暂停（IND Hold）")
-    trial.add_break_condition("关键患者脱落 > 15%")
-
-    trial.severity = CatalystSeverity.CRITICAL
-
-    timeline.add_catalyst(trial)
-
-    return timeline
+    v0.41.8 (2026-07-23): 移除硬编码的"Phase 3 临床试验结果发布"（2026-08-15,
+    critical）——核实后确认这是错误信息：真正的三期大型减重试验是
+    VANQUISH-1/VANQUISH-2（非此前误写的"VENTURE"），公司自己给的顶线数据指引
+    是 2027 年，不是 8/15。近期真实催化剂（Q3 维持剂量数据、7/29 财报）已改由
+    catalysts.json 维护（可核实来源 + 明确标注日期不确定性），此函数不再重复
+    硬编码，避免两处数据源打架。保留空 timeline 以维持向后兼容的调用签名。
+    """
+    return CatalystTimeline("VKTX")
 
 
 # 使用示例

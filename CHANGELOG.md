@@ -5,6 +5,33 @@
 
 ---
 
+## [0.41.8] — 2026-07-23 — 修复 VKTX 错误催化剂数据（三期临床数据混淆二期试验名）
+
+> 用户让"仔细寻找 VKTX 8/21 前重大事件"，核实过程中发现系统内部
+> `catalysts.json` + `catalyst_refinement.py` 里的 VKTX 三期临床数据日期是
+> **错误信息**：标为 "VK2735 Phase 3 VENTURE Enrollment Complete"/"VK2735
+> Phase 3 Topline Data"（2026-08-15，critical severity），但 VENTURE 实际是
+> **二期**口服剂型试验（已于 2024-2025 完成，数据已在 ECO 2026 展示），真正的
+> 三期大型减重试验是 **VANQUISH-1/VANQUISH-2**，公司自己给的顶线数据指引是
+> **2027 年**，8/15 这个具体日期查无出处。
+
+### Fixed — `catalysts.json`
+- 删除错误的两条 VKTX 条目（试验名写错 + 顶线数据日期与公司指引矛盾提前近一年）
+- 替换为核实过的条目：VK2735 **Phase 1** 维持剂量研究数据，公司仅给
+  "Q3 2026"季度指引、无具体日期——`date` 取季度末 9/30 占位，`severity`
+  从 critical 降为 high，`note` 字段明确标注"待验证"及来源
+
+### Fixed — `catalyst_refinement.py::create_vktx_catalysts()`
+- 移除同款硬编码的错误催化剂（`event_name="Phase 3 临床试验结果发布"`,
+  `scheduled_date="2026-08-15"`, severity=CRITICAL）——这是与 `catalysts.json`
+  独立的第二个数据源，两处不修会通过 chronos_bee 的按名去重机制同时残留
+  错误信息。改为返回空 timeline，避免两处数据源各说各话
+
+### 验证
+- `ChronosBeeHorizon.analyze("VKTX")` 实测：催化剂从 3 个（含 2 个重复/错误
+  的三期数据）收敛为 2 个（7/29 财报 + 修正后的 Q3 维持剂量研究，high severity）
+- 全量 1030 测试通过
+
 ## [0.41.7] — 2026-07-23 — 恢复 `analysis-{ticker}-ml-{date}.json` 每日落盘（`collect_data.py`"方案B"断供 13 天）
 
 > 用户核对"每日生活中枢"自动任务的 NVDA 数据时发现，`collect_data.py` 找到的
