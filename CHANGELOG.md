@@ -5,6 +5,31 @@
 
 ---
 
+## [0.41.7] — 2026-07-23 — 恢复 `analysis-{ticker}-ml-{date}.json` 每日落盘（`collect_data.py`"方案B"断供 13 天）
+
+> 用户核对"每日生活中枢"自动任务的 NVDA 数据时发现，`collect_data.py` 找到的
+> 最新 `analysis-NVDA-ml-*.json` 是 **2026-07-02** 的（20 天前），只能拼接
+> `.swarm_results_2026-07-21.json` 的蜂群评分去补全，产生了一个两个不同日期
+> 数据混算出来的分数（4.46/bullish），跟同日期干净扫描的 5.4/neutral 对不上。
+
+### Fixed — `alpha_hive_daily_report.py::_generate_ml_reports/_gen_one`
+- 排查发现：`--swarm` 日常扫描走的 `_gen_one()` 内部其实已经算出了完整的
+  `enhanced`（含 `advanced_analysis`/`ml_prediction`/`combined_recommendation`/
+  当日 `swarm_results`），但只喂给 HTML 渲染就丢弃，从未落盘为
+  `analysis-{ticker}-ml-{date}.json`。全项目排查发现这个文件格式**任何标的
+  最后一次真正生成都是 7/9**——`collect_data.py`（"方案B"数据提炼工作流）依赖
+  这个文件，断供 13 天后其内建的日期回退逻辑找不到近期文件，才退到 7/2
+- 修复：`_gen_one()` 补一行 JSON 落盘，与 HTML 同步写入。副作用：
+  `swarm_results` 落盘时已是当天口径，`collect_data.py` 里"analysis JSON 内
+  swarm_results 为空→ 从别的日期补全"的 fallback 分支不再被触发，根治了
+  跨日期拼接问题（该 fallback 逻辑保留作为历史数据兜底，不删除）
+
+### 验证
+- 重跑 NVDA 单标的：`analysis-NVDA-ml-2026-07-22.json` 正确生成，内嵌
+  `swarm_results` 非空且为当天数据；`collect_data.py NVDA` 端到端验证
+  `swarm_source: None`（未触发补全）、P/C Ratio/IV Skew/异常流均为 7/22 真实值
+- 全量 1030 测试通过
+
 ## [0.41.6] — 2026-07-22 — 修复 `--date` 补跑历史交易日时价格锚定错误（架构级修复）
 
 > v0.41.5 修完"同一报告内价格不一致"后，用户追问："这才是 7/21 真实收盘价
