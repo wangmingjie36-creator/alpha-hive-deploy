@@ -5,6 +5,32 @@
 
 ---
 
+## [0.41.9] — 2026-07-24 — 消除自动流水线 Step 3 ML 报告重复抓取（限流连锁崩溃根治）
+
+> 用户核对"自动跑的产出是否和手动规则模式一样"时，发现 7/23 自动流水线 10/10
+> 标的的 ML 增强报告（HTML + analysis JSON）全部缺失，而 `.swarm_results`/
+> 日报 md 数据完全正常。排查 `~/.claude/scripts/alpha-hive-orchestrator.sh`
+> 发现根因：**Step 2（`alpha_hive_daily_report.py --swarm`）内部已经会生成
+> 全部 ML 报告，Step 3（`generate_ml_report.py --tickers ...`）对同一批标的
+> 做的是完全相同的 CBOE/yfinance 抓取，纯属重复**——当天两条路径背靠背对
+> 同 10 只票各打一遍全套 API，把调用量顶到限流线，Step 2 和 Step 3 内部的
+> ML 报告生成同时崩溃（`momentum_5d=None` 触发 `'>' not supported between
+> NoneType and int`）。
+
+### Changed — `~/.claude/scripts/alpha-hive-orchestrator.sh`（不在本仓库，Alpha Hive 自动化基础设施的一部分）
+- Step 3 执行前先检查当天 `alpha-hive-{ticker}-ml-enhanced-{date}.html` 是否
+  已由 Step 2 生成；全部齐全则跳过（沿用 Step 4/5 已有的"已由 Step 2 pipeline
+  完成"跳过模式），只有缺失时才补跑，且只对缺失的标的传参，不再无条件全量
+  重跑 10 只票
+- 验证：模拟 7/23（全缺）→ 判定补跑全部 10 只（不劣于原行为）；模拟 7/22
+  （已手动生成齐全）→ 判定跳过，不再重复调用
+
+### 已知遗留（记录不修）
+- `'>' not supported between instances of 'NoneType' and 'int'` 这个具体崩溃
+  点本身未定位到精确代码行（本地无法稳定复现深夜限流时的多源同时降级组合），
+  本次治标于根源（消除重复调用降低触发概率），未做防御性判空加固——若后续
+  仍复现，需要在触发时抓取完整 traceback 而非仅日志摘要
+
 ## [0.41.8] — 2026-07-23 — 修复 VKTX 错误催化剂数据（三期临床数据混淆二期试验名）
 
 > 用户让"仔细寻找 VKTX 8/21 前重大事件"，核实过程中发现系统内部
