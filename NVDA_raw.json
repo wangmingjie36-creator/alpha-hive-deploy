@@ -2,7 +2,7 @@
   "_meta": {
     "ticker": "NVDA",
     "report_date": "2026-07-23",
-    "price": 212.06,
+    "price": 208.76,
     "generated_by": "collect_data.py · 方案B",
     "swarm_source": null
   },
@@ -224,7 +224,8 @@
     "reddit_rank": 9,
     "reddit_mentions": 182,
     "volume_ratio": 1.01,
-    "buzz_discovery": "情绪 66% | 动量 +2.2% | 量比 1.0x | Reddit #9(rising,182提及) | 看多叙事主导 | 未上 Yahoo 热搜 | F&G 43(Fear) | 情绪动量:rising | 历史5条:多5/空0,均分6.0|历史T+7准确率49%(41次,均收益+0.09%)"
+    "buzz_discovery": "情绪 66% | 动量 +2.2% | 量比 1.0x | Reddit #9(rising,182提及) | 看多叙事主导 | 未上 Yahoo 热搜 | F&G 43(Fear) | 情绪动量:rising | 历史5条:多5/空0,均分6.0|历史T+7准确率49%(41次,均收益+0.09%)",
+    "daily_macro_summary": "宏观数据不可用（降级到默认值）"
   },
   "fundamentals": {
     "scout_score": 5.83,
@@ -249,5 +250,7 @@
     "rating": "BUY",
     "action": "分批建仓",
     "reasoning": "人工分析 71.0% + ML 预测 53.1% = 综合 65.6%"
-  }
+  },
+  "price": 208.76,
+  "price_source": "closing"
 }

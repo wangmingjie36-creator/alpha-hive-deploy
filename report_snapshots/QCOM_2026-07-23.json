@@ -1,0 +1,40 @@
+{
+  "ticker": "QCOM",
+  "date": "2026-07-23",
+  "composite_score": 5.27,
+  "direction": "bearish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 171.11000061035156,
+  "agent_votes": {
+    "OracleBeeEcho": 9.20153846153846,
+    "ChronosBeeHorizon": 7.45,
+    "GuardBeeSentinel": 6.61,
+    "CodeExecutorAgent": 5.0,
+    "RivalBeeVanguard": 5.96,
+    "QueenDistiller": 5.27
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.222,
+    "signal": 0.0,
+    "catalyst": 0.556,
+    "sentiment": 0.556,
+    "odds": 0.889,
+    "risk_adj": 0.778
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-07-24T00:57:53.169576"
+}
