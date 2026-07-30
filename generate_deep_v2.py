@@ -3274,13 +3274,13 @@ def _build_scenario_narrative(ctx: dict) -> str:
   <td style="padding:7px 10px;color:var(--green2);font-weight:700;">A · 强势多头</td>
   <td style="padding:7px 8px;text-align:center;font-weight:700;color:var(--green2);">{pa}%</td>
   <td style="padding:7px 8px;text-align:center;color:var(--green2);">{ret_a:+.1f}%</td>
-  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_a) + "x×EPS→$" + f"{_fwd_eps*_pe_a:.0f}" + " | " if _fwd_eps else ""}催化剂超预期 → 突破 {res1_s} Call Wall → gamma squeeze → 目标 {res2_s}</td>
+  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_a) + "x×EPS→$" + f"{_fwd_eps*_pe_a:.0f}" + " | " if _fwd_eps > 0 else ""}催化剂超预期 → 突破 {res1_s} Call Wall → gamma squeeze → 目标 {res2_s}</td>
 </tr>
 <tr style="border-bottom:1px solid var(--border);">
   <td style="padding:7px 10px;color:#4ade80;font-weight:600;">B · 温和看涨</td>
   <td style="padding:7px 8px;text-align:center;font-weight:700;color:#4ade80;">{pb}%</td>
   <td style="padding:7px 8px;text-align:center;color:#4ade80;">{ret_b:+.1f}%</td>
-  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_b) + "x×EPS→$" + f"{_fwd_eps*_pe_b:.0f}" + " | " if _fwd_eps else ""}基本面稳健 → {sup1_s}–{res1_s} 震荡偏多 → 分批减仓</td>
+  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_b) + "x×EPS→$" + f"{_fwd_eps*_pe_b:.0f}" + " | " if _fwd_eps > 0 else ""}基本面稳健 → {sup1_s}–{res1_s} 震荡偏多 → 分批减仓</td>
 </tr>
 <tr style="border-bottom:1px solid var(--border);">
   <td style="padding:7px 10px;color:var(--gold2);font-weight:600;">C · 区间震荡</td>
@@ -3292,13 +3292,13 @@ def _build_scenario_narrative(ctx: dict) -> str:
   <td style="padding:7px 10px;color:#f87171;font-weight:600;">D · 温和看跌</td>
   <td style="padding:7px 8px;text-align:center;font-weight:700;color:#f87171;">{pd}%</td>
   <td style="padding:7px 8px;text-align:center;color:#f87171;">{ret_d:+.1f}%</td>
-  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_d) + "x×EPS→$" + f"{_fwd_eps*_pe_d:.0f}" + " | " if _fwd_eps else ""}宏观逆风 → Put OI 堆积 → {sup1_s} 支撑承压 → 做市商对冲加剧下行</td>
+  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_d) + "x×EPS→$" + f"{_fwd_eps*_pe_d:.0f}" + " | " if _fwd_eps > 0 else ""}宏观逆风 → Put OI 堆积 → {sup1_s} 支撑承压 → 做市商对冲加剧下行</td>
 </tr>
 <tr>
   <td style="padding:7px 10px;color:var(--red2);font-weight:700;">E · 强势看跌</td>
   <td style="padding:7px 8px;text-align:center;font-weight:700;color:var(--red2);">{pe}%</td>
   <td style="padding:7px 8px;text-align:center;color:var(--red2);">{ret_e:+.1f}%</td>
-  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_e) + "x×EPS→$" + f"{_fwd_eps*_pe_e:.0f}" + " | " if _fwd_eps else ""}逆向信号兑现 → {sup1_s} 失守 → 止损盘触发 → 负Gamma区追空 → 目标 {sup2_s}</td>
+  <td style="padding:7px 10px;color:var(--text2);font-size:11px;">{"PE " + str(_pe_e) + "x×EPS→$" + f"{_fwd_eps*_pe_e:.0f}" + " | " if _fwd_eps > 0 else ""}逆向信号兑现 → {sup1_s} 失守 → 止损盘触发 → 负Gamma区追空 → 目标 {sup2_s}</td>
 </tr>
 </tbody>
 <tfoot>

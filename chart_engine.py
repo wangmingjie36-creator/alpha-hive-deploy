@@ -617,7 +617,7 @@ def render_gex_profile_chart(
             gex_vals = [float(gex_profile[k]) for k in strikes]
             strikes_f = [float(k) for k in strikes]
 
-        if not strikes:
+        if not strikes_f:
             return None
 
         # Filter to ±30% around current price
