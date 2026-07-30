@@ -104,6 +104,116 @@ class TestSavePrediction:
         assert len(nvda) == 1
         assert nvda[0]["final_score"] == 9.0
 
+
+class TestBusinessDateStamping:
+    """v0.42.4 P0：预测记录必须盖**业务日期**而非写入时刻的墙上时钟
+
+    旧实现无条件写 `_pdt_today()`，配合 UNIQUE(date,ticker) + INSERT OR REPLACE，
+    导致同一 PDT 日历日跑第二次扫描删掉第一次的记录。`--date` 补跑历史交易日时
+    尤其致命：报告/快照标着目标日期，预测却盖成运行当天并互相覆盖。
+    实测全库因此丢失 479 行（消耗 1294 个 id 只留 815 行，37%）。
+    """
+
+    @pytest.fixture
+    def store(self, tmp_path):
+        from backtester import PredictionStore
+        return PredictionStore(db_path=str(tmp_path / "test.db"))
+
+    def _dates_in_db(self, store):
+        import sqlite3
+        with sqlite3.connect(store.db_path) as conn:
+            return sorted(r[0] for r in conn.execute(
+                f"SELECT date FROM {store.TABLE}"))
+
+    def test_explicit_date_is_used(self, store):
+        """传了 date 就必须写它，而不是今天"""
+        from backtester import _pdt_today
+        ok = store.save_prediction(
+            ticker="NVDA", final_score=8.0, direction="bullish", price=140.0,
+            date="2026-01-15",
+        )
+        assert ok is True
+        dates = self._dates_in_db(store)
+        assert dates == ["2026-01-15"]
+        assert _pdt_today() not in dates
+
+    def test_defaults_to_pdt_today(self, store):
+        """不传 date 时行为与修复前一致（向后兼容）"""
+        from backtester import _pdt_today
+        store.save_prediction(
+            ticker="NVDA", final_score=8.0, direction="bullish", price=140.0)
+        assert self._dates_in_db(store) == [_pdt_today()]
+
+    def test_two_business_dates_same_run_both_survive(self, store):
+        """核心回归：同一进程内写两个不同业务日的同一标的，两条都必须存活。
+
+        修复前两条会被 REPLACE 成 1 条 —— 这正是补跑多个历史交易日时
+        样本被静默吞掉的机制。
+        """
+        for d in ("2026-01-15", "2026-01-16"):
+            store.save_prediction(
+                ticker="NVDA", final_score=8.0, direction="bullish",
+                price=140.0, date=d)
+        assert self._dates_in_db(store) == ["2026-01-15", "2026-01-16"]
+
+    def test_same_business_date_still_replaces(self, store):
+        """同一业务日重复写同一标的仍应只留 1 条（REPLACE 语义保持不变）"""
+        store.save_prediction(ticker="NVDA", final_score=7.0,
+                              direction="bullish", price=140.0, date="2026-01-15")
+        store.save_prediction(ticker="NVDA", final_score=9.0,
+                              direction="bearish", price=145.0, date="2026-01-15")
+        import sqlite3
+        with sqlite3.connect(store.db_path) as conn:
+            rows = conn.execute(
+                f"SELECT date, final_score FROM {store.TABLE}").fetchall()
+        assert len(rows) == 1
+        assert rows[0][1] == 9.0
+
+    @pytest.mark.parametrize("bad", ["2026/01/15", "garbage", "20260115", ""])
+    def test_invalid_date_falls_back_without_raising(self, store, bad):
+        """非法日期回退当日且不抛异常，不写脏数据"""
+        from backtester import _pdt_today
+        ok = store.save_prediction(
+            ticker="NVDA", final_score=8.0, direction="bullish",
+            price=140.0, date=bad)
+        assert ok is True
+        assert self._dates_in_db(store) == [_pdt_today()]
+
+    def test_save_predictions_passes_date_through(self, tmp_path, monkeypatch):
+        """Backtester.save_predictions 必须把 date 透传到 store"""
+        from backtester import Backtester, PredictionStore
+        bt = Backtester.__new__(Backtester)
+        bt.store = PredictionStore(db_path=str(tmp_path / "t.db"))
+        bt._spy_entry_cache = {}
+        monkeypatch.setattr("backtester.yf", None, raising=False)
+
+        n = bt.save_predictions(
+            {"NVDA": {"final_score": 8.0, "direction": "bullish"},
+             "TSLA": {"final_score": 4.0, "direction": "bearish"}},
+            date="2026-01-15",
+        )
+        assert n == 2
+        import sqlite3
+        with sqlite3.connect(bt.store.db_path) as conn:
+            dates = {r[0] for r in conn.execute(
+                f"SELECT DISTINCT date FROM {bt.store.TABLE}")}
+        assert dates == {"2026-01-15"}
+
+    def test_save_predictions_returns_count(self, tmp_path, monkeypatch):
+        """返回值 = 实际保存条数，供调用方检测 0（学习闭环无样本告警）"""
+        from backtester import Backtester, PredictionStore
+        bt = Backtester.__new__(Backtester)
+        bt.store = PredictionStore(db_path=str(tmp_path / "t.db"))
+        bt._spy_entry_cache = {}
+        monkeypatch.setattr("backtester.yf", None, raising=False)
+
+        assert bt.save_predictions({}, date="2026-01-15") == 0
+        # 非 dict 的条目应被跳过而非计数
+        assert bt.save_predictions(
+            {"NVDA": {"final_score": 8.0, "direction": "bullish"},
+             "BAD": "not-a-dict"},
+            date="2026-01-15") == 1
+
     def test_save_with_pheromone_compact(self, store):
         compact = [{"agent": "ScoutBeeNova", "score": 8.0}]
         ok = store.save_prediction(

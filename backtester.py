@@ -157,9 +157,35 @@ class PredictionStore:
         agent_directions: Dict = None,
         options_data: Dict = None,
         pheromone_compact: list = None,
+        date: Optional[str] = None,
     ) -> bool:
-        """保存一条预测记录（含期权分析数据 + Agent 自评分快照）"""
+        """保存一条预测记录（含期权分析数据 + Agent 自评分快照）
+
+        Args:
+            date: **业务日期**（YYYY-MM-DD），即"这份预测属于哪个交易日"。
+                  留空则回退 `_pdt_today()`（写入时刻的 PDT 日历日）。
+
+        ⚠️ v0.42.4 修复的核心：本表有 `UNIQUE(date, ticker)` + `INSERT OR REPLACE`，
+        REPLACE 语义是「删除旧行 + 插入新行（分配新 rowid）」。旧实现无条件盖
+        `_pdt_today()`，于是**同一 PDT 日历日跑第二次扫描会删掉第一次的记录**——
+        `--date` 补跑历史交易日时尤其致命：报告和快照都标着目标日期，唯独预测
+        记录盖成运行当天并互相覆盖。实测全库因此丢失 479 行（消耗 1294 个 id
+        只保留 815 行，37%）。调用方**只要有业务日期就必须显式传入**。
+        """
         opts = options_data or {}
+
+        # 业务日期校验：格式不合法时回退当日并告警，不静默写脏数据
+        entry_date = date or _pdt_today()
+        if date:
+            try:
+                datetime.strptime(date, "%Y-%m-%d")
+            except (ValueError, TypeError):
+                _log.warning(
+                    "save_prediction 收到非法业务日期 %r（应为 YYYY-MM-DD），"
+                    "回退为 %s", date, _pdt_today()
+                )
+                entry_date = _pdt_today()
+
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(f"""
@@ -170,7 +196,7 @@ class PredictionStore:
                      pheromone_compact)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    _pdt_today(),  # v0.27.3: 美股交易日（PDT），与 reporter.date_str 对齐
+                    entry_date,  # v0.42.4: 业务日期（调用方传入）；留空才回退 PDT 当日
                     ticker,
                     final_score,
                     direction,
@@ -637,15 +663,19 @@ class Backtester:
 
     # ==================== 保存预测 ====================
 
-    def save_predictions(self, swarm_results: Dict) -> int:
+    def save_predictions(self, swarm_results: Dict, date: Optional[str] = None) -> int:
         """
         将蜂群扫描结果保存为预测记录
 
         Args:
             swarm_results: {ticker: {final_score, direction, dimension_scores, ...}}
+            date: **业务日期**（YYYY-MM-DD）。调用方有报告日期时**必须传入** ——
+                  留空会回退到写入时刻的 PDT 当日，`--date` 补跑场景下会导致
+                  多个业务日的预测盖成同一天并互相 REPLACE（v0.42.4 修复的 bug）。
 
         Returns:
-            保存的记录数
+            保存的记录数。**调用方应检查返回值**：返回 0 而 swarm_results 非空
+            意味着学习闭环本次未获得任何样本。
         """
         saved = 0
         for ticker, data in swarm_results.items():
@@ -676,6 +706,7 @@ class Backtester:
                 agent_directions=agent_dirs,
                 options_data=options_data,
                 pheromone_compact=data.get("pheromone_compact", []),
+                date=date,
             )
             if ok:
                 saved += 1
@@ -1531,7 +1562,7 @@ class Backtester:
 
 # ==================== 便捷函数 ====================
 
-def run_full_backtest(swarm_results: Dict = None) -> Dict:
+def run_full_backtest(swarm_results: Dict = None, date: Optional[str] = None) -> Dict:
     """
     执行完整回测流程
 
@@ -1540,13 +1571,18 @@ def run_full_backtest(swarm_results: Dict = None) -> Dict:
     3. 输出报告
     4. 尝试权重自适应
 
+    Args:
+        date: 业务日期（YYYY-MM-DD）。**调用方若有报告日期应显式传入**，
+              否则预测会盖成运行当天的 PDT 日期（见 save_prediction 的
+              v0.42.4 说明）。留空仅适用于"就是为当天跑"的场景。
+
     返回: {backtest_results, accuracy_stats, adapted_weights}
     """
     bt = Backtester()
 
     # 1. 保存新预测
     if swarm_results:
-        bt.save_predictions(swarm_results)
+        bt.save_predictions(swarm_results, date=date)
 
     # 2. 回测到期预测
     backtest_results = bt.run_backtest()

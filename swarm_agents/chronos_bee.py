@@ -1,5 +1,6 @@
 """ChronosBeeHorizon - 催化剂追踪蜂 (Catalyst 维度, 权重 0.20)"""
 
+import os
 from typing import Any, Dict, List, Optional
 from swarm_agents._config import _log, _AS
 from swarm_agents.cache import _safe_score
@@ -43,6 +44,54 @@ class ChronosBeeHorizon(BeeAgent):
         "medium":   1.0,
         "low":      0.8,
     }
+
+    # v0.43.0：PEAD 分数微调默认**关闭**。
+    # 理由：catalyst 维度的历史 784 条样本是在"无 PEAD 分数调整"口径下产生的，
+    # 一旦开启，dimension_scores['catalyst'] 的口径就变了，与历史样本不可比，
+    # 而 catalyst 在四口径 IC 体检里只过 1/4（与纯噪音无异），分数微调的
+    # 期望收益接近零、破坏可比性的代价却是确定的。
+    # 方向修复不受此开关影响 —— 方向本就是全零（bearish 从未出现过），
+    # 没有"可比性"可言，只有从无到有。
+    _PEAD_SCORE_ADJUST_ENV = "ALPHA_HIVE_CHRONOS_PEAD_SCORE_ADJUST"
+
+    def _apply_pead_direction(self, ticker: str, direction: str, score: float,
+                              pending: Dict) -> tuple:
+        """把 PEAD 漂移证据施加到方向（可选施加到分数）
+
+        必须在评分块**之后**调用 —— 评分块会无条件重写 direction/score，
+        这正是 v0.43.0 之前该逻辑成为死代码的原因。
+
+        Args:
+            pending: `{bias, adj, drift_mean, winrate, sample_count}`，空则原样返回
+
+        Returns:
+            (direction, score)
+        """
+        if not pending:
+            return direction, score
+
+        bias = pending.get("bias", "neutral")
+        if bias not in ("bullish", "bearish"):
+            return direction, score
+
+        adj = float(pending.get("adj", 0.0) or 0.0)
+
+        # 方向：只在评分块判为 neutral 时施加，不覆盖高置信的 bullish 判定。
+        # 这保证「强催化剂 + 看多」不会被历史漂移翻转，只填补"无方向"的空白。
+        if direction == "neutral":
+            direction = bias
+            _log.info(
+                "ChronosBee %s: PEAD %s 方向生效（drift=%.2f%%, winrate=%.0f%%, n=%d）",
+                ticker, bias, pending.get("drift_mean", 0.0),
+                (pending.get("winrate", 0.5) or 0.5) * 100,
+                pending.get("sample_count", 0),
+            )
+
+        # 分数：默认不动（见 _PEAD_SCORE_ADJUST_ENV 上方注释）
+        if os.getenv(self._PEAD_SCORE_ADJUST_ENV, "0") == "1":
+            score = min(10.0, score + adj) if bias == "bullish" else max(0.0, score - adj)
+
+        return direction, score
 
     def analyze(self, ticker: str) -> Dict:
         _err = self._validate_ticker(ticker)
@@ -201,6 +250,7 @@ class ChronosBeeHorizon(BeeAgent):
             # 1d. ② PEAD 历史量化（财报后价格漂移统计）
             _pead_data: dict = {}
             _pead_text: str = ""
+            _pead_pending: dict = {}   # v0.43.0：暂存方向证据，评分块之后再施加
             try:
                 import sys as _sys_pead
                 import os as _os_pead
@@ -233,18 +283,20 @@ class ChronosBeeHorizon(BeeAgent):
 
                 _pead_adj = round(min(0.8, _pead_adj), 2)
 
-                if _pead_bias == "bullish":
-                    score = min(10.0, score + _pead_adj)
-                    if direction == "neutral":
-                        direction = "bullish"
-                    _log.debug("PEAD %s: bullish +%.2f (drift=%.1f%%, winrate=%.0f%%, n=%d)",
-                               ticker, _pead_adj, _drift_mean, _drift_winrate*100, _sample_count)
-                elif _pead_bias == "bearish":
-                    score = max(0.0, score - _pead_adj)
-                    if direction == "neutral":
-                        direction = "bearish"
-                    _log.debug("PEAD %s: bearish -%.2f (drift=%.1f%%, winrate=%.0f%%, n=%d)",
-                               ticker, _pead_adj, _drift_mean, _drift_winrate*100, _sample_count)
+                # ⚠️ v0.43.0：此处**不再**直接改 score / direction。
+                # 旧实现在这里赋值，但下方评分块（`score = base` 与 direction 三分支）
+                # 位于本段**之后**，会无条件覆盖 —— 这整段方向逻辑是死代码。
+                # 后果：ChronosBee 结构上永远无法输出 bearish（DB 950 条记录
+                # bearish = 0），而 `elif score <= 4.5` 那条分支也不可达
+                # （score 从 5.5 起步且只增不减）。
+                # 现改为暂存，由评分块之后的 `_apply_pead_direction()` 统一施加。
+                _pead_pending = {
+                    "bias": _pead_bias,
+                    "adj": _pead_adj,
+                    "drift_mean": _drift_mean,
+                    "winrate": _drift_winrate,
+                    "sample_count": _sample_count,
+                }
             except Exception as _e_pead:
                 _log.debug("PEAD analysis unavailable for %s: %s", ticker, _e_pead)
 
@@ -343,6 +395,9 @@ class ChronosBeeHorizon(BeeAgent):
                 if score >= 7.5 and high_impact_imminent:
                     direction = "bullish"
                 elif score <= 4.5:
+                    # 注：`score` 自 5.5 起步且只增不减，本分支在此**不可达**。
+                    # 保留仅为防御（若未来评分改为可减分）。真正的看空判定
+                    # 由下方 _apply_pead_direction() 依据 PEAD 漂移证据给出。
                     direction = "bearish"
                 else:
                     direction = "neutral"
@@ -350,6 +405,16 @@ class ChronosBeeHorizon(BeeAgent):
                 score = 4.0
                 discovery = "无近期催化剂"
                 direction = "neutral"
+
+            # ── v0.43.0：施加 PEAD 方向证据（修复死代码）────────────────────
+            # 评分块只衡量"事件强度"（有多大的事要发生），不含方向。
+            # PEAD（财报后价格漂移）是本蜂唯一真正带方向的证据源，此前被
+            # 上方评分块无条件覆盖 ⇒ ChronosBee 永远输出不了 bearish
+            # （实测 DB 950 条记录 bearish = 0），成为"信息素多5/空0
+            # 自我强化看多"的结构性源头之一。
+            direction, score = self._apply_pead_direction(
+                ticker, direction, score, _pead_pending
+            )
 
             # 分析师目标价注入 discovery
             if _analyst_info and _analyst_info.get("upside_pct") is not None:

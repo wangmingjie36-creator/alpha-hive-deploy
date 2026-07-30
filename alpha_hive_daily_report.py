@@ -713,7 +713,16 @@ class AlphaHiveDailyReporter:
         if Backtester:
             try:
                 bt = Backtester()
-                bt.save_predictions(swarm_results)
+                # v0.42.4：必须传业务日期。旧实现让 save_prediction 盖 _pdt_today()，
+                # 于是 --date 补跑历史交易日时预测被盖成运行当天，配合
+                # UNIQUE(date,ticker)+INSERT OR REPLACE 互相覆盖（实测丢失 37% 样本）。
+                _saved = bt.save_predictions(swarm_results, date=self.date_str)
+                if not _saved and swarm_results:
+                    _log.error(
+                        "预测写库 0 条（swarm_results 有 %d 个标的）—— 学习闭环本次未获得样本",
+                        len(swarm_results),
+                    )
+                    print("⚠️  预测写库失败：本次扫描未产生任何 predictions 记录")
                 bt.run_backtest()
                 adapted = bt.adapt_weights(min_samples=10, period="t7")
                 if adapted is None:
@@ -1734,13 +1743,30 @@ class AlphaHiveDailyReporter:
             except (OSError, json.JSONDecodeError):
                 pass
 
-        # 用 swarm_data 所有标的（而非仅 opportunities 前几名），确保每个扫描标的都有 ML 报告
+        # opportunities 已按分数降序，故 opp_tickers 天然是"最高分优先"
         opps = report.get("opportunities", [])
         opp_tickers = [o.get("ticker") for o in opps if o.get("ticker")]
         extra = [t for t in swarm_data if t not in opp_tickers]
         tickers = opp_tickers + extra
         if not tickers:
             return []
+
+        # ── v0.42.9：ML 报告数量上限 ──────────────────────────────────
+        # 每份 ML 报告都要走一次 CBOE/yfinance 取价链。标的池从 10 扩到 30 后，
+        # 若仍为**每只**标的生成，这部分调用量直接翻 3 倍——2026-07-23 深夜的
+        # 限流连锁崩溃（10/10 标的 ML 报告在 Step 2 与 Step 3 同时失败）正是
+        # 调用量堆叠所致。
+        #
+        # 扩池的目的是**统计广度**（predictions 表的 dimension_scores + 价格），
+        # 那条路径不依赖 ML HTML。ML 报告是给人看的，只需覆盖最高分的那些。
+        # 所以：全部标的照常扫描入库，ML 报告只出前 N 名。
+        _ml_cap = int(os.getenv("ALPHA_HIVE_ML_REPORT_MAX", "12"))
+        if _ml_cap > 0 and len(tickers) > _ml_cap:
+            _log.info(
+                "ML 报告限流：扫描 %d 只，仅为分数最高的 %d 只生成（其余仍完整入库）",
+                len(tickers), _ml_cap,
+            )
+            tickers = tickers[:_ml_cap]
 
         def _gen_one(ticker: str) -> str | None:
             """生成单个标的的 ML 报告（线程安全）"""
@@ -1800,14 +1826,34 @@ class AlphaHiveDailyReporter:
                 return None
 
         # 并行生成 ML 报告（yfinance + HTML 渲染，I/O 密集）
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        # ⚠️ v0.42.9：与 parallel_agent_runner 同一挂死模式——原实现用
+        # `with ThreadPoolExecutor(...)` 且 `as_completed()` / `future.result()`
+        # **都没有超时**，任何一个卡住的取价调用都会让整个扫描永久挂起。
+        # 改为：带超时收集 + shutdown(wait=False, cancel_futures=True)。
+        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FTimeout
         generated = []
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        _per_ticker_timeout = float(os.getenv("ALPHA_HIVE_ML_REPORT_TIMEOUT", "90"))
+        _total_timeout = _per_ticker_timeout * max(1, len(tickers)) / 4 + _per_ticker_timeout
+
+        pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ml-report")
+        try:
             futures = {pool.submit(_gen_one, t): t for t in tickers}
-            for future in as_completed(futures):
-                result = future.result()
-                if result:
-                    generated.append(result)
+            try:
+                for future in as_completed(futures, timeout=_total_timeout):
+                    try:
+                        result = future.result(timeout=_per_ticker_timeout)
+                        if result:
+                            generated.append(result)
+                    except Exception as e:
+                        _log.warning("ML 报告失败 %s: %s", futures.get(future), e)
+            except _FTimeout:
+                _stuck = [t for f, t in futures.items() if not f.done()]
+                _log.error(
+                    "ML 报告整体超时（%.0fs），%d 只未完成：%s",
+                    _total_timeout, len(_stuck), ", ".join(_stuck[:8]),
+                )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
         return generated
 
@@ -2122,8 +2168,21 @@ def main():
     parser.add_argument(
         '--tickers',
         nargs='+',
-        default=["NVDA", "TSLA", "MSFT", "QCOM", "VKTX", "META", "BILI", "AMZN", "RKLB", "CRCL"],
-        help='要扫描的股票代码列表（空格分隔，默认：NVDA TSLA MSFT QCOM VKTX META BILI AMZN RKLB CRCL）'
+        # v0.42.9 扩池：10 → 30 只。原 10 只全是高相关科技股，平均两两相关 0.230，
+        # 有效独立标的数 N_eff 仅 **3.25** —— 这是横截面 rank-IC 统计功效的真正瓶颈，
+        # 而非样本天数。新增 20 只按"最大化 N_eff"贪心选出（优先低相关行业：
+        # Energy 与核心池相关 −0.180、Communication −0.007、Consumer +0.048），
+        # 使 N_eff 提升到 **13.8**（40 只之后 N_eff 反而下降，故止步 30）。
+        # 成本实测可忽略：耗时 ≈ 71 + 4.9×标的数 秒，30 只约 219s（超时的 12%）。
+        # 全部取自已有的 WATCHLIST_EXTENDED，数据真实度实测 90~96%，与核心池无差别。
+        default=[
+            # 原核心 10
+            "NVDA", "TSLA", "MSFT", "QCOM", "VKTX", "META", "BILI", "AMZN", "RKLB", "CRCL",
+            # 扩池 20（按 N_eff 增量降序）
+            "CVX", "VZ", "JNJ", "XOM", "COST", "BRK-B", "AMC", "ABBV", "T", "DELL",
+            "DE", "CRM", "MU", "WMT", "TMO", "TMUS", "ENPH", "NFLX", "NEE", "SNOW",
+        ],
+        help='要扫描的股票代码列表（空格分隔，默认 30 只跨 11 个行业）'
     )
     parser.add_argument(
         '--all-watchlist',
@@ -2351,5 +2410,53 @@ def main():
     return report
 
 
+def _force_exit_if_threads_stuck(grace_seconds: float = 10.0) -> None:
+    """全部工作完成后，若仍有卡死的工作线程则强制退出（v0.42.8 安全网）
+
+    为什么需要：`concurrent.futures` 通过 `threading._register_atexit` 注册了
+    `_python_exit`，进程退出时会 **join 所有工作线程**。所以即便
+    `executor.shutdown(wait=False)` 立即返回、主流程也跑完了，进程仍会在退出时
+    静默挂住，直到卡在网络调用里的线程自己返回（可能是几小时——Python 无法
+    强制中断线程）。实测：一个 1 秒完成的主流程，因一个 20 秒的卡住线程，
+    进程总耗时 20 秒。
+
+    本函数只在**所有产出都已落盘之后**调用，因此强退是安全的：
+    数据库、报告、gh-pages 同步均已完成。给 grace_seconds 让线程有机会自然结束，
+    超时则 `os._exit(0)` 跳过 atexit 直接结束进程。
+    """
+    import sys
+    import threading
+
+    lingering = [
+        t for t in threading.enumerate()
+        if t is not threading.current_thread() and t.is_alive() and not t.daemon
+    ]
+    if not lingering:
+        return
+
+    names = ", ".join(t.name for t in lingering[:6])
+    _log.warning(
+        "退出时仍有 %d 个非守护线程存活（%s），最多等待 %.0fs",
+        len(lingering), names, grace_seconds,
+    )
+    deadline = time.time() + grace_seconds
+    for t in lingering:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        t.join(timeout=remaining)
+
+    still = [t for t in lingering if t.is_alive()]
+    if still:
+        _log.error(
+            "强制退出：%d 个线程仍卡住（%s）。所有产出已落盘，跳过 atexit join。",
+            len(still), ", ".join(t.name for t in still[:6]),
+        )
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+
+
 if __name__ == "__main__":
     main()
+    _force_exit_if_threads_stuck()

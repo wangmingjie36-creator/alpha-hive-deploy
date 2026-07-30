@@ -174,10 +174,20 @@ class ParallelAgentRunner:
         if not agents:
             return results
 
-        with ThreadPoolExecutor(
+        # ⚠️ v0.42.8：**不使用 `with` 上下文管理器**。
+        # `with ThreadPoolExecutor(...)` 退出时执行 shutdown(wait=True)，会一直阻塞
+        # 到所有工作线程返回为止。下面的 timeout 只让我们**停止等待结果**，
+        # 并不会杀死卡住的线程（Python 无法强制中断线程）——于是超时逻辑正常填了
+        # 默认值，却在退出 with 块时被无限期挂住。
+        # 实测事故：2026-05-28 一次 10 标的扫描跑了 **24.1 小时**（prefetch 仅 17s，
+        # 时间全耗在这里）；另有 06-27 (0.8h)、06-30 (2.2h)、07-17 (3.1h) 三次。
+        # 改为手动 shutdown(wait=False, cancel_futures=True)：放弃未开始的任务，
+        # 已卡住的线程留作守护后台自生自灭，主流程立即继续。
+        executor = ThreadPoolExecutor(
             max_workers=min(max_workers, len(agents)),
             thread_name_prefix=f"agent-p{phase}"
-        ) as executor:
+        )
+        try:
             # 提交所有任务
             future_to_name: Dict[Future, str] = {}
             for name, agent in agents.items():
@@ -234,6 +244,17 @@ class ParallelAgentRunner:
                             "error": "global_timeout",
                             "data_quality": {"source": "timeout"},
                         })
+        finally:
+            # 关键：wait=False 立即返回，不等卡住的线程。
+            # cancel_futures=True 取消尚未开始执行的任务，避免它们继续占用网络配额。
+            # 仍在运行的线程会在后台跑完（Python 无法强杀），但主流程不再被它们绑架。
+            _stuck = [n for f, n in future_to_name.items() if not f.done()]
+            if _stuck:
+                _log.error(
+                    "[Phase%d] %d 个 Agent 线程仍卡住，放弃等待并继续：%s",
+                    phase, len(_stuck), ", ".join(_stuck),
+                )
+            executor.shutdown(wait=False, cancel_futures=True)
 
         return results
 

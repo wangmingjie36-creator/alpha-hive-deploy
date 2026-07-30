@@ -7,11 +7,44 @@ import logging as _logging
 import json
 import os
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 from statistics import mean, stdev
 from hive_logger import SafeJSONEncoder, atomic_json_write
 
 _log = _logging.getLogger("alpha_hive.feedback_loop")
+
+
+def agent_vote_correct(vote: float, ret: float) -> Optional[bool]:
+    """
+    单只蜂的票是否押对方向 —— 维度层记分的唯一真相（v0.42.2）
+
+    判定基准是**蜂自己的票**（vote > 5 = 看多，vote < 5 = 看空），
+    与快照整体 direction **无关**。
+
+    ⚠️ 这是 v0.42.2 修复的根因 bug。旧实现用快照整体 direction 算出的
+    `is_correct` 去评判每只蜂自己的票：
+
+        is_correct = (direction in ("long","bullish") and ret > 0) or ...
+        agent_correct = (vote > 5 and is_correct) or (vote <= 5 and not is_correct)
+
+    对 direction="neutral" 的快照，`is_correct` 恒为 False（neutral 不匹配任何
+    分支），于是 agent_correct 退化成"只要 vote <= 5 就算对"——完全脱离价格实际
+    走势。实测 625 个快照里 neutral 占 202 个（32%），系统性惩罚看多票，导致
+    5 个维度的准确率全部跌到 0.5 以下（比抛硬币还差）。修复后回到 0.498~0.532。
+
+    **direction 的正确用途**：只用于组合层评估（walk-forward 的 WR/Sharpe），
+    不得用于维度层记分。改动此函数前请先读这段注释。
+
+    Returns:
+        True  — 押对方向
+        False — 押错方向
+        None  — 弃权，不计入准确率分母（vote 恰为 5.0 的中性票，或 ret 恰为 0）
+    """
+    if vote is None or ret is None:
+        return None
+    if vote == 5.0 or ret == 0:
+        return None
+    return (vote > 5.0) == (ret > 0)
 
 
 class ReportSnapshot:
@@ -320,18 +353,24 @@ class BacktestAnalyzer:
         }
 
         for snapshot in self.snapshots:
-            direction_accuracy = snapshot.check_direction_accuracy()
+            # v0.42.2 修复：改用「蜂自己的票 vs 实际涨跌」记分（agent_vote_correct），
+            # 不再经由 check_direction_accuracy 的快照级 direction。旧实现里该函数对
+            # Neutral 方向返回 None，而下游 `not None → True` 会让所有 vote<=5 的票
+            # 无条件判对（与价格无关）——32% 的样本走的正是这条路径。
+            # 详见 agent_vote_correct() 的 docstring。
+            returns = snapshot.calculate_returns()
+            ret_t7 = returns.get("t7")
+            if ret_t7 is None:
+                continue
 
-            if "t7" in direction_accuracy:
-                is_correct = direction_accuracy["t7"]
-
-                for agent_name, agent_score in snapshot.agent_votes.items():
-                    # 兼容旧名称：将旧 key 映射到新 Agent ID
-                    canonical = self._LEGACY_AGENT_MAP.get(agent_name, agent_name)
-                    if canonical in agent_scores:
-                        # 如果 Agent 评分高且预测正确，记 1；否则记 0
-                        score_correct = 1 if (agent_score > 5 and is_correct) or (agent_score <= 5 and not is_correct) else 0
-                        agent_scores[canonical].append(score_correct)
+            for agent_name, agent_score in snapshot.agent_votes.items():
+                # 兼容旧名称：将旧 key 映射到新 Agent ID
+                canonical = self._LEGACY_AGENT_MAP.get(agent_name, agent_name)
+                if canonical in agent_scores:
+                    ok = agent_vote_correct(agent_score, ret_t7)
+                    if ok is None:
+                        continue  # 弃权票（vote==5.0 或 ret==0）不计入分母
+                    agent_scores[canonical].append(1 if ok else 0)
 
         # 计算平均准确度
         agent_accuracy = {}

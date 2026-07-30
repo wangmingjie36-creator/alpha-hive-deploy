@@ -9,10 +9,12 @@
   4. 记录到 weight_history.jsonl（审计轨迹）
   5. 打印摘要
 
-用法：
-  python3 weekly_optimizer.py                  # 标准运行
-  python3 weekly_optimizer.py --dry-run        # 只分析，不写 config
-  python3 weekly_optimizer.py --min-samples 5  # 降低最低样本要求（测试用）
+用法（必须用 /usr/local/bin/python3 = 3.11，裸 python3 可能解析成 3.9.6）：
+  /usr/local/bin/python3 weekly_optimizer.py                 # 标准运行
+  /usr/local/bin/python3 weekly_optimizer.py --dry-run       # 只分析，不写 config
+  /usr/local/bin/python3 weekly_optimizer.py --min-samples 5 # 降低最低样本要求（测试用）
+  /usr/local/bin/python3 weekly_optimizer.py --rollback      # 回滚到上次写入前的权重
+  /usr/local/bin/python3 weekly_optimizer.py --rollback --dry-run   # 预览回滚
 """
 
 from __future__ import annotations
@@ -125,67 +127,134 @@ def count_t7_samples(snapshots_dir: Path) -> int:
     return count
 
 
-def _apply_weight_clamps(weights: dict, max_iter: int = 50, tol: float = 1e-9) -> dict:
-    """
-    迭代式 clamp + 归一化 — 修复 Bug #5：
-    旧实现"先 clamp 再归一化"在多个维度触底时会让未触底维度被放大超过上限
-    （实证：catalyst raw 可触发 0.33 > 0.25 上限）。
+class InfeasibleBoundsError(ValueError):
+    """盒约束与单纯形（sum=1）无交集 —— 配置本身矛盾，必须拒绝写入而非静默降级。"""
 
-    新算法：
-      1. 目标总和 = 1.0
-      2. 循环：把当前超限的维度钳到边界并固定；剩余未固定维度按比例瓜分剩余预算
-      3. 直到无新维度触发钳制 或达到 max_iter
-    数学性质：输出严格满足 lo ≤ w[k] ≤ hi（对 CLAMPS 中所有键）且 sum(w)=1.0
-    """
-    # 初始化：未覆盖 CLAMPS 的维度用 DEFAULT_WEIGHTS 兜底
-    w = {k: float(weights.get(k, DEFAULT_WEIGHTS.get(k, 0.2))) for k in set(list(weights.keys()) + list(WEIGHT_CLAMPS.keys()))}
-    total = sum(w.values())
-    if total <= 0:
-        return dict(DEFAULT_WEIGHTS)
-    w = {k: v / total for k, v in w.items()}  # 先归一化到 1.0
 
-    fixed: dict = {}
+def merge_bounds(anchor: dict, max_shift_pp: float = None,
+                 clamps: dict = None) -> dict:
+    """
+    把「绝对上下限」与「单次变动上限」合并成**单一盒约束**（v0.42.6）
+
+        lo_eff[d] = max(WEIGHT_CLAMPS[d][0], anchor[d] - MAX_SHIFT)
+        hi_eff[d] = min(WEIGHT_CLAMPS[d][1], anchor[d] + MAX_SHIFT)
+
+    为什么必须合并：旧实现分两步做——先 `_apply_weight_clamps` 保证绝对上下限，
+    再 `clamp_shifts` 钳幅并**重新归一化**。归一化是乘性缩放，必然把已在边界上的
+    值推出边界，所以两个不变式互相破坏。历史实证：`weight_history.jsonl` 里
+    `risk_adj +10.72pp`、`signal −11.32pp` 均突破 MAX_SHIFT_PP=10.0，
+    且 catalyst 曾落到 0.3316（> clamp 上限 0.25）。
+
+    合并成一个盒之后，单次投影即可同时满足三个约束，不存在互相破坏的顺序问题。
+    """
+    if max_shift_pp is None:
+        max_shift_pp = MAX_SHIFT_PP
+    if clamps is None:
+        clamps = WEIGHT_CLAMPS
+    shift = max_shift_pp / 100.0
+    bounds = {}
+    for k in set(list(anchor.keys()) + list(clamps.keys())):
+        a = float(anchor.get(k, DEFAULT_WEIGHTS.get(k, 0.2)))
+        lo_c, hi_c = clamps.get(k, (0.0, 1.0))
+        bounds[k] = (max(lo_c, a - shift), min(hi_c, a + shift))
+    return bounds
+
+
+def project_to_feasible(target: dict, bounds: dict = None,
+                        max_iter: int = 200, tol: float = 1e-12) -> dict:
+    """
+    把 target 投影到「盒约束 ∩ 单纯形」上（欧氏投影，λ 二分）
+
+    数学性质：输出严格满足 `lo ≤ w[k] ≤ hi`（对 bounds 中所有键）**且** `sum(w)=1.0`，
+    并且是可行域内距 target 最近的点（L2 意义）。
+
+    算法：求 λ 使得 `Σ clip(target[k] + λ, lo[k], hi[k]) = 1`。
+    `f(λ) = Σ clip(...) − 1` 关于 λ 单调不减且连续，故二分必收敛。
+
+    ⚠️ v0.42.6 换掉了「钳制 + 按比例再分配」的 water-filling 实现。旧算法在
+    **所有维度同时触界**时会失效：free_keys 为空 → 直接 break，剩余预算无人吸收，
+    输出的和可能远离 1.0（实测 0.8545）。旧代码注释里也承认了这个降级会
+    "允许轻微突破 clamp"。二分法没有这个死角——它不需要"自由维度"。
+
+    Raises:
+        InfeasibleBoundsError: 盒与单纯形无交集（Σlo > 1 或 Σhi < 1）。
+            由调用方据此拒绝写入，绝不静默降级。
+    """
+    if bounds is None:
+        bounds = WEIGHT_CLAMPS
+
+    # 可行性前置检查：盒 ∩ 单纯形非空 ⟺ Σlo ≤ 1 ≤ Σhi
+    sum_lo = sum(b[0] for b in bounds.values())
+    sum_hi = sum(b[1] for b in bounds.values())
+    if sum_lo > 1.0 + 1e-9 or sum_hi < 1.0 - 1e-9:
+        raise InfeasibleBoundsError(
+            f"盒约束与 sum=1 无交集：Σlo={sum_lo:.4f}, Σhi={sum_hi:.4f}（需 Σlo ≤ 1 ≤ Σhi）"
+        )
+
+    keys = sorted(set(list(target.keys()) + list(bounds.keys())))
+    t = {k: float(target.get(k, DEFAULT_WEIGHTS.get(k, 0.2))) for k in keys}
+
+    def clipped_sum(lam: float) -> float:
+        s = 0.0
+        for k in keys:
+            lo, hi = bounds.get(k, (0.0, 1.0))
+            s += min(max(t[k] + lam, lo), hi)
+        return s
+
+    # 二分区间：λ 足够小时全部落到 lo（和 = Σlo ≤ 1），足够大时全部落到 hi（和 = Σhi ≥ 1）
+    lam_lo = min(bounds.get(k, (0.0, 1.0))[0] for k in keys) - max(t.values()) - 1.0
+    lam_hi = max(bounds.get(k, (0.0, 1.0))[1] for k in keys) - min(t.values()) + 1.0
     for _ in range(max_iter):
-        # 识别当前超限维度
-        to_fix = {}
-        for k, (lo, hi) in WEIGHT_CLAMPS.items():
-            if k in fixed:
-                continue
-            if w[k] < lo - tol:
-                to_fix[k] = lo
-            elif w[k] > hi + tol:
-                to_fix[k] = hi
-        if not to_fix:
+        mid = (lam_lo + lam_hi) / 2.0
+        if clipped_sum(mid) < 1.0:
+            lam_lo = mid
+        else:
+            lam_hi = mid
+        if lam_hi - lam_lo < tol:
             break
-        fixed.update(to_fix)
-        # 立即把 fixed 值写回 w（修复 edge case：所有维度都 fix 时要先落值再 break）
-        for k, v in fixed.items():
-            w[k] = v
-        # 剩余预算分配给未固定维度（按原比例）
-        remaining_budget = 1.0 - sum(fixed.values())
-        free_keys = [k for k in w if k not in fixed]
-        if not free_keys:
-            # 所有维度都被钳制 — 数学上 sum(fixed) 与 1.0 不等时，无可行解
-            # 降级：均匀缩放 fixed 值到 sum=1.0，允许轻微突破 clamp（这种情况表明 CLAMPS 设置本身不合理）
-            break
-        free_sum = sum(w[k] for k in free_keys)
-        if remaining_budget <= 0 or free_sum <= 0:
-            if remaining_budget > 0:
-                share = remaining_budget / len(free_keys)
-                for k in free_keys:
-                    w[k] = share
-            else:
-                for k in free_keys:
-                    w[k] = 0.0
-            break
-        for k in free_keys:
-            w[k] = w[k] / free_sum * remaining_budget
+    lam = (lam_lo + lam_hi) / 2.0
 
-    # 最终确保和为 1.0（数值稳定性）
-    s = sum(w.values())
-    if s > 0 and abs(s - 1.0) > tol:
-        w = {k: v / s for k, v in w.items()}
+    w = {}
+    for k in keys:
+        lo, hi = bounds.get(k, (0.0, 1.0))
+        w[k] = min(max(t[k] + lam, lo), hi)
+
+    assert_feasible(w, bounds, tol=1e-6)
     return w
+
+
+def assert_feasible(w: dict, bounds: dict, tol: float = 1e-6) -> None:
+    """校验三不变式：sum=1、各维在盒内。不满足则抛 InfeasibleBoundsError。"""
+    s = sum(w.values())
+    if abs(s - 1.0) > tol:
+        raise InfeasibleBoundsError(f"权重和 ={s:.9f}，偏离 1.0 超过容差")
+    for k, (lo, hi) in bounds.items():
+        v = w.get(k)
+        if v is None:
+            raise InfeasibleBoundsError(f"缺少维度 {k}")
+        if v < lo - tol or v > hi + tol:
+            raise InfeasibleBoundsError(
+                f"维度 {k}={v:.6f} 越界 [{lo:.6f}, {hi:.6f}]"
+            )
+
+
+def _apply_weight_clamps(weights: dict, max_iter: int = 50, tol: float = 1e-9) -> dict:
+    """仅按 WEIGHT_CLAMPS 绝对上下限投影（不含单次变动限幅）。
+
+    保留此名以兼容既有调用点；新代码请直接用 `project_to_feasible(target, bounds)`。
+    """
+    return project_to_feasible(weights, WEIGHT_CLAMPS, max_iter=max_iter, tol=tol)
+
+
+# 模块导入期自洽性检查：WEIGHT_CLAMPS 本身必须允许 sum=1 的解，
+# 否则任何投影都会抛错。把配置错误暴露在导入时，而不是周日 cron 跑到一半。
+_CLAMP_SUM_LO = sum(b[0] for b in WEIGHT_CLAMPS.values())
+_CLAMP_SUM_HI = sum(b[1] for b in WEIGHT_CLAMPS.values())
+if not (_CLAMP_SUM_LO <= 1.0 <= _CLAMP_SUM_HI):
+    raise InfeasibleBoundsError(
+        f"WEIGHT_CLAMPS 配置矛盾：Σlo={_CLAMP_SUM_LO:.4f}, Σhi={_CLAMP_SUM_HI:.4f}"
+        f"（需 Σlo ≤ 1 ≤ Σhi）"
+    )
 
 
 # 统一的 Agent → 维度映射（BearBee 纳入 risk_adj，修复 Bug #6）
@@ -235,7 +304,7 @@ def compute_new_weights_wls(snapshots_dir: Path) -> Optional[dict]:
     """
     try:
         sys.path.insert(0, str(ALPHAHIVE_DIR))
-        from feedback_loop import BacktestAnalyzer
+        from feedback_loop import BacktestAnalyzer, agent_vote_correct
     except ImportError as e:
         print(f"❌ 无法导入 feedback_loop: {e}")
         return None
@@ -280,18 +349,19 @@ def compute_new_weights_wls(snapshots_dir: Path) -> Optional[dict]:
         for i, snap in enumerate(valid_snaps):
             tw = time_weights[i]
             ret_t7 = (snap.actual_price_t7 - snap.entry_price) / snap.entry_price * 100
-            direction = snap.direction.lower()
-            is_correct = (direction in ("long", "bullish") and ret_t7 > 0) or \
-                         (direction in ("short", "bearish") and ret_t7 < 0)
 
-            # 按维度聚合：同维度多只蜂取平均而非相加
+            # v0.42.2 修复：用 agent_vote_correct（蜂自己的票 vs 实际涨跌）替代
+            # 「快照 direction 推出 is_correct，再拿去判每只蜂」的旧逻辑。
+            # 旧逻辑对 neutral 快照（实测占 32%）恒判「vote<=5 即正确」，与价格无关。
             per_dim_acc = {dim: [] for dim in DEFAULT_WEIGHTS}
             for agent_name, vote in snap.agent_votes.items():
                 dim = AGENT_TO_DIM.get(agent_name)
                 if dim is None:
                     continue
-                agent_correct = (vote > 5 and is_correct) or (vote <= 5 and not is_correct)
-                per_dim_acc[dim].append(1.0 if agent_correct else 0.0)
+                ok = agent_vote_correct(vote, ret_t7)
+                if ok is None:
+                    continue  # 弃权票不计入分母
+                per_dim_acc[dim].append(1.0 if ok else 0.0)
 
             for dim, accs in per_dim_acc.items():
                 if not accs:
@@ -346,7 +416,7 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
     """
     try:
         sys.path.insert(0, str(ALPHAHIVE_DIR))
-        from feedback_loop import BacktestAnalyzer
+        from feedback_loop import BacktestAnalyzer, agent_vote_correct
     except ImportError:
         return {"stable": False, "error": "无法导入 feedback_loop"}
 
@@ -371,17 +441,17 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
 
             for snap in sample:
                 ret_t7 = (snap.actual_price_t7 - snap.entry_price) / snap.entry_price * 100
-                direction = snap.direction.lower()
-                is_correct = (direction in ("long", "bullish") and ret_t7 > 0) or \
-                             (direction in ("short", "bearish") and ret_t7 < 0)
 
+                # v0.42.2 修复：与主路径共用 agent_vote_correct，消除记分逻辑重复
                 per_dim = {dim: [] for dim in DEFAULT_WEIGHTS}
                 for agent_name, vote in snap.agent_votes.items():
                     dim = AGENT_TO_DIM.get(agent_name)
                     if dim is None:
                         continue
-                    agent_correct = (vote > 5 and is_correct) or (vote <= 5 and not is_correct)
-                    per_dim[dim].append(1.0 if agent_correct else 0.0)
+                    ok = agent_vote_correct(vote, ret_t7)
+                    if ok is None:
+                        continue  # 弃权票不计入分母
+                    per_dim[dim].append(1.0 if ok else 0.0)
                 for dim, accs in per_dim.items():
                     if accs:
                         dim_snap_acc[dim] += sum(accs) / len(accs)
@@ -436,23 +506,37 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
 
 def clamp_shifts(old_weights: dict, new_weights: dict) -> dict:
     """
-    限制单次调整幅度（每维度 <= MAX_SHIFT_PP），防止权重突变。
-    调整后重新归一化，保证总和 = 1.0。
-    """
-    clamped = {}
-    for k, old in old_weights.items():
-        new  = new_weights.get(k, old)
-        diff = new - old
-        # 限幅
-        if abs(diff) > MAX_SHIFT_PP / 100:
-            diff = (MAX_SHIFT_PP / 100) * (1 if diff > 0 else -1)
-        clamped[k] = old + diff
+    把 new_weights 投影到「WEIGHT_CLAMPS ∩ 距 old_weights 不超过 ±MAX_SHIFT_PP ∩ sum=1」
 
-    # 归一化
-    total = sum(clamped.values())
-    if total > 0:
-        clamped = {k: round(v / total, 6) for k, v in clamped.items()}
-    return clamped
+    v0.42.6 重写。旧实现是「逐维钳幅 → 重新归一化」，两步互相破坏：
+    归一化是乘性缩放，必然把已钳到 ±MAX_SHIFT_PP 边界的值再推出去。
+    历史实证突破：`risk_adj +10.72pp`、`signal −11.32pp`（均 > MAX_SHIFT_PP=10.0），
+    以及 catalyst 落到 0.3316（> WEIGHT_CLAMPS 上限 0.25，因为绝对上下限在
+    归一化之前施加、之后不再复查）。
+
+    新实现把两类约束合并成单一盒后**单次投影**，三个不变式同时成立。
+
+    Raises:
+        InfeasibleBoundsError: 合并后的盒与 sum=1 无交集。调用方应据此拒绝写入。
+    """
+    bounds = merge_bounds(old_weights, MAX_SHIFT_PP, WEIGHT_CLAMPS)
+    projected = project_to_feasible(new_weights, bounds)
+
+    # 舍入到 6 位会引入至多 ~n×5e-7 的和偏差。把残差吸收进**余量最大**的维度，
+    # 保证 sum=1 精确成立且不越界（直接返回舍入结果会让和轻微偏离 1.0）。
+    rounded = {k: round(v, 6) for k, v in projected.items()}
+    residual = 1.0 - sum(rounded.values())
+    if abs(residual) > 1e-12:
+        # 余量 = 该维度朝残差方向还能移动多少
+        def slack(k):
+            lo, hi = bounds.get(k, (0.0, 1.0))
+            return (hi - rounded[k]) if residual > 0 else (rounded[k] - lo)
+        target_k = max(rounded, key=slack)
+        if slack(target_k) >= abs(residual):
+            rounded[target_k] = round(rounded[target_k] + residual, 12)
+
+    assert_feasible(rounded, bounds, tol=1e-5)
+    return rounded
 
 
 def has_significant_change(old: dict, new: dict, threshold_pp: float) -> bool:
@@ -490,10 +574,63 @@ def read_current_weights() -> dict:
         return dict(DEFAULT_WEIGHTS)
 
 
+BACKUP_DIR      = ALPHAHIVE_DIR / "weight_backups"
+BACKUP_LATEST   = ALPHAHIVE_DIR / "config.py.weights.bak"
+BACKUP_KEEP_N   = 8
+
+
+def _backup_config() -> bool:
+    """
+    写入 config.py 之前备份（v0.42.2）
+
+    两份：
+      • config.py.weights.bak            — 单槽最新，便于人工 `cp` 回滚
+      • weight_backups/config_<ts>.py    — 时间戳滚动，保留最近 BACKUP_KEEP_N 份
+
+    必须在 tmp.replace(CONFIG_PATH) **之前**调用。
+    """
+    try:
+        text = CONFIG_PATH.read_text(encoding="utf-8")
+        BACKUP_LATEST.write_text(text, encoding="utf-8")
+
+        BACKUP_DIR.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        (BACKUP_DIR / f"config_{ts}.py").write_text(text, encoding="utf-8")
+
+        # 滚动清理：只保留最近 N 份
+        snaps = sorted(BACKUP_DIR.glob("config_*.py"))
+        for old in snaps[:-BACKUP_KEEP_N]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        return True
+    except Exception as e:
+        print(f"⚠️  备份 config.py 失败: {e}")
+        return False
+
+
+def _restore_config_from_backup() -> bool:
+    """从 config.py.weights.bak 还原（回读校验失败时的逃生舱）"""
+    try:
+        if not BACKUP_LATEST.exists():
+            return False
+        tmp = CONFIG_PATH.with_suffix(".py.restore-tmp")
+        tmp.write_text(BACKUP_LATEST.read_text(encoding="utf-8"), encoding="utf-8")
+        tmp.replace(CONFIG_PATH)
+        return True
+    except Exception as e:
+        print(f"⚠️  从备份还原失败: {e}")
+        return False
+
+
 def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
     """
     将新权重写回 config.py 的 EVALUATION_WEIGHTS 块。
     保留所有注释，只替换数值。
+
+    v0.42.2 增加三道安全网：语法预检 → 备份 → 回读校验（失败自动还原）。
+    dry_run=True 时返回 False（预览不等于写入，见函数内注释）。
     """
     try:
         text = CONFIG_PATH.read_text(encoding="utf-8")
@@ -530,12 +667,51 @@ def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
         if dry_run:
             print("🔍 [Dry-run] 新权重块预览：")
             print(new_block)
-            return True
+            # v0.42.2 修复：dry-run 必须返回 False。
+            # 旧实现 return True 会让 main() 把 applied 记成 True，导致
+            # weight_history.jsonl 出现 {"dry_run": true, "applied": true} 的
+            # 矛盾记录（2026-05-10 那条），而 health_check.py 正在读这个字段。
+            return False
+
+        # ── v0.42.2 安全网 ①：写入前语法预检 ────────────────────────────────
+        # 语法错误的 config.py 会瘫痪整个系统（所有模块都 import config）。
+        # 必须在覆盖原文件之前发现，而不是之后。
+        try:
+            compile(new_text, str(CONFIG_PATH), "exec")
+        except SyntaxError as e:
+            print(f"❌ 生成的 config.py 语法错误（已中止写入）: {e}")
+            return False
+
+        # ── v0.42.2 安全网 ②：写入前备份 ──────────────────────────────────
+        # 必须在 tmp.replace() 之前完成，否则备份到的是新内容。
+        _backup_config()
 
         # 原子写入（先写临时文件再 rename）
         tmp = CONFIG_PATH.with_suffix(".py.tmp")
         tmp.write_text(new_text, encoding="utf-8")
         tmp.replace(CONFIG_PATH)
+
+        # ── v0.42.2 安全网 ③：写入后回读校验 ──────────────────────────────
+        # regex 替换可能损坏文件而不报错（如反向引用被解释）。回读比对是
+        # 唯一能确认"落盘的确实是我要写的值"的方法。
+        try:
+            written = read_current_weights()
+            mismatch = [
+                k for k in ["signal", "catalyst", "sentiment", "odds", "risk_adj"]
+                if abs(written.get(k, -1) - round(new_weights.get(k, DEFAULT_WEIGHTS[k]), 4)) > 1e-4
+            ]
+            if mismatch:
+                print(f"❌ 回读校验失败，维度不符: {mismatch} — 正在从备份还原")
+                if _restore_config_from_backup():
+                    print("   ✅ 已还原到写入前状态")
+                else:
+                    print("   ⚠️  自动还原失败！请手动检查 config.py 与 weight_backups/")
+                return False
+        except Exception as e:
+            print(f"❌ 回读校验异常: {e} — 正在从备份还原")
+            _restore_config_from_backup()
+            return False
+
         return True
 
     except Exception as e:
@@ -548,16 +724,29 @@ def append_history(old_weights: dict, new_weights: dict,
                    method: Optional[str] = None,
                    clamped: Optional[bool] = None,
                    bootstrap_stable: Optional[bool] = None,
-                   applied: Optional[bool] = None) -> None:
+                   applied: Optional[bool] = None,
+                   skip_reason: Optional[str] = None,
+                   action: str = "optimize") -> None:
     """追加一条记录到 weight_history.jsonl
 
     v0.23.7：增加 method / clamped / bootstrap_stable / applied 字段
-    （之前 dashboard 端读 method 拿到 None，因为没记录哪个 compute path 跑的）
+    v0.42.2：增加 schema_version / skip_reason / action
+      • skip_reason 把"为什么这次没写入"结构化。旧实现里"无显著变化"的运行
+        **完全不记录**（main 的 `if significant or dry_run` 分支），导致
+        weight_history.jsonl 自 2026-05-10 起空白 11 周，看起来像任务挂了，
+        实际是每次都在静默跳过。沉默必须可观测。
+      • schema_version=2 用于区分新旧记录：v1 记录里 dry_run=true 可能伴随
+        applied=true（旧 write_weights_to_config 的 dry-run 分支返回 True），
+        这类记录不可信。历史记录不改写（审计轨迹不可篡改），由消费方按
+        schema_version 甄别。
     """
     record = {
         "timestamp":  datetime.now().isoformat(),
+        "schema_version": 2,
+        "action":     action,                        # "optimize" | "rollback"
         "dry_run":    dry_run,
-        "applied":    applied,                      # 是否真正写入 config.py
+        "applied":    applied,                       # 是否真正写入 config.py
+        "skip_reason": skip_reason,                  # 未写入的结构化原因；写入成功时为 None
         "method":     method,                        # "wls_time_decay" 或 "standard"
         "clamped":    clamped,                       # _apply_weight_clamps 是否调整了值
         "bootstrap_stable": bootstrap_stable,         # Bootstrap CI 是否覆盖新权重
@@ -606,6 +795,97 @@ def print_summary(old: dict, new: dict, n_samples: int,
 # 主入口
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _last_applied_record() -> Optional[dict]:
+    """读 weight_history.jsonl 里最后一条真正写入过的记录（v0.42.2）
+
+    只认 action=="optimize" 且 applied 为真且非 dry_run 的记录。
+    schema_version < 2 的旧记录里 dry_run=true 可能伴随 applied=true（旧
+    dry-run 分支返回 True 的产物），这类记录不可信，直接排除。
+    """
+    if not HISTORY_FILE.exists():
+        return None
+    last = None
+    try:
+        with HISTORY_FILE.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("action", "optimize") != "optimize":
+                    continue
+                if not rec.get("applied"):
+                    continue
+                if rec.get("dry_run"):
+                    continue  # 排除旧 schema 的矛盾记录
+                last = rec
+    except OSError as e:
+        print(f"⚠️  读取 {HISTORY_FILE.name} 失败: {e}")
+        return None
+    return last
+
+
+def do_rollback(dry_run: bool = False, use_backup: bool = False) -> int:
+    """
+    回滚权重到上一次写入前的状态（v0.42.2）
+
+    默认从审计日志重建（只改 EVALUATION_WEIGHTS），**不做整文件还原** ——
+    config.py 有 1400+ 行，两次 optimizer 运行之间用户可能改过别的配置项，
+    整文件回滚会连带撤销无关改动。
+    `--to-backup` 是逃生舱：直接用 config.py.weights.bak 整文件还原。
+
+    回滚同样走 write_weights_to_config（语法预检 + 备份 + 回读校验），不开后门。
+    """
+    if use_backup:
+        print(f"↩️  逃生舱模式：从 {BACKUP_LATEST.name} 整文件还原")
+        if not BACKUP_LATEST.exists():
+            print(f"❌ 备份不存在: {BACKUP_LATEST}")
+            return 1
+        if dry_run:
+            print("🔍 [Dry-run] 将整文件还原，未执行")
+            return 0
+        ok = _restore_config_from_backup()
+        print("✅ 已还原" if ok else "❌ 还原失败")
+        return 0 if ok else 1
+
+    rec = _last_applied_record()
+    if rec is None:
+        print("⏭  weight_history.jsonl 里没有可回滚的写入记录（schema_version>=2 且 applied）。")
+        print("   如需强制还原整个 config.py，用: --rollback --to-backup")
+        return 1
+
+    target = rec.get("old_weights") or {}
+    if not target:
+        print("❌ 该记录缺少 old_weights 字段，无法回滚。")
+        return 1
+
+    current = read_current_weights()
+    print(f"↩️  回滚目标：{rec.get('timestamp')} 之前的权重")
+    print(f"\n{'维度':<12}{'当前':>10}{'回滚到':>10}{'变动pp':>10}")
+    for k in ["signal", "catalyst", "sentiment", "odds", "risk_adj"]:
+        cur, tgt = current.get(k, 0.0), target.get(k, 0.0)
+        print(f"{k:<12}{cur:>10.4f}{tgt:>10.4f}{(tgt - cur) * 100:>+10.2f}")
+
+    if dry_run:
+        print("\n🔍 [Dry-run] 未执行回滚")
+        return 0
+
+    ok = write_weights_to_config(target, dry_run=False)
+    append_history(
+        current, target, n_samples=rec.get("n_samples", 0),
+        dry_run=False, method="rollback", applied=ok,
+        skip_reason=None if ok else "rollback_write_failed",
+        action="rollback",
+    )
+    print("\n✅ 回滚完成" if ok else "\n❌ 回滚写入失败")
+    if ok:
+        print("   ⚠️  长驻进程需重启才能读到新权重（模块级 import 有缓存）")
+    return 0 if ok else 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Alpha Hive · 周度权重自动优化器（轨道 A）"
@@ -616,7 +896,14 @@ def main() -> None:
                         help=f"最少样本数（默认 {MIN_SAMPLES}）")
     parser.add_argument("--min-change",   type=float, default=MIN_CHANGE_PP,
                         help=f"最小变化触发阈值 pp（默认 {MIN_CHANGE_PP}）")
+    parser.add_argument("--rollback",     action="store_true",
+                        help="回滚到上一次写入前的权重（从审计日志重建）")
+    parser.add_argument("--to-backup",    action="store_true",
+                        help="配合 --rollback：改为用 config.py.weights.bak 整文件还原")
     args = parser.parse_args()
+
+    if args.rollback:
+        sys.exit(do_rollback(dry_run=args.dry_run, use_backup=args.to_backup))
 
     print(f"\n🐝 Alpha Hive · weekly_optimizer 启动")
     print(f"   快照目录: {SNAPSHOTS_DIR}")
@@ -651,8 +938,19 @@ def main() -> None:
     old_weights = read_current_weights()
     raw_new     = result["new_weights"]
 
-    # 5. 限幅（单次最大 ±10pp）
-    new_weights = clamp_shifts(old_weights, raw_new)
+    # 5. 投影到「WEIGHT_CLAMPS ∩ ±MAX_SHIFT_PP ∩ sum=1」（v0.42.6 合并盒单次投影）
+    try:
+        new_weights = clamp_shifts(old_weights, raw_new)
+    except InfeasibleBoundsError as e:
+        # 约束无解 = 配置矛盾。拒绝写入并留审计，绝不静默降级写越界权重。
+        print(f"\n🛑 权重约束无可行解，拒绝写入：{e}")
+        _log.error("clamp_shifts 不可行，跳过本次写入: %s", e)
+        append_history(
+            old_weights, old_weights, n_samples,
+            dry_run=args.dry_run, method=result.get("method"),
+            applied=False, skip_reason="infeasible_bounds",
+        )
+        return
 
     # 6. Bootstrap 验证
     print("🔍 Bootstrap 稳健性验证...")
@@ -667,17 +965,29 @@ def main() -> None:
     # 7. 检查是否有显著变化
     significant = has_significant_change(old_weights, new_weights, args.min_change)
 
+    # v0.42.2：无论是否写入都记审计。旧实现只在 `significant or dry_run` 时记录，
+    # 于是"每周跑、每周都无显著变化"表现为日志完全空白（2026-05-10 之后 11 周），
+    # 与"任务挂了"无法区分。现在跳过也留痕，附结构化 skip_reason。
     applied = False
+    skip_reason = None
     if significant or args.dry_run:
         applied = write_weights_to_config(new_weights, dry_run=args.dry_run)
-        append_history(
-            old_weights, new_weights, n_samples,
-            dry_run=args.dry_run,
-            method=result.get("method"),
-            clamped=result.get("clamped"),
-            bootstrap_stable=bootstrap.get("stable"),
-            applied=applied,
-        )
+        if args.dry_run:
+            skip_reason = "dry_run"
+        elif not applied:
+            skip_reason = "write_failed"
+    else:
+        skip_reason = "below_min_change"
+
+    append_history(
+        old_weights, new_weights, n_samples,
+        dry_run=args.dry_run,
+        method=result.get("method"),
+        clamped=result.get("clamped"),
+        bootstrap_stable=bootstrap.get("stable"),
+        applied=applied,
+        skip_reason=skip_reason,
+    )
 
     # 8. 打印摘要
     print_summary(old_weights, new_weights, n_samples, applied, args.dry_run)

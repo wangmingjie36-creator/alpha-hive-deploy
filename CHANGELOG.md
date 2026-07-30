@@ -5,6 +5,484 @@
 
 ---
 
+## [0.43.0] — 2026-07-30 — 修复 ChronosBee 结构性无法看空（950 条记录 bearish=0）
+
+> 本 session 唯一一处「代码明确写错、且指向系统唯一勉强有效方向」的缺陷：
+> 全样本方向准确率 53.6%（CI 含 50%，等同抛硬币），但**看空侧 60.6%**
+> （n=94，CI [50.8%, 70.5%]）是唯一勉强显著的数字 —— 而系统在结构上就不会看空。
+
+### Fixed — ChronosBee 永远无法输出 bearish（P0）
+实测：`pheromone.db` 里 950 条 ChronosBee 记录 **bearish = 0 条**。两处成因：
+
+1. **`elif score <= 4.5` 结构性不可达**（`chronos_bee.py`）：
+   评分块 `score = 5.5` 起步，三个分支全是 `score += ...`（只增不减），
+   该条件永远为假。无催化剂时走 `else` 分支 `score=4.0` 但直接写死 `neutral`
+2. **唯一带方向的证据是死代码**：PEAD（财报后价格漂移）段**已经写了**
+   `direction = "bearish"`，但它位于评分块**之前**，被后面的 `score = base`
+   与 direction 三分支**无条件覆盖**。不是"没写"，是"写了被冲掉"
+
+**修复**：把 PEAD 方向证据抽成 `_apply_pead_direction()`，改在评分块**之后**调用。
+PEAD 采集段只写入 `_pead_pending` 暂存，不再直接赋值。
+
+### 关键设计：只改方向，不改分数
+- `_apply_pead_direction` 的**分数调整默认关闭**
+  （需显式 `ALPHA_HIVE_CHRONOS_PEAD_SCORE_ADJUST=1` 开启）
+- 理由：catalyst 维度的 784 条历史样本是在"无 PEAD 分数调整"口径下产生的，
+  开启即破坏可比性；而 catalyst 在四口径 IC 体检里只过 **1/4**（与纯噪音无异），
+  分数微调的期望收益接近零、代价却是确定的
+- **方向不受此限**——方向本就全零（bearish 从未出现），没有"可比性"可言，只有从无到有
+- 保护规则：只在评分块判为 `neutral` 时施加，**不覆盖高置信的 bullish**
+  （强催化剂判定不会被历史漂移翻转）
+
+### 实测效果（10 只真实标的）
+```
+修复前：950 条历史记录 bearish = 0 条
+修复后：neutral 7 / bearish 2 (TSLA, CVX) / bullish 1 (ABBV)
+```
+
+### 对 8/3 定档回测的影响：无
+`bear-hypothesis-backtest` 分析的是**已回填 T+7** 的历史样本；今天之后的新扫描
+要到 ~8/10 才成熟，不进入其分析集。且该任务第 3 项正是
+「找出哪几只蜂从不投 bearish」——与本次修复互补，可作为修复前的基线记录。
+
+### Added — 测试（+13，`tests/test_chronos_bee_direction.py`）
+- 方向真值表、bullish 保护、无证据时 no-op、分数开关默认关闭且可开启
+- **源码顺序护栏**（本 bug 的本质是**执行顺序**错，不是逻辑错）：
+  - `test_pead_applied_after_scoring_block`：断言 `_apply_pead_direction` 调用
+    位置在 `score = base` **之后** —— 若有人挪回去，它会重新变成死代码，
+    而单元测试仍会全绿（函数本身没坏），只有顺序断言能拦住
+  - `test_pead_block_does_not_assign_direction_directly`：PEAD 采集段不得直接赋值 direction
+  - `test_unreachable_branch_is_documented`：`elif score <= 4.5` 仍不可达，必须有注释说明
+- 全量 **1132 passed, 1 skipped, 1 xfailed**（本 session 起点 1063），零回归
+
+## [0.42.9] — 2026-07-30 — 标的池 10 → 30 只（N_eff 3.25 → 13.8）+ ML 报告限流
+
+> 承 v0.42.8 的挂死加固。扩池的目的不是"看更多股票"，而是**提升横截面统计功效**——
+> 这是本 session 反复撞到的真瓶颈：所有因子结论都因样本太窄而站不住。
+
+### Changed — 默认标的池 10 → 30 只
+- **问题**：原 10 只全是高相关科技股，平均两两相关 **0.230**，
+  有效独立标的数 **N_eff = 3.25**。每天扫 10 只，统计上只相当于 3 个独立观测
+- **选股方法**：对 `WATCHLIST_EXTENDED` 全部 91 只做贪心搜索，每步选让 N_eff
+  增幅最大的标的。结果自动偏向低相关行业——与核心池相关度：
+  Energy **−0.180**、Communication **−0.007**、Consumer +0.048，
+  而 Technology +0.251（最差之一）
+- **结果**：N_eff **3.25 → 13.8**，行业数 5 → **11**
+- 新增 20 只（按 N_eff 增量降序）：`CVX VZ JNJ XOM COST BRK-B AMC ABBV T DELL
+  DE CRM MU WMT TMO TMUS ENPH NFLX NEE SNOW`
+- **收益在 25~30 只饱和**：40 只 N_eff=13.97、50 只反而降到 13.29（后面加进来的
+  都是高相关科技股），故止步 30
+- 改动点：`alpha_hive_daily_report.py` 的 `--tickers` 默认值、
+  `~/.claude/scripts/alpha-hive-orchestrator.sh` 的 `DEFAULT_TICKERS`
+- 全部取自已有 `WATCHLIST_EXTENDED`，零配置成本；数据真实度实测 90~96%，与核心池无差别
+
+### Added — ML 报告数量上限 `ALPHA_HIVE_ML_REPORT_MAX`（默认 12）
+- 每份 ML 报告都要走一次 CBOE/yfinance 取价链。若扩池后仍为**每只**标的生成，
+  这部分调用量直接翻 3 倍——2026-07-23 深夜的限流连锁崩溃正是调用量堆叠所致
+- 扩池的收益路径是 `predictions` 表（dimension_scores + 价格），**不依赖 ML HTML**。
+  故：全部 30 只照常扫描入库，ML 报告只出分数最高的 12 只
+- 同步修改编排器 Step 3 的补跑判据：原逻辑按**全部标的**判"缺失"，
+  限流后 18 只永远缺失会被 Step 3 补跑，**把限流完全抵消**。
+  改为按"已生成数是否达到上限"判断
+
+### Fixed — 第二处线程池挂死（`_generate_ml_reports`）
+- 与 v0.42.8 修的是同一模式，但**更危险**：原实现 `with ThreadPoolExecutor(...)`
+  且 `as_completed()` 与 `future.result()` **都没有超时**，任何一个卡住的取价调用
+  都会让整个扫描永久挂起
+- 改为带超时收集 + `shutdown(wait=False, cancel_futures=True)`，
+  超时可通过 `ALPHA_HIVE_ML_REPORT_TIMEOUT` 调整（默认 90s/只）
+
+### Added — 测试（+3）
+- `test_ml_report_generation_is_capped` / `test_ml_report_pool_is_non_blocking`：
+  源码级护栏，防止限流与非阻塞关闭被改回去
+- `test_default_ticker_pool_expanded_and_diverse`：断言 ≥25 只、**≥8 个行业**、
+  单一行业占比 ≤50%、全部在 watchlist 内、无重复。
+  **断言行业数而非仅标的数**——若有人把池改回全科技股，标的数不变但 N_eff 会塌掉
+- 全量 **1119 passed, 1 skipped, 1 xfailed**（本 session 起点 1063），零回归
+
+### 预期影响
+- 单次扫描耗时 120s → 约 219s（STEP2_TIMEOUT 的 12%）
+- 每日新增 predictions 行 10 → 30；T+7 样本积累速度提升 3 倍
+- **验证周期从约 9 个月压缩到 2~3 个月**（N_eff 提升 4.2 倍带来的功效增益）
+
+## [0.42.8] — 2026-07-30 — 修复扫描挂死（实测曾跑 24 小时），为扩池做限流加固
+
+> 扩标的池前的前置加固。`metrics.db` 显示 193 次 swarm 扫描里有 **4 次跑飞**：
+> 2026-05-28 **86899s（24.1 小时）**、07-17 11046s（3.1h）、06-30 7882s（2.2h）、
+> 06-27 2729s（0.8h）。正常扫描中位数仅 127s。
+
+### Fixed — `parallel_agent_runner._run_phase` 被卡死线程无限阻塞（P0）
+- 根因：`with ThreadPoolExecutor(...)` 退出时执行 `shutdown(wait=True)`，
+  **会一直阻塞到所有工作线程返回**。而 `future.result(timeout=)` 与
+  `as_completed(timeout=)` 只让主线程**停止等待结果**，并不能杀死卡在网络调用里的
+  工作线程（Python 无法强制中断线程）。于是超时逻辑正确地填了占位结果，
+  却在退出 `with` 块时被无限期挂住
+- 证据：24 小时那次 `prefetch_seconds` 仅 **17s**，且 `duration_seconds` 是在
+  标的分析循环**之后**测量的（`alpha_hive_daily_report.py:1169`）⇒ 时间全耗在此处
+- 修复：改为手动 `executor` + `try/finally` + **`shutdown(wait=False, cancel_futures=True)`**。
+  放弃未开始的任务，卡住的线程留在后台，主流程立即继续；并记录哪些 Agent 卡住
+
+### Added — `_force_exit_if_threads_stuck()` 退出路径兜底
+- 即便 `shutdown(wait=False)` 已让主流程继续，`concurrent.futures` 通过
+  `threading._register_atexit` 注册的 `_python_exit` 仍会在进程退出时
+  **join 所有工作线程** —— 实测：1 秒完成的主流程因一个 20 秒的卡住线程，
+  进程总耗时 20 秒
+- 在 `__main__` 中、**所有产出落盘之后**调用：给 10s 宽限，仍卡住则 `os._exit(0)`
+  跳过 atexit。此时数据库/报告/gh-pages 同步均已完成，强退是安全的
+- 顺带修复：`sys` 在 `alpha_hive_daily_report` 模块作用域**不可用**（只在两处函数内
+  局部 import），强退路径引用它会在最不该崩的时刻崩
+
+### 实测效果
+| | 修复前 | 修复后 |
+|---|---|---|
+| 一个卡 60s 的 Agent | 主流程阻塞 60s | **6s 返回** |
+| 进程总耗时（含退出） | ~120s | **11s** |
+
+### Added — 测试（+9，`tests/test_parallel_agent_runner.py`）
+- 卡死 Agent 不阻塞 phase、占位结果结构完整、全部卡住仍返回、正常路径无回归
+- **源码级护栏**：断言代码里不出现 `with ThreadPoolExecutor(`、必须有
+  `shutdown(wait=False` 与 `cancel_futures=True` —— 防止被改回去
+- 断言 `_force_exit_if_threads_stuck()` 确实在 `__main__` 里被调用（否则安全网形同虚设）
+- 测试用 `Event.wait` 而非 `time.sleep` 并配 autouse fixture 释放，
+  避免测试自身把线程残留到 pytest 退出（不能再犯一遍本文件要防的问题）
+- 全量 **1116 passed, 1 skipped, 1 xfailed**（本 session 起点 1063），零回归
+
+### 扩池前置结论（本次未改标的池）
+- **耗时不是约束**：189 次正常扫描回归 `耗时 ≈ 71 + 4.9 × 标的数` 秒；
+  30 只约 219s、101 只约 569s，均 < 30 分钟超时的 32%。
+  实测更乐观——历史上真跑过 39 只只用 **150s**（10 只中位数 127s），批量预取效率极高
+- **真正的风险是挂死**，与标的数无关，10 只时就已发生 ⇒ 故先做本次加固
+- 池已存在：`WATCHLIST`(24) + `WATCHLIST_EXTENDED`(77) = 101 只，覆盖 9 个行业，
+  数据真实度实测 90~96%，与核心池无差别
+
+## [0.42.7] — 2026-07-30 — catalyst 符号翻转调查：判定为假象；IC 目标口径改用纯价格
+
+> 多智能体工作流调查 catalyst 的 regime 符号翻转（上涨期 +0.094 / 下跌期 −0.236），
+> 三条核心论断我逐条独立复现。**结论：翻转是假象，不做任何 catalyst 改动。**
+
+### 调查结论：翻转是假象（三条独立证据，均已复现）
+1. **整个下跌期效应来自一段连跌**：剔除 2026-02-26~03-13 这 13 天后，
+   下跌期 IC 从 **−0.196(t=−2.57)** 塌到 **−0.017(t=−0.11)**，仅剩 6 天。
+   19 天不是 19 个独立观测，是**一次市场事件**
+2. **该窗口与一个已修复的打分 bug 完全重合**：`3d7de04`（v0.24.3，2026-04-29）
+   修的正是 ChronosBee「过期事件被当成 7 天内迫近事件计满分」。
+   下跌期 19 天中 **15 天（79%）在修复之前**。按修复日拆分：
+   修复后下跌期仅 4 天、IC=−0.115(**t=−0.55**)，修复前后不是同一个变量
+3. **分段是事后择优**：全枚举 C(6,3)=20 种 3/3 月份分法，选中的 (4,5,6)
+   |diff| 排名 **1/20**
+
+### Changed — `ic_diagnostics.py` 目标变量口径（默认 price）
+调查中发现 `return_t7` **不是纯 T+7 前瞻收益**，而是
+`backtester._simulate_trade_path()` 的**路径依赖模拟交易收益**（触及 SL/TP 提前出场）：
+- 776 条 checked_t7 中 SL 195 + TP 135 = **330 条（42.5%）提前出场**
+- 收益被钉在出场档位：`+9.945` 出现 **93 次**、`−5.048` 61 次、`−10.045` 21 次
+- 与真实价格变动一致率仅 **88.9%**
+- 对 rank-IC 的危害：档位截断制造大量**并列值**，破坏尾部排序——而尾部正是 IC
+  信息最集中处
+
+新增 `--target {price,path}`，**默认 price**（由 `price_t7`/`price_at_predict` 直接算）。
+
+**口径切换未推翻任何结论，但数字更干净**（T+7，纯价格口径）：
+
+| 维度 | 路径依赖 IC / 通过 | 纯价格 IC / 通过 |
+|---|---|---|
+| risk_adj | −0.1384 / 3-4 | **−0.1598 / 4-4** |
+| sentiment | +0.0874 / 2-4 | +0.0830 / 2-4 |
+| signal | −0.1182 / 1-4 | −0.1205 / 1-4 |
+| odds | +0.0562 / 0-4 | +0.0593 / 1-4 |
+| catalyst | +0.0070 / 1-4 | +0.0298 / 1-4 |
+
+### 已确认但**暂不修**的 ChronosBee 工程缺陷（记录备查）
+- `chronos_bee.py:313-332` 是**纯单向事件强度累加器**，三个分支全为非负增量，
+  无任何减分通路；权重表只编码"影响多大"不编码"影响好坏"
+- `:345 elif score<=4.5` 的 bearish 分支**结构性不可达**（位于 `if catalysts_found`
+  内而 score 恒 ≥5.5）；DB 里 950 条 ChronosBee 记录 **bearish = 0 条**
+- 唯一带方向的 PEAD 调整是**死代码**（`:237/:243` 改完被 `:313-314` 无条件覆盖）
+- 无方向分被 `queen_distiller.py:307-311` 当**加性看多票**以 +0.1878 正权重线性加入
+
+**为何暂不修**：① 2026-07 已结算样本里 cat≥7 占比 **0%**、55% 的分恰为 6.0，
+该维度眼下近似常数，实际伤害很小；② 改动爆炸半径大（62 个 .py 引用 catalyst，
+`ml_predictor.py:454,459` 的 `FEATURE_NAMES_V1` 含 catalyst → 训练/服务偏移会静默劣化）；
+③ 会污染 **8/3 定档的 bear-hypothesis-backtest** 输入；④ 会把 784 条历史样本
+切成第三个不可比世代（v0.24.3 已造成一次断层）
+
+### 不做的动作（附理由，避免重复提议）
+- ❌ **regime 门控 catalyst**：依据已证伪；唯一能复现翻转的切分用了 SPY **前瞻**
+  收益（未来函数，实盘不可执行）。且这是同族第 3 次提案——locked-tasks 里已有
+  两条反向证伪记录（宏观 risk_off 门控、F&G 恐惧区门控）
+- ❌ **手动调 catalyst 权重**：四口径仅通过 1/4；且把 catalyst 归零后复合分 IC
+  只从 −0.1010 → −0.0832，**仍显著为负**，瓶颈在信号层不在加权层
+
+## [0.42.6] — 2026-07-30 — 护栏投影重写（修限幅突破）+ 新增 ic_diagnostics 体检工具
+
+### Fixed — `weekly_optimizer.clamp_shifts` 限幅可被突破（P1）
+- 旧实现两步走：逐维钳幅到 ±`MAX_SHIFT_PP` → **重新归一化**。归一化是乘性缩放，
+  必然把已钳到边界的值再推出去。历史实证：`weight_history.jsonl` 记录过
+  `risk_adj +10.72pp`、`signal −11.32pp`（均 > 10.0）
+- 且 `_apply_weight_clamps`（绝对上下限）在归一化**之前**执行、之后不复查，
+  导致落盘权重不保证满足 `WEIGHT_CLAMPS`（史上 catalyst 到过 0.3316 > 上限 0.25）
+- 新实现：`merge_bounds()` 把 `WEIGHT_CLAMPS ∩ [anchor ± MAX_SHIFT_PP]` 合并成
+  **单一盒约束**，再 `project_to_feasible()` 单次投影 ⇒ 三个不变式
+  （sum=1 ∧ 各维在 clamp 内 ∧ 单次变动 ≤ MAX_SHIFT_PP）同时成立，无顺序冲突
+
+### Fixed — 投影算法在「所有维度同时触界」时失效
+- 原 water-filling（钳制 + 按比例再分配）有一个死角：当 5 个维度在同一轮
+  全部触界时 `free_keys` 为空 → 直接 break，剩余预算无人吸收，
+  **输出的和可能远离 1.0**（重构过程中实测到 0.8545）。旧代码注释亦承认
+  该降级会"允许轻微突破 clamp"
+- 改为**欧氏投影**：二分求 λ 使 `Σ clip(target+λ, lo, hi) = 1`。
+  `f(λ)` 单调不减且连续，二分必收敛，且不需要"自由维度"，无死角
+- 新增 `InfeasibleBoundsError`：盒与单纯形无交集（Σlo>1 或 Σhi<1）时显式抛错，
+  由 `main()` 捕获后**拒绝写入**并记 `skip_reason="infeasible_bounds"`，不再静默降级
+- 模块导入期断言 `WEIGHT_CLAMPS` 自洽（Σlo ≤ 1 ≤ Σhi），把配置错误暴露在导入时
+  而非周日 cron 跑到一半
+- 舍入到 6 位后的残差吸收进**余量最大**的维度，保证 `sum=1` 精确成立
+
+### Added — `ic_diagnostics.py`：调权重前的必跑体检
+每个维度同时输出**四个口径**，只有多口径一致才值得采信：
+1. 日度（重叠）— 与历史报告一致，t 偏高，仅作参照
+2. Newey-West(HAC) — Bartlett 核自相关调整
+3. 不重叠取样 — **T+7 按周、T+30 按月**（关键：T+30 按周仍重叠 ~4 倍，
+   实测会把 risk_adj 的 t 从真实的 −1.09 抬到 −3.28，看起来比 T+7 还显著）
+4. Jackknife — 剔除最极端 10 天，检验是否被少数日子驱动
+
+外加 regime 分段（上涨期 vs 下跌震荡期）与 Bonferroni×5 校正。
+纯 stdlib 实现（无 scipy 依赖），只读打开数据库（`mode=ro`）。
+
+```bash
+/usr/local/bin/python3 ic_diagnostics.py            # T+7 + T+30 全套
+/usr/local/bin/python3 ic_diagnostics.py --json     # 机器可读
+```
+
+### Added — 测试（+23）
+- `tests/test_weekly_optimizer.py::TestProjectionInvariants`（9 项）：
+  三不变式随机检验（200 组）、两条**历史突破固化回归**
+  （`risk_adj +10.72pp` / `catalyst 0.3316`）、不可行盒抛错、投影幂等性
+- `tests/test_ic_diagnostics.py`（23 项）：Spearman 对拍 scipy、
+  Newey-West 在正自相关下必须压低 |t|、**T+30 取样周期必须是"月"**的回归断言、
+  只读访问校验
+- 全量 **1105 passed, 1 skipped, 1 xfailed**（本 session 起点 1063），零回归
+
+### 行为影响：无
+真实数据下新投影输出与重构前**逐位相同**（signal −0.97 / catalyst +0.59 /
+sentiment +1.91 / odds +1.01 / risk_adj −2.54 pp），和精确为 1.000000000，
+最大变动 2.54pp < `MIN_CHANGE_PP=3.0` ⇒ 仍不写入 config.py。
+
+### 一个值得记的测试教训
+`test_perfect_correlation_yields_undefined_t`：合成数据做成 IC 恒为 1.0 时，
+序列方差为 0 ⇒ t = mean/0 未定义 ⇒ 工具正确地判 0 个口径通过。
+最初的测试期望"完美相关应过多数口径"是**错的**。另：纯随机维度会过 1/4 个口径
+（四口径各 α=0.05，至少一个误报的概率 ≈ 19%）——**「仅一口径过」正是噪音的
+典型形态**，而真实数据里 signal 与 catalyst 恰在这一档。
+
+## [0.42.4] — 2026-07-30 — 修复预测日期戳错位导致的跨业务日样本覆盖
+
+> 用户指出"我有手动跑规则模式的，你是不是漏看了"——确实漏了。交叉比对
+> git 日报提交 / `report_snapshots/` / `predictions` 三个数据源，发现 4 个日期
+> （07-07、07-16、07-21、07-28）跑了扫描却没有预测记录，顺藤摸瓜定位到静默数据丢失。
+
+### Fixed — `backtester.py::PredictionStore.save_prediction` 日期戳（P0）
+- 旧实现无条件写 **`_pdt_today()`（写入时刻的墙上时钟）**，而非报告的业务日期。
+  表上有 `UNIQUE(date, ticker)` + `INSERT OR REPLACE`，SQLite 的 REPLACE 是
+  「删除旧行 + 插入新行（分配新 rowid）」⇒ **同一 PDT 日历日跑第二次扫描
+  会删掉第一次的记录**，旧 id 变成空洞
+- **`--date` 补跑模式尤其致命**：`reporter.date_str`（`alpha_hive_daily_report.py:125`）
+  会正确设为目标日期，报告和快照都标对了，唯独 `save_prediction` 不知情，
+  照样盖运行当天 ⇒ 补跑多个历史交易日时预测互相覆盖
+- id 空洞位置与补跑行为吻合：07-09→07-22 缺 29 个 id（≈3 次扫描），
+  而 2026-07-22 当天 git 提交了 3 份日报（「日报 07-21 07:47」「07-21 06:45」「07-21 01:59」）
+- ⚠️ **实际数据损失量的准确口径**（v0.42.5 评估后修正）：全库 id 跨度 1294 而只保留
+  815 行，但**空洞的绝大部分是同一业务日重跑的正常覆盖**（重跑当天扫描时只保留
+  最后一次是正确行为），**不是** bug 造成的损失。真正因跨业务日碰撞而丢失、
+  且可经 `report_snapshots/` 识别的仅 **29 条**（业务日 07-07 / 07-21 / 07-23）。
+  另有 07-16、07-28 两天（git 有日报但快照与预测皆无）不可恢复。
+  早先"丢失 479 行（37%）"的表述**不准确，勿再引用**
+
+### Changed — 业务日期贯穿调用链
+- `PredictionStore.save_prediction(..., date: Optional[str] = None)` —— 新增业务日期参数，
+  留空回退 `_pdt_today()`（**向后兼容**，17 处既有测试调用无需改）。
+  非 `YYYY-MM-DD` 格式时 `_log.warning` 并回退当日，不静默写脏数据
+- `Backtester.save_predictions(swarm_results, date=None)` —— 透传
+- `run_full_backtest(swarm_results, date=None)` —— 透传，docstring 注明调用方有业务日期应显式传
+- `alpha_hive_daily_report.py:716` —— 改为 `bt.save_predictions(swarm_results, date=self.date_str)`
+
+### Fixed — 写库失败不再静默
+- 旧实现丢弃 `save_predictions` 返回值，写库 0 条时无人知晓（日报照常发布）。
+  现在返回 0 而 `swarm_results` 非空时 `_log.error` + 终端告警
+
+### 明确不改的边界
+- **不改 `UNIQUE(date, ticker)`**：同一业务日同一标的确实应唯一，日期戳修对后
+  REPLACE 语义就是正确的「重跑同一天覆盖旧结果」
+- **不改 `get_pending_checks` 的 cutoff**：它用 `_pdt_today()` 做「今天往回数 N 个
+  交易日」是正确的，与写入日期戳是两回事
+- **不回填已丢失的 479 行**：属独立的下一步（从 `report_snapshots/` 重建）
+
+### Added — 测试
+- `tests/test_backtester.py` 新增 `TestBusinessDateStamping`（10 项），核心是
+  `test_two_business_dates_same_run_both_survive` —— 同一进程写两个不同业务日的
+  同一标的必须都存活（修复前会被 REPLACE 成 1 条）
+- 全量 **1073 passed, 1 skipped, 1 xfailed**（修复前 1063），零回归
+
+### 验证
+- 前后对比实证：不带 date 连写两次 → 保留 1 条（旧行为）；带不同业务日期 → 保留 2 条
+- 端到端复现用户 07-22 场景：同一天补跑 07-16/07-21/07-22 三个业务日 →
+  **6 条全部存活、id 空洞 0**（修复前只会剩 2 条）
+
+## [0.42.5] — 2026-07-30 — 快照回填可行性评估：结论「不做」（无代码改动）
+
+> 评估能否从 `report_snapshots/` 重建 v0.42.4 日期戳 bug 丢失的预测记录。
+> 结论是投入产出不成立，**不实施回填**。记录评估过程以免未来重复调查。
+
+### 评估结论：否决
+1. **可回填量远小于预期**：`report_snapshots/` 有 667 个唯一 (ticker, date) 组合，
+   `predictions` 有 815 个，其中「仅快照有」= **29 条**（07-07 / 07-21 / 07-23）。
+   现有 t7 价格的仅 **10 条** ⇒ 对 T+7 样本贡献 784→794（**+1.3%**）
+2. **`dimension_scores` 只能还原 8/29 条**。快照存 `agent_votes` 而非 `dimension_scores`，
+   映射关系（signal←ScoutBeeNova / catalyst←ChronosBeeHorizon / sentiment←BuzzBeeWhisper /
+   odds←OracleBeeEcho / risk_adj←GuardBeeSentinel）经 638 条重叠样本验证**正确**，
+   主蜂在场时按 2 位小数匹配率 **95~99%**；但快照的 `agent_votes` 常缺蜂，
+   29 条候选里 5 维齐全的只有 **8 条**
+3. **缺维度的行会引入选择性偏差**：29 条里 `sentiment` 缺 15 次，而它恰是四口径表中
+   唯一显著的正向维度。以「部分维度为空」入库会让每日横截面在不同维度上样本集不同
+
+### 方法论记录（避免重蹈）
+首次比对用 `abs(a-b) < 1e-6`，得出「最佳主蜂仅匹配 6~75%」并差点据此判定映射不存在。
+真实原因是**两侧存储精度不同**：`dimension_scores` 存 2 位小数、`agent_votes` 全精度
+（4.8100 vs 4.8083）。按 `round(x, 2)` 重测后匹配率跃升至 95~99%。
+**跨数据源比对数值前必须先确认双方精度约定。**
+
+## [0.42.3] — 2026-07-30 — T+N 回填 + IC 统计权威重算（无代码改动，数据与结论更新）
+
+### Changed — 数据
+- 跑 `Backtester.run_backtest()` 补齐到期回填：**t1 +10**（07-29）、**t30 +10**（06-16）、
+  **t7 +0**。回填前备份 `/tmp/pheromone_pre_backfill_20260730_024100.db`
+- `checked_t1` 805→815、`checked_t30` 674→684、`checked_t7` 784→784（未变）
+
+### Fixed — 更正一个错误诊断（本 session 早先由我提出）
+- 曾判定"T+7 回填停滞 3 周"，**该结论错误**。`get_pending_checks('t7')` 返回 0 是因为
+  07-22 之后的预测尚未到期（07-22→到期 07-31、07-23→08-03、07-24→08-04、07-29→08-07）
+- `checked_t7` 停在 07-09 的真实原因：**07-10 ~ 07-21 共 13 天没有跑过扫描**。
+  扫描本身高度稀疏（06-22/23/26/29、07-02/06/08/09、07-22/23/24/29），
+  与 `alpha-hive-daily-scan` 定时任务 `enabled:false`（lastRunAt 2026-06-19）一致
+- 回填逻辑一直正常工作，无需修复
+
+### Added — IC 统计权威基线（四口径对照）
+因 `checked_t7` 未增加，基于 `return_t7` 的 IC 数字与回填前完全一致。本次以全部
+稳健性口径重算，作为后续权重决策的唯一基线（776 行 / 73 个交易日 / 日均横截面宽度 10.2）：
+
+| 维度 | 日度(重叠) | Newey-West(L=7) | 不重叠周 | 剔极端10天 | 通过 |
+|---|---|---|---|---|---|
+| risk_adj | −3.72 | −3.08 | −2.56 | −1.89 ✗ | 3/4 |
+| sentiment | +2.14 | +1.66 ✗ | +2.24 | +0.10 ✗ | 2/4 |
+| signal | −2.54 | −1.51 ✗ | −1.10 ✗ | −0.52 ✗ | 1/4 |
+| catalyst | +0.17 | +0.10 | +0.37 | −2.25 | 1/4 |
+| odds | +1.52 ✗ | +1.11 ✗ | +1.20 ✗ | −0.49 ✗ | 0/4 |
+
+- **T+30 不构成独立确认**：周度 risk_adj t=−3.28（Bonferroni p=0.005）看似更强，但 30 天
+  前瞻收益按周取样仍重叠 ~4 倍；按月**真不重叠**后 n=5，t=**−1.09**、CI[−0.452,+0.129] 含 0
+- **catalyst 不是零信息，是符号翻转**（T+7）：上涨期 IC=+0.094(t=+2.18,n=53)、
+  下跌震荡期 −0.236(t=−3.30,n=19)，两个相反效应相消才显得像 0。T+30 该翻转消失
+
+### 结论：暂不做任何权重调整
+没有任何维度通过全部保守口径。risk_adj 是最强负向候选但败于 jackknife，
+sentiment 最强正向候选但败于 Newey-West 与 jackknife。且本次做了
+5 维 × 2 horizon × 4 方法的多重检验，未做全局校正。
+
+### 顺带更正 v0.42.2 遗留的一个说法
+"样本仅覆盖单一 regime"**不成立**：① 指数层有方向切换（SPY T+7 月度：2月 −1.96%
+100%为负、4月 +2.88% 0%为负、7月 −0.04%）；② 本系统实际持仓有真熊市被指数掩盖 ——
+核心10票等权全窗口 **−10.71%**（同期 SPY +5.80%），最大回撤 **−26.91%**（SPY −8.58%），
+单票 RKLB −61%／CRCL −54%／BILI −46%（yfinance 实测）。
+不动 risk_adj 的正确理由是**统计口径脆弱性**（重叠收益 + 对少数天敏感 + 横截面窄），
+不是 regime 单一。
+
+## [0.42.2] — 2026-07-30 — 修复权重学习闭环的记分方向 bug + 补齐写入安全网
+
+> 承 v0.42.1 的样本充足性结论，跑了 Bootstrap / Walk-Forward / FF6 三件套统计验证，
+> 顺着"样本外过拟合 gap +8.6pp、test Sharpe −0.46"往下挖，定位到维度层记分的根因 bug。
+
+### Fixed — 维度层记分方向 bug（P0 根因）
+- `feedback_loop.py` 新增 `agent_vote_correct(vote, ret)` 作为**唯一记分入口**，
+  判定基准是「蜂自己的票 vs 实际涨跌」，与快照整体 `direction` **无关**
+- 旧实现用快照级 `direction` 推出 `is_correct`，再拿去评判每只蜂自己的票。对
+  `direction="neutral"` 的快照 `is_correct` 恒为 False（`check_direction_accuracy`
+  返回 `None`，下游 `not None → True`），于是退化成「只要 vote≤5 就算对」，
+  **完全脱离价格实际走势**。实测 625 个快照里 neutral 占 202 个（**32%**）
+- 后果：5 个维度准确率全部低于抛硬币（0.376~0.493）。修复后回到 0.498~0.532
+- 修复三处重复实现：`weekly_optimizer.py` 主路径、`weekly_optimizer.py` bootstrap 内、
+  `feedback_loop.calculate_agent_contribution`，统一改调 `agent_vote_correct`
+- `vote == 5.0`（中性票）与 `ret == 0` 改为**弃权**，不计入准确率分母
+- 交叉验证：修复后二值口径给出 risk_adj −2.54pp / sentiment +1.91pp，与独立的
+  按日横截面 rank-IC 分析（risk_adj IC=−0.138 t=−3.72、sentiment IC=+0.087 t=+2.14）
+  **首次符号一致**；修复前二值口径把 risk_adj 排准确率第一，与 rank-IC 直接矛盾
+
+### Added — config.py 写入安全网（P1b）
+- **写入前语法预检**：`compile(new_text)`，语法错的 config.py 会瘫痪所有模块，
+  必须在覆盖原文件之前发现
+- **写入前备份**：`config.py.weights.bak`（单槽）+ `weight_backups/config_<ts>.py`
+  （滚动保留 8 份）。严格在 `tmp.replace()` 之前执行
+- **写入后回读校验**：比对落盘值与目标值（4 位小数），不符自动从备份还原
+- **`--rollback` CLI**：从审计日志重建上一次写入前的权重（只改 `EVALUATION_WEIGHTS`，
+  **不做整文件还原**——config.py 1400+ 行，期间用户可能改过别的配置项）。
+  `--rollback --to-backup` 为整文件还原逃生舱；`--rollback --dry-run` 预览
+
+### Fixed — 审计日志可信度
+- `write_weights_to_config` 的 dry-run 分支由 `return True` 改为 `return False`。
+  旧实现导致 `{"dry_run": true, "applied": true}` 的矛盾记录（2026-05-10 那条），
+  而 `health_check.py` 正在读这个字段
+- 新增 `schema_version` / `skip_reason` / `action` 字段。**历史记录不改写**
+  （审计轨迹不可篡改），由 `health_check.py` 按 `schema_version` 甄别旧记录
+- **跳过也留痕**：旧实现只在 `significant or dry_run` 时写审计，于是"每周跑、
+  每周无显著变化"表现为日志完全空白（2026-05-10 后 11 周），与"任务挂了"无法区分。
+  现在跳过也记录，附 `skip_reason`（`below_min_change` / `dry_run` / `write_failed`）
+
+### Added — 测试
+- 新增 `tests/test_weekly_optimizer.py`（29 项）：记分真值表、方向无关性不变式、
+  收益取反属性测试、备份/回读/语法预检、dry-run 语义、回滚往返
+- `tests/test_feedback_loop.py` 新增 `TestAgentContributionScoring`（4 项）
+- 全量 **1063 passed, 1 skipped, 1 xfailed**，零回归
+
+### 行为影响：无
+修复后最大变动 2.54pp < `MIN_CHANGE_PP=3.0` → 优化器仍不写入 config.py，
+外部行为与修复前一致（实跑验证 config.py 逐字节未变）。这是纯正确性修复。
+
+### 已知遗留（本次未做，见 `~/.claude/plans/tingly-skipping-pike.md`）
+- **P1 护栏重构**：`clamp_shifts` 先钳 ±10pp 再重新归一化，归一化把边界值再放大 →
+  历史实测突破（`risk_adj +10.72pp` / `signal −11.32pp`）；`_apply_weight_clamps`
+  在归一化前执行、之后不再钳 → 落盘权重不保证满足 `WEIGHT_CLAMPS`（史上 catalyst
+  到过 0.3316 > 上限 0.25）。修法：把 `WEIGHT_CLAMPS ∩ ±MAX_SHIFT_PP` 合并成单一
+  盒约束后单次投影（复用 `_apply_weight_clamps` 的迭代算法，参数化 bounds）
+- **P2 权重映射**：`w = acc/Σacc` 在数学上无法表达"这个维度没用"——acc 都挤在 0.5
+  附近，归一化后必然全 ≈0.2，"所有维度一样好"与"所有维度都没用"输出相同。
+  且 `compute_new_weights_wls` 的 docstring 声称做 OLS 回归取 beta + 共线性检测，
+  实现里一行都没有。建议改 rank-IC + 显著性收缩 + floor 分配
+- **P3 口径统一**：optimizer 读 `report_snapshots` 毛收益，walk_forward 读
+  `pheromone.db` 净收益，`MIN_SAMPLES=10` vs validator 要求 40+20
+- **P4 OOS 门**：`walk_forward_validator` 与 `weekly_optimizer` 零连接，
+  `run_walk_forward()` 无任何 Python 调用方；`bootstrap_validate` 结果不阻断写入
+- **统计现实**：修正后 5 维 edge 的 |t| 全 < 1.2（按日聚类 SE），二值准确率信息量
+  不足以支撑权重学习。真正的杠杆在信号层（各蜂原始分质量），不在加权层——
+  与 `experiments/penalty_replay_report.md` 早先结论一致
+
+## [0.42.1] — 2026-07-30 — 退役 alpha-hive-sample-accumulator 定时任务
+
+> 用户问"这个样本积累任务还有存在必要吗，我已经升级很多版了"。调查后确认：任务已过时
+> 且实际空转约 2.5 个月，应退役。
+
+### Removed / Changed — scheduled task `alpha-hive-sample-accumulator`
+- 已 `enabled:false` 禁用（无法在本 session 直接 delete——它正是启动本 session 的
+  scheduled task，需从常规 session 用 `delete_scheduled_task` 彻底删除；SKILL.md 保留可恢复）
+- 退役依据：
+  1. **目标达成**：`predictions` 表已有 674 笔已结算 T+30 样本（`checked_t30=1`），
+     6/7 月另 180 笔成熟后达 ~850，落在原定 700-900 目标区间
+  2. **已空转 ~2.5 个月**：库内最后一个周日样本 = 2026-05-17，最后一个
+     `.samples-only-*.json` 产物同为 2026-05-17，但 cron 每周日照常触发
+     （`lastRunAt 2026-07-27`）——近 ~10 次运行写入 0 条
+  3. **根因环境隔离**：任务跑在 Cowork VM，VM 连不上 yfinance → 撞空扫描护栏
+     （`alpha_hive_daily_report.py:2309`）→ 不写库。真正填库的是工作日 Mac orchestrator 扫描
+  4. **扩 universe 卖点从未兑现**：全库有史仅 39 个不同 ticker，全部与主池重叠
+- 影响：无。工作日 Mac 扫描继续每日填库；下游 `bear-hypothesis-backtest`（8/3）照常读取现有样本
+
 ## [0.42.0] — 2026-07-29 — 修复深度报告生成器对亏损标的（负 EPS）的两处崩溃
 
 > 用户要求对 VKTX 财报做机构级深度分析，`generate_deep_v2.py --ticker VKTX --no-llm`

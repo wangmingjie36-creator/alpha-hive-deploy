@@ -130,6 +130,64 @@ class TestReportSnapshot:
         assert acc["t7"] is None  # Neutral 方向不判对错
 
 
+class TestAgentContributionScoring:
+    """v0.42.2 P0：Agent 贡献度记分不得依赖快照整体 direction
+
+    旧实现经由 check_direction_accuracy()，对 Neutral 返回 None，下游
+    `not None → True` 让所有 vote<=5 的票无条件判对（与价格无关）。
+    实测 625 个快照里 Neutral 占 202 个（32%），系统性压低所有维度准确率。
+    """
+
+    def _snap(self, direction, entry, t7, votes):
+        from feedback_loop import ReportSnapshot
+        s = ReportSnapshot("AAPL", "2026-01-01")
+        s.direction = direction
+        s.entry_price = entry
+        s.actual_price_t7 = t7
+        s.agent_votes = votes
+        return s
+
+    def test_neutral_snapshot_not_auto_correct_for_low_votes(self):
+        """Neutral + 看空票 + 价格大涨 → 必须判错（旧实现会无条件判对）。"""
+        from feedback_loop import BacktestAnalyzer
+        a = BacktestAnalyzer.__new__(BacktestAnalyzer)
+        a.snapshots = [self._snap("Neutral", 100.0, 120.0, {"ScoutBeeNova": 2.0})
+                       for _ in range(5)]
+        acc = a.calculate_agent_contribution()
+        assert acc["ScoutBeeNova"] == 0.0, "看空票遇大涨必须 0% 准确率"
+
+    def test_neutral_snapshot_credits_correct_bullish_votes(self):
+        """Neutral + 看多票 + 价格大涨 → 必须判对（旧实现会无条件判错）。"""
+        from feedback_loop import BacktestAnalyzer
+        a = BacktestAnalyzer.__new__(BacktestAnalyzer)
+        a.snapshots = [self._snap("Neutral", 100.0, 120.0, {"ScoutBeeNova": 9.0})
+                       for _ in range(5)]
+        acc = a.calculate_agent_contribution()
+        assert acc["ScoutBeeNova"] == 100.0, "看多票遇大涨必须 100% 准确率"
+
+    def test_scoring_identical_across_directions(self):
+        """同一份 votes + 同一价格路径，换 direction 不得改变 Agent 准确率。"""
+        from feedback_loop import BacktestAnalyzer
+        results = []
+        for d in ("Long", "Short", "Neutral"):
+            a = BacktestAnalyzer.__new__(BacktestAnalyzer)
+            a.snapshots = [self._snap(d, 100.0, 108.0, {"ScoutBeeNova": 8.0})
+                           for _ in range(4)]
+            results.append(a.calculate_agent_contribution()["ScoutBeeNova"])
+        assert len(set(results)) == 1, f"direction 影响了记分: {results}"
+
+    def test_abstain_votes_excluded_from_denominator(self):
+        """vote 恰为 5.0 的中性票应弃权，不计入分母。"""
+        from feedback_loop import BacktestAnalyzer
+        a = BacktestAnalyzer.__new__(BacktestAnalyzer)
+        a.snapshots = [self._snap("Long", 100.0, 110.0,
+                                  {"ScoutBeeNova": 5.0, "BuzzBeeWhisper": 9.0})
+                       for _ in range(3)]
+        acc = a.calculate_agent_contribution()
+        assert acc["ScoutBeeNova"] == 0.0      # 无有效样本 → 0.0 兜底
+        assert acc["BuzzBeeWhisper"] == 100.0  # 看多 + 涨 = 全对
+
+
 class TestBacktestAnalyzer:
     """BacktestAnalyzer 回测分析"""
 

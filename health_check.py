@@ -190,12 +190,30 @@ def check_weekly_optimizer() -> List[CheckResult]:
         sev = "fail"
         suffix = " (异常 > 30 天无更新)"
 
+    # v0.42.2：schema_version < 2 的记录里 applied 字段不可信 —— 旧
+    # write_weights_to_config 的 dry-run 分支 return True，导致 dry_run=true 的
+    # 运行被记成 applied=true（weight_history.jsonl 2026-05-10 那条即是）。
+    # 历史记录不改写（审计轨迹不可篡改），在消费侧甄别。
+    _schema = last.get("schema_version", 1)
+    if _schema >= 2:
+        _applied = last.get("applied")
+    elif last.get("dry_run") and last.get("applied"):
+        _applied = None  # 已知矛盾记录，不作断言
+    else:
+        _applied = last.get("applied")
+
     results.append(CheckResult(
         "weekly-optimizer: 上次 weight_history 写入",
         "alpha-hive-weekly-optimizer",
         sev,
         f"{age_days} 天前 ({last_ts.strftime('%Y-%m-%d %H:%M')}){suffix}",
-        {"age_days": age_days, "method": last.get("method"), "applied": last.get("applied")},
+        {
+            "age_days": age_days,
+            "method": last.get("method"),
+            "applied": _applied,
+            "skip_reason": last.get("skip_reason"),
+            "schema_version": _schema,
+        },
     ))
 
     # 字段完整性（v0.24.2 修复后必须有 method 字段）— 但仅对 4-27 之后的记录检查
