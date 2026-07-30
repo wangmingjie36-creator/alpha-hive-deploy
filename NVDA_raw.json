@@ -249,6 +249,6 @@
     "action": "分批建仓",
     "reasoning": "人工分析 71.0% + ML 预测 54.7% = 综合 66.1%"
   },
-  "price": 197.01,
+  "price": 190.01,
   "price_source": "closing"
 }
