@@ -379,3 +379,32 @@ def test_rollback_without_history_is_safe(sandbox):
     before = wo.CONFIG_PATH.read_text(encoding="utf-8")
     assert wo.do_rollback(dry_run=False) == 1
     assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
+
+
+class TestModuleLoggerDefined:
+    """v0.43.3 回归：`_log` 曾未定义，导致 InfeasibleBoundsError 处理路径崩溃。
+
+    该 except 分支是 v0.42.6 为"约束无解时拒绝写入并留审计"专门加的安全网，
+    却因 `_log` 未定义而在触发时抛 AttributeError —— append_history 永远不会执行，
+    审计缺失，且 cron 以非零码崩溃。本 session 已犯过同类错误一次
+    （alpha_hive_daily_report 的 `sys` 未在模块作用域）。
+    """
+
+    def test_module_logger_exists(self):
+        assert hasattr(wo, "_log"), "weekly_optimizer 必须有模块级 _log"
+        assert wo._log.name.startswith("alpha_hive")
+
+    def test_infeasible_handler_can_log(self):
+        """模拟 main() 的 except 分支，确认不抛 NameError/AttributeError"""
+        try:
+            raise wo.InfeasibleBoundsError("模拟不可行")
+        except wo.InfeasibleBoundsError as e:
+            wo._log.error("clamp_shifts 不可行: %s", e)   # 崩则测试失败
+
+    def test_every_log_usage_is_resolvable(self):
+        """源码里用到的所有 _log.<method> 都必须存在于 logger 上"""
+        import re
+        with open(wo.__file__, encoding="utf-8") as f:
+            src = f.read()
+        for m in set(re.findall(r"_log\.(\w+)\(", src)):
+            assert hasattr(wo._log, m), f"logger 无方法 {m}"

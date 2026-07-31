@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import random
@@ -29,6 +30,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+_log = logging.getLogger("alpha_hive.weekly_optimizer")
 
 # ── 路径配置（与 generate_deep_v2.py 保持一致）─────────────────────────────
 # v0.10.1 修复：VM 路径硬编码旧 session（keen-magical-wright）导致新 session

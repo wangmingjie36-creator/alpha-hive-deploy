@@ -457,6 +457,12 @@ def _build_summary(ticker: str, alpha_annual: float, alpha_sig: str,
     if not alpha_sig:
         alpha_str += "（不显著）"
 
+    # v0.43.5：`r2_str` / `ir_str` 从未定义 —— 重构时漏改，
+    # 一旦 factors 为空（FF 回归无有效因子）就抛 NameError。
+    # 由 ruff F821 扫描发现（该分支在正常路径上不执行，测试从未覆盖）。
+    r2_str = f"R² {r2 * 100:.1f}%"
+    ir_str = f"IR {ir:+.2f}"
+
     # 最大绝对暴露因子
     if not factors:
         return f"{ticker} — {alpha_str} | {r2_str} | {ir_str}"

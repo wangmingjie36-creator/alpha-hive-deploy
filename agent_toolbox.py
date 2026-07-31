@@ -149,11 +149,37 @@ class GitHubTool:
             return {"modified_files": files, "status": "✅ Clean" if not files else "⚠️ Dirty"}
         return {"error": result.get("stderr")}
 
-    def commit(self, message: str) -> Dict[str, Any]:
-        """创建提交"""
-        stage = self.run_git_cmd("git add -A")
-        if not stage["success"]:
-            return {"error": f"Failed to stage: {stage['stderr']}"}
+    def commit(self, message: str,
+               paths: Optional[List[str]] = None) -> Dict[str, Any]:
+        """创建提交
+
+        Args:
+            paths: **白名单** —— 只暂存这些 pathspec（可含 glob）。
+                留空则沿用 `git add -A`（全量），保持向后兼容。
+
+        ⚠️ v0.43.4：自动化调用方**必须传 paths**。
+        2026-07-30 的教训：定时日报走的是全量 `git add -A`，把当时工作区里
+        进行中的 10 个版本的代码改动（backtester / chronos_bee /
+        parallel_agent_runner / weekly_optimizer / 6 个测试文件…）全部卷进了
+        一次名为「Alpha Hive 蜂群日报 14:02」的提交里。后果：提交历史失真、
+        无法单独回滚代码改动、且半成品代码会被自动推上生产分支。
+
+        自动化边界应按**白名单**定义而非黑名单：失败模式从"多提交了不该提交的"
+        （不可发现）变成"漏提交了该提交的"（下次运行即可见）。
+        """
+        if paths:
+            # 逐条暂存：某个 pathspec 无匹配时 git 会报错，此处容忍（该产物本次未生成）
+            staged_any = False
+            for p in paths:
+                r = self.run_git_cmd(f"git add -- {shlex.quote(p)}")
+                if r["success"]:
+                    staged_any = True
+            if not staged_any:
+                return {"success": False, "error": "白名单未匹配到任何文件"}
+        else:
+            stage = self.run_git_cmd("git add -A")
+            if not stage["success"]:
+                return {"error": f"Failed to stage: {stage['stderr']}"}
 
         commit = self.run_git_cmd(f"git commit -m {shlex.quote(message)}")
         return {

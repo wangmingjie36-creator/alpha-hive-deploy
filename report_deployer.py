@@ -5,7 +5,7 @@ report_deployer - 报告部署与通知模块
 每个函数接收 reporter 实例（原 self）作为第一个参数。
 """
 
-from typing import Dict
+from typing import Dict, List
 from datetime import datetime
 from hive_logger import get_logger
 
@@ -223,6 +223,57 @@ def deploy_static_to_ghpages(reporter):
         )
 
 
+#: 日报自动提交的**白名单**（v0.43.4）
+#
+# 只有这些路径会被定时任务自动提交。代码文件一律交给人工提交。
+#
+# 为什么是白名单而非黑名单：自动化系统的失败模式必须是可发现的。
+# 白名单漏一项 → 该产物不进 git → 下次运行/看网站立刻发现；
+# 黑名单漏一项 → 半成品代码被自动提交并推上生产 → 无人知晓。
+#
+# 清单来源：commit 68aad61（2026-07-30 日报）里的全部非代码文件，
+# 加上 ML 报告与 analysis JSON（那次恰好没生成）。
+REPORT_ARTIFACT_PATHS: List[str] = [
+    # 日报正文与分享版
+    "alpha-hive-daily-*.json",
+    "alpha-hive-daily-*.md",
+    "alpha-hive-thread-*.txt",
+    # ML 增强报告与其数据快照
+    "alpha-hive-*-ml-enhanced-*.html",
+    "analysis-*-ml-*.json",
+    # 站点资产
+    "index.html",
+    "dashboard-data.json",
+    "rss.xml",
+    "sw.js",
+    # 状态与缓存
+    "report_snapshots/",
+    "paper_portfolio_state/",
+    ".factor_cache/",
+    "weight_history.jsonl",
+]
+
+#: 与上表对应的匹配规则（用于"哪些被跳过"的提示）
+_ARTIFACT_PREFIXES = ("report_snapshots/", "paper_portfolio_state/", ".factor_cache/")
+_ARTIFACT_GLOBS = (
+    "alpha-hive-daily-*.json", "alpha-hive-daily-*.md", "alpha-hive-thread-*.txt",
+    "alpha-hive-*-ml-enhanced-*.html", "analysis-*-ml-*.json",
+)
+_ARTIFACT_EXACT = ("index.html", "dashboard-data.json", "rss.xml", "sw.js",
+                   "weight_history.jsonl")
+
+
+def _is_report_artifact(path: str) -> bool:
+    """该文件是否属于日报产物（即会被自动提交）"""
+    import fnmatch
+    p = path.strip()
+    if p in _ARTIFACT_EXACT:
+        return True
+    if any(p.startswith(pre) for pre in _ARTIFACT_PREFIXES):
+        return True
+    return any(fnmatch.fnmatch(p, g) for g in _ARTIFACT_GLOBS)
+
+
 def auto_commit_and_notify(reporter, report: Dict) -> Dict:
     """
     自动提交报告到 Git + Slack 通知（Agent Toolbox 演示）
@@ -259,10 +310,26 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
     _log.info("Git commit... (mode: new)")
     status = reporter.agent_helper.git.status()
     if status.get("modified_files"):
-        commit_result = reporter.agent_helper.git.commit(today_commit_msg)
+        # v0.43.4：白名单提交。此前走 `git add -A` 全量，会把工作区里
+        # 任何进行中的代码改动一并卷进"日报"提交（2026-07-30 实际发生：
+        # 10 个版本的代码改动混进 commit 68aad61）。详见 AgentHelper.commit 注释。
+        _skipped = [f for f in status["modified_files"]
+                    if not _is_report_artifact(f)]
+        if _skipped:
+            _log.warning(
+                "白名单提交：跳过 %d 个非日报产物（不会被自动提交）：%s",
+                len(_skipped), ", ".join(_skipped[:10]),
+            )
+            print(f"   ℹ️  跳过 {len(_skipped)} 个非日报文件（需手动提交）："
+                  f"{', '.join(_skipped[:5])}"
+                  + (" …" if len(_skipped) > 5 else ""))
+
+        commit_result = reporter.agent_helper.git.commit(
+            today_commit_msg, paths=REPORT_ARTIFACT_PATHS)
         results["git_commit"] = commit_result
+        results["skipped_non_artifacts"] = _skipped
         if commit_result["success"]:
-            _log.info("Git commit 成功（new）")
+            _log.info("Git commit 成功（new，白名单）")
         else:
             _log.warning("Git commit 失败：%s", commit_result.get('message'))
     else:

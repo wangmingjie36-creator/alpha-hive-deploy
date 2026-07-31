@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import argparse
+import logging
 import os
 import time
 from datetime import datetime
@@ -712,6 +713,15 @@ class AlphaHiveDailyReporter:
         adapted = None
         if Backtester:
             try:
+                # v0.43.2：归档全部原始信号（7 蜂 60+ 字段），供单信号 IC 档案。
+                # 只有 5 个聚合维度会进评分，但"哪块砖在承重"必须在原始层才看得见。
+                try:
+                    from signal_archive import archive as _sig_archive
+                    _n_sig = _sig_archive(swarm_results, self.date_str)
+                    _log.info("单信号档案：写入 %d 行", _n_sig)
+                except Exception as _e_sig:   # noqa: BLE001 - 档案失败不得阻断扫描
+                    _log.warning("单信号档案写入失败（不影响主流程）: %s", _e_sig)
+
                 bt = Backtester()
                 # v0.42.4：必须传业务日期。旧实现让 save_prediction 盖 _pdt_today()，
                 # 于是 --date 补跑历史交易日时预测被盖成运行当天，配合

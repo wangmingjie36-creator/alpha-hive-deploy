@@ -5,6 +5,197 @@
 
 ---
 
+## [0.43.5] — 2026-07-30 — 接入 ruff F821 静态守卫，修 4 个存量潜伏 NameError
+
+> 本 session 一天内连犯 **3 次**同型错误，必须系统性解决而非逐个修。
+
+### 问题：模块作用域缺名字，而引用它的代码在正常路径上不执行
+| # | 文件 | 缺失 | 触发路径 |
+|---|---|---|---|
+| 1 | `alpha_hive_daily_report.py` | `sys` | 线程卡死后的强制退出 |
+| 2 | `weekly_optimizer.py` | `_log` | 权重约束无解时的拒绝写入分支 |
+| 3 | `report_deployer.py` | `List`（只导了 `Dict`） | 模块级类型标注 |
+
+`import` 不报（函数体不求值）、单元测试不报（异常/边界分支覆盖不到）、
+人工 review 不报（`from typing import Dict` 看起来完全正常）。
+
+### 更正一个此前的判断
+我曾断言"静态检查不报，唯一可靠的发现方式是实际执行到那行"——**这句是错的**。
+实测 ruff `F821` 把上述三例**全部**精确抓到（含行列号）。
+而本仓库 `pyproject.toml` 早已配置 ruff（`select = ["E","F","W"]`，
+未 ignore F821）——**工具一直在，只是没人跑**。
+
+### Fixed — 扫出并修复 4 个存量潜伏 NameError
+- `alpha_hive_daily_report.py:1904/1953`：两处 `except` 里调用
+  `logging.getLogger()`，而模块**根本没有 `import logging`**
+  ⇒ 异常处理路径里再抛 NameError（与本 session 三次同型）
+- `factor_attribution.py:462`：`_build_summary()` 用了从未定义的
+  `r2_str` / `ir_str`（重构漏改），`factors` 为空时必崩。
+  函数已收到 `r2`/`ir` 参数，补上格式化即可
+
+### Added — `tests/test_no_undefined_names.py`（+8）
+把检查接进 **pytest**，跟着现有工作流跑，不需要养成新习惯：
+- `F821` 未定义名 / `F823` 局部变量赋值前使用 / `F50x` 格式化参数错配
+- **守卫自检**：用三次事故的最小复现验证守卫真能抓到，
+  并反向验证正确代码不误报（否则守卫会被噪音淹没而遭忽略）
+- 断言 `pyproject.toml` 里 ruff 配置存在且 **F821/F823 未被 ignore**
+  —— 防止未来有人为图省事关掉这条唯一的静态防线
+
+### 验证
+全量 **1201 passed, 1 skipped, 1 xfailed**，零回归；
+`ruff check --select F821` 全仓库 **All checks passed**。
+
+## [0.43.4] — 2026-07-30 — 日报自动提交改为白名单（防止卷走在制代码）
+
+> 事故：今日 14:02 的定时日报走 `git add -A` 全量提交，把当时工作区里
+> **进行中的 10 个版本代码改动**（`backtester` / `chronos_bee` /
+> `parallel_agent_runner` / `weekly_optimizer` / `feedback_loop` /
+> `health_check` / `ic_diagnostics` / 6 个测试文件）全部卷进了一次名为
+> 「Alpha Hive 蜂群日报 2026-07-30 14:02」的提交（`68aad61`）。
+
+### 后果
+1. **提交历史失真** —— 搜"ChronosBee 看空修复在哪个 commit"，结果是一条日报
+2. **无法单独回滚** —— 撤销某个代码改动会连带撤销当天日报数据
+3. **潜在风险** —— 工作区若有半成品代码，定时任务会直接提交并**推上生产分支**
+
+### Changed — `AgentHelper.git.commit(message, paths=None)`
+- 新增可选 `paths` 白名单参数：只暂存指定 pathspec；留空仍走 `git add -A`
+  （**向后兼容**，其他调用方不受影响）
+- 白名单一个都没匹配上时**显式失败**，而非静默创建空提交
+
+### Changed — `report_deployer.REPORT_ARTIFACT_PATHS`
+定时日报只自动提交这些路径，代码一律交人工：
+```
+alpha-hive-daily-*.{json,md}   alpha-hive-thread-*.txt
+alpha-hive-*-ml-enhanced-*.html   analysis-*-ml-*.json
+index.html  dashboard-data.json  rss.xml  sw.js  weight_history.jsonl
+report_snapshots/  paper_portfolio_state/  .factor_cache/
+```
+清单来源 = `68aad61` 里的全部非代码文件 + ML 报告与 analysis JSON（那次未生成）。
+
+- 被跳过的非产物文件会**显式告警**（日志 + 终端），不会静默消失
+- `auto_commit_and_notify` 返回值新增 `skipped_non_artifacts`
+
+### 为什么是白名单而非黑名单
+自动化系统的失败模式必须是**可发现的**：
+- 白名单漏一项 → 该产物不进 git → 下次运行或看网站立刻发现
+- 黑名单漏一项 → 半成品代码被自动提交并推生产 → **无人知晓**
+
+### Added — 测试（+29）
+- 用 `68aad61` 的**真实文件清单**做参数化：13 个产物必须提交、12 个代码必须跳过
+- **真实 git 仓库沙盒验证**（分类函数对 ≠ `git add` 行为对）：
+  造出 3 个产物 + 2 个"半成品代码"，断言提交里只有产物、代码完好留在工作区
+- 不传 `paths` 时仍全量暂存（向后兼容）
+- 全量 **1193 passed, 1 skipped, 1 xfailed**，零回归
+
+### 顺带修复
+`report_deployer.py` 只导入了 `Dict` 而新代码用了 `List` —— 与本 session
+已犯两次的同类错误相同（`weekly_optimizer` 的 `_log`、`alpha_hive_daily_report`
+的 `sys`），均为"模块作用域缺名字，仅在特定路径触发"。
+
+## [0.43.2] — 2026-07-30 — `signal_archive.py`：单信号 IC 档案（47 个原始信号全部体检）
+
+> 系统有 7 只蜂、60+ 个原始字段，但只有 **5 个聚合维度**进入评估。
+> 「哪块砖在承重」此前每次都要重新翻 `.swarm_results_*.json` 考古，
+> 样本永远停在临时抽取的几十条。本模块把它变成一张随时可查的表。
+
+### Added — `signal_archive` 表 + 声明式提取器
+- 长表 `signal_archive(date, ticker, signal, value)`，新增信号**无需改 schema**
+- `SIGNAL_EXTRACTORS`：47 个信号，加一个 = 加一行。覆盖内幕/国会、拥挤度、
+  价格动量、期权(IV/PCR/GEX/OI)、情绪、看空分项、共振一致性、ML 预测、
+  基本面，以及 7 只蜂各自的 score 与 direction
+- 前瞻收益**分析时**从 `predictions` 联表，不重复存储；且用**纯价格变动**
+  而非 `return_t7`（后者含 SL/TP 截断，42.5% 的行被钉在档位）
+- 挂载点：`alpha_hive_daily_report._post_scan_enrichment`，扫描后自动写入；
+  失败只告警不阻断主流程
+- 一次性回填：**83 个文件 → 43,189 行**
+
+### 首次全量体检结果（T+7，噪音地板 |IC|=0.077 / 通过 95分位 2-4）
+判定真信号需同时满足 `|IC| > 地板` **且** `通过 ≥3/4`。47 个信号里只有 **2 个**达标：
+
+| 信号 | 样本 | IC | 通过 | 备注 |
+|---|---|---|---|---|
+| `agent.ScoutBeeNova.direction` | 667 | −0.198 | 4/4 | ⚠️稀疏（方向是三值） |
+| `crowding.adj_factor` | 649 | −0.112 | 3/4 | ⚠️稀疏（三档阶跃） |
+
+其余 45 个全部落在"超地板但口径不足"或"噪音带内"。值得记录的几条：
+- `composite.final_score` 仅 2/4 —— **综合分本身达不到真信号门槛**
+- `composite.swarm_agreement` IC=**+0.002**、0/4 —— 蜂群一致度零预测力，
+  却经 GuardBee 基础分 + queen 共振加成被三重计入
+- `bear.score` / `agent.BearBeeContrarian.score` IC≈**0.00** —— 看空蜂的分本身不预测
+- `insider.*` 全系为负（sentiment −0.132、distinct_buyers −0.179、dollar_bought −0.165）
+- `ml.expected_7d` / `ml.expected_30d` IC=−0.044、0/4 —— ML 预测未体现价值
+
+### Added — 稀疏度告警
+`distinct_ratio < 0.25` 的信号标 ⚠️稀疏。事件型信号（如 `insider.distinct_buyers`
+离散度 0.00）大量取值并列，**rank-IC 会失真**，应改用事件研究。
+这一条直接解释了为什么内幕信号的 IC 不可直接采信 —— 676 条样本里
+只有 47 条有任何买入事件。
+
+### Added — 测试（+19）
+提取正确性（嵌套路径/缺失省略而非填 0/bool 不转数值/单提取器失败隔离）、
+`code=P` 白名单、`notable_trades` repr 字符串容错、幂等写入、
+**不同业务日必须并存**（与 v0.42.4 日期戳 bug 同类风险）、
+**联表必须用纯价格收益而非 return_t7**、回填容错。
+全量 **1157 passed, 1 skipped, 1 xfailed**（本 session 起点 1063），零回归
+
+### 用法
+```bash
+/usr/local/bin/python3 signal_archive.py --backfill              # 一次性回填
+/usr/local/bin/python3 signal_archive.py --analyze               # 全信号体检
+/usr/local/bin/python3 signal_archive.py --analyze --min-samples 300
+/usr/local/bin/python3 signal_archive.py --list                  # 覆盖度清单
+```
+
+## [0.43.1] — 2026-07-30 — `ic_diagnostics --benchmark`：噪音地板 + 经典因子对照
+
+> 系统此前**没有任何基准**，因此无法回答唯一重要的问题：**这比什么都不做强吗？**
+> 本次排查中正是靠临时加的动量对照，才把结论从「蜂群设计有问题」修正为
+> 「T+7 横截面选股在此尺度上极难」——指向完全不同的行动。没有基准，
+> 会给出方向正确但代价高昂的错误建议。
+
+### Added — 基准套件（`--benchmark`）
+三类参照，一次输出：
+1. **噪音地板**：随机排序重复 N 次（默认 200）→ `|日度IC|` 的 95 分位。
+   把「过 1/4 口径」这种模糊说法变成一个**具体数字**
+2. **经典因子**：20 日动量 / 5 日反转 / 低波动。打不过它们就没有理由用复杂系统
+3. **系统自身**：综合分 + 5 个维度
+
+用法：`/usr/local/bin/python3 ic_diagnostics.py --benchmark [--draws 200]`
+价格类因子需联网；拉取失败自动降级，只保留系统自身基准，工具不崩。
+
+### 首次运行结果（T+7，纯价格口径，73 个交易日）
+```
+🎯 噪音地板（随机 ×200）：|日度IC| 中位 0.026、95分位 0.077
+                          通过口径数 均值 0.49、95分位 2/4
+
+   risk_adj        −0.1598  4/4  ✅ 超出
+📈 20日动量          +0.1352  1/4  ✅ 超出
+   signal          −0.1205  1/4  ✅ 超出
+🐝 综合分            −0.0903  2/4  ✅ 超出
+   sentiment       +0.0830  1/4  ✅ 超出
+   odds            +0.0593  1/4  ❌ 噪音带内
+   catalyst        +0.0298  0/4  ❌ 噪音带内
+🎲 随机              −0.0159  0/4  ❌ 噪音带内
+```
+**判定：综合分 |IC|=0.090 < 最佳经典因子 |IC|=0.135 —— 系统未能超过 20 日动量。**
+
+两个此前看不见的结论：
+- **「通过 2/4 口径」并不安全**：纯噪音的通过口径数 95 分位就是 **2/4**。
+  此前把 1/4 当噪音基准是**低估**了——2/4 同样落在噪音带内
+- `odds`（+0.0593）虽然过了 1 个口径，但**未超出噪音地板**，应视为无信号
+
+### Added — 测试（+6）
+- 噪音地板有界且确定性（同输入同结果，否则无法作为上线门槛）
+- **真信号必须超出地板**（否则地板设太高、工具没有辨别力）
+- **纯噪音不得超出地板**（否则产生假阳性建议）
+- 行情拉取失败时降级不崩、且不出现价格类因子
+- 全量 **1138 passed, 1 skipped, 1 xfailed**（本 session 起点 1063），零回归
+
+### 使用规则（已写进模块 docstring）
+**任何评分/权重改动上线前，必须先跑 `--benchmark` 并证明相对基准有改善。
+只比「改动前的自己」好是不够的——那是在噪音里挑选。**
+
 ## [0.43.0] — 2026-07-30 — 修复 ChronosBee 结构性无法看空（950 条记录 bearish=0）
 
 > 本 session 唯一一处「代码明确写错、且指向系统唯一勉强有效方向」的缺陷：
