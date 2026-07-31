@@ -299,3 +299,163 @@ class TestLoadAndDiagnose:
 def mean_of(d):
     from statistics import mean
     return mean(d.values())
+
+
+class TestBenchmarkSuite:
+    """v0.43.1 基准套件
+
+    存在理由：单看「综合分 IC=−0.09, t=−2.8」无法回答唯一重要的问题
+    ——**这比什么都不做强吗？** 2026-07-30 排查时正是靠临时加的动量对照，
+    才把结论从「蜂群设计有问题」修正为「这个任务在此尺度上极难」。
+    """
+
+    def _panel(self, rng_seed=1, n_days=40, n_names=8, signal=0.0):
+        """构造 {因子: {date: [(值, 收益)]}}，signal 控制真实相关强度"""
+        import random as _r
+        rng = _r.Random(rng_seed)
+        panel = {"🐝 综合分 final_score": {}, "🎲 随机(单次抽样)": {}}
+        d0 = datetime.date.fromisoformat("2026-03-02")
+        i = 0
+        made = 0
+        while made < n_days:
+            d = d0 + datetime.timedelta(days=i)
+            i += 1
+            if d.weekday() >= 5:
+                continue
+            made += 1
+            key = d.isoformat()
+            pairs, rnd = [], []
+            for j in range(n_names):
+                x = rng.gauss(0, 1)
+                ret = signal * x + rng.gauss(0, 1)
+                pairs.append((x, ret))
+                rnd.append((rng.random(), ret))
+            panel["🐝 综合分 final_score"][key] = pairs
+            panel["🎲 随机(单次抽样)"][key] = rnd
+        return panel
+
+    def test_noise_floor_is_positive_and_bounded(self):
+        """噪音地板必须是一个有限正数，且通过口径数远低于 4"""
+        panel = self._panel(signal=0.0)
+        f = icd.noise_floor(panel, lag=7, period="周", draws=60)
+        assert f["n_draws"] >= 30
+        assert 0 < f["ic_p95"] < 0.5, f"噪音地板异常: {f['ic_p95']}"
+        assert f["ic_p50"] < f["ic_p95"]
+        assert f["passed_mean"] < 2.0, "纯噪音的平均通过口径数不应接近 4"
+
+    def test_real_signal_exceeds_noise_floor(self):
+        """有真信号时必须超出噪音地板（否则地板设得太高，工具没有辨别力）"""
+        panel = self._panel(signal=1.2)
+        f = icd.noise_floor(panel, lag=7, period="周", draws=60)
+        s = icd._ic_series_from_pairs(panel["🐝 综合分 final_score"])
+        r = icd.diagnose(s, 7, "周")
+        assert abs(r["daily_ic"]) > f["ic_p95"], "强信号未超出噪音地板"
+
+    def test_pure_noise_does_not_exceed_floor(self):
+        """纯噪音因子不得被判为超出地板（否则会产生假阳性建议）"""
+        panel = self._panel(signal=0.0)
+        f = icd.noise_floor(panel, lag=7, period="周", draws=80)
+        s = icd._ic_series_from_pairs(panel["🎲 随机(单次抽样)"])
+        r = icd.diagnose(s, 7, "周")
+        assert abs(r["daily_ic"]) <= f["ic_p95"] * 1.5, \
+            "纯噪音因子的 |IC| 明显超出地板，说明地板估计有误"
+
+    def test_noise_floor_is_deterministic(self):
+        """同一输入必须给出同一地板 —— 否则无法作为上线门槛"""
+        panel = self._panel(signal=0.0)
+        a = icd.noise_floor(panel, lag=7, period="周", draws=50)
+        b = icd.noise_floor(panel, lag=7, period="周", draws=50)
+        assert a["ic_p95"] == pytest.approx(b["ic_p95"])
+
+    def test_empty_panel_degrades_gracefully(self):
+        assert icd.noise_floor({}, lag=7, period="周", draws=10) == {}
+
+    def test_price_load_failure_does_not_crash(self, monkeypatch, tmp_path):
+        """行情拉取失败时基准降级，不得让整个工具崩掉"""
+        monkeypatch.setattr(icd, "_load_prices", lambda *a, **k: None)
+        db = tmp_path / "p.db"
+        con = sqlite3.connect(db)
+        con.execute("""CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT, ticker TEXT, final_score REAL, dimension_scores TEXT,
+            price_at_predict REAL, price_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
+        d0 = datetime.date.fromisoformat("2026-03-02")
+        n = 0
+        i = 0
+        while n < 15:
+            d = d0 + datetime.timedelta(days=i)
+            i += 1
+            if d.weekday() >= 5:
+                continue
+            n += 1
+            for j in range(8):
+                dims = {k: float(j) for k in icd.DIMS}
+                con.execute(
+                    "INSERT INTO predictions (date,ticker,final_score,"
+                    "dimension_scores,price_at_predict,price_t7,checked_t7) "
+                    "VALUES (?,?,?,?,?,?,1)",
+                    (d.isoformat(), f"T{j}", float(j), json.dumps(dims),
+                     100.0, 100.0 + j))
+        con.commit()
+        con.close()
+
+        panel = icd.build_benchmark_panel(db, "return_t7", "checked_t7", "t7")
+        assert "🐝 综合分 final_score" in panel, "系统自身基准必须始终可用"
+        assert not any(k.startswith("📈") for k in panel), \
+            "行情不可用时不应出现价格类因子"
+
+
+class TestNoiseFloorBaseKey:
+    """v0.43.3 回归：地板基准不得依赖 dict 迭代顺序
+
+    旧实现写死匹配 `"🐝 综合分 final_score"`（只有 build_benchmark_panel 产生该键），
+    在 signal_archive 面板上必然落空并 fallback 到 `next(iter(...))` ——
+    即依赖 SQL 行序。实测地板对基准骨架高度敏感：
+    64 天/宽10.4 → 0.076，49 天/宽8.0 → 0.116，相差 52%，足以翻转判定。
+    """
+
+    def _panel(self):
+        import random as _r
+        rng = _r.Random(5)
+        def mk(n_days, width):
+            out = {}
+            d0 = datetime.date.fromisoformat("2026-03-02")
+            i = made = 0
+            while made < n_days:
+                d = d0 + datetime.timedelta(days=i); i += 1
+                if d.weekday() >= 5:
+                    continue
+                made += 1
+                out[d.isoformat()] = [(rng.random(), rng.gauss(0, 1))
+                                      for _ in range(width)]
+            return out
+        return {"wide": mk(50, 12), "composite.final_score": mk(50, 12),
+                "narrow": mk(18, 6)}
+
+    def test_explicit_base_key_is_used(self):
+        p = self._panel()
+        wide = icd.noise_floor(p, 7, "周", draws=40, base_key="wide")
+        narrow = icd.noise_floor(p, 7, "周", draws=40, base_key="narrow")
+        assert wide["ic_p95"] != pytest.approx(narrow["ic_p95"]), \
+            "不同基准应给出不同地板（否则参数没生效）"
+        assert narrow["ic_p95"] > wide["ic_p95"], "更窄/更短的基准地板应更高"
+
+    def test_falls_back_to_composite_final_score(self):
+        """未显式指定时，应优先匹配 composite.final_score 而非 dict 首项"""
+        p = self._panel()
+        auto = icd.noise_floor(p, 7, "周", draws=40)
+        explicit = icd.noise_floor(p, 7, "周", draws=40,
+                                   base_key="composite.final_score")
+        assert auto["ic_p95"] == pytest.approx(explicit["ic_p95"])
+
+    def test_fallback_is_deterministic_when_no_known_key(self):
+        """都匹配不上时取覆盖最多的，而非 dict 首项 —— 必须确定性"""
+        p = {"z": self._panel()["narrow"], "a": self._panel()["wide"]}
+        a = icd.noise_floor(p, 7, "周", draws=40)
+        b = icd.noise_floor(dict(reversed(list(p.items()))), 7, "周", draws=40)
+        assert a["ic_p95"] == pytest.approx(b["ic_p95"]), \
+            "地板不得随 dict 顺序变化"
+
+    def test_missing_base_key_does_not_crash(self):
+        p = self._panel()
+        assert icd.noise_floor(p, 7, "周", draws=20, base_key="不存在")["n_draws"] > 0

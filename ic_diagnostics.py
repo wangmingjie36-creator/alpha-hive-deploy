@@ -41,6 +41,7 @@ import argparse
 import datetime
 import json
 import math
+import random
 import sqlite3
 import sys
 from collections import defaultdict
@@ -270,6 +271,248 @@ def diagnose(ic_by_day: Dict[str, float], lag: int, period: str) -> Dict:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# 基准套件（v0.43.1）
+# ────────────────────────────────────────────────────────────────────────────
+#
+# 为什么必须有基准
+# ----------------
+# 单看"综合分 IC = −0.09, t = −2.8"无法回答唯一重要的问题：
+# **这比什么都不做强吗？** 2026-07-30 的排查里，正是因为临时加了一个
+# 20 日动量对照，才发现连这个被验证几十年的经典因子在同一批数据上
+# 也只过 1/4 —— 结论从"蜂群设计有问题"变成"这个任务在这个尺度上极难"，
+# 指向完全不同的行动。没有基准，那次会给出方向正确但代价高昂的错误建议。
+#
+# 本套件提供三类参照：
+#   1. **噪音地板**：随机排序重复 N 次 → |IC| 的 95 分位。任何低于此带的
+#      "信号"都不可信。这把"过 1/4 口径"这种模糊说法变成一个具体数字。
+#   2. **经典因子**：20日动量 / 5日反转 / 已实现波动。它们是"别人早就
+#      做出来的东西"，打不过它们就没有理由用复杂系统。
+#   3. **系统自身**：综合分 + 5 个维度。
+#
+# 使用规则（写给未来的自己）
+# ------------------------
+# **任何评分/权重改动上线前，必须先跑 `--benchmark` 并证明它相对基准有改善。**
+# 只比"改动前的自己"好是不够的 —— 那是在噪音里挑选。
+
+RANDOM_DRAWS = 200          # 噪音地板的重采样次数
+_PRICE_CACHE: Dict = {}
+
+
+def _load_prices(tickers: List[str], start: str, end: str):
+    """拉取收盘价（yfinance）。失败返回 None —— 基准降级而非整个工具崩掉。"""
+    key = (tuple(sorted(tickers)), start, end)
+    if key in _PRICE_CACHE:
+        return _PRICE_CACHE[key]
+    try:
+        import warnings
+        warnings.filterwarnings("ignore")
+        import yfinance as yf
+        px = yf.download(list(tickers), start=start, end=end,
+                         progress=False, auto_adjust=True)["Close"]
+        _PRICE_CACHE[key] = px
+        return px
+    except Exception as e:  # noqa: BLE001 - 基准是可选功能，任何失败都降级
+        print(f"⚠️  行情拉取失败，价格类基准跳过：{e}", file=sys.stderr)
+        return None
+
+
+def build_benchmark_panel(db_path: Path, target_col: str, checked_col: str,
+                          horizon: str, min_width: int = 5) -> Dict[str, Dict]:
+    """构造 {因子名: {date: [(值, 前瞻收益), ...]}} 面板。"""
+    price_col = f"price_{horizon}"
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(
+            f"SELECT date, ticker, final_score, dimension_scores, "
+            f"       price_at_predict, {price_col} AS p_end "
+            f"FROM predictions WHERE {checked_col}=1 AND {price_col} IS NOT NULL "
+            f"  AND price_at_predict > 0"
+        ).fetchall()
+    finally:
+        con.close()
+
+    recs = []
+    for r in rows:
+        p0, p1 = r["price_at_predict"], r["p_end"]
+        if not p0 or not p1 or p0 <= 0:
+            continue
+        try:
+            ds = json.loads(r["dimension_scores"]) if r["dimension_scores"] else {}
+        except (json.JSONDecodeError, TypeError):
+            ds = {}
+        recs.append({
+            "date": r["date"][:10], "ticker": r["ticker"],
+            "score": r["final_score"], "ds": ds,
+            "ret": (p1 - p0) / p0 * 100.0,
+        })
+    if not recs:
+        return {}
+
+    # 价格类基准（可选，失败则只保留系统自身）
+    tickers = sorted({r["ticker"] for r in recs})
+    dates = sorted({r["date"] for r in recs})
+    px = _load_prices(tickers, "2025-11-01", dates[-1])
+    mom20 = mom5 = vol20 = None
+    if px is not None:
+        try:
+            import pandas as pd
+            mom20, mom5, vol20 = {}, {}, {}
+            for r in recs:
+                t, d = r["ticker"], pd.Timestamp(r["date"])
+                if t not in px.columns:
+                    continue
+                s = px[t].loc[:d].dropna()
+                if len(s) < 26:
+                    continue
+                k = (t, r["date"])
+                mom20[k] = (s.iloc[-1] / s.iloc[-21] - 1) * 100
+                mom5[k] = (s.iloc[-1] / s.iloc[-6] - 1) * 100
+                vol20[k] = s.pct_change().tail(20).std() * 100
+        except Exception as e:  # noqa: BLE001
+            print(f"⚠️  价格因子构造失败，跳过：{e}", file=sys.stderr)
+            mom20 = mom5 = vol20 = None
+
+    panel: Dict[str, Dict] = defaultdict(lambda: defaultdict(list))
+    rng = random.Random(20260730)
+    for r in recs:
+        d, k = r["date"], (r["ticker"], r["date"])
+        panel["🐝 综合分 final_score"][d].append((r["score"], r["ret"]))
+        for dim in DIMS:
+            v = r["ds"].get(dim)
+            if v is not None:
+                panel[f"   └ {dim}"][d].append((v, r["ret"]))
+        if mom20 is not None and k in mom20:
+            panel["📈 20日动量"][d].append((mom20[k], r["ret"]))
+            panel["📉 5日反转"][d].append((-mom5[k], r["ret"]))
+            panel["🌪 低波动(1/vol20)"][d].append((-vol20[k], r["ret"]))
+        panel["🎲 随机(单次抽样)"][d].append((rng.random(), r["ret"]))
+
+    # 只保留满足最小宽度的日期
+    out = {}
+    for name, by_d in panel.items():
+        out[name] = {d: v for d, v in by_d.items() if len(v) >= min_width}
+    return out
+
+
+def _ic_series_from_pairs(by_day: Dict[str, List]) -> Dict[str, float]:
+    s = {}
+    for d, pairs in by_day.items():
+        xs = [a for a, _ in pairs]
+        if len(set(xs)) < 2:
+            continue
+        c = spearman(xs, [b for _, b in pairs])
+        if c is not None:
+            s[d] = c
+    return s
+
+
+def noise_floor(panel: Dict[str, Dict], lag: int, period: str,
+                draws: int = RANDOM_DRAWS, base_key: Optional[str] = None) -> Dict:
+    """随机排序重复 draws 次 → |日度IC| 与 |周度t| 的 95 分位。
+
+    这是"什么都不知道"长什么样。任何未超过此带的因子都不应被采信 ——
+    包括系统自己的综合分。
+
+    Args:
+        base_key: 用哪个因子的**日期/宽度骨架**做随机化模板。
+            必须显式指定或能匹配到默认值 —— 地板对骨架高度敏感：
+            实测同一份 signal_archive 面板，基准取 `composite.final_score`
+            （64 天 / 日均宽 10.4）得地板 0.076，取 `fund.pe_ratio`
+            （49 天 / 日均宽 8.0）得 **0.116**，相差 52%，足以翻转多个信号的判定。
+            旧实现写死匹配 `"🐝 综合分 final_score"`（只有 build_benchmark_panel
+            会产生该键），在 signal_archive 面板上必然落空并静默 fallback 到
+            `next(iter(...))` —— 即依赖 dict 迭代顺序（源于 SQL 行序），
+            不是一个可复现的选择。
+    """
+    base = None
+    for k in (base_key, "🐝 综合分 final_score", "composite.final_score"):
+        if k and k in panel:
+            base = panel[k]
+            break
+    if base is None:
+        # 兜底：取覆盖天数最多的因子，而非 dict 首项 —— 至少是确定性的
+        base = max(panel.values(), key=len, default={})
+    if not base:
+        return {}
+    daily_abs, sub_abs, passed = [], [], []
+    for i in range(draws):
+        rng = random.Random(1000 + i)
+        fake = {d: [(rng.random(), ret) for _, ret in pairs]
+                for d, pairs in base.items()}
+        s = _ic_series_from_pairs(fake)
+        if len(s) < 10:
+            continue
+        r = diagnose(s, lag, period)
+        if not r:
+            continue
+        daily_abs.append(abs(r["daily_ic"]))
+        if math.isfinite(r["sub_t"]):
+            sub_abs.append(abs(r["sub_t"]))
+        passed.append(r["passed_methods"])
+
+    def pct(v, q):
+        if not v:
+            return float("nan")
+        v = sorted(v)
+        return v[min(len(v) - 1, int(q * len(v)))]
+
+    return {
+        "n_draws": len(daily_abs),
+        "ic_p95": pct(daily_abs, 0.95),
+        "ic_p50": pct(daily_abs, 0.50),
+        "sub_t_p95": pct(sub_abs, 0.95),
+        "passed_mean": mean(passed) if passed else float("nan"),
+        "passed_p95": pct(passed, 0.95),
+    }
+
+
+def print_benchmark(panel: Dict[str, Dict], lag: int, period: str,
+                    floor: Dict) -> None:
+    rows = []
+    for name, by_day in panel.items():
+        s = _ic_series_from_pairs(by_day)
+        if len(s) < 10:
+            continue
+        r = diagnose(s, lag, period)
+        if r:
+            rows.append((name, r))
+    rows.sort(key=lambda x: -abs(x[1]["daily_ic"]))
+
+    print("\n" + "=" * 104)
+    print("【基准对照】任何改动上线前必须证明相对这组基准有改善"
+          " —— 只比「改动前的自己」好，是在噪音里挑选")
+    print("=" * 104)
+    if floor:
+        print(f"  🎯 噪音地板（随机排序 ×{floor['n_draws']} 次）："
+              f"|日度IC| 中位 {floor['ic_p50']:.3f}、**95分位 {floor['ic_p95']:.3f}**"
+              f" ｜ 通过口径数 均值 {floor['passed_mean']:.2f}、95分位 {floor['passed_p95']:.0f}/4")
+        print("     ↑ 低于 95 分位的一律视为无信号，无论 t 值多好看")
+    print("-" * 104)
+    print(f"{'因子':<26}{'日度IC':>9}{'t':>8}{'NW t':>8}{'不重叠'+period+'t':>10}"
+          f"{'通过':>6}   {'是否超出噪音地板':<16}")
+    print("-" * 104)
+    thr = floor.get("ic_p95", float("nan"))
+    for name, r in rows:
+        beats = (math.isfinite(thr) and abs(r["daily_ic"]) > thr)
+        verdict = "✅ 超出" if beats else "❌ 噪音带内"
+        print(f"{name:<26}{_fmt(r['daily_ic']):>9}{_fmt(r['daily_t'],'+.2f'):>8}"
+              f"{_fmt(r['nw_t'],'+.2f'):>8}{_fmt(r['sub_t'],'+.2f'):>10}"
+              f"{r['passed_methods']:>4}/4   {verdict:<16}")
+    print()
+    sysrow = next((r for n, r in rows if n.startswith("🐝")), None)
+    best_ext = max((r for n, r in rows if n[0] in "📈📉🌪"),
+                   key=lambda r: abs(r["daily_ic"]), default=None)
+    if sysrow and best_ext:
+        better = abs(sysrow["daily_ic"]) > abs(best_ext["daily_ic"])
+        print(f"  判定：综合分 |IC|={abs(sysrow['daily_ic']):.4f} vs "
+              f"最佳经典因子 |IC|={abs(best_ext['daily_ic']):.4f} → "
+              f"{'系统占优' if better else '⚠️ 系统未能超过经典因子'}")
+    if sysrow and math.isfinite(thr) and abs(sysrow["daily_ic"]) <= thr:
+        print("  ⚠️ 综合分未超出噪音地板 —— 当前证据不支持任何基于它的选股决策")
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # 输出
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -351,6 +594,10 @@ def main() -> int:
     ap.add_argument("--target", choices=TARGETS, default="price",
                     help="目标变量口径：price=纯价格变动（默认，推荐）；"
                          "path=return_t7 列（含 SL/TP 截断，42.5%% 样本被钉在出场档位）")
+    ap.add_argument("--benchmark", action="store_true",
+                    help="对照基准套件：噪音地板 + 经典因子 + 系统各维度（需联网拉行情）")
+    ap.add_argument("--draws", type=int, default=RANDOM_DRAWS,
+                    help=f"噪音地板的随机重采样次数（默认 {RANDOM_DRAWS}）")
     ap.add_argument("--json", action="store_true", help="输出 JSON 而非表格")
     args = ap.parse_args()
 
@@ -388,6 +635,21 @@ def main() -> int:
             if h == "t7":
                 print_robustness(res)
                 print_scoreboard(res)
+
+        if args.benchmark:
+            panel = build_benchmark_panel(db, target, checked, h, args.min_width)
+            if panel:
+                floor = noise_floor(panel, lag, period, draws=args.draws)
+                out[h]["benchmark"] = {
+                    "noise_floor": floor,
+                    "factors": {
+                        n: diagnose(_ic_series_from_pairs(bd), lag, period)
+                        for n, bd in panel.items()
+                        if len(_ic_series_from_pairs(bd)) >= 10
+                    },
+                }
+                if not args.json:
+                    print_benchmark(panel, lag, period, floor)
 
     if args.json:
         print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
