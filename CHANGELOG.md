@@ -5,6 +5,54 @@
 
 ---
 
+## [0.43.4] — 2026-07-30 — 日报自动提交改为白名单（防止卷走在制代码）
+
+> 事故：今日 14:02 的定时日报走 `git add -A` 全量提交，把当时工作区里
+> **进行中的 10 个版本代码改动**（`backtester` / `chronos_bee` /
+> `parallel_agent_runner` / `weekly_optimizer` / `feedback_loop` /
+> `health_check` / `ic_diagnostics` / 6 个测试文件）全部卷进了一次名为
+> 「Alpha Hive 蜂群日报 2026-07-30 14:02」的提交（`68aad61`）。
+
+### 后果
+1. **提交历史失真** —— 搜"ChronosBee 看空修复在哪个 commit"，结果是一条日报
+2. **无法单独回滚** —— 撤销某个代码改动会连带撤销当天日报数据
+3. **潜在风险** —— 工作区若有半成品代码，定时任务会直接提交并**推上生产分支**
+
+### Changed — `AgentHelper.git.commit(message, paths=None)`
+- 新增可选 `paths` 白名单参数：只暂存指定 pathspec；留空仍走 `git add -A`
+  （**向后兼容**，其他调用方不受影响）
+- 白名单一个都没匹配上时**显式失败**，而非静默创建空提交
+
+### Changed — `report_deployer.REPORT_ARTIFACT_PATHS`
+定时日报只自动提交这些路径，代码一律交人工：
+```
+alpha-hive-daily-*.{json,md}   alpha-hive-thread-*.txt
+alpha-hive-*-ml-enhanced-*.html   analysis-*-ml-*.json
+index.html  dashboard-data.json  rss.xml  sw.js  weight_history.jsonl
+report_snapshots/  paper_portfolio_state/  .factor_cache/
+```
+清单来源 = `68aad61` 里的全部非代码文件 + ML 报告与 analysis JSON（那次未生成）。
+
+- 被跳过的非产物文件会**显式告警**（日志 + 终端），不会静默消失
+- `auto_commit_and_notify` 返回值新增 `skipped_non_artifacts`
+
+### 为什么是白名单而非黑名单
+自动化系统的失败模式必须是**可发现的**：
+- 白名单漏一项 → 该产物不进 git → 下次运行或看网站立刻发现
+- 黑名单漏一项 → 半成品代码被自动提交并推生产 → **无人知晓**
+
+### Added — 测试（+29）
+- 用 `68aad61` 的**真实文件清单**做参数化：13 个产物必须提交、12 个代码必须跳过
+- **真实 git 仓库沙盒验证**（分类函数对 ≠ `git add` 行为对）：
+  造出 3 个产物 + 2 个"半成品代码"，断言提交里只有产物、代码完好留在工作区
+- 不传 `paths` 时仍全量暂存（向后兼容）
+- 全量 **1193 passed, 1 skipped, 1 xfailed**，零回归
+
+### 顺带修复
+`report_deployer.py` 只导入了 `Dict` 而新代码用了 `List` —— 与本 session
+已犯两次的同类错误相同（`weekly_optimizer` 的 `_log`、`alpha_hive_daily_report`
+的 `sys`），均为"模块作用域缺名字，仅在特定路径触发"。
+
 ## [0.43.2] — 2026-07-30 — `signal_archive.py`：单信号 IC 档案（47 个原始信号全部体检）
 
 > 系统有 7 只蜂、60+ 个原始字段，但只有 **5 个聚合维度**进入评估。
