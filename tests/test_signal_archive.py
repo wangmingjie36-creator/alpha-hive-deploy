@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import ic_diagnostics as icd
 import signal_archive as sa
 
 
@@ -353,3 +354,63 @@ class TestSplitStability:
         r = sa.split_stability(p, floor=0.077, train_frac=0.6)
         assert r["n_train"] > 0 and r["n_test"] > 0
         assert r["n_train"] + r["n_test"] <= len(p)
+
+
+class TestVolatilityTarget:
+    """v0.43.8：波动率预测目标
+
+    2026-07-30 实测，同一宇宙（90 只）× 897 交易日 × 同样朴素的特征：
+        未来 7 日**收益率**   ← 20 日动量   IC = +0.012  (t=+1.7)
+        未来 7 日**已实现波动** ← 60 日波动  IC = **+0.710** (t=+288.6)
+
+    波动率的可学性高 60 倍。这不是过拟合，是波动率聚集。
+    含义：系统当前在预测一个 IC≈0.01 的目标，天花板与架构无关。
+    """
+
+    def test_target_metrics_declared(self):
+        assert icd is not None  # 确保模块导入链完好
+        assert sa.TARGET_METRICS == ("return", "vol")
+
+    def test_load_panel_default_is_return(self):
+        """默认必须是 return —— 换目标是显式选择，不能静默改变既有分析"""
+        import inspect
+        sig = inspect.signature(sa.load_panel)
+        assert sig.parameters["target_metric"].default == "return"
+        assert inspect.signature(sa.analyze).parameters["target_metric"].default == "return"
+
+    def test_vol_target_degrades_gracefully_without_network(self, tmp_path, monkeypatch):
+        """行情不可用时返回空面板，不得崩溃或退回错误的目标"""
+        monkeypatch.setattr(sa, "_forward_realized_vol", lambda *a, **k: {})
+        db = tmp_path / "p.db"
+        con = sqlite3.connect(db)
+        con.execute("""CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ticker TEXT,
+            price_at_predict REAL, price_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
+        con.execute("INSERT INTO predictions (date,ticker,price_at_predict,"
+                    "price_t7,checked_t7) VALUES ('2026-03-02','A',100.0,110.0,1)")
+        con.commit(); con.close()
+        sa.ensure_schema(db)
+        sa.archive({"A": _tr()}, "2026-03-02", db)
+        assert sa.load_panel(db, "t7", 1, target_metric="vol") == {}
+
+    def test_vol_target_uses_same_sample_keys(self, tmp_path, monkeypatch):
+        """波动率目标必须沿用同一批 (ticker, date)，否则与收益率口径不可对照"""
+        fake_vol = {("A", "2026-03-02"): 2.5}
+        monkeypatch.setattr(sa, "_forward_realized_vol", lambda *a, **k: fake_vol)
+        db = tmp_path / "p.db"
+        con = sqlite3.connect(db)
+        con.execute("""CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ticker TEXT,
+            price_at_predict REAL, price_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
+        con.execute("INSERT INTO predictions (date,ticker,price_at_predict,"
+                    "price_t7,checked_t7) VALUES ('2026-03-02','A',100.0,110.0,1)")
+        con.commit(); con.close()
+        sa.ensure_schema(db)
+        sa.archive({"A": _tr()}, "2026-03-02", db)
+
+        p = sa.load_panel(db, "t7", 1, target_metric="vol")
+        assert p["composite.final_score"]["2026-03-02"][0][1] == 2.5, \
+            "目标值应为波动率 2.5，而非收益率 10.0"
+        # 收益率口径不受影响
+        pr = sa.load_panel(db, "t7", 1, target_metric="return")
+        assert pr["composite.final_score"]["2026-03-02"][0][1] == pytest.approx(10.0)
