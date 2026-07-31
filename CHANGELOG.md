@@ -5,6 +5,46 @@
 
 ---
 
+## [0.43.5] — 2026-07-30 — 接入 ruff F821 静态守卫，修 4 个存量潜伏 NameError
+
+> 本 session 一天内连犯 **3 次**同型错误，必须系统性解决而非逐个修。
+
+### 问题：模块作用域缺名字，而引用它的代码在正常路径上不执行
+| # | 文件 | 缺失 | 触发路径 |
+|---|---|---|---|
+| 1 | `alpha_hive_daily_report.py` | `sys` | 线程卡死后的强制退出 |
+| 2 | `weekly_optimizer.py` | `_log` | 权重约束无解时的拒绝写入分支 |
+| 3 | `report_deployer.py` | `List`（只导了 `Dict`） | 模块级类型标注 |
+
+`import` 不报（函数体不求值）、单元测试不报（异常/边界分支覆盖不到）、
+人工 review 不报（`from typing import Dict` 看起来完全正常）。
+
+### 更正一个此前的判断
+我曾断言"静态检查不报，唯一可靠的发现方式是实际执行到那行"——**这句是错的**。
+实测 ruff `F821` 把上述三例**全部**精确抓到（含行列号）。
+而本仓库 `pyproject.toml` 早已配置 ruff（`select = ["E","F","W"]`，
+未 ignore F821）——**工具一直在，只是没人跑**。
+
+### Fixed — 扫出并修复 4 个存量潜伏 NameError
+- `alpha_hive_daily_report.py:1904/1953`：两处 `except` 里调用
+  `logging.getLogger()`，而模块**根本没有 `import logging`**
+  ⇒ 异常处理路径里再抛 NameError（与本 session 三次同型）
+- `factor_attribution.py:462`：`_build_summary()` 用了从未定义的
+  `r2_str` / `ir_str`（重构漏改），`factors` 为空时必崩。
+  函数已收到 `r2`/`ir` 参数，补上格式化即可
+
+### Added — `tests/test_no_undefined_names.py`（+8）
+把检查接进 **pytest**，跟着现有工作流跑，不需要养成新习惯：
+- `F821` 未定义名 / `F823` 局部变量赋值前使用 / `F50x` 格式化参数错配
+- **守卫自检**：用三次事故的最小复现验证守卫真能抓到，
+  并反向验证正确代码不误报（否则守卫会被噪音淹没而遭忽略）
+- 断言 `pyproject.toml` 里 ruff 配置存在且 **F821/F823 未被 ignore**
+  —— 防止未来有人为图省事关掉这条唯一的静态防线
+
+### 验证
+全量 **1201 passed, 1 skipped, 1 xfailed**，零回归；
+`ruff check --select F821` 全仓库 **All checks passed**。
+
 ## [0.43.4] — 2026-07-30 — 日报自动提交改为白名单（防止卷走在制代码）
 
 > 事故：今日 14:02 的定时日报走 `git add -A` 全量提交，把当时工作区里
