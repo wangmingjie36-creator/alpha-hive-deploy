@@ -1472,7 +1472,7 @@ class AlphaHiveDailyReporter:
             "sector_sentiment_contagion": sector_sentiment_summary,
             "macro_context": macro_snapshot,
             "backtest_stats": backtest_stats,
-            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis),
+            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(),
             "twitter_threads": self._generate_swarm_twitter_threads(swarm_results),
             "opportunities": [
                 {
@@ -1489,7 +1489,65 @@ class AlphaHiveDailyReporter:
             ]
         }
 
+        _vt = self._volatility_tiers()
+        if _vt:
+            report["volatility_tiers"] = _vt
+
         return report
+
+    def _volatility_tiers(self) -> Dict:
+        """当日波动率分层 —— **只观察，不影响仓位**（v0.44.0）
+
+        读 `signal_archive` 里当日的 IV 与 20 日已实现波动，做横截面分层。
+
+        为什么先只输出不下注：`vol_score` 的横截面 IC=**+0.663**、四口径全过、
+        样本外几乎不衰减（分层后高/低组实际未来 7 日波动 4.81% vs 2.32%，t=+10.8），
+        是 2026-07-30 排查中**唯一通过全部检验的预测器**。但接进 `paper_portfolio`
+        会改变纸面组合的历史可比性，故先积累一两个月每日记录再决定是否真的下注。
+
+        ⚠️ 仅横截面有效：`price.volatility_20d` 固定效应 IC=+0.720、
+        票内时变仅 +0.012 ⇒ 能答"哪些标的波动大"，**不能答"何时变大"**。
+        """
+        try:
+            from vol_forecast import (load_day as _vf_load,
+                                      score_cross_section as _vf_score,
+                                      size_multipliers as _vf_size)
+            rows = _vf_load(self.date_str)
+            scores = _vf_score(rows) if rows else {}
+            if not scores:
+                return {}
+            out = _vf_size(scores)
+            _log.info("波动率分层：%d 只标的（仅观察，未影响仓位）", len(out))
+            return out
+        except Exception as e:   # noqa: BLE001 - 观察性输出，失败不得阻断报告
+            _log.warning("波动率分层失败（不影响主流程）: %s", e)
+            return {}
+
+    def _volatility_tier_markdown(self) -> str:
+        """把波动率分层渲染成 Markdown 小节，追加在日报末尾。"""
+        tiers = self._volatility_tiers()
+        if not tiers:
+            return ""
+        lines = [
+            "",
+            "## 波动率分层（观察项，未影响仓位）",
+            "",
+            "| 标的 | 波动分 | 分位 | 建议仓位乘数 | 分层 |",
+            "|------|--------|------|--------------|------|",
+        ]
+        for tk, d in sorted(tiers.items(), key=lambda x: -x[1]["vol_score"]):
+            lines.append(f"| {tk} | {d['vol_score']:.4f} | {d['pct']:.2f} | "
+                         f"{d['multiplier']:.2f}x | {d['tier']} |")
+        lines += [
+            "",
+            "> 组合 = IV 分位 × 0.5 + 20 日已实现波动分位 × 0.5。",
+            "> 实测横截面 IC **+0.663**（四口径全过，667 条样本）；分层后高/低组",
+            "> 实际未来 7 日波动 **4.81% vs 2.32%**（测试期 t=+10.8，样本外几乎不衰减）。",
+            "> ⚠️ 仅用于横截面比较，不可用于择时（票内时变 IC 仅 +0.012）。",
+            "> **当前为观察项，未影响任何下注规模。**",
+            "",
+        ]
+        return "\n".join(lines)
 
     @staticmethod
     def _format_score_adjustments(*args, **kwargs):

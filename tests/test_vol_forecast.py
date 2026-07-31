@@ -151,3 +151,76 @@ class TestLoadDay:
             signal TEXT, value REAL)""")
         con.commit(); con.close()
         assert vf.load_day("2026-01-01", db) == {}
+
+
+class TestDailyReportIntegration:
+    """v0.44.0：接进日报 —— **只观察，不影响仓位**
+
+    这是"先观察再下注"路线的第一步。核心断言不是"它能输出"，
+    而是"它**没有**碰任何下注逻辑" —— 否则纸面组合的历史可比性就断了。
+    """
+
+    def _reporter(self, date="2026-07-29"):
+        from alpha_hive_daily_report import AlphaHiveDailyReporter as R
+        r = R.__new__(R)
+        r.date_str = date
+        return r
+
+    def test_returns_empty_when_no_archive(self, monkeypatch):
+        """无归档数据时安全返回空，不抛异常"""
+        import vol_forecast as v
+        monkeypatch.setattr(v, "load_day", lambda *a, **k: {})
+        assert self._reporter()._volatility_tiers() == {}
+        assert self._reporter()._volatility_tier_markdown() == ""
+
+    def test_failure_does_not_break_report(self, monkeypatch):
+        """任何异常都不得阻断日报生成 —— 这是观察性输出"""
+        import vol_forecast as v
+        def boom(*a, **k):
+            raise RuntimeError("模拟行情源故障")
+        monkeypatch.setattr(v, "load_day", boom)
+        assert self._reporter()._volatility_tiers() == {}
+        assert self._reporter()._volatility_tier_markdown() == ""
+
+    def test_markdown_states_it_is_observation_only(self, monkeypatch):
+        """渲染必须明确写出"未影响仓位" —— 防止读者误以为已在下注"""
+        import vol_forecast as v
+        monkeypatch.setattr(v, "load_day", lambda *a, **k: {
+            "A": {"options.iv_current": 0.2, "price.volatility_20d": 1.0},
+            "B": {"options.iv_current": 0.5, "price.volatility_20d": 3.0},
+            "C": {"options.iv_current": 0.9, "price.volatility_20d": 6.0},
+        })
+        md = self._reporter()._volatility_tier_markdown()
+        assert "未影响" in md and "观察" in md
+        assert "不可用于择时" in md, "必须写明横截面限制"
+        for tk in ("A", "B", "C"):
+            assert f"| {tk} |" in md
+
+    def test_does_not_touch_position_sizing(self):
+        """源码级护栏：vol_forecast 不得被 paper_portfolio 引用。
+
+        路线是"先观察一两个月，再决定是否下注"。若有人提前接进下注逻辑，
+        纸面组合的历史可比性会断裂，而这一步应当是显式决策。
+        """
+        import pathlib
+        pp = pathlib.Path(__file__).resolve().parent.parent / "paper_portfolio.py"
+        if not pp.exists():
+            pytest.skip("paper_portfolio.py 不存在")
+        src = pp.read_text(encoding="utf-8")
+        code = "\n".join(l for l in src.splitlines()
+                         if not l.lstrip().startswith("#"))
+        assert "vol_forecast" not in code, (
+            "paper_portfolio 引用了 vol_forecast —— 当前阶段应为纯观察。"
+            "接入下注前请先积累样本并显式决策")
+
+    def test_multiplier_is_advisory_field_only(self, monkeypatch):
+        """multiplier 只是建议值，结构里不得混入实际下注字段"""
+        import vol_forecast as v
+        monkeypatch.setattr(v, "load_day", lambda *a, **k: {
+            f"T{i}": {"options.iv_current": i * 0.1,
+                      "price.volatility_20d": float(i)} for i in range(1, 7)})
+        tiers = self._reporter()._volatility_tiers()
+        assert tiers
+        for d in tiers.values():
+            assert set(d) == {"vol_score", "pct", "multiplier", "tier"}, \
+                f"字段集合意外变化: {set(d)}"
