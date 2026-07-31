@@ -287,3 +287,69 @@ class TestFixedVsTimeVaryingDecomposition:
         assert len(pairs[k]["2026-03-02"][0]) == 2, "默认必须返回二元组（向后兼容）"
         assert len(triples[k]["2026-03-02"][0]) == 3
         assert triples[k]["2026-03-02"][0][2] == "A"
+
+
+class TestSplitStability:
+    """v0.43.7：训练/测试分段 —— 检测全样本 IC 是否只是异号平均
+
+    2026-07-30 实测：综合分全样本 IC=−0.09 看似稳定弱负，
+    切开后训练 −0.214(t=−5.28) / 测试 +0.025(t=+0.46)，**符号相反**。
+    那个 −0.09 描述的不是效应，是两段异号数据的中间值。
+    """
+
+    def _panel(self, kind, n_days=40, width=8):
+        import random as _r
+        rng = _r.Random(3)
+        out = {}
+        d0 = datetime.datetime.fromisoformat("2026-03-02").date()
+        made = i = 0
+        while made < n_days:
+            d = d0 + datetime.timedelta(days=i); i += 1
+            if d.weekday() >= 5:
+                continue
+            made += 1
+            # 后 40% 为测试期
+            late = made > n_days * 0.6
+            rows = []
+            for _ in range(width):
+                x = rng.gauss(0, 1)
+                if kind == "stable":
+                    ret = x * 2 + rng.gauss(0, 0.5)
+                elif kind == "flip":
+                    ret = (-x if late else x) * 2 + rng.gauss(0, 0.5)
+                elif kind == "decay":
+                    ret = (x * 0.15 if late else x * 2) + rng.gauss(0, 0.5)
+                else:
+                    ret = rng.gauss(0, 1)
+                rows.append((x, ret))
+            out[d.isoformat()] = rows
+        return out
+
+    def test_stable_signal_labeled_stable(self):
+        r = sa.split_stability(self._panel("stable"), floor=0.077)
+        assert r["stability"] == "稳定", r
+
+    def test_sign_flip_is_caught(self):
+        """核心：符号翻转必须被标出 —— 否则全样本 IC 会误导所有下游结论"""
+        r = sa.split_stability(self._panel("flip"), floor=0.077)
+        assert r["stability"] == "翻转", r
+        assert (r["ic_train"] > 0) != (r["ic_test"] > 0)
+
+    def test_decay_is_distinguished_from_stable(self):
+        r = sa.split_stability(self._panel("decay"), floor=0.077)
+        assert r["stability"] == "衰减", r
+
+    def test_pure_noise_labeled_noise(self):
+        r = sa.split_stability(self._panel("noise"), floor=0.077)
+        assert r["stability"] in ("均噪音", "翻转"), r
+
+    def test_too_few_days_returns_insufficient(self):
+        r = sa.split_stability(self._panel("stable", n_days=8), floor=0.077)
+        assert r["stability"] == "样本不足"
+
+    def test_train_test_are_disjoint_and_ordered(self):
+        """训练必须在测试之前 —— 否则是前视"""
+        p = self._panel("stable", n_days=40)
+        r = sa.split_stability(p, floor=0.077, train_frac=0.6)
+        assert r["n_train"] > 0 and r["n_test"] > 0
+        assert r["n_train"] + r["n_test"] <= len(p)

@@ -394,6 +394,59 @@ def decompose_fixed_vs_timevarying(by_day: Dict[str, List]) -> Dict:
             "nature": nature}
 
 
+def split_stability(by_day: Dict[str, List], floor: float,
+                    train_frac: float = 0.6) -> Dict:
+    """按时间切训练/测试，分别算 IC —— 检测全样本 IC 是否只是异号平均。
+
+    ## 为什么必须常驻
+
+    2026-07-30 实测：综合分全样本 IC = **−0.09**，看起来是个稳定的弱负信号。
+    按时间切开后：**训练期 −0.214(t=−5.28) / 测试期 +0.025(t=+0.46)**。
+
+    符号相反。那个 −0.09 **描述的不是一个效应，而是两段异号数据的平均**
+    —— 一个不存在的中间值。此前所有基于全样本 IC 的分析都在解释这个平均数，
+    这解释了为什么每次深挖都得到互相矛盾的结论。
+
+    全样本统计量在存在时间不稳定性时会系统性误导，而检测它只需一步：
+    **先分段看，再决定要不要合并**。
+
+    Returns:
+        {ic_train, ic_test, n_train, n_test, stability}
+        stability ∈ {"稳定", "衰减", "翻转", "均噪音", "样本不足"}
+    """
+    sys.path.insert(0, str(Path(__file__).parent))
+    import ic_diagnostics as icd
+
+    days = sorted(by_day)
+    if len(days) < 16:
+        return {"stability": "样本不足", "ic_train": float("nan"),
+                "ic_test": float("nan"), "n_train": 0, "n_test": 0}
+    cut = int(len(days) * train_frac)
+    tr = {d: by_day[d] for d in days[:cut]}
+    te = {d: by_day[d] for d in days[cut:]}
+
+    def _ic(panel):
+        s = icd._ic_series_from_pairs(panel)
+        return (mean(s.values()) if len(s) >= 5 else float("nan")), len(s)
+
+    ic_tr, n_tr = _ic(tr)
+    ic_te, n_te = _ic(te)
+
+    if not (math.isfinite(ic_tr) and math.isfinite(ic_te)):
+        stab = "样本不足"
+    elif abs(ic_tr) < floor and abs(ic_te) < floor:
+        stab = "均噪音"
+    elif (ic_tr > 0) != (ic_te > 0):
+        # 符号相反 ⇒ 全样本 IC 是异号平均，不描述任何真实效应
+        stab = "翻转"
+    elif abs(ic_te) >= abs(ic_tr) * 0.5:
+        stab = "稳定"
+    else:
+        stab = "衰减"
+    return {"ic_train": ic_tr, "ic_test": ic_te,
+            "n_train": n_tr, "n_test": n_te, "stability": stab}
+
+
 def load_panel(db_path: Path = DB_PATH, horizon: str = "t7",
                min_width: int = 5,
                with_ticker: bool = False) -> Dict[str, Dict[str, List]]:
@@ -474,6 +527,8 @@ def analyze(db_path: Path = DB_PATH, horizon: str = "t7",
         # 固定效应 vs 时变分解 —— 区分「选股标签」与「择时信号」
         r.update(decompose_fixed_vs_timevarying(panel_t[sig]) or
                  {"nature": "?", "ic_fixed": float("nan"), "ic_within": float("nan")})
+        # 训练/测试分段 —— 检测全样本 IC 是否只是异号平均
+        r.update(split_stability(by_day, thr if math.isfinite(thr) else 0.077))
         out.append(r)
     out.sort(key=lambda x: -abs(x["daily_ic"]))
     return out, floor
@@ -487,23 +542,26 @@ def print_report(rows: List[Dict], floor: Dict, horizon: str) -> None:
         print(f"  🎯 噪音地板（随机 ×{floor['n_draws']}）：|日度IC| 95分位 = "
               f"{floor['ic_p95']:.3f} ｜ 通过口径数 95分位 = {floor['passed_p95']:.0f}/4")
         print("     判定为真信号需同时满足：|IC| > 地板 **且** 通过 ≥3/4")
-    print("-" * 126)
-    print(f"{'信号':<32}{'样本':>6}{'天':>5}{'日度IC':>9}{'t':>7}{'NW':>7}"
-          f"{'周t':>7}{'通过':>6}{'离散':>6}{'固定效应':>10}{'票内时变':>10}{'性质':>8}  判定")
-    print("-" * 126)
+    print("-" * 132)
+    print(f"{'信号':<32}{'样本':>6}{'日度IC':>9}{'t':>7}{'通过':>6}"
+          f"{'训练IC':>9}{'测试IC':>9}{'稳定性':>9}"
+          f"{'固定':>9}{'时变':>9}{'性质':>8}  判定")
+    print("-" * 132)
 
     def _f(x):
         return f"{x:+.4f}" if isinstance(x, float) and math.isfinite(x) else "   n/a"
 
+    STAB_MARK = {"稳定": "✅稳定", "衰减": "⚠️衰减", "翻转": "❌翻转",
+                 "均噪音": "  噪音", "样本不足": "  不足"}
     for r in rows:
         real = r["beats_noise"] and r["passed_methods"] >= 3
         mark = "🟢 候选" if real else ("🟡 口径不足" if r["beats_noise"] else "⚪ 噪音带内")
         warn = " ⚠️稀疏" if r["distinct_ratio"] < 0.25 else ""
-        print(f"{r['signal']:<32}{r['n_samples']:>6}{r['n_days']:>5}"
-              f"{r['daily_ic']:>+9.4f}{r['daily_t']:>+7.2f}{r['nw_t']:>+7.2f}"
-              f"{r['sub_t']:>+7.2f}{r['passed_methods']:>4}/4"
-              f"{r['distinct_ratio']:>6.2f}"
-              f"{_f(r.get('ic_fixed')):>10}{_f(r.get('ic_within')):>10}"
+        print(f"{r['signal']:<32}{r['n_samples']:>6}"
+              f"{r['daily_ic']:>+9.4f}{r['daily_t']:>+7.2f}{r['passed_methods']:>4}/4"
+              f"{_f(r.get('ic_train')):>9}{_f(r.get('ic_test')):>9}"
+              f"{STAB_MARK.get(r.get('stability','?'),'?'):>9}"
+              f"{_f(r.get('ic_fixed')):>9}{_f(r.get('ic_within')):>9}"
               f"{r.get('nature','?'):>8}  {mark}{warn}")
     print()
     print("  ⚠️稀疏 = 取值离散度 <25%，多为事件型信号（大量并列），rank-IC 会失真，")
@@ -516,6 +574,13 @@ def print_report(rows: List[Dict], floor: Dict, horizon: str) -> None:
     print("               **只能做筛选池，塞进每日评分等于每天重新发现「MSFT 是大盘股」**")
     print("               （例：crowding_score 全样本看似显著且样本外延续，")
     print("                 但票内去均值后效应完全消失）")
+    print()
+    print("  【稳定性】按时间切 60/40，分别算 IC —— 检测全样本 IC 是否只是异号平均：")
+    print("    ✅稳定 = 两期同号且测试期强度 ≥ 训练期一半")
+    print("    ⚠️衰减 = 同号但测试期明显减弱（过拟合的典型形态）")
+    print("    ❌翻转 = **两期符号相反** ⇒ 全样本 IC 不描述任何真实效应，只是中间值。")
+    print("             实测综合分：训练 −0.214(t=−5.28) / 测试 +0.025(t=+0.46)，")
+    print("             那个 −0.09 的全样本 IC 是假象 —— 勿据此下任何结论")
 
 
 def main() -> int:
