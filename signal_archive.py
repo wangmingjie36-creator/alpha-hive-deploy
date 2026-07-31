@@ -312,8 +312,91 @@ def backfill(pattern: str = ".swarm_results_*.json",
 # 分析
 # ────────────────────────────────────────────────────────────────────────────
 
+def decompose_fixed_vs_timevarying(by_day: Dict[str, List]) -> Dict:
+    """把信号拆成「标的固定效应」与「票内时变」两部分，分别算 IC。
+
+    ## 为什么这个分解是必需的
+
+    常规 IC 无法区分两种**性质完全不同**的信号，而它们长得一模一样：
+
+    - **固定效应**：某些标的长期取值就高/低 —— 这是**选股标签**，
+      不是时变信号。塞进每日评分等于每天重新发现"MSFT 是只大盘科技股"，
+      并把这个身份当成新信息。正确用法是**筛选池**，不是打分。
+    - **票内时变**：同一只标的的取值相对自身均值的波动 —— 这才是**择时信号**，
+      适合做成每日评分。
+
+    2026-07-30 实测的两个反例：
+      • `risk_adj`：固定效应 IC=+0.006(t=0.19)、票内时变 −0.161(t=−3.75)
+        ⇒ 100% 择时，用法正确
+      • `crowding_score`：全样本看驼峰形显著（30~50 组超额 +1.17%，
+        且样本外延续），但**票内去均值后效应完全消失**
+        ⇒ 100% 固定效应，把它当每日信号用是错的
+
+    Args:
+        by_day: {date: [(value, ret, ticker), ...]}
+
+    Returns:
+        {ic_fixed, ic_within, ic_raw, nature} —— nature ∈
+        {"择时", "选股标签", "混合", "无"}
+    """
+    sys.path.insert(0, str(Path(__file__).parent))
+    import ic_diagnostics as icd
+
+    vals_by_ticker: Dict[str, List[float]] = defaultdict(list)
+    for rows in by_day.values():
+        for v, _r, tk in rows:
+            vals_by_ticker[tk].append(v)
+    if len(vals_by_ticker) < 3:
+        return {}
+    tmean = {tk: mean(vs) for tk, vs in vals_by_ticker.items()}
+
+    raw = {d: [(v, r) for v, r, _ in rows] for d, rows in by_day.items()}
+    fixed = {d: [(tmean[tk], r) for _v, r, tk in rows] for d, rows in by_day.items()}
+    within = {d: [(v - tmean[tk], r) for v, r, tk in rows] for d, rows in by_day.items()}
+
+    def _mean_ic(panel):
+        s = icd._ic_series_from_pairs(panel)
+        return mean(s.values()) if len(s) >= 10 else float("nan")
+
+    ic_raw, ic_f, ic_w = _mean_ic(raw), _mean_ic(fixed), _mean_ic(within)
+
+    # 票内方差为 0 ⇒ 该信号在每只标的内部完全不变，是**纯标签**。
+    # 此时 ic_within 必为 nan（常数无法算秩相关），但语义不是"未知"而是"无时变信息"，
+    # 需与"天数不足导致的 nan"区分开。
+    within_spread = max(
+        (abs(v) for rows in within.values() for v, _ in rows), default=0.0)
+    no_within_variation = within_spread < 1e-12
+
+    af = abs(ic_f) if math.isfinite(ic_f) else 0.0
+    aw = 0.0 if no_within_variation else (abs(ic_w) if math.isfinite(ic_w) else 0.0)
+
+    # 判定门槛不能用固定绝对值 —— 票均值本身有抽样波动，标的越少波动越大。
+    # 实测：8 只票 × 30 天的**纯随机**面板，ic_fixed 可达 0.037，
+    # 若用固定 0.03 会把噪音判成"选股标签"。
+    # 改用 1/√(有效横截面宽度) 标定：这正是零假设下单日 IC 的标准差量级
+    # （与 ic_diagnostics 噪音地板同源的原理）。
+    widths = [len(rows) for rows in by_day.values()]
+    avg_w = mean(widths) if widths else 5.0
+    n_days_eff = len(by_day)
+    floor = (1.0 / math.sqrt(max(avg_w - 1, 1))) / math.sqrt(max(n_days_eff, 1)) * 2.0
+
+    if max(af, aw) < floor:
+        nature = "无"
+    elif aw >= af * 1.5:
+        nature = "择时"
+    elif af >= aw * 1.5:
+        nature = "选股标签"
+    else:
+        nature = "混合"
+    return {"ic_raw": ic_raw, "ic_fixed": ic_f,
+            "ic_within": 0.0 if no_within_variation else ic_w,
+            "no_within_variation": no_within_variation,
+            "nature": nature}
+
+
 def load_panel(db_path: Path = DB_PATH, horizon: str = "t7",
-               min_width: int = 5) -> Dict[str, Dict[str, List]]:
+               min_width: int = 5,
+               with_ticker: bool = False) -> Dict[str, Dict[str, List]]:
     """联表取 {signal: {date: [(值, 前瞻收益)]}}。
 
     前瞻收益用**纯价格变动**（price_{h} / price_at_predict），而非 return_t7 列
@@ -339,7 +422,9 @@ def load_panel(db_path: Path = DB_PATH, horizon: str = "t7",
             key = (r["ticker"], r["date"][:10])
             if key not in rets or r["value"] is None:
                 continue
-            panel[r["signal"]][r["date"][:10]].append((r["value"], rets[key]))
+            row = ((r["value"], rets[key], r["ticker"]) if with_ticker
+                   else (r["value"], rets[key]))
+            panel[r["signal"]][r["date"][:10]].append(row)
     finally:
         con.close()
     return {s: {d: v for d, v in bd.items() if len(v) >= min_width}
@@ -353,9 +438,12 @@ def analyze(db_path: Path = DB_PATH, horizon: str = "t7",
     sys.path.insert(0, str(Path(__file__).parent))
     import ic_diagnostics as icd
 
-    panel = load_panel(db_path, horizon, min_width)
-    if not panel:
+    # 带 ticker 取一次，供固定效应/时变分解；IC 计算仍用 (值, 收益) 二元组
+    panel_t = load_panel(db_path, horizon, min_width, with_ticker=True)
+    if not panel_t:
         return []
+    panel = {s: {d: [(v, r) for v, r, _ in rows] for d, rows in bd.items()}
+             for s, bd in panel_t.items()}
     lag, period = (7, "周") if horizon == "t7" else (30, "月")
     # 显式指定地板基准：`composite.final_score` 覆盖最全（每个标的每天都有）。
     # 不能依赖默认 fallback —— 地板对基准的日期覆盖高度敏感（实测 0.076 vs 0.116）。
@@ -383,6 +471,9 @@ def analyze(db_path: Path = DB_PATH, horizon: str = "t7",
             "distinct_ratio": distinct_ratio,
             "beats_noise": bool(math.isfinite(thr) and abs(r["daily_ic"]) > thr),
         })
+        # 固定效应 vs 时变分解 —— 区分「选股标签」与「择时信号」
+        r.update(decompose_fixed_vs_timevarying(panel_t[sig]) or
+                 {"nature": "?", "ic_fixed": float("nan"), "ic_within": float("nan")})
         out.append(r)
     out.sort(key=lambda x: -abs(x["daily_ic"]))
     return out, floor
@@ -396,21 +487,35 @@ def print_report(rows: List[Dict], floor: Dict, horizon: str) -> None:
         print(f"  🎯 噪音地板（随机 ×{floor['n_draws']}）：|日度IC| 95分位 = "
               f"{floor['ic_p95']:.3f} ｜ 通过口径数 95分位 = {floor['passed_p95']:.0f}/4")
         print("     判定为真信号需同时满足：|IC| > 地板 **且** 通过 ≥3/4")
-    print("-" * 112)
+    print("-" * 126)
     print(f"{'信号':<32}{'样本':>6}{'天':>5}{'日度IC':>9}{'t':>7}{'NW':>7}"
-          f"{'周t':>7}{'通过':>6}{'离散度':>8}  判定")
-    print("-" * 112)
+          f"{'周t':>7}{'通过':>6}{'离散':>6}{'固定效应':>10}{'票内时变':>10}{'性质':>8}  判定")
+    print("-" * 126)
+
+    def _f(x):
+        return f"{x:+.4f}" if isinstance(x, float) and math.isfinite(x) else "   n/a"
+
     for r in rows:
         real = r["beats_noise"] and r["passed_methods"] >= 3
-        mark = "🟢 候选真信号" if real else ("🟡 超地板但口径不足" if r["beats_noise"] else "⚪ 噪音带内")
+        mark = "🟢 候选" if real else ("🟡 口径不足" if r["beats_noise"] else "⚪ 噪音带内")
         warn = " ⚠️稀疏" if r["distinct_ratio"] < 0.25 else ""
         print(f"{r['signal']:<32}{r['n_samples']:>6}{r['n_days']:>5}"
               f"{r['daily_ic']:>+9.4f}{r['daily_t']:>+7.2f}{r['nw_t']:>+7.2f}"
               f"{r['sub_t']:>+7.2f}{r['passed_methods']:>4}/4"
-              f"{r['distinct_ratio']:>8.2f}  {mark}{warn}")
+              f"{r['distinct_ratio']:>6.2f}"
+              f"{_f(r.get('ic_fixed')):>10}{_f(r.get('ic_within')):>10}"
+              f"{r.get('nature','?'):>8}  {mark}{warn}")
     print()
     print("  ⚠️稀疏 = 取值离散度 <25%，多为事件型信号（大量并列），rank-IC 会失真，")
     print("     应改用事件研究（对比有/无事件两组的超额收益）而非 IC。")
+    print()
+    print("  【性质】区分两种在常规 IC 里长得一样、但用法完全不同的信号：")
+    print("    择时     = 票内时变主导 → 同一标的相对自身均值的波动有预测力，")
+    print("               **适合做每日评分**（例：risk_adj 固定+0.006 / 时变 −0.161）")
+    print("    选股标签 = 固定效应主导 → 只是某类标的的身份标记，不随时间提供新信息，")
+    print("               **只能做筛选池，塞进每日评分等于每天重新发现「MSFT 是大盘股」**")
+    print("               （例：crowding_score 全样本看似显著且样本外延续，")
+    print("                 但票内去均值后效应完全消失）")
 
 
 def main() -> int:

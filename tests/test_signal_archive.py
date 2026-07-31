@@ -195,3 +195,95 @@ class TestBackfill:
             json.dumps({"NVDA": _tr()}), encoding="utf-8")
         st = sa.backfill(".swarm_results_*.json", tmp_path / "p.db")
         assert st["skipped"] == 1 and st["files"] == 1
+
+
+class TestFixedVsTimeVaryingDecomposition:
+    """v0.43.6：区分「选股标签」与「择时信号」
+
+    常规 IC 无法区分两种性质完全不同的信号，而它们长得一模一样：
+      • 固定效应主导 = 某类标的的身份标记，不随时间提供新信息
+        → 只能做筛选池；塞进每日评分等于每天重新发现「MSFT 是大盘股」
+      • 票内时变主导 = 同一标的相对自身均值的波动有预测力
+        → 才适合做每日评分
+
+    2026-07-30 实测的两个反例：
+      risk_adj      固定 +0.006 / 时变 −0.161  ⇒ 100% 择时
+      crowding_score 全样本驼峰形显著且样本外延续，但票内去均值后**完全消失**
+                     ⇒ 100% 固定效应，当每日信号用是错的
+    """
+
+    def _panel(self, kind, n_days=30, n_tickers=8):
+        """构造已知性质的合成面板
+
+        kind="fixed"  : 值只由 ticker 决定（票内无变化），收益也只由 ticker 决定
+        kind="timing" : 每票均值相同，值围绕均值波动，收益跟随波动
+        kind="none"   : 值与收益均随机
+        """
+        import random as _r
+        rng = _r.Random(11)
+        out = {}
+        d0 = datetime.datetime.fromisoformat("2026-03-02").date()
+        made = i = 0
+        base = {f"T{j}": float(j) for j in range(n_tickers)}
+        while made < n_days:
+            d = d0 + datetime.timedelta(days=i)
+            i += 1
+            if d.weekday() >= 5:
+                continue
+            made += 1
+            rows = []
+            for tk in base:
+                if kind == "fixed":
+                    v = base[tk]
+                    ret = base[tk] + rng.gauss(0, 0.3)
+                elif kind == "timing":
+                    dev = rng.gauss(0, 1)
+                    v = 5.0 + dev
+                    ret = dev * 2 + rng.gauss(0, 0.3)
+                else:
+                    v = rng.gauss(0, 1)
+                    ret = rng.gauss(0, 1)
+                rows.append((v, ret, tk))
+            out[d.isoformat()] = rows
+        return out
+
+    def test_pure_fixed_effect_is_labeled_selection(self):
+        r = sa.decompose_fixed_vs_timevarying(self._panel("fixed"))
+        assert r["nature"] == "选股标签", r
+        assert abs(r["ic_fixed"]) > abs(r["ic_within"])
+        # 票内完全无变化 → 必须显式标记，而非留一个含义模糊的 nan
+        assert r["no_within_variation"] is True
+        assert r["ic_within"] == 0.0
+
+    def test_pure_time_varying_is_labeled_timing(self):
+        r = sa.decompose_fixed_vs_timevarying(self._panel("timing"))
+        assert r["nature"] == "择时", r
+        assert abs(r["ic_within"]) > abs(r["ic_fixed"])
+
+    def test_pure_noise_is_labeled_none(self):
+        r = sa.decompose_fixed_vs_timevarying(self._panel("none"))
+        assert r["nature"] == "无", r
+
+    def test_too_few_tickers_returns_empty(self):
+        """标的太少时无法可靠估计票均值，应返回空而非给出可疑判定"""
+        p = {"2026-03-02": [(1.0, 1.0, "A"), (2.0, 2.0, "B")]}
+        assert sa.decompose_fixed_vs_timevarying(p) == {}
+
+    def test_load_panel_with_ticker_returns_triples(self, tmp_path):
+        db = tmp_path / "p.db"
+        con = sqlite3.connect(db)
+        con.execute("""CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, ticker TEXT,
+            price_at_predict REAL, price_t7 REAL, checked_t7 INTEGER DEFAULT 0)""")
+        con.execute("INSERT INTO predictions (date,ticker,price_at_predict,"
+                    "price_t7,checked_t7) VALUES ('2026-03-02','A',100.0,110.0,1)")
+        con.commit(); con.close()
+        sa.ensure_schema(db)
+        sa.archive({"A": _tr()}, "2026-03-02", db)
+
+        pairs = sa.load_panel(db, "t7", min_width=1)
+        triples = sa.load_panel(db, "t7", min_width=1, with_ticker=True)
+        k = "composite.final_score"
+        assert len(pairs[k]["2026-03-02"][0]) == 2, "默认必须返回二元组（向后兼容）"
+        assert len(triples[k]["2026-03-02"][0]) == 3
+        assert triples[k]["2026-03-02"][0][2] == "A"
