@@ -5,6 +5,42 @@
 
 ---
 
+## [0.43.11] — 2026-08-12 — 修复 ChronosBee 仍零看空——PEAD 漂移统计被同款 MultiIndex 崩溃清空
+
+> 上一条修复 CodeExecutorAgent 后，用户要求继续排查"ChronosBeeHorizon 同期
+> 也是零看空"。v0.43.0（7/30）已经修过"评分块无条件覆盖 PEAD 方向"的死代码
+> 问题，但修复后（7/30~8/12，30 笔样本）**看空依旧是 0，连之前还有的
+> 少量看多都消失了，全部退化成 neutral**——说明 v0.43.0 修的是"通道"，
+> 但通道另一头的真实证据源本身是空的。
+
+### Fixed — `pead_analyzer.py::_compute_post_earnings_drift`
+- 第三次撞上同一个 MultiIndex 坑：`hist = yf.download(ticker, ...)` 对单票
+  返回 `('Close','NVDA')` 这种 MultiIndex 列名，`float(row["Close"])` 抛
+  `TypeError`，被外层 `except (KeyError, TypeError, ValueError): continue`
+  静默吞掉——`price_map` 永远为空，财报后价格漂移记录永远是 `[]`，
+  `t5_avg` 永远是 `None`，`bias` 永远退化成 `"neutral"`。ChronosBee 唯一真正
+  带方向的证据源（PEAD）结构上从未真正产出过数据，v0.43.0 的"通道"从上线
+  起就没东西可传
+- 修复：补上与 `_generate_yfinance`/`_generate_technical_analysis`（v0.43.10）
+  一致的列名兼容处理
+
+### 验证
+- 直接测 `get_pead_analysis`：修复前全部标的 `t5_avg=None, n=0`；修复后
+  NVDA `bias=bearish`（8 次财报后 T+5 均值 -5.83%，真实统计，非编造）、
+  VKTX `bias=bullish`（+5.44%）
+- 端到端跑 `ChronosBeeHorizon.analyze()`：NVDA 输出 `direction=bearish`，
+  discovery 里带出真实漂移数字（"T+5: -5.8% (胜率12%, n=8)"）
+- 新增 `tests/test_pead_analyzer.py`；全量 1240 测试通过
+
+### ⚠️ 同款 bug 疑似广泛存在，本次仅修复直接相关的两处（未全仓扫）
+全仓 grep `yf.download(` 命中 18 处调用点，逐一实测确认 `scout_bee.py`
+（板块相对强弱）、`market_intelligence.py`（3 处）、`cboe_fetcher.py`
+（VIX/SKEW/VVIX，4 处）等**在当前 yfinance 版本下同样会返回 MultiIndex
+列名**，是否实际崩溃取决于各自后续访问模式，未逐一验证。`risk_engine.py`
+与 `portfolio_concentration.py` 已有正确的兼容处理，不受影响。
+本次只处理了直接导致 ChronosBee/CodeExecutorAgent 问题的两处，**其余各处
+是否存活是未知数**，需要专项排查，见 memory `alpha-hive-locked-tasks`。
+
 ## [0.43.10] — 2026-08-12 — 修复 CodeExecutorAgent 恒定看多——技术分析脚本对 yfinance MultiIndex 列名的崩溃
 
 > 上一条记录（bear-hypothesis-backtest 补跑）里顺带发现 `CodeExecutorAgent`

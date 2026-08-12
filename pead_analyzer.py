@@ -121,6 +121,11 @@ def _compute_post_earnings_drift(
         hist = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
         if hist.empty:
             return []
+        # 兼容新版 yfinance 单票下载返回 MultiIndex 列名（如 ('Close','NVDA')），
+        # 否则 row["Close"] 拿到 Series，float() 直接 TypeError，被下方 except
+        # 静默吞掉 → price_map 永远为空 → PEAD 漂移统计永远 n=0 → bias 永远 neutral
+        if hasattr(hist.columns, "levels"):
+            hist.columns = hist.columns.get_level_values(0)
         # 统一 index 为字符串日期
         hist.index = [str(d)[:10] for d in hist.index]
         price_map: Dict[str, float] = {}
