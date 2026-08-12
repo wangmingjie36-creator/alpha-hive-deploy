@@ -334,8 +334,10 @@ import json
 
 ticker = "{ticker}"
 
-# 下载最近 3 个月数据
+# 下载最近 3 个月数据（兼容新版 yfinance 单票 MultiIndex 列名）
 data = yf.download(ticker, period="3mo")
+if hasattr(data.columns, "levels"):
+    data.columns = data.columns.get_level_values(0)
 
 # 计算动量指标
 df = data.copy()
@@ -397,8 +399,10 @@ import matplotlib.pyplot as plt
 ticker = "{ticker}"
 period = "{period}"
 
-# 下载数据
+# 下载数据（兼容新版 yfinance 单票 MultiIndex 列名）
 data = yf.download(ticker, period=period)
+if hasattr(data.columns, "levels"):
+    data.columns = data.columns.get_level_values(0)
 
 # 创建图表
 plt.figure(figsize=(14, 7))
@@ -430,8 +434,10 @@ import plotly.graph_objects as go
 
 ticker = "{ticker}"
 
-# 下载数据
+# 下载数据（兼容新版 yfinance 单票 MultiIndex 列名）
 data = yf.download(ticker, period="1mo")
+if hasattr(data.columns, "levels"):
+    data.columns = data.columns.get_level_values(0)
 
 # 创建蜡烛图
 fig = go.Figure(data=[go.Candlestick(
@@ -474,6 +480,8 @@ tickers = {tickers}
 returns = pd.DataFrame()
 for ticker in tickers:
     data = yf.download(ticker, period="1mo", progress=False)
+    if hasattr(data.columns, "levels"):
+        data.columns = data.columns.get_level_values(0)
     returns[ticker] = data["Close"].pct_change() * 100
 
 # 计算相关矩阵

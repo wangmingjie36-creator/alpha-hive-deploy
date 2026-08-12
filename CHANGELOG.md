@@ -5,6 +5,40 @@
 
 ---
 
+## [0.43.12] — 2026-08-12 — 全仓审计 yf.download() MultiIndex 反模式：修复 5 处易崩 + 3 处脆弱写法
+
+> v0.43.10（CodeExecutorAgent）和 v0.43.11（pead_analyzer）连续两次撞上同一个
+> "新版 yfinance 单票 download() 返回 MultiIndex 列名"的坑后，按"修反模式必须
+> 全仓 grep 同款"纪律做了一次完整审计：全项目 20 处 `yf.download()` 调用点
+> 逐一分类（易崩/已防护/多票设计不受影响），本次修复全部剩余易崩点。
+
+### Fixed — `cboe_fetcher.py`（4 处易崩，宏观指标长期静默失效）
+- `^VIX`(314)/`VIXY`(325)/`^SKEW`(395)/`^VVIX`(458) 四处 `float(x['Close'].iloc[-1])`
+  全部 MultiIndex 崩溃：VIX/SKEW/VVIX 长期落默认值（15.0/120.0/85.0），
+  **VIXY 更被裸 `except:` 吞掉，导致 VIX 期限结构恒判 contango**（比报错更隐蔽）
+- 新增模块级 `_last_close()` helper 统一安全取值；修复后实测抓到真实值
+  （VIX 14.64/SKEW 135.59/VVIX 88.75），期限结构立刻算出 backwardation——
+  与被吞异常时代的恒 contango 完全不同，宏观评分的输入质量实质性恢复
+
+### Fixed — `code_generator.py`（1 处易崩 + 3 处脆弱写法）
+- `_generate_momentum_analysis`（实测复现 TypeError）：momentum/z_score/trend
+  全部算不出，同款 flatten 修复
+- `_generate_line_chart` / `_generate_candlestick_chart` / `_generate_heatmap_chart`：
+  当前 pandas 版本下侥幸不崩（matplotlib/赋值隐式接受 (N,1) DataFrame），
+  但写法脆弱，统一补上 flatten 保持一致
+
+### Added — `tests/test_code_generator.py` 扩展
+- momentum 脚本 MultiIndex 存活测试（monkeypatch 假 MultiIndex 数据直接 exec）
+- **反模式契约测试**：所有含裸 `yf.download(` 的生成代码必须带
+  `get_level_values(0)` 防护——防止未来新增生成器再漏
+
+### 审计结论（全 20 处 yf.download 调用点归类，本次后全部清零）
+- 已防护（本次前就安全）：`risk_engine.py:97/538`、`market_intelligence.py:181/452/741`、
+  `portfolio_concentration.py:84`、`ff6_cycle_history.py:56`（靠 squeeze 偶然兜住）、
+  `pead_analyzer.py:121`（v0.43.11 已修）
+- 多票设计不受影响：`signal_archive.py:488`、`ic_diagnostics.py:310`、`scout_bee.py:374`
+- 全量 1243 测试通过
+
 ## [0.43.11] — 2026-08-12 — 修复 ChronosBee 仍零看空——PEAD 漂移统计被同款 MultiIndex 崩溃清空
 
 > 上一条修复 CodeExecutorAgent 后，用户要求继续排查"ChronosBeeHorizon 同期

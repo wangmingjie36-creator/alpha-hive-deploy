@@ -42,3 +42,27 @@ def test_technical_analysis_code_flattens_multiindex_before_use():
     code = CodeGenerator.generate_analysis("technical", {"ticker": "NVDA", "period": "1mo"})
     assert 'hasattr(data.columns, "levels")' in code
     assert "get_level_values(0)" in code
+
+
+def test_momentum_analysis_code_survives_multiindex_columns(monkeypatch):
+    """v0.43.12: momentum 分析脚本与 technical 同款 MultiIndex 崩溃（实测复现过），同款修法"""
+    import yfinance as yf
+    monkeypatch.setattr(yf, "download", _fake_multiindex_download)
+
+    code = CodeGenerator.generate_analysis("momentum", {"ticker": "NVDA"})
+    exec_globals = {}
+    exec(code, exec_globals)
+
+
+def test_all_download_based_generated_code_has_flatten_guard():
+    """所有含裸 yf.download 的生成代码必须带 MultiIndex 兼容处理——防止再漏"""
+    sources = [
+        CodeGenerator.generate_analysis("technical", {"ticker": "NVDA", "period": "1mo"}),
+        CodeGenerator.generate_analysis("momentum", {"ticker": "NVDA"}),
+        CodeGenerator.generate_visualization("line", {"ticker": "NVDA", "period": "1mo"}),
+        CodeGenerator.generate_visualization("candlestick", {"ticker": "NVDA"}),
+        CodeGenerator.generate_visualization("heatmap", {"tickers": ["NVDA", "TSLA"]}),
+    ]
+    for code in sources:
+        if "yf.download(" in code:
+            assert "get_level_values(0)" in code, f"生成代码缺 MultiIndex 防护:\n{code[:300]}"

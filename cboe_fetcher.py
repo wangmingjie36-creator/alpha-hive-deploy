@@ -27,6 +27,21 @@ try:
 except ImportError:
     yf = None
 
+
+def _last_close(df) -> float:
+    """安全提取 yf.download() 结果的最后一根 Close 标量。
+
+    v0.43.12: 新版 yfinance 对单只标的 download() 也返回 MultiIndex 列名
+    （如 ('Close','^VIX')），df['Close'] 是 (N,1) DataFrame，.iloc[-1] 得到
+    Series，float() 直接 TypeError——VIX/SKEW/VVIX 因此长期落默认值
+    （15.0/120.0/85.0），VIXY 更被裸 except 吞掉导致期限结构恒判 contango。
+    """
+    close = df["Close"]
+    if hasattr(close, "columns"):  # MultiIndex → (N,1) DataFrame
+        close = close.iloc[:, 0]
+    return float(close.iloc[-1])
+
+
 try:
     from resilience import NETWORK_ERRORS
 except ImportError:
@@ -311,7 +326,7 @@ class CBOEDailyFetcher:
                 # 获取 VIX 现货
                 vix_data = yf.download('^VIX', period='1d', progress=False)
                 if not vix_data.empty:
-                    result['vix_spot'] = float(vix_data['Close'].iloc[-1])
+                    result['vix_spot'] = _last_close(vix_data)
                 else:
                     result['vix_spot'] = 15.0  # 默认
 
@@ -322,7 +337,7 @@ class CBOEDailyFetcher:
                     vixy_data = yf.download('VIXY', period='1d', progress=False)
                     if not vixy_data.empty:
                         # VIXY 反映约 1 月期 VIX
-                        result['vix_1m'] = float(vixy_data['Close'].iloc[-1]) * 0.5  # 近似转换
+                        result['vix_1m'] = _last_close(vixy_data) * 0.5  # 近似转换
                     else:
                         result['vix_1m'] = result['vix_spot'] * 1.05  # 正常情况小幅升水
                 except:
@@ -392,7 +407,7 @@ class CBOEDailyFetcher:
 
                 skew_data = yf.download('^SKEW', period='1d', progress=False)
                 if not skew_data.empty:
-                    result['skew_value'] = float(skew_data['Close'].iloc[-1])
+                    result['skew_value'] = _last_close(skew_data)
 
                     # 根据阈值分类
                     if result['skew_value'] > 150:
@@ -455,7 +470,7 @@ class CBOEDailyFetcher:
 
                 vvix_data = yf.download('^VVIX', period='1d', progress=False)
                 if not vvix_data.empty:
-                    result['vvix_value'] = float(vvix_data['Close'].iloc[-1])
+                    result['vvix_value'] = _last_close(vvix_data)
 
                     # 根据阈值分类
                     if result['vvix_value'] > 130:
