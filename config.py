@@ -1317,9 +1317,17 @@ BEAR_SCORING_CONFIG = {
     # ── Bear Cap ──
     "bear_cap_trigger_threshold": 5.0,     # 触发阈值（原 7.0）
     "bear_cap_slope": 0.5,                 # 上限衰减斜率
-    # ── v0.37.0 Bear 强信号压制看多（回测：拦截13单均收益-1.70% vs 全体看多+3.09%）──
-    "bull_veto_enabled": True,             # BearBee 强信号时禁止 bullish 方向（降级 neutral，不翻转）
-    "bull_veto_bear_score": 7.0,           # BearBee score >= 此值触发压制
+    # ── v0.37.0 Bear 强信号压制看多 ──
+    # ⚠️ v0.43.13 停用：实现从未按设计生效——queen_distiller 读的是 BearBee
+    # 反转后的吸引力分（score=10-bear_score）而非真实看空强度，score>=7 恰恰
+    # 等价于 bear_score<=3（BearBee 确认看多），导致上线以来 35 次触发全部是
+    # 反向误拦（被拦单 78% 本该盈利，均+0.42% vs 对照组+4.20%）。修复需同时
+    # 换字段+重新校准阈值（正确字段下 7.0 会命中 62% 看多信号），且历史
+    # bear_score 分布产生于 ChronosBee 零看空/CodeExecutor 恒看多的坏生态
+    # （v0.43.10-12 已修），须等 4-6 周干净样本再校准。详见
+    # self_analysis_briefs/bear_hypothesis_backtest_2026-08.md
+    "bull_veto_enabled": False,            # 停用（原 True）——见上方说明，勿在重新校准前打开
+    "bull_veto_bear_score": 7.0,           # 保留旧值仅作历史参照；重新上线时必须换字段+重校准
 }
 
 # ==================== Dashboard 颜色方案 ====================
