@@ -5,6 +5,40 @@
 
 ---
 
+## [0.43.10] — 2026-08-12 — 修复 CodeExecutorAgent 恒定看多——技术分析脚本对 yfinance MultiIndex 列名的崩溃
+
+> 上一条记录（bear-hypothesis-backtest 补跑）里顺带发现 `CodeExecutorAgent`
+> 过去一个多月 91/91 笔预测恒定看多，从未投过看空或中性。本次单独开排查定位到
+> 根因并修复。
+
+### Fixed — `code_generator.py::_generate_technical_analysis`
+- 生成的沙盒脚本用裸 `yf.download(ticker, period=period)` 取数——新版 yfinance
+  对单只股票的 `download()` 返回 **MultiIndex 列名**（如 `('Close','NVDA')`
+  而非纯 `'Close'`），导致 `latest["Close"]` 拿到的是 Series 不是标量，
+  `float(latest["Close"])` 直接 `TypeError` 崩溃。这是结果字典的第一个字段，
+  脚本还没打印任何 JSON 就先崩了
+- **同一个坑 `_generate_yfinance`（数据爬取脚本）早就修过**（注释写着"优先用
+  history() 避免 download() 多层列名 TypeError"），但从未同步到
+  `_generate_technical_analysis`——两个函数各自独立生成 yfinance 代码，
+  修一个漏一个，是本项目"修反模式必须全仓 grep 同款"教训的又一次印证
+- 修复：补上与 `_generate_yfinance` 一致的列名兼容处理
+  （`if hasattr(data.columns, "levels"): data.columns = data.columns.get_level_values(0)`）
+
+### 为什么"技术分析脚本崩溃"表现成了"恒定看多"（而不是报错）
+`CodeExecutorAgent.analyze()` 里技术分析脚本失败后落入的兜底分支
+（`code_executor_agent.py` "如果分析失败，返回原始数据结果"）设计上只有两种
+出口：`price and market_cap` 都拿到 → bullish；否则 → neutral——**这条兜底
+路径从来不会返回 bearish**。价格和市值来自另一个独立、没坏的取数脚本，
+所以兜底路径几乎每次都命中"bullish"分支。真正能产生看空判断的 RSI 超买/
+跌破均线逻辑一直都在代码里，只是从未被执行到过。
+
+### 验证
+- 直接执行生成的代码：修复前 `float() argument must be a string or a real
+  number, not 'Series'`，修复后正常输出 price/SMA/RSI/signal
+- 端到端跑 `CodeExecutorAgent.analyze()`：NVDA=bullish(价格高于均线)，
+  **TSLA=bearish、VKTX=bearish**（价格低于均线）——方向多样性恢复
+- 新增 `tests/test_code_generator.py` 回归测试；全量 1238 测试通过
+
 ## [0.43.9] — 2026-08-12 — 补跑 bear-hypothesis-backtest 分析（无代码改动）
 
 > 原定 2026-08-03 自动运行的 scheduled task `bear-hypothesis-backtest` 实际触发后

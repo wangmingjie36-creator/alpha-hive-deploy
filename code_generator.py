@@ -242,8 +242,12 @@ import json
 ticker = "{ticker}"
 period = "{period}"
 
-# 下载数据
+# 下载数据（兼容新版 yfinance 多层列名，同 _generate_yfinance 的修法：
+# download() 对单只股票会返回 MultiIndex 列名如 ('Close','{ticker}')，
+# 导致 latest["Close"] 拿到的是 Series 而非标量，float() 直接 TypeError 崩溃）
 data = yf.download(ticker, period=period)
+if hasattr(data.columns, "levels"):
+    data.columns = data.columns.get_level_values(0)
 
 # 计算技术指标
 df = data.copy()
