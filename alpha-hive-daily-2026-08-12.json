@@ -1,0 +1,292 @@
+{
+  "date": "2026-08-12",
+  "timestamp": "2026-08-12T11:05:28.142573",
+  "system_status": "✅ 蜂群协作完成",
+  "phase_completed": "完整蜂群流程 (Swarm Mode)",
+  "data_quality_summary": {
+    "total_tickers": 1,
+    "degraded_count": 0,
+    "critical_count": 0,
+    "degraded_pct": 0.0,
+    "has_quality_issue": false
+  },
+  "swarm_metadata": {
+    "total_agents": 8,
+    "tickers_analyzed": 1,
+    "resonances_detected": 0,
+    "pheromone_board_entries": 10
+  },
+  "concentration_analysis": {
+    "concentration_risk": "low",
+    "risk_score": 0.0,
+    "sector_breakdown": {},
+    "correlation_warnings": [],
+    "factor_clusters": {},
+    "recommendations": [
+      "暂无高分标的，无需评估集中度"
+    ],
+    "summary": "无高分标的（分数 < 6.0）"
+  },
+  "cross_ticker_analysis": {},
+  "sector_sentiment_contagion": {},
+  "macro_context": {
+    "macro_regime": "neutral",
+    "macro_score": 6.0,
+    "vix": 14.57,
+    "vix_change_pct": -4.65,
+    "vix_regime": "low",
+    "treasury_10y": 4.676,
+    "treasury_2y": 4.25,
+    "yield_spread": 42.6,
+    "yield_curve": "normal",
+    "rate_environment": "high",
+    "dollar_trend": "neutral",
+    "market_trend": "neutral",
+    "spx_change_pct": 0.31,
+    "gold_price": 403.48,
+    "gold_change_pct": 0.63,
+    "gold_trend": "rising",
+    "sector_rotation": {
+      "hot": [
+        [
+          "XLE",
+          "能源",
+          4.93
+        ],
+        [
+          "XLV",
+          "医疗",
+          2.39
+        ],
+        [
+          "XLK",
+          "科技",
+          2.1
+        ]
+      ],
+      "cold": [
+        [
+          "XLY",
+          "可选消费",
+          -0.12
+        ],
+        [
+          "XLRE",
+          "房地产",
+          -0.78
+        ],
+        [
+          "XLC",
+          "通信",
+          -0.98
+        ]
+      ],
+      "full": {
+        "XLF": [
+          "金融",
+          0.04
+        ],
+        "XLK": [
+          "科技",
+          2.1
+        ],
+        "XLE": [
+          "能源",
+          4.93
+        ],
+        "XLV": [
+          "医疗",
+          2.39
+        ],
+        "XLI": [
+          "工业",
+          0.84
+        ],
+        "XLY": [
+          "可选消费",
+          -0.12
+        ],
+        "XLP": [
+          "必需消费",
+          -0.04
+        ],
+        "XLRE": [
+          "房地产",
+          -0.78
+        ],
+        "XLU": [
+          "公用事业",
+          1.0
+        ],
+        "XLC": [
+          "通信",
+          -0.98
+        ],
+        "XLB": [
+          "材料",
+          0.99
+        ]
+      }
+    },
+    "macro_headwinds": [
+      "黄金走强+0.6%（避险情绪升温）",
+      "CPI同比 3.3%（通胀略偏高）"
+    ],
+    "macro_tailwinds": [
+      "VIX 14.6（低波动，风险偏好良好）",
+      "HY信用利差 272bp(+2bp日变)（信用市场平稳，风险偏好良好）"
+    ],
+    "fred_extras": {
+      "cpi_yoy": 3.3,
+      "cpi_date": "2026-07-01",
+      "unemployment": 4.1,
+      "unemployment_date": "2026-07-01",
+      "fed_funds_rate": 3.63,
+      "treasury_2y": 4.25,
+      "hy_spread_bp": 272.0,
+      "hy_spread_date": "2026-08-11",
+      "hy_spread_chg_bp": 2.0
+    },
+    "cpi_yoy": 3.3,
+    "unemployment": 4.1,
+    "fed_funds_rate": 3.63,
+    "hy_spread_bp": 272.0,
+    "hy_spread_chg_bp": 2.0,
+    "summary": "VIX 14.6(low) | 10Y 4.68% | 大盘+0.3% | 宏观:neutral | 曲线:正常 | CPI同比3.3% | HY利差272bp | 黄金走强+0.6%",
+    "data_source": "yfinance+fred"
+  },
+  "backtest_stats": {
+    "period": "t7",
+    "days_window": 30,
+    "overall_accuracy": 0.419,
+    "total_checked": 31,
+    "correct_count": 13,
+    "avg_return": -1.066,
+    "avg_score": 5.3,
+    "actionable": {
+      "total": 13,
+      "correct": 5,
+      "accuracy": 0.385,
+      "avg_pnl": -0.31
+    },
+    "by_direction": {
+      "bullish": {
+        "total": 16,
+        "correct": 7,
+        "accuracy": 0.4375,
+        "avg_return": -0.67
+      },
+      "bearish": {
+        "total": 7,
+        "correct": 2,
+        "accuracy": 0.2857142857142857,
+        "avg_return": -1.97
+      },
+      "neutral": {
+        "total": 8,
+        "correct": 4,
+        "accuracy": 0.5,
+        "avg_return": -2.7
+      }
+    },
+    "by_ticker": {
+      "NVDA": {
+        "total": 4,
+        "correct": 2,
+        "accuracy": 0.5,
+        "avg_return": 0.57,
+        "avg_score": 5.3
+      },
+      "VKTX": {
+        "total": 3,
+        "correct": 1,
+        "accuracy": 0.3333333333333333,
+        "avg_return": -7.2,
+        "avg_score": 6.0
+      },
+      "TSLA": {
+        "total": 3,
+        "correct": 1,
+        "accuracy": 0.3333333333333333,
+        "avg_return": -0.17,
+        "avg_score": 4.8
+      },
+      "RKLB": {
+        "total": 3,
+        "correct": 0,
+        "accuracy": 0.0,
+        "avg_return": -6.68,
+        "avg_score": 5.0
+      },
+      "QCOM": {
+        "total": 3,
+        "correct": 1,
+        "accuracy": 0.3333333333333333,
+        "avg_return": -8.84,
+        "avg_score": 5.1
+      },
+      "MSFT": {
+        "total": 3,
+        "correct": 3,
+        "accuracy": 1.0,
+        "avg_return": 12.97,
+        "avg_score": 6.3
+      },
+      "META": {
+        "total": 3,
+        "correct": 0,
+        "accuracy": 0.0,
+        "avg_return": -9.51,
+        "avg_score": 5.1
+      },
+      "CRCL": {
+        "total": 3,
+        "correct": 2,
+        "accuracy": 0.6666666666666666,
+        "avg_return": 2.1,
+        "avg_score": 5.2
+      },
+      "BILI": {
+        "total": 3,
+        "correct": 3,
+        "accuracy": 1.0,
+        "avg_return": 5.89,
+        "avg_score": 4.8
+      },
+      "AMZN": {
+        "total": 3,
+        "correct": 0,
+        "accuracy": 0.0,
+        "avg_return": 4.49,
+        "avg_score": 5.1
+      }
+    }
+  },
+  "markdown_report": "# 【2026-08-12】Alpha Hive 蜂群协作日报\n\n**自动生成于**：2026-08-12 11:05:28\n**系统模式**：完全去中心化蜂群协作 | 8 个自治工蜂（6 核心 + BearBeeContrarian）\n\n## 1) 今日摘要\n\n- 扫描标的：1 个 | 共振信号：0/1\n\n- ⚫ **暂不行动**（<6.0）：\n  - **NVDA** NEUTRAL 5.9/10 \n\n## 2) 今日聪明钱动向\n\n### NVDA\n- COXE TENCH 赠与 500,000股 | 拥挤度 33/100（中等拥挤度） | 动量 -0.8% | 历史5条:多4/空0,均分6.0|历史T+7准确率39%(28次,均收益-1.57%) | 板块相对强度 +8.1pp(科技 20D)【跑赢】 | 供应链领先信号：TSM, ASML 5日涨幅领先 NVDA 超 1.5pp——上游需求强劲，有望传导至 NVDA 订单端。\n- 内幕交易情绪：**neutral** | 申报数：5\n  - COXE TENCH：赠与 500,000 股\n  - COXE TENCH：赠与 500,000 股\n- 拥挤度：33/100\n\n## 3) 市场隐含预期\n\n### NVDA\n- IV 处于理想水位 | 检测到 64 个看涨异动 | TermStr:contango(15/31) | Skew25d:1.18 | MaxPain:$205(+9.1%) | 异常流:异常Call流 83个信号 溢价$246.4M | $223.7 | 无相关预测市场 | 历史5条:多4/空0,均分6.0|历史T+7准确率39%(28次,均收益-1.57%)\n- IV Rank：63.35\n- Put/Call Ratio：0.78\n- Gamma Exposure：240.0438\n- 异常活动：104 个信号\n  - 看涨 call sweep $222.5 (15,356手)\n  - 看涨 large call volume $215.0 (12,327手)\n  - 看涨 large call volume $225.0 (20,481手)\n\n## 4) X 情绪汇总\n\n### NVDA\n- 情绪 59% | 动量 -0.8% | 量比 0.8x | Reddit #10(rising,114提及) | 看多叙事主导 | 未上 Yahoo 热搜 | F&G 62(Greed) | 历史5条:多4/空0,均分6.0|历史T+7准确率39%(28次,均收益-1.57%)\n- 看多情绪：59%\n- 5 日动量：-0.8%\n- 量比：0.8x\n\n## 5) 财报/事件催化剂\n\n### NVDA\n- 催化剂 1 个 | 最近：财报发布（13天后） | 分析师目标$302.83(↑35.4%) | 历史5条:多4/空0,均分6.0|历史T+7准确率39%(28次,均收益-1.57%) | 📉历史漂移偏空 | 近期财报后价格漂移 T+1: -2.8% (胜率25%, n=8) | T+5: -5.8% (胜率12%, n=8) | T+10: -2.8% (胜率12%, n=8) | T+20: -4.1% (胜率12%, n=8)\n  - 2026-08-26：财报发布\n\n## 6) 竞争格局分析\n\n### NVDA\n- ML 胜率 57% | 7d +7.37% | 30d +11.06% | RSI:61 | MACD:多 | BB:89% | 目标价上行 +35.5%（分析师看多） | 分析师共识1.3/5（强烈看多） | 远期EPS增速 +97.7%（盈利高增长） | 历史5条:多4/空0,均分6.0|历史T+7准确率39%(28次,均收益-1.57%)\n\n## 6.5) 看空对冲观点\n\n> BearBeeContrarian 专门寻找看空信号，平衡蜂群系统性看多偏差\n\n### NVDA (需关注风险点 | 看空强度 4.8/10)\n- IV Rank 63（波动偏高）\n- 近期小幅回调 -0.8%\n- *数据来源*：insider=SEC直查 | valuation=yfinance | options=real | momentum=yfinance | news=real | catalyst=real | ml=real | guard=real | short_interest=yfinance\n\n## 7) 综合判断 & 信号强度\n\n| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |\n|------|------|--------|------|---------------|-------|---------|\n| **NVDA** | NEUTRAL | 5.9 | N | 4/1/3 | 96% | 信号分散 |\n\n### 交叉验证详情\n\n- **NVDA**：信号分散 | 均分 6.7 | 一致性 60% | 风险调整 0.95 | 历史5条:多4/空0,均分6.0|历史T+7准确率39%(28次,均收益-1.57%) | Macro:risk_on(黄金走强; 板块顺风) | Regime:风险偏好\n\n## 🌐 宏观环境 🟡\n\n**宏观政体**：NEUTRAL | **评分**：6.0/10\n\n| 指标 | 数值 | 状态 |\n|------|------|------|\n| VIX | 14.6 | low |\n| 10Y利率 | 4.68% | high |\n| 大盘(5日) | +0.31% | neutral |\n| 美元 | — | neutral |\n\n**逆风**：黄金走强+0.6%（避险情绪升温） | CPI同比 3.3%（通胀略偏高）\n\n**顺风**：VIX 14.6（低波动，风险偏好良好） | HY信用利差 272bp(+2bp日变)（信用市场平稳，风险偏好良好）\n\n## 📈 历史预测准确率（T+7，近30天）\n\n**可执行方向单**：13 条 | **准确率**：38.5% (5/13) | **均PnL**：-0.31%\n**全部预测**（含观望档/中性）：31 条 | 准确率 41.9% | 平均收益 -1.07%\n\n| 标的 | 方向准确率 | 预测次数 | 平均收益 |\n|------|-----------|---------|---------|\n| NVDA | 50% | 4 | +0.57% |\n| VKTX | 33% | 3 | -7.20% |\n| TSLA | 33% | 3 | -0.17% |\n| RKLB | 0% | 3 | -6.68% |\n| QCOM | 33% | 3 | -8.84% |\n| MSFT | 100% | 3 | +12.97% |\n\n**按方向**：看多:44%(16次) | 看空:29%(7次) | 中性:50%(8次)\n\n## 数据质量\n\n**通道健康度**：100%（29/29 通道为真实数据）\n\n全部通道数据正常，无降级。\n\n## 8) 数据来源 & 免责声明\n\n**蜂群分工**：\n- ScoutBeeNova：聪明钱侦察（SEC Form 4/13F + 拥挤度）\n- OracleBeeEcho：市场预期（期权 IV/P-C Ratio/Gamma）\n- BuzzBeeWhisper：社交情绪（X/Reddit/Yahoo·AV新闻）\n- ChronosBeeHorizon：催化剂追踪（财报/事件日历）\n- RivalBeeVanguard：竞争格局（ML 预测 + 行业对标）\n- GuardBeeSentinel：交叉验证（共振检测 + 风险调整）\n\n**免责声明**：\n本报告为蜂群 AI 分析，不构成投资建议，不替代持牌投顾。预测存在误差，所有交易决策需自行判断和风控。\n",
+  "twitter_threads": [
+    "【Alpha Hive 蜂群日报 2026-08-12】7 个自治工蜂协作分析，多数投票共振信号。非投资建议，仅数据分析与情景推演。👇\n\n1. **NVDA** NEUTRAL\n蜂群评分：5.9/10 | 共振：❌\nAgent 投票：看多4 vs 看空1\n\n🐝 7 个工蜂独立分析（6 核心 + 看空对冲蜂）→ 信息素板实时交换 → 多数投票汇总\n高共振信号优先级最高。风险提示：控制仓位。\n下一步：T+1 验证，T+7 回看准确率。@igg_wang748"
+  ],
+  "opportunities": [
+    {
+      "rank": 1,
+      "ticker": "NVDA",
+      "direction": "中性",
+      "opp_score": 5.9,
+      "confidence": "75%",
+      "resonance": false,
+      "supporting_agents": 8,
+      "thesis_break": "信号分散 | 均分 6.7 | 一致性 60% | 风险调整 0.95 | 历史5条:多4/空0,均分6.0|历史T+7准确率39%(28次,均收益-1.57%",
+      "thesis_break_l1": [
+        "DataCenter Revenue Growth：季度环比下降 > 5%",
+        "竞争对手新产品：AMD 或 Intel 发布超越 NVIDIA 的产品",
+        "中国芯片禁令：Polymarket 禁令概率 > 60%",
+        "毛利率：季度环比下降 > 200bps"
+      ],
+      "thesis_break_l2": [
+        "EPS 大幅低于预期：实际 < 预期 20%+",
+        "美国芯片出口禁令：直接禁止对华 H100/H800 销售",
+        "CEO 离职：Jensen Huang 宣布离职"
+      ]
+    }
+  ]
+}
