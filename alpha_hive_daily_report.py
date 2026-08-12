@@ -242,7 +242,7 @@ class AlphaHiveDailyReporter:
             try:
                 self._bg_futures[0].result(timeout=15)
             except Exception as _e_bg:
-                self.logger.debug("后台任务等待超时: %s", _e_bg)
+                _log.debug("后台任务等待超时: %s", _e_bg)
             self._bg_futures = [f for f in self._bg_futures if not f.done()]
         future = self._bg_executor.submit(fn, *args, **kwargs)
         self._bg_futures.append(future)
@@ -1019,13 +1019,28 @@ class AlphaHiveDailyReporter:
                     }
                     # v0.40.0: 横截面排名埋点随快照落盘（供未来 rank-IC 回测）
                     _snap.cs_rank = _data.get("cs_rank")
+                    # v0.43.16: 入场价优先复用 swarm 里 ScoutBee 的共享快照价
+                    # （CBOE-first，与报告同口径）——旧实现逐票打 yfinance，
+                    # 限流时进入 except，而处理器写的是不存在的 self.logger
+                    # → AttributeError 冲出内层 try 杀死整个快照循环 →
+                    # 自动扫描日快照恒为 0 → 纸面组合无开仓输入（8/11 T 8.72
+                    # 分未开仓即此因）。手动跑不限流走不到坏处理器，故一直没暴露。
                     try:
-                        from data_pipeline import _drop_forming_bar as _dfb
-                        _hist = _dfb(_yf_fb.Ticker(_tk).history(period="5d"))  # v0.29.4 盘中护栏
-                        if not _hist.empty:
-                            _snap.entry_price = float(_hist["Close"].iloc[-1])
-                    except Exception as _e_price:
-                        self.logger.debug("Snapshot 入场价获取失败 (%s): %s", _tk, _e_price)
+                        _snap.entry_price = float(
+                            (_data.get("agent_details") or {})
+                            .get("ScoutBeeNova", {}).get("details", {})
+                            .get("price") or 0.0
+                        )
+                    except (TypeError, ValueError):
+                        _snap.entry_price = 0.0
+                    if not _snap.entry_price:
+                        try:
+                            from data_pipeline import _drop_forming_bar as _dfb
+                            _hist = _dfb(_yf_fb.Ticker(_tk).history(period="5d"))  # v0.29.4 盘中护栏
+                            if not _hist.empty:
+                                _snap.entry_price = float(_hist["Close"].iloc[-1])
+                        except Exception as _e_price:  # noqa: BLE001 - 取价失败不阻断快照
+                            _log.debug("Snapshot 入场价获取失败 (%s): %s", _tk, _e_price)
                     _snap.save_to_json(_snap_dir)
                     _snap_count += 1
             if _snap_count:
