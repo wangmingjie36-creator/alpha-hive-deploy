@@ -682,34 +682,55 @@ class Backtester:
             if not isinstance(data, dict):
                 continue
 
-            # 收集各 Agent 的方向（从 QueenDistiller 的 agent_directions 字段）
-            agent_dirs = data.get("agent_directions", {})
-
-            # 获取预测时的价格
-            price = 0.0
+            # v0.43.15: 整只票的处理包进 try——此前 yfinance 限流异常
+            # （YFRateLimitError 不在旧 except 清单里）会穿透并杀死整个循环，
+            # 导致当天 0 条落库（自动扫描 14:00 整点常撞限流，7/28~8/11 多个
+            # 交易日 predictions 全空即此因；手动跑的时段限流少所以能落库）。
             try:
-                if yf:
-                    stock = yf.Ticker(ticker)
-                    price = stock.fast_info.get("lastPrice", 0)
-            except (ConnectionError, TimeoutError, OSError, ValueError, KeyError, AttributeError) as e:
-                _log.debug("Price fetch failed for %s: %s", ticker, e)
+                # 收集各 Agent 的方向（从 QueenDistiller 的 agent_directions 字段）
+                agent_dirs = data.get("agent_directions", {})
 
-            # 提取期权分析数据（如果蜂群结果中包含）
-            options_data = data.get("options_data") or {}
+                # v0.43.15: 价格优先复用 swarm_results 里的共享快照价
+                # （ScoutBee 的 CBOE-first 价，与报告/仪表板同一口径），
+                # 不再为落库单独打一轮 yfinance——那既是限流引爆点，
+                # 又与报告价格口径不一致（fast_info 是另一时刻的实时价）。
+                price = 0.0
+                try:
+                    price = float(
+                        (data.get("agent_details") or {})
+                        .get("ScoutBeeNova", {})
+                        .get("details", {})
+                        .get("price") or 0.0
+                    )
+                except (TypeError, ValueError):
+                    price = 0.0
+                if not price or price <= 0:
+                    # 兜底：swarm 里没价才打 yfinance，且宽捕获（含 YFRateLimitError）
+                    try:
+                        if yf:
+                            stock = yf.Ticker(ticker)
+                            price = stock.fast_info.get("lastPrice", 0)
+                    except Exception as e:  # noqa: BLE001 - 任何取价失败都不阻断落库
+                        _log.debug("Price fetch failed for %s: %s", ticker, e)
 
-            ok = self.store.save_prediction(
-                ticker=ticker,
-                final_score=data.get("final_score", 5.0),
-                direction=data.get("direction", "neutral"),
-                price=price,
-                dimension_scores=data.get("dimension_scores"),
-                agent_directions=agent_dirs,
-                options_data=options_data,
-                pheromone_compact=data.get("pheromone_compact", []),
-                date=date,
-            )
-            if ok:
-                saved += 1
+                # 提取期权分析数据（如果蜂群结果中包含）
+                options_data = data.get("options_data") or {}
+
+                ok = self.store.save_prediction(
+                    ticker=ticker,
+                    final_score=data.get("final_score", 5.0),
+                    direction=data.get("direction", "neutral"),
+                    price=price,
+                    dimension_scores=data.get("dimension_scores"),
+                    agent_directions=agent_dirs,
+                    options_data=options_data,
+                    pheromone_compact=data.get("pheromone_compact", []),
+                    date=date,
+                )
+                if ok:
+                    saved += 1
+            except Exception as e:  # noqa: BLE001 - 单票失败不得杀死整个落库循环
+                _log.warning("save_predictions 单票处理失败 %s: %s", ticker, e)
 
         return saved
 

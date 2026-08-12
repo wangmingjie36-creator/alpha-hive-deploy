@@ -214,6 +214,65 @@ class TestBusinessDateStamping:
              "BAD": "not-a-dict"},
             date="2026-01-15") == 1
 
+    def test_save_predictions_survives_rate_limit(self, tmp_path, monkeypatch):
+        """v0.43.15 回归：yfinance 限流（YFRateLimitError 等任意异常）不得杀死落库循环
+
+        事故：save_predictions 逐票调 yf.Ticker().fast_info 抓价，限流异常不在
+        旧 except 清单里，穿透后当天 0 条落库——7/28~8/11 多个自动扫描日
+        predictions 全空即此因。"""
+        from backtester import Backtester, PredictionStore
+
+        class _FakeRateLimit(Exception):
+            pass
+
+        class _RaisingYF:
+            @staticmethod
+            def Ticker(_):
+                raise _FakeRateLimit("Too Many Requests. Rate limited.")
+
+        bt = Backtester.__new__(Backtester)
+        bt.store = PredictionStore(db_path=str(tmp_path / "t.db"))
+        bt._spy_entry_cache = {}
+        monkeypatch.setattr("backtester.yf", _RaisingYF, raising=False)
+
+        # 无快照价 → 走 yfinance 兜底被限流 → 仍应保存（price=0）而非丢样本
+        n = bt.save_predictions(
+            {"NVDA": {"final_score": 8.0, "direction": "bullish"},
+             "TSLA": {"final_score": 4.0, "direction": "bearish"}},
+            date="2026-01-15")
+        assert n == 2
+
+    def test_save_predictions_prefers_snapshot_price(self, tmp_path, monkeypatch):
+        """v0.43.15：swarm_results 自带快照价时不得触碰 yfinance（限流引爆点+口径不一致）"""
+        from backtester import Backtester, PredictionStore
+
+        calls = {"n": 0}
+
+        class _CountingYF:
+            @staticmethod
+            def Ticker(_):
+                calls["n"] += 1
+                raise AssertionError("不应调用 yfinance")
+
+        bt = Backtester.__new__(Backtester)
+        bt.store = PredictionStore(db_path=str(tmp_path / "t.db"))
+        bt._spy_entry_cache = {}
+        monkeypatch.setattr("backtester.yf", _CountingYF, raising=False)
+
+        n = bt.save_predictions(
+            {"NVDA": {
+                "final_score": 8.0, "direction": "bullish",
+                "agent_details": {"ScoutBeeNova": {"details": {"price": 223.7}}},
+            }},
+            date="2026-01-15")
+        assert n == 1
+        assert calls["n"] == 0
+        import sqlite3
+        with sqlite3.connect(bt.store.db_path) as conn:
+            price = conn.execute(
+                f"SELECT price_at_predict FROM {bt.store.TABLE}").fetchone()[0]
+        assert price == 223.7
+
     def test_save_with_pheromone_compact(self, store):
         compact = [{"agent": "ScoutBeeNova", "score": 8.0}]
         ok = store.save_prediction(

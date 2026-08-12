@@ -5,6 +5,36 @@
 
 ---
 
+## [0.43.15] — 2026-08-12 — 修复自动扫描日 predictions 全空（落库循环被 yfinance 限流杀死）
+
+> 用户核实"积攒数据"计划可行性时发现：约一半扫描日（7/21、7/28、7/30、8/4、
+> 8/6、8/11 等）`.swarm_results` 都在但 predictions 表整日 0 条——若不修，
+> 4-6 周的样本积累窗口实际要拖一倍。8/11 自动扫描日志实锤根因：
+> `扫描后指标收集异常: Too Many Requests. Rate limited.`
+
+### Fixed — `backtester.py::save_predictions`
+- 旧实现落库前逐票调 `yf.Ticker().fast_info` 抓实时价，except 清单
+  `(ConnectionError, TimeoutError, OSError, ValueError, KeyError, AttributeError)`
+  **不含 `YFRateLimitError`**——限流异常穿透 save_predictions、穿透
+  daily_report 的 `except (OSError, ValueError, KeyError, TypeError)`，
+  被最外层 `except Exception` 兜住时**整个落库循环已死，当天 0 条入库**。
+  自动扫描（14:00 整点，限流高发时段）次次中招；手动跑的时段限流少故能落库
+  ——这就是"手动日有记录、自动日没记录"规律的全部成因
+- 修复①：价格优先复用 swarm_results 里 ScoutBee 的共享快照价（CBOE-first，
+  与报告/仪表板同一口径）——落库不再单独打 yfinance，既消灭限流引爆点，
+  又消除"fast_info 实时价 vs 报告快照价"的口径分裂
+- 修复②：单票处理整体包 try（宽捕获），任何单票异常都不再杀死整个循环；
+  yfinance 兜底路径同样宽捕获，取价失败保存 price=0 而非丢弃样本
+- 新增 2 条回归测试（模拟限流场景 + 快照价优先且零 yfinance 调用断言）；
+  全量 1245 测试通过
+
+### 影响
+- 从下一次自动扫描（今天 14:00 PDT）起，每个交易日应稳定落库全部扫描标的，
+  修复后系统的样本积累速度恢复到设计预期，9 月中旬复盘窗口可如期兑现
+- 历史缺失日（7/21 等 6+ 天）的预测**无法补录**——当时的完整快照虽在
+  `.swarm_results` 文件里，但 T+1/T+7 判分需要预测时点价格锚定，且补录会
+  混入"事后视角"污染，按既定原则不回填
+
 ## [0.43.14] — 2026-08-12 — 一次性迁移：清除 BullVeto 反向误拦对历史标签的污染
 
 > 用户批准。备份 `pheromone.db.bak-20260812-111340`。35 条 veto 误拦事件中
