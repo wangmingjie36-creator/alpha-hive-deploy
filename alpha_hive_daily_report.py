@@ -1030,8 +1030,15 @@ class AlphaHiveDailyReporter:
                     _snap_count += 1
             if _snap_count:
                 _log.info("反馈循环: 已保存 %d 个标的快照", _snap_count)
+            else:
+                # v0.43.16: 零快照必须可见——快照是纸面组合开仓决策的唯一输入，
+                # 静默失败=当天所有过门槛信号被无声丢弃（8/11 T 8.72 分未开仓即此因）
+                _log.warning("反馈循环: 本次保存 0 个快照（swarm_results %d 个标的）", len(swarm_results))
         except Exception as e:
-            _log.debug("反馈循环保存失败(非致命): %s", e)
+            # v0.43.16: debug→warning+traceback。实测自动扫描（launchd）的快照
+            # 写入从未成功过（全部日志零次"反馈循环"记录），但异常被 debug 级
+            # 日志吞掉，一直无人发现。
+            _log.warning("反馈循环快照保存失败: %s", e, exc_info=True)
 
         # ── P0-3 (v0.38.0): $50K 纸面组合日更 ──
         # 原来只挂在 generate_deep_v2（深度报告）里，日报流程不生成深度报告
