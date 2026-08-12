@@ -5,6 +5,27 @@
 
 ---
 
+## [0.43.13] — 2026-08-12 — 停用 BullVeto（实现从未按设计生效且方向反转）
+
+> 用户确认后停用。`queen_distiller.py:728` 读的是 BearBee 反转后的吸引力分
+> （score=10-bear_score）而非真实看空强度——`score>=7` 恰恰等价于
+> `bear_score<=3`（BearBee 确认看多），即上线以来 35 次触发全部是
+> "BearBee 确认看多时反向拦截看多"（被拦单 78% 本该盈利，均 +0.42% vs
+> 对照组 +4.20%）。
+
+### Changed — `config.py`
+- `bull_veto_enabled: True → False`，附完整停用说明注释。重新上线的前置条件：
+  ① 换成读取 `details.bear_score` 正确字段 ② 用 v0.43.10-12 修复后的干净样本
+  重新校准阈值（历史 bear_score 分布产生于 ChronosBee 零看空/CodeExecutor
+  恒看多的坏生态，正确字段下旧阈值 7.0 会命中 62% 看多信号）——预计 4-6 周后
+  与 BearBee boost 假说复盘同批处理
+- 影响面：全项目仅 queen_distiller 一处消费此开关，效果=被误拦的
+  "BearBee 确认看多"单恢复为看多输出；纸面组合中过 6.5 分门槛者恢复参与开仓
+
+### 验证
+- 全量 1243 测试通过；停用后 NVDA 单票扫描 `bull_veto 触发: False`，
+  且修复后生态首次观察到 **ChronosBee 投出 bearish**（此前 91/91 零看空）
+
 ## [0.43.12] — 2026-08-12 — 全仓审计 yf.download() MultiIndex 反模式：修复 5 处易崩 + 3 处脆弱写法
 
 > v0.43.10（CodeExecutorAgent）和 v0.43.11（pead_analyzer）连续两次撞上同一个
