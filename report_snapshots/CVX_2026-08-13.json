@@ -1,0 +1,36 @@
+{
+  "ticker": "CVX",
+  "date": "2026-08-13",
+  "composite_score": 6.16,
+  "direction": "neutral",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 197.6999969482422,
+  "agent_votes": {
+    "CodeExecutorAgent": 6.5,
+    "QueenDistiller": 6.16
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.643,
+    "signal": 0.407,
+    "catalyst": 0.852,
+    "sentiment": 0.519,
+    "odds": 0.037,
+    "risk_adj": 0.222
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-08-14T02:20:11.376986"
+}

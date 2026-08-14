@@ -1,0 +1,37 @@
+{
+  "ticker": "ENPH",
+  "date": "2026-08-13",
+  "composite_score": 4.66,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 40.779998779296875,
+  "agent_votes": {
+    "ScoutBeeNova": 6.80245,
+    "OracleBeeEcho": 6.685769230769231,
+    "CodeExecutorAgent": 6.5
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.0,
+    "signal": 0.963,
+    "catalyst": 0.593,
+    "sentiment": 0.0,
+    "odds": 0.296,
+    "risk_adj": 0.148
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-08-14T02:20:16.249609"
+}
