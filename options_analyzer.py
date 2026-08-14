@@ -1524,6 +1524,9 @@ class OptionsAgent:
                 "iv_rank": None,
                 "iv_percentile": None,
                 "iv_current": None,
+                "iv_raw_observed": None,      # v0.43.18 schema 一致性
+                "iv_rank_source": None,
+                "iv_rank_window_days": None,
                 "put_call_ratio": None,
                 "total_oi": 0,
                 "total_oi_raw": 0,
@@ -1607,6 +1610,14 @@ class OptionsAgent:
         else:
             current_iv = 0.0
 
+        # v0.43.18: 记录降级前的当日真实观测 IV。
+        # 扫描固定在收盘后跑 → _market_open 恒 False → 下方降级分支每次都用
+        # last_valid_iv 缓存（TTL 120h），当日真实 raw_iv 被丢弃 ⇒ 快照里的
+        # iv_current 是"5 天一阶的阶梯"（实测 76 份快照仅 15 个不同值），
+        # 无法用于构建真实 IV Rank 的历史序列。此字段只记账、不参与任何评分，
+        # 是"自攒 IV 历史"（iv_history.py）唯一可信的原料。
+        _iv_raw_observed = current_iv if raw_ivs and _MIN_VALID_IV <= current_iv <= _MAX_VALID_IV else None
+
         # ── 根因④ BUG FIX: 使用精确 DST 判断，避免 3/11 月换时误判 ──
         from datetime import timezone, timedelta as _td, time as _dtime
         _utc = datetime.now(timezone.utc)
@@ -1677,8 +1688,38 @@ class OptionsAgent:
             self.fetcher._save_last_valid_iv(ticker, current_iv)
 
         # 3. 计算各项指标
-        iv_rank, iv_current = self.analyzer.calculate_iv_rank(current_iv, hist_iv)
-        iv_percentile = self.analyzer.calculate_iv_percentile(current_iv, hist_iv)
+        # ── v0.43.18: 优先用自攒的真实 IV 历史；不足则诚实降级到 HV 代理 ──
+        # 背景：hist_iv 是「HV 序列 × 单个标量 iv_premium」，而给整条序列乘同一
+        # 常数不改变任何排序 ⇒ 用它算出的"IV Rank"在数学上恒等于 HV Rank
+        # （实测 NVDA 未 clamp 时 62.91 vs 62.91 完全相等）。真 IV Rank 必须用
+        # 真实 IV 的历史分布，见 iv_history.py。
+        _iv_rank_source = "hv_proxy"
+        _iv_rank_window = None
+        iv_rank = iv_percentile = None
+        try:
+            from iv_history import (
+                load_iv_history, iv_rank_from_history, IV_RANK_MIN_DAYS,
+            )
+            _real_hist, _real_days = load_iv_history(ticker, self.fetcher.cache_dir)
+            if _real_days >= IV_RANK_MIN_DAYS:
+                _r, _p = iv_rank_from_history(current_iv, _real_hist)
+                if _r is not None:
+                    iv_rank, iv_percentile = _r, _p
+                    iv_current = round(current_iv, 2)
+                    _iv_rank_source = f"real_iv_{_real_days}d"
+                    _iv_rank_window = _real_days
+                    _log.info(
+                        "[%s] IV Rank 使用真实 IV 历史：%.1f（%d 个交易日观测）",
+                        ticker, iv_rank, _real_days,
+                    )
+        except Exception as _e_ivh:  # noqa: BLE001 - 自攒历史失败绝不阻断评分
+            _log.debug("[%s] 自攒 IV 历史不可用，降级 HV 代理: %s", ticker, _e_ivh)
+
+        if iv_rank is None:
+            # 降级路径：HV 代理（如实标注 iv_rank_source="hv_proxy"，
+            # 消费方据此判断该值是"已实现波动率排名"而非真正的 IV Rank）
+            iv_rank, iv_current = self.analyzer.calculate_iv_rank(current_iv, hist_iv)
+            iv_percentile = self.analyzer.calculate_iv_percentile(current_iv, hist_iv)
         # P0-1 (v0.38.0): 历史 IV 为样本数据时，IV Rank 不可信（样本区间与真实
         # 现价 IV 错配 → 假 0/100 极值），置 None 并在评分中走中性
         if getattr(self.fetcher, "last_hist_iv_is_sample", False):
@@ -1783,7 +1824,11 @@ class OptionsAgent:
             "data_quality": data_quality,  # "real" | "degraded" | "unavailable"
             "iv_rank": iv_rank,  # 0-100
             "iv_percentile": iv_percentile,  # 0-100
-            "iv_current": iv_current,  # 当前 IV
+            "iv_current": iv_current,  # 当前 IV（可能来自 last_valid 缓存，见降级逻辑）
+            # v0.43.18 自攒 IV 历史原料：当日真实观测 IV（降级前），只记账不进评分
+            "iv_raw_observed": _iv_raw_observed,
+            "iv_rank_source": _iv_rank_source,      # "real_iv_{N}d" | "hv_proxy"
+            "iv_rank_window_days": _iv_rank_window,  # 真实 IV 样本天数（hv_proxy 时为 None）
             "put_call_ratio": put_call_ratio,
             # v0.17.0: total_oi 双口径 — raw（原始总和）+ stable（排除 DTE<7 近到期）
             # stable 口径用于日环比对比，避免 Opex 周到期日脱落导致 OI 跳变
