@@ -5,6 +5,29 @@
 
 ---
 
+## [0.43.17] — 2026-08-14 — 修复仪表板渲染撞限流杀死部署（网站两天未更新）
+
+> 用户问"8/13 自动跑的推送到网站了吗"→ 查出扫描成功但网站停在 8/12 单票视图。
+> 这是"逐票打 yfinance + except 漏 YFRateLimitError"反模式的**第三次现身**
+> （前两次：v0.43.15 predictions 全空、v0.43.16 快照恒为 0）。
+
+### Fixed（两层防线同时漏了同一个异常）
+- `dashboard_renderer.py::_detail`：渲染 30 只票时逐票打 yfinance 兜底取价，
+  except 清单 `(ValueError, IndexError, KeyError, AttributeError)` 不含
+  `YFRateLimitError`
+- `alpha_hive_daily_report.py::_save_output_files`：包住 index.html 生成的
+  兜底 except 同样漏了它——**该处注释本就写着"任何失败都不得阻断已生成的
+  核心报告 + 后续提交/部署"，但实现与注释不符**
+- 两层都没兜住 → 异常穿透杀死 `save_report` → **gh-pages 部署在其内部、
+  崩溃点之后，一并夭折**：报告文件正常写出，网站一行没推
+- 两处均改为 `except Exception`（`_detail` 补 noqa 说明；daily_report 侧
+  additionally 加 `exc_info=True` 便于下次定位）
+
+### 验证
+- 全量 1245 测试通过；重跑并部署 8/13 报告，线上恢复 30 只标的完整视图
+  （`_date: 2026-08-13`，Top5: AMC 8.7 / DELL 7.5 / XOM 7.4 / T 7.0 / WMT 6.8），
+  CDN 验证通过
+
 ## [0.43.16] — 2026-08-12 — 修复自动扫描日快照恒为 0 + 流水线 24 小时病态接力
 
 > 继 v0.43.15（predictions 全空）后，继续追查"信号→开仓"链路：发现自动扫描日
