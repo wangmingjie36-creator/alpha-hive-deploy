@@ -2104,10 +2104,13 @@ class AlphaHiveDailyReporter:
             with open(index_file, "w", encoding="utf-8") as f:
                 f.write(html)
             _log.info("index.html 已更新（GitHub Pages）")
-        except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError) as e:
-            # ImportError 覆盖 ModuleNotFoundError（如缺 jinja2）：dashboard 渲染是次要步骤，
-            # 任何失败都不得阻断已生成的核心报告 + 后续提交/部署，降级到独立 JSON。
-            _log.warning("index.html 生成失败: %s", e)
+        except Exception as e:  # noqa: BLE001 - 见下方注释：此处必须真正兜住"任何失败"
+            # 注释本就写着"任何失败都不得阻断……后续提交/部署"，但 v0.43.17 前的
+            # except 清单漏了 YFRateLimitError（渲染层逐票打 yfinance），限流时异常
+            # 穿透 → save_report 整体崩溃 → **gh-pages 部署一并夭折**（部署在
+            # save_report 内部、崩溃点之后）。8/12-8/13 扫描成功但网站停留旧数据即此因。
+            # 改为 except Exception 让兜底与注释意图一致。
+            _log.warning("index.html 生成失败: %s", e, exc_info=True)
             # Fallback: 即使 HTML 渲染崩溃，也确保 dashboard-data.json 被更新
             self._fallback_dashboard_data(report)
 

@@ -443,6 +443,12 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         if _pm:
             _price_raw = float(_pm.group(1))
     # Fallback 2: 直接从 yfinance 获取
+    # v0.43.17: except 清单原为 (ValueError, IndexError, KeyError, AttributeError)，
+    # **不含 YFRateLimitError**——渲染 30 只票时逐票打 yfinance，限流异常穿透
+    # 杀死 render_dashboard_html → save_report 整体崩溃 → **gh-pages 部署也
+    # 一并夭折**（部署在 save_report 内部、崩溃点之后），8/12-8/13 两天扫描
+    # 成功但网站停留在旧数据即此因。这是"逐票打 yfinance 被限流杀死整条流程"
+    # 反模式的第 3 处（前两处见 v0.43.15 save_predictions / v0.43.16 快照循环）。
     if _price_raw is None:
         try:
             import yfinance as _yf
@@ -451,7 +457,7 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
                 _price_raw = float(_h["Close"].iloc[-1])
                 if len(_h) >= 2 and _momentum_raw is None:
                     _momentum_raw = (_h["Close"].iloc[-1] / _h["Close"].iloc[0] - 1) * 100
-        except (ValueError, IndexError, KeyError, AttributeError):
+        except Exception:  # noqa: BLE001 - 取价失败绝不能拖垮仪表板渲染与部署
             pass
     # ── 维度数据质量（#3）──
     dim_dq = sd.get("dim_data_quality", {})
