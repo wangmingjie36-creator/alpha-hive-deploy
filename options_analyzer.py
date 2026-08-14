@@ -44,7 +44,7 @@ class OptionsDataFetcher:
         # 曾导致 pytest 的 mock 期权链写进生产 options_snapshot 被正式扫描复用
         self.cache_dir = cache_dir or str(PATHS.cache_dir)
         self.cache_ttl = 300  # 5 分钟缓存
-        self.last_hist_iv_is_sample = False  # P0-1: 最近一次 fetch_historical_iv 是否落样本
+        self.last_hist_hv_is_sample = False  # P0-1: 最近一次 fetch_historical_iv 是否落样本
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def _get_cache_path(self, ticker: str, data_type: str) -> str:
@@ -351,32 +351,38 @@ class OptionsDataFetcher:
             _log.warning("%s CBOE 主源获取失败：%s，降级 yfinance", ticker, _ce)
         return None
 
-    def fetch_historical_iv(self, ticker: str, days: int = 252) -> List[float]:
-        """获取历史 IV 数据 - 用历史已实现波动率 + 动态 IV 溢价估算
+    def fetch_historical_hv(self, ticker: str, days: int = 252) -> List[float]:
+        """获取历史**已实现波动率**（HV）序列：20 日滚动年化，按日期升序。
 
-        方法：
-        1. 获取当前期权链中的实际隐含波动率（ATM 中位数）
-        2. 计算当前 20 日已实现波动率
-        3. 算出动态 IV/HV 比率（典型范围 1.05-1.60）
-        4. 用该比率 × 历史 HV 滚动序列 = 更准确的历史 IV 代理
+        v0.43.19 更名 + 去伪：旧名 `fetch_historical_iv` 与旧实现宣称产出
+        "历史 IV 代理"（HV 序列 × 动态 iv_premium），但——
 
-        相比固定 HV × 1.25 的优势：
-        - 高波动期（如财报季前），IV premium 可能高达 1.6+
-        - 低波动期，IV premium 可能低至 1.05
-        - 动态比率让 IV Rank 更贴合实际市场状态
+          给整条序列乘同一个标量**不改变任何排序关系**，
+          故由它算出的 "IV Rank" 在数学上**恒等于 HV Rank**。
+
+        实测（NVDA，premium 未被 clamp 时）：IV Rank 62.91 vs 纯 HV Rank 62.91，
+        完全相等。旧注释声称"动态比率让 IV Rank 更贴合实际市场状态"并不成立，
+        premium 对 rank 的贡献精确为零，只改变绝对水位。
+
+        更糟的是 premium 被 clamp 到 [1.05, 2.0]：clamp 生效时抵消关系被破坏，
+        输出既非 IV Rank 也非 HV Rank（实测 NVDA raw ratio=0.318 被夹到 1.05
+        → "IV Rank" 算出 0.00，而真实 HV Rank 是 62.91）。
+
+        因此本函数现在只做一件事：**如实返回 HV 序列**，不乘任何系数。
+        真 IV Rank 请走 `iv_history.py`（自攒真实 IV 观测）。
         """
         # P0-1 (v0.38.0): 标记本次历史 IV 是否为样本数据，供 analyze() 决定
         # IV Rank 是否可信（样本历史区间与真实现价 IV 错配会产生假 0/100 极值）
-        self.last_hist_iv_is_sample = False
+        self.last_hist_hv_is_sample = False
 
-        cached = self._read_cache(ticker, "hist_iv_v3")
+        cached = self._read_cache(ticker, "hist_hv_v4")
         if cached:
             return cached
 
         if yf is None:
-            _log.warning("yfinance 未安装，使用样本 IV 数据")
-            self.last_hist_iv_is_sample = True
-            return self._get_sample_historical_iv(ticker)
+            _log.warning("yfinance 未安装，使用样本 HV 数据")
+            self.last_hist_hv_is_sample = True
+            return self._get_sample_historical_hv(ticker)
 
         try:
             stock = yf.Ticker(ticker)
@@ -384,8 +390,8 @@ class OptionsDataFetcher:
 
             if hist.empty:
                 _log.warning("%s 历史数据不可用，使用样本数据", ticker)
-                self.last_hist_iv_is_sample = True
-                return self._get_sample_historical_iv(ticker)
+                self.last_hist_hv_is_sample = True
+                return self._get_sample_historical_hv(ticker)
 
             # 计算历史已实现波动率（20日滚动）
             returns = hist["Close"].pct_change().dropna()
@@ -393,89 +399,20 @@ class OptionsDataFetcher:
             hv_values = rolling_vol.dropna().tolist()
 
             if not hv_values:
-                self.last_hist_iv_is_sample = True
-                return self._get_sample_historical_iv(ticker)
+                self.last_hist_hv_is_sample = True
+                return self._get_sample_historical_hv(ticker)
 
-            # 动态 IV premium：从当前期权链获取实际 IV，与当前 HV 对比
-            current_hv = hv_values[-1] if hv_values else 25.0
-            iv_premium = self._estimate_iv_premium(stock, current_hv)
+            # v0.43.19: 不再乘 iv_premium（见 docstring：对 rank 贡献恒为零，
+            # 且 clamp 生效时反而制造失真）。如实返回 HV 序列，最后 252 个点。
+            hv_list = hv_values[-days:]
 
-            iv_list = [v * iv_premium for v in hv_values]
-
-            # 保留最后 252 个数据点
-            iv_list = iv_list[-days:]
-
-            self._write_cache(ticker, "hist_iv_v3", iv_list)
-            return iv_list
+            self._write_cache(ticker, "hist_hv_v4", hv_list)
+            return hv_list
 
         except (*NETWORK_ERRORS, TypeError) as e:
-            _log.warning("获取 %s 历史 IV 失败：%s，使用样本数据", ticker, e)
-            self.last_hist_iv_is_sample = True
-            return self._get_sample_historical_iv(ticker)
-
-    def _estimate_iv_premium(self, stock, current_hv: float) -> float:
-        """
-        从当前期权链估算 IV/HV 比率（动态 IV premium）
-
-        - 取 ATM ±20% 范围内的 call IV 中位数
-        - 计算 IV / HV 比率，clamp 到 [1.05, 2.0]
-        - 无法获取时降级为 1.25
-        """
-        try:
-            if not hasattr(stock, "options") or not stock.options:
-                return 1.25
-
-            # 跳过 DTE<7 的近期到期日（近到期期权 IV 因 Gamma 效应被人为抬高）
-            today_dt = datetime.now()
-            expiry = None
-            for _e in stock.options:
-                try:
-                    if (datetime.strptime(_e, "%Y-%m-%d") - today_dt).days >= 7:
-                        expiry = _e
-                        break
-                except (ValueError, TypeError):
-                    continue
-            if expiry is None:
-                expiry = stock.options[0]  # 降级：无 DTE≥7 则取最近的
-            chain = stock.option_chain(expiry)
-            calls = chain.calls
-
-            # 获取当前股价
-            try:
-                price = stock.fast_info.get("lastPrice", 0) or stock.fast_info.get("previousClose", 0)
-            except (AttributeError, TypeError, KeyError, RuntimeError):
-                price = 0
-
-            if not price:
-                all_strikes = calls["strike"].tolist()
-                price = statistics.median(all_strikes) if all_strikes else 100.0
-
-            # ATM ±20% 范围
-            atm_lower = price * 0.80
-            atm_upper = price * 1.20
-
-            atm_calls = calls[
-                (calls["strike"] >= atm_lower) &
-                (calls["strike"] <= atm_upper) &
-                (calls["impliedVolatility"] > 0.005)
-            ]
-
-            if atm_calls.empty:
-                return 1.25
-
-            # 中位数 IV（yfinance 返回小数，×100 转百分比）
-            current_iv = float(atm_calls["impliedVolatility"].median()) * 100
-
-            if current_hv <= 0:
-                return 1.25
-
-            ratio = current_iv / current_hv
-            # clamp 到合理范围
-            return max(1.05, min(2.0, ratio))
-
-        except (*NETWORK_ERRORS, TypeError, AttributeError, IndexError) as e:
-            _log.debug("IV premium 估算降级: %s", e)
-            return 1.25
+            _log.warning("获取 %s 历史 HV 失败：%s，使用样本数据", ticker, e)
+            self.last_hist_hv_is_sample = True
+            return self._get_sample_historical_hv(ticker)
 
     def fetch_expirations(self, ticker: str) -> List[str]:
         """获取期权到期日列表"""
@@ -585,7 +522,7 @@ class OptionsDataFetcher:
             "expirations": ["2026-03-21", "2026-04-18", "2026-05-16"],
         }
 
-    def _get_sample_historical_iv(self, ticker: str) -> List[float]:
+    def _get_sample_historical_hv(self, ticker: str) -> List[float]:
         """样本历史 IV 数据"""
         # 生成 252 个 IV 值（1 年），范围 20-40
         base_iv = {
@@ -1555,7 +1492,7 @@ class OptionsAgent:
             return result
 
         # 2. 获取历史 IV
-        hist_iv = self.fetcher.fetch_historical_iv(ticker)
+        hist_hv = self.fetcher.fetch_historical_hv(ticker)
 
         # 计算当前 IV（从期权链中获取）
         # 关键修复：
@@ -1650,7 +1587,7 @@ class OptionsAgent:
             if last_valid:
                 # 合理性校验：缓存值不应低于历史 IV 最低点的 70%
                 # 防止某次错误采集（如 yfinance 返回极低 IV）污染后续扫描
-                _hist_min = min(hist_iv) if hist_iv else 0.0
+                _hist_min = min(hist_hv) if hist_hv else 0.0
                 _cache_suspicious = _hist_min > 0 and last_valid < _hist_min * 0.7
                 if _cache_suspicious:
                     _log.warning(
@@ -1689,7 +1626,7 @@ class OptionsAgent:
 
         # 3. 计算各项指标
         # ── v0.43.18: 优先用自攒的真实 IV 历史；不足则诚实降级到 HV 代理 ──
-        # 背景：hist_iv 是「HV 序列 × 单个标量 iv_premium」，而给整条序列乘同一
+        # 背景：v0.43.19 前 hist 是「HV 序列 × 单个标量 iv_premium」，给整条序列乘同一
         # 常数不改变任何排序 ⇒ 用它算出的"IV Rank"在数学上恒等于 HV Rank
         # （实测 NVDA 未 clamp 时 62.91 vs 62.91 完全相等）。真 IV Rank 必须用
         # 真实 IV 的历史分布，见 iv_history.py。
@@ -1716,14 +1653,24 @@ class OptionsAgent:
             _log.debug("[%s] 自攒 IV 历史不可用，降级 HV 代理: %s", ticker, _e_ivh)
 
         if iv_rank is None:
-            # 降级路径：HV 代理（如实标注 iv_rank_source="hv_proxy"，
-            # 消费方据此判断该值是"已实现波动率排名"而非真正的 IV Rank）
-            iv_rank, iv_current = self.analyzer.calculate_iv_rank(current_iv, hist_iv)
-            iv_percentile = self.analyzer.calculate_iv_percentile(current_iv, hist_iv)
+            # 降级路径：HV Rank 代理（如实标注 iv_rank_source="hv_proxy"）。
+            # v0.43.19 同口径修正：拿**当前 HV** 比 **历史 HV 分布**（同一量纲），
+            # 而非拿真实 IV 比 HV 分布——后者是旧实现失真的根源（实测 IV 12.5%
+            # 落进 HV 39% 的分布 → rank 0.00，而真实 HV Rank 是 62.91）。
+            # 当前 HV 即序列最后一点（20 日滚动年化，与历史同法计算）。
+            _current_hv = hist_hv[-1] if hist_hv else None
+            if _current_hv is not None:
+                iv_rank, _ = self.analyzer.calculate_iv_rank(_current_hv, hist_hv)
+                iv_percentile = self.analyzer.calculate_iv_percentile(_current_hv, hist_hv)
+            iv_current = round(current_iv, 2)  # 展示值仍是真实 IV，不受 rank 口径影响
         # P0-1 (v0.38.0): 历史 IV 为样本数据时，IV Rank 不可信（样本区间与真实
         # 现价 IV 错配 → 假 0/100 极值），置 None 并在评分中走中性
-        if getattr(self.fetcher, "last_hist_iv_is_sample", False):
-            _log.warning("[%s] 历史 IV 为样本数据，IV Rank/Percentile 置 None（不可信）", ticker)
+        if (_iv_rank_source == "hv_proxy"
+                and getattr(self.fetcher, "last_hist_hv_is_sample", False)):
+            # v0.43.19: ① 属性名随 fetch_historical_hv 改名同步（此处是字符串
+            # 字面量，全局改名碰不到，漏改会让守卫因 getattr 默认 False 永久失效）
+            # ② 限定 hv_proxy——真实 IV 历史路径不依赖 hist_hv，不该被它置 None
+            _log.warning("[%s] 历史 HV 为样本数据，HV Rank/Percentile 置 None（不可信）", ticker)
             iv_rank = None
             iv_percentile = None
         put_call_ratio = self.analyzer.calculate_put_call_ratio(calls_df, puts_df)

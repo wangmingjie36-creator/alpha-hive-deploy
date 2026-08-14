@@ -116,7 +116,7 @@ class TestAnalyzerIntegration:
                       "gamma": 0.03, "volume": 80}],
             "expirations": ["2026-09-18"], "source": "real",
         })
-        monkeypatch.setattr(agent.fetcher, "fetch_historical_iv",
+        monkeypatch.setattr(agent.fetcher, "fetch_historical_hv",
                             lambda t: [20.0 + i for i in range(30)])
         monkeypatch.setattr(agent.fetcher, "_save_last_valid_iv", lambda t, iv: None)
         monkeypatch.setattr(agent.fetcher, "_read_last_valid_iv", lambda t: None)
@@ -143,7 +143,7 @@ class TestAnalyzerIntegration:
                       "gamma": 0.03, "volume": 80}],
             "expirations": ["2026-09-18"], "source": "real",
         })
-        monkeypatch.setattr(agent.fetcher, "fetch_historical_iv",
+        monkeypatch.setattr(agent.fetcher, "fetch_historical_hv",
                             lambda t: [20.0 + i for i in range(30)])
         monkeypatch.setattr(agent.fetcher, "_save_last_valid_iv", lambda t, iv: None)
         monkeypatch.setattr(agent.fetcher, "_read_last_valid_iv", lambda t: None)

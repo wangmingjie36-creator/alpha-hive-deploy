@@ -143,7 +143,7 @@ class TestOptionsAgent:
             }
         )
         monkeypatch.setattr(
-            agent.fetcher, "fetch_historical_iv",
+            agent.fetcher, "fetch_historical_hv",
             lambda ticker: [0.25 + i * 0.02 for i in range(20)]
         )
         # 隔离缓存：阻止测试写入/读取生产 last_valid_iv 缓存文件
@@ -177,7 +177,7 @@ class TestOptionsAgent:
             }
         )
         monkeypatch.setattr(
-            agent.fetcher, "fetch_historical_iv",
+            agent.fetcher, "fetch_historical_hv",
             lambda ticker: [0.30] * 20
         )
         # 隔离缓存：阻止测试写入/读取生产 last_valid_iv 缓存文件
