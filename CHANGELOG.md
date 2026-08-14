@@ -5,6 +5,59 @@
 
 ---
 
+## [0.43.18] — 2026-08-14 — 自攒真实 IV 历史：IV Rank 从"HV 排名冒名顶替"走向真值
+
+> 用户追问"为什么不是真 IV Rank 数据"，查证后确认问题比"函数名撒谎"更深。
+
+### 查证结论（数学 + 实测双重确认）
+- `fetch_historical_iv` 产出的"历史 IV" = `HV序列 × iv_premium`，而
+  `iv_premium = current_IV/current_HV` 是**单个标量**——给整条序列乘同一常数
+  **不改变任何排序关系**，故算出的 IV Rank 在数学上**恒等于 HV Rank**。
+  实测 NVDA 未 clamp 时：IV Rank 62.91 vs 纯 HV Rank 62.91，**完全相等**。
+  函数注释宣称"动态比率让 IV Rank 更贴合实际市场状态"——该说法不成立，
+  premium 对 rank 的贡献精确为零
+- `ratio` 被 clamp 到 [1.05, 2.0]，clamp 生效时抵消关系被破坏，输出**既非
+  IV Rank 也非 HV Rank**：实测 NVDA raw ratio=0.318 被夹到 1.05 →
+  IV Rank 算出 **0.00**，而真实 HV Rank 是 **62.91**
+- 附带发现：`_estimate_iv_premium` 读 **yfinance** 链，主路径 IV 走 **CBOE** 链，
+  两个数据源（口径分裂，本次未动）
+
+### 为什么之前无法自攒（关键前置障碍）
+快照里的 `iv_current` **不是每日观测**：扫描固定在收盘后跑 → `_market_open`
+恒 False → 降级分支每次都用 `last_valid_iv` 缓存（TTL **120h**），当日真实
+`raw_iv` 被丢弃。实测 NVDA 76 份快照仅 **15 个不同值**（≈76/5，与 120h TTL
+精确吻合）——是"5 天一阶的阶梯"。用它建 IV Rank 等于在 15 个有效点上算
+min/max，比现状更差。
+
+### Added
+- `options_analyzer.py`：新增 `iv_raw_observed` 字段，记录**降级前**的当日
+  真实观测 IV（只记账、不进任何评分），从本版起逐日积累真实 IV 序列
+- `iv_history.py`（新模块）：`load_iv_history()` 从每日快照读取真实 IV 序列
+  （只认 `iv_raw_observed`，**绝不退回读 `iv_current`**）；
+  `iv_rank_from_history()` 用真实分布算 rank/percentile，退化时返回 `None`
+  让调用方降级而非编造中性值；`coverage_report()` 查各标的积累进度
+- 结果新增 `iv_rank_source`（`real_iv_{N}d` / `hv_proxy`）与
+  `iv_rank_window_days`，消费方可据此判断该 rank 是真 IV 排名还是 HV 代理
+
+### Changed
+- `OptionsAgent.analyze()`：IV Rank 优先用自攒真实历史（阈值 **63 个交易日**
+  ≈ 季度 IV Rank，业界公认变体下限），不足则降级 HV 代理并如实标注
+
+### 现状与预期
+- 自攒进度：**0/56 只达标**（历史快照无该字段，从今天起积累）；按每交易日
+  一条，约 **3 个月后**首批标的可切换到真 IV Rank，届时 `iv_rank_source`
+  会自动变为 `real_iv_63d`+，无需再改代码
+- 实测本版行为：`iv_raw_observed: 40.8`（当日真实）vs `iv_current: 41.38`
+  （缓存降级值）——两者不同，正好印证陈旧问题；`iv_rank_source: hv_proxy` 如实标注
+- 新增 12 条测试；全量 1257 通过
+
+### 未做（明确留待决定）
+- **HV 代理路径的 clamp 失真未修**（用户本轮只选了"自攒"方案）。在真实 IV
+  样本达标前，`hv_proxy` 路径仍可能因 clamp 输出失真值（如上述 0.00 vs 62.91）。
+  最小修法是去掉 premium 与 clamp，让它成为一个干净无失真的 HV Rank
+- `iv_rank` 进 OracleBee 评分、BearBee 也用它当看空信号，故上述失真是**评分
+  输入问题**而非仅显示问题
+
 ## [0.43.17] — 2026-08-14 — 修复仪表板渲染撞限流杀死部署（网站两天未更新）
 
 > 用户问"8/13 自动跑的推送到网站了吗"→ 查出扫描成功但网站停在 8/12 单票视图。
