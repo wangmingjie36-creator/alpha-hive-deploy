@@ -1639,7 +1639,13 @@ class OptionsAgent:
             )
             _real_hist, _real_days = load_iv_history(ticker, self.fetcher.cache_dir)
             if _real_days >= IV_RANK_MIN_DAYS:
-                _r, _p = iv_rank_from_history(current_iv, _real_hist)
+                # v0.43.20 口径修正：分母 _real_hist 由每日 iv_raw_observed 组成，
+                # 分子必须同源用**今日原始观测**，不能用 current_iv——后者在上方
+                # 降级块可能已被 last_valid_iv（TTL 120h，最长 5 天前）替换，
+                # 拿陈旧值比对新鲜分布 = 口径错配，与 v0.43.19 修掉的
+                # "拿真实 IV 比 HV 分布"是同一类错误。
+                _numer = _iv_raw_observed if _iv_raw_observed is not None else current_iv
+                _r, _p = iv_rank_from_history(_numer, _real_hist)
                 if _r is not None:
                     iv_rank, iv_percentile = _r, _p
                     iv_current = round(current_iv, 2)

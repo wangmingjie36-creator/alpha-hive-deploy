@@ -151,3 +151,62 @@ class TestAnalyzerIntegration:
         r = agent.analyze("NVDA", stock_price=100.0)
         assert r["iv_rank_source"].startswith("real_iv_")
         assert r["iv_rank_window_days"] >= IV_RANK_MIN_DAYS
+
+    def test_real_iv_rank_uses_raw_observation_not_degraded_cache(self, tmp_path, monkeypatch):
+        """v0.43.20 回归：分子必须用今日 iv_raw_observed，不能用被缓存降级的 current_iv
+
+        分母 _real_hist 由每日 iv_raw_observed 组成；current_iv 在降级块可能被
+        last_valid_iv（TTL 120h ≈ 最长 5 天前）替换。若拿陈旧分子比对新鲜分布，
+        就是口径错配——与 v0.43.19 修掉的"拿真实 IV 比 HV 分布"同一类错误。
+
+        ⚠️ 必须冻结时钟：降级分支只在 `not _market_open` 时进入。若按真实时间跑，
+        盘中运行时该分支根本不执行，测试会变成永远通过的空跑（本测试初版即如此，
+        在盘中写就、盘中验证，退回 bug 版仍绿）。
+        """
+        import options_analyzer as _oa
+        from datetime import datetime as _dt, timezone as _tz
+
+        class _AfterHoursDateTime(_dt):
+            @classmethod
+            def now(cls, tz=None):
+                # 2026-08-14 22:00 UTC = 18:00 ET（周五收盘后）→ _market_open=False
+                fixed = _dt(2026, 8, 14, 22, 0, tzinfo=_tz.utc)
+                return fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+
+        monkeypatch.setattr(_oa, "datetime", _AfterHoursDateTime)
+
+        from options_analyzer import OptionsAgent
+
+        # 历史 IV 分布 20~59；今日链上真实 IV = 58%（分布高位）
+        for i in range(IV_RANK_MIN_DAYS + 5):
+            d = f"2026-{(i // 28) + 1:02d}-{(i % 28) + 1:02d}"
+            _write_snap(tmp_path, "NVDA", d, iv_raw_observed=20.0 + (i % 40))
+
+        agent = OptionsAgent()
+        monkeypatch.setattr(agent.fetcher, "cache_dir", str(tmp_path))
+        monkeypatch.setattr(agent.fetcher, "fetch_options_chain", lambda t: {
+            "calls": [{"strike": 100, "openInterest": 500, "impliedVolatility": 0.58,
+                       "gamma": 0.04, "volume": 100}],
+            "puts": [{"strike": 95, "openInterest": 400, "impliedVolatility": 0.58,
+                      "gamma": 0.03, "volume": 80}],
+            "expirations": ["2026-09-18"], "source": "real",
+        })
+        monkeypatch.setattr(agent.fetcher, "fetch_historical_hv",
+                            lambda t: [20.0 + i for i in range(30)])
+        monkeypatch.setattr(agent.fetcher, "_save_last_valid_iv", lambda t, iv: None)
+        # 关键：模拟 120h 陈旧缓存 21%（分布低位），与今日真实 58% 相反
+        monkeypatch.setattr(agent.fetcher, "_read_last_valid_iv", lambda t: 21.0)
+
+        r = agent.analyze("NVDA", stock_price=100.0)
+
+        # 前置校验：确认降级确实发生了，否则本测试无意义（防止再次退化为空跑）
+        assert r["iv_current"] == pytest.approx(21.0, abs=0.5), (
+            f"降级未生效（iv_current={r['iv_current']}），本测试无法验证口径问题"
+        )
+        assert r["iv_rank_source"].startswith("real_iv_")
+        assert r["iv_raw_observed"] == pytest.approx(58.0, abs=0.5)
+        # 用今日真实观测 58 → 高位 rank；若误用降级缓存 21 → 会掉到低位
+        assert r["iv_rank"] > 80, (
+            f"iv_rank={r['iv_rank']} 偏低，疑似误用了降级后的 current_iv "
+            f"(={r['iv_current']}) 而非今日原始观测 {r['iv_raw_observed']}"
+        )
