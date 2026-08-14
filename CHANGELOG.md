@@ -5,6 +5,43 @@
 
 ---
 
+## [0.43.19] — 2026-08-14 — 去掉 IV Rank 的伪 premium 与 clamp 失真（补 v0.43.18 未做项）
+
+> v0.43.18 只做了"自攒真实 IV 历史"，把 HV 代理路径的失真留了下来。本版补上：
+> 让降级路径成为一个**干净、无失真、名副其实的 HV Rank**。
+
+### Changed — `options_analyzer.py`
+- `fetch_historical_iv` → **`fetch_historical_hv`**（连带 `_get_sample_historical_iv`
+  → `_get_sample_historical_hv`、`last_hist_iv_is_sample` → `last_hist_hv_is_sample`）：
+  函数名不再撒谎，如实说明它产出的是已实现波动率序列
+- **移除 `iv_premium` 乘法**：给整条序列乘同一标量对 rank 贡献恒为零，clamp
+  生效时反而制造失真（实测 NVDA 输出 **0.00** vs 真实 HV Rank **62.91**）
+- **删除已死的 `_estimate_iv_premium`**（唯一调用点已移除；IV/HV 价差信号另有
+  `market_intelligence.calculate_iv_rv_spread` 负责，无功能损失）
+- **缓存键换代 `hist_iv_v3` → `hist_hv_v4`**：旧键存的是乘过 premium 的值，
+  语义已变，绝不可复用
+- **hv_proxy 路径改为同口径比较**：拿**当前 HV** 比 **历史 HV 分布**（同一量纲），
+  不再拿真实 IV 比 HV 分布——后者正是 clamp 失真的根源。展示用的 `iv_current`
+  仍是真实 IV，不受影响
+
+### Fixed — 改名过程中发现并避免的静默陷阱
+- 样本守卫写的是 `getattr(self.fetcher, "last_hist_iv_is_sample", False)`——
+  属性名是**字符串字面量**，全局改名碰不到它。若漏改，getattr 取默认值 False
+  ⇒ 守卫永久失效且无任何报错。已同步修正
+- 该守卫另加 `_iv_rank_source == "hv_proxy"` 限定：真实 IV 历史路径不依赖
+  `hist_hv`，不应因"HV 序列是样本数据"被误置 None
+
+### 验证
+- 实测 NVDA：`iv_rank 62.91` == 手算纯 HV Rank `62.91`，完全一致（同一只票
+  修复前 clamp 生效时输出 0.00）；`iv_current 41.38` 展示值不受影响
+- 全量 1257 测试通过（4 处测试 monkeypatch 目标随改名同步更新）
+
+### 现状小结（IV Rank 两条路径）
+| 路径 | 触发条件 | 语义 | 标注 |
+|---|---|---|---|
+| 真实 IV Rank | 自攒样本 ≥63 交易日 | 真 IV 在自身历史分布中的位置 | `real_iv_{N}d` |
+| HV Rank 代理 | 样本不足（当前全部标的） | 当前 HV 在历史 HV 分布中的位置，**已无失真** | `hv_proxy` |
+
 ## [0.43.18] — 2026-08-14 — 自攒真实 IV 历史：IV Rank 从"HV 排名冒名顶替"走向真值
 
 > 用户追问"为什么不是真 IV Rank 数据"，查证后确认问题比"函数名撒谎"更深。
