@@ -5,6 +5,69 @@
 
 ---
 
+## [0.43.24] — 2026-08-15 — VIX 假数据：兜底值 20.0 冒充观测值，13/88 天
+
+### 背景
+用户发现深度报告写 `VIX: 20 (elevated)`，而 CBOE 官方数据当天是 14.6（极度平静）——
+**方向相反的信号**。
+
+`20` 是 `fred_macro.py:111` 的 `base` 常量。触发条件是 `if not data: return base`：
+7 个宏观标的（^VIX/^TNX/^FVX/DXY/^GSPC/TLT/GLD）**全部**抓取失败。
+根因是 yfinance 限流——宏观数据在 30 只标的扫完之后才抓，配额已耗尽
+（2026-08-14 全天 363 条 Too Many Requests，每个标的的失败只记 `_log.debug`）。
+
+实测 88 个扫描日：
+
+| 月份 | 兜底天数 |
+|---|---|
+| 3–5 月 | 0 |
+| 6 月 | 3 |
+| 7 月 | 5 |
+| **8 月** | **9 个扫描日里 5 天** |
+
+识别标记是 `yield_curve: "unknown"`（base 原值）。**13/88 天用的是假 VIX，且在加速。**
+
+### Fixed — Step 1：降级值不再冒充观测值（`swarm_agents/guard_bee.py`）
+`fred_macro` 其实**老实标注了** `data_source="fallback"`，但 GuardBee 不看，
+把 20.0 写进 `details["vix"]`。全仓确认 `data_source` 在日报与 ML 报告里
+**从没被读过**——诚实标记在边界上被丢掉了。
+
+- 降级时不记录 `vix` / `yield_curve` / `gold_trend`，改为留下 `macro_data_source`
+- 渲染层无需改动：`generate_deep_v2:2706` 早就把 None 显示成 `N/A`
+- `dashboard_renderer:2101` 一直在判这个标记，本次是补齐 GuardBee 缺失的路径
+- 评分不受影响：base 的 20.0 / "unknown" / "stable" 本就不触发任何 `regime_vote` 分支
+
+### Added — Step 2：VIX 走 CBOE 优先（`cboe_vix.py`，新模块）
+`fred_macro` 直接调 yfinance，**绕过了项目既定的 CBOE 优先链**
+（CLAUDE.md：CBOE → yfinance → AV → Finnhub）。
+
+- 数据源 `cdn.cboe.com/.../VIX_History.csv`：无 key、无限流、1990 年至今 **9251 个交易日**
+- 纯 urllib，复用 `cboe_options._CBOE_SEM` 串行化（本机老 SSL 栈扛不住并发 HTTPS）
+- 磁盘缓存 6h TTL + 原子替换；网络失败回落陈旧缓存；**都没有则返回 None，绝不猜**
+- 顺带提供真实 252 日分位（此前无真实样本）
+- **逐字段判源**：新增 `vix_source`（`cboe`/`yfinance`/`fallback`）。yfinance 全灭时
+  CBOE 仍可能供上真实 VIX，此时 `data_source` 保持 `fallback`（其余字段确实降级），
+  但 VIX 这一项是观测值。一个全局开关会把真 VIX 和假收益率曲线一起丢掉。
+- `_classify_vix` 抽成共用函数：现有两条产出路径，同口径才不会让同一个 VIX
+  得到不同 regime 标签
+
+### 验证
+- 模拟 yfinance 全量 429 → `vix=14.25` / `vix_source=cboe` / 其余诚实降级
+- CBOE 的 2026-08-13 收盘 **14.63**，与用户独立数据源精确一致
+- 11 条回归测试（含"退回旧逻辑必须变红"的非空跑验证），全量 **1285 通过**
+
+### 📌 口径提醒（易致反向结论）
+`get_vix_percentile()` 返回的是**恐慌分位**（比多少比例的交易日更高）。
+实测 VIX 14.25 → **2.0%**，即极度平静；"平静度分位"是 `100 - 本值` = 98.0%。
+两者方向相反，混用会得到完全相反的结论——本项目已被同类符号反向咬过一次
+（BullVeto 读反字段，v0.43.9）。
+
+### 🔗 与 v0.43.23 同根
+`data_pipeline.py:341` 注明 `momentum_5d`/`volume_ratio` 也是"从 yfinance 历史
+K线独立获取"。v0.43.23 的 BuzzBee None 崩溃与本次 VIX 20 假数据，是同一条
+限流链上的两个出口：**一个诚实返回 None 把报告搞崩，一个返回合法 float 悄悄
+污染结论**。会崩的降级是幸运的。
+
 ## [0.43.23] — 2026-08-15 — ML 报告因 None 崩溃：每日 11/12 份静默丢失一个月
 
 ### Fixed — `generate_ml_report.py`
