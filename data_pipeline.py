@@ -29,6 +29,17 @@ import logging
 import threading
 from typing import Dict, Optional, List, Tuple
 from collections import deque
+
+
+def _get_secret(name: str) -> str:
+    """取集中管理的 key。config 不可用时退回环境变量——
+    data_pipeline 设计上可独立于项目其余部分使用。"""
+    try:
+        from config import get_secret
+        return get_secret(name) or ""
+    except Exception:  # noqa: BLE001
+        import os as _os
+        return _os.environ.get(name, "")
 from dataclasses import dataclass, field
 from datetime import datetime, time as _dt_time
 
@@ -481,7 +492,11 @@ class AlphaVantageSource:
     """降级源 1：Alpha Vantage（免费 25次/天，需 API Key）"""
 
     def __init__(self):
-        self.api_key = os.environ.get("ALPHA_VANTAGE_API_KEY", "")
+        # v0.43.26: 原为 os.environ.get("ALPHA_VANTAGE_API_KEY")——环境变量未设，
+        # 而 key 实际在 ~/.alpha_hive_av_key。改用集中的 config.get_secret
+        # （环境变量优先 → 降级文件，且校验文件权限）。
+        # 兼容旧环境变量名：注册表登记的是 AV_API_KEY，与此处历史用名不同。
+        self.api_key = _get_secret("AV_API_KEY") or os.environ.get("ALPHA_VANTAGE_API_KEY", "")
         self.breaker = ObservableCircuitBreaker("alpha_vantage", failure_threshold=5, recovery_timeout=120)
         self.name = "alpha_vantage"
 
@@ -533,7 +548,9 @@ class FinnhubSource:
     """降级源 2：Finnhub（免费 60次/分钟，需 API Key）"""
 
     def __init__(self):
-        self.api_key = os.environ.get("FINNHUB_API_KEY", "")
+        # v0.43.26: 同上。key 在 ~/.alpha_hive_finnhub_key，环境变量从未设过，
+        # 所以这条降级链的最后一环一直是死的。
+        self.api_key = _get_secret("FINNHUB_API_KEY")
         self.breaker = ObservableCircuitBreaker("finnhub", failure_threshold=5, recovery_timeout=90)
         self.name = "finnhub"
 
@@ -598,8 +615,11 @@ class MultiSourceFetcher:
         self._sources: List = [
             CBOESource(),
             YFinanceSource(),
-            AlphaVantageSource(),
+            # v0.43.26: Finnhub 提到 AV 之前。额度差一个量级——Finnhub 60 次/分钟，
+            # AV 只有 25 次/天。而需要降级的场景恰恰是"30 只标的批量抓取失败"，
+            # 把日额度只有 25 的源排在前面，等于第 26 只起必然再降一级。
             FinnhubSource(),
+            AlphaVantageSource(),
         ]
         self._cache: Dict[str, StockData] = {}
         self._cache_ts: Dict[str, float] = {}

@@ -108,6 +108,10 @@ _SECRET_REGISTRY = {
     "SLACK_USER_TOKEN": "~/.alpha_hive_slack_user_token",
     "FRED_API_KEY": "~/.alpha_hive_fred_key",
     "AV_API_KEY": "~/.alpha_hive_av_key",
+    # v0.43.26: 此前未登记，而 data_pipeline 只读环境变量（未设）→
+    # FinnhubSource 每次 `if not self.api_key: return None`，
+    # "CBOE→yfinance→AV→Finnhub" 链的最后一环从未生效过
+    "FINNHUB_API_KEY": "~/.alpha_hive_finnhub_key",
     "ALPHA_VANTAGE_KEY": None,
     "STOCKTWITS_TOKEN": None,
     "GMAIL_APP_PASSWORD": None,
