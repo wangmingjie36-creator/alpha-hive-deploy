@@ -440,7 +440,7 @@ class MLEnhancedReportGenerator:
         unusual_activity = options.get("unusual_activity", [])
         key_levels = options.get("key_levels", {})
 
-        # 判断 IV Rank 颜色
+        # 判断 IV Rank 颜色（None 已在上方 L431 归一为 50，此处无需再判）
         if iv_rank < 30:
             iv_color = "#28a745"  # 绿色，低 IV
             iv_label = "低 IV"
@@ -706,7 +706,10 @@ class MLEnhancedReportGenerator:
         insider = details.get("insider", {})
         trades = insider.get("notable_trades", [])
         crowding = details.get("crowding_score", 0)
-        momentum = details.get("momentum_5d", 0)
+        # 与 _ch3_buzz 同型：键存在且为 None 时 .get 默认值不生效。ScoutBee 当前
+        # 该字段健康（2026-08-14 快照 0/27 为 None），加守卫只为防同源降级把
+        # BuzzBee 那个崩溃点平移过来。
+        momentum = details.get("momentum_5d")
         score = ad.get("score", 0)
         direction = ad.get("direction", "neutral")
         trade_rows = ""
@@ -727,7 +730,8 @@ class MLEnhancedReportGenerator:
         insider_sentiment = insider.get("sentiment", "neutral")
         ins_cn = self._dir_cn(insider_sentiment)
         ins_color = self._dir_color(insider_sentiment)
-        mom_color = "#28a745" if momentum > 0 else "#dc3545"
+        mom_color = "#6c757d" if momentum is None else ("#28a745" if momentum > 0 else "#dc3545")
+        mom_txt = "—" if momentum is None else f"{momentum:+.2f}%"
         return f"""
         <div class="section">
             <h2>🐝 ScoutBee — 聪明钱侦察</h2>
@@ -735,7 +739,7 @@ class MLEnhancedReportGenerator:
                 <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Signal 评分</div></div>
                 <div class="stat"><div class="num" style="color:{ins_color}">{ins_cn}</div><div class="lbl">内部人情绪</div></div>
                 <div class="stat"><div class="num">{crowding:.0f}</div><div class="lbl">拥挤度 /100</div></div>
-                <div class="stat"><div class="num" style="color:{mom_color}">{momentum:+.2f}%</div><div class="lbl">5日动量</div></div>
+                <div class="stat"><div class="num" style="color:{mom_color}">{mom_txt}</div><div class="lbl">5日动量</div></div>
             </div>
             <h3>近期内部人交易（Form 4）</h3>
             <table>
@@ -1172,12 +1176,20 @@ class MLEnhancedReportGenerator:
         score = ad.get("score", 0)
         direction = ad.get("direction", "neutral")
         sentiment_pct = det.get("sentiment_pct", det.get("sentiment_score", 50))
-        momentum = det.get("momentum_5d", 0)
-        vol_ratio = det.get("volume_ratio", 1)
+        # v0.43.23: 上游 BuzzBee 对缺价格/成交量的降级源刻意写入 None（见 buzz_bee.py
+        # P0-2：不拿 0 冒充"无动量"、不拿 1 冒充"正常量"）。而 .get(k, 默认) 只在**键
+        # 缺失**时用默认值——键存在且为 None 时默认值形同虚设，下面的 `> 0` 与
+        # `:+.2f` 都会抛 TypeError。实测 2026-08-14 快照 27/28 只该字段为 None，
+        # 这正是 7/15 起每日 ML 报告 0~1/12 成功的唯一原因。
+        momentum = det.get("momentum_5d")
+        vol_ratio = det.get("volume_ratio")
         reddit = det.get("reddit", {})
         fear_greed = det.get("fear_greed_index", det.get("components", {}).get("fear_greed", None))
         sent_color = "#28a745" if sentiment_pct > 60 else ("#dc3545" if sentiment_pct < 40 else "#ffc107")
-        mom_color = "#28a745" if momentum > 0 else "#dc3545"
+        # 缺数显示"—"并用中性灰，绝不用 0 / 1 顶替（项目硬规则：不编数据）
+        mom_color = "#6c757d" if momentum is None else ("#28a745" if momentum > 0 else "#dc3545")
+        mom_txt = "—" if momentum is None else f"{momentum:+.2f}%"
+        vol_txt = "—" if vol_ratio is None else f"{vol_ratio:.2f}×"
         fg_text = ""
         if fear_greed is not None:
             fg_label = "极度恐惧" if fear_greed < 25 else ("恐惧" if fear_greed < 45 else ("中性" if fear_greed < 55 else ("贪婪" if fear_greed < 75 else "极度贪婪")))
@@ -1196,8 +1208,8 @@ class MLEnhancedReportGenerator:
             <div class="grid-4" style="margin-bottom:15px;">
                 <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Sentiment 评分</div></div>
                 <div class="stat"><div class="num" style="color:{sent_color}">{sentiment_pct:.0f}%</div><div class="lbl">正面情绪占比</div></div>
-                <div class="stat"><div class="num" style="color:{mom_color}">{momentum:+.2f}%</div><div class="lbl">5日动量</div></div>
-                <div class="stat"><div class="num">{vol_ratio:.2f}×</div><div class="lbl">成交量比</div></div>
+                <div class="stat"><div class="num" style="color:{mom_color}">{mom_txt}</div><div class="lbl">5日动量</div></div>
+                <div class="stat"><div class="num">{vol_txt}</div><div class="lbl">成交量比</div></div>
                 {fg_text}
             </div>
             {reddit_html}
@@ -2172,7 +2184,9 @@ def main():
             successful_count += 1
 
         except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
-            _log.warning("%s 分析失败: %s", ticker, str(e)[:100])
+            # v0.43.23: 必须带 exc_info。此前只记 str(e)[:100]，
+            # 导致 _ch3_buzz 的 None 崩溃从 2026-07-15 起潜伏一个月无人定位。
+            _log.warning("%s 分析失败: %s", ticker, str(e)[:100], exc_info=True)
 
     # ⭐ Task 3: 等待所有异步文件写入完成
     if MLEnhancedReportGenerator._file_writer_pool:
@@ -2180,6 +2194,15 @@ def main():
 
     _log.info("=" * 60)
     _log.info("ML 增强报告生成完毕！成功: %d/%d", successful_count, len(tickers))
+    # v0.43.23: 成功率过低必须刺眼。此前 2026-07-15~08-14 连续一个月 0~1/12，
+    # 而编排器只看退出码 → 天天报"所有步骤成功"，网站照常更新、只是少了 11 份报告。
+    _total = len(tickers)
+    if _total and successful_count < _total * 0.5:
+        _log.error(
+            "🚨 ML 报告成功率异常：%d/%d（<50%%）。上方每条『分析失败』都带完整调用栈，"
+            "请直接查栈顶定位；不要只看这行汇总。",
+            successful_count, _total,
+        )
     _log.info("所有文件已完成写入")
     _log.info("=" * 60)
 
