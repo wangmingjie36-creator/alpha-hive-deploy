@@ -5,6 +5,49 @@
 
 ---
 
+## [0.43.26] — 2026-08-15 — 降级链的后两环从未生效：AV/Finnhub key 只读环境变量
+
+### Fixed — `config.py` / `data_pipeline.py`
+`AlphaVantageSource` / `FinnhubSource` 都只读 `os.environ`
+（`ALPHA_VANTAGE_API_KEY` / `FINNHUB_API_KEY`），而 key 实际在
+`~/.alpha_hive_av_key` / `~/.alpha_hive_finnhub_key`，环境变量**从未设过** →
+两个源每次 `if not self.api_key: return None`。
+
+**"CBOE→yfinance→AV→Finnhub" 的后两环从未生效过。**
+
+又一例"防御看着在、其实是死的"：链子写得完整、源类也实现了，只是永远拿不到
+key，静默返回 None，日志里一行都没有。而这条链存在的全部意义，就是 CBOE 与
+yfinance 双双失效时兜底——**正是最近一个月反复发生的场景**（v0.43.23 的 ML
+报告崩溃、v0.43.24 的 VIX 假数据、v0.43.25 的动量伪造，根因都是限流）。
+
+修复用项目现成的 `config.get_secret`（环境变量优先 → 降级文件 + 权限校验），
+**不手搓第二份读文件逻辑**：
+- `config._SECRET_REGISTRY` 补登 `FINNHUB_API_KEY`（此前漏登记）
+- AV 兼容旧环境变量名 `ALPHA_VANTAGE_API_KEY`（注册表登记的是 `AV_API_KEY`，
+  两个名字对不上也是失效原因之一）
+- `data_pipeline._get_secret` 薄封装：config 不可用时退回环境变量
+  （该模块设计上可独立于项目其余部分使用）
+
+### Changed — 降级链顺序
+Finnhub 提到 AV 之前。额度差一个量级：
+
+| 源 | 免费额度 |
+|---|---|
+| Finnhub | 60 次/**分钟** |
+| Alpha Vantage | 25 次/**天** |
+
+需要降级的场景恰恰是"30 只标的批量抓取失败"。把日额度只有 25 的源排在前面，
+等于第 26 只起必然再降一级——排序本身就让这一环失去意义。
+
+### 验证
+- 两源实测均可用，NVDA 报价一致（**225.16**）
+- 两者都正确保持 `momentum_5d=None`（纯报价源无历史）→ 回落 v0.43.25 的自攒索引
+- 7 条回归测试（含"退回旧逻辑必须变红"的非空跑验证），全量 **1308 通过**
+
+### 💰 费用说明
+两者均为**免费额度**，无 API 费用。启用后 AV 在极端降级日可能触及 25 次/天上限，
+由熔断器（`failure_threshold=5`）接管，不会影响主流程。
+
 ## [0.43.25] — 2026-08-15 — momentum_5d 脱离 yfinance 限流；拆掉 ScoutBee 的 0.0 伪造
 
 ### 背景：同一份故障的两个出口
