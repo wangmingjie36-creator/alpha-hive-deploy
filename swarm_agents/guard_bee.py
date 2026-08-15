@@ -267,8 +267,17 @@ class GuardBeeSentinel(BeeAgent):
         except (ImportError, Exception) as e:
             _log.debug("fred_macro 不可用: %s", e)
 
+        # v0.43.24: fred_macro 在 7 个宏观标的全部抓取失败时返回 base 常量
+        # （vix=20.0 / yield_curve="unknown" / gold_trend="stable"），并老实标注
+        # data_source="fallback"。此前本函数不看这个标记，于是 20.0 被当作观测值
+        # 写进 details["vix"] → 深度报告渲染成"VIX 20（偏高恐慌）"，与真实的
+        # 14.6（极度平静）方向相反。实测 88 个扫描日里 13 天如此，8 月 9 天里占 5 天。
+        # dashboard_renderer:2101 早就在判这个标记，这里是补齐缺口。
+        _macro_degraded = macro.get("data_source") == "fallback"
+        details["macro_data_source"] = macro.get("data_source", "unknown")
+
         # VIX
-        vix = macro.get("vix")
+        vix = None if _macro_degraded else macro.get("vix")
         if vix is not None:
             details["vix"] = vix
             if vix > 35:
@@ -280,9 +289,10 @@ class GuardBeeSentinel(BeeAgent):
             elif vix < 15:
                 regime_votes["risk_on"] += 1
 
-        # 收益率曲线
-        yc = macro.get("yield_curve", "unknown")
-        details["yield_curve"] = yc
+        # 收益率曲线（降级时不记录，避免 base 的 "unknown" 被当成一次真实观测）
+        yc = "unknown" if _macro_degraded else macro.get("yield_curve", "unknown")
+        if not _macro_degraded:
+            details["yield_curve"] = yc
         if yc == "inverted":
             regime_votes["risk_off"] += 2
             signals.append("收益率曲线倒挂")
@@ -290,8 +300,9 @@ class GuardBeeSentinel(BeeAgent):
             regime_votes["risk_off"] += 1
 
         # 黄金避险
-        gld = macro.get("gold_trend", "stable")
-        details["gold_trend"] = gld
+        gld = "stable" if _macro_degraded else macro.get("gold_trend", "stable")
+        if not _macro_degraded:
+            details["gold_trend"] = gld
         if gld == "surging":
             regime_votes["risk_off"] += 2
             signals.append("黄金飙升（避险需求强）")
