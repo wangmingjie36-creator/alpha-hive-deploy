@@ -77,3 +77,29 @@ class TestHealthyMacroUnaffected:
         d = _details(macro)
         assert d["vix"] == 14.25
         assert d["macro_data_source"] == "unknown"
+
+
+class TestCBOEVixSurvivesYfinanceOutage:
+    """v0.43.24 Step 2：yfinance 全灭时 CBOE 仍可能供上真实 VIX。
+    此时 data_source 仍是 "fallback"（其余字段确实降级了），但 VIX 是观测值，
+    不该被一起丢掉——所以判定必须逐字段，而不是一个全局开关。"""
+
+    _PARTIAL = {
+        **_FALLBACK,
+        "vix": 14.25, "vix_regime": "low", "vix_source": "cboe",
+        "summary": "宏观数据不可用（VIX 14.2 来自 CBOE，其余降级）",
+    }
+
+    def test_real_cboe_vix_is_recorded_even_when_rest_degraded(self):
+        d = _details(self._PARTIAL)
+        assert d["vix"] == 14.25
+        assert d["vix_source"] == "cboe"
+
+    @pytest.mark.parametrize("field", ["yield_curve", "gold_trend"])
+    def test_other_fields_still_suppressed(self, field):
+        """VIX 真了不代表收益率曲线/黄金也真了"""
+        assert field not in _details(self._PARTIAL)
+
+    def test_explicit_fallback_vix_source_still_suppressed(self):
+        """vix_source 显式为 fallback 时照样不记录"""
+        assert "vix" not in _details({**_FALLBACK, "vix_source": "fallback"})

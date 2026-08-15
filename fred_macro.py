@@ -102,6 +102,22 @@ def get_macro_context() -> Dict:
     return result
 
 
+def _classify_vix(vix: float) -> str:
+    """VIX 绝对水平分档。抽成函数是因为 v0.43.24 后有两条产出路径
+    （正常路径 / yfinance 全灭但 CBOE 可用的部分降级路径），
+    两边必须同口径，否则同一个 VIX 会得到不同 regime 标签。
+    与 cboe_vix.get_vix_regime 保持一致。"""
+    if vix < 15:
+        return "low"
+    if vix < 20:
+        return "moderate"
+    if vix < 30:
+        return "elevated"
+    if vix < 40:
+        return "high"
+    return "spike"
+
+
 def _fetch_macro_data() -> Dict:
     """内部：实际拉取宏观数据"""
 
@@ -121,6 +137,9 @@ def _fetch_macro_data() -> Dict:
         "macro_tailwinds": [],
         "summary": "宏观数据不可用（降级到默认值）",
         "data_source": "fallback",
+        # v0.43.24: VIX 单独标源。它可以在 yfinance 全灭时仍由 CBOE 供上，
+        # 此时 data_source 仍是 fallback（其余字段确实降级了），但 VIX 是真的。
+        "vix_source": "fallback",
     }
 
     try:
@@ -152,23 +171,42 @@ def _fetch_macro_data() -> Dict:
             except Exception as e:
                 _log.debug("宏观数据获取失败 %s: %s", sym, e)
 
+        # ---- VIX：CBOE 优先（v0.43.24 Step 2）----
+        # 原先直接用 yfinance 的 ^VIX，绕过了项目既定的 CBOE 优先链。宏观数据在
+        # 30 只标的扫完之后才抓，配额已耗尽（2026-08-14 全天 363 条 429），7 个
+        # 标的全灭 → 整体降级到 base 的 vix=20.0，被当作"偏高恐慌"写进报告，
+        # 而当天真实 VIX 是 14.25。CBOE 的 VIX_History.csv 无 key、无限流。
+        _cboe_vix = None
+        try:
+            from cboe_vix import get_vix_spot as _cboe_vix_spot
+            _spot = _cboe_vix_spot()
+            if _spot:
+                _cboe_vix = _spot[0]
+        except Exception as _e_cv:  # noqa: BLE001
+            _log.debug("CBOE VIX 不可用，回落 yfinance: %s", _e_cv)
+
         if not data:
+            # yfinance 全灭。但 CBOE 若拿到真实 VIX，就不该让它跟着变成 20.0 ——
+            # 其余字段照旧降级，只把 VIX 这一项换成观测值并如实标源。
+            if _cboe_vix is not None:
+                _partial = dict(base)
+                _partial["vix"] = _cboe_vix
+                _partial["vix_regime"] = _classify_vix(_cboe_vix)
+                _partial["vix_source"] = "cboe"
+                _partial["summary"] = f"宏观数据不可用（VIX {_cboe_vix:.1f} 来自 CBOE，其余降级）"
+                return _partial
             return base
 
         # ---- VIX 分析 ----
-        vix = data.get("VIX", {}).get("last", 20.0)
+        if _cboe_vix is not None:
+            vix = _cboe_vix
+            _vix_source = "cboe"
+        else:
+            vix = data.get("VIX", {}).get("last", 20.0)
+            _vix_source = "yfinance" if "VIX" in data else "fallback"
         vix_change = data.get("VIX", {}).get("change_pct", 0.0)
 
-        if vix < 15:
-            vix_regime = "low"
-        elif vix < 20:
-            vix_regime = "moderate"
-        elif vix < 30:
-            vix_regime = "elevated"
-        elif vix < 40:
-            vix_regime = "high"
-        else:
-            vix_regime = "spike"
+        vix_regime = _classify_vix(vix)
 
         # ---- 10Y 利率分析 ----
         tnx = data.get("TNX", {}).get("last", 4.5)
@@ -429,6 +467,7 @@ def _fetch_macro_data() -> Dict:
             "hy_spread_chg_bp": fred_data.get("hy_spread_chg_bp"),
             "summary": " | ".join(summary_parts),
             "data_source": "yfinance" + ("+fred" if fred_data else ""),
+            "vix_source": _vix_source,
         }
 
     except ImportError:

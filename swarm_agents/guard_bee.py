@@ -276,8 +276,14 @@ class GuardBeeSentinel(BeeAgent):
         _macro_degraded = macro.get("data_source") == "fallback"
         details["macro_data_source"] = macro.get("data_source", "unknown")
 
-        # VIX
-        vix = None if _macro_degraded else macro.get("vix")
+        # VIX 单独判源（v0.43.24 Step 2）：yfinance 全灭时 CBOE 仍可能供上真实
+        # VIX，此时 data_source 仍是 "fallback"（其余字段确实降级），但 VIX 是
+        # 观测值，不该被一起丢掉。逐字段判定优于一个全局开关。
+        # 缺 vix_source 的旧格式回落到粗粒度判定，避免无谓地把健康数据判死
+        _vix_src = macro.get("vix_source")
+        _vix_real = (_vix_src in ("cboe", "yfinance")) if _vix_src else not _macro_degraded
+        details["vix_source"] = macro.get("vix_source", "unknown")
+        vix = macro.get("vix") if _vix_real else None
         if vix is not None:
             details["vix"] = vix
             if vix > 35:
