@@ -278,3 +278,20 @@ class TestCompactIndex:
         ivs, n = load_iv_history("NVDA", str(tmp_path))
         assert n == 6, f"历史被吞掉了，只剩 {n} 条"
         assert 99.0 in ivs and 41.0 in ivs  # 当日记录与历史都在
+
+    def test_coverage_report_sees_index_only_tickers(self, tmp_path):
+        """v0.43.21 二次检查：索引已是唯一真相源，仅有索引（无快照）的票也必须被统计"""
+        from iv_history import append_observation
+        append_observation("ONLYIDX", str(tmp_path), "2026-08-14", 30.0)
+        rep = coverage_report(str(tmp_path))
+        assert rep.get("ONLYIDX") == 1
+
+    def test_index_survives_snapshot_pruning(self, tmp_path):
+        """快照被清理后索引仍可用——证明数据真正落在索引里，不依赖快照长期留存"""
+        from iv_history import append_observation
+        for i in range(1, 4):
+            append_observation("NVDA", str(tmp_path), f"2026-08-{i:02d}", 40.0 + i)
+        assert load_iv_history("NVDA", str(tmp_path))[1] == 3
+        for p in tmp_path.glob("options_snapshot_*.json"):
+            p.unlink()
+        assert load_iv_history("NVDA", str(tmp_path))[1] == 3

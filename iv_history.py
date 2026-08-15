@@ -6,9 +6,14 @@
 CBOE 延迟报价）只暴露**当前**期权链，无法回查历史 IV，付费源（ORATS /
 IVolatility / CBOE DataShop）才有。因此唯一可行路径是**自己每天记一笔**。
 
-本模块从每日期权快照 `cache/options_snapshot_{TICKER}_{DATE}.json` 读取
-`iv_raw_observed`（v0.43.18 起写入，是降级前的当日真实观测 IV），拼成真实
-IV 时间序列。
+存储：每票一个追加式紧凑索引 `cache/iv_history_{TICKER}.jsonl`（一行一天
+`{"date","iv"}`）。数据源是 options_analyzer 每次分析写入的 `iv_raw_observed`
+（降级前的当日真实观测 IV，v0.43.18 起）。
+
+v0.43.21 起**读取只走索引**：此前每次都全量解析该票所有期权快照（单票
+1120KB）只为取出几十个 float，30 只/扫描 680ms 且随天数线性增长。快照扫描
+现已降级为一次性迁移路径（sentinel `.iv_index_migrated_{TICKER}` 控制），
+不再进日常热路径。
 
 ⚠️ 为什么不用快照里的 `iv_current`：
 扫描固定在收盘后运行 → `_market_open` 恒 False → options_analyzer 的降级
@@ -256,9 +261,13 @@ def iv_rank_from_history(
 
 def coverage_report(cache_dir: str) -> dict:
     """自攒进度报告：各标的已积累多少个交易日的真实 IV 观测。"""
-    pattern = os.path.join(cache_dir, "options_snapshot_*.json")
     tickers: dict = {}
-    for path in glob.glob(pattern):
+    # 索引是 v0.43.21 起的唯一真相源，必须枚举（快照可能被清理或从无该字段）
+    for path in glob.glob(os.path.join(cache_dir, "iv_history_*.jsonl")):
+        name = os.path.basename(path)
+        tickers.setdefault(name[len("iv_history_"):-len(".jsonl")], None)
+    # 快照仍需枚举：尚未迁移过的票只在快照里有数据
+    for path in glob.glob(os.path.join(cache_dir, "options_snapshot_*.json")):
         m = _SNAP_RE.search(os.path.basename(path))
         if not m:
             continue
