@@ -134,6 +134,17 @@ def _detect_sentiment_price_divergence(
     """
     result: Dict = {"divergence_type": "none", "severity": 0, "score_adj": 0.0, "description": ""}
 
+    # v0.43.25: momentum_5d 现在可能是 None（诚实缺数据）。此前 ScoutBee 用
+    # `or 0.0` 伪造"持平"，0.0 永远够不到下面的阈值——实测近 28 个扫描日
+    # 395 次检测**全部** severity=0，整个背离检测是死的。
+    # 改诚实后必须在这里接住 None，否则 `momentum_5d < -price_thresh` 直接抛
+    # TypeError（与 v0.43.23 的 ML 报告崩溃同一模式）。
+    # 用 "unavailable" 而非 "none"：前者是"查不了"，后者是"查过、没背离"，
+    # 两者对下游的含义完全不同。
+    if momentum_5d is None:
+        result["divergence_type"] = "unavailable"
+        return result
+
     bull_trap_sent = _SM_CFG.get("divergence_bull_trap_sentiment", 65)
     hidden_opp_sent = _SM_CFG.get("divergence_hidden_opp_sentiment", 35)
     price_thresh = _SM_CFG.get("divergence_price_threshold", 3.0)

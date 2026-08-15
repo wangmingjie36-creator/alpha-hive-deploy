@@ -329,10 +329,39 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
                     out["volatility_20d"] = vol
 
         out["_price_from_hist"] = float(hist["Close"].iloc[-1])
-        return out
+        out["momentum_source"] = "yfinance"
+        return _fill_momentum_from_index(ticker, out)
     except Exception as e:
         _log.debug("_fetch_history_metrics %s failed: %s", ticker, e)
-        return None
+        return _fill_momentum_from_index(ticker, None)
+
+
+def _fill_momentum_from_index(ticker: str, out: Optional[Dict]) -> Optional[Dict]:
+    """yfinance 拿不到 momentum_5d 时，回落自攒收盘价索引（v0.43.25）。
+
+    索引来源是 pheromone.db 的权威价 + 期权快照，**完全不经外部接口**，
+    因此不受 yfinance 限流影响——而限流恰恰是本函数长期返回 None 的唯一原因
+    （2026-08-14 全天 363 条 429）。
+
+    volume_ratio 不回落：自攒序列只有收盘价、没有成交量，硬造一个比值等于
+    编数据。缺就是缺，让下游按 None 处理。
+    """
+    if out is not None and out.get("momentum_5d") is not None:
+        return out
+    try:
+        from price_history import momentum_5d as _idx_momentum
+        _cache = os.environ.get("ALPHA_HIVE_CACHE_DIR", "cache")
+        m = _idx_momentum(ticker, _cache)
+    except Exception as e:  # noqa: BLE001
+        _log.debug("[%s] 自攒动量索引不可用: %s", ticker, e)
+        return out
+    if m is None:
+        return out  # 索引也没有 → 保持 None，诚实缺数据
+    out = dict(out) if out else {}
+    out["momentum_5d"] = m
+    out["momentum_source"] = "price_index"
+    _log.info("[%s] momentum_5d 由自攒索引补上: %+.2f%%（yfinance 不可用）", ticker, m)
+    return out
 
 
 class CBOESource:
