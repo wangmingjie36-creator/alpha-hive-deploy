@@ -47,6 +47,144 @@ _MIN_VALID_IV = 5.0
 _MAX_VALID_IV = 150.0
 
 
+def _index_path(ticker: str, cache_dir: str) -> str:
+    return os.path.join(cache_dir, f"iv_history_{ticker}.jsonl")
+
+
+def append_observation(ticker: str, cache_dir: str, date: str, iv: Optional[float]) -> bool:
+    """把当日真实观测 IV 追加进紧凑索引（每票一个 JSONL，一行一天）。
+
+    v0.43.21：此前 `load_iv_history` 直接 glob + 全量解析该票的所有期权快照
+    （每份 ~46KB）只为取出一个 float——单票 4.3MB / 30 只一次扫描 ~680ms，
+    且随天数线性增长（攒满 252 天约 2.3s）且永不回落。改为写紧凑索引后，
+    读取成本与快照体积解耦。
+
+    幂等：同一天重复调用只保留最后一次（同日重跑/补跑不会产生重复行；
+    读取端亦按日期去重，后写覆盖）。
+
+    Returns: True=已写入 / False=跳过（值无效或当日已记录同值）
+    """
+    if iv is None:
+        return False
+    try:
+        iv = float(iv)
+    except (TypeError, ValueError):
+        return False
+    if not (_MIN_VALID_IV <= iv <= _MAX_VALID_IV):
+        return False
+
+    path = _index_path(ticker, cache_dir)
+    try:
+        # 幂等检查：末行已是同日同值则不重复写（避免同日多次扫描堆积冗余行）
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                last = None
+                for last in f:  # noqa: B007 - 只要最后一行
+                    pass
+            if last:
+                try:
+                    rec = json.loads(last)
+                    if rec.get("date") == date and abs(float(rec.get("iv", -1)) - iv) < 1e-9:
+                        return False
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass  # 末行损坏不阻断写入
+
+        os.makedirs(cache_dir, exist_ok=True)
+        # 单次 write 一整行：POSIX 追加模式下短写入实质原子，多票并行互不干扰
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"date": date, "iv": round(iv, 4)}, ensure_ascii=False) + "\n")
+        return True
+    except OSError as e:
+        _log.debug("[%s] IV 索引写入失败（不阻断评分）: %s", ticker, e)
+        return False
+
+
+def _read_index(ticker: str, cache_dir: str) -> dict:
+    """读紧凑索引 → {date: iv}。同日多行取最后一行（后写覆盖）。"""
+    path = _index_path(ticker, cache_dir)
+    if not os.path.exists(path):
+        return {}
+    by_date: dict = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    d, iv = rec.get("date"), float(rec.get("iv"))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue  # 跳过损坏行，不让单行错误废掉整个索引
+                if d and _MIN_VALID_IV <= iv <= _MAX_VALID_IV:
+                    by_date[d] = iv
+    except OSError as e:
+        _log.debug("[%s] IV 索引读取失败: %s", ticker, e)
+        return {}
+    return by_date
+
+
+def _scan_snapshots(ticker: str, cache_dir: str) -> dict:
+    """慢路径：从期权快照全量扫出 iv_raw_observed → {date: iv}。
+
+    仅用于索引缺失时的一次性重建（或索引被误删后的自愈），不进日常热路径。
+    """
+    by_date: dict = {}
+    for path in glob.glob(os.path.join(cache_dir, f"options_snapshot_{ticker}_*.json")):
+        m = _SNAP_RE.search(os.path.basename(path))
+        if not m or m.group(1) != ticker:
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                snap = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        iv = snap.get("iv_raw_observed")
+        if iv is None:
+            continue
+        try:
+            iv = float(iv)
+        except (TypeError, ValueError):
+            continue
+        if _MIN_VALID_IV <= iv <= _MAX_VALID_IV:
+            by_date[m.group(2)] = iv
+    return by_date
+
+
+def _migration_marker(ticker: str, cache_dir: str) -> str:
+    return os.path.join(cache_dir, f".iv_index_migrated_{ticker}")
+
+
+def merge_snapshots_into_index(ticker: str, cache_dir: str) -> int:
+    """把快照里的 iv_raw_observed **合并**进索引（冲突时索引优先）。返回索引总条数。
+
+    ⚠️ 用途仅限**一次性迁移/自愈**，绝不能进日常热路径——它要全量解析该票
+    所有快照（单票数 MB）。由 `load_iv_history` 用 sentinel 文件保证每票只跑
+    一次；跑过之后即便快照数远多于索引条数（老快照没有 iv_raw_observed 字段，
+    永远不会被收录）也不再重复扫描。
+
+    为什么必须是"合并"而非"覆盖"：analyze() 会先 append 当日观测再读取历史，
+    若此处覆盖，刚写入的当日记录会被抹掉。
+    """
+    by_date = _scan_snapshots(ticker, cache_dir)
+    by_date.update(_read_index(ticker, cache_dir))  # 索引更权威，覆盖同日快照值
+    if not by_date:
+        return 0
+    path = _index_path(ticker, cache_dir)
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for d in sorted(by_date):
+                f.write(json.dumps({"date": d, "iv": round(by_date[d], 4)}, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)  # 原子替换，避免半截文件被读到
+        _log.info("[%s] IV 索引迁移完成：%d 条", ticker, len(by_date))
+        return len(by_date)
+    except OSError as e:
+        _log.debug("[%s] IV 索引迁移失败: %s", ticker, e)
+        return 0
+
+
 def load_iv_history(
     ticker: str,
     cache_dir: str,
@@ -54,40 +192,35 @@ def load_iv_history(
 ) -> Tuple[List[float], int]:
     """读取该标的的真实观测 IV 序列（按日期升序）。
 
+    v0.43.21 读取策略：**紧凑索引优先**（`iv_history_{TICKER}.jsonl`）。
+    索引缺失时自动从快照重建一次（自愈），重建后仍走索引。日常热路径不再
+    解析任何快照——此前每次调用要全量解析该票所有快照（单票 4.3MB）只为
+    取出几十个 float。
+
     Args:
         ticker: 标的代码
-        cache_dir: 期权快照目录（通常是 OptionsDataFetcher.cache_dir）
+        cache_dir: 缓存目录（通常是 OptionsDataFetcher.cache_dir）
         max_days: 最多回看多少个交易日（默认 252）
 
     Returns:
         (iv_list, n_days) —— iv_list 按日期升序，每个交易日至多一条；
         n_days 是实际可用的独立观测天数。数据不足时返回 ([], 0)。
     """
-    pattern = os.path.join(cache_dir, f"options_snapshot_{ticker}_*.json")
-    by_date: dict = {}
-
-    for path in glob.glob(pattern):
-        m = _SNAP_RE.search(os.path.basename(path))
-        if not m or m.group(1) != ticker:
-            continue
-        date_str = m.group(2)
+    # 一次性迁移：把 v0.43.21 之前只存在于快照里的观测并入索引。
+    # 用 sentinel 文件保证每票只跑一次——不能用"索引为空"当条件：analyze()
+    # 会先 append 当日观测再读历史，索引因此恒非空，历史将被永久忽略
+    # （本设计缺陷由 test_uses_real_iv_when_enough_history 抓出）。
+    _marker = _migration_marker(ticker, cache_dir)
+    if not os.path.exists(_marker):
+        merge_snapshots_into_index(ticker, cache_dir)
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                snap = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(_marker, "w", encoding="utf-8") as f:
+                f.write("v0.43.21\n")
+        except OSError:
+            pass  # 标记写不成只会导致下次重复迁移，不影响正确性
 
-        iv = snap.get("iv_raw_observed")
-        if iv is None:
-            continue  # v0.43.18 之前的快照没有此字段，跳过（不退回 iv_current）
-        try:
-            iv = float(iv)
-        except (TypeError, ValueError):
-            continue
-        if not (_MIN_VALID_IV <= iv <= _MAX_VALID_IV):
-            continue
-        by_date[date_str] = iv  # 同日多次扫描：后写覆盖，保证一天一条
-
+    by_date = _read_index(ticker, cache_dir)
     if not by_date:
         return [], 0
 

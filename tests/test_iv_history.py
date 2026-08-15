@@ -210,3 +210,71 @@ class TestAnalyzerIntegration:
             f"iv_rank={r['iv_rank']} 偏低，疑似误用了降级后的 current_iv "
             f"(={r['iv_current']}) 而非今日原始观测 {r['iv_raw_observed']}"
         )
+
+
+class TestCompactIndex:
+    """v0.43.21 紧凑索引：避免为取一个 float 解析整份快照"""
+
+    def test_append_and_read_roundtrip(self, tmp_path):
+        from iv_history import append_observation
+        assert append_observation("NVDA", str(tmp_path), "2026-08-14", 44.3) is True
+        assert append_observation("NVDA", str(tmp_path), "2026-08-13", 41.0) is True
+        ivs, n = load_iv_history("NVDA", str(tmp_path))
+        assert ivs == [41.0, 44.3]  # 按日期升序，与写入顺序无关
+        assert n == 2
+
+    def test_append_is_idempotent_same_day_same_value(self, tmp_path):
+        from iv_history import append_observation
+        assert append_observation("NVDA", str(tmp_path), "2026-08-14", 44.3) is True
+        assert append_observation("NVDA", str(tmp_path), "2026-08-14", 44.3) is False  # 不重复写
+        assert load_iv_history("NVDA", str(tmp_path))[1] == 1
+
+    def test_same_day_rerun_with_new_value_overwrites(self, tmp_path):
+        """同日重跑取到新值时后写覆盖，不产生两条同日记录"""
+        from iv_history import append_observation
+        append_observation("NVDA", str(tmp_path), "2026-08-14", 44.3)
+        append_observation("NVDA", str(tmp_path), "2026-08-14", 45.9)
+        ivs, n = load_iv_history("NVDA", str(tmp_path))
+        assert n == 1 and ivs == [45.9]
+
+    def test_rejects_invalid_values(self, tmp_path):
+        from iv_history import append_observation
+        assert append_observation("NVDA", str(tmp_path), "2026-08-14", None) is False
+        assert append_observation("NVDA", str(tmp_path), "2026-08-14", 3.0) is False    # <5
+        assert append_observation("NVDA", str(tmp_path), "2026-08-14", 200.0) is False  # >150
+        assert load_iv_history("NVDA", str(tmp_path)) == ([], 0)
+
+    def test_corrupt_line_does_not_kill_whole_index(self, tmp_path):
+        from iv_history import append_observation, _index_path
+        append_observation("NVDA", str(tmp_path), "2026-08-13", 41.0)
+        with open(_index_path("NVDA", str(tmp_path)), "a", encoding="utf-8") as f:
+            f.write("{ 这不是合法 JSON\n")
+        append_observation("NVDA", str(tmp_path), "2026-08-14", 44.3)
+        ivs, n = load_iv_history("NVDA", str(tmp_path))
+        assert n == 2 and ivs == [41.0, 44.3]  # 坏行被跳过，其余照常可用
+
+    def test_migrates_existing_snapshots_once(self, tmp_path):
+        """v0.43.21 前只存在于快照里的观测必须被并入索引"""
+        for i in range(1, 6):
+            _write_snap(tmp_path, "NVDA", f"2026-08-{i:02d}", iv_raw_observed=40.0 + i)
+        ivs, n = load_iv_history("NVDA", str(tmp_path))
+        assert n == 5 and ivs == [41.0, 42.0, 43.0, 44.0, 45.0]
+        # 迁移后删掉快照，索引仍应可用（证明数据真的进了索引而非每次重扫）
+        for p in tmp_path.glob("options_snapshot_*.json"):
+            p.unlink()
+        assert load_iv_history("NVDA", str(tmp_path))[1] == 5
+
+    def test_migration_does_not_clobber_todays_appended_record(self, tmp_path):
+        """回归：analyze() 先 append 当日观测、再读历史——迁移必须合并而非覆盖
+
+        初版实现用"索引为空"作为重建条件，导致 append 写入一条后索引恒非空，
+        快照里的历史被永久忽略（test_uses_real_iv_when_enough_history 曾因此变红）。
+        """
+        from iv_history import append_observation
+        for i in range(1, 6):
+            _write_snap(tmp_path, "NVDA", f"2026-08-{i:02d}", iv_raw_observed=40.0 + i)
+        append_observation("NVDA", str(tmp_path), "2026-08-14", 99.0)  # 模拟当日先写
+
+        ivs, n = load_iv_history("NVDA", str(tmp_path))
+        assert n == 6, f"历史被吞掉了，只剩 {n} 条"
+        assert 99.0 in ivs and 41.0 in ivs  # 当日记录与历史都在

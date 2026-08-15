@@ -95,3 +95,7 @@ pheromone.db.bak*
 design_current/
 DESIGN_BRIEF.md
 .fuse_hidden*
+
+# v0.43.21 自攒 IV 历史：本地积累的索引与迁移标记（每台机器自行积累，不入库）
+cache/iv_history_*.jsonl
+cache/.iv_index_migrated_*

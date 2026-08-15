@@ -1555,6 +1555,16 @@ class OptionsAgent:
         # 是"自攒 IV 历史"（iv_history.py）唯一可信的原料。
         _iv_raw_observed = current_iv if raw_ivs and _MIN_VALID_IV <= current_iv <= _MAX_VALID_IV else None
 
+        # v0.43.21: 同步写入紧凑 IV 索引（每票一个 JSONL，一行一天）。
+        # 索引是 load_iv_history 的热路径数据源，避免为取一个 float 解析整份
+        # 快照。写失败不阻断评分（函数内部已吞 OSError 并返回 False）。
+        if _iv_raw_observed is not None:
+            try:
+                from iv_history import append_observation
+                append_observation(ticker, self.fetcher.cache_dir, _snap_date, _iv_raw_observed)
+            except Exception as _e_idx:  # noqa: BLE001 - 记账失败绝不影响评分
+                _log.debug("[%s] IV 索引写入跳过: %s", ticker, _e_idx)
+
         # ── 根因④ BUG FIX: 使用精确 DST 判断，避免 3/11 月换时误判 ──
         from datetime import timezone, timedelta as _td, time as _dtime
         _utc = datetime.now(timezone.utc)
