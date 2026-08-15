@@ -5,6 +5,38 @@
 
 ---
 
+## [0.43.22] — 2026-08-14 — v0.43.21 二次检查：修 coverage_report 漏统计 + 文档/配置修正
+
+### Fixed
+- **`coverage_report` 漏统计**：只从 `options_snapshot_*.json` 枚举标的，
+  但索引自 v0.43.21 起已是唯一真相源——仅有索引的票（快照被清理，或老快照
+  从无 `iv_raw_observed` 字段）会被漏掉，进度报告偏低。改为索引 + 快照并集
+- **模块 docstring 过时**：仍写"从每日期权快照读取"，与"索引优先、快照扫描
+  仅作一次性迁移"的实际策略不符
+- **`.gitignore` 冗余**：`cache/` 早在第 34 行整体忽略，v0.43.21 新加的两行
+  是死重量且误导（暗示需要单独忽略）
+
+### 二次检查其余项（均无问题）
+- **测试污染**：跑完整测试套件前后，生产 `cache/` 的索引与 sentinel 文件
+  数量一致（13→13），无污染——该项目 v0.41.3 曾被"测试 mock 写进生产快照"
+  咬过，故列为固定检查项
+- **改名残留**：`rebuild_index_from_snapshots` → `merge_snapshots_into_index`
+  全仓无残留引用
+- **gitignore 实际生效**：`git check-ignore -v` 确认索引与 sentinel 均被忽略
+- **积累起点**：今日 29 份快照中 2 份带 `iv_raw_observed`（v0.43.18 部署后
+  手动跑的两只），其余 27 只的今日快照早于部署 → 明日起全量正常积累
+
+### 新增测试（22 条，全量 1267 通过）
+- `test_coverage_report_sees_index_only_tickers`：仅索引标的必须被统计
+- `test_index_survives_snapshot_pruning`：快照清理后索引仍可用
+
+### ⚠️ 已知低severity项（未修，记录备查）
+`merge_snapshots_into_index` 的 `os.replace` 与并发 `append_observation`
+理论上存在竞态（A 读索引→写 tmp→replace 期间 B 追加，B 的行可能被覆盖），
+会丢失单日单票一条观测。触发条件苛刻：仅首次迁移窗口内、同一标的被并发
+分析——而 analyze() 内部是"先 append 再迁移"的单线程顺序，且期权快照缓存
+使同票同日重复计算极罕见。
+
 ## [0.43.21] — 2026-08-14 — IV 历史改用紧凑索引（补 v0.43.20 二次检查记录的性能问题）
 
 ### Changed — `iv_history.py` / `options_analyzer.py`
