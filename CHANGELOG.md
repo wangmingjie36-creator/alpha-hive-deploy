@@ -5,6 +5,471 @@
 
 ---
 
+## [0.44.4] — 2026-08-16 — 把「攒够样本后重跑 IC」挂成可追踪的东西
+
+### Added — `ic_rerun_readiness.py`
+v0.44.1~0.44.3 那批修复**只验证了接线正确，没验证方向变准** —— 后者要等新样本
+（实测约 **25 个不重叠周**，见 `experiments/ic_power_report.md`）。
+
+而「等攒够」这件事此前**没有承载物**：不在测试里（测试跑当下）、不在告警里
+（没有异常），全靠人记着。按半年的时间尺度，等于不存在。本工具就是那个承载物。
+
+**为什么不用定时提醒**：到期条件是**数据条件**（攒够不重叠周），
+而它取决于扫描连续性 —— 实测覆盖率只有 36.7%，日历时间与样本进度根本不成比例。
+所以判据必须读库算，不能拍一个日期。ETA 因此按**实际周产出率**外推，不按日历。
+
+判定内容：
+- 世代内已回填 T+7 的样本数与**不重叠 ISO 周数** vs 判据（默认 |IC|=0.090 → 25 周）
+- **只数已回填的**：未到期样本 `checked_t7=0`，只按日期过滤会让就绪度提前变绿
+- **标的池是否被中途换掉**（换了则样本同样不可比，与 `weekly_optimizer` 的闸 2 同思路）
+- 退出码 `0`=已就绪 / `1`=未就绪（正常）/ **`3`**=无法判定（2 被编排器占用）
+
+⚠️ **世代边界 `_COHORT_HISTORY` 是本工具的核心前提**，只追加不改写（审计轨迹）。
+`ml_predictor.expected_returns` 的 docstring 已加显著提示：再次改动
+`expected_returns` / `predict_probability` / RivalBee 特征来源时**必须追加一条**，
+否则新旧口径样本会被混算 —— 而混算是静默的：数字照出，只是没有意义。
+
+### Added — 两处挂载点（都不发 Slack）
+1. **编排器 Step 11**（每交易日）：用 `--out` 写 JSON 与 `status.json`，
+   就绪时在日志里显著标出并列出该跑的命令。
+   **刻意不自动跑那两条命令** —— IC 分析要人看结果并做判断。
+   与 Step 10 同样**不影响 `OVERALL_STATUS`**（"样本没攒够"是正常状态）。
+2. **周度只读诊断任务 SKILL.md**（每周日）：新增「每周必查」小节，
+   明确退出码含义与汇报方式，并禁止自行修改 `_COHORT_HISTORY` / `_WEEKS_REQUIRED`。
+
+两处都有是刻意的：周度任务是 LLM 型的，可能被跳过或改写；编排器每交易日都跑，
+是更可靠的心跳。
+
+### Added — `tests/test_ic_rerun_readiness.py`（22 项）
+最关键的一组是 `TestVerdictActuallyFlips`：**喂足 25 周必须真的翻成"已就绪"**
+—— 一个永远说"未就绪"的判定器和没有判定器是一样的。与
+`test_distribution_invariants.py::TestGuardsHaveTeeth` 同一思路。
+
+另含：世代历史只追加且按时间有序、每条都记了原因（只有日期的边界半年后无法判断
+是否仍适用）、边界之前的样本一条不算、差一周就是差一周（不许四舍五入）、
+未到期样本不计入周数、池被换掉会拦下就绪、加 1 只到 10 只池不该过敏、
+ETA 按产出率而非日历、退出码 3 不占用 2、`_WEEKS_REQUIRED` 与功效报告的三个
+关键数字一致（防两处悄悄分叉）。
+
+⚠️ 过程中这组测试两次抓出**我自己测试数据的错误**（早期序列跨过了世代边界、
+fixture 复用同一个库文件）——判定逻辑本身两次都是对的。
+
+### 验证
+全量套件 **1459 passed / 1 skipped / 1 xfailed**（新增 22 项）。
+新增两文件 `--select F` 全绿；`ml_predictor.py` 与 HEAD 的 F 错误一致；
+全仓 **F821 全绿**；`bash -n` 编排器通过；`config.py` 全程未被动过。
+
+当前实测状态：世代自 **2026-08-17** 起（明天），已攒 **0/25** 周。
+
+---
+
+## [0.44.3] — 2026-08-16 — RivalBee 移到 Phase-1.5，三个硬编码特征接上真实数据
+
+### Changed — `alpha_hive_daily_report.py` RivalBeeVanguard 从 Phase-1 移到 Phase-1.5
+新执行顺序：**Phase-1 并行(4~5 蜂) → Rival → Guard → Bear**。
+
+为什么移：RivalBee 的 ML 特征里有三个属别的蜂的产出 —— `catalyst_quality` 来自
+ChronosBee 的催化剂分、`iv_rank`/`put_call_ratio` 来自 OracleBee 的期权 details。
+留在 Phase-1 并行里读不到（同批蜂互相看不见），此前只能写死
+`"B+"` / `50.0` / `1.0` 三个常量。
+
+为什么排在 Guard **之前**：Rival 只依赖 Phase-1，不依赖 Guard；而 BearBee 读全板，
+把 Rival 排在前面能保证 Bear 仍看得到它。
+
+⚠️ `rival_agent` 必须进 `all_agents`：`inject_prefetched` 靠它注入
+`_prefetched_stock`，漏了会让 Rival 逐标的直接抓 yfinance（本项目三次事故的同一根因）。
+有测试钉住。
+
+代价：单标的耗时增加一个 Rival 的串行时长（此前与其他 4 只并行）。
+Rival 无独立网络调用（动量走预取的 stock、拥挤度走带缓存的共享路径），增量很小。
+
+### Added — `swarm_agents/base.py` `_read_peer(ticker, agent_id)`
+通用能力：读取**同一轮里已发布**的其他蜂的信息素条目，返回 `PheromoneEntry` 或
+`None`。走信息素板的 `details`（S3 本就为结构化数据交换设计），
+**不改 `analyze(ticker)` 签名** —— 那是所有蜂共用的契约。
+
+⚠️ 能不能读到完全取决于**执行阶段顺序**，docstring 里写明了这一点，
+并有测试断言该说明存在（否则下个调用方会以为它总能读到）。
+默认查 24 条（`get_top_signals` 默认 n=5 会截断 5~6 只蜂的一轮）。
+
+### Changed — `swarm_agents/rival_bee.py` 三个特征接真实数据
+- `catalyst_quality` ← ChronosBee 条目的 `self_score`，经
+  `catalyst_quality_from_score()` 转等级
+- `iv_rank` / `put_call_ratio` ← OracleBee 条目 details 的 `iv_rank` / **`pc_ratio`**
+  （注意板上的键名是 `pc_ratio`，与报告 `agent_details` 里的 `put_call_ratio` 是
+  两个不同的 dict —— 前者来自 `_publish`，后者来自 analyze 返回值）
+
+回落值刻意选**可与真实值区分**的档并留 debug 日志：`catalyst_quality` 回落 **"B"**
+而不是 "B+"（后者是 magnitude 1.0 的基准档，用它会让"拿不到数据"与"质量正好中等"
+不可区分）。iv_rank/pc_ratio 各自独立回落（Oracle 的 details 是条件填充的，
+缺一个键不能全丢）。
+
+### Changed — `catalyst_quality_from_score()` 提为模块级单一真相
+同一套阈值（8.5→A+ / 7.5→A / 6.5→B+ / 5.5→B）此前在**三处**各写一份嵌套
+`_cat_qual`（`ml_predictor.py` 内、`alpha_hive_daily_report.py:823`、
+`generate_ml_report.py:139`），与 `expected_returns` 曾经的三重复制同一个反模式。
+两处副本已改为 import 共享函数。有测试扫全仓确保不再增殖。
+
+⚠️ 阈值本身**未动**：历史 `predictions` 的 `catalyst_quality` 都按这套生成，
+改了会让新旧样本不可比。
+
+### Added — `tests/test_rival_bee_peer_features.py`（32 项）
+移完之后全量套件依然全绿 —— 因为**没有任何既有测试覆盖阶段顺序**。
+「跑通了」和「读到了」是两件事，本项目的招牌缺陷正是前者掩盖后者。故补：
+- `_read_peer`：读到/读不到/不跨标的泄漏/窗口够覆盖一轮/板损坏不崩
+- 等级转换阈值逐档 + 缺失给 "B" 不给 "B+" + 全仓只定义一处
+- **特征真的抵达 `TrainingData`**（拦截 `predict_for_opportunity` 检查入参）：
+  读到真值、读不到可区分回落、Oracle 部分缺键各自回落、脏值回落、
+  v0.44.2 的真实拥挤度未被回退
+- **阶段顺序契约（源码级）**：Rival 不在 Phase-1 列表、顺序为
+  Phase1→Rival→Guard→Bear、`rival_agent` 在 `all_agents` 里、
+  `_read_peer` 的 docstring 说明了顺序依赖
+
+顺序类缺陷的本质是**执行顺序错而非逻辑错**：把 Rival 挪回 Phase-1 并行，
+单元测试仍会全绿（它会安静地回落到三个中性常量），只有源码级断言能拦住。
+与 `test_chronos_bee_direction.py::test_pead_applied_after_scoring_block` 同一思路。
+
+### 端到端验证（隔离环境，不污染生产库）
+用 `ALPHA_HIVE_HOME`/`ALPHA_HIVE_DB_PATH` 指向临时目录跑
+`--swarm --no-llm --force --tickers NVDA`：
+- 日志确认新顺序：`8 Agent（Phase1 5 + Rival + Guard + Bear）` →
+  `⚔️ 竞争蜂` → `🛡️ 验证蜂` → `🐻 看空蜂`
+- ChronosBee 催化剂分 6.085 → 等级 "B"（转换路径生效）
+- 当轮 OracleBee 的 `iv_rank`/`pc_ratio` 为 None（周日无期权数据，
+  `options_analyzer.py:1461` 的降级路径）→ 回落正确生效，未崩
+- 已确认上游键存在：`options_analyzer.py:1788` 返回 `"iv_rank": iv_rank`(0-100)；
+  `options.put_call_ratio` 在生产 signal_archive 有 1095 行 / 146 个不同取值
+  ⇒ 正常交易日这两个特征有真实值
+
+### 顺带发现（未修，需决策）
+**`predictions` 的 `iv_rank` / `put_call_ratio` / `options_score` /
+`gamma_exposure` 四列在 933 行里 100% 为 NULL** —— schema 里有、从来没写过。
+又一例"看着有其实是死的"。与本次改动无关（那是 `PredictionStore` 的写入路径，
+与信息素板是两条路），但它意味着任何基于这四列的分析都是空转。
+
+### 验证
+全量套件 **1437 passed / 1 skipped / 1 xfailed**（新增 32 项）。
+改动的六个既有文件与 HEAD 的 F 错误**逐条一致**；新文件 `--select F` 全绿；
+全仓 **F821 全绿**；`config.py` 全程未被动过。
+
+---
+
+## [0.44.2] — 2026-08-16 — RivalBee 传入真实拥挤度；并否决把它做成收益项
+
+### Changed — `swarm_agents/rival_bee.py` 传真实 `crowding_score`
+不再写死 `crowding_score=50.0`，改走 ScoutBee / GuardBee **已在用的同一条路**
+（`CrowdingDetector` + `get_real_crowding_metrics(ticker, stock, board)`），
+**不另造一套**。拿不到时回落 `ml_predictor.CROWDING_NEUTRAL`（**不是 50.0**，
+理由见下）。
+
+成本可忽略：内部两个网络调用都有缓存（social TTL 3600s / short interest
+TTL 86400s），`stock` 由本蜂已取的 `_get_stock_data` 传入。ScoutBee 先跑时是
+缓存命中；最坏情况（与 ScoutBee 并行同时未命中）每标的多一次抓取；
+GuardBee 在 Phase-1.5 必然命中。
+
+只补这一个特征：`catalyst_quality` 属 ChronosBee 域、`iv_rank`/`put_call_ratio`
+属 OracleBee 域，而 RivalBee 在 **Phase-1 并行**运行，那时点它们还没产出。
+
+### Fixed — 中性点 50 是凭量表刻度猜的（差点重新引入 +2.67pp 正偏）
+实测 `crowding.score`（n=1057）：中位 **23.30**、p90 43.23、**≥50 的样本仅 4.6%**。
+检测器自己的档位（`<30` 低 / `30~60` 中 / `≥60` 高，中心约 45）**也与实测差得远**。
+
+**若直接把真实值传入而不重标中性点**，95.4% 的样本会被判"不拥挤 → 加分"，
+中位 tilt = −2.67pp ⇒ **重新引入 +2.67pp 系统性正偏**，把 v0.44.1 修掉的东西
+部分抵消回去。**所以这个改动不是"低风险局部改进"，除非两件一起做。**
+
+`CROWDING_NEUTRAL` 重标为 23.30（实测中位数），用途改为 `probability` 的中性
+回落值——那里 crowding 是**权重最大的特征**（0.18），回落值选错会直接偏斜概率。
+
+### Removed — 拥挤度不再进入 `expected_returns`（否决 v0.44.1 的倾斜项）
+用现成的四口径工具 `signal_archive.py --analyze`（噪音地板 |IC|=0.076、需 ≥3/4）
+复核后否决：
+
+| 信号 | 日度IC | t | 通过口径 | 判定 |
+|---|---|---|---|---|
+| `crowding.score`（连续） | **+0.1122** | +2.48 | **1/4** | 🟡 口径不足 |
+| `crowding.adj_factor`（分档） | −0.1117 | −2.81 | 3/4 | 🟢 候选 **⚠️稀疏** |
+
+三条理由：① **方向未确立且与设计意图相反**——三个口径一致指向「高拥挤 → 收益
+更高」，而 `get_adjustment_factor` 对高拥挤打 30% 折；连续版不达标，达标版仅 6 个
+取值、被工具标 ⚠️稀疏（命中 MEMORY 的「`distinct_ratio<0.25` → rank-IC 失真」
+陷阱）。② **三重计数**（已在 probability 权重最大 + 综合分 adj_factor）。
+③ **它不是收益预测量**，折成百分点需凭空定标度。
+
+⚠️ **代价说清**：否决后偏差从 **+0.19pp 回到 +1.06pp**。但那 +0.19 是**巧合**
+——倾斜均值恰好抵消了动量带来的正偏，不是因为符号对。
+**宁要 +1.06pp 的可辩护公式，不要 +0.19pp 的不可辩护公式。**
+被否决的方案保留在回放脚本里作对照（`v442_tilt_expected`），连同否决理由。
+
+### Added — 测试（共 43 项，净增 6）
+- `TestCrowdingStaysOutOfExpectedReturns`：拥挤度取任何值（含 ±∞/NaN/None/字符串）
+  都不得改变 `expected_returns`；但**必须**仍影响 `probability`
+  （否则真实拥挤度就白传了）。
+- `TestCrowdingCalibrationDrift`：`CROWDING_NEUTRAL` 是**经验常数会过期**，
+  对着生产库分布守着；并单独钉住"为什么不是 50"（若被改回 50 附近就红）。
+- helper 的 `crowding_score` 默认值改用 `mp.CROWDING_NEUTRAL` 而非字面量 50.0
+  —— 中性点重标时立刻捕捉到了这个前提变化（一条测试因此变红并被修正）。
+
+### 未做（需决策）
+- **拥挤度的真实方向值得单独查**：三个口径一致指向"高拥挤 → 收益更高"，
+  与常识和检测器设计都相反。若成立，`get_adjustment_factor` 的折扣方向也是反的
+  ——那是个比本次修复大得多的问题。**按 MEMORY 的「稀疏信号必须改用事件研究」
+  走，不要用 rank-IC 下结论。**
+- `catalyst_quality` / `iv_rank` / `put_call_ratio` 仍写死（需动 Phase 结构）。
+  当前 `expected_7d = 0.8 × momentum_5d`，5 日动量 IC=+0.0079 ⇒
+  **RivalBee 仍不提供方向信息。**
+
+### 验证
+全量套件 **1405 passed / 1 skipped / 1 xfailed**。改动的三个既有文件与 HEAD 的
+F 错误**逐条一致**；新增两文件 `--select F` 全绿；全仓 **F821 全绿**；
+`config.py` 全程未被动过。
+
+---
+
+## [0.44.1] — 2026-08-16 — ML 预期收益结构性恒正：+9pp 的系统性谎报已修
+
+起因：v0.44.0 新加的分布不变式报出 `RivalBeeVanguard` **95.2% 看多**。
+查下去发现不是 RivalBee 的 bug，是 `ml_predictor` 的 `expected_7d` 结构性恒正。
+完整诊断与回放见 **`experiments/ml_expected_return_report.md`**。
+
+### Fixed — `ml_predictor.py` 预期收益公式（根因）
+旧式 `expected_7d = catalyst_bonus + momentum_bonus − crowding_penalty` 里
+`catalyst_bonus` ∈{5,10,15,20,25}（默认 10）**永不为负**、`crowding_penalty`
+**上限 10** ⇒ 唯一能为负的项只剩动量，转负需 5 日跌超 5%（A+ 时需跌超 25%）。
+
+量纲也错了：`catalyst_bonus` 是催化剂**质量等级**（5~25 的"分"），却与
+`momentum_5d`（**百分点**）相加当预期收益 —— "B 级催化剂" = +10pp 的 7 日预期收益。
+与 ChronosBee「权重表只编码影响多大、不编码影响好坏」同族。
+
+⚠️ **生产里更极端**：`rival_bee.py` 把特征写死（`catalyst_quality="B+"`、
+`crowding_score=50.0`、`iv_rank=50.0`、`put_call_ratio=1.0`），代入旧式得闭式
+**`expected_7d = 8.0 + 0.8 × momentum_5d`**，在 1057 个配对样本上**零反例**。
+所谓"ML 预期收益"就是一个截距 +8% 的一元线性式。
+
+修法：催化剂质量改为**只调幅度不调方向**的无量纲乘数；拥挤度以中性 50 为中心
+（可正可负）；全部项统一为百分点 ⇒ **无信号时预期收益为 0，而不是 +8%**。
+动量为 None/NaN/非数值时按 0 处理（旧实现会 TypeError）。
+
+### Fixed — `ml_predictor.py` probability 的中性点全在 0.5 之上
+八个分项形如 `0.3 + x*0.7`（中性 0.65）与 `1.0 − x*0.3`（中性 0.85），
+按默认权重算出**结构性地板 0.3610**（与实测最小值 0.3500 吻合）。实测
+`ml.probability` **99.6% > 0.5**；向下空间 0.139 vs 向上 0.45，**不对称 3.2 倍**
+—— 它无法表达"强烈看空"。代码注释称「每个分项必须在 [0,1] 范围内」，
+范围确实对，但**中性点不在 0.5**，这是注释没说、也没人验过的那一半。
+
+新增 `centered_feature(x, influence, inverse)`：**保留每项原有的影响力系数**，
+只把中性点搬回 0.5。因此不是靠削弱某个特征来消除偏斜，特征间相对影响力不变；
+`influence=1.0` 时等价恒等映射，故本来就居中的 catalyst / final_score /
+odds_score / risk_adj_score 四项数值完全不变。
+
+### Changed — 三处重复公式合并为单一真相
+旧实现在 `SimpleMLModel:390` / `SGDMLModel:672` / `HGBModel:1197` **逐字重复三份**，
+docstring 还写着"公式与 SimpleMLModel 完全一致"。合并为模块级 `expected_returns()`，
+三个类共同委托。**换模型对本问题完全无效**（训练只影响 `probability`），
+这点也写进了注释。
+
+### Fixed — `ml_predictor_extended.py` 的 `max(0, ...)`
+降级实现（`ml_predictor` 导入失败时才生效）用 `max(0,...)` 让负值**结构性不可能**，
+且期限缩放是 0.3/**0.7**/1.2 与主实现 0.3/**0.8**/1.2 悄悄不一致。已镜像主实现。
+重复是结构性强制的（它存在的前提就是主实现不可用），用
+`TestFallbackMirrorsPrimary` 断言两份数值一致来兜住。
+
+### Fixed — `swarm_agents/rival_bee.py:121-126` EPS 单向棘轮
+`positive` 会把 neutral 翻成 bullish，`negative` **没有对应的 neutral → bearish 分支**。
+与 ChronosBee 同构。此前被掩盖（ML 路径占 ~99%，旧 expected_7d 恒正 ⇒ 方向几乎
+从不为 neutral）；修好 expected_returns 后 neutral 会真的出现（动量为 0 的样本在近
+12 个扫描日占 **63.7%**），这个棘轮就会接替成为主要偏斜源。**必须同时落地。**
+
+### Added — `tests/test_ml_expected_return.py`（37 项）
+断言此前没人问过的那个反方向问题：**有没有输入能让它输出负数？**
+旧实现逃过所有测试的原因很具体——喂 `catalyst_quality="A+"` 会得到一个大的正数，
+**符合预期**。包含：负动量必须给负预期（−0.5% 也要）、无信号必须恰为 0、
+催化剂质量不得翻转符号、A+ 救不了下跌股、拥挤度两侧对称、probability 全中位输入
+恰为 0.5 且可达区间对称、三个模型类都委托共享函数、降级实现与主实现数值一致。
+
+### Added — `experiments/ml_expected_return_replay.py` + 报告
+697 条真实配对样本的前后回放：
+- 为正占比 **97.1% → 51.9%**（真实 48.4%）
+- 系统性偏差 **+9.06pp → +1.06pp**；平均绝对误差 11.02 → **8.12**（改善 26%）
+- 方向准确率 49.8% → 50.0%（恒定看多基准 48.4%），
+  5 日动量 vs 未来 7 日收益 rank-IC = **+0.0079** ≈ 0
+
+**诚实结论：本次修复消除了一个 +9pp 的系统性谎报，但没有创造 alpha。**
+与 MEMORY 的「T+7 横截面选股接近有效市场、瓶颈在信号层」一致。
+新增 43 次弃权是进步的一部分——系统现在会诚实地说"没有观点"。
+
+### 连带修好的下游近死分支（`generate_deep_v2.py`，n=1057）
+| 条件 | 旧 | 新 | 位置 |
+|---|---|---|---|
+| `ml_7d > 3.0`（ML看多/蜂群看空） | **89.9%** | 21.0% | `:161` |
+| `ml_7d < -3.0`（ML看空/蜂群看多） | **1.2%** ← 近死分支 | 18.1% | `:166` |
+| `ml_7d < -1.0` | 2.2% | 31.2% | `:3834` |
+| `ml_7d > 1.0` | 93.9% | 35.1% | `:3836` |
+
+深度报告的「ML vs 蜂群分歧」检测器此前**结构性单向**：几乎永远报"ML 看多、
+蜂群看空"，反向那条基本不可能触发。这些阈值本身是**对称写的**（±3.0、±1.0），
+暴露了作者意图是"以 0 为中心"——修复让现实对上意图，**下游阈值无需重调**。
+
+### 未做（需决策，勿当已完成）
+- **`rival_bee.py` 的特征硬编码**（第 2 层根因）未修。`crowding_score` 可经
+  `crowding_detector` 独立取得，但 `catalyst_quality`/`iv_rank`/`put_call_ratio`
+  分属 ChronosBee 与 OracleBee，而 RivalBee 在 Phase-1 **并行**运行，那时点拿不到
+  ——要改需动阶段结构。当前 `expected_7d = 0.8 × momentum_5d`，
+  **诚实表述：RivalBee 目前不提供方向信息**（该信号 IC≈0）。
+- **样本世代**：`ml.expected_*` 前后不可比，旧 1094 条须按旧口径单独看待。
+
+### 验证
+全量套件 **1399 passed / 1 skipped / 1 xfailed**（新增 37 项）。
+`ruff --select F` 对新增两个文件全绿；改动的三个既有文件与 HEAD 的 F 错误**逐条一致**
+（未引入新问题）；全仓 **F821 全绿**。
+
+---
+
+## [0.44.0] — 2026-08-16 — 扩池 5.18× 已实测证实；扫描连续性与分布不变式补上
+
+本轮不改任何评分/预测逻辑，只补三件让时间开始复利的基础设施。起因是
+`weekly_optimizer` 的定时任务：dry-run 发现它已**从 inert 变回会开火**
+（risk_adj −4.1pp > `MIN_CHANGE_PP=3.0`），而它要动的依据全是 10 只时代的数据。
+
+### Added — `experiments/ic_power_analysis.py` + `experiments/ic_power_report.md`
+横截面 rank-IC 的正式功效计算，用来核实"扩池 10→30 只把出结论时间缩短约 4 倍"
+这个此前只有心算支撑的估计。**结论：成立且偏保守，实测 5.18×**（区间 3.2~5.7×）。
+
+实测 N_eff（近一年日收益，30/30 只拿到数据）：
+- 原核心 10 只：ρ̄=+0.2386 → **N_eff = 3.18**（记忆值 3.25）
+- 扩池 30 只：ρ̄=+0.0498 → **N_eff = 12.27**（记忆值 13.8）
+
+对 |IC|=0.090（系统综合分实测）：10 只需 132 个不重叠周（**~2.4 年**），
+30 只需 25 周（**~0.5 年**）。
+
+过程中修掉自己**四处**方法论错误，都记在脚本 docstring 与报告里：
+1. **（二次检查时发现，最严重）相关矩阵必须按日期取交集，不能截尾对齐。**
+   第一版用 `a[-n:]` 配对，而本池 30 只的有效观测天数是 **247/249/250 三种**
+   （DE 247、VKTX 249），截尾会把涉及这两只的配对错位最多 3 天。错位
+   **系统性稀释相关性** → ρ̄ 被压低 → N_eff 被抬高 → 倍数被低估：
+   ρ̄(10只) 0.1649→**0.2386**、N_eff 4.03→**3.18**、倍数 4.54×→**5.18×**。
+   修复后的 3.18/12.27 与记忆里 v0.42.9 独立算出的 3.25/13.8 几乎吻合，
+   **反证那份旧值对齐正确、第一版才是错的**。
+2. **置换零分布必须保留并列结构**。第一版复用 `ic_diagnostics.noise_floor` 的
+   `rng.random()`——那是无并列值的连续分布，而真实维度分大量并列
+   （catalyst 去重比仅 **0.105**），会系统性高估 σ_cs²，导致 4/5 个维度分解出
+   负值被钳到 0。改为置换真实分数向量本身。`noise_floor` 对它自己的用途
+   （跨异质因子的统一地板）是对的，对方差分解不是——**勿去"修" noise_floor**。
+3. **σ_cs² 必须逐维度算**（各维并列程度差一个数量级），且过滤条件要与
+   `load_daily_ic` **逐字一致**——那边除 `min_width` 还要求当日该维度
+   **至少 2 个不同分数**，第一版漏了，导致 σ_cs² 与 σ_IC² 算在不同天集合上。
+4. **倍数的分子分母必须同走模型**，否则"实测/模型"混用会系统性低估增益。
+
+同时给出 σ_t²（IC 的时间变异，扩池压不掉的部分）分解：4/5 维度检测不到
+（点估计撞 0 边界，不等于已证明为零），`signal` 是唯一有 σ_t²>0 的维度，
+它的倍数只有 1.73×。
+
+### Added — `scan_continuity.py`
+扫描连续性体检。**存在理由由上面那份功效计算给出**：5.18× 的计价单位是
+**有扫描的 ISO 周数**，T+7 不重叠取样单位就是周，漏一周就永久少一个观测。
+
+首次运行即查出实质问题：近 30 个交易日**覆盖率 36.7%**（11/30），
+两个长空档（07-10→07-21 共 8 天、07-30→08-07 共 7 天），
+**2026-W29 / W32 两周完全无扫描**。
+
+并独立重现了 v0.42.4 那个 `save_prediction` 业务日碰撞 bug 的受害日：
+库与快照交叉核对报出 07-07 / 07-21 **有快照但无库记录**（与 MEMORY 记载的
+07-07/07-21/07-23 一致）。
+
+- 退出码 `0`=健康 / `1`=降级 / **`3`=无法判定**。3 而非 2 是刻意的：
+  编排器 `run_step()` 把 **2 保留给「脚本不存在」**，占用它就会让编排器
+  分不清"检查器没装"和"装了但判不了"——那本身是一次静默降级。有测试钉住。
+- **不发任何通知**。`--slack` 是显式未接线的占位（对外动作需先确认）。
+  聚合告警文案已实现（只讲"过去 N 个交易日只跑了 M 次"，不报单次失败，
+  因此与 CLAUDE.md 的 Slack 静音规则相容），但接线待用户批准。
+
+### Added — `~/.claude/scripts/alpha-hive-orchestrator.sh` Step 10
+编排器末尾（Step 2 写库、Step 9 持久化之后）跑连续性体检，
+结果写 `$LOGDIR/scan_continuity-$DATE_STR.json` 与 `status.json`。
+
+⚠️ 用 `scan_continuity.py --out FILE` 写 JSON，**不用 `> FILE` 捕获 stdout**
+（二次检查时发现的 bug）：本编排器的 `log()` 用 `tee -a`，**会写 stdout**，
+而 `run_step` 在"脚本不存在"(`return 2`) 与 TCC 权限被拒两条路径上都会 log
+——那些行会混进 JSON 让下游解析失败。有回归测试钉住 `--out` 路径。
+
+**刻意不影响 `OVERALL_STATUS`**：连续性反映过去 30 个交易日的历史事实，
+不是今天这轮跑得好不好；把历史空档记成"今天失败"会让该字段长期停在 failed，
+等于废掉它。
+
+### Added — `tests/test_distribution_invariants.py`（15 项）
+对**生产库实际产出分布**的断言，与既有的单输入机制测试互补。治的是本项目
+最高频的一类缺陷：**单元测试全绿、退出码 0、日志正常，但输出分布早已退化**
+（ChronosBee 950 条 bearish=0、BullVeto 从未生效、CodeExecutorAgent 恒定看多、
+VIX 兜底 20.0 撑了 13/88 天、优化器静默 inert 11 周）。
+
+- 每只蜂的方向都必须真的可达（单一方向占比 <99%；bearish 单独断言）
+- 维度分数不得塌成常数（去重比 >0.25；`catalyst` 作为**已知且已接受**的
+  退化项给单独地板 0.05，不假装它健康）
+- `guard.macro_adj` 不得冻结成单一值；CBOE VIX 历史缓存不得超过 5 个交易日陈旧
+- 扫描未实质停摆；每日标的数未腰斩（防 30→10 静默截断）
+- 含 `TestGuardsHaveTeeth`：**喂合成退化数据确认每个谓词真的会红**。
+  没有这组，"全绿"证明不了任何事——那正是 BullVeto 式缺陷的同构物。
+  这组当场抓出我自己测试数据里的算术错误（947/950 是 99.7% 不是 94.7%）。
+
+### Added — `tests/test_scan_continuity.py`（25 项）
+纯逻辑测试（空档切分含尾部空档、ISO 周覆盖、门槛 AND 关系、退出码、
+`BRK-B` 连字符标的的日期解析、库/快照双向不一致）。全部合成数据，不依赖生产库。
+
+### Changed — `weekly_optimizer.py` 降级为只读诊断 + 两道闸
+**默认不再修改 `config.py`。** 写入必须显式 `--apply`，且两道闸全过；
+`--force` 可覆盖但会记入审计。`--dry-run` 保留为向后兼容（与 `--apply` 同给时以
+不写为准）。审计日志新增 `action: "diagnose"` 区分只读运行。
+
+反转默认值（opt-out → opt-in）沿用本项目既有先例：2026-03-16
+`generate_deep_v2.py` 的 opt-out 设计让 NVDA 深度报告静默消费 $0.47 Opus，
+之后改为 opt-in。这里的代价不是钱而是**样本世代**。
+
+**闸 1 — Bootstrap 稳健性**：此前 `weekly_optimizer.py:965` **只打印不阻断**
+（原文"继续应用（限幅已保护）"）。2026-08-16 实测到真实后果：该轮 bootstrap
+报不稳健、`risk_adj −4.13pp` 已越过 `MIN_CHANGE_PP`，若非人工中断就会写入。
+限幅只保证**幅度**不失控，不保证**方向**对。
+
+**闸 2 — 标的池世代一致性**（新函数 `check_ticker_pool_consistency`）：
+比较「最近 3 个扫描日的标的」与「进入 T+7 样本基的标的」，
+当前池未被覆盖的比例 >20% 即拦下。实跑结果：
+**「当前池 30 只里有 14 只（47%）从未进入 T+7 样本基」**。
+理由是 v0.42.9 扩池后存在数周窗口，优化器眼里还是旧的 10 只却要改 30 只在用的权重。
+两个闸都**判不了时默认关闭**（不放行）。
+
+降级理由（三条独立，任一条都够，写在模块 docstring 里）：
+1. `w = acc/Σacc` 数学上无法表达"这个维度没用"——准确率都挤在 0.5 附近，
+   权重必然全部 ≈0.2，输出空间里不存在"归零"这个答案
+2. 它优化的对象已被证明不存在：综合分 |IC|=0.090 打不过 20 日动量 0.135
+3. **每次写入都重置样本世代**，把扩池换来的 5.18× 测量加速周期性清零
+   ——这是唯一会**主动让系统变差**的一条
+
+附带记录：`compute_new_weights_wls` 名不副实（docstring 称 OLS 回归取 beta +
+共线性检测，实现里没有任何回归）。当前 config 那五个数是 n=28/133 噪声期的产物，
+**应按任意常数看待**。
+
+### Changed — 定时任务 `alpha-hive-weekly-optimizer/SKILL.md`
+改为只读诊断契约：明确**不加 `--apply`/`--force`**、**不发 Slack**
+（只读诊断没有"权重自适应更新"可通知，旧的">5pp 发 Slack"指令随写入能力一并移除），
+并把裸 `python3` 修正为 `/usr/local/bin/python3`（原文违反项目硬规则）。
+
+### Added — `tests/test_weekly_optimizer.py` 新增 12 项
+`TestTickerPoolGate`（含"判不了默认关闭"、"加 1 只到 10 只池不该过敏"）+
+`TestReadOnlyDefaultAndGates`（端到端跑 `main()`：默认只读、闸门全过时
+`--apply` **真的能写**、两闸分别与同时拦下、`--force` 真能覆盖且审计留痕、
+`--dry-run` 优先于 `--apply`）。
+
+### 未做（需用户决策，勿当已完成）
+- 连续性告警的 Slack 接线待批准（`scan_continuity.py --slack` 仍是占位）。
+- `RivalBeeVanguard` 近 12 个扫描日 **95.2% 看多**（bullish 180/189），
+  是所有非看空蜂里最偏的，且不在任何已知问题清单里。分布不变式**刻意未拦**
+  （门槛 0.99），因为那属于建模判断。待查。
+
+### 验证
+全量套件 **1348 passed / 1 skipped / 1 xfailed**（新增 40 项）。
+`ruff --select F` 对新增四个文件全绿；全仓 `F821` 全绿；`bash -n` 编排器通过。
+
+---
+
 ## [0.43.26] — 2026-08-15 — 降级链的后两环从未生效：AV/Finnhub key 只读环境变量
 
 ### Fixed — `config.py` / `data_pipeline.py`
