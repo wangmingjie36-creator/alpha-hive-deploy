@@ -5,6 +5,59 @@
 
 ---
 
+## [0.45.1] — 2026-08-24 — 波动率工具链二次检查：三个"看不见"的缺陷
+
+对 v0.45.0 补录的那批代码做二次检查。三个缺陷都不影响已产出的验证结论
+（IC +0.663、四口径全过），但都属于**平时看不见、出事时难查**的形态。
+
+### Fixed
+
+- **`alpha_hive_daily_report.py`** — 波动率分层每次生成报告读两遍库。
+  `_volatility_tier_markdown()` 内部又调了一次 `_volatility_tiers()`，而
+  `report["volatility_tiers"]` 也调一次。真正的风险不是性能：两次读之间若
+  `signal_archive` 被写入，JSON 里的分层会与 Markdown 里的对不上，
+  **而这种不一致没有任何地方会报错**。
+  改为在 report dict 构建前算一次，两处复用；`_volatility_tier_markdown(tiers=None)`
+  保留无参调用，向后兼容。
+
+- **`vol_forecast.py`** — `load_day()` 未捕获 `sqlite3.OperationalError`。
+  日报路径外面有 try/except 兜底，所以这个缺陷**在日报里看不见**；但
+  `vol_forecast.py --date` 直接跑，遇到全新库或未 backfill 就吐一屏 traceback。
+  现在库文件不存在 / 表不存在都返回 `{}`，由 `main()` 给出"先跑 --backfill"
+  的可操作提示，退出码 1。
+
+- **`signal_archive.py`** — `_PX_CACHE` 的键漏掉中间日期。
+  旧键 `(tickers, dates[0], dates[-1], fwd_days)` 用**区间端点**冒充**集合内容**。
+  同进程内两次调用若首尾相同、中间不同（新样本回填后重查是典型场景），
+  第二次静默复用陈旧结果、丢掉中间日期。改用完整日期序列的 sha1 指纹。
+  ⚠️ 只加 `len(dates)` 不够——首尾与长度都相同、只有中间那天不同的情形仍会撞键。
+
+### Changed
+
+- **`signal_archive.py`** — 键逻辑提取为 `_px_cache_key()`，让测试直接引用生产代码。
+  原先测试里重抄一遍键实现，**等于测试测自己**：生产代码改回旧写法照样绿。
+
+### Tests
+
+新增 3 组共 10 项。每组都**反向验证过**——把生产代码改回旧写法，对应测试确实变红：
+
+| 测试组 | 注入的旧 bug | 结果 |
+|---|---|---|
+| `TestSingleDatabaseRead` | markdown 无视传参再读一次 | 红 ✅ |
+| `TestLoadDayResilience` | 去掉表缺失容错 | 红 ✅ |
+| `TestPriceCacheKey` | 键退回首尾式 | 红 ✅ |
+
+全量 **1469 passed**, 1 skipped, 1 xfailed；ruff F821 全库通过。
+
+### 提交纪律
+
+`alpha_hive_daily_report.py` 里 v0.44.3 的 RivalBee 改动是工作区既有内容，
+按 hunk 拆分后留在未暂存状态，未随本次提交。同理 `CHANGELOG.md` 的
+v0.44.0~v0.44.4 条目单独成一个提交（`c1350a9`），与 0.45.0 补录分开，
+避免混在一起无法单独回滚。
+
+---
+
 ## [0.45.0] — 2026-08-16 — 补录：波动率预测工具链（2026-07-30/31 已提交但漏记）
 
 > ⚠️ **这是一次补录，不是新功能。** 下列四个提交在 2026-07-30/31 已完成、
