@@ -17,7 +17,9 @@
 
 import os
 import sqlite3
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -224,3 +226,83 @@ class TestDailyReportIntegration:
         for d in tiers.values():
             assert set(d) == {"vol_score", "pct", "multiplier", "tier"}, \
                 f"字段集合意外变化: {set(d)}"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# v0.45.1 二次检查发现的三个缺陷（回归锁）
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestLoadDayResilience:
+    """load_day 在库/表缺失时必须返回空 dict，而不是抛 OperationalError。
+
+    背景：日报路径外面有 try/except 兜底，所以这个缺陷在日报里看不见；
+    但 CLI 直接跑（vol_forecast.py --date）会吐一屏 traceback，
+    而正确行为是提示"先跑 --backfill"。
+    """
+
+    def test_missing_table_returns_empty(self, tmp_path):
+        db = tmp_path / "empty.db"
+        sqlite3.connect(str(db)).close()          # 库存在，但没有 signal_archive 表
+        assert vf.load_day("2026-07-29", db) == {}
+
+    def test_missing_db_file_returns_empty(self, tmp_path):
+        assert vf.load_day("2026-07-29", tmp_path / "nope" / "no.db") == {}
+
+    def test_cli_exits_cleanly_without_traceback(self, tmp_path):
+        db = tmp_path / "empty.db"
+        sqlite3.connect(str(db)).close()
+        r = subprocess.run(
+            [sys.executable, str(Path(__file__).parent.parent / "vol_forecast.py"),
+             "--date", "2026-07-29", "--db", str(db)],
+            capture_output=True, text=True)
+        assert r.returncode == 1
+        assert "Traceback" not in r.stderr
+        assert "backfill" in r.stderr
+
+
+class TestSingleDatabaseRead:
+    """波动率分层每次生成报告只能读一次库。
+
+    旧实现里 `_volatility_tier_markdown()` 内部又调了一次 `_volatility_tiers()`，
+    而 `report["volatility_tiers"]` 也调一次 —— 一次报告读两遍库、打两遍日志。
+    除了浪费，两次结果若不一致（并发写入 signal_archive）还会让 JSON 与
+    Markdown 内容对不上，属于难查的一类不一致。
+    """
+
+    def _reporter_with_data(self, monkeypatch, calls):
+        """构造一个 reporter，并记录 vf.load_day 的调用次数。"""
+        import vol_forecast as _vf
+        from alpha_hive_daily_report import AlphaHiveDailyReporter
+
+        fake = {t: {"options.iv_current": 0.2 + i * 0.05,
+                    "price.volatility_20d": 0.3 + i * 0.04}
+                for i, t in enumerate(["AAA", "BBB", "CCC", "DDD"])}
+        monkeypatch.setattr(_vf, "load_day",
+                            lambda d, db=None: (calls.append(d), fake)[1])
+        r = AlphaHiveDailyReporter.__new__(AlphaHiveDailyReporter)
+        r.date_str = "2026-07-29"
+        return r
+
+    def test_markdown_accepts_precomputed_tiers(self, monkeypatch):
+        calls = []
+        r = self._reporter_with_data(monkeypatch, calls)
+        tiers = r._volatility_tiers()
+        assert len(calls) == 1
+        md = r._volatility_tier_markdown(tiers)      # 传入 → 不应再读库
+        assert len(calls) == 1, f"传入已算好的分层后仍读了库：{len(calls)} 次"
+        assert md, "传入分层后应正常渲染出 Markdown"
+
+    def test_markdown_backward_compatible_without_arg(self, monkeypatch):
+        """不传参仍可用（向后兼容），但会自行查询一次。"""
+        calls = []
+        r = self._reporter_with_data(monkeypatch, calls)
+        md = r._volatility_tier_markdown()
+        assert len(calls) == 1
+        assert md
+
+    def test_both_call_styles_agree(self, monkeypatch):
+        """传参与不传参必须渲染出同样的内容。"""
+        calls = []
+        r = self._reporter_with_data(monkeypatch, calls)
+        assert r._volatility_tier_markdown(r._volatility_tiers()) == \
+            r._volatility_tier_markdown()

@@ -43,6 +43,7 @@ import argparse
 import datetime
 import ast
 import glob
+import hashlib
 import json
 import math
 import os
@@ -454,6 +455,19 @@ TARGET_METRICS = ("return", "vol")
 _PX_CACHE: Dict = {}
 
 
+def _px_cache_key(tickers, dates, fwd_days) -> tuple:
+    """行情缓存的键。**独立成函数是为了让测试能直接引用它**——
+    测试里重抄一遍键逻辑等于测试自己，生产代码改回旧写法也照样绿。
+
+    ⚠️ 键必须包含**完整**日期集合的指纹，不能只用首尾两天。
+    只用 (首日, 末日) 时，同进程内若两次调用首尾相同但中间日期不同
+    （例如新预测被回填后重查），第二次会静默复用陈旧结果、丢掉中间日期。
+    len(dates) 也不够：首尾与长度都相同、只有中间那天不同的情形仍会撞键。
+    """
+    fp = hashlib.sha1("|".join(dates).encode()).hexdigest()[:16] if dates else ""
+    return (tuple(sorted(tickers)), fp, len(dates), fwd_days)
+
+
 def _forward_realized_vol(tickers: List[str], dates: List[str],
                           fwd_days: int) -> Dict:
     """未来 N 个交易日的已实现波动（日收益标准差 %）。
@@ -475,7 +489,7 @@ def _forward_realized_vol(tickers: List[str], dates: List[str],
 
     Returns: {(ticker, date): 未来 fwd_days 日的日收益 std × 100}
     """
-    key = (tuple(sorted(tickers)), dates[0] if dates else "", dates[-1] if dates else "", fwd_days)
+    key = _px_cache_key(tickers, dates, fwd_days)
     if key in _PX_CACHE:
         return _PX_CACHE[key]
     try:

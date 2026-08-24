@@ -1471,6 +1471,12 @@ class AlphaHiveDailyReporter:
         else:
             _sys_status = "✅ 蜂群协作完成"
 
+        # v0.45.1：波动率分层只算一次，供 markdown 与 JSON 两处复用。
+        # 旧实现 _volatility_tier_markdown() 内部又调了一次 _volatility_tiers()，
+        # 导致每次生成报告读两遍库、打两遍日志；两次结果若不一致
+        # （并发写入）还会让 JSON 与 Markdown 内容不符。
+        _vol_tiers = self._volatility_tiers()
+
         report = {
             "date": self.date_str,
             "timestamp": self.timestamp.isoformat(),
@@ -1494,7 +1500,7 @@ class AlphaHiveDailyReporter:
             "sector_sentiment_contagion": sector_sentiment_summary,
             "macro_context": macro_snapshot,
             "backtest_stats": backtest_stats,
-            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(),
+            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(_vol_tiers),
             "twitter_threads": self._generate_swarm_twitter_threads(swarm_results),
             "opportunities": [
                 {
@@ -1511,9 +1517,8 @@ class AlphaHiveDailyReporter:
             ]
         }
 
-        _vt = self._volatility_tiers()
-        if _vt:
-            report["volatility_tiers"] = _vt
+        if _vol_tiers:
+            report["volatility_tiers"] = _vol_tiers
 
         return report
 
@@ -1545,9 +1550,15 @@ class AlphaHiveDailyReporter:
             _log.warning("波动率分层失败（不影响主流程）: %s", e)
             return {}
 
-    def _volatility_tier_markdown(self) -> str:
-        """把波动率分层渲染成 Markdown 小节，追加在日报末尾。"""
-        tiers = self._volatility_tiers()
+    def _volatility_tier_markdown(self, tiers: Dict = None) -> str:
+        """把波动率分层渲染成 Markdown 小节，追加在日报末尾。
+
+        Args:
+            tiers: 已算好的分层结果。**调用方应传入**以避免重复读库；
+                留空时自行查询（仅为向后兼容，会多一次 DB 往返）。
+        """
+        if tiers is None:
+            tiers = self._volatility_tiers()
         if not tiers:
             return ""
         lines = [

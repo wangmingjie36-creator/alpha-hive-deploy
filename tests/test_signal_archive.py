@@ -414,3 +414,39 @@ class TestVolatilityTarget:
         # 收益率口径不受影响
         pr = sa.load_panel(db, "t7", 1, target_metric="return")
         assert pr["composite.final_score"]["2026-03-02"][0][1] == pytest.approx(10.0)
+
+
+class TestPriceCacheKey:
+    """_PX_CACHE 的键必须反映**完整**日期集合，不能只用首尾两天。
+
+    旧键 = (tickers, dates[0], dates[-1], fwd_days)。同进程内若两次调用
+    首尾相同但中间不同（例如新样本回填后重查），第二次会静默复用陈旧
+    结果、丢掉中间日期 —— 属于本项目最常见的"看着成功其实早废了"形态。
+    """
+
+    #: 直接引用生产代码的键函数。**不要在这里重抄一遍实现**——
+    #: 那样测的是测试自己，生产代码改回旧写法照样绿。
+    _key = staticmethod(sa._px_cache_key)
+
+    def test_same_endpoints_different_length_no_collision(self):
+        tk = ["AAPL", "MSFT"]
+        a = ["2026-07-01", "2026-07-15"]
+        b = ["2026-07-01", "2026-07-08", "2026-07-15"]
+        assert self._key(tk, a, 7) != self._key(tk, b, 7)
+
+    def test_same_endpoints_same_length_different_middle_no_collision(self):
+        """len() 单独救不了的情形：首尾与长度都相同，只有中间那天不同。"""
+        tk = ["AAPL", "MSFT"]
+        b = ["2026-07-01", "2026-07-08", "2026-07-15"]
+        c = ["2026-07-01", "2026-07-09", "2026-07-15"]
+        assert self._key(tk, b, 7) != self._key(tk, c, 7)
+
+    def test_identical_inputs_still_hit(self):
+        """修复不能把缓存打废：完全相同的输入必须仍然命中。"""
+        tk = ["AAPL", "MSFT"]
+        d = ["2026-07-01", "2026-07-08"]
+        assert self._key(tk, d, 7) == self._key(list(reversed(tk)), list(d), 7)
+
+    def test_fwd_days_still_separates(self):
+        tk, d = ["AAPL"], ["2026-07-01", "2026-07-08"]
+        assert self._key(tk, d, 7) != self._key(tk, d, 30)

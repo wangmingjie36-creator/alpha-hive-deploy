@@ -150,13 +150,22 @@ def size_multipliers(vol_scores: Dict[str, float]) -> Dict[str, Dict]:
 def load_day(date: str, db_path: Path = DB_PATH) -> Dict[str, Dict[str, float]]:
     """从 signal_archive 读某一天的分量信号。"""
     q = ",".join("?" * len(COMPONENTS))
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.OperationalError:
+        # 库文件不存在 —— 返回空由调用方处理，不裸崩
+        return {}
     con.row_factory = sqlite3.Row
     try:
         rows = con.execute(
             f"SELECT ticker, signal, value FROM signal_archive "
             f"WHERE date = ? AND signal IN ({q})",
             (date, *COMPONENTS.keys())).fetchall()
+    except sqlite3.OperationalError:
+        # signal_archive 表不存在（全新库 / 未 backfill）。
+        # 日报路径有 try/except 兜底，但 CLI 直接跑会裸崩出 traceback，
+        # 而正确行为是给出"先跑 --backfill"的提示。
+        return {}
     finally:
         con.close()
     out: Dict[str, Dict[str, float]] = {}
