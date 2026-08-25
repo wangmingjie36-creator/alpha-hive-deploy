@@ -639,6 +639,83 @@ VIX 兜底 20.0 撑了 13/88 天、优化器静默 inert 11 周）。
 
 ---
 
+## [0.43.27~0.43.28] — 2026-08-25 — SSL 并发风暴致扫描全废；补跑价格锚定
+
+### 事故：2026-08-24 自动扫描"跑了但全废"
+| 步骤 | 结果 |
+|---|---|
+| Step 2 蜂群分析 | **超时 1800s 被杀** → 零蜂群结果、零落库 |
+| Step 3 ML 报告 | **超时 600s 被杀** → 0 份 |
+| 编排器结论 | 🎉 编排流程完成 |
+
+当天全天 **96 次 SSL EOF** + 38 次 yfinance 限流 + **36 个标的次全链失效**。
+
+### v0.43.27 根因一：SSL 并发风暴（主症）
+本机 **OpenSSL 1.1.1q**（2022，已 EOL）扛不住并发 HTTPS。项目早有对策，
+但那把信号量**只锁了 CBOE**——yfinance/Finnhub/AlphaVantage 各走各的。
+
+⚠️ **自我更正**：v0.43.26 接通 Finnhub/AV 之前，这两个源因拿不到 key 直接返回
+None、**一个请求都不发**。接通后它们成了两个不受保护的并发 HTTPS 调用方——
+那个"修复"很可能是 EOF 风暴的助推之一。**加数据源前先确认闸门覆盖它。**
+
+新增 `http_gate.py`：全进程唯一的出站 HTTPS 闸门，cboe_options / cboe_vix /
+Finnhub / AlphaVantage 全部并入。实测 4 并发拉 CBOE：
+
+| | 耗时 | 失败 |
+|---|---|---|
+| 不经闸门 | 65.2s | 0 |
+| **经闸门** | **40.5s** | 0 |
+
+**串行反而快 38%**——并发在这个 SSL 栈上是负优化。
+（今天两组均未触发 EOF，所以"防 EOF"是从 8/24 日志与已知机制推断；
+今天证到的是"串行不慢反快"，消除了加锁拖慢扫描的顾虑。）
+
+### v0.43.27 根因二：`_ch6_risk_radar` 的 None 崩溃（次症）
+期权链降级为样本数据 → `options_analyzer` 诚实返回 `iv_rank=None`（v0.43.19 起）
+→ `f"{iv_rank:.1f}"` 抛 TypeError。`bear_score` / `crowding` 同型。
+
+⚠️ 这一行我在 v0.43.23 **看到过**，但当时用 2026-08-14 数据实测显示该键"缺失"
+而非 None，判定不会命中就跳过了——**用健康数据验证只在降级时触发的分支**。
+
+修法关键：**不能把 None 当 0**。`risk_level(0, ...)` 输出"🟢 低"，等于把
+"没数据"渲染成"低风险"——比崩溃更危险，因为它不会报错。现在缺数显示 `—`、
+等级显示 `⚪ 数据缺失`。6 条新测试全部显式喂 None。
+
+### v0.43.28：`--date` 补跑的三条旁路仍取实时价
+v0.41.6 已建好历史通道（`fetch_stock_data(t, as_of_date=)` →
+`_fetch_historical_stock_data`，标 `source_name="yfinance_historical"`），
+建它的起因正是 2026-07-21"网站价格不是当日收盘价"。但通道建好 ≠ 处处接通：
+
+1. `swarm_agents/base.py._get_stock_data` —— prefetch 落空分支不传 date
+2. `alpha_hive_daily_report._generate_ml_reports` —— `_fsd(ticker)` 无 as_of_date
+3. `alpha_hive_daily_report._analyze_ticker_safe` —— `_dr_fetch_stock(ticker)` 无 date
+
+危险在于**静默**：同一份报告里 prefetch 命中的是历史价、落空的是实时价，
+两种口径混在一起，零报错。修法：prefetch 返回值带 `target_date` →
+`inject_prefetched` 注入 `agent._target_date` → 落空分支 `getattr` 取用。
+
+顺带更正一份子 agent 报告：它称 `backtester.save_predictions` 仍裸调
+`fast_info.lastPrice` —— 实为 v0.43.15 已改成复用 ScoutBee 共享快照价，不是缺口。
+
+### 2026-08-24 补跑实测（修复后首次完整验证）
+| 指标 | 8/24 自动跑 | 8/25 补跑 |
+|---|---|---|
+| SSL EOF | **96** | **0** |
+| yfinance 限流 | 38 | **0** |
+| 全链失效 | 36 | **0** |
+| 蜂群 | 1800s 超时被杀 | **30/30，1222.8s，err=0/240** |
+| ML 报告 | 0 份 | **12 份，0 失败** |
+| 落库 | 0 | **30 只** |
+
+价格口径逐只核对（对照独立 yfinance 历史K线）：NVDA 208.48 / TSLA 348.95 /
+MSFT 487.31 / QCOM 158.53 / META 559.02 —— **5/5 精确等于 8/24 收盘**，
+且与 8/25 价格明显不同。VIX 15.85 = CBOE 8/24 收盘，`vix_source="cboe"`。
+
+### ⚠️ 已知局限（未修，记录备查）
+`cboe_vix.get_vix_spot()` 无日期参数，返回的是**最新**收盘。本次补跑恰好正确，
+仅因 CBOE 当时尚未发布 8/25 数据。**补跑更早的历史日期时 VIX 会取到错误的天**。
+需要时给它加 `as_of_date`（`get_vix_history()` 已有全部历史，改动很小）。
+
 ## [0.43.26] — 2026-08-15 — 降级链的后两环从未生效：AV/Finnhub key 只读环境变量
 
 ### Fixed — `config.py` / `data_pipeline.py`
