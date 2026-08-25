@@ -1,0 +1,36 @@
+{
+  "ticker": "META",
+  "date": "2026-08-24",
+  "composite_score": 5.23,
+  "direction": "bearish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 559.02001953125,
+  "agent_votes": {
+    "OracleBeeEcho": 7.461923076923076,
+    "BuzzBeeWhisper": 5.87
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.483,
+    "signal": 0.214,
+    "catalyst": 0.464,
+    "sentiment": 0.964,
+    "odds": 0.714,
+    "risk_adj": 0.071
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-08-25T08:01:23.338858"
+}
