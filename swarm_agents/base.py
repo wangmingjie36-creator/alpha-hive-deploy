@@ -47,6 +47,35 @@ class BeeAgent(ABC):
         )
         self.board.publish(entry)
 
+    # 一轮里 Phase-1 有 5~6 只蜂发布，`get_top_signals` 的默认 n=5 会截断。
+    # 取 24 条（80 条上限的 30%）足够覆盖单标的一轮的全部条目。
+    _PEER_LOOKUP_N = 24
+
+    def _read_peer(self, ticker: str, agent_id: str):
+        """读取**同一轮里已发布**的其他蜂的信息素条目。
+
+        返回 `PheromoneEntry` 或 `None`（对方还没跑 / 没发布 / 板上已衰减淘汰）。
+
+        ⚠️ **调用方必须能接受 None。** 能不能读到完全取决于**执行阶段顺序**：
+        Phase-1 内部是并行的，同批蜂之间读不到彼此；只有排在后面的阶段
+        （GuardBee 所在的 Phase-1.5、BearBee 所在的 Phase-2，以及 v0.44.3 起
+        被移到 Phase-1.5 的 RivalBee）才读得到 Phase-1 的产出。
+        **想读某只蜂就必须排在它后面** —— 别指望靠重试或等待绕过这一点。
+
+        为什么走信息素板而不是把上游结果当参数传进 `analyze()`：
+        `analyze(ticker)` 的签名是所有蜂共用的契约，改它会牵动全部蜂与测试；
+        而板上的 `details` 字段本来就是为结构化数据交换设计的（S3）。
+        """
+        try:
+            entries = self.board.get_top_signals(ticker, n=self._PEER_LOOKUP_N)
+        except (AttributeError, TypeError) as e:      # board 不可用/替身对象
+            _log.debug("_read_peer(%s, %s) 板读取失败: %s", ticker, agent_id, e)
+            return None
+        for e in entries or []:
+            if getattr(e, "agent_id", None) == agent_id:
+                return e
+        return None
+
     def _get_stock_data(self, ticker: str) -> Dict:
         """获取股票数据（优先使用预取缓存，回退到直接请求）
 
@@ -56,7 +85,12 @@ class BeeAgent(ABC):
         if ticker in self._prefetched_stock:
             data = self._prefetched_stock[ticker]
         else:
-            data = _cache._fetch_stock_data(ticker)
+            # v0.43.28: 必须透传目标日期。prefetch 走的是
+            # `_fetch_stock_data(t, target_date)`（v0.41.6 的历史补跑通道），
+            # 但这条落空分支此前不传 date —— `--date` 补跑历史交易日时，
+            # 任何 prefetch miss 的标的会**静默拿到今天的实时价**，
+            # 与同一份报告里其余标的的历史收盘价口径不一致。
+            data = _cache._fetch_stock_data(ticker, getattr(self, "_target_date", None))
 
         # WARN-3 保护：price<=0 说明所有数据源不可用
         price = data.get("price", 0)
@@ -112,7 +146,7 @@ def prefetch_shared_data(tickers: list, retriever=None, target_date: Optional[st
     _get_stock_data()/共享快照价的 Agent（Scout/Oracle/Chronos/CodeExecutor 等）
     自动获得一致、正确的历史价格。
 
-    返回: {"stock_data": {ticker: data}, "contexts": {ticker: str}}
+    返回: {"stock_data": {ticker: data}, "contexts": {ticker: str}, "target_date": str|None}
     """
     stock_data = {}
     contexts = {}
@@ -160,7 +194,7 @@ def prefetch_shared_data(tickers: list, retriever=None, target_date: Optional[st
     except (ImportError, OSError, ValueError, KeyError, TypeError) as e:
         _log.debug("Prefetch backtest context failed: %s", e)
 
-    return {"stock_data": stock_data, "contexts": contexts}
+    return {"stock_data": stock_data, "contexts": contexts, "target_date": target_date}
 
 
 def inject_prefetched(agents: list, prefetched: Dict):
@@ -168,3 +202,5 @@ def inject_prefetched(agents: list, prefetched: Dict):
     for agent in agents:
         agent._prefetched_stock = prefetched.get("stock_data", {})
         agent._prefetched_context = prefetched.get("contexts", {})
+        # v0.43.28: 目标日期随预取一起注入，供 _get_stock_data 的落空分支使用
+        agent._target_date = prefetched.get("target_date")

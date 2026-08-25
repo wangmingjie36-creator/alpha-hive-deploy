@@ -103,6 +103,7 @@ class _SwarmContext:
     targets: List[str]
     board: object  # PheromoneBoard
     phase1_agents: list
+    rival_agent: object      # v0.44.3：从 Phase-1 移出，改在 Phase-1.5 顺序执行
     guard_agent: object
     bear_agent: object
     queen: object
@@ -263,7 +264,8 @@ class AlphaHiveDailyReporter:
             # 构建实时数据结构（真实多源降级链：yfinance → Alpha Vantage → Finnhub → 安全默认值，
             # 与 swarm 路径共用 _fetch_stock_data，避免虚假 current_price=100.0 污染下游报告/仪表板）
             from swarm_agents.cache import _fetch_stock_data as _dr_fetch_stock
-            _stock_data = _dr_fetch_stock(ticker)
+            # v0.43.28: 同上，透传报告日期
+            _stock_data = _dr_fetch_stock(ticker, self.date_str)
             realtime_metrics = {
                 "ticker": ticker,
                 "sources": {
@@ -380,13 +382,28 @@ class AlphaHiveDailyReporter:
 
         board = PheromoneBoard(memory_store=self.memory_store, session_id=self._session_id)
         retriever = self.vector_memory if (self.vector_memory and self.vector_memory.enabled) else None
+        # v0.44.3：RivalBeeVanguard 从 Phase-1 并行**移到 Phase-1.5 顺序段**。
+        #
+        # 为什么移：它的 ML 特征里有三个属别的蜂的产出 —— `catalyst_quality`
+        # 来自 ChronosBee 的催化剂分、`iv_rank`/`put_call_ratio` 来自 OracleBee 的
+        # 期权 details。留在 Phase-1 并行里读不到它们（同批蜂互相看不见），
+        # 此前只能写死 `"B+"` / `50.0` / `1.0` 三个常量 —— 于是"ML 预测"实际上
+        # 只由动量驱动（见 experiments/ml_expected_return_report.md）。
+        #
+        # 为什么排在 GuardBee **之前**：Rival 只依赖 Phase-1（Chronos + Oracle），
+        # 不依赖 Guard；而 BearBee 读全板，把 Rival 排在 Guard 前能保证 Bear
+        # 仍看得到 Rival 的条目（顺序：Phase-1 → Rival → Guard → Bear）。
+        #
+        # 代价：单标的耗时增加一个 Rival 的串行时长（此前它与其他 4 只并行）。
+        # Rival 无独立网络调用（动量走已预取的 stock，拥挤度走带缓存的共享路径），
+        # 故增量很小。
         phase1_agents = [
             ScoutBeeNova(board, retriever=retriever),
             OracleBeeEcho(board, retriever=retriever),
             BuzzBeeWhisper(board, retriever=retriever),
             ChronosBeeHorizon(board, retriever=retriever),
-            RivalBeeVanguard(board, retriever=retriever),
         ]
+        rival_agent = RivalBeeVanguard(board, retriever=retriever)
         guard_agent = GuardBeeSentinel(board, retriever=retriever)
         bear_agent = BearBeeContrarian(board, retriever=retriever)
 
@@ -428,8 +445,11 @@ class AlphaHiveDailyReporter:
             ml_model=_ml_model_for_queen,
         )
 
-        all_agents = phase1_agents + [guard_agent, bear_agent]
-        _log.info("%d Agent（Phase1 %d + Guard + Bear）| 预取数据中...", len(all_agents), len(phase1_agents))
+        # rival_agent 必须在 all_agents 里：下面的 inject_prefetched 靠它注入
+        # `_prefetched_stock`，漏了会让 Rival 逐标的直接抓 yfinance（限流风险）。
+        all_agents = phase1_agents + [rival_agent, guard_agent, bear_agent]
+        _log.info("%d Agent（Phase1 %d + Rival + Guard + Bear）| 预取数据中...",
+                  len(all_agents), len(phase1_agents))
 
         # v0.41.6: 传入本次报告的目标交易日——`--date` 补跑历史日期时价格锚定
         # 该日期真实收盘价；未传 --date 时 self.date_str=当日，行为不变
@@ -453,7 +473,8 @@ class AlphaHiveDailyReporter:
 
         return _SwarmContext(
             targets=targets, board=board,
-            phase1_agents=phase1_agents, guard_agent=guard_agent,
+            phase1_agents=phase1_agents, rival_agent=rival_agent,
+            guard_agent=guard_agent,
             bear_agent=bear_agent, queen=queen, all_agents=all_agents,
             prefetch_elapsed=prefetch_elapsed, start_time=start_time,
             checkpoint_file=checkpoint_file,
@@ -514,6 +535,22 @@ class AlphaHiveDailyReporter:
                 except (TimeoutError, ValueError, KeyError, TypeError, RuntimeError) as e:
                     _log.warning("Agent future failed: %s", e)
                     agent_results.append(None)
+
+        # Phase 1.4: RivalBeeVanguard（v0.44.3 从 Phase-1 移来）
+        #
+        # 必须在 Phase-1 之后：它要从信息素板读 ChronosBee 的催化剂分与 OracleBee
+        # 的 iv_rank/pc_ratio —— 留在 Phase-1 并行里读不到（同批蜂互相看不见），
+        # 此前只能写死三个常量。
+        # 必须在 GuardBee/BearBee 之前：Bear 读全板，排在前面才能让它看到 Rival。
+        try:
+            rival_result = ctx.rival_agent.analyze(ticker)
+            agent_results.append(rival_result)
+            _log.info("  ⚔️ 竞争蜂: %s %s (%.1f分)",
+                      ticker, rival_result.get("direction", "?"),
+                      rival_result.get("score", 5.0))
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            _log.warning("RivalBeeVanguard failed for %s: %s", ticker, e)
+            agent_results.append(None)
 
         # Phase 1.5: GuardBeeSentinel 交叉验证（必须先于 BearBee，Bear 读取 Guard 的信息素条目）
         try:
@@ -782,14 +819,13 @@ class AlphaHiveDailyReporter:
             try:
                 verified_rows = bt.store.get_recently_verified_t7(limit=50)
                 if len(verified_rows) >= 5:
-                    from ml_predictor import MLPredictionService, TrainingData
-
-                    def _cat_qual(v):
-                        if v >= 8.5: return "A+"
-                        if v >= 7.5: return "A"
-                        if v >= 6.5: return "B+"
-                        if v >= 5.5: return "B"
-                        return "C"
+                    # v0.44.3：阈值唯一真相 = catalyst_quality_from_score
+                    # （此前同一套阈值在三处各写一份嵌套 _cat_qual）
+                    from ml_predictor import (
+                        MLPredictionService,
+                        TrainingData,
+                        catalyst_quality_from_score as _cat_qual,
+                    )
 
                     new_training = []
                     direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
@@ -1879,7 +1915,10 @@ class AlphaHiveDailyReporter:
                 real_price, real_change = 0.0, 0.0
                 try:
                     from data_pipeline import fetch_stock_data as _fsd
-                    _sd = _fsd(ticker)
+                    # v0.43.28: 补跑历史交易日时必须锚定日期，否则这条兜底路径
+                    # 会把今天的实时价写进 analysis-*.json（与 v0.41.6 建立的
+                    # 历史通道口径不一致，正是 7/21 补跑价格对不上的同类问题）
+                    _sd = _fsd(ticker, as_of_date=self.date_str)
                     if _sd.get("price", 0) > 0:
                         real_price = float(_sd["price"])
                         real_change = float(_sd.get("momentum_5d") or 0.0)
