@@ -888,6 +888,39 @@ class Backtester:
             if hist.empty:
                 return None
 
+            # v0.45.10: 目标交易日**尚未收盘**时，yfinance 返回的那根 bar 是
+            # "正在形成"的——它的 Close 是此刻最新价，不是收盘价。此前无护栏，
+            # 于是任何盘中运行都会拿盘中价当收盘价评分。
+            #
+            # 实测 2026-08-24 那批 T+1（08-25 盘中评的）30 条里抽 5 只有 2 只判反：
+            #   AMC  记 +2.251% 判对，真实收盘 -1.124% 应判错
+            #   BILI 记 +0.812%（看空却收益为正）判对，应判错
+            #
+            # 正常 14:00 PDT 定时扫描在 13:00 收盘后跑，所以这个洞一直没暴露。
+            # 拿不到收盘价时返回 None —— 调用方会跳过，预测留在"待检"，
+            # 下次收盘后再评。**绝不用盘中价冒充收盘价。**
+            #
+            # 判据用交易所真实时钟（_exchange_now，来自 Yahoo 服务器），
+            # 不依赖本机钟——与 data_pipeline._drop_forming_bar 同一套判据。
+            # 那个函数丢的是末根且要求 len>=3，此处取 iloc[0] 且常只有 1 根，
+            # 复用不了，故单独判。
+            try:
+                from datetime import time as _dt_time
+                from data_pipeline import _exchange_now
+                _xnow = _exchange_now()
+                if (_xnow is not None
+                        and hist.index[0].date() == _xnow.date()
+                        and _xnow.time() < _dt_time(15, 59)):
+                    _log.info(
+                        "[%s] T+%d 目标日 %s 尚未收盘（交易所时间 %s），"
+                        "跳过本次评分，留待收盘后重评",
+                        ticker, days_ahead, hist.index[0].date(),
+                        _xnow.strftime("%H:%M"),
+                    )
+                    return None
+            except Exception as _e_fb:  # noqa: BLE001 - 护栏失效不该阻断回测
+                _log.debug("未收盘护栏检查失败 %s: %s", ticker, _e_fb)
+
             # 取目标交易日（或之后第一个交易日）的收盘价
             return float(hist["Close"].iloc[0])
 
