@@ -5,6 +5,306 @@
 
 ---
 
+## [0.45.5] — 2026-08-25 — 周报样本源切换：.predictions.json → pheromone.db
+
+用户质疑「Alpha Hive 有 30 个标的，为什么周报样本没收集到」。排查确认样本
+一直在收，只是**周报读的是另一个已死三个月的文件**：
+
+| | 旧源 `.predictions.json` | 新源 `pheromone.db` |
+|---|---|---|
+| 写入者 | compare_engine_v2 解析 `深度/deep-*.html` | 每日扫描直接落库 |
+| 触发方式 | 手动 `generate_deep_v2.py --ticker`（无任何调度器调用） | 自动，30 标的/天 |
+| 标的覆盖 | NVDA 1 只（历史仅 NVDA 53 + VKTX 2 份深度报告） | 52 只 |
+| 已验证样本 | 45 条 | **919 条** |
+| 最后更新 | **2026-05-20（冻结）** | 2026-08-24 |
+
+后果：6/21–8/24 连续 11 份 optimizer-report 字节数完全相同（30,769），
+同一份 5 月快照被反复计算了 13 周。
+
+### Added
+
+- **`深度分析报告/规则/pheromone_source.py`** — 周报数据源适配层。把
+  `pheromone.db` 的 `predictions`（959 行，自带 T+1/T+7/T+30 验证列）+
+  `signal_archive`（53k 行 options.*/agent.*/ml.*/insider.* 原生信号）
+  映射成 `.predictions.json` 的嵌套结构，下游分析函数零改动。
+  - 验证口径默认 **T+7**（对齐 weekly_optimizer），`ALPHA_HIVE_HORIZON` 可覆盖
+  - `predictions.iv_rank/put_call_ratio/options_score` 三列全表 NULL，实际数据
+    在 `signal_archive.options.*`，改从后者取
+  - `options.iv_current` 是 IV 绝对值，按**每标的自身历史百分位**换算为 IV Rank
+  - `score_high/score_low` 改用经验四分位。原硬编码 6.5/3.5 在蜂群
+    final_score 分布（min 3.19 / p50 5.44）下会让 `score_low` 恒为假
+  - 新增 8 个蜂群原生信号：`swarm_agreement_high` `guard_consistent`
+    `bear_warning` `insider_buying` `ml_bullish` `crowded` `momentum_up`
+    `sentiment_hot`
+
+### Changed
+
+- **`weekly_analyzer.py` v2.0 → v3.0**：`load_predictions()` / `load_accuracy()`
+  改为优先 pheromone.db，失败时回退 `.predictions.json`（已验证回退路径可用）。
+  报告头部新增数据源/口径/覆盖/日期区间标注。
+- **中性桶阈值随口径缩放**：t1=1.0% / t7=2.5% / t30=5.0%。原固定 1.0% 是为
+  T+1 设计的，套到 T+7 会把几乎全部样本判成 directional。
+
+### Fixed
+
+- **`split_neutral_bucket` / `compute_per_ticker_accuracy` 方向桶口径错误**。
+  原版只按 `|price_chg|` 分桶，**预测方向本身为「中性」**的样本只要标的波动够大
+  就被算进方向胜率。旧源中性样本极少影响可忽略，新源 280/959 是中性，会混入
+  186 条无方向预测。修正后净化胜率 47.1% → **50.5%**（262/519）。
+- **误判归因把分数嵌进原因字符串**（`高评分(7.86)过度乐观`），导致归因统计炸成
+  几十个 n=1 的桶。改为 `高评分(≥7.0)过度乐观`，聚合后 26 次 / 6%。
+
+### 口径变更后的结论修正
+
+- 低置信度过滤器（IV Rank>60 + 共振未触发 + 分数 3.5–6.5）**结论反转**：
+  旧 45 样本显示触发组 66.7% > 未触发 50.0%（+16.7pp，方向反常）；
+  新 919 样本显示触发组 47.9% < 未触发 56.3%（**-8.4pp**）。过滤器实际按设计
+  工作，旧报告的悖论是 NVDA 单标的小样本噪音。
+- 方向胜率 T+7：看多 49.8%（217/436）、看空 54.2%（45/83），整体 50.5%
+  ——接近抛硬币，与旧报告的 57.8% 不可比（口径与样本均已变）。
+
+---
+
+## [0.45.4] — 2026-08-25 — 深度报告：IV 两条链修复 + 版式去 AI 味
+
+用户报告网站深度研究报告里「IV 期限结构 + IV-RV 价差」显示为 0。核对 8/24
+那批 12 只标的的 analysis JSON，确认**不是一个 bug，是两条独立断链**，
+且交集不完全（T 有期限结构没 RV）——正是两条链路各自失败的指纹：
+
+**影响面按全量扫描池 30 只计**（`.swarm_results_2026-08-24.json`），
+不是深度报告的 12 份——深度报告有 `ALPHA_HIVE_ML_REPORT_MAX=12` 限流
+（v0.42.9），只给分数最高的 12 只出 HTML，但**另外 18 只照常扫描入库**，
+它们的 OracleBee 评分与 predictions 同样受影响：
+
+| | 挂掉 / 30 | 标的 |
+|---|---|---|
+| 期限结构 | **14** | ABBV·AMC·BILI·COST·DE·DELL·META·MSFT·NVDA·QCOM·RKLB·SNOW·TSLA·VKTX |
+| IV-RV | **11** | AMC·CRCL·CRM·DE·DELL·ENPH·JNJ·NEE·T·TMO·VKTX |
+
+两者交集仅 4 只（AMC·DE·DELL·VKTX）——NVDA/MSFT 只挂期限结构、T/JNJ 只挂
+IV-RV，这正是两条独立链路各自失败的指纹。
+
+### Fixed
+
+- **`options_analyzer.calculate_iv_term_structure` — 取数链改为 CBOE 主源**。
+  旧实现只走 yfinance：1 次 `.options` + 4 次 `option_chain()` 共 **5 次额外
+  HTTPS 往返**，撞上本机 OpenSSL 1.1.1q（实测当场抛 `SSLError: TLS connect
+  error`），而循环里的 `except Exception: continue` 把它全吞了 ⇒ `term_structure`
+  空列表 ⇒ shape="unknown" ⇒ 渲染成「0.0% / 0.0%」。
+  新增 `cboe_options.fetch_cboe_iv_term_structure()`：**一次请求含全部到期日**，
+  已在 `http_gate` 闸门内且 `_fetch_cboe_payload` 有进程缓存 ⇒ 主链拉过时
+  **零额外网络开销**。这不只是"更稳"，它净减少了出站请求数——对这台 SSL 栈
+  而言，减少并发本身就是修复的一部分（v0.43.27 实测：串行比并发快 38%）。
+  yfinance 降为兜底，且每次出站都进闸门 + 退避重试，失败原因逐条回传。
+  ⚠️ 取点仍用 **同一组目标 DTE (25/55/85/150)**，且限 DTE∈[7,270]：直接用
+  CBOE 全部到期日会拿 5 DTE（theta 扭曲）比 842 DTE（LEAPS），得出的 spread
+  与历史已发布数值不同源。**口径可比优先于数据量。**
+
+- **`market_intelligence.calculate_iv_rv_spread` — 哨兵值过滤改用相对量纲**。
+  `closes = closes[closes > 5]` 本意是滤掉 yfinance 归一化哨兵值（~1.0），
+  但 $5 这个绝对门槛对 $180 的 NVDA 是"极低"、对 $3 的 **AMC 就是"全部"**
+  ⇒ 低价股的 RV **结构性永远不可用**。改为中位数的 20%：哨兵值相对真实价格
+  永远是数量级差距，而真股票 30 天内不会跌到中位数的 1/5。
+  同时 `yf.download` 并入 `http_gate` + 3 次退避重试（此前是 8/24 SSL 风暴里
+  未受保护的调用方之一），各失败分支写明 `error` 而非只留一句"RV 数据不可用"。
+
+- **`.get(key, 0.0)` 救不了 `None` —— 传播层堵死**。这是本次的核心形状，
+  与 MEMORY「静默中性化」同源：`calculate_iv_rv_spread` 失败时返回的字典里
+  `rv_30d` **键是存在的、值是 None**，所以 `iv_rv_data.get("rv_30d", 0.0)`
+  拿到的是 None 而非默认值，一路流到渲染层被 `_safe(v, 0)` 兜成 `0.0`。
+  于是"网络失败"与"波动率真的是 0"在页面上完全同形。
+  改为不写默认值、诚实传 None；期权链完全不可用时的兜底 dict 里
+  `"rv_30d": 0.0 / "iv_rv_spread": 0.0` 一并改成 None。
+
+- **渲染层诚实化（`generate_ml_report._ch3_oracle`）**：缺数一律显示 `—`
+  并附上游失败原因（HTML 转义），不再兜成 0；取数来源（cboe/yfinance）作为
+  角标可见，沿用项目既有的 `iv_rank_source` / `vix_source` 约定。
+
+实测（`OPTIONS_SNAPSHOT_DISABLE=1` 绕过当日快照，全链跑通）：
+
+| 标的 | 期限结构 | IV-RV |
+|---|---|---|
+| NVDA | backwardation 43.0→39.6（cboe） | rv 35.83 / +14.42pp |
+| AMC  | contango 90.3→94.2（cboe） | rv 99.44 / −10.94pp |
+| VKTX | contango 82.5→87.1（cboe） | rv 44.80 / +36.75pp |
+| T    | flat 23.1→25.4（cboe） | rv 26.71 / −1.80pp |
+| DELL | backwardation（cboe） | rv 83.41 / +5.85pp |
+
+⚠️ **今天的报告重跑不会变**：`OptionsAgent.analyze` 有当日快照冻结
+（`cache/options_snapshot_{T}_{date}.json`），今早 06:33 已冻的快照仍带旧数据。
+**明天的扫描才会生效**，或手动 `force_refresh=True` / `OPTIONS_SNAPSHOT_DISABLE=1`。
+
+- **`classify_call_flow` 的 C 票：缺数被当成"观察到中性"**（查影响面时翻出的
+  第四处同型缺陷，**影响评分不只是显示**）。旧写法：
+
+  ```python
+  if term_data and term_data.get("shape"):   # "unknown" 是 truthy 字符串
+      ...
+      else: votes["C"] = "mixed"             # 失败的期限结构投出一张真票
+  ```
+
+  函数下方 `labels = [v for v in votes.values() if v != "unknown"]`
+  本就是**为弃权设计的**，但这张票永远到不了那里。实测同一组输入下：
+  取数失败 → `label=mixed, conf=0.67`，真实 contango → `label=mixed, conf=0.67`
+  ——**完全一致**。修复后失败弃权 → `label=hedge, conf=0.5`（分母只剩 2 票）。
+
+### Changed
+
+- **深度报告版式去 AI 味 —— 并入站点自有设计系统，不新造第三套审美**。
+  `generate_ml_report.py` 是站点上**唯一**还穿着 `#667eea → #764ba2` 紫色渐变的
+  页面：白圆角卡 + 大投影浮在渐变底上、渐变表头、每个标题挂 emoji。而
+  `index.html` 早有一套刻意非 AI 的语言（奶油纸底 `#FAF7F2` / 铁锈红 `#B7410E` /
+  Playfair Display + JetBrains Mono + Noto Sans SC / 0.5px 细线 / `html.dark`），
+  `generate_deep_v2` 也有自己的深色令牌集。从仪表板点进报告像换了个产品。
+  - 令牌与 `index.html` **逐个对齐**（含 `html.dark` 全套），主题经
+    `localStorage` 的 `ah-theme` / `ahDark` 与仪表板共享 ⇒ 同源跳转不闪白。
+  - 刊头从"居中英雄卡"改为**左对齐研究信笺**：mono 眉标 + Playfair 大标题 +
+    描边方角评级标签 + mono 元信息行。
+  - 渐变全部移除；卡片投影 → 细线分隔；圆角 15px/10px → 2px；
+    数字统一 JetBrains Mono + `tabular-nums`（表格数字终于能对齐）。
+  - 正文 20 处硬编码十六进制**语义化**映射到令牌（`#28a745`→`var(--bull)` 等），
+    页面内已无硬编码色值 ⇒ 明暗两套自动成立。
+  - 标题 emoji 全清；正文 `⚠️/✅/🟢/🔴` 换成可着色、可随主题变化的排版标记
+    （`●`/`▲`/`▼`）。日志里的 emoji 保留——那是终端输出，不是 UI。
+
+- `tests/test_ml_report_none_safety.py` 的颜色断言从硬编码十六进制换成令牌名。
+  **测试意图未变**（颜色必须反映状态、缺数不得被涂成看跌），只是跟随重构。
+
+### Added
+
+- **`tests/test_iv_structure_guards.py`（23 条）** — 「零值伪装」回归闸。
+  已验证可变红：把相对阈值退回 `closes > 5`、把渲染层退回 `_safe(v, 0)`，
+  精确红 4 条；退回 C 票修复另红 4 条。含反向断言：**真实测得 0.0 仍须显示为 0.0**，
+  与「—」区分——否则修复就修反了。
+
+- `cboe_options.fetch_cboe_iv_term_structure()` — ATM 容差自适应
+  `max(4%×S, 1.2×中位行权价间距)`。纯百分比容差对低价股会归零
+  （AMC ≈$3 时 ±4% = ±$0.12，而行权价间距 $0.50 → 一个候选都选不到）。
+
+---
+
+## [0.45.3] — 2026-08-25 — 「缺数据渲染成安全值」的剩余六处
+
+v0.45.2 只修了 `momentum_5d`。同一形状还散在另外五个字段/模块里，按**当前可达性**
+排序处理。共同判据：**这个默认值会不会让下游误以为掌握了信息**。
+
+### Fixed
+
+- **`collect_data.py`** — `round(float(sdet.get("momentum_5d", 0)), 4)`。
+  ScoutBee 自 v0.43.25 起对该字段诚实吐 None，键是在的，`.get` 默认值失效 ⇒
+  `float(None)` TypeError。**当前就可达**，故排第一。改为缺失写 JSON null——
+  写 0 会被下游当成"动量为零"消费。`crowding_score` 同款一并改。
+
+- **`risk_engine.py`** — σ 未知时不再编造风险数字。两个毛病叠在一起：
+  ① `float(stock_data.get("volatility_20d", 30.0))` 里那个保守兜底是**幌子**，
+  默认值只在键缺失时生效，值为 None 时照样 `float(None)` 崩；
+  ② 更早的形态 `volatility_20d = 0.0` ⇒ σ=0 ⇒ VaR 恒为 0 ⇒ 面板显示「🟢 低」。
+  新增 `_sigma_annual()`：σ 不可得则返回 `{"error": ...}`，与本文件既有的
+  `price 无效 (≤0)` 哨兵写法一致。`parametric_var` / `monte_carlo_var` 接入。
+  `_classify_growth_value` σ 缺失时返回 `"unknown"`，并把消费它的
+  `sens_map[style]` 裸下标改成 `.get(..., blend)`——否则诚实化立刻变成 KeyError。
+
+- **`data_pipeline.py` / `swarm_agents/cache.py`** — `volatility_20d` 与
+  `volume_ratio` 不再伪造。`volume_ratio` 的契约本就定好了（531/582 行显式传
+  None，注释写明"原 1.0 会被当正常量消费"），只有 cache fallback 没跟上。
+  `volatility_20d` 则连 dataclass 都还是 `float = 0.0`。
+  ⚠️ **只改 cache.py 堵不住**：那条分支要 data_pipeline 导入失败才走得到，
+  主路径在 dataclass 默认值上。同时把 `momentum_5d` / `volume_ratio` 的
+  **默认值**也改成 None——它们的类型早已是 Optional，默认值却还是 0.0/1.0，
+  构造 StockData 时不显式赋值就又变回伪造。
+
+- **`ml_predictor.py`** — `normalize_feature()` 对 None 无守卫，
+  `(value - min_val)` 抛 TypeError；SGD 路径更隐蔽，None 经
+  `np.array(dtype=float64)` **静默变成 NaN** 再进 scaler。
+  关键发现：`centered_feature(0.5, influence, inverse)` 对任意参数**恒等**
+  返回 0.5，所以 **0.5 是这个坐标系里唯一表达"该维不投票"的数**——
+  填别的才是伪造，抛错则是把数据缺口翻译成崩溃（12 维向量结构上必须凑齐）。
+  故：插补 0.5，但**必须配套声明**。新增 `_missing_features()` /
+  `_feature_quality()`，三个模型类的 `predict_return()` 统一输出
+  `feature_completeness` / `imputed_features` / `unreliable`。
+  缺 >4 维时 `_generate_recommendation()` 返回 `NO CALL`——此前无论插补多少维
+  都照常出建议，而插补值全中性 ⇒ 概率被推向 0.5 ⇒ 稳定落进 "HOLD"，
+  读起来像一个真实判断。SGD 路径的 NaN 改用训练均值填补（标准化后恰为 0）。
+
+- **`llm_service.py`** — 三处 momentum + 两处 volatility 的
+  `{...get(k, 0):+.1f}%`。format(None, spec) 直接 TypeError，与 v0.43.23
+  那次 ML 报告崩溃**完全同款**；就算不崩，把缺失渲染成 "+0.0%" 等于告诉模型
+  "这只票持平/低波动"，而真相是"没查到"——**喂给 LLM 的假事实会被它当前提推理**。
+  新增 `_fmt_num()`：None → "不可得"。
+  注：volatility 那两处是被本次改动**新变得可达**的，同批修掉。
+
+### Added
+
+- **`tests/test_silent_failure_guards.py`** — 扩到 44 条，新增五组：
+  dataclass 默认值诚实性、risk_engine 拒绝出数、ML 插补声明、prompt 渲染、
+  collect_data 输出 null。含"插补不能顺手改坏正常路径"的对照断言
+  （`normalize_feature(3,0,10)==0.3`）与"0.5 确实中性"的证明
+  （`centered_feature(0.5,·)≡0.5` 对四种 influence × 两种 inverse）。
+
+### 已知遗留
+
+- `crowding_detector.py:489/501` 自建 stock_data，仍有 `volatility_20d: 0.0` /
+  `volume_ratio: 1.0`。它与 data_pipeline 无关、下游只用 crowding，本次未动。
+- `_data_unavailable` 全仓**只有写入没有读取**（7 处全是写）。诚实降级实际靠的是
+  值本身为 None，不是这个标志位。要么接上读取点，要么别在新代码里假装它有用。
+
+## [0.45.2] — 2026-08-25 — 2026-08-24 跑后核对翻出的三条静默失败路径
+
+来自 `post-fix-verification-2026-08-24` 的跑后核对。三条都不报错、退出码为 0、
+日志正常，**但产出早已是假的**——与 v0.43.23~0.43.26 是同一族缺陷。
+
+### Fixed
+
+- **`swarm_agents/_config.py` / `config.py` / `swarm_agents/base.py`** —
+  ticker 正则 `^[A-Z]{1,5}$` 拒绝类份额后缀，`BRK-B` 从未被真正分析过。
+  后果不是报错而是**静默中性化**：8 只蜂里 7 只在 `_validate_ticker` 提前
+  返回 `score=5.0 / confidence=0.0 / details={}`，日报照常印
+  "BRK-B NEUTRAL 5.0"，与"分析过、确实中性"在产出上完全同形。
+  至少可追溯到 2026-08-11 的日报。改为 `^[A-Z]{1,5}(?:[.-][A-Z])?$`，
+  同时接纳 `BRK.B` / `BF-B`；`BRK-BB` / `BRK--B` / `../etc` 等注入形状仍被拒。
+  修复后实测 BRK-B 拿到真实动量 +0.27%、情绪 51%、confidence 0.85。
+
+- **`swarm_agents/cache.py`** — fallback 把 `momentum_5d` 初始化为 `0.0`，
+  是 v0.43.25 在 ScoutBee 侧拆掉的伪造**搬到了上游**。
+  真正危险的不是那两条 `_data_unavailable=True` 的早退路径，而是
+  `len(hist) >= 5` 不成立时（次新股 / 停牌 / 取数残缺）：0.0 会一路走到
+  `data_source="real"` 且**不置任何标志位**，下游无从区分"真持平"和"没数据"。
+  改为 `None`，对齐 data_pipeline 自 v0.38.0 起的 P0-2 契约。
+  警告：全仓 `_data_unavailable` 只有写入、**没有任何读取点**——诚实降级靠的是
+  `momentum_5d is None` 本身，不是这个标志位。
+
+- **`swarm_agents/buzz_bee.py`** — 注释写"momentum 为 None 时跳过背离检测"，
+  代码却传 `_mom_raw if _mom_raw is not None else 0.0`，**并没有跳过**。
+  于是 `sentiment.py` 里那条返回 `divergence_type="unavailable"` 的分支
+  （v0.43.25 专门为此写的）永远不可达，"查不了"被伪装成"查过、没背离"。
+  现在直传 None。注意 `score_adj` 恒为 0.0，评分不受影响。
+
+- **`report_deployer.py` / `generate_ml_report.py`** — gh-pages 空提交。
+  部署走 `git commit-tree` 这类**管道命令**，它不做 `git commit` 的
+  "无变更则拒绝"检查，tree 与父提交相同也照样生成 commit。实测
+  `8b16977` / `06d99cc` / `0c00454` 三条 commit message 都声称
+  "(12 tickers)"，`git show --name-only` 却是 **0 个文件**——message 里的
+  数字是 `successful_count`（**声称值**），与 tree 实际变更无关。
+  新增 `ghpages_tree_delta()`：tree 未变则跳过 commit 并打 ERROR，
+  变更时把**实测**文件数写进 message 与 `.gh_pages_deploy_log.jsonl`。
+  无父提交 / git 调用失败返回 `(True, -1)` fail-open，不阻断部署。
+
+### Added
+
+- **`tests/test_silent_failure_guards.py`** — 26 条回归闸，覆盖上述三条路径。
+  每条都已验证**把修复回退掉会变红**（旧正则拒 BRK-B、HEAD 里默认值是 0.0、
+  HEAD 里仍含 `if None else 0.0`、旧调用方下 `unavailable` 不可达、
+  HEAD 里没有 `ghpages_tree_delta`）——否则测试只是装饰。
+
+### 已知遗留（未修，本次只报告）
+
+- `ml_predictor.normalize_feature()` 对 `None` 无守卫，`(value - min_val)`
+  会直接抛 TypeError。当前不可达（`TrainingData` 的构造方都已 sanitize），
+  但契约仅靠类型注解 `momentum_5d: float` 维系，没有运行时强制。
+  刻意不加"None → 0.5"的兜底：那会是又一处静默伪造。
+- `swarm_agents/cache.py` 的 `volume_ratio: 1.0` 与 `volatility_20d: 0.0`
+  是同一形状的伪造，本次未动（超出核对范围）。
+
 ## [0.45.1] — 2026-08-24 — 波动率工具链二次检查：三个"看不见"的缺陷
 
 对 v0.45.0 补录的那批代码做二次检查。三个缺陷都不影响已产出的验证结论
@@ -666,9 +966,13 @@ Finnhub / AlphaVantage 全部并入。实测 4 并发拉 CBOE：
 | 不经闸门 | 65.2s | 0 |
 | **经闸门** | **40.5s** | 0 |
 
-**串行反而快 38%**——并发在这个 SSL 栈上是负优化。
-（今天两组均未触发 EOF，所以"防 EOF"是从 8/24 日志与已知机制推断；
-今天证到的是"串行不慢反快"，消除了加锁拖慢扫描的顾虑。）
+~~**串行反而快 38%**~~ —— ⚠️ **2026-08-25 更正：该结论已被证伪。**
+重测（12 只×并发 1/4/8/12 + 3 轮×8 只并发 4，两个解释器各 24 次请求）：
+OpenSSL 1.1.1q 与 3.6.1 **均 0 失败、耗时几乎相同**（52s vs 53s），
+串行 80.5s 反而比并发 62s **慢**。原先那组 65.2s vs 40.5s 是单次取样、
+顺序执行，第二次很可能吃到 CDN 热缓存——把缓存效应当成了闸门效果。
+`http_gate` 保留（无害、可防对端限流），但**不再宣称它治 EOF**。
+8/24 的 96 次 EOF 同时打在 7 个互不相干的域名上，指向主机/网络层瞬时状况。
 
 ### v0.43.27 根因二：`_ch6_risk_radar` 的 None 崩溃（次症）
 期权链降级为样本数据 → `options_analyzer` 诚实返回 `iv_rank=None`（v0.43.19 起）
