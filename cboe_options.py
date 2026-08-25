@@ -42,7 +42,13 @@ _MAX_STRIKES_PER_SIDE = 40      # 每到期日每边最多保留 40 strike（按
 
 # 本机老 SSL 栈（LibreSSL 2.8.3）扛不住并发 HTTPS：实测 4 并发拉 CBOE 每个挂 50-70s
 # 甚至 SSL EOF，而顺序拉仅 8-11s。故串行化 CBOE 网络请求（信号量限 1）。
-_CBOE_SEM = threading.Semaphore(1)
+# v0.43.27: 指向全进程唯一的 HTTPS 闸门。此前这把锁只保护 CBOE，
+# yfinance/Finnhub/AlphaVantage 各走各的，照样把老 SSL 栈压垮
+# （2026-08-24 全天 96 次 SSL EOF → Step 2 超时被杀、当天零产出）。
+try:
+    from http_gate import _GATE as _CBOE_SEM
+except Exception:  # pragma: no cover - 闸门不可得时退回本地锁，至少保住 CBOE
+    _CBOE_SEM = threading.Semaphore(1)
 # 进程内 payload 缓存：同一标的的主链(fetch_cboe_chain)与全链(fetch_cboe_full_chain_oi)
 # 共享一次下载，避免每标的拉 2 次大 JSON。短 TTL 防长驻进程取到陈旧数据。
 _payload_cache = {}  # ticker -> (timestamp, data)

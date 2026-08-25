@@ -75,3 +75,57 @@ class TestScoutNoneSafety:
             "details": {"momentum_5d": None, "crowding_score": 40, "insider": {}},
         }})
         assert ">—</div><div class=\"lbl\">5日动量</div>" in html
+
+
+class TestRiskRadarNoneSafety:
+    """v0.43.27 回归：2026-08-24 真实事故。
+
+    期权链因 SSL 风暴降级为样本数据 → options_analyzer 诚实返回 iv_rank=None
+    （v0.43.19 起）→ `f"{iv_rank:.1f}"` 抛 TypeError，12 只标的 ML 报告全废。
+
+    ⚠️ 这个坑我在 v0.43.23 就**看到过**这一行，但当时用 2026-08-14 的数据实测，
+    该键显示为「缺失」而非 None，判定不会命中就跳过了——**用健康数据验证一个
+    只在降级时触发的分支**。所以下面每条测试都必须显式喂 None。
+    """
+
+    @staticmethod
+    def _radar(**over):
+        g = _gen()
+        opts = {"gamma_squeeze_risk": "low", "iv_rank": 55.0}
+        opts.update(over.pop("options", {}))
+        ad = {
+            "BearBeeContrarian": {"details": {"bear_score": over.pop("bear_score", 6.0)}},
+            "ScoutBeeNova": {"details": {"crowding_score": over.pop("crowding", 40)}},
+            "ChronosBeeHorizon": {"details": {"catalysts": []}},
+        }
+        return g._ch6_risk_radar({"conflict_info": {"conflict_level": "low"}}, ad, opts)
+
+    def test_none_iv_rank_does_not_crash(self):
+        assert self._radar(options={"iv_rank": None})
+
+    def test_none_iv_rank_renders_dash(self):
+        html = self._radar(options={"iv_rank": None})
+        assert "IV Rank —" in html
+        assert "IV Rank 0.0%" not in html
+
+    @pytest.mark.parametrize("field", ["bear_score", "crowding"])
+    def test_other_none_fields_do_not_crash(self, field):
+        assert self._radar(**{field: None})
+
+    def test_missing_data_is_not_rendered_as_low_risk(self):
+        """最关键的一条：None 当 0 处理会让 risk_level 输出「🟢 低」，
+        把「没数据」渲染成「低风险」——比崩溃更危险，因为它不会报错"""
+        html = self._radar(bear_score=None, crowding=None)
+        assert "⚪ 数据缺失" in html
+        # 两个缺数维度都不该出现绿灯
+        import re
+        rows = [r for r in re.findall(r"<tr>.*?</tr>", html) if "情绪风险" in r or "估值压缩" in r]
+        assert rows, "未取到目标行"
+        for r in rows:
+            assert "🟢" not in r, f"缺数据却渲染成低风险: {r[:120]}"
+
+    def test_real_values_still_render(self):
+        """守卫不能写成永远走缺失分支"""
+        html = self._radar()
+        assert "IV Rank 55.0%" in html
+        assert "⚪ 数据缺失" not in html

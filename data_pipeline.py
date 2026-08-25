@@ -511,8 +511,9 @@ class AlphaVantageSource:
                 f"https://www.alphavantage.co/query?"
                 f"function=GLOBAL_QUOTE&symbol={ticker}&apikey={self.api_key}"
             )
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                result = json.loads(resp.read().decode())
+            # v0.43.27: 同 Finnhub，走全局 HTTPS 闸门
+            from http_gate import urlopen_gated
+            result = json.loads(urlopen_gated(url, timeout=10).decode())
 
             quote = result.get("Global Quote", {})
             price = float(quote.get("05. price", 0))
@@ -562,8 +563,10 @@ class FinnhubSource:
             import json
 
             url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={self.api_key}"
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                quote = json.loads(resp.read().decode())
+            # v0.43.27: 必须走全局 HTTPS 闸门。本机 OpenSSL 1.1.1q 扛不住并发，
+            # 而本源自 v0.43.26 接通后才真正开始发请求——正是 8/24 EOF 风暴的新增变量。
+            from http_gate import urlopen_gated
+            quote = json.loads(urlopen_gated(url, timeout=10).decode())
 
             current = float(quote.get("c", 0))
             prev_close = float(quote.get("pc", 0))

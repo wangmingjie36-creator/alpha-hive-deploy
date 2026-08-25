@@ -136,12 +136,9 @@ class MLEnhancedReportGenerator:
                     LIMIT 200
                 """).fetchall()
 
-            def _cat_qual(v):
-                if v >= 8.5: return "A+"
-                if v >= 7.5: return "A"
-                if v >= 6.5: return "B+"
-                if v >= 5.5: return "B"
-                return "C"
+            # v0.44.3：阈值唯一真相 = ml_predictor.catalyst_quality_from_score
+            # （此前同一套阈值在三处各写一份嵌套 _cat_qual）
+            from ml_predictor import catalyst_quality_from_score as _cat_qual
 
             direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
             result = []
@@ -1469,7 +1466,20 @@ class MLEnhancedReportGenerator:
         gex = options.get("gamma_squeeze_risk", "low")
         iv_rank = options.get("iv_rank", 0)
         conflict_level = swarm.get("conflict_info", {}).get("conflict_level", "low")
+
+        # v0.43.27: 这三个值都是 `.get(k, 数字默认)` —— 而默认值只在**键缺失**时
+        # 生效，上游写成 None 时它形同虚设。2026-08-24 实测崩在下面的
+        # f"{iv_rank:.1f}"：期权链降级为样本数据后 options_analyzer 诚实返回
+        # iv_rank=None（v0.43.19 起），而这里没接住。
+        #
+        # 关键：**不能把 None 当 0 处理**。risk_level(0, ...) 会输出"🟢 低"，
+        # 等于把"没数据"渲染成"低风险"——比崩溃更危险，因为它不会报错。
+        def _fmt(val, spec, suffix=""):
+            return "—" if val is None else f"{val:{spec}}{suffix}"
+
         def risk_level(val, high_thr, med_thr, high_lbl="高", med_lbl="中", low_lbl="低"):
+            if val is None:
+                return "⚪ 数据缺失"
             if val >= high_thr:
                 return f"🔴 {high_lbl}"
             if val >= med_thr:
@@ -1477,10 +1487,10 @@ class MLEnhancedReportGenerator:
             return f"🟢 {low_lbl}"
         rows = [
             ("监管风险", risk_level(1 if conflict_level in ("high","severe") else 0, 1, 0.5), "AI 芯片出口管制 / 政策变化风险"),
-            ("市场情绪风险", risk_level(bear_score, 7, 5), f"看空强度 {bear_score:.1f}/10，{'临近催化剂' if imminent else '无近期催化剂'}"),
-            ("估值压缩风险", risk_level(crowding, 70, 50), f"拥挤度 {crowding:.0f}/100（{'偏高' if crowding>70 else ('适中' if crowding>40 else '偏低')}）"),
+            ("市场情绪风险", risk_level(bear_score, 7, 5), f"看空强度 {_fmt(bear_score, '.1f')}/10，{'临近催化剂' if imminent else '无近期催化剂'}"),
+            ("估值压缩风险", risk_level(crowding, 70, 50), f"拥挤度 {_fmt(crowding, '.0f')}/100（{'数据缺失' if crowding is None else ('偏高' if crowding > 70 else ('适中' if crowding > 40 else '偏低'))}）"),
             ("流动性风险", "🟢 低", "大盘股，日均成交量充足"),
-            ("期权事件风险", risk_level(1 if str(gex).lower() in ("high","很高","medium") else 0, 1, 0.5), f"Gamma 压榨风险：{gex}，IV Rank {iv_rank:.1f}%"),
+            ("期权事件风险", risk_level(1 if str(gex).lower() in ("high","很高","medium") else 0, 1, 0.5), f"Gamma 压榨风险：{gex}，IV Rank {_fmt(iv_rank, '.1f', '%')}"),
             ("催化剂风险", risk_level(len(imminent), 2, 1), f"7 天内催化剂 {len(imminent)} 个：{', '.join(c.get('event','') for c in imminent[:2])}"),
         ]
         risk_rows = "".join(
