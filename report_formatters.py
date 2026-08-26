@@ -618,7 +618,8 @@ def _build_data_quality_section(sorted_results) -> List[str]:
     degraded: Dict[str, List[str]] = {}   # "Agent.channel" -> [tickers]
     total_ch = 0
     real_ch = 0
-    # 设计性缺失通道不算降级（Polymarket 无个股预测市场，权重已自动重分配）
+    # 设计性缺失通道不算降级（Polymarket 自 v0.45.30 已关闭，见 config.POLYMARKET_ENABLED；
+    # 权重在 oracle_bee 侧自动重归一化，不掺常数）
     _by_design = {"polymarket"}
     for ticker, r in sorted_results:
         dq = r.get("data_quality") or {}
@@ -836,8 +837,7 @@ def generate_markdown_report(reporter) -> str:
     md.append("## 📝 数据来源 & 免责声明")
     md.append("")
     md.append("**数据源**：")
-    md.append("- StockTwits 情绪（实时）")
-    md.append("- Polymarket 赔率（每5分钟）")
+    md.append("- 社交热度：Reddit 提及量（ApeWisdom）")
     md.append("- Yahoo Finance / yFinance（实时）")
     md.append("- SEC 披露（每日更新）")
     md.append("- **期权链数据**（yFinance，每5分钟缓存）")

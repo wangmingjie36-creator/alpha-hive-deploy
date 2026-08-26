@@ -204,7 +204,7 @@ class TestFeaturesReachTrainingData:
         import crowding_detector as cd
 
         monkeypatch.setattr(rds, "get_real_crowding_metrics",
-                            lambda t, s, b: {"stocktwits_messages_per_day": 1})
+                            lambda t, s, b: {"social_messages_per_day": 1})
 
         class _Det:
             def __init__(self, ticker):

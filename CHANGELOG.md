@@ -5,6 +5,81 @@
 
 ---
 
+## [0.45.30] — 2026-08-26 — 清理三个名存实亡的数据源，并修掉拥挤度里的动量双计
+
+用户提出「AlphaVantage/Tiingo/Stocktwits/Polymarket 好像很久没用到了」，全仓核查。
+结论四个源各不相同，**其中两个我先前的判断是错的**：
+
+| 源 | 实况 | 处理 |
+|---|---|---|
+| Tiingo | **0 个 Python 文件引用**，日志 0 次 | key 文件为遗物，代码无可删 |
+| StockTwits | 公开 API 自 v0.40.0 已 403 停用，数据**早就换成 Reddit ApeWisdom**，只有字段名还叫 stocktwits_* | 全面改名为 social_* |
+| AlphaVantage / Finnhub | **没坏**。实测两个都通（Finnhub 返回 NVDA 真实报价）。极少出现是因为它们在降级链第 2、3 位，CBOE/yfinance 通常成功 —— 这正是降级链该有的样子。日志里 26 次 EOF 全是 8/24 网络风暴期间的 | **不动** |
+| Polymarket | 每次扫描都调，**从无一条成功返回个股赔率**（455 条日志全是「无相关个股预测市场」+ 熔断）。结构性原因：大盘股没有个股预测市场 | 关闭 |
+
+### Changed — 关闭 Polymarket（`config.POLYMARKET_ENABLED = False`）
+
+代价是纯浪费：每次扫描 30 只 × 最多 3 次尝试 × 15s 超时 + 429 退避，且它是
+v0.43.27 那场 EOF 风暴命中的 7 个域名之一 —— 每天 30 次注定失败的请求白白扩大故障面。
+
+**odds 维度评分口径不变**：`oracle_bee` 在 `poly_markets==0` 时本就把
+0.55+0.10 重新归一化、不掺常数。开关的 fallback 默认值一并设为 `False`
+（v0.45.23 教训：关掉的开关若 fallback 是 True，import 失败会静默重开）。
+`polymarket_client.py` 与 `data_fetcher.get_polymarket_odds` **保留**，改回 True 即复活。
+
+### Fixed — 拥挤度里的动量伪装与双计（这是本次真正的 bug）
+
+`real_data_sources.get_real_crowding_metrics`（ScoutBee 实际走的路径）里：
+
+```python
+poly_proxy = abs(momentum_5d) * 0.8   # 冒充 polymarket_odds_change_24h
+```
+
+把动量改个名字当赔率变化用，而**同一个 dict 里 `price_momentum_5d` 已在喂
+`short_squeeze_risk`** —— 动量被暗中重复计权。实测 2026-08 的 250 个样本反推：
+该分量 **76% 落在最低档常数 20**，其余 24% 的变化全部来自动量本身。
+既是常数稀释又是双计，整项移除。
+
+- `CROWDING_WEIGHTS` 删除 `polymarket_volatility`（原 0.15），其余五项
+  按原比例重归一化到 1.0（相对关系不变）。
+- **缺失分量不再按 0 计**：原 `sum(w[k] * scores.get(k, 0))` 把「没数据」
+  等同于「这维度得 0 分」并压低总分；改为只在实际算出的分量间重归一化。
+  缺失与「真的很低」必须可区分（同 v0.45.3「安全默认值」判据）。
+
+### Fixed — `CrowdingDetector` 硬编码了第二份权重
+
+`__init__` 里硬编码的权重字典与 `config.CROWDING_WEIGHTS` 并存且从不同步——
+config 那份被 `_validate_weight_sum` 校验却**从未生效**。现改为读 config
+（唯一真相源），fallback 与 config 现值逐字同向。
+
+### Fixed — 报告里的对外假声明
+
+`report_formatters.py` 数据源清单写着「StockTwits 情绪（实时）」与
+「Polymarket 赔率（每5分钟）」，两者都不属实。已改为「社交热度：Reddit 提及量
+（ApeWisdom）」并删除 Polymarket 行。
+
+### Changed — 改名（消除误导，非行为变更）
+
+`stocktwits_messages_per_day` → `social_messages_per_day`、
+`stocktwits_volume` → `social_volume`、`get_stocktwits_metrics` → `get_social_metrics`、
+TTL `stocktwits_legacy` → `social_legacy`、`DATA_SOURCE_PRIORITY.stocktwits_messages`
+→ `social_messages`。移除注册表里的 `STOCKTWITS_TOKEN`。
+全仓 grep 确认生产代码无旧键名残留，测试同步更新。
+
+### ⚠️ 世代边界（`ic_rerun_readiness._COHORT_HISTORY` 已追加 2026-08-26 / v0.45.30）
+
+拥挤度 → ScoutBee signal 维度 → `final_score`，属评分口径变更。
+**现在改的代价接近于零**：上一世代（2026-08-17）此时才 0/25 周、60 条未到期样本，
+晚改只会更贵。
+
+### 测试
+
+全量 **1643 passed / 0 failed**（+1 skipped，64 deselected）。
+端到端实测拥挤度链路：权重与 config 一致、缺失分量走重归一化（49.31 而非按 0 计的更低值）、
+只给旧键名时 `social_volume` 走 0 档 —— 证明改名彻底、无双读残留。
+
+---
+
 ## [0.45.29] — 2026-08-26 — VIX 期限结构口径修正：ETF 股价冒充期货点位，结构方向长期报反
 
 v0.45.27 首跑对比暴露、用户批准修复。`cboe_fetcher.fetch_vix_term_structure`

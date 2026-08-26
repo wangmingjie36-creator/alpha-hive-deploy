@@ -113,7 +113,6 @@ _SECRET_REGISTRY = {
     # "CBOE→yfinance→AV→Finnhub" 链的最后一环从未生效过
     "FINNHUB_API_KEY": "~/.alpha_hive_finnhub_key",
     "ALPHA_VANTAGE_KEY": None,
-    "STOCKTWITS_TOKEN": None,
     "GMAIL_APP_PASSWORD": None,
     "TRADIER_API_KEY": "~/.alpha_hive_tradier_key",
 }
@@ -168,7 +167,7 @@ CACHE_CONFIG = {
         "reddit_memory": 300,     # 5 分钟（内存）
         "edgar_rss": 900,         # 15 分钟
         # 中频数据源（1~24 小时）
-        "stocktwits_legacy": 3600,  # 1 小时（data_fetcher 旧路径）
+        "social_legacy": 3600,      # 1 小时（社交热度，Reddit ApeWisdom 代理）
         "google_trends": 86400,   # 24 小时
         "seeking_alpha": 86400,   # 24 小时
         "sec_cik": 86400,         # 24 小时
@@ -487,8 +486,7 @@ def get_extended_watchlist() -> dict:
 
 # ==================== 数据源优先级 ====================
 DATA_SOURCE_PRIORITY = {
-    "stocktwits_messages": 1,  # 可靠性最高
-    "polymarket_odds": 2,
+    "social_messages": 1,  # 可靠性最高（Reddit ApeWisdom 代理）
     "sec_filings": 2,
     "google_trends": 3,
     "seeking_alpha": 3,
@@ -733,13 +731,31 @@ YFINANCE_OPTIONS_CONFIG = {
 }
 
 # ==================== 拥挤度权重 ====================
+# ⚠️ v0.45.30：删除 polymarket_volatility（原 0.15）。
+# Polymarket 对本名单的大盘股**没有个股预测市场**，odds_change 恒为 0，
+# 落 else 分支恒得 20 分 —— 15% 权重是每只标的都相同的常数，
+# 不携带任何区分信息，只做常数抬升（同 experiments/final_score_dilution_report.md 的稀释形态）。
+# 其余五项按原比例重新归一化到 1.0（0.25/0.85 等），相对关系不变。
+# 唯一真相源：CrowdingDetector 自 v0.45.30 起读本字典，不再硬编码第二份。
+# ==================== Polymarket 开关 ====================
+# v0.45.30 关闭。实测证据（全部日志 455 条 polymarket 记录）：
+#   · 从无一条成功返回个股赔率，只有「无相关个股预测市场」与熔断器打开
+#   · 原因是结构性的 —— Polymarket 对大盘股基本不存在个股预测市场，非网络故障
+#   · 代价是每次扫描 30 只标的 × 最多 3 次尝试 × 15s 超时 + 429 退避，
+#     且它是 v0.43.27 那场 EOF 风暴命中的 7 个域名之一（白白扩大故障面）
+# 评分影响为零：oracle_bee 在 poly_markets=0 时本就把 0.55+0.10 重新归一化，
+# 不掺常数（见 swarm_agents/oracle_bee.py 的 poly_markets==0 分支）。
+# ⚠️ 改回 True 之前先确认目标名单里真有个股预测市场，否则只是恢复空转。
+# ⚠️ 消费方读取时的 fallback 默认值必须同为 False（v0.45.23 教训：
+#    关掉的开关若 fallback 是 True，import 失败会静默重开被否决的功能）。
+POLYMARKET_ENABLED = False
+
 CROWDING_WEIGHTS = {
-    "stocktwits_volume": 0.25,
-    "google_trends": 0.15,
-    "consensus_strength": 0.25,
-    "polymarket_volatility": 0.15,
-    "seeking_alpha_views": 0.10,
-    "short_squeeze_risk": 0.10,
+    "social_volume": 0.2941,        # 原 0.25 / 0.85（Reddit ApeWisdom 代理消息量）
+    "google_trends": 0.1765,        # 原 0.15 / 0.85
+    "consensus_strength": 0.2941,   # 原 0.25 / 0.85
+    "seeking_alpha_views": 0.1176,  # 原 0.10 / 0.85
+    "short_squeeze_risk": 0.1177,   # 原 0.10 / 0.85（+0.0001 凑整到 1.0）
 }
 
 # ==================== 失效条件阈值 ====================

@@ -218,18 +218,29 @@ class OracleBeeEcho(BeeAgent):
                 _log.warning("OracleBeeEcho options unavailable for %s: %s", ticker, e)
                 result = {}
 
-            # ---- Polymarket 赔率（40%）----
+            # ---- Polymarket 赔率（权重 35%）----
+            # v0.45.30: 默认关闭（config.POLYMARKET_ENABLED=False）。本名单是大盘股，
+            # Polymarket 无对应个股预测市场，实测从未成功返回过赔率，只白耗
+            # 30 次 × 最多 3 重试 × 15s 超时。关闭后走下方 poly_markets==0 的
+            # 权重重归一化分支，评分口径不变。
+            # ⚠️ fallback 默认值必须与 config 同为 False（v0.45.23 教训）。
             poly_score = 5.0
             poly_signal = ""
+            poly_markets = 0
             try:
-                from polymarket_client import get_polymarket_odds
-                poly = get_polymarket_odds(ticker)
-                poly_score = _safe_score(poly.get("odds_score"), 5.0, 0, 10, "poly_score")
-                poly_signal = poly.get("odds_signal", "")
-                poly_markets = poly.get("markets_found", 0)
-            except LLM_ERRORS as e:
-                _log.warning("OracleBeeEcho Polymarket unavailable for %s: %s", ticker, e)
-                poly_markets = 0
+                from config import POLYMARKET_ENABLED as _POLY_ON
+            except (ImportError, AttributeError):
+                _POLY_ON = False
+            if _POLY_ON:
+                try:
+                    from polymarket_client import get_polymarket_odds
+                    poly = get_polymarket_odds(ticker)
+                    poly_score = _safe_score(poly.get("odds_score"), 5.0, 0, 10, "poly_score")
+                    poly_signal = poly.get("odds_signal", "")
+                    poly_markets = poly.get("markets_found", 0)
+                except LLM_ERRORS as e:
+                    _log.warning("OracleBeeEcho Polymarket unavailable for %s: %s", ticker, e)
+                    poly_markets = 0
 
             # ---- Phase 2: 期权深度分析（term structure / 25d skew / max pain）----
             term_structure = self._analyze_term_structure(ticker, current_price)

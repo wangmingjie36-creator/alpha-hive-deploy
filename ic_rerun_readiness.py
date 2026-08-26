@@ -68,6 +68,11 @@ DB_PATH = ALPHAHIVE_DIR / "pheromone.db"
 _COHORT_HISTORY = [
     ("2026-08-17", "v0.44.1~0.44.3",
      "expected_returns 去偏 + probability 居中 + RivalBee 三特征接真实数据"),
+    ("2026-08-26", "v0.45.30",
+     "拥挤度口径变更：删除 polymarket_volatility（原 15% 权重，实测 76% 为常数 20、"
+     "其余变化来自 |momentum_5d|*0.8 的动量伪装，属常数稀释+暗中双计），"
+     "其余五项按原比例重归一化；缺失分量改为在现存分量间重归一化而非按 0 计。"
+     "拥挤度 → ScoutBee signal 维度 → final_score，故为世代边界"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）

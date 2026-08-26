@@ -11,10 +11,9 @@ from crowding_detector import CrowdingDetector
 def _low_activity_metrics():
     """Low activity => low crowding score."""
     return {
-        "stocktwits_messages_per_day": 500,
+        "social_messages_per_day": 500,
         "google_trends_percentile": 10.0,
         "bullish_agents": 1,
-        "polymarket_odds_change_24h": 0.5,
         "seeking_alpha_page_views": 2000,
         "short_float_ratio": 0.05,
         "price_momentum_5d": 1.0,
@@ -24,10 +23,9 @@ def _low_activity_metrics():
 def _high_activity_metrics():
     """High activity => high crowding score."""
     return {
-        "stocktwits_messages_per_day": 80000,
+        "social_messages_per_day": 80000,
         "google_trends_percentile": 95.0,
         "bullish_agents": 6,
-        "polymarket_odds_change_24h": 15.0,
         "seeking_alpha_page_views": 200000,
         "short_float_ratio": 0.35,
         "price_momentum_5d": 20.0,
@@ -37,10 +35,9 @@ def _high_activity_metrics():
 def _medium_activity_metrics():
     """Medium activity => mid-range crowding score."""
     return {
-        "stocktwits_messages_per_day": 25000,
+        "social_messages_per_day": 25000,
         "google_trends_percentile": 45.0,
         "bullish_agents": 3,
-        "polymarket_odds_change_24h": 6.0,
         "seeking_alpha_page_views": 55000,
         "short_float_ratio": 0.10,
         "price_momentum_5d": 5.0,
