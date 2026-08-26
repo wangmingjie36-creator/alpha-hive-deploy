@@ -1,17 +1,17 @@
 {
   "ticker": "AMC",
   "date": "2026-08-25",
-  "composite_score": 8.41,
+  "composite_score": 6.85,
   "direction": "bullish",
   "price_target": 0.0,
   "stop_loss": 0.0,
   "entry_price": 2.64,
   "agent_votes": {
-    "GuardBeeSentinel": 8.55,
-    "QueenDistiller": 8.41,
-    "OracleBeeEcho": 6.6923076923076925,
-    "ScoutBeeNova": 6.638,
-    "RivalBeeVanguard": 5.74
+    "OracleBeeEcho": 7.115384615384615,
+    "QueenDistiller": 6.85,
+    "CodeExecutorAgent": 6.5,
+    "ScoutBeeNova": 6.46265,
+    "GuardBeeSentinel": 6.15
   },
   "weights_used": {
     "signal": 0.2094,
@@ -20,20 +20,20 @@
     "odds": 0.194,
     "risk_adj": 0.225
   },
-  "low_conviction": false,
-  "low_conviction_reason": "",
+  "low_conviction": true,
+  "low_conviction_reason": "score_high_guard: 高分 6.8 但情绪 5.2<6 未确认（signal 6.5）→ 仓位减半",
   "cs_rank": {
-    "final": 0.963,
-    "signal": 0.963,
-    "catalyst": 0.481,
-    "sentiment": null,
-    "odds": 0.704,
-    "risk_adj": 0.926
+    "final": 0.897,
+    "signal": 0.966,
+    "catalyst": 0.069,
+    "sentiment": 0.69,
+    "odds": 0.379,
+    "risk_adj": 0.69
   },
   "actual_prices": {
     "t1": null,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-08-25T14:16:40.782461"
+  "created_at": "2026-08-25T22:14:23.559343"
 }
