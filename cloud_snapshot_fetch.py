@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-🐝 Alpha Hive — 云端当日快照抓取 (v0.45.26)
+🐝 Alpha Hive — 云端当日快照抓取 (v0.45.36)
 =============================================
 在 Claude cloud routine 里每个交易日收盘后运行，把**过时不候**的当日数据
 （期权链 / ATM IV 期限结构 / 全链 OI / VIX 期限结构 / P/C / SKEW / VVIX / F&G）
@@ -21,6 +21,11 @@
 - **产出必须可数**：manifest.json 记录成功/失败清单——「跑完了吗」永远
   核对数量，不看退出标语（见 MEMORY 静默降级三件套）。
 - 幂等：同日重跑整目录覆盖。
+- **vintage 校验**（v0.45.36）：目录名来自墙上时钟，但数据新鲜度必须由
+  payload 自证。CBOE 在盘前/休市照常 200 返回**上一交易日**的结算数据，
+  顶层 `timestamp` 却是当下时刻——首跑（02:28 PDT）就这样把 8/25 的
+  NVDA 数据存成了 `2026-08-26/`（实测 price 213.67 vs 8/25 收盘 213.05）。
+  唯一可信指纹是 `data.last_trade_time`（ET 成交时刻），不符即拒绝落盘。
 
 用法
 ----
@@ -28,7 +33,8 @@
     python3 cloud_snapshot_fetch.py --out cloud_snapshots
     python3 cloud_snapshot_fetch.py --tickers NVDA,AMD   # 调试子集
 
-退出码：0=全部成功；1=部分失败（详见 manifest）；2=完全失败/无产出。
+退出码：0=全部成功；1=部分失败或 vintage 异常（详见 manifest）；2=完全失败/无产出
+（含「连续 3 个标的 vintage 陈旧」的市场级中止——此时 tickers_ok=0，routine 不提交）。
 """
 
 import os
@@ -43,10 +49,42 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 SCHEMA_VERSION = 1
 
+_ET = ZoneInfo("America/New_York")
+
+# 连续多少个标的 vintage 陈旧就判定为市场级问题（休市/盘前触发）并中止。
+# 逐个跑完只是白烧 30 次网络请求，结论不会变。
+_STALE_ABORT_STREAK = 3
+
+
+class StaleVintageError(RuntimeError):
+    """payload 的成交时刻不属于目标业务日——拿到的是上一交易日数据。"""
+
 
 def _business_date() -> str:
     # 业务日口径与扫描一致：PDT/PST 日历日
     return datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
+
+
+def _vintage(payload: dict):
+    """从 CBOE payload 反解数据 vintage → `(date_str | None, raw)`。
+
+    判据是 `data.last_trade_time`（ET 朴素时刻，形如 '2026-08-26T15:26:31'）——
+    **最后成交时刻**。刻意不用顶层 `timestamp`：那是 CDN 生成时刻，盘前拉取
+    时它等于「现在」，正是它让首跑的陈旧数据看起来是新鲜的。
+
+    解析不出来返回 `(None, raw)` 交调用方标 unverifiable——不猜，也不假装新鲜
+    （见 MEMORY「安全默认值判据」：默认值不得让下游误以为掌握了信息）。
+    """
+    raw = (payload or {}).get("last_trade_time")
+    if not raw or not isinstance(raw, str):
+        return None, raw
+    try:
+        dt = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None, raw
+    if dt.tzinfo is not None:          # CBOE 目前给朴素 ET；带偏移也照样归一
+        dt = dt.astimezone(_ET)
+    return dt.strftime("%Y-%m-%d"), raw
 
 
 def _degradation_check(cboe: dict) -> dict:
@@ -77,13 +115,24 @@ def _degradation_check(cboe: dict) -> dict:
     return sus
 
 
-def _fetch_one_ticker(ticker: str) -> dict:
-    """单标的三件套：精选链 / ATM IV 期限结构 / 全链 OI。共享一次网络请求。"""
+def _fetch_one_ticker(ticker: str, business_date: str) -> dict:
+    """单标的三件套：精选链 / ATM IV 期限结构 / 全链 OI。共享一次网络请求。
+
+    `business_date` 是目标业务日；payload vintage 与之不符直接 `StaleVintageError`，
+    在昂贵的链解析**之前**抛出——陈旧数据解析得再干净也是错的一天。
+    """
     import cboe_options as co
 
     payload = co._fetch_cboe_payload(ticker, 15)  # noqa: SLF001 —— 进程缓存入口，见模块 docstring
     if not payload:
         raise RuntimeError("CBOE payload 为空（网络/403/符号问题）")
+
+    vintage_date, last_trade_raw = _vintage(payload)
+    if vintage_date is not None and vintage_date != business_date:
+        raise StaleVintageError(
+            f"vintage={vintage_date} != 业务日 {business_date}"
+            f"（last_trade_time={last_trade_raw!r}）——盘前/休市拉到的是上一交易日数据")
+
     price = float(payload.get("current_price") or payload.get("close") or 0.0)
 
     out = {
@@ -92,6 +141,11 @@ def _fetch_one_ticker(ticker: str) -> dict:
         "fetched_at_utc": datetime.now(ZoneInfo("UTC")).isoformat(),
         "price_at_fetch": price,
         "price_source": "cboe_delayed",
+        # vintage 三件套随数据同行：消费端不必回头查 manifest 就能判新鲜度
+        "last_trade_time_et": last_trade_raw,
+        "vintage_date": vintage_date,
+        "vintage_status": "ok" if vintage_date else "unverifiable",
+        "prev_day_close": payload.get("prev_day_close"),
     }
     # 三个解析各自独立失败，不连坐；哪个为 None 就如实存 None + 原因键
     chain = co.fetch_cboe_chain(ticker, price)
@@ -119,21 +173,50 @@ def main() -> int:
 
     t0 = time.time()
     ok, failed = [], {}
+    stale, unverifiable = [], []
+    stale_streak = 0
+    abort_reason = None
 
     # ── 每标的期权快照 ────────────────────────────────────────────
     for i, t in enumerate(tickers, 1):
         try:
-            data = _fetch_one_ticker(t)
+            data = _fetch_one_ticker(t, date)
             path = os.path.join(day_dir, f"{t}.json")
             with open(path + ".tmp", "w") as f:
                 json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
             os.replace(path + ".tmp", path)
             ok.append(t)
-            print(f"  [{i:2d}/{len(tickers)}] {t} ✓  (${data['price_at_fetch']:.2f})")
+            stale_streak = 0
+            mark = ""
+            if data.get("vintage_status") != "ok":
+                unverifiable.append(t)
+                mark = "  ⚠️ vintage 无法核实"
+            print(f"  [{i:2d}/{len(tickers)}] {t} ✓  (${data['price_at_fetch']:.2f}){mark}")
+        except StaleVintageError as e:
+            failed[t] = f"StaleVintageError: {e}"
+            stale.append(t)
+            stale_streak += 1
+            print(f"  [{i:2d}/{len(tickers)}] {t} ✗  {failed[t]}", file=sys.stderr)
+            if stale_streak >= _STALE_ABORT_STREAK:
+                abort_reason = "stale_vintage"
+                print(f"  ⛔ 连续 {stale_streak} 个标的 vintage 陈旧 → 判定为市场级"
+                      f"（休市/盘前触发），中止抓取（此前已落盘 {len(ok)} 个）",
+                      file=sys.stderr)
+                break
         except Exception as e:  # noqa: BLE001 —— per-ticker 隔离，manifest 记明细
             failed[t] = f"{type(e).__name__}: {e}"
+            stale_streak = 0
             print(f"  [{i:2d}/{len(tickers)}] {t} ✗  {failed[t]}", file=sys.stderr)
         time.sleep(0.5)  # 温和限速；CBOE 无认证端点，别做坏邻居
+
+    # 全员 unverifiable = CBOE 大概率改了字段名，而不是 30 个标的同时没成交。
+    # 这种「校验静默失效」比陈旧数据更阴——它让检查看起来一直在跑。
+    unverifiable_all = bool(ok) and len(unverifiable) == len(ok)
+    if unverifiable_all:
+        print(f"  ⚠️ {len(ok)}/{len(ok)} 个标的都取不到 last_trade_time → "
+              f"疑似 CBOE 字段变更，vintage 校验已静默失效。数据照常落盘"
+              f"（改字段名 ≠ 数据陈旧），但消费前必须人工确认新鲜度",
+              file=sys.stderr)
 
     # ── 大盘指标（VIX 期限结构 / PCCE / SKEW / VVIX / F&G）────────
     market: dict = {"schema_version": SCHEMA_VERSION,
@@ -167,6 +250,12 @@ def main() -> int:
         "market_cboe_ok": market.get("cboe") is not None,
         "market_degraded_sections": sorted(market["degraded_sections"].keys()),
         "fear_greed_ok": market.get("fear_greed") is not None,
+        # ── vintage 审计（v0.45.36）：date 只是墙上时钟，这几项才是新鲜度证据 ──
+        "vintage_ok": len(ok) - len(unverifiable),
+        "vintage_unverifiable": sorted(unverifiable),
+        "vintage_stale": sorted(stale),
+        "vintage_unverifiable_all": unverifiable_all,
+        "abort_reason": abort_reason,
     }
     with open(os.path.join(day_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)
@@ -178,12 +267,21 @@ def main() -> int:
           f"{manifest['elapsed_sec']}s → {day_dir}/")
     if deg:
         print(f"   ⚠️ market 疑似兜底段（不可信）：{', '.join(deg)}")
+    if unverifiable:
+        print(f"   ⚠️ vintage 无法核实：{', '.join(sorted(unverifiable))}")
+    if stale:
+        print(f"   ⛔ vintage 陈旧（已拒绝落盘）：{', '.join(sorted(stale))}")
+    if unverifiable_all:
+        print("   ⚠️ vintage 校验全员失效（疑似 CBOE 字段变更）——消费前人工确认")
+    if abort_reason:
+        print(f"   ⛔ 中止原因：{abort_reason}")
     if failed:
         print(f"   失败：{', '.join(failed)}")
 
     if not ok:
         return 2
-    return 1 if (failed or not manifest["market_cboe_ok"]) else 0
+    return 1 if (failed or abort_reason or unverifiable_all
+                 or not manifest["market_cboe_ok"]) else 0
 
 
 if __name__ == "__main__":

@@ -5,6 +5,101 @@
 
 ---
 
+## [0.45.37] — 2026-08-26 — 早绑定默认参数让 `replay_scoring` 的退化测试读了真库
+
+做 v0.45.36 的全量回归时 `test_underpowered_run_exits_nonzero` 转红。
+排查发现与该次改动无关，是一个独立缺陷。
+
+### Fixed 🔴 — `load_samples(db_path=DB_PATH)` 早绑定，`monkeypatch` 打空
+
+默认值在 **import 时**求值并绑死，`monkeypatch.setattr(rs, "DB_PATH", ...)`
+改的是模块属性，改不动它 —— `main()` 于是绕开夹具去读真 `pheromone.db`。
+
+后果**不是**「护栏完全没生效」（此前的说法过重），而是：
+
+- 它验证的是「**真库**功效不足 → 退 1」，不是它自称的「**4 周夹具** → 退 1」
+- 结果依赖环境：主 checkout（989 条样本）绿，全新 worktree（空库）红
+- 最阴的一点：等样本真攒够 25 周 —— **正是本项目的目标** —— 它会在
+  成功的那一刻变红，而那时没人会想到去怀疑一条一直绿着的测试
+
+改为 `db_path: Optional[str] = None` + 运行时 `db_path or DB_PATH`，
+`main()` 显式传 `DB_PATH`。
+
+### Fixed 🟠 — 样本库不可读时裸抛 sqlite3 异常 → 被读成「一切正常」
+
+上一条修完，元守卫立刻抓到第二个：库不存在时 `sqlite3.connect` 抛栈，
+以退出码 **1** 结束 —— 而 1 的语义是「功效不足，正常继续攒」。
+库丢了会被编排器读成正常状态（MEMORY「编排器只看退出码」同款）。
+现改为返回空样本 + 显式 note，由 `main()` 走「无法判定」(3)。
+
+### Added — 元守卫 `test_main_actually_uses_patched_db`
+
+不测业务，只测**夹具有没有接上**：喂一个必然不存在的库路径，`main()`
+必须返回 3。这是本类其余所有「喂退化数据」测试的前提条件，
+以前没人守着这个前提。
+
+三次变异确认：`powered` 恒真 / `main()` 改回早绑定 / vintage 三变异 —— 均转红。
+
+---
+
+## [0.45.36] — 2026-08-26 — 云端快照 vintage 校验：目录名是墙上时钟，数据新鲜度必须自证
+
+起因是一个时间问题：云端 routine（21:00 UTC）与本地 launchd（14:00 PDT）
+是不是撞车。结论是**不撞**（异机、异分支、异出口 IP），但查证过程里
+从首跑数据里翻出一个真 bug。
+
+### Fixed 🔴 — `cloud_snapshot_fetch` 把上一交易日数据存成当日
+
+`_business_date()` 用**墙上时钟**给快照目录命名，**从不校验 payload 自身
+的 vintage**。CBOE 在盘前/休市**照常 200** 返回上一交易日的结算数据 ——
+不报错，因为那确实是「最新」的一次成交。
+
+实测证据（首跑，2026-08-26 02:28 PDT 盘前手动触发，manifest 报 30/30 成功）：
+
+| | 值 |
+|---|---|
+| `cloud_snapshots/2026-08-26/NVDA.json` 的 `price_at_fetch` | **213.67** |
+| NVDA **8/25** 收盘（yfinance 对账） | **213.05** |
+| NVDA 8/26 | 当时尚未开盘 |
+
+即 8/25 vintage 的数据挂在 8/26 名下，日志全绿、manifest 全绿。
+典型「静默降级」：两个各自合理的默认值一撞，伪造出一天不存在的数据。
+
+**判据选择**：用 `data.last_trade_time`（ET 成交时刻），**刻意不用顶层
+`timestamp`** —— 后者是 CDN 生成时刻，盘前拉取时它等于「现在」，
+正是它让首跑的陈旧数据看起来新鲜。
+
+### Added — vintage 三件套与市场级中止
+
+- `_vintage(payload)` → `(date | None, raw)`；解析不出返回 `None`，
+  **不回落成「今天」**（MEMORY「安全默认值判据」）
+- `_fetch_one_ticker(ticker, business_date)`（签名变更）：vintage 不符抛
+  `StaleVintageError`，且在**链解析之前**抛 —— 陈旧数据解析得再干净也是错的一天
+- 每标的落盘新增 `last_trade_time_et` / `vintage_date` / `vintage_status` /
+  `prev_day_close`，随数据同行，消费端不必回头查 manifest
+- 连续 `_STALE_ABORT_STREAK=3` 个标的陈旧 → 判定市场级（休市/盘前触发），
+  中止抓取。`tickers_ok=0` → routine 据既有规则拒绝 commit，污染进不了库
+- manifest 新增 `vintage_ok` / `vintage_unverifiable` / `vintage_stale` /
+  `vintage_unverifiable_all` / `abort_reason`
+
+**刻意不做的**：全员 `unverifiable`（CBOE 改字段名）**不判完全失败**，
+数据照常落盘只打标。改字段名 ≠ 数据陈旧 —— 因为证不出来就丢掉可能是好的
+一天，正是这套云端快照存在的意义所要防的事。退出码 1 逼 routine 如实报告。
+
+### Changed — 行为变更（需知悉）
+
+**市场休市日**（cron `1-5` 会照常触发）现在会**响亮失败**（三连陈旧 → 中止 →
+不提交），而不是像以前那样静默存一份与前一交易日重复的数据。这是期望行为。
+
+### 守卫
+
+`tests/test_cloud_snapshot_vintage.py`（16 项），含首跑事故真实数字的回归用例。
+三次变异测试确认非假守卫：删掉 stale 抛错 / unverifiable 谎报成 ok /
+`_vintage` 回落成今天 —— **均转红**。
+实弹验证：真实 CBOE 数据（12:48 PDT）→ `vintage=ok`，无误杀。
+
+---
+
 ## [0.45.35] — 2026-08-26 — 二次检查 v0.45.31~34：两个真 bug，都是「复制了已存在的正确实现」
 
 对第 1~6 项改动逐条对抗式复查。发现的两个真 bug **性质相同**：

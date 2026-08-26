@@ -70,6 +70,20 @@ class TestPowerHonesty:
         code = rs.main()
         assert code == 1, "功效不足却返回 0 —— 会被脚本当成通过"
 
+    def test_main_actually_uses_patched_db(self, db, monkeypatch):
+        """元守卫：证明 monkeypatch 真的改到了 main() 读的库。
+
+        本类其余测试全部依赖 `setattr(rs, "DB_PATH", ...)` 生效。曾经不生效——
+        `load_samples(db_path=DB_PATH)` 在 import 时绑死默认值，`main()` 于是
+        绕开夹具去读真 `pheromone.db`，退化测试变成假守卫（v0.45.37 修）。
+        这条不测业务，只测「夹具接上了没有」，喂一个必然不存在的路径看它红。
+        """
+        monkeypatch.setattr(rs, "DB_PATH", "/nonexistent/definitely-not-a.db")
+        monkeypatch.setattr(sys, "argv", ["replay_scoring.py", "--all-cohorts"])
+        assert rs.main() == 3, (
+            "main() 没读到被 patch 的 DB_PATH —— 说明它绕开夹具读了真库，"
+            "本文件所有喂退化数据的测试都因此失效")
+
     def test_no_samples_exits_3_not_0(self, db, monkeypatch):
         monkeypatch.setattr(rs, "DB_PATH", db([]))
         monkeypatch.setattr(sys, "argv", ["replay_scoring.py"])
