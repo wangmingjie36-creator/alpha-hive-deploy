@@ -5,6 +5,52 @@
 
 ---
 
+## [0.45.29] — 2026-08-26 — VIX 期限结构口径修正：ETF 股价冒充期货点位，结构方向长期报反
+
+v0.45.27 首跑对比暴露、用户批准修复。`cboe_fetcher.fetch_vix_term_structure`
+的旧口径：`vix_1m` = **VIXY ETF 股价 × 0.5**（注释自称「近似转换」）、
+`vix_3m` = spot × 1.10（**从来没抓过数据，纯合成**）。ETF 价格与 VIX 点位
+无可比性——修复当天实测对比：
+
+| | spot | 1m | 3m | 结构判定 |
+|---|---|---|---|---|
+| 旧口径 | 15.70 | **9.005**（VIXY 股价×0.5） | 17.27（合成） | **backwardation −42.6%** |
+| 新口径（VX 真期货） | 15.74 | 17.20（M1） | 19.70（M3） | **contango +9.28%** |
+
+**不只数值错，结构方向整个是反的**：市场平静（contango）被天天报成恐慌
+（backwardation）。消费方 `_calculate_macro_score` 与 generate_deep_v2 宏观卡
+一直吃这个反向信号。
+
+### Changed — `cboe_fetcher.py`
+
+- `fetch_vix_term_structure` 主源改为 **vixcentral VX 期货曲线**（复用现成的
+  `vix_term_structure.py`，M1/M3 真值；spot 缺失时 `cboe_vix.get_vix_spot()`
+  CBOE 官网兜底——云端 yfinance 不通时链路仍活）。返回 schema 不变，零下游破坏。
+- **拿不到期货时不再合成**，直接落 `source='default_fallback'`。
+- `vix_term` / `skew` / `vvix` **全部路径补 `source` 标注**（成功 →
+  `vx_futures`/`yfinance`；兜底 → `default_fallback`；`pcce` 本就有，是范本）。
+- 无 `source` 键的当日旧缓存视为过期重抓——否则 VIXY 垃圾口径经缓存再活一天。
+
+### Changed — `cloud_snapshot_fetch._degradation_check`
+
+判据升级为两层：`source=='default_fallback'`（权威）优先，等值匹配已知兜底
+常量（15.0/15.75/16.5、120.0、85.0）保底兜住无 source 的旧数据。
+
+### Added — `tests/test_cboe_fetcher_source.py`（11 项）
+
+全部按「喂退化数据看它红」构造：VIXY 口径回归即红（`vix_1m` 必须等于 M1、
+`vix_3m ≠ spot×1.10`）、每条兜底路径必须带标注、旧缓存必须作废、
+带标注缓存正常复用、degradation_check source 优先。
+本地真实网络验证：`source=vx_futures`，contango +9.28% 与 vixcentral 一致。
+
+### 遗留说明
+
+兜底常量本身（15.0/15.75/16.5 等）**数值语义未动**——只加了标注。彻底
+None 化需要先审计 `_calculate_macro_score` 等消费端的 None 处理
+（教训 v0.43.25/v0.45.3：上游诚实化会立刻在下游炸出新点），另行处理。
+
+---
+
 ## [0.45.28] — 2026-08-26 — 清除 8/24 的期权污染 + 数据隔离名单
 
 > 版本号说明：原编 0.45.27，与并发 session 的「抓数上云」条目撞号，顺延至 0.45.28。

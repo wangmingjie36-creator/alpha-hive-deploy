@@ -50,28 +50,30 @@ def _business_date() -> str:
 
 
 def _degradation_check(cboe: dict) -> dict:
-    """对照 cboe_fetcher 的已知兜底常量，标记疑似降级的段。
+    """标记 market.cboe 里疑似兜底降级的段。消费端规则：**列出的段不可信**。
 
-    为什么需要：cboe_fetcher 的 skew/vvix/vix_term 兜底**不带 source 标注**
-    （其 docstring 自认，v0.43.24 同款形态），而云沙箱里 yfinance 域名被重置，
-    这些段每次都会落到兜底值——首跑实测 vix_term=15.0/15.75/16.5、skew=120.0、
-    vvix=85.0 与真实观测（本地同刻 15.70/143.27）完全不符。
-    等值匹配是启发式（真值恰等于兜底常量会误报），cboe_fetcher 补上 source
-    标注后应改读 source 字段。消费端规则：**degraded_sections 里列出的段不可信**。
+    判据两层：① source == 'default_fallback'（v0.45.29 起 cboe_fetcher 全部
+    兜底路径都标注，权威判据）；② 等值匹配已知兜底常量（保底启发式，兜住
+    旧缓存/旧版数据没有 source 键的情形；真值恰等于常量会误报，可接受）。
+    背景：云沙箱里 yfinance 域名被重置，skew/vvix 必然降级——首跑实测
+    vix_term=15.0/15.75/16.5、skew=120.0 与真实观测（15.70/143.27）完全不符。
     """
     sus = {}
     c = cboe or {}
+    for sec in ("vix_term", "skew", "vvix", "pcce"):
+        if (c.get(sec) or {}).get("source") == "default_fallback":
+            sus[sec] = "explicit_default_fallback"
     vt = c.get("vix_term") or {}
-    if (vt.get("vix_spot"), vt.get("vix_1m"), vt.get("vix_3m")) == (15.0, 15.75, 16.5):
+    if "vix_term" not in sus and (
+            vt.get("vix_spot"), vt.get("vix_1m"), vt.get("vix_3m")) == (15.0, 15.75, 16.5):
         sus["vix_term"] = "matches_known_fallback_15.0/15.75/16.5"
-    if (c.get("skew") or {}).get("skew_value") == 120.0:
+    if "skew" not in sus and (c.get("skew") or {}).get("skew_value") == 120.0:
         sus["skew"] = "matches_known_fallback_120.0"
-    if (c.get("vvix") or {}).get("vvix_value") == 85.0:
+    if "vvix" not in sus and (c.get("vvix") or {}).get("vvix_value") == 85.0:
         sus["vvix"] = "matches_known_fallback_85.0"
     pc = c.get("pcce") or {}
-    if pc.get("source") == "default_fallback" or (
-            pc.get("call_volume") == 0 and pc.get("put_volume") == 0 and pc):
-        sus["pcce"] = "explicit_default_fallback"
+    if "pcce" not in sus and pc and pc.get("call_volume") == 0 and pc.get("put_volume") == 0:
+        sus["pcce"] = "zero_volume_heuristic"
     return sus
 
 
