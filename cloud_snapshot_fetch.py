@@ -233,6 +233,41 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         market["fear_greed"] = None
         market["fear_greed_error"] = f"{type(e).__name__}: {e}"
+    # ── 陈旧标的补抓（v0.45.39）─────────────────────────────────
+    # CBOE 的 CDN 对部分符号刷新滞后（2026-08-26 实测 TMUS 收盘后约 20 分钟
+    # 才更新，TMO 则卡了 44.5 小时）。滞后型靠等就能好，所以放在大盘段**之后**
+    # 重试 —— 那段本身要跑 20~30 秒，等于免费争取到一个时间窗，
+    # 常见情况下不增加任何额外耗时。云沙箱里 yfinance 不通，
+    # 拿不到就只能弃掉（本机扫描有 yfinance 降级链，见 cboe_options v0.45.39）。
+    if stale and not abort_reason:
+        import cboe_options as _co
+        print(f"\n🔁 补抓 {len(stale)} 个此前 vintage 陈旧的标的：{', '.join(stale)}")
+        recovered = []
+        for t in list(stale):
+            _co.invalidate_payload_cache(t)   # 不清缓存会原样拿回那份陈旧 payload
+            try:
+                data = _fetch_one_ticker(t, date)
+            except Exception as e:  # noqa: BLE001
+                failed[t] = f"{type(e).__name__}: {e}"
+                continue
+            path = os.path.join(day_dir, f"{t}.json")
+            with open(path + ".tmp", "w") as f:
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(path + ".tmp", path)
+            ok.append(t)
+            failed.pop(t, None)
+            stale.remove(t)
+            recovered.append(t)
+            if data.get("vintage_status") != "ok":
+                unverifiable.append(t)
+            print(f"  ✓ {t} 补抓成功 (${data['price_at_fetch']:.2f})")
+        if recovered:
+            ok.sort()
+            print(f"   补回 {len(recovered)}/{len(recovered) + len(stale)}：{', '.join(recovered)}")
+        if stale:
+            print(f"   仍陈旧（CDN 卡死，非滞后）：{', '.join(stale)}")
+        unverifiable_all = bool(ok) and len(unverifiable) == len(ok)
+
     market["degraded_sections"] = _degradation_check(market.get("cboe"))
     with open(os.path.join(day_dir, "market.json"), "w") as f:
         json.dump(market, f, ensure_ascii=False, indent=1)

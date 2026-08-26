@@ -24,8 +24,10 @@ import statistics
 import threading
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
+from datetime import time as _dt_time
 from typing import Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 try:
     from hive_logger import get_logger
@@ -86,6 +88,77 @@ _CACHE_TTL = 120.0
 # 补跑的是过去某天，实时抓取会拿到今天的链再贴上那天的日期，
 # 与 v0.45.36 拦下的污染同源，只是方向相反。装卸见 cloud_snapshot_loader。
 _SNAPSHOT_PROVIDER = None
+
+# ── CBOE CDN 陈旧文件防线（v0.45.39）────────────────────────────────
+# CBOE 的 CDN 对某些符号**不重新生成文件**：HTTP 200、字段齐全、看不出异常，
+# 但整份 JSON（现价/期权链/IV/OI）停在旧日期。2026-08-26 实测 TMO 卡了
+# 44.5 小时（现价是 8/24 收盘），TMUS 滞后约 20 分钟后自愈。
+# 历史对账：pheromone.db 877 条可对账样本里 13 条（1.5%）的 price_at_predict
+# 精确等于更早某日收盘，2026-07-24 一天中了 8 只。
+# 检出后返回 None → data_pipeline 落到 YFinanceSource（降级源 0）拿正确数据。
+_ET_TZ = ZoneInfo("America/New_York")
+_vintage_stats = {"checked": 0, "stale": 0}
+
+
+def _expected_vintage_date() -> Optional[str]:
+    """本时点**应当**拿到的数据日期（ET 日历日）；无法判定返回 None。
+
+    开盘前拿到上一交易日的收盘天经地义，开盘后就该是今天 —— 所以判据随
+    时间变化，分界取 ET 09:30。
+
+    ⚠️ fail-open：交易日历不可用时返回 None，调用方**跳过**校验。
+    宁可放过陈旧数据，也不能因为日历挂了把 30 只全打成陈旧、连锁压到
+    yfinance 上 —— 7/23 那次限流雪崩就是这么来的。
+    """
+    try:
+        from is_trading_day import is_trading_day
+        now = datetime.now(_ET_TZ)
+        today = now.date()
+        if is_trading_day(today)[0] and now.time() >= _dt_time(9, 30):
+            return today.isoformat()
+        d = today - timedelta(days=1)
+        for _ in range(10):          # 长假最多跨约 5 天，10 天足够
+            if is_trading_day(d)[0]:
+                return d.isoformat()
+            d -= timedelta(days=1)
+    except Exception:  # noqa: BLE001 —— 见上方 fail-open 说明
+        _log.debug("交易日历不可用，跳过 CBOE vintage 校验", exc_info=True)
+    return None
+
+
+def _payload_is_stale(ticker: str, data: dict) -> bool:
+    """payload 的成交时刻是否早于应有日期。判不了一律返回 False（fail-open）。"""
+    expected = _expected_vintage_date()
+    raw = (data or {}).get("last_trade_time")
+    if not expected or not raw or not isinstance(raw, str):
+        return False
+    try:
+        dt_ = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return False
+    if dt_.tzinfo is not None:
+        dt_ = dt_.astimezone(_ET_TZ)
+    got = dt_.strftime("%Y-%m-%d")
+    _vintage_stats["checked"] += 1
+    if got >= expected:
+        return False
+    _vintage_stats["stale"] += 1
+    _log.warning("CBOE %s 数据陈旧：last_trade=%s，应为 %s —— 弃用本源，交由降级链",
+                 ticker, got, expected)
+    c, st = _vintage_stats["checked"], _vintage_stats["stale"]
+    if c >= 8 and st / c > 0.5:
+        _log.error("CBOE vintage 陈旧率 %d/%d >50%% —— 疑似校验口径错误或 CBOE "
+                   "大面积故障，请核对；此刻全部标的正在落到 yfinance", st, c)
+    return True
+
+
+def invalidate_payload_cache(ticker: Optional[str] = None) -> None:
+    """清掉进程内 payload 缓存（传 None 清全部）。供陈旧标的稍后重试用。"""
+    with _cache_lock:
+        if ticker is None:
+            _payload_cache.clear()
+        else:
+            _payload_cache.pop(ticker.upper(), None)
 
 
 def set_snapshot_provider(fn) -> None:
@@ -200,6 +273,10 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
             data = (json.loads(raw) or {}).get("data") or {}
             if not data.get("options"):
                 _log.warning("CBOE %s 返回空期权链", ticker)
+                return None
+            # v0.45.39：陈旧 CDN 文件在此拦下。**不写缓存** ——
+            # 写了就等于把陈旧数据在进程内又保鲜 120 秒。
+            if _payload_is_stale(ticker, data):
                 return None
             with _cache_lock:
                 _payload_cache[key] = (now, data)

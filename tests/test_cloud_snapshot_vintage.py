@@ -192,3 +192,45 @@ def test_clean_day_has_no_vintage_noise(monkeypatch, tmp_path):
     assert mf["vintage_unverifiable_all"] is False
     assert mf["abort_reason"] is None
     assert mf["vintage_ok"] == 5 and rc == 0
+
+
+# ══════════════════════════════════════════════════════════════════
+# 陈旧标的补抓（v0.45.39）—— 滞后型能救，卡死型救不了
+# ══════════════════════════════════════════════════════════════════
+
+def test_lagging_ticker_recovered_on_retry(monkeypatch, tmp_path):
+    """CDN 刷新滞后的标的（实测 TMUS 收盘后约 20 分钟才更新）必须被补回。
+
+    构造：B 第一次拿到昨天的数据，第二次（大盘段跑完之后）拿到今天的。
+    """
+    calls = {}
+
+    def payload(t, to):
+        calls[t] = calls.get(t, 0) + 1
+        if t == "B" and calls[t] == 1:
+            return _payload(last_trade="2026-08-25T16:00:00")
+        return _payload()
+
+    rc, mf, day = _run_main(monkeypatch, tmp_path, payload, tickers="A,B,C")
+    assert mf["tickers_ok"] == 3, f"补抓没生效：{mf['failed']}"
+    assert mf["vintage_stale"] == [], "补回后不该还留在 stale 名单里"
+    assert "B" not in mf["failed"], "补回的标的必须从 failed 里移除"
+    assert (day / "B.json").exists()
+    assert calls["B"] == 2, "B 应当被抓两次（首轮 + 补抓）"
+    assert rc == 0
+
+
+def test_permanently_stale_ticker_stays_failed(monkeypatch, tmp_path):
+    """CDN 卡死的标的（实测 TMO 卡 44.5 小时）补抓也救不回，必须如实留在 failed。
+
+    云沙箱里 yfinance 不通，这种只能弃掉；本机扫描有降级链（cboe_options v0.45.39）。
+    """
+    def payload(t, to):
+        return _payload(last_trade="2026-08-24T15:59:59") if t == "B" else _payload()
+
+    rc, mf, day = _run_main(monkeypatch, tmp_path, payload, tickers="A,B,C")
+    assert mf["tickers_ok"] == 2
+    assert mf["vintage_stale"] == ["B"]
+    assert "StaleVintageError" in mf["failed"]["B"]
+    assert not (day / "B.json").exists(), "陈旧标的不得落盘"
+    assert rc == 1
