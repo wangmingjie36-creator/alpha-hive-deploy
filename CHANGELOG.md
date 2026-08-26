@@ -5,6 +5,68 @@
 
 ---
 
+## [0.45.38] — 2026-08-26 — 云端快照消费端接线：从「只写不读」到真能补跑
+
+云端快照自 v0.45.27 起每个交易日落盘，但**没有任何代码读它** ——
+全项目 grep `cloud_snapshots` 只命中生产者自己和它的测试，编排器 9 步里
+也没有相关步骤。本次把消费端接上。
+
+### Added — `cloud_snapshot_loader.py`
+
+- `load_ticker` / `load_market` / `load_manifest` / `available_dates`：
+  经 `git show <ref>:cloud_snapshots/<date>/…` 直读分支，不切分支、不多开 worktree
+- `snapshot_mode(date)` 上下文：进入时装载供给器到 `cboe_options`，退出（含异常）卸载
+
+### Added — `cboe_options.set_snapshot_provider()`：一处拦截，四个入口全覆盖
+
+四个消费点（`options_analyzer` ×3、`oracle_bee` ×1）都是函数内
+`from cboe_options import X`，名字在**调用时**才从模块命名空间解析 ——
+所以在 `cboe_options` 内拦截即全覆盖，调用方一行未改。
+钩子装在 `_fetch_cboe_payload` + 三个 `fetch_cboe_*`。
+
+### Fixed 🔴 — JSON 往返把行权价键变成字符串 → Max Pain / GEX 算在错序上
+
+这是本模块存在的**首要理由**。`full_chain_oi` 的 `call_oi`/`put_oi`/
+`call_exp_oi`/`put_exp_oi` 以行权价为键，`json.dump` 后 `130.0` → `'130.0'`。
+**不会崩**：`options_analyzer` 的
+
+    all_strikes = sorted(set(call_oi.keys()) | set(put_oi.keys()))
+
+照样排得出来，只是排成字典序 —— `'100.0' < '130.0' < '90.0'`，
+Max Pain 穷举与 GEX 于是算在错序的行权价上，**数字照出、全是错的**。
+`_restore_numeric_keys` 只还原这四段的顶层键（内层到期日本来就该是 str）。
+
+### Changed — `--date` 补跑默认走快照，且降级必须出声
+
+新增 `--no-snapshot`。默认行为改为：`--date` 补跑时优先用该日云端快照。
+**理由**：不接快照的补跑会拿到**今天**的期权链、贴上补跑日的日期写进
+`pheromone.db` —— 一直如此，只是从来没人看见。
+
+两条刻意的设计：
+- **快照模式下绝不回落实时**：缺标的返回 `None`（诚实缺失）。回落 = 用今天的
+  链冒充那天的，与 v0.45.36 拦下的污染同源、方向相反。
+- **拿不到快照不中止**：价格/情绪/催化剂维度仍可信（价格有历史 API），
+  中止会把「期权维度缺失」升级成「整天没有」。改为继续跑 + 明确警告。
+
+### 守卫 `tests/test_cloud_snapshot_loader.py`（16 项，真实 git 仓库不打桩）
+
+⚠️ **「无实时回落」的判据是禁网，不是返回值**。初版只断言返回 `None`，
+变异掉 `fetch_cboe_chain` 的钩子后**测试仍全绿** —— 四个钩子是分层的，
+上层拆了下层照样把结果压成 `None`。改为把 `urlopen` 换成抛错，任何一层
+回落立刻暴露；重跑变异确认转红。
+
+端到端实测：OracleBee 吃快照与吃实时得分一致（8.28 / 8.28，`gamma_exposure`
+四位小数相同）；判别性检验 —— 篡改快照价为 1234.56 会流到消费端，
+TMO 实时有数据而快照下为 `None`，证明两条路径真的隔离。
+
+### 一处自己踩的坑
+
+本模块初版把 `ref: str = SNAPSHOT_REF` 写进签名 —— **正是 v0.45.37 刚修完的
+早绑定 pattern**，同一天同一个坑。6 处签名全部改为 `Optional[str] = None`
++ 体内 `ref or SNAPSHOT_REF`，并在常量处留了警示注释。
+
+---
+
 ## [0.45.37] — 2026-08-26 — 早绑定默认参数让 `replay_scoring` 的退化测试读了真库
 
 做 v0.45.36 的全量回归时 `test_underpowered_run_exits_nonzero` 转红。

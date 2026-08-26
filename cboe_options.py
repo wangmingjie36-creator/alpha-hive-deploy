@@ -81,6 +81,34 @@ _payload_cache = {}  # ticker -> (timestamp, data)
 _cache_lock = threading.Lock()
 _CACHE_TTL = 120.0
 
+# ── 快照供给器（v0.45.38）：补跑历史交易日时接管全部取数 ──────────
+# 装载后本模块四个取数入口一律走快照，**不回落实时抓取** ——
+# 补跑的是过去某天，实时抓取会拿到今天的链再贴上那天的日期，
+# 与 v0.45.36 拦下的污染同源，只是方向相反。装卸见 cloud_snapshot_loader。
+_SNAPSHOT_PROVIDER = None
+
+
+def set_snapshot_provider(fn) -> None:
+    """装载/卸载快照供给器。`fn(ticker) -> dict | None`；传 None 卸载。
+
+    刻意放在本模块而不是让调用方各自 monkeypatch：四个消费点
+    （options_analyzer ×3、oracle_bee ×1）都是函数内 `from cboe_options import X`，
+    在本模块内拦截即全覆盖，调用方一行不用改。
+    """
+    global _SNAPSHOT_PROVIDER
+    _SNAPSHOT_PROVIDER = fn
+
+
+def _snapshot(ticker: str):
+    """返回该标的的快照 dict；未装载供给器时返回 None。"""
+    if _SNAPSHOT_PROVIDER is None:
+        return None
+    try:
+        return _SNAPSHOT_PROVIDER(ticker)
+    except Exception:  # noqa: BLE001 - 供给器故障不得连累实时路径判断
+        _log.exception("快照供给器对 %s 抛错", ticker)
+        return None
+
 
 def _bs_gamma(S: float, K: float, T: float, sigma: float) -> float:
     """Black-Scholes gamma — CBOE gamma 为 0（深 ITM/低流动）时兜底，与 options_analyzer 同公式"""
@@ -143,6 +171,18 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
     串行化（`_CBOE_SEM` 限 1）：本机老 SSL 栈扛不住并发 HTTPS（实测 4 并发挂 50-70s/SSL EOF），
     顺序拉仅 8-11s。进程缓存：同标的主链+全链共享一次下载。重试退避：瞬时 SSL EOF 错开即恢复。
     """
+    if _SNAPSHOT_PROVIDER is not None:
+        snap = _snapshot(ticker)
+        if not snap:
+            return None
+        # 合成最小 payload：快照不存原始 options 数组（体积 10 倍），
+        # 但快照模式下三个解析函数都短路了，没人会去读它。
+        return {"current_price": snap.get("price_at_fetch"),
+                "close": snap.get("price_at_fetch"),
+                "last_trade_time": snap.get("last_trade_time_et"),
+                "prev_day_close": snap.get("prev_day_close"),
+                "_from_snapshot": True}
+
     key = ticker.upper()
     now = time.time()
     with _cache_lock:
@@ -180,6 +220,9 @@ def fetch_cboe_chain(
     max_expiries: int = 4,
 ) -> Optional[Dict]:
     """拉取并解析 CBOE 期权链 → options_analyzer 兼容 result dict；任何失败返回 None。"""
+    if _SNAPSHOT_PROVIDER is not None:
+        return (_snapshot(ticker) or {}).get("chain")
+
     data = _fetch_cboe_payload(ticker, timeout)
     if not data:
         return None
@@ -303,6 +346,11 @@ def fetch_cboe_full_chain_oi(
          expiry_breakdown:[{expiry,call_oi,put_oi,total}], used_exps:int}
     行权价过滤区间 [0.60×S, 1.45×S]，与 yfinance 路径一致。失败返回 None。
     """
+    # 钩子放在 stock_price 守卫之前：快照里的 OI 是当日用有效价算好的，
+    # 此刻传进来的 stock_price 是不是 0 与它无关。
+    if _SNAPSHOT_PROVIDER is not None:
+        return (_snapshot(ticker) or {}).get("full_chain_oi")
+
     if not stock_price or stock_price <= 0:
         return None
     data = _fetch_cboe_payload(ticker, timeout)
@@ -380,6 +428,9 @@ def fetch_cboe_iv_term_structure(
     Returns: [{"expiry": str, "dte": int, "atm_iv": float(%)}, ...] 按 DTE 升序；
              无法计算返回 None（**不是空列表**——空列表会被误读为"算过了，没有"）。
     """
+    if _SNAPSHOT_PROVIDER is not None:
+        return (_snapshot(ticker) or {}).get("iv_term_structure")
+
     if not stock_price or stock_price <= 0:
         return None
     data = _fetch_cboe_payload(ticker, timeout)

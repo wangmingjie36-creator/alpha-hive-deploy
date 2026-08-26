@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import argparse
+import contextlib
 import logging
 import os
 import time
@@ -2346,6 +2347,38 @@ def _resolve_focus_tickers(args) -> List[str]:
     return tickers
 
 
+@contextlib.contextmanager
+def _snapshot_ctx(args):
+    """补跑时把期权/IV 取数切到当日云端快照；用不上就**明说**，绝不闷着。
+
+    为什么默认开启：不接快照的 `--date` 补跑会拿到**今天**的期权链，
+    贴上补跑日的日期写进 pheromone.db —— 一直如此，只是从来没人看见。
+    默认走快照是把这条路修对；`--no-snapshot` 保留旧行为但会警告。
+
+    为什么拿不到快照时**不**中止：补跑还有价格/情绪/催化剂等维度是可信的
+    （价格有历史 API，与期权链不同）。中止会把「期权维度缺失」升级成
+    「整天没有」，损失更大。所以继续跑，但把降级说清楚。
+    """
+    if not args.date or getattr(args, "no_snapshot", False):
+        if args.date:
+            print("⚠️ --no-snapshot：期权/IV 将来自**今天**的实时数据，"
+                  f"而非 {args.date} 的。该日的期权维度不可与正常扫描日同池比较。")
+        yield None
+        return
+    try:
+        import cloud_snapshot_loader as csl
+        with csl.snapshot_mode(args.date) as prov:
+            print(f"📦 云端快照模式：{args.date} 的期权/IV 取自 cloud-snapshots 分支")
+            yield prov
+        return
+    except ImportError as e:
+        print(f"⚠️ 快照消费端不可用（{e}）——退回实时抓取")
+    except Exception as e:  # noqa: BLE001 —— 含 SnapshotUnavailable
+        print(f"⚠️ {args.date} 无可用云端快照（{type(e).__name__}: {e}）")
+        print("   → 继续补跑，但**期权/IV 将是今天的数据**，该日期权维度不可同池比较。")
+    yield None
+
+
 def main():
     """主入口"""
 
@@ -2440,8 +2473,17 @@ def main():
         default=None,
         help='覆盖报告日期（YYYY-MM-DD），用于补跑指定交易日（默认自动取 PDT 当日）'
     )
+    parser.add_argument(
+        '--no-snapshot',
+        action='store_true',
+        help='补跑时不使用云端快照，强制实时抓取（⚠️ 期权/IV 会是今天的，不是补跑日的）'
+    )
 
     args = parser.parse_args()
+
+    # v0.45.38: --date 补跑时默认消费云端快照（见下方 _snapshot_ctx）
+    if getattr(args, "no_snapshot", False) and not args.date:
+        print("⚠️ --no-snapshot 只在 --date 补跑时有意义，本次忽略")
 
     # v32.6: --date 覆盖校验
     if args.date:
@@ -2533,10 +2575,14 @@ def main():
     # 否则 --extended-pool / --max-tickers 对实际扫描完全不生效）
     focus_tickers = _resolve_focus_tickers(args)
 
-    if args.swarm:
-        report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
-    else:
-        report = reporter.run_daily_scan(focus_tickers=focus_tickers)
+    # v0.45.38：补跑历史交易日时，期权/IV 走当日云端快照而非实时抓取。
+    # 不接快照的补跑会拿到**今天**的期权链再贴上补跑日的日期——一直如此，
+    # 只是从来没人看见。下面这个上下文要么用上快照，要么把这件事说出来。
+    with _snapshot_ctx(args):
+        if args.swarm:
+            report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
+        else:
+            report = reporter.run_daily_scan(focus_tickers=focus_tickers)
 
     # v0.23.2 修复 #2：--samples-only 必须在 save_report 之前短路
     # 否则 _save_output_files 会生成 MD/HTML/PWA/X线程/rss.xml 到 repo 根，
