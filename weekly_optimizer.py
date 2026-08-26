@@ -1,20 +1,47 @@
 #!/usr/bin/env python3
 """
-🐝 Alpha Hive · 轨道 A — 每周权重自动优化器
+🐝 Alpha Hive · 轨道 A — 权重优化器（v0.44.0 起：**默认只读诊断**）
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-流程：
-  1. 扫描 report_snapshots/ → 找 T+7 已回填快照
-  2. BacktestAnalyzer.suggest_weight_adjustments() → 计算新 5 维权重
-  3. 变化 >= MIN_CHANGE_PP（绝对值）且样本 >= MIN_SAMPLES → 写入 config.py
-  4. 记录到 weight_history.jsonl（审计轨迹）
-  5. 打印摘要
+
+⚠️ **本工具默认不再修改 config.py。** 写入必须显式 `--apply`，且两道闸全过。
+
+为什么降级为只读（三条独立理由，任一条都够）
+--------------------------------------------
+1. **`w = acc/Σacc` 数学上无法表达"这个维度没用"**：准确率都挤在 0.5 附近，
+   权重必然全部 ≈0.2 —— 它的输出空间里不存在"归零"这个答案。
+2. **它优化的对象已被证明不存在**：综合分 |IC|=0.090 打不过 20 日动量 0.135；
+   五维没有一个经得起全部保守口径（见 MEMORY 的四口径表）。
+   在无 edge 的信号层上优化加权，是在噪音里挑选。
+3. **每次写入都重置样本世代**：此后所有样本都是在新权重下产生的，与之前不可比。
+   `experiments/ic_power_report.md` 实测扩池 10→30 只把出结论时间缩短 **5.18×**，
+   而那份加速的计价单位是可汇总的历史样本 —— 优化器每开一次火就清零一次。
+   **这是唯一会主动让系统变差的一条。**
+
+附带事实：`compute_new_weights_wls` 名不副实 —— docstring 称 OLS 回归取 beta
+并做共线性检测，实现里**没有任何回归**。它从未做过它声称的事，却已真实改写过
+config.py 两次（2026-04-26 与更早）。当前 config 里那五个数是 n=28/133 噪声期的
+产物，应当**按任意常数看待**，不要赋予它"学出来的"含义。
+
+两道闸（`--apply` 时生效，`--force` 可覆盖但会记入审计）
+--------------------------------------------------------
+- **闸 1 Bootstrap 稳健性**：v0.44.0 之前这里只打印不阻断（原文"继续应用
+  （限幅已保护）"）。2026-08-16 实测到真实后果：bootstrap 报不稳健、
+  risk_adj −4.13pp 已越阈值，若非人工中断就会写入。限幅只保证**幅度**不失控，
+  不保证**方向**对。
+- **闸 2 标的池世代一致性**：v0.42.9 扩池 10→30 后有数周窗口，优化器眼里
+  还是旧的 10 只却要改 30 只在用的权重。2026-08-16 实测：665 个 T+7 样本
+  跨度 03-09→07-29，30 只时代贡献 **0 条**。
 
 用法（必须用 /usr/local/bin/python3 = 3.11，裸 python3 可能解析成 3.9.6）：
-  /usr/local/bin/python3 weekly_optimizer.py                 # 标准运行
-  /usr/local/bin/python3 weekly_optimizer.py --dry-run       # 只分析，不写 config
+  /usr/local/bin/python3 weekly_optimizer.py                 # 只读诊断（默认）
+  /usr/local/bin/python3 weekly_optimizer.py --apply         # 请求写入，闸门仍生效
+  /usr/local/bin/python3 weekly_optimizer.py --apply --force # 无视闸门（几乎不该用）
   /usr/local/bin/python3 weekly_optimizer.py --min-samples 5 # 降低最低样本要求（测试用）
   /usr/local/bin/python3 weekly_optimizer.py --rollback      # 回滚到上次写入前的权重
   /usr/local/bin/python3 weekly_optimizer.py --rollback --dry-run   # 预览回滚
+
+审计日志 `weight_history.jsonl` 的 `action` 字段区分两种运行：
+`"diagnose"`（只读）与 `"optimize"`（请求过写入）。
 """
 
 from __future__ import annotations
@@ -722,6 +749,85 @@ def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
         return False
 
 
+def check_ticker_pool_consistency(snapshots_dir: Path,
+                                  recent_days: int = 3,
+                                  max_unrepresented: float = 0.20) -> dict:
+    """闸 2：样本基的标的池必须能代表**当前**在扫的标的池。
+
+    为什么需要这道闸
+    ----------------
+    权重是在某个横截面上学出来的，而横截面宽度一变，最优加权就不是同一个问题。
+    v0.42.9 把标的池从 10 只扩到 30 只（N_eff 3.18 → 12.27，见
+    `experiments/ic_power_report.md`），但 T+7 要 7 个交易日才到期 —— 于是存在
+    一个长达数周的窗口：**优化器眼里的世界还是旧的 10 只，却要去改现在 30 只
+    在用的权重。**
+
+    2026-08-16 实测正是此状态：665 个 T+7 样本跨度 2026-03-09→07-29，
+    30 只时代（≥08-10）贡献 **0 条**。而优化器当天恰好越过 MIN_CHANGE_PP
+    要开火（risk_adj −4.13pp）。
+
+    判据
+    ----
+    比较「最近 recent_days 个扫描日出现过的标的」与「进入 T+7 样本基的标的」。
+    当前池里未被样本基覆盖的比例 > max_unrepresented 即拦下。
+
+    Returns:
+        {ok, unrepresented_ratio, recent_pool, sample_pool, missing, reason}
+    """
+    try:
+        sys.path.insert(0, str(ALPHAHIVE_DIR))
+        from feedback_loop import BacktestAnalyzer
+    except ImportError as e:
+        # 拿不到就**不放行**——闸的默认态是关，不是开
+        return {"ok": False, "reason": f"无法导入 feedback_loop: {e}"}
+
+    try:
+        analyzer = BacktestAnalyzer(directory=str(snapshots_dir))
+    except Exception as e:  # noqa: BLE001 - 任何读取失败都按"判不了"处理
+        return {"ok": False, "reason": f"BacktestAnalyzer 失败: {e}"}
+
+    snaps = getattr(analyzer, "snapshots", None) or []
+    if not snaps:
+        return {"ok": False, "reason": "快照为空"}
+
+    # 样本基 = 真正参与优化的那些（有 T+7 且入场价有效），与
+    # compute_new_weights_wls 的筛选条件保持一致
+    sample_pool = {
+        s.ticker for s in snaps
+        if getattr(s, "actual_price_t7", None) is not None
+        and getattr(s, "entry_price", 0) > 0
+        and getattr(s, "ticker", None)
+    }
+    if not sample_pool:
+        return {"ok": False, "reason": "样本基里没有可用标的"}
+
+    dates = sorted({s.date for s in snaps if getattr(s, "date", None)})
+    if not dates:
+        return {"ok": False, "reason": "快照缺少日期"}
+    recent_dates = set(dates[-recent_days:])
+    recent_pool = {s.ticker for s in snaps
+                   if getattr(s, "date", None) in recent_dates
+                   and getattr(s, "ticker", None)}
+    if not recent_pool:
+        return {"ok": False, "reason": "最近扫描日没有标的"}
+
+    missing = sorted(recent_pool - sample_pool)
+    ratio = len(missing) / len(recent_pool)
+    ok = ratio <= max_unrepresented
+    return {
+        "ok": ok,
+        "unrepresented_ratio": ratio,
+        "n_recent_pool": len(recent_pool),
+        "n_sample_pool": len(sample_pool),
+        "missing": missing,
+        "recent_dates": sorted(recent_dates),
+        "reason": None if ok else (
+            f"当前池 {len(recent_pool)} 只里有 {len(missing)} 只"
+            f"（{ratio:.0%}）从未进入 T+7 样本基"
+        ),
+    }
+
+
 def append_history(old_weights: dict, new_weights: dict,
                    n_samples: int, dry_run: bool,
                    method: Optional[str] = None,
@@ -893,8 +999,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Alpha Hive · 周度权重自动优化器（轨道 A）"
     )
+    parser.add_argument("--apply",        action="store_true",
+                        help=(
+                            "显式请求写入 config.py。**不给此参数则只做诊断**"
+                            "（v0.44.0 起默认只读）。即便给了，两道闸全过才写。"
+                        ))
     parser.add_argument("--dry-run",      action="store_true",
-                        help="只分析，不写 config.py")
+                        help="（已成为默认行为，保留仅为向后兼容）只分析，不写 config.py")
+    parser.add_argument("--force",        action="store_true",
+                        help=(
+                            "配合 --apply：无视闸门强行写入。"
+                            "**除非你已读过 experiments/ic_power_report.md "
+                            "并明确知道自己在做什么，否则不要用。**"
+                        ))
     parser.add_argument("--min-samples",  type=int, default=MIN_SAMPLES,
                         help=f"最少样本数（默认 {MIN_SAMPLES}）")
     parser.add_argument("--min-change",   type=float, default=MIN_CHANGE_PP,
@@ -908,13 +1025,35 @@ def main() -> None:
     if args.rollback:
         sys.exit(do_rollback(dry_run=args.dry_run, use_backup=args.to_backup))
 
-    print(f"\n🐝 Alpha Hive · weekly_optimizer 启动")
+    # v0.44.0：默认只读诊断。写入必须显式 --apply，且两道闸全过。
+    #
+    # 为什么反转默认值（opt-out → opt-in）：
+    #   本项目已有同款先例。2026-03-16 `generate_deep_v2.py` 的 opt-out 设计
+    #   让 NVDA 深度报告静默消费了 $0.47 Opus，之后改为 opt-in。这里的代价
+    #   不是钱而是**样本世代**：每次写 config.py 都让此前所有样本变成在旧权重
+    #   下产生的、不可比的一代，把「扩池换来的 5.18× 测量加速」周期性清零。
+    #
+    # 为什么本来就该只读（三条独立理由，任一条都够）：
+    #   1. `w = acc/Σacc` 数学上无法表达"这个维度没用"——准确率都挤在 0.5
+    #      附近，权重必然全部 ≈0.2，输出空间里不存在"归零"这个答案。
+    #   2. 它优化的对象已被证明不存在：综合分 |IC|=0.090 打不过 20 日动量
+    #      0.135；五维没有一个经得起全部保守口径。
+    #   3. `compute_new_weights_wls` 名不副实：docstring 称 OLS 回归取 beta，
+    #      实现里没有任何回归。它从未做过它声称的事，却已真实改写过 config 两次。
+    write_requested = args.apply and not args.dry_run
+    mode_label = "写入模式 (--apply)" if write_requested else "只读诊断（默认）"
+
+    print(f"\n🐝 Alpha Hive · weekly_optimizer 启动 — {mode_label}")
     print(f"   快照目录: {SNAPSHOTS_DIR}")
     print(f"   config:   {CONFIG_PATH}")
+    if args.apply and args.dry_run:
+        print("   ⚠️  同时给了 --apply 与 --dry-run，按 --dry-run 处理（不写入）")
+    if not write_requested:
+        print("   ℹ️  本次不会修改 config.py。要写入需显式 --apply。")
 
     # 1. 检查快照目录
     if not SNAPSHOTS_DIR.exists():
-        print(f"⏭  report_snapshots/ 不存在，尚无历史数据，跳过。")
+        print("⏭  report_snapshots/ 不存在，尚无历史数据，跳过。")
         return
 
     # 2. 计算有效样本数
@@ -955,48 +1094,98 @@ def main() -> None:
         )
         return
 
-    # 6. Bootstrap 验证
-    print("🔍 Bootstrap 稳健性验证...")
+    # 6. 闸 1：Bootstrap 稳健性
+    #
+    # v0.44.0 之前这里**只打印不阻断**——原文是
+    #   `if not args.dry_run: print("继续应用（限幅已保护），建议关注下周数据")`
+    # 2026-08-16 实测到了它的真实后果：该轮 bootstrap 报"不稳健"，
+    # 而 risk_adj −4.13pp 已越过 MIN_CHANGE_PP，若不是人工中断就会写进 config.py。
+    # "限幅已保护"是个安慰性说法：限幅只保证**幅度**不失控，不保证**方向**对。
+    print("🔍 闸 1/2：Bootstrap 稳健性验证...")
     bootstrap = bootstrap_validate(SNAPSHOTS_DIR, new_weights)
-    if bootstrap.get("stable"):
-        print("   ✅ Bootstrap 验证通过：权重变动在 95% 置信区间内")
+    gate_bootstrap_ok = bool(bootstrap.get("stable"))
+    if gate_bootstrap_ok:
+        print("   ✅ 通过：权重变动在 95% 置信区间内")
     else:
-        print(f"   ⚠️  Bootstrap 警告：{bootstrap.get('error', '权重可能不稳健')}")
-        if not args.dry_run:
-            print("   继续应用（限幅已保护），建议关注下周数据")
+        print(f"   🛑 未通过：{bootstrap.get('error', '权重可能不稳健')}")
 
-    # 7. 检查是否有显著变化
+    # 7. 闸 2：样本基的标的池必须代表当前在扫的池
+    print("🔍 闸 2/2：标的池世代一致性...")
+    pool = check_ticker_pool_consistency(SNAPSHOTS_DIR)
+    gate_pool_ok = bool(pool.get("ok"))
+    if gate_pool_ok:
+        print(f"   ✅ 通过：当前池 {pool.get('n_recent_pool')} 只，"
+              f"未被样本覆盖 {pool.get('unrepresented_ratio', 0):.0%}")
+    else:
+        print(f"   🛑 未通过：{pool.get('reason')}")
+        if pool.get("missing"):
+            shown = ", ".join(pool["missing"][:12])
+            more = "…" if len(pool["missing"]) > 12 else ""
+            print(f"      未进入样本基的标的: {shown}{more}")
+
+    gates_ok = gate_bootstrap_ok and gate_pool_ok
+
+    # 8. 检查是否有显著变化
     significant = has_significant_change(old_weights, new_weights, args.min_change)
 
     # v0.42.2：无论是否写入都记审计。旧实现只在 `significant or dry_run` 时记录，
     # 于是"每周跑、每周都无显著变化"表现为日志完全空白（2026-05-10 之后 11 周），
     # 与"任务挂了"无法区分。现在跳过也留痕，附结构化 skip_reason。
+    # 9. 写入决策。优先级：只读默认 > 闸门 > 显著性
     applied = False
     skip_reason = None
-    if significant or args.dry_run:
-        applied = write_weights_to_config(new_weights, dry_run=args.dry_run)
-        if args.dry_run:
-            skip_reason = "dry_run"
-        elif not applied:
-            skip_reason = "write_failed"
-    else:
+    if not write_requested:
+        # 默认路径：只读诊断。仍然预览新权重块（write_weights_to_config 的
+        # dry_run 分支只打印不落盘），并留审计轨迹。
+        write_weights_to_config(new_weights, dry_run=True)
+        skip_reason = "read_only_default"
+    elif not gates_ok and not args.force:
+        reasons = []
+        if not gate_bootstrap_ok:
+            reasons.append("bootstrap_unstable")
+        if not gate_pool_ok:
+            reasons.append("stale_ticker_pool")
+        skip_reason = "+".join(reasons)
+        print(f"\n🛑 --apply 已请求写入，但闸门未通过（{skip_reason}），拒绝写入。")
+        print("   要覆盖需 --apply --force，且请先读 experiments/ic_power_report.md。")
+    elif not significant:
         skip_reason = "below_min_change"
+    else:
+        if args.force and not gates_ok:
+            print("\n⚠️  --force：无视未通过的闸门强行写入。此举已记入审计日志。")
+        applied = write_weights_to_config(new_weights, dry_run=False)
+        if not applied:
+            skip_reason = "write_failed"
 
     append_history(
         old_weights, new_weights, n_samples,
-        dry_run=args.dry_run,
+        dry_run=not write_requested,
         method=result.get("method"),
         clamped=result.get("clamped"),
         bootstrap_stable=bootstrap.get("stable"),
         applied=applied,
         skip_reason=skip_reason,
+        action="optimize" if write_requested else "diagnose",
     )
 
-    # 8. 打印摘要
-    print_summary(old_weights, new_weights, n_samples, applied, args.dry_run)
+    # 10. 打印摘要
+    print_summary(old_weights, new_weights, n_samples, applied,
+                  dry_run=not write_requested)
 
-    if not significant and not args.dry_run:
-        print(f"⏭  所有维度变化 < {args.min_change}pp，权重保持不变（系统稳定）。\n")
+    print("  闸门: "
+          f"bootstrap {'✅' if gate_bootstrap_ok else '🛑'}  "
+          f"标的池世代 {'✅' if gate_pool_ok else '🛑'}")
+    if not write_requested:
+        print("  模式: 只读诊断 — config.py 未被修改（写入需 --apply）")
+    print()
+
+    if significant and not write_requested:
+        print(f"ℹ️  有维度变化 ≥ {args.min_change}pp，但当前为只读模式，未写入。")
+        if not gates_ok:
+            print("   （即便加 --apply 也会被闸门拦下）")
+    elif not significant:
+        print(f"⏭  所有维度变化 < {args.min_change}pp，权重保持不变（系统稳定）。")
+    print()
 
 
 if __name__ == "__main__":

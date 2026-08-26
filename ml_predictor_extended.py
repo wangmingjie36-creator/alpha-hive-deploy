@@ -720,22 +720,41 @@ class SimpleMLModel:
 
         return min(max(probability, 0.0), 1.0)
 
+    # ── 预期收益（v0.44.1 重做）────────────────────────────────────────
+    # ⚠️ 本类是 `ml_predictor` **导入失败时**的降级实现（见 `_create_ml_model`），
+    # 因此不能 import `ml_predictor.expected_returns` —— 那正是它不可用的场景。
+    # 重复是结构性强制的，靠 `tests/test_ml_expected_return.py::
+    # TestFallbackMirrorsPrimary` 断言两份实现数值一致来兜住。
+    # **改任何一份都必须同时改另一份，那个测试会红。**
+    #
+    # 旧实现三处错：
+    #   1. `max(0, ...)` 让负预期收益**结构性不可能**（比主实现更露骨）
+    #   2. `base_return = 10.0 * catalyst_multiplier * crowding_discount` 恒 ≥0，
+    #      催化剂质量又一次被当成"预期上涨"而非"影响幅度"
+    #   3. 期限缩放是 0.3/**0.7**/1.2，与主实现的 0.3/**0.8**/1.2 悄悄不一致
+    _CATALYST_MAGNITUDE = {"A+": 1.5, "A": 1.3, "B+": 1.0, "B": 0.9, "C": 0.7}
+    _HORIZON_SCALE = {"expected_3d": 0.3, "expected_7d": 0.8, "expected_30d": 1.2}
+
     def predict_return(self, data: TrainingData) -> Dict[str, float]:
-        """预测收益"""
-        probability = self.predict_probability(data)
+        """预测收益（百分点）。必须与 `ml_predictor.expected_returns()` 数值一致。
 
-        # 基于催化剂质量和概率的简单收益预测
-        catalyst_multiplier = self.encode_catalyst_quality(data.catalyst_quality)
-        crowding_discount = 1.0 - (data.crowding_score / 100.0)
+        v0.44.2：拥挤度**刻意不进入**本公式（方向未确立、且已在 probability
+        里是权重最大的特征）。理由详见 `ml_predictor.py` 的 `CROWDING_NEUTRAL`
+        处长注释。
+        """
+        mag = self._CATALYST_MAGNITUDE.get(
+            getattr(data, "catalyst_quality", None), 1.0
+        )
 
-        base_return = 10.0 * catalyst_multiplier * crowding_discount
-        momentum_boost = data.momentum_5d * 0.5
+        mom = getattr(data, "momentum_5d", 0.0)
+        if mom is None or mom != mom:      # NaN 自身不等于自身
+            mom = 0.0
+        try:
+            mom = float(mom)
+        except (TypeError, ValueError):
+            mom = 0.0
 
-        return {
-            "expected_3d": max(0, (base_return * 0.3 + momentum_boost) * probability),
-            "expected_7d": max(0, (base_return * 0.7 + momentum_boost) * probability),
-            "expected_30d": max(0, (base_return * 1.2 + momentum_boost * 0.5) * probability),
-        }
+        return {k: mag * mom * s for k, s in self._HORIZON_SCALE.items()}
 
     def save_model(self, filename: str = "ml_model_extended.json"):
         """保存模型（JSON 格式，安全序列化）"""

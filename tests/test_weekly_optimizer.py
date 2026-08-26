@@ -408,3 +408,197 @@ class TestModuleLoggerDefined:
             src = f.read()
         for m in set(re.findall(r"_log\.(\w+)\(", src)):
             assert hasattr(wo._log, m), f"logger 无方法 {m}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# v0.44.0：默认只读 + 两道闸
+#
+# 起因：2026-08-16 的定时任务 dry-run 发现优化器已从 inert 变回会开火
+# （risk_adj −4.13pp > MIN_CHANGE_PP=3.0），而它要动的依据全是 10 只时代的
+# 数据，且 bootstrap 报"不稳健"时旧代码**只打印不阻断**。
+# ════════════════════════════════════════════════════════════════════════════
+
+class _PoolSnap:
+    """带 ticker 的最小快照替身，供 check_ticker_pool_consistency 用。"""
+
+    def __init__(self, ticker, date, t7=110.0, entry=100.0):
+        self.ticker = ticker
+        self.date = date
+        self.actual_price_t7 = t7
+        self.entry_price = entry
+
+
+def _patch_snaps(monkeypatch, snaps):
+    """把 BacktestAnalyzer 换成只返回给定快照的替身。
+
+    注意 check_ticker_pool_consistency 内部是 `from feedback_loop import
+    BacktestAnalyzer`（函数级 import），所以必须 patch feedback_loop 上的名字，
+    patch weekly_optimizer 的属性没用。
+    """
+    import feedback_loop
+
+    class _FakeAnalyzer:
+        def __init__(self, directory=None, **kw):
+            self.snapshots = snaps
+
+    monkeypatch.setattr(feedback_loop, "BacktestAnalyzer", _FakeAnalyzer)
+
+
+class TestTickerPoolGate:
+    """闸 2：样本基必须能代表当前在扫的标的池。
+
+    2026-08-16 实测状态：665 个 T+7 样本跨度 03-09→07-29，30 只时代贡献 0 条；
+    该闸实跑时报「当前池 30 只里有 14 只（47%）从未进入 T+7 样本基」。
+    """
+
+    def test_same_pool_passes(self, monkeypatch, tmp_path):
+        snaps = [_PoolSnap(t, "2026-08-14") for t in ("AAA", "BBB", "CCC")]
+        _patch_snaps(monkeypatch, snaps)
+        res = wo.check_ticker_pool_consistency(tmp_path)
+        assert res["ok"] is True
+        assert res["unrepresented_ratio"] == 0.0
+
+    def test_expanded_pool_without_t7_is_blocked(self, monkeypatch, tmp_path):
+        """复刻真实场景：老标的有 T+7，新扩的没有（t7=None）。"""
+        old = [_PoolSnap(t, "2026-07-01") for t in ("AAA", "BBB")]
+        new = [_PoolSnap(t, "2026-08-14", t7=None)
+               for t in ("CCC", "DDD", "EEE", "FFF")]
+        # 老标的当天也在扫
+        still = [_PoolSnap(t, "2026-08-14", t7=None) for t in ("AAA", "BBB")]
+        _patch_snaps(monkeypatch, old + new + still)
+        res = wo.check_ticker_pool_consistency(tmp_path)
+        assert res["ok"] is False
+        assert res["unrepresented_ratio"] == pytest.approx(4 / 6)
+        assert set(res["missing"]) == {"CCC", "DDD", "EEE", "FFF"}
+        assert "从未进入 T+7 样本基" in res["reason"]
+
+    def test_small_addition_within_threshold_passes(self, monkeypatch, tmp_path):
+        """加 1 只到 10 只池（10% < 20% 门槛）不该拦——闸不能过敏。"""
+        covered = [_PoolSnap(f"T{i}", "2026-07-01") for i in range(9)]
+        recent = [_PoolSnap(f"T{i}", "2026-08-14", t7=None) for i in range(9)]
+        newbie = [_PoolSnap("NEW", "2026-08-14", t7=None)]
+        _patch_snaps(monkeypatch, covered + recent + newbie)
+        res = wo.check_ticker_pool_consistency(tmp_path)
+        assert res["ok"] is True
+
+    def test_gate_defaults_closed_when_undeterminable(self, monkeypatch, tmp_path):
+        """判不了必须**不放行**——闸的默认态是关，不是开。"""
+        _patch_snaps(monkeypatch, [])
+        res = wo.check_ticker_pool_consistency(tmp_path)
+        assert res["ok"] is False
+        assert res["reason"]
+
+    def test_no_t7_samples_at_all_is_blocked(self, monkeypatch, tmp_path):
+        _patch_snaps(monkeypatch,
+                     [_PoolSnap("AAA", "2026-08-14", t7=None)])
+        res = wo.check_ticker_pool_consistency(tmp_path)
+        assert res["ok"] is False
+
+
+class TestReadOnlyDefaultAndGates:
+    """默认只读 + `--apply` 时闸门生效。用 main() 端到端跑，因为这几条
+    约束全部落在 main() 的分支里，单测函数覆盖不到。
+    """
+
+    def _run_main(self, monkeypatch, argv):
+        monkeypatch.setattr(sys, "argv", ["weekly_optimizer.py", *argv])
+        wo.main()
+
+    @pytest.fixture
+    def stub_pipeline(self, monkeypatch, sandbox):
+        """让 main() 走到写入决策那一步：样本充足、有显著变化。"""
+        monkeypatch.setattr(wo, "SNAPSHOTS_DIR", sandbox)
+        monkeypatch.setattr(wo, "count_t7_samples", lambda d: 667)
+        big_shift = {"signal": 0.30, "catalyst": 0.20,
+                     "sentiment": 0.20, "odds": 0.20, "risk_adj": 0.10}
+        monkeypatch.setattr(wo, "compute_new_weights_wls",
+                            lambda d: {"new_weights": dict(big_shift),
+                                       "method": "wls_time_decay"})
+        return sandbox
+
+    def test_default_is_read_only(self, monkeypatch, stub_pipeline):
+        """不给 --apply 就绝不碰 config.py，即便变化显著且闸门全过。"""
+        monkeypatch.setattr(wo, "bootstrap_validate",
+                            lambda *a, **k: {"stable": True})
+        monkeypatch.setattr(wo, "check_ticker_pool_consistency",
+                            lambda *a, **k: {"ok": True, "n_recent_pool": 30,
+                                             "unrepresented_ratio": 0.0})
+        before = wo.CONFIG_PATH.read_text(encoding="utf-8")
+        self._run_main(monkeypatch, [])
+        assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
+        rec = _read_history(wo.HISTORY_FILE)[-1]
+        assert rec["applied"] is False
+        assert rec["skip_reason"] == "read_only_default"
+        assert rec["action"] == "diagnose"
+
+    def test_apply_with_gates_open_does_write(self, monkeypatch, stub_pipeline):
+        """闸门全过 + 显式 --apply 才写 —— 证明只读不是把功能焊死了。"""
+        monkeypatch.setattr(wo, "bootstrap_validate",
+                            lambda *a, **k: {"stable": True})
+        monkeypatch.setattr(wo, "check_ticker_pool_consistency",
+                            lambda *a, **k: {"ok": True, "n_recent_pool": 30,
+                                             "unrepresented_ratio": 0.0})
+        self._run_main(monkeypatch, ["--apply"])
+        rec = _read_history(wo.HISTORY_FILE)[-1]
+        assert rec["applied"] is True
+        assert rec["action"] == "optimize"
+        assert wo.read_current_weights()["signal"] == pytest.approx(0.30, abs=1e-4)
+
+    def test_bootstrap_gate_blocks_apply(self, monkeypatch, stub_pipeline):
+        """v0.44.0 之前这里只打印不阻断，是 2026-08-16 差点写入的直接原因。"""
+        monkeypatch.setattr(wo, "bootstrap_validate",
+                            lambda *a, **k: {"stable": False})
+        monkeypatch.setattr(wo, "check_ticker_pool_consistency",
+                            lambda *a, **k: {"ok": True, "n_recent_pool": 30,
+                                             "unrepresented_ratio": 0.0})
+        before = wo.CONFIG_PATH.read_text(encoding="utf-8")
+        self._run_main(monkeypatch, ["--apply"])
+        assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
+        rec = _read_history(wo.HISTORY_FILE)[-1]
+        assert rec["applied"] is False
+        assert "bootstrap_unstable" in rec["skip_reason"]
+
+    def test_pool_gate_blocks_apply(self, monkeypatch, stub_pipeline):
+        monkeypatch.setattr(wo, "bootstrap_validate",
+                            lambda *a, **k: {"stable": True})
+        monkeypatch.setattr(wo, "check_ticker_pool_consistency",
+                            lambda *a, **k: {"ok": False, "reason": "陈旧池",
+                                             "missing": ["X"], "n_recent_pool": 30})
+        before = wo.CONFIG_PATH.read_text(encoding="utf-8")
+        self._run_main(monkeypatch, ["--apply"])
+        assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
+        assert "stale_ticker_pool" in _read_history(wo.HISTORY_FILE)[-1]["skip_reason"]
+
+    def test_both_gates_recorded_in_skip_reason(self, monkeypatch, stub_pipeline):
+        """两道闸都拦时，审计要能看出是两个原因而非一个。"""
+        monkeypatch.setattr(wo, "bootstrap_validate",
+                            lambda *a, **k: {"stable": False})
+        monkeypatch.setattr(wo, "check_ticker_pool_consistency",
+                            lambda *a, **k: {"ok": False, "reason": "陈旧池",
+                                             "missing": [], "n_recent_pool": 30})
+        self._run_main(monkeypatch, ["--apply"])
+        reason = _read_history(wo.HISTORY_FILE)[-1]["skip_reason"]
+        assert "bootstrap_unstable" in reason and "stale_ticker_pool" in reason
+
+    def test_force_overrides_gates_but_is_audited(self, monkeypatch, stub_pipeline):
+        """--force 必须真能写（否则是假逃生舱），且审计留下 bootstrap_stable=False。"""
+        monkeypatch.setattr(wo, "bootstrap_validate",
+                            lambda *a, **k: {"stable": False})
+        monkeypatch.setattr(wo, "check_ticker_pool_consistency",
+                            lambda *a, **k: {"ok": False, "reason": "陈旧池",
+                                             "missing": [], "n_recent_pool": 30})
+        self._run_main(monkeypatch, ["--apply", "--force"])
+        rec = _read_history(wo.HISTORY_FILE)[-1]
+        assert rec["applied"] is True
+        assert rec["bootstrap_stable"] is False, "强行写入也必须留下闸门状态"
+
+    def test_dry_run_still_wins_over_apply(self, monkeypatch, stub_pipeline):
+        """--dry-run 保留为向后兼容；与 --apply 同给时以不写为准。"""
+        monkeypatch.setattr(wo, "bootstrap_validate",
+                            lambda *a, **k: {"stable": True})
+        monkeypatch.setattr(wo, "check_ticker_pool_consistency",
+                            lambda *a, **k: {"ok": True, "n_recent_pool": 30,
+                                             "unrepresented_ratio": 0.0})
+        before = wo.CONFIG_PATH.read_text(encoding="utf-8")
+        self._run_main(monkeypatch, ["--apply", "--dry-run"])
+        assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
