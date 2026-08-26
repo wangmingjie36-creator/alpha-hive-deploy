@@ -1,8 +1,8 @@
 {
  "schema_version": 1,
  "date": "2026-08-26",
- "generated_at_utc": "2026-08-26T09:30:41.828600+00:00",
- "elapsed_sec": 94.9,
+ "generated_at_utc": "2026-08-26T21:08:02.730261+00:00",
+ "elapsed_sec": 150.4,
  "tickers_requested": 30,
  "tickers_ok": 30,
  "ok": [
@@ -39,5 +39,10 @@
  ],
  "failed": {},
  "market_cboe_ok": true,
+ "market_degraded_sections": [
+  "pcce",
+  "skew",
+  "vvix"
+ ],
  "fear_greed_ok": true
 }

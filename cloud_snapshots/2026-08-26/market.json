@@ -1,6 +1,6 @@
 {
  "schema_version": 1,
- "fetched_at_utc": "2026-08-26T09:29:31.469882+00:00",
+ "fetched_at_utc": "2026-08-26T21:06:00.048583+00:00",
  "cboe": {
   "pcce": {
    "total_pc_ratio": 0.95,
@@ -12,32 +12,40 @@
    "tickers_used": []
   },
   "vix_term": {
-   "vix_spot": 15.0,
-   "vix_1m": 15.75,
-   "vix_3m": 16.5,
+   "vix_spot": 15.45,
+   "vix_1m": 17.2,
+   "vix_3m": 19.7,
    "term_structure": "contango",
-   "contango_pct": 5.0
+   "contango_pct": 11.33,
+   "source": "vx_futures"
   },
   "skew": {
    "skew_value": 120.0,
    "signal": "normal",
-   "date": "2026-08-26"
+   "date": "2026-08-26",
+   "source": "default_fallback"
   },
   "vvix": {
    "vvix_value": 85.0,
    "signal": "normal",
-   "date": "2026-08-26"
+   "date": "2026-08-26",
+   "source": "default_fallback"
   },
   "macro_score": 4.38,
   "macro_sentiment": "neutral",
-  "timestamp": "2026-08-26T09:30:41.186344"
+  "timestamp": "2026-08-26T21:08:02.040715"
  },
  "fear_greed": {
-  "value": 59,
+  "value": 55,
   "classification": "Greed",
-  "sentiment_score": 5.9,
+  "sentiment_score": 5.5,
   "is_real_data": true,
   "source": "cnn",
-  "timestamp": "2026-08-26T09:30:41.827580"
+  "timestamp": "2026-08-26T21:08:02.728827"
+ },
+ "degraded_sections": {
+  "skew": "explicit_default_fallback",
+  "vvix": "explicit_default_fallback",
+  "pcce": "explicit_default_fallback"
  }
 }
