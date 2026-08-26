@@ -36,16 +36,86 @@ class RivalBeeVanguard(BeeAgent):
                 _mom_ml = stock.get("momentum_5d")
                 if _mom_ml is None:
                     _mom_ml = 0.0
+
+                # v0.44.2：传**真实**拥挤度，不再写死 50.0。
+                #
+                # 走的是 ScoutBee / GuardBee 已在用的同一条路（**不另造一套**）。
+                #
+                # 成本：`get_real_crowding_metrics` 内的两个网络调用都有缓存
+                # （social TTL 3600s / short interest TTL 86400s），且 stock 数据
+                # 由上面已取的 `_get_stock_data` 传入。ScoutBee 先跑时本调用是
+                # 缓存命中；最坏情况（与 ScoutBee 并行同时未命中）每标的多一次抓取。
+                # GuardBee 在 Phase-1.5，必然命中。
+                #
+                # ⚠️ 拿不到就用 CROWDING_NEUTRAL（中性），**不要**回落到 50.0 ——
+                # 实测只有 4.6% 的样本 ≥50，50 在这个分布里等于"极不拥挤 → 加分"，
+                # 那会把降级悄悄变成看多偏斜。
+                try:
+                    from ml_predictor import CROWDING_NEUTRAL as _CRD_NEUTRAL
+                except ImportError:
+                    _CRD_NEUTRAL = 23.30
+                _crowding = _CRD_NEUTRAL
+                try:
+                    from crowding_detector import CrowdingDetector
+                    from real_data_sources import get_real_crowding_metrics
+                    _detector = CrowdingDetector(ticker)
+                    _metrics = get_real_crowding_metrics(ticker, stock, self.board)
+                    _crowding, _ = _detector.calculate_crowding_score(_metrics)
+                except (ImportError, ValueError, KeyError, TypeError,
+                        AttributeError) as _e:
+                    _log.warning(
+                        "RivalBeeVanguard 拥挤度不可用 %s: %s（回落中性 %.2f）",
+                        ticker, _e, _CRD_NEUTRAL,
+                    )
+
+                # v0.44.3：从信息素板读**真实**的催化剂等级与期权指标。
+                #
+                # 前提是本蜂已从 Phase-1 移到 **Phase-1.5**（见
+                # `alpha_hive_daily_report` 的分阶段调用）——Phase-1 内部并行，
+                # 同批蜂之间读不到彼此，排在后面才读得到。
+                #
+                # ⚠️ 三个都必须能接受"读不到"：板上条目会衰减淘汰、上游蜂可能失败。
+                # 回落值刻意选**可与真实值区分**的中性档，并留 debug 日志 ——
+                # 这样"没读到"不会伪装成"读到了一个中性值"。
+                _cat_quality = "B"        # 见 catalyst_quality_from_score 的缺失约定
+                _chronos = self._read_peer(ticker, "ChronosBeeHorizon")
+                if _chronos is not None:
+                    try:
+                        from ml_predictor import catalyst_quality_from_score
+                        _cat_quality = catalyst_quality_from_score(
+                            getattr(_chronos, "self_score", None))
+                    except ImportError:
+                        pass
+                else:
+                    _log.debug("RivalBeeVanguard %s: 板上无 ChronosBee 条目，"
+                               "catalyst_quality 回落 %s", ticker, _cat_quality)
+
+                # OracleBee 发布的键名是 `pc_ratio`（不是 put_call_ratio）与 `iv_rank`
+                _iv_rank, _pc_ratio = 50.0, 1.0
+                _oracle = self._read_peer(ticker, "OracleBeeEcho")
+                if _oracle is not None:
+                    _od = getattr(_oracle, "details", None) or {}
+                    _iv_raw, _pc_raw = _od.get("iv_rank"), _od.get("pc_ratio")
+                    if isinstance(_iv_raw, (int, float)) and _iv_raw == _iv_raw:
+                        _iv_rank = float(_iv_raw)
+                    if isinstance(_pc_raw, (int, float)) and _pc_raw == _pc_raw:
+                        _pc_ratio = float(_pc_raw)
+                else:
+                    _log.debug("RivalBeeVanguard %s: 板上无 OracleBee 条目，"
+                               "iv_rank/put_call_ratio 回落中性", ticker)
+
                 opportunity = TrainingData(
                     ticker=ticker,
                     date=pdt_today(),  # v0.28.0: 美股交易日
-                    crowding_score=50.0,
-                    catalyst_quality="B+",
+                    crowding_score=_crowding,
+                    catalyst_quality=_cat_quality,
                     momentum_5d=_mom_ml,
-                    volatility=stock["volatility_20d"],
+                    # v0.45.3: 透传 None（不补 0.0）——ml_predictor 的
+                    # `_feature_quality()` 会把它列进 imputed_features
+                    volatility=stock.get("volatility_20d"),
                     market_sentiment=_mom_ml * 5,
-                    iv_rank=50.0,
-                    put_call_ratio=1.0,
+                    iv_rank=_iv_rank,
+                    put_call_ratio=_pc_ratio,
                     actual_return_3d=0.0,
                     actual_return_7d=0.0,
                     actual_return_30d=0.0,
@@ -108,7 +178,10 @@ class RivalBeeVanguard(BeeAgent):
                 else:
                     direction = "neutral"
                 _mom_txt = f"动量 {mom:+.1f}%" if not _mom_missing else "动量 N/A"
-                discovery = f"{_mom_txt} | {tech['summary']} | 波动率 {stock['volatility_20d']:.0f}%"
+                # v0.45.3: volatility_20d 可为 None，format(None, '.0f') 直接抛
+                _v20 = stock.get("volatility_20d")
+                _v20_txt = f"波动率 {_v20:.0f}%" if _v20 is not None else "波动率 N/A"
+                discovery = f"{_mom_txt} | {tech['summary']} | {_v20_txt}"
 
             # ---- EPS Revision Momentum（分析师共识 proxy）----
             eps_rev = self._assess_eps_revision(ticker)
@@ -118,12 +191,25 @@ class RivalBeeVanguard(BeeAgent):
                 if rev_summary:
                     discovery = f"{discovery} | {rev_summary}"
                 # 正面修正微升分，负面修正微降分（权重 4%，避免喧宾夺主）
+                #
+                # v0.44.1 修正单向棘轮：旧实现里 positive 会把 neutral 翻成
+                # bullish，而 negative **没有对应的 neutral → bearish 分支**。
+                # 与 ChronosBee「三分支全非负增量、无减分通路」是同族错误。
+                #
+                # 此前影响被掩盖：ML 路径占约 99%（1094/1101 有 ml.probability），
+                # 而旧的 expected_7d 结构性恒正 ⇒ direction 进入本块时几乎从不为
+                # neutral，棘轮无从触发。v0.44.1 把 expected_returns 改为居中后，
+                # 无动量/无信号时 direction **会**是 neutral（动量为 0 的样本在近
+                # 12 个扫描日占 63.7%），这个棘轮就会变成主要偏斜源。
+                # **必须与 expected_returns 的修复同时落地。**
                 if eps_sig == "positive":
                     score = min(10.0, score * 1.04)
                     if direction == "neutral":
                         direction = "bullish"
                 elif eps_sig == "negative":
                     score = max(0.0, score * 0.96)
+                    if direction == "neutral":
+                        direction = "bearish"
 
             discovery = append_context(discovery, ctx)
 

@@ -265,7 +265,10 @@ def extract_raw(data: dict) -> dict:
             "sentiment_pct": bdet.get("sentiment_pct"),
             "reddit_rank": bdet.get("reddit", {}).get("rank"),
             "reddit_mentions": bdet.get("reddit", {}).get("mentions"),
-            "volume_ratio": round(float(bdet.get("volume_ratio", 1) or 1), 2),
+            # v0.45.15: 原 `or 1` 把 None 转成 1.0（"正常量"）。v0.45.3 把源头
+            # 改成诚实的 None 后，这条伪造反而更常触发——等于把伪造挪到了出口。
+            "volume_ratio": (round(float(_vr), 2)
+                             if (_vr := bdet.get("volume_ratio")) is not None else None),
             "buzz_discovery": buzz.get("discovery", "")[:200],
         },
 
@@ -274,8 +277,14 @@ def extract_raw(data: dict) -> dict:
             "scout_score": round(float(scout.get("score", 0)), 2),
             "scout_direction": scout.get("direction", ""),
             "scout_discovery": scout.get("discovery", "")[:200],
-            "crowding_score": round(float(sdet.get("crowding_score", 0)), 1),
-            "momentum_5d": round(float(sdet.get("momentum_5d", 0)), 4),
+            # v0.45.3: 原 `round(float(sdet.get(k, 0)), n)`——`.get` 默认值只在
+            # **键缺失**时生效。ScoutBee 自 v0.43.25 起对 momentum_5d 诚实吐 None，
+            # 键是在的，于是默认值失效、`float(None)` 直接 TypeError。
+            # 缺数据写 JSON null（不是 0）：0 会被下游当成"动量为零"消费。
+            "crowding_score": (round(float(_v), 1)
+                               if (_v := sdet.get("crowding_score")) is not None else None),
+            "momentum_5d": (round(float(_v), 4)
+                            if (_v := sdet.get("momentum_5d")) is not None else None),
             "overview": aa.get("overview", "")[:150],
         },
 

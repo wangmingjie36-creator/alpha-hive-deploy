@@ -64,9 +64,14 @@ class BuzzBeeWhisper(BeeAgent):
                 volume_signal = 20
 
             # 3. 波动率信号（高波动 = 恐惧，低波动 = 贪婪/稳定）
-            vol20 = stock["volatility_20d"]
+            # v0.45.3: volatility_20d 自本版起可为 None（原 0.0 是"零波动=零风险"
+            # 的伪造）。与上面 volume_ratio 同型处理 → 中性 50，不当"低波动/稳定"。
+            # 缺这条守卫时 2026-08-25 自动扫描 30/30 只全崩在这一行。
+            vol20 = stock.get("volatility_20d")
             _vlt = _AS.get("volatility_thresholds", {})
-            if vol20 > _vlt.get("extreme", 60):
+            if vol20 is None:
+                vol_sentiment = 50
+            elif vol20 > _vlt.get("extreme", 60):
                 vol_sentiment = 25
             elif vol20 > _vlt.get("high", 40):
                 vol_sentiment = 40
@@ -188,9 +193,12 @@ class BuzzBeeWhisper(BeeAgent):
             score += sent_momentum["momentum_score_adj"]
 
             # ── 情绪-价格背离检测 ──
-            # P0-2: momentum 为 None 时跳过背离检测（1 日近似曾触发假 bull trap）
+            # P0-2: momentum 为 None 时不做背离判定（1 日近似曾触发假 bull trap）
+            # v0.45.2: 此前注释说"跳过"，代码却传 `if None else 0.0`——检测器里
+            # 那条返回 divergence_type="unavailable" 的分支因此永远不可达，
+            # "查不了"被伪装成"查过、没背离"。现在直传 None 让它生效。
             sent_divergence = _detect_sentiment_price_divergence(
-                int(sentiment_composite), _mom_raw if _mom_raw is not None else 0.0, ticker
+                int(sentiment_composite), _mom_raw, ticker
             )
             score += sent_divergence["score_adj"]
             score = clamp_score_cfg(score)

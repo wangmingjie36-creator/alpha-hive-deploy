@@ -23,6 +23,24 @@ from prompt_loader import load_prompt as _load_prompt  # pattern 5: persona 从 
 
 _log = _logging.getLogger("alpha_hive.llm_service")
 
+
+def _fmt_num(v, spec: str = "+.1f", unit: str = "%") -> str:
+    """把可能缺失的数值渲染进 prompt。None 渲染成"不可得"，不是 0。
+
+    v0.45.3：原写法是在 f-string 里直接 `.get(键, 0)` 再套格式说明符，两个毛病：
+    · `.get(k, 0)` 只在**键缺失**时给默认值；上游是键在、值为 None，
+      于是 format(None, ...) 直接 TypeError——与 v0.43.23 那次 ML 报告
+      崩溃完全同款。
+    · 就算不崩，把缺失渲染成 "+0.0%" 等于告诉模型"这只票持平/低波动"，
+      而真相是"没查到"。喂给 LLM 的假事实会被它当作前提去推理。
+    """
+    if v is None:
+        return "不可得"
+    try:
+        return format(float(v), spec) + unit
+    except (TypeError, ValueError):
+        return "不可得"
+
 # API Key 加载优先级：环境变量 > 配置文件
 _api_key: Optional[str] = None
 _client = None
@@ -697,7 +715,7 @@ def interpret_insider_trades(
 {_ts.wrap_untrusted(_notable_txt, '交易明细')}
 
 股票价格: ${stock_data.get('price', 0):.2f}
-5日动量: {stock_data.get('momentum_5d', 0):+.1f}%
+5日动量: {_fmt_num(stock_data.get('momentum_5d'))}
 
 输出 JSON："""
 
@@ -747,8 +765,8 @@ def interpret_catalyst_impact(
 
 股票当前状态:
 - 价格: ${stock_data.get('price', 0):.2f}
-- 5日动量: {stock_data.get('momentum_5d', 0):+.1f}%
-- 20日波动率: {stock_data.get('volatility_20d', 0):.1f}%
+- 5日动量: {_fmt_num(stock_data.get('momentum_5d'))}
+- 20日波动率: {_fmt_num(stock_data.get('volatility_20d'), '.1f')}
 
 即将到来的催化剂:
 {json.dumps(catalysts[:6], ensure_ascii=False)}
@@ -800,8 +818,8 @@ def interpret_options_flow(
 
 股票状态:
 - 价格: ${stock_data.get('price', 0):.2f}
-- 5日动量: {stock_data.get('momentum_5d', 0):+.1f}%
-- 20日波动率: {stock_data.get('volatility_20d', 0):.1f}%
+- 5日动量: {_fmt_num(stock_data.get('momentum_5d'))}
+- 20日波动率: {_fmt_num(stock_data.get('volatility_20d'), '.1f')}
 
 输出 JSON："""
 

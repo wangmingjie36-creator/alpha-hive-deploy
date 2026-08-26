@@ -5,11 +5,45 @@ report_deployer - 报告部署与通知模块
 每个函数接收 reporter 实例（原 self）作为第一个参数。
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from hive_logger import get_logger
 
 _log = get_logger("report_deployer")
+
+
+def ghpages_tree_delta(repo: str, tree: str, parent: Optional[str]) -> Tuple[bool, int]:
+    """比较新 tree 与 parent 提交的 tree，返回 (是否有变更, 变更文件数)。
+
+    为什么需要这个：部署走的是 `git commit-tree` 这类**管道命令**，它不做
+    `git commit` 的「无变更则拒绝提交」检查——tree 与父提交完全相同时照样
+    生成一个 commit。实测 2026-08-15 连续三条
+    `Deploy: ML reports 2026-08-15 (12 tickers)` 全部是 0 文件的空提交，
+    message 里的数字是**声称值**（successful_count），与 tree 实际变更无关。
+
+    变更文件数返回 -1 表示「无法判定」（无父提交，或 git 调用失败），
+    调用方此时不应把它写进 commit message 冒充实测值。
+    """
+    import subprocess
+    if not parent:
+        return True, -1          # 首次提交，无从比对
+    try:
+        parent_tree = subprocess.check_output(
+            ["git", "rev-parse", f"{parent}^{{tree}}"],
+            cwd=repo, stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (subprocess.CalledProcessError, OSError):
+        return True, -1
+    if parent_tree == tree:
+        return False, 0
+    try:
+        out = subprocess.check_output(
+            ["git", "diff-tree", "-r", "--name-only", parent_tree, tree],
+            cwd=repo, stderr=subprocess.DEVNULL,
+        ).decode()
+        return True, len([ln for ln in out.splitlines() if ln.strip()])
+    except (subprocess.CalledProcessError, OSError):
+        return True, -1
 
 
 def verify_cdn_deployment(reporter, repo: str,
@@ -106,8 +140,12 @@ def deploy_static_to_ghpages(reporter):
         "sw.js", "rss.xml", ".nojekyll",
         "chart.umd.min.js",  # v0.41.0: Chart.js 自托管
     }
+    # v0.45.15: 原 `\w+` 不含连字符 ⇒ alpha-hive-BRK-B-ml-enhanced-*.html 永远
+    # 匹配不上，报告生成了却从不部署，而 index.html 照常链接它 → 线上 404。
+    # 与 v0.45.2（Agent 校验层）、v0.45.8（CBOE 取数层）是同一个类份额连字符问题。
+    # 收尾 `-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$` 已锁死范围，放宽字符集安全。
     _ml_pat = _re_deploy.compile(
-        r"^alpha-hive-\w+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$"
+        r"^alpha-hive-[\w.-]+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$"
     )
     try:
         from is_trading_day import filename_is_nontrading_day as _fnt_dep
@@ -151,6 +189,7 @@ def deploy_static_to_ghpages(reporter):
     ).decode().strip()
     # 获取 gh-pages 父提交（若存在）
     parent_args = []
+    parent = None
     try:
         parent = subprocess.check_output(
             ["git", "rev-parse", "gh-pages"], cwd=repo, stderr=subprocess.DEVNULL
@@ -158,15 +197,27 @@ def deploy_static_to_ghpages(reporter):
         parent_args = ["-p", parent]
     except subprocess.CalledProcessError:
         pass
-    commit = subprocess.check_output(
-        ["git", "commit-tree", tree] + parent_args +
-        ["-m", f"Deploy: Alpha Hive static {datetime.now().strftime('%Y-%m-%d %H:%M')}"],
-        cwd=repo
-    ).decode().strip()
-    subprocess.run(
-        ["git", "update-ref", "refs/heads/gh-pages", commit],
-        cwd=repo, check=True
-    )
+    # v0.45.2: 空提交闸。tree 与父提交相同就不再造 commit，
+    # 否则 gh-pages 会积累一串「message 声称 N 份报告、实际 0 文件」的假记录。
+    _has_change, _n_changed = ghpages_tree_delta(repo, tree, parent)
+    if not _has_change:
+        _log.error(
+            "🚨 gh-pages 无变更：新 tree 与父提交 %s 完全相同，跳过 commit"
+            "（本次待部署 %d 个文件）。若本应有新报告，说明报告文件根本没重新生成。",
+            (parent or "")[:7], len(files),
+        )
+    else:
+        _msg = f"Deploy: Alpha Hive static {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        if _n_changed >= 0:
+            _msg += f" [{_n_changed} files changed]"
+        commit = subprocess.check_output(
+            ["git", "commit-tree", tree] + parent_args + ["-m", _msg],
+            cwd=repo
+        ).decode().strip()
+        subprocess.run(
+            ["git", "update-ref", "refs/heads/gh-pages", commit],
+            cwd=repo, check=True
+        )
     # ── D3: Push 重试（指数退避，最多 3 次重试） ──
     import time as _time_push
     _PUSH_MAX_RETRIES = 3
@@ -198,6 +249,8 @@ def deploy_static_to_ghpages(reporter):
             "timestamp": _dt_q.datetime.utcnow().isoformat() + "Z",
             "date_str": reporter.date_str,
             "file_count": len(files),
+            "changed_files": _n_changed,   # v0.45.2: 实测值（-1=无法判定）
+            "tree_unchanged": not _has_change,
             "status": "success" if _push_ok else "failed",
             "attempts": _push_attempt + 1,
             "last_error": (r.stderr or "")[:300] if not _push_ok else "",

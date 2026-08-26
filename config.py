@@ -1151,8 +1151,28 @@ BULLISH_GATE_CONFIG = {
 }
 
 # 升级 5: 历史胜率反馈折扣（低胜率标的分数压缩向中性）
+#
+# ⚠️ v0.45.12 (2026-08-25) 关闭 —— 前提被数据否定。
+# 该机制假设「标的的历史胜率能预测它的前向胜率」。走查检验
+# （experiments/ticker_winrate_persistence.py，pheromone.db 597 方向样本，
+# 已应用 v0.45.9 ambiguous 修正，只用严格早于当日的同标的样本算 trailing）：
+#
+#   折扣触发（trailing<50%）  n=112  前向胜率 52.7%  均收益 +0.50%
+#   未触发（trailing>=50%）   n=344  前向胜率 51.5%  均收益 +0.68%
+#
+# 触发组前向胜率反而**更高**。按 trailing 五分层更明显，最差的 Q1
+# （trailing 0-48%，正是折扣打击对象）前向表现是五层里最好的：
+#   Q1 58.2% / +1.30%   Q2 46.2% / -0.69%   Q3 47.3%   Q4 52.7%   Q5 54.3%
+# 前后半段分割（10 只样本≥15 的标的）Spearman = -0.139，AMZN 85.7%→25.0%、
+# META 29.2%→56.2%，标的强弱不但不外推还倾向反转。
+#
+# 危害不止于「无效」：压缩后的 score 可能跌破 paper_portfolio 的
+# entry_score_bull=6.5 → 直接否决入场，等于在均值回归前精准做反。
+#
+# 代码保留在 swarm_agents/queen_distiller.py（受 enabled 开关控制），
+# 样本积累后重跑上述脚本即可复核；若触发组显著劣于未触发组再打开。
 TICKER_ACCURACY_FEEDBACK = {
-    "enabled": True,
+    "enabled": False,           # v0.45.12: True → False（见上方走查证据）
     "min_samples": 5,           # 需要 5+ 笔 T+7 验证才启用
     "discount_threshold": 0.50, # 胜率低于 50% 触发折扣
     "min_reliability": 0.5,     # 最低可靠性系数（BILI 33% → 0.66）

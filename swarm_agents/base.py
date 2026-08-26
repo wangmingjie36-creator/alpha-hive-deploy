@@ -120,7 +120,7 @@ class BeeAgent(ABC):
             return ""
 
     def _validate_ticker(self, ticker: str) -> Optional[Dict]:
-        """验证 ticker 格式（1~5 大写字母，无特殊字符）；无效时返回标准错误结构"""
+        """验证 ticker 格式（1~5 大写字母 + 可选 -X/.X 类份额后缀）；无效时返回标准错误结构"""
         if not ticker or not _RE_TICKER.match(str(ticker).strip()):
             _log.warning("%s.analyze() 收到无效 ticker: %r", self.__class__.__name__, ticker)
             return {
@@ -129,7 +129,8 @@ class BeeAgent(ABC):
                 "score": 5.0,
                 "direction": "neutral",
                 "confidence": 0.0,
-                "discovery": f"无效 ticker 格式: {ticker!r}（需 1~5 位大写字母）",
+                "discovery": f"无效 ticker 格式: {ticker!r}"
+                             "（需 1~5 位大写字母，可带 -X/.X 类份额后缀）",
                 "dimension": "validation",
             }
         return None

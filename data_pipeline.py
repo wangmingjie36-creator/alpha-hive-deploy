@@ -113,10 +113,17 @@ class StockData:
     momentum_source: "5d_real"（yfinance 历史K线计算）| "unavailable"
     """
     price: float = 0.0
-    momentum_5d: Optional[float] = 0.0
+    # v0.45.3: 类型早已是 Optional，默认值却还是 0.0 / 1.0——构造 StockData 时
+    # 不显式赋值就又变回伪造（531/582 行显式传 None 正说明意图是 None）。
+    # 默认改为 None：**没测量过就是未知**，而不是"持平/正常量"。
+    momentum_5d: Optional[float] = None
     avg_volume: int = 0
-    volume_ratio: Optional[float] = 1.0
-    volatility_20d: float = 0.0
+    volume_ratio: Optional[float] = None
+    # v0.45.3: 原 `float = 0.0`。momentum_5d/volume_ratio 早已是 Optional（P0-2,
+    # v0.38.0），只有 volatility 还留着 0.0——而它是三者里后果最重的：
+    # σ=0 ⇒ VaR 恒为 0 ⇒ 风险面板显示"🟢 低"。只改 cache.py 的兜底堵不住，
+    # 因为那条分支要 data_pipeline 导入失败才走得到，主路径在这里。
+    volatility_20d: Optional[float] = None
     # 元数据
     data_source: str = DataQuality.FALLBACK
     source_name: str = "none"
@@ -413,7 +420,7 @@ class CBOESource:
                 data.momentum_5d = metrics["momentum_5d"]
                 data.avg_volume = metrics.get("avg_volume", 0)
                 data.volume_ratio = metrics.get("volume_ratio", 1.0)
-                data.volatility_20d = metrics.get("volatility_20d", 0.0)
+                data.volatility_20d = metrics.get("volatility_20d")   # v0.45.3: 不再补 0.0
                 data.momentum_source = "5d_real"
             else:
                 data.momentum_5d = None

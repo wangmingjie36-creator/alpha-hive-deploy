@@ -271,7 +271,10 @@ class AlphaHiveDailyReporter:
                 "sources": {
                     "yahoo_finance": {
                         "current_price": _stock_data.get("price", 0.0),
-                        "change_pct": _stock_data.get("momentum_5d", 0.0)
+                        # v0.45.2: 原 `.get("momentum_5d", 0.0)`——键存在且值为 None 时
+                        # 默认值不生效，返回的仍是 None；而写 0.0 又是伪造"持平"。
+                        # 保持 None 透传（realtime_metrics.change_pct 无下游算术消费点）。
+                        "change_pct": _stock_data.get("momentum_5d")
                     }
                 }
             }
@@ -1159,18 +1162,72 @@ class AlphaHiveDailyReporter:
             return ticker, distilled
 
         # 并行分析（max_workers=4 平衡吞吐与 API 限流）
-        if len(pending_tickers) > 1:
-            _log.info("🚀 并行分析 %d 个标的（max_workers=4）", len(pending_tickers))
-            with ThreadPoolExecutor(max_workers=min(4, len(pending_tickers))) as pool:
-                futures = {pool.submit(_analyze_and_save, item): item for item in pending_tickers}
+        #
+        # v0.45.4「一只都不能丢」：此前失败的标的被一条 WARNING 吞掉就永久丢弃，
+        # 且编排器的「扫描 N 只」取自配置数组长度、从不与实际产出比对，
+        # 于是 2026-08-12 丢 7 只、08-13 丢 4 只、08-25 丢 2 只（COST/DE），
+        # 全程「✅ 所有步骤成功」。失败主因是 `AST constructor recursion depth
+        # mismatch` —— CPython 层的 SystemError，竞态偶发、重跑基本能过，
+        # 恰恰是最该重试而不是最该放弃的那一类。
+        _MAX_TICKER_ATTEMPTS = 3
+
+        def _run_pool(items: list) -> None:
+            """跑一轮并行分析。失败只负责**记日志**，不负责记账——
+            谁需要重试由 `_pending_again()` 查实际产出决定（见下）。"""
+            if not items:
+                return
+            if len(items) == 1:
+                try:
+                    _analyze_and_save(items[0])
+                except Exception as e:
+                    _log.warning("标的 %s 分析失败: %s", items[0][1], e, exc_info=True)
+                return
+            with ThreadPoolExecutor(max_workers=min(4, len(items))) as pool:
+                futures = {pool.submit(_analyze_and_save, item): item for item in items}
                 for future in as_completed(futures):
+                    item = futures[future]
                     try:
                         future.result(timeout=180)  # 每个标的最多 3 分钟
                     except Exception as e:
-                        _, tk = futures[future]
-                        _log.warning("标的 %s 并行分析失败: %s", tk, e)
-        elif pending_tickers:
-            _analyze_and_save(pending_tickers[0])
+                        # exc_info 必须带：此前只记 str(e)，拿不到栈就无法定位
+                        # AST SystemError 的触发点（与 v0.43.23 同一教训）。
+                        _log.warning("标的 %s 并行分析失败: %s", item[1], e, exc_info=True)
+
+        def _pending_again() -> list:
+            """还缺结果的 item。**以实际产出为准，不以异常记账为准**：
+            ① `future.result(timeout=)` 抛超时时任务仍在池里跑，按异常记账会
+               把一个其实会成功的标的再分析一遍（重复写库/重复拉期权快照）；
+            ② `_analyze_and_save` 正常返回但 distilled 为空时**不抛异常**，
+               按异常记账会漏掉它——而它同样没有产出。
+            查 swarm_results 两种情况都覆盖。"""
+            with _ckpt_lock:
+                done = set(swarm_results)
+            return [it for it in pending_tickers if it[1] not in done]
+
+        if pending_tickers:
+            _log.info("🚀 并行分析 %d 个标的（max_workers=4）", len(pending_tickers))
+            _run_pool(pending_tickers)
+            for _attempt in range(2, _MAX_TICKER_ATTEMPTS + 1):
+                retry_items = _pending_again()
+                if not retry_items:
+                    break
+                _log.warning("♻️ 第 %d/%d 轮重试 %d 个未产出标的：%s",
+                             _attempt, _MAX_TICKER_ATTEMPTS, len(retry_items),
+                             " ".join(t for _, t in retry_items))
+                _run_pool(retry_items)
+
+            # ── 硬闸：打算扫的每一只都必须有结果 ──
+            missing = [t for _, t in _pending_again()]
+            if missing:
+                _log.error(
+                    "🚨 标的丢失：打算扫 %d 只，实际产出 %d 只，缺 %d 只：%s。"
+                    "已重试 %d 轮仍未补齐——本轮结果不完整，勿直接用于横向对比。",
+                    len(pending_tickers), len(pending_tickers) - len(missing),
+                    len(missing), " ".join(missing), _MAX_TICKER_ATTEMPTS,
+                )
+            else:
+                _log.info("✅ 标的完整性：%d/%d 全部产出",
+                          len(pending_tickers), len(pending_tickers))
 
         elapsed = self._post_scan_enrichment(ctx, swarm_results)
         try:

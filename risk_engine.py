@@ -31,6 +31,49 @@ import numpy as np
 
 _log = logging.getLogger("alpha_hive.risk_engine")
 
+
+def _vol_pct(stock_data: dict):
+    """年化波动率（**百分数**，如 30.0 表示 30%）；不可得返回 None。
+
+    v0.45.15：与 `_sigma_annual()` 同源，区别只在不除以 100。
+    补这个是因为二次检查发现 v0.45.3 当时只改了 3 处 `.get("volatility_20d", 30.0)`，
+    另有 4 处漏网（stress 情景 / 结果字典 / 综合风险等级），
+    根因是当时那次 grep 加了 `head` 被截断。
+    """
+    v = stock_data.get("volatility_20d")
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sigma_annual(stock_data: dict, method: str):
+    """取年化波动率；不可得时返回 (None, 错误结构)。
+
+    v0.45.3：原为 `float(stock_data.get("volatility_20d", 30.0)) / 100.0`，
+    两个毛病叠在一起：
+
+    · `.get(k, 30.0)` 那个保守兜底是**幌子**——默认值只在键缺失时生效，
+      而上游（data_pipeline / cache fallback）是把键留着、值置 None 的，
+      于是 `float(None)` 直接 TypeError。
+    · 更早的形态是 `volatility_20d: 0.0`：σ=0 ⇒ VaR 恒为 0 ⇒ 输出"🟢 低风险"。
+      把"没查到"渲染成"没问题"，比崩溃危险得多。
+
+    σ 未知时 VaR 在数学上就没有意义，所以既不崩也不编，**拒绝出数字**——
+    与本文件 `price 无效 (≤0)` 的哨兵写法一致。
+    """
+    _vol = stock_data.get("volatility_20d")
+    if _vol is None:
+        return None, {"method": method,
+                      "error": "volatility_20d 不可得——σ 未知时 VaR 无意义，不输出数字"}
+    try:
+        return float(_vol) / 100.0, None
+    except (TypeError, ValueError):
+        return None, {"method": method,
+                      "error": f"volatility_20d 非数值({_vol!r})，风险数字不可信"}
+
 # ─────────────────────────────────────────────────────────────
 # 配置常量
 # ─────────────────────────────────────────────────────────────
@@ -236,8 +279,10 @@ def parametric_var(
     """
     from scipy.stats import norm
 
-    sigma_annual = float(stock_data.get("volatility_20d", 30.0)) / 100.0
-    mom_5d_pct   = float(stock_data.get("momentum_5d", 0.0))
+    sigma_annual, _err = _sigma_annual(stock_data, "parametric_var")
+    if _err:
+        return _err
+    mom_5d_pct   = float(stock_data.get("momentum_5d") or 0.0)
 
     sigma_daily = sigma_annual / math.sqrt(TRADING_DAYS)
     mu_daily    = mom_5d_pct / 5.0 / 100.0   # 5日动量 → 日均收益
@@ -300,8 +345,10 @@ def monte_carlo_var(
     if S0 <= 0:
         return {"method": "monte_carlo_gbm", "error": "price 无效 (≤0)"}
 
-    sigma_annual = float(stock_data.get("volatility_20d", 30.0)) / 100.0
-    mom_5d_pct   = float(stock_data.get("momentum_5d", 0.0))
+    sigma_annual, _err = _sigma_annual(stock_data, "monte_carlo_gbm")
+    if _err:
+        return _err
+    mom_5d_pct   = float(stock_data.get("momentum_5d") or 0.0)
     mu_annual    = mom_5d_pct / 5.0 / 100.0 * TRADING_DAYS   # 年化漂移
 
     T = horizon_days / TRADING_DAYS  # 年
@@ -561,8 +608,12 @@ def _classify_growth_value(stock_data: Dict) -> str:
     - value:  低波动 + 负动量
     - blend:  介于中间
     """
-    vol = float(stock_data.get("volatility_20d", 30.0))
-    mom = float(stock_data.get("momentum_5d", 0.0))
+    # v0.45.3: 同样的 `.get` 默认值陷阱。σ 缺失时不硬推风格，返回 unknown。
+    _v, _m = stock_data.get("volatility_20d"), stock_data.get("momentum_5d")
+    if _v is None:
+        return "unknown"
+    vol = float(_v)
+    mom = float(_m or 0.0)
     if vol > 35 or mom > 5:
         return "growth"
     elif vol < 20 and mom < 0:
@@ -599,8 +650,14 @@ def run_stress_tests(ticker: str,
         scenarios = list(_STRESS_SCENARIOS.keys())
 
     S0  = float(stock_data.get("price", 100.0))
-    vol = float(stock_data.get("volatility_20d", 30.0))
-    vol_ratio = float(stock_data.get("volume_ratio", 1.0))
+    # v0.45.15: 两个 `.get(k, 默认)` 都接不住 None（键在、值为 None）。
+    # 缺数据时不触发对应的加成/惩罚项，而不是伪造一个"中等波动/正常量"。
+    vol = _vol_pct(stock_data)
+    _vr = stock_data.get("volume_ratio")
+    try:
+        vol_ratio = float(_vr) if _vr is not None else None
+    except (TypeError, ValueError):
+        vol_ratio = None
 
     # 惰性加载 beta，避免重复 API 调用
     _beta_cache: Dict[str, float] = {}
@@ -625,7 +682,7 @@ def run_stress_tests(ticker: str,
                 b = beta("SPY")
                 shock_pct = cfg["spx_shock_pct"] * b
                 notes.append(f"SPX {cfg['spx_shock_pct']:.0f}% × β{b:.2f}")
-                if vol > cfg["high_vol_threshold"]:
+                if vol is not None and vol > cfg["high_vol_threshold"]:
                     shock_pct += cfg["high_vol_extra_pct"]
                     notes.append(f"高σ额外{cfg['high_vol_extra_pct']:.0f}%")
 
@@ -637,10 +694,14 @@ def run_stress_tests(ticker: str,
                     "value":  cfg["value_sensitivity"],
                     "blend":  cfg["blend_sensitivity"],
                 }
-                sensitivity = sens_map[style]
+                # v0.45.3: `_classify_growth_value` 现在会在 σ 缺失时返回 "unknown"，
+                # 裸下标会 KeyError。用 blend（中间档）兜底并在 notes 里写明是估计值——
+                # 不静默：读到"风格:unknown"就知道这条冲击数字的依据不全。
+                sensitivity = sens_map.get(style, cfg["blend_sensitivity"])
                 # 每 100bps 对应敏感系数（已内嵌在参数里）
                 shock_pct = sensitivity * (cfg["rate_shock_bps"] / 100.0)
-                notes.append(f"风格:{style}, 利率敏感度{sensitivity:.0f}%/100bps")
+                notes.append(f"风格:{style}, 利率敏感度{sensitivity:.0f}%/100bps"
+                             + ("（σ 缺失，按 blend 估计）" if style == "unknown" else ""))
 
             # ── 板块崩盘 ──
             elif scenario_key == "sector_crash":
@@ -668,10 +729,10 @@ def run_stress_tests(ticker: str,
                 b = beta("SPY")
                 shock_pct = cfg["spx_shock_pct"] * b
                 notes.append(f"SPX {cfg['spx_shock_pct']:.0f}% × β{b:.2f}")
-                if vol_ratio < cfg["low_volume_threshold"]:
+                if vol_ratio is not None and vol_ratio < cfg["low_volume_threshold"]:
                     shock_pct += cfg["illiquidity_pct"]
                     notes.append(f"流动性折价{cfg['illiquidity_pct']:.0f}%")
-                if vol > cfg["high_vol_threshold"]:
+                if vol is not None and vol > cfg["high_vol_threshold"]:
                     shock_pct += cfg["high_vol_extra_pct"]
                     notes.append(f"高σ额外{cfg['high_vol_extra_pct']:.0f}%")
 
@@ -785,7 +846,8 @@ def run_full_risk_analysis(
         "ticker": ticker,
         "analysis_date": __import__("datetime").date.today().isoformat(),
         "entry_price": round(float(stock_data.get("price", 100)), 2),
-        "sigma_annual_pct": round(float(stock_data.get("volatility_20d", 30)), 2),
+        # v0.45.15: σ 不可得就写 None，不要用 30 冒充一个观测值
+        "sigma_annual_pct": (round(_v0, 2) if (_v0 := _vol_pct(stock_data)) is not None else None),
     }
 
     # ── Layer 1: 历史 VaR ──
@@ -877,9 +939,18 @@ def _build_summary(result: Dict, stock_data: Dict) -> Dict:
         summary["avg_stress_shock_pct"]  = st.get("average_shock_pct")
 
     # 综合风险等级
-    sigma      = float(stock_data.get("volatility_20d", 30.0))
+    # v0.45.15: σ 不可得时**不评风险等级**。原来 `.get(k, 30.0)` 既接不住 None
+    # （直接 TypeError），30 这个值本身还会让 `sigma > 20` 成立而输出 "low"——
+    # 把"没查到"渲染成一个具体的风险档位，比崩溃更危险。
+    sigma      = _vol_pct(stock_data)
     worst_shock = st.get("worst_case", {}).get("shock_pct", -10.0) or -10.0
     cvar_val    = summary.get("cvar_99_30d", -15.0) or -15.0
+
+    if sigma is None:
+        summary["risk_level"] = "unknown"
+        summary["risk_level_reason"] = "volatility_20d 不可得，σ 未知时风险等级无意义"
+        summary["sigma_annual_pct"] = None
+        return summary
 
     if sigma > 60 or worst_shock < -35 or cvar_val < -30:
         risk_level = "extreme"

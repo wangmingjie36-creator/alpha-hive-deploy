@@ -177,10 +177,19 @@ def _fetch_stock_data(ticker: str, target_date: Optional[str] = None) -> Dict:
 
     data: Dict = {
         "price": 0.0,          # 修复：原 100.0 是虚假 fallback，改为 0.0 触发 WARN-3
-        "momentum_5d": 0.0,
+        # v0.45.2: 原为 0.0——与 v0.43.25 在 ScoutBee 侧拆掉的伪造是同一形状，
+        # 只是搬到了上游。下面 `len(hist) >= 5` 不成立时（次新股/停牌/取数残缺）
+        # 会带着这个 0.0 一路走到 data_source="real"，且**不置** _data_unavailable，
+        # 下游完全无法区分"真持平"和"没数据"。data_pipeline 的契约（P0-2, v0.38.0）
+        # 本就是 None=诚实缺数据，这里对齐。
+        "momentum_5d": None,
         "avg_volume": 0,
-        "volume_ratio": 1.0,
-        "volatility_20d": 0.0,
+        # v0.45.3: 与 momentum_5d 同一形状的伪造。
+        # volume_ratio=1.0 会被下游当"正常量"消费（data_pipeline.py:533 早有此注释）；
+        # volatility_20d=0.0 更危险——σ=0 在风险引擎里等于"零风险"，
+        # 把"没查到"渲染成"没问题"。两者都改成 None。
+        "volume_ratio": None,
+        "volatility_20d": None,
         "data_source": "fallback",
     }
 

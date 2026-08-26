@@ -304,7 +304,9 @@ class BearBeeContrarian(BeeAgent):
         vol_ratio = stock.get("volume_ratio")
         if vol_ratio is None:  # P0-2: 降级源无成交量 → 中性 1.0，不触发量能萎缩信号
             vol_ratio = 1.0
-        volatility = stock.get("volatility_20d", 0)
+        # v0.45.3: `.get(k, 0)` 接不住 None（键在、值为 None），且 0 会被读成
+        # "零波动"。缺数据时不触发高波动看空信号，而不是伪造一个 0。
+        volatility = stock.get("volatility_20d")
 
         if mom_5d < -5:
             momentum_bear = 7.5
@@ -326,7 +328,7 @@ class BearBeeContrarian(BeeAgent):
             momentum_bear = max(momentum_bear, 5.5)
             bearish_signals.append(f"量增价跌 {vol_ratio:.1f}x | {mom_5d:+.1f}%")
 
-        if volatility > 50:
+        if volatility is not None and volatility > 50:
             momentum_bear = max(momentum_bear, 5.5)
             bearish_signals.append(f"高波动率 {volatility:.0f}%（年化）")
 

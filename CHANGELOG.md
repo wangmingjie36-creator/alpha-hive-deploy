@@ -5,6 +5,136 @@
 
 ---
 
+## [0.45.19] — 2026-08-25 — 全信号 IC 普查：干净口径下维度排名反转
+
+> 版本号说明：原编 0.45.18，与并发 session 撞号，顺延至 0.45.19。
+
+承 v0.45.17 的 `close_t7`。既然真实收盘价刚补齐，所有基于旧收益列的 IC 结论都要复核。
+
+### Changed — `ic_diagnostics.py` 新增并默认 `close` 口径
+
+v0.42.7 曾察觉截断问题、加了 `price` 口径，但**选错了列**：`price_t7` 存的是
+`path["exit_price"]`，自 2026-05 起 100% 等于 `exit_price`，与 `path` 口径一样带
+SL/TP 截断。原 docstring「无截断、无并列人为聚集」对 5 月后样本是错的，已更正。
+`--target` 增加 `close`（默认）；`price` 仅保留复现历史报告。
+`t30` 无 `close_t30`，回退时**显式告警**而非静默。
+
+**换口径后 5 维排名直接反转**：
+
+| 维度 | 污染口径(price) | 干净口径(close) |
+|---|---|---|
+| `risk_adj` | 四口径全过 t=−3.02 | 三口径过 t=−2.50，jackknife 失效 |
+| `sentiment` | **无口径通过** t=+1.97 | **三口径过 t=+3.16，Bonf(5维) p=0.008** |
+
+⚠️ 此前基于 `price`/`path` 口径的维度排名与权重讨论**全部应视为待复核**。
+
+### Added — `experiments/signal_ic_sweep.py` + `_report.md`
+
+把 `signal_archive` 全部 49 个信号 + `final_score` + 5 维一起在干净口径下普查。
+方法沿用 `ic_diagnostics` 既有约定（**日度横截面 → 每 ISO 周取一天**），
+不自创——第一版按周池化，把跨日、收益区间不同的预测混进同一个横截面排序，
+直接把 `dim.sentiment` 从 t=+3.16 压到查不出来。
+
+**结果：53 个信号 0 个过全局 Bonferroni。** 但两条值得记录：
+
+- **`dim.sentiment` 是唯一有实质证据的信号**：IC **+0.170**、t=+3.16、
+  剔极端 3 周后仍 t=+2.25、regime 符号一致；三分位多空毛价差 **+3.98%/周**
+  （剔极端后 +2.67%，仅做多超额 +1.56%）。四道 confound 检验全过：
+  无前视（扫描在收盘后、`dimension_scores` 落库即不改）、
+  **不是动量马甲**（`price.momentum_5d` 自身 IC=+0.008、t=+0.12）、
+  非少数周驱动、regime 一致。旁证：同族 `BuzzBeeWhisper.score`(+0.145)、
+  `sentiment.pct`(+0.115) 方向一致。
+- **`final_score` 完全无预测力**：IC **+0.025**、t=+0.46、p=0.65。
+  7 只蜂里 6 只 |t|<1.3。**一个 IC=+0.17 的输入经聚合后变成 +0.025** ——
+  这是目前最反常也最有行动价值的一条。
+
+保留意见（报告中不得省略）：未过 53 信号的严格 Bonferroni（p=0.082，
+仅按 5 维族校正才过）；N_eff 仅 21–23 周；+3.98%/周作为可持续 edge 不现实，
+样本内估计天然上偏；毛口径未扣成本、做空腿未验证可借券。
+**尚不足以据此改交易规则。**
+
+---
+
+## [0.45.17] — 2026-08-25 — 准确率口径拆分：「方向判对」与「交易赚钱」分开存
+
+> 版本号说明：本条原编 0.45.14，与并发 session 的「标的静默丢失三道闸」撞号，
+> 顺延至 0.45.17。代码注释中的 `v0.45.17` 即指本条。
+
+用户指出网站三张准确率卡（52.6%/56.2%/51.1%）口径可疑。查证属实，并牵出
+一条更深的数据陷阱。
+
+### Fixed — 「准确率」度量的其实是交易结果
+
+`correct_t7` 由 `_simulate_trade_path` 的**路径依赖离场收益**算出：触发 SL/TP
+即提前离场，收益被钳在止损止盈档位（库里 `-10.04`/`+9.95` 反复出现即此故）。
+所以它回答的是「这笔交易赚钱了吗」；而中性预测从不建仓、从无 SL/TP，
+判定带宽也不同（5% vs 方向单 1%）。**两者混进同一分母报「整体准确率」
+是苹果比橘子。**
+
+更麻烦的是 `price_t7` 也不可靠——自 2026-05 起 **100% 等于 `exit_price`**，
+同样被截断。**库里根本没有存方向单的真实 T+7 收盘价。**
+
+### Added
+
+- **`predictions` 三个新列**（`backtester._migrate_options_columns`，幂等迁移）：
+  `close_t7`（未截断的真实 T+7 收盘价）、`dir_correct_t7`、`dir_ambiguous_t7`。
+  旧的 `price_t7`/`return_t7`/`correct_t7` **语义不变**，equity curve、ML 训练、
+  `portfolio_backtest` 继续吃它们——那是交易指标，本就该路径依赖。
+- **`backfill_dir_accuracy.py`** — 重新取数回填历史样本（927 条已补齐）。
+  - 用 `yf.download(auto_adjust=False)`：只要拆股复权、不要分红复权，
+    才对得上库里的真实成交价（实测 auto_adjust=True 使自校验失败率 8.8%→12.3%）
+  - 收益用**同一条序列两端**算，否则遇拆股即垃圾（实测 CRWD 4:1，偏离 75%）
+  - **自校验**：对 `T7_CLOSE` 行比对库内收益。护栏判据是**中位偏离**与**符号
+    翻转率**，不是尾部计数——系统性口径错必然体现在中位数上，尾部零星偏离
+    则来自原始跑批的数据毛刺。实测中位 **0.000pp**、符号翻转 **0.7%**。
+- **`backtester.get_accuracy_stats(use_direction_metric=True)`** — 切到方向口径，
+  并新增 `directional_accuracy/total/correct`（**只含看多+看空，排除中性**）
+  与 `metric` 标注键。
+- **`tests/test_dir_accuracy_metric.py`**（4 项）——守语义不变式。
+  已按惯例验证「退回 bug 版必须变红」：开关失效 → 红；中性混入方向单分母 → 红。
+  含一项专守「未回填的 NULL 不得被当成判错」。
+
+### Changed — dashboard 口径
+
+`dashboard_renderer` 的准确率区块改走方向口径，卡片改为
+**方向准确率（看多+看空） / 方向单已验证 / 含中性（口径不可比）**三列并存，
+并加 `.acc-caption` 说明两者不可互相替代。周度走势同步切到 `dir_correct_t7`
+（`IS NOT NULL` 排除未回填行，**不用 COALESCE 兜底**——那会把「未知」当「判错」）。
+
+口径切换后（全历史）：
+
+| 口径 | 看多 | 看空 | 方向单合计 |
+|---|---|---|---|
+| 旧（交易结果） | 51.1% (256/501) | 56.2% (54/96) | 51.9% (310/597) |
+| 新（纯方向） | 56.3% (276/490) | 59.4% (57/96) | **56.8% (333/586)** |
+
+方向精度反而更高——止损截断会把「方向对但中途被打掉」记成判错。
+⚠️ 按不重叠周 N_eff=23：t 检验 p=0.076（不显著）、符号检验 p=0.017（显著），
+证据**边界性**，勿宣称「预测变准了」。
+
+### 更正 — 「中性标签可作卖权过滤器」已证否
+
+本 session 早先基于被截断的数据，先后报出中性平静度 **p=5.6e-08**、
+卖权过滤器 **SR 0.67→1.85**、中性组**双峰肥尾**三个「发现」。
+换用 `close_t7` 后**全部归零**：
+
+- `|ret|<5%` 中性 vs 方向单：+18.2pp/p<0.0001 → **+5.7pp/p=0.114**
+- 剔除中性：均损益 −0.92% → **−1.02%（更差）**
+- 过滤增量 +0.072pp/周，**t=0.33、p=0.744**
+
+`experiments/vol_regime_filter.py` 已改读 `close_t7`，输出结论改为**由 p 值生成**
+（第一版把结论硬编码在 print 里，数据换掉后仍在自说自话）；
+`_report.md` 重写为否定结论。教训：一个混淆能伪装成三种互相印证的「发现」；
+「最差 −10.01%」这类整齐极值是警报不是好消息（真实 max 达 73.4%）。
+
+### 测试
+
+全量 **1600 passed, 1 skipped, 1 xfailed**；`ruff --select F821` 全绿
+（改动中一次把变量定义写进了错误的函数作用域，靠 F821 当场抓到）。
+数据库已备份 `db_backups/pheromone_pre_dir_accuracy_fix_2026-08-25.db`。
+
+---
+
 ## [0.45.18] — 2026-08-25 — v0.45.16 的二次检查：目标日未校验可逃出 cache/
 
 ### Fixed
@@ -100,6 +230,415 @@
 括号内为**实测变更数**）；线上核对 23/23 期限结构全部有真实数据、0 处紫色渐变。
 
 ---
+
+## [0.45.15] — 2026-08-25 — BRK-B 报告线上 404：部署白名单也不认连字符
+
+v0.45.2 修好 ticker 正则后 BRK-B 终于产出 ML 报告，但**从未被部署**——
+`index.html` 照常链接它，线上直接 404。
+连同 v0.45.8（CBOE 对 BRK-B 恒定 403），**同一个类份额连字符问题一天之内
+出现在三层**：Agent 校验层、行情取数层、部署白名单层。
+
+### Fixed
+
+- **`report_deployer.py:144` / `generate_ml_report.py:2428`** — 白名单
+  `^alpha-hive-\w+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$` 里的 `\w` 是
+  `[A-Za-z0-9_]`，**不含连字符**，`alpha-hive-BRK-B-ml-enhanced-*.html`
+  永远匹配不上。改为 `[\w.-]+`（同时覆盖 `BRK.B`）。
+  收尾 `-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$` 已锁死范围，
+  `.bak` / `evil-alpha-hive-*` / 错误日期格式仍被拒。
+  实测：gh-pages 上 2026-08-25 的报告 29 → **30 份**，
+  `alpha-hive-BRK-B-ml-enhanced-2026-08-25.html` **404 → 200**。
+
+### Added
+
+- **`tests/test_silent_failure_guards.py`** — `TestDeployWhitelistAcceptsClassShares`。
+  正则**从生产源文件里 `re.search` 抓取**，不在测试里重抄——重抄等于测试测自己，
+  生产代码改回旧写法照样绿（v0.45.1 已吃过这个亏）。
+
+### 二次检查补充（同版号，对 v0.45.14/15 的对抗性复查）
+
+用**不加 `head` 的全量扫描**（当天两次栽跟头的地方）查所有会对可缺失字段做
+算术/比较/格式化的行，25 处疑似里查出 **4 个真缺陷**，其余为误报。
+
+- **`risk_engine.py`** — v0.45.3 当时只改了 3 处 `.get("volatility_20d", 30.0)`，
+  **另有 4 处漏网**（stress 情景 / 结果字典 `sigma_annual_pct` / 综合风险等级），
+  根因正是那次 grep 被 `head` 截断。新增 `_vol_pct()` 统一接住 None。
+  综合风险等级现在 σ 不可得就返回 `risk_level="unknown"`——原写法既接不住 None
+  （TypeError），30 这个默认值本身还会让 `sigma > 20` 成立而输出 `"low"`，
+  **把「没查到」渲染成一个具体的风险档位**。
+
+- **`alpha_hive_daily_report.py`** — 重试集合改为**查实际产出**，不按异常记账。
+  按异常记账有两个缺口：① `future.result(timeout=)` 抛超时时任务仍在池里跑，
+  会把其实会成功的标的**重复分析**（重复写库/重复拉期权快照）；
+  ② `_analyze_and_save` 返回空但**不抛异常**时会被漏掉。
+  新增 `_pending_again()` 查 `swarm_results`，硬闸走同一真相源。
+
+- **`collect_data.py`** — `bdet.get("volume_ratio", 1) or 1` 把 None 转成 1.0
+  （"正常量"）。源头改诚实后**这条伪造反而更常触发**——伪造从入口挪到了出口。
+
+- **编排器完整性闸** — 读失败时 `|| echo 0` 会误报「30 只全丢」。
+  改 `-1` 哨兵单独分支报「无法判定」。同一类毛病：把「读不出来」渲染成极端结论。
+
+**测试变更**：`test_completeness_gate_exists` 原先断言实现字符串
+`"not in swarm_results"`，被上面的重构改掉后变红——已改为断言**不变式**，
+并新增 `test_retry_set_comes_from_actual_output`。
+教训：结构性断言要盯不变式，别盯实现细节的字面量。
+
+**误报清单**（逐条走查确认无需改动）：`sentiment.py` 有前置 `return` 守卫、
+`scout_bee.py:312` 的守卫在下一行、`crowding_detector.py` 自建 dict 与本管线无关、
+`mcp-servers/` 是 vendored 第三方。另实测确认：`llm_service` 三处 prompt 是真
+f-string 且调用通过；`collect_data` 的海象表达式正确（首次测试是我构造错了数据
+形状，非代码问题）；三个模型类的 `predict_return` 均吃得下 None。
+
+### 备注
+
+- 2026-08-25 数据已按 v0.45.14 重跑并部署：`.swarm_results` 30 只、
+  `predictions` 30 只、gh-pages 30 份 ML 报告、线上页面 30 只全部出现。
+- 首页仅链接 24 只，是 **ML 报告 top-12/轮上限**的既有设计
+  （DE / ENPH / MU / NEE / SNOW / TMUS 本轮排名在外），非缺失——
+  这 6 份报告已生成并部署，可按 URL 直接访问。要让它们也上首页需调 `ML_CAP`。
+
+## [0.45.14] — 2026-08-25 — 一只都不能丢：标的静默丢失的三道闸
+
+2026-08-25 跑后核对发现扫描池 30 只、实际产出 28 只，**COST / DE 被静默丢弃**。
+翻历史日志：08-12 丢 **7 只**、08-13 丢 **4 只**。每次都只有一条 WARNING，
+编排器照常打印「✅ 所有步骤成功」。
+
+### Fixed
+
+- **`alpha_hive_daily_report.py`** — 并行分析的失败标的不再被丢弃。
+  直接原因是 `SystemError: AST constructor recursion depth mismatch
+  (before=27, after=35)`，一个 CPython 层的竞态偶发错误，被
+  `except Exception` 接住后只打一条 WARNING、不重试、不计数、不影响退出码。
+  三处修改：
+  ① 失败标的**最多重试 3 轮**（竞态偶发恰恰是最该重试的一类）；
+  ② 那条 warning 补 `exc_info=True`——此前只记 `str(e)`，**拿不到栈**，
+     所以至今仍无法定位 AST SystemError 的确切触发点（与 v0.43.23 同一教训）；
+  ③ 重试后仍缺则打 ERROR 并列出丢失标的名。
+
+- **`~/.claude/scripts/alpha-hive-orchestrator.sh`** — 新增标的完整性闸。
+  此前唯一的数量提示是 `扫描 ${#TICKERS[@]} 只`，取自**配置数组长度**，
+  与实际产出**从不比对**——这正是丢失能藏住的原因（与 gh-pages
+  `Deploy: ML reports (12 tickers)` 声称 12 实际 0 文件是同一个反模式：
+  **拿输入端的数字冒充输出端的结果**）。
+  现在读 `.swarm_results_${DATE_STR}.json` 实际长度比对，缺则 ERROR +
+  `OVERALL_STATUS=partial` + 写进 `ticker_completeness` 结构。
+
+### Changed
+
+- **2026-08-25 数据重跑**。当日 28 只标的的 BuzzBee/BearBee 因 v0.45.3 的
+  波动率回归全部是 `score=5.0 / confidence=0.0 / details={}` 的空壳
+  （即「静默中性化」形状），COST/DE 则完全缺失。**重跑全部 30 只**并重新部署，
+  不是只补那 2 只——空壳数据混在库里做横向对比会污染结论。
+
+### Added
+
+- **`tests/test_silent_failure_guards.py`** — `TestNoTickerMayBeDropped` 4 条。
+  明确标注为**结构性断言**：触发真实路径需要一次完整蜂群扫描（约 20 分钟 +
+  大量外网请求），无法在单测里跑；它们的作用是当有人删掉重试或闸门时变红。
+
+### 未解决
+
+- `AST constructor recursion depth mismatch` 的**根因仍未定位**。已知：
+  全仓无 `setrecursionlimit`；`code_executor.py:108` 的 `ast.parse()` 是
+  每标的流程里唯一跑 AST 的地方，且 `CodeExecutorAgent` 在
+  `alpha_hive_daily_report.py:172` 是**单个共享实例**被 4 个线程并发调用——
+  最可疑但**无证据**（用并发 `ast.parse` 跑 960 次未复现，触发条件更窄）。
+  下次发生时日志里会有完整调用栈，届时再定位。
+## [0.45.13] — 2026-08-25 — 「中性」标签的可交易性检验（含一次自我更正）
+
+起因：用户追问网站上 52.6%/56.2%/51.1% 三张准确率卡片。复算确认取数准确
+（`pheromone.db` T+7、排除 ambiguous 后 457/869），但顺带发现两件事。
+
+### 更正 — 会话早先报出的 p=5.6e-08 高估约一个数量级
+
+我先报「中性预测平静命中率 54.0% vs 方向单 34.8%，z=5.43、p=5.6e-08」，
+并建议做成可交易策略。两处高估：
+
+- **收益口径混淆（小）**：`predictions.return_t7` 对走 SL/TP 的方向单存的是
+  **钳位后的离场收益**（`−10.04`/`+9.95` 全表反复出现），对中性单存原始收益。
+  46% 方向单走 SL/TP，等于拿截断收益比原始收益。真实原始收益在 `price_t7`。
+  修正后 19.3pp → 18.2pp。
+- **重叠窗口（致命）**：30 只标的每日滚动 × T+7 持有，820 条高度重叠。
+  按不重叠 ISO 周聚合 **N_eff = 21**，名义 N 高估 **39×**。
+  正是 MEMORY「统计功效与扩池收益」警告过的陷阱。
+
+**效应方向成立，强度不成立。** 修正后 p ≈ 0.095，未过 0.05。
+
+### Added — `experiments/vol_regime_filter.py` + `_report.md`
+
+检验「`direction='neutral'` 能否用作卖权风险过滤器」。方法：用 `price_t7`
+还原原始收益绕开钳位；期权损益走 **Black-Scholes 实价**（非倍数近似），
+IV 取当日 `signal_archive.options.iv_current`，卖方按 `0.95×IV` 计点差劣势。
+
+实测（卖 ±1σ 宽跨式，持有至 T+7 到期）：
+
+| 组合 | n | 均损益% | SR | 最差% |
+|---|---|---|---|---|
+| 无过滤 | 820 | +0.31 | 0.67 | −28.15 |
+| 剔除中性 | 580 | **+0.59** | **1.85** | **−10.01** |
+| 仅中性 | 240 | −0.37 | −0.55 | −28.15 |
+
+三道对照排除「中性只是别的规则的代号」：静态高波动黑名单 SR 0.50、
+IV>73 过滤 SR −0.04，**均远逊于蜂群标签**——因为这些标的的*方向单*是赚钱的
+（RKLB +1.82、VKTX +1.51），静态剔除会连好单一起砍。蜂群做的是逐日判断。
+
+### 语义修正 — 「中性」不是低波动预测，是弃权标记
+
+用原始收益重做，中性组呈**双峰/肥尾**而非单纯安静：
+`|ret|<5%` 中性 55.1% vs 方向单 36.9%（+18.2pp），
+但 `|ret|>10%` 中性 25.7% vs 15.8%（**+9.9pp**）。中性 p95=25.1%、最大 41.5%。
+
+故其交易用法是**风险过滤器**（别在中性标的上卖权，肥尾吃光权利金），
+不是独立多/空波动率策略——BS 敏感性扫描显示买 1.5σ 宽跨式一旦按真实买价
+（多付 10% IV）即回落到盈亏平衡。
+
+### 就绪度闸 — 未达标，**未改动任何交易行为**
+
+`p ≈ 0.095`，80% 功效约需 60 周，还差 39 周。脚本退出码 `0`=已显著、
+**`3`=方向确立但功效未达标**（当前），与 `scan_continuity.py` 语义一致（2 留给编排器）。
+
+局限已写进报告且不得省略：IV 用单一 `iv_current` 非真实期权链报价，
+未建模 skew/点差/早行权/保证金；到期损益忽略路径依赖（真实尾部更差）；
+N_eff=21 时样本方差自身相对标准误 ≈32%，SR 1.85 应读作量级。
+
+---
+
+## [0.45.12] — 2026-08-25 — P1：关闭标的历史胜率反馈（前提被走查检验否定）
+
+系统里两处按「标的历史胜率」调节行为的机制，共用同一个未经检验的前提：
+**标的的历史胜率能预测它的前向胜率**。
+
+| | 机制 | 触发后果 |
+|---|---|---|
+| A | `queen_distiller` + `TICKER_ACCURACY_FEEDBACK` | trailing 胜率 <50% → `final_score = 5 + (score-5)×reliability` 向中性压缩 |
+| B | `paper_portfolio.CONFIG["win_rate_multiplier"]` | 胜率 <45% → 仓位 ×0.5；≥60% 且 n≥10 → ×1.2 |
+
+A 的危害不止「无效」：压缩后的 score 可能跌破 `entry_score_bull=6.5`，
+**直接否决入场**。且 `report_snapshots` 有 811 份、单标的 50–76 份，
+远超 `min_samples=5`，所以它在生产里经常触发，不是摆设。
+
+### 走查检验（新增 `experiments/ticker_winrate_persistence.py`）
+
+只用**严格早于当日**的同标的已验证样本算 trailing 胜率，杜绝前视偏差；
+口径与 queen_distiller 对齐（累计全历史、纯符号判定）；样本已应用
+v0.45.9 的 ambiguous 修正，否则容差本身就会污染胜率。
+
+T+7，597 方向样本 / 456 条具备 trailing：
+
+```
+折扣触发（trailing<50%）  n=112  前向胜率 52.7%  CI[44-62]  均收益 +0.50%
+未触发（trailing>=50%）   n=344  前向胜率 51.5%  CI[46-57]  均收益 +0.68%
+```
+
+触发组前向胜率反而**更高**。按 trailing 五分层，前向表现非单调，
+且最差的 Q1（正是折扣打击对象）前向表现是五层里最好的：
+
+```
+Q1  0-48%  → 58.2%  +1.30%   ← 折扣正打在这一层
+Q2 48-53%  → 46.2%  -0.69%
+Q3 53-58%  → 47.3%  +0.77%
+Q4 59-67%  → 52.7%  +0.99%
+Q5 67-100% → 54.3%  +0.80%
+```
+
+前后半段分割（2026-05-03 为界，10 只样本≥15 的标的）Spearman = **-0.139**，
+AMZN 85.7%→25.0%、META 29.2%→56.2%、QCOM 61.9%→43.3%——标的强弱不但不外推，
+还倾向反转。所有差异都在噪音内，诚实的表述是：**无任何证据支持该前提，
+点估计方向与机制假设相反**。
+
+### Changed
+
+- **`config.TICKER_ACCURACY_FEEDBACK["enabled"]` True → False**。代码保留在
+  `swarm_agents/queen_distiller.py`（受开关控制），样本积累后重跑上述脚本可复核。
+- **`paper_portfolio.CONFIG["win_rate_multiplier"]` 中性化**：
+  strong 1.2 → 1.0、weak 0.5 → 1.0。该表现实中几乎从未生效
+  （closed_trades 仅 38 笔、单标的最多 7 笔，`min_samples_for_win_rate=5`
+  使其历史上只有 3 次达标），属于「装着但没响的枪」——留着会在样本变多后
+  按一个已被证伪的规则开始改仓位。原值写在注释里，恢复即回滚。
+
+### Added
+
+- **`experiments/ticker_winrate_persistence.py`** — 可复跑的走查检验脚本，
+  支持 `--horizon t1|t7|t30`、`--min-prior`、`--threshold`，参数默认对齐
+  `TICKER_ACCURACY_FEEDBACK`。判据写在脚本末尾：折扣触发组前向表现若未
+  显著劣于未触发组，则该机制无依据。
+
+### 未改动 / 待议
+
+- `min_samples_for_win_rate` / `discount_threshold` 等参数保持原值——关掉开关后
+  它们不生效，留着是为了将来重新评估时口径可比。
+- 本次只处理「按标的历史胜率调节」这一类。评分体系本身的校准问题
+  （final_score 对 T+7 收益 rank-IC = -0.023，最高分层不优于最低分层）
+  属 P2，未在本条处理。
+
+### 回归
+
+全量 1553 passed / 65 failed，与 v0.45.9 完全一致——失败项全部为 VM 缺失依赖
+（google.auth / sklearn / yfinance / scipy）与硬编码 `/usr/local/bin/python3`，
+无测试断言旧行为（已全仓 grep 确认）。
+
+---
+
+## [0.45.9] — 2026-08-25 — P0：容差语义修正（单边亏损豁免 → 双边模糊带）
+
+`outcome_utils.determine_correctness` 的方向容差是**单边**的：
+
+```python
+看多 correct if return_pct > -1.0    # 亏 0.9% 记为「预测正确」
+看空 correct if return_pct < +1.0    # 逆向涨 0.9% 记为「预测正确」
+```
+
+这不是中性带，是给亏损单发免罪符。pheromone.db 全量实测：
+
+| 口径 | 方向样本 | 库内准确率 | 修正后 | 模糊剔除 |
+|---|---|---|---|---|
+| T+1 | 679 | 72.9% | **54.7%** (n=397) | 282 |
+| T+7 | 647 | 55.6% | **51.9%** (n=597) | 50 |
+| T+30 | 555 | 49.4% | **47.0%** (n=530) | 25 |
+
+T+1 的 679 条里有 175 条（25.8%）「判对」实为亏损单，其中 173 条恰落在
+±1% 带内——指纹完全吻合。该虚高指标被 `backtester.adapt_weights` /
+`weekly_optimizer` 权重自适应 / `ml_predictor` 训练标签共同消费，
+等于全系统在优化一个假目标。
+
+### Changed
+
+- **`outcome_utils.determine_correctness` 改为三态**：`|return| <= tolerance`
+  → `"ambiguous"`，超出容差后才按符号判 correct/incorrect。中性方向判定
+  **不变**（中性预测的语义就是「不会大幅波动」，带宽是名副其实的）。
+- **`backtester._check_direction` 返回值 bool → (correct, ambiguous) 二元组**。
+- **`backtester.run_backtest` 的 T+7 分支** `is_correct = ret > -1.0` 改走
+  `determine_outcome_triplet`；模糊样本不进 checked/correct 分母分子，
+  results 新增 `ambiguous` 计数。
+- **准确率查询全线加 `AND COALESCE(ambiguous_{period}, 0) = 0`**：
+  `get_accuracy_stats`（总体/按方向/按标的/actionable）、
+  `get_dimension_accuracy`、`analyze_self_score_bias`、`adapt_weights` 的
+  单蜂统计、`ml_predictor.build_training_data_from_db`、
+  `深度分析报告/规则/pheromone_source.py`。COALESCE 保证未迁移的旧库不炸。
+
+### Added
+
+- **`outcome_utils.determine_outcome_triplet(direction, return_pct)`** —
+  落库友好版本，返回 `(correct, ambiguous)`。
+- **`predictions` 表新增 `ambiguous_t1/t7/t30` 列**（`_migrate_options_columns`
+  幂等补齐）；`update_check_result` / `update_t7_path_result` 支持写入。
+- **`migrate_ambiguous_backfill.py`** — 一次性迁移 + 全表回填脚本，
+  按存量 `return_*` 重算 `correct_*` / `ambiguous_*`，不联网。
+  支持 `--dry-run`，自动备份到 `db_backups/`，幂等可重跑。
+
+### Fixed
+
+- **幽灵行**：`checked_t7=1` 但 `return_t7 IS NULL` 的 8 行（回测取价失败）
+  旧逻辑落成 `correct_t7=0`，等于往分母里塞必错样本。无数据不可评分 →
+  统一标 ambiguous。
+- **`ml_predictor.build_training_data_from_db` 的列探测**：新增 WHERE 子句
+  前先 `PRAGMA table_info` 探测 `ambiguous_t7` 是否存在，避免在未迁移的库
+  / 测试夹具上抛 "no such column" 后被 except 吞掉、静默返回空训练集。
+
+### 测试
+
+- `tests/test_outcome_utils.py` 重写容差带内断言 + 新增 `TestDetermineOutcomeTriplet`
+  （核心回归：亏 0.9% 绝不能记为判对），28 → 39 项全绿。
+- `tests/test_e2e_pipeline.py::TestOutcomeConsistency` 同步更新为新语义。
+- 回归：`test_backtester` 56 项、`test_ml_real_training` 8 项全绿；
+  全量 1553 passed，剩余 65 failed 全部为 VM 缺失依赖
+  （google.auth / sklearn / yfinance / scipy）与硬编码 `/usr/local/bin/python3`
+  路径，与本次改动无关（已逐文件核对不含相关符号）。
+
+### 修正后的周报口径
+
+整体准确率 55.6%（919 样本）→ **52.6%**（869 样本），95% CI [49%, 56%]。
+方向桶净化后 50.5%（262/519）不变——`|Δ|>=2.5%` 的过滤本就已排除 ±1% 带内
+样本，这是一致性交叉验证。
+
+---
+
+## [0.45.11] — 2026-08-25 — 周报样本源切换：.predictions.json → pheromone.db
+
+> 版本号说明：本条工作实际早于 0.45.9（P0 容差修正）——先切样本源才发现容差问题。但 0.45.9 已被 0.45.10 显式预留给 ambiguous 三态判定，故本条顺延取 0.45.11，编号与时序不一致。
+
+用户质疑「Alpha Hive 有 30 个标的，为什么周报样本没收集到」。排查确认样本
+一直在收，只是**周报读的是另一个已死三个月的文件**：
+
+| | 旧源 `.predictions.json` | 新源 `pheromone.db` |
+|---|---|---|
+| 写入者 | compare_engine_v2 解析 `深度/deep-*.html` | 每日扫描直接落库 |
+| 触发方式 | 手动 `generate_deep_v2.py --ticker`（无任何调度器调用） | 自动，30 标的/天 |
+| 标的覆盖 | NVDA 1 只（历史仅 NVDA 53 + VKTX 2 份深度报告） | 52 只 |
+| 已验证样本 | 45 条 | **919 条** |
+| 最后更新 | **2026-05-20（冻结）** | 2026-08-24 |
+
+后果：6/21–8/24 连续 11 份 optimizer-report 字节数完全相同（30,769），
+同一份 5 月快照被反复计算了 13 周。
+
+### Added
+
+- **`深度分析报告/规则/pheromone_source.py`** — 周报数据源适配层。把
+  `pheromone.db` 的 `predictions`（959 行，自带 T+1/T+7/T+30 验证列）+
+  `signal_archive`（53k 行 options.*/agent.*/ml.*/insider.* 原生信号）
+  映射成 `.predictions.json` 的嵌套结构，下游分析函数零改动。
+  - 验证口径默认 **T+7**（对齐 weekly_optimizer），`ALPHA_HIVE_HORIZON` 可覆盖
+  - `predictions.iv_rank/put_call_ratio/options_score` 三列全表 NULL，实际数据
+    在 `signal_archive.options.*`，改从后者取
+  - `options.iv_current` 是 IV 绝对值，按**每标的自身历史百分位**换算为 IV Rank
+  - `score_high/score_low` 改用经验四分位。原硬编码 6.5/3.5 在蜂群
+    final_score 分布（min 3.19 / p50 5.44）下会让 `score_low` 恒为假
+  - 新增 8 个蜂群原生信号：`swarm_agreement_high` `guard_consistent`
+    `bear_warning` `insider_buying` `ml_bullish` `crowded` `momentum_up`
+    `sentiment_hot`
+
+### Changed
+
+- **`weekly_analyzer.py` v2.0 → v3.0**：`load_predictions()` / `load_accuracy()`
+  改为优先 pheromone.db，失败时回退 `.predictions.json`（已验证回退路径可用）。
+  报告头部新增数据源/口径/覆盖/日期区间标注。
+- **中性桶阈值随口径缩放**：t1=1.0% / t7=2.5% / t30=5.0%。原固定 1.0% 是为
+  T+1 设计的，套到 T+7 会把几乎全部样本判成 directional。
+
+### Fixed
+
+- **`split_neutral_bucket` / `compute_per_ticker_accuracy` 方向桶口径错误**。
+  原版只按 `|price_chg|` 分桶，**预测方向本身为「中性」**的样本只要标的波动够大
+  就被算进方向胜率。旧源中性样本极少影响可忽略，新源 280/959 是中性，会混入
+  186 条无方向预测。修正后净化胜率 47.1% → **50.5%**（262/519）。
+- **误判归因把分数嵌进原因字符串**（`高评分(7.86)过度乐观`），导致归因统计炸成
+  几十个 n=1 的桶。改为 `高评分(≥7.0)过度乐观`，聚合后 26 次 / 6%。
+
+### 口径变更后的结论修正
+
+- 低置信度过滤器（IV Rank>60 + 共振未触发 + 分数 3.5–6.5）**结论反转**：
+  旧 45 样本显示触发组 66.7% > 未触发 50.0%（+16.7pp，方向反常）；
+  新 919 样本显示触发组 47.9% < 未触发 56.3%（**-8.4pp**）。过滤器实际按设计
+  工作，旧报告的悖论是 NVDA 单标的小样本噪音。
+- 方向胜率 T+7：看多 49.8%（217/436）、看空 54.2%（45/83），整体 50.5%
+  ——接近抛硬币，与旧报告的 57.8% 不可比（口径与样本均已变）。
+
+---
+
+## [0.45.10] — 2026-08-25 — T+N 评分不得用「正在形成」的 bar
+
+### Fixed — `backtester._get_price_at_date`
+docstring 说取"收盘价"，实现是 `history(start=目标日)["Close"].iloc[0]`——
+盘中调用时那根 bar 未完成，`Close` 是此刻最新价。评分闸门 `get_pending_checks`
+只判 `预测日 + N 交易日 <= 今天`，**没有"当天是否已收盘"的概念**。
+正常 14:00 PDT 扫描在收盘后跑，所以从未暴露；2026-08-25 盘中补跑 8/24 时
+30 条 T+1 全部用盘中价评分，抽样 5 只 2 只判反（AMC +2.251% 记判对、
+真实收盘 −1.124% 应判错；BILI 看空+正收益却判对）。
+
+修复：目标日 == 交易所当日且未到 15:59 美东 → 返回 None，预测留在待检，
+收盘后重评。判据用 `_exchange_now()`（Yahoo 服务器时钟），不依赖本机钟。
+护栏失效时放行（不阻断回测）。8 条回归测试（含复刻 AMC 事故场景），
+已验证退回无护栏版变红。
+
+### 数据修复
+2026-08-24 那 30 条被污染的 T+1 已重置（备份
+`db_backups/pheromone_pre_t1_reset_20260825_132201.db`），预测本身与
+T+7/T+30 未动，由收盘后扫描重评。实测重置后取价已是真实收盘
+（AMC 2.65 vs 污染值 2.73）。
+
+> 版本号说明：本条原编 v0.43.29（写作时仓库在 0.43.28），因并发 session
+> 已推进至 0.45.8 而改号 0.45.10；0.45.9 预留给 ambiguous 三态判定。
 
 ## [0.45.8] — 2026-08-25 — CBOE 对 BRK-B 恒定 403（类份额符号写法）
 
@@ -280,90 +819,6 @@
 
 ---
 
-## [0.45.10] — 2026-08-25 — T+N 评分不得用「正在形成」的 bar
-
-### Fixed — `backtester._get_price_at_date`
-docstring 说取"收盘价"，实现是 `history(start=目标日)["Close"].iloc[0]`——
-盘中调用时那根 bar 未完成，`Close` 是此刻最新价。评分闸门 `get_pending_checks`
-只判 `预测日 + N 交易日 <= 今天`，**没有"当天是否已收盘"的概念**。
-正常 14:00 PDT 扫描在收盘后跑，所以从未暴露；2026-08-25 盘中补跑 8/24 时
-30 条 T+1 全部用盘中价评分，抽样 5 只 2 只判反（AMC +2.251% 记判对、
-真实收盘 −1.124% 应判错；BILI 看空+正收益却判对）。
-
-修复：目标日 == 交易所当日且未到 15:59 美东 → 返回 None，预测留在待检，
-收盘后重评。判据用 `_exchange_now()`（Yahoo 服务器时钟），不依赖本机钟。
-护栏失效时放行（不阻断回测）。8 条回归测试（含复刻 AMC 事故场景），
-已验证退回无护栏版变红。
-
-### 数据修复
-2026-08-24 那 30 条被污染的 T+1 已重置（备份
-`db_backups/pheromone_pre_t1_reset_20260825_132201.db`），预测本身与
-T+7/T+30 未动，由收盘后扫描重评。实测重置后取价已是真实收盘
-（AMC 2.65 vs 污染值 2.73）。
-
-> 版本号说明：本条原编 v0.43.29（写作时仓库在 0.43.28），因并发 session
-> 已推进至 0.45.8 而改号 0.45.10；0.45.9 预留给 ambiguous 三态判定。
-
-## [0.45.5] — 2026-08-25 — 周报样本源切换：.predictions.json → pheromone.db
-
-用户质疑「Alpha Hive 有 30 个标的，为什么周报样本没收集到」。排查确认样本
-一直在收，只是**周报读的是另一个已死三个月的文件**：
-
-| | 旧源 `.predictions.json` | 新源 `pheromone.db` |
-|---|---|---|
-| 写入者 | compare_engine_v2 解析 `深度/deep-*.html` | 每日扫描直接落库 |
-| 触发方式 | 手动 `generate_deep_v2.py --ticker`（无任何调度器调用） | 自动，30 标的/天 |
-| 标的覆盖 | NVDA 1 只（历史仅 NVDA 53 + VKTX 2 份深度报告） | 52 只 |
-| 已验证样本 | 45 条 | **919 条** |
-| 最后更新 | **2026-05-20（冻结）** | 2026-08-24 |
-
-后果：6/21–8/24 连续 11 份 optimizer-report 字节数完全相同（30,769），
-同一份 5 月快照被反复计算了 13 周。
-
-### Added
-
-- **`深度分析报告/规则/pheromone_source.py`** — 周报数据源适配层。把
-  `pheromone.db` 的 `predictions`（959 行，自带 T+1/T+7/T+30 验证列）+
-  `signal_archive`（53k 行 options.*/agent.*/ml.*/insider.* 原生信号）
-  映射成 `.predictions.json` 的嵌套结构，下游分析函数零改动。
-  - 验证口径默认 **T+7**（对齐 weekly_optimizer），`ALPHA_HIVE_HORIZON` 可覆盖
-  - `predictions.iv_rank/put_call_ratio/options_score` 三列全表 NULL，实际数据
-    在 `signal_archive.options.*`，改从后者取
-  - `options.iv_current` 是 IV 绝对值，按**每标的自身历史百分位**换算为 IV Rank
-  - `score_high/score_low` 改用经验四分位。原硬编码 6.5/3.5 在蜂群
-    final_score 分布（min 3.19 / p50 5.44）下会让 `score_low` 恒为假
-  - 新增 8 个蜂群原生信号：`swarm_agreement_high` `guard_consistent`
-    `bear_warning` `insider_buying` `ml_bullish` `crowded` `momentum_up`
-    `sentiment_hot`
-
-### Changed
-
-- **`weekly_analyzer.py` v2.0 → v3.0**：`load_predictions()` / `load_accuracy()`
-  改为优先 pheromone.db，失败时回退 `.predictions.json`（已验证回退路径可用）。
-  报告头部新增数据源/口径/覆盖/日期区间标注。
-- **中性桶阈值随口径缩放**：t1=1.0% / t7=2.5% / t30=5.0%。原固定 1.0% 是为
-  T+1 设计的，套到 T+7 会把几乎全部样本判成 directional。
-
-### Fixed
-
-- **`split_neutral_bucket` / `compute_per_ticker_accuracy` 方向桶口径错误**。
-  原版只按 `|price_chg|` 分桶，**预测方向本身为「中性」**的样本只要标的波动够大
-  就被算进方向胜率。旧源中性样本极少影响可忽略，新源 280/959 是中性，会混入
-  186 条无方向预测。修正后净化胜率 47.1% → **50.5%**（262/519）。
-- **误判归因把分数嵌进原因字符串**（`高评分(7.86)过度乐观`），导致归因统计炸成
-  几十个 n=1 的桶。改为 `高评分(≥7.0)过度乐观`，聚合后 26 次 / 6%。
-
-### 口径变更后的结论修正
-
-- 低置信度过滤器（IV Rank>60 + 共振未触发 + 分数 3.5–6.5）**结论反转**：
-  旧 45 样本显示触发组 66.7% > 未触发 50.0%（+16.7pp，方向反常）；
-  新 919 样本显示触发组 47.9% < 未触发 56.3%（**-8.4pp**）。过滤器实际按设计
-  工作，旧报告的悖论是 NVDA 单标的小样本噪音。
-- 方向胜率 T+7：看多 49.8%（217/436）、看空 54.2%（45/83），整体 50.5%
-  ——接近抛硬币，与旧报告的 57.8% 不可比（口径与样本均已变）。
-
----
-
 ## [0.45.4] — 2026-08-25 — 深度报告：IV 两条链修复 + 版式去 AI 味
 
 用户报告网站深度研究报告里「IV 期限结构 + IV-RV 价差」显示为 0。核对 8/24
@@ -482,6 +937,7 @@ IV-RV，这正是两条独立链路各自失败的指纹。
 
 ---
 
+
 ## [0.45.3] — 2026-08-25 — 「缺数据渲染成安全值」的剩余六处
 
 v0.45.2 只修了 `momentum_5d`。同一形状还散在另外五个字段/模块里，按**当前可达性**
@@ -531,6 +987,28 @@ v0.45.2 只修了 `momentum_5d`。同一形状还散在另外五个字段/模块
   "这只票持平/低波动"，而真相是"没查到"——**喂给 LLM 的假事实会被它当前提推理**。
   新增 `_fmt_num()`：None → "不可得"。
   注：volatility 那两处是被本次改动**新变得可达**的，同批修掉。
+
+### ⚠️ 本版自己造成的生产事故（同批修复）
+
+把 `volatility_20d` 的默认值从 `0.0` 改成 `None` 后，**2026-08-25 的自动扫描
+30/30 只标的的 BuzzBee 全崩**、BearBee 28 只：
+
+```
+BuzzBeeWhisper failed for NVDA: '>' not supported between instances of 'NoneType' and 'int'
+  File "swarm_agents/buzz_bee.py", line 69, in analyze
+```
+
+崩点是 `vol20 > _vlt.get("extreme", 60)`——**同一个文件里上面十行的
+`volume_ratio` 就有 `if x is None` 守卫，波动率这条没有**。
+
+根因不是没想到，是**审计方法出错**：两次用 `grep ... | head -N` 查消费点，
+两次都被截断，`swarm_agents/` 恰好在被截掉的部分。查影响面时禁用 `head`。
+
+同批修复四处：`buzz_bee.py:67`（→ 中性 50，与 volume_ratio 同型）、
+`bear_bee.py:307/331`、`rival_bee.py:113`（透传 None 给 ML，由
+`_feature_quality` 声明）、`rival_bee.py:179`（format(None) 崩溃）。
+新增 `TestAgentsSurviveFullyDegradedData`：给三只蜂喂**全字段皆缺**的数据。
+此前没有任何一条测试这么喂过——所以 1540 条全绿也没拦住。
 
 ### Added
 

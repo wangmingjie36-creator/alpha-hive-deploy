@@ -168,6 +168,226 @@ class HistoricalDataBuilder:
             json.dump(data, f, indent=2)
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# 预期收益与概率的共享原语（v0.44.1 重做）
+#
+# 修的是什么
+# ---------
+# 旧公式 `expected_7d = catalyst_bonus + momentum_bonus - crowding_penalty`
+# 结构性恒正：`catalyst_bonus` ∈ {5,10,15,20,25}（默认 10）**永不为负**，
+# `crowding_penalty = crowding*0.1` **上限只有 10**，于是唯一能为负的项只剩
+# 动量 —— 要让"预期收益"转负需要 5 日跌超 5%（催化剂 A+ 时需跌超 25%）。
+#
+# 实测后果（2026-08-16，1094 条）：
+#   · `ml.expected_7d` **96.7% 为正**，中位数 **+8.00%**，p5 **+0.60%**
+#   · 同期真实 7 日收益中位数 **−0.21%**、为正占比 **49.1%**
+#   · 下游 `RivalBeeVanguard` 因此 **95.2% 看多**（方向直接取 avg_ret 的符号）
+#   · 这解释了 `ml.expected_7d/30d` rank-IC = −0.044、0/4 —— 不是 ML 弱，
+#     是它**从来不是模型输出**，只是三行手写加法
+#
+# 更根本的是量纲错了：`catalyst_bonus` 是催化剂**质量等级**（5~25 的"分"），
+# 却直接与 `momentum_5d`（**百分点**）相加当预期收益。于是"B 级催化剂"
+# = +10 个百分点的 7 日预期收益。
+#
+# ⚠️ 生产里 `rival_bee.py` 还把特征写死成常量（`catalyst_quality="B+"`、
+# `crowding_score=50.0`、`iv_rank=50.0`、`put_call_ratio=1.0`），代入旧公式得
+# **`expected_7d = 8.0 + 0.8 × momentum_5d`** —— 一个截距 +8% 的一元线性式。
+# 该闭式在 1057 个配对样本上**零反例**。特征硬编码是另一个独立缺陷，
+# 见 `swarm_agents/rival_bee.py` 处注释，本次未动。
+#
+# 怎么修
+# -----
+# 催化剂质量只调**幅度**不调**方向** —— 它编码"影响多大"，不编码"影响好坏"
+# （与 ChronosBee「权重表只编码影响多大」是同族错误）。拥挤度以中性 50 为
+# 中心，可正可负。全部项统一为百分点。于是**无信号时预期收益为 0**，
+# 而不是 +8%。
+# ════════════════════════════════════════════════════════════════════════════
+
+# 催化剂质量 → 无量纲幅度乘数（B+ = 1.0 基准，不改变符号）
+_CATALYST_MAGNITUDE = {"A+": 1.5, "A": 1.3, "B+": 1.0, "B": 0.9, "C": 0.7}
+_CATALYST_MAGNITUDE_DEFAULT = 1.0
+
+# 催化剂维度分（0~10）→ 等级。阈值沿用项目既有约定，**勿改**：
+# 历史 `predictions` 里的 catalyst_quality 都是按这套阈值生成的，改了会让
+# 新旧样本不可比。
+_CATALYST_GRADE_CUTS = ((8.5, "A+"), (7.5, "A"), (6.5, "B+"), (5.5, "B"))
+
+
+def catalyst_quality_from_score(score) -> str:
+    """把 ChronosBee 的催化剂维度分（0~10）转成 A+/A/B+/B/C 等级。
+
+    v0.44.3 提为模块级单一真相。此前同一套阈值在**至少三处**各写一份嵌套
+    `_cat_qual`（`ml_predictor.py` 内、`alpha_hive_daily_report.py`、
+    `generate_ml_report.py`），与 `expected_returns` 曾经的三重复制是同一个
+    反模式 —— 阈值一改就得记住改三处，漏一处就静默产生两套口径的历史样本。
+
+    分数不可用（None/NaN/非数值）时返回 "B"（对应 magnitude 0.9，接近中性），
+    **不返回 "B+"** —— "B+" 是 magnitude 1.0 的基准档，用它做缺失值会让
+    "拿不到数据"与"质量正好中等"不可区分。
+    """
+    try:
+        v = float(score)
+    except (TypeError, ValueError):
+        return "B"
+    if v != v:                      # NaN
+        return "B"
+    for cut, grade in _CATALYST_GRADE_CUTS:
+        if v >= cut:
+            return grade
+    return "C"
+
+# ── 拥挤度：**刻意不进入 expected_returns**（v0.44.2 决定）───────────────
+#
+# v0.44.1 曾把拥挤度做成双向倾斜项。v0.44.2 用现成的四口径工具
+# （`signal_archive.py --analyze`，噪音地板 |IC|=0.076、需 ≥3/4 口径）复核后移除，
+# 三条理由：
+#
+# 1. **方向未确立。** 实测（n=669）：
+#      · `crowding.score`（连续）  IC=**+0.1122**, t=+2.48, **仅 1/4 口径** → 不达标
+#      · `crowding.adj_factor`（分档）IC=−0.1117, t=−2.81, 3/4 口径，但**⚠️稀疏**
+#        （只有 6 个取值，命中 MEMORY 记载的「distinct_ratio<0.25 → rank-IC 失真」陷阱）
+#    两者方向一致，且都指向「**高拥挤 → 收益更高**」——与检测器
+#    `get_adjustment_factor`（高拥挤打 30% 折）的设计意图**相反**。
+#    连续版不达标、达标版有稀疏问题 ⇒ **符号不该由这份证据决定，也不该无视它**。
+#    带着一个与现有证据相反的符号上线，是在给预期收益注入可能反向的噪音。
+#
+# 2. **三重计数。** 拥挤度已经在 `predict_probability` 里是**权重最大的特征**
+#    （`crowding: 0.18`），又经 `CrowdingDetector.get_adjustment_factor` 作用于
+#    综合分。再加进 expected_returns 是第三次。
+#
+# 3. **它本来就不是收益预测量。** 拥挤度是容量/风险概念，其**已确立**的用法是
+#    乘性折扣（adj_factor），把它折成"多少个百分点的预期收益"需要凭空定标度。
+#
+# ⚠️ 移除的代价要说清：v0.44.1（含倾斜）的偏差是 +0.19pp，移除后回到 +1.06pp。
+# 但那 +0.19 是**巧合**——倾斜的均值恰好抵消了动量带来的正偏，不是因为符号对。
+# **宁要 +1.06pp 的可辩护公式，不要 +0.19pp 的不可辩护公式。**
+#
+# `CROWDING_NEUTRAL` 保留，但用途变了：它是 `rival_bee` 取不到真实拥挤度时喂给
+# **`probability`** 的中性回落值（那里 crowding 是权重最大的特征，回落值选错会
+# 直接偏斜概率）。取实测中位数而非量表中点 50 —— 实测只有 4.6% 的样本 ≥50，
+# 在这个分布里 50 等于"极不拥挤"。
+#
+# ⚠️ **这是经验常数，会过期。** 由 `tests/test_ml_expected_return.py::
+# TestCrowdingCalibrationDrift` 对着生产库分布守着：漂出容许带就红。
+CROWDING_NEUTRAL = 23.30      # 实测中位数（2026-08-16, n=1057）
+
+# 期限缩放。⚠️ 三个期限是**同一个量的缩放**，不是三个独立预测，因此符号恒同。
+# 下游 `rival_bee.py` 的 `avg_ret = (expected_7d + expected_30d)/2` 因此等于
+# `expected_7d × 1.0` —— 看似在平均两个期限，实则没有平均任何东西。
+# 保留缩放（这是期限结构假设），但**下游不得把三者当独立信号**。
+_HORIZON_SCALE = {"expected_3d": 0.3, "expected_7d": 0.8, "expected_30d": 1.2}
+
+
+def expected_returns(data: "TrainingData") -> Dict[str, float]:
+    """由动量算三个期限的预期收益（单位：百分点）。
+
+    ⚠️ **改动本函数（或 `predict_probability` / RivalBee 的特征来源）时，
+    必须往 `ic_rerun_readiness._COHORT_HISTORY` 追加一条世代边界。**
+    否则新旧口径的样本会被混算 —— 而混算是静默的：数字照出，只是没有意义。
+    那个文件是"攒够样本后重跑 IC"这件事的唯一承载物。
+
+
+    **三个模型类（SimpleMLModel / SGDMLModel / HGBModel）共用此函数。**
+    旧实现在三处逐字重复同一公式，docstring 还写着"公式与 SimpleMLModel 完全
+    一致" —— 那种一致性靠人肉维护，改一处漏两处就会让模型降级链出现口径分裂。
+
+    刻意**不**把 `probability` 掺进来：probability 的特征里已经含 momentum，
+    再加进来是对同一个信号双重计数。
+
+    刻意**不**把 `crowding_score` 掺进来：方向未确立（连续版仅过 1/4 口径），
+    且它已在 probability 里是权重最大的特征、又经 adj_factor 作用于综合分。
+    理由详见上方 `CROWDING_NEUTRAL` 处的长注释。
+    """
+    mag = _CATALYST_MAGNITUDE.get(
+        getattr(data, "catalyst_quality", None), _CATALYST_MAGNITUDE_DEFAULT
+    )
+
+    # 动量缺失/NaN → 0（无观点），而不是让 None 参与算术
+    mom = getattr(data, "momentum_5d", 0.0)
+    if mom is None or mom != mom:      # NaN 自身不等于自身
+        mom = 0.0
+    try:
+        mom = float(mom)
+    except (TypeError, ValueError):
+        mom = 0.0
+
+    core = mom                         # 百分点
+    return {k: mag * core * s for k, s in _HORIZON_SCALE.items()}
+
+
+def centered_feature(x: float, influence: float, inverse: bool = False) -> float:
+    """把归一化特征 x∈[0,1] 映射到**以 0.5 为中心**、总宽度 influence 的区间。
+
+    旧实现的分项形如 `0.3 + x*0.7`（中性点 0.65）与 `1.0 - x*0.3`（中性点 0.85），
+    每一项的中性点都在 0.5 **之上**。八项叠加后 probability 的结构性地板是
+    **0.3610**（与实测最小值 0.3500 吻合），到 0.5 只剩 0.139 空间，而向上有
+    0.45 —— 不对称约 3.2 倍。实测 `ml.probability` **99.6% > 0.5**。
+
+    本函数保留每项原有的影响力系数（`influence`，即旧式里 x 的乘数），
+    只把中性点搬回 0.5。因此：
+      · 全部特征取中位数时 probability **恰为 0.5**
+      · 可达区间关于 0.5 对称
+      · 各特征的相对影响力不变（不是靠削弱某项来消除偏斜）
+
+    `influence=1.0` 时本函数等价于恒等映射 —— 旧实现里 catalyst / final_score /
+    odds_score / risk_adj_score 四项本来就是裸 `x`，它们**本来就是居中的**，
+    改动后数值完全不变。
+    """
+    delta = (x - 0.5) * influence
+    return 0.5 - delta if inverse else 0.5 + delta
+
+
+# v0.45.3: `centered_feature(0.5, influence, inverse)` 对任意 influence / inverse
+# **恒等**返回 0.5（见上面的设计注释：全特征取中位数时 probability 恰为 0.5）。
+# 所以 0.5 是这个坐标系里唯一能表达"这一维不投票"的数——缺数据时填别的才是伪造。
+_FEATURE_NEUTRAL = 0.5
+# 12 维里缺超过这个数，probability 就不该被当结论用（标 unreliable，不静默出数）
+_MAX_IMPUTED_FEATURES = 4
+
+_FEATURE_SOURCES = (
+    "crowding", "catalyst", "momentum", "volatility", "sentiment",
+    "iv_rank", "put_call_ratio", "final_score",
+    "odds_score", "risk_adj_score", "agent_agreement", "direction_encoded",
+)
+
+
+def _missing_features(data) -> list:
+    """列出 12 维里取不到值的特征名（None 或 NaN）。
+
+    与 `normalize_feature` 的 0.5 插补是**成对**的设计：插补让向量凑得齐，
+    这个函数负责把"哪几维是凑出来的"如实说出去。只留插补不留清单，
+    等于把伪造换了个更好听的名字。
+    """
+    vals = (
+        data.crowding_score, data.catalyst_quality, data.momentum_5d,
+        data.volatility, data.market_sentiment, data.iv_rank,
+        data.put_call_ratio, data.final_score, data.odds_score,
+        data.risk_adj_score, data.agent_agreement, data.direction_encoded,
+    )
+    return [name for name, v in zip(_FEATURE_SOURCES, vals)
+            if v is None or (isinstance(v, float) and v != v)]
+
+
+def _feature_quality(data) -> Dict:
+    """预测输出里的数据质量字段。缺失必须刺眼，不能只体现为一个居中的概率。"""
+    missing = _missing_features(data)
+    n = len(missing)
+    tk = getattr(data, "ticker", "?")
+    unreliable = n > _MAX_IMPUTED_FEATURES
+    if n:
+        _log.warning("%s: %d/%d 维特征取不到值，按中性插补: %s",
+                     tk, n, len(_FEATURE_SOURCES), ",".join(missing))
+    if unreliable:
+        _log.error("🚨 %s: 12 维特征缺 %d 个（阈值 %d）——probability 不可信，"
+                   "已标 unreliable=True，勿据此决策",
+                   tk, n, _MAX_IMPUTED_FEATURES)
+    return {
+        "feature_completeness": f"{len(_FEATURE_SOURCES) - n}/{len(_FEATURE_SOURCES)}",
+        "imputed_features": missing,
+        "unreliable": unreliable,
+    }
+
+
 class SimpleMLModel:
     """简单机器学习模型（不依赖 sklearn）"""
 
@@ -197,11 +417,23 @@ class SimpleMLModel:
         return mapping.get(quality, 0.5)
 
     def normalize_feature(
-        self, value: float, min_val: float, max_val: float
+        self, value, min_val: float, max_val: float
     ) -> float:
-        """特征归一化"""
+        """特征归一化；None/NaN → `_FEATURE_NEUTRAL`（本模型精确的"无观点"点）。
+
+        v0.45.3：原实现直接 `(value - min_val)`，value 为 None 时抛 TypeError。
+        当前不可达（TrainingData 的构造方都已 sanitize），但契约只靠类型注解
+        `momentum_5d: float` 维系，没有运行时强制——而上游 data_pipeline 自
+        v0.38.0 起就在诚实吐 None，两边迟早对上。
+
+        为什么是 0.5 而不是抛错、也不是训练均值：见 `_FEATURE_NEUTRAL` 注释。
+        为什么这不算静默伪造：缺失清单由 `_missing_features()` 独立报出，
+        并写进 `predict_return()` 的 `imputed_features` / `unreliable`。
+        """
+        if value is None or (isinstance(value, float) and value != value):
+            return _FEATURE_NEUTRAL
         if max_val == min_val:
-            return 0.5
+            return _FEATURE_NEUTRAL
         return (value - min_val) / (max_val - min_val)
 
     def train(self, training_data: List[TrainingData]) -> Dict:
@@ -345,55 +577,46 @@ class SimpleMLModel:
         agreement_norm = _norm("agent_agreement", data.agent_agreement)
         direction_norm = _norm("direction_encoded", data.direction_encoded)
 
-        # 加权求和（各特征方向性处理）
-        # 注意：每个分项必须在 [0, 1] 范围内，权重总和 = 1.0，
-        # 这样加权和自然在 [0, 1]，不需要截断。
+        # 加权求和。每个分项经 centered_feature 映射到**以 0.5 为中心**的区间，
+        # 权重和 = 1.0 ⇒ 全特征取中位数时 probability 恰为 0.5，可达区间对称。
+        #
+        # v0.44.1 修正：旧实现的注释声称"每个分项必须在 [0,1] 范围内 …… 加权和
+        # 自然在 [0,1]"。范围确实在 [0,1]，但**中性点不在 0.5**：
+        #   crowding `1.0 - x*0.3` → [0.7,1.0] 中心 0.85
+        #   iv_rank  `1.0 - x*0.3` → [0.7,1.0] 中心 0.85
+        #   pcr      `1.0 - x*0.4` → [0.6,1.0] 中心 0.80
+        #   volatility `1.0 - x*0.5` → [0.5,1.0] 中心 0.75
+        #   momentum / sentiment / agent_agreement / direction_encoded
+        #            `0.3 + x*0.7` → [0.3,1.0] 中心 0.65
+        # 八项的中性点全在 0.5 之上 ⇒ 结构性地板 0.3610（实测最小 0.3500），
+        # 向下空间 0.139 vs 向上 0.45，实测 99.6% > 0.5 —— 它无法表达"强烈看空"。
+        #
+        # 第二个参数是各特征原有的**影响力系数**（旧式里 x 的乘数），逐一保留，
+        # 所以本次只消除偏斜，不改变特征间的相对影响力。
         probability = (
-            self.weights.get("crowding", 0) * (1.0 - crowding_norm * 0.3)
-            + self.weights.get("catalyst", 0) * catalyst_norm
-            + self.weights.get("momentum", 0) * (0.3 + momentum_norm * 0.7)  # 正动量加分，范围 [0.3, 1.0]
-            + self.weights.get("volatility", 0) * (1.0 - volatility_norm * 0.5)
-            + self.weights.get("sentiment", 0) * (0.3 + sentiment_norm * 0.7)  # 正情绪加分，范围 [0.3, 1.0]
+            self.weights.get("crowding", 0) * centered_feature(crowding_norm, 0.3, inverse=True)
+            + self.weights.get("catalyst", 0) * centered_feature(catalyst_norm, 1.0)
+            + self.weights.get("momentum", 0) * centered_feature(momentum_norm, 0.7)
+            + self.weights.get("volatility", 0) * centered_feature(volatility_norm, 0.5, inverse=True)
+            + self.weights.get("sentiment", 0) * centered_feature(sentiment_norm, 0.7)
             # v2 新特征
-            + self.weights.get("iv_rank", 0) * (1.0 - iv_rank_norm * 0.3)  # 高IV→略降
-            + self.weights.get("put_call_ratio", 0) * (1.0 - pcr_norm * 0.4)  # 高P/C→看空
-            + self.weights.get("final_score", 0) * final_score_norm
-            + self.weights.get("odds_score", 0) * odds_norm
-            + self.weights.get("risk_adj_score", 0) * risk_adj_norm
-            + self.weights.get("agent_agreement", 0) * (0.3 + agreement_norm * 0.7)  # 高共识加分，范围 [0.3, 1.0]
-            + self.weights.get("direction_encoded", 0) * (0.3 + direction_norm * 0.7)  # 看多方向加分，范围 [0.3, 1.0]
+            + self.weights.get("iv_rank", 0) * centered_feature(iv_rank_norm, 0.3, inverse=True)  # 高IV→略降
+            + self.weights.get("put_call_ratio", 0) * centered_feature(pcr_norm, 0.4, inverse=True)  # 高P/C→看空
+            + self.weights.get("final_score", 0) * centered_feature(final_score_norm, 1.0)
+            + self.weights.get("odds_score", 0) * centered_feature(odds_norm, 1.0)
+            + self.weights.get("risk_adj_score", 0) * centered_feature(risk_adj_norm, 1.0)
+            + self.weights.get("agent_agreement", 0) * centered_feature(agreement_norm, 0.7)
+            + self.weights.get("direction_encoded", 0) * centered_feature(direction_norm, 0.7)
         )
 
         return max(0.0, min(1.0, probability))
 
     def predict_return(self, data: TrainingData) -> Dict:
-        """预测收益"""
-        probability = self.predict_probability(data)
-
-        # 基于催化剂质量和其他因素预测收益
-        catalyst_bonus = {
-            "A+": 25,
-            "A": 20,
-            "B+": 15,
-            "B": 10,
-            "C": 5,
-        }.get(data.catalyst_quality, 10)
-
-        momentum_bonus = data.momentum_5d  # 动量直接加到收益
-        # BUG FIX: 原公式 crowding_score * 0.1 在 crowding_score=500 时产生 -50 惩罚，
-        # 导致 expected_7d 严重失真。改为百分比归一化：
-        # 中性分（50）→ 惩罚 5（参考原公式中位行为）；100 → 惩罚 10；0 → 惩罚 0。
-        _crd = min(100.0, max(0.0, data.crowding_score))  # 内层再次 clamp，防止跨层调用时绕过
-        crowding_penalty = _crd * 0.1  # 拥挤度降低预期收益（0→0, 50→5, 100→10）
-
-        # 预测 3 日、7 日、30 日收益
-        expected_7d = catalyst_bonus + momentum_bonus - crowding_penalty
-
+        """预测收益。公式唯一真相 = 模块级 `expected_returns()`（三个类共用）。"""
         return {
-            "probability": probability,
-            "expected_3d": expected_7d * 0.3,
-            "expected_7d": expected_7d * 0.8,
-            "expected_30d": expected_7d * 1.2,
+            "probability": self.predict_probability(data),
+            **expected_returns(data),
+            **_feature_quality(data),   # v0.45.3: 插补了哪几维，必须随结论一起走
         }
 
     def get_feature_importance(self) -> dict:
@@ -639,6 +862,15 @@ class SGDMLModel:
             return 0.5  # 未训练时返回默认值
 
         X = np.array([_extract_features(data)], dtype=np.float64)
+        # v0.45.3: None 经 np.array(dtype=float64) 会**静默变成 NaN**，再进
+        # scaler / predict_proba 要么抛要么吐 NaN。用训练均值填补——
+        # StandardScaler 之后恰为 0，即该维不参与投票。
+        _bad = ~np.isfinite(X[0])
+        if _bad.any():
+            _mean = getattr(self._scaler, "mean_", None)
+            X[0, _bad] = _mean[_bad] if _mean is not None else 0.0
+            _log.warning("%s: %d 维特征为 NaN，已用训练均值填补（标准化后中性）",
+                         getattr(data, "ticker", "?"), int(_bad.sum()))
         X_scaled = self._scaler.transform(X)
         prob = self._clf.predict_proba(X_scaled)[0]
 
@@ -658,24 +890,16 @@ class SGDMLModel:
         return calibrated
 
     def predict_return(self, data: TrainingData) -> Dict:
-        """预测收益（公式与 SimpleMLModel 完全一致）"""
-        probability = self.predict_probability(data)
+        """预测收益。公式唯一真相 = 模块级 `expected_returns()`。
 
-        catalyst_bonus = {
-            "A+": 25, "A": 20, "B+": 15, "B": 10, "C": 5,
-        }.get(data.catalyst_quality, 10)
-
-        momentum_bonus = data.momentum_5d
-        # BUG FIX: 同 SimpleMLModel — clamp 后再计算 penalty，防止越界输入
-        _crd = min(100.0, max(0.0, data.crowding_score))
-        crowding_penalty = _crd * 0.1
-        expected_7d = catalyst_bonus + momentum_bonus - crowding_penalty
-
+        v0.44.1 之前这里是**逐字复制**的第二份公式，docstring 写着"与
+        SimpleMLModel 完全一致" —— 那种一致性靠人肉维护，改一处漏两处
+        就会让模型降级链出现口径分裂。现在没有第二份可漏。
+        """
         return {
-            "probability": probability,
-            "expected_3d": expected_7d * 0.3,
-            "expected_7d": expected_7d * 0.8,
-            "expected_30d": expected_7d * 1.2,
+            "probability": self.predict_probability(data),
+            **expected_returns(data),
+            **_feature_quality(data),   # v0.45.3: 插补了哪几维，必须随结论一起走
         }
 
     # ---- 序列化（JSON，无 pickle）----
@@ -863,10 +1087,19 @@ def build_training_data_from_db(
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
+        # v0.45.9 P0：模糊样本（|return| <= 容差）的 correct_t7 标签无意义，
+        # 用作训练标签会往模型里灌噪音，故排除。列可能尚未迁移（旧库副本 /
+        # 测试夹具），先探测再拼接，避免 "no such column" 直接吞掉全部样本。
+        _has_amb = any(
+            r[1] == "ambiguous_t7"
+            for r in conn.execute("PRAGMA table_info(predictions)")
+        )
+        _amb_clause = " AND COALESCE(ambiguous_t7, 0) = 0" if _has_amb else ""
         cursor.execute(
             "SELECT * FROM predictions "
-            "WHERE checked_t7 = 1 AND return_t7 IS NOT NULL "
-            "ORDER BY date DESC LIMIT ?",
+            "WHERE checked_t7 = 1 AND return_t7 IS NOT NULL"
+            + _amb_clause +
+            " ORDER BY date DESC LIMIT ?",
             (max_rows,),
         )
         rows = cursor.fetchall()
@@ -1184,23 +1417,11 @@ class HGBModel:
         return max(0.05, min(0.95, calibrated))
 
     def predict_return(self, data: TrainingData) -> Dict:
-        """预测收益（公式与 SGDMLModel 完全一致）"""
-        probability = self.predict_probability(data)
-
-        catalyst_bonus = {
-            "A+": 25, "A": 20, "B+": 15, "B": 10, "C": 5,
-        }.get(data.catalyst_quality, 10)
-
-        momentum_bonus = data.momentum_5d
-        _crd = min(100.0, max(0.0, data.crowding_score))
-        crowding_penalty = _crd * 0.1
-        expected_7d = catalyst_bonus + momentum_bonus - crowding_penalty
-
+        """预测收益。公式唯一真相 = 模块级 `expected_returns()`（第三份重复已删）。"""
         return {
-            "probability": probability,
-            "expected_3d": expected_7d * 0.3,
-            "expected_7d": expected_7d * 0.8,
-            "expected_30d": expected_7d * 1.2,
+            "probability": self.predict_probability(data),
+            **expected_returns(data),
+            **_feature_quality(data),   # v0.45.3: 插补了哪几维，必须随结论一起走
         }
 
     # ---- 序列化 ----
@@ -1397,6 +1618,12 @@ class MLPredictionService:
 
     def _generate_recommendation(self, prediction: Dict) -> str:
         """生成推荐"""
+        # v0.45.3: 特征缺太多时不给方向。原来无论插补多少维都照常输出
+        # "STRONG BUY"，而插补值全是中性 → 概率被推向 0.5 → 稳定落进
+        # "HOLD"，读起来像一个真实判断。
+        if prediction.get("unreliable"):
+            _n = len(prediction.get("imputed_features") or [])
+            return f"NO CALL - 12 维特征缺 {_n} 个，数据不足以支撑结论"
         prob = prediction["probability"]
 
         if prob >= 0.75:
