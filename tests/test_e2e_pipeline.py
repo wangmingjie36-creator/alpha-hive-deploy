@@ -311,14 +311,23 @@ class TestOutcomeConsistency:
     """方案12：验证 outcome_utils 的一致性"""
 
     def test_outcomes_fetcher_uses_tolerance(self):
-        """OutcomesFetcher 的 _determine_outcome 现在含容差"""
+        """
+        OutcomesFetcher 的 _determine_outcome 含容差。
+
+        v0.45.9 P0：容差语义由「单边亏损豁免」改为「双边模糊带」——
+        落在 ±1% 内的样本不再记为 correct，而是 ambiguous（从统计中剔除）。
+        """
         from outcome_utils import determine_correctness
 
-        # -0.5% 在 1% 容差内 → correct（旧逻辑会判 incorrect）
-        assert determine_correctness("Long", -0.5) == "correct"
+        # -0.5% 落在 ±1% 模糊带内 → ambiguous（v0.45.9 前为 correct）
+        assert determine_correctness("Long", -0.5) == "ambiguous"
 
-        # +0.5% 看空在 1% 容差内 → correct
-        assert determine_correctness("Short", 0.5) == "correct"
+        # +0.5% 看空同样在模糊带内 → ambiguous
+        assert determine_correctness("Short", 0.5) == "ambiguous"
+
+        # 超出容差后才按符号判定
+        assert determine_correctness("Long", -2.0) == "incorrect"
+        assert determine_correctness("Long", 2.0) == "correct"
 
     def test_backtester_and_outcomes_agree(self):
         """两个模块对相同数据给出相同结论"""
@@ -331,6 +340,9 @@ class TestOutcomeConsistency:
             ("bearish", 2.0, False, "incorrect"),
             ("neutral", 1.0, True, "correct"),
             ("neutral", 5.0, False, "incorrect"),
+            # v0.45.9 P0：模糊带样本 bool 版返回 False，字符串版返回 ambiguous
+            ("bullish", -0.5, False, "ambiguous"),
+            ("bearish", 0.5, False, "ambiguous"),
         ]
 
         for direction, ret, expected_bool, expected_str in test_cases:

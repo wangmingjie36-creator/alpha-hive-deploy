@@ -78,8 +78,19 @@ HORIZONS = {
 # （结论未被推翻，但 risk_adj 在干净口径下从 3/4 升到 **4/4**）。
 #
 # 何时该用 path：想问"这个维度能否预测我的**实际交易盈亏**"（含止损止盈规则）。
-# 何时该用 price：想问"这个维度能否预测**前瞻收益**"——IC 框架的标准问题。
-TARGETS = ("price", "path")
+# 何时该用 close：想问"这个维度能否预测**前瞻收益**"——IC 框架的标准问题。
+#
+# ⚠️⚠️ v0.45.19 更正：**`price` 口径并不干净**。
+# 上面 v0.42.7 那段推理是对的，但选错了列——`price_t7` 存的是
+# `path["exit_price"]`，也就是**离场价**。实测自 2026-05 起它 100% 等于
+# `exit_price`（`SELECT COUNT(*) FROM predictions WHERE checked_t7=1
+#  AND ABS(price_t7-exit_price)<0.01` 可自查）。所以 `price` 口径与 `path`
+# 一样带 SL/TP 截断，"无截断、无并列人为聚集"这句话对 5 月后的样本是错的。
+#
+# 真正未截断的 T+7 收盘价是 v0.45.19 新增的 **`close_t7`**（由
+# `backfill_dir_accuracy.py` 重新取数回填，927 条全覆盖），故默认改为 `close`。
+# `price` 保留仅为复现历史报告，**不要用它出新结论**。
+TARGETS = ("close", "price", "path")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -167,13 +178,15 @@ def subsample_non_overlapping(ic_by_day: Dict[str, float], period: str) -> List[
 # ────────────────────────────────────────────────────────────────────────────
 
 def load_daily_ic(db_path: Path, target_col: str, checked_col: str,
-                  min_width: int = 5, target: str = "price",
+                  min_width: int = 5, target: str = "close",
                   horizon: str = "t7") -> Tuple[Dict[str, Dict[str, float]], int, List[int]]:
     """按日横截面 Spearman rank-IC。
 
     Args:
-        target: "price" = 由 price_{h} 与 price_at_predict 直接算（推荐，无截断）；
-                "path"  = 直接用 return_{h} 列（含 SL/TP 提前出场，42.5% 被截断）
+        target: "close" = 由 close_t7 与 price_at_predict 算（**推荐，真正无截断**）；
+                "price" = 由 price_{h} 算——⚠️ price_t7 实为离场价，同样被截断，
+                          仅为复现历史报告保留；
+                "path"  = 直接用 return_{h} 列（含 SL/TP 提前出场）
                 详见模块顶部 TARGETS 说明。
 
     Returns:
@@ -183,7 +196,15 @@ def load_daily_ic(db_path: Path, target_col: str, checked_col: str,
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
-        if target == "price":
+        if target == "close":
+            # close_t7 目前只对 t7 回填；其它 horizon 回退 price 并在 main 里告警
+            _cc = "close_t7" if horizon == "t7" else price_col
+            rows = con.execute(
+                f"SELECT date, dimension_scores, price_at_predict, {_cc} AS p_end "
+                f"FROM predictions WHERE {checked_col}=1 AND {_cc} IS NOT NULL "
+                f"  AND price_at_predict > 0 AND dimension_scores IS NOT NULL"
+            ).fetchall()
+        elif target == "price":
             rows = con.execute(
                 f"SELECT date, dimension_scores, price_at_predict, {price_col} AS p_end "
                 f"FROM predictions WHERE {checked_col}=1 AND {price_col} IS NOT NULL "
@@ -206,7 +227,7 @@ def load_daily_ic(db_path: Path, target_col: str, checked_col: str,
             continue
         if not (isinstance(ds, dict) and ds):
             continue
-        if target == "price":
+        if target in ("close", "price"):
             p0, p1 = r["price_at_predict"], r["p_end"]
             if not p0 or not p1 or p0 <= 0:
                 continue
@@ -591,7 +612,7 @@ def main() -> int:
     ap.add_argument("--min-width", type=int, default=5,
                     help="每日最少标的数，低于此值的交易日不参与（默认 5）")
     ap.add_argument("--db", type=str, default=str(DB_PATH), help="pheromone.db 路径")
-    ap.add_argument("--target", choices=TARGETS, default="price",
+    ap.add_argument("--target", choices=TARGETS, default="close",
                     help="目标变量口径：price=纯价格变动（默认，推荐）；"
                          "path=return_t7 列（含 SL/TP 截断，42.5%% 样本被钉在出场档位）")
     ap.add_argument("--benchmark", action="store_true",
@@ -611,6 +632,10 @@ def main() -> int:
 
     for h in horizons:
         target, checked, lag, period = HORIZONS[h]
+        if args.target == "close" and h != "t7":
+            # close_t7 只对 t7 存在；静默回退会让读者以为 t30 也走了干净口径
+            print(f"⚠️  {h}: close_t7 仅回填了 t7，本 horizon 回退 price 口径"
+                  f"（**仍含 SL/TP 截断**，勿据此出新结论）")
         ic, n_rows, widths = load_daily_ic(db, target, checked, args.min_width,
                                            target=args.target, horizon=h)
         if not widths:
@@ -619,7 +644,7 @@ def main() -> int:
         res = {dim: diagnose(ic[dim], lag, period) for dim in DIMS}
         res = {k: v for k, v in res.items() if v}
         label = (f"price_{h} 相对 price_at_predict（纯价格变动）"
-                 if args.target == "price" else f"{target}（路径依赖，含 SL/TP 截断）")
+                 if args.target in ("close", "price") else f"{target}（路径依赖，含 SL/TP 截断）")
         meta = {
             "target": label, "target_mode": args.target,
             "rows": n_rows, "n_days": len(widths),

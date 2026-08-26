@@ -648,7 +648,22 @@ def _load_accuracy_data() -> dict:
     try:
         from backtester import PredictionStore
         _ps = PredictionStore()
-        _acc_stats = _ps.get_accuracy_stats(period="t7", days=90, exclude_nontrading_days=True) or {}  # v32.3: 门面只算核心交易日
+        # v0.45.17：门面展示的是「预测准确率」，故走 **方向口径**
+        # （dir_correct_t7，基于未截断的 T+7 收盘价）。默认的 correct_t7 由
+        # 路径依赖离场收益算出，衡量的是「这笔交易赚钱了吗」——那是交易指标，
+        # 归 equity curve / portfolio_backtest 管，不该挂在「准确率」标题下。
+        # v0.45.22：主数字改用**全历史**，90 天降为副指标。
+        # 依据：90 天仅 10 个不重叠周、CI 宽 14.5pp，区间横跨 50%
+        # ——一个自己都无法与抛硬币区分的数字不该当门面。
+        # 早期 vs 近期无显著断层（z=0.75, p=0.45），且回填已用同一条规则
+        # 重算全部 927 条，测量侧世代问题已消除。
+        # 90 天保留为漂移监测副指标（漂移监测的需求是真的，只是不该当门面）。
+        _acc_stats = _ps.get_accuracy_stats(
+            period="t7", days=3650, exclude_nontrading_days=True,
+            use_direction_metric=True) or {}  # v32.3: 门面只算核心交易日
+        _acc_stats_90d = _ps.get_accuracy_stats(
+            period="t7", days=90, exclude_nontrading_days=True,
+            use_direction_metric=True) or {}
     except Exception as _ace:
         _log.debug("准确率统计加载失败: %s", _ace)
     _acc_total_checked = _acc_stats.get("total_checked", 0)
@@ -656,6 +671,18 @@ def _load_accuracy_data() -> dict:
     _acc_avg_return    = _acc_stats.get("avg_return", 0.0)
     _acc_correct       = _acc_stats.get("correct_count", 0)
     _acc_by_dir        = _acc_stats.get("by_direction", {})
+    # v0.45.17：方向单合计（bullish+bearish，不含中性）。中性判定标准是
+    # 「涨跌幅<5%」，与方向单的 1% 容差不同难度，混一个分母会抬高读数。
+    _acc_dir_total     = _acc_stats.get("directional_total", 0)
+    _acc_dir_correct   = _acc_stats.get("directional_correct", 0)
+    _acc_dir_acc       = _acc_stats.get("directional_accuracy", 0.0)
+    _acc_metric        = _acc_stats.get("metric", "trade")
+    _acc_dir_ci        = _acc_stats.get("directional_ci")
+    _acc_dir_p         = _acc_stats.get("directional_p")
+    _acc_n_eff         = _acc_stats.get("n_eff_weeks", 0)
+    _acc_90d_acc       = _acc_stats_90d.get("directional_accuracy", 0.0)
+    _acc_90d_total     = _acc_stats_90d.get("directional_total", 0)
+    _acc_90d_correct   = _acc_stats_90d.get("directional_correct", 0)
     _acc_by_ticker     = _acc_stats.get("by_ticker", {})
 
     # F11: 增强准确率数据（胜率走势、最佳/最差预测、Sharpe）
@@ -695,12 +722,17 @@ def _load_accuracy_data() -> dict:
                 _excl11 = ""
                 _excl11_p = []
             # 周胜率走势（最近 12 周）
+            # v0.45.17：走势与上方卡片同口径（方向口径），否则同一区块内两套
+            # 标准打架。dir_correct_t7 为空的旧行（尚未回填）直接排除，
+            # 不用 COALESCE 兜底——那会把「未知」当成「判错」，是伪造。
             _wrows = _cn11.execute(f"""
                 SELECT strftime('%Y-W%W', date) as week,
                        COUNT(*) as total,
-                       SUM(CASE WHEN correct_t7=1 THEN 1 ELSE 0 END) as correct,
+                       SUM(CASE WHEN dir_correct_t7=1 THEN 1 ELSE 0 END) as correct,
                        AVG(return_t7) as avg_ret
-                FROM predictions WHERE checked_t7=1{_excl11}
+                FROM predictions WHERE checked_t7=1
+                  AND dir_correct_t7 IS NOT NULL
+                  AND COALESCE(dir_ambiguous_t7, 0) = 0{_excl11}
                 GROUP BY week ORDER BY week DESC LIMIT 12
             """, _excl11_p).fetchall()
             _acc_weekly_trend = [
@@ -713,8 +745,10 @@ def _load_accuracy_data() -> dict:
                 SELECT strftime('%Y-W%W', date) as week,
                        direction,
                        COUNT(*) as total,
-                       SUM(CASE WHEN correct_t7=1 THEN 1 ELSE 0 END) as correct
-                FROM predictions WHERE checked_t7=1{_excl11}
+                       SUM(CASE WHEN dir_correct_t7=1 THEN 1 ELSE 0 END) as correct
+                FROM predictions WHERE checked_t7=1
+                  AND dir_correct_t7 IS NOT NULL
+                  AND COALESCE(dir_ambiguous_t7, 0) = 0{_excl11}
                 GROUP BY week, direction ORDER BY week DESC LIMIT 48
             """, _excl11_p).fetchall()
             # 重组为 {week: {bullish: acc, bearish: acc, neutral: acc}}
@@ -1045,6 +1079,17 @@ def _load_accuracy_data() -> dict:
     return {
         "stats": _acc_stats,
         "total_checked": _acc_total_checked,
+        # v0.45.17：方向单合计单独传，勿与含中性的 overall 混用
+        "dir_total": _acc_dir_total,
+        "dir_correct": _acc_dir_correct,
+        "dir_accuracy": _acc_dir_acc,
+        "dir_ci": _acc_dir_ci,
+        "dir_p": _acc_dir_p,
+        "n_eff_weeks": _acc_n_eff,
+        "d90_accuracy": _acc_90d_acc,
+        "d90_total": _acc_90d_total,
+        "d90_correct": _acc_90d_correct,
+        "metric": _acc_metric,
         "overall": _acc_overall,
         "avg_return": _acc_avg_return,
         "correct": _acc_correct,
@@ -1396,6 +1441,20 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                          f'<div class="dim-b" style="height:{_dpct6}%;background:{_dcol6}"></div>'
                          f'<span class="dim-lbl">{_dlbl6x}</span></div>')
             _dim_html6 = f'<div class="dim-bars">{_db6}</div>'
+
+        # ── v0.45.21：sentiment 与 final_score 并列展示 ──
+        # 干净口径下 final_score 的净 IC ≈ 0（两个反向维度占 43% 权重，
+        # 抵消掉唯一有效的 sentiment），详见
+        # experiments/final_score_dilution_report.md。
+        # 只展示 final_score 等于把唯一有信息的维度藏进一个净剩为 0 的合成分里，
+        # 故此处把 sentiment 提为并列主指标。
+        # ⚠️ 这是**展示层**改动：排序/决策仍用 final_score，权重一律未动。
+        _senti6 = None
+        if _dims6 and _dims6.get("sentiment") is not None:
+            try:
+                _senti6 = float(_dims6["sentiment"])
+            except (TypeError, ValueError):
+                _senti6 = None
         # 升级 D2: 情绪 Sparkline（7 天得分趋势 SVG）
         _spark6 = ""
         try:
@@ -1477,8 +1536,27 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                             f'<span class="sprice">${_p6:,.2f}</span>'
                             f'{f"""<span class="sprice-chg {_mcls6}">{_mstr6}</span>""" if _mstr6 else ""}'
                             f'</div>')
+        # 并列指标的 HTML（无 sentiment 数据时整体省略，不用 5.0 兜底——
+        # 兜底会把「没有数据」画成「中性」，是伪造，见 [[alpha-hive-silent-degradation]]）
+        _senti_num6 = ""
+        _senti_bar6 = ""
+        if _senti6 is not None:
+            _scls_s6 = "sc-h" if _senti6 >= 7 else ("sc-m" if _senti6 >= 5.5 else "sc-l")
+            _fcls_s6 = "fill-h" if _senti6 >= 7 else ("fill-m" if _senti6 >= 5.5 else "fill-l")
+            _tip_s6 = ("情绪分（BuzzBee）。干净口径下这是五维中唯一有证据的维度"
+                       "（周度 rank-IC +0.17, t=+2.52）；综合分把它与两个反向维度"
+                       "加权后净 IC≈0。证据仍未过 Bonferroni 校正，"
+                       "属「值得观察」而非「已确立」。")
+            _senti_num6 = (f'<span class="score-sep">·</span>'
+                           f'<span class="score-big score-senti {_scls_s6}" '
+                           f'title="{_html.escape(_tip_s6)}">{_senti6:.1f}</span>')
+            _senti_bar6 = (f'<div class="sbar-lbl sbar-lbl-senti">'
+                           f'<span>情绪分 <em>唯一有 IC 的维度</em></span><span>/10</span></div>'
+                           f'<div class="sbar"><div class="sbar-fill {_fcls_s6}" '
+                           f'style="width:{max(5, int(_senti6 * 10))}%"></div></div>')
+
         new_cards_html += f"""
-        <div class="scard" data-dir="{_dr6}" data-score="{_sc6:.1f}" data-ticker="{_html.escape(_tc6)}">
+        <div class="scard" data-dir="{_dr6}" data-score="{_sc6:.1f}" data-senti="{(f"{_senti6:.1f}" if _senti6 is not None else "")}" data-ticker="{_html.escape(_tc6)}">
           <button class="scard-share" onclick="event.stopPropagation();shareCard('{_html.escape(_tc6)}',{_sc6:.1f})">𝕏</button>
           <div class="scard-head">
             <div class="slogo-wrap">{_logo6}<span class="srank">#{_ci}</span></div>
@@ -1488,9 +1566,11 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             <div class="sticker">{_html.escape(_tc6)}</div>
             <div class="score-row">
               <span class="score-big {_scls6}">{_sc6:.1f}</span>{_delta6}
+              {_senti_num6}
               <div class="sbar-wrap">
                 <div class="sbar-lbl"><span>综合分</span><span>/10</span></div>
                 <div class="sbar"><div class="sbar-fill {_fcls6}" style="width:{_pct6}%"></div></div>
+                {_senti_bar6}
               </div>
             </div>
             {_dim_html6}
@@ -1832,6 +1912,16 @@ def render_dashboard_html(report: Dict, date_str: str,
     _acc = _load_accuracy_data()
     _acc_stats = _acc["stats"]
     _acc_total_checked = _acc["total_checked"]
+    _acc_dir_total = _acc.get("dir_total", 0)
+    _acc_dir_correct = _acc.get("dir_correct", 0)
+    _acc_dir_acc = _acc.get("dir_accuracy", 0.0)
+    _acc_dir_ci = _acc.get("dir_ci")
+    _acc_dir_p = _acc.get("dir_p")
+    _acc_n_eff = _acc.get("n_eff_weeks", 0)
+    _acc_90d_acc = _acc.get("d90_accuracy", 0.0)
+    _acc_90d_total = _acc.get("d90_total", 0)
+    _acc_90d_correct = _acc.get("d90_correct", 0)
+    _acc_metric = _acc.get("metric", "trade")
     _acc_overall = _acc["overall"]
     _acc_avg_return = _acc["avg_return"]
     _acc_correct = _acc["correct"]
@@ -2272,8 +2362,13 @@ def render_dashboard_html(report: Dict, date_str: str,
     _worst3_html = _pred_list_html(_acc_worst3, False)
 
     # F11: 额外指标行 HTML
+    # v0.45.17：这三个 pill（Sharpe / 回撤 / 连胜）都由 return_t7、correct_t7 算出，
+    # 是**交易口径**（含止损止盈提前离场），与上方的方向准确率不是一回事。
+    # 它们本身没错——Sharpe 和回撤本就该路径依赖——但挂在「方向口径」标题下
+    # 不加标注就会被读成方向指标，故显式标一行。
     _acc_extra_metrics = (
         f'<div class="acc-metrics-row">'
+        f'<span class="acc-pill-note">↓ 交易口径（含止损/止盈）</span>'
         f'<div class="acc-metric-pill"><span class="mv">{_acc_sharpe:+.2f}</span><span class="ml">Sharpe Ratio</span></div>'
         f'<div class="acc-metric-pill"><span class="mv">{_acc_max_dd:.1f}%</span><span class="ml">最大回撤</span></div>'
         f'<div class="acc-metric-pill"><span class="mv">{_acc_win_streak}</span><span class="ml">当前连胜</span></div>'
@@ -2323,17 +2418,46 @@ def render_dashboard_html(report: Dict, date_str: str,
             f'</div>\n'
         )
 
+    # v0.45.22：显著性标注。一个 57% 不加限定词看着像成绩，
+    # 而按不重叠周它与 50% 并无显著差异——必须在同一视线内说清楚。
+    _acc_ci_str = (f"{_acc_dir_ci[0]:.1f}–{_acc_dir_ci[1]:.1f}%"
+                   if _acc_dir_ci else "样本不足")
+    _acc_90d_str = (f"{_acc_90d_acc*100:.1f}% <em>{_acc_90d_correct}/{_acc_90d_total}</em>"
+                    if _acc_90d_total else "样本不足")
+    if _acc_dir_p is None:
+        _acc_sig_tag = ""
+        _acc_p_str = "不重叠周不足 3 个，暂不做检验。"
+    elif _acc_dir_p < 0.05:
+        _acc_sig_tag = '<span class="acc-sig acc-sig-yes">显著</span>'
+        _acc_p_str = (f"不重叠周 t 检验 vs 50%：<strong>p={_acc_dir_p:.3f}</strong>，"
+                      f"在 0.05 水平下显著。")
+    else:
+        _acc_sig_tag = '<span class="acc-sig acc-sig-no">≈抛硬币</span>'
+        _acc_p_str = (f"不重叠周 t 检验 vs 50%：<strong>p={_acc_dir_p:.3f}</strong>，"
+                      f"<strong>与 50% 无显著差异</strong>——这个数字目前不能当作预测能力的证据。")
+
     # 生成准确率 HTML Section
     if _acc_total_checked > 0:
         _acc_section_html = f"""
   <!-- ── Accuracy Dashboard ── -->
   <div class="section" id="accuracy">
-    <div class="acc-section-title">预测准确率追踪（T+7 验证）</div>
+    <div class="acc-section-title">预测准确率追踪（T+7 验证 · 方向口径 · 全历史）</div>
     <div class="acc-kpi-row">
-      <div class="acc-kpi"><div class="kv">{_acc_overall_pct:.0f}%</div><div class="kl">综合准确率</div></div>
-      <div class="acc-kpi"><div class="kv">{_acc_total_checked}</div><div class="kl">已验证预测</div></div>
-      <div class="acc-kpi"><div class="kv">{_acc_correct}</div><div class="kl">预测正确数</div></div>
-      <div class="acc-kpi"><div class="kv">{_acc_avg_return:+.1f}%</div><div class="kl">平均收益率</div></div>
+      <div class="acc-kpi"><div class="kv">{_acc_dir_acc*100:.1f}%{_acc_sig_tag}</div><div class="kl">方向准确率（看多+看空）</div></div>
+      <div class="acc-kpi"><div class="kv">{_acc_ci_str}</div><div class="kl">95% 区间 · {_acc_dir_correct}/{_acc_dir_total} · {_acc_n_eff} 个不重叠周</div></div>
+      <div class="acc-kpi"><div class="kv">{_acc_90d_str}</div><div class="kl">近 90 天（漂移监测）</div></div>
+      <div class="acc-kpi"><div class="kv">{_acc_overall_pct:.0f}%</div><div class="kl">含中性（口径不可比）</div></div>
+    </div>
+    <div class="acc-caption">
+      <strong>口径</strong>：按<strong>未截断的 T+7 收盘价</strong>判方向（<code>dir_correct_t7</code>），
+      不含止损/止盈提前离场的影响——方向看对但中途被震出场，不计为判错。
+      中性预测的判定带宽是 5%、方向单是 1%，难度不同，故<strong>单列不合并</strong>，
+      「含中性」一栏仅供对照。<br>
+      <strong>为什么用全历史</strong>：30 只标的每日滚动、T+7 持有，名义样本高度重叠。
+      近 90 天只有 10 个不重叠周、区间宽约 14.5pp（横跨 50%），不足以与抛硬币区分；
+      早期与近期无显著断层（z=0.75, p=0.45）。90 天保留为漂移监测副指标。<br>
+      <strong>显著性</strong>：{_acc_p_str}
+      区间按名义样本数计算，仅示精度量级；判显著性以不重叠周为准。
     </div>
     <div class="acc-dir-kpi-row">
 {_acc_dir_kpi_html}
@@ -2616,6 +2740,16 @@ def render_dashboard_html(report: Dict, date_str: str,
         "fv": _fv3,
         "fg_label": _fg_label,
         "scores": [[t, round(s, 1)] for t, s in _all_scores],
+        # v0.45.21：sentiment 与综合分并列。缺数据的标的直接不进这个 map
+        # ——不用 5.0 兜底，那会把「没有数据」画成「中性」。
+        "senti": {
+            _t_s: round(float(_v_s), 1)
+            for _t_s, _v_s in (
+                (_t2, (swarm_detail.get(_t2, {}).get("dimension_scores") or {}).get("sentiment"))
+                for _t2, _ in _all_scores
+            )
+            if _v_s is not None
+        },
         "dir_counts": [_dir_counts["bullish"], _dir_counts["bearish"], _dir_counts["neutral"]],
         "radar": {t: _radar_data(t, swarm_detail) for t in all_tickers_sorted},
         "acc_dir_labels": [_dir_map_acc.get(d, d) for d in ["bullish", "bearish", "neutral"]],

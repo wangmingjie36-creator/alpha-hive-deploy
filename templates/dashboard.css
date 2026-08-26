@@ -767,3 +767,51 @@ html:not(.dark) .bnav-item.active{color:var(--acc)}
 
 /* Compare bar update */
 /* v0.41.1: 对比模式样式已随功能删除 */
+
+/* v0.45.14：准确率口径说明。方向口径 vs 含中性口径不可互相替代，
+   这段文字是防误读的一部分，勿当作装饰删除。 */
+.acc-caption {
+  margin: 10px 0 4px;
+  font-size: .78em;
+  line-height: 1.65;
+  opacity: .72;
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+}
+
+/* v0.45.17：区分交易口径 pill 与方向口径卡片，防误读 */
+.acc-pill-note {
+  font-size: .72em;
+  opacity: .6;
+  align-self: center;
+  margin-right: 6px;
+  white-space: nowrap;
+}
+
+/* v0.45.21：sentiment 与 final_score 并列展示。
+   理由：干净口径下 final_score 净 IC≈0（两反向维度占43%权重抵消掉 sentiment），
+   只展示综合分等于把唯一有信息的维度藏起来。见
+   experiments/final_score_dilution_report.md。
+   这是展示层改动——排序与决策仍用 final_score，权重未动。 */
+.score-sep{font-size:1.3em;font-weight:300;color:var(--tm);opacity:.5;margin:0 -2px}
+.score-big.score-senti{font-size:1.55em;opacity:.92}
+.score-big.score-senti::after{content:'情绪';display:block;font-size:.30em;font-weight:600;
+  letter-spacing:.08em;color:var(--tm);opacity:.75;margin-top:2px;text-align:center}
+.sbar-lbl-senti{margin-top:6px}
+.sbar-lbl-senti em{font-style:normal;font-size:.88em;opacity:.7;
+  border-bottom:1px dotted var(--tm);padding-bottom:1px}
+@media(max-width:520px){
+  .score-big.score-senti{font-size:1.3em}
+  .score-sep{display:none}
+}
+.score-dual-note{margin:10px 0 16px;padding:11px 14px;font-size:.78em;line-height:1.7;
+  color:var(--ts);background:var(--surface2);border-left:2px solid var(--acc);border-radius:0 6px 6px 0}
+.score-dual-note strong{color:var(--tp);font-weight:700}
+.score-dual-note em{font-style:normal;opacity:.8}
+/* v0.45.22：准确率显著性标签。一个 57% 不加限定词看着像成绩，
+   而按不重叠周它与 50% 并无显著差异——标签必须与数字同处一个视线内。 */
+.acc-sig{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:9px;
+  font-size:.32em;font-weight:700;letter-spacing:.04em;vertical-align:middle}
+.acc-sig-yes{background:rgba(34,197,94,.15);color:var(--bull)}
+.acc-sig-no{background:rgba(148,163,184,.16);color:var(--tm)}
+.acc-kpi .kv em{font-style:normal;font-size:.5em;font-weight:600;opacity:.65;margin-left:4px}

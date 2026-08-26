@@ -53,6 +53,42 @@ _log = get_logger("backtester")
 DB_PATH = PATHS.db
 
 
+def _wilson_ci(k: int, n: int, z: float = 1.96) -> Optional[tuple]:
+    """Wilson 95% 置信区间（百分数）。
+
+    ⚠️ 传入的 n 是**名义样本数**。本项目 30 只标的每日滚动、T+7 持有，
+    相邻样本高度重叠，名义 n 约高估有效样本 25×。所以这个区间只用来
+    **展示精度量级**，不能拿它判显著性——判显著性用 `_t_test_vs` 的周度序列。
+    """
+    if n <= 0:
+        return None
+    import math as _m
+    p = k / n
+    d = 1 + z * z / n
+    ctr = (p + z * z / (2 * n)) / d
+    half = z * _m.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (round((ctr - half) * 100, 1), round((ctr + half) * 100, 1))
+
+
+def _t_test_vs(series: List[float], null_value: float) -> Optional[float]:
+    """对不重叠周序列做单样本 t 检验，返回双尾 p（正态近似）。
+
+    序列每个元素是**一个 ISO 周**的准确率——这是本项目唯一诚实的独立观测单位。
+    少于 3 周不给结论（返回 None），不要用 0.0 之类的值兜底：
+    「样本不足」和「p=0」在下游看起来会一模一样。
+    """
+    n = len(series)
+    if n < 3:
+        return None
+    import math as _m
+    mean_v = sum(series) / n
+    var = sum((x - mean_v) ** 2 for x in series) / (n - 1)
+    if var <= 0:
+        return None
+    t = (mean_v - null_value) / (_m.sqrt(var) / _m.sqrt(n))
+    return round(_m.erfc(abs(t) / _m.sqrt(2)), 4)
+
+
 class PredictionStore:
     """预测记录存储（SQLite）"""
 
@@ -131,6 +167,19 @@ class PredictionStore:
             ("holding_days", "INTEGER"),    # 实际持仓天数
             ("cost_breakdown", "TEXT"),     # JSON: {slippage, commission, borrow}
             ("spy_return_t7", "REAL"),      # 同期 SPY 基准收益
+            # v0.45.9 P0：容差语义修正。|return| <= tolerance 的样本标为模糊，
+            # 既不算对也不算错，所有准确率查询须带 AND ambiguous_{period} = 0
+            ("ambiguous_t1", "INTEGER"),
+            ("ambiguous_t7", "INTEGER"),
+            ("ambiguous_t30", "INTEGER"),
+            # v0.45.17：把「方向判对了吗」与「这笔交易赚钱了吗」分开存。
+            # 旧 correct_t7 由**路径依赖的离场收益**算出（SL/TP 触发即截断），
+            # 它衡量的是交易结果，不是方向精度；而中性预测从不建仓、没有 SL/TP，
+            # 两者混进同一个分母报成「整体准确率」是苹果比橘子。
+            # 下面三列一律基于**未截断的 T+7 收盘价**，只回答方向问题。
+            ("close_t7", "REAL"),           # 真实 T+7 收盘价（无路径截断）
+            ("dir_correct_t7", "INTEGER"),  # 按 close_t7 判定的方向是否正确
+            ("dir_ambiguous_t7", "INTEGER"),# |原始收益| <= 容差 → 不评分
         ]
         for col_name, col_type in new_columns:
             try:
@@ -251,17 +300,25 @@ class PredictionStore:
 
     def update_check_result(
         self, pred_id: int, period: str,
-        price: float, ret: float, correct: bool
+        price: float, ret: float, correct: bool,
+        ambiguous: bool = False,
     ) -> bool:
-        """更新回测结果"""
+        """
+        更新回测结果。
+
+        v0.45.9 P0：新增 ambiguous —— |return| <= 容差的样本既不算对也不算错，
+        落库后由所有准确率查询以 `AND ambiguous_{period} = 0` 剔除。
+        """
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(f"""
                     UPDATE {self.TABLE}
                     SET price_{period} = ?, return_{period} = ?,
-                        correct_{period} = ?, checked_{period} = 1
+                        correct_{period} = ?, ambiguous_{period} = ?,
+                        checked_{period} = 1
                     WHERE id = ?
-                """, (price, ret, 1 if correct else 0, pred_id))
+                """, (price, ret, 1 if correct else 0,
+                      1 if ambiguous else 0, pred_id))
                 conn.commit()
             return True
         except (sqlite3.Error, OSError) as e:
@@ -278,23 +335,47 @@ class PredictionStore:
         holding_days: Optional[int],
         cost_breakdown: Optional[Dict],
         spy_return: Optional[float],
+        ambiguous_t7: bool = False,
+        close_t7: Optional[float] = None,
+        dir_correct_t7: Optional[bool] = None,
+        dir_ambiguous_t7: Optional[bool] = None,
     ) -> bool:
-        """Sprint 1: T+7 路径依赖 + 净收益 + 基准一次性写入。"""
+        """
+        Sprint 1: T+7 路径依赖 + 净收益 + 基准一次性写入。
+
+        v0.45.9 P0：ambiguous_t7 作为**末位关键字参数**追加，不影响既有
+        位置调用；|return| <= 容差时置 1，准确率统计会剔除该样本。
+
+        v0.45.17：新增 close_t7 / dir_correct_t7 / dir_ambiguous_t7 三个
+        **纯方向**字段，同样以末位关键字追加。
+        - `price_t7`/`return_t7`/`correct_t7` 保持原语义（路径依赖的交易结果），
+          equity curve、ML 训练、portfolio_backtest 全部继续吃它们，勿改。
+        - 新三列只回答「方向判对了吗」，基于未截断的 T+7 收盘价。
+        传 None 时该列不写（保持 NULL），供回填脚本分批补齐。
+        """
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(f"""
                     UPDATE {self.TABLE}
                     SET price_t7 = ?, return_t7 = ?, correct_t7 = ?, checked_t7 = 1,
+                        ambiguous_t7 = ?,
                         net_return_t7 = ?, exit_reason = ?, exit_date = ?,
                         exit_price = ?, holding_days = ?, cost_breakdown = ?,
-                        spy_return_t7 = ?
+                        spy_return_t7 = ?,
+                        close_t7 = COALESCE(?, close_t7),
+                        dir_correct_t7 = COALESCE(?, dir_correct_t7),
+                        dir_ambiguous_t7 = COALESCE(?, dir_ambiguous_t7)
                     WHERE id = ?
                 """, (
                     price_t7, return_t7, 1 if correct_t7 else 0,
+                    1 if ambiguous_t7 else 0,
                     net_return_pct, exit_reason, exit_date,
                     exit_price, holding_days,
                     json.dumps(cost_breakdown or {}, cls=SafeJSONEncoder),
                     spy_return,
+                    close_t7,
+                    None if dir_correct_t7 is None else (1 if dir_correct_t7 else 0),
+                    None if dir_ambiguous_t7 is None else (1 if dir_ambiguous_t7 else 0),
                     pred_id,
                 ))
                 conn.commit()
@@ -328,7 +409,8 @@ class PredictionStore:
             return []
 
     def get_accuracy_stats(self, period: str = "t7", days: int = 90,
-                           exclude_nontrading_days: bool = False) -> Dict:
+                           exclude_nontrading_days: bool = False,
+                           use_direction_metric: bool = False) -> Dict:
         """
         获取准确率统计
 
@@ -341,11 +423,33 @@ class PredictionStore:
             avg_return, by_direction: {bullish: {}, bearish: {}, neutral: {}},
             by_ticker: {NVDA: {}, ...}
         }
+
+        use_direction_metric=True（仅 t7 有效，v0.45.17 新增）：
+            改用 `dir_correct_t7` / `dir_ambiguous_t7` —— 基于**未截断的
+            T+7 收盘价**的纯方向判定。默认 False 保持旧行为。
+
+            为什么需要这个开关：默认的 `correct_t7` 由**路径依赖的离场收益**
+            算出，触发 SL/TP 即提前离场、收益被钳在止损止盈档位（库里
+            `-10.04` / `+9.95` 反复出现即此故）。所以它回答的是「这笔交易
+            赚钱了吗」，不是「方向猜对了吗」；而中性预测从不建仓、从无 SL/TP。
+            两者混进同一分母报成「整体准确率」是苹果比橘子。
+            交易类指标（equity curve / ML 训练 / portfolio_backtest）应继续用
+            默认口径，**只有展示「预测准确率」时才该开这个开关**。
+
+        额外返回键（v0.45.17）：
+            directional_accuracy / directional_total / directional_correct
+                —— 只含 bullish+bearish，**不含中性**，这才是可比的方向精度。
+            metric —— "direction" 或 "trade"，供上游标注口径，勿省略。
         """
+        _use_dir = bool(use_direction_metric) and period == "t7"
         cutoff = (_pdt_now() - timedelta(days=days)).strftime("%Y-%m-%d")  # v0.33.0: 统计窗口口径 PDT 化（对齐 date 列）
         checked_col = f"checked_{period}"
-        correct_col = f"correct_{period}"
+        correct_col = "dir_correct_t7" if _use_dir else f"correct_{period}"
         return_col = f"return_{period}"
+        # v0.45.9 P0：模糊样本（|return| <= 容差，或回测取价失败的幽灵行）
+        # 不计入准确率的分子与分母。COALESCE 兼容尚未回填的旧库。
+        _amb = (" AND COALESCE(dir_ambiguous_t7, 0) = 0 AND dir_correct_t7 IS NOT NULL"
+                if _use_dir else f" AND COALESCE(ambiguous_{period}, 0) = 0")
 
         # v32.3: 门面口径 —— 构建"排除非交易日"子句（周日 sample-accumulator 样本）
         _excl = ""
@@ -384,7 +488,7 @@ class PredictionStore:
                         AVG({return_col}) as avg_ret,
                         AVG(final_score) as avg_score
                     FROM {self.TABLE}
-                    WHERE {checked_col} = 1 AND date >= ?{_excl}
+                    WHERE {checked_col} = 1{_amb} AND date >= ?{_excl}
                 """, (cutoff, *_excl_p)).fetchone()
 
                 total = row["total"] or 0
@@ -400,7 +504,7 @@ class PredictionStore:
                             SUM({correct_col}) as correct,
                             AVG({return_col}) as avg_ret
                         FROM {self.TABLE}
-                        WHERE {checked_col} = 1 AND direction = ? AND date >= ?{_excl}
+                        WHERE {checked_col} = 1{_amb} AND direction = ? AND date >= ?{_excl}
                     """, (direction, cutoff, *_excl_p)).fetchone()
                     t = r["total"] or 0
                     raw_ret = r["avg_ret"] or 0
@@ -423,7 +527,7 @@ class PredictionStore:
                         AVG({return_col}) as avg_ret,
                         AVG(final_score) as avg_score
                     FROM {self.TABLE}
-                    WHERE {checked_col} = 1 AND date >= ?{_excl}
+                    WHERE {checked_col} = 1{_amb} AND date >= ?{_excl}
                     GROUP BY ticker
                     ORDER BY total DESC
                 """, (cutoff, *_excl_p)).fetchall()
@@ -461,7 +565,7 @@ class PredictionStore:
                             AVG(CASE WHEN direction='bullish' THEN {return_col}
                                      ELSE -{return_col} END) as avg_pnl
                         FROM {self.TABLE}
-                        WHERE {checked_col} = 1 AND date >= ?{_excl}
+                        WHERE {checked_col} = 1{_amb} AND date >= ?{_excl}
                           AND ((direction = 'bullish' AND final_score >= 6.0)
                                OR direction = 'bearish')
                     """, (cutoff, *_excl_p)).fetchone()
@@ -475,9 +579,49 @@ class PredictionStore:
                 except (sqlite3.Error, KeyError, TypeError):
                     pass
 
+                # v0.45.17：方向单合计（bullish+bearish，**排除中性**）。
+                # 中性的判定标准是「涨跌幅 < 5%」，与方向单的 1% 容差不是同一
+                # 难度，混进一个分母报「整体准确率」会系统性抬高读数。
+                _dir_tot = sum(by_direction.get(d, {}).get("total", 0)
+                               for d in ("bullish", "bearish"))
+                _dir_cor = sum(by_direction.get(d, {}).get("correct", 0)
+                               for d in ("bullish", "bearish"))
+
+                # v0.45.22：门面必须同时给出精度与显著性，否则一个 56.8% 看着像成绩。
+                #  - Wilson CI 按**名义 n**算，只用于展示区间宽度；
+                #  - 真正的显著性走**不重叠 ISO 周**序列做 t 检验 —— 30 只标的
+                #    每日滚动 × T+7 持有，名义 n 高估约 25×，朴素检验必然虚高。
+                _dir_ci = _dir_p = None
+                _n_eff_weeks = 0
+                if _use_dir and _dir_tot > 0:
+                    _dir_ci = _wilson_ci(_dir_cor, _dir_tot)
+                    try:
+                        _wk_rows = conn.execute(f"""
+                            SELECT date, {correct_col} AS c FROM {self.TABLE}
+                            WHERE {checked_col} = 1{_amb} AND date >= ?{_excl}
+                              AND direction IN ('bullish','bearish')
+                        """, (cutoff, *_excl_p)).fetchall()
+                        _by_wk: Dict = {}
+                        for _wr in _wk_rows:
+                            _iso = datetime.strptime(_wr["date"], "%Y-%m-%d").isocalendar()[:2]
+                            _by_wk.setdefault(_iso, []).append(_wr["c"])
+                        _series = [sum(v) / len(v) * 100 for v in _by_wk.values()
+                                   if len(v) >= 3]
+                        _n_eff_weeks = len(_series)
+                        _dir_p = _t_test_vs(_series, 50.0)
+                    except (sqlite3.Error, ValueError, KeyError, TypeError):
+                        pass
+
                 return {
                     "period": period,
                     "days_window": days,
+                    "metric": "direction" if _use_dir else "trade",
+                    "directional_accuracy": round(_dir_cor / _dir_tot, 3) if _dir_tot else 0.0,
+                    "directional_total": _dir_tot,
+                    "directional_correct": _dir_cor,
+                    "directional_ci": _dir_ci,          # Wilson 95%，按名义 n（仅示区间宽度）
+                    "directional_p": _dir_p,            # 不重叠周 t 检验 vs 50%，唯一诚实的 p
+                    "n_eff_weeks": _n_eff_weeks,
                     "overall_accuracy": round(overall_acc, 3),
                     "total_checked": total,
                     "correct_count": correct,
@@ -507,6 +651,7 @@ class PredictionStore:
         cutoff = (_pdt_now() - timedelta(days=days)).strftime("%Y-%m-%d")  # v0.33.0: 统计窗口口径 PDT 化（对齐 date 列）
         checked_col = f"checked_{period}"
         return_col = f"return_{period}"
+        _amb = f" AND COALESCE(ambiguous_{period}, 0) = 0"  # v0.45.9 P0
 
         # Agent → 维度映射
         agent_dim = {
@@ -532,7 +677,7 @@ class PredictionStore:
                 rows = conn.execute(f"""
                     SELECT agent_directions, {return_col}
                     FROM {self.TABLE}
-                    WHERE {checked_col} = 1 AND agent_directions IS NOT NULL AND date >= ?
+                    WHERE {checked_col} = 1{_amb} AND agent_directions IS NOT NULL AND date >= ?
                 """, (cutoff,)).fetchall()
 
                 for row in rows:
@@ -545,10 +690,14 @@ class PredictionStore:
                             agent_dir = dirs.get(agent_name)
                             if not agent_dir:
                                 continue
-                            dim_stats[dim]["total"] += 1
                             # 方案12: 统一使用共享判定函数
-                            from outcome_utils import determine_correctness_bool
-                            if determine_correctness_bool(agent_dir, ret):
+                            # v0.45.9 P0：三态判定，模糊样本不进 total
+                            from outcome_utils import determine_outcome_triplet
+                            _ok, _amb_row = determine_outcome_triplet(agent_dir, ret)
+                            if _amb_row:
+                                continue
+                            dim_stats[dim]["total"] += 1
+                            if _ok:
                                 dim_stats[dim]["correct"] += 1
                     except (json.JSONDecodeError, KeyError, TypeError):
                         continue
@@ -624,6 +773,8 @@ class Backtester:
         self, pred_id, price_t7, return_t7, is_correct,
         net_return_pct, exit_reason, exit_date, exit_price,
         holding_days, cost_breakdown, spy_return,
+        ambiguous_t7=False,
+        close_t7=None, dir_correct_t7=None, dir_ambiguous_t7=None,
     ):
         """代理调用 PredictionStore。"""
         return self.store.update_t7_path_result(
@@ -638,6 +789,10 @@ class Backtester:
             holding_days=holding_days,
             cost_breakdown=cost_breakdown,
             spy_return=spy_return,
+            ambiguous_t7=ambiguous_t7,
+            close_t7=close_t7,
+            dir_correct_t7=dir_correct_t7,
+            dir_ambiguous_t7=dir_ambiguous_t7,
         )
 
     def _get_spy_entry_price(self, predict_date: str) -> Optional[float]:
@@ -756,6 +911,7 @@ class Backtester:
             checked = 0
             correct = 0
             skipped = 0
+            ambiguous = 0   # v0.45.9 P0：|return| <= 容差，不评分
 
             # {period.upper()} 回测
 
@@ -782,8 +938,11 @@ class Backtester:
                     # gross_return_pct 已经是"方向调整后"的净方向收益（看空已取反）
                     ret = path["gross_return_pct"]
 
-                    # 判断方向正确（基于"方向调整后"收益 > -tolerance）
-                    is_correct = ret > -1.0  # 使用 outcome_utils 容差
+                    # 判断方向正确。v0.45.9 P0：原 `ret > -1.0` 是单边亏损豁免
+                    # （亏 0.9% 记为判对）。改为双边模糊带：|ret| <= 容差 → 不评分。
+                    # ret 已是方向调整后收益（看空取反），故按 bullish 语义判定。
+                    from outcome_utils import determine_outcome_triplet
+                    is_correct, is_ambiguous = determine_outcome_triplet("bullish", ret)
 
                     # ── Sprint 1 / P0-2: 应用交易成本得到净收益 ──
                     try:
@@ -817,6 +976,20 @@ class Backtester:
                     _dir_lc = (direction or "").strip().lower()
                     raw_ret_store = -ret if _dir_lc == "bearish" else ret  # 还原原始价格变动以兼容旧显示
 
+                    # ── v0.45.17：另取一次**未截断的 T+7 收盘价**判方向 ──
+                    # 上面的 is_correct 由 path["gross_return_pct"] 算出，
+                    # 而 path 在触发 SL/TP 时会提前离场，收益被钳在止损/止盈档位
+                    # （库里 `-10.04` / `+9.95` 反复出现即此故）。用它判方向等于问
+                    # 「这笔交易赚钱了吗」，不是「方向猜对了吗」。中性预测从不建仓、
+                    # 从无 SL/TP，两者混一个分母就是苹果比橘子。
+                    # 故此处独立取 T+7 收盘价，只回答方向问题。取价失败时留 None，
+                    # 由 backfill_dir_accuracy.py 补齐——**不拿离场价冒充收盘价**。
+                    _close_t7 = self._get_price_at_date(ticker, predict_date, days)
+                    _dir_ok = _dir_amb = None
+                    if _close_t7 and _close_t7 > 0:
+                        _raw_ret = (_close_t7 - predict_price) / predict_price * 100
+                        _dir_ok, _dir_amb = determine_outcome_triplet(direction, _raw_ret)
+
                     self._store_path_result(
                         pred["id"], actual_price, round(raw_ret_store, 3), is_correct,
                         net_return_pct=net_ret,
@@ -826,6 +999,10 @@ class Backtester:
                         holding_days=path.get("holding_days", days),
                         cost_breakdown=cost_breakdown,
                         spy_return=spy_ret,
+                        ambiguous_t7=is_ambiguous,
+                        close_t7=_close_t7,
+                        dir_correct_t7=_dir_ok,
+                        dir_ambiguous_t7=_dir_amb,
                     )
                 else:
                     # T+1 / T+30 沿用旧逻辑
@@ -834,15 +1011,20 @@ class Backtester:
                         skipped += 1
                         continue
                     ret = (actual_price - predict_price) / predict_price * 100
-                    is_correct = self._check_direction(direction, ret)
+                    is_correct, is_ambiguous = self._check_direction(direction, ret)
                     self.store.update_check_result(
-                        pred["id"], period, actual_price, round(ret, 3), is_correct
+                        pred["id"], period, actual_price, round(ret, 3), is_correct,
+                        ambiguous=is_ambiguous,
                     )
 
                 # T+1 期权回验：记录 T+1 的 IV Rank 变化
                 if period == "t1" and pred.get("iv_rank") is not None:
                     self._check_options_t1(pred)
 
+                # v0.45.9 P0：模糊样本不计入 checked/correct 分母分子
+                if is_ambiguous:
+                    ambiguous += 1
+                    continue
                 checked += 1
                 if is_correct:
                     correct += 1
@@ -850,6 +1032,7 @@ class Backtester:
             results[period] = {
                 "checked": checked,
                 "correct": correct,
+                "ambiguous": ambiguous,
                 "skipped": skipped,
                 "accuracy": correct / checked if checked > 0 else 0,
             }
@@ -1152,19 +1335,23 @@ class Backtester:
                 ValueError, KeyError, TypeError) as e:
             _log.debug("Options T+1 check skipped for %s: %s", ticker, e)
 
-    def _check_direction(self, direction: str, actual_return: float) -> bool:
+    def _check_direction(self, direction: str, actual_return: float):
         """
         检查预测方向是否正确（方案12: 统一标准）
 
-        使用 outcome_utils.determine_correctness_bool 共享逻辑，
-        默认容差 1%（允许小幅逆向波动）。
+        v0.45.9 P0：返回值由 bool 改为 (correct, ambiguous) 二元组。
+        原实现是单边容差（看多亏 0.9% 记为判对），现改为双边模糊带：
+        |return| <= 容差 → ambiguous，既不算对也不算错，从统计中剔除。
 
         Args:
             direction: "bullish" / "bearish" / "neutral"
             actual_return: 实际收益率（百分比，如 5.0 = +5%）
+
+        Returns:
+            (correct: bool, ambiguous: bool)
         """
-        from outcome_utils import determine_correctness_bool
-        return determine_correctness_bool(direction, actual_return)
+        from outcome_utils import determine_outcome_triplet
+        return determine_outcome_triplet(direction, actual_return)
 
     # ==================== 准确率报告 ====================
 
@@ -1341,6 +1528,7 @@ class Backtester:
                     SELECT pheromone_compact, correct_{period}, return_{period}
                     FROM {PredictionStore.TABLE}
                     WHERE checked_{period} = 1
+                      AND COALESCE(ambiguous_{period}, 0) = 0
                       AND pheromone_compact IS NOT NULL
                       AND date >= ?
                 """, (cutoff,)).fetchall()
@@ -1430,7 +1618,9 @@ class Backtester:
                     rows = conn.execute(f"""
                         SELECT agent_directions, return_{period}, direction
                         FROM {PredictionStore.TABLE}
-                        WHERE checked_{period} = 1 AND agent_directions IS NOT NULL
+                        WHERE checked_{period} = 1
+                        AND COALESCE(ambiguous_{period}, 0) = 0
+                        AND agent_directions IS NOT NULL
                         AND date >= ?
                     """, ((datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d"),)).fetchall()
 
@@ -1445,8 +1635,12 @@ class Backtester:
                             ret = row[f"return_{period}"]
                             if ret is None:
                                 continue
+                            # v0.45.9 P0：单蜂方向也走三态，模糊样本不进分母
+                            _ok, _amb_row = self._check_direction(agent_dir, ret)
+                            if _amb_row:
+                                continue
                             checked += 1
-                            if self._check_direction(agent_dir, ret):
+                            if _ok:
                                 correct += 1
                         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                             _log.debug("Agent direction parse error: %s", e)

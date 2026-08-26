@@ -127,10 +127,14 @@ class TestLoadAndDiagnose:
         """构造一个 signal 完美正相关、risk_adj 完美负相关的合成库"""
         db = tmp_path / "p.db"
         con = sqlite3.connect(db)
+        # close_t7 是 v0.45.19 起的默认口径（唯一未被路径截断的收益源），
+        # fixture 必须带上它，否则默认口径查不到列 → 静默 0 行。
+        # 此处刻意让 close_t7 == price_t7，使既有断言（IC=±1）在两种口径下等价，
+        # 这组测试因此仍只检验 IC 计算本身，不掺入口径差异。
         con.execute("""CREATE TABLE predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT, ticker TEXT, dimension_scores TEXT,
-            price_at_predict REAL, price_t7 REAL, price_t30 REAL,
+            price_at_predict REAL, price_t7 REAL, price_t30 REAL, close_t7 REAL,
             return_t7 REAL, checked_t7 INTEGER DEFAULT 0,
             return_t30 REAL, checked_t30 INTEGER DEFAULT 0)""")
         d0 = datetime.date.fromisoformat("2026-03-02")
@@ -148,11 +152,11 @@ class TestLoadAndDiagnose:
                         "risk_adj": float(8 - j)}
                 con.execute(
                     "INSERT INTO predictions (date,ticker,dimension_scores,"
-                    "price_at_predict,price_t7,price_t30,"
+                    "price_at_predict,price_t7,price_t30,close_t7,"
                     "return_t7,checked_t7,return_t30,checked_t30) "
-                    "VALUES (?,?,?,?,?,?,?,1,?,1)",
+                    "VALUES (?,?,?,?,?,?,?,?,1,?,1)",
                     (d.isoformat(), f"T{j}", json.dumps(dims),
-                     100.0, 100.0 + j, 100.0 + j,
+                     100.0, 100.0 + j, 100.0 + j, 100.0 + j,
                      float(j), float(j)))
         con.commit()
         con.close()
@@ -197,7 +201,7 @@ class TestLoadAndDiagnose:
         con.execute("""CREATE TABLE predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT, ticker TEXT, dimension_scores TEXT,
-            price_at_predict REAL, price_t7 REAL, price_t30 REAL,
+            price_at_predict REAL, price_t7 REAL, price_t30 REAL, close_t7 REAL,
             return_t7 REAL, checked_t7 INTEGER DEFAULT 0,
             return_t30 REAL, checked_t30 INTEGER DEFAULT 0)""")
         d0 = datetime.date.fromisoformat("2026-03-02")
@@ -215,10 +219,10 @@ class TestLoadAndDiagnose:
                         "sentiment": 5.0, "odds": 5.0, "risk_adj": 5.0}
                 con.execute(
                     "INSERT INTO predictions (date,ticker,dimension_scores,"
-                    "price_at_predict,price_t7,return_t7,checked_t7) "
-                    "VALUES (?,?,?,?,?,?,1)",
+                    "price_at_predict,price_t7,close_t7,return_t7,checked_t7) "
+                    "VALUES (?,?,?,?,?,?,?,1)",
                     (d.isoformat(), f"T{j}", json.dumps(dims),
-                     100.0, 100.0 + j, float(j)))
+                     100.0, 100.0 + j, 100.0 + j, float(j)))
         con.commit()
         con.close()
 
@@ -282,12 +286,25 @@ class TestLoadAndDiagnose:
         assert mean_of(ic_price["signal"]) == pytest.approx(1.0, abs=1e-9)
         assert ic_path["signal"] == {}, "全并列的目标不应产出 IC"
 
-    def test_price_target_is_default(self):
-        """默认口径必须是 price —— path 会因档位截断产生大量并列值"""
+    def test_close_target_is_default(self):
+        """
+        默认口径必须是 close —— 它是**唯一**未被路径截断的收益源。
+
+        v0.45.19 更正：原断言默认是 `price`。那条断言的理由（"path 会因档位
+        截断产生大量并列值"）是对的，但 `price` 并不干净——`price_t7` 存的是
+        `path["exit_price"]`，自 2026-05 起 100% 等于 `exit_price`，同样带
+        SL/TP 截断。真正未截断的是 `close_t7`（v0.45.17 新增并回填）。
+
+        换口径后 5 维排名直接反转（risk_adj 从四口径全过掉到 jackknife 失效、
+        sentiment 从无口径通过升到三口径过），所以这个默认值是**有后果的**，
+        不是风格选择——故保留断言，只把目标值改对。
+        """
         import inspect
         sig = inspect.signature(icd.load_daily_ic)
-        assert sig.parameters["target"].default == "price"
-        assert icd.TARGETS == ("price", "path")
+        assert sig.parameters["target"].default == "close"
+        assert icd.TARGETS == ("close", "price", "path")
+        # `price` 必须仍在：历史报告要靠它复现
+        assert "price" in icd.TARGETS
 
     def test_readonly_db_access(self, fake_db):
         """必须以只读模式打开，诊断工具不得意外写生产库"""

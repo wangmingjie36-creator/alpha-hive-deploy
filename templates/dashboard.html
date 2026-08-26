@@ -175,6 +175,14 @@
       <button class="filter-btn" id="filter-high">高分 (≥7.5)</button>
     </div>
     <div class="filter-count" id="filterCount"></div>
+    <div class="score-dual-note">
+      每张卡并列两个分数：<strong>综合分</strong>（五维加权，用于排序）与
+      <strong>情绪分</strong>（BuzzBee 维度）。并列的原因是——干净口径下综合分的
+      净 rank-IC ≈ 0：五维里两个方向相反的维度占了 43% 权重，
+      恰好抵消掉情绪分的贡献；而情绪分单独的周度 rank-IC 为 +0.17 (t=+2.52)，
+      是五维中唯一有证据的。<em>该证据尚未通过 Bonferroni 多重检验校正，
+      属「值得观察」而非「已确立」，两个分数都不构成投资建议。</em>
+    </div>
     <div class="ah-cards-grid top6-grid">{{ cards_html }}</div>
   </div>
 
