@@ -233,6 +233,17 @@ SL/TP 截断。原 docstring「无截断、无并列人为聚集」对 5 月后�
 
 ## [0.45.15] — 2026-08-25 — BRK-B 报告线上 404：部署白名单也不认连字符
 
+> **⚠️ 提交归属（本条改动被劈成两半）**
+> 同 v0.45.2 的情况——部署白名单的两处同源修复分处两条提交：
+>
+> | 文件 | 提交 |
+> |---|---|
+> | `report_deployer.py` | `4f48da7` |
+> | `generate_ml_report.py` | **`25615ff`**（message 与本条无关） |
+>
+> 两处必须同时存在才生效：前者管静态部署，后者管 ML 报告同步。
+> 只看到其中一处就以为改全了，是这条容易踩的坑。
+
 v0.45.2 修好 ticker 正则后 BRK-B 终于产出 ML 报告，但**从未被部署**——
 `index.html` 照常链接它，线上直接 404。
 连同 v0.45.8（CBOE 对 BRK-B 恒定 403），**同一个类份额连字符问题一天之内
@@ -1026,6 +1037,20 @@ BuzzBeeWhisper failed for NVDA: '>' not supported between instances of 'NoneType
   值本身为 None，不是这个标志位。要么接上读取点，要么别在新代码里假装它有用。
 
 ## [0.45.2] — 2026-08-25 — 2026-08-24 跑后核对翻出的三条静默失败路径
+
+> **⚠️ 提交归属（本条改动被劈成两半）**
+> 多 session 并发编辑期间，另一个 session 用宽口径 `git add` 把本条的一部分
+> 文件先提交了，于是同一个修复散在两条提交里，且其中一条的 message 与本条无关：
+>
+> | 改动 | 文件 | 提交 |
+> |---|---|---|
+> | ticker 正则接受 `BRK-B`/`BRK.B` | `swarm_agents/_config.py` | **`25615ff`**（message 讲的是「深度报告 IV / 版式去 AI 味」） |
+> | WATCHLIST 启动校验正则 | `config.py` | **`25615ff`** |
+> | ticker 错误文案 | `swarm_agents/base.py` | `4f48da7` |
+> | gh-pages 空提交闸 `ghpages_tree_delta()` 定义 | `report_deployer.py` | `4f48da7` |
+> | gh-pages 空提交闸 调用侧 | `generate_ml_report.py` | **`25615ff`** |
+>
+> **靠 `git log <file>` 追溯本条时会找错地方**，请以本表为准。
 
 来自 `post-fix-verification-2026-08-24` 的跑后核对。三条都不报错、退出码为 0、
 日志正常，**但产出早已是假的**——与 v0.43.23~0.43.26 是同一族缺陷。
