@@ -123,6 +123,38 @@
    4.4
   ]
  ],
+ "senti": {
+  "T": 5.1,
+  "AMZN": 4.2,
+  "BILI": 5.2,
+  "AMC": 5.2,
+  "JNJ": 4.5,
+  "DELL": 5.3,
+  "META": 5.5,
+  "NVDA": 5.9,
+  "CRM": 5.2,
+  "NFLX": 5.2,
+  "CVX": 4.6,
+  "COST": 5.0,
+  "WMT": 3.4,
+  "MSFT": 4.7,
+  "MU": 5.7,
+  "VZ": 4.8,
+  "ABBV": 4.8,
+  "QCOM": 4.6,
+  "XOM": 4.9,
+  "TSLA": 5.2,
+  "TMUS": 4.6,
+  "SNOW": 4.1,
+  "DE": 5.5,
+  "RKLB": 4.5,
+  "CRCL": 5.3,
+  "TMO": 4.5,
+  "VKTX": 3.5,
+  "NEE": 4.1,
+  "ENPH": 3.1,
+  "BRK-B": 4.1
+ },
  "dir_counts": [
   10,
   19,
@@ -346,32 +378,32 @@
   "中性"
  ],
  "acc_dir_accs": [
-  44.1,
-  50.0,
-  51.3
+  56.1,
+  61.8,
+  53.3
  ],
  "acc_dir_tots": [
-  145,
-  34,
-  113
+  426,
+  89,
+  240
  ],
  "acc_dir_rets": [
-  -0.81,
-  0.38,
-  -0.89
+  0.69,
+  0.89,
+  0.42
  ],
  "acc_weekly": [
   {
    "week": "2026-W19",
-   "accuracy": 40.0,
-   "total": 50,
-   "avg_ret": -2.27
+   "accuracy": 47.9,
+   "total": 48,
+   "avg_ret": -2.37
   },
   {
    "week": "2026-W20",
-   "accuracy": 62.5,
-   "total": 40,
-   "avg_ret": 0.65
+   "accuracy": 68.4,
+   "total": 38,
+   "avg_ret": 0.79
   },
   {
    "week": "2026-W21",
@@ -381,70 +413,70 @@
   },
   {
    "week": "2026-W22",
-   "accuracy": 20.0,
-   "total": 10,
-   "avg_ret": -0.9
+   "accuracy": 100.0,
+   "total": 6,
+   "avg_ret": 1.16
   },
   {
    "week": "2026-W23",
-   "accuracy": 60.0,
-   "total": 20,
-   "avg_ret": -0.9
+   "accuracy": 73.7,
+   "total": 19,
+   "avg_ret": -0.81
   },
   {
    "week": "2026-W24",
-   "accuracy": 17.9,
-   "total": 39,
-   "avg_ret": -4.04
+   "accuracy": 23.7,
+   "total": 38,
+   "avg_ret": -4.12
   },
   {
    "week": "2026-W25",
-   "accuracy": 56.7,
-   "total": 30,
-   "avg_ret": 1.55
+   "accuracy": 65.5,
+   "total": 29,
+   "avg_ret": 1.94
   },
   {
    "week": "2026-W26",
-   "accuracy": 55.0,
-   "total": 20,
-   "avg_ret": 1.06
+   "accuracy": 63.2,
+   "total": 19,
+   "avg_ret": 1.08
   },
   {
    "week": "2026-W27",
-   "accuracy": 63.3,
-   "total": 30,
-   "avg_ret": -0.78
+   "accuracy": 70.4,
+   "total": 27,
+   "avg_ret": -0.86
   },
   {
    "week": "2026-W29",
-   "accuracy": 28.6,
+   "accuracy": 33.3,
    "total": 21,
    "avg_ret": -2.91
   },
   {
    "week": "2026-W30",
-   "accuracy": 50.0,
+   "accuracy": 70.0,
    "total": 10,
    "avg_ret": 4.27
   },
   {
    "week": "2026-W32",
-   "accuracy": 50.0,
-   "total": 116,
-   "avg_ret": 0.32
+   "accuracy": 58.1,
+   "total": 105,
+   "avg_ret": 0.4
   }
  ],
  "acc_weekly_by_dir": [
   {
    "week": "2026-W19",
-   "bullish": 19.2,
+   "bullish": 33.3,
    "bearish": 50.0,
    "neutral": 65.0
   },
   {
    "week": "2026-W20",
-   "bullish": 56.5,
-   "bearish": 66.7,
+   "bullish": 71.4,
+   "bearish": 33.3,
    "neutral": 71.4
   },
   {
@@ -455,56 +487,56 @@
   },
   {
    "week": "2026-W22",
-   "bullish": 20.0,
-   "bearish": 0.0,
+   "bullish": 100.0,
+   "bearish": null,
    "neutral": null
   },
   {
    "week": "2026-W23",
-   "bullish": 20.0,
-   "bearish": 33.3,
+   "bullish": 50.0,
+   "bearish": 66.7,
    "neutral": 83.3
   },
   {
    "week": "2026-W24",
-   "bullish": 0.0,
-   "bearish": 33.3,
+   "bullish": 11.8,
+   "bearish": null,
    "neutral": 31.6
   },
   {
    "week": "2026-W25",
-   "bullish": 63.2,
-   "bearish": 40.0,
+   "bullish": 73.7,
+   "bearish": 50.0,
    "neutral": 50.0
   },
   {
    "week": "2026-W26",
-   "bullish": 50.0,
+   "bullish": 66.7,
    "bearish": null,
    "neutral": 55.6
   },
   {
    "week": "2026-W27",
-   "bullish": 64.3,
+   "bullish": 72.7,
    "bearish": 87.5,
-   "neutral": 37.5
+   "neutral": 50.0
   },
   {
    "week": "2026-W29",
-   "bullish": 30.0,
+   "bullish": 40.0,
    "bearish": 50.0,
    "neutral": 14.3
   },
   {
    "week": "2026-W30",
-   "bullish": 66.7,
+   "bullish": 100.0,
    "bearish": 0.0,
    "neutral": null
   },
   {
    "week": "2026-W32",
-   "bullish": 43.1,
-   "bearish": 33.3,
+   "bullish": 55.4,
+   "bearish": 42.9,
    "neutral": 64.3
   }
  ],
@@ -25418,7 +25450,7 @@
    ]
   }
  },
- "_generated_at": "2026-08-25 22:15 PDT",
+ "_generated_at": "2026-08-26 01:03 PDT",
  "_date": "2026-08-25",
- "_deploy_ts": 1787721347
+ "_deploy_ts": 1787731418
 }
