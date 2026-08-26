@@ -226,6 +226,44 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
 # 存储
 # ────────────────────────────────────────────────────────────────────────────
 
+#: 数据隔离名单 —— 已证实取自错误交易日的观测，禁止入库。
+#:
+#: 为什么需要它：`backfill()` 从 `.swarm_results_*.json` 用 `INSERT OR REPLACE`
+#: 重建，所以**光删库不够**，下一次回填会把污染原样带回来。原始 JSON 刻意不改
+#: （它是"系统当天实际产出什么"的审计轨迹），改由本名单在入库口拦截。
+#:
+#: 划界原则：只隔离**当日市场观测**（取错日子 ⇒ 值本身就是错的）；
+#: **不隔离 Agent 评分**——那些是系统当天的真实输出，属审计轨迹，
+#: 抹掉它们会让"系统当时做了什么"这个问题永远查不清。
+#: 代价是 OracleBee 等下游评分在该日仍基于坏输入，已在 reason 里写明。
+QUARANTINE: List[Dict] = [
+    {
+        "date": "2026-08-24",
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi",
+                    "bear.options_bear"),
+        "reason": (
+            "v0.45.16 补跑槽位 bug：8/24 的报告实际在 8/25 07:37–12:44 生成，"
+            "期权快照键取 pdt_today() 而非 --date 目标日，于是 30 只标的全部"
+            "拿到 8/25 的期权链。日志实证：24 只命中 options_snapshot_*_2026-08-25.json，"
+            "5 只（CRM/JNJ/NEE/WMT/XOM）现拉后写入同一个 8/25 槽位，"
+            "BRK-B 于 12:44 单独重跑同样写入 8/25 槽位。"
+            "⚠️ 期权接口只有实时快照、无历史 ⇒ 8/24 的真实期权观测**永久丢失**，"
+            "不可补，只能缺失。"
+        ),
+        "evidence": ("logs/backfill_2026-08-24.log", "logs/rerun_brkb.log"),
+    },
+]
+
+
+def is_quarantined(date: str, signal: str) -> bool:
+    """该 (日期, 信号) 是否在隔离名单内。入库与分析都应先问这一句。"""
+    for q in QUARANTINE:
+        if q["date"] == date and signal in q["signals"]:
+            return True
+    return False
+
+
 def ensure_schema(db_path: Path = DB_PATH) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(f"""
@@ -276,6 +314,10 @@ def archive(swarm_results: Dict, date: str, db_path: Path = DB_PATH) -> int:
         if not isinstance(tr, dict):
             continue
         for sig, val in extract(tr).items():
+            # v0.45.26：隔离名单在**入库口**拦截，而不是在分析时过滤——
+            # 后者会让每个下游都得记得过滤一次，漏一个就前功尽弃。
+            if is_quarantined(date, sig):
+                continue
             rows.append((date, ticker, sig, val))
     if not rows:
         return 0
