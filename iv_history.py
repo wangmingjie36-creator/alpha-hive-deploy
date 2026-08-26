@@ -280,13 +280,67 @@ def coverage_report(cache_dir: str) -> dict:
     return dict(sorted(out.items(), key=lambda kv: -kv[1]))
 
 
+def _observed_accrual_rate(cache_dir: str = "cache"):
+    """实测积累速率 = 已记录的不同日期数 / 首条记录以来经过的交易日数。
+
+    v0.45.31：原 ETA 写「还差 N 天」，隐含假设**今后每个交易日都攒到 1 条**。
+    但条目只在**有扫描且期权链抓到真实 IV**的日子产生，而扫描连续性实测
+    日覆盖率远低于 100%（见 scan_continuity.py）。按日历日报 ETA 会系统性
+    乐观数倍 —— 与 ic_rerun_readiness 用实测周产出率的做法相反，那才是对的。
+
+    返回 (rate, observed_days, elapsed_trading_days)；无法判定时 rate 为 None。
+    """
+    import datetime as _dt
+    seen = set()
+    first = None
+    for path in glob.glob(os.path.join(cache_dir, "iv_history_*.jsonl")):
+        try:
+            with open(path) as fh:
+                for line in fh:
+                    try:
+                        d = json.loads(line).get("date")
+                    except Exception:  # noqa: BLE001 - 单行坏了不该毁掉整份统计
+                        continue
+                    if d:
+                        seen.add(d[:10])
+        except OSError:
+            continue
+    if not seen:
+        return None, 0, 0
+    first = min(seen)
+    today = _dt.date.today()
+    d0 = _dt.date.fromisoformat(first)
+    elapsed = sum(1 for i in range((today - d0).days + 1)
+                  if (d0 + _dt.timedelta(days=i)).weekday() < 5)
+    if elapsed <= 0:
+        return None, len(seen), 0
+    return len(seen) / elapsed, len(seen), elapsed
+
+
 if __name__ == "__main__":  # pragma: no cover
     import sys
     _dir = sys.argv[1] if len(sys.argv) > 1 else "cache"
     rep = coverage_report(_dir)
     ready = {k: v for k, v in rep.items() if v >= IV_RANK_MIN_DAYS}
+    rate, obs_days, elapsed = _observed_accrual_rate(_dir)
     print(f"自攒 IV 历史进度（阈值 {IV_RANK_MIN_DAYS} 个交易日）")
     print(f"  已达标: {len(ready)}/{len(rep)} 只")
+    if rate:
+        print(f"  实测积累速率: {obs_days}/{elapsed} 个交易日有记录 = {rate:.2f} 天/交易日")
+        print(f"  ⚠️ ETA 按此速率外推，不是按日历日 —— 条目只在有扫描且抓到真实 IV 的日子产生")
+    else:
+        print("  实测积累速率: 无法判定（暂无记录）")
     for tk, n in list(rep.items())[:15]:
-        flag = "✅" if n >= IV_RANK_MIN_DAYS else f"({IV_RANK_MIN_DAYS - n} 天后可用)"
+        if n >= IV_RANK_MIN_DAYS:
+            flag = "✅"
+        elif rate:
+            need = IV_RANK_MIN_DAYS - n
+            eta_td = need / rate
+            flag = f"(还需 {need} 条 ≈ {eta_td:.0f} 个交易日 ≈ {eta_td/21:.1f} 个月)"
+        else:
+            flag = f"(还需 {IV_RANK_MIN_DAYS - n} 条，速率未知)"
         print(f"  {tk:6s} {n:4d} 天 {flag}")
+    if rate and rate < 0.8:
+        print()
+        print(f"  💡 提高扫描日覆盖率可按比例缩短 ETA：当前 {rate:.0%}，")
+        print(f"     若升到 100% 则 ETA 缩短 {1/rate:.1f}×（见 scan_continuity.py）")

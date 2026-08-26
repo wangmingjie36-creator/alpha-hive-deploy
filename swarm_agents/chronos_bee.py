@@ -104,6 +104,9 @@ class ChronosBeeHorizon(BeeAgent):
             score = 5.0
             direction = "neutral"
             t = None  # yfinance Ticker，步骤 1b 分析师目标价复用
+            # v0.45.31: 区分「抓取失败」与「确实无催化剂」——两者产出必须不同形
+            _calendar_failed = False
+            _calendar_error = ""
 
             # 1. 从 yfinance 获取真实财报日期
             try:
@@ -185,6 +188,15 @@ class ChronosBeeHorizon(BeeAgent):
                                 "severity": "medium",
                             })
             except (*NETWORK_ERRORS, AttributeError) as e:
+                # v0.45.31: 记下失败事实。此前只打 warning 就继续，
+                # 于是「抓取失败」与「确实没有催化剂」在产出上完全同形
+                # （都落 score=4.0 / "无近期催化剂"）——静默中性化，见
+                # MEMORY alpha-hive-silent-degradation。实测 90 个扫描日里
+                # 有 9 天（10%）出现 4.0 占比 >75% 的集体塌缩，最严重
+                # 2026-08-11 是 26/27 只标的，而那天 18.78% 的权重携带的
+                # 是「今天 yfinance 没抓到」而不是催化剂信息。
+                _calendar_failed = True
+                _calendar_error = f"{type(e).__name__}: {str(e)[:80]}"
                 _log.warning("ChronosBeeHorizon yfinance calendar unavailable for %s: %s", ticker, e)
 
             # 1b. 分析师目标价（补强2：yfinance analyst_price_targets）
@@ -300,8 +312,10 @@ class ChronosBeeHorizon(BeeAgent):
             except Exception as _e_pead:
                 _log.debug("PEAD analysis unavailable for %s: %s", ticker, _e_pead)
 
-            # 2. 加载外部 catalysts.json（S13：覆盖全部 WATCHLIST 标的）
+            # 2. 加载外部 catalysts.json（原注释称「覆盖全部 WATCHLIST」，
+            #    实测 2026-08-26 只有 9/30 只标的且窗口内 0 事件，见 CHANGELOG v0.45.31）
             _catalysts_json_loaded = False
+            _cat_json_has_ticker = False
             try:
                 import json as _json_cat
                 import os as _os_cat
@@ -310,6 +324,10 @@ class ChronosBeeHorizon(BeeAgent):
                     with open(_cat_path, "r", encoding="utf-8") as _cf:
                         _all_cats = _json_cat.load(_cf)
                     _catalysts_json_loaded = True
+                    # v0.45.31: 逐标的覆盖标记。文件读到 ≠ 本标的有条目
+                    # （实测 catalysts.json 只覆盖 9/30 只，且窗口内 0 事件）。
+                    # 判「有无可用来源」必须按标的，不能按文件是否存在。
+                    _cat_json_has_ticker = bool(_all_cats.get(ticker))
                     for entry in _all_cats.get(ticker, []):
                         cat_date = entry.get("date", "")
                         if cat_date:
@@ -401,6 +419,17 @@ class ChronosBeeHorizon(BeeAgent):
                     direction = "bearish"
                 else:
                     direction = "neutral"
+            elif _calendar_failed and not _cat_json_has_ticker:
+                # v0.45.31: 财报日历是本蜂唯一的实时来源，catalysts.json 是
+                # 静态兜底。两者都不可得时**没有任何依据**判断有无催化剂，
+                # 此时返回 error 让 queen_distiller 按缺失维度处理
+                # （dim_status="error" → 动态填充 + 覆盖度压缩），
+                # 而不是复用 4.0 —— 4.0 的语义是「查过了，确实没有」。
+                _log.warning("ChronosBeeHorizon %s 催化剂来源全部不可得，返回缺失而非 4.0", ticker)
+                return make_error_result(
+                    "ChronosBeeHorizon", "catalyst",
+                    RuntimeError(f"catalyst_sources_unavailable: calendar={_calendar_error}, "
+                                 f"catalysts_json=no_entry_for_ticker"))
             else:
                 score = 4.0
                 discovery = "无近期催化剂"
@@ -507,7 +536,8 @@ class ChronosBeeHorizon(BeeAgent):
                 source="ChronosBeeHorizon",
                 dimension="catalyst",
                 data_quality={
-                    "yfinance_calendar": "real" if catalysts_found else "empty",
+                    "yfinance_calendar": ("failed" if _calendar_failed else
+                                          ("real" if catalysts_found else "empty")),
                     "catalysts_json": "loaded" if _catalysts_json_loaded else "missing",
                     "analyst_targets": "real" if _analyst_info else "unavailable",
                     "llm_impact": "llm_enhanced" if llm_catalyst else "rule_only",

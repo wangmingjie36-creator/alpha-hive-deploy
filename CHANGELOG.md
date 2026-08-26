@@ -5,6 +5,79 @@
 
 ---
 
+## [0.45.31] — 2026-08-26 — catalyst 的静默中性化 + IV Rank ETA 的结构性乐观
+
+承接「让评分更准」的排查。两处都属**移除已证实的缺陷**，不需要统计验证。
+
+### Fixed — ChronosBee：抓取失败冒充「无近期催化剂」
+
+`except (*NETWORK_ERRORS, AttributeError)` 只打 warning 就继续，随后落到
+`else: score = 4.0 / "无近期催化剂"`。于是**「yfinance 财报日历挂了」与
+「这只标的确实没催化剂」产出完全同形**——静默中性化（MEMORY
+alpha-hive-silent-degradation 记的同款形态）。
+
+实测规模：90 个扫描日里 **9 天（10%）** 出现 catalyst 落 4.0 占比 >75% 的
+集体塌缩，最严重 2026-08-11 是 **26/27 只标的**。catalyst 占 `final_score`
+权重 **18.78%**，那些天这 18.78% 携带的是「今天没抓到」而非催化剂信息。
+
+修法：记录 `_calendar_failed`；当财报日历失败**且** `catalysts.json` 无该
+标的条目时，返回 `make_error_result(...)` 而非 4.0。queen_distiller 本就有
+正确的缺失维度通道（`valid_results` 过滤掉带 `error` 的结果 →
+`dim_status="error"` → 动态填充 + 覆盖度压缩），此前从未被触发。
+
+⚠️ 判据必须**逐标的**：`_catalysts_json_loaded` 只表示文件读到了，
+而实测 `catalysts.json` 只覆盖 **6/30** 只标的（另 3 个键是注释），
+故新增 `_cat_json_has_ticker`。按文件是否存在判断会让修复几乎不触发。
+
+反向守卫同样重要：日历**成功返回空**时仍应是 4.0——「查过了确实没有」
+与「没查到」都要能表达，否则修过头。
+
+### Fixed — `iv_history.py` 的 ETA 结构性乐观 4 倍
+
+原输出「QCOM 3 天（60 天后可用）」隐含假设**今后每个日历日都攒到 1 条**。
+但条目只在**有扫描且抓到真实 IV**的日子产生。改为按实测积累速率外推
+（同 `ic_rerun_readiness` 的周产出率做法）：
+
+```
+实测积累速率: 3/9 个交易日有记录 = 0.33 天/交易日
+QCOM  3 天 (还需 60 条 ≈ 180 个交易日 ≈ 8.6 个月)
+```
+
+**8.6 个月 vs 原报的 2 个月。** 并附一行提示：提高扫描日覆盖率可按比例
+缩短 ETA。注意 IV Rank 的阈值是 63 个**扫描日**（不是周），所以它对
+日覆盖率敏感，而 IC 闸对周覆盖率敏感——两者的瓶颈口径不同。
+
+（顺带更正一个说法：`iv_history.py` 上线是 2026-08-14，只跑了 12 天，
+积累进度本身正常，不是坏了。）
+
+### Fixed — `tests/test_ic_rerun_readiness.py` 硬编码世代日期（v0.45.30 遗留）
+
+v0.45.30 追加世代边界后，该文件里写死的 `start="2026-08-17"`（当时的最新
+世代）全部落到新边界之前被过滤，7 个测试变红。**这是 v0.45.30 的提交疏漏
+——全量回归跑在追加世代边界之前，之后未重跑就提交了。**
+现改为一律从 `rr._COHORT_HISTORY[-1][0]` 推导（世代边界会持续追加，
+硬编码必然反复失效）。
+
+### Added — `tests/test_catalyst_availability.py`（7 项）
+
+含端到端「喂退化看它红」验证：把缺失分支改回旧行为后
+`test_calendar_failure_returns_error_not_4` **必红**，还原后全绿。
+
+⚠️ 初版用假 ticker `ZZZZ_NO_SUCH` 写测试，被 `_validate_ticker` 提前挡下，
+根本走不到目标分支——**退化版照样全绿的假守卫**。现改用 ABBV（真实在
+WATCHLIST、且不在 catalysts.json 的 6 只里）。此坑已写进测试 docstring。
+
+### 世代边界
+
+catalyst 缺失时不再计入 `dim_scores` → 影响 `final_score`，属评分口径变更。
+与 v0.45.30 同属 2026-08-26 世代（当日已有边界，不重复追加）。
+
+### 测试
+
+全量 **1650 passed / 0 failed**（1 skipped，64 deselected，1 xfailed）。
+
+---
+
 ## [0.45.30] — 2026-08-26 — 清理三个名存实亡的数据源，并修掉拥挤度里的动量双计
 
 用户提出「AlphaVantage/Tiingo/Stocktwits/Polymarket 好像很久没用到了」，全仓核查。
