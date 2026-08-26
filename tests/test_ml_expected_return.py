@@ -192,6 +192,14 @@ class TestCrowdingCalibrationDrift:
             rows = [v for (v,) in con.execute(
                 "SELECT value FROM signal_archive "
                 "WHERE signal = 'crowding.score' AND value IS NOT NULL")]
+        except sqlite3.OperationalError as e:
+            # v0.45.24: 存根库（测试/worktree 环境自动生成的 pheromone.db）
+            # 可能只有 predictions 表。只把「表不存在」当合法 skip；
+            # database is locked 等其他 OperationalError 照抛——吞掉会把
+            # 瞬时可重试状态误报成「数据不足」。
+            if "no such table" in str(e):
+                pytest.skip(f"pheromone.db 无 signal_archive 表（存根库）：{e}")
+            raise
         finally:
             con.close()
         if len(rows) < 100:
