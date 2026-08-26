@@ -1,6 +1,7 @@
 """
 🐝 Alpha Hive - 实时数据获取系统
-支持多源数据采集：StockTwits、Polymarket、Yahoo Finance、Google Trends 等
+支持多源数据采集：社交热度(Reddit 代理)、Yahoo Finance、Google Trends、SEC 等
+（v0.45.30: StockTwits 公开 API 已停用、Polymarket 对大盘股无个股市场，均已移除）
 """
 
 import json
@@ -18,7 +19,7 @@ try:
 except ImportError:
     def _ttl(source: str) -> int:  # type: ignore[misc]
         """降级: config 不可用时使用保守默认值"""
-        return {"stocktwits_legacy": 3600, "polymarket": 300, "yahoo_finance": 300,
+        return {"social_legacy": 3600, "yahoo_finance": 300,
                 "google_trends": 86400, "sec_edgar": 604800, "seeking_alpha": 86400,
                 }.get(source, 300)
 
@@ -88,11 +89,14 @@ class DataFetcher:
         self.cache_hits = 0
         self.cache_misses = 0
 
-    # ==================== StockTwits 数据 ====================
+    # ==================== 社交热度数据（Reddit 代理）====================
 
-    def get_stocktwits_metrics(self, ticker: str) -> Dict:
+    def get_social_metrics(self, ticker: str) -> Dict:
         """
-        获取 StockTwits 数据
+        获取社交热度数据（Reddit ApeWisdom 代理）
+
+        v0.45.30 由 get_stocktwits_metrics 改名：StockTwits 公开 API 自 v0.40.0
+        已 403 停用，真实来源一直是 Reddit，旧名会让人误以为在用 StockTwits
 
         Returns:
             {
@@ -102,10 +106,10 @@ class DataFetcher:
                 "last_updated": str,
             }
         """
-        cache_key = self.cache.get_cache_key("stocktwits", ticker)
-        cached = self.cache.load(cache_key, ttl=_ttl("stocktwits_legacy"))
+        cache_key = self.cache.get_cache_key("social", ticker)
+        cached = self.cache.load(cache_key, ttl=_ttl("social_legacy"))
         if cached:
-            _log.info("📦 使用 StockTwits 缓存: %s", ticker)
+            _log.info("📦 使用社交热度缓存: %s", ticker)
             return cached
 
         try:
@@ -517,8 +521,8 @@ class DataFetcher:
         # H2: 真正并行采集各数据源（ThreadPoolExecutor）
         from concurrent.futures import ThreadPoolExecutor, as_completed
         _source_tasks = {
-            "stocktwits": self.get_stocktwits_metrics,
-            "polymarket": self.get_polymarket_odds,
+            "social": self.get_social_metrics,
+            # v0.45.30: polymarket 已移除 —— 见 config.POLYMARKET_ENABLED
             "yahoo_finance": self.get_yahoo_finance_metrics,
             "google_trends": self.get_google_trends,
             "sec_filings": self.get_sec_filings,
@@ -536,10 +540,9 @@ class DataFetcher:
 
         # 转换为拥挤度检测需要的格式
         metrics["crowding_input"] = {
-            "stocktwits_messages_per_day": metrics["sources"]["stocktwits"].get("messages_per_day", 0),
+            "social_messages_per_day": metrics["sources"]["social"].get("messages_per_day", 0),
             "google_trends_percentile": metrics["sources"]["google_trends"].get("search_interest_percentile", 0),
-            "bullish_agents": int(metrics["sources"]["stocktwits"].get("bullish_ratio", 0.5) * 6),
-            "polymarket_odds_change_24h": metrics["sources"]["polymarket"].get("odds_change_24h", 0),
+            "bullish_agents": int(metrics["sources"]["social"].get("bullish_ratio", 0.5) * 6),
             "seeking_alpha_page_views": metrics["sources"]["seeking_alpha"].get("page_views_week", 0),
             "short_float_ratio": metrics["sources"]["yahoo_finance"].get("short_float_ratio", 0),
             "price_momentum_5d": metrics["sources"]["yahoo_finance"].get("price_change_5d", 0),

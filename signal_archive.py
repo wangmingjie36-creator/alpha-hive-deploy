@@ -134,6 +134,99 @@ def _path(p: str) -> Callable:
     return lambda tr: _num(_dig(tr, p))
 
 
+# ── v0.45.33: 维度**输入**提取器 ─────────────────────────────────────────
+# 此前档案只存各蜂的**输出分数**，于是「改 crowding 公式会不会更准」这类
+# 问题无法离线重放，只能前向累积 25 个不重叠周（约半年）才知道。
+# 输入一旦落库，维度计算层的改动也能当场重放（见 replay_scoring.py）。
+# 全部走 details 里已有的字段，扫描侧零额外开销。
+
+def _crowding_comp(key: str) -> Callable:
+    """拥挤度分量。v0.45.30 前后键名不同（stocktwits_volume → social_volume），
+    两个都试 —— 历史回填必须能读旧名，否则等于丢掉改名前的全部样本。"""
+    _legacy = {"social_volume": "stocktwits_volume"}
+
+    def _f(tr: Dict) -> Optional[float]:
+        comp = _dig(tr, "agent_details.ScoutBeeNova.details.components")
+        if not isinstance(comp, dict):
+            return None
+        v = comp.get(key)
+        if v is None and key in _legacy:
+            v = comp.get(_legacy[key])
+        return _num(v)
+    return _f
+
+
+def _buzz_comp(key: str) -> Callable:
+    def _f(tr: Dict) -> Optional[float]:
+        comp = _dig(tr, "agent_details.BuzzBeeWhisper.details.components")
+        return _num(comp.get(key)) if isinstance(comp, dict) else None
+    return _f
+
+
+# ⚠️ v0.45.35 修：权重表**从 ChronosBee 读**，不再复制第二份。
+# 初版手抄了一份，漏了 6 个类型（split/dividend/dividendDate/analyst_day/
+# conference/exDividendDate）且默认值写成 0.8（蜂内是 0.7）。后果不是小偏差：
+# 实测最常见的催化剂正是 Dividend/Ex-Dividend（蜂内 0.4/0.3），
+# 归档里全按默认 0.8 算，**高估一倍以上**，875 行已回填数据全错。
+# 同款教训见 v0.45.30 的 CrowdingDetector 硬编码第二份权重。
+# 惰性导入：signal_archive 被 swarm_agents 依赖会成环，故不在模块顶层导。
+_CAT_TABLES: Optional[tuple] = None
+
+
+def _cat_tables() -> tuple:
+    """(type_weights, severity_mult, type_default)。取不到就抛 —— 归档一份
+    与蜂内不一致的权重，比不归档更糟（重放会给出看似精确的错误结论）。"""
+    global _CAT_TABLES
+    if _CAT_TABLES is None:
+        from swarm_agents.chronos_bee import ChronosBeeHorizon as _C
+        _CAT_TABLES = (dict(_C.CATALYST_TYPE_WEIGHTS),
+                       dict(_C.CATALYST_SEVERITY_MULT),
+                       _C._CATALYST_TYPE_DEFAULT)
+    return _CAT_TABLES
+
+
+def _catalysts(tr: Dict) -> List[Dict]:
+    c = _dig(tr, "agent_details.ChronosBeeHorizon.details.catalysts")
+    return [x for x in c if isinstance(x, dict)] if isinstance(c, list) else []
+
+
+def _cat_count(tr: Dict) -> Optional[float]:
+    """催化剂条数。注意 0 与「来源不可得」不同 —— 后者自 v0.45.31 起
+    ChronosBee 返回 error，details 缺失，本函数返回 None（诚实缺失）。"""
+    if _dig(tr, "agent_details.ChronosBeeHorizon.details") is None:
+        return None
+    return float(len(_catalysts(tr)))
+
+
+def _cat_nearest_days(tr: Dict) -> Optional[float]:
+    days = [_num(c.get("days_until")) for c in _catalysts(tr)]
+    days = [d for d in days if d is not None and d >= 0]
+    return float(min(days)) if days else None
+
+
+def _cat_max_weight(tr: Dict) -> Optional[float]:
+    """最强催化剂的 type_w × sev_m —— 重放评分公式时的关键输入。
+    权重表与 ChronosBee 同源（见 _cat_tables），复制第二份必然漂移。"""
+    cats = _catalysts(tr)
+    if not cats:
+        return None
+    tw, sm, tdef = _cat_tables()
+    best = None
+    for c in cats:
+        w = tw.get(c.get("type", ""), tdef) * sm.get(c.get("severity", "medium"), 1.0)
+        best = w if best is None else max(best, w)
+    return best
+
+
+def _iv_rank_is_real(tr: Dict) -> Optional[float]:
+    """1.0 = 真实自攒 IV 历史；0.0 = hv_proxy（数学上等于 HV Rank，非 IV）。
+    读 iv_rank 的任何分析都必须先看这一列，见 MEMORY alpha-hive-iv-rank。"""
+    src = _dig(tr, "agent_details.OracleBeeEcho.details.iv_rank_source")
+    if not isinstance(src, str) or not src:
+        return None
+    return 0.0 if src == "hv_proxy" else 1.0
+
+
 def _agent_score(agent: str) -> Callable:
     return lambda tr: _num(_dig(tr, f"agent_details.{agent}.score"))
 
@@ -195,6 +288,23 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     "bear.options_bear": _path("agent_details.BearBeeContrarian.details.options_bear"),
     "bear.short_int_bear": _path("agent_details.BearBeeContrarian.details.short_int_bear"),
 
+    # ── v0.45.33: 维度输入（供离线重放维度计算层的改动）──────────
+    "crowding.comp.social_volume":      _crowding_comp("social_volume"),
+    "crowding.comp.google_trends":      _crowding_comp("google_trends"),
+    "crowding.comp.consensus_strength": _crowding_comp("consensus_strength"),
+    "crowding.comp.seeking_alpha_views": _crowding_comp("seeking_alpha_views"),
+    "crowding.comp.short_squeeze_risk": _crowding_comp("short_squeeze_risk"),
+    "catalyst.count":         _cat_count,
+    "catalyst.nearest_days":  _cat_nearest_days,
+    "catalyst.max_weight":    _cat_max_weight,
+    "buzz.comp.momentum_signal":   _buzz_comp("momentum_signal"),
+    "buzz.comp.volume_signal":     _buzz_comp("volume_signal"),
+    "buzz.comp.volatility_signal": _buzz_comp("volatility_signal"),
+    "buzz.comp.reddit_signal":     _buzz_comp("reddit_signal"),
+    "options.iv_rank":         _path("agent_details.OracleBeeEcho.details.iv_rank"),
+    "options.iv_percentile":   _path("agent_details.OracleBeeEcho.details.iv_percentile"),
+    "options.iv_rank_is_real": _iv_rank_is_real,
+
     # ── 共振 / 一致性（回声源头）─────────────────────────────────
     "guard.consistency": _path("agent_details.GuardBeeSentinel.details.consistency"),
     "guard.adj_factor": _path("agent_details.GuardBeeSentinel.details.adjustment_factor"),
@@ -225,6 +335,44 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
 # ────────────────────────────────────────────────────────────────────────────
 # 存储
 # ────────────────────────────────────────────────────────────────────────────
+
+#: 数据隔离名单 —— 已证实取自错误交易日的观测，禁止入库。
+#:
+#: 为什么需要它：`backfill()` 从 `.swarm_results_*.json` 用 `INSERT OR REPLACE`
+#: 重建，所以**光删库不够**，下一次回填会把污染原样带回来。原始 JSON 刻意不改
+#: （它是"系统当天实际产出什么"的审计轨迹），改由本名单在入库口拦截。
+#:
+#: 划界原则：只隔离**当日市场观测**（取错日子 ⇒ 值本身就是错的）；
+#: **不隔离 Agent 评分**——那些是系统当天的真实输出，属审计轨迹，
+#: 抹掉它们会让"系统当时做了什么"这个问题永远查不清。
+#: 代价是 OracleBee 等下游评分在该日仍基于坏输入，已在 reason 里写明。
+QUARANTINE: List[Dict] = [
+    {
+        "date": "2026-08-24",
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi",
+                    "bear.options_bear"),
+        "reason": (
+            "v0.45.16 补跑槽位 bug：8/24 的报告实际在 8/25 07:37–12:44 生成，"
+            "期权快照键取 pdt_today() 而非 --date 目标日，于是 30 只标的全部"
+            "拿到 8/25 的期权链。日志实证：24 只命中 options_snapshot_*_2026-08-25.json，"
+            "5 只（CRM/JNJ/NEE/WMT/XOM）现拉后写入同一个 8/25 槽位，"
+            "BRK-B 于 12:44 单独重跑同样写入 8/25 槽位。"
+            "⚠️ 期权接口只有实时快照、无历史 ⇒ 8/24 的真实期权观测**永久丢失**，"
+            "不可补，只能缺失。"
+        ),
+        "evidence": ("logs/backfill_2026-08-24.log", "logs/rerun_brkb.log"),
+    },
+]
+
+
+def is_quarantined(date: str, signal: str) -> bool:
+    """该 (日期, 信号) 是否在隔离名单内。入库与分析都应先问这一句。"""
+    for q in QUARANTINE:
+        if q["date"] == date and signal in q["signals"]:
+            return True
+    return False
+
 
 def ensure_schema(db_path: Path = DB_PATH) -> None:
     with sqlite3.connect(db_path) as conn:
@@ -276,6 +424,10 @@ def archive(swarm_results: Dict, date: str, db_path: Path = DB_PATH) -> int:
         if not isinstance(tr, dict):
             continue
         for sig, val in extract(tr).items():
+            # v0.45.26：隔离名单在**入库口**拦截，而不是在分析时过滤——
+            # 后者会让每个下游都得记得过滤一次，漏一个就前功尽弃。
+            if is_quarantined(date, sig):
+                continue
             rows.append((date, ticker, sig, val))
     if not rows:
         return 0

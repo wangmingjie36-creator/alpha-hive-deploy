@@ -291,86 +291,85 @@ class CBOEDailyFetcher:
 
     def fetch_vix_term_structure(self) -> Dict[str, Any]:
         """
-        获取 VIX 期限结构
+        获取 VIX 期限结构（v0.45.29 起主源 = 真实 VX 期货曲线）
 
         Returns:
             {
                 'vix_spot': float,            # 现货 VIX
-                'vix_1m': float,              # 1 月期 VIX 期货
-                'vix_3m': float,              # 3 月期 VIX 期货
+                'vix_1m': float,              # 1 月期 VIX 期货（VX M1 真值）
+                'vix_3m': float,              # 3 月期 VIX 期货（VX M3 真值）
                 'term_structure': str,        # 'contango' / 'backwardation' / 'flat'
                 'contango_pct': float,        # 现货 vs 1 月差额 %
+                'source': str,                # 'vx_futures' | 'default_fallback'
                 'error': str (optional)
             }
+
+        ⚠️ source='default_fallback' 时全部数值是兜底常量，**不可当观测值用**。
+
+        历史缺陷（v0.45.29 修正）：此前 vix_1m = VIXY **ETF 股价** × 0.5、
+        vix_3m = spot × 1.10——ETF 价格与 VIX 点位无可比性（实测算出
+        backwardation −42.6% 的垃圾口径），且兜底常量不带任何标注。
+        现复用 vix_term_structure.py 的 vixcentral VX 期货曲线（M1~M8 真值）；
+        拿不到期货时**不再合成**，直接落 default_fallback 并标注。
         """
         cached = self._read_cache('vix_term')
-        if cached:
+        if cached and cached.get('source'):
             self.logger.debug("使用缓存 VIX 期限结构")
             return cached
+        # 无 source 键 = v0.45.29 之前的旧缓存（可能是 VIXY 垃圾口径），忽略重抓
 
         result = {
             'vix_spot': 0.0,
             'vix_1m': 0.0,
             'vix_3m': 0.0,
             'term_structure': 'unknown',
-            'contango_pct': 0.0
+            'contango_pct': 0.0,
+            'source': 'default_fallback',
         }
 
         try:
-            if yf is None:
-                raise ImportError("yfinance 未安装")
+            from vix_term_structure import get_vix_term_structure as _get_vts
+            vts = _get_vts() or {}
+            spot = vts.get('spot_vix')
+            futures = vts.get('futures') or []
 
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-
-                # 获取 VIX 现货
-                vix_data = yf.download('^VIX', period='1d', progress=False)
-                if not vix_data.empty:
-                    result['vix_spot'] = _last_close(vix_data)
-                else:
-                    result['vix_spot'] = 15.0  # 默认
-
-                # 尝试获取 VIX 期货数据（yfinance 支持 VIXY / UVXY）
-                # VIXY: 短期 VIX ETN（约 1 月）
-                # UVXY: 2x 短期 VIX ETN
+            if spot is None:
+                # spot 的 CBOE 官网兜底（v0.43.24 起的主源，云端 yfinance 不通时仍可达）
                 try:
-                    vixy_data = yf.download('VIXY', period='1d', progress=False)
-                    if not vixy_data.empty:
-                        # VIXY 反映约 1 月期 VIX
-                        result['vix_1m'] = _last_close(vixy_data) * 0.5  # 近似转换
-                    else:
-                        result['vix_1m'] = result['vix_spot'] * 1.05  # 正常情况小幅升水
-                except:
-                    result['vix_1m'] = result['vix_spot'] * 1.05
+                    from cboe_vix import get_vix_spot
+                    _sp = get_vix_spot()
+                    if _sp:
+                        spot = _sp[0]  # (value, source_str)
+                except Exception as e:  # noqa: BLE001
+                    self.logger.debug(f"cboe_vix spot 兜底失败: {e}")
 
-                # VIX 3 月期（更高，通常）
-                result['vix_3m'] = result['vix_spot'] * 1.10
-
-                # 计算期限结构
-                if result['vix_1m'] > result['vix_spot'] * 1.02:
-                    result['term_structure'] = 'contango'
-                elif result['vix_1m'] < result['vix_spot'] * 0.98:
-                    result['term_structure'] = 'backwardation'
-                else:
-                    result['term_structure'] = 'flat'
-
-                # 计算升水百分比
-                if result['vix_spot'] > 0:
-                    result['contango_pct'] = (result['vix_1m'] - result['vix_spot']) / result['vix_spot'] * 100
-
-                self.logger.info(f"VIX 期限结构: spot={result['vix_spot']:.2f}, 1m={result['vix_1m']:.2f}, "
-                               f"term={result['term_structure']}, contango={result['contango_pct']:.2f}%")
+            if spot and len(futures) >= 3:
+                result['vix_spot'] = round(float(spot), 2)
+                result['vix_1m'] = round(float(futures[0]), 2)
+                result['vix_3m'] = round(float(futures[2]), 2)
+                result['term_structure'] = vts.get('structure') or 'unknown'
+                result['contango_pct'] = round(
+                    (result['vix_1m'] - result['vix_spot']) / result['vix_spot'] * 100, 2)
+                result['source'] = 'vx_futures'
+                self.logger.info(
+                    f"VIX 期限结构(VX期货): spot={result['vix_spot']:.2f}, "
+                    f"M1={result['vix_1m']:.2f}, M3={result['vix_3m']:.2f}, "
+                    f"term={result['term_structure']}, contango={result['contango_pct']:.2f}%")
+            else:
+                raise RuntimeError(
+                    f"VX 期货数据不足（spot={spot}, futures={len(futures)} 点）")
 
         except NETWORK_ERRORS as ne:
             self.logger.warning(f"网络错误获取 VIX: {ne}")
-            result['vix_spot'] = 15.0
-            result['vix_1m'] = 15.75
-            result['vix_3m'] = 16.5
-            result['term_structure'] = 'contango'
-            result['contango_pct'] = 5.0
+            result.update(vix_spot=15.0, vix_1m=15.75, vix_3m=16.5,
+                          term_structure='contango', contango_pct=5.0,
+                          source='default_fallback')
         except Exception as e:
             self.logger.error(f"VIX 期限结构抓取异常: {e}")
             result['error'] = str(e)
+            result.update(vix_spot=15.0, vix_1m=15.75, vix_3m=16.5,
+                          term_structure='contango', contango_pct=5.0,
+                          source='default_fallback')
 
         self._write_cache('vix_term', result)
         return result
@@ -388,14 +387,16 @@ class CBOEDailyFetcher:
             }
         """
         cached = self._read_cache('skew')
-        if cached:
+        if cached and cached.get('source'):
             self.logger.debug("使用缓存 SKEW 数据")
             return cached
+        # 无 source 键 = v0.45.29 之前的旧缓存，忽略重抓
 
         result = {
             'skew_value': 0.0,
             'signal': 'unknown',
-            'date': datetime.now().isoformat()[:10]
+            'date': datetime.now().isoformat()[:10],
+            'source': 'default_fallback',
         }
 
         try:
@@ -408,6 +409,7 @@ class CBOEDailyFetcher:
                 skew_data = yf.download('^SKEW', period='1d', progress=False)
                 if not skew_data.empty:
                     result['skew_value'] = _last_close(skew_data)
+                    result['source'] = 'yfinance'
 
                     # 根据阈值分类
                     if result['skew_value'] > 150:
@@ -423,17 +425,20 @@ class CBOEDailyFetcher:
                 else:
                     result['signal'] = 'normal'
                     result['skew_value'] = 120.0
+                    result['source'] = 'default_fallback'
                     self.logger.warning("SKEW 数据下载为空，使用默认值")
 
         except NETWORK_ERRORS as ne:
             self.logger.warning(f"网络错误获取 SKEW: {ne}")
             result['signal'] = 'normal'
             result['skew_value'] = 120.0
+            result['source'] = 'default_fallback'
         except Exception as e:
             self.logger.error(f"SKEW 抓取异常: {e}")
             result['error'] = str(e)
             result['signal'] = 'normal'
             result['skew_value'] = 120.0
+            result['source'] = 'default_fallback'
 
         self._write_cache('skew', result)
         return result
@@ -451,14 +456,16 @@ class CBOEDailyFetcher:
             }
         """
         cached = self._read_cache('vvix')
-        if cached:
+        if cached and cached.get('source'):
             self.logger.debug("使用缓存 VVIX 数据")
             return cached
+        # 无 source 键 = v0.45.29 之前的旧缓存，忽略重抓
 
         result = {
             'vvix_value': 0.0,
             'signal': 'unknown',
-            'date': datetime.now().isoformat()[:10]
+            'date': datetime.now().isoformat()[:10],
+            'source': 'default_fallback',
         }
 
         try:
@@ -471,6 +478,7 @@ class CBOEDailyFetcher:
                 vvix_data = yf.download('^VVIX', period='1d', progress=False)
                 if not vvix_data.empty:
                     result['vvix_value'] = _last_close(vvix_data)
+                    result['source'] = 'yfinance'
 
                     # 根据阈值分类
                     if result['vvix_value'] > 130:
@@ -486,17 +494,20 @@ class CBOEDailyFetcher:
                 else:
                     result['signal'] = 'normal'
                     result['vvix_value'] = 85.0
+                    result['source'] = 'default_fallback'
                     self.logger.warning("VVIX 数据下载为空，使用默认值")
 
         except NETWORK_ERRORS as ne:
             self.logger.warning(f"网络错误获取 VVIX: {ne}")
             result['signal'] = 'normal'
             result['vvix_value'] = 85.0
+            result['source'] = 'default_fallback'
         except Exception as e:
             self.logger.error(f"VVIX 抓取异常: {e}")
             result['error'] = str(e)
             result['signal'] = 'normal'
             result['vvix_value'] = 85.0
+            result['source'] = 'default_fallback'
 
         self._write_cache('vvix', result)
         return result

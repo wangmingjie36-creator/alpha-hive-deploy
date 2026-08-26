@@ -18,14 +18,22 @@ class CrowdingDetector:
 
     def __init__(self, ticker: str):
         self.ticker = ticker
-        self.weights = {
-            "stocktwits_volume": 0.25,
-            "google_trends": 0.15,
-            "consensus_strength": 0.25,
-            "polymarket_volatility": 0.15,
-            "seeking_alpha_views": 0.10,
-            "short_squeeze_risk": 0.10
-        }
+        # v0.45.30: 权重唯一真相源 = config.CROWDING_WEIGHTS。
+        # 此前这里硬编码了第二份，与 config 的那份并存且从不同步 ——
+        # config 里的值被 _validate_weight_sum 校验却从未生效。
+        # fallback 与 config 现值逐字同向（polymarket_volatility 已删，两边都不得再出现），
+        # 防止 import 失败时静默恢复旧口径。
+        try:
+            from config import CROWDING_WEIGHTS as _CW
+            self.weights = dict(_CW)
+        except (ImportError, AttributeError):
+            self.weights = {
+                "social_volume": 0.2941,
+                "google_trends": 0.1765,
+                "consensus_strength": 0.2941,
+                "seeking_alpha_views": 0.1176,
+                "short_squeeze_risk": 0.1177,
+            }
 
     def calculate_crowding_score(self, metrics: Dict) -> float:
         """
@@ -33,10 +41,9 @@ class CrowdingDetector:
 
         Args:
             metrics: {
-                "stocktwits_messages_per_day": int,
+                "social_messages_per_day": int,
                 "google_trends_percentile": float (0-100),
                 "bullish_agents": int,  # 6 个中有几个看多
-                "polymarket_odds_change_24h": float (%)
                 "seeking_alpha_page_views": int,
                 "short_float_ratio": float,
                 "price_momentum_5d": float (%)
@@ -45,14 +52,14 @@ class CrowdingDetector:
 
         scores = {}
 
-        # 1. StockTwits 消息量
-        messages = metrics.get("stocktwits_messages_per_day", 0)
+        # 1. 社交热度消息量（Reddit ApeWisdom 代理；StockTwits 公开 API 已 403 停用）
+        messages = metrics.get("social_messages_per_day", 0)
         if messages < 10000:
-            scores["stocktwits_volume"] = (messages / 10000) * 30
+            scores["social_volume"] = (messages / 10000) * 30
         elif messages < 50000:
-            scores["stocktwits_volume"] = 30 + ((messages - 10000) / 40000) * 40
+            scores["social_volume"] = 30 + ((messages - 10000) / 40000) * 40
         else:
-            scores["stocktwits_volume"] = 70 + min(30, (messages - 50000) / 10000)
+            scores["social_volume"] = 70 + min(30, (messages - 50000) / 10000)
 
         # 2. Google Trends 热度
         scores["google_trends"] = metrics.get("google_trends_percentile", 0)
@@ -62,16 +69,7 @@ class CrowdingDetector:
         consensus_pct = (bullish_agents / 6) * 100
         scores["consensus_strength"] = consensus_pct
 
-        # 4. Polymarket 赔率变化速度
-        odds_change = abs(metrics.get("polymarket_odds_change_24h", 0))
-        if odds_change > 10:
-            scores["polymarket_volatility"] = 80
-        elif odds_change > 5:
-            scores["polymarket_volatility"] = 60
-        elif odds_change > 2:
-            scores["polymarket_volatility"] = 40
-        else:
-            scores["polymarket_volatility"] = 20
+        # 4. （v0.45.30 删除）Polymarket 赔率变化速度 —— 详见 config.POLYMARKET_ENABLED
 
         # 5. Seeking Alpha 页面浏览
         page_views = metrics.get("seeking_alpha_page_views", 0)
@@ -100,10 +98,14 @@ class CrowdingDetector:
             scores["short_squeeze_risk"] = 30
 
         # 加权合成
-        crowding_score = sum(
-            self.weights[key] * scores.get(key, 0)
-            for key in self.weights
-        )
+        # v0.45.30: 缺失项不再按 0 计入（那等于悄悄给该维度打最低分并压低总分），
+        # 改为只在**实际算出的**维度之间重新归一化。缺失与「真的很低」必须可区分。
+        _present = {k: v for k, v in scores.items() if k in self.weights and v is not None}
+        _wsum = sum(self.weights[k] for k in _present)
+        if _wsum <= 0:
+            crowding_score = 0.0
+        else:
+            crowding_score = sum(self.weights[k] * _present[k] for k in _present) / _wsum
 
         return min(100, max(0, crowding_score)), scores
 
@@ -214,10 +216,9 @@ class CrowdingDetector:
 
         # 添加每个指标
         indicator_labels = {
-            "stocktwits_volume": ("StockTwits 48h 消息量", "25%"),
+            "social_volume": ("社交热度消息量（Reddit 代理）", "29.4%"),
             "google_trends": ("Google Trends 热度", "15%"),
             "consensus_strength": ("6 个 Agent 共识强度", "25%"),
-            "polymarket_volatility": ("Polymarket 赔率变化速度", "15%"),
             "seeking_alpha_views": ("Seeking Alpha 页面浏览", "10%"),
             "short_squeeze_risk": ("短期价格动量", "10%")
         }
@@ -411,10 +412,9 @@ class CrowdingDetector:
     def _get_metric_display(self, key: str, metrics: Dict) -> str:
         """获取指标的显示值"""
         displays = {
-            "stocktwits_volume": f"{metrics.get('stocktwits_messages_per_day', 0):,} 条/天",
+            "social_volume": f"{metrics.get('social_messages_per_day', 0):,} 条/天",
             "google_trends": f"{metrics.get('google_trends_percentile', 0):.0f} 百分位",
             "consensus_strength": f"{metrics.get('bullish_agents', 0)}/6 看多",
-            "polymarket_volatility": f"24h {metrics.get('polymarket_odds_change_24h', 0):.1f}% 变化",
             "seeking_alpha_views": f"{metrics.get('seeking_alpha_page_views', 0):,} 次/周",
             "short_squeeze_risk": f"+{metrics.get('price_momentum_5d', 0):.1f}% (5d)"
         }

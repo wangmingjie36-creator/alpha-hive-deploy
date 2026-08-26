@@ -5,6 +5,524 @@
 
 ---
 
+## [0.45.35] — 2026-08-26 — 二次检查 v0.45.31~34：两个真 bug，都是「复制了已存在的正确实现」
+
+对第 1~6 项改动逐条对抗式复查。发现的两个真 bug **性质相同**：
+我把一份已经存在且正确的实现**手抄了一遍然后抄错了** ——
+而这正是我几小时前在 v0.45.30 修 `CrowdingDetector` 硬编码第二份权重时
+写进注释的教训。同一天犯两次。
+
+### Fixed 🔴 — `replay_scoring.rank_ic` 并列值处理错误（严重）
+
+自写的 `_rank` 给并列值分配**递增秩**而非平均秩。构造检验：
+x 大量并列、与 y 完全无关时，正确答案 **0.0**，它给出 **+0.2967** ——
+**凭空造出相关性**。
+
+`ic_diagnostics.spearman` 早就正确处理了并列（平均秩），项目原有的全部
+IC 结论**不受影响**；错的只有我新写的这份。现改为直接调用它。
+
+实际影响（重跑对比）：多数维度变动 <0.002，**只有 catalyst 显著变化
+（+0.0057 → +0.0130，翻倍以上）** —— 它恰恰是并列最多的维度
+（30 只标的只有约 6 个不同取值）。
+
+⚠️ **已复核承重结论仍成立**：「signal 的 IC 符号会翻转、不可追」用坏秩算的，
+修正后 3–5 月 −0.040/−0.157/−0.043、6–8 月 +0.200/+0.160/+0.084，
+3/6 个月为负，与修前几乎相同。该建议不变。
+
+### Fixed 🟠 — `signal_archive` 催化剂权重表漂移
+
+手抄的 `_CAT_TYPE_W` 漏了 6 个类型且默认值写成 0.8（蜂内是 **0.7**）：
+
+| 类型 | ChronosBee | 归档（错） |
+|---|---|---|
+| `dividendDate` | 0.3 | 0.8 |
+| `exDividendDate` / `dividend` | 0.4 | 0.8 |
+| `conference` | 0.5 | 0.8 |
+| `split` / `analyst_day` | 0.8 / 0.7 | 0.8 |
+
+而实测最常见的催化剂正是 Dividend/Ex-Dividend。现改为惰性导入
+`ChronosBeeHorizon` 的表（`_cat_tables()`），并已重新回填。
+
+**爆炸半径 6/875 行（0.7%）** —— 比担心的小，因为 earnings（两表一致）
+占绝大多数。但会随只有股息事件的标的增多而扩大。
+
+### Fixed 🟡 — 三处次要问题
+
+- **`watchlist_events` 列数不足的行静默消失**：手工文件里少打一个 `|`
+  整行就无声丢弃，编辑者永远不会知道。现计数并渲染
+  「⚠️ N 行列数不足被跳过」。
+- **`iv_history._observed_accrual_rate` 未来日期虚高速率**：时钟漂移
+  或手写错日期会让分子增而分母不变 → ETA 偏乐观，而该函数存在的意义
+  恰恰是治「ETA 偏乐观」。现剔除 `> today` 的条目。
+- **编排器时间闸加前导零注释**：`[ "$NOW_HHMM" -lt ... ]` 是对的
+  （十进制解析），但改成 `(( ))` 会在 10 点前崩
+  （`0905` 非法八进制 → `value too great for base`，闸直接失效）。
+  实测确认并写进注释锁住。
+
+### 复查通过、未发现问题的部分
+
+- v0.45.32 **确已完整提交**（437ffa4 + da060d5），`catalysts.json` 已删，
+  `chronos_bee` 的加载分支已移除且条件正确简化为 `elif _calendar_failed:`
+  （无悬空变量）
+- 补跑闸四条边界均正确：`mkdir -p $REPORTDIR` 在闸之前、进程锁在闸之前、
+  非交易日先跳过、`DATE_STR` 在启动时算定（跨午夜不漂）
+- `watchlist_events` 解析边界（坏日期 / 空来源 / 文件不存在 / 60 天陈旧警告）全对
+- `_observed_accrual_rate` 的空目录、单条、坏行分支全对
+
+### Added — 守卫 5 项
+
+`TestRankCorrelationTies`（并列必须平均秩、必须与 `ic_diagnostics.spearman`
+同源、出现自建 `_rank` 即视为回归）+ `TestCatalystWeightTablesSameSource`
+（权重表逐项比对、股息类不得落默认值）。
+
+### 测试
+
+全量 **1688 passed / 0 failed**。
+
+---
+
+## [0.45.34] — 2026-08-26 — 开机补跑：关机漏掉的扫描日不再永久丢失
+
+W29/W32/W34 三周完全无扫描，日志里**零条记录** = 机器没开（不是扫描失败）。
+`com.alpha.hive.daily.plist` 原为 `RunAtLoad=false`，关机错过 14:00
+那一刻就再也不补。而这直接卡住两个指标：
+IV Rank 的 63 天阈值按**扫描日**计（当前实测积累速率 0.33 天/交易日 →
+ETA 8.6 个月），IC 闸按不重叠周计（23/25）。
+
+### Changed — `~/.claude/scripts/alpha-hive-orchestrator.sh` 新增补跑闸
+
+⚠️ **风险不在漏跑，在修复本身**：`RunAtLoad=true` 会在**每次登录**触发，
+若无时间闸，早上开机就会在盘中跑，把盘中价当收盘价写进 `predictions` ——
+那正是 MEMORY alpha-hive-accuracy-metrics-suspect 记的头号污染源。
+
+故闸对定时触发与开机触发**统一生效**，无需区分来源：
+
+| 场景 | 今日已扫 | 时间 | 结果 |
+|---|---|---|---|
+| 定时 14:00 | 否 | ≥1330 | 跑 |
+| 早 9 点开机 | 否 | <1330 | **跳过**（防盘中污染）|
+| 下午 4 点开机 | 否 | ≥1330 | **补跑** |
+| 扫完后再开机 | 是 | — | 跳过（幂等）|
+
+- `CATCHUP_AFTER_HHMM="1330"`：美股 13:00 PT 收盘，留 30 分钟落定
+- `SWARM_MARKER`：`.swarm_results_${DATE_STR}.json` 存在即视为今日已扫
+- 两条跳过分支都 `exit 0` 并写 `status.json`（跳过是正常状态，
+  非 0 会被监控当成故障）
+- 闸位于 Step 1 **之前**，否则先抓完数据再退出等于白跑
+
+### Changed — `com.alpha.hive.daily.plist`
+
+`RunAtLoad` false → **true**。`StartCalendarInterval` 的 5 个工作日时刻
+**保持不变**——补跑是补充不是替代。已 `launchctl unload/load` 生效。
+
+### 实测验证（三条分支全部端到端跑过）
+
+```
+分支②（伪造今日产出）  → ✅ 今日（2026-08-26）已有扫描产出，跳过
+分支①（现在 11:35）    → ⏳ 现在 1135 早于收盘后阈值 1330，跳过
+分支③（阈值临时调 0001）→ 🔁 今日尚无产出且已过 0001，执行扫描
+真实 RunAtLoad 触发     → launchctl load 后自动跑，命中时间闸，退出码 0
+```
+
+命中幂等闸时**耗时 0 秒**——闸确实在 Step 1 之前拦下。
+
+### Added — `tests/test_scan_catchup.py`（8 静态 + 1 integration）
+
+守的重点是**时间闸不被调早**：`test_time_gate_not_before_market_close`
+断言阈值 ≥1300 PT，把它调到盘中即变红。另守闸在 Step 1 之前、
+跳过必须 exit 0、plist 的 RunAtLoad 为真且定时时刻未被顺手删掉。
+
+顺带记一个 subprocess 陷阱：实跑测试**不能用 `capture_output=True`** ——
+编排器会 spawn 后台全局超时看门狗，它继承 stdout/stderr，管道要等
+**所有**写入端关闭才 EOF，于是直接跑只要 0 秒的命令走管道却卡满 120s。
+已改为重定向到文件，测试从卡死变成 0.20 秒通过。
+
+### 测试
+
+全量 **1683 passed / 0 failed**。本版不改评分逻辑，不触发世代边界。
+
+---
+
+## [0.45.33] — 2026-08-26 — 评分重放：把「这样改会不会更准」从等半年变成跑一下
+
+本项目真正的瓶颈不是缺改进想法，是**无法判断哪个改进有效**：
+`ic_rerun_readiness` 实测检出 |IC|=0.090 需 25 个不重叠周（约半年），
+而半年内必然又改了别的，于是**永远学不到东西**。
+
+但并非所有改动都要等。分水岭在于**输入是否已归档**：
+
+| 改动类型 | 能否离线重放 | 依据 |
+|---|---|---|
+| 聚合层（权重、组合规则、剔除某维度） | ✅ 一直可以 | `predictions.dimension_scores` 已存 |
+| 维度计算层（改 crowding/catalyst 公式） | ✅ **本版起** | `signal_archive` 现存维度**输入** |
+| 换数据源、改抓取逻辑 | ❌ 必须前向累积 | 原始外部数据未归档 |
+
+### Added — `signal_archive` 扩展 15 个维度输入信号
+
+此前档案只存各蜂的**输出分数**，输入看不见，于是维度计算层的改动无法重放。
+新增（全部走 `details` 里已有字段，扫描侧零额外开销，schema 不变）：
+
+- `crowding.comp.*` 五项分量（social_volume / google_trends /
+  consensus_strength / seeking_alpha_views / short_squeeze_risk）
+- `catalyst.count` / `catalyst.nearest_days` / `catalyst.max_weight`
+- `buzz.comp.*` 四项（momentum / volume / volatility / reddit signal）
+- `options.iv_rank` / `options.iv_percentile` / `options.iv_rank_is_real`
+
+已回填历史：**92 个文件 → 70031 行**，新信号覆盖 2026-03-10 ~ 08-25 共 90 天。
+
+两个刻意的设计：
+- **`crowding.comp.social_volume` 同时读旧键名 `stocktwits_volume`**
+  （v0.45.30 改名前的历史样本占绝大多数，读不了旧名等于丢掉全部历史）。
+- **`catalyst.count` 在来源不可得时返回 `None` 而非 `0`** —— 0 的语义是
+  「查过了确实没有」，与 v0.45.31 的缺失分支保持同一套语义。
+- `options.iv_rank_is_real` 只有 3 天有值：`iv_rank_source` 字段本身是
+  v0.43.18 才加的，更早的历史无从判定，如实留空而不是猜。
+
+### Added — `replay_scoring.py`
+
+对已验证样本重放任意打分方案，即时出 rank-IC。内置 13 个情景
+（现行权重 / 等权 / 落库 final_score / 五个单维 / 五个 leave-one-out）。
+
+**设计重点是「不会被误读」，不是「算得快」**：
+
+- **功效护栏**：不重叠周数与 IC 并排显示，不足时明确打出
+  「⛔ 功效不足：23/25 个不重叠周，下表不足以支持任何改动决定」，
+  且**退出码非 0**（防止被脚本当成通过）
+- **默认只取最新世代**，`--all-cohorts` 显式放宽并标注「口径不可比，
+  只能相对比较」
+- **收益口径锁死 `close_t7 / price_at_predict - 1`**，不用 `return_t7`
+  （对方向单是钳位离场收益，直接对比即无效）
+- **剔除 `dir_ambiguous_t7`**
+- **不提供任何调参出口**（`best_weights` / `optimize` 之类），权重自
+  v0.44.0 只读，且实测单维 IC 均不过 Bonferroni
+
+首跑（`--all-cohorts`，860 样本 / 23 周）：护栏正确拦截，退出码 1。
+
+### Added — `tests/test_replay_scoring.py`（14 项）
+
+守的是**诚实性**而非正确性：功效不足必须非 0 退出、有效样本量必须按
+不重叠周报、跨世代必须标注不可比、收益口径必须是未截断的 close_t7、
+不得出现调参形状的 API。
+
+已验证守卫为真：拆掉功效护栏（`return 0 if powered else 1` → `return 0`）
+即变红，还原后全绿。
+
+### 测试
+
+全量 **1675 passed / 0 failed**。本版**不改任何评分逻辑**，
+不触发世代边界。
+
+---
+
+## [0.45.32] — 2026-08-26 — 人工前瞻日历移出评分：从「静默改分」降级为「误导读者」
+
+延续 v0.45.31 的 catalyst 排查。问题不止于「文件过期」——**人工维护的前瞻
+日历直接喂 `catalysts_found` → catalyst 维度 → `final_score` 的 18.78%**，
+两种失败都真实发生过：
+
+1. **腐烂**：`catalysts.json` 最后更新 2026-07-23，一个月后窗口内 0 事件；
+   注释自称「覆盖全部 WATCHLIST」，实测只有 **6/30** 只标的（另 3 个键是注释）。
+   `catalyst_refinement.py` 的硬编码日期停在 **2026-03-15**，5 个月后仍在被
+   读取，实测产出 0 个事件。
+2. **编造**：VKTX 曾有两条 `critical` 级条目是错误信息——把二期口服剂型试验
+   当成三期（真正的三期是 VANQUISH-1/2）、把公司指引 2027 年的顶线数据写成
+   2026-08-15。它们躺在文件里驱动评分，直到有人专门核实才发现
+   （见删除前该文件的 `_vktx_note`）。违反 CLAUDE.md「不编数据」。
+
+### 核心判断：改的是失败模式，不是数据质量
+
+- 喂评分时：一条错误的 critical 催化剂**静默推动 18.78% 的权重**，
+  与真催化剂产出完全同形，人看不见 —— 不可恢复。
+- 只进报告时：降级为「误导一个能自己判断的读者」—— 可恢复。
+
+所以不是「重建 or 删除」，而是**把无法自动核实的信息挡在评分之外**。
+
+### Removed — 两个人工前瞻日历退出评分路径
+
+- 删除 `catalysts.json` 与 `catalyst_refinement.py`
+- `chronos_bee` 移除对应的两段加载逻辑。本蜂的催化剂来源现在**只剩自动
+  可核实的一条**：yfinance 财报日历（含 Earnings / Dividend / Ex-Dividend Date，
+  实测 12/12 可用）。来源不可得时走 v0.45.31 的缺失分支返回 error。
+
+**活路径不受影响**：`chronos_bee` 调 `plan_exit` 时直接传 `catalysts_found`，
+不读文件。只有回测脚本 `dynamic_exit_backtest.py` 经
+`catalyst_exit_planner.load_catalysts_for_ticker` 读它，而该函数缺文件时
+恒返回 `[]`，且那份数据在删除前就已全部过期。函数签名保留以免破坏导入。
+
+### Added — `watchlist_events.md` + `watchlist_events.py`（报告素材通道）
+
+人工前瞻事件的新去处，**只渲染进日报「关注事项」段，不进任何评分路径**。
+反腐烂设计（针对前身烂到没人发现的三个机制）：
+
+- **文件报告自己的年龄**：mtime 随报告输出，超 30 天显示陈旧警告
+- **过期条目不删除**，折叠但保留可见 —— 静默消失正是前身没被发现的原因
+- **日期写坏不静默丢弃**，标 `bad_date` 单独列出
+- **每条强制带来源 URL 与核实状态**（`已核实` / `待验证`），缺失即标 ⚠️
+
+### Added — `tests/test_watchlist_events.py`（11 项）
+
+最重要的是 `TestNeverReachesScoring` 三条边界守卫：模块不得暴露评分形状的
+出口、评分路径模块不得 import 它（**AST 查真实 import，不做字符串匹配**——
+注释里提到模块名是正当的）、被删的两个文件不得复活。
+
+已验证守卫为真：往 `chronos_bee` 加一行 `from watchlist_events import ...`
+即变红，还原后全绿。
+
+### 测试
+
+全量 **1661 passed / 0 failed**（1 skipped，64 deselected，1 xfailed）。
+
+---
+
+## [0.45.31] — 2026-08-26 — catalyst 的静默中性化 + IV Rank ETA 的结构性乐观
+
+承接「让评分更准」的排查。两处都属**移除已证实的缺陷**，不需要统计验证。
+
+### Fixed — ChronosBee：抓取失败冒充「无近期催化剂」
+
+`except (*NETWORK_ERRORS, AttributeError)` 只打 warning 就继续，随后落到
+`else: score = 4.0 / "无近期催化剂"`。于是**「yfinance 财报日历挂了」与
+「这只标的确实没催化剂」产出完全同形**——静默中性化（MEMORY
+alpha-hive-silent-degradation 记的同款形态）。
+
+实测规模：90 个扫描日里 **9 天（10%）** 出现 catalyst 落 4.0 占比 >75% 的
+集体塌缩，最严重 2026-08-11 是 **26/27 只标的**。catalyst 占 `final_score`
+权重 **18.78%**，那些天这 18.78% 携带的是「今天没抓到」而非催化剂信息。
+
+修法：记录 `_calendar_failed`；当财报日历失败**且** `catalysts.json` 无该
+标的条目时，返回 `make_error_result(...)` 而非 4.0。queen_distiller 本就有
+正确的缺失维度通道（`valid_results` 过滤掉带 `error` 的结果 →
+`dim_status="error"` → 动态填充 + 覆盖度压缩），此前从未被触发。
+
+⚠️ 判据必须**逐标的**：`_catalysts_json_loaded` 只表示文件读到了，
+而实测 `catalysts.json` 只覆盖 **6/30** 只标的（另 3 个键是注释），
+故新增 `_cat_json_has_ticker`。按文件是否存在判断会让修复几乎不触发。
+
+反向守卫同样重要：日历**成功返回空**时仍应是 4.0——「查过了确实没有」
+与「没查到」都要能表达，否则修过头。
+
+### Fixed — `iv_history.py` 的 ETA 结构性乐观 4 倍
+
+原输出「QCOM 3 天（60 天后可用）」隐含假设**今后每个日历日都攒到 1 条**。
+但条目只在**有扫描且抓到真实 IV**的日子产生。改为按实测积累速率外推
+（同 `ic_rerun_readiness` 的周产出率做法）：
+
+```
+实测积累速率: 3/9 个交易日有记录 = 0.33 天/交易日
+QCOM  3 天 (还需 60 条 ≈ 180 个交易日 ≈ 8.6 个月)
+```
+
+**8.6 个月 vs 原报的 2 个月。** 并附一行提示：提高扫描日覆盖率可按比例
+缩短 ETA。注意 IV Rank 的阈值是 63 个**扫描日**（不是周），所以它对
+日覆盖率敏感，而 IC 闸对周覆盖率敏感——两者的瓶颈口径不同。
+
+（顺带更正一个说法：`iv_history.py` 上线是 2026-08-14，只跑了 12 天，
+积累进度本身正常，不是坏了。）
+
+### Fixed — `tests/test_ic_rerun_readiness.py` 硬编码世代日期（v0.45.30 遗留）
+
+v0.45.30 追加世代边界后，该文件里写死的 `start="2026-08-17"`（当时的最新
+世代）全部落到新边界之前被过滤，7 个测试变红。**这是 v0.45.30 的提交疏漏
+——全量回归跑在追加世代边界之前，之后未重跑就提交了。**
+现改为一律从 `rr._COHORT_HISTORY[-1][0]` 推导（世代边界会持续追加，
+硬编码必然反复失效）。
+
+### Added — `tests/test_catalyst_availability.py`（7 项）
+
+含端到端「喂退化看它红」验证：把缺失分支改回旧行为后
+`test_calendar_failure_returns_error_not_4` **必红**，还原后全绿。
+
+⚠️ 初版用假 ticker `ZZZZ_NO_SUCH` 写测试，被 `_validate_ticker` 提前挡下，
+根本走不到目标分支——**退化版照样全绿的假守卫**。现改用 ABBV（真实在
+WATCHLIST、且不在 catalysts.json 的 6 只里）。此坑已写进测试 docstring。
+
+### 世代边界
+
+catalyst 缺失时不再计入 `dim_scores` → 影响 `final_score`，属评分口径变更。
+与 v0.45.30 同属 2026-08-26 世代（当日已有边界，不重复追加）。
+
+### 测试
+
+全量 **1650 passed / 0 failed**（1 skipped，64 deselected，1 xfailed）。
+
+---
+
+## [0.45.30] — 2026-08-26 — 清理三个名存实亡的数据源，并修掉拥挤度里的动量双计
+
+用户提出「AlphaVantage/Tiingo/Stocktwits/Polymarket 好像很久没用到了」，全仓核查。
+结论四个源各不相同，**其中两个我先前的判断是错的**：
+
+| 源 | 实况 | 处理 |
+|---|---|---|
+| Tiingo | **0 个 Python 文件引用**，日志 0 次 | key 文件为遗物，代码无可删 |
+| StockTwits | 公开 API 自 v0.40.0 已 403 停用，数据**早就换成 Reddit ApeWisdom**，只有字段名还叫 stocktwits_* | 全面改名为 social_* |
+| AlphaVantage / Finnhub | **没坏**。实测两个都通（Finnhub 返回 NVDA 真实报价）。极少出现是因为它们在降级链第 2、3 位，CBOE/yfinance 通常成功 —— 这正是降级链该有的样子。日志里 26 次 EOF 全是 8/24 网络风暴期间的 | **不动** |
+| Polymarket | 每次扫描都调，**从无一条成功返回个股赔率**（455 条日志全是「无相关个股预测市场」+ 熔断）。结构性原因：大盘股没有个股预测市场 | 关闭 |
+
+### Changed — 关闭 Polymarket（`config.POLYMARKET_ENABLED = False`）
+
+代价是纯浪费：每次扫描 30 只 × 最多 3 次尝试 × 15s 超时 + 429 退避，且它是
+v0.43.27 那场 EOF 风暴命中的 7 个域名之一 —— 每天 30 次注定失败的请求白白扩大故障面。
+
+**odds 维度评分口径不变**：`oracle_bee` 在 `poly_markets==0` 时本就把
+0.55+0.10 重新归一化、不掺常数。开关的 fallback 默认值一并设为 `False`
+（v0.45.23 教训：关掉的开关若 fallback 是 True，import 失败会静默重开）。
+`polymarket_client.py` 与 `data_fetcher.get_polymarket_odds` **保留**，改回 True 即复活。
+
+### Fixed — 拥挤度里的动量伪装与双计（这是本次真正的 bug）
+
+`real_data_sources.get_real_crowding_metrics`（ScoutBee 实际走的路径）里：
+
+```python
+poly_proxy = abs(momentum_5d) * 0.8   # 冒充 polymarket_odds_change_24h
+```
+
+把动量改个名字当赔率变化用，而**同一个 dict 里 `price_momentum_5d` 已在喂
+`short_squeeze_risk`** —— 动量被暗中重复计权。实测 2026-08 的 250 个样本反推：
+该分量 **76% 落在最低档常数 20**，其余 24% 的变化全部来自动量本身。
+既是常数稀释又是双计，整项移除。
+
+- `CROWDING_WEIGHTS` 删除 `polymarket_volatility`（原 0.15），其余五项
+  按原比例重归一化到 1.0（相对关系不变）。
+- **缺失分量不再按 0 计**：原 `sum(w[k] * scores.get(k, 0))` 把「没数据」
+  等同于「这维度得 0 分」并压低总分；改为只在实际算出的分量间重归一化。
+  缺失与「真的很低」必须可区分（同 v0.45.3「安全默认值」判据）。
+
+### Fixed — `CrowdingDetector` 硬编码了第二份权重
+
+`__init__` 里硬编码的权重字典与 `config.CROWDING_WEIGHTS` 并存且从不同步——
+config 那份被 `_validate_weight_sum` 校验却**从未生效**。现改为读 config
+（唯一真相源），fallback 与 config 现值逐字同向。
+
+### Fixed — 报告里的对外假声明
+
+`report_formatters.py` 数据源清单写着「StockTwits 情绪（实时）」与
+「Polymarket 赔率（每5分钟）」，两者都不属实。已改为「社交热度：Reddit 提及量
+（ApeWisdom）」并删除 Polymarket 行。
+
+### Changed — 改名（消除误导，非行为变更）
+
+`stocktwits_messages_per_day` → `social_messages_per_day`、
+`stocktwits_volume` → `social_volume`、`get_stocktwits_metrics` → `get_social_metrics`、
+TTL `stocktwits_legacy` → `social_legacy`、`DATA_SOURCE_PRIORITY.stocktwits_messages`
+→ `social_messages`。移除注册表里的 `STOCKTWITS_TOKEN`。
+全仓 grep 确认生产代码无旧键名残留，测试同步更新。
+
+### ⚠️ 世代边界（`ic_rerun_readiness._COHORT_HISTORY` 已追加 2026-08-26 / v0.45.30）
+
+拥挤度 → ScoutBee signal 维度 → `final_score`，属评分口径变更。
+**现在改的代价接近于零**：上一世代（2026-08-17）此时才 0/25 周、60 条未到期样本，
+晚改只会更贵。
+
+### 测试
+
+全量 **1643 passed / 0 failed**（+1 skipped，64 deselected）。
+端到端实测拥挤度链路：权重与 config 一致、缺失分量走重归一化（49.31 而非按 0 计的更低值）、
+只给旧键名时 `social_volume` 走 0 档 —— 证明改名彻底、无双读残留。
+
+---
+
+## [0.45.29] — 2026-08-26 — VIX 期限结构口径修正：ETF 股价冒充期货点位，结构方向长期报反
+
+v0.45.27 首跑对比暴露、用户批准修复。`cboe_fetcher.fetch_vix_term_structure`
+的旧口径：`vix_1m` = **VIXY ETF 股价 × 0.5**（注释自称「近似转换」）、
+`vix_3m` = spot × 1.10（**从来没抓过数据，纯合成**）。ETF 价格与 VIX 点位
+无可比性——修复当天实测对比：
+
+| | spot | 1m | 3m | 结构判定 |
+|---|---|---|---|---|
+| 旧口径 | 15.70 | **9.005**（VIXY 股价×0.5） | 17.27（合成） | **backwardation −42.6%** |
+| 新口径（VX 真期货） | 15.74 | 17.20（M1） | 19.70（M3） | **contango +9.28%** |
+
+**不只数值错，结构方向整个是反的**：市场平静（contango）被天天报成恐慌
+（backwardation）。消费方 `_calculate_macro_score` 与 generate_deep_v2 宏观卡
+一直吃这个反向信号。
+
+### Changed — `cboe_fetcher.py`
+
+- `fetch_vix_term_structure` 主源改为 **vixcentral VX 期货曲线**（复用现成的
+  `vix_term_structure.py`，M1/M3 真值；spot 缺失时 `cboe_vix.get_vix_spot()`
+  CBOE 官网兜底——云端 yfinance 不通时链路仍活）。返回 schema 不变，零下游破坏。
+- **拿不到期货时不再合成**，直接落 `source='default_fallback'`。
+- `vix_term` / `skew` / `vvix` **全部路径补 `source` 标注**（成功 →
+  `vx_futures`/`yfinance`；兜底 → `default_fallback`；`pcce` 本就有，是范本）。
+- 无 `source` 键的当日旧缓存视为过期重抓——否则 VIXY 垃圾口径经缓存再活一天。
+
+### Changed — `cloud_snapshot_fetch._degradation_check`
+
+判据升级为两层：`source=='default_fallback'`（权威）优先，等值匹配已知兜底
+常量（15.0/15.75/16.5、120.0、85.0）保底兜住无 source 的旧数据。
+
+### Added — `tests/test_cboe_fetcher_source.py`（11 项）
+
+全部按「喂退化数据看它红」构造：VIXY 口径回归即红（`vix_1m` 必须等于 M1、
+`vix_3m ≠ spot×1.10`）、每条兜底路径必须带标注、旧缓存必须作废、
+带标注缓存正常复用、degradation_check source 优先。
+本地真实网络验证：`source=vx_futures`，contango +9.28% 与 vixcentral 一致。
+
+### 遗留说明
+
+兜底常量本身（15.0/15.75/16.5 等）**数值语义未动**——只加了标注。彻底
+None 化需要先审计 `_calculate_macro_score` 等消费端的 None 处理
+（教训 v0.43.25/v0.45.3：上游诚实化会立刻在下游炸出新点），另行处理。
+
+---
+
+## [0.45.28] — 2026-08-26 — 清除 8/24 的期权污染 + 数据隔离名单
+
+> 版本号说明：原编 0.45.27，与并发 session 的「抓数上云」条目撞号，顺延至 0.45.28。
+
+v0.45.16 只修了代码、没清数据。本条清掉污染，并加一道机制防止它被回填带回。
+
+### 污染范围（日志实证，不靠猜）
+
+8/24 的报告实际在 **8/25 07:37–12:44** 生成，`options_analyzer` 的快照键取
+`pdt_today()` 而非 `--date` 目标日，于是**全部 30 只标的**的期权链都是 8/25 的：
+
+| 路径 | 只数 | 证据 |
+|---|---|---|
+| 命中已存在的 8/25 快照 | 24 | `[NVDA] 期权快照命中: options_snapshot_NVDA_2026-08-25.json (冻结于 2026-08-25T06:33:51)` |
+| 现拉后写入 8/25 槽位 | 5 | CRM/JNJ/NEE/WMT/XOM，`期权快照写入: options_snapshot_*_2026-08-25.json` |
+| 单独重跑同样写 8/25 槽位 | 1 | BRK-B，12:44，`logs/rerun_brkb.log` |
+
+⚠️ **一处排查更正**：我最初按「8/24 与 8/25 取值相同」判定污染，得出"26/30"。
+这个判据是错的——未被污染的 6 只（BRK-B/CRM/JNJ/NEE/WMT/XOM）取值也相同，
+那是 v0.45.26 修掉的 5 天 IV 缓存造成的。改用日志实证后确认是 **30/30**。
+
+### Added — `signal_archive.QUARANTINE` 数据隔离名单
+
+`backfill()` 用 `INSERT OR REPLACE` 从 `.swarm_results_*.json` 重建，
+所以**光删库不够**，下一次回填会把污染原样带回。原始 JSON 刻意不改
+（它是"系统当天实际产出什么"的审计轨迹），改由名单在**入库口**拦截
+——不放在分析时过滤，否则每个下游都得记得过滤一次，漏一个就前功尽弃。
+
+**划界原则**：只隔离**当日市场观测**（取错日子 ⇒ 值本身就是错的）；
+**不隔离 Agent 评分**——那些是系统当天的真实输出，属审计轨迹，抹掉会让
+"系统当时做了什么"永远查不清。代价（OracleBee 等下游评分在该日仍基于坏输入）
+已写进 `reason`。
+
+### Removed — 150 行污染数据
+
+`2026-08-24` × 30 只 × 5 类信号（`options.iv_current` / `put_call_ratio` /
+`gamma_exposure` / `total_oi` / `bear.options_bear`）。
+当日剩余 1268 行（Agent 评分等审计轨迹保留）。
+备份：`db_backups/pheromone_pre_0824_options_purge_2026-08-26.db`。
+
+⚠️ **期权接口只有实时快照、无历史 ⇒ 8/24 的真实期权观测永久丢失**，不可补，只能缺失。
+
+### 下游行为验证
+
+`vol_forecast` 对 8/24 返回 **0 只**（分量缺失 ⇒ 跳过，不猜测、不填默认值），
+8/25 仍为 30 只——缺口被正确表达为"没有数据"，而非伪造成中性值。
+
+### 测试 — `tests/test_signal_quarantine.py`（5 条）
+
+入库口拦截 / 不误伤同批其它信号 / 不扩散到其它日期 / `is_quarantined` 真值表 /
+**每条隔离必须带 reason 与 evidence**（没有出处的隔离等于凭空删数据）/
+端到端 backfill 不得复活。已验证两个退化版必红（拆掉拦截 → 红；删掉证据 → 红）。
+
+---
+
 ## [0.45.27] — 2026-08-26 — 抓数上云：当日期权/IV 快照不再依赖 Mac 开机
 
 覆盖率 35%（v0.45.25 实测）的根因是扫描跑在本机、主机关机即断档，而**当日
@@ -32,11 +550,31 @@ IV」）。对策：把「抓数」从「分析」里拆出来，放 Claude clou
 - 额度说明：每次运行消耗 Claude 订阅额度（机械脚本任务，量小；确切数字
   见首跑后 /usage）。用户已在 session 中批准方案与模型选择。
 
+### 首跑实测（2026-08-26 09:28 UTC，手动触发）
+
+**30/30 标的成功**、186 秒、push 成功（`cloud-snapshots` 分支 `00b52d7`，32 文件）。
+抽查 NVDA：链 160C/160P、期限结构 `atm_iv` 4 点（22DTE 42.4%）——核心资产真值 ✓。
+
+**云沙箱网络边界（实测）**：CBOE / CNN / pypi 可达；**yfinance（Yahoo）连接
+被重置**。后果：`market.json` 的 `cboe` 段里凡走 yfinance 的指标全部落到
+cboe_fetcher 的**无标注兜底常量**——实测 vix_term=15.0/15.75/16.5（本地同刻
+真值 15.70）、skew=120.0（真值 143.27）、vvix=85.0。v0.43.24「兜底值冒充
+观测值」同款，云端 agent 的回报也被骗（报了「VIX 期限结构仍算出」）。
+
+**已修**：`_degradation_check()` 对照已知兜底常量标记疑似降级段，写入
+`market.json.degraded_sections` 与 `manifest.market_degraded_sections`；
+stdout 打「⚠️ market 疑似兜底段（不可信）」。**消费端规则：degraded_sections
+里列出的段一律不用。** 每标的期权数据与 F&G 不受影响（CBOE/CNN 直连）。
+等值匹配是启发式，cboe_fetcher 补 source 标注后应改读 source（已 flag 后台任务，
+同一任务含：VIXY **ETF 价格**被当 VIX 期货点位的口径错误——本地路径同样中招，
+vix_1m=9.005 实为 VIXY 股价，backwardation −42.6% 是垃圾口径）。
+
 ### 未做（后续接线）
 
 本机消费端——扫描/补跑时优先读当日 `cloud_snapshots/`——**尚未接线**，
 现阶段云端只负责把数据存住（先止血断档不可逆的部分）。接线时注意
-v0.45.16/18 的补跑快照槽位语义，并与 v0.45.26 的 IV 缓存优先级修复对齐。
+v0.45.16/18 的补跑快照槽位语义，并与 v0.45.26 的 IV 缓存优先级修复对齐；
+`market.json` 只可消费 `degraded_sections` 之外的段。
 
 ---
 

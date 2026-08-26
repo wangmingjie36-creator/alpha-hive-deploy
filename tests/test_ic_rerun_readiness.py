@@ -51,11 +51,23 @@ def db(tmp_path):
     return _make
 
 
-def _weekly_rows(n_weeks, start="2026-08-17", tickers=("AAA", "BBB"),
-                 ripe=True):
-    """每周一条（不重叠取样单位就是周），共 n_weeks 周。"""
+# v0.45.31: 起始日不再硬编码。此前默认写死 "2026-08-17"（当时的最新世代），
+# v0.45.30 追加新世代边界后，这些样本全部落到边界之前被过滤掉，7 个测试变红。
+# 世代边界会持续追加，硬编码必然反复失效 —— 一律从 _COHORT_HISTORY 末条推导。
+_COHORT_START = rr._COHORT_HISTORY[-1][0]
+
+
+def _after_cohort(weeks=0):
+    """世代起始日之后 N 周的日期（供测试构造世代内样本）。"""
     import datetime as dt
-    d0 = dt.date.fromisoformat(start)
+    return (dt.date.fromisoformat(_COHORT_START) + dt.timedelta(weeks=weeks)).isoformat()
+
+
+def _weekly_rows(n_weeks, start=None, tickers=("AAA", "BBB"),
+                 ripe=True):
+    """每周一条（不重叠取样单位就是周），共 n_weeks 周。默认从当前世代起始日开始。"""
+    import datetime as dt
+    d0 = dt.date.fromisoformat(start or _COHORT_START)
     out = []
     for w in range(n_weeks):
         d = (d0 + dt.timedelta(weeks=w)).isoformat()
@@ -90,12 +102,14 @@ class TestCohortBoundary:
     def test_samples_before_boundary_are_excluded(self, db):
         """世代之前的样本必须一条都不算 —— 混算是静默的，数字照出但没意义。
 
-        注意早期序列只取 20 周（2026-01-05 → 05-18），全部落在边界 2026-08-17
-        之前。取 40 周会跨过边界，那测的就不是过滤逻辑了。
+        注意早期序列取的是当前世代边界之前的 20 周，全部应被过滤。
+        跨过边界就测不到过滤逻辑了，故起止日均由 _COHORT_START 推导。
         """
-        rows = (_weekly_rows(20, start="2026-01-05")      # 全部早于边界
-                + _weekly_rows(2, start="2026-08-17"))
-        res = rr.assess(db_path=db(rows), today="2026-08-31")
+        import datetime as dt
+        _early = (dt.date.fromisoformat(_COHORT_START) - dt.timedelta(weeks=32)).isoformat()
+        rows = (_weekly_rows(20, start=_early)            # 全部早于边界
+                + _weekly_rows(2))                        # 世代内 2 周
+        res = rr.assess(db_path=db(rows), today=_after_cohort(3))
         assert res["weeks_accrued"] == 2, "边界之前的样本被算进来了"
         assert res["n_all_samples"] == 4, "世代内总样本数也应只数世代内的"
 
@@ -213,7 +227,7 @@ class TestEtaAndExitCodes:
         扫描覆盖率实测只有 36.7%，按日历周外推会给出过于乐观的日期。
         """
         # 8 个日历周里只产出 4 个扫描周 ⇒ 产出率 0.5
-        rows = _weekly_rows(4, start="2026-08-17")
+        rows = _weekly_rows(4)
         res = rr.assess(db_path=db(rows), today="2026-10-12")
         assert res["weeks_per_calendar_week"] < 1.0
         assert res["eta_calendar_weeks"] > res["weeks_remaining"], (
@@ -237,7 +251,7 @@ class TestEtaAndExitCodes:
 
     def test_not_ready_returns_1(self, monkeypatch, db):
         rc = self._run(monkeypatch, ["--db", str(db(_weekly_rows(2))),
-                                     "--today", "2026-08-31", "--quiet"])
+                                     "--today", _after_cohort(3), "--quiet"])
         assert rc == 1
 
     def test_ready_returns_0(self, monkeypatch, db):
@@ -250,7 +264,7 @@ class TestEtaAndExitCodes:
                                                      capsys):
         import json
         rc = self._run(monkeypatch, ["--db", str(db(_weekly_rows(2))),
-                                     "--today", "2026-08-31", "--json"])
+                                     "--today", _after_cohort(3), "--json"])
         assert rc == 1
         payload = json.loads(capsys.readouterr().out)
         for key in ("cohort", "weeks_required", "weeks_accrued",

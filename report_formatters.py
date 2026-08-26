@@ -618,7 +618,8 @@ def _build_data_quality_section(sorted_results) -> List[str]:
     degraded: Dict[str, List[str]] = {}   # "Agent.channel" -> [tickers]
     total_ch = 0
     real_ch = 0
-    # 设计性缺失通道不算降级（Polymarket 无个股预测市场，权重已自动重分配）
+    # 设计性缺失通道不算降级（Polymarket 自 v0.45.30 已关闭，见 config.POLYMARKET_ENABLED；
+    # 权重在 oracle_bee 侧自动重归一化，不掺常数）
     _by_design = {"polymarket"}
     for ticker, r in sorted_results:
         dq = r.get("data_quality") or {}
@@ -715,6 +716,14 @@ def generate_swarm_markdown_report(reporter, swarm_results: Dict,
     md.extend(_build_market_expectations(sorted_results))
     md.extend(_build_sentiment(sorted_results))
     md.extend(_build_catalysts(sorted_results))
+    # v0.45.32: 人工维护的前瞻事件 —— 只渲染进报告，**绝不进评分**。
+    # 前身 catalysts.json / catalyst_refinement 直接喂 catalyst 维度（18.78% 权重），
+    # 既腐烂过也编造过（见 watchlist_events.py 模块 docstring）。
+    try:
+        from watchlist_events import format_for_report as _wl_fmt
+        md.extend(_wl_fmt(tickers=[t for t, _ in sorted_results]))
+    except Exception as _e_wl:  # noqa: BLE001 - 报告素材失败绝不影响主报告
+        _log.warning("关注事项渲染跳过: %s", _e_wl)
     md.extend(_build_competitive(sorted_results))
 
     md.extend(_build_bear_contrarian(sorted_results))
@@ -836,8 +845,7 @@ def generate_markdown_report(reporter) -> str:
     md.append("## 📝 数据来源 & 免责声明")
     md.append("")
     md.append("**数据源**：")
-    md.append("- StockTwits 情绪（实时）")
-    md.append("- Polymarket 赔率（每5分钟）")
+    md.append("- 社交热度：Reddit 提及量（ApeWisdom）")
     md.append("- Yahoo Finance / yFinance（实时）")
     md.append("- SEC 披露（每日更新）")
     md.append("- **期权链数据**（yFinance，每5分钟缓存）")

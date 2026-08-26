@@ -199,16 +199,67 @@ class TestAnalyzerIntegration:
 
         r = agent.analyze("NVDA", stock_price=100.0)
 
-        # 前置校验：确认降级确实发生了，否则本测试无意义（防止再次退化为空跑）
-        assert r["iv_current"] == pytest.approx(21.0, abs=0.5), (
-            f"降级未生效（iv_current={r['iv_current']}），本测试无法验证口径问题"
+        # ── v0.45.26 起断言更强 ──
+        # 旧版这里断言 `iv_current == 21.0`（即"降级确实发生了"），因为当时
+        # **只要缓存存在就用缓存**。v0.45.26 把优先级倒过来：当日实拉值有效时
+        # 必须用实拉值并刷新缓存，缓存只在实拉值无效时兜底。
+        # 于是 current_iv 与 iv_raw_observed 不再可能在"实拉有效"时分叉
+        # ——v0.43.20 的口径错配从"被守着"变成"结构上不可能"。
+        # 这里改为断言新不变式：**盘后 + 实拉有效 ⇒ 绝不被缓存替换**。
+        assert r["iv_current"] == pytest.approx(58.0, abs=0.5), (
+            f"盘后实拉 IV 58% 有效，却被缓存 21% 替换（iv_current={r['iv_current']}）"
+            f"——v0.45.26 的优先级倒置修复失效了"
         )
         assert r["iv_rank_source"].startswith("real_iv_")
         assert r["iv_raw_observed"] == pytest.approx(58.0, abs=0.5)
-        # 用今日真实观测 58 → 高位 rank；若误用降级缓存 21 → 会掉到低位
+        # 用今日真实观测 58 → 高位 rank；若误用陈旧缓存 21 → 会掉到低位
         assert r["iv_rank"] > 80, (
-            f"iv_rank={r['iv_rank']} 偏低，疑似误用了降级后的 current_iv "
+            f"iv_rank={r['iv_rank']} 偏低，疑似误用了缓存值 "
             f"(={r['iv_current']}) 而非今日原始观测 {r['iv_raw_observed']}"
+        )
+
+    def test_after_hours_falls_back_to_cache_only_when_raw_invalid(
+            self, tmp_path, monkeypatch):
+        """v0.45.26：实拉值**无效**时才回退缓存 —— 这是缓存唯一该生效的场合。
+
+        与上一条配对：上一条守"有效实拉不得被替换"，本条守"无效实拉必须被替换"。
+        缺了本条，把降级块整个删掉也能让上一条变绿。
+        """
+        import options_analyzer as _oa
+        from datetime import datetime as _dt, timezone as _tz
+
+        class _AfterHoursDateTime(_dt):
+            @classmethod
+            def now(cls, tz=None):
+                fixed = _dt(2026, 8, 14, 22, 0, tzinfo=_tz.utc)   # 18:00 ET 周五
+                return fixed.astimezone(tz) if tz else fixed.replace(tzinfo=None)
+
+        monkeypatch.setattr(_oa, "datetime", _AfterHoursDateTime)
+        from options_analyzer import OptionsAgent
+
+        agent = OptionsAgent()
+        monkeypatch.setattr(agent.fetcher, "cache_dir", str(tmp_path))
+        # 链上 IV = 0 ⇒ 低于 _MIN_VALID_IV，属"实拉无效"
+        monkeypatch.setattr(agent.fetcher, "fetch_options_chain", lambda t: {
+            "calls": [{"strike": 100, "openInterest": 500, "impliedVolatility": 0.0,
+                       "gamma": 0.04, "volume": 100}],
+            "puts": [{"strike": 95, "openInterest": 400, "impliedVolatility": 0.0,
+                      "gamma": 0.03, "volume": 80}],
+            "expirations": ["2026-09-18"], "source": "real",
+        })
+        monkeypatch.setattr(agent.fetcher, "fetch_historical_hv",
+                            lambda t: [20.0 + i for i in range(30)])
+        monkeypatch.setattr(agent.fetcher, "_save_last_valid_iv", lambda t, iv: None)
+        monkeypatch.setattr(agent.fetcher, "_read_last_valid_iv", lambda t: 33.0)
+
+        r = agent.analyze("NVDA", stock_price=100.0)
+
+        assert r["iv_current"] == pytest.approx(33.0, abs=0.5), (
+            f"实拉 IV 无效时应回退缓存 33%，实得 {r['iv_current']}"
+        )
+        # 实拉无效 ⇒ 不得把它当成"今日观测"写进 IV 历史
+        assert r["iv_raw_observed"] is None, (
+            f"实拉无效却记成观测值 {r['iv_raw_observed']}，会污染 IV 历史分布"
         )
 
 

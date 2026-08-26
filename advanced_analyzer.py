@@ -834,7 +834,7 @@ class AdvancedAnalyzer:
 
         # 提取关键数据
         crowding_score = realtime_metrics.get("crowding_input", {}).get(
-            "stocktwits_messages_per_day", 0
+            "social_messages_per_day", 0
         )
         current_price = realtime_metrics.get("sources", {}).get("yahoo_finance", {}).get(
             "current_price", 0

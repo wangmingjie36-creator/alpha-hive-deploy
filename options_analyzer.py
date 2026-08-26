@@ -1759,43 +1759,56 @@ class OptionsAgent:
         #   C. 缓存 TTL 从 48h 延长到 120h（覆盖 3 天长周末 + 缓冲）
         if not _market_open or current_iv < _MIN_VALID_IV:
             _raw_iv = current_iv  # 保留原始值用于对比
-            last_valid = self.fetcher._read_last_valid_iv(ticker)
-            if last_valid:
-                # 合理性校验：缓存值不应低于历史 IV 最低点的 70%
-                # 防止某次错误采集（如 yfinance 返回极低 IV）污染后续扫描
-                _hist_min = min(hist_hv) if hist_hv else 0.0
-                _cache_suspicious = _hist_min > 0 and last_valid < _hist_min * 0.7
-                if _cache_suspicious:
-                    _log.warning(
-                        "%s 缓存 IV %.2f%% 低于历史最低 %.2f%% × 70%% → 丢弃坏缓存；"
-                        "raw_iv=%.2f%% %s",
-                        ticker, last_valid, _hist_min, _raw_iv,
-                        "可用，采用" if _MIN_VALID_IV <= _raw_iv <= _MAX_VALID_IV else "同样异常，使用兜底 25.0%%"
-                    )
-                    # 坏缓存不使用；current_iv 保持 raw_iv 进入下方 elif/else 兜底
-                else:
+            # ── v0.45.26：优先级倒置修复 ──
+            # 旧逻辑：只要缓存存在就用缓存，**且命中时不刷新缓存**。
+            # 由于扫描定时在 14:00 PDT（= 17:00 ET，已收盘），`_market_open`
+            # 恒为 False，于是每次扫描都走这条降级路径 ⇒ 同一个 IV 值会被
+            # `_LAST_VALID_IV_TTL`（120h）内的所有扫描反复复用，
+            # `options.iv_current` 因此变成 5 天一跳的阶梯而非每日观测。
+            #
+            # 实测代价（生产日志 100 次降级）：
+            #   raw_iv 本就无效（该丢）        3 次
+            #   raw_iv 完全有效却被丢弃       97 次  ← 中位偏差 1.30pp，最大 38.06pp
+            # 例：`TSLA IV 降级→缓存 40.35% (市场已关闭, raw_iv=43.37%)`
+            #
+            # 新逻辑：**当日实拉值有效就用它并刷新缓存**；缓存只在实拉值
+            # 无效（<5% 或 >150%）时兜底。盘后期权链的 IV 虽非实时报价，
+            # 但它是「今天」的观测，比 5 天前的缓存诚实。
+            if _MIN_VALID_IV <= _raw_iv <= _MAX_VALID_IV:
+                current_iv = _raw_iv
+                self.fetcher._save_last_valid_iv(ticker, _raw_iv)
+                _log.info(
+                    "%s 盘后采用当日实拉 IV %.2f%%（并刷新缓存）", ticker, _raw_iv
+                )
+            else:
+                # 实拉值无效，才回退缓存
+                last_valid = self.fetcher._read_last_valid_iv(ticker)
+                _cache_suspicious = False
+                if last_valid:
+                    # 合理性校验：缓存值不应低于历史 IV 最低点的 70%
+                    # 防止某次错误采集（如 yfinance 返回极低 IV）污染后续扫描
+                    _hist_min = min(hist_hv) if hist_hv else 0.0
+                    _cache_suspicious = _hist_min > 0 and last_valid < _hist_min * 0.7
+                if last_valid and not _cache_suspicious:
                     _log.info(
-                        "%s IV 降级→缓存 %.2f%% (市场%s, raw_iv=%.2f%%)",
-                        ticker, last_valid,
-                        "已关闭" if not _market_open else "异常数据", _raw_iv
+                        "%s raw_iv=%.2f%% 无效 → 回退缓存 %.2f%%（市场%s）",
+                        ticker, _raw_iv, last_valid,
+                        "已关闭" if not _market_open else "异常数据",
                     )
                     current_iv = last_valid
-            if last_valid is None or _cache_suspicious if last_valid else False:
-                pass  # 继续往下走 elif/else
-            elif _MIN_VALID_IV <= current_iv <= _MAX_VALID_IV:
-                # 盘后无缓存，但 raw IV 在合理范围内 → 作为次优缓存保存并使用
-                # （优于硬编码 25.0，下次运行直接从缓存读取）
-                _log.info(
-                    "%s 盘后无缓存，raw_iv=%.2f%% 在合理范围，保存为次优缓存", ticker, current_iv
-                )
-                self.fetcher._save_last_valid_iv(ticker, current_iv)
-                # current_iv 保持不变，直接使用
-            elif current_iv < _MIN_VALID_IV:
-                current_iv = 25.0  # 完全无效，最后兜底
-            # else: current_iv > MAX_VALID_IV → 极端异常，也用 25.0
-            else:
-                _log.warning("%s raw_iv=%.2f%% 超出合理上限，使用兜底 25.0%%", ticker, current_iv)
-                current_iv = 25.0
+                else:
+                    if _cache_suspicious:
+                        _log.warning(
+                            "%s 缓存 IV %.2f%% 低于历史最低 %.2f%% × 70%% → 丢弃坏缓存；"
+                            "raw_iv=%.2f%% 同样异常，使用兜底 25.0%%",
+                            ticker, last_valid, min(hist_hv) if hist_hv else 0.0, _raw_iv,
+                        )
+                    else:
+                        _log.warning(
+                            "%s raw_iv=%.2f%% 无效且无可用缓存，使用兜底 25.0%%",
+                            ticker, _raw_iv,
+                        )
+                    current_iv = 25.0
         else:
             # 开市且 IV 有效 → 保存供收市后使用
             self.fetcher._save_last_valid_iv(ticker, current_iv)

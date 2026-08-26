@@ -24,7 +24,7 @@ def test_none_volume_ratio_and_momentum_does_not_crash(monkeypatch):
     metrics = get_real_crowding_metrics("TEST", stock_data, board=None)
 
     assert metrics["google_trends_percentile"] == 36.0  # 中性代理值 (1.0 - 0.5)/2.5*80+20
-    assert metrics["polymarket_odds_change_24h"] == 0.0
+    assert "polymarket_odds_change_24h" not in metrics  # v0.45.30 已移除动量伪装代理
     assert metrics["price_momentum_5d"] == 0.0
 
 
@@ -40,4 +40,4 @@ def test_normal_values_unaffected(monkeypatch):
     metrics = get_real_crowding_metrics("TEST", stock_data, board=None)
 
     assert metrics["price_momentum_5d"] == 5.0
-    assert metrics["polymarket_odds_change_24h"] == round(abs(5.0) * 0.8, 2)
+    assert "polymarket_odds_change_24h" not in metrics  # v0.45.30 已移除动量伪装代理

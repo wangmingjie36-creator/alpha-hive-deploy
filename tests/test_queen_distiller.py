@@ -864,7 +864,7 @@ class TestDataRealPct:
              "dimension": "catalyst", "source": "ChronosBeeHorizon",
              "discovery": "test catalyst",
              "data_quality": {
-                 "yfinance_calendar": "real", "catalysts_json": "loaded",
+                 "yfinance_calendar": "real",
                  "analyst_targets": "real", "llm_impact": "rule_only",
              }},
             {"score": 5.0, "direction": "neutral", "confidence": 0.6,
@@ -916,7 +916,7 @@ class TestDataRealPct:
         results = self._typical_results()
         results[2]["data_quality"]["reddit"] = "fallback"
         results[3]["data_quality"]["yfinance_calendar"] = "empty"
-        results[3]["data_quality"]["catalysts_json"] = "missing"
+        results[3]["data_quality"]["yfinance_calendar"] = "failed"
         results[5]["data_quality"]["ml_prediction"] = "fallback_momentum"
         tp = queen._apply_triple_penalty("TEST", 7.0, results)
         assert tp["data_real_pct"] >= 85.0, \

@@ -3,7 +3,7 @@ Alpha Hive - 真实数据源层
 替换 ScoutBeeNova 中所有伪造的拥挤度指标
 
 数据源：
-- StockTwits API（免费，无需 API Key，限 200 req/hr）
+- 社交热度：Reddit ApeWisdom（StockTwits 公开 API 自 v0.40.0 已 403 停用）
 - yfinance short interest（机构持仓+做空比例）
 - 信息素板动态 bullish_agents 计数
 """
@@ -265,10 +265,9 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
 
     Returns:
         {
-            "stocktwits_messages_per_day": int,    # 真实 StockTwits 数据
+            "social_messages_per_day": int,        # Reddit ApeWisdom 代理（非 StockTwits）
             "google_trends_percentile": float,     # 暂用成交量百分位代替（标记降级）
             "bullish_agents": int,                 # 信息素板动态计数
-            "polymarket_odds_change_24h": float,   # 暂用价格波动代替（标记降级）
             "seeking_alpha_page_views": int,       # 暂用成交量比率代替（标记降级）
             "short_float_ratio": float,            # 真实 yfinance 做空数据
             "price_momentum_5d": float,            # 真实 yfinance 动量
@@ -295,20 +294,21 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
     # volume_ratio → 百分位映射: 0.5x=20, 1.0x=50, 2.0x=80, 3.0x=95
     google_proxy = min(100, max(0, (vol_ratio - 0.5) / 2.5 * 80 + 20))
 
-    # 5. Polymarket — 暂不接入（需要搜索 market slug），
-    #    改用 5 日动量绝对值作为"赔率变化速度"代理
+    # 5. （v0.45.30 删除）Polymarket 赔率变化速度代理。
+    #    原实现 poly_proxy = |momentum_5d| * 0.8 —— 把动量改个名字冒充赔率变化，
+    #    而同一 dict 里 price_momentum_5d 已在喂 short_squeeze_risk，等于动量被
+    #    重复计权。实测 8 月 250 个样本：该分量 76% 落在最低档常数 20，
+    #    其余 24% 的变化全部来自动量本身。既是常数稀释又是暗中双计，故整项移除。
     _mom_for_proxy = stock_data.get("momentum_5d")
-    poly_proxy = abs(_mom_for_proxy if _mom_for_proxy is not None else 0.0) * 0.8
 
     # 6. Seeking Alpha — 无免费 API，
-    #    改用 StockTwits 消息量 * 2 作为"页面浏览"代理
+    #    改用社交热度消息量 * 2 作为"页面浏览"代理
     sa_proxy = st_data["messages_per_day"] * 2
 
     metrics = {
-        "stocktwits_messages_per_day": st_data["messages_per_day"],
+        "social_messages_per_day": st_data["messages_per_day"],
         "google_trends_percentile": round(google_proxy, 1),
         "bullish_agents": bullish,
-        "polymarket_odds_change_24h": round(poly_proxy, 2),
         "seeking_alpha_page_views": sa_proxy,
         "short_float_ratio": short_data["short_pct_float"],
         "price_momentum_5d": _mom_for_proxy if _mom_for_proxy is not None else 0.0,
@@ -316,7 +316,6 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
             "social_buzz": st_data["data_quality"],         # Reddit ApeWisdom 真实数据
             "google_trends": "proxy_volume",                # 成交量代理指标
             "bullish_agents": "real" if board else "default",
-            "polymarket": "proxy_momentum",                 # 动量代理指标
             "seeking_alpha": "proxy_social",                # 社交热度代理指标
             "short_interest": short_data["data_quality"],   # yfinance 真实数据
             "momentum": "real",                             # yfinance 真实数据
