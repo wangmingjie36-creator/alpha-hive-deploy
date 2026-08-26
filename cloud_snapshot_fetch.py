@@ -49,6 +49,32 @@ def _business_date() -> str:
     return datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")
 
 
+def _degradation_check(cboe: dict) -> dict:
+    """对照 cboe_fetcher 的已知兜底常量，标记疑似降级的段。
+
+    为什么需要：cboe_fetcher 的 skew/vvix/vix_term 兜底**不带 source 标注**
+    （其 docstring 自认，v0.43.24 同款形态），而云沙箱里 yfinance 域名被重置，
+    这些段每次都会落到兜底值——首跑实测 vix_term=15.0/15.75/16.5、skew=120.0、
+    vvix=85.0 与真实观测（本地同刻 15.70/143.27）完全不符。
+    等值匹配是启发式（真值恰等于兜底常量会误报），cboe_fetcher 补上 source
+    标注后应改读 source 字段。消费端规则：**degraded_sections 里列出的段不可信**。
+    """
+    sus = {}
+    c = cboe or {}
+    vt = c.get("vix_term") or {}
+    if (vt.get("vix_spot"), vt.get("vix_1m"), vt.get("vix_3m")) == (15.0, 15.75, 16.5):
+        sus["vix_term"] = "matches_known_fallback_15.0/15.75/16.5"
+    if (c.get("skew") or {}).get("skew_value") == 120.0:
+        sus["skew"] = "matches_known_fallback_120.0"
+    if (c.get("vvix") or {}).get("vvix_value") == 85.0:
+        sus["vvix"] = "matches_known_fallback_85.0"
+    pc = c.get("pcce") or {}
+    if pc.get("source") == "default_fallback" or (
+            pc.get("call_volume") == 0 and pc.get("put_volume") == 0 and pc):
+        sus["pcce"] = "explicit_default_fallback"
+    return sus
+
+
 def _fetch_one_ticker(ticker: str) -> dict:
     """单标的三件套：精选链 / ATM IV 期限结构 / 全链 OI。共享一次网络请求。"""
     import cboe_options as co
@@ -122,6 +148,7 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         market["fear_greed"] = None
         market["fear_greed_error"] = f"{type(e).__name__}: {e}"
+    market["degraded_sections"] = _degradation_check(market.get("cboe"))
     with open(os.path.join(day_dir, "market.json"), "w") as f:
         json.dump(market, f, ensure_ascii=False, indent=1)
 
@@ -136,15 +163,19 @@ def main() -> int:
         "ok": ok,
         "failed": failed,
         "market_cboe_ok": market.get("cboe") is not None,
+        "market_degraded_sections": sorted(market["degraded_sections"].keys()),
         "fear_greed_ok": market.get("fear_greed") is not None,
     }
     with open(os.path.join(day_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)
 
+    deg = manifest["market_degraded_sections"]
     print(f"\n📦 {date}: {len(ok)}/{len(tickers)} 标的成功，"
           f"market={'✓' if manifest['market_cboe_ok'] else '✗'} "
           f"F&G={'✓' if manifest['fear_greed_ok'] else '✗'}，"
           f"{manifest['elapsed_sec']}s → {day_dir}/")
+    if deg:
+        print(f"   ⚠️ market 疑似兜底段（不可信）：{', '.join(deg)}")
     if failed:
         print(f"   失败：{', '.join(failed)}")
 
