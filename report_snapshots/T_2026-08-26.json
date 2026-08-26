@@ -1,17 +1,15 @@
 {
   "ticker": "T",
   "date": "2026-08-26",
-  "composite_score": 6.86,
+  "composite_score": 5.91,
   "direction": "bullish",
   "price_target": 0.0,
   "stop_loss": 0.0,
-  "entry_price": 25.875,
+  "entry_price": 25.82,
   "agent_votes": {
-    "ScoutBeeNova": 7.13289,
     "BearBeeContrarian": 7.0,
-    "QueenDistiller": 6.86,
-    "GuardBeeSentinel": 6.18,
-    "RivalBeeVanguard": 5.74
+    "ScoutBeeNova": 6.8874284999999995,
+    "GuardBeeSentinel": 6.47
   },
   "weights_used": {
     "signal": 0.2094,
@@ -20,20 +18,20 @@
     "odds": 0.194,
     "risk_adj": 0.225
   },
-  "low_conviction": true,
-  "low_conviction_reason": "score_high_guard: 高分 6.9 但情绪 5.1<6 未确认（signal 7.1）→ 仓位减半",
+  "low_conviction": false,
+  "low_conviction_reason": "",
   "cs_rank": {
-    "final": 0.931,
-    "signal": 1.0,
-    "catalyst": null,
-    "sentiment": 0.724,
-    "odds": 0.069,
-    "risk_adj": 0.862
+    "final": 0.655,
+    "signal": 0.966,
+    "catalyst": 0.552,
+    "sentiment": 0.828,
+    "odds": 0.103,
+    "risk_adj": 0.69
   },
   "actual_prices": {
     "t1": null,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-08-26T14:19:47.174548"
+  "created_at": "2026-08-26T16:43:47.657780"
 }
