@@ -1,0 +1,38 @@
+{
+  "ticker": "NEE",
+  "date": "2026-08-26",
+  "composite_score": 4.93,
+  "direction": "bearish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 84.33,
+  "agent_votes": {
+    "OracleBeeEcho": 6.6923076923076925,
+    "ScoutBeeNova": 6.13289,
+    "GuardBeeSentinel": 5.94,
+    "RivalBeeVanguard": 5.74
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.241,
+    "signal": 0.931,
+    "catalyst": null,
+    "sentiment": 0.207,
+    "odds": 0.724,
+    "risk_adj": 0.793
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-08-26T14:19:47.178492"
+}
