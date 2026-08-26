@@ -30,7 +30,8 @@
 
 ## ⚠️ 边界：横截面可预测 ≠ 时序可预测
 
-实测 `price.volatility_20d` 的分解：固定效应 IC **+0.720** / 票内时变 **+0.012**。
+实测 `price.volatility_20d` 的分解（2026-08-24 重算：固定 **+0.693** / 时变 **−0.000**）：
+固定效应 IC 高、票内时变近零 —— 两次重算结论一致。
 即：它能可靠回答「**哪些股票波动大**」，但对「**某只股票何时波动变大**」
 预测力接近零。这是波动率的固有性质。
 
@@ -59,11 +60,17 @@ from typing import Dict, List, Optional, Tuple
 
 DB_PATH = Path(__file__).parent / "pheromone.db"
 
-#: 组合权重。实测（667 条样本、四口径全过）：
-#:   IV 单独            IC = +0.6399  t=+20.35  4/4
-#:   20 日已实现波动 单独  IC = +0.6108  t=+15.46  4/4
-#:   两者秩平均          IC = +0.6632  t=+22.55  4/4  ← 优于任一单信号
-#: 等权是刻意的：样本量不足以支撑更精细的权重估计，且等权对参数误设最稳健。
+#: 组合权重。**等权是刻意的**：样本量不足以支撑更精细的权重估计，
+#: 且等权对参数误设最稳健。
+#:
+#: 支撑这个选择的不变式是「**组合 IC > 任一单信号 IC，且四口径全过**」。
+#: ⚠️ 具体数值随样本增长而变，勿把下面的快照当成当前真相 ——
+#:    重算：`/usr/local/bin/python3 signal_archive.py --analyze --target vol`
+#:
+#:   截至 2026-07-30（667 条）  IV +0.6399 / 波动 +0.6108 / 组合 +0.6632  4/4
+#:   截至 2026-08-24（684 条）  IV +0.6087 / 波动 +0.5847 / 组合 +0.6299  4/4
+#:
+#: 两次重算的**排序与判定一致**，数值整体下移约 0.03 —— 属正常估计漂移。
 COMPONENTS: Dict[str, float] = {
     "options.iv_current": 0.5,
     "price.volatility_20d": 0.5,
@@ -150,21 +157,33 @@ def size_multipliers(vol_scores: Dict[str, float]) -> Dict[str, Dict]:
 def load_day(date: str, db_path: Path = DB_PATH) -> Dict[str, Dict[str, float]]:
     """从 signal_archive 读某一天的分量信号。"""
     q = ",".join("?" * len(COMPONENTS))
-    try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    except sqlite3.OperationalError:
-        # 库文件不存在 —— 返回空由调用方处理，不裸崩
+    # ⚠️ 用 exists() 判断，**不要**去匹配 OperationalError 的消息文本。
+    # 实测（SQLite 3.39.4）：「文件不存在」与「权限被拒」给出的消息**完全相同**
+    # 都是 'unable to open database file' —— 靠字符串区分等于把权限错误
+    # 静默吞成"没有数据"，而那是需要人介入的故障，不是合法空状态。
+    # （路径是目录的情形给的是 'disk I/O error'，会自然传播。）
+    if not Path(db_path).exists():
         return {}
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         rows = con.execute(
             f"SELECT ticker, signal, value FROM signal_archive "
             f"WHERE date = ? AND signal IN ({q})",
             (date, *COMPONENTS.keys())).fetchall()
-    except sqlite3.OperationalError:
-        # signal_archive 表不存在（全新库 / 未 backfill）。
-        # 日报路径有 try/except 兜底，但 CLI 直接跑会裸崩出 traceback，
-        # 而正确行为是给出"先跑 --backfill"的提示。
+    except sqlite3.OperationalError as e:
+        # ⚠️ **只**吞"表不存在"（全新库 / 未 backfill）—— 那是合法的空状态。
+        #
+        # 不能吞整个 OperationalError：`database is locked` 也是这个类型，
+        # 而它是**瞬时可重试**状态，不是"没有数据"。日报在
+        # _post_scan_enrichment 里写 signal_archive，本函数读它 —— 并发时
+        # 锁冲突真实存在。吞掉它会让波动率分层静默消失，CLI 还会给出
+        # 错误建议"先跑 --backfill"（其实数据就在库里）。
+        #
+        # 这正是本项目反复出现的"看着成功其实早废了"形态：不该被容错的
+        # 错误被更外层的 except 吃掉，于是没有任何地方会报警。
+        if "no such table" not in str(e):
+            raise
         return {}
     finally:
         con.close()
@@ -206,9 +225,12 @@ def main() -> int:
               f"{d['multiplier']:>10.2f}   {d['tier']}")
     print()
     print("  组合 = IV 分位 × 0.5 + 20日已实现波动分位 × 0.5")
-    print("  实测（667 条 / 四口径全过）：组合 IC=+0.663 vs IV 单独 +0.640 / 波动单独 +0.611")
+    print("  不变式：组合 IC > 任一单信号，四口径全过")
+    print("  （截至 2026-08-24：组合 +0.630 / IV +0.609 / 波动 +0.585，684 条）")
+    print("  ⚠️ 数值随样本增长而变。重算：")
+    print("     /usr/local/bin/python3 signal_archive.py --analyze --target vol")
     print("  ⚠️ 仅用于**横截面**仓位分层，不可用于择时"
-          "（票内时变 IC 仅 +0.012）")
+          "（票内时变 IC ≈ 0）")
     return 0
 
 

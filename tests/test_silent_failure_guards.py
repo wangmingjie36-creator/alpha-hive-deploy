@@ -419,12 +419,12 @@ class TestNoTickerMayBeDropped:
 
 
 class TestDeployWhitelistAcceptsClassShares:
-    """部署白名单也必须认类份额后缀（v0.45.5）。
+    """部署白名单也必须认类份额后缀（v0.45.15）。
 
     v0.45.2 修好 ticker 正则后 BRK-B 终于产出 ML 报告，却**从不被部署**：
     白名单 `^alpha-hive-\\w+-ml-enhanced-...` 里的 `\\w` 不含连字符。
     而 index.html 照常链接它 —— 线上直接 404。
-    同一个坑在一天之内出现在两层：Agent 校验层（v0.45.2）与部署层（v0.45.5）。
+    同一个坑在一天之内出现在两层：Agent 校验层（v0.45.2）与部署层（v0.45.15）。
     """
 
     ML_FILES_OK = [

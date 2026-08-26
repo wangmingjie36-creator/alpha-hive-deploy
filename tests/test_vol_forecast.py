@@ -248,6 +248,61 @@ class TestLoadDayResilience:
     def test_missing_db_file_returns_empty(self, tmp_path):
         assert vf.load_day("2026-07-29", tmp_path / "nope" / "no.db") == {}
 
+    def test_permission_denied_raises_not_swallowed(self, tmp_path):
+        """权限被拒**必须抛出**，不得被当成"库不存在"吞掉。
+
+        实测（SQLite 3.39.4）：「文件不存在」与「权限被拒」的 OperationalError
+        消息**完全相同**，都是 'unable to open database file'。所以靠消息文本
+        区分两者是行不通的 —— 最初的修复就是这么写的，会把需要人介入的权限
+        故障静默吞成"没有数据"。现在改用 Path.exists() 显式判断。
+        """
+        db = tmp_path / "perm.db"
+        con = sqlite3.connect(str(db))
+        con.execute("CREATE TABLE signal_archive"
+                    "(date TEXT, ticker TEXT, signal TEXT, value REAL)")
+        con.commit()
+        con.close()
+        os.chmod(db, 0o000)
+        try:
+            if os.access(db, os.R_OK):
+                pytest.skip("以 root 运行，chmod 拦不住读取")
+            with pytest.raises(sqlite3.OperationalError):
+                vf.load_day("2026-07-29", db)
+        finally:
+            os.chmod(db, 0o644)
+
+    def test_locked_db_raises_not_swallowed(self, tmp_path):
+        """`database is locked` **必须抛出**，不得被当成"无数据"吞掉。
+
+        这是二次检查中发现的、由修复本身引入的缺陷：最初的 except 捕获整个
+        OperationalError，而锁冲突也是这个类型。日报在 _post_scan_enrichment
+        里写 signal_archive，load_day 读它 —— 并发时锁冲突真实存在。
+        吞掉它会让波动率分层静默消失，CLI 还给出错误建议"先跑 --backfill"。
+        """
+        db = tmp_path / "locked.db"
+        con = sqlite3.connect(str(db))
+        con.execute("CREATE TABLE signal_archive"
+                    "(date TEXT, ticker TEXT, signal TEXT, value REAL)")
+        con.commit()
+        blocker = sqlite3.connect(str(db), isolation_level="EXCLUSIVE")
+        blocker.execute("BEGIN EXCLUSIVE")
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                vf.load_day("2026-07-29", db)
+        finally:
+            blocker.close()
+            con.close()
+
+    def test_empty_table_still_returns_empty(self, tmp_path):
+        """表存在但当天无行 —— 这是合法空状态，返回 {} 而非抛出。"""
+        db = tmp_path / "has_table.db"
+        con = sqlite3.connect(str(db))
+        con.execute("CREATE TABLE signal_archive"
+                    "(date TEXT, ticker TEXT, signal TEXT, value REAL)")
+        con.commit()
+        con.close()
+        assert vf.load_day("2026-07-29", db) == {}
+
     def test_cli_exits_cleanly_without_traceback(self, tmp_path):
         db = tmp_path / "empty.db"
         sqlite3.connect(str(db)).close()
