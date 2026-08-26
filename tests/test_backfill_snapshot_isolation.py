@@ -155,3 +155,71 @@ class TestDailyReportWiresTargetDate:
 
         src = inspect.getsource(adr)
         assert 'os.environ["ALPHA_HIVE_TARGET_DATE"] = args.date' in src
+
+
+# ────────── ⑥ 目标日会拼进文件名，必须先校验格式 ──────────
+
+class TestTargetDateIsValidated:
+    """`ALPHA_HIVE_TARGET_DATE` 直接参与文件名拼接 —— 未校验则可逃出 cache/。
+
+    实测（v0.45.18 修复前）：`ALPHA_HIVE_TARGET_DATE=../../../tmp/evil`
+    使快照路径规范化后变成 `<repo>/tmp/evil_backfilled-....json`，**写到了
+    cache/ 之外**。环境变量可能来自残留 export、别的工具、cron env，
+    不能假定它经过 `--date` 的 fromisoformat 校验。
+    本项目对 ticker 早有同型防护（`_RE_TICKER` 拒绝 `../etc`），日期侧此前是缺口。
+    """
+
+    @pytest.mark.parametrize("bad", [
+        "../../../tmp/evil", "2026-08-24/../..", "not-a-date", "2026-8-4",
+        "2026-08-24 ; rm -rf /", "../etc/passwd", "20260824",
+    ])
+    def test_malformed_target_is_rejected(self, bad):
+        from options_analyzer import _RE_SNAP_DATE
+
+        assert not _RE_SNAP_DATE.match(bad), f"{bad!r} 不该被接受"
+
+    @pytest.mark.parametrize("good", ["2026-08-24", "1999-01-01", "2100-12-31"])
+    def test_valid_dates_accepted(self, good):
+        from options_analyzer import _RE_SNAP_DATE
+
+        assert _RE_SNAP_DATE.match(good)
+
+    def test_malformed_target_falls_back_to_today_slot(self, agent, monkeypatch, tmp_path):
+        """格式非法时退回当日口径，且路径不得逃出 cache 目录。"""
+        import os
+
+        from hive_logger import pdt_today
+
+        monkeypatch.setenv("ALPHA_HIVE_TARGET_DATE", "../../../tmp/evil")
+
+        class _Boom(RuntimeError):
+            pass
+
+        monkeypatch.setattr(agent.fetcher, "fetch_options_chain",
+                            lambda *a, **k: (_ for _ in ()).throw(_Boom()))
+        with pytest.raises(_Boom):
+            agent.analyze("NVDA", stock_price=100.0)
+
+        # 非法值被忽略 ⇒ 不该产生任何逃出 tmp_path 的路径
+        escaped = os.path.normpath(os.path.join(str(tmp_path), "..", "tmp"))
+        assert not os.path.exists(os.path.join(escaped, "evil_backfilled-%s.json" % pdt_today()))
+
+
+class TestBackfillSnapshotsStayOutOfPriceHistory:
+    """补跑快照**不得**被 price_history 当作历史收盘价采信。
+
+    `price_history._SNAP_RE` 只认 `..._{YYYY-MM-DD}.json` 结尾，补跑文件名
+    `..._{target}_backfilled-{today}.json` 匹配不上 ⇒ 被 `continue` 跳过。
+    这不是巧合而是**必需**：补跑快照里的 `_snapshot_stock_price` 是运行时的
+    实时价，不是目标日收盘价，采信它正是该模块 docstring 警告的那类污染。
+
+    ⚠️ 若日后有人"修好"这个正则让它也匹配补跑文件，就会引回价格污染。
+    """
+
+    def test_backfill_filename_not_matched_by_price_history(self):
+        from price_history import _SNAP_RE
+
+        assert _SNAP_RE.search("options_snapshot_NVDA_2026-08-25.json"), "正常快照应被采信"
+        assert not _SNAP_RE.search(
+            "options_snapshot_NVDA_2026-08-24_backfilled-2026-08-25.json"
+        ), "补跑快照被当成历史收盘价了——会引回价格污染"

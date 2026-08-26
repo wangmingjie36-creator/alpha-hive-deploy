@@ -5,6 +5,7 @@
 
 import json
 import math as _math
+import re as _re_mod
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
@@ -1298,6 +1299,10 @@ class OptionsAnalyzer:
         return total_score, summary
 
 
+# 补跑目标日的合法形状。拼进快照文件名前的唯一防线——见 analyze() 内注释。
+_RE_SNAP_DATE = _re_mod.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 def _sanitize_result(result: Dict) -> None:
     """方案21: 遍历结果 dict，将 NaN/Inf float 替换为 0.0（就地修改）"""
     for key, val in result.items():
@@ -1562,7 +1567,17 @@ class OptionsAgent:
         #
         # 用环境变量而非模块级变量：编排器为 daily_report / generate_ml_report
         # 分别 spawn 独立进程，模块级变量跨不过进程边界，env 可以。
-        _snap_target = (os.environ.get("ALPHA_HIVE_TARGET_DATE", "") or "").strip() or _snap_today
+        # ⚠️ 该值会拼进文件名，**必须先校验格式**。环境变量可能来自任何地方
+        # （残留的 export、别的工具、cron env），不能假定它经过 `--date` 的
+        # fromisoformat 校验。实测未校验时 `ALPHA_HIVE_TARGET_DATE=../../../tmp/evil`
+        # 会让快照写到 cache/ 之外。本项目对 ticker 早有同型防护（`_RE_TICKER`
+        # 拒绝 `../etc`），日期这一侧此前是缺口。格式不合法 → 忽略并退回当日口径。
+        _snap_target = (os.environ.get("ALPHA_HIVE_TARGET_DATE", "") or "").strip()
+        if _snap_target and not _RE_SNAP_DATE.match(_snap_target):
+            _log.warning("ALPHA_HIVE_TARGET_DATE=%r 格式非法（应为 YYYY-MM-DD），已忽略",
+                         _snap_target[:40])
+            _snap_target = ""
+        _snap_target = _snap_target or _snap_today
         _is_backfill = _snap_target != _snap_today
         _snap_date = _snap_today  # 快照内容的**实际获取日**，始终是今天
         if _is_backfill:

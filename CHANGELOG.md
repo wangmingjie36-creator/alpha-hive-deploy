@@ -5,6 +5,40 @@
 
 ---
 
+## [0.45.18] — 2026-08-25 — v0.45.16 的二次检查：目标日未校验可逃出 cache/
+
+### Fixed
+
+- **`ALPHA_HIVE_TARGET_DATE` 直接拼进快照文件名，却没有格式校验**。
+  实测 `ALPHA_HIVE_TARGET_DATE=../../../tmp/evil` 使路径规范化后变成
+  `<repo>/tmp/evil_backfilled-2026-08-25.json`——**写到了 cache/ 之外**。
+  `alpha_hive_daily_report` 在 `--date` 侧确实做了 `fromisoformat` 校验，但环境
+  变量可能来自残留 export、别的工具、cron env，**不能假定它经过那道校验**。
+  本项目对 ticker 早有同型防护（`_RE_TICKER` 拒绝 `../etc`，v0.45.2 的
+  BRK-B 事故就出在这条正则上），日期这一侧此前是缺口。
+  新增模块级 `_RE_SNAP_DATE`，格式非法则告警并退回当日口径。
+
+### Added
+
+- 回归测试 +12 条（本文件合计 18）：7 种畸形输入必须被拒、3 种合法日期必须通过、
+  非法值必须退回当日槽位且不产生逃逸路径。已验证可变红：把校验正则放宽成 `.*`，
+  精确红 7 条。
+
+- **锁住一个"恰好正确"的行为**：`price_history._SNAP_RE` 只认
+  `..._{YYYY-MM-DD}.json` 结尾，补跑文件名 `..._{target}_backfilled-{today}.json`
+  匹配不上 ⇒ 被 `continue` 跳过。这不是巧合而是**必需**——补跑快照里的
+  `_snapshot_stock_price` 是运行时实时价、不是目标日收盘价，采信它正是该模块
+  docstring 警告的那类污染。加测试防止后人"修好"这个正则反而引回污染。
+
+### 二次检查的其余结论（未发现问题）
+
+- 提交进仓的 `config.py` / `alpha_hive_daily_report.py` 是 hunk 级选择性暂存
+  产生的**混合版本，磁盘上从未存在过**，故单独 `git archive HEAD` 到干净目录
+  实测：WATCHLIST 30 / EXTENDED 71 / validate 无警告，**全量 1384 passed**。
+  （比工作区少，因为其他并发 session 的未跟踪测试文件不在提交里，符合预期。）
+
+---
+
 ## [0.45.16] — 2026-08-25 — 补跑污染当日期权快照槽位
 
 用户在核对「IV 修复为什么没生效」时定位出来的：**8/25 的期权快照是 8/24 补跑写的**。
