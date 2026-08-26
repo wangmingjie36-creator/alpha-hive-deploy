@@ -1,0 +1,43 @@
+{
+ "schema_version": 1,
+ "fetched_at_utc": "2026-08-26T09:29:31.469882+00:00",
+ "cboe": {
+  "pcce": {
+   "total_pc_ratio": 0.95,
+   "call_volume": 0,
+   "put_volume": 0,
+   "date": "2026-08-26",
+   "signal": "neutral",
+   "source": "default_fallback",
+   "tickers_used": []
+  },
+  "vix_term": {
+   "vix_spot": 15.0,
+   "vix_1m": 15.75,
+   "vix_3m": 16.5,
+   "term_structure": "contango",
+   "contango_pct": 5.0
+  },
+  "skew": {
+   "skew_value": 120.0,
+   "signal": "normal",
+   "date": "2026-08-26"
+  },
+  "vvix": {
+   "vvix_value": 85.0,
+   "signal": "normal",
+   "date": "2026-08-26"
+  },
+  "macro_score": 4.38,
+  "macro_sentiment": "neutral",
+  "timestamp": "2026-08-26T09:30:41.186344"
+ },
+ "fear_greed": {
+  "value": 59,
+  "classification": "Greed",
+  "sentiment_score": 5.9,
+  "is_real_data": true,
+  "source": "cnn",
+  "timestamp": "2026-08-26T09:30:41.827580"
+ }
+}
