@@ -142,7 +142,14 @@ def plan_exit(
 
 
 def load_catalysts_for_ticker(ticker: str, catalysts_file: str = "catalysts.json") -> List[Dict]:
-    """从 catalysts.json 加载指定 ticker 的催化剂列表"""
+    """从 catalysts.json 加载指定 ticker 的催化剂列表。
+
+    ⚠️ v0.45.32：`catalysts.json` 已删除（人工前瞻日历既腐烂过也编造过，
+    见 watchlist_events.py 模块 docstring），本函数现在恒返回 []。
+    **活路径不受影响** —— chronos_bee 调 plan_exit 时直接传 catalysts_found，
+    不走本函数；只有回测脚本 dynamic_exit_backtest.py 用它，而那份数据
+    早在删除前就已全部过期。保留函数签名以免破坏回测脚本导入。
+    """
     import json
     from pathlib import Path
     p = Path(__file__).parent / catalysts_file

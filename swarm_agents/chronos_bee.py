@@ -312,65 +312,28 @@ class ChronosBeeHorizon(BeeAgent):
             except Exception as _e_pead:
                 _log.debug("PEAD analysis unavailable for %s: %s", ticker, _e_pead)
 
-            # 2. 加载外部 catalysts.json（原注释称「覆盖全部 WATCHLIST」，
-            #    实测 2026-08-26 只有 9/30 只标的且窗口内 0 事件，见 CHANGELOG v0.45.31）
-            _catalysts_json_loaded = False
-            _cat_json_has_ticker = False
-            try:
-                import json as _json_cat
-                import os as _os_cat
-                _cat_path = _os_cat.path.join(_os_cat.path.dirname(_os_cat.path.dirname(__file__)), "catalysts.json")
-                if _os_cat.path.isfile(_cat_path):
-                    with open(_cat_path, "r", encoding="utf-8") as _cf:
-                        _all_cats = _json_cat.load(_cf)
-                    _catalysts_json_loaded = True
-                    # v0.45.31: 逐标的覆盖标记。文件读到 ≠ 本标的有条目
-                    # （实测 catalysts.json 只覆盖 9/30 只，且窗口内 0 事件）。
-                    # 判「有无可用来源」必须按标的，不能按文件是否存在。
-                    _cat_json_has_ticker = bool(_all_cats.get(ticker))
-                    for entry in _all_cats.get(ticker, []):
-                        cat_date = entry.get("date", "")
-                        if cat_date:
-                            from datetime import datetime as _dt_cat
-                            try:
-                                days_until = (_dt_cat.strptime(cat_date, "%Y-%m-%d") - _dt_cat.now()).days
-                            except ValueError:
-                                days_until = 999
-                            if days_until >= 0:
-                                catalysts_found.append({
-                                    "event": entry.get("event", "Unknown"),
-                                    "date": cat_date,
-                                    "days_until": days_until,
-                                    "type": entry.get("type", "economic_event"),
-                                    "severity": entry.get("severity", "medium"),
-                                })
-            except (OSError, ValueError, KeyError) as e:
-                _log.debug("catalysts.json unavailable for %s: %s", ticker, e)
-
-            # 2b. 回退：CatalystTimeline 硬编码（向后兼容 NVDA/VKTX 详细催化剂）
-            try:
-                from catalyst_refinement import create_nvda_catalysts, create_vktx_catalysts
-                if ticker == "NVDA":
-                    timeline = create_nvda_catalysts()
-                elif ticker == "VKTX":
-                    timeline = create_vktx_catalysts()
-                else:
-                    timeline = None
-
-                if timeline:
-                    # 去重：如果 catalysts.json 已有同名事件就跳过
-                    existing_events = {c["event"] for c in catalysts_found}
-                    for cat in timeline.get_upcoming_catalysts(days_ahead=30):
-                        if cat.event_name not in existing_events:
-                            catalysts_found.append({
-                                "event": cat.event_name,
-                                "date": cat.scheduled_date or "TBD",
-                                "days_until": cat.get_days_until_event(),
-                                "type": cat.catalyst_type.value,
-                                "severity": cat.severity.value,
-                            })
-            except (ImportError, ValueError, AttributeError) as e:
-                _log.debug("CatalystTimeline unavailable for %s: %s", ticker, e)
+            # 2. （v0.45.32 移除）人工维护的前瞻催化剂来源
+            #
+            # 原有两条都**直接喂 catalysts_found → catalyst 维度 → final_score
+            # 的 18.78%**，且都是人工维护的静态前瞻日历：
+            #   a) catalysts.json —— 最后更新 2026-07-23，一个月后窗口内 0 事件；
+            #      注释自称「覆盖全部 WATCHLIST」，实测只有 6/30 只标的。
+            #   b) catalyst_refinement.create_nvda/vktx_catalysts —— 硬编码日期
+            #      停在 2026-03-15，5 个月后仍在被读取，产出 0 个事件。
+            #
+            # 两种失败都真实发生过：**腐烂**（上述），以及**编造** —— VKTX 曾有
+            # 两条 critical 级条目是错误信息（把二期试验当三期、把公司指引 2027 年
+            # 的顶线数据写成 2026-08-15），在文件里驱动评分直到有人专门核实。
+            # 违反 CLAUDE.md「不编数据」。
+            #
+            # 关键在失败模式：喂评分时，一条错误的 critical 催化剂**静默推动
+            # 18.78% 的权重**，与真催化剂产出同形，人看不见。
+            # 人工前瞻信息现移至 `watchlist_events.md`，只渲染进日报的
+            # 「关注事项」段（见 watchlist_events.py），**不进任何评分路径**。
+            #
+            # 本蜂的催化剂来源现在只剩自动可核实的一条：上方 yfinance 财报日历
+            # （含 Earnings / Dividend / Ex-Dividend Date）。来源不可得时走
+            # 下方 _calendar_failed 分支返回缺失，不再冒充「无近期催化剂」。
 
             # 评分逻辑
             if catalysts_found:
@@ -419,9 +382,10 @@ class ChronosBeeHorizon(BeeAgent):
                     direction = "bearish"
                 else:
                     direction = "neutral"
-            elif _calendar_failed and not _cat_json_has_ticker:
-                # v0.45.31: 财报日历是本蜂唯一的实时来源，catalysts.json 是
-                # 静态兜底。两者都不可得时**没有任何依据**判断有无催化剂，
+            elif _calendar_failed:
+                # v0.45.32: 财报日历现在是本蜂**唯一**的催化剂来源
+                # （人工日历已移出评分路径）。它不可得时**没有任何依据**
+                # 判断有无催化剂，
                 # 此时返回 error 让 queen_distiller 按缺失维度处理
                 # （dim_status="error" → 动态填充 + 覆盖度压缩），
                 # 而不是复用 4.0 —— 4.0 的语义是「查过了，确实没有」。
@@ -429,7 +393,7 @@ class ChronosBeeHorizon(BeeAgent):
                 return make_error_result(
                     "ChronosBeeHorizon", "catalyst",
                     RuntimeError(f"catalyst_sources_unavailable: calendar={_calendar_error}, "
-                                 f"catalysts_json=no_entry_for_ticker"))
+                                 f"manual_calendar=removed_v0.45.32"))
             else:
                 score = 4.0
                 discovery = "无近期催化剂"
@@ -538,7 +502,7 @@ class ChronosBeeHorizon(BeeAgent):
                 data_quality={
                     "yfinance_calendar": ("failed" if _calendar_failed else
                                           ("real" if catalysts_found else "empty")),
-                    "catalysts_json": "loaded" if _catalysts_json_loaded else "missing",
+                    # v0.45.32: catalysts_json 通道已移除（人工日历不再进评分）
                     "analyst_targets": "real" if _analyst_info else "unavailable",
                     "llm_impact": "llm_enhanced" if llm_catalyst else "rule_only",
                 },

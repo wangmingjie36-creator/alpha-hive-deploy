@@ -57,7 +57,7 @@ class QueenDistiller:
         "keyword", "llm_enhanced", "reddit_apewisdom",
         "newsapi",  # v0.40.0: Yahoo/AV 新闻主源（Finviz 已删除）
         "rule_only", "sec_api", "SEC直查",
-        "loaded", "empty",  # ChronosBee: catalysts.json 加载成功 / 日历查询成功但无事件
+        "loaded", "empty",  # ChronosBee: 日历查询成功但无事件（v0.45.32: catalysts.json 通道已移除）
     }
     PROXY_SOURCES = {
         "proxy_volume", "proxy_momentum", "proxy_social",

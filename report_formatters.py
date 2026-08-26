@@ -716,6 +716,14 @@ def generate_swarm_markdown_report(reporter, swarm_results: Dict,
     md.extend(_build_market_expectations(sorted_results))
     md.extend(_build_sentiment(sorted_results))
     md.extend(_build_catalysts(sorted_results))
+    # v0.45.32: 人工维护的前瞻事件 —— 只渲染进报告，**绝不进评分**。
+    # 前身 catalysts.json / catalyst_refinement 直接喂 catalyst 维度（18.78% 权重），
+    # 既腐烂过也编造过（见 watchlist_events.py 模块 docstring）。
+    try:
+        from watchlist_events import format_for_report as _wl_fmt
+        md.extend(_wl_fmt(tickers=[t for t, _ in sorted_results]))
+    except Exception as _e_wl:  # noqa: BLE001 - 报告素材失败绝不影响主报告
+        _log.warning("关注事项渲染跳过: %s", _e_wl)
     md.extend(_build_competitive(sorted_results))
 
     md.extend(_build_bear_contrarian(sorted_results))
