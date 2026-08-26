@@ -5,6 +5,59 @@
 
 ---
 
+## [0.45.40] — 2026-08-26 — 移除 Google Calendar 集成：一条早已被替代、且从未授权成功的路径
+
+### 起因是一次误诊
+
+今天扫描日志里 `ChronosBeeHorizon ... 催化剂来源全部不可得` 与
+`calendar_integrator | Calendar 认证失败` 同时出现，我据此判定催化剂全灭是
+Google Calendar OAuth 所致 —— **错的**。查 `chronos_bee.py:113` 才发现催化剂
+来源是 **yfinance 的 `Ticker.calendar`**，与 Google Calendar 毫无关系。
+真凶是 yfinance 限流（今日累计 487 次）。两条恰好同时报错的日志被我当成了因果。
+
+### 现状核实
+
+- `~/.alpha_hive_calendar_token.json` **不存在** —— OAuth 从未完成，
+  每次扫描都白试一遍并打一条 WARNING
+- `calendar_integrator.get_upcoming_events` **零调用方**
+  （同名函数在 `economic_calendar.py`，是另一个模块）
+- 其余用途全部是**往 Google 日历写提醒**，非评分输入
+
+### 替代关系（早已在跑）
+
+| 原职责 | 现在由谁承担 |
+|---|---|
+| 催化剂数据 | `chronos_bee` 走 yfinance `Ticker.calendar` + `catalysts.json` + `earnings_watcher` |
+| 宏观事件同步 | `economic_calendar.py`（本地模块，无 Google 依赖） |
+| 机会提醒 / Thesis Break 告警 / T+N 回看提醒 | Telegram Bot（`/watch` `/alert` `/alerts` + `push_job`）+ Slack MCP |
+
+### Removed
+
+- `calendar_integrator.py`（907 行）、`tests/test_calendar_integrator.py`（603 行）
+- `PHASE3_P2_IMPLEMENTATION_SUMMARY.md`（190 行，整篇是该功能实现文档）
+- `config.CALENDAR_CONFIG`、`PATHS.calendar_token`
+- `requirements.txt` 的 `google-auth` / `google-auth-oauthlib` /
+  `google-api-python-client` —— 核实 `calendar_integrator` 是三者唯一消费者
+  （`email_notifier` 走 `smtplib`，不碰 Google API）
+- `alpha_hive_daily_report.py` 五处：import、`self.calendar` 初始化、
+  Thesis Break 日历告警、高分机会/T+N 提醒、D1 催化剂同步 + D2 经济日历同步
+
+### 刻意保留
+
+- **`thesis_break_l1/l2` 快照**：与日历告警写在同一个 try 块里，但它是进报告的
+  真数据。手术式拆分，只摘掉告警部分
+- **`PATHS.google_credentials`**：Gmail 邮件配置仍引用
+- **`earnings_watcher.get_catalysts_for_calendar`**：原调用方（D1）已移除，
+  生产链路上暂无调用方，但它是该模块唯一的「取全部标的催化剂」入口且有测试覆盖，
+  docstring 已注明现状
+
+### 顺带发现（未修）
+
+`config.py:882` 的 `"email_provider": "gmail_api"` **没有任何代码读它** ——
+`email_notifier.py` 全程 `smtplib`。这条配置声称用 Gmail API，实际走 SMTP。
+
+---
+
 ## [0.45.39] — 2026-08-26 — CBOE CDN 陈旧文件防线：主数据源会安静地发昨天的数据
 
 v0.45.36 的 30 只彩排里 TMO/TMUS 被判陈旧。查证不是误伤，是**主数据源的既有缺陷**。

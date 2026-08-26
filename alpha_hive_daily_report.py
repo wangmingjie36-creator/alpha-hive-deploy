@@ -37,7 +37,6 @@ from swarm_agents import (
 from agent_toolbox import AgentHelper
 
 MemoryStore = optional_import("memory_store", "MemoryStore")
-CalendarIntegrator = optional_import("calendar_integrator", "CalendarIntegrator")
 
 # Phase 3 P4: Code Execution Agent（含 fallback dict，保留 try/except）
 try:
@@ -157,14 +156,6 @@ class AlphaHiveDailyReporter:
 
         # 线程安全锁（用于并行执行时保护共享数据）
         self._results_lock = Lock()
-
-        # Phase 3 P2: 初始化 Google Calendar 集成（失败时降级）
-        self.calendar = None
-        if CalendarIntegrator:
-            try:
-                self.calendar = CalendarIntegrator()
-            except Exception as e:
-                _log.warning("Calendar 初始化失败（降级运行）: %s", e)
 
         # Phase 3 P4: 初始化代码执行 Agent（失败时降级）
         self.code_executor_agent = None
@@ -913,14 +904,10 @@ class AlphaHiveDailyReporter:
         # 逐标的机会/风险通知已禁用（减少 Slack DM 噪音）
         # Bot 只发：1) LLM 确认提示  2) 富文本日报推送成功
 
-        # 失效条件快照 + Thesis Break 日历提醒
+        # 失效条件快照（v0.45.40：日历提醒随 Google Calendar 一并移除，
+        # 告警改由 Telegram Bot /alert 承担；此处只保留进报告的 l1/l2 数据）
         try:
-            from thesis_breaks import ThesisBreakConfig, ThesisBreakMonitor
-            from config import CALENDAR_CONFIG as _CC_tb
-            _tb_alert_enabled = (
-                _CC_tb.get("thesis_break_calendar_alerts", True)
-                and hasattr(self, 'calendar') and self.calendar
-            )
+            from thesis_breaks import ThesisBreakConfig
             for _opp in report.get("opportunities", []):
                 _tk = _opp.get("ticker", "")
                 _tb_cfg = ThesisBreakConfig.get_breaks_config(_tk)
@@ -934,44 +921,8 @@ class AlphaHiveDailyReporter:
                     if _tk in swarm_results:
                         swarm_results[_tk]["thesis_break_l1"] = _l1
                         swarm_results[_tk]["thesis_break_l2"] = _l2
-                    # Thesis Break 日历提醒
-                    if _tb_alert_enabled and _tk in swarm_results:
-                        _metric = swarm_results[_tk].get("metric_data", {})
-                        if _metric:
-                            _initial = swarm_results[_tk].get("final_score", 5.0)
-                            _monitor = ThesisBreakMonitor(_tk, _initial)
-                            _tb_res = _monitor.check_all_conditions(_metric)
-                            if _tb_res.get("level_2_stops"):
-                                self._submit_bg(
-                                    self.calendar.add_thesis_break_alert,
-                                    _tk, 2, _tb_res["level_2_stops"],
-                                    _tb_res["score_adjustment"], _initial,
-                                )
-                            elif _tb_res.get("level_1_warnings"):
-                                self._submit_bg(
-                                    self.calendar.add_thesis_break_alert,
-                                    _tk, 1, _tb_res["level_1_warnings"],
-                                    _tb_res["score_adjustment"], _initial,
-                                )
         except Exception as _tbe:
             _log.warning("thesis_break 配置加载失败: %s", _tbe)
-
-        # 日历提醒
-        if self.calendar and report.get('opportunities'):
-            for opp in report['opportunities']:
-                _opp_score = opp.get("opp_score", 0) if isinstance(opp, dict) else getattr(opp, "opportunity_score", 0)
-                if _opp_score >= 7.5:
-                    _tk = opp.get("ticker", "") if isinstance(opp, dict) else getattr(opp, "ticker", "")
-                    _dir = opp.get("direction", "") if isinstance(opp, dict) else getattr(opp, "direction", "")
-                    self._submit_bg(self.calendar.add_opportunity_reminder, _tk, _opp_score, _dir, "高分机会")
-                    # T+1/T+7/T+30 回测提醒
-                    try:
-                        from config import CALENDAR_CONFIG as _CC_fb
-                        if _CC_fb.get("add_feedback_reminders", True):
-                            _evidence = (opp.get("discovery") or opp.get("key_evidence") or "")[:200] if isinstance(opp, dict) else ""
-                            self._submit_bg(self.calendar.add_feedback_reminders, _tk, _opp_score, _dir, _evidence)
-                    except Exception:
-                        pass
 
         # 保存会话
         if self.memory_store and self._session_id:
@@ -1893,36 +1844,6 @@ class AlphaHiveDailyReporter:
                     )
                 except (OSError, ValueError, RuntimeError) as e:
                     _log.warning("Slack 财报通知发送失败: %s", e)
-
-        # D1: 自动同步财报日期到催化剂日历
-        try:
-            auto_catalysts = self.earnings_watcher.get_catalysts_for_calendar(tickers)
-            if auto_catalysts and hasattr(self, 'calendar') and self.calendar:
-                # 合并自动获取的财报日期与 config.CATALYSTS
-                from config import CATALYSTS
-                merged = dict(CATALYSTS)
-                for t, events in auto_catalysts.items():
-                    if t in merged:
-                        # 去重：只添加尚未存在的 earnings 事件
-                        existing_dates = {e.get("scheduled_date") for e in merged[t]}
-                        for ev in events:
-                            if ev.get("scheduled_date") not in existing_dates:
-                                merged[t].append(ev)
-                    else:
-                        merged[t] = events
-                self.calendar.sync_catalysts(catalysts=merged, tickers=tickers)
-                _log.info("已自动同步 %d 个标的的财报日期到催化剂日历", len(auto_catalysts))
-        except (ImportError, OSError, ValueError, TypeError, AttributeError) as e:
-            _log.debug("催化剂日历自动同步跳过: %s", e)
-
-        # D2: 经济日历同步到 Google Calendar
-        try:
-            from config import CALENDAR_CONFIG as _CC_econ
-            if hasattr(self, 'calendar') and self.calendar and _CC_econ.get("sync_economic_calendar", True):
-                _econ_days = _CC_econ.get("economic_calendar_days_ahead", 60)
-                self._submit_bg(self.calendar.sync_economic_calendar, _econ_days)
-        except Exception:
-            pass
 
         return result
 

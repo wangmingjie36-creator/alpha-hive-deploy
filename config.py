@@ -992,26 +992,6 @@ MEMORY_CONFIG = {
     }
 }
 
-# ==================== Google Calendar 配置 (Phase 3 P2) ====================
-CALENDAR_CONFIG = {
-    "enabled": True,
-    "credentials_file": PATHS.google_credentials,
-    "token_file": PATHS.calendar_token,
-    "calendar_id": "primary",
-    "sync_catalysts_on_startup": True,   # 每次日报运行时同步 CATALYSTS
-    "add_opportunity_reminders": True,   # 高分机会自动添加提醒
-    "opportunity_score_threshold": 7.5,  # 触发提醒的分数阈值
-    "reminder_advance_minutes": 30,      # 事件前多少分钟提醒
-    "upcoming_days_context": 7,          # 注入 Agent 的未来几天事件
-    # 回测提醒 (Phase 3 P2+)
-    "add_feedback_reminders": True,       # T+1/T+7/T+30 回测提醒
-    # 经济日历同步
-    "sync_economic_calendar": True,       # 宏观事件同步到 Calendar
-    "economic_calendar_days_ahead": 60,   # 前瞻天数
-    # Thesis Break 紧急提醒
-    "thesis_break_calendar_alerts": True, # Thesis Break 触发时创建日历事件
-}
-
 # ==================== 向量记忆配置 (Phase 3 内存优化) ====================
 VECTOR_MEMORY_CONFIG = {
     "enabled": True,

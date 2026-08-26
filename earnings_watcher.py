@@ -158,7 +158,7 @@ class EarningsWatcher:
 
     def get_catalysts_for_calendar(self, tickers: List[str]) -> Dict[str, List[Dict]]:
         """
-        将自动获取的财报日期转换为 calendar_integrator.sync_catalysts() 格式
+        将自动获取的财报日期转换为催化剂字典格式
 
         返回: {
             "NVDA": [{"event": "Q4 Earnings", "scheduled_date": "2026-02-25",
@@ -166,7 +166,9 @@ class EarningsWatcher:
             ...
         }
 
-        可直接传入 CalendarIntegrator.sync_catalysts(catalysts=result)
+        ⚠️ v0.45.40 起本方法在生产链路上无调用方（原调用方是已移除的
+        Google Calendar 同步）。保留是因为它是 earnings_watcher 唯一的
+        「取全部标的催化剂」入口，且有测试覆盖
         """
         all_dates = self.get_all_earnings_dates(tickers)
         catalysts = {}

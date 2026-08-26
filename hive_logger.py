@@ -86,13 +86,6 @@ class _HivePaths:
             os.path.expanduser("~/.alpha_hive_gmail_credentials.json")
         )
 
-    @property
-    def calendar_token(self) -> str:
-        return os.environ.get(
-            "ALPHA_HIVE_CALENDAR_TOKEN",
-            os.path.expanduser("~/.alpha_hive_calendar_token.json")
-        )
-
 
 PATHS = _HivePaths()
 
