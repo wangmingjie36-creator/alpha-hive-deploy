@@ -852,7 +852,7 @@ def append_history(old_weights: dict, new_weights: dict,
     record = {
         "timestamp":  datetime.now().isoformat(),
         "schema_version": 2,
-        "action":     action,                        # "optimize" | "rollback"
+        "action":     action,                        # "optimize" | "diagnose" | "rollback"
         "dry_run":    dry_run,
         "applied":    applied,                       # 是否真正写入 config.py
         "skip_reason": skip_reason,                  # 未写入的结构化原因；写入成功时为 None
