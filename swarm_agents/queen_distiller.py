@@ -1085,8 +1085,11 @@ class QueenDistiller:
         try:
             from config import TICKER_ACCURACY_FEEDBACK as _TAF
         except (ImportError, AttributeError):
-            _TAF = {"enabled": True, "min_samples": 5, "discount_threshold": 0.50, "min_reliability": 0.5}
-        if _TAF.get("enabled", True):
+            # v0.45.23: fallback 必须与 config 的深思熟虑值同向（v0.45.12 已定 enabled=False）。
+            # 若这里是 True，config 导入失败会静默重开被走查检验否决的胜率反馈，
+            # 且与真实开启同形，无从分辨。
+            _TAF = {"enabled": False, "min_samples": 5, "discount_threshold": 0.50, "min_reliability": 0.5}
+        if _TAF.get("enabled", False):
             try:
                 from pathlib import Path as _Path_ta
                 from feedback_loop import BacktestAnalyzer as _BA_ta

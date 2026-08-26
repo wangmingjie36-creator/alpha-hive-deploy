@@ -5,6 +5,38 @@
 
 ---
 
+## [0.45.23] — 2026-08-26 — 胜率反馈的 fallback 默认开启 + 补提交两批「已记录未入库」代码
+
+### Fixed — `swarm_agents/queen_distiller.py` 的「安全默认值」
+
+v0.45.12 把 `config.TICKER_ACCURACY_FEEDBACK` 关掉（`enabled: False`，前提被
+走查检验否定），但 queen_distiller 里 config 导入失败时的 fallback 字典仍是
+`{"enabled": True, ...}`，且 `.get("enabled", True)` 的第二默认值同样是 True。
+即 config 一旦导入失败，被否决的胜率反馈会**静默重开**，与真实开启同形——
+正是 v0.45.3 记录的「安全默认值」判据形态。两处默认值均改为 False，
+fallback 与 config 的深思熟虑值保持同向。
+
+（属 v0.45.12 的二次检查遗漏项。现 config 定义存在、fallback 从未实际触发，
+是潜伏缺陷而非线上事故。）
+
+### Chore — 补提交（代码早于本条被各版本条目记录，但一直停留在工作区）
+
+全库核对 CHANGELOG 与 git 历史后发现两批「条目已提交、代码未提交」：
+
+- **v0.44.0~0.44.4 批**（2026-08-16 落笔）：`weekly_optimizer.py` 只读诊断
+  + 两道闸、`scan_continuity.py`、`ic_rerun_readiness.py`、
+  `ml_predictor_extended.py` 预期收益镜像、`experiments/ic_power_analysis.py`、
+  `experiments/ml_expected_return_replay.py` 及全部配套测试与报告。
+- **v0.45.1/9/12/15 批**（2026-08-24~25 落笔）：`vol_forecast.py` SQLite 错误
+  语义修复、`migrate_ambiguous_backfill.py`、`paper_portfolio.py`
+  win_rate_multiplier 中性化、`experiments/ticker_winrate_persistence.py`、
+  `tests/test_silent_failure_guards.py` 注释版本号更正、8 月自诊断简报。
+
+各文件内容与对应条目描述逐一核对无出入；全部测试（366 项）在提交前重跑通过。
+自此「CHANGELOG 记录的改动」与「git 历史」重新对齐。
+
+---
+
 ## [0.45.22] — 2026-08-26 — 准确率门面改全历史 + 显著性标注，并重建 index.html
 
 用户问「网站 T+7 准确率为什么显示 48%」。48% 是 `139/292` ——**旧口径的静态渲染**，
@@ -394,6 +426,10 @@ SL/TP 截断。原 docstring「无截断、无并列人为聚集」对 5 月后�
 ---
 
 ## [0.45.15] — 2026-08-25 — BRK-B 报告线上 404：部署白名单也不认连字符
+
+> 版本号说明：本条原编 0.45.5（`tests/test_silent_failure_guards.py` 的注释
+> 曾引用该号，v0.45.23 已更正），与并发 session 撞号后顺延至 0.45.15，
+> **0.45.5 因此空缺**。
 
 > **⚠️ 提交归属（本条改动被劈成两半）**
 > 同 v0.45.2 的情况——部署白名单的两处同源修复分处两条提交：
