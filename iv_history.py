@@ -305,10 +305,14 @@ def _observed_accrual_rate(cache_dir: str = "cache"):
                         seen.add(d[:10])
         except OSError:
             continue
+    today = _dt.date.today()
+    # v0.45.35: 剔除未来日期。时钟漂移或手工写坏会让分子虚增而分母不变，
+    # 结果是 ETA 偏乐观 —— 本函数存在的意义恰恰是治「ETA 偏乐观」。
+    _t = today.isoformat()
+    seen = {d for d in seen if d <= _t}
     if not seen:
         return None, 0, 0
     first = min(seen)
-    today = _dt.date.today()
     d0 = _dt.date.fromisoformat(first)
     elapsed = sum(1 for i in range((today - d0).days + 1)
                   if (d0 + _dt.timedelta(days=i)).weekday() < 5)

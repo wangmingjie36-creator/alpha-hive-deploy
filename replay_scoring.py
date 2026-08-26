@@ -60,22 +60,21 @@ DIMS = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
 # 统计
 # ══════════════════════════════════════════════════════════════════════════
 
-def _rank(v: List[float]) -> List[float]:
-    idx = sorted(range(len(v)), key=lambda i: v[i])
-    r = [0.0] * len(v)
-    for k, i in enumerate(idx):
-        r[i] = float(k)
-    return r
-
-
 def rank_ic(xs: List[float], ys: List[float]) -> Optional[float]:
+    """Spearman 秩相关。**直接用 ic_diagnostics.spearman，不另写一份。**
+
+    ⚠️ v0.45.35 修：初版自己写了个 _rank，给并列值分配**递增秩**而非平均秩。
+    后果不是小偏差 —— 构造一组与 y 完全无关、但 x 大量并列的数据，
+    正确答案 0.0，初版给出 **+0.2967**：凭空造出相关性。
+    而 catalyst 恰恰只有约 6 个不同取值（30 只标的），并列极多，
+    正是最容易被这个 bug 放大的维度。
+    `ic_diagnostics.spearman` 早就正确处理了并列（平均秩），复制一份等于
+    重新引入已被解决的问题 —— 同 v0.45.30 CrowdingDetector 硬编码第二份权重。
+    """
     if len(xs) < 10:
         return None
-    rx, ry = _rank(xs), _rank(ys)
-    mx, my = mean(rx), mean(ry)
-    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
-    den = math.sqrt(sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry))
-    return num / den if den else None
+    from ic_diagnostics import spearman
+    return spearman(xs, ys)
 
 
 def _iso_weeks(dates: List[str]) -> int:

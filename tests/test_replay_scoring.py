@@ -169,3 +169,57 @@ class TestDimensionInputsArchived:
     def test_inputs_attachable_to_samples(self, db):
         d = rs.load_samples(db(_rows(2)), all_cohorts=True, with_inputs=True)
         assert all("inputs" in r for r in d["rows"])
+
+
+class TestRankCorrelationTies:
+    """并列值必须用平均秩 —— 递增秩会凭空造出相关性（v0.45.35 实测 0.0 → +0.2967）。
+
+    catalyst 只有约 6 个不同取值（30 只标的），是最容易被放大的维度。
+    """
+
+    def test_ties_give_zero_when_unrelated(self):
+        xs = [1, 1, 1, 2, 2, 2, 3, 3, 3] * 3
+        ys = [1, 2, 3, 1, 2, 3, 1, 2, 3] * 3
+        ic = rs.rank_ic(xs, ys)
+        assert abs(ic) < 1e-9, (
+            f"并列值处理错误：无关数据得到 IC={ic:+.4f}，应为 0。"
+            "多半是又自己写了一份 _rank 而非用 ic_diagnostics.spearman")
+
+    def test_matches_project_spearman(self):
+        """必须与项目现有实现同源，不得再复制第二份。"""
+        from ic_diagnostics import spearman
+        xs = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0, 5.0]
+        ys = [2.0, 7.0, 1.0, 8.0, 2.0, 8.0, 1.0, 8.0, 2.0, 8.0, 4.0]
+        assert rs.rank_ic(xs, ys) == spearman(xs, ys)
+
+    def test_no_local_rank_helper(self):
+        """出现自建 _rank 即视为回归 —— 那正是 bug 的来源。"""
+        import inspect
+        src = inspect.getsource(rs)
+        assert "def _rank(" not in src, "又自己写了一份秩函数"
+
+
+class TestCatalystWeightTablesSameSource:
+    """归档的催化剂权重必须与 ChronosBee 同源（v0.45.35 修）。
+
+    初版手抄一份，漏了 6 个类型且默认值 0.8 vs 蜂内 0.7。
+    实测最常见的 Dividend/Ex-Dividend（蜂内 0.4/0.3）被按 0.8 算，高估一倍。
+    """
+
+    def test_tables_identical_to_bee(self):
+        from swarm_agents.chronos_bee import ChronosBeeHorizon as C
+        import signal_archive as sa
+        tw, sm, td = sa._cat_tables()
+        assert tw == C.CATALYST_TYPE_WEIGHTS, "type 权重表已漂移"
+        assert sm == C.CATALYST_SEVERITY_MULT, "severity 表已漂移"
+        assert td == C._CATALYST_TYPE_DEFAULT, "未知类型默认值已漂移"
+
+    def test_dividend_weight_not_default(self):
+        """喂退化：股息类必须拿到自己的低权重，不能落默认值。"""
+        import signal_archive as sa
+        fn = sa.SIGNAL_EXTRACTORS["catalyst.max_weight"]
+        tr = {"agent_details": {"ChronosBeeHorizon": {"details": {"catalysts": [
+            {"type": "exDividendDate", "severity": "medium"}]}}}}
+        w = fn(tr)
+        assert w is not None and w < 0.6, (
+            f"exDividendDate 得到 {w}，说明落了默认值 —— 权重表又被复制了")

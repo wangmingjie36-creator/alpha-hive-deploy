@@ -42,14 +42,22 @@ _HORIZON_DAYS = 90          # 报告里显示的前瞻窗口
 _ROW = re.compile(r"^\s*\|(?!\s*[-:| ]+\|)(.+)\|\s*$")
 
 
-def _parse_rows(text: str) -> List[Dict]:
+def _parse_rows(text: str) -> tuple:
+    """返回 (rows, malformed_count)。
+
+    v0.45.35：列数不足的行**不再静默丢弃**。手工文件里少打一个 `|`
+    就让整行无声消失，编辑者永远不会知道 —— 正是本项目反复被咬的形态
+    （MEMORY alpha-hive-silent-degradation）。现在计数并渲染进报告。
+    """
     out: List[Dict] = []
+    malformed = 0
     for line in text.splitlines():
         m = _ROW.match(line)
         if not m:
             continue
         cells = [c.strip() for c in m.group(1).split("|")]
         if len(cells) < 6:
+            malformed += 1
             continue
         if cells[0] in ("标的", "------") or cells[0].startswith("--"):
             continue
@@ -66,7 +74,7 @@ def _parse_rows(text: str) -> List[Dict]:
             continue
         out.append({"ticker": ticker, "date": date, "event": event,
                     "type": etype, "source": source, "verified": verified})
-    return out
+    return out, malformed
 
 
 def load_events(path: Optional[str] = None, today: Optional[str] = None) -> Dict:
@@ -85,16 +93,16 @@ def load_events(path: Optional[str] = None, today: Optional[str] = None) -> Dict
     ref = _dt.date.fromisoformat(today) if today else _dt.date.today()
     if not os.path.isfile(p):
         return {"events": [], "file_mtime": None, "days_since_update": None,
-                "is_stale": False, "available": False}
+                "is_stale": False, "available": False, "malformed_rows": 0}
     try:
         with open(p, "r", encoding="utf-8") as fh:
             text = fh.read()
         mtime = _dt.date.fromtimestamp(os.path.getmtime(p))
     except OSError:
         return {"events": [], "file_mtime": None, "days_since_update": None,
-                "is_stale": False, "available": False}
+                "is_stale": False, "available": False, "malformed_rows": 0}
 
-    rows = _parse_rows(text)
+    rows, malformed = _parse_rows(text)
     for r in rows:
         if r.get("status") == "bad_date":
             continue
@@ -109,6 +117,7 @@ def load_events(path: Optional[str] = None, today: Optional[str] = None) -> Dict
         "days_since_update": days_since,
         "is_stale": days_since > STALE_AFTER_DAYS,
         "available": True,
+        "malformed_rows": malformed,
     }
 
 
@@ -162,6 +171,10 @@ def format_for_report(data: Optional[Dict] = None,
             md.append(f"- ~~{r['ticker']} {r['date']}｜{r['event']}~~")
         md.append("")
         md.append("</details>")
+        md.append("")
+    if d.get("malformed_rows"):
+        md.append(f"⚠️ **{d['malformed_rows']} 行列数不足被跳过**（表格需 6 列，"
+                  f"检查是否少打了 `|`）")
         md.append("")
     if broken:
         md.append(f"⚠️ **{len(broken)} 条日期格式非法，请修**："

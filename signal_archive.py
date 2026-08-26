@@ -163,10 +163,26 @@ def _buzz_comp(key: str) -> Callable:
     return _f
 
 
-_CAT_TYPE_W = {"earnings": 1.5, "fda_approval": 1.4, "merger": 1.3,
-               "product_launch": 1.2, "regulatory": 1.1, "guidance": 1.0,
-               "economic_event": 0.9, "investor_day": 0.7}
-_CAT_SEV_M = {"critical": 1.3, "high": 1.1, "medium": 1.0, "low": 0.8}
+# ⚠️ v0.45.35 修：权重表**从 ChronosBee 读**，不再复制第二份。
+# 初版手抄了一份，漏了 6 个类型（split/dividend/dividendDate/analyst_day/
+# conference/exDividendDate）且默认值写成 0.8（蜂内是 0.7）。后果不是小偏差：
+# 实测最常见的催化剂正是 Dividend/Ex-Dividend（蜂内 0.4/0.3），
+# 归档里全按默认 0.8 算，**高估一倍以上**，875 行已回填数据全错。
+# 同款教训见 v0.45.30 的 CrowdingDetector 硬编码第二份权重。
+# 惰性导入：signal_archive 被 swarm_agents 依赖会成环，故不在模块顶层导。
+_CAT_TABLES: Optional[tuple] = None
+
+
+def _cat_tables() -> tuple:
+    """(type_weights, severity_mult, type_default)。取不到就抛 —— 归档一份
+    与蜂内不一致的权重，比不归档更糟（重放会给出看似精确的错误结论）。"""
+    global _CAT_TABLES
+    if _CAT_TABLES is None:
+        from swarm_agents.chronos_bee import ChronosBeeHorizon as _C
+        _CAT_TABLES = (dict(_C.CATALYST_TYPE_WEIGHTS),
+                       dict(_C.CATALYST_SEVERITY_MULT),
+                       _C._CATALYST_TYPE_DEFAULT)
+    return _CAT_TABLES
 
 
 def _catalysts(tr: Dict) -> List[Dict]:
@@ -189,10 +205,15 @@ def _cat_nearest_days(tr: Dict) -> Optional[float]:
 
 
 def _cat_max_weight(tr: Dict) -> Optional[float]:
-    """最强催化剂的 type_w × sev_m —— 重放评分公式时的关键输入。"""
+    """最强催化剂的 type_w × sev_m —— 重放评分公式时的关键输入。
+    权重表与 ChronosBee 同源（见 _cat_tables），复制第二份必然漂移。"""
+    cats = _catalysts(tr)
+    if not cats:
+        return None
+    tw, sm, tdef = _cat_tables()
     best = None
-    for c in _catalysts(tr):
-        w = _CAT_TYPE_W.get(c.get("type", ""), 0.8) * _CAT_SEV_M.get(c.get("severity", "medium"), 1.0)
+    for c in cats:
+        w = tw.get(c.get("type", ""), tdef) * sm.get(c.get("severity", "medium"), 1.0)
         best = w if best is None else max(best, w)
     return best
 
