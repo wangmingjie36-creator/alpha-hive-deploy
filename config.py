@@ -201,7 +201,13 @@ def get_cache_ttl(source: str) -> int:
 
 # ==================== 监控标的 ====================
 WATCHLIST = {
-    # 科技板块 (Technology) - 5 个
+    # ⚠️ 这份名单 = **每日扫描池的唯一真相**（v0.45.6 起）。
+    # 编排器 alpha-hive-orchestrator.sh 的 DEFAULT_TICKERS 直接从这里读取，
+    # 不再各存一份——此前两边各维护一份、内容早已漂移：config 里 24 只、
+    # 编排器里 30 只，重合仅 13 只，且 config 里有 11 只（AMD/AMGN/BIIB/REGN/
+    # PLUG/RUN/ICLN/SQ/COIN/MSTR/UPST）**从未被扫过**。改了这里以为生效，
+    # 其实扫描纹丝不动。
+    # 顺序 = 编排器原 DEFAULT_TICKERS 顺序，勿随意重排（多处 `[:10]` 取前 N）。
     "NVDA": {
         "name": "NVIDIA Corporation",
         "sector": "Technology",
@@ -220,123 +226,23 @@ WATCHLIST = {
         "polymarket_slug": "microsoft-cloud-growth",
         "monitor_events": ["earnings", "azure_adoption", "ai_partnership"],
     },
-    "AMD": {
-        "name": "Advanced Micro Devices",
-        "sector": "Technology",
-        "polymarket_slug": "amd-market-share",
-        "monitor_events": ["earnings", "product_launch", "supply"],
-    },
     "QCOM": {
         "name": "Qualcomm Inc",
         "sector": "Technology",
         "polymarket_slug": "qualcomm-5g-adoption",
         "monitor_events": ["earnings", "flagship_launch"],
     },
-
-    # 生物医药 (Healthcare/Biotech) - 5 个
     "VKTX": {
         "name": "Viking Therapeutics",
         "sector": "Healthcare",
         "polymarket_slug": "viking-therapeutics-fda-approval",
         "monitor_events": ["trial_results", "fda_decision"],
     },
-    "AMGN": {
-        "name": "Amgen Inc",
-        "sector": "Healthcare",
-        "polymarket_slug": "amgen-oncology-pipeline",
-        "monitor_events": ["trial_results", "fda_approval"],
-    },
-    "BIIB": {
-        "name": "Biogen Inc",
-        "sector": "Healthcare",
-        "polymarket_slug": "biogen-alzheimers",
-        "monitor_events": ["clinical_trial", "regulatory_approval"],
-    },
-    "JNJ": {
-        "name": "Johnson & Johnson",
-        "sector": "Healthcare",
-        "polymarket_slug": "jnj-pharma-pipeline",
-        "monitor_events": ["earnings", "clinical_trial_results"],
-    },
-    "REGN": {
-        "name": "Regeneron Pharmaceuticals",
-        "sector": "Healthcare",
-        "polymarket_slug": "regn-obesity-drug",
-        "monitor_events": ["clinical_data", "fda_decision"],
-    },
-
-    # 清洁能源 (Clean Energy) - 5 个
-    "PLUG": {
-        "name": "Plug Power Inc",
-        "sector": "CleanEnergy",
-        "polymarket_slug": "plug-hydrogen-adoption",
-        "monitor_events": ["supply_deal", "partnership_announcement"],
-    },
-    "RUN": {
-        "name": "Sunrun Inc",
-        "sector": "CleanEnergy",
-        "polymarket_slug": "sunrun-irs-credits",
-        "monitor_events": ["policy_change", "installation_growth"],
-    },
-    "NEE": {
-        "name": "NextEra Energy",
-        "sector": "CleanEnergy",
-        "polymarket_slug": "nextEra-renewable-expansion",
-        "monitor_events": ["earnings", "capacity_expansion"],
-    },
-    "ICLN": {
-        "name": "iClean Energy ETF",
-        "sector": "CleanEnergy",
-        "polymarket_slug": "clean-energy-policy",
-        "monitor_events": ["legislation", "irs_guidance"],
-    },
-    "ENPH": {
-        "name": "Enphase Energy",
-        "sector": "CleanEnergy",
-        "polymarket_slug": "enphase-battery-sales",
-        "monitor_events": ["earnings", "product_launch"],
-    },
-
-    # 金融科技 (FinTech) - 3 个
-    "SQ": {
-        "name": "Block Inc",
-        "sector": "FinTech",
-        "polymarket_slug": "square-btc-adoption",
-        "monitor_events": ["earnings", "product_launch"],
-    },
-    "COIN": {
-        "name": "Coinbase Global",
-        "sector": "FinTech",
-        "polymarket_slug": "coinbase-btc-price",
-        "monitor_events": ["earnings", "regulatory_approval"],
-    },
-    "MSTR": {
-        "name": "MicroStrategy Inc",
-        "sector": "FinTech",
-        "polymarket_slug": "mstr-bitcoin-reserve",
-        "monitor_events": ["btc_purchase", "quarterly_earnings"],
-    },
-
-    # 人工智能 (AI) - 2 个
-    "UPST": {
-        "name": "Upstart Holdings",
-        "sector": "AI",
-        "polymarket_slug": "upstart-ai-lending",
-        "monitor_events": ["earnings", "partnership"],
-    },
-
-    # 用户自选标的 (User Watchlist)
     "META": {
         "name": "Meta Platforms Inc",
         "sector": "Technology",
         "polymarket_slug": "meta-ai-revenue",
         "monitor_events": ["earnings", "ai_product_launch", "regulatory"],
-    },
-    "RKLB": {
-        "name": "Rocket Lab USA",
-        "sector": "Aerospace",
-        "polymarket_slug": "rocket-lab-launch",
-        "monitor_events": ["launch_success", "contract_award", "earnings"],
     },
     "BILI": {
         "name": "Bilibili Inc",
@@ -350,11 +256,120 @@ WATCHLIST = {
         "polymarket_slug": "amazon-aws-revenue",
         "monitor_events": ["earnings", "aws_growth", "prime_day", "regulatory"],
     },
+    "RKLB": {
+        "name": "Rocket Lab USA",
+        "sector": "Aerospace",
+        "polymarket_slug": "rocket-lab-launch",
+        "monitor_events": ["launch_success", "contract_award", "earnings"],
+    },
     "CRCL": {
         "name": "Circle Internet Financial",
         "sector": "FinTech",
         "polymarket_slug": "circle-ipo",
         "monitor_events": ["ipo", "earnings", "usdc_growth", "regulatory", "crypto_policy"],
+    },
+    "CVX": {
+        "name": "Chevron Corp",
+        "sector": "Energy",
+        "monitor_events": ["earnings", "permian_output"],
+    },
+    "VZ": {
+        "name": "Verizon Communications",
+        "sector": "Communication",
+        "monitor_events": ["earnings", "postpaid_net_adds"],
+    },
+    "JNJ": {
+        "name": "Johnson & Johnson",
+        "sector": "Healthcare",
+        "polymarket_slug": "jnj-pharma-pipeline",
+        "monitor_events": ["earnings", "clinical_trial_results"],
+    },
+    "XOM": {
+        "name": "Exxon Mobil",
+        "sector": "Energy",
+        "monitor_events": ["earnings", "oil_prices"],
+    },
+    "COST": {
+        "name": "Costco Wholesale",
+        "sector": "Consumer",
+        "monitor_events": ["monthly_sales", "earnings"],
+    },
+    "BRK-B": {
+        "name": "Berkshire Hathaway",
+        "sector": "Financials",
+        "monitor_events": ["13f", "annual_meeting"],
+    },
+    "AMC": {
+        "name": "AMC Entertainment",
+        "sector": "Communication",
+        "monitor_events": ["box_office", "earnings"],
+    },
+    "ABBV": {
+        "name": "AbbVie Inc",
+        "sector": "Healthcare",
+        "monitor_events": ["earnings", "skyrizi_rinvoq"],
+    },
+    "T": {
+        "name": "AT&T Inc",
+        "sector": "Communication",
+        "monitor_events": ["earnings", "postpaid_adds"],
+    },
+    "DELL": {
+        "name": "Dell Technologies",
+        "sector": "Technology",
+        "monitor_events": ["earnings", "ai_server"],
+    },
+    "DE": {
+        "name": "Deere & Co",
+        "sector": "Industrials",
+        "monitor_events": ["earnings", "ag_equipment"],
+    },
+    "CRM": {
+        "name": "Salesforce Inc",
+        "sector": "Technology",
+        "monitor_events": ["earnings", "ai_agentforce"],
+    },
+    "MU": {
+        "name": "Micron Technology",
+        "sector": "Technology",
+        "monitor_events": ["earnings", "hbm_shipments"],
+    },
+    "WMT": {
+        "name": "Walmart Inc",
+        "sector": "Consumer",
+        "monitor_events": ["earnings", "comp_sales"],
+    },
+    "TMO": {
+        "name": "Thermo Fisher",
+        "sector": "Healthcare",
+        "monitor_events": ["earnings"],
+    },
+    "TMUS": {
+        "name": "T-Mobile US",
+        "sector": "Communication",
+        "monitor_events": ["earnings", "postpaid_net_adds"],
+    },
+    "ENPH": {
+        "name": "Enphase Energy",
+        "sector": "CleanEnergy",
+        "polymarket_slug": "enphase-battery-sales",
+        "monitor_events": ["earnings", "product_launch"],
+    },
+    "NFLX": {
+        "name": "Netflix Inc",
+        "sector": "Communication",
+        "monitor_events": ["earnings", "subscriber_adds", "ad_tier"],
+    },
+    "NEE": {
+        "name": "NextEra Energy",
+        "sector": "CleanEnergy",
+        "polymarket_slug": "nextEra-renewable-expansion",
+        "monitor_events": ["earnings", "capacity_expansion"],
+    },
+    "SNOW": {
+        "name": "Snowflake Inc",
+        "sector": "Technology",
+        "monitor_events": ["earnings"],
     },
 }
 
@@ -364,72 +379,63 @@ WATCHLIST = {
 # 用法：扫描脚本按需合并 WATCHLIST + WATCHLIST_EXTENDED（CLI --all-watchlist 或 --extended-pool）
 # ══════════════════════════════════════════════════════════════════════════════
 WATCHLIST_EXTENDED = {
-    # ── 大型科技（Mega-cap Tech）──
+    # 候补样本池：仅 `--extended-pool` 时并入，不参与每日扫描。
+    # v0.45.6：原 WATCHLIST 中从未被扫过的 11 只降级至此——**不是删除**，
+    # 扩池样本量直接决定统计功效（实测 10→30 把出结论时间缩短 5.18×），
+    # 凭空砍掉 11 只样本不划算。
+    "AMD": {"name": "Advanced Micro Devices", "sector": "Technology", "polymarket_slug": "amd-market-share", "monitor_events": ["earnings", "product_launch", "supply"]},
+    "AMGN": {"name": "Amgen Inc", "sector": "Healthcare", "polymarket_slug": "amgen-oncology-pipeline", "monitor_events": ["trial_results", "fda_approval"]},
+    "BIIB": {"name": "Biogen Inc", "sector": "Healthcare", "polymarket_slug": "biogen-alzheimers", "monitor_events": ["clinical_trial", "regulatory_approval"]},
+    "REGN": {"name": "Regeneron Pharmaceuticals", "sector": "Healthcare", "polymarket_slug": "regn-obesity-drug", "monitor_events": ["clinical_data", "fda_decision"]},
+    "PLUG": {"name": "Plug Power Inc", "sector": "CleanEnergy", "polymarket_slug": "plug-hydrogen-adoption", "monitor_events": ["supply_deal", "partnership_announcement"]},
+    "RUN": {"name": "Sunrun Inc", "sector": "CleanEnergy", "polymarket_slug": "sunrun-irs-credits", "monitor_events": ["policy_change", "installation_growth"]},
+    "ICLN": {"name": "iClean Energy ETF", "sector": "CleanEnergy", "polymarket_slug": "clean-energy-policy", "monitor_events": ["legislation", "irs_guidance"]},
+    "SQ": {"name": "Block Inc", "sector": "FinTech", "polymarket_slug": "square-btc-adoption", "monitor_events": ["earnings", "product_launch"]},
+    "COIN": {"name": "Coinbase Global", "sector": "FinTech", "polymarket_slug": "coinbase-btc-price", "monitor_events": ["earnings", "regulatory_approval"]},
+    "MSTR": {"name": "MicroStrategy Inc", "sector": "FinTech", "polymarket_slug": "mstr-bitcoin-reserve", "monitor_events": ["btc_purchase", "quarterly_earnings"]},
+    "UPST": {"name": "Upstart Holdings", "sector": "AI", "polymarket_slug": "upstart-ai-lending", "monitor_events": ["earnings", "partnership"]},
     "AAPL": {"name": "Apple Inc", "sector": "Technology", "monitor_events": ["earnings", "product_launch"]},
     "GOOGL": {"name": "Alphabet Inc", "sector": "Technology", "monitor_events": ["earnings", "ai_product", "antitrust"]},
     "AVGO": {"name": "Broadcom Inc", "sector": "Technology", "monitor_events": ["earnings", "vmware_integration"]},
     "ORCL": {"name": "Oracle Corp", "sector": "Technology", "monitor_events": ["earnings", "cloud_growth"]},
-    "CRM": {"name": "Salesforce Inc", "sector": "Technology", "monitor_events": ["earnings", "ai_agentforce"]},
     "ADBE": {"name": "Adobe Inc", "sector": "Technology", "monitor_events": ["earnings", "creative_cloud"]},
     "NOW": {"name": "ServiceNow Inc", "sector": "Technology", "monitor_events": ["earnings"]},
     "PANW": {"name": "Palo Alto Networks", "sector": "Technology", "monitor_events": ["earnings", "security_platform"]},
     "CRWD": {"name": "CrowdStrike Holdings", "sector": "Technology", "monitor_events": ["earnings", "incident_response"]},
-    "SNOW": {"name": "Snowflake Inc", "sector": "Technology", "monitor_events": ["earnings"]},
     "INTC": {"name": "Intel Corp", "sector": "Technology", "monitor_events": ["earnings", "foundry"]},
-    "MU": {"name": "Micron Technology", "sector": "Technology", "monitor_events": ["earnings", "hbm_shipments"]},
     "SMCI": {"name": "Super Micro Computer", "sector": "Technology", "monitor_events": ["earnings", "ai_server"]},
     "ARM": {"name": "Arm Holdings", "sector": "Technology", "monitor_events": ["earnings", "ai_licensing"]},
-    "DELL": {"name": "Dell Technologies", "sector": "Technology", "monitor_events": ["earnings", "ai_server"]},
     "HPE": {"name": "Hewlett Packard Enterprise", "sector": "Technology", "monitor_events": ["earnings"]},
     "ASML": {"name": "ASML Holding", "sector": "Technology", "monitor_events": ["earnings", "euv_orders"]},
     "TSM": {"name": "Taiwan Semiconductor", "sector": "Technology", "monitor_events": ["earnings", "monthly_revenue"]},
-    # ── 消费（Consumer）──
-    "COST": {"name": "Costco Wholesale", "sector": "Consumer", "monitor_events": ["monthly_sales", "earnings"]},
-    "WMT": {"name": "Walmart Inc", "sector": "Consumer", "monitor_events": ["earnings", "comp_sales"]},
     "HD": {"name": "Home Depot", "sector": "Consumer", "monitor_events": ["earnings", "housing_starts"]},
     "NKE": {"name": "Nike Inc", "sector": "Consumer", "monitor_events": ["earnings", "china_sales"]},
     "MCD": {"name": "McDonald's Corp", "sector": "Consumer", "monitor_events": ["earnings", "same_store_sales"]},
     "SBUX": {"name": "Starbucks Corp", "sector": "Consumer", "monitor_events": ["earnings", "china_traffic"]},
     "LULU": {"name": "Lululemon Athletica", "sector": "Consumer", "monitor_events": ["earnings", "international_growth"]},
-    # ── 金融（Financials）──
     "JPM": {"name": "JPMorgan Chase", "sector": "Financials", "monitor_events": ["earnings", "nii_guidance"]},
     "BAC": {"name": "Bank of America", "sector": "Financials", "monitor_events": ["earnings", "nii"]},
     "GS": {"name": "Goldman Sachs", "sector": "Financials", "monitor_events": ["earnings", "trading_revenue"]},
     "MS": {"name": "Morgan Stanley", "sector": "Financials", "monitor_events": ["earnings", "wealth_mgmt"]},
     "V": {"name": "Visa Inc", "sector": "Financials", "monitor_events": ["earnings", "payment_volume"]},
     "MA": {"name": "Mastercard Inc", "sector": "Financials", "monitor_events": ["earnings", "cross_border"]},
-    "BRK-B": {"name": "Berkshire Hathaway", "sector": "Financials", "monitor_events": ["13f", "annual_meeting"]},
-    # ── 医药（Healthcare - 补充）──
     "LLY": {"name": "Eli Lilly", "sector": "Healthcare", "monitor_events": ["earnings", "glp1_sales"]},
     "NVO": {"name": "Novo Nordisk", "sector": "Healthcare", "monitor_events": ["earnings", "wegovy_demand"]},
     "UNH": {"name": "UnitedHealth Group", "sector": "Healthcare", "monitor_events": ["earnings", "mlr"]},
-    "ABBV": {"name": "AbbVie Inc", "sector": "Healthcare", "monitor_events": ["earnings", "skyrizi_rinvoq"]},
     "PFE": {"name": "Pfizer Inc", "sector": "Healthcare", "monitor_events": ["earnings", "pipeline"]},
     "MRK": {"name": "Merck & Co", "sector": "Healthcare", "monitor_events": ["earnings", "keytruda"]},
-    "TMO": {"name": "Thermo Fisher", "sector": "Healthcare", "monitor_events": ["earnings"]},
     "ISRG": {"name": "Intuitive Surgical", "sector": "Healthcare", "monitor_events": ["earnings", "procedure_volumes"]},
-    # ── 能源 / 工业 ──
-    "XOM": {"name": "Exxon Mobil", "sector": "Energy", "monitor_events": ["earnings", "oil_prices"]},
-    "CVX": {"name": "Chevron Corp", "sector": "Energy", "monitor_events": ["earnings", "permian_output"]},
     "CAT": {"name": "Caterpillar Inc", "sector": "Industrials", "monitor_events": ["earnings", "dealer_inventory"]},
     "BA": {"name": "Boeing Co", "sector": "Industrials", "monitor_events": ["earnings", "737max_deliveries", "defense"]},
     "GE": {"name": "GE Aerospace", "sector": "Industrials", "monitor_events": ["earnings", "services_orders"]},
-    "DE": {"name": "Deere & Co", "sector": "Industrials", "monitor_events": ["earnings", "ag_equipment"]},
-    # ── 通讯 / 媒体 ──
-    "NFLX": {"name": "Netflix Inc", "sector": "Communication", "monitor_events": ["earnings", "subscriber_adds", "ad_tier"]},
     "DIS": {"name": "Walt Disney Co", "sector": "Communication", "monitor_events": ["earnings", "parks", "dtc_profitability"]},
-    "T": {"name": "AT&T Inc", "sector": "Communication", "monitor_events": ["earnings", "postpaid_adds"]},
-    "VZ": {"name": "Verizon Communications", "sector": "Communication", "monitor_events": ["earnings", "postpaid_net_adds"]},
     "CMCSA": {"name": "Comcast Corp", "sector": "Communication", "monitor_events": ["earnings", "broadband_subs"]},
-    "TMUS": {"name": "T-Mobile US", "sector": "Communication", "monitor_events": ["earnings", "postpaid_net_adds"]},
-    # ── 中概 / 其它高波动 ──
     "BABA": {"name": "Alibaba Group", "sector": "Technology", "monitor_events": ["earnings", "cloud_revenue"]},
     "PDD": {"name": "PDD Holdings", "sector": "Technology", "monitor_events": ["earnings", "temu_gmv"]},
     "JD": {"name": "JD.com Inc", "sector": "Technology", "monitor_events": ["earnings", "618_promotion"]},
     "NIO": {"name": "NIO Inc", "sector": "Automotive", "monitor_events": ["deliveries", "earnings"]},
     "XPEV": {"name": "XPeng Inc", "sector": "Automotive", "monitor_events": ["deliveries", "earnings"]},
     "LI": {"name": "Li Auto Inc", "sector": "Automotive", "monitor_events": ["deliveries", "earnings"]},
-    # ── ETF 做 sector-hedge / regime 参考 ──
     "SPY": {"name": "SPDR S&P 500 ETF", "sector": "ETF", "monitor_events": ["macro", "fomc"]},
     "QQQ": {"name": "Invesco QQQ Trust", "sector": "ETF", "monitor_events": ["tech_earnings"]},
     "IWM": {"name": "iShares Russell 2000 ETF", "sector": "ETF", "monitor_events": ["small_cap_earnings"]},
@@ -439,9 +445,7 @@ WATCHLIST_EXTENDED = {
     "XLV": {"name": "Health Care Select SPDR", "sector": "ETF", "monitor_events": ["healthcare_earnings"]},
     "XLK": {"name": "Technology Select Sector SPDR", "sector": "ETF", "monitor_events": ["tech_earnings"]},
     "VXX": {"name": "iPath VIX Short-Term Futures", "sector": "ETF", "monitor_events": ["vix_spike"]},
-    # ── 高 beta / meme（波动信号用）──
     "GME": {"name": "GameStop Corp", "sector": "Consumer", "monitor_events": ["earnings", "retail_sentiment"]},
-    "AMC": {"name": "AMC Entertainment", "sector": "Communication", "monitor_events": ["box_office", "earnings"]},
     "PLTR": {"name": "Palantir Technologies", "sector": "Technology", "monitor_events": ["earnings", "government_contracts"]},
     "SOFI": {"name": "SoFi Technologies", "sector": "Financials", "monitor_events": ["earnings", "member_adds"]},
     "HOOD": {"name": "Robinhood Markets", "sector": "Financials", "monitor_events": ["earnings", "monthly_active_users"]},
@@ -454,7 +458,7 @@ WATCHLIST_EXTENDED = {
 
 
 def get_extended_watchlist() -> dict:
-    """返回合并后的 WATCHLIST（25 核心 + 扩展池 ~75）。
+    """返回合并后的标的池（30 只每日扫描 + 71 只候补 = 101）。
     调用方：`python3 alpha_hive_daily_report.py --extended-pool`
 
     v0.23.2 修复：语义明确为"WATCHLIST 优先"（核心标的的 catalyst 配置不被扩展池覆盖）。
@@ -755,8 +759,10 @@ def validate_watchlist():
 
     for ticker, cfg in WATCHLIST.items():
         # ticker 格式：1~5 位大写字母
-        if not re.match(r'^[A-Z]{1,5}$', ticker):
-            warnings.append(f"WATCHLIST ticker 格式异常: {ticker!r}（需 1~5 位大写字母）")
+        if not re.match(r'^[A-Z]{1,5}(?:[.-][A-Z])?$', ticker):
+            warnings.append(
+                f"WATCHLIST ticker 格式异常: {ticker!r}"
+                "（需 1~5 位大写字母，可带 -X/.X 类份额后缀）")
 
         # 必填字段检查
         missing = _required_fields - set(cfg.keys())
@@ -768,12 +774,17 @@ def validate_watchlist():
         if not isinstance(evts, list) or len(evts) == 0:
             warnings.append(f"WATCHLIST[{ticker}].monitor_events 为空或非列表")
 
-    # CATALYSTS 中有但 WATCHLIST 中没有的 ticker
-    orphan_catalysts = set(CATALYSTS.keys()) - set(WATCHLIST.keys())
+    # CATALYSTS 中有但**两个池子都没有**的 ticker。
+    # v0.45.6：口径从 WATCHLIST 放宽到 WATCHLIST + WATCHLIST_EXTENDED——
+    # WATCHLIST 收窄为每日扫描的 30 只后，候补池标的的 catalyst 配置是**合法的**
+    # （`--extended-pool` 会用到），按旧口径会误报 10 个孤儿。
+    # 真正该报的是"配了 catalyst 却哪个池子都不在"，那才是死配置。
+    _known = set(WATCHLIST.keys()) | set(WATCHLIST_EXTENDED.keys())
+    orphan_catalysts = set(CATALYSTS.keys()) - _known
     if orphan_catalysts:
-        warnings.append(f"CATALYSTS 中有 {orphan_catalysts} 不在 WATCHLIST 中")
+        warnings.append(f"CATALYSTS 中有 {sorted(orphan_catalysts)} 不在任何标的池中")
 
-    # WATCHLIST 中没有 CATALYSTS 配置的 ticker（仅 info 级别）
+    # 每日扫描池中没有 CATALYSTS 配置的 ticker（仅 info 级别）
     missing_catalysts = set(WATCHLIST.keys()) - set(CATALYSTS.keys())
     if missing_catalysts:
         _log.info("以下 ticker 尚无 CATALYSTS 配置（不影响运行）: %s", sorted(missing_catalysts))

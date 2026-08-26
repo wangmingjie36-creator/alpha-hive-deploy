@@ -4,6 +4,7 @@
 """
 
 import atexit
+import html as _html
 import json
 import argparse
 from datetime import datetime
@@ -19,6 +20,20 @@ from config import WATCHLIST
 from hive_logger import PATHS, get_logger, pdt_today
 
 _log = get_logger("ml_report")
+
+
+def _html_escape(v) -> str:
+    """转义进入 HTML 的动态文本（多为上游失败原因，可能含 < > &）。"""
+    return _html.escape(str(v), quote=True)
+
+
+# 排版化信号标记：替代 emoji（⚠️/✅/🟢/🔴）。emoji 在报告里既不可着色、
+# 也不随明暗主题变化，且是"AI 生成页面"最明显的指纹之一。
+DOT_BULL = '<span style="color:var(--bull)">●</span> '
+DOT_BEAR = '<span style="color:var(--bear)">●</span> '
+DOT_NEUT = '<span style="color:var(--neut)">●</span> '
+# 缺数占位：与 IV 小节的 .na 同形，页面上「没取到」与「值是 0」必须可区分
+_NA_SPAN = '<span class="na" title="数据不可用">—</span>'
 
 
 def _pdt_now():
@@ -418,8 +433,8 @@ class MLEnhancedReportGenerator:
         if options.get("data_quality") == "unavailable":
             return (
                 '<div class="section"><h2>期权市场分析</h2>'
-                '<div style="padding:14px 16px;border:1px solid #e0c060;'
-                'background:rgba(224,192,96,.08);border-radius:8px;font-size:.9em;">'
+                '<div style="padding:14px 16px;border:1px solid var(--border);'
+                'border-radius:2px;font-size:.9em;">'
                 '期权数据不可用（CBOE / yfinance 均获取失败），本节指标跳过，'
                 '不参与今日评分。</div></div>'
             )
@@ -439,22 +454,22 @@ class MLEnhancedReportGenerator:
 
         # 判断 IV Rank 颜色（None 已在上方 L431 归一为 50，此处无需再判）
         if iv_rank < 30:
-            iv_color = "#28a745"  # 绿色，低 IV
+            iv_color = "var(--bull)"  # 绿色，低 IV
             iv_label = "低 IV"
         elif iv_rank > 70:
-            iv_color = "#dc3545"  # 红色，高 IV
+            iv_color = "var(--bear)"  # 红色，高 IV
             iv_label = "高 IV"
         else:
-            iv_color = "#ffc107"  # 黄色，中等 IV
+            iv_color = "var(--neut)"  # 黄色，中等 IV
             iv_label = "中等 IV"
 
         # 判断流向颜色
         if flow_direction == "bullish":
-            flow_color = "#28a745"
+            flow_color = "var(--bull)"
         elif flow_direction == "bearish":
-            flow_color = "#dc3545"
+            flow_color = "var(--bear)"
         else:
-            flow_color = "#ffc107"
+            flow_color = "var(--neut)"
 
         # 生成异动信号 HTML
         unusual_html = ""
@@ -489,10 +504,10 @@ class MLEnhancedReportGenerator:
 
         return f"""
             <div class="section">
-                <h2>📈 期权信号分析</h2>
+                <h2>期权信号分析</h2>
 
                 <div class="ml-section">
-                    <h3 style="color: #667eea; margin-bottom: 15px;">⚡ 核心指标</h3>
+                    <h3>核心指标</h3>
 
                     <div class="metric">
                         <span class="metric-label">IV Rank</span>
@@ -528,14 +543,14 @@ class MLEnhancedReportGenerator:
                         <span class="metric-value">{gamma_squeeze_risk.upper()}</span>
                     </div>
 
-                    <h3 style="color: #667eea; margin-top: 20px; margin-bottom: 15px;">📊 期权综合评分</h3>
+                    <h3>期权综合评分</h3>
 
-                    <div style="text-align: center; padding: 20px; background: #f8f9fa; border-radius: 10px;">
-                        <div style="font-size: 3.5em; font-weight: bold; color: #667eea; margin-bottom: 10px;">
+                    <div style="text-align: center; padding: 20px; background:none; border:1px solid var(--border); border-radius:2px;">
+                        <div style="font-size: 3.5em; font-weight: bold; color: var(--tp); margin-bottom: 10px;">
                             {options_score:.1f}
                         </div>
-                        <div style="font-size: 1.2em; color: #333; margin-bottom: 10px;">/ 10.0</div>
-                        <div style="color: #666; font-size: 0.95em;">{signal_summary}</div>
+                        <div style="font-size: 1.2em; color: var(--tp); margin-bottom: 10px;">/ 10.0</div>
+                        <div style="color: var(--ts); font-size: 0.95em;">{signal_summary}</div>
                     </div>
 
                     {unusual_html}
@@ -592,7 +607,7 @@ class MLEnhancedReportGenerator:
 
     @staticmethod
     def _dir_color(d):
-        return {"bullish": "#28a745", "bearish": "#dc3545"}.get(d, "#ffc107")
+        return {"bullish": "var(--bull)", "bearish": "var(--bear)"}.get(d, "var(--neut)")
 
     def _ch1_core_conclusion(self, swarm: dict, combined: dict, analysis: dict) -> str:
         """第1章：核心结论"""
@@ -626,15 +641,15 @@ class MLEnhancedReportGenerator:
         bear_score = bear.get("details", {}).get("bear_score", 0) if bear else 0
         if bear_score >= 6:
             summary_parts.append(f"看空蜂强度 {bear_score:.1f}/10，需关注下行风险")
-        summary_html = "".join(f"<p style='margin:6px 0;color:#555;'>{s}</p>" for s in summary_parts[:3])
+        summary_html = "".join(f"<p style='margin:6px 0;color:var(--ts);'>{s}</p>" for s in summary_parts[:3])
         return f"""
         <div class="section">
             <h2>第 1 章：核心结论</h2>
             <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-bottom:18px;">
                 <div style="text-align:center;">
                     <span style="font-size:3em;font-weight:bold;color:{dir_color};">{final_score:.1f}</span>
-                    <span style="font-size:1.2em;color:#888;">/10</span>
-                    <div><span style="background:{dir_color};color:white;padding:4px 16px;border-radius:15px;font-weight:bold;">{dir_cn}</span></div>
+                    <span style="font-size:1.2em;color:var(--tm);">/10</span>
+                    <div><span style="color:{dir_color};border:1px solid currentColor;border-radius:2px;padding:3px 11px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;font-weight:600;letter-spacing:.5px;">{dir_cn}</span></div>
                 </div>
                 <div style="flex:1;min-width:180px;">
                     <div class="metric"><span class="metric-label">综合胜率</span><span class="metric-value" style="color:{dir_color};">{combined_prob:.1f}%</span></div>
@@ -653,11 +668,11 @@ class MLEnhancedReportGenerator:
         if not dim_scores:
             return ""
         DIMS = [
-            ("signal",   "🐝 信号强度 (Signal)",   0.30, "聪明钱 SEC Form4 / 机构持仓"),
-            ("catalyst", "⏰ 催化剂 (Catalyst)",   0.20, "事件日历 / 财报 / 产品发布"),
-            ("sentiment","📢 情绪 (Sentiment)",    0.20, "X 平台 / Reddit / 新闻情绪"),
-            ("odds",     "🔮 赔率 (Odds)",          0.15, "期权 P/C / IV Rank / Polymarket"),
-            ("risk_adj", "🛡️ 风险调整 (RiskAdj)",  0.15, "拥挤度 / 波动 / 交叉验证调整"),
+            ("signal",   "信号强度 (Signal)",   0.30, "聪明钱 SEC Form4 / 机构持仓"),
+            ("catalyst", "催化剂 (Catalyst)",   0.20, "事件日历 / 财报 / 产品发布"),
+            ("sentiment","情绪 (Sentiment)",    0.20, "X 平台 / Reddit / 新闻情绪"),
+            ("odds",     "赔率 (Odds)",          0.15, "期权 P/C / IV Rank / Polymarket"),
+            ("risk_adj", "风险调整 (RiskAdj)",  0.15, "拥挤度 / 波动 / 交叉验证调整"),
         ]
         rows = ""
         total_weighted = 0.0
@@ -666,22 +681,22 @@ class MLEnhancedReportGenerator:
             weighted = score * weight
             total_weighted += weighted
             bar_pct = int(score / 10 * 100)
-            bar_color = "#28a745" if score >= 7 else ("#ffc107" if score >= 5 else "#dc3545")
+            bar_color = "var(--bull)" if score >= 7 else ("var(--neut)" if score >= 5 else "var(--bear)")
             rows += f"""<tr>
-                <td>{label}<br><small style="color:#999">{hint}</small></td>
+                <td>{label}<br><small style="color:var(--tm)">{hint}</small></td>
                 <td style="font-weight:bold;color:{bar_color}">{score:.1f}</td>
                 <td>{weight:.0%}</td>
                 <td style="font-weight:bold">{weighted:.2f}</td>
-                <td><div style="background:#f0f0f0;border-radius:4px;height:8px;width:100px;display:inline-block;">
+                <td><div style="background:var(--border);border-radius:4px;height:8px;width:100px;display:inline-block;">
                     <div style="background:{bar_color};border-radius:4px;height:8px;width:{bar_pct}px;"></div>
                 </div></td>
             </tr>"""
-        score_lv = "高优先级 ✅" if total_weighted >= 7.5 else ("观察名单 👀" if total_weighted >= 6.0 else "不行动 ❌")
-        rows += f"""<tr style="background:#f8f9ff;font-weight:bold;">
+        score_lv = "高优先级" if total_weighted >= 7.5 else ("观察名单" if total_weighted >= 6.0 else "不行动")
+        rows += f"""<tr style="background:var(--surface2);font-weight:bold;">
             <td><strong>综合 Opportunity Score</strong></td>
-            <td style="color:#667eea;font-size:1.2em;">{total_weighted:.2f}</td>
+            <td style="color:var(--tp);font-size:1.2em;">{total_weighted:.2f}</td>
             <td></td>
-            <td style="color:#667eea;font-size:1.2em;">{total_weighted:.2f}</td>
+            <td style="color:var(--tp);font-size:1.2em;">{total_weighted:.2f}</td>
             <td>{score_lv}</td>
         </tr>"""
         return f"""
@@ -691,7 +706,7 @@ class MLEnhancedReportGenerator:
                 <tr><th>维度</th><th>分数</th><th>权重</th><th>加权</th><th>进度</th></tr>
                 {rows}
             </table>
-            <p style="margin-top:12px;font-size:0.85em;color:#888;">公式：Score = 0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds + 0.15×RiskAdj</p>
+            <p style="margin-top:12px;font-size:0.85em;color:var(--tm);">公式：Score = 0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds + 0.15×RiskAdj</p>
         </div>"""
 
     def _ch3_scout(self, agent_details: dict) -> str:
@@ -716,22 +731,22 @@ class MLEnhancedReportGenerator:
             amount = shares * price if price else 0
             trade_rows += f"""<tr>
                 <td>{t.get('insider','')}</td>
-                <td style="font-size:0.85em;color:#666">{t.get('title','')}</td>
+                <td style="font-size:0.85em;color:var(--ts)">{t.get('title','')}</td>
                 <td>{t.get('date','')}</td>
                 <td>{shares:,.0f}</td>
                 <td>{"$"+f"{price:.2f}" if price else "授予"}</td>
                 <td>{"$"+f"{amount:,.0f}" if amount else "—"}</td>
             </tr>"""
         if not trade_rows:
-            trade_rows = '<tr><td colspan="6" style="color:#999;text-align:center">暂无近期内部人交易记录</td></tr>'
+            trade_rows = '<tr><td colspan="6" style="color:var(--tm);text-align:center">暂无近期内部人交易记录</td></tr>'
         insider_sentiment = insider.get("sentiment", "neutral")
         ins_cn = self._dir_cn(insider_sentiment)
         ins_color = self._dir_color(insider_sentiment)
-        mom_color = "#6c757d" if momentum is None else ("#28a745" if momentum > 0 else "#dc3545")
+        mom_color = "var(--tm)" if momentum is None else ("var(--bull)" if momentum > 0 else "var(--bear)")
         mom_txt = "—" if momentum is None else f"{momentum:+.2f}%"
         return f"""
         <div class="section">
-            <h2>🐝 ScoutBee — 聪明钱侦察</h2>
+            <h2>ScoutBee — 聪明钱侦察</h2>
             <div style="display:flex;gap:15px;flex-wrap:wrap;margin-bottom:15px;">
                 <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Signal 评分</div></div>
                 <div class="stat"><div class="num" style="color:{ins_color}">{ins_cn}</div><div class="lbl">内部人情绪</div></div>
@@ -743,7 +758,7 @@ class MLEnhancedReportGenerator:
                 <tr><th>内部人</th><th>职位</th><th>日期</th><th>股数</th><th>均价</th><th>金额</th></tr>
                 {trade_rows}
             </table>
-            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>{ad.get('discovery','')}</p>
+            <p style="margin-top:10px;font-size:0.85em;color:var(--ts);"><strong>关键判断：</strong>{ad.get('discovery','')}</p>
         </div>"""
 
     def _ch3_oracle(self, agent_details: dict, options: dict, current_price: float = 0) -> str:
@@ -770,11 +785,11 @@ class MLEnhancedReportGenerator:
         key_levels = opts.get("key_levels") or {}
         support = key_levels.get("support") or []
         resist = key_levels.get("resistance") or []
-        pc_color = "#28a745" if pc < 0.8 else ("#dc3545" if pc > 1.2 else "#ffc107")
+        pc_color = "var(--bull)" if pc < 0.8 else ("var(--bear)" if pc > 1.2 else "var(--neut)")
         unusual_rows = ""
         for u in unusual[:5]:
             bullish = u.get("bullish", True)
-            emo = "🟢" if bullish else "🔴"
+            emo = ('<span style="color:var(--bull)">▲</span>' if bullish else '<span style="color:var(--bear)">▼</span>')
             unusual_rows += f"<li>{emo} {u.get('type','').replace('_',' ')} Strike ${u.get('strike',0):.0f} × {u.get('volume',0):,.0f}</li>"
         support_txt = " | ".join(f"${s.get('strike',0):.0f}(OI:{s.get('oi',0):,})" for s in support[:3])
         resist_txt = " | ".join(f"${r.get('strike',0):.0f}(OI:{r.get('oi',0):,})" for r in resist[:3])
@@ -798,7 +813,7 @@ class MLEnhancedReportGenerator:
         if _near_mp_val is not None:
             _dist_txt = f"（距现价 {_near_mp_dist:+.1f}%）" if _near_mp_dist is not None else ""
             _near_max_pain_html = (
-                f'<div class="stat"><div class="num" style="color:#667eea">${_near_mp_val:.0f}</div>'
+                f'<div class="stat"><div class="num" style="color:var(--tp)">${_near_mp_val:.0f}</div>'
                 f'<div class="lbl">近端磁吸目标价{_dist_txt}</div></div>'
             )
 
@@ -833,40 +848,40 @@ class MLEnhancedReportGenerator:
                     else:
                         pct_txt = "—"
                     dom_exp = w.get("dom_exp") or w.get("position") or ""
-                    badge = f'<span style="background:#eee;color:#666;font-size:0.75em;padding:1px 5px;border-radius:3px;margin-left:4px;">{dom_exp}</span>' if dom_exp else ""
-                    color = "#dc3545" if is_call else "#28a745"
+                    badge = f'<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">{dom_exp}</span>' if dom_exp else ""
+                    color = "var(--bear)" if is_call else "var(--bull)"
                     rows += (
                         f'<tr><td style="color:{color};font-weight:600;">${sk_f:.0f}</td>'
                         f'<td>{int(oi_v):,}</td>'
-                        f'<td style="color:#666;">{pct_txt}{badge}</td></tr>'
+                        f'<td style="color:var(--ts);">{pct_txt}{badge}</td></tr>'
                     )
                 return rows
 
             _call_walls_html = _wall_rows(_full_chain.get("top_call_oi", []), True, current_price)
             _put_walls_html = _wall_rows(_full_chain.get("top_put_oi", []), False, current_price)
-            _fc_pc_color = "#28a745" if _fc_pc < 0.8 else ("#dc3545" if _fc_pc > 1.2 else "#ffc107")
+            _fc_pc_color = "var(--bull)" if _fc_pc < 0.8 else ("var(--bear)" if _fc_pc > 1.2 else "var(--neut)")
 
             _full_oi_html = f"""
-            <h3 style="color:#667eea;margin-top:18px;">📊 全链 OI 结构（{_fc_expiry_count} 个到期日聚合，含 LEAPS 远期参考）</h3>
+            <h3>全链 OI 结构（{_fc_expiry_count} 个到期日聚合，含 LEAPS 远期参考）</h3>
             <div class="grid-4" style="margin-bottom:12px;">
-                <div class="stat"><div class="num" style="color:#888">${_fc_max_pain:.0f}</div><div class="lbl">全链 Max Pain（远期参考）</div></div>
+                <div class="stat"><div class="num" style="color:var(--tm)">${_fc_max_pain:.0f}</div><div class="lbl">全链 Max Pain（远期参考）</div></div>
                 <div class="stat"><div class="num" style="color:{_fc_pc_color}">{_fc_pc:.2f}</div><div class="lbl">全链 P/C Ratio</div></div>
                 <div class="stat"><div class="num">{_fc_total:,}</div><div class="lbl">全链总 OI</div></div>
                 <div class="stat"><div class="num">{_fc_call_oi:,} / {_fc_put_oi:,}</div><div class="lbl">Call / Put OI</div></div>
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px;">
                 <div>
-                    <strong style="color:#dc3545;">Top5 Call 阻力墙（全链）</strong>
+                    <strong style="color:var(--bear);">Top5 Call 阻力墙（全链）</strong>
                     <table style="font-size:0.88em;margin-top:6px;">
                         <tr><th>行权价</th><th>OI</th><th>距现价 / 主导到期</th></tr>
-                        {_call_walls_html or '<tr><td colspan="3" style="color:#999;text-align:center;">—</td></tr>'}
+                        {_call_walls_html or '<tr><td colspan="3" style="color:var(--tm);text-align:center;">—</td></tr>'}
                     </table>
                 </div>
                 <div>
-                    <strong style="color:#28a745;">Top5 Put 支撑墙（全链）</strong>
+                    <strong style="color:var(--bull);">Top5 Put 支撑墙（全链）</strong>
                     <table style="font-size:0.88em;margin-top:6px;">
                         <tr><th>行权价</th><th>OI</th><th>距现价 / 主导到期</th></tr>
-                        {_put_walls_html or '<tr><td colspan="3" style="color:#999;text-align:center;">—</td></tr>'}
+                        {_put_walls_html or '<tr><td colspan="3" style="color:var(--tm);text-align:center;">—</td></tr>'}
                     </table>
                 </div>
             </div>
@@ -936,30 +951,30 @@ class MLEnhancedReportGenerator:
 
             if _near_call_top or _near_put_top:
                 def _row_near(walls, is_call):
-                    color = "#dc3545" if is_call else "#28a745"
+                    color = "var(--bear)" if is_call else "var(--bull)"
                     if not walls:
-                        return '<tr><td colspan="3" style="color:#999;text-align:center;">—</td></tr>'
+                        return '<tr><td colspan="3" style="color:var(--tm);text-align:center;">—</td></tr>'
                     return "".join(
                         f'<tr><td style="color:{color};font-weight:600;">${w["strike"]:.0f}</td>'
                         f'<td>{int(w["oi"]):,}</td>'
-                        f'<td style="color:#666;">{w["pct"]:+.1f}%</td></tr>'
+                        f'<td style="color:var(--ts);">{w["pct"]:+.1f}%</td></tr>'
                         for w in walls
                     )
                 _near_walls_html = f"""
-                <h3 style="color:#667eea;margin-top:18px;">🎯 近 30 天到期 OI 墙（现场聚合，磁吸效应最强）</h3>
-                <div style="background:#fff3cd;border-left:3px solid #ffc107;padding:8px 12px;margin-bottom:10px;font-size:0.88em;color:#856404;">
+                <h3>近 30 天到期 OI 墙（现场聚合，磁吸效应最强）</h3>
+                <div style="background:var(--surface2);border-left:3px solid var(--neut);padding:8px 12px;margin-bottom:10px;font-size:0.88em;color:var(--neut);">
                     近端 P/C = <strong>{_near_pc_str}</strong> | Call OI {_near_call_sum:,} | Put OI {_near_put_sum:,}
                 </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px;">
                     <div>
-                        <strong style="color:#dc3545;">近端 Top3 Call 阻力</strong>
+                        <strong style="color:var(--bear);">近端 Top3 Call 阻力</strong>
                         <table style="font-size:0.88em;margin-top:6px;">
                             <tr><th>行权价</th><th>OI</th><th>距现价</th></tr>
                             {_row_near(_near_call_top, True)}
                         </table>
                     </div>
                     <div>
-                        <strong style="color:#28a745;">近端 Top3 Put 支撑</strong>
+                        <strong style="color:var(--bull);">近端 Top3 Put 支撑</strong>
                         <table style="font-size:0.88em;margin-top:6px;">
                             <tr><th>行权价</th><th>OI</th><th>距现价</th></tr>
                             {_row_near(_near_put_top, False)}
@@ -969,31 +984,73 @@ class MLEnhancedReportGenerator:
                 """
 
         # ── v0.27.0：IV 期限结构 + IV-RV 价差 ───────────────────────────
+        # v0.45.4 诚实渲染：**缺数一律显示「—」，绝不兜成 0**。
+        # 旧实现 `_safe(v, 0)` 把上游诚实返回的 None 兜成 0.0，页面显示
+        # 「0.0% / 0.0%」「+0.0pp」，与"真实测得为 0"完全同形（MEMORY「静默中性化」）。
         _iv_term = opts.get("iv_term_structure") or {}
         _iv_rv_signal = opts.get("iv_rv_signal", "")
-        _iv_rv_spread = _safe(opts.get("iv_rv_spread"), 0)
-        _rv_30d = _safe(opts.get("rv_30d"), 0)
+        _iv_rv_spread = opts.get("iv_rv_spread")      # 可能是 None —— 不要 _safe
+        _rv_30d = opts.get("rv_30d")                  # 可能是 None —— 不要 _safe
         _iv_struct_html = ""
         if (isinstance(_iv_term, dict) and _iv_term) or _iv_rv_signal:
-            _shape = (_iv_term or {}).get("shape") or (_iv_term or {}).get("term_shape") or "—"
-            _shape_color = {"contango": "#28a745", "backwardation": "#dc3545", "flat": "#ffc107"}.get(str(_shape).lower(), "#666")
-            _shape_cn = {"contango": "Contango（远月>近月，市场预期平稳）",
-                         "backwardation": "Backwardation（近月>远月，短期不确定性高）",
-                         "flat": "Flat（期限结构平坦）"}.get(str(_shape).lower(), str(_shape))
-            _front_iv = _safe((_iv_term or {}).get("front_iv"), 0)
-            _back_iv = _safe((_iv_term or {}).get("back_iv"), 0)
-            _iv_rv_color = "#dc3545" if _iv_rv_spread > 10 else ("#28a745" if _iv_rv_spread < -5 else "#666")
+            _NA = '<span class="na" title="数据不可用">—</span>'
+
+            # 期限结构：data_available 缺省时回退到"front/back 都在"作为判据，
+            # 兼容旧快照 JSON（v0.45.4 之前没有这个键）。
+            _ts_front = (_iv_term or {}).get("front_iv")
+            _ts_back = (_iv_term or {}).get("back_iv")
+            _ts_ok = bool((_iv_term or {}).get("data_available",
+                                               _ts_front is not None and _ts_back is not None))
+            _shape = (_iv_term or {}).get("shape") or (_iv_term or {}).get("term_shape") or "unknown"
+            _ts_err = str((_iv_term or {}).get("error") or "")
+            _ts_src = str((_iv_term or {}).get("source") or "")
+
+            if _ts_ok:
+                _shape_color = {"contango": "var(--bull)", "backwardation": "var(--bear)",
+                                "flat": "var(--neut)"}.get(str(_shape).lower(), "var(--ts)")
+                _shape_cell = f'<div class="num" style="color:{_shape_color};font-size:1.15em;">{str(_shape).upper()}</div>'
+                _iv_pair_cell = f'<div class="num">{_ts_front:.1f}% / {_ts_back:.1f}%</div>'
+                _shape_cn = {"contango": "Contango（远月>近月，市场预期平稳）",
+                             "backwardation": "Backwardation（近月>远月，短期不确定性高）",
+                             "flat": "Flat（期限结构平坦）"}.get(str(_shape).lower(), str(_shape))
+                if _ts_src:
+                    _shape_cn += f'<span class="src-tag">{_ts_src}</span>'
+            else:
+                _shape_cell = f'<div class="num" style="font-size:1.15em;">{_NA}</div>'
+                _iv_pair_cell = f'<div class="num">{_NA}</div>'
+                _shape_cn = ('<span class="na-note">数据不可用'
+                             + (f'：{_html_escape(_ts_err[:120])}' if _ts_err else '')
+                             + '</span>')
+
+            # IV-RV：None 与 0.0 必须可区分
+            if _iv_rv_spread is None:
+                _spread_cell = f'<div class="num">{_NA}</div>'
+            else:
+                _iv_rv_color = ("var(--bear)" if _iv_rv_spread > 10
+                                else "var(--bull)" if _iv_rv_spread < -5 else "var(--ts)")
+                _spread_cell = f'<div class="num" style="color:{_iv_rv_color}">{_iv_rv_spread:+.1f}pp</div>'
+            _rv_cell = (f'<div class="num">{_NA}</div>' if _rv_30d is None
+                        else f'<div class="num">{_rv_30d:.1f}%</div>')
+
+            _rv_err = str((opts.get("iv_rv_detail") or {}).get("error") or "")
+            if _iv_rv_signal and _iv_rv_signal != "unknown":
+                _sig_txt = _html_escape(_iv_rv_signal)
+            else:
+                _sig_txt = ('<span class="na-note">数据不可用'
+                            + (f'：{_html_escape(_rv_err[:120])}' if _rv_err else '')
+                            + '</span>')
+
             _iv_struct_html = f"""
-            <h3 style="color:#667eea;margin-top:18px;">📐 IV 期限结构 + IV-RV 价差</h3>
+            <h3>IV 期限结构 · IV-RV 价差</h3>
             <div class="grid-4" style="margin-bottom:12px;">
-                <div class="stat"><div class="num" style="color:{_shape_color};font-size:1.3em;">{str(_shape).upper()}</div><div class="lbl">期限结构形态</div></div>
-                <div class="stat"><div class="num">{_front_iv:.1f}% / {_back_iv:.1f}%</div><div class="lbl">近月 IV / 远月 IV</div></div>
-                <div class="stat"><div class="num" style="color:{_iv_rv_color}">{_iv_rv_spread:+.1f}pp</div><div class="lbl">IV-RV 价差</div></div>
-                <div class="stat"><div class="num">{_rv_30d:.1f}%</div><div class="lbl">30日实现波动率</div></div>
+                <div class="stat">{_shape_cell}<div class="lbl">期限结构形态</div></div>
+                <div class="stat">{_iv_pair_cell}<div class="lbl">近月 IV / 远月 IV</div></div>
+                <div class="stat">{_spread_cell}<div class="lbl">IV-RV 价差</div></div>
+                <div class="stat">{_rv_cell}<div class="lbl">30 日实现波动率</div></div>
             </div>
-            <p style="font-size:0.86em;color:#555;margin-bottom:10px;">
+            <p class="note">
                 <strong>形态解读：</strong>{_shape_cn}<br/>
-                <strong>IV-RV 信号：</strong>{_iv_rv_signal or '—'}
+                <strong>IV-RV 信号：</strong>{_sig_txt}
             </p>
             """
 
@@ -1012,7 +1069,7 @@ class MLEnhancedReportGenerator:
             _oi_concentration = (_exp_rows[0].get("total_oi", 0) / _total_all * 100) if (_exp_rows and _total_all > 0) else 0.0
             _pin_txt = f"${float(_pin_risk):.0f}" if isinstance(_pin_risk, (int, float)) and _pin_risk else "—"
             _gamma_cal_html = f"""
-            <h3 style="color:#667eea;margin-top:18px;">📅 Gamma 到期日历</h3>
+            <h3>Gamma 到期日历</h3>
             <table style="font-size:0.88em;margin-bottom:10px;">
                 <tr><th>指标</th><th>数值</th><th>含义</th></tr>
                 <tr><td>下一主要到期日</td><td>{_next_exp}</td><td>资金面集中点</td></tr>
@@ -1035,15 +1092,15 @@ class MLEnhancedReportGenerator:
 
         return f"""
         <div class="section">
-            <h2>🔮 OracleBee — 期权市场预期</h2>
+            <h2>OracleBee — 期权市场预期</h2>
             <div class="grid-4" style="margin-bottom:15px;">
                 {_hero_cards}
             </div>
             <table style="margin-bottom:12px;">
                 <tr><th>指标</th><th>数值</th><th>信号</th></tr>
-                <tr><td>Gamma 压榨风险</td><td>{gex}</td><td>{"⚠️ 高" if str(gex).lower() in ("high","很高") else "✅ 可控"}</td></tr>
-                <tr><td>期权流方向</td><td>{flow}</td><td>{"🟢 看多" if str(flow).lower() in ("bullish","看多") else ("🔴 看空" if str(flow).lower() in ("bearish","看空") else "—")}</td></tr>
-                <tr><td>IV 偏斜比</td><td>{skew:.2f}</td><td>{"⚠️ 看跌溢价" if skew > 1.2 else "✅ 正常"}</td></tr>
+                <tr><td>Gamma 压榨风险</td><td>{gex}</td><td>{DOT_NEUT + "高" if str(gex).lower() in ("high","很高") else DOT_BULL + "可控"}</td></tr>
+                <tr><td>期权流方向</td><td>{flow}</td><td>{DOT_BULL + "看多" if str(flow).lower() in ("bullish","看多") else (DOT_BEAR + "看空" if str(flow).lower() in ("bearish","看空") else "—")}</td></tr>
+                <tr><td>IV 偏斜比</td><td>{skew:.2f}</td><td>{DOT_NEUT + "看跌溢价" if skew > 1.2 else DOT_BULL + "正常"}</td></tr>
                 <tr><td>近端总持仓量</td><td>{oi:,}</td><td>—</td></tr>
             </table>
             {_near_walls_html}
@@ -1052,7 +1109,7 @@ class MLEnhancedReportGenerator:
             {_gamma_cal_html}
             {f'<h3>异常期权活动 Top5</h3><ul>{unusual_rows}</ul>' if unusual_rows else ''}
             {f'<h3>近端关键价位（OracleBee key_levels）</h3><p>支撑：{support_txt or "—"}</p><p>压力：{resist_txt or "—"}</p>' if (support_txt or resist_txt) else ''}
-            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>{ad.get('discovery','') if ad else ''}</p>
+            <p style="margin-top:10px;font-size:0.85em;color:var(--ts);"><strong>关键判断：</strong>{ad.get('discovery','') if ad else ''}</p>
         </div>"""
 
     def _ch3_chronos(self, agent_details: dict) -> str:
@@ -1108,22 +1165,22 @@ class MLEnhancedReportGenerator:
                 labels_top += " " * gap + name[:8].ljust(10)
                 labels_bot += " " * gap + f"{days}天".ljust(10)
                 line += "─" * gap + "●"
-            sev_colors = {"critical": "#dc3545", "high": "#fd7e14", "medium": "#ffc107", "low": "#28a745"}
+            sev_colors = {"critical": "var(--bear)", "high": "var(--acc)", "medium": "var(--neut)", "low": "var(--bull)"}
             cat_rows = ""
             for c in cats_sorted:
                 sev = c.get("severity", "medium")
-                sev_color = sev_colors.get(sev, "#888")
+                sev_color = sev_colors.get(sev, "var(--tm)")
                 days = c.get("days_until", 0)
                 days_txt = f"{days}天后" if days >= 0 else f"{abs(days)}天前"
                 cat_rows += f"""<tr>
                     <td style="color:{sev_color};font-weight:bold">{c.get('event','')}</td>
                     <td>{c.get('date','')}</td>
                     <td>{days_txt}</td>
-                    <td><span style="background:{sev_color};color:white;padding:2px 8px;border-radius:10px;font-size:0.8em">{sev}</span></td>
+                    <td><span style="color:{sev_color};border:1px solid currentColor;border-radius:2px;padding:1px 7px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;font-weight:600;letter-spacing:.5px;">{sev}</span></td>
                 </tr>"""
             timeline_html = f"""
-            <div style="background:#f8f9ff;border-radius:8px;padding:15px;margin:12px 0;overflow-x:auto;">
-                <pre style="font-family:monospace;font-size:0.8em;color:#333;line-height:1.8;margin:0">   {labels_top}
+            <div style="border:1px solid var(--border);border-radius:2px;padding:15px;margin:12px 0;overflow-x:auto;">
+                <pre style="font-family:monospace;font-size:0.8em;color:var(--tp);line-height:1.8;margin:0">   {labels_top}
    {labels_bot}
     │{"─" * (len(line)-1)}
     {line}</pre>
@@ -1140,7 +1197,7 @@ class MLEnhancedReportGenerator:
             low = analyst.get("target_low", 0)
             high = analyst.get("target_high", 0)
             upside = analyst.get("upside_pct", ((mean - curr) / curr * 100) if curr else 0)
-            upside_color = "#28a745" if upside > 0 else "#dc3545"
+            upside_color = "var(--bull)" if upside > 0 else "var(--bear)"
             analyst_html = f"""
             <h3>分析师目标价</h3>
             <div class="grid-4">
@@ -1151,17 +1208,17 @@ class MLEnhancedReportGenerator:
             </div>"""
         return f"""
         <div class="section">
-            <h2>⏰ ChronosBee — 催化剂时间线</h2>
+            <h2>ChronosBee — 催化剂时间线</h2>
             <div style="margin-bottom:12px;">
                 <span class="stat" style="display:inline-block;margin-right:10px;">
                     <span class="num" style="color:{self._dir_color(direction)}">{score:.1f}</span>
                     <span class="lbl"> Catalyst 评分</span>
                 </span>
-                <span style="color:#666;font-size:0.9em">检测到 {len(catalysts)} 个催化剂</span>
+                <span style="color:var(--ts);font-size:0.9em">检测到 {len(catalysts)} 个催化剂</span>
             </div>
-            {timeline_html if timeline_html else '<p style="color:#999">暂无催化剂数据</p>'}
+            {timeline_html if timeline_html else '<p style="color:var(--tm)">暂无催化剂数据</p>'}
             {analyst_html}
-            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>关键判断：</strong>{ad.get('discovery','')}</p>
+            <p style="margin-top:10px;font-size:0.85em;color:var(--ts);"><strong>关键判断：</strong>{ad.get('discovery','')}</p>
         </div>"""
 
     def _ch3_buzz(self, agent_details: dict) -> str:
@@ -1182,26 +1239,32 @@ class MLEnhancedReportGenerator:
         vol_ratio = det.get("volume_ratio")
         reddit = det.get("reddit", {})
         fear_greed = det.get("fear_greed_index", det.get("components", {}).get("fear_greed", None))
-        sent_color = "#28a745" if sentiment_pct > 60 else ("#dc3545" if sentiment_pct < 40 else "#ffc107")
+        sent_color = "var(--bull)" if sentiment_pct > 60 else ("var(--bear)" if sentiment_pct < 40 else "var(--neut)")
         # 缺数显示"—"并用中性灰，绝不用 0 / 1 顶替（项目硬规则：不编数据）
-        mom_color = "#6c757d" if momentum is None else ("#28a745" if momentum > 0 else "#dc3545")
+        mom_color = "var(--tm)" if momentum is None else ("var(--bull)" if momentum > 0 else "var(--bear)")
         mom_txt = "—" if momentum is None else f"{momentum:+.2f}%"
         vol_txt = "—" if vol_ratio is None else f"{vol_ratio:.2f}×"
         fg_text = ""
         if fear_greed is not None:
             fg_label = "极度恐惧" if fear_greed < 25 else ("恐惧" if fear_greed < 45 else ("中性" if fear_greed < 55 else ("贪婪" if fear_greed < 75 else "极度贪婪")))
-            fg_color = "#28a745" if fear_greed > 55 else ("#dc3545" if fear_greed < 45 else "#ffc107")
+            fg_color = "var(--bull)" if fear_greed > 55 else ("var(--bear)" if fear_greed < 45 else "var(--neut)")
             fg_text = f'<div class="stat"><div class="num" style="color:{fg_color}">{fear_greed}</div><div class="lbl">恐贪指数 ({fg_label})</div></div>'
         reddit_html = ""
         if reddit:
-            reddit_html = f"""<p style="margin-top:10px;">Reddit 热度：<strong>第{reddit.get('rank','—')}名</strong> | 提及量：<strong>{reddit.get('mentions','—')}</strong> | 状态：<strong>{reddit.get('buzz','—')}</strong></p>"""
+            # ⚠️ 不能写 `.get(k, "—")`：键存在但值为 None 时默认值不生效，
+            # 页面会渲染出字面量「第None名」（8/24 存档 12 份里 7 份如此）。
+            _rk = reddit.get("rank")
+            _mt = reddit.get("mentions")
+            _bz = reddit.get("buzz")
+            _rk_txt = f"第{_rk}名" if _rk is not None else _NA_SPAN
+            reddit_html = f"""<p style="margin-top:10px;">Reddit 热度：<strong>{_rk_txt}</strong> | 提及量：<strong>{_mt if _mt is not None else _NA_SPAN}</strong> | 状态：<strong>{_bz or _NA_SPAN}</strong></p>"""
         # 叙事列表
         disc = ad.get("discovery", "")
         bullets = [b.strip() for b in disc.split("|") if b.strip()] if disc else []
-        bullets_html = "".join(f"<li>{'✅' if i==0 else '📊'} {b}</li>" for i, b in enumerate(bullets[:5]))
+        bullets_html = "".join(f"<li>{b}</li>" for i, b in enumerate(bullets[:5]))
         return f"""
         <div class="section">
-            <h2>📢 BuzzBee — 情绪与叙事</h2>
+            <h2>BuzzBee — 情绪与叙事</h2>
             <div class="grid-4" style="margin-bottom:15px;">
                 <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Sentiment 评分</div></div>
                 <div class="stat"><div class="num" style="color:{sent_color}">{sentiment_pct:.0f}%</div><div class="lbl">正面情绪占比</div></div>
@@ -1224,13 +1287,13 @@ class MLEnhancedReportGenerator:
         position = ind.get("position", "—")
         strength = ind.get("comparative_strength", 0)
         industry = ind.get("industry", "—")
-        strength_color = "#28a745" if strength >= 70 else ("#ffc107" if strength >= 40 else "#dc3545")
-        adv_li = "".join(f"<li>✅ {a}</li>" for a in advantages[:5])
-        thr_li = "".join(f"<li>⚠️ {t}</li>" for t in threats[:5])
-        comp_tags = " ".join(f'<span style="background:#e8e8f0;padding:3px 10px;border-radius:10px;font-size:0.85em">{c}</span>' for c in competitors[:5])
+        strength_color = "var(--bull)" if strength >= 70 else ("var(--neut)" if strength >= 40 else "var(--bear)")
+        adv_li = "".join(f'<li>{DOT_BULL}{a}</li>' for a in advantages[:5])
+        thr_li = "".join(f'<li>{DOT_NEUT}{t}</li>' for t in threats[:5])
+        comp_tags = " ".join(f'<span class="mono" style="border:1px solid var(--border);border-radius:2px;padding:2px 8px;font-size:11px;color:var(--ts);">{c}</span>' for c in competitors[:5])
         return f"""
         <div class="section">
-            <h2>🤖 RivalBee — 竞争格局</h2>
+            <h2>RivalBee — 竞争格局</h2>
             <div class="grid-4" style="margin-bottom:15px;">
                 <div class="stat"><div class="num">{industry}</div><div class="lbl">行业</div></div>
                 <div class="stat"><div class="num">{position}</div><div class="lbl">市场地位</div></div>
@@ -1239,8 +1302,8 @@ class MLEnhancedReportGenerator:
             </div>
             {f'<p>竞争对手：{comp_tags}</p>' if comp_tags else ''}
             <div class="grid-2" style="margin-top:15px;">
-                <div><h3 style="color:#28a745;">护城河优势</h3><ul>{adv_li}</ul></div>
-                <div><h3 style="color:#dc3545;">竞争威胁</h3><ul>{thr_li}</ul></div>
+                <div><h3 style="color:var(--bull);">护城河优势</h3><ul>{adv_li}</ul></div>
+                <div><h3 style="color:var(--bear);">竞争威胁</h3><ul>{thr_li}</ul></div>
             </div>
         </div>"""
 
@@ -1268,18 +1331,18 @@ class MLEnhancedReportGenerator:
             row_cells = f"<td><strong>{DIM_CN.get(row_dim,row_dim)}</strong></td>"
             for col_dim in DIMS:
                 if row_dim == col_dim:
-                    row_cells += "<td style='color:#ccc;text-align:center'>—</td>"
+                    row_cells += "<td style='color:var(--tm);text-align:center'>—</td>"
                 elif row_dim in resonant_dims and col_dim in resonant_dims:
-                    row_cells += "<td style='text-align:center;color:#28a745'>✅</td>"
+                    row_cells += "<td style='text-align:center;color:var(--bull)'>●</td>"
                 elif conflict_level in ("high", "severe") and (row_dim not in resonant_dims or col_dim not in resonant_dims):
-                    row_cells += "<td style='text-align:center;color:#ffc107'>⚠️</td>"
+                    row_cells += "<td style='text-align:center;color:var(--neut)'>◐</td>"
                 else:
-                    row_cells += "<td style='text-align:center;color:#ccc'>—</td>"
+                    row_cells += "<td style='text-align:center;color:var(--tm)'>—</td>"
             matrix_rows += f"<tr>{row_cells}</tr>"
-        conflict_cn = {"low": "低 ✅", "moderate": "中 ⚠️", "high": "高 ❌", "severe": "严重 ⛔"}.get(conflict_level, conflict_level)
+        conflict_cn = {"low": "低", "moderate": "中", "high": "高", "severe": "严重"}.get(conflict_level, conflict_level)
         return f"""
         <div class="section">
-            <h2>🛡️ GuardBee — 交叉验证</h2>
+            <h2>GuardBee — 交叉验证</h2>
             <div class="grid-4" style="margin-bottom:15px;">
                 <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">RiskAdj 评分</div></div>
                 <div class="stat"><div class="num">{consistency:.0%}</div><div class="lbl">信号一致性</div></div>
@@ -1293,12 +1356,12 @@ class MLEnhancedReportGenerator:
                     {matrix_rows}
                 </table>
             </div>
-            <p style="margin-top:8px;font-size:0.82em;color:#888;">✅ 同向共振 | ⚠️ 存在冲突 | — 中性/无关</p>
-            <p style="margin-top:10px;font-size:0.85em;color:#666;"><strong>共振结论：</strong>
+            <p style="margin-top:8px;font-size:0.82em;color:var(--tm);"><span style="color:var(--bull)">●</span> 同向共振 &nbsp;·&nbsp; <span style="color:var(--neut)">◐</span> 存在冲突 &nbsp;·&nbsp; — 中性/无关</p>
+            <p style="margin-top:10px;font-size:0.85em;color:var(--ts);"><strong>共振结论：</strong>
                 {resonance.get('supporting_agents', 0)} 个 Agent 同向（{', '.join(resonant_dims)}），
                 置信度提升 {resonance.get('confidence_boost', 0)}%
             </p>
-            <p style="font-size:0.85em;color:#666;"><strong>关键判断：</strong>{ad.get('discovery','') if ad else ''}</p>
+            <p style="font-size:0.85em;color:var(--ts);"><strong>关键判断：</strong>{ad.get('discovery','') if ad else ''}</p>
         </div>"""
 
     def _ch3_bear(self, agent_details: dict) -> str:
@@ -1325,15 +1388,15 @@ class MLEnhancedReportGenerator:
                     break
         items = ""
         for i, s in enumerate(signals[:6], 1):
-            items += f'<li style="margin:10px 0;padding:10px;background:#fff5f5;border-left:3px solid #dc3545;border-radius:4px;"><strong>{i}.</strong> {s}</li>'
+            items += f'<li style="margin:10px 0;padding:10px;background:var(--surface2);border-left:3px solid var(--bear);border-radius:4px;"><strong>{i}.</strong> {s}</li>'
         return f"""
         <div class="section">
-            <h2>🐻 BearBee — 看空对冲</h2>
+            <h2>BearBee — 看空对冲</h2>
             <div class="grid-4" style="margin-bottom:15px;">
-                <div class="stat"><div class="num" style="color:#dc3545">{score:.1f}</div><div class="lbl">看空蜂评分</div></div>
-                <div class="stat"><div class="num" style="color:{'#dc3545' if bear_score>=6 else '#ffc107'}">{bear_score:.1f}/10</div><div class="lbl">看空强度</div></div>
+                <div class="stat"><div class="num" style="color:var(--bear)">{score:.1f}</div><div class="lbl">看空蜂评分</div></div>
+                <div class="stat"><div class="num" style="color:{'var(--bear)' if bear_score>=6 else 'var(--neut)'}">{bear_score:.1f}/10</div><div class="lbl">看空强度</div></div>
                 <div class="stat"><div class="num">{iv_skew:.2f}</div><div class="lbl">IV Skew 比</div></div>
-                <div class="stat"><div class="num">{'⛔' if bear_score>=7 else ('⚠️' if bear_score>=5 else '✅')}</div><div class="lbl">风险等级</div></div>
+                <div class="stat"><div class="num">{'高' if bear_score>=7 else ('中' if bear_score>=5 else '低')}</div><div class="lbl">风险等级</div></div>
             </div>
             <h3>反对观点（至少 3 条 — 硬性要求）</h3>
             <ul style="list-style:none;padding:0;">{items}</ul>
@@ -1379,14 +1442,14 @@ class MLEnhancedReportGenerator:
                 break
             break_conditions.append(d)
         cond_rows = "".join(
-            f"<tr><td>{c[0]}</td><td>{c[1]}</td><td style='color:#888;font-size:0.85em'>{c[2]}</td></tr>"
+            f"<tr><td>{c[0]}</td><td>{c[1]}</td><td style='color:var(--tm);font-size:0.85em'>{c[2]}</td></tr>"
             for c in break_conditions[:5]
         )
         return f"""
         <div class="section">
             <h2>第 4 章：投资假设与失效条件</h2>
             <h3>核心 Thesis</h3>
-            <blockquote style="border-left:4px solid #667eea;padding:12px 18px;background:#f8f9ff;border-radius:0 8px 8px 0;margin:10px 0;color:#333;font-style:italic;">
+            <blockquote style="border-left:4px solid var(--tp);padding:12px 18px;background:var(--surface2);border-radius:0;margin:10px 0;color:var(--tp);font-style:italic;">
                 {thesis}
             </blockquote>
             <h3 style="margin-top:18px;">失效条件（Thesis Break）</h3>
@@ -1418,21 +1481,21 @@ class MLEnhancedReportGenerator:
         drawdown_min = exp.get("max_drawdown", {}).get("min", drawdown * 1.5)
         # 4 场景
         scenarios = [
-            ("🟢 强多", 25, curr_price * (1 + gain_max / 100), "催化剂超预期 + 出口管制缓和"),
-            ("🟢 温和多", 45, curr_price * (1 + gain_7d / 100), "催化剂符合预期，指引维持"),
-            ("🟡 震荡", 20, curr_price * (1 + drawdown / 200), "获利回吐，等待下一催化剂"),
-            ("🔴 回调", 10, curr_price * (1 + drawdown_min / 100), "政策恶化 或 竞品重大突破"),
+            ("强多", 25, curr_price * (1 + gain_max / 100), "催化剂超预期 + 出口管制缓和"),
+            ("温和多", 45, curr_price * (1 + gain_7d / 100), "催化剂符合预期，指引维持"),
+            ("震荡", 20, curr_price * (1 + drawdown / 200), "获利回吐，等待下一催化剂"),
+            ("回调", 10, curr_price * (1 + drawdown_min / 100), "政策恶化 或 竞品重大突破"),
         ]
         exp_price = sum(prob / 100 * price for _, prob, price, _ in scenarios)
         exp_return = (exp_price - curr_price) / curr_price * 100 if curr_price else 0
-        exp_color = "#28a745" if exp_return > 0 else "#dc3545"
+        exp_color = "var(--bull)" if exp_return > 0 else "var(--bear)"
         rows = "".join(
             f"""<tr>
                 <td>{icon}</td>
                 <td>{prob}%</td>
                 <td>${price:.2f}</td>
-                <td style="color:{'#28a745' if price>curr_price else '#dc3545'}">{(price-curr_price)/curr_price*100:+.1f}%</td>
-                <td style="font-size:0.85em;color:#666">{trigger}</td>
+                <td style="color:{'var(--bull)' if price>curr_price else 'var(--bear)'}">{(price-curr_price)/curr_price*100:+.1f}%</td>
+                <td style="font-size:0.85em;color:var(--ts)">{trigger}</td>
             </tr>"""
             for icon, prob, price, trigger in scenarios
         )
@@ -1442,14 +1505,14 @@ class MLEnhancedReportGenerator:
             <table>
                 <tr><th>情景</th><th>概率</th><th>目标价</th><th>涨跌幅</th><th>触发条件</th></tr>
                 {rows}
-                <tr style="background:#f8f9ff;font-weight:bold;">
+                <tr style="background:var(--surface2);font-weight:bold;">
                     <td colspan="2">概率加权期望价格</td>
                     <td style="color:{exp_color}">${exp_price:.2f}</td>
                     <td style="color:{exp_color}">{exp_return:+.1f}%</td>
                     <td>from ${curr_price:.2f}</td>
                 </tr>
             </table>
-            <p style="margin-top:10px;font-size:0.85em;color:#888;">
+            <p style="margin-top:10px;font-size:0.85em;color:var(--tm);">
                 期望价格 = Σ(概率 × 情景价格) = {' + '.join(f'{p}%×${pr:.0f}' for _,p,pr,_ in scenarios)} = <strong style="color:{exp_color}">${exp_price:.2f}</strong>
             </p>
         </div>"""
@@ -1479,22 +1542,22 @@ class MLEnhancedReportGenerator:
 
         def risk_level(val, high_thr, med_thr, high_lbl="高", med_lbl="中", low_lbl="低"):
             if val is None:
-                return "⚪ 数据缺失"
+                return '<span style="color:var(--tm)">○</span> 数据缺失'
             if val >= high_thr:
-                return f"🔴 {high_lbl}"
+                return f'<span style="color:var(--bear)">●</span> {high_lbl}'
             if val >= med_thr:
-                return f"🟡 {med_lbl}"
-            return f"🟢 {low_lbl}"
+                return f'<span style="color:var(--neut)">●</span> {med_lbl}'
+            return f'<span style="color:var(--bull)">●</span> {low_lbl}'
         rows = [
             ("监管风险", risk_level(1 if conflict_level in ("high","severe") else 0, 1, 0.5), "AI 芯片出口管制 / 政策变化风险"),
             ("市场情绪风险", risk_level(bear_score, 7, 5), f"看空强度 {_fmt(bear_score, '.1f')}/10，{'临近催化剂' if imminent else '无近期催化剂'}"),
             ("估值压缩风险", risk_level(crowding, 70, 50), f"拥挤度 {_fmt(crowding, '.0f')}/100（{'数据缺失' if crowding is None else ('偏高' if crowding > 70 else ('适中' if crowding > 40 else '偏低'))}）"),
-            ("流动性风险", "🟢 低", "大盘股，日均成交量充足"),
+            ("流动性风险", '<span style="color:var(--bull)">●</span> 低', "大盘股，日均成交量充足"),
             ("期权事件风险", risk_level(1 if str(gex).lower() in ("high","很高","medium") else 0, 1, 0.5), f"Gamma 压榨风险：{gex}，IV Rank {_fmt(iv_rank, '.1f', '%')}"),
             ("催化剂风险", risk_level(len(imminent), 2, 1), f"7 天内催化剂 {len(imminent)} 个：{', '.join(c.get('event','') for c in imminent[:2])}"),
         ]
         risk_rows = "".join(
-            f"<tr><td>{name}</td><td>{level}</td><td style='font-size:0.85em;color:#666'>{detail}</td></tr>"
+            f"<tr><td>{name}</td><td>{level}</td><td style='font-size:0.85em;color:var(--ts)'>{detail}</td></tr>"
             for name, level, detail in rows
         )
         return f"""
@@ -1591,8 +1654,8 @@ class MLEnhancedReportGenerator:
             _val_grid = " &nbsp;·&nbsp; ".join(_val_items)
             parts.append(
                 f'<div class="section" style="padding:18px 25px;">'
-                f'<h3 style="color:#667eea;font-size:1em;margin-bottom:10px;">📊 估值快照</h3>'
-                f'<div style="font-size:0.9em;color:#555;line-height:1.8;">{_val_grid}</div>'
+                f'<h3>估值快照</h3>'
+                f'<div style="font-size:0.9em;color:var(--ts);line-height:1.8;">{_val_grid}</div>'
                 f'</div>'
             )
 
@@ -1650,15 +1713,15 @@ class MLEnhancedReportGenerator:
             _top3 = _thesis_items[:3]
             _pills_html = "".join(
                 f'<div style="display:flex;gap:8px;align-items:baseline;margin:5px 0;">'
-                f'<span style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;'
-                f'font-size:0.75em;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap;">'
+                f'<span style="color:var(--acc);border:1px solid var(--acc);'
+                f'font-size:9.5px;font-weight:600;letter-spacing:.8px;padding:1px 7px;border-radius:2px;white-space:nowrap;">'
                 f'{t[0]}</span>'
-                f'<span style="font-size:0.88em;color:#444;">{t[2]}</span></div>'
+                f'<span style="font-size:0.88em;color:var(--tp);">{t[2]}</span></div>'
                 for t in _top3
             )
             parts.append(
                 f'<div class="section" style="padding:18px 25px;">'
-                f'<h3 style="color:#667eea;font-size:1em;margin-bottom:10px;">🎯 核心论点 Top-3</h3>'
+                f'<h3>核心论点 Top-3</h3>'
                 f'{_pills_html}</div>'
             )
 
@@ -1679,13 +1742,13 @@ class MLEnhancedReportGenerator:
         # 评级颜色
         rating = combined.get('rating', 'HOLD')
         if rating == 'STRONG BUY':
-            rating_color = '#28a745'
+            rating_color = 'var(--bull)'
         elif rating == 'BUY':
-            rating_color = '#17a2b8'
+            rating_color = 'var(--acc2)'
         elif rating == 'AVOID':
-            rating_color = '#dc3545'
+            rating_color = 'var(--bear)'
         else:
-            rating_color = '#ffc107'
+            rating_color = 'var(--neut)'
 
         # ML 预测部分（提前计算，用于修正蜂群表中 RivalBee 的旧概率值）
         pred = ml_pred.get('prediction', {})
@@ -1780,8 +1843,8 @@ class MLEnhancedReportGenerator:
             sl_tp_html = f"""
             <div style="margin-bottom:20px;">
                 <div class="grid-2">
-                    <div><h3 style="color:#dc3545;">止损位</h3><table>{sl_rows}</table></div>
-                    <div><h3 style="color:#28a745;">止盈位</h3>
+                    <div><h3 style="color:var(--bear);">止损位</h3><table>{sl_rows}</table></div>
+                    <div><h3 style="color:var(--bull);">止盈位</h3>
                         <table><tr><th>档位</th><th>价格</th><th>涨幅</th><th>操作</th></tr>{tp_rows}</table>
                     </div>
                 </div>
@@ -1807,92 +1870,227 @@ class MLEnhancedReportGenerator:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{ticker} 深度研究报告 - Alpha Hive</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500&display=swap" rel="stylesheet">
     <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        /* ══════════════════════════════════════════════════════════════
+           Alpha Hive 深度研究报告 — 与 index.html 同一套设计令牌。
+           v0.45.4 前这里是 var(--tp)→var(--tp) 紫色渐变 + 白圆角卡 + 大投影 +
+           emoji 标题，与站点自身的「奶油纸底 + Playfair + 铁锈红」完全脱节：
+           从仪表板点进报告像换了个产品。此处不新造第三套审美，直接复用站点令牌。
+           ══════════════════════════════════════════════════════════════ */
+        :root {{
+            --bg:#FAF7F2; --surface:#FFFFFF; --surface2:#F5F0E8; --border:#C8BAA8;
+            --tp:#1A1208; --ts:#6B5F52; --tm:#B0A090;
+            --acc:#B7410E; --acc2:#1D6B3A; --acc3:#92601A;
+            --bull:#1D6B3A; --bear:#9B2C2C; --neut:#92601A;
+        }}
+        html.dark {{
+            --bg:#0A0F1C; --surface:#141928; --surface2:#1a2035; --border:#2a3050;
+            --tp:#e2e8f0; --ts:#94a3b8; --tm:#64748b;
+            --acc:#E05A1F; --acc2:#22c55e; --acc3:#f59e0b;
+            --bull:#22c55e; --bear:#ef4444; --neut:#f59e0b;
+        }}
+        * {{ margin:0; padding:0; box-sizing:border-box; }}
+        html {{ overflow-x:hidden; }}
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh; padding: 20px;
+            font-family:'Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+            background:var(--bg); color:var(--tp);
+            font-size:14px; line-height:1.75; -webkit-font-smoothing:antialiased;
+            overflow-x:hidden; padding:0;
         }}
-        .container {{ max-width: 900px; margin: 0 auto; }}
+        .container {{ max-width:860px; margin:0 auto; padding:0 28px 96px; }}
+        @media (max-width:600px) {{ .container {{ padding:0 18px 64px; }} }}
+
+        /* ── 刊头：左对齐研究报告信笺，不是居中英雄卡 ── */
         .header {{
-            background: white; border-radius: 15px; padding: 35px;
-            margin-bottom: 25px; box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-            text-align: center;
+            padding:56px 0 28px; margin-bottom:0;
+            border-bottom:1px solid var(--tp);
+            background:none; border-radius:0; box-shadow:none; text-align:left;
         }}
-        .header h1 {{ font-size: 2.2em; color: #667eea; margin-bottom: 8px; }}
+        .header .eyebrow {{
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:9px; letter-spacing:2.5px; text-transform:uppercase;
+            color:var(--acc); display:block; margin-bottom:14px;
+        }}
+        .header h1 {{
+            font-family:'Playfair Display',Georgia,serif;
+            font-size:clamp(30px,5vw,44px); font-weight:700; color:var(--tp);
+            line-height:1.1; letter-spacing:-.5px; margin-bottom:0;
+        }}
+        .header h1 .tk {{ font-family:'JetBrains Mono',ui-monospace,monospace; letter-spacing:-1px; }}
         .header .rating {{
-            display: inline-block; padding: 8px 25px; border-radius: 25px;
-            color: white; font-size: 1.3em; font-weight: bold;
-            background: {rating_color}; margin: 10px 0;
+            display:inline-block; margin:18px 0 0; padding:5px 12px;
+            border:1px solid currentColor; border-radius:2px; background:none;
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:12px; font-weight:600; letter-spacing:.5px;
+            color:{rating_color};
         }}
+        .header .meta {{
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:10px; color:var(--tm); letter-spacing:.8px; margin-top:16px;
+        }}
+        .header .meta b {{ color:var(--ts); font-weight:500; }}
+
+        /* ── 章节：细线分隔，不是浮空卡片 ── */
         .section {{
-            background: white; border-radius: 12px; padding: 25px;
-            margin-bottom: 20px; box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+            background:none; border-radius:0; box-shadow:none;
+            padding:34px 0; margin-bottom:0;
+            border-bottom:1px solid var(--border);
         }}
         .section h2 {{
-            color: #667eea; font-size: 1.4em; margin-bottom: 18px;
-            padding-bottom: 10px; border-bottom: 2px solid #f0f0f0;
+            font-family:'Playfair Display',Georgia,serif;
+            color:var(--tp); font-size:19px; font-weight:600;
+            margin-bottom:20px; padding-bottom:0; border-bottom:none;
+            letter-spacing:-.2px;
         }}
-        .section h3 {{ color: #555; margin: 15px 0 10px; font-size: 1.1em; }}
-        .grid-4 {{
-            display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px;
+        /* h3 多为中文：mono + 大字距会把汉字撑散，故只对拉丁部分保留微字距 */
+        .section h3 {{
+            font-family:'JetBrains Mono',ui-monospace,'Noto Sans SC',monospace;
+            color:var(--ts); font-size:11.5px; font-weight:600;
+            letter-spacing:.5px;
+            margin:26px 0 12px; padding-bottom:7px;
+            border-bottom:1px solid var(--border);
         }}
-        .grid-2 {{
-            display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
-        }}
+
+        /* ── 数据格：细线分栏 + 等宽等距数字 ── */
+        .grid-4 {{ display:grid; grid-template-columns:repeat(4,1fr); gap:0;
+                   border:1px solid var(--border); }}
+        .grid-2 {{ display:grid; grid-template-columns:1fr 1fr; gap:28px; }}
         .stat {{
-            text-align: center; padding: 15px; border-radius: 10px;
-            background: linear-gradient(135deg, #f8f9fa, #fff);
-            border: 1px solid #e8e8e8;
+            text-align:left; padding:14px 16px; border-radius:0;
+            background:none; border:none; border-right:1px solid var(--border);
         }}
-        .stat .num {{ font-size: 1.8em; font-weight: bold; color: #667eea; }}
-        .stat .lbl {{ font-size: 0.85em; color: #888; margin-top: 5px; }}
+        .grid-4 .stat:last-child {{ border-right:none; }}
+        .stat .num {{
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:21px; font-weight:600; color:var(--tp);
+            font-variant-numeric:tabular-nums; line-height:1.25;
+        }}
+        .stat .lbl {{
+            font-size:10px; color:var(--tm); margin-top:6px;
+            letter-spacing:.6px; line-height:1.4;
+        }}
+
         .metric {{
-            display: flex; justify-content: space-between; align-items: center;
-            padding: 10px 0; border-bottom: 1px solid #f5f5f5;
+            display:flex; justify-content:space-between; align-items:baseline;
+            padding:9px 0; border-bottom:1px solid var(--border); gap:16px;
         }}
-        .metric-label {{ color: #666; font-weight: 500; }}
-        .metric-value {{ font-weight: bold; color: #333; }}
-        table {{
-            width: 100%; border-collapse: collapse; margin-top: 10px;
+        .metric:last-child {{ border-bottom:none; }}
+        .metric-label {{ color:var(--ts); font-weight:400; font-size:13px; }}
+        .metric-value {{
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-weight:600; color:var(--tp); font-variant-numeric:tabular-nums;
         }}
-        th, td {{
-            padding: 10px 12px; text-align: left; border-bottom: 1px solid #eee;
-        }}
+
+        table {{ width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }}
+        th, td {{ padding:9px 12px; text-align:left; border-bottom:1px solid var(--border); }}
         th {{
-            background: linear-gradient(135deg, #667eea, #764ba2);
-            color: white; font-weight: 600; font-size: 0.9em;
+            background:none; color:var(--tm); font-weight:600;
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:9.5px; letter-spacing:1.2px; text-transform:uppercase;
+            border-bottom:1px solid var(--tp);
         }}
-        ul {{ padding-left: 20px; margin: 10px 0; }}
-        li {{ margin: 6px 0; color: #444; line-height: 1.6; }}
-        details {{ background:white; border-radius:12px; padding:20px;
-                   margin-bottom:20px; box-shadow:0 5px 20px rgba(0,0,0,0.08); }}
-        details summary {{ cursor:pointer; color:#667eea; font-weight:bold;
-                           font-size:1.1em; user-select:none; }}
+        td {{ color:var(--tp); font-variant-numeric:tabular-nums; }}
+        tbody tr:last-child td {{ border-bottom:none; }}
+
+        ul {{ padding-left:18px; margin:10px 0; }}
+        li {{ margin:6px 0; color:var(--ts); line-height:1.8; }}
+        p {{ color:var(--ts); }}
+        strong {{ color:var(--tp); font-weight:600; }}
+        blockquote {{ color:var(--ts); }}
+
+        details {{
+            background:none; border-radius:0; box-shadow:none;
+            padding:24px 0; margin-bottom:0; border-bottom:1px solid var(--border);
+        }}
+        details summary {{
+            cursor:pointer; user-select:none;
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            color:var(--acc); font-weight:600; font-size:10.5px;
+            letter-spacing:1.4px; text-transform:uppercase;
+        }}
+
+        /* ── 缺数标记：让「没取到」与「测得为 0」在视觉上不可混淆 ── */
+        .na {{
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            color:var(--tm); font-weight:400; cursor:help;
+            border-bottom:1px dotted var(--tm);
+        }}
+        .na-note {{ color:var(--tm); font-style:italic; }}
+        .mono {{ font-family:'JetBrains Mono',ui-monospace,monospace; }}
+        .src-tag {{
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:9px; letter-spacing:.8px; text-transform:uppercase;
+            color:var(--tm); border:1px solid var(--border); border-radius:2px;
+            padding:1px 5px; margin-left:7px; vertical-align:middle;
+        }}
+        .note {{ font-size:12.5px; color:var(--ts); margin:12px 0 4px; line-height:1.8; }}
+
         .footer {{
-            text-align: center; color: rgba(255,255,255,0.85);
-            margin-top: 20px; font-size: 0.9em;
+            text-align:left; color:var(--tm); margin-top:36px;
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:10px; letter-spacing:1px; line-height:2;
         }}
-        @media (max-width: 600px) {{
-            .grid-4 {{ grid-template-columns: repeat(2, 1fr); }}
-            .grid-2 {{ grid-template-columns: 1fr; }}
+        .theme-btn {{
+            position:fixed; top:16px; right:16px; z-index:99;
+            font-family:'JetBrains Mono',ui-monospace,monospace; font-size:9.5px;
+            letter-spacing:1.2px; text-transform:uppercase; cursor:pointer;
+            background:var(--surface); color:var(--ts);
+            border:1px solid var(--border); border-radius:2px; padding:6px 11px;
+        }}
+        .theme-btn:hover {{ color:var(--acc); border-color:var(--acc); }}
+        a {{ color:var(--acc); }}
+        :focus-visible {{ outline:2px solid var(--acc); outline-offset:2px; }}
+
+        @media (max-width:600px) {{
+            .grid-4 {{ grid-template-columns:repeat(2,1fr); }}
+            .grid-4 .stat:nth-child(2) {{ border-right:none; }}
+            .grid-4 .stat:nth-child(-n+2) {{ border-bottom:1px solid var(--border); }}
+            .grid-2 {{ grid-template-columns:1fr; gap:18px; }}
+            .header {{ padding:36px 0 22px; }}
+        }}
+        @media print {{
+            .theme-btn {{ display:none; }}
+            body {{ background:var(--surface); }}
         }}
     </style>
+    <script>
+    /* 与仪表板共享 localStorage 主题（同源），从 index.html 点进来不会闪白 */
+    (function(){{
+      try {{
+        var s = localStorage.getItem('ah-theme') || (localStorage.getItem('ahDark')==='1' ? 'dark' : '');
+        if (s === 'dark' || (!s && window.matchMedia('(prefers-color-scheme: dark)').matches))
+          document.documentElement.classList.add('dark');
+      }} catch(e) {{}}
+    }})();
+    function ahToggleTheme(){{
+      var h = document.documentElement, d = h.classList.toggle('dark');
+      try {{ localStorage.setItem('ah-theme', d?'dark':'light');
+             localStorage.setItem('ahDark', d?'1':'0'); }} catch(e) {{}}
+      var b = document.getElementById('themeBtn');
+      if (b) b.textContent = d ? '亮色' : '暗色';
+    }}
+    document.addEventListener('DOMContentLoaded', function(){{
+      var b = document.getElementById('themeBtn');
+      if (b && document.documentElement.classList.contains('dark')) b.textContent = '亮色';
+    }});
+    </script>
 </head>
 <body>
+<button id="themeBtn" class="theme-btn" onclick="ahToggleTheme()" aria-label="切换明暗主题">暗色</button>
 <div class="container">
-    <!-- 头部 -->
+    <!-- 刊头 -->
     <div class="header">
-        <h1>🐝 {ticker} 深度研究报告</h1>
+        <span class="eyebrow">Alpha Hive · 蜂群智能深度研究</span>
+        <h1><span class="tk">{ticker}</span> 深度研究报告</h1>
         <div class="rating">{rating} — {combined['action']}</div>
-        <p style="color:#888; margin-top:10px;">
-            {self.timestamp.strftime('%Y-%m-%d %H:%M')} | Alpha Hive 蜂群智能
-        </p>
-        <p style="color:#aaa; font-size:0.85em; margin-top:6px;">
-            综合胜率 {combined['combined_probability']:.1f}% &nbsp;|&nbsp;
-            风险回报比 {risk_reward:.2f} &nbsp;|&nbsp;
-            ML 预测 {ml_prob_val:.1f}%
+        <p class="meta">
+            {self.timestamp.strftime('%Y-%m-%d %H:%M')} PDT
+            &nbsp;·&nbsp; 综合胜率 <b>{combined['combined_probability']:.1f}%</b>
+            &nbsp;·&nbsp; 风险回报比 <b>{risk_reward:.2f}</b>
+            &nbsp;·&nbsp; ML 预测 <b>{ml_prob_val:.1f}%</b>
         </p>
     </div>
 
@@ -1928,15 +2126,15 @@ class MLEnhancedReportGenerator:
 
     <!-- 折叠详情：止损止盈 / 期权信号 / ML 特征 -->
     <details>
-        <summary>📊 详细数据（止损止盈 / 期权信号 / ML 特征）</summary>
+        <summary>详细数据（止损止盈 / 期权信号 / ML 特征）</summary>
         {sl_tp_html}
         {options_html}
         {ml_feat_html}
     </details>
 
     <!-- 免责声明 -->
-    <div class="section" style="background:#fff3cd; border:1px solid #ffc107;">
-        <p style="color:#856404; font-size:0.9em;">
+    <div class="section" style="background:var(--surface2); border:1px solid var(--neut);">
+        <p style="color:var(--neut); font-size:0.9em;">
             <strong>免责声明</strong>：本报告为 AI 自动生成，不构成投资建议。
             所有交易决策需自行判断和风控。预测存在误差，过往表现不代表未来收益。
         </p>
@@ -2227,7 +2425,7 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
         return
     repo = str(Path(__file__).parent)
     date_str = pdt_today()
-    _ml_pat = _re.compile(r"^alpha-hive-\w+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$")
+    _ml_pat = _re.compile(r"^alpha-hive-[\w.-]+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$")
     _CORE = {"index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml", ".nojekyll", "chart.umd.min.js"}  # v0.41.0
     try:
         from is_trading_day import filename_is_nontrading_day as _fnt_dep
@@ -2254,6 +2452,7 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
                             "100644", blob, f], env=env, cwd=repo, check=True)
         tree = subprocess.check_output(["git", "write-tree"], env=env, cwd=repo).decode().strip()
         parent_args = []
+        parent = None
         try:
             parent = subprocess.check_output(
                 ["git", "rev-parse", "gh-pages"], cwd=repo, stderr=subprocess.DEVNULL
@@ -2261,17 +2460,34 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
             parent_args = ["-p", parent]
         except subprocess.CalledProcessError:
             pass
-        commit = subprocess.check_output(
-            ["git", "commit-tree", tree] + parent_args +
-            ["-m", f"Deploy: ML reports {date_str} ({successful_count} tickers)"],
-            cwd=repo
-        ).decode().strip()
-        subprocess.run(["git", "update-ref", "refs/heads/gh-pages", commit],
-                       cwd=repo, check=True)
+        # v0.45.2: 空提交闸。`git commit-tree` 是管道命令，不做 `git commit` 的
+        # 「无变更则拒绝」检查——tree 与父提交相同也照样生成 commit。实测
+        # 2026-08-15 的 8b16977 / 06d99cc / 0c00454 三条 commit message 都声称
+        # "(12 tickers)"，`git show --name-only` 却是 0 个文件。message 里的
+        # successful_count 是**声称值**，与 tree 实际变更无关，必须并排写出实测值。
+        from report_deployer import ghpages_tree_delta
+        _has_change, _n_changed = ghpages_tree_delta(repo, tree, parent)
+        if not _has_change:
+            _log.error(
+                "🚨 gh-pages 无变更：新 tree 与父提交 %s 完全相同，跳过 commit。"
+                "本次声称 %d 份 ML 报告成功——若非重复运行，说明报告文件根本没重新生成。",
+                (parent or "")[:7], successful_count,
+            )
+        else:
+            _msg = f"Deploy: ML reports {date_str} ({successful_count} tickers"
+            _msg += f", {_n_changed} files changed)" if _n_changed >= 0 else ")"
+            commit = subprocess.check_output(
+                ["git", "commit-tree", tree] + parent_args + ["-m", _msg],
+                cwd=repo
+            ).decode().strip()
+            subprocess.run(["git", "update-ref", "refs/heads/gh-pages", commit],
+                           cwd=repo, check=True)
+        # 无变更时仍尝试 push：相当于重试上一次可能失败的推送
         r = subprocess.run(["git", "push", "origin", "gh-pages", "--force"],
                            cwd=repo, capture_output=True, text=True)
         if r.returncode == 0:
-            _log.info("gh-pages 同步成功 (%d 文件)", len(files))
+            _log.info("gh-pages 同步成功 (%d 文件，实测变更 %s)",
+                      len(files), _n_changed if _n_changed >= 0 else "未知")
         else:
             _log.warning("gh-pages push 失败: %s", r.stderr.strip()[:200])
     except Exception as e:

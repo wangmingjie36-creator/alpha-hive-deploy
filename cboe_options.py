@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import statistics
 import threading
 import time
 import urllib.request
@@ -34,11 +35,36 @@ except Exception:  # pragma: no cover - 叶子模块降级
     _log = logging.getLogger("alpha_hive.cboe_options")
 
 _CBOE_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{}.json"
+
+
+def _cboe_symbol(ticker: str) -> str:
+    """项目内部 ticker → CBOE URL 用的符号。
+
+    类份额标的的写法各家不同：项目内部（含 config.WATCHLIST / yfinance）用
+    **连字符** `BRK-B`，而 CBOE 用**点** `BRK.B`。2026-08-25 实测：
+    `BRK.B` 返回 2054 个合约，`BRK-B` 与 `BRKB` 均 **403 Forbidden**。
+
+    后果不是报错而是**全链降级**：`fetch_cboe_chain` / `fetch_cboe_full_chain_oi`
+    / `fetch_cboe_iv_term_structure` 三处主源一起失败，BRK-B 每次扫描都白烧
+    3 次 CBOE 重试（约 5s）再整体退回 yfinance——恰好落回 SSL 风暴高发路径。
+    BRK-B 是 30 只每日扫描标的之一，且在 v0.45.2 有过被静默中性化的前科。
+
+    注意只规范化 **URL**；`_payload_cache` 的键、日志、返回结构一律沿用调用方
+    传入的原始 ticker，避免上下游出现第二种写法。
+    OCC 合约符号不受影响——CBOE 返回的是 `BRKB260828C00270000`，
+    现有 `_OCC` 正则 `^([A-Z]+)…` 照常匹配（实测 2054/2054 全部解析成功）。
+    """
+    return ticker.upper().replace("-", ".")
 # OCC 合约符号：NVDA 260702 C 00200000 → 标的 / YYMMDD / C|P / 8 位行权价(×1000)
 _OCC = re.compile(r"^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
 _BS_RISK_FREE = 0.045  # 与 options_analyzer 一致的参考无风险利率
 _ATM_LO, _ATM_HI = 0.30, 1.70  # ATM 过滤区间（±70%），与 yfinance 路径一致
 _MAX_STRIKES_PER_SIDE = 40      # 每到期日每边最多保留 40 strike（按 OI），内存保护
+# IV 期限结构取点：与 options_analyzer yfinance 路径同一组目标 DTE，保证口径可比。
+# 下界 7 天剔除 theta 扭曲的临期合约，上界 270 天剔除 LEAPS（把 842 DTE 当"远端"
+# 会让 spread 与历史已发布数值不同源）。
+_TS_TARGET_DTE = (25, 55, 85, 150)
+_TS_MIN_DTE, _TS_MAX_DTE = 7, 270
 
 # 本机老 SSL 栈（LibreSSL 2.8.3）扛不住并发 HTTPS：实测 4 并发拉 CBOE 每个挂 50-70s
 # 甚至 SSL EOF，而顺序拉仅 8-11s。故串行化 CBOE 网络请求（信号量限 1）。
@@ -124,7 +150,7 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
         if hit and now - hit[0] < _CACHE_TTL:
             return hit[1]
 
-    url = _CBOE_URL.format(key)
+    url = _CBOE_URL.format(_cboe_symbol(key))
     last_err = None
     for attempt in range(retries):
         try:
@@ -331,6 +357,91 @@ def fetch_cboe_full_chain_oi(
         "call_exp_oi": call_exp_oi, "put_exp_oi": put_exp_oi,
         "expiry_breakdown": expiry_breakdown, "used_exps": used,
     }
+
+
+def fetch_cboe_iv_term_structure(
+    ticker: str,
+    stock_price: float,
+    *,
+    timeout: int = 15,
+    max_points: int = 6,
+) -> Optional[List[Dict]]:
+    """从 CBOE 全链算 ATM IV 期限结构（供 options_analyzer 主源）。
+
+    为什么走 CBOE 而不是 yfinance：yfinance 路径要 1 次 `.options` + 4 次
+    `option_chain()` 共 **5 次额外网络往返**，在本机老 SSL 栈上大面积抛
+    SSLError；实测 2026-08-24 那批 12 只标的有 7 只期限结构 pts=0，页面显示
+    「0.0% / 0.0%」。CBOE 是**一次请求拿全部到期日**，已进 `http_gate` 闸门，
+    且 `_fetch_cboe_payload` 有进程缓存——主链已拉过时**零额外网络开销**。
+
+    ATM 容差：`max(4%×S, 1.2×中位行权价间距)`。纯百分比容差对低价股会归零
+    （AMC ≈$3 时 ±4% = ±$0.12，而行权价间距 $0.50 → 一个候选都选不到）。
+
+    Returns: [{"expiry": str, "dte": int, "atm_iv": float(%)}, ...] 按 DTE 升序；
+             无法计算返回 None（**不是空列表**——空列表会被误读为"算过了，没有"）。
+    """
+    if not stock_price or stock_price <= 0:
+        return None
+    data = _fetch_cboe_payload(ticker, timeout)
+    if not data:
+        return None
+
+    today = _pdt_now()
+    # expiry -> {strike: [iv, ...]}（只用 call，与 yfinance 路径口径一致）
+    by_exp: Dict[str, Dict[float, List[float]]] = {}
+    for o in data["options"]:
+        parsed = _parse_occ(o.get("option", ""))
+        if not parsed:
+            continue
+        expiry, cp, strike = parsed
+        if cp != "C":
+            continue
+        iv = float(o.get("iv") or 0.0)
+        # CBOE iv 已是小数；深 ITM/零流动合约 iv=0，上界 2.0 与 yfinance 路径一致
+        if not (0.02 < iv < 2.0):
+            continue
+        by_exp.setdefault(expiry, {}).setdefault(strike, []).append(iv)
+
+    if not by_exp:
+        return None
+
+    # 自适应 ATM 容差：用全链行权价间距中位数兜底百分比容差
+    all_strikes = sorted({k for m in by_exp.values() for k in m})
+    gaps = [b - a for a, b in zip(all_strikes, all_strikes[1:]) if b > a]
+    gap_med = statistics.median(gaps) if gaps else 0.0
+    atm_tol = max(stock_price * 0.04, gap_med * 1.2)
+
+    points: List[Dict] = []
+    for expiry, strike_map in by_exp.items():
+        try:
+            dte = (datetime.strptime(expiry, "%Y-%m-%d") - today).days
+        except ValueError:
+            continue
+        if not (_TS_MIN_DTE <= dte <= _TS_MAX_DTE):
+            continue
+        ivs = [iv for k, m in strike_map.items() if abs(k - stock_price) <= atm_tol for iv in m]
+        if not ivs:
+            continue
+        points.append({
+            "expiry": expiry,
+            "dte": dte,
+            "atm_iv": round(statistics.mean(ivs) * 100, 1),
+        })
+
+    if len(points) < 2:
+        return None
+
+    points.sort(key=lambda p: p["dte"])
+    # 按与 yfinance 路径**相同的目标 DTE** 抽点，保证新旧报告的 front/back 口径可比。
+    # 直接返回全部到期日会把 5 DTE（theta 扭曲）与 842 DTE（LEAPS）拿来比，
+    # 得出的 spread 与历史已发布数值不同源。
+    picked: List[Dict] = []
+    for tgt in _TS_TARGET_DTE:
+        best = min(points, key=lambda p: abs(p["dte"] - tgt))
+        if best not in picked:
+            picked.append(best)
+    picked.sort(key=lambda p: p["dte"])
+    return picked[:max_points] if len(picked) >= 2 else None
 
 
 if __name__ == "__main__":

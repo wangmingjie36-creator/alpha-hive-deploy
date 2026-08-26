@@ -761,6 +761,16 @@ class OptionsAnalyzer:
         Contango  (正向期限结构): 近期 IV < 远期 IV → 正常，市场无即时恐慌
         Backwardation (倒挂):    近期 IV > 远期 IV → 市场担忧短期事件（财报/催化剂）
 
+        取数链（v0.45.4 起）：
+            ① CBOE 全链（`fetch_cboe_iv_term_structure`）—— 一次请求含全部到期日，
+               已进 `http_gate` 闸门且有进程缓存，主链拉过则**零额外网络开销**
+            ② yfinance（1 次 `.options` + N 次 `option_chain()`）—— 进闸门 + 重试
+
+        为什么改：旧实现只有 ②，5 次裸 HTTPS 往返撞上本机 OpenSSL 1.1.1q，
+        循环里的 `except Exception: continue` 把 SSLError 全吞掉 → `term_structure`
+        空列表 → shape="unknown" → 报告渲染成「0.0% / 0.0%」，与"真的是 0"无法区分。
+        2026-08-24 那批 12 只标的有 7 只如此。
+
         Returns:
             {
               "term_structure": [{"expiry": str, "dte": int, "atm_iv": float}, ...],
@@ -769,92 +779,197 @@ class OptionsAnalyzer:
               "back_iv": float|None,     # 较远 expiry ATM IV (%)
               "iv_spread": float|None,   # back_iv - front_iv (pp), >0 = contango
               "signal": str,
+              "data_available": bool,    # False = 没算出来，front/back 为 None
+              "source": "cboe"|"yfinance"|"none",
+              "error": str,              # data_available=False 时的失败原因
             }
         """
-        result: Dict = {"shape": "unknown", "term_structure": [], "signal": "IV期限结构数据不足"}
-        if yf is None or stock_price <= 0:
+        result: Dict = {
+            "shape": "unknown", "term_structure": [],
+            "front_iv": None, "back_iv": None, "iv_spread": None,
+            "signal": "IV期限结构数据不足",
+            "data_available": False, "source": "none", "error": "",
+        }
+        if not stock_price or stock_price <= 0:
+            result["error"] = "现价不可用（stock_price<=0），无法定位 ATM"
             return result
+
+        term_pts: List[Dict] = []
+        errors: List[str] = []
+
+        # ── 主源：CBOE 全链 ──────────────────────────────────────────
         try:
-            import math
-            stock_obj = yf.Ticker(ticker)
-            if not hasattr(stock_obj, "options") or not stock_obj.options:
-                return result
+            from cboe_options import fetch_cboe_iv_term_structure
+            _cb_pts = fetch_cboe_iv_term_structure(ticker, stock_price)
+            if _cb_pts:
+                term_pts = _cb_pts
+                result["source"] = "cboe"
+        except Exception as _e_cb:  # noqa: BLE001 — CBOE 失败降级 yfinance
+            errors.append(f"cboe:{type(_e_cb).__name__}:{_e_cb}")
+            _log.debug("[%s] CBOE IV 期限结构失败：%s，降级 yfinance", ticker, _e_cb)
 
-            today_dt = datetime.now()
-            # 取 4 个跨度不同的到期日（尽量覆盖 30/60/90/180 DTE）
-            all_exps = list(stock_obj.options)
-            selected: List[str] = []
-            targets = [25, 55, 85, 150]   # 目标 DTE
-            for tgt in targets:
-                best = min(
-                    (e for e in all_exps if (datetime.strptime(e, "%Y-%m-%d") - today_dt).days >= tgt - 10),
-                    key=lambda e: abs((datetime.strptime(e, "%Y-%m-%d") - today_dt).days - tgt),
-                    default=None
-                )
-                if best and best not in selected:
-                    selected.append(best)
-            if not selected:
-                selected = all_exps[:4]
+        # ── 降级：yfinance（进闸门 + 重试）────────────────────────────
+        # 双保险：即便 _iv_term_points_yfinance 内部再冒出未预料的异常，也只能
+        # 让**期限结构这一项**不可用，绝不能冒泡到 analyze() 让整份期权分析作废
+        # （OracleBee 会把它接住并静默中性化成 5.0 分）。
+        if not term_pts:
+            try:
+                term_pts, _yf_errs = self._iv_term_points_yfinance(ticker, stock_price)
+                errors.extend(_yf_errs)
+            except Exception as _e_yf:  # noqa: BLE001
+                errors.append(f"yfinance:{type(_e_yf).__name__}:{_e_yf}")
+                _log.warning("[%s] yfinance 期限结构路径异常：%s", ticker, _e_yf)
+                term_pts = []
+            if term_pts:
+                result["source"] = "yfinance"
 
-            term_pts: List[Dict] = []
-            atm_tol = stock_price * 0.04   # ±4% ATM 容差
+        result["term_structure"] = term_pts
+        if len(term_pts) < 2:
+            # 诚实降级：说清楚是"没取到"，不是"算出来是 0"
+            result["error"] = "；".join(errors) or f"仅取到 {len(term_pts)} 个到期日的 ATM IV（需 ≥2）"
+            result["signal"] = f"IV期限结构数据不可用（{result['error'][:80]}）"
+            _log.info("[%s] IV 期限结构不可用：%s", ticker, result["error"])
+            return result
 
-            for exp in selected:
-                try:
-                    chain = stock_obj.option_chain(exp)
-                    dte = (datetime.strptime(exp, "%Y-%m-%d") - today_dt).days
-                    # ATM call IV（最接近股价的行权价）
-                    calls_list = chain.calls.to_dict("records") if chain.calls is not None else []
-                    ivs = []
-                    for c in calls_list:
-                        k = c.get("strike", 0)
-                        iv_raw = c.get("impliedVolatility", 0)
-                        if (abs(k - stock_price) <= atm_tol
-                                and iv_raw and math.isfinite(iv_raw) and 0.02 < iv_raw < 2.0):
-                            ivs.append(float(iv_raw) * 100)
-                    if ivs:
-                        term_pts.append({
-                            "expiry": exp,
-                            "dte":    dte,
-                            "atm_iv": round(sum(ivs) / len(ivs), 1),
-                        })
-                except Exception:
-                    continue
+        front_iv = term_pts[0]["atm_iv"]
+        back_iv  = term_pts[-1]["atm_iv"]
+        iv_spread = round(back_iv - front_iv, 1)
+        result["front_iv"]  = front_iv
+        result["back_iv"]   = back_iv
+        result["iv_spread"] = iv_spread
+        result["data_available"] = True
 
-            if len(term_pts) < 2:
-                result["term_structure"] = term_pts
-                return result
-
-            result["term_structure"] = term_pts
-            front_iv = term_pts[0]["atm_iv"]
-            back_iv  = term_pts[-1]["atm_iv"]
-            iv_spread = round(back_iv - front_iv, 1)
-            result["front_iv"]  = front_iv
-            result["back_iv"]   = back_iv
-            result["iv_spread"] = iv_spread
-
-            if iv_spread >= 3.0:
-                result["shape"] = "contango"
-                result["signal"] = (
-                    f"IV期限结构正向（前端{front_iv:.1f}% → 远端{back_iv:.1f}%，"
-                    f"+{iv_spread:.1f}pp），市场无短期恐慌，IV低廉适合方向性买权"
-                )
-            elif iv_spread <= -3.0:
-                result["shape"] = "backwardation"
-                result["signal"] = (
-                    f"IV期限结构倒挂（前端{front_iv:.1f}% > 远端{back_iv:.1f}%，"
-                    f"{iv_spread:.1f}pp），短期事件溢价偏高（财报/催化剂），卖短期权占优"
-                )
-            else:
-                result["shape"] = "flat"
-                result["signal"] = (
-                    f"IV期限结构平坦（前端{front_iv:.1f}% / 远端{back_iv:.1f}%，"
-                    f"利差{iv_spread:+.1f}pp），无明显方向性时间价值信号"
-                )
-
-        except Exception as e:
-            _log.debug("IV term structure unavailable for %s: %s", ticker, e)
+        if iv_spread >= 3.0:
+            result["shape"] = "contango"
+            result["signal"] = (
+                f"IV期限结构正向（前端{front_iv:.1f}% → 远端{back_iv:.1f}%，"
+                f"+{iv_spread:.1f}pp），市场无短期恐慌，IV低廉适合方向性买权"
+            )
+        elif iv_spread <= -3.0:
+            result["shape"] = "backwardation"
+            result["signal"] = (
+                f"IV期限结构倒挂（前端{front_iv:.1f}% > 远端{back_iv:.1f}%，"
+                f"{iv_spread:.1f}pp），短期事件溢价偏高（财报/催化剂），卖短期权占优"
+            )
+        else:
+            result["shape"] = "flat"
+            result["signal"] = (
+                f"IV期限结构平坦（前端{front_iv:.1f}% / 远端{back_iv:.1f}%，"
+                f"利差{iv_spread:+.1f}pp），无明显方向性时间价值信号"
+            )
         return result
+
+    @staticmethod
+    def _iv_term_points_yfinance(ticker: str, stock_price: float) -> tuple:
+        """yfinance 降级路径：返回 (term_pts, errors)。
+
+        每次出站 HTTPS 都走 `http_gate`——旧实现在 3~6 个工作线程里并发裸调
+        `option_chain()`，是 2026-08-24 SSL EOF 风暴的未受保护调用方之一。
+        失败原因逐条回传，**不再 `except: continue` 静默丢弃**。
+        """
+        import time
+
+        errors: List[str] = []
+        if yf is None:
+            return [], ["yfinance 未安装"]
+        try:
+            from http_gate import https_gate
+        except Exception:  # pragma: no cover - 闸门不可得时退化为直连
+            from contextlib import nullcontext
+
+            def https_gate(*_a, **_k):  # type: ignore[misc]
+                return nullcontext()
+
+        def _gated(fn, what: str, retries: int = 2):
+            """闸门内执行一次网络调用；瞬时 SSL 错误退避重试。"""
+            last = None
+            for attempt in range(retries + 1):
+                try:
+                    with https_gate():
+                        return fn()
+                except Exception as e:  # noqa: BLE001
+                    last = e
+                    if attempt < retries:
+                        time.sleep(0.7 * (attempt + 1))
+            errors.append(f"{what}:{type(last).__name__}:{last}")
+            return None
+
+        stock_obj = yf.Ticker(ticker)
+        all_exps = _gated(lambda: list(stock_obj.options), "options")
+        if not all_exps:
+            return [], errors or ["yfinance 无到期日"]
+
+        today_dt = datetime.now()
+
+        def _dte(e: str) -> Optional[int]:
+            """无法解析的到期日返回 None 而不是抛异常。
+
+            v0.45.4 回归修复：本函数原先整个包在 `calculate_iv_term_structure` 的
+            外层 try/except 里，拆掉后一个畸形字符串（实测 yfinance 可返回 'N/A'/''）
+            会让 ValueError 抛穿到 `OptionsAgent.analyze`（第 1805 行无 try 覆盖），
+            再被 OracleBee 的 except 元组接住 → result={} → options_score=5.0。
+            后果是**整只标的的 GEX/关键位/OI 墙/IV Rank 全部丢失**且不报错，
+            而期限结构本身只是这份结果里的一个小字段。
+            """
+            try:
+                return (datetime.strptime(str(e), "%Y-%m-%d") - today_dt).days
+            except (ValueError, TypeError):
+                return None
+
+        # 取 4 个跨度不同的到期日（尽量覆盖 25/55/85/150 DTE）
+        _dated = [(e, _dte(e)) for e in all_exps]
+        _unparsable = [e for e, d in _dated if d is None]
+        if _unparsable:
+            errors.append(f"options:{len(_unparsable)} 个到期日无法解析（如 {_unparsable[0]!r}）")
+        _dated = [(e, d) for e, d in _dated if d is not None]
+        if not _dated:
+            return [], errors or ["yfinance 到期日全部无法解析"]
+
+        selected: List[str] = []
+        for tgt in (25, 55, 85, 150):
+            cands = [(e, d) for e, d in _dated if d >= tgt - 10]
+            if not cands:
+                continue
+            best = min(cands, key=lambda ed: abs(ed[1] - tgt))[0]
+            if best not in selected:
+                selected.append(best)
+        if not selected:
+            selected = [e for e, _ in _dated[:4]]
+
+        term_pts: List[Dict] = []
+        for exp in selected:
+            chain = _gated(lambda e=exp: stock_obj.option_chain(e), f"chain[{exp}]")
+            if chain is None:
+                continue
+            try:
+                calls_list = chain.calls.to_dict("records") if chain.calls is not None else []
+                strikes = sorted({c.get("strike", 0) for c in calls_list if c.get("strike")})
+                gaps = [b - a for a, b in zip(strikes, strikes[1:]) if b > a]
+                gap_med = statistics.median(gaps) if gaps else 0.0
+                # 自适应 ATM 容差：纯 ±4% 对低价股会归零（AMC≈$3 时 ±$0.12 < 行权价间距 $0.50）
+                atm_tol = max(stock_price * 0.04, gap_med * 1.2)
+                ivs = [
+                    float(c["impliedVolatility"]) * 100
+                    for c in calls_list
+                    if abs(c.get("strike", 0) - stock_price) <= atm_tol
+                    and c.get("impliedVolatility")
+                    and _math.isfinite(c["impliedVolatility"])
+                    and 0.02 < c["impliedVolatility"] < 2.0
+                ]
+                if ivs:
+                    term_pts.append({
+                        "expiry": exp,
+                        # selected 里的到期日已通过 _dated 过滤，_dte 必不为 None
+                        "dte": _dte(exp) or 0,
+                        "atm_iv": round(sum(ivs) / len(ivs), 1),
+                    })
+                else:
+                    errors.append(f"chain[{exp}]:ATM(±{atm_tol:.2f})内无有效 IV")
+            except Exception as e:  # noqa: BLE001 — 解析失败也要留痕
+                errors.append(f"parse[{exp}]:{type(e).__name__}:{e}")
+
+        term_pts.sort(key=lambda p: p["dte"])
+        return term_pts, errors
 
     def classify_call_flow(
         self,
@@ -926,14 +1041,21 @@ class OptionsAnalyzer:
                 votes["B"] = "mixed"
 
         # ── C. IV 期限结构 ──
-        if term_data and term_data.get("shape"):
-            shape = term_data["shape"]
-            if shape == "backwardation":
+        # v0.45.4: 曾写成 `if term_data.get("shape")` + else→"mixed"。
+        # 取数失败时 shape 是字符串 "unknown"（**truthy**），于是落进 else 投出
+        # 一张真票 "mixed"——而下方 `labels = [v for v in votes.values()
+        # if v != "unknown"]` 本就是为弃权设计的，这张票永远到不了那里。
+        # 后果：2026-08-24 有 14/30 只标的期限结构取数失败，却各自贡献了一张
+        # "观察到中性"，既参与多数投票、又抬高 confidence 分母。
+        # 缺数必须**弃权**，不是投中性（同 MEMORY「静默中性化」）。
+        _shape = (term_data or {}).get("shape")
+        _term_ok = bool((term_data or {}).get(
+            "data_available", _shape not in (None, "", "unknown")))
+        if _term_ok and _shape:
+            if _shape == "backwardation":
                 votes["C"] = "directional"  # 短期事件溢价
-            elif shape == "contango":
-                votes["C"] = "mixed"        # 正常无信号
             else:
-                votes["C"] = "mixed"
+                votes["C"] = "mixed"        # contango / flat：正常无方向信号
 
         # 投票汇总
         labels = [v for v in votes.values() if v != "unknown"]
@@ -1422,9 +1544,32 @@ class OptionsAgent:
         """
         # ===== Snapshot cache 入口 =====
         _snap_disabled = os.environ.get("OPTIONS_SNAPSHOT_DISABLE", "").lower() in ("1", "true", "yes")
-        _snap_date = pdt_today()  # v0.28.0: 美股交易日，避免跨午夜文件命名偏移
-        _snap_path = os.path.join(self.fetcher.cache_dir,
-                                  f"options_snapshot_{ticker}_{_snap_date}.json")
+        _snap_today = pdt_today()  # v0.28.0: 美股交易日，避免跨午夜文件命名偏移
+
+        # v0.45.16：补跑（`--date` 指定的目标日 ≠ 今天）必须用**独立槽位**。
+        #
+        # 旧实现 `_snap_date = pdt_today()` 完全不看目标日，于是「在 8/25 补跑
+        # 8/24」会写出 `options_snapshot_{T}_2026-08-25.json`——占的是**今天**的位置。
+        # 2026-08-25 实测后果（两个方向都错）：
+        #   ① 往回污染：8/24 的报告拿到 8/25 早上现拉的期权数据，冒充 8/24 的
+        #      （NVDA 两天的 iv_rank/pc/GEX/rv 逐字段完全相同，因为就是同一份）
+        #   ② 往前污染：06:33 的补跑占住槽位后，当天 14:00 的正式定时扫描
+        #      一进门就命中缓存，**从未拉取过属于自己的期权数据**
+        #
+        # 为什么不能简单改成「用目标日命名」：CBOE/yfinance 的期权接口**只有
+        # 实时快照、没有历史**，补跑时拿到的必然是运行时的链。命名成 8/24 只是
+        # 把谎换个说法。所以这里只做两件诚实的事——槽位隔离 + 口径标注。
+        #
+        # 用环境变量而非模块级变量：编排器为 daily_report / generate_ml_report
+        # 分别 spawn 独立进程，模块级变量跨不过进程边界，env 可以。
+        _snap_target = (os.environ.get("ALPHA_HIVE_TARGET_DATE", "") or "").strip() or _snap_today
+        _is_backfill = _snap_target != _snap_today
+        _snap_date = _snap_today  # 快照内容的**实际获取日**，始终是今天
+        if _is_backfill:
+            _snap_name = f"options_snapshot_{ticker}_{_snap_target}_backfilled-{_snap_today}.json"
+        else:
+            _snap_name = f"options_snapshot_{ticker}_{_snap_today}.json"
+        _snap_path = os.path.join(self.fetcher.cache_dir, _snap_name)
         if not _snap_disabled and not force_refresh and os.path.exists(_snap_path):
             try:
                 with open(_snap_path, "r") as _f:
@@ -1478,13 +1623,19 @@ class OptionsAgent:
                 "iv_skew_ratio": None,
                 "iv_skew_signal": "",
                 "iv_skew_detail": {},
-                "iv_term_structure": {},
+                "iv_term_structure": {"shape": "unknown", "term_structure": [],
+                                      "front_iv": None, "back_iv": None, "iv_spread": None,
+                                      "data_available": False, "source": "none",
+                                      "error": "期权数据不可用（真实链获取失败）"},
                 "call_flow_classification": {"label": "unknown", "confidence": 0.0,
                                              "reasoning": "期权数据不可用", "votes": {}},
-                "rv_30d": 0.0,
-                "iv_rv_spread": 0.0,
-                "iv_rv_signal": "",
-                "iv_rv_detail": {},
+                # v0.45.4: 曾是 0.0 —— 把"没数据"写成"价差为零"，与真实的
+                # fair 定价同形（MEMORY「静默中性化」）。诚实用 None，渲染层显示「—」。
+                "rv_30d": None,
+                "iv_rv_spread": None,
+                "iv_rv_signal": "unknown",
+                "iv_rv_detail": {"data_available": False,
+                                 "error": "期权数据不可用（真实链获取失败）"},
                 "gamma_calendar": {},
                 "full_chain_oi": {},
             }
@@ -1815,9 +1966,12 @@ class OptionsAgent:
             # P1-⑤ Call 流分类（directional / hedge / mixed）
             "call_flow_classification": call_flow_classification,
             # ① IV-RV Spread
-            "rv_30d": iv_rv_data.get("rv_30d", 0.0),
-            "iv_rv_spread": iv_rv_data.get("iv_rv_spread", 0.0),
-            "iv_rv_signal": iv_rv_data.get("iv_rv_signal", ""),
+            # ⚠️ 这里**不能**写 `.get(k, 0.0)`：失败时 `calculate_iv_rv_spread` 返回的
+            # 字典里这些键是**存在的、值为 None**，默认值根本不生效，None 一路流到
+            # 渲染层被兜成 0.0 → 页面显示「+0.0pp / 0.0%」（8/24 实测 4/12 只如此）。
+            "rv_30d": iv_rv_data.get("rv_30d"),
+            "iv_rv_spread": iv_rv_data.get("iv_rv_spread"),
+            "iv_rv_signal": iv_rv_data.get("iv_rv_signal") or "unknown",
             "iv_rv_detail": iv_rv_data,
             # ⑤ Gamma 到期日历
             "gamma_calendar": gamma_calendar,
@@ -1834,6 +1988,12 @@ class OptionsAgent:
                 result["_snapshot_timestamp"] = datetime.now().isoformat()
                 result["_snapshot_ticker"] = ticker
                 result["_snapshot_stock_price"] = stock_price
+                # v0.45.16：补跑时显式标注"期权是运行时实时拉的，不是目标日的"。
+                # CBOE/yfinance 无历史期权接口，这一点没法假装，只能让下游看得见。
+                if _is_backfill:
+                    result["_options_as_of_mismatch"] = True
+                    result["_options_target_date"] = _snap_target
+                    result["_options_fetched_on"] = _snap_today
                 with open(_snap_path, "w") as _f:
                     json.dump(result, _f, default=str, indent=2)
                 _log.info("[%s] 期权快照写入: %s", ticker, os.path.basename(_snap_path))

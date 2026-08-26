@@ -733,14 +733,46 @@ def calculate_iv_rv_spread(
     _empty = {
         "rv_30d": None, "iv_rv_spread": None,
         "iv_rv_signal": "unknown", "iv_rv_note": "RV 数据不可用",
+        "data_available": False, "error": "",
     }
     try:
+        import time
+
         import yfinance as yf
         import numpy as np
 
-        hist = yf.download(ticker, period=f"{lookback_days + 10}d", interval="1d",
-                           progress=False, auto_adjust=True)
-        if hist.empty or len(hist) < lookback_days // 2:
+        # v0.45.4: 进 http_gate 闸门 + 退避重试。
+        # 本机 OpenSSL 1.1.1q 并发 HTTPS 会抛 SSLError/EOF，此前这里是裸 yf.download，
+        # 是 2026-08-24 SSL 风暴里未受保护的调用方之一；失败即返回 _empty，
+        # 下游 `.get("rv_30d", 0.0)` 拿到 **None**（键存在！）再被渲染成 0.0，
+        # 与"真的没波动"无法区分。2026-08-24 那批 12 只有 4 只如此。
+        try:
+            from http_gate import https_gate
+        except Exception:  # pragma: no cover - 闸门不可得时退化直连
+            from contextlib import nullcontext
+
+            def https_gate(*_a, **_k):
+                return nullcontext()
+
+        hist = None
+        _dl_err = None
+        for _attempt in range(3):
+            try:
+                with https_gate():
+                    hist = yf.download(ticker, period=f"{lookback_days + 10}d", interval="1d",
+                                       progress=False, auto_adjust=True)
+                if hist is not None and not hist.empty:
+                    break
+            except Exception as _e_dl:  # noqa: BLE001 — 瞬时 SSL 错开即恢复
+                _dl_err = _e_dl
+            if _attempt < 2:
+                time.sleep(0.7 * (_attempt + 1))
+
+        if hist is None or hist.empty or len(hist) < lookback_days // 2:
+            _empty["error"] = (f"yfinance 历史K线不可用（{type(_dl_err).__name__}:{_dl_err}）"
+                               if _dl_err else
+                               f"yfinance 历史K线不足（{0 if hist is None else len(hist)} 根，需 ≥{lookback_days // 2}）")
+            _empty["iv_rv_note"] = f"RV 数据不可用：{_empty['error']}"
             return _empty
 
         # yfinance >= 0.2.49 对单 ticker 也返回 MultiIndex columns，需显式取列
@@ -750,11 +782,19 @@ def calculate_iv_rv_spread(
             close_col = close_col.iloc[:, 0]
         closes = close_col.dropna().values.flatten().astype(float)
 
-        # 过滤掉无效价格（0/负值/极低 ~1.0 哨兵值均来自 yfinance sample data）
-        # 用 > 5 而非 > 0，防止归一化哨兵值（~1.0）污染 HV 计算
-        closes = closes[closes > 5]
+        # 过滤掉无效价格（0/负值/极低 ~1.0 哨兵值均来自 yfinance sample data）。
+        # v0.45.4: 旧实现用绝对阈值 `closes > 5`，会把**低价股的全部真实收盘价**
+        # 一起滤光——AMC ≈$3 时整条序列清零 → RV 结构性永远不可用（8/24 实测）。
+        # 改用相对阈值：哨兵值（~1.0）相对真实价格数量级极小，取中位数的 20% 即可
+        # 区分，而同一只股票 30 天内不可能跌到中位数的 1/5。
+        closes = closes[closes > 0]
+        if len(closes) >= 5:
+            _med = float(np.median(closes))
+            closes = closes[closes >= _med * 0.2]
         n = min(lookback_days, len(closes) - 1)
         if n < 5:
+            _empty["error"] = f"有效收盘价不足（{len(closes)} 根）"
+            _empty["iv_rv_note"] = f"RV 数据不可用：{_empty['error']}"
             return _empty
 
         log_rets = np.log(closes[-n:] / closes[-(n + 1):-1])
@@ -762,6 +802,8 @@ def calculate_iv_rv_spread(
         # 过滤异常跳升：单日 |log_ret| > 0.5（≈ e^0.5-1=65% 日涨跌）视为数据污染
         log_rets = log_rets[np.abs(log_rets) < 0.5]
         if len(log_rets) < 5:
+            _empty["error"] = f"有效日收益不足（{len(log_rets)} 个，异常跳升已剔除）"
+            _empty["iv_rv_note"] = f"RV 数据不可用：{_empty['error']}"
             return _empty
 
         rv_daily = float(np.std(log_rets, ddof=1))
@@ -769,6 +811,7 @@ def calculate_iv_rv_spread(
 
         # Sanity check：正常股票 HV30 不应超过 300%
         if rv_annual <= 0 or rv_annual > 300:
+            _empty["error"] = f"HV30={rv_annual:.1f}% 超出合理区间 (0, 300]"
             _empty["iv_rv_note"] = f"RV 数据异常（HV30={rv_annual:.1f}%），已跳过"
             return _empty
 
@@ -793,7 +836,10 @@ def calculate_iv_rv_spread(
             "iv_rv_spread": round(spread, 2),
             "iv_rv_signal": signal,
             "iv_rv_note": note,
+            "data_available": True,
+            "error": "",
         }
     except Exception as e:
+        _empty["error"] = f"{type(e).__name__}:{e}"
         _empty["iv_rv_note"] = f"RV 计算失败：{e}"
         return _empty

@@ -2266,8 +2266,8 @@ def _resolve_focus_tickers(args) -> List[str]:
     """
     v0.23.0 扩样本：统一 CLI 解析优先级
       1. 显式 --tickers 列表 → 直接用
-      2. --extended-pool → WATCHLIST + WATCHLIST_EXTENDED（约 101 只）
-      3. --all-watchlist → WATCHLIST 核心 25 只
+      2. --extended-pool → WATCHLIST + WATCHLIST_EXTENDED（101 只）
+      3. --all-watchlist → WATCHLIST 每日扫描池 30 只（v0.45.6 起与编排器同源）
       4. 默认 → args.tickers 里的 10 只
     --max-tickers 是硬上限（防止首次跑太久）
     """
@@ -2335,7 +2335,7 @@ def main():
     parser.add_argument(
         '--extended-pool',
         action='store_true',
-        help='v0.23.0 扩样本：扫描 WATCHLIST + WATCHLIST_EXTENDED（约 101 只，覆盖 14 sector）'
+        help='v0.23.0 扩样本：扫描 WATCHLIST + WATCHLIST_EXTENDED（101 只，覆盖 14 sector）'
     )
     parser.add_argument(
         '--max-tickers',
@@ -2396,6 +2396,11 @@ def main():
             import sys as _s
             _s.exit(2)
         print(f"📅 日期覆盖：报告标记为 {args.date}（非自动 PDT 当日）")
+        # v0.45.16：把目标日传给期权快照层，让补跑用独立槽位、不占今天的位置。
+        # 走环境变量是因为本进程内还会 spawn 子进程（ML 报告等），模块级变量传不过去。
+        # 曾发生：8/25 早上补跑 8/24 → 写出 options_snapshot_*_2026-08-25.json
+        # → 当天 14:00 的正式扫描一进门就命中它，从未拉过自己的期权数据。
+        os.environ["ALPHA_HIVE_TARGET_DATE"] = args.date
 
     # ── 美股交易日护栏 ──
     # 周末 / 美股假日（Juneteenth、Good Friday…）跳过完整简报生成，不对无交易日产出幽灵报告。

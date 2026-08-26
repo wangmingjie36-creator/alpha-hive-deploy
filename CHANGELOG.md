@@ -5,6 +5,247 @@
 
 ---
 
+## [0.45.16] — 2026-08-25 — 补跑污染当日期权快照槽位
+
+用户在核对「IV 修复为什么没生效」时定位出来的：**8/25 的期权快照是 8/24 补跑写的**。
+
+`options_analyzer.analyze()` 的快照键取 `pdt_today()`，**完全不看 `--date` 目标日**。
+于是「在 8/25 补跑 8/24」写出的是 `options_snapshot_{T}_2026-08-25.json`——
+占的是**今天**的位置。实测两个方向都错：
+
+| 方向 | 后果 | 实测证据 |
+|---|---|---|
+| 往回污染 | 8/24 的报告拿到 8/25 早上现拉的期权数据冒充 8/24 的 | NVDA 两天的 `iv_rank=45.33` / `pc=0.96` / `GEX=6.6839` / `rv=35.47` **逐字段完全相同** |
+| 往前污染 | 06:33 的补跑占住槽位 → 当天 **14:00 的正式定时扫描一进门就命中缓存**，从未拉取过属于自己的期权数据 | 该次运行 58 次「期权快照命中」；12:44 后全天再未写过任何快照 |
+
+连带影响：当天所有报告的期权部分都继承自 06:33，**且是 v0.45.4 修复前的旧代码算的**
+——这正是「IV 修复已上线却看不到效果」的真正原因（23/24 份 analysis JSON
+缺 `data_available` 键，而该键只有新代码会写）。
+
+### Fixed
+
+- **补跑改用独立槽位**：`--date` 目标日 ≠ 今天时，快照写成
+  `options_snapshot_{T}_{目标日}_backfilled-{今天}.json`，永不触碰当日槽位。
+
+  ⚠️ **刻意没有采用「改用目标日命名」这个看似自然的修法**：CBOE/yfinance 的期权
+  接口只有实时快照、没有历史，补跑拿到的必然是运行时的链，命名成 8/24 只是把谎
+  换个说法。所以只做两件诚实的事——**槽位隔离** + **口径标注**
+  （`_options_as_of_mismatch` / `_options_target_date` / `_options_fetched_on`）。
+
+- **接缝用环境变量 `ALPHA_HIVE_TARGET_DATE`，不用模块级变量**：编排器为
+  `daily_report` 与 `generate_ml_report` 分别 spawn **独立进程**，模块级变量跨不过
+  进程边界。`alpha_hive_daily_report` 在 `--date` 校验通过后写入该变量。
+  与既有的 `OPTIONS_SNAPSHOT_DISABLE` 同一形状。
+
+### Added
+
+- **`tests/test_backfill_snapshot_isolation.py`（6 条）**：补跑槽位名必须与当日不同、
+  补跑不得读当日槽位、**当日扫描仍须命中快照**（防止把闸门写成"永远不命中"）、
+  口径标注三个键齐备、`--date` 必须写入环境变量。
+  已验证可变红：退回「只看今天」的旧写法，精确红 2 条。
+
+  ⚠️ 该文件的 fixture 必须显式 `delenv("OPTIONS_SNAPSHOT_DISABLE")` ——
+  `tests/conftest.py:27` 给全部测试设了这个开关（防 mock 链写进生产 cache/），
+  而本文件测的恰恰**是快照读写行为**。不解开它，「补跑不读当日槽位」会因为
+  "根本没读任何快照"而通过，**测试通过但什么也没守住**。cache_dir 已重定向到
+  tmp_path，重新启用不污染生产目录。
+
+### 当日修复后实测（30 只全量重算）
+
+| | 修复前（早上旧快照） | 重算后 |
+|---|---|---|
+| 期限结构可用 | 9/24 | **30/30** |
+| 其中 CBOE 主源 | 0 | **30** |
+| IV-RV 可用 | 部分 | **30/30** |
+| AMC（曾必挂） | 无数据 | contango 86.3→93.5，RV 99.5 |
+| VKTX（曾必挂） | 无数据 | contango 83.8→93.7，RV 44.5 |
+| DELL（曾必挂） | 无数据 | backwardation 80.1→72.4，RV 83.4 |
+| BRK-B | `source=yfinance` 兜底 | **`source=cboe`**（v0.45.8 符号修复生效） |
+
+23 份报告已重新生成并部署（`Deploy: ML reports 2026-08-25 (23 tickers, 23 files changed)`，
+括号内为**实测变更数**）；线上核对 23/23 期限结构全部有真实数据、0 处紫色渐变。
+
+---
+
+## [0.45.8] — 2026-08-25 — CBOE 对 BRK-B 恒定 403（类份额符号写法）
+
+### Fixed
+
+- **CBOE 用点 `BRK.B`，项目内部用连字符 `BRK-B`**，导致该标的的 CBOE 请求
+  **每次都 403**。实测：`BRK.B` 返回 2054 个合约、`BRK-B` 与 `BRKB` 均
+  403 Forbidden。
+
+  症状不是报错而是**全链降级**——`fetch_cboe_chain`（主链）、
+  `fetch_cboe_full_chain_oi`（全链 OI/Max Pain）、`fetch_cboe_iv_term_structure`
+  （IV 期限结构）三个 CBOE 主源一起失败，BRK-B 每次扫描都白烧 3 次重试
+  （约 5s）再整体退回 yfinance，**恰好落回 SSL 风暴高发路径**。BRK-B 是 30 只
+  每日扫描标的之一，且在 v0.45.2 有过被静默中性化的前科。
+
+  新增 `_cboe_symbol()`：只规范化 **URL**（`-` → `.`）；`_payload_cache` 的键、
+  日志、返回结构一律沿用调用方传入的原始 ticker，避免上下游出现第二种写法。
+  OCC 合约符号不受影响——CBOE 返回 `BRKB260828C00270000`，现有 `_OCC` 正则
+  `^([A-Z]+)…` 照常匹配（实测 **2054/2054 全部解析成功**）。
+
+  修复前后实测（`OPTIONS_SNAPSHOT_DISABLE=1` 走真实全链）：
+
+  | | 修复前 | 修复后 |
+  |---|---|---|
+  | payload | 403 ×3 重试 | OK，现价 $503.96 |
+  | 主链 | 降级 yfinance | CBOE 160 calls / 4 到期日 |
+  | 全链 OI | 降级 yfinance | CBOE 15 到期日，总 OI 485,339 |
+  | IV 期限结构 | `source=yfinance` | `source=cboe`，flat 14.0→16.2 |
+  | call 流 C 票 | 视兜底成败 | 正常投票 |
+
+  NVDA 等无连字符标的行为不变（已回归验证）。
+
+### Added
+
+- `tests/test_iv_structure_guards.py` 增 5 条（合计 31）：符号映射表、
+  **实际请求 URL 必须用点号**（只测 helper 不够，故 mock urlopen 抓真实 URL）、
+  缓存键必须保持原始 ticker、OCC 正则仍能解析类份额合约。
+  已验证可变红：回退 URL 规范化后 `test_url_uses_dotted_form` 立即失败。
+
+---
+
+## [0.45.7] — 2026-08-25 — v0.45.4/0.45.6 的二次检查：4 个自查出的缺陷
+
+对本轮改动做对抗式复查（`/code-review high`），8 条发现里 4 条确认为真并已修，
+其余 3 条为低优先级、1 条为既有缺陷（见文末）。
+
+### Fixed
+
+- **【最严重】畸形到期日字符串会让整只标的的期权分析静默作废**
+  （`options_analyzer._iv_term_points_yfinance`）。v0.45.4 重写时拆掉了旧版包裹
+  整个函数体的 `try/except Exception`，而新的 yfinance 兜底路径里 `_dte()` 直接
+  调 `datetime.strptime` 未加保护。实测 yfinance 的 `.options` 返回 `'N/A'` 或
+  `''` 时 ValueError 会**抛穿**：`calculate_iv_term_structure` → `analyze()`
+  （第 1805 行经 AST 确认无 try 覆盖）→ 被 OracleBee 第 214 行的 except 元组
+  接住（ValueError 在内）→ `result = {}`、`options_score = 5.0`。
+  后果是该标的的 **GEX / 关键位 / OI 墙 / IV Rank / 异常流全部丢失**，日报照常
+  印中性 5.0 分且零报错——而期限结构本身只是这份结果里的一个小字段。
+  **修复放大了故障半径，这是最不该发生的一类回归。**
+  修法：`_dte` 无法解析返回 None 并留痕；调用点再加一层 try 兜底，保证兜底路径
+  的任何意外都只能让期限结构一项不可用。五种畸形输入实测全部诚实降级。
+
+- **`generate_deep_v2.py` 因上游改 None 而崩**。v0.45.4 把 `rv_30d` /
+  `iv_rv_spread` 从 0.0 改成诚实的 None 后，该脚本的消费者仍写 `.get(k, 0.0)`
+  ——**同一个"键存在则默认值失效"的陷阱**。第 935 行先在 `... > 3` 抛
+  `TypeError: '>' not supported between NoneType and int`，第 1010/1011 行抛
+  `unsupported format string passed to NoneType.__format__`（均已复现）。
+  该脚本不在编排器流水线内（手动运行），故为潜在崩溃而非当日故障。
+
+- **报告渲染出字面量「第None名」**（`generate_ml_report` Reddit 热度行）。
+  `第{reddit.get('rank','—')}名` 命中同族陷阱；8/24 存档 12 份里 **7 份**如此。
+  该行本轮未改动，属既有缺陷，与本轮修的是同一形状故一并处理。
+  同行的 mentions / buzz 一并改为显式 None 判断。
+
+- **风险雷达的缺数标记仍是 emoji**（`risk_level` 返回 `"⚪ 数据缺失"`），
+  是 v0.45.4 去 emoji 时漏掉的一处；同函数其余三个分支已是可着色的 `●`。
+  改为 `<span style="color:var(--tm)">○</span>`。
+  ⚠️ 这一改让 `test_missing_data_is_not_rendered_as_low_risk` 变红——它把
+  `"⚪ 数据缺失"` **写死**在断言里。该测试守的是"缺数不得显示成低风险"，
+  与用什么符号无关，故断言改为盯语义：缺数行必须含「数据缺失」、且不得出现
+  `var(--bull)`（低风险绿）或「低」字样。已验证仍有守卫力——把 `None` 退回
+  当 0 处理它立刻变红。**把展示层的具体字符写进断言，会让每次改版都误报。**
+
+### Changed
+
+- **重写一条"不会红"的测试**（`test_sentinel_values_still_filtered`）。
+  它断言 `rv < 300`，但把被测的哨兵值过滤**整段删掉后仍然绿**——因为下游
+  `|log_ret| < 0.5` 的跳变过滤已经吃掉了进出哨兵区的 ±5.19 极端收益，
+  docstring 里声称的失败机制根本不成立。真实污染形态是哨兵值区块**内部**的
+  零收益**压低**波动率，方向与断言相反。改为比对"干净序列 vs 尾部混入 8 个
+  哨兵值"的 RV 是否一致（rel=2%）。**不会红的测试比没有更糟——它让人以为
+  这条路径有回归保护。** 已验证移除过滤后该条变红。
+
+### 未修（已评估）
+
+- `_iv_term_points_yfinance` 用裸 `datetime.now()` 而 CBOE 路径用 `_pdt_now()`，
+  两条路径 DTE 基准不同。本机时钟已锚 Vancouver（时区问题已根治），当前两者
+  一致，属潜在口径漂移。
+- `fetch_cboe_iv_term_structure` 的 `max_points` 参数已失效（抽点固定按 4 个
+  目标 DTE，`picked` 不可能超过 4）。当前无调用方传该参数。
+- 低价股 ATM 容差走行权价间距分支时带宽偏大（AMC ≈$3 → ±$0.60 = ±20% 价位），
+  平均后的「ATM IV」会混入 skew。数值仍可用，属精度问题。
+
+### 顺带查出的既有缺陷（本轮未改，待定）
+
+- **CBOE 对 `BRK-B` 恒定 403**：CBOE 的符号惯例是 **`BRK.B`（点）不是 `BRK-B`
+  （连字符）**，实测 `BRK.B` 返回 2054 个合约、`BRK-B`/`BRKB` 均 403。
+  影响的不只是新加的期限结构函数——`fetch_cboe_chain` /
+  `fetch_cboe_full_chain_oi` 同样失败，即 BRK-B **每次扫描都白烧 3 次 CBOE
+  重试再全量降级 yfinance**。BRK-B 是 30 只扫描标的之一，且在 v0.45.2 有过
+  被静默中性化的前科。修法应是 CBOE URL 侧做 `-` → `.` 规范化。
+
+---
+
+## [0.45.6] — 2026-08-25 — 标的名单合并为单一真相源
+
+用户在核对 v0.45.4 的影响面时问出来的：「不是 30 只标的吗怎么你说 12 只」。
+顺着查下去发现**存在两份各自维护的名单，且早已漂移**：
+
+| | 数量 | 谁在用 |
+|---|---|---|
+| `config.WATCHLIST` | 24 | 全部 Python 侧（108 处引用） |
+| 编排器 `DEFAULT_TICKERS` | **30** | 实际每日扫描 |
+| 重合 | 仅 13 | — |
+
+后果是**改 config 以为生效，扫描纹丝不动**：`AMD` / `AMGN` / `BIIB` / `REGN` /
+`PLUG` / `RUN` / `ICLN` / `SQ` / `COIN` / `MSTR` / `UPST` 共 11 只挂在
+`WATCHLIST` 里，**从未被扫过一次**。
+
+### Changed
+
+- **`config.WATCHLIST` 收窄/对齐为每日扫描的那 30 只**，顺序与编排器原
+  `DEFAULT_TICKERS` 完全一致（多处代码用 `list(WATCHLIST.keys())[:10]` 取前 N，
+  顺序变了就是换了一批标的）。
+  - 13 只原地保留；17 只（CVX·VZ·XOM·COST·BRK-B·AMC·ABBV·T·DELL·DE·CRM·MU·
+    WMT·TMO·TMUS·NFLX·SNOW）**连同元数据**从 `WATCHLIST_EXTENDED` 升入。
+  - ⚠️ **不能直接清空 `WATCHLIST`**：那 13 只里含 NVDA/TSLA/MSFT/META/AMZN 等
+    核心标的，清空会让它们丢 `sector`，而下游 5 处全是 `.get("sector", "")`
+    ——**不报错，只是静默变成"无板块"**：板块集中度分析、`fred_macro` 板块 ETF
+    映射、ScoutBee 板块判断、Slack 板块分组、`llm_service` sector_map。
+    这正是本轮一直在修的那类缺陷，不能顺手再造一个。
+
+- **11 只从未被扫的标的降级到 `WATCHLIST_EXTENDED`，而非删除**。
+  候补池是 `--extended-pool` 的统计样本来源，而样本量直接决定统计功效
+  （实测扩池 10→30 把出结论时间缩短 **5.18×**），凭空砍掉 11 只不划算。
+  实测守恒：合并池 **101 → 101**，标的零丢失、`name`/`sector`/
+  `polymarket_slug`/`monitor_events` **逐字段零差异**；
+  每日扫描池 24→30、候补池 77→71。
+
+- **编排器改为从 `config.WATCHLIST` 读取名单**（`alpha-hive-orchestrator.sh`）。
+  硬编码数组降级为 `DEFAULT_TICKERS_FALLBACK`，仅在 config 读取失败时启用——
+  扫描绝不能因为配置问题起不来。兜底判据不只是"非空"，还要求**每一项都符合
+  ticker 形状**：半截输出（例如 import 期间打了日志到 stdout）比读不出来更危险，
+  它会静默缩小扫描池。四种情形实测通过：正常读取 30 只 / 目录不存在 /
+  python 不可用 / config 语法损坏——后三者均正确退回兜底并告警。
+
+- **`validate_watchlist()` 的 orphan catalyst 口径放宽到两池之和**。
+  `WATCHLIST` 收窄后，候补池标的的 catalyst 配置是**合法的**（`--extended-pool`
+  会用到），按旧口径会误报 10 个孤儿。真正该报的是"配了 catalyst 却哪个池子
+  都不在"。改后 `validate_watchlist()` 返回空列表。
+
+- 同步订正因数量变化而陈旧的文案：`get_extended_watchlist` docstring
+  「25 核心 + ~75」、`--all-watchlist` / `--extended-pool` 的 help 文本、
+  `swarm_agents/_config.py` 里「BRK-B 在 WATCHLIST_EXTENDED 里」的注释
+  （BRK-B 现已是每日扫描标的）。
+
+### Added
+
+- **`tests/test_watchlist_single_source.py`（8 条）** — 防漂移闸。
+  - 编排器必须从 config 读，且**不得再出现顶格的 `DEFAULT_TICKERS=(`**
+  - 兜底数组与 `config.WATCHLIST` **逐个且按顺序**一致（只比集合不够：
+    顺序不同 ⇒ 走兜底那天 `[:10]` 取到的是另一批标的）
+  - 每只扫描标的必须有 `sector` / `name`（缺了不报错，只会静默退化）
+  - 全部 ticker 必须通过 `_RE_TICKER`（BRK-B 曾因此被 7/8 蜂静默中性化）
+  - 两池不得重叠；候补池合计不得跌破 100（防"顺手清理"砍掉统计样本）
+
+  已验证可变红：把兜底数组改漂移一只（QCOM→AMD），
+  `test_fallback_matches_config_exactly` 立即失败。
+
+---
+
 ## [0.45.10] — 2026-08-25 — T+N 评分不得用「正在形成」的 bar
 
 ### Fixed — `backtester._get_price_at_date`

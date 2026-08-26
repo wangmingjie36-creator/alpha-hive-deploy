@@ -756,9 +756,11 @@ def extract(data: dict) -> dict:
         # Overview
         "overview": aa.get("overview", ""),
         # ① IV-RV Spread（来自 options_analyzer → OptionsAgent）
-        "iv_rv_spread": odet.get("iv_rv_spread", 0.0),
+        # v0.45.4 起上游缺数诚实返回 None（键存在，故 .get 默认值不生效），
+        # 这里必须显式兜住，否则下方 f-string 的比较与格式化会抛 TypeError。
+        "iv_rv_spread": odet.get("iv_rv_spread") or 0.0,
         "iv_rv_signal": odet.get("iv_rv_signal", ""),
-        "rv_30d": odet.get("rv_30d", 0.0),
+        "rv_30d": odet.get("rv_30d") or 0.0,
         # ⑤ Gamma 到期日历
         "gamma_calendar": odet.get("gamma_calendar", {}),
         # ② PEAD（来自 chronos_bee details）
@@ -932,7 +934,7 @@ Scout:{fmt_score(ctx['scout'].get('score'))} Rival:{fmt_score(ctx['rival'].get('
 
         "options": f"""分析 {ticker} 期权市场结构：
 P/C={ctx['put_call_ratio']} | 总OI={ctx['total_oi']:,.0f} | IV Skew={ctx['iv_skew']}({ctx['iv_skew_signal']}) | IV={ctx['iv_current']:.1f}%
-IV-RV价差:{ctx.get('iv_rv_spread',0):+.1f}%(期权{'昂贵' if ctx.get('iv_rv_spread',0)>3 else '便宜' if ctx.get('iv_rv_spread',0)<-3 else '合理'},{ctx.get('iv_rv_signal','')}) | HV30={ctx.get('rv_30d',0):.1f}%
+IV-RV价差:{(ctx.get('iv_rv_spread') or 0):+.1f}%(期权{'昂贵' if (ctx.get('iv_rv_spread') or 0)>3 else '便宜' if (ctx.get('iv_rv_spread') or 0)<-3 else '合理'},{ctx.get('iv_rv_signal','')}) | HV30={(ctx.get('rv_30d') or 0):.1f}%
 流向:{ctx['flow_direction']} | 关键阻力:{json.dumps(ctx['key_levels'].get('resistance',[])[:2],ensure_ascii=False)}
 关键支撑:{json.dumps(ctx['key_levels'].get('support',[])[:2],ensure_ascii=False)}
 Gamma日历钉子:{ctx.get('gamma_calendar',{}).get('pin_strike','N/A')} | Charm方向:{ctx.get('gamma_calendar',{}).get('charm_direction','N/A')}
@@ -1007,8 +1009,8 @@ PEAD历史财报漂移: {ctx.get('pead_summary','暂无历史数据')}（偏向:
 - P/C 比: {ctx['put_call_ratio']}（{'>1 偏空' if pc_float > 1 else '<1 偏多'}）
 - 总OI: {ctx['total_oi']:,.0f}
 - IV Skew: {ctx['iv_skew']} ({ctx['iv_skew_signal']})
-- IV 当前: {ctx['iv_current']:.1f}% | HV30（已实现波动率）: {ctx.get('rv_30d',0):.1f}%
-- IV-RV 价差: {ctx.get('iv_rv_spread',0):+.1f}%（正值=期权相对HV偏贵，卖方有优势；负值=期权便宜，方向性买入占优），信号: {ctx.get('iv_rv_signal','')}
+- IV 当前: {ctx['iv_current']:.1f}% | HV30（已实现波动率）: {(ctx.get('rv_30d') or 0):.1f}%
+- IV-RV 价差: {(ctx.get('iv_rv_spread') or 0):+.1f}%（正值=期权相对HV偏贵，卖方有优势；负值=期权便宜，方向性买入占优），信号: {ctx.get('iv_rv_signal','')}
 - 流向: {ctx['flow_direction']}
 - 关键支撑: {json.dumps(ctx['key_levels'].get('support',[])[:3], ensure_ascii=False)}
 - 关键阻力: {json.dumps(ctx['key_levels'].get('resistance',[])[:3], ensure_ascii=False)}

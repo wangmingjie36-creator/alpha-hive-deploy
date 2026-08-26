@@ -54,10 +54,12 @@ class TestBuzzNoneSafety:
         assert "1.80×" in html
         assert ">—</div><div class=\"lbl\">5日动量</div>" not in html
 
+    # v0.45.4 起报告改用站点设计令牌（去 AI 味重构），断言随之从硬编码
+    # 十六进制换成令牌名——**测试意图不变**：颜色必须反映状态，缺数不得被涂成看跌。
     @pytest.mark.parametrize("momentum,expect_color", [
-        (3.25, "#28a745"),   # 正动量 → 绿
-        (-2.10, "#dc3545"),  # 负动量 → 红
-        (None, "#6c757d"),   # 缺数 → 中性灰，不能被涂成"看跌"
+        (3.25, "var(--bull)"),   # 正动量 → 绿
+        (-2.10, "var(--bear)"),  # 负动量 → 红
+        (None, "var(--tm)"),     # 缺数 → 中性灰，不能被涂成"看跌"
     ])
     def test_color_reflects_state_including_missing(self, momentum, expect_color):
         html = _gen()._ch3_buzz(_buzz({
@@ -113,16 +115,25 @@ class TestRiskRadarNoneSafety:
         assert self._radar(**{field: None})
 
     def test_missing_data_is_not_rendered_as_low_risk(self):
-        """最关键的一条：None 当 0 处理会让 risk_level 输出「🟢 低」，
-        把「没数据」渲染成「低风险」——比崩溃更危险，因为它不会报错"""
-        html = self._radar(bear_score=None, crowding=None)
-        assert "⚪ 数据缺失" in html
-        # 两个缺数维度都不该出现绿灯
+        """最关键的一条：None 当 0 处理会让 risk_level 输出「低」，
+        把「没数据」渲染成「低风险」——比崩溃更危险，因为它不会报错。
+
+        v0.45.7：断言改为盯**语义**而非具体字符。原版把 `"⚪ 数据缺失"` 写死，
+        v0.45.4 去 emoji 重构（emoji 不可着色、不随明暗主题变化）时这条就红了——
+        而它真正要守的是"缺数不得显示成低风险"，与用什么符号无关。
+        """
         import re
+
+        html = self._radar(bear_score=None, crowding=None)
+        assert "数据缺失" in html, "缺数维度未标注"
+
         rows = [r for r in re.findall(r"<tr>.*?</tr>", html) if "情绪风险" in r or "估值压缩" in r]
         assert rows, "未取到目标行"
         for r in rows:
-            assert "🟢" not in r, f"缺数据却渲染成低风险: {r[:120]}"
+            assert "数据缺失" in r, f"缺数维度未标注: {r[:140]}"
+            # 低风险的视觉标记是 --bull 色（绿），缺数维度不得出现
+            assert "var(--bull)" not in r, f"缺数据却渲染成低风险（绿）: {r[:140]}"
+            assert ">低<" not in r and "● 低" not in r, f"缺数据却显示「低」: {r[:140]}"
 
     def test_real_values_still_render(self):
         """守卫不能写成永远走缺失分支"""
