@@ -134,6 +134,78 @@ def _path(p: str) -> Callable:
     return lambda tr: _num(_dig(tr, p))
 
 
+# ── v0.45.33: 维度**输入**提取器 ─────────────────────────────────────────
+# 此前档案只存各蜂的**输出分数**，于是「改 crowding 公式会不会更准」这类
+# 问题无法离线重放，只能前向累积 25 个不重叠周（约半年）才知道。
+# 输入一旦落库，维度计算层的改动也能当场重放（见 replay_scoring.py）。
+# 全部走 details 里已有的字段，扫描侧零额外开销。
+
+def _crowding_comp(key: str) -> Callable:
+    """拥挤度分量。v0.45.30 前后键名不同（stocktwits_volume → social_volume），
+    两个都试 —— 历史回填必须能读旧名，否则等于丢掉改名前的全部样本。"""
+    _legacy = {"social_volume": "stocktwits_volume"}
+
+    def _f(tr: Dict) -> Optional[float]:
+        comp = _dig(tr, "agent_details.ScoutBeeNova.details.components")
+        if not isinstance(comp, dict):
+            return None
+        v = comp.get(key)
+        if v is None and key in _legacy:
+            v = comp.get(_legacy[key])
+        return _num(v)
+    return _f
+
+
+def _buzz_comp(key: str) -> Callable:
+    def _f(tr: Dict) -> Optional[float]:
+        comp = _dig(tr, "agent_details.BuzzBeeWhisper.details.components")
+        return _num(comp.get(key)) if isinstance(comp, dict) else None
+    return _f
+
+
+_CAT_TYPE_W = {"earnings": 1.5, "fda_approval": 1.4, "merger": 1.3,
+               "product_launch": 1.2, "regulatory": 1.1, "guidance": 1.0,
+               "economic_event": 0.9, "investor_day": 0.7}
+_CAT_SEV_M = {"critical": 1.3, "high": 1.1, "medium": 1.0, "low": 0.8}
+
+
+def _catalysts(tr: Dict) -> List[Dict]:
+    c = _dig(tr, "agent_details.ChronosBeeHorizon.details.catalysts")
+    return [x for x in c if isinstance(x, dict)] if isinstance(c, list) else []
+
+
+def _cat_count(tr: Dict) -> Optional[float]:
+    """催化剂条数。注意 0 与「来源不可得」不同 —— 后者自 v0.45.31 起
+    ChronosBee 返回 error，details 缺失，本函数返回 None（诚实缺失）。"""
+    if _dig(tr, "agent_details.ChronosBeeHorizon.details") is None:
+        return None
+    return float(len(_catalysts(tr)))
+
+
+def _cat_nearest_days(tr: Dict) -> Optional[float]:
+    days = [_num(c.get("days_until")) for c in _catalysts(tr)]
+    days = [d for d in days if d is not None and d >= 0]
+    return float(min(days)) if days else None
+
+
+def _cat_max_weight(tr: Dict) -> Optional[float]:
+    """最强催化剂的 type_w × sev_m —— 重放评分公式时的关键输入。"""
+    best = None
+    for c in _catalysts(tr):
+        w = _CAT_TYPE_W.get(c.get("type", ""), 0.8) * _CAT_SEV_M.get(c.get("severity", "medium"), 1.0)
+        best = w if best is None else max(best, w)
+    return best
+
+
+def _iv_rank_is_real(tr: Dict) -> Optional[float]:
+    """1.0 = 真实自攒 IV 历史；0.0 = hv_proxy（数学上等于 HV Rank，非 IV）。
+    读 iv_rank 的任何分析都必须先看这一列，见 MEMORY alpha-hive-iv-rank。"""
+    src = _dig(tr, "agent_details.OracleBeeEcho.details.iv_rank_source")
+    if not isinstance(src, str) or not src:
+        return None
+    return 0.0 if src == "hv_proxy" else 1.0
+
+
 def _agent_score(agent: str) -> Callable:
     return lambda tr: _num(_dig(tr, f"agent_details.{agent}.score"))
 
@@ -194,6 +266,23 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     "bear.overval_bear": _path("agent_details.BearBeeContrarian.details.overval_bear"),
     "bear.options_bear": _path("agent_details.BearBeeContrarian.details.options_bear"),
     "bear.short_int_bear": _path("agent_details.BearBeeContrarian.details.short_int_bear"),
+
+    # ── v0.45.33: 维度输入（供离线重放维度计算层的改动）──────────
+    "crowding.comp.social_volume":      _crowding_comp("social_volume"),
+    "crowding.comp.google_trends":      _crowding_comp("google_trends"),
+    "crowding.comp.consensus_strength": _crowding_comp("consensus_strength"),
+    "crowding.comp.seeking_alpha_views": _crowding_comp("seeking_alpha_views"),
+    "crowding.comp.short_squeeze_risk": _crowding_comp("short_squeeze_risk"),
+    "catalyst.count":         _cat_count,
+    "catalyst.nearest_days":  _cat_nearest_days,
+    "catalyst.max_weight":    _cat_max_weight,
+    "buzz.comp.momentum_signal":   _buzz_comp("momentum_signal"),
+    "buzz.comp.volume_signal":     _buzz_comp("volume_signal"),
+    "buzz.comp.volatility_signal": _buzz_comp("volatility_signal"),
+    "buzz.comp.reddit_signal":     _buzz_comp("reddit_signal"),
+    "options.iv_rank":         _path("agent_details.OracleBeeEcho.details.iv_rank"),
+    "options.iv_percentile":   _path("agent_details.OracleBeeEcho.details.iv_percentile"),
+    "options.iv_rank_is_real": _iv_rank_is_real,
 
     # ── 共振 / 一致性（回声源头）─────────────────────────────────
     "guard.consistency": _path("agent_details.GuardBeeSentinel.details.consistency"),

@@ -5,6 +5,77 @@
 
 ---
 
+## [0.45.33] — 2026-08-26 — 评分重放：把「这样改会不会更准」从等半年变成跑一下
+
+本项目真正的瓶颈不是缺改进想法，是**无法判断哪个改进有效**：
+`ic_rerun_readiness` 实测检出 |IC|=0.090 需 25 个不重叠周（约半年），
+而半年内必然又改了别的，于是**永远学不到东西**。
+
+但并非所有改动都要等。分水岭在于**输入是否已归档**：
+
+| 改动类型 | 能否离线重放 | 依据 |
+|---|---|---|
+| 聚合层（权重、组合规则、剔除某维度） | ✅ 一直可以 | `predictions.dimension_scores` 已存 |
+| 维度计算层（改 crowding/catalyst 公式） | ✅ **本版起** | `signal_archive` 现存维度**输入** |
+| 换数据源、改抓取逻辑 | ❌ 必须前向累积 | 原始外部数据未归档 |
+
+### Added — `signal_archive` 扩展 15 个维度输入信号
+
+此前档案只存各蜂的**输出分数**，输入看不见，于是维度计算层的改动无法重放。
+新增（全部走 `details` 里已有字段，扫描侧零额外开销，schema 不变）：
+
+- `crowding.comp.*` 五项分量（social_volume / google_trends /
+  consensus_strength / seeking_alpha_views / short_squeeze_risk）
+- `catalyst.count` / `catalyst.nearest_days` / `catalyst.max_weight`
+- `buzz.comp.*` 四项（momentum / volume / volatility / reddit signal）
+- `options.iv_rank` / `options.iv_percentile` / `options.iv_rank_is_real`
+
+已回填历史：**92 个文件 → 70031 行**，新信号覆盖 2026-03-10 ~ 08-25 共 90 天。
+
+两个刻意的设计：
+- **`crowding.comp.social_volume` 同时读旧键名 `stocktwits_volume`**
+  （v0.45.30 改名前的历史样本占绝大多数，读不了旧名等于丢掉全部历史）。
+- **`catalyst.count` 在来源不可得时返回 `None` 而非 `0`** —— 0 的语义是
+  「查过了确实没有」，与 v0.45.31 的缺失分支保持同一套语义。
+- `options.iv_rank_is_real` 只有 3 天有值：`iv_rank_source` 字段本身是
+  v0.43.18 才加的，更早的历史无从判定，如实留空而不是猜。
+
+### Added — `replay_scoring.py`
+
+对已验证样本重放任意打分方案，即时出 rank-IC。内置 13 个情景
+（现行权重 / 等权 / 落库 final_score / 五个单维 / 五个 leave-one-out）。
+
+**设计重点是「不会被误读」，不是「算得快」**：
+
+- **功效护栏**：不重叠周数与 IC 并排显示，不足时明确打出
+  「⛔ 功效不足：23/25 个不重叠周，下表不足以支持任何改动决定」，
+  且**退出码非 0**（防止被脚本当成通过）
+- **默认只取最新世代**，`--all-cohorts` 显式放宽并标注「口径不可比，
+  只能相对比较」
+- **收益口径锁死 `close_t7 / price_at_predict - 1`**，不用 `return_t7`
+  （对方向单是钳位离场收益，直接对比即无效）
+- **剔除 `dir_ambiguous_t7`**
+- **不提供任何调参出口**（`best_weights` / `optimize` 之类），权重自
+  v0.44.0 只读，且实测单维 IC 均不过 Bonferroni
+
+首跑（`--all-cohorts`，860 样本 / 23 周）：护栏正确拦截，退出码 1。
+
+### Added — `tests/test_replay_scoring.py`（14 项）
+
+守的是**诚实性**而非正确性：功效不足必须非 0 退出、有效样本量必须按
+不重叠周报、跨世代必须标注不可比、收益口径必须是未截断的 close_t7、
+不得出现调参形状的 API。
+
+已验证守卫为真：拆掉功效护栏（`return 0 if powered else 1` → `return 0`）
+即变红，还原后全绿。
+
+### 测试
+
+全量 **1675 passed / 0 failed**。本版**不改任何评分逻辑**，
+不触发世代边界。
+
+---
+
 ## [0.45.32] — 2026-08-26 — 人工前瞻日历移出评分：从「静默改分」降级为「误导读者」
 
 延续 v0.45.31 的 catalyst 排查。问题不止于「文件过期」——**人工维护的前瞻
