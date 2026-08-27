@@ -229,7 +229,10 @@ def official_price(payload: dict, now_et: "Optional[datetime]" = None) -> Tuple[
             f = float(v)
         except (TypeError, ValueError):
             return None
-        return f if f > 0 else None
+        # 必须 isfinite：`inf > 0` 为真，只判正数会让 inf 当成合法价格漏过去。
+        # Python 的 json.loads 默认接受 `Infinity` 字面量，所以这不是纯理论问题。
+        # （NaN 恰好被 `> 0` 挡住，inf 不会 —— 二次检查实测发现。）
+        return f if (math.isfinite(f) and f > 0) else None
 
     if is_market_open(now_et):
         px = _num(payload.get("current_price")) or _num(payload.get("close"))
