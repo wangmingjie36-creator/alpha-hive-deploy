@@ -439,16 +439,31 @@ class CrowdingDetector:
             return "🟢 <strong>低拥挤度</strong><br>信息相对不为人知。存在信息不对称的机会。"
 
     def _get_metric_display(self, key: str, metrics: Dict) -> str:
-        """获取指标的显示值"""
+        """获取指标的显示值；任一分量不可得时显示「—」而不是崩或冒充 0。
+
+        ⚠️ 这个 dict 是**急求值**的 —— 即使只取一个 key，其余四项也会被计算。
+        所以任何一项对 None 抛异常，整个函数就崩，与请求哪个 key 无关。
+        v0.45.44 只修了 short_squeeze_risk 一项，其余四项仍在用
+        `.get(k, 0)`（挡不住「键存在但值为 None」）—— 由 Phase 2 退化输入
+        护栏抓到，本次统一修。
+        """
+        def _fmt(field, spec, suffix="", prefix=""):
+            v = metrics.get(field)
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                return "—"
+            return prefix + format(v, spec) + suffix
+
         displays = {
-            "social_volume": f"{metrics.get('social_messages_per_day', 0):,} 条/天",
-            "google_trends": f"{metrics.get('google_trends_percentile', 0):.0f} 百分位",
-            "consensus_strength": f"{metrics.get('bullish_agents', 0)}/6 看多",
-            "seeking_alpha_views": f"{metrics.get('seeking_alpha_page_views', 0):,} 次/周",
-            # v0.45.44：price_momentum_5d 现在可为 None（取数失败），
-            # `.get(k, 0)` 挡不住「键存在但值为 None」→ f"{None:.1f}" 会抛。
+            "social_volume": _fmt("social_messages_per_day", ",", " 条/天"),
+            "google_trends": _fmt("google_trends_percentile", ".0f", " 百分位"),
+            "consensus_strength": (
+                "—/6 看多" if not isinstance(metrics.get("bullish_agents"), (int, float))
+                else f"{metrics['bullish_agents']}/6 看多"
+            ),
+            "seeking_alpha_views": _fmt("seeking_alpha_page_views", ",", " 次/周"),
             "short_squeeze_risk": (
-                "— (5d, 数据不可用)" if metrics.get("price_momentum_5d") is None
+                "— (5d, 数据不可用)"
+                if not isinstance(metrics.get("price_momentum_5d"), (int, float))
                 else f"+{metrics['price_momentum_5d']:.1f}% (5d)"
             ),
         }

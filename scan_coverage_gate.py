@@ -207,6 +207,80 @@ def check_prices(date: str, db_path: str = "pheromone.db") -> Dict[str, Any]:
     }
 
 
+# ── 来源标签诚实度（v0.45.53）──────────────────────────────────────
+# 静态检查判不了「一个来源标签是不是在撒谎」：`"data_quality": "fallback"`
+# 写在 except 块里本来就诚实，写在成功路径上才可疑 —— 同一行字面量，
+# 诚实与否**取决于它在哪条分支上**，那是语义不是语法。
+# （实测：全仓 98 处字面量来源标签、175 处结果词字面量，静态筛完全是噪音。）
+#
+# 但运行时判得了，而且判据很硬：
+#
+#     标签宣称取数成功 ⇒ 它管辖的值必须非空。
+#
+# 违反即矛盾 —— 要么标签在撒谎，要么值被谁清掉了，两种都该查。
+# 这正是 2026-08-27 审计里 `"momentum": "real"` 那一类的运行时对应物：
+# 当时动量兜底成 0.0，而质量标签硬编码自称 real。
+_SUCCESS_LABELS = {"real", "cboe", "yfinance", "live", "verified",
+                   "cboe_close", "cboe_intraday", "yfinance+fred"}
+
+# (标签字段, 它管辖的值字段, 说明)
+_LABEL_GOVERNS = [
+    ("OracleBeeEcho.iv_rank_source", "OracleBeeEcho.iv_rank",
+     "iv_rank_source 宣称有来源，iv_rank 却为空"),
+    ("OracleBeeEcho.data_quality", "OracleBeeEcho.iv_current",
+     "期权链标 real，iv_current 却为空"),
+    ("OracleBeeEcho.data_quality", "OracleBeeEcho.put_call_ratio",
+     "期权链标 real，put_call_ratio 却为空"),
+]
+
+
+def check_label_honesty(date: str, results_path: Optional[Path] = None) -> Dict[str, Any]:
+    """核对来源标签与它管辖的值是否自洽。纯离线，读扫描结果即可。"""
+    path = results_path or (ROOT / f".swarm_results_{date}.json")
+    if not path.exists():
+        return {"determinable": False, "reason": f"结果文件不存在：{path.name}"}
+    try:
+        results = json.loads(path.read_text())
+    except Exception as e:  # noqa: BLE001
+        return {"determinable": False, "reason": f"不可解析：{type(e).__name__}: {e}"}
+    if not isinstance(results, dict) or not results:
+        return {"determinable": False, "reason": "结果为空"}
+
+    contradictions = []
+    checked = 0
+    for tk, tr in results.items():
+        if not isinstance(tr, dict):
+            continue
+        for label_path, value_path, why in _LABEL_GOVERNS:
+            label = _dig(tr, label_path)
+            if not isinstance(label, str) or label.lower() not in _SUCCESS_LABELS:
+                continue          # 标签本身就说降级 ⇒ 诚实，跳过
+            checked += 1
+            if not _present(_dig(tr, value_path)):
+                contradictions.append({
+                    "ticker": tk, "label_field": label_path, "label": label,
+                    "value_field": value_path, "why": why,
+                })
+    return {
+        "determinable": True, "checked": checked,
+        "contradictions": contradictions,
+        "healthy": not contradictions,
+    }
+
+
+def _render_label_honesty(r: Dict[str, Any]) -> str:
+    if not r.get("determinable"):
+        return f"⚠️  来源标签核对无法判定：{r.get('reason')}"
+    if r["healthy"]:
+        return f"来源标签核对 · {r['checked']} 项宣称成功 · ✅ 全部与值自洽"
+    out = [f"来源标签核对 · {r['checked']} 项宣称成功 · "
+           f"❌ {len(r['contradictions'])} 处矛盾"]
+    for c in r["contradictions"][:10]:
+        out.append(f"  ❌ {c['ticker']:6} {c['label_field']}={c['label']!r} "
+                   f"但 {c['value_field'].split('.')[-1]} 为空 —— {c['why']}")
+    return "\n".join(out)
+
+
 def _render_prices(pr: Dict[str, Any]) -> str:
     if not pr.get("determinable"):
         return f"⚠️  价格核验无法判定：{pr.get('reason')}"
@@ -272,6 +346,14 @@ def main() -> int:
     elif not res["healthy"]:
         print(f"❌ {res['date']} 降级字段：{', '.join(res['degraded_fields'])}")
 
+    lh = check_label_honesty(date, Path(args.file) if args.file else None)
+    res["label_honesty"] = lh
+    if not args.quiet:
+        print()
+        print(_render_label_honesty(lh))
+    elif lh.get("determinable") and not lh["healthy"]:
+        print(f"❌ {date} 来源标签矛盾 {len(lh['contradictions'])} 处")
+
     if args.check_prices:
         pr = check_prices(date)
         res["price_check"] = pr
@@ -288,6 +370,8 @@ def main() -> int:
 
     if not res.get("determinable"):
         return 3
+    if lh.get("determinable") and not lh["healthy"]:
+        return 1
     return 0 if res["healthy"] else 1
 
 

@@ -251,7 +251,14 @@ class DealerGEXAnalyzer:
         for contracts, sign in [(calls, +1.0), (puts, -1.0)]:
             for c in contracts:
                 K = float(c.get("strike", 0) or 0)
-                dte = float(c.get("dte", 30) or 30)
+                # v0.45.53：与 L118 同修 —— `or 30` 把真实 0DTE 改写成 30 天，
+                # 架空下一行的 `max(dte, 0.5)` 守卫（T 差 60 倍）。
+                # 这是第三处，前两处修于 v0.45.50 时漏了本处，由 Phase 2 护栏抓到。
+                _dte_v = c.get("dte")
+                try:
+                    dte = float(_dte_v) if _dte_v is not None else 30.0
+                except (TypeError, ValueError):
+                    dte = 30.0
                 sigma = float(c.get("impliedVolatility", 0) or 0)
                 oi = float(c.get("openInterest", 0) or 0)
                 T = max(dte, 0.5) / 365.0

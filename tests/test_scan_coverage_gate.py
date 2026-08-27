@@ -218,3 +218,70 @@ class TestPriceCheck:
     def test_missing_db_undeterminable(self):
         r = gate.check_prices("2026-08-26", "/nonexistent/x.db")
         assert r["determinable"] is False
+
+
+# ─────────── 来源标签诚实度（Phase 2 运行时护栏，v0.45.53）───────────
+
+class TestLabelHonesty:
+    """静态检查判不了「标签是不是在撒谎」—— `"data_quality": "fallback"`
+    写在 except 里诚实、写在成功路径上可疑，同一行字面量，
+    诚实与否取决于它在哪条分支上。实测：全仓 98 处字面量来源标签、
+    175 处结果词字面量，静态筛完全是噪音。
+
+    运行时的判据很硬：**标签宣称成功 ⇒ 它管辖的值必须非空**。
+    """
+
+    @staticmethod
+    def _mk(tmp_path, details, name="s.json"):
+        p = tmp_path / name
+        p.write_text(json.dumps(
+            {"NVDA": {"agent_details": {"OracleBeeEcho": {"details": details}}}}))
+        return p
+
+    def test_success_label_with_empty_value_is_contradiction(self, tmp_path):
+        """复刻 2026-08-26：标签自称有来源，值却为空"""
+        p = self._mk(tmp_path, {"iv_rank_source": "yfinance", "iv_rank": None,
+                                "data_quality": "real", "iv_current": None})
+        r = gate.check_label_honesty("2026-08-26", p)
+        assert r["healthy"] is False
+        fields = {c["value_field"] for c in r["contradictions"]}
+        assert "OracleBeeEcho.iv_rank" in fields
+        assert "OracleBeeEcho.iv_current" in fields
+
+    def test_honest_degradation_passes(self, tmp_path):
+        """标签自认 fallback + 值为空 = 诚实，不得报警"""
+        p = self._mk(tmp_path, {"iv_rank_source": "unavailable", "iv_rank": None,
+                                "data_quality": "fallback", "iv_current": None})
+        r = gate.check_label_honesty("2026-08-26", p)
+        assert r["healthy"] is True
+        assert r["checked"] == 0, "标签自认降级时不该被计入「宣称成功」"
+
+    def test_success_label_with_real_value_passes(self, tmp_path):
+        p = self._mk(tmp_path, {"iv_rank_source": "yfinance", "iv_rank": 37.8,
+                                "data_quality": "real", "iv_current": 48.6,
+                                "put_call_ratio": 0.91})
+        r = gate.check_label_honesty("2026-08-26", p)
+        assert r["healthy"] is True and r["checked"] == 3
+
+    def test_zero_counts_as_present(self, tmp_path):
+        """0 是合法读数，不是缺失 —— 否则真实的 0 会被误报成矛盾"""
+        p = self._mk(tmp_path, {"data_quality": "real", "iv_current": 0.0,
+                                "put_call_ratio": 0.0})
+        r = gate.check_label_honesty("2026-08-26", p)
+        assert r["healthy"] is True
+
+    def test_missing_file_undeterminable(self, tmp_path):
+        r = gate.check_label_honesty("2026-08-26", tmp_path / "nope.json")
+        assert r["determinable"] is False
+        assert "healthy" not in r, "无法判定时不得给出健康结论"
+
+    def test_real_scan_results_are_honest(self):
+        """对真实扫描结果跑一遍 —— 现网不该有矛盾"""
+        import pathlib
+        files = sorted(pathlib.Path(".").glob(".swarm_results_*.json"))
+        if not files:
+            pytest.skip("无扫描结果")
+        r = gate.check_label_honesty("x", files[-1])
+        if not r.get("determinable"):
+            pytest.skip(r.get("reason"))
+        assert r["healthy"], f"现网存在标签矛盾：{r['contradictions'][:3]}"
