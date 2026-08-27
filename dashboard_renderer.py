@@ -2076,9 +2076,26 @@ def render_dashboard_html(report: Dict, date_str: str,
     n_tickers = len(all_tickers_sorted) or n_tickers
 
 
-    # 计算 avg real_pct
-    real_pcts = [swarm_detail[t].get("data_real_pct", 0) for t in swarm_detail if swarm_detail[t].get("data_real_pct")]
+    # ── 计算 avg real_pct（v0.45.47 修：真值过滤把 0 踢出了分母）──
+    # 旧写法 `if swarm_detail[t].get("data_real_pct")` 是**真值**过滤，
+    # 它同时排除了两种完全不同的情况：
+    #   · None  —— 该标的没算过真实度 ⇒ 确实该排除
+    #   · 0     —— 该标的**一条真实数据通道都没有** ⇒ 最该被计入
+    # 后果是这个指标越是该报警越不报警：数据越烂的标的越容易被踢出分母，
+    # 显示的「数据真实度」反而越高。
+    #
+    # 实测（历史 swarm_results）：8/04、8/06、8/10~8/14 共 7 个扫描日，
+    # 每天恰好 1 只标的为 0，全部是 **BRK-B** —— 即 v0.45.2 那个
+    # ticker 正则（`^[A-Z]{1,5}$` 拒绝带连字符的类份额代码）的受害者。
+    # 于是：正则拒绝 BRK-B → 它全部通道失败 → data_real_pct=0 →
+    # **被这个本该暴露数据问题的指标排除掉**。
+    _rp = [swarm_detail[t].get("data_real_pct") for t in swarm_detail]
+    real_pcts = [v for v in _rp if isinstance(v, (int, float))]
     avg_real = f"{sum(real_pcts)/len(real_pcts):.0f}%" if real_pcts else "-"
+    _rp_missing = sum(1 for v in _rp if not isinstance(v, (int, float)))
+    if _rp_missing:
+        _log.warning("数据真实度：%d/%d 只标的没有 data_real_pct，未计入均值",
+                     _rp_missing, len(_rp))
 
     # ── P1-1 (v0.38.0): 数据降级横幅 ─────────────────────────────
     # 按通道聚合降级情况（unavailable/fallback/sample），真实度 <70% 或

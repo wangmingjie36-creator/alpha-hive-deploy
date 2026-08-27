@@ -218,7 +218,21 @@ def get_short_interest(ticker: str) -> Dict:
         }
 
         _write_cache(cache_key, result)
-        _record_src_success("yfinance_short_interest")
+        # ── v0.45.47：健康追踪必须与本函数自己的质量判定一致 ──
+        # 旧写法**无条件** _record_src_success。而 _record_src_success 会把
+        # 连续失败计数**重置为 0** —— 于是一个永远返回空数据的源，
+        # 「连续失败 3 次」的降级告警**永远不可能触发**，每次调用都清零。
+        # 上面第 217 行刚把这种情况判成 data_quality="fallback"，
+        # 下一行却告诉追踪器「这次成功了」，两者自相矛盾。
+        #
+        # 注意语义：这里的「失败」不是网络错误，是**源没有交付可用数据**。
+        # 对健康度而言两者后果相同 —— 拿不到就是拿不到。
+        if result["data_quality"] == "real":
+            _record_src_success("yfinance_short_interest")
+        else:
+            _log.debug("yfinance_short_interest %s 返回空（short_ratio=%s pct=%s），"
+                       "记为一次降级而非成功", ticker, short_ratio, short_pct)
+            _record_src_failure("yfinance_short_interest")
         return result
 
     except (*NETWORK_ERRORS, TypeError, AttributeError) as exc:
