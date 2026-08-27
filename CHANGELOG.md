@@ -98,6 +98,28 @@
 - `dashboard_renderer` 板块热力图、`generate_deep_v2` 约 15 处叙事兜底：
   与雷达图同类（图表/prompt 输入），改动面大且不影响评分，留待单独决定。
 
+### Fixed 🔴 — 二次检查：我在本批亲手造了一个 `.get(k, default)` 陷阱
+
+把 `avg_volume` 不可得时改成 `None` 之后，下游仍是：
+
+```python
+data.avg_volume = metrics.get("avg_volume", 0)      # 键存在但值为 None → 返回 None
+data.volume_ratio = metrics.get("volume_ratio", 1.0)
+```
+
+**`.get(k, default)` 挡不住「键存在但值为 None」** —— 默认值 `0` 根本不生效，
+None 被原样赋给声明为 `int` 的字段。
+
+讽刺的是这正是本次审计**最早识别出来的那一类**（MEMORY 已记：
+「`.get(k, 精心挑的默认值)` 最会骗人 —— 上游置 None 时它永不生效」）。
+
+成因很具体：我改的是**上游**（让它返回 None），而陷阱在**下游**；
+查消费点时看的是「谁会崩」，而 `.get(k, 0)` **不会崩** ——
+它安静地把 None 传下去。**不崩的消费点最容易被漏掉。**
+
+同时把字段声明由 `avg_volume: int = 0` 改为 `Optional[int] = None`，
+让类型声明与实际行为对齐。
+
 ### Added — 测试
 
 `tests/test_deep_report_no_fabrication.py` 17 条（含「任一分量缺失即跳过 ——

@@ -117,7 +117,9 @@ class StockData:
     # 不显式赋值就又变回伪造（531/582 行显式传 None 正说明意图是 None）。
     # 默认改为 None：**没测量过就是未知**，而不是"持平/正常量"。
     momentum_5d: Optional[float] = None
-    avg_volume: int = 0
+    # v0.45.54：由 int 改 Optional[int] —— 20 日均量不可得时置 None，
+    # 而不是 0（读作「零成交」）或 1（读作「日均成交 1 股」）。
+    avg_volume: Optional[int] = None
     volume_ratio: Optional[float] = None
     # v0.45.3: 原 `float = 0.0`。momentum_5d/volume_ratio 早已是 Optional（P0-2,
     # v0.38.0），只有 volatility 还留着 0.0——而它是三者里后果最重的：
@@ -428,8 +430,11 @@ class CBOESource:
             metrics = _fetch_history_metrics(ticker)
             if metrics and "momentum_5d" in metrics:
                 data.momentum_5d = metrics["momentum_5d"]
-                data.avg_volume = metrics.get("avg_volume", 0)
-                data.volume_ratio = metrics.get("volume_ratio", 1.0)
+                # v0.45.54：`.get(k, default)` 挡不住「键存在但值为 None」——
+                # _fetch_history_metrics 现在会把不可得的均量置 None，
+                # 旧写法会把 None 原样赋给声明为 int 的字段。
+                data.avg_volume = metrics.get("avg_volume")
+                data.volume_ratio = metrics.get("volume_ratio")
                 data.volatility_20d = metrics.get("volatility_20d")   # v0.45.3: 不再补 0.0
                 data.momentum_source = "5d_real"
             else:
