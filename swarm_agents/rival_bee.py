@@ -60,7 +60,14 @@ class RivalBeeVanguard(BeeAgent):
                     from real_data_sources import get_real_crowding_metrics
                     _detector = CrowdingDetector(ticker)
                     _metrics = get_real_crowding_metrics(ticker, stock, self.board)
-                    _crowding, _ = _detector.calculate_crowding_score(_metrics)
+                    _c_raw, _ = _detector.calculate_crowding_score(_metrics)
+                    # v0.45.50：拥挤度现在可为 None（全部分量不可得）。
+                    # 保留上面已设的 _CRD_NEUTRAL，而不是让 None 盖掉它。
+                    if _c_raw is not None:
+                        _crowding = _c_raw
+                    else:
+                        _log.debug("RivalBeeVanguard %s 拥挤度全分量不可得，"
+                                   "沿用中性 %.2f", ticker, _CRD_NEUTRAL)
                 except (ImportError, ValueError, KeyError, TypeError,
                         AttributeError) as _e:
                     _log.warning(

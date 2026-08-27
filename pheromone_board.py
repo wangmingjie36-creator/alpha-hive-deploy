@@ -137,12 +137,19 @@ class PheromoneBoard:
         try:
             p = float(entry.pheromone_strength)
             if math.isnan(p) or math.isinf(p):
-                _log.warning("PheromoneBoard: pheromone_strength 为 NaN/Inf → 设为 1.0")
-                entry.pheromone_strength = 1.0
+                _log.warning("PheromoneBoard: pheromone_strength 为 NaN/Inf → 设为 0.5 中位"
+                             "（旧实现给 1.0 最大值，等于奖励坏数据）")
+                entry.pheromone_strength = 0.5
             else:
                 entry.pheromone_strength = max(0.0, min(1.0, p))
         except (TypeError, ValueError):
-            entry.pheromone_strength = 1.0
+            # v0.45.50：1.0 是**最大值**，不是中位数。
+            # 值损坏的条目原先直接拿到板上最高影响力与最长存活期 ——
+            # 越是坏数据越被优先引用。改为 0.5 中位，并留痕。
+            _log.warning("PheromoneBoard: pheromone_strength 不可解析(%r) → 设为 0.5 中位"
+                         "（旧实现给 1.0 最大值，等于奖励坏数据）",
+                         getattr(entry, "pheromone_strength", None))
+            entry.pheromone_strength = 0.5
 
         # pattern 3: 来源强制 —— CLAUDE.md「禁止无来源结论进入信息素板」此前仅文档、未落代码。
         # 空 / 纯空白 source → 标记 [UNSOURCED]（fail-safe：标记而非丢弃，不破坏蜂群协作）

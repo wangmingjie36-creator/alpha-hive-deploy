@@ -360,12 +360,18 @@ class TestValidateEntry:
         board.publish(e)
         assert e.pheromone_strength == 0.0
 
-    def test_pheromone_strength_nan_becomes_1(self, board):
-        """pheromone_strength = NaN → 设为 1.0"""
+    def test_pheromone_strength_nan_becomes_median_not_max(self, board):
+        """v0.45.50：NaN → 0.5 中位，**不是** 1.0 最大值。
+
+        旧断言 `== 1.0` 把缺陷固化成了不变式：1.0 是 pheromone_strength 的
+        **上限**，于是一条值损坏的条目直接拿到板上最高影响力与最长存活期 ——
+        越是坏数据越被优先引用、越晚衰减。
+        """
         e = PheromoneEntry(
             agent_id="TestAgent", ticker="NVDA", discovery="test",
             source="test", self_score=5.0, direction="bullish",
             pheromone_strength=float("nan")
         )
         board.publish(e)
-        assert e.pheromone_strength == 1.0
+        assert e.pheromone_strength == 0.5
+        assert e.pheromone_strength < 1.0, "坏数据不得获得最高影响力"

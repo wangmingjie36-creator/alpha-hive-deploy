@@ -1650,7 +1650,25 @@ class AlphaHiveDailyReporter:
         opts = adv.get("options_analysis")
         ml_pred = ml_report.get("ml_prediction", {})
 
-        # 提取各维度评分（假设已标准化为 0-10）
+        # ── 提取各维度评分（假设已标准化为 0-10）──
+        # v0.45.50：五个 5.0 兜底会让 opp_score 恰好等于 **5.00**，
+        # 而 5.0 在 CLAUDE.md 的决策阈值里是一个明确档位（<6.0 = 不行动、仅归档），
+        # 与「五个维度都实测出中等水平」完全同形，且没有任何字段说明它来自缺键。
+        # 仍然出这条机会（保持行为不变），但把补齐了哪几维记下来。
+        _dim_src = {
+            "signal": adv.get("signal_strength"),
+            "catalyst": adv.get("catalyst_score"),
+            "sentiment": adv.get("sentiment_score"),
+            "odds": adv.get("odds_score"),
+            "risk_adj": adv.get("risk_adjusted_score"),
+        }
+        _dims_missing = [k for k, v in _dim_src.items()
+                         if not isinstance(v, (int, float)) or isinstance(v, bool)]
+        if _dims_missing:
+            _log.warning("[%s] ML 路径：%d/5 个维度不可得（%s），已补 5.0——"
+                         "本条 opp_score 不是五维实测结果",
+                         ticker, len(_dims_missing), ", ".join(_dims_missing))
+
         signal_score = adv.get("signal_strength", 5.0)
         catalyst_score = adv.get("catalyst_score", 5.0)
         sentiment_score = adv.get("sentiment_score", 5.0)

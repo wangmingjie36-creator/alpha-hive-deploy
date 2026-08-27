@@ -1114,9 +1114,27 @@ def build_training_data_from_db(
 
     direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
     result = []
+    _skipped_incomplete = 0          # v0.45.50：维度缺失而被剔除的样本数
+    _REQUIRED_DIMS = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
     for r in rows:
         try:
             ds = json.loads(r["dimension_scores"] or "{}")
+
+            # ── v0.45.50：维度缺失的样本**剔除**，不再用 5.0 补齐 ──
+            # 旧实现 `ds.get("signal", 5.0)` 等五处缺失即补 5.0，而下面的
+            # _momentum / _vol / _iv / _pc 全部由这五个值派生 —— 于是一条
+            # 「某只蜂当天挂了」的记录，会变成一整行内部完全自洽的
+            # 「各维中性、动量 0%、波动率 12.5%、IV Rank 50」正常样本，
+            # 模型不会拒绝它，照常学。
+            #
+            # 讽刺的是下面第 1152/1159 行已经把 `50.0` 与 `1.0` 当可疑哨兵
+            # （`_iv_db != 50.0` 才采信 DB 值），却仍在上游亲手制造同类值。
+            #
+            # 实测代价：910 条训练候选里 96.9% 五维齐全，剔除只损失 28 条（3.1%）。
+            # 用 3% 样本换掉伪造特征向量，划算。
+            if not all(isinstance(ds.get(k), (int, float)) for k in _REQUIRED_DIMS):
+                _skipped_incomplete += 1
+                continue
             ad = json.loads(r["agent_directions"] or "{}")
 
             _dir = r["direction"] or "neutral"
@@ -1131,11 +1149,12 @@ def build_training_data_from_db(
             is_correct = bool(r["correct_t7"]) if r["correct_t7"] is not None else (return_t7 > 0)
 
             # 修复死特征：从 dimension_scores 推导真实信号
-            _sig = ds.get("signal", 5.0)
-            _cat = ds.get("catalyst", 5.0)
-            _sent = ds.get("sentiment", 5.0)
-            _odds = ds.get("odds", 5.0)
-            _risk = ds.get("risk_adj", 5.0)
+            # v0.45.50：上方已保证五维齐全，无需再兜底（兜底值会伪造样本）
+            _sig = ds["signal"]
+            _cat = ds["catalyst"]
+            _sent = ds["sentiment"]
+            _odds = ds["odds"]
+            _risk = ds["risk_adj"]
 
             # momentum: 信号强度偏离中性的方向 × 幅度（正=看多动量，负=看空动量）
             _momentum = (_sig - 5.0) * 2.0 + (_sent - 5.0) * 1.5
@@ -1183,6 +1202,9 @@ def build_training_data_from_db(
             _log.debug("build_training_data_from_db: 跳过行: %s", e)
             continue
 
+    if _skipped_incomplete:
+        _log.warning("build_training_data_from_db: 剔除 %d 条维度缺失样本"
+                     "（不再用 5.0 补齐伪造特征向量）", _skipped_incomplete)
     _log.info("build_training_data_from_db: 成功构建 %d 条真实训练数据", len(result))
     return result
 

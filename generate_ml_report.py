@@ -321,6 +321,8 @@ class MLEnhancedReportGenerator:
                 **ml_prediction,
                 "current_price": float(_current_price) if _current_price else None,
                 "training_data_source": self._training_data_source,  # "real"/"sample"/"unknown"
+                # v0.45.50：输入特征里有几个是补齐的（空 = 全部为真实观测）
+                "input_features_missing": list(getattr(self, "_ml_input_missing", [])),
             },
             "combined_recommendation": {
                 **self._combine_recommendations(advanced_analysis, ml_prediction),
@@ -398,6 +400,27 @@ class MLEnhancedReportGenerator:
         _rec = analysis.get("recommendation", {})
         _ds = analysis.get("dimension_scores", {})
         _rating_dir = {"STRONG BUY": 1.0, "BUY": 0.5, "HOLD": 0.0, "AVOID": -1.0}
+
+        # ── v0.45.50：记录哪些特征是**补齐的**，不是观测到的 ──
+        # 下面五个 .get(k, 默认值) 在缺失时产出 iv_rank=50 / pc=1.0 / 三个 5.0，
+        # 组成一份内部完全自洽的「典型标的」画像。模型不会拒绝它，
+        # 会照常吐出一个概率，而那个概率随后被当成真实预测渲染。
+        # 预测本身仍然做（有部分特征也比不做强），但**不能声称输入是干净的**。
+        # 与同文件已有的 `training_data_source` 来源标记同一思路。
+        self._ml_input_missing = [
+            _name for _name, _val in (
+                ("iv_rank", _opts.get("iv_rank")),
+                ("put_call_ratio", _opts.get("put_call_ratio")),
+                ("final_score", _rec.get("score")),
+                ("odds_score", _ds.get("odds")),
+                ("risk_adj_score", _ds.get("risk_adj")),
+            ) if not isinstance(_val, (int, float)) or isinstance(_val, bool)
+        ]
+        if self._ml_input_missing:
+            _log.warning("[%s] ML 输入有 %d 个特征不可得，已补中位值——"
+                         "本次预测的输入不是干净观测：%s",
+                         ticker, len(self._ml_input_missing),
+                         ", ".join(self._ml_input_missing))
 
         return TrainingData(
             ticker=ticker,

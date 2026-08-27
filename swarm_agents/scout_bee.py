@@ -77,7 +77,15 @@ class ScoutBeeNova(BeeAgent):
             metrics = get_real_crowding_metrics(ticker, stock, self.board)
 
             crowding_score, component_scores = detector.calculate_crowding_score(metrics)
-            crowding_signal = max(1.0, 10.0 - crowding_score / 10.0)
+            # v0.45.50：拥挤度全分量不可得时返回 None。
+            # crowding_signal 是 signal 维度里权重最重的一档，不能凭空给分——
+            # 取 5.0 中性（对应 crowding_score=50），并留痕。
+            if crowding_score is None:
+                _log.warning("ScoutBeeNova %s 拥挤度全分量不可得，"
+                             "crowding_signal 取 5.0 中性", ticker)
+                crowding_signal = 5.0
+            else:
+                crowding_signal = max(1.0, 10.0 - crowding_score / 10.0)
 
             # ---- 3. 综合评分（v0.24.2: 修复 3 个 bug） ----
             # v0.24.1 旧实现：第一阶段永远用 v2 权重 / _stage1_total，导致

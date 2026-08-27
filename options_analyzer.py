@@ -299,7 +299,13 @@ class OptionsDataFetcher:
                         gammas.append(float(raw_g))
                         continue
                     K     = float(row.get("strike", 0) or 0)
-                    dte   = float(row.get("dte", 30) or 30)
+                    # v0.45.50：同 advanced_analyzer:111 —— `or 30` 会把真实的
+                    # 0DTE 改写成 30DTE，架空下游的超短期守卫。
+                    _dte_r = row.get("dte")
+                    try:
+                        dte = float(_dte_r) if _dte_r is not None else 30.0
+                    except (TypeError, ValueError):
+                        dte = 30.0
                     sigma = float(row.get("impliedVolatility", 0) or 0)
                     T     = max(dte, 0.5) / 365.0
                     gammas.append(_bs_gamma_inline(_S, K, T, sigma))
