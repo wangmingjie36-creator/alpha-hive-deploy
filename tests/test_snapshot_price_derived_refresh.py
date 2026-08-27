@@ -175,3 +175,11 @@ class TestWiredIntoSnapshotHit:
         hit = src.split("期权快照命中")[1][:900]
         assert "_refresh_price_derived" in hit, \
             "快照命中后必须尝试重算价格派生字段，否则瞬时故障会被冻成当日永久缺失"
+
+
+class TestMalformedInput:
+    """二次检查发现：cached 非 dict 时 `.get` 直接 AttributeError"""
+
+    @pytest.mark.parametrize("bad", [[], "x", 42, None])
+    def test_non_dict_cached_returns_false(self, agent, bad):
+        assert agent._refresh_price_derived(bad, "NVDA") is False

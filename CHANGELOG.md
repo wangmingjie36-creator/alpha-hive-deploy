@@ -479,22 +479,73 @@ yfinance SPY ───→ portfolio_backtest 基准 + 宏观门控
   用于凑满「至少 3 条看空」，**在无数据时等于编造一条信号**（违反「不编数据」）。
   本次未改 —— 它牵涉「反对蜂硬性下限」的设计取舍，应单独决定。
 
-> ### ⚠️ 版本号 0.45.36 – 0.45.41 的去向（2026-08-27 记）
->
-> 这几个号**不是遗漏**，是留给并发分支 `claude/verify-changelog-versions-6109ba` 的：
->
-> | 号段 | 归属 | 状态 |
-> |---|---|---|
-> | 0.45.36 – 0.45.40 | 该分支：云端快照 vintage 校验 / replay_scoring 早绑定 / 快照消费端接线 / CBOE CDN 陈旧防线 / 移除 Google Calendar | 已提交在该分支，**尚未合入 main** |
-> | 0.45.41 | 该分支的 `close_correction.py` | 该分支工作区，**尚未提交** |
->
-> 起因：两条线在 2026-08-26 同时从 `0.45.35`（提交 `4333c13`）分叉，各自往下编号，
-> **0.45.36–0.45.40 五个号被双方各用了一遍，且内容完全不同**。
->
-> 处理原则：**先提交的占号**。对方那五条已进 git 历史，我这五条当时只在工作区，
-> 故整体后移到 0.45.42–0.45.46，并空出 0.45.41 给他们在制的 `close_correction.py`。
->
-> 合并该分支后这段可删。
+---
+
+## [0.45.41] — 2026-08-27 — 历史入场价补救 + 合并时统一 ET 时钟
+
+本条与另一条线的 v0.45.45/0.45.46 是**同一个问题的三段防线**，不是重复：
+
+| | 管什么 | 时机 |
+|---|---|---|
+| `cboe_options.official_price`（0.45.46） | **源头**：收盘后取 `close` 不取 `current_price` | 写入前 |
+| `scan_coverage_gate.check_prices`（0.45.45） | **单日闸**：当天入库价 vs 真实收盘 | 写入后当天 |
+| **`close_correction.py`**（本条） | **历史补救**：跨全库校正已污染的行 | 事后 |
+
+0.45.46 堵住源头之后新数据不再被污染；本工具处理的是**它上线之前**已经写进库的那批。
+
+### Added — `close_correction.py`
+
+- **双源交叉**：yfinance 官方收盘（批量下载，30 只一次请求，与逐标的调用不同，
+  不触发限流雪崩）+ CBOE `prev_day_close`（仅 T+1 可得）。两源分歧 >0.2% →
+  **不猜哪个对，拒改并记账**。实测 29 条交叉印证**零分歧**。
+- **原值留痕**：`price_at_predict_raw` / `close_corrected_at` /
+  `close_correction_source` 三列，`COALESCE` 保证重跑不覆盖最初原值。
+- **幂等**，dry-run 为默认。
+
+实测（2026-08-26 全库 1017 条）：**95 条需校正**，最大偏离 CRM 8/26 **+13.28%**
+（232.93 → 205.62，当天财报盘后）。校正后接跑 `backfill_dir_accuracy.py --all`
+重算 927 条派生列。
+
+⚠️ **方向准确率不受影响**：`backfill_dir_accuracy.py:196` 用的是它自己从
+yfinance 取的入场价，不是库里的 `price_at_predict` —— 所以 `dir_correct_t7`
+那条链从来没被污染过（实测 0/1019 变化）。被污染的是**以 `price_at_predict`
+为起点算收益**的那条链：`ic_diagnostics` / `replay_scoring` / `backtester` /
+`dynamic_exit_backtest`。55 条已结算样本里收益变化最大 10pp（RKLB 7/24
++6.42% → +16.54%），但符号只翻转 1 条。
+
+### Fixed 🟠 — 自己写的幂等判据错了
+
+初版用 `price_at_predict_raw`（原值）判断「要不要校正」。原值校正后必然仍偏离
+官方收盘，于是**重跑永远报「需校正 95 条」**。数据没写错（`COALESCE` 护住了
+raw），坏的是**报告**：校正完 95 条之后还说有 95 条待校正，看起来像什么都没发生。
+改为看当前值。
+
+### Fixed 🟠 — 合并时统一 ET 时钟（`cboe_options._et_now`）
+
+两条线各有一套 ET 时间助手。对方的 `_et_now` 是自述的「粗略 DST 近似」
+（`-4 if 3 <= month <= 11 else -5`）。2026 年美东夏令时 **3/8 起、11/1 止**，
+故 **3/1–3/7 与 11/2–11/30 共约 37 天会算早一小时**。后果正是 0.45.46 要修的
+那一类：真实 08:30 ET（盘前）被算成 09:30 → `is_market_open` 判为盘中 →
+取 `current_price`（盘前价）而非 `close`。统一到 `ZoneInfo("America/New_York")`。
+
+### 守卫
+
+`tests/test_close_correction.py`（9 条）+ `test_cboe_live_vintage.py` 新增 5 条。
+变异确认：判据退回 raw / 分歧照改 / raw 被覆盖 / dry-run 写库 / ET 时钟退回近似
+—— 均转红。
+
+⚠️ **两次写出假守卫，都被变异测试抓到**：① 「raw 不被覆盖」初版碰不到 UPDATE
+（第二轮直接 continue），补了「二次校正」用例；② ET 时钟那条初版断言的是
+`_ET_TZ` 常量与显式传参的 `is_market_open`，**根本没调到被改的 `_et_now`**，
+改为冻结 `co.datetime.now` 直测该函数。
+
+### 遗留
+
+`close_correction.official_closes` 与 `scan_coverage_gate.check_prices` 各有一份
+yfinance 取数实现（并行发明，非抄袭）。可合并，但要动另一条线的文件，留作后续。
+
+---
+
 ## [0.45.40] — 2026-08-26 — 移除 Google Calendar 集成：一条早已被替代、且从未授权成功的路径
 
 ### 起因是一次误诊

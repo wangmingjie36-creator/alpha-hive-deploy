@@ -104,3 +104,26 @@ class TestCallSitesWired:
         assert bad not in src and bad2 not in src, \
             f"{path} 仍在收盘后取 current_price（盘后价）"
         assert "official_price" in src, f"{path} 未接入 official_price"
+
+
+class TestNonFiniteRejected:
+    """二次检查发现：`inf > 0` 为真，只判正数会让 inf 当成合法价格漏过去。
+    NaN 恰好被 `> 0` 挡住（NaN 的任何比较都是 False），inf 不会 —— 两者必须都挡。
+    Python 的 json.loads 默认接受 `Infinity` 字面量，所以这不是纯理论问题。"""
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+    def test_non_finite_close_rejected(self, bad):
+        px, src = official_price({"close": bad}, AFTER_ET)
+        assert px == 0.0 and src == "unavailable", f"{bad} 不该被当成合法价格"
+
+    @pytest.mark.parametrize("bad", [float("inf"), float("nan")])
+    def test_non_finite_current_price_rejected_intraday(self, bad):
+        px, src = official_price({"current_price": bad, "close": 205.62}, OPEN_ET)
+        assert px == 205.62, "盘中 current_price 非有限时应回退到 close"
+
+    def test_string_number_still_works(self):
+        assert official_price({"close": "205.62"}, AFTER_ET) == (205.62, "cboe_close")
+
+    @pytest.mark.parametrize("payload", [[], "x", 42, {"close": []}])
+    def test_malformed_payload_safe(self, payload):
+        assert official_price(payload, AFTER_ET) == (0.0, "unavailable")

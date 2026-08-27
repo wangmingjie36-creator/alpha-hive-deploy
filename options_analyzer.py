@@ -1545,6 +1545,9 @@ class OptionsAgent:
 
         Returns: 是否发生了修复（供测试与日志用）
         """
+        if not isinstance(cached, dict):
+            return False
+
         _fixed = []
 
         # ① IV-RV / RV30 —— 纯 yfinance 日K，随时可重拉
