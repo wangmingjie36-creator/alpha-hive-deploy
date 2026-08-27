@@ -125,9 +125,15 @@ def official_closes(tickers: List[str], lo: str, hi: str) -> Dict[Tuple[str, str
     except ImportError as e:
         _log.error("yfinance/pandas 不可得：%s", e)
         return {}
+    # ⚠️ 起点**往前垫 10 个自然日**：非交易日样本要回退到「该日之前最近的
+    # 交易日」，若下载区间恰好从那个非交易日开始，前一交易日就不在数据里 ——
+    # 该行会被静默记成「无来源」而不是被校正。实测触发条件：
+    # `--since 2026-03-01`（周日）。全量跑靠「最早预测日 2/27 早于最早周日 3/01」
+    # 侥幸安全，不能依赖。
+    start = (dt.date.fromisoformat(lo) - dt.timedelta(days=10)).isoformat()
     end = (dt.date.fromisoformat(hi) + dt.timedelta(days=1)).isoformat()
     try:
-        h = yf.download(sorted(set(tickers)), start=lo, end=end,
+        h = yf.download(sorted(set(tickers)), start=start, end=end,
                         progress=False, auto_adjust=False)["Close"]
     except Exception as e:  # noqa: BLE001 - 拿不到就空表，调用方据此不动数据
         _log.error("yfinance 批量下载失败：%s: %s", type(e).__name__, e)
@@ -139,7 +145,10 @@ def official_closes(tickers: List[str], lo: str, hi: str) -> Dict[Tuple[str, str
         ds = d.strftime("%Y-%m-%d")
         for t in h.columns:
             v = row[t]
-            if v is not None and not pd.isna(v):
+            # ⚠️ 必须 `> 0`：0 不是「零元」，是**没有这个价**。
+            # 它会一路当成合法收盘价流到 `base / truth` 造成 ZeroDivisionError
+            # （构造检验确认）。与 v0.45.42「缺失值不许冒充 0」同一条原则。
+            if v is not None and not pd.isna(v) and float(v) > 0:
                 out[(ds, t)] = float(v)
     return out
 
@@ -178,14 +187,17 @@ def _resolve_close(closes: Dict, avail: List[str], date: str, ticker: str):
     只有 CRWD 的 2 条不符 —— 那是 2026-07-02 的 4:1 拆股，库存的是拆股前
     未复权价（448.13 / 527.77），而 `close_t7` 是复权序列算的。
     """
+    # ⚠️ 判据是 `> 0` 而不是 `is not None`：0 不是「零元」，是**没有这个价**。
+    # 纵深防御 —— `official_closes` 已在取数层滤过，但本函数也可能被喂进
+    # 别处来的 closes 表；漏过去会一路流到 `current / truth` 直接除零。
     exact = closes.get((date, ticker))
-    if exact is not None:
+    if exact is not None and exact > 0:
         return exact, date
     if _is_trading_date(date):
         return None, None                     # 交易日缺数 → 不猜
     for d in reversed([x for x in avail if x < date]):
         v = closes.get((d, ticker))
-        if v is not None:
+        if v is not None and v > 0:
             return v, d
     return None, None
 
@@ -332,6 +344,16 @@ def correct(conn: sqlite3.Connection, *, since: Optional[str] = None,
             # 非交易日样本：如实记下这个价取自哪一天，别让它看起来像当日收盘
             src = f"yfinance_close@{truth_date}"
             stats["prior_close_used"] += 1
+        # ⚠️ 先判「要不要动」，再做交叉印证。反过来的话，一条**本就正确**的行
+        # 遇到 CBOE 分歧会被打出「拒绝校正」警告并计入 disputed —— 可它压根
+        # 没有待校正的内容，这条警告是假的（构造检验确认）。
+        if abs(current / truth - 1) <= CORRECT_TOL:
+            if r["close_corrected_at"]:
+                stats["skipped_done"] += 1
+            else:
+                stats["already_ok"] += 1
+            continue
+
         # 交叉印证：只在 CBOE 那个价**确实属于本行日期**时才做（见 cboe_official_closes）
         _c = cboe.get(r["ticker"])
         if _c and _c[0] == r["date"]:
@@ -341,15 +363,8 @@ def correct(conn: sqlite3.Connection, *, since: Optional[str] = None,
                 _log.warning("两源分歧，拒绝校正 %s %s：yfinance=%.4f CBOE=%.4f",
                              r["date"], r["ticker"], truth, other)
                 continue
-            src = "yfinance_close+cboe_prev"
+            src = f"{src}+cboe_close"      # 保留 @日期 后缀，别把来源信息盖掉
             stats["cross_checked"] += 1
-
-        if abs(current / truth - 1) <= CORRECT_TOL:
-            if r["close_corrected_at"]:
-                stats["skipped_done"] += 1
-            else:
-                stats["already_ok"] += 1
-            continue
         dev = raw / truth - 1          # 展示用：原值相对官方收盘偏了多少
         stats["corrected"] += 1
         stats["worst"].append((abs(dev), r["date"], r["ticker"], raw, truth, dev * 100))

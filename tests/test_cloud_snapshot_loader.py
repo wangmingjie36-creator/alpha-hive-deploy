@@ -266,3 +266,27 @@ def test_ctx_activates_and_unloads(snap_repo, monkeypatch, capsys):
         assert co.fetch_cboe_chain("NVDA", 0.0)["_source"] == "cboe"
     assert co._SNAPSHOT_PROVIDER is None
     assert "云端快照模式" in capsys.readouterr().out
+
+
+def test_scan_error_propagates_not_masked(snap_repo, monkeypatch, capsys):
+    """🔴 扫描体的异常必须原样传播，不许被「无可用快照」的诊断吞掉。
+
+    初版 `_snapshot_ctx` 把「进入快照模式」和「跑扫描」包在同一个 try 里：
+    扫描体抛异常 → 穿过 `yield prov` 被 `except Exception` 抓住 →
+    打出「无可用云端快照」这条**完全错误的诊断**（快照明明拿到了）→
+    再 `yield None` 触发 `RuntimeError: generator didn't stop after throw()`。
+    真实错误被吞，换成一个假诊断加一个莫名其妙的 RuntimeError（构造检验确认）。
+    """
+    import alpha_hive_daily_report as ahdr
+    import cloud_snapshot_loader as loader
+    repo, ref = snap_repo()
+    monkeypatch.setattr(loader, "SNAPSHOT_REF", ref)
+    monkeypatch.setattr(loader, "REPO_DIR", repo)
+
+    with pytest.raises(ValueError, match="蜂群崩溃"):
+        with ahdr._snapshot_ctx(_Args(date=DATE)):
+            raise ValueError("模拟蜂群崩溃")
+
+    out = capsys.readouterr().out
+    assert "无可用云端快照" not in out, "把扫描失败误报成了快照不可用"
+    assert co._SNAPSHOT_PROVIDER is None, "异常路径未卸载供给器"

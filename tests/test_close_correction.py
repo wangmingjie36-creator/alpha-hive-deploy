@@ -107,7 +107,7 @@ def test_two_sources_agree_marks_cross_checked(db, monkeypatch):
     src = con.execute("SELECT close_correction_source FROM predictions").fetchone()[0]
     con.close()
     assert st["cross_checked"] == 1 and st["corrected"] == 1
-    assert src == "yfinance_close+cboe_prev"
+    assert src == "yfinance_close+cboe_close"
 
 
 def test_no_source_leaves_row_untouched(db, monkeypatch):
@@ -296,3 +296,74 @@ def test_session_of_close_unparseable_returns_none():
     """推不出就不做交叉印证 —— 不猜。"""
     for bad in ("", "not-a-timestamp", "2026-13-99 00:00:00"):
         assert cc._session_of_close(bad) is None
+
+
+# ══════════════════════════════════════════════════════════════════
+# 二次检查发现的三个 bug（v0.45.49）
+# ══════════════════════════════════════════════════════════════════
+
+def test_zero_close_is_missing_not_a_price(db, monkeypatch):
+    """🔴 0 不是「零元」，是**没有这个价**。
+
+    初版 `official_closes` 只滤 `None`/`NaN`，0 会一路当成合法收盘价流到
+    `current / truth`，直接 ZeroDivisionError（构造检验确认）。
+    与 v0.45.42「缺失值不许冒充 0」同一条原则。
+    """
+    p = db([(DATE, "X", 100.0)])
+    _patch_sources(monkeypatch, {(DATE, "X"): 0.0})
+    con = sqlite3.connect(p)
+    st = cc.correct(con, apply=True)          # 不得抛异常
+    val = con.execute("SELECT price_at_predict FROM predictions").fetchone()[0]
+    con.close()
+    assert st["corrected"] == 0
+    assert val == pytest.approx(100.0), "0 被当成了收盘价写进库"
+
+
+def test_official_closes_filters_zero(monkeypatch):
+    """同一条原则守在取数层：0 不该进 closes 表。"""
+    import types
+    import pandas as pd
+
+    idx = pd.to_datetime(["2026-08-26"])
+    fake = pd.DataFrame({"A": [0.0], "B": [10.0]}, index=idx)
+    mod = types.SimpleNamespace(download=lambda *a, **k: {"Close": fake})
+    monkeypatch.setitem(sys.modules, "yfinance", mod)
+    got = cc.official_closes(["A", "B"], "2026-08-26", "2026-08-26")
+    assert ("2026-08-26", "B") in got
+    assert ("2026-08-26", "A") not in got, "0 值进了 closes 表"
+
+
+def test_dispute_not_reported_when_nothing_to_correct(db, monkeypatch):
+    """🟠 先判「要不要动」，再做交叉印证。
+
+    反过来的话，一条**本就正确**的行遇到 CBOE 分歧会被打出「拒绝校正」
+    警告并计入 disputed —— 可它压根没有待校正的内容，那条警告是假的。
+    """
+    p = db([(DATE, "X", 105.0)])              # 已等于官方收盘
+    _patch_sources(monkeypatch, {(DATE, "X"): 105.0},
+                   cboe={"X": (DATE, 130.0)}, prev_td=DATE)
+    con = sqlite3.connect(p)
+    st = cc.correct(con, apply=True)
+    con.close()
+    assert st["disputed"] == 0, "对无需校正的行报了假分歧"
+    assert st["already_ok"] == 1
+
+
+def test_download_range_padded_for_non_trading_start(monkeypatch):
+    """🟠 下载区间起点必须往前垫，否则非交易日样本回退不到前一交易日。
+
+    实测触发条件：`--since 2026-03-01`（周日）。全量跑靠「最早预测日 2/27
+    早于最早周日 3/01」侥幸安全，不能依赖。
+    """
+    import types
+    import pandas as pd
+
+    seen = {}
+
+    def _dl(tk, start=None, end=None, **k):
+        seen["start"] = start
+        return {"Close": pd.DataFrame({"X": [1.0]}, index=pd.to_datetime(["2026-03-02"]))}
+
+    monkeypatch.setitem(sys.modules, "yfinance", types.SimpleNamespace(download=_dl))
+    cc.official_closes(["X"], "2026-03-01", "2026-03-02")
+    assert seen["start"] < "2026-03-01", f"起点未前垫：{seen['start']}"

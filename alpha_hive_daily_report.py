@@ -2286,18 +2286,29 @@ def _snapshot_ctx(args):
                   f"而非 {args.date} 的。该日的期权维度不可与正常扫描日同池比较。")
         yield None
         return
+    # ⚠️ try 只包「进入快照模式」，**不包扫描体**。
+    # 初版把两者包在一起：扫描体抛异常时会穿过 `yield prov` 被这里的
+    # `except Exception` 抓住，打出「无可用云端快照」这条**完全错误的诊断**
+    # （快照明明拿到了），再执行下面的 `yield None` 触发
+    # `RuntimeError: generator didn't stop after throw()` ——
+    # 真实的扫描错误被吞掉，换成一个假诊断加一个莫名其妙的 RuntimeError。
+    stack = contextlib.ExitStack()
     try:
         import cloud_snapshot_loader as csl
-        with csl.snapshot_mode(args.date) as prov:
-            print(f"📦 云端快照模式：{args.date} 的期权/IV 取自 cloud-snapshots 分支")
-            yield prov
-        return
+        prov = stack.enter_context(csl.snapshot_mode(args.date))
     except ImportError as e:
         print(f"⚠️ 快照消费端不可用（{e}）——退回实时抓取")
+        yield None
+        return
     except Exception as e:  # noqa: BLE001 —— 含 SnapshotUnavailable
         print(f"⚠️ {args.date} 无可用云端快照（{type(e).__name__}: {e}）")
         print("   → 继续补跑，但**期权/IV 将是今天的数据**，该日期权维度不可同池比较。")
-    yield None
+        yield None
+        return
+
+    with stack:                    # 扫描体的异常原样传播，且供给器一定被卸载
+        print(f"📦 云端快照模式：{args.date} 的期权/IV 取自 cloud-snapshots 分支")
+        yield prov
 
 
 def main():

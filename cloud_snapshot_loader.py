@@ -42,6 +42,7 @@ vintage 双重把关
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from contextlib import contextmanager
@@ -57,6 +58,8 @@ REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 以行权价为键、必须还原成 float 的段（见模块 docstring）
 _FLOAT_KEY_SECTIONS = ("call_oi", "put_oi", "call_exp_oi", "put_exp_oi")
+
+_log = logging.getLogger("alpha_hive.cloud_snapshot_loader")
 
 
 class SnapshotUnavailable(RuntimeError):
@@ -107,9 +110,17 @@ def _restore_numeric_keys(oi: Optional[dict]) -> Optional[dict]:
         conv = {}
         for k, v in d.items():
             try:
-                conv[float(k)] = v
+                nk = float(k)
             except (TypeError, ValueError):
                 conv[k] = v          # 转不动就原样留，别静默丢数据
+                continue
+            if nk in conv:
+                # 理论上不会发生（快照的键统一来自 Python float 经 json.dump，
+                # 不会同时出现 "130" 与 "130.0"）。但真发生就是**静默丢一条 OI**，
+                # 所以宁可吵一声也不闷着 —— 本项目最贵的故障都是这么来的。
+                _log.warning("full_chain_oi.%s 行权价键碰撞：%r 与已有键都归到 %s，"
+                             "后者覆盖前者", sec, k, nk)
+            conv[nk] = v
         out[sec] = conv
     return out
 
