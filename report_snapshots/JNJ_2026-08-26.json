@@ -1,16 +1,17 @@
 {
   "ticker": "JNJ",
   "date": "2026-08-26",
-  "composite_score": 6.15,
+  "composite_score": 7.1,
   "direction": "bullish",
   "price_target": 0.0,
   "stop_loss": 0.0,
   "entry_price": 269.8,
   "agent_votes": {
     "OracleBeeEcho": 7.6923076923076925,
+    "GuardBeeSentinel": 7.67,
+    "QueenDistiller": 7.1,
     "CodeExecutorAgent": 6.5,
-    "QueenDistiller": 6.15,
-    "GuardBeeSentinel": 5.87
+    "RivalBeeVanguard": 5.99
   },
   "weights_used": {
     "signal": 0.2094,
@@ -19,20 +20,20 @@
     "odds": 0.194,
     "risk_adj": 0.225
   },
-  "low_conviction": false,
-  "low_conviction_reason": "",
+  "low_conviction": true,
+  "low_conviction_reason": "score_high_guard: 高分 7.1 但情绪 4.9<6 未确认（signal 5.3）→ 仓位减半",
   "cs_rank": {
-    "final": 0.862,
-    "signal": 0.621,
-    "catalyst": 0.276,
-    "sentiment": 0.621,
+    "final": 0.931,
+    "signal": 0.379,
+    "catalyst": 0.828,
+    "sentiment": 0.724,
     "odds": 0.793,
-    "risk_adj": 0.483
+    "risk_adj": 0.828
   },
   "actual_prices": {
     "t1": null,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-08-26T17:03:05.468637"
+  "created_at": "2026-08-26T17:43:57.573430"
 }
