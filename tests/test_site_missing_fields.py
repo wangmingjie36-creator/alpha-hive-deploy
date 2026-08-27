@@ -123,3 +123,37 @@ def test_dashboard_detail_missing_shows_dash():
     import dashboard_renderer as dr
     d = dr._detail("ZZZZ", {"ZZZZ": {"agent_details": {"OracleBeeEcho": {"details": {}}}}})
     assert d["iv_rv_spread"] == "-" and d["rv_30d"] == "-", "缺失时应显示 '-' 而非 0"
+
+
+# ══════════════════════════════════════════════════════════════════
+# ML 胜率必须按**报告日期**读，不是按「今天」（v0.45.52）
+# ══════════════════════════════════════════════════════════════════
+
+def test_ml_prob_reads_report_date_not_today(tmp_path, monkeypatch):
+    """🔴 回归：`_load_fresh_ml_prob` 原本写死 `datetime.now()`。
+
+    重渲染或补跑历史日报时它指向**今天**，对应文件不存在于是**全部**返回
+    None，30 只标的的 ML 胜率被 swarm 存量的降级常数覆盖。
+    2026-08-27 重渲染 8/26 实测：真实值 66/62/51/64/63/64 **全变成 57%** ——
+    与「所有标的同一个值」这一类污染同形。
+    """
+    import json
+    import report_formatters as rf
+
+    monkeypatch.setattr(rf, "__file__", str(tmp_path / "report_formatters.py"))
+    (tmp_path / "analysis-NVDA-ml-2026-08-26.json").write_text(json.dumps(
+        {"ml_prediction": {"prediction": {"probability": 0.6218}}}))
+
+    assert rf._load_fresh_ml_prob("NVDA", "2026-08-26") == pytest.approx(0.6218)
+    # 不传日期 → 退回今天 → 该日无文件 → None（向后兼容行为，但不该被依赖）
+    assert rf._load_fresh_ml_prob("NVDA", "1999-01-04") is None
+
+
+def test_competitive_section_threads_date(monkeypatch, tmp_path):
+    """`_build_competitive` 必须把报告日期传下去，否则上面那条修复形同虚设。"""
+    import inspect
+    import report_formatters as rf
+    src = inspect.getsource(rf.generate_swarm_markdown_report)
+    assert "_build_competitive(sorted_results, getattr(reporter, 'date_str'" in src, \
+        "总装函数没把 date_str 传给 _build_competitive"
+    assert "date_str" in inspect.signature(rf._build_competitive).parameters

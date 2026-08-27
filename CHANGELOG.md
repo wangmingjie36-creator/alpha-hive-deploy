@@ -70,12 +70,29 @@ SPY 同期基准 / 宏观数据补上。逐项核对后发现**七项里只有�
 完全是两回事（v0.45.42 同一原则）。守卫里有反向用例：真算出 `0.00%` 时
 必须照常渲染，不能被当成缺失。
 
+### Fixed 🔴 — ML 胜率按「今天」读文件，重渲染历史日报会抹成一个常数
+
+`_load_fresh_ml_prob` 写死 `datetime.now()` 去找 `analysis-{TICKER}-ml-{DATE}.json`。
+重渲染 / 补跑历史日报时它指向**今天**，对应文件不存在 → **全部**返回 None →
+30 只标的的 ML 胜率退回 swarm 存量的**降级常数**。
+
+2026-08-27 重渲染 8/26 实测：
+
+| | swarm 存量 | `analysis-*-ml-2026-08-26.json` |
+|---|---|---|
+| QCOM / NVDA / MSFT / TSLA / VKTX / BILI | **全是 57%** | 66 / 62 / 51 / 64 / 63 / 64 |
+
+`_load_fresh_ml_prob` 存在的意义正是替换掉那个常数 —— 而按「今天」读让它在
+补跑时**完全失效**。与「所有标的同一个值」这一类污染同形（本版另一条
+`_get_ma` 也是）。改为 `date_str` 由调用方传报告日期，`_build_competitive`
+与 `generate_swarm_markdown_report` 一并透传。
+
 ### 守卫
 
 `tests/test_market_regime_symbol_guard.py`（4 条）+
-`tests/test_site_missing_fields.py`（10 条）。五次变异全部转红：
+`tests/test_site_missing_fields.py`（12 条）。七次变异全部转红：
 拆掉符号校验 / IV-RV 用 0 兜底 / SPY 用 0 兜底 / IV Rank 不标 source /
-仪表板缺失给 0。
+仪表板缺失给 0 / ML 胜率退回 `datetime.now()` / `_build_competitive` 不透传日期。
 
 ## [0.45.51] — 2026-08-27 — 并发开工先占号（`CLAUDE.md` 规则）
 

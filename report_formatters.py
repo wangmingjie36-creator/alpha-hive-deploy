@@ -261,14 +261,22 @@ def _build_catalysts(sorted_results: list) -> List[str]:
     return md
 
 
-def _load_fresh_ml_prob(ticker: str) -> float | None:
-    """从当日 analysis-{TICKER}-ml-{DATE}.json 读取最新 ML 胜率，失败返回 None"""
+def _load_fresh_ml_prob(ticker: str, date_str: str | None = None) -> float | None:
+    """从 `analysis-{TICKER}-ml-{DATE}.json` 读取 ML 胜率，失败返回 None。
+
+    ⚠️ **`date_str` 必须由调用方传报告日期**（v0.45.52）。
+    初版写死 `datetime.now()` —— 重渲染或补跑历史日报时它指向**今天**，
+    对应文件不存在于是**全部**返回 None，30 只标的的 ML 胜率被抹成同一个
+    兜底常数。2026-08-27 重渲染 8/26 实测：62% / 66% / 46% / 64% …
+    **全部变成 57%**，与「所有标的同一个值」这一类污染同形。
+    留 None 时退回今天，仅为向后兼容。
+    """
     import json as _json
     import glob as _glob
     from datetime import datetime as _dt
     from pathlib import Path as _Path
     try:
-        today = _dt.now().strftime("%Y-%m-%d")
+        today = date_str or _dt.now().strftime("%Y-%m-%d")
         base = _Path(__file__).parent
         pattern = str(base / f"analysis-{ticker}-ml-{today}.json")
         files = _glob.glob(pattern)
@@ -282,8 +290,13 @@ def _load_fresh_ml_prob(ticker: str) -> float | None:
         return None
 
 
-def _build_competitive(sorted_results: list) -> List[str]:
-    """版块 6：竞争格局分析（RivalBeeVanguard）"""
+def _build_competitive(sorted_results: list, date_str: str | None = None) -> List[str]:
+    """版块 6：竞争格局分析（RivalBeeVanguard）
+
+    `date_str` 用于读取该日的 `analysis-*-ml-{DATE}.json`。**必须传**，
+    否则重渲染历史日报时会退回「今天」，30 只标的的 ML 胜率被 swarm 存量的
+    降级常数覆盖（实测 8/26 存量恒为 57%，真实值 66/62/51/64/63/64）。
+    """
     import re as _re
     md: List[str] = []
     md.append("## 6) 竞争格局分析")
@@ -295,7 +308,7 @@ def _build_competitive(sorted_results: list) -> List[str]:
         md.append(f"### {ticker}")
         if discovery:
             # 优先用当日 analysis JSON 中的真实 ML 概率替换 swarm 存量值
-            fresh_prob = _load_fresh_ml_prob(ticker)
+            fresh_prob = _load_fresh_ml_prob(ticker, date_str)
             if fresh_prob is not None:
                 discovery = _re.sub(
                     r"ML 胜率 \d+%",
@@ -762,7 +775,7 @@ def generate_swarm_markdown_report(reporter, swarm_results: Dict,
         md.extend(_wl_fmt(tickers=[t for t, _ in sorted_results]))
     except Exception as _e_wl:  # noqa: BLE001 - 报告素材失败绝不影响主报告
         _log.warning("关注事项渲染跳过: %s", _e_wl)
-    md.extend(_build_competitive(sorted_results))
+    md.extend(_build_competitive(sorted_results, getattr(reporter, 'date_str', None)))
 
     md.extend(_build_bear_contrarian(sorted_results))
     md.extend(_build_composite_judgment(sorted_results))
