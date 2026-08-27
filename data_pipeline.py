@@ -334,10 +334,16 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
         recent_vol = float(hist["Volume"].iloc[-1])
         avg_vol = (float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20
                    else float(hist["Volume"].mean()))
+        # v0.45.54：兜底 1.0 会让 avg_volume = **1 股**（任何流动性检查都判
+        # 极端不可交易），且 volume_ratio = recent_vol/1 变成千万量级
+        # （读作「成交量是均量的 5000 万倍」）。不可得就置 None。
         if math.isnan(avg_vol) or avg_vol <= 0:
-            avg_vol = 1.0
-        out["avg_volume"] = int(avg_vol)
-        out["volume_ratio"] = recent_vol / avg_vol if avg_vol > 0 else 1.0
+            _log.warning("%s 20 日均量不可得，avg_volume/volume_ratio 置 None", ticker)
+            out["avg_volume"] = None
+            out["volume_ratio"] = None
+        else:
+            out["avg_volume"] = int(avg_vol)
+            out["volume_ratio"] = recent_vol / avg_vol
 
         if len(hist) >= 20:
             returns = hist["Close"].pct_change().dropna()

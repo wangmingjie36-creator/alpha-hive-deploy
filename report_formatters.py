@@ -530,9 +530,21 @@ def _build_macro(macro_context) -> List[str]:
     md.append("")
     md.append("| 指标 | 数值 | 状态 |")
     md.append("|------|------|------|")
-    md.append(f"| VIX | {macro_context.get('vix', 0):.1f} | {macro_context.get('vix_regime', '')} |")
-    md.append(f"| 10Y利率 | {macro_context.get('treasury_10y', 0):.2f}% | {macro_context.get('rate_environment', '')} |")
-    md.append(f"| 大盘(5日) | {macro_context.get('spx_change_pct', 0):+.2f}% | {macro_context.get('market_trend', '')} |")
+    # ── v0.45.54：宏观表不许把「取数失败」印成一张带状态列的观测表 ──
+    # 兜底 0 会渲染成「VIX 0.0 / 10Y 0.00% / 大盘 +0.00%」，而配套的「状态」列
+    # 仍照常显示 low/high/neutral —— 一整行看起来完全正常的宏观快照。
+    # 上游 fred_macro 的兜底（VIX 20.0、TNX 4.5）更隐蔽：4.5 恰好落在
+    # rate_environment 的 high 档边界上（见 v0.45.42 记录）。
+    def _mrow(label, key, spec, suffix, state_key):
+        v = macro_context.get(key)
+        txt = (format(v, spec) + suffix
+               if isinstance(v, (int, float)) and not isinstance(v, bool) else "—")
+        state = macro_context.get(state_key, "") if txt != "—" else "不可得"
+        md.append(f"| {label} | {txt} | {state} |")
+
+    _mrow("VIX", "vix", ".1f", "", "vix_regime")
+    _mrow("10Y利率", "treasury_10y", ".2f", "%", "rate_environment")
+    _mrow("大盘(5日)", "spx_change_pct", "+.2f", "%", "market_trend")
     md.append(f"| 美元 | — | {macro_context.get('dollar_trend', '')} |")
     md.append("")
     headwinds = macro_context.get("macro_headwinds", [])

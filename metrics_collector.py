@@ -17,7 +17,7 @@ import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from hive_logger import PATHS, get_logger
 
@@ -360,15 +360,18 @@ class MetricsCollector:
     # ==================== 内部工具 ====================
 
     @staticmethod
-    def _get_memory_mb() -> float:
+    def _get_memory_mb() -> Optional[float]:
         """获取当前进程内存使用（MB）"""
         try:
             import resource
             rusage = resource.getrusage(resource.RUSAGE_SELF)
             return rusage.ru_maxrss / (1024 * 1024)  # macOS: bytes -> MB
         except (ImportError, OSError, ValueError) as exc:
+            # v0.45.54：0.0 MB 读作「本次扫描峰值内存 0MB」——一个数值型读数，
+            # 与「测出来非常省内存」不可区分。仅影响运维指标、不进评分，
+            # 但同形，一并改为 None。
             _log.debug("_get_memory_mb 失败: %s", exc)
-            return 0.0
+            return None
 
     @staticmethod
     def get_thread_count() -> int:

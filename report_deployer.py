@@ -65,8 +65,11 @@ def verify_cdn_deployment(reporter, repo: str,
             _log.debug("dashboard-data.json 无 _generated_at，跳过 CDN 验证")
             return True
     except (OSError, _json_v.JSONDecodeError) as e:
-        _log.debug("读取本地 dashboard-data.json 失败，跳过验证: %s", e)
-        return True
+        # v0.45.54：读不到本地文件 → 返回 True =「CDN 部署已验证」，
+        # 与真正轮询成功的返回值完全同形。改为 None ＝「未验证」。
+        _log.warning("读取本地 dashboard-data.json 失败，**CDN 验证未执行**"
+                     "（不报告为已验证）: %s", e)
+        return None
 
     # ── 快速连通性探测：如果网络出口无法访问 github.io，直接跳过，避免浪费 3 分钟 ──
     _deploy_host = reporter._DEPLOY_BASE_URL.split("/")[2]  # e.g. "wangmingjie36-creator.github.io"
