@@ -439,12 +439,22 @@ class MLEnhancedReportGenerator:
                 '不参与今日评分。</div></div>'
             )
 
+        # ── v0.45.43：与 _ch3_oracle 同一处理，缺失渲染「—」不冒充读数 ──
+        # 上面的 data_quality=="unavailable" 闸只挡**全盘**不可用。
+        # 2026-08-26 是**部分**降级：CBOE 正常（data_quality="real"）而
+        # yfinance 挂掉 → iv_rank 为 None 却照样过闸，随后：
+        #   iv_rank=50  → 渲染成「50.0（中等 IV）」   ← 一个确凿的假读数
+        #   iv_current or 25 / iv_percentile or 50 / put_call_ratio or 1.0
+        # 注意 `or` 比 `if is None` 更糟：真实的 **0** 也会被替换掉。
+        _NA_M = '<span class="na" title="数据不可用">—</span>'
+
+        def _m(v, spec="{:.1f}", suffix=""):
+            return _NA_M if not isinstance(v, (int, float)) else (spec.format(v) + suffix)
+
         iv_rank = options.get("iv_rank")
-        if iv_rank is None:
-            iv_rank = 50
-        iv_percentile = options.get("iv_percentile") or 50
-        iv_current = options.get("iv_current") or 25
-        put_call_ratio = options.get("put_call_ratio") or 1.0
+        iv_percentile = options.get("iv_percentile")
+        iv_current = options.get("iv_current")
+        put_call_ratio = options.get("put_call_ratio")
         gamma_squeeze_risk = options.get("gamma_squeeze_risk", "medium")
         flow_direction = options.get("flow_direction", "neutral")
         options_score = options.get("options_score", 5.0)
@@ -452,8 +462,11 @@ class MLEnhancedReportGenerator:
         unusual_activity = options.get("unusual_activity", [])
         key_levels = options.get("key_levels", {})
 
-        # 判断 IV Rank 颜色（None 已在上方 L431 归一为 50，此处无需再判）
-        if iv_rank < 30:
+        # 判断 IV Rank 颜色（v0.45.43：不再归一为 50，缺失单独走中性色）
+        if iv_rank is None:
+            iv_color = "var(--tm)"
+            iv_label = "数据不可用"
+        elif iv_rank < 30:
             iv_color = "var(--bull)"  # 绿色，低 IV
             iv_label = "低 IV"
         elif iv_rank > 70:
@@ -512,23 +525,23 @@ class MLEnhancedReportGenerator:
                     <div class="metric">
                         <span class="metric-label">IV Rank</span>
                         <span class="metric-value" style="color: {iv_color};">
-                            {iv_rank:.1f} ({iv_label})
+                            {_m(iv_rank)} ({iv_label})
                         </span>
                     </div>
 
                     <div class="metric">
                         <span class="metric-label">当前 IV</span>
-                        <span class="metric-value">{iv_current:.2f}%</span>
+                        <span class="metric-value">{_m(iv_current, "{:.2f}", "%")}</span>
                     </div>
 
                     <div class="metric">
                         <span class="metric-label">IV 百分位数</span>
-                        <span class="metric-value">{iv_percentile:.1f}%</span>
+                        <span class="metric-value">{_m(iv_percentile, "{:.1f}", "%")}</span>
                     </div>
 
                     <div class="metric">
                         <span class="metric-label">Put/Call Ratio</span>
-                        <span class="metric-value">{put_call_ratio:.2f}</span>
+                        <span class="metric-value">{_m(put_call_ratio, "{:.2f}")}</span>
                     </div>
 
                     <div class="metric">
@@ -771,21 +784,38 @@ class MLEnhancedReportGenerator:
         # 防 None：dict 里 key 存在但值为 None 时，.get() 返回 None，格式化会崩
         def _safe(v, default=0):
             return default if v is None else v
+
+        # ── v0.45.42：缺失值不再兜底成 0 ──────────────────────────────
+        # 旧实现对期权指标一律 `_safe(..., 0)`，于是 8/26 yfinance 全线返回空时，
+        # IV Rank 从 None 变成 **0.0%** 渲染上墙。0.0% 的语义不是"没数据"，
+        # 是"IV 处于历史区间最低点"——一个强烈且完全虚假的做多波动率信号。
+        # 判据（CLAUDE.md 安全默认值）：这个默认值会不会让下游误以为掌握了信息。
+        # 同文件 _rv_30d 已因同样理由单独豁免过 _safe（见 `# 可能是 None —— 不要 _safe`），
+        # 这里把该豁免推广到全部期权指标：缺失一律渲染 "—"。
+        # _NA 原先只在下方 `if (_iv_term ...)` 块里赋值（12 缩进）。_fmt 在该块外也要用，
+        # 条件为假时会 NameError，故提到函数顶层；块内那次赋值是同值重绑定，无副作用。
+        _NA = '<span class="na" title="数据不可用">—</span>'
+
+        def _fmt(v, spec="{:.1f}", suffix=""):
+            """有值按 spec 渲染，None 渲染成 —（绝不代入 0）"""
+            return _NA if v is None else (spec.format(v) + suffix)
+
         score = _safe(ad.get("score", 0)) if ad else 0
         direction = ad.get("direction", "neutral") if ad else "neutral"
-        iv_rank = _safe(opts.get("iv_rank", 0))
-        iv_curr = _safe(opts.get("iv_current", opts.get("iv_curr", 0)))
-        pc = _safe(opts.get("put_call_ratio", 0))
-        oi = _safe(opts.get("total_oi", 0))
+        iv_rank = opts.get("iv_rank")
+        iv_curr = opts.get("iv_current", opts.get("iv_curr"))
+        pc = opts.get("put_call_ratio")
+        oi = opts.get("total_oi")
         gex = opts.get("gamma_squeeze_risk") or "—"
         flow = opts.get("flow_direction") or opts.get("options_score") or "—"
-        skew = _safe(opts.get("iv_skew_ratio", opts.get("iv_skew", 0)))
+        skew = opts.get("iv_skew_ratio", opts.get("iv_skew"))
         # v0.27.1 bug fix: dict.get() 不会用默认值若 key 存在但 value=None；用 `or` 保护
         unusual = opts.get("unusual_activity") or []
         key_levels = opts.get("key_levels") or {}
         support = key_levels.get("support") or []
         resist = key_levels.get("resistance") or []
-        pc_color = "var(--bull)" if pc < 0.8 else ("var(--bear)" if pc > 1.2 else "var(--neut)")
+        pc_color = ("var(--neut)" if pc is None else
+                    "var(--bull)" if pc < 0.8 else ("var(--bear)" if pc > 1.2 else "var(--neut)"))
         unusual_rows = ""
         for u in unusual[:5]:
             bullish = u.get("bullish", True)
@@ -1082,13 +1112,13 @@ class MLEnhancedReportGenerator:
         # ── 头部 stat 卡片：注入近端磁吸目标价（如可用）────────────────────
         _hero_cards = (
             f'<div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Odds 评分</div></div>'
-            f'<div class="stat"><div class="num" style="color:{pc_color}">{pc:.2f}</div><div class="lbl">近端 P/C Ratio</div></div>'
-            f'<div class="stat"><div class="num">{iv_rank:.1f}%</div><div class="lbl">IV Rank</div></div>'
+            f'<div class="stat"><div class="num" style="color:{pc_color}">{_fmt(pc, "{:.2f}")}</div><div class="lbl">近端 P/C Ratio</div></div>'
+            f'<div class="stat"><div class="num">{_fmt(iv_rank, "{:.1f}", "%")}</div><div class="lbl">IV Rank</div></div>'
         )
         if _near_max_pain_html:
             _hero_cards += _near_max_pain_html
         else:
-            _hero_cards += f'<div class="stat"><div class="num">{iv_curr:.1f}%</div><div class="lbl">当前 IV</div></div>'
+            _hero_cards += f'<div class="stat"><div class="num">{_fmt(iv_curr, "{:.1f}", "%")}</div><div class="lbl">当前 IV</div></div>'
 
         return f"""
         <div class="section">
@@ -1100,8 +1130,8 @@ class MLEnhancedReportGenerator:
                 <tr><th>指标</th><th>数值</th><th>信号</th></tr>
                 <tr><td>Gamma 压榨风险</td><td>{gex}</td><td>{DOT_NEUT + "高" if str(gex).lower() in ("high","很高") else DOT_BULL + "可控"}</td></tr>
                 <tr><td>期权流方向</td><td>{flow}</td><td>{DOT_BULL + "看多" if str(flow).lower() in ("bullish","看多") else (DOT_BEAR + "看空" if str(flow).lower() in ("bearish","看空") else "—")}</td></tr>
-                <tr><td>IV 偏斜比</td><td>{skew:.2f}</td><td>{DOT_NEUT + "看跌溢价" if skew > 1.2 else DOT_BULL + "正常"}</td></tr>
-                <tr><td>近端总持仓量</td><td>{oi:,}</td><td>—</td></tr>
+                <tr><td>IV 偏斜比</td><td>{_fmt(skew, "{:.2f}")}</td><td>{"—" if skew is None else (DOT_NEUT + "看跌溢价" if skew > 1.2 else DOT_BULL + "正常")}</td></tr>
+                <tr><td>近端总持仓量</td><td>{_fmt(oi, "{:,.0f}")}</td><td>—</td></tr>
             </table>
             {_near_walls_html}
             {_full_oi_html}
@@ -1373,7 +1403,16 @@ class MLEnhancedReportGenerator:
         signals = det.get("bearish_signals", [])
         bear_score = det.get("bear_score", 0)
         score = ad.get("score", 0)
-        iv_skew = det.get("iv_skew_ratio", det.get("iv_skew", 0))
+        # ── v0.45.42：iv_skew 取错了蜂 ────────────────────────────────
+        # `det` 是 **BearBeeContrarian** 的 details，而 iv_skew_ratio 产自
+        # **OracleBeeEcho**。旧代码在 BearBee 里取这个键，永远取不到，
+        # 于是恒定落到 fallback 0 —— 这张卡从上线起就没显示过真实值
+        # （实测 8/25 与 8/26 都是 0.00，而 OracleBee 里 29/30 有值）。
+        # 真值缺失时给 None，由下方渲染成 —，不再冒充 0.00。
+        _oracle_det = (agent_details.get("OracleBeeEcho") or {}).get("details") or {}
+        iv_skew = _oracle_det.get("iv_skew_ratio", _oracle_det.get("iv_skew"))
+        _skew_cell = ('<span class="na" title="数据不可用">—</span>'
+                      if iv_skew is None else f"{iv_skew:.2f}")
         # 确保至少 3 条
         fallback = [
             "期权 IV Skew 偏高（看跌期权溢价）",
@@ -1395,7 +1434,7 @@ class MLEnhancedReportGenerator:
             <div class="grid-4" style="margin-bottom:15px;">
                 <div class="stat"><div class="num" style="color:var(--bear)">{score:.1f}</div><div class="lbl">看空蜂评分</div></div>
                 <div class="stat"><div class="num" style="color:{'var(--bear)' if bear_score>=6 else 'var(--neut)'}">{bear_score:.1f}/10</div><div class="lbl">看空强度</div></div>
-                <div class="stat"><div class="num">{iv_skew:.2f}</div><div class="lbl">IV Skew 比</div></div>
+                <div class="stat"><div class="num">{_skew_cell}</div><div class="lbl">IV Skew 比</div></div>
                 <div class="stat"><div class="num">{'高' if bear_score>=7 else ('中' if bear_score>=5 else '低')}</div><div class="lbl">风险等级</div></div>
             </div>
             <h3>反对观点（至少 3 条 — 硬性要求）</h3>

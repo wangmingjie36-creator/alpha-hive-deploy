@@ -21,6 +21,14 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# v0.45.44：本模块此前无 logger，所有降级都是静默的。
+try:
+    from hive_logger import get_logger
+    _log = get_logger("market_intel")
+except Exception:  # pragma: no cover - 独立运行/测试时退化到标准库
+    import logging as _logging
+    _log = _logging.getLogger("alpha_hive.market_intel")
+
 _BASE = Path(__file__).parent
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -611,9 +619,21 @@ def check_thesis_breaks(
       "alert_html": str,   # 渲染用 HTML（空字符串 = 无警报）
     }
     """
+    # v0.45.44：`evaluable` 区分「核对过、没触发」与「根本没核对」。
+    # 实测（2026-08-26）：本闸**从未触发过一次**——极端输入（price $1 vs
+    # $100,000 / IV 200% / P/C 5.0 / score 0 / 6 条看空）在 NVDA 与 WMT 上
+    # 一律返回 level=None。根因是 schema 对不上：
+    #   配置存的是人读散文 {id, metric, trigger, data_source, current_status}
+    #   求值器要的是机器可比 {field, op, value}
+    # → `cond.get("value")` 恒为 None → `_eval_condition` 第一行就 return False。
+    # 而 level=None 在下游读作「论点完好」。CLAUDE.md 把「任何结论必须附失效
+    # 条件」列为硬约束，于是这条硬约束长期是靠一个永不触发的闸在"满足"。
+    # 这里先让它**可见**；配置 schema 的迁移是独立决定（且该文件正被其他
+    # session 编辑），不在本次改动范围。
     _none = {
         "level": None, "triggered_conditions": [],
         "recommendation": "", "alert_html": "",
+        "evaluable": False, "unevaluable_reason": "",
     }
 
     config_path = _BASE / "thesis_breaks_config.json"
@@ -661,6 +681,28 @@ def check_thesis_breaks(
             return actual == val
         return False
 
+    # ── v0.45.44：先判「这份配置到底可不可求值」──────────────────────
+    # 一条 condition 只有同时带 field/op/value 才是机器可比的；
+    # 只有 metric/trigger/current_status 的是给人读的散文，求值器碰不到。
+    _all_conds = []
+    for _lk in ("level_2_stop_loss", "level_1_warning"):
+        _all_conds += (ticker_cfg.get(_lk, {}) or {}).get("conditions", []) or []
+    _evaluable_conds = [c for c in _all_conds
+                        if isinstance(c, dict) and c.get("field") and c.get("value") is not None]
+    _is_fallback = ticker not in cfg
+
+    if not _evaluable_conds:
+        _reason = (f"{ticker} 的 {len(_all_conds)} 条失效条件全部不可机器求值"
+                   f"（缺 field/value，是给人读的散文 schema）"
+                   + ("；且该标的无专属配置，用的是 NVDA 兜底" if _is_fallback else ""))
+        _log.warning("论点失效闸未执行：%s —— 本次返回「未核对」而非「论点完好」", _reason)
+        _out = dict(_none)
+        _out["unevaluable_reason"] = _reason
+        return _out
+    if _is_fallback:
+        _log.warning("%s 无专属论点失效配置，回落到 NVDA 的条件（数据中心营收/AMD 竞品/"
+                     "中国芯片禁令等），对本标的无意义", ticker)
+
     # 检查两个告警级别
     triggered: Optional[str] = None
     triggered_conds: List[str] = []
@@ -684,7 +726,10 @@ def check_thesis_breaks(
             break
 
     if not triggered:
-        return _none
+        # 走到这里说明**确实核对过**了，与「没核对」区分开
+        _ok = dict(_none)
+        _ok["evaluable"] = True
+        return _ok
 
     # 构建 HTML 告警卡片
     if triggered == "stop_loss":

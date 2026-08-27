@@ -1531,6 +1531,70 @@ class OptionsAgent:
                     + sum(p.get("openInterest", 0) for p in puts_df))
         return stable_oi
 
+    # ── v0.45.43：快照里的价格历史派生字段可重算 ──────────────────────
+    # 见 analyze() 里 "期权快照命中" 处的长注释。这里只碰**日K 派生**的字段，
+    # 绝不碰期权链字段（后者错过即永久丢失，重算等于伪造）。
+    _PRICE_DERIVED_KEYS = ("rv_30d", "iv_rv_spread", "iv_rv_signal", "iv_rv_detail")
+
+    def _refresh_price_derived(self, cached: dict, ticker: str,
+                               snap_path: str = "") -> bool:
+        """快照里价格历史派生的字段若为空，就地重算并回写。
+
+        只在**确实为空**时才动手 —— 快照健康时不该多打一次外网。
+        重算失败不抛错也不改动 cached：保持「空」比写个假值好。
+
+        Returns: 是否发生了修复（供测试与日志用）
+        """
+        _fixed = []
+
+        # ① IV-RV / RV30 —— 纯 yfinance 日K，随时可重拉
+        if cached.get("rv_30d") is None:
+            _iv = cached.get("iv_current")
+            if _iv:
+                try:
+                    from market_intelligence import calculate_iv_rv_spread
+                    _d = calculate_iv_rv_spread(ticker, float(_iv))
+                    if _d.get("rv_30d") is not None:
+                        cached["rv_30d"] = _d.get("rv_30d")
+                        cached["iv_rv_spread"] = _d.get("iv_rv_spread")
+                        cached["iv_rv_signal"] = _d.get("iv_rv_signal") or "unknown"
+                        cached["iv_rv_detail"] = _d
+                        _fixed.append("rv_30d")
+                except Exception as _e:  # noqa: BLE001 - 重算失败保持原样
+                    _log.debug("[%s] 快照 RV 重算失败: %s", ticker, _e)
+
+        # ② IV Rank —— **仅** hv_proxy 口径可重算（它由 HV 历史派生）。
+        # 真实 IV 历史口径（real_iv_*）来自自攒的 IV 观测库，不是日K 派生，
+        # 缺了就是真缺，重算会拿 HV 冒充 IV —— 那正是 v0.43.19 修掉的失真。
+        if (cached.get("iv_rank") is None
+                and cached.get("iv_rank_source") == "hv_proxy"):
+            try:
+                _hist_hv = self.fetcher.fetch_historical_hv(ticker)
+                if _hist_hv and not getattr(self.fetcher, "last_hist_hv_is_sample", False):
+                    _cur_hv = _hist_hv[-1]
+                    _rank, _ = self.analyzer.calculate_iv_rank(_cur_hv, _hist_hv)
+                    if _rank is not None:
+                        cached["iv_rank"] = _rank
+                        cached["iv_percentile"] = self.analyzer.calculate_iv_percentile(
+                            _cur_hv, _hist_hv)
+                        _fixed.append("iv_rank")
+            except Exception as _e:  # noqa: BLE001
+                _log.debug("[%s] 快照 IV Rank 重算失败: %s", ticker, _e)
+
+        if not _fixed:
+            return False
+
+        _log.info("[%s] 快照价格派生字段已重算并回写: %s（原快照抓取时该数据源不可用）",
+                  ticker, ", ".join(_fixed))
+        if snap_path:
+            try:
+                cached["_price_derived_refreshed_at"] = datetime.now().isoformat()
+                with open(snap_path, "w") as _f:
+                    json.dump(cached, _f, ensure_ascii=False, default=str)
+            except Exception as _e:  # noqa: BLE001 - 回写失败不影响本次返回值
+                _log.warning("[%s] 快照回写失败（本次结果仍已修复）: %s", ticker, _e)
+        return True
+
     def analyze(self, ticker: str, stock_price: Optional[float] = None,
                 force_refresh: bool = False) -> Dict:
         """
@@ -1594,6 +1658,17 @@ class OptionsAgent:
                 if _cached_ts.startswith(_snap_date):
                     _log.info("[%s] 期权快照命中: %s (冻结于 %s)",
                               ticker, os.path.basename(_snap_path), _cached_ts[:19])
+                    # v0.45.43：快照里**混着两类数据**，只有一类该被冻结。
+                    #   · 期权链（IV/OI/strike）—— 接口只有实时快照、无历史，
+                    #     错过就永久丢失，必须冻结。
+                    #   · 价格历史派生（rv_30d / iv_rv_* / hv_proxy 口径的 iv_rank）
+                    #     —— 日K 随时可重拉，冻结它零收益。
+                    # 2026-08-26 实测代价：yfinance 在 14:13 抓快照时正好挂了，
+                    # 29/30 份快照把 `rv_30d: null` 一起冻了进去；当晚 yfinance
+                    # 早已恢复，重跑扫描却**原样复现失败**——快照命中即返回，
+                    # 根本没再去算。一次瞬时故障被快照升级成了当日永久缺失。
+                    # 现在：命中后若这些字段是空的，就地重算并回写快照。
+                    self._refresh_price_derived(_cached, ticker, _snap_path)
                     return _cached
                 else:
                     _log.warning("[%s] 期权快照日期不匹配 (%s vs %s)，忽略",

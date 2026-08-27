@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import sqlite3
 import sys
@@ -35,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+_log = logging.getLogger("alpha_hive.portfolio_backtest")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 配置
@@ -245,19 +248,57 @@ def _calc_dim_std(pred: Dict) -> Optional[float]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _fetch_spy_prices(start_date: str, end_date: str) -> Dict[str, float]:
-    """获取 SPY 在 [start-40d, end+buffer] 区间的每日收盘价（多拉40天用于计算MA）"""
+    """获取 SPY 在 [start-60d, end+buffer] 区间的每日收盘价（多拉60天用于计算MA）
+
+    ⚠️ 空 dict 的含义是「取数失败」，**不是**「大盘没动」。调用方必须区分这两者：
+    见下方 run_backtest 里 spy_start 的处理。
+
+    v0.45.42：旧实现是裸 yf.Ticker().history() + `except: return {}`，
+    是 2026-08-26 yfinance 全线故障中未受保护的调用方。后果不是"少一张图"：
+      · spy_start=0 → spy_bh_pct=0 → 网站显示"SPY 同期 0%"
+      · alpha = 组合收益 − 0 = **组合收益本身** → 当天显示 +4.29%，真值 −5.62%（符号反了）
+      · _is_risk_off() 拿不到均线一律 return False，而 macro_gate 默认 True
+        → 宏观门控当天一笔没拦，不是没到风险区，是它瞎了
+    现改为走 http_gate + 退避重试，并让失败可被上游识别（返回空 dict 但由调用方判空）。
+    """
     try:
+        import time
+
         import yfinance as yf
-        spy = yf.Ticker("SPY")
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=60)  # 多拉60天给MA
+
+        try:
+            from http_gate import https_gate
+        except Exception:  # pragma: no cover - 闸门不可得时退化直连
+            from contextlib import nullcontext
+
+            def https_gate(*_a, **_k):
+                return nullcontext()
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=60)
         end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=10)
-        hist = spy.history(start=start_dt.strftime("%Y-%m-%d"),
-                          end=end_dt.strftime("%Y-%m-%d"))
+
+        hist = None
+        _err = None
+        for _attempt in range(3):
+            try:
+                with https_gate():
+                    hist = yf.Ticker("SPY").history(start=start_dt.strftime("%Y-%m-%d"),
+                                                    end=end_dt.strftime("%Y-%m-%d"))
+                if hist is not None and not hist.empty:
+                    break
+            except Exception as _e:  # noqa: BLE001 — 瞬时 SSL/限流错开即恢复
+                _err = _e
+            if _attempt < 2:
+                time.sleep(0.7 * (_attempt + 1))
+
         if hist is None or hist.empty:
+            _log.warning("SPY 基准取数失败（%s）——基准与宏观门控本次不可用，"
+                         "不会以 0%% 冒充大盘收益", _err or "返回空")
             return {}
         return {idx.strftime("%Y-%m-%d"): float(row["Close"])
                 for idx, row in hist.iterrows()}
-    except Exception:
+    except Exception as _e:
+        _log.warning("SPY 基准取数异常（%s）——基准与宏观门控本次不可用", _e)
         return {}
 
 
@@ -578,11 +619,34 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
     final_nav = cash
     total_return_pct = (final_nav - cfg.initial_capital) / cfg.initial_capital * 100
 
-    # SPY 买入持有
-    spy_start = spy_prices.get(first_date, 0)
-    spy_end = spy_prices.get(last_date, spy_start)
-    spy_bh_pct = ((spy_end - spy_start) / spy_start * 100) if spy_start > 0 else 0
-    spy_bh_end_nav = cfg.initial_capital * (1 + spy_bh_pct / 100)
+    # ── SPY 买入持有 ────────────────────────────────────────────────
+    # v0.45.42：区分「取数失败」与「大盘没动」。
+    # 旧实现 spy_start=0 → spy_bh_pct=0 → alpha 变成组合收益本身（符号可被翻反）。
+    # 现在取不到就一路给 None，让下游显式渲染「不可用」而不是 0%。
+    # 另修一个潜在同源 bug：first_date/last_date 若落在非交易日，
+    # 直接 .get() 也拿不到价 —— 改为取「不晚于该日的最近一个交易日」。
+    def _nearest_close(_target: str, _direction: str) -> Optional[float]:
+        if not spy_prices:
+            return None
+        if _target in spy_prices:
+            return spy_prices[_target]
+        if _direction == "back":                      # 找 <= target 的最近一天
+            cands = [d for d in spy_prices if d <= _target]
+            return spy_prices[max(cands)] if cands else None
+        cands = [d for d in spy_prices if d >= _target]  # 找 >= target 的最近一天
+        return spy_prices[min(cands)] if cands else None
+
+    spy_start = _nearest_close(first_date, "fwd")
+    spy_end = _nearest_close(last_date, "back")
+    if spy_start and spy_start > 0 and spy_end and spy_end > 0:
+        spy_bh_pct = (spy_end - spy_start) / spy_start * 100
+        spy_bh_end_nav = cfg.initial_capital * (1 + spy_bh_pct / 100)
+    else:
+        spy_bh_pct = None
+        spy_bh_end_nav = None
+        _log.warning("SPY 基准不可用（起=%s 终=%s，样本 %d 天）——"
+                     "benchmark/alpha 本次返回 None，不以 0%% 冒充",
+                     spy_start, spy_end, len(spy_prices))
 
     # 胜率
     winners = [t for t in closed if t.net_return_pct > 0]
@@ -697,12 +761,15 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
             "total_pnl_usd": round(final_nav - cfg.initial_capital, 2),
         },
         "benchmark": {
-            "spy_start_price": round(spy_start, 2),
-            "spy_end_price": round(spy_end, 2),
-            "spy_return_pct": round(spy_bh_pct, 2),
-            "spy_end_nav": round(spy_bh_end_nav, 2),
+            "spy_start_price": round(spy_start, 2) if spy_start else None,
+            "spy_end_price": round(spy_end, 2) if spy_end else None,
+            "spy_return_pct": round(spy_bh_pct, 2) if spy_bh_pct is not None else None,
+            "spy_end_nav": round(spy_bh_end_nav, 2) if spy_bh_end_nav is not None else None,
+            # 取数失败时为 False —— 下游据此渲染「基准不可用」而非 0%
+            "available": spy_bh_pct is not None,
         },
-        "alpha": round(total_return_pct - spy_bh_pct, 2),
+        "alpha": (round(total_return_pct - spy_bh_pct, 2)
+                  if spy_bh_pct is not None else None),
         "risk_metrics": {
             "sharpe_ratio": sharpe,
             "profit_factor": round(profit_factor, 3),
@@ -793,12 +860,16 @@ def print_report(result: Dict):
     nav_emoji = "📈" if p["total_return_pct"] >= 0 else "📉"
     print(f"  {nav_emoji} 组合终值：${p['final_nav']:>10,.2f}（{pnl_sign}{p['total_return_pct']:.2f}%）")
     print(f"     PnL：{pnl_sign}${p['total_pnl_usd']:,.2f}")
-    spy_sign = "+" if b["spy_return_pct"] >= 0 else ""
-    print(f"  📊 SPY 基准：${b['spy_end_nav']:>10,.2f}（{spy_sign}{b['spy_return_pct']:.2f}%）")
-    alpha = result["alpha"]
-    alpha_emoji = "🏆" if alpha > 0 else "❌"
-    alpha_sign = "+" if alpha >= 0 else ""
-    print(f"  {alpha_emoji} Alpha vs SPY：{alpha_sign}{alpha:.2f}%")
+    if b.get("spy_return_pct") is None:
+        print("  ⚠️  SPY 基准：不可用（取数失败）——Alpha 无法计算，"
+              "不以 0% 冒充大盘收益")
+    else:
+        spy_sign = "+" if b["spy_return_pct"] >= 0 else ""
+        print(f"  📊 SPY 基准：${b['spy_end_nav']:>10,.2f}（{spy_sign}{b['spy_return_pct']:.2f}%）")
+        alpha = result["alpha"]
+        alpha_emoji = "🏆" if alpha > 0 else "❌"
+        alpha_sign = "+" if alpha >= 0 else ""
+        print(f"  {alpha_emoji} Alpha vs SPY：{alpha_sign}{alpha:.2f}%")
     print("└─────────────────────────────────────────────────────┘")
     print()
 

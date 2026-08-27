@@ -196,3 +196,50 @@ def test_retry_needs_cache_invalidation_when_checks_disagree(monkeypatch):
     fresh = co._fetch_cboe_payload("TMUS", 15)
     assert fresh["last_trade_time"] == "2026-08-26T15:59:59", \
         "清了缓存仍拿回旧数据 —— invalidate_payload_cache 失效"
+
+
+# ══════════════════════════════════════════════════════════════════
+# ET 时钟：合并 v0.45.46 时统一到 ZoneInfo（v0.45.41）
+# ══════════════════════════════════════════════════════════════════
+
+def _freeze_utc(monkeypatch, utc_dt):
+    """冻结 `co.datetime.now`，语义与真 datetime 一致：now(tz) = 该瞬间在 tz 下的表示。
+
+    必须打在 `co.datetime` 上而不是断言 `_ET_TZ` —— 要测的是 `_et_now()`
+    这个函数，不是它用到的常量。（初版就栽在这：断言常量，变异 `_et_now`
+    后测试全绿。）
+    """
+    class _FrozenDT:
+        @staticmethod
+        def now(tz=None):
+            return utc_dt.astimezone(tz) if tz else utc_dt.replace(tzinfo=None)
+
+        @staticmethod
+        def fromisoformat(x):
+            return _dt.datetime.fromisoformat(x)
+    monkeypatch.setattr(co, "datetime", _FrozenDT)
+
+
+@pytest.mark.parametrize("utc_moment,expect_et", [
+    ("2026-03-04T13:30:00+00:00", "08:30"),   # EST（UTC−5）；近似算法会给 09:30
+    ("2026-03-04T14:30:00+00:00", "09:30"),
+    ("2026-07-01T13:30:00+00:00", "09:30"),   # EDT（UTC−4），两种算法一致
+    ("2026-11-10T13:30:00+00:00", "08:30"),   # 已回 EST；近似算法会给 09:30
+])
+def test_et_now_uses_real_dst(monkeypatch, utc_moment, expect_et):
+    """`_et_now` 必须走真 DST，不能用「3–11 月一律 −4」的近似。
+
+    2026 年美东夏令时 3/8 起、11/1 止 —— 近似算法在 3/1–3/7 与 11/2–11/30
+    （约 37 天）算**早一小时**。后果正是 v0.45.46 要修的那一类：
+    真实 08:30 ET（盘前）被算成 09:30 → `is_market_open` 判为盘中
+    → 取 `current_price`（盘前价）而不是 `close`。
+    """
+    _freeze_utc(monkeypatch, _dt.datetime.fromisoformat(utc_moment))
+    assert co._et_now().strftime("%H:%M") == expect_et
+
+
+def test_premarket_in_est_not_reported_open(monkeypatch):
+    """端到端：3 月初盘前时刻，`is_market_open()` 不传参时也必须判为收盘。"""
+    _freeze_utc(monkeypatch, _dt.datetime.fromisoformat("2026-03-04T13:30:00+00:00"))
+    assert co.is_market_open() is False, \
+        "08:30 ET 是盘前，判成盘中会导致取 current_price（盘前价）而非 close"

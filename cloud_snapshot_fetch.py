@@ -127,20 +127,25 @@ def _fetch_one_ticker(ticker: str, business_date: str) -> dict:
     if not payload:
         raise RuntimeError("CBOE payload 为空（网络/403/符号问题）")
 
+    # 两道互补的把关，缺一不可：
+    #   vintage（v0.45.36）——「这份 payload 是不是今天的」
+    #   official_price（v0.45.46）——「今天的这份里，该取哪个价格字段」
+    # 前者管文件新鲜度，后者管字段口径。CDN 卡死会骗过后者，盘后价会骗过前者。
     vintage_date, last_trade_raw = _vintage(payload)
     if vintage_date is not None and vintage_date != business_date:
         raise StaleVintageError(
             f"vintage={vintage_date} != 业务日 {business_date}"
             f"（last_trade_time={last_trade_raw!r}）——盘前/休市拉到的是上一交易日数据")
 
-    price = float(payload.get("current_price") or payload.get("close") or 0.0)
+    from cboe_options import official_price as _official_price
+    price, _price_src = _official_price(payload)
 
     out = {
         "ticker": ticker,
         "schema_version": SCHEMA_VERSION,
         "fetched_at_utc": datetime.now(ZoneInfo("UTC")).isoformat(),
         "price_at_fetch": price,
-        "price_source": "cboe_delayed",
+        "price_source": _price_src,   # cboe_close / cboe_intraday / unavailable
         # vintage 三件套随数据同行：消费端不必回头查 manifest 就能判新鲜度
         "last_trade_time_et": last_trade_raw,
         "vintage_date": vintage_date,

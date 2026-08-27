@@ -24,9 +24,8 @@ import statistics
 import threading
 import time
 import urllib.request
-from datetime import datetime, timedelta
-from datetime import time as _dt_time
-from typing import Dict, List, Optional
+from datetime import datetime, time as _dtime, timedelta
+from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 try:
@@ -114,7 +113,7 @@ def _expected_vintage_date() -> Optional[str]:
         from is_trading_day import is_trading_day
         now = datetime.now(_ET_TZ)
         today = now.date()
-        if is_trading_day(today)[0] and now.time() >= _dt_time(9, 30):
+        if is_trading_day(today)[0] and now.time() >= _ET_OPEN:
             return today.isoformat()
         d = today - timedelta(days=1)
         for _ in range(10):          # 长假最多跨约 5 天，10 天足够
@@ -289,6 +288,79 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
     return None
 
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# 官方收盘价 vs 盘后价（v0.45.46）
+# ────────────────────────────────────────────────────────────────────────────
+# CBOE payload 同时给 `current_price` 与 `close`，含义完全不同：
+#   current_price —— **最近一笔成交**。收盘后它是**盘后价**（延长时段到 20:00 ET）
+#   close         —— 该交易日的**官方收盘价**
+#
+# 全部定时扫描都在 14:00 PDT（= 17:00 ET）跑，即收盘之后、盘后时段之内。
+# 旧代码三处一律 `current_price or close`，于是记录的一直是**盘后价**。
+#
+# 2026-08-26 实测（CBOE 实拉，对照 yfinance 官方收盘）：
+#   CRM   current_price=232.3187  close=205.62  ← 当日财报，盘后 +12.98%
+#   NVDA  current_price=219.53    close=209.66  ← 盘后 +4.71%
+#   MSFT  current_price=495.94    close=496.37  ← 盘后 −0.09%
+# 三只的 `close` 与 yfinance 官方收盘**逐分不差**。
+#
+# 这个偏差不是小数点问题：`price_at_predict` 是所有收益计算的**入场价**
+# （backtester / dynamic_exit_backtest / ic_diagnostics）。用盘后价当入场价，
+# 等于假设能在财报公布后、以盘后价成交——收益全错。
+#
+# 判据：**盘中用 current_price，收盘后用 close，绝不在收盘后用 current_price。**
+_ET_OPEN = _dtime(9, 30)
+_ET_CLOSE = _dtime(16, 0)
+
+
+def _et_now() -> "datetime":
+    """当前美东时间。
+
+    v0.45.41 合并时改用 `ZoneInfo`：原实现是自述的「粗略 DST 近似」
+    （`-4 if 3 <= month <= 11 else -5`），而 2026 年夏令时 3/8 起、11/1 止 ——
+    3/1–3/7 与 11/2–11/30 共约 37 天会算早一小时。后果正是 v0.45.46 要修的
+    那一类：真实 08:30 ET（盘前）被算成 09:30 → `is_market_open` 判为盘中
+    → 取 `current_price`（盘前价）而不是 `close`。
+    """
+    return datetime.now(_ET_TZ)
+
+
+def is_market_open(now_et: "Optional[datetime]" = None) -> bool:
+    """美股常规时段（09:30–16:00 ET 工作日）。不含盘前/盘后。"""
+    et = now_et or _et_now()
+    return et.weekday() < 5 and _ET_OPEN <= et.time() < _ET_CLOSE
+
+
+def official_price(payload: dict, now_et: "Optional[datetime]" = None) -> Tuple[float, str]:
+    """从 CBOE payload 取「该用的」股价。
+
+    Returns
+    -------
+    (price, source)  source ∈ {"cboe_intraday", "cboe_close", "unavailable"}
+        盘中   → current_price（实时成交价才是此刻的真实价格）
+        收盘后 → close（官方收盘价）；**不回退到 current_price**，
+                 那是盘后价，回退等于把这个 bug 原样放回来。
+    取不到返回 (0.0, "unavailable") —— 由调用方决定怎么处理，不猜。
+    """
+    if not isinstance(payload, dict):
+        return 0.0, "unavailable"
+
+    def _num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if f > 0 else None
+
+    if is_market_open(now_et):
+        px = _num(payload.get("current_price")) or _num(payload.get("close"))
+        return (px, "cboe_intraday") if px else (0.0, "unavailable")
+
+    px = _num(payload.get("close"))
+    return (px, "cboe_close") if px else (0.0, "unavailable")
+
+
 def fetch_cboe_chain(
     ticker: str,
     stock_price: float = 0.0,
@@ -305,8 +377,8 @@ def fetch_cboe_chain(
         return None
     options = data["options"]
 
-    # 现价：优先入参 → CBOE current_price → close
-    S = float(stock_price or 0.0) or float(data.get("current_price") or data.get("close") or 0.0)
+    # 现价：优先入参 → 按交易时段选 CBOE 字段（见 official_price 的长注释）
+    S = float(stock_price or 0.0) or official_price(data)[0]
 
     # ── 解析全部合约，按到期日分组 ─────────────────────────────
     # CBOE 每合约 iv 已是小数（实测 ATM ~0.18-0.34，与 yfinance impliedVolatility 同尺度），
