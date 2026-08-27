@@ -72,6 +72,7 @@ import os
 import sqlite3
 import sys
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -143,25 +144,132 @@ def official_closes(tickers: List[str], lo: str, hi: str) -> Dict[Tuple[str, str
     return out
 
 
-def cboe_prev_closes(tickers: List[str]) -> Dict[str, float]:
-    """CBOE `prev_day_close` → {ticker: close}。**只对上一个交易日有效**。
+_TRADING_DAY_CACHE: Dict[str, bool] = {}
 
-    走 `_fetch_cboe_payload`，因此自动继承 v0.45.39 的 vintage 校验 ——
-    CDN 卡死的符号会返回 None 而不是它那份陈旧的 prev_day_close。
+
+def _is_trading_date(d: str) -> bool:
+    """该日期是不是美股交易日。判不了一律按**是**处理 —— 更严格的方向。
+
+    按交易日处理意味着「必须命中当天收盘」，取不到就不动数据；
+    反过来按非交易日处理会允许回退到更早的收盘，那才是危险的默认值。
     """
-    out: Dict[str, float] = {}
+    if d not in _TRADING_DAY_CACHE:
+        try:
+            import datetime as _dt
+            from is_trading_day import is_trading_day
+            _TRADING_DAY_CACHE[d] = bool(is_trading_day(_dt.date.fromisoformat(d))[0])
+        except Exception:  # noqa: BLE001 - 见 docstring
+            _TRADING_DAY_CACHE[d] = True
+    return _TRADING_DAY_CACHE[d]
+
+
+def _resolve_close(closes: Dict, avail: List[str], date: str, ticker: str):
+    """取该预测日该用的收盘价 → `(close, 取自哪天)`；取不到返回 `(None, None)`。
+
+    **交易日：必须命中当天，不许回退。** yfinance 偶发缺一天时回退会静默把
+    前一日收盘当成当日收盘 —— 正是本工具要治的那种污染，方向还反了。
+
+    **非交易日：取该日之前最近一个交易日的收盘。** 周日样本是已退役的
+    `sample-accumulator` 的产物（周日 18:00 跑），它当时能拿到的最新价本来就是
+    上周五收盘。这也是 `backfill_dir_accuracy.py:196`（`_close_at_or_before`）
+    一直在用的口径 —— 两处对齐，不是新发明。
+
+    实测（110 条非交易日样本）：108 条本就与前一交易日收盘一致，
+    只有 CRWD 的 2 条不符 —— 那是 2026-07-02 的 4:1 拆股，库存的是拆股前
+    未复权价（448.13 / 527.77），而 `close_t7` 是复权序列算的。
+    """
+    exact = closes.get((date, ticker))
+    if exact is not None:
+        return exact, date
+    if _is_trading_date(date):
+        return None, None                     # 交易日缺数 → 不猜
+    for d in reversed([x for x in avail if x < date]):
+        v = closes.get((d, ticker))
+        if v is not None:
+            return v, d
+    return None, None
+
+
+def _trading_day_before(d: str) -> Optional[str]:
+    """`d` 之前最近的一个交易日。判不了返回 None。"""
+    try:
+        import datetime as _dt
+        from is_trading_day import is_trading_day
+        x = _dt.date.fromisoformat(d) - _dt.timedelta(days=1)
+        for _ in range(10):
+            if is_trading_day(x)[0]:
+                return x.isoformat()
+            x -= _dt.timedelta(days=1)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _session_of_close(cdn_ts_utc: str) -> Optional[str]:
+    """CBOE payload 的 `close` 属于哪个交易日 —— 由 CDN 生成时刻决定。
+
+    规则（2026-08-27 实拉四只标的验证，见 tests）：
+    **`close` = 文件生成时刻「最近一个已经收盘的交易日」的官方收盘价。**
+
+        NVDA 文件 08-27 08:31 ET（盘前） → close=209.66 = **8/26** 收盘
+        TMO  文件 08-26 21:18 ET（盘后） → close=633.71 = **8/26** 收盘
+
+    刻意**不用** `last_trade_time` 定这个日期：盘前它仍停在上一场的最后成交，
+    无法区分「8/27 盘前的新文件」与「8/26 的旧文件」——初版就栽在这。
+    也刻意**不用** `prev_day_close`：它是再往前一天，归属同样要靠本函数推，
+    多绕一层没有收益（v0.45.47 两次修错都源于此）。
+    """
+    try:
+        import datetime as _dt
+        from is_trading_day import is_trading_day
+        ts = _dt.datetime.strptime(cdn_ts_utc, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=_dt.timezone.utc)
+        et = ts.astimezone(ZoneInfo("America/New_York"))
+        d = et.date()
+        if is_trading_day(d)[0] and et.time() >= _dt.time(16, 0):
+            return d.isoformat()
+        return _trading_day_before(d.isoformat())
+    except Exception:  # noqa: BLE001 - 推不出就不做交叉印证，不猜
+        return None
+
+
+def cboe_official_closes(tickers: List[str]) -> Dict[str, Tuple[str, float]]:
+    """CBOE `close` → `{ticker: (该收盘价所属交易日, close)}`。
+
+    与 yfinance 官方收盘互为独立来源，用于交叉印证。日期由 payload 的 CDN
+    生成时刻自述（`_session_of_close`），**不假设它就是「今天的前一交易日」**：
+    CDN 对不同符号刷新进度不同（2026-08-26 实测 TMO 落后一整个 session）。
+
+    走 `_fetch_cboe_payload`，因此继承 v0.45.39 的 vintage 校验。
+    """
+    out: Dict[str, Tuple[str, float]] = {}
     try:
         import cboe_options as co
+        import urllib.request as _u
+        import json as _j
     except ImportError:
         return out
     for t in sorted(set(tickers)):
+        # 只发一次请求：顶层 `timestamp` 定 session，`data` 过 v0.45.39 的
+        # vintage 闸。走 co._fetch_cboe_payload 会丢掉顶层字段且要再发一次。
         try:
-            p = co._fetch_cboe_payload(t, 15)  # noqa: SLF001 - 见 docstring
+            raw = _u.urlopen(_u.Request(
+                f"https://cdn.cboe.com/api/global/delayed_quotes/options/"
+                f"{co._cboe_symbol(t.upper())}.json",  # noqa: SLF001
+                headers={"User-Agent": "Mozilla/5.0"}), timeout=15).read()
+            j = _j.loads(raw)
         except Exception:  # noqa: BLE001
             continue
-        v = (p or {}).get("prev_day_close")
-        if v:
-            out[t] = float(v)
+        data = j.get("data") or {}
+        try:
+            if co._payload_is_stale(t, data):  # noqa: SLF001 - 复用既有闸，不自写
+                continue
+        except Exception:  # noqa: BLE001
+            pass
+        px = data.get("close")
+        sess = _session_of_close(j.get("timestamp") or "")
+        if px and sess:
+            out[t] = (sess, float(px))
     return out
 
 
@@ -175,6 +283,15 @@ def correct(conn: sqlite3.Connection, *, since: Optional[str] = None,
     tickers = sorted({r["ticker"] for r in rows})
     lo, hi = min(r["date"] for r in rows), max(r["date"] for r in rows)
     closes = official_closes(tickers, lo, hi)
+    # yfinance 批量下载会**部分失败**（实测同一天两次运行：一次全covered，
+    # 一次 102 条无来源）。覆盖率必须报出来 —— 否则「无来源 N 条」看起来
+    # 像数据本身的性质，而不是这一次下载没拿全。
+    _got = {t for _, t in closes}
+    stats_cov = (len(_got), len(tickers))
+    if _got and len(_got) < len(tickers):
+        _log.warning("⚠️ 官方收盘仅覆盖 %d/%d 只标的（yfinance 批量下载部分失败）——"
+                     "本次「无来源」条数受此影响，不代表数据缺失；可稍后重跑",
+                     len(_got), len(tickers))
     if not closes:
         _log.error("拿不到任何官方收盘 —— 不做任何改动")
         return {"rows": len(rows), "aborted": "no_official_closes"}
@@ -183,14 +300,19 @@ def correct(conn: sqlite3.Connection, *, since: Optional[str] = None,
     # 而不是全部 52 只（全抓会串行拉 52 次大 JSON，白等 5 分钟）
     prev_td = _prev_trading_day()
     _pt = sorted({r["ticker"] for r in rows if r["date"] == prev_td}) if prev_td else []
-    cboe = cboe_prev_closes(_pt) if (use_cboe and _pt) else {}
-    if _pt:
-        _log.info("CBOE 交叉印证：%s 有 %d 只样本，已取回 %d 只的 prev_day_close",
+    cboe = cboe_official_closes(_pt) if (use_cboe and _pt) else {}
+    if _pt and use_cboe:
+        _log.info("CBOE 交叉印证：%s 有 %d 只样本，已取回 %d 只的官方收盘（CBOE close）",
                   prev_td, len(_pt), len(cboe))
+    elif _pt:
+        # --no-cboe 时别打「已取回 0 只」——那看起来像试过且失败了
+        _log.info("CBOE 交叉印证：已按 --no-cboe 跳过（%s 有 %d 只样本可印证）",
+                  prev_td, len(_pt))
 
+    avail = sorted({d for d, _ in closes})
     stats = {"rows": len(rows), "corrected": 0, "already_ok": 0,
              "no_source": 0, "disputed": 0, "skipped_done": 0,
-             "cross_checked": 0, "worst": []}
+             "cross_checked": 0, "prior_close_used": 0, "worst": []}
     cur = conn.cursor()
     import datetime as dt
     now = dt.datetime.now().isoformat(timespec="seconds")
@@ -201,14 +323,19 @@ def correct(conn: sqlite3.Connection, *, since: Optional[str] = None,
         # 数据没写错（COALESCE 护住了 raw），但报告在撒谎。
         current = r["price_at_predict"]
         raw = r["price_at_predict_raw"] if r["price_at_predict_raw"] else current
-        truth = closes.get((r["date"], r["ticker"]))
+        truth, truth_date = _resolve_close(closes, avail, r["date"], r["ticker"])
         if truth is None:
             stats["no_source"] += 1
             continue
         src = "yfinance_close"
-        # 交叉印证：仅当该行日期恰是上一个交易日
-        if r["date"] == prev_td and r["ticker"] in cboe:
-            other = cboe[r["ticker"]]
+        if truth_date != r["date"]:
+            # 非交易日样本：如实记下这个价取自哪一天，别让它看起来像当日收盘
+            src = f"yfinance_close@{truth_date}"
+            stats["prior_close_used"] += 1
+        # 交叉印证：只在 CBOE 那个价**确实属于本行日期**时才做（见 cboe_official_closes）
+        _c = cboe.get(r["ticker"])
+        if _c and _c[0] == r["date"]:
+            other = _c[1]
             if abs(other / truth - 1) > DISPUTE_TOL:
                 stats["disputed"] += 1
                 _log.warning("两源分歧，拒绝校正 %s %s：yfinance=%.4f CBOE=%.4f",
@@ -234,6 +361,7 @@ def correct(conn: sqlite3.Connection, *, since: Optional[str] = None,
                 (current, truth, now, src, r["id"]))
     if apply:
         conn.commit()
+    stats["close_coverage"] = stats_cov
     stats["worst"].sort(reverse=True)
     stats["worst"] = stats["worst"][:15]
     return stats
@@ -283,7 +411,12 @@ def main() -> int:
     _log.info("  样本 %d 条 | 需校正 %d | 本就正确 %d | 已校正过 %d | 无来源 %d | 两源分歧拒改 %d",
               st["rows"], st["corrected"], st["already_ok"],
               st["skipped_done"], st["no_source"], st["disputed"])
-    _log.info("  其中经 CBOE 交叉印证：%d 条", st["cross_checked"])
+    _log.info("  其中经 CBOE 交叉印证：%d 条 | 非交易日取前一交易日收盘：%d 条",
+              st["cross_checked"], st.get("prior_close_used", 0))
+    _cov = st.get("close_coverage")
+    if _cov and _cov[0] < _cov[1]:
+        _log.info("  ⚠️ 官方收盘覆盖 %d/%d 只标的 —— 「无来源」受此影响，可稍后重跑",
+                  _cov[0], _cov[1])
     if st["worst"]:
         _log.info("\n  偏离最大的 %d 条：", len(st["worst"]))
         _log.info(f"  {'日期':11s}{'标的':7s}{'原值':>11s}{'官方收盘':>11s}{'偏离':>9s}")
