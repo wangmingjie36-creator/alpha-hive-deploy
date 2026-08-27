@@ -612,9 +612,30 @@ class PredictionStore:
                     except (sqlite3.Error, ValueError, KeyError, TypeError):
                         pass
 
+                # ── v0.45.52：SPY 同期基准 ──
+                # 「均收益 +0.10%」单看没有意义 —— 同期大盘是涨是跌决定了它
+                # 到底算好还是算差。取**同一批已结算样本**的 spy_return_t7 均值，
+                # 口径与 avg_return 对齐（同样的 cutoff、同样的模糊样本排除）。
+                # 取不到就留 None，由渲染层整行省略 —— 不用 0 兜底，
+                # 0 是「大盘恰好没动」，与「没算出来」完全是两回事。
+                _spy_avg = _spy_n = None
+                try:
+                    _sr = conn.execute(f"""
+                        SELECT AVG(spy_return_t7) AS a, COUNT(spy_return_t7) AS n
+                        FROM {self.TABLE}
+                        WHERE {checked_col} = 1{_amb} AND date >= ?{_excl}
+                          AND spy_return_t7 IS NOT NULL
+                    """, (cutoff, *_excl_p)).fetchone()
+                    if _sr and _sr["n"]:
+                        _spy_avg, _spy_n = round(float(_sr["a"]), 3), int(_sr["n"])
+                except (sqlite3.Error, ValueError, KeyError, TypeError):
+                    pass
+
                 return {
                     "period": period,
                     "days_window": days,
+                    "spy_avg_return": _spy_avg,    # 同期 SPY 均收益（%），None = 不可得
+                    "spy_sample_n": _spy_n,
                     "metric": "direction" if _use_dir else "trade",
                     "directional_accuracy": round(_dir_cor / _dir_tot, 3) if _dir_tot else 0.0,
                     "directional_total": _dir_tot,

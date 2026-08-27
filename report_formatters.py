@@ -153,12 +153,37 @@ def _build_market_expectations(sorted_results: list) -> List[str]:
             pc = details.get("put_call_ratio")
             gamma = details.get("gamma_exposure")
             if iv is not None:
-                md.append(f"- IV Rank：{iv}")
+                _src = details.get("iv_rank_source")
+                # iv_rank_source 必须同行显示：hv_proxy 与真实 IV 历史算出来的
+                # 是两个东西（见 MEMORY「IV Rank 口径」），不标就分不出来
+                md.append(f"- IV Rank：{iv}" + (f"（来源 {_src}）" if _src else ""))
             if pc is not None:
                 pc_val = pc if isinstance(pc, (int, float)) else pc
                 md.append(f"- Put/Call Ratio：{pc_val}")
             if gamma is not None:
                 md.append(f"- Gamma Exposure：{gamma}")
+            # ── v0.45.52：IV-RV 价差 / RV30 / IV Skew 比值 ──
+            # 数据一直都在（8/26 实测 30/30 覆盖），此前从未渲染到日报。
+            # 一律「有才写」，缺就整行不出现 —— 不用 0 或 5.0 兜底，
+            # 那会把「没算出来」画成「恰好中性」。
+            _ivrv = details.get("iv_rv_detail") or {}
+            _spread = details.get("iv_rv_spread", _ivrv.get("iv_rv_spread"))
+            _sig = details.get("iv_rv_signal", _ivrv.get("iv_rv_signal"))
+            _rv30 = _ivrv.get("rv_30d")
+            if isinstance(_spread, (int, float)):
+                _tail = {"expensive": "期权偏贵", "cheap": "期权偏便宜",
+                         "fair": "定价合理"}.get(_sig, _sig or "")
+                md.append(f"- IV-RV 价差：{_spread:+.1f}pp"
+                          + (f"（{_tail}）" if _tail else ""))
+            if isinstance(_rv30, (int, float)):
+                md.append(f"- 30 日实现波动率（RV30）：{_rv30:.1f}%")
+            _skew = details.get("iv_skew_ratio",
+                                (details.get("iv_skew_detail") or {}).get("skew_ratio"))
+            if isinstance(_skew, (int, float)):
+                _sk_sig = details.get("iv_skew_signal",
+                                      (details.get("iv_skew_detail") or {}).get("skew_signal"))
+                md.append(f"- IV Skew 比值：{_skew:.2f}"
+                          + (f"（{_sk_sig}）" if _sk_sig else ""))
             unusual = details.get("unusual_activity", [])
             if unusual:
                 md.append(f"- 异常活动：{len(unusual)} 个信号")
@@ -574,6 +599,19 @@ def _build_backtest(backtest_stats) -> List[str]:
             f"**样本**：{total} 条 | "
             f"**准确率**：{acc * 100:.1f}% ({correct}/{total}) | "
             f"**平均收益**：{avg_ret:+.2f}%"
+        )
+    # ── v0.45.52：SPY 同期基准 ──
+    # 「平均收益 +0.10%」单看没有意义 —— 同期大盘是涨是跌决定了它算好还是算差。
+    # 取不到就整行省略（backtester 给 None），不用 0 兜底：
+    # 0 是「大盘恰好没动」，与「没算出来」完全是两回事。
+    _spy = backtest_stats.get("spy_avg_return")
+    if isinstance(_spy, (int, float)):
+        _sn = backtest_stats.get("spy_sample_n")
+        _excess = avg_ret - _spy
+        md.append(
+            f"**SPY 同期基准**：{_spy:+.2f}%"
+            + (f"（{_sn} 条同口径样本）" if _sn else "")
+            + f" | **超额**：{_excess:+.2f}pp"
         )
     md.append("")
     by_ticker = backtest_stats.get("by_ticker", {})

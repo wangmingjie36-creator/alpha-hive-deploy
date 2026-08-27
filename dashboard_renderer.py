@@ -432,6 +432,13 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     gsr = oracle.get("gamma_squeeze_risk", None)
     iv_current = oracle.get("iv_current", None)
     signal_sum = oracle.get("signal_summary", "")
+    # ── v0.45.52：IV-RV 价差与 30 日实现波动率 ──
+    # 数据一直都在（30/30 覆盖），只是从未渲染到站上。
+    # rv_30d 取结构化字段，**不从 iv_rv_note 文本里抠**。
+    _ivrv = oracle.get("iv_rv_detail") or {}
+    iv_rv_spread = oracle.get("iv_rv_spread", _ivrv.get("iv_rv_spread"))
+    iv_rv_signal = oracle.get("iv_rv_signal", _ivrv.get("iv_rv_signal"))
+    rv_30d = _ivrv.get("rv_30d")
     # ── 价格数据（#10）── fallback: ScoutBee → OracleBee discovery → yfinance
     scout_det = ad.get("ScoutBeeNova", {}).get("details", {})
     _price_raw = scout_det.get("price")
@@ -582,6 +589,10 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         "flow_color": flow_color,
         "gsr": gsr or "-",
         "iv_current": f"{iv_current:.1f}%" if iv_current is not None else "-",
+        # v0.45.52：缺就显示 "-"，不用 0 兜底（0 价差是「IV 恰等于 RV」，含义完全不同）
+        "iv_rv_spread": f"{iv_rv_spread:+.1f}pp" if isinstance(iv_rv_spread, (int, float)) else "-",
+        "iv_rv_signal": iv_rv_signal or "-",
+        "rv_30d": f"{rv_30d:.1f}%" if isinstance(rv_30d, (int, float)) else "-",
         "signal_sum": _html.escape(signal_sum[:45]) if signal_sum else "",
         # 维度数据质量
         "dim_dq": dim_dq,
@@ -1606,6 +1617,8 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
               <div class="dg-item"><span class="dg-label">看空强度</span><span class="dg-value">{_det6['bear_score']:.1f}</span></div>
               <div class="dg-item"><span class="dg-label">数据真实度</span><span class="dg-value">{_det6['real_pct']}</span></div>
               <div class="dg-item"><span class="dg-label">GEX</span><span class="dg-value">{_det6['gex']}</span></div>
+              <div class="dg-item" title="IV 减 RV30 的价差。正=期权偏贵（利于卖方），负=期权偏便宜"><span class="dg-label">IV-RV</span><span class="dg-value">{_det6['iv_rv_spread']}</span></div>
+              <div class="dg-item" title="过去 30 个交易日的年化已实现波动率"><span class="dg-label">RV30</span><span class="dg-value">{_det6['rv_30d']}</span></div>
               <div class="dg-item"><span class="dg-label">期权流向</span><span class="dg-value" style="color:{_det6['flow_color']}">{_det6['flow_dir']}</span></div>
             </div>
             <div class="radar-mini"><canvas id="radar-expand-{_html.escape(_tc6)}" width="200" height="160"></canvas></div>
