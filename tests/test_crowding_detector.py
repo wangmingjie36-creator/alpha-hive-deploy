@@ -59,19 +59,29 @@ class TestCalculateCrowdingScore:
         score, components = detector.calculate_crowding_score(_high_activity_metrics())
         assert score > 60, f"Expected high score (>60) for high activity, got {score}"
 
-    def test_empty_metrics_returns_valid_score(self):
-        """Empty metrics dict should not crash and should return a valid score."""
+    def test_empty_metrics_returns_none_not_a_score(self):
+        """v0.45.50：空 metrics 必须给 None，不是一个有效分。
+
+        旧断言 `0 <= score <= 100` 把 bug 固化成了不变式 —— 实测旧行为是
+        score=20.59 →「低拥挤度」→ get_adjustment_factor **1.2（加 20% 分）**，
+        即「一条拥挤度数据都没拿到」被当成利好。
+        """
         detector = CrowdingDetector("TEST")
         score, components = detector.calculate_crowding_score({})
-        assert 0 <= score <= 100
+        assert score is None, "全分量不可得必须返回 None"
         assert isinstance(components, dict)
+        assert all(v is None for v in components.values())
+        assert detector.get_adjustment_factor(score) == 1.0, "不可得必须中性，不得加分"
+        assert detector.get_crowding_category(score) == ("数据不可用", "gray")
 
     def test_score_always_in_0_100_range(self):
         """Score is clamped to [0, 100] regardless of input."""
         detector = CrowdingDetector("TEST")
-        for metrics in [_low_activity_metrics(), _medium_activity_metrics(), _high_activity_metrics(), {}]:
+        for metrics in [_low_activity_metrics(), _medium_activity_metrics(), _high_activity_metrics()]:
             score, _ = detector.calculate_crowding_score(metrics)
             assert 0 <= score <= 100, f"Score {score} out of [0, 100] range"
+        # 空 metrics 走 None 分支，见 test_empty_metrics_returns_none_not_a_score
+        assert detector.calculate_crowding_score({})[0] is None
 
     def test_returns_tuple_of_score_and_dict(self):
         """calculate_crowding_score returns (float, dict)."""

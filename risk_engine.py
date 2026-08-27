@@ -829,17 +829,29 @@ def run_full_risk_analysis(
             try:
                 from data_pipeline import fetch_stock_data as _fsd_re
                 _sd_re = _fsd_re(ticker)
+                # ── v0.45.50：不要在这里替 _vol_pct 做决定 ──
+                # 下方第 ~862 行的注释写着「σ 不可得就写 None，不要用 30 冒充一个
+                # 观测值」（v0.45.15），而 `_vol_pct()` 也确实在键缺失时返回 None。
+                # 但这两行 `or 30.0` **在守卫之前就把缺失填成了 30.0**，
+                # 于是 _vol_pct 永远看不到「缺失」—— 守卫写对了，却被上游架空。
+                # 30% 年化波动率是一个非常典型的大盘股读数，与真实观测不可区分。
+                _v_raw = _sd_re.get("volatility_20d")
+                _m_raw = _sd_re.get("momentum_5d")
+                _vr_raw = _sd_re.get("volume_ratio")
                 stock_data = {
                     "price": float(_sd_re.get("price") or 0.0),
-                    "volatility_20d": float(_sd_re.get("volatility_20d") or 30.0),
-                    "momentum_5d": float(_sd_re.get("momentum_5d") or 0.0),
-                    "volume_ratio": float(_sd_re.get("volume_ratio") or 1.0),
+                    "volatility_20d": (float(_v_raw) if isinstance(_v_raw, (int, float)) else None),
+                    "momentum_5d": (float(_m_raw) if isinstance(_m_raw, (int, float)) else None),
+                    "volume_ratio": (float(_vr_raw) if isinstance(_vr_raw, (int, float)) else None),
                 }
+                if stock_data["volatility_20d"] is None:
+                    _log.warning("risk_engine: %s 多源链未返回 volatility_20d，"
+                                 "σ 置 None（不以 30%% 冒充观测值）", ticker)
             except Exception as e2:
                 _log.error("risk_engine: %s 多源链也失败(%s)——price=0 哨兵，风险数字不可信", ticker, e2)
                 stock_data = {
-                    "price": 0.0, "volatility_20d": 30.0,
-                    "momentum_5d": 0.0, "volume_ratio": 1.0,
+                    "price": 0.0, "volatility_20d": None,
+                    "momentum_5d": None, "volume_ratio": None,
                 }
 
     result: Dict = {

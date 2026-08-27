@@ -833,6 +833,7 @@ class Backtester:
             意味着学习闭环本次未获得任何样本。
         """
         saved = 0
+        _unusable: List[str] = []  # v0.45.50：落库但无入场价 ⇒ 统计上不存在
         for ticker, data in swarm_results.items():
             if not isinstance(data, dict):
                 continue
@@ -868,6 +869,20 @@ class Backtester:
                     except Exception as e:  # noqa: BLE001 - 任何取价失败都不阻断落库
                         _log.debug("Price fetch failed for %s: %s", ticker, e)
 
+                # ── v0.45.50：price=0 不是「零元」，是「这条样本作废」──
+                # predictions.price_at_predict 是全部收益计算的入场价，
+                # 而**13 处 SQL 带 `price_at_predict > 0`**（signal_archive /
+                # ic_diagnostics / ic_rerun_readiness / replay_scoring / portfolio_backtest …）。
+                # 所以 price=0 的行对**全部统计不可见** —— 它不是一条差样本，
+                # 是一条根本不存在的样本。
+                # 而旧实现下 `saved += 1` 照常计数、日志照常报「已落库 N 条」，
+                # 两个取价路径的失败又都只有 debug —— 样本静默消失。
+                # DB 实测：BRK-B 2026-08-12 与 08-14 两条即如此（ticker 正则那次事故的遗留）。
+                if not price or price <= 0:
+                    _unusable.append(ticker)
+                    _log.warning("[%s] 取价失败（swarm 与 yfinance 兜底均无价）——"
+                                 "该条落库后 price_at_predict=0，**对全部统计不可见**", ticker)
+
                 # 提取期权分析数据（如果蜂群结果中包含）
                 options_data = data.get("options_data") or {}
 
@@ -887,6 +902,16 @@ class Backtester:
             except Exception as e:  # noqa: BLE001 - 单票失败不得杀死整个落库循环
                 _log.warning("save_predictions 单票处理失败 %s: %s", ticker, e)
 
+        # v0.45.50：把「落库了」与「落库且可用」分开报。
+        # 返回值保持 int（调用方与既有测试依赖它），明细挂在实例上。
+        self.last_save_stats = {
+            "saved": saved,
+            "unusable_no_price": len(_unusable),
+            "unusable_tickers": list(_unusable),
+        }
+        if _unusable:
+            _log.warning("落库 %d 条，其中 **%d 条无入场价、对全部统计不可见**：%s",
+                         saved, len(_unusable), ", ".join(_unusable))
         return saved
 
     # ==================== 执行回测 ====================
@@ -956,8 +981,18 @@ class Backtester:
                         net_ret = cost_res["net_return_pct"]
                         cost_breakdown = cost_res["breakdown"]
                     except Exception as _ce:
-                        _log.debug("Cost application failed %s: %s", ticker, _ce)
-                        net_ret = ret
+                        # ── v0.45.50：净收益算不出时，不许把毛收益冒充成净收益 ──
+                        # net_return_t7 这一列在 portfolio_backtest.py:11 被明确定义为
+                        # 「含滑点+佣金+借券费」，而这里写进去的是**未扣成本的毛收益**，
+                        # 且 cost_breakdown={} 让事后审计也查不出是哪几笔。
+                        # 下游 portfolio_backtest.load_verified_predictions 用
+                        # `WHERE net_return_t7 IS NOT NULL` 取样 —— 于是毛收益混进净收益
+                        # 样本后**没有任何标记可区分**，Net 权益曲线与全部组合级 KPI 被高估。
+                        # 现改为置 None：该笔从净收益口径中诚实缺席，而不是伪装成一笔零成本交易。
+                        _log.warning("[%s] 成本计算失败，net_return_t7 置 None"
+                                     "（不以毛收益冒充净收益）：%s: %s",
+                                     ticker, type(_ce).__name__, _ce)
+                        net_ret = None
                         cost_breakdown = {}
 
                     # SPY 同期基准

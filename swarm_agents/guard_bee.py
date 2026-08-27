@@ -52,6 +52,11 @@ class GuardBeeSentinel(BeeAgent):
                 # 覆盖 bullish_agents 为实际信息素板数据
                 real_metrics["bullish_agents"] = bull
                 crowd, _ = detector.calculate_crowding_score(real_metrics)
+                # v0.45.50：crowd 可为 None ⇒ get_adjustment_factor 返回 1.0（中性），
+                # 而不是旧行为里 0.0 → <30 档 → 1.2 加分。
+                if crowd is None:
+                    _log.warning("GuardBeeSentinel %s 拥挤度全分量不可得，"
+                                 "调整因子取 1.0 中性（不加分也不折扣）", ticker)
                 adj_factor = detector.get_adjustment_factor(crowd)
             except (ImportError, ValueError, KeyError, TypeError) as e:
                 _log.warning("GuardBeeSentinel crowding analysis unavailable for %s: %s", ticker, e)

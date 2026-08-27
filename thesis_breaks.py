@@ -150,15 +150,26 @@ class ThesisBreakMonitor:
             return None
 
     def _check_condition(self, condition: Dict, metric_data: Dict) -> bool:
-        """检查单个条件是否触发"""
-        condition_id = condition["id"]
+        """检查单个条件是否触发。
+
+        v0.45.50：`thesis_breaks_config.json` 现在**同时承载两套 schema**——
+          · 人读散文 `{id, metric, trigger, current_status}` ← 本模块用
+          · 机器可比 `{field, op, value}`                   ← market_intelligence 用
+        本模块只处理散文条目，遇到机器条目原样跳过（而不是 KeyError）。
+        每个求值器跳过自己看不懂的条目，是两套 schema 并存的前提。
+        """
+        if not isinstance(condition, dict):
+            return False
+        condition_id = condition.get("id")
+        trigger = condition.get("trigger")
+        if not condition_id or not trigger:
+            return False        # 机器条目 / 结构异常 —— 不是本模块的活
 
         # 模拟数据查询（实际应从数据源获取）
         if condition_id not in metric_data:
             return False
 
         current_value = metric_data[condition_id]
-        trigger = condition["trigger"]
 
         # 简单的触发逻辑（实际应更复杂）
         if "%" in trigger and ">" in trigger:

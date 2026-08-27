@@ -133,11 +133,17 @@ class TestBuildTrainingDataFromDB:
             direction = "bearish"
             ret = -0.05  # 看空，实际下跌 → 预测正确
             correct = 1   # backtester 标记为正确
+            # v0.45.50：补齐 dimension_scores —— 本测试测的是 bearish/win_7d 逻辑，
+            # 维度缺失是夹具的偶然属性。缺维度的样本现在会被剔除（不再补 5.0 伪造），
+            # 夹具若不带维度就一条都进不来，测不到它真正想测的东西。
+            _dims = json.dumps({"signal": 6.0, "catalyst": 5.5, "sentiment": 4.5,
+                                "odds": 5.0, "risk_adj": 6.0})
             conn.execute(
                 "INSERT INTO predictions "
-                "(date, ticker, final_score, direction, return_t7, correct_t7, checked_t7) "
-                "VALUES (?, ?, ?, ?, ?, ?, 1)",
-                (f"2025-02-{i+1:02d}", f"B{i}", 7.0, direction, ret, correct),
+                "(date, ticker, final_score, direction, dimension_scores, "
+                " return_t7, correct_t7, checked_t7) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+                (f"2025-02-{i+1:02d}", f"B{i}", 7.0, direction, _dims, ret, correct),
             )
         conn.commit()
         conn.close()
@@ -151,8 +157,16 @@ class TestBuildTrainingDataFromDB:
             )
             assert td.actual_return_7d < 0  # 收益确实为负
 
-    def test_handles_missing_dimension_scores(self, predictions_db):
-        """dimension_scores 为空 JSON 时用默认值"""
+    def test_missing_dimension_scores_are_skipped_not_fabricated(self, predictions_db):
+        """v0.45.50：dimension_scores 缺失的样本**剔除**，不再补 5.0。
+
+        旧断言是 `len(result) == 35` + `crowding_score == 50.0` —— 它把伪造行为
+        固化成了不变式。实际后果：一条「某只蜂当天挂了」的记录，会变成一整行
+        内部完全自洽的「各维中性、动量 0%、波动率 12.5%、IV Rank 50」正常样本，
+        模型不会拒绝它，照常学。
+
+        实测代价可控：910 条训练候选里 96.9% 五维齐全，剔除只损失 28 条（3.1%）。
+        """
         conn = sqlite3.connect(predictions_db)
         for i in range(35):
             conn.execute(
@@ -165,10 +179,7 @@ class TestBuildTrainingDataFromDB:
         conn.close()
 
         result = build_training_data_from_db(db_path=predictions_db, min_samples=30)
-        assert len(result) == 35
-        # 默认值检查
-        assert result[0].crowding_score == 50.0  # 5.0 * 10
-        assert result[0].odds_score == 5.0
+        assert result == [], "维度全缺的样本必须被剔除，不得补 5.0 后进入训练集"
 
     def test_nonexistent_db_returns_empty(self, tmp_path):
         """不存在的数据库 → 空列表"""
