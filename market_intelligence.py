@@ -185,11 +185,33 @@ def detect_market_regime(ticker: str = "NVDA") -> Dict[str, Any]:
         import numpy as np
 
         def _get_ma(sym: str, period: int = 200, window: int = max(200, 60)) -> Tuple[float, float]:
-            """返回 (最新收盘价, N日均线) 或 (nan, nan)。"""
+            """返回 (最新收盘价, N日均线) 或 (nan, nan)。
+
+            ⚠️ **必须校验返回的确实是 `sym` 的数据**（v0.45.52）。
+            yfinance 限流时会返回**上一次成功请求的缓存帧**，而原来的守卫只查
+            `empty` 与 `len < period` —— 一份完整的**别家**数据两条都过。
+
+            2026-08-26 实测（那次扫描 yfinance 限流 487 次）：板块层的
+            `_get_ma("SOXX", 20, 40)` 与个股层的 `_get_ma(ticker, 20, 40)`
+            用的是**同一个 period 字符串**（"60d"），于是 SOXX 的均线泄漏进了
+            NVDA / MSFT / TSLA / VKTX 的个股政体 —— 四只标的的 20MA 全是
+            $528（SOXX 真值 529），而 NVDA 自己的 20MA 是 215.56。
+            个股金叉/死叉判断因此建立在半导体 ETF 的均线上。
+
+            校验不通过返回 `(nan, nan)` → 调用方走「个股政体数据不可用」，
+            诚实缺失好过安静地用别人的数据。
+            """
             hist = yf.download(sym, period=f"{window+20}d", interval="1d",
                                progress=False, auto_adjust=True)
             if hist.empty or len(hist) < period:
                 return float("nan"), float("nan")
+            if getattr(hist.columns, "nlevels", 1) > 1:
+                got = {str(x).upper() for x in hist.columns.get_level_values(-1)}
+                if got and sym.upper() not in got:
+                    _log.warning("yfinance 请求 %s 却返回了 %s 的数据 —— 弃用"
+                                 "（限流时返回缓存帧，见本函数 docstring）",
+                                 sym, ",".join(sorted(got)))
+                    return float("nan"), float("nan")
             closes = hist["Close"].dropna().values.flatten()
             ma = float(np.mean(closes[-period:]))
             return float(closes[-1]), ma
