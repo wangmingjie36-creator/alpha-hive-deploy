@@ -627,8 +627,13 @@ window.AH.initTradingStats=function(){
   if(real && real.final_nav!=null){
     // === 真实回测口径（含并发限制）===
     var netPct=Number(real.total_return_pct)||0;
-    var spyPct=Number(real.spy_return_pct)||0;
-    var alphaPct=Number(real.alpha_vs_spy)||0;
+    // v0.45.42：SPY 取数失败时后端给 null。旧代码 `Number(null)||0` → 0，
+    // 于是 "SPY 同期 0%"，而 Alpha = 组合收益 − 0 = 组合收益本身。
+    // 2026-08-26 实测：网站显示 Alpha +4.29%，真值 −5.62%（符号反了）。
+    // 缺失一律渲染 —，与本文件 Sharpe/PF 的既有写法一致。
+    var spyAvail=(real.spy_return_pct!=null);
+    var spyPct=spyAvail?Number(real.spy_return_pct):null;
+    var alphaPct=(real.alpha_vs_spy!=null)?Number(real.alpha_vs_spy):null;
     var sharpe=real.sharpe_ratio;
     var pf=real.profit_factor;
     var maxDd=Number(real.max_drawdown_pct)||0;
@@ -637,8 +642,8 @@ window.AH.initTradingStats=function(){
     var maxConc=Number(real.max_concurrent)||15;
 
     var netColor=netPct>=0?'var(--bull)':'var(--bear)';
-    var spyColor=spyPct>=0?'var(--bull)':'var(--bear)';
-    var alphaColor=alphaPct>=0?'var(--bull)':'var(--bear)';
+    var spyColor=!spyAvail?'var(--mt)':(spyPct>=0?'var(--bull)':'var(--bear)');
+    var alphaColor=(alphaPct==null)?'var(--mt)':(alphaPct>=0?'var(--bull)':'var(--bear)');
     var pfColor=pf>=1.5?'var(--bull)':(pf>=1?'#f59e0b':'var(--bear)');
     var shColor=sharpe>=1?'var(--bull)':(sharpe>=0?'#f59e0b':'var(--bear)');
 
@@ -648,9 +653,10 @@ window.AH.initTradingStats=function(){
       '</div>';
     html+=card((netPct>=0?'+':'')+netPct.toFixed(2)+'%','Net 累计收益',netColor,
       '$'+Math.round(real.final_nav).toLocaleString()+' / 起始 $'+Math.round(initCap).toLocaleString());
-    html+=card((spyPct>=0?'+':'')+spyPct.toFixed(2)+'%','SPY 同期基准',spyColor,
-      '$'+Math.round(real.spy_end_nav||initCap).toLocaleString());
-    html+=card((alphaPct>=0?'+':'')+alphaPct.toFixed(2)+'%','Alpha vs SPY',alphaColor,'剥离市场后超额');
+    html+=card(spyAvail?((spyPct>=0?'+':'')+spyPct.toFixed(2)+'%'):'—','SPY 同期基准',spyColor,
+      spyAvail?('$'+Math.round(real.spy_end_nav||initCap).toLocaleString()):'基准取数失败');
+    html+=card((alphaPct!=null)?((alphaPct>=0?'+':'')+alphaPct.toFixed(2)+'%'):'—','Alpha vs SPY',alphaColor,
+      (alphaPct!=null)?'剥离市场后超额':'无基准，无法计算');
     html+=card((sharpe!=null?(sharpe>=0?'+':'')+Number(sharpe).toFixed(2):'—'),'Sharpe (净值)',shColor,'年化 ×√36');
     html+=card((pf!=null?Number(pf).toFixed(2):'—'),'Profit Factor',pfColor,'>1.5 好');
     html+=card(winRate.toFixed(1)+'%','净值胜率','var(--t)',trades+' 笔入场');
@@ -667,9 +673,14 @@ window.AH.initTradingStats=function(){
     // === 退回到独立每笔模型（理论上限）===
     var netRetT=(Number(ts.final_cap_net)||initCap)/initCap-1;
     var grossRetT=(Number(ts.final_cap_gross)||initCap)/initCap-1;
-    var spyRetT=(Number(ts.final_cap_spy)||initCap)/initCap-1;
+    // v0.45.43：这条「理论上限口径」分支正是 realistic 缺失时实际渲染的那条。
+    // 旧写法 `||initCap` / `||0` 把「没算出来」变成「大盘 0%、无超额」——
+    // 2026-08-26 用户看到的就是它。缺失一律 —。
+    var spyAvailT=(ts.final_cap_spy!=null);
+    var spyRetT=spyAvailT?(Number(ts.final_cap_spy)/initCap-1):null;
+    var alphaAvailT=(ts.alpha_vs_spy!=null);
     var netColorT=netRetT>=0?'var(--bull)':'var(--bear)';
-    var alphaColorT=(ts.alpha_vs_spy||0)>=0?'var(--bull)':'var(--bear)';
+    var alphaColorT=!alphaAvailT?'var(--mt)':((ts.alpha_vs_spy>=0)?'var(--bull)':'var(--bear)');
     var pfColorT=ts.profit_factor>=1.5?'var(--bull)':(ts.profit_factor>=1?'#f59e0b':'var(--bear)');
     var shColorT=ts.sharpe_net>=1?'var(--bull)':(ts.sharpe_net>=0?'#f59e0b':'var(--bear)');
 
@@ -680,9 +691,11 @@ window.AH.initTradingStats=function(){
     html+=card((netRetT*100).toFixed(2)+'%','Net 累计收益（理论上限）',netColorT,
       '$'+Math.round(ts.final_cap_net||initCap).toLocaleString());
     html+=card((grossRetT*100).toFixed(2)+'%','Gross 累计（不扣成本）','var(--t)','纸面参考');
-    html+=card((spyRetT*100).toFixed(2)+'%','SPY 同期',(spyRetT>=0?'var(--bull)':'var(--bear)'),
-      '$'+Math.round(ts.final_cap_spy||initCap).toLocaleString());
-    html+=card(((ts.alpha_vs_spy||0)>=0?'+':'')+(ts.alpha_vs_spy||0).toFixed(2)+'%','vs SPY Alpha (上限)',alphaColorT,'独立每笔假设');
+    html+=card(spyAvailT?((spyRetT*100).toFixed(2)+'%'):'—','SPY 同期',
+      !spyAvailT?'var(--mt)':(spyRetT>=0?'var(--bull)':'var(--bear)'),
+      spyAvailT?('$'+Math.round(ts.final_cap_spy).toLocaleString()):'基准取数失败');
+    html+=card(alphaAvailT?(((ts.alpha_vs_spy>=0)?'+':'')+Number(ts.alpha_vs_spy).toFixed(2)+'%'):'—',
+      'vs SPY Alpha (上限)',alphaColorT,alphaAvailT?'独立每笔假设':'无基准，无法计算');
     html+=card((ts.sharpe_net!=null?ts.sharpe_net.toFixed(2):'—'),'Sharpe (净值)',shColorT,'>1 可用');
     html+=card((ts.profit_factor!=null?ts.profit_factor.toFixed(2):'—'),'Profit Factor',pfColorT,'>1.5 好');
     html+=card((ts.net_win_rate||0).toFixed(1)+'%','净值胜率','var(--t)','每笔扣成本后');

@@ -403,7 +403,11 @@ class CBOESource:
             if not payload:
                 self.breaker.record_failure("no_data")
                 return None
-            price = float(payload.get("current_price") or payload.get("close") or 0.0)
+            # v0.45.46：按交易时段选字段。旧写法 `current_price or close` 在
+            # 收盘后拿到的是**盘后价**——全部定时扫描都在 17:00 ET 跑。
+            # 实测 CRM 2026-08-26（财报日）盘后 232.32 vs 官方收盘 205.62。
+            from cboe_options import official_price
+            price, _px_src = official_price(payload)
             if price <= 0:
                 self.breaker.record_failure("zero_price")
                 return None

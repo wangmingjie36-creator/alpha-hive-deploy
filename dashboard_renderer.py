@@ -839,7 +839,9 @@ def _load_accuracy_data() -> dict:
         "net_win_rate": 0.0, "sharpe_net": None,
         "max_dd_net_pct": 0.0, "max_dd_gross_pct": 0.0,
         "profit_factor": None,
-        "total_spy_ret": 0.0, "alpha_vs_spy": 0.0,
+        # v0.45.43：None 而非 0.0。0.0 读作「大盘同期零涨跌 / 无超额收益」，
+        # 是个合法可解读的假读数；计算失败时它会冒充真实结果（本次实测如此）。
+        "total_spy_ret": None, "alpha_vs_spy": None,
         "initial_capital": 100000.0,
     }
     try:
@@ -933,11 +935,15 @@ def _load_accuracy_data() -> dict:
                 _gross_dir_adj = -_r7_raw if _dir_lc == "bearish" else _r7_raw
                 _net = _eqr["net_return_t7"]
                 # net_return_t7 已在 SQL WHERE 保证 NOT NULL，无需兜底
-                _spy = _eqr["spy_return_t7"] if _eqr["spy_return_t7"] is not None else 0.0
+                # v0.45.42：缺 SPY 基准的样本不再兜底成 0.0（=「那周大盘没动」），
+                # 改为整笔跳过基准累加——曲线少一个点，好过多一个假点。
+                _spy_raw = _eqr["spy_return_t7"]
+                _spy = _spy_raw if _spy_raw is not None else None
 
                 _gross_rets.append(_gross_dir_adj)
                 _net_rets.append(_net)
-                _spy_rets.append(_spy)
+                if _spy is not None:
+                    _spy_rets.append(_spy)
 
                 if _net > 0:
                     _wins_net.append(_net)
@@ -949,7 +955,7 @@ def _load_accuracy_data() -> dict:
                 if _is_accepted:
                     _pnl_gross = _fixed_size_usd * (_gross_dir_adj / 100.0)
                     _pnl_net = _fixed_size_usd * (_net / 100.0)
-                    _pnl_spy = _fixed_size_usd * (_spy / 100.0)
+                    _pnl_spy = _fixed_size_usd * (_spy / 100.0) if _spy is not None else 0.0
                     _cap_gross += _pnl_gross
                     _cap_net += _pnl_net
                     _cap_spy += _pnl_spy
@@ -971,7 +977,13 @@ def _load_accuracy_data() -> dict:
                     "direction": _eqr["direction"],
                     "gross_ret": round(_gross_dir_adj, 2),
                     "net_ret": round(_net, 2),
-                    "spy_ret": round(_spy, 2),
+                    # v0.45.43：_spy 自 v0.45.42 起可为 None（缺基准的样本）。
+                    # 旧行 `round(_spy, 2)` 对 None 抛 TypeError，被下方
+                    # `except ... _log.debug` 整块吞掉 → equity_curve 与
+                    # trading_stats["realistic"] 全部不生成，而 _trading_stats
+                    # 的预置默认值（total_spy_ret=0.0 / alpha_vs_spy=0.0）让
+                    # 结果看起来"算过了"。这是我在 v0.45.42 自己引入的回归。
+                    "spy_ret": (round(_spy, 2) if _spy is not None else None),
                     "exit_reason": _eqr["exit_reason"] or "T7_CLOSE",
                     "cap_gross": round(_cap_gross, 2),
                     "cap_net": round(_cap_net, 2),
@@ -1074,7 +1086,12 @@ def _load_accuracy_data() -> dict:
             _log.debug("portfolio_backtest 真实数字加载失败（dashboard 仅显示理论上限）: %s", _pb_err)
 
     except Exception as _eq_err:
-        _log.debug("Equity curve 数据加载失败: %s", _eq_err)
+        # v0.45.43：debug → warning + 堆栈。
+        # 这条 debug 让一个 TypeError 隐身了三次重跑：资金曲线、SPY 基准、
+        # Alpha、realistic 全部没生成，而页面照常渲染（读到的是
+        # _trading_stats 的预置默认值）。静默降级三件套的第二条。
+        _log.warning("Equity curve / trading_stats 计算失败，页面将回落到预置默认值"
+                     "（SPY 与 Alpha 因此不可信）: %s", _eq_err, exc_info=True)
 
     return {
         "stats": _acc_stats,
@@ -2188,9 +2205,21 @@ def render_dashboard_html(report: Dict, date_str: str,
     try:
         from fred_macro import get_macro_context as _get_macro_ctx
         _mctx = _get_macro_ctx()
-        if _mctx.get("data_source") != "fallback":
-            _macro_vix = f"{_mctx.get('vix', 0):.1f}"
-            _macro_10y = f"{_mctx.get('treasury_10y', 0):.2f}%"
+        if _mctx.get("data_source") == "fallback":
+            # 整块宏观被跳过（全显示「—」）。旧实现在这里**什么都不说**，
+            # 于是 8/26 网站宏观区块整块消失而日志里毫无痕迹。
+            logging.getLogger("alpha_hive.dashboard").warning(
+                "宏观数据源降级为 fallback，dashboard 宏观区块将全部显示「—」")
+        else:
+            # v0.45.43：逐字段独立降级。
+            # 旧实现 `.get('vix', 0)` 在「键存在但值为 None」时返回 **None**
+            # （默认值不生效——本项目 MEMORY 记过的经典陷阱），随后
+            # f"{None:.1f}" 抛 TypeError，被外层 except 吞掉 →
+            # **一个字段缺失导致整块宏观消失**。现在各字段互不牵连。
+            _v = _mctx.get("vix")
+            _macro_vix = f"{_v:.1f}" if isinstance(_v, (int, float)) else "—"
+            _t = _mctx.get("treasury_10y")
+            _macro_10y = f"{_t:.2f}%" if isinstance(_t, (int, float)) else "—"
             _yc = _mctx.get("yield_curve", "unknown")
             _yc_map = {"normal": "正常", "flat": "趋平", "inverted": "倒挂"}
             _yc_cls_map = {"normal": "yc-ok", "flat": "yc-warn", "inverted": "yc-bad"}
@@ -2198,11 +2227,11 @@ def render_dashboard_html(report: Dict, date_str: str,
             _macro_yc_cls = _yc_cls_map.get(_yc, "")
             # 黄金指标
             _gld_trend = _mctx.get("gold_trend", "stable")
-            _gld_chg = _mctx.get("gold_change_pct", 0.0)
-            if _gld_trend in ("surging", "rising", "falling"):
+            _gld_chg = _mctx.get("gold_change_pct")
+            if _gld_trend in ("surging", "rising", "falling") and isinstance(_gld_chg, (int, float)):
                 _macro_gld = f"{_gld_chg:+.1f}%"
                 _macro_gld_cls = "gld-up" if _gld_chg > 0 else "gld-dn"
-            elif _mctx.get("gold_price"):
+            elif isinstance(_mctx.get("gold_price"), (int, float)):
                 _macro_gld = f"${_mctx['gold_price']:.0f}"
             # 板块轮动 HTML
             _sr = _mctx.get("sector_rotation", {})
@@ -2221,7 +2250,12 @@ def render_dashboard_html(report: Dict, date_str: str,
     except ImportError:
         pass
     except Exception as e:
-        logging.getLogger("alpha_hive.dashboard").debug("宏观指标加载失败: %s", e)
+        # v0.45.43：从 debug 提到 warning。2026-08-26 渲染时 yfinance 挂了，
+        # 整块宏观（VIX / 10Y / 收益率曲线 / 黄金 / 板块轮动）全成「—」，
+        # 而唯一的痕迹是一条 debug 日志 —— 等于没有。缺数据可以，
+        # 缺得无声不行。
+        logging.getLogger("alpha_hive.dashboard").warning(
+            "宏观指标加载失败，本次 dashboard 宏观区块将全部显示「—」: %s", e)
 
     # ── 升级 E: 快速预计算 Score Delta（对比昨天） ──
     _score_deltas = {}  # {ticker: {"delta": float, "html": str}}

@@ -84,14 +84,16 @@ def _fetch_one_ticker(ticker: str) -> dict:
     payload = co._fetch_cboe_payload(ticker, 15)  # noqa: SLF001 —— 进程缓存入口，见模块 docstring
     if not payload:
         raise RuntimeError("CBOE payload 为空（网络/403/符号问题）")
-    price = float(payload.get("current_price") or payload.get("close") or 0.0)
+    # v0.45.46：按交易时段选字段，收盘后取官方收盘价而非盘后价。
+    from cboe_options import official_price as _official_price
+    price, _price_src = _official_price(payload)
 
     out = {
         "ticker": ticker,
         "schema_version": SCHEMA_VERSION,
         "fetched_at_utc": datetime.now(ZoneInfo("UTC")).isoformat(),
         "price_at_fetch": price,
-        "price_source": "cboe_delayed",
+        "price_source": _price_src,   # cboe_close / cboe_intraday / unavailable
     }
     # 三个解析各自独立失败，不连坐；哪个为 None 就如实存 None + 原因键
     chain = co.fetch_cboe_chain(ticker, price)

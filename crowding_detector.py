@@ -416,7 +416,12 @@ class CrowdingDetector:
             "google_trends": f"{metrics.get('google_trends_percentile', 0):.0f} 百分位",
             "consensus_strength": f"{metrics.get('bullish_agents', 0)}/6 看多",
             "seeking_alpha_views": f"{metrics.get('seeking_alpha_page_views', 0):,} 次/周",
-            "short_squeeze_risk": f"+{metrics.get('price_momentum_5d', 0):.1f}% (5d)"
+            # v0.45.44：price_momentum_5d 现在可为 None（取数失败），
+            # `.get(k, 0)` 挡不住「键存在但值为 None」→ f"{None:.1f}" 会抛。
+            "short_squeeze_risk": (
+                "— (5d, 数据不可用)" if metrics.get("price_momentum_5d") is None
+                else f"+{metrics['price_momentum_5d']:.1f}% (5d)"
+            ),
         }
         return displays.get(key, "N/A")
 

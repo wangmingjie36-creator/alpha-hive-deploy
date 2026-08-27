@@ -5,6 +5,499 @@
 
 ---
 
+## [0.45.46] — 2026-08-27 — 收盘后取的一直是盘后价
+
+用户指出「232.32 是 CRM 盘后价」，并要求「检查所有价格都取收盘价格，
+不要取到盘后价格」。查下去发现这不是 CRM 一只的问题，是**整条取价链的系统性偏差**。
+
+### 根因
+
+CBOE payload 同时给两个字段，含义完全不同：
+
+| 字段 | 含义 |
+|---|---|
+| `current_price` | 最近一笔成交。**收盘后 = 盘后价**（延长时段到 20:00 ET） |
+| `close` | 该交易日的**官方收盘价** |
+
+全部定时扫描在 **14:00 PDT = 17:00 ET** 跑，即收盘之后、盘后时段之内。
+而三个取价点一律写成 `current_price or close`：
+
+- `cboe_options.py:189`（主链，`fetch_cboe_chain` 的现价）
+- `data_pipeline.py:405`（`StockData.price`）
+- `cloud_snapshot_fetch.py:87`（云端快照）
+
+于是**记录的一直是盘后价**。
+
+2026-08-27 03:52 ET 实拉 CBOE，对照 yfinance 官方收盘：
+
+| | `current_price` | `close` | 官方收盘 |
+|---|---|---|---|
+| CRM | **232.3187** | 205.62 | 205.62 |
+| NVDA | **219.53** | 209.66 | 209.66 |
+| MSFT | 495.94 | **496.37** | 496.37 |
+
+`close` 与官方收盘**逐分不差**（实测 5 只全部 0.000%）。
+`232.3187` 正是回填前 DB 里 CRM 的值——一字不差，坐实了取的就是 `current_price`。
+
+**为什么这不是小数点问题**：`price_at_predict` 是所有收益计算的**入场价**
+（`backtester` / `dynamic_exit_backtest` / `ic_diagnostics`）。用盘后价当入场价，
+等于假设能在财报公布后、以盘后价成交——收益全错。CRM 2026-08-26 恰是财报日
+（`yf.Ticker("CRM").calendar` 确认），盘后 **+12.98%**，把这个长期偏差
+放大到了肉眼可见。平日它藏在 0.1~5% 里。
+
+### Added — `cboe_options.official_price(payload)`
+
+按交易时段选字段，返回 `(price, source)`：
+
+- **盘中**（09:30–16:00 ET 工作日）→ `current_price`，标 `cboe_intraday`
+- **收盘后 / 盘前 / 周末** → `close`，标 `cboe_close`
+- 取不到 → `(0.0, "unavailable")`
+
+关键设计：**收盘后不回退到 `current_price`**。回退等于把这个 bug 原样放回来——
+「拿不到官方收盘价」与「拿到盘后价」必须是两种不同的结果。
+
+三个取价点全部接线，`cloud_snapshot_fetch` 的 `price_source` 由写死的
+`"cboe_delayed"` 改为真实来源标签。
+
+### Changed — 8/26 的 `price_at_predict` 用官方收盘价重新回填
+
+v0.45.45 用冻结快照回填过一次，但快照价本身也来自 `current_price`
+（只是采于 17:13 ET，盘后刚开始、多数标的还没怎么动，所以偏差小得多）。
+本次改用 `close`，30 只全部对齐官方收盘。
+
+备份：`db_backups/pheromone_pre_close_price_*.db`
+
+### Added — 测试 24 条（`tests/test_official_close_price.py`）
+
+- 时段边界参数化（开盘/收盘瞬间、盘前、周末）
+- 三只实拉 payload 的收盘后取值
+- **`close` 缺失时不许回退 `current_price`**
+- 盘中仍取实时价（不能矫枉过正）
+- 静态闸：三个文件都不许再出现 `current_price or close` 模式
+
+### 未做（记录在案）
+
+- ~~未回溯修正历史日期~~ → **已核查，历史值不需要修正**（2026-08-27 补）。
+
+  我原先写的「历史值普遍是盘后价」**是错的**。用另一 session 已建好的
+  `close_correction.py`（双源交叉：yfinance 官方收盘 + CBOE `prev_day_close`）
+  对全库 1008 条 dry-run：
+
+  | | 条数 |
+  |---|---|
+  | **需校正** | **0** |
+  | 本就与官方收盘一致 | 810 |
+  | 此前已被该工具校正过 | 76 |
+  | 无官方收盘可比（**全部是周日**的扩展池样本） | 110 |
+  | 两源分歧拒改（CBOE CDN 陈旧，我方值经 yfinance 核实为准） | 12 |
+
+  **机制是真的，影响几乎为零**：扫描在 17:10 ET 跑，距收盘仅 10 分钟，
+  多数标的盘后尚未成交或波动 <0.1%，`current_price` 与 `close` 事实上相等。
+  它只在**财报日**咬人——而那些行早已被 `close_correction.py` 抓出并修正
+  （76 条中就有这类）。
+
+  教训与 CRM 那次同形：我从「机制存在」直接推到「影响普遍」，
+  中间少了一步**量一量**。
+- **未给重跑加时间窗护栏**（v0.45.45 已记）：现在能发现窗口漂移，不能阻止。
+
+## [0.45.45] — 2026-08-27 — 冻结股价反而是防护：`price_at_predict` 的两种污染
+
+用户问「云端快照现在是不是只冻结 CBOE 的 IV 了，因为冻结股价会出问题」。
+答案是 **否**（快照仍冻结股价：本地 `_snapshot_stock_price`、云端 `price_at_fetch`），
+但**"冻结股价会出问题"这个前提在实测里是反的**——冻结的那份反而干净。
+
+### 实测对照（8/26，30 只，对照 yfinance 核实的真实收盘）
+
+| 来源 | 中位绝对偏差 | >1% | 最大 |
+|---|---|---|---|
+| DB `price_at_predict`（每次运行现拉） | 0.36% | 8 只 | **+4.71%** (NVDA) |
+| 期权快照 `_snapshot_stock_price`（冻结） | **0.14%** | 1 只 | 1.45% |
+
+### Fixed 🔴 — ① 补跑窗口漂移（本次由我的重跑造成）
+
+为业务日 D 重跑扫描时，若运行时刻已越过 D 的交易时段，现拉的价格早已不代表 D。
+本次 8/26 的最后一次重跑在 **23:57 PDT = 8/27 ET 凌晨 2:57**，于是
+NVDA 的 `price_at_predict` 被写成 219.53，而 8/26 真实收盘是 209.66（**+4.71%**）。
+30 只里 8 只偏差 >1%。
+
+`price_at_predict` 是**所有收益计算的入场价**（`backtester.py:921`、
+`dynamic_exit_backtest.py:113`、`ic_diagnostics.py:231/358`）。NVDA 入场价高 4.71%
+意味着它的 T+7 收益会被低估 4.71pp。
+
+**万幸**：8/26 的 30 条一条都还没 T+7 结算（T+7 = 9/2），污染未传导到任何收益指标。
+
+已从冻结快照回填 30 条（备份 `db_backups/pheromone_pre_price_restore_20260827_002008.db`）。
+
+⚠️ **这是本次会话的操作事故，不是既有 bug**：这个形状与 v0.45.28 隔离的
+8/24 期权污染同源——「为过去某日重跑，却拿了运行时刻的实时数据」。
+期权那侧当时已定性为**不可补、只能缺失**；价格这侧因为快照冻结了当时的观测，
+反而可补。**冻结在这件事上是防护，不是风险。**
+
+### Fixed 🔴 — ② CRM 232.32 是**盘后价**（见 v0.45.46，本条初判有误）
+
+⚠️ **本条最初被我判为「数据源单点乱码」，是错的**（用户指出）。
+232.32 不是坏读数，是 CRM 在 **2026-08-26 财报日**的盘后价
+（`yf.Ticker("CRM").calendar` 确认 Earnings Date = 2026-08-26，盘后 +12.98%）。
+
+真正的成因与 ① **是同一件事**：CBOE payload 里 `current_price` 在收盘后
+就是盘后价，而全部扫描都在 17:00 ET 跑。CRM 只是因为当天有财报，
+把这个长期存在的偏差放大到了肉眼可见。根治见 **v0.45.46**。
+
+保留此条是为了记录判断过程：三条"证据"（近月无此价、期权支撑位在 160/190、
+邻日价格正确）当时看起来互相印证，但它们只能证明**这个价不是当日收盘价**，
+不能证明**它是乱码**。缺的那一步是问「那它是什么价」。
+
+### 修复后
+
+| | 中位绝对偏差 | >1% | 最大 |
+|---|---|---|---|
+| 修复前 | 0.36% | 8 只 | 4.71% |
+| **修复后** | **0.135%** | **1 只** | **1.45%** |
+
+### Added — `scan_coverage_gate.py --check-prices`
+
+两种污染的共同点是**内部自洽性检查抓不到**：快照与 DB 可以彼此一致地错，
+CRM 那种乱码在单日数据里也完全自洽。只有与外部收盘价对照才发现得了。
+
+新增 `check_prices()`：把 `price_at_predict` 与该日真实收盘对照，
+分两档——`≥1%` 列为 ⚠️（多半是窗口漂移），`≥5%` 判为 ❌ 坏读数
+（正常时点差不可能有这个量级）。取不到收盘价时返回「无法判定」而不是「可信」。
+
+默认不跑（需网络、较慢），加 `--check-prices` 启用。实测对污染前的备份
+能同时抓出 CRM 坏读数与 8 只窗口漂移。
+
+### Added — 测试 5 条
+
+含「取不到收盘价必须说不知道，不得默认成价格可信」，以及两种污染各一条复刻用例
+（CRM 12.98% 判 bad、NVDA 4.71% 判 warn —— 量级不同、成因也不同，不该同档处理）。
+
+### 未做（记录在案）
+
+- **未给重跑加时间窗护栏**：现在只是能**发现**窗口漂移，没有阻止它。
+  正确做法是补跑时不再现拉价格、直接用当日冻结快照，但这会改动主扫描路径的
+  取价链，应单独评估。
+- **未回溯核验历史日期**：只查了 8/26。CRM 那种单点乱码可能在其他日期也发生过。
+  `--check-prices` 现在可以逐日跑，但本次没跑。
+
+## [0.45.44] — 2026-08-26 — 我自己引入的回归 + 论点失效闸从未触发过
+
+### Fixed 🔴 — v0.45.42 的回归：资金曲线与 SPY 基准整块没生成
+
+v0.45.42 把 `_spy` 改成可为 None，但**漏掉了一个消费点**：
+
+```python
+"spy_ret": round(_spy, 2),   # round(None, 2) → TypeError
+```
+
+异常被 `except Exception as _eq_err: _log.debug(...)` 整块吞掉，于是
+`equity_curve` 与 `trading_stats["realistic"]` **完全没有生成**。
+而 `_trading_stats` 预置了默认值（`total_spy_ret: 0.0`、`alpha_vs_spy: 0.0`），
+页面照常渲染出「大盘 0%、无超额」——看起来算过了。
+
+**这个 bug 隐身了三次重跑**，因为三样东西同时掩护它：裸 `round` 抛的是
+TypeError（不是取数错误，所以我没往那儿想）、debug 级日志、以及预置默认值。
+
+教训正是本批改动的主题：**把一个值改成可 None，必须把它的每个消费点都找出来
+——漏一个就是一次新的静默降级。**
+
+三处一起改：
+- `round(_spy, 2)` → `round(...) if _spy is not None else None`
+- `_log.debug("Equity curve 数据加载失败")` → `warning` + `exc_info=True`
+- 预置默认值 `total_spy_ret/alpha_vs_spy` 由 `0.0` 改为 `None`
+- `templates/dashboard.js` 的「理论上限口径」分支（`realistic` 缺失时**实际渲染
+  的就是它**）不再 `||0` / `||initCap`
+
+### Fixed 🔴 — 论点失效闸从未触发过一次
+
+`check_thesis_breaks` 实测：极端输入（price $1 vs $100,000 / IV 200% /
+P/C 5.0 / score 0 / 6 条看空）在 NVDA 与 WMT 上**一律返回 `level=None`**。
+
+根因是 schema 对不上：
+
+| | 内容 |
+|---|---|
+| `thesis_breaks_config.json` 存的 | `{id, metric, trigger, data_source, current_status, severity}` —— 人读散文 |
+| `_eval_condition` 要的 | `{field, op, value}` —— 机器可比 |
+
+`cond.get("value")` 恒为 None → 第一行 `if val is None: return False`。
+**7 条条件，一条都没被求值过。**
+
+而 `level=None` 在下游读作「论点完好」。CLAUDE.md 把「任何结论必须附失效条件」
+列为硬约束——这条硬约束长期是靠一个永不触发的闸在"满足"。
+
+另有 **17/30 只标的没有专属配置**，`cfg.get(ticker, cfg.get("NVDA", {}))`
+让 ABBV/AMC/BRK-B/COST/CRM/CVX/DE/DELL/MU/NFLX/SNOW/T… 套用 NVIDIA 的条件
+（数据中心营收环比、AMD/Intel 竞品、中国芯片禁令概率）。
+
+本次**不迁移配置 schema**（那是独立决定，且该文件正被其他 session 编辑），
+只让失败可见：新增 `evaluable` / `unevaluable_reason` 字段区分
+「核对过、没触发」与「根本没核对」，并在两种情况下各打一条 WARNING。
+
+顺带：`market_intelligence.py` 此前**整个模块没有 logger**，所有降级都是静默的。
+
+### Fixed — 拥挤度的数据质量标签是写死的
+
+`real_data_sources.get_real_crowding_metrics` 里：
+
+```python
+"price_momentum_5d": _mom_for_proxy if _mom_for_proxy is not None else 0.0,
+"momentum": "real",   # ← 硬编码字符串
+```
+
+取数失败 → 动量兜底 0.0（读作「5 日横盘」），而质量标签**自称 real**。
+标签不是从数据推导的，是写死的。同一个 dict 里 `bullish_agents` 写的是
+`"real" if board else "default"` —— 正确写法本来就在眼前。
+
+现改为 `"real" if _mom_for_proxy is not None else "unavailable"`，动量本身也
+不再兜底 0.0；同时修掉 `crowding_detector.py:419` 的显示层
+（`.get(k, 0)` 挡不住 None → `f"{None:.1f}"` 会抛）。
+
+### Added — 测试 14 条
+
+- `tests/test_thesis_break_evaluability.py`（10 条）：含 5 组极端输入参数化
+  （证明闸确实没在工作，而不是恰好没触发），以及一组「配置补成机器可比 schema
+  后必须真的能触发」的正例，锁住未来迁移的行为。
+- `tests/test_missing_value_not_zero.py` +4 条：锁住上面那个回归的四个面
+  （裸 round、debug 级 except、预置默认值、JS 上限分支）。
+
+### 未做（记录在案）
+
+- **配置 schema 未迁移**：论点失效闸仍不可求值，只是现在会明说。迁移需要
+  为每只标的定义机器可比条件，是产品决定不是工程决定。
+- **17 只标的仍无专属论点失效配置**。
+- `crowding_detector.py:90-91` 把 None 动量兜底成 0.0 用于打分——改它会动
+  评分口径，按 CLAUDE.md 需要走世代边界，本次未动。
+
+### ⚠️ 审计结果的可信度说明
+
+本批的后三项来自一次 5 视角并行审计（82 条候选）。**该审计的对抗核验阶段
+因 session limit 全灭**（220/300 agent 报错），而我写的筛选逻辑
+`votes.filter(Boolean)` 把报错的核验票过滤掉了，导致 `refuted >= 2` 恒为假
+——**核验全灭时筛选静默退化成「全部放行」**。这正是本批在追的那个缺陷形状，
+出现在我自己的审计脚本里。
+
+因此：**82 条应视为未核验候选，不是结论。** 本 CHANGELOG 只收录我**逐条
+手工复核并实测复现**的三条（论点失效闸、动量质量标签、以及我自己的回归）。
+其余 79 条留待核验。
+
+## [0.45.43] — 2026-08-26 — 期权快照把瞬时故障冻成了当日永久缺失
+
+v0.45.42 定位了 8/26 的 yfinance 故障后，重跑扫描试图补数据 —— **失败了**。
+催化剂恢复（0/30 → 24/30），但 `rv_30d` / `iv_rank` 仍是 1/30，而 yfinance
+当时早已恢复（实测 NVDA/QCOM/TSLA 全部可拉）。查下去发现根因不在取数层。
+
+### Fixed 🔴 — 快照混着两类性质相反的数据，却一视同仁地冻结
+
+`cache/options_snapshot_NVDA_2026-08-26.json`（冻结于 14:13:23）里：
+
+```json
+"rv_30d": null,
+"iv_rank": null,
+"iv_rv_detail": {"error": "yfinance 历史K线不足（0 根，需 ≥15）"}
+```
+
+29/30 份快照如此。重跑时**快照命中即 return，根本没再去算**。
+
+快照里其实是两类东西：
+
+| 类别 | 例子 | 能否重拉 | 该不该冻 |
+|---|---|---|---|
+| 期权链 | IV / OI / strike / GEX | ❌ 接口只有实时快照、无历史，错过即永久丢失 | **必须冻** |
+| 价格历史派生 | `rv_30d` / `iv_rv_*` / hv_proxy 口径 `iv_rank` | ✅ 日K 随时可重拉 | **冻它零收益** |
+
+把第二类一起冻，就把一次约 15 分钟的瞬时故障，升级成了**当日永久缺失**。
+
+新增 `OptionsAgent._refresh_price_derived()`，挂在快照命中处：这些字段若为空
+就地重算并回写快照（带 `_price_derived_refreshed_at` 时间戳留痕）。
+
+三条边界，每条都有测试锁住：
+- **绝不碰期权链字段** —— 那类重算等于伪造。
+- **只重算 `hv_proxy` 口径的 `iv_rank`** —— `real_iv_*` 口径来自自攒 IV 观测库，
+  不是日K 派生，缺了就是真缺；用 HV 顶上正是 v0.43.19 修掉的失真。
+- **重算失败保持「空」** —— 写个假值比缺失更糟；快照健康时不多打一次外网。
+
+实测：8/26 的 30 份快照修复 30/30（NVDA rv=36.14/rank=37.81、TSLA rv=58.98/
+rank=20.06）。重跑后覆盖率闸 **全绿**：rv_30d 30/30、iv_rank 30/30、iv_rv_spread 30/30。
+
+### Fixed — 一个宏观字段缺失会干掉整块宏观
+
+用户报告网站宏观数据消失。`dashboard_renderer` 的宏观块里：
+
+```python
+_macro_vix = f"{_mctx.get('vix', 0):.1f}"
+```
+
+`.get('vix', 0)` 在「键存在但值为 None」时返回 **None**（默认值根本不生效 ——
+本项目 MEMORY 记过的经典陷阱），随后 `f"{None:.1f}"` 抛 TypeError，被外层
+`except Exception` 吞掉 → **VIX / 10Y / 收益率曲线 / 黄金 / 板块轮动整块消失**。
+
+现改为逐字段 `isinstance` 判定，各字段互不牵连。
+
+### Fixed — 宏观降级此前完全无痕
+
+两条路径都不留痕迹：`except` 走的是 **debug** 级；`data_source == "fallback"`
+分支**一句话都不说**，直接跳过整块。于是 8/26 网站宏观区块整块消失而日志干净。
+两处均提为 WARNING 并写明后果（「宏观区块将全部显示「—」」）。
+
+### Changed — 覆盖率闸新增 `iv_rv_spread`
+
+它是 `rv_30d` 的派生项，单独列出便于区分「RV 没算出来」与「RV 有但价差没算」。
+
+### Added — 测试 11 条（`tests/test_snapshot_price_derived_refresh.py`）
+
+含四条边界断言：期权链字段原样不动、`real_iv_*` 口径不许用 HV 顶替、
+样本 HV 被拒、重算失败保持 None。另有一条静态回归闸——
+`analyze()` 的快照命中路径**必须**调用 `_refresh_price_derived`，
+否则这个 bug 会原样回来。
+
+### 未做（记录在案）
+
+- **催化剂覆盖率仍不稳**：重跑后 24/30 → 12/30（恰好压在 40% 闸上）。
+  yfinance 财报日历本身是抖的，尚未加重试/缓存。已可见，未治本。
+- 历史日期（8/26 之前）的快照未回溯修复 —— 只改了机制与当日。
+
+## [0.45.42] — 2026-08-26 — 缺失值不许冒充 0：一次 yfinance 故障暴露的四处「安全默认值」
+
+用户报告 8/26 的 ML 报告 IV-RV / IV Rank / 30日实现波动率 / 催化剂 / SPY 同期基准
+全部丢失，问「是不是 changelog 哪里改坏了」。**不是。** 是 8/26 14:10 那次扫描
+期间 yfinance 全线返回空。但顺着查下来，暴露出四处更值得修的东西。
+
+### 根因（非回归）
+
+代码把失败原因老实存下来了，`iv_rv_detail.error` 直接读得到：
+
+| 8/26 错误 | 数量 |
+|---|---|
+| `yfinance 历史K线不足（0 根，需 ≥15）` | 27 |
+| `yfinance 历史K线不可用（ValueError:No objects to concatenate）` | 2 |
+| 空（成功） | 1 |
+
+唯一成功的 ABBV 来自 12:16 一次单独运行，不在 14:10 的扫描里。8/25 是 30/30 全空错误。
+故障已自行恢复（16:30 实测 NVDA/QCOM/TSLA 全部正常）。
+
+⚠️ **底层机制「待验证」**。已确认的事实是：`yf.download` **返回空 DataFrame
+且不抛异常**（所以 `except` 型防护对它完全无效，`range(3)` 退避重试也无效——
+27 只标的失败得整整齐齐）。至于**为什么**返回空，本次未能确证：
+- 扫描日志里确有 29 条 `401 Invalid Crumb`，一度以为是 crumb 令牌中途失效；
+  但**实测证伪**——手动往 `YfData._crumb` 注入坏值后 `yf.download` 仍正常返回
+  10 行，说明该端点不走 crumb（401 来自 quoteSummary 类端点，是另一回事）。
+- 并发也已排除：8 线程并发 12 只，30/30 成功。
+- 剩余嫌疑是 Yahoo 侧的速率限制/临时封禁，未能在不冒被封风险的前提下复现。
+
+**这不影响本次修复的正确性**：四处「缺失冒充 0」与覆盖率闸都不依赖于知道
+根因是什么，它们要解决的是「失败不可见」。但也**不该假装根因已查明**。
+
+**一个故障干掉这么多字段，是因为它们共用一条取数链：**
+
+```
+yfinance 日K ──┬─→ rv_30d ──→ iv_rv_spread / iv_rv_signal
+               └─→ iv_rank（source=hv_proxy，用 HV 历史代理 IV 历史）
+yfinance 日历 ───→ ChronosBee（details 整个是 {}，不只催化剂）
+yfinance SPY ───→ portfolio_backtest 基准 + 宏观门控
+```
+
+⚠️ 澄清一个长期混淆：**IV Current 走 CBOE 且 8/26 一条没丢**（30/30）。
+丢的是 **IV Rank**，它的 `iv_rank_source` 8/25 与 8/26 **都是 `hv_proxy`** ——
+本来就是 yfinance 口径，不是这次变的（真实 IV 历史仍在自攒，见 v0.43.18）。
+
+### Fixed 🔴 — SPY 基准取数失败让 Alpha 符号反转（严重）
+
+`portfolio_backtest._fetch_spy_prices` 是裸 `yf.Ticker().history()` + `except: return {}`，
+无 http_gate、无重试。空 dict 之后：
+
+    spy_start = 0 → spy_bh_pct = 0 → alpha = 组合收益 − 0 = **组合收益本身**
+
+| | 8/26 网站显示 | 实测真值 |
+|---|---|---|
+| SPY 同期 | **0%** | **+11.7%** |
+| spy_end_nav | $50,000（= 初始值） | $55,852 |
+| **alpha_vs_spy** | **+4.29%** | **−5.62%** |
+
+网站当时在说「跑赢大盘 4.3 个点」，实际跑输 5.6 个点。
+
+**第二个后果**：`_is_risk_off()` 拿不到均线一律 `return False`，而 `macro_gate`
+默认 `True` —— 8/26 的宏观门控一笔没拦，不是没到风险区，是它瞎了。
+
+现改为：走 http_gate + 三次退避重试；取不到时 `benchmark.spy_return_pct` /
+`alpha` 一路给 `None` 并置 `benchmark.available=False`，由渲染层显示「—」。
+另修一个同源潜在 bug：起止日落在非交易日时 `.get()` 也拿不到价，改为取最近交易日。
+
+### Fixed — IV Rank 缺失渲染成 `0.0%`
+
+`generate_ml_report.py` 对期权指标一律 `_safe(..., 0)`。**0.0% 的语义不是
+「没数据」，是「IV 处于历史区间最低点」** —— 一个强烈且完全虚假的做多波动率信号。
+且 `iv_rank` 是 ML 模型头号特征（实测 importance 0.267），不只是显示问题。
+
+同文件 `_rv_30d` 早已因同样理由单独豁免过（行注释 `# 可能是 None —— 不要 _safe`），
+所以当天 IV-RV 老实显示「—」而 IV Rank 显示 0.0%。现把该豁免推广到
+`iv_rank` / `iv_current` / `put_call_ratio` / `total_oi` / `iv_skew_ratio`。
+
+判据（CLAUDE.md 安全默认值）：**这个默认值会不会让下游误以为掌握了信息。**
+
+### Fixed — IV Skew 比从上线起就没显示过真实值
+
+`_ch3_bear` 从 **BearBeeContrarian** 的 details 里取 `iv_skew_ratio`，
+而该字段产自 **OracleBeeEcho**。永远取不到 → 恒定落到 fallback `0`。
+8/25 与 8/26 实测都是 `0.00`，而 OracleBee 里 29/30 有值。
+现改为从 OracleBee 读取，缺失显示「—」。
+
+### Fixed — dashboard 两处把 null 兜底成 0
+
+- `templates/dashboard.js`：`Number(real.spy_return_pct)||0` → null 变 0。
+  改为与本文件 Sharpe/PF 既有写法一致的 `!=null ? ... : '—'`。
+- `dashboard_renderer.py`：`spy_return_t7` 缺失兜底 `0.0`（=「那周大盘没动」），
+  改为跳过该笔的基准累加 —— 曲线少一个点，好过多一个假点。
+
+### Added — `scan_coverage_gate.py`：扫描字段覆盖率闸（编排器 Step 12）
+
+这次故障真正的问题不是 yfinance 挂了，是**挂了没人知道**：每处降级都被
+`except → return _empty` 老实接住，退出码 0，日报照常生成、推 Slack、上站。
+正是 MEMORY「静默降级三件套」的第三条 —— 编排器只看退出码。
+
+新脚本对 6 个关键字段算非空覆盖率，低于阈值即报红。阈值 0.70
+（催化剂 0.40，因并非每只标的任意时点都有已知催化剂）：单只偶发失败是常态，
+30 只里超过 9 只同时失败只可能是上游整体故障。
+
+跨源判别：`likely_network_layer` —— yfinance 与 CBOE 同时降级才提示网络层。
+实测 8/26 该标志为 `False`（CBOE 侧完好），诊断正确。
+
+退出码 `0` 健康 / `1` 检出降级 / `3` 无法判定（`2` 留给「脚本不存在」，与
+`scan_continuity` 一致）。**刻意不阻断主流程**：数据缺失是事实，报告该出还得出，
+只是必须可见。
+
+### Added — 回归测试 26 条
+
+- `tests/test_missing_value_not_zero.py`（13 条）：四处默认值逐条「喂退化数据看它红」。
+  已验证把修复回退后其中 5 条转红。
+- `tests/test_scan_coverage_gate.py`（13 条）：含阈值边界、`0`/`False` 算有值
+  （否则真实的 0 会被误判成故障）、无法判定时**不得给出健康结论**、退出码契约。
+
+### 未做（记录在案）
+
+- **8/26 的 `iv_current` 等 CBOE 字段未受影响，无需补**。
+- ChronosBee 的看空 fallback 文案硬写「期权 IV Skew 偏高（看跌期权溢价）」
+  用于凑满「至少 3 条看空」，**在无数据时等于编造一条信号**（违反「不编数据」）。
+  本次未改 —— 它牵涉「反对蜂硬性下限」的设计取舍，应单独决定。
+
+> ### ⚠️ 版本号 0.45.36 – 0.45.41 的去向（2026-08-27 记）
+>
+> 这几个号**不是遗漏**，是留给并发分支 `claude/verify-changelog-versions-6109ba` 的：
+>
+> | 号段 | 归属 | 状态 |
+> |---|---|---|
+> | 0.45.36 – 0.45.40 | 该分支：云端快照 vintage 校验 / replay_scoring 早绑定 / 快照消费端接线 / CBOE CDN 陈旧防线 / 移除 Google Calendar | 已提交在该分支，**尚未合入 main** |
+> | 0.45.41 | 该分支的 `close_correction.py` | 该分支工作区，**尚未提交** |
+>
+> 起因：两条线在 2026-08-26 同时从 `0.45.35`（提交 `4333c13`）分叉，各自往下编号，
+> **0.45.36–0.45.40 五个号被双方各用了一遍，且内容完全不同**。
+>
+> 处理原则：**先提交的占号**。对方那五条已进 git 历史，我这五条当时只在工作区，
+> 故整体后移到 0.45.42–0.45.46，并空出 0.45.41 给他们在制的 `close_correction.py`。
+>
+> 合并该分支后这段可删。
+
+---
+
 ## [0.45.35] — 2026-08-26 — 二次检查 v0.45.31~34：两个真 bug，都是「复制了已存在的正确实现」
 
 对第 1~6 项改动逐条对抗式复查。发现的两个真 bug **性质相同**：
