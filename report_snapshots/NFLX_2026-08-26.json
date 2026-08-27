@@ -1,14 +1,14 @@
 {
   "ticker": "NFLX",
   "date": "2026-08-26",
-  "composite_score": 5.41,
+  "composite_score": 5.65,
   "direction": "bullish",
   "price_target": 0.0,
   "stop_loss": 0.0,
   "entry_price": 80.95,
   "agent_votes": {
-    "GuardBeeSentinel": 7.94,
-    "OracleBeeEcho": 7.538461538461538
+    "GuardBeeSentinel": 9.18,
+    "OracleBeeEcho": 9.045846153846153
   },
   "weights_used": {
     "signal": 0.2094,
@@ -20,17 +20,17 @@
   "low_conviction": false,
   "low_conviction_reason": "",
   "cs_rank": {
-    "final": 0.552,
-    "signal": 0.655,
-    "catalyst": 0.345,
-    "sentiment": 0.448,
-    "odds": 0.759,
-    "risk_adj": 0.897
+    "final": 0.586,
+    "signal": 0.345,
+    "catalyst": 0.69,
+    "sentiment": 0.379,
+    "odds": 0.931,
+    "risk_adj": 0.931
   },
   "actual_prices": {
     "t1": null,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-08-26T17:43:57.581636"
+  "created_at": "2026-08-26T23:58:15.198008"
 }
