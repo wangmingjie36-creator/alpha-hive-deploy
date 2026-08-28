@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>META 深度研究报告 - Alpha Hive</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500&display=swap" rel="stylesheet">
+    <style>
+        /* ══════════════════════════════════════════════════════════════
+           Alpha Hive 深度研究报告 — 与 index.html 同一套设计令牌。
+           v0.45.4 前这里是 var(--tp)→var(--tp) 紫色渐变 + 白圆角卡 + 大投影 +
+           emoji 标题，与站点自身的「奶油纸底 + Playfair + 铁锈红」完全脱节：
+           从仪表板点进报告像换了个产品。此处不新造第三套审美，直接复用站点令牌。
+           ══════════════════════════════════════════════════════════════ */
+        :root {
+            --bg:#FAF7F2; --surface:#FFFFFF; --surface2:#F5F0E8; --border:#C8BAA8;
+            --tp:#1A1208; --ts:#6B5F52; --tm:#B0A090;
+            --acc:#B7410E; --acc2:#1D6B3A; --acc3:#92601A;
+            --bull:#1D6B3A; --bear:#9B2C2C; --neut:#92601A;
+        }
+        html.dark {
+            --bg:#0A0F1C; --surface:#141928; --surface2:#1a2035; --border:#2a3050;
+            --tp:#e2e8f0; --ts:#94a3b8; --tm:#64748b;
+            --acc:#E05A1F; --acc2:#22c55e; --acc3:#f59e0b;
+            --bull:#22c55e; --bear:#ef4444; --neut:#f59e0b;
+        }
+        * { margin:0; padding:0; box-sizing:border-box; }
+        html { overflow-x:hidden; }
+        body {
+            font-family:'Noto Sans SC',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+            background:var(--bg); color:var(--tp);
+            font-size:14px; line-height:1.75; -webkit-font-smoothing:antialiased;
+            overflow-x:hidden; padding:0;
+        }
+        .container { max-width:860px; margin:0 auto; padding:0 28px 96px; }
+        @media (max-width:600px) { .container { padding:0 18px 64px; } }
+
+        /* ── 刊头：左对齐研究报告信笺，不是居中英雄卡 ── */
+        .header {
+            padding:56px 0 28px; margin-bottom:0;
+            border-bottom:1px solid var(--tp);
+            background:none; border-radius:0; box-shadow:none; text-align:left;
+        }
+        .header .eyebrow {
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:9px; letter-spacing:2.5px; text-transform:uppercase;
+            color:var(--acc); display:block; margin-bottom:14px;
+        }
+        .header h1 {
+            font-family:'Playfair Display',Georgia,serif;
+            font-size:clamp(30px,5vw,44px); font-weight:700; color:var(--tp);
+            line-height:1.1; letter-spacing:-.5px; margin-bottom:0;
+        }
+        .header h1 .tk { font-family:'JetBrains Mono',ui-monospace,monospace; letter-spacing:-1px; }
+        .header .rating {
+            display:inline-block; margin:18px 0 0; padding:5px 12px;
+            border:1px solid currentColor; border-radius:2px; background:none;
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:12px; font-weight:600; letter-spacing:.5px;
+            color:var(--bear);
+        }
+        .header .meta {
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:10px; color:var(--tm); letter-spacing:.8px; margin-top:16px;
+        }
+        .header .meta b { color:var(--ts); font-weight:500; }
+
+        /* ── 章节：细线分隔，不是浮空卡片 ── */
+        .section {
+            background:none; border-radius:0; box-shadow:none;
+            padding:34px 0; margin-bottom:0;
+            border-bottom:1px solid var(--border);
+        }
+        .section h2 {
+            font-family:'Playfair Display',Georgia,serif;
+            color:var(--tp); font-size:19px; font-weight:600;
+            margin-bottom:20px; padding-bottom:0; border-bottom:none;
+            letter-spacing:-.2px;
+        }
+        /* h3 多为中文：mono + 大字距会把汉字撑散，故只对拉丁部分保留微字距 */
+        .section h3 {
+            font-family:'JetBrains Mono',ui-monospace,'Noto Sans SC',monospace;
+            color:var(--ts); font-size:11.5px; font-weight:600;
+            letter-spacing:.5px;
+            margin:26px 0 12px; padding-bottom:7px;
+            border-bottom:1px solid var(--border);
+        }
+
+        /* ── 数据格：细线分栏 + 等宽等距数字 ── */
+        .grid-4 { display:grid; grid-template-columns:repeat(4,1fr); gap:0;
+                   border:1px solid var(--border); }
+        .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:28px; }
+        .stat {
+            text-align:left; padding:14px 16px; border-radius:0;
+            background:none; border:none; border-right:1px solid var(--border);
+        }
+        .grid-4 .stat:last-child { border-right:none; }
+        .stat .num {
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:21px; font-weight:600; color:var(--tp);
+            font-variant-numeric:tabular-nums; line-height:1.25;
+        }
+        .stat .lbl {
+            font-size:10px; color:var(--tm); margin-top:6px;
+            letter-spacing:.6px; line-height:1.4;
+        }
+
+        .metric {
+            display:flex; justify-content:space-between; align-items:baseline;
+            padding:9px 0; border-bottom:1px solid var(--border); gap:16px;
+        }
+        .metric:last-child { border-bottom:none; }
+        .metric-label { color:var(--ts); font-weight:400; font-size:13px; }
+        .metric-value {
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-weight:600; color:var(--tp); font-variant-numeric:tabular-nums;
+        }
+
+        table { width:100%; border-collapse:collapse; margin-top:12px; font-size:13px; }
+        th, td { padding:9px 12px; text-align:left; border-bottom:1px solid var(--border); }
+        th {
+            background:none; color:var(--tm); font-weight:600;
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:9.5px; letter-spacing:1.2px; text-transform:uppercase;
+            border-bottom:1px solid var(--tp);
+        }
+        td { color:var(--tp); font-variant-numeric:tabular-nums; }
+        tbody tr:last-child td { border-bottom:none; }
+
+        ul { padding-left:18px; margin:10px 0; }
+        li { margin:6px 0; color:var(--ts); line-height:1.8; }
+        p { color:var(--ts); }
+        strong { color:var(--tp); font-weight:600; }
+        blockquote { color:var(--ts); }
+
+        details {
+            background:none; border-radius:0; box-shadow:none;
+            padding:24px 0; margin-bottom:0; border-bottom:1px solid var(--border);
+        }
+        details summary {
+            cursor:pointer; user-select:none;
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            color:var(--acc); font-weight:600; font-size:10.5px;
+            letter-spacing:1.4px; text-transform:uppercase;
+        }
+
+        /* ── 缺数标记：让「没取到」与「测得为 0」在视觉上不可混淆 ── */
+        .na {
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            color:var(--tm); font-weight:400; cursor:help;
+            border-bottom:1px dotted var(--tm);
+        }
+        .na-note { color:var(--tm); font-style:italic; }
+        .mono { font-family:'JetBrains Mono',ui-monospace,monospace; }
+        .src-tag {
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:9px; letter-spacing:.8px; text-transform:uppercase;
+            color:var(--tm); border:1px solid var(--border); border-radius:2px;
+            padding:1px 5px; margin-left:7px; vertical-align:middle;
+        }
+        .note { font-size:12.5px; color:var(--ts); margin:12px 0 4px; line-height:1.8; }
+
+        .footer {
+            text-align:left; color:var(--tm); margin-top:36px;
+            font-family:'JetBrains Mono',ui-monospace,monospace;
+            font-size:10px; letter-spacing:1px; line-height:2;
+        }
+        .theme-btn {
+            position:fixed; top:16px; right:16px; z-index:99;
+            font-family:'JetBrains Mono',ui-monospace,monospace; font-size:9.5px;
+            letter-spacing:1.2px; text-transform:uppercase; cursor:pointer;
+            background:var(--surface); color:var(--ts);
+            border:1px solid var(--border); border-radius:2px; padding:6px 11px;
+        }
+        .theme-btn:hover { color:var(--acc); border-color:var(--acc); }
+        a { color:var(--acc); }
+        :focus-visible { outline:2px solid var(--acc); outline-offset:2px; }
+
+        @media (max-width:600px) {
+            .grid-4 { grid-template-columns:repeat(2,1fr); }
+            .grid-4 .stat:nth-child(2) { border-right:none; }
+            .grid-4 .stat:nth-child(-n+2) { border-bottom:1px solid var(--border); }
+            .grid-2 { grid-template-columns:1fr; gap:18px; }
+            .header { padding:36px 0 22px; }
+        }
+        @media print {
+            .theme-btn { display:none; }
+            body { background:var(--surface); }
+        }
+    </style>
+    <script>
+    /* 与仪表板共享 localStorage 主题（同源），从 index.html 点进来不会闪白 */
+    (function(){
+      try {
+        var s = localStorage.getItem('ah-theme') || (localStorage.getItem('ahDark')==='1' ? 'dark' : '');
+        if (s === 'dark' || (!s && window.matchMedia('(prefers-color-scheme: dark)').matches))
+          document.documentElement.classList.add('dark');
+      } catch(e) {}
+    })();
+    function ahToggleTheme(){
+      var h = document.documentElement, d = h.classList.toggle('dark');
+      try { localStorage.setItem('ah-theme', d?'dark':'light');
+             localStorage.setItem('ahDark', d?'1':'0'); } catch(e) {}
+      var b = document.getElementById('themeBtn');
+      if (b) b.textContent = d ? '亮色' : '暗色';
+    }
+    document.addEventListener('DOMContentLoaded', function(){
+      var b = document.getElementById('themeBtn');
+      if (b && document.documentElement.classList.contains('dark')) b.textContent = '亮色';
+    });
+    </script>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" onclick="ahToggleTheme()" aria-label="切换明暗主题">暗色</button>
+<div class="container">
+    <!-- 刊头 -->
+    <div class="header">
+        <span class="eyebrow">Alpha Hive · 蜂群智能深度研究</span>
+        <h1><span class="tk">META</span> 深度研究报告</h1>
+        <div class="rating">AVOID — 回避或减仓</div>
+        <p class="meta">
+            2026-08-28 05:13 PDT
+            &nbsp;·&nbsp; 综合胜率 <b>50.0%</b>
+            &nbsp;·&nbsp; 风险回报比 <b>未知</b>
+            &nbsp;·&nbsp; ML 预测 <b>14.9%</b>
+        </p>
+    </div>
+
+    <!-- 第 1 章：核心结论 -->
+    
+        <div class="section">
+            <h2>第 1 章：核心结论</h2>
+            <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-bottom:18px;">
+                <div style="text-align:center;">
+                    <span style="font-size:3em;font-weight:bold;color:var(--bear);">6.1</span>
+                    <span style="font-size:1.2em;color:var(--tm);">/10</span>
+                    <div><span style="color:var(--bear);border:1px solid currentColor;border-radius:2px;padding:3px 11px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:11px;font-weight:600;letter-spacing:.5px;">看空</span></div>
+                </div>
+                <div style="flex:1;min-width:180px;">
+                    <div class="metric"><span class="metric-label">综合胜率</span><span class="metric-value" style="color:var(--bear);">50.0%</span></div>
+                    <div class="metric"><span class="metric-label">投票</span><span class="metric-value">2多 / 5空 / 1中</span></div>
+                    <div class="metric"><span class="metric-label">建议</span><span class="metric-value">AVOID — 回避或减仓</span></div>
+                </div>
+            </div>
+            <p style='margin:6px 0;color:var(--ts);'>标的基本面分析</p><p style='margin:6px 0;color:var(--ts);'>最强维度 期权赔率 评分 9.0/10（5 Agent 共振：catalyst、contrarian、risk_adj、signal）</p><p style='margin:6px 0;color:var(--ts);'>看空蜂强度 8.0/10，需关注下行风险</p>
+        </div>
+
+    <!-- v0.15.0: 估值快照 + Top-3 核心论点 Pills -->
+    <div class="section" style="padding:18px 25px;"><h3>估值快照</h3><div style="font-size:0.9em;color:var(--ts);line-height:1.8;"><span style='font-weight:600;'>PE (TTM):</span> 21.5x &nbsp;·&nbsp; <span style='font-weight:600;'>Forward PE:</span> 16.4x &nbsp;·&nbsp; <span style='font-weight:600;'>PEG:</span> 0.85 (低估) &nbsp;·&nbsp; <span style='font-weight:600;'>分析师目标价:</span> $755 (57人共识)</div></div>
+<div class="section" style="padding:18px 25px;"><h3>核心论点 Top-3</h3><div style="display:flex;gap:8px;align-items:baseline;margin:5px 0;"><span style="color:var(--acc);border:1px solid var(--acc);font-size:9.5px;font-weight:600;letter-spacing:.8px;padding:1px 7px;border-radius:2px;white-space:nowrap;">期权</span><span style="font-size:0.88em;color:var(--tp);">期权结构强看涨（OracleBee 9.0/10），IV Rank 51%，P/C 0.7</span></div><div style="display:flex;gap:8px;align-items:baseline;margin:5px 0;"><span style="color:var(--acc);border:1px solid var(--acc);font-size:9.5px;font-weight:600;letter-spacing:.8px;padding:1px 7px;border-radius:2px;white-space:nowrap;">逆向</span><span style="font-size:0.88em;color:var(--tp);">BearBee 2.0/10</span></div><div style="display:flex;gap:8px;align-items:baseline;margin:5px 0;"><span style="color:var(--acc);border:1px solid var(--acc);font-size:9.5px;font-weight:600;letter-spacing:.8px;padding:1px 7px;border-radius:2px;white-space:nowrap;">ML</span><span style="font-size:0.88em;color:var(--tp);">ML 7日胜率 15%，信号偏弱</span></div></div>
+
+    <!-- 第 2 章：五维评分明细 -->
+    
+        <div class="section">
+            <h2>第 2 章：五维评分明细</h2>
+            <table>
+                <tr><th>维度</th><th>分数</th><th>权重</th><th>加权</th><th>进度</th></tr>
+                <tr>
+                <td>信号强度 (Signal)<br><small style="color:var(--tm)">聪明钱 SEC Form4 / 机构持仓</small></td>
+                <td style="font-weight:bold;color:var(--bear)">4.0</td>
+                <td>30%</td>
+                <td style="font-weight:bold">1.21</td>
+                <td><div style="background:var(--border);border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:var(--bear);border-radius:4px;height:8px;width:40px;"></div>
+                </div></td>
+            </tr><tr>
+                <td>催化剂 (Catalyst)<br><small style="color:var(--tm)">事件日历 / 财报 / 产品发布</small></td>
+                <td style="font-weight:bold;color:var(--neut)">5.5</td>
+                <td>20%</td>
+                <td style="font-weight:bold">1.10</td>
+                <td><div style="background:var(--border);border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:var(--neut);border-radius:4px;height:8px;width:55px;"></div>
+                </div></td>
+            </tr><tr>
+                <td>情绪 (Sentiment)<br><small style="color:var(--tm)">X 平台 / Reddit / 新闻情绪</small></td>
+                <td style="font-weight:bold;color:var(--bear)">4.9</td>
+                <td>20%</td>
+                <td style="font-weight:bold">0.98</td>
+                <td><div style="background:var(--border);border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:var(--bear);border-radius:4px;height:8px;width:49px;"></div>
+                </div></td>
+            </tr><tr>
+                <td>赔率 (Odds)<br><small style="color:var(--tm)">期权 P/C / IV Rank / Polymarket</small></td>
+                <td style="font-weight:bold;color:var(--bull)">9.0</td>
+                <td>15%</td>
+                <td style="font-weight:bold">1.34</td>
+                <td><div style="background:var(--border);border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:var(--bull);border-radius:4px;height:8px;width:89px;"></div>
+                </div></td>
+            </tr><tr>
+                <td>风险调整 (RiskAdj)<br><small style="color:var(--tm)">拥挤度 / 波动 / 交叉验证调整</small></td>
+                <td style="font-weight:bold;color:var(--bear)">4.4</td>
+                <td>15%</td>
+                <td style="font-weight:bold">0.66</td>
+                <td><div style="background:var(--border);border-radius:4px;height:8px;width:100px;display:inline-block;">
+                    <div style="background:var(--bear);border-radius:4px;height:8px;width:43px;"></div>
+                </div></td>
+            </tr><tr style="background:var(--surface2);font-weight:bold;">
+            <td><strong>综合 Opportunity Score</strong></td>
+            <td style="color:var(--tp);font-size:1.2em;">5.30</td>
+            <td></td>
+            <td style="color:var(--tp);font-size:1.2em;">5.30</td>
+            <td>不行动</td>
+        </tr>
+            </table>
+            <p style="margin-top:12px;font-size:0.85em;color:var(--tm);">公式：Score = 0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds + 0.15×RiskAdj</p>
+        </div>
+
+    <!-- 第 3 章：7 Agent 独立分析 -->
+    
+        <div class="section">
+            <h2>ScoutBee — 聪明钱侦察</h2>
+            <div style="display:flex;gap:15px;flex-wrap:wrap;margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:var(--bear)">4.0</div><div class="lbl">Signal 评分</div></div>
+                <div class="stat"><div class="num" style="color:var(--bear)">看空</div><div class="lbl">内部人情绪</div></div>
+                <div class="stat"><div class="num">26</div><div class="lbl">拥挤度 /100</div></div>
+                <div class="stat"><div class="num" style="color:var(--bull)">+3.86%</div><div class="lbl">5日动量</div></div>
+            </div>
+            <h3>近期内部人交易（Form 4）</h3>
+            <table>
+                <tr><th>内部人</th><th>职位</th><th>日期</th><th>股数</th><th>均价</th><th>金额</th></tr>
+                <tr>
+                <td>LI SUSAN J</td>
+                <td style="font-size:0.85em;color:var(--ts)">Chief Financial Officer</td>
+                <td>2026-08-18</td>
+                <td>8,716</td>
+                <td>$550.23</td>
+                <td>$4,795,820</td>
+            </tr><tr>
+                <td>Bosworth Andrew</td>
+                <td style="font-size:0.85em;color:var(--ts)">Chief Technology Officer</td>
+                <td>2026-08-18</td>
+                <td>7,848</td>
+                <td>$558.00</td>
+                <td>$4,379,184</td>
+            </tr><tr>
+                <td>Powell Dina H.</td>
+                <td style="font-size:0.85em;color:var(--ts)">President and Vice Chairman</td>
+                <td>2026-08-15</td>
+                <td>3,518</td>
+                <td>$589.85</td>
+                <td>$2,075,092</td>
+            </tr><tr>
+                <td>Mahoney Curtis J.</td>
+                <td style="font-size:0.85em;color:var(--ts)">Chief Legal Officer</td>
+                <td>2026-08-18</td>
+                <td>1,559</td>
+                <td>$558.00</td>
+                <td>$869,922</td>
+            </tr>
+            </table>
+            <p style="margin-top:10px;font-size:0.85em;color:var(--ts);"><strong>关键判断：</strong>内幕卖出 $10,312,495 | LI SUSAN J 卖出 8,716股 | 拥挤度 26/100（低拥挤度） | 动量 +3.9% | 历史5条:多4/空0,均分6.6|历史T+7准确率59%(22次,均收益+0.15%) | 板块相对强度 -9.3pp(科技 20D)【跑输】 | 供应链滞后警告：TSM, AMAT, SOXX 5日涨幅落后 META 超 1.5pp——上游景气度下行，META 可能存在需求前瞻性透支。</p>
+        </div>
+    
+        <div class="section">
+            <h2>OracleBee — 期权市场预期</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:var(--bull)">9.0</div><div class="lbl">Odds 评分</div></div><div class="stat"><div class="num" style="color:var(--bull)">0.72</div><div class="lbl">近端 P/C Ratio</div></div><div class="stat"><div class="num"><span class="na" title="数据不可用">—</span></div><div class="lbl">IV Rank</div></div><div class="stat"><div class="num" style="color:var(--tp)">$575</div><div class="lbl">近端磁吸目标价（距现价 -0.7%）</div></div>
+            </div>
+            <table style="margin-bottom:12px;">
+                <tr><th>指标</th><th>数值</th><th>信号</th></tr>
+                <tr><td>Gamma 压榨风险</td><td>high</td><td><span style="color:var(--neut)">●</span> 高</td></tr>
+                <tr><td>期权流方向</td><td>bullish</td><td><span style="color:var(--bull)">●</span> 看多</td></tr>
+                <tr><td>IV 偏斜比</td><td>0.96</td><td><span style="color:var(--bull)">●</span> 正常</td></tr>
+                <tr><td>近端总持仓量</td><td>435,041</td><td>—</td></tr>
+            </table>
+            
+            
+            <h3>全链 OI 结构（21 个到期日聚合，含 LEAPS 远期参考）</h3>
+            <div class="grid-4" style="margin-bottom:12px;">
+                <div class="stat"><div class="num" style="color:var(--tm)">$585</div><div class="lbl">全链 Max Pain（远期参考）</div></div>
+                <div class="stat"><div class="num" style="color:var(--bull)">0.51</div><div class="lbl">全链 P/C Ratio</div></div>
+                <div class="stat"><div class="num">2,441,582</div><div class="lbl">全链总 OI</div></div>
+                <div class="stat"><div class="num">1,612,896 / 828,686</div><div class="lbl">Call / Put OI</div></div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:12px;">
+                <div>
+                    <strong style="color:var(--bear);">Top5 Call 阻力墙（全链）</strong>
+                    <table style="font-size:0.88em;margin-top:6px;">
+                        <tr><th>行权价</th><th>OI</th><th>距现价 / 主导到期</th></tr>
+                        <tr><td style="color:var(--bear);font-weight:600;">$750</td><td>293,570</td><td style="color:var(--ts);">—<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">01/15</span></td></tr><tr><td style="color:var(--bear);font-weight:600;">$700</td><td>192,137</td><td style="color:var(--ts);">—<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">01/15</span></td></tr><tr><td style="color:var(--bear);font-weight:600;">$800</td><td>170,061</td><td style="color:var(--ts);">—<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">01/15</span></td></tr><tr><td style="color:var(--bear);font-weight:600;">$600</td><td>84,223</td><td style="color:var(--ts);">—<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">08/28</span></td></tr><tr><td style="color:var(--bear);font-weight:600;">$650</td><td>60,581</td><td style="color:var(--ts);">—<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">09/18</span></td></tr>
+                    </table>
+                </div>
+                <div>
+                    <strong style="color:var(--bull);">Top5 Put 支撑墙（全链）</strong>
+                    <table style="font-size:0.88em;margin-top:6px;">
+                        <tr><th>行权价</th><th>OI</th><th>距现价 / 主导到期</th></tr>
+                        <tr><td style="color:var(--bull);font-weight:600;">$500</td><td>62,682</td><td style="color:var(--ts);">—<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">09/18</span></td></tr><tr><td style="color:var(--bull);font-weight:600;">$550</td><td>51,758</td><td style="color:var(--ts);">—<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">09/18</span></td></tr><tr><td style="color:var(--bull);font-weight:600;">$600</td><td>38,941</td><td style="color:var(--ts);">—<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">01/15</span></td></tr><tr><td style="color:var(--bull);font-weight:600;">$450</td><td>38,270</td><td style="color:var(--ts);">—<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">01/15</span></td></tr><tr><td style="color:var(--bull);font-weight:600;">$540</td><td>33,129</td><td style="color:var(--ts);">—<span class="mono" style="border:1px solid var(--border);color:var(--tm);font-size:9.5px;padding:0 5px;border-radius:2px;margin-left:5px;">09/18</span></td></tr>
+                    </table>
+                </div>
+            </div>
+            
+            
+            <h3>IV 期限结构 · IV-RV 价差</h3>
+            <div class="grid-4" style="margin-bottom:12px;">
+                <div class="stat"><div class="num" style="color:var(--bull);font-size:1.15em;">CONTANGO</div><div class="lbl">期限结构形态</div></div>
+                <div class="stat"><div class="num">34.7% / 39.2%</div><div class="lbl">近月 IV / 远月 IV</div></div>
+                <div class="stat"><div class="num"><span class="na" title="数据不可用">—</span></div><div class="lbl">IV-RV 价差</div></div>
+                <div class="stat"><div class="num"><span class="na" title="数据不可用">—</span></div><div class="lbl">30 日实现波动率</div></div>
+            </div>
+            <p class="note">
+                <strong>形态解读：</strong>Contango（远月>近月，市场预期平稳）<span class="src-tag">cboe</span><br/>
+                <strong>IV-RV 信号：</strong><span class="na-note">数据不可用：yfinance 历史K线不足（10 根，需 ≥15）</span>
+            </p>
+            
+            
+            <h3>Gamma 到期日历</h3>
+            <table style="font-size:0.88em;margin-bottom:10px;">
+                <tr><th>指标</th><th>数值</th><th>含义</th></tr>
+                <tr><td>下一主要到期日</td><td>2026-09-18</td><td>资金面集中点</td></tr>
+                <tr><td>Pin Risk 行权价</td><td>$650</td><td>到期日可能磁吸到此价位</td></tr>
+                <tr><td>OI 集中度</td><td>74.1%</td><td>下一到期占全链 OI 比例</td></tr>
+                <tr><td>Charm 方向</td><td>bearish</td><td>时间衰减对 Delta 的影响</td></tr>
+            </table>
+            
+            <h3>异常期权活动 Top5</h3><ul><li><span style="color:var(--bull)">▲</span> large call volume Strike $600 × 2,816</li><li><span style="color:var(--bull)">▲</span> large call volume Strike $600 × 5,685</li><li><span style="color:var(--bull)">▲</span> large call volume Strike $580 × 2,158</li><li><span style="color:var(--bull)">▲</span> large call volume Strike $570 × 1,299</li><li><span style="color:var(--bull)">▲</span> large call volume Strike $570 × 721</li></ul>
+            <h3>近端关键价位（OracleBee key_levels）</h3><p>支撑：$550(OI:13,159.0) | $500(OI:9,893.0) | $460(OI:6,745.0)</p><p>压力：$650(OI:17,234.0) | $595(OI:12,423.0) | $600(OI:11,596.0)</p>
+            <p style="margin-top:10px;font-size:0.85em;color:var(--ts);"><strong>关键判断：</strong>检测到 43 个看涨异动 | MaxPain:$575(-0.7%) | 异常流:异常Call流 73个信号 溢价$18.0M | $571.1 | 历史5条:多4/空0,均分6.6|历史T+7准确率59%(22次,均收益+0.15%)</p>
+        </div>
+    
+        <div class="section">
+            <h2>ChronosBee — 催化剂时间线</h2>
+            <div style="margin-bottom:12px;">
+                <span class="stat" style="display:inline-block;margin-right:10px;">
+                    <span class="num" style="color:var(--bear)">5.5</span>
+                    <span class="lbl"> Catalyst 评分</span>
+                </span>
+                <span style="color:var(--ts);font-size:0.9em">检测到 1 个催化剂</span>
+            </div>
+            
+            <div style="border:1px solid var(--border);border-radius:2px;padding:15px;margin:12px 0;overflow-x:auto;">
+                <pre style="font-family:monospace;font-size:0.8em;color:var(--tp);line-height:1.8;margin:0">   今天                                                                             财报发布      
+   0天                                                                             60天       
+    │──────────────────────────────────────────────────────────────────────────
+    ●─────────────────────────────────────────────────────────────────────────●</pre>
+            </div>
+            <table style="margin-top:10px;">
+                <tr><th>事件</th><th>日期</th><th>距今</th><th>重要性</th></tr>
+                <tr>
+                    <td style="color:var(--acc);font-weight:bold">财报发布</td>
+                    <td>2026-10-28</td>
+                    <td>60天后</td>
+                    <td><span style="color:var(--acc);border:1px solid currentColor;border-radius:2px;padding:1px 7px;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10px;font-weight:600;letter-spacing:.5px;">high</span></td>
+                </tr>
+            </table>
+            
+            <h3>分析师目标价</h3>
+            <div class="grid-4">
+                <div class="stat"><div class="num">$571.10</div><div class="lbl">当前价</div></div>
+                <div class="stat"><div class="num">$754.72</div><div class="lbl">目标均价</div></div>
+                <div class="stat"><div class="num">$580~$1000</div><div class="lbl">目标区间</div></div>
+                <div class="stat"><div class="num" style="color:var(--bull)">+32.2%</div><div class="lbl">潜在涨幅</div></div>
+            </div>
+            <p style="margin-top:10px;font-size:0.85em;color:var(--ts);"><strong>关键判断：</strong>催化剂 1 个 | 最近：财报发布（60天后） | 分析师目标$754.72(↑32.2%) | 历史5条:多4/空0,均分6.6|历史T+7准确率59%(22次,均收益+0.15%) | 📉历史漂移偏空 | 近期财报后价格漂移 T+1: +0.3% (胜率100%, n=8) | T+5: -4.0% (胜率0%, n=8)</p>
+        </div>
+    
+        <div class="section">
+            <h2>BuzzBee — 情绪与叙事</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:var(--neut)">4.9</div><div class="lbl">Sentiment 评分</div></div>
+                <div class="stat"><div class="num" style="color:var(--neut)">49%</div><div class="lbl">正面情绪占比</div></div>
+                <div class="stat"><div class="num" style="color:var(--bull)">+3.86%</div><div class="lbl">5日动量</div></div>
+                <div class="stat"><div class="num">0.92×</div><div class="lbl">成交量比</div></div>
+                
+            </div>
+            <p style="margin-top:10px;">Reddit 热度：<strong>第9名</strong> | 提及量：<strong>77</strong> | 状态：<strong>rising</strong></p>
+            <h3>主流叙事</h3><ul style="margin-top:8px"><li>情绪 49%</li><li>动量 +3.9%</li><li>量比 0.9x</li><li>Reddit #9(rising,77提及)</li><li>看多叙事主导</li></ul>
+        </div>
+    
+    
+        <div class="section">
+            <h2>GuardBee — 交叉验证</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:var(--bear)">4.4</div><div class="lbl">RiskAdj 评分</div></div>
+                <div class="stat"><div class="num">60%</div><div class="lbl">信号一致性</div></div>
+                <div class="stat"><div class="num">0.95×</div><div class="lbl">调整系数</div></div>
+                <div class="stat"><div class="num">heavy</div><div class="lbl">冲突等级</div></div>
+            </div>
+            <h3>信号共振矩阵</h3>
+            <div style="overflow-x:auto;">
+                <table style="min-width:400px;">
+                    <tr><th></th><th>催化剂</th><th>内部人</th><th>期权</th><th>情绪</th><th>风控</th></tr>
+                    <tr><td><strong>催化剂</strong></td><td style='color:var(--tm);text-align:center'>—</td><td style='text-align:center;color:var(--bull)'>●</td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td></tr><tr><td><strong>内部人</strong></td><td style='text-align:center;color:var(--bull)'>●</td><td style='color:var(--tm);text-align:center'>—</td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td></tr><tr><td><strong>期权</strong></td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td><td style='color:var(--tm);text-align:center'>—</td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td></tr><tr><td><strong>情绪</strong></td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td><td style='color:var(--tm);text-align:center'>—</td><td style='text-align:center;color:var(--tm)'>—</td></tr><tr><td><strong>风控</strong></td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td><td style='text-align:center;color:var(--tm)'>—</td><td style='color:var(--tm);text-align:center'>—</td></tr>
+                </table>
+            </div>
+            <p style="margin-top:8px;font-size:0.82em;color:var(--tm);"><span style="color:var(--bull)">●</span> 同向共振 &nbsp;·&nbsp; <span style="color:var(--neut)">◐</span> 存在冲突 &nbsp;·&nbsp; — 中性/无关</p>
+            <p style="margin-top:10px;font-size:0.85em;color:var(--ts);"><strong>共振结论：</strong>
+                3 个 Agent 同向（signal, catalyst），
+                置信度提升 0%
+            </p>
+            <p style="font-size:0.85em;color:var(--ts);"><strong>关键判断：</strong>信号分散 | 均分 5.8 | 一致性 60% | 风险调整 0.95 | 历史5条:多4/空0,均分6.6|历史T+7准确率59%(22次,均收益+0.15%) | Macro:neutral(黄金走强; 板块顺风)</p>
+        </div>
+    
+        <div class="section">
+            <h2>BearBee — 看空对冲</h2>
+            <div class="grid-4" style="margin-bottom:15px;">
+                <div class="stat"><div class="num" style="color:var(--bear)">2.0</div><div class="lbl">看空蜂评分</div></div>
+                <div class="stat"><div class="num" style="color:var(--bear)">8.0/10</div><div class="lbl">看空强度</div></div>
+                <div class="stat"><div class="num">0.96</div><div class="lbl">IV Skew 比</div></div>
+                <div class="stat"><div class="num">高</div><div class="lbl">风险等级</div></div>
+            </div>
+            <h3>反对观点（至少 3 条 — 硬性要求）</h3>
+            <ul style="list-style:none;padding:0;"><li style="margin:10px 0;padding:10px;background:var(--surface2);border-left:3px solid var(--bear);border-radius:4px;"><strong>1.</strong> 内幕大额抛售 $10,312,495（买入仅 $0）</li><li style="margin:10px 0;padding:10px;background:var(--surface2);border-left:3px solid var(--bear);border-radius:4px;"><strong>2.</strong> 期权 IV Skew 偏高（看跌期权溢价）</li><li style="margin:10px 0;padding:10px;background:var(--surface2);border-left:3px solid var(--bear);border-radius:4px;"><strong>3.</strong> 短期催化剂带来波动性风险</li></ul>
+        </div>
+
+    <!-- 第 4 章：投资假设与失效条件 -->
+    
+        <div class="section">
+            <h2>第 4 章：投资假设与失效条件</h2>
+            <h3>核心 Thesis</h3>
+            <blockquote style="border-left:4px solid var(--tp);padding:12px 18px;background:var(--surface2);border-radius:0;margin:10px 0;color:var(--tp);font-style:italic;">
+                标的基本面分析
+            </blockquote>
+            <h3 style="margin-top:18px;">失效条件（Thesis Break）</h3>
+            <table>
+                <tr><th>条件</th><th>触发阈值</th><th>监控方式</th></tr>
+                <tr><td>内幕大额抛售 $10,312,495（买入仅 $0）</td><td>信号逆转</td><td style='color:var(--tm);font-size:0.85em'>BearBee / Form 4 监控</td></tr><tr><td>期权 IV Skew 偏高（看跌期权溢价）</td><td>信号逆转</td><td style='color:var(--tm);font-size:0.85em'>BearBee / Form 4 监控</td></tr><tr><td>短期催化剂带来波动性风险</td><td>信号逆转</td><td style='color:var(--tm);font-size:0.85em'>BearBee / Form 4 监控</td></tr>
+            </table>
+        </div>
+
+    <!-- 第 5 章：情景推演 -->
+    
+        <div class="section">
+            <h2>第 5 章：情景推演</h2>
+            <div style="padding:14px 16px;border:1px solid var(--border);border-radius:2px;
+                        font-size:.9em;color:var(--tm);">
+                情景推演不可用：缺少 最大涨幅, 7日期望, 最大回撤。
+                本表依赖历史同类信号的收益分布，数据不足时不做推演 ——
+                以常量生成的目标价与期望收益无法与真实测算区分。
+            </div>
+        </div>
+
+    <!-- 第 6 章：风险雷达 -->
+    
+        <div class="section">
+            <h2>第 6 章：风险雷达</h2>
+            <table>
+                <tr><th>风险类型</th><th>等级</th><th>具体内容</th></tr>
+                <tr><td>监管风险</td><td><span style="color:var(--bull)">●</span> 低</td><td style='font-size:0.85em;color:var(--ts)'>AI 芯片出口管制 / 政策变化风险</td></tr><tr><td>市场情绪风险</td><td><span style="color:var(--bear)">●</span> 高</td><td style='font-size:0.85em;color:var(--ts)'>看空强度 8.0/10，无近期催化剂</td></tr><tr><td>估值压缩风险</td><td><span style="color:var(--bull)">●</span> 低</td><td style='font-size:0.85em;color:var(--ts)'>拥挤度 26/100（偏低）</td></tr><tr><td>流动性风险</td><td><span style="color:var(--bull)">●</span> 低</td><td style='font-size:0.85em;color:var(--ts)'>大盘股，日均成交量充足</td></tr><tr><td>期权事件风险</td><td><span style="color:var(--bear)">●</span> 高</td><td style='font-size:0.85em;color:var(--ts)'>Gamma 压榨风险：high，IV Rank 51.2%</td></tr><tr><td>催化剂风险</td><td><span style="color:var(--bull)">●</span> 低</td><td style='font-size:0.85em;color:var(--ts)'>7 天内催化剂 0 个：</td></tr>
+            </table>
+        </div>
+
+    <!-- 第 7 章：明日追踪任务 -->
+    
+        <div class="section">
+            <h2>第 7 章：明日追踪任务</h2>
+            <ul style="list-style:none;padding:0;"><li style="margin:8px 0;">☐ 监控期权到期日 **2026-09-04** 前后的 Pin Risk / Gamma Exposure</li><li style="margin:8px 0;">☐ 监控期权到期日 **2026-09-09** 前后的 Pin Risk / Gamma Exposure</li><li style="margin:8px 0;">☐ 跟踪 BearBee 看空信号是否兑现</li><li style="margin:8px 0;">☐ 检查 SEC EDGAR 是否有新 Form 4 大额内部人减持</li><li style="margin:8px 0;">☐ 观察蜂群评分是否突破 7.5（高优先级阈值）</li></ul>
+        </div>
+
+    <!-- 折叠详情：止损止盈 / 期权信号 / ML 特征 -->
+    <details>
+        <summary>详细数据（止损止盈 / 期权信号 / ML 特征）</summary>
+        
+            <div style="margin-bottom:20px;">
+                <div class="grid-2">
+                    <div><h3 style="color:var(--bear);">止损位</h3><table><tr><td>conservative</td><td>$559.68</td></tr><tr><td>moderate</td><td>$542.54</td></tr><tr><td>aggressive</td><td>$525.41</td></tr></table></div>
+                    <div><h3 style="color:var(--bull);">止盈位</h3>
+                        <table><tr><th>档位</th><th>价格</th><th>涨幅</th><th>操作</th></tr><tr><td>level_1</td><td>$605.37</td><td>+30%</td><td>33% | 锁定初步收益</td></tr><tr><td>level_2</td><td>$639.63</td><td>+60%</td><td>33% | 追踪止损，保护利润</td></tr><tr><td>level_3</td><td>$685.32</td><td>+20%</td><td>34% | 达到目标收益，全部清仓</td></tr></table>
+                    </div>
+                </div>
+                <p style="margin-top:15px;">最佳持仓周期：<strong>数据不足</strong></p>
+            </div>
+        
+            <div class="section">
+                <h2>期权信号分析</h2>
+
+                <div class="ml-section">
+                    <h3>核心指标</h3>
+
+                    <div class="metric">
+                        <span class="metric-label">IV Rank</span>
+                        <span class="metric-value" style="color: var(--neut);">
+                            51.2 (中等 IV)
+                        </span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">当前 IV</span>
+                        <span class="metric-value">34.58%</span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">IV 百分位数</span>
+                        <span class="metric-value">47.2%</span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">Put/Call Ratio</span>
+                        <span class="metric-value">0.72</span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">流向</span>
+                        <span class="metric-value" style="color: var(--bull);">
+                            BULLISH
+                        </span>
+                    </div>
+
+                    <div class="metric">
+                        <span class="metric-label">Gamma Squeeze 风险</span>
+                        <span class="metric-value">HIGH</span>
+                    </div>
+
+                    <h3>期权综合评分</h3>
+
+                    <div style="text-align: center; padding: 20px; background:none; border:1px solid var(--border); border-radius:2px;">
+                        <div style="font-size: 3.5em; font-weight: bold; color: var(--tp); margin-bottom: 10px;">
+                            7.0
+                        </div>
+                        <div style="font-size: 1.2em; color: var(--tp); margin-bottom: 10px;">/ 10.0</div>
+                        <div style="color: var(--ts); font-size: 0.95em;">检测到 43 个看涨异动</div>
+                    </div>
+
+                    <div style='margin-top: 15px;'><strong>异动信号：</strong><ul style='margin: 10px 0; padding-left: 20px;'><li>large_call_volume @ $600.0 (成交量: 2,816)</li><li>large_call_volume @ $600.0 (成交量: 5,685)</li><li>large_call_volume @ $580.0 (成交量: 2,158)</li><li>large_call_volume @ $570.0 (成交量: 1,299)</li><li>large_call_volume @ $570.0 (成交量: 721)</li></ul></div>
+                    <div style='margin-top: 15px;'><strong>支撑位：</strong><ul style='margin: 10px 0; padding-left: 20px;'><li>$550.0 (OI: 13,159.0)</li><li>$500.0 (OI: 9,893.0)</li><li>$460.0 (OI: 6,745.0)</li></ul></div>
+                    <div style='margin-top: 15px;'><strong>阻力位：</strong><ul style='margin: 10px 0; padding-left: 20px;'><li>$650.0 (OI: 17,234.0)</li><li>$595.0 (OI: 12,423.0)</li><li>$600.0 (OI: 11,596.0)</li></ul></div>
+                </div>
+            </div>
+
+        
+    </details>
+
+    <!-- 免责声明 -->
+    <div class="section" style="background:var(--surface2); border:1px solid var(--neut);">
+        <p style="color:var(--neut); font-size:0.9em;">
+            <strong>免责声明</strong>：本报告为 AI 自动生成，不构成投资建议。
+            所有交易决策需自行判断和风控。预测存在误差，过往表现不代表未来收益。
+        </p>
+    </div>
+
+    <div class="footer">
+        <p><a href="index.html" style="color:white;">← 返回仪表板</a></p>
+    </div>
+</div>
+</body>
+</html>

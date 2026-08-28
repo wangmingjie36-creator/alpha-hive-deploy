@@ -1,15 +1,17 @@
 {
   "ticker": "SNOW",
   "date": "2026-08-27",
-  "composite_score": 5.48,
+  "composite_score": 5.86,
   "direction": "bearish",
   "price_target": 0.0,
   "stop_loss": 0.0,
-  "entry_price": 329.11,
+  "entry_price": 329.1099853515625,
   "agent_votes": {
-    "OracleBeeEcho": 6.6923076923076925,
-    "GuardBeeSentinel": 5.97,
-    "RivalBeeVanguard": 5.74
+    "OracleBeeEcho": 8.115384615384617,
+    "ChronosBeeHorizon": 7.45,
+    "GuardBeeSentinel": 6.94,
+    "CodeExecutorAgent": 6.5,
+    "ScoutBeeNova": 6.0178115
   },
   "weights_used": {
     "signal": 0.2094,
@@ -21,10 +23,10 @@
   "low_conviction": false,
   "low_conviction_reason": "",
   "cs_rank": {
-    "final": 0.517,
-    "signal": 0.655,
-    "catalyst": null,
-    "sentiment": 0.448,
+    "final": 0.655,
+    "signal": 0.759,
+    "catalyst": 1.0,
+    "sentiment": 0.345,
     "odds": 0.69,
     "risk_adj": 0.793
   },
@@ -33,5 +35,5 @@
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-08-27T14:21:36.139777"
+  "created_at": "2026-08-28T05:55:46.326165"
 }
