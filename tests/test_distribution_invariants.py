@@ -55,11 +55,26 @@ MAX_SINGLE_DIRECTION_SHARE = 0.99
 
 # 维度分数去重比下限。低于此说明大量并列，rank-IC 会失真。
 MIN_DISTINCT_RATIO = 0.25
-# catalyst 是**已知且已接受**的退化项（实测 0.105）：ChronosBee 是纯单向事件
-# 强度累加器，2026-07 已结算样本 cat≥7 占比 0%、55% 恰为 6.0。暂不修的理由
-# 见 MEMORY（爆炸半径大：62 个 .py 引用 catalyst，且会切出第三个不可比世代）。
-# 给它单独的、更松的地板 —— 守住"别彻底塌成常数"，不假装它健康。
-KNOWN_DEGRADED_DIMS = {"catalyst": 0.05}
+# catalyst 是**已知且已接受**的退化项：ChronosBee 是纯单向事件强度累加器，
+# 2026-07 已结算样本 cat≥7 占比 0%、55% 恰为 6.0。暂不修的理由见 MEMORY
+# （爆炸半径大：62 个 .py 引用 catalyst，且会切出第三个不可比世代）。
+#
+# v0.45.60：口径从**全局去重比**改为**每个扫描日的不同值数（中位）**。
+#
+# 原口径 `distinct/n` 对离散维度会随窗口填满**机械性衰减**：catalyst 全局只有
+# ~13 个取值，distinct 几乎不增长而 n 线性增长，比值必然下滑。实测
+# 2026-08-28：n=265 distinct=13 → 0.049，跌破 0.05 地板 —— 但**每个扫描日
+# 仍稳定有 5.5 个不同值**，与 8/24–8/26 完全一致，分布根本没退化。
+# 机器恢复日更后窗口会填到 12×30=360 行，比值将跌到 ~0.036：这条闸注定
+# 天天红，而红的原因与它想守的东西无关。
+#
+# 一条会因为**数据变多**而报警的不变式，是在训练人忽略它。
+#
+# 每日不同值数不随 n 变化，直接对应它真正要守的那句话：「别彻底塌成常数」。
+# 实测 catalyst 每日中位 5.5；塌成常数是 1。地板取 3。
+# 其余 4 个维度是连续量（比值 0.45~0.71，每日 17~25 个不同值），
+# 原比值口径对它们依然有效，不动。
+KNOWN_DEGRADED_DIMS_MIN_DAILY_DISTINCT = {"catalyst": 3}
 
 VIX_MAX_STALE_TRADING_DAYS = 5
 CATASTROPHIC_NO_SCAN_TRADING_DAYS = 10
@@ -116,6 +131,36 @@ def agent_directions(recent_dates):
     if not out:
         pytest.skip("窗口内没有可解析的 agent_directions")
     return dict(out)
+
+
+@pytest.fixture(scope="module")
+def dimension_scores_by_day(recent_dates):
+    """{维度: {扫描日: [分数, ...]}}，近 RECENT_SCAN_DAYS 个扫描日。
+
+    与 `dimension_scores` 同一份数据，只是保留了日期分组 —— 离散维度必须
+    按日看不同值数，全局去重比会随 n 机械衰减（见 KNOWN_DEGRADED_DIMS_*
+    处的注释）。
+    """
+    out = defaultdict(lambda: defaultdict(list))
+    with _con() as con:
+        rows = con.execute(
+            "SELECT date, dimension_scores FROM predictions "
+            "WHERE date >= ? AND dimension_scores IS NOT NULL",
+            (recent_dates[0],),
+        ).fetchall()
+    for day, raw in rows:
+        try:
+            d = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(d, dict):
+            continue
+        for dim, val in d.items():
+            try:
+                out[dim][str(day)[:10]].append(float(val))
+            except (TypeError, ValueError):
+                continue
+    return {k: dict(v) for k, v in out.items()}
 
 
 @pytest.fixture(scope="module")
@@ -288,24 +333,32 @@ class TestDimensionScoreSpread:
 
     def test_healthy_dims_keep_enough_distinct_values(self, dimension_scores):
         offenders = low_spread_dims(dimension_scores,
-                                    exempt=frozenset(KNOWN_DEGRADED_DIMS))
+                                    exempt=frozenset(KNOWN_DEGRADED_DIMS_MIN_DAILY_DISTINCT))
         assert not offenders, (
             f"维度分数并列过多（门槛 {MIN_DISTINCT_RATIO}）：\n  "
             + "\n  ".join(offenders)
         )
 
-    def test_known_degraded_dims_have_not_fully_collapsed(self, dimension_scores):
-        """catalyst 已知退化（~0.105）且**已决定暂不修**，但仍守一条底线：
+    def test_known_degraded_dims_have_not_fully_collapsed(self, dimension_scores_by_day):
+        """catalyst 已知退化且**已决定暂不修**，但仍守一条底线：
         彻底塌成常数就是另一回事了，那意味着它连噪音都不再贡献。
+
+        按**扫描日**看不同值数，不看全局去重比 —— 后者对离散维度会随窗口
+        填满而机械下滑，报的是"数据变多了"，不是"分布坏了"。见常量处注释。
         """
-        for dim, floor in KNOWN_DEGRADED_DIMS.items():
-            vals = dimension_scores.get(dim, [])
-            if len(vals) < MIN_RECORDS:
+        import statistics as _st
+        for dim, floor in KNOWN_DEGRADED_DIMS_MIN_DAILY_DISTINCT.items():
+            per_day = dimension_scores_by_day.get(dim, {})
+            counts = [len(set(v)) for v in per_day.values() if v]
+            if sum(len(v) for v in per_day.values()) < MIN_RECORDS:
                 continue
-            ratio = len(set(vals)) / len(vals)
-            assert ratio >= floor, (
-                f"{dim} 去重比 {ratio:.4f} 已低于已知退化项的地板 {floor}"
-                f"（{len(set(vals))}/{len(vals)}）——它比记录在案的状态又坏了"
+            if not counts:
+                continue
+            med = _st.median(counts)
+            assert med >= floor, (
+                f"{dim} 每个扫描日中位只有 {med:.1f} 个不同值（地板 {floor}）"
+                f"——逐日：{ {d: len(set(v)) for d, v in sorted(per_day.items())} }。"
+                "它比记录在案的状态又坏了：接近塌成常数。"
             )
 
     def test_all_five_dims_present(self, dimension_scores):

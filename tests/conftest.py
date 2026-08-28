@@ -42,6 +42,33 @@ def _block_llm_api(monkeypatch):
     monkeypatch.setattr(llm_service, "_client", None)
 
 
+# ==================== 禁止测试调用真实宏观数据源 ====================
+
+@pytest.fixture(autouse=True)
+def _block_same_day_macro(monkeypatch):
+    """默认关掉 v0.45.60 的当日宏观取数层（财政部 + Finnhub）。
+
+    为什么必须有这道闸：conftest 一直只 mock 了 yfinance（见下方
+    `mock_yfinance`），而 v0.45.60 新增的取数层**绕过 yfinance 直接打外网**。
+    接上当天就有两个后果：
+
+      · `test_yield_curve_inverted` 红了 —— 测试构造的倒挂曲线被真实的
+        2026-08-27 数据（10Y 4.67 / 2Y 4.20，normal）盖掉
+      · 整个套件开始打真网络：变慢、变脆、且在离线环境下不可用
+
+    加数据源时必须同时确认「测试里它被关掉了吗」—— 与 `http_gate` docstring
+    记过的那条教训同形（「加源之前先确认闸门覆盖它」）。
+
+    需要验证这一层的测试自己 monkeypatch `_same_day_macro_data`，
+    那会覆盖本 fixture。
+    """
+    try:
+        import fred_macro
+    except Exception:  # pragma: no cover - 模块不可得时无需拦
+        return
+    monkeypatch.setattr(fred_macro, "_same_day_macro_data", lambda: ({}, {}))
+
+
 # ==================== Mock 股票数据 ====================
 
 MOCK_STOCK_DATA = {

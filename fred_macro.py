@@ -20,7 +20,7 @@ import os
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 from hive_logger import get_logger
 
@@ -102,6 +102,175 @@ def get_macro_context() -> Dict:
     return result
 
 
+# ══════════════════════════════════════════════════════════════════
+# 云端快照供给（v0.45.59）
+# ══════════════════════════════════════════════════════════════════
+# 补跑（`--date`）时宏观必须是**目标日**的，而不是运行当天的。
+# 旧实现两处都错位：
+#   · VIX/F&G —— market.json 里存着目标日的真实观测，但 `load_market()`
+#     在生产代码里**一个调用者都没有**（典型的「死字段：算了没人读」）
+#   · 国债/SPX/美元/黄金 —— `yf.Ticker(sym).history(period="5d")` 永远取
+#     最近 5 天，与目标日无关
+# 结果：8/27 的报告里宏观是 8/28 的，且没有任何标记说明这一点。
+#
+# 现在：`as_of` 一旦设定，两条路径同时对齐到该日。
+_MACRO_SNAPSHOT: Optional[Dict] = None
+
+
+def set_macro_snapshot(date: Optional[str], market: Optional[Dict] = None) -> None:
+    """装载某日的 market.json 作为宏观取数基准。`date=None` 卸载。
+
+    由 `cloud_snapshot_loader.snapshot_mode` 调用，与期权链供给器同进同出 ——
+    只装一半会让报告里期权是目标日的、宏观是今天的，且无从分辨。
+    """
+    global _MACRO_SNAPSHOT, _CACHE, _CACHE_TS
+    _MACRO_SNAPSHOT = None if not date else {"date": date, "market": market or {}}
+    _CACHE, _CACHE_TS = None, 0.0        # 口径变了，旧缓存必须作废
+
+
+def get_macro_snapshot() -> Optional[Dict]:
+    return _MACRO_SNAPSHOT
+
+
+def _asof_history(yf, sym: str, as_of: str):
+    """取 `as_of` 当日及其前一交易日的收盘。
+
+    用 start/end 而不是 `period="5d"` —— 后者永远是**最近** 5 天。
+    多要 12 个自然日的余量以跨过周末与假期。
+    """
+    import datetime as _dt
+    d = _dt.date.fromisoformat(as_of)
+    hist = yf.Ticker(sym).history(start=(d - _dt.timedelta(days=12)).isoformat(),
+                                  end=(d + _dt.timedelta(days=1)).isoformat(),
+                                  interval="1d")
+    if hist is None or hist.empty:
+        return None
+    # end 是开区间，但时区/夏令时偶尔会多带一根；显式截断到 as_of 当日为止
+    hist = hist[hist.index.date <= d]
+    return hist if not hist.empty else None
+
+
+# ══════════════════════════════════════════════════════════════════
+# 当日宏观：脱离 yfinance（v0.45.60）
+# ══════════════════════════════════════════════════════════════════
+# 2026-08-27：yfinance 全天 687 次 429，这 7 个符号一起归零，整块宏观降级为
+# `data_source: "fallback"`，报告里的 `treasury_10y: 4.5` 是兜底常量。
+#
+# 定时任务在**当日** 17:00 ET 跑，所以替代源必须当天就能出数：
+#   ^VIX          → CBOE（早已在用，8/27 限流全程 30/30 完好）
+#   ^TNX / ^FVX   → 美国财政部日度曲线（免 key；FRED 的 DGS10 转发的正是它，晚一天）
+#   ^GSPC / GLD / DX-Y.NYB / TLT → Finnhub /quote 的 ETF 代理
+#
+# 为什么用 ETF 代理而不是指数代码：实测 Finnhub 免费档对 `^GSPC` / `^VIX`
+# 返回 "Market data subscription required for CFD indices"，而 SPY / GLD /
+# UUP / TLT 全通（2026-08-27 实测 771.10 / 422.60 / 28.02 / 83.13）。
+# 涨跌幅用 `c` 与 `pc`，与原 yfinance 的 last/prev 口径一致。
+#
+# yfinance 保留为**最后一环**，不再是第一环。
+_ETF_PROXY = {
+    "SPX":  ("SPY", "标普 500"),
+    "GLD":  ("GLD", "黄金"),
+    "DXY":  ("UUP", "美元"),
+    "TLT":  ("TLT", "长债"),
+}
+
+
+def _finnhub_quote(symbol: str) -> Optional[Dict]:
+    """Finnhub /quote。→ {"last","prev","change_pct","ts"} 或 None。
+
+    拿不到就 None —— 绝不返回 0.0。0.0 会被下游当成「持平」，
+    与「没数据」不可区分（MEMORY 静默降级三件套）。
+    """
+    try:
+        from data_pipeline import _get_secret
+        key = _get_secret("FINNHUB_API_KEY")
+    except Exception:  # noqa: BLE001
+        key = ""
+    if not key:
+        return None
+    try:
+        import json as _json
+        import urllib.request as _ur
+
+        from http_gate import urlopen_gated
+        req = _ur.Request(f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={key}",
+                          headers={"User-Agent": "alpha-hive/1.0"})
+        q = _json.loads(urlopen_gated(req, timeout=15))
+    except Exception as e:  # noqa: BLE001
+        _log.debug("Finnhub quote 失败 %s: %s", symbol, e)
+        return None
+    try:
+        last = float(q.get("c") or 0)
+        prev = float(q.get("pc") or 0)
+    except (TypeError, ValueError):
+        return None
+    if last <= 0:
+        return None
+    return {
+        "last": last,
+        "prev": prev if prev > 0 else last,
+        "change_pct": ((last / prev) - 1) * 100 if prev > 0 else 0.0,
+        "ts": q.get("t"),
+    }
+
+
+def _same_day_macro_data() -> Tuple[Dict, Dict[str, str]]:
+    """当日口径取数：财政部 + Finnhub ETF。→ (data, sources)
+
+    `data` 与原 yfinance 分支同形（{name: {last, prev, change_pct}}），
+    这样下游分析逻辑一行都不用改。
+    `sources` 逐字段记录来源，供 `data_source` 如实汇总 ——
+    不同源的值同形，不标源就无从分辨（MEMORY「读 vix 前先看 vix_source」）。
+    """
+    data: Dict[str, Dict] = {}
+    sources: Dict[str, str] = {}
+
+    # ① 国债：一次请求拿到 2Y/5Y/10Y
+    try:
+        from treasury_yields import get_yield_curve
+        cur = get_yield_curve()
+        if cur:
+            for name, k in (("TNX", "y10"), ("FVX", "y5"), ("TWO", "y2")):
+                v = cur.get(k)
+                if v is not None:
+                    # 口径注意：财政部给的是 par yield 本身，**不是** ^TNX 的 ×10
+                    data[name] = {"last": v, "prev": v, "change_pct": 0.0}
+                    sources[name] = f"treasury_gov@{cur['date']}"
+    except Exception as e:  # noqa: BLE001
+        _log.debug("财政部曲线不可用: %s", e)
+
+    # ② 大盘 / 黄金 / 美元 / 长债：ETF 代理
+    for name, (sym, _label) in _ETF_PROXY.items():
+        q = _finnhub_quote(sym)
+        if q:
+            data[name] = {"last": q["last"], "prev": q["prev"],
+                          "change_pct": q["change_pct"]}
+            sources[name] = f"finnhub:{sym}"
+
+    return data, sources
+
+
+def _compose_data_source(as_of, src_map: Dict[str, str], data: Dict,
+                         has_fred: bool) -> str:
+    """如实汇总本次宏观实际用到的源。
+
+    不再无条件写 "yfinance"：8/27 那天 yfinance 一个字段都没供上，
+    标签却仍是 `yfinance+fred`，排查时会把人引向一个没被调用的源。
+    """
+    if as_of:
+        return f"cloud_snapshot+yfinance@{as_of}" + ("+fred" if has_fred else "")
+    parts = []
+    if any(v.startswith("treasury_gov") for v in src_map.values()):
+        parts.append("treasury")
+    if any(v.startswith("finnhub") for v in src_map.values()):
+        parts.append("finnhub")
+    if len(data) > len(src_map):        # 有字段是 yfinance 兜上来的
+        parts.append("yfinance")
+    if has_fred:
+        parts.append("fred")
+    return "+".join(parts) if parts else "fallback"
+
+
 def _classify_vix(vix: float) -> str:
     """VIX 绝对水平分档。抽成函数是因为 v0.43.24 后有两条产出路径
     （正常路径 / yfinance 全灭但 CBOE 可用的部分降级路径），
@@ -161,12 +330,33 @@ def _fetch_macro_data() -> Dict:
             "GLD":    "GLD",       # SPDR 黄金 ETF（避险指标）
         }
 
-        data = {}
+        # v0.45.59：补跑时对齐到目标日。`_snap` 为 None 时行为与旧版完全一致。
+        _snap = _MACRO_SNAPSHOT
+        _as_of = _snap.get("date") if _snap else None
+
+        # v0.45.60：**当日**口径先走非 yfinance 源（财政部 + Finnhub ETF）。
+        # 补跑口径不走这条 —— 那两个源只给"最新"，给不了历史某日，
+        # 拿今天的值冒充目标日比缺失更坏。补跑仍由 `_asof_history` 对齐。
+        data: Dict = {}
+        _src_map: Dict[str, str] = {}
+        if not _as_of:
+            data, _src_map = _same_day_macro_data()
+            if data:
+                _log.info("宏观当日源命中 %d 项：%s", len(data),
+                          ", ".join(f"{k}={v}" for k, v in sorted(_src_map.items())))
+
         for name, sym in symbols.items():
+            if name in data:          # 已由当日源供上，不再打 yfinance
+                continue
             try:
-                t = yf.Ticker(sym)
-                hist = t.history(period="5d", interval="1d")
-                if not hist.empty:
+                if _as_of:
+                    hist = _asof_history(yf, sym, _as_of)
+                    if hist is None:
+                        continue
+                else:
+                    t = yf.Ticker(sym)
+                    hist = t.history(period="5d", interval="1d")
+                if hist is not None and not hist.empty:
                     data[name] = {
                         "last": float(hist["Close"].iloc[-1]),
                         "prev": float(hist["Close"].iloc[-2]) if len(hist) >= 2 else float(hist["Close"].iloc[-1]),
@@ -183,13 +373,27 @@ def _fetch_macro_data() -> Dict:
         # 标的全灭 → 整体降级到 base 的 vix=20.0，被当作"偏高恐慌"写进报告，
         # 而当天真实 VIX 是 14.25。CBOE 的 VIX_History.csv 无 key、无限流。
         _cboe_vix = None
-        try:
-            from cboe_vix import get_vix_spot as _cboe_vix_spot
-            _spot = _cboe_vix_spot()
-            if _spot:
-                _cboe_vix = _spot[0]
-        except Exception as _e_cv:  # noqa: BLE001
-            _log.debug("CBOE VIX 不可用，回落 yfinance: %s", _e_cv)
+        _vix_src_override = ""
+        # v0.45.59：补跑时 VIX 取目标日快照里的观测值。
+        # 实时问 CBOE 拿到的是**今天**的 VIX —— 对 8/27 的报告是错的，
+        # 而 market.json 里正躺着当天 17:05 ET 抓下的真值。
+        if _snap:
+            try:
+                _vt = ((_snap.get("market") or {}).get("cboe") or {}).get("vix_term") or {}
+                _sv = _vt.get("vix_spot")
+                if isinstance(_sv, (int, float)) and _sv > 0:
+                    _cboe_vix = float(_sv)
+                    _vix_src_override = "cloud_snapshot_cboe"
+            except Exception as _e_sv:  # noqa: BLE001
+                _log.debug("快照 VIX 读取失败: %s", _e_sv)
+        if _cboe_vix is None:
+            try:
+                from cboe_vix import get_vix_spot as _cboe_vix_spot
+                _spot = _cboe_vix_spot()
+                if _spot:
+                    _cboe_vix = _spot[0]
+            except Exception as _e_cv:  # noqa: BLE001
+                _log.debug("CBOE VIX 不可用，回落 yfinance: %s", _e_cv)
 
         if not data:
             # yfinance 全灭。但 CBOE 若拿到真实 VIX，就不该让它跟着变成 20.0 ——
@@ -206,7 +410,11 @@ def _fetch_macro_data() -> Dict:
         # ---- VIX 分析 ----
         if _cboe_vix is not None:
             vix = _cboe_vix
-            _vix_source = "cboe"
+            # v0.45.59：补跑时必须区分「今天问 CBOE 拿的」与「目标日快照里的」。
+            # 两者同形（都是一个 float），标成同一个 "cboe" 就无从分辨报告里的
+            # VIX 究竟属于哪一天 —— 正是 MEMORY 里「读 vix 前先看 vix_source」
+            # 那条要防的事。
+            _vix_source = _vix_src_override or "cboe"
         else:
             vix = data.get("VIX", {}).get("last", 20.0)
             _vix_source = "yfinance" if "VIX" in data else "fallback"
@@ -260,35 +468,44 @@ def _fetch_macro_data() -> Dict:
         treasury_2y = None
         yield_spread = None
         yield_curve = "unknown"
-        # fred_data 稍后获取，此处先用 5Y fallback
-        fvx = data.get("FVX", {}).get("last")
-        if fvx is not None and tnx > 0:
-            # 5Y 近似 2Y：通常 2Y 比 5Y 高 20-40bp（扁平化时差更小）
-            approx_2y = fvx + 0.15  # 保守近似
-            treasury_2y = round(approx_2y, 3)
-            yield_spread = round((tnx - approx_2y) * 100, 1)  # bp
-            if yield_spread < -10:
-                yield_curve = "inverted"
-            elif yield_spread < 20:
-                yield_curve = "flat"
-            else:
-                yield_curve = "normal"
+        _2y_source = ""
+
+        def _set_curve(y2: float, src: str):
+            """同一段判定逻辑此前抄了三遍（近似 / FRED / 本次新增财政部）。
+            抄三遍就有三处会漂移 —— 收敛成一处。"""
+            nonlocal treasury_2y, yield_spread, yield_curve, _2y_source
+            treasury_2y = round(y2, 3)
+            yield_spread = round((tnx - y2) * 100, 1)     # bp
+            yield_curve = ("inverted" if yield_spread < -10
+                           else "flat" if yield_spread < 20 else "normal")
+            _2y_source = src
+
+        # v0.45.60：财政部日度曲线直接给真 2Y —— 优先于下面的 5Y 近似。
+        #
+        # 那个近似（`5Y + 0.15`）是拿不到 2Y 时代的产物，而它会**扭曲曲线判定**：
+        # 2026-08-27 实测 5Y=4.38 → 近似 2Y=4.53 → 10Y−2Y=+14bp 判成 "flat"；
+        # 真 2Y=4.20 → 利差 +47bp，实际是 "normal"。差了一个档位。
+        _tsy_2y = data.get("TWO", {}).get("last")
+        if _tsy_2y is not None and tnx > 0:
+            _set_curve(_tsy_2y, "treasury_gov")
+        else:
+            # 退而求其次：5Y 近似。保留是因为财政部不可得时它总比 unknown 强，
+            # 但必须标出来，否则读者无从知道这个 2Y 是推算的。
+            fvx = data.get("FVX", {}).get("last")
+            if fvx is not None and tnx > 0:
+                _set_curve(fvx + 0.15, "approx_from_5y")
 
         # ---- FRED API（提前获取以修正 2Y 曲线数据）----
         fred_data = {}
         fred_key = _load_fred_key()
         if fred_key:
             fred_data = _fetch_fred_series(fred_key)
-            # FRED 精确 2Y 覆盖 5Y 近似
-            if fred_data.get("treasury_2y") is not None:
-                treasury_2y = fred_data["treasury_2y"]
-                yield_spread = round((tnx - treasury_2y) * 100, 1)
-                if yield_spread < -10:
-                    yield_curve = "inverted"
-                elif yield_spread < 20:
-                    yield_curve = "flat"
-                else:
-                    yield_curve = "normal"
+            # FRED 精确 2Y 覆盖 5Y 近似 —— 但**不覆盖财政部**：
+            # FRED 转发的就是财政部的数，且晚一天（实测 08-26 vs 08-27）。
+            # 用它盖掉更新的同源数据是纯粹的倒退。
+            if (fred_data.get("treasury_2y") is not None
+                    and _2y_source != "treasury_gov"):
+                _set_curve(fred_data["treasury_2y"], "fred")
 
         # ---- 板块轮动 ----
         sector_rotation = _fetch_sector_rotation(yf)
@@ -472,8 +689,17 @@ def _fetch_macro_data() -> Dict:
             "hy_spread_bp": fred_data.get("hy_spread_bp"),
             "hy_spread_chg_bp": fred_data.get("hy_spread_chg_bp"),
             "summary": " | ".join(summary_parts),
-            "data_source": "yfinance" + ("+fred" if fred_data else ""),
+            # v0.45.59：`as_of` 生效时如实写明这是哪一天的口径。
+            # 「yfinance+fred」用在补跑上会让读者以为是运行当天的实时数据。
+            #
+            # v0.45.60：当日口径下 `data_source` 必须反映**实际**供数的源。
+            # 财政部与 Finnhub 供上后仍写「yfinance」是假标签 —— 排查限流时
+            # 会让人去查一个根本没被调用的源。
+            "data_source": _compose_data_source(_as_of, _src_map, data, bool(fred_data)),
+            "field_sources": dict(_src_map),   # 逐字段来源，空 = 该项走了 yfinance
+            "treasury_2y_source": _2y_source,  # treasury_gov / fred / approx_from_5y
             "vix_source": _vix_source,
+            "as_of": _as_of,          # None = 实时口径
         }
 
     except ImportError:

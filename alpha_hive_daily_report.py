@@ -2402,7 +2402,8 @@ def _snapshot_ctx(args):
     stack = contextlib.ExitStack()
     try:
         import cloud_snapshot_loader as csl
-        prov = stack.enter_context(csl.snapshot_mode(args.date))
+        prov = stack.enter_context(csl.snapshot_mode(
+            args.date, allow_unverified=getattr(args, "allow_unverified_snapshot", False)))
     except ImportError as e:
         print(f"⚠️ 快照消费端不可用（{e}）——退回实时抓取")
         yield None
@@ -2519,6 +2520,16 @@ def main():
         type=str,
         default=None,
         help='覆盖报告日期（YYYY-MM-DD），用于补跑指定交易日（默认自动取 PDT 当日）'
+    )
+    parser.add_argument(
+        '--allow-unverified-snapshot',
+        action='store_true',
+        help=("接受缺 vintage_date 的云端快照（v0.45.36 之前的生产端产出）。"
+              "⚠️ 该字段是快照自证新鲜度的唯一凭据——CBOE 在盘前/休市照常 200 "
+              "返回上一交易日的结算数据。用它之前请**独立验证**：拿快照的 "
+              "price_at_fetch 对目标日真实收盘。现存需要它的只有 2026-08-26 / "
+              "2026-08-27 两天（已于 v0.45.58 逐只验过）；生产端已在 v0.45.59 "
+              "修好，此后的快照不需要这个开关。")
     )
     parser.add_argument(
         '--no-snapshot',
