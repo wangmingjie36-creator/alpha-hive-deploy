@@ -337,8 +337,10 @@ def main() -> int:
 
     res = check(date, Path(args.file) if args.file else None)
 
-    if args.out:
-        Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2))
+    # v0.45.54 二次检查：`--out` 原先在这里就写盘，而 label_honesty / price_check
+    # 是之后才算出来的 —— 默认路径（编排器用的 `--quiet --out`）写出的 JSON
+    # **缺 label_honesty 段**，下游永远看不到这项检查的结果。
+    # 现统一挪到全部检查之后写一次。
     if not args.quiet:
         print(_render(res))
     elif not res.get("determinable"):
@@ -357,22 +359,28 @@ def main() -> int:
     if args.check_prices:
         pr = check_prices(date)
         res["price_check"] = pr
-        if args.out:
-            Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2))
         if not args.quiet:
             print()
             print(_render_prices(pr))
         elif pr.get("determinable") and not pr["healthy"]:
             print(f"❌ {date} 坏价格：{', '.join(r['ticker'] for r in pr['bad'])}")
-        # 坏价格与字段缺失同级：都判 1（检出降级）
-        if pr.get("determinable") and not pr["healthy"]:
-            return 1
+
+    # ── v0.45.54 二次检查：写盘与退出码都收敛到这里 ──
+    # 原先坏价格那条是**提前 return 1**，会绕过写盘 —— 于是「检出问题」的那次
+    # 恰好是 --out 拿不到 JSON 的那次，下游想查都查不了。
+    # 退出码语义（与 scan_continuity 一致）：0 健康 / 1 检出降级 / 3 无法判定。
+    if args.out:
+        Path(args.out).write_text(json.dumps(res, ensure_ascii=False, indent=2))
 
     if not res.get("determinable"):
         return 3
-    if lh.get("determinable") and not lh["healthy"]:
-        return 1
-    return 0 if res["healthy"] else 1
+    _degraded = (
+        (not res["healthy"])
+        or (lh.get("determinable") and not lh["healthy"])
+        or (res.get("price_check", {}).get("determinable")
+            and not res.get("price_check", {}).get("healthy", True))
+    )
+    return 1 if _degraded else 0
 
 
 if __name__ == "__main__":

@@ -421,7 +421,11 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     ad = sd.get("agent_details", {})
     oracle = ad.get("OracleBeeEcho", {}).get("details", {})
     scout_disc = ad.get("ScoutBeeNova", {}).get("discovery", "")
-    bear_score = ad.get("BearBeeContrarian", {}).get("score", 0.0)
+    # v0.45.54：默认 0.0 渲染成「看空强度 0.0/10」= 零看空压力，最安全的读数。
+    # 而同文件 _radar_data 对**同一字段**默认 5.0 —— 两个默认值不一致，
+    # 这个不一致本身就说明它们都是随手填的，不是有依据的选择。
+    _bs_raw = ad.get("BearBeeContrarian", {}).get("score")
+    bear_score = _bs_raw if isinstance(_bs_raw, (int, float)) and not isinstance(_bs_raw, bool) else None
     ab = sd.get("agent_breakdown", {})
     iv_rank = oracle.get("iv_rank", None)
     pc = oracle.get("put_call_ratio", None)
@@ -527,8 +531,14 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     near_max_pain = _near_mp_dict.get("max_pain") if isinstance(_near_mp_dict, dict) else None
     near_max_pain_pct = _near_mp_dict.get("distance_pct") if isinstance(_near_mp_dict, dict) else None
     near_expiry_dates = oracle.get("expiration_dates") or []  # 近端到期日列表
-    total_call_oi = fco.get("total_call_oi") or 0
-    total_put_oi = fco.get("total_put_oi") or 0
+    # v0.45.54：`or 0` 把「全链 OI 采集失败」渲染成「一张持仓都没有」——
+    # 对活跃标的是不可能事件。上游现返回 {"data_available": False}（见
+    # options_analyzer._fetch_full_chain_oi），这里据此置 None。
+    _fco_ok = bool(fco) and fco.get("data_available") is not False
+    _tc = fco.get("total_call_oi") if _fco_ok else None
+    _tp = fco.get("total_put_oi") if _fco_ok else None
+    total_call_oi = _tc if isinstance(_tc, (int, float)) else None
+    total_put_oi = _tp if isinstance(_tp, (int, float)) else None
     top_call_oi_raw = fco.get("top_call_oi") or []
     top_put_oi_raw = fco.get("top_put_oi") or []
     # 提取 Top 5 关键墙（强阻力 / 强支撑），含 ITM/OTM 距离
@@ -541,9 +551,13 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
             oi_v = e.get("oi") or 0
             if strike is None: continue
             try:
-                pct_diff = (float(strike) - cur_price) / cur_price * 100 if cur_price else 0
+                # v0.45.54：cur_price 不可得时 pct_diff=0 读作「这堵 OI 墙正好压在
+                # 平价上」—— 在期权叙事里那是最有信息量的位置（最大磁吸/pin risk），
+                # 恰恰不是「不知道」。现金价缺失即置 None。
+                pct_diff = ((float(strike) - cur_price) / cur_price * 100
+                            if cur_price else None)
             except (ValueError, TypeError, ZeroDivisionError):
-                pct_diff = 0
+                pct_diff = None
             out.append({
                 "strike": float(strike),
                 "oi": int(oi_v),
@@ -560,9 +574,12 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         out = []
         for strike, oi_v in sorted(by_strike_dict.items(), key=lambda x: -x[1])[:top_n]:
             try:
-                pct_diff = (strike - cur_price) / cur_price * 100 if cur_price else 0
+                # v0.45.54：同上 —— 0 读作「正好压在平价上」，那是最有信息量的
+                # 位置而非「不知道」。
+                pct_diff = ((strike - cur_price) / cur_price * 100
+                            if cur_price else None)
             except (ValueError, TypeError, ZeroDivisionError):
-                pct_diff = 0
+                pct_diff = None
             out.append({"strike": strike, "oi": int(oi_v), "pct_diff": pct_diff, "dom_exp": ""})
         return out
     near_call_walls = _near_wall_summary(near_call_by_strike, _cur_price)
@@ -576,7 +593,7 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     return {
         "iv_rank": f"{iv_rank:.1f}" if iv_rank is not None else "-",
         "pc": f"{pc:.2f}" if pc is not None else "-",
-        "bear_score": float(bear_score),
+        "bear_score": (float(bear_score) if bear_score is not None else None),
         "bullish": ab.get("bullish", 0),
         "bearish_v": ab.get("bearish", 0),
         "neutral_v": ab.get("neutral", 0),
@@ -625,11 +642,21 @@ def _radar_data(ticker: str, swarm_detail: dict) -> list:
     sd  = swarm_detail.get(ticker, {})
     dim = sd.get("dimension_scores", {})
     if dim:
-        signal    = float(dim.get("signal",   5.0)) * 10
-        catalyst  = float(dim.get("catalyst", 5.0)) * 10
-        sentiment = float(dim.get("sentiment",5.0)) * 10
-        odds      = float(dim.get("odds",     5.0)) * 10
-        risk_adj  = float(dim.get("risk_adj", 5.0)) * 10
+        # ── v0.45.54：缺失维度不再补 5.0（雷达图上 = 50/100 正中间）──
+        # 5.0 会画出一个「不好不坏」的正常形状，与真实的中性评分完全同形。
+        # 雷达图画不出「—」，所以缺失维度画 **0** 并在 dim_dq 里标注 ——
+        # 0 在雷达图上是一个塌陷的角，视觉上就能看出「这一维没有」，
+        # 而 50 看起来完全正常。
+        def _d(k):
+            v = dim.get(k)
+            return float(v) * 10 if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+        _missing_dims = [k for k in ("signal", "catalyst", "sentiment", "odds", "risk_adj")
+                         if not isinstance(dim.get(k), (int, float)) or isinstance(dim.get(k), bool)]
+        if _missing_dims:
+            _log.debug("[%s] 雷达图 %d/5 维缺失（%s），画 0 而非 50 中位",
+                       ticker, len(_missing_dims), ", ".join(_missing_dims))
+        signal, catalyst, sentiment, odds, risk_adj = (
+            _d("signal"), _d("catalyst"), _d("sentiment"), _d("odds"), _d("risk_adj"))
     else:
         ad = sd.get("agent_details", {})
         signal   = float(ad.get("ScoutBeeNova",     {}).get("self_score", 5.0)) * 10
@@ -1554,6 +1581,9 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             _log.debug("共识环形图生成失败 (%s): %s", _tc6, _e_donut)
         # F10: 价格标注
         _det6 = _detail(_tc6, swarm_detail)
+        # v0.45.54：bear_score 可为 None —— 预先算好文案，不在 f-string 里放条件
+        _bs6_v = _det6.get("bear_score")
+        _bs6_txt = f"{_bs6_v:.1f}" if isinstance(_bs6_v, (int, float)) else "—"
         _price6_html = ""
         if _det6["price"] is not None:
             _p6 = _det6["price"]
@@ -1614,7 +1644,7 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             <div class="detail-grid">
               <div class="dg-item"><span class="dg-label">IV Rank</span><span class="dg-value">{_det6['iv_rank']}</span></div>
               <div class="dg-item"><span class="dg-label">P/C Ratio</span><span class="dg-value">{_det6['pc']}</span></div>
-              <div class="dg-item"><span class="dg-label">看空强度</span><span class="dg-value">{_det6['bear_score']:.1f}</span></div>
+              <div class="dg-item"><span class="dg-label">看空强度</span><span class="dg-value">{_bs6_txt}</span></div>
               <div class="dg-item"><span class="dg-label">数据真实度</span><span class="dg-value">{_det6['real_pct']}</span></div>
               <div class="dg-item"><span class="dg-label">GEX</span><span class="dg-value">{_det6['gex']}</span></div>
               <div class="dg-item" title="IV 减 RV30 的价差。正=期权偏贵（利于卖方），负=期权偏便宜"><span class="dg-label">IV-RV</span><span class="dg-value">{_det6['iv_rv_spread']}</span></div>
@@ -1644,6 +1674,8 @@ def _build_table_rows_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
         _dclrt = {"bullish":"dcell-bull","bearish":"dcell-bear","neutral":"dcell-neut"}[_drt]
         _scrt = _sc_cls(_srt)
         _det_rt = _detail(_trt, swarm_detail)
+        _bs_rt_v = _det_rt.get("bear_score")
+        _bs_rt_txt = f"{_bs_rt_v:.1f}" if isinstance(_bs_rt_v, (int, float)) else "—"
         _res_rt = swarm_detail.get(_trt,{}).get("resonance",{}).get("resonance_detected",False)
         _sup_rt = int(_ort.get("supporting_agents") or swarm_detail.get(_trt,{}).get("supporting_agents",0))
         _res_html_rt = (f'<span class="res-y">{_sup_rt}A</span>' if _res_rt else '<span class="res-n">无</span>')
@@ -1672,7 +1704,7 @@ def _build_table_rows_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
           <td>{_det_rt['bullish']}/{_det_rt['bearish_v']}/{_det_rt['neutral_v']}</td>
           <td>{_det_rt['iv_rank']}</td>
           <td{_pc_st_rt}>{_det_rt['pc']}</td>
-          <td style="color:var(--neut)">{_det_rt['bear_score']:.1f}</td>
+          <td style="color:var(--neut)">{_bs_rt_txt}</td>
           <td>{_ml_rt}</td>
         </tr>"""
     return new_rows_html
@@ -1759,6 +1791,12 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
         # ── v0.26.0 全链 OI 卡片（影响价格判断核心） ─────────────────────────
         # 用户反馈：#/deep 板块只有异常流和近端 P/C，缺全链 OI 让价格判断盲目
         # 设计：紧凑卡片显示全链 P/C + Max Pain + Top 3 Call 阻力 + Top 3 Put 支撑
+        # v0.45.54：bear_score 可为 None —— 预先算好文案。
+        # 必须放在**无条件**位置：下方 _full_oi_html 只在有全链数据时才进分支，
+        # 而 _bsd_txt 的使用点在分支之外（实测 UnboundLocalError）。
+        _bsd_v = (_detd or {}).get("bear_score")
+        _bsd_txt = (f"{_bsd_v:.1f}/10" if isinstance(_bsd_v, (int, float)) else "—")
+
         _full_oi_html = ""
         _full_pc = _detd.get("full_pc")
         _mp = _detd.get("max_pain")
@@ -1821,12 +1859,18 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             _is_near = bool(_near_calls_all or _near_puts_all)
 
             if _is_near:
-                _calls = [w for w in _near_calls_all if w["pct_diff"] > -1][:3]
-                _puts = [w for w in _near_puts_all if w["pct_diff"] < 1][:3]
+                # v0.45.54：pct_diff 可为 None —— 参与比较会 TypeError，
+                # 且「不知道距现价多远」不该被当成满足筛选条件。
+                _calls = [w for w in _near_calls_all
+                          if isinstance(w.get("pct_diff"), (int, float)) and w["pct_diff"] > -1][:3]
+                _puts = [w for w in _near_puts_all
+                         if isinstance(w.get("pct_diff"), (int, float)) and w["pct_diff"] < 1][:3]
                 _wall_label = "近 30 天到期"
             else:
-                _calls = [w for w in _detd.get("top_call_walls", []) if w["pct_diff"] > -1][:3]
-                _puts = [w for w in _detd.get("top_put_walls", []) if w["pct_diff"] < 1][:3]
+                _calls = [w for w in _detd.get("top_call_walls", [])
+                          if isinstance(w.get("pct_diff"), (int, float)) and w["pct_diff"] > -1][:3]
+                _puts = [w for w in _detd.get("top_put_walls", [])
+                         if isinstance(w.get("pct_diff"), (int, float)) and w["pct_diff"] < 1][:3]
                 _wall_label = "全链聚合"
 
             def _wall_rows(walls, side_color, side_label):
@@ -1834,8 +1878,9 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                     return f'<div style="font-size:.75em;color:#94a3b8;padding:4px 0">无数据</div>'
                 rows = []
                 for w in walls:
-                    pct = w["pct_diff"]
-                    pct_str = f"{pct:+.1f}%"
+                    # v0.45.54：pct_diff 可为 None（现价不可得）
+                    pct = w.get("pct_diff")
+                    pct_str = f"{pct:+.1f}%" if isinstance(pct, (int, float)) else "—"
                     oi_k = w["oi"] / 1000.0
                     oi_str = f"{oi_k:.0f}k" if oi_k >= 1 else f"{w['oi']}"
                     exp_tag = f' <span style="background:#374151;color:#cbd5e1;padding:1px 4px;border-radius:3px;font-size:.65em">{w["dom_exp"]}</span>' if w.get("dom_exp") else ""
@@ -1903,7 +1948,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                 <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">{_detd['pc']}</span></div>
                 {f'<div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:{_detd["flow_color"]};font-weight:bold;">{_detd["flow_dir"]}</span></div>' if _detd["flow_dir"] != "-" else ""}
                 {f'<div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">{_detd["gex"]}</span></div>' if _detd["gex"] != "-" else ""}
-                <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">{_detd['bear_score']:.1f}/10</span></div>
+                <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">{_bsd_txt}</span></div>
                 <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">{_detd['bullish']}多/{_detd['bearish_v']}空</span></div>
               </div>
               <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-{_html.escape(_tkrd)}" width="160" height="160"></canvas></div>

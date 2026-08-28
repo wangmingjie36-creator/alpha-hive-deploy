@@ -521,15 +521,24 @@ def get_supply_chain_signals(ticker: str = "NVDA", lookback_days: int = 5) -> Di
                     f"5日涨幅落后 {ticker} 超 1.5pp——上游景气度下行，{ticker} 可能存在需求前瞻性透支。")
         else:
             signal = "neutral"
-            soxx_ret = returns.get("SOXX", 0)
-            note = (f"供应链与 {ticker} 同步波动（{ticker} 5d {target_ret:+.1f}% vs SOXX {soxx_ret:+.1f}%），"
-                    "未发现显著领先/滞后背离。")
+            # v0.45.54：SOXX 取不到时 `returns.get("SOXX", 0)` 给 0，
+            # 于是摘要里印出「vs SOXX +0.0%」—— 一个被观测到的周涨跌幅，
+            # 而实际是取数失败。这句话会进 discovery 与报告正文。
+            _soxx = returns.get("SOXX")
+            if isinstance(_soxx, (int, float)) and not isinstance(_soxx, bool):
+                note = (f"供应链与 {ticker} 同步波动（{ticker} 5d {target_ret:+.1f}% "
+                        f"vs SOXX {_soxx:+.1f}%），未发现显著领先/滞后背离。")
+            else:
+                _log.warning("%s 供应链分析：SOXX 5 日收益不可得，摘要中不写基准涨跌幅", ticker)
+                note = (f"供应链与 {ticker} 同步波动（{ticker} 5d {target_ret:+.1f}%；"
+                        "SOXX 基准本次不可得），未发现显著领先/滞后背离。")
 
         return {
             "peers": peers,
             "supply_chain_signal": signal,
             "supply_chain_note": note,
-            "source": "yfinance",
+            # v0.45.54：source 由实际取到的同业数量推导，不再无条件写 "yfinance"
+            "source": "yfinance" if peers else "unavailable",
         }
     except Exception as e:
         _empty["supply_chain_note"] = f"供应链分析失败：{e}"

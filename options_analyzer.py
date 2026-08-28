@@ -1504,8 +1504,13 @@ class OptionsAgent:
                 "put_exp_oi":         _serialize_exp_oi(put_exp_oi),
             }
         except Exception as _e:
-            _log.debug("full_chain_oi 采集失败 %s: %s", ticker, _e)
-            return {}
+            # v0.45.54：返回 {} 后，下游 dashboard_renderer 的
+            # `fco.get("total_call_oi") or 0` 会渲染成「全链 Call OI = 0、Put OI = 0」
+            # ——即「这只票的期权链上一张持仓都没有」，对活跃标的是不可能事件。
+            # 用显式标记区分「采集失败」与「真的零持仓」。
+            _log.warning("[%s] 全链 OI 采集失败，标记 unavailable（不以 0 冒充零持仓）：%s",
+                         ticker, _e)
+            return {"data_available": False, "error": str(_e)[:200]}
 
     @staticmethod
     def _calc_total_oi(calls_df: list, puts_df: list, options_chain: dict) -> int:

@@ -126,7 +126,16 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
                 try:
                     strike = float(row.get("strike", 0))
                     volume = int(row.get("volume") or 0)
-                    oi = int(row.get("openInterest") or 1)
+                    # v0.45.54：`or 1` 让 vol_oi_ratio = volume / 1 = volume ——
+                    # 任何有成交的合约都会被判成「异动」。真实 OI=0 是「新开合约」，
+                    # 与「OI 字段缺失」都不该被当成 1 张持仓。
+                    _oi_raw = row.get("openInterest")
+                    try:
+                        oi = int(_oi_raw) if _oi_raw is not None else 0
+                    except (TypeError, ValueError):
+                        oi = 0
+                    if oi <= 0:
+                        continue      # 无持仓基数 ⇒ 比率无意义，不判异动
                     last_price = float(row.get("lastPrice") or 0)
                     implied_vol = float(row.get("impliedVolatility") or 0)
 
@@ -181,7 +190,16 @@ def detect_unusual_flow(ticker: str, stock_price: float = 0.0) -> Dict:
                     try:
                         strike = float(row.get("strike", 0))
                         volume = int(row.get("volume") or 0)
-                        oi = int(row.get("openInterest") or 1)
+                        # v0.45.54：`or 1` 让 vol_oi_ratio = volume / 1 = volume ——
+                        # 任何有成交的合约都会被判成「异动」。真实 OI=0 是「新开合约」，
+                        # 与「OI 字段缺失」都不该被当成 1 张持仓。
+                        _oi_raw = row.get("openInterest")
+                        try:
+                            oi = int(_oi_raw) if _oi_raw is not None else 0
+                        except (TypeError, ValueError):
+                            oi = 0
+                        if oi <= 0:
+                            continue      # 无持仓基数 ⇒ 比率无意义，不判异动
                         last_price = float(row.get("lastPrice") or 0)
 
                         if volume < 50 or strike <= 0:

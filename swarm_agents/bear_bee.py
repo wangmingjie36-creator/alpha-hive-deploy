@@ -293,7 +293,12 @@ class BearBeeContrarian(BeeAgent):
             overval_bear = max(overval_bear, 3.5)
             bearish_signals.append(f"P/E {pe:.1f}（高于市场中位数）")
 
-        data_sources["valuation"] = "yfinance"
+        # v0.45.54：原先**无条件**写 "yfinance" —— pe 取不到时（三档 elif 全不命中）
+        # 标签仍自称有来源。与 real_data_sources 的 `"momentum": "real"` 同形
+        # （v0.45.49 已修）。由 pe 是否真的拿到推导。
+        data_sources["valuation"] = (
+            "yfinance" if isinstance(pe, (int, float)) and not isinstance(pe, bool) and pe > 0
+            else "unavailable")
         return overval_bear
 
     def _assess_momentum_decay(self, stock: Dict, mom_5d: float,

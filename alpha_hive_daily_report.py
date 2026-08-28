@@ -2026,8 +2026,16 @@ class AlphaHiveDailyReporter:
         try:
             from fear_greed import get_fear_greed
             _fg = get_fear_greed()
-            _fg_value = _fg.get("value")
-            _fg_class = _fg.get("classification", "")
+            # v0.45.54：必须同时看 is_real_data —— get_fear_greed 兜底时
+            # 返回 value=50/classification="Neutral" 且**不抛异常**，
+            # 于是「今日市场情绪 50（中性）」会作为观测证据进 BuzzBee discovery。
+            # 同项目 buzz_bee.py:169 对同一个函数是检查了的（三处），说明这里是遗漏。
+            if _fg.get("is_real_data"):
+                _fg_value = _fg.get("value")
+                _fg_class = _fg.get("classification", "")
+            else:
+                logging.getLogger("alpha_hive").warning(
+                    "Fear & Greed 为兜底值（is_real_data=False），不写入 discovery")
         except Exception as _e_fg:
             logging.getLogger("alpha_hive").debug("Fear & Greed 指数获取失败: %s", _e_fg)
         # ── 初始化期权分析器（复用缓存，开销极低）──

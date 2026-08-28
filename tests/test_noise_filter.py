@@ -83,9 +83,14 @@ class TestRecencyWeight:
         assert 0.10 < w < 0.15  # 3 个半衰期 → ~0.125
 
     def test_unparseable_date(self):
+        """v0.45.54：解析不了 → None，不是 0.5。
+
+        0.5 **恰好等于半衰期点的权重**（= 「发布于约 24 小时前」），
+        与一篇真的 24 小时前的新闻不可区分。而加权和决定 bull_ratio，
+        直接进 sentiment 维度 —— 本项目唯一有证据的可交易信号。
+        """
         from newsapi_client import _recency_weight
-        w = _recency_weight("invalid-date")
-        assert w == 0.5  # 默认中等权重
+        assert _recency_weight("invalid-date") is None
 
     def test_custom_half_life(self):
         from newsapi_client import _recency_weight

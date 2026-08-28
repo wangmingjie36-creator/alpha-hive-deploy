@@ -285,3 +285,95 @@ class TestLabelHonesty:
         if not r.get("determinable"):
             pytest.skip(r.get("reason"))
         assert r["healthy"], f"现网存在标签矛盾：{r['contradictions'][:3]}"
+
+
+class TestOutFileCompleteness:
+    """v0.45.54 二次检查发现：`--out` 原先在 label_honesty / price_check 算出来
+    **之前**就写盘，默认路径（编排器用的 `--quiet --out`）写出的 JSON 缺 label_honesty；
+    而坏价格那条是提前 `return 1`，会**完全绕过写盘** —— 于是「检出问题」的那次
+    恰好是下游拿不到 JSON 的那次。写盘与退出码现已收敛到函数末尾。"""
+
+    @staticmethod
+    def _run(tmp_path, results, extra=()):
+        import subprocess
+        import sys
+        p = tmp_path / "s.json"; p.write_text(json.dumps(results))
+        out = tmp_path / "o.json"
+        rc = subprocess.run(
+            [sys.executable, "scan_coverage_gate.py", "--date", "2026-08-26",
+             "--file", str(p), "--quiet", "--out", str(out), *extra],
+            capture_output=True).returncode
+        data = json.loads(out.read_text()) if out.exists() else None
+        return rc, data
+
+    FULL = {"OracleBeeEcho": {"details": {
+                "rv_30d": 30.0, "iv_rank": 45.0, "iv_current": 50.0,
+                "iv_skew_ratio": 1.0, "put_call_ratio": 0.9, "iv_rv_spread": 20.0,
+                "iv_rank_source": "yfinance", "data_quality": "real"}},
+            "ChronosBeeHorizon": {"details": {"catalysts": [{"e": 1}]}}}
+
+    def _mk(self, mut=None):
+        r = {f"T{i}": {"agent_details": json.loads(json.dumps(self.FULL))}
+             for i in range(30)}
+        if mut:
+            mut(r)
+        return r
+
+    def test_healthy_writes_all_sections(self, tmp_path):
+        rc, d = self._run(tmp_path, self._mk())
+        assert rc == 0
+        assert d is not None and "label_honesty" in d, "--out 必须含 label_honesty"
+
+    def test_degraded_still_writes(self, tmp_path):
+        def mut(r):
+            for t in r:
+                r[t]["agent_details"]["OracleBeeEcho"]["details"].update(
+                    {"rv_30d": None, "iv_rank": None})
+        rc, d = self._run(tmp_path, self._mk(mut))
+        assert rc == 1
+        assert d is not None and "label_honesty" in d, \
+            "检出降级时更要写盘 —— 否则下游查不了"
+
+    def test_label_contradiction_exits_one_and_writes(self, tmp_path):
+        def mut(r):
+            for t in r:
+                r[t]["agent_details"]["OracleBeeEcho"]["details"]["iv_rank"] = None
+        rc, d = self._run(tmp_path, self._mk(mut))
+        assert rc == 1
+        assert d["label_honesty"]["healthy"] is False
+
+    def test_undeterminable_exits_three(self, tmp_path):
+        import subprocess
+        import sys
+        out = tmp_path / "o.json"
+        rc = subprocess.run(
+            [sys.executable, "scan_coverage_gate.py", "--date", "2026-01-01",
+             "--file", str(tmp_path / "nope.json"), "--quiet", "--out", str(out)],
+            capture_output=True).returncode
+        assert rc == 3
+
+
+class TestLabelHonestyMalformed:
+    """畸形输入不得崩 —— 护栏自己崩掉是最糟的失效方式"""
+
+    @pytest.mark.parametrize("payload,determinable", [
+        ("[]", False), ("{}", False), ("{not json", False),
+        ('{"A":"x"}', True),
+        ('{"A":{"agent_details":null}}', True),
+        ('{"A":{"agent_details":{"OracleBeeEcho":{"details":null}}}}', True),
+        ('{"A":{"agent_details":{"OracleBeeEcho":{"details":{"data_quality":1}}}}}', True),
+    ])
+    def test_malformed_input_does_not_crash(self, tmp_path, payload, determinable):
+        p = tmp_path / "m.json"; p.write_text(payload)
+        r = gate.check_label_honesty("2026-08-26", p)
+        assert r.get("determinable") is determinable
+        if not determinable:
+            assert "healthy" not in r, "无法判定时不得给出健康结论"
+
+    def test_label_case_insensitive(self, tmp_path):
+        """标签大小写不该影响判定 —— 'REAL' 与 'real' 同义"""
+        p = tmp_path / "c.json"
+        p.write_text(json.dumps({"A": {"agent_details": {"OracleBeeEcho": {
+            "details": {"data_quality": "REAL", "iv_current": None}}}}}))
+        r = gate.check_label_honesty("2026-08-26", p)
+        assert r["healthy"] is False, "大写 REAL 也应被当成成功标签"

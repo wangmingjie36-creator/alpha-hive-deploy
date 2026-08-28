@@ -1,0 +1,37 @@
+{
+  "ticker": "TMUS",
+  "date": "2026-08-27",
+  "composite_score": 5.46,
+  "direction": "bearish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 178.575,
+  "agent_votes": {
+    "ScoutBeeNova": 6.203978238694321,
+    "OracleBeeEcho": 5.846153846153847,
+    "RivalBeeVanguard": 5.74
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.483,
+    "signal": 0.897,
+    "catalyst": null,
+    "sentiment": 0.345,
+    "odds": 0.241,
+    "risk_adj": 0.724
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-08-27T14:21:36.139259"
+}
