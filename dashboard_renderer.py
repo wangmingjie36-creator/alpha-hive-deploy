@@ -462,6 +462,12 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     # 反模式的第 3 处（前两处见 v0.43.15 save_predictions / v0.43.16 快照循环）。
     if _price_raw is None:
         try:
+            try:                                # v0.45.56 限流闸门
+                from yf_gate import ensure as _yf_ensure
+                _yf_ensure()
+            except Exception:                   # pragma: no cover - 闸门不可得不阻断
+                pass
+
             import yfinance as _yf
             _h = _yf.Ticker(ticker).history(period="5d")
             if not _h.empty:

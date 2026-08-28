@@ -814,6 +814,12 @@ def calculate_iv_rv_spread(
     try:
         import time
 
+        try:                                    # v0.45.56 限流闸门
+            from yf_gate import ensure as _yf_ensure
+            _yf_ensure()
+        except Exception:                       # pragma: no cover - 闸门不可得不阻断
+            pass
+
         import yfinance as yf
         import numpy as np
 
@@ -830,6 +836,19 @@ def calculate_iv_rv_spread(
             def https_gate(*_a, **_k):
                 return nullcontext()
 
+        # v0.45.56: 429 与瞬时故障必须分开处理。
+        # 旧实现对**所有**失败都退避 0.7s/1.4s 再重试——那是为「本机 OpenSSL
+        # 1.1.1q 并发 HTTPS 抛 SSLEOFError」这类开即恢复的故障设计的。对上
+        # yfinance 限流它是反向的：把 1 次请求变成 3 次、间隔不到 2 秒，
+        # **在被拒绝时加倍施压**。2026-08-27 全天 687 次 429、rv_30d 0/30，
+        # 这个循环是放大器之一。现在：一次 429 就停，不重试。
+        try:
+            from yf_gate import is_rate_limit_error as _is_rl
+        except Exception:  # pragma: no cover - 闸门不可得时退化
+            def _is_rl(_e):
+                _m = str(_e).lower()
+                return "too many requests" in _m or "rate limited" in _m
+
         hist = None
         _dl_err = None
         for _attempt in range(3):
@@ -841,6 +860,8 @@ def calculate_iv_rv_spread(
                     break
             except Exception as _e_dl:  # noqa: BLE001 — 瞬时 SSL 错开即恢复
                 _dl_err = _e_dl
+                if _is_rl(_e_dl):
+                    break          # 限流：重试只会加深，直接降级
             if _attempt < 2:
                 time.sleep(0.7 * (_attempt + 1))
 

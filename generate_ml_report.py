@@ -2274,6 +2274,14 @@ class MLEnhancedReportGenerator:
 def main():
     """主程序"""
 
+    # v0.45.56：yfinance 全局限流闸门。必须在任何取数之前装好。
+    # 8/27 事故：全天 687 次 429，rv_30d/iv_rank/iv_rv_spread/catalysts 各 0/30。
+    try:
+        import yf_gate
+        yf_gate.install()
+    except Exception as _e:  # pragma: no cover - 闸门不可得不阻断主流程
+        print(f"⚠️  yfinance 限流闸门未装上：{_e}")
+
     # 解析命令行参数
     parser = argparse.ArgumentParser(
         description="Alpha Hive ML 增强报告生成器",

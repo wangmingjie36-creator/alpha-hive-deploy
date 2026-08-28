@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -316,12 +317,75 @@ def _render(res: Dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def check_rate_limit(date: str, log_dir: str = "") -> Dict[str, Any]:
+    """数当日编排器日志里的 yfinance 429，回答「为什么降级」而不只是「降了什么」。
+
+    v0.45.56 起。8/27 的覆盖率报告准确列出了 rv_30d/iv_rank/iv_rv_spread/
+    catalysts 各 0/30 —— 但**没说是被限流打空的**，于是那份报告读起来像
+    「yfinance 今天没数据」，而真相是「我们把 yfinance 打到拒绝服务」。
+    两者的修法完全相反：前者等它恢复，后者必须自己降速。
+
+    证据本来就躺在日志里，不需要新管道：数一下就是了。
+
+    阈值 100 是经验刻度而非实测最优（⚠️ 待验证）：已知 8/25=364 次时数据仍
+    全须全尾、8/27=687 次时全空，真正的临界点在两者之间，尚未定位。
+    """
+    _dir = Path(log_dir) if log_dir else Path.home() / ".claude" / "logs"
+    log = _dir / f"orchestrator-{date}.log"
+    if not log.exists():
+        return {"determinable": False, "reason": f"无 {log.name}", "healthy": True}
+    try:
+        txt = log.read_text(encoding="utf-8", errors="ignore")
+    except OSError as e:
+        return {"determinable": False, "reason": f"日志读取失败: {e}", "healthy": True}
+
+    n = txt.count("Too Many Requests")
+    # 首末时刻：限流是"一阵子"还是"全程"，决定它是否吃掉了整轮扫描
+    stamps = re.findall(r"^(\d{2}:\d{2}:\d{2}).*Too Many Requests", txt, re.M)
+    return {
+        "determinable": True,
+        "count": n,
+        "first": stamps[0] if stamps else None,
+        "last": stamps[-1] if stamps else None,
+        "threshold": 100,
+        "healthy": n < 100,
+    }
+
+
+def _rate_limit_verdict(rl: Dict[str, Any], fields_healthy: bool) -> str:
+    """限流量高**且**字段降了 = 病因；限流量高但字段还全 = 预警。
+
+    两者必须分开说。8/25 实测 364 次限流、数据却全须全尾；8/27 是 687 次、
+    全空。把前者也写成「降级的直接原因」是假话 —— 那天没有降级。
+    但它同样该报：赤字是那时开始攒的，三天后才还。
+    """
+    if rl["healthy"]:
+        return ""
+    if fields_healthy:
+        return ("⚠️ 本轮数据仍是全的，但限流量已越闸 —— 这是**早期预警**："
+                "8/25=364 次时数据还全，8/27=687 次时全空。")
+    return ("yfinance 限流是本轮降级的直接原因；重试会加深它，"
+            "应下调 resilience.yfinance_limiter 速率。")
+
+
+def _render_rate_limit(r: Dict[str, Any], fields_healthy: bool = False) -> str:
+    if not r.get("determinable"):
+        return f"⚠️  限流检查无法判定：{r['reason']}"
+    if r["healthy"]:
+        return f"✅ yfinance 限流 {r['count']} 次（闸 {r['threshold']}）"
+    return (f"❌ yfinance 限流 {r['count']} 次（闸 {r['threshold']}），"
+            f"{r['first']}–{r['last']}\n       ↳ "
+            + _rate_limit_verdict(r, fields_healthy))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="扫描字段覆盖率闸")
     ap.add_argument("--date", default=None, help="业务日期 YYYY-MM-DD（默认 PDT 当日）")
     ap.add_argument("--file", default=None, help="直接指定 .swarm_results_*.json")
     ap.add_argument("--quiet", action="store_true", help="只输出结论行")
     ap.add_argument("--out", default=None, help="把完整结果写成 JSON")
+    ap.add_argument("--log-dir", default="",
+                    help="编排器日志目录（默认 ~/.claude/logs）；限流检查从这里读")
     ap.add_argument("--check-prices", action="store_true",
                     help="额外核验 price_at_predict 与真实收盘（需网络，较慢）")
     args = ap.parse_args()
@@ -355,6 +419,23 @@ def main() -> int:
         print(_render_label_honesty(lh))
     elif lh.get("determinable") and not lh["healthy"]:
         print(f"❌ {date} 来源标签矛盾 {len(lh['contradictions'])} 处")
+
+    # 限流检查是**诊断项，不进退出码**：
+    #   · 字段真降了 → 退出码已经是 1，限流只是补上「为什么」
+    #   · 字段还全但 429 越闸 → 那是早期预警（8/25 实测 364 次、数据全须全尾），
+    #     把它判成失败会让编排器对一次成功的扫描报错
+    # 它的价值在于**回答病因**，不在于多亮一盏红灯。
+    rl = check_rate_limit(date, args.log_dir)
+    _fields_ok = bool(res.get("healthy"))
+    if rl.get("determinable"):
+        rl["verdict"] = _rate_limit_verdict(rl, _fields_ok)
+    res["rate_limit"] = rl
+    if not args.quiet:
+        print()
+        print(_render_rate_limit(rl, _fields_ok))
+    elif rl.get("determinable") and not rl["healthy"]:
+        _tail = "降级的直接原因" if not _fields_ok else "早期预警（本轮数据仍全）"
+        print(f"❌ {date} yfinance 限流 {rl['count']} 次 —— {_tail}")
 
     if args.check_prices:
         pr = check_prices(date)

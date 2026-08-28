@@ -8,6 +8,7 @@
 """
 
 import json
+import sys
 
 import pytest
 
@@ -377,3 +378,60 @@ class TestLabelHonestyMalformed:
             "details": {"data_quality": "REAL", "iv_current": None}}}}}))
         r = gate.check_label_honesty("2026-08-26", p)
         assert r["healthy"] is False, "大写 REAL 也应被当成成功标签"
+
+
+class TestRateLimitDiagnosis:
+    """限流检查（v0.45.56）：回答「为什么降级」，但**不进退出码**。
+
+    8/27 的覆盖率报告准确列出了四个字段各 0/30，却没说是被限流打空的 ——
+    读起来像「yfinance 今天没数据」，真相是「我们把 yfinance 打到拒绝服务」。
+    两者修法相反：前者等它恢复，后者必须自己降速。
+    """
+
+    def _log(self, tmp_path, date, n):
+        p = tmp_path / f"orchestrator-{date}.log"
+        p.write_text("\n".join(
+            f"14:0{i%10}:00 | WARNING | x | boom: Too Many Requests. Rate limited."
+            for i in range(n)))
+        return str(tmp_path)
+
+    def test_counts_and_reports(self, tmp_path):
+        import scan_coverage_gate as gate
+        r = gate.check_rate_limit("2026-08-27", self._log(tmp_path, "2026-08-27", 150))
+        assert r["determinable"] and r["count"] == 150
+        assert r["healthy"] is False
+        assert r["first"] and r["last"]
+
+    def test_missing_log_is_undeterminable_not_failure(self, tmp_path):
+        import scan_coverage_gate as gate
+        r = gate.check_rate_limit("2026-01-01", str(tmp_path))
+        assert r["determinable"] is False
+        assert r["healthy"] is True, "无日志必须是「无法判定」，不能算成失败"
+
+    def test_early_warning_vs_cause(self):
+        """字段还全 = 早期预警；字段降了 = 直接病因。措辞必须分开。"""
+        import scan_coverage_gate as gate
+        rl = {"healthy": False, "count": 364}
+        assert "早期预警" in gate._rate_limit_verdict(rl, fields_healthy=True)
+        assert "直接原因" in gate._rate_limit_verdict(rl, fields_healthy=False)
+        assert gate._rate_limit_verdict({"healthy": True}, fields_healthy=True) == ""
+
+    def test_does_not_flip_exit_code(self, tmp_path, monkeypatch, capsys):
+        """限流越闸但字段健康时，退出码必须仍是 0。
+
+        回归：初版把限流并进了 `_degraded`，于是一次**成功**的扫描
+        （8/26 合成健康数据 + 真实日志 487 次 429）被判成失败。
+        编排器只看退出码，那等于把预警谎报成故障。
+        """
+        import scan_coverage_gate as gate
+        ld = self._log(tmp_path, "2026-08-26", 500)
+        monkeypatch.setattr(gate, "check", lambda *a, **k: {
+            "determinable": True, "date": "2026-08-26", "tickers": 30,
+            "fields": [], "healthy": True, "degraded_fields": [],
+            "likely_network_layer": False})
+        monkeypatch.setattr(gate, "check_label_honesty", lambda *a, **k: {
+            "determinable": True, "checked": 0, "contradictions": [], "healthy": True})
+        monkeypatch.setattr(sys, "argv",
+                            ["gate", "--date", "2026-08-26", "--quiet", "--log-dir", ld])
+        assert gate.main() == 0
+        assert "早期预警" in capsys.readouterr().out

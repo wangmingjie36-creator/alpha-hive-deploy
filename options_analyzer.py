@@ -21,10 +21,14 @@ except ImportError:
     yf = None
 
 # ── 期权数据断路器（#9）──
+# v0.45.56：`yfinance_limiter` 曾在这里被 import 然后**从未调用**——只有
+# `_opt_cb`（熔断器）真在用。一个导入了却不用的限流器比没有更坏：读代码的人
+# （包括我）会以为这条路径受治理。限流现在由 `yf_gate` 全局承担（它 patch 了
+# yfinance.download/Ticker，共享的正是同一个 `yfinance_limiter` 桶），
+# 所以这里不再导入它。
 try:
-    from resilience import yfinance_limiter as _opt_rl, yfinance_breaker as _opt_cb, NETWORK_ERRORS
+    from resilience import yfinance_breaker as _opt_cb, NETWORK_ERRORS
 except ImportError:
-    _opt_rl = None
     _opt_cb = None
     NETWORK_ERRORS = (ConnectionError, TimeoutError, OSError, ValueError, KeyError)
 
@@ -392,6 +396,12 @@ class OptionsDataFetcher:
             return self._get_sample_historical_hv(ticker)
 
         try:
+            try:                                # v0.45.56 限流闸门
+                from yf_gate import ensure as _yf_ensure
+                _yf_ensure()
+            except Exception:                   # pragma: no cover - 闸门不可得不阻断
+                pass
+
             stock = yf.Ticker(ticker)
             hist = stock.history(period="1y")
 

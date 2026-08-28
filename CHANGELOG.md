@@ -69,7 +69,142 @@
   改成逐标的分位需要重算，不在本次范围。
 
 
-## [0.45.56] — 2026-08-28 — 占位（进行中：yfinance 限流治理 —— 8/27 全天 687 次 429 打空 iv_rank/RV30/宏观）
+## [0.45.56] — 2026-08-28 — 限流器早就在仓库里，只接了 6 个调用点
+
+用户问：「为什么 8-27 网站的 IV Rank 还是丢失，不是有云端快照的数据源可以用吗，
+macro 宏观数据还是丢失」。
+
+三个问题、一个根因，且**都不是 8/26 那个故障**。
+
+### 病因：我们把 yfinance 打到拒绝服务
+
+8/27 编排器日志里 **687 次 `Too Many Requests`**，14:00:05 起持续到 14:29:40 ——
+覆盖整个扫描窗口。`rv_30d` / `iv_rank` / `iv_rv_spread` / `catalysts` **各 0/30**，
+宏观整块 `data_source: "fallback"`。
+
+不是突发，是一条在爬的曲线：
+
+| 日期 | 429 次数 | 分布 | rv_30d | iv_rank | 宏观 |
+|---|---|---|---|---|---|
+| 8-25 | 364 | 14:00–14:16（5 分钟爆发） | 30/30 | 29/30 | `yfinance+fred` |
+| 8-26 | 487 | — | — | — | `yfinance+fred` |
+| **8-27** | **687** | **14:00–14:29（全程）** | **0/30** | **0/30** | **`fallback`** |
+
+8/25 已经在限流了，只是爆发集中、之后放行，所以数据还是全的 —— 赤字从那时开始攒。
+
+### 为什么护栏没拦住：它只覆盖 6/40 个调用点
+
+`resilience.py` 里**早就有** `yfinance_limiter`（rate=3.0）和 `yfinance_breaker`。
+真实使用者只有 `earnings_watcher`（5 处）和 `swarm_agents/cache`（1 处）。
+而 `market_intelligence`（RV30）、`fred_macro`（宏观）、`risk_engine`、`backtester`、
+`cboe_fetcher`、`data_pipeline`、四只蜂、`pead_analyzer`、`paper_portfolio`、
+`dashboard_renderer`、`outcomes_fetcher` —— 三十多个调用点，一个都不走它。
+
+`options_analyzer` 更微妙：它 `import` 了 `yfinance_limiter`，**然后从未调用**，
+只用了熔断器。一个导入了却不用的限流器比没有更坏 —— 读代码的人会以为这条路径受治理。
+
+这与 `http_gate` docstring 里已经记过的教训逐字相同：
+「那把信号量只锁了 CBOE……**加源之前先确认闸门覆盖它**」。同一个错误，换了一层。
+
+### 云端快照为什么兜不住
+
+`cloud_snapshot_fetch` 按设计只冻结「过时不候」的数据（期权链 / IV 期限结构 /
+OI / VIX / P/C / SKEW / VVIX / F&G），理由原文是「股价有历史 API 可补」。
+判断没错，但这让它的覆盖面与本次故障面**正交**：8/27 快照 30/30 全部落盘、
+`iv_current` 一个不缺（走 CBOE，没被限流），坏的恰好是它决定不管的那一半。
+
+`_refresh_price_derived`（v0.45.43，为 8/26 事故所写）当天也失效 ——
+它「字段为空就就地重算」，而重算方式是**再调一次 yfinance**。
+**修复手段与被修复对象共用同一个挂掉的依赖，那不是兜底。**
+
+### Added
+
+- **`yf_gate.py`** —— yfinance 全局限流闸门。patch `yfinance.download` /
+  `yfinance.Ticker` **本身**，而不是逐处接线：接线一次，新调用点自动受治理，
+  不存在「忘了接」。已核实全仓无 `from yfinance import X` 写法（那种写法会绕过 patch），
+  并由测试锁住。
+  - `ensure()`：幂等、极廉价，供热点取数函数在入口自调，使覆盖率不依赖「记得在新入口 install」
+  - 429 → **立即熔断 180s**，冷却期内的调用抛 `YFRateLimited`，不打网
+  - 复用 `resilience.yfinance_limiter` **同一个桶**（自造第二个桶 = 两拨调用方各持一半配额）
+  - **方法与 property 都包**：`history` / `option_chain` / `get_earnings_dates` 是方法，
+    `info` / `calendar` / `options` / `news` 是 property。只包 `history()` 会漏掉催化剂 ——
+    8/27 掉的第四个字段正是走 `t.calendar`（`chronos_bee.py:115`），`.info` 同理
+    （bear / scout / rival 三只蜂）。property 只对**首次**访问计限流：yfinance 把它们
+    缓存在实例上，每次访问都扣令牌会让缓存命中也等 2s。
+- `scan_coverage_gate.check_rate_limit()` —— 数当日日志里的 429，回答「为什么降级」
+  而不只是「降了什么」。**区分病因与预警**：限流越闸且字段降了 = 直接原因；
+  限流越闸但字段还全 = 早期预警（8/25 正是后者）。
+  **是诊断项，不进退出码**：字段真降了退出码已经是 1，限流只补「为什么」；
+  字段还全时把预警判成失败会让编排器对一次成功的扫描报错。
+  新增 `--log-dir` 便于测试，也不再隐式依赖 `~/.claude/logs` 这个机器全局路径。
+- `ALPHA_HIVE_YF_RATE` 环境变量可覆盖限流速率（越界值忽略），调参不必改代码。
+- `tests/conftest.py` 新增 autouse fixture，测试期把限流速率调到不产生等待。
+  单测里 yfinance 全被 mock，令牌等待没有语义、只是墙钟浪费。
+
+⚠️ **限流会拖慢逐票取数**。`test_dashboard_renderer` 实测从秒级涨到 **56s**
+（30 只标的 × 2s 令牌），撞上 60s 超时 —— 这是把速率从 3.0 降到 0.5 的直接代价，
+也是一个提前示警：**真实扫描同样会变慢**。若日常扫描因此吃不下时间预算，
+用 `ALPHA_HIVE_YF_RATE` 上调，但先看 `scan_coverage_gate` 报的 429 次数。
+- `tests/test_yf_gate.py`（20 项）
+
+### Changed
+
+- `resilience.yfinance_limiter`: rate **3.0 → 0.5** req/s, burst 2 → 1。
+  3.0 是推测值且从未被实测支持，实测证据全部指向它太快。0.5 仍是保守推测
+  而非实测最优（⚠️ 待验证）。
+- `alpha_hive_daily_report.main()` / `generate_ml_report.main()`: 取数前 `yf_gate.install()`
+- `market_intelligence` / `fred_macro` / `options_analyzer`: 热点路径 `yf_gate.ensure()`
+
+### Fixed
+
+- **`market_intelligence.calculate_iv_rv_spread` 的重试是限流放大器**：
+  旧实现对**所有**失败都 `time.sleep(0.7 * (attempt+1))` 后重试 3 次。
+  那个退避是为「OpenSSL 1.1.1q 并发 HTTPS 抛 SSLEOFError」这类开即恢复的故障
+  设计的；对上限流器它把 1 次请求变成 3 次、间隔不到 2 秒，**在被拒绝时加倍施压**。
+  现在 429 一次就停。
+- `options_analyzer` 删掉 import 了却从未调用的 `_opt_rl`
+
+### 8-27 数据已离线补算（30/30）
+
+期权链快照 30/30 完好，缺的只是日K 派生字段 —— 这类数据随时可重拉。
+以 0.5 req/s 走闸门重算并回写：**30/30 全部补回**，`rv_30d` 中位 40.7%（12.7~99.1）、
+`iv_rank` 中位 32.2（2.9~100.0）。
+
+闸门实测：**51 次调用、0 次 429、0 次冷却拦截**。同一批取数在 8/27 无节流时
+产生了 687 次 429 —— 这是 0.5 req/s 可用的第一个正面证据（样本仍小，
+真实上限未定位，⚠️ 待验证）。
+
+⚠️ **尚未做**：8-27 的 `analysis-*.json` 与网站 HTML 仍是旧值。快照修好只是
+让重跑能拿到数据，报告本身要重新生成才会更新 —— 那是一次需要用户确认的
+限流长跑（30 只 × 0.5 req/s）。
+
+### 自查记录（两条，都是我自己造的）
+
+1. **测试写假了。** `test_iv_rv_does_not_retry_on_429` 第一版没停用闸门，
+   于是第 2/3 次调用被冷却挡下，`calls == 1` 无论修复在不在都成立 ——
+   把修复注释掉它照样绿。已改为在闸门缺席时隔离验证；mutation check 实测
+   移除修复后报 `3 == 1` 变红、还原后变绿。
+   **一个不会变红的护栏只是装饰。**
+2. **「限流」这个解释我用错了三次。** 离线补算连续三轮 0 修复，我先归因于
+   Yahoo 限流、再归因于「前台测试与后台任务抢配额」（这条第一次是真的），
+   于是第二、三次就照搬。真正的原因是 scratchpad 里有个遗留的 `inspect.py`
+   —— 用 `python3 <脚本路径>` 运行时 Python 会把**脚本自己的目录**放进
+   `sys.path`（排在我显式 `sys.path.insert(0, PROJ)` 之后但依然生效），
+   它遮蔽了标准库 `inspect`，yfinance 深处 `from inspect import getmembers`
+   抛 ImportError，又被 `_refresh_price_derived` 的 `except Exception: _log.debug`
+   吞掉 —— 退出码 0、「30/30 已处理」、零修复。
+   **手上一直有反证：`calls: 0`。** 闸门计数器说一次网络请求都没发出，这与
+   「我们被限流了」直接矛盾。我连着三轮把它解释过去了。
+   （这正是本 session 在治的那个病，只不过对象是我自己。）
+3. **退出码语义写错了一版。** 初版把限流并进 `_degraded`，于是
+   `test_healthy_exits_zero` 红了 —— 合成的健康数据 + 8/26 真实日志的 487 次 429
+   被判成失败。测试是对的：编排器只看退出码，那等于把预警谎报成故障。
+   已改为诊断项，并补了「越闸但字段健康 → 退出码仍 0」的回归测试。
+4. **我自己把限流打爆了一次。** 离线补算跑在后台时，我在前台继续做
+   yfinance 冒烟测试，两者抢同一份配额，于是补算第一只标的就 429、
+   而我的前台调用却成功 —— 差点据此误判成「`_refresh_price_derived` 有 bug」。
+   实际是我在跟自己抢。
+
 
 ## [0.45.55] — 2026-08-28 — 失效条件空转了两天：一条读不懂，另外 119 条陪葬
 
