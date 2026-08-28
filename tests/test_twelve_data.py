@@ -192,3 +192,68 @@ class TestIntegrationWithMarketIntelligence:
         d = mi.calculate_iv_rv_spread("NVDA", 48.61)
         assert calls["n"] >= 1, "未回落到 yfinance"
         assert d["rv_30d"] is None and d["data_available"] is False
+
+
+class TestFormingBarGuard:
+    """盘中未完成的末根日线必须丢掉（v0.45.61 自检时实测发现）。
+
+    2026-08-28 10:09 ET 跑自检，NVDA 末根是
+    `2026-08-28 close=224.57 volume=103412` —— 开盘才十分钟的半根 bar，
+    而 8/24–8/27 成交量是 1.2~3.0 亿。把它算进 RV30 等于用一个残缺的
+    日收益污染波动率（实测 42.56 vs 修复后 42.89）。
+
+    项目里已有 `data_pipeline._drop_forming_bar`，但它靠 yfinance 探 SPY
+    分钟线判交易所时间 —— 正是本模块要绕开的东西。这里用返回体自带的
+    日期与成交量，不额外发请求。
+    """
+
+    def _rows(self, n=10, last_date="2026-08-27", last_vol=2e8):
+        rows = [{"date": f"2026-08-{10 + i:02d}", "close": 100.0 + i, "vol": 2e8}
+                for i in range(n - 1)]
+        rows.append({"date": last_date, "close": 200.0, "vol": last_vol})
+        return rows
+
+    def test_drops_bar_dated_today_et(self, monkeypatch):
+        monkeypatch.setattr(td, "_et_today", lambda: "2026-08-28")
+        rows = self._rows(last_date="2026-08-28", last_vol=103412)
+        assert len(td._drop_forming_bar(rows)) == len(rows) - 1
+
+    def test_keeps_completed_last_bar(self, monkeypatch):
+        """收盘后末根就是完整的，不该被丢。"""
+        monkeypatch.setattr(td, "_et_today", lambda: "2026-08-28")
+        rows = self._rows(last_date="2026-08-27", last_vol=2.9e8)
+        assert len(td._drop_forming_bar(rows)) == len(rows)
+
+    def test_volume_signal_catches_it_without_a_clock(self, monkeypatch):
+        """时钟不可得时，成交量是独立的第二道判据。
+
+        两道各自独立、任一命中即丢 —— 误丢的代价是 30 根少一根，
+        漏丢的代价是波动率失真，不对称。
+        """
+        monkeypatch.setattr(td, "_et_today", lambda: None)
+        rows = self._rows(last_date="2026-08-28", last_vol=103412)   # 中位的 0.05%
+        assert len(td._drop_forming_bar(rows)) == len(rows) - 1
+
+    def test_volume_signal_does_not_fire_on_normal_day(self, monkeypatch):
+        monkeypatch.setattr(td, "_et_today", lambda: None)
+        rows = self._rows(last_date="2026-08-27", last_vol=1.6e8)    # 中位的 80%
+        assert len(td._drop_forming_bar(rows)) == len(rows)
+
+    def test_too_few_rows_untouched(self, monkeypatch):
+        """样本太少时不做判断——丢一根可能让整批不可用。"""
+        monkeypatch.setattr(td, "_et_today", lambda: "2026-08-28")
+        rows = self._rows(n=4, last_date="2026-08-28", last_vol=1)
+        assert len(td._drop_forming_bar(rows)) == len(rows)
+
+    def test_end_to_end_excludes_today(self, monkeypatch):
+        """整条取数链上生效，不只是那个私有函数。"""
+        monkeypatch.setattr(td, "api_key", lambda: "k")
+        monkeypatch.setattr(td, "_et_today", lambda: "2026-08-28")
+        payload = {"values": [
+            {"datetime": f"2026-08-{10 + i:02d}", "close": str(100 + i),
+             "volume": "200000000"} for i in range(18)
+        ] + [{"datetime": "2026-08-28", "close": "224.57", "volume": "103412"}]}
+        _patch_http(monkeypatch, _resp(payload))
+        cs = td.fetch_daily_closes("NVDA")
+        assert 224.57 not in cs, "盘中半根 bar 进了收盘价序列"
+        assert len(cs) == 18

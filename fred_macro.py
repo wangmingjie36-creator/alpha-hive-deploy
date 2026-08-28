@@ -214,7 +214,7 @@ def _finnhub_quote(symbol: str) -> Optional[Dict]:
     }
 
 
-def _same_day_macro_data() -> Tuple[Dict, Dict[str, str]]:
+def _same_day_macro_data(as_of: Optional[str] = None) -> Tuple[Dict, Dict[str, str]]:
     """当日口径取数：财政部 + Finnhub ETF。→ (data, sources)
 
     `data` 与原 yfinance 分支同形（{name: {last, prev, change_pct}}），
@@ -226,9 +226,14 @@ def _same_day_macro_data() -> Tuple[Dict, Dict[str, str]]:
     sources: Dict[str, str] = {}
 
     # ① 国债：一次请求拿到 2Y/5Y/10Y
+    #
+    # v0.45.61：补跑时按**目标日**取。财政部一次返回整月，指定日期不额外发请求；
+    # 该日无数据（周末/假日/未发布）时 `get_yield_curve` 返回 None，**不会**
+    # 悄悄给前一交易日。补跑走 FRED 也对，但 FRED 转发的就是这份数据且晚一天
+    # ——实测 8/28 查询时 FRED 的 2Y 是 4.19@08-26，财政部已有 4.20@08-27。
     try:
         from treasury_yields import get_yield_curve
-        cur = get_yield_curve()
+        cur = get_yield_curve(as_of)
         if cur:
             for name, k in (("TNX", "y10"), ("FVX", "y5"), ("TWO", "y2")):
                 v = cur.get(k)
@@ -239,8 +244,11 @@ def _same_day_macro_data() -> Tuple[Dict, Dict[str, str]]:
     except Exception as e:  # noqa: BLE001
         _log.debug("财政部曲线不可用: %s", e)
 
-    # ② 大盘 / 黄金 / 美元 / 长债：ETF 代理
-    for name, (sym, _label) in _ETF_PROXY.items():
+    # ② 大盘 / 黄金 / 美元 / 长债：ETF 代理。
+    # **仅当日口径**：Finnhub `/quote` 只给最新报价，给不了历史某日 ——
+    # 补跑时拿今天的 SPY 冒充目标日比缺失更坏（补跑那条路由 `_asof_history`
+    # 按目标日取 yfinance 日K）。
+    for name, (sym, _label) in ({} if as_of else _ETF_PROXY).items():
         q = _finnhub_quote(sym)
         if q:
             data[name] = {"last": q["last"], "prev": q["prev"],
@@ -339,11 +347,12 @@ def _fetch_macro_data() -> Dict:
         # 拿今天的值冒充目标日比缺失更坏。补跑仍由 `_asof_history` 对齐。
         data: Dict = {}
         _src_map: Dict[str, str] = {}
-        if not _as_of:
-            data, _src_map = _same_day_macro_data()
-            if data:
-                _log.info("宏观当日源命中 %d 项：%s", len(data),
-                          ", ".join(f"{k}={v}" for k, v in sorted(_src_map.items())))
+        # 补跑也调 —— 只为拿目标日的国债曲线（ETF 报价那半段会自动跳过）。
+        data, _src_map = _same_day_macro_data(_as_of)
+        if data:
+            _log.info("宏观非 yfinance 源命中 %d 项（as_of=%s）：%s",
+                      len(data), _as_of or "当日",
+                      ", ".join(f"{k}={v}" for k, v in sorted(_src_map.items())))
 
         for name, sym in symbols.items():
             if name in data:          # 已由当日源供上，不再打 yfinance

@@ -18,6 +18,11 @@ import pytest
 
 import fred_macro as fm
 
+# conftest 的 `_block_same_day_macro` 会把 `fm._same_day_macro_data` 换成桩
+# （防止测试打真网络）。要验证**它本身**的行为就得拿到真函数 ——
+# 模块加载早于 autouse fixture，此刻抓到的还是原件。
+_REAL_SAME_DAY = fm._same_day_macro_data
+
 
 @pytest.fixture(autouse=True)
 def _clean():
@@ -209,7 +214,7 @@ class TestSameDayWithoutYfinance:
     """
 
     def test_same_day_prefers_non_yfinance(self, monkeypatch):
-        monkeypatch.setattr(fm, "_same_day_macro_data", lambda: (
+        monkeypatch.setattr(fm, "_same_day_macro_data", lambda as_of=None: (
             {"TNX": {"last": 4.67, "prev": 4.67, "change_pct": 0.0},
              "TWO": {"last": 4.20, "prev": 4.20, "change_pct": 0.0},
              "SPX": {"last": 771.10, "prev": 766.08, "change_pct": 0.66}},
@@ -224,16 +229,33 @@ class TestSameDayWithoutYfinance:
         assert "treasury" in r["data_source"] and "finnhub" in r["data_source"]
         assert r["field_sources"]["TNX"].startswith("treasury_gov")
 
-    def test_backfill_does_not_use_same_day_sources(self, monkeypatch):
-        """补跑绝不能走当日源 —— 财政部/Finnhub 只给"最新"，
-        拿今天的值冒充目标日比缺失更坏。"""
-        called = {"n": 0}
+    def test_backfill_asks_treasury_for_the_target_date(self, monkeypatch):
+        """补跑要**目标日**的国债，不是最新的。
+
+        财政部一次返回整月，指定日期不额外发请求。走 FRED 也对，但 FRED
+        转发的就是这份数据且晚一天 —— 实测 8/28 查询时 FRED 的 2Y 是
+        4.19@08-26，财政部已有 4.20@08-27。
+        """
+        seen = {}
         monkeypatch.setattr(fm, "_same_day_macro_data",
-                            lambda: (called.__setitem__("n", called["n"] + 1), ({}, {}))[1])
+                            lambda as_of=None: (seen.__setitem__("as_of", as_of), ({}, {}))[1])
         monkeypatch.setattr(fm, "_asof_history", lambda *a, **k: None)
         fm.set_macro_snapshot("2026-08-27", MARKET_827)
         fm.get_macro_context()
-        assert called["n"] == 0, "补跑口径下调用了当日源"
+        assert seen.get("as_of") == "2026-08-27", "补跑没把目标日传给取数层"
+
+    def test_backfill_skips_etf_quotes(self, monkeypatch):
+        """ETF 报价只给最新 —— 补跑时必须跳过，拿今天的 SPY 冒充目标日
+        比缺失更坏。"""
+        called = {"n": 0}
+        monkeypatch.setattr(fm, "_finnhub_quote",
+                            lambda s: called.__setitem__("n", called["n"] + 1))
+        monkeypatch.setattr("treasury_yields.get_yield_curve", lambda *a, **k: None)
+        _REAL_SAME_DAY("2026-08-27")
+        assert called["n"] == 0, "补跑口径下调用了 Finnhub 实时报价"
+        # 当日口径则应该调
+        _REAL_SAME_DAY(None)
+        assert called["n"] == len(fm._ETF_PROXY)
 
     def test_real_2y_beats_the_5y_approximation(self, monkeypatch):
         """真 2Y 必须压过 `5Y + 0.15` 近似 —— 那个近似会**错判曲线档位**。
@@ -241,7 +263,7 @@ class TestSameDayWithoutYfinance:
         2026-08-27 实测：5Y=4.38 → 近似 2Y=4.53 → 10Y−2Y=+14bp 判成 flat；
         真 2Y=4.20 → +47bp，实际是 normal。
         """
-        monkeypatch.setattr(fm, "_same_day_macro_data", lambda: (
+        monkeypatch.setattr(fm, "_same_day_macro_data", lambda as_of=None: (
             {"TNX": {"last": 4.67, "prev": 4.67, "change_pct": 0.0},
              "FVX": {"last": 4.38, "prev": 4.38, "change_pct": 0.0},
              "TWO": {"last": 4.20, "prev": 4.20, "change_pct": 0.0}},
@@ -256,7 +278,7 @@ class TestSameDayWithoutYfinance:
 
     def test_falls_back_to_approximation_and_labels_it(self, monkeypatch):
         """财政部不可得时仍可用近似，但**必须标出来**。"""
-        monkeypatch.setattr(fm, "_same_day_macro_data", lambda: (
+        monkeypatch.setattr(fm, "_same_day_macro_data", lambda as_of=None: (
             {"TNX": {"last": 4.67, "prev": 4.67, "change_pct": 0.0},
              "FVX": {"last": 4.38, "prev": 4.38, "change_pct": 0.0}},
             {"TNX": "treasury_gov", "FVX": "treasury_gov"}))

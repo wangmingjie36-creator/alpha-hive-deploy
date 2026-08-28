@@ -105,6 +105,54 @@ def reset_stats() -> None:
     _daily_used = 0
 
 
+def _et_today() -> Optional[str]:
+    """美东当日日期。时区换算靠 zoneinfo（绝对时间正确即可），不靠本机 tz 设置。"""
+    try:
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        return _dt.datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:  # pragma: no cover
+        return None
+
+
+def _drop_forming_bar(rows: List[dict], ticker: str = "") -> List[dict]:
+    """去掉「当日盘中正在形成」的末根日线。
+
+    2026-08-28 10:09 ET 实测：NVDA 末根 `2026-08-28 close=224.57 volume=103412`，
+    而 8/24–8/27 的成交量是 1.2~3.0 亿 —— 开盘才十分钟的半根 bar。
+    把它算进 RV30 等于用一个残缺的日收益污染波动率。
+
+    项目里已有 `data_pipeline._drop_forming_bar`，但它靠 yfinance 探 SPY 分钟线
+    判断交易所时间 —— 那正是本模块要绕开的东西。这里改用返回体自带的两个信号，
+    不额外发请求：
+
+      ① **日期**：末根日期 == 美东当日 → 今天的 bar，收盘前必然未完成
+      ② **成交量**：末根 < 窗口中位数的 30% → 几乎只可能是半根
+
+    两道各自独立、任一命中即丢。误丢的代价极小（30 根里少一根），
+    漏丢的代价是波动率失真 —— 不对称，所以宁可宽。
+    """
+    if len(rows) < 5:
+        return rows
+    last = rows[-1]
+    reason = ""
+
+    today_et = _et_today()
+    if today_et and last["date"] >= today_et:
+        reason = f"日期 {last['date']} 是美东当日"
+    else:
+        vols = sorted(r["vol"] for r in rows[:-1] if r["vol"] > 0)
+        if vols:
+            med = vols[len(vols) // 2]
+            if med > 0 and last["vol"] < med * 0.30:
+                reason = f"成交量 {last['vol']:,.0f} 不足中位 {med:,.0f} 的 30%"
+
+    if reason:
+        _log.info("[%s] 丢弃盘中未完成的末根日线（%s）", ticker or "?", reason)
+        return rows[:-1]
+    return rows
+
+
 def fetch_daily_closes(ticker: str, days: int = 60,
                        end_date: Optional[str] = None) -> Optional[List[float]]:
     """取日线收盘价，**按日期升序**（最旧 → 最新）。
@@ -173,15 +221,23 @@ def fetch_daily_closes(ticker: str, days: int = 60,
         _log.warning("[%s] Twelve Data 无 values 段", ticker)
         return None
 
-    closes: List[float] = []
+    rows: List[dict] = []
     for row in values:
         try:
             c = float(row.get("close"))
         except (TypeError, ValueError, AttributeError):
             continue
-        if c > 0:
-            closes.append(c)
+        if c <= 0:
+            continue
+        try:
+            v = float(row.get("volume") or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        rows.append({"date": str(row.get("datetime") or "")[:10], "close": c, "vol": v})
 
+    rows = _drop_forming_bar(rows, ticker)
+
+    closes = [r["close"] for r in rows]
     if len(closes) < 10:
         _log.warning("[%s] Twelve Data 有效收盘价仅 %d 根", ticker, len(closes))
         return None
