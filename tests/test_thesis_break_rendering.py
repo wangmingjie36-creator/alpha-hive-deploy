@@ -165,3 +165,164 @@ def test_real_config_renders_for_every_watchlist_ticker():
     empty = [t for t, v in sr.items()
              if not (v.get("thesis_break_l1") or v.get("thesis_break_l2"))]
     assert not empty, f"这些标的没有可渲染的失效条件：{empty}"
+
+
+# ── v0.45.62：阈值旁边必须有当前值与判定 ──────────────────────────
+def _row_with_data(ticker, iv=None, pcr=None, score=5.0, bear=0):
+    return (ticker, {
+        "final_score": score,
+        "agent_details": {
+            "OracleBeeEcho": {"details": {
+                "iv_current": iv, "put_call_ratio": pcr,
+                "_snapshot_stock_price": 100.0}},
+            "BearBeeContrarian": {"details": {"bearish_signals": ["x"] * bear}},
+        },
+    })
+
+
+def _attach(monkeypatch, cfg, rows):
+    import alpha_hive_daily_report as ahdr
+    from thesis_breaks import ThesisBreakConfig
+    import market_intelligence as mi
+    monkeypatch.setattr(ThesisBreakConfig, "_data", cfg)
+    monkeypatch.setattr(mi, "_BASE", __import__("pathlib").Path(
+        __import__("alpha_hive_daily_report").__file__).parent)
+    rep = ahdr.AlphaHiveDailyReporter.__new__(ahdr.AlphaHiveDailyReporter)
+    rep._attach_thesis_breaks(rows)
+    return rows
+
+
+_CFG_ONE = {"AAA": {"level_1_warning": {"conditions": [
+    {"field": "put_call_ratio", "op": ">", "value": 1.59,
+     "_machine": True, "_note": "看跌持仓进入 p98"}]}}}
+
+
+def test_verdict_shows_current_value_and_not_fired(monkeypatch, tmp_path):
+    """静态阈值表 → 可判读的核对结果。缺了当前值，读者分不清
+    「没触发」和「不可能触发」——这正是 8/27 网页上的样子。"""
+    import json
+    import market_intelligence as mi
+    (tmp_path / "thesis_breaks_config.json").write_text(
+        json.dumps(_CFG_ONE, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(mi, "_BASE", tmp_path)
+    import alpha_hive_daily_report as ahdr
+    from thesis_breaks import ThesisBreakConfig
+    monkeypatch.setattr(ThesisBreakConfig, "_data", _CFG_ONE)
+    rows = dict([_row_with_data("AAA", pcr=1.09)])
+    ahdr.AlphaHiveDailyReporter.__new__(ahdr.AlphaHiveDailyReporter)._attach_thesis_breaks(rows)
+    line = rows["AAA"]["thesis_break_l1"][0]
+    assert "1.59" in line, "阈值必须还在"
+    assert "当前 1.09" in line, "当前值必须打出来"
+    assert "未触发" in line
+
+
+def test_verdict_marks_fired(monkeypatch, tmp_path):
+    import json
+    import market_intelligence as mi
+    import alpha_hive_daily_report as ahdr
+    from thesis_breaks import ThesisBreakConfig
+    (tmp_path / "thesis_breaks_config.json").write_text(
+        json.dumps(_CFG_ONE, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(mi, "_BASE", tmp_path)
+    monkeypatch.setattr(ThesisBreakConfig, "_data", _CFG_ONE)
+    rows = dict([_row_with_data("AAA", pcr=2.4)])
+    ahdr.AlphaHiveDailyReporter.__new__(ahdr.AlphaHiveDailyReporter)._attach_thesis_breaks(rows)
+    assert "✅ 已触发" in rows["AAA"]["thesis_break_l1"][0]
+
+
+def test_missing_value_is_not_reported_as_safe(monkeypatch, tmp_path):
+    """当前值缺失必须说「未核对」，**不能**渲染成「未触发」。
+
+    这是本仓库最常见的故障形状：缺数据被读成「没事」。"""
+    import json
+    import market_intelligence as mi
+    import alpha_hive_daily_report as ahdr
+    from thesis_breaks import ThesisBreakConfig
+    (tmp_path / "thesis_breaks_config.json").write_text(
+        json.dumps(_CFG_ONE, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(mi, "_BASE", tmp_path)
+    monkeypatch.setattr(ThesisBreakConfig, "_data", _CFG_ONE)
+    rows = dict([_row_with_data("AAA", pcr=None)])
+    ahdr.AlphaHiveDailyReporter.__new__(ahdr.AlphaHiveDailyReporter)._attach_thesis_breaks(rows)
+    line = rows["AAA"]["thesis_break_l1"][0]
+    assert "未核对" in line and "未触发" not in line
+
+
+def test_evaluation_order_matches_config_order():
+    """求值明细必须与配置逐位同序 —— 渲染层按位置贴当前值。
+
+    顺序一旦漂了，A 条件的阈值会配上 B 条件的当前值，
+    而两条都「看起来正常」。所以直接盯契约。
+    """
+    import json
+    import market_intelligence as mi
+    cfg = json.loads((__import__("pathlib").Path(mi.__file__).parent
+                      / "thesis_breaks_config.json").read_text(encoding="utf-8"))
+    tk = "NVDA"
+    res = mi.check_thesis_breaks(tk, 100.0, 30.0, 1.0, [], 5.0)
+    evs = res["evaluations"]
+    expected = []
+    for lk in ("level_1_warning", "level_2_stop_loss"):
+        for c in (cfg[tk].get(lk, {}) or {}).get("conditions", []) or []:
+            expected.append((lk, c.get("field"), c.get("value")))
+    assert [(e["level"], e["field"], e["value"]) for e in evs] == expected
+
+
+def test_evaluations_present_on_every_return_path():
+    """三条 return 路径都要带 evaluations —— 不留给调用方 .get 兜默认值。"""
+    import market_intelligence as mi
+    for args in (("ZZZ_NOT_IN_CONFIG", 100.0, 30.0, 1.0, [], 5.0),
+                 ("NVDA", 100.0, 30.0, 1.0, [], 5.0),
+                 ("NVDA", 100.0, 30.0, 9.9, [], 0.1)):
+        assert "evaluations" in mi.check_thesis_breaks(*args)
+
+
+def test_misaligned_evaluations_degrade_instead_of_mislabel(monkeypatch, tmp_path):
+    """长度对不上时退回「只有阈值」，绝不把 A 的当前值贴到 B 上。"""
+    import json
+    import market_intelligence as mi
+    import alpha_hive_daily_report as ahdr
+    from thesis_breaks import ThesisBreakConfig
+    cfg = {"AAA": {"level_1_warning": {"conditions": [
+        {"field": "put_call_ratio", "op": ">", "value": 1.59, "_machine": True},
+        {"field": "score", "op": "<", "value": 4.0, "_machine": True}]}}}
+    (tmp_path / "thesis_breaks_config.json").write_text(
+        json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(mi, "_BASE", tmp_path)
+    monkeypatch.setattr(ThesisBreakConfig, "_data", cfg)
+    monkeypatch.setattr(ahdr.AlphaHiveDailyReporter, "_evaluate_thesis_breaks",
+                        staticmethod(lambda t, r: [{"level": "level_1_warning",
+                                                    "field": "score", "op": "<",
+                                                    "value": 4.0, "actual": 9.9,
+                                                    "fired": False, "machine": True}]))
+    rows = dict([_row_with_data("AAA", pcr=1.09, score=9.9)])
+    ahdr.AlphaHiveDailyReporter.__new__(ahdr.AlphaHiveDailyReporter)._attach_thesis_breaks(rows)
+    for line in rows["AAA"]["thesis_break_l1"]:
+        assert "当前" not in line, f"对不齐时不该贴当前值：{line}"
+
+
+def test_section_summary_counts_fired():
+    md = "\n".join(rf._build_thesis_breaks([
+        _row("AAA", ["a：x（当前 1，✅ 已触发）", "b：y（当前 2，未触发）"], []),
+        _row("BBB", ["c：z（当前值缺失，未核对）"], []),
+    ]))
+    assert "共 **3** 条" in md and "**1** 条当前满足" in md
+    assert "**1** 条因缺当前值未核对" in md
+
+
+def test_prose_conditions_are_not_counted_as_safe():
+    """全是人工条件的日子（如 8/26 口径），汇总不能读成「都没事」。"""
+    md = "\n".join(rf._build_thesis_breaks([
+        _row("META", ["DAU：QoQ < 1%（人工条件，未自动核对）"], [])]))
+    assert "人工条件" in md and "需人工判读" in md
+    assert "可自动核对" not in md, "没有自动条件时不该报可自动核对条数"
+
+
+def test_uncalibrated_caveat_only_when_auto_conditions_exist():
+    prose_only = "\n".join(rf._build_thesis_breaks([
+        _row("META", ["DAU：QoQ < 1%（人工条件，未自动核对）"], [])]))
+    assert "阈值未校准" not in prose_only
+    with_auto = "\n".join(rf._build_thesis_breaks([
+        _row("AMC", ["IV 进入 p98：iv > 105.7（自动）（当前 83.42，未触发）"], [])]))
+    assert "阈值未校准" in with_auto
+    assert "你是哪只票" in with_auto, "要说清阈值测的是什么，不能只说「未校准」"

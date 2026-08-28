@@ -661,10 +661,16 @@ def check_thesis_breaks(
     # 条件」列为硬约束，于是这条硬约束长期是靠一个永不触发的闸在"满足"。
     # 这里先让它**可见**；配置 schema 的迁移是独立决定（且该文件正被其他
     # session 编辑），不在本次改动范围。
+    # v0.45.62：新增 `evaluations` —— **每一条**条件的当前值与判定，
+    # 不只是触发的那几条。日报 7.5 节要把「阈值 + 当前值 + 判定」一起打出来，
+    # 否则读者看到的是一张静态阈值表，分不清「没触发」和「不可能触发」。
+    # 它在**每一条 return 路径上都显式出现**，不留给调用方 `.get("evaluations", [])`
+    # 去兜——那种默认值恰好在出错时最像正常（本仓库反复踩过的坑）。
     _none = {
         "level": None, "triggered_conditions": [],
         "recommendation": "", "alert_html": "",
         "evaluable": False, "unevaluable_reason": "",
+        "evaluations": [],
     }
 
     config_path = _BASE / "thesis_breaks_config.json"
@@ -712,6 +718,36 @@ def check_thesis_breaks(
             return actual == val
         return False
 
+    # ── v0.45.62：逐条求值明细（含未触发的）────────────────────────
+    _field_vals_all = {
+        'price': current_price, 'iv': iv_current,
+        'put_call_ratio': put_call_ratio, 'score': swarm_score,
+        'bear_signals_count': len(bear_signals),
+    }
+    _evaluations: List[Dict[str, Any]] = []
+    for _lk in ("level_1_warning", "level_2_stop_loss"):
+        for _c in (ticker_cfg.get(_lk, {}) or {}).get("conditions", []) or []:
+            if not isinstance(_c, dict):
+                continue
+            _fld = _c.get("field")
+            _val = _c.get("value")
+            if not _fld or _val is None:
+                # 人读散文条件：求值器碰不到，如实标注而不是当作「未触发」
+                _evaluations.append({
+                    "level": _lk, "field": None, "op": None, "value": None,
+                    "actual": None, "fired": None, "machine": False,
+                    "label": _c.get("metric") or _c.get("id") or "",
+                })
+                continue
+            _act = _field_vals_all.get(_fld)
+            _evaluations.append({
+                "level": _lk, "field": _fld, "op": _c.get("op", ">"), "value": _val,
+                "actual": _act,
+                "fired": _eval_condition(_c) if _act is not None else None,
+                "machine": bool(_c.get("_machine")),
+                "label": _c.get("_note") or _fld,
+            })
+
     # ── v0.45.44：先判「这份配置到底可不可求值」──────────────────────
     # 一条 condition 只有同时带 field/op/value 才是机器可比的；
     # 只有 metric/trigger/current_status 的是给人读的散文，求值器碰不到。
@@ -729,6 +765,9 @@ def check_thesis_breaks(
         _log.warning("论点失效闸未执行：%s —— 本次返回「未核对」而非「论点完好」", _reason)
         _out = dict(_none)
         _out["unevaluable_reason"] = _reason
+        # v0.45.62：这些条件求值器碰不到，但**它们存在**——明细照样返回，
+        # 让渲染层标「人工条件，未自动核对」，而不是整级退回只有阈值。
+        _out["evaluations"] = _evaluations
         return _out
     if _is_fallback:
         _log.warning("%s 无专属论点失效配置，回落到 NVDA 的条件（数据中心营收/AMD 竞品/"
@@ -760,6 +799,7 @@ def check_thesis_breaks(
         # 走到这里说明**确实核对过**了，与「没核对」区分开
         _ok = dict(_none)
         _ok["evaluable"] = True
+        _ok["evaluations"] = _evaluations
         return _ok
 
     # 构建 HTML 告警卡片
@@ -782,6 +822,9 @@ def check_thesis_breaks(
         "triggered_conditions": triggered_conds,
         "recommendation": rec,
         "alert_html": alert_html,
+        "evaluable": True,
+        "unevaluable_reason": "",
+        "evaluations": _evaluations,
     }
 
 

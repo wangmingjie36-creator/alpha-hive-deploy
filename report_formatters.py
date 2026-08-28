@@ -407,11 +407,45 @@ def _build_thesis_breaks(sorted_results: list) -> List[str]:
     md.append("")
     md.append("> 论点在什么情况下作废。标「自动」的由历史分位推出，"
               "与人工判断不是一个重量。")
-    md.append(">")
-    md.append("> ⚠️ 自动条件用的是**全标的池化**分位（非逐标的口径）——"
-              "同一个 IV / 评分阈值套在所有标的上，"
-              "低波动标的（如 BRK-B、JNJ）可能永远触发不了其中的 IV 条件。")
+    _has_auto = any("（自动）" in _c
+                    for _t, _d in sorted_results
+                    for _lv in ("thesis_break_l1", "thesis_break_l2")
+                    for _c in (_d.get(_lv) or []))
+    if _has_auto:
+        md.append(">")
+        md.append("> ⚠️ **自动条件的阈值未校准，当前仅供观察，不作为行动依据。**"
+                  "它们用**全标的池化**分位定出，而 IV 的横截面跨度（BRK-B 约 16 → "
+                  "高波动票 110+）远大于单票的时序跨度 —— 这样的阈值测的是"
+                  "「你是哪只票」，不是「这只票出事没」。逐票分位与锚自身中位两种改法"
+                  "均已实测无效，需等每票攒够真实 IV 序列后重定。")
     md.append("")
+    _n_total = _n_fired = _n_unchecked = _n_prose = _n_auto = 0
+    for _t, _d in sorted_results:
+        for _lv in ("thesis_break_l1", "thesis_break_l2"):
+            for _c in (_d.get(_lv) or []):
+                _n_total += 1
+                if "人工条件，未自动核对" in _c:
+                    _n_prose += 1
+                elif "✅ 已触发" in _c:
+                    _n_fired += 1
+                    _n_auto += 1
+                elif "未核对" in _c:
+                    _n_unchecked += 1
+                    _n_auto += 1
+                else:
+                    _n_auto += 1
+    if _n_total:
+        _bits = [f"共 **{_n_total}** 条"]
+        if _n_auto:
+            _bits.append(f"可自动核对 **{_n_auto}** 条，其中 **{_n_fired}** 条当前满足")
+        if _n_unchecked:
+            _bits.append(f"**{_n_unchecked}** 条因缺当前值未核对")
+        if _n_prose:
+            # 说清楚这不是「都没事」——是根本没核对过
+            _bits.append(f"**{_n_prose}** 条为人工条件，求值器碰不到，需人工判读")
+        md.append("；".join(_bits) + "。")
+        md.append("")
+
     _missing = []
     for ticker, data in sorted_results:
         l1 = data.get("thesis_break_l1") or []
