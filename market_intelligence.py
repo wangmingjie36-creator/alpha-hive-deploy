@@ -815,10 +815,28 @@ def calculate_iv_rv_spread(
     # 这是整条链上最后一处非 yfinance 不可的依赖。免费档 800 次/天，
     # 30 只标的 × 1 credit 远在额度内；未配 key 时 `realized_vol` 返回 None，
     # 原样落到下面的 yfinance 路径，不报错、不阻断。
+    # 补跑时必须取**目标日**的窗口。`ALPHA_HIVE_TARGET_DATE` 是本项目既有的
+    # 补跑信道（options_analyzer 用同一个），这里沿用而不另造。
+    #
+    # v0.45.61 二次检查发现：`realized_vol` 一开始就支持 `end_date`，但调用处
+    # 没传 —— 补跑会拿**最新**窗口冒充目标日。对次日补跑影响小（forming-bar
+    # 已丢、窗口末端恰好是目标日），但补跑更早的日子会严重错位。
+    # ⚠️ 下面的 yfinance 兜底路径**仍然**是「最近 N 天」口径，补跑较早日期时
+    # 那条路给出的 RV 不属于目标日 —— 已知缺陷，未在本版修（要改成 start/end）。
+    _target = ""
+    try:
+        import os as _os
+        import re as _re
+        _t = (_os.environ.get("ALPHA_HIVE_TARGET_DATE", "") or "").strip()
+        if _t and _re.fullmatch(r"\d{4}-\d{2}-\d{2}", _t):
+            _target = _t
+    except Exception:  # pragma: no cover
+        pass
+
     try:
         from twelve_data import is_configured as _td_ok, realized_vol as _td_rv
         if _td_ok():
-            _rv_td = _td_rv(ticker, lookback=lookback_days)
+            _rv_td = _td_rv(ticker, lookback=lookback_days, end_date=_target or None)
             if _rv_td is not None:
                 _spread_td = iv_current_pct - _rv_td
                 _sig_td = ("expensive" if _spread_td > 10
@@ -831,7 +849,7 @@ def calculate_iv_rv_spread(
                                    f"价差 {_spread_td:+.1f}pp"),
                     "data_available": True,
                     "error": "",
-                    "source": "twelve_data",
+                    "source": ("twelve_data@" + _target) if _target else "twelve_data",
                 }
     except Exception as _e_td:  # noqa: BLE001 - 任何失败都退回 yfinance
         _log.debug("[%s] Twelve Data RV 不可用，退回 yfinance: %s", ticker, _e_td)

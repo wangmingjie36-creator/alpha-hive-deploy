@@ -257,3 +257,58 @@ class TestFormingBarGuard:
         cs = td.fetch_daily_closes("NVDA")
         assert 224.57 not in cs, "盘中半根 bar 进了收盘价序列"
         assert len(cs) == 18
+
+
+class TestBackfillTargetDate:
+    """补跑必须取**目标日**窗口，不是最新的（v0.45.61 二次检查）。
+
+    `realized_vol` 一开始就支持 `end_date`，但调用处没传 —— 补跑会拿最新窗口
+    冒充目标日。对次日补跑影响小（forming-bar 已丢、窗口末端恰好是目标日），
+    补跑更早的日子会严重错位。
+    """
+
+    def test_target_date_reaches_the_api(self, monkeypatch):
+        import market_intelligence as mi
+        monkeypatch.setenv("ALPHA_HIVE_TARGET_DATE", "2026-08-20")
+        monkeypatch.setattr(td, "api_key", lambda: "k")
+        seen = {}
+
+        def _rv(ticker, lookback=30, end_date=None):
+            seen["end_date"] = end_date
+            return 36.14
+
+        monkeypatch.setattr(td, "realized_vol", _rv)
+        d = mi.calculate_iv_rv_spread("NVDA", 48.61)
+        assert seen["end_date"] == "2026-08-20", "补跑目标日没传到取数层"
+        assert d["source"] == "twelve_data@2026-08-20", "来源标签未写明口径日"
+
+    def test_no_target_date_means_latest(self, monkeypatch):
+        import market_intelligence as mi
+        monkeypatch.delenv("ALPHA_HIVE_TARGET_DATE", raising=False)
+        monkeypatch.setattr(td, "api_key", lambda: "k")
+        seen = {}
+
+        def _rv(ticker, lookback=30, end_date=None):
+            seen["end_date"] = end_date
+            return 36.14
+
+        monkeypatch.setattr(td, "realized_vol", _rv)
+        d = mi.calculate_iv_rv_spread("NVDA", 48.61)
+        assert seen["end_date"] is None
+        assert d["source"] == "twelve_data"
+
+    def test_malformed_target_date_is_ignored(self, monkeypatch):
+        """环境变量可能来自残留 export / 别的工具，格式不合法就当没有。
+
+        与 options_analyzer 对同一变量的处理一致（那里实测过
+        `ALPHA_HIVE_TARGET_DATE=../../../tmp/evil` 会让快照写到 cache/ 之外）。
+        """
+        import market_intelligence as mi
+        monkeypatch.setenv("ALPHA_HIVE_TARGET_DATE", "../../../tmp/evil")
+        monkeypatch.setattr(td, "api_key", lambda: "k")
+        seen = {}
+        monkeypatch.setattr(td, "realized_vol",
+                            lambda t, lookback=30, end_date=None:
+                            (seen.setdefault("end_date", end_date), 36.14)[1])
+        mi.calculate_iv_rv_spread("NVDA", 48.61)
+        assert seen["end_date"] is None, "非法日期被当成了目标日"

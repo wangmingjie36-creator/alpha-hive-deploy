@@ -91,6 +91,39 @@ Finnhub `/quote` 只给最新报价，给不了历史某日，补跑时那半段
 conftest 换成桩的那个函数 —— 直接调等于在测桩。改为在模块加载时
 （早于 autouse fixture）抓下真函数引用。
 
+### 二次检查：三条，全是「修过同一形状、又犯一次」
+
+用户要求逐条复核本轮改动。三条都用代码验出来，不是推理出来的：
+
+**① 补跑的 `data_source` 谎报来源。** `_compose_data_source` 的补跑分支
+**无条件**返回 `cloud_snapshot+yfinance@日期`，完全不看 `src_map` ——
+而自本版起补跑的国债已改走财政部，于是标签说 yfinance、实际是 treasury。
+与 8/27 那次「yfinance 一个字段都没供上、标签却仍写 yfinance」**是同一形状，
+而且是在同一个函数里**。现按实际供数源组装：
+`cloud_snapshot+treasury+yfinance+fred@2026-08-27`。
+
+**② Twelve Data 在补跑时取最新窗口冒充目标日。** `realized_vol` 一开始就有
+`end_date` 参数，调用处没传。对次日补跑影响小（forming-bar 已丢、窗口末端
+恰好是目标日），补跑更早的日子会严重错位。现沿用项目既有的
+`ALPHA_HIVE_TARGET_DATE` 信道（与 options_analyzer 同一个，含同样的格式校验
+—— 那里实测过 `../../../tmp/evil` 能让快照写到 cache/ 之外），
+来源标签写成 `twelve_data@<日期>`。
+⚠️ **yfinance 兜底路径仍是「最近 N 天」口径**，补跑较早日期时它给的 RV
+不属于目标日 —— 已知缺陷，本版未修（要改成 start/end）。
+
+**③ 财政部缓存键用本机时间。** `time.strftime("%Y%m")` —— 本机在 PT、
+落后 ET 3 小时：每月 1 号的 ET 00:00~03:00 之间本机还停在上个月，
+会去抓上个月的 XML、找不到 ET 当日 → 返回 None。**一年 12 次、
+每次 3 小时的窗口，正好覆盖凌晨的定时任务。** 改用 `_et_month()`，
+与 `_et_today()` 同源。
+
+三条各配回归测试，mutation check 实测：还原成修复前 → 三条全红；
+还原修复 → 全绿。
+
+（另核对过但**没问题**的：Twelve Data 分支与 yfinance 分支的返回键集一致
+（只多一个 `source`）；`yf_gate._bucket` 的缓存在测试里会被 conftest
+special-case 换掉，不会用到生产桶。）
+
 ### 待你操作
 
 Twelve Data 的免费 key 需要注册（我不能替你注册账号）。拿到后：

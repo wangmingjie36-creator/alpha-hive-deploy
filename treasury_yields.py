@@ -59,6 +59,16 @@ _CACHE_TS: Dict[str, float] = {}
 _TTL = 3600.0          # 曲线一天只更新一次，一小时足够
 
 
+def _et_month() -> Optional[str]:
+    """美东当前年月 `YYYYMM`。时区换算靠 zoneinfo，不依赖本机 tz 设置。"""
+    try:
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+        return _dt.datetime.now(ZoneInfo("America/New_York")).strftime("%Y%m")
+    except Exception:  # pragma: no cover
+        return None
+
+
 def _fetch_month(yyyymm: str, attempts: int = 3) -> Optional[str]:
     """抓整月 XML。带退避重试。
 
@@ -129,7 +139,13 @@ def get_yield_curve(date: Optional[str] = None) -> Optional[Dict]:
     if date:
         yyyymm = date[:4] + date[5:7]
     else:
-        yyyymm = time.strftime("%Y%m")
+        # v0.45.61 二次检查：原用 `time.strftime("%Y%m")` —— **本机时间**。
+        # 本机在温哥华（PT），落后 ET 3 小时：每月 1 号的 ET 00:00~03:00 之间，
+        # PT 还停在上个月，于是去抓上个月的 XML，找不到 ET 当日 → 返回 None。
+        # 一年 12 次、每次 3 小时的窗口，正好覆盖凌晨的定时任务。
+        # 用 ET 取月份，与 `_et_today()` 同源。
+        _et = _et_month()
+        yyyymm = _et or time.strftime("%Y%m")
 
     now = time.time()
     if yyyymm not in _CACHE or now - _CACHE_TS.get(yyyymm, 0) > _TTL:

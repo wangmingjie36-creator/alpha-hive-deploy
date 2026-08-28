@@ -312,3 +312,41 @@ class TestSameDayWithoutYfinance:
         # 有字段是 yfinance 兜上来的时候，就必须写上
         data2 = {"TNX": {}, "SPX": {}, "GLD": {}}
         assert "yfinance" in fm._compose_data_source(None, src, data2, has_fred=False)
+
+
+class TestSecondPassRegressions:
+    """v0.45.61 二次检查抓到的三条。都是「已经修过同一形状、又犯一次」。"""
+
+    def test_backfill_label_names_treasury_when_treasury_supplied(self):
+        """补跑标签必须反映**实际**供数的源。
+
+        原实现的补跑分支无条件写 `cloud_snapshot+yfinance@日期`，完全不看
+        `src_map` —— 而自 v0.45.61 起补跑的国债已改走财政部，于是标签说
+        yfinance、实际是 treasury。与 8/27 那次「yfinance 一个字段都没供上、
+        标签却仍写 yfinance」是同一形状，在同一个函数里又犯一次。
+        """
+        src = {"TNX": "treasury_gov@2026-08-27", "FVX": "treasury_gov@2026-08-27"}
+        out = fm._compose_data_source("2026-08-27", src,
+                                      {"TNX": {}, "FVX": {}, "SPX": {}}, has_fred=True)
+        assert "treasury" in out, f"财政部供了数却没进标签：{out}"
+        assert "cloud_snapshot" in out and out.endswith("@2026-08-27")
+        # 全 yfinance 时不得凭空写 treasury
+        assert "treasury" not in fm._compose_data_source(
+            "2026-08-27", {}, {"SPX": {}}, has_fred=False)
+
+    def test_treasury_month_key_uses_eastern_not_local(self, monkeypatch):
+        """月份键必须按美东取。
+
+        本机在 PT，落后 ET 3 小时：每月 1 号的 ET 00:00~03:00 之间本机还停在
+        上个月，会去抓上个月的 XML、找不到 ET 当日 → 返回 None。
+        一年 12 次、每次 3 小时，正好覆盖凌晨的定时任务。
+        """
+        import treasury_yields as ty
+        seen = {}
+        monkeypatch.setattr(ty, "_fetch_month",
+                            lambda mm, **k: seen.setdefault("mm", mm) and None)
+        monkeypatch.setattr(ty, "_et_month", lambda: "202609")
+        monkeypatch.setattr(ty.time, "strftime", lambda *_: "202608")  # 本机还在上月
+        ty.clear_cache()
+        ty.get_yield_curve()
+        assert seen["mm"] == "202609", "用了本机月份而非美东月份"

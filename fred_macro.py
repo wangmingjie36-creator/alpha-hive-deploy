@@ -265,9 +265,14 @@ def _compose_data_source(as_of, src_map: Dict[str, str], data: Dict,
     不再无条件写 "yfinance"：8/27 那天 yfinance 一个字段都没供上，
     标签却仍是 `yfinance+fred`，排查时会把人引向一个没被调用的源。
     """
-    if as_of:
-        return f"cloud_snapshot+yfinance@{as_of}" + ("+fred" if has_fred else "")
     parts = []
+    if as_of:
+        parts.append("cloud_snapshot")
+    # v0.45.61 二次检查：补跑分支原先**无条件**写 `cloud_snapshot+yfinance@日期`，
+    # 完全不看 `src_map`。而自 v0.45.61 起补跑的国债已改走财政部 ——
+    # 于是标签说 yfinance、实际是 treasury。
+    # 这正是本 session 一路在修的那类标签问题（8/27 那天 yfinance 一个字段
+    # 都没供上、标签却仍写 yfinance），我在同一个函数里又犯了一次。
     if any(v.startswith("treasury_gov") for v in src_map.values()):
         parts.append("treasury")
     if any(v.startswith("finnhub") for v in src_map.values()):
@@ -276,7 +281,10 @@ def _compose_data_source(as_of, src_map: Dict[str, str], data: Dict,
         parts.append("yfinance")
     if has_fred:
         parts.append("fred")
-    return "+".join(parts) if parts else "fallback"
+    if not parts:
+        return "fallback"
+    label = "+".join(parts)
+    return f"{label}@{as_of}" if as_of else label
 
 
 def _classify_vix(vix: float) -> str:
