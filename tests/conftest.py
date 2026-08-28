@@ -42,6 +42,49 @@ def _block_llm_api(monkeypatch):
     monkeypatch.setattr(llm_service, "_client", None)
 
 
+# ==================== 禁止测试调用真实宏观数据源 ====================
+
+@pytest.fixture(autouse=True)
+def _block_same_day_macro(monkeypatch):
+    """默认关掉 v0.45.60 的当日宏观取数层（财政部 + Finnhub）。
+
+    为什么必须有这道闸：conftest 一直只 mock 了 yfinance（见下方
+    `mock_yfinance`），而 v0.45.60 新增的取数层**绕过 yfinance 直接打外网**。
+    接上当天就有两个后果：
+
+      · `test_yield_curve_inverted` 红了 —— 测试构造的倒挂曲线被真实的
+        2026-08-27 数据（10Y 4.67 / 2Y 4.20，normal）盖掉
+      · 整个套件开始打真网络：变慢、变脆、且在离线环境下不可用
+
+    加数据源时必须同时确认「测试里它被关掉了吗」—— 与 `http_gate` docstring
+    记过的那条教训同形（「加源之前先确认闸门覆盖它」）。
+
+    需要验证这一层的测试自己 monkeypatch `_same_day_macro_data`，
+    那会覆盖本 fixture。
+    """
+    try:
+        import fred_macro
+    except Exception:  # pragma: no cover - 模块不可得时无需拦
+        pass
+    else:
+        monkeypatch.setattr(fred_macro, "_same_day_macro_data",
+                            lambda as_of=None: ({}, {}))
+
+    # v0.45.61：Twelve Data 同理。配上 key 后 `calculate_iv_rv_spread` 会先走它，
+    # 于是 `test_iv_rv_reports_unavailable_not_zero`（构造"取不到数"场景）被
+    # 真实数据盖掉 —— **同一个错误的第三次**：
+    #   ① v0.45.56 加 yf_gate 时                → 已由 mock_yfinance 覆盖
+    #   ② v0.45.60 加财政部/Finnhub 宏观层时    → 漏了，本 fixture 上半段补的
+    #   ③ v0.45.61 加 Twelve Data 时            → 又漏了，这段补的
+    # 教训固定下来：**新增任何外部数据源，同一个 commit 里必须在这里加一行。**
+    # 需要验证它的测试自己 monkeypatch，会覆盖本 fixture。
+    try:
+        import twelve_data
+    except Exception:  # pragma: no cover
+        return
+    monkeypatch.setattr(twelve_data, "api_key", lambda: "")
+
+
 # ==================== Mock 股票数据 ====================
 
 MOCK_STOCK_DATA = {

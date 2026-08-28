@@ -5,7 +5,390 @@
 
 ---
 
-## [0.45.59] — 2026-08-28 — 占位（进行中：云端快照根治三件——生产端补 vintage_date、market.json 接进宏观、补跑 8-27）
+## [0.45.62] — 2026-08-28 — 那 7 条失效条件，入库以来一次都没被求值过
+
+### 先更正 v0.45.57 的判断
+
+上一条把根因定在「`iv_current` 陈旧」。**错了。**（另一 session 的复核，已实测采纳）
+
+- `iv_current` 的阶梯 **v0.45.26（8/26）已修**：修复后 8/25→8/27 只有 1/60 重复，
+  修复前约 75%。我拿全历史比例当现状讲了。
+- 真根因是**横截面池化**：IV 的横截面跨度（BRK-B 约 16 → 高波动票 110+，6×）
+  远大于单票时序跨度。对这种量做池化分位，阈值测的是「你是哪只票」，
+  不是「这只票出事没」。**就算 `iv_current` 从今天起完美，池化分位仍然得到同样的废阈值。**
+- 我提的「锚自身中位 `> 1.5×`」也已被实测毙掉（k=1.30/1.50/1.75 全扫过，
+  IV 仍有 23~28/29 只从不触发）。
+
+### 而更上游的事实：这个闸从来没跑过
+
+唯一求值器 `market_intelligence.check_thesis_breaks()` 只有一个生产调用点
+`generate_deep_v2.py`。而 deep 报告**全项目只产出过 9 份、全在 2026 年 3 月**
+（最后一份 3/24），gh-pages 上 0 份；机器条件 8/27 才入库，比最后一份 deep 报告晚 5 个月。
+日常编排器跑的是 `generate_ml_report.py`。
+
+所以 v0.45.57 把失效条件渲染上页后，网页上是**一张静态阈值表**：
+只有阈值，没有当前值，没有判定。读者分不清「没触发」和「不可能触发」。
+这是「死字段」的升级形态——从**算了没人读**变成**读了但没求值**。
+
+**实测代价**：8/27 RKLB 的两条 L1 条件**真的满足了**
+（`score 3.94 < 4.0`、`bear_signals 7 >= 7`）——系统史上第一次真实预警，
+没有任何人看见。
+
+### Changed
+
+- `market_intelligence.check_thesis_breaks()`：新增 `evaluations` —— **每一条**
+  条件的当前值与判定（不只是触发的那几条）。在**每一条 return 路径上都显式出现**，
+  不留给调用方 `.get("evaluations", [])` 兜默认值。
+  明细在「可求值性」早退**之前**构建，散文条件也进明细（标「人工条件」），
+  否则整级退回只剩阈值。
+- `alpha_hive_daily_report`：新增 `_evaluate_thesis_breaks()`，日报路径接上
+  **同一个**求值器，**不另写一个**（本仓库当天刚有过一次平行发明：
+  `close_correction.official_closes` vs `scan_coverage_gate.check_prices`）。
+  取不到值就返回空列表让渲染层退回只显示阈值，**不编当前值**。
+- `_format_break_verdict()`：三态分明——
+  `（当前 1.09，未触发）` / `（当前值缺失，未核对）` / `（人工条件，未自动核对）`。
+  缺数据**不得**渲染成「未触发」。
+
+### Added
+
+- 7.5 节汇总行区分「可自动核对 / 已触发 / 缺值未核对 / 人工需判读」，
+  防止一页全是人工条件时被读成「都没事」。
+- 未校准告诫写进 7.5 节，且**只在确实存在自动条件时**才出现；
+  说清阈值测的是「你是哪只票」，不只是含糊的「未校准」。
+- `tests/test_thesis_break_rendering.py` 增至 **20 条**，新增 9 条守：
+  求值明细与配置**逐位同序**（顺序漂了会把 A 的阈值配上 B 的当前值，两条都「看着正常」）、
+  三条 return 路径都带 `evaluations`、对不齐时**降级而非错贴**、缺值不得报「未触发」。
+  5 次变异全红。全量 **2031 passed**。
+
+### Fixed
+
+- 回填 **8/26** 页面（65 条，全部为人工条件，如实标注需人工判读）。
+  顺带修掉回填脚本的一个真 bug：页面上已有 7.5 节时它会**再插一份**，
+  渲染出两个「7.5) 失效条件」。现在是替换。零丢失：行 1452→1452、章节 199→199。
+- **8/27 刻意不回填**：其 `.swarm_results` 已于 2026-08-28 07:11 被 v0.45.59
+  「8-27 补跑」重新生成（data_real 87%→92.1%），而页面仍是原次扫描的产物。
+  拿新数据的当前值贴旧数据的页面 = 两个 vintage 混渲染。零丢失护栏当场拦下
+  （标的顺序不一致）。**该页应由补跑方整体重渲染。**
+
+### 遗留
+
+- 阈值本身未动，标「未校准，仅供观察」。需等每票攒够真实 IV 序列后逐票重定。
+- `check_thesis_breaks` 的 `level` / `alert_html` 仍只有 deep 报告一个消费者；
+  日报只用 `evaluations`，**不**把「🔴 STOP LOSS」搬上页面——阈值未校准之前，
+  那种红标会是噪音（COST 的 PCR 条件按现阈值 20% 的日子在响）。
+
+
+## [0.45.61] — 2026-08-28 — Twelve Data 接管日K：最后一处 yfinance 依赖
+
+v0.45.60 把当日宏观搬离了 yfinance，链上只剩一处非它不可：**逐标的 30 日收盘**
+（`rv_30d` / `iv_rv_spread` / hv_proxy 口径 `iv_rank` 全由它派生）。
+2026-08-27 那 687 次 429 打空的正是这三项。
+
+### 为什么是 Twelve Data（其余全部实打验证不可用）
+
+| 源 | 逐标的日K | 实测 2026-08-28 |
+|---|---|---|
+| Finnhub `/stock/candle` | ❌ | HTTP 403，已转付费 |
+| Alpha Vantage | ❌ | 25 次/天**已被 newsapi 的新闻情绪占满**（当天日志正在报 rate-limited） |
+| Stooq | ❌ | 返回 JS 工作量证明挑战页，已上反爬 |
+| FRED | ❌ | 只有指数（SP500/NASDAQCOM），无逐标的 |
+| **Twelve Data** | ✅ | 免费 800 次/天、8 次/分 —— 30 只 × 1 credit 远在额度内 |
+
+### Added
+
+- **`twelve_data.py`**：日K 客户端 + `realized_vol()`。
+  - **口径与 `calculate_iv_rv_spread` 逐条对齐**（对数收益 / `ddof=1` /
+    ×√252×100 / 剔除 |log_ret|>0.5 / HV30>300% 视为污染）。口径不一致的话，
+    同一只标的会因为走了哪条源而得到不同的 RV，那种差异会被误读成波动率变化。
+  - **独立**令牌桶 7/分（免费档 8/分，留一成余量）。刻意不与
+    `resilience.yfinance_limiter` 共用 —— 两边配额本来就是分开的，共用只会互相拖慢。
+  - `TwelveDataUnavailable` 继承 `ConnectionError`（⊂ NETWORK_ERRORS）。
+    v0.45.56 在 `YFRateLimited` 上踩过这个坑：新造的异常不继承既有网络异常族，
+    会穿透所有降级路径。
+  - **HTTP 200 + body 里 `status: "error"`** 单独处理：免费档超额时状态码仍是 200，
+    只看状态码会把错误当数据。
+- `config.SECRET_FILES` 登记 `TWELVEDATA_API_KEY` → `~/.alpha_hive_twelvedata_key`
+- `tests/test_twelve_data.py`（15 项）
+
+### Changed
+
+- `market_intelligence.calculate_iv_rv_spread`：Twelve Data 优先，yfinance 退为兜底。
+  **未配 key 时行为与之前完全一致**（实测未配 key 仍走 yfinance 得到 rv_30d=42.22），
+  不报错、不阻断。
+
+### 自检当场抓到一个 bug：盘中半根 bar 混进了 RV30
+
+配好 key 跑 `python3 twelve_data.py NVDA`（2026-08-28 10:09 ET，盘中），
+末根返回 `2026-08-28 close=224.57 volume=103412` —— 而 8/24–8/27 的成交量是
+1.2~3.0 亿。**开盘才十分钟的半根 bar**，被算进了 RV30（42.56 vs 修复后 42.89）。
+
+项目里已有 `data_pipeline._drop_forming_bar`，但它靠 yfinance 探 SPY 分钟线
+判交易所时间 —— 正是本模块要绕开的东西。改用返回体自带的两个信号，不额外发请求：
+
+- **日期**：末根日期 ≥ 美东当日 → 收盘前必然未完成（`zoneinfo` 换算，
+  绝对时间正确即可，不依赖本机 tz 设置）
+- **成交量**：末根 < 窗口中位数的 30% → 几乎只可能是半根（时钟不可得时的独立判据）
+
+任一命中即丢。**误丢的代价是 30 根少一根，漏丢的代价是波动率失真** —— 不对称，
+所以宁可宽。6 项测试锁住，含端到端。
+
+值得记一笔：这个 bug 是**真去跑了自检**才发现的。如果只看「21 项测试全绿、
+自检打印了三行数字」就宣布完成，它会带着一根半截 K 线上生产。
+
+### 补跑的国债也改走财政部目标日
+
+`get_yield_curve(date)` 本来就支持指定日期（一次返回整月，不额外发请求），
+但初版只接了当日路径，补跑仍走 FRED —— 而 FRED 转发的就是这份数据且晚一天。
+实测 8/28 查询：FRED 的 2Y 是 **4.19@08-26**，财政部已有 **4.20@08-27**。
+
+现在补跑也调 `_same_day_macro_data(as_of)`，但**只取国债**：
+Finnhub `/quote` 只给最新报价，给不了历史某日，补跑时那半段自动跳过
+（拿今天的 SPY 冒充目标日比缺失更坏；那几项由 `_asof_history` 按目标日取）。
+
+实测补跑 @2026-08-27：`2Y 4.2 (treasury_gov)`、曲线 `normal`、
+`field_sources` 三项全是 `treasury_gov@2026-08-27`。
+
+### 「加源之前先确认闸门覆盖它」—— 同一个错的第三次
+
+配上 key 跑全量，`test_iv_rv_reports_unavailable_not_zero` 红了：
+测试构造的「取不到数」场景被**真实的 Twelve Data 数据**盖掉。
+
+  ① v0.45.56 加 `yf_gate`          → 已由既有的 `mock_yfinance` 覆盖
+  ② v0.45.60 加财政部/Finnhub 宏观层 → **漏了**
+  ③ v0.45.61 加 Twelve Data         → **又漏了**
+
+已在 conftest 一并拦住，并把教训写进注释：
+**新增任何外部数据源，同一个 commit 里必须在 conftest 加一行。**
+
+顺带一个测试自身的坑：`test_backfill_skips_etf_quotes` 要验的正是被
+conftest 换成桩的那个函数 —— 直接调等于在测桩。改为在模块加载时
+（早于 autouse fixture）抓下真函数引用。
+
+### 二次检查：三条，全是「修过同一形状、又犯一次」
+
+用户要求逐条复核本轮改动。三条都用代码验出来，不是推理出来的：
+
+**① 补跑的 `data_source` 谎报来源。** `_compose_data_source` 的补跑分支
+**无条件**返回 `cloud_snapshot+yfinance@日期`，完全不看 `src_map` ——
+而自本版起补跑的国债已改走财政部，于是标签说 yfinance、实际是 treasury。
+与 8/27 那次「yfinance 一个字段都没供上、标签却仍写 yfinance」**是同一形状，
+而且是在同一个函数里**。现按实际供数源组装：
+`cloud_snapshot+treasury+yfinance+fred@2026-08-27`。
+
+**② Twelve Data 在补跑时取最新窗口冒充目标日。** `realized_vol` 一开始就有
+`end_date` 参数，调用处没传。对次日补跑影响小（forming-bar 已丢、窗口末端
+恰好是目标日），补跑更早的日子会严重错位。现沿用项目既有的
+`ALPHA_HIVE_TARGET_DATE` 信道（与 options_analyzer 同一个，含同样的格式校验
+—— 那里实测过 `../../../tmp/evil` 能让快照写到 cache/ 之外），
+来源标签写成 `twelve_data@<日期>`。
+⚠️ **yfinance 兜底路径仍是「最近 N 天」口径**，补跑较早日期时它给的 RV
+不属于目标日 —— 已知缺陷，本版未修（要改成 start/end）。
+
+**③ 财政部缓存键用本机时间。** `time.strftime("%Y%m")` —— 本机在 PT、
+落后 ET 3 小时：每月 1 号的 ET 00:00~03:00 之间本机还停在上个月，
+会去抓上个月的 XML、找不到 ET 当日 → 返回 None。**一年 12 次、
+每次 3 小时的窗口，正好覆盖凌晨的定时任务。** 改用 `_et_month()`，
+与 `_et_today()` 同源。
+
+三条各配回归测试，mutation check 实测：还原成修复前 → 三条全红；
+还原修复 → 全绿。
+
+（另核对过但**没问题**的：Twelve Data 分支与 yfinance 分支的返回键集一致
+（只多一个 `source`）；`yf_gate._bucket` 的缓存在测试里会被 conftest
+special-case 换掉，不会用到生产桶。）
+
+### 待你操作
+
+Twelve Data 的免费 key 需要注册（我不能替你注册账号）。拿到后：
+
+    echo 'YOUR_KEY' > ~/.alpha_hive_twelvedata_key && chmod 600 ~/.alpha_hive_twelvedata_key
+
+写入即生效，无需改任何代码。未配置时整条链原样退回限流版 yfinance。
+
+
+## [0.45.60] — 2026-08-28 — 当日宏观脱离 yfinance；顺带发现 2Y 一直是猜的
+
+用户指出 v0.45.59 那份调研的漏洞：「那我当天规则模式的自动任务 FRED 给不出信息啊」。
+**对的。** FRED 滞后 1–2 天，而定时任务在**当日 17:00 ET** 跑 —— 我把 FRED 说成通用替代，
+实际只对补跑成立。追下去反而找到了更好的答案。
+
+### `fred_macro` 的 7 个 yfinance 符号，逐个换掉
+
+| 原符号 | 当日替代 | 实测 2026-08-27 |
+|---|---|---|
+| `^VIX` | CBOE（早已在用） | 15.21 |
+| `^TNX` / `^FVX` | **美国财政部日度曲线**（免 key） | 10Y 4.67 · 5Y 4.38 · 2Y 4.20 |
+| `^GSPC` | Finnhub `/quote` · SPY | 771.10（+0.66%） |
+| `GLD` | Finnhub `/quote` · GLD | 422.60（+0.30%） |
+| `DX-Y.NYB` | Finnhub `/quote` · UUP | 28.02 |
+| `TLT` | Finnhub `/quote` · TLT | 83.13 |
+
+为什么是财政部而不是 FRED：**FRED 的 `DGS10` 转发的正是这份数据，但晚一天**
+（实测 08-28 查询时 FRED 最新 08-26、财政部已有 08-27）。
+
+为什么用 ETF 代理而不是指数代码：Finnhub 免费档对 `^GSPC` / `^VIX` 返回
+`Market data subscription required for CFD indices`，而 SPY/GLD/UUP/TLT 全通。
+
+### 顺带修掉一个更老的错：2Y 一直是**猜**出来的
+
+查证时发现 `treasury_2y` 走的是 `5Y + 0.15` 的近似（拿不到真 2Y 时代的产物），
+而它会**错判收益率曲线档位**：
+
+| | 2Y | 10Y−2Y | 曲线判定 |
+|---|---|---|---|
+| 近似 `5Y+0.15` | 4.53 | +14bp | `flat` |
+| 财政部真值 | **4.20** | **+47bp** | `normal` |
+
+差一个档位。现在真值优先，近似退为兜底并标 `treasury_2y_source`。
+FRED 的 2Y **不再覆盖财政部**——同源且晚一天，覆盖是纯粹的倒退。
+三处重复的曲线判定逻辑收敛成一个 `_set_curve()`（抄三遍就有三处会漂移）。
+
+### Added
+
+- **`treasury_yields.py`**：财政部日度收益率曲线。免 key、一次请求返回整月
+  （补跑任意目标日不额外请求）、带退避重试（实测一次瞬时 `RemoteDisconnected`
+  的代价是 3 个字段掉回 yfinance，值得多试两次）。
+  正则解析而非 XML 解析器——schema 变化时正则「少匹配到」比解析器「整份炸掉」
+  的失败方式更安全。指定日期无数据时**返回 None，绝不回退到前一交易日**。
+- `fred_macro._same_day_macro_data()` / `_finnhub_quote()`
+- `tests/test_treasury_yields.py`（12 项）+ 当日宏观回归（6 项）
+
+### Changed
+
+- `fred_macro` 取数顺序：**非 yfinance 源优先，yfinance 退为最后一环**。
+  补跑口径不走当日源（财政部/Finnhub 只给"最新"，拿今天的值冒充目标日比缺失更坏）。
+- `data_source` 如实汇总实际供数的源（`treasury+finnhub+fred`），
+  新增逐字段的 `field_sources`。8/27 那天 yfinance 一个字段都没供上、标签却仍是
+  `yfinance+fred` —— 排查限流时会把人引向一个根本没被调用的源。
+
+### 8-27 补跑结果
+
+补跑完成（退出码 0）。快照 30/30 写入，`iv_rank` 30/30、`rv_30d` 27/30；
+宏观 `as_of: 2026-08-27`、VIX 15.2 取自当日快照。
+⚠️ ML HTML 报告按设计只出分数最高的 12 只（`ALPHA_HIVE_ML_REPORT_MAX`），
+所以网站上另有 13 份仍是 8/27 那次失败扫描的遗留 —— 好坏混杂，正在以
+`ALPHA_HIVE_ML_REPORT_MAX=30` 重跑统一。
+
+### 顺带修：一条会因为「数据变多」而报警的不变式
+
+跑全量时 `test_known_degraded_dims_have_not_fully_collapsed` 红了。追下去发现
+**不是我的改动坏了什么，是这条闸的口径本身有缺陷**。
+
+它用**全局去重比** `distinct/n`。对连续维度没问题（odds/risk_adj/sentiment/signal
+实测 0.45~0.71）。但 `catalyst` 是离散量、全局只有 ~13 个取值：**distinct 几乎
+不增长而 n 线性增长，比值必然机械下滑**。
+
+| 时点 | n | distinct | 比值 |
+|---|---|---|---|
+| 补跑前 | 235 | 13 | 0.055 ✅ |
+| 补跑后（+30 行合法数据） | 265 | 13 | **0.049 ❌** |
+| 窗口填满 12×30 后 | 360 | ~13 | ~0.036 |
+
+而**每个扫描日仍稳定 5.5 个不同值**，与 8/24–8/26 完全一致 —— 分布根本没退化。
+机器恢复日更后这条闸注定天天红，且红的原因与它想守的东西无关。
+**一条会因为数据变多而报警的不变式，是在训练人忽略它。**
+
+口径改为**每个扫描日的不同值数（中位）**，不随 n 变化，直接对应它真正要守的
+那句话「别彻底塌成常数」。地板 3（实测中位 5.5，塌成常数是 1）。
+其余 4 个连续维度沿用原比值口径，不动。
+
+mutation check：塌成常数 → 红（中位 1.0）；只剩 2 个值 → 红；现状 → 绿；
+**同样 6 个取值、行数翻 4 倍 → 仍绿**（原口径正是在这里误报）。
+
+### 又一处「加源之前先确认闸门覆盖它」
+
+新取数层接上当天，`test_yield_curve_inverted` 红了：测试构造的倒挂曲线被
+**真实的 2026-08-27 数据**（10Y 4.67 / 2Y 4.20 → normal）盖掉。
+根因是 `conftest.py` 一直只 mock 了 yfinance，而这一层**绕过 yfinance 直接打外网**。
+
+后果不止那一条测试 —— 整个套件开始打真网络：变慢、变脆、离线不可用。
+已在 conftest 加 autouse fixture 默认关掉当日宏观取数层；需要验证它的测试
+自己 monkeypatch（会覆盖该 fixture）。
+
+与 `http_gate` docstring 记过的那条教训同形，这次是我犯的。
+
+### 自查
+
+1. **zsh 词分割**：`--tickers $NEED` 在 zsh 里**不做词分割**（bash 才会），
+   18 个代码被当成一个标的传了进去，产出文件名带空格、日期还错的垃圾文件。
+   已清理。护栏正常工作并点破了它：
+   「🚨 gh-pages 无变更：新 tree 与父提交完全相同……本次声称 1 份 ML 报告成功——
+   若非重复运行，说明报告文件根本没重新生成。」
+2. **又一次找错地方就下结论**：核对补跑产物时我查 `alpha-hive-daily-*.json`
+   的 `opportunities`，报 `iv_rank 0/30`——但拿数据完好的 8-25 一比，**也是 0/30**，
+   因为那个结构里根本不含 `iv_rank`。真正的产物在快照与 `analysis-*.json` 里
+   （实际 30/30）。**下结论前先拿一个已知完好的对照跑一遍**，这次是对照救了我。
+
+
+## [0.45.59] — 2026-08-28 — 云端快照根治：生产端补上、宏观接上、8-27 补跑
+
+承 v0.45.58 查明的两处断裂，按用户指示三件一起做。
+
+### ① 生产端：把 main 合进 `cloud-snapshots` 分支
+
+云端 routine 的取数代码自 08-26 13:28 UTC 起没再更新，落后 main 39 个提交，
+于是 v0.45.36 起本该写出的 `vintage_date` 从未被写出。
+
+该分支的独有提交**只有快照数据、改动零个代码文件**（`git diff --stat
+origin/main...origin/cloud-snapshots -- . ':!cloud_snapshots'` 为空），
+故直接合并 main：`5dc9ece..f7138a1`。合并后校验：`vintage_date` 5 处、
+`official_price`（v0.45.47 收盘价修复）已带上、两天快照数据完好、与 main 零代码差异。
+
+⚠️ **该分支的代码会独立于 main 老化。** 今后改 `cloud_snapshot_fetch.py` /
+`cboe_options.py` 必须同步过去，否则同一个错会再犯一次。
+
+### ② `market.json` 接进宏观 —— 但主因不在 market.json
+
+用户要的是「让补跑的宏观走快照而不是运行当天」。查下来错位有两处，
+而**大头不是 market.json**：
+
+| 字段 | 旧行为 | 修法 |
+|---|---|---|
+| VIX / F&G | market.json 里有目标日真值，但 `load_market()` **0 个调用者** | 走快照，`vix_source="cloud_snapshot_cboe"` |
+| 国债 / SPX / 美元 / 黄金 | `yf.Ticker(sym).history(period="5d")` —— **永远取最近 5 天** | `_asof_history()` 用 start/end 锁定目标日 |
+
+**market.json 里根本没有国债/SPX/美元/黄金**，光接它解决不了问题；
+`period="5d"` 才是补跑宏观错位的主因。两处一起修才成立。
+
+- `fred_macro.set_macro_snapshot(date, market)` / `get_macro_snapshot()`
+  （装载即作废 `_CACHE`，否则补跑会拿到上一次实时调用的结果）
+- `snapshot_mode` 里**期权链与宏观同进同出** —— 只装一半会让报告里期权是
+  目标日的、宏观是今天的，且无从分辨
+- 标签诚实化：`data_source` 写成 `cloud_snapshot+yfinance@<日期>`，
+  新增 `as_of` 字段（None = 实时口径）。补跑标成 `yfinance+fred` 会让读者
+  以为是运行当天的实时数据。
+
+实测对照（8-28 05:01 运行）：
+
+| | 实时口径 | 快照口径 @2026-08-27 |
+|---|---|---|
+| `data_source` | `yfinance+fred` | `cloud_snapshot+yfinance@2026-08-27+fred` |
+| `vix_source` | `cboe` | `cloud_snapshot_cboe` |
+| VIX | 14.51 | **15.21** |
+
+`_asof_history` 截断实测：as_of=08-25 → 4.639、08-26 → 4.664、08-27 → 4.672
+（`^TNX` 各日真实收盘），**不是**一律给最新的 4.672。
+
+### Added
+
+- `--allow-unverified-snapshot`：接受缺 `vintage_date` 的快照。
+  仅 2026-08-26 / 08-27 两天需要（新鲜度已于 v0.45.58 逐只独立验证）；
+  ① 修好后此后的快照不需要它。
+- `tests/test_macro_snapshot.py`（9 项）
+
+### ③ 8-27 补跑
+
+（结果见下方补记）
+
+### 自查：测试替身连错两版
+
+`_FakeHist` 第一版 `.date` 返回 list —— 真 pandas 的 `DatetimeIndex.date` 是
+numpy 数组，`arr <= date` 是逐元素比较，list 会抛 TypeError。
+第二版漏了 `__len__`，取数循环里的 `len(hist) >= 2` 抛异常被
+`except Exception` 吞掉 → `data` 空 → 走「yfinance 全灭」分支 →
+测试红在一条与被测逻辑无关的路径上，还给出 `'cboe' == 'cloud_snapshot_cboe'`
+这种看着像真 bug 的错。**替身失真会伪造出被测代码的假故障。**
+
 
 ## [0.45.58] — 2026-08-28 — 云端快照兜底是死的，而它一直宣称自己活着
 

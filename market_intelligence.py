@@ -661,10 +661,16 @@ def check_thesis_breaks(
     # 条件」列为硬约束，于是这条硬约束长期是靠一个永不触发的闸在"满足"。
     # 这里先让它**可见**；配置 schema 的迁移是独立决定（且该文件正被其他
     # session 编辑），不在本次改动范围。
+    # v0.45.62：新增 `evaluations` —— **每一条**条件的当前值与判定，
+    # 不只是触发的那几条。日报 7.5 节要把「阈值 + 当前值 + 判定」一起打出来，
+    # 否则读者看到的是一张静态阈值表，分不清「没触发」和「不可能触发」。
+    # 它在**每一条 return 路径上都显式出现**，不留给调用方 `.get("evaluations", [])`
+    # 去兜——那种默认值恰好在出错时最像正常（本仓库反复踩过的坑）。
     _none = {
         "level": None, "triggered_conditions": [],
         "recommendation": "", "alert_html": "",
         "evaluable": False, "unevaluable_reason": "",
+        "evaluations": [],
     }
 
     config_path = _BASE / "thesis_breaks_config.json"
@@ -712,6 +718,36 @@ def check_thesis_breaks(
             return actual == val
         return False
 
+    # ── v0.45.62：逐条求值明细（含未触发的）────────────────────────
+    _field_vals_all = {
+        'price': current_price, 'iv': iv_current,
+        'put_call_ratio': put_call_ratio, 'score': swarm_score,
+        'bear_signals_count': len(bear_signals),
+    }
+    _evaluations: List[Dict[str, Any]] = []
+    for _lk in ("level_1_warning", "level_2_stop_loss"):
+        for _c in (ticker_cfg.get(_lk, {}) or {}).get("conditions", []) or []:
+            if not isinstance(_c, dict):
+                continue
+            _fld = _c.get("field")
+            _val = _c.get("value")
+            if not _fld or _val is None:
+                # 人读散文条件：求值器碰不到，如实标注而不是当作「未触发」
+                _evaluations.append({
+                    "level": _lk, "field": None, "op": None, "value": None,
+                    "actual": None, "fired": None, "machine": False,
+                    "label": _c.get("metric") or _c.get("id") or "",
+                })
+                continue
+            _act = _field_vals_all.get(_fld)
+            _evaluations.append({
+                "level": _lk, "field": _fld, "op": _c.get("op", ">"), "value": _val,
+                "actual": _act,
+                "fired": _eval_condition(_c) if _act is not None else None,
+                "machine": bool(_c.get("_machine")),
+                "label": _c.get("_note") or _fld,
+            })
+
     # ── v0.45.44：先判「这份配置到底可不可求值」──────────────────────
     # 一条 condition 只有同时带 field/op/value 才是机器可比的；
     # 只有 metric/trigger/current_status 的是给人读的散文，求值器碰不到。
@@ -729,6 +765,9 @@ def check_thesis_breaks(
         _log.warning("论点失效闸未执行：%s —— 本次返回「未核对」而非「论点完好」", _reason)
         _out = dict(_none)
         _out["unevaluable_reason"] = _reason
+        # v0.45.62：这些条件求值器碰不到，但**它们存在**——明细照样返回，
+        # 让渲染层标「人工条件，未自动核对」，而不是整级退回只有阈值。
+        _out["evaluations"] = _evaluations
         return _out
     if _is_fallback:
         _log.warning("%s 无专属论点失效配置，回落到 NVDA 的条件（数据中心营收/AMD 竞品/"
@@ -760,6 +799,7 @@ def check_thesis_breaks(
         # 走到这里说明**确实核对过**了，与「没核对」区分开
         _ok = dict(_none)
         _ok["evaluable"] = True
+        _ok["evaluations"] = _evaluations
         return _ok
 
     # 构建 HTML 告警卡片
@@ -782,6 +822,9 @@ def check_thesis_breaks(
         "triggered_conditions": triggered_conds,
         "recommendation": rec,
         "alert_html": alert_html,
+        "evaluable": True,
+        "unevaluable_reason": "",
+        "evaluations": _evaluations,
     }
 
 
@@ -811,6 +854,49 @@ def calculate_iv_rv_spread(
         "iv_rv_signal": "unknown", "iv_rv_note": "RV 数据不可用",
         "data_available": False, "error": "",
     }
+    # ── v0.45.61：Twelve Data 优先 ──────────────────────────────────
+    # 这是整条链上最后一处非 yfinance 不可的依赖。免费档 800 次/天，
+    # 30 只标的 × 1 credit 远在额度内；未配 key 时 `realized_vol` 返回 None，
+    # 原样落到下面的 yfinance 路径，不报错、不阻断。
+    # 补跑时必须取**目标日**的窗口。`ALPHA_HIVE_TARGET_DATE` 是本项目既有的
+    # 补跑信道（options_analyzer 用同一个），这里沿用而不另造。
+    #
+    # v0.45.61 二次检查发现：`realized_vol` 一开始就支持 `end_date`，但调用处
+    # 没传 —— 补跑会拿**最新**窗口冒充目标日。对次日补跑影响小（forming-bar
+    # 已丢、窗口末端恰好是目标日），但补跑更早的日子会严重错位。
+    # ⚠️ 下面的 yfinance 兜底路径**仍然**是「最近 N 天」口径，补跑较早日期时
+    # 那条路给出的 RV 不属于目标日 —— 已知缺陷，未在本版修（要改成 start/end）。
+    _target = ""
+    try:
+        import os as _os
+        import re as _re
+        _t = (_os.environ.get("ALPHA_HIVE_TARGET_DATE", "") or "").strip()
+        if _t and _re.fullmatch(r"\d{4}-\d{2}-\d{2}", _t):
+            _target = _t
+    except Exception:  # pragma: no cover
+        pass
+
+    try:
+        from twelve_data import is_configured as _td_ok, realized_vol as _td_rv
+        if _td_ok():
+            _rv_td = _td_rv(ticker, lookback=lookback_days, end_date=_target or None)
+            if _rv_td is not None:
+                _spread_td = iv_current_pct - _rv_td
+                _sig_td = ("expensive" if _spread_td > 10
+                           else "cheap" if _spread_td < -10 else "fair")
+                return {
+                    "rv_30d": round(_rv_td, 2),
+                    "iv_rv_spread": round(_spread_td, 2),
+                    "iv_rv_signal": _sig_td,
+                    "iv_rv_note": (f"IV {iv_current_pct:.1f}% vs RV30 {_rv_td:.1f}%，"
+                                   f"价差 {_spread_td:+.1f}pp"),
+                    "data_available": True,
+                    "error": "",
+                    "source": ("twelve_data@" + _target) if _target else "twelve_data",
+                }
+    except Exception as _e_td:  # noqa: BLE001 - 任何失败都退回 yfinance
+        _log.debug("[%s] Twelve Data RV 不可用，退回 yfinance: %s", ticker, _e_td)
+
     try:
         import time
 

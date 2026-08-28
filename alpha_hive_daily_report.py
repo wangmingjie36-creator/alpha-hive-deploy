@@ -113,6 +113,25 @@ class _SwarmContext:
     checkpoint_file: object = None  # Path
 
 
+def _format_break_verdict(ev) -> str:
+    """把一条求值明细渲染成跟在阈值后面的判定后缀（v0.45.62）。
+
+    读者要能分清三件事，缺一件这张表就还是静态阈值表：
+      「当前 1.09，未触发」 —— 核对过了，没事
+      「当前值缺失，未核对」 —— 数据没来，别当成没事
+      「人工条件，未自动核对」 —— 求值器碰不到，得人看
+    """
+    if not isinstance(ev, dict):
+        return ""
+    if ev.get("field") is None:
+        return "（人工条件，未自动核对）"
+    actual = ev.get("actual")
+    if actual is None or ev.get("fired") is None:
+        return "（当前值缺失，未核对）"
+    shown = f"{actual:.2f}".rstrip("0").rstrip(".") if isinstance(actual, float) else str(actual)
+    return f"（当前 {shown}，{'✅ 已触发' if ev.get('fired') else '未触发'}）"
+
+
 def _format_break_condition(cond) -> "str | None":
     """把一条失效条件格式化成一行；无法识别返回 None（由调用方跳过并计数）。
 
@@ -931,6 +950,37 @@ class AlphaHiveDailyReporter:
             except Exception as e:
                 _log.debug("预测清理失败: %s", e)
 
+    @staticmethod
+    def _evaluate_thesis_breaks(ticker: str, row: Dict) -> "list":
+        """对单只标的跑一次失效条件求值，返回逐条明细。
+
+        v0.45.62。喂给求值器的五个字段就是它 `data_map` 认的那五个，
+        取值口径与 `.swarm_results_*.json` 一致（离线回放用的也是这套）。
+        任何一步取不到就返回空列表 —— 让渲染层退回「只有阈值」，
+        **不要**编一个当前值出来。
+        """
+        try:
+            from market_intelligence import check_thesis_breaks
+        except Exception as _e:
+            _log.warning("失效条件求值器不可用，本轮只渲染阈值: %s", _e)
+            return []
+        _det = (row.get("agent_details", {}) or {}).get("OracleBeeEcho", {}).get("details", {}) or {}
+        _bear = ((row.get("agent_details", {}) or {}).get("BearBeeContrarian", {})
+                 .get("details", {}) or {}).get("bearish_signals", []) or []
+        try:
+            _res = check_thesis_breaks(
+                ticker,
+                _det.get("_snapshot_stock_price"),
+                _det.get("iv_current"),
+                _det.get("put_call_ratio"),
+                list(_bear),
+                row.get("final_score"),
+            )
+        except Exception as _e:
+            _log.warning("失效条件求值失败 %s: %s", ticker, _e)
+            return []
+        return _res.get("evaluations") or []
+
     def _attach_thesis_breaks(self, swarm_results: Dict) -> None:
         """把失效条件写进 swarm_results —— **必须在 _build_swarm_report 之前调用**。
 
@@ -950,7 +1000,7 @@ class AlphaHiveDailyReporter:
         except Exception as _tbe:
             _log.warning("thesis_break 配置加载失败，本轮无失效条件: %s", _tbe)
             return
-        _n_ok = _n_bad = 0
+        _n_ok = _n_bad = _n_fired = 0
         _covered = 0
         for _tk, _row in swarm_results.items():
             try:
@@ -960,19 +1010,37 @@ class AlphaHiveDailyReporter:
                 continue
             if not _tb_cfg:
                 continue
+            # v0.45.62：求值走**唯一**的 check_thesis_breaks，日报不另写一个。
+            # 本仓库今天已经有过一次平行发明（close_correction.official_closes
+            # vs scan_coverage_gate.check_prices），两个求值器意味着两套口径会悄悄漂开。
+            _evals = self._evaluate_thesis_breaks(_tk, _row)
             _lv = {}
             for _key, _name in (("level_1_warning", "l1"), ("level_2_stop_loss", "l2")):
+                _conds = (_tb_cfg.get(_key, {}) or {}).get("conditions", []) or []
+                _lvl_evals = [e for e in _evals if e.get("level") == _key]
+                # 逐位对齐：check_thesis_breaks 按同一份配置、同一顺序产出。
+                # 长度对不上说明契约破了 —— 宁可退回「只有阈值没有判定」，
+                # 也不把 A 条件的当前值贴到 B 条件上。
+                _aligned = _lvl_evals if len(_lvl_evals) == len(_conds) else None
+                if _aligned is None and _conds:
+                    _log.warning("thesis_break %s/%s：条件 %d 条、求值明细 %d 条对不上，"
+                                 "本级降级为只显示阈值", _tk, _key, len(_conds), len(_lvl_evals))
                 _out = []
-                for _c in (_tb_cfg.get(_key, {}) or {}).get("conditions", []) or []:
+                for _i, _c in enumerate(_conds):
                     _txt = _format_break_condition(_c)
-                    if _txt:
-                        _out.append(_txt)
-                        _n_ok += 1
-                    else:
+                    if not _txt:
                         _n_bad += 1
+                        continue
+                    _ev = _aligned[_i] if _aligned else None
+                    _suffix = _format_break_verdict(_ev)
+                    _out.append(_txt + _suffix)
+                    _n_ok += 1
+                    if _ev and _ev.get("fired"):
+                        _n_fired += 1
                 _lv[_name] = _out
             _row["thesis_break_l1"] = _lv["l1"]
             _row["thesis_break_l2"] = _lv["l2"]
+            _row["thesis_break_evaluations"] = _evals
             if _lv["l1"] or _lv["l2"]:
                 _covered += 1
         if _n_bad:
@@ -981,7 +1049,8 @@ class AlphaHiveDailyReporter:
                          _n_bad, _n_ok)
         _total = len(swarm_results)
         if _total:
-            _log.info("失效条件覆盖：%d/%d 只标的（%d 条）", _covered, _total, _n_ok)
+            _log.info("失效条件覆盖：%d/%d 只标的（%d 条，其中 %d 条当前满足）",
+                      _covered, _total, _n_ok, _n_fired)
         # CLAUDE.md 硬性规则：任何结论必须附失效条件。全灭时必须吵，
         # 因为 8/27 那次正是「日志一行 WARNING，报告 0/30」而没人发现。
         if _total and _covered == 0:
@@ -2402,7 +2471,8 @@ def _snapshot_ctx(args):
     stack = contextlib.ExitStack()
     try:
         import cloud_snapshot_loader as csl
-        prov = stack.enter_context(csl.snapshot_mode(args.date))
+        prov = stack.enter_context(csl.snapshot_mode(
+            args.date, allow_unverified=getattr(args, "allow_unverified_snapshot", False)))
     except ImportError as e:
         print(f"⚠️ 快照消费端不可用（{e}）——退回实时抓取")
         yield None
@@ -2519,6 +2589,16 @@ def main():
         type=str,
         default=None,
         help='覆盖报告日期（YYYY-MM-DD），用于补跑指定交易日（默认自动取 PDT 当日）'
+    )
+    parser.add_argument(
+        '--allow-unverified-snapshot',
+        action='store_true',
+        help=("接受缺 vintage_date 的云端快照（v0.45.36 之前的生产端产出）。"
+              "⚠️ 该字段是快照自证新鲜度的唯一凭据——CBOE 在盘前/休市照常 200 "
+              "返回上一交易日的结算数据。用它之前请**独立验证**：拿快照的 "
+              "price_at_fetch 对目标日真实收盘。现存需要它的只有 2026-08-26 / "
+              "2026-08-27 两天（已于 v0.45.58 逐只验过）；生产端已在 v0.45.59 "
+              "修好，此后的快照不需要这个开关。")
     )
     parser.add_argument(
         '--no-snapshot',

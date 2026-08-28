@@ -245,8 +245,26 @@ def snapshot_mode(date: str, *, ref: Optional[str] = None, repo: Optional[str] =
                                    allow_unverified=allow_unverified)
         return cache[k]
 
+    # v0.45.59：宏观与期权链**同进同出**。
+    # 只装一半的后果是报告里期权是目标日的、宏观是运行当天的，而且无从分辨
+    # —— `market.json` 此前在生产代码里 0 个调用者，8/27 的真实 VIX 期限结构
+    # 天天被抓下来、提交、然后没人读（「死字段：算了没人读」）。
+    _macro_installed = False
+    try:
+        import fred_macro as _fm
+        _fm.set_macro_snapshot(date, load_market(date, ref=ref, repo=repo))
+        _macro_installed = True
+    except Exception as _e_fm:  # noqa: BLE001 - 宏观装不上不阻断期权链
+        _log.warning("宏观快照未装上（宏观将是运行当天的口径）: %s", _e_fm)
+
     co.set_snapshot_provider(provider)
     try:
         yield provider
     finally:
         co.set_snapshot_provider(None)
+        if _macro_installed:
+            try:
+                import fred_macro as _fm2
+                _fm2.set_macro_snapshot(None)
+            except Exception:  # noqa: BLE001 - 卸载失败只影响同进程后续调用
+                _log.warning("宏观快照卸载失败")

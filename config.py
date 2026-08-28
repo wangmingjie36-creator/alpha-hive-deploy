@@ -115,6 +115,10 @@ _SECRET_REGISTRY = {
     "ALPHA_VANTAGE_KEY": None,
     "GMAIL_APP_PASSWORD": None,
     "TRADIER_API_KEY": "~/.alpha_hive_tradier_key",
+    # v0.45.61: 逐标的日K。免费档 800 次/天、8 次/分——30 只标的 × 1 credit
+    # 远在额度内，是唯一量级够覆盖整个 WATCHLIST 的免费源。
+    # 未配置时 TwelveDataSource 直接返回 None，降级链退回 yfinance（限流版）。
+    "TWELVEDATA_API_KEY": "~/.alpha_hive_twelvedata_key",
 }
 
 
