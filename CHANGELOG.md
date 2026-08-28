@@ -5,7 +5,52 @@
 
 ---
 
-## [0.45.61] — 2026-08-28 — 占位（进行中：Twelve Data 接管逐标的日K，补上 RV30/iv_rank 最后一处 yfinance 依赖）
+## [0.45.61] — 2026-08-28 — Twelve Data 接管日K：最后一处 yfinance 依赖
+
+v0.45.60 把当日宏观搬离了 yfinance，链上只剩一处非它不可：**逐标的 30 日收盘**
+（`rv_30d` / `iv_rv_spread` / hv_proxy 口径 `iv_rank` 全由它派生）。
+2026-08-27 那 687 次 429 打空的正是这三项。
+
+### 为什么是 Twelve Data（其余全部实打验证不可用）
+
+| 源 | 逐标的日K | 实测 2026-08-28 |
+|---|---|---|
+| Finnhub `/stock/candle` | ❌ | HTTP 403，已转付费 |
+| Alpha Vantage | ❌ | 25 次/天**已被 newsapi 的新闻情绪占满**（当天日志正在报 rate-limited） |
+| Stooq | ❌ | 返回 JS 工作量证明挑战页，已上反爬 |
+| FRED | ❌ | 只有指数（SP500/NASDAQCOM），无逐标的 |
+| **Twelve Data** | ✅ | 免费 800 次/天、8 次/分 —— 30 只 × 1 credit 远在额度内 |
+
+### Added
+
+- **`twelve_data.py`**：日K 客户端 + `realized_vol()`。
+  - **口径与 `calculate_iv_rv_spread` 逐条对齐**（对数收益 / `ddof=1` /
+    ×√252×100 / 剔除 |log_ret|>0.5 / HV30>300% 视为污染）。口径不一致的话，
+    同一只标的会因为走了哪条源而得到不同的 RV，那种差异会被误读成波动率变化。
+  - **独立**令牌桶 7/分（免费档 8/分，留一成余量）。刻意不与
+    `resilience.yfinance_limiter` 共用 —— 两边配额本来就是分开的，共用只会互相拖慢。
+  - `TwelveDataUnavailable` 继承 `ConnectionError`（⊂ NETWORK_ERRORS）。
+    v0.45.56 在 `YFRateLimited` 上踩过这个坑：新造的异常不继承既有网络异常族，
+    会穿透所有降级路径。
+  - **HTTP 200 + body 里 `status: "error"`** 单独处理：免费档超额时状态码仍是 200，
+    只看状态码会把错误当数据。
+- `config.SECRET_FILES` 登记 `TWELVEDATA_API_KEY` → `~/.alpha_hive_twelvedata_key`
+- `tests/test_twelve_data.py`（15 项）
+
+### Changed
+
+- `market_intelligence.calculate_iv_rv_spread`：Twelve Data 优先，yfinance 退为兜底。
+  **未配 key 时行为与之前完全一致**（实测未配 key 仍走 yfinance 得到 rv_30d=42.22），
+  不报错、不阻断。
+
+### 待你操作
+
+Twelve Data 的免费 key 需要注册（我不能替你注册账号）。拿到后：
+
+    echo 'YOUR_KEY' > ~/.alpha_hive_twelvedata_key && chmod 600 ~/.alpha_hive_twelvedata_key
+
+写入即生效，无需改任何代码。未配置时整条链原样退回限流版 yfinance。
+
 
 ## [0.45.60] — 2026-08-28 — 当日宏观脱离 yfinance；顺带发现 2Y 一直是猜的
 

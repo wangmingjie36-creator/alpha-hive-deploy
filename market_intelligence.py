@@ -811,6 +811,31 @@ def calculate_iv_rv_spread(
         "iv_rv_signal": "unknown", "iv_rv_note": "RV 数据不可用",
         "data_available": False, "error": "",
     }
+    # ── v0.45.61：Twelve Data 优先 ──────────────────────────────────
+    # 这是整条链上最后一处非 yfinance 不可的依赖。免费档 800 次/天，
+    # 30 只标的 × 1 credit 远在额度内；未配 key 时 `realized_vol` 返回 None，
+    # 原样落到下面的 yfinance 路径，不报错、不阻断。
+    try:
+        from twelve_data import is_configured as _td_ok, realized_vol as _td_rv
+        if _td_ok():
+            _rv_td = _td_rv(ticker, lookback=lookback_days)
+            if _rv_td is not None:
+                _spread_td = iv_current_pct - _rv_td
+                _sig_td = ("expensive" if _spread_td > 10
+                           else "cheap" if _spread_td < -10 else "fair")
+                return {
+                    "rv_30d": round(_rv_td, 2),
+                    "iv_rv_spread": round(_spread_td, 2),
+                    "iv_rv_signal": _sig_td,
+                    "iv_rv_note": (f"IV {iv_current_pct:.1f}% vs RV30 {_rv_td:.1f}%，"
+                                   f"价差 {_spread_td:+.1f}pp"),
+                    "data_available": True,
+                    "error": "",
+                    "source": "twelve_data",
+                }
+    except Exception as _e_td:  # noqa: BLE001 - 任何失败都退回 yfinance
+        _log.debug("[%s] Twelve Data RV 不可用，退回 yfinance: %s", ticker, _e_td)
+
     try:
         import time
 
