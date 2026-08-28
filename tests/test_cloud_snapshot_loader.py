@@ -290,3 +290,68 @@ def test_scan_error_propagates_not_masked(snap_repo, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "无可用云端快照" not in out, "把扫描失败误报成了快照不可用"
     assert co._SNAPSHOT_PROVIDER is None, "异常路径未卸载供给器"
+
+
+class TestSnapshotModeProbesLoadability:
+    """manifest 存在 ≠ 标的能载入（v0.45.58）。
+
+    实测事故：`vintage_date` 于 v0.45.36 加进主线生产端，但云端 routine 跑的是
+    cloud-snapshots 分支上的旧脚本（该字段出现 0 次），于是每份快照都缺它，
+    而 `load_ticker` 对缺它的一律 return None。
+
+    旧 `snapshot_mode` 只验 manifest 就 yield，调用方随即打印
+    「📦 云端快照模式」，扫描却静默退回实时抓取 —— 8-26 与 8-27 两天
+    各 30/30 完好的快照一份都没用上，且看起来一直是活的。
+
+    这就是 `check_label_honesty` 要抓的形态：标签宣称成功，
+    它所管辖的值却是空的。
+    """
+
+    def _seed(self, tmp_path, *, vintage):
+        import json as _j
+        import os as _os
+        d = tmp_path / "cloud_snapshots" / "2026-08-27"
+        d.mkdir(parents=True)
+        (d / "manifest.json").write_text(_j.dumps(
+            {"date": "2026-08-27", "tickers_requested": 2, "tickers_ok": 2,
+             "ok": ["NVDA", "ABBV"]}))
+        for t in ("NVDA", "ABBV"):
+            doc = {"ticker": t, "chain": {"calls": [1], "puts": [1]}}
+            if vintage:
+                doc["vintage_date"] = "2026-08-27"
+            (d / f"{t}.json").write_text(_j.dumps(doc))
+        return str(tmp_path)
+
+    def _patch_git_show(self, monkeypatch, root):
+        import os as _os
+        import cloud_snapshot_loader as loader
+
+        def _fake(path, ref=None, repo=None):
+            fp = _os.path.join(root, path)
+            return open(fp).read() if _os.path.exists(fp) else None
+
+        monkeypatch.setattr(loader, "_git_show", _fake)
+
+    def test_raises_when_manifest_ok_but_nothing_loadable(self, tmp_path, monkeypatch):
+        import cloud_snapshot_loader as loader
+        self._patch_git_show(monkeypatch, self._seed(tmp_path, vintage=False))
+        with pytest.raises(loader.SnapshotUnavailable) as ei:
+            with loader.snapshot_mode("2026-08-27"):
+                pass
+        msg = str(ei.value)
+        assert "一只都载不进来" in msg
+        assert "vintage_date" in msg, "诊断必须点名根因，否则等于换个说法的沉默"
+
+    def test_allow_unverified_lets_them_through(self, tmp_path, monkeypatch):
+        import cloud_snapshot_loader as loader
+        self._patch_git_show(monkeypatch, self._seed(tmp_path, vintage=False))
+        with loader.snapshot_mode("2026-08-27", allow_unverified=True) as prov:
+            assert prov("NVDA") is not None
+
+    def test_healthy_snapshot_still_works(self, tmp_path, monkeypatch):
+        """回归：带 vintage_date 的正常快照不得被抽验误伤。"""
+        import cloud_snapshot_loader as loader
+        self._patch_git_show(monkeypatch, self._seed(tmp_path, vintage=True))
+        with loader.snapshot_mode("2026-08-27") as prov:
+            assert prov("NVDA") is not None
+            assert prov("ABBV") is not None

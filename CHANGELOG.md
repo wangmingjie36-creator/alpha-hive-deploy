@@ -5,7 +5,96 @@
 
 ---
 
-## [0.45.58] — 2026-08-28 — 占位（进行中：云端快照兜底自 v0.45.36 起就是死的——生产端没写 vintage_date，消费端全拒收，标签还宣称走了快照）
+## [0.45.58] — 2026-08-28 — 云端快照兜底是死的，而它一直宣称自己活着
+
+用户问：「补跑不可能有目标日的期权链，但是我有云端快照兜底不是吗？」
+
+**用户是对的，我上一条答错了。** `cloud_snapshot_fetch` 的 docstring 自己就写着
+「补跑时消费这些快照」，`alpha_hive_daily_report` 里也确实接了
+`cloud_snapshot_loader.snapshot_mode(args.date)`。快照不但存在，而且完好：
+`cloud_snapshots/2026-08-27/` 有 30 个标的 + manifest + market，
+`tickers_ok=30/30`，每只 160 calls + 160 puts + 4 个到期日 + IV 期限结构 + 全链 OI。
+
+**但它一份都没被用上。**
+
+### 根因：生产端与消费端分处一次契约变更的两侧
+
+`vintage_date` 于 **v0.45.36**（`670a444`）加进主线的 `cloud_snapshot_fetch.py`，
+消费端 `load_ticker` 同时开始**拒收缺该字段的快照**（`return None`）。
+
+**但生产端从未拿到 670a444。** 时间线是硬的：
+
+| 时刻(UTC) | 事件 |
+|---|---|
+| 08-26 13:28 | `cloud-snapshots` 分支的 `cloud_snapshot_fetch.py` 最后一次更新（v0.45.29，**早于** 670a444） |
+| 08-26 20:11 | 670a444 落到 main：生产端开始写 `vintage_date`，消费端开始拒收缺它的 |
+| 08-26 21:08 | 8-26 快照生成 —— **晚于契约变更 57 分钟，仍无 `vintage_date`** |
+| 08-27 21:05 | 8-27 快照生成 —— 晚整整一天，**仍无** |
+
+`git show origin/cloud-snapshots:cloud_snapshot_fetch.py \| grep -c vintage_date` = **0**。
+
+（可确证的是「生产端跑的不是 main-at-HEAD」；究竟是 `cloud-snapshots` 分支
+还是别的陈旧 checkout，我没有 routine 侧的配置可查，不做断言。）
+
+于是自 v0.45.36 起，生产端写的每一份快照都缺这个字段，消费端每一份都拒收。
+**兜底自那时起就是死的。**
+
+### 更坏的是它看起来是活的
+
+旧 `snapshot_mode` **只验 manifest 就 yield**。manifest 没有 `vintage_date` 要求，
+所以永远通过 → 调用方随即打印「📦 云端快照模式：期权/IV 取自 cloud-snapshots 分支」
+→ 而后每个 `load_ticker` 静默返回 None → 扫描退回实时抓取。
+
+**一条自信的、错误的标签。** 这正是 v0.45.53 `check_label_honesty` 要抓的形态
+（标签宣称成功、它管辖的值却是空的），只不过那道闸检查的是扫描产物，
+够不到这里。
+
+### 数据本身是真的（已独立验证，不靠那个缺失字段）
+
+拿 `price_at_fetch` 与真实收盘逐只对照：
+
+| 标的 | 快照 | 8-26 收 | 8-27 收 | 判定 |
+|---|---|---|---|---|
+| NVDA | 227.00 | 209.66 | 227.98 | ✅ 8-27 |
+| ABBV | 257.66 | 262.90 | 258.15 | ✅ 8-27 |
+| COST | 934.66 | 956.12 | 934.66 | ✅ 8-27（精确到分） |
+| XOM | 156.60 | 158.19 | 156.44 | ✅ 8-27 |
+
+manifest `generated_at_utc` = 2026-08-27T21:05:52Z = 17:05 ET，收盘后。
+数据是货真价实的 8-27，只是缺一个元数据字段。
+
+### Fixed
+
+- `cloud_snapshot_loader.snapshot_mode()` 现在**抽验标的可载入性**（前 5 只），
+  一只都载不进来就 `SnapshotUnavailable` 并**点名根因**（缺 `vintage_date` /
+  如何绕过 / 如何根治），而不是顶着假标签静默降级。
+  部分可载入时按实际比例告警。
+  - mutation check：移除抽验后 `DID NOT RAISE`，还原后绿。
+
+### 第二处死路：`market.json` 根本没有消费者
+
+`load_market()` 在生产代码里 **0 个调用者**（只有定义处和一个测试）。
+`cloud_snapshots/2026-08-27/market.json` 里躺着当天的 **VIX 期限结构真数据**
+（`source: vx_futures`，vix_spot 15.21 / 1m 17.15 / 3m 19.60 / contango 12.75%）
+和 Fear & Greed —— 每个交易日抓下来、提交到分支，**没有任何东西读它**。
+
+这正是 MEMORY 里那条「死字段：算了没人读」——**查功能是否生效先数读者**。
+后果直接落在用户这次问的第二件事上：即便修好上面的 `vintage_date`，
+补跑的宏观**仍然**会是运行当天的，因为 market.json 压根没接进 `fred_macro`。
+
+### 尚未做（需要你定）
+
+1. **根治要更新 `cloud-snapshots` 分支上的 `cloud_snapshot_fetch.py`** ——
+   那是推到另一个分支、且会改变云端 routine 行为的对外动作，未擅自执行。
+2. 现存 8-26 / 8-27 两天的快照缺 `vintage_date`，只能走 `allow_unverified=True`。
+   `--date` 路径目前没有对应的 CLI 开关。新鲜度已由上表独立验证。
+
+### 自查
+
+上一条我写「补跑会拿 8-28 的期权链冒充 8-27」，并据此开了个后台任务卡片。
+两者都建立在「补跑不可能有目标日期权链」这个**我没有核实就写下的前提**上——
+而 `cloud_snapshot_fetch` 的 docstring 第一段就否证了它。卡片已撤回。
+
 
 ## [0.45.57] — 2026-08-28 — 失效条件算了半年，全项目没有一个读者
 

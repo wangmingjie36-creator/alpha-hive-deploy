@@ -196,9 +196,45 @@ def snapshot_mode(date: str, *, ref: Optional[str] = None, repo: Optional[str] =
     """
     import cboe_options as co
 
-    if load_manifest(date, ref=ref, repo=repo) is None:
+    _man = load_manifest(date, ref=ref, repo=repo)
+    if _man is None:
         raise SnapshotUnavailable(
             f"{ref} 上没有 {date} 的快照（已有：{', '.join(available_dates(ref, repo)) or '无'}）")
+
+    # v0.45.58：manifest 在不等于标的能载入。
+    #
+    # 旧实现只验 manifest 就 yield，调用方随即打印「📦 云端快照模式」——
+    # 而如果每个 load_ticker 都返回 None，扫描会**静默退回实时抓取**，
+    # 却顶着一个宣称走了快照的标签。这正是 check_label_honesty 要抓的形态：
+    # 标签宣称成功，它所管辖的值却是空的。
+    #
+    # 实测代价：`vintage_date` 于 v0.45.36 加进主线的生产端，但云端 routine
+    # 跑的是 cloud-snapshots 分支上的旧脚本（该字段出现 0 次），于是**每一份
+    # 快照都缺它**，而消费端对缺它的一律 return None。8-26 与 8-27 两天
+    # 各 30/30 完好的快照，一份都没被用上 —— 兜底自那时起就是死的，
+    # 且因为这条假标签，看起来一直是活的。
+    _ok = [t for t in (_man.get("ok") or []) if isinstance(t, str)]
+    _probe = _ok[:5]
+    _loadable = sum(1 for t in _probe
+                    if load_ticker(date, t, ref=ref, repo=repo,
+                                   allow_unverified=allow_unverified) is not None)
+    if _probe and _loadable == 0:
+        _why = ""
+        _raw = _git_show(f"{SNAPSHOT_SUBDIR}/{date}/{_probe[0]}.json", ref, repo)
+        if _raw:
+            try:
+                if json.loads(_raw).get("vintage_date") is None:
+                    _why = ("：快照缺 `vintage_date`（生产端早于 v0.45.36）。"
+                            "确认新鲜度后可用 allow_unverified=True，"
+                            "根治要更新 cloud-snapshots 分支上的 cloud_snapshot_fetch.py")
+            except ValueError:
+                pass
+        raise SnapshotUnavailable(
+            f"{date} 的 manifest 称 {_man.get('tickers_ok')} 只可用，"
+            f"但抽验 {len(_probe)} 只**一只都载不进来**{_why}")
+    if _probe and _loadable < len(_probe):
+        _log.warning("%s 快照抽验 %d/%d 可载入——部分标的会退回实时抓取",
+                     date, _loadable, len(_probe))
 
     cache: Dict[str, Optional[dict]] = {}
 
