@@ -113,6 +113,39 @@ class _SwarmContext:
     checkpoint_file: object = None  # Path
 
 
+def _format_break_condition(cond) -> "str | None":
+    """把一条失效条件格式化成一行；无法识别返回 None（由调用方跳过并计数）。
+
+    配置里**两种 schema 并存**（实测 2026-08-28，`thesis_breaks_config.json`）：
+
+        人工条件 120 条：`metric` / `trigger`
+            {"metric": "EPS 大幅低于预期", "trigger": "实际 < 预期 20%+"}
+        机器条件 210 条：`field` / `op` / `value`（v0.45.50 新增，`_machine`=true）
+            {"field": "score", "op": "<", "value": 4.0,
+             "_note": "综合分跌破 p2（全历史 1191 obs）"}
+
+    ⚠️ 返回 None 而不是抛异常，是因为**逐条隔离**才是这次修复的重点：
+    旧写法用列表推导 `c["metric"] + "：" + c["trigger"]`，一条机器条件的
+    KeyError 就把整块 try 打掉 —— 实测 8/26 / 8/27 两天各 **0/30** 只标的
+    有失效条件，而 CLAUDE.md 写着「任何结论必须附失效条件」。
+    一条读不懂不该让另外 119 条一起消失。
+    """
+    if not isinstance(cond, dict):
+        return None
+    metric, trigger = cond.get("metric"), cond.get("trigger")
+    if metric and trigger:
+        return f"{metric}：{trigger}"
+    field, op, value = cond.get("field"), cond.get("op"), cond.get("value")
+    if field and op is not None and value is not None:
+        expr = f"{field} {op} {value}"
+        note = cond.get("_note")
+        # 机器条件显式标注来源：它是从历史分位自动推出来的，不是人工判断
+        tag = "自动" if cond.get("_machine") else None
+        label = note or field
+        return f"{label}：{expr}" + (f"（{tag}）" if tag else "")
+    return None
+
+
 class AlphaHiveDailyReporter:
     """Alpha Hive 日报生成引擎"""
 
@@ -906,21 +939,42 @@ class AlphaHiveDailyReporter:
 
         # 失效条件快照（v0.45.40：日历提醒随 Google Calendar 一并移除，
         # 告警改由 Telegram Bot /alert 承担；此处只保留进报告的 l1/l2 数据）
+        #
+        # v0.45.55：配置里**两种 schema 并存**，逐条格式化且逐条隔离。
+        #   人工条件 120 条：metric / trigger
+        #   机器条件 210 条：field / op / value（v0.45.50 于 2026-08-27 新增，_machine=true）
+        # 旧写法 `c["metric"] + "：" + c["trigger"]` 在列表推导里对机器条件抛
+        # KeyError，被外层 except 整块吞掉 —— 结果是 **30 只标的的 l1/l2 全部为空**，
+        # 日志只留一行 WARNING。实测 8/26 与 8/27 两天各 0/30。
+        # 而 CLAUDE.md 写着「任何结论必须附失效条件」——这条硬性规则空转了两天。
         try:
             from thesis_breaks import ThesisBreakConfig
+            _n_ok = _n_bad = 0
             for _opp in report.get("opportunities", []):
                 _tk = _opp.get("ticker", "")
                 _tb_cfg = ThesisBreakConfig.get_breaks_config(_tk)
-                if _tb_cfg:
-                    _l1 = [c["metric"] + "：" + c["trigger"]
-                           for c in _tb_cfg.get("level_1_warning", {}).get("conditions", [])]
-                    _l2 = [c["metric"] + "：" + c["trigger"]
-                           for c in _tb_cfg.get("level_2_stop_loss", {}).get("conditions", [])]
-                    _opp["thesis_break_l1"] = _l1
-                    _opp["thesis_break_l2"] = _l2
-                    if _tk in swarm_results:
-                        swarm_results[_tk]["thesis_break_l1"] = _l1
-                        swarm_results[_tk]["thesis_break_l2"] = _l2
+                if not _tb_cfg:
+                    continue
+                _lv = {}
+                for _key, _name in (("level_1_warning", "l1"), ("level_2_stop_loss", "l2")):
+                    _out = []
+                    for _c in (_tb_cfg.get(_key, {}) or {}).get("conditions", []) or []:
+                        _txt = _format_break_condition(_c)
+                        if _txt:
+                            _out.append(_txt)
+                            _n_ok += 1
+                        else:
+                            _n_bad += 1
+                    _lv[_name] = _out
+                _opp["thesis_break_l1"] = _lv["l1"]
+                _opp["thesis_break_l2"] = _lv["l2"]
+                if _tk in swarm_results:
+                    swarm_results[_tk]["thesis_break_l1"] = _lv["l1"]
+                    swarm_results[_tk]["thesis_break_l2"] = _lv["l2"]
+            if _n_bad:
+                _log.warning("thesis_break：%d 条件无法识别已跳过（成功 %d 条）——"
+                             "**其余条件不受影响**，这正是逐条隔离要保证的",
+                             _n_bad, _n_ok)
         except Exception as _tbe:
             _log.warning("thesis_break 配置加载失败: %s", _tbe)
 
