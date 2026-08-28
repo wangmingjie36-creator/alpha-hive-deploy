@@ -5,7 +5,77 @@
 
 ---
 
-## [0.45.59] — 2026-08-28 — 占位（进行中：云端快照根治三件——生产端补 vintage_date、market.json 接进宏观、补跑 8-27）
+## [0.45.60] — 2026-08-28 — 占位（进行中：当日扫描宏观脱离 yfinance——接财政部日度曲线 + Finnhub ETF 报价）
+
+## [0.45.59] — 2026-08-28 — 云端快照根治：生产端补上、宏观接上、8-27 补跑
+
+承 v0.45.58 查明的两处断裂，按用户指示三件一起做。
+
+### ① 生产端：把 main 合进 `cloud-snapshots` 分支
+
+云端 routine 的取数代码自 08-26 13:28 UTC 起没再更新，落后 main 39 个提交，
+于是 v0.45.36 起本该写出的 `vintage_date` 从未被写出。
+
+该分支的独有提交**只有快照数据、改动零个代码文件**（`git diff --stat
+origin/main...origin/cloud-snapshots -- . ':!cloud_snapshots'` 为空），
+故直接合并 main：`5dc9ece..f7138a1`。合并后校验：`vintage_date` 5 处、
+`official_price`（v0.45.47 收盘价修复）已带上、两天快照数据完好、与 main 零代码差异。
+
+⚠️ **该分支的代码会独立于 main 老化。** 今后改 `cloud_snapshot_fetch.py` /
+`cboe_options.py` 必须同步过去，否则同一个错会再犯一次。
+
+### ② `market.json` 接进宏观 —— 但主因不在 market.json
+
+用户要的是「让补跑的宏观走快照而不是运行当天」。查下来错位有两处，
+而**大头不是 market.json**：
+
+| 字段 | 旧行为 | 修法 |
+|---|---|---|
+| VIX / F&G | market.json 里有目标日真值，但 `load_market()` **0 个调用者** | 走快照，`vix_source="cloud_snapshot_cboe"` |
+| 国债 / SPX / 美元 / 黄金 | `yf.Ticker(sym).history(period="5d")` —— **永远取最近 5 天** | `_asof_history()` 用 start/end 锁定目标日 |
+
+**market.json 里根本没有国债/SPX/美元/黄金**，光接它解决不了问题；
+`period="5d"` 才是补跑宏观错位的主因。两处一起修才成立。
+
+- `fred_macro.set_macro_snapshot(date, market)` / `get_macro_snapshot()`
+  （装载即作废 `_CACHE`，否则补跑会拿到上一次实时调用的结果）
+- `snapshot_mode` 里**期权链与宏观同进同出** —— 只装一半会让报告里期权是
+  目标日的、宏观是今天的，且无从分辨
+- 标签诚实化：`data_source` 写成 `cloud_snapshot+yfinance@<日期>`，
+  新增 `as_of` 字段（None = 实时口径）。补跑标成 `yfinance+fred` 会让读者
+  以为是运行当天的实时数据。
+
+实测对照（8-28 05:01 运行）：
+
+| | 实时口径 | 快照口径 @2026-08-27 |
+|---|---|---|
+| `data_source` | `yfinance+fred` | `cloud_snapshot+yfinance@2026-08-27+fred` |
+| `vix_source` | `cboe` | `cloud_snapshot_cboe` |
+| VIX | 14.51 | **15.21** |
+
+`_asof_history` 截断实测：as_of=08-25 → 4.639、08-26 → 4.664、08-27 → 4.672
+（`^TNX` 各日真实收盘），**不是**一律给最新的 4.672。
+
+### Added
+
+- `--allow-unverified-snapshot`：接受缺 `vintage_date` 的快照。
+  仅 2026-08-26 / 08-27 两天需要（新鲜度已于 v0.45.58 逐只独立验证）；
+  ① 修好后此后的快照不需要它。
+- `tests/test_macro_snapshot.py`（9 项）
+
+### ③ 8-27 补跑
+
+（结果见下方补记）
+
+### 自查：测试替身连错两版
+
+`_FakeHist` 第一版 `.date` 返回 list —— 真 pandas 的 `DatetimeIndex.date` 是
+numpy 数组，`arr <= date` 是逐元素比较，list 会抛 TypeError。
+第二版漏了 `__len__`，取数循环里的 `len(hist) >= 2` 抛异常被
+`except Exception` 吞掉 → `data` 空 → 走「yfinance 全灭」分支 →
+测试红在一条与被测逻辑无关的路径上，还给出 `'cboe' == 'cloud_snapshot_cboe'`
+这种看着像真 bug 的错。**替身失真会伪造出被测代码的假故障。**
+
 
 ## [0.45.58] — 2026-08-28 — 云端快照兜底是死的，而它一直宣称自己活着
 
