@@ -16,6 +16,15 @@ import json
 import math
 
 from hive_logger import pdt_today  # v0.28.0: 美股交易日工具
+
+# v0.45.50：本模块此前无 logger —— 所有降级（OHLC 取数失败、SPY 基准缺失）
+# 都是静默的，连 debug 都没有。
+try:
+    from hive_logger import get_logger as _get_logger
+    _log = _get_logger("paper_portfolio")
+except Exception:  # pragma: no cover - 独立运行时退化到标准库
+    import logging as _logging
+    _log = _logging.getLogger("alpha_hive.paper_portfolio")
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -339,8 +348,15 @@ def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
             }
         _PRICE_CACHE[key] = out
         return out
-    except Exception:
-        _PRICE_CACHE[key] = {}
+    except Exception as _e_ohlc:
+        # ── v0.45.50：失败结果**不再写进缓存** ──
+        # 旧实现把 {} 存进 _PRICE_CACHE，而取用侧用 `if key in _PRICE_CACHE` 判定
+        # （空 dict 也命中）—— 于是同一进程内该 (ticker, start, end) **永不重试**，
+        # 一次瞬时网络抖动就把整轮估值钉死。
+        # 下游 _mark_to_market 拿到空 OHLC 会走 `cur_price = pos.entry_price`，
+        # 渲染成「浮动盈亏恰好 0.00%」——与「今天这只票收平」完全同形。
+        _log.warning("_fetch_ohlc %s 失败（不写入缓存，下次仍会重试）：%s: %s",
+                     ticker, type(_e_ohlc).__name__, _e_ohlc)
         return {}
 
 
@@ -901,7 +917,10 @@ def compute_kpis(as_of: Optional[str] = None) -> Dict:
     # SPY 基准对比
     spy_start_date = eq_sorted[0]["date"]
     spy_end_date = eq_sorted[-1]["date"]
-    spy_ret = 0.0
+    # v0.45.50：None 而非 0.0。spy_ret=0 会让下方 alpha_pct = total_ret - 0
+    # = **组合收益本身**，读作「同期 SPY 零涨跌，全部收益都是超额 alpha」。
+    # 与 portfolio_backtest 里已修的同形缺陷（v0.45.42）在另一条 KPI 链上。
+    spy_ret = None
     try:
         spy_ohlc = _fetch_ohlc("SPY", spy_start_date,
                                 (datetime.strptime(spy_end_date, "%Y-%m-%d") + timedelta(days=2)).strftime("%Y-%m-%d"))
@@ -910,8 +929,10 @@ def compute_kpis(as_of: Optional[str] = None) -> Dict:
             spy_start = spy_ohlc[_dates[0]]["Close"]
             spy_end = spy_ohlc[min(spy_end_date, _dates[-1])]["Close"] if spy_end_date in spy_ohlc else spy_ohlc[_dates[-1]]["Close"]
             spy_ret = (spy_end - spy_start) / spy_start * 100
-    except Exception:
-        pass
+    except Exception as _e_spy:
+        _log.warning("compute_kpis: SPY 基准取数失败，spy_return_pct/alpha 置 None"
+                     "（不以 0%% 冒充大盘零涨跌）：%s", _e_spy)
+        spy_ret = None
 
     return {
         "nav": latest["nav"],
@@ -919,8 +940,8 @@ def compute_kpis(as_of: Optional[str] = None) -> Dict:
         "deployed": latest["deployed"],
         "unrealized": latest["unrealized"],
         "total_return_pct": round(total_ret, 2),
-        "spy_return_pct": round(spy_ret, 2),
-        "alpha_pct": round(total_ret - spy_ret, 2),
+        "spy_return_pct": (round(spy_ret, 2) if spy_ret is not None else None),
+        "alpha_pct": (round(total_ret - spy_ret, 2) if spy_ret is not None else None),
         "sharpe": round(sharpe, 2),
         "max_drawdown_pct": round(mdd, 2),
         "win_rate_pct": round(wins / total * 100, 1) if total else 0.0,
@@ -977,7 +998,16 @@ def render_portfolio_card() -> str:
 
     # KPI 色
     ret_col = "#10b981" if kpi["total_return_pct"] >= 0 else "#ef4444"
-    alpha_col = "#10b981" if kpi["alpha_pct"] >= 0 else "#ef4444"
+    # v0.45.50：alpha_pct 现在可为 None（SPY 基准不可得）
+    _alpha_known = isinstance(kpi.get("alpha_pct"), (int, float))
+    alpha_col = ("#6b7280" if not _alpha_known
+                 else ("#10b981" if kpi["alpha_pct"] >= 0 else "#ef4444"))
+    # ⚠️ 这两个必须**预先算好**：隐式字符串拼接链里放行内 if/else，
+    # 三元会绑定到前面**整条链**而不是单个片段 —— 语法合法、静默出错。
+    _spy_txt = (format(kpi["spy_return_pct"], "+.2f") + "%"
+                if isinstance(kpi.get("spy_return_pct"), (int, float)) else "—")
+    _alpha_txt = ("Alpha " + format(kpi["alpha_pct"], "+.2f") + "%"
+                  if _alpha_known else "Alpha 不可用")
 
     # 持仓表格
     pos_rows = ""
@@ -1059,8 +1089,8 @@ def render_portfolio_card() -> str:
         f'<div style="font-size:12px;color:{ret_col};font-weight:600;">{kpi["total_return_pct"]:+.2f}%</div></div>'
 
         f'<div><div style="font-size:11px;color:var(--text3);">vs SPY</div>'
-        f'<div style="font-size:20px;font-weight:700;color:var(--text1);">{kpi["spy_return_pct"]:+.2f}%</div>'
-        f'<div style="font-size:12px;color:{alpha_col};font-weight:600;">Alpha {kpi["alpha_pct"]:+.2f}%</div></div>'
+        f'<div style="font-size:20px;font-weight:700;color:var(--text1);">{_spy_txt}</div>'
+        f'<div style="font-size:12px;color:{alpha_col};font-weight:600;">{_alpha_txt}</div></div>'
 
         f'<div><div style="font-size:11px;color:var(--text3);">Sharpe / MDD</div>'
         f'<div style="font-size:20px;font-weight:700;color:var(--text1);">{kpi["sharpe"]:.2f}</div>'
@@ -1139,7 +1169,10 @@ def main():
         kpi = compute_kpis()
         print(f"\n✅ Bootstrap 完成")
         print(f"   NAV:    ${kpi['nav']:,.2f}  ({kpi['total_return_pct']:+.2f}%)")
-        print(f"   vs SPY: {kpi['spy_return_pct']:+.2f}%  Alpha: {kpi['alpha_pct']:+.2f}%")
+        if isinstance(kpi.get("alpha_pct"), (int, float)):
+            print(f"   vs SPY: {kpi['spy_return_pct']:+.2f}%  Alpha: {kpi['alpha_pct']:+.2f}%")
+        else:
+            print("   vs SPY: 不可用（基准取数失败）  Alpha: 不可用")
         print(f"   胜率:   {kpi['win_rate_pct']:.1f}% ({kpi['trades_wins']}/{kpi['trades_total']})")
         print(f"   Sharpe: {kpi['sharpe']:.2f}  MDD: {kpi['max_drawdown_pct']:.1f}%")
         return

@@ -133,3 +133,40 @@ def memory_store(tmp_path):
     ms = MemoryStore(db_path=str(tmp_path / "test_memory.db"))
     yield ms
     ms.close()
+
+
+@pytest.fixture(autouse=True)
+def _fast_yfinance_limiter(monkeypatch):
+    """测试期间把 yfinance 限流速率调到不产生等待（v0.45.56）。
+
+    生产速率是 0.5 req/s（2s 一个令牌）—— 那是给真实 Yahoo 配额用的。
+    单测里 yfinance 全被 mock，令牌等待没有任何语义，只是纯粹的墙钟浪费：
+    `test_dashboard_renderer` 逐票渲染 30 只标的，实测从秒级涨到 **56s**，
+    在全量跑里直接撞 60s 超时。
+
+    ⚠️ 这里只改**速率**，不改任何行为。真正验证限流生效的
+    `tests/test_yf_gate.py::TestGateBehaviour::test_throttles` 自带慢桶，
+    不依赖这个全局值 —— 否则那条测试会被本 fixture 架空成永真。
+    """
+    try:
+        import resilience
+        from resilience import RateLimiter
+    except ImportError:  # pragma: no cover
+        return
+    fast = RateLimiter(rate=10_000.0, burst=1000)
+    monkeypatch.setattr(resilience, "yfinance_limiter", fast, raising=False)
+
+    # `from resilience import yfinance_limiter` 的模块**各自持有一份绑定**，
+    # 只改 resilience 上的名字够不到它们 —— 必须逐个替换。
+    # （这正是 yf_gate 选择 patch yfinance 模块本身、而非逐处接线的原因：
+    #   全仓已核实无 `from yfinance import X`，所以那边不存在这个问题。）
+    import importlib
+    for _mod in ("swarm_agents.cache", "earnings_watcher", "yf_gate"):
+        try:
+            _m = importlib.import_module(_mod)
+        except ImportError:  # pragma: no cover
+            continue
+        if hasattr(_m, "yfinance_limiter"):
+            monkeypatch.setattr(_m, "yfinance_limiter", fast)
+        if _mod == "yf_gate":
+            monkeypatch.setattr(_m, "_bucket", fast, raising=False)

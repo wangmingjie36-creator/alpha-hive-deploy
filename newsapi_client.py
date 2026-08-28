@@ -478,7 +478,10 @@ def _recency_weight(published_str: str, half_life_hours: float | None = None) ->
         age_hours = max(0.0, (now - pub).total_seconds() / 3600.0)
         return 0.5 ** (age_hours / half_life_hours)
     except Exception:
-        return 0.5  # 无法解析时给中等权重
+        # v0.45.54：0.5 **恰好等于半衰期点的权重** —— 与一篇真的
+        # 24 小时前的新闻不可区分。解析不了发布时间就不该参与时效加权，
+        # 返回 None 由调用方剔除该条。
+        return None
 
 
 # ==================== 结果构建 + DataQualityChecker ====================
@@ -518,11 +521,28 @@ def _build_result(ticker: str, raw_articles: List[Dict], source: str) -> Dict:
     min_for_recency = _NF_CFG.get("min_articles_for_recency", 3)
     if total >= min_for_recency:
         # 时效加权：新文章权重高，旧文章权重低
-        w_bull = sum(_recency_weight(a.get("published", "")) for a in articles if a["sentiment_label"] == "bullish")
-        w_bear = sum(_recency_weight(a.get("published", "")) for a in articles if a["sentiment_label"] == "bearish")
-        w_neut = sum(_recency_weight(a.get("published", "")) for a in articles if a["sentiment_label"] == "neutral")
+        # v0.45.54：_recency_weight 现在对「发布时间解析不了」返回 None
+        # （旧实现返回 0.5，恰好等于半衰期点的权重，与真的 24 小时前的新闻
+        # 不可区分）。这类文章从时效加权里剔除，而不是按中等权重计入。
+        def _w(label):
+            ws = [w for a in articles if a["sentiment_label"] == label
+                  for w in (_recency_weight(a.get("published", "")),)
+                  if w is not None]
+            return sum(ws), len(ws)
+
+        w_bull, _n_b = _w("bullish")
+        w_bear, _n_r = _w("bearish")
+        w_neut, _n_n = _w("neutral")
+        _n_weighted = _n_b + _n_r + _n_n
+        if _n_weighted < total:
+            _log.debug("时效加权：%d/%d 篇发布时间不可解析，已从加权中剔除",
+                       total - _n_weighted, total)
         w_total = w_bull + w_bear + w_neut
-        bull_ratio = w_bull / w_total if w_total > 0 else 0.5
+        if w_total > 0 and _n_weighted >= min_for_recency:
+            bull_ratio = w_bull / w_total
+        else:
+            # 可加权样本不足 ⇒ 退回简单计数，而不是给 0.5「多空各半」
+            bull_ratio = bullish / total if total > 0 else 0.5
     else:
         # 文章太少时用简单计数（避免单篇文章时效权重失真）
         bull_ratio = bullish / total if total > 0 else 0.5

@@ -23,7 +23,6 @@ class TestBuildSwarmReport:
         import alpha_hive_daily_report as mod
 
         monkeypatch.setattr(mod, "MemoryStore", None)
-        monkeypatch.setattr(mod, "CalendarIntegrator", None)
         monkeypatch.setattr(mod, "CodeExecutorAgent", None)
         monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
@@ -37,7 +36,6 @@ class TestBuildSwarmReport:
         r = AlphaHiveDailyReporter()
         # 确保可选组件都是 None
         assert r.memory_store is None
-        assert r.calendar is None
         assert r.slack_notifier is None
         return r
 
@@ -140,7 +138,6 @@ class TestDataQualityGate:
     def reporter(self, monkeypatch, tmp_path):
         import alpha_hive_daily_report as mod
         monkeypatch.setattr(mod, "MemoryStore", None)
-        monkeypatch.setattr(mod, "CalendarIntegrator", None)
         monkeypatch.setattr(mod, "CodeExecutorAgent", None)
         monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
@@ -307,7 +304,6 @@ class TestDeployStaticToGhPages:
         import alpha_hive_daily_report as mod
 
         monkeypatch.setattr(mod, "MemoryStore", None)
-        monkeypatch.setattr(mod, "CalendarIntegrator", None)
         monkeypatch.setattr(mod, "CodeExecutorAgent", None)
         monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)
@@ -674,7 +670,6 @@ class _ReporterMixin:
     def _make_reporter(monkeypatch, tmp_path):
         import alpha_hive_daily_report as mod
         monkeypatch.setattr(mod, "MemoryStore", None)
-        monkeypatch.setattr(mod, "CalendarIntegrator", None)
         monkeypatch.setattr(mod, "CodeExecutorAgent", None)
         monkeypatch.setattr(mod, "CODE_EXECUTION_CONFIG", {"enabled": False})
         monkeypatch.setattr(mod, "VectorMemory", None)

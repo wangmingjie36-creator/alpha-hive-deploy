@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import argparse
+import contextlib
 import logging
 import os
 import time
@@ -36,7 +37,6 @@ from swarm_agents import (
 from agent_toolbox import AgentHelper
 
 MemoryStore = optional_import("memory_store", "MemoryStore")
-CalendarIntegrator = optional_import("calendar_integrator", "CalendarIntegrator")
 
 # Phase 3 P4: Code Execution Agent（含 fallback dict，保留 try/except）
 try:
@@ -113,6 +113,39 @@ class _SwarmContext:
     checkpoint_file: object = None  # Path
 
 
+def _format_break_condition(cond) -> "str | None":
+    """把一条失效条件格式化成一行；无法识别返回 None（由调用方跳过并计数）。
+
+    配置里**两种 schema 并存**（实测 2026-08-28，`thesis_breaks_config.json`）：
+
+        人工条件 120 条：`metric` / `trigger`
+            {"metric": "EPS 大幅低于预期", "trigger": "实际 < 预期 20%+"}
+        机器条件 210 条：`field` / `op` / `value`（v0.45.50 新增，`_machine`=true）
+            {"field": "score", "op": "<", "value": 4.0,
+             "_note": "综合分跌破 p2（全历史 1191 obs）"}
+
+    ⚠️ 返回 None 而不是抛异常，是因为**逐条隔离**才是这次修复的重点：
+    旧写法用列表推导 `c["metric"] + "：" + c["trigger"]`，一条机器条件的
+    KeyError 就把整块 try 打掉 —— 实测 8/26 / 8/27 两天各 **0/30** 只标的
+    有失效条件，而 CLAUDE.md 写着「任何结论必须附失效条件」。
+    一条读不懂不该让另外 119 条一起消失。
+    """
+    if not isinstance(cond, dict):
+        return None
+    metric, trigger = cond.get("metric"), cond.get("trigger")
+    if metric and trigger:
+        return f"{metric}：{trigger}"
+    field, op, value = cond.get("field"), cond.get("op"), cond.get("value")
+    if field and op is not None and value is not None:
+        expr = f"{field} {op} {value}"
+        note = cond.get("_note")
+        # 机器条件显式标注来源：它是从历史分位自动推出来的，不是人工判断
+        tag = "自动" if cond.get("_machine") else None
+        label = note or field
+        return f"{label}：{expr}" + (f"（{tag}）" if tag else "")
+    return None
+
+
 class AlphaHiveDailyReporter:
     """Alpha Hive 日报生成引擎"""
 
@@ -156,14 +189,6 @@ class AlphaHiveDailyReporter:
 
         # 线程安全锁（用于并行执行时保护共享数据）
         self._results_lock = Lock()
-
-        # Phase 3 P2: 初始化 Google Calendar 集成（失败时降级）
-        self.calendar = None
-        if CalendarIntegrator:
-            try:
-                self.calendar = CalendarIntegrator()
-            except Exception as e:
-                _log.warning("Calendar 初始化失败（降级运行）: %s", e)
 
         # Phase 3 P4: 初始化代码执行 Agent（失败时降级）
         self.code_executor_agent = None
@@ -906,71 +931,78 @@ class AlphaHiveDailyReporter:
             except Exception as e:
                 _log.debug("预测清理失败: %s", e)
 
+    def _attach_thesis_breaks(self, swarm_results: Dict) -> None:
+        """把失效条件写进 swarm_results —— **必须在 _build_swarm_report 之前调用**。
+
+        v0.45.57：这段原本住在 `_post_scan_notify` 里，是 Google Calendar 提醒
+        （v0.45.40 移除）留下的残肢。日历没了之后它继续写一个**没有任何读者**的字段：
+        `_build_swarm_report` 在它之前一行就已经把 markdown 渲染完了，
+        `.swarm_results_*.json` 也在更早的 `_post_scan_enrichment` 里落了盘。
+        所以 v0.45.55 修好的 KeyError 只是让一个死字段填对了值。
+        搬到扫描后的第一步，渲染层和两份 JSON 才都看得见。
+
+        两种 schema 并存，逐条格式化且逐条隔离（v0.45.55）：
+          人工条件：metric / trigger      机器条件：field / op / value（_machine=true）
+        一条读不懂只丢它自己，不再连坐同一标的的其余条件。
+        """
+        try:
+            from thesis_breaks import ThesisBreakConfig
+        except Exception as _tbe:
+            _log.warning("thesis_break 配置加载失败，本轮无失效条件: %s", _tbe)
+            return
+        _n_ok = _n_bad = 0
+        _covered = 0
+        for _tk, _row in swarm_results.items():
+            try:
+                _tb_cfg = ThesisBreakConfig.get_breaks_config(_tk)
+            except Exception as _e:
+                _log.warning("thesis_break 读取 %s 配置失败: %s", _tk, _e)
+                continue
+            if not _tb_cfg:
+                continue
+            _lv = {}
+            for _key, _name in (("level_1_warning", "l1"), ("level_2_stop_loss", "l2")):
+                _out = []
+                for _c in (_tb_cfg.get(_key, {}) or {}).get("conditions", []) or []:
+                    _txt = _format_break_condition(_c)
+                    if _txt:
+                        _out.append(_txt)
+                        _n_ok += 1
+                    else:
+                        _n_bad += 1
+                _lv[_name] = _out
+            _row["thesis_break_l1"] = _lv["l1"]
+            _row["thesis_break_l2"] = _lv["l2"]
+            if _lv["l1"] or _lv["l2"]:
+                _covered += 1
+        if _n_bad:
+            _log.warning("thesis_break：%d 条件无法识别已跳过（成功 %d 条）——"
+                         "**其余条件不受影响**，这正是逐条隔离要保证的",
+                         _n_bad, _n_ok)
+        _total = len(swarm_results)
+        if _total:
+            _log.info("失效条件覆盖：%d/%d 只标的（%d 条）", _covered, _total, _n_ok)
+        # CLAUDE.md 硬性规则：任何结论必须附失效条件。全灭时必须吵，
+        # 因为 8/27 那次正是「日志一行 WARNING，报告 0/30」而没人发现。
+        if _total and _covered == 0:
+            _log.error("🚨 失效条件全灭：%d 只标的一条都没有 —— "
+                       "CLAUDE.md 硬性规则「任何结论必须附失效条件」已空转", _total)
+
     def _post_scan_notify(self, ctx: '_SwarmContext', swarm_results: Dict,
                           report: Dict, elapsed: float) -> None:
         """扫描后通知：Slack推送 + 失效条件 + 日历 + 会话存储 + 向量记忆 + 反馈循环"""
         # 逐标的机会/风险通知已禁用（减少 Slack DM 噪音）
         # Bot 只发：1) LLM 确认提示  2) 富文本日报推送成功
 
-        # 失效条件快照 + Thesis Break 日历提醒
-        try:
-            from thesis_breaks import ThesisBreakConfig, ThesisBreakMonitor
-            from config import CALENDAR_CONFIG as _CC_tb
-            _tb_alert_enabled = (
-                _CC_tb.get("thesis_break_calendar_alerts", True)
-                and hasattr(self, 'calendar') and self.calendar
-            )
-            for _opp in report.get("opportunities", []):
-                _tk = _opp.get("ticker", "")
-                _tb_cfg = ThesisBreakConfig.get_breaks_config(_tk)
-                if _tb_cfg:
-                    _l1 = [c["metric"] + "：" + c["trigger"]
-                           for c in _tb_cfg.get("level_1_warning", {}).get("conditions", [])]
-                    _l2 = [c["metric"] + "：" + c["trigger"]
-                           for c in _tb_cfg.get("level_2_stop_loss", {}).get("conditions", [])]
-                    _opp["thesis_break_l1"] = _l1
-                    _opp["thesis_break_l2"] = _l2
-                    if _tk in swarm_results:
-                        swarm_results[_tk]["thesis_break_l1"] = _l1
-                        swarm_results[_tk]["thesis_break_l2"] = _l2
-                    # Thesis Break 日历提醒
-                    if _tb_alert_enabled and _tk in swarm_results:
-                        _metric = swarm_results[_tk].get("metric_data", {})
-                        if _metric:
-                            _initial = swarm_results[_tk].get("final_score", 5.0)
-                            _monitor = ThesisBreakMonitor(_tk, _initial)
-                            _tb_res = _monitor.check_all_conditions(_metric)
-                            if _tb_res.get("level_2_stops"):
-                                self._submit_bg(
-                                    self.calendar.add_thesis_break_alert,
-                                    _tk, 2, _tb_res["level_2_stops"],
-                                    _tb_res["score_adjustment"], _initial,
-                                )
-                            elif _tb_res.get("level_1_warnings"):
-                                self._submit_bg(
-                                    self.calendar.add_thesis_break_alert,
-                                    _tk, 1, _tb_res["level_1_warnings"],
-                                    _tb_res["score_adjustment"], _initial,
-                                )
-        except Exception as _tbe:
-            _log.warning("thesis_break 配置加载失败: %s", _tbe)
-
-        # 日历提醒
-        if self.calendar and report.get('opportunities'):
-            for opp in report['opportunities']:
-                _opp_score = opp.get("opp_score", 0) if isinstance(opp, dict) else getattr(opp, "opportunity_score", 0)
-                if _opp_score >= 7.5:
-                    _tk = opp.get("ticker", "") if isinstance(opp, dict) else getattr(opp, "ticker", "")
-                    _dir = opp.get("direction", "") if isinstance(opp, dict) else getattr(opp, "direction", "")
-                    self._submit_bg(self.calendar.add_opportunity_reminder, _tk, _opp_score, _dir, "高分机会")
-                    # T+1/T+7/T+30 回测提醒
-                    try:
-                        from config import CALENDAR_CONFIG as _CC_fb
-                        if _CC_fb.get("add_feedback_reminders", True):
-                            _evidence = (opp.get("discovery") or opp.get("key_evidence") or "")[:200] if isinstance(opp, dict) else ""
-                            self._submit_bg(self.calendar.add_feedback_reminders, _tk, _opp_score, _dir, _evidence)
-                    except Exception:
-                        pass
+        # 失效条件回填进 report["opportunities"]（保持 JSON 形状不变）。
+        # v0.45.57：**计算已上移到 _attach_thesis_breaks，在建报告之前跑**——
+        # 原先算在这里（_post_scan_notify），而 _build_swarm_report 早一行就跑完了，
+        # 渲染层永远看不到它。这里只做搬运，不再重算。
+        for _opp in report.get("opportunities", []):
+            _sr = swarm_results.get(_opp.get("ticker", ""), {})
+            if "thesis_break_l1" in _sr:
+                _opp["thesis_break_l1"] = _sr["thesis_break_l1"]
+                _opp["thesis_break_l2"] = _sr["thesis_break_l2"]
 
         # 保存会话
         if self.memory_store and self._session_id:
@@ -1229,6 +1261,7 @@ class AlphaHiveDailyReporter:
                 _log.info("✅ 标的完整性：%d/%d 全部产出",
                           len(pending_tickers), len(pending_tickers))
 
+        self._attach_thesis_breaks(swarm_results)
         elapsed = self._post_scan_enrichment(ctx, swarm_results)
         try:
             self._post_scan_metrics(ctx, swarm_results, elapsed)
@@ -1698,7 +1731,25 @@ class AlphaHiveDailyReporter:
         opts = adv.get("options_analysis")
         ml_pred = ml_report.get("ml_prediction", {})
 
-        # 提取各维度评分（假设已标准化为 0-10）
+        # ── 提取各维度评分（假设已标准化为 0-10）──
+        # v0.45.50：五个 5.0 兜底会让 opp_score 恰好等于 **5.00**，
+        # 而 5.0 在 CLAUDE.md 的决策阈值里是一个明确档位（<6.0 = 不行动、仅归档），
+        # 与「五个维度都实测出中等水平」完全同形，且没有任何字段说明它来自缺键。
+        # 仍然出这条机会（保持行为不变），但把补齐了哪几维记下来。
+        _dim_src = {
+            "signal": adv.get("signal_strength"),
+            "catalyst": adv.get("catalyst_score"),
+            "sentiment": adv.get("sentiment_score"),
+            "odds": adv.get("odds_score"),
+            "risk_adj": adv.get("risk_adjusted_score"),
+        }
+        _dims_missing = [k for k, v in _dim_src.items()
+                         if not isinstance(v, (int, float)) or isinstance(v, bool)]
+        if _dims_missing:
+            _log.warning("[%s] ML 路径：%d/5 个维度不可得（%s），已补 5.0——"
+                         "本条 opp_score 不是五维实测结果",
+                         ticker, len(_dims_missing), ", ".join(_dims_missing))
+
         signal_score = adv.get("signal_strength", 5.0)
         catalyst_score = adv.get("catalyst_score", 5.0)
         sentiment_score = adv.get("sentiment_score", 5.0)
@@ -1893,36 +1944,6 @@ class AlphaHiveDailyReporter:
                 except (OSError, ValueError, RuntimeError) as e:
                     _log.warning("Slack 财报通知发送失败: %s", e)
 
-        # D1: 自动同步财报日期到催化剂日历
-        try:
-            auto_catalysts = self.earnings_watcher.get_catalysts_for_calendar(tickers)
-            if auto_catalysts and hasattr(self, 'calendar') and self.calendar:
-                # 合并自动获取的财报日期与 config.CATALYSTS
-                from config import CATALYSTS
-                merged = dict(CATALYSTS)
-                for t, events in auto_catalysts.items():
-                    if t in merged:
-                        # 去重：只添加尚未存在的 earnings 事件
-                        existing_dates = {e.get("scheduled_date") for e in merged[t]}
-                        for ev in events:
-                            if ev.get("scheduled_date") not in existing_dates:
-                                merged[t].append(ev)
-                    else:
-                        merged[t] = events
-                self.calendar.sync_catalysts(catalysts=merged, tickers=tickers)
-                _log.info("已自动同步 %d 个标的的财报日期到催化剂日历", len(auto_catalysts))
-        except (ImportError, OSError, ValueError, TypeError, AttributeError) as e:
-            _log.debug("催化剂日历自动同步跳过: %s", e)
-
-        # D2: 经济日历同步到 Google Calendar
-        try:
-            from config import CALENDAR_CONFIG as _CC_econ
-            if hasattr(self, 'calendar') and self.calendar and _CC_econ.get("sync_economic_calendar", True):
-                _econ_days = _CC_econ.get("economic_calendar_days_ahead", 60)
-                self._submit_bg(self.calendar.sync_economic_calendar, _econ_days)
-        except Exception:
-            pass
-
         return result
 
     def _generate_ml_reports(self, report: Dict) -> List[str]:
@@ -2086,8 +2107,16 @@ class AlphaHiveDailyReporter:
         try:
             from fear_greed import get_fear_greed
             _fg = get_fear_greed()
-            _fg_value = _fg.get("value")
-            _fg_class = _fg.get("classification", "")
+            # v0.45.54：必须同时看 is_real_data —— get_fear_greed 兜底时
+            # 返回 value=50/classification="Neutral" 且**不抛异常**，
+            # 于是「今日市场情绪 50（中性）」会作为观测证据进 BuzzBee discovery。
+            # 同项目 buzz_bee.py:169 对同一个函数是检查了的（三处），说明这里是遗漏。
+            if _fg.get("is_real_data"):
+                _fg_value = _fg.get("value")
+                _fg_class = _fg.get("classification", "")
+            else:
+                logging.getLogger("alpha_hive").warning(
+                    "Fear & Greed 为兜底值（is_real_data=False），不写入 discovery")
         except Exception as _e_fg:
             logging.getLogger("alpha_hive").debug("Fear & Greed 指数获取失败: %s", _e_fg)
         # ── 初始化期权分析器（复用缓存，开销极低）──
@@ -2346,8 +2375,59 @@ def _resolve_focus_tickers(args) -> List[str]:
     return tickers
 
 
+@contextlib.contextmanager
+def _snapshot_ctx(args):
+    """补跑时把期权/IV 取数切到当日云端快照；用不上就**明说**，绝不闷着。
+
+    为什么默认开启：不接快照的 `--date` 补跑会拿到**今天**的期权链，
+    贴上补跑日的日期写进 pheromone.db —— 一直如此，只是从来没人看见。
+    默认走快照是把这条路修对；`--no-snapshot` 保留旧行为但会警告。
+
+    为什么拿不到快照时**不**中止：补跑还有价格/情绪/催化剂等维度是可信的
+    （价格有历史 API，与期权链不同）。中止会把「期权维度缺失」升级成
+    「整天没有」，损失更大。所以继续跑，但把降级说清楚。
+    """
+    if not args.date or getattr(args, "no_snapshot", False):
+        if args.date:
+            print("⚠️ --no-snapshot：期权/IV 将来自**今天**的实时数据，"
+                  f"而非 {args.date} 的。该日的期权维度不可与正常扫描日同池比较。")
+        yield None
+        return
+    # ⚠️ try 只包「进入快照模式」，**不包扫描体**。
+    # 初版把两者包在一起：扫描体抛异常时会穿过 `yield prov` 被这里的
+    # `except Exception` 抓住，打出「无可用云端快照」这条**完全错误的诊断**
+    # （快照明明拿到了），再执行下面的 `yield None` 触发
+    # `RuntimeError: generator didn't stop after throw()` ——
+    # 真实的扫描错误被吞掉，换成一个假诊断加一个莫名其妙的 RuntimeError。
+    stack = contextlib.ExitStack()
+    try:
+        import cloud_snapshot_loader as csl
+        prov = stack.enter_context(csl.snapshot_mode(args.date))
+    except ImportError as e:
+        print(f"⚠️ 快照消费端不可用（{e}）——退回实时抓取")
+        yield None
+        return
+    except Exception as e:  # noqa: BLE001 —— 含 SnapshotUnavailable
+        print(f"⚠️ {args.date} 无可用云端快照（{type(e).__name__}: {e}）")
+        print("   → 继续补跑，但**期权/IV 将是今天的数据**，该日期权维度不可同池比较。")
+        yield None
+        return
+
+    with stack:                    # 扫描体的异常原样传播，且供给器一定被卸载
+        print(f"📦 云端快照模式：{args.date} 的期权/IV 取自 cloud-snapshots 分支")
+        yield prov
+
+
 def main():
     """主入口"""
+
+    # v0.45.56：yfinance 全局限流闸门。必须在任何取数之前装好。
+    # 8/27 事故：全天 687 次 429，rv_30d/iv_rank/iv_rv_spread/catalysts 各 0/30。
+    try:
+        import yf_gate
+        yf_gate.install()
+    except Exception as _e:  # pragma: no cover - 闸门不可得不阻断主流程
+        print(f"⚠️  yfinance 限流闸门未装上：{_e}")
 
     # 解析命令行参数
     parser = argparse.ArgumentParser(
@@ -2440,8 +2520,17 @@ def main():
         default=None,
         help='覆盖报告日期（YYYY-MM-DD），用于补跑指定交易日（默认自动取 PDT 当日）'
     )
+    parser.add_argument(
+        '--no-snapshot',
+        action='store_true',
+        help='补跑时不使用云端快照，强制实时抓取（⚠️ 期权/IV 会是今天的，不是补跑日的）'
+    )
 
     args = parser.parse_args()
+
+    # v0.45.38: --date 补跑时默认消费云端快照（见下方 _snapshot_ctx）
+    if getattr(args, "no_snapshot", False) and not args.date:
+        print("⚠️ --no-snapshot 只在 --date 补跑时有意义，本次忽略")
 
     # v32.6: --date 覆盖校验
     if args.date:
@@ -2533,10 +2622,14 @@ def main():
     # 否则 --extended-pool / --max-tickers 对实际扫描完全不生效）
     focus_tickers = _resolve_focus_tickers(args)
 
-    if args.swarm:
-        report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
-    else:
-        report = reporter.run_daily_scan(focus_tickers=focus_tickers)
+    # v0.45.38：补跑历史交易日时，期权/IV 走当日云端快照而非实时抓取。
+    # 不接快照的补跑会拿到**今天**的期权链再贴上补跑日的日期——一直如此，
+    # 只是从来没人看见。下面这个上下文要么用上快照，要么把这件事说出来。
+    with _snapshot_ctx(args):
+        if args.swarm:
+            report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
+        else:
+            report = reporter.run_daily_scan(focus_tickers=focus_tickers)
 
     # v0.23.2 修复 #2：--samples-only 必须在 save_report 之前短路
     # 否则 _save_output_files 会生成 MD/HTML/PWA/X线程/rss.xml 到 repo 根，

@@ -24,8 +24,9 @@ import statistics
 import threading
 import time
 import urllib.request
-from datetime import datetime
-from typing import Dict, List, Optional
+from datetime import datetime, time as _dtime, timedelta
+from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 try:
     from hive_logger import get_logger
@@ -80,6 +81,105 @@ except Exception:  # pragma: no cover - 闸门不可得时退回本地锁，至�
 _payload_cache = {}  # ticker -> (timestamp, data)
 _cache_lock = threading.Lock()
 _CACHE_TTL = 120.0
+
+# ── 快照供给器（v0.45.38）：补跑历史交易日时接管全部取数 ──────────
+# 装载后本模块四个取数入口一律走快照，**不回落实时抓取** ——
+# 补跑的是过去某天，实时抓取会拿到今天的链再贴上那天的日期，
+# 与 v0.45.36 拦下的污染同源，只是方向相反。装卸见 cloud_snapshot_loader。
+_SNAPSHOT_PROVIDER = None
+
+# ── CBOE CDN 陈旧文件防线（v0.45.39）────────────────────────────────
+# CBOE 的 CDN 对某些符号**不重新生成文件**：HTTP 200、字段齐全、看不出异常，
+# 但整份 JSON（现价/期权链/IV/OI）停在旧日期。2026-08-26 实测 TMO 卡了
+# 44.5 小时（现价是 8/24 收盘），TMUS 滞后约 20 分钟后自愈。
+# 历史对账：pheromone.db 877 条可对账样本里 13 条（1.5%）的 price_at_predict
+# 精确等于更早某日收盘，2026-07-24 一天中了 8 只。
+# 检出后返回 None → data_pipeline 落到 YFinanceSource（降级源 0）拿正确数据。
+_ET_TZ = ZoneInfo("America/New_York")
+_vintage_stats = {"checked": 0, "stale": 0}
+
+
+def _expected_vintage_date() -> Optional[str]:
+    """本时点**应当**拿到的数据日期（ET 日历日）；无法判定返回 None。
+
+    开盘前拿到上一交易日的收盘天经地义，开盘后就该是今天 —— 所以判据随
+    时间变化，分界取 ET 09:30。
+
+    ⚠️ fail-open：交易日历不可用时返回 None，调用方**跳过**校验。
+    宁可放过陈旧数据，也不能因为日历挂了把 30 只全打成陈旧、连锁压到
+    yfinance 上 —— 7/23 那次限流雪崩就是这么来的。
+    """
+    try:
+        from is_trading_day import is_trading_day
+        now = datetime.now(_ET_TZ)
+        today = now.date()
+        if is_trading_day(today)[0] and now.time() >= _ET_OPEN:
+            return today.isoformat()
+        d = today - timedelta(days=1)
+        for _ in range(10):          # 长假最多跨约 5 天，10 天足够
+            if is_trading_day(d)[0]:
+                return d.isoformat()
+            d -= timedelta(days=1)
+    except Exception:  # noqa: BLE001 —— 见上方 fail-open 说明
+        _log.debug("交易日历不可用，跳过 CBOE vintage 校验", exc_info=True)
+    return None
+
+
+def _payload_is_stale(ticker: str, data: dict) -> bool:
+    """payload 的成交时刻是否早于应有日期。判不了一律返回 False（fail-open）。"""
+    expected = _expected_vintage_date()
+    raw = (data or {}).get("last_trade_time")
+    if not expected or not raw or not isinstance(raw, str):
+        return False
+    try:
+        dt_ = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return False
+    if dt_.tzinfo is not None:
+        dt_ = dt_.astimezone(_ET_TZ)
+    got = dt_.strftime("%Y-%m-%d")
+    _vintage_stats["checked"] += 1
+    if got >= expected:
+        return False
+    _vintage_stats["stale"] += 1
+    _log.warning("CBOE %s 数据陈旧：last_trade=%s，应为 %s —— 弃用本源，交由降级链",
+                 ticker, got, expected)
+    c, st = _vintage_stats["checked"], _vintage_stats["stale"]
+    if c >= 8 and st / c > 0.5:
+        _log.error("CBOE vintage 陈旧率 %d/%d >50%% —— 疑似校验口径错误或 CBOE "
+                   "大面积故障，请核对；此刻全部标的正在落到 yfinance", st, c)
+    return True
+
+
+def invalidate_payload_cache(ticker: Optional[str] = None) -> None:
+    """清掉进程内 payload 缓存（传 None 清全部）。供陈旧标的稍后重试用。"""
+    with _cache_lock:
+        if ticker is None:
+            _payload_cache.clear()
+        else:
+            _payload_cache.pop(ticker.upper(), None)
+
+
+def set_snapshot_provider(fn) -> None:
+    """装载/卸载快照供给器。`fn(ticker) -> dict | None`；传 None 卸载。
+
+    刻意放在本模块而不是让调用方各自 monkeypatch：四个消费点
+    （options_analyzer ×3、oracle_bee ×1）都是函数内 `from cboe_options import X`，
+    在本模块内拦截即全覆盖，调用方一行不用改。
+    """
+    global _SNAPSHOT_PROVIDER
+    _SNAPSHOT_PROVIDER = fn
+
+
+def _snapshot(ticker: str):
+    """返回该标的的快照 dict；未装载供给器时返回 None。"""
+    if _SNAPSHOT_PROVIDER is None:
+        return None
+    try:
+        return _SNAPSHOT_PROVIDER(ticker)
+    except Exception:  # noqa: BLE001 - 供给器故障不得连累实时路径判断
+        _log.exception("快照供给器对 %s 抛错", ticker)
+        return None
 
 
 def _bs_gamma(S: float, K: float, T: float, sigma: float) -> float:
@@ -143,6 +243,18 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
     串行化（`_CBOE_SEM` 限 1）：本机老 SSL 栈扛不住并发 HTTPS（实测 4 并发挂 50-70s/SSL EOF），
     顺序拉仅 8-11s。进程缓存：同标的主链+全链共享一次下载。重试退避：瞬时 SSL EOF 错开即恢复。
     """
+    if _SNAPSHOT_PROVIDER is not None:
+        snap = _snapshot(ticker)
+        if not snap:
+            return None
+        # 合成最小 payload：快照不存原始 options 数组（体积 10 倍），
+        # 但快照模式下三个解析函数都短路了，没人会去读它。
+        return {"current_price": snap.get("price_at_fetch"),
+                "close": snap.get("price_at_fetch"),
+                "last_trade_time": snap.get("last_trade_time_et"),
+                "prev_day_close": snap.get("prev_day_close"),
+                "_from_snapshot": True}
+
     key = ticker.upper()
     now = time.time()
     with _cache_lock:
@@ -161,6 +273,10 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
             if not data.get("options"):
                 _log.warning("CBOE %s 返回空期权链", ticker)
                 return None
+            # v0.45.39：陈旧 CDN 文件在此拦下。**不写缓存** ——
+            # 写了就等于把陈旧数据在进程内又保鲜 120 秒。
+            if _payload_is_stale(ticker, data):
+                return None
             with _cache_lock:
                 _payload_cache[key] = (now, data)
             return data
@@ -172,6 +288,82 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
     return None
 
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# 官方收盘价 vs 盘后价（v0.45.46）
+# ────────────────────────────────────────────────────────────────────────────
+# CBOE payload 同时给 `current_price` 与 `close`，含义完全不同：
+#   current_price —— **最近一笔成交**。收盘后它是**盘后价**（延长时段到 20:00 ET）
+#   close         —— 该交易日的**官方收盘价**
+#
+# 全部定时扫描都在 14:00 PDT（= 17:00 ET）跑，即收盘之后、盘后时段之内。
+# 旧代码三处一律 `current_price or close`，于是记录的一直是**盘后价**。
+#
+# 2026-08-26 实测（CBOE 实拉，对照 yfinance 官方收盘）：
+#   CRM   current_price=232.3187  close=205.62  ← 当日财报，盘后 +12.98%
+#   NVDA  current_price=219.53    close=209.66  ← 盘后 +4.71%
+#   MSFT  current_price=495.94    close=496.37  ← 盘后 −0.09%
+# 三只的 `close` 与 yfinance 官方收盘**逐分不差**。
+#
+# 这个偏差不是小数点问题：`price_at_predict` 是所有收益计算的**入场价**
+# （backtester / dynamic_exit_backtest / ic_diagnostics）。用盘后价当入场价，
+# 等于假设能在财报公布后、以盘后价成交——收益全错。
+#
+# 判据：**盘中用 current_price，收盘后用 close，绝不在收盘后用 current_price。**
+_ET_OPEN = _dtime(9, 30)
+_ET_CLOSE = _dtime(16, 0)
+
+
+def _et_now() -> "datetime":
+    """当前美东时间。
+
+    v0.45.41 合并时改用 `ZoneInfo`：原实现是自述的「粗略 DST 近似」
+    （`-4 if 3 <= month <= 11 else -5`），而 2026 年夏令时 3/8 起、11/1 止 ——
+    3/1–3/7 与 11/2–11/30 共约 37 天会算早一小时。后果正是 v0.45.46 要修的
+    那一类：真实 08:30 ET（盘前）被算成 09:30 → `is_market_open` 判为盘中
+    → 取 `current_price`（盘前价）而不是 `close`。
+    """
+    return datetime.now(_ET_TZ)
+
+
+def is_market_open(now_et: "Optional[datetime]" = None) -> bool:
+    """美股常规时段（09:30–16:00 ET 工作日）。不含盘前/盘后。"""
+    et = now_et or _et_now()
+    return et.weekday() < 5 and _ET_OPEN <= et.time() < _ET_CLOSE
+
+
+def official_price(payload: dict, now_et: "Optional[datetime]" = None) -> Tuple[float, str]:
+    """从 CBOE payload 取「该用的」股价。
+
+    Returns
+    -------
+    (price, source)  source ∈ {"cboe_intraday", "cboe_close", "unavailable"}
+        盘中   → current_price（实时成交价才是此刻的真实价格）
+        收盘后 → close（官方收盘价）；**不回退到 current_price**，
+                 那是盘后价，回退等于把这个 bug 原样放回来。
+    取不到返回 (0.0, "unavailable") —— 由调用方决定怎么处理，不猜。
+    """
+    if not isinstance(payload, dict):
+        return 0.0, "unavailable"
+
+    def _num(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        # 必须 isfinite：`inf > 0` 为真，只判正数会让 inf 当成合法价格漏过去。
+        # Python 的 json.loads 默认接受 `Infinity` 字面量，所以这不是纯理论问题。
+        # （NaN 恰好被 `> 0` 挡住，inf 不会 —— 二次检查实测发现。）
+        return f if (math.isfinite(f) and f > 0) else None
+
+    if is_market_open(now_et):
+        px = _num(payload.get("current_price")) or _num(payload.get("close"))
+        return (px, "cboe_intraday") if px else (0.0, "unavailable")
+
+    px = _num(payload.get("close"))
+    return (px, "cboe_close") if px else (0.0, "unavailable")
+
+
 def fetch_cboe_chain(
     ticker: str,
     stock_price: float = 0.0,
@@ -180,13 +372,16 @@ def fetch_cboe_chain(
     max_expiries: int = 4,
 ) -> Optional[Dict]:
     """拉取并解析 CBOE 期权链 → options_analyzer 兼容 result dict；任何失败返回 None。"""
+    if _SNAPSHOT_PROVIDER is not None:
+        return (_snapshot(ticker) or {}).get("chain")
+
     data = _fetch_cboe_payload(ticker, timeout)
     if not data:
         return None
     options = data["options"]
 
-    # 现价：优先入参 → CBOE current_price → close
-    S = float(stock_price or 0.0) or float(data.get("current_price") or data.get("close") or 0.0)
+    # 现价：优先入参 → 按交易时段选 CBOE 字段（见 official_price 的长注释）
+    S = float(stock_price or 0.0) or official_price(data)[0]
 
     # ── 解析全部合约，按到期日分组 ─────────────────────────────
     # CBOE 每合约 iv 已是小数（实测 ATM ~0.18-0.34，与 yfinance impliedVolatility 同尺度），
@@ -303,6 +498,11 @@ def fetch_cboe_full_chain_oi(
          expiry_breakdown:[{expiry,call_oi,put_oi,total}], used_exps:int}
     行权价过滤区间 [0.60×S, 1.45×S]，与 yfinance 路径一致。失败返回 None。
     """
+    # 钩子放在 stock_price 守卫之前：快照里的 OI 是当日用有效价算好的，
+    # 此刻传进来的 stock_price 是不是 0 与它无关。
+    if _SNAPSHOT_PROVIDER is not None:
+        return (_snapshot(ticker) or {}).get("full_chain_oi")
+
     if not stock_price or stock_price <= 0:
         return None
     data = _fetch_cboe_payload(ticker, timeout)
@@ -380,6 +580,9 @@ def fetch_cboe_iv_term_structure(
     Returns: [{"expiry": str, "dte": int, "atm_iv": float(%)}, ...] 按 DTE 升序；
              无法计算返回 None（**不是空列表**——空列表会被误读为"算过了，没有"）。
     """
+    if _SNAPSHOT_PROVIDER is not None:
+        return (_snapshot(ticker) or {}).get("iv_term_structure")
+
     if not stock_price or stock_price <= 0:
         return None
     data = _fetch_cboe_payload(ticker, timeout)

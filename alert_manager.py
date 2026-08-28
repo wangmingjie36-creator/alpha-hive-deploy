@@ -89,10 +89,16 @@ class AlertAnalyzer:
         self.report_dir = report_dir or PATHS.home
         self.perf_baseline = perf_baseline_seconds
         self.alerts: List[Alert] = []
+        # v0.45.47：记录**哪些检查没能执行**。
+        # 「零告警」有两种完全不同的成因——「查过了，没问题」与「根本没查成」，
+        # 而旧实现把两者都渲染成 "No alerts detected - system healthy"。
+        # 告警系统自己静默失效，是最不该发生的一种静默失效。
+        self.checks_skipped: List[str] = []
 
     def analyze(self, status_json_path: Path) -> List[Alert]:
         """分析执行结果并生成告警"""
         self.alerts = []
+        self.checks_skipped = []
 
         try:
             with open(status_json_path, 'r', encoding='utf-8') as f:
@@ -123,7 +129,14 @@ class AlertAnalyzer:
             return self.alerts  # P0 优先返回
 
         # 2. 检测 P1: 步骤失败
-        steps_result = status.get('steps_result', {})
+        # v0.45.47：`.get('steps_result', {})` 拿到空 dict 时循环直接不执行，
+        # 于是「一个失败步骤都没有」与「编排器没写这个字段」产出完全相同的结果。
+        steps_result = status.get('steps_result')
+        if not isinstance(steps_result, dict) or not steps_result:
+            self.checks_skipped.append("步骤失败检查（status.json 缺 steps_result）")
+            _log.warning("status.json 无 steps_result —— **步骤失败检查未执行**，"
+                         "本次「无告警」不等于「无失败」")
+            steps_result = {}
         for step_name, step_result in steps_result.items():
             if step_result.get('status') == 'failed':
                 self.alerts.append(Alert(
@@ -200,8 +213,13 @@ class AlertAnalyzer:
                             ["data_quality"]
                         ))
         except (json.JSONDecodeError, OSError, KeyError, ValueError, TypeError) as e:
-            # JSON 报告解析失败（不中断）
-            _log.debug("JSON report parsing skipped: %s", e)
+            # v0.45.47：debug → warning，并记入 checks_skipped。
+            # 这个 except 覆盖了 KeyError/ValueError/TypeError —— 日报 JSON 结构
+            # 稍有变化（opportunities 从 list 变 dict 等）就会整块跳过 P2 低分检查，
+            # 而调用方只看到「零告警」。
+            self.checks_skipped.append(f"低分/数据质量检查（报告解析失败：{type(e).__name__}）")
+            _log.warning("日报 JSON 解析失败，**低分与数据质量检查未执行**：%s: %s",
+                         type(e).__name__, e)
 
         # 6. 检测 P1/P2: GitHub 部署失败
         if status.get('deploy_status') == 'failed':
@@ -317,7 +335,13 @@ def main():
     alerts = analyzer.analyze(Path(args.status_json))
 
     if not alerts:
-        _log.info("No alerts detected - system healthy")
+        # v0.45.47：只有**全部检查都执行过**才敢说 healthy
+        if analyzer.checks_skipped:
+            _log.warning("⚠️ 无告警，但有 %d 项检查未能执行 —— 不能判定为健康：\n  · %s",
+                         len(analyzer.checks_skipped),
+                         "\n  · ".join(analyzer.checks_skipped))
+        else:
+            _log.info("No alerts detected - system healthy")
         return
 
     # 2. 保存告警

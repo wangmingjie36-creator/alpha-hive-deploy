@@ -27,6 +27,15 @@ from __future__ import annotations
 VERSION = "0.18.0"
 
 import json
+
+# v0.45.54：本模块此前**整个文件没有 logger** —— 所有降级都是静默的。
+# （本次会话第三个这样的文件，前两个是 market_intelligence 与 paper_portfolio。）
+try:
+    from hive_logger import get_logger as _get_logger
+    _log = _get_logger("deep_v2")
+except Exception:  # pragma: no cover
+    import logging as _logging
+    _log = _logging.getLogger("alpha_hive.deep_v2")
 import os
 import sys
 import glob
@@ -136,22 +145,34 @@ def detect_conflicts(ctx: dict) -> list[str]:
     flow = ctx.get("flow_direction", "").lower()
     res_detected = ctx.get("resonance", {}).get("resonance_detected", False)
 
-    try:
-        pc = float(ctx.get("put_call_ratio", 1.0))
-    except (ValueError, TypeError):
-        pc = 1.0
-    try:
-        iv_skew = float(ctx.get("iv_skew", 1.0))
-    except (ValueError, TypeError):
-        iv_skew = 1.0
+    # ── v0.45.54：兜底值恰好落在所有阈值区间的正中 ──
+    # pc=1.0 既不满足 `< 0.80` 也不满足 `> 1.20`；iv_skew=1.0 同理。
+    # 于是「三个判据的输入全没拿到」与「五类矛盾都不成立」产出**完全相同的
+    # 空列表**，而下游把空列表读作「本次扫描未检测到信号矛盾」。
+    # 拿不到就置 None，让对应的判据整条跳过并在结果里说明。
+    def _num_or_none(key):
+        v = ctx.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+            return None
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return None
+
+    pc = _num_or_none("put_call_ratio")
+    iv_skew = _num_or_none("iv_skew")
+    _skipped = [n for n, v in (("put_call_ratio", pc), ("iv_skew", iv_skew)) if v is None]
+    if _skipped:
+        _log.warning("detect_conflicts：%s 不可得，相关矛盾判据本次未执行"
+                     "（空结果 ≠ 无矛盾）", "、".join(_skipped))
 
     # 1. P/C vs 综合评分
-    if pc < 0.80 and score < 4.5:
+    if pc is not None and pc < 0.80 and score < 4.5:
         conflicts.append(
             f"⚠️ 期权P/C={pc:.2f}（<0.80偏多）↔ 综合评分{score:.1f}（<4.5偏空）"
             f"：smart money买Call但蜂群系统看空，需判断谁领先"
         )
-    if pc > 1.20 and score > 6.5:
+    if pc is not None and pc > 1.20 and score > 6.5:
         conflicts.append(
             f"⚠️ 期权P/C={pc:.2f}（>1.20偏空）↔ 综合评分{score:.1f}（>6.5偏多）"
             f"：机构大量买Put对冲但蜂群系统看多，需判断是对冲还是预警"
@@ -170,7 +191,8 @@ def detect_conflicts(ctx: dict) -> list[str]:
         )
 
     # 3. IV Skew vs P/C（期权内部矛盾）
-    if iv_skew > 1.15 and pc < 0.85:
+    if (iv_skew is not None and pc is not None
+            and iv_skew > 1.15 and pc < 0.85):
         conflicts.append(
             f"⚠️ IV Skew={iv_skew:.2f}（>1.15下行恐慌溢价）↔ P/C={pc:.2f}（<0.85 Call主导）"
             f"：期权内部矛盾，保护性Put贵但同时也在买Call，可能是双向押注"
@@ -914,6 +936,19 @@ def llm_reason(ctx: dict, section: str, api_key: str) -> str:
     ) if _prev_chs else ""
 
     # ── Step 1：分析框架提示（每章专属，纯分析不写HTML）─────────────────────────
+    # ── v0.45.54：IV-RV 与 HV30 不可得时不写成「+0.0%（期权合理）/ HV30=0.0%」──
+    # HV30=0.0% 意味着股价 30 天纹丝不动，对任何上市股票都是不可能事件；
+    # 而「期权合理」是由 `abs(iv_rv) <= 3` 从那个 0 推出来的明确结论。
+    _ivrv = ctx.get('iv_rv_spread')
+    _hv30 = ctx.get('rv_30d')
+    if isinstance(_ivrv, (int, float)) and not isinstance(_ivrv, bool):
+        _lab = '昂贵' if _ivrv > 3 else ('便宜' if _ivrv < -3 else '合理')
+        _ivrv_txt = f"{_ivrv:+.1f}%(期权{_lab},{ctx.get('iv_rv_signal','')})"
+    else:
+        _ivrv_txt = "不可得"
+    _hv30_txt = (f"{_hv30:.1f}%" if isinstance(_hv30, (int, float))
+                 and not isinstance(_hv30, bool) else "不可得")
+
     step1_prompts = {
         "swarm_analysis": f"""分析 {ticker} 蜂群七维信号结构：
 综合评分{score}/10 | Scout {fmt_score(ctx['scout'].get('score'))} | Rival {fmt_score(ctx['rival'].get('score'))} ML7d{ctx['ml_7d']:+.1f}%
@@ -934,7 +969,7 @@ Scout:{fmt_score(ctx['scout'].get('score'))} Rival:{fmt_score(ctx['rival'].get('
 
         "options": f"""分析 {ticker} 期权市场结构：
 P/C={ctx['put_call_ratio']} | 总OI={ctx['total_oi']:,.0f} | IV Skew={ctx['iv_skew']}({ctx['iv_skew_signal']}) | IV={ctx['iv_current']:.1f}%
-IV-RV价差:{(ctx.get('iv_rv_spread') or 0):+.1f}%(期权{'昂贵' if (ctx.get('iv_rv_spread') or 0)>3 else '便宜' if (ctx.get('iv_rv_spread') or 0)<-3 else '合理'},{ctx.get('iv_rv_signal','')}) | HV30={(ctx.get('rv_30d') or 0):.1f}%
+IV-RV价差:{_ivrv_txt} | HV30={_hv30_txt}
 流向:{ctx['flow_direction']} | 关键阻力:{json.dumps(ctx['key_levels'].get('resistance',[])[:2],ensure_ascii=False)}
 关键支撑:{json.dumps(ctx['key_levels'].get('support',[])[:2],ensure_ascii=False)}
 Gamma日历钉子:{ctx.get('gamma_calendar',{}).get('pin_strike','N/A')} | Charm方向:{ctx.get('gamma_calendar',{}).get('charm_direction','N/A')}
@@ -3106,12 +3141,21 @@ def _build_scenario_narrative(ctx: dict) -> str:
     iv_rv    = float(ctx.get('iv_rv_spread', 0) or 0)
     iv_curr  = float(ctx.get('iv_current', 0) or 0)
 
-    # Confidence band
-    cb      = ctx.get('confidence_band') or [max(0, score - 1.5), min(10, score + 1.5)]
-    cb_lo   = float(cb[0])
-    cb_hi   = float(cb[1])
-    band_w  = float(ctx.get('band_width') or (cb_hi - cb_lo))
-    dim_std = float(ctx.get('dimension_std') or 1.5)
+    # ── Confidence band（v0.45.54：不可得时不编一个统计陈述）──
+    # 旧实现：区间兜底 ±1.5、σ 兜底 1.5，两者还互相自洽（band_w 由区间反推 3.0），
+    # 渲染出「置信区间 [3.50–6.50]，信号不确定性 中等（σ=1.5）」——
+    # 一句带希腊字母和区间的统计陈述，而两个数都是写死的常量。
+    _cb_raw = ctx.get('confidence_band')
+    _cb_ok = (isinstance(_cb_raw, (list, tuple)) and len(_cb_raw) >= 2
+              and all(isinstance(x, (int, float)) for x in _cb_raw[:2]))
+    cb_lo = float(_cb_raw[0]) if _cb_ok else None
+    cb_hi = float(_cb_raw[1]) if _cb_ok else None
+    _bw = ctx.get('band_width')
+    band_w = (float(_bw) if isinstance(_bw, (int, float))
+              else ((cb_hi - cb_lo) if _cb_ok else None))
+    _ds = ctx.get('dimension_std')
+    dim_std = float(_ds) if isinstance(_ds, (int, float)) else None
+    _cb_txt = (f"[{cb_lo:.2f}–{cb_hi:.2f}]" if _cb_ok else "不可得")
 
     # Gamma calendar
     gc        = ctx.get('gamma_calendar') or {}
@@ -3233,7 +3277,13 @@ def _build_scenario_narrative(ctx: dict) -> str:
     rr_str = f"{rr_num:.1f}:1"
 
     # Uncertainty
-    uncertainty = "高" if band_w > 3 or dim_std > 2.5 else ("中等" if band_w > 1.5 else "低")
+    # v0.45.54：两个输入都不可得时，不确定性判不了
+    if band_w is None and dim_std is None:
+        uncertainty = None
+    else:
+        _bwv = band_w if band_w is not None else 0.0
+        _dsv = dim_std if dim_std is not None else 0.0
+        uncertainty = "高" if _bwv > 3 or _dsv > 2.5 else ("中等" if _bwv > 1.5 else "低")
 
     # ── OPTIONS STRATEGY ──────────────────────────────────────────────
     if iv_rank < 30:
@@ -3247,11 +3297,19 @@ def _build_scenario_narrative(ctx: dict) -> str:
     cat_window_note = f"⚠️ 距 {near_cat_name} 约 {near_cat_days} 天，催化剂窗口期优先价差策略控制 IV Crush 风险。" if near_cat else ""
     pin_note = f"（第四章 GEX Pin Strike {res1_s} 附近为做市商磁吸区，可作入场参考）" if pin else ""
 
+    # ⚠️ 预先算好，不要在下面的隐式拼接链里放三元 —— 那会绑定到整条链
+    # （v0.45.50 我犯过一次，语法合法但整块 HTML 出错；这次是语法错误当场暴露）。
+    _conf_txt = (
+        f"置信区间 {_cb_txt}，信号不确定性 <strong>{uncertainty}</strong>（σ={dim_std:.1f}）。"
+        if (_cb_ok and uncertainty and dim_std is not None)
+        else "置信区间与信号不确定性本次不可得（缺维度分布数据），此处不做推断。"
+    )
+
     # ── PARAGRAPH 1: Core thesis + EV ────────────────────────────────
     p1 = (
         f'<p><strong>综合研判（结合第一章蜂群评分、第三章催化剂、第四章期权结构）：</strong>'
         f'蜂群评分 <strong>{score:.2f}/10</strong>，ML 7日信号 <strong>{ml7}%</strong>，'
-        f'置信区间 [{cb_lo:.2f}–{cb_hi:.2f}]，信号不确定性 <strong>{uncertainty}</strong>（σ={dim_std:.1f}）。'
+        f'{_conf_txt}'
         f'{"市场政体 <strong>" + regime + "</strong>，" if regime else ""}'
         f'{"信号拥挤度偏高（α衰减=" + f"{decay_f:.2f}" + "），alpha 可能已被部分定价；" if decay_f < 0.85 else ""}'
         f'{"PEAD 财报后漂移偏向 <strong>" + pead_bias + "</strong>，" if pead_bias not in ("neutral","") else ""}'
@@ -3309,7 +3367,7 @@ def _build_scenario_narrative(ctx: dict) -> str:
     加权期望值 EV = <strong style="color:{ev_color};">{ev:+.2f}%</strong> &nbsp;·&nbsp;
     风险回报比 ≈ <strong>{rr_str}</strong> &nbsp;·&nbsp;
     ML 7日胜率 <strong>{ml7:+.1f}%</strong> &nbsp;·&nbsp;
-    置信区间 [{cb_lo:.2f}–{cb_hi:.2f}]
+    置信区间 {_cb_txt}
   </td>
 </tr>
 </tfoot>

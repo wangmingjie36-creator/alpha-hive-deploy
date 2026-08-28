@@ -143,6 +143,12 @@ def _fetch_macro_data() -> Dict:
     }
 
     try:
+        try:                                    # v0.45.56 限流闸门
+            from yf_gate import ensure as _yf_ensure
+            _yf_ensure()
+        except Exception:                       # pragma: no cover - 闸门不可得不阻断
+            pass
+
         import yfinance as yf
 
         symbols = {

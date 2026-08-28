@@ -158,7 +158,7 @@ SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 ## 🔐 安全性检查
 
-✅ 所有凭证存储本地（`~/.alpha_hive_calendar_token.json`）
+✅ 所有凭证存储本地（`~/.alpha_hive_gmail_credentials.json`）
 ✅ OAuth scope 最小化（仅 Gmail.send）
 ✅ 本地缓存数据不上传
 ✅ 降级逻辑完整（无服务时 `self.service = None`）

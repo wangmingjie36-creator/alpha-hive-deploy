@@ -405,17 +405,32 @@ class TestNewsAPIClient:
         assert newsapi_client._av_daily["count"] == newsapi_client._AV_DAILY_LIMIT
 
     def test_recency_weight_returns_valid_range(self):
-        """_recency_weight returns float in (0, 1] for valid timestamps, 0.5 for invalid."""
+        """有效时间戳 → (0,1] 的权重；**无效时间戳 → None**（v0.45.54）。
+
+        旧断言是 `== 0.5`，而 0.5 **恰好等于半衰期点的权重** —— 也就是
+        「这篇新闻发布于约 24 小时前」。于是解析不了发布时间的文章会被按
+        「中等时效」计入加权，与一篇真的 24 小时前的新闻不可区分。
+
+        这不只是显示问题：加权和决定 bull_ratio，直接进 sentiment 维度 ——
+        而 sentiment 是本项目唯一有证据的可交易信号（IC +0.17）。
+        """
         from newsapi_client import _recency_weight
-        # Invalid/empty string -> fallback 0.5
-        assert _recency_weight("") == 0.5
-        assert _recency_weight("not-a-date") == 0.5
+        # 解析不了 → None（由调用方剔除该条），不得给一个可解读的权重
+        assert _recency_weight("") is None
+        assert _recency_weight("not-a-date") is None
 
         # Very recent date should be close to 1.0
         from datetime import datetime
         now_str = datetime.now().isoformat()
         weight = _recency_weight(now_str, half_life_hours=24.0)
-        assert 0.9 <= weight <= 1.0
+        assert weight is not None and 0.9 <= weight <= 1.0
+
+    def test_unparseable_articles_excluded_from_weighting(self):
+        """解析不了时间的文章从时效加权中剔除，而不是按 0.5 计入"""
+        from newsapi_client import _recency_weight
+        arts = [{"published": "not-a-date"}, {"published": ""}]
+        ws = [w for a in arts for w in (_recency_weight(a["published"]),) if w is not None]
+        assert ws == [], "无法定时的文章不该贡献任何权重"
 
     def test_fallback_structure(self):
         """_fallback returns correct default structure."""

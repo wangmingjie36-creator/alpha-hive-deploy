@@ -421,7 +421,11 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     ad = sd.get("agent_details", {})
     oracle = ad.get("OracleBeeEcho", {}).get("details", {})
     scout_disc = ad.get("ScoutBeeNova", {}).get("discovery", "")
-    bear_score = ad.get("BearBeeContrarian", {}).get("score", 0.0)
+    # v0.45.54：默认 0.0 渲染成「看空强度 0.0/10」= 零看空压力，最安全的读数。
+    # 而同文件 _radar_data 对**同一字段**默认 5.0 —— 两个默认值不一致，
+    # 这个不一致本身就说明它们都是随手填的，不是有依据的选择。
+    _bs_raw = ad.get("BearBeeContrarian", {}).get("score")
+    bear_score = _bs_raw if isinstance(_bs_raw, (int, float)) and not isinstance(_bs_raw, bool) else None
     ab = sd.get("agent_breakdown", {})
     iv_rank = oracle.get("iv_rank", None)
     pc = oracle.get("put_call_ratio", None)
@@ -432,6 +436,13 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     gsr = oracle.get("gamma_squeeze_risk", None)
     iv_current = oracle.get("iv_current", None)
     signal_sum = oracle.get("signal_summary", "")
+    # ── v0.45.52：IV-RV 价差与 30 日实现波动率 ──
+    # 数据一直都在（30/30 覆盖），只是从未渲染到站上。
+    # rv_30d 取结构化字段，**不从 iv_rv_note 文本里抠**。
+    _ivrv = oracle.get("iv_rv_detail") or {}
+    iv_rv_spread = oracle.get("iv_rv_spread", _ivrv.get("iv_rv_spread"))
+    iv_rv_signal = oracle.get("iv_rv_signal", _ivrv.get("iv_rv_signal"))
+    rv_30d = _ivrv.get("rv_30d")
     # ── 价格数据（#10）── fallback: ScoutBee → OracleBee discovery → yfinance
     scout_det = ad.get("ScoutBeeNova", {}).get("details", {})
     _price_raw = scout_det.get("price")
@@ -451,6 +462,12 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     # 反模式的第 3 处（前两处见 v0.43.15 save_predictions / v0.43.16 快照循环）。
     if _price_raw is None:
         try:
+            try:                                # v0.45.56 限流闸门
+                from yf_gate import ensure as _yf_ensure
+                _yf_ensure()
+            except Exception:                   # pragma: no cover - 闸门不可得不阻断
+                pass
+
             import yfinance as _yf
             _h = _yf.Ticker(ticker).history(period="5d")
             if not _h.empty:
@@ -520,8 +537,14 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     near_max_pain = _near_mp_dict.get("max_pain") if isinstance(_near_mp_dict, dict) else None
     near_max_pain_pct = _near_mp_dict.get("distance_pct") if isinstance(_near_mp_dict, dict) else None
     near_expiry_dates = oracle.get("expiration_dates") or []  # 近端到期日列表
-    total_call_oi = fco.get("total_call_oi") or 0
-    total_put_oi = fco.get("total_put_oi") or 0
+    # v0.45.54：`or 0` 把「全链 OI 采集失败」渲染成「一张持仓都没有」——
+    # 对活跃标的是不可能事件。上游现返回 {"data_available": False}（见
+    # options_analyzer._fetch_full_chain_oi），这里据此置 None。
+    _fco_ok = bool(fco) and fco.get("data_available") is not False
+    _tc = fco.get("total_call_oi") if _fco_ok else None
+    _tp = fco.get("total_put_oi") if _fco_ok else None
+    total_call_oi = _tc if isinstance(_tc, (int, float)) else None
+    total_put_oi = _tp if isinstance(_tp, (int, float)) else None
     top_call_oi_raw = fco.get("top_call_oi") or []
     top_put_oi_raw = fco.get("top_put_oi") or []
     # 提取 Top 5 关键墙（强阻力 / 强支撑），含 ITM/OTM 距离
@@ -534,9 +557,13 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
             oi_v = e.get("oi") or 0
             if strike is None: continue
             try:
-                pct_diff = (float(strike) - cur_price) / cur_price * 100 if cur_price else 0
+                # v0.45.54：cur_price 不可得时 pct_diff=0 读作「这堵 OI 墙正好压在
+                # 平价上」—— 在期权叙事里那是最有信息量的位置（最大磁吸/pin risk），
+                # 恰恰不是「不知道」。现金价缺失即置 None。
+                pct_diff = ((float(strike) - cur_price) / cur_price * 100
+                            if cur_price else None)
             except (ValueError, TypeError, ZeroDivisionError):
-                pct_diff = 0
+                pct_diff = None
             out.append({
                 "strike": float(strike),
                 "oi": int(oi_v),
@@ -553,9 +580,12 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         out = []
         for strike, oi_v in sorted(by_strike_dict.items(), key=lambda x: -x[1])[:top_n]:
             try:
-                pct_diff = (strike - cur_price) / cur_price * 100 if cur_price else 0
+                # v0.45.54：同上 —— 0 读作「正好压在平价上」，那是最有信息量的
+                # 位置而非「不知道」。
+                pct_diff = ((strike - cur_price) / cur_price * 100
+                            if cur_price else None)
             except (ValueError, TypeError, ZeroDivisionError):
-                pct_diff = 0
+                pct_diff = None
             out.append({"strike": strike, "oi": int(oi_v), "pct_diff": pct_diff, "dom_exp": ""})
         return out
     near_call_walls = _near_wall_summary(near_call_by_strike, _cur_price)
@@ -569,7 +599,7 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     return {
         "iv_rank": f"{iv_rank:.1f}" if iv_rank is not None else "-",
         "pc": f"{pc:.2f}" if pc is not None else "-",
-        "bear_score": float(bear_score),
+        "bear_score": (float(bear_score) if bear_score is not None else None),
         "bullish": ab.get("bullish", 0),
         "bearish_v": ab.get("bearish", 0),
         "neutral_v": ab.get("neutral", 0),
@@ -582,6 +612,10 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         "flow_color": flow_color,
         "gsr": gsr or "-",
         "iv_current": f"{iv_current:.1f}%" if iv_current is not None else "-",
+        # v0.45.52：缺就显示 "-"，不用 0 兜底（0 价差是「IV 恰等于 RV」，含义完全不同）
+        "iv_rv_spread": f"{iv_rv_spread:+.1f}pp" if isinstance(iv_rv_spread, (int, float)) else "-",
+        "iv_rv_signal": iv_rv_signal or "-",
+        "rv_30d": f"{rv_30d:.1f}%" if isinstance(rv_30d, (int, float)) else "-",
         "signal_sum": _html.escape(signal_sum[:45]) if signal_sum else "",
         # 维度数据质量
         "dim_dq": dim_dq,
@@ -614,11 +648,21 @@ def _radar_data(ticker: str, swarm_detail: dict) -> list:
     sd  = swarm_detail.get(ticker, {})
     dim = sd.get("dimension_scores", {})
     if dim:
-        signal    = float(dim.get("signal",   5.0)) * 10
-        catalyst  = float(dim.get("catalyst", 5.0)) * 10
-        sentiment = float(dim.get("sentiment",5.0)) * 10
-        odds      = float(dim.get("odds",     5.0)) * 10
-        risk_adj  = float(dim.get("risk_adj", 5.0)) * 10
+        # ── v0.45.54：缺失维度不再补 5.0（雷达图上 = 50/100 正中间）──
+        # 5.0 会画出一个「不好不坏」的正常形状，与真实的中性评分完全同形。
+        # 雷达图画不出「—」，所以缺失维度画 **0** 并在 dim_dq 里标注 ——
+        # 0 在雷达图上是一个塌陷的角，视觉上就能看出「这一维没有」，
+        # 而 50 看起来完全正常。
+        def _d(k):
+            v = dim.get(k)
+            return float(v) * 10 if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+        _missing_dims = [k for k in ("signal", "catalyst", "sentiment", "odds", "risk_adj")
+                         if not isinstance(dim.get(k), (int, float)) or isinstance(dim.get(k), bool)]
+        if _missing_dims:
+            _log.debug("[%s] 雷达图 %d/5 维缺失（%s），画 0 而非 50 中位",
+                       ticker, len(_missing_dims), ", ".join(_missing_dims))
+        signal, catalyst, sentiment, odds, risk_adj = (
+            _d("signal"), _d("catalyst"), _d("sentiment"), _d("odds"), _d("risk_adj"))
     else:
         ad = sd.get("agent_details", {})
         signal   = float(ad.get("ScoutBeeNova",     {}).get("self_score", 5.0)) * 10
@@ -839,7 +883,9 @@ def _load_accuracy_data() -> dict:
         "net_win_rate": 0.0, "sharpe_net": None,
         "max_dd_net_pct": 0.0, "max_dd_gross_pct": 0.0,
         "profit_factor": None,
-        "total_spy_ret": 0.0, "alpha_vs_spy": 0.0,
+        # v0.45.43：None 而非 0.0。0.0 读作「大盘同期零涨跌 / 无超额收益」，
+        # 是个合法可解读的假读数；计算失败时它会冒充真实结果（本次实测如此）。
+        "total_spy_ret": None, "alpha_vs_spy": None,
         "initial_capital": 100000.0,
     }
     try:
@@ -933,11 +979,15 @@ def _load_accuracy_data() -> dict:
                 _gross_dir_adj = -_r7_raw if _dir_lc == "bearish" else _r7_raw
                 _net = _eqr["net_return_t7"]
                 # net_return_t7 已在 SQL WHERE 保证 NOT NULL，无需兜底
-                _spy = _eqr["spy_return_t7"] if _eqr["spy_return_t7"] is not None else 0.0
+                # v0.45.42：缺 SPY 基准的样本不再兜底成 0.0（=「那周大盘没动」），
+                # 改为整笔跳过基准累加——曲线少一个点，好过多一个假点。
+                _spy_raw = _eqr["spy_return_t7"]
+                _spy = _spy_raw if _spy_raw is not None else None
 
                 _gross_rets.append(_gross_dir_adj)
                 _net_rets.append(_net)
-                _spy_rets.append(_spy)
+                if _spy is not None:
+                    _spy_rets.append(_spy)
 
                 if _net > 0:
                     _wins_net.append(_net)
@@ -949,7 +999,7 @@ def _load_accuracy_data() -> dict:
                 if _is_accepted:
                     _pnl_gross = _fixed_size_usd * (_gross_dir_adj / 100.0)
                     _pnl_net = _fixed_size_usd * (_net / 100.0)
-                    _pnl_spy = _fixed_size_usd * (_spy / 100.0)
+                    _pnl_spy = _fixed_size_usd * (_spy / 100.0) if _spy is not None else 0.0
                     _cap_gross += _pnl_gross
                     _cap_net += _pnl_net
                     _cap_spy += _pnl_spy
@@ -971,7 +1021,13 @@ def _load_accuracy_data() -> dict:
                     "direction": _eqr["direction"],
                     "gross_ret": round(_gross_dir_adj, 2),
                     "net_ret": round(_net, 2),
-                    "spy_ret": round(_spy, 2),
+                    # v0.45.43：_spy 自 v0.45.42 起可为 None（缺基准的样本）。
+                    # 旧行 `round(_spy, 2)` 对 None 抛 TypeError，被下方
+                    # `except ... _log.debug` 整块吞掉 → equity_curve 与
+                    # trading_stats["realistic"] 全部不生成，而 _trading_stats
+                    # 的预置默认值（total_spy_ret=0.0 / alpha_vs_spy=0.0）让
+                    # 结果看起来"算过了"。这是我在 v0.45.42 自己引入的回归。
+                    "spy_ret": (round(_spy, 2) if _spy is not None else None),
                     "exit_reason": _eqr["exit_reason"] or "T7_CLOSE",
                     "cap_gross": round(_cap_gross, 2),
                     "cap_net": round(_cap_net, 2),
@@ -1074,7 +1130,12 @@ def _load_accuracy_data() -> dict:
             _log.debug("portfolio_backtest 真实数字加载失败（dashboard 仅显示理论上限）: %s", _pb_err)
 
     except Exception as _eq_err:
-        _log.debug("Equity curve 数据加载失败: %s", _eq_err)
+        # v0.45.43：debug → warning + 堆栈。
+        # 这条 debug 让一个 TypeError 隐身了三次重跑：资金曲线、SPY 基准、
+        # Alpha、realistic 全部没生成，而页面照常渲染（读到的是
+        # _trading_stats 的预置默认值）。静默降级三件套的第二条。
+        _log.warning("Equity curve / trading_stats 计算失败，页面将回落到预置默认值"
+                     "（SPY 与 Alpha 因此不可信）: %s", _eq_err, exc_info=True)
 
     return {
         "stats": _acc_stats,
@@ -1526,6 +1587,9 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             _log.debug("共识环形图生成失败 (%s): %s", _tc6, _e_donut)
         # F10: 价格标注
         _det6 = _detail(_tc6, swarm_detail)
+        # v0.45.54：bear_score 可为 None —— 预先算好文案，不在 f-string 里放条件
+        _bs6_v = _det6.get("bear_score")
+        _bs6_txt = f"{_bs6_v:.1f}" if isinstance(_bs6_v, (int, float)) else "—"
         _price6_html = ""
         if _det6["price"] is not None:
             _p6 = _det6["price"]
@@ -1586,9 +1650,11 @@ def _build_top_cards_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             <div class="detail-grid">
               <div class="dg-item"><span class="dg-label">IV Rank</span><span class="dg-value">{_det6['iv_rank']}</span></div>
               <div class="dg-item"><span class="dg-label">P/C Ratio</span><span class="dg-value">{_det6['pc']}</span></div>
-              <div class="dg-item"><span class="dg-label">看空强度</span><span class="dg-value">{_det6['bear_score']:.1f}</span></div>
+              <div class="dg-item"><span class="dg-label">看空强度</span><span class="dg-value">{_bs6_txt}</span></div>
               <div class="dg-item"><span class="dg-label">数据真实度</span><span class="dg-value">{_det6['real_pct']}</span></div>
               <div class="dg-item"><span class="dg-label">GEX</span><span class="dg-value">{_det6['gex']}</span></div>
+              <div class="dg-item" title="IV 减 RV30 的价差。正=期权偏贵（利于卖方），负=期权偏便宜"><span class="dg-label">IV-RV</span><span class="dg-value">{_det6['iv_rv_spread']}</span></div>
+              <div class="dg-item" title="过去 30 个交易日的年化已实现波动率"><span class="dg-label">RV30</span><span class="dg-value">{_det6['rv_30d']}</span></div>
               <div class="dg-item"><span class="dg-label">期权流向</span><span class="dg-value" style="color:{_det6['flow_color']}">{_det6['flow_dir']}</span></div>
             </div>
             <div class="radar-mini"><canvas id="radar-expand-{_html.escape(_tc6)}" width="200" height="160"></canvas></div>
@@ -1614,6 +1680,8 @@ def _build_table_rows_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
         _dclrt = {"bullish":"dcell-bull","bearish":"dcell-bear","neutral":"dcell-neut"}[_drt]
         _scrt = _sc_cls(_srt)
         _det_rt = _detail(_trt, swarm_detail)
+        _bs_rt_v = _det_rt.get("bear_score")
+        _bs_rt_txt = f"{_bs_rt_v:.1f}" if isinstance(_bs_rt_v, (int, float)) else "—"
         _res_rt = swarm_detail.get(_trt,{}).get("resonance",{}).get("resonance_detected",False)
         _sup_rt = int(_ort.get("supporting_agents") or swarm_detail.get(_trt,{}).get("supporting_agents",0))
         _res_html_rt = (f'<span class="res-y">{_sup_rt}A</span>' if _res_rt else '<span class="res-n">无</span>')
@@ -1642,7 +1710,7 @@ def _build_table_rows_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
           <td>{_det_rt['bullish']}/{_det_rt['bearish_v']}/{_det_rt['neutral_v']}</td>
           <td>{_det_rt['iv_rank']}</td>
           <td{_pc_st_rt}>{_det_rt['pc']}</td>
-          <td style="color:var(--neut)">{_det_rt['bear_score']:.1f}</td>
+          <td style="color:var(--neut)">{_bs_rt_txt}</td>
           <td>{_ml_rt}</td>
         </tr>"""
     return new_rows_html
@@ -1729,6 +1797,12 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
         # ── v0.26.0 全链 OI 卡片（影响价格判断核心） ─────────────────────────
         # 用户反馈：#/deep 板块只有异常流和近端 P/C，缺全链 OI 让价格判断盲目
         # 设计：紧凑卡片显示全链 P/C + Max Pain + Top 3 Call 阻力 + Top 3 Put 支撑
+        # v0.45.54：bear_score 可为 None —— 预先算好文案。
+        # 必须放在**无条件**位置：下方 _full_oi_html 只在有全链数据时才进分支，
+        # 而 _bsd_txt 的使用点在分支之外（实测 UnboundLocalError）。
+        _bsd_v = (_detd or {}).get("bear_score")
+        _bsd_txt = (f"{_bsd_v:.1f}/10" if isinstance(_bsd_v, (int, float)) else "—")
+
         _full_oi_html = ""
         _full_pc = _detd.get("full_pc")
         _mp = _detd.get("max_pain")
@@ -1791,12 +1865,18 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             _is_near = bool(_near_calls_all or _near_puts_all)
 
             if _is_near:
-                _calls = [w for w in _near_calls_all if w["pct_diff"] > -1][:3]
-                _puts = [w for w in _near_puts_all if w["pct_diff"] < 1][:3]
+                # v0.45.54：pct_diff 可为 None —— 参与比较会 TypeError，
+                # 且「不知道距现价多远」不该被当成满足筛选条件。
+                _calls = [w for w in _near_calls_all
+                          if isinstance(w.get("pct_diff"), (int, float)) and w["pct_diff"] > -1][:3]
+                _puts = [w for w in _near_puts_all
+                         if isinstance(w.get("pct_diff"), (int, float)) and w["pct_diff"] < 1][:3]
                 _wall_label = "近 30 天到期"
             else:
-                _calls = [w for w in _detd.get("top_call_walls", []) if w["pct_diff"] > -1][:3]
-                _puts = [w for w in _detd.get("top_put_walls", []) if w["pct_diff"] < 1][:3]
+                _calls = [w for w in _detd.get("top_call_walls", [])
+                          if isinstance(w.get("pct_diff"), (int, float)) and w["pct_diff"] > -1][:3]
+                _puts = [w for w in _detd.get("top_put_walls", [])
+                         if isinstance(w.get("pct_diff"), (int, float)) and w["pct_diff"] < 1][:3]
                 _wall_label = "全链聚合"
 
             def _wall_rows(walls, side_color, side_label):
@@ -1804,8 +1884,9 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                     return f'<div style="font-size:.75em;color:#94a3b8;padding:4px 0">无数据</div>'
                 rows = []
                 for w in walls:
-                    pct = w["pct_diff"]
-                    pct_str = f"{pct:+.1f}%"
+                    # v0.45.54：pct_diff 可为 None（现价不可得）
+                    pct = w.get("pct_diff")
+                    pct_str = f"{pct:+.1f}%" if isinstance(pct, (int, float)) else "—"
                     oi_k = w["oi"] / 1000.0
                     oi_str = f"{oi_k:.0f}k" if oi_k >= 1 else f"{w['oi']}"
                     exp_tag = f' <span style="background:#374151;color:#cbd5e1;padding:1px 4px;border-radius:3px;font-size:.65em">{w["dom_exp"]}</span>' if w.get("dom_exp") else ""
@@ -1873,7 +1954,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                 <div class="cc-metric"><span class="cm-l">P/C Ratio</span><span class="cm-v">{_detd['pc']}</span></div>
                 {f'<div class="cc-metric"><span class="cm-l">期权流向</span><span class="cm-v" style="color:{_detd["flow_color"]};font-weight:bold;">{_detd["flow_dir"]}</span></div>' if _detd["flow_dir"] != "-" else ""}
                 {f'<div class="cc-metric"><span class="cm-l">GEX</span><span class="cm-v">{_detd["gex"]}</span></div>' if _detd["gex"] != "-" else ""}
-                <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">{_detd['bear_score']:.1f}/10</span></div>
+                <div class="cc-metric"><span class="cm-l">看空强度</span><span class="cm-v">{_bsd_txt}</span></div>
                 <div class="cc-metric"><span class="cm-l">投票</span><span class="cm-v">{_detd['bullish']}多/{_detd['bearish_v']}空</span></div>
               </div>
               <div class="radar-wrap"><div class="skeleton"><div class="skel-circle"></div></div><canvas id="radar-{_html.escape(_tkrd)}" width="160" height="160"></canvas></div>
@@ -2059,9 +2140,26 @@ def render_dashboard_html(report: Dict, date_str: str,
     n_tickers = len(all_tickers_sorted) or n_tickers
 
 
-    # 计算 avg real_pct
-    real_pcts = [swarm_detail[t].get("data_real_pct", 0) for t in swarm_detail if swarm_detail[t].get("data_real_pct")]
+    # ── 计算 avg real_pct（v0.45.47 修：真值过滤把 0 踢出了分母）──
+    # 旧写法 `if swarm_detail[t].get("data_real_pct")` 是**真值**过滤，
+    # 它同时排除了两种完全不同的情况：
+    #   · None  —— 该标的没算过真实度 ⇒ 确实该排除
+    #   · 0     —— 该标的**一条真实数据通道都没有** ⇒ 最该被计入
+    # 后果是这个指标越是该报警越不报警：数据越烂的标的越容易被踢出分母，
+    # 显示的「数据真实度」反而越高。
+    #
+    # 实测（历史 swarm_results）：8/04、8/06、8/10~8/14 共 7 个扫描日，
+    # 每天恰好 1 只标的为 0，全部是 **BRK-B** —— 即 v0.45.2 那个
+    # ticker 正则（`^[A-Z]{1,5}$` 拒绝带连字符的类份额代码）的受害者。
+    # 于是：正则拒绝 BRK-B → 它全部通道失败 → data_real_pct=0 →
+    # **被这个本该暴露数据问题的指标排除掉**。
+    _rp = [swarm_detail[t].get("data_real_pct") for t in swarm_detail]
+    real_pcts = [v for v in _rp if isinstance(v, (int, float))]
     avg_real = f"{sum(real_pcts)/len(real_pcts):.0f}%" if real_pcts else "-"
+    _rp_missing = sum(1 for v in _rp if not isinstance(v, (int, float)))
+    if _rp_missing:
+        _log.warning("数据真实度：%d/%d 只标的没有 data_real_pct，未计入均值",
+                     _rp_missing, len(_rp))
 
     # ── P1-1 (v0.38.0): 数据降级横幅 ─────────────────────────────
     # 按通道聚合降级情况（unavailable/fallback/sample），真实度 <70% 或
@@ -2188,9 +2286,21 @@ def render_dashboard_html(report: Dict, date_str: str,
     try:
         from fred_macro import get_macro_context as _get_macro_ctx
         _mctx = _get_macro_ctx()
-        if _mctx.get("data_source") != "fallback":
-            _macro_vix = f"{_mctx.get('vix', 0):.1f}"
-            _macro_10y = f"{_mctx.get('treasury_10y', 0):.2f}%"
+        if _mctx.get("data_source") == "fallback":
+            # 整块宏观被跳过（全显示「—」）。旧实现在这里**什么都不说**，
+            # 于是 8/26 网站宏观区块整块消失而日志里毫无痕迹。
+            logging.getLogger("alpha_hive.dashboard").warning(
+                "宏观数据源降级为 fallback，dashboard 宏观区块将全部显示「—」")
+        else:
+            # v0.45.43：逐字段独立降级。
+            # 旧实现 `.get('vix', 0)` 在「键存在但值为 None」时返回 **None**
+            # （默认值不生效——本项目 MEMORY 记过的经典陷阱），随后
+            # f"{None:.1f}" 抛 TypeError，被外层 except 吞掉 →
+            # **一个字段缺失导致整块宏观消失**。现在各字段互不牵连。
+            _v = _mctx.get("vix")
+            _macro_vix = f"{_v:.1f}" if isinstance(_v, (int, float)) else "—"
+            _t = _mctx.get("treasury_10y")
+            _macro_10y = f"{_t:.2f}%" if isinstance(_t, (int, float)) else "—"
             _yc = _mctx.get("yield_curve", "unknown")
             _yc_map = {"normal": "正常", "flat": "趋平", "inverted": "倒挂"}
             _yc_cls_map = {"normal": "yc-ok", "flat": "yc-warn", "inverted": "yc-bad"}
@@ -2198,11 +2308,11 @@ def render_dashboard_html(report: Dict, date_str: str,
             _macro_yc_cls = _yc_cls_map.get(_yc, "")
             # 黄金指标
             _gld_trend = _mctx.get("gold_trend", "stable")
-            _gld_chg = _mctx.get("gold_change_pct", 0.0)
-            if _gld_trend in ("surging", "rising", "falling"):
+            _gld_chg = _mctx.get("gold_change_pct")
+            if _gld_trend in ("surging", "rising", "falling") and isinstance(_gld_chg, (int, float)):
                 _macro_gld = f"{_gld_chg:+.1f}%"
                 _macro_gld_cls = "gld-up" if _gld_chg > 0 else "gld-dn"
-            elif _mctx.get("gold_price"):
+            elif isinstance(_mctx.get("gold_price"), (int, float)):
                 _macro_gld = f"${_mctx['gold_price']:.0f}"
             # 板块轮动 HTML
             _sr = _mctx.get("sector_rotation", {})
@@ -2221,7 +2331,12 @@ def render_dashboard_html(report: Dict, date_str: str,
     except ImportError:
         pass
     except Exception as e:
-        logging.getLogger("alpha_hive.dashboard").debug("宏观指标加载失败: %s", e)
+        # v0.45.43：从 debug 提到 warning。2026-08-26 渲染时 yfinance 挂了，
+        # 整块宏观（VIX / 10Y / 收益率曲线 / 黄金 / 板块轮动）全成「—」，
+        # 而唯一的痕迹是一条 debug 日志 —— 等于没有。缺数据可以，
+        # 缺得无声不行。
+        logging.getLogger("alpha_hive.dashboard").warning(
+            "宏观指标加载失败，本次 dashboard 宏观区块将全部显示「—」: %s", e)
 
     # ── 升级 E: 快速预计算 Score Delta（对比昨天） ──
     _score_deltas = {}  # {ticker: {"delta": float, "html": str}}

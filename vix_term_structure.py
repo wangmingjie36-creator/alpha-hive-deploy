@@ -91,7 +91,10 @@ def _fetch_fresh() -> Dict:
         "signal": "",
         "trading_implication": "",
         "timestamp": datetime.now().isoformat(),
-        "source": "vixcentral+yfinance",
+        # v0.45.54：source 原先写死在字面量里，与取数是否成功无关 ——
+        # 期限结构算不出时（futures 不足 2 个）它仍自称 vixcentral+yfinance。
+        # 由实际拿到的期货点位数推导。
+        "source": ("vixcentral+yfinance" if len(futures) >= 2 else "unavailable"),
     }
 
     if len(futures) >= 2:

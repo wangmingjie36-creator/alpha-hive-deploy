@@ -321,6 +321,8 @@ class MLEnhancedReportGenerator:
                 **ml_prediction,
                 "current_price": float(_current_price) if _current_price else None,
                 "training_data_source": self._training_data_source,  # "real"/"sample"/"unknown"
+                # v0.45.50：输入特征里有几个是补齐的（空 = 全部为真实观测）
+                "input_features_missing": list(getattr(self, "_ml_input_missing", [])),
             },
             "combined_recommendation": {
                 **self._combine_recommendations(advanced_analysis, ml_prediction),
@@ -399,6 +401,27 @@ class MLEnhancedReportGenerator:
         _ds = analysis.get("dimension_scores", {})
         _rating_dir = {"STRONG BUY": 1.0, "BUY": 0.5, "HOLD": 0.0, "AVOID": -1.0}
 
+        # ── v0.45.50：记录哪些特征是**补齐的**，不是观测到的 ──
+        # 下面五个 .get(k, 默认值) 在缺失时产出 iv_rank=50 / pc=1.0 / 三个 5.0，
+        # 组成一份内部完全自洽的「典型标的」画像。模型不会拒绝它，
+        # 会照常吐出一个概率，而那个概率随后被当成真实预测渲染。
+        # 预测本身仍然做（有部分特征也比不做强），但**不能声称输入是干净的**。
+        # 与同文件已有的 `training_data_source` 来源标记同一思路。
+        self._ml_input_missing = [
+            _name for _name, _val in (
+                ("iv_rank", _opts.get("iv_rank")),
+                ("put_call_ratio", _opts.get("put_call_ratio")),
+                ("final_score", _rec.get("score")),
+                ("odds_score", _ds.get("odds")),
+                ("risk_adj_score", _ds.get("risk_adj")),
+            ) if not isinstance(_val, (int, float)) or isinstance(_val, bool)
+        ]
+        if self._ml_input_missing:
+            _log.warning("[%s] ML 输入有 %d 个特征不可得，已补中位值——"
+                         "本次预测的输入不是干净观测：%s",
+                         ticker, len(self._ml_input_missing),
+                         ", ".join(self._ml_input_missing))
+
         return TrainingData(
             ticker=ticker,
             date=_pdt_now().isoformat(),  # 与本文件其余日期口径统一为 PDT（该字段不参与下游日期逻辑）
@@ -439,12 +462,22 @@ class MLEnhancedReportGenerator:
                 '不参与今日评分。</div></div>'
             )
 
+        # ── v0.45.43：与 _ch3_oracle 同一处理，缺失渲染「—」不冒充读数 ──
+        # 上面的 data_quality=="unavailable" 闸只挡**全盘**不可用。
+        # 2026-08-26 是**部分**降级：CBOE 正常（data_quality="real"）而
+        # yfinance 挂掉 → iv_rank 为 None 却照样过闸，随后：
+        #   iv_rank=50  → 渲染成「50.0（中等 IV）」   ← 一个确凿的假读数
+        #   iv_current or 25 / iv_percentile or 50 / put_call_ratio or 1.0
+        # 注意 `or` 比 `if is None` 更糟：真实的 **0** 也会被替换掉。
+        _NA_M = '<span class="na" title="数据不可用">—</span>'
+
+        def _m(v, spec="{:.1f}", suffix=""):
+            return _NA_M if not isinstance(v, (int, float)) else (spec.format(v) + suffix)
+
         iv_rank = options.get("iv_rank")
-        if iv_rank is None:
-            iv_rank = 50
-        iv_percentile = options.get("iv_percentile") or 50
-        iv_current = options.get("iv_current") or 25
-        put_call_ratio = options.get("put_call_ratio") or 1.0
+        iv_percentile = options.get("iv_percentile")
+        iv_current = options.get("iv_current")
+        put_call_ratio = options.get("put_call_ratio")
         gamma_squeeze_risk = options.get("gamma_squeeze_risk", "medium")
         flow_direction = options.get("flow_direction", "neutral")
         options_score = options.get("options_score", 5.0)
@@ -452,8 +485,11 @@ class MLEnhancedReportGenerator:
         unusual_activity = options.get("unusual_activity", [])
         key_levels = options.get("key_levels", {})
 
-        # 判断 IV Rank 颜色（None 已在上方 L431 归一为 50，此处无需再判）
-        if iv_rank < 30:
+        # 判断 IV Rank 颜色（v0.45.43：不再归一为 50，缺失单独走中性色）
+        if iv_rank is None:
+            iv_color = "var(--tm)"
+            iv_label = "数据不可用"
+        elif iv_rank < 30:
             iv_color = "var(--bull)"  # 绿色，低 IV
             iv_label = "低 IV"
         elif iv_rank > 70:
@@ -512,23 +548,23 @@ class MLEnhancedReportGenerator:
                     <div class="metric">
                         <span class="metric-label">IV Rank</span>
                         <span class="metric-value" style="color: {iv_color};">
-                            {iv_rank:.1f} ({iv_label})
+                            {_m(iv_rank)} ({iv_label})
                         </span>
                     </div>
 
                     <div class="metric">
                         <span class="metric-label">当前 IV</span>
-                        <span class="metric-value">{iv_current:.2f}%</span>
+                        <span class="metric-value">{_m(iv_current, "{:.2f}", "%")}</span>
                     </div>
 
                     <div class="metric">
                         <span class="metric-label">IV 百分位数</span>
-                        <span class="metric-value">{iv_percentile:.1f}%</span>
+                        <span class="metric-value">{_m(iv_percentile, "{:.1f}", "%")}</span>
                     </div>
 
                     <div class="metric">
                         <span class="metric-label">Put/Call Ratio</span>
-                        <span class="metric-value">{put_call_ratio:.2f}</span>
+                        <span class="metric-value">{_m(put_call_ratio, "{:.2f}")}</span>
                     </div>
 
                     <div class="metric">
@@ -771,21 +807,38 @@ class MLEnhancedReportGenerator:
         # 防 None：dict 里 key 存在但值为 None 时，.get() 返回 None，格式化会崩
         def _safe(v, default=0):
             return default if v is None else v
+
+        # ── v0.45.42：缺失值不再兜底成 0 ──────────────────────────────
+        # 旧实现对期权指标一律 `_safe(..., 0)`，于是 8/26 yfinance 全线返回空时，
+        # IV Rank 从 None 变成 **0.0%** 渲染上墙。0.0% 的语义不是"没数据"，
+        # 是"IV 处于历史区间最低点"——一个强烈且完全虚假的做多波动率信号。
+        # 判据（CLAUDE.md 安全默认值）：这个默认值会不会让下游误以为掌握了信息。
+        # 同文件 _rv_30d 已因同样理由单独豁免过 _safe（见 `# 可能是 None —— 不要 _safe`），
+        # 这里把该豁免推广到全部期权指标：缺失一律渲染 "—"。
+        # _NA 原先只在下方 `if (_iv_term ...)` 块里赋值（12 缩进）。_fmt 在该块外也要用，
+        # 条件为假时会 NameError，故提到函数顶层；块内那次赋值是同值重绑定，无副作用。
+        _NA = '<span class="na" title="数据不可用">—</span>'
+
+        def _fmt(v, spec="{:.1f}", suffix=""):
+            """有值按 spec 渲染，None 渲染成 —（绝不代入 0）"""
+            return _NA if v is None else (spec.format(v) + suffix)
+
         score = _safe(ad.get("score", 0)) if ad else 0
         direction = ad.get("direction", "neutral") if ad else "neutral"
-        iv_rank = _safe(opts.get("iv_rank", 0))
-        iv_curr = _safe(opts.get("iv_current", opts.get("iv_curr", 0)))
-        pc = _safe(opts.get("put_call_ratio", 0))
-        oi = _safe(opts.get("total_oi", 0))
+        iv_rank = opts.get("iv_rank")
+        iv_curr = opts.get("iv_current", opts.get("iv_curr"))
+        pc = opts.get("put_call_ratio")
+        oi = opts.get("total_oi")
         gex = opts.get("gamma_squeeze_risk") or "—"
         flow = opts.get("flow_direction") or opts.get("options_score") or "—"
-        skew = _safe(opts.get("iv_skew_ratio", opts.get("iv_skew", 0)))
+        skew = opts.get("iv_skew_ratio", opts.get("iv_skew"))
         # v0.27.1 bug fix: dict.get() 不会用默认值若 key 存在但 value=None；用 `or` 保护
         unusual = opts.get("unusual_activity") or []
         key_levels = opts.get("key_levels") or {}
         support = key_levels.get("support") or []
         resist = key_levels.get("resistance") or []
-        pc_color = "var(--bull)" if pc < 0.8 else ("var(--bear)" if pc > 1.2 else "var(--neut)")
+        pc_color = ("var(--neut)" if pc is None else
+                    "var(--bull)" if pc < 0.8 else ("var(--bear)" if pc > 1.2 else "var(--neut)"))
         unusual_rows = ""
         for u in unusual[:5]:
             bullish = u.get("bullish", True)
@@ -1082,13 +1135,13 @@ class MLEnhancedReportGenerator:
         # ── 头部 stat 卡片：注入近端磁吸目标价（如可用）────────────────────
         _hero_cards = (
             f'<div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Odds 评分</div></div>'
-            f'<div class="stat"><div class="num" style="color:{pc_color}">{pc:.2f}</div><div class="lbl">近端 P/C Ratio</div></div>'
-            f'<div class="stat"><div class="num">{iv_rank:.1f}%</div><div class="lbl">IV Rank</div></div>'
+            f'<div class="stat"><div class="num" style="color:{pc_color}">{_fmt(pc, "{:.2f}")}</div><div class="lbl">近端 P/C Ratio</div></div>'
+            f'<div class="stat"><div class="num">{_fmt(iv_rank, "{:.1f}", "%")}</div><div class="lbl">IV Rank</div></div>'
         )
         if _near_max_pain_html:
             _hero_cards += _near_max_pain_html
         else:
-            _hero_cards += f'<div class="stat"><div class="num">{iv_curr:.1f}%</div><div class="lbl">当前 IV</div></div>'
+            _hero_cards += f'<div class="stat"><div class="num">{_fmt(iv_curr, "{:.1f}", "%")}</div><div class="lbl">当前 IV</div></div>'
 
         return f"""
         <div class="section">
@@ -1100,8 +1153,8 @@ class MLEnhancedReportGenerator:
                 <tr><th>指标</th><th>数值</th><th>信号</th></tr>
                 <tr><td>Gamma 压榨风险</td><td>{gex}</td><td>{DOT_NEUT + "高" if str(gex).lower() in ("high","很高") else DOT_BULL + "可控"}</td></tr>
                 <tr><td>期权流方向</td><td>{flow}</td><td>{DOT_BULL + "看多" if str(flow).lower() in ("bullish","看多") else (DOT_BEAR + "看空" if str(flow).lower() in ("bearish","看空") else "—")}</td></tr>
-                <tr><td>IV 偏斜比</td><td>{skew:.2f}</td><td>{DOT_NEUT + "看跌溢价" if skew > 1.2 else DOT_BULL + "正常"}</td></tr>
-                <tr><td>近端总持仓量</td><td>{oi:,}</td><td>—</td></tr>
+                <tr><td>IV 偏斜比</td><td>{_fmt(skew, "{:.2f}")}</td><td>{"—" if skew is None else (DOT_NEUT + "看跌溢价" if skew > 1.2 else DOT_BULL + "正常")}</td></tr>
+                <tr><td>近端总持仓量</td><td>{_fmt(oi, "{:,.0f}")}</td><td>—</td></tr>
             </table>
             {_near_walls_html}
             {_full_oi_html}
@@ -1191,12 +1244,27 @@ class MLEnhancedReportGenerator:
             </table>"""
         # 分析师目标价
         analyst_html = ""
-        if analyst:
-            curr = analyst.get("current_price", 0)
-            mean = analyst.get("target_mean", 0)
-            low = analyst.get("target_low", 0)
-            high = analyst.get("target_high", 0)
-            upside = analyst.get("upside_pct", ((mean - curr) / curr * 100) if curr else 0)
+        # v0.45.54：全 0 时不渲染「$0.00 目标均价 / $0~$0 目标区间 / +0.0% 潜在涨幅」。
+        # $0.00 单看荒谬，但它出现在四张并排 stat 卡里、和「检测到 N 个催化剂」同屏，
+        # 读者更可能理解成「分析师没给目标价」而不是「取数挂了」—— 而这两者
+        # 后续动作完全不同。
+        _a_nums = {k: analyst.get(k) for k in
+                   ("current_price", "target_mean", "target_low", "target_high")}
+        _a_ok = all(isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+                    for v in _a_nums.values())
+        if analyst and not _a_ok:
+            _log.debug("[_ch3_chronos] 分析师目标价不完整 %s，跳过该区块", _a_nums)
+            analyst_html = ('<h3>分析师目标价</h3>'
+                            '<p style="font-size:.9em;color:var(--tm);">'
+                            '本次未取到分析师目标价。</p>')
+        elif analyst:
+            curr = _a_nums["current_price"]
+            mean = _a_nums["target_mean"]
+            low = _a_nums["target_low"]
+            high = _a_nums["target_high"]
+            _up_raw = analyst.get("upside_pct")
+            upside = (_up_raw if isinstance(_up_raw, (int, float))
+                      else (mean - curr) / curr * 100)
             upside_color = "var(--bull)" if upside > 0 else "var(--bear)"
             analyst_html = f"""
             <h3>分析师目标价</h3>
@@ -1229,7 +1297,11 @@ class MLEnhancedReportGenerator:
         det = ad.get("details", {})
         score = ad.get("score", 0)
         direction = ad.get("direction", "neutral")
-        sentiment_pct = det.get("sentiment_pct", det.get("sentiment_score", 50))
+        # v0.45.54：兜底 50 读作「舆情样本里正面占 50%，多空完全均衡」。
+        # 同一个 grid-4 里紧邻的 5 日动量与成交量比在缺数时都正确渲染「—」
+        # （见 v0.45.42 的整段注释），唯独这一项还在冒充读数 —— 同屏不一致。
+        _sp = det.get("sentiment_pct", det.get("sentiment_score"))
+        sentiment_pct = _sp if isinstance(_sp, (int, float)) and not isinstance(_sp, bool) else None
         # v0.43.23: 上游 BuzzBee 对缺价格/成交量的降级源刻意写入 None（见 buzz_bee.py
         # P0-2：不拿 0 冒充"无动量"、不拿 1 冒充"正常量"）。而 .get(k, 默认) 只在**键
         # 缺失**时用默认值——键存在且为 None 时默认值形同虚设，下面的 `> 0` 与
@@ -1239,7 +1311,11 @@ class MLEnhancedReportGenerator:
         vol_ratio = det.get("volume_ratio")
         reddit = det.get("reddit", {})
         fear_greed = det.get("fear_greed_index", det.get("components", {}).get("fear_greed", None))
-        sent_color = "var(--bull)" if sentiment_pct > 60 else ("var(--bear)" if sentiment_pct < 40 else "var(--neut)")
+        sent_color = ("var(--tm)" if sentiment_pct is None
+                      else ("var(--bull)" if sentiment_pct > 60
+                            else ("var(--bear)" if sentiment_pct < 40 else "var(--neut)")))
+        # 预先算好文案 —— 拼接链里不放条件逻辑
+        _sent_txt = f"{sentiment_pct:.0f}%" if sentiment_pct is not None else "—"
         # 缺数显示"—"并用中性灰，绝不用 0 / 1 顶替（项目硬规则：不编数据）
         mom_color = "var(--tm)" if momentum is None else ("var(--bull)" if momentum > 0 else "var(--bear)")
         mom_txt = "—" if momentum is None else f"{momentum:+.2f}%"
@@ -1267,7 +1343,7 @@ class MLEnhancedReportGenerator:
             <h2>BuzzBee — 情绪与叙事</h2>
             <div class="grid-4" style="margin-bottom:15px;">
                 <div class="stat"><div class="num" style="color:{self._dir_color(direction)}">{score:.1f}</div><div class="lbl">Sentiment 评分</div></div>
-                <div class="stat"><div class="num" style="color:{sent_color}">{sentiment_pct:.0f}%</div><div class="lbl">正面情绪占比</div></div>
+                <div class="stat"><div class="num" style="color:{sent_color}">{_sent_txt}</div><div class="lbl">正面情绪占比</div></div>
                 <div class="stat"><div class="num" style="color:{mom_color}">{mom_txt}</div><div class="lbl">5日动量</div></div>
                 <div class="stat"><div class="num">{vol_txt}</div><div class="lbl">成交量比</div></div>
                 {fg_text}
@@ -1373,7 +1449,16 @@ class MLEnhancedReportGenerator:
         signals = det.get("bearish_signals", [])
         bear_score = det.get("bear_score", 0)
         score = ad.get("score", 0)
-        iv_skew = det.get("iv_skew_ratio", det.get("iv_skew", 0))
+        # ── v0.45.42：iv_skew 取错了蜂 ────────────────────────────────
+        # `det` 是 **BearBeeContrarian** 的 details，而 iv_skew_ratio 产自
+        # **OracleBeeEcho**。旧代码在 BearBee 里取这个键，永远取不到，
+        # 于是恒定落到 fallback 0 —— 这张卡从上线起就没显示过真实值
+        # （实测 8/25 与 8/26 都是 0.00，而 OracleBee 里 29/30 有值）。
+        # 真值缺失时给 None，由下方渲染成 —，不再冒充 0.00。
+        _oracle_det = (agent_details.get("OracleBeeEcho") or {}).get("details") or {}
+        iv_skew = _oracle_det.get("iv_skew_ratio", _oracle_det.get("iv_skew"))
+        _skew_cell = ('<span class="na" title="数据不可用">—</span>'
+                      if iv_skew is None else f"{iv_skew:.2f}")
         # 确保至少 3 条
         fallback = [
             "期权 IV Skew 偏高（看跌期权溢价）",
@@ -1395,7 +1480,7 @@ class MLEnhancedReportGenerator:
             <div class="grid-4" style="margin-bottom:15px;">
                 <div class="stat"><div class="num" style="color:var(--bear)">{score:.1f}</div><div class="lbl">看空蜂评分</div></div>
                 <div class="stat"><div class="num" style="color:{'var(--bear)' if bear_score>=6 else 'var(--neut)'}">{bear_score:.1f}/10</div><div class="lbl">看空强度</div></div>
-                <div class="stat"><div class="num">{iv_skew:.2f}</div><div class="lbl">IV Skew 比</div></div>
+                <div class="stat"><div class="num">{_skew_cell}</div><div class="lbl">IV Skew 比</div></div>
                 <div class="stat"><div class="num">{'高' if bear_score>=7 else ('中' if bear_score>=5 else '低')}</div><div class="lbl">风险等级</div></div>
             </div>
             <h3>反对观点（至少 3 条 — 硬性要求）</h3>
@@ -1472,13 +1557,40 @@ class MLEnhancedReportGenerator:
         if not curr_price and isinstance(sl, dict):
             conservative = sl.get("conservative", 0)
             curr_price = conservative / 0.97 if conservative else 0
+        # ── v0.45.54：四个常量不许撑起一张带概率和公式的定量结论表 ──
+        # 旧实现：curr_price 兜底 100（"防零"）、gain_max or 20、gain_7d or 5、
+        # drawdown or -10 —— 四个都是写死的常量，却产出
+        #   「$120.00 / $105.00 / $95.00 / $85.00，概率加权期望价 $104.75，+4.75%」
+        # 外加一行公式展开「Σ(概率 × 情景价格) = 25%×$120 + …」。
+        # 这是全报告最像量化结论的部分，而每一个数字都是编的。
+        # 注意 `or` 比 `if is None` 更糟：真实的 0 收益也会被换成常量。
+        _missing = []
         if not curr_price:
-            curr_price = 100  # 防零
-        # 期望收益数据
-        gain_max = exp.get("max_gain", {}).get("mean", 0) or 20
-        gain_7d = exp.get("expected_7d", {}).get("mean", 0) or 5
-        drawdown = exp.get("max_drawdown", {}).get("mean", 0) or -10
-        drawdown_min = exp.get("max_drawdown", {}).get("min", drawdown * 1.5)
+            _missing.append("现价")
+        for _name, _v in (("最大涨幅", exp.get("max_gain", {}).get("mean")),
+                          ("7日期望", exp.get("expected_7d", {}).get("mean")),
+                          ("最大回撤", exp.get("max_drawdown", {}).get("mean"))):
+            if not isinstance(_v, (int, float)) or isinstance(_v, bool):
+                _missing.append(_name)
+        if _missing:
+            _log.warning("[_ch5_scenarios] %s 不可得，跳过情景推演表"
+                         "（不以常量撑起带概率与公式的定量结论）", "、".join(_missing))
+            return f"""
+        <div class="section">
+            <h2>第 5 章：情景推演</h2>
+            <div style="padding:14px 16px;border:1px solid var(--border);border-radius:2px;
+                        font-size:.9em;color:var(--tm);">
+                情景推演不可用：缺少 {', '.join(_missing)}。
+                本表依赖历史同类信号的收益分布，数据不足时不做推演 ——
+                以常量生成的目标价与期望收益无法与真实测算区分。
+            </div>
+        </div>"""
+
+        gain_max = exp["max_gain"]["mean"]
+        gain_7d = exp["expected_7d"]["mean"]
+        drawdown = exp["max_drawdown"]["mean"]
+        _dm = exp.get("max_drawdown", {}).get("min")
+        drawdown_min = _dm if isinstance(_dm, (int, float)) else drawdown * 1.5
         # 4 场景
         scenarios = [
             ("强多", 25, curr_price * (1 + gain_max / 100), "催化剂超预期 + 出口管制缓和"),
@@ -1752,7 +1864,10 @@ class MLEnhancedReportGenerator:
 
         # ML 预测部分（提前计算，用于修正蜂群表中 RivalBee 的旧概率值）
         pred = ml_pred.get('prediction', {})
-        ml_prob_val = pred.get('probability', 0.5) * 100
+        # v0.45.54：0.5 → 50.0% 是「模型给出五五开」，与真实的中性预测同形。
+        _pv = pred.get('probability')
+        ml_prob_val = (_pv * 100 if isinstance(_pv, (int, float))
+                       and not isinstance(_pv, bool) else None)
 
         # 用 fresh ML 概率修正 swarm 里 RivalBeeVanguard 的历史缓存值（防止旧扫描结果显示 100%）
         import re as _re
@@ -1803,7 +1918,14 @@ class MLEnhancedReportGenerator:
 
         # ── 折叠详情区（止损 / 止盈 / 期权 / ML 特征）──────────────
         win_prob    = prob.get('win_probability_pct', 50)
-        risk_reward = prob.get('risk_reward_ratio', 1.0)
+        # v0.45.54：1.00 的 R:R 是一个明确的（很差的）交易结论，不是「不知道」。
+        # 上游 _calculate_risk_reward_ratio 现已在无历史时返回 None（v0.45.50）。
+        _rr = prob.get('risk_reward_ratio')
+        risk_reward = _rr if isinstance(_rr, (int, float)) and not isinstance(_rr, bool) else None
+
+        # ⚠️ 预先算好 —— 不在下面的 f-string 里放条件逻辑（v0.45.50/53 各犯过一次）
+        _rr_txt = f"{risk_reward:.2f}" if risk_reward is not None else "未知"
+        _mlp_txt = f"{ml_prob_val:.1f}%" if ml_prob_val is not None else "未知"
         position    = analysis.get('position_management', {})
         stop_loss   = position.get('stop_loss', {})
         take_profit = position.get('take_profit', {})
@@ -2089,8 +2211,8 @@ class MLEnhancedReportGenerator:
         <p class="meta">
             {self.timestamp.strftime('%Y-%m-%d %H:%M')} PDT
             &nbsp;·&nbsp; 综合胜率 <b>{combined['combined_probability']:.1f}%</b>
-            &nbsp;·&nbsp; 风险回报比 <b>{risk_reward:.2f}</b>
-            &nbsp;·&nbsp; ML 预测 <b>{ml_prob_val:.1f}%</b>
+            &nbsp;·&nbsp; 风险回报比 <b>{_rr_txt}</b>
+            &nbsp;·&nbsp; ML 预测 <b>{_mlp_txt}</b>
         </p>
     </div>
 
@@ -2151,6 +2273,14 @@ class MLEnhancedReportGenerator:
 
 def main():
     """主程序"""
+
+    # v0.45.56：yfinance 全局限流闸门。必须在任何取数之前装好。
+    # 8/27 事故：全天 687 次 429，rv_30d/iv_rank/iv_rv_spread/catalysts 各 0/30。
+    try:
+        import yf_gate
+        yf_gate.install()
+    except Exception as _e:  # pragma: no cover - 闸门不可得不阻断主流程
+        print(f"⚠️  yfinance 限流闸门未装上：{_e}")
 
     # 解析命令行参数
     parser = argparse.ArgumentParser(
@@ -2359,8 +2489,12 @@ def main():
                 try:
                     _prob = (enhanced_report.get("advanced_analysis") or {}).get(
                         "probability_analysis", {}) or {}
-                    _win = float(_prob.get("win_probability_pct", 0) or 0)
-                    _rr  = float(_prob.get("risk_reward_ratio", 0) or 0)
+                    # v0.45.54：`or 0` 把「不可得」与「真实的 0」混为一谈；
+                    # 该结构只用于记录被禁用的加成，保留 None 更诚实。
+                    _wp = _prob.get("win_probability_pct")
+                    _win = float(_wp) if isinstance(_wp, (int, float)) else None
+                    _rrv = _prob.get("risk_reward_ratio")
+                    _rr = float(_rrv) if isinstance(_rrv, (int, float)) else None
                     enhanced_report["swarm_results"]["probability_boost"] = {
                         "applied": False,
                         "disabled": True,

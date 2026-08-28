@@ -117,7 +117,9 @@ class StockData:
     # 不显式赋值就又变回伪造（531/582 行显式传 None 正说明意图是 None）。
     # 默认改为 None：**没测量过就是未知**，而不是"持平/正常量"。
     momentum_5d: Optional[float] = None
-    avg_volume: int = 0
+    # v0.45.54：由 int 改 Optional[int] —— 20 日均量不可得时置 None，
+    # 而不是 0（读作「零成交」）或 1（读作「日均成交 1 股」）。
+    avg_volume: Optional[int] = None
     volume_ratio: Optional[float] = None
     # v0.45.3: 原 `float = 0.0`。momentum_5d/volume_ratio 早已是 Optional（P0-2,
     # v0.38.0），只有 volatility 还留着 0.0——而它是三者里后果最重的：
@@ -334,10 +336,16 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
         recent_vol = float(hist["Volume"].iloc[-1])
         avg_vol = (float(hist["Volume"].iloc[-20:].mean()) if len(hist) >= 20
                    else float(hist["Volume"].mean()))
+        # v0.45.54：兜底 1.0 会让 avg_volume = **1 股**（任何流动性检查都判
+        # 极端不可交易），且 volume_ratio = recent_vol/1 变成千万量级
+        # （读作「成交量是均量的 5000 万倍」）。不可得就置 None。
         if math.isnan(avg_vol) or avg_vol <= 0:
-            avg_vol = 1.0
-        out["avg_volume"] = int(avg_vol)
-        out["volume_ratio"] = recent_vol / avg_vol if avg_vol > 0 else 1.0
+            _log.warning("%s 20 日均量不可得，avg_volume/volume_ratio 置 None", ticker)
+            out["avg_volume"] = None
+            out["volume_ratio"] = None
+        else:
+            out["avg_volume"] = int(avg_vol)
+            out["volume_ratio"] = recent_vol / avg_vol
 
         if len(hist) >= 20:
             returns = hist["Close"].pct_change().dropna()
@@ -403,7 +411,11 @@ class CBOESource:
             if not payload:
                 self.breaker.record_failure("no_data")
                 return None
-            price = float(payload.get("current_price") or payload.get("close") or 0.0)
+            # v0.45.46：按交易时段选字段。旧写法 `current_price or close` 在
+            # 收盘后拿到的是**盘后价**——全部定时扫描都在 17:00 ET 跑。
+            # 实测 CRM 2026-08-26（财报日）盘后 232.32 vs 官方收盘 205.62。
+            from cboe_options import official_price
+            price, _px_src = official_price(payload)
             if price <= 0:
                 self.breaker.record_failure("zero_price")
                 return None
@@ -418,8 +430,11 @@ class CBOESource:
             metrics = _fetch_history_metrics(ticker)
             if metrics and "momentum_5d" in metrics:
                 data.momentum_5d = metrics["momentum_5d"]
-                data.avg_volume = metrics.get("avg_volume", 0)
-                data.volume_ratio = metrics.get("volume_ratio", 1.0)
+                # v0.45.54：`.get(k, default)` 挡不住「键存在但值为 None」——
+                # _fetch_history_metrics 现在会把不可得的均量置 None，
+                # 旧写法会把 None 原样赋给声明为 int 的字段。
+                data.avg_volume = metrics.get("avg_volume")
+                data.volume_ratio = metrics.get("volume_ratio")
                 data.volatility_20d = metrics.get("volatility_20d")   # v0.45.3: 不再补 0.0
                 data.momentum_source = "5d_real"
             else:

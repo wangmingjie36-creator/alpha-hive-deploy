@@ -108,7 +108,18 @@ class DealerGEXAnalyzer:
                 continue
 
             K     = float(c.get("strike", 0) or 0)
-            dte   = float(c.get("dte", 30) or 30)
+            # ── v0.45.50：`or 30` 把 0DTE 变成了 30DTE ──
+            # 下一行的 `max(dte, 0.5)` 才是真正的超短期守卫（注释也这么写）。
+            # 但 `or 30` 在它之前生效：到期日当天 dte=0 → `or 30` → 30，
+            # 于是 T 从 0.5/365=0.00137 变成 30/365=0.08219 —— **差 60 倍**，
+            # BS gamma 被严重低估，恰好发生在 gamma 最大、pinning 最强的那一天。
+            # 守卫写对了，被上游默认值架空（同 risk_engine:834 的 σ 守卫）。
+            # 现在只把「键缺失/不可解析」当未知给 30，真实的 0 原样传给守卫。
+            _dte_raw = c.get("dte")
+            try:
+                dte = float(_dte_raw) if _dte_raw is not None else 30.0
+            except (TypeError, ValueError):
+                dte = 30.0
             sigma = float(c.get("impliedVolatility", 0) or 0)
             T     = max(dte, 0.5) / 365.0  # 最小 0.5 天，避免超短期 gamma 爆炸
 
@@ -240,7 +251,14 @@ class DealerGEXAnalyzer:
         for contracts, sign in [(calls, +1.0), (puts, -1.0)]:
             for c in contracts:
                 K = float(c.get("strike", 0) or 0)
-                dte = float(c.get("dte", 30) or 30)
+                # v0.45.53：与 L118 同修 —— `or 30` 把真实 0DTE 改写成 30 天，
+                # 架空下一行的 `max(dte, 0.5)` 守卫（T 差 60 倍）。
+                # 这是第三处，前两处修于 v0.45.50 时漏了本处，由 Phase 2 护栏抓到。
+                _dte_v = c.get("dte")
+                try:
+                    dte = float(_dte_v) if _dte_v is not None else 30.0
+                except (TypeError, ValueError):
+                    dte = 30.0
                 sigma = float(c.get("impliedVolatility", 0) or 0)
                 oi = float(c.get("openInterest", 0) or 0)
                 T = max(dte, 0.5) / 365.0
@@ -971,16 +989,29 @@ class AdvancedAnalyzer:
         else:
             return base - 5  # 极度拥挤 -5%
 
-    def _calculate_risk_reward_ratio(self, ticker: str, similar_opps: List) -> float:
-        """计算风险收益比"""
+    def _calculate_risk_reward_ratio(self, ticker: str, similar_opps: List):
+        """计算风险收益比；**无历史可比时返回 None**。
+
+        v0.45.50：旧实现无历史返回 **2.0**，而 `_generate_recommendation` 的
+        STRONG BUY 闸正是 `prob >= 70 and rr >= 2.0` —— 「一次历史比对都没做成」
+        恰好卡在阈值上通过，于是缺数据不但不降级，反而让评级门槛自动满足。
+        `avg_loss == 0` 那条返回 3.0 更宽。
+
+        报告里的 rationale 会逐字印成「风险收益比 {rr}:1」，读者无法与真实
+        测算结果区分。现在改为 None，由调用方显式走「不可得」路径。
+        """
         if not similar_opps:
-            return 2.0
+            _log.debug("[%s] 无历史相似机会，风险收益比不可得（不以 2.0 冒充）", ticker)
+            return None
 
         avg_gain = statistics.mean([s["gain_7d_pct"] for s in similar_opps])
         avg_loss = abs(statistics.mean([s["max_drawdown_pct"] for s in similar_opps]))
 
         if avg_loss == 0:
-            return 3.0
+            # 历史样本里一次回撤都没有 —— 这是样本太少的症状，不是「风险收益比 3:1」
+            _log.debug("[%s] 历史样本平均回撤为 0（n=%d），风险收益比不可得",
+                       ticker, len(similar_opps))
+            return None
 
         return round(avg_gain / avg_loss, 2)
 
@@ -989,13 +1020,20 @@ class AdvancedAnalyzer:
     ) -> Dict:
         """生成投资建议"""
         prob = analysis.get("probability_analysis", {}).get("win_probability_pct", 50)
-        rr = analysis.get("probability_analysis", {}).get("risk_reward_ratio", 1.5)
+        rr = analysis.get("probability_analysis", {}).get("risk_reward_ratio")
+        # v0.45.50：rr 不可得时**不许升级评级**。
+        # 旧默认值 1.5 恰好是 BUY 闸的阈值（`prob >= 60 and rr >= 1.5`），
+        # 与上面 _calculate_risk_reward_ratio 的 2.0 一样卡在门槛上。
+        # 两个闸都要求 rr 达标，所以「不知道」必须是不达标，而不是刚好达标。
+        _rr_known = isinstance(rr, (int, float)) and not isinstance(rr, bool)
+        if not _rr_known:
+            _log.debug("风险收益比不可得，评级不因缺数据而升级")
 
         # 评估建议
-        if prob >= 70 and rr >= 2.0:
+        if prob >= 70 and _rr_known and rr >= 2.0:
             rating = "STRONG BUY"
             action = "积极布局"
-        elif prob >= 60 and rr >= 1.5:
+        elif prob >= 60 and _rr_known and rr >= 1.5:
             rating = "BUY"
             action = "分批建仓"
         elif prob >= 50:
@@ -1009,7 +1047,9 @@ class AdvancedAnalyzer:
             "rating": rating,
             "action": action,
             "confidence": f"{prob:.1f}%",
-            "rationale": f"赚钱概率 {prob:.1f}%，风险收益比 {rr}:1",
+            # v0.45.50：rr 为 None 时印「未知」，不印 "None:1" 也不编一个数
+            "rationale": (f"赚钱概率 {prob:.1f}%，风险收益比 {rr}:1" if _rr_known
+                          else f"赚钱概率 {prob:.1f}%，风险收益比未知（无历史可比样本）"),
         }
 
 
@@ -1075,7 +1115,9 @@ if __name__ == "__main__":
             # 概率
             pa = analysis.get("probability_analysis", {})
             print(f"\n🎲 赚钱概率：{pa.get('win_probability_pct', '?')}%")
-            print(f"   风险收益比：{pa.get('risk_reward_ratio', '?')}:1")
+            _rr_p = pa.get("risk_reward_ratio")
+            print(f"   风险收益比：{_rr_p}:1" if isinstance(_rr_p, (int, float))
+                  else "   风险收益比：未知（无历史可比样本）")
 
             # 位置管理
             pm = analysis.get("position_management", {})

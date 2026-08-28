@@ -218,7 +218,21 @@ def get_short_interest(ticker: str) -> Dict:
         }
 
         _write_cache(cache_key, result)
-        _record_src_success("yfinance_short_interest")
+        # ── v0.45.47：健康追踪必须与本函数自己的质量判定一致 ──
+        # 旧写法**无条件** _record_src_success。而 _record_src_success 会把
+        # 连续失败计数**重置为 0** —— 于是一个永远返回空数据的源，
+        # 「连续失败 3 次」的降级告警**永远不可能触发**，每次调用都清零。
+        # 上面第 217 行刚把这种情况判成 data_quality="fallback"，
+        # 下一行却告诉追踪器「这次成功了」，两者自相矛盾。
+        #
+        # 注意语义：这里的「失败」不是网络错误，是**源没有交付可用数据**。
+        # 对健康度而言两者后果相同 —— 拿不到就是拿不到。
+        if result["data_quality"] == "real":
+            _record_src_success("yfinance_short_interest")
+        else:
+            _log.debug("yfinance_short_interest %s 返回空（short_ratio=%s pct=%s），"
+                       "记为一次降级而非成功", ticker, short_ratio, short_pct)
+            _record_src_failure("yfinance_short_interest")
         return result
 
     except (*NETWORK_ERRORS, TypeError, AttributeError) as exc:
@@ -311,14 +325,20 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
         "bullish_agents": bullish,
         "seeking_alpha_page_views": sa_proxy,
         "short_float_ratio": short_data["short_pct_float"],
-        "price_momentum_5d": _mom_for_proxy if _mom_for_proxy is not None else 0.0,
+        # v0.45.44：动量取不到时给 None，不再兜底 0.0（读作「5 日横盘」）
+        "price_momentum_5d": _mom_for_proxy,
         "data_quality": {
             "social_buzz": st_data["data_quality"],         # Reddit ApeWisdom 真实数据
             "google_trends": "proxy_volume",                # 成交量代理指标
             "bullish_agents": "real" if board else "default",
             "seeking_alpha": "proxy_social",                # 社交热度代理指标
             "short_interest": short_data["data_quality"],   # yfinance 真实数据
-            "momentum": "real",                             # yfinance 真实数据
+            # v0.45.44：这里原是**硬编码字符串** "real" —— 质量标签不是从数据
+            # 推导出来的，是写死的。取数失败时 price_momentum_5d 兜底成 0.0，
+            # 而标签仍自称 real，下游无法与「真的横盘」区分。
+            # 同一个 dict 里 bullish_agents 是 `"real" if board else "default"`，
+            # 说明正确写法本来就在眼前。
+            "momentum": "real" if _mom_for_proxy is not None else "unavailable",
         }
     }
 

@@ -153,12 +153,37 @@ def _build_market_expectations(sorted_results: list) -> List[str]:
             pc = details.get("put_call_ratio")
             gamma = details.get("gamma_exposure")
             if iv is not None:
-                md.append(f"- IV Rank：{iv}")
+                _src = details.get("iv_rank_source")
+                # iv_rank_source 必须同行显示：hv_proxy 与真实 IV 历史算出来的
+                # 是两个东西（见 MEMORY「IV Rank 口径」），不标就分不出来
+                md.append(f"- IV Rank：{iv}" + (f"（来源 {_src}）" if _src else ""))
             if pc is not None:
                 pc_val = pc if isinstance(pc, (int, float)) else pc
                 md.append(f"- Put/Call Ratio：{pc_val}")
             if gamma is not None:
                 md.append(f"- Gamma Exposure：{gamma}")
+            # ── v0.45.52：IV-RV 价差 / RV30 / IV Skew 比值 ──
+            # 数据一直都在（8/26 实测 30/30 覆盖），此前从未渲染到日报。
+            # 一律「有才写」，缺就整行不出现 —— 不用 0 或 5.0 兜底，
+            # 那会把「没算出来」画成「恰好中性」。
+            _ivrv = details.get("iv_rv_detail") or {}
+            _spread = details.get("iv_rv_spread", _ivrv.get("iv_rv_spread"))
+            _sig = details.get("iv_rv_signal", _ivrv.get("iv_rv_signal"))
+            _rv30 = _ivrv.get("rv_30d")
+            if isinstance(_spread, (int, float)):
+                _tail = {"expensive": "期权偏贵", "cheap": "期权偏便宜",
+                         "fair": "定价合理"}.get(_sig, _sig or "")
+                md.append(f"- IV-RV 价差：{_spread:+.1f}pp"
+                          + (f"（{_tail}）" if _tail else ""))
+            if isinstance(_rv30, (int, float)):
+                md.append(f"- 30 日实现波动率（RV30）：{_rv30:.1f}%")
+            _skew = details.get("iv_skew_ratio",
+                                (details.get("iv_skew_detail") or {}).get("skew_ratio"))
+            if isinstance(_skew, (int, float)):
+                _sk_sig = details.get("iv_skew_signal",
+                                      (details.get("iv_skew_detail") or {}).get("skew_signal"))
+                md.append(f"- IV Skew 比值：{_skew:.2f}"
+                          + (f"（{_sk_sig}）" if _sk_sig else ""))
             unusual = details.get("unusual_activity", [])
             if unusual:
                 md.append(f"- 异常活动：{len(unusual)} 个信号")
@@ -236,14 +261,22 @@ def _build_catalysts(sorted_results: list) -> List[str]:
     return md
 
 
-def _load_fresh_ml_prob(ticker: str) -> float | None:
-    """从当日 analysis-{TICKER}-ml-{DATE}.json 读取最新 ML 胜率，失败返回 None"""
+def _load_fresh_ml_prob(ticker: str, date_str: str | None = None) -> float | None:
+    """从 `analysis-{TICKER}-ml-{DATE}.json` 读取 ML 胜率，失败返回 None。
+
+    ⚠️ **`date_str` 必须由调用方传报告日期**（v0.45.52）。
+    初版写死 `datetime.now()` —— 重渲染或补跑历史日报时它指向**今天**，
+    对应文件不存在于是**全部**返回 None，30 只标的的 ML 胜率被抹成同一个
+    兜底常数。2026-08-27 重渲染 8/26 实测：62% / 66% / 46% / 64% …
+    **全部变成 57%**，与「所有标的同一个值」这一类污染同形。
+    留 None 时退回今天，仅为向后兼容。
+    """
     import json as _json
     import glob as _glob
     from datetime import datetime as _dt
     from pathlib import Path as _Path
     try:
-        today = _dt.now().strftime("%Y-%m-%d")
+        today = date_str or _dt.now().strftime("%Y-%m-%d")
         base = _Path(__file__).parent
         pattern = str(base / f"analysis-{ticker}-ml-{today}.json")
         files = _glob.glob(pattern)
@@ -257,8 +290,13 @@ def _load_fresh_ml_prob(ticker: str) -> float | None:
         return None
 
 
-def _build_competitive(sorted_results: list) -> List[str]:
-    """版块 6：竞争格局分析（RivalBeeVanguard）"""
+def _build_competitive(sorted_results: list, date_str: str | None = None) -> List[str]:
+    """版块 6：竞争格局分析（RivalBeeVanguard）
+
+    `date_str` 用于读取该日的 `analysis-*-ml-{DATE}.json`。**必须传**，
+    否则重渲染历史日报时会退回「今天」，30 只标的的 ML 胜率被 swarm 存量的
+    降级常数覆盖（实测 8/26 存量恒为 57%，真实值 66/62/51/64/63/64）。
+    """
     import re as _re
     md: List[str] = []
     md.append("## 6) 竞争格局分析")
@@ -270,7 +308,7 @@ def _build_competitive(sorted_results: list) -> List[str]:
         md.append(f"### {ticker}")
         if discovery:
             # 优先用当日 analysis JSON 中的真实 ML 概率替换 swarm 存量值
-            fresh_prob = _load_fresh_ml_prob(ticker)
+            fresh_prob = _load_fresh_ml_prob(ticker, date_str)
             if fresh_prob is not None:
                 discovery = _re.sub(
                     r"ML 胜率 \d+%",
@@ -357,28 +395,77 @@ def _build_bear_contrarian(sorted_results: list) -> List[str]:
     return md
 
 
+def _build_thesis_breaks(sorted_results: list) -> List[str]:
+    """版块 7.5：失效条件（thesis break）—— CLAUDE.md 硬性规则的落地处。
+
+    v0.45.57 新增。此前 `thesis_break_l1/l2` 算是算了，**全项目没有任何读者**：
+    唯一叫「失效条件」的地方（7 节表格最后一列）装的是 GuardBee 共振摘要。
+    规则要求的是「什么情况下我该认错」，那一列答的却是「为什么我是对的」。
+    """
+    md: List[str] = []
+    md.append("### 7.5) 失效条件（thesis break）")
+    md.append("")
+    md.append("> 论点在什么情况下作废。标「自动」的由历史分位推出，"
+              "与人工判断不是一个重量。")
+    md.append(">")
+    md.append("> ⚠️ 自动条件用的是**全标的池化**分位（非逐标的口径）——"
+              "同一个 IV / 评分阈值套在所有标的上，"
+              "低波动标的（如 BRK-B、JNJ）可能永远触发不了其中的 IV 条件。")
+    md.append("")
+    _missing = []
+    for ticker, data in sorted_results:
+        l1 = data.get("thesis_break_l1") or []
+        l2 = data.get("thesis_break_l2") or []
+        if not l1 and not l2:
+            _missing.append(ticker)
+            continue
+        md.append(f"**{ticker}**")
+        if l1:
+            md.append("- L1 预警：")
+            for c in l1:
+                md.append(f"  - {c}")
+        if l2:
+            md.append("- L2 止损：")
+            for c in l2:
+                md.append(f"  - {c}")
+        md.append("")
+    if _missing:
+        md.append(f"⚠️ **无失效条件配置**（{len(_missing)} 只）："
+                  f"{'、'.join(_missing)} —— 这些标的的结论不满足 "
+                  f"CLAUDE.md「任何结论必须附失效条件」，请补 `thesis_breaks_config.json`。")
+        md.append("")
+    return md
+
+
 def _build_composite_judgment(sorted_results: list) -> List[str]:
     """版块 7：综合判断 & 信号强度（含 AI 叙事、历史类比、评分调整、交叉验证）"""
     md: List[str] = []
     # 主表
     md.append("## 7) 综合判断 & 信号强度")
     md.append("")
-    md.append("| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |")
-    md.append("|------|------|--------|------|---------------|-------|---------|")
+    # v0.45.57：最后一列原先标题写「失效条件」，装的却是 GuardBee 的共振摘要
+    # （"共振✅ 5 Agent 同向" / "信号分散"）—— 那是**论点成立的理由**，
+    # 与失效条件正好相反。列名改回它真实的内容，真的失效条件见 7.5 节。
+    md.append("| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 共振判定 | 失效条件 |")
+    md.append("|------|------|--------|------|---------------|-------|---------|---------|")
     for ticker, data in sorted_results:
         res = "Y" if data["resonance"]["resonance_detected"] else "N"
         ab = data["agent_breakdown"]
         data_pct = data.get("data_real_pct", 0)
         guard = data.get("agent_details", {}).get("GuardBeeSentinel", {})
         guard_discovery = guard.get("discovery", "")
-        thesis_break = "信号分散" if not guard_discovery else guard_discovery.split("|")[0].strip()[:30]
+        verdict = "信号分散" if not guard_discovery else guard_discovery.split("|")[0].strip()[:30]
+        _n1 = len(data.get("thesis_break_l1") or [])
+        _n2 = len(data.get("thesis_break_l2") or [])
+        tb = f"L1×{_n1} L2×{_n2}" if (_n1 or _n2) else "⚠️ 无"
         md.append(
             f"| **{ticker}** | {data['direction'].upper()} | "
             f"{data['final_score']:.1f} | {res} | "
             f"{ab['bullish']}/{ab['bearish']}/{ab['neutral']} | "
-            f"{data_pct:.0f}% | {thesis_break} |"
+            f"{data_pct:.0f}% | {verdict} | {tb} |"
         )
     md.append("")
+    md.extend(_build_thesis_breaks(sorted_results))
 
     # LLM 多空综合叙事
     synthesis_lines = []
@@ -530,9 +617,21 @@ def _build_macro(macro_context) -> List[str]:
     md.append("")
     md.append("| 指标 | 数值 | 状态 |")
     md.append("|------|------|------|")
-    md.append(f"| VIX | {macro_context.get('vix', 0):.1f} | {macro_context.get('vix_regime', '')} |")
-    md.append(f"| 10Y利率 | {macro_context.get('treasury_10y', 0):.2f}% | {macro_context.get('rate_environment', '')} |")
-    md.append(f"| 大盘(5日) | {macro_context.get('spx_change_pct', 0):+.2f}% | {macro_context.get('market_trend', '')} |")
+    # ── v0.45.54：宏观表不许把「取数失败」印成一张带状态列的观测表 ──
+    # 兜底 0 会渲染成「VIX 0.0 / 10Y 0.00% / 大盘 +0.00%」，而配套的「状态」列
+    # 仍照常显示 low/high/neutral —— 一整行看起来完全正常的宏观快照。
+    # 上游 fred_macro 的兜底（VIX 20.0、TNX 4.5）更隐蔽：4.5 恰好落在
+    # rate_environment 的 high 档边界上（见 v0.45.42 记录）。
+    def _mrow(label, key, spec, suffix, state_key):
+        v = macro_context.get(key)
+        txt = (format(v, spec) + suffix
+               if isinstance(v, (int, float)) and not isinstance(v, bool) else "—")
+        state = macro_context.get(state_key, "") if txt != "—" else "不可得"
+        md.append(f"| {label} | {txt} | {state} |")
+
+    _mrow("VIX", "vix", ".1f", "", "vix_regime")
+    _mrow("10Y利率", "treasury_10y", ".2f", "%", "rate_environment")
+    _mrow("大盘(5日)", "spx_change_pct", "+.2f", "%", "market_trend")
     md.append(f"| 美元 | — | {macro_context.get('dollar_trend', '')} |")
     md.append("")
     headwinds = macro_context.get("macro_headwinds", [])
@@ -574,6 +673,19 @@ def _build_backtest(backtest_stats) -> List[str]:
             f"**样本**：{total} 条 | "
             f"**准确率**：{acc * 100:.1f}% ({correct}/{total}) | "
             f"**平均收益**：{avg_ret:+.2f}%"
+        )
+    # ── v0.45.52：SPY 同期基准 ──
+    # 「平均收益 +0.10%」单看没有意义 —— 同期大盘是涨是跌决定了它算好还是算差。
+    # 取不到就整行省略（backtester 给 None），不用 0 兜底：
+    # 0 是「大盘恰好没动」，与「没算出来」完全是两回事。
+    _spy = backtest_stats.get("spy_avg_return")
+    if isinstance(_spy, (int, float)):
+        _sn = backtest_stats.get("spy_sample_n")
+        _excess = avg_ret - _spy
+        md.append(
+            f"**SPY 同期基准**：{_spy:+.2f}%"
+            + (f"（{_sn} 条同口径样本）" if _sn else "")
+            + f" | **超额**：{_excess:+.2f}pp"
         )
     md.append("")
     by_ticker = backtest_stats.get("by_ticker", {})
@@ -724,7 +836,7 @@ def generate_swarm_markdown_report(reporter, swarm_results: Dict,
         md.extend(_wl_fmt(tickers=[t for t, _ in sorted_results]))
     except Exception as _e_wl:  # noqa: BLE001 - 报告素材失败绝不影响主报告
         _log.warning("关注事项渲染跳过: %s", _e_wl)
-    md.extend(_build_competitive(sorted_results))
+    md.extend(_build_competitive(sorted_results, getattr(reporter, 'date_str', None)))
 
     md.extend(_build_bear_contrarian(sorted_results))
     md.extend(_build_composite_judgment(sorted_results))

@@ -93,9 +93,17 @@ def latest_cohort_start() -> Optional[str]:
         return None
 
 
-def load_samples(db_path: str = DB_PATH, all_cohorts: bool = False,
+def load_samples(db_path: Optional[str] = None, all_cohorts: bool = False,
                  with_inputs: bool = False) -> Dict:
-    """载入干净样本。返回 {'rows': [...], 'cohort_start': str|None, 'notes': [...]}"""
+    """载入干净样本。返回 {'rows': [...], 'cohort_start': str|None, 'notes': [...]}
+
+    ⚠️ `db_path` 默认 **None → 运行时解析 DB_PATH**，不是 `db_path=DB_PATH`。
+    后者在 import 时就把值绑死了，`monkeypatch.setattr(rs, "DB_PATH", ...)`
+    改不动它——`main()` 会绕开夹具去读真库，测试于是变成了**假守卫**
+    （v0.45.37 实测：功效护栏的退化测试自诞生起从未真正生效，
+    它在主 checkout 变绿只是因为真库样本量恰好落在「功效不足」区间）。
+    """
+    db_path = db_path or DB_PATH
     notes: List[str] = []
     cohort = None if all_cohorts else latest_cohort_start()
     if all_cohorts:
@@ -105,7 +113,14 @@ def load_samples(db_path: str = DB_PATH, all_cohorts: bool = False,
     else:
         notes.append("⚠️ 取不到世代边界，按全历史处理")
 
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    # 库读不到 → 空样本 + 显式 note，交由 main() 走「无法判定」(3)。
+    # 不能让 sqlite3 异常裸奔：抛栈会以退出码 1 结束，而 1 的语义是
+    # 「功效不足，正常继续攒」—— 库丢了会被读成一切正常（v0.45.37）。
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error as e:
+        notes.append(f"⛔ 样本库不可读（{db_path}）：{type(e).__name__}: {e}")
+        return {"rows": [], "cohort_start": cohort, "notes": notes}
     try:
         sql = ("SELECT date, ticker, final_score, dimension_scores, "
                "price_at_predict, close_t7, dir_ambiguous_t7 "
@@ -115,6 +130,9 @@ def load_samples(db_path: str = DB_PATH, all_cohorts: bool = False,
             sql += " AND date >= ?"
             params.append(cohort)
         raw = con.execute(sql, params).fetchall()
+    except sqlite3.Error as e:
+        notes.append(f"⛔ 样本表不可查（{db_path}）：{type(e).__name__}: {e}")
+        return {"rows": [], "cohort_start": cohort, "notes": notes}
     finally:
         con.close()
 
@@ -240,7 +258,7 @@ def main() -> int:
     ap.add_argument("--target-ic", type=float, default=0.090)
     args = ap.parse_args()
 
-    data = load_samples(all_cohorts=args.all_cohorts)
+    data = load_samples(DB_PATH, all_cohorts=args.all_cohorts)
     rows = data["rows"]
     need = required_weeks(args.target_ic)
 

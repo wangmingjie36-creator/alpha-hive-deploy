@@ -21,6 +21,14 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# v0.45.44：本模块此前无 logger，所有降级都是静默的。
+try:
+    from hive_logger import get_logger
+    _log = get_logger("market_intel")
+except Exception:  # pragma: no cover - 独立运行/测试时退化到标准库
+    import logging as _logging
+    _log = _logging.getLogger("alpha_hive.market_intel")
+
 _BASE = Path(__file__).parent
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,11 +185,33 @@ def detect_market_regime(ticker: str = "NVDA") -> Dict[str, Any]:
         import numpy as np
 
         def _get_ma(sym: str, period: int = 200, window: int = max(200, 60)) -> Tuple[float, float]:
-            """返回 (最新收盘价, N日均线) 或 (nan, nan)。"""
+            """返回 (最新收盘价, N日均线) 或 (nan, nan)。
+
+            ⚠️ **必须校验返回的确实是 `sym` 的数据**（v0.45.52）。
+            yfinance 限流时会返回**上一次成功请求的缓存帧**，而原来的守卫只查
+            `empty` 与 `len < period` —— 一份完整的**别家**数据两条都过。
+
+            2026-08-26 实测（那次扫描 yfinance 限流 487 次）：板块层的
+            `_get_ma("SOXX", 20, 40)` 与个股层的 `_get_ma(ticker, 20, 40)`
+            用的是**同一个 period 字符串**（"60d"），于是 SOXX 的均线泄漏进了
+            NVDA / MSFT / TSLA / VKTX 的个股政体 —— 四只标的的 20MA 全是
+            $528（SOXX 真值 529），而 NVDA 自己的 20MA 是 215.56。
+            个股金叉/死叉判断因此建立在半导体 ETF 的均线上。
+
+            校验不通过返回 `(nan, nan)` → 调用方走「个股政体数据不可用」，
+            诚实缺失好过安静地用别人的数据。
+            """
             hist = yf.download(sym, period=f"{window+20}d", interval="1d",
                                progress=False, auto_adjust=True)
             if hist.empty or len(hist) < period:
                 return float("nan"), float("nan")
+            if getattr(hist.columns, "nlevels", 1) > 1:
+                got = {str(x).upper() for x in hist.columns.get_level_values(-1)}
+                if got and sym.upper() not in got:
+                    _log.warning("yfinance 请求 %s 却返回了 %s 的数据 —— 弃用"
+                                 "（限流时返回缓存帧，见本函数 docstring）",
+                                 sym, ",".join(sorted(got)))
+                    return float("nan"), float("nan")
             closes = hist["Close"].dropna().values.flatten()
             ma = float(np.mean(closes[-period:]))
             return float(closes[-1]), ma
@@ -491,15 +521,24 @@ def get_supply_chain_signals(ticker: str = "NVDA", lookback_days: int = 5) -> Di
                     f"5日涨幅落后 {ticker} 超 1.5pp——上游景气度下行，{ticker} 可能存在需求前瞻性透支。")
         else:
             signal = "neutral"
-            soxx_ret = returns.get("SOXX", 0)
-            note = (f"供应链与 {ticker} 同步波动（{ticker} 5d {target_ret:+.1f}% vs SOXX {soxx_ret:+.1f}%），"
-                    "未发现显著领先/滞后背离。")
+            # v0.45.54：SOXX 取不到时 `returns.get("SOXX", 0)` 给 0，
+            # 于是摘要里印出「vs SOXX +0.0%」—— 一个被观测到的周涨跌幅，
+            # 而实际是取数失败。这句话会进 discovery 与报告正文。
+            _soxx = returns.get("SOXX")
+            if isinstance(_soxx, (int, float)) and not isinstance(_soxx, bool):
+                note = (f"供应链与 {ticker} 同步波动（{ticker} 5d {target_ret:+.1f}% "
+                        f"vs SOXX {_soxx:+.1f}%），未发现显著领先/滞后背离。")
+            else:
+                _log.warning("%s 供应链分析：SOXX 5 日收益不可得，摘要中不写基准涨跌幅", ticker)
+                note = (f"供应链与 {ticker} 同步波动（{ticker} 5d {target_ret:+.1f}%；"
+                        "SOXX 基准本次不可得），未发现显著领先/滞后背离。")
 
         return {
             "peers": peers,
             "supply_chain_signal": signal,
             "supply_chain_note": note,
-            "source": "yfinance",
+            # v0.45.54：source 由实际取到的同业数量推导，不再无条件写 "yfinance"
+            "source": "yfinance" if peers else "unavailable",
         }
     except Exception as e:
         _empty["supply_chain_note"] = f"供应链分析失败：{e}"
@@ -611,9 +650,21 @@ def check_thesis_breaks(
       "alert_html": str,   # 渲染用 HTML（空字符串 = 无警报）
     }
     """
+    # v0.45.44：`evaluable` 区分「核对过、没触发」与「根本没核对」。
+    # 实测（2026-08-26）：本闸**从未触发过一次**——极端输入（price $1 vs
+    # $100,000 / IV 200% / P/C 5.0 / score 0 / 6 条看空）在 NVDA 与 WMT 上
+    # 一律返回 level=None。根因是 schema 对不上：
+    #   配置存的是人读散文 {id, metric, trigger, data_source, current_status}
+    #   求值器要的是机器可比 {field, op, value}
+    # → `cond.get("value")` 恒为 None → `_eval_condition` 第一行就 return False。
+    # 而 level=None 在下游读作「论点完好」。CLAUDE.md 把「任何结论必须附失效
+    # 条件」列为硬约束，于是这条硬约束长期是靠一个永不触发的闸在"满足"。
+    # 这里先让它**可见**；配置 schema 的迁移是独立决定（且该文件正被其他
+    # session 编辑），不在本次改动范围。
     _none = {
         "level": None, "triggered_conditions": [],
         "recommendation": "", "alert_html": "",
+        "evaluable": False, "unevaluable_reason": "",
     }
 
     config_path = _BASE / "thesis_breaks_config.json"
@@ -661,6 +712,28 @@ def check_thesis_breaks(
             return actual == val
         return False
 
+    # ── v0.45.44：先判「这份配置到底可不可求值」──────────────────────
+    # 一条 condition 只有同时带 field/op/value 才是机器可比的；
+    # 只有 metric/trigger/current_status 的是给人读的散文，求值器碰不到。
+    _all_conds = []
+    for _lk in ("level_2_stop_loss", "level_1_warning"):
+        _all_conds += (ticker_cfg.get(_lk, {}) or {}).get("conditions", []) or []
+    _evaluable_conds = [c for c in _all_conds
+                        if isinstance(c, dict) and c.get("field") and c.get("value") is not None]
+    _is_fallback = ticker not in cfg
+
+    if not _evaluable_conds:
+        _reason = (f"{ticker} 的 {len(_all_conds)} 条失效条件全部不可机器求值"
+                   f"（缺 field/value，是给人读的散文 schema）"
+                   + ("；且该标的无专属配置，用的是 NVDA 兜底" if _is_fallback else ""))
+        _log.warning("论点失效闸未执行：%s —— 本次返回「未核对」而非「论点完好」", _reason)
+        _out = dict(_none)
+        _out["unevaluable_reason"] = _reason
+        return _out
+    if _is_fallback:
+        _log.warning("%s 无专属论点失效配置，回落到 NVDA 的条件（数据中心营收/AMD 竞品/"
+                     "中国芯片禁令等），对本标的无意义", ticker)
+
     # 检查两个告警级别
     triggered: Optional[str] = None
     triggered_conds: List[str] = []
@@ -684,7 +757,10 @@ def check_thesis_breaks(
             break
 
     if not triggered:
-        return _none
+        # 走到这里说明**确实核对过**了，与「没核对」区分开
+        _ok = dict(_none)
+        _ok["evaluable"] = True
+        return _ok
 
     # 构建 HTML 告警卡片
     if triggered == "stop_loss":
@@ -738,6 +814,12 @@ def calculate_iv_rv_spread(
     try:
         import time
 
+        try:                                    # v0.45.56 限流闸门
+            from yf_gate import ensure as _yf_ensure
+            _yf_ensure()
+        except Exception:                       # pragma: no cover - 闸门不可得不阻断
+            pass
+
         import yfinance as yf
         import numpy as np
 
@@ -754,6 +836,19 @@ def calculate_iv_rv_spread(
             def https_gate(*_a, **_k):
                 return nullcontext()
 
+        # v0.45.56: 429 与瞬时故障必须分开处理。
+        # 旧实现对**所有**失败都退避 0.7s/1.4s 再重试——那是为「本机 OpenSSL
+        # 1.1.1q 并发 HTTPS 抛 SSLEOFError」这类开即恢复的故障设计的。对上
+        # yfinance 限流它是反向的：把 1 次请求变成 3 次、间隔不到 2 秒，
+        # **在被拒绝时加倍施压**。2026-08-27 全天 687 次 429、rv_30d 0/30，
+        # 这个循环是放大器之一。现在：一次 429 就停，不重试。
+        try:
+            from yf_gate import is_rate_limit_error as _is_rl
+        except Exception:  # pragma: no cover - 闸门不可得时退化
+            def _is_rl(_e):
+                _m = str(_e).lower()
+                return "too many requests" in _m or "rate limited" in _m
+
         hist = None
         _dl_err = None
         for _attempt in range(3):
@@ -765,6 +860,8 @@ def calculate_iv_rv_spread(
                     break
             except Exception as _e_dl:  # noqa: BLE001 — 瞬时 SSL 错开即恢复
                 _dl_err = _e_dl
+                if _is_rl(_e_dl):
+                    break          # 限流：重试只会加深，直接降级
             if _attempt < 2:
                 time.sleep(0.7 * (_attempt + 1))
 

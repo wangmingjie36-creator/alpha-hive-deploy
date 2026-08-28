@@ -314,8 +314,31 @@ sec_breaker = CircuitBreaker("sec_edgar", failure_threshold=6, recovery_timeout=
 polymarket_limiter = RateLimiter(rate=2.0, burst=2)
 polymarket_breaker = CircuitBreaker("polymarket", failure_threshold=5, recovery_timeout=60.0)
 
-# yfinance: ~3 req/s
-yfinance_limiter = RateLimiter(rate=3.0, burst=2)
+# yfinance: 0.5 req/s（v0.45.56 从 3.0 下调）
+#
+# 3.0 是**推测值，从未被实测支持**，而实测证据全部指向它太快：
+#   · 2026-08-25/26/27 的 429 次数逐日 364 → 487 → 687，8/27 rv_30d 0/30
+#   · 2026-08-28 01:41 离线补算时以 ≈1.5 req/s 重放，**第一只标的即 429**
+# 取 0.5 req/s（2s 一次）。这仍是保守推测而非实测最优——真实上限待
+# `yf_gate.stats()` 攒够观测后收敛。⚠️ 待验证
+#
+# 注意：这个桶现在由 `yf_gate` 全局共享（patch 了 yfinance.download/Ticker），
+# 调快它等于同时调快所有 yfinance 调用点。
+#
+# 可用 `ALPHA_HIVE_YF_RATE` 覆盖（每秒请求数），便于在不改代码的前提下调参：
+#   ALPHA_HIVE_YF_RATE=1.0 python3 alpha_hive_daily_report.py
+# ⚠️ 调快之前先看 `scan_coverage_gate.py --date <当日>` 报的 429 次数 ——
+# 8/25 实测 364 次时数据还全、8/27 687 次时全空，临界点在两者之间尚未定位。
+def _yf_rate() -> float:
+    import os as _os
+    try:
+        _v = float(_os.environ.get("ALPHA_HIVE_YF_RATE", "") or 0.5)
+        return _v if 0 < _v <= 10 else 0.5      # 越界即忽略，不接受荒谬值
+    except (TypeError, ValueError):
+        return 0.5
+
+
+yfinance_limiter = RateLimiter(rate=_yf_rate(), burst=1)
 yfinance_breaker = CircuitBreaker("yfinance", failure_threshold=5, recovery_timeout=90.0)
 
 # Reddit (ApeWisdom): 保守限流

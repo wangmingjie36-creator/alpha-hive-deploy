@@ -50,11 +50,26 @@ class CrowdingDetector:
             }
         """
 
+        # ── v0.45.50：每个分量在输入缺失时给 None，而不是编一个读数 ────────
+        # v0.45.30 已经把**合成层**修对了（缺失分量在现存分量间重新归一化，
+        # 而不是按 0 计入）。但那层修复一直没生效 —— 因为每个分量在**上游**
+        # 就被 `.get(k, 默认值)` 填成了具体数字，归一化永远看不到「缺失」。
+        # 这与 risk_engine:834 的 σ 守卫、advanced_analyzer:111 的 0DTE 守卫
+        # 是同一形状：**守卫写对了，但被上游默认值架空**。
+        #
+        # 实测旧行为（空 metrics）：score=20.59 →「低拥挤度」→
+        # get_adjustment_factor 返回 **1.2，即加 20% 分**。
+        # 也就是说「一条拥挤度数据都没拿到」被系统当成了利好。
         scores = {}
 
+        def _num(v):
+            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
         # 1. 社交热度消息量（Reddit ApeWisdom 代理；StockTwits 公开 API 已 403 停用）
-        messages = metrics.get("social_messages_per_day", 0)
-        if messages < 10000:
+        messages = _num(metrics.get("social_messages_per_day"))
+        if messages is None:
+            scores["social_volume"] = None
+        elif messages < 10000:
             scores["social_volume"] = (messages / 10000) * 30
         elif messages < 50000:
             scores["social_volume"] = 30 + ((messages - 10000) / 40000) * 40
@@ -62,18 +77,20 @@ class CrowdingDetector:
             scores["social_volume"] = 70 + min(30, (messages - 50000) / 10000)
 
         # 2. Google Trends 热度
-        scores["google_trends"] = metrics.get("google_trends_percentile", 0)
+        scores["google_trends"] = _num(metrics.get("google_trends_percentile"))
 
-        # 3. Agent 共识强度
-        bullish_agents = metrics.get("bullish_agents", 3)
-        consensus_pct = (bullish_agents / 6) * 100
-        scores["consensus_strength"] = consensus_pct
+        # 3. Agent 共识强度 —— 旧默认值 3 恰好是 6 的一半 ⇒ 「共识 50%」
+        bullish_agents = _num(metrics.get("bullish_agents"))
+        scores["consensus_strength"] = (None if bullish_agents is None
+                                        else (bullish_agents / 6) * 100)
 
         # 4. （v0.45.30 删除）Polymarket 赔率变化速度 —— 详见 config.POLYMARKET_ENABLED
 
-        # 5. Seeking Alpha 页面浏览
-        page_views = metrics.get("seeking_alpha_page_views", 0)
-        if page_views > 100000:
+        # 5. Seeking Alpha 页面浏览 —— 旧默认值落进 else 分支给 20（最低档）
+        page_views = _num(metrics.get("seeking_alpha_page_views"))
+        if page_views is None:
+            scores["seeking_alpha_views"] = None
+        elif page_views > 100000:
             scores["seeking_alpha_views"] = 80
         elif page_views > 50000:
             scores["seeking_alpha_views"] = 60
@@ -83,14 +100,13 @@ class CrowdingDetector:
             scores["seeking_alpha_views"] = 20
 
         # 6. 短期内急速上升 + 高做空比例
-        # v0.41.4: .get(key, default) 挡不住显式 None（上游数据不可得时的诚实标记），
-        # 同款加固，防止 price_momentum > 15 比较崩溃
-        short_ratio = metrics.get("short_float_ratio")
-        short_ratio = short_ratio if short_ratio is not None else 0.0
-        price_momentum = metrics.get("price_momentum_5d")
-        price_momentum = price_momentum if price_momentum is not None else 0.0
-
-        if short_ratio > 0.3 and price_momentum > 15:
+        # 两个输入都要有才判得了 —— 判据同时用到它们，缺一个就不是「风险低」，
+        # 是「不知道」。旧实现把两者各自兜底成 0，必然落进 else 给 30。
+        short_ratio = _num(metrics.get("short_float_ratio"))
+        price_momentum = _num(metrics.get("price_momentum_5d"))
+        if short_ratio is None or price_momentum is None:
+            scores["short_squeeze_risk"] = None
+        elif short_ratio > 0.3 and price_momentum > 15:
             scores["short_squeeze_risk"] = 90
         elif short_ratio > 0.2 or price_momentum > 20:
             scores["short_squeeze_risk"] = 70
@@ -103,9 +119,16 @@ class CrowdingDetector:
         _present = {k: v for k, v in scores.items() if k in self.weights and v is not None}
         _wsum = sum(self.weights[k] for k in _present)
         if _wsum <= 0:
-            crowding_score = 0.0
-        else:
-            crowding_score = sum(self.weights[k] * _present[k] for k in _present) / _wsum
+            # v0.45.50：一个分量都算不出 ⇒ **返回 None，不是 0.0**。
+            # 0.0 会被 get_crowding_category 读成「低拥挤度」、被
+            # get_adjustment_factor 读成 1.2 加分 —— 数据缺失变成利好。
+            _log.warning("[%s] 拥挤度：全部分量均不可得，返回 None（不以 0 冒充低拥挤）",
+                         self.ticker)
+            return None, scores
+        crowding_score = sum(self.weights[k] * _present[k] for k in _present) / _wsum
+        if len(_present) < len(self.weights):
+            _log.debug("[%s] 拥挤度：%d/%d 个分量可用，已在其间重新归一化",
+                       self.ticker, len(_present), len(self.weights))
 
         return min(100, max(0, crowding_score)), scores
 
@@ -115,6 +138,8 @@ class CrowdingDetector:
         返回 (分类, 颜色)
         """
 
+        if score is None:
+            return "数据不可用", "gray"
         if score < 30:
             return "低拥挤度", "green"
         elif score < 60:
@@ -125,6 +150,10 @@ class CrowdingDetector:
     def get_adjustment_factor(self, score: float) -> float:
         """基于拥挤度调整综合评分的因子"""
 
+        # v0.45.50：不可得 ⇒ **1.0 中性**。既不加分也不折扣。
+        # 这三档里没有 1.0，所以旧实现下「没数据」只能落进 <30 那一档拿 1.2。
+        if score is None:
+            return 1.0
         # 拥挤度越高，评分折扣越大
         if score < 30:
             return 1.2  # 低拥挤度，加权 +20%
@@ -410,13 +439,33 @@ class CrowdingDetector:
             return "🟢 <strong>低拥挤度</strong><br>信息相对不为人知。存在信息不对称的机会。"
 
     def _get_metric_display(self, key: str, metrics: Dict) -> str:
-        """获取指标的显示值"""
+        """获取指标的显示值；任一分量不可得时显示「—」而不是崩或冒充 0。
+
+        ⚠️ 这个 dict 是**急求值**的 —— 即使只取一个 key，其余四项也会被计算。
+        所以任何一项对 None 抛异常，整个函数就崩，与请求哪个 key 无关。
+        v0.45.44 只修了 short_squeeze_risk 一项，其余四项仍在用
+        `.get(k, 0)`（挡不住「键存在但值为 None」）—— 由 Phase 2 退化输入
+        护栏抓到，本次统一修。
+        """
+        def _fmt(field, spec, suffix="", prefix=""):
+            v = metrics.get(field)
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                return "—"
+            return prefix + format(v, spec) + suffix
+
         displays = {
-            "social_volume": f"{metrics.get('social_messages_per_day', 0):,} 条/天",
-            "google_trends": f"{metrics.get('google_trends_percentile', 0):.0f} 百分位",
-            "consensus_strength": f"{metrics.get('bullish_agents', 0)}/6 看多",
-            "seeking_alpha_views": f"{metrics.get('seeking_alpha_page_views', 0):,} 次/周",
-            "short_squeeze_risk": f"+{metrics.get('price_momentum_5d', 0):.1f}% (5d)"
+            "social_volume": _fmt("social_messages_per_day", ",", " 条/天"),
+            "google_trends": _fmt("google_trends_percentile", ".0f", " 百分位"),
+            "consensus_strength": (
+                "—/6 看多" if not isinstance(metrics.get("bullish_agents"), (int, float))
+                else f"{metrics['bullish_agents']}/6 看多"
+            ),
+            "seeking_alpha_views": _fmt("seeking_alpha_page_views", ",", " 次/周"),
+            "short_squeeze_risk": (
+                "— (5d, 数据不可用)"
+                if not isinstance(metrics.get("price_momentum_5d"), (int, float))
+                else f"+{metrics['price_momentum_5d']:.1f}% (5d)"
+            ),
         }
         return displays.get(key, "N/A")
 
