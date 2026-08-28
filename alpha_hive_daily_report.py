@@ -931,52 +931,78 @@ class AlphaHiveDailyReporter:
             except Exception as e:
                 _log.debug("预测清理失败: %s", e)
 
+    def _attach_thesis_breaks(self, swarm_results: Dict) -> None:
+        """把失效条件写进 swarm_results —— **必须在 _build_swarm_report 之前调用**。
+
+        v0.45.57：这段原本住在 `_post_scan_notify` 里，是 Google Calendar 提醒
+        （v0.45.40 移除）留下的残肢。日历没了之后它继续写一个**没有任何读者**的字段：
+        `_build_swarm_report` 在它之前一行就已经把 markdown 渲染完了，
+        `.swarm_results_*.json` 也在更早的 `_post_scan_enrichment` 里落了盘。
+        所以 v0.45.55 修好的 KeyError 只是让一个死字段填对了值。
+        搬到扫描后的第一步，渲染层和两份 JSON 才都看得见。
+
+        两种 schema 并存，逐条格式化且逐条隔离（v0.45.55）：
+          人工条件：metric / trigger      机器条件：field / op / value（_machine=true）
+        一条读不懂只丢它自己，不再连坐同一标的的其余条件。
+        """
+        try:
+            from thesis_breaks import ThesisBreakConfig
+        except Exception as _tbe:
+            _log.warning("thesis_break 配置加载失败，本轮无失效条件: %s", _tbe)
+            return
+        _n_ok = _n_bad = 0
+        _covered = 0
+        for _tk, _row in swarm_results.items():
+            try:
+                _tb_cfg = ThesisBreakConfig.get_breaks_config(_tk)
+            except Exception as _e:
+                _log.warning("thesis_break 读取 %s 配置失败: %s", _tk, _e)
+                continue
+            if not _tb_cfg:
+                continue
+            _lv = {}
+            for _key, _name in (("level_1_warning", "l1"), ("level_2_stop_loss", "l2")):
+                _out = []
+                for _c in (_tb_cfg.get(_key, {}) or {}).get("conditions", []) or []:
+                    _txt = _format_break_condition(_c)
+                    if _txt:
+                        _out.append(_txt)
+                        _n_ok += 1
+                    else:
+                        _n_bad += 1
+                _lv[_name] = _out
+            _row["thesis_break_l1"] = _lv["l1"]
+            _row["thesis_break_l2"] = _lv["l2"]
+            if _lv["l1"] or _lv["l2"]:
+                _covered += 1
+        if _n_bad:
+            _log.warning("thesis_break：%d 条件无法识别已跳过（成功 %d 条）——"
+                         "**其余条件不受影响**，这正是逐条隔离要保证的",
+                         _n_bad, _n_ok)
+        _total = len(swarm_results)
+        if _total:
+            _log.info("失效条件覆盖：%d/%d 只标的（%d 条）", _covered, _total, _n_ok)
+        # CLAUDE.md 硬性规则：任何结论必须附失效条件。全灭时必须吵，
+        # 因为 8/27 那次正是「日志一行 WARNING，报告 0/30」而没人发现。
+        if _total and _covered == 0:
+            _log.error("🚨 失效条件全灭：%d 只标的一条都没有 —— "
+                       "CLAUDE.md 硬性规则「任何结论必须附失效条件」已空转", _total)
+
     def _post_scan_notify(self, ctx: '_SwarmContext', swarm_results: Dict,
                           report: Dict, elapsed: float) -> None:
         """扫描后通知：Slack推送 + 失效条件 + 日历 + 会话存储 + 向量记忆 + 反馈循环"""
         # 逐标的机会/风险通知已禁用（减少 Slack DM 噪音）
         # Bot 只发：1) LLM 确认提示  2) 富文本日报推送成功
 
-        # 失效条件快照（v0.45.40：日历提醒随 Google Calendar 一并移除，
-        # 告警改由 Telegram Bot /alert 承担；此处只保留进报告的 l1/l2 数据）
-        #
-        # v0.45.55：配置里**两种 schema 并存**，逐条格式化且逐条隔离。
-        #   人工条件 120 条：metric / trigger
-        #   机器条件 210 条：field / op / value（v0.45.50 于 2026-08-27 新增，_machine=true）
-        # 旧写法 `c["metric"] + "：" + c["trigger"]` 在列表推导里对机器条件抛
-        # KeyError，被外层 except 整块吞掉 —— 结果是 **30 只标的的 l1/l2 全部为空**，
-        # 日志只留一行 WARNING。实测 8/26 与 8/27 两天各 0/30。
-        # 而 CLAUDE.md 写着「任何结论必须附失效条件」——这条硬性规则空转了两天。
-        try:
-            from thesis_breaks import ThesisBreakConfig
-            _n_ok = _n_bad = 0
-            for _opp in report.get("opportunities", []):
-                _tk = _opp.get("ticker", "")
-                _tb_cfg = ThesisBreakConfig.get_breaks_config(_tk)
-                if not _tb_cfg:
-                    continue
-                _lv = {}
-                for _key, _name in (("level_1_warning", "l1"), ("level_2_stop_loss", "l2")):
-                    _out = []
-                    for _c in (_tb_cfg.get(_key, {}) or {}).get("conditions", []) or []:
-                        _txt = _format_break_condition(_c)
-                        if _txt:
-                            _out.append(_txt)
-                            _n_ok += 1
-                        else:
-                            _n_bad += 1
-                    _lv[_name] = _out
-                _opp["thesis_break_l1"] = _lv["l1"]
-                _opp["thesis_break_l2"] = _lv["l2"]
-                if _tk in swarm_results:
-                    swarm_results[_tk]["thesis_break_l1"] = _lv["l1"]
-                    swarm_results[_tk]["thesis_break_l2"] = _lv["l2"]
-            if _n_bad:
-                _log.warning("thesis_break：%d 条件无法识别已跳过（成功 %d 条）——"
-                             "**其余条件不受影响**，这正是逐条隔离要保证的",
-                             _n_bad, _n_ok)
-        except Exception as _tbe:
-            _log.warning("thesis_break 配置加载失败: %s", _tbe)
+        # 失效条件回填进 report["opportunities"]（保持 JSON 形状不变）。
+        # v0.45.57：**计算已上移到 _attach_thesis_breaks，在建报告之前跑**——
+        # 原先算在这里（_post_scan_notify），而 _build_swarm_report 早一行就跑完了，
+        # 渲染层永远看不到它。这里只做搬运，不再重算。
+        for _opp in report.get("opportunities", []):
+            _sr = swarm_results.get(_opp.get("ticker", ""), {})
+            if "thesis_break_l1" in _sr:
+                _opp["thesis_break_l1"] = _sr["thesis_break_l1"]
+                _opp["thesis_break_l2"] = _sr["thesis_break_l2"]
 
         # 保存会话
         if self.memory_store and self._session_id:
@@ -1235,6 +1261,7 @@ class AlphaHiveDailyReporter:
                 _log.info("✅ 标的完整性：%d/%d 全部产出",
                           len(pending_tickers), len(pending_tickers))
 
+        self._attach_thesis_breaks(swarm_results)
         elapsed = self._post_scan_enrichment(ctx, swarm_results)
         try:
             self._post_scan_metrics(ctx, swarm_results, elapsed)

@@ -395,28 +395,77 @@ def _build_bear_contrarian(sorted_results: list) -> List[str]:
     return md
 
 
+def _build_thesis_breaks(sorted_results: list) -> List[str]:
+    """版块 7.5：失效条件（thesis break）—— CLAUDE.md 硬性规则的落地处。
+
+    v0.45.57 新增。此前 `thesis_break_l1/l2` 算是算了，**全项目没有任何读者**：
+    唯一叫「失效条件」的地方（7 节表格最后一列）装的是 GuardBee 共振摘要。
+    规则要求的是「什么情况下我该认错」，那一列答的却是「为什么我是对的」。
+    """
+    md: List[str] = []
+    md.append("### 7.5) 失效条件（thesis break）")
+    md.append("")
+    md.append("> 论点在什么情况下作废。标「自动」的由历史分位推出，"
+              "与人工判断不是一个重量。")
+    md.append(">")
+    md.append("> ⚠️ 自动条件用的是**全标的池化**分位（非逐标的口径）——"
+              "同一个 IV / 评分阈值套在所有标的上，"
+              "低波动标的（如 BRK-B、JNJ）可能永远触发不了其中的 IV 条件。")
+    md.append("")
+    _missing = []
+    for ticker, data in sorted_results:
+        l1 = data.get("thesis_break_l1") or []
+        l2 = data.get("thesis_break_l2") or []
+        if not l1 and not l2:
+            _missing.append(ticker)
+            continue
+        md.append(f"**{ticker}**")
+        if l1:
+            md.append("- L1 预警：")
+            for c in l1:
+                md.append(f"  - {c}")
+        if l2:
+            md.append("- L2 止损：")
+            for c in l2:
+                md.append(f"  - {c}")
+        md.append("")
+    if _missing:
+        md.append(f"⚠️ **无失效条件配置**（{len(_missing)} 只）："
+                  f"{'、'.join(_missing)} —— 这些标的的结论不满足 "
+                  f"CLAUDE.md「任何结论必须附失效条件」，请补 `thesis_breaks_config.json`。")
+        md.append("")
+    return md
+
+
 def _build_composite_judgment(sorted_results: list) -> List[str]:
     """版块 7：综合判断 & 信号强度（含 AI 叙事、历史类比、评分调整、交叉验证）"""
     md: List[str] = []
     # 主表
     md.append("## 7) 综合判断 & 信号强度")
     md.append("")
-    md.append("| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 失效条件 |")
-    md.append("|------|------|--------|------|---------------|-------|---------|")
+    # v0.45.57：最后一列原先标题写「失效条件」，装的却是 GuardBee 的共振摘要
+    # （"共振✅ 5 Agent 同向" / "信号分散"）—— 那是**论点成立的理由**，
+    # 与失效条件正好相反。列名改回它真实的内容，真的失效条件见 7.5 节。
+    md.append("| 标的 | 方向 | 综合分 | 共振 | 投票(多/空/中) | 数据% | 共振判定 | 失效条件 |")
+    md.append("|------|------|--------|------|---------------|-------|---------|---------|")
     for ticker, data in sorted_results:
         res = "Y" if data["resonance"]["resonance_detected"] else "N"
         ab = data["agent_breakdown"]
         data_pct = data.get("data_real_pct", 0)
         guard = data.get("agent_details", {}).get("GuardBeeSentinel", {})
         guard_discovery = guard.get("discovery", "")
-        thesis_break = "信号分散" if not guard_discovery else guard_discovery.split("|")[0].strip()[:30]
+        verdict = "信号分散" if not guard_discovery else guard_discovery.split("|")[0].strip()[:30]
+        _n1 = len(data.get("thesis_break_l1") or [])
+        _n2 = len(data.get("thesis_break_l2") or [])
+        tb = f"L1×{_n1} L2×{_n2}" if (_n1 or _n2) else "⚠️ 无"
         md.append(
             f"| **{ticker}** | {data['direction'].upper()} | "
             f"{data['final_score']:.1f} | {res} | "
             f"{ab['bullish']}/{ab['bearish']}/{ab['neutral']} | "
-            f"{data_pct:.0f}% | {thesis_break} |"
+            f"{data_pct:.0f}% | {verdict} | {tb} |"
         )
     md.append("")
+    md.extend(_build_thesis_breaks(sorted_results))
 
     # LLM 多空综合叙事
     synthesis_lines = []
