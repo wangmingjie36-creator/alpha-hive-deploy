@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.65] — 2026-08-29 — 占位（进行中：economic_calendar 硬编码日历只到 2026-12，补 2027/2028 + 加陈旧告警与地平线单测）
+
 ## [0.45.64] — 2026-08-29 — 单测里的定时炸弹：分界线在走，写死的 fixture 日期钉在原地
 
 `tests/test_pipeline.py::TestBacktesterCleanup::test_cleanup_deletes_old_predictions`
