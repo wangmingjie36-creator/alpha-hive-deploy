@@ -23,15 +23,35 @@ def _hist(rows):
 
 @pytest.fixture
 def _yf(monkeypatch):
-    """把 yfinance 换成可控桩，避免测试联网。"""
-    holder = {}
+    """把 yfinance 换成可控桩，避免测试联网。
+
+    ⚠️ v0.45.72 修：原写法是 `monkeypatch.setattr(dp, "yf", ..., raising=False)`,
+    而 `data_pipeline` 里**没有**模块级的 `yf` —— 四处 `import yfinance as yf`
+    全是函数内局部导入，局部名把模块属性整个盖住。于是这个桩谁也没读到，
+    五条用例一路打真外网；`raising=False` 又恰好把「属性不存在」这唯一的
+    报警吞了。改为 patch `yfinance.Ticker` 本身：函数里 `yf.Ticker(...)` 是
+    调用时在真模块上查属性，这样才盖得住局部 import。
+
+    症状会漂：2026-08-29 写这些用例时 yfinance 的 8/28 行 Close 恰好是 NaN，
+    真网返回的形状与桩碰巧一致，全绿；等 yfinance 回填了 8/28 的真实收盘，
+    同一份代码就在 8/29 之后变红——**红的不是生产代码，是这条从没生效过的桩**。
+    （`test_normal_day_unaffected` 更彻底：它拿真实行情断言真实行情，
+    桩失效也照样绿。）
+    """
+    holder = {"calls": 0}
 
     class _T:
         def __init__(self, ticker): pass
-        def history(self, **kw): return holder["hist"]
 
-    monkeypatch.setattr(dp, "yf", type("Y", (), {"Ticker": _T}), raising=False)
-    return holder
+        def history(self, **kw):
+            holder["calls"] += 1
+            return holder["hist"]
+
+    monkeypatch.setattr("yfinance.Ticker", _T)
+    yield holder
+    # 桩没被调用 = 打了真网 = 这条用例测的不是它以为在测的东西。
+    # 这道断言就是上面那半年没人发现的漏洞的看门人。
+    assert holder["calls"] > 0, "yfinance 桩一次都没被调用 —— 用例多半打了真外网"
 
 
 def test_uses_cloud_snapshot_when_target_day_close_is_nan(_yf, monkeypatch):

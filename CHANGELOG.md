@@ -7,7 +7,77 @@
 
 ## [0.45.73] — 2026-08-29 — 占位（进行中：关掉 crewai 导入时的 install 遥测 phone-home）
 
-## [0.45.72] — 2026-08-29 — 占位（进行中：修 test_historical_price_anchor 的陈旧 fixture 日期）
+## [0.45.72] — 2026-08-29 — 一个没锚定的 fixture，一个没生效的桩：两条测试各自相信着一件没发生的事
+
+起点是 `test_historical_price_anchor.py::test_as_of_date_in_past_skips_live_fetcher`
+在 2026-08-29 变红。**生产代码是对的**——红的是测试自己。
+排查中又牵出第二条：`test_cloud_snapshot_price.py` 的 5 条用例里有 4 条同日变红，
+根因完全不同，但形状是同一族：**测试测的不是它以为在测的东西**。
+
+### Fixed 1 — fixture 从没锚定过它要测的那一天（`tests/test_historical_price_anchor.py`）
+
+假日线写死起点、被测日期另写死一个：
+
+```python
+idx = pd.date_range("2026-06-22", periods=len(prices), freq="D")  # 末行 = 7/17
+result = fetch_stock_data("NVDA", as_of_date="2026-07-21")        # 目标日 = 7/21
+```
+
+两个日期各写各的，中间 4 天缺口从 v0.41.6 起就在，没有任何东西校验它们对得上。
+一直绿，是因为当时的生产代码会拿末行顶上；v0.45.69/0.45.70 加了
+「末行不是目标日就拒绝、**不以前一交易日冒充**」的闸之后，这个缺口才第一次被看见。
+
+改为**从被测日期倒推**：`pd.date_range(end=last_date, periods=..., freq="D")`，
+并在 helper 里断言 `idx[-1] == last_date`。periods 或日期怎么改，锚点都不松脱。
+freq 保持 `"D"` 是刻意的——`freq="B"` 遇到 end 落在周末会静默往前回滚，
+那正是本次要根治的漂移。同形教训见 v0.45.64「单测里的定时炸弹」：**日期能推就别钉**。
+
+### Fixed 2 — 一个从没生效过的 yfinance 桩（`tests/test_cloud_snapshot_price.py`）
+
+```python
+monkeypatch.setattr(dp, "yf", type("Y", (), {"Ticker": _T}), raising=False)
+```
+
+`data_pipeline` 里**没有**模块级的 `yf`——四处 `import yfinance as yf` 全是
+函数内局部导入，局部名把模块属性整个盖住。这个桩谁也没读到，5 条用例一路打真外网。
+`raising=False` 又恰好把「属性不存在」这唯一的报警吞掉了。
+
+为什么 8/29 当天写完是绿的、8/29 之后变红：写用例那天 yfinance 的 8/28 行
+Close 恰好就是 `NaN`，**真网返回的形状与桩碰巧一致**；等 yfinance 回填了 8/28 的
+真实收盘，同一份代码就红了。红的不是生产代码，是这条桩。
+（`test_normal_day_unaffected` 更彻底：它拿真实行情断言真实行情，桩失效也照样绿——
+它的 fixture 数字本来就是从真实行情抄来的。）
+
+改为 patch `yfinance.Ticker` 本身（调用时在真模块上查属性，盖得住局部 import），
+并在 fixture teardown 加一道看门断言：**桩一次都没被调用 = 打了真网**。
+用例耗时 3.07s → 0.41s，这个降幅本身就是「网络没了」的凭据。
+
+### Added — 给拒绝闸补上真覆盖（`tests/test_historical_price_anchor.py`）
+
+修好锚点之后有个反直觉的后果：**本文件对那道拒绝闸的覆盖归零了**。
+末行现在都正好落在目标日，没有一条用例还会走到闸上。实测把
+`if _last_date != as_of:` 改成 `if False:`（等于整个回退 v0.45.69/70），
+修完的 5 条用例**照样全绿**——旧那条脱靶的用例是「靠自己变红」在覆盖这道闸的，
+那不叫覆盖。
+
+新增 `TestRefusesToSubstituteNeighbouringTradingDay`，只钉本文件自己的教训：
+日线整段停在目标日之前（不是 NaN，是压根没这一行）时必须标不可用。
+NaN 形状与云端快照兜底的语义由 `test_cloud_snapshot_price.py` 专管，不在两处并存。
+
+### 判据（mutation check，`--maxfail=99`）
+
+⚠️ `pyproject.toml` 设了 `maxfail=1`，不显式抬高就只看得见第一条红的。
+
+| 回退的守卫 | 变红的用例 |
+|---|---|
+| 「不以前一交易日冒充」拒绝闸（v0.45.69/70） | 5 条 |
+| NaN 剔除 `dropna()`（v0.45.69） | 4 条 |
+| 云端快照兜底（v0.45.70） | 2 条 |
+
+三次全部咬住，且爆炸半径各不相同（=不是一条断言在重复报警）。
+`data_pipeline.py` **本次一行未改**——全部改动都在测试侧。
+`data_pipeline` 相关 12 个测试文件：183 passed（改前 179 passed + 4 failed）。
+
 
 ## [0.45.71] — 2026-08-29 — 那条为"崩溃"写的闸，拦不住崩溃：一个联网 flake 掀出的恒真断言
 
