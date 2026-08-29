@@ -267,9 +267,39 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         # 只保留 <= as_of 的行（防止误传未来日期，或 yfinance 返回多余数据）
         _idx_dates = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
         hist = hist[_idx_dates.date <= as_of]
-        if hist.empty or hist["Close"].iloc[-1] <= 0:
+        # v0.45.69：**先丢掉 Close 为 NaN 的行，再判空。**
+        # 原写法 `hist["Close"].iloc[-1] <= 0` 挡不住 NaN —— NaN 的任何比较
+        # 都返回 False，于是 `price=float(NaN)` 一路流到下游。
+        # 实测 2026-08-29 补跑 8/28（周六跑周五）：yfinance 尾行 Close 是 NaN，
+        # 30 只标的全部拿到 price=NaN。而 NaN 还是 truthy，
+        # `base._get_stock_data` 的 `if not price or price <= 0` 也拦不住它，
+        # 最终 OptionsAgent 收到 stock_price=NaN → ATM 带 [NaN, NaN] 恒不匹配
+        # → raw_ivs 全空 → data_quality 判 degraded → iv_current 回落陈缓存。
+        # 一个 NaN，穿过四道各自写着「<= 0」的守卫。
+        _closes = hist["Close"].dropna()
+        if hist.empty or _closes.empty or _closes.iloc[-1] <= 0:
             fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
             fb["_data_unavailable"] = True
+            return fb
+        hist = hist.loc[_closes.index]      # 后续窗口一并用清洗过的行，口径一致
+
+        # v0.45.69 ⚠️ 丢完 NaN 之后必须校验**剩下的最后一行确实是 as_of 当天**。
+        # 否则「丢掉 NaN 行」会静默变成「用前一交易日的收盘价冒充目标日」——
+        # 那正是 2026-08-24 被写进 signal_archive 隔离名单的那种口径污染，
+        # 只不过换了个更隐蔽的入口。
+        # 实测 2026-08-29：yfinance 的 2026-08-28 行 Close=NaN 而 Volume=1.94 亿
+        # （当天确实交易了，只是收盘价拿不到），丢掉后末行变成 8/27 的 227.98，
+        # 而 8/28 的真实收盘按云端 CBOE 快照是 217.55 —— 差 4.8%。
+        _last_dt = hist.index[-1]
+        _last_date = (_last_dt.tz_localize(None) if getattr(_last_dt, "tzinfo", None) else _last_dt).date()
+        if _last_date != as_of:
+            _log.warning(
+                "[历史补跑] %s @ %s：yfinance 无该日有效收盘价（最近有效行是 %s）——"
+                "**不以前一交易日冒充**，标记不可用",
+                ticker, as_of_date, _last_date)
+            fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
+            fb["_data_unavailable"] = True
+            fb["_reason"] = f"no_close_on_{as_of_date}"
             return fb
 
         data = StockData(

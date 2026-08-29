@@ -5,7 +5,65 @@
 
 ---
 
-## [0.45.69] — 2026-08-29 — 占位（进行中：一个 NaN 穿过四道写着「<= 0」的守卫）
+## [0.45.69] — 2026-08-29 — 一个 NaN 穿过四道写着「<= 0」的守卫
+
+补跑 2026-08-28 时 30 只标的**全部** `data_quality=degraded`、`iv_skew_ratio=None`、
+`gamma_exposure=0.0`。追到底是**一个 NaN**，它穿过了四道各自写着 `<= 0` 的守卫。
+
+### 为什么 NaN 谁都拦不住
+
+Python 里 `float('nan')` 有两个性质，合起来正好绕开常规写法：
+
+- **任何比较都返回 False** → `price <= 0`、`total <= 0` 全部放行
+- **它是 truthy** → `if not price`、`if not atm_price` 也拦不住
+
+四道守卫依次失守：
+
+| 位置 | 守卫写法 | 结果 |
+|---|---|---|
+| `data_pipeline._fetch_historical_stock_data` | `hist["Close"].iloc[-1] <= 0` | `price=float(NaN)` |
+| `swarm_agents/base._get_stock_data` | `if not price or price <= 0` | 不标 `_data_unavailable` |
+| `options_analyzer.analyze` | `if not atm_price` | ATM 带 `[NaN, NaN]` |
+| `calculate_gamma_exposure`（v0.45.63 新写） | `stock_price is None or <= 0` | 返回 NaN |
+
+末端 `_sanitize_result` 再把 NaN 转成 **0.0** ——
+**v0.45.63 刚消灭的那个假读数，在出口被原样还原了。**
+
+链路后果：ATM 带是 `[NaN, NaN]` ⇒ `NaN <= strike <= NaN` 恒 False ⇒
+`raw_ivs` 全空 ⇒ `data_quality` 判 degraded ⇒ `iv_current` 回落
+`last_valid_iv` 陈缓存（NVDA 拿到 8/27 的 34.64）。
+
+### 根因：yfinance 有 8/28 的行，但 Close 是 NaN
+
+```
+2026-08-27  Close=227.98  Volume=298,909,800
+2026-08-28  Close=nan     Volume=194,036,188   ← 当天确实交易了
+```
+
+### Fixed
+
+- `data_pipeline`：先 `dropna()` 再判空，后续窗口一并用清洗过的行
+- **`data_pipeline` ⚠️ 同时加日期校验** —— 只 dropna 会让「丢掉 NaN 行」
+  静默变成「用**前一交易日**冒充目标日」：末行变成 8/27 的 227.98，
+  而 8/28 真实收盘（云端 CBOE 快照）是 217.55，差 **4.8%**。
+  那正是 2026-08-24 被写进 `signal_archive` 隔离名单的口径污染，换了个更隐蔽的入口。
+  现在拿不到目标日收盘就返回 `_data_unavailable` + `_reason`，**不冒充**。
+- `swarm_agents/base._get_stock_data`：加 `isfinite` 校验
+- `options_analyzer`：`calculate_iv_skew` / `calculate_gamma_exposure` /
+  `analyze` 的 `atm_price` 兜底，三处加 `_math.isfinite`
+
+### 教训
+
+**v0.45.63 我写的守卫是 `is None or <= 0`，二次检查也没抓到 NaN。**
+本项目「安全默认值」判据要加一条：*写数值守卫时，先问 NaN 会怎么走。*
+`<= 0` 与 `if not x` 都不是 NaN 的守卫。
+
+### ⚠️ 未完成：2026-08-28 的补跑仍无法产出正确数据
+
+yfinance 没有 8/28 的收盘价，而云端快照有（`price_at_fetch=217.55`，
+CBOE 延时，8/28 17:02 ET 抓取，`vintage_status: ok`）。
+**取价链目前不消费云端快照的价格**，所以补跑只能诚实地标"不可用"。
+把云端快照价接进补跑取价链是独立改动，未做。**网站未部署 8/28 数据。**
 
 ## [0.45.68] — 2026-08-29 — 二次检查 v0.45.65/67：四条自造 bug，三条是守卫自己在撒谎
 

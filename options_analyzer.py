@@ -691,7 +691,12 @@ class OptionsAnalyzer:
         # 于是这道守卫只剩下误伤的那一半：AMC（$2.70）实测 gamma_exposure 恒为 0.0。
         # 「用绝对价格阈值过滤哨兵值」这个形状 MEMORY 里已记过一次
         # （曾把 AMC≈$3 的真实价格全滤光）——同一只票，同一个错法，第二次。
-        if stock_price is None or stock_price <= 0:
+        # v0.45.69：**NaN 必须显式挡掉。** NaN 的任何比较都返回 False，
+        # 所以 `stock_price <= 0` 放它过去；它还是 truthy，连 `if not x` 也拦不住。
+        # 实测 2026-08-28 补跑：上游传进来的就是 NaN，于是 call_gamma=NaN、
+        # total=NaN、`total <= 0` 为 False → 返回 NaN → 出口的 `_sanitize_result`
+        # 把 NaN 转成 **0.0** —— v0.45.63 刚消灭的那个假读数，在出口被原样还原。
+        if stock_price is None or not _math.isfinite(stock_price) or stock_price <= 0:
             return None
 
         # 标准 notional GEX 计算
@@ -732,8 +737,13 @@ class OptionsAnalyzer:
         # 与 calculate_gamma_exposure 同一处错法——样本链在 analyze() 里
         # 已被 `source == "sample"` 早退拦掉，本函数见不到它；这道守卫只剩误伤。
         # AMC（$2.70）因此自入库起 skew_ratio 恒为 None、signal 恒为「数据不足」。
-        if not calls_df or not puts_df or stock_price is None or stock_price <= 0:
-            return {"skew_ratio": None, "skew_signal": "数据不足"}
+        # v0.45.69：同上，NaN 会穿过 `<= 0`（NaN 比较恒 False）。
+        # 穿过后 put_target/tolerance 全是 NaN，两侧筛选恒空，
+        # 结果是「OTM 期权数据不足」—— 一个**看起来像数据问题的诊断**，
+        # 真实原因却是上游价格是 NaN。错的诊断比没有诊断更费时间。
+        if (not calls_df or not puts_df or stock_price is None
+                or not _math.isfinite(stock_price) or stock_price <= 0):
+            return {"skew_ratio": None, "skew_signal": "数据不足（股价非有限值）"}
 
         import math
 
@@ -1832,7 +1842,11 @@ class OptionsAgent:
         # 2. 过滤 <7 天到期的期权（临近到期 IV 被 Theta 衰减人为放大）
         # 3. 用中位数代替均值，抗极端值
         atm_price = stock_price
-        if not atm_price:
+        # v0.45.69：`if not atm_price` 拦不住 NaN（NaN 是 truthy），于是
+        # atm_lower/upper 全成 NaN，`NaN <= strike <= NaN` 恒 False，
+        # raw_ivs 必然为空 → data_quality 判成 degraded → iv_current 回落
+        # last_valid_iv 缓存。2026-08-28 补跑 9/9 只标的全中此坑。
+        if not atm_price or not _math.isfinite(atm_price):
             all_strikes = [c.get("strike", 0) for c in calls_df if c.get("openInterest", 0) > 100]
             atm_price = statistics.median(all_strikes) if all_strikes else 145.0
         atm_lower = atm_price * 0.80

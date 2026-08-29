@@ -94,7 +94,13 @@ class BeeAgent(ABC):
 
         # WARN-3 保护：price<=0 说明所有数据源不可用
         price = data.get("price", 0)
-        if not price or price <= 0:
+        # v0.45.69：NaN 必须显式挡。`not price` 拦不住（NaN 是 truthy），
+        # `price <= 0` 也拦不住（NaN 比较恒 False）—— 2026-08-28 补跑就是
+        # 从这里漏过去的，下游一路当成真价格用。
+        import math as _m
+        if (price is None or not isinstance(price, (int, float))
+                or (isinstance(price, float) and not _m.isfinite(price))
+                or price <= 0):
             _log.warning(
                 "%s._get_stock_data(%s): price=%s, 标记数据不可用",
                 self.__class__.__name__, ticker, price
