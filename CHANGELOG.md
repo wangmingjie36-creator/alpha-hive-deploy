@@ -5,7 +5,64 @@
 
 ---
 
-## [0.45.70] — 2026-08-29 — 占位（进行中：云端快照价接进补跑取价链）
+## [0.45.70] — 2026-08-29 — 云端快照价接进补跑取价链；8/28 补跑完成并上线
+
+v0.45.69 让 NaN 不再冒充价格，但补跑因此**拿不到任何价格**：
+yfinance 有 2026-08-28 那一行，`Volume=1.94 亿`（当天确实交易了），
+但 `Close=NaN`。而云端快照有该日真实收盘（目标日 17:02 ET 从 CBOE 抓）。
+
+### Added — `data_pipeline._fetch_historical_stock_data` 的快照兜底
+
+yfinance 拿不到目标日收盘时改问 `cloud_snapshot_loader.load_ticker()`。
+**不另造日期闸** —— 该函数内部已校验 `vintage_date == date`，vintage 不符返回 None；
+再造一道就是两个口径并存。
+
+三条约束：
+- 快照价必须是**有限正数**（NaN / 0 / 负数 / 字符串一律不收）
+- 来源标进 `source_name`（实测为 `cloud_snapshot:cboe_close`）+ `_price_from_cloud_snapshot`
+- **`volume_ratio` 不给** —— 它要拿目标日成交量比均量，而这条路径下目标日的量
+  本来就没取到，用前一日的量冒充会静默失真。动量标 `5d_snapshot_spliced`（拼接口径）
+
+目标日有真实收盘时**逐字节走原路径**，连 `load_ticker` 都不调用（测试有断言）。
+
+### 2026-08-28 补跑结果（已部署）
+
+```
+30/30 标的  data_quality=real   字段缺失：无
+err=0/240   real=92%            失效条件 275 条覆盖 30/30
+```
+
+口径核验（价格必须是 8/28 的，且不等于 8/27）：
+
+| | 8/28 | 8/27 |
+|---|---|---|
+| NVDA | 217.55 | 227.98 |
+| MSFT | 513.53 | 505.06 |
+| AMC | 2.59 | 2.70 |
+| NVDA `iv_current` | 33.44 | 34.64 |
+| NVDA `total_oi` | 2,281,026 | 2,497,713 |
+
+gh-pages 部署 `120d950`：12 份 ML 报告 + 日报 + 看板。
+**12 份是设计值**（`ALPHA_HIVE_ML_REPORT_MAX` 默认 12），日报覆盖全部 30 只。
+
+线上验证 —— 用户最初问的那只：
+
+```
+AMC 8/28  IV Skew 比 = 0.84      （8/27 是【空】）
+          IV Rank = 18.8%  期限结构 = CONTANGO  RV30 = 99.1%
+```
+
+### 已知限制（未做）
+
+`generate_ml_report.py` **无法为过去日期生成报告** —— 它用 `pdt_today()`，
+没有覆盖入口，`--date` 参数不存在。所以编排器 Step 3 的「补齐缺失标的」
+只在当天有效；补跑历史日只能拿到 Step 2 产出的前 12 名。
+没有 monkey-patch 绕开，那会产出**日期标错**的文件。
+
+### Added — `tests/test_cloud_snapshot_price.py`（5 条）
+
+含四次 mutation check：去掉快照兜底 / 去掉快照价校验 / 去掉日期校验 /
+volume_ratio 改用前一日冒充 —— 全部变红。
 
 ## [0.45.69] — 2026-08-29 — 一个 NaN 穿过四道写着「<= 0」的守卫
 

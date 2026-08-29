@@ -293,14 +293,59 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         _last_dt = hist.index[-1]
         _last_date = (_last_dt.tz_localize(None) if getattr(_last_dt, "tzinfo", None) else _last_dt).date()
         if _last_date != as_of:
-            _log.warning(
-                "[历史补跑] %s @ %s：yfinance 无该日有效收盘价（最近有效行是 %s）——"
-                "**不以前一交易日冒充**，标记不可用",
-                ticker, as_of_date, _last_date)
-            fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
-            fb["_data_unavailable"] = True
-            fb["_reason"] = f"no_close_on_{as_of_date}"
-            return fb
+            # v0.45.70：yfinance 拿不到目标日收盘时，改问云端快照。
+            # 快照是**目标日收盘后**（约 17:00 ET）从 CBOE 抓的，正是该日的价；
+            # `load_ticker` 内部已校验 `vintage_date == date`，vintage 不符返回 None，
+            # 所以这里不需要再造一道日期闸 —— 造了就是两个口径并存。
+            _snap_px = None
+            try:
+                import cloud_snapshot_loader as _csl
+                _snap = _csl.load_ticker(as_of_date, ticker)
+                if _snap:
+                    _v = _snap.get("price_at_fetch")
+                    if isinstance(_v, (int, float)) and math.isfinite(_v) and _v > 0:
+                        _snap_px = float(_v)
+                        _snap_src = str(_snap.get("price_source") or "cloud_snapshot")
+            except Exception as _e_snap:  # noqa: BLE001 —— 兜底失败不得掩盖主诊断
+                _log.debug("[历史补跑] %s @ %s 云端快照取价跳过: %s", ticker, as_of_date, _e_snap)
+
+            if _snap_px is None:
+                _log.warning(
+                    "[历史补跑] %s @ %s：yfinance 无该日有效收盘价（最近有效行是 %s），"
+                    "云端快照也无 —— **不以前一交易日冒充**，标记不可用",
+                    ticker, as_of_date, _last_date)
+                fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
+                fb["_data_unavailable"] = True
+                fb["_reason"] = f"no_close_on_{as_of_date}"
+                return fb
+
+            _log.info("[历史补跑] %s @ %s：yfinance 无该日收盘（末行 %s），"
+                      "改用云端快照 %.4f（来源 %s）",
+                      ticker, as_of_date, _last_date, _snap_px, _snap_src)
+            _d2 = StockData(
+                price=_snap_px,
+                data_source=DataQuality.REAL,
+                source_name=f"cloud_snapshot:{_snap_src}",
+                fetch_timestamp=time.time(),
+            )
+            # 动量用快照价当最新一档、yfinance 历史当基准 —— 两端都是收盘价，
+            # 口径可比；但要标明它是拼出来的，别当成单一来源的读数。
+            _cl = hist["Close"]
+            if len(_cl) >= 4:
+                _base = float(_cl.iloc[-4])
+                if _base > 0:
+                    _d2.momentum_5d = float((_snap_px / _base - 1) * 100)
+                    _d2.momentum_source = "5d_snapshot_spliced"
+            else:
+                _d2.momentum_5d = None
+                _d2.momentum_source = "unavailable"
+            # ⚠️ volume_ratio 不给：它要拿**目标日**成交量比均量，
+            # 而这条路径下目标日的量本来就没取到。用前一日的量冒充会静默失真。
+            _d2.volume_ratio = None
+            _r2 = _d2.to_dict()
+            _r2["_as_of_date"] = as_of_date
+            _r2["_price_from_cloud_snapshot"] = True
+            return _r2
 
         data = StockData(
             price=float(hist["Close"].iloc[-1]),
