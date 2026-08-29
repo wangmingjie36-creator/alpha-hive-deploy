@@ -5,6 +5,27 @@
 
 ---
 
+## [0.45.68] — 2026-08-29 — BILI 补抓复盘：两道新鲜度闸互相吞掉对方的错误信息
+
+**背景**：cloud-snapshot routine 2026-08-28 那次 BILI 主跑失败，manifest 记的
+`RuntimeError: CBOE payload 为空（网络/403/符号问题）`是误导性文案——真实原因
+是 CBOE CDN 对 BILI 刷新滞后（stderr 里有更早一行`数据陈旧`日志被盖过去了）。
+用真实引擎（`cloud_snapshot_fetch._fetch_one_ticker`）补抓后确认 CDN 已追上，
+BILI 30/30 已落盘补齐；顺带定位并修了根因。
+
+### Fixed
+- `cboe_options._fetch_cboe_payload`：新增 `skip_staleness_check` 关键字参数
+  （默认 `False`，其余调用方零影响）。`cloud_snapshot_fetch._fetch_one_ticker`
+  传 `True`，把新鲜度判定权交给自己更精确的 business_date 比对，不再被内层
+  「相对当下时刻」的启发式抢先吞成 `None`。
+- 修复前的实际后果：① 失败原因文案是网络/403而非真相；② manifest 的
+  `vintage_stale` 字段永远是空的（说谎）；③ v0.45.39 设计的陈旧标的自动补抓
+  机制是死代码——`stale` 列表只在 `except StaleVintageError` 分支追加，而这条
+  路径永远抛的是 `RuntimeError`，进不去那个分支。
+- `tests/test_cloud_snapshot_vintage.py`：全部改用 `co._fetch_cboe_payload`
+  整函数 mock 的用例补 `**_kw` 容错新签名；新增 3 条只 mock 网络层（不 mock
+  `_fetch_cboe_payload` 本身）的用例，复现并锁住这次分层旁路修复。
+
 ## [0.45.67] — 2026-08-29 — 占位（进行中：BLS/BEA 2027 日程发布监视器，接入编排器周频体检）
 
 ## [0.45.66] — 2026-08-29 — 定时扫描一直在走另一条网络链路

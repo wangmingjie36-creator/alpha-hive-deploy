@@ -237,11 +237,17 @@ def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: 
     return chosen, list(near_set)
 
 
-def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optional[dict]:
+def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
+                        skip_staleness_check: bool = False) -> Optional[dict]:
     """拉取 CBOE 延迟报价 JSON，返回 data 段（含 options / current_price / close）；失败返回 None。
 
     串行化（`_CBOE_SEM` 限 1）：本机老 SSL 栈扛不住并发 HTTPS（实测 4 并发挂 50-70s/SSL EOF），
     顺序拉仅 8-11s。进程缓存：同标的主链+全链共享一次下载。重试退避：瞬时 SSL EOF 错开即恢复。
+
+    `skip_staleness_check`：调用方自己有更精确的新鲜度判据时使用（如
+    `cloud_snapshot_fetch` 按目标业务日比对，而非本函数默认用的「相对当下时刻」
+    启发式）。跳过时不放弃陈旧数据，但仍照常写缓存——调用方拿到手的就是它
+    要自行核验的那份，同标的后续取数不该在同一次运行里再被这道闸拦第二次。
     """
     if _SNAPSHOT_PROVIDER is not None:
         snap = _snapshot(ticker)
@@ -275,7 +281,7 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
                 return None
             # v0.45.39：陈旧 CDN 文件在此拦下。**不写缓存** ——
             # 写了就等于把陈旧数据在进程内又保鲜 120 秒。
-            if _payload_is_stale(ticker, data):
+            if _payload_is_stale(ticker, data) and not skip_staleness_check:
                 return None
             with _cache_lock:
                 _payload_cache[key] = (now, data)

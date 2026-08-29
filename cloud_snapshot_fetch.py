@@ -123,7 +123,13 @@ def _fetch_one_ticker(ticker: str, business_date: str) -> dict:
     """
     import cboe_options as co
 
-    payload = co._fetch_cboe_payload(ticker, 15)  # noqa: SLF001 —— 进程缓存入口，见模块 docstring
+    # skip_staleness_check：本函数自己按 business_date 核验新鲜度（下方），
+    # 比 _fetch_cboe_payload 默认「相对当下时刻」的启发式更精确——CDN 对个别
+    # 符号刷新滞后时，默认启发式会先一步把 payload 判陈旧、直接吞成 None，
+    # 使下面这道更准的校验根本拿不到数据可比，滞后误报成「网络/403」失败，
+    # 也连带让 v0.45.39 的陈旧标的补抓机制因为从未观测到 StaleVintageError 而失效。
+    payload = co._fetch_cboe_payload(  # noqa: SLF001 —— 进程缓存入口，见模块 docstring
+        ticker, 15, skip_staleness_check=True)
     if not payload:
         raise RuntimeError("CBOE payload 为空（网络/403/符号问题）")
 
