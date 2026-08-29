@@ -660,8 +660,11 @@ class FinnhubSource:
             import json
 
             url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={self.api_key}"
-            # v0.43.27: 必须走全局 HTTPS 闸门。本机 OpenSSL 1.1.1q 扛不住并发，
-            # 而本源自 v0.43.26 接通后才真正开始发请求——正是 8/24 EOF 风暴的新增变量。
+            # v0.43.27: 必须走全局 HTTPS 闸门。本源自 v0.43.26 接通后才真正开始
+            # 发请求（此前拿不到 key、一个请求都不发），是个不受闸门约束的新调用方。
+            # 走闸门的理由是不给 Finnhub 的配额/限流器加压。
+            # ⚠️ 原注称它「正是 8/24 EOF 风暴的新增变量」并归因于 OpenSSL 1.1.1q：
+            # 该归因 2026-08-25 已证伪，8/24 根因未定（见 http_gate docstring）。
             from http_gate import urlopen_gated
             quote = json.loads(urlopen_gated(url, timeout=10).decode())
 

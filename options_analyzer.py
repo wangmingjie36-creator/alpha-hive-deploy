@@ -848,10 +848,12 @@ class OptionsAnalyzer:
                已进 `http_gate` 闸门且有进程缓存，主链拉过则**零额外网络开销**
             ② yfinance（1 次 `.options` + N 次 `option_chain()`）—— 进闸门 + 重试
 
-        为什么改：旧实现只有 ②，5 次裸 HTTPS 往返撞上本机 OpenSSL 1.1.1q，
-        循环里的 `except Exception: continue` 把 SSLError 全吞掉 → `term_structure`
+        为什么改：旧实现只有 ②，5 次裸 HTTPS 往返（不进闸门），循环里的
+        `except Exception: continue` 把 SSLError 全吞掉 → `term_structure`
         空列表 → shape="unknown" → 报告渲染成「0.0% / 0.0%」，与"真的是 0"无法区分。
-        2026-08-24 那批 12 只标的有 7 只如此。
+        2026-08-24 那批 12 只标的有 7 只如此。⚠️ 原注把这些 SSLError 归因于
+        「本机 OpenSSL 1.1.1q」——该归因 2026-08-25 已证伪（见 http_gate docstring），
+        8/24 根因未定；但"静默吞掉异常、把失败渲染成 0.0%"这条毛病与根因无关。
 
         Returns:
             {
@@ -946,8 +948,10 @@ class OptionsAnalyzer:
         """yfinance 降级路径：返回 (term_pts, errors)。
 
         每次出站 HTTPS 都走 `http_gate`——旧实现在 3~6 个工作线程里并发裸调
-        `option_chain()`，是 2026-08-24 SSL EOF 风暴的未受保护调用方之一。
-        失败原因逐条回传，**不再 `except: continue` 静默丢弃**。
+        `option_chain()`，是 8/24 当天不受闸门约束的调用方之一。接线的理由是
+        不给对端限流器加压（⚠️「它导致了那场 SSL EOF 风暴」是已撤回的推断，
+        见 http_gate docstring）。失败原因逐条回传，**不再 `except: continue`
+        静默丢弃**。
         """
         import time
 
