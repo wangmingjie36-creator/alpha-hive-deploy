@@ -95,8 +95,16 @@ v0.45.73 关掉 crewai 的 import 埋点时顺带确认了 `run_crew_scan()` 零
 | `requirements.txt` 的 `# crewai>=0.1.0` | 本来就是注释行——**它从来不是声明依赖** |
 | `tests/conftest.py` / 编排器的埋点 env 闸（v0.45.73 加的） | 本仓已无 `import crewai`，留着就是「关一个不存在的东西」的死配置 |
 
-`pip uninstall crewai` **未执行**：包装在用户级 site-packages，可能有别的项目在用；
-且本仓不再 import 它之后，装着不产生任何成本（无导入 ⇒ 无埋点 ⇒ 无耗时）。
+`pip uninstall crewai` **已于同日执行**（用户要求）。卸载前核过两件事：
+`pip show crewai` 的 `Required-by` 为空（无包依赖它）、且全机器除本仓外无人 `import crewai`。
+卸载后全套 2104 passed 不变。
+
+⚠️ **别顺手清「crewai 的依赖」**：`opentelemetry-sdk` 与 `tokenizers` 看着像 crewai 的遗留，
+实为 **`chromadb` 的依赖**，而 `vector_memory.py:24` 在用 chromadb —— 清了会打断向量记忆。
+真正的孤儿只有 `instructor`（`Required-by` 为空），无害，留着也行。
+
+同日把主 checkout `/Users/igg/Desktop/Alpha Hive` 从 v0.45.73 快进到本版本 —— 编排器的
+`PROJECT_DIR` 指向那里，**不拉齐的话这次移除在生产上等于没做**。
 
 ### 为什么不只是「闲置」——三条硬伤
 
