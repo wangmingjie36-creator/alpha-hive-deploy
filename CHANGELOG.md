@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.74] — 2026-08-29 — 占位（进行中：彻底移除 CrewAI 集成）
+
 ## [0.45.73] — 2026-08-29 — 一个第三方 phone-home，和一个「设了等于没设」的环境变量名
 
 `import alpha_hive_daily_report` 会起一个 daemon 线程 `Thread-1 (_track_install)`
