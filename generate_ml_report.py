@@ -1660,12 +1660,25 @@ class MLEnhancedReportGenerator:
             if val >= med_thr:
                 return f'<span style="color:var(--neut)">●</span> {med_lbl}'
             return f'<span style="color:var(--bull)">●</span> {low_lbl}'
+        # v0.45.63 二次检查：`gamma_squeeze_risk` 现在可能是 "unknown"
+        # （GEX 算不出时 options_analyzer 不再伪造 0.0）。旧写法
+        # `1 if ... in ("high","很高","medium") else 0` 会把 "unknown" 判成 0，
+        # risk_level(0) 输出「● 低」—— 正是上面那段注释警告的
+        # 「把没数据渲染成低风险，比崩溃更危险」。传 None 走它自己的「数据缺失」分支。
+        _gex_txt = str(gex).lower()
+        if _gex_txt in ("unknown", "none", "", "—", "-", "n/a"):
+            _gex_risk = None
+            _gex_desc = "数据不可用"
+        else:
+            _gex_risk = 1 if _gex_txt in ("high", "很高", "medium") else 0
+            _gex_desc = str(gex)
+
         rows = [
             ("监管风险", risk_level(1 if conflict_level in ("high","severe") else 0, 1, 0.5), "AI 芯片出口管制 / 政策变化风险"),
             ("市场情绪风险", risk_level(bear_score, 7, 5), f"看空强度 {_fmt(bear_score, '.1f')}/10，{'临近催化剂' if imminent else '无近期催化剂'}"),
             ("估值压缩风险", risk_level(crowding, 70, 50), f"拥挤度 {_fmt(crowding, '.0f')}/100（{'数据缺失' if crowding is None else ('偏高' if crowding > 70 else ('适中' if crowding > 40 else '偏低'))}）"),
             ("流动性风险", '<span style="color:var(--bull)">●</span> 低', "大盘股，日均成交量充足"),
-            ("期权事件风险", risk_level(1 if str(gex).lower() in ("high","很高","medium") else 0, 1, 0.5), f"Gamma 压榨风险：{gex}，IV Rank {_fmt(iv_rank, '.1f', '%')}"),
+            ("期权事件风险", risk_level(_gex_risk, 1, 0.5), f"Gamma 压榨风险：{_gex_desc}，IV Rank {_fmt(iv_rank, '.1f', '%')}"),
             ("催化剂风险", risk_level(len(imminent), 2, 1), f"7 天内催化剂 {len(imminent)} 个：{', '.join(c.get('event','') for c in imminent[:2])}"),
         ]
         risk_rows = "".join(

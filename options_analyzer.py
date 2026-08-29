@@ -774,14 +774,24 @@ class OptionsAnalyzer:
             win = [iv for strike, iv in valid if abs(strike - target) <= tolerance]
             if win:
                 return win, "window"
-            otm = [(abs(strike - target), iv) for strike, iv in valid
-                   if (strike <= stock_price if want_below else strike >= stock_price)]
-            if not otm:
+            # v0.45.63 二次检查：期权链是**跨到期日拍平**的，同一个行权价有多行。
+            # 初版 `min(otm, key=dist)` 只取其中一行 —— 取哪行取决于列表顺序，
+            # 且与窗口路径「取平均」的语义不一致。
+            # 实测 AMC 8/27：32 行 = 8 个行权价 × 4 个到期日，
+            # $3.0 一档的 IV 是 [0.8841, 0.8406, 0.8604, 0.8577]，初版取了 0.8841。
+            # 改为：先定最近的**行权价**，再把该档所有到期日一起返回给上层平均。
+            by_strike: Dict[float, List[float]] = {}
+            for strike, iv in valid:
+                by_strike.setdefault(strike, []).append(iv)
+            cand = [k for k in by_strike
+                    if (k <= stock_price if want_below else k >= stock_price)]
+            if not cand:
                 return [], "none"
-            dist, iv = min(otm, key=lambda t: t[0])
-            if dist > stock_price * 0.25:
+            # 次序键带上 strike 本身，等距时的取舍才是确定的（不看字典顺序）
+            best = min(cand, key=lambda k: (abs(k - target), k))
+            if abs(best - target) > stock_price * 0.25:
                 return [], "none"
-            return [iv], "nearest_strike"
+            return by_strike[best], "nearest_strike"
 
         put_ivs, put_basis = _pick(puts_df, put_target, want_below=True)
         call_ivs, call_basis = _pick(calls_df, call_target, want_below=False)
@@ -1335,7 +1345,14 @@ class OptionsAnalyzer:
             flow_signal = 0.0
 
         # GEX Signal (0-2)：负 GEX 有利趋势跟踪
-        gex_signal = 2.0 if gex < -0.001 else 1.0
+        # v0.45.63 二次检查：gex 自本版起可能是 None（算不出）。照上面 iv_rank
+        # 那条既有先例——「不可信 → 中性，不奖不罚」。取 1.0 还有一层好处：
+        # 它**恰好等于**改动前 gex=0.0 时走的分支，所以此前拿 0.0 的那些情形
+        # 评分逐字节不变，不产生口径世代边界。
+        if gex is None:
+            gex_signal = 1.0
+        else:
+            gex_signal = 2.0 if gex < -0.001 else 1.0
 
         # Unusual Signal (0-2)：多头异动加分
         bullish_unusual = sum(1 for u in unusual if u.get("bullish", False))
@@ -1350,7 +1367,12 @@ class OptionsAnalyzer:
             signals.append("IV 处于理想水位")
         if flow_signal >= 3.0:
             signals.append("做多气氛浓厚（P/C低）")
-        if gex < -0.001:
+        # v0.45.63 二次检查（第二轮）：**同一个函数里的第二处 gex 比较，第一轮漏了。**
+        # 第一轮我甚至在上面写了「只修一处就是 v0.45.49 那种五分之一」的注释，
+        # 然后在同一个函数里犯了同样的事 —— 因为我按「精确匹配带上下文的字符串」
+        # 去改，`assert count==1` 通过了，但那只证明**那段上下文**唯一，
+        # 不证明**这个比较**唯一。改类型契约必须 grep 裸符号，不能 grep 带注释的块。
+        if gex is not None and gex < -0.001:
             signals.append("负 GEX 利于趋势")
         if bullish_unusual > 0:
             signals.append(f"检测到 {bullish_unusual} 个看涨异动")
@@ -2078,7 +2100,14 @@ class OptionsAgent:
         )
 
         # 5. 判断 Gamma Squeeze 风险
-        if gex > 0.001:
+        # v0.45.63 二次检查：这里原本恒能拿到 float（失败时是 0.0），
+        # 改成 None 之后 `gex > 0.001` 直接 TypeError，而 analyze() 的调用方
+        # （如 alpha_hive_daily_report:2210）用的是宽 except —— 崩溃会被吞成
+        # 「该标的整份期权数据消失」，比崩掉更难查。
+        # "unknown" 不是新造的值：样本链早退分支写的就是它。
+        if gex is None:
+            gamma_squeeze_risk = "unknown"
+        elif gex > 0.001:
             gamma_squeeze_risk = "high"  # 正 GEX 压制波动
         elif gex < -0.001:
             gamma_squeeze_risk = "low"  # 负 GEX 放大波动

@@ -86,6 +86,75 @@ AMC 2026-08-27 真实链：calls 32 / puts 32，现价 $2.6815（cboe_delayed）
 ### Changed — `test_gex_empty_chains`
 
 旧断言 `assert gex == 0.0` 把 bug 固化成了契约，改为断言 `is None`。
+
+---
+
+### 二次检查（同版追加）—— 四条真 bug，两条会直接崩
+
+**三条是同一个根因：我改了返回类型契约，却只单测了被改的那个函数。**
+`calculate_gamma_exposure` 由「失败返回 0.0」改成「失败返回 None」，而调用方
+有五处直接拿它做数值比较 —— 原代码里安全（恒为 float），改完全部 TypeError：
+
+| 位置 | 表达式 |
+|---|---|
+| `options_analyzer:2077` → `generate_options_score` | `gex_signal = 2.0 if gex < -0.001 else 1.0` |
+| `generate_options_score` 信号总结段 | `if gex < -0.001:` ← **第一轮漏了，同一个函数里的第二处** |
+| `options_analyzer:2110/2112` | `if gex > 0.001: ... elif gex < -0.001:` |
+
+崩得还很难查：`analyze()` 的调用方用宽 except（`alpha_hive_daily_report:2210`），
+TypeError 会被吞成「该标的整份期权数据消失」——**看着像取数失败，其实是类型错**。
+
+修法都取「与改动前等价」的分支，不产生世代边界：
+- `gex_signal` 在 gex 为 None 时取 `1.0` —— **恰好等于**改动前 gex=0.0 走的分支。
+  函数上方 `if iv_rank is None: iv_signal = 2.0  # 中性，不奖不罚` 就是现成先例。
+- `gamma_squeeze_risk` 在 gex 为 None 时取 `"unknown"` —— 不是新造的值，
+  样本链早退分支写的就是它。
+
+⚠️ **「同一个函数里的第二处」这条最难看**：第一轮我在 GEX 那边专门写了注释说
+「只修上面两处而留下这处，就是 v0.45.49 那种五分之一」，然后在
+`generate_options_score` 里犯了同样的事。原因是我按「精确匹配带注释上下文的
+字符串」去改，`assert count == 1` 通过了 —— 但那只证明**那段上下文**唯一，
+不证明**这个比较**唯一。**改类型契约必须 grep 裸符号（`gex *[<>]`），
+不能 grep 带注释的块。**
+
+**第四条：退化路径只取一行，没按行权价聚合。**
+期权链是**跨到期日拍平**的，同一档有多行。初版 `min(otm, key=dist)` 只取其中
+一行，取哪行取决于列表顺序，且与窗口路径「取平均」的语义不一致。
+实测 AMC 8/27：32 行 = 8 档 × 4 个到期日，$3.0 那档 IV 是
+`[0.8841, 0.8406, 0.8604, 0.8577]`，初版取了第一个。
+改为先定最近的**行权价**、再把该档所有到期日交给上层平均，并在次序键里带上
+strike 本身，等距时的取舍才是确定的。
+
+真实数据对照（云端 8/27 快照）：
+
+```
+              skew_ratio   otm_call_iv
+一次检查        0.881        88.41（4 行里的第 1 行）
+二次检查后      0.904        86.07（4 行的均值）
+当天独立口径    0.90         （deep_skew.skew_25d）
+```
+
+与独立口径的偏差从 2.1% 收到 **0.4%**。
+
+### Fixed —— 连带：`generate_ml_report` 把「未知」画成「低风险」
+
+`gamma_squeeze_risk` 现在可能是 `"unknown"`，而 `generate_ml_report:1668` 写的是
+`1 if str(gex).lower() in ("high","很高","medium") else 0` → `"unknown"` 判成 0
+→ `risk_level(0)` 输出「● 低」。**正是该函数上方二十行注释警告的
+「把没数据渲染成低风险，比崩溃更危险」。** 改为传 `None`，走 `risk_level`
+自己已有的「○ 数据缺失」分支。
+
+### Added — 测试 6 条（`TestGexNoneContract` + `TestNearestStrikeAveraging`）
+
+含 `test_analyze_survives_none_gex` —— **第一轮缺的就是这个形状的测试**：
+它走的是调用方，不是被改的函数。第一轮给 `calculate_gamma_exposure` 写了 8 条，
+一条都没碰到调用方。
+
+五次 mutation check 全部变红。⚠️ **又抓到一个假护栏**（连续第二轮）：
+`test_equidistant_strikes_break_ties_deterministically` 初版用档位 1.6/2.6
+声称「等距」，但 1.6 < 现价 2.00，先被 OTM 侧约束滤掉了 —— 根本没有并列，
+去掉确定性次序键照样绿。改用 2.0/2.2（到 target 2.10 都是 0.10，且都 ≥ 现价）
+才真正测到。
 ## [0.45.62] — 2026-08-28 — 那 7 条失效条件，入库以来一次都没被求值过
 
 ### 先更正 v0.45.57 的判断
