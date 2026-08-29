@@ -314,3 +314,111 @@ class TestUserAgent:
         import economic_calendar_watch as w
         monkeypatch.setenv("ALPHA_HIVE_CONTACT_EMAIL", "ops@example.com")
         assert "ops@example.com" in w._user_agent()
+
+
+# HTML 样本：页面 <title> 与表头同文，且导航区含一个会被日期正则误吃的行
+BLS_HTML_WITH_NAV_DATE = """
+<html><head><title>Schedule of Releases for the Consumer Price Index</title></head>
+<body>
+<h1>Schedule of Releases for the Consumer Price Index</h1>
+<nav><ul><li>Prior Years</li>
+  <li>Last Modified Date:</li><li>Jan. 05, 2099</li></ul></nav>
+""" + BLS_HTML[BLS_HTML.index("<h1>"):]
+
+
+class TestSecondPassRegressions:
+    """v0.45.68 二次检查抓到的四条，逐条钉死"""
+
+    def test_throttled_with_empty_cache_is_undeterminable_not_healthy(self, tmp_state):
+        """🔴 回归：节流 + 缓存里没有任何源的结果
+
+        旧实现直接拿缓存的空 dict 当结论：undeterminable=[]、new=[]
+        → 报「✅ 上游无新日程」。监视器自己犯了它要治的那个静默失败。
+        """
+        import economic_calendar_watch as w
+        tmp_state.write_text(json.dumps({
+            "last_checked_at": "2026-08-28T09:00:00",
+            "upstream": {},                       # 从未成功查过任何源
+            "action_required": False,
+        }), encoding="utf-8")
+
+        res = w.check(state_path=tmp_state, today=date(2026, 8, 29))
+        assert res["throttled"] is True
+        assert res["network_checked_this_run"] is False
+        assert set(res["undeterminable_tables"]) == {"fomc", "cpi", "nfp", "gdp"}
+        assert res["upstream_conclusive"] is False
+        for v in res["upstream"].values():
+            assert v["determinable"] is False
+            assert "从未被成功检查过" in v["reason"]
+
+    def test_throttled_with_partial_cache_marks_only_missing_as_undeterminable(
+            self, monkeypatch, tmp_state):
+        """缓存里只有一部分源 → 只有缺的那些判无法判定，已有的照旧可用"""
+        import economic_calendar_watch as w
+        monkeypatch.setattr(w, "_fetch", _stub_fetch({}))
+        tmp_state.write_text(json.dumps({
+            "last_checked_at": "2026-08-28T09:00:00",
+            "upstream": {"fomc": {"source": "x", "determinable": True,
+                                  "new_available": False, "reason": None,
+                                  "upstream_latest": "2028-01-26",
+                                  "our_verified_through": "2028-01-26"}},
+            "action_required": False,
+        }), encoding="utf-8")
+
+        res = w.check(state_path=tmp_state, today=date(2026, 8, 29))
+        assert res["upstream"]["fomc"]["determinable"] is True
+        assert set(res["undeterminable_tables"]) == {"cpi", "nfp", "gdp"}
+
+    def test_never_claims_no_new_schedules_when_sources_unreachable(self, tmp_state):
+        """🔴 回归：本地 stale + 四源全抓不到时，不得断言「上游暂无新日程」
+
+        退出码优先级是 action > health > undetermined，所以这一格走 health 分支。
+        旧版在这里无条件打「上游暂无新日程」—— 一句毫无依据的断言，
+        而且把四个源全部抓取失败整个吃掉，恰好抵消掉监视器存在的意义。
+        """
+        import economic_calendar_watch as w
+
+        def _boom(url, timeout, ua):
+            raise OSError("network unreachable")
+        w_fetch_backup = w._fetch
+        try:
+            w._fetch = _boom
+            res = w.check(force=True, state_path=tmp_state, today=date(2026, 9, 20))
+        finally:
+            w._fetch = w_fetch_backup
+
+        assert res["calendar_health"]["status"] == "stale"
+        assert res["upstream_conclusive"] is False
+        assert len(res["undeterminable_tables"]) == 4
+
+        # 复刻 main() 的文案分支
+        undet = res["undeterminable_tables"]
+        note = ("上游暂无新日程" if res["upstream_conclusive"]
+                else f"⚠️ 上游 {len(undet)} 个源无法判定（{'、'.join(undet)}）")
+        assert "暂无新日程" not in note, "在一个源都没查到的情况下断言了上游没有新日程"
+        assert "无法判定" in note
+
+    def test_upstream_conclusive_true_only_when_every_source_parsed(
+            self, monkeypatch, tmp_state):
+        import economic_calendar_watch as w
+        monkeypatch.setattr(w, "_fetch", _stub_fetch({
+            "cpi.htm": BLS_HTML, "empsit.htm": BLS_HTML,
+            "fomccalendars": FOMC_HTML, "bea.gov": BEA_HTML,
+        }))
+        res = w.check(force=True, state_path=tmp_state, today=date(2026, 8, 29))
+        assert res["upstream_conclusive"] is True
+        assert res["undeterminable_tables"] == []
+
+    def test_bls_slice_anchors_to_real_header_not_page_title(self):
+        """🔴 回归：页面 <title> 与表头同文
+
+        旧实现用 next() 命中第 0 行的 title，把整段导航纳入切片。
+        当前真实页面的导航恰好没有能被日期正则吃掉的行 —— 那是运气不是设计。
+        这里放一行 `Last Modified Date: Jan. 05, 2099` 在导航里：
+        旧实现会把 2099 当成上游最新日程，直接误报「上游发布新日程了」。
+        """
+        from economic_calendar_watch import parse_bls_schedule
+        dates, err = parse_bls_schedule(BLS_HTML_WITH_NAV_DATE)
+        assert err is None
+        assert max(dates).year == 2027, f"导航里的 2099 被当成了日程：max={max(dates)}"
+        assert len(dates) == 12

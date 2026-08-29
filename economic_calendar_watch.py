@@ -151,11 +151,17 @@ def parse_bls_schedule(html: str) -> Tuple[List[date], Optional[str]]:
     """BLS 发布日程表：Reference Month | Release Date | Release Time。
     只取发布日期列的 `Mon. DD, YYYY`。"""
     lines = _visible_lines(html)
-    try:
-        i = next(n for n, ln in enumerate(lines)
-                 if ln.startswith("Schedule of Releases for"))
-    except StopIteration:
-        return [], "页面缺少「Schedule of Releases for」表头，疑为改版"
+    # 页面 <title> 与表头同文，`next()` 会命中第 0 行的 title，把整段导航纳入切片。
+    # 目前导航里恰好没有能被日期正则误吃的行（都是 "FEBRUARY 2026" 这种格式），
+    # 但那是运气不是设计。锚到真表头：它后面紧跟着 "Reference Month" 列名。
+    i = None
+    for n, ln in enumerate(lines):
+        if ln.startswith("Schedule of Releases for") and \
+                any("Reference Month" in x for x in lines[n + 1:n + 4]):
+            i = n
+            break
+    if i is None:
+        return [], "页面找不到「Schedule of Releases for …」+「Reference Month」表头，疑为改版"
     try:
         j = next(n for n, ln in enumerate(lines)
                  if n > i and "Subscribe to the BLS Online Calendar" in ln)
@@ -333,7 +339,19 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
                  and not prev_action)
 
     if throttled:
-        upstream = state.get("upstream", {})
+        upstream = dict(state.get("upstream") or {})
+        # v0.45.68 二次检查：缓存里缺哪个源，就把哪个源判成「无法判定」。
+        # 旧实现直接用缓存的空 dict —— 于是「从未成功检查过任何源」被算成
+        # undeterminable=[]、new=[]，一路报「✅ 上游无新日程」。
+        # 监视器自己犯了它要治的那个静默失败。
+        for _k, _url in _SOURCES.items():
+            if not upstream.get(_k):
+                upstream[_k] = {
+                    "source": _url,
+                    "determinable": False,
+                    "new_available": False,
+                    "reason": "节流窗口内且无缓存结果 —— 此源从未被成功检查过",
+                }
         checked_now = False
     else:
         upstream = check_upstream(timeout=timeout)
@@ -364,6 +382,9 @@ def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
         "upstream": upstream,
         "new_schedule_tables": new_tables,
         "undeterminable_tables": undet,
+        # 「上游没有新日程」这句话，只有四个源都查通了才有资格说。
+        # 少一个源，就只能说「不知道」——见 main() 的文案分支。
+        "upstream_conclusive": not undet,
         "action_required": bool(new_tables),
     }
 
@@ -448,6 +469,14 @@ def main() -> int:
         print(_render(res))
 
     h = res["calendar_health"]
+    undet = res["undeterminable_tables"]
+    # v0.45.68 二次检查：旧版在 health 分支无条件打「上游暂无新日程」。
+    # 但退出码优先级是 action > health > undetermined，于是「本地将见底 + 四个源全抓不到」
+    # 这一格会打出一句**毫无依据**的断言，且把抓取失败整个吃掉——
+    # 恰好抵消掉这个监视器存在的意义。
+    _up_note = ("上游暂无新日程" if res["upstream_conclusive"]
+                else f"⚠️ 上游 {len(undet)} 个源无法判定（{'、'.join(undet)}），"
+                     f"本次**无法确认**上游有没有新日程")
     if res["action_required"]:
         if args.quiet:
             print(f"🆕 上游已发布新日程：{'、'.join(res['new_schedule_tables'])} —— 待人工抄录")
@@ -455,8 +484,7 @@ def main() -> int:
     if h["status"] != "ok":
         if args.quiet:
             print(f"⚠️  本地日历 {h['status']}：{h['binding_table']} 只到 "
-                  f"{h['binding_last_date']}（剩 {h['binding_horizon_days']} 天），"
-                  f"上游暂无新日程")
+                  f"{h['binding_last_date']}（剩 {h['binding_horizon_days']} 天），{_up_note}")
         return 1
     if res["undeterminable_tables"]:
         if args.quiet:
