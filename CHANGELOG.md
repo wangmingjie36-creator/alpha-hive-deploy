@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.71] — 2026-08-29 — 占位（进行中：默认测试套里的联网 flake —— test_agent_does_not_crash_on_all_none_metrics 真打 apewisdom/Alpha Vantage）
+
 ## [0.45.70] — 2026-08-29 — 云端快照价接进补跑取价链；8/28 补跑完成并上线
 
 v0.45.69 让 NaN 不再冒充价格，但补跑因此**拿不到任何价格**：
