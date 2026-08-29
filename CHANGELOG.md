@@ -5,7 +5,120 @@
 
 ---
 
-## [0.45.73] — 2026-08-29 — 占位（进行中：关掉 crewai 导入时的 install 遥测 phone-home）
+## [0.45.73] — 2026-08-29 — 一个第三方 phone-home，和一个「设了等于没设」的环境变量名
+
+`import alpha_hive_daily_report` 会起一个 daemon 线程 `Thread-1 (_track_install)`
+往外发一个请求。链路是 `alpha_hive_daily_report` → `crewai_adapter` → `crewai`：
+crewai 1.9.3 的 `crewai/__init__.py` **在模块顶层**调 `_track_install_async()`，
+给 `api.scarf.sh` 打一个安装量像素点。每进程一次，于是**每次 pytest、每次生产扫描
+各一次**。它不阻塞任何东西，也不是任何测试的依赖。
+
+值得修的不是"有埋点"，是它是一次**不在 `http_gate` 覆盖范围内的出站 HTTPS**：
+本项目所有自家数据源都走那道串行闸，而这个 phone-home 发生在闸门自己还没被
+import 的时刻。`http_gate.py` 的结论「加源之前先确认闸门覆盖它」照样适用。
+
+⚠️ **不把它和 2026-08-24 的 96 次 SSL EOF 挂因果**。`http_gate.py` 的 docstring 仍写着
+「OpenSSL 1.1.1q 扛不住并发」，但那个归因 **2026-08-25 已被重测证伪**（1.1.1q 与 3.6.1
+各 0 失败，串行 80.5s 反而比并发 62s 更慢；原数据是单次取样吃了 CDN 热缓存）。
+关掉埋点的理由就是朴素的那一条：**没必要为一个第三方埋点，在每个进程启动时付一次
+不受管的出站请求。**
+
+### Fixed 1 — 关掉埋点，变量名照**装着的那版**抄（`crewai_adapter.py`）
+
+在本仓唯一的 `import crewai` 处（`crewai_adapter.py` 顶部）、且**在那句 import 之前**
+`os.environ.setdefault` 两个变量。crewai 读的是 import 那一刻的 env，晚一行都无效。
+
+⚠️ **差点掉进去的坑**：网上（和记忆里）流传最广的 `CREWAI_TELEMETRY_OPT_OUT`
+在 1.9.3 里**全仓不存在**。1.9.3 的
+`telemetry/telemetry.py::Telemetry._is_telemetry_disabled()` 只认三个名字：
+
+| 变量名 | 1.9.3 认吗 |
+|---|---|
+| `CREWAI_DISABLE_TELEMETRY` | ✅ |
+| `CREWAI_DISABLE_TRACKING` | ✅ |
+| `OTEL_SDK_DISABLED` | ✅（OpenTelemetry 总闸，本项目没别的 OTEL 用户，不动它） |
+| `CREWAI_TELEMETRY_OPT_OUT` | ❌ **设了一行日志都不会变** |
+
+这不是理论推演——mutation 测试实测把变量名换成 `CREWAI_TELEMETRY_OPT_OUT` 后，
+crewai 自己的 `_is_telemetry_disabled()` 返回 `DISABLED=False`。
+和 [[alpha-hive-silent-degradation]] 记的那类"看着成功其实早废了"同形：
+**一个拼错/过期的 opt-out 变量名，是所有静默降级里最舒服的一种——它消除了本该
+触发自查的那点不适，却什么都没关掉。**
+
+### Fixed 2 — `crewai` 顶层导入改惰性（`alpha_hive_daily_report.py`）
+
+顺手核了一遍"这个 import 是不是遗迹"：`run_crew_scan()` **全仓零调用方**，
+只出现在 `QUICK_START.md` / `PHASE3_*.md` / `SLACK_INTEGRATION_GUIDE.md` 的示例里，
+编排器与 `~/.claude/scripts/` 下也搜不到。为一个没人调的降级分支，让每次 import
+都付出「一次出站 HTTPS + 一次 crewai 导入」，不划算。
+
+把 `from crewai_adapter import AlphaHiveCrew` 挪进 `run_crew_scan()` 内部。
+默认路径不再 import crewai（`'crewai' in sys.modules` → `False`），
+埋点因此**不是被静音，是根本没发生**。实测导入耗时（各 3 次，稳定）：
+
+| | 耗时 |
+|---|---|
+| 旧（顶层拉进 crewai_adapter） | 1.07 / 1.05 / 1.07s |
+| 新（惰性） | 0.63 / 0.64 / 0.64s |
+
+省约 **0.43s / 进程**（−40%）。注意是**每进程一次**，不是每条测试一次。
+
+保留 `run_crew_scan()` 本身：它是 QUICK_START 里写着的公开用法，删它超出本次范围。
+
+### Fixed 3 — `run_crew_scan()` 的降级守卫从来没生效过（`alpha_hive_daily_report.py`）
+
+改惰性时撞见的：该方法 docstring 写「若 crewai 未安装，自动降级到 run_swarm_scan()」，
+但守卫是 `if not AlphaHiveCrew`。而 crewai 没装时 `crewai_adapter` **照样 import 得动**
+（它内部自己降级，`AlphaHiveCrew` 仍是个正常的类），所以这个条件恒假，
+会一路走到 `crew.build()` 抛 `RuntimeError("CrewAI 未安装")` ——
+**docstring 承诺的降级，实现里不存在**。真正的可用性标志是适配层的 `CREWAI_AVAILABLE`，
+已改用它。（在死代码里，不影响任何现网行为，但它正是
+[[alpha-hive-silent-degradation]] "守卫自己恒真" 那一条的又一个实例。）
+
+### Added — 三道同向的闸 + 回归测试
+
+| 位置 | 覆盖范围 | 在 git 里 |
+|---|---|---|
+| `crewai_adapter.py` 顶部 | 本仓唯一 `import crewai` 处，任何入口都绕不过 | ✅ |
+| `tests/conftest.py` **模块级** | 整个 pytest 进程，含测试自己直接 `import crewai` | ✅ |
+| `~/.claude/scripts/alpha-hive-orchestrator.sh`（export，第 66-67 行） | 生产扫描全进程，在第一次 spawn python（第 87 行读 `config.WATCHLIST`）之前 | ❌ **在仓外，无测试守护** |
+
+⚠️ conftest 那段**必须是模块级，不能写成 fixture**：fixture 是每条测试跑之前才执行，
+而 `import crewai` 发生在 pytest **收集阶段**（import 测试模块时），那时 fixture 一条都没跑。
+写成 fixture 等于没设。
+
+`tests/test_crewai_telemetry_optout.py`（3 条，2.9s）：
+
+1. 断言 **crewai 自己的** `_is_telemetry_disabled()` 返回 True，
+   而不是断言"我们写没写 os.environ"（后者恒真，等于没测）。升级 crewai 后若它改名，这条先红。
+2. 子进程 import `crewai_adapter`，`_track_install` 线程数必须为 0。
+3. 子进程 import `alpha_hive_daily_report`，`'crewai' in sys.modules` 必须为 False。
+
+两个刻意的设计（都是 v0.45.71「恒真断言」教训的直接产物）：
+- 子进程**显式把三个变量从 env 里删掉**再跑。否则它继承 conftest 设的值，
+  不管被测代码写没写都绿。
+- 探针挂 `threading.Thread.start` 而不是只看 socket——没网/代理拒连时它也不会连，
+  只看 socket 会假绿。
+
+**mutation check**（`--maxfail=99`，三次都只红对应的那一条）：
+
+| 注入的故障 | 结果 |
+|---|---|
+| `setdefault` 挪到 `import crewai` **之后** | ❌ `TRACK_INSTALL_THREADS=1` |
+| 恢复顶层 `from crewai_adapter import ...` | ❌ `CREWAI_IMPORTED=True` |
+| 变量名换成 `CREWAI_TELEMETRY_OPT_OUT` | ❌ `DISABLED=False` |
+
+### 验证
+
+复现脚本（patch `threading.Thread.start`，命中 `_target.__name__ == '_track_install'` 即记录）：
+
+| | `_track_install` 线程 | 出站连接 | `crewai` in sys.modules |
+|---|---|---|---|
+| 修前 `import alpha_hive_daily_report` | 1 | `('127.0.0.1', 7897)` | True |
+| 修后 `import alpha_hive_daily_report` | **0** | **0** | **False** |
+| 修后 `import crewai_adapter`（env 已清空） | **0** | **0** | True |
+
+回归：受影响模块 373 条测试全绿（含 F821 静态闸 `test_no_undefined_names.py`）。
 
 ## [0.45.72] — 2026-08-29 — 一个没锚定的 fixture，一个没生效的桩：两条测试各自相信着一件没发生的事
 

@@ -46,14 +46,16 @@ except ImportError:
     CodeExecutorAgent = None
     CODE_EXECUTION_CONFIG = {"enabled": False}
 
-# Phase 3 P5: CrewAI 多 Agent 框架（含错误日志，保留 try/except）
+# Phase 3 P5: CrewAI 多 Agent 框架 —— v0.45.73 起改为惰性导入，见 run_crew_scan()
+# 为什么不在顶层 import：`crewai_adapter` 顶层就 `import crewai`，而 crewai 1.9.3
+# 一被 import 就起 daemon 线程给 api.scarf.sh 打埋点（细节见 crewai_adapter.py 顶部）。
+# 而 `run_crew_scan()` 全仓**零调用方** —— 只出现在 QUICK_START.md / PHASE3_*.md 的
+# 示例里。让每次 pytest、每次生产扫描都为一个没人调的分支付出「一次不受 http_gate
+# 管的出站 HTTPS + ~0.4s 导入」，不划算；真有人调 run_crew_scan() 时再导入即可。
 try:
-    from crewai_adapter import AlphaHiveCrew
     from config import CREWAI_CONFIG
-except (ImportError, TypeError) as e:
-    AlphaHiveCrew = None
+except ImportError:
     CREWAI_CONFIG = {"enabled": False}
-    _log.info("CrewAI 模块导入失败: %s (降级到原始蜂群)", type(e).__name__)
 
 SlackReportNotifier = optional_import("slack_report_notifier", "SlackReportNotifier")
 EarningsWatcher = optional_import("earnings_watcher", "EarningsWatcher")
@@ -1351,9 +1353,24 @@ class AlphaHiveDailyReporter:
         Returns:
             完整的蜂群分析报告
         """
-        # 检查 CrewAI 是否可用
-        if not AlphaHiveCrew or not CREWAI_CONFIG.get("enabled"):
-            _log.info("CrewAI 未安装或未启用，降级到标准蜂群模式")
+        # 检查 CrewAI 是否可用（惰性导入：见模块顶部 Phase 3 P5 注释）
+        if not CREWAI_CONFIG.get("enabled"):
+            _log.info("CrewAI 未启用，降级到标准蜂群模式")
+            return self.run_swarm_scan(focus_tickers)
+
+        try:
+            from crewai_adapter import AlphaHiveCrew, CREWAI_AVAILABLE
+        except (ImportError, TypeError) as e:
+            _log.info("CrewAI 模块导入失败: %s（降级到原始蜂群）", type(e).__name__)
+            return self.run_swarm_scan(focus_tickers)
+
+        # 顺带修掉一个与本方法 docstring 相悖的旧行为：crewai 没装时
+        # `crewai_adapter` 仍然 import 得动（它内部自己降级，AlphaHiveCrew 照样是
+        # 个类），所以旧的 `if not AlphaHiveCrew` 根本拦不住，会一路走到
+        # `crew.build()` 抛 RuntimeError("CrewAI 未安装") —— 而 docstring 写的是
+        # 「若 crewai 未安装，自动降级」。真正的可用性标志是适配层的 CREWAI_AVAILABLE。
+        if not CREWAI_AVAILABLE:
+            _log.info("CrewAI 未安装，降级到标准蜂群模式")
             return self.run_swarm_scan(focus_tickers)
 
         _log.info("CrewAI 模式 %s", self.date_str)

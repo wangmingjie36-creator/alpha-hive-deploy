@@ -7,12 +7,36 @@
 
 import json
 import logging as _logging
+import os
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
 _log = _logging.getLogger("alpha_hive.crewai_adapter")
 
 CREWAI_AVAILABLE = False
+
+# ---- v0.45.73：关掉 crewai 的 install 埋点，必须在 import crewai 之前 ----
+# crewai 1.9.3 的 `__init__.py` 在模块顶层就调 `_track_install_async()`，
+# 起一个 daemon 线程给 api.scarf.sh 打一个像素点。它读的是 import 时刻的
+# os.environ，所以这几行**只有放在下面那句 import 之前才有效**，放函数里、
+# 放 fixture 里都晚了。
+#
+# ⚠️ 这里的变量名是照着**装着的那个版本**抄的，不是照着文档抄的：
+# crewai 1.9.3 `telemetry/telemetry.py::Telemetry._is_telemetry_disabled()`
+# 只认下面两个（外加 OTEL_SDK_DISABLED）。网上流传最广的
+# `CREWAI_TELEMETRY_OPT_OUT` 在 1.9.3 里**全仓不存在**——设了它一行日志都不会
+# 变，却看着像已经关掉了。升级 crewai 后若这两个名字被改掉，
+# `tests/test_crewai_telemetry_optout.py` 会直接变红（那条测试断言的是
+# crewai 自己的 `_is_telemetry_disabled()` 返回 True，不是断言我们写没写环境变量）。
+#
+# 不设 OTEL_SDK_DISABLED：那是整个 OpenTelemetry SDK 的总闸。本项目目前虽然没有
+# 别的 OTEL 用户（全仓 grep 零命中），但没必要为关一个第三方埋点去按全局开关。
+#
+# 用 setdefault 而非硬写：留给运维显式 `CREWAI_DISABLE_TELEMETRY=false` 重新
+# 打开的余地（那是主动选择，不是默认行为）。
+for _k in ("CREWAI_DISABLE_TELEMETRY", "CREWAI_DISABLE_TRACKING"):
+    os.environ.setdefault(_k, "true")
+del _k
 
 # 尝试导入 CrewAI（可能因版本不兼容而失败）
 try:
