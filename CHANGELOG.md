@@ -5,7 +5,103 @@
 
 ---
 
-## [0.45.71] — 2026-08-29 — 占位（进行中：默认测试套里的联网 flake —— test_agent_does_not_crash_on_all_none_metrics 真打 apewisdom/Alpha Vantage）
+## [0.45.71] — 2026-08-29 — 那条为"崩溃"写的闸，拦不住崩溃：一个联网 flake 掀出的恒真断言
+
+起因是一条普通的 flake：2026-08-29 全量跑里
+`test_silent_failure_guards.py::TestAgentsSurviveFullyDegradedData` 的
+BuzzBee 参数化变红，隔离重跑 44s 通过、全量重跑也通过。
+日志里是 `apewisdom.io` 读超时（15s + urllib3 重试）和一条 Alpha Vantage SSLEOFError。
+
+修 flake 只花了一半工夫；**另一半是发现这条测试从来没有生效过**。
+
+### Fixed 1 — 默认测试套在打真外网（`tests/test_silent_failure_guards.py`）
+
+这条测试的意图（见其 docstring）纯粹是 None 处理：v0.45.3 把 `volatility_20d`
+从 0.0 改成 None 后，`buzz_bee.py` 的 `vol20 > _vlt.get("extreme", 60)` 当场
+TypeError。它**不该碰网络**。但它只 stub 了 `_get_stock_data`，然后直接调真实的
+`analyze()` —— 于是逐个打了出去。实测（pytest 内挂 HTTP 探针）：
+
+| 蜂 | 真实出网 |
+|---|---|
+| BuzzBee | apewisdom（Reddit）、Alpha Vantage（新闻）、Yahoo 热搜、CNN F&G |
+| BearBee | SEC EDGAR ×7、CBOE 期权链 ×2、yfinance ×7 |
+| RivalBee | yfinance ×3（EPS 共识 / 技术指标 / 空头仓位） |
+
+`pyproject.toml` 的 `--timeout=60` 对上冷缓存的 44s，**上游一慢就红**；
+而 addopts 里有 `-x`，这一条 flake 会把整套掐断。
+
+**修法：stub 打在叶子（各取数模块），不打在中间聚合层**——
+`get_real_crowding_metrics` / `CrowdingDetector` / 7 通道加权 / 看空评分
+这些真实逻辑仍然跑，它们才是这道闸要保护的东西。所有 stub 一律返回
+"不可用"档，与 `FULLY_DEGRADED` 同一个意思，不是喂好数据把降级路径绕开。
+
+同时加 `_no_network` 绊线：出网即炸并点名调用栈。理由是**光有 stub 清单会悄悄腐烂**
+——谁给 BuzzBee 加第 8 个通道，清单不会自己长出一行，测试只会慢慢变回联网 flake。
+这与 conftest `_block_same_day_macro` 记的是同一条教训（加数据源必须同时确认
+"测试里它被关掉了吗"，v0.45.60 / v0.45.61 连漏两次）。实测把 `sec_edgar` 那行
+stub 去掉，0.88s 内报出 `sec_edgar.py:115 _request_get <- _load_cik_map <- __init__`。
+
+效果（`pytest tests/test_silent_failure_guards.py -q -p no:randomly`）：
+
+- 全文件 **35.82s → 5.01s**，54 passed 不变
+- BuzzBee / BearBee 两条已跌出 durations 榜（<0.01s），BearBee 原为 **25.61s**
+- RivalBee 3.08s → 0.92s（剩下的是本地 ML 模型加载，不出网）
+- HTTP 探针复测：三条参数化 **一次外网都不打**
+
+### Fixed 2 — 三条断言全部恒真：这道闸拦不住它自己写的那个崩溃
+
+修完 flake 后按本文件开头的规矩做回归验证（"每条测试都必须能在把修复回退掉时变红"），
+把 v0.45.3 那道 None 守卫拆掉、让 BuzzBee 当场 TypeError —— **三条断言依然全绿**。
+
+根因是 `make_error_result()` 的兜底返回与正常返回**同形**：
+
+```python
+AgentResult(score=5.0, direction="neutral", confidence=0.0,
+            discovery=f"Error: {error}", ..., error=str(error))
+```
+
+于是逐条对照：
+
+| 断言 | 崩溃时实际拿到 | 结果 |
+|---|---|---|
+| `error != "agent_failure"` | `"'>' not supported between instances of 'NoneType' and 'int'"` | 恒真 |
+| `"failed" not in discovery` | `"Error: '>' not supported..."`（含 Error，不含 failed） | 恒真 |
+| `score is not None` | `5.0`（崩溃兜底值） | 恒真 |
+
+其中第一条最刺眼：`"agent_failure"` 这个字面量
+**全仓只出现在这行断言里**（`grep -rn agent_failure --include=*.py` 仅 1 处命中，
+就是它自己），生产代码从来没产出过——等于在和一个不存在的值比较。
+
+也就是说：**为 v0.45.3 崩溃写的闸，拦不住 v0.45.3 的崩溃。**
+这正是本文件开头定义的形状——没有报错、退出码为 0，但产出早已是假的；
+也是 MEMORY「静默中性化」记的那条：`score=5.0 / confidence=0.0` 与真实中性同形。
+
+**修法**：原三条按用户要求原样保留（不改既有意图），另加一条真正生效的：
+
+```python
+assert not result.get("error"), f"{cls_name} 崩了：{result.get('error')}"
+```
+
+实测：注入 regression 后 **0.78s 变红**，并打出完整 TypeError 栈；恢复后转绿。
+
+> 教训：**"测试跑得慢"和"测试没生效"可以是同一个坑的两面。**
+> 这条测试因为真打网络而慢，慢又掩护了它其实什么也没测——44s 的运行时间
+> 看起来像在"认真做事"，实际上三条断言在任何输入下都返回 True。
+> 修 flake 时顺手做一次"把修复回退掉看它红不红"，才是这次真正的收获。
+
+### 附带发现（未修，已另开任务）
+
+`alpha_hive_daily_report` 导入时，**crewai 会起一个后台守护线程 `_track_install`
+向外发装机遥测**（本机走 127.0.0.1:7897 代理）。它不阻塞测试、也不是任何测试的依赖，
+但每次跑测试与每次生产扫描都会发一次。属第三方 phone-home，与本次改动无关，
+故未在本版处理。
+
+### Changed
+
+- `tests/test_silent_failure_guards.py`：`TestAgentsSurviveFullyDegradedData`
+  新增 `_offline`（叶子级取数 stub）与 `_no_network`（出网绊线）两个 autouse
+  fixture；测试方法新增一条真正生效的 `error` 断言。**仅测试文件改动，
+  生产代码零改动。**
 
 ## [0.45.70] — 2026-08-29 — 云端快照价接进补跑取价链；8/28 补跑完成并上线
 
