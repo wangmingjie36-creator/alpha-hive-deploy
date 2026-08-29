@@ -5,8 +5,87 @@
 
 ---
 
-## [0.45.63] — 2026-08-29 — 占位（进行中：AMC 的 IV Skew 恒为「数据不足」——低价股行权价容差）
+## [0.45.63] — 2026-08-29 — 一道守卫，两个指标，同一只票：AMC 的绝对价格地板
 
+用户报「网站上 AMC 的 IV Skew 是空的」。查下来是**两个独立原因叠在一起**，
+只修一个都不够；而且顺带发现同一道守卫还悄悄污染了另一个指标。
+
+### 根因① —— `stock_price < 5` 绝对地板（两处）
+
+```python
+# options_analyzer.calculate_iv_skew
+if not calls_df or not puts_df or stock_price < 5:   # < 5 防 sample data ~1.0
+# options_analyzer.calculate_gamma_exposure
+if stock_price < 5:   # < 5 同时排除零值和 yfinance sample data ~1.0 哨兵值
+```
+
+它要防的样本数据，**在 analyze() 里早 1300 行就被
+`options_chain["source"] == "sample"` 早退拦掉了**（v0.38.0）——这两个函数
+根本见不到样本数据。守卫只剩误伤的那一半：AMC（$2.70）自入库起
+`skew_ratio` 恒为 None、`gamma_exposure` 恒为 **0.0**。
+
+「用绝对价格阈值过滤哨兵值」这个形状 MEMORY 里已经记过一次
+（「曾把 AMC≈$3 的真实价格全滤光」）。**同一只票，同一个错法，第二次。**
+
+### 根因② —— 容差是相对的，行权价网格是绝对的
+
+光去掉地板还不够。`tolerance = stock_price * 0.03`，而行权价网格是固定间距，
+两者随价格**反向张缩**：
+
+| 标的 | 现价 | ±3% 窗口 | 网格间距 | 窗口里有几档 |
+|---|---|---|---|---|
+| NVDA | $228 | ±$6.84 | $2.5 | 好几档 |
+| AMC | $2.70 | **±$0.081** | $0.50 | **0 档** |
+
+实测 AMC 8/27 行权价 `[1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]`，
+call 窗口 `[2.754, 2.916]` 一档不含。即使地板拿掉，这里照样返回
+「OTM 期权数据不足」。
+
+### Fixed
+
+- **`calculate_iv_skew`**：地板改为 `stock_price <= 0`；窗口为空时退到
+  「最近的一档 OTM 行权价」，两条约束防止它变成兜底垃圾——
+  ① 必须仍在 OTM 一侧（put ≤ 现价 / call ≥ 现价）
+  ② 离目标超过现价 25% 就放弃（只有两三档的链不配给出 skew）
+  新增 `skew_basis` 字段（`"window"` / `"nearest_strike"`）如实标注走了哪条路，
+  与 `iv_rank_source` 同一条原则：两种取法算的不是一个东西，不标就分不出来。
+- **`calculate_gamma_exposure`**：地板同改；**返回值 `0.0` → `None`**（三处）。
+  0.0 在 GEX 的量纲里是「做市商净 gamma 中性」这个**真实读数**，与「没算」
+  不可区分，而且会经 `signal_archive` 归档成一条真观测进 IC 数据集。
+  模块自己的样本早退写的就是 `"gamma_exposure": None`，
+  `report_formatters` 也是 `if gamma is not None` —— 0.0 从一开始就不自洽。
+  签名 `-> float` 改 `-> Optional[float]`。
+
+### 真实数据验证（云端 8/27 快照，离线，无网络调用）
+
+```
+AMC 2026-08-27 真实链：calls 32 / puts 32，现价 $2.6815（cboe_delayed）
+  修复后 skew_ratio = 0.881（basis=nearest_strike）  gamma_exposure = 11.3464
+  线上现值 skew_ratio = null（「数据不足」）          gamma_exposure = 0.0
+```
+
+`0.881` 与当天另一套口径独立算出的 `deep_skew.skew_25d = 0.90` 差 2% ——
+不同代码路径、不同取档方法，互为佐证。
+
+### 不产生口径世代边界
+
+**窗口非空时行为逐字节不变**，其余 29 只标的一律仍走 `basis="window"`
+（有测试断言）。只有窗口本来就空的标的才进新路径，而它们此前的值是 None。
+故无需付 MEMORY「IC 重跑就绪度闸」那 25 周的前向累积代价。
+
+### Added — `tests/test_options_analyzer.py::TestLowPricedUnderlying`（8 条）
+
+含五次 mutation check，去掉任一修复必须变红。
+
+⚠️ **第四次变异抓到一个假护栏**：`test_fallback_stays_on_otm_side` 初版用
+`calls=[1.0, 1.5]`，看似在测 OTM 侧约束，实际那两档离目标 1.34 > 距离上限
+0.675，**先被上限挡掉了** —— 去掉 OTM 约束这条测试照样全绿。改用一个
+「过得了距离上限、但站错边」的档位（$2.5 对 $2.70 现价）后才真正生效。
+没有变异检查的话，这条护栏会一直挂在那里假装在守。
+
+### Changed — `test_gex_empty_chains`
+
+旧断言 `assert gex == 0.0` 把 bug 固化成了契约，改为断言 `is None`。
 ## [0.45.62] — 2026-08-28 — 那 7 条失效条件，入库以来一次都没被求值过
 
 ### 先更正 v0.45.57 的判断

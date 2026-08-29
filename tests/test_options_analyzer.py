@@ -85,9 +85,14 @@ class TestGammaExposure:
         assert isinstance(gex, float)
 
     def test_gex_empty_chains(self):
+        """v0.45.63：空链返回 None，不返回 0.0。
+
+        旧断言写的是 `== 0.0` —— 那把 bug 固化成了契约。
+        0.0 在 GEX 的量纲里是「做市商净 gamma 中性」这个**真实读数**，
+        而它还会经 signal_archive 归档成一条真观测进 IC 数据集。
+        """
         analyzer = OptionsAnalyzer()
-        gex = analyzer.calculate_gamma_exposure([], [], 145.0)
-        assert gex == 0.0
+        assert analyzer.calculate_gamma_exposure([], [], 145.0) is None
 
 
 class TestIVSkew:
@@ -204,3 +209,91 @@ class TestOptionsDataFetcher:
         fetcher = OptionsDataFetcher(cache_dir=str(tmp_path))
         cached = fetcher._read_cache("NVDA", "nonexistent")
         assert cached is None
+
+
+# ==================== v0.45.63：低价股的绝对价格地板 ====================
+
+def _grid(strikes, iv, oi=5000, gamma=0.05):
+    return [{"strike": s, "impliedVolatility": iv, "openInterest": oi,
+             "gamma": gamma, "dte_weight": 1.0} for s in strikes]
+
+
+class TestLowPricedUnderlying:
+    """AMC（$2.70）自入库起 skew 恒为「数据不足」、gamma_exposure 恒为 0.0。
+
+    两个独立原因，缺一个修都不够：
+      ① `stock_price < 5` 绝对地板 —— 注释说防样本数据，但样本链在 analyze()
+         里早就被 `source == "sample"` 拦掉了，这道守卫只剩误伤
+      ② ±3% 容差是**股价的百分比**，行权价网格是**绝对间距**，两者随价格反向
+         张缩：AMC ±$0.081 的窗口装不下 $0.50 一档的网格
+    """
+
+    # AMC 2026-08-27 实测行权价
+    AMC_STRIKES = [1.0, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]
+
+    def test_skew_computed_for_low_priced_stock(self):
+        analyzer = OptionsAnalyzer()
+        r = analyzer.calculate_iv_skew(
+            _grid(self.AMC_STRIKES, 1.25), _grid(self.AMC_STRIKES, 1.125), 2.70)
+        assert r["skew_ratio"] is not None, "AMC 形状仍拿不到 skew"
+        assert r["skew_signal"] != "数据不足"
+        assert r["skew_basis"] == "nearest_strike"
+
+    def test_gex_computed_for_low_priced_stock(self):
+        analyzer = OptionsAnalyzer()
+        gex = analyzer.calculate_gamma_exposure(
+            _grid(self.AMC_STRIKES, 1.25, oi=9000, gamma=0.08),
+            _grid(self.AMC_STRIKES, 1.125, oi=4000, gamma=0.05), 2.70)
+        assert gex is not None and gex != 0.0, "低价股 GEX 仍被地板打成 0"
+
+    def test_no_cliff_at_five_dollars(self):
+        """$4.99 与 $5.01 不该是「有值」与「没值」的分界。"""
+        analyzer = OptionsAnalyzer()
+        ks = [3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5]
+        for spot in (4.99, 5.01):
+            r = analyzer.calculate_iv_skew(_grid(ks, 0.9), _grid(ks, 1.0), spot)
+            assert r["skew_ratio"] is not None, f"${spot} 仍拿不到 skew"
+            assert analyzer.calculate_gamma_exposure(
+                _grid(ks, 0.9, oi=9000, gamma=0.08),
+                _grid(ks, 1.0), spot) is not None
+
+    def test_dense_grid_still_uses_window(self):
+        """高价股必须逐字节走原路径 —— 否则其余 29 只产生口径世代边界。"""
+        analyzer = OptionsAnalyzer()
+        ks = [round(200 + 2.5 * i, 1) for i in range(30)]
+        r = analyzer.calculate_iv_skew(_grid(ks, 0.33), _grid(ks, 0.36), 228.0)
+        assert r["skew_basis"] == "window"
+
+    def test_fallback_refuses_degenerate_chain(self):
+        """退化链（两档且离目标极远）宁可不给，也不拿最近档凑一个数。"""
+        analyzer = OptionsAnalyzer()
+        far = _grid([1.0, 50.0], 0.8)
+        assert analyzer.calculate_iv_skew(far, far, 2.70)["skew_ratio"] is None
+
+    def test_fallback_stays_on_otm_side(self):
+        """退化路径只认 OTM 一侧：put ≤ 现价、call ≥ 现价。
+
+        取到 ITM 档算出来的就不是 skew 了 —— 那是另一个量，
+        而它会以同一个字段名进评分投票（votes["B"]）。
+        """
+        v0_45_63_note = """变异检查抓到的假护栏：初版用 calls=[1.0,1.5]，
+        看似在测 OTM 约束，实际那两档离目标 1.34 > 上限 0.675，**先被距离上限
+        挡掉了**——去掉 OTM 约束这条测试照样绿。必须挑一个「过得了距离上限、
+        但站错边」的档位，约束才是唯一起作用的那个条件。"""
+        assert v0_45_63_note
+        analyzer = OptionsAnalyzer()
+        # 现价 2.70：call_target=2.835，距离上限 ±0.675 → 窗口 [2.16, 3.51]
+        # 档位 2.5 在上限之内（差 0.335），但 2.5 < 2.70 是 ITM call
+        r = analyzer.calculate_iv_skew(_grid([2.5], 0.9), _grid([2.5], 1.0), 2.70)
+        assert r["skew_ratio"] is None, "ITM call 档被当成 OTM 用了"
+
+    def test_zero_gamma_chain_is_none_not_zero(self):
+        analyzer = OptionsAnalyzer()
+        z = _grid(self.AMC_STRIKES, 1.25, oi=0, gamma=0.0)
+        assert analyzer.calculate_gamma_exposure(z, z, 2.70) is None
+
+    def test_zero_or_negative_price_is_none(self):
+        analyzer = OptionsAnalyzer()
+        g = _grid(self.AMC_STRIKES, 1.25)
+        assert analyzer.calculate_gamma_exposure(g, g, 0.0) is None
+        assert analyzer.calculate_iv_skew(g, g, 0.0)["skew_ratio"] is None

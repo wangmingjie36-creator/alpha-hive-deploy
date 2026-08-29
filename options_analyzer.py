@@ -656,7 +656,7 @@ class OptionsAnalyzer:
 
     def calculate_gamma_exposure(
         self, calls_df: List[Dict], puts_df: List[Dict], stock_price: float
-    ) -> float:
+    ) -> Optional[float]:
         """
         计算 Notional Gamma Exposure（标准做市商 delta-hedge 模型）
 
@@ -676,11 +676,23 @@ class OptionsAnalyzer:
 
         返回值单位：百万美元 notional gamma
         """
+        # v0.45.63：算不出返回 None，不返回 0.0。
+        # 0.0 在 GEX 的量纲里是**一个有意义的读数**（做市商净 gamma 中性），
+        # 与「没算」不可区分；而它还会被 signal_archive 归档成一条真观测进 IC。
+        # 本模块自己的样本早退（analyze() 内，v0.38.0）写的就是
+        # `"gamma_exposure": None`，report_formatters 也是 `if gamma is not None`
+        # ——0.0 这条从一开始就跟模块口径不一致。
         if not calls_df or not puts_df:
-            return 0.0
+            return None
 
-        if stock_price < 5:  # < 5 同时排除零值和 yfinance sample data ~1.0 哨兵值
-            return 0.0
+        # v0.45.63：原为 `stock_price < 5`，注释说是为了排除 yfinance 样本数据的
+        # ~1.0 哨兵值。但样本链在 analyze() 里已由 `options_chain["source"]=="sample"`
+        # 早退拦掉（v0.38.0，比这里早 1300 行），本函数**根本见不到样本数据**。
+        # 于是这道守卫只剩下误伤的那一半：AMC（$2.70）实测 gamma_exposure 恒为 0.0。
+        # 「用绝对价格阈值过滤哨兵值」这个形状 MEMORY 里已记过一次
+        # （曾把 AMC≈$3 的真实价格全滤光）——同一只票，同一个错法，第二次。
+        if stock_price is None or stock_price <= 0:
+            return None
 
         # 标准 notional GEX 计算
         call_gamma = sum(
@@ -697,9 +709,12 @@ class OptionsAnalyzer:
         # 正数 = net long gamma（压制波动），负数 = net short gamma（放大波动）
         # 除以 1e6 转为百万美元
         total = call_gamma + put_gamma
-        gex = (call_gamma - put_gamma) / 1e6 if total > 0 else 0.0
-
-        return round(gex, 4)
+        # v0.45.63：同上——total==0 表示整条链没有任何 gamma×OI（退化链），
+        # 那是「算不出」不是「净 gamma 为零」。只修了上面两处而留下这处，
+        # 就是 v0.45.49 `_get_metric_display` 那种「五个字段只修了一个」。
+        if total <= 0:
+            return None
+        return round((call_gamma - put_gamma) / 1e6, 4)
 
     def calculate_iv_skew(
         self, calls_df: List[Dict], puts_df: List[Dict], stock_price: float
@@ -713,7 +728,11 @@ class OptionsAnalyzer:
 
         近似 25-delta：OTM ~5% 的行权价（put: stock_price * 0.95, call: stock_price * 1.05）
         """
-        if not calls_df or not puts_df or stock_price < 5:  # < 5 防 sample data ~1.0
+        # v0.45.63：原为 `stock_price < 5`（注释：防 sample data ~1.0）。
+        # 与 calculate_gamma_exposure 同一处错法——样本链在 analyze() 里
+        # 已被 `source == "sample"` 早退拦掉，本函数见不到它；这道守卫只剩误伤。
+        # AMC（$2.70）因此自入库起 skew_ratio 恒为 None、signal 恒为「数据不足」。
+        if not calls_df or not puts_df or stock_price is None or stock_price <= 0:
             return {"skew_ratio": None, "skew_signal": "数据不足"}
 
         import math
@@ -723,30 +742,55 @@ class OptionsAnalyzer:
         call_target = stock_price * 1.05  # OTM call ~5% above
         tolerance = stock_price * 0.03    # ±3% 容差
 
-        # 找 OTM put IV（行权价 ≈ stock_price * 0.95）
-        put_ivs = []
-        for p in puts_df:
-            strike = p.get("strike", 0)
-            iv = p.get("impliedVolatility", 0)
-            try:
-                if iv and math.isfinite(iv) and iv > 0.005 and abs(strike - put_target) <= tolerance:
-                    put_ivs.append(float(iv))
-            except (TypeError, ValueError):
-                continue
+        def _pick(rows, target, want_below):
+            """取目标行权价附近的 OTM IV，返回 (ivs, basis)。
 
-        # 找 OTM call IV（行权价 ≈ stock_price * 1.05）
-        call_ivs = []
-        for c in calls_df:
-            strike = c.get("strike", 0)
-            iv = c.get("impliedVolatility", 0)
-            try:
-                if iv and math.isfinite(iv) and iv > 0.005 and abs(strike - call_target) <= tolerance:
-                    call_ivs.append(float(iv))
-            except (TypeError, ValueError):
-                continue
+            v0.45.63：**光去掉价格地板还不够。** 容差是「股价的 3%」，
+            而行权价网格是绝对间距 —— 两者随价格反向张缩：
+
+                NVDA $228：±3% = ±$6.84，跨得过 $2.5 一档的网格  → 窗口里有货
+                AMC  $2.70：±3% = ±$0.081，而网格是 $0.50 一档   → 窗口里必然空
+
+            实测 AMC 8/27 行权价 [1.0, 2.0, 2.5, 3.0, 3.5]：
+            call 窗口 [2.754, 2.916] 一档都不含 —— 即使价格地板拿掉，
+            这里也会返回「OTM 期权数据不足」。
+
+            所以窗口空时退到「最近的一档 OTM 行权价」。两条约束防止它变成兜底垃圾：
+              ① 必须仍在 OTM 一侧（put ≤ 现价 / call ≥ 现价），否则算的就不是 skew
+              ② 离目标超过现价的 25% 就放弃 —— 只有两三档的链不配给出 skew
+
+            **窗口非空时行为逐字节不变**，所以其余 29 只标的不产生口径世代边界
+            （MEMORY「IC 重跑就绪度闸」：换口径要付 25 周的前向累积代价）。
+            """
+            valid = []
+            for row in rows:
+                strike = row.get("strike", 0)
+                iv = row.get("impliedVolatility", 0)
+                try:
+                    if iv and math.isfinite(iv) and iv > 0.005 and strike > 0:
+                        valid.append((float(strike), float(iv)))
+                except (TypeError, ValueError):
+                    continue
+            win = [iv for strike, iv in valid if abs(strike - target) <= tolerance]
+            if win:
+                return win, "window"
+            otm = [(abs(strike - target), iv) for strike, iv in valid
+                   if (strike <= stock_price if want_below else strike >= stock_price)]
+            if not otm:
+                return [], "none"
+            dist, iv = min(otm, key=lambda t: t[0])
+            if dist > stock_price * 0.25:
+                return [], "none"
+            return [iv], "nearest_strike"
+
+        put_ivs, put_basis = _pick(puts_df, put_target, want_below=True)
+        call_ivs, call_basis = _pick(calls_df, call_target, want_below=False)
 
         if not put_ivs or not call_ivs:
             return {"skew_ratio": None, "skew_signal": "OTM 期权数据不足"}
+        # 只要有一侧走了退化路径就如实标注 —— 与 iv_rank_source 同一条原则：
+        # 两种取法算出来的不是一个东西，不标就分不出来
+        basis = "window" if put_basis == call_basis == "window" else "nearest_strike"
 
         avg_put_iv = sum(put_ivs) / len(put_ivs)
         avg_call_iv = sum(call_ivs) / len(call_ivs)
@@ -768,6 +812,7 @@ class OptionsAnalyzer:
             "skew_signal": signal,
             "otm_put_iv": round(avg_put_iv * 100, 2),
             "otm_call_iv": round(avg_call_iv * 100, 2),
+            "skew_basis": basis,
         }
 
     def calculate_iv_term_structure(
