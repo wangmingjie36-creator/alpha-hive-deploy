@@ -8,7 +8,7 @@ import os
 import subprocess
 import pytest
 from unittest.mock import MagicMock, patch, call
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 # ==================== _build_swarm_report 测试 ====================
@@ -575,14 +575,17 @@ class TestMemoryStoreCleanup:
         # 插入一条旧记录和一条新记录
         import sqlite3
         conn = sqlite3.connect(str(tmp_path / "test.db"))
+        # 两侧都相对当天生成（与 TestBacktesterCleanup 同一写法）：
+        # 分界线 now()-180d 随日历前移，写死日期迟早被它追上。
+        _now = datetime.now()
+        _old = (_now - timedelta(days=200)).strftime("%Y-%m-%d")   # 应被删
+        _recent = _now.strftime("%Y-%m-%d")                        # 应存活
         conn.execute("""
             INSERT INTO agent_memory (memory_id, session_id, date, ticker, agent_id,
                                       direction, discovery, source, self_score)
-            VALUES ('old_1', 's1', '2024-01-01', 'NVDA', 'ScoutBeeNova',
+            VALUES ('old_1', 's1', ?, 'NVDA', 'ScoutBeeNova',
                     'bullish', 'test', 'test', 7.0)
-        """)
-        # 动态"今天"，避免写死日期随真实时间流逝掉出 get_recent_memories(days=30) 窗口（时间炸弹）
-        _recent = datetime.now().strftime("%Y-%m-%d")
+        """, (_old,))
         conn.execute("""
             INSERT INTO agent_memory (memory_id, session_id, date, ticker, agent_id,
                                       direction, discovery, source, self_score)
@@ -615,15 +618,23 @@ class TestBacktesterCleanup:
         db = str(tmp_path / "test.db")
         bt = Backtester(db_path=db)
 
+        # 两个日期都相对当天生成：cleanup 的分界线是 now()-180d，会随日历前移，
+        # 写死日期迟早被它追上。原 fixture 的 '2026-03-01' 在 2026-08-28 越线，
+        # 于是本该存活的那条也被删，assert 2 == 1。
+        # 存活行留 150 天余量，删除行留 20 天余量，两侧都不贴边。
+        _now = datetime.now()
+        old_date = (_now - timedelta(days=200)).strftime("%Y-%m-%d")     # 应被删
+        recent_date = (_now - timedelta(days=30)).strftime("%Y-%m-%d")   # 应存活
+
         conn = sqlite3.connect(db)
         conn.execute(f"""
             INSERT INTO {PredictionStore.TABLE} (date, ticker, final_score, direction)
-            VALUES ('2024-01-01', 'NVDA', 8.0, 'bullish')
-        """)
+            VALUES (?, 'NVDA', 8.0, 'bullish')
+        """, (old_date,))
         conn.execute(f"""
             INSERT INTO {PredictionStore.TABLE} (date, ticker, final_score, direction)
-            VALUES ('2026-03-01', 'TSLA', 7.0, 'bearish')
-        """)
+            VALUES (?, 'TSLA', 7.0, 'bearish')
+        """, (recent_date,))
         conn.commit()
         conn.close()
 

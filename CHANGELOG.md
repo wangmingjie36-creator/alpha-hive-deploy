@@ -5,7 +5,73 @@
 
 ---
 
-## [0.45.64] — 2026-08-29 — 占位（进行中：单测硬编码日期随日历腐烂——固定日期改为相对当天）
+## [0.45.64] — 2026-08-29 — 单测里的定时炸弹：分界线在走，写死的 fixture 日期钉在原地
+
+`tests/test_pipeline.py::TestBacktesterCleanup::test_cleanup_deletes_old_predictions`
+从 **2026-08-28** 起变红：`assert 2 == 1`。与 v0.45.63 无关——把工作区全部改动
+stash 掉仍然复现。
+
+### 根因 —— 180 天分界线每天前移，日期不动
+
+`Backtester.cleanup_old_predictions(days=180)`（`backtester.py:1816`）的分界线是
+`datetime.now() - timedelta(days=180)`，**每天前移一天**。fixture 的两条数据却是钉死的：
+
+| 行 | 写死日期 | 意图 | 距 2026-08-29 |
+|---|---|---|---|
+| NVDA | `2024-01-01` | 应被删 | 971 天 |
+| TSLA | `2026-03-01` | **应存活** | **181 天** |
+
+`2026-03-01 + 180d = 2026-08-28`——分界线那天正好越过它，第二条也被删，
+删除数 1 → 2。
+
+**这类腐烂是不对称的**：写死「应被删」那行是安全的，固定的过去日期只会离分界线
+越来越远；只有「应存活」那行是炸弹，因为 `now()` 正朝它走。
+
+### 修复 —— 两行都相对当天生成
+
+关键不只是「用相对日期」，而是**用与被测代码同一个时钟**（都走 `datetime.now()`），
+时钟一移两边同移：
+
+```python
+_now = datetime.now()
+old_date    = (_now - timedelta(days=200)).strftime("%Y-%m-%d")   # 应被删，余量 20 天
+recent_date = (_now - timedelta(days=30)).strftime("%Y-%m-%d")    # 应存活，余量 150 天
+```
+
+### 顺带：同一文件的姊妹用例只修了一半
+
+`TestMemoryStoreCleanup.test_cleanup_deletes_old_records` 早就撞过同一个坑——
+「应存活」那行已带注释「动态"今天"…（时间炸弹）」，但「应被删」那行仍写死
+`'2024-01-01'`。它本身安全（见上文的不对称性），但两行写法不一致，照抄的人
+容易把炸弹抄回来。已统一。
+
+### 排查了但**没**动的：写死日期 ≠ bug
+
+判据只有一条：**这个字面量会不会被拿去和 `datetime.now()` 比？** 不会就不该动它——
+把 `2026-02-27` 改成相对日期反而会毁掉「这天是周五」的可读性。
+
+| 文件 | 写死日期 | 为何安全 |
+|---|---|---|
+| `test_backtester.py` | `2026-01-15` 等 | 纯标签，写进去读出来；所有 now 相关 fixture 早已用 `datetime.now() - timedelta(...)` |
+| `test_backtest_forming_bar.py` | `2026-08-24` | `_exchange_now` 被 monkeypatch，时钟是注入的 |
+| `test_pipeline.py` 部署用例 | `2026-03-05` / `2026-02-27` | 部署白名单只过 `filename_is_nontrading_day`（纯日历谓词），不看 now |
+| `test_pipeline.py` checkpoint | `saved_at: 2020-01-01` | 意图就是「已过期」，只会更过期 |
+| `test_edgar_rss.py` / `test_watchlist_events.py` / `test_cboe_live_vintage.py` / `test_economic_calendar.py` | 各种 | 全部注入时钟（`pdt_today` / `today=` / `_at()` / `ref_date=`） |
+
+**未做**全仓「禁止测试写死日期」的静态守卫：上表说明绝大多数写死日期是正当的，
+误报率会高到没人看——守卫本身就会变成噪音。
+
+### Fixed
+- `tests/test_pipeline.py`：`TestBacktesterCleanup.test_cleanup_deletes_old_predictions`
+  的 fixture 日期改为相对当天（−200 / −30 天），修复 2026-08-28 起的 `assert 2 == 1`
+- `tests/test_pipeline.py`：`TestMemoryStoreCleanup.test_cleanup_deletes_old_records`
+  的「应被删」行统一改为相对当天，与姊妹用例同写法
+- `tests/test_pipeline.py`：模块级 import 补 `timedelta`
+
+### 验证
+- `tests/test_pipeline.py` + `test_backtester.py` + `test_backtest_forming_bar.py`：**105 passed**
+- 另跑 15 个含写死日期的相关测试文件：**397 passed**，无其他已腐烂用例
+- `ruff check --select F821 tests/test_pipeline.py`：All checks passed
 
 ## [0.45.63] — 2026-08-29 — 一道守卫，两个指标，同一只票：AMC 的绝对价格地板
 
