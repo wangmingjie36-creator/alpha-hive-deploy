@@ -1018,14 +1018,6 @@ CODE_EXECUTION_CONFIG = {
     "add_to_swarm": True,        # 是否将 CodeExecutorAgent 加入蜂群
 }
 
-# ==================== CrewAI 多 Agent 配置 (Phase 3 P5) ====================
-CREWAI_CONFIG = {
-    "enabled": True,  # CrewAI 框架启用（需先 pip install crewai）
-    "process_type": "hierarchical",  # hierarchical 或 sequential
-    "manager_verbose": True,
-    "timeout_seconds": 300,  # 单个分析超时
-}
-
 # ==================== 财报自动监控配置 ====================
 EARNINGS_WATCHER_CONFIG = {
     "enabled": True,

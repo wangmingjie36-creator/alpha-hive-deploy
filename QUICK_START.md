@@ -36,13 +36,6 @@ report = reporter.run_swarm_scan(['NVDA', 'TSLA', 'MSFT'])
 - 实时推送到 Slack
 - 返回结构化报告
 
-### CrewAI 扫描（Phase 3）
-```python
-reporter = AlphaHiveDailyReporter()
-report = reporter.run_crew_scan(['NVDA'])
-# 若 CrewAI 未安装，自动降级到蜂群模式
-```
-
 ### 手动 Slack 通知
 ```python
 from slack_report_notifier import SlackReportNotifier
@@ -74,7 +67,6 @@ notifier.send_risk_alert(
 |------|------|
 | `alpha_hive_daily_report.py` | 日报生成器 |
 | `slack_report_notifier.py` | Slack 通知器 |
-| `crewai_adapter.py` | CrewAI 多 Agent 框架 |
 | `code_executor.py` | 代码执行引擎（AST 安全） |
 | `config.py` | 全局配置 |
 | `test_nvda_full_workflow.py` | NVDA 演示 |

@@ -10,28 +10,6 @@ import tempfile
 # 确保项目根目录在 sys.path 中
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ==================== 禁止 crewai 在 import 时打埋点（v0.45.73）====================
-# crewai 1.9.3 的 `__init__.py` 顶层就调 `_track_install_async()`，起一个 daemon
-# 线程给 api.scarf.sh 发一个像素点。它没阻塞任何东西，也不是任何测试的依赖，
-# 纯粹是第三方 phone-home。
-#
-# 它是一次**不在 `http_gate` 覆盖范围内的出站 HTTPS**：本项目所有自家数据源都
-# 走那道串行闸，而这个 phone-home 发生在闸门自己还没被 import 的时刻。
-# ⚠️ 别把它和 2026-08-24 的 96 次 SSL EOF 挂因果 —— 那次的「OpenSSL 1.1.1q 扛不住
-# 并发」归因 **2026-08-25 已被重测证伪**（两个 OpenSSL 版本各 0 失败，串行反而更慢），
-# `http_gate.py` 的 docstring 在这点上是陈旧的。这里的理由只是「没必要为第三方埋点
-# 付一次不受管的出站请求」，不是「它会引发 EOF」。
-#
-# ⚠️ 这段**必须是模块级**，不能写成 fixture。fixture 是每条测试跑之前才执行的，
-# 而 `import crewai` 发生在 pytest **收集阶段**（import 测试模块时），那时
-# fixture 一条都还没跑 —— 写成 fixture 等于没设。
-#
-# 真正的兜底在 `crewai_adapter.py` 顶部（本仓唯一的 `import crewai` 处）；
-# 这里再设一道，是为了覆盖「某条测试自己直接 import crewai」的情况。
-for _k in ("CREWAI_DISABLE_TELEMETRY", "CREWAI_DISABLE_TRACKING"):
-    os.environ.setdefault(_k, "true")
-del _k
-
 
 # ==================== 环境隔离 ====================
 

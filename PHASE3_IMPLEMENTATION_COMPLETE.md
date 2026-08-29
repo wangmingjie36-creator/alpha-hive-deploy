@@ -1,3 +1,8 @@
+> ⚠️ **历史文档**：其中的 CrewAI 集成（Phase 3 P5）已于 **v0.45.74 彻底移除**。
+> 它从未接通：`run_crew_scan()` 零调用方、`requirements.txt` 里是注释行、
+> `Agent(...)` 从未传 `llm=`（会落到 crewai 默认的 OpenAI 模型，而本仓无 key）。
+> 本文件保留作为当时的实现记录，**不要照着它重建**。详见 CHANGELOG v0.45.74。
+
 # ✅ Alpha Hive Phase 3 完整实现 - 代码执行框架 + CrewAI 多 Agent 协作
 
 **完成时间**: 2026-02-24 20:15 UTC

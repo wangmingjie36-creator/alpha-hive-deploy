@@ -46,17 +46,6 @@ except ImportError:
     CodeExecutorAgent = None
     CODE_EXECUTION_CONFIG = {"enabled": False}
 
-# Phase 3 P5: CrewAI 多 Agent 框架 —— v0.45.73 起改为惰性导入，见 run_crew_scan()
-# 为什么不在顶层 import：`crewai_adapter` 顶层就 `import crewai`，而 crewai 1.9.3
-# 一被 import 就起 daemon 线程给 api.scarf.sh 打埋点（细节见 crewai_adapter.py 顶部）。
-# 而 `run_crew_scan()` 全仓**零调用方** —— 只出现在 QUICK_START.md / PHASE3_*.md 的
-# 示例里。让每次 pytest、每次生产扫描都为一个没人调的分支付出「一次不受 http_gate
-# 管的出站 HTTPS + ~0.4s 导入」，不划算；真有人调 run_crew_scan() 时再导入即可。
-try:
-    from config import CREWAI_CONFIG
-except ImportError:
-    CREWAI_CONFIG = {"enabled": False}
-
 SlackReportNotifier = optional_import("slack_report_notifier", "SlackReportNotifier")
 EarningsWatcher = optional_import("earnings_watcher", "EarningsWatcher")
 
@@ -1340,92 +1329,6 @@ class AlphaHiveDailyReporter:
             _log.warning("扫描后指标收集异常（不影响报告生成）: %s", e)
         report = self._build_swarm_report(swarm_results, ctx.board, agent_count=len(ctx.all_agents))
         self._post_scan_notify(ctx, swarm_results, report, elapsed)
-        return report
-
-    def run_crew_scan(self, focus_tickers: List[str] = None) -> Dict:
-        """
-        CrewAI 模式蜂群扫描 - 使用 Process.hierarchical 主-子 Agent 递归调度
-        若 crewai 未安装，自动降级到 run_swarm_scan()
-
-        Args:
-            focus_tickers: 重点关注标的（如为None则扫描全部watchlist）
-
-        Returns:
-            完整的蜂群分析报告
-        """
-        # 检查 CrewAI 是否可用（惰性导入：见模块顶部 Phase 3 P5 注释）
-        if not CREWAI_CONFIG.get("enabled"):
-            _log.info("CrewAI 未启用，降级到标准蜂群模式")
-            return self.run_swarm_scan(focus_tickers)
-
-        try:
-            from crewai_adapter import AlphaHiveCrew, CREWAI_AVAILABLE
-        except (ImportError, TypeError) as e:
-            _log.info("CrewAI 模块导入失败: %s（降级到原始蜂群）", type(e).__name__)
-            return self.run_swarm_scan(focus_tickers)
-
-        # 顺带修掉一个与本方法 docstring 相悖的旧行为：crewai 没装时
-        # `crewai_adapter` 仍然 import 得动（它内部自己降级，AlphaHiveCrew 照样是
-        # 个类），所以旧的 `if not AlphaHiveCrew` 根本拦不住，会一路走到
-        # `crew.build()` 抛 RuntimeError("CrewAI 未安装") —— 而 docstring 写的是
-        # 「若 crewai 未安装，自动降级」。真正的可用性标志是适配层的 CREWAI_AVAILABLE。
-        if not CREWAI_AVAILABLE:
-            _log.info("CrewAI 未安装，降级到标准蜂群模式")
-            return self.run_swarm_scan(focus_tickers)
-
-        _log.info("CrewAI 模式 %s", self.date_str)
-
-        targets = focus_tickers or list(WATCHLIST.keys())[:10]
-        _log.info("标的：%s", " ".join(targets))
-
-        # 创建共享的信息素板
-        board = PheromoneBoard(memory_store=self.memory_store, session_id=self._session_id)
-
-        # 构建 CrewAI Crew
-        crew = AlphaHiveCrew(board=board, memory_store=self.memory_store)
-        crew.build(targets)
-
-        _log.info("CrewAI %d Agent", crew.get_agents_count())
-
-        swarm_results = {}
-        start_time = time.time()
-
-        # 使用 CrewAI 分析每个标的
-        for i, ticker in enumerate(targets, 1):
-            _log.info("[%d/%d] CrewAI 分析 %s", i, len(targets), ticker)
-
-            try:
-                result = crew.analyze(ticker)
-                swarm_results[ticker] = result
-
-                _log.info("  %s: %.1f/10 %s", ticker, result.get('final_score', 0), result.get('direction', 'neutral'))
-
-            except (ValueError, KeyError, TypeError, RuntimeError, ConnectionError) as e:
-                _log.warning("  %s CrewAI 分析失败: %s", ticker, str(e)[:80])
-                swarm_results[ticker] = {
-                    "ticker": ticker,
-                    "final_score": 0.0,
-                    "direction": "neutral",
-                    "discovery": f"CrewAI 分析失败: {str(e)}",
-                    "error": str(e)
-                }
-
-        elapsed = time.time() - start_time
-        _log.info("CrewAI 耗时：%.1fs", elapsed)
-
-        # 转换为标准报告格式（兼容 run_swarm_scan 输出）
-        # CrewAI 模式：6 核心 BeeAgent + BearBeeContrarian = 7
-        report = self._build_swarm_report(swarm_results, board, agent_count=7)
-
-        # 异步保存会话（使用共享线程池，退出时等待完成）
-        if self.memory_store and self._session_id:
-            snapshot = board.compact_snapshot()
-            self._submit_bg(
-                self.memory_store.save_session,
-                self._session_id, self.date_str, "crew_scan",
-                targets, swarm_results, snapshot, elapsed
-            )
-
         return report
 
     # ── _build_swarm_report helper methods ──────────────────────────

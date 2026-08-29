@@ -7,7 +7,79 @@
 
 ## [0.45.75] — 2026-08-29 — 占位（进行中：撤回 http_gate 已被证伪的 OpenSSL 归因）
 
-## [0.45.74] — 2026-08-29 — 占位（进行中：彻底移除 CrewAI 集成）
+## [0.45.74] — 2026-08-29 — 移除 CrewAI：一个从未接通、且与本系统测量方式相冲突的集成
+
+v0.45.73 关掉 crewai 的 import 埋点时顺带确认了 `run_crew_scan()` 零调用方。
+这次把整条集成删干净——不是因为它闲置，是因为**它就算接通也不该接通**。
+
+### Removed
+
+| 删除项 | 说明 |
+|---|---|
+| `crewai_adapter.py` | 整个文件（`BeeAgentTool` / `AlphaHiveCrew`） |
+| `alpha_hive_daily_report.run_crew_scan()` | 86 行，零调用方 |
+| 同文件顶层 CrewAI import 块 | 11 行 |
+| `config.CREWAI_CONFIG` | 8 行；`enabled: True` 是**假开关**，只被那个没人调的方法读 |
+| `requirements.txt` 的 `# crewai>=0.1.0` | 本来就是注释行——**它从来不是声明依赖** |
+| `tests/conftest.py` / 编排器的埋点 env 闸（v0.45.73 加的） | 本仓已无 `import crewai`，留着就是「关一个不存在的东西」的死配置 |
+
+`pip uninstall crewai` **未执行**：包装在用户级 site-packages，可能有别的项目在用；
+且本仓不再 import 它之后，装着不产生任何成本（无导入 ⇒ 无埋点 ⇒ 无耗时）。
+
+### 为什么不只是「闲置」——三条硬伤
+
+1. **从未接通**。`Agent(...)` 从头到尾没传 `llm=`。crewai
+   `utilities/llm_utils.py::_llm_via_environment_or_fallback()` 的回退链是
+   `MODEL` → `MODEL_NAME` → `OPENAI_MODEL_NAME` → `DEFAULT_LLM_MODEL="gpt-4.1-mini"`（OpenAI）。
+   全仓 `grep OPENAI_API_KEY` 零命中、环境也没有 ⇒ `crew.kickoff()` 必然失败。
+   它不是「装了没用」，是**装了也跑不了**。
+
+2. **与项目硬规则冲突**。真要跑通就得配一个付费 OpenAI key，
+   而本项目的规则是「报告走 Cowork 本地推理、禁付费 API、LLM 扫描必须先报费用」。
+   hierarchical + 6 工具 + `verbose=True`，每只标的多轮往返，30 只标的的账不小。
+
+3. **与本系统的测量方式相冲突**——这条最关键，见下。
+
+### 设计评估：LLM manager 动态选蜂 + 自行加权，对本系统是负分
+
+被删掉的那个设计是：一个「投资分析总监」LLM 读工具描述，自己决定调哪几只蜂、
+怎么综合，产出再 `_normalize_result()` 转回蜂群格式。评估结论是**多余且有害**：
+
+- **动态选蜂省不下东西，还会毁掉可比性**。蜂只有 6~8 只、各自都便宜、且每天每只
+  标的都要全跑——因为整套价值就在那张**横截面面板**。按情境跳过某几只蜂 =
+  每天的口径都不一样，`compute_kpis` / rank-IC / 扩池换来的 N_eff 全部作废。
+- **它会砸掉本项目最贵的资产：可复现的评分管道**。`replay_scoring.py`（v0.45.33）
+  能把聚合层与维度计算层的改动离线重放，省掉 25 周的世代边界代价；
+  `weekly_optimizer` 的 T+7 回测、逐维 rank-IC、IC 重跑就绪度闸的世代边界，
+  全都建立在「同样的输入产出同样的分数」之上。
+  LLM manager 让聚合**不可复现**（同输入不同日不同权重，且模型每次升版都是一次
+  静默的世代切换），上面这一整套测量设施同时失效。
+- **它治不了真正的病**。`final_score` IC≈0 的根因是**符号抵消**：两个反向维度占
+  43% 权重、抵消掉唯一有证据的 sentiment（详见
+  `experiments/final_score_dilution_report.md` 与 v0.44.0 的只读化决定）。
+  换个更聪明的混合器不解决抵消，只是让抵消**不可审计**。
+  诊断指向的是「该信哪个信号」，不是「怎么混得更花哨」。
+- **它自带一个静默中性化的接缝**。`_normalize_result()` 里
+  `float(data.get("score", ..., 5.0))`——LLM 少吐一个字段就静默变成 5.0 中性，
+  与「真的分析出中性」同形。这是本项目最难发现的一类故障（v0.45.2）。
+  任何「LLM 自由吐 JSON → 解析 → 填默认值」的设计都有这道缝。
+
+**LLM 在本系统里该待的地方是数字定下来之后的叙事合成**（深度报告模板 C，
+走 Cowork 本地推理），**不是替掉评分与聚合**。
+
+### Added
+
+`tests/test_no_crewai_dependency.py`（2 条，1.5s），防它回来：
+
+1. 子进程 import 日报主入口，`'crewai' in sys.modules` 必须为 False。
+   ⚠️ 这条的有效性取决于 crewai 还装着；哪天卸载了它会变恒真，所以必须配第 2 条。
+2. 全仓静态扫描，不许出现 `import crewai` / `from crewai import ...`
+   （与装没装无关，卸载后依然有效）。
+
+mutation check（`--maxfail=99`）：新建一个含 `import crewai` 的文件 ⇒ 第 2 条红；
+日报顶层加回 `import crewai` ⇒ 两条都红。
+
+回归：全套 **2104 passed / 0 failed**，ruff F821 全过。
 
 ## [0.45.73] — 2026-08-29 — 一个第三方 phone-home，和一个「设了等于没设」的环境变量名
 
