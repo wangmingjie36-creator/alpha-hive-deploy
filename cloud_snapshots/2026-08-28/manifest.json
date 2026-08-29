@@ -4,11 +4,12 @@
  "generated_at_utc": "2026-08-28T21:04:42.417763+00:00",
  "elapsed_sec": 146.4,
  "tickers_requested": 30,
- "tickers_ok": 29,
+ "tickers_ok": 30,
  "ok": [
   "ABBV",
   "AMC",
   "AMZN",
+  "BILI",
   "BRK-B",
   "COST",
   "CRCL",
@@ -36,9 +37,7 @@
   "WMT",
   "XOM"
  ],
- "failed": {
-  "BILI": "RuntimeError: CBOE payload 为空（网络/403/符号问题）"
- },
+ "failed": {},
  "market_cboe_ok": true,
  "market_degraded_sections": [
   "pcce",
@@ -46,9 +45,19 @@
   "vvix"
  ],
  "fear_greed_ok": true,
- "vintage_ok": 29,
+ "vintage_ok": 30,
  "vintage_unverifiable": [],
  "vintage_stale": [],
  "vintage_unverifiable_all": false,
- "abort_reason": null
+ "abort_reason": null,
+ "backfill": {
+  "tickers": [
+   "BILI"
+  ],
+  "at_utc": "2026-08-29T13:11:21.366072+00:00",
+  "business_date": "2026-08-28",
+  "original_failure": "RuntimeError: CBOE payload 为空（网络/403/符号问题）",
+  "root_cause": "CBOE CDN 对 BILI 刷新滞后；主跑时 last_trade=2026-08-27，补抓时已更新为 2026-08-28T15:59:59",
+  "method": "cloud_snapshot_fetch._fetch_one_ticker(\"BILI\", \"2026-08-28\") 原引擎，vintage 校验照常生效"
+ }
 }
