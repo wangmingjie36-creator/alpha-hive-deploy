@@ -5,7 +5,82 @@
 
 ---
 
-## [0.45.80] — 2026-08-30 — 占位（进行中：CSS 死类审计——沿 dot-bull/yc-ok 同款 bug 顺藤摸瓜，查 dashboard.css 全量死类/被遮蔽类）
+## [0.45.80] — 2026-08-30 — dashboard.css 全量死类审计：又挖出两处「v2 重写但 v1 没删」的死代码
+
+同一天两个并行 worktree 各自发现一个"class 被引用/定义了但从没真正渲染"的 bug
+（`elastic-spence` 的 v0.45.76：`.dot-bull/.dot-bear/.dot-neut` 被 Python 引用三处，
+CSS 从未定义；`interesting-khayyam` 的 v0.45.79：`.yc-ok` 等单类选择器被同特异度、
+更靠后的 `.ah-macro-val{color:...}` 顶掉，实测颜色从未生效过——均未合并进 main）。
+两个 bug 同一天在同一文件里各撞一次，值得做一次全量审计而不是等第三次撞见。
+
+### 方法（不只是 grep）
+
+1. 从 `dashboard_renderer.py`（2938 行）+ `templates/dashboard.html` 提取全部
+   `class="..."` 静态字面量（296 个原始 token），再逐个追踪 f-string 里的动态
+   class 变量（`_scls6`/`_dcls6`/`dot_cls`/`macro_yc_cls` 等 18 个）到其
+   赋值语句，解出全部可能取值（`_sc_cls()` 等辅助函数一并展开），合并成
+   **306 个实际可能出现的 class 名**。
+2. 用 `tinycss2` 把 `templates/dashboard.css`（817 行）解析成
+   `(selector, media, specificity, source_order, declarations)` 结构化列表
+   （手写正则跨不过 `@media` 嵌套和多选择器逗号分组，故引入依赖），而不是肉眼扫。
+3. **死类检测**：306 个 class 里，逐个查是否在任意选择器的最右复合部分出现过。
+4. **遮蔽检测**：先从 `class="..."` 里把"同一元素同时挂两个 class"的组合
+   （如 `hscore {_hscls}`、`ah-cards-grid top6-grid`）枚举出来（29 组），
+   对每组按 CSS 级联规则（`!important` > 特异度 > 源码顺序）算出每条属性的
+   实际胜出声明，标出"单类选择器写的值，被更晚出现的同特异度选择器顶掉"的情况。
+   为避免重复报告已在途的两个 bug，第 3、4 步跑在"临时合并了 v0.45.76 +
+   v0.45.79 两个未合并分支改动"的参考副本上，而不是本 worktree 当时的旧状态。
+5. **真机验证**：本地起 `http.server` + 最小 HTML 骨架引入真实 CSS，用
+   Browser 的 `getComputedStyle` 而非肉眼/grep 核对候选项——筛掉了脚本标出的
+   多数"遮蔽"其实是**假阳性**（`::after` 伪元素规则不影响本体文字颜色；
+   `.score-big.sc-h` 等复合选择器虽也"赢了"单类 `.sc-h`，但写的是同一个值，
+   视觉上无差异——本仓库已有对这个模式的正确防御写法，不是本次要修的范围）。
+
+### Fixed
+
+真机验证后确认两处货真价实的死代码，模式相同：**后来的重写替换了旧样式，
+旧声明却从没删**，与 `.dot-bull`/`.yc-ok` 那种"从来没实现过"是两种不同的病，
+但外部症状一样——grep 能看到定义，实际从不生效：
+
+- **`.top6-grid`（`templates/dashboard.css` 原第 99–102 行）** vs
+  **`.ah-cards-grid`**（注释自称"v2 — flush bordered grid"，`git blame`
+  确认由更晚的「B-style Financial Newspaper dashboard redesign」引入，
+  `.top6-grid` 则来自项目早期 2026-03-04 的提交）。两者同特异度（单类选择器），
+  `.ah-cards-grid` 源码顺序更靠后，`gap`/`grid-template-columns` 两项属性
+  全部顶掉 `.top6-grid` 的 `18px`/`repeat(3,1fr)`，实测 `gap` 恒为 `0px`。
+  `dashboard.html` 里两个 class 一直同时挂在同一个 div 上
+  （`class="ah-cards-grid top6-grid"`）。**删掉 `.top6-grid` 死规则块
+  + HTML 里多余的 class**（保留 `.ah-cards-grid`，即当前实际渲染的样子）。
+- **`.hamburger`/`.nav-overlay`/`.nav-overlay.open` 整块被定义了两次**
+  （原第 365–377 行 vs 748–761 行），第二块注释明写「update for light theme」，
+  用 `var(--tp)`/`var(--surface)` 替换第一块硬编码的 `#fff`/`#0A0F1C`——
+  第一块 100% 死代码，第二块单独已完整可用。**删掉第一块（旧、硬编码深色版）**。
+  两处改动均用 `getComputedStyle` 核对：删除前后计算样式逐属性一致
+  （`gap`/`color`/`display` 等），确认纯粹是死代码清理，零渲染差异。
+
+### 结论：9 个"零 CSS 定义"class 里 8 个是设计如此，1 个良性
+
+另有 9 个 class 全仓查无 CSS 定义（`acc-dir-rets`/`actionable-card`/
+`actionable-empty`/`actionable-section`/`ah-filter-row`/`cc-metrics-col`/
+`dq-banner`/`full-oi-card`/`hist-toggle-text`），逐个核对用途：其中 8 个
+在 HTML 里自带完整 `style="..."` 内联样式或纯粹是 `hist-toggle-text` 这类
+JS `querySelector` 挂钩——class 本就不承担样式职责，不是 bug。唯一存疑的
+`cc-metrics-col`（`.cc-two` 网格第一列的容器 div，零样式）经 `getComputedStyle`
+实测为 `display:block`，与相邻 `.cc-metric` 行自带的 flex/padding 组合视觉
+无异常——记录在案但不构成需要修的缺陷。
+
+### 影响面
+
+`templates/dashboard.css` −18 行、`templates/dashboard.html` 1 处 class
+属性精简；**零渲染差异**（真机 `getComputedStyle` 前后逐属性核对一致）。
+`index.html`（GitHub Pages 部署产物）未手动改动——它由 `report_deployer.py`
+在下次扫描时从这两个源文件重新生成，会自动带上本次改动。
+
+⚠️ 与 v0.45.76/v0.45.79 的交接：本次改动与那两个未合并分支改的是
+`dashboard.css` 里不重叠的行区间（本次动的是第 99–102 行与第 365–377 行；
+`elastic-spence` 动的是 `.sdir-neut` 后新增 4 行；`interesting-khayyam`
+动的是第七轮宏观指标那一段），三方 diff 互不相交，理论上能自动合并，
+但仍需人工确认最终合并顺序与结果。
 
 ## [0.45.75] — 2026-08-29 — 一个已被自己证伪的归因，还在 7 个文件里当理由用
 
