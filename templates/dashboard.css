@@ -116,6 +116,10 @@ html.dark .hstat{border-right-color:var(--border)}
 .sdir-bull{background:rgba(34,197,94,.13);color:var(--bull)}
 .sdir-bear{background:rgba(239,68,68,.13);color:var(--bear)}
 .sdir-neut{background:rgba(245,158,11,.13);color:var(--neut)}
+.dot-bull,.dot-bear,.dot-neut{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:3px}
+.dot-bull{background:var(--bull)}
+.dot-bear{background:var(--bear)}
+.dot-neut{background:var(--neut)}
 .scard-body{padding:0 16px 16px}
 .sticker{font-size:1.4em;font-weight:900;color:var(--tp)}
 .sname{font-size:.75em;color:var(--ts);margin-top:1px}
