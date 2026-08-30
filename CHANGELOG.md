@@ -5,6 +5,96 @@
 
 ---
 
+## [0.45.77] — 2026-08-29 — 网站去 AI 味收尾：公司卡改扁平网格 + 渲染器硬编码色清空 + 顶层紫蓝/渐变/浮影/圆角审计合并
+
+用户拿一份 Claude Design 出的新版网站设计稿（财经报刊风格）跟线上站比对，发现顶层外壳
+（nav/hero/macro bar/section 标题）早就套上了站点令牌系统，但组件层——评分卡/公司卡/
+徽章/弹窗/热力图，以及渲染器内联生成的几段 HTML——从未真正迁移过。**这条目合并了两条
+并行 session 各自做的一半**：一条（原打算落 v0.45.76，见下方「撞号」说明）做了顶层紫蓝
+残留 + 装饰性渐变/浮空阴影 + 圆角超标 + 评分卡结构 的审计与修复；另一条独立做了公司卡
+结构重做 + 渲染器 ~22 处硬编码涨跌色。两条改的是同两个文件的不同区域，合并时只有
+`.ml-btn-cc` 的紫色渐变被两边各修了一遍（结果一致，无冲突）。
+
+### 撞号说明
+
+本条目原计划占 v0.45.76，但另一 session 已抢先提交+推送了 `.dot-bull`/`.dot-bear`/
+`.dot-neut` 缺失样式修复（分支 `claude/distracted-heyrovsky-b7ebed`，PR #2），先落地者
+不改号，本条目让到 v0.45.77。那个 PR 修的是渲染器里引用了 4 次却从未定义样式的三个
+方向圆点 class（渲染出来是空 `<span>`，圆点从未真正显示过）——和本条目内容独立，未包含
+在这次的合并范围内。
+
+### Changed — `templates/dashboard.css`
+
+- **`.company-card`/`.cc-header`（个股深度分析卡片）结构重做**：从「整栏彩色通栏 + 白字」
+  改成和评分卡一样的扁平单线网格（`.company-grid` 用
+  `grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:0;border:0.5px solid var(--border)`，
+  每张卡只画 `border-right`/`border-bottom`），卡头去掉 `background:{方向色}` 通栏，改成纯
+  文字 ticker（+ 公司名/板块，从 `config.WATCHLIST`/`WATCHLIST_EXTENDED` 取，查不到就不
+  渲染该行）+ 复用已有的 `.sdir-bull/bear/neut` 徽标类表示方向 + 分数。这个结构选择顺带
+  避开了「白字压满色通栏」在暗色主题下切换到高亮令牌会显得刺眼、对比度差的问题——不是
+  靠保留固定十六进制回避，是直接把通栏结构拆掉了。
+- **机会评分卡 `.scard` 同样改成单线共享网格**：从「独立浮卡 + 18px 间距 + hover 浮起
+  投影」改成 `border-right`/`border-bottom` 各卡只画两边、容器画外框；此前 `.top6-grid`
+  与 `.ah-cards-grid` 两条同选择器规则打架（卡片同时套了两套布局意图），边框在相邻卡
+  之间重复画，已删除失效的 `.top6-grid` 布局属性。
+- **清除全部遗留紫蓝色**（`rgba(102,126,234,*)` / `rgba(118,75,162,*)` / `#667eea`→
+  `#764ba2`），改用站点既有令牌：`.ml-btn-cc`、`.hlink-md/json`、`.hist-toggle`、
+  `.acc-kpi`、`.acc-dir-box`/`.acc-ticker-box`、`.delta-new`、`.chg-chip.chg-new`、
+  scrollbar-thumb 等。
+- **移除装饰性渐变**：`.slogo-fb` 头像兜底、`.fill-h`/`.bear-fill` 评分条改纯色——顺带
+  修了一个真实 bug：`.fill-h` 此前硬编码 `#22c55e→#4ade80`，浅色主题下和同一张卡片上
+  `var(--bull)`(#1D6B3A) 的文字颜色对不上。
+- **移除全部装饰性 `box-shadow`**（卡片 hover 浮起、搜索框 focus 光晕、下拉面板投影、
+  卡片高亮闪烁 `@keyframes card-glow` 等 ~10 处），hover 反馈一律改为边框色/背景色变化。
+- **`border-radius` 全仓审计并 clamp 到 ≤4px**（85 处），保留 4 处功能性圆形（状态点、
+  共识环形图、骨架屏圆形占位、评分卡分享按钮/收起按钮的小圆点——后两者顺带把误改小的
+  尺寸从 32×32px 改回站点统一的 44×44px 最小可点击热区）。
+- 删除一段已被同名规则完全覆盖的死 CSS（旧版深色汉堡菜单，迁移到浅色主题时忘记删），
+  顺带把它独有的 iOS 安全区 padding 合并进存活的规则。
+
+### Changed — `dashboard_renderer.py`
+
+- **~22 处硬编码涨跌/中性十六进制色**（`#22c55e`/`#ef4444`/`#f59e0b`/`#28a745`/`#dc3545`/
+  `#ffc107`/`#16a34a`/`#dc2626`/`#d97706` 等）改用 `var(--bull)`/`var(--bear)`/
+  `var(--neut)`，覆盖：今日 Actionable 卡片、维度数据质量条、Top 6 卡片的维度迷你条/
+  情绪 sparkline/Agent 共识环形图、全链 OI 视图的 P/C 颜色/近端磁吸目标价箭头/阻力墙-
+  支撑墙配色、F&G 指数颜色、准确率个股表格涨跌色、方向分组 KPI 卡片、公司卡头部方向色
+  （改用 `.sdir-*` 徽标类，见上）。**保留不动的**：`rgba(r,g,b,alpha)` 背景淡染（站点
+  既有惯例）；`#94a3b8`/`#666`/`#fff`/`#e99` 等纯灰/白/警示色——表达"无数据"或纯 UI
+  装饰，不是方向信号，套用 `var(--neut)` 反而会把"没有这项数据"误读成"存在中性信号"。
+- **修了一个隐藏 bug**：9 处内联样式引用 `var(--mt)`/`var(--t)`，这两个自定义属性从未在
+  `dashboard.css` 的 `:root` 里定义过（真正的 token 叫 `--tm`/`--tp`），此前一直靠 CSS
+  对非法 `var()` 的继承兜底行为侥幸不出错——现指向真实令牌。分布：今日 Actionable 空
+  状态/候选卡、全链 OI 视图卡片、Sharpe 方法学说明。
+- **今日 Actionable 板块**：空状态的石板灰硬编码色改为站点通用的 `surface2` + 左侧强调线
+  约定；候选卡外层的琥珀→绿色装饰性渐变背景改为纯色；候选卡圆角/链接圆角 clamp 到 4px。
+- **全链 OI 视图卡片**：紫罗兰色调（`rgba(99,102,241,*)`，站点里独立于 CSS 层紫蓝残留的
+  另一处来源）改为站点令牌；两个内嵌小方块此前硬编码 `rgba(0,0,0,.18)`——这是按深色卡片
+  设计的填色，套在浅色奶油背景上会显示成两块突兀的深色补丁，改为 `var(--surface)`；
+  到期日徽标从硬编码深灰底改成描边风格。
+- `_signal_conflicts` 的冲突预警图标从字面 emoji（⚠️）改为可着色的排版标记（▲），与
+  站点其余信号标记（●/▲/▼）保持一致。
+
+### 验证方式
+
+未触发真实扫描。公司卡结构：本地直接调用 `_build_deep_analysis_html()` 传入手写 mock
+`swarm_detail`（多头/空头各一），拼进带新 `templates/dashboard.css` 的 HTML 壳里，浏览器
+截图核对结构。顶层清理部分：用当前 `index.html`（真实数据）临时替换内联 `<style>` 为新
+CSS，浏览器核对明暗两套主题下评分卡网格、Actionable 区块、头像兜底色的渲染结果。合并后
+完整跑了 `pytest tests/test_dashboard_renderer.py tests/test_site_missing_fields.py
+tests/test_dashboard_contract.py tests/test_score_dual_display.py tests/test_macro_degradation.py
+tests/test_missing_value_not_zero.py tests/test_instrument_integrity.py`（77 项，74 过 3 跳过，
+与合并前基线一致）+ `ruff check --select F821`（全过）。
+
+### 已知未覆盖（留给下一次再处理）
+
+`.full-oi-card` 内部的方向配色已接令牌，但它挂在个股深度卡片这条路径上——若后续再新增
+类似「大面积色块背景配固定前景色」的组件，先查是不是该拆结构而不是接令牌（本条目里
+`.cc-header` 就是反面教材，见上）。渲染器里仍有少量非涨跌语义的硬编码灰/白色未动
+（`#94a3b8`/`#666` 等，见上方"保留不动"），按既定判断标准这些不应该接令牌，不算遗留项。
+
+---
+
 ## [0.45.75] — 2026-08-29 — 一个已被自己证伪的归因，还在 7 个文件里当理由用
 
 2026-08-25 的重测已经证伪了「本机 OpenSSL 1.1.1q 扛不住并发 HTTPS」这个归因，
