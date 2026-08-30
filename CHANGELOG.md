@@ -5,6 +5,26 @@
 
 ---
 
+## [0.45.76] — 2026-08-30 — dashboard 方向圆点三个 class 从未定义过样式
+
+`dashboard_renderer.py` 里 `.dot-bull`/`.dot-bear`/`.dot-neut` 三个 class（`_DIR_ICON`
+映射、`_build_actionable_top_html`、`_build_top_cards_html` 三处引用）在
+`templates/dashboard.css` 里从未有过任何规则——span 无宽高无背景色，渲染为空的
+零尺寸元素。这个"方向圆点"视觉标记自引入以来，从未在部署站点上真正出现过。
+
+### Fixed
+- `templates/dashboard.css`：在既有 `.sdir-*` 规则旁新增 `.dot-bull`/`.dot-bear`/
+  `.dot-neut`（7px 圆点，颜色取 `--bull`/`--bear`/`--neut` token，与 `.sdir-*` 同一套
+  颜色约定）。
+- 用真实函数输出核实：直接调用 `_build_actionable_top_html`（mock swarm_detail，
+  产出看多/看空两张卡片）+ `_DIR_ICON`/`_dlbl6` 的原始 span 标记，拼上
+  `templates/dashboard.css` 组成独立 HTML 截图核对，浅色/深色模式圆点均正确显示
+  为对应颜色的小圆点。
+- `pytest tests/test_dashboard_renderer.py tests/test_site_missing_fields.py`：
+  21 passed，无回归。
+
+---
+
 ## [0.45.75] — 2026-08-29 — 一个已被自己证伪的归因，还在 7 个文件里当理由用
 
 2026-08-25 的重测已经证伪了「本机 OpenSSL 1.1.1q 扛不住并发 HTTPS」这个归因，
