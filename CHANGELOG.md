@@ -5,6 +5,48 @@
 
 ---
 
+## [0.45.78] — 2026-08-29 — 宏观条补涨跌幅 + 评分分布图去 Chart.js 默认圆角/饱和色
+
+v0.45.77 收尾后再用设计稿逐项复核，找到两处仍未覆盖：宏观条只有数值没有涨跌幅（设计稿
+每项都是"数值+涨跌幅"两个元素）；"标的综合评分分布"用的是 Chart.js 默认圆角柱+固定
+饱和 rgba 色，跟站点其余细横条的扁平/令牌配色对不上。
+
+### Changed — `dashboard_renderer.py`
+
+- **宏观指标新增日环比 delta**（VIX / 10Y 利率 / 黄金）：复用 `_score_deltas` 已有的
+  「读昨天的 `alpha-hive-daily-*.json`」模式（跳过非交易日），从 `macro_context` 字段取
+  真实历史值做差，不是估算或编造。取不到昨天数据、或今天/昨天任一值是 NaN 时 delta 就是
+  空字符串——不强行凑一个假涨跌幅。渲染进 `.ah-macro-delta`（up/dn 上色）这个此前定义了
+  却没被模板用过的 CSS 类。
+- **黄金主值逻辑简化**：原先靠 `gold_trend` 字段猜"该显示价格还是涨跌幅"，两者只能露出
+  一个；现在固定显示价格（价格缺失时兜底显示涨跌幅，保留原有的"总得显示点什么"降级），
+  涨跌幅统一放进上面那个新的 delta span，不再互斥。
+- 收益率曲线（正常/趋平/倒挂）与恐惧贪婪指数保持原状未动——前者本来就是设计稿要的定性
+  标签（不是数值 delta），后者没有可靠的历史落库来源，没有数据就不编。
+
+### Changed — `templates/dashboard.js`
+
+- `scoresChart`（标的综合评分分布，Chart.js 横向柱状图）：柱子颜色从固定的
+  `rgba(34,197,94,.85)` 等高饱和常量，改成跟随明暗主题的 `--bull`/`--neut`/`--bear`
+  实际取值（浅色 `#1D6B3A`/`#92601A`/`#9B2C2C`，深色 `#22c55e`/`#f59e0b`/`#ef4444`）；
+  `borderRadius` 从 5 改成 0（方头，不再是默认 Chart.js 的圆角柱）；`barPercentage` 降到
+  0.6，柱子更细，视觉上更接近站点其余细横条（`.sbar-fill`/评分分布条）的比例。
+
+### 验证方式
+
+宏观 delta：直接跑真实历史数据（`alpha-hive-daily-2026-08-27.json` vs `-08-26.json`，
+`-08-28` vs `-08-27`）验证计算逻辑和取整；后者恰好覆盖了 VIX 两天数值相同（delta=0，
+应显示中性色不挂 up/dn）和黄金当天数据缺失（NaN，应整个不显示 delta）两种边界情况，
+结果符合预期。渲染出的 HTML 片段拼进新 CSS 壳里截图核对了颜色和排版。评分分布图颜色
+逻辑直接读代码核对新旧取值一致（浅色令牌值与站点 `:root` 定义逐字比对）；`dashboard.js`
+用 `node --check` 过了语法检查（Chart.js 渲染本身依赖浏览器 canvas，未做行为测试）。
+完整跑了一遍 `pytest tests/test_dashboard_renderer.py tests/test_site_missing_fields.py
+tests/test_dashboard_contract.py tests/test_score_dual_display.py tests/test_macro_degradation.py
+tests/test_missing_value_not_zero.py tests/test_instrument_integrity.py`（77 项，74 过
+3 跳过，与之前一致）。
+
+---
+
 ## [0.45.77] — 2026-08-29 — 网站去 AI 味收尾：公司卡改扁平网格 + 渲染器硬编码色清空 + 顶层紫蓝/渐变/浮影/圆角审计合并
 
 用户拿一份 Claude Design 出的新版网站设计稿（财经报刊风格）跟线上站比对，发现顶层外壳

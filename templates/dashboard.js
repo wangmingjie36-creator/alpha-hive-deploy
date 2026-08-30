@@ -296,11 +296,13 @@ let chartInstances=[];
       const scCtx=document.getElementById('scoresChart');
       if(!scCtx)return;
       const sc=__AH__.scores;
-      const clrs=sc.map(function(x){return x[1]>=7?'rgba(34,197,94,.85)':x[1]>=5.5?'rgba(245,158,11,.85)':'rgba(239,68,68,.85)';});
+      // 颜色对齐设计系统令牌（浅/深各一套，而不是固定的高饱和 rgba），
+      // 方头无圆角——跟站点其余细横条一致，别单这块像默认 Chart.js 主题。
+      const clrs=sc.map(function(x){return x[1]>=7?(dark?'#22c55e':'#1D6B3A'):x[1]>=5.5?(dark?'#f59e0b':'#92601A'):(dark?'#ef4444':'#9B2C2C');});
       chartInstances.push(new Chart(scCtx,{
         type:'bar',
         data:{labels:sc.map(function(x){return x[0];}),
-               datasets:[{data:sc.map(function(x){return x[1];}),backgroundColor:clrs,borderRadius:5,borderSkipped:false}]},
+               datasets:[{data:sc.map(function(x){return x[1];}),backgroundColor:clrs,borderRadius:0,borderSkipped:false,barPercentage:0.6}]},
         options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
                  onClick:function(evt,elems){
                    if(!elems.length)return;

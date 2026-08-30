@@ -2296,6 +2296,9 @@ def render_dashboard_html(report: Dict, date_str: str,
     _macro_yc_cls = ""
     _macro_gld = "—"
     _macro_gld_cls = ""
+    _macro_vix_delta_html = ""
+    _macro_10y_delta_html = ""
+    _macro_gld_delta_html = ""
     _macro_sector_html = ""
     try:
         from fred_macro import get_macro_context as _get_macro_ctx
@@ -2320,14 +2323,16 @@ def render_dashboard_html(report: Dict, date_str: str,
             _yc_cls_map = {"normal": "yc-ok", "flat": "yc-warn", "inverted": "yc-bad"}
             _macro_yc = _yc_map.get(_yc, "—")
             _macro_yc_cls = _yc_cls_map.get(_yc, "")
-            # 黄金指标
-            _gld_trend = _mctx.get("gold_trend", "stable")
+            # 黄金指标：主值固定显示价格，涨跌幅放到独立的 delta span
+            # （对齐设计稿"绝对值+涨跌幅"的展示模式；v0.45.77 之前靠 gold_trend
+            # 猜"该显示价格还是涨跌幅"，两者只能露出一个）
+            _gld_price = _mctx.get("gold_price")
             _gld_chg = _mctx.get("gold_change_pct")
-            if _gld_trend in ("surging", "rising", "falling") and isinstance(_gld_chg, (int, float)):
+            if isinstance(_gld_price, (int, float)) and _gld_price == _gld_price:  # not NaN
+                _macro_gld = f"${_gld_price:.0f}"
+            elif isinstance(_gld_chg, (int, float)) and _gld_chg == _gld_chg:
                 _macro_gld = f"{_gld_chg:+.1f}%"
                 _macro_gld_cls = "gld-up" if _gld_chg > 0 else "gld-dn"
-            elif isinstance(_mctx.get("gold_price"), (int, float)):
-                _macro_gld = f"${_mctx['gold_price']:.0f}"
             # 板块轮动 HTML
             _sr = _mctx.get("sector_rotation", {})
             if _sr.get("hot") or _sr.get("cold"):
@@ -2351,6 +2356,48 @@ def render_dashboard_html(report: Dict, date_str: str,
         # 缺得无声不行。
         logging.getLogger("alpha_hive.dashboard").warning(
             "宏观指标加载失败，本次 dashboard 宏观区块将全部显示「—」: %s", e)
+
+    # ── 宏观指标日环比（对比昨天，真实历史值，非估算）──
+    try:
+        import glob as _glob_m
+        _prev_macro = {}
+        for _pjf_m in sorted(_Path_mod(report_dir).glob("alpha-hive-daily-*.json"), reverse=True):
+            _pdate_m = _pjf_m.stem.replace("alpha-hive-daily-", "")
+            if _pdate_m == date_str:
+                continue
+            try:
+                from is_trading_day import filename_is_nontrading_day as _fnt_m
+                if _fnt_m(_pdate_m):
+                    continue
+            except Exception:
+                pass
+            try:
+                with open(_pjf_m, encoding="utf-8") as _pfp_m:
+                    _prev_macro = _json.load(_pfp_m).get("macro_context", {}) or {}
+                break
+            except Exception:
+                continue
+
+        def _macro_delta_span(cur, prev, fmt):
+            if not (isinstance(cur, (int, float)) and cur == cur
+                    and isinstance(prev, (int, float)) and prev == prev):
+                return ""
+            d = cur - prev
+            dcls = "up" if d > 0 else ("dn" if d < 0 else "")
+            return f'<span class="ah-macro-delta {dcls}">{fmt(d)}</span>'
+
+        _macro_vix_delta_html = _macro_delta_span(
+            _mctx.get("vix"), _prev_macro.get("vix"), lambda d: f"{d:+.1f}")
+        _macro_10y_delta_html = _macro_delta_span(
+            _mctx.get("treasury_10y"), _prev_macro.get("treasury_10y"), lambda d: f"{d:+.2f}")
+        # 黄金涨跌幅本身就是 fred_macro 提供的今日值，不需要跟昨天再做差；
+        # 只需按同样的「非 NaN 才显示」规则包成 delta span。
+        _gld_chg_v = _mctx.get("gold_change_pct")
+        if isinstance(_gld_chg_v, (int, float)) and _gld_chg_v == _gld_chg_v and _macro_gld.startswith("$"):
+            _dcls_g = "up" if _gld_chg_v > 0 else ("dn" if _gld_chg_v < 0 else "")
+            _macro_gld_delta_html = f'<span class="ah-macro-delta {_dcls_g}">{_gld_chg_v:+.1f}%</span>'
+    except Exception as _e_macro_delta:
+        _log.debug("宏观指标日环比计算失败: %s", _e_macro_delta)
 
     # ── 升级 E: 快速预计算 Score Delta（对比昨天） ──
     _score_deltas = {}  # {ticker: {"delta": float, "html": str}}
@@ -2936,6 +2983,9 @@ def render_dashboard_html(report: Dict, date_str: str,
         macro_yc_cls=_macro_yc_cls,
         macro_gld=_macro_gld,
         macro_gld_cls=_macro_gld_cls,
+        macro_vix_delta=_macro_vix_delta_html,
+        macro_10y_delta=_macro_10y_delta_html,
+        macro_gld_delta=_macro_gld_delta_html,
         macro_sector_html=_macro_sector_html,
         deploy_ts=_data_obj.get("_deploy_ts", 0),
         changes_html=_changes_html,
