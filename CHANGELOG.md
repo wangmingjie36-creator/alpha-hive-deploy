@@ -5,6 +5,49 @@
 
 ---
 
+## [0.45.79] — 2026-08-30 — dashboard 宏观指标令牌化，顺带挖出一个从未生效过的颜色规则
+
+`templates/dashboard.css` 的 `.yc-ok/.yc-warn/.yc-bad/.gld-up/.gld-dn` 一直是硬编码
+十六进制色，不随 `html.dark` 切换（违反本项目"页面内不得有硬编码色，全部走令牌"
+的设计系统规则）；`dashboard_renderer.py` 里恐惧贪婪指数的 `_fg_color` 也是内联
+hex，直接拼进 `style="color:..."`。
+
+### Fixed — 令牌化过程中发现的真实 bug：这几个类的颜色从未真正生效过
+
+浏览器实测（用真实 CSS 搭最小复现页，对比 `getComputedStyle` 而非肉眼看色块）发现：
+`.yc-ok` 等单类选择器与后文（第 690 行附近）的 `.ah-macro-val{color:var(--tp)}`
+特异度相同，按源码顺序后者覆盖前者——**这五个类从提交那天起颜色就没生效过**，
+宏观栏「收益率曲线/黄金」两项文字色实际上一直是普通文字色 `--tp`，不是绿/黄/红。
+恐惧贪婪指数当时用的是行内 `style`，特异度更高所以不受影响、是唯一真正生效的。
+修复：改成 `.ah-macro-val.yc-ok` 复合选择器，不再依赖脆弱的源码顺序。
+
+### Changed
+
+- `.yc-ok`→`var(--bull)`，`.yc-warn`→`var(--neut)`，`.yc-bad`→`var(--bear)`（保留
+  `font-weight:700`），`.gld-up`→`var(--bull)`
+- `.gld-dn` 保留灰色语义（黄金下跌≠对股票利空，非硬性反向信号），但改用已有的
+  `--tm`（次要文字）令牌而非字面量 `#999`——语义选择已与用户确认
+- 新增 `.fg-low/.fg-mid/.fg-high` 三个类映射到 `--bear/--neut/--bull`；
+  `dashboard_renderer.py` 的 `_fg_color`（内联 hex）改为 `_fg_cls`（返回类名），
+  `templates/dashboard.html` 恐惧贪婪 span 从内联 `style` 改为类
+- 影响范围核查：`yc-*/gld-*` 只出现在 `templates/dashboard.css` +
+  `dashboard_renderer.py` + 由它们渲染出的 `index.html`（宏观栏），
+  71 份 `alpha-hive-*-ml-enhanced-*.html`（深度报告，另一套渲染管线）不受影响
+
+验证：`pytest tests/test_dashboard_renderer.py tests/test_macro_degradation.py
+tests/test_dashboard_contract.py`（26 passed）+ `ruff check` 全过；浏览器分别在
+`html.dark` 开/关下用 `getComputedStyle` 逐类核对 8 个类的实际渲染色与
+`--bull/--bear/--neut/--tm` 令牌值一致。`index.html` 是每日扫描自动生成的构建产物
+（非源文件），本次未手动改它，下次生成会自然带上修复。
+
+版本号说明：起草时 `origin/main` 顶部仍是 0.45.75，但 `git worktree list` 一查发现
+另外两个 worktree 已本地提交（未推送）占了 0.45.76~0.45.78——其中 0.45.76
+（`elastic-spence-160ce3`／`.dot-bull/.dot-bear/.dot-neut` 从未定义样式）与本条是
+**同一类 bug 的另一个实例**（都是"class 用了但没生效，肉眼从没发现过"），只是巧合被
+两个并行 session 同一天各自撞见。故本条让号至 0.45.79。
+
+---
+
 ## [0.45.75] — 2026-08-29 — 一个已被自己证伪的归因，还在 7 个文件里当理由用
 
 2026-08-25 的重测已经证伪了「本机 OpenSSL 1.1.1q 扛不住并发 HTTPS」这个归因，

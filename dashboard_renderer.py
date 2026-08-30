@@ -2218,7 +2218,7 @@ def render_dashboard_html(report: Dict, date_str: str,
             _avg_sent += float(_s3.group(1))
             _sent_cnt += 1
     _fv3 = _fg_val if _fg_val is not None else 50
-    _fg_color = "#dc3545" if _fv3 <= 45 else ("#ffc107" if _fv3 <= 55 else "#28a745")
+    _fg_cls = "fg-low" if _fv3 <= 45 else ("fg-mid" if _fv3 <= 55 else "fg-high")
     _fg_label = (("极度恐惧" if _fv3 <= 25 else "恐惧") if _fv3 <= 45
                  else (("中性" if _fv3 <= 55 else "贪婪") if _fv3 <= 75 else "极度贪婪"))
     _fg_str = str(_fg_val) if _fg_val is not None else "?"
@@ -2912,7 +2912,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         avg_real=avg_real,
         dq_banner_html=dq_banner_html,
         n_resonance=n_resonance,
-        fg_color=_fg_color,
+        fg_cls=_fg_cls,
         fg_str=_fg_str,
         avg_score_str=_avg_score_str,
         hero_tldr=_hero_tldr,

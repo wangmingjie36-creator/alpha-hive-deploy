@@ -540,12 +540,18 @@ z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgb
 /* ── 升级 G: 维度数值标签 ── */
 .dim-val{font-size:.62em;font-weight:700;line-height:1;margin-bottom:1px}
 .dim-b-item{cursor:help}
-/* ── 第七轮: 宏观指标 ── */
-.yc-ok{color:#28a745}
-.yc-warn{color:#ffc107}
-.yc-bad{color:#dc3545;font-weight:700}
-.gld-up{color:#ffd700;font-weight:700}
-.gld-dn{color:#999}
+/* ── 第七轮: 宏观指标 ──
+   复合选择器（而非单类选择器）：这些类总是与 .ah-macro-val 同时出现，
+   而 .ah-macro-val{color:var(--tp)} 定义在本文件更后面，同特异度下按源码顺序
+   会覆盖单类选择器——之前这里就是单类写法，实测颜色从未真正生效过。 */
+.ah-macro-val.yc-ok{color:var(--bull)}
+.ah-macro-val.yc-warn{color:var(--neut)}
+.ah-macro-val.yc-bad{color:var(--bear);font-weight:700}
+.ah-macro-val.gld-up{color:var(--bull);font-weight:700}
+.ah-macro-val.gld-dn{color:var(--tm)}
+.ah-macro-val.fg-low{color:var(--bear)}
+.ah-macro-val.fg-mid{color:var(--neut)}
+.ah-macro-val.fg-high{color:var(--bull)}
 .macro-sectors{text-align:center;padding:6px 16px;font-size:.82em;color:var(--neut);
   display:flex;flex-wrap:wrap;gap:6px;justify-content:center;align-items:center}
 .sec-label{font-weight:600;opacity:.7;margin-right:2px}
