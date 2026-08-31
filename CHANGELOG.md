@@ -5,6 +5,65 @@
 
 ---
 
+## [0.45.86] — 2026-08-31 — Track A（weekly_optimizer）T+7 价格改用 close_t7 干净口径
+
+排查"闸1 bootstrap 为什么总不过"时发现：`weekly_optimizer.py` 全链路
+（`compute_new_weights`/`compute_new_weights_wls`/`bootstrap_validate`/
+`check_ticker_pool_consistency`，经 `feedback_loop.BacktestAnalyzer` →
+`snap.actual_price_t7`）读的 T+7 价格来自 `report_snapshots/*.json` 的
+`actual_prices.t7`，由 `backtest_engine.PriceBackfiller._get_price_on_date`
+用 `Ticker().history()` ±3天容差取价——`backfill_dir_accuracy.py` 开头注释
+早已记录了弃用它的理由（本机间歇性 `TypeError: 'NoneType' object is not
+subscriptable`）。抽样比对同一 `(ticker,date)`：与 `pheromone.db.close_t7`
+（`backfill_dir_accuracy.py` 用 `yf.download`+精确交易日+自校验回填的干净
+口径，`ic_diagnostics.py`/`signal_archive.py`"唯一可交易信号"结论同源）
+只有约1/3 重合，25% 两者都不等——三条独立取价管线（另一条是
+`backtester._simulate_trade_path` 写的、已知被 SL/TP 截断的 `price_t7`）
+互不对齐，从未校验过。
+
+落地前验证（未直接采用 `replay_scoring.py`——它自己的决策表明确排除
+"换数据源"类改动；本次改动读的两列历史价格本就都已归档，不属于
+该表针对的"原始数据未归档、必须前向累积"场景）：① `(ticker,date)` join
+命中率 96.9%，`close_t7` 可用 80.6%（750/931），且是当前可用样本
+（`actual_prices.t7` 非空的 781 条）的严格子集——零净新增，只丢 31 条，
+且这 31 条全部因为 `backfill_dir_accuracy.py` 还没追上（`close_t7` 有值的
+必然 `actual_prices.t7` 也有值）；② monkeypatch `BacktestAnalyzer` 直接跑
+两版真实代码对比，catalyst 提议变化 +2.10pp→+0.65pp（近乎腰斩）、
+risk_adj −2.83pp→−1.65pp（少四成），换源本身不改变"这周该不该写"的
+结论（两边都 <3.0pp 阈值），但足以在未来某周直接翻转判断。
+
+### Fixed
+
+- `weekly_optimizer.py`：新增 `_load_close_t7_map()`（只读连接读
+  `pheromone.db`，按 `PHEROMONE_DB_PATH` 当前值缓存，不用
+  `functools.lru_cache`——后者对零参函数只认首次调用结果，测试
+  monkeypatch 换库路径后仍会读到旧缓存）与 `_apply_clean_t7_prices()`
+  （覆盖 `snap.actual_price_t7` 为 `close_t7`；库不可用时原样不改，
+  保留旧行为；`(ticker,date)` 查无匹配则丢弃样本、不回退旧值，避免
+  脏/干净口径混算）。4 处 `BacktestAnalyzer(directory=...)` 构造
+  （`compute_new_weights`/`compute_new_weights_wls`/`bootstrap_validate`/
+  `check_ticker_pool_consistency`）统一接入，避免只修一处又制造新的
+  "两个数字互相打架"。`count_t7_samples()` 同步改用 `close_t7_map`
+  计数，使打印的"T+7 已回填样本"数字与真正参与拟合/重采样的样本
+  用同一口径。
+- `tests/conftest.py`：新增 `_isolate_weekly_optimizer_db` 自动隔离
+  fixture——`PHEROMONE_DB_PATH` 不走现有的 `ALPHA_HIVE_DB_PATH` 环境变量
+  隔离，若不单独隔离，测试构造的 `(ticker,date)` 会在本机真实生产库里
+  查无匹配、被新逻辑整批当"无干净价格"丢弃，4 个既有测试因此假红
+  （`test_compute_weights_neutral_not_systematically_penalized` 与
+  `TestTickerPoolGate` 三个用例）。与本文件已有的 `_block_same_day_macro`
+  同一条教训："新增任何数据源，同一提交里必须在这里加一行"。
+- `tests/test_weekly_optimizer.py`：新增 `TestCleanT7PriceOverride`
+  （4 个用例）锁死覆盖/丢弃/库不存在三条分支，以及
+  `count_t7_samples` 与真实拟合口径一致。
+
+### Known follow-up（未在本次处理，记在 MEMORY）
+
+`backfill_dir_accuracy.py` 若定期重跑，能把上面提到的 31 条"还没追上"
+的样本补回来，但这属于运维层面的调度问题，不在本次代码改动范围内。
+
+---
+
 ## [0.45.85] — 2026-08-31 — self_analyst.classify() 认不出生产快照的 bullish/bearish 词表
 
 v0.45.84 修好 `SNAPSHOTS_DIR` 目录选择后暴露：`classify()`（self_analyst.py:176-190）

@@ -602,3 +602,78 @@ class TestReadOnlyDefaultAndGates:
         before = wo.CONFIG_PATH.read_text(encoding="utf-8")
         self._run_main(monkeypatch, ["--apply", "--dry-run"])
         assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# G. close_t7 干净口径覆盖（v0.45.86）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# actual_price_t7（report_snapshots/*.json 的 actual_prices.t7，来自
+# backtest_engine.PriceBackfiller 的 Ticker().history() ±3天容差取价）与
+# pheromone.db.close_t7（backfill_dir_accuracy.py 的干净口径）实测同一
+# (ticker,date) 下只有约1/3重合。_apply_clean_t7_prices 让 Track A 统一改用
+# close_t7；本节锁死三条分支：覆盖、丢弃(无匹配)、库不存在时原样不动。
+
+def _make_pheromone_db(tmp_path, rows):
+    """rows: [(ticker, date, close_t7), ...]，建最小 predictions 表。"""
+    import sqlite3
+    db_path = tmp_path / "pheromone.db"
+    con = sqlite3.connect(str(db_path))
+    con.execute("CREATE TABLE predictions (ticker TEXT, date TEXT, close_t7 REAL)")
+    con.executemany("INSERT INTO predictions VALUES (?, ?, ?)", rows)
+    con.commit()
+    con.close()
+    return db_path
+
+
+class TestCleanT7PriceOverride:
+
+    def test_overrides_with_matching_close_t7(self, monkeypatch, tmp_path):
+        """有匹配行：actual_price_t7 必须被换成 close_t7，而不是原来的值。"""
+        db_path = _make_pheromone_db(tmp_path, [("AAA", "2026-08-14", 123.45)])
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
+
+        snap = _PoolSnap("AAA", "2026-08-14", t7=999.0)  # 999 是要被覆盖掉的脏值
+        analyzer = type("A", (), {"snapshots": [snap]})()
+        wo._apply_clean_t7_prices(analyzer)
+
+        assert snap.actual_price_t7 == 123.45
+
+    def test_drops_sample_without_matching_row(self, monkeypatch, tmp_path):
+        """库存在但查无该 (ticker,date)：必须丢弃（置 None），不回退旧值。"""
+        db_path = _make_pheromone_db(tmp_path, [("AAA", "2026-08-14", 123.45)])
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
+
+        snap = _PoolSnap("ZZZ", "2026-08-14", t7=999.0)  # 库里没有 ZZZ
+        analyzer = type("A", (), {"snapshots": [snap]})()
+        wo._apply_clean_t7_prices(analyzer)
+
+        assert snap.actual_price_t7 is None
+
+    def test_unchanged_when_db_missing(self, monkeypatch, tmp_path):
+        """库不存在：原样返回，不能把 Track A 全部样本清零。"""
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", tmp_path / "_absent.db")
+
+        snap = _PoolSnap("AAA", "2026-08-14", t7=999.0)
+        analyzer = type("A", (), {"snapshots": [snap]})()
+        wo._apply_clean_t7_prices(analyzer)
+
+        assert snap.actual_price_t7 == 999.0
+
+    def test_count_t7_samples_uses_same_source(self, monkeypatch, tmp_path):
+        """n_samples 展示的数字必须和真正参与拟合的样本用同一个口径，
+        否则重现此前"skip_reason 和 bootstrap_stable 对不上"那类误读。"""
+        snapshots_dir = tmp_path / "snapshots"
+        snapshots_dir.mkdir()
+        (snapshots_dir / "AAA_2026-08-14.json").write_text(json.dumps({
+            "ticker": "AAA", "date": "2026-08-14",
+            "actual_prices": {"t7": 999.0},  # 脏值，不该被数进去
+        }))
+        (snapshots_dir / "BBB_2026-08-14.json").write_text(json.dumps({
+            "ticker": "BBB", "date": "2026-08-14",
+            "actual_prices": {"t7": None},  # close_t7 有、旧字段没有——该被数进去
+        }))
+        db_path = _make_pheromone_db(tmp_path, [("BBB", "2026-08-14", 50.0)])
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
+
+        assert wo.count_t7_samples(snapshots_dir) == 1  # 只有 BBB 在 close_t7 里
