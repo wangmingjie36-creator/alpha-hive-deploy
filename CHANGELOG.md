@@ -5,7 +5,69 @@
 
 ---
 
-## [0.45.88] — 2026-08-31 — 占位（进行中：CBOE vintage 陈旧信号透传，修补抓失效 + 盘中冻结记录静默通过）
+## [0.45.88] — 2026-08-31 — CBOE 新鲜度分层：补抓从未触发 + 陈旧误入缓存 + 盘中冻结静默通过
+
+合并两条独立发现的线：8/28 的 BILI 事故（原 v0.45.68，因 0.45.68 号已被
+占用而重编到本条）与 8/31 的 TMO 事故。两次查到的是同一个根因。
+
+**8/31 现场**：云端快照 TMO 失败（29/30），manifest 记的原因是
+`RuntimeError: CBOE payload 为空（网络/403/符号问题）`。那不是根因——CBOE CDN
+的 TMO 文件停在 08-28（实测 `last_trade_time=2026-08-28T15:59:59`，同批
+JNJ/ABBV 均为 08-31）。8/28 的 BILI 是同一形状。
+
+### Fixed
+
+- **「🔁 补抓」自 v0.45.39 上线以来一次都没触发过（主因）**：`cboe_options` 内层
+  的 `_payload_is_stale`（比「相对当下时刻应有的交易日」）跑在
+  `cloud_snapshot_fetch._vintage`（比「目标业务日」）**之前**，判陈旧后直接
+  把 payload 吞成 `None`。外层那道更精确的校验根本拿不到数据可比，只能抛
+  通用 `RuntimeError`，`except StaleVintageError` 捕不到 → 标的落进 `failed`
+  而**进不了 `stale` 列表** → `if stale and not abort_reason:` 的补抓循环空转。
+  实测佐证：8/31 日志无「🔁 补抓」行，manifest 的 `vintage_stale=[]`（在说谎）。
+  修复：`_fetch_cboe_payload` 新增 `skip_staleness_check`（默认 `False`，
+  其余四个消费点零影响），`_fetch_one_ticker` 传 `True`，把裁决权交给
+  business_date 比对——那才是这条路径**定义上**正确的判据（目录名就是它）。
+  两道口径不同的闸串在一起本身就是这个 bug 的成因，故取消其一，而不是让
+  它们互相通气。
+- **误导性错误信息**：陈旧标的的 manifest 记录不再写「网络/403/符号问题」，
+  改为 `StaleVintageError: vintage=X != 业务日 Y（last_trade_time=…）`。
+- **让权裁决不得顺手关掉「陈旧绝不入缓存」**：这两件事正交。写进缓存等于把
+  陈旧数据在进程内又保鲜 120 秒（v0.45.39 立此不变式时的原话），与「谁来
+  裁决新鲜度」无关。现在 `skip_staleness_check` 只影响**是否丢弃**，不影响
+  **是否缓存**；陈旧一律不入缓存。代价为零：调用方拿到陈旧 payload 后立刻
+  抛错，三个解析调用根本不会发生。
+
+### Added
+
+- **盘中冻结告警 `intraday_freeze_suspect`**：vintage 校验（无论由哪一层裁决）
+  比的都是**日期字符串**，同一天内记录冻在什么时刻一概放行。8/28 的 TMO 就是
+  这么过关的——冻在 09:45:27（其余 29 只均 15:59~16:00），日期同为 8/28 →
+  判定新鲜 → 存下 `price_at_fetch=626.325` 且标 `price_source=cboe_close`、
+  `vintage_status=ok`。而 CBOE 事后回填的 8/28 真实收盘是 **622.18**，
+  差 $4.15（0.67%）。那天没有任何信号告诉下游这份「收盘价」其实是上午的价。
+  现在收盘后若 `last_trade_time` 早于 16:00 超过 `_FREEZE_LAG_WARN_MIN`
+  （120 分钟）即标记，逐标的写 `last_trade_lag_min` /
+  `intraday_freeze_suspect`，manifest 汇总为 `vintage_intraday_freeze_suspect`。
+  **是告警不是拒绝**：数据照常落盘，消费端规则同 `market_degraded_sections`
+  ——列出的标的收盘价口径存疑。
+  ⚠️ 120 分钟是**启发式**，按 8/28 + 8/31 两天 60 个观测标定，未经更长样本
+  验证：命中 TMO(375min) / TMUS(239min) / BILI(294min)，紧邻未命中的是
+  DE(100min) / CVX(90min)。收窄会把正常薄流动性标的卷进来。
+
+### 验证
+
+- `tests/test_cloud_snapshot_vintage.py`：整函数 mock 的用例补 `**_kw` 容错
+  新签名；新增 3 条只 mock 网络层的用例，复现并锁住分层旁路修复。
+- 新增 `tests/test_cboe_stale_cache_and_freeze.py`（16 例）：让权后仍不缓存
+  陈旧（含「不依赖调用方记得清缓存也能补抓到新数据」）、默认行为回归守卫、
+  新鲜 payload 不被误伤仍入缓存、冻结阈值边界（盘中/盘后/跨日/不可解析）、
+  标记走到 manifest。
+- 相关五套件 95 例全通过；实况小子集验证（JNJ/BILI/TMO）：TMO 进
+  `vintage_stale` 且补抓触发并如实报「仍陈旧（CDN 卡死，非滞后）」，
+  BILI 标记冻结 293 分钟。
+- 全量 `tests/` 有 8 例失败，均为云沙箱 yfinance 域名不可达 + dashboard
+  渲染依赖，基线上同样失败，与本次改动无关。
+
 
 ## [0.45.87] — 2026-08-31 — weekly_optimizer close_t7 上线后 7-agent 复查修复（6 项）
 

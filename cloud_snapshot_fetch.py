@@ -55,6 +55,23 @@ _ET = ZoneInfo("America/New_York")
 # 逐个跑完只是白烧 30 次网络请求，结论不会变。
 _STALE_ABORT_STREAK = 3
 
+# 收盘后，last_trade_time 早于官方收盘多少分钟就标「疑似盘中冻结」（v0.45.88）。
+# 这是**告警不是拒绝**：命中只写进快照与 manifest，数据照常落盘。
+#
+# 为什么需要它：vintage 校验（无论由哪一层裁决）比的都是**日期字符串**，
+# 同一天内记录冻在什么时刻它一概放行。2026-08-28 的 TMO 就是这么过关的——
+# 记录冻在 09:45:27（其余 29 只都在 15:59~16:00），日期同为 8/28 → 判定新鲜 →
+# 存下 price_at_fetch=626.325 且标 price_source=cboe_close、vintage_status=ok。
+# 而 CBOE 事后回填的 8/28 真实收盘是 622.18，差 $4.15（0.67%）。
+# 那天没有任何信号告诉下游这份「收盘价」其实是上午的盘中价。
+#
+# 阈值 120 分钟是**启发式**，按 8/28 + 8/31 两天 60 个观测标定，未经更长样本验证：
+#   8/28 命中 TMO(375min) / TMUS(239min)；8/31 命中 BILI(294min)
+#   紧邻未命中的是 8/31 DE(100min)、CVX(90min)
+# 收窄会把 DE/CVX 这类正常薄流动性标的一起卷进来。因为只告警不拒绝，
+# 误报成本仅是 manifest 多一行，故取偏宽的一档。
+_FREEZE_LAG_WARN_MIN = 120
+
 
 class StaleVintageError(RuntimeError):
     """payload 的成交时刻不属于目标业务日——拿到的是上一交易日数据。"""
@@ -85,6 +102,31 @@ def _vintage(payload: dict):
     if dt.tzinfo is not None:          # CBOE 目前给朴素 ET；带偏移也照样归一
         dt = dt.astimezone(_ET)
     return dt.strftime("%Y-%m-%d"), raw
+
+
+def _freeze_lag_min(last_trade_raw, business_date: str):
+    """`last_trade_time` 比当日官方收盘（16:00 ET）早多少分钟；判不了返回 None。
+
+    只在**收盘后**有意义：盘中跑的话"早于收盘"是常态，不构成异常。
+    调用方据此决定要不要标 `intraday_freeze_suspect`。负值（盘后成交）归零。
+    """
+    if not last_trade_raw or not isinstance(last_trade_raw, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(last_trade_raw.strip())
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_ET)
+    else:
+        dt = dt.replace(tzinfo=_ET)
+    if dt.strftime("%Y-%m-%d") != business_date:
+        return None                      # 跨日的归 vintage 校验管，不重复计
+    close_et = dt.replace(hour=16, minute=0, second=0, microsecond=0)
+    now_et = datetime.now(_ET)
+    if now_et < close_et:
+        return None                      # 还没收盘，无从判断
+    return max(0.0, (close_et - dt).total_seconds() / 60.0)
 
 
 def _degradation_check(cboe: dict) -> dict:
@@ -123,7 +165,13 @@ def _fetch_one_ticker(ticker: str, business_date: str) -> dict:
     """
     import cboe_options as co
 
-    payload = co._fetch_cboe_payload(ticker, 15)  # noqa: SLF001 —— 进程缓存入口，见模块 docstring
+    # skip_staleness_check：本函数自己按 business_date 核验新鲜度（下方），
+    # 比 _fetch_cboe_payload 默认「相对当下时刻」的启发式更精确——CDN 对个别
+    # 符号刷新滞后时，默认启发式会先一步把 payload 判陈旧、直接吞成 None，
+    # 使下面这道更准的校验根本拿不到数据可比，滞后误报成「网络/403」失败，
+    # 也连带让 v0.45.39 的陈旧标的补抓机制因为从未观测到 StaleVintageError 而失效。
+    payload = co._fetch_cboe_payload(  # noqa: SLF001 —— 进程缓存入口，见模块 docstring
+        ticker, 15, skip_staleness_check=True)
     if not payload:
         raise RuntimeError("CBOE payload 为空（网络/403/符号问题）")
 
@@ -152,6 +200,11 @@ def _fetch_one_ticker(ticker: str, business_date: str) -> dict:
         "vintage_status": "ok" if vintage_date else "unverifiable",
         "prev_day_close": payload.get("prev_day_close"),
     }
+    # 盘中冻结告警（v0.45.88）。刻意**不动** `vintage_status` 的取值域：
+    # 它现有两个消费点都写成 `!= "ok"` → unverifiable，多塞一个值会被误分类。
+    lag = _freeze_lag_min(last_trade_raw, business_date)
+    out["last_trade_lag_min"] = round(lag, 1) if lag is not None else None
+    out["intraday_freeze_suspect"] = bool(lag is not None and lag >= _FREEZE_LAG_WARN_MIN)
     # 三个解析各自独立失败，不连坐；哪个为 None 就如实存 None + 原因键
     chain = co.fetch_cboe_chain(ticker, price)
     out["chain"] = chain
@@ -178,7 +231,7 @@ def main() -> int:
 
     t0 = time.time()
     ok, failed = [], {}
-    stale, unverifiable = [], []
+    stale, unverifiable, frozen = [], [], []
     stale_streak = 0
     abort_reason = None
 
@@ -196,6 +249,9 @@ def main() -> int:
             if data.get("vintage_status") != "ok":
                 unverifiable.append(t)
                 mark = "  ⚠️ vintage 无法核实"
+            if data.get("intraday_freeze_suspect"):
+                frozen.append(t)
+                mark += f"  ⚠️ 疑似盘中冻结（last_trade 早于收盘 {data['last_trade_lag_min']:.0f} 分钟）"
             print(f"  [{i:2d}/{len(tickers)}] {t} ✓  (${data['price_at_fetch']:.2f}){mark}")
         except StaleVintageError as e:
             failed[t] = f"StaleVintageError: {e}"
@@ -265,6 +321,8 @@ def main() -> int:
             recovered.append(t)
             if data.get("vintage_status") != "ok":
                 unverifiable.append(t)
+            if data.get("intraday_freeze_suspect") and t not in frozen:
+                frozen.append(t)
             print(f"  ✓ {t} 补抓成功 (${data['price_at_fetch']:.2f})")
         if recovered:
             ok.sort()
@@ -294,6 +352,10 @@ def main() -> int:
         "vintage_ok": len(ok) - len(unverifiable),
         "vintage_unverifiable": sorted(unverifiable),
         "vintage_stale": sorted(stale),
+        # v0.45.88：日期对但记录冻在盘中的标的。**已落盘、可用**，只是那份
+        # price_source=cboe_close 很可能是盘中价而非真收盘（8/28 TMO 差 0.67%）。
+        # 消费端规则同 market_degraded_sections：列出的标的收盘价口径存疑。
+        "vintage_intraday_freeze_suspect": sorted(frozen),
         "vintage_unverifiable_all": unverifiable_all,
         "abort_reason": abort_reason,
     }
@@ -311,6 +373,8 @@ def main() -> int:
         print(f"   ⚠️ vintage 无法核实：{', '.join(sorted(unverifiable))}")
     if stale:
         print(f"   ⛔ vintage 陈旧（已拒绝落盘）：{', '.join(sorted(stale))}")
+    if frozen:
+        print(f"   ⚠️ 疑似盘中冻结（已落盘，但收盘价口径存疑）：{', '.join(sorted(frozen))}")
     if unverifiable_all:
         print("   ⚠️ vintage 校验全员失效（疑似 CBOE 字段变更）——消费前人工确认")
     if abort_reason:

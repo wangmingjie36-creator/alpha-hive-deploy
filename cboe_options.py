@@ -241,12 +241,21 @@ def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: 
     return chosen, list(near_set)
 
 
-def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optional[dict]:
+def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
+                        skip_staleness_check: bool = False) -> Optional[dict]:
     """拉取 CBOE 延迟报价 JSON，返回 data 段（含 options / current_price / close）；失败返回 None。
 
     串行化（`_CBOE_SEM` 限 1）：全进程一次只发一个出站请求，不给 CBOE 的限流器加压
     （⚠️ **不是**因为并发压垮 TLS 栈——那条归因 2026-08-25 已证伪，见 http_gate docstring）。
     进程缓存：同标的主链+全链共享一次下载。重试退避：瞬时网络故障错开即恢复。
+
+    `skip_staleness_check`：调用方自己有更精确的新鲜度判据时使用（如
+    `cloud_snapshot_fetch` 按目标业务日比对，而非本函数默认用的「相对当下时刻」
+    启发式）。跳过时把陈旧 payload **交还给调用方自行裁决**，但
+    **仍然不写缓存**——「陈旧绝不入缓存」是 v0.45.39 立的不变式（写了就等于
+    在进程内又保鲜 120 秒），它与「谁来裁决新鲜度」是两件事，不该被一起关掉。
+    代价为零：调用方拿到陈旧 payload 后立刻抛错，三个解析调用根本不会发生，
+    不存在「缓存未命中导致重复下载」的情形。
     """
     if _SNAPSHOT_PROVIDER is not None:
         snap = _snapshot(ticker)
@@ -278,12 +287,17 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
             if not data.get("options"):
                 _log.warning("CBOE %s 返回空期权链", ticker)
                 return None
-            # v0.45.39：陈旧 CDN 文件在此拦下。**不写缓存** ——
-            # 写了就等于把陈旧数据在进程内又保鲜 120 秒。
-            if _payload_is_stale(ticker, data):
+            # v0.45.39：陈旧 CDN 文件在此拦下。
+            # 两件独立的事，别绑在一起（v0.45.88）：
+            #   ① 要不要**丢弃** —— 可以让权给判据更准的调用方（skip_staleness_check）
+            #   ② 要不要**入缓存** —— 永远不。写了就等于把陈旧数据在进程内又保鲜
+            #      120 秒，这是 v0.45.39 立的不变式，与①无关，不该被一起关掉。
+            stale = _payload_is_stale(ticker, data)
+            if stale and not skip_staleness_check:
                 return None
-            with _cache_lock:
-                _payload_cache[key] = (now, data)
+            if not stale:
+                with _cache_lock:
+                    _payload_cache[key] = (now, data)
             return data
         except Exception as e:  # 网络/SSL/解析失败 → 退避重试
             last_err = e

@@ -85,7 +85,7 @@ def test_stale_payload_raises(monkeypatch):
     """核心守卫：vintage 早于业务日 → StaleVintageError。"""
     import cboe_options as co
     monkeypatch.setattr(co, "_fetch_cboe_payload",
-                        lambda t, to: _payload(last_trade="2026-08-25T16:00:02"))
+                        lambda t, to, **_kw: _payload(last_trade="2026-08-25T16:00:02"))
     with pytest.raises(csf.StaleVintageError) as ei:
         csf._fetch_one_ticker("NVDA", "2026-08-26")
     assert "2026-08-25" in str(ei.value)
@@ -96,7 +96,7 @@ def test_stale_rejected_before_expensive_parse(monkeypatch):
     import cboe_options as co
     calls = []
     monkeypatch.setattr(co, "_fetch_cboe_payload",
-                        lambda t, to: _payload(last_trade="2026-08-25T16:00:02"))
+                        lambda t, to, **_kw: _payload(last_trade="2026-08-25T16:00:02"))
     for fn in ("fetch_cboe_chain", "fetch_cboe_iv_term_structure", "fetch_cboe_full_chain_oi"):
         monkeypatch.setattr(co, fn, lambda *a, _f=fn, **k: calls.append(_f))
     with pytest.raises(csf.StaleVintageError):
@@ -106,7 +106,7 @@ def test_stale_rejected_before_expensive_parse(monkeypatch):
 
 def test_fresh_payload_stamps_vintage(monkeypatch):
     import cboe_options as co
-    monkeypatch.setattr(co, "_fetch_cboe_payload", lambda t, to: _payload())
+    monkeypatch.setattr(co, "_fetch_cboe_payload", lambda t, to, **_kw: _payload())
     monkeypatch.setattr(co, "fetch_cboe_chain", lambda *a, **k: {"expiries": []})
     monkeypatch.setattr(co, "fetch_cboe_iv_term_structure", lambda *a, **k: [])
     monkeypatch.setattr(co, "fetch_cboe_full_chain_oi", lambda *a, **k: {})
@@ -120,7 +120,7 @@ def test_fresh_payload_stamps_vintage(monkeypatch):
 def test_missing_timestamp_is_unverifiable_not_ok(monkeypatch):
     """证不出新鲜 ≠ 陈旧：照常落盘，但状态必须是 unverifiable。"""
     import cboe_options as co
-    monkeypatch.setattr(co, "_fetch_cboe_payload", lambda t, to: _payload(drop_lt=True))
+    monkeypatch.setattr(co, "_fetch_cboe_payload", lambda t, to, **_kw: _payload(drop_lt=True))
     monkeypatch.setattr(co, "fetch_cboe_chain", lambda *a, **k: {"expiries": []})
     monkeypatch.setattr(co, "fetch_cboe_iv_term_structure", lambda *a, **k: [])
     monkeypatch.setattr(co, "fetch_cboe_full_chain_oi", lambda *a, **k: {})
@@ -137,7 +137,7 @@ def test_regression_first_run_pollution(monkeypatch):
     """
     import cboe_options as co
     monkeypatch.setattr(co, "_fetch_cboe_payload",
-                        lambda t, to: _payload(last_trade="2026-08-25T19:59:58", price=213.67))
+                        lambda t, to, **_kw: _payload(last_trade="2026-08-25T19:59:58", price=213.67))
     with pytest.raises(csf.StaleVintageError):
         csf._fetch_one_ticker("NVDA", "2026-08-26")
 
@@ -168,7 +168,7 @@ def test_market_wide_stale_aborts_after_three(monkeypatch, tmp_path):
     """休市/盘前触发：三连陈旧就停手，不白烧 30 次请求，且一个标的都不落盘。"""
     rc, mf, day = _run_main(
         monkeypatch, tmp_path,
-        lambda t, to: _payload(last_trade="2026-08-25T16:00:02"))
+        lambda t, to, **_kw: _payload(last_trade="2026-08-25T16:00:02"))
     assert mf["abort_reason"] == "stale_vintage"
     assert mf["tickers_ok"] == 0
     assert len(mf["vintage_stale"]) == 3, "应在第 3 个就中止，而不是跑满 5 个"
@@ -178,7 +178,7 @@ def test_market_wide_stale_aborts_after_three(monkeypatch, tmp_path):
 
 def test_all_unverifiable_keeps_data_but_flags(monkeypatch, tmp_path):
     """CBOE 改字段名 ≠ 数据陈旧——不能因为证不出来就丢掉可能是好的一天。"""
-    rc, mf, day = _run_main(monkeypatch, tmp_path, lambda t, to: _payload(drop_lt=True))
+    rc, mf, day = _run_main(monkeypatch, tmp_path, lambda t, to, **_kw: _payload(drop_lt=True))
     assert mf["vintage_unverifiable_all"] is True
     assert mf["tickers_ok"] == 5, "数据应照常落盘"
     assert mf["vintage_ok"] == 0
@@ -187,7 +187,7 @@ def test_all_unverifiable_keeps_data_but_flags(monkeypatch, tmp_path):
 
 def test_clean_day_has_no_vintage_noise(monkeypatch, tmp_path):
     """正路不误伤：全新鲜时审计字段必须干净，退出码 0。"""
-    rc, mf, _ = _run_main(monkeypatch, tmp_path, lambda t, to: _payload())
+    rc, mf, _ = _run_main(monkeypatch, tmp_path, lambda t, to, **_kw: _payload())
     assert (mf["vintage_stale"], mf["vintage_unverifiable"]) == ([], [])
     assert mf["vintage_unverifiable_all"] is False
     assert mf["abort_reason"] is None
@@ -205,7 +205,7 @@ def test_lagging_ticker_recovered_on_retry(monkeypatch, tmp_path):
     """
     calls = {}
 
-    def payload(t, to):
+    def payload(t, to, **_kw):
         calls[t] = calls.get(t, 0) + 1
         if t == "B" and calls[t] == 1:
             return _payload(last_trade="2026-08-25T16:00:00")
@@ -225,7 +225,7 @@ def test_permanently_stale_ticker_stays_failed(monkeypatch, tmp_path):
 
     云沙箱里 yfinance 不通，这种只能弃掉；本机扫描有降级链（cboe_options v0.45.39）。
     """
-    def payload(t, to):
+    def payload(t, to, **_kw):
         return _payload(last_trade="2026-08-24T15:59:59") if t == "B" else _payload()
 
     rc, mf, day = _run_main(monkeypatch, tmp_path, payload, tickers="A,B,C")
@@ -234,3 +234,73 @@ def test_permanently_stale_ticker_stays_failed(monkeypatch, tmp_path):
     assert "StaleVintageError" in mf["failed"]["B"]
     assert not (day / "B.json").exists(), "陈旧标的不得落盘"
     assert rc == 1
+
+
+# ══════════════════════════════════════════════════════════════════
+# 分层旁路（BILI 事故，2026-08-28）—— 两道新鲜度闸不能互相吞掉对方
+# ══════════════════════════════════════════════════════════════════
+#
+# 上面所有用例都直接 monkeypatch `co._fetch_cboe_payload` 整个函数，天然绕开了
+# 它内部真正的 `_payload_is_stale` 闸（相对「当下时刻」的启发式）。生产环境里
+# 这道闸跑在 `_fetch_one_ticker` 自己的 vintage 校验（相对调用方传入的
+# `business_date`）**之前**：CDN 对个别符号刷新滞后时，内层闸先把 payload
+# 判「陈旧」直接吞成 `None`，外层再也拿不到数据去比对 business_date，只能报
+# 一个文不对题的 `RuntimeError("CBOE payload 为空")`——福祸看着像网络故障，
+# 实际是滞后。connected bug：这条路径永远不会产生 `StaleVintageError`，
+# 于是 v0.45.39 的陈旧标的补抓机制也从未被触发过。
+#
+# 本节直接调真实的 `_fetch_cboe_payload`（只 mock 网络层），复现并锁住修复。
+
+class _Resp:
+    def __init__(self, b): self._b = b
+    def read(self): return self._b
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def _raw_cboe_json(last_trade):
+    return json.dumps({
+        "timestamp": "2026-08-28 21:00:00",
+        "data": {"options": [{"option": "BILI260918C00020000", "iv": 0.4}],
+                 "current_price": 16.6, "close": 16.6,
+                 "prev_day_close": 16.5, "last_trade_time": last_trade},
+    }).encode()
+
+
+def test_lagging_cdn_raises_stale_not_generic_runtime_error(monkeypatch):
+    """CDN 滞后（内层闸会吞）必须仍然浮现为 StaleVintageError，不是网络失败。"""
+    import cboe_options as co
+    co.invalidate_payload_cache()
+    monkeypatch.setattr(co, "_expected_vintage_date", lambda: "2026-08-28")
+    monkeypatch.setattr(co.urllib.request, "urlopen",
+                        lambda *a, **k: _Resp(_raw_cboe_json("2026-08-27T15:59:59")))
+    with pytest.raises(csf.StaleVintageError):
+        csf._fetch_one_ticker("BILI", "2026-08-28")
+    co.invalidate_payload_cache()
+
+
+def test_default_call_still_swallows_stale_into_none(monkeypatch):
+    """佐证上面不是误测：不传 skip_staleness_check 时，内层闸确实会把它吞成 None。"""
+    import cboe_options as co
+    co.invalidate_payload_cache()
+    monkeypatch.setattr(co, "_expected_vintage_date", lambda: "2026-08-28")
+    monkeypatch.setattr(co.urllib.request, "urlopen",
+                        lambda *a, **k: _Resp(_raw_cboe_json("2026-08-27T15:59:59")))
+    assert co._fetch_cboe_payload("BILI", 15) is None
+    co.invalidate_payload_cache()
+
+
+def test_fresh_cdn_still_stamps_correct_vintage(monkeypatch):
+    """正路不误伤：新鲜数据经真实两道闸后照常成功，vintage 打对日期。"""
+    import cboe_options as co
+    co.invalidate_payload_cache()
+    monkeypatch.setattr(co, "_expected_vintage_date", lambda: "2026-08-28")
+    monkeypatch.setattr(co.urllib.request, "urlopen",
+                        lambda *a, **k: _Resp(_raw_cboe_json("2026-08-28T15:59:59")))
+    monkeypatch.setattr(co, "fetch_cboe_chain", lambda *a, **k: {"expiries": []})
+    monkeypatch.setattr(co, "fetch_cboe_iv_term_structure", lambda *a, **k: [])
+    monkeypatch.setattr(co, "fetch_cboe_full_chain_oi", lambda *a, **k: {})
+    out = csf._fetch_one_ticker("BILI", "2026-08-28")
+    assert out["vintage_status"] == "ok"
+    assert out["vintage_date"] == "2026-08-28"
+    co.invalidate_payload_cache()
