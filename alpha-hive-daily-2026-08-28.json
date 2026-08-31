@@ -147,89 +147,89 @@
     "rate_environment": "high",
     "dollar_trend": "neutral",
     "market_trend": "neutral",
-    "spx_change_pct": NaN,
-    "gold_price": NaN,
-    "gold_change_pct": NaN,
+    "spx_change_pct": null,
+    "gold_price": null,
+    "gold_change_pct": null,
     "gold_trend": "stable",
     "sector_rotation": {
       "hot": [
         [
           "XLV",
           "医疗",
-          NaN
+          null
         ],
         [
           "XLE",
           "能源",
-          NaN
+          null
         ],
         [
           "XLF",
           "金融",
-          NaN
+          null
         ]
       ],
       "cold": [
         [
           "XLI",
           "工业",
-          NaN
+          null
         ],
         [
           "XLB",
           "材料",
-          NaN
+          null
         ],
         [
           "XLC",
           "通信",
-          NaN
+          null
         ]
       ],
       "full": {
         "XLV": [
           "医疗",
-          NaN
+          null
         ],
         "XLE": [
           "能源",
-          NaN
+          null
         ],
         "XLF": [
           "金融",
-          NaN
+          null
         ],
         "XLK": [
           "科技",
-          NaN
+          null
         ],
         "XLP": [
           "必需消费",
-          NaN
+          null
         ],
         "XLRE": [
           "房地产",
-          NaN
+          null
         ],
         "XLU": [
           "公用事业",
-          NaN
+          null
         ],
         "XLY": [
           "可选消费",
-          NaN
+          null
         ],
         "XLI": [
           "工业",
-          NaN
+          null
         ],
         "XLB": [
           "材料",
-          NaN
+          null
         ],
         "XLC": [
           "通信",
-          NaN
+          null
         ]
       }
     },
