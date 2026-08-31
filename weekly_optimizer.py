@@ -144,81 +144,79 @@ WEIGHT_CLAMPS = {
 # 核心函数
 # ─────────────────────────────────────────────────────────────────────────────
 
-_CLOSE_T7_CACHE: dict = {}
+def _load_close_t7_map() -> "tuple[dict, str]":
+    """(ticker, date) -> close_t7。返回 (map, status)。
 
+    v0.45.87：真正实现已挪到 feedback_loop.py（`_load_close_t7_map`），
+    供全部消费者共用（weekly_optimizer 4 处 BacktestAnalyzer 构造 +
+    generate_deep_v2.py / alpha_hive_daily_report.py /
+    swarm_agents/queen_distiller.py）。这里是薄包装：显式传入本模块自己
+    解析出的 PHEROMONE_DB_PATH——它带 Cowork VM 挂载点探测逻辑，与
+    feedback_loop.py 自己的 `Path(__file__).parent` 缺省值不是恒等的，
+    所以不能省略这个参数、直接用 feedback_loop 的默认行为。
 
-def _load_close_t7_map() -> dict:
-    """(ticker, date) -> close_t7，只读连接读 pheromone.db。
-
-    背景（v0.45.86）：Track A 此前用 report_snapshots/*.json 的
-    actual_prices.t7 作为 T+7 价格，它由 backtest_engine.PriceBackfiller 用
-    Ticker().history() ±3天容差取价——backfill_dir_accuracy.py 开头注释明确
-    记录了弃用它的理由（本机间歇性 TypeError）。实测同一 (ticker,date) 下，
-    该字段与 pheromone.db.close_t7（yf.download 精确交易日+自校验回填，
-    ic_diagnostics.py/signal_archive.py 那套"干净口径"的唯一来源）只有约1/3
-    重合，25% 两者都不等，说明是第三条互不对齐的独立取价管线。
-
-    库不存在/打不开时返回空 dict —— 调用方须据此保留旧行为（不覆盖），
-    不是把 Track A 全部样本清零；宁可退回旧口径，也不要因为一次读库失败
-    就让优化器在部分环境里彻底失能。
-
-    ⚠️ 按 PHEROMONE_DB_PATH **当前值**缓存（不是 functools.lru_cache）——
-    后者对零参函数只认第一次调用的结果，测试用 monkeypatch.setattr 换路径
-    后仍会拿到旧库缓存，24 个 (ticker,date) 假样本因此在真实生产库里查无
-    匹配、被整批当"无干净价格"丢弃，4 个既有测试因此假红。按路径本身做
-    key，不同 tmp_path（测试隔离）与生产路径互不干扰，且同一路径的重复
-    调用（本文件内 4 处 BacktestAnalyzer 都会触发一次）仍然只读一次库。
+    status 取值见 feedback_loop._load_close_t7_map 的 docstring：
+    "ok" / "empty" / "missing" / "error"。
     """
-    db_path = PHEROMONE_DB_PATH
-    if db_path in _CLOSE_T7_CACHE:
-        return _CLOSE_T7_CACHE[db_path]
-    if not db_path.exists():
-        _CLOSE_T7_CACHE[db_path] = {}
-        return {}
-    try:
-        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        try:
-            rows = con.execute(
-                "SELECT ticker, date, close_t7 FROM predictions WHERE close_t7 IS NOT NULL"
-            ).fetchall()
-        finally:
-            con.close()
-        result = {(ticker, date): close_t7 for ticker, date, close_t7 in rows}
-    except sqlite3.Error as e:
-        _log.warning("读取 pheromone.db close_t7 失败，Track A 回退旧口径: %s", e)
-        result = {}
-    _CLOSE_T7_CACHE[db_path] = result
-    return result
+    sys.path.insert(0, str(ALPHAHIVE_DIR))
+    from feedback_loop import _load_close_t7_map as _fl_load_close_t7_map
+    return _fl_load_close_t7_map(PHEROMONE_DB_PATH)
+
+
+def _warn_if_close_t7_unavailable() -> None:
+    """v0.45.87：db 存在但没有可用 close_t7 数据、或读库失败时必须显式提示。
+
+    这两种情况下 Track A 会静默回退到已弃用的脏口径（actual_prices.t7），
+    CLI 输出跟一切正常时一模一样。`_log.warning` 在本文件里没配置
+    handler，不保证能在终端显示；main() 里其他状态提示统一走 print()，
+    这里跟随同一惯例，确保用户在正常运行（没有 --json 之类）时能看到。
+    "missing"（数据库文件本就不存在，比如测试隔离、全新环境首次运行）
+    不算异常，不警示。
+    """
+    _, status = _load_close_t7_map()
+    if status == "empty":
+        print(f"⚠️  {PHEROMONE_DB_PATH} 数据库存在，但没有任何 close_t7 非空行"
+              f"（backfill_dir_accuracy.py 可能还没跑过/跑挂了），"
+              f"本次回退到旧口径 actual_prices.t7。")
+    elif status == "error":
+        print(f"⚠️  读取 {PHEROMONE_DB_PATH} 的 close_t7 数据失败，"
+              f"本次回退到旧口径 actual_prices.t7。")
 
 
 def _apply_clean_t7_prices(analyzer):
     """把 BacktestAnalyzer 快照的 actual_price_t7 覆盖为 close_t7（干净口径）。
 
-    close_t7_map 为空（库不存在/打不开）时原样返回 analyzer，不做任何改动。
-    库可用时，(ticker,date) 在 close_t7_map 里查不到的快照一律丢弃
-    （actual_price_t7 置 None），**不回退旧值**——宁可少几条干净样本，
-    也不要让脏/干净两种口径混进同一次拟合/重采样。
+    v0.45.87：真正实现已挪到 feedback_loop.py（`_apply_clean_t7_prices`）。
+    这里是薄包装，同样显式传入本模块的 PHEROMONE_DB_PATH（理由见
+    `_load_close_t7_map` 的 docstring）。保留这个包装（而非让四处调用点
+    直接改用 `BacktestAnalyzer(clean_t7=True)`）是为了不改动任何既有调用
+    点/测试的调用形态，把这次改动的影响面限制在"实现挪家"本身。
     """
-    close_t7_map = _load_close_t7_map()
-    if not close_t7_map:
-        return analyzer
-    for snap in getattr(analyzer, "snapshots", None) or []:
-        key = (getattr(snap, "ticker", None), getattr(snap, "date", None))
-        snap.actual_price_t7 = close_t7_map.get(key)
+    sys.path.insert(0, str(ALPHAHIVE_DIR))
+    from feedback_loop import _apply_clean_t7_prices as _fl_apply_clean_t7_prices
+    _fl_apply_clean_t7_prices(getattr(analyzer, "snapshots", None) or [],
+                              db_path=PHEROMONE_DB_PATH)
     return analyzer
 
 
 def count_t7_samples(snapshots_dir: Path) -> int:
-    """统计 T+7 样本数，口径与 compute_new_weights_wls/bootstrap_validate 一致
+    """统计 T+7 样本数，口径须与 compute_new_weights_wls/bootstrap_validate 的
+    valid_snaps 完全一致（v0.45.87）——两处都额外要求 entry_price > 0，
+    此前这里没有对齐：门槛检查用了更宽的口径（只看有没有 T+7 价格），
+    真正参与拟合的样本因 entry_price<=0 被过滤后可能远低于 MIN_SAMPLES，
+    main() 却已经放行，退回 compute_new_weights() 时用极少样本产出建议。
     （v0.45.86 起改用 close_t7；close_t7_map 不可用时退回旧的
     actual_prices.t7，避免两处口径不一致时数字互相打架）。"""
     if not snapshots_dir.exists():
         return 0
-    close_t7_map = _load_close_t7_map()
+    close_t7_map, _status = _load_close_t7_map()
     count = 0
     for f in snapshots_dir.glob("*.json"):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
+            entry_price = data.get("entry_price", 0.0)
+            if not entry_price or entry_price <= 0:
+                continue
             if close_t7_map:
                 if (data.get("ticker"), data.get("date")) in close_t7_map:
                     count += 1
@@ -376,6 +374,12 @@ def compute_new_weights(snapshots_dir: Path) -> Optional[dict]:
     """
     调用 BacktestAnalyzer 计算建议权重（带 clamp）。
     返回 suggest_weight_adjustments() 的完整结果，或 None（样本不足/失败）。
+
+    v0.45.87：补上 MIN_SAMPLES 保护。这是 compute_new_weights_wls 因样本不足
+    返回 None 时 main() 的回退路径——旧实现完全没有最低样本数校验，
+    底层 feedback_loop.BacktestAnalyzer.suggest_weight_adjustments() /
+    calculate_agent_contribution() 同样不做样本量保护，只要不是全零准确率
+    就会产出权重建议，能在极少样本（比如 3 条）下静默产出"建议"。
     """
     try:
         sys.path.insert(0, str(ALPHAHIVE_DIR))
@@ -386,6 +390,13 @@ def compute_new_weights(snapshots_dir: Path) -> Optional[dict]:
 
     try:
         analyzer = _apply_clean_t7_prices(BacktestAnalyzer(directory=str(snapshots_dir)))
+        valid_snaps = [
+            s for s in (getattr(analyzer, "snapshots", None) or [])
+            if getattr(s, "actual_price_t7", None) is not None
+            and getattr(s, "entry_price", 0) > 0
+        ]
+        if len(valid_snaps) < MIN_SAMPLES:
+            return None
         result = analyzer.suggest_weight_adjustments()
         if result and "new_weights" in result:
             result["new_weights"] = _apply_weight_clamps(result["new_weights"])
@@ -1129,6 +1140,7 @@ def main() -> None:
         return
 
     # 2. 计算有效样本数
+    _warn_if_close_t7_unavailable()
     n_samples = count_t7_samples(SNAPSHOTS_DIR)
     print(f"   T+7 已回填样本: {n_samples} 条")
 

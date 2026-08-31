@@ -821,7 +821,9 @@ class AlphaHiveDailyReporter:
         try:
             from feedback_loop import BacktestAnalyzer as _FBAnalyzer
             _snap_dir = os.path.join(str(self.report_dir), "report_snapshots")
-            _fb_analyzer = _FBAnalyzer(directory=_snap_dir)
+            # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
+            # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
+            _fb_analyzer = _FBAnalyzer(directory=_snap_dir, clean_t7=True)
             if _fb_analyzer.snapshots:
                 _suggestion = _fb_analyzer.suggest_weight_adjustments()
                 if _suggestion and _suggestion.get("new_weights"):

@@ -5,7 +5,73 @@
 
 ---
 
-## [0.45.87] — 2026-08-31 — 占位（进行中：修 weekly_optimizer close_t7 复查发现的问题）
+## [0.45.87] — 2026-08-31 — weekly_optimizer close_t7 上线后 7-agent 复查修复（6 项）
+
+v0.45.86 落地后对 `weekly_optimizer.py` 做了一次独立代码复查，发现 6 个
+问题，按严重程度依次修复。
+
+### Fixed
+
+- **样本数门槛可被绕过（最高优先级）**：`count_t7_samples()` 判断样本
+  "可用"的口径只看有没有 T+7 价格，而 `compute_new_weights_wls` /
+  `bootstrap_validate` 内部构造 `valid_snaps` 时额外要求
+  `entry_price > 0`。后果：`main()` 用前者的宽口径通过 `min_samples`
+  门槛后，若 `compute_new_weights_wls` 因窄口径过滤后样本不足自己的
+  `MIN_SAMPLES=10` 而返回 `None`，会回退到旧实现 `compute_new_weights()`
+  ——而它经 `feedback_loop.BacktestAnalyzer.suggest_weight_adjustments()`
+  完全没有最低样本数保护，能在极少样本（如 3 条）下静默产出权重建议，
+  审计日志显示的 `n_samples` 与真正参与拟合的样本数因此对不上。
+  两处都已修：`count_t7_samples()` 补上 `entry_price > 0` 检查，与
+  `valid_snaps` 完全对齐；`compute_new_weights()` 补上
+  `if len(valid_snaps) < MIN_SAMPLES: return None` 保护。新增
+  `TestSampleThresholdAlignment` 锁死。
+- **pheromone.db 存在但 close_t7 未回填时整个修复静默失效**：
+  `_load_close_t7_map()` 对"库不存在"和"库/表都在但查无任何 close_t7
+  非空行"一视同仁，都返回空 dict；调用方也都用 `if close_t7_map:` 真值
+  判断，CLI 表现两种情况下完全一样——权重实际上悄悄回退到被弃用的脏口径
+  （`actual_prices.t7`），用户毫无感知。改为返回 `(map, status)`，
+  `status ∈ {"ok","empty","missing","error"}`；新增 `_warn_if_close_t7_
+  unavailable()`，在 `main()` 里用 `print()`（`_log.warning` 本文件未配
+  handler，不保证终端可见）对 `"empty"`/`"error"` 显式提示，`"missing"`
+  （测试隔离、全新环境等正常降级路径）不警示。
+- **`Path.exists()` 未被 try/except 保护**：`db_path.exists()` 在
+  `try/except sqlite3.Error` 保护范围之外——`Path.exists()` 只吞
+  ENOENT/ENOTDIR/EBADF/ELOOP，`PermissionError`（目录权限被误改、NFS
+  挂载抖动、备份工具临时锁目录）会原样往上抛，导致脚本直接崩溃退出，
+  而非文档承诺的优雅降级。现已用 `try/except OSError` 包住 `exists()`
+  调用，权限类问题走跟"库不存在"一样的降级分支（并按上一条标记为
+  `"error"` 状态供上层警示）。
+- **瞬时 sqlite 错误被当成永久失败缓存**：遇到 `sqlite3.Error`（如与
+  `backfill_dir_accuracy.py` 并发写产生的 "database is locked"）时，
+  此前把空结果写进 `_CLOSE_T7_CACHE`，导致一次性脚本内后续所有调用
+  （`count_t7_samples` + 4 处 `BacktestAnalyzer` 构造）都直接命中空缓存、
+  不会重试。现在只在确认查询成功（无论是否为空）或确认文件不存在时才
+  写缓存，`"error"` 分支不写，给同一次运行的后续调用重试机会。
+- **三处生产代码未接上修复（范围缺口）**：`generate_deep_v2.py` 的
+  `_load_ticker_accuracy`、`alpha_hive_daily_report.py` 合并进
+  `AgentWeightManager` 的权重调整、`swarm_agents/queen_distiller.py` 的
+  `TICKER_ACCURACY_FEEDBACK`，三处各自独立构造 `BacktestAnalyzer`，
+  继续用只有约1/3 可信的 `actual_price_t7`。架构性调整：把
+  `_load_close_t7_map`/`_apply_clean_t7_prices` 从 `weekly_optimizer.py`
+  挪到 `feedback_loop.py`，作为 `BacktestAnalyzer.__init__` 的
+  `clean_t7`（默认 `False`，向后兼容）与 `close_t7_db_path` 参数；
+  `weekly_optimizer.py` 原有的两个同名函数保留为薄包装，显式转发自己
+  解析出的 `PHEROMONE_DB_PATH`（带 Cowork VM 挂载点探测逻辑），4 处既有
+  调用点与全部既有测试的调用形态不变。三处生产调用点改为显式传
+  `clean_t7=True`，不改变其余任何行为（错误处理/日志格式原样保留）。
+  新增 `tests/test_feedback_loop.py::TestBacktestAnalyzerCleanT7`
+  （覆盖 `clean_t7=True/False` 与库缺失/命中/未命中四种情形）；
+  `tests/conftest.py` 新增 `_isolate_feedback_loop_close_t7_db`
+  autouse fixture，防止未显式覆盖 db 路径的测试打到本机真实生产库
+  （与既有 `_isolate_weekly_optimizer_db` 同一条教训）。
+- **流程：占号协议缺失（低优先级，本次已按协议执行）**：v0.45.86 落地
+  时跳过了"开工先占号"步骤。本次开工第一件事已按协议
+  `git fetch origin` 取号、插入占位条目并单独提交推送到 main，
+  不追溯修改 v0.45.86 的历史。
+
+全量测试套件 `pytest tests/ -q`：**2128 passed, 24 skipped, 63 deselected,
+1 xfailed**（较 v0.45.86 的 2108 passed 净增 20，全部来自本次新增的
+回归测试）。
 
 ## [0.45.86] — 2026-08-31 — Track A（weekly_optimizer）T+7 价格改用 close_t7 干净口径
 

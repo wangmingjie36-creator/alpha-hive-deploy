@@ -313,3 +313,100 @@ class TestBacktestAnalyzer:
             aapl = analyzer.get_snapshots_by_ticker("AAPL")
             assert len(aapl) == 2
             assert all(s.ticker == "AAPL" for s in aapl)
+
+
+class TestBacktestAnalyzerCleanT7:
+    """BacktestAnalyzer(clean_t7=True) —— close_t7 干净口径共用实现（v0.45.87）
+
+    挪自 weekly_optimizer.py 的 _load_close_t7_map/_apply_clean_t7_prices，
+    现在是 generate_deep_v2.py / alpha_hive_daily_report.py /
+    swarm_agents/queen_distiller.py 与 weekly_optimizer.py 共用的唯一实现。
+    clean_t7 默认 False，必须验证默认行为与此前完全一致（不静默改变既有
+    三处生产调用点的行为），以及 True 时的覆盖/丢弃两条分支。
+    """
+
+    def _make_snapshot(self, ticker, date, direction, entry, t7_price):
+        from feedback_loop import ReportSnapshot
+        snap = ReportSnapshot(ticker, date)
+        snap.direction = direction
+        snap.entry_price = entry
+        snap.actual_price_t7 = t7_price
+        snap.composite_score = 7.0
+        return snap
+
+    def _make_pheromone_db(self, tmp_path, rows):
+        import sqlite3
+        db_path = tmp_path / "pheromone.db"
+        con = sqlite3.connect(str(db_path))
+        con.execute("CREATE TABLE predictions (ticker TEXT, date TEXT, close_t7 REAL)")
+        con.executemany("INSERT INTO predictions VALUES (?, ?, ?)", rows)
+        con.commit()
+        con.close()
+        return db_path
+
+    def test_clean_t7_false_keeps_dirty_value(self, tmp_path):
+        """默认 clean_t7=False：行为必须与挪家前完全一致，不做任何覆盖。"""
+        from feedback_loop import BacktestAnalyzer
+        snapshots_dir = tmp_path / "snapshots"
+        snapshots_dir.mkdir()
+        s = self._make_snapshot("AAA", "2026-08-14", "Long", 100.0, 999.0)
+        s.save_to_json(str(snapshots_dir))
+
+        db_path = self._make_pheromone_db(tmp_path, [("AAA", "2026-08-14", 123.45)])
+
+        analyzer = BacktestAnalyzer(directory=str(snapshots_dir),
+                                    close_t7_db_path=db_path)  # clean_t7 缺省 False
+        assert analyzer.snapshots[0].actual_price_t7 == 999.0, \
+            "clean_t7=False 时即便传了 close_t7_db_path 也不该生效"
+
+    def test_clean_t7_true_overrides_with_matching_row(self, tmp_path):
+        from feedback_loop import BacktestAnalyzer
+        snapshots_dir = tmp_path / "snapshots"
+        snapshots_dir.mkdir()
+        s = self._make_snapshot("AAA", "2026-08-14", "Long", 100.0, 999.0)  # 脏值
+        s.save_to_json(str(snapshots_dir))
+
+        db_path = self._make_pheromone_db(tmp_path, [("AAA", "2026-08-14", 123.45)])
+
+        analyzer = BacktestAnalyzer(directory=str(snapshots_dir), clean_t7=True,
+                                    close_t7_db_path=db_path)
+        assert analyzer.snapshots[0].actual_price_t7 == 123.45
+
+    def test_clean_t7_true_drops_sample_without_matching_row(self, tmp_path):
+        from feedback_loop import BacktestAnalyzer
+        snapshots_dir = tmp_path / "snapshots"
+        snapshots_dir.mkdir()
+        s = self._make_snapshot("ZZZ", "2026-08-14", "Long", 100.0, 999.0)
+        s.save_to_json(str(snapshots_dir))
+
+        db_path = self._make_pheromone_db(tmp_path, [("AAA", "2026-08-14", 123.45)])
+
+        analyzer = BacktestAnalyzer(directory=str(snapshots_dir), clean_t7=True,
+                                    close_t7_db_path=db_path)
+        assert analyzer.snapshots[0].actual_price_t7 is None
+
+    def test_clean_t7_true_unchanged_when_db_missing(self, tmp_path):
+        """库不存在：原样返回，不能把消费者的全部样本清零。"""
+        from feedback_loop import BacktestAnalyzer
+        snapshots_dir = tmp_path / "snapshots"
+        snapshots_dir.mkdir()
+        s = self._make_snapshot("AAA", "2026-08-14", "Long", 100.0, 999.0)
+        s.save_to_json(str(snapshots_dir))
+
+        analyzer = BacktestAnalyzer(directory=str(snapshots_dir), clean_t7=True,
+                                    close_t7_db_path=tmp_path / "_absent.db")
+        assert analyzer.snapshots[0].actual_price_t7 == 999.0
+
+    def test_clean_t7_true_defaults_to_isolated_db_in_tests(self, tmp_path):
+        """不显式传 close_t7_db_path 时用模块默认值；测试环境下
+        conftest 的 _isolate_feedback_loop_close_t7_db 会把它指向不存在的
+        路径，所以这里也应该保留脏值——防止这条路径意外打到真实生产库。
+        """
+        from feedback_loop import BacktestAnalyzer
+        snapshots_dir = tmp_path / "snapshots"
+        snapshots_dir.mkdir()
+        s = self._make_snapshot("AAA", "2026-08-14", "Long", 100.0, 999.0)
+        s.save_to_json(str(snapshots_dir))
+
+        analyzer = BacktestAnalyzer(directory=str(snapshots_dir), clean_t7=True)
+        assert analyzer.snapshots[0].actual_price_t7 == 999.0

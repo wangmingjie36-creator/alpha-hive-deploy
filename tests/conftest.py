@@ -109,6 +109,30 @@ def _isolate_weekly_optimizer_db(tmp_path, monkeypatch):
                         tmp_path / "_no_such_pheromone.db", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_feedback_loop_close_t7_db(tmp_path, monkeypatch):
+    """把 feedback_loop.PHEROMONE_DB_PATH 指向不存在的临时路径（v0.45.87）。
+
+    v0.45.87 把 close_t7 干净口径的实现从 weekly_optimizer.py 挪到了
+    feedback_loop.py，供 `BacktestAnalyzer(clean_t7=True)` 的全部消费者
+    共用——包括这个模块自己缺省的 PHEROMONE_DB_PATH
+    (`Path(__file__).parent / "pheromone.db"`，即真实生产库路径)。
+    测试若构造 `BacktestAnalyzer(clean_t7=True)` 而不显式覆盖
+    close_t7_db_path，会在本机真实生产库里查询——与
+    `_isolate_weekly_optimizer_db` 记的是同一条教训（加数据源时必须同时
+    确认测试里它被关掉了吗）。指向不存在的路径，让查表函数走
+    "库不存在→保留旧值"分支。需要单独验证覆盖行为的测试自己 monkeypatch
+    一个真实存在、有数据的临时库（或显式传 close_t7_db_path），会覆盖/
+    绕开本 fixture。
+    """
+    try:
+        import feedback_loop
+    except Exception:  # pragma: no cover - 模块不可得时无需隔离
+        return
+    monkeypatch.setattr(feedback_loop, "PHEROMONE_DB_PATH",
+                        tmp_path / "_no_such_pheromone.db", raising=False)
+
+
 # ==================== Mock 股票数据 ====================
 
 MOCK_STOCK_DATA = {
