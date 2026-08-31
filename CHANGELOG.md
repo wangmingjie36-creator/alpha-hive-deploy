@@ -5,6 +5,57 @@
 
 ---
 
+## [0.45.82] — 2026-08-30 — BuzzBee 成交量比长期空缺：补上独立回落源（Twelve Data）
+
+用户发现 ML 报告 BuzzBee 板块「成交量比」总是"—"。核对 2026-08-28 全部 12 份报告
+逐个实测：同一份报告里 `5日动量` 全是真实数值，`成交量比` 100% 为 None——这个反差
+是破案关键。追到 `data_pipeline._fetch_history_metrics()`：yfinance 限流失败时，
+`momentum_5d` 早有自攒价格索引兜底（v0.43.25，数据源 pheromone.db，不经外部网络），
+但 `volume_ratio` 从未有回落路径——索引只存收盘价没存成交量，硬凑一个比值等于编数据，
+所以诚实地一直空着。这不是新 bug，是 v0.43.25 就写明的已知缺口。
+
+### 排查过程中的意外发现
+项目里已经有一个现成、写好、测试覆盖、专门为了绕开 yfinance 429 建的
+`twelve_data.py`（v0.45.61，供 `market_intelligence.py` 算 `rv_30d`/`iv_rank`
+用），免费档 800 次/天、8 次/分，量级够覆盖整个 30 只标的 WATCHLIST。它内部已经
+在解析每根日线的成交量字段（`row.get("volume")`），但 `fetch_daily_closes()`
+最后只吐收盘价，成交量解析完就被扔了，从没接到 `volume_ratio` 上——又一个
+「代码写了、没接线」的半成品。候选数据源逐个验证排除：Alpha Vantage（TIME_SERIES_DAILY
+确认有量，但这把 key 的 25次/天额度已被 newsapi 新闻情绪功能占满）、Stooq（CSV 端点
+已上 JS 反爬工作量证明，服务器端脚本调不通）。
+
+### Added
+- `twelve_data.py`：把原本内联在 `fetch_daily_closes()` 里的抓取/解析逻辑提成
+  共享的 `_fetch_rows()`，新增 `fetch_volume_ratio(ticker, window=20)`——
+  最新成交量 / 近 20 根均量（含当日，口径对齐 `data_pipeline` 现有 yfinance 路径），
+  算不出（数据不足/成交量为 0/NaN）返回 None，不兜底 1.0（成交量比"正常"是假象）
+- `data_pipeline.py`：新增 `_fill_volume_from_twelvedata()`，与既有的
+  `_fill_momentum_from_index()` 对称——yfinance 失败时先补动量（价格索引）、
+  再独立尝试补成交量比（Twelve Data，与前者数据源互不相关）；已有真实值时
+  不重复请求，两条回落都没有时保持诚实 None
+- `tests/test_volume_ratio_fallback.py`（11 项）：覆盖算不出不兜 1.0、已有真实值
+  跳过请求不重复打 API、两条回落都失败时保持 None 不阻断降级链、模块异常不炸主流程
+
+### 验证方式
+未触发真实每日扫描。`_fetch_rows` 重构后原有 `tests/test_twelve_data.py`
+24 项全过（行为零回归）；`fetch_volume_ratio`/`_fill_volume_from_twelvedata`
+用构造数据跑过全部分支；额外用 `unittest.mock` 模拟 yfinance 抛 429，端到端
+验证 `_fetch_history_metrics()` 正确落到 Twelve Data 回落（XOM 实测拿到真实
+`volume_ratio=0.81`，与同一份 yfinance 数据手算结果一致）；正常路径（yfinance
+成功）额外确认零 Twelve Data 调用，不浪费配额。与本次改动直接相关的既有测试
+（`test_backfill_date_anchoring`/`test_cloud_snapshot_price`/`test_macro_snapshot`
+等 11 个文件、159 项）全过，`ruff --select F821` 干净。
+
+### 已知限制
+只补了 `volume_ratio` 这一个缺口，`_fill_momentum_from_index` 的 momentum 回落
+路径未动。配额层面 Twelve Data 现由 `market_intelligence.py`（RV30）与本次改动
+共用同一 800/天预算，两者合计仍远低于额度，暂不需要额外的每日用量协调。
+
+> 撞号记录：`origin/main` 已有 `claude/xxx` 分支先提交+合并了 v0.45.81（NaN 穿透
+> 三层渲染守卫那条），本条目按"先提交者不改号"原则从 0.45.81 让到 0.45.82。
+
+---
+
 ## [0.45.81] — 2026-08-30 — 板块轮动「+nan%」：isinstance 挡不住 NaN，这次踩在三层渲染上
 
 用户问 2026-08-28 报告为什么有 NaN JSON 错误，查到 `alpha-hive-daily-2026-08-28.json`

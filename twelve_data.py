@@ -170,6 +170,24 @@ def fetch_daily_closes(ticker: str, days: int = 60,
     **绝不返回空列表或 0.0 填充** —— 下游 `np.std` 拿到常数列会算出
     `rv=0`，与「波动率真的是 0」不可区分（MEMORY 静默降级三件套）。
     """
+    rows = _fetch_rows(ticker, days, end_date)
+    if rows is None:
+        return None
+
+    closes = [r["close"] for r in rows]
+    if len(closes) < 10:
+        _log.warning("[%s] Twelve Data 有效收盘价仅 %d 根", ticker, len(closes))
+        return None
+    return closes
+
+
+def _fetch_rows(ticker: str, days: int,
+                end_date: Optional[str] = None) -> Optional[List[dict]]:
+    """共享抓取层：一次请求拿回 `{date, close, vol}` 逐根日线（已剔除半根）。
+
+    `fetch_daily_closes` / `fetch_volume_ratio` 共用同一次限流令牌 + 同一份
+    解析逻辑，避免两个口径各发一次请求、各自出一套"哪天算今天"的判断。
+    """
     key = api_key()
     if not key:
         return None
@@ -235,13 +253,37 @@ def fetch_daily_closes(ticker: str, days: int = 60,
             v = 0.0
         rows.append({"date": str(row.get("datetime") or "")[:10], "close": c, "vol": v})
 
-    rows = _drop_forming_bar(rows, ticker)
+    return _drop_forming_bar(rows, ticker)
 
-    closes = [r["close"] for r in rows]
-    if len(closes) < 10:
-        _log.warning("[%s] Twelve Data 有效收盘价仅 %d 根", ticker, len(closes))
+
+def fetch_volume_ratio(ticker: str, window: int = 20,
+                       end_date: Optional[str] = None) -> Optional[Dict]:
+    """最新成交量 / 近 `window` 根均量（含当日）。算不出返回 None。
+
+    与 `data_pipeline._fetch_history_metrics` 的 yfinance 口径保持一致：
+    均量窗口含最新一根，不是"最新对比前 window 根"——两条腿走不同口径的话，
+    同一只标的会因为落到哪条降级路径而算出不同的比值。
+
+    **不兜底 1.0** —— 均量算不出（数据不足/为 0/NaN）时置 None，
+    绝不让"量比正常"这个假象混进评分（MEMORY 静默降级三件套）。
+    """
+    rows = _fetch_rows(ticker, days=window + 10, end_date=end_date)
+    if not rows or len(rows) < window:
         return None
-    return closes
+
+    recent_vol = rows[-1]["vol"]
+    window_vols = [r["vol"] for r in rows[-window:]]
+    avg_vol = sum(window_vols) / len(window_vols)
+
+    if recent_vol <= 0 or avg_vol <= 0:
+        _log.warning("[%s] Twelve Data 成交量不可得或为 0，volume_ratio 置 None", ticker)
+        return None
+
+    return {
+        "volume_ratio": recent_vol / avg_vol,
+        "avg_volume": int(avg_vol),
+        "recent_volume": int(recent_vol),
+    }
 
 
 def realized_vol(ticker: str, lookback: int = 30,

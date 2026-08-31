@@ -434,7 +434,8 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
         return _fill_momentum_from_index(ticker, out)
     except Exception as e:
         _log.debug("_fetch_history_metrics %s failed: %s", ticker, e)
-        return _fill_momentum_from_index(ticker, None)
+        out = _fill_momentum_from_index(ticker, None)
+        return _fill_volume_from_twelvedata(ticker, out)
 
 
 def _fill_momentum_from_index(ticker: str, out: Optional[Dict]) -> Optional[Dict]:
@@ -444,8 +445,9 @@ def _fill_momentum_from_index(ticker: str, out: Optional[Dict]) -> Optional[Dict
     因此不受 yfinance 限流影响——而限流恰恰是本函数长期返回 None 的唯一原因
     （2026-08-14 全天 363 条 429）。
 
-    volume_ratio 不回落：自攒序列只有收盘价、没有成交量，硬造一个比值等于
-    编数据。缺就是缺，让下游按 None 处理。
+    volume_ratio 不由本函数回落：自攒序列只有收盘价、没有成交量，硬造一个
+    比值等于编数据。它的回落见下面 `_fill_volume_from_twelvedata`——
+    独立数据源，不是拿这份收盘价索引硬凑。
     """
     if out is not None and out.get("momentum_5d") is not None:
         return out
@@ -462,6 +464,35 @@ def _fill_momentum_from_index(ticker: str, out: Optional[Dict]) -> Optional[Dict
     out["momentum_5d"] = m
     out["momentum_source"] = "price_index"
     _log.info("[%s] momentum_5d 由自攒索引补上: %+.2f%%（yfinance 不可用）", ticker, m)
+    return out
+
+
+def _fill_volume_from_twelvedata(ticker: str, out: Optional[Dict]) -> Optional[Dict]:
+    """yfinance 拿不到 volume_ratio 时，回落 Twelve Data 日K（v0.45.81）。
+
+    独立数据源（800次/天、8次/分免费档，见 `twelve_data.py`），不经 yfinance，
+    不受同一限流影响。未配置 key 或接口失败时安静返回 None，不阻断降级链——
+    与 `_fill_momentum_from_index` 对 momentum_5d 的处理对称。
+
+    不去动 momentum_5d：那条已经有自己的回落路径（自攒价格索引），
+    这里只补 volume_ratio 这一项缺口。
+    """
+    if out is not None and out.get("volume_ratio") is not None:
+        return out
+    try:
+        from twelve_data import fetch_volume_ratio as _td_volume
+        v = _td_volume(ticker)
+    except Exception as e:  # noqa: BLE001
+        _log.debug("[%s] Twelve Data 成交量回落不可用: %s", ticker, e)
+        return out
+    if v is None:
+        return out  # Twelve Data 也没有 → 保持 None，诚实缺数据
+    out = dict(out) if out else {}
+    out["volume_ratio"] = v["volume_ratio"]
+    out["avg_volume"] = v["avg_volume"]
+    out["volume_source"] = "twelvedata"
+    _log.info("[%s] volume_ratio 由 Twelve Data 补上: %.2fx（yfinance 不可用）",
+              ticker, v["volume_ratio"])
     return out
 
 
