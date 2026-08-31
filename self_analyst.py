@@ -174,16 +174,22 @@ def compute_dimension_ic(snaps: list) -> dict:
 
 
 def classify(snap: dict) -> str:
-    """判断预测方向是否正确 → 'correct' | 'wrong' | 'neutral'"""
-    direction  = snap.get("direction", "Neutral")
+    """判断预测方向是否正确 → 'correct' | 'wrong' | 'neutral'
+
+    生产快照（v0.38.0 起 paper_portfolio.py 挂载）写的是小写 bullish/bearish/neutral
+    （见 paper_portfolio.py:391,1038：direction=="bullish" 即渲染为 Long）；
+    2026-07-29 前冻结的旧快照用的是 Long/Short/Neutral。两套词表都要认，
+    否则冻结目录之外的当前生产快照全部落入 neutral 分支（v0.45.85 修复）。
+    """
+    direction = str(snap.get("direction", "neutral")).strip().lower()
     entry      = snap.get("entry_price", 0.0) or 0.0
     actual_t7  = snap.get("actual_prices", {}).get("t7") or 0.0
     if not entry or not actual_t7:
         return "unknown"
     ret = (actual_t7 - entry) / entry * 100
-    if direction == "Long":
+    if direction in ("long", "bullish"):
         return "correct" if ret > 0 else "wrong"
-    elif direction == "Short":
+    elif direction in ("short", "bearish"):
         return "correct" if ret < 0 else "wrong"
     return "neutral"
 

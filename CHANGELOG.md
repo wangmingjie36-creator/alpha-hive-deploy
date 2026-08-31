@@ -5,7 +5,33 @@
 
 ---
 
-## [0.45.85] — 2026-08-31 — 占位（进行中：self_analyst.classify() 方向词表不匹配生产快照）
+## [0.45.85] — 2026-08-31 — self_analyst.classify() 认不出生产快照的 bullish/bearish 词表
+
+v0.45.84 修好 `SNAPSHOTS_DIR` 目录选择后暴露：`classify()`（self_analyst.py:176-190）
+判断方向对错时硬编码 `direction == "Long"` / `"Short"`，但生产扫描管线
+（`paper_portfolio.py`，v0.38.0 起挂载）写入快照的 `direction` 字段实际是
+小写 `bullish` / `bearish` / `neutral`（见 paper_portfolio.py:391,1038：
+`"Long" if direction == "bullish" else "Short"`）。两套词表从未匹配过，
+`classify()` 对当前全部生产快照恒定返回 `"neutral"`——`--months 3` 跑出
+645 条快照、643 条 neutral、correct/wrong 均为 0、胜率恒 0.0%。此前用
+2026-07-29 前冻结的旧快照测试时表现正常（34 条分出 21 correct/12 wrong），
+是因为那批旧快照凑巧还用着 `Long`/`Short`/`Neutral` 词表——这个 schema 不一致
+一直被"读错目录"那个更大的 bug 意外掩盖，v0.45.84 修对目录后才露出来。
+
+### Fixed
+
+- `self_analyst.py` `classify()`：`direction` 先 `str().strip().lower()`，
+  再同时接受新词表（`bullish`→看多、`bearish`→看空）与旧词表
+  （`long`→看多、`short`→看空），大小写不敏感。方向语义已用
+  `paper_portfolio.py` 的止盈止损计算（:502-533，bullish 时 `exit>entry`
+  为盈利、bearish 时 `entry>exit` 为盈利）与仓位表渲染（:1038）交叉确认，
+  未搞反。修复后 `--months 3`：645 条快照，227 correct / 196 wrong /
+  222 neutral，胜率 53.7%（此前恒为 0.0%）。
+- 无针对 `self_analyst.py` 的既有单元测试（`tests/` 下命中 "classify"
+  关键词的三个文件测的是 `OptionsAnalyzer.classify_call_flow`、
+  `PolymarketClient._classify`、`risk_engine._classify_growth_value`，
+  均与本函数无关）；已跑 `py_compile` 与 `ruff check --select F821` 确认
+  改动无静态错误。
 
 ## [0.45.84] — 2026-08-31 — self_analyst.py 快照目录 fallback 只判断"存在"不判断"还在更新"
 
