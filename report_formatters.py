@@ -7,6 +7,7 @@ report_formatters - 报告格式化与展示模块
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List
 from hive_logger import get_logger
 
@@ -658,8 +659,11 @@ def _build_macro(macro_context) -> List[str]:
     # rate_environment 的 high 档边界上（见 v0.45.42 记录）。
     def _mrow(label, key, spec, suffix, state_key):
         v = macro_context.get(key)
+        # isinstance 挡不住 NaN——float('nan') 也是 float 实例，
+        # 格式化不报错、只吐出字面文本 "nan"，印成一行看起来正常的假数据。
         txt = (format(v, spec) + suffix
-               if isinstance(v, (int, float)) and not isinstance(v, bool) else "—")
+               if isinstance(v, (int, float)) and not isinstance(v, bool)
+               and math.isfinite(v) else "—")
         state = macro_context.get(state_key, "") if txt != "—" else "不可得"
         md.append(f"| {label} | {txt} | {state} |")
 

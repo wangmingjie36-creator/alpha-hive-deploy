@@ -7,6 +7,7 @@ Alpha Hive Dashboard Renderer
 
 import json
 import logging
+import math
 from typing import Dict, List
 import html as _html
 import re as _re
@@ -2297,10 +2298,16 @@ def render_dashboard_html(report: Dict, date_str: str,
             # （默认值不生效——本项目 MEMORY 记过的经典陷阱），随后
             # f"{None:.1f}" 抛 TypeError，被外层 except 吞掉 →
             # **一个字段缺失导致整块宏观消失**。现在各字段互不牵连。
+            # isinstance 挡不住 NaN——float('nan') 也是 float 实例，
+            # 格式化不报错、只吐出字面文本 "nan"，印成一行看起来正常的假数据
+            # （2026-08-28 首页「板块轮动」曾这样显示成 "科技+nan%"）。
+            def _finite(x):
+                return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
             _v = _mctx.get("vix")
-            _macro_vix = f"{_v:.1f}" if isinstance(_v, (int, float)) else "—"
+            _macro_vix = f"{_v:.1f}" if _finite(_v) else "—"
             _t = _mctx.get("treasury_10y")
-            _macro_10y = f"{_t:.2f}%" if isinstance(_t, (int, float)) else "—"
+            _macro_10y = f"{_t:.2f}%" if _finite(_t) else "—"
             _yc = _mctx.get("yield_curve", "unknown")
             _yc_map = {"normal": "正常", "flat": "趋平", "inverted": "倒挂"}
             _yc_cls_map = {"normal": "yc-ok", "flat": "yc-warn", "inverted": "yc-bad"}
@@ -2309,25 +2316,29 @@ def render_dashboard_html(report: Dict, date_str: str,
             # 黄金指标
             _gld_trend = _mctx.get("gold_trend", "stable")
             _gld_chg = _mctx.get("gold_change_pct")
-            if _gld_trend in ("surging", "rising", "falling") and isinstance(_gld_chg, (int, float)):
+            _gld_price = _mctx.get("gold_price")
+            if _gld_trend in ("surging", "rising", "falling") and _finite(_gld_chg):
                 _macro_gld = f"{_gld_chg:+.1f}%"
                 _macro_gld_cls = "gld-up" if _gld_chg > 0 else "gld-dn"
-            elif isinstance(_mctx.get("gold_price"), (int, float)):
-                _macro_gld = f"${_mctx['gold_price']:.0f}"
+            elif _finite(_gld_price):
+                _macro_gld = f"${_gld_price:.0f}"
             # 板块轮动 HTML
             _sr = _mctx.get("sector_rotation", {})
             if _sr.get("hot") or _sr.get("cold"):
                 _sec_parts = []
                 for etf, name, chg in _sr.get("hot", [])[:3]:
-                    _sec_parts.append(f'<span class="sec-hot">{name}{chg:+.1f}%</span>')
+                    if _finite(chg):
+                        _sec_parts.append(f'<span class="sec-hot">{name}{chg:+.1f}%</span>')
                 for etf, name, chg in _sr.get("cold", [])[-2:]:
-                    _sec_parts.append(f'<span class="sec-cold">{name}{chg:+.1f}%</span>')
-                _macro_sector_html = (
-                    '<div class="macro-sectors">'
-                    '<span class="sec-label">板块轮动(5日)</span> '
-                    + " ".join(_sec_parts)
-                    + '</div>'
-                )
+                    if _finite(chg):
+                        _sec_parts.append(f'<span class="sec-cold">{name}{chg:+.1f}%</span>')
+                if _sec_parts:
+                    _macro_sector_html = (
+                        '<div class="macro-sectors">'
+                        '<span class="sec-label">板块轮动(5日)</span> '
+                        + " ".join(_sec_parts)
+                        + '</div>'
+                    )
     except ImportError:
         pass
     except Exception as e:

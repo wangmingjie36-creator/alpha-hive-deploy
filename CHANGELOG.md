@@ -5,6 +5,99 @@
 
 ---
 
+## [0.45.81] — 2026-08-30 — 板块轮动「+nan%」：isinstance 挡不住 NaN，这次踩在三层渲染上
+
+用户问 2026-08-28 报告为什么有 NaN JSON 错误，查到 `alpha-hive-daily-2026-08-28.json`
+的 `macro_context` 里 20 处字面量 `NaN`（`spx_change_pct`/`gold_price`/
+`gold_change_pct`/`sector_rotation` 全部 11 个板块）。根因与 v0.45.69 那次
+（yfinance 当天 Close=NaN、Volume 是真的）同源，但这次穿的是另外两道守卫：
+
+- `fred_macro.py` 的 `if data[name]["prev"] != 0:`——`NaN != 0` 恒 `True`，
+  除法照算，NaN 就这样被当成"取到了"写进 `data[name]`。
+- `_fetch_sector_rotation` 的 `if first_close >= 5:`——只挡得住分母，
+  `first_close` 正常、`last_close` 是 NaN 时照样放行。
+- 更值得记的是**第三层**：`report_formatters.py` / `dashboard_renderer.py`
+  里专门为"取不到就显示—"写的 `isinstance(v, (int, float))` 判断
+  （v0.45.43/v0.45.54 就是为了不让假数据看起来正常而加的），同样没挡住——
+  `float('nan')` 本身就是 `float` 实例，`isinstance` 检查为真，
+  格式化不报错，只吐出字面文本 "nan"，于是网站首页「板块轮动(5日)」
+  实测显示成"科技+nan% 医疗+nan% 能源+nan%..."（截图直接在线上复现），
+  日报 Markdown 显示"大盘(5日) | +nan% | neutral"——状态列还配着一个
+  看起来正常的标签，比 v0.45.54 想防的「兜底 0 冒充正常值」更隐蔽。
+
+Python 的 `json.dumps` 默认 `allow_nan=True`，NaN 序列化不报错、
+生成阶段的编排器日志里也确实一条 NaN/JSON 相关的报错都没有——
+但 `NaN` 不是合法 JSON（RFC 8259 只认 `null`），严格解析器
+（JS `JSON.parse`、大多数非 Python 语言的 JSON 库）读到这个文件会报错，
+这才是"NaN JSON 错误"的真正触发点，Chrome 内置 JSON 查看器本身够宽松，
+人眼直接开文件反而看不出问题。
+
+### Fixed
+
+- `fred_macro.py`：yfinance 收盘价 ingestion（`_fetch_macro_data` 内的
+  symbol 循环）与 `_fetch_sector_rotation` 的 `_fetch_one` 都加
+  `math.isfinite()` 校验，Close 不是有限数就当同「没取到」处理，
+  不再写入 `data`/返回该 ETF——与 v0.45.69「拿不到就不冒充」同一原则。
+- `report_formatters.py`：`_build_macro._mrow` 的判断加 `math.isfinite`。
+- `dashboard_renderer.py`：新增 `_finite()` 帮助函数，VIX/10Y/黄金/
+  板块轮动全部改用它；板块轮动的 hot/cold 逐项过滤 NaN，若过滤后一项
+  不剩，整个「板块轮动」div 不渲染（不留一个空壳标签）。
+
+### 教训
+
+`isinstance(x, (int, float))` 不是 NaN 的守卫——`NaN` 本身就是合法的
+`float` 实例，这条检查专门用来分辨"有没有拿到数"，却分辨不出"拿到的是
+垃圾"。这是 v0.45.69 记录的 NaN 穿透模式（`<=0`、`if not x` 挡不住 NaN）
+在**格式化/渲染层**的第三次复现，说明这条教训不能只在数值运算层打补丁——
+凡是"判断是否为有效数字"的地方，无论是用来算术还是用来决定显示什么文本，
+都要问一遍 NaN 会怎么走。
+
+### 追加：MCP 服务端读的是另一份文件，也各中一枪
+
+`alpha_hive_mcp.py`（Cowork 里挂的 alpha_hive MCP server）不读
+`alpha-hive-daily-{date}.json`，读的是逐标的 `analysis-{TICKER}-ml-{date}.json`——
+跟上面 `macro_context` 完全是两份文件、两条代码路径，理论上不该受这次的
+影响。但用户报告 Cowork 侧一个消费市场数据的定时任务在 MCP 层解析
+2026-08-28 报告时同样撞上 `NaN` 导致 JSON 非法，一查才发现 8-28 那天
+**12 个标的**（AMC/AMZN/CVX/DELL/META/MSFT/MU/NEE/QCOM/SNOW/VKTX/XOM）的
+`analysis-*-ml-2026-08-28.json` 里，`CodeExecutorAgent` 的技术分析详情
+确实各带 2 处字面量 NaN：
+
+- `fetch_data.recent_close`
+- `analysis_data.price`
+
+根因是同一天 yfinance 的同一个数据缺陷（Close=NaN、Volume 是真的），
+但这次踩中的是**第三处、此前完全没查过的代码**——`code_generator.py`
+里两段被 `CodeExecutorAgent` 动态 `exec()` 的代码模板字符串：
+
+- `_generate_yfinance`：`recent_close = float(hist["Close"].iloc[-1]) if len(hist) > 0 else None`——
+  只判断"有没有行"，不判断"这一行的收盘价是不是数"。
+- `_generate_technical_analysis`：`"price": float(latest["Close"])`——
+  同一个 `result` 字典里 `sma_20`/`sma_50`/`rsi` 三个字段都写了
+  `pd.notna(...)` 守卫，唯独 `price` 这个最基础的字段没写，是三个手写的
+  兄弟字段里漏掉的那一个。
+
+### Fixed（追加）
+
+- `code_generator.py` `_generate_yfinance`：`recent_close` 加 `math.isfinite()`
+  校验，NaN 归一成 `None`（连带修好一个副作用：`_price` 的 fallback链
+  `... or recent_close or "N/A"` 此前若 `recent_close` 是 NaN，会因为
+  NaN 是 truthy 而把 NaN 当作"取到了"直接返回，现在 NaN 正确变成 `None`
+  后能继续 fallback 到 `"N/A"`）。
+- `code_generator.py` `_generate_technical_analysis`：`price` 补上
+  `pd.notna(...)` 守卫，与同一字典里另外三个字段的写法保持一致。
+- 顺着同一模式在文件里再搜了一遍 `float(...["Close"]...)`，`_generate_momentum_analysis`
+  也中招：`current_price`/`momentum`/`avg_momentum`/`momentum_std`/`z_score`
+  五个数值字段全部补上 `pd.notna` 守卫（`avg_momentum`/`momentum_std` 因
+  `.mean()`/`.std()` 默认 `skipna=True` 实际很难撞上，但为了跟同一字典
+  里其余字段一致、防止未来改动引入 `skipna=False`，一并加固）。
+
+三处均已用一段与 8-28 实测同形的假数据（Close=NaN、Volume 是真的）
+跑通生成的代码字符串，严格 `json.loads()` 复解析确认不再出现 `NaN` token；
+也各跑了一遍正常（无 NaN）数据确认没有破坏原有输出。
+
+---
+
 ## [0.45.80] — 2026-08-30 — dashboard.css 全量死类审计：又挖出两处「v2 重写但 v1 没删」的死代码
 
 同一天两个并行 worktree 各自发现一个"class 被引用/定义了但从没真正渲染"的 bug
