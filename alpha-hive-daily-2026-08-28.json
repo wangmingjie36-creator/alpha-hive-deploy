@@ -147,89 +147,89 @@
     "rate_environment": "high",
     "dollar_trend": "neutral",
     "market_trend": "neutral",
-    "spx_change_pct": NaN,
-    "gold_price": NaN,
-    "gold_change_pct": NaN,
-    "gold_trend": "stable",
+    "spx_change_pct": -0.25,
+    "gold_price": 408.89,
+    "gold_change_pct": -3.24,
+    "gold_trend": "falling",
     "sector_rotation": {
       "hot": [
         [
-          "XLV",
-          "医疗",
-          NaN
-        ],
-        [
-          "XLE",
-          "能源",
-          NaN
-        ],
-        [
-          "XLF",
-          "金融",
-          NaN
-        ]
-      ],
-      "cold": [
-        [
-          "XLI",
-          "工业",
-          NaN
-        ],
-        [
-          "XLB",
-          "材料",
-          NaN
+          "XLK",
+          "科技",
+          3.13
         ],
         [
           "XLC",
           "通信",
-          NaN
+          0.6
+        ],
+        [
+          "XLF",
+          "金融",
+          -0.21
+        ]
+      ],
+      "cold": [
+        [
+          "XLRE",
+          "房地产",
+          -1.88
+        ],
+        [
+          "XLV",
+          "医疗",
+          -2.03
+        ],
+        [
+          "XLP",
+          "必需消费",
+          -2.29
         ]
       ],
       "full": {
         "XLV": [
           "医疗",
-          NaN
+          -2.03
         ],
         "XLE": [
           "能源",
-          NaN
+          -0.68
         ],
         "XLF": [
           "金融",
-          NaN
+          -0.21
         ],
         "XLK": [
           "科技",
-          NaN
+          3.13
         ],
         "XLP": [
           "必需消费",
-          NaN
+          -2.29
         ],
         "XLRE": [
           "房地产",
-          NaN
+          -1.88
         ],
         "XLU": [
           "公用事业",
-          NaN
+          -1.13
         ],
         "XLY": [
           "可选消费",
-          NaN
+          -0.92
         ],
         "XLI": [
           "工业",
-          NaN
+          -1.04
         ],
         "XLB": [
           "材料",
-          NaN
+          -0.75
         ],
         "XLC": [
           "通信",
-          NaN
+          0.6
         ]
       }
     },
@@ -238,6 +238,7 @@
     ],
     "macro_tailwinds": [
       "VIX 14.5（低波动，风险偏好良好）",
+      "黄金回落-3.2%（风险偏好回升）",
       "HY信用利差 263bp(-4bp日变)（信用市场平稳，风险偏好良好）"
     ],
     "fred_extras": {
@@ -256,12 +257,15 @@
     "fed_funds_rate": 3.63,
     "hy_spread_bp": 263.0,
     "hy_spread_chg_bp": -4.0,
-    "summary": "VIX 14.5(low) | 10Y 4.73% | 大盘+nan% | 宏观:neutral | 曲线:正常 | CPI同比3.3% | HY利差263bp",
+    "summary": "VIX 14.5(low) | 10Y 4.73% | 大盘-0.2% | 宏观:neutral | 曲线:正常 | CPI同比3.3% | HY利差263bp | 黄金回落-3.2%",
     "data_source": "cloud_snapshot+treasury+yfinance+fred@2026-08-28",
     "field_sources": {
       "TNX": "treasury_gov@2026-08-28",
       "FVX": "treasury_gov@2026-08-28",
-      "TWO": "treasury_gov@2026-08-28"
+      "TWO": "treasury_gov@2026-08-28",
+      "SPX": "yfinance_backfill@2026-08-30",
+      "GLD": "yfinance_backfill@2026-08-30",
+      "sector_rotation": "yfinance_backfill@2026-08-30"
     },
     "treasury_2y_source": "treasury_gov",
     "vix_source": "cloud_snapshot_cboe",
