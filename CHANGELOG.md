@@ -5,7 +5,38 @@
 
 ---
 
-## [0.45.84] — 2026-08-31 — 占位（进行中：修 self_analyst.py 快照目录静默使用冻结旧数据）
+## [0.45.84] — 2026-08-31 — self_analyst.py 快照目录 fallback 只判断"存在"不判断"还在更新"
+
+`SNAPSHOTS_DIR` 优先取 `OUTPUT_DIR/report_snapshots`（`~/Desktop/深度分析报告/深度/report_snapshots`），
+只有该目录"不存在"时才回退到 `ALPHAHIVE_DIR/report_snapshots`（`~/Desktop/Alpha Hive/report_snapshots`）。
+但生产扫描管线早已只往后者写入——前者自 2026-07-29 起停止更新，只剩 59 个
+2026-03-16~2026-07-29 的旧文件，却因为"目录仍然存在"从未触发 fallback。
+`self_analyst.py` 每次运行都"成功"（不报错、样本数看似正常，如 34 条），
+用的实际是一个月前就冻结的数据，诊断简报的"近期"标签是假的，且随时间推移
+越来越过时。`weekly_optimizer.py` 在 v0.23.6 已经踩过同一个坑并修过
+（`_best_snapshots_dir()`，见 weekly_optimizer.py:90-103：同时看两个候选目录、
+各自数 `*.json` 文件数、取更多的那个），但当时没有同步到 self_analyst.py。
+
+### Fixed
+
+- `self_analyst.py`：`SNAPSHOTS_DIR` 解析改为复制 `weekly_optimizer.py` 的
+  `_best_snapshots_dir()` 逻辑——比较两个候选目录的 `*.json` 文件数，取更多的
+  那个，而不是"只在不存在时才 fallback"。实测 `--months 3`：样本数
+  34 → **645**，`SNAPSHOTS_DIR` 从冻结的 `深度分析报告/深度/report_snapshots`
+  (59 文件，止于 2026-07-29) 改为持续更新的 `Alpha Hive/report_snapshots`
+  (931 文件，更新到 2026-08-28)。
+- 无针对 `self_analyst.py` 的既有单元测试；已跑 `ruff check --select F821` 与
+  `py_compile` 确认改动无静态错误。
+
+### 顺手发现（未修，超出本次范围）
+
+验证时发现：切到正确目录后，`compute_stats()` 里 `correct`/`wrong` 双双归零
+（645 条样本里 643 条被分类为 `neutral`）。根因是 `classify()`
+（self_analyst.py:176-188）按 `direction == "Long"/"Short"` 判断，但当前生产
+快照（如 `XOM_2026-08-28.json`）里 `direction` 字段实际是小写的
+`"bullish"/"bearish"/"neutral"`——两者从未匹配过。旧的冻结快照恰好是
+`Long`/`Short` 词表，所以这个 schema 不一致此前被"用错目录"意外掩盖了。
+这是另一个独立 bug，不在本次任务范围内，留给后续 session。
 
 ---
 

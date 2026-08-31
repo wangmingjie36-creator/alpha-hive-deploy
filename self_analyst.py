@@ -47,16 +47,24 @@ try:
 except PermissionError:
     OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
 
-# v0.10.1 兜底：VM 里 OUTPUT_DIR/report_snapshots 常为空 — 回退到
-# ALPHAHIVE_DIR/report_snapshots（generate_deep_v2.py 实际写入位置）
-SNAPSHOTS_DIR = OUTPUT_DIR / "report_snapshots"
-try:
-    if not SNAPSHOTS_DIR.exists():
-        _fallback = ALPHAHIVE_DIR / "report_snapshots"
-        if _fallback.exists():
-            SNAPSHOTS_DIR = _fallback
-except PermissionError:
-    pass
+# v0.45.84 修复：与 weekly_optimizer.py 同步 —— "目录存在"不等于"目录还在更新"。
+# 旧逻辑只在 OUTPUT_DIR/report_snapshots 不存在时才回退，但生产扫描管线早已
+# 只往 ALPHAHIVE_DIR/report_snapshots 写入，前者会长期存在却停止更新，导致
+# 本脚本静默消费冻结的旧快照。改为取两个候选目录中 *.json 文件数更多的那个。
+def _best_snapshots_dir() -> Path:
+    candidates = []
+    for p in [ALPHAHIVE_DIR / "report_snapshots", OUTPUT_DIR / "report_snapshots"]:
+        try:
+            if p.exists():
+                n = len(list(p.glob("*.json")))
+                candidates.append((n, p))
+        except (OSError, PermissionError):
+            pass
+    if not candidates:
+        return ALPHAHIVE_DIR / "report_snapshots"  # 兜底（即使不存在）
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+SNAPSHOTS_DIR = _best_snapshots_dir()
 
 BRIEFS_DIR    = ALPHAHIVE_DIR / "self_analysis_briefs"
 
