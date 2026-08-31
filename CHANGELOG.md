@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.87] — 2026-08-31 — 占位（进行中：修 weekly_optimizer close_t7 复查发现的问题）
+
 ## [0.45.86] — 2026-08-31 — Track A（weekly_optimizer）T+7 价格改用 close_t7 干净口径
 
 排查"闸1 bootstrap 为什么总不过"时发现：`weekly_optimizer.py` 全链路
