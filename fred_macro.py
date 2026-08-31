@@ -16,6 +16,7 @@
 - 设置环境变量 FRED_API_KEY 可解锁 CPI、PMI、2Y 国债收益率等
 """
 
+import math
 import os
 import time
 import threading
@@ -374,13 +375,19 @@ def _fetch_macro_data() -> Dict:
                     t = yf.Ticker(sym)
                     hist = t.history(period="5d", interval="1d")
                 if hist is not None and not hist.empty:
-                    data[name] = {
-                        "last": float(hist["Close"].iloc[-1]),
-                        "prev": float(hist["Close"].iloc[-2]) if len(hist) >= 2 else float(hist["Close"].iloc[-1]),
-                        "change_pct": 0.0,
-                    }
-                    if data[name]["prev"] != 0:
-                        data[name]["change_pct"] = (data[name]["last"] / data[name]["prev"] - 1) * 100
+                    _last = float(hist["Close"].iloc[-1])
+                    _prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else _last
+                    # v0.45.7x：`!= 0` 挡不住 NaN（NaN != 0 恒 True）——2026-08-28
+                    # 那次 yfinance 返回的行 Volume 是真的、Close 却是 NaN，NaN 就
+                    # 这样算出 NaN 的 change_pct，被当成「取到了」写进 data[name]。
+                    # 收盘价不是有限数就当同「没取到」处理，不让 NaN 冒充数据
+                    # （同 CHANGELOG v0.45.69 的原则：拿不到就不冒充，不伪造）。
+                    if math.isfinite(_last) and math.isfinite(_prev):
+                        data[name] = {
+                            "last": _last,
+                            "prev": _prev,
+                            "change_pct": (_last / _prev - 1) * 100 if _prev != 0 else 0.0,
+                        }
             except Exception as e:
                 _log.debug("宏观数据获取失败 %s: %s", sym, e)
 
@@ -865,8 +872,11 @@ def _fetch_sector_rotation(yf_module=None) -> Dict:
                 if hist is not None and len(hist) >= 2:
                     first_close = float(hist["Close"].iloc[0])
                     last_close = float(hist["Close"].iloc[-1])
-                    # < 5 防 yfinance sample data ~1.0 哨兵值（ETF 真实价格均 > $5）
-                    if first_close >= 5:
+                    # < 5 防 yfinance sample data ~1.0 哨兵值（ETF 真实价格均 > $5）；
+                    # isfinite 防 NaN——first_close 正常、last_close 是 NaN 时
+                    # `>= 5` 单独挡不住（NaN 只挡得住"分母"这一半）。
+                    if (math.isfinite(first_close) and math.isfinite(last_close)
+                            and first_close >= 5):
                         chg = round((last_close / first_close - 1) * 100, 2)
                         # 5 日涨跌 ±50% 以上为数据异常，归零保守处理
                         if abs(chg) > 50:
