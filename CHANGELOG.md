@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.85] — 2026-08-31 — 占位（进行中：self_analyst.classify() 方向词表不匹配生产快照）
+
 ## [0.45.84] — 2026-08-31 — self_analyst.py 快照目录 fallback 只判断"存在"不判断"还在更新"
 
 `SNAPSHOTS_DIR` 优先取 `OUTPUT_DIR/report_snapshots`（`~/Desktop/深度分析报告/深度/report_snapshots`），
