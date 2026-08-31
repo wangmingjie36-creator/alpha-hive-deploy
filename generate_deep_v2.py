@@ -6957,7 +6957,9 @@ def _load_ticker_accuracy(ticker: str, out_dir: Path) -> dict:
     try:
         from feedback_loop import BacktestAnalyzer
         snap_dir = str(out_dir / "report_snapshots")
-        analyzer = BacktestAnalyzer(directory=snap_dir)
+        # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
+        # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
+        analyzer = BacktestAnalyzer(directory=snap_dir, clean_t7=True)
         snaps = analyzer.get_snapshots_by_ticker(ticker)
         if not snaps:
             return {}

@@ -359,3 +359,97 @@ class TestPublishedDates:
                 f"{key} 表出现了 2027 日期，但 verified_through 仍是 "
                 f"{spec['verified_through']} —— 要么核对后上移边界，要么删掉"
             )
+
+
+class TestWarningLabelHonesty:
+    """v0.45.68 二次检查：告警自己在标签上撒谎
+
+    这一组守的是「表名和日期必须来自同一张表」。v0.45.65 的告警文案两处都破了这条。
+    """
+
+    LOGGER = "alpha_hive.economic_calendar"
+
+    @pytest.fixture(autouse=True)
+    def _clear_throttle(self):
+        from economic_calendar import _reset_warning_throttle
+        _reset_warning_throttle()
+        yield
+        _reset_warning_throttle()
+
+    def test_binding_table_is_always_one_of_the_culprits(self):
+        """🔴 binding_table 必定是导致当前 status 的表之一
+
+        这是 guard_bee 和告警文案共同依赖的性质：想给一个状态配一个日期，
+        取 binding 表的；取 shortest 表的会指到一张健康的表上。
+        数学依据：stale 表 margin<0，exhausted 表 margin 更负，故 min(margin) 必落在肇事表。
+        """
+        from economic_calendar import get_calendar_health
+        from datetime import timedelta
+        d = date(2026, 8, 1)
+        checked_non_ok = 0
+        while d <= date(2028, 3, 1):
+            h = get_calendar_health(ref_date=d)
+            if h["status"] != "ok":
+                checked_non_ok += 1
+                culprits = h["stale_tables"] + h["exhausted_tables"]
+                assert h["binding_table"] in culprits, (
+                    f"{d}: status={h['status']} binding={h['binding_table']} "
+                    f"不在肇事表 {culprits} 中"
+                )
+            d += timedelta(days=1)
+        assert checked_non_ok > 100, "样本里没有足够多的非健康日，本测试形同虚设"
+
+    def test_shortest_table_can_be_healthy_while_status_is_stale(self):
+        """反向确认上一条为什么必要：shortest 表**确实**可能是健康的那张。
+
+        2026-09-10：nfp 已 stale（剩 85 天 < 90），而 shortest 是 gdp
+        （剩 49 天，阈值 30，健康）。拿 shortest 的日期配 stale 状态就是指错表。
+        """
+        from economic_calendar import get_calendar_health
+        h = get_calendar_health(ref_date=date(2026, 9, 10))
+        assert h["status"] == "stale"
+        assert h["shortest_table"] != h["binding_table"]
+        assert h["per_table"][h["shortest_table"]]["stale"] is False
+
+    def test_exhausted_message_gives_each_table_its_own_date(self, caplog):
+        """🔴 回归：旧文案点名多张表却共用一个日期
+
+        2026-12-15：cpi/gdp/nfp 三张都走完，但表尾各不相同
+        （12-10 / 10-29 / 12-04）。旧文案说「cpi/gdp/nfp 表在 2026-10-29 之后
+        没有任何条目」——对 cpi 和 nfp 都是假话。
+        """
+        import logging
+        from economic_calendar import get_upcoming_events, get_calendar_health
+        ref = date(2026, 12, 15)
+        with caplog.at_level(logging.DEBUG, logger=self.LOGGER):
+            get_upcoming_events(days=30, ref_date=ref)
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert errors
+        msg = errors[0].getMessage()
+
+        h = get_calendar_health(ref_date=ref)
+        assert len(h["exhausted_tables"]) >= 3, "本测试需要多张表同时走完的场景"
+        for k in h["exhausted_tables"]:
+            own = h["per_table"][k]["last_date"]
+            assert f"{k} 止于 {own}" in msg, (
+                f"{k} 表没有配上自己的表尾日期 {own}；文案：{msg}"
+            )
+
+    def test_stale_message_numbers_all_come_from_the_binding_table(self, caplog):
+        import logging
+        from economic_calendar import get_upcoming_events, get_calendar_health
+        ref = date(2026, 9, 20)
+        with caplog.at_level(logging.DEBUG, logger=self.LOGGER):
+            get_upcoming_events(days=30, ref_date=ref)
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings
+        msg = warnings[0].getMessage()
+
+        h = get_calendar_health(ref_date=ref)
+        b = h["per_table"][h["binding_table"]]
+        assert h["binding_table"] in msg
+        assert b["last_date"] in msg
+        # 不得混入 shortest 表的日期
+        shortest_date = h["per_table"][h["shortest_table"]]["last_date"]
+        if shortest_date != b["last_date"]:
+            assert shortest_date not in msg, "文案里混进了 shortest 表的日期"

@@ -22,7 +22,6 @@
 
 蜂群扫描完成时自动推送：
 - ✅ `run_swarm_scan()` → Slack 报告
-- ✅ `run_crew_scan()` → Slack 报告
 - ✅ 不依赖 Gmail，完全独立
 
 ### 3. 富文本格式

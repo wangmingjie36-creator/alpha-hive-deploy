@@ -46,15 +46,6 @@ except ImportError:
     CodeExecutorAgent = None
     CODE_EXECUTION_CONFIG = {"enabled": False}
 
-# Phase 3 P5: CrewAI 多 Agent 框架（含错误日志，保留 try/except）
-try:
-    from crewai_adapter import AlphaHiveCrew
-    from config import CREWAI_CONFIG
-except (ImportError, TypeError) as e:
-    AlphaHiveCrew = None
-    CREWAI_CONFIG = {"enabled": False}
-    _log.info("CrewAI 模块导入失败: %s (降级到原始蜂群)", type(e).__name__)
-
 SlackReportNotifier = optional_import("slack_report_notifier", "SlackReportNotifier")
 EarningsWatcher = optional_import("earnings_watcher", "EarningsWatcher")
 
@@ -830,7 +821,9 @@ class AlphaHiveDailyReporter:
         try:
             from feedback_loop import BacktestAnalyzer as _FBAnalyzer
             _snap_dir = os.path.join(str(self.report_dir), "report_snapshots")
-            _fb_analyzer = _FBAnalyzer(directory=_snap_dir)
+            # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
+            # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
+            _fb_analyzer = _FBAnalyzer(directory=_snap_dir, clean_t7=True)
             if _fb_analyzer.snapshots:
                 _suggestion = _fb_analyzer.suggest_weight_adjustments()
                 if _suggestion and _suggestion.get("new_weights"):
@@ -1338,77 +1331,6 @@ class AlphaHiveDailyReporter:
             _log.warning("扫描后指标收集异常（不影响报告生成）: %s", e)
         report = self._build_swarm_report(swarm_results, ctx.board, agent_count=len(ctx.all_agents))
         self._post_scan_notify(ctx, swarm_results, report, elapsed)
-        return report
-
-    def run_crew_scan(self, focus_tickers: List[str] = None) -> Dict:
-        """
-        CrewAI 模式蜂群扫描 - 使用 Process.hierarchical 主-子 Agent 递归调度
-        若 crewai 未安装，自动降级到 run_swarm_scan()
-
-        Args:
-            focus_tickers: 重点关注标的（如为None则扫描全部watchlist）
-
-        Returns:
-            完整的蜂群分析报告
-        """
-        # 检查 CrewAI 是否可用
-        if not AlphaHiveCrew or not CREWAI_CONFIG.get("enabled"):
-            _log.info("CrewAI 未安装或未启用，降级到标准蜂群模式")
-            return self.run_swarm_scan(focus_tickers)
-
-        _log.info("CrewAI 模式 %s", self.date_str)
-
-        targets = focus_tickers or list(WATCHLIST.keys())[:10]
-        _log.info("标的：%s", " ".join(targets))
-
-        # 创建共享的信息素板
-        board = PheromoneBoard(memory_store=self.memory_store, session_id=self._session_id)
-
-        # 构建 CrewAI Crew
-        crew = AlphaHiveCrew(board=board, memory_store=self.memory_store)
-        crew.build(targets)
-
-        _log.info("CrewAI %d Agent", crew.get_agents_count())
-
-        swarm_results = {}
-        start_time = time.time()
-
-        # 使用 CrewAI 分析每个标的
-        for i, ticker in enumerate(targets, 1):
-            _log.info("[%d/%d] CrewAI 分析 %s", i, len(targets), ticker)
-
-            try:
-                result = crew.analyze(ticker)
-                swarm_results[ticker] = result
-
-                _log.info("  %s: %.1f/10 %s", ticker, result.get('final_score', 0), result.get('direction', 'neutral'))
-
-            except (ValueError, KeyError, TypeError, RuntimeError, ConnectionError) as e:
-                _log.warning("  %s CrewAI 分析失败: %s", ticker, str(e)[:80])
-                swarm_results[ticker] = {
-                    "ticker": ticker,
-                    "final_score": 0.0,
-                    "direction": "neutral",
-                    "discovery": f"CrewAI 分析失败: {str(e)}",
-                    "error": str(e)
-                }
-
-        elapsed = time.time() - start_time
-        _log.info("CrewAI 耗时：%.1fs", elapsed)
-
-        # 转换为标准报告格式（兼容 run_swarm_scan 输出）
-        # CrewAI 模式：6 核心 BeeAgent + BearBeeContrarian = 7
-        report = self._build_swarm_report(swarm_results, board, agent_count=7)
-
-        # 异步保存会话（使用共享线程池，退出时等待完成）
-        if self.memory_store and self._session_id:
-            snapshot = board.compact_snapshot()
-            self._submit_bg(
-                self.memory_store.save_session,
-                self._session_id, self.date_str, "crew_scan",
-                targets, swarm_results, snapshot, elapsed
-            )
-
         return report
 
     # ── _build_swarm_report helper methods ──────────────────────────

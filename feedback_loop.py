@@ -6,12 +6,106 @@
 import logging as _logging
 import json
 import os
+import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 from statistics import mean, stdev
 from hive_logger import SafeJSONEncoder, atomic_json_write
 
 _log = _logging.getLogger("alpha_hive.feedback_loop")
+
+# ── T+7 干净口径（close_t7）共用实现（v0.45.87）────────────────────────────
+# 挪自 weekly_optimizer.py：此前只有它一个消费者接了 pheromone.db.close_t7，
+# generate_deep_v2.py / alpha_hive_daily_report.py / swarm_agents/
+# queen_distiller.py 各自独立构造 BacktestAnalyzer，继续用只有约1/3 可信的
+# actual_price_t7（report_snapshots/*.json，backtest_engine.PriceBackfiller
+# 的 Ticker().history() ±3天容差取价，backfill_dir_accuracy.py 已记录弃用
+# 理由）。现在五处消费者通过 BacktestAnalyzer(clean_t7=True) 共用这一份。
+
+PHEROMONE_DB_PATH = Path(__file__).resolve().parent / "pheromone.db"
+
+_CLOSE_T7_CACHE: dict = {}
+
+
+def _load_close_t7_map(db_path: Optional[Path] = None) -> "tuple[dict, str]":
+    """(ticker, date) -> close_t7，只读连接读 pheromone.db。返回 (map, status)。
+
+    status 取值：
+      "ok"      —— 查询成功，且至少有一行 close_t7 非空
+      "empty"   —— 数据库/表都存在，查询成功，但没有任何 close_t7 非空行
+                    （比如全新部署，或 backfill_dir_accuracy.py 还没跑过/跑挂了）
+      "missing" —— 数据库文件不存在，视为正常降级路径
+      "error"   —— 打开/查询数据库失败（含权限问题），视为瞬时故障，不缓存
+
+    库不存在/打不开时返回空 dict —— 调用方须据此保留旧行为（不覆盖），
+    不是把消费者的全部样本清零；宁可退回旧口径，也不要因为一次读库失败
+    就让调用方在部分环境里彻底失能。
+
+    db_path 缺省用本模块的 PHEROMONE_DB_PATH；调用方（如 weekly_optimizer.py）
+    可显式传入自己解析出的路径——它有额外的 Cowork VM 挂载点探测逻辑，
+    与本模块的简单 `Path(__file__).parent` 不是恒等的。
+
+    ⚠️ 按 db_path **当前值**缓存（不是 functools.lru_cache）——后者对零参
+    函数只认第一次调用的结果，测试用 monkeypatch 换路径后仍会拿到旧库缓存。
+    按路径本身做 key，不同路径（测试隔离 vs 生产）互不干扰。"error" 状态
+    不缓存——它代表瞬时故障（比如与 backfill_dir_accuracy.py 并发写产生的
+    "database is locked"），写了缓存会让短暂锁冲突被永久当成"无干净数据"，
+    同一次运行里后续所有调用都直接命中空缓存、不会重试。
+    """
+    if db_path is None:
+        db_path = PHEROMONE_DB_PATH
+    if db_path in _CLOSE_T7_CACHE:
+        return _CLOSE_T7_CACHE[db_path]
+
+    try:
+        exists = db_path.exists()
+    except OSError as e:
+        # Path.exists() 只吞 ENOENT/ENOTDIR/EBADF/ELOOP 这几类 OSError，
+        # PermissionError（目录权限被误改、NFS 挂载抖动、备份工具临时锁
+        # 目录）会原样往上抛，必须显式保护，否则调用方直接崩溃退出，
+        # 而不是按文档承诺的"库不存在/打不开时返回空 dict"优雅降级。
+        _log.warning("检查 %s 是否存在失败，回退旧口径: %s", db_path, e)
+        return {}, "error"
+
+    if not exists:
+        result = ({}, "missing")
+        _CLOSE_T7_CACHE[db_path] = result
+        return result
+
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            rows = con.execute(
+                "SELECT ticker, date, close_t7 FROM predictions WHERE close_t7 IS NOT NULL"
+            ).fetchall()
+        finally:
+            con.close()
+        close_t7_map = {(ticker, date): close_t7 for ticker, date, close_t7 in rows}
+    except (sqlite3.Error, OSError) as e:
+        _log.warning("读取 pheromone.db close_t7 失败，回退旧口径: %s", e)
+        return {}, "error"
+
+    result = (close_t7_map, "ok" if close_t7_map else "empty")
+    _CLOSE_T7_CACHE[db_path] = result
+    return result
+
+
+def _apply_clean_t7_prices(snapshots: List["ReportSnapshot"],
+                           db_path: Optional[Path] = None) -> None:
+    """把快照列表的 actual_price_t7 原地覆盖为 close_t7（干净口径）。
+
+    close_t7_map 为空（库不存在/打不开/查无数据）时不做任何改动，原样保留
+    快照已有的 actual_price_t7。库可用时，(ticker,date) 在 close_t7_map 里
+    查不到的快照一律丢弃（actual_price_t7 置 None），**不回退旧值**——
+    宁可少几条干净样本，也不要让脏/干净两种口径混进同一次拟合/重采样。
+    """
+    close_t7_map, _status = _load_close_t7_map(db_path)
+    if not close_t7_map:
+        return
+    for snap in snapshots:
+        key = (getattr(snap, "ticker", None), getattr(snap, "date", None))
+        snap.actual_price_t7 = close_t7_map.get(key)
 
 
 def agent_vote_correct(vote: float, ret: float) -> Optional[bool]:
@@ -171,9 +265,23 @@ class ReportSnapshot:
 class BacktestAnalyzer:
     """回溯测试分析器"""
 
-    def __init__(self, directory: str = "report_snapshots"):
+    def __init__(self, directory: str = "report_snapshots", clean_t7: bool = False,
+                close_t7_db_path: Optional[Path] = None):
+        """
+        Args:
+            directory: report_snapshots/*.json 所在目录
+            clean_t7: True 时用 pheromone.db.close_t7 覆盖 actual_price_t7
+                （v0.45.87，见模块级 _apply_clean_t7_prices）。默认 False——
+                本类既有的生产调用点（generate_deep_v2.py /
+                alpha_hive_daily_report.py / swarm_agents/queen_distiller.py）
+                在显式接入前不应静默改变行为。
+            close_t7_db_path: 覆盖 close_t7 的来源库路径；默认用本模块的
+                PHEROMONE_DB_PATH。仅 clean_t7=True 时生效。
+        """
         self.directory = directory
         self.snapshots = self._load_all_snapshots()
+        if clean_t7:
+            _apply_clean_t7_prices(self.snapshots, db_path=close_t7_db_path)
 
     def _load_all_snapshots(self) -> List[ReportSnapshot]:
         """加载所有快照"""

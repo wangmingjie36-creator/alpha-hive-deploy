@@ -41,6 +41,7 @@ class CodeGenerator:
         interval = params.get("interval", "1d")
 
         code = f'''
+import math
 import yfinance as yf
 import json
 
@@ -55,7 +56,11 @@ try:
     # 兼容多层列名
     if hasattr(hist.columns, "levels"):
         hist.columns = hist.columns.get_level_values(0)
-    recent_close = float(hist["Close"].iloc[-1]) if len(hist) > 0 else None
+    # yfinance 偶尔对最新一根 bar 返回 Volume 是真的、Close 却是 NaN
+    # （2026-08-28 实测）——float(NaN) 不报错，会被 json.dumps 原样
+    # 写成非法 token NaN，下游任何标准 JSON 解析器读到就崩。
+    _recent_close = float(hist["Close"].iloc[-1]) if len(hist) > 0 else None
+    recent_close = _recent_close if _recent_close is not None and math.isfinite(_recent_close) else None
     recent_volume = int(hist["Volume"].iloc[-1]) if len(hist) > 0 else None
 except Exception:
     recent_close = None
@@ -261,7 +266,11 @@ latest = df.iloc[-1]
 
 result = {{
     "ticker": ticker,
-    "price": float(latest["Close"]),
+    # "price" 原先直接 float(latest["Close"])，没有 pd.notna 守卫——
+    # 与它同一行块里的 sma_20/sma_50/rsi 都有、独它没有，2026-08-28
+    # yfinance 最新一根 bar 的 Close 是 NaN 时，这里会把非法 JSON token
+    # NaN 写进结果（其余字段的守卫拦不住它，因为它们各自独立判断）。
+    "price": float(latest["Close"]) if pd.notna(latest["Close"]) else None,
     "sma_20": float(latest["SMA_20"]) if pd.notna(latest["SMA_20"]) else None,
     "sma_50": float(latest["SMA_50"]) if pd.notna(latest["SMA_50"]) else None,
     "rsi": float(latest["RSI"]) if pd.notna(latest["RSI"]) else None,
@@ -351,11 +360,15 @@ momentum_std = df["Momentum"].std()
 
 result = {{
     "ticker": ticker,
-    "current_price": float(df["Close"].iloc[-1]),
-    "momentum": float(recent_momentum),
-    "avg_momentum": float(avg_momentum),
-    "momentum_std": float(momentum_std),
-    "z_score": float((recent_momentum - avg_momentum) / momentum_std) if momentum_std > 0 else 0,
+    # 同 _generate_yfinance / _generate_technical_analysis 的教训：直接
+    # float(...) 不挡 NaN，最新一根 bar 的 Close 是 NaN 时（2026-08-28
+    # 实测）会把非法 JSON token 写进结果。
+    "current_price": float(df["Close"].iloc[-1]) if pd.notna(df["Close"].iloc[-1]) else None,
+    "momentum": float(recent_momentum) if pd.notna(recent_momentum) else None,
+    "avg_momentum": float(avg_momentum) if pd.notna(avg_momentum) else None,
+    "momentum_std": float(momentum_std) if pd.notna(momentum_std) else None,
+    "z_score": float((recent_momentum - avg_momentum) / momentum_std)
+               if (momentum_std > 0 and pd.notna(recent_momentum) and pd.notna(avg_momentum)) else 0,
     "trend": "加速上升" if recent_momentum > avg_momentum + momentum_std else (
              "加速下降" if recent_momentum < avg_momentum - momentum_std else "平稳"
     )

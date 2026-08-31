@@ -190,6 +190,10 @@ def get_calendar_health(ref_date: Optional[date] = None) -> Dict[str, Any]:
           horizon_days: int,            # 最短表的原始地平线（可为负）
           last_date: str | None,        # 最短表的最后一个日期
           binding_table: str,           # 余量最小、最先报警的那张表
+                                        # —— 它必定是导致当前 status 的表之一：
+                                        # stale 表 margin<0，exhausted 表 margin 更负，
+                                        # 故 min(margin) 一定落在肇事表上。想给状态
+                                        # 配一个日期，用它，别用 shortest 的。
           binding_margin_days: int,     # 该表距离自己阈值还剩几天
           stale_tables: [str], exhausted_tables: [str],
           per_table: {key: {...}},
@@ -253,21 +257,29 @@ def _emit_health_warning(today: date) -> Dict[str, Any]:
     if health["ok"]:
         return health
 
-    key = (health["status"], health["binding_table"], health["last_date"])
+    # 节流键用 binding 表**自己**的表尾日期。health["last_date"] 属于 shortest 表，
+    # 与 binding 常非同一张（v0.45.68 二次检查）。
+    _bind = health["per_table"][health["binding_table"]]
+    key = (health["status"], health["binding_table"], _bind["last_date"])
     first_time = key not in _WARNED_KEYS
     _WARNED_KEYS.add(key)
 
     if health["status"] == "exhausted":
-        names = "/".join(health["exhausted_tables"])
-        msg = ("🚨 经济日历已被日期走完：%s 表在 %s 之后没有任何条目，"
-               "宏观催化剂信号已失效（GuardBee 的 FOMC 临近票、dashboard 倒计时都会静默消失）。"
-               "补录办法见 economic_calendar 模块 docstring；各表来源：%s")
-        args = (names, health["last_date"],
-                "; ".join(f"{k}<-{v['source']}" for k, v in health["per_table"].items()
-                          if v["exhausted"]))
-        (_log.error if first_time else _log.debug)(msg, *args)
+        # ⚠️ 必须**逐表**写各自的表尾日期。
+        # v0.45.65 的旧文案是「{cpi/gdp/nfp} 表在 {shortest 表的日期} 之后没有任何条目」——
+        # 点名多张表却共用一个日期，对其余表全是假话：2026-12-15 那天它会说
+        # 「cpi 表在 2026-10-29 之后没有任何条目」，而 cpi 明明还有 11-10 和 12-10。
+        # 在治标签诚实性的模块里，告警自己在撒谎。
+        detail = "；".join(
+            f"{k} 止于 {health['per_table'][k]['last_date']}"
+            f"（源 {health['per_table'][k]['source']}）"
+            for k in health["exhausted_tables"])
+        msg = ("🚨 经济日历已被日期走完：%s。宏观催化剂信号已失效"
+               "（GuardBee 的 FOMC 临近票、dashboard 倒计时都会静默消失）。"
+               "补录办法见 economic_calendar 模块 docstring")
+        (_log.error if first_time else _log.debug)(msg, detail)
     else:
-        b = health["per_table"][health["binding_table"]]
+        b = _bind
         msg = ("⚠️ 经济日历即将过期：%s 表只覆盖到 %s（还剩 %d 天，阈值 %d 天）。"
                "待验证事项：%s。请去 %s 抄取新日程，禁止按规律推算。")
         args = (health["binding_table"], b["last_date"], b["horizon_days"],

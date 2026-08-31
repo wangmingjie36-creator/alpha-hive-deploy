@@ -5,28 +5,1206 @@
 
 ---
 
-## [0.45.68] — 2026-08-29 — BILI 补抓复盘：两道新鲜度闸互相吞掉对方的错误信息
+## [0.45.88] — 2026-08-31 — 占位（进行中：CBOE vintage 陈旧信号透传，修补抓失效 + 盘中冻结记录静默通过）
 
-**背景**：cloud-snapshot routine 2026-08-28 那次 BILI 主跑失败，manifest 记的
-`RuntimeError: CBOE payload 为空（网络/403/符号问题）`是误导性文案——真实原因
-是 CBOE CDN 对 BILI 刷新滞后（stderr 里有更早一行`数据陈旧`日志被盖过去了）。
-用真实引擎（`cloud_snapshot_fetch._fetch_one_ticker`）补抓后确认 CDN 已追上，
-BILI 30/30 已落盘补齐；顺带定位并修了根因。
+## [0.45.87] — 2026-08-31 — weekly_optimizer close_t7 上线后 7-agent 复查修复（6 项）
+
+v0.45.86 落地后对 `weekly_optimizer.py` 做了一次独立代码复查，发现 6 个
+问题，按严重程度依次修复。
 
 ### Fixed
-- `cboe_options._fetch_cboe_payload`：新增 `skip_staleness_check` 关键字参数
-  （默认 `False`，其余调用方零影响）。`cloud_snapshot_fetch._fetch_one_ticker`
-  传 `True`，把新鲜度判定权交给自己更精确的 business_date 比对，不再被内层
-  「相对当下时刻」的启发式抢先吞成 `None`。
-- 修复前的实际后果：① 失败原因文案是网络/403而非真相；② manifest 的
-  `vintage_stale` 字段永远是空的（说谎）；③ v0.45.39 设计的陈旧标的自动补抓
-  机制是死代码——`stale` 列表只在 `except StaleVintageError` 分支追加，而这条
-  路径永远抛的是 `RuntimeError`，进不去那个分支。
-- `tests/test_cloud_snapshot_vintage.py`：全部改用 `co._fetch_cboe_payload`
-  整函数 mock 的用例补 `**_kw` 容错新签名；新增 3 条只 mock 网络层（不 mock
-  `_fetch_cboe_payload` 本身）的用例，复现并锁住这次分层旁路修复。
 
-## [0.45.67] — 2026-08-29 — 占位（进行中：BLS/BEA 2027 日程发布监视器，接入编排器周频体检）
+- **样本数门槛可被绕过（最高优先级）**：`count_t7_samples()` 判断样本
+  "可用"的口径只看有没有 T+7 价格，而 `compute_new_weights_wls` /
+  `bootstrap_validate` 内部构造 `valid_snaps` 时额外要求
+  `entry_price > 0`。后果：`main()` 用前者的宽口径通过 `min_samples`
+  门槛后，若 `compute_new_weights_wls` 因窄口径过滤后样本不足自己的
+  `MIN_SAMPLES=10` 而返回 `None`，会回退到旧实现 `compute_new_weights()`
+  ——而它经 `feedback_loop.BacktestAnalyzer.suggest_weight_adjustments()`
+  完全没有最低样本数保护，能在极少样本（如 3 条）下静默产出权重建议，
+  审计日志显示的 `n_samples` 与真正参与拟合的样本数因此对不上。
+  两处都已修：`count_t7_samples()` 补上 `entry_price > 0` 检查，与
+  `valid_snaps` 完全对齐；`compute_new_weights()` 补上
+  `if len(valid_snaps) < MIN_SAMPLES: return None` 保护。新增
+  `TestSampleThresholdAlignment` 锁死。
+- **pheromone.db 存在但 close_t7 未回填时整个修复静默失效**：
+  `_load_close_t7_map()` 对"库不存在"和"库/表都在但查无任何 close_t7
+  非空行"一视同仁，都返回空 dict；调用方也都用 `if close_t7_map:` 真值
+  判断，CLI 表现两种情况下完全一样——权重实际上悄悄回退到被弃用的脏口径
+  （`actual_prices.t7`），用户毫无感知。改为返回 `(map, status)`，
+  `status ∈ {"ok","empty","missing","error"}`；新增 `_warn_if_close_t7_
+  unavailable()`，在 `main()` 里用 `print()`（`_log.warning` 本文件未配
+  handler，不保证终端可见）对 `"empty"`/`"error"` 显式提示，`"missing"`
+  （测试隔离、全新环境等正常降级路径）不警示。
+- **`Path.exists()` 未被 try/except 保护**：`db_path.exists()` 在
+  `try/except sqlite3.Error` 保护范围之外——`Path.exists()` 只吞
+  ENOENT/ENOTDIR/EBADF/ELOOP，`PermissionError`（目录权限被误改、NFS
+  挂载抖动、备份工具临时锁目录）会原样往上抛，导致脚本直接崩溃退出，
+  而非文档承诺的优雅降级。现已用 `try/except OSError` 包住 `exists()`
+  调用，权限类问题走跟"库不存在"一样的降级分支（并按上一条标记为
+  `"error"` 状态供上层警示）。
+- **瞬时 sqlite 错误被当成永久失败缓存**：遇到 `sqlite3.Error`（如与
+  `backfill_dir_accuracy.py` 并发写产生的 "database is locked"）时，
+  此前把空结果写进 `_CLOSE_T7_CACHE`，导致一次性脚本内后续所有调用
+  （`count_t7_samples` + 4 处 `BacktestAnalyzer` 构造）都直接命中空缓存、
+  不会重试。现在只在确认查询成功（无论是否为空）或确认文件不存在时才
+  写缓存，`"error"` 分支不写，给同一次运行的后续调用重试机会。
+- **三处生产代码未接上修复（范围缺口）**：`generate_deep_v2.py` 的
+  `_load_ticker_accuracy`、`alpha_hive_daily_report.py` 合并进
+  `AgentWeightManager` 的权重调整、`swarm_agents/queen_distiller.py` 的
+  `TICKER_ACCURACY_FEEDBACK`，三处各自独立构造 `BacktestAnalyzer`，
+  继续用只有约1/3 可信的 `actual_price_t7`。架构性调整：把
+  `_load_close_t7_map`/`_apply_clean_t7_prices` 从 `weekly_optimizer.py`
+  挪到 `feedback_loop.py`，作为 `BacktestAnalyzer.__init__` 的
+  `clean_t7`（默认 `False`，向后兼容）与 `close_t7_db_path` 参数；
+  `weekly_optimizer.py` 原有的两个同名函数保留为薄包装，显式转发自己
+  解析出的 `PHEROMONE_DB_PATH`（带 Cowork VM 挂载点探测逻辑），4 处既有
+  调用点与全部既有测试的调用形态不变。三处生产调用点改为显式传
+  `clean_t7=True`，不改变其余任何行为（错误处理/日志格式原样保留）。
+  新增 `tests/test_feedback_loop.py::TestBacktestAnalyzerCleanT7`
+  （覆盖 `clean_t7=True/False` 与库缺失/命中/未命中四种情形）；
+  `tests/conftest.py` 新增 `_isolate_feedback_loop_close_t7_db`
+  autouse fixture，防止未显式覆盖 db 路径的测试打到本机真实生产库
+  （与既有 `_isolate_weekly_optimizer_db` 同一条教训）。
+- **流程：占号协议缺失（低优先级，本次已按协议执行）**：v0.45.86 落地
+  时跳过了"开工先占号"步骤。本次开工第一件事已按协议
+  `git fetch origin` 取号、插入占位条目并单独提交推送到 main，
+  不追溯修改 v0.45.86 的历史。
+
+全量测试套件 `pytest tests/ -q`：**2128 passed, 24 skipped, 63 deselected,
+1 xfailed**（较 v0.45.86 的 2108 passed 净增 20，全部来自本次新增的
+回归测试）。
+
+## [0.45.86] — 2026-08-31 — Track A（weekly_optimizer）T+7 价格改用 close_t7 干净口径
+
+排查"闸1 bootstrap 为什么总不过"时发现：`weekly_optimizer.py` 全链路
+（`compute_new_weights`/`compute_new_weights_wls`/`bootstrap_validate`/
+`check_ticker_pool_consistency`，经 `feedback_loop.BacktestAnalyzer` →
+`snap.actual_price_t7`）读的 T+7 价格来自 `report_snapshots/*.json` 的
+`actual_prices.t7`，由 `backtest_engine.PriceBackfiller._get_price_on_date`
+用 `Ticker().history()` ±3天容差取价——`backfill_dir_accuracy.py` 开头注释
+早已记录了弃用它的理由（本机间歇性 `TypeError: 'NoneType' object is not
+subscriptable`）。抽样比对同一 `(ticker,date)`：与 `pheromone.db.close_t7`
+（`backfill_dir_accuracy.py` 用 `yf.download`+精确交易日+自校验回填的干净
+口径，`ic_diagnostics.py`/`signal_archive.py`"唯一可交易信号"结论同源）
+只有约1/3 重合，25% 两者都不等——三条独立取价管线（另一条是
+`backtester._simulate_trade_path` 写的、已知被 SL/TP 截断的 `price_t7`）
+互不对齐，从未校验过。
+
+落地前验证（未直接采用 `replay_scoring.py`——它自己的决策表明确排除
+"换数据源"类改动；本次改动读的两列历史价格本就都已归档，不属于
+该表针对的"原始数据未归档、必须前向累积"场景）：① `(ticker,date)` join
+命中率 96.9%，`close_t7` 可用 80.6%（750/931），且是当前可用样本
+（`actual_prices.t7` 非空的 781 条）的严格子集——零净新增，只丢 31 条，
+且这 31 条全部因为 `backfill_dir_accuracy.py` 还没追上（`close_t7` 有值的
+必然 `actual_prices.t7` 也有值）；② monkeypatch `BacktestAnalyzer` 直接跑
+两版真实代码对比，catalyst 提议变化 +2.10pp→+0.65pp（近乎腰斩）、
+risk_adj −2.83pp→−1.65pp（少四成），换源本身不改变"这周该不该写"的
+结论（两边都 <3.0pp 阈值），但足以在未来某周直接翻转判断。
+
+### Fixed
+
+- `weekly_optimizer.py`：新增 `_load_close_t7_map()`（只读连接读
+  `pheromone.db`，按 `PHEROMONE_DB_PATH` 当前值缓存，不用
+  `functools.lru_cache`——后者对零参函数只认首次调用结果，测试
+  monkeypatch 换库路径后仍会读到旧缓存）与 `_apply_clean_t7_prices()`
+  （覆盖 `snap.actual_price_t7` 为 `close_t7`；库不可用时原样不改，
+  保留旧行为；`(ticker,date)` 查无匹配则丢弃样本、不回退旧值，避免
+  脏/干净口径混算）。4 处 `BacktestAnalyzer(directory=...)` 构造
+  （`compute_new_weights`/`compute_new_weights_wls`/`bootstrap_validate`/
+  `check_ticker_pool_consistency`）统一接入，避免只修一处又制造新的
+  "两个数字互相打架"。`count_t7_samples()` 同步改用 `close_t7_map`
+  计数，使打印的"T+7 已回填样本"数字与真正参与拟合/重采样的样本
+  用同一口径。
+- `tests/conftest.py`：新增 `_isolate_weekly_optimizer_db` 自动隔离
+  fixture——`PHEROMONE_DB_PATH` 不走现有的 `ALPHA_HIVE_DB_PATH` 环境变量
+  隔离，若不单独隔离，测试构造的 `(ticker,date)` 会在本机真实生产库里
+  查无匹配、被新逻辑整批当"无干净价格"丢弃，4 个既有测试因此假红
+  （`test_compute_weights_neutral_not_systematically_penalized` 与
+  `TestTickerPoolGate` 三个用例）。与本文件已有的 `_block_same_day_macro`
+  同一条教训："新增任何数据源，同一提交里必须在这里加一行"。
+- `tests/test_weekly_optimizer.py`：新增 `TestCleanT7PriceOverride`
+  （4 个用例）锁死覆盖/丢弃/库不存在三条分支，以及
+  `count_t7_samples` 与真实拟合口径一致。
+
+### Known follow-up（未在本次处理，记在 MEMORY）
+
+`backfill_dir_accuracy.py` 若定期重跑，能把上面提到的 31 条"还没追上"
+的样本补回来，但这属于运维层面的调度问题，不在本次代码改动范围内。
+
+---
+
+## [0.45.85] — 2026-08-31 — self_analyst.classify() 认不出生产快照的 bullish/bearish 词表
+
+v0.45.84 修好 `SNAPSHOTS_DIR` 目录选择后暴露：`classify()`（self_analyst.py:176-190）
+判断方向对错时硬编码 `direction == "Long"` / `"Short"`，但生产扫描管线
+（`paper_portfolio.py`，v0.38.0 起挂载）写入快照的 `direction` 字段实际是
+小写 `bullish` / `bearish` / `neutral`（见 paper_portfolio.py:391,1038：
+`"Long" if direction == "bullish" else "Short"`）。两套词表从未匹配过，
+`classify()` 对当前全部生产快照恒定返回 `"neutral"`——`--months 3` 跑出
+645 条快照、643 条 neutral、correct/wrong 均为 0、胜率恒 0.0%。此前用
+2026-07-29 前冻结的旧快照测试时表现正常（34 条分出 21 correct/12 wrong），
+是因为那批旧快照凑巧还用着 `Long`/`Short`/`Neutral` 词表——这个 schema 不一致
+一直被"读错目录"那个更大的 bug 意外掩盖，v0.45.84 修对目录后才露出来。
+
+### Fixed
+
+- `self_analyst.py` `classify()`：`direction` 先 `str().strip().lower()`，
+  再同时接受新词表（`bullish`→看多、`bearish`→看空）与旧词表
+  （`long`→看多、`short`→看空），大小写不敏感。方向语义已用
+  `paper_portfolio.py` 的止盈止损计算（:502-533，bullish 时 `exit>entry`
+  为盈利、bearish 时 `entry>exit` 为盈利）与仓位表渲染（:1038）交叉确认，
+  未搞反。修复后 `--months 3`：645 条快照，227 correct / 196 wrong /
+  222 neutral，胜率 53.7%（此前恒为 0.0%）。
+- 无针对 `self_analyst.py` 的既有单元测试（`tests/` 下命中 "classify"
+  关键词的三个文件测的是 `OptionsAnalyzer.classify_call_flow`、
+  `PolymarketClient._classify`、`risk_engine._classify_growth_value`，
+  均与本函数无关）；已跑 `py_compile` 与 `ruff check --select F821` 确认
+  改动无静态错误。
+
+## [0.45.84] — 2026-08-31 — self_analyst.py 快照目录 fallback 只判断"存在"不判断"还在更新"
+
+`SNAPSHOTS_DIR` 优先取 `OUTPUT_DIR/report_snapshots`（`~/Desktop/深度分析报告/深度/report_snapshots`），
+只有该目录"不存在"时才回退到 `ALPHAHIVE_DIR/report_snapshots`（`~/Desktop/Alpha Hive/report_snapshots`）。
+但生产扫描管线早已只往后者写入——前者自 2026-07-29 起停止更新，只剩 59 个
+2026-03-16~2026-07-29 的旧文件，却因为"目录仍然存在"从未触发 fallback。
+`self_analyst.py` 每次运行都"成功"（不报错、样本数看似正常，如 34 条），
+用的实际是一个月前就冻结的数据，诊断简报的"近期"标签是假的，且随时间推移
+越来越过时。`weekly_optimizer.py` 在 v0.23.6 已经踩过同一个坑并修过
+（`_best_snapshots_dir()`，见 weekly_optimizer.py:90-103：同时看两个候选目录、
+各自数 `*.json` 文件数、取更多的那个），但当时没有同步到 self_analyst.py。
+
+### Fixed
+
+- `self_analyst.py`：`SNAPSHOTS_DIR` 解析改为复制 `weekly_optimizer.py` 的
+  `_best_snapshots_dir()` 逻辑——比较两个候选目录的 `*.json` 文件数，取更多的
+  那个，而不是"只在不存在时才 fallback"。实测 `--months 3`：样本数
+  34 → **645**，`SNAPSHOTS_DIR` 从冻结的 `深度分析报告/深度/report_snapshots`
+  (59 文件，止于 2026-07-29) 改为持续更新的 `Alpha Hive/report_snapshots`
+  (931 文件，更新到 2026-08-28)。
+- 无针对 `self_analyst.py` 的既有单元测试；已跑 `ruff check --select F821` 与
+  `py_compile` 确认改动无静态错误。
+
+### 顺手发现（未修，超出本次范围）
+
+验证时发现：切到正确目录后，`compute_stats()` 里 `correct`/`wrong` 双双归零
+（645 条样本里 643 条被分类为 `neutral`）。根因是 `classify()`
+（self_analyst.py:176-188）按 `direction == "Long"/"Short"` 判断，但当前生产
+快照（如 `XOM_2026-08-28.json`）里 `direction` 字段实际是小写的
+`"bullish"/"bearish"/"neutral"`——两者从未匹配过。旧的冻结快照恰好是
+`Long`/`Short` 词表，所以这个 schema 不一致此前被"用错目录"意外掩盖了。
+这是另一个独立 bug，不在本次任务范围内，留给后续 session。
+
+---
+
+## [0.45.83] — 2026-08-30 — 2026-08-28 宏观数据补跑：yfinance 的缺口是暂时性的，不是永久的
+
+v0.45.81 把 `macro_context` 里的 20 处 NaN 老实标成了 `null`（当时 yfinance
+对 `^GSPC`/`GLD`/11 个板块 ETF 确实取不到 2026-08-28 那天的收盘价）。用户
+追问"大盘这个没有数据源吗"，现查（2026-08-30）yfinance 历史数据：
+
+```
+^GSPC  2026-08-28  Close=7711.76  Volume=4,297,560,000
+GLD    2026-08-28  Close=408.89
+```
+
+都已经补齐了。顺手也查了 NVDA——v0.45.69 曾记录"yfinance 永久没有 8/28
+的 NVDA 收盘价，只有云端快照有（217.55）"，现查 yfinance 同样已经回填出
+`Close=217.55`，与云端快照分毫不差。**当时判定的"永久缺失"其实是暂时性
+缺失**：大概率是当天扫描撞上了 Yahoo 数据结算延迟 + 429 限流风暴的窗口，
+过后 Yahoo 自己把数据补全了，只是没人再去复查。
+
+### Fixed
+
+用 `fred_macro._asof_history()`（v0.45.81 里已修复、能正确挡 NaN 的同一
+条历史取数路径）重新对齐 2026-08-28，把 `null` 换成真实数字：
+
+- `spx_change_pct`: null → -0.25，`gold_price`/`gold_change_pct`: null →
+  408.89 / -3.24，`gold_trend`: stable → falling（原来的 "stable" 是
+  NaN 比较全部落空后的兜底分支，本身就是错的，随 gold_change_pct 一起改）
+- `sector_rotation.hot/cold/full`：11 个板块全部补上真实 5 日涨跌幅
+- `summary` 字符串修正"大盘+nan%"片段，并按源码 `summary_parts` 的原有
+  顺序补上黄金片段；`macro_tailwinds` 按源码分支顺序（VIX→黄金→HY）插入
+  "黄金回落-3.2%（风险偏好回升）"——这条分支源码里不调整 `score`，所以
+  补它不会让 `macro_score`/`macro_regime` 与报告里其它已算好的字段脱节
+- `field_sources` 新增 `SPX`/`GLD`/`sector_rotation` 三项，标注取数时刻是
+  补跑时（2026-08-30），不是原始扫描时刻——避免看起来像"当天就取到了"
+- `market_trend`/`macro_score`/`macro_headwinds` 均未改动：真实
+  `spx_change_pct=-0.25` 没有跨过 ±0.5 的 bull/bear 判定阈值，`market_trend`
+  维持 "neutral" 不变；打分只在 CPI/联邦基金利率/HY 利差三个分支里调整，
+  跟大盘/黄金无关，故这两个字段本就不该动
+
+主仓库（`alpha-hive-daily-2026-08-28.json`）与 `gh-pages`（同名文件 +
+首页内嵌的完整简报表格「大盘(5日)」行）同步更新。
+
+### 教训
+
+**"数据源缺失"的判定不会自动过期，得有人回头查。** v0.45.69 当时的判断
+（yfinance 永久没有 8/28 数据）在当时是诚实的，但没有任何机制会在数据
+補齐后自动复核这条结论——它就一直躺在 CHANGELOG 里被当作既定事实引用，
+直到这次因为另一件事顺带去查了才发现已经不成立。同类"暂时性缺失 vs
+永久缺口"的判断，如果只查一次就下结论且没有复查计划，结论的保质期
+可能比看起来短得多。
+
+---
+
+## [0.45.82] — 2026-08-30 — BuzzBee 成交量比长期空缺：补上独立回落源（Twelve Data）
+
+用户发现 ML 报告 BuzzBee 板块「成交量比」总是"—"。核对 2026-08-28 全部 12 份报告
+逐个实测：同一份报告里 `5日动量` 全是真实数值，`成交量比` 100% 为 None——这个反差
+是破案关键。追到 `data_pipeline._fetch_history_metrics()`：yfinance 限流失败时，
+`momentum_5d` 早有自攒价格索引兜底（v0.43.25，数据源 pheromone.db，不经外部网络），
+但 `volume_ratio` 从未有回落路径——索引只存收盘价没存成交量，硬凑一个比值等于编数据，
+所以诚实地一直空着。这不是新 bug，是 v0.43.25 就写明的已知缺口。
+
+### 排查过程中的意外发现
+项目里已经有一个现成、写好、测试覆盖、专门为了绕开 yfinance 429 建的
+`twelve_data.py`（v0.45.61，供 `market_intelligence.py` 算 `rv_30d`/`iv_rank`
+用），免费档 800 次/天、8 次/分，量级够覆盖整个 30 只标的 WATCHLIST。它内部已经
+在解析每根日线的成交量字段（`row.get("volume")`），但 `fetch_daily_closes()`
+最后只吐收盘价，成交量解析完就被扔了，从没接到 `volume_ratio` 上——又一个
+「代码写了、没接线」的半成品。候选数据源逐个验证排除：Alpha Vantage（TIME_SERIES_DAILY
+确认有量，但这把 key 的 25次/天额度已被 newsapi 新闻情绪功能占满）、Stooq（CSV 端点
+已上 JS 反爬工作量证明，服务器端脚本调不通）。
+
+### Added
+- `twelve_data.py`：把原本内联在 `fetch_daily_closes()` 里的抓取/解析逻辑提成
+  共享的 `_fetch_rows()`，新增 `fetch_volume_ratio(ticker, window=20)`——
+  最新成交量 / 近 20 根均量（含当日，口径对齐 `data_pipeline` 现有 yfinance 路径），
+  算不出（数据不足/成交量为 0/NaN）返回 None，不兜底 1.0（成交量比"正常"是假象）
+- `data_pipeline.py`：新增 `_fill_volume_from_twelvedata()`，与既有的
+  `_fill_momentum_from_index()` 对称——yfinance 失败时先补动量（价格索引）、
+  再独立尝试补成交量比（Twelve Data，与前者数据源互不相关）；已有真实值时
+  不重复请求，两条回落都没有时保持诚实 None
+- `tests/test_volume_ratio_fallback.py`（11 项）：覆盖算不出不兜 1.0、已有真实值
+  跳过请求不重复打 API、两条回落都失败时保持 None 不阻断降级链、模块异常不炸主流程
+
+### 验证方式
+未触发真实每日扫描。`_fetch_rows` 重构后原有 `tests/test_twelve_data.py`
+24 项全过（行为零回归）；`fetch_volume_ratio`/`_fill_volume_from_twelvedata`
+用构造数据跑过全部分支；额外用 `unittest.mock` 模拟 yfinance 抛 429，端到端
+验证 `_fetch_history_metrics()` 正确落到 Twelve Data 回落（XOM 实测拿到真实
+`volume_ratio=0.81`，与同一份 yfinance 数据手算结果一致）；正常路径（yfinance
+成功）额外确认零 Twelve Data 调用，不浪费配额。与本次改动直接相关的既有测试
+（`test_backfill_date_anchoring`/`test_cloud_snapshot_price`/`test_macro_snapshot`
+等 11 个文件、159 项）全过，`ruff --select F821` 干净。
+
+### 已知限制
+只补了 `volume_ratio` 这一个缺口，`_fill_momentum_from_index` 的 momentum 回落
+路径未动。配额层面 Twelve Data 现由 `market_intelligence.py`（RV30）与本次改动
+共用同一 800/天预算，两者合计仍远低于额度，暂不需要额外的每日用量协调。
+
+> 撞号记录：`origin/main` 已有 `claude/xxx` 分支先提交+合并了 v0.45.81（NaN 穿透
+> 三层渲染守卫那条），本条目按"先提交者不改号"原则从 0.45.81 让到 0.45.82。
+
+---
+
+## [0.45.81] — 2026-08-30 — 板块轮动「+nan%」：isinstance 挡不住 NaN，这次踩在三层渲染上
+
+用户问 2026-08-28 报告为什么有 NaN JSON 错误，查到 `alpha-hive-daily-2026-08-28.json`
+的 `macro_context` 里 20 处字面量 `NaN`（`spx_change_pct`/`gold_price`/
+`gold_change_pct`/`sector_rotation` 全部 11 个板块）。根因与 v0.45.69 那次
+（yfinance 当天 Close=NaN、Volume 是真的）同源，但这次穿的是另外两道守卫：
+
+- `fred_macro.py` 的 `if data[name]["prev"] != 0:`——`NaN != 0` 恒 `True`，
+  除法照算，NaN 就这样被当成"取到了"写进 `data[name]`。
+- `_fetch_sector_rotation` 的 `if first_close >= 5:`——只挡得住分母，
+  `first_close` 正常、`last_close` 是 NaN 时照样放行。
+- 更值得记的是**第三层**：`report_formatters.py` / `dashboard_renderer.py`
+  里专门为"取不到就显示—"写的 `isinstance(v, (int, float))` 判断
+  （v0.45.43/v0.45.54 就是为了不让假数据看起来正常而加的），同样没挡住——
+  `float('nan')` 本身就是 `float` 实例，`isinstance` 检查为真，
+  格式化不报错，只吐出字面文本 "nan"，于是网站首页「板块轮动(5日)」
+  实测显示成"科技+nan% 医疗+nan% 能源+nan%..."（截图直接在线上复现），
+  日报 Markdown 显示"大盘(5日) | +nan% | neutral"——状态列还配着一个
+  看起来正常的标签，比 v0.45.54 想防的「兜底 0 冒充正常值」更隐蔽。
+
+Python 的 `json.dumps` 默认 `allow_nan=True`，NaN 序列化不报错、
+生成阶段的编排器日志里也确实一条 NaN/JSON 相关的报错都没有——
+但 `NaN` 不是合法 JSON（RFC 8259 只认 `null`），严格解析器
+（JS `JSON.parse`、大多数非 Python 语言的 JSON 库）读到这个文件会报错，
+这才是"NaN JSON 错误"的真正触发点，Chrome 内置 JSON 查看器本身够宽松，
+人眼直接开文件反而看不出问题。
+
+### Fixed
+
+- `fred_macro.py`：yfinance 收盘价 ingestion（`_fetch_macro_data` 内的
+  symbol 循环）与 `_fetch_sector_rotation` 的 `_fetch_one` 都加
+  `math.isfinite()` 校验，Close 不是有限数就当同「没取到」处理，
+  不再写入 `data`/返回该 ETF——与 v0.45.69「拿不到就不冒充」同一原则。
+- `report_formatters.py`：`_build_macro._mrow` 的判断加 `math.isfinite`。
+- `dashboard_renderer.py`：新增 `_finite()` 帮助函数，VIX/10Y/黄金/
+  板块轮动全部改用它；板块轮动的 hot/cold 逐项过滤 NaN，若过滤后一项
+  不剩，整个「板块轮动」div 不渲染（不留一个空壳标签）。
+
+### 教训
+
+`isinstance(x, (int, float))` 不是 NaN 的守卫——`NaN` 本身就是合法的
+`float` 实例，这条检查专门用来分辨"有没有拿到数"，却分辨不出"拿到的是
+垃圾"。这是 v0.45.69 记录的 NaN 穿透模式（`<=0`、`if not x` 挡不住 NaN）
+在**格式化/渲染层**的第三次复现，说明这条教训不能只在数值运算层打补丁——
+凡是"判断是否为有效数字"的地方，无论是用来算术还是用来决定显示什么文本，
+都要问一遍 NaN 会怎么走。
+
+### 追加：MCP 服务端读的是另一份文件，也各中一枪
+
+`alpha_hive_mcp.py`（Cowork 里挂的 alpha_hive MCP server）不读
+`alpha-hive-daily-{date}.json`，读的是逐标的 `analysis-{TICKER}-ml-{date}.json`——
+跟上面 `macro_context` 完全是两份文件、两条代码路径，理论上不该受这次的
+影响。但用户报告 Cowork 侧一个消费市场数据的定时任务在 MCP 层解析
+2026-08-28 报告时同样撞上 `NaN` 导致 JSON 非法，一查才发现 8-28 那天
+**12 个标的**（AMC/AMZN/CVX/DELL/META/MSFT/MU/NEE/QCOM/SNOW/VKTX/XOM）的
+`analysis-*-ml-2026-08-28.json` 里，`CodeExecutorAgent` 的技术分析详情
+确实各带 2 处字面量 NaN：
+
+- `fetch_data.recent_close`
+- `analysis_data.price`
+
+根因是同一天 yfinance 的同一个数据缺陷（Close=NaN、Volume 是真的），
+但这次踩中的是**第三处、此前完全没查过的代码**——`code_generator.py`
+里两段被 `CodeExecutorAgent` 动态 `exec()` 的代码模板字符串：
+
+- `_generate_yfinance`：`recent_close = float(hist["Close"].iloc[-1]) if len(hist) > 0 else None`——
+  只判断"有没有行"，不判断"这一行的收盘价是不是数"。
+- `_generate_technical_analysis`：`"price": float(latest["Close"])`——
+  同一个 `result` 字典里 `sma_20`/`sma_50`/`rsi` 三个字段都写了
+  `pd.notna(...)` 守卫，唯独 `price` 这个最基础的字段没写，是三个手写的
+  兄弟字段里漏掉的那一个。
+
+### Fixed（追加）
+
+- `code_generator.py` `_generate_yfinance`：`recent_close` 加 `math.isfinite()`
+  校验，NaN 归一成 `None`（连带修好一个副作用：`_price` 的 fallback链
+  `... or recent_close or "N/A"` 此前若 `recent_close` 是 NaN，会因为
+  NaN 是 truthy 而把 NaN 当作"取到了"直接返回，现在 NaN 正确变成 `None`
+  后能继续 fallback 到 `"N/A"`）。
+- `code_generator.py` `_generate_technical_analysis`：`price` 补上
+  `pd.notna(...)` 守卫，与同一字典里另外三个字段的写法保持一致。
+- 顺着同一模式在文件里再搜了一遍 `float(...["Close"]...)`，`_generate_momentum_analysis`
+  也中招：`current_price`/`momentum`/`avg_momentum`/`momentum_std`/`z_score`
+  五个数值字段全部补上 `pd.notna` 守卫（`avg_momentum`/`momentum_std` 因
+  `.mean()`/`.std()` 默认 `skipna=True` 实际很难撞上，但为了跟同一字典
+  里其余字段一致、防止未来改动引入 `skipna=False`，一并加固）。
+
+三处均已用一段与 8-28 实测同形的假数据（Close=NaN、Volume 是真的）
+跑通生成的代码字符串，严格 `json.loads()` 复解析确认不再出现 `NaN` token；
+也各跑了一遍正常（无 NaN）数据确认没有破坏原有输出。
+
+---
+
+## [0.45.80] — 2026-08-30 — dashboard.css 全量死类审计：又挖出两处「v2 重写但 v1 没删」的死代码
+
+同一天两个并行 worktree 各自发现一个"class 被引用/定义了但从没真正渲染"的 bug
+（`elastic-spence` 的 v0.45.76：`.dot-bull/.dot-bear/.dot-neut` 被 Python 引用三处，
+CSS 从未定义；`interesting-khayyam` 的 v0.45.79：`.yc-ok` 等单类选择器被同特异度、
+更靠后的 `.ah-macro-val{color:...}` 顶掉，实测颜色从未生效过——均未合并进 main）。
+两个 bug 同一天在同一文件里各撞一次，值得做一次全量审计而不是等第三次撞见。
+
+### 方法（不只是 grep）
+
+1. 从 `dashboard_renderer.py`（2938 行）+ `templates/dashboard.html` 提取全部
+   `class="..."` 静态字面量（296 个原始 token），再逐个追踪 f-string 里的动态
+   class 变量（`_scls6`/`_dcls6`/`dot_cls`/`macro_yc_cls` 等 18 个）到其
+   赋值语句，解出全部可能取值（`_sc_cls()` 等辅助函数一并展开），合并成
+   **306 个实际可能出现的 class 名**。
+2. 用 `tinycss2` 把 `templates/dashboard.css`（817 行）解析成
+   `(selector, media, specificity, source_order, declarations)` 结构化列表
+   （手写正则跨不过 `@media` 嵌套和多选择器逗号分组，故引入依赖），而不是肉眼扫。
+3. **死类检测**：306 个 class 里，逐个查是否在任意选择器的最右复合部分出现过。
+4. **遮蔽检测**：先从 `class="..."` 里把"同一元素同时挂两个 class"的组合
+   （如 `hscore {_hscls}`、`ah-cards-grid top6-grid`）枚举出来（29 组），
+   对每组按 CSS 级联规则（`!important` > 特异度 > 源码顺序）算出每条属性的
+   实际胜出声明，标出"单类选择器写的值，被更晚出现的同特异度选择器顶掉"的情况。
+   为避免重复报告已在途的两个 bug，第 3、4 步跑在"临时合并了 v0.45.76 +
+   v0.45.79 两个未合并分支改动"的参考副本上，而不是本 worktree 当时的旧状态。
+5. **真机验证**：本地起 `http.server` + 最小 HTML 骨架引入真实 CSS，用
+   Browser 的 `getComputedStyle` 而非肉眼/grep 核对候选项——筛掉了脚本标出的
+   多数"遮蔽"其实是**假阳性**（`::after` 伪元素规则不影响本体文字颜色；
+   `.score-big.sc-h` 等复合选择器虽也"赢了"单类 `.sc-h`，但写的是同一个值，
+   视觉上无差异——本仓库已有对这个模式的正确防御写法，不是本次要修的范围）。
+
+### Fixed
+
+真机验证后确认两处货真价实的死代码，模式相同：**后来的重写替换了旧样式，
+旧声明却从没删**，与 `.dot-bull`/`.yc-ok` 那种"从来没实现过"是两种不同的病，
+但外部症状一样——grep 能看到定义，实际从不生效：
+
+- **`.top6-grid`（`templates/dashboard.css` 原第 99–102 行）** vs
+  **`.ah-cards-grid`**（注释自称"v2 — flush bordered grid"，`git blame`
+  确认由更晚的「B-style Financial Newspaper dashboard redesign」引入，
+  `.top6-grid` 则来自项目早期 2026-03-04 的提交）。两者同特异度（单类选择器），
+  `.ah-cards-grid` 源码顺序更靠后，`gap`/`grid-template-columns` 两项属性
+  全部顶掉 `.top6-grid` 的 `18px`/`repeat(3,1fr)`，实测 `gap` 恒为 `0px`。
+  `dashboard.html` 里两个 class 一直同时挂在同一个 div 上
+  （`class="ah-cards-grid top6-grid"`）。**删掉 `.top6-grid` 死规则块
+  + HTML 里多余的 class**（保留 `.ah-cards-grid`，即当前实际渲染的样子）。
+- **`.hamburger`/`.nav-overlay`/`.nav-overlay.open` 整块被定义了两次**
+  （原第 365–377 行 vs 748–761 行），第二块注释明写「update for light theme」，
+  用 `var(--tp)`/`var(--surface)` 替换第一块硬编码的 `#fff`/`#0A0F1C`——
+  第一块 100% 死代码，第二块单独已完整可用。**删掉第一块（旧、硬编码深色版）**。
+  两处改动均用 `getComputedStyle` 核对：删除前后计算样式逐属性一致
+  （`gap`/`color`/`display` 等），确认纯粹是死代码清理，零渲染差异。
+
+### 结论：9 个"零 CSS 定义"class 里 8 个是设计如此，1 个良性
+
+另有 9 个 class 全仓查无 CSS 定义（`acc-dir-rets`/`actionable-card`/
+`actionable-empty`/`actionable-section`/`ah-filter-row`/`cc-metrics-col`/
+`dq-banner`/`full-oi-card`/`hist-toggle-text`），逐个核对用途：其中 8 个
+在 HTML 里自带完整 `style="..."` 内联样式或纯粹是 `hist-toggle-text` 这类
+JS `querySelector` 挂钩——class 本就不承担样式职责，不是 bug。唯一存疑的
+`cc-metrics-col`（`.cc-two` 网格第一列的容器 div，零样式）经 `getComputedStyle`
+实测为 `display:block`，与相邻 `.cc-metric` 行自带的 flex/padding 组合视觉
+无异常——记录在案但不构成需要修的缺陷。
+
+### 影响面
+
+`templates/dashboard.css` −18 行、`templates/dashboard.html` 1 处 class
+属性精简；**零渲染差异**（真机 `getComputedStyle` 前后逐属性核对一致）。
+`index.html`（GitHub Pages 部署产物）未手动改动——它由 `report_deployer.py`
+在下次扫描时从这两个源文件重新生成，会自动带上本次改动。
+
+⚠️ 与 v0.45.76/v0.45.79 的交接：本次改动与那两个未合并分支改的是
+`dashboard.css` 里不重叠的行区间（本次动的是第 99–102 行与第 365–377 行；
+`elastic-spence` 动的是 `.sdir-neut` 后新增 4 行；`interesting-khayyam`
+动的是第七轮宏观指标那一段），三方 diff 互不相交，理论上能自动合并，
+但仍需人工确认最终合并顺序与结果。
+
+## [0.45.75] — 2026-08-29 — 一个已被自己证伪的归因，还在 7 个文件里当理由用
+
+2026-08-25 的重测已经证伪了「本机 OpenSSL 1.1.1q 扛不住并发 HTTPS」这个归因，
+记忆库也写了更正。但 `http_gate.py` 的模块 docstring **一直原样写着它**，
+而且是全仓最权威的那份表述——其余文件写注释时都在引它，或引它引的
+`cboe_options` 实测数据。v0.45.73 的条目已经点名说过这件事，只是没动手。
+
+于是一条已撤回的因果，在 **7 个生产文件**里继续当着设计理由用：
+
+| 文件 | 它在那里承担什么 |
+|---|---|
+| `http_gate.py` | **源头**：docstring 把它写成闸门存在的理由，还引了「4 并发挂 50~70s / 顺序 8~11s」当实测 |
+| `cboe_options.py` ×4 | 信号量注释、`_fetch_cboe_payload` docstring、`with _CBOE_SEM` 行内、期限结构选源理由 |
+| `options_analyzer.py` ×2 | 为什么弃 yfinance 走 CBOE；`_iv_term_points_yfinance` 接闸门的理由 |
+| `market_intelligence.py` ×2 | 进闸门的理由；**退避重试策略的分类依据** |
+| `yf_gate.py` | docstring 里「为什么原来那个退避是那样设计的」 |
+| `cboe_vix.py` ×2 | 复用 `_CBOE_SEM` 的理由；`with` 行内注释 |
+| `data_pipeline.py` | Finnhub 走闸门的理由 |
+
+### Changed — 改写归因，闸门与结论一行不动
+
+**闸门全部保留。** 它无害、开销只在网络往返、且防的是**真实存在**的东西：
+yfinance 429 逐日翻倍（8/25=364 → 8/26=487 → 8/27=687），8/27 那天
+`rv_30d` / `iv_rank` / `catalysts` 各 0/30。诚实的理由就是这一条——
+**不给对端限流器加压**，与 `yf_gate` 的「一次 429 就停」同向。
+
+`http_gate.py` docstring 重写为四节：为什么保留（限流）/ ⚠️ 已撤回的理由（附
+2026-08-25 重测表）/ 仍然成立的那条教训 / 用法。**「加源之前先确认闸门覆盖它」
+原样保留**——它是结构性事实（v0.43.26 接通 Finnhub/AV 前那两个源一个请求都不发，
+接通后成了两个不受约束的调用方），与 8/24 的根因是什么**无关地**成立。
+
+8/24 那 96 次 SSL EOF **是真的，但根因至今未确定**，各处均如实标注。最强的
+反证是分布：EOF 同时打在 Slack(18)/reddit(13)/SEC EDGAR(8)/polymarket(4)/
+CBOE(20)/Finnhub(11)/AV(13) —— 七个互不相干的域名同时挂。
+**复发时先抓现场**（并发数、网络状态、有无 VPN/代理、机器负载、是所有域名
+一起挂还是只有一个），别照着版本号往回推。
+
+### 顺带查实：两处版本号互相矛盾，却都被当成实测证据
+
+`http_gate` 写 OpenSSL 1.1.1q，`cboe_options` 写 LibreSSL 2.8.3 —— 同一场事故、
+同一台机器。实测：
+
+    /usr/local/bin/python3  3.11.1  → OpenSSL 1.1.1q      ← 生产扫描跑的是这个
+    /usr/bin/python3        3.9.6   → LibreSSL 2.8.3      ← 项目硬规则禁用
+
+即 `cboe_options` 归咎的那个 TLS 栈，**生产路径根本不经过**。两处谁也没发现
+自己和对方矛盾，因为没人回头核对过——**版本号是最容易顺手拿来的解释，
+也最不用付代价**：它不需要复现，写下来就像有了根因。
+
+### 差点顺手制造一处新的陈旧
+
+`tests/conftest.py` 与 `tests/test_crewai_telemetry_optout.py` 里各有一句
+「`http_gate.py` 的 docstring 在这点上是陈旧的」。**docstring 一改，这两句
+自己就变陈旧了**——本条目在治的那个形状，差点当场又犯一次。
+（改完撞上并发的 v0.45.74：它把 CrewAI 整体移除，这两处连同文件一起没了，
+改动作废。留下这段是因为**教训不作废**：改一份被下游逐字引用的表述时，
+`grep` 一遍谁在引它，引用点也要跟着改。）
+
+⚠️ 与 v0.45.74 的交接：`http_gate` docstring 末尾把 v0.45.73 的 crewai 埋点
+当「闸门覆盖不到的调用方」的例子引着。crewai 现已整体移除、全仓 grep 不到，
+故就地标注「已于 v0.45.74 移除，查经过看 CHANGELOG」，免得下一个读者
+去 grep 一个不存在的包——**同一种病：留着指向已消失事物的指针。**
+
+### 影响面
+
+**注释与 docstring only，零行为改动。** `py_compile` + `ruff F821` 全过；
+全量 `pytest tests/`（rebase 到 v0.45.74 之后重跑）**2104 passed / 18 skipped /
+1 xfailed / 63 deselected**，205.74s；`http_gate` 冒烟确认
+`DEFAULT_ACQUIRE_TIMEOUT=120.0`、信号量仍限 1、acquire/release 正常。
+
+⚠️ `DEFAULT_ACQUIRE_TIMEOUT = 120.0` **未改动**，但注释里已标注：单次往返耗时
+**没有当前实测**（原注引的 8~11s 属已撤回的那批单次取样），要调它先自己测。
+
+
+## [0.45.74] — 2026-08-29 — 移除 CrewAI：一个从未接通、且与本系统测量方式相冲突的集成
+
+v0.45.73 关掉 crewai 的 import 埋点时顺带确认了 `run_crew_scan()` 零调用方。
+这次把整条集成删干净——不是因为它闲置，是因为**它就算接通也不该接通**。
+
+### Removed
+
+| 删除项 | 说明 |
+|---|---|
+| `crewai_adapter.py` | 整个文件（`BeeAgentTool` / `AlphaHiveCrew`） |
+| `alpha_hive_daily_report.run_crew_scan()` | 86 行，零调用方 |
+| 同文件顶层 CrewAI import 块 | 11 行 |
+| `config.CREWAI_CONFIG` | 8 行；`enabled: True` 是**假开关**，只被那个没人调的方法读 |
+| `requirements.txt` 的 `# crewai>=0.1.0` | 本来就是注释行——**它从来不是声明依赖** |
+| `tests/conftest.py` / 编排器的埋点 env 闸（v0.45.73 加的） | 本仓已无 `import crewai`，留着就是「关一个不存在的东西」的死配置 |
+
+`pip uninstall crewai` **已于同日执行**（用户要求）。卸载前核过两件事：
+`pip show crewai` 的 `Required-by` 为空（无包依赖它）、且全机器除本仓外无人 `import crewai`。
+卸载后全套 2104 passed 不变。
+
+⚠️ **别顺手清「crewai 的依赖」**：`opentelemetry-sdk` 与 `tokenizers` 看着像 crewai 的遗留，
+实为 **`chromadb` 的依赖**，而 `vector_memory.py:24` 在用 chromadb —— 清了会打断向量记忆。
+真正的孤儿只有 `instructor`（`Required-by` 为空），无害，留着也行。
+
+同日把主 checkout `/Users/igg/Desktop/Alpha Hive` 从 v0.45.73 快进到本版本 —— 编排器的
+`PROJECT_DIR` 指向那里，**不拉齐的话这次移除在生产上等于没做**。
+
+### 为什么不只是「闲置」——三条硬伤
+
+1. **从未接通**。`Agent(...)` 从头到尾没传 `llm=`。crewai
+   `utilities/llm_utils.py::_llm_via_environment_or_fallback()` 的回退链是
+   `MODEL` → `MODEL_NAME` → `OPENAI_MODEL_NAME` → `DEFAULT_LLM_MODEL="gpt-4.1-mini"`（OpenAI）。
+   全仓 `grep OPENAI_API_KEY` 零命中、环境也没有 ⇒ `crew.kickoff()` 必然失败。
+   它不是「装了没用」，是**装了也跑不了**。
+
+2. **与项目硬规则冲突**。真要跑通就得配一个付费 OpenAI key，
+   而本项目的规则是「报告走 Cowork 本地推理、禁付费 API、LLM 扫描必须先报费用」。
+   hierarchical + 6 工具 + `verbose=True`，每只标的多轮往返，30 只标的的账不小。
+
+3. **与本系统的测量方式相冲突**——这条最关键，见下。
+
+### 设计评估：LLM manager 动态选蜂 + 自行加权，对本系统是负分
+
+被删掉的那个设计是：一个「投资分析总监」LLM 读工具描述，自己决定调哪几只蜂、
+怎么综合，产出再 `_normalize_result()` 转回蜂群格式。评估结论是**多余且有害**：
+
+- **动态选蜂省不下东西，还会毁掉可比性**。蜂只有 6~8 只、各自都便宜、且每天每只
+  标的都要全跑——因为整套价值就在那张**横截面面板**。按情境跳过某几只蜂 =
+  每天的口径都不一样，`compute_kpis` / rank-IC / 扩池换来的 N_eff 全部作废。
+- **它会砸掉本项目最贵的资产：可复现的评分管道**。`replay_scoring.py`（v0.45.33）
+  能把聚合层与维度计算层的改动离线重放，省掉 25 周的世代边界代价；
+  `weekly_optimizer` 的 T+7 回测、逐维 rank-IC、IC 重跑就绪度闸的世代边界，
+  全都建立在「同样的输入产出同样的分数」之上。
+  LLM manager 让聚合**不可复现**（同输入不同日不同权重，且模型每次升版都是一次
+  静默的世代切换），上面这一整套测量设施同时失效。
+- **它治不了真正的病**。`final_score` IC≈0 的根因是**符号抵消**：两个反向维度占
+  43% 权重、抵消掉唯一有证据的 sentiment（详见
+  `experiments/final_score_dilution_report.md` 与 v0.44.0 的只读化决定）。
+  换个更聪明的混合器不解决抵消，只是让抵消**不可审计**。
+  诊断指向的是「该信哪个信号」，不是「怎么混得更花哨」。
+- **它自带一个静默中性化的接缝**。`_normalize_result()` 里
+  `float(data.get("score", ..., 5.0))`——LLM 少吐一个字段就静默变成 5.0 中性，
+  与「真的分析出中性」同形。这是本项目最难发现的一类故障（v0.45.2）。
+  任何「LLM 自由吐 JSON → 解析 → 填默认值」的设计都有这道缝。
+
+**LLM 在本系统里该待的地方是数字定下来之后的叙事合成**（深度报告模板 C，
+走 Cowork 本地推理），**不是替掉评分与聚合**。
+
+### Added
+
+`tests/test_no_crewai_dependency.py`（2 条，1.5s），防它回来：
+
+1. 子进程 import 日报主入口，`'crewai' in sys.modules` 必须为 False。
+   ⚠️ 这条的有效性取决于 crewai 还装着；哪天卸载了它会变恒真，所以必须配第 2 条。
+2. 全仓静态扫描，不许出现 `import crewai` / `from crewai import ...`
+   （与装没装无关，卸载后依然有效）。
+
+mutation check（`--maxfail=99`）：新建一个含 `import crewai` 的文件 ⇒ 第 2 条红；
+日报顶层加回 `import crewai` ⇒ 两条都红。
+
+回归：全套 **2104 passed / 0 failed**，ruff F821 全过。
+
+## [0.45.73] — 2026-08-29 — 一个第三方 phone-home，和一个「设了等于没设」的环境变量名
+
+`import alpha_hive_daily_report` 会起一个 daemon 线程 `Thread-1 (_track_install)`
+往外发一个请求。链路是 `alpha_hive_daily_report` → `crewai_adapter` → `crewai`：
+crewai 1.9.3 的 `crewai/__init__.py` **在模块顶层**调 `_track_install_async()`，
+给 `api.scarf.sh` 打一个安装量像素点。每进程一次，于是**每次 pytest、每次生产扫描
+各一次**。它不阻塞任何东西，也不是任何测试的依赖。
+
+值得修的不是"有埋点"，是它是一次**不在 `http_gate` 覆盖范围内的出站 HTTPS**：
+本项目所有自家数据源都走那道串行闸，而这个 phone-home 发生在闸门自己还没被
+import 的时刻。`http_gate.py` 的结论「加源之前先确认闸门覆盖它」照样适用。
+
+⚠️ **不把它和 2026-08-24 的 96 次 SSL EOF 挂因果**。`http_gate.py` 的 docstring 仍写着
+「OpenSSL 1.1.1q 扛不住并发」，但那个归因 **2026-08-25 已被重测证伪**（1.1.1q 与 3.6.1
+各 0 失败，串行 80.5s 反而比并发 62s 更慢；原数据是单次取样吃了 CDN 热缓存）。
+关掉埋点的理由就是朴素的那一条：**没必要为一个第三方埋点，在每个进程启动时付一次
+不受管的出站请求。**
+
+### Fixed 1 — 关掉埋点，变量名照**装着的那版**抄（`crewai_adapter.py`）
+
+在本仓唯一的 `import crewai` 处（`crewai_adapter.py` 顶部）、且**在那句 import 之前**
+`os.environ.setdefault` 两个变量。crewai 读的是 import 那一刻的 env，晚一行都无效。
+
+⚠️ **差点掉进去的坑**：网上（和记忆里）流传最广的 `CREWAI_TELEMETRY_OPT_OUT`
+在 1.9.3 里**全仓不存在**。1.9.3 的
+`telemetry/telemetry.py::Telemetry._is_telemetry_disabled()` 只认三个名字：
+
+| 变量名 | 1.9.3 认吗 |
+|---|---|
+| `CREWAI_DISABLE_TELEMETRY` | ✅ |
+| `CREWAI_DISABLE_TRACKING` | ✅ |
+| `OTEL_SDK_DISABLED` | ✅（OpenTelemetry 总闸，本项目没别的 OTEL 用户，不动它） |
+| `CREWAI_TELEMETRY_OPT_OUT` | ❌ **设了一行日志都不会变** |
+
+这不是理论推演——mutation 测试实测把变量名换成 `CREWAI_TELEMETRY_OPT_OUT` 后，
+crewai 自己的 `_is_telemetry_disabled()` 返回 `DISABLED=False`。
+和 [[alpha-hive-silent-degradation]] 记的那类"看着成功其实早废了"同形：
+**一个拼错/过期的 opt-out 变量名，是所有静默降级里最舒服的一种——它消除了本该
+触发自查的那点不适，却什么都没关掉。**
+
+### Fixed 2 — `crewai` 顶层导入改惰性（`alpha_hive_daily_report.py`）
+
+顺手核了一遍"这个 import 是不是遗迹"：`run_crew_scan()` **全仓零调用方**，
+只出现在 `QUICK_START.md` / `PHASE3_*.md` / `SLACK_INTEGRATION_GUIDE.md` 的示例里，
+编排器与 `~/.claude/scripts/` 下也搜不到。为一个没人调的降级分支，让每次 import
+都付出「一次出站 HTTPS + 一次 crewai 导入」，不划算。
+
+把 `from crewai_adapter import AlphaHiveCrew` 挪进 `run_crew_scan()` 内部。
+默认路径不再 import crewai（`'crewai' in sys.modules` → `False`），
+埋点因此**不是被静音，是根本没发生**。实测导入耗时（各 3 次，稳定）：
+
+| | 耗时 |
+|---|---|
+| 旧（顶层拉进 crewai_adapter） | 1.07 / 1.05 / 1.07s |
+| 新（惰性） | 0.63 / 0.64 / 0.64s |
+
+省约 **0.43s / 进程**（−40%）。注意是**每进程一次**，不是每条测试一次。
+
+保留 `run_crew_scan()` 本身：它是 QUICK_START 里写着的公开用法，删它超出本次范围。
+
+### Fixed 3 — `run_crew_scan()` 的降级守卫从来没生效过（`alpha_hive_daily_report.py`）
+
+改惰性时撞见的：该方法 docstring 写「若 crewai 未安装，自动降级到 run_swarm_scan()」，
+但守卫是 `if not AlphaHiveCrew`。而 crewai 没装时 `crewai_adapter` **照样 import 得动**
+（它内部自己降级，`AlphaHiveCrew` 仍是个正常的类），所以这个条件恒假，
+会一路走到 `crew.build()` 抛 `RuntimeError("CrewAI 未安装")` ——
+**docstring 承诺的降级，实现里不存在**。真正的可用性标志是适配层的 `CREWAI_AVAILABLE`，
+已改用它。（在死代码里，不影响任何现网行为，但它正是
+[[alpha-hive-silent-degradation]] "守卫自己恒真" 那一条的又一个实例。）
+
+### Added — 三道同向的闸 + 回归测试
+
+| 位置 | 覆盖范围 | 在 git 里 |
+|---|---|---|
+| `crewai_adapter.py` 顶部 | 本仓唯一 `import crewai` 处，任何入口都绕不过 | ✅ |
+| `tests/conftest.py` **模块级** | 整个 pytest 进程，含测试自己直接 `import crewai` | ✅ |
+| `~/.claude/scripts/alpha-hive-orchestrator.sh`（export，第 66-67 行） | 生产扫描全进程，在第一次 spawn python（第 87 行读 `config.WATCHLIST`）之前 | ❌ **在仓外，无测试守护** |
+
+⚠️ conftest 那段**必须是模块级，不能写成 fixture**：fixture 是每条测试跑之前才执行，
+而 `import crewai` 发生在 pytest **收集阶段**（import 测试模块时），那时 fixture 一条都没跑。
+写成 fixture 等于没设。
+
+`tests/test_crewai_telemetry_optout.py`（3 条，2.9s）：
+
+1. 断言 **crewai 自己的** `_is_telemetry_disabled()` 返回 True，
+   而不是断言"我们写没写 os.environ"（后者恒真，等于没测）。升级 crewai 后若它改名，这条先红。
+2. 子进程 import `crewai_adapter`，`_track_install` 线程数必须为 0。
+3. 子进程 import `alpha_hive_daily_report`，`'crewai' in sys.modules` 必须为 False。
+
+两个刻意的设计（都是 v0.45.71「恒真断言」教训的直接产物）：
+- 子进程**显式把三个变量从 env 里删掉**再跑。否则它继承 conftest 设的值，
+  不管被测代码写没写都绿。
+- 探针挂 `threading.Thread.start` 而不是只看 socket——没网/代理拒连时它也不会连，
+  只看 socket 会假绿。
+
+**mutation check**（`--maxfail=99`，三次都只红对应的那一条）：
+
+| 注入的故障 | 结果 |
+|---|---|
+| `setdefault` 挪到 `import crewai` **之后** | ❌ `TRACK_INSTALL_THREADS=1` |
+| 恢复顶层 `from crewai_adapter import ...` | ❌ `CREWAI_IMPORTED=True` |
+| 变量名换成 `CREWAI_TELEMETRY_OPT_OUT` | ❌ `DISABLED=False` |
+
+### 验证
+
+复现脚本（patch `threading.Thread.start`，命中 `_target.__name__ == '_track_install'` 即记录）：
+
+| | `_track_install` 线程 | 出站连接 | `crewai` in sys.modules |
+|---|---|---|---|
+| 修前 `import alpha_hive_daily_report` | 1 | `('127.0.0.1', 7897)` | True |
+| 修后 `import alpha_hive_daily_report` | **0** | **0** | **False** |
+| 修后 `import crewai_adapter`（env 已清空） | **0** | **0** | True |
+
+回归：受影响模块 373 条测试全绿（含 F821 静态闸 `test_no_undefined_names.py`）。
+
+## [0.45.72] — 2026-08-29 — 一个没锚定的 fixture，一个没生效的桩：两条测试各自相信着一件没发生的事
+
+起点是 `test_historical_price_anchor.py::test_as_of_date_in_past_skips_live_fetcher`
+在 2026-08-29 变红。**生产代码是对的**——红的是测试自己。
+排查中又牵出第二条：`test_cloud_snapshot_price.py` 的 5 条用例里有 4 条同日变红，
+根因完全不同，但形状是同一族：**测试测的不是它以为在测的东西**。
+
+### Fixed 1 — fixture 从没锚定过它要测的那一天（`tests/test_historical_price_anchor.py`）
+
+假日线写死起点、被测日期另写死一个：
+
+```python
+idx = pd.date_range("2026-06-22", periods=len(prices), freq="D")  # 末行 = 7/17
+result = fetch_stock_data("NVDA", as_of_date="2026-07-21")        # 目标日 = 7/21
+```
+
+两个日期各写各的，中间 4 天缺口从 v0.41.6 起就在，没有任何东西校验它们对得上。
+一直绿，是因为当时的生产代码会拿末行顶上；v0.45.69/0.45.70 加了
+「末行不是目标日就拒绝、**不以前一交易日冒充**」的闸之后，这个缺口才第一次被看见。
+
+改为**从被测日期倒推**：`pd.date_range(end=last_date, periods=..., freq="D")`，
+并在 helper 里断言 `idx[-1] == last_date`。periods 或日期怎么改，锚点都不松脱。
+freq 保持 `"D"` 是刻意的——`freq="B"` 遇到 end 落在周末会静默往前回滚，
+那正是本次要根治的漂移。同形教训见 v0.45.64「单测里的定时炸弹」：**日期能推就别钉**。
+
+### Fixed 2 — 一个从没生效过的 yfinance 桩（`tests/test_cloud_snapshot_price.py`）
+
+```python
+monkeypatch.setattr(dp, "yf", type("Y", (), {"Ticker": _T}), raising=False)
+```
+
+`data_pipeline` 里**没有**模块级的 `yf`——四处 `import yfinance as yf` 全是
+函数内局部导入，局部名把模块属性整个盖住。这个桩谁也没读到，5 条用例一路打真外网。
+`raising=False` 又恰好把「属性不存在」这唯一的报警吞掉了。
+
+为什么 8/29 当天写完是绿的、8/29 之后变红：写用例那天 yfinance 的 8/28 行
+Close 恰好就是 `NaN`，**真网返回的形状与桩碰巧一致**；等 yfinance 回填了 8/28 的
+真实收盘，同一份代码就红了。红的不是生产代码，是这条桩。
+（`test_normal_day_unaffected` 更彻底：它拿真实行情断言真实行情，桩失效也照样绿——
+它的 fixture 数字本来就是从真实行情抄来的。）
+
+改为 patch `yfinance.Ticker` 本身（调用时在真模块上查属性，盖得住局部 import），
+并在 fixture teardown 加一道看门断言：**桩一次都没被调用 = 打了真网**。
+用例耗时 3.07s → 0.41s，这个降幅本身就是「网络没了」的凭据。
+
+### Added — 给拒绝闸补上真覆盖（`tests/test_historical_price_anchor.py`）
+
+修好锚点之后有个反直觉的后果：**本文件对那道拒绝闸的覆盖归零了**。
+末行现在都正好落在目标日，没有一条用例还会走到闸上。实测把
+`if _last_date != as_of:` 改成 `if False:`（等于整个回退 v0.45.69/70），
+修完的 5 条用例**照样全绿**——旧那条脱靶的用例是「靠自己变红」在覆盖这道闸的，
+那不叫覆盖。
+
+新增 `TestRefusesToSubstituteNeighbouringTradingDay`，只钉本文件自己的教训：
+日线整段停在目标日之前（不是 NaN，是压根没这一行）时必须标不可用。
+NaN 形状与云端快照兜底的语义由 `test_cloud_snapshot_price.py` 专管，不在两处并存。
+
+### 判据（mutation check，`--maxfail=99`）
+
+⚠️ `pyproject.toml` 设了 `maxfail=1`，不显式抬高就只看得见第一条红的。
+
+| 回退的守卫 | 变红的用例 |
+|---|---|
+| 「不以前一交易日冒充」拒绝闸（v0.45.69/70） | 5 条 |
+| NaN 剔除 `dropna()`（v0.45.69） | 4 条 |
+| 云端快照兜底（v0.45.70） | 2 条 |
+
+三次全部咬住，且爆炸半径各不相同（=不是一条断言在重复报警）。
+`data_pipeline.py` **本次一行未改**——全部改动都在测试侧。
+`data_pipeline` 相关 12 个测试文件：183 passed（改前 179 passed + 4 failed）。
+
+
+## [0.45.71] — 2026-08-29 — 那条为"崩溃"写的闸，拦不住崩溃：一个联网 flake 掀出的恒真断言
+
+起因是一条普通的 flake：2026-08-29 全量跑里
+`test_silent_failure_guards.py::TestAgentsSurviveFullyDegradedData` 的
+BuzzBee 参数化变红，隔离重跑 44s 通过、全量重跑也通过。
+日志里是 `apewisdom.io` 读超时（15s + urllib3 重试）和一条 Alpha Vantage SSLEOFError。
+
+修 flake 只花了一半工夫；**另一半是发现这条测试从来没有生效过**。
+
+### Fixed 1 — 默认测试套在打真外网（`tests/test_silent_failure_guards.py`）
+
+这条测试的意图（见其 docstring）纯粹是 None 处理：v0.45.3 把 `volatility_20d`
+从 0.0 改成 None 后，`buzz_bee.py` 的 `vol20 > _vlt.get("extreme", 60)` 当场
+TypeError。它**不该碰网络**。但它只 stub 了 `_get_stock_data`，然后直接调真实的
+`analyze()` —— 于是逐个打了出去。实测（pytest 内挂 HTTP 探针）：
+
+| 蜂 | 真实出网 |
+|---|---|
+| BuzzBee | apewisdom（Reddit）、Alpha Vantage（新闻）、Yahoo 热搜、CNN F&G |
+| BearBee | SEC EDGAR ×7、CBOE 期权链 ×2、yfinance ×7 |
+| RivalBee | yfinance ×3（EPS 共识 / 技术指标 / 空头仓位） |
+
+`pyproject.toml` 的 `--timeout=60` 对上冷缓存的 44s，**上游一慢就红**；
+而 addopts 里有 `-x`，这一条 flake 会把整套掐断。
+
+**修法：stub 打在叶子（各取数模块），不打在中间聚合层**——
+`get_real_crowding_metrics` / `CrowdingDetector` / 7 通道加权 / 看空评分
+这些真实逻辑仍然跑，它们才是这道闸要保护的东西。所有 stub 一律返回
+"不可用"档，与 `FULLY_DEGRADED` 同一个意思，不是喂好数据把降级路径绕开。
+
+同时加 `_no_network` 绊线：出网即炸并点名调用栈。理由是**光有 stub 清单会悄悄腐烂**
+——谁给 BuzzBee 加第 8 个通道，清单不会自己长出一行，测试只会慢慢变回联网 flake。
+这与 conftest `_block_same_day_macro` 记的是同一条教训（加数据源必须同时确认
+"测试里它被关掉了吗"，v0.45.60 / v0.45.61 连漏两次）。实测把 `sec_edgar` 那行
+stub 去掉，0.88s 内报出 `sec_edgar.py:115 _request_get <- _load_cik_map <- __init__`。
+
+效果（`pytest tests/test_silent_failure_guards.py -q -p no:randomly`）：
+
+- 全文件 **35.82s → 5.01s**，54 passed 不变
+- BuzzBee / BearBee 两条已跌出 durations 榜（<0.01s），BearBee 原为 **25.61s**
+- RivalBee 3.08s → 0.92s（剩下的是本地 ML 模型加载，不出网）
+- HTTP 探针复测：三条参数化 **一次外网都不打**
+
+### Fixed 2 — 三条断言全部恒真：这道闸拦不住它自己写的那个崩溃
+
+修完 flake 后按本文件开头的规矩做回归验证（"每条测试都必须能在把修复回退掉时变红"），
+把 v0.45.3 那道 None 守卫拆掉、让 BuzzBee 当场 TypeError —— **三条断言依然全绿**。
+
+根因是 `make_error_result()` 的兜底返回与正常返回**同形**：
+
+```python
+AgentResult(score=5.0, direction="neutral", confidence=0.0,
+            discovery=f"Error: {error}", ..., error=str(error))
+```
+
+于是逐条对照：
+
+| 断言 | 崩溃时实际拿到 | 结果 |
+|---|---|---|
+| `error != "agent_failure"` | `"'>' not supported between instances of 'NoneType' and 'int'"` | 恒真 |
+| `"failed" not in discovery` | `"Error: '>' not supported..."`（含 Error，不含 failed） | 恒真 |
+| `score is not None` | `5.0`（崩溃兜底值） | 恒真 |
+
+其中第一条最刺眼：`"agent_failure"` 这个字面量
+**全仓只出现在这行断言里**（`grep -rn agent_failure --include=*.py` 仅 1 处命中，
+就是它自己），生产代码从来没产出过——等于在和一个不存在的值比较。
+
+也就是说：**为 v0.45.3 崩溃写的闸，拦不住 v0.45.3 的崩溃。**
+这正是本文件开头定义的形状——没有报错、退出码为 0，但产出早已是假的；
+也是 MEMORY「静默中性化」记的那条：`score=5.0 / confidence=0.0` 与真实中性同形。
+
+**修法**：原三条按用户要求原样保留（不改既有意图），另加一条真正生效的：
+
+```python
+assert not result.get("error"), f"{cls_name} 崩了：{result.get('error')}"
+```
+
+实测：注入 regression 后 **0.78s 变红**，并打出完整 TypeError 栈；恢复后转绿。
+
+> 教训：**"测试跑得慢"和"测试没生效"可以是同一个坑的两面。**
+> 这条测试因为真打网络而慢，慢又掩护了它其实什么也没测——44s 的运行时间
+> 看起来像在"认真做事"，实际上三条断言在任何输入下都返回 True。
+> 修 flake 时顺手做一次"把修复回退掉看它红不红"，才是这次真正的收获。
+
+### 附带发现（未修，已另开任务）
+
+`alpha_hive_daily_report` 导入时，**crewai 会起一个后台守护线程 `_track_install`
+向外发装机遥测**（本机走 127.0.0.1:7897 代理）。它不阻塞测试、也不是任何测试的依赖，
+但每次跑测试与每次生产扫描都会发一次。属第三方 phone-home，与本次改动无关，
+故未在本版处理。
+
+### Changed
+
+- `tests/test_silent_failure_guards.py`：`TestAgentsSurviveFullyDegradedData`
+  新增 `_offline`（叶子级取数 stub）与 `_no_network`（出网绊线）两个 autouse
+  fixture；测试方法新增一条真正生效的 `error` 断言。**仅测试文件改动，
+  生产代码零改动。**
+
+## [0.45.70] — 2026-08-29 — 云端快照价接进补跑取价链；8/28 补跑完成并上线
+
+v0.45.69 让 NaN 不再冒充价格，但补跑因此**拿不到任何价格**：
+yfinance 有 2026-08-28 那一行，`Volume=1.94 亿`（当天确实交易了），
+但 `Close=NaN`。而云端快照有该日真实收盘（目标日 17:02 ET 从 CBOE 抓）。
+
+### Added — `data_pipeline._fetch_historical_stock_data` 的快照兜底
+
+yfinance 拿不到目标日收盘时改问 `cloud_snapshot_loader.load_ticker()`。
+**不另造日期闸** —— 该函数内部已校验 `vintage_date == date`，vintage 不符返回 None；
+再造一道就是两个口径并存。
+
+三条约束：
+- 快照价必须是**有限正数**（NaN / 0 / 负数 / 字符串一律不收）
+- 来源标进 `source_name`（实测为 `cloud_snapshot:cboe_close`）+ `_price_from_cloud_snapshot`
+- **`volume_ratio` 不给** —— 它要拿目标日成交量比均量，而这条路径下目标日的量
+  本来就没取到，用前一日的量冒充会静默失真。动量标 `5d_snapshot_spliced`（拼接口径）
+
+目标日有真实收盘时**逐字节走原路径**，连 `load_ticker` 都不调用（测试有断言）。
+
+### 2026-08-28 补跑结果（已部署）
+
+```
+30/30 标的  data_quality=real   字段缺失：无
+err=0/240   real=92%            失效条件 275 条覆盖 30/30
+```
+
+口径核验（价格必须是 8/28 的，且不等于 8/27）：
+
+| | 8/28 | 8/27 |
+|---|---|---|
+| NVDA | 217.55 | 227.98 |
+| MSFT | 513.53 | 505.06 |
+| AMC | 2.59 | 2.70 |
+| NVDA `iv_current` | 33.44 | 34.64 |
+| NVDA `total_oi` | 2,281,026 | 2,497,713 |
+
+gh-pages 部署 `120d950`：12 份 ML 报告 + 日报 + 看板。
+**12 份是设计值**（`ALPHA_HIVE_ML_REPORT_MAX` 默认 12），日报覆盖全部 30 只。
+
+线上验证 —— 用户最初问的那只：
+
+```
+AMC 8/28  IV Skew 比 = 0.84      （8/27 是【空】）
+          IV Rank = 18.8%  期限结构 = CONTANGO  RV30 = 99.1%
+```
+
+### 已知限制（未做）
+
+`generate_ml_report.py` **无法为过去日期生成报告** —— 它用 `pdt_today()`，
+没有覆盖入口，`--date` 参数不存在。所以编排器 Step 3 的「补齐缺失标的」
+只在当天有效；补跑历史日只能拿到 Step 2 产出的前 12 名。
+没有 monkey-patch 绕开，那会产出**日期标错**的文件。
+
+### Added — `tests/test_cloud_snapshot_price.py`（5 条）
+
+含四次 mutation check：去掉快照兜底 / 去掉快照价校验 / 去掉日期校验 /
+volume_ratio 改用前一日冒充 —— 全部变红。
+
+## [0.45.69] — 2026-08-29 — 一个 NaN 穿过四道写着「<= 0」的守卫
+
+补跑 2026-08-28 时 30 只标的**全部** `data_quality=degraded`、`iv_skew_ratio=None`、
+`gamma_exposure=0.0`。追到底是**一个 NaN**，它穿过了四道各自写着 `<= 0` 的守卫。
+
+### 为什么 NaN 谁都拦不住
+
+Python 里 `float('nan')` 有两个性质，合起来正好绕开常规写法：
+
+- **任何比较都返回 False** → `price <= 0`、`total <= 0` 全部放行
+- **它是 truthy** → `if not price`、`if not atm_price` 也拦不住
+
+四道守卫依次失守：
+
+| 位置 | 守卫写法 | 结果 |
+|---|---|---|
+| `data_pipeline._fetch_historical_stock_data` | `hist["Close"].iloc[-1] <= 0` | `price=float(NaN)` |
+| `swarm_agents/base._get_stock_data` | `if not price or price <= 0` | 不标 `_data_unavailable` |
+| `options_analyzer.analyze` | `if not atm_price` | ATM 带 `[NaN, NaN]` |
+| `calculate_gamma_exposure`（v0.45.63 新写） | `stock_price is None or <= 0` | 返回 NaN |
+
+末端 `_sanitize_result` 再把 NaN 转成 **0.0** ——
+**v0.45.63 刚消灭的那个假读数，在出口被原样还原了。**
+
+链路后果：ATM 带是 `[NaN, NaN]` ⇒ `NaN <= strike <= NaN` 恒 False ⇒
+`raw_ivs` 全空 ⇒ `data_quality` 判 degraded ⇒ `iv_current` 回落
+`last_valid_iv` 陈缓存（NVDA 拿到 8/27 的 34.64）。
+
+### 根因：yfinance 有 8/28 的行，但 Close 是 NaN
+
+```
+2026-08-27  Close=227.98  Volume=298,909,800
+2026-08-28  Close=nan     Volume=194,036,188   ← 当天确实交易了
+```
+
+### Fixed
+
+- `data_pipeline`：先 `dropna()` 再判空，后续窗口一并用清洗过的行
+- **`data_pipeline` ⚠️ 同时加日期校验** —— 只 dropna 会让「丢掉 NaN 行」
+  静默变成「用**前一交易日**冒充目标日」：末行变成 8/27 的 227.98，
+  而 8/28 真实收盘（云端 CBOE 快照）是 217.55，差 **4.8%**。
+  那正是 2026-08-24 被写进 `signal_archive` 隔离名单的口径污染，换了个更隐蔽的入口。
+  现在拿不到目标日收盘就返回 `_data_unavailable` + `_reason`，**不冒充**。
+- `swarm_agents/base._get_stock_data`：加 `isfinite` 校验
+- `options_analyzer`：`calculate_iv_skew` / `calculate_gamma_exposure` /
+  `analyze` 的 `atm_price` 兜底，三处加 `_math.isfinite`
+
+### 教训
+
+**v0.45.63 我写的守卫是 `is None or <= 0`，二次检查也没抓到 NaN。**
+本项目「安全默认值」判据要加一条：*写数值守卫时，先问 NaN 会怎么走。*
+`<= 0` 与 `if not x` 都不是 NaN 的守卫。
+
+### ⚠️ 未完成：2026-08-28 的补跑仍无法产出正确数据
+
+yfinance 没有 8/28 的收盘价，而云端快照有（`price_at_fetch=217.55`，
+CBOE 延时，8/28 17:02 ET 抓取，`vintage_status: ok`）。
+**取价链目前不消费云端快照的价格**，所以补跑只能诚实地标"不可用"。
+把云端快照价接进补跑取价链是独立改动，未做。**网站未部署 8/28 数据。**
+
+## [0.45.68] — 2026-08-29 — 二次检查 v0.45.65/67：四条自造 bug，三条是守卫自己在撒谎
+
+对同一 session 内 v0.45.65（日历体检）与 v0.45.67（上游监视器）做二次检查，
+五条假设查出**四条真 bug**。其中三条是同一个形状：
+
+> **表名取自甲表、日期取自乙表，拼进同一句话。**
+
+v0.45.67 自查时已经在监视器的渲染里抓到过一次这个错，当场修了；
+但**没有回头查同一 session 里更早写的 v0.45.65**——于是同型错误在
+`economic_calendar.py` 和 `guard_bee.py` 里各留了一份。
+**自查抓到一个模式后，要把它当模式去搜全部改动，不是当个案修掉。**
+
+根因是 `get_calendar_health()` 返回两组不可混用的字段：
+`binding_table`（余量最小 = **肇事表**）与 `shortest_table` + `last_date`/`horizon_days`
+（地平线最短）。阈值逐表不同，两者常非同一张表。
+
+### Fixed 1 — exhausted 告警点名多张表，却共用一个日期（`economic_calendar.py`）
+
+2026-12-15 那天，旧文案会打：
+
+```
+🚨 经济日历已被日期走完：cpi/gdp/nfp 表在 2026-10-29 之后没有任何条目
+```
+
+`2026-10-29` 是 gdp 的表尾。而 **cpi 在该日之后还有 11-10、12-10 两条，
+nfp 还有 11-06、12-04**——这句话对三张表里的两张是假的。
+现改为逐表写各自表尾：`cpi 止于 2026-12-10（源 …）；gdp 止于 2026-10-29（源 …）；…`
+
+### Fixed 2 — GuardBee 写的日期属于一张**健康**的表（`swarm_agents/guard_bee.py`）
+
+`details["macro_calendar_last_date"]` 取的是 `_cal["last_date"]`（shortest 表）。
+**2026-09-06 ~ 09-29 这 24 天**里：nfp/cpi 先后 stale，而 shortest 是 gdp——
+gdp 此时剩 49 天、阈值 30，**完全健康**。于是 analysis JSON 里会出现
+`macro_calendar: "stale"` 配着一张健康表的日期，排查时直接指错方向。
+八天后就进入这个窗口。
+
+现改用 binding 表，并把该性质写成单测钉死：
+**binding_table 必定是肇事表之一**（stale 表 margin<0，exhausted 表 margin 更负，
+故 `min(margin)` 必落在肇事表上）。`test_binding_table_is_always_one_of_the_culprits`
+遍历 2026-08-01~2028-03-01 每一天验证，覆盖 100+ 个非健康日。
+
+### Fixed 3 — 监视器节流 + 空缓存 → 谎报健康（`economic_calendar_watch.py`）
+
+节流窗口内直接拿 `state["upstream"]` 当结论。若缓存里没有任何源的结果
+（状态文件被截断、手工编辑、或旧格式），得到 `undeterminable=[]`、`new=[]`
+→ 打印 **「✅ 日历健康，上游无新日程」、退出码 0**——**一个源都没查过**。
+
+监视器自己犯了它专门要治的那个静默失败。现改为：缓存里缺哪个源，
+就把哪个源判成 `determinable=False`，reason 写明「此源从未被成功检查过」。
+
+### Fixed 4 — 「上游暂无新日程」是一句没有依据的断言
+
+退出码优先级是 `action(1) > health(1) > undetermined(3)`。于是
+**「本地日历将见底 + 四个源全部抓取失败」**这一格走 health 分支，
+旧版在这里无条件打：
+
+```
+⚠️ 本地日历 stale：nfp 只到 2026-12-04（剩 75 天），上游暂无新日程
+```
+
+四个源一个都没抓到，却断言上游没有新日程；且 undetermined 被 health 整个吃掉，
+日志里看不出抓取失败——**恰好抵消掉这个监视器存在的全部意义**。
+
+新增 `upstream_conclusive` 字段（四源全部 determinable 才为真）。
+退出码优先级不变（本地将见底同样要人盯），但**文案与退出码解耦**：
+不 conclusive 时一律打「⚠️ 上游 N 个源无法判定（…），本次无法确认上游有无新日程」。
+编排器 Step 13 的摘要提取器同步修（⚠️ 该文件不在本仓库，
+备份 `alpha-hive-orchestrator.sh.bak-20260829_calwatch2`）。
+
+### Fixed 5（脆弱点，当前无影响）— BLS 切片锚在页面 `<title>` 上
+
+`<title>` 与表头同文，`next()` 命中第 0 行，把 229 行导航区一并纳入切片。
+今天恰好没有能被日期正则吃掉的行（导航是 `FEBRUARY 2026` 这种格式）——
+**那是运气不是设计**。现锚到真表头（其后 3 行内必有 `Reference Month`）。
+
+### 一条方法论教训：差点提交一条形同虚设的回归测试
+
+给 Fixed 5 写的样本最初是 `<li>Last Modified Date: Jan. 05, 2099</li>`，
+测试绿。但**用旧实现跑一遍才发现旧实现也是绿的**——正则是 `fullmatch`，
+带前缀的行本就不会被吃，样本根本没触发那个 bug。
+改成独立成行的 `Jan. 05, 2099` 后，旧实现解析出 `max=2099-01-05`（会误报
+「上游发布新日程」），新实现 `max=2027-12-10`。
+
+MEMORY.md「分布不变式」条早就写过：**新增不变式必配「喂退化数据看它红」的测试**。
+这次是它第一次在「回归测试」上生效——回归测试同样要验证它在旧代码上会红，
+否则只是一条昂贵的注释。
+
+### 复核过但**不是** bug 的两条
+
+- `_parse_dates` 在一次 `get_upcoming_events` 里被调用两轮（事件构建 + 体检各一次）：
+  4 表 ×2，纯内存操作，实测无感知开销，不改。
+- `parse_fomc` 解析出 54 个日期（页面含历史年份区块）：只取 max，属预期。
+
+### Changed
+- `economic_calendar.py`：告警节流键改用 binding 表自己的表尾日期；
+  `get_calendar_health` docstring 写明「binding 必定是肇事表，配日期用它」
+- `tests/test_economic_calendar.py`：+4（32 条）
+- `tests/test_economic_calendar_watch.py`：+5（29 条）
+
+
+## [0.45.67] — 2026-08-29 — 谁去看上游发了没：日程监视器（v0.45.65 的另一半）
+
+v0.45.65 给硬编码日历加了地平线告警和一条会变红的单测，但那些只会说
+**「快见底了」**，说不出**「上游发布 2027 日程了没」**。后者得有人每周去源站看一眼。
+`economic_calendar_watch.py` 就是那个人。
+
+### 为什么做成编排器 Step 13，而不是周度 LLM 任务
+
+三条理由，第二条是项目既有判例（Step 11 的注释里已经写过一次）：
+
+1. **零 API 费用**。这个检查是纯机械的：抓四个页面、比日期。用 LLM 跑等于
+   每周付钱让模型做正则能做的事，且违反 CLAUDE.md「花钱前必须先问」。
+2. **心跳更可靠**。周度 LLM 任务可能被跳过、被改写、某周没跑；编排器每个交易日都跑。
+3. **「每交易日跑」实际就是「每周联网一次」**——脚本自带 7 天节流。
+   例外：上次查出有新日程而人还没抄，则不节流，天天提醒到抄完为止。
+
+不阻断、不动 `OVERALL_STATUS`：日历没坏，只是需要有人去抄。
+
+### 核心不变式：「看不出来」≠「没有新的」
+
+一个静默失败的监视器，就是 v0.45.65 治的那个 bug 升了一级：
+页面改版 → 解析器抓到 0 条 → 报告「无新日程」→ 一切正常 → 直到日历见底。
+
+所以每个源都要求解析出足够条目（CPI/NFP ≥ 12、FOMC ≥ 8、GDP ≥ 1），
+达不到一律 `undetermined`（退出码 3），**绝不报健康**。抓取失败同理。
+两条独立单测钉住这一点。
+
+### 它永远不会自己往表里写日期
+
+这是刻意的边界。v0.45.65 修的 bug 本质是「用规律推算代替抄写」；
+如果监视器自动把抓到的日期写进表，等于把同一个错误自动化了——
+解析器对页面结构的每个假设，都会变成一批**看起来像抄来的、实际是程序猜的**日期。
+它只负责喊「去看」，抄写永远人工。单测
+`test_watcher_never_mutates_the_calendar_tables` 守着。
+
+### 三处源站的实际坑
+
+- **BEA 的日期格不带年份**：`<div class="release-date">October 29</div>`，
+  年份只在区块标题里，跨年必歧义。所以 GDP 比对的是**标题里的参考季度**
+  （`GDP (Advance Estimate), 3rd Quarter 2026`），自带年份，无歧义。
+- **bls.gov 用 UA 做准入**：浏览器 UA、`curl/8.4.0`、`python-urllib/3.11` 一律 403；
+  **只要 UA 里有一个邮箱形状的 token 就放行**——实测 `nobody@nowhere.invalid`
+  同样 200，即它只校验格式、不校验地址。默认 UA 因此用占位域，
+  **不把任何私人邮箱写进仓库、也不每周发给 BLS**；想做好公民设
+  `ALPHA_HIVE_CONTACT_EMAIL` 即可。单测断言默认 UA 里没有私人邮箱。
+- **FOMC 页面含历史年份**，解析到 54 个日期属正常（只取 max）；
+  `2025-08-22 (notation vote)` 非两日例会，已跳过。
+
+### 自查抓到一处「列名说谎」
+
+首版渲染打的是「最短表 nfp，覆盖到 2026-10-29，还剩 61 天」——
+**表名取自 `binding_table`（余量最小 = nfp），天数取自 `shortest_table`
+（地平线最短 = gdp）**，两张不同的表被拼进同一句话。阈值逐表不同，
+这两者本就常常不是同一张。已拆成两组各自成套的字段，并加回归测试。
+在治标签诚实性的代码里又犯一次标签谎报，与 v0.45.66 自查抓到的那条同型。
+
+### 首次实跑（2026-08-29，四源全部联通）
+
+```
+✅ cpi   上游最新 2026-12-10（我们已核对到 2026-12-10）
+✅ fomc  上游最新 2028-01-26（我们已核对到 2028-01-26）
+✅ gdp   上游最新参考季度 2026Q3（我们 2026Q3）
+✅ nfp   上游最新 2026-12-04（我们已核对到 2026-12-04）
+```
+
+四张表与上游**逐一吻合**——这同时是对 v0.45.65 抄录的独立复核：
+监视器用完全不同的解析路径重新算出了同样的边界。
+也再次确认：BLS/BEA 的 2027 日程截至今天仍未发布，只能等。
+
+### Added
+- `economic_calendar_watch.py`：四源日程监视器；7 天节流（待办未清时不节流）；
+  退出码 0/1/3 沿用 Step 10-12 约定；状态文件 `cache/economic_calendar_watch.json`（已 gitignore）
+- `~/.claude/scripts/alpha-hive-orchestrator.sh` **Step 13**（⚠️ 该文件不在本仓库，
+  备份 `alpha-hive-orchestrator.sh.bak-20260829_calwatch`）
+- `tests/test_economic_calendar_watch.py`：24 条离线测试（`_fetch` 全部 monkeypatch，不打网络）
+
 
 ## [0.45.66] — 2026-08-29 — 定时扫描一直在走另一条网络链路
 
@@ -152,6 +1330,58 @@ Critical: 1   🚨 【P0 严重】完整流程失败
 （8/28 记的是 `partial`，step2/step3 都标了 timeout），退出码也是 1，
 告警还正确抓到了「未生成日报」。
 **机制是好的，坏的是给人看的横幅、以及告警读错了轮次。**
+
+---
+
+### 二次检查 —— 四条，其中一条会让整个改动在 8/28 那种场景下完全失效
+
+**① 状态被降级：`failed` 又被改回 `partial`（最严重）**
+
+`OVERALL_STATUS` 全脚本有 9 处**无条件**赋值，谁最后跑谁说了算 ——
+而「最后跑」和「最严重」没有关系。`failed` 是本版新引入的更高档位，
+和旧代码里所有无条件的 `partial` 相遇必然出事：
+
+```
+8/28 实际序列：Step 2 超时 → 零产出 → failed
+              Step 3 超时 → partial      ← 把 failed 盖掉
+```
+
+**于是 CRITICAL P0 永远不会响，本次改动等于没做。**
+改法：新增只升不降的 `set_status()`（`success < partial < failed`），
+9 处赋值全部改走它。
+
+**② 我重造了项目已有的闸，而且造得更差**
+
+新写的「本轮产出核验」与第 494 行 v0.45.4 的「标的完整性闸」功能重叠。
+更难看的是实现质量：我用 `|| echo 0`，而它用 `|| echo -1`，
+注释里明确写着为什么不能用 0 ——
+
+> 读失败返回 -1 而不是 0 —— 0 会被下面当成「30 只全丢」误报，
+> 把「无法判定」渲染成一个具体且极端的结论，正是本项目要根除的形状。
+
+**我犯的正是它记着要避免的那个错。** CLAUDE.md「先用装好的工具，再手搓」
+这条又中一次。已删除重复块，改为在既有闸上扩展一个 `-eq 0` 分支。
+
+**③ 空文件被判成成功，还带个绿勾**
+
+`{}` 和坏 JSON 都能通过 `-s` 非空判断，实测输出
+`✅ 本轮产出核验：含 0 只标的` + `status=success`。
+绿勾旁边写着 0 —— 正是 `check_label_honesty` 那条判据要禁的形状
+（标签宣称成功 ⇒ 它管辖的值必须非空）。
+并入既有闸后：`{}` → `failed`；坏 JSON → `partial`/`unknown`（**不是** 0）。
+
+**④ `set_status` 把未知值原样存进去，与自己的注释矛盾**
+
+注释写「未知值按 partial 计，宁可高估不低估」，实现却是
+`OVERALL_STATUS="$1"` —— 真传进一个拼错的状态，`status.json` 里就会出现
+`alert_manager` 不认识的字符串（它只判 `== 'failed'`），等于把一次告警悄悄丢掉。
+已加归一化 + WARN。
+
+另有一次 `bash -n` 抓到的语法错（`elif` 放到了内层 `fi` 之外），未计入。
+
+五种产出情形逐一实测：文件缺失→failed｜`{}`→failed｜坏 JSON→partial/unknown｜
+3/10→partial/incomplete｜10/10→success。
+状态单调性实测：`failed` 后再来 `partial` 仍为 `failed`。
 ## [0.45.65] — 2026-08-29 — 宏观日历：一张会过期的表，和它挂着的假来源
 
 `economic_calendar.py` 的四张硬编码表（FOMC/CPI/NFP/GDP）只排到 2026-12。

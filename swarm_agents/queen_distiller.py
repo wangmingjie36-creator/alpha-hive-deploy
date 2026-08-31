@@ -1095,8 +1095,10 @@ class QueenDistiller:
                 from feedback_loop import BacktestAnalyzer as _BA_ta
                 _snap_dir = str(_Path_ta(__file__).resolve().parent.parent / "report_snapshots")
                 # 缓存 BacktestAnalyzer 实例（避免每标的都重新扫描文件系统）
+                # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
+                # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
                 if not hasattr(self, "_ba_cache"):
-                    self._ba_cache = _BA_ta(directory=_snap_dir)
+                    self._ba_cache = _BA_ta(directory=_snap_dir, clean_t7=True)
                 _snaps = self._ba_cache.get_snapshots_by_ticker(ticker)
                 _t7 = [s for s in (_snaps or []) if s.actual_price_t7 is not None and s.entry_price]
                 if len(_t7) >= _TAF.get("min_samples", 5):

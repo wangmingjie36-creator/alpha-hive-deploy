@@ -67,11 +67,15 @@ _MAX_STRIKES_PER_SIDE = 40      # 每到期日每边最多保留 40 strike（按
 _TS_TARGET_DTE = (25, 55, 85, 150)
 _TS_MIN_DTE, _TS_MAX_DTE = 7, 270
 
-# 本机老 SSL 栈（LibreSSL 2.8.3）扛不住并发 HTTPS：实测 4 并发拉 CBOE 每个挂 50-70s
-# 甚至 SSL EOF，而顺序拉仅 8-11s。故串行化 CBOE 网络请求（信号量限 1）。
+# 串行化 CBOE 网络请求（信号量限 1）：不给对端限流器加压。
 # v0.43.27: 指向全进程唯一的 HTTPS 闸门。此前这把锁只保护 CBOE，
-# yfinance/Finnhub/AlphaVantage 各走各的，照样把老 SSL 栈压垮
-# （2026-08-24 全天 96 次 SSL EOF → Step 2 超时被杀、当天零产出）。
+# yfinance/Finnhub/AlphaVantage 各走各的，不受任何闸门约束
+# （8/24 那天全天 96 次 SSL EOF、Step 2 超时被杀、当天零产出）。
+# ⚠️ 这里原写「本机老 SSL 栈（LibreSSL 2.8.3）扛不住并发」，并附「4 并发挂 50-70s /
+# 顺序 8-11s」的实测——**该归因 2026-08-25 已被重测证伪，那组数字是单次取样**
+# （详见 http_gate 模块 docstring）。顺带：LibreSSL 2.8.3 是系统 /usr/bin/python3
+# 3.9.6 的 TLS 栈，生产扫描跑的是 3.11.1/OpenSSL 1.1.1q，根本不是它。
+# 96 次 EOF 是真的，但根因至今未定——复发时抓现场，别照版本号推断。
 try:
     from http_gate import _GATE as _CBOE_SEM
 except Exception:  # pragma: no cover - 闸门不可得时退回本地锁，至少保住 CBOE
@@ -241,13 +245,17 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
                         skip_staleness_check: bool = False) -> Optional[dict]:
     """拉取 CBOE 延迟报价 JSON，返回 data 段（含 options / current_price / close）；失败返回 None。
 
-    串行化（`_CBOE_SEM` 限 1）：本机老 SSL 栈扛不住并发 HTTPS（实测 4 并发挂 50-70s/SSL EOF），
-    顺序拉仅 8-11s。进程缓存：同标的主链+全链共享一次下载。重试退避：瞬时 SSL EOF 错开即恢复。
+    串行化（`_CBOE_SEM` 限 1）：全进程一次只发一个出站请求，不给 CBOE 的限流器加压
+    （⚠️ **不是**因为并发压垮 TLS 栈——那条归因 2026-08-25 已证伪，见 http_gate docstring）。
+    进程缓存：同标的主链+全链共享一次下载。重试退避：瞬时网络故障错开即恢复。
 
     `skip_staleness_check`：调用方自己有更精确的新鲜度判据时使用（如
     `cloud_snapshot_fetch` 按目标业务日比对，而非本函数默认用的「相对当下时刻」
-    启发式）。跳过时不放弃陈旧数据，但仍照常写缓存——调用方拿到手的就是它
-    要自行核验的那份，同标的后续取数不该在同一次运行里再被这道闸拦第二次。
+    启发式）。跳过时把陈旧 payload **交还给调用方自行裁决**，但
+    **仍然不写缓存**——「陈旧绝不入缓存」是 v0.45.39 立的不变式（写了就等于
+    在进程内又保鲜 120 秒），它与「谁来裁决新鲜度」是两件事，不该被一起关掉。
+    代价为零：调用方拿到陈旧 payload 后立刻抛错，三个解析调用根本不会发生，
+    不存在「缓存未命中导致重复下载」的情形。
     """
     if _SNAPSHOT_PROVIDER is not None:
         snap = _snapshot(ticker)
@@ -272,19 +280,24 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
     last_err = None
     for attempt in range(retries):
         try:
-            with _CBOE_SEM:  # 串行化：避免并发压垮本机 SSL 栈
+            with _CBOE_SEM:  # 串行化：不给对端限流器加压（非 TLS 栈原因，见 http_gate）
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 raw = urllib.request.urlopen(req, timeout=timeout).read()
             data = (json.loads(raw) or {}).get("data") or {}
             if not data.get("options"):
                 _log.warning("CBOE %s 返回空期权链", ticker)
                 return None
-            # v0.45.39：陈旧 CDN 文件在此拦下。**不写缓存** ——
-            # 写了就等于把陈旧数据在进程内又保鲜 120 秒。
-            if _payload_is_stale(ticker, data) and not skip_staleness_check:
+            # v0.45.39：陈旧 CDN 文件在此拦下。
+            # 两件独立的事，别绑在一起（v0.45.88）：
+            #   ① 要不要**丢弃** —— 可以让权给判据更准的调用方（skip_staleness_check）
+            #   ② 要不要**入缓存** —— 永远不。写了就等于把陈旧数据在进程内又保鲜
+            #      120 秒，这是 v0.45.39 立的不变式，与①无关，不该被一起关掉。
+            stale = _payload_is_stale(ticker, data)
+            if stale and not skip_staleness_check:
                 return None
-            with _cache_lock:
-                _payload_cache[key] = (now, data)
+            if not stale:
+                with _cache_lock:
+                    _payload_cache[key] = (now, data)
             return data
         except Exception as e:  # 网络/SSL/解析失败 → 退避重试
             last_err = e
@@ -575,9 +588,11 @@ def fetch_cboe_iv_term_structure(
     """从 CBOE 全链算 ATM IV 期限结构（供 options_analyzer 主源）。
 
     为什么走 CBOE 而不是 yfinance：yfinance 路径要 1 次 `.options` + 4 次
-    `option_chain()` 共 **5 次额外网络往返**，在本机老 SSL 栈上大面积抛
-    SSLError；实测 2026-08-24 那批 12 只标的有 7 只期限结构 pts=0，页面显示
-    「0.0% / 0.0%」。CBOE 是**一次请求拿全部到期日**，已进 `http_gate` 闸门，
+    `option_chain()` 共 **5 次额外网络往返**，8/24 当天大面积抛 SSLError；
+    实测那批 12 只标的有 7 只期限结构 pts=0，页面显示「0.0% / 0.0%」。
+    （⚠️ 原注把这些 SSLError 归因于「本机老 SSL 栈」，该归因 2026-08-25 已证伪，
+    见 http_gate docstring；但"少发 4 次请求"这个收益与根因无关，照样成立。）
+    CBOE 是**一次请求拿全部到期日**，已进 `http_gate` 闸门，
     且 `_fetch_cboe_payload` 有进程缓存——主链已拉过时**零额外网络开销**。
 
     ATM 容差：`max(4%×S, 1.2×中位行权价间距)`。纯百分比容差对低价股会归零

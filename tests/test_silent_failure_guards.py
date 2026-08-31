@@ -329,6 +329,10 @@ class TestCollectDataEmitsNullNotZero:
         assert 'round(float(sdet.get("crowding_score", 0)), 1)' not in src
 
 
+class _RealNetworkAttempted(RuntimeError):
+    """测试期间任何真实出网都应立刻炸掉，而不是慢慢地超时。"""
+
+
 class TestAgentsSurviveFullyDegradedData:
     """上游诚实化必须**同一批**改下游——否则 None 只是把崩溃点搬了个家。
 
@@ -336,12 +340,144 @@ class TestAgentsSurviveFullyDegradedData:
     0.0 改成 None 后，`buzz_bee.py` 的 `vol20 > _vlt.get("extreme", 60)`
     当场 TypeError，**30/30 只标的的 BuzzBee 全崩**、BearBee 28 只。
     单元测试当时全绿——因为没有一条测试喂过"全部字段皆缺"的数据。
+
+    ⚠️ 本类只验证一件事：**全字段皆 None 时不崩、且给得出分**。
+    它不验证任何取数源，因此一次外网都不该打（见 `_offline` / `_no_network`）。
     """
 
     FULLY_DEGRADED = {
         "price": 100.0, "momentum_5d": None, "volume_ratio": None,
         "volatility_20d": None, "avg_volume": 0, "data_source": "fallback",
     }
+
+    # ── 各协作源「这一轮什么都没拿到」的固定返回 ──────────────────────
+    # 键名照抄各自函数 docstring 里承诺的形状；值一律取"不可用"档，
+    # 与 FULLY_DEGRADED 同一个意思。**不要**改成一份好数据——那会把本类
+    # 唯一要走的降级路径绕过去，测试就变成永真了。
+    _DEGRADED_NEWS = {
+        "ticker": "NVDA", "articles": [], "total_articles": 0,
+        "bullish_count": 0, "bearish_count": 0, "neutral_count": 0,
+        "sentiment_score": None, "dominant_theme": "",
+        "source": "unavailable", "is_real_data": False,
+    }
+    _DEGRADED_REDDIT = {
+        "ticker": "NVDA", "rank": None, "mentions": 0, "mention_delta": 0,
+        "momentum": 0, "reddit_buzz": "quiet", "sentiment_score": None,
+        "is_fallback": True,
+    }
+    _DEGRADED_YAHOO = {
+        "ticker": "NVDA", "is_trending": False, "rank": None,
+        "attention_score": 0.0, "is_real_data": False, "description": "",
+    }
+    _DEGRADED_FEAR_GREED = {
+        "value": None, "classification": "unavailable",
+        "sentiment_score": None, "is_real_data": False,
+    }
+
+    @pytest.fixture(autouse=True)
+    def _offline(self, monkeypatch):
+        """把三只蜂 analyze() 会打网的**叶子**取数源换成「取不到」的固定返回。
+
+        为什么必须有：本测试原先只 stub 了 `_get_stock_data`，然后直接调真实的
+        `analyze()`——于是 apewisdom.io / Alpha Vantage / SEC EDGAR / CBOE /
+        yfinance 全被打了一遍。2026-08-29 全量跑里 BuzzBee 这条参数化因
+        apewisdom 读超时（15s + urllib3 重试）撞上 `--timeout=60` 变红，
+        隔离重跑 44s 通过、全量重跑也通过——典型联网 flake。而 addopts 里有
+        `-x`，这一条 flake 会把整套掐断。
+
+        stub 打在**叶子**（各取数模块）而不是中间聚合层，是为了让
+        `get_real_crowding_metrics` / `CrowdingDetector` / 7 通道加权 /
+        看空评分这些**真实逻辑仍然跑**——它们才是这道闸要保护的东西。
+
+        这些模块内都是 `from X import Y` 的函数内导入，运行时才从模块对象上
+        取名字，所以 patch 源模块即可生效，无需逐个 patch 导入方。
+        """
+        import importlib
+
+        def _stub(module: str, attr: str, value):
+            monkeypatch.setattr(importlib.import_module(module), attr, value)
+
+        # BuzzBee 的 4 个外部通道（Reddit / 新闻 / Yahoo 热搜 / F&G）
+        _stub("reddit_sentiment", "get_reddit_sentiment",
+              lambda *_a, **_k: dict(self._DEGRADED_REDDIT))
+        _stub("newsapi_client", "get_ticker_news",
+              lambda *_a, **_k: dict(self._DEGRADED_NEWS))
+        _stub("yahoo_trending", "get_ticker_attention",
+              lambda *_a, **_k: dict(self._DEGRADED_YAHOO))
+        _stub("fear_greed", "get_fear_greed",
+              lambda *_a, **_k: dict(self._DEGRADED_FEAR_GREED))
+
+        # BearBee：SEC EDGAR 内幕交易 + 期权链（后者内部走 cboe_options）
+        # 两处调用方都是 `if not data:` 判空后才用，空 dict 即"没拿到"。
+        _stub("sec_edgar", "get_insider_trades", lambda *_a, **_k: {})
+
+        class _OfflineOptionsAgent:
+            def analyze(self, *_a, **_k):
+                return {}
+
+        _stub("options_analyzer", "OptionsAgent", _OfflineOptionsAgent)
+
+        # yfinance：BearBee 的 PE/空头仓位、RivalBee 的 EPS 共识与技术指标，
+        # 以及 real_data_sources.get_short_interest 都从这里出网。
+        # 直接换掉 Ticker 类——顺带绕开 yf_gate 的限流令牌等待。
+        import pandas as pd
+        import yfinance
+
+        class _OfflineTicker:
+            """取不到任何东西时 yfinance 的形状：info/fast_info 空、K线空表。"""
+
+            def __init__(self, *_a, **_k):
+                pass
+
+            @property
+            def info(self):
+                return {}
+
+            @property
+            def fast_info(self):
+                return {}
+
+            def history(self, *_a, **_k):
+                return pd.DataFrame()
+
+        monkeypatch.setattr(yfinance, "Ticker", _OfflineTicker)
+        monkeypatch.setattr(yfinance, "download",
+                            lambda *_a, **_k: pd.DataFrame(), raising=False)
+
+    @pytest.fixture(autouse=True)
+    def _no_network(self, monkeypatch):
+        """出网即炸的绊线——`_offline` 漏了谁，这里立刻点名。
+
+        单靠 stub 清单会**悄悄腐烂**：谁给 BuzzBee 加第 8 个通道，
+        清单不会自己长出一行，测试只会慢慢变回原来的联网 flake。
+        本 fixture 让"漏了一个源"从 15s 超时变成一行带调用栈的断言。
+
+        这正是 conftest 里那条教训的同一形状（`_block_same_day_macro`
+        docstring：加数据源时必须同时确认「测试里它被关掉了吗」，
+        v0.45.60 / v0.45.61 连漏两次）。
+        """
+        import socket
+        import traceback
+
+        attempts = []
+
+        def _trip(*_a, **_k):
+            frames = [
+                f"{f.filename.split('/')[-1]}:{f.lineno} {f.name}"
+                for f in traceback.extract_stack()
+                if "/site-packages/" not in f.filename and "test_silent" not in f.filename
+            ][-3:]
+            attempts.append(" <- ".join(reversed(frames)))
+            raise _RealNetworkAttempted(attempts[-1])
+
+        monkeypatch.setattr(socket, "create_connection", _trip)
+        monkeypatch.setattr(socket.socket, "connect", _trip)
+        monkeypatch.setattr(socket, "getaddrinfo", _trip)
+        yield
+        assert not attempts, (
+            "本测试不该打任何外网，但有人出网了——多半是新增了一个取数源而"
+            f"`_offline` 没跟着加一行：\n  " + "\n  ".join(dict.fromkeys(attempts))
+        )
 
     @pytest.mark.parametrize("agent_path,cls_name", [
         ("swarm_agents.buzz_bee", "BuzzBeeWhisper"),
@@ -358,6 +494,21 @@ class TestAgentsSurviveFullyDegradedData:
         assert result.get("error") != "agent_failure", f"{cls_name} 崩了"
         assert "failed" not in str(result.get("discovery", ""))
         assert result.get("score") is not None
+
+        # ⚠️ v0.45.71：上面三条**全部恒真**，一条也拦不住崩溃。原样保留（不改既有
+        # 意图），真正生效的是下面这条。实测复现：把 v0.45.3 那道 None 守卫拆掉、
+        # 让 BuzzBee 在 `vol20 > _vlt.get("extreme", 60)` 当场 TypeError——
+        # 三条依然全绿，因为 `make_error_result` 的兜底返回与正常返回同形：
+        #   · error = str(e)，即 "'>' not supported between..."，
+        #     从来不是 "agent_failure"——该字面量全仓**只出现在上面那行断言里**，
+        #     生产代码里一次都没产出过，等于在和一个不存在的值比较；
+        #   · discovery = "Error: ..."，含 "Error" 不含 "failed"；
+        #   · score = 5.0（崩溃兜底值），永远不是 None。
+        # 也就是说：这道为 v0.45.3 崩溃写的闸，拦不住 v0.45.3 的崩溃。
+        # 正是本文件开头那个形状——没有报错、退出码为 0，但产出早已是假的；
+        # 也是 MEMORY「静默中性化」记的那条：score=5.0/confidence=0.0 与真实
+        # 中性同形，要分辨真伪得看 error/confidence/details 是否为空。
+        assert not result.get("error"), f"{cls_name} 崩了：{result.get('error')}"
 
 
 class TestNoTickerMayBeDropped:
