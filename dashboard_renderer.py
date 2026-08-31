@@ -1382,7 +1382,7 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
         return (
             '<div class="actionable-empty" style="padding:18px;background:rgba(148,163,184,.08);'
             'border-left:4px solid #94a3b8;border-radius:6px;margin:12px 0">'
-            '<div style="font-weight:700;color:var(--mt);margin-bottom:6px">今日 Actionable</div>'
+            '<div style="font-weight:700;color:var(--tm);margin-bottom:6px">今日 Actionable</div>'
             '<div style="color:var(--ts);font-size:.95em">'
             '今日无强信号通过 4 重门控（score 极端 + 蜂群一致 + 近期催化剂 + 不在 risk-off）。'
             '<b>建议观望</b>，避免低置信度交易。'
@@ -1427,9 +1427,9 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
     <div style="font-size:1.4em;font-weight:800;color:{border};margin-bottom:4px">
       {tk} · {score:.1f}分 · <span style="font-size:.7em;background:{border};color:#fff;padding:2px 8px;border-radius:4px">{label}</span>
     </div>
-    <div style="color:var(--t);font-size:.92em;margin-bottom:3px"><strong>{action}</strong></div>
-    {f'<div style="color:var(--mt);font-size:.86em;margin-top:2px">{cat_text}</div>' if cat_text else ''}
-    {f'<div style="color:var(--mt);font-size:.86em;margin-top:2px">{unusual_text}</div>' if unusual_text else ''}
+    <div style="color:var(--tp);font-size:.92em;margin-bottom:3px"><strong>{action}</strong></div>
+    {f'<div style="color:var(--tm);font-size:.86em;margin-top:2px">{cat_text}</div>' if cat_text else ''}
+    {f'<div style="color:var(--tm);font-size:.86em;margin-top:2px">{unusual_text}</div>' if unusual_text else ''}
     <div style="color:var(--ts);font-size:.78em;margin-top:4px">{std_text}</div>
   </div>
   <a href="#tk-{tk}" style="text-decoration:none;color:{border};font-weight:700;
@@ -1895,7 +1895,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                         f'border-bottom:1px dashed rgba(148,163,184,.2)">'
                         f'<span style="color:{side_color};font-weight:600">${w["strike"]:.0f}{exp_tag}</span>'
                         f'<span style="color:var(--ts);font-size:.85em">{pct_str}</span>'
-                        f'<span style="color:var(--t);font-weight:500">{oi_str}</span>'
+                        f'<span style="color:var(--tp);font-weight:500">{oi_str}</span>'
                         f'</div>'
                     )
                 return ''.join(rows)
@@ -1903,7 +1903,7 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             _full_oi_html = f'''
             <div class="full-oi-card" style="background:rgba(99,102,241,.06);border:1px solid rgba(99,102,241,.25);
                 border-radius:8px;padding:10px 12px;margin:10px 0">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:.85em;font-weight:700;color:var(--mt)">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:.85em;font-weight:700;color:var(--tm)">
                 <span>全链 OI 视图</span>
                 <span style="font-size:.7em;color:var(--ts);font-weight:400">影响价格判断核心</span>
               </div>
@@ -1917,12 +1917,12 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                 </div>
                 <div style="background:rgba(0,0,0,.18);border-radius:6px;padding:6px 8px">
                   <div style="font-size:.7em;color:var(--ts)">近端磁吸目标价</div>
-                  <div style="font-size:1.15em;font-weight:700;color:var(--t)">{_mp_str}</div>
+                  <div style="font-size:1.15em;font-weight:700;color:var(--tp)">{_mp_str}</div>
                   {_mp_compare}
                 </div>
               </div>
               <div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0 3px">
-                <div style="font-size:.7em;color:var(--ts)">OI 墙位 · <b style="color:var(--mt)">{_wall_label}</b></div>
+                <div style="font-size:.7em;color:var(--ts)">OI 墙位 · <b style="color:var(--tm)">{_wall_label}</b></div>
                 <div style="font-size:.62em;color:var(--ts)">数据={int(_detd.get("near_call_total") or 0):,}C / {int(_detd.get("near_put_total") or 0):,}P {f"(近端P/C {_detd.get('near_pc'):.2f})" if _detd.get('near_pc') else ""}</div>
               </div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
@@ -2603,7 +2603,7 @@ def render_dashboard_html(report: Dict, date_str: str,
         <strong>方法学</strong>：${int(_initial_capital/1000)}K 起始资金，每笔固定 ${int(_initial_capital * _pos_pct)}（{_pos_pct*100:.0f}% 仓位、不复利），
         -5% 硬止损 / +10% 止盈（盘中触发，跳空时 gap-aware），扣滑点 + 佣金 + 借券费（空头）。
         <span style="color:#e99;">Gross 曲线不扣成本（参考），Net 曲线 = 真实可拿收益。</span>
-        <span style="color:var(--mt);">Sharpe 已年化（×√36，T+7 周期）。</span>
+        <span style="color:var(--tm);">Sharpe 已年化（×√36，T+7 周期）。</span>
       </div>
       <div id="tradingStatsCards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
     </div>
