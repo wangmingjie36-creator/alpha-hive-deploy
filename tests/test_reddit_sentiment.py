@@ -360,3 +360,77 @@ class TestRedditSentimentClient:
         # Different positions should generally yield different scores
         # (both are high-rank so scores may be close, but mentions differ)
         assert nvda["mentions"] != tsla["mentions"]
+
+
+# ==================== TestNullFieldsFromUpstream (v0.45.89) ====================
+
+class TestNullFieldsFromUpstream:
+    """上游把字段显式置成 null 时不得让整只蜂 raise。
+
+    2026-09-01 生产实测：QCOM 一次打死 BuzzBeeWhisper + ScoutBeeNova。
+    根因是 `.get(k, 默认值)` —— 默认值只在键**不存在**时生效，
+    键在、值是 None 时它永不触发，None 漏进 `mentions - mentions_24h`。
+    """
+
+    def _client(self, monkeypatch, results):
+        _noop_limiter(monkeypatch)
+        _mock_session(monkeypatch, _make_apewisdom_response(results))
+        from reddit_sentiment import RedditSentimentClient
+        return RedditSentimentClient()
+
+    def test_null_mentions_24h_does_not_raise(self, monkeypatch):
+        c = self._client(monkeypatch, [
+            {"ticker": "QCOM", "rank": 7, "mentions": 40,
+             "mentions_24h_ago": None, "upvotes": 90},
+        ])
+        r = c.get_ticker_sentiment("QCOM")          # 修复前：TypeError
+        assert r["ticker"] == "QCOM"
+        assert r["mentions"] == 40
+
+    def test_unknown_baseline_does_not_fabricate_hot(self, monkeypatch):
+        """基线未知 ≠ 基线为 0。
+
+        若把 None 折成 0，会走进 `momentum_pct = 100.0 if mentions > 0` 那条
+        分支，凭空造出 momentum=100% → 动量加 1.5 分。这是「安全默认值」
+        最典型的骗法：不崩了，但给下游一个它并不掌握的信息。
+        """
+        c = self._client(monkeypatch, [
+            {"ticker": "QCOM", "rank": 7, "mentions": 40,
+             "mentions_24h_ago": None, "upvotes": 90},
+        ])
+        r = c.get_ticker_sentiment("QCOM")
+        assert r["momentum_pct"] == 0.0, "基线未知时不得报出正动量"
+        assert r["reddit_buzz"] != "hot"
+
+    def test_genuine_zero_baseline_still_reports_100(self, monkeypatch):
+        """回归护栏：真实的 0 基线（新票首次上榜）行为必须保持不变。
+
+        这条和上一条构成一对——修复只能区分 None 与 0，不能把 0 也压平。
+        """
+        c = self._client(monkeypatch, [
+            {"ticker": "NEWX", "rank": 12, "mentions": 40,
+             "mentions_24h_ago": 0, "upvotes": 90},
+        ])
+        r = c.get_ticker_sentiment("NEWX")
+        assert r["momentum_pct"] == 100.0
+
+    def test_null_rank_treated_as_unranked(self, monkeypatch):
+        """rank=None 走 999（没进前 100），且不得在 `rank <= 5` 处崩。
+
+        本模块自己就在造这个 None：_quiet_result() 返回 "rank": None。
+        """
+        c = self._client(monkeypatch, [
+            {"ticker": "QCOM", "rank": None, "mentions": 40,
+             "mentions_24h_ago": 20, "upvotes": 90},
+        ])
+        r = c.get_ticker_sentiment("QCOM")
+        assert r["reddit_buzz"] in ("hot", "rising", "cooling", "quiet")
+
+    def test_null_mentions_and_upvotes(self, monkeypatch):
+        c = self._client(monkeypatch, [
+            {"ticker": "QCOM", "rank": 7, "mentions": None,
+             "mentions_24h_ago": None, "upvotes": None},
+        ])
+        r = c.get_ticker_sentiment("QCOM")
+        assert r["mentions"] == 0
+        assert r["sentiment_score"] >= 0.0

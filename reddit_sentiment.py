@@ -157,14 +157,31 @@ class RedditSentimentClient:
             _fetch_failed = not all_stocks and not wsb
             return self._quiet_result(ticker, is_fallback=_fetch_failed)
 
-        mentions = primary.get("mentions", 0)
-        mentions_24h = primary.get("mentions_24h_ago", 0)
-        upvotes = primary.get("upvotes", 0)
-        rank = primary.get("rank", 999)
+        # v0.45.89：**别用 `.get(k, 默认值)` 挡 None。** 默认值只在键"不存在"时
+        # 生效；上游把值显式置成 null（键在、值是 None）时它永不触发，None 就
+        # 一路漏到下面的减法 —— `mentions - None` → TypeError，整只蜂 raise。
+        # 2026-09-01 实测：QCOM 一次打死 BuzzBeeWhisper + ScoutBeeNova 两只。
+        # 讽刺的是本模块自己就在造 None：`_quiet_result()` 返回 `"rank": None`。
+        def _num(key, default):
+            v = primary.get(key)
+            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+
+        mentions = _num("mentions", 0)
+        upvotes = _num("upvotes", 0)
+        rank = _num("rank", 999)          # None = 没进前 100，999 正是这个意思
+
+        # mentions_24h_ago 要分三态，不能和上面一样一律折成 0：
+        # 「基线未知」≠「基线为 0」。折成 0 会走进下面 100.0 那条分支，
+        # 凭空造出一个 momentum=100% → buzz="hot" → 动量加 1.5 分的假信号。
+        _24h_raw = primary.get("mentions_24h_ago")
+        _24h_known = isinstance(_24h_raw, (int, float)) and not isinstance(_24h_raw, bool)
+        mentions_24h = _24h_raw if _24h_known else 0
 
         # 计算提及量变化
         mention_delta = mentions - mentions_24h
-        if mentions_24h > 0:
+        if not _24h_known:
+            momentum_pct = 0.0            # 基线未知 → 不给动量分，也不扣
+        elif mentions_24h > 0:
             momentum_pct = (mention_delta / mentions_24h) * 100
         else:
             momentum_pct = 100.0 if mentions > 0 else 0.0
@@ -213,7 +230,11 @@ class RedditSentimentClient:
 
         # WSB 额外信号
         if wsb_match:
-            wsb_rank = wsb_match.get("rank", 999)
+            # v0.45.89：同一个坑的第二处。上面 primary 用 _num() 挡住了 None，
+            # 这里的 wsb_match 是**另一个字典**，`.get("rank", 999)` 同样挡不住
+            # 显式 null，`wsb_rank <= 5` 照样 TypeError。
+            _wr = wsb_match.get("rank")
+            wsb_rank = _wr if isinstance(_wr, (int, float)) and not isinstance(_wr, bool) else 999
             if wsb_rank <= 5:
                 score += 0.5  # WSB 焦点
                 buzz = "hot" if buzz != "hot" else buzz
