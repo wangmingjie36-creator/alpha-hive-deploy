@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.90] — 2026-09-01 — 占位（进行中：twelve_data end_date 语义与 docstring 不符，判定 off-by-one 还是有意排除当日）
+
+---
+
 ## [0.45.89] — 2026-09-01 — 修好限流之后，扫描反而超时了
 
 ⚠️ **本条改的是 `~/.claude/scripts/alpha-hive-orchestrator.sh`，该文件不在本仓库**
