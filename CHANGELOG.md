@@ -5,7 +5,98 @@
 
 ---
 
-## [0.45.90] — 2026-09-01 — 占位（进行中：twelve_data end_date 语义与 docstring 不符，判定 off-by-one 还是有意排除当日）
+## [0.45.90] — 2026-09-01 — Twelve Data `end_date` 左闭右开，补跑的 RV 一直少一个交易日
+
+### 现象
+
+`twelve_data.fetch_daily_closes` 的 docstring 承诺「取**截至该日（含）**的窗口」，
+但 `_fetch_rows` 把 `end_date` 原样透传给接口，而 Twelve Data 对日线是**左闭右开**的
+—— 目标日那根不返回。2026-09-01 实测（NVDA，`outputsize=15`）：
+
+| 调用 | 末根 | 收盘 |
+|---|---|---|
+| `_fetch_rows("NVDA", 15, "2026-08-31")` | 2026-08-28 | 217.55 |
+| `_fetch_rows("NVDA", 8, None)` | 2026-08-31 | 220.78 |
+
+8/29–8/30 是周末，所以这正好差**一个交易日**。
+
+唯一真正传这个参数的生产路径是 `market_intelligence.calculate_iv_rv_spread`
+的补跑腿（`_td_rv(..., end_date=_target)`），也就是说：**补跑 D 的报告，
+它那份「D 的 RV30」其实是截至 D 前一个交易日的。**
+
+### 判定：off-by-one，不是「有意排除当日」
+
+「有意排除」这个读法不是没影子 —— 实时扫描当天窗口末端确实是 D-1
+（`_drop_forming_bar` 丢掉美东当日那根），当前的错误行为恰好和它对齐。
+但它站不住，四条理由：
+
+1. **docstring 明写「含」**，`market_intelligence` v0.45.61 那条注释也把
+   「窗口末端恰好是目标日」当作**正确**状态在描述（"对次日补跑影响小"）——
+   作者要的就是含，只是没验成没成。
+2. **`_drop_forming_bar` 和 `end_date` 管的不是一件事。** 前者判「这根还没
+   走完」（`date >= 美东当日`），是**运行时**的数据质量护栏；后者说「窗口画到哪」。
+   补跑 D 时 D 那根早已收完，根本没有半根可言 —— 实时少那一根是**跑得早的
+   限制**，不是口径约定。
+3. **压根不存在可对齐的「D-1 口径」。** 同一个 `calculate_iv_rv_spread` 里的
+   yfinance 兜底腿走 `yf.download(period=...)`、没有 forming-bar 闸、当天那根照收。
+   两条腿本来就差一根，没有一致的「as-known-before-D」政策要保。
+4. **不构成前视。** 补跑 D 的报告在 D 收盘后才发（编排器时间闸 13:30 PDT =
+   16:30 ET），D 的收盘价那时已是公开信息；HV30 的标准定义本来就含当日。
+
+反方唯一有分量的理由是「补跑值与实时值口径混用」。查过了，**没牙**：
+`rv_30d` / `iv_rv_spread` 只出现在 `report_formatters`（展示）和
+`scan_coverage_gate`（只查有没有），在 `signal_archive` / `replay_scoring` /
+`feedback_loop` 里**一次都没有** —— 不是评分维度，不进 IC 管道。
+一根 bar 的窗口平移影响不到任何测量。
+
+顺带一个旁证：修完之后 `RV30 @2026-08-31` 与 `RV30 live` 完全相等（44.84），
+因为今天 9/1 那根是半根、被丢掉，实时窗口末端也是 8/31 —— 补跑与实时
+在**该当一致的时候**终于一致了。修复前补跑那条路比实时路**掌握的信息还少**。
+
+### Fixed
+
+- **`twelve_data.py` 新增 `_api_end_date()`**：把调用方的「含该日」翻成接口的
+  「不含」，+1 个自然日。非交易日没有 bar，落到周末/假日不会多带一根
+  （实测 `end_date=2026-08-29` 周六 → 末根仍是 2026-08-28）。
+  解析不了就**原样透传并 warning**（Twelve Data 也收 `YYYY-MM-DD hh:mm:ss`，
+  那种写法自带时刻语义，不该按「日」平移）—— 透传意味着「含」这条承诺本次
+  不成立，必须让日志说出来，不能静默。
+- `_fetch_rows` 调用点改走 `_api_end_date`。三个入口
+  （`fetch_daily_closes` / `fetch_volume_ratio` / `realized_vol`）共用它，语义一致。
+  ⚠️ 生产端 `data_pipeline._fill_volume_from_twelvedata` 目前**不传** `end_date`，
+  只走实时口径；改的是它将来接补跑时会踩的同一个坑。
+
+### Changed
+
+- `fetch_daily_closes` docstring 写实：「含」是**本函数的承诺**，不是接口的行为，
+  差值在 `_api_end_date` 里补掉。`fetch_volume_ratio` / `realized_vol` 补上同样的
+  `end_date` 语义说明（此前 `realized_vol` 完全没提这个参数）。
+- `market_intelligence.py` 与 `tests/test_twelve_data.py::TestBackfillTargetDate`
+  里 v0.45.61 那段叙述补完：「窗口末端恰好是目标日」是**要达到的状态**，
+  v0.45.61 传了 `end_date` 但没验窗口末端，实际并没达到。
+  （MEMORY v0.45.75 教训：结论更新了，代码注释里的副本也得跟着更新。）
+
+### Added
+
+- `tests/test_twelve_data.py::TestEndDateIsInclusive`（5 项）：假接口**照真接口的
+  左闭右开行为**造数据，所以断言钉的是**语义**不是「参数长什么样」。含
+  「末根 == 请求的 end_date」（周一 / 跨周末两种）、`realized_vol` 端到端、
+  **+1 之后 forming-bar 闸仍拦得住美东当日那根**、实时口径零回归。
+- `TestApiEndDateHelper`（4 项）：跨月/跨年/闰年平移、datetime 写法透传、
+  非法值**出声**透传。
+- **mutation check 已跑**：去掉 +1 → 4 红；改成 +2 → 5 红。两个方向都咬得住。
+
+### 已知遗留（本版未动）
+
+- `calculate_iv_rv_spread` 的 **yfinance 兜底腿仍是「最近 N 天」口径**，
+  补跑时给出的 RV 不属于目标日（v0.45.61 就已标注，要改成 start/end 才行）。
+  本版只修了 Twelve Data 主腿。
+- 全量 `pytest --maxfail=99`：**2147 passed / 1 failed**，唯一那条是
+  `test_treasury_yields.py::TestGetYieldCurve::test_caches_within_ttl`，
+  与本次改动无关（本次只碰 `twelve_data.py` + 其测试，且它单独跑也红）。
+  根因是同型的「fixture 日期不从被测时钟倒推」：测试拿 `get_yield_curve()`
+  （**当前** ET 月）去和写死的 `"2026-08-26"` 比「同月，应复用」，
+  月份翻到 9 月就不成立了。已另开任务，不在本版修。
 
 ---
 

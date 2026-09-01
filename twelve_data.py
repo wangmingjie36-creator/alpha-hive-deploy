@@ -160,8 +160,11 @@ def fetch_daily_closes(ticker: str, days: int = 60,
     Parameters
     ----------
     days : 要多少根。`rv_30d` 需要 ≥31 根才能算 30 个收益率。
-    end_date : "YYYY-MM-DD"。给定时取**截至该日**（含）的窗口，用于补跑；
-        `None` = 最新。
+    end_date : "YYYY-MM-DD"。给定时取**截至该日（含）**的窗口，用于补跑；
+        `None` = 最新（末根是最近一个已收完的交易日，当日那根由
+        `_drop_forming_bar` 丢掉）。
+        「含」是本函数的承诺，不是接口的行为 —— Twelve Data 的 `end_date`
+        是**不含**的，差值在 `_api_end_date` 里补掉（v0.45.90）。
 
     Returns
     -------
@@ -179,6 +182,51 @@ def fetch_daily_closes(ticker: str, days: int = 60,
         _log.warning("[%s] Twelve Data 有效收盘价仅 %d 根", ticker, len(closes))
         return None
     return closes
+
+
+def _api_end_date(end_date: str) -> str:
+    """把调用方的「截至该日（**含**）」翻成 Twelve Data 的 `end_date`（**不含**）。
+
+    2026-09-01 实测（NVDA，`outputsize=15`）：
+
+        end_date=2026-08-31 → 末根 2026-08-28 close=217.55
+        end_date=None       → 末根 2026-08-31 close=220.78
+
+    8/29–8/30 是周末，所以这正好差**一个交易日**：接口把 `end_date` 按左闭
+    右开处理，当日那根不返回。而本模块对外的契约（`fetch_daily_closes`
+    docstring）和唯一真正传这个参数的生产消费方
+    （`market_intelligence.calculate_iv_rv_spread` 的补跑路径）要的都是含目标日：
+
+      · HV30 的标准定义就是「截至 D 收盘的 30 个日收益」；
+      · 补跑 D 的报告在 D 收盘后才发（编排器时间闸 13:30 PDT = 16:30 ET），
+        D 的收盘价那时已是公开信息 —— 用它不构成前视。
+
+    所以这里 +1 个自然日抵掉那个开区间。非交易日没有 bar，落到周末/假日也
+    不会多带一根（实测 `end_date=2026-08-29` 周六 → 末根仍是 2026-08-28）。
+
+    ⚠️ 这**不能**由「让 `_drop_forming_bar` 去掉当日」代劳 —— 两者管的不是
+    一件事。那道闸判的是「这根还没走完」（`date >= 美东当日`），是运行时的
+    数据质量护栏；`end_date` 说的是「窗口画到哪」。补跑 D 时 D 那根早已收完，
+    根本没有半根可言。反过来，+1 之后若目标日恰好是今天，当日那根会被拉进来，
+    那道闸照旧拦得住（实测 `end_date=2026-09-02` → 末根仍是 2026-08-31）。
+
+    ⚠️ 也**不要**据此去对齐「实时扫描当天拿到的窗口末端是 D-1」：那不是口径
+    约定，只是 `_drop_forming_bar` 在跑的当下无法确认 D 那根收没收完。同一
+    函数里的 yfinance 兜底腿（`yf.download(period=...)`）压根没有这道闸、
+    当天那根照收 —— 两条腿本来就差一根，没有「D-1 口径」可言。
+
+    解析不了就原样透传：Twelve Data 也收 `YYYY-MM-DD hh:mm:ss`，那种写法自带
+    时刻语义，不该被本函数按「日」平移。
+    """
+    try:
+        import datetime as _dt
+        return (_dt.date.fromisoformat(end_date) + _dt.timedelta(days=1)).isoformat()
+    except (TypeError, ValueError):
+        # 不静默：透传意味着「含目标日」这条承诺在本次调用上不成立，
+        # 得让日志说出来，而不是让调用方以为补偿生效了。
+        _log.warning("end_date=%r 不是纯日期，原样透传（不做含/不含补偿）",
+                     str(end_date)[:40])
+        return end_date
 
 
 def _fetch_rows(ticker: str, days: int,
@@ -200,7 +248,8 @@ def _fetch_rows(ticker: str, days: int,
         "order": "ASC",
     }
     if end_date:
-        params["end_date"] = end_date
+        # 接口是左闭右开的，+1 天才等于调用方要的「含该日」（见 `_api_end_date`）
+        params["end_date"] = _api_end_date(end_date)
 
     rl = _get_limiter()
     if rl is not None and not rl.acquire(timeout=90.0):
@@ -266,6 +315,10 @@ def fetch_volume_ratio(ticker: str, window: int = 20,
 
     **不兜底 1.0** —— 均量算不出（数据不足/为 0/NaN）时置 None，
     绝不让"量比正常"这个假象混进评分（MEMORY 静默降级三件套）。
+
+    `end_date` 与 `fetch_daily_closes` 同义：**截至该日（含）**。
+    （生产端 `data_pipeline._fill_volume_from_twelvedata` 目前只走实时口径、
+    不传这个参数；语义仍与另外两个入口保持一致，免得将来接补跑时又差一根。）
     """
     rows = _fetch_rows(ticker, days=window + 10, end_date=end_date)
     if not rows or len(rows) < window:
@@ -294,6 +347,9 @@ def realized_vol(ticker: str, lookback: int = 30,
     对数收益、`ddof=1`、×√252×100、剔除 |log_ret| > 0.5 的异常跳升。
     口径不一致的话，同一只标的会因为走了哪条源而得到不同的 RV —— 那种
     差异会被误读成波动率变化。
+
+    `end_date` 与 `fetch_daily_closes` 同义：**截至该日（含）**，
+    即窗口末根就是该日的收盘（HV30 的标准定义）。
     """
     import math
 
