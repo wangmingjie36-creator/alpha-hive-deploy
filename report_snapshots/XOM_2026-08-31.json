@@ -1,0 +1,39 @@
+{
+  "ticker": "XOM",
+  "date": "2026-08-31",
+  "composite_score": 7.15,
+  "direction": "bearish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 160.9499969482422,
+  "agent_votes": {
+    "OracleBeeEcho": 9.553846153846154,
+    "GuardBeeSentinel": 7.19,
+    "QueenDistiller": 7.15,
+    "CodeExecutorAgent": 6.5,
+    "ScoutBeeNova": 6.0581689999999995
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": true,
+  "low_conviction_reason": "score_high_guard: 高分 7.2 但情绪 4.5<6 未确认（signal 6.1）→ 仓位减半",
+  "cs_rank": {
+    "final": 0.966,
+    "signal": 0.815,
+    "catalyst": 0.793,
+    "sentiment": 0.519,
+    "odds": 1.0,
+    "risk_adj": 0.793
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-01T04:31:34.807440"
+}
