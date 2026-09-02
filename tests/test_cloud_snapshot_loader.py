@@ -355,3 +355,67 @@ class TestSnapshotModeProbesLoadability:
         with loader.snapshot_mode("2026-08-27") as prov:
             assert prov("NVDA") is not None
             assert prov("ABBV") is not None
+
+
+# ══════════════════════════════════════════════════════════════════
+# 盘中冻结快照默认拒绝（v0.45.88）
+# ══════════════════════════════════════════════════════════════════
+#
+# `vintage_date` 只能证明「属于哪一天」，证不了「是不是那天的**收盘**」。
+# 2026-08-28 的 TMO：CDN 刷新滞后，记录冻在 09:45:27（当日其余 29 只均
+# 15:59~16:00），日期同为 8/28 → vintage 校验放行 → 存下的
+# price_at_fetch=626.325 标着 price_source=cboe_close，而真实收盘 622.18。
+#
+# 判据与 load_market 剔除 degraded_sections 同源：留着比删掉危险——
+# 盘中价与收盘价同形，下游读到 626.325 不会觉得有什么不对。
+
+def _frozen_ticker():
+    d = _ticker_json(price=626.325)
+    d["price_source"] = "cboe_close"          # 名不副实，正是危险所在
+    d["last_trade_time_et"] = f"{DATE}T09:45:27"
+    d["last_trade_lag_min"] = 374.6
+    d["intraday_freeze_suspect"] = True
+    return d
+
+
+def test_freeze_suspect_rejected_by_default(snap_repo):
+    """核心守卫：vintage 合格挡不住它，必须另有一道。"""
+    repo, ref = snap_repo(tickers={"NVDA": _frozen_ticker()})
+    assert csl.load_ticker(DATE, "NVDA", ref=ref, repo=repo) is None
+
+
+def test_freeze_suspect_opt_in_still_available(snap_repo):
+    """不是删数据：显式取用仍可拿到（full_chain_oi 相对可信）。"""
+    repo, ref = snap_repo(tickers={"NVDA": _frozen_ticker()})
+    d = csl.load_ticker(DATE, "NVDA", ref=ref, repo=repo, allow_freeze_suspect=True)
+    assert d is not None and d["price_at_fetch"] == 626.325
+    assert list(d["full_chain_oi"]["call_oi"]) == [90.0, 100.0, 130.0], "数字键还原仍需生效"
+
+
+def test_clean_snapshot_unaffected(snap_repo):
+    """正路不误伤：没打标记的快照照常放行。"""
+    repo, ref = snap_repo()
+    assert csl.load_ticker(DATE, "NVDA", ref=ref, repo=repo) is not None
+
+
+def test_explicit_false_flag_is_not_suspect(snap_repo):
+    """生产端对正常标的写的是 intraday_freeze_suspect=False，不能被当成命中。"""
+    d = _ticker_json()
+    d["intraday_freeze_suspect"] = False
+    d["last_trade_lag_min"] = 0.0
+    repo, ref = snap_repo(tickers={"NVDA": d})
+    assert csl.load_ticker(DATE, "NVDA", ref=ref, repo=repo) is not None
+
+
+def test_two_gates_are_independent(snap_repo):
+    """缺 vintage + 冻结：解开任一个都不够，两道都得显式放行。"""
+    d = _frozen_ticker()
+    d.pop("vintage_date")
+    repo, ref = snap_repo(tickers={"NVDA": d})
+    assert csl.load_ticker(DATE, "NVDA", ref=ref, repo=repo) is None
+    assert csl.load_ticker(DATE, "NVDA", ref=ref, repo=repo,
+                           allow_unverified=True) is None
+    assert csl.load_ticker(DATE, "NVDA", ref=ref, repo=repo,
+                           allow_freeze_suspect=True) is None
+    assert csl.load_ticker(DATE, "NVDA", ref=ref, repo=repo,
+                           allow_unverified=True, allow_freeze_suspect=True) is not None

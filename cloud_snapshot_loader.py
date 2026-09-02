@@ -31,6 +31,20 @@ vintage 双重把关
 缺 `vintage_date` 的（v0.45.36 之前产出）默认拒绝 —— 现存这类快照只有一份，
 而它恰好就是被污染的那份。
 
+盘中冻结快照同样默认拒绝（v0.45.88）
+------------------------------------
+`vintage_date` 只能证明「这份数据属于哪一天」，证不了「它是不是那天的**收盘**」。
+CBOE CDN 对个别符号刷新滞后时，记录会冻在盘中某刻却仍带正确日期——
+2026-08-28 的 TMO 冻在 09:45:27（当日其余 29 只均 15:59~16:00），
+存下的 `price_at_fetch=626.325` 标着 `price_source=cboe_close`，
+而真实收盘是 622.18（差 0.67%）。生产端 v0.45.88 起给这类文件打
+`intraday_freeze_suspect`，消费端据此**默认拒绝**。
+
+判据与隔壁 `load_market` 剔除 `degraded_sections` 同源：**留着比删掉危险**——
+盘中价与收盘价同形，下游读到 626.325 不会觉得有什么不对。
+需要时用 `allow_freeze_suspect=True` 显式取用（`full_chain_oi` 相对可信：
+OI 是日频结算量，盘中与收盘同值）。
+
 用法
 ----
     import cloud_snapshot_loader as csl
@@ -126,10 +140,14 @@ def _restore_numeric_keys(oi: Optional[dict]) -> Optional[dict]:
 
 
 def load_ticker(date: str, ticker: str, *, ref: Optional[str] = None,
-                repo: Optional[str] = None, allow_unverified: bool = False) -> Optional[dict]:
-    """载入某日某标的的快照；不存在或 vintage 不符返回 None。
+                repo: Optional[str] = None, allow_unverified: bool = False,
+                allow_freeze_suspect: bool = False) -> Optional[dict]:
+    """载入某日某标的的快照；不存在、vintage 不符或疑似盘中冻结返回 None。
 
     `allow_unverified=True` 才接受缺 `vintage_date` 的旧快照（v0.45.36 之前产出）。
+    `allow_freeze_suspect=True` 才接受带 `intraday_freeze_suspect` 的快照
+    （v0.45.88，见模块 docstring）——那种文件日期对但记录冻在盘中，
+    `price_source=cboe_close` 名不副实，只有 `full_chain_oi` 相对可信。
     """
     txt = _git_show(f"{SNAPSHOT_SUBDIR}/{date}/{ticker.upper()}.json", ref, repo)
     if not txt:
@@ -144,6 +162,8 @@ def load_ticker(date: str, ticker: str, *, ref: Optional[str] = None,
         return None                      # 旧格式：证不出新鲜度，默认不用
     if v is not None and v != date:
         return None                      # 目录日期与数据自述不符，一律不用
+    if d.get("intraday_freeze_suspect") and not allow_freeze_suspect:
+        return None                      # 日期对但记录冻在盘中，收盘价名不副实
 
     d["full_chain_oi"] = _restore_numeric_keys(d.get("full_chain_oi"))
     return d

@@ -53,6 +53,13 @@ JNJ/ABBV 均为 08-31）。8/28 的 BILI 是同一形状。
   ⚠️ 120 分钟是**启发式**，按 8/28 + 8/31 两天 60 个观测标定，未经更长样本
   验证：命中 TMO(375min) / TMUS(239min) / BILI(294min)，紧邻未命中的是
   DE(100min) / CVX(90min)。收窄会把正常薄流动性标的卷进来。
+- **消费端据此默认拒绝**：`cloud_snapshot_loader.load_ticker` 新增
+  `allow_freeze_suspect`（默认 `False`），带 `intraday_freeze_suspect` 的快照
+  不再被静默取用。判据与隔壁 `load_market` 剔除 `degraded_sections` 同源：
+  **留着比删掉危险**——盘中价与收盘价同形，下游读到 626.325 不会觉得有什么
+  不对。不是删数据：显式传 `True` 仍可取用（`full_chain_oi` 相对可信，
+  OI 是日频结算量，盘中与收盘同值）。
+  没有这一道，`intraday_freeze_suspect` 只是个没人执行的告示。
 
 ### 验证
 
@@ -62,6 +69,9 @@ JNJ/ABBV 均为 08-31）。8/28 的 BILI 是同一形状。
   陈旧（含「不依赖调用方记得清缓存也能补抓到新数据」）、默认行为回归守卫、
   新鲜 payload 不被误伤仍入缓存、冻结阈值边界（盘中/盘后/跨日/不可解析）、
   标记走到 manifest。
+- `tests/test_cloud_snapshot_loader.py` 新增 5 例：冻结快照默认拒绝、显式
+  取用仍可达且数字键还原照常、`intraday_freeze_suspect=False` 不算命中、
+  两道闸互相独立（缺 vintage + 冻结须两个开关都开）。
 - 相关五套件 95 例全通过；实况小子集验证（JNJ/BILI/TMO）：TMO 进
   `vintage_stale` 且补抓触发并如实报「仍陈旧（CDN 卡死，非滞后）」，
   BILI 标记冻结 293 分钟。
