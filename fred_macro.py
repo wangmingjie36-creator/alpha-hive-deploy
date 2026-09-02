@@ -259,6 +259,40 @@ def _same_day_macro_data(as_of: Optional[str] = None) -> Tuple[Dict, Dict[str, s
     return data, sources
 
 
+def _realtime_as_of() -> Optional[str]:
+    """实时口径下，这批宏观数据实际代表**哪一个交易日**。
+
+    v0.45.92：此前实时路径的 `as_of` 恒为 `None`（哨兵，表示"非补跑"），
+    于是日报里的 `macro_context` 没有任何日期戳 —— 读者无法判断它是哪天的。
+
+    ⚠️ 不能直接填"今天"。盘前跑时拿到的实时报价是**上一个交易日的收盘**
+    （2026-09-01 06:49 ET 手动跑过一次，正是这个情形），写成今天就是本项目
+    一路在治的 vintage 污染，比留空更坏。故：16:00 ET 收盘后才把当天算作
+    as_of，否则回退到最近一个已收盘的交易日。
+
+    复用已装好的 `cboe_options._et_now`（ZoneInfo，DST 正确）与
+    `is_trading_day`（含美股假日表），不自己算时区和节假日。
+    推算不出来时返回 `None` —— 诚实留空，不猜。
+    """
+    try:
+        from datetime import timedelta
+        from is_trading_day import is_trading_day
+        from cboe_options import _et_now, _ET_CLOSE
+
+        et = _et_now()
+        d = et.date()
+        # 当天尚未收盘（盘前/盘中），手里的报价还属于上一个交易日
+        if not is_trading_day(d)[0] or et.time() < _ET_CLOSE:
+            d -= timedelta(days=1)
+        for _ in range(10):
+            if is_trading_day(d)[0]:
+                return d.isoformat()
+            d -= timedelta(days=1)
+    except Exception as e:  # noqa: BLE001
+        _log.debug("实时 as_of 推算失败，留空：%s", e)
+    return None
+
+
 def _compose_data_source(as_of, src_map: Dict[str, str], data: Dict,
                          has_fred: bool) -> str:
     """如实汇总本次宏观实际用到的源。
@@ -326,6 +360,12 @@ def _fetch_macro_data() -> Dict:
         # v0.43.24: VIX 单独标源。它可以在 yfinance 全灭时仍由 CBOE 供上，
         # 此时 data_source 仍是 fallback（其余字段确实降级了），但 VIX 是真的。
         "vix_source": "fallback",
+        # v0.45.92：降级路径也要带这两个键，否则消费者拿到"键不存在"，
+        # 与实时路径的"键在、值为 None"无法区分 —— 那正是本项目治过多次的
+        # 静默降级形态。这里的值是兜底常量，不属于任何一天，故 as_of 留 None
+        # 且 mode 明写 fallback，不冒充 realtime。
+        "as_of": None,
+        "as_of_mode": "fallback",
     }
 
     try:
@@ -723,7 +763,12 @@ def _fetch_macro_data() -> Dict:
             "field_sources": dict(_src_map),   # 逐字段来源，空 = 该项走了 yfinance
             "treasury_2y_source": _2y_source,  # treasury_gov / fred / approx_from_5y
             "vix_source": _vix_source,
-            "as_of": _as_of,          # None = 实时口径
+            # v0.45.92：两条路径都给日期戳。
+            # `_as_of` 本身**不能动** —— 它是控制流：非 None 会让上面走
+            # `_asof_history` 对齐历史日，实时路径填了它会改变取数行为。
+            # 所以只改输出，并用 `as_of_mode` 显式承载原先靠 None 表达的区分。
+            "as_of": _as_of or _realtime_as_of(),
+            "as_of_mode": "backfill" if _as_of else "realtime",
         }
 
     except ImportError:
