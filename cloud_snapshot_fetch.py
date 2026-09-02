@@ -120,10 +120,21 @@ def _fetch_one_ticker(ticker: str, business_date: str) -> dict:
 
     `business_date` 是目标业务日；payload vintage 与之不符直接 `StaleVintageError`，
     在昂贵的链解析**之前**抛出——陈旧数据解析得再干净也是错的一天。
+
+    陈旧有两个检出点，都必须归到 `StaleVintageError`：
+      - `cboe_options` 内层（判据＝「此刻应有日期」，随 ET 09:30 变化）
+      - 下面的 `_vintage`（判据＝「目标业务日」，固定）
+    口径不同是刻意的，但**归类必须一致**——否则内层先命中的那些标的会以
+    泛化错误落进普通失败，绕过下面的补抓 pass（v0.45.91 修的就是这个）。
     """
     import cboe_options as co
 
-    payload = co._fetch_cboe_payload(ticker, 15)  # noqa: SLF001 —— 进程缓存入口，见模块 docstring
+    try:
+        # on_stale="raise"：把「陈旧」从「网络失败」里分出来。缺了它，内层
+        # 检出的陈旧会变成 payload=None → 下面那句泛化 RuntimeError → 不进补抓。
+        payload = co._fetch_cboe_payload(ticker, 15, on_stale="raise")  # noqa: SLF001 —— 进程缓存入口，见模块 docstring
+    except co.CboeStaleVintageError as e:
+        raise StaleVintageError(str(e)) from e
     if not payload:
         raise RuntimeError("CBOE payload 为空（网络/403/符号问题）")
 

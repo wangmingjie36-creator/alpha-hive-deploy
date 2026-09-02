@@ -5,7 +5,91 @@
 
 ---
 
-## [0.45.91] — 2026-09-02 — 占位（进行中：CBOE vintage 陈旧信号透传，云端快照补抓从未生效）
+## [0.45.91] — 2026-09-02 — 补抓 pass 从上线起就是死代码：两道 vintage 校验，内层把外层判死了
+
+### 现象
+
+云端快照连着三次单标的失败，错误串完全一致：
+
+| 日期 | 标的 | manifest.failed | manifest.vintage_stale |
+|---|---|---|---|
+| 08-28 | BILI | `RuntimeError: CBOE payload 为空（网络/403/符号问题）` | `[]` |
+| 08-31 | TMO | 同上 | `[]` |
+| 09-01 | BILI | 同上 | `[]` |
+
+而同一次运行的 stderr 明写 `CBOE BILI 数据陈旧：last_trade=2026-08-31，应为 2026-09-01`。
+**审计字段和日志互相矛盾**，而人只会信前者。08-28 那次是人工补抓收的场
+（`0858f4e`，只改 BILI.json + manifest，没动一行代码）。
+
+### 根因：信号在内层被压平
+
+陈旧有两个检出点，判据不同是刻意的，但**归类不一致**：
+
+| | 判据 | 陈旧时 |
+|---|---|---|
+| 内层 `cboe_options._payload_is_stale`（v0.45.39） | 此刻应有日期（随 ET 09:30 变化） | `return None` |
+| 外层 `cloud_snapshot_fetch._vintage`（v0.45.36） | 目标业务日（固定） | `raise StaleVintageError` |
+
+内层先命中，把「陈旧」和「网络失败 / 403 / 空期权链」压进同一个 `None` 出口。
+`_fetch_one_ticker` 拿到 `None` 撞的是泛化兜底：
+
+```python
+payload = co._fetch_cboe_payload(ticker, 15)
+if not payload:
+    raise RuntimeError("CBOE payload 为空（网络/403/符号问题）")   # ← 陈旧标的死在这
+```
+
+于是标的落进 `except Exception` 泛化分支，进 `failed`、**不进 `stale`**。
+而 v0.45.39 的补抓 pass 只遍历 `stale` —— **它自诞生起对自己要治的病从未触发过**。
+今天 BILI 本该被免费补抓一次（大盘段那 20~30 秒是白送的时间窗），实际直接放弃。
+
+连带两处：`vintage_stale` 长期报空（审计字段说谎）；`stale_streak` 只在
+`StaleVintageError` 分支累加、泛化分支反而清零，**市场级中止（连续 3 个）
+对 CDN 陈旧同样永不触发** —— 真到休市日会静默跑完 30 个泛化失败而非正确中止。
+
+### 为什么测试从头到尾没红
+
+`tests/test_cloud_snapshot_vintage.py` 里每个覆盖 `StaleVintageError` 的用例
+都把整个 `_fetch_cboe_payload` 打了桩，交回一份**陈旧 dict**：
+
+```python
+monkeypatch.setattr(co, "_fetch_cboe_payload",
+                    lambda t, to: _payload(last_trade="2026-08-25T16:00:02"))
+```
+
+真实函数对同一份输入返回 `None`。桩造了一个生产中不可能出现的场景，
+测的是一条不存在的路径。v0.45.39 的提交信息其实警告过同型问题
+（「那次没红——测试把整个 `_fetch_cboe_payload` 打了桩绕过缓存」），
+当时只补了缓存那条，没意识到 stale 分类这条同样被架空。
+
+### Fixed
+
+- **`cboe_options.py`**：新增 `CboeStaleVintageError`（带 `ticker` /
+  `vintage_date` / `expected_date`）与 `_fetch_cboe_payload(..., on_stale=...)`。
+  `"none"` 为默认，实时路径行为逐字节不变（三种失败都该降级 yfinance，
+  分辨它们没意义）；`"raise"` 供云端快照使用。
+  `_payload_is_stale` 保留为 `_payload_stale_vintage` 的布尔外壳
+  —— `close_correction.py:277` 仍在用它。
+  ⚠️ 抛点在重试 `try` 内，必须有一条先于兜底 `except Exception` 的
+  `except CboeStaleVintageError: raise`，否则被当成网络故障吞掉、白重试 3 次、
+  最后仍旧 `None`（变异检验实测：日志出现「重试 3 次耗尽」）。
+- **`cloud_snapshot_fetch.py`**：`_fetch_one_ticker` 改用 `on_stale="raise"`，
+  在边界处把 `CboeStaleVintageError` 转成 `StaleVintageError`，
+  让两个检出点归到同一类。补抓 pass 与市场级中止随之真正生效。
+
+### Changed — 测试
+
+- 新增 6 项 `on_stale` 守卫（`tests/test_cboe_live_vintage.py`）：默认口径不变、
+  异常带日期、**不被重试循环吞掉且不重试**、仍不写缓存、其他失败不受影响、
+  日历挂了仍 fail-open。
+- 新增 4 项**组合**守卫（`tests/test_cloud_snapshot_vintage.py`）：只桩网络层，
+  让两道校验真的串起来跑 —— 内层命中也归 `StaleVintageError`、真网络失败仍归泛化、
+  端到端补抓救回、manifest 不许把陈旧报成空。
+- 既有 10 个桩的签名由 `(t, to)` 放宽到 `(t, to, **k)`
+  —— 签名对不上真实函数本身就是这次事故的一部分。
+
+变异检验：撤掉 `on_stale="raise"`，3 个新用例转红而**原有 19 个全绿**
+（正是它们抓不住这个 bug 的证据）；撤掉那条 `except CboeStaleVintageError` 亦转红。
 
 ## [0.45.90] — 2026-09-01 — Twelve Data `end_date` 左闭右开，补跑的 RV 一直少一个交易日
 
