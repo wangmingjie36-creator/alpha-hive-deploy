@@ -1,0 +1,39 @@
+{
+  "ticker": "AMC",
+  "date": "2026-08-31",
+  "composite_score": 6.89,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 2.640000104904175,
+  "agent_votes": {
+    "OracleBeeEcho": 8.876923076923077,
+    "ScoutBeeNova": 7.1671865,
+    "GuardBeeSentinel": 6.94,
+    "QueenDistiller": 6.89,
+    "CodeExecutorAgent": 6.5
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": true,
+  "low_conviction_reason": "score_high_guard: 高分 6.9 但情绪 3.9<6 未确认（signal 7.2）→ 仓位减半",
+  "cs_rank": {
+    "final": 0.828,
+    "signal": 1.0,
+    "catalyst": 0.379,
+    "sentiment": 0.148,
+    "odds": 0.966,
+    "risk_adj": 0.759
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-01T04:31:34.809176"
+}

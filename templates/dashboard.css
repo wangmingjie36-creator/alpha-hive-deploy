@@ -96,10 +96,6 @@ html.dark .hstat{border-right-color:var(--border)}
   border:none;border-bottom:0.5px solid var(--border)}
 .section:first-child{padding-top:0}
 .sec-title{display:none}/* replaced by ah-sec-title */
-/* TOP 6 CARDS */
-.top6-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
-@media(max-width:1024px){.top6-grid{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:500px){.top6-grid{grid-template-columns:1fr}}
 .scard{border:1px solid var(--border);border-radius:13px;overflow:hidden;
    background:var(--surface2);transition:transform .2s,box-shadow .2s,border-color .2s;position:relative}
 .scard:hover{transform:translateY(-4px);box-shadow:0 12px 36px rgba(244,165,50,.14);border-color:var(--acc)}
@@ -362,19 +358,6 @@ transition-duration:.01ms!important;scroll-behavior:auto!important}
 .px-bee-hero{display:inline-block;width:40px;height:40px;vertical-align:middle;
   background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23555'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23F4A532'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23555'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23F4A532'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23c8d6e5' opacity='.7'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23c8d6e5' opacity='.5'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23c8d6e5' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23F4A532' opacity='.5'/%3E%3C/svg%3E") no-repeat center/contain;
   image-rendering:pixelated}
-/* HAMBURGER MENU */
-.hamburger{display:none;background:none;border:none;color:#fff;font-size:1.5em;
-  cursor:pointer;padding:8px;min-height:44px;min-width:44px;z-index:1002}
-.nav-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:998}
-.nav-overlay.open{display:block}
-@media(max-width:768px){
-  .hamburger{display:flex;align-items:center;justify-content:center}
-  .nav-links.open{position:fixed;top:0;right:0;bottom:0;width:min(260px,75vw);display:flex;
-flex-direction:column;background:#0A0F1C;
-padding:calc(var(--nav-h) + env(safe-area-inset-top,0px) + 16px) 16px calc(16px + env(safe-area-inset-bottom,0px));
-z-index:999;border-left:1px solid rgba(244,165,50,.2);box-shadow:-4px 0 20px rgba(0,0,0,.3);overflow-y:auto}
-  .nav-links.open .nav-link{padding:14px 12px;font-size:.95em;border-bottom:1px solid rgba(255,255,255,.06)}
-}
 /* SHARE BAR */
 .share-bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;align-items:center}
 .share-btn{display:inline-flex;align-items:center;gap:5px;padding:7px 15px;border-radius:20px;

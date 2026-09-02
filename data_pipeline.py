@@ -267,10 +267,85 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         # 只保留 <= as_of 的行（防止误传未来日期，或 yfinance 返回多余数据）
         _idx_dates = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
         hist = hist[_idx_dates.date <= as_of]
-        if hist.empty or hist["Close"].iloc[-1] <= 0:
+        # v0.45.69：**先丢掉 Close 为 NaN 的行，再判空。**
+        # 原写法 `hist["Close"].iloc[-1] <= 0` 挡不住 NaN —— NaN 的任何比较
+        # 都返回 False，于是 `price=float(NaN)` 一路流到下游。
+        # 实测 2026-08-29 补跑 8/28（周六跑周五）：yfinance 尾行 Close 是 NaN，
+        # 30 只标的全部拿到 price=NaN。而 NaN 还是 truthy，
+        # `base._get_stock_data` 的 `if not price or price <= 0` 也拦不住它，
+        # 最终 OptionsAgent 收到 stock_price=NaN → ATM 带 [NaN, NaN] 恒不匹配
+        # → raw_ivs 全空 → data_quality 判 degraded → iv_current 回落陈缓存。
+        # 一个 NaN，穿过四道各自写着「<= 0」的守卫。
+        _closes = hist["Close"].dropna()
+        if hist.empty or _closes.empty or _closes.iloc[-1] <= 0:
             fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
             fb["_data_unavailable"] = True
             return fb
+        hist = hist.loc[_closes.index]      # 后续窗口一并用清洗过的行，口径一致
+
+        # v0.45.69 ⚠️ 丢完 NaN 之后必须校验**剩下的最后一行确实是 as_of 当天**。
+        # 否则「丢掉 NaN 行」会静默变成「用前一交易日的收盘价冒充目标日」——
+        # 那正是 2026-08-24 被写进 signal_archive 隔离名单的那种口径污染，
+        # 只不过换了个更隐蔽的入口。
+        # 实测 2026-08-29：yfinance 的 2026-08-28 行 Close=NaN 而 Volume=1.94 亿
+        # （当天确实交易了，只是收盘价拿不到），丢掉后末行变成 8/27 的 227.98，
+        # 而 8/28 的真实收盘按云端 CBOE 快照是 217.55 —— 差 4.8%。
+        _last_dt = hist.index[-1]
+        _last_date = (_last_dt.tz_localize(None) if getattr(_last_dt, "tzinfo", None) else _last_dt).date()
+        if _last_date != as_of:
+            # v0.45.70：yfinance 拿不到目标日收盘时，改问云端快照。
+            # 快照是**目标日收盘后**（约 17:00 ET）从 CBOE 抓的，正是该日的价；
+            # `load_ticker` 内部已校验 `vintage_date == date`，vintage 不符返回 None，
+            # 所以这里不需要再造一道日期闸 —— 造了就是两个口径并存。
+            _snap_px = None
+            try:
+                import cloud_snapshot_loader as _csl
+                _snap = _csl.load_ticker(as_of_date, ticker)
+                if _snap:
+                    _v = _snap.get("price_at_fetch")
+                    if isinstance(_v, (int, float)) and math.isfinite(_v) and _v > 0:
+                        _snap_px = float(_v)
+                        _snap_src = str(_snap.get("price_source") or "cloud_snapshot")
+            except Exception as _e_snap:  # noqa: BLE001 —— 兜底失败不得掩盖主诊断
+                _log.debug("[历史补跑] %s @ %s 云端快照取价跳过: %s", ticker, as_of_date, _e_snap)
+
+            if _snap_px is None:
+                _log.warning(
+                    "[历史补跑] %s @ %s：yfinance 无该日有效收盘价（最近有效行是 %s），"
+                    "云端快照也无 —— **不以前一交易日冒充**，标记不可用",
+                    ticker, as_of_date, _last_date)
+                fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
+                fb["_data_unavailable"] = True
+                fb["_reason"] = f"no_close_on_{as_of_date}"
+                return fb
+
+            _log.info("[历史补跑] %s @ %s：yfinance 无该日收盘（末行 %s），"
+                      "改用云端快照 %.4f（来源 %s）",
+                      ticker, as_of_date, _last_date, _snap_px, _snap_src)
+            _d2 = StockData(
+                price=_snap_px,
+                data_source=DataQuality.REAL,
+                source_name=f"cloud_snapshot:{_snap_src}",
+                fetch_timestamp=time.time(),
+            )
+            # 动量用快照价当最新一档、yfinance 历史当基准 —— 两端都是收盘价，
+            # 口径可比；但要标明它是拼出来的，别当成单一来源的读数。
+            _cl = hist["Close"]
+            if len(_cl) >= 4:
+                _base = float(_cl.iloc[-4])
+                if _base > 0:
+                    _d2.momentum_5d = float((_snap_px / _base - 1) * 100)
+                    _d2.momentum_source = "5d_snapshot_spliced"
+            else:
+                _d2.momentum_5d = None
+                _d2.momentum_source = "unavailable"
+            # ⚠️ volume_ratio 不给：它要拿**目标日**成交量比均量，
+            # 而这条路径下目标日的量本来就没取到。用前一日的量冒充会静默失真。
+            _d2.volume_ratio = None
+            _r2 = _d2.to_dict()
+            _r2["_as_of_date"] = as_of_date
+            _r2["_price_from_cloud_snapshot"] = True
+            return _r2
 
         data = StockData(
             price=float(hist["Close"].iloc[-1]),
@@ -359,7 +434,8 @@ def _fetch_history_metrics(ticker: str) -> Optional[Dict]:
         return _fill_momentum_from_index(ticker, out)
     except Exception as e:
         _log.debug("_fetch_history_metrics %s failed: %s", ticker, e)
-        return _fill_momentum_from_index(ticker, None)
+        out = _fill_momentum_from_index(ticker, None)
+        return _fill_volume_from_twelvedata(ticker, out)
 
 
 def _fill_momentum_from_index(ticker: str, out: Optional[Dict]) -> Optional[Dict]:
@@ -369,8 +445,9 @@ def _fill_momentum_from_index(ticker: str, out: Optional[Dict]) -> Optional[Dict
     因此不受 yfinance 限流影响——而限流恰恰是本函数长期返回 None 的唯一原因
     （2026-08-14 全天 363 条 429）。
 
-    volume_ratio 不回落：自攒序列只有收盘价、没有成交量，硬造一个比值等于
-    编数据。缺就是缺，让下游按 None 处理。
+    volume_ratio 不由本函数回落：自攒序列只有收盘价、没有成交量，硬造一个
+    比值等于编数据。它的回落见下面 `_fill_volume_from_twelvedata`——
+    独立数据源，不是拿这份收盘价索引硬凑。
     """
     if out is not None and out.get("momentum_5d") is not None:
         return out
@@ -387,6 +464,35 @@ def _fill_momentum_from_index(ticker: str, out: Optional[Dict]) -> Optional[Dict
     out["momentum_5d"] = m
     out["momentum_source"] = "price_index"
     _log.info("[%s] momentum_5d 由自攒索引补上: %+.2f%%（yfinance 不可用）", ticker, m)
+    return out
+
+
+def _fill_volume_from_twelvedata(ticker: str, out: Optional[Dict]) -> Optional[Dict]:
+    """yfinance 拿不到 volume_ratio 时，回落 Twelve Data 日K（v0.45.81）。
+
+    独立数据源（800次/天、8次/分免费档，见 `twelve_data.py`），不经 yfinance，
+    不受同一限流影响。未配置 key 或接口失败时安静返回 None，不阻断降级链——
+    与 `_fill_momentum_from_index` 对 momentum_5d 的处理对称。
+
+    不去动 momentum_5d：那条已经有自己的回落路径（自攒价格索引），
+    这里只补 volume_ratio 这一项缺口。
+    """
+    if out is not None and out.get("volume_ratio") is not None:
+        return out
+    try:
+        from twelve_data import fetch_volume_ratio as _td_volume
+        v = _td_volume(ticker)
+    except Exception as e:  # noqa: BLE001
+        _log.debug("[%s] Twelve Data 成交量回落不可用: %s", ticker, e)
+        return out
+    if v is None:
+        return out  # Twelve Data 也没有 → 保持 None，诚实缺数据
+    out = dict(out) if out else {}
+    out["volume_ratio"] = v["volume_ratio"]
+    out["avg_volume"] = v["avg_volume"]
+    out["volume_source"] = "twelvedata"
+    _log.info("[%s] volume_ratio 由 Twelve Data 补上: %.2fx（yfinance 不可用）",
+              ticker, v["volume_ratio"])
     return out
 
 
@@ -585,8 +691,11 @@ class FinnhubSource:
             import json
 
             url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={self.api_key}"
-            # v0.43.27: 必须走全局 HTTPS 闸门。本机 OpenSSL 1.1.1q 扛不住并发，
-            # 而本源自 v0.43.26 接通后才真正开始发请求——正是 8/24 EOF 风暴的新增变量。
+            # v0.43.27: 必须走全局 HTTPS 闸门。本源自 v0.43.26 接通后才真正开始
+            # 发请求（此前拿不到 key、一个请求都不发），是个不受闸门约束的新调用方。
+            # 走闸门的理由是不给 Finnhub 的配额/限流器加压。
+            # ⚠️ 原注称它「正是 8/24 EOF 风暴的新增变量」并归因于 OpenSSL 1.1.1q：
+            # 该归因 2026-08-25 已证伪，8/24 根因未定（见 http_gate docstring）。
             from http_gate import urlopen_gated
             quote = json.loads(urlopen_gated(url, timeout=10).decode())
 

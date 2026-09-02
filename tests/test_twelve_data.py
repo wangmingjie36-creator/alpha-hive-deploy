@@ -265,6 +265,10 @@ class TestBackfillTargetDate:
     `realized_vol` 一开始就支持 `end_date`，但调用处没传 —— 补跑会拿最新窗口
     冒充目标日。对次日补跑影响小（forming-bar 已丢、窗口末端恰好是目标日），
     补跑更早的日子会严重错位。
+
+    ⚠️ 本组只钉「目标日传到了取数层」这一段。传进去之后窗口末端到底落在哪，
+    v0.45.61 并没验 —— 实际差了一个交易日（接口左闭右开），
+    见下面的 `TestEndDateIsInclusive`（v0.45.90）。
     """
 
     def test_target_date_reaches_the_api(self, monkeypatch):
@@ -312,3 +316,148 @@ class TestBackfillTargetDate:
                             (seen.setdefault("end_date", end_date), 36.14)[1])
         mi.calculate_iv_rv_spread("NVDA", 48.61)
         assert seen["end_date"] is None, "非法日期被当成了目标日"
+
+
+# 假日历的终点 = 下面钉住的「美东当日」，两者必须一起改。
+# 日历比时钟长的话，`_drop_forming_bar` 会去咬日历尾巴，测的就不是本意了
+# （MEMORY：fixture 日期要从被测日期倒推，别各写各的）。
+_ET_TODAY = "2026-09-01"          # 实测那天
+
+
+def _trading_days(start: str = "2026-07-01", end: str = _ET_TODAY):
+    """周一~周五（不管假日 —— 假日只会让窗口少一根，不影响本组断言）。"""
+    import datetime as dt
+    d, last, out = dt.date.fromisoformat(start), dt.date.fromisoformat(end), []
+    while d <= last:
+        if d.weekday() < 5:
+            out.append(d.isoformat())
+        d += dt.timedelta(days=1)
+    return out
+
+
+class TestEndDateIsInclusive:
+    """`end_date` 对外语义 = **截至该日（含）**；接口是不含的（v0.45.90）。
+
+    2026-09-01 实测（NVDA，`outputsize=15`）：
+
+        _fetch_rows("NVDA", 15, "2026-08-31") → 末根 2026-08-28 close=217.55
+        _fetch_rows("NVDA",  8, None)         → 末根 2026-08-31 close=220.78
+
+    8/29–8/30 是周末，所以恰好差**一个交易日**：Twelve Data 的 `end_date`
+    左闭右开，当日那根不返回。
+
+    判定为 off-by-one 而不是「有意排除当日、让指标只含该日之前的信息」：
+
+      · `fetch_daily_closes` docstring 明写「截至该日（含）」；
+      · `market_intelligence` 的 v0.45.61 注释把「窗口末端恰好是目标日」当作
+        **正确**状态在描述（"对次日补跑影响小"），即作者要的就是含；
+      · 补跑 D 的报告在 D 收盘后才发（编排器时间闸 13:30 PDT = 16:30 ET），
+        用 D 的收盘价不构成前视，HV30 的标准定义本来就含当日；
+      · 不存在可对齐的「D-1 口径」：同一个 `calculate_iv_rv_spread` 里的
+        yfinance 兜底腿走 `yf.download(period=...)`、没有 forming-bar 闸、
+        当天那根照收 —— 两条腿本来就差一根。
+
+    下面这组假接口**照真接口的左闭右开行为**造数据，所以断言钉的是语义，
+    不是「参数长什么样」—— 把 `_api_end_date` 的 +1 去掉，它们会红。
+    """
+
+    def _fake_api(self, monkeypatch, seen):
+        """模拟 Twelve Data：`end_date` 不含，`outputsize` 从末端往回数。"""
+        import http_gate
+        from urllib.parse import parse_qs, urlparse
+
+        monkeypatch.setattr(td, "api_key", lambda: "k")
+        monkeypatch.setattr(td, "_get_limiter", lambda: None)   # 7 次/分，别在测试里真等
+
+        def _open(req, *a, **k):
+            q = parse_qs(urlparse(req.full_url).query)
+            seen["end_date"] = q.get("end_date", [None])[0]
+            days = _trading_days()
+            if seen["end_date"]:
+                days = [d for d in days if d < seen["end_date"]]   # ← 不含，与真接口一致
+            days = days[-int(q["outputsize"][0]):]
+            return _resp({"values": [
+                {"datetime": d, "close": str(100.0 + i), "volume": "200000000"}
+                for i, d in enumerate(days)]})
+
+        monkeypatch.setattr(http_gate, "urlopen_gated", _open)
+
+    def test_last_bar_is_the_requested_day(self, monkeypatch):
+        """核心不变式：要 2026-08-31（周一，交易日），末根就得是 2026-08-31。"""
+        seen = {}
+        self._fake_api(monkeypatch, seen)
+        monkeypatch.setattr(td, "_et_today", lambda: _ET_TODAY)
+        rows = td._fetch_rows("NVDA", 15, "2026-08-31")
+        assert rows[-1]["date"] == "2026-08-31", (
+            f"窗口末根 {rows[-1]['date']} ≠ 请求的 end_date 2026-08-31 —— "
+            "接口左闭右开，`_api_end_date` 的 +1 天是不是被去掉了？")
+
+    def test_last_bar_is_the_requested_day_across_a_weekend(self, monkeypatch):
+        """目标日是周五时 +1 落到周六 —— 周六没有 bar，不能因此多带一根。"""
+        seen = {}
+        self._fake_api(monkeypatch, seen)
+        monkeypatch.setattr(td, "_et_today", lambda: _ET_TODAY)
+        rows = td._fetch_rows("NVDA", 15, "2026-08-28")
+        assert seen["end_date"] == "2026-08-29", "没有 +1 到周六"
+        assert rows[-1]["date"] == "2026-08-28"
+
+    def test_realized_vol_window_ends_on_the_target_day(self, monkeypatch):
+        """唯一的生产消费方走的是这条链：补跑 D 的 RV 必须含 D 的收盘。"""
+        seen = {}
+        self._fake_api(monkeypatch, seen)
+        monkeypatch.setattr(td, "_et_today", lambda: _ET_TODAY)
+        assert td.realized_vol("NVDA", lookback=30, end_date="2026-08-31") is not None
+        assert seen["end_date"] == "2026-09-01"
+
+    def test_forming_bar_guard_survives_the_shift(self, monkeypatch):
+        """+1 之后目标日若正是今天，当日那根会被拉进来 —— 那道闸必须照旧拦住。
+
+        两道机制管的不是一件事：`end_date` 画窗口，`_drop_forming_bar` 判
+        「这根走完没有」。补上前者不能把后者顶掉。
+        """
+        seen = {}
+        self._fake_api(monkeypatch, seen)
+        monkeypatch.setattr(td, "_et_today", lambda: "2026-08-31")
+        rows = td._fetch_rows("NVDA", 15, "2026-08-31")
+        assert seen["end_date"] == "2026-09-01"
+        assert rows[-1]["date"] == "2026-08-28", "美东当日的半根 bar 漏进来了"
+
+    def test_live_path_is_untouched(self, monkeypatch):
+        """`end_date=None` 不该因为这次修改而改变行为。
+
+        钉的就是 2026-09-01 那次实测：`_fetch_rows("NVDA", 8, None)`
+        末根 2026-08-31 —— 当日（9/1）那根由 forming 闸丢掉。
+        """
+        seen = {}
+        self._fake_api(monkeypatch, seen)
+        monkeypatch.setattr(td, "_et_today", lambda: _ET_TODAY)
+        rows = td._fetch_rows("NVDA", 15, None)
+        assert seen["end_date"] is None, "实时口径不该出现 end_date 参数"
+        assert rows[-1]["date"] == "2026-08-31"
+
+
+class TestApiEndDateHelper:
+    def test_shifts_one_calendar_day(self):
+        assert td._api_end_date("2026-08-31") == "2026-09-01"
+
+    def test_shifts_across_month_and_year_ends(self):
+        assert td._api_end_date("2026-08-31") == "2026-09-01"
+        assert td._api_end_date("2026-12-31") == "2027-01-01"
+        assert td._api_end_date("2028-02-28") == "2028-02-29"   # 闰年
+
+    def test_passes_through_datetime_form(self):
+        """Twelve Data 也收 `YYYY-MM-DD hh:mm:ss`，那种写法自带时刻语义，
+        不该被按「日」平移。"""
+        assert td._api_end_date("2026-08-31 16:00:00") == "2026-08-31 16:00:00"
+
+    def test_garbage_passes_through_loudly(self, monkeypatch):
+        """透传 = 「含该日」这条承诺本次不成立，日志必须说出来，不能静默。
+
+        直接钉 `_log.warning` 而不用 caplog：`hive_logger` 的 handler/propagate
+        配置不该决定这条断言的成败。
+        """
+        said = []
+        monkeypatch.setattr(td._log, "warning",
+                            lambda msg, *a, **k: said.append(msg % a if a else msg))
+        assert td._api_end_date("not-a-date") == "not-a-date"
+        assert any("原样透传" in m for m in said), f"非法 end_date 被静默透传了：{said}"

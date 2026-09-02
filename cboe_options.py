@@ -67,11 +67,15 @@ _MAX_STRIKES_PER_SIDE = 40      # 每到期日每边最多保留 40 strike（按
 _TS_TARGET_DTE = (25, 55, 85, 150)
 _TS_MIN_DTE, _TS_MAX_DTE = 7, 270
 
-# 本机老 SSL 栈（LibreSSL 2.8.3）扛不住并发 HTTPS：实测 4 并发拉 CBOE 每个挂 50-70s
-# 甚至 SSL EOF，而顺序拉仅 8-11s。故串行化 CBOE 网络请求（信号量限 1）。
+# 串行化 CBOE 网络请求（信号量限 1）：不给对端限流器加压。
 # v0.43.27: 指向全进程唯一的 HTTPS 闸门。此前这把锁只保护 CBOE，
-# yfinance/Finnhub/AlphaVantage 各走各的，照样把老 SSL 栈压垮
-# （2026-08-24 全天 96 次 SSL EOF → Step 2 超时被杀、当天零产出）。
+# yfinance/Finnhub/AlphaVantage 各走各的，不受任何闸门约束
+# （8/24 那天全天 96 次 SSL EOF、Step 2 超时被杀、当天零产出）。
+# ⚠️ 这里原写「本机老 SSL 栈（LibreSSL 2.8.3）扛不住并发」，并附「4 并发挂 50-70s /
+# 顺序 8-11s」的实测——**该归因 2026-08-25 已被重测证伪，那组数字是单次取样**
+# （详见 http_gate 模块 docstring）。顺带：LibreSSL 2.8.3 是系统 /usr/bin/python3
+# 3.9.6 的 TLS 栈，生产扫描跑的是 3.11.1/OpenSSL 1.1.1q，根本不是它。
+# 96 次 EOF 是真的，但根因至今未定——复发时抓现场，别照版本号推断。
 try:
     from http_gate import _GATE as _CBOE_SEM
 except Exception:  # pragma: no cover - 闸门不可得时退回本地锁，至少保住 CBOE
@@ -240,8 +244,9 @@ def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: 
 def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optional[dict]:
     """拉取 CBOE 延迟报价 JSON，返回 data 段（含 options / current_price / close）；失败返回 None。
 
-    串行化（`_CBOE_SEM` 限 1）：本机老 SSL 栈扛不住并发 HTTPS（实测 4 并发挂 50-70s/SSL EOF），
-    顺序拉仅 8-11s。进程缓存：同标的主链+全链共享一次下载。重试退避：瞬时 SSL EOF 错开即恢复。
+    串行化（`_CBOE_SEM` 限 1）：全进程一次只发一个出站请求，不给 CBOE 的限流器加压
+    （⚠️ **不是**因为并发压垮 TLS 栈——那条归因 2026-08-25 已证伪，见 http_gate docstring）。
+    进程缓存：同标的主链+全链共享一次下载。重试退避：瞬时网络故障错开即恢复。
     """
     if _SNAPSHOT_PROVIDER is not None:
         snap = _snapshot(ticker)
@@ -266,7 +271,7 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
     last_err = None
     for attempt in range(retries):
         try:
-            with _CBOE_SEM:  # 串行化：避免并发压垮本机 SSL 栈
+            with _CBOE_SEM:  # 串行化：不给对端限流器加压（非 TLS 栈原因，见 http_gate）
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 raw = urllib.request.urlopen(req, timeout=timeout).read()
             data = (json.loads(raw) or {}).get("data") or {}
@@ -569,9 +574,11 @@ def fetch_cboe_iv_term_structure(
     """从 CBOE 全链算 ATM IV 期限结构（供 options_analyzer 主源）。
 
     为什么走 CBOE 而不是 yfinance：yfinance 路径要 1 次 `.options` + 4 次
-    `option_chain()` 共 **5 次额外网络往返**，在本机老 SSL 栈上大面积抛
-    SSLError；实测 2026-08-24 那批 12 只标的有 7 只期限结构 pts=0，页面显示
-    「0.0% / 0.0%」。CBOE 是**一次请求拿全部到期日**，已进 `http_gate` 闸门，
+    `option_chain()` 共 **5 次额外网络往返**，8/24 当天大面积抛 SSLError；
+    实测那批 12 只标的有 7 只期限结构 pts=0，页面显示「0.0% / 0.0%」。
+    （⚠️ 原注把这些 SSLError 归因于「本机老 SSL 栈」，该归因 2026-08-25 已证伪，
+    见 http_gate docstring；但"少发 4 次请求"这个收益与根因无关，照样成立。）
+    CBOE 是**一次请求拿全部到期日**，已进 `http_gate` 闸门，
     且 `_fetch_cboe_payload` 有进程缓存——主链已拉过时**零额外网络开销**。
 
     ATM 容差：`max(4%×S, 1.2×中位行权价间距)`。纯百分比容差对低价股会归零

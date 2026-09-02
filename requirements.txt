@@ -23,8 +23,6 @@ jinja2>=3.1.0,<4
 # LLM 服务（Claude API）
 # anthropic>=0.25.0,<1
 
-# 多 Agent 框架（CrewAI）
-# crewai>=0.1.0
 
 # 向量数据库（长期记忆）
 # chromadb>=0.4.0

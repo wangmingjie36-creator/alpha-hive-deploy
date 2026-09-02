@@ -323,14 +323,29 @@ class GuardBeeSentinel(BeeAgent):
 
         # ===== 2. FOMC 临近 =====
         try:
-            from economic_calendar import get_next_event
+            from economic_calendar import get_next_event, get_calendar_health
             nxt = get_next_event()
             if nxt and nxt.get("days_until", 99) <= 3 and nxt.get("type") == "fomc":
                 regime_votes["risk_off"] += 1
                 signals.append(f"FOMC {nxt['days_until']}天后")
                 details["fomc_days"] = nxt["days_until"]
-        except (ImportError, Exception):
-            pass
+            # v0.45.65：日历是硬编码的、会过期的资产。表被日期走完后
+            # get_next_event() 返回 None，与「未来 60 天真的没有宏观事件」完全同形——
+            # risk_off 票就此少一张，而结果里不留任何痕迹。
+            # 把体检结论落进 details，让降级在 analysis JSON 里可见（不影响评分口径）。
+            _cal = get_calendar_health()
+            if not _cal["ok"]:
+                # v0.45.68 二次检查：日期必须取自 binding_table（余量最小 = 肇事表），
+                # 不能取 _cal["last_date"]（那是 shortest_table 的）。两者常非同一张：
+                # 2026-09-06~09-29 那段里 shortest 是 gdp 且**健康**，
+                # 旧写法会打出「stale + 一个健康表的日期」，指错表。
+                _cb = _cal["binding_table"]
+                details["macro_calendar"] = _cal["status"]          # stale | exhausted
+                details["macro_calendar_table"] = _cb
+                details["macro_calendar_last_date"] = _cal["per_table"][_cb]["last_date"]
+        except (ImportError, Exception) as _e_cal:
+            # 原实现是裸 pass：日历模块 import 失败时，FOMC 维度整块消失且无迹可寻
+            _log.debug("宏观日历读取失败: %s", _e_cal, exc_info=True)
 
         # ===== 3. VIX 期限结构 =====
         try:

@@ -1,0 +1,36 @@
+{
+  "ticker": "T",
+  "date": "2026-08-31",
+  "composite_score": 5.16,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 25.889999389648438,
+  "agent_votes": {
+    "ScoutBeeNova": 6.829713000000001,
+    "GuardBeeSentinel": 6.15
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.345,
+    "signal": 0.963,
+    "catalyst": 0.448,
+    "sentiment": 0.593,
+    "odds": 0.069,
+    "risk_adj": 0.586
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-01T04:31:34.811172"
+}

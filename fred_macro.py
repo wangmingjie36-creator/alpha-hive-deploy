@@ -16,6 +16,7 @@
 - 设置环境变量 FRED_API_KEY 可解锁 CPI、PMI、2Y 国债收益率等
 """
 
+import math
 import os
 import time
 import threading
@@ -258,6 +259,40 @@ def _same_day_macro_data(as_of: Optional[str] = None) -> Tuple[Dict, Dict[str, s
     return data, sources
 
 
+def _realtime_as_of() -> Optional[str]:
+    """实时口径下，这批宏观数据实际代表**哪一个交易日**。
+
+    v0.45.92：此前实时路径的 `as_of` 恒为 `None`（哨兵，表示"非补跑"），
+    于是日报里的 `macro_context` 没有任何日期戳 —— 读者无法判断它是哪天的。
+
+    ⚠️ 不能直接填"今天"。盘前跑时拿到的实时报价是**上一个交易日的收盘**
+    （2026-09-01 06:49 ET 手动跑过一次，正是这个情形），写成今天就是本项目
+    一路在治的 vintage 污染，比留空更坏。故：16:00 ET 收盘后才把当天算作
+    as_of，否则回退到最近一个已收盘的交易日。
+
+    复用已装好的 `cboe_options._et_now`（ZoneInfo，DST 正确）与
+    `is_trading_day`（含美股假日表），不自己算时区和节假日。
+    推算不出来时返回 `None` —— 诚实留空，不猜。
+    """
+    try:
+        from datetime import timedelta
+        from is_trading_day import is_trading_day
+        from cboe_options import _et_now, _ET_CLOSE
+
+        et = _et_now()
+        d = et.date()
+        # 当天尚未收盘（盘前/盘中），手里的报价还属于上一个交易日
+        if not is_trading_day(d)[0] or et.time() < _ET_CLOSE:
+            d -= timedelta(days=1)
+        for _ in range(10):
+            if is_trading_day(d)[0]:
+                return d.isoformat()
+            d -= timedelta(days=1)
+    except Exception as e:  # noqa: BLE001
+        _log.debug("实时 as_of 推算失败，留空：%s", e)
+    return None
+
+
 def _compose_data_source(as_of, src_map: Dict[str, str], data: Dict,
                          has_fred: bool) -> str:
     """如实汇总本次宏观实际用到的源。
@@ -325,6 +360,12 @@ def _fetch_macro_data() -> Dict:
         # v0.43.24: VIX 单独标源。它可以在 yfinance 全灭时仍由 CBOE 供上，
         # 此时 data_source 仍是 fallback（其余字段确实降级了），但 VIX 是真的。
         "vix_source": "fallback",
+        # v0.45.92：降级路径也要带这两个键，否则消费者拿到"键不存在"，
+        # 与实时路径的"键在、值为 None"无法区分 —— 那正是本项目治过多次的
+        # 静默降级形态。这里的值是兜底常量，不属于任何一天，故 as_of 留 None
+        # 且 mode 明写 fallback，不冒充 realtime。
+        "as_of": None,
+        "as_of_mode": "fallback",
     }
 
     try:
@@ -374,13 +415,19 @@ def _fetch_macro_data() -> Dict:
                     t = yf.Ticker(sym)
                     hist = t.history(period="5d", interval="1d")
                 if hist is not None and not hist.empty:
-                    data[name] = {
-                        "last": float(hist["Close"].iloc[-1]),
-                        "prev": float(hist["Close"].iloc[-2]) if len(hist) >= 2 else float(hist["Close"].iloc[-1]),
-                        "change_pct": 0.0,
-                    }
-                    if data[name]["prev"] != 0:
-                        data[name]["change_pct"] = (data[name]["last"] / data[name]["prev"] - 1) * 100
+                    _last = float(hist["Close"].iloc[-1])
+                    _prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else _last
+                    # v0.45.7x：`!= 0` 挡不住 NaN（NaN != 0 恒 True）——2026-08-28
+                    # 那次 yfinance 返回的行 Volume 是真的、Close 却是 NaN，NaN 就
+                    # 这样算出 NaN 的 change_pct，被当成「取到了」写进 data[name]。
+                    # 收盘价不是有限数就当同「没取到」处理，不让 NaN 冒充数据
+                    # （同 CHANGELOG v0.45.69 的原则：拿不到就不冒充，不伪造）。
+                    if math.isfinite(_last) and math.isfinite(_prev):
+                        data[name] = {
+                            "last": _last,
+                            "prev": _prev,
+                            "change_pct": (_last / _prev - 1) * 100 if _prev != 0 else 0.0,
+                        }
             except Exception as e:
                 _log.debug("宏观数据获取失败 %s: %s", sym, e)
 
@@ -716,7 +763,12 @@ def _fetch_macro_data() -> Dict:
             "field_sources": dict(_src_map),   # 逐字段来源，空 = 该项走了 yfinance
             "treasury_2y_source": _2y_source,  # treasury_gov / fred / approx_from_5y
             "vix_source": _vix_source,
-            "as_of": _as_of,          # None = 实时口径
+            # v0.45.92：两条路径都给日期戳。
+            # `_as_of` 本身**不能动** —— 它是控制流：非 None 会让上面走
+            # `_asof_history` 对齐历史日，实时路径填了它会改变取数行为。
+            # 所以只改输出，并用 `as_of_mode` 显式承载原先靠 None 表达的区分。
+            "as_of": _as_of or _realtime_as_of(),
+            "as_of_mode": "backfill" if _as_of else "realtime",
         }
 
     except ImportError:
@@ -865,8 +917,11 @@ def _fetch_sector_rotation(yf_module=None) -> Dict:
                 if hist is not None and len(hist) >= 2:
                     first_close = float(hist["Close"].iloc[0])
                     last_close = float(hist["Close"].iloc[-1])
-                    # < 5 防 yfinance sample data ~1.0 哨兵值（ETF 真实价格均 > $5）
-                    if first_close >= 5:
+                    # < 5 防 yfinance sample data ~1.0 哨兵值（ETF 真实价格均 > $5）；
+                    # isfinite 防 NaN——first_close 正常、last_close 是 NaN 时
+                    # `>= 5` 单独挡不住（NaN 只挡得住"分母"这一半）。
+                    if (math.isfinite(first_close) and math.isfinite(last_close)
+                            and first_close >= 5):
                         chg = round((last_close / first_close - 1) * 100, 2)
                         # 5 日涨跌 ±50% 以上为数据异常，归零保守处理
                         if abs(chg) > 50:

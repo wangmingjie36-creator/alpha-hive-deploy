@@ -656,7 +656,7 @@ class OptionsAnalyzer:
 
     def calculate_gamma_exposure(
         self, calls_df: List[Dict], puts_df: List[Dict], stock_price: float
-    ) -> float:
+    ) -> Optional[float]:
         """
         计算 Notional Gamma Exposure（标准做市商 delta-hedge 模型）
 
@@ -676,11 +676,28 @@ class OptionsAnalyzer:
 
         返回值单位：百万美元 notional gamma
         """
+        # v0.45.63：算不出返回 None，不返回 0.0。
+        # 0.0 在 GEX 的量纲里是**一个有意义的读数**（做市商净 gamma 中性），
+        # 与「没算」不可区分；而它还会被 signal_archive 归档成一条真观测进 IC。
+        # 本模块自己的样本早退（analyze() 内，v0.38.0）写的就是
+        # `"gamma_exposure": None`，report_formatters 也是 `if gamma is not None`
+        # ——0.0 这条从一开始就跟模块口径不一致。
         if not calls_df or not puts_df:
-            return 0.0
+            return None
 
-        if stock_price < 5:  # < 5 同时排除零值和 yfinance sample data ~1.0 哨兵值
-            return 0.0
+        # v0.45.63：原为 `stock_price < 5`，注释说是为了排除 yfinance 样本数据的
+        # ~1.0 哨兵值。但样本链在 analyze() 里已由 `options_chain["source"]=="sample"`
+        # 早退拦掉（v0.38.0，比这里早 1300 行），本函数**根本见不到样本数据**。
+        # 于是这道守卫只剩下误伤的那一半：AMC（$2.70）实测 gamma_exposure 恒为 0.0。
+        # 「用绝对价格阈值过滤哨兵值」这个形状 MEMORY 里已记过一次
+        # （曾把 AMC≈$3 的真实价格全滤光）——同一只票，同一个错法，第二次。
+        # v0.45.69：**NaN 必须显式挡掉。** NaN 的任何比较都返回 False，
+        # 所以 `stock_price <= 0` 放它过去；它还是 truthy，连 `if not x` 也拦不住。
+        # 实测 2026-08-28 补跑：上游传进来的就是 NaN，于是 call_gamma=NaN、
+        # total=NaN、`total <= 0` 为 False → 返回 NaN → 出口的 `_sanitize_result`
+        # 把 NaN 转成 **0.0** —— v0.45.63 刚消灭的那个假读数，在出口被原样还原。
+        if stock_price is None or not _math.isfinite(stock_price) or stock_price <= 0:
+            return None
 
         # 标准 notional GEX 计算
         call_gamma = sum(
@@ -697,9 +714,12 @@ class OptionsAnalyzer:
         # 正数 = net long gamma（压制波动），负数 = net short gamma（放大波动）
         # 除以 1e6 转为百万美元
         total = call_gamma + put_gamma
-        gex = (call_gamma - put_gamma) / 1e6 if total > 0 else 0.0
-
-        return round(gex, 4)
+        # v0.45.63：同上——total==0 表示整条链没有任何 gamma×OI（退化链），
+        # 那是「算不出」不是「净 gamma 为零」。只修了上面两处而留下这处，
+        # 就是 v0.45.49 `_get_metric_display` 那种「五个字段只修了一个」。
+        if total <= 0:
+            return None
+        return round((call_gamma - put_gamma) / 1e6, 4)
 
     def calculate_iv_skew(
         self, calls_df: List[Dict], puts_df: List[Dict], stock_price: float
@@ -713,8 +733,17 @@ class OptionsAnalyzer:
 
         近似 25-delta：OTM ~5% 的行权价（put: stock_price * 0.95, call: stock_price * 1.05）
         """
-        if not calls_df or not puts_df or stock_price < 5:  # < 5 防 sample data ~1.0
-            return {"skew_ratio": None, "skew_signal": "数据不足"}
+        # v0.45.63：原为 `stock_price < 5`（注释：防 sample data ~1.0）。
+        # 与 calculate_gamma_exposure 同一处错法——样本链在 analyze() 里
+        # 已被 `source == "sample"` 早退拦掉，本函数见不到它；这道守卫只剩误伤。
+        # AMC（$2.70）因此自入库起 skew_ratio 恒为 None、signal 恒为「数据不足」。
+        # v0.45.69：同上，NaN 会穿过 `<= 0`（NaN 比较恒 False）。
+        # 穿过后 put_target/tolerance 全是 NaN，两侧筛选恒空，
+        # 结果是「OTM 期权数据不足」—— 一个**看起来像数据问题的诊断**，
+        # 真实原因却是上游价格是 NaN。错的诊断比没有诊断更费时间。
+        if (not calls_df or not puts_df or stock_price is None
+                or not _math.isfinite(stock_price) or stock_price <= 0):
+            return {"skew_ratio": None, "skew_signal": "数据不足（股价非有限值）"}
 
         import math
 
@@ -723,30 +752,65 @@ class OptionsAnalyzer:
         call_target = stock_price * 1.05  # OTM call ~5% above
         tolerance = stock_price * 0.03    # ±3% 容差
 
-        # 找 OTM put IV（行权价 ≈ stock_price * 0.95）
-        put_ivs = []
-        for p in puts_df:
-            strike = p.get("strike", 0)
-            iv = p.get("impliedVolatility", 0)
-            try:
-                if iv and math.isfinite(iv) and iv > 0.005 and abs(strike - put_target) <= tolerance:
-                    put_ivs.append(float(iv))
-            except (TypeError, ValueError):
-                continue
+        def _pick(rows, target, want_below):
+            """取目标行权价附近的 OTM IV，返回 (ivs, basis)。
 
-        # 找 OTM call IV（行权价 ≈ stock_price * 1.05）
-        call_ivs = []
-        for c in calls_df:
-            strike = c.get("strike", 0)
-            iv = c.get("impliedVolatility", 0)
-            try:
-                if iv and math.isfinite(iv) and iv > 0.005 and abs(strike - call_target) <= tolerance:
-                    call_ivs.append(float(iv))
-            except (TypeError, ValueError):
-                continue
+            v0.45.63：**光去掉价格地板还不够。** 容差是「股价的 3%」，
+            而行权价网格是绝对间距 —— 两者随价格反向张缩：
+
+                NVDA $228：±3% = ±$6.84，跨得过 $2.5 一档的网格  → 窗口里有货
+                AMC  $2.70：±3% = ±$0.081，而网格是 $0.50 一档   → 窗口里必然空
+
+            实测 AMC 8/27 行权价 [1.0, 2.0, 2.5, 3.0, 3.5]：
+            call 窗口 [2.754, 2.916] 一档都不含 —— 即使价格地板拿掉，
+            这里也会返回「OTM 期权数据不足」。
+
+            所以窗口空时退到「最近的一档 OTM 行权价」。两条约束防止它变成兜底垃圾：
+              ① 必须仍在 OTM 一侧（put ≤ 现价 / call ≥ 现价），否则算的就不是 skew
+              ② 离目标超过现价的 25% 就放弃 —— 只有两三档的链不配给出 skew
+
+            **窗口非空时行为逐字节不变**，所以其余 29 只标的不产生口径世代边界
+            （MEMORY「IC 重跑就绪度闸」：换口径要付 25 周的前向累积代价）。
+            """
+            valid = []
+            for row in rows:
+                strike = row.get("strike", 0)
+                iv = row.get("impliedVolatility", 0)
+                try:
+                    if iv and math.isfinite(iv) and iv > 0.005 and strike > 0:
+                        valid.append((float(strike), float(iv)))
+                except (TypeError, ValueError):
+                    continue
+            win = [iv for strike, iv in valid if abs(strike - target) <= tolerance]
+            if win:
+                return win, "window"
+            # v0.45.63 二次检查：期权链是**跨到期日拍平**的，同一个行权价有多行。
+            # 初版 `min(otm, key=dist)` 只取其中一行 —— 取哪行取决于列表顺序，
+            # 且与窗口路径「取平均」的语义不一致。
+            # 实测 AMC 8/27：32 行 = 8 个行权价 × 4 个到期日，
+            # $3.0 一档的 IV 是 [0.8841, 0.8406, 0.8604, 0.8577]，初版取了 0.8841。
+            # 改为：先定最近的**行权价**，再把该档所有到期日一起返回给上层平均。
+            by_strike: Dict[float, List[float]] = {}
+            for strike, iv in valid:
+                by_strike.setdefault(strike, []).append(iv)
+            cand = [k for k in by_strike
+                    if (k <= stock_price if want_below else k >= stock_price)]
+            if not cand:
+                return [], "none"
+            # 次序键带上 strike 本身，等距时的取舍才是确定的（不看字典顺序）
+            best = min(cand, key=lambda k: (abs(k - target), k))
+            if abs(best - target) > stock_price * 0.25:
+                return [], "none"
+            return by_strike[best], "nearest_strike"
+
+        put_ivs, put_basis = _pick(puts_df, put_target, want_below=True)
+        call_ivs, call_basis = _pick(calls_df, call_target, want_below=False)
 
         if not put_ivs or not call_ivs:
             return {"skew_ratio": None, "skew_signal": "OTM 期权数据不足"}
+        # 只要有一侧走了退化路径就如实标注 —— 与 iv_rank_source 同一条原则：
+        # 两种取法算出来的不是一个东西，不标就分不出来
+        basis = "window" if put_basis == call_basis == "window" else "nearest_strike"
 
         avg_put_iv = sum(put_ivs) / len(put_ivs)
         avg_call_iv = sum(call_ivs) / len(call_ivs)
@@ -768,6 +832,7 @@ class OptionsAnalyzer:
             "skew_signal": signal,
             "otm_put_iv": round(avg_put_iv * 100, 2),
             "otm_call_iv": round(avg_call_iv * 100, 2),
+            "skew_basis": basis,
         }
 
     def calculate_iv_term_structure(
@@ -783,10 +848,12 @@ class OptionsAnalyzer:
                已进 `http_gate` 闸门且有进程缓存，主链拉过则**零额外网络开销**
             ② yfinance（1 次 `.options` + N 次 `option_chain()`）—— 进闸门 + 重试
 
-        为什么改：旧实现只有 ②，5 次裸 HTTPS 往返撞上本机 OpenSSL 1.1.1q，
-        循环里的 `except Exception: continue` 把 SSLError 全吞掉 → `term_structure`
+        为什么改：旧实现只有 ②，5 次裸 HTTPS 往返（不进闸门），循环里的
+        `except Exception: continue` 把 SSLError 全吞掉 → `term_structure`
         空列表 → shape="unknown" → 报告渲染成「0.0% / 0.0%」，与"真的是 0"无法区分。
-        2026-08-24 那批 12 只标的有 7 只如此。
+        2026-08-24 那批 12 只标的有 7 只如此。⚠️ 原注把这些 SSLError 归因于
+        「本机 OpenSSL 1.1.1q」——该归因 2026-08-25 已证伪（见 http_gate docstring），
+        8/24 根因未定；但"静默吞掉异常、把失败渲染成 0.0%"这条毛病与根因无关。
 
         Returns:
             {
@@ -881,8 +948,10 @@ class OptionsAnalyzer:
         """yfinance 降级路径：返回 (term_pts, errors)。
 
         每次出站 HTTPS 都走 `http_gate`——旧实现在 3~6 个工作线程里并发裸调
-        `option_chain()`，是 2026-08-24 SSL EOF 风暴的未受保护调用方之一。
-        失败原因逐条回传，**不再 `except: continue` 静默丢弃**。
+        `option_chain()`，是 8/24 当天不受闸门约束的调用方之一。接线的理由是
+        不给对端限流器加压（⚠️「它导致了那场 SSL EOF 风暴」是已撤回的推断，
+        见 http_gate docstring）。失败原因逐条回传，**不再 `except: continue`
+        静默丢弃**。
         """
         import time
 
@@ -1290,7 +1359,14 @@ class OptionsAnalyzer:
             flow_signal = 0.0
 
         # GEX Signal (0-2)：负 GEX 有利趋势跟踪
-        gex_signal = 2.0 if gex < -0.001 else 1.0
+        # v0.45.63 二次检查：gex 自本版起可能是 None（算不出）。照上面 iv_rank
+        # 那条既有先例——「不可信 → 中性，不奖不罚」。取 1.0 还有一层好处：
+        # 它**恰好等于**改动前 gex=0.0 时走的分支，所以此前拿 0.0 的那些情形
+        # 评分逐字节不变，不产生口径世代边界。
+        if gex is None:
+            gex_signal = 1.0
+        else:
+            gex_signal = 2.0 if gex < -0.001 else 1.0
 
         # Unusual Signal (0-2)：多头异动加分
         bullish_unusual = sum(1 for u in unusual if u.get("bullish", False))
@@ -1305,7 +1381,12 @@ class OptionsAnalyzer:
             signals.append("IV 处于理想水位")
         if flow_signal >= 3.0:
             signals.append("做多气氛浓厚（P/C低）")
-        if gex < -0.001:
+        # v0.45.63 二次检查（第二轮）：**同一个函数里的第二处 gex 比较，第一轮漏了。**
+        # 第一轮我甚至在上面写了「只修一处就是 v0.45.49 那种五分之一」的注释，
+        # 然后在同一个函数里犯了同样的事 —— 因为我按「精确匹配带上下文的字符串」
+        # 去改，`assert count==1` 通过了，但那只证明**那段上下文**唯一，
+        # 不证明**这个比较**唯一。改类型契约必须 grep 裸符号，不能 grep 带注释的块。
+        if gex is not None and gex < -0.001:
             signals.append("负 GEX 利于趋势")
         if bullish_unusual > 0:
             signals.append(f"检测到 {bullish_unusual} 个看涨异动")
@@ -1765,7 +1846,11 @@ class OptionsAgent:
         # 2. 过滤 <7 天到期的期权（临近到期 IV 被 Theta 衰减人为放大）
         # 3. 用中位数代替均值，抗极端值
         atm_price = stock_price
-        if not atm_price:
+        # v0.45.69：`if not atm_price` 拦不住 NaN（NaN 是 truthy），于是
+        # atm_lower/upper 全成 NaN，`NaN <= strike <= NaN` 恒 False，
+        # raw_ivs 必然为空 → data_quality 判成 degraded → iv_current 回落
+        # last_valid_iv 缓存。2026-08-28 补跑 9/9 只标的全中此坑。
+        if not atm_price or not _math.isfinite(atm_price):
             all_strikes = [c.get("strike", 0) for c in calls_df if c.get("openInterest", 0) > 100]
             atm_price = statistics.median(all_strikes) if all_strikes else 145.0
         atm_lower = atm_price * 0.80
@@ -2033,7 +2118,14 @@ class OptionsAgent:
         )
 
         # 5. 判断 Gamma Squeeze 风险
-        if gex > 0.001:
+        # v0.45.63 二次检查：这里原本恒能拿到 float（失败时是 0.0），
+        # 改成 None 之后 `gex > 0.001` 直接 TypeError，而 analyze() 的调用方
+        # （如 alpha_hive_daily_report:2210）用的是宽 except —— 崩溃会被吞成
+        # 「该标的整份期权数据消失」，比崩掉更难查。
+        # "unknown" 不是新造的值：样本链早退分支写的就是它。
+        if gex is None:
+            gamma_squeeze_risk = "unknown"
+        elif gex > 0.001:
             gamma_squeeze_risk = "high"  # 正 GEX 压制波动
         elif gex < -0.001:
             gamma_squeeze_risk = "low"  # 负 GEX 放大波动

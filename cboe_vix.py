@@ -43,8 +43,9 @@ except Exception:  # pragma: no cover - 叶子模块降级
     _log = logging.getLogger("alpha_hive.cboe_vix")
 
 try:
-    # 复用 cboe_options 的信号量：本机老 SSL 栈扛不住并发 HTTPS（实测 4 并发
-    # 挂 50-70s 甚至 SSL EOF）。共用同一把锁才能真正串行化所有 CBOE 请求。
+    # 复用 cboe_options 的信号量：共用同一把锁，才能真正串行化所有 CBOE 请求，
+    # 不给对端限流器加压。（⚠️ 原注「本机老 SSL 栈扛不住并发」的归因
+    # 2026-08-25 已证伪，见 http_gate docstring。）
     from cboe_options import _CBOE_SEM
 except Exception:  # pragma: no cover
     import threading
@@ -66,7 +67,7 @@ VIX_PERCENTILE_WINDOW = 252
 def _download() -> Optional[str]:
     """拉取 CBOE CSV 原文；失败返回 None（不抛，让调用方走缓存）"""
     try:
-        with _CBOE_SEM:  # 串行化：避免并发压垮本机 SSL 栈
+        with _CBOE_SEM:  # 串行化：不给对端限流器加压（非 TLS 栈原因，见 http_gate）
             req = urllib.request.Request(_VIX_URL, headers={"User-Agent": "Mozilla/5.0"})
             raw = urllib.request.urlopen(req, timeout=_NET_TIMEOUT).read()
         text = raw.decode("utf-8", errors="replace")

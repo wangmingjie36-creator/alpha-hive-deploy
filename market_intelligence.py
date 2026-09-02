@@ -864,6 +864,11 @@ def calculate_iv_rv_spread(
     # v0.45.61 二次检查发现：`realized_vol` 一开始就支持 `end_date`，但调用处
     # 没传 —— 补跑会拿**最新**窗口冒充目标日。对次日补跑影响小（forming-bar
     # 已丢、窗口末端恰好是目标日），但补跑更早的日子会严重错位。
+    # v0.45.90 补：上面那句「窗口末端恰好是目标日」是**要达到的状态**，
+    # 而 v0.45.61 传了 `end_date` 之后其实并没达到 —— Twelve Data 的
+    # `end_date` 左闭右开，目标日那根不返回，窗口末端一直是目标日的**前**
+    # 一个交易日（2026-09-01 实测 NVDA：end_date=8/31 → 末根 8/28）。
+    # 差值现在由 `twelve_data._api_end_date` 补掉，这里的语义不变。
     # ⚠️ 下面的 yfinance 兜底路径**仍然**是「最近 N 天」口径，补跑较早日期时
     # 那条路给出的 RV 不属于目标日 —— 已知缺陷，未在本版修（要改成 start/end）。
     _target = ""
@@ -910,10 +915,12 @@ def calculate_iv_rv_spread(
         import numpy as np
 
         # v0.45.4: 进 http_gate 闸门 + 退避重试。
-        # 本机 OpenSSL 1.1.1q 并发 HTTPS 会抛 SSLError/EOF，此前这里是裸 yf.download，
-        # 是 2026-08-24 SSL 风暴里未受保护的调用方之一；失败即返回 _empty，
-        # 下游 `.get("rv_30d", 0.0)` 拿到 **None**（键存在！）再被渲染成 0.0，
+        # 此前这里是裸 yf.download，不进闸门；失败即返回 _empty，下游
+        # `.get("rv_30d", 0.0)` 拿到 **None**（键存在！）再被渲染成 0.0，
         # 与"真的没波动"无法区分。2026-08-24 那批 12 只有 4 只如此。
+        # 进闸门的理由是不给 yfinance 限流器加压——那个是实测存在的（8/27 全天 687 次 429）。
+        # ⚠️ 原注把这些失败归因于「本机 OpenSSL 1.1.1q 并发 HTTPS 抛 SSLError/EOF」，
+        # 该归因 2026-08-25 已证伪、8/24 根因未定（见 http_gate docstring）。
         try:
             from http_gate import https_gate
         except Exception:  # pragma: no cover - 闸门不可得时退化直连
@@ -923,8 +930,9 @@ def calculate_iv_rv_spread(
                 return nullcontext()
 
         # v0.45.56: 429 与瞬时故障必须分开处理。
-        # 旧实现对**所有**失败都退避 0.7s/1.4s 再重试——那是为「本机 OpenSSL
-        # 1.1.1q 并发 HTTPS 抛 SSLEOFError」这类开即恢复的故障设计的。对上
+        # 旧实现对**所有**失败都退避 0.7s/1.4s 再重试——那是按「瞬时 SSL/超时故障、
+        # 错开即恢复」设计的（⚠️ 当时把这类故障归因于本机 OpenSSL 版本，该归因已证伪，
+        # 见 http_gate docstring；退避对瞬时故障本身仍成立）。对上
         # yfinance 限流它是反向的：把 1 次请求变成 3 次、间隔不到 2 秒，
         # **在被拒绝时加倍施压**。2026-08-27 全天 687 次 429、rv_30d 0/30，
         # 这个循环是放大器之一。现在：一次 429 就停，不重试。

@@ -602,3 +602,259 @@ class TestReadOnlyDefaultAndGates:
         before = wo.CONFIG_PATH.read_text(encoding="utf-8")
         self._run_main(monkeypatch, ["--apply", "--dry-run"])
         assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# G. close_t7 干净口径覆盖（v0.45.86）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# actual_price_t7（report_snapshots/*.json 的 actual_prices.t7，来自
+# backtest_engine.PriceBackfiller 的 Ticker().history() ±3天容差取价）与
+# pheromone.db.close_t7（backfill_dir_accuracy.py 的干净口径）实测同一
+# (ticker,date) 下只有约1/3重合。_apply_clean_t7_prices 让 Track A 统一改用
+# close_t7；本节锁死三条分支：覆盖、丢弃(无匹配)、库不存在时原样不动。
+
+def _make_pheromone_db(tmp_path, rows):
+    """rows: [(ticker, date, close_t7), ...]，建最小 predictions 表。"""
+    import sqlite3
+    db_path = tmp_path / "pheromone.db"
+    con = sqlite3.connect(str(db_path))
+    con.execute("CREATE TABLE predictions (ticker TEXT, date TEXT, close_t7 REAL)")
+    con.executemany("INSERT INTO predictions VALUES (?, ?, ?)", rows)
+    con.commit()
+    con.close()
+    return db_path
+
+
+class TestCleanT7PriceOverride:
+
+    def test_overrides_with_matching_close_t7(self, monkeypatch, tmp_path):
+        """有匹配行：actual_price_t7 必须被换成 close_t7，而不是原来的值。"""
+        db_path = _make_pheromone_db(tmp_path, [("AAA", "2026-08-14", 123.45)])
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
+
+        snap = _PoolSnap("AAA", "2026-08-14", t7=999.0)  # 999 是要被覆盖掉的脏值
+        analyzer = type("A", (), {"snapshots": [snap]})()
+        wo._apply_clean_t7_prices(analyzer)
+
+        assert snap.actual_price_t7 == 123.45
+
+    def test_drops_sample_without_matching_row(self, monkeypatch, tmp_path):
+        """库存在但查无该 (ticker,date)：必须丢弃（置 None），不回退旧值。"""
+        db_path = _make_pheromone_db(tmp_path, [("AAA", "2026-08-14", 123.45)])
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
+
+        snap = _PoolSnap("ZZZ", "2026-08-14", t7=999.0)  # 库里没有 ZZZ
+        analyzer = type("A", (), {"snapshots": [snap]})()
+        wo._apply_clean_t7_prices(analyzer)
+
+        assert snap.actual_price_t7 is None
+
+    def test_unchanged_when_db_missing(self, monkeypatch, tmp_path):
+        """库不存在：原样返回，不能把 Track A 全部样本清零。"""
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", tmp_path / "_absent.db")
+
+        snap = _PoolSnap("AAA", "2026-08-14", t7=999.0)
+        analyzer = type("A", (), {"snapshots": [snap]})()
+        wo._apply_clean_t7_prices(analyzer)
+
+        assert snap.actual_price_t7 == 999.0
+
+    def test_count_t7_samples_uses_same_source(self, monkeypatch, tmp_path):
+        """n_samples 展示的数字必须和真正参与拟合的样本用同一个口径，
+        否则重现此前"skip_reason 和 bootstrap_stable 对不上"那类误读。"""
+        snapshots_dir = tmp_path / "snapshots"
+        snapshots_dir.mkdir()
+        (snapshots_dir / "AAA_2026-08-14.json").write_text(json.dumps({
+            "ticker": "AAA", "date": "2026-08-14",
+            "entry_price": 100.0,
+            "actual_prices": {"t7": 999.0},  # 脏值，不该被数进去
+        }))
+        (snapshots_dir / "BBB_2026-08-14.json").write_text(json.dumps({
+            "ticker": "BBB", "date": "2026-08-14",
+            "entry_price": 100.0,
+            "actual_prices": {"t7": None},  # close_t7 有、旧字段没有——该被数进去
+        }))
+        db_path = _make_pheromone_db(tmp_path, [("BBB", "2026-08-14", 50.0)])
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
+
+        assert wo.count_t7_samples(snapshots_dir) == 1  # 只有 BBB 在 close_t7 里
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# G2. close_t7 缺数据/瞬时故障的状态区分与可见警示（v0.45.87，复查问题 #2-4）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# _load_close_t7_map() 此前对"库不存在"和"库/表都在但查无任何 close_t7
+# 非空行"一视同仁，都返回空 dict；调用方也都用 `if close_t7_map:` 真值判断，
+# CLI 表现在两种情况下完全一样——用户看不出这次权重其实是用脏口径算的。
+
+def _make_empty_predictions_db(tmp_path):
+    """建一张有 predictions 表、但没有任何 close_t7 非空行的库（模拟全新部署
+    或 backfill_dir_accuracy.py 还没跑过/跑挂了）。"""
+    import sqlite3
+    db_path = tmp_path / "pheromone.db"
+    con = sqlite3.connect(str(db_path))
+    con.execute("CREATE TABLE predictions (ticker TEXT, date TEXT, close_t7 REAL)")
+    con.execute("INSERT INTO predictions VALUES ('AAA', '2026-08-14', NULL)")
+    con.commit()
+    con.close()
+    return db_path
+
+
+class TestCloseT7StatusDistinction:
+
+    def test_status_ok_when_rows_present(self, monkeypatch, tmp_path):
+        db_path = _make_pheromone_db(tmp_path, [("AAA", "2026-08-14", 123.45)])
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
+        result, status = wo._load_close_t7_map()
+        assert status == "ok"
+        assert result == {("AAA", "2026-08-14"): 123.45}
+
+    def test_status_missing_when_db_absent(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", tmp_path / "_absent.db")
+        result, status = wo._load_close_t7_map()
+        assert status == "missing"
+        assert result == {}
+
+    def test_status_empty_when_db_has_no_close_t7_rows(self, monkeypatch, tmp_path):
+        """问题 #2 核心场景：库/表都存在，但没有任何 close_t7 非空行。"""
+        db_path = _make_empty_predictions_db(tmp_path)
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
+        result, status = wo._load_close_t7_map()
+        assert status == "empty"
+        assert result == {}
+
+    def test_main_prints_visible_warning_when_db_empty(self, monkeypatch, sandbox, capsys):
+        """问题 #2 要求：警示必须出现在用户能看到的输出层（终端 print），
+        不能只是内部行为对了、CLI 表现却和一切正常时一模一样。"""
+        db_path = _make_empty_predictions_db(sandbox)
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
+        monkeypatch.setattr(wo, "SNAPSHOTS_DIR", sandbox)
+        monkeypatch.setattr(sys, "argv", ["weekly_optimizer.py"])
+        wo.main()
+        out = capsys.readouterr().out
+        assert "close_t7" in out
+        assert "⚠️" in out
+
+    def test_main_silent_when_db_missing(self, monkeypatch, sandbox, capsys):
+        """"库不存在"是预期内的正常降级路径（如全新环境、测试隔离），不应报警。"""
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", sandbox / "_absent.db")
+        monkeypatch.setattr(wo, "SNAPSHOTS_DIR", sandbox)
+        monkeypatch.setattr(sys, "argv", ["weekly_optimizer.py"])
+        wo.main()
+        out = capsys.readouterr().out
+        assert "close_t7" not in out
+
+    def test_exists_permission_error_falls_back_gracefully(self, monkeypatch, tmp_path):
+        """问题 #3：Path.exists() 抛 PermissionError 不能让脚本崩溃，
+        必须走跟"库不存在"一样的优雅降级分支，并标记为 error 供上层警示。"""
+        fake_path = tmp_path / "pheromone.db"
+
+        class _BoomPath:
+            def exists(self):
+                raise PermissionError("目录权限被误改")
+
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", _BoomPath())
+        result, status = wo._load_close_t7_map()  # 不应抛出
+        assert result == {}
+        assert status == "error"
+
+    def test_transient_sqlite_error_not_cached(self, monkeypatch, tmp_path):
+        """问题 #4：sqlite3.Error（如并发写产生的 "database is locked"）
+        不能写进缓存，否则一次性脚本内后续所有调用都直接命中空缓存不重试。
+        """
+        db_path = _make_pheromone_db(tmp_path, [("AAA", "2026-08-14", 123.45)])
+        monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
+
+        real_connect = wo.sqlite3.connect
+        calls = {"n": 0}
+
+        def _flaky_connect(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise wo.sqlite3.OperationalError("database is locked")
+            return real_connect(*a, **kw)
+
+        monkeypatch.setattr(wo.sqlite3, "connect", _flaky_connect)
+
+        result1, status1 = wo._load_close_t7_map()
+        assert status1 == "error"
+        assert result1 == {}
+
+        # 第二次调用应该重新尝试连接（没有被空缓存挡住），这次真的成功
+        result2, status2 = wo._load_close_t7_map()
+        assert status2 == "ok"
+        assert result2 == {("AAA", "2026-08-14"): 123.45}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# H. 样本数门槛口径对齐（v0.45.87，复查问题 #1）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# count_t7_samples() 此前只看「有没有 T+7 价格」，而 compute_new_weights_wls /
+# bootstrap_validate 内部构造 valid_snaps 时额外要求 entry_price > 0。
+# main() 先用前者判断是否达到 args.min_samples（够就往下走），若 WLS 因
+# entry_price>0 过滤后样本不足 MIN_SAMPLES 而返回 None，会回退到
+# compute_new_weights()（旧实现），而后者此前完全没有最低样本数保护，
+# 能在极少样本（比如 3 条）下产出权重建议。
+
+class TestSampleThresholdAlignment:
+
+    def test_count_t7_samples_excludes_zero_or_missing_entry_price(self, tmp_path):
+        """口径必须与 valid_snaps 的 entry_price > 0 完全对齐。"""
+        snapshots_dir = tmp_path / "snapshots"
+        snapshots_dir.mkdir()
+        for i in range(3):
+            (snapshots_dir / f"OK{i}.json").write_text(json.dumps({
+                "ticker": f"OK{i}", "date": "2026-08-14",
+                "entry_price": 100.0,
+                "actual_prices": {"t7": 105.0},
+            }))
+        (snapshots_dir / "ZERO.json").write_text(json.dumps({
+            "ticker": "ZERO", "date": "2026-08-14",
+            "entry_price": 0.0,
+            "actual_prices": {"t7": 105.0},
+        }))
+        (snapshots_dir / "MISSING.json").write_text(json.dumps({
+            "ticker": "MISSING", "date": "2026-08-14",
+            "actual_prices": {"t7": 105.0},
+        }))
+        assert wo.count_t7_samples(snapshots_dir) == 3
+
+    def test_compute_new_weights_returns_none_below_min_samples(self, monkeypatch, tmp_path):
+        """回退路径必须有最低样本数保护——此前完全没有，能在极少样本下产出建议。"""
+        assert wo.MIN_SAMPLES > 3
+        snaps = [_FakeSnap("bullish", 100.0, 105.0, {"ScoutBeeNova": 8.0})
+                 for _ in range(3)]
+        called = {"suggest": False}
+
+        class _FakeAnalyzer:
+            def __init__(self, directory=None):
+                self.snapshots = snaps
+
+            def suggest_weight_adjustments(self):
+                called["suggest"] = True
+                return {"new_weights": dict(wo.DEFAULT_WEIGHTS)}
+
+        monkeypatch.setattr("feedback_loop.BacktestAnalyzer", _FakeAnalyzer, raising=False)
+        res = wo.compute_new_weights(tmp_path)
+        assert res is None
+        assert called["suggest"] is False, "样本不足时不该走到 suggest_weight_adjustments()"
+
+    def test_compute_new_weights_still_works_above_min_samples(self, monkeypatch, tmp_path):
+        """保护不能过度——样本充足时回退路径仍应正常产出建议。"""
+        snaps = [_FakeSnap("bullish", 100.0, 105.0, {"ScoutBeeNova": 8.0})
+                 for _ in range(wo.MIN_SAMPLES + 2)]
+
+        class _FakeAnalyzer:
+            def __init__(self, directory=None):
+                self.snapshots = snaps
+
+            def suggest_weight_adjustments(self):
+                return {"new_weights": dict(wo.DEFAULT_WEIGHTS)}
+
+        monkeypatch.setattr("feedback_loop.BacktestAnalyzer", _FakeAnalyzer, raising=False)
+        res = wo.compute_new_weights(tmp_path)
+        assert res is not None
+        assert "new_weights" in res
