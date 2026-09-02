@@ -59,5 +59,8 @@
   "original_failure": "RuntimeError: CBOE payload 为空（网络/403/符号问题）",
   "root_cause": "CBOE CDN 对 BILI 刷新滞后；主跑时 last_trade=2026-08-27，补抓时已更新为 2026-08-28T15:59:59",
   "method": "cloud_snapshot_fetch._fetch_one_ticker(\"BILI\", \"2026-08-28\") 原引擎，vintage 校验照常生效"
- }
+ },
+ "vintage_intraday_freeze_suspect": [
+  "TMO"
+ ]
 }
