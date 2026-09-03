@@ -7,7 +7,97 @@
 
 ## [0.45.97] — 2026-09-03 — 占位（进行中：纸面组合净值自 8/28 起恒为 NaN，溯源取价链）
 
-## [0.45.96] — 2026-09-03 — 占位（进行中：test_caches_within_ttl 硬编码 8 月日期，跨月自动变红）
+## [0.45.96] — 2026-09-03 — 缓存测试写死 8 月日期，跨月自动变红（本次不含生产代码改动）
+
+### 现象
+
+`tests/test_treasury_yields.py::TestGetYieldCurve::test_caches_within_ttl`
+自 2026-09-01 起恒红（`assert 2 == 1`），隔离跑同样红，**与任何代码改动无关**。
+`treasury_yields.py` 上一次改动是 v0.45.61，此后一行未动。
+
+### 根因：两次调用的月份来自两个不同的钟
+
+`get_yield_curve` 的缓存键是**年月**：
+
+- `get_yield_curve()`（不带参数）→ 键取 **ET 当前月**（`_et_month()`，:147）
+- `get_yield_curve("2026-08-26")` → 键取**参数里的月**（:139）
+
+原测试把前者交给挂钟、后者写死 `"2026-08-26"`，再断言"同月，应复用"。
+这个配对只在挂钟停留在 **2026-08** 时成立。月份一翻，两次调用落进
+`202609` / `202608` 两个桶，`_fetch_month` 被调两次 —— 断言如实报告了
+一件真实发生的事，只是它测的不是缓存，是"今天是不是八月"。
+
+与 MEMORY v0.45.72「fixture 日期没从被测日期倒推」、v0.45.65
+`TestCoverageHorizon` 是同一形状：**夹具日期相对于测试自己控制不了的钟漂移**。
+
+### Fixed（测试）
+
+- `test_caches_within_ttl`：先 `monkeypatch.setattr(ty, "_et_month", lambda: "202608")`
+  把月份钉死，两次调用再配对。选钉时钟而不是"从 ET 今天倒推出 `YYYY-MM-15`"，
+  是因为 `_XML` 夹具里只有 8 月的行：让缓存键跟着真实月份走的话，第二次调用
+  会返回 `None`，测试照样绿，但**除了抓取次数什么都没断言**。钉住之后第二次
+  调用真的取到行，顺手补了 `["date"] == "2026-08-27"` 与 `["y10"] == 4.66`。
+  这个打桩打得中：`get_yield_curve` 里是模块级全局查找，不是 v0.45.72 那种
+  打不中的函数内局部 import。写法沿用 `test_macro_snapshot.py:381` 的既有惯例。
+
+### Added（测试）
+
+- `test_cache_key_is_per_month`：跨月方向的姐妹测试。钉 `_et_month` 到
+  `202609`，配一份 9 月夹具 `_XML_SEPT`（值与 8 月**刻意全不同**），断言
+  `seen == ["202609", "202608"]` 且 8 月的查询拿到的是 8 月的曲线。
+  两条测试守的是**互补而非重复**的性质："同月复用"与"跨月不复用"，
+  单有前者时把缓存键换成常量照样全绿 —— 而那会让 9 月的调用默默拿到
+  8 月的曲线，正是本模块开篇拒绝的那种"错值与真值无法区分"。
+
+### 变异验证
+
+按 MEMORY「修好一条长期变红的测试后必跑 mutation check」，逐个改
+`treasury_yields.py` 后重跑（每次跑完还原，已核对文件字节一致）：
+
+| 变异 | 实际改动处 | 变红的测试 |
+|---|---|---|
+| M0 `_et_month` → `"202612"`（模拟月度翻转） | 1 | **无** ✅ 正是本次要的：不再随挂钟漂移 |
+| M0b `_et_month` → `"202701"`（翻年） | 1 | **无** ✅ 排除"同年巧合" |
+| M1 缓存键换成常量（所有月共用一个桶） | 4 | `test_cache_key_is_per_month` |
+| M2 缓存键按年分桶 `yyyymm[:4]` | 4 | `test_cache_key_is_per_month` |
+| M3 彻底不缓存（`if True:`） | 1 | `test_caches_within_ttl` |
+
+M3 变红说明**没有把原测试唯一的覆盖一起"修"没**（v0.45.72 的坑）；
+M1/M2 只打中新增那条，说明姐妹测试确实补的是空白，不是冗余。
+
+**变异脚本自己也要验。** M1/M2 换缓存键时，除了判断行还有三处写回
+（`_CACHE[yyyymm]=` / `_CACHE_TS[yyyymm]=` / `rows=_CACHE[yyyymm]`）必须同步换，
+漏一处则永远 miss —— 那会变成 M3 的形状，表里却记成 M1。
+所以「实际改动处」这列是证据的一部分：4 = 四处全中；脚本另加
+`assert mutated != orig`（挡 no-op 替换）、禁 ERROR（挡变异把测试搞崩而非搞红）、
+跑完 sha256 比对还原。**没有这层，变异表本身就是一份没人验过的绿。**
+
+跨月那条钉的 `"202609"` 恰好等于本次执行时的真实 ET 月份 ——
+**光看它今天绿证明不了钉住了**，M0/M0b 才是证据。另：
+`monkeypatch.setattr` 未用 `raising=False`，`_et_month` 若被改名会当场抛
+`AttributeError`，不会像 v0.45.72 ② 那样静默失效（已实测）。
+
+### 遗留（本次未动，仅记录）
+
+M0 不变红同时暴露：**`_et_month()` 函数体本身无人守**。它的两个消费测试
+（本文件与 `test_macro_snapshot.py::test_treasury_month_key_uses_eastern_not_local`）
+都把它 monkeypatch 掉了 —— 后者验的是"`get_yield_curve` 调了 `_et_month`
+而不是本机 `strftime`"，不是"`_et_month` 返回的确实是美东月"。
+是 3 行 zoneinfo，风险低，先记不改。
+
+### 实测
+
+```
+修前：tests/test_treasury_yields.py  11 passed, 1 failed
+修后：tests/test_treasury_yields.py  13 passed（13 条逐条独立进程跑也全过，
+      排除顺序依赖与 _CACHE 跨用例污染）
+全量：2163 passed, 24 skipped, 63 deselected, 1 xfailed（0 failed）
+ruff check --select F821：All checks passed（全仓）
+```
+
+全量扫了一遍同形状风险（读挂钟 + 近期硬编码日期同现），
+`tests/` 下仅 `test_site_missing_fields.py` 命中，核对为假阳性
+（`datetime.now()` 出现在描述历史 bug 的 docstring 里，被测函数已收显式日期）。
 
 ## [0.45.95] — 2026-09-03 — Step 3 的 ML 计数从来没准过（bash glob 撞 TCC readdir）
 
