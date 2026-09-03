@@ -1205,6 +1205,23 @@ class AlphaHiveDailyReporter:
         except Exception as e:
             _log.warning("纸面组合更新失败(非致命): %s", e)
 
+        # ── v0.45.101: 财报事件波动率信号 + 期权纸面跨式腿（观察项）──
+        # 读当日 options_snapshot 的 quote_set（v0.45.99）算隐含/历史事件波动比值，
+        # 回填已过财报的实际波动，再驱动独立的跨式账本。三步各自幂等；
+        # 任何失败只记 warning，绝不拖死日报。
+        try:
+            import earnings_vol_signal as _evs
+            import options_paper_leg as _opl
+            _ev_signals = _evs.scan(self.date_str)
+            _ev_settled = _evs.settle_signals(self.date_str)
+            _opl_result = _opl.run_for_date(self.date_str, signals=_ev_signals)
+            _log.info("期权纸面腿已更新: %s (信号 %d / 合格 %d / 回填 %d / nav=%s)",
+                      self.date_str, len(_ev_signals),
+                      sum(1 for _s in _ev_signals if _s.get("eligible")), _ev_settled,
+                      (_opl_result or {}).get("nav", "?"))
+        except Exception as e:
+            _log.warning("期权纸面腿更新失败(非致命): %s", e)
+
         # ── T+1/T+7/T+30 实际价格回填（后台执行，不阻塞主流程）──
         try:
             from outcomes_fetcher import OutcomesFetcher
@@ -1623,7 +1640,7 @@ class AlphaHiveDailyReporter:
             "sector_sentiment_contagion": sector_sentiment_summary,
             "macro_context": macro_snapshot,
             "backtest_stats": backtest_stats,
-            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(_vol_tiers),
+            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(_vol_tiers) + self._options_paper_leg_markdown(),
             "twitter_threads": self._generate_swarm_twitter_threads(swarm_results),
             "opportunities": [
                 {
@@ -1704,6 +1721,15 @@ class AlphaHiveDailyReporter:
             "",
         ]
         return "\n".join(lines)
+
+    def _options_paper_leg_markdown(self) -> str:
+        """v0.45.101 期权纸面腿小节；任何失败返回空串，不影响日报。"""
+        try:
+            import options_paper_leg as _opl
+            return _opl.render_markdown(self.date_str) or ""
+        except Exception as e:  # noqa: BLE001
+            _log.warning("期权纸面腿小节渲染失败(非致命): %s", e)
+            return ""
 
     @staticmethod
     def _format_score_adjustments(*args, **kwargs):

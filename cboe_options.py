@@ -937,6 +937,41 @@ def fetch_cboe_quote_set(ticker: str, stock_price: float = 0.0, *,
     return qs
 
 
+def quote_contracts(ticker: str, symbols: List[str], *, timeout: int = 15) -> Dict[str, Optional[dict]]:
+    """按 OCC 符号重新报价一组**已持有**的合约（v0.45.101，期权纸面腿逐日盯市用）。
+
+    返回 `{symbol: _qs_contract 形状 | None}`，role 固定 "held"、strike/expiry 从
+    `_parse_occ` 解出、dte 按 `_pdt_now` 算。链里找不到的符号 → None（合约到期
+    /下架/CBOE 当天没给），调用方据此把该腿标 stale，**不得**拿上次的价当今天的。
+    快照模式（补跑历史日）→ 全 None：补跑那天的真实报价谁也拿不到。
+    payload 走 `_fetch_cboe_payload` 的 120s 进程缓存：主链刚拉过时零额外网络开销。
+    """
+    out: Dict[str, Optional[dict]] = {s: None for s in symbols}
+    if not symbols or _SNAPSHOT_PROVIDER is not None:
+        return out
+    data = _fetch_cboe_payload(ticker, timeout)
+    if not data:
+        return out
+    want = set(symbols)
+    today = _pdt_now().date()
+    found: Dict[str, List[dict]] = {}
+    for row in (data or {}).get("options") or []:
+        if isinstance(row, dict) and row.get("option") in want:
+            found.setdefault(row["option"], []).append(row)
+    for sym, rows in found.items():
+        parsed = _parse_occ(sym)
+        if not parsed:
+            continue
+        expiry, cp, strike = parsed
+        try:
+            dte = (datetime.strptime(expiry, "%Y-%m-%d").date() - today).days
+        except ValueError:
+            continue
+        out[sym] = _qs_contract(_qs_pick_row(rows), role="held", cp=cp, strike=strike,
+                                expiry=expiry, dte=dte)
+    return out
+
+
 if __name__ == "__main__":
     import sys
     tk = sys.argv[1] if len(sys.argv) > 1 else "NVDA"

@@ -9,7 +9,62 @@
 
 ## [0.45.102] — 2026-09-03 — 占位（进行中：VRP 信号与就绪度闸，IV 历史满 3 个月前只测量不下注）
 
-## [0.45.101] — 2026-09-03 — 占位（进行中：财报事件波动率信号 + 纸面跨式腿）
+## [0.45.101] — 2026-09-03 — 财报事件波动率信号 + 期权纸面跨式腿（期权路线图第 3 步）
+
+**背景**：单票期权里证据最扎实的边是财报 IV 压缩——隐含事件波动 vs 历史实际
+波动的错配。零件此前散落三处（`iv_crush_analysis` / `earnings_pc_history` 只做过
+NVDA 单票、`earnings_watcher` 只取下次财报日），没有一个能逐日对 30 只票算信号、
+更没有一本用真实报价盯市的账。v0.45.99 的 `quote_set` 正好提供了跨式中间价、
+两腿点差与 ATM 行权价。本版把三者串成「信号 → 账本 → 事后结算」，**只测量不下单**。
+
+### Added
+
+- `earnings_history.py`：过去 8 次财报日（yfinance `get_earnings_dates` 经
+  `yf_gate`，30 天磁盘缓存；失败返回 None 不返回 `[]`）+ 两日窗口实际波动
+  （pre = 财报日前最后一根收盘，post = 财报日后第一根；对 BMO/AMC 不敏感，
+  跨度 >7 日历日的窗口视作数据洞跳过）+ `earnings_move_stats`（可用事件 <4 → None，
+  `_detail` 版带 `reason`）。日线优先 Twelve Data 一次拉 2 年，退本地价格索引。
+- `earnings_vol_signal.py`：`compute_signal` 纯函数。合格条件：`quote_set` 可用、
+  ATM 两腿 `quote_ok`、财报日落在 `(as_of, selected_expiry]`（跨式必须跨过事件）、
+  历史事件 ≥4。事件波动剥离扩散：`diffusion = 0.8·σ_rv30·√(dte/252)`，
+  `implied_event = √(straddle² − diffusion²)`（rv_30d 缺失退 `raw_straddle` 口径并标注
+  高估）。`ratio = implied_event / 历史 |move| 中位`：≥1.30 rich（卖跨式候选）、
+  ≤0.75 cheap（买跨式候选）、否则 fair。任一腿点差 >15% → `untradeable`
+  （COST 25Δ 27.6% vs NVDA 4.4% 的实测差距就是这条阈值的来历）；
+  **扩散 ≥ 跨式把事件波动压成 0 也判 untradeable**——那是 rv_30d 被别的跳空撑大的
+  退化数字，不是便宜。`scan(as_of)` 按日幂等写 `options_paper_state/earnings_signals.jsonl`；
+  `settle_signals` 在财报过后回填实际两日波动与 `realized_ratio`，是日后校准
+  阈值的 y；`summary_stats` n<3 一律给 None。
+- `options_paper_leg.py`：独立于股票纸面组合的跨式账本（`options_paper_state/`，
+  起始 $100k）。**成交付点差**：long 两腿按 ask 买、short 按 bid 卖，出场镜像，
+  盯市用 mid。`contracts = max(1, ⌊NAV×6% / (premium×100)⌋)`，一张就超预算则跳过
+  并记原因；short 同样按权利金封顶（它只是保证金代理，卖跨式真实风险无上界，
+  账本注释明写这不是实盘规则）。逐日用新增的 `cboe_options.quote_contracts` 按
+  OCC 符号重报两腿：报价合法 → `cboe_mid`；否则沿用 `last_mark` 标 `stale` 并计日；
+  财报过后第一个有报价的日子平仓；连续 stale 超 3 天或到期前 2 天 → 用标的收盘算
+  内在价值平仓并标 `intrinsic`；取不到收盘继续持有并告警，**绝不编价关仓**。
+  `compute_kpis` / `render_markdown`（日报小节「期权纸面腿：财报跨式（观察项）」）。
+- `alpha_hive_daily_report.py::_post_scan_enrichment`：纸面组合之后新增
+  scan → settle → run_for_date 三步，任何失败只 warning；markdown 追加小节。
+- 测试 79 条（`test_earnings_history` 19 / `test_earnings_vol_signal` 27 /
+  `test_options_paper_leg` 33），全部合成数据、临时目录、零网络。mutation：
+  换 ask/bid 成交方向 → 11 红；去掉扩散剥离 → 2 红。开发中被测试抓到并修掉
+  两个真 bug：同日重跑把入场日 `mark_source` 翻成 stale；净值快照的
+  `opened_today/closed_today` 取自运行计数器而非状态，破坏了同日重跑的逐字节一致。
+
+### 规模校准
+
+规格初值 $20k × 2% = $400/笔连一张 NVDA 跨式（≈$2,800）都开不出，账本会永远是空的。
+改为 $100k × 6% = $6,000，让主流名单的一张合约进得来（COST ≈ $5,300）。
+这是测量账本，规模只服务于「能攒到样本」。
+
+### 已知局限（模块头部明写）
+
+- **无 delta 对冲**：ATM 跨式只在入场时近似 delta 中性，之后标的一漂就带方向，
+  v1 把它当噪音记录；第 5 步的组合 Greeks 对冲会接管。
+- 阈值 1.30 / 0.75 是先验不是校准，`settle_signals` 攒够样本后再定。
+- 生产快照今天之前没有 `quote_set`，端到端目前只有合成数据验证；第一批真实
+  信号在下一次扫描出现。
 
 ## [0.45.100] — 2026-09-03 — 纸面组合仓位改为波动率目标制（用上系统里 IC 最高的信号）
 
