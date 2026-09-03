@@ -1222,6 +1222,19 @@ class AlphaHiveDailyReporter:
         except Exception as e:
             _log.warning("期权纸面腿更新失败(非致命): %s", e)
 
+        # ── v0.45.102: 方差风险溢价（VRP）信号 —— 只记录与结算，不下注 ──
+        # 读当日 options_snapshot 的 iv_raw_observed / rv_30d 记一行 IV−RV，再给
+        # 21 个交易日前的旧行回填事后 RV。逐票时序、闸门 63 条；同日重跑幂等。
+        try:
+            import vrp_signal as _vrp
+            _vrp_rows = _vrp.record_day(self.date_str)
+            _vrp_settled = _vrp.settle(self.date_str)
+            _log.info("VRP 信号已更新: %s (记录 %d / ready %d / 结算 %d)",
+                      self.date_str, len(_vrp_rows),
+                      sum(1 for _r in _vrp_rows if _r.get("ready")), _vrp_settled)
+        except Exception as e:
+            _log.warning("VRP 信号更新失败(非致命): %s", e)
+
         # ── T+1/T+7/T+30 实际价格回填（后台执行，不阻塞主流程）──
         try:
             from outcomes_fetcher import OutcomesFetcher
@@ -1640,7 +1653,7 @@ class AlphaHiveDailyReporter:
             "sector_sentiment_contagion": sector_sentiment_summary,
             "macro_context": macro_snapshot,
             "backtest_stats": backtest_stats,
-            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(_vol_tiers) + self._options_paper_leg_markdown(),
+            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(_vol_tiers) + self._options_paper_leg_markdown() + self._vrp_markdown(),
             "twitter_threads": self._generate_swarm_twitter_threads(swarm_results),
             "opportunities": [
                 {
@@ -1729,6 +1742,15 @@ class AlphaHiveDailyReporter:
             return _opl.render_markdown(self.date_str) or ""
         except Exception as e:  # noqa: BLE001
             _log.warning("期权纸面腿小节渲染失败(非致命): %s", e)
+            return ""
+
+    def _vrp_markdown(self) -> str:
+        """v0.45.102 VRP 信号小节；任何失败返回空串，不影响日报。"""
+        try:
+            import vrp_signal as _vrp
+            return _vrp.render_markdown(self.date_str) or ""
+        except Exception as e:  # noqa: BLE001
+            _log.warning("VRP 信号小节渲染失败(非致命): %s", e)
             return ""
 
     @staticmethod
