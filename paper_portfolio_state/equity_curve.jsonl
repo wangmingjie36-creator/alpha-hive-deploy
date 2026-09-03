@@ -90,3 +90,4 @@
 {"date": "2026-08-28", "cash": NaN, "deployed": 11333.47, "unrealized": NaN, "nav": NaN, "positions_count": 7, "trades_closed_today": 1, "realized_pnl_today": NaN}
 {"date": "2026-08-31", "cash": NaN, "deployed": NaN, "unrealized": NaN, "nav": NaN, "positions_count": 9, "trades_closed_today": 0, "realized_pnl_today": 0.0}
 {"date": "2026-09-01", "cash": NaN, "deployed": NaN, "unrealized": NaN, "nav": NaN, "positions_count": 12, "trades_closed_today": 0, "realized_pnl_today": 0.0}
+{"date": "2026-09-02", "cash": NaN, "deployed": NaN, "unrealized": NaN, "nav": NaN, "positions_count": 13, "trades_closed_today": 0, "realized_pnl_today": 0.0}
