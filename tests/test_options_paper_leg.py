@@ -142,11 +142,25 @@ class TestSizing:
         assert opl.size_contracts("long", float("nan"), 20_000)[0] == 0
         assert opl.size_contracts("long", 2.0, float("nan"))[0] == 0
 
-    def test_max_open_and_no_duplicate_ticker(self, monkeypatch):
+    def test_max_open_caps_total_positions(self, monkeypatch):
+        """max_open 生效：两只**不同**的票、都合格，只开得下一个。"""
         monkeypatch.setitem(opl.CONFIG, "max_open", 1)
         r = opl.run_for_date(AS_OF, quotes_fn=_none_quotes,
-                             signals=[_sig("AAA", "cheap"), _sig("AAA", "rich"), _sig("BBB", "cheap")])
-        assert len(r["positions"]) == 1
+                             signals=[_sig("AAA", "cheap"), _sig("BBB", "cheap")])
+        assert [p["ticker"] for p in r["positions"]] == ["AAA"]
+        assert [k["reason"] for k in r["skipped"]] == ["max_open reached"]
+
+    def test_same_ticker_never_opened_twice_even_with_room(self):
+        """同票去重生效：max_open 还剩很多位子，同一只票的两条信号也只开一个。
+
+        （旧版把这两件事合在一条里，把 max_open 换成常数 99 或把去重删掉，
+        任一单独失效都还能过。）
+        """
+        assert opl.CONFIG["max_open"] >= 2
+        r = opl.run_for_date(AS_OF, quotes_fn=_none_quotes,
+                             signals=[_sig("AAA", "cheap"), _sig("AAA", "rich")])
+        assert [p["ticker"] for p in r["positions"]] == ["AAA"]
+        assert not any(k.get("reason") == "max_open reached" for k in r["skipped"])
 
     def test_fair_and_untradeable_never_enter(self):
         r = opl.run_for_date(AS_OF, quotes_fn=_none_quotes,
@@ -178,17 +192,29 @@ class TestMarkToMarket:
         r = opl.run_for_date("2026-09-04", quotes_fn=_quotes_fn({CALL: _q(1.4, 1.6), PUT: _q(1.4, 1.6)}), signals=[])
         assert r["equity_snapshot"]["unrealized"] == pytest.approx((1.8 - 3.0) * 100 * 2)
 
-    def test_stale_keeps_last_mark_and_counts_once_per_day(self):
+    def test_stale_days_counts_calendar_days_not_runs(self):
+        """H3(a) 回归：stale_days = as_of − last_mark_date 的真实日历天数。
+
+        旧实现是**运行次数**计数器（每跑一次 +1）：漏跑不计数，于是一个到期一年、
+        再也报不出价的仓位读出来是"stale 10 天"，看着像暂时抖动。下面 09-03 → 09-08
+        只跑了一次，旧实现给 1，真实值是 5。
+        """
         opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
         r = opl.run_for_date("2026-09-04", quotes_fn=_none_quotes, signals=[])
         pos = r["positions"][0]
         assert pos["last_mark"] == pytest.approx(2.0) and pos["last_mark_date"] == AS_OF
         assert pos["mark_source"] == "stale" and pos["stale_days"] == 1
-        r = opl.run_for_date("2026-09-04", quotes_fn=_none_quotes, signals=[])     # 同日重跑
+        r = opl.run_for_date("2026-09-04", quotes_fn=_none_quotes, signals=[])     # 同日重跑幂等
         assert r["positions"][0]["stale_days"] == 1
         r = opl.run_for_date("2026-09-08", quotes_fn=_none_quotes, signals=[])
-        assert r["positions"][0]["stale_days"] == 2
+        assert r["positions"][0]["stale_days"] == 5        # 运行次数计数器会给 2
         assert r["equity_snapshot"]["stale_positions"] == 1
+        # 一次成功盯市把它清零，并把锚点挪到今天
+        r = opl.run_for_date("2026-09-09", quotes_fn=_quotes_fn({CALL: _q(1.4, 1.6), PUT: _q(1.4, 1.6)}),
+                             signals=[])
+        assert r["positions"][0]["stale_days"] == 0
+        r = opl.run_for_date("2026-09-11", quotes_fn=_none_quotes, signals=[])
+        assert r["positions"][0]["stale_days"] == 2
 
     def test_half_quote_is_stale(self):
         opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
@@ -245,7 +271,7 @@ class TestExits:
         opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
         for d in ("2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24"):
             r = opl.run_for_date(d, quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, dd: None)
-        assert len(r["positions"]) == 1 and r["positions"][0]["stale_days"] == 4
+        assert len(r["positions"]) == 1 and r["positions"][0]["stale_days"] == 21   # 09-03 → 09-24
         _state_files_finite()
 
     def test_expiry_buffer_exit(self):
@@ -261,6 +287,67 @@ class TestExits:
         r = opl.run_for_date("2026-10-02", quotes_fn=_none_quotes, signals=[], closes_fn=lambda tk, d: 95.0)
         t = r["closed_today"][0]
         assert t["mark_source"] == "intrinsic" and t["exit_premium"] == pytest.approx(5.0)
+
+    def test_late_intrinsic_settles_at_expiry_close_not_todays_close(self):
+        """H2 回归：迟到的内在价值结算必须用**到期日**的收盘，不是"今天"的。
+
+        K=100、2026-10-02 到期、到期日 S=101 → 真实结算 $1.00/股。旧实现在 12-20
+        才结算时读 12-20 的收盘 S=160，把它记成 $60.00/股：一笔 $220 的仓位凭空
+        +$5,780 的盈亏，等于让一张早就作废的合约继续跟着标的涨了两个半月。
+        """
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])  # long 1× @2.2
+        closes = {"2026-10-02": 101.0, "2026-12-20": 160.0}
+        r = opl.run_for_date("2026-12-20", quotes_fn=_none_quotes, signals=[],
+                             closes_fn=lambda tk, d: closes.get(d))
+        assert r["positions"] == []
+        t = r["closed_today"][0]
+        assert t["mark_source"] == "intrinsic"
+        assert t["exit_underlying"] == pytest.approx(101.0)          # 不是 160
+        assert t["exit_premium"] == pytest.approx(1.0)               # |101 − 100|，不是 60.0
+        assert t["pnl_usd"] == pytest.approx((1.0 - 2.2) * 100)      # −120，不是 +5780
+        assert "settle_date=2026-10-02" in t["rationale"]
+        # holding_days 不变式：一张合约不可能被持有到超过它自己的到期日
+        assert t["holding_days"] == 29 == opl._days_between(AS_OF, EXPIRY)
+        assert t["settled_late_days"] == 79                          # 10-02 → 12-20
+
+    def test_expired_position_with_no_price_is_written_off(self):
+        """H3(b) 回归：到期后既无报价又无收盘价的仓位必须核销，不能永远挂着。
+
+        `cboe_options.quote_contracts` 对不在链里的符号返回 None，所以到期后
+        `to_expiry ≤ 0` 是**永久**状态：等报价回来是等不到的。旧实现让它一直挂着，
+        入场日的冻结 mark 还一直计进 NAV。
+        """
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
+        dead = lambda tk, d: None                                    # noqa: E731 任何日期都没价
+        r = opl.run_for_date("2026-10-30", quotes_fn=_none_quotes, signals=[], closes_fn=dead)
+        assert len(r["positions"]) == 1 and r["closed_today"] == []   # 到期 28 天 ≤ 30：还等
+        r = opl.run_for_date("2026-11-05", quotes_fn=_none_quotes, signals=[], closes_fn=dead)
+        assert r["positions"] == []
+        t = r["closed_today"][0]
+        assert t["mark_source"] == "written_off" and t["exit_reason"] == "written_off"
+        assert t["exit_premium"] == pytest.approx(2.0)               # 最后已知 mark（入场日 mid）
+        assert t["exit_call"] is None and t["exit_underlying"] is None
+        assert t["pnl_usd"] == pytest.approx((2.0 - 2.2) * 100)
+        assert "WRITTEN OFF" in t["rationale"] and "NOT a traded price" in t["rationale"]
+        assert t["holding_days"] == 29 and t["settled_late_days"] == 34
+        assert opl.compute_kpis()["written_off_exits"] == 1
+        assert opl.compute_kpis()["intrinsic_exits"] == 0
+        _state_files_finite()
+
+    def test_write_off_horizon_is_configurable(self, monkeypatch):
+        monkeypatch.setitem(opl.CONFIG, "write_off_days_after_expiry", 90)
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
+        r = opl.run_for_date("2026-11-05", quotes_fn=_none_quotes, signals=[],
+                             closes_fn=lambda tk, d: None)
+        assert len(r["positions"]) == 1                              # 34 天 ≤ 90：按配置继续等
+
+    def test_write_off_never_preempts_a_real_settlement_price(self):
+        """有到期日收盘时走内在价值，核销只是最后手段。"""
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=[_sig(label="cheap")])
+        r = opl.run_for_date("2026-11-05", quotes_fn=_none_quotes, signals=[],
+                             closes_fn=lambda tk, d: 108.0 if d == EXPIRY else None)
+        t = r["closed_today"][0]
+        assert t["mark_source"] == "intrinsic" and t["exit_premium"] == pytest.approx(8.0)
 
     def test_exit_after_event_disabled_holds_until_buffer(self, monkeypatch):
         monkeypatch.setitem(opl.CONFIG, "exit_after_event", False)
@@ -345,6 +432,22 @@ class TestReporting:
         assert "stale" in md                                   # BBB 9/21 没报价
         assert "无 delta 对冲" in md
 
+    def test_markdown_distinguishes_frozen_marks_and_write_offs(self):
+        """H3(c)：读者不能把一个冻结的旧 mark 当成活报价读。"""
+        sigs = [_sig("AAA", "cheap"),                                  # 到期 10-02 → 会被核销
+                _sig("BBB", "cheap", earnings="2027-01-10", expiry="2027-01-15")]
+        opl.run_for_date(AS_OF, quotes_fn=_none_quotes, signals=sigs)
+        r = opl.run_for_date("2026-11-05", quotes_fn=_none_quotes, signals=[],
+                             closes_fn=lambda tk, d: None)
+        assert [t["ticker"] for t in r["closed_today"]] == ["AAA"]
+        assert [p["ticker"] for p in r["positions"]] == ["BBB"]        # 还没到期、财报未到
+        k = opl.compute_kpis()
+        assert k["written_off_exits"] == 1 and k["stale_positions"] == 1
+        md = opl.render_markdown("2026-11-05")
+        assert "⚠️" in md and "冻结 mark" in md                        # 持仓侧
+        assert "written_off" in md and "核销" in md                    # 已平侧
+        assert "63d @ 2026-09-03" in md                                # 冻结了多久、冻在哪天
+
     def test_markdown_empty_when_nothing(self):
         assert opl.render_markdown(AS_OF) == ""
 
@@ -352,6 +455,24 @@ class TestReporting:
         evs._write_jsonl(evs.SIGNALS_FILE, [_sig("AAA", "cheap")])
         r = opl.run_for_date(AS_OF, quotes_fn=_none_quotes)
         assert [p["ticker"] for p in r["positions"]] == ["AAA"]
+
+
+# ==================== 数值守卫 ====================
+
+class TestScrubGuard:
+
+    def test_scrub_turns_non_finite_floats_into_none_everywhere(self):
+        """_scrub 是落盘前最后一道闸；把它换成 identity 时下面每条都会红。"""
+        obj = {"a": float("nan"), "b": [1.0, float("inf"), {"c": float("-inf")}],
+               "d": "nan", "e": 2.5, "f": None, "g": 3, "h": True}
+        out = opl._scrub(obj)
+        assert out["a"] is None
+        assert out["b"][1] is None and out["b"][2]["c"] is None
+        assert out["b"][0] == pytest.approx(1.0)
+        # 有限值 / 非 float 一律原样透传（不能顺手把好数据也抹了）
+        assert out["d"] == "nan" and out["e"] == pytest.approx(2.5)
+        assert out["f"] is None and out["g"] == 3 and out["h"] is True
+        assert opl._scrub(float("nan")) is None and opl._scrub(1.5) == pytest.approx(1.5)
 
 
 # ==================== cboe_options.quote_contracts ====================
@@ -374,6 +495,27 @@ class TestQuoteContracts:
         assert out[CALL]["expiry"] == EXPIRY and out[CALL]["dte"] == 29
         assert out[PUT]["quote_ok"] is False and out[PUT]["mid"] is None
         assert out["XYZ261002C00105000"] is None
+
+    def test_duplicate_rows_resolve_to_the_highest_open_interest(self, monkeypatch):
+        """`_qs_pick_row` 的并列消解：同一 OCC 符号出现两行时取 OI 最大的那行。
+
+        故意把 OI=1 的那行放在前面：换成 `rows[0]` 会拿到 mid 1.1 而不是 5.1。
+        """
+        import cboe_options as co
+        from datetime import datetime
+        payload = {"options": [
+            {"option": CALL, "bid": 1.0, "ask": 1.2, "delta": 0.5, "iv": 0.3, "open_interest": 1},
+            {"option": CALL, "bid": 5.0, "ask": 5.2, "delta": 0.5, "iv": 0.3, "open_interest": 999},
+        ]}
+        monkeypatch.setattr(co, "_fetch_cboe_payload", lambda tk, timeout, **kw: payload)
+        monkeypatch.setattr(co, "_pdt_now", lambda: datetime(2026, 9, 3, 10, 0))
+        monkeypatch.setattr(co, "_SNAPSHOT_PROVIDER", None)
+        out = co.quote_contracts("XYZ", [CALL])
+        assert out[CALL]["mid"] == pytest.approx(5.1) and out[CALL]["oi"] == pytest.approx(999)
+        # 顺序反过来结果必须一样（证明是按 OI 选，不是碰巧取了最后一行）
+        payload["options"].reverse()
+        out = co.quote_contracts("XYZ", [CALL])
+        assert out[CALL]["mid"] == pytest.approx(5.1) and out[CALL]["oi"] == pytest.approx(999)
 
     def test_snapshot_mode_all_none(self, monkeypatch):
         import cboe_options as co

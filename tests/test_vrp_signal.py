@@ -109,11 +109,20 @@ class TestRecord:
         for r in rows.values():
             assert r["vrp_ex_ante"] is None and r["ready"] is False and r["ts_pct"] is None
 
-    def test_backfilled_snapshots_are_ignored(self, state):
+    def test_backfilled_files_are_excluded_by_glob_and_regex(self, state):
+        """补跑文件用真实命名（业务日在中间、跑批日在末尾）。record_day 不该收它们 ——
+        收了就等于把业务日记到跑批日名下。v0.45.104 删掉了那行显式 `_backfilled-`
+        过滤：它读起来像在承重，实际 glob 与 _SNAP_RE 都已经把它们挡在外面。
+        本测试把"挡住"钉在行为上，同时钉住两道机制各自确实不匹配。"""
         _snap(state, "AAA", AS_OF)
-        (state / f"options_snapshot_BBB_{AS_OF}_backfilled-2026-09-10.json").write_text(
-            json.dumps({"iv_raw_observed": 30, "rv_30d": 20}))
+        bf = state / f"options_snapshot_BBB_2026-08-28_backfilled-{AS_OF}.json"
+        bf.write_text(json.dumps({"iv_raw_observed": 30, "rv_30d": 20}))
         assert [r["ticker"] for r in vrp.record_day(AS_OF, cache_dir=state)] == ["AAA"]
+        # 跑批日与业务日两个口径都不该把它捞进来
+        assert bf not in set(state.glob(f"options_snapshot_*_{AS_OF}.json"))
+        assert bf not in set(state.glob("options_snapshot_*_2026-08-28.json"))
+        assert vrp._SNAP_RE.match(bf.name) is None
+        assert [r["ticker"] for r in vrp.record_day("2026-08-28", cache_dir=state)] == []
 
     @pytest.mark.parametrize("n_prior,ready", [(62, False), (63, True), (70, True)])
     def test_n_obs_boundary_counts_only_prior_dates(self, state, n_prior, ready):
@@ -190,6 +199,91 @@ class TestRecord:
         assert next(r for r in today if r["ticker"] == "AAA")["vrp_ex_ante"] == pytest.approx(15.0)
         assert len(rows) == 4                                # 2 条历史保留
 
+    def test_rerun_preserves_settlement_written_fields(self, state):
+        """v0.45.104 回归：同日重跑不得抹掉 settle() 已填好的结算字段。
+
+        修复前：record_day 丢掉该日全部旧行、用 rv_forward/vrp_realized/settled_on
+        全为 None 的新行顶上，日志照打"记录 N 行"。日报 --date 回填路径就走这里。
+        """
+        _snap(state, "AAA", AS_OF, iv_raw=30.0, rv=20.0)
+        vrp.record_day(AS_OF, cache_dir=state)
+        # settle 填上结算字段（用真实 settle，不手写，免得钉住一个假形状）
+        bars = _bars(AS_OF, [100.0 + (i % 3) for i in range(40)])
+        assert vrp.settle(_day(-90), bars_fn=lambda t: bars) == 1
+        before = dict(vrp.load_rows()[0])
+        assert before["rv_forward"] is not None and before["settled_on"] is not None
+
+        vrp.record_day(AS_OF, cache_dir=state)                    # 同日重跑
+        (after,) = vrp.load_rows()
+        for k in ("rv_forward", "vrp_realized", "settled_on"):
+            assert after[k] == before[k], f"{k} 被重跑抹掉了"
+
+    def test_rerun_preserves_every_settlement_field(self, state):
+        """逐字段钉住 _SETTLEMENT_FIELDS：从元组里漏掉任何一个（比如后加的
+        settle_give_up 三兄弟），那个字段就会被同日重跑悄悄抹成 None。
+        没有这条，漏字段的改动能全程绿灯通过。"""
+        _snap(state, "AAA", AS_OF, iv_raw=30.0, rv=20.0)
+        vrp.record_day(AS_OF, cache_dir=state)
+        sentinel = {"rv_forward": 12.5, "vrp_realized": 17.5, "settled_on": "2026-08-01",
+                    "settle_attempts": 3, "settle_give_up": True,
+                    "settle_give_up_reason": "out_of_fetch_window",
+                    "settle_give_up_on": "2026-08-02"}
+        assert set(sentinel) == set(vrp._SETTLEMENT_FIELDS), "改了 _SETTLEMENT_FIELDS 就要同步本用例"
+        (row,) = vrp.load_rows()
+        row.update(sentinel)
+        _seed_rows([row])
+
+        vrp.record_day(AS_OF, cache_dir=state)
+        (after,) = vrp.load_rows()
+        for k, want in sentinel.items():
+            assert after[k] == want, f"{k} 被重跑抹掉了"
+
+    def test_rerun_recomputes_vrp_realized_when_iv_revised(self, state):
+        """iv 被修订过时搬运结算字段还要维持 vrp_realized == iv − rv_forward。"""
+        _snap(state, "AAA", AS_OF, iv_raw=30.0, rv=20.0)
+        vrp.record_day(AS_OF, cache_dir=state)
+        bars = _bars(AS_OF, [100.0 + (i % 3) for i in range(40)])
+        vrp.settle(_day(-90), bars_fn=lambda t: bars)
+        rv_f = vrp.load_rows()[0]["rv_forward"]
+
+        _snap(state, "AAA", AS_OF, iv_raw=44.0, rv=20.0)          # 快照重抓，iv 变了
+        vrp.record_day(AS_OF, cache_dir=state)
+        (row,) = vrp.load_rows()
+        assert row["iv"] == 44.0 and row["rv_forward"] == rv_f
+        assert row["vrp_realized"] == pytest.approx(44.0 - rv_f, abs=1e-4)
+
+    def test_prior_history_accepts_backfilled_snapshot_rv(self, state):
+        """v0.45.104 回归：补跑快照的 rv_30d 也要能进 VRP 历史。
+
+        真实命名 `options_snapshot_WMT_2026-08-28_backfilled-2026-08-29.json`：
+        IV 索引早就收它（iv_history 走的是别的路径），_snapshot_rv 从前只开精确
+        文件名 → 该业务日单向地"有 IV、无 vrp" → assess 的分母永远够不着。
+        """
+        dates = [_day(i + 1) for i in range(10)]
+        _index(state, "AAA", dates, iv=30.0)
+        for d in dates[:6]:
+            _snap(state, "AAA", d, iv_raw=30.0, rv=25.0)
+        for d in dates[6:]:                                       # 这 4 天只有补跑文件
+            (state / f"options_snapshot_AAA_{d}_backfilled-{_day(-1, d)}.json").write_text(
+                json.dumps({"iv_raw_observed": 30.0, "rv_30d": 25.0}))
+        assert vrp._snapshot_rv(state, "AAA", dates[8]) == 25.0
+        _snap(state, "AAA", AS_OF, iv_raw=30.0, rv=20.0)
+        (row,) = vrp.record_day(AS_OF, cache_dir=state)
+        assert row["n_obs"] == 10                                 # 修复前是 6
+
+    def test_backfilled_fallback_prefers_newest_run(self, state):
+        """同一业务日补跑多次 → 取跑批日最新的一份。"""
+        for run, rv in (("2026-08-29", 11.0), ("2026-09-02", 22.0)):
+            (state / f"options_snapshot_AAA_2026-08-28_backfilled-{run}.json").write_text(
+                json.dumps({"rv_30d": rv}))
+        assert vrp._snapshot_rv(state, "AAA", "2026-08-28") == 22.0
+
+    def test_plain_snapshot_wins_over_backfilled(self, state):
+        _snap(state, "AAA", "2026-08-28", rv=7.0)
+        (state / "options_snapshot_AAA_2026-08-28_backfilled-2026-08-29.json").write_text(
+            json.dumps({"rv_30d": 99.0}))
+        assert vrp._snapshot_rv(state, "AAA", "2026-08-28") == 7.0
+
     def test_nan_in_snapshot_never_reaches_file(self, state):
         nan = float("nan")
         _snap(state, "AAA", AS_OF, iv_raw=nan, iv30=nan, rv=nan, price=nan)
@@ -220,13 +314,26 @@ D0 = "2026-07-01"           # 周三
 
 class TestSettle:
 
-    def test_constant_closes_realize_zero_vol(self):
+    def test_zero_forward_vol_is_rejected_like_upstream(self):
+        """v0.45.104 回归：rv_forward == 0 不是观测，是坏数据（停牌/补齐/取错列）。
+
+        修复前这里放行 0，于是常数收盘价凭空造出一条**最大可能**的"卖方全赢"
+        观测（vrp_realized == iv），再进 settlement_stats.by_label 的均值。
+        口径必须与 twelve_data.realized_vol 的 `0 < rv <= 300` 一致。
+        """
+        assert vrp.realized_vol_from_closes([100.0] * 22) is None
         _seed_rows([_row("AAA", D0, 10.0, iv=30.0)])
         bars = _bars(D0, [100.0] * 40)
+        assert vrp.settle("2026-09-01", bars_fn=lambda t: bars) == 0
+        (row,) = vrp.load_rows()
+        assert row["rv_forward"] is None and row["vrp_realized"] is None
+        assert row["settled_on"] is None
+        # 而非退化序列照常结算
+        _seed_rows([_row("AAA", D0, 10.0, iv=30.0)])
+        bars = _bars(D0, [100.0 + (i % 3) for i in range(40)])
         assert vrp.settle("2026-09-01", bars_fn=lambda t: bars) == 1
         (row,) = vrp.load_rows()
-        assert row["rv_forward"] == 0.0 and row["vrp_realized"] == pytest.approx(30.0)
-        assert row["settled_on"] == "2026-09-01"
+        assert row["rv_forward"] > 0 and row["settled_on"] == "2026-09-01"
 
     def test_alternating_returns_match_project_convention(self):
         rets = [0.01 if i % 2 == 0 else -0.01 for i in range(21)]
@@ -251,26 +358,61 @@ class TestSettle:
         assert row["rv_forward"] is None and row["vrp_realized"] is None and row["settled_on"] is None
 
     def test_lookahead_guard_ignores_bars_after_as_of(self):
+        """v0.45.104 重写：旧版本删掉 `b["date"] <= as_of` 过滤仍然全绿 ——
+        它的夹具切出来的片段在有无过滤时**逐字节相同**，等于没测。
+
+        判别性场景（唯一能让两者分叉的那种）：基准 2026-07-01，as_of=2026-07-30。
+        (D0, as_of] 有 21 个**工作日**，settle 的零成本预筛因此放行；但 2026-07-03
+        是独立日观察日休市，真实交易日只有 20 个。
+          · 有过滤：可用 K 线 21 根（基准 + 20），差 1 根 → _forward_closes 返回 None。
+          · 无过滤：直接切前 22 根，末根是 2026-07-31 —— as_of **之后**一个交易日，
+            偷看了未来。
+        """
+        holidays = {"2026-07-03", "2026-09-07"}               # 独立日观察日 / 劳动节
+        bars, d = [], dt.date.fromisoformat(D0)
+        while d <= dt.date(2026, 9, 30):
+            if d.weekday() < 5 and d.isoformat() not in holidays:
+                bars.append({"date": d.isoformat(), "close": 100.0 + len(bars)})
+            d += dt.timedelta(days=1)
+        as_of = "2026-07-30"
+        assert vrp._weekdays_after(D0, as_of) == 21            # 预筛放行……
+        assert sum(1 for b in bars if b["date"] <= as_of) == 21   # ……但只有 20 个交易日
+        assert bars[21]["date"] == "2026-07-31" > as_of        # 无过滤会用到的那根
+
         _seed_rows([_row("AAA", D0, 10.0)])
-        bars = _bars(D0, [100.0 + i for i in range(60)])      # 数据够，但 as_of 只放到第 16 根
-        as_of = bars[15]["date"]
         calls = []
 
         def fn(t):
             calls.append(t)
             return bars
-        assert vrp.settle(as_of, bars_fn=fn) == 0
-        assert calls == []                                   # 连工作日都不够，压根不取 K 线
-        as_of = bars[21]["date"]                              # 恰好第 21 个交易日
-        assert vrp.settle(as_of, bars_fn=fn) == 1
-        assert calls == ["AAA"]
+        assert vrp._forward_closes(bars, D0, as_of, 21) is None
+        assert vrp.settle(as_of, bars_fn=fn) == 0             # 删掉过滤 → 1，本行变红
+        assert calls == ["AAA"]                               # K 线确实取了，不是被预筛挡掉的
+        (row,) = vrp.load_rows()
+        assert row["rv_forward"] is None and row["settled_on"] is None
+
+        # 再等一个交易日，第 21 根到位，正常结算
+        as_of2 = "2026-07-31"
+        assert vrp.settle(as_of2, bars_fn=fn) == 1
         (row,) = vrp.load_rows()
         assert row["rv_forward"] == pytest.approx(
             vrp.realized_vol_from_closes([b["close"] for b in bars[:22]]), abs=1e-4)
 
+    def test_settle_skips_fetch_when_not_enough_weekdays(self):
+        """预筛：连工作日都不够 forward_days 的行压根不取 K 线（省一次限流额度）。"""
+        _seed_rows([_row("AAA", D0, 10.0)])
+        bars = _bars(D0, [100.0 + i for i in range(60)])
+        calls = []
+
+        def fn(t):
+            calls.append(t)
+            return bars
+        assert vrp.settle(bars[15]["date"], bars_fn=fn) == 0
+        assert calls == []
+
     def test_base_bar_falls_back_to_last_close_on_or_before_date(self):
         _seed_rows([_row("AAA", "2026-07-04", 10.0)])         # 周六快照
-        bars = _bars(D0, [100.0] * 40)
+        bars = _bars(D0, [100.0 + (i % 3) for i in range(40)])   # 非退化（rv == 0 已不合法）
         assert vrp.settle("2026-09-01", bars_fn=lambda t: bars) == 1
 
     def test_one_bars_call_per_ticker_and_quiet_tickers_skipped(self):
@@ -301,6 +443,62 @@ class TestSettle:
             return None
         assert vrp.settle("2026-09-01", bars_fn=fn) == 0
 
+    def test_out_of_fetch_window_rows_give_up_and_stop_costing_calls(self):
+        """v0.45.104 回归：基准日掉出 _default_bars 的 120 根窗口 → 永远结算不了。
+
+        修复前 pending 只看 `rv_forward is None`，这种行每票每天白取一次 K 线、
+        永远取不完，而且完全看不见（既不是 settled 也没有任何标记）。
+        """
+        old = "2025-01-02"                                    # 离 as_of 远超 120+15 个工作日
+        _seed_rows([_row("AAA", old, 10.0), _row("BBB", D0, 10.0)])
+        calls = []
+
+        def fn(t):
+            calls.append(t)
+            return _bars(D0, [100.0 + (i % 3) for i in range(40)])
+        assert vrp.settle("2026-09-01", bars_fn=fn) == 1      # 只有 BBB 结算成功
+        assert calls == ["BBB"]                               # 修复前这里还会为 AAA 取一次
+        a = next(r for r in vrp.load_rows() if r["ticker"] == "AAA")
+        assert a["settle_give_up"] is True
+        assert a["settle_give_up_reason"] == "out_of_fetch_window"
+        assert a["settle_give_up_on"] == "2026-09-01"
+        assert vrp.settlement_stats()["n_gave_up"] == 1
+        # 放弃是终态：再跑一次不再产生任何取数
+        assert vrp.settle("2026-09-02", bars_fn=fn) == 0
+        assert calls == ["BBB"]
+
+    def test_repeated_unsettleable_rows_give_up_after_max_attempts(self):
+        """拿到了 K 线却始终算不出 rv_forward → 计次，到上限打放弃标记。"""
+        _seed_rows([_row("AAA", D0, 10.0)])
+        bars = _bars(D0, [100.0] * 40)                        # 常数 → rv == 0 → 永远算不出
+        calls = []
+
+        def fn(t):
+            calls.append(t)
+            return bars
+        for i in range(1, vrp.CONFIG["settle_max_attempts"] + 1):
+            assert vrp.settle("2026-09-01", bars_fn=fn) == 0
+            (row,) = vrp.load_rows()
+            assert row["settle_attempts"] == i
+        assert row["settle_give_up"] is True
+        assert row["settle_give_up_reason"] == "max_attempts_exhausted"
+        n_calls = len(calls)
+        assert vrp.settle("2026-09-01", bars_fn=fn) == 0
+        assert len(calls) == n_calls                          # 放弃后不再取数
+
+    def test_transient_fetch_failure_does_not_count_as_attempt(self):
+        """限流/断网是暂时的，不该消耗放弃次数 —— 否则一周 429 就把行判死。"""
+        _seed_rows([_row("AAA", D0, 10.0), _row("BBB", D0, 10.0)])
+
+        def fn(t):
+            if t == "AAA":
+                raise ConnectionError("429")
+            return None
+        for _ in range(vrp.CONFIG["settle_max_attempts"] + 2):
+            assert vrp.settle("2026-09-01", bars_fn=fn) == 0
+        for r in vrp.load_rows():
+            assert r["settle_attempts"] is None and r["settle_give_up"] is None
+
     def test_settled_values_are_finite(self):
         _seed_rows([_row("AAA", D0, 1.0)])
         bars = _bars(D0, [100.0, 0.0, float("nan")] + [100.0] * 40)
@@ -329,17 +527,65 @@ class TestAssess:
         assert vrp.summary_line(res).startswith("⏳")
 
     def test_ready_when_enough_tickers_have_enough_obs(self, state):
+        deep = _past_dates(63)
         for i in range(20):
-            _index(state, f"T{i:02d}", _past_dates(63))
+            _index(state, f"T{i:02d}", deep)
+            for d in deep:                                    # 可用历史也要够，不能只有索引
+                _snap(state, f"T{i:02d}", d, iv_raw=30.0, rv=20.0)
         for i in range(20, 30):
             _index(state, f"T{i:02d}", _past_dates(10))
         res = vrp.assess(cache_dir=state)
         assert res["status"] == "ready" and res["ready"] is True and res["n_ready_tickers"] == 20
+        assert res["n_index_ready_tickers"] == 20 and res["median_usable_obs"] >= 63
         assert res["eta_weeks"] == 0.0
         assert vrp.summary_line(res).startswith("✅")
         # 19 只 → 差一只就不算
         (state / "iv_history_T19.jsonl").unlink()
         assert vrp.assess(cache_dir=state)["status"] == "accruing"
+
+    def test_ready_verdict_uses_usable_history_not_index_count(self, state, monkeypatch):
+        """v0.45.104 回归：闸门量的必须是 record_day 真正用得上的那个数。
+
+        修复前 assess 数 len(_read_index(t))，record_day 却按 len(_prior_history(...))
+        判 ready —— 于是能打印「✅ VRP 信号已就绪」而当天唯一一行是
+        ready=False, n_obs=4。两个分母根本不是同一个量。
+        """
+        monkeypatch.setitem(vrp.CONFIG, "min_obs_per_ticker", 5)
+        monkeypatch.setitem(vrp.CONFIG, "min_ready_tickers", 1)
+        dates = [_day(i + 1) for i in range(6)]
+        _index(state, "AAA", dates, iv=30.0)
+        for d in dates[:4]:                                   # 索引 6 条，但只有 4 条配得上快照
+            _snap(state, "AAA", d, iv_raw=30.0, rv=25.0)
+        _snap(state, "AAA", AS_OF, iv_raw=30.0, rv=20.0)
+
+        (row,) = vrp.record_day(AS_OF, cache_dir=state)
+        assert row["ready"] is False and row["n_obs"] == 4     # record_day 的真实处境
+
+        # as_of 显式钉死：assess 默认走 pdt_today()，而本用例的日期是相对 AS_OF 造的 ——
+        # 断言两端来自两个不同的钟就是定时炸弹（MEMORY：v0.45.96）。
+        res = vrp.assess(cache_dir=state, as_of=AS_OF)
+        assert res["per_ticker_obs"]["AAA"] == 6               # 索引口径（旧分母）
+        assert res["per_ticker_usable_obs"]["AAA"] == 4        # 可用口径（新分母）
+        assert res["n_index_ready_tickers"] == 1               # 旧口径会说"就绪"
+        assert res["status"] == "accruing" and res["ready"] is False
+        line = vrp.summary_line(res)
+        assert line.startswith("⏳") and "✅" not in line
+        assert "瓶颈不是攒得不够" in res["eta_note"]
+
+        # 补上缺的两天快照 → 两个口径合流，这才真就绪
+        for d in dates[4:]:
+            _snap(state, "AAA", d, iv_raw=30.0, rv=25.0)
+        res = vrp.assess(cache_dir=state, as_of=AS_OF)
+        assert res["status"] == "ready" and res["per_ticker_usable_obs"]["AAA"] == 6
+
+    def test_assess_settlement_is_scoped_to_passed_rows(self, state):
+        """v0.45.104 回归：assess(cache_dir=某目录) 从前不带参调 settlement_stats()，
+        探针式调用会把全局信号文件的生产结算统计打印成那个目录的结果。"""
+        _seed_rows([_row("AAA", _day(i + 1), 1.0, vrp_realized=2.0) for i in range(12)])
+        assert vrp.assess(cache_dir=state)["settlement"]["n_settled"] == 12
+        assert vrp.assess(cache_dir=state, rows=[])["settlement"] == {
+            "n_rows": 0, "n_settled": 0, "n_gave_up": 0, "by_label": {},
+            "spearman_within_ticker": {"n_tickers": 0, "n_pairs": 0, "rho": None}}
 
     def test_undetermined_on_empty_cache(self, state):
         res = vrp.assess(cache_dir=state)
@@ -370,15 +616,34 @@ class TestAssess:
         assert sorted(p.name for p in state.iterdir()) == before
         assert not vrp.SIGNALS_FILE.exists()
 
-    def test_spearman_within_ticker_perfect_monotone(self, state):
+    def test_spearman_is_within_ticker_not_pooled(self, state):
+        """v0.45.104 重写：这是本模块的招牌主张（绝不横截面池化），从前却没被测到。
+
+        旧夹具 x = 100k + i、y = 300k + 2i 把两轴的票间偏移推向**同一方向**，
+        逐票秩化与"把 75 个原值倒一个池子排名"给出的都是 rho = 1.0 —— 把
+        within-ticker 归一化整段换成朴素池化排名，39/39 依旧全绿。
+
+        判别性夹具：把 y 的偏移翻向（y = −300k + 2i）。票内两轴仍严格同向递增，
+        逐票秩化 rho = +1.0；池化原值则被票间偏移主导，rho = −0.7781。
+        这是本项目被引用最多的失效模式（MEMORY：alpha-hive-cross-sectional-pooling，
+        v0.45.50 那 7 条机器失效条件 28/30 只从未触发就是它）。
+        """
         rows = []
         for k, t in enumerate(["AAA", "BBB", "CCC"]):
-            off = 100.0 * k                                   # 票间大偏移，池化原值会乱
             for i in range(25):
-                rows.append(_row(t, _day(i + 1), off + i, rv_forward=1.0, vrp_realized=off * 3 + 2 * i))
+                rows.append(_row(t, _day(i + 1), 100.0 * k + i,
+                                 rv_forward=1.0, vrp_realized=-300.0 * k + 2 * i))
         _seed_rows(rows)
         sp = vrp.within_ticker_spearman(vrp.load_rows())
         assert sp == {"n_tickers": 3, "n_pairs": 75, "rho": 1.0}
+
+        # 同一份数据，朴素池化排名给出的是完全不同（且符号相反）的答案 ——
+        # 这一段就是被否决的那个实现，钉在这里以证明上面那条断言有判别力。
+        pooled = vrp._pearson(vrp._avg_ranks([r["vrp_ex_ante"] for r in rows]),
+                              vrp._avg_ranks([r["vrp_realized"] for r in rows]))
+        assert pooled == pytest.approx(-0.7781, abs=1e-4)
+        assert sp["rho"] != pytest.approx(pooled, abs=0.5)
+
         res = vrp.assess(cache_dir=state)
         assert res["settlement"]["spearman_within_ticker"]["rho"] == 1.0
         assert res["settlement"]["n_settled"] == 75
@@ -406,7 +671,9 @@ class TestAssess:
 
 class TestCliAndMarkdown:
 
-    def test_exit_codes_and_out_file(self, state, tmp_path):
+    def test_exit_codes_and_out_file(self, state, tmp_path, monkeypatch):
+        # min_ready 降到 2 纯为省掉 20×63 份快照的写入；min_obs 保持 63 不动
+        monkeypatch.setitem(vrp.CONFIG, "min_ready_tickers", 2)
         out = tmp_path / "vrp.json"
         assert vrp.main(["--json", "--out", str(out), "--cache-dir", str(state), "--date", AS_OF]) == 3
         assert json.loads(out.read_text())["assessment"]["status"] == "undetermined"
@@ -414,9 +681,33 @@ class TestCliAndMarkdown:
             _index(state, f"T{i:02d}", _past_dates(10))
         assert vrp.main(["--json", "--out", str(out), "--cache-dir", str(state), "--date", AS_OF]) == 1
         assert json.loads(out.read_text())["assessment"]["status"] == "accruing"
-        for i in range(25):
-            _index(state, f"T{i:02d}", _past_dates(63))
+        deep = _past_dates(63)
+        for i in range(2):
+            _index(state, f"T{i:02d}", deep)
+            for d in deep:
+                _snap(state, f"T{i:02d}", d, iv_raw=30.0, rv=20.0)
         assert vrp.main(["--cache-dir", str(state), "--date", AS_OF]) == 0
+
+    def test_record_zero_rows_warns_without_changing_exit_code(self, state, tmp_path, capsys):
+        """v0.45.104 回归：`--date D --record` 一行没写时，退出码与健康的"攒数中"
+        逐字节相同 —— 报错和正常态长得一模一样。退出码归就绪度（编排器契约不动），
+        成败改由 WARNING + JSON 计数表达。"""
+        for i in range(25):
+            _index(state, f"T{i:02d}", _past_dates(10))       # 有索引、无当日快照
+        out = tmp_path / "vrp.json"
+        code = vrp.main(["--record", "--json", "--out", str(out),
+                         "--cache-dir", str(state), "--date", AS_OF])
+        assert code == 1                                      # 契约不变
+        j = json.loads(out.read_text())
+        assert j["recorded"] == 0
+        assert j["warnings"] and "一行没写" in j["warnings"][0]
+        assert AS_OF in j["warnings"][0]
+        # 健康那一天：写了行就不该有告警
+        _snap(state, "AAA", AS_OF)
+        vrp.main(["--record", "--json", "--out", str(out),
+                  "--cache-dir", str(state), "--date", AS_OF])
+        j = json.loads(out.read_text())
+        assert j["recorded"] == 1 and j["warnings"] == []
 
     def test_record_flag_writes_rows(self, state, tmp_path, capsys):
         _snap(state, "AAA", AS_OF)

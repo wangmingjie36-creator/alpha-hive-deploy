@@ -1400,6 +1400,25 @@ class OptionsAnalyzer:
 _RE_SNAP_DATE = _re_mod.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def _qs_unavailable(error: str, *, source: str = "cboe") -> Dict:
+    """quote_set 不可用时的统一形状（v0.45.104）。
+
+    `cboe_options._quote_set_unavailable` 的 docstring 承诺 `contracts` 四个键
+    恒在、下游可以无脑 `.get("contracts", {}).get("atm_call")`。但本文件里三处
+    生产者（样本链早退 / 报价集异常 / 非 CBOE 链）此前只发
+    `{data_available, source, error}` —— 四个生产者里只有一个守约，照 docstring
+    写的第一个消费者就会 KeyError。这里统一转调那个 helper。
+    本函数是**附属字段**的兜底，绝不能把整份 analyze 拖死：cboe_options 万一
+    import 不了，也仍要给出带 contracts 四键的最小形状。
+    """
+    try:
+        from cboe_options import _quote_set_unavailable
+        return _quote_set_unavailable(error, source=source)
+    except Exception:  # noqa: BLE001 - 见上：附属字段不得中断 analyze
+        return {"data_available": False, "source": source, "error": error,
+                "contracts": {r: None for r in ("atm_call", "atm_put", "c25", "p25")}}
+
+
 def _sanitize_result(result: Dict) -> None:
     """方案21: 遍历结果 dict，将 NaN/Inf float 替换为 0.0（就地修改）"""
     for key, val in result.items():
@@ -1700,6 +1719,51 @@ class OptionsAgent:
                 _log.warning("[%s] 快照回写失败（本次结果仍已修复）: %s", ticker, _e)
         return True
 
+    def _refill_empty_quote_set(self, cached: dict, ticker: str,
+                                snap_path: str = "") -> bool:
+        """快照里的 quote_set 若是**空的**（data_available False），就地重取并回写。
+
+        v0.45.104。`_PRICE_DERIVED_KEYS` 不含 quote_set，所以一旦当日首扫写下
+        `{"data_available": False, "error": "cboe payload unavailable"}`，
+        这份「什么都没有」会跟着快照冻一整天，当晚 CBOE 早已恢复也不会再取。
+        这是 v0.45.43 那次事故的轻量重演——**但只对空的成立**：
+          · 已捕获的报价集必须冻结（CBOE 接口只有实时快照、没有历史，
+            重取等于拿今晚的价冒充今早的，v0.45.43 的规则原样保留）；
+          · 空的没有历史可保护，重取只会得到一份**属于这一天的**真实快照。
+        所以本函数只在 `data_available is False` 时动手，且只在拿到
+        `data_available=True` 的新结果时才覆盖——重取失败保持原样（空比假值好）。
+
+        Returns: 是否发生了回填（供测试与日志用）
+        """
+        if not isinstance(cached, dict):
+            return False
+        _qs = cached.get("quote_set")
+        # 严格只认「明确标了不可用」的那种。缺键（v0.45.99 之前的老快照）与
+        # 形状不认识的一律不碰——不确定是不是"空"时，不动比乱动安全。
+        if not (isinstance(_qs, dict) and _qs.get("data_available") is False):
+            return False
+
+        try:
+            from cboe_options import fetch_cboe_quote_set
+            # 与 analyze 出口同一口径：传 0.0 让它自己走 official_price 取价
+            _fresh = fetch_cboe_quote_set(ticker, 0.0)
+        except Exception as _e:  # noqa: BLE001 - 附属字段，重取失败保持原样
+            _log.debug("[%s] 快照 quote_set 回填失败: %s", ticker, _e)
+            return False
+        if not (isinstance(_fresh, dict) and _fresh.get("data_available")):
+            return False
+
+        cached["quote_set"] = _fresh
+        cached["_quote_set_refilled_at"] = datetime.now().isoformat()
+        _log.info("[%s] 快照 quote_set 已回填（原快照抓取时 CBOE 不可用）", ticker)
+        if snap_path:
+            try:
+                with open(snap_path, "w") as _f:
+                    json.dump(cached, _f, ensure_ascii=False, default=str)
+            except Exception as _e:  # noqa: BLE001 - 回写失败不影响本次返回值
+                _log.warning("[%s] 快照回写失败（本次结果仍已回填）: %s", ticker, _e)
+        return True
+
     def analyze(self, ticker: str, stock_price: Optional[float] = None,
                 force_refresh: bool = False) -> Dict:
         """
@@ -1774,6 +1838,9 @@ class OptionsAgent:
                     # 根本没再去算。一次瞬时故障被快照升级成了当日永久缺失。
                     # 现在：命中后若这些字段是空的，就地重算并回写快照。
                     self._refresh_price_derived(_cached, ticker, _snap_path)
+                    # v0.45.104：同理，空的 quote_set 也不该被冻一整天。
+                    # **已捕获的不动**——见 _refill_empty_quote_set 的 docstring。
+                    self._refill_empty_quote_set(_cached, ticker, _snap_path)
                     return _cached
                 else:
                     _log.warning("[%s] 期权快照日期不匹配 (%s vs %s)，忽略",
@@ -1834,8 +1901,9 @@ class OptionsAgent:
                 "gamma_calendar": {},
                 "full_chain_oi": {},
                 # v0.45.99 四合约报价集：样本链没有真实报价，诚实标不可用
-                "quote_set": {"data_available": False, "source": "none",
-                              "error": "期权数据不可用（真实链获取失败）"},
+                # v0.45.104：改走 _qs_unavailable，形状与另外三个生产者一致
+                "quote_set": _qs_unavailable("期权数据不可用（真实链获取失败）",
+                                             source="none"),
             }
             # 不写快照：样本结果不冻结，若当日稍后 API 恢复可直接重算
             return result
@@ -2160,16 +2228,24 @@ class OptionsAgent:
         if options_chain.get("_source") == "cboe":
             try:
                 from cboe_options import fetch_cboe_quote_set
-                _qs_S = stock_price if (stock_price and _math.isfinite(stock_price)
-                                        and stock_price > 0) else atm_price
-                quote_set = fetch_cboe_quote_set(ticker, _qs_S)
+                # v0.45.104：**不再**拿 atm_price 当兜底价。stock_price 缺失/NaN 时
+                # 上面已把 atm_price 换成 `median(all_strikes)`（甚至字面量 145.0）——
+                # 那是**行权价中位数，不是股价**。把这个正数传进去会让
+                # fetch_cboe_quote_set 里的 `_qs_num(stock_price)` 直接成立，从而
+                # **绕过它自己的 official_price 诚实取价路径**，并把
+                # underlying_price_source 标成 "caller"。实测（$145 链、行权价 120-180）：
+                # 传 0.0 → underlying_price=145.0 / source=cboe_intraday / ATM=145；
+                # 传中位行权价 → underlying_price=150.0 / source="caller" / ATM=150，
+                # implied_move 8.41 → 7.21。AMC(~$3) 这类票会直接落盘 145.0 冒充股价。
+                # 上游确实会送 0/NaN 进来：swarm_agents/base.py 数据源失败即 price=0，
+                # oracle_bee 原样透传，日报主流程更是完全不传价。
+                # 传 0.0 → 让它走 official_price；拿不到就诚实 data_available=False。
+                quote_set = fetch_cboe_quote_set(ticker, 0.0)
             except Exception as _e_qs:  # noqa: BLE001 - 附属字段失败不得中断 analyze
                 _log.warning("[%s] 四合约报价集获取失败：%s", ticker, _e_qs)
-                quote_set = {"data_available": False, "source": "cboe",
-                             "error": f"quote set failed: {_e_qs}"}
+                quote_set = _qs_unavailable(f"quote set failed: {_e_qs}", source="cboe")
         else:
-            quote_set = {"data_available": False, "source": "none",
-                         "error": "chain source is not cboe"}
+            quote_set = _qs_unavailable("chain source is not cboe", source="none")
 
         # 8. 汇总结果
         result = {

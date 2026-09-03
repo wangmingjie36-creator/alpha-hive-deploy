@@ -297,3 +297,185 @@ class TestCardRuleText:
         monkeypatch.setitem(pp.CONFIG, "sizing_mode", "tier")
         txt = pp._sizing_rule_text()
         assert "高置信 5.0% NAV" in txt and "波动率目标" not in txt
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.45.104 二次复查修复
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestMemoKeyIncludesMaxAge:
+    """#2：`vol_source_max_age_days` 是查询条件的一部分，必须进 memo key。"""
+
+    def test_widening_the_window_is_not_served_from_cache(self, tmp_path, monkeypatch):
+        db = tmp_path / "p.db"
+        _build_db(db, [("2026-08-29", "NVDA", "price.volatility_20d", 40.0)])
+        as_of = "2026-09-02"          # 该行在 4 天前
+        vt = pp.CONFIG["vol_target"]
+
+        monkeypatch.setitem(vt, "vol_source_max_age_days", 1)
+        assert pp._lookup_vol_ann("NVDA", as_of, db) is None       # 窗口太窄，本就该是 None
+
+        monkeypatch.setitem(vt, "vol_source_max_age_days", 10)
+        # 修复前：key 里没有 max_age → 命中上一次那个 None，40.0 永远拿不到
+        assert pp._lookup_vol_ann("NVDA", as_of, db) == pytest.approx(40.0)
+
+    def test_narrowing_the_window_is_not_served_from_cache(self, tmp_path, monkeypatch):
+        """反方向同样成立——否则测试只钉住了一半。"""
+        db = tmp_path / "p.db"
+        _build_db(db, [("2026-08-29", "NVDA", "price.volatility_20d", 40.0)])
+        as_of = "2026-09-02"
+        vt = pp.CONFIG["vol_target"]
+
+        monkeypatch.setitem(vt, "vol_source_max_age_days", 10)
+        assert pp._lookup_vol_ann("NVDA", as_of, db) == pytest.approx(40.0)
+
+        monkeypatch.setitem(vt, "vol_source_max_age_days", 1)
+        assert pp._lookup_vol_ann("NVDA", as_of, db) is None
+
+    def test_same_window_still_memoized(self, tmp_path):
+        """收紧 key 不能顺手把缓存本身废掉（同桶必须仍然复用）。"""
+        db = tmp_path / "p.db"
+        _build_db(db, [("2026-09-01", "NVDA", "price.volatility_20d", 40.0)])
+        assert pp._lookup_vol_ann("NVDA", "2026-09-02", db) == pytest.approx(40.0)
+        db.unlink()
+        assert pp._lookup_vol_ann("NVDA", "2026-09-02", db) == pytest.approx(40.0)
+
+    def test_run_replay_isolates_the_vol_cache(self, tmp_path, monkeypatch):
+        """沙盒进出各清一次：生产的 σ 不进沙盒，沙盒的 σ 不回生产。"""
+        pp._VOL_ANN_CACHE[("PRE", "2026-09-02", "prod.db", 5)] = 99.0
+        seen = {}
+
+        def _fake_day(d, verbose=False):
+            seen["at_entry"] = dict(pp._VOL_ANN_CACHE)
+            pp._VOL_ANN_CACHE[("INSIDE", d, "sb.db", 5)] = 1.0
+
+        monkeypatch.setattr(pp, "run_for_date", _fake_day)
+        pp.run_replay({}, tmp_path / "sb", dates=["2026-09-01"])
+        assert seen["at_entry"] == {}, "生产缓存漏进了沙盒"
+        assert pp._VOL_ANN_CACHE == {}, "沙盒缓存漏回了生产"
+
+
+class TestSizingModeValidatedAtEntry:
+    """#10：模式名打错必须当天就炸，不能等到「恰好有仓要开」。"""
+
+    def test_run_for_date_rejects_unknown_mode_before_any_position(self, monkeypatch):
+        monkeypatch.setitem(pp.CONFIG, "sizing_mode", "vol_targt")   # 打错一个字母
+        monkeypatch.setattr(pp, "_load_meta",
+                            lambda: pytest.fail("校验必须发生在读状态之前"))
+        with pytest.raises(ValueError) as e:
+            pp.run_for_date("2026-09-02")
+        assert "vol_targt" in str(e.value)
+
+    def test_valid_modes_pass_the_entry_check(self, monkeypatch, tmp_path):
+        """闸门不许顺手把合法模式也拦下——两个合法值都要放行。
+
+        ⚠️ run_for_date 收尾用 `_write_jsonl` **整体重写** POSITIONS_FILE /
+        EQUITY_FILE，不走 _append_jsonl。四个路径必须全部重绑到 tmp，
+        否则这个测试会把生产 paper_portfolio_state/ 清空（实测踩过）。
+        """
+        for mode in pp._SIZING_MODES:
+            sb = tmp_path / mode
+            sb.mkdir()
+            monkeypatch.setattr(pp, "POSITIONS_FILE", sb / "positions.jsonl")
+            monkeypatch.setattr(pp, "CLOSED_FILE", sb / "closed_trades.jsonl")
+            monkeypatch.setattr(pp, "EQUITY_FILE", sb / "equity_curve.jsonl")
+            monkeypatch.setattr(pp, "META_FILE", sb / "meta.json")
+            monkeypatch.setitem(pp.CONFIG, "sizing_mode", mode)
+            monkeypatch.setattr(pp, "_load_meta", lambda: {"cash": 50_000.0})
+            monkeypatch.setattr(pp, "_load_snapshots_for_date", lambda d: [])
+            pp.run_for_date("2026-09-02")      # 不抛即通过
+            assert (sb / "equity_curve.jsonl").exists()   # 确实跑完了整条路径
+
+
+class TestClampWordingMatchesBehaviour:
+    """#7：钳位作用在**置信乘数之前**的百分比上，文案不得声称 NAV 边界。"""
+
+    def test_measured_mid_bounds_are_not_the_config_numbers(self):
+        lo = pp._compute_position_size(NAV, "mid", "X", [], vol_ann=200.0)[0] / NAV * 100
+        hi = pp._compute_position_size(NAV, "mid", "X", [], vol_ann=1.0)[0] / NAV * 100
+        assert lo == pytest.approx(0.90)      # ≠ size_pct_min 1.5
+        assert hi == pytest.approx(4.80)      # ≠ size_pct_max 8.0
+
+    def test_rule_text_does_not_claim_an_unenforced_nav_range(self):
+        txt = pp._sizing_rule_text()
+        assert f'{VT["size_pct_min"]}–{VT["size_pct_max"]}% NAV' not in txt
+        assert "置信乘数前钳位" in txt
+        # 数值本身仍要露出（读者要能对上 CONFIG）
+        assert str(VT["size_pct_min"]) in txt and str(VT["size_pct_max"]) in txt
+
+    def test_high_tier_really_does_hit_the_clamp_bounds(self):
+        """high 档（×1.0）确实等于钳位区间——文案改动不是把真话也删了。"""
+        lo = pp._compute_position_size(NAV, "high", "X", [], vol_ann=200.0)[0] / NAV * 100
+        hi = pp._compute_position_size(NAV, "high", "X", [], vol_ann=1.0)[0] / NAV * 100
+        assert lo == pytest.approx(VT["size_pct_min"])
+        assert hi == pytest.approx(VT["size_pct_max"])
+
+
+class TestFallbackVisibleOnTheCard:
+    """#8：Position.sizing 此前零读者，降级只对会开 jsonl 的人可见。"""
+
+    def _card(self, monkeypatch, tmp_path, sizings):
+        import json
+        pos = [{"ticker": f"T{i}", "direction": "bullish", "entry_date": "2026-08-31",
+                "entry_price": 100.0, "sl_price": 93.0, "tp_price": 115.0,
+                "shares": 25.0, "size_usd": 2500.0, "time_stop_date": "2026-09-14",
+                "confidence": "high", "score": 7.8, "rationale": "r", "sizing": sz}
+               for i, sz in enumerate(sizings)]
+        (tmp_path / "positions.jsonl").write_text(
+            "".join(json.dumps(p) + "\n" for p in pos))
+        (tmp_path / "closed_trades.jsonl").write_text("")
+        (tmp_path / "equity_curve.jsonl").write_text(json.dumps(
+            {"date": "2026-09-02", "nav": 50_000.0, "cash": 45_000.0,
+             "deployed": 5_000.0, "unrealized": 0.0}) + "\n")
+        monkeypatch.setattr(pp, "POSITIONS_FILE", tmp_path / "positions.jsonl")
+        monkeypatch.setattr(pp, "CLOSED_FILE", tmp_path / "closed_trades.jsonl")
+        monkeypatch.setattr(pp, "EQUITY_FILE", tmp_path / "equity_curve.jsonl")
+        monkeypatch.setattr(pp, "_fetch_ohlc", lambda *a, **k: {})
+        return pp.render_portfolio_card()
+
+    def test_card_reports_how_many_positions_fell_back(self, monkeypatch, tmp_path):
+        html = self._card(monkeypatch, tmp_path,
+                          ["vol_target(σ=35.0%→5.0%)", "tier_fallback(no_vol)",
+                           "tier_fallback(no_vol)"])
+        assert "2/3 仓退回分档" in html
+
+    def test_card_says_nothing_when_nothing_fell_back(self, monkeypatch, tmp_path):
+        html = self._card(monkeypatch, tmp_path,
+                          ["vol_target(σ=35.0%→5.0%)", "vol_target(σ=20.0%→8.0%)"])
+        # 注意别撞上规则行里那句「无 σ 时退回分档」——那是常驻文案
+        assert "仓退回分档" not in html
+
+
+class TestProductionStateIsIsolated:
+    """conftest 的 `_isolate_paper_portfolio_state` 两道防线各配一个自检。
+
+    事故：`test_valid_modes_pass_the_entry_check` 曾只打桩 _load_meta /
+    _append_jsonl / _save_meta，漏了路径本身，run_for_date 收尾的
+    `_write_jsonl(EQUITY_FILE/POSITIONS_FILE, ...)` 直接重写了生产状态
+    （equity 93 行→1、positions 13 行→0）。
+    """
+
+    def test_state_paths_point_outside_the_repo(self):
+        """防线①：四个全局在测试期间必须已被重绑到 tmp。"""
+        for f in (pp.POSITIONS_FILE, pp.CLOSED_FILE, pp.EQUITY_FILE, pp.META_FILE):
+            assert pp.BASE_DIR not in f.parents, f"{f} 仍指向仓库内"
+        assert pp.BASE_DIR not in pp.STATE_DIR.parents
+
+    def test_digest_helper_actually_detects_changes(self, tmp_path):
+        """防线②：指纹函数得真能看出改动，否则 teardown 的断言恒真。"""
+        # conftest 在 pytest 的 importlib 模式下不是可直接 import 的模块名，
+        # 按路径载入拿到同一个函数（conftest 顶层只有定义，重复执行无副作用）。
+        import importlib.util
+        import pathlib
+        _spec = importlib.util.spec_from_file_location(
+            "_pp_conftest_probe", pathlib.Path(__file__).parent / "conftest.py")
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _pp_state_digest = _mod._pp_state_digest
+        f = tmp_path / "x.jsonl"
+        f.write_text("a\n")
+        d1 = _pp_state_digest(f)
+        f.write_text("b\n")
+        assert _pp_state_digest(f) != d1          # 内容改了要看得见
+        f.unlink()
+        assert _pp_state_digest(f) == "MISSING" != d1   # 删掉也要看得见

@@ -720,6 +720,13 @@ def fetch_cboe_iv_term_structure(
 # 拿不到都返回 `data_available=False` + error 字符串，**不填看起来合理的默认值**。
 _QS_MIN_DTE = 7          # 与主链一致：<7 DTE 的合约 theta 扭曲，不作候选
 _QS_ROLES = ("atm_call", "atm_put", "c25", "p25")
+# v0.45.104：25Δ 候选的最大偏离 |Δ − 0.25|。此前是"取最接近的那张，多远都要"，
+# 于是稀疏链（单行权价的 AMC 那类）上 Δ=0.60 的合约照样被贴上 role="c25"、
+# quote_ok=True、missing_reasons 里一个字都没有——名字说 25Δ、东西是 ATM 甚至 ITM。
+# 0.15 的取法：0.25 与 ATM(≈0.50) 的中点是 0.375，取上界 0.40 保证"仍明显 OTM、
+# 不至于滑成第二张 ATM"；对称的下界 0.10 是链上仍普遍有真实双边报价的最远翼。
+# 窗口里没有候选是稀疏链的**常态**，诚实给 None + 具体 reason，不贴假标签。
+_QS_D25_TOL = 0.15
 
 
 def _qs_num(v) -> Optional[float]:
@@ -774,6 +781,9 @@ def _qs_contract(row: dict, *, role: str, cp: str, strike: float,
         "ask": round(ask, 4) if ask is not None else None,
         "mid": mid,
         "spread_pct": spread_pct,
+        # ⚠️ **小数**（0.3286），不是百分数。顶层 quote_set["iv30"] 是**百分数**
+        # （32.822）——同票同期两者差 100×，见 select_quote_set docstring。
+        # 两种单位都已随快照落盘，谁都不许改，比较前自己乘 100。
         "iv": _qs_num(row.get("iv")),
         "delta": _qs_num(row.get("delta")),
         "gamma": _qs_num(row.get("gamma")),
@@ -803,7 +813,20 @@ def select_quote_set(data: dict, S: float, *, target_dte: int = 30,
                 ATM call 与 ATM put 同一行权价。
       25Δ    —— call 取 delta 最接近 +0.25、put 取最接近 −0.25；只在 delta
                 有限且非零的行里选（CBOE 对零流动合约给 delta=0，那不是观测值）。
-    `now` 只用来算 DTE；缺省取 `_pdt_now()`（禁用裸 datetime.now()，见其 docstring）。
+                且必须 |Δ − 0.25| ≤ `_QS_D25_TOL`、不得与同侧 ATM 是同一张合约，
+                否则该槽位给 None + missing_reasons（见常量处注释）。
+
+    ⚠️ **本 dict 里 "iv" 有两种单位，不要混着算**（v0.45.104 补记，两者都已
+    随快照落盘、不得改口径）：
+      · 顶层 `iv30` —— **百分数**，CBOE payload 原样透传（NVDA 实测 32.822）。
+        `vrp_signal` 的 iv_source_order 与 `iv_raw_observed` 都是这个口径。
+      · `contracts[*]["iv"]` —— **小数**，逐合约 Greeks 原样透传（同票同期
+        实测 0.3286）。同一标的、同一 tenor，两者差 100×。
+      要拿逐合约 IV 与 iv30 比较，先 `contracts[*]["iv"] * 100`。
+
+    `now` 若给了，就是本次选择的**唯一时钟**：DTE、market_open、fetched_at
+    全部由它导出（v0.45.104；此前只有 DTE 用它，另两个读挂钟，同一份 dict 里
+    混两个钟）。缺省取 `_pdt_now()`（禁用裸 datetime.now()，见其 docstring）。
     """
     today = (now or _pdt_now()).date()
     S_num = _qs_num(S)
@@ -871,18 +894,33 @@ def select_quote_set(data: dict, S: float, *, target_dte: int = 30,
                     best = (dist, strike, row)
         return best
 
-    c25 = _by_delta(calls, 0.25)
-    if c25:
-        contracts["c25"] = _qs_contract(c25[2], role="c25", cp="C", strike=c25[1],
-                                        expiry=sel_expiry, dte=sel_dte)
-    else:
-        reasons["c25"] = "no delta"
-    p25 = _by_delta(puts, -0.25)
-    if p25:
-        contracts["p25"] = _qs_contract(p25[2], role="p25", cp="P", strike=p25[1],
-                                        expiry=sel_expiry, dte=sel_dte)
-    else:
-        reasons["p25"] = "no delta"
+    def _assign_25d(role: str, side: Dict[float, List[dict]], target: float,
+                    cp: str, atm_role: str) -> None:
+        """选中 → 填 contracts[role]；两条否决规则任一命中 → None + 具体 reason。"""
+        best = _by_delta(side, target)
+        if best is None:
+            reasons[role] = "no delta"
+            return
+        dist, strike, row = best
+        # ① 距离闸：最接近 ≠ 够近。稀疏链上"最接近的"可能是 Δ=0.60。
+        # 减完再比而不是直接 `dist > tol`：窗口边界上的 Δ=0.40 实际算出
+        # 0.15000000000000002，直接比会把注释里明说「收」的那一档判掉。
+        if dist - _QS_D25_TOL > 1e-9:
+            _d = _qs_num(row.get("delta"))
+            reasons[role] = (f"nearest delta {_d:+.4f} is {dist:.4f} from {target:+.2f} "
+                             f"(> tol {_QS_D25_TOL})")
+            return
+        # ② 去重闸：25Δ 与同侧 ATM 撞成同一张合约时，这个槽位没有新增信息，
+        # 留着只会让下游把同一张合约的报价当成两个观测点用。
+        atm = contracts.get(atm_role)
+        if atm is not None and atm.get("symbol") == row.get("option"):
+            reasons[role] = f"same contract as {atm_role}"
+            return
+        contracts[role] = _qs_contract(row, role=role, cp=cp, strike=strike,
+                                       expiry=sel_expiry, dte=sel_dte)
+
+    _assign_25d("c25", calls, 0.25, "C", "atm_call")
+    _assign_25d("p25", puts, -0.25, "P", "atm_put")
 
     ac, ap = contracts["atm_call"], contracts["atm_put"]
     straddle = None
@@ -900,8 +938,12 @@ def select_quote_set(data: dict, S: float, *, target_dte: int = 30,
         "underlying_price": round(S_num, 4),
         "underlying_price_source": "caller",
         "iv30": _qs_num((data or {}).get("iv30")),
-        "market_open": is_market_open(),
-        "fetched_at": _et_now().isoformat(),
+        # v0.45.104：`now` 给了就整份用它。此前 today 走注入钟、这两个走挂钟，
+        # 同一份 dict 里混两个钟：离线重放 now=2026-03-10 会给出
+        # selected_dte 属于 3 月、fetched_at 属于今天的自相矛盾快照。
+        # 不注入时行为一字不变（真实抓取时挂钟就是抓取时刻）。
+        "market_open": is_market_open(now) if now is not None else is_market_open(),
+        "fetched_at": (now if now is not None else _et_now()).isoformat(),
         "contracts": contracts,
         "missing_reasons": reasons,
         "atm_straddle_mid": straddle,
@@ -928,7 +970,12 @@ def fetch_cboe_quote_set(ticker: str, stock_price: float = 0.0, *,
     price_source = "caller"
     if S is None or S <= 0:
         S, price_source = official_price(data)
-    if not S or S <= 0 or not math.isfinite(S):
+    # v0.45.104 删掉了这里的 `not math.isfinite(S)`：它永不可能触发。
+    # `_qs_num` 只返回 None 或有限值（None 已进上面的分支），`official_price`
+    # 只返回有限正数或 0.0（被 `not S` 接住）。且退一万步，S 真是 NaN 时
+    # `select_quote_set` 开头的 `_qs_num(S)` 会再拦一次并诚实返回不可用——
+    # 这条守卫既不生效、也不是唯一防线，留着只制造"这里防过 NaN"的错觉。
+    if not S or S <= 0:
         return _quote_set_unavailable("underlying price unavailable", target_dte=target_dte)
 
     qs = select_quote_set(data, S, target_dte=target_dte)

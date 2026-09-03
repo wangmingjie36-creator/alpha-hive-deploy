@@ -39,6 +39,24 @@ IV−RV 倒进一个池子算分位，阈值测出来的是"你是哪只票"，�
 事前与事后必须同一口径，否则差值会被误读成溢价变化。只用 ≤ `as_of` 的
 K 线，不偷看未来。
 
+重跑不得抹掉结算（v0.45.104）
+----------------------------
+`record_day` 同日重跑会整日重写。**重写必须把 `settle()` 已经填好的字段
+原样搬过来**（`_SETTLEMENT_FIELDS`），否则日报 `--date` 回填路径重跑一次旧
+日期，就把当天所有行的 `rv_forward`/`vrp_realized`/`settled_on` 抹成 None，
+而日志照旧打印成功行。只要基准日还落在 `_default_bars` 的 120 根窗口里，
+下次 settle 还能补回来 —— 出了窗口就是永久丢失，且全程无声。
+
+补跑快照（backfilled）是单向的 —— 已修
+--------------------------------------
+真实补跑文件名是 `options_snapshot_WMT_2026-08-28_backfilled-2026-08-29.json`：
+业务日在中间、跑批日在末尾。`_iter_snapshots` 的 glob 与 `_SNAP_RE` 都要求
+`_YYYY-MM-DD.json` 结尾，补跑文件是 `-YYYY-MM-DD.json`，两处都匹配不上 ——
+**这是对的**（否则会把业务日记到跑批日名下）。但 `_snapshot_rv` 从前也只开
+精确文件名，于是补跑日进得了 IV 索引、进不了 VRP 历史：实测索引 272 条 vs
+可用历史 212 条，每票整整差 2 条。`_snapshot_rv` 现在会退到同业务日的最新
+补跑文件（IV 本来就取自同一份快照，口径一致）。
+
 本版**不做**的事
 ----------------
 - 不下注：没有纸面腿、没有仓位、不影响任何评分。
@@ -56,10 +74,12 @@ K 线，不偷看未来。
     /usr/local/bin/python3 vrp_signal.py --record --settle  # 日报钩子做的事
     /usr/local/bin/python3 vrp_signal.py --json --out /tmp/vrp.json
 
-退出码：0 = 已就绪（≥ min_ready_tickers 只票各有 ≥ min_obs 条真实 IV）
+退出码：0 = 已就绪（≥ min_ready_tickers 只票各有 ≥ min_obs 条**可用**历史）
         1 = 攒数中（正常态）
         3 = 无法判定（缓存目录里连一个 IV 索引都没有）
         ⚠️ 3 而非 2：编排器 `run_step()` 把 2 保留给"脚本不存在"。
+        ⚠️ 退出码只表达就绪度（编排器契约），**不**表达 --record/--settle 的
+        成败：那两个的条数在 `--json` 里，写 0 行时另有一条 WARNING。
 """
 
 from __future__ import annotations
@@ -89,6 +109,12 @@ CONFIG = {
     "cheap_pct": 0.20,             # ts_pct ≤ 0.20 → cheap
     "iv_source_order": ["iv_raw_observed", "quote_set.iv30"],
     "rv_source": "rv_30d",
+    # 结算放弃闸（v0.45.104）：拿到了 K 线却仍算不出 rv_forward 的行，重试这么多次后放弃
+    "settle_max_attempts": 5,
+    # `_default_bars` 只取 120 根；基准日掉出这个窗口就永远结算不了，别再每天白取一次 K 线
+    "settle_window_bars": 120,
+    # 工作日是交易日的**上界**，反过来判"掉出窗口"要留出节假日余量，宁可晚放弃不可早放弃
+    "settle_window_slack": 15,
 }
 
 BASE_DIR = PATHS.home
@@ -98,7 +124,13 @@ SIGNALS_FILE = STATE_DIR / "vrp_signals.jsonl"
 _SNAP_RE = re.compile(r"options_snapshot_(.+)_(\d{4}-\d{2}-\d{2})\.json$")
 _ROW_FIELDS = ("ticker", "date", "iv", "iv_source", "rv_30d", "vrp_ex_ante", "n_obs", "ready",
                "ts_pct", "label", "underlying_price", "rv_forward", "vrp_realized", "settled_on",
-               "reason")
+               "reason", "settle_attempts", "settle_give_up", "settle_give_up_reason",
+               "settle_give_up_on")
+
+# 只由 `settle()` 写、`record_day` 绝不能覆盖的字段。新增结算字段务必同步加进来，
+# 否则同日重跑会把它悄悄抹成 None（v0.45.104 修的就是这个）。
+_SETTLEMENT_FIELDS = ("rv_forward", "vrp_realized", "settled_on", "settle_attempts",
+                      "settle_give_up", "settle_give_up_reason", "settle_give_up_on")
 
 
 # ---------------------------------------------------------------- 小工具
@@ -178,9 +210,13 @@ def _extract(snap: dict, path: str):
 
 
 def _iter_snapshots(cache_dir: Path, as_of: str):
+    """`as_of` 当日的常规快照。**补跑（`_backfilled-`）文件天然进不来**：它们叫
+    `..._{业务日}_backfilled-{跑批日}.json`，glob 与 `_SNAP_RE` 都要求 `_YYYY-MM-DD.json`
+    结尾，而补跑文件是 `-YYYY-MM-DD.json`。这正是我们要的 —— 让它们按跑批日进来，
+    等于把业务日记到错误的日期名下。（此处原有一行 `"_backfilled-" in p.name` 的
+    显式过滤，v0.45.104 删除：它读起来像在承重，实际永远不会触发，
+    见 test_backfilled_files_are_excluded_by_glob_and_regex。）"""
     for p in sorted(cache_dir.glob(f"options_snapshot_*_{as_of}.json")):
-        if "_backfilled-" in p.name:
-            continue
         m = _SNAP_RE.match(p.name)
         if not m or m.group(2) != as_of:
             continue
@@ -195,9 +231,21 @@ def _iter_snapshots(cache_dir: Path, as_of: str):
 
 
 def _snapshot_rv(cache_dir: Path, ticker: str, date: str) -> Optional[float]:
+    """该票该**业务日**快照里的 `rv_30d`。
+
+    v0.45.104：精确文件名缺失时退到同业务日的补跑文件
+    `options_snapshot_{T}_{date}_backfilled-*.json`（同日多份取跑批日最新的一份）。
+    这条路径是合法的：`iv_history` 的 IV 本来就取自同一份快照，两边口径一致 ——
+    从前只开精确文件名，导致补跑日单向地"能进 IV 索引、进不了 VRP 历史"
+    （实测索引 272 条 / 可用 212 条，每票差 2 条）。
+    ⚠️ 只在这里认补跑文件；`_iter_snapshots`/`record_day` 仍然不认（理由见那边）。
+    """
     p = cache_dir / f"options_snapshot_{ticker}_{date}.json"
     if not p.exists():
-        return None
+        cands = sorted(cache_dir.glob(f"options_snapshot_{ticker}_{date}_backfilled-*.json"))
+        if not cands:
+            return None
+        p = cands[-1]
     try:
         with p.open("r", encoding="utf-8") as f:
             snap = json.load(f)
@@ -208,10 +256,14 @@ def _snapshot_rv(cache_dir: Path, ticker: str, date: str) -> Optional[float]:
 
 def realized_vol_from_closes(closes: List[float]) -> Optional[float]:
     """年化已实现波动率（%），**逐字复刻** `twelve_data.realized_vol` 的算法段：
-    对数收益、剔除 |r| ≥ 0.5、至少 5 个收益率、ddof=1、×√252×100。
+    对数收益、剔除 |r| ≥ 0.5、至少 5 个收益率、ddof=1、×√252×100，
+    合法区间同样是 `0 < rv <= 300`。
 
-    与上游唯一的差别：不拒绝 rv == 0（常数收盘价是合法的退化输入，测试用它
-    钉住 `vrp_realized == iv`）；> 300% 仍视为坏数据返回 None。
+    v0.45.104：从前这里放行 rv == 0，理由是"测试用常数收盘价钉住
+    `vrp_realized == iv`"—— 方向反了。21 个交易日收盘价一动不动是数据坏了
+    （停牌 / 补齐 / 取错列），不是波动率真的为零；放行它等于凭空造出一条
+    **可能的最大**"卖方全赢"观测（`vrp_realized == iv`），再喂进
+    `settlement_stats.by_label` 的均值里。口径与上游对齐，测试改用非退化序列。
     """
     rets: List[float] = []
     for a, b in zip(closes[:-1], closes[1:]):
@@ -225,7 +277,7 @@ def realized_vol_from_closes(closes: List[float]) -> Optional[float]:
     mean = sum(rets) / len(rets)
     var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
     rv = math.sqrt(var) * math.sqrt(252) * 100
-    return rv if math.isfinite(rv) and rv <= 300 else None
+    return rv if math.isfinite(rv) and 0 < rv <= 300 else None
 
 
 def _weekdays_after(d0: str, d1: str) -> int:
@@ -285,10 +337,19 @@ def _label(ts_pct: float) -> str:
 
 
 def record_day(as_of: str, cache_dir=None) -> List[Dict]:
-    """为 `as_of` 的每份常规快照写一行 VRP 记录（同日重跑 = 整日重写）。返回写入的行。"""
+    """为 `as_of` 的每份常规快照写一行 VRP 记录（同日重跑 = 整日重写）。返回写入的行。
+
+    v0.45.104：重写**不得**抹掉 `settle()` 已经填好的字段。日报 `--date` 回填路径
+    （`date_override` → `self.date_str` → VRP 钩子）会拿旧日期重跑 `record_day`，
+    从前那一下会把当天所有行的 `rv_forward`/`vrp_realized`/`settled_on` 清成 None，
+    日志却照常打印"记录 N 行"。基准日还在 120 根窗口内时下次 settle 能补回来，
+    出了窗口就是永久丢失 —— 全程无声。
+    """
     cdir = _cache_dir(cache_dir)
     existing = load_rows()
     keep = [r for r in existing if r.get("date") != as_of]
+    # 被本次重写顶掉的旧行，按票索引，用来搬运结算字段
+    superseded = {r.get("ticker"): r for r in existing if r.get("date") == as_of}
     min_obs = int(CONFIG["min_obs_per_ticker"])
 
     new_rows: List[Dict] = []
@@ -305,6 +366,19 @@ def record_day(as_of: str, cache_dir=None) -> List[Dict]:
         row.update({"ticker": ticker, "date": as_of, "iv": _r(iv), "iv_source": iv_source,
                     "rv_30d": _r(rv), "underlying_price": _r(_num(snap.get("_snapshot_stock_price"))),
                     "ready": False})
+
+        # ── 搬运结算字段（v0.45.104）──────────────────────────────────────
+        # settle() 写的东西只有 settle() 能改。重跑同一天不该让"已结算"倒退成"未结算"。
+        prev = superseded.get(ticker)
+        if prev:
+            for k in _SETTLEMENT_FIELDS:
+                if prev.get(k) is not None:
+                    row[k] = prev[k]
+            # iv 被修订过（快照重抓）时顺带重算，维持 vrp_realized == iv − rv_forward
+            # 这条不变式；新 iv 缺失就原样留着，宁可留旧值也不要丢数据。
+            rv_f, prev_iv = _num(row.get("rv_forward")), _num(prev.get("iv"))
+            if rv_f is not None and iv is not None and (prev_iv is None or prev_iv != iv):
+                row["vrp_realized"] = _r(iv - rv_f)
 
         if iv is None or rv is None:
             row["reason"] = ("iv_and_rv_missing" if iv is None and rv is None
@@ -369,18 +443,45 @@ def _forward_closes(bars: List[dict], date: str, as_of: str, forward_days: int) 
     return None if any(c is None for c in closes) else closes
 
 
+def _give_up(row: Dict, as_of: str, reason: str) -> None:
+    row["settle_give_up"] = True
+    row["settle_give_up_reason"] = reason
+    row["settle_give_up_on"] = as_of
+    _log.info("[%s] %s 的 VRP 行放弃结算：%s", row.get("ticker"), row.get("date"), reason)
+
+
 def settle(as_of: str, bars_fn: Optional[Callable[[str], Optional[List[dict]]]] = None) -> int:
-    """给已到期的行填 `rv_forward` / `vrp_realized`。每票最多取一次 K 线；没有可结算行的票不取。"""
+    """给已到期的行填 `rv_forward` / `vrp_realized`。每票最多取一次 K 线；没有可结算行的票不取。
+
+    v0.45.104 放弃闸：从前 `pending` 只看 `rv_forward is None`，于是基准日一旦掉出
+    `_default_bars` 的 120 根窗口，这行就**永远**结算不了，却仍然每票每天白取一次
+    K 线，而且完全看不见（既不是 settled 也没有任何标记）。现在两种情形会打
+    `settle_give_up` 并退出 pending：
+      ① `out_of_fetch_window` —— 基准日离 as_of 的工作日数已超过取数窗口（留了
+         `settle_window_slack` 的节假日余量：工作日是交易日的上界，宁可晚放弃）；
+      ② `max_attempts_exhausted` —— **拿到了 K 线**却仍算不出 rv_forward，累计
+         `settle_max_attempts` 次。取不到 K 线（限流/断网）不计次，那是暂时的。
+    放弃数在 `settlement_stats()['n_gave_up']` 与日报小节里可见。
+    """
     bars_fn = bars_fn or _default_bars
     fwd = int(CONFIG["forward_days"])
+    max_attempts = int(CONFIG["settle_max_attempts"])
+    window = int(CONFIG["settle_window_bars"]) + int(CONFIG["settle_window_slack"])
     rows = load_rows()
+    dirty = False
     pending: Dict[str, List[Dict]] = defaultdict(list)
     for r in rows:
         d = r.get("date")
-        if (r.get("rv_forward") is None and _num(r.get("iv")) is not None and d
-                and _weekdays_after(d, as_of) >= fwd):
+        if (r.get("rv_forward") is None and not r.get("settle_give_up")
+                and _num(r.get("iv")) is not None and d and _weekdays_after(d, as_of) >= fwd):
+            if _weekdays_after(d, as_of) > window:
+                _give_up(r, as_of, "out_of_fetch_window")
+                dirty = True
+                continue
             pending[r["ticker"]].append(r)
     if not pending:
+        if dirty:
+            _write_jsonl(SIGNALS_FILE, rows)
         return 0
 
     n = 0
@@ -394,17 +495,21 @@ def settle(as_of: str, bars_fn: Optional[Callable[[str], Optional[List[dict]]]] 
             continue
         for r in trs:
             closes = _forward_closes(bars, r["date"], as_of, fwd)
-            if closes is None:
-                continue
-            rv_f = realized_vol_from_closes(closes)
+            rv_f = realized_vol_from_closes(closes) if closes is not None else None
             if rv_f is None:
+                # 有 K 线还算不出来 —— 这才计一次失败（限流/断网走上面的 continue，不计）
+                r["settle_attempts"] = int(r.get("settle_attempts") or 0) + 1
+                dirty = True
+                if r["settle_attempts"] >= max_attempts:
+                    _give_up(r, as_of, "max_attempts_exhausted")
                 continue
             r["rv_forward"] = _r(rv_f)
             r["vrp_realized"] = _r(float(r["iv"]) - rv_f)
             r["settled_on"] = as_of
             n += 1
-    if n:
+    if n or dirty:
         _write_jsonl(SIGNALS_FILE, rows)
+    if n:
         _log.info("VRP 结算 %d 行（%s）", n, as_of)
     return n
 
@@ -470,7 +575,8 @@ def settlement_stats(rows: Optional[List[Dict]] = None, min_n: int = 10) -> Dict
     by_label: Dict[str, List[float]] = defaultdict(list)
     for r in settled:
         by_label[r.get("label") or "unlabeled"].append(float(r["vrp_realized"]))
-    out = {"n_rows": len(rows), "n_settled": len(settled), "by_label": {}}
+    gave_up = [r for r in rows if r.get("settle_give_up")]
+    out = {"n_rows": len(rows), "n_settled": len(settled), "n_gave_up": len(gave_up), "by_label": {}}
     for label in sorted(by_label):
         vals = by_label[label]
         out["by_label"][label] = {"n": len(vals),
@@ -479,17 +585,44 @@ def settlement_stats(rows: Optional[List[Dict]] = None, min_n: int = 10) -> Dict
     return out
 
 
-def assess(cache_dir=None) -> Dict:
-    """就绪度判定（纯读取，无副作用：用 `_read_index` 而非 `load_iv_history`，后者会写迁移标记）。"""
+def _usable_history_counts(cache_dir: Path, tickers: List[str], rows: List[Dict],
+                           as_of: str) -> Dict[str, int]:
+    """每票**真正能被 `record_day(as_of)` 用上**的历史条数，口径逐字等于 `_prior_history`。
+
+    与 IV 索引条数不是一回事：索引里有 IV、但同业务日快照拿不到 `rv_30d` 的日期
+    算不出 `vrp_ex_ante`，进不了分位的分母。`assess()` 从前只数索引，于是能打印
+    「✅ 已就绪」而当天每一行都是 `ready=False` —— 闸门量的根本不是它把守的那个数。
+
+    ⚠️ 必须传 `as_of` 并沿用"严格早于"语义：把 as_of 当天那行也数进来，就会在
+    边界上刚好多一条，闸门又能在 `n_obs == min_obs - 1` 时说就绪 —— 同一个 bug
+    换了个小一号的身量（本条注释由它自己的回归测试逼出来）。
+    """
+    return {t: len(_prior_history(t, as_of, cache_dir, rows)) for t in tickers}
+
+
+def assess(cache_dir=None, rows: Optional[List[Dict]] = None, as_of: Optional[str] = None) -> Dict:
+    """就绪度判定（纯读取，无副作用：用 `_read_index` 而非 `load_iv_history`，后者会写迁移标记）。
+
+    ⚠️ `rows`（VRP 记账行）来自模块级 `SIGNALS_FILE`，**与 cache_dir 无关** ——
+    信号文件是全局状态，不按缓存目录分片。v0.45.104 把它提成显式参数：从前
+    `settlement_stats()` 不带参地读全局文件，探针式地 `assess(cache_dir=某临时目录)`
+    会把生产结算统计打印成那个临时目录的结果。要探针就传 `rows=[]`。
+    """
+    from hive_logger import pdt_today
     from iv_history import _observed_accrual_rate, _read_index
 
     cdir = _cache_dir(cache_dir)
+    rows = load_rows() if rows is None else rows
+    as_of = as_of or pdt_today()
     min_obs = int(CONFIG["min_obs_per_ticker"])
     min_ready = int(CONFIG["min_ready_tickers"])
     tickers = sorted(os.path.basename(p)[len("iv_history_"):-len(".jsonl")]
                      for p in glob.glob(os.path.join(str(cdir), "iv_history_*.jsonl")))
     per_ticker = {t: min(len(_read_index(t, str(cdir))), 252) for t in tickers}
-    ready_tickers = sorted(t for t, n in per_ticker.items() if n >= min_obs)
+    per_ticker_usable = _usable_history_counts(cdir, tickers, rows, as_of)
+    index_ready_tickers = sorted(t for t, n in per_ticker.items() if n >= min_obs)
+    # 就绪判定认**可用**口径，不认索引口径 —— 闸门必须量它把守的那个数
+    ready_tickers = sorted(t for t, n in per_ticker_usable.items() if n >= min_obs)
 
     if not tickers:
         status = "undetermined"
@@ -507,6 +640,12 @@ def assess(cache_dir=None) -> Dict:
     counts = sorted(per_ticker.values(), reverse=True)
     if status == "ready":
         eta_weeks = 0.0
+    elif len(index_ready_tickers) >= min_ready:
+        # 索引攒够了、可用历史没攒够 —— 瓶颈不是"再等等"，是同日快照缺 rv_30d，
+        # 按积累速率外推会给出一个假的「0.0 周后到位」。
+        eta_note = (f"IV 索引已有 {len(index_ready_tickers)} 只票达标，但只有 "
+                    f"{len(ready_tickers)} 只的历史真能被 record_day 用上"
+                    f"（缺同业务日快照的 {CONFIG['rv_source']}）—— 瓶颈不是攒得不够")
     elif len(counts) < min_ready:
         eta_note = f"只有 {len(counts)} 只票在攒 IV 历史，不足 {min_ready} 只 —— 光靠攒攒不到就绪"
     elif not rate:
@@ -519,6 +658,7 @@ def assess(cache_dir=None) -> Dict:
         "status": status,
         "ready": status == "ready",
         "cache_dir": str(cdir),
+        "as_of": as_of,
         "min_obs_per_ticker": min_obs,
         "min_ready_tickers": min_ready,
         "n_tickers": len(tickers),
@@ -526,12 +666,21 @@ def assess(cache_dir=None) -> Dict:
         "n_ready_tickers": len(ready_tickers),
         "per_ticker_obs": per_ticker,
         "median_obs": (sorted(counts)[len(counts) // 2] if counts else 0),
+        # ↓ 两个口径都报出来：索引条数（上面）vs record_day 真能用的条数（下面）。
+        #   ready 的判据是后者；两者之差 = 有 IV 却缺同日 rv_30d 的日期数。
+        "per_ticker_usable_obs": per_ticker_usable,
+        "n_index_ready_tickers": len(index_ready_tickers),
+        "index_ready_tickers": index_ready_tickers,
+        "median_usable_obs": (sorted(per_ticker_usable.values())[len(per_ticker_usable) // 2]
+                              if per_ticker_usable else 0),
+        "n_obs_index_total": sum(per_ticker.values()),
+        "n_obs_usable_total": sum(per_ticker_usable.values()),
         "accrual_rate_per_trading_day": _r(rate, 3) if rate else None,
         "accrual_observed_days": observed_days,
         "accrual_elapsed_trading_days": elapsed,
         "eta_weeks": eta_weeks,
         "eta_note": eta_note,
-        "settlement": settlement_stats(),
+        "settlement": settlement_stats(rows),
     }
 
 
@@ -539,14 +688,19 @@ def summary_line(res: Dict) -> str:
     s = res["status"]
     if s == "undetermined":
         return f"❓ VRP 信号：无法判定 —— {res['cache_dir']} 里没有任何 IV 索引"
+    st = res["settlement"]
+    gave_up = f"，放弃 {st['n_gave_up']} 行" if st.get("n_gave_up") else ""
+    # 两个口径都写出来：索引条数会系统性高于可用条数，只报前者就是 v0.45.104 修的那个假就绪
+    both = (f"可用历史 {res['n_ready_tickers']}/{res['n_tickers']} 只达标"
+            f"（IV 索引口径 {res['n_index_ready_tickers']} 只；"
+            f"条数中位 可用 {res['median_usable_obs']} / 索引 {res['median_obs']}）")
     if s == "ready":
-        return (f"✅ VRP 信号已就绪：{res['n_ready_tickers']}/{res['n_tickers']} 只票各有 "
-                f"≥{res['min_obs_per_ticker']} 条真实 IV（已结算 {res['settlement']['n_settled']} 行）")
+        return (f"✅ VRP 信号已就绪：{both}，各 ≥{res['min_obs_per_ticker']} 条"
+                f"（已结算 {st['n_settled']} 行{gave_up}）")
     eta = (f"，按实测速率约 {res['eta_weeks']} 周后到位" if res["eta_weeks"] is not None
            else f"，ETA 无法判定：{res['eta_note']}")
-    return (f"⏳ VRP 信号攒数中：{res['n_ready_tickers']}/{res['n_tickers']} 只票达标"
-            f"（需 {res['min_ready_tickers']} 只各 ≥{res['min_obs_per_ticker']} 条，"
-            f"中位 {res['median_obs']} 条）{eta}")
+    return (f"⏳ VRP 信号攒数中：{both}"
+            f"，需 {res['min_ready_tickers']} 只各 ≥{res['min_obs_per_ticker']} 条{gave_up}{eta}")
 
 
 # ---------------------------------------------------------------- 日报小节
@@ -560,7 +714,7 @@ def render_markdown(as_of: str, cache_dir=None) -> str:
     rows = rows_for_date(as_of)
     if not rows:
         return ""
-    res = assess(cache_dir)
+    res = assess(cache_dir, as_of=as_of)
     lines = ["", "## VRP 信号（攒数期，未下注）", ""]
     lines.append(summary_line(res))
     lines += ["", "| 标的 | IV | RV30 | IV−RV | 历史 n | 时序分位 | 标签 |",
@@ -570,8 +724,10 @@ def render_markdown(as_of: str, cache_dir=None) -> str:
                      f"{_fmt(r.get('vrp_ex_ante'), 2)} | {r.get('n_obs') if r.get('n_obs') is not None else '—'} | "
                      f"{_fmt(r.get('ts_pct'), 2)} | {r.get('label') or '—'} |")
     st = res["settlement"]
-    if st["n_settled"]:
+    if st["n_settled"] or st["n_gave_up"]:
         parts = [f"已结算 {st['n_settled']}/{st['n_rows']} 行（{CONFIG['forward_days']} 个交易日事后 RV）"]
+        if st["n_gave_up"]:
+            parts.append(f"已放弃 {st['n_gave_up']} 行（基准日出了取数窗口或反复算不出）")
         for label, d in st["by_label"].items():
             parts.append(f"{label}: n={d['n']}, 均值 {_fmt(d['mean_vrp_realized'])}")
         sp = st["spearman_within_ticker"]
@@ -597,13 +753,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = ap.parse_args(argv)
     as_of = args.date or pdt_today()
 
-    result: Dict = {"date": as_of, "recorded": None, "settled": None}
+    # v0.45.104：退出码只表达就绪度（编排器契约），--record/--settle 的成败另走
+    # warnings + JSON 计数。从前 `--date D --record` 一行没写，退出码与健康的
+    # 「攒数中」逐字节相同 —— 报错和正常态长得一样，等于没报。
+    result: Dict = {"date": as_of, "recorded": None, "settled": None, "warnings": []}
     if args.record:
         result["recorded"] = len(record_day(as_of, cache_dir=args.cache_dir))
+        if result["recorded"] == 0:
+            msg = (f"--record 被要求了，但 {as_of} 一行没写 —— "
+                   f"该日在 {_cache_dir(args.cache_dir)} 里没有任何常规期权快照")
+            _log.warning(msg)
+            result["warnings"].append(msg)
     if args.settle:
         result["settled"] = settle(as_of)
-    res = assess(cache_dir=args.cache_dir)
+    res = assess(cache_dir=args.cache_dir, as_of=as_of)
     result["assessment"] = res
+    if res["settlement"]["n_gave_up"]:
+        result["gave_up"] = res["settlement"]["n_gave_up"]
 
     if args.out:
         try:
@@ -618,6 +784,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"记录 {result['recorded']} 行（{as_of}）")
         if args.settle:
             print(f"结算 {result['settled']} 行（{as_of}）")
+        for w in result["warnings"]:
+            print(f"⚠️  {w}", file=sys.stderr)
         print(summary_line(res))
         if res["status"] != "undetermined":
             top = sorted(res["per_ticker_obs"].items(), key=lambda kv: -kv[1])[:10]

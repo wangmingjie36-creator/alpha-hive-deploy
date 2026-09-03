@@ -19,8 +19,11 @@
 ------------------
 ATM 跨式中价 / S 是到期前**全部**波动的价格：财报跳空 + 到期前每天的普通扩散。
 用 30 日已实现波动把扩散那部分扣掉：
-    diffusion_move_pct = 0.8 · σ_rv · √(dte/252) · 100        （0.8σ√T ≈ ATM 跨式）
+    diffusion_move_pct = 0.8 · σ_rv · √(dte/365) · 100        （0.8σ√T ≈ ATM 跨式）
     implied_event_move_pct = √(max(straddle² − diffusion², 0))
+`dte` 是**日历日**（cboe_options 里的 `(expiry − today).days`），所以分母只能是 365。
+252 是交易日年，只能配交易日计数的 T；两者混用会把 √T 放大 √(365/252)=1.2035
+（v0.45.104 之前就是这个 bug）。
 `rv_30d` 缺失时退回 `straddle_move_pct` 本身并标 `event_move_basis="raw_straddle"`：
 它**含扩散**，会高估事件波动、把 ratio 往 rich 推——读 ratio 前先看 basis。
 （earnings_history 的两日窗口同样多掺一天扩散，两边偏差同向，比值受影响较小。）
@@ -28,13 +31,25 @@ ATM 跨式中价 / S 是到期前**全部**波动的价格：财报跳空 + 到�
 合格条件（缺一个就 `eligible=False` 并给 `reason`）
 --------------------------------------------------
 1. `quote_set.data_available` 且 ATM call/put 两腿 `quote_ok`（bid>0、ask≥bid、有限）
-2. 有下次财报日，且 `as_of < earnings_date <= selected_expiry`——跨式必须**跨过**事件，
-   到期日在财报前的跨式定价的是别的东西
+2. 有下次财报日，且 `as_of < earnings_date <= selected_expiry − expiry_buffer_days`——
+   跨式必须**跨过**事件；到期日在财报前的跨式定价的是别的东西，而账本
+   （options_paper_leg）在到期前 `expiry_buffer_days` 天就强平：落在这个缓冲里的
+   信号会在它自己要测的事件发生**之前**被平掉，只给 KPI 留一次纯来回点差损失
 3. 历史事件 ≥ `min_events`
 
-可交易性单独判：两腿任一 `spread_pct > max_spread_pct` → `label="untradeable"`，
-真实标签保留在 `raw_label`。依据 2026-09-03 实盘核对：COST 25Δ 合约点差 27.6%，
-NVDA 只有 4.4%——前者的"中价"是两个相隔 28% 的报价的算术平均，按它成交是幻觉。
+可交易性单独判：**ATM 两腿**任一 `spread_pct > max_spread_pct` → `label="untradeable"`，
+真实标签保留在 `raw_label`。25Δ 腿不参与——账本买卖的是 ATM 跨式，闸门必须盯着
+真正会成交的那两条腿。依据 2026-09-03 14:46 ET 盘中实测 ATM 点差：NVDA 1.78%/1.77%、
+COST 4.62%/5.11%、AMC 16.00%/10.53%；点差 16% 的"中价"是两个相隔 16% 的报价的算术
+平均，按它成交是幻觉。
+
+⚠️ 点差读数的时段偏差（暂不处理，只标注）
+------------------------------------------
+日更扫描跑在 14:00 PDT = 17:00 ET，**收盘之后**，所以落盘的每一个 `spread_pct` 都是
+盘后点差，系统性地宽于开盘时真能成交的点差（同日 COST 25Δ：盘后 27.64% vs 盘中 9.63%，
+约 2.9×）。`quote_set["market_open"]` 记了每份报价来自哪个时段，信号里也带着
+（`market_open` 字段）。将来校准 `max_spread_pct` 必须**按 market_open 分层**，
+不能把两个时段的点差混在一起当同一个分布。现在不加第二个阈值、不改这个数。
 
 诚实降级
 --------
@@ -56,6 +71,7 @@ import json
 import math
 import re
 from collections import defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -68,7 +84,13 @@ CONFIG = {
     "cheap_ratio": 0.75,      # ≤ 0.75 → cheap（买跨式候选）
     "min_events": 4,          # 历史事件下限
     "min_quote_ok": True,     # ATM 两腿必须 quote_ok（关掉 = 允许 bid=0 的半边报价，别关）
-    "max_spread_pct": 0.15,   # 任一腿点差 > 15% → untradeable（COST 25Δ 27.6% vs NVDA 4.4%）
+    # 闸门只看 **ATM 两腿**（账本交易的就是 ATM 跨式，25Δ 从不进这个判断）。
+    # 2026-09-03 14:46 ET 盘中实测 ATM 点差：NVDA 1.78%/1.77%、COST 4.62%/5.11%、
+    # AMC 16.00%/10.53%。15% 这条线的作用就是把 AMC 那一类挡在外面、放行 NVDA/COST。
+    # ⚠️ 此前这里写的"COST 25Δ 27.6% vs NVDA 4.4%"是**盘后的 25Δ** 数字：既不是被
+    # 求值的腿（25Δ），也不是可成交的时段（收盘后），约为实测 ATM 点差的 6 倍。
+    # 阈值本身没动，只是不再拿一个从未被这个过滤器读过的数当依据（v0.45.75 那类教训）。
+    "max_spread_pct": 0.15,
     "history_n": 8,           # 取过去 8 次财报
     "diffusion_k": 0.8,       # 0.8σ√T ≈ ATM 跨式
 }
@@ -95,6 +117,29 @@ def _r(v, nd=4) -> Optional[float]:
 def _resolve_dir(p, default_name: str) -> Path:
     path = Path(p) if p is not None else Path(default_name)
     return path if path.is_absolute() else BASE_DIR / path
+
+
+# 账本强平缓冲的**唯一真相**是 options_paper_leg.CONFIG；下面这个常量只是
+# import 失败时的降级值，有测试（test_eligibility_buffer_matches_ledger_config）钉住
+# 两者必须相等——否则就是又一个默默漂开的重复参数。
+_EXIT_BUFFER_FALLBACK_DAYS = 2
+
+
+def _exit_buffer_days() -> int:
+    try:
+        import options_paper_leg
+        return int(options_paper_leg.CONFIG["expiry_buffer_days"])
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("读 options_paper_leg.expiry_buffer_days 失败，退回 %d: %s",
+                     _EXIT_BUFFER_FALLBACK_DAYS, exc)
+        return _EXIT_BUFFER_FALLBACK_DAYS
+
+
+def _minus_days(d, n: int) -> Optional[str]:
+    try:
+        return (datetime.strptime(d, "%Y-%m-%d") - timedelta(days=n)).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------- 状态文件
@@ -194,8 +239,15 @@ def _precheck(as_of: str, quote_set: Optional[dict], upcoming: Optional[dict]) -
     if not ed:
         return "no upcoming earnings date"
     expiry = quote_set.get("selected_expiry")
-    if not (as_of < ed <= expiry):
+    # M1（v0.45.104）：不能只要求 ed ≤ expiry。账本在 expiry − buffer 天就强平，
+    # 所以 expiry − ed ≤ buffer 的信号开仓后**必然**在财报前被平：它测不到事件，
+    # 却会把一次纯来回点差损失当成“信号的一次检验”记进 KPI。
+    buf = _exit_buffer_days()
+    last_ok = _minus_days(expiry, buf) if isinstance(expiry, str) else None
+    if last_ok is None:
         return f"earnings {ed} not within (as_of, expiry={expiry}]"
+    if not (as_of < ed <= last_ok):
+        return f"earnings {ed} not within (as_of, expiry−{buf}d={last_ok}]"
     return None
 
 
@@ -228,8 +280,9 @@ def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
         "ratio": None, "max_leg_spread_pct": None,
         "quote": {"call": call, "put": put},
         "quote_fetched_at": qs.get("fetched_at"), "market_open": qs.get("market_open"),
-        # settle_signals 回填
-        "realized_abs_move_pct": None, "realized_ratio": None, "settled_on": None,
+        # settle_signals 回填（realized_move_pct 以前只在 settle 里出现，未初始化 = schema 漂移）
+        "realized_abs_move_pct": None, "realized_move_pct": None,
+        "realized_ratio": None, "settled_on": None,
     }
 
     reason = _precheck(as_of, qs, upcoming)
@@ -248,7 +301,12 @@ def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
     dte = sig["dte"]
     rv = sig["rv_30d"]
     if rv is not None and rv > 0 and dte is not None and dte > 0:
-        diffusion = CONFIG["diffusion_k"] * (rv / 100.0) * math.sqrt(dte / 252.0) * 100.0
+        # H1（v0.45.104）：以前写的是 dte/252。dte 来自 quote_set["selected_dte"]，
+        # 它是 cboe_options 里的 `(expiry − today).days`——**日历日**。合法的配对只有两种：
+        # 日历日/365、交易日/252；混用就是单位错误，把 √T 放大 √(365/252)=1.2035，
+        # 扩散项虚高 20.35%（rv=30%、dte=29：8.1416% vs 正确的 6.7649%）。
+        # 它是在根号下被减掉的，所以会直接翻标签：NVDA cheap→fair、COST floor→cheap。
+        diffusion = CONFIG["diffusion_k"] * (rv / 100.0) * math.sqrt(dte / 365.0) * 100.0
         event2 = straddle * straddle - diffusion * diffusion
         sig["diffusion_move_pct"] = _r(diffusion)
         sig["event_move_floor_hit"] = event2 <= 0
@@ -271,6 +329,9 @@ def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
         raw = "fair"
     sig["raw_label"] = raw
 
+    # 只取 ATM 两腿：账本成交的就是这两条腿，25Δ（contracts["c25"]/["p25"]）不进闸门。
+    # ⚠️ 这里读到的 spread_pct 几乎总是**盘后**点差（日更 14:00 PDT = 17:00 ET，收盘后），
+    # 系统性宽于开盘可成交的点差；`market_open` 字段记了时段，将来校准阈值须按它分层。
     spreads = [x for x in (call["spread_pct"], put["spread_pct"]) if x is not None]
     max_spread = max(spreads) if spreads else None
     sig["max_leg_spread_pct"] = _r(max_spread)
@@ -312,8 +373,13 @@ def _iter_snapshots(cache_dir: Path, as_of: str):
 
 
 def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
-         watcher=None, stats_fn: Optional[Callable[[str], Optional[dict]]] = None) -> List[dict]:
-    """当日全部常规快照 → 信号列表，并幂等落盘（先删该日旧行再追加）。"""
+         watcher=None, stats_fn: Optional[Callable[[str], Optional[dict]]] = None,
+         upcoming_fn: Optional[Callable[[str], Optional[dict]]] = None) -> List[dict]:
+    """当日全部常规快照 → 信号列表，并幂等落盘（先删该日旧行再追加）。
+
+    `upcoming_fn(ticker) -> {"earnings_date": ..., "earnings_time": ...} | None` 可注入：
+    调用方（日报）手里已经有财报日时直接给过来，不必再造一个 EarningsWatcher。
+    缺省为 None 时行为与以前完全一致（延迟构造 EarningsWatcher）。"""
     cdir = _resolve_dir(cache_dir, "cache")
     ecdir = _resolve_dir(earnings_cache_dir, "earnings_cache")
 
@@ -334,6 +400,7 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
             return None
 
     stats_fn = stats_fn or _default_stats
+    upcoming_fn = upcoming_fn or _upcoming
     signals: List[dict] = []
     for ticker, snap in _iter_snapshots(cdir, as_of):
         qs = snap.get("quote_set")
@@ -342,7 +409,7 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
         stats = None
         # 先用零成本条件判死，通过了才去打网
         if _precheck_quotes(qs) is None:
-            upcoming = _upcoming(ticker)
+            upcoming = upcoming_fn(ticker)
             if _precheck(as_of, qs, upcoming) is None:
                 try:
                     stats = stats_fn(ticker)
@@ -354,7 +421,19 @@ def scan(as_of: str, cache_dir="cache", earnings_cache_dir="earnings_cache",
         except Exception as exc:  # noqa: BLE001 - 单票失败不拖死整轮
             _log.warning("[%s] 信号计算失败: %s", ticker, exc, exc_info=True)
 
-    existing = [s for s in load_signals() if s.get("as_of") != as_of]
+    # M4（v0.45.104）：重写该日的行之前，把 settle_signals 已经填好的实际波动搬过来。
+    # 正常日更不会触发（一行不可能在自己的 as_of 当天就结算），但 `--date` 回补
+    # 或手动重跑会：不搬就是把已结算的样本删了，而新行还未必更好。
+    all_rows = load_signals()
+    prev = {s.get("ticker"): s for s in all_rows if s.get("as_of") == as_of}
+    for sig in signals:
+        old = prev.get(sig["ticker"])
+        if not old:
+            continue
+        for k in ("realized_abs_move_pct", "realized_move_pct", "realized_ratio", "settled_on"):
+            if old.get(k) is not None:
+                sig[k] = old[k]
+    existing = [s for s in all_rows if s.get("as_of") != as_of]
     _write_jsonl(SIGNALS_FILE, existing + signals)
     n_el = sum(1 for s in signals if s.get("eligible"))
     _log.info("财报事件波动率信号 %s：快照 %d，合格 %d（%s）", as_of, len(signals), n_el,

@@ -26,8 +26,9 @@ yfinance 给的财报日不带可靠的盘前/盘后标记（earnings_watcher �
 - 取不到财报日期 → `None`，**不是 `[]`**（空列表会被下游当成"查过了、确实没有"）。
 - 财报日前后缺 K 线（本地价格索引只有几个月、Twelve Data 未配置）→ 该次事件跳过，
   计入 `n_missing`；不用最近的一根去凑。
-- pre→post 跨度超过 `_MAX_WINDOW_CAL_DAYS` 个日历日 → 视为数据有洞而非真实两日窗口，
-  跳过。一次假期最多让窗口到 5 天；超过就是 K 线缺了。
+- pre / ed / post 三根 K 线在序列里必须**相邻**（索引距离正好 2）→ 否则视为数据有洞，
+  跳过。日历日闸（`_MAX_WINDOW_CAL_DAYS`）挡不住真正的洞：缺两个交易日的窗口
+  日历跨度可能只有 6 天，照样会被当成"两日窗口"收下（v0.45.104 修）。两道闸都保留。
 - 可用事件 < 4 → `earnings_move_stats` 返回 `None`（原因写进日志与 `_moves.json`
   的 `reason` 字段，`earnings_move_stats_detail` 可读到）。4 个样本算中位数已经很勉强，
   再少就是在拿噪音当分母。
@@ -36,7 +37,10 @@ yfinance 给的财报日不带可靠的盘前/盘后标记（earnings_watcher �
 缓存
 ----
 `earnings_cache/{T}_history.json`（原始财报日期列表，30 天）
-`earnings_cache/{T}_moves.json`（统计结果，30 天）。财报一季一次，30 天足够；
+`earnings_cache/{T}_moves.json`（统计结果，30 天）。两份都按 ticker 存、不含日期，
+所以**读出来必须按当次的 `today` 再过滤一次**：history 一直是这么做的（存原始、读时滤），
+moves 以前不是，回补时会把当时还没发生的财报算进分母（look-ahead，v0.45.104 修）。
+财报一季一次，30 天足够；
 过期后重拉一次 yfinance（走 yf_gate）+ 一次 Twelve Data（800/天的预算里 30 只
 每月各 1 次可忽略）。
 
@@ -142,12 +146,19 @@ def get_past_earnings_dates(ticker: str, n: int = 8, today: Optional[str] = None
         dates = _fetch_earnings_dates_raw(ticker, max(_FETCH_LIMIT_FLOOR, n + 4))
         if not dates:
             return None
-        try:
-            atomic_json_write(path, {"ticker": ticker, "dates": dates,
-                                     "source": "yfinance",
-                                     "fetched_at": datetime.now().isoformat()})
-        except (OSError, TypeError) as exc:
-            _log.debug("[%s] 财报日期缓存写入失败: %s", ticker, exc)
+        # L2（v0.45.104）：一次**成功但被截断**的取数（限流/上游只给了两三条）不能
+        # 进 30 天缓存——它会把这只票封成"没有历史"整整一个月，长得和真的没有一模一样。
+        # 至少要够 MIN_EVENTS 个过去事件 + 1 个未来事件才算一份可用的历史。
+        if len(dates) < MIN_EVENTS + 1:
+            _log.info("[%s] 财报日期只拿到 %d 条（< %d），不写缓存，下次重试",
+                      ticker, len(dates), MIN_EVENTS + 1)
+        else:
+            try:
+                atomic_json_write(path, {"ticker": ticker, "dates": dates,
+                                         "source": "yfinance",
+                                         "fetched_at": datetime.now().isoformat()})
+            except (OSError, TypeError) as exc:
+                _log.debug("[%s] 财报日期缓存写入失败: %s", ticker, exc)
     past = sorted((d for d in dates if d < today), reverse=True)
     return past[:n] if past else None
 
@@ -174,6 +185,15 @@ def realized_earnings_moves(ticker: str, dates: List[str], bars: List[dict]) -> 
         i_pre = bisect.bisect_left(bar_dates, ed) - 1        # 最后一个 < ed
         i_post = bisect.bisect_right(bar_dates, ed)          # 第一个 > ed
         if i_pre < 0 or i_post >= len(bar_dates):
+            continue
+        # M5（v0.45.104）：两日窗口 = pre / ed / post 三根**相邻** K 线，索引距离正好 2。
+        # 日历日闸（≤7 天）是近似的，挡不住真实的数据洞：只有 04-08 与 04-14 两根、
+        # 财报在 04-13 时跨度 6 天 ≤ 7，会被当成两日窗口收下，实际是 4 个交易日的漂移
+        # 被贴上 abs_move_pct 的标签。距离 ≠ 2 有两种成因（ed 当天 K 线缺了、
+        # ed 不是交易日），两种都无法证明 pre/post 紧挨着事件，一律跳过。
+        if i_post - i_pre != 2:
+            _log.debug("[%s] %s 前后 K 线索引距离 %d（应为 2，%s→%s），视为缺 K 线跳过",
+                       ticker, ed, i_post - i_pre, bar_dates[i_pre], bar_dates[i_post])
             continue
         pre_d, pre_c = clean[i_pre]
         post_d, post_c = clean[i_post]
@@ -236,6 +256,9 @@ def _stats_from_moves(ticker: str, dates: List[str], moves: List[dict],
         reason = f"only {len(abs_moves)} usable events (< {MIN_EVENTS})"
     return {
         "ticker": ticker,
+        # dates 落盘是 M2 重过滤的前提：只有知道当时用了哪些财报日，才能按新的 today
+        # 把未来事件从分子分母里一起摘掉。
+        "dates": sorted({d for d in dates if isinstance(d, str)}, reverse=True),
         "n": len(abs_moves),
         "n_missing": max(0, len(dates) - len(abs_moves)),
         "usable": usable,
@@ -249,17 +272,46 @@ def _stats_from_moves(ticker: str, dates: List[str], moves: List[dict],
     }
 
 
+def _refilter_for_today(cached: dict, today: str) -> Optional[dict]:
+    """把按 ticker 存的 moves 缓存按当次 `today` 再过滤一次；旧格式（无 dates）→ None。
+
+    M2（v0.45.104）：`{T}_moves.json` 存的是**写缓存那天**过滤出来的统计，键里没有日期，
+    TTL 30 天。回补（`--date`）或手动重跑时 today 往前挪，直接返回缓存就等于把当时
+    还没发生的财报算进了分母——look-ahead。`get_past_earnings_dates` 没这个毛病
+    （它缓存原始列表、读时才过滤），坏的只有缓存**已过滤结果**的这一层。
+    返回 None = 无法安全重过滤，调用方当缓存未命中处理（不猜、不将就）。
+    """
+    dates, moves = cached.get("dates"), cached.get("moves")
+    if not isinstance(dates, list) or not isinstance(moves, list):
+        return None
+    past_dates = [d for d in dates if isinstance(d, str) and d < today]
+    past_moves = [m for m in moves if isinstance(m, dict)
+                  and str(m.get("earnings_date") or "") < today]
+    if len(past_dates) == len(dates) and len(past_moves) == len(moves):
+        return cached
+    out = _stats_from_moves(cached.get("ticker") or "", past_dates, past_moves,
+                            cached.get("source") or "cache")
+    out["computed_at"] = cached.get("computed_at")
+    out["refiltered_for"] = today
+    return out
+
+
 def earnings_move_stats_detail(ticker: str, n: int = 8, today: Optional[str] = None,
                                cache_dir="earnings_cache",
                                bars_fn: Optional[Callable[[str], Tuple[Optional[List[dict]], str]]] = None,
                                ) -> Optional[dict]:
     """完整统计 dict（含 `usable=False` 的），硬失败（无日期 / 无 K 线）→ None。"""
     ticker = ticker.upper()
+    today = today or pdt_today()
     cdir = _resolve_cache_dir(cache_dir)
     path = cdir / f"{ticker}_moves.json"
     cached = read_json_cache(path, MOVES_TTL)
     if isinstance(cached, dict) and "n" in cached:
-        return cached
+        refiltered = _refilter_for_today(cached, today)
+        if refiltered is not None:
+            return refiltered
+        _log.info("[%s] moves 缓存是旧格式（无 dates），无法按 today=%s 重过滤，重算",
+                  ticker, today)
 
     dates = get_past_earnings_dates(ticker, n=n, today=today, cache_dir=cdir)
     if not dates:

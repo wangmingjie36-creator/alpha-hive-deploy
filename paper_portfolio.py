@@ -88,8 +88,13 @@ CONFIG = {
     "sizing_mode": "vol_target",          # "vol_target" | "tier"
     "vol_target": {
         "target_position_vol_pct": 1.75,  # 每仓对 NAV 的年化波动贡献目标（%）。校准：σ=35% 的中位标的 → 5% NAV，与旧 high 档持平
-        "size_pct_min": 1.5,              # 单仓下限（% NAV）：σ 极高的票也不至于小到没意义
-        "size_pct_max": 8.0,              # 单仓上限（% NAV）：σ 极低的票不能无限放大
+        # ⚠️ 这两个钳的是**置信乘数之前**的 target/σ 百分比，不是最终 NAV 占比。
+        # 钳位在前、conf_multiplier 在后（顺序由 test_clamp_applies_before_conf_multiplier
+        # 钉死，是有意的：先把 σ 极端值拉回可交易区间，再按置信缩放）。
+        # 实测最终 NAV 占比：high(×1.0) 落 1.5–8.0%，mid(×0.6) 落 0.90–4.8%
+        # （σ=200% 的票 mid 档只有 0.90% NAV）。别把下面两个数当 NAV 边界读。
+        "size_pct_min": 1.5,              # 钳位下限（%，乘 conf 之前）：σ 极高的票也不至于小到没意义
+        "size_pct_max": 8.0,              # 钳位上限（%，乘 conf 之前）：σ 极低的票不能无限放大
         "conf_multiplier": {"high": 1.0, "mid": 0.6, "low": 0.0},   # 保留置信分层的相对比例（旧 5:3）
         "vol_source_max_age_days": 5,     # 用 as_of 当日或最近 5 天内的 volatility_20d
     },
@@ -449,9 +454,13 @@ def _should_open(snapshot: Dict, existing_tickers: set, as_of: str = "") -> Tupl
 
 # v0.45.100：(ticker, as_of, db_path) → 年化波动 % 或 None。同一次 run_for_date
 # 每个候选标的只查一次库；测试的 autouse fixture 负责清空。
-_VOL_ANN_CACHE: Dict[Tuple[str, str, str], Optional[float]] = {}
+_VOL_ANN_CACHE: Dict[Tuple[str, str, str, int], Optional[float]] = {}
 
 _VOL_SIGNAL = "price.volatility_20d"
+
+# 合法的 sizing_mode。run_for_date 入口与 _compute_position_size 共用同一张表——
+# 两处各写一遍字面量，迟早会有一处漏更（v0.45.104）。
+_SIZING_MODES = ("vol_target", "tier")
 
 
 def _lookup_vol_ann(ticker: str, as_of: str,
@@ -464,11 +473,15 @@ def _lookup_vol_ann(ticker: str, as_of: str,
     import sqlite3
 
     db = Path(db_path) if db_path is not None else BASE_DIR / "pheromone.db"
-    key = (ticker, as_of, str(db))
+    # v0.45.104：max_age 必须进 key。它是**查询条件的一部分**（下面的 since 由它算），
+    # 却曾被漏在 key 之外：同进程里先用 max_age=1 查出 None，再改成 max_age=10
+    # 重查，拿回的是缓存里那个 None——一次 run_replay 的窗口覆盖会污染下一次。
+    # 实测：4 天前的一行，narrow(1)→None 之后 wide(10) 仍然 None（清缓存则 40.0）。
+    max_age = int(CONFIG["vol_target"]["vol_source_max_age_days"])
+    key = (ticker, as_of, str(db), max_age)
     if key in _VOL_ANN_CACHE:
         return _VOL_ANN_CACHE[key]
 
-    max_age = int(CONFIG["vol_target"]["vol_source_max_age_days"])
     try:
         since = (datetime.strptime(as_of, "%Y-%m-%d")
                  - timedelta(days=max_age)).strftime("%Y-%m-%d")
@@ -537,8 +550,12 @@ def _compute_position_size(
         vt = CONFIG["vol_target"]
         if vol_ann is None:
             vol_ann = _lookup_vol_ann(ticker, as_of)
-        # NaN / inf / <=0 与缺失同等对待（bool(nan) is True，不能靠真值判断）
-        if (isinstance(vol_ann, bool) or not isinstance(vol_ann, (int, float))
+        # NaN / inf / <=0 与缺失同等对待（bool(nan) is True，不能靠真值判断）。
+        # v0.45.104 删掉了这里的 `isinstance(vol_ann, bool)`：_lookup_vol_ann 只
+        # 返回 float(row[0]) 或 None，生产上没有任何调用方传 vol_ann，这条永不触发。
+        # 保留 `isinstance(..., (int, float))` 是另一件事——它挡的是下一行
+        # math.isfinite 在非数字入参上直接 TypeError（vol_ann 是公开 kwarg）。
+        if (not isinstance(vol_ann, (int, float))
                 or not math.isfinite(vol_ann) or vol_ann <= 0):
             vol_ann = None
         if vol_ann is None:
@@ -558,7 +575,8 @@ def _compute_position_size(
     elif mode == "tier":
         base_pct = _tier_size_pct(conf)
     else:
-        raise ValueError(f"CONFIG['sizing_mode']={mode!r} 未知，只认 'vol_target' / 'tier'")
+        raise ValueError(f"CONFIG['sizing_mode']={mode!r} 未知，"
+                         f"只认 {' / '.join(repr(m) for m in _SIZING_MODES)}")
 
     mult = _size_multiplier(ticker, closed)
     size = nav * (base_pct / 100.0) * mult
@@ -838,6 +856,14 @@ def run_for_date(as_of: str, verbose: bool = False) -> Dict:
     2. 读取当日符合条件的报告 → 开新仓
     3. 更新 equity curve
     """
+    # v0.45.104：模式名打错必须**当天**就炸，不能等到"今天恰好有候选要开仓"。
+    # _compute_position_size 里的 ValueError 只在 _open_position 路径上抛，
+    # 没有合格候选的日子会一路静默跑完（照常写 equity），一份错配置可以潜伏好几天。
+    _mode = CONFIG.get("sizing_mode", "tier")
+    if _mode not in _SIZING_MODES:
+        raise ValueError(f"CONFIG['sizing_mode']={_mode!r} 未知，"
+                         f"只认 {' / '.join(repr(m) for m in _SIZING_MODES)}")
+
     meta = _load_meta()
     positions = [Position(**p) for p in _load_jsonl(POSITIONS_FILE)]
     closed = _load_jsonl(CLOSED_FILE)
@@ -1007,6 +1033,11 @@ def run_replay(config_overrides: Dict, state_dir: Path,
     # 就地改内层的覆盖泄漏到生产 CONFIG——用 deepcopy 封死。
     _orig_config = copy.deepcopy(CONFIG)
     _REPLAY_MODE = True  # v0.40.0: 回放期间屏障结果不回写生产 pheromone.db
+    # v0.45.104：σ 缓存是模块级的，`_VOL_ANN_CACHE.clear()` 此前在全模块里一次
+    # 都没有出现过——同一进程里连跑多个沙盒（weekly_optimizer 的参数网格就是
+    # 这么跑的）会互相串味：上一轮 vol_source_max_age_days 下查出的 None
+    # 原样回给下一轮。进出各清一次，沙盒之间彻底隔开。
+    _VOL_ANN_CACHE.clear()
     try:
         POSITIONS_FILE = state_dir / "positions.jsonl"
         CLOSED_FILE = state_dir / "closed_trades.jsonl"
@@ -1031,6 +1062,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
         POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE = _orig_paths
         CONFIG.clear()
         CONFIG.update(_orig_config)
+        _VOL_ANN_CACHE.clear()   # 沙盒里攒的 σ 不得漏进生产 run_for_date
         _REPLAY_MODE = False
 
 
@@ -1149,8 +1181,11 @@ def _sizing_rule_text() -> str:
     if CONFIG.get("sizing_mode", "tier") == "vol_target":
         vt = CONFIG["vol_target"]
         cm = vt["conf_multiplier"]
+        # v0.45.104：曾写作「钳位 1.5–8.0% NAV」——那不是 NAV 边界。钳位作用在
+        # 乘置信乘数**之前**的 target/σ 百分比上，mid 档（×0.6）实测只落
+        # 0.90–4.8% NAV。卡片不能声称一个代码并不执行的区间。
         return (f'波动率目标仓位：单仓年化波动贡献 {vt["target_position_vol_pct"]}% NAV'
-                f'（仓位 = 目标/σ₂₀，钳位 {vt["size_pct_min"]}–{vt["size_pct_max"]}% NAV）'
+                f'（仓位 = 目标/σ₂₀，置信乘数前钳位 {vt["size_pct_min"]}–{vt["size_pct_max"]}%）'
                 f' · 高置信 ×{cm["high"]} / 中置信 ×{cm["mid"]} · 无 σ 时退回分档')
     t = CONFIG["size_pct_by_tier"]
     return f'高置信 {t["high"]}% NAV / 中置信 {t["mid"]}%'
@@ -1187,6 +1222,14 @@ def render_portfolio_card() -> str:
                 if isinstance(kpi.get("spy_return_pct"), (int, float)) else "—")
     _alpha_txt = ("Alpha " + format(kpi["alpha_pct"], "+.2f") + "%"
                   if _alpha_known else "Alpha 不可用")
+
+    # v0.45.104：降级可见性。Position.sizing 此前只落在 positions.jsonl 与
+    # rationale 里，卡片一个字都不渲染——"降级必须可见"只对会去开 jsonl 的人
+    # 成立。把退回分档的仓数摆到人真正会看的地方。
+    _n_fb = sum(1 for p in positions
+                if str(p.get("sizing", "")).startswith("tier_fallback"))
+    _fallback_txt = (f'⚠️ 今日 {_n_fb}/{len(positions)} 仓退回分档（无可用 σ₂₀，'
+                     f'按置信档位定仓）<br>' if _n_fb else '')
 
     # 持仓表格
     pos_rows = ""
@@ -1314,6 +1357,7 @@ def render_portfolio_card() -> str:
         # 规则说明
         '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border2);'
         'font-size:10px;color:var(--text3);line-height:1.6;">'
+        f'{_fallback_txt}'
         f'⚙️ 规则：{_sizing_rule_text()} · '
         f'−{CONFIG["sl_pct"]}% SL / +{CONFIG["tp_pct"]}% TP / T+{CONFIG["time_stop_days"]} 强平 · '
         f'最大并行 {CONFIG["max_positions"]} 仓位 · 最大部署 {CONFIG["max_deployed_pct"]}% NAV<br>'

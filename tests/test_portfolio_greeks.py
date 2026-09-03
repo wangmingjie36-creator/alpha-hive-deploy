@@ -3,6 +3,7 @@
 
 import json
 import math
+import re
 
 import pytest
 
@@ -515,3 +516,195 @@ class TestReportAndCli:
         out = json.loads(capsys.readouterr().out)
         assert out["recommendation"]["action"] == "sell_spy" and out["executed"] is False
         assert not pg.STATE_DIR.exists() or not any(pg.STATE_DIR.iterdir())
+
+
+# ── 二次复查回归 ────────────────────────────────────────────────────
+# 每条都对着一个「跑得通、看着对、结论错」的具体状态，先证明它在修之前是红的。
+
+class TestNotStartedVsDataLoss:
+    """`not_started` 只能由「净值文件与持仓文件双双为空」证明。只看净值文件的话，
+    「跨式腿从未开张」与「净值文件被删/状态目录指错」输出逐字节相同。"""
+
+    def test_not_started_needs_both_files_empty(self, state):
+        _jsonl(pp.EQUITY_FILE, [{"date": AS_OF, "nav": 50_000.0}])
+        closes = _closes({"SPY": SPY})
+        d0 = pg.combined_nav_detail(AS_OF, closes)                      # ① 真的从未启动
+        assert d0["not_started"] == ["straddle_leg"] and d0["nav"] == 50_000.0
+        _jsonl(opl.POSITIONS_FILE, [_straddle("long", 1)])              # ② 有持仓、没净值文件
+        d1 = pg.combined_nav_detail(AS_OF, closes)
+        assert d1["nav"] is None and d1["missing"] == ["straddle_leg"] and d1["not_started"] == []
+        _jsonl(opl.EQUITY_FILE, [{"date": AS_OF, "nav": 98_000.0}])     # ③ 真持有 $98,000 后净值文件被删
+        assert pg.combined_nav_detail(AS_OF, closes)["nav"] == 148_000.0
+        opl.EQUITY_FILE.unlink()
+        d3 = pg.combined_nav_detail(AS_OF, closes)
+        assert d3["nav"] is None and d3["missing"] == ["straddle_leg"]
+        assert d3 != d0                                                 # 与「从未启动」不得同形
+
+    def test_straddle_positions_without_equity_file_never_hedges(self, state):
+        """分子有跨式腿的 Greeks、分母把它记成 0 → 比率被放大，而且是要成交的。"""
+        _jsonl(pp.EQUITY_FILE, [{"date": AS_OF, "nav": 100_000.0}])
+        _jsonl(pp.POSITIONS_FILE, [_stock("AAA", "bullish", 600.0)])    # $60,000 名义
+        _jsonl(opl.POSITIONS_FILE, [_straddle("long", 2)])
+        assert not opl.EQUITY_FILE.exists()
+        table = {CALL: _bs_quote(100.0, 100.0, 29, 0.4, "call"), PUT: _bs_quote(100.0, 100.0, 29, 0.4, "put")}
+        r = pg.run_for_date(AS_OF, closes_fn=_closes({"AAA": 100.0, "XYZ": 100.0, "SPY": SPY}),
+                            quotes_fn=_quotes(table), beta_fn=_betas({"AAA": 1.0, "XYZ": 1.0}))
+        assert r["nav"]["nav"] is None and r["nav"]["missing"] == ["straddle_leg"] and r["nav"]["not_started"] == []
+        assert r["aggregate"]["band_status"] == "unknown" and r["executed"] is False
+        assert not pg.TRADES_FILE.exists()
+
+
+class TestHedgeLedgerBadShares:
+    """对冲账本 shares 为 null/NaN：必须标一行残行（照 stock_exposures 的老规矩），
+    不能静默丢掉——丢掉之后 band_status 报 "empty"、n_price_missing=0，自信且错误。"""
+
+    def test_null_shares_row_is_flagged_not_dropped(self):
+        rows = pg.hedge_exposures(AS_OF, positions=[{"ticker": "SPY", "shares": None, "avg_price": SPY}],
+                                  spy_price=SPY)
+        assert len(rows) == 1
+        assert rows[0]["qty"] is None and rows[0]["price_missing"] is True
+        assert rows[0]["beta_dollar_delta"] is None
+        agg = pg.aggregate(rows, 200_000.0)
+        assert agg["partial"] is True and agg["band_status"] == "unknown"
+        assert agg["coverage"]["n_price_missing"] == 1
+        assert pg.hedge_recommendation(agg, SPY, 200_000.0)["action"] == "hold"
+
+    def test_nan_shares_row_is_flagged_too(self):
+        rows = pg.hedge_exposures(AS_OF, positions=[{"ticker": "SPY", "shares": float("nan")}], spy_price=SPY)
+        assert len(rows) == 1 and rows[0]["price_missing"] is True
+        _all_finite(rows)
+
+    def test_genuine_zero_share_row_is_still_skipped(self):
+        rows = pg.hedge_exposures(AS_OF, positions=[{"ticker": "SPY", "shares": 0, "avg_price": SPY}], spy_price=SPY)
+        assert rows == []                                    # 0 股是真的没有暴露，跳过是对的
+
+    def test_overlay_value_none_when_shares_unreadable(self, state):
+        _jsonl(pg.POSITIONS_FILE, [{"ticker": "SPY", "shares": None, "avg_price": SPY}])
+        pg._save_meta({"cash": 1000.0})
+        assert pg.hedge_overlay_value(AS_OF, SPY) is None    # `or 0.0` 会把它当 0 股，净值看着完好
+
+    def test_bad_hedge_row_blocks_hedging_end_to_end(self, state):
+        closes, betas, _ = _book_above(state)
+        _jsonl(pg.POSITIONS_FILE, [{"ticker": "SPY", "shares": None, "avg_price": SPY}])
+        pg._save_meta({"cash": 0.0})
+        r = pg.run_for_date(AS_OF, closes_fn=closes, quotes_fn=_quotes({}), beta_fn=betas)
+        assert r["aggregate"]["band_status"] == "unknown" and r["executed"] is False
+        assert not pg.TRADES_FILE.exists()
+
+
+class TestStressIvAxisAndExclusions:
+    S, K, IV = 100.0, 100.0, 0.40
+
+    def _cell(self, st, sp, iv):
+        return next(c for c in st["cells"] if c["spot_pct"] == sp and c["iv_pts"] == iv)
+
+    def _long_straddle_rows(self, iv=0.40, dte_expiry=EXPIRY, contracts=2):
+        pos = _straddle("long", contracts)
+        pos["expiry"] = dte_expiry
+        table = {CALL: _bs_quote(self.S, self.K, 29, iv, "call"), PUT: _bs_quote(self.S, self.K, 29, iv, "put")}
+        return pg.option_exposures(AS_OF, positions=[pos], quotes_fn=_quotes(table),
+                                   closes_fn=_closes({"XYZ": self.S}), beta_fn=_betas({"XYZ": 1.0}))
+
+    def test_iv_column_unit_is_vol_points(self):
+        """IV 轴的单位闸：`+10pt` 格必须按 σ=0.50 定价（0.40 + 10/100），不是 σ=10.40。
+        把 `ivp / 100.0` 写成 `ivp` 的变异在这里必须死——29 DTE ATM 认购 σ 0.40→10.40，
+        每股 $3.6 变 $86，200 股 qty 上是万元级差别，而 37 条老测试一条都不红。
+        期望值当场用 greeks_engine.bs_price 手算，不抄常数。"""
+        rows = self._long_straddle_rows()
+        st = pg.stress_table(rows)
+        T = 29 / 365.0
+        r = pg.CONFIG["risk_free"]
+        expect = 0.0
+        for cp in ("call", "put"):
+            mid = bs_price(self.S, self.K, T, r, self.IV, cp)
+            expect += 200 * (bs_price(self.S, self.K, T, r, self.IV + 0.10, cp) - mid)
+        got = self._cell(st, 0, 10)["pnl"]
+        assert got == pytest.approx(expect, abs=0.02)
+        # 变异体（σ=10.40）的量级：每股 $80+ → 200 股上 $16,000+。这条把门槛钉死。
+        assert 0 < got < 500, got
+
+    def test_iv_shock_clamped_below_zero_is_flagged(self, state):
+        """8% IV 的合约吃不下 −10pt：地板托住之后实际只施加了 −7.99pt，
+        格子却还挂着 `-10pt` 的标签。截断必须标出来。"""
+        _seed_navs(state)
+        _jsonl(opl.POSITIONS_FILE, [_straddle("long", 1)])
+        table = {CALL: _bs_quote(100.0, 100.0, 29, 0.08, "call"), PUT: _bs_quote(100.0, 100.0, 29, 0.08, "put")}
+        res = pg.run_for_date(AS_OF, closes_fn=_closes({"XYZ": 100.0, "SPY": SPY}), quotes_fn=_quotes(table),
+                              beta_fn=_betas({"XYZ": 1.0}), execute=False)
+        st = res["stress"]
+        cell = self._cell(st, 0, -10)
+        assert cell["iv_clamped"] is True
+        assert cell["iv_pts_effective"] == pytest.approx(-7.99, abs=0.01)
+        assert cell["n_iv_clamped"] == 2                       # 两条腿都被截
+        assert self._cell(st, 0, 10)["iv_clamped"] is False
+        assert st["n_iv_clamped_cells"] == len(pg.CONFIG["stress_spot_pct"])   # 整列 −10pt
+        md = pg.render_markdown(AS_OF, result=res)
+        assert "IV 轴截断" in md
+        assert re.search(r"[-+][\d,]+\*", md), md              # 网格里那些格带 `*`
+
+    def test_expired_contract_excluded_not_repriced(self):
+        """dte<=0 的合约原来按 T=1/365 重新定价——凭空发明时间价值，不剔除也不标记。"""
+        rows = self._long_straddle_rows(dte_expiry="2026-08-29")     # AS_OF 之前 5 天
+        assert all(r["dte"] == -5 for r in rows)
+        st = pg.stress_table(rows)
+        assert st["n_used"] == 0 and st["partial"] is True
+        assert len(st["excluded"]) == 2 and all("expired" in e for e in st["excluded"])
+        assert all(c["pnl"] == 0.0 for c in st["cells"])
+        assert st["bs_vs_mid_gap"] == []
+
+    def test_worst_cell_carries_excluded_exposure(self, state):
+        """两行股票：$1,000,000 无 β（剔除）+ $10,000 β=1.0。最差格 −$1,000，
+        比真实的 −$101,000 温和 100 倍；那个数字旁边必须写清楚少算了多少。"""
+        _seed_navs(state)
+        _jsonl(pp.POSITIONS_FILE, [_stock("AAA", "bullish", 100.0), _stock("BBB", "bullish", 10_000.0)])
+        res = pg.run_for_date(AS_OF, closes_fn=_closes({"AAA": 100.0, "BBB": 100.0, "SPY": SPY}),
+                              quotes_fn=_quotes({}), beta_fn=_betas({"AAA": 1.0}), execute=False)
+        st = res["stress"]
+        assert st["partial"] is True and st["worst_cell"]["pnl"] == pytest.approx(-1000.0)
+        assert st["worst_cell"]["excluded_dollar_delta"] == pytest.approx(1_000_000.0)
+        assert st["excluded_dollar_delta"] == pytest.approx(1_000_000.0)
+        md = pg.render_markdown(AS_OF, result=res)
+        line = next(l for l in md.splitlines() if l.startswith("最差格"))
+        assert "网格不完整，已排除" in line and "$1,000,000" in line     # 与金额同一行，不许另起一行
+
+
+class TestBetaCacheFreshness:
+    """磁盘 β 缓存省不下任何网络调用（日线早被 _default_close 拉进 _BARS_CACHE 了），
+    只省几十次乘加，代价是可能端上 4 个交易日前的 β。所以：日线在手就重算。"""
+
+    def _seed_cache(self, beta=9.99, as_of="2026-09-02"):
+        pg.BETA_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        pg.BETA_CACHE_FILE.write_text(json.dumps({"AAA": {"as_of": as_of, "beta": beta, "n": 60}}),
+                                      encoding="utf-8")
+
+    def test_fresh_bars_beat_stale_cache(self, state):
+        stock, bench = TestBeta()._bars(90, slope=1.3)
+        pg._BARS_CACHE[("AAA", AS_OF)] = stock          # 日线已在进程内 = 重算零网络调用
+        pg._BARS_CACHE[("SPY", AS_OF)] = bench
+        self._seed_cache(beta=9.99, as_of="2026-09-02")  # 1 个交易日前，按老逻辑仍在有效期内
+        b, src = pg._default_beta("AAA", AS_OF)
+        assert src == "ols60" and b == pytest.approx(1.3, abs=1e-4)
+
+    def test_cache_still_covers_bars_outage(self, state):
+        stock, bench = TestBeta()._bars(10, slope=1.3)   # 只有 10 根，OLS 60 算不出来
+        pg._BARS_CACHE[("AAA", AS_OF)] = stock
+        pg._BARS_CACHE[("SPY", AS_OF)] = bench
+        self._seed_cache(beta=1.11, as_of="2026-09-02")
+        assert pg._default_beta("AAA", AS_OF) == (1.11, "cache")   # 兜底还在
+
+
+class TestSharedBarsAccessor:
+    """daily_bars：本模块对外的取 K 线入口，同一 (ticker, as_of) 只取一次。"""
+
+    def test_daily_bars_fetches_once_for_all_consumers(self, state, monkeypatch):
+        calls = []
+
+        def fake(t, d):
+            calls.append((t, d))
+            return [{"date": d, "close": 12.5}]
+
+        monkeypatch.setattr(pg, "_fetch_bars_uncached", fake)
+        assert pg.daily_bars("AAA", AS_OF) == [{"date": AS_OF, "close": 12.5}]
+        assert pg.daily_bars("AAA", AS_OF) is pg._BARS_CACHE[("AAA", AS_OF)]
+        assert pg._default_close("AAA", AS_OF) == 12.5          # 收盘价走的是同一份缓存
+        assert calls == [("AAA", AS_OF)]                        # 一次取数供所有消费者

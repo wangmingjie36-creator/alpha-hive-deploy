@@ -45,7 +45,12 @@ CBOE Greeks 单位（2026-09-03 用 NVDA 实盘报价对 greeks_engine 校核，
 - 价格/报价/β 缺一行就少一行，`coverage` 里逐项计数；所有数值过 `_num()`（`bool(nan) is True`，
   真值判断挡不住 NaN），落盘前再 `_scrub()` 一遍。
 - 合并 NAV 三个分量（股票账 / 跨式账 / SPY 覆盖）任一缺失 → None 并说出缺哪个。
-- 压力网格里 β 缺失的行**剔除**并把该格标 `partial`，不用 1.0 顶上。
+- 压力网格里 β 缺失的行**剔除**并把该格标 `partial`，不用 1.0 顶上；剔除行的毛 |$Delta|
+  记在 `excluded_dollar_delta` 并挂到 `worst_cell` 上——最差格那个数字会被单独引用，
+  必须自带「少算了多少」。已到期（dte<=0）的合约同样剔除，不按 T=1/365 冒充活合约。
+- IV 轴被 0 地板托住的格标 `iv_clamped` + 实际施加的 `iv_pts_effective`（8% IV 的票吃不下 −10pt）。
+- 「从未启动」必须由净值文件与持仓文件**双双为空**证明；有持仓没净值行 = 数据缺失 → None。
+- 账本里 shares 为 null/NaN 的行标成残行、不丢弃——丢掉之后 band_status 会报 "empty"。
 
 没做的事（已知局限）
 --------------------
@@ -222,20 +227,18 @@ def _save_meta(meta: Dict) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _BARS_CACHE: Dict[Tuple[str, str], Optional[List[dict]]] = {}
+_BARS_WINDOW = 100               # 每次取多少根日线（β 只要 61 根，留余量给节假日）
 
 
-def _default_bars(ticker: str, as_of: str) -> Optional[List[dict]]:
-    """截至 as_of（含）的日线 `[{date, close}]` 升序。同一进程内按 (ticker, as_of) 记忆——
-    收盘价与 β 共用同一次 Twelve Data 调用（30 只票 + SPY ≈ 31 次/天，预算 800）。
-    Twelve Data 未配置/拿不到 → 本地价格索引（快照价，口径略不同，日志里说）。"""
-    key = (ticker, as_of)
-    if key in _BARS_CACHE:
-        return _BARS_CACHE[key]
+def _fetch_bars_uncached(ticker: str, as_of: str) -> Optional[List[dict]]:
+    """真去取数的那一层（Twelve Data → 本地价格索引），**不碰缓存**。
+    单独拆出来，是为了让「同一 (ticker, as_of) 只取一次」这件事能被测试直接数到——
+    否则缓存命中与否只能靠计时猜，而本项目的教训是「看着成功其实早废了」。"""
     rows: Optional[List[dict]] = None
     try:
         import twelve_data
         if twelve_data.is_configured():
-            rows = twelve_data._fetch_rows(ticker, 100, end_date=as_of)
+            rows = twelve_data._fetch_rows(ticker, _BARS_WINDOW, end_date=as_of)
     except Exception as exc:  # noqa: BLE001
         _log.warning("[%s] Twelve Data 取 K 线失败: %s", ticker, exc)
         rows = None
@@ -255,8 +258,36 @@ def _default_bars(ticker: str, as_of: str) -> Optional[List[dict]]:
         if d and c is not None and d <= as_of:
             clean.append({"date": d, "close": c})
     clean.sort(key=lambda b: b["date"])
-    _BARS_CACHE[key] = clean or None
+    return clean or None
+
+
+def daily_bars(ticker: str, as_of: str) -> Optional[List[dict]]:
+    """截至 as_of（含）的日线 `[{date, close}]` 升序，进程内按 (ticker, as_of) 记忆一次。
+    **本模块对外的取 K 线入口**（二次复查新增）：收盘价与 β 共用同一次 Twelve Data 调用
+    （30 只票 + SPY ≈ 31 次/天，预算 800，且 Twelve Data 是串行 7 次/分钟）。
+    Twelve Data 未配置/拿不到 → 本地价格索引（快照价，口径略不同，日志里说）。
+
+    还没接进来的两处（**本次不改它们**，那两个文件不归本改动管；来改的 session 直接调本函数）：
+        vrp_signal.py:342           twelve_data._fetch_rows(ticker, 120)
+        options_paper_leg.py:303    twelve_data._fetch_rows(ticker, 10, end_date=as_of)
+    同一只票的日线因此一次扫描最多被取 3 遍。接入前提是窗口谈拢：本函数取 `_BARS_WINDOW`
+    (=100) 根，vrp_signal 要 120 根——谁先接谁把这个常数提到 120（多取 20 根不多花调用，
+    同一次 API 的 outputsize 而已）；options_paper_leg 只要 10 根，100 根是超集，可直接用。"""
+    key = (ticker, as_of)
+    if key in _BARS_CACHE:
+        return _BARS_CACHE[key]
+    _BARS_CACHE[key] = _fetch_bars_uncached(ticker, as_of)
     return _BARS_CACHE[key]
+
+
+def _default_bars(ticker: str, as_of: str) -> Optional[List[dict]]:
+    """内部别名 = daily_bars（测试注入的挂钩点，历史名字，别删）。"""
+    return daily_bars(ticker, as_of)
+
+
+def _bars_in_memory(ticker: str, as_of: str) -> bool:
+    """这只票与基准的日线是否**已经在本进程缓存里**（即：重算 β 不需要任何网络调用）。"""
+    return bool(_BARS_CACHE.get((ticker, as_of))) and bool(_BARS_CACHE.get((CONFIG["hedge_instrument"], as_of)))
 
 
 def _default_close(ticker: str, as_of: str) -> Optional[float]:
@@ -305,29 +336,47 @@ def _read_beta_cache() -> Dict:
     return {}
 
 
+def _fresh_cached_beta(ticker: str, as_of: str) -> Optional[float]:
+    """磁盘缓存里对 as_of 仍然有效的 β：计算日在 (as_of − 5 个交易日, as_of] 内。
+    计算日晚于 as_of（补跑历史）一律不用——那是未来数据。"""
+    ent = _read_beta_cache().get(ticker)
+    if not isinstance(ent, dict):
+        return None
+    wd = _weekdays_between(str(ent.get("as_of") or ""), as_of)
+    b = _num(ent.get("beta"))
+    if b is not None and wd is not None and 0 <= wd < CONFIG["beta_cache_trading_days"]:
+        return b
+    return None
+
+
 def _default_beta(ticker: str, as_of: str) -> Tuple[Optional[float], Optional[str]]:
     """60 日 OLS β 对 SPY。返回 (beta, source)，source ∈ {"ols60", "cache", None}。
-    缓存 hedge_state/beta_cache.json 按 (ticker, 计算日) 存，as_of 之后 5 个交易日内复用；
-    缓存日期在 as_of 之后（补跑历史）不用——那是未来数据。算不出 → (None, None)。"""
+    算不出 → (None, None)。
+
+    磁盘缓存只在**日线拿不到时**兜底，不再抢在重算前面（二次复查修正）：走到这里时
+    _default_close 早已把同一 (ticker, as_of) 的日线放进 _BARS_CACHE，OLS 不过是 60 次
+    乘加——用缓存**一次网络调用都省不下**，却可能端上 4 个交易日前的 β。省错东西了。
+    所以：日线已在内存 → 一律重算；日线取不到（限流/断网）→ 才退回缓存并标 source="cache"。"""
     if ticker == CONFIG["hedge_instrument"]:
         return 1.0, "benchmark"
-    cache = _read_beta_cache()
-    ent = cache.get(ticker)
-    if isinstance(ent, dict):
-        wd = _weekdays_between(str(ent.get("as_of") or ""), as_of)
-        b = _num(ent.get("beta"))
-        if b is not None and wd is not None and 0 <= wd < CONFIG["beta_cache_trading_days"]:
+    if not _bars_in_memory(ticker, as_of):
+        b = _fresh_cached_beta(ticker, as_of)
+        if b is not None:
             return b, "cache"
     stock = _default_bars(ticker, as_of)
     bench = _default_bars(CONFIG["hedge_instrument"], as_of)
-    if not stock or not bench:
-        return None, None
-    res = _ols_beta(stock, bench, as_of, CONFIG["beta_window"])
+    res = _ols_beta(stock, bench, as_of, CONFIG["beta_window"]) if (stock and bench) else None
     if res is None:
-        _log.warning("[%s] β 不可得：与 SPY 对齐的日线不足 %d 根", ticker, CONFIG["beta_window"] + 1)
+        b = _fresh_cached_beta(ticker, as_of)
+        if b is not None:
+            _log.warning("[%s] 日线不可得/不足，退回 %d 个交易日内的缓存 β", ticker, CONFIG["beta_cache_trading_days"])
+            return b, "cache"
+        if stock and bench:
+            _log.warning("[%s] β 不可得：与 SPY 对齐的日线不足 %d 根", ticker, CONFIG["beta_window"] + 1)
         return None, None
     beta, n = res
     beta = round(beta, 4)
+    cache = _read_beta_cache()          # 写回时才读盘：缓存的用途已只剩「日线断供时的兜底」
     cache[ticker] = {"as_of": as_of, "beta": beta, "n": n, "computed_at": as_of}
     try:
         _atomic_write_text(BETA_CACHE_FILE, json.dumps(_scrub(cache), ensure_ascii=False, indent=1))
@@ -488,8 +537,22 @@ def hedge_exposures(as_of: str, closes_fn: Optional[Callable[[str, str], Optiona
         row.update({"gamma_dollar_per_1pct": 0.0, "vega_dollar_per_pt": 0.0, "theta_dollar_per_day": 0.0,
                     "beta": 1.0, "beta_source": "benchmark", "avg_price": _num(p.get("avg_price"))})
         shares = _num(p.get("shares"))
-        if shares is None or shares == 0:
+        if shares is None:
+            # shares 是 null/NaN（_scrub 落盘时把 NaN 写成 null，坏行会原样读回来）：
+            # 这行的 $ 暴露**未知**，不是 0。原来 `continue` 把它和「已平掉的 0 股行」
+            # 一起丢掉，结果 hedge_exposures 返回空表、band_status 报 "empty"、
+            # n_price_missing=0——自信且错误。照 stock_exposures 的老规矩标一行残行
+            # （那边 :385 一直是这么处理的），让 β·$Delta 缺一项 → unknown → 不对冲。
+            # 标 price_missing 而不是新造一个 shares_missing：口径与股票行一致，
+            # 覆盖率计数与 hedge_recommendation 的 reason 都不用改就能说出「缺了东西」。
+            _log.warning("[PortfolioGreeks] 对冲账本仓位 shares 非有限（%r），按缺数据处理不跳过", p.get("shares"))
+            row["price_missing"] = True
+            row["beta_missing"] = True
+            row["beta"] = row["beta_source"] = None
+            rows.append(row)
             continue
+        if shares == 0:
+            continue                      # 真实的 0 股（平仓留痕）：跳过是对的，它确实没有暴露
         row["qty"] = shares
         px = _pos(spy_price)
         if px is None:
@@ -568,13 +631,32 @@ def _latest_nav(path: Path, as_of: str) -> Optional[float]:
     return best[1] if best else None
 
 
+def _book_never_started(equity_file, positions_file) -> bool:
+    """这本账**从未启动**：净值文件与持仓文件都不存在，或存在但一条可解析记录都没有。
+    两个都要看——单看净值文件的话，「文件被删」与「从未开张」输出完全一样。"""
+    for f in (equity_file, positions_file):
+        try:
+            if Path(f).exists() and _load_jsonl(Path(f)):
+                return False
+        except OSError as exc:
+            _log.warning("[PortfolioGreeks] %s 不可读，不敢当作「从未启动」: %s", f, exc)
+            return False
+    return True
+
+
 def hedge_overlay_value(as_of: str, spy_price: Optional[float]) -> Optional[float]:
     """覆盖账本净值 = cash + shares × SPY 价。没开过仓 → 0.0；有仓但没价 → None。"""
     meta = _load_meta()
     cash = _num(meta.get("cash"))
     if cash is None:
         return None
-    shares = sum(_num(p.get("shares")) or 0.0 for p in _hedge_positions())
+    raw = [_num(p.get("shares")) for p in _hedge_positions()]
+    if any(v is None for v in raw):
+        # 有一行 shares 读不出来 → 覆盖账本市值未知。`or 0.0` 会把它算成 0 股，
+        # 于是净值看着完好、合并 NAV 少一块、Greeks 分子却还在——分母被做小、比率被放大。
+        _log.error("[PortfolioGreeks] 对冲账本有 shares 非有限的仓位，覆盖账本净值不可得")
+        return None
+    shares = sum(raw)
     if shares == 0:
         return cash
     px = _pos(spy_price)
@@ -592,11 +674,15 @@ def combined_nav_detail(as_of: str, closes_fn: Optional[Callable[[str, str], Opt
         "stock_book": _latest_nav(pp.EQUITY_FILE, as_of),
         "straddle_leg": _latest_nav(opl.EQUITY_FILE, as_of),
     }
-    # 跨式腿**从未启动**（连净值文件都没有）≠ 「今天缺一行」。前者是合法的零状态：
-    # 没有期权仓，对合并 NAV 与 Greeks 的贡献确实是 0，按 0 计并标注 not_started，
-    # 否则对冲在腿建账之前永远 unknown。文件存在但缺行仍然是 None——那是数据缺失。
+    # 跨式腿**从未启动** ≠ 「今天缺一行」。前者是合法的零状态：没有期权仓，对合并 NAV
+    # 与 Greeks 的贡献确实是 0，按 0 计并标注 not_started，否则对冲在腿建账之前永远 unknown。
+    # 但「从未启动」要由**净值文件与持仓文件双双空**来证明，只看净值文件不够（二次复查修正）：
+    #   ① 净值文件被删/状态目录指错 → 输出与「从未启动」逐字节相同，$98,000 的账凭空消失；
+    #   ② 更糟的是持仓还在、净值文件没了：这些仓的 Greeks 进了分子、NAV 却按 0 进分母，
+    #      partial=False、band_status="above"，照样下单——分母被做小的比率是要成交的。
+    # 有持仓却没净值行，那是数据缺失，只能 None 并点名。
     not_started: List[str] = []
-    if comps["straddle_leg"] is None and not Path(opl.EQUITY_FILE).exists():
+    if comps["straddle_leg"] is None and _book_never_started(opl.EQUITY_FILE, opl.POSITIONS_FILE):
         comps["straddle_leg"] = 0.0
         not_started.append("straddle_leg")
     if spy_price is None:
@@ -680,10 +766,14 @@ def hedge_recommendation(agg: Dict, spy_price: Optional[float], nav: Optional[fl
 def stress_table(rows: List[Dict], spy_price: Optional[float] = None) -> Dict:
     """网格 stress_spot_pct × stress_iv_pts → 组合 P&L。
         股票：dollar_delta × β × shock            （β 缺 → 剔除，该格 partial）
-        期权：qty × [BS(S·(1+β·shock), K, T, r, iv + pts/100) − mid]，T=dte/365（下限 1/365）
+        期权：qty × [BS(S·(1+β·shock), K, T, r, iv + pts/100) − mid]，T=dte/365
         SPY：dollar_delta × shock
-    (0,0) 格股票恒为 0；期权在 (0,0) 是 BS 价 − mid 的模型基差，逐合约列在 bs_vs_mid_gap。"""
+    (0,0) 格股票恒为 0；期权在 (0,0) 是 BS 价 − mid 的模型基差，逐合约列在 bs_vs_mid_gap。
+    剔除的行进 `excluded`，其毛 |$Delta| 进 `excluded_dollar_delta`（也挂到 worst_cell 上）；
+    IV 轴被 0 地板托住的格标 `iv_clamped` + 实际施加的 `iv_pts_effective`。
+    已到期（dte<=0）的合约剔除，不重定价——理由写在下面剔除处。"""
     from greeks_engine import bs_price
+    IV_FLOOR = 0.0001
     spots = list(CONFIG["stress_spot_pct"])
     ivs = list(CONFIG["stress_iv_pts"])
     r = CONFIG["risk_free"]
@@ -691,6 +781,20 @@ def stress_table(rows: List[Dict], spy_price: Optional[float] = None) -> Dict:
     gaps: List[Dict] = []
     excluded: List[str] = []
     usable: List[Tuple[str, Dict]] = []
+    excl_dd = 0.0            # 被剔除行的 |$Delta| 合计（**毛额**：正负互抵会把规模抹平）
+    excl_dd_unknown = 0      # 连 $Delta 都算不出来的剔除行数（缺价/缺报价）
+
+    def _exclude(row: Dict, label: str) -> None:
+        """剔一行的同时把它的规模记下来。只记 label 的话，worst_cell 里那个温和的数字
+        就没人对得上账了——$100 万无 β 的股票被剔掉后，最差格能小 100 倍。"""
+        nonlocal excl_dd, excl_dd_unknown
+        excluded.append(label)
+        dd = _num(row.get("dollar_delta"))
+        if dd is None:
+            excl_dd_unknown += 1
+        else:
+            excl_dd += abs(dd)
+
     for row in rows:
         kind = row.get("kind")
         if kind == "hedge":
@@ -698,32 +802,44 @@ def stress_table(rows: List[Dict], spy_price: Optional[float] = None) -> Dict:
             if dd is None:
                 dd = (_num(row.get("qty")) or 0.0) * (_pos(spy_price) or 0.0) if _pos(spy_price) else None
             if dd is None:
-                excluded.append(f"{row.get('ticker')}(hedge:no price)")
+                _exclude(row, f"{row.get('ticker')}(hedge:no price)")
                 continue
             usable.append(("hedge", {"dd": dd}))
         elif kind == "stock":
             dd, beta = _num(row.get("dollar_delta")), _num(row.get("beta"))
             if dd is None or beta is None:
-                excluded.append(f"{row.get('ticker')}(stock:{'no price' if dd is None else 'no beta'})")
+                _exclude(row, f"{row.get('ticker')}(stock:{'no price' if dd is None else 'no beta'})")
                 continue
             usable.append(("stock", {"dd": dd, "beta": beta}))
         elif kind == "option":
             need = {k: _num(row.get(k)) for k in ("qty", "price", "strike", "iv", "mid", "beta")}
-            dte = row.get("dte")
+            dte = _num(row.get("dte"))     # 过 _num：NaN 的 dte 躲得过 `is None`，却会让 int() 直接崩
             if any(v is None for v in need.values()) or dte is None or row.get("cp") not in ("call", "put"):
                 miss = [k for k, v in need.items() if v is None] + (["dte"] if dte is None else [])
-                excluded.append(f"{row.get('symbol') or row.get('ticker')}(option:{','.join(miss)})")
+                _exclude(row, f"{row.get('symbol') or row.get('ticker')}(option:{','.join(miss) or 'cp'})")
                 continue
-            T = max(int(dte), 1) / 365.0
+            if dte <= 0:
+                # 已到期的合约剔除，**不**重新定价。原来 T=max(int(dte),1)/365 会把一张
+                # 过期 5 天的合约当成「还剩 1 天」的活合约报价，凭空发明时间价值，
+                # 且不剔除、不标记——网格看着完整。
+                # 为什么是剔除而不是按内在价值 max(S−K,0)·qty 重估：过期腿的真实结果
+                # 取决于结算与平仓约定（有没有被行权、跨式腿账本何时把它移出持仓），
+                # 那是 options_paper_leg 的信息，本模块既不管也拿不到；在这里编一个
+                # 内在价值只是用一个猜测换另一个猜测，而且更像真的。剔除会让整张网格
+                # partial、行名进 excluded、规模进 excluded_dollar_delta——大声说不知道。
+                _exclude(row, f"{row.get('symbol') or row.get('ticker')}(option:expired {int(dte)}d)")
+                continue
+            T = int(dte) / 365.0
             base_bs = bs_price(need["price"], need["strike"], T, r, need["iv"], row["cp"])
             gaps.append({"symbol": row.get("symbol"), "bs": round(base_bs, 4), "mid": need["mid"],
-                         "gap": round(base_bs - need["mid"], 4), "T_days": max(int(dte), 1)})
+                         "gap": round(base_bs - need["mid"], 4), "T_days": int(dte)})
             usable.append(("option", {**need, "T": T, "cp": row["cp"]}))
     partial = bool(excluded)
     worst = None
     for sp in spots:
         for ivp in ivs:
             pnl = 0.0
+            clamped: List[float] = []
             for kind, u in usable:
                 shock = sp / 100.0
                 if kind == "hedge":
@@ -732,16 +848,34 @@ def stress_table(rows: List[Dict], spy_price: Optional[float] = None) -> Dict:
                     pnl += u["dd"] * u["beta"] * shock
                 else:
                     S1 = u["price"] * (1.0 + u["beta"] * shock)
-                    iv1 = max(u["iv"] + ivp / 100.0, 0.0001)
+                    iv_shocked = u["iv"] + ivp / 100.0      # ivp 是 vol 点：−10pt = IV −0.10
+                    iv1 = max(iv_shocked, IV_FLOOR)
+                    if iv1 > iv_shocked:
+                        # 地板托住了：这张合约实际吃到的冲击比列标签小（IV 8% 的票吃不下
+                        # −10pt）。原来这里静默截断，格子照样标 −10pt——标签在说谎。
+                        clamped.append(round((iv1 - u["iv"]) * 100.0, 4))
                     pnl += u["qty"] * (bs_price(S1, u["strike"], u["T"], r, iv1, u["cp"]) - u["mid"])
-            cell = {"spot_pct": sp, "iv_pts": ivp, "pnl": round(pnl, 2), "partial": partial}
+            cell = {"spot_pct": sp, "iv_pts": ivp, "pnl": round(pnl, 2), "partial": partial,
+                    "iv_clamped": bool(clamped)}
+            if clamped:
+                cell["iv_pts_effective"] = min(clamped, key=abs)   # 截得最狠的那张（|冲击| 最小）
+                cell["n_iv_clamped"] = len(clamped)
             cells.append(cell)
             if worst is None or pnl < worst["pnl"]:
                 worst = dict(cell)
     zero = next((c["pnl"] for c in cells if c["spot_pct"] == 0 and c["iv_pts"] == 0), None)
-    return {"spot_pct": spots, "iv_pts": ivs, "cells": cells, "worst_cell": worst,
-            "pnl_at_zero": zero, "bs_vs_mid_gap": gaps, "n_used": len(usable),
-            "excluded": excluded, "partial": partial}
+    out = {"spot_pct": spots, "iv_pts": ivs, "cells": cells, "worst_cell": worst,
+           "pnl_at_zero": zero, "bs_vs_mid_gap": gaps, "n_used": len(usable),
+           "excluded": excluded, "partial": partial,
+           "excluded_dollar_delta": round(excl_dd, 2), "excluded_dd_unknown": excl_dd_unknown,
+           "n_iv_clamped_cells": sum(1 for c in cells if c.get("iv_clamped"))}
+    if worst is not None and partial:
+        # 最差格那个金额会被单独引用（日报里就是一行字），所以把「它少算了多少敞口」
+        # 贴在它自己身上，而不是指望读者去翻 excluded 列表。
+        worst["excluded_dollar_delta"] = round(excl_dd, 2)
+        worst["excluded_rows"] = len(excluded)
+        worst["excluded_dd_unknown"] = excl_dd_unknown
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -995,15 +1129,34 @@ def render_markdown(as_of: str, result: Optional[Dict] = None) -> str:
         L += ["", "**压力网格**（行：β 调整后现货冲击；列：IV 平移 vol 点；单位 $）", "",
               "| spot \\ IV | " + " | ".join(f"{v:+d}pt" for v in ivs) + " |",
               "|---|" + "---|" * len(ivs)]
-        by = {(c["spot_pct"], c["iv_pts"]): c["pnl"] for c in stress["cells"]}
+        by = {(c["spot_pct"], c["iv_pts"]): c for c in stress["cells"]}
         for sp in spots:
-            L.append(f"| {sp:+d}% | " + " | ".join(f"{_num(by.get((sp, iv))) or 0:+,.0f}" for iv in ivs) + " |")
+            vals = []
+            for iv in ivs:
+                c = by.get((sp, iv)) or {}
+                # `*` = 这一格的 IV 冲击被 0 地板截断了，实际没打满标签上的点数
+                vals.append(f"{_num(c.get('pnl')) or 0:+,.0f}" + ("*" if c.get("iv_clamped") else ""))
+            L.append(f"| {sp:+d}% | " + " | ".join(vals) + " |")
         w = stress.get("worst_cell") or {}
         L.append("")
-        L.append(f"最差格：现货 {w.get('spot_pct', 0):+d}% / IV {w.get('iv_pts', 0):+d}pt → {_fmt_usd(w.get('pnl'))}"
-                 + (f"（{_num(w.get('pnl')) / nav * 100:+.2f}% NAV）" if (nav and _num(w.get('pnl')) is not None) else "")
-                 + (f"；剔除 {len(stress.get('excluded') or [])} 行（{', '.join(stress['excluded'][:4])}）→ **网格不完整**"
-                    if stress.get("partial") else ""))
+        # 「网格不完整，已排除 $X 敞口」必须**紧贴**最差格那个金额：读者带走的是那个数字，
+        # 不是下一行的免责声明（二次复查：$100 万无 β 的行被剔掉后，最差格温和了 100 倍）。
+        worst_line = (f"最差格：现货 {w.get('spot_pct', 0):+d}% / IV {w.get('iv_pts', 0):+d}pt → {_fmt_usd(w.get('pnl'))}"
+                      + (f"（{_num(w.get('pnl')) / nav * 100:+.2f}% NAV）" if (nav and _num(w.get('pnl')) is not None) else ""))
+        if stress.get("partial"):
+            exd = _num(w.get("excluded_dollar_delta"))
+            unk = int(w.get("excluded_dd_unknown") or 0)
+            worst_line += ("　⚠️ **网格不完整，已排除 " + (f"${exd:,.0f}" if exd is not None else "未知规模")
+                           + (f" + {unk} 行规模未知" if unk else "") + " 敞口，真实最差比这个数字更差**"
+                           + f"；剔除 {len(stress.get('excluded') or [])} 行（{', '.join(stress['excluded'][:4])}）")
+        L.append(worst_line)
+        if stress.get("n_iv_clamped_cells"):
+            cl = [c for c in stress["cells"] if c.get("iv_clamped")]
+            L.append(f"⚠️ IV 轴截断（表中标 `*`）：{stress['n_iv_clamped_cells']} 格的标称冲击打不满"
+                     f"（合约 IV 不够减，IV 不能为负）——"
+                     + "；".join(f"{c['spot_pct']:+d}%/{c['iv_pts']:+d}pt 实际 {_num(c.get('iv_pts_effective')) or 0:+.1f}pt"
+                                 for c in cl[:4])
+                     + "。这些格施加的冲击比标签小，别按标签读。")
         if stress.get("bs_vs_mid_gap"):
             g = stress["bs_vs_mid_gap"]
             L.append(f"模型基差（BS − mid，每股）：" + "；".join(f"{x.get('symbol')} {x.get('gap'):+.2f}" for x in g[:6])

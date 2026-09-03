@@ -1212,7 +1212,8 @@ class AlphaHiveDailyReporter:
         try:
             import earnings_vol_signal as _evs
             import options_paper_leg as _opl
-            _ev_signals = _evs.scan(self.date_str)
+            _ev_signals = _evs.scan(self.date_str,
+                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results))
             _ev_settled = _evs.settle_signals(self.date_str)
             _opl_result = _opl.run_for_date(self.date_str, signals=_ev_signals)
             _log.info("期权纸面腿已更新: %s (信号 %d / 合格 %d / 回填 %d / nav=%s)",
@@ -1252,6 +1253,24 @@ class AlphaHiveDailyReporter:
                       " / 已成交" if (_pg_result or {}).get("executed") else "")
         except Exception as e:
             _log.warning("组合 Greeks 更新失败(非致命): %s", e)
+
+        # ── v0.45.104: 三个新小节必须在**这里**回填，不能在 _build_swarm_report 里拼 ──
+        # 二次复查实测：`_build_swarm_report`（run_swarm_scan 里早一行）先渲染 markdown，
+        # `_post_scan_notify`（本方法）才跑上面三个钩子。于是渲染层读到的是钩子跑之前的
+        # 状态——VRP 小节 `rows_for_date(today)` 恒空 → **返回空串，小节一天都不出现**；
+        # 期权纸面腿恒显示"扫描 0 个快照"、持仓标记停在昨天；组合 Greeks 只好退回
+        # `run_for_date(execute=False)` 把整套计算重做一遍，且渲染的是对冲成交前的状态。
+        # 这与 v0.45.57 的失效条件是同一个坑（见本方法开头 1067 行的注释），
+        # 修法也照抄那次：`report` 是可变 dict 且在 run_swarm_scan 返回后才被
+        # save_report/部署消费，所以在钩子跑完后追加即可。
+        try:
+            _extra_md = (self._options_paper_leg_markdown()
+                         + self._vrp_markdown()
+                         + self._portfolio_greeks_markdown())
+            if _extra_md:
+                report["markdown_report"] = (report.get("markdown_report") or "") + _extra_md
+        except Exception as e:
+            _log.warning("期权/VRP/Greeks 小节回填失败(非致命): %s", e)
 
         # ── T+1/T+7/T+30 实际价格回填（后台执行，不阻塞主流程）──
         try:
@@ -1671,7 +1690,7 @@ class AlphaHiveDailyReporter:
             "sector_sentiment_contagion": sector_sentiment_summary,
             "macro_context": macro_snapshot,
             "backtest_stats": backtest_stats,
-            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(_vol_tiers) + self._options_paper_leg_markdown() + self._vrp_markdown() + self._portfolio_greeks_markdown(),
+            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(_vol_tiers),
             "twitter_threads": self._generate_swarm_twitter_threads(swarm_results),
             "opportunities": [
                 {
@@ -1752,6 +1771,55 @@ class AlphaHiveDailyReporter:
             "",
         ]
         return "\n".join(lines)
+
+    @staticmethod
+    def _earnings_date_from_swarm(swarm_results: Dict):
+        """v0.45.104：财报日改从**本轮扫描已有的** ChronosBee 催化剂里取，不再重打 yfinance。
+
+        二次复查实测：`earnings_vol_signal.scan` 原先对每只通过报价预检的票各调一次
+        `EarningsWatcher.get_earnings_date`（走 `stock.calendar`），而 ChronosBee 在
+        同一轮扫描里早就取过同一个数据 —— 2026-09-02 的 `.swarm_results` 里 28/30 只
+        票带着 `type == "earnings"` 的催化剂。而 `earnings_cache/*_date.json` 的 TTL 是
+        12 小时、扫描每天跑一次，所以那 30 次调用**每天都是真打网**（实测该目录 24 个
+        文件最新停在 8/9，今天一个都没刷新）。yfinance 429 是本项目头号数据丢失原因，
+        限流后每次约 2s + 2s，白白多花约两分钟。
+
+        降级语义（区分「没有财报」与「蜂没跑出来」）：
+          · 该票有催化剂、但没有 earnings 条目 → 视野内确实没有财报 → None（零成本）
+          · 该票**完全没有**催化剂（蜂失败，9/2 是 WMT/SNOW 两只）→ **本函数自己**
+            延迟构造 `EarningsWatcher` 兜底（每天至多几次调用）
+
+        ⚠️ 兜底必须写在这里：`scan` 的 `upcoming_fn = upcoming_fn or _upcoming` 只在
+        **参数为 None** 时替换整个函数，不会因为某一只票返回 None 就回退。早先这段
+        注释写的是「由 scan 兜底」而代码做不到 —— 正是本轮复查在别处抓到的
+        「注释说的和代码做的不是一回事」。
+        """
+        _watcher_box: list = []      # 延迟构造：没有票需要兜底时一次都不建
+
+        def _fallback(ticker: str):
+            try:
+                if not _watcher_box:
+                    from earnings_watcher import EarningsWatcher
+                    _watcher_box.append(EarningsWatcher())
+                return _watcher_box[0].get_earnings_date(ticker)
+            except Exception as exc:  # noqa: BLE001 - 兜底失败按「没有财报日」处理
+                _log.warning("[%s] 财报日兜底获取失败: %s", ticker, exc)
+                return None
+
+        def _fn(ticker: str):
+            det = ((swarm_results.get(ticker) or {}).get("agent_details") or {})
+            chronos = (det.get("ChronosBeeHorizon") or {}).get("details") or {}
+            cats = chronos.get("catalysts")
+            if not cats:
+                return _fallback(ticker)     # 蜂失败 → 打一次 yfinance
+            for c in cats:
+                if c.get("type") == "earnings" and c.get("date"):
+                    return {"earnings_date": str(c["date"])[:10],
+                            # ⚠️ 与 EarningsWatcher 一样是**假定值**不是观测值
+                            "earnings_time": "AMC",
+                            "source": "chronos_bee_catalyst"}
+            return {"earnings_date": None, "source": "chronos_bee_no_earnings"}
+        return _fn
 
     def _options_paper_leg_markdown(self) -> str:
         """v0.45.101 期权纸面腿小节；任何失败返回空串，不影响日报。"""

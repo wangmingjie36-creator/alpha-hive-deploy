@@ -23,21 +23,31 @@
     risk_budget = NAV × risk_per_trade_pct / 100
     contracts   = max(1, floor(risk_budget / (premium × 100)))
     一张合约就超预算 → 跳过并记录原因（不会为了"总得开一张"突破风险预算）
-short 侧同样按 premium×100×contracts ≤ risk_budget 封顶——收到的权利金只是
+两侧都由同一个 floor 封顶（floor(budget/per_contract) 本身就保证 per_contract×n ≤
+budget，不需要额外的循环）。short 侧用权利金当上限只是因为收到的权利金是
 **保证金的代理**，卖跨式的真实风险无上界（标的跳 30% 时亏的是数倍权利金）。
 这本账用它只是为了让 long/short 两侧的名义规模可比，**不是**实盘仓位规则。
 
 盯市与出场
 ----------
 逐日用 `cboe_options.quote_contracts` 按 OCC 符号重新报价两腿：
-    两腿 quote_ok           → mark = mid 之和，mark_source="cboe_mid"，stale 计数清零
-    否则                    → 沿用 last_mark，mark_source="stale"，stale_days += 1（同日重跑不重复计）
+    两腿 quote_ok           → mark = mid 之和，mark_source="cboe_mid"，stale_days=0
+    否则                    → 沿用 last_mark，mark_source="stale"，
+                              stale_days = as_of − last_mark_date 的**真实日历天数**
 出场触发：
     as_of > earnings_date（exit_after_event） → post_event
     expiry − as_of ≤ expiry_buffer_days       → expiry_buffer
+    到期后 write_off_days_after_expiry 天仍拿不到任何价格 → written_off（核销）
 出场价：报价 ok → 镜像成交价；报价连续 stale 超过 fallback_stale_max_days（或已到期）
-→ 用标的收盘算**内在价值** |S − K|，mark_source="intrinsic"，rationale 里明标。
-取不到收盘就继续持有并告警——**绝不**编一个价把仓位关掉。
+→ 用 **min(as_of, expiry) 那天**的标的收盘算内在价值 |S − K|，mark_source="intrinsic"。
+必须取到期日（或更早）的收盘：合约到期后标的还在走，拿今天的收盘算等于让一张早就
+作废的合约继续跟涨（K=100、到期日 S=101 的真实结算是 $1，两个半月后按 S=160 会算成 $60）。
+取不到收盘就继续持有并告警——**绝不**编一个价把仓位关掉；但也不能让它永远挂着：
+到期后 `quote_contracts` 对不在链里的符号**永远**返回 None（`to_expiry ≤ 0` 是永久状态
+不是暂时状态），所以"等报价回来"是等不到的。过了核销期限仍无任何价格 → 按最后已知
+mark 平账、mark_source="written_off"、error 级告警点名——账本不能挂着一个拿入场日
+冻结价计进 NAV 的幽灵仓。stale_days 也因此必须是真实日历天数而不是运行次数计数器：
+漏跑一年的计数器只会加十来次，读出来像"才 stale 10 天"。
 
 诚实降级
 --------
@@ -80,6 +90,9 @@ CONFIG = {
     "exit_after_event": True,         # 财报过后第一个有报价的日子平仓
     "expiry_buffer_days": 2,          # 到期前 2 天强平（避开到期日 gamma 与指派）
     "fallback_stale_max_days": 3,     # 事件后报价连续 stale 超过 3 天 → 内在价值平仓
+    # 到期这么多天后仍拿不到任何价格（报价没了、到期日收盘也取不到）→ 按最后已知
+    # mark 核销。30 天足够覆盖一次长假 + 数据源短期故障；再长就是幽灵仓了。
+    "write_off_days_after_expiry": 30,
 }
 
 BASE_DIR = PATHS.home
@@ -158,8 +171,11 @@ class StraddlePosition:
     last_mark_date: str
     mark_source: str                # cboe_mid | stale | intrinsic
     rationale: str = ""
+    # stale_days = as_of − last_mark_date 的日历天数（H3a 起不再是运行次数计数器）。
+    # 一并删掉了 last_quote_date：它唯一的用途是"同日重跑不重复加 stale"，而日历
+    # 天数天然幂等，用不着它了；留着就是一个只写不读的死字段（本项目专门有这条教训），
+    # 而"上次跑到哪天"meta.last_run_date 已经记了。
     stale_days: int = 0
-    last_quote_date: Optional[str] = None
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -195,10 +211,11 @@ class ClosedStraddle:
     size_usd: float
     pnl_usd: float
     pnl_pct: float
-    exit_reason: str                # post_event | expiry_buffer | manual
-    mark_source: str                # cboe_mid | intrinsic
-    holding_days: Optional[int]
+    exit_reason: str                # post_event | expiry_buffer | written_off | manual
+    mark_source: str                # cboe_mid | intrinsic | written_off
+    holding_days: Optional[int]     # 已按 expiry 钳过：一张合约不可能被持有到它到期之后
     rationale: str = ""
+    settled_late_days: Optional[int] = None   # 平仓日晚于到期日的天数（正常为 None）
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -321,7 +338,7 @@ def _default_close(ticker: str, as_of: str) -> Optional[float]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def size_contracts(side: str, premium: Optional[float], nav: Optional[float]) -> Tuple[int, Optional[str]]:
-    """合约张数；0 张时给原因。short 侧的封顶写成显式循环（见模块说明）。"""
+    """合约张数；0 张时给原因。long/short 同一套封顶：floor(budget/per_contract)。"""
     premium = _pos(premium)
     nav = _pos(nav)
     if premium is None:
@@ -332,11 +349,11 @@ def size_contracts(side: str, premium: Optional[float], nav: Optional[float]) ->
     per_contract = premium * 100.0
     if per_contract > budget:
         return 0, f"1 contract ${per_contract:,.0f} exceeds risk budget ${budget:,.0f}"
+    # L1（v0.45.104）：这里原本还有一段 `if side == "short": while ... n -= 1` 的"封顶循环"。
+    # 上面 `per_contract > budget` 已经早退，floor(budget/per_contract) 本身就保证
+    # per_contract × n ≤ budget——循环体在 180 万次随机预算内输入里一次都没执行过。
+    # 一个永远不可能触发、却在文档里被当成承重墙介绍的守卫，删掉比留着安全。
     n = max(1, int(math.floor(budget / per_contract)))
-    if side == "short":
-        # 权利金收入 = 保证金代理：premium×100×n ≤ budget（风险本身无上界，见模块说明）
-        while n > 1 and per_contract * n > budget:
-            n -= 1
     return n, None
 
 
@@ -425,7 +442,7 @@ def _open_from_signal(sig: Dict, nav: float, as_of: str) -> Tuple[Optional[Strad
         earnings_date=sig.get("earnings_date"), signal_ratio=ratio, label=label,
         size_usd=round(premium * 100.0 * n, 2),
         last_mark=round(mark, 4), last_mark_date=as_of, mark_source="cboe_mid",
-        rationale=rationale, stale_days=0, last_quote_date=as_of,
+        rationale=rationale, stale_days=0,
     ), None
 
 
@@ -440,6 +457,17 @@ def _close(pos: StraddlePosition, exit_call: Optional[float], exit_put: Optional
     if pos.side == "short":
         pnl = -pnl
     pnl_pct = pnl / pos.size_usd * 100.0 if pos.size_usd > 0 else 0.0
+    # H2 不变式（v0.45.104，免费的一道交叉校验）：一张合约不可能被持有到超过自己的
+    # 到期日，所以 holding_days 上限就是 expiry − entry_date。多出来的天数是"账本晚了
+    # 几天才了结"，单列到 settled_late_days，不许塞进 holding_days 里冒充持有期。
+    raw_days = _days_between(pos.entry_date, as_of)
+    max_days = _days_between(pos.entry_date, pos.expiry)
+    hold, late = raw_days, None
+    if raw_days is not None and max_days is not None and raw_days > max_days:
+        hold, late = max_days, raw_days - max_days
+        _log.error("[OptionsPaperLeg] %s 平仓日 %s 比到期日 %s 晚 %d 天："
+                   "holding_days 钳到 %d，超出部分记 settled_late_days",
+                   pos.ticker, as_of, pos.expiry, late, max_days)
     rec = ClosedStraddle(
         ticker=pos.ticker, side=pos.side, entry_date=pos.entry_date, exit_date=as_of,
         expiry=pos.expiry, strike=pos.strike, call_symbol=pos.call_symbol, put_symbol=pos.put_symbol,
@@ -451,7 +479,7 @@ def _close(pos: StraddlePosition, exit_call: Optional[float], exit_put: Optional
         earnings_date=pos.earnings_date, signal_ratio=pos.signal_ratio, label=pos.label,
         size_usd=pos.size_usd, pnl_usd=round(pnl, 2), pnl_pct=round(pnl_pct, 4),
         exit_reason=reason, mark_source=mark_source,
-        holding_days=_days_between(pos.entry_date, as_of),
+        holding_days=hold, settled_late_days=late,
         rationale=(pos.rationale + (" | " + note if note else "")),
     )
     return rec, cash_delta
@@ -499,12 +527,15 @@ def run_for_date(as_of: str,
             # 重跑时报价拿不到不算 stale，否则同日重跑会把状态改掉（幂等性）。
             pass
         else:
-            if pos.last_quote_date != as_of:      # 同日重跑不重复计 stale
-                pos.stale_days += 1
+            # H3(a)（v0.45.104）：stale_days 以前是**运行次数**计数器（每跑一次 +1）。
+            # 漏跑（周末、机器没开、任务失败）不会计数，于是一个到期一年的幽灵仓
+            # 读出来是"stale 10 天"，看着像暂时性抖动。改成距最后一次成功盯市的
+            # 真实日历天数：同日重跑天然幂等，不需要再靠 last_quote_date 去重
+            # （那个字段因此也删了，见 StraddlePosition）。
+            pos.stale_days = _days_between(pos.last_mark_date, as_of) or 0
             pos.mark_source = "stale"
-            _log.warning("[OptionsPaperLeg] %s %s 两腿报价不可用（stale 第 %d 天），沿用 %s 的 mark %.4f",
+            _log.warning("[OptionsPaperLeg] %s %s 两腿报价不可用（距上次成功盯市 %d 天），沿用 %s 的 mark %.4f",
                          pos.ticker, pos.side, pos.stale_days, pos.last_mark_date, pos.last_mark)
-        pos.last_quote_date = as_of
 
         post_event = bool(CONFIG["exit_after_event"] and pos.earnings_date and as_of > pos.earnings_date)
         to_expiry = _days_between(as_of, pos.expiry)
@@ -522,16 +553,37 @@ def run_for_date(as_of: str,
         if rec is None:
             expired = to_expiry is not None and to_expiry <= 0
             if pos.stale_days > CONFIG["fallback_stale_max_days"] or expired:
+                # H2（v0.45.104）：内在价值必须用**到期日（或更早的 as_of）**那天的收盘。
+                # 以前直接用 as_of 的收盘，等于让一张早就作废的合约继续跟着标的涨：
+                # K=100、2026-10-02 到期、到期日 S=101（真实结算 $1.00/股），
+                # 12-20 才结算时 S=160 → 记成 $60.00/股，一笔 $220 的仓位凭空 +$5,780。
+                settle_date = min(as_of, pos.expiry) if pos.expiry else as_of
                 try:
-                    S = _pos(closes_fn(pos.ticker, as_of))
+                    S = _pos(closes_fn(pos.ticker, settle_date))
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("[%s] 收盘价获取失败: %s", pos.ticker, exc)
                     S = None
                 iv = intrinsic_value(pos.strike, S)
+                past_expiry = _days_between(pos.expiry, as_of) if pos.expiry else None
                 if iv is not None:
                     note = (f"INTRINSIC fallback: quotes stale {pos.stale_days}d"
-                            f"{' / expired' if expired else ''}, |S−K|=|{S}−{pos.strike}|")
+                            f"{' / expired' if expired else ''}, settle_date={settle_date}, "
+                            f"|S−K|=|{S}−{pos.strike}|")
                     rec, delta = _close(pos, None, None, iv, as_of, reason, "intrinsic", S, note)
+                elif past_expiry is not None and past_expiry > CONFIG["write_off_days_after_expiry"]:
+                    # H3(b)（v0.45.104）：到期后 cboe_options.quote_contracts 对不在链里的
+                    # 符号**永远**返回 None——`to_expiry ≤ 0` 是永久状态，不是暂时状态。
+                    # 所以"等报价回来再平"是等不到的：不核销就永远挂着，而它冻结的入场日
+                    # mark 还在 NAV 里当活价用。按最后已知 mark 平账并 error 级点名。
+                    note = (f"WRITTEN OFF: {past_expiry}d past expiry {pos.expiry}, no quote and "
+                            f"no close at/before expiry; P&L from last known mark "
+                            f"{pos.last_mark} @ {pos.last_mark_date} (NOT a traded price)")
+                    _log.error("[OptionsPaperLeg] ⚠️ 核销幽灵仓 %s %s ×%d K=%s exp=%s：到期 %d 天"
+                               "仍取不到任何价格，按最后已知 mark %.4f（%s）平账，非成交价",
+                               pos.ticker, pos.side, pos.contracts, pos.strike, pos.expiry,
+                               past_expiry, pos.last_mark, pos.last_mark_date)
+                    rec, delta = _close(pos, None, None, pos.last_mark, as_of, "written_off",
+                                        "written_off", None, note)
                 else:
                     _log.warning("[OptionsPaperLeg] %s 该平仓（%s）但既无报价也无收盘价——继续持有",
                                  pos.ticker, reason)
@@ -679,6 +731,10 @@ def compute_kpis() -> Dict:
         "by_side": {k: _kpi_block(v) for k, v in by_side.items()},
         "by_label": {k: _kpi_block(v) for k, v in by_label.items()},
         "intrinsic_exits": sum(1 for t in closed if t.get("mark_source") == "intrinsic"),
+        # H3(c)（v0.45.104）：核销与冻结 mark 必须单独可见，否则读者会把一个早就
+        # 死掉的仓位的入场日价格当成活报价读。
+        "written_off_exits": sum(1 for t in closed if t.get("mark_source") == "written_off"),
+        "stale_positions": sum(1 for p in positions if p.get("mark_source") != "cboe_mid"),
         "open_positions": len(positions),
         "nav": equity[-1].get("nav") if equity else CONFIG["starting_capital"],
         "starting_capital": CONFIG["starting_capital"],
@@ -726,14 +782,26 @@ def render_markdown(as_of: str) -> str:
                   "| 标的 | 方向 | 张数 | 入场权利金 | 当前 mark | 浮动盈亏 | mark 来源 | 财报日 | 到期 |",
                   "|------|------|------|------------|-----------|----------|-----------|--------|------|"]
         for p in positions:
+            # H3(c)：冻结 mark 必须一眼可辨，否则读者会把上次活报价的价格当成今天的市价。
+            src = (f"⚠️ {p.mark_source} ({p.stale_days}d @ {p.last_mark_date})"
+                   if p.mark_source != "cboe_mid" else p.mark_source)
             lines.append(f"| {p.ticker} | {p.side} | {p.contracts} | {_fmt(p.entry_premium)} | "
-                         f"{_fmt(p.last_mark)} | ${_unrealized(p):+,.0f} | {p.mark_source}"
-                         f"{' (' + str(p.stale_days) + 'd)' if p.mark_source == 'stale' else ''} | "
+                         f"{_fmt(p.last_mark)} | ${_unrealized(p):+,.0f} | {src} | "
                          f"{p.earnings_date} | {p.expiry} |")
+        n_frozen = sum(1 for p in positions if p.mark_source != "cboe_mid")
+        if n_frozen:
+            lines += ["", f"> ⚠️ 其中 {n_frozen} 个持仓用的是**冻结 mark**（上次拿到活报价那天的价格），"
+                          "不是今天的市价；这部分 NAV 只是账面占位，不可当成可成交的估值。"]
+    tail = ""
+    if kpis.get("intrinsic_exits"):
+        tail += f"，内在价值平仓 {kpis['intrinsic_exits']} 笔"
+    if kpis.get("written_off_exits"):
+        tail += (f"，**核销（written_off）{kpis['written_off_exits']} 笔**"
+                 "（到期后再也拿不到任何价格，按最后已知 mark 记账，不是成交价）")
     lines += ["", f"**账本**：NAV ${_num(kpis.get('nav')) or 0:,.0f}（起始 ${CONFIG['starting_capital']:,.0f}），"
                   f"已平 {kpis['n']} 笔，胜率 {_fmt(kpis.get('win_rate'), 1, '%')}，"
                   f"均值 {_fmt(kpis.get('avg_pnl_pct'), 2, '%')}，累计 ${kpis.get('total_pnl_usd', 0):+,.0f}"
-                  f"{'，内在价值平仓 ' + str(kpis['intrinsic_exits']) + ' 笔' if kpis.get('intrinsic_exits') else ''}。"]
+                  f"{tail}。"]
     for k, v in sorted(kpis.get("by_side", {}).items()):
         lines.append(f"- {k}: {v['n']} 笔，胜率 {_fmt(v['win_rate'], 1, '%')}，均值 {_fmt(v['avg_pnl_pct'], 2, '%')}")
     lines += ["",
