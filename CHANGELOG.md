@@ -5,9 +5,116 @@
 
 ---
 
-## [0.45.100] — 2026-09-03 — 占位（进行中：纸面组合仓位改为波动率目标制，替换固定档位）
+## [0.45.100] — 2026-09-03 — 纸面组合仓位改为波动率目标制（用上系统里 IC 最高的信号）
 
-## [0.45.99] — 2026-09-03 — 占位（进行中：扫描快照持久化目标 DTE 的 ATM/25d 四合约 bid/ask 报价）
+**背景**：`vol_forecast.py`（v0.44.0）实测「未来 7 日已实现波动」的可学性
+是「未来 7 日收益方向」的 60 倍（IC +0.71 vs +0.01），但它至今只是日报末尾
+的观察表，没进任何下注。旧仓位规则是固定分档：高置信 5% NAV / 中置信 3%，
+于是 σ=15% 的 KO 与 σ=90% 的 MSTR 拿同样的钱，单仓对组合的波动贡献差 6 倍，
+组合风险实际由几只高波动票决定。这是把评分系统往期权对冲量化靠的第二步
+（第一步 v0.45.99 攒真实报价）：**风险预算按波动率定，不按分数档定**——
+这也是期权组合里 vega/gamma 预算的同一思路，先在股票腿上跑通。
+
+### Changed
+
+- `paper_portfolio.py` CONFIG 新增 `sizing_mode`（默认 `"vol_target"`）与
+  `vol_target` 块：`size_pct = clamp(target_position_vol_pct / σ₂₀ × 100,
+  size_pct_min, size_pct_max) × conf_multiplier[conf]`，再乘既有的
+  `_size_multiplier`、低置信减半逻辑不变。校准：`target=1.75%` 让 σ=35% 的
+  中位标的得 5% NAV，与旧 high 档持平；钳位 1.5–8%；置信乘数 1.0/0.6/0
+  保留旧 5:3 比例。**σ 用的是水平不是变化**——`vol_forecast` 已证明票内
+  时变不可预测、横截面水平高度持久，波动率目标制恰好只需要水平。
+- σ 来源：新增 `_lookup_vol_ann(ticker, as_of)` 直读 `pheromone.db`
+  `signal_archive` 的 `price.volatility_20d`（年化 %，`data_pipeline.py:375`
+  `std × √252 × 100`），只取 `date <= as_of` 且 5 天窗口内最近一行（**禁前视**）；
+  只读连接，只吞「表不存在」，`database is locked` 照抛（同 `vol_forecast.load_day`
+  的教训）。
+- `_compute_position_size` 返回 `(size_usd, sizing_note)`；`Position` 新增
+  末位默认字段 `sizing`，并把留痕追加进 `rationale`：`"vol_target(σ=35.0%→5.0%)"`
+  / `"...,clamp_min"` / `"tier"` / `"tier_fallback(no_vol)"`。
+- **诚实降级**：σ 缺失 / NaN / ≤0 时显式退回分档算法，打 warning 且仓位
+  记录里可见 `tier_fallback(no_vol)`——不能静默换成一个看起来合理的数字。
+  未知 `sizing_mode` 直接 `ValueError`。
+- `sizing_mode="tier"` 逐字节还原 v0.39.0 算法；`run_replay` docstring 注明
+  要复现 v0.39.0～v0.45.99 的历史数字必须显式传它。`run_replay` 的 CONFIG
+  备份改 `copy.deepcopy`（`vol_target.conf_multiplier` 二层嵌套，一层拷贝
+  挡不住就地改内层的覆盖泄漏到生产 CONFIG）。
+- `render_portfolio_card` 规则行改为按当前模式描述（`_sizing_rule_text`）。
+- `experiments/portfolio_capacity_replay.py` 两处 `run_replay` 覆盖钉上
+  `"sizing_mode": "tier"`——它扫的是分档乘数，新默认下不钉会变成扫一个
+  被忽略的参数。
+- `tests/test_vol_forecast.py::test_does_not_touch_position_sizing` docstring
+  更新：护栏继续拦的是「横截面分位乘数被接进仓位」，v0.45.100 接的是波动
+  水平，二者回答的是不同问题。
+
+### Added
+
+- `tests/test_paper_portfolio_vol_sizing.py`：29 条——σ=35 → 5%/3% 与旧档
+  持平（校准断言）；σ=70 减半；σ=10/200 触上下钳位；σ 缺失 → tier_fallback
+  且 `caplog` 有 warning；`sizing_mode="tier"` 三档逐字节复现旧数；低置信仍
+  减半；NaN σ 按缺失处理、输出无 NaN；旧 `positions.jsonl` 记录无 `sizing`
+  字段仍可加载；`_lookup_vol_ann` 对临时 sqlite：取窗口内最近一行、忽略
+  `date > as_of`（无前视）、窗口外 None、无表 None。mutation：钳位反转 →
+  6 红；去掉 `date <= as_of` → 1 红。
+- `tests/test_paper_portfolio_nan.py` 三处 `_compute_position_size` 桩改为
+  返回二元组。
+
+### 生效与可比性
+
+- 下一次真实 `run_for_date` 起新仓按新算法定量，存量仓不动；
+  `meta.json` 的 `config_snapshot` 自动记录新键。
+- 主库 `signal_archive` 里 `volatility_20d` 覆盖 30 只 × 全部扫描日
+  （2026-03-10～09-02，1299 行），但存在 `0.0` 值——它会正确落到
+  `tier_fallback(no_vol)`，别把这条 warning 当故障。
+- 纸面组合 KPI 自本版起**跨越一条口径世代边界**：对比 v0.45.99 之前的
+  净值曲线时须用 `run_replay({"sizing_mode": "tier"}, ...)` 重放同口径。
+
+## [0.45.99] — 2026-09-03 — 期权快照持久化 ~30 DTE 四合约真实报价（期权对冲策略的数据地基）
+
+**背景**：系统现有的期权数据（IV Rank / P/C / GEX / 异动）全部只作为
+**方向评分的输入**；`options_backtester.py` 对期权策略的回测用的是
+Black-Scholes 加快照里的一个 IV 值——模型价不是可成交价。要把评分系统
+往期权对冲量化策略靠，第一步是**攒真实市场报价**，而不是先改评分。
+实盘抽查（2026-09-03 收盘后 CBOE 延迟报价）已说明为什么必须是真报价：
+NVDA 25Δ call 买卖价差占中间价 4.4%，COST 同一合约 **27.6%**——单票期权
+的成本差一个量级，BS 回测出来的 Sharpe 全是纸上的。
+
+### Added
+
+- `cboe_options.py::select_quote_set(data, S, *, target_dte=30, now=None)`：
+  纯函数，从 CBOE **原始 payload**（不是成品链——成品链每边只留 40 个
+  OI 最大行权价，25Δ 常被裁掉）选出四张合约：到期日取 dte≥7 中
+  |dte−30| 最小者（平手取更远）；ATM 取离 S 最近且 call/put 两边都有的
+  行权价；25Δ 按 CBOE 自带 delta 取最接近 ±0.25（只认有限非零 delta）。
+  每张合约持久化 `bid/ask/mid/spread_pct/iv/delta/gamma/vega/theta/oi/
+  volume/theo/last_trade_time/quote_ok`；附 `atm_straddle_mid` 与
+  `implied_move_pct`（跨式中间价 ÷ 现价，财报事件波动率信号的直接原料）。
+- `cboe_options.py::fetch_cboe_quote_set(ticker, stock_price=0.0, *, target_dte=30)`：
+  复用 `_fetch_cboe_payload` 的 120s 进程缓存，主链刚拉过时**零额外网络
+  开销**；永不抛错、永不返回 None——失败一律 `data_available=False` +
+  `error` 字符串，且 `contracts` 四个键仍在（值 None），下游可无脑 `.get`。
+- `options_analyzer.py::OptionsAgent.analyze`：新增出口字段 `quote_set`。
+  只在链 `_source == "cboe"` 时取（yfinance 链没有原始 payload）；异常吞掉
+  记 warning，绝不拖死 analyze。样本链早退分支同样带此键（不可用）。
+  **旧快照没有这个键，消费者必须 `.get("quote_set")`。**
+- `tests/test_quote_set.py`：23 条（到期日选择含 dte=3 必须忽略 / 28 vs 35
+  平手规则；ATM 最近行权价；25Δ 按 delta 而非行权价；bid=0 → `quote_ok`
+  False 且 mid/跨式为 None；delta 全 0 → 25Δ 槽位 None 但 ATM 仍在；
+  NaN bid 不崩；`analyze()` 接线两条）。5 处 mutation 各让一条测试变红。
+
+### 诚实降级约定（沿用项目硬规则）
+
+- bid=0 的合约 **不算 mid**：`(0+ask)/2` 是「一半的 ask」不是市价，拿它当
+  成交价等于凭空造出一个对手方。`quote_ok=False`、`mid=None`。
+- 云端快照模式（补跑历史日）payload 没有 options 数组 → 直接不可用。
+  补跑那天的真实报价谁也拿不到，用今天的链冒充比缺失更糟。
+- DTE 按**日历日差**（`expiry.date() − now.date()`）算，与 `_select_expiries`
+  的 `datetime` 相减略有不同（后者盘中会少读一天）；持久化字段取日历口径。
+
+### 下游（尚未接）
+
+期权纸面腿 / 财报 IV 压缩信号 / VRP 信号都读这个字段。当前**零消费者**，
+按 MEMORY「死字段」判据这是有意为之的攒数期，不是遗漏。
 
 ## [0.45.98] — 2026-09-03 — 三处 close_t7 生产接入点未传 db 路径，worktree 下静默失效
 

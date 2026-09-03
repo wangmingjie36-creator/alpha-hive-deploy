@@ -199,10 +199,13 @@ class TestDailyReportIntegration:
             assert f"| {tk} |" in md
 
     def test_does_not_touch_position_sizing(self):
-        """源码级护栏：vol_forecast 不得被 paper_portfolio 引用。
+        """源码级护栏：vol_forecast 的**横截面分层**不得被 paper_portfolio 引用。
 
-        路线是"先观察一两个月，再决定是否下注"。若有人提前接进下注逻辑，
-        纸面组合的历史可比性会断裂，而这一步应当是显式决策。
+        v0.45.100 已显式决策把波动率接进仓位——但接的是标的自身的波动**水平**
+        （paper_portfolio._lookup_vol_ann 直读 signal_archive 的 volatility_20d，
+        仓位 = 目标/σ），不是本模块的横截面分位乘数。分位乘数仍是观察项：
+        它回答"今天谁比谁波动大"，而仓位需要的是"这只票年化波动是多少"。
+        本护栏继续拦住的是后者被前者替换。
         """
         import pathlib
         pp = pathlib.Path(__file__).resolve().parent.parent / "paper_portfolio.py"

@@ -111,12 +111,12 @@ class TestSizingGuardsRejectNaN:
         修复前：`size_usd <= 1` 放 NaN 过去 → shares = NaN/367.95 = NaN。
         """
         monkeypatch.setattr(pp, "_compute_position_size",
-                            lambda *a, **k: float("nan"))
+                            lambda *a, **k: (float("nan"), "tier"))
         got = pp._open_position(self._snap(), float("nan"), "2026-08-31", {}, [])
         assert got is None
 
     def test_nan_entry_price_yields_no_position(self, monkeypatch):
-        monkeypatch.setattr(pp, "_compute_position_size", lambda *a, **k: 1000.0)
+        monkeypatch.setattr(pp, "_compute_position_size", lambda *a, **k: (1000.0, "tier"))
         snap = self._snap()
         snap["entry_price"] = float("nan")
         got = pp._open_position(snap, 50000.0, "2026-08-31", {}, [])
@@ -124,7 +124,7 @@ class TestSizingGuardsRejectNaN:
 
     def test_healthy_inputs_still_open(self, monkeypatch):
         """回归护栏：修复只能挡 NaN，不能把正常开仓一起挡掉。"""
-        monkeypatch.setattr(pp, "_compute_position_size", lambda *a, **k: 1000.0)
+        monkeypatch.setattr(pp, "_compute_position_size", lambda *a, **k: (1000.0, "tier"))
         got = pp._open_position(self._snap(), 50000.0, "2026-08-31", {}, [])
         assert got is not None
         assert math.isfinite(got.shares) and got.shares > 0
