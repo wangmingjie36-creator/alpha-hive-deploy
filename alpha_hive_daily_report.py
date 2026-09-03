@@ -1235,6 +1235,24 @@ class AlphaHiveDailyReporter:
         except Exception as e:
             _log.warning("VRP 信号更新失败(非致命): %s", e)
 
+        # ── v0.45.103: 组合 Greeks 聚合 + β·Delta 带状对冲（纸面 SPY 覆盖）──
+        # 读股票纸面组合 + 跨式腿持仓（都只读），CBOE 重新报价、60 日 OLS β，
+        # 合并 NAV 折百分比；β·$Delta 出 ±15% 带才在独立的 hedge_state/ 账本里
+        # 用 SPY 股票拉回带边。缺 β/缺价/缺报价 → partial → 一律不对冲。同日重跑幂等。
+        try:
+            import portfolio_greeks as _pg
+            _pg_result = _pg.run_for_date(self.date_str)
+            _pg_agg = (_pg_result or {}).get("aggregate") or {}
+            _pg_rec = (_pg_result or {}).get("recommendation") or {}
+            _log.info("组合 Greeks 已更新: %s (行 %d / β·Δ %s%% NAV / %s / %s %+d SPY%s)",
+                      self.date_str, len((_pg_result or {}).get("rows") or []),
+                      (_pg_agg.get("pct_nav") or {}).get("beta_dollar_delta"),
+                      _pg_agg.get("band_status"), _pg_rec.get("action"),
+                      int(_pg_rec.get("spy_shares") or 0),
+                      " / 已成交" if (_pg_result or {}).get("executed") else "")
+        except Exception as e:
+            _log.warning("组合 Greeks 更新失败(非致命): %s", e)
+
         # ── T+1/T+7/T+30 实际价格回填（后台执行，不阻塞主流程）──
         try:
             from outcomes_fetcher import OutcomesFetcher
@@ -1653,7 +1671,7 @@ class AlphaHiveDailyReporter:
             "sector_sentiment_contagion": sector_sentiment_summary,
             "macro_context": macro_snapshot,
             "backtest_stats": backtest_stats,
-            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(_vol_tiers) + self._options_paper_leg_markdown() + self._vrp_markdown(),
+            "markdown_report": self._generate_swarm_markdown_report(swarm_results, concentration, macro_snapshot, backtest_stats, agent_count=agent_count, cross_ticker=cross_ticker_analysis) + self._volatility_tier_markdown(_vol_tiers) + self._options_paper_leg_markdown() + self._vrp_markdown() + self._portfolio_greeks_markdown(),
             "twitter_threads": self._generate_swarm_twitter_threads(swarm_results),
             "opportunities": [
                 {
@@ -1751,6 +1769,15 @@ class AlphaHiveDailyReporter:
             return _vrp.render_markdown(self.date_str) or ""
         except Exception as e:  # noqa: BLE001
             _log.warning("VRP 信号小节渲染失败(非致命): %s", e)
+            return ""
+
+    def _portfolio_greeks_markdown(self) -> str:
+        """v0.45.103 组合 Greeks / 对冲小节；任何失败返回空串，不影响日报。"""
+        try:
+            import portfolio_greeks as _pg
+            return _pg.render_markdown(self.date_str) or ""
+        except Exception as e:  # noqa: BLE001
+            _log.warning("组合 Greeks 小节渲染失败(非致命): %s", e)
             return ""
 
     @staticmethod

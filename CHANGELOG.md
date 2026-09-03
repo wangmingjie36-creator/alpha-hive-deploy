@@ -5,7 +5,71 @@
 
 ---
 
-## [0.45.103] — 2026-09-03 — 占位（进行中：组合 Greeks 带宽对冲，含 IV 曲面压力测试）
+## [0.45.103] — 2026-09-03 — 组合 Greeks 聚合 + β·Delta 带状对冲（纸面 SPY 覆盖）+ 现货×IV 压力测试（期权路线图第 5 步）
+
+**背景**：「对冲量化」的核心不是选票，是控制组合暴露。`greeks_engine.calculate_portfolio_greeks`
+早就有但无人调用；`risk_engine` 的压力测试只冲击现货不冲击 IV；纸面组合的风控是
+逐票 7% 止损，没有组合层的 delta/vega/gamma 视图。本版把股票腿（paper_portfolio）、
+跨式腿（options_paper_leg）与新增的 SPY 对冲覆盖腿聚合成一张组合 Greeks 表，
+β·$Delta 出带才用 SPY 股票拉回，并给出现货×IV 联合冲击网格。
+
+### Added
+
+- `portfolio_greeks.py`
+  - 暴露：`stock_exposures`（qty 按方向带符号，$Delta = qty×close，β·$Delta）、
+    `option_exposures`（每张跨式两行，qty = ±contracts×100；用 `cboe_options.quote_contracts`
+    重报的 delta/gamma/vega/theta）、`hedge_exposures`（SPY，β=1 定义值）。
+  - **CBOE Greeks 单位实测**（NVDA S=227.19，2026-09-03）：225C 10-02 CBOE vega 0.2517 vs
+    BS 每 1 个 vol 点 0.2508；theta −0.1346 vs BS 每日历日 −0.1536。结论：vega 按
+    **每 1 个 vol 点**、theta 按**每日历日**，delta/gamma 与 BS 差 <1%，不做缩放。
+    数字写在模块头部。
+  - **β 自算**：60 日对数收益对 SPY 的 OLS（Twelve Data 日线，≥61 根对齐，
+    `hedge_state/beta_cache.json` 缓存 5 个交易日、拒绝来自未来的缓存）。
+    刻意**不用** `risk_engine._estimate_beta`——它失败静默返回 1.0，与真实 β=1.0 同形
+    （MEMORY「安全默认值」判据）。算不出 → `(None, None)`，聚合标 `partial`。
+  - `aggregate`：$Delta / β·$Delta / gamma$（1% 移动的凸性 P&L）/ vega$（每点）/
+    theta$（每日）及占 NAV %；`coverage` 块与 `band_status ∈ {inside, above, below, unknown, empty}`；
+    **任何一行的 β·$Delta 算不出就是 unknown**——不在部分数据上对冲。
+  - `hedge_recommendation`：出带 → `spy_shares = −excess / SPY`，edge 模式向外取整
+    （否则半股留在带外、次日再来一笔 1 股小单），center 模式四舍五入。
+  - 覆盖账本 `hedge_state/`：每日至多一笔 SPY 调整，成交价=收盘（SPY 点差 ≈1bp，
+    记录里 `spread_model` 明写无点差模型）；净值按日去重；同日重跑逐字节一致
+    （重跑时先扣掉当日成交重建"交易前视图"）；每日审计 `greeks_{date}.json`。
+  - `stress_table`：现货冲击 {−10,−5,0,+5,+10}% × IV {−10,0,+10,+20} 点。股票按 β×冲击，
+    期权用 `bs_price` 在 `S×(1+β·shock)`、`iv+pts` 重定价减当前 mid，SPY 按冲击；
+    β 缺失的行剔除并标 `partial`；`worst_cell`；(0,0) 格附 `bs_vs_mid_gap` 作模型基差诊断。
+  - `combined_nav_detail`：股票腿 + 跨式腿 + 覆盖腿；分量缺失 → None 并列出缺谁。
+    **跨式腿从未建账（净值文件不存在）按 0 计并标 `not_started`**——那是合法零状态，
+    否则对冲在腿建账前永远 unknown；文件存在但缺行仍是 None。
+  - `render_markdown`（日报小节「组合 Greeks 与对冲（观察项 + 纸面 SPY 覆盖）」）、
+    CLI `--date --dry-run --json`。
+- `alpha_hive_daily_report.py`：VRP 块之后 `run_for_date`，失败只 warning；markdown 追加小节。
+- `tests/test_portfolio_greeks.py` 36 条 + 本轮补 1 条（未建账 → 0 + not_started；
+  建账缺行 → None）：方向符号、β 缺失 → partial/unknown/不对冲、long 跨式 |Δ| 小且
+  gamma/vega 为正、short 镜像、vega 单位对照 `calculate_single`、带内/上/下三态与
+  edge/center、覆盖账本同日重跑一致、NaN 不落盘、压力网格 (0,0)=0、+10 IV 长跨式为正、
+  股票网格线性、worst_cell、CLI dry-run 不写状态。mutation：对冲方向反转 → 9 红；
+  去掉股票冲击的 β× → 1 红。
+
+### 实测（worktree 状态，`--dry-run --date 2026-09-02`）
+
+13 条股票仓，β 覆盖 100%，$Delta +$25,532，β·$Delta +$14,642（带宽 ±15% NAV 内），
+−10% 现货冲击 −$1,464。SPY 收盘 $765.16 来自 Twelve Data，**待验证**。
+
+### 边界
+
+- 合并 NAV 把跨式腿的 $100k 名义资本算进分母，% NAV 口径因此比只看股票腿
+  （≈$51k）小一半、带宽的美元宽度大一倍。先照此运行，攒一个月再定分母。
+- 期权行的 $Delta 用 Twelve Data 收盘，CBOE 的 delta 按其自身 `current_price` 算，
+  有几美分基差；`quote_contracts` 不暴露 payload 价格，留待需要时扩展。
+- 对冲工具 v1 只用 SPY 股票；指数 put 要等 SPY 进 quote_set 名单。
+
+### 路线图收口
+
+五步全部落地（v0.45.99～103）。真正的产出要等数据：quote_set 从下一次扫描起
+攒真实报价，财报跨式账本在下一个财报季出样本，VRP 约 14.7 周后过闸，
+组合 Greeks 每日出表。**生产目录 `~/Desktop/Alpha Hive` 需要 `git pull --ff-only`
+才能跑到这些代码**——编排器不自动拉取。
 
 ## [0.45.102] — 2026-09-03 — VRP 信号：逐票时序记账 + 事后结算 + 就绪度闸（期权路线图第 4 步）
 
