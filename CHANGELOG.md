@@ -5,7 +5,63 @@
 
 ---
 
-## [0.45.94] — 2026-09-03 — 占位（进行中：建立 Python CI，离线确定性子集）
+## [0.45.94] — 2026-09-03 — 仓库有了 CI：只跑离线确定性子集
+
+### 背景
+
+v0.45.91 那个 bug（补抓 pass 从上线起是死代码）的形态是「测试全绿但测的是
+不存在的路径」。查它的时候才发现更基础的问题：**本仓库根本没有 CI**，
+那套测试从来不会在 PR 上自动跑，全靠人在本机手动执行。
+
+拦路石是 `.gitignore` 第 2 行 `.github/`，注释写「PAT 无 workflow scope，
+不提交」。那条对 `git push` 确实成立——推含 `.github/workflows/` 的提交会被
+GitHub 拒。但它**不是「不能有 CI」的充分理由**：GitHub App 的 contents API
+带 workflows 权限，本次 workflow 文件即由该路径提交成功。
+
+### 关键设计：只跑离线确定性子集，不跑全量
+
+本仓库有一批测试打真实外部端点（yfinance / Treasury / CNN）。它们在本机是
+绿的，但放进 CI 就是噪音源——Yahoo 限流、端点改版、runner 出口 IP 被限速，
+任何一样都会让 CI 无故转红。**一个时红时绿的 CI 比没有 CI 更糟：它训练
+所有人忽略红灯，真出问题时没人看。**
+
+所以新增 `network` marker，CI 跑 `-m "not integration and not network"`。
+
+### Added
+
+- `.github/workflows/tests.yml`：push to main + PR 触发，Python 3.11
+  （与生产一致；3.9 会因 PEP604 注解直接崩），装 `requirements.txt` +
+  pytest/pytest-timeout，跑离线子集。concurrency 组取消同分支的过期运行。
+- `pyproject.toml` 注册 `network` marker。与 `integration` 的区别是**意图**：
+  integration 测的是「对接外部系统这件事本身」，network 测的是本地逻辑、
+  只是恰好在路径上碰了网络。
+  **刻意不加进 addopts 的默认排除**——本机有网，这些测试照常跑照常有价值。
+
+### Changed
+
+- 29 项测试标注 `network`，判据是实测而非猜测：在无 Yahoo 访问的云沙箱里
+  跑全量（2122 passed / 30 failed），失败的就是网络依赖项。
+  4 个类整类依赖（`TestBuildSwarmReport` / `TestDataQualityGate` /
+  `TestMacroContextUsesSnapshot` / `TestRenderDashboard`）取类级标注，
+  另 5 项逐项标注。
+- `.gitignore` 解除 `.github/` 整目录忽略，保留告警注释说明改 workflow
+  仍需走 API。
+
+### Fixed
+
+- `test_scan_catchup::test_syntax_valid` 补上 `orch_text` fixture。同 class
+  其他用例都经该 fixture 拿到「编排器不在本机就 skip」的保护，唯独这条直接
+  `subprocess` 跑 `bash -n ORCH`，于是在任何没有编排器的环境（CI、云沙箱）
+  都以 returncode 127 假报「编排器语法错误」——报的是环境缺失，
+  却指控代码有语法错。
+
+### 验证
+
+命令行覆盖行为逐条实测而非假设：
+- `--maxfail=0` 确实解除 addopts 的 `-x`：三失败探针下默认停在 1 个、加了跑满 3 个
+- CLI `-m` 确实覆盖 addopts 的 `-m`（deselected 计数比对）
+- `-m network` 恰好收集到 29 项，与实测失败清单吻合
+
 
 ## [0.45.93] — 2026-09-03 — 占位（进行中：self_analyst NaN 价格污染 IC 表与胜率分母）
 

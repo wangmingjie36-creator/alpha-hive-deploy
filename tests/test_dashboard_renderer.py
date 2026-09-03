@@ -22,6 +22,7 @@ class TestDashboardImport:
 
 # ==================== render_dashboard_html 测试 ====================
 
+@pytest.mark.network  # 走真实取数路径（yfinance/Treasury），离线必挂；CI 排除，本机照跑
 class TestRenderDashboard:
 
     @pytest.fixture
