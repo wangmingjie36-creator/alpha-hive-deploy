@@ -41,7 +41,7 @@ import json
 import time
 import urllib.parse
 import urllib.request
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 try:
     from hive_logger import get_logger
@@ -60,6 +60,18 @@ _BURST = 2
 _limiter = None
 _daily_used = 0          # 观测用：免费档 800/天，跨过就该知道
 _DAILY_BUDGET = 800
+
+# ── 进程内日线缓存（v0.45.105）────────────────────────────────────────────────
+# 同一只票的日线在一次扫描里曾被取 3 遍（portfolio_greeks / vrp_signal /
+# options_paper_leg 各一次）。缓存放在**本模块**而不是任何一个消费方：
+# 三个消费方都已经依赖 twelve_data，把它放在这片叶子上不给任何方向新增依赖；
+# 放进 portfolio_greeks 反而会让 options_paper_leg 反向 import 它，成环
+# （portfolio_greeks 已经 import options_paper_leg）。
+SHARED_BARS_WINDOW = 120   # 三个消费方谈拢的统一窗口，见 `fetch_bars`
+
+# key = (ticker, end_date)；value = (请求过的最大窗口, 该次返回的行)
+_BARS_CACHE: Dict[Tuple[str, Optional[str]], Tuple[int, List[dict]]] = {}
+_bars_cache_stats = {"hits": 0, "misses": 0, "refetch_larger": 0, "fetches": 0}
 
 
 class TwelveDataUnavailable(ConnectionError):
@@ -303,6 +315,100 @@ def _fetch_rows(ticker: str, days: int,
         rows.append({"date": str(row.get("datetime") or "")[:10], "close": c, "vol": v})
 
     return _drop_forming_bar(rows, ticker)
+
+
+def fetch_bars(ticker: str, days: int = SHARED_BARS_WINDOW,
+               end_date: Optional[str] = None) -> Optional[List[dict]]:
+    """**日线的对外入口**：与 `_fetch_rows` 同样的 `[{date, close, vol}]` 升序，
+    但同一 `(ticker, end_date)` 在一个进程里只真去取一次。
+
+    为什么需要它
+    ------------
+    Twelve Data 是**串行 7 次/分钟**的队列（`_RATE_PER_SEC`），一次调用排队
+    ≈8.6 秒。日报里三个消费方各取一次同一只票的日线：
+
+        options_paper_leg._default_close   （先跑）
+        vrp_signal._default_bars
+        portfolio_greeks.daily_bars        （后跑）
+
+    30 只票 × 多余的 2 次 = 60 次串行调用 ≈ 8.6 分钟，全部是重复数据。
+    编排器 `STEP2_TIMEOUT` 对 ~2700 秒的扫描只剩 ~900 秒余量，而 v0.45.89
+    已经有过一次「扫描被超时杀在 20/30」——白花的串行调用是可靠性成本，
+    不只是慢。
+
+    缓存语义
+    --------
+    · **键 = `(ticker, end_date)`**。`end_date=None`（"最新"）与显式日期是
+      **两个键**，绝不合并：`_api_end_date` 会把显式日期 +1 天抵掉接口的开
+      区间，而 `None` 那条路末根还要过 `_drop_forming_bar`，两者的尾巴本来
+      就可能不同。合并等于用一个口径冒充另一个（本项目「静默降级」那一族）。
+    · **存"迄今请求过的最大窗口"**。后来的**小**窗口请求切尾巴返回
+      （行是升序的，"小窗口"就是最后 N 行），不再发请求；后来的**大**窗口
+      请求会重新取数并整条替换。
+    · **失败不入缓存**。`None`（未配 key / 限流 / 接口错）和空列表都直接返回、
+      不写进去，下一次调用照常重试 —— v0.45.50 有过「缓存住一次失败把整轮
+      钉死」的教训（`paper_portfolio._PRICE_CACHE` 就是为此修的）。
+      大窗口取数失败时也**不动**已有的小窗口条目：那份数据仍然是好的。
+    · **返回副本**（连同每行的 dict），调用方随便改都碰不到缓存里的那份。
+    · **新取和命中走同一条裁剪规则**（都只回最后 `days` 根）。写这个函数时第一版
+      只在命中时切、新取时原样返回，于是「同样的参数，第一次 130 根、第二次
+      120 根」——同一个入口两种口径，正是本项目最爱出的那类不一致。生产上看不
+      出来（`outputsize=days`，接口不会多给），但看不出来的不一致最贵。
+      注意 `_fetch_rows` 的 `outputsize` 有 `max(days, 10)` 下限，所以 `days < 10`
+      时本函数会比它少给几根 —— 现有三个消费方都要 120 根，够不着这个边角。
+    · `_drop_forming_bar` 的行为一点没变：缓存的就是 `_fetch_rows` 今天返回
+      的东西，本函数不做任何额外裁剪。
+
+    生命周期
+    --------
+    **进程内、一次运行内不设上限**，也不设 TTL。一次扫描就是一个进程：
+    30 只票 + SPY × 各自几个窗口 ≈ 几十条 × 120 行，量级完全无所谓。
+    但正因为没有 TTL，**长驻进程别用它**（会一直端着当天第一次取到的数）；
+    真需要重取就调 `clear_bars_cache()`。
+
+    Parameters
+    ----------
+    days : 要多少根。三个消费方统一用 `SHARED_BARS_WINDOW`(=120)，
+        这样谁先跑都只发一次请求 —— 窗口不一致的话，先跑的小窗口会让后跑的
+        大窗口白白重取一次（options_paper_leg 只要 10 根，却是最先跑的那个）。
+        多要几十根不多花配额：那只是同一次请求的 `outputsize`。
+    end_date : 与 `fetch_daily_closes` 同义，**截至该日（含）**。
+    """
+    days = max(int(days), 1)
+    key = (ticker, end_date)
+
+    ent = _BARS_CACHE.get(key)
+    if ent is not None:
+        cached_days, cached_rows = ent
+        if days <= cached_days:
+            _bars_cache_stats["hits"] += 1
+            return [dict(r) for r in cached_rows[-days:]]
+        _bars_cache_stats["refetch_larger"] += 1
+    else:
+        _bars_cache_stats["misses"] += 1
+
+    _bars_cache_stats["fetches"] += 1
+    rows = _fetch_rows(ticker, days, end_date)
+    if not rows:
+        # None / [] 都不入缓存，且不动已有条目（见上面「失败不入缓存」）
+        return rows
+    _BARS_CACHE[key] = (days, rows)
+    return [dict(r) for r in rows[-days:]]
+
+
+def bars_cache_stats() -> Dict:
+    """`fetch_bars` 的命中情况。`hits + misses + refetch_larger` = 总调用次数，
+    `fetches` = 真正发出去的请求数（= misses + refetch_larger）。"""
+    d = dict(_bars_cache_stats)
+    d["entries"] = len(_BARS_CACHE)
+    return d
+
+
+def clear_bars_cache() -> None:
+    """清空日线缓存并把计数归零（测试之间、以及长驻进程换日时用）。"""
+    _BARS_CACHE.clear()
+    for k in _bars_cache_stats:
+        _bars_cache_stats[k] = 0
 
 
 def fetch_volume_ratio(ticker: str, window: int = 20,

@@ -138,9 +138,12 @@ class TestDiffusionMath:
         assert s["diffusion_move_pct"] != pytest.approx(8.1416, abs=1e-3)   # 旧的 /252
 
     @pytest.mark.parametrize("name,straddle_leg,rv,median,label,ratio", [
-        # 模块自己的两个校准案例：错口径会把它们的标签翻掉
-        ("NVDA", (6.2, 6.3), 45.0, 8.0, "fair", 0.9124),    # /252 下是 cheap（ratio 0.333）
-        ("COST", (2.75, 2.83), 22.0, 3.5, "cheap", 0.7298),  # /252 下扩散 > 跨式 → floor/untradeable
+        # 模块自己的两个校准案例。三代口径：
+        #   v0.45.99  dte/252            → NVDA 0.333 cheap、COST 扩散>跨式 floor/untradeable
+        #   v0.45.104 dte/365            → NVDA 0.9124 fair、COST 0.7298 cheap
+        #   v0.45.105 再加回窗口扩散      → 下面这两行（分子分母含同样多的扩散）
+        ("NVDA", (6.2, 6.3), 45.0, 8.0, "fair", 0.9966),
+        ("COST", (2.75, 2.83), 22.0, 3.5, "fair", 0.8564),
     ])
     def test_calibration_cases_keep_their_labels(self, name, straddle_leg, rv, median, label, ratio):
         s = evs.compute_signal(name, AS_OF, _qs(c=straddle_leg, p=straddle_leg), UP,
@@ -150,13 +153,16 @@ class TestDiffusionMath:
         assert s["raw_label"] == s["label"] == label
 
     def test_hand_computed_event_move(self):
-        # straddle 10%；rv 20% → diffusion = 0.8·0.20·√(29/365)·100 = 4.50996
-        # event = √(100 − 20.3397) = 8.92526；ratio = 8.92526/5 = 1.78505 → rich
+        # straddle 10%；rv 20%
+        #   扩散(dte)      = 0.8·0.20·√(29/365)·100 = 4.50996
+        #   扩散(2 交易日)  = 0.8·0.20·√(2/252)·100  = 1.42539（v0.45.105 加回）
+        #   event = √(100 − 20.3401 + 2.0318) = 9.0384
         s = evs.compute_signal("XYZ", AS_OF, _qs(), UP, _stats(median=5.0), rv_30d=20.0)
         assert s["diffusion_move_pct"] == pytest.approx(4.5100, abs=1e-3)
-        assert s["implied_event_move_pct"] == pytest.approx(8.9253, abs=1e-3)
-        assert s["ratio"] == pytest.approx(1.7851, abs=1e-3)
-        assert s["event_move_basis"] == "straddle_minus_diffusion"
+        assert s["diffusion_window_move_pct"] == pytest.approx(1.4254, abs=1e-3)
+        assert s["implied_event_move_pct"] == pytest.approx(9.0384, abs=1e-3)
+        assert s["ratio"] == pytest.approx(1.8077, abs=1e-3)     # 9.0384 / 5.0
+        assert s["event_move_basis"] == "straddle_minus_diffusion_plus_window"
         assert s["event_move_floor_hit"] is False
         assert s["implied_event_move_pct"] < s["straddle_move_pct"]
 
@@ -183,6 +189,91 @@ class TestDiffusionMath:
 
 
 # ==================== 标签阈值 / 可交易性 ====================
+
+class TestNumeratorAndDenominatorCarryTheSameDiffusion:
+    """v0.45.105：分子分母必须含同样多的扩散，否则两个偏差同向复利。
+
+    分母是 `earnings_history` 的**两个交易日**窗口（天然含 2 天扩散），
+    分子若把 dte 天的扩散整个减掉就成了纯事件波动 —— 分子偏小、分母偏大，
+    比值被系统性压低、一切被推向 cheap。修法是在分子里留下同样长度的扩散。
+    """
+
+    #: 手算（rv=45%、dte=29 日历日、straddle=12.5%、k=0.8）
+    #:   扩散(dte)   = 0.8 × 0.45 × √(29/365) × 100 = 10.1474
+    #:   扩散(2 交易日) = 0.8 × 0.45 × √(2/252)  × 100 =  3.2071
+    #:   事件        = √(12.5² − 10.1474² + 3.2071²)  =  7.9728
+    def _sig(self, rv=45.0, straddle_pct=12.5, median=8.0):
+        # S=100 且两腿等价 → 每腿 mid = straddle_pct/2，implied_move_pct == straddle_pct
+        half = straddle_pct / 2.0
+        qs = _qs(c=(half - 0.1, half + 0.1), p=(half - 0.1, half + 0.1))
+        assert qs["implied_move_pct"] == pytest.approx(straddle_pct, abs=1e-6)
+        return evs.compute_signal("XYZ", AS_OF, qs, UP, _stats(median=median), rv_30d=rv)
+
+    def test_window_diffusion_is_added_back(self):
+        s = self._sig()
+        assert s["diffusion_move_pct"] == pytest.approx(10.1474, abs=1e-3)
+        assert s["diffusion_window_move_pct"] == pytest.approx(3.2071, abs=1e-3)
+        assert s["implied_event_move_pct"] == pytest.approx(7.9728, abs=1e-3)
+        # 纯事件口径（不加回窗口扩散）是 7.2993——必须**不是**它
+        assert s["implied_event_move_pct"] != pytest.approx(7.2993, abs=1e-3)
+        assert s["event_move_basis"] == "straddle_minus_diffusion_plus_window"
+
+    def test_identity_holds(self):
+        """event² == straddle² − 扩散(dte)² + 扩散(窗口)²，删掉任一项即破。
+
+        容差按落盘精度取：四个量都经 `_r` 舍到 4 位小数，平方后误差在 1e-3 量级，
+        不是 1e-6。少了窗口项时两边差 10.29（远超容差），所以这条仍有判别力。
+        """
+        s = self._sig()
+        lhs = s["implied_event_move_pct"] ** 2
+        rhs = (s["straddle_move_pct"] ** 2 - s["diffusion_move_pct"] ** 2
+               + s["diffusion_window_move_pct"] ** 2)
+        assert lhs == pytest.approx(rhs, abs=1e-3)
+        # 判别力自证：去掉窗口项后两边相差 ~10.29，远在容差之外
+        assert abs(lhs - (rhs - s["diffusion_window_move_pct"] ** 2)) > 1.0
+
+    def test_window_term_uses_trading_days_over_252(self):
+        """窗口是 2 个**交易日** → 只能配 252。用 365 会得 2.6649，必须拒绝。"""
+        s = self._sig()
+        assert s["diffusion_window_move_pct"] == pytest.approx(3.2071, abs=1e-3)
+        assert s["diffusion_window_move_pct"] != pytest.approx(2.6649, abs=1e-3)
+
+    def test_calibration_cases_land_near_parity(self):
+        """模块自己的两个校准例子：修正后都落在 ~1.0，符合大致公允定价的预期。"""
+        nvda = self._sig(rv=45.0, straddle_pct=12.5, median=8.0)
+        cost = self._sig(rv=22.0, straddle_pct=5.58, median=3.5)
+        assert nvda["ratio"] == pytest.approx(0.9966, abs=1e-3) and nvda["raw_label"] == "fair"
+        # 只减不加时 COST 是 0.7299 → cheap；加回窗口扩散后 0.8564 → fair
+        assert cost["ratio"] == pytest.approx(0.8564, abs=1e-3) and cost["raw_label"] == "fair"
+
+    def test_window_length_is_configurable_and_moves_the_number(self):
+        s2 = self._sig()
+        evs.CONFIG["realized_window_trading_days"] = 8
+        try:
+            s8 = self._sig()
+        finally:
+            evs.CONFIG["realized_window_trading_days"] = 2
+        assert s8["diffusion_window_move_pct"] > s2["diffusion_window_move_pct"]
+        assert s8["implied_event_move_pct"] > s2["implied_event_move_pct"]
+
+
+class TestEarningsTimeIsNotPassedOffAsObserved:
+    """v0.45.105：`earnings_time` 恒为写死的 "AMC"，不能顶着观测值的名字落盘。"""
+
+    def test_field_is_renamed_to_assumed(self):
+        s = evs.compute_signal("XYZ", AS_OF, _qs(), UP, _stats(), rv_30d=30.0)
+        assert "earnings_time" not in s, "叫这个名字会被日后的分层校准当成观测值"
+        assert s["earnings_time_assumed"] == "AMC"
+
+    def test_observed_slot_exists_and_is_empty(self):
+        s = evs.compute_signal("XYZ", AS_OF, _qs(), UP, _stats(), rv_30d=30.0)
+        assert s["earnings_time_observed"] is None
+
+    def test_source_is_carried_through(self):
+        up = dict(UP, source="chronos_bee_catalyst")
+        s = evs.compute_signal("XYZ", AS_OF, _qs(), up, _stats(), rv_30d=30.0)
+        assert s["earnings_time_source"] == "chronos_bee_catalyst"
+
 
 class TestLabels:
 

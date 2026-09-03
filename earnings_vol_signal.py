@@ -19,14 +19,21 @@
 ------------------
 ATM 跨式中价 / S 是到期前**全部**波动的价格：财报跳空 + 到期前每天的普通扩散。
 用 30 日已实现波动把扩散那部分扣掉：
-    diffusion_move_pct = 0.8 · σ_rv · √(dte/365) · 100        （0.8σ√T ≈ ATM 跨式）
-    implied_event_move_pct = √(max(straddle² − diffusion², 0))
+    diffusion_move_pct        = 0.8 · σ_rv · √(dte/365) · 100   （0.8σ√T ≈ ATM 跨式）
+    diffusion_window_move_pct = 0.8 · σ_rv · √(2/252)   · 100   （实际波动窗口那 2 个交易日）
+    implied_event_move_pct    = √(max(straddle² − diffusion² + diffusion_window², 0))
 `dte` 是**日历日**（cboe_options 里的 `(expiry − today).days`），所以分母只能是 365。
 252 是交易日年，只能配交易日计数的 T；两者混用会把 √T 放大 √(365/252)=1.2035
 （v0.45.104 之前就是这个 bug）。
 `rv_30d` 缺失时退回 `straddle_move_pct` 本身并标 `event_move_basis="raw_straddle"`：
 它**含扩散**，会高估事件波动、把 ratio 往 rich 推——读 ratio 前先看 basis。
-（earnings_history 的两日窗口同样多掺一天扩散，两边偏差同向，比值受影响较小。）
+为什么要把 `diffusion_window` **加回**分子（v0.45.105）：分母是 earnings_history 的
+**两个交易日**窗口，它天然含 2 天扩散；分子若把 dte 天的扩散整个减掉就成了纯事件波动。
+分子偏小、分母偏大——两个偏差**不是抵消而是复利**（此处原先写的"同向、影响较小"是错的）。
+蒙特卡洛实测分母被抬高：真实事件 sd 3% 时 +13.57%、5% 时 +6.18%。加回同样长度的扩散后，
+两边都等于「事件 + 2 个交易日扩散」，可比。
+⚠️ 窗口那一项用**交易日/252**（窗口就是 2 个交易日），与 dte 用日历日/365 各自成立，
+不是又一次混用：2/252 恒等于 2×(365/252)/365。
 
 合格条件（缺一个就 `eligible=False` 并给 `reason`）
 --------------------------------------------------
@@ -92,7 +99,10 @@ CONFIG = {
     # 阈值本身没动，只是不再拿一个从未被这个过滤器读过的数当依据（v0.45.75 那类教训）。
     "max_spread_pct": 0.15,
     "history_n": 8,           # 取过去 8 次财报
-    "diffusion_k": 0.8,       # 0.8σ√T ≈ ATM 跨式
+    "diffusion_k": 0.8,       # 0.8σ√T ≈ ATM 跨式（精确值 2·φ(0)=0.7979）
+    # 分母（earnings_history 的实际波动）用的是**两个交易日**窗口；分子要留下同样
+    # 长度的扩散才可比。改这个数必须同时改 earnings_history 的窗口，否则两边又错开。
+    "realized_window_trading_days": 2,
 }
 
 BASE_DIR = PATHS.home
@@ -264,14 +274,23 @@ def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
         "eligible": False, "reason": None,
         "label": None, "raw_label": None, "tradeable": None, "untradeable_reason": None,
         "earnings_date": ed,
-        "earnings_time": (upcoming or {}).get("earnings_time") if isinstance(upcoming, dict) else None,
+        # v0.45.105：这个字段**不是观测值**，改名以免日后被当成观测值用。
+        # 唯一的生产者 `EarningsWatcher.get_earnings_date` 写的是写死的 "AMC"
+        # （yfinance 的 calendar 不给时段），ChronosBee 催化剂那条路径同样。
+        # 叫 `earnings_time` 时，任何按盘前/盘后分层的校准都只会得到一个桶 + 一个
+        # 空结果，然后被误读成"时段不影响"——本项目的「假数据披着观测值外衣」老病。
+        # 真观测到了再填 `earnings_time_observed`，在那之前它恒为 None。
+        "earnings_time_assumed": (upcoming or {}).get("earnings_time") if isinstance(upcoming, dict) else None,
+        "earnings_time_source": (upcoming or {}).get("source") if isinstance(upcoming, dict) else None,
+        "earnings_time_observed": None,
         "selected_expiry": qs.get("selected_expiry"), "dte": _num(qs.get("selected_dte")),
         "underlying_price": _num(qs.get("underlying_price")),
         "atm_strike": call.get("strike") if call else None,
         "atm_straddle_mid": _num(qs.get("atm_straddle_mid")),
         "straddle_move_pct": _num(qs.get("implied_move_pct")),
         "rv_30d": _num(rv_30d),
-        "diffusion_move_pct": None, "implied_event_move_pct": None,
+        "diffusion_move_pct": None, "diffusion_window_move_pct": None,
+        "implied_event_move_pct": None,
         "event_move_basis": None, "event_move_floor_hit": False,
         "hist_n": int(stats.get("n") or 0) if isinstance(stats, dict) else 0,
         "hist_median_abs_move_pct": _num((stats or {}).get("median_abs_move_pct")) if isinstance(stats, dict) else None,
@@ -307,11 +326,28 @@ def compute_signal(ticker: str, as_of: str, quote_set: Optional[dict],
         # 扩散项虚高 20.35%（rv=30%、dte=29：8.1416% vs 正确的 6.7649%）。
         # 它是在根号下被减掉的，所以会直接翻标签：NVDA cheap→fair、COST floor→cheap。
         diffusion = CONFIG["diffusion_k"] * (rv / 100.0) * math.sqrt(dte / 365.0) * 100.0
-        event2 = straddle * straddle - diffusion * diffusion
+        # v0.45.105：分子分母必须含**同样多**的扩散，否则两个偏差同向叠加。
+        #
+        # 二次复查（M3）实测：分子这一侧把 dte 天的扩散**整个减掉**（得到纯事件波动），
+        # 而分母那一侧是 `earnings_history` 的**两个交易日**窗口，天然含 2 天扩散
+        # （蒙特卡洛：真实事件 sd 3% 时中位数被抬高 13.57%，5% 时 6.18%）。
+        # 于是分子偏小、分母偏大，比值被系统性压低——两个偏差不是抵消而是复利，
+        # 模块头部原先写它们"同向所以商不受影响"，那句话是错的。
+        #
+        # 修法不是改窗口：两日窗口是**刻意**的安全选择，财报是盘前还是盘后我们并不
+        # 真的知道（见 `earnings_time_assumed`），单日窗口会在盘前发布时整个错过事件。
+        # 正确做法是把分子也留下同样长度的扩散，让两边都等于「事件 + 2 个交易日扩散」。
+        #
+        # ⚠️ 这一项用**交易日/252**：实际波动窗口是 2 个**交易日**。与上面 dte 用
+        # 日历日/365 并不矛盾——两者各自是合法配对（且 2/252 恒等于 2×(365/252)/365）。
+        win_td = float(CONFIG["realized_window_trading_days"])
+        diffusion_win = CONFIG["diffusion_k"] * (rv / 100.0) * math.sqrt(win_td / 252.0) * 100.0
+        event2 = straddle * straddle - diffusion * diffusion + diffusion_win * diffusion_win
         sig["diffusion_move_pct"] = _r(diffusion)
+        sig["diffusion_window_move_pct"] = _r(diffusion_win)
         sig["event_move_floor_hit"] = event2 <= 0
         sig["implied_event_move_pct"] = _r(math.sqrt(max(event2, 0.0)))
-        sig["event_move_basis"] = "straddle_minus_diffusion"
+        sig["event_move_basis"] = "straddle_minus_diffusion_plus_window"
     else:
         sig["implied_event_move_pct"] = _r(straddle)
         sig["event_move_basis"] = "raw_straddle"   # 含扩散，高估事件波动
