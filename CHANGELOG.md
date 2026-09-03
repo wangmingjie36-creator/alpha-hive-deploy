@@ -250,7 +250,71 @@ Step 3 跑到次日 00:04，补出 12 份标着 `2026-09-03` 的报告 ——
 
 ## [0.45.94] — 2026-09-03 — 占位（进行中：建立 Python CI，离线确定性子集）
 
-## [0.45.93] — 2026-09-03 — 占位（进行中：self_analyst NaN 价格污染 IC 表与胜率分母）
+## [0.45.93] — 2026-09-03 — 2 条 NaN 快照伪造了整张每蜂 IC 表
+
+### 现象
+
+月度自诊断简报（`self_analysis_2026-09.md`）把 `T+7 平均收益` 印成 `+nan%`。
+显眼的是那个 `+nan%`，但它恰好是三处伤害里最轻的一个。
+
+### 根因
+
+645 条快照里有 2 条 `entry_price=NaN`（2026-06-26 META / RKLB，疑似 yfinance
+429 期间落库）。`bool(float('nan')) is True`，所以下面这些**看起来像有效性检查、
+实际只是非空检查**的守卫，一条都没挡住：
+
+- `compute_stats`：`if ep and t7` → NaN 进入 `returns_t7`，均值被传染 → `+nan%`
+- `classify`：`if not entry or not actual_t7` → NaN 穿过，随后 `nan > 0` 与
+  `nan < 0` **同时为 False**，看多看空都落 `"wrong"` → 静默污染胜率分母
+- `compute_dimension_ic`：`if not t7 or not ep` → NaN 喂进 `_spearman()` 的
+  `sorted()`。NaN 与任何值比较均为 False，令比较关系自相矛盾，产出的名次数组是
+  **未定义的**（不是「NaN 排末尾」这种可预期偏差，而是整段序列被打乱）
+
+第三条是真正的破坏：**2 条坏行让全表 IC 位移最多 0.26**，凭空造出一份完整的、
+读起来很合理的「高 IC 蜂」排名——而该表的用途正是给 Track A 权重优化当依据：
+
+| 蜂 | 修复前 | 修复后 | 位移 |
+|-----|--------|--------|------|
+| ChronosBeeHorizon | +0.272 | +0.012 | −0.260 |
+| GuardBeeSentinel | +0.296 | +0.066 | −0.230 |
+| QueenDistiller | +0.252 | +0.050 | −0.202 |
+| BearBeeContrarian | +0.385 | +0.273 | −0.112 |
+| CodeExecutorAgent | −0.076 | +0.031 | +0.107 |
+
+### Fixed
+
+- `self_analyst.py` 新增 `_is_valid_price()`（有限、正、非 bool），替换
+  `classify` / `compute_stats` / `compute_dimension_ic` 三处真值判断守卫
+- `_spearman()` 入口成对剔除 NaN/inf——它是共享原语，放行 NaN 的排序函数会替
+  之后每一个调用方继续生产「看起来合理」的相关系数
+- 胜率 227/194（原 227/196），`avg_ret_7d` `+nan%` → **+1.31%**
+- 简报第一节增印「⚠️ 价格无效被剔除 N 条」——剔除必须留痕，静默丢弃只是把盲区
+  换个地方藏（本轮 4 条：2 条 NaN + 2 条 BRK-B `entry_price=0`）
+
+### Added
+
+- `tests/test_self_analyst_nan.py`（22 条）。已过 mutation check：把
+  `_is_valid_price` 改回 `bool(v)` 语义后 12 条转红，其中包含核心的
+  `test_dimension_ic_unmoved_by_added_nan_rows`
+
+### 诊断结论（写入 `self_analysis_briefs/self_analysis_2026-09.md` 第四节）
+
+修完数据又发现**简报的结论方式本身有系统性缺陷**：第二节印原始计数、不除基准率，
+三条「发现」全是同一个错误的三种外观——
+
+- 「看多偏斜」不存在：失败中 88.7% 看多，而方向性样本本就 88.6% 看多；
+  两方向胜率 53.9% vs 54.2%，实质相同
+- 「失败集中于 VKTX」是成交量假象：n≥20 的 10 个标的，Wilson CI **全部含 50%**
+- 「Oracle 最具误导」方向反了：Oracle 失败均分 7.99、**正确均分 8.28**，
+  它对什么都打 ~8 分。真正在失败案例上打更高分的是 ChronosBee（−0.26）与 ScoutBee（−0.21）
+- 模板固定文案「系统自信度越高越危险」与数据相反：score≥7 胜率 73.5%（n=34）
+  vs score<7 的 52.2%——但事后择优且样本薄，**列为线索不作结论**
+
+另记：`compute_dimension_ic` 跨标的且跨日期池化，落进 MEMORY「横截面池化陷阱」。
+改逐日横截面口径后**无一只蜂通过 Bonferroni**（最高 BuzzBee t=+1.89，需 |t|>2.9），
+BearBee 的 +0.273 因任何单日都凑不够 5 条横截面而**无法计算、应作废**。
+与 MEMORY 既有结论一致：sentiment 是唯一有证据的信号，聚合分 IC≈0。
+
 
 ## [0.45.92] — 2026-09-02 — 实时口径的宏观数据补上日期戳
 

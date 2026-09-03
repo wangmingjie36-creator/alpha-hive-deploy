@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -113,8 +114,38 @@ def load_snapshots(snapshots_dir: Path, months_back: int = 3,
     return results
 
 
+def _is_valid_price(v) -> bool:
+    """价格是否可用于计算：必须是有限的正实数。
+
+    v0.45.93：**不能用 `if price:` 代替本函数**——`bool(float('nan')) is True`，
+    真值判断挡不住 NaN。2026-06-26 META/RKLB 两条 entry_price=NaN 的快照因此
+    穿过了 `if ep and t7` / `if not t7 or not ep`，导致：
+      ① classify() 里 `nan > 0` 恒 False → 看多预测被静默记成 "wrong"（污染胜率分母）
+      ② compute_stats() 的 avg_ret 被 NaN 传染 → 简报显示 "+nan%"
+      ③ compute_dimension_ic() 把 NaN 喂进 _spearman 的排序 → **全表 IC 位移最多 0.26**
+    ③ 最危险：645 条样本里的 2 条坏行，把 Guard +0.066 抬成 +0.296、
+    Chronos +0.012 抬成 +0.272、Queen +0.050 抬成 +0.252，凭空造出一份
+    「高 IC 蜂」排名，而该表的用途正是给 Track A 权重优化提供依据。
+    """
+    return isinstance(v, (int, float)) and not isinstance(v, bool) \
+        and math.isfinite(v) and v > 0
+
+
 def _spearman(xs: list, ys: list) -> float:
-    """Spearman rank 相关（无第三方依赖，与 experiments/penalty_replay.py 同实现）"""
+    """Spearman rank 相关（无第三方依赖，与 experiments/penalty_replay.py 同实现）
+
+    v0.45.93：入口处成对剔除 NaN/inf。NaN 与任何值比较均为 False，会让
+    sorted() 的比较关系自相矛盾，产出一个**未定义的名次数组**——不是「NaN 排最后」
+    这种可预期的偏差，而是整段序列被打乱，且乱法随数据分布变化。
+    """
+    pairs = [(a, b) for a, b in zip(xs, ys)
+             if isinstance(a, (int, float)) and isinstance(b, (int, float))
+             and math.isfinite(a) and math.isfinite(b)]
+    if len(pairs) < 3:
+        return 0.0
+    xs = [p[0] for p in pairs]
+    ys = [p[1] for p in pairs]
+
     def rank(v):
         s = sorted(range(len(v)), key=lambda i: v[i])
         r = [0] * len(v)
@@ -142,7 +173,7 @@ def compute_dimension_ic(snaps: list) -> dict:
     for s in snaps:
         t7 = (s.get("actual_prices") or {}).get("t7")
         ep = s.get("entry_price")
-        if not t7 or not ep:
+        if not _is_valid_price(t7) or not _is_valid_price(ep):
             continue
         ret = (t7 / ep - 1) * 100
         rows.append((s.get("date", ""), s.get("agent_votes") or {}, ret))
@@ -184,7 +215,9 @@ def classify(snap: dict) -> str:
     direction = str(snap.get("direction", "neutral")).strip().lower()
     entry      = snap.get("entry_price", 0.0) or 0.0
     actual_t7  = snap.get("actual_prices", {}).get("t7") or 0.0
-    if not entry or not actual_t7:
+    # v0.45.93：NaN 价格必须走 unknown。此前 `not entry` 挡不住 NaN，
+    # 后面 `nan > 0` / `nan < 0` 双双为 False，看多看空都被判 "wrong"。
+    if not _is_valid_price(entry) or not _is_valid_price(actual_t7):
         return "unknown"
     ret = (actual_t7 - entry) / entry * 100
     if direction in ("long", "bullish"):
@@ -218,11 +251,15 @@ def compute_stats(snaps: list) -> dict:
     unknown  = [s for s, c in classified if c == "unknown"]
 
     returns_t7 = []
+    invalid_price = 0
     for s in snaps:
         ep = s.get("entry_price") or 0
         t7 = s.get("actual_prices", {}).get("t7") or 0
-        if ep and t7:
+        if _is_valid_price(ep) and _is_valid_price(t7):
             returns_t7.append((t7 - ep) / ep * 100)
+        elif ep or t7:
+            # v0.45.93：坏价格要计数，不能默默丢——静默剔除只是把盲区换个地方藏
+            invalid_price += 1
 
     avg_ret = round(sum(returns_t7) / len(returns_t7), 2) if returns_t7 else 0.0
     _n_dir = len(correct) + len(wrong)
@@ -242,6 +279,7 @@ def compute_stats(snaps: list) -> dict:
         "significant":       _ci_low > 50.0,   # CI 下界 >50% = 统计显著优于随机
         "sample_sufficient": _n_dir >= 30,     # n<30 = 样本不足，不下统计定论
         "avg_ret_7d": avg_ret,
+        "invalid_price": invalid_price,   # v0.45.93
         "wrong_snaps": wrong,
         "correct_snaps": correct,
     }
@@ -337,6 +375,8 @@ def format_briefing(stats: dict, patterns: dict,
         f"| 方向错误 | {stats['wrong']} |",
         f"| 方向胜率 | {stats['win_rate']}% · Wilson 95% CI [{stats.get('win_rate_ci',[0,100])[0]}%–{stats.get('win_rate_ci',[0,100])[1]}%] · n={stats.get('n_directional','?')} |",
         f"| T+7 平均收益 | {stats['avg_ret_7d']:+.2f}% |",
+        (f"| ⚠️ 价格无效被剔除 | {stats['invalid_price']} 条（NaN/非正数，"
+         f"不计入胜率与 IC）|" if stats.get("invalid_price") else ""),
         "",
     ]
 
