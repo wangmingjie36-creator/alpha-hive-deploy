@@ -5,6 +5,79 @@
 
 ---
 
+## [0.45.94] — 2026-09-03 — 占位（进行中：建立 Python CI，离线确定性子集）
+
+## [0.45.93] — 2026-09-03 — 占位（进行中：self_analyst NaN 价格污染 IC 表与胜率分母）
+
+## [0.45.92] — 2026-09-02 — 实时口径的宏观数据补上日期戳
+
+### 现象
+
+2026-09-01 定时任务产出的日报里，`macro_context.as_of` 是 `None`
+（数值本身齐全：spx −0.69 / gold 396.75 / cpi 3.3，无 NaN）。
+对比 8/31 那份补跑产出的 `as_of: "2026-08-31"` —— 差别来自路径：
+补跑走 `cloud_snapshot`（带 vintage 校验，所以有日期），
+定时走 finnhub/treasury 实时源（不写 as_of）。
+
+后果：日报里的宏观块**没有任何日期戳**，读者无法判断它是哪天的。
+按 MEMORY「读 vix 前先看 vix_source」那条纪律，这是同一类问题。
+
+### 关键约束：`_as_of` 是控制流，不能动
+
+`fred_macro._as_of` 非 None 时会让取数走 `_asof_history` 对齐历史日
+（:404）。实时路径把它填上会**改变取数行为**，不是加个标签那么简单。
+所以只改输出，并用新字段 `as_of_mode` 显式承载原先靠 `None` 表达的区分。
+
+### 更关键：不能直接填"今天"
+
+盘前跑时拿到的实时报价是**上一个交易日的收盘**（2026-09-01 06:49 ET
+手动跑过一次，正是这个情形）。写成今天就是本项目一路在治的 vintage
+污染 —— 比留空更坏。
+
+### Added
+
+- `fred_macro._realtime_as_of()`：推算实时数据**真正代表**的交易日。
+  16:00 ET 收盘后才算当天，否则回退到最近一个已收盘交易日；周末与
+  美股假日一并回溯。复用已装好的 `cboe_options._et_now`（ZoneInfo，
+  DST 正确）与 `is_trading_day`（含假日表），不自己算时区和节假日。
+  推算失败返回 `None` —— 诚实留空，不猜。
+- `macro_context.as_of_mode`：`backfill` / `realtime` / `fallback`。
+
+### Changed
+
+- `macro_context.as_of` 两条路径都填：补跑 = 目标日，实时 = 推算出的交易日。
+- 降级路径的 `base` dict 也带这两个键（`as_of: None` +
+  `as_of_mode: "fallback"`），否则消费者拿到的是"键不存在"，
+  与实时路径的"键在、值为 None"无法区分。
+- **`data_source` 刻意不动**：`_compose_data_source(as_of=...)` 一旦收到
+  日期就会加 `cloud_snapshot` 前缀和 `@日期` 后缀。实时路径传进去会造出
+  假标签（说走了云端快照，其实没有）。测试里加了反向断言钉死这点。
+
+### Fixed（测试）
+
+- `test_no_snapshot_keeps_live_semantics` 原先断言 `as_of is None` ——
+  那是拿"哨兵为空"当"实时口径"的**代理判断**，随本次改动作废。
+  改为断言 `as_of_mode != "backfill"` + `data_source` 不含 cloud_snapshot/@，
+  **它真正守的那条不变式（未装快照不得调 `_asof_history`）原封不动**。
+- 补跑侧原先只断言 `as_of == 目标日`，不断言 mode ——
+  实测把 `as_of_mode` 写死成 `"realtime"` 能全绿（45 passed），
+  是一条抓不住的假守卫。已补 `assert r["as_of_mode"] == "backfill"`，
+  重跑同一变异即变红。
+- 新增 `TestRealtimeAsOf`（8 条）：盘后归当天 / 盘前与盘中回退 /
+  16:00 整边界 / 周末回退周五 / 劳动节回退 / 时钟不可用时留空 /
+  降级路径自称 fallback。5 个变异逐一验证会变红。
+  冻结时钟必须 patch `cboe_options._et_now`（源模块），
+  因为 `_realtime_as_of` 里是**函数内局部 import**（MEMORY v0.45.72 教训）。
+
+### 实测
+
+```
+实时（2026-09-02 07:2x ET 盘前）
+  as_of=2026-09-01  mode=realtime  data_source=treasury+finnhub+yfinance+fred
+补跑（set_macro_snapshot("2026-08-27")）
+  as_of=2026-08-27  mode=backfill  data_source=cloud_snapshot+treasury+yfinance+fred@2026-08-27
+```
+
 ## [0.45.91] — 2026-09-02 — 补抓 pass 从上线起就是死代码：两道 vintage 校验，内层把外层判死了
 
 ### 现象

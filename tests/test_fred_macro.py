@@ -403,3 +403,81 @@ class TestCacheTTL:
         result = fred_macro.get_macro_context()
         assert result.get("test") is True  # 返回缓存版本
         # 清理由 autouse fixture _clear_fred_cache 自动完成
+
+
+# ==================== TestRealtimeAsOf (v0.45.92) ====================
+
+class TestRealtimeAsOf:
+    """实时口径的 `as_of` 必须是数据**真正代表**的那个交易日。
+
+    2026-09-01 的定时任务产出的 macro_context 里 `as_of` 为 None（哨兵，
+    表示"非补跑"），日报因此没有宏观日期戳。补上它的关键不是"填今天"——
+    盘前跑时手里的实时报价是上一个交易日的收盘，写成今天就是 vintage 污染。
+    """
+
+    def _freeze_et(self, monkeypatch, iso_dt):
+        """冻结美东时钟。
+
+        `_realtime_as_of` 里是**函数内局部 import**（`from cboe_options
+        import _et_now`），所以必须 patch 源模块 cboe_options 上的属性 ——
+        patch fred_macro 上的同名属性打不中（MEMORY v0.45.72 的教训）。
+        """
+        import datetime as dt
+        from zoneinfo import ZoneInfo
+        fixed = dt.datetime.fromisoformat(iso_dt).replace(tzinfo=ZoneInfo("America/New_York"))
+        monkeypatch.setattr("cboe_options._et_now", lambda: fixed)
+
+    def test_after_close_uses_today(self, monkeypatch):
+        """定时任务的实际时点：14:00 PDT = 17:00 ET，已收盘。"""
+        import fred_macro
+        self._freeze_et(monkeypatch, "2026-09-01T17:00:00")   # 周二盘后
+        assert fred_macro._realtime_as_of() == "2026-09-01"
+
+    def test_premarket_falls_back_to_prev_trading_day(self, monkeypatch):
+        """盘前的实时报价 = 上一个交易日的收盘，绝不能写成今天。"""
+        import fred_macro
+        self._freeze_et(monkeypatch, "2026-09-02T07:25:00")   # 周三盘前
+        assert fred_macro._realtime_as_of() == "2026-09-01"
+
+    def test_intraday_also_falls_back(self, monkeypatch):
+        """盘中同理：当天还没收盘，收盘价尚不存在。"""
+        import fred_macro
+        self._freeze_et(monkeypatch, "2026-09-02T11:00:00")
+        assert fred_macro._realtime_as_of() == "2026-09-01"
+
+    def test_exactly_at_close_counts_as_today(self, monkeypatch):
+        """16:00:00 ET 整 —— 边界归当天。"""
+        import fred_macro
+        self._freeze_et(monkeypatch, "2026-09-01T16:00:00")
+        assert fred_macro._realtime_as_of() == "2026-09-01"
+
+    def test_weekend_skips_back_to_friday(self, monkeypatch):
+        import fred_macro
+        self._freeze_et(monkeypatch, "2026-09-06T17:00:00")   # 周日
+        assert fred_macro._realtime_as_of() == "2026-09-04"   # 周五
+
+    def test_holiday_skips_back(self, monkeypatch):
+        """2026-09-07 是劳动节（美股休市），当天盘后应回退到 9/4 周五。"""
+        import fred_macro
+        from is_trading_day import is_trading_day
+        assert not is_trading_day(__import__("datetime").date(2026, 9, 7))[0], \
+            "前提失效：9/7 不再是假日，请更新本测试"
+        self._freeze_et(monkeypatch, "2026-09-07T17:00:00")
+        assert fred_macro._realtime_as_of() == "2026-09-04"
+
+    def test_returns_none_when_clock_unavailable(self, monkeypatch):
+        """推算不出来时诚实留空，不猜一个日期。"""
+        import fred_macro
+
+        def boom():
+            raise RuntimeError("no clock")
+        monkeypatch.setattr("cboe_options._et_now", boom)
+        assert fred_macro._realtime_as_of() is None
+
+    def test_fallback_dict_labels_itself_fallback(self):
+        """降级路径的兜底常量不属于任何一天：as_of=None 且 mode=fallback，
+        不得冒充 realtime，也不得让键干脆缺失。"""
+        import inspect, fred_macro
+        src = inspect.getsource(fred_macro._fetch_macro_data)
+        assert '"as_of_mode": "fallback"' in src
+        assert '"as_of": None' in src

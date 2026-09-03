@@ -166,18 +166,51 @@ class TestMacroContextUsesSnapshot:
         assert r["vix"] == 15.21
         assert r["vix_source"] == "cloud_snapshot_cboe"
         assert r["as_of"] == "2026-08-27"
+        # v0.45.92：mode 必须跟着走。只断言 as_of 的话，把 as_of_mode 写死成
+        # "realtime" 也能全绿 —— 实测过，这正是一条抓不住的假守卫。
+        assert r["as_of_mode"] == "backfill", "补跑口径必须自称 backfill"
         assert "2026-08-27" in r["data_source"], "data_source 必须写明口径日"
         assert r["data_source"] != "yfinance", "补跑标成实时口径会误导读者"
 
     def test_no_snapshot_keeps_live_semantics(self, monkeypatch):
-        """回归：不装快照时 as_of 为 None，标签回到实时口径。"""
+        """回归：不装快照时不得走补跑取数路径，标签也不得写成补跑。
+
+        v0.45.92 更新：原先这里断言 `as_of is None` —— 那是拿"哨兵为空"
+        当"实时口径"的**代理判断**。实时路径现在也会填 as_of（数据真正代表
+        的那个交易日），区分改由 `as_of_mode` 显式承载，故代理判断作废。
+        本测试真正守的那条不变式（`_asof_history` 不得被调用）原封不动。
+        """
         called = {"n": 0}
         monkeypatch.setattr(fm, "_asof_history",
                             lambda *a, **k: called.__setitem__("n", called["n"] + 1))
         fm.set_macro_snapshot(None)
         r = fm.get_macro_context()
-        assert r.get("as_of") is None
         assert called["n"] == 0, "未装快照却走了 as_of 取数路径"
+        assert r.get("as_of_mode") != "backfill", "未装快照却自称补跑口径"
+        # 反向：实时口径绝不能带上补跑才有的标签，否则又是一个假标签
+        assert "cloud_snapshot" not in str(r.get("data_source", "")), \
+            "实时口径不得写 cloud_snapshot"
+        assert "@" not in str(r.get("data_source", "")), \
+            "实时口径的 data_source 不该带 @日期 后缀"
+
+    def test_no_snapshot_still_stamps_a_date(self, monkeypatch):
+        """实时口径也要有日期戳 —— 这是 v0.45.92 补上的那件事本身。
+
+        时钟冻在 2026-09-01 17:00 ET（定时任务的真实时点，已收盘），
+        所以 as_of 必须是当天，且 mode 明写 realtime。
+        """
+        import datetime as dt
+        from zoneinfo import ZoneInfo
+        fixed = dt.datetime(2026, 9, 1, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+        monkeypatch.setattr("cboe_options._et_now", lambda: fixed)
+        monkeypatch.setattr(fm, "_asof_history", lambda *a, **k: None)
+        fm.set_macro_snapshot(None)
+        r = fm.get_macro_context()
+        if r.get("as_of_mode") == "fallback":
+            import pytest as _p
+            _p.skip("宏观取数整体降级，本条只测非降级路径")
+        assert r.get("as_of_mode") == "realtime"
+        assert r.get("as_of") == "2026-09-01"
 
     def test_snapshot_without_vix_does_not_fake_one(self, monkeypatch):
         """快照里没有 vix_term 时不得凭空造一个 —— 退回既有降级链。"""

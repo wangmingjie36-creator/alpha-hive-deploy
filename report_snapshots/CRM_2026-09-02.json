@@ -1,0 +1,36 @@
+{
+  "ticker": "CRM",
+  "date": "2026-09-02",
+  "composite_score": 4.56,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 256.93,
+  "agent_votes": {
+    "ScoutBeeNova": 6.85724844,
+    "RivalBeeVanguard": 5.78
+  },
+  "weights_used": {
+    "signal": 0.2094,
+    "catalyst": 0.1878,
+    "sentiment": 0.1838,
+    "odds": 0.194,
+    "risk_adj": 0.225
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.241,
+    "signal": 0.966,
+    "catalyst": 0.517,
+    "sentiment": 0.069,
+    "odds": 0.069,
+    "risk_adj": 0.586
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-03T00:01:03.028589"
+}
