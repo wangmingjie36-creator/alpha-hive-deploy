@@ -338,14 +338,34 @@ def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
             _PRICE_CACHE[key] = {}
             return {}
         out = {}
+        _dropped = 0
         for idx, row in hist.iterrows():
             date_str = idx.strftime("%Y-%m-%d")
-            out[date_str] = {
-                "Open": float(row["Open"]),
-                "High": float(row["High"]),
-                "Low": float(row["Low"]),
-                "Close": float(row["Close"]),
-            }
+            # ── v0.45.97：**含 NaN 的 bar 一律丢掉，不许流向下游。** ──
+            # 2026-08-28 全站 HTTPS 断掉那天，TMUS 的 Close 是 NaN，
+            # 却照样触发了 TIME 止损：`_check_exit` 返回 ("TIME", NaN, d)
+            # → `gross_pct` NaN → `pnl_usd` NaN → `cash += size_usd + pnl`
+            # → **cash 从此永久 NaN**，此后每天 NAV、每个新仓的 size_usd
+            # 全是 NaN（NaN 会穿过 `size_usd <= 1` 和 `entry_price <= 0`
+            # 两道守卫，因为 NaN 的任何比较都返回 False）。8/28→9/2 四个
+            # 扫描日的净值就是这么烂掉的。
+            # 在这里挡是因为它是唯一的源头：_check_exit / _mark_to_market
+            # 都从这份 dict 取数，堵住出口就不必在每个消费者各补一遍。
+            # 丢掉 bar 的后果是良性的：该日不触发出场，等到有真实价格的
+            # 下一个交易日再触发（TIME 的判据是 `dt >= time_stop`，不会漏）。
+            try:
+                _o, _h, _l, _c = (float(row["Open"]), float(row["High"]),
+                                  float(row["Low"]), float(row["Close"]))
+            except (TypeError, ValueError):
+                _dropped += 1
+                continue
+            if not all(math.isfinite(v) for v in (_o, _h, _l, _c)):
+                _dropped += 1
+                continue
+            out[date_str] = {"Open": _o, "High": _h, "Low": _l, "Close": _c}
+        if _dropped:
+            _log.warning("_fetch_ohlc %s：丢弃 %d 根含非有限值的日线（该日不出场，顺延到有真实价格那天）",
+                         ticker, _dropped)
         _PRICE_CACHE[key] = out
         return out
     except Exception as _e_ohlc:
@@ -434,14 +454,17 @@ def _open_position(
     conf = _infer_confidence(snapshot)
     low_conv = bool(snapshot.get("low_conviction", False))
     size_usd = _compute_position_size(nav, conf, ticker, closed, low_conviction=low_conv)
-    if size_usd <= 1:
+    # v0.45.97：`size_usd <= 1` 挡不住 NaN（NaN 的任何比较都返回 False），
+    # 于是 NaN 会一路走到 `shares = size_usd / entry_price` 变成 NaN 仓位。
+    if not isinstance(size_usd, (int, float)) or not math.isfinite(size_usd) or size_usd <= 1:
         return None
 
     # 入场价：用 snapshot 的 entry_price 或当日 Close
     entry_price = float(snapshot.get("entry_price") or 0)
-    if entry_price <= 0 and as_of in ticker_ohlc:
+    if (not math.isfinite(entry_price) or entry_price <= 0) and as_of in ticker_ohlc:
         entry_price = ticker_ohlc[as_of]["Close"]
-    if entry_price <= 0:
+    # v0.45.97：同上，`<= 0` 放 NaN 过去
+    if not math.isfinite(entry_price) or entry_price <= 0:
         return None
 
     # SL / TP 价位
@@ -714,6 +737,15 @@ def run_for_date(as_of: str, verbose: bool = False) -> Dict:
     snapshots = _load_snapshots_for_date(as_of)
     existing_tix = {p.ticker for p in positions}
     nav_for_sizing = cash + sum(p.size_usd for p in positions)  # 简化：用 cost basis 做 NAV
+    # v0.45.97：纵深防御。上面三处已堵住已知的 NaN 来源，但只要 cash 或任何
+    # 一条 size_usd 再次变成非有限值，这里就会静默地把 NaN 传给每一个新仓。
+    # 宁可当天不开仓并大声报错，也不要写出 NaN 仓位——NaN 一旦落盘，
+    # 之后每一天的 NAV 都继承它，且无法从状态文件反推出原始数值。
+    if not math.isfinite(nav_for_sizing):
+        _log.error("[PaperPortfolio] %s NAV 非有限值（cash=%r，持仓 %d 条）——"
+                   "本日不开新仓。请检查 closed_trades.jsonl 最近是否有 NaN 出场价。",
+                   as_of, cash, len(positions))
+        snapshots = []
 
     # 先按 score 排序，保证高分优先吃到资金
     snapshots.sort(key=lambda s: abs(float(s.get("composite_score") or 5) - 5), reverse=True)

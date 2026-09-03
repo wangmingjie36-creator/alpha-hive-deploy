@@ -5,7 +5,82 @@
 
 ---
 
-## [0.45.97] — 2026-09-03 — 占位（进行中：纸面组合净值自 8/28 起恒为 NaN，溯源取价链）
+## [0.45.97] — 2026-09-03 — 一根 NaN 日线，把纸面组合净值烂了四天
+
+### 现象
+
+`paper_portfolio_state/equity_curve.jsonl` 自 **2026-08-28 起连续 4 个扫描日
+`nav`/`cash` 全是 NaN**（8/28、8/31、9/1、9/2），13 条持仓里 6 条的
+`shares`/`size_usd` 也是 NaN。`meta.json` 的 `cash` 同样是 NaN。
+
+### 溯源：单点起因 + 不可逆传染
+
+起点是 **2026-08-28 TMUS 的 TIME 止损**——那天正是全站 HTTPS 断掉、
+扫描只跑到 20/30 的日子，`_fetch_ohlc` 拿回的 8/28 那根日线是 NaN：
+
+```
+_check_exit → ("TIME", NaN, "2026-08-28")        # NaN 价照样触发出场
+_close_position → gross_pct NaN → pnl_usd NaN
+cash += pos.size_usd + pnl                       # ← cash 从此永久 NaN
+nav_for_sizing = cash + sum(size_usd)            # 之后每天 NAV 都是 NaN
+_compute_position_size(NaN, ...) → NaN
+if size_usd <= 1: return None                    # ← NaN 穿过，仓位照开
+shares = size_usd / entry_price → NaN
+```
+
+**关键判据：6 条坏仓的 `entry_price` 全是好的**（367.95 / 170.48 / 676.08…
+都是真实收盘价），只有 `shares`/`size_usd` 是 NaN —— 说明毒源不在取价，
+在 `nav`。而 8/28 当天持仓还全是干净的，于是锁定到 `cash` 那一侧，
+再顺着 `cash += size_usd + pnl` 找到那条 `exit_price: NaN` 的 TMUS 平仓。
+
+三道守卫全是 `<= 0` / `<= 1` 形态，NaN 的任何比较都返回 False，**一道没拦住**。
+
+### Fixed
+
+- **`_fetch_ohlc` 出口丢弃含非有限值的 bar**（唯一源头，堵这里就不必在
+  `_check_exit` / `_mark_to_market` 各补一遍）。丢 bar 的后果是良性的：
+  该日不出场，顺延到有真实价格的下一个交易日（TIME 判据是
+  `dt >= time_stop`，不会漏触发）。
+- `_open_position` 两道守卫改成 NaN-proof（`math.isfinite` + 原有阈值）。
+- `run_for_date` 加纵深防御：`nav_for_sizing` 非有限值时**当天不开新仓并
+  报 ERROR**，而不是静默写出 NaN 仓位。NaN 一旦落盘，之后每天的 NAV
+  都继承它，且无法从状态文件反推原始数值。
+- 新增 `tests/test_paper_portfolio_nan.py`（7 条），含反向回归护栏
+  `test_healthy_inputs_still_open` / `test_all_finite_passes_through`。
+  5 个变异逐一验证会变红（含「过度修复：把好 bar 也丢掉」
+  与「NaN 日用 0 价冒充出场」两种错误修法）。
+
+### 数据修复
+
+备份 `paper_portfolio_state.bak-nanfix-20260903/`，回滚到 8/27 收盘状态后
+用修好的引擎重放 8/28→9/2 四天。
+
+回滚状态**逐项对平后才动手**：8/27 记录 `positions_count=8`、
+`deployed=$12,593.03`；保留的 7 条干净仓成本合计 $11,333.47，
+加上重建的 TMUS $1,259.55 = **$12,593.02**（1 分钱舍入）。
+TMUS 的 `sl/tp` 由 `CONFIG(-7%/+15%)` 反推，**同期 13 条仓位逐条验证
+公式吻合**后才采用；`rationale` 原文不可恢复，已在字段里如实注明。
+
+重放结果：
+
+```
+8/28  NAV $50,663.14  8 仓   （TMUS 的 NaN 日线被丢弃，不出场）
+8/31  NAV $50,711.63  9 仓   ← TIME TMUS $182.24→$181.37  PnL −$8.66
+9/01  NAV $50,512.05  12 仓
+9/02  NAV $51,031.21  13 仓
+```
+
+TMUS 最终按 **8/28 的真实收盘 $181.37** 平仓（重放时数据已可获取），
+`exit_date` 仍是 8/28，口径正确。全部状态文件 `: NaN` 字面量归零，
+KPI 恢复可算：total_return +2.06% / Sharpe 0.4 / 胜率 52.3% / 44 笔。
+
+### 已知残留（不修，记录）
+
+重放是逐日进行的，8/31 那天才处理掉 TMUS，故 `equity_curve` 的
+`realized_pnl_today: -8.66` 记在 8/31，而该笔交易的 `exit_date` 是 8/28。
+两者不一致但都不是错值 —— 交易本身的日期与价格都正确，
+只是现金效应落在引擎处理它的那天。
+
 
 ## [0.45.96] — 2026-09-03 — 缓存测试写死 8 月日期，跨月自动变红（本次不含生产代码改动）
 
