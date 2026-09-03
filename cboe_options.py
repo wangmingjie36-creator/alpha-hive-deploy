@@ -705,6 +705,238 @@ def fetch_cboe_iv_term_structure(
     return picked[:max_points] if len(picked) >= 2 else None
 
 
+# ── 四合约报价集（v0.45.99）───────────────────────────────────────────
+# 为将来的期权纸面交易腿攒数据：每天在 ~30 DTE 到期日上**持久化四张合约的真实
+# 买卖报价**（ATM call / ATM put / 25Δ call / 25Δ put）。当前**没有任何下游消费者**，
+# 只落进 options_snapshot；不进评分、不进 IC、不改任何既有字段。
+#
+# 为什么从**原始 payload** 选而不是从 `fetch_cboe_chain` 的成品链选：
+# 成品链每边按 OI 只留 40 个行权价、再套 ATM 带宽过滤，25Δ 的行权价（离 ATM
+# 约 1σ）很容易被裁掉；原始 payload 是全链，且 `_fetch_cboe_payload` 有 120s
+# 进程缓存——主链刚拉过时**零额外网络开销**。
+#
+# 诚实降级（项目硬规则）：bid=0 / NaN / ask<bid 的报价 `quote_ok=False`，
+# mid 与 spread_pct 置 None；缺 delta 的槽位置 None 并给 reason；任何一步
+# 拿不到都返回 `data_available=False` + error 字符串，**不填看起来合理的默认值**。
+_QS_MIN_DTE = 7          # 与主链一致：<7 DTE 的合约 theta 扭曲，不作候选
+_QS_ROLES = ("atm_call", "atm_put", "c25", "p25")
+
+
+def _qs_num(v) -> Optional[float]:
+    """float 且有限 → float；否则 None。`bool(nan) is True`，所以不能用真值判断。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _quote_set_unavailable(error: str, *, source: str = "cboe",
+                           target_dte: int = 30) -> dict:
+    """`data_available=False` 的统一形状：contracts 四个键都在、值为 None，
+    下游可以无脑 `.get("contracts", {}).get("atm_call")` 而不必先判可用。"""
+    return {
+        "data_available": False,
+        "source": source,
+        "error": error,
+        "target_dte": target_dte,
+        "selected_expiry": None,
+        "selected_dte": None,
+        "underlying_price": None,
+        "underlying_price_source": None,
+        "iv30": None,
+        "market_open": None,
+        "fetched_at": None,
+        "contracts": {role: None for role in _QS_ROLES},
+        "atm_straddle_mid": None,
+        "implied_move_pct": None,
+    }
+
+
+def _qs_contract(row: dict, *, role: str, cp: str, strike: float,
+                 expiry: str, dte: int) -> dict:
+    """把一行 CBOE 原始合约整理成持久化形状。价格 4dp；报价不合法时 mid/spread 为 None。"""
+    bid = _qs_num(row.get("bid"))
+    ask = _qs_num(row.get("ask"))
+    # quote_ok：双边有限、bid>0、ask>=bid。bid=0 的 mid 是「一半的 ask」，不是市价——
+    # 拿它当成交价等于凭空造出一个不存在的对手方。
+    quote_ok = bid is not None and ask is not None and bid > 0 and ask >= bid
+    mid = round((bid + ask) / 2.0, 4) if quote_ok else None
+    spread_pct = round((ask - bid) / mid, 4) if (quote_ok and mid) else None
+    return {
+        "symbol": row.get("option"),
+        "type": cp,
+        "role": role,
+        "strike": strike,
+        "expiry": expiry,
+        "dte": dte,
+        "bid": round(bid, 4) if bid is not None else None,
+        "ask": round(ask, 4) if ask is not None else None,
+        "mid": mid,
+        "spread_pct": spread_pct,
+        "iv": _qs_num(row.get("iv")),
+        "delta": _qs_num(row.get("delta")),
+        "gamma": _qs_num(row.get("gamma")),
+        "vega": _qs_num(row.get("vega")),
+        "theta": _qs_num(row.get("theta")),
+        "oi": _qs_num(row.get("open_interest")),
+        "volume": _qs_num(row.get("volume")),
+        "theo": _qs_num(row.get("theo")),
+        "last_trade_time": row.get("last_trade_time"),
+        "quote_ok": quote_ok,
+    }
+
+
+def _qs_pick_row(rows: List[dict]) -> dict:
+    """同 (到期日, 方向, 行权价) 理论上只有一行；万一重复，取 OI 最大的那行。"""
+    return max(rows, key=lambda r: _qs_num(r.get("open_interest")) or 0.0)
+
+
+def select_quote_set(data: dict, S: float, *, target_dte: int = 30,
+                     now: Optional[datetime] = None) -> dict:
+    """从 CBOE 原始 payload 选出 ~target_dte 到期日上的四张合约（纯函数，可离线测）。
+
+    选法：
+      到期日 —— 所有 dte ≥ 7 的候选里取 |dte − target_dte| 最小者，平手取更远的
+                （更远的 theta 更平缓，作为纸面持仓更不吃时间）。
+      ATM    —— 离 S 最近的行权价，**优先 call/put 两边都有的**行权价；
+                ATM call 与 ATM put 同一行权价。
+      25Δ    —— call 取 delta 最接近 +0.25、put 取最接近 −0.25；只在 delta
+                有限且非零的行里选（CBOE 对零流动合约给 delta=0，那不是观测值）。
+    `now` 只用来算 DTE；缺省取 `_pdt_now()`（禁用裸 datetime.now()，见其 docstring）。
+    """
+    today = (now or _pdt_now()).date()
+    S_num = _qs_num(S)
+    if S_num is None or S_num <= 0:
+        return _quote_set_unavailable("underlying price unavailable", target_dte=target_dte)
+
+    # 按到期日分组：expiry -> {"C": {strike: [row,...]}, "P": {...}}
+    by_expiry: Dict[str, Dict[str, Dict[float, List[dict]]]] = {}
+    for row in (data or {}).get("options") or []:
+        if not isinstance(row, dict):
+            continue
+        parsed = _parse_occ(row.get("option", ""))
+        if not parsed:
+            continue
+        expiry, cp, strike = parsed
+        by_expiry.setdefault(expiry, {"C": {}, "P": {}})[cp].setdefault(strike, []).append(row)
+
+    candidates: List[Tuple[str, int]] = []
+    for expiry in by_expiry:
+        try:
+            dte = (datetime.strptime(expiry, "%Y-%m-%d").date() - today).days
+        except ValueError:
+            continue
+        if dte >= _QS_MIN_DTE:
+            candidates.append((expiry, dte))
+    if not candidates:
+        return _quote_set_unavailable(f"no expiry with dte>={_QS_MIN_DTE}",
+                                      target_dte=target_dte)
+
+    # 平手取更远：key 里第二项用 -dte，dte 越大越靠前
+    sel_expiry, sel_dte = min(candidates, key=lambda ed: (abs(ed[1] - target_dte), -ed[1]))
+    calls = by_expiry[sel_expiry]["C"]
+    puts = by_expiry[sel_expiry]["P"]
+
+    # ATM 行权价：优先两边都有的；没有交集才退到任一边的全集
+    both = set(calls) & set(puts)
+    pool = both or (set(calls) | set(puts))
+    contracts: Dict[str, Optional[dict]] = {role: None for role in _QS_ROLES}
+    reasons: Dict[str, str] = {}
+    if pool:
+        atm_strike = min(pool, key=lambda k: (abs(k - S_num), k))
+        if atm_strike in calls:
+            contracts["atm_call"] = _qs_contract(_qs_pick_row(calls[atm_strike]), role="atm_call",
+                                                 cp="C", strike=atm_strike, expiry=sel_expiry, dte=sel_dte)
+        else:
+            reasons["atm_call"] = "no call at atm strike"
+        if atm_strike in puts:
+            contracts["atm_put"] = _qs_contract(_qs_pick_row(puts[atm_strike]), role="atm_put",
+                                                cp="P", strike=atm_strike, expiry=sel_expiry, dte=sel_dte)
+        else:
+            reasons["atm_put"] = "no put at atm strike"
+    else:
+        reasons["atm_call"] = reasons["atm_put"] = "no strikes in selected expiry"
+
+    # 25Δ：只认有限且非零的 delta
+    def _by_delta(side: Dict[float, List[dict]], target: float):
+        best = None
+        for strike, rows in side.items():
+            for row in rows:
+                d = _qs_num(row.get("delta"))
+                if d is None or d == 0.0:
+                    continue
+                dist = abs(d - target)
+                if best is None or dist < best[0]:
+                    best = (dist, strike, row)
+        return best
+
+    c25 = _by_delta(calls, 0.25)
+    if c25:
+        contracts["c25"] = _qs_contract(c25[2], role="c25", cp="C", strike=c25[1],
+                                        expiry=sel_expiry, dte=sel_dte)
+    else:
+        reasons["c25"] = "no delta"
+    p25 = _by_delta(puts, -0.25)
+    if p25:
+        contracts["p25"] = _qs_contract(p25[2], role="p25", cp="P", strike=p25[1],
+                                        expiry=sel_expiry, dte=sel_dte)
+    else:
+        reasons["p25"] = "no delta"
+
+    ac, ap = contracts["atm_call"], contracts["atm_put"]
+    straddle = None
+    if ac and ap and ac["quote_ok"] and ap["quote_ok"]:
+        straddle = round(ac["mid"] + ap["mid"], 4)
+    implied_move = round(straddle / S_num * 100.0, 4) if straddle is not None else None
+
+    return {
+        "data_available": True,
+        "source": "cboe",
+        "error": None,
+        "target_dte": target_dte,
+        "selected_expiry": sel_expiry,
+        "selected_dte": sel_dte,
+        "underlying_price": round(S_num, 4),
+        "underlying_price_source": "caller",
+        "iv30": _qs_num((data or {}).get("iv30")),
+        "market_open": is_market_open(),
+        "fetched_at": _et_now().isoformat(),
+        "contracts": contracts,
+        "missing_reasons": reasons,
+        "atm_straddle_mid": straddle,
+        "implied_move_pct": implied_move,
+    }
+
+
+def fetch_cboe_quote_set(ticker: str, stock_price: float = 0.0, *,
+                         target_dte: int = 30, timeout: int = 15) -> dict:
+    """拉 CBOE 原始链并选四合约报价集；任何失败都返回 `data_available=False` 的 dict
+    （**永不抛错、永不返回 None**——调用方是 analyze() 的出口，不该被它绊倒）。
+
+    快照模式（补跑历史日）下 payload 没有 options 数组，直接诚实返回不可用：
+    补跑那天的真实报价谁也拿不到，用今天的链冒充比缺失更糟。
+    """
+    if _SNAPSHOT_PROVIDER is not None:
+        return _quote_set_unavailable("snapshot mode has no raw chain", target_dte=target_dte)
+
+    data = _fetch_cboe_payload(ticker, timeout)
+    if not data:
+        return _quote_set_unavailable("cboe payload unavailable", target_dte=target_dte)
+
+    S = _qs_num(stock_price)
+    price_source = "caller"
+    if S is None or S <= 0:
+        S, price_source = official_price(data)
+    if not S or S <= 0 or not math.isfinite(S):
+        return _quote_set_unavailable("underlying price unavailable", target_dte=target_dte)
+
+    qs = select_quote_set(data, S, target_dte=target_dte)
+    if qs.get("data_available"):
+        qs["underlying_price_source"] = price_source
+    return qs
+
+
 if __name__ == "__main__":
     import sys
     tk = sys.argv[1] if len(sys.argv) > 1 else "NVDA"

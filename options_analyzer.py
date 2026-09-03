@@ -1833,6 +1833,9 @@ class OptionsAgent:
                                  "error": "期权数据不可用（真实链获取失败）"},
                 "gamma_calendar": {},
                 "full_chain_oi": {},
+                # v0.45.99 四合约报价集：样本链没有真实报价，诚实标不可用
+                "quote_set": {"data_available": False, "source": "none",
+                              "error": "期权数据不可用（真实链获取失败）"},
             }
             # 不写快照：样本结果不冻结，若当日稍后 API 恢复可直接重算
             return result
@@ -2150,6 +2153,24 @@ class OptionsAgent:
         else:
             data_quality = "real"
 
+        # 7.5 (v0.45.99) 四合约报价集：~30 DTE 的 ATM call/put + 25Δ call/put 真实 bid/ask。
+        # 只记账、不进评分——为将来期权纸面交易腿攒数据。只在链来自 CBOE 时才取
+        # （yfinance 链没有 CBOE 原始 payload，25Δ 行权价也早被裁掉了）。
+        # 任何异常都吞掉记 warning：这是出口附属字段，绝不能把整份 analyze 拖死。
+        if options_chain.get("_source") == "cboe":
+            try:
+                from cboe_options import fetch_cboe_quote_set
+                _qs_S = stock_price if (stock_price and _math.isfinite(stock_price)
+                                        and stock_price > 0) else atm_price
+                quote_set = fetch_cboe_quote_set(ticker, _qs_S)
+            except Exception as _e_qs:  # noqa: BLE001 - 附属字段失败不得中断 analyze
+                _log.warning("[%s] 四合约报价集获取失败：%s", ticker, _e_qs)
+                quote_set = {"data_available": False, "source": "cboe",
+                             "error": f"quote set failed: {_e_qs}"}
+        else:
+            quote_set = {"data_available": False, "source": "none",
+                         "error": "chain source is not cboe"}
+
         # 8. 汇总结果
         result = {
             "ticker": ticker,
@@ -2196,6 +2217,9 @@ class OptionsAgent:
             "gamma_calendar": gamma_calendar,
             # v0.25.3: 全链 OI 结构（所有到期日汇总）
             "full_chain_oi": full_chain_oi,
+            # v0.45.99: 四合约报价集（~30 DTE ATM/25Δ 的 bid/ask），只记账不进评分。
+            # 旧快照没有这个键 —— 消费者必须 `.get("quote_set")`。
+            "quote_set": quote_set,
         }
 
         # 方案21: 出口消毒 — 遍历结果 dict，NaN/Inf → 安全默认值
