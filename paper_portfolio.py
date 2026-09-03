@@ -12,6 +12,7 @@ $50,000 股票现货模拟组合，用于透明展示蜂群方向信号的真实
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 
@@ -70,10 +71,32 @@ CONFIG = {
     # ×3 仓位 Calmar 回落、门槛 6.0 风险调整后不划算，均不采用。
     # 样本 3.4 个月偏多头行情——上线后跑 4 周复盘（8 月初，与 bear-hypothesis 复盘同期）。
     "max_deployed_pct": 80.0,   # 30→80：上限用于不卡好信号（回放实测平均在场仅 ~26%）
-    "size_pct_by_tier": {       # 基础仓位占 NAV %（×2）
+    "size_pct_by_tier": {       # 基础仓位占 NAV %（×2）—— sizing_mode="tier" 时生效
         "high": 5.0,            # ⭐⭐⭐ 高置信（2.5→5.0）
         "mid": 3.0,             # ⭐⭐ 中置信（1.5→3.0）
         "low": 0.0,             # ⚠️ 低置信跳过
+    },
+    # ── v0.45.100 波动率目标仓位（替代 v0.39.0 的固定分档）────────────────────
+    # 固定分档让 σ=15% 的 KO 和 σ=90% 的 MSTR 拿同样 5% NAV，单仓对组合的
+    # 波动贡献差 6 倍——组合风险实际由几只高波动票决定。改为按标的自身
+    # 20 日年化波动（pheromone.db signal_archive 的 price.volatility_20d，
+    # 年化 %，与 data_pipeline 口径一致）反比定仓：size_pct = target / σ。
+    # 用的是波动**水平**（横截面高度持久，IC +0.71），不是波动变化的预测。
+    # `sizing_mode: "tier"` 逐字节还原旧算法，供 run_replay 对照历史。
+    # 波动率缺失/非有限/≤0 时**显式**回落到分档算法，并把 tier_fallback 写进
+    # 仓位记录的 sizing 字段与 rationale——静默换成默认数字是本项目的老病。
+    "sizing_mode": "vol_target",          # "vol_target" | "tier"
+    "vol_target": {
+        "target_position_vol_pct": 1.75,  # 每仓对 NAV 的年化波动贡献目标（%）。校准：σ=35% 的中位标的 → 5% NAV，与旧 high 档持平
+        # ⚠️ 这两个钳的是**置信乘数之前**的 target/σ 百分比，不是最终 NAV 占比。
+        # 钳位在前、conf_multiplier 在后（顺序由 test_clamp_applies_before_conf_multiplier
+        # 钉死，是有意的：先把 σ 极端值拉回可交易区间，再按置信缩放）。
+        # 实测最终 NAV 占比：high(×1.0) 落 1.5–8.0%，mid(×0.6) 落 0.90–4.8%
+        # （σ=200% 的票 mid 档只有 0.90% NAV）。别把下面两个数当 NAV 边界读。
+        "size_pct_min": 1.5,              # 钳位下限（%，乘 conf 之前）：σ 极高的票也不至于小到没意义
+        "size_pct_max": 8.0,              # 钳位上限（%，乘 conf 之前）：σ 极低的票不能无限放大
+        "conf_multiplier": {"high": 1.0, "mid": 0.6, "low": 0.0},   # 保留置信分层的相对比例（旧 5:3）
+        "vol_source_max_age_days": 5,     # 用 as_of 当日或最近 5 天内的 volatility_20d
     },
     # ⚠️ v0.45.12 (2026-08-25) 中性化 —— 与 TICKER_ACCURACY_FEEDBACK 同一前提被否。
     # 本表假设标的历史胜率可外推，但走查检验（experiments/ticker_winrate_persistence.py）
@@ -125,6 +148,10 @@ class Position:
     confidence: str         # high/mid/low
     score: float            # 蜂群评分
     rationale: str          # 入场依据简述
+    # v0.45.100：仓位算法留痕（"tier" / "vol_target(σ=35.0%→5.0%)" /
+    # "tier_fallback(no_vol)"）。必须带默认值且排最后——旧 positions.jsonl
+    # 没有这个字段，Position(**p) 才能继续加载。
+    sizing: str = ""
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -338,14 +365,34 @@ def _fetch_ohlc(ticker: str, start: str, end: str) -> Dict[str, Dict]:
             _PRICE_CACHE[key] = {}
             return {}
         out = {}
+        _dropped = 0
         for idx, row in hist.iterrows():
             date_str = idx.strftime("%Y-%m-%d")
-            out[date_str] = {
-                "Open": float(row["Open"]),
-                "High": float(row["High"]),
-                "Low": float(row["Low"]),
-                "Close": float(row["Close"]),
-            }
+            # ── v0.45.97：**含 NaN 的 bar 一律丢掉，不许流向下游。** ──
+            # 2026-08-28 全站 HTTPS 断掉那天，TMUS 的 Close 是 NaN，
+            # 却照样触发了 TIME 止损：`_check_exit` 返回 ("TIME", NaN, d)
+            # → `gross_pct` NaN → `pnl_usd` NaN → `cash += size_usd + pnl`
+            # → **cash 从此永久 NaN**，此后每天 NAV、每个新仓的 size_usd
+            # 全是 NaN（NaN 会穿过 `size_usd <= 1` 和 `entry_price <= 0`
+            # 两道守卫，因为 NaN 的任何比较都返回 False）。8/28→9/2 四个
+            # 扫描日的净值就是这么烂掉的。
+            # 在这里挡是因为它是唯一的源头：_check_exit / _mark_to_market
+            # 都从这份 dict 取数，堵住出口就不必在每个消费者各补一遍。
+            # 丢掉 bar 的后果是良性的：该日不触发出场，等到有真实价格的
+            # 下一个交易日再触发（TIME 的判据是 `dt >= time_stop`，不会漏）。
+            try:
+                _o, _h, _l, _c = (float(row["Open"]), float(row["High"]),
+                                  float(row["Low"]), float(row["Close"]))
+            except (TypeError, ValueError):
+                _dropped += 1
+                continue
+            if not all(math.isfinite(v) for v in (_o, _h, _l, _c)):
+                _dropped += 1
+                continue
+            out[date_str] = {"Open": _o, "High": _h, "Low": _l, "Close": _c}
+        if _dropped:
+            _log.warning("_fetch_ohlc %s：丢弃 %d 根含非有限值的日线（该日不出场，顺延到有真实价格那天）",
+                         ticker, _dropped)
         _PRICE_CACHE[key] = out
         return out
     except Exception as _e_ohlc:
@@ -405,20 +452,138 @@ def _should_open(snapshot: Dict, existing_tickers: set, as_of: str = "") -> Tupl
     return True, f"{direction} score={score:.1f} conf={conf}"
 
 
+# v0.45.100：(ticker, as_of, db_path) → 年化波动 % 或 None。同一次 run_for_date
+# 每个候选标的只查一次库；测试的 autouse fixture 负责清空。
+_VOL_ANN_CACHE: Dict[Tuple[str, str, str, int], Optional[float]] = {}
+
+_VOL_SIGNAL = "price.volatility_20d"
+
+# 合法的 sizing_mode。run_for_date 入口与 _compute_position_size 共用同一张表——
+# 两处各写一遍字面量，迟早会有一处漏更（v0.45.104）。
+_SIZING_MODES = ("vol_target", "tier")
+
+
+def _lookup_vol_ann(ticker: str, as_of: str,
+                    db_path: Optional[Path] = None) -> Optional[float]:
+    """读 signal_archive 里 as_of 当日或最近 max_age_days 内的 20 日年化波动（%）。
+
+    只取 date <= as_of 的行（禁止前视），窗口外 / 缺表 / 缺库 / 非有限 / <=0
+    一律返回 None——由调用方显式降级，本函数不给默认数字。
+    """
+    import sqlite3
+
+    db = Path(db_path) if db_path is not None else BASE_DIR / "pheromone.db"
+    # v0.45.104：max_age 必须进 key。它是**查询条件的一部分**（下面的 since 由它算），
+    # 却曾被漏在 key 之外：同进程里先用 max_age=1 查出 None，再改成 max_age=10
+    # 重查，拿回的是缓存里那个 None——一次 run_replay 的窗口覆盖会污染下一次。
+    # 实测：4 天前的一行，narrow(1)→None 之后 wide(10) 仍然 None（清缓存则 40.0）。
+    max_age = int(CONFIG["vol_target"]["vol_source_max_age_days"])
+    key = (ticker, as_of, str(db), max_age)
+    if key in _VOL_ANN_CACHE:
+        return _VOL_ANN_CACHE[key]
+
+    try:
+        since = (datetime.strptime(as_of, "%Y-%m-%d")
+                 - timedelta(days=max_age)).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        _log.warning("_lookup_vol_ann: as_of=%r 不是 YYYY-MM-DD，按缺失处理", as_of)
+        return None
+
+    val: Optional[float] = None
+    # 同 vol_forecast.load_day 的判法：exists() 而非匹配错误文本——
+    # 「文件不存在」与「权限被拒」的 OperationalError 消息一模一样。
+    if db.exists():
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            row = con.execute(
+                "SELECT value FROM signal_archive "
+                "WHERE ticker = ? AND signal = ? AND date <= ? AND date >= ? "
+                "ORDER BY date DESC LIMIT 1",
+                (ticker, _VOL_SIGNAL, as_of, since),
+            ).fetchone()
+        except sqlite3.OperationalError as e:
+            # 只吞「表不存在」（全新库 / 未 backfill）。`database is locked`
+            # 是瞬时可重试状态，不是"没数据"，必须往上抛。
+            if "no such table" not in str(e):
+                raise
+            row = None
+        finally:
+            con.close()
+        if row is not None and row[0] is not None:
+            try:
+                v = float(row[0])
+            except (TypeError, ValueError):
+                v = float("nan")
+            # bool(nan) is True，`<= 0` 也放 NaN 过去——先 isfinite
+            if math.isfinite(v) and v > 0:
+                val = v
+
+    _VOL_ANN_CACHE[key] = val
+    return val
+
+
+def _tier_size_pct(conf: str) -> float:
+    return float(CONFIG["size_pct_by_tier"].get(conf, 0.0))
+
+
 def _compute_position_size(
     nav: float,
     conf: str,
     ticker: str,
     closed: List[Dict],
     low_conviction: bool = False,
-) -> float:
-    base_pct = CONFIG["size_pct_by_tier"].get(conf, 0.0)
+    as_of: str = "",
+    vol_ann: Optional[float] = None,
+) -> Tuple[float, str]:
+    """返回 (size_usd, sizing_note)。
+
+    sizing_mode="tier"：v0.39.0 固定分档，逐字节等于旧算法，note="tier"。
+    sizing_mode="vol_target"（v0.45.100）：
+        size_pct = clamp(target / σ × 100, min, max) × conf_multiplier[conf]
+      σ 取 vol_ann（年化 %），未给则查 signal_archive；查不到 → 退回分档，
+      note="tier_fallback(no_vol)" 并打 warning——降级必须在仓位记录里可见。
+    两种模式之后都再乘 _size_multiplier，低置信仍减半。
+    """
+    mode = CONFIG.get("sizing_mode", "tier")
+    note = "tier"
+    if mode == "vol_target":
+        vt = CONFIG["vol_target"]
+        if vol_ann is None:
+            vol_ann = _lookup_vol_ann(ticker, as_of)
+        # NaN / inf / <=0 与缺失同等对待（bool(nan) is True，不能靠真值判断）。
+        # v0.45.104 删掉了这里的 `isinstance(vol_ann, bool)`：_lookup_vol_ann 只
+        # 返回 float(row[0]) 或 None，生产上没有任何调用方传 vol_ann，这条永不触发。
+        # 保留 `isinstance(..., (int, float))` 是另一件事——它挡的是下一行
+        # math.isfinite 在非数字入参上直接 TypeError（vol_ann 是公开 kwarg）。
+        if (not isinstance(vol_ann, (int, float))
+                or not math.isfinite(vol_ann) or vol_ann <= 0):
+            vol_ann = None
+        if vol_ann is None:
+            _log.warning("[仓位] %s @ %s 无可用 volatility_20d（≤%d 天内），"
+                         "退回分档仓位", ticker, as_of or "?",
+                         int(vt["vol_source_max_age_days"]))
+            base_pct = _tier_size_pct(conf)
+            note = "tier_fallback(no_vol)"
+        else:
+            raw_pct = float(vt["target_position_vol_pct"]) / float(vol_ann) * 100.0
+            lo, hi = float(vt["size_pct_min"]), float(vt["size_pct_max"])
+            clamped = min(max(raw_pct, lo), hi)
+            base_pct = clamped * float(vt["conf_multiplier"].get(conf, 0.0))
+            clamp_tag = ("" if clamped == raw_pct
+                         else (",clamp_min" if clamped == lo else ",clamp_max"))
+            note = f"vol_target(σ={vol_ann:.1f}%→{base_pct:.1f}%{clamp_tag})"
+    elif mode == "tier":
+        base_pct = _tier_size_pct(conf)
+    else:
+        raise ValueError(f"CONFIG['sizing_mode']={mode!r} 未知，"
+                         f"只认 {' / '.join(repr(m) for m in _SIZING_MODES)}")
+
     mult = _size_multiplier(ticker, closed)
     size = nav * (base_pct / 100.0) * mult
     # 低方向置信（v0.22.0）：IV 偏高 + 共振未触发 + 分数模糊区间 → 仓位减半
     if low_conviction:
         size *= 0.5
-    return size
+    return size, note
 
 
 def _open_position(
@@ -433,15 +598,19 @@ def _open_position(
     direction = snapshot["direction"]
     conf = _infer_confidence(snapshot)
     low_conv = bool(snapshot.get("low_conviction", False))
-    size_usd = _compute_position_size(nav, conf, ticker, closed, low_conviction=low_conv)
-    if size_usd <= 1:
+    size_usd, sizing_note = _compute_position_size(
+        nav, conf, ticker, closed, low_conviction=low_conv, as_of=as_of)
+    # v0.45.97：`size_usd <= 1` 挡不住 NaN（NaN 的任何比较都返回 False），
+    # 于是 NaN 会一路走到 `shares = size_usd / entry_price` 变成 NaN 仓位。
+    if not isinstance(size_usd, (int, float)) or not math.isfinite(size_usd) or size_usd <= 1:
         return None
 
     # 入场价：用 snapshot 的 entry_price 或当日 Close
     entry_price = float(snapshot.get("entry_price") or 0)
-    if entry_price <= 0 and as_of in ticker_ohlc:
+    if (not math.isfinite(entry_price) or entry_price <= 0) and as_of in ticker_ohlc:
         entry_price = ticker_ohlc[as_of]["Close"]
-    if entry_price <= 0:
+    # v0.45.97：同上，`<= 0` 放 NaN 过去
+    if not math.isfinite(entry_price) or entry_price <= 0:
         return None
 
     # SL / TP 价位
@@ -463,6 +632,8 @@ def _open_position(
     rationale = f"score={_cs_txt} · {conf}"
     if low_conv:
         rationale += " · ⚠️低置信-减半仓"
+    if sizing_note:
+        rationale += f" · {sizing_note}"
 
     return Position(
         ticker=ticker,
@@ -477,6 +648,7 @@ def _open_position(
         confidence=conf,
         score=float(snapshot.get("composite_score") or 0),
         rationale=rationale,
+        sizing=sizing_note,
     )
 
 
@@ -684,6 +856,14 @@ def run_for_date(as_of: str, verbose: bool = False) -> Dict:
     2. 读取当日符合条件的报告 → 开新仓
     3. 更新 equity curve
     """
+    # v0.45.104：模式名打错必须**当天**就炸，不能等到"今天恰好有候选要开仓"。
+    # _compute_position_size 里的 ValueError 只在 _open_position 路径上抛，
+    # 没有合格候选的日子会一路静默跑完（照常写 equity），一份错配置可以潜伏好几天。
+    _mode = CONFIG.get("sizing_mode", "tier")
+    if _mode not in _SIZING_MODES:
+        raise ValueError(f"CONFIG['sizing_mode']={_mode!r} 未知，"
+                         f"只认 {' / '.join(repr(m) for m in _SIZING_MODES)}")
+
     meta = _load_meta()
     positions = [Position(**p) for p in _load_jsonl(POSITIONS_FILE)]
     closed = _load_jsonl(CLOSED_FILE)
@@ -714,6 +894,15 @@ def run_for_date(as_of: str, verbose: bool = False) -> Dict:
     snapshots = _load_snapshots_for_date(as_of)
     existing_tix = {p.ticker for p in positions}
     nav_for_sizing = cash + sum(p.size_usd for p in positions)  # 简化：用 cost basis 做 NAV
+    # v0.45.97：纵深防御。上面三处已堵住已知的 NaN 来源，但只要 cash 或任何
+    # 一条 size_usd 再次变成非有限值，这里就会静默地把 NaN 传给每一个新仓。
+    # 宁可当天不开仓并大声报错，也不要写出 NaN 仓位——NaN 一旦落盘，
+    # 之后每一天的 NAV 都继承它，且无法从状态文件反推出原始数值。
+    if not math.isfinite(nav_for_sizing):
+        _log.error("[PaperPortfolio] %s NAV 非有限值（cash=%r，持仓 %d 条）——"
+                   "本日不开新仓。请检查 closed_trades.jsonl 最近是否有 NaN 出场价。",
+                   as_of, cash, len(positions))
+        snapshots = []
 
     # 先按 score 排序，保证高分优先吃到资金
     snapshots.sort(key=lambda s: abs(float(s.get("composite_score") or 5) - 5), reverse=True)
@@ -822,7 +1011,9 @@ def run_replay(config_overrides: Dict, state_dir: Path,
 
     Args:
         config_overrides: 要覆盖的 CONFIG 键值（如 entry_score_bull /
-            size_pct_by_tier / max_deployed_pct / tp_pct）
+            size_pct_by_tier / max_deployed_pct / tp_pct）。
+            v0.45.100 起默认 sizing_mode="vol_target"；要复现 v0.39.0～v0.45.99
+            的旧数字必须显式传 {"sizing_mode": "tier"}。
         state_dir: 沙盒状态目录（调用方负责唯一性；已存在则续跑）
         dates: 要回放的日期列表；None = 全部 snapshot 日期（含 bootstrap_date 过滤）
 
@@ -838,8 +1029,15 @@ def run_replay(config_overrides: Dict, state_dir: Path,
     state_dir.mkdir(parents=True, exist_ok=True)
 
     _orig_paths = (POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE)
-    _orig_config = {k: (dict(v) if isinstance(v, dict) else v) for k, v in CONFIG.items()}
+    # v0.45.100：vol_target.conf_multiplier 是二层嵌套，一层 dict(v) 拷贝挡不住
+    # 就地改内层的覆盖泄漏到生产 CONFIG——用 deepcopy 封死。
+    _orig_config = copy.deepcopy(CONFIG)
     _REPLAY_MODE = True  # v0.40.0: 回放期间屏障结果不回写生产 pheromone.db
+    # v0.45.104：σ 缓存是模块级的，`_VOL_ANN_CACHE.clear()` 此前在全模块里一次
+    # 都没有出现过——同一进程里连跑多个沙盒（weekly_optimizer 的参数网格就是
+    # 这么跑的）会互相串味：上一轮 vol_source_max_age_days 下查出的 None
+    # 原样回给下一轮。进出各清一次，沙盒之间彻底隔开。
+    _VOL_ANN_CACHE.clear()
     try:
         POSITIONS_FILE = state_dir / "positions.jsonl"
         CLOSED_FILE = state_dir / "closed_trades.jsonl"
@@ -864,6 +1062,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
         POSITIONS_FILE, CLOSED_FILE, EQUITY_FILE, META_FILE = _orig_paths
         CONFIG.clear()
         CONFIG.update(_orig_config)
+        _VOL_ANN_CACHE.clear()   # 沙盒里攒的 σ 不得漏进生产 run_for_date
         _REPLAY_MODE = False
 
 
@@ -977,6 +1176,21 @@ def _render_sparkline_svg(nav_series: List[Tuple[str, float]], width: int = 320,
             f'</svg>')
 
 
+def _sizing_rule_text() -> str:
+    """组合卡片「规则」行里描述当前生效的仓位算法（v0.45.100）。"""
+    if CONFIG.get("sizing_mode", "tier") == "vol_target":
+        vt = CONFIG["vol_target"]
+        cm = vt["conf_multiplier"]
+        # v0.45.104：曾写作「钳位 1.5–8.0% NAV」——那不是 NAV 边界。钳位作用在
+        # 乘置信乘数**之前**的 target/σ 百分比上，mid 档（×0.6）实测只落
+        # 0.90–4.8% NAV。卡片不能声称一个代码并不执行的区间。
+        return (f'波动率目标仓位：单仓年化波动贡献 {vt["target_position_vol_pct"]}% NAV'
+                f'（仓位 = 目标/σ₂₀，置信乘数前钳位 {vt["size_pct_min"]}–{vt["size_pct_max"]}%）'
+                f' · 高置信 ×{cm["high"]} / 中置信 ×{cm["mid"]} · 无 σ 时退回分档')
+    t = CONFIG["size_pct_by_tier"]
+    return f'高置信 {t["high"]}% NAV / 中置信 {t["mid"]}%'
+
+
 def render_portfolio_card() -> str:
     """渲染 $50k PaperPortfolio 卡片 HTML（插入到 CH0 或顶层）"""
     kpi = compute_kpis()
@@ -1008,6 +1222,14 @@ def render_portfolio_card() -> str:
                 if isinstance(kpi.get("spy_return_pct"), (int, float)) else "—")
     _alpha_txt = ("Alpha " + format(kpi["alpha_pct"], "+.2f") + "%"
                   if _alpha_known else "Alpha 不可用")
+
+    # v0.45.104：降级可见性。Position.sizing 此前只落在 positions.jsonl 与
+    # rationale 里，卡片一个字都不渲染——"降级必须可见"只对会去开 jsonl 的人
+    # 成立。把退回分档的仓数摆到人真正会看的地方。
+    _n_fb = sum(1 for p in positions
+                if str(p.get("sizing", "")).startswith("tier_fallback"))
+    _fallback_txt = (f'⚠️ 今日 {_n_fb}/{len(positions)} 仓退回分档（无可用 σ₂₀，'
+                     f'按置信档位定仓）<br>' if _n_fb else '')
 
     # 持仓表格
     pos_rows = ""
@@ -1135,7 +1357,8 @@ def render_portfolio_card() -> str:
         # 规则说明
         '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border2);'
         'font-size:10px;color:var(--text3);line-height:1.6;">'
-        f'⚙️ 规则：高置信 {CONFIG["size_pct_by_tier"]["high"]}% NAV / 中置信 {CONFIG["size_pct_by_tier"]["mid"]}% · '
+        f'{_fallback_txt}'
+        f'⚙️ 规则：{_sizing_rule_text()} · '
         f'−{CONFIG["sl_pct"]}% SL / +{CONFIG["tp_pct"]}% TP / T+{CONFIG["time_stop_days"]} 强平 · '
         f'最大并行 {CONFIG["max_positions"]} 仓位 · 最大部署 {CONFIG["max_deployed_pct"]}% NAV<br>'
         '📎 含 trading_costs.py 成本（滑点 + 佣金 + 借券费）· 股票现货模拟 · 不含期权'

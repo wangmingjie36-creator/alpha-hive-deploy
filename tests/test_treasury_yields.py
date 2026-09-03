@@ -29,6 +29,13 @@ _XML = """<feed><entry><content><m:properties>
 <d:BC_2YEAR>4.20</d:BC_2YEAR><d:BC_5YEAR>4.38</d:BC_5YEAR><d:BC_10YEAR>4.67</d:BC_10YEAR>
 </m:properties></content></entry></feed>"""
 
+# 另一个月的曲线。值与 8 月**刻意全不相同**：跨月测试要能看出「拿错了月份」，
+# 而不只是「抓了几次」。
+_XML_SEPT = """<feed><entry><content><m:properties>
+<d:NEW_DATE>2026-09-02T00:00:00</d:NEW_DATE>
+<d:BC_2YEAR>4.01</d:BC_2YEAR><d:BC_5YEAR>4.11</d:BC_5YEAR><d:BC_10YEAR>4.21</d:BC_10YEAR>
+</m:properties></content></entry></feed>"""
+
 
 class TestParse:
     def test_extracts_all_tenors(self):
@@ -86,6 +93,18 @@ class TestGetYieldCurve:
         assert ty.get_yield_curve() is None
 
     def test_caches_within_ttl(self, monkeypatch):
+        """同月的两次调用只抓一次。
+
+        月份必须钉死后再配对：不带参数那次的缓存键取 **ET 当前月**，带
+        `date=` 那次取参数里的月。原先这里让前者跟着挂钟走、后者写死
+        "2026-08-26"，只在挂钟停在 2026-08 时成立 —— 2026-09-01 一到就
+        自动变红（两次落进不同月桶 → 抓两次），与任何代码改动无关。
+        见 MEMORY v0.45.72「fixture 日期没从被测日期倒推」。
+
+        钉住 `_et_month` 顺带让 `_XML` 的月份与缓存键一致，第二次调用因此
+        真的取到行 —— 否则它返回 None，这条测试就只是在数抓取次数。
+        """
+        monkeypatch.setattr(ty, "_et_month", lambda: "202608")
         calls = {"n": 0}
 
         def _f(*a, **k):
@@ -93,9 +112,29 @@ class TestGetYieldCurve:
             return _XML
 
         monkeypatch.setattr(ty, "_fetch_month", _f)
-        ty.get_yield_curve()
-        ty.get_yield_curve("2026-08-26")     # 同月，应复用
+        assert ty.get_yield_curve()["date"] == "2026-08-27"
+        assert ty.get_yield_curve("2026-08-26")["y10"] == 4.66   # 同月，应复用
         assert calls["n"] == 1
+
+    def test_cache_key_is_per_month(self, monkeypatch):
+        """跨月必须各抓各的，且各拿各月的数。
+
+        与 `test_caches_within_ttl` 成对，缺一不可：只有「同月复用」那条时，
+        把缓存键换成常量（所有月份共用一个桶）照样全绿 —— 而那会让 9 月的
+        调用默默拿到 8 月的曲线，正是本模块开篇拒绝的那种「取到了错值却
+        与真值无法区分」。
+        """
+        monkeypatch.setattr(ty, "_et_month", lambda: "202609")
+        seen = []
+
+        def _f(yyyymm, *a, **k):
+            seen.append(yyyymm)
+            return _XML_SEPT if yyyymm == "202609" else _XML
+
+        monkeypatch.setattr(ty, "_fetch_month", _f)
+        assert ty.get_yield_curve()["date"] == "2026-09-02"
+        assert ty.get_yield_curve("2026-08-26")["y10"] == 4.66, "8 月的查询拿到了别月的曲线"
+        assert seen == ["202609", "202608"], f"缓存键不是按月分桶：{seen}"
 
 
 class TestRetry:

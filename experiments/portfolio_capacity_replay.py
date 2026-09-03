@@ -95,6 +95,8 @@ def run_grid(dates, sandbox_root: Path):
     for i, (e, m, d, t) in enumerate(combos, 1):
         overrides = {
             "entry_score_bull": e,
+            # v0.45.100：默认仓位算法改为 vol_target，本实验扫的是分档乘数，必须钉回 tier
+            "sizing_mode": "tier",
             "size_pct_by_tier": {k: v * m for k, v in BASE_TIER.items()},
             "max_deployed_pct": d,
             "tp_pct": t,
@@ -140,6 +142,7 @@ def main():
     for r in top:
         overrides = {
             "entry_score_bull": r["e"],
+            "sizing_mode": "tier",  # v0.45.100：同上
             "size_pct_by_tier": {k: v * r["m"] for k, v in BASE_TIER.items()},
             "max_deployed_pct": r["d"],
             "tp_pct": r["t"],

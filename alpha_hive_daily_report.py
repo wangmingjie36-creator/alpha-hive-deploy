@@ -823,7 +823,13 @@ class AlphaHiveDailyReporter:
             _snap_dir = os.path.join(str(self.report_dir), "report_snapshots")
             # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
             # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
-            _fb_analyzer = _FBAnalyzer(directory=_snap_dir, clean_t7=True)
+            # v0.45.98：显式传 close_t7_db_path=self.report_dir/"pheromone.db"，
+            # 与上一行 _snap_dir 用同一个基准目录（self.report_dir），不用
+            # feedback_loop.py 的 __file__ 相对缺省值——否则 snapshots 和
+            # close_t7 库可能来自两个不同目录，worktree 场景下已实测会不一致。
+            _fb_analyzer = _FBAnalyzer(
+                directory=_snap_dir, clean_t7=True,
+                close_t7_db_path=self.report_dir / "pheromone.db")
             if _fb_analyzer.snapshots:
                 _suggestion = _fb_analyzer.suggest_weight_adjustments()
                 if _suggestion and _suggestion.get("new_weights"):
@@ -1198,6 +1204,73 @@ class AlphaHiveDailyReporter:
                       (_pp_result or {}).get("nav", "?"))
         except Exception as e:
             _log.warning("纸面组合更新失败(非致命): %s", e)
+
+        # ── v0.45.101: 财报事件波动率信号 + 期权纸面跨式腿（观察项）──
+        # 读当日 options_snapshot 的 quote_set（v0.45.99）算隐含/历史事件波动比值，
+        # 回填已过财报的实际波动，再驱动独立的跨式账本。三步各自幂等；
+        # 任何失败只记 warning，绝不拖死日报。
+        try:
+            import earnings_vol_signal as _evs
+            import options_paper_leg as _opl
+            _ev_signals = _evs.scan(self.date_str,
+                                    upcoming_fn=self._earnings_date_from_swarm(swarm_results))
+            _ev_settled = _evs.settle_signals(self.date_str)
+            _opl_result = _opl.run_for_date(self.date_str, signals=_ev_signals)
+            _log.info("期权纸面腿已更新: %s (信号 %d / 合格 %d / 回填 %d / nav=%s)",
+                      self.date_str, len(_ev_signals),
+                      sum(1 for _s in _ev_signals if _s.get("eligible")), _ev_settled,
+                      (_opl_result or {}).get("nav", "?"))
+        except Exception as e:
+            _log.warning("期权纸面腿更新失败(非致命): %s", e)
+
+        # ── v0.45.102: 方差风险溢价（VRP）信号 —— 只记录与结算，不下注 ──
+        # 读当日 options_snapshot 的 iv_raw_observed / rv_30d 记一行 IV−RV，再给
+        # 21 个交易日前的旧行回填事后 RV。逐票时序、闸门 63 条；同日重跑幂等。
+        try:
+            import vrp_signal as _vrp
+            _vrp_rows = _vrp.record_day(self.date_str)
+            _vrp_settled = _vrp.settle(self.date_str)
+            _log.info("VRP 信号已更新: %s (记录 %d / ready %d / 结算 %d)",
+                      self.date_str, len(_vrp_rows),
+                      sum(1 for _r in _vrp_rows if _r.get("ready")), _vrp_settled)
+        except Exception as e:
+            _log.warning("VRP 信号更新失败(非致命): %s", e)
+
+        # ── v0.45.103: 组合 Greeks 聚合 + β·Delta 带状对冲（纸面 SPY 覆盖）──
+        # 读股票纸面组合 + 跨式腿持仓（都只读），CBOE 重新报价、60 日 OLS β，
+        # 合并 NAV 折百分比；β·$Delta 出 ±15% 带才在独立的 hedge_state/ 账本里
+        # 用 SPY 股票拉回带边。缺 β/缺价/缺报价 → partial → 一律不对冲。同日重跑幂等。
+        try:
+            import portfolio_greeks as _pg
+            _pg_result = _pg.run_for_date(self.date_str)
+            _pg_agg = (_pg_result or {}).get("aggregate") or {}
+            _pg_rec = (_pg_result or {}).get("recommendation") or {}
+            _log.info("组合 Greeks 已更新: %s (行 %d / β·Δ %s%% NAV / %s / %s %+d SPY%s)",
+                      self.date_str, len((_pg_result or {}).get("rows") or []),
+                      (_pg_agg.get("pct_nav") or {}).get("beta_dollar_delta"),
+                      _pg_agg.get("band_status"), _pg_rec.get("action"),
+                      int(_pg_rec.get("spy_shares") or 0),
+                      " / 已成交" if (_pg_result or {}).get("executed") else "")
+        except Exception as e:
+            _log.warning("组合 Greeks 更新失败(非致命): %s", e)
+
+        # ── v0.45.104: 三个新小节必须在**这里**回填，不能在 _build_swarm_report 里拼 ──
+        # 二次复查实测：`_build_swarm_report`（run_swarm_scan 里早一行）先渲染 markdown，
+        # `_post_scan_notify`（本方法）才跑上面三个钩子。于是渲染层读到的是钩子跑之前的
+        # 状态——VRP 小节 `rows_for_date(today)` 恒空 → **返回空串，小节一天都不出现**；
+        # 期权纸面腿恒显示"扫描 0 个快照"、持仓标记停在昨天；组合 Greeks 只好退回
+        # `run_for_date(execute=False)` 把整套计算重做一遍，且渲染的是对冲成交前的状态。
+        # 这与 v0.45.57 的失效条件是同一个坑（见本方法开头 1067 行的注释），
+        # 修法也照抄那次：`report` 是可变 dict 且在 run_swarm_scan 返回后才被
+        # save_report/部署消费，所以在钩子跑完后追加即可。
+        try:
+            _extra_md = (self._options_paper_leg_markdown()
+                         + self._vrp_markdown()
+                         + self._portfolio_greeks_markdown())
+            if _extra_md:
+                report["markdown_report"] = (report.get("markdown_report") or "") + _extra_md
+        except Exception as e:
+            _log.warning("期权/VRP/Greeks 小节回填失败(非致命): %s", e)
 
         # ── T+1/T+7/T+30 实际价格回填（后台执行，不阻塞主流程）──
         try:
@@ -1698,6 +1771,82 @@ class AlphaHiveDailyReporter:
             "",
         ]
         return "\n".join(lines)
+
+    @staticmethod
+    def _earnings_date_from_swarm(swarm_results: Dict):
+        """v0.45.104：财报日改从**本轮扫描已有的** ChronosBee 催化剂里取，不再重打 yfinance。
+
+        二次复查实测：`earnings_vol_signal.scan` 原先对每只通过报价预检的票各调一次
+        `EarningsWatcher.get_earnings_date`（走 `stock.calendar`），而 ChronosBee 在
+        同一轮扫描里早就取过同一个数据 —— 2026-09-02 的 `.swarm_results` 里 28/30 只
+        票带着 `type == "earnings"` 的催化剂。而 `earnings_cache/*_date.json` 的 TTL 是
+        12 小时、扫描每天跑一次，所以那 30 次调用**每天都是真打网**（实测该目录 24 个
+        文件最新停在 8/9，今天一个都没刷新）。yfinance 429 是本项目头号数据丢失原因，
+        限流后每次约 2s + 2s，白白多花约两分钟。
+
+        降级语义（区分「没有财报」与「蜂没跑出来」）：
+          · 该票有催化剂、但没有 earnings 条目 → 视野内确实没有财报 → None（零成本）
+          · 该票**完全没有**催化剂（蜂失败，9/2 是 WMT/SNOW 两只）→ **本函数自己**
+            延迟构造 `EarningsWatcher` 兜底（每天至多几次调用）
+
+        ⚠️ 兜底必须写在这里：`scan` 的 `upcoming_fn = upcoming_fn or _upcoming` 只在
+        **参数为 None** 时替换整个函数，不会因为某一只票返回 None 就回退。早先这段
+        注释写的是「由 scan 兜底」而代码做不到 —— 正是本轮复查在别处抓到的
+        「注释说的和代码做的不是一回事」。
+        """
+        _watcher_box: list = []      # 延迟构造：没有票需要兜底时一次都不建
+
+        def _fallback(ticker: str):
+            try:
+                if not _watcher_box:
+                    from earnings_watcher import EarningsWatcher
+                    _watcher_box.append(EarningsWatcher())
+                return _watcher_box[0].get_earnings_date(ticker)
+            except Exception as exc:  # noqa: BLE001 - 兜底失败按「没有财报日」处理
+                _log.warning("[%s] 财报日兜底获取失败: %s", ticker, exc)
+                return None
+
+        def _fn(ticker: str):
+            det = ((swarm_results.get(ticker) or {}).get("agent_details") or {})
+            chronos = (det.get("ChronosBeeHorizon") or {}).get("details") or {}
+            cats = chronos.get("catalysts")
+            if not cats:
+                return _fallback(ticker)     # 蜂失败 → 打一次 yfinance
+            for c in cats:
+                if c.get("type") == "earnings" and c.get("date"):
+                    return {"earnings_date": str(c["date"])[:10],
+                            # ⚠️ 与 EarningsWatcher 一样是**假定值**不是观测值
+                            "earnings_time": "AMC",
+                            "source": "chronos_bee_catalyst"}
+            return {"earnings_date": None, "source": "chronos_bee_no_earnings"}
+        return _fn
+
+    def _options_paper_leg_markdown(self) -> str:
+        """v0.45.101 期权纸面腿小节；任何失败返回空串，不影响日报。"""
+        try:
+            import options_paper_leg as _opl
+            return _opl.render_markdown(self.date_str) or ""
+        except Exception as e:  # noqa: BLE001
+            _log.warning("期权纸面腿小节渲染失败(非致命): %s", e)
+            return ""
+
+    def _vrp_markdown(self) -> str:
+        """v0.45.102 VRP 信号小节；任何失败返回空串，不影响日报。"""
+        try:
+            import vrp_signal as _vrp
+            return _vrp.render_markdown(self.date_str) or ""
+        except Exception as e:  # noqa: BLE001
+            _log.warning("VRP 信号小节渲染失败(非致命): %s", e)
+            return ""
+
+    def _portfolio_greeks_markdown(self) -> str:
+        """v0.45.103 组合 Greeks / 对冲小节；任何失败返回空串，不影响日报。"""
+        try:
+            import portfolio_greeks as _pg
+            return _pg.render_markdown(self.date_str) or ""
+        except Exception as e:  # noqa: BLE001
+            _log.warning("组合 Greeks 小节渲染失败(非致命): %s", e)
+            return ""
 
     @staticmethod
     def _format_score_adjustments(*args, **kwargs):

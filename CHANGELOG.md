@@ -5,9 +5,851 @@
 
 ---
 
+## [0.45.104] — 2026-09-03 — 期权路线图五版的二次复查：41 处修复，其中 3 处会算错钱
+
+**做了什么**：对同一天落地的 v0.45.99~103（期权路线图五步）做对抗式二次复查——
+4 路独立审查（每路要求「先试着推翻自己的发现」+ 变异检验）→ 4 路并行修复
+（每处修复必须配一条「还原修复就变红」的回归测试）。**41 处修复**，
+测试从 2408 涨到 **2501 全绿**，ruff F821 干净。
+
+教训先写在前面：**这五版是同一天写的，当天复查就挖出 3 个会算错钱的 bug 和
+2 条「删掉实现测试依然全绿」的核心守卫。** 写完即测不等于写完即对。
+
+### Fixed — 会算错钱的三处
+
+- **`earnings_vol_signal.py` 扩散项高估 20.35%（最严重）**：`dte` 是**日历日**
+  （`cboe_options` 的 `(expiry − today).days`），却除以 **252**（交易日年）。
+  正确配对只有日历日/365 或交易日/252，混用把 √T 放大 √(365/252)=1.2035。
+  因为它在根号下被减去，标签会整个翻转，且方向单一——一切被推向 cheap、
+  `event_move_floor_hit` 从「罕见退化」变成 30% 波动率名字的**常态**，
+  卖跨式那一侧会被饿死。实测（rv 30%、dte 29）扩散 8.1416% → **6.7649%**；
+  用模块自己的校准例子：NVDA 12.50/45%/8.0 从 ratio 0.333 `cheap`（买跨式）
+  → **0.912 `fair`（不动）**；COST 5.58/22%/3.5 从 `floor_hit/untradeable`
+  → **0.730 `cheap`**。改 `dte/365.0`，模块头部公式同步更正。
+- **`options_paper_leg.py` 迟到的内在价值结算用了今天的收盘价**：报价长期缺失后
+  走内在价值平仓时取 `closes_fn(ticker, as_of)`，**从不看 `pos.expiry`**。
+  复现：K=100、2026-10-02 到期、到期时标的 101（真实结算 $1.00/股 = $100），
+  行情恢复到 12-20 时标的 160 → 记成 **$60.00/股、+$5,780**，而正确是 **−$120**。
+  改 `min(as_of, pos.expiry)`；并补上免费不变式 `holding_days` 不得超过
+  `expiry − entry_date`（该例 108 → 29，溢出记进新字段 `settled_late_days`）。
+- **`options_analyzer.py` 报价集会把行权价中位数当成标的价**：`stock_price`
+  缺失/NaN 时回退 `atm_price`，而那时它已经是
+  `statistics.median(all_strikes)`（再取不到就是写死的 **145.0**）。传一个正数进去
+  会让 `fetch_cboe_quote_set` 以为调用方给了真价，**跳过 CBOE 自己的 `official_price`**，
+  并把 `underlying_price_source` 记成 `"caller"`。同一条链实测隐含波幅
+  8.4138% → 7.2137%、ATM 行权价 145 → 150。生产可达：数据源失败时蜂把 price=0/NaN
+  往下传（`swarm_agents/base.py` 只置 `_data_unavailable`，`oracle_bee` 不检查），
+  且日报有一处 `analyze(_tk)` 根本不传价 —— AMC 这类 $3 的票会被记成 $145。
+  改传 `0.0`。
+
+### Fixed — 幽灵状态与静默数据丢失
+
+- **`options_paper_leg.py` 拿不到任何价格的仓位永远漏在账上**：既无报价又无收盘价时
+  无条件 `remaining.append(pos)`，无年龄上限。复现：到期一年后仍未平，净值里还挂着
+  入场那天的 mid。两个加重因素：`stale_days` 数的是**运行次数**不是天数
+  （跑满 12 个月显示「10d」）；而过期合约在 CBOE 链里永远查不到，
+  `quote_contracts` 恒返回 None，所以这是**永久**状态不是暂时的。
+  改：`stale_days` 改按日历日算；新增 `write_off_days_after_expiry=30`，
+  逾期且无任何价格 → `mark_source="written_off"` 强制核销并 `_log.error` 点名；
+  `compute_kpis` 增 `written_off_exits`/`stale_positions`，日报小节把冻结 mark
+  显式标成「⚠️ stale (63d @ …) 只是账面占位」。
+- **`record_day` / `scan` 按日期重写会抹掉已结算字段**：两个模块都是「删该日旧行 →
+  重建全 None 行」，而日志照打成功。日常路径不会触发（行不可能在自己的 `as_of`
+  当天被结算），但**任何 `--date` 补跑都会**，且重建的行更差（见下条 look-ahead）。
+  VRP 侧改：新增 `_SETTLEMENT_FIELDS` 单一清单并逐字段搬运，`iv` 被修订时
+  `vrp_realized` 重算而非沿用；财报侧同样搬运四个字段。
+- **`portfolio_greeks.combined_nav_detail` 的 `not_started` 会掩盖真实数据丢失**：
+  只判断跨式腿的**净值文件**存不存在。删掉一本真持有 $98,000 的账的净值文件，
+  输出与「从未建账」逐字节相同。更糟的变体——持仓文件在、净值文件不在：
+  跨式腿的 Greeks 在分子里、NAV 在分母里是 0，`partial=False`、
+  `band_status="above"`，实际**成交了 −76 股 SPY 对冲**。改为净值与持仓
+  两个文件都空才算未建账，否则是数据丢失 → `nav=None` 并点名。
+- **`portfolio_greeks` 对冲账本里 `shares` 为 null/NaN 的行被静默丢弃**：
+  `_scrub` 把 NaN 写成 null，读回来变 None 后整行消失，聚合报
+  `band_status="empty", partial=false` —— 自信且错误。而同模块的
+  `stock_exposures` 对同样情形处理是对的（标 flag → `unknown` → 不对冲）。
+  改为同构处理，并区分「真的 0 股」与「读不出来」。
+
+### Fixed — 两条核心守卫「删掉实现测试依然全绿」
+
+`vrp_signal` 最常被引用的两条声明，实现删掉后 39 条测试**全绿**：
+
+- **禁前视**：夹具的切片在有无过滤器时完全相同。改用判别性用例——
+  基准日 2026-07-01、`as_of=2026-07-30`（21 个工作日但只有 20 个交易日，
+  因为 7/3 独立日休市）、K 线到 09-30：有守卫 → 不结算；没守卫 → 吃到
+  **2026-07-31** 那根，比 `as_of` 晚一个交易日。
+- **禁横截面池化**（本项目最常被引用的失效模式）：原夹具 `x=100k+i, y=300k+2i`
+  把 x 与 y 同向偏移，池化算法照样得 ρ=1.0。改成 `y=−300k+2i`：
+  票内 ρ=+1.0，池化 ρ=**−0.7781**，并把被否决的实现写进测试正文。
+
+财报模块另有 5 条装饰性测试，其中一条把**同一个函数用同样参数调了两次然后断言相等**
+（名字叫「BMO 和 AMC 给出相同结果」，却观察不到 BMO/AMC）；短仓上限的整个分支
+删掉后 79 条测试仍全绿（`floor` 早就保证了那个不等式，循环体在 183 万组随机输入下
+执行 0 次）。全部重写或删除。
+
+### Fixed — 日报里看不见的三个新小节
+
+`run_swarm_scan` 里 `_build_swarm_report`（拼 markdown）比 `_post_scan_notify`
+（跑三个钩子）**早一行**。于是 v0.45.101~103 的小节读到的是钩子跑之前的状态：
+**VRP 小节 `rows_for_date(today)` 恒空 → 返回空串，一天都不出现**；期权纸面腿恒显示
+「扫描 0 个快照」、标记停在昨天；组合 Greeks 只能退回
+`run_for_date(execute=False)` 把整套计算重做一遍，且渲染的是对冲成交前的状态，
+与一分钟后落盘的审计文件对不上。**这与 v0.45.57 的失效条件是同一个坑**
+（该方法开头 1067 行就写着这条注释）。修法照抄那次：`report` 是可变 dict、
+且在 `run_swarm_scan` 返回后才被 save/部署消费，所以在钩子跑完后追加。
+新增 `tests/test_daily_report_section_order.py`（4 条，AST 检查，挪回去即变红）。
+
+### Changed — 别再为已经取过的数据打第二次网
+
+`earnings_vol_signal.scan` 原先对每只通过报价预检的票各调一次
+`EarningsWatcher.get_earnings_date`（走 `stock.calendar`），而 **ChronosBee 在同一轮
+扫描里早就取过同一个数据**——2026-09-02 的 `.swarm_results` 里 28/30 只票带着
+`type=="earnings"` 的催化剂。`earnings_cache/*_date.json` 的 TTL 是 12 小时、扫描每天
+跑一次，所以那 30 次调用**每天都是真打网**（实测该目录 24 个文件最新停在 8/9，
+当天一个都没刷新）。yfinance 429 是本项目头号数据丢失原因，限流后每次约 2s+2s。
+改：`scan()` 新增可注入的 `upcoming_fn`，日报传入
+`_earnings_date_from_swarm(swarm_results)`。降级语义**区分两种情况**：
+有催化剂但无财报条目 = 视野内确实没有财报（零成本 None）；
+完全没有催化剂 = 蜂失败（9/2 是 WMT/SNOW 两只）→ **本函数自己**延迟构造
+`EarningsWatcher` 兜底。⚠️ 兜底必须写在注入函数里：`scan` 的
+`upcoming_fn or _upcoming` 只在**参数**为 None 时替换整个函数，不会因为某只票
+返回 None 就回退——本条注释的第一版正是这么写错的，随即被自己的测试抓出。
+新增 `tests/test_daily_report_earnings_source.py`（7 条）。
+
+**另注（未改代码）**：已装好的 `iv_crush_scraper.py` 每天为 30/30 只票产出
+下次财报日、过去 8 次财报日涨跌幅、平均绝对幅度与当前隐含波幅，`earnings_history.py`
+把前两项又算了一遍。保留自建实现的理由是口径不同（中位数 vs 均值、两日窗口 vs
+单日、且我们要做事后结算），但**财报日的重复取数已按上面改掉**——那才是花钱的部分。
+
+### Fixed — 其余（按模块）
+
+- `earnings_history.py`：`{T}_moves.json` 只按 ticker 缓存 30 天 → **补跑有前视**
+  （实测 today=2026-08-20 的统计里含 08-25 的事件；冷缓存 n=4 中位 4.5 vs
+  热缓存 n=5 中位 5.0），改为读缓存后按 `today` 重新过滤；「>7 个日历日」的窗口
+  守卫改成**K 线下标距离恰为 2**（原守卫放行了 2 个交易日的数据洞，
+  把 4 个交易日的窗口当成两日波动，虚增历史分母）；截断但成功的财报日列表
+  不再写缓存（原先会造成看起来像「这只票没有历史」的一个月黑屏）。
+- `earnings_vol_signal.py`：合格条件加上 `ed <= expiry − expiry_buffer_days`
+  ——原先 `ed` 落在到期前 2 天内的信号**必然在自己的财报之前被强平**，
+  那笔纯往返点差亏损还会被记进 KPI，当成对信号的检验（测量污染）；
+  `max_spread_pct` 的注释原先引用「COST 25Δ 27.6%」，而过滤器**只看 ATM 两腿**
+  且那是盘后口径——盘中实测 ATM：NVDA 1.78%、COST 4.62%、AMC 16.0%，
+  注释改为引用真正被求值的数，并说明扫描在收盘后跑、落盘的点差系统性偏宽，
+  日后校准应按 `quote_set["market_open"]` 分层。
+- `vrp_signal.py`：回填快照（`..._{D}_backfilled-{W}.json`）此前**单向**——
+  进得了 IV 索引、进不了 VRP 历史（glob 与正则都不匹配），
+  `_snapshot_rv` 增加回填文件兜底后，真实缓存上可用历史 **188 → 218**
+  （每票恰好 +1）；`assess()` 改为同时报「索引条数」与「可用条数」并按后者判就绪
+  （原先可以打印「✅ 已就绪」而当天每一行都是 `ready=False`）；
+  永远结算不了的行新增 `settle_give_up` 标记与尝试计数（取数失败**不计入**尝试，
+  否则限流坏一周会误杀活行）；`rv_forward == 0` 改为按上游口径拒收
+  （它会制造「卖方赚满」的最大观测值喂进统计）；`assess(cache_dir=X)` 的结算统计
+  改为显式传行（原先读全局文件，探测别的缓存目录会打印生产数字）。
+- `portfolio_greeks.py`：压力网格的 IV 轴单位**此前无任何测试**
+  （把 `ivp/100.0` 改成 `ivp` 全绿；对 30% IV、30 DTE 的 ATM call，
+  +10pt 那格会从 $3.61 变成 $86.04/股）→ 补上用 `bs_price` 现算期望值的测试；
+  IV 冲击被截到 0 时增加 `iv_clamped`/`iv_pts_effective` 标记（8% IV 的票在
+  「−10pt」列实际只减了 7.99pt，标签却仍写 −10pt）；`worst_cell` 在有行被排除时
+  带上 `excluded_dollar_delta` 并在同一行打印「网格不完整，已排除 $X 敞口，
+  真实最差比这个数字更差」（实测可差 100 倍）；`dte<=0` 的过期合约不再按 T=1/365
+  重定价而是排除并列名；β 缓存改为「K 线已在内存就重算」，磁盘缓存退回纯断网兜底；
+  新增可复用的 `daily_bars()` 并在注释里点名 `vrp_signal.py:342` 与
+  `options_paper_leg.py:303` 两个应当改用它的调用点（三份互不共享的 K 线缓存，
+  同一只票一轮扫描最多取 3 次，Twelve Data 是 7 次/分钟的串行队列）。
+- `cboe_options.py`：25Δ 搜索原先**没有距离上限**，Δ=0.60 的合约照样被标成 `c25`
+  且不留 `missing_reasons`，也不禁止 `c25` 与 `atm_call` 落在同一张合约上
+  （稀疏链、AMC 类名字才会触发）→ 新增 `_QS_D25_TOL=0.15` 与同合约守卫，
+  各自给出具体的缺失原因（边界用 `dist − tol > 1e-9` 比较，
+  因为 `0.40−0.25 == 0.15000000000000002`）；注入 `now` 时
+  `market_open`/`fetched_at` 不再读挂钟；删除恒不成立的 `not math.isfinite(S)`。
+- `options_analyzer.py`：`data_available == False` 的空报价集不再被冻结一整天
+  （v0.45.43 的规则是「链数据要冻结、价格派生的不冻结」，而**空**报价集没有
+  任何历史需要保护），快照命中时按 `_refill_empty_quote_set` 补取并盖
+  `_quote_set_refilled_at` 戳；三处只发 `{data_available, source, error}` 的
+  生产者改为调用 `_quote_set_unavailable`，形状统一。
+- `paper_portfolio.py`：`_VOL_ANN_CACHE` 的键漏了 `vol_source_max_age_days`
+  （同一 `(ticker, as_of)` 换窗口拿到旧答案，且跨 `run_replay` 沙盒泄漏），
+  补进键并在 `run_replay` 进出时清空；`sizing_mode` 改为在 `run_for_date` 入口校验
+  （原先只在「恰好有仓要开」时才炸）；`size_pct_min/max` 的文案更正——
+  钳位作用在**置信乘数之前**的百分比上，实测 mid 档在 σ=200% 时是
+  **0.90% NAV** 而非 1.5%，且永远到不了 4.8% 以上；
+  `Position.sizing` 此前**零读者**，`render_portfolio_card` 增加「今日 N/M 仓退回分档」。
+
+### Fixed — 测试自己写坏了生产状态
+
+新写的 `test_valid_modes_pass_the_entry_check` 调真实 `run_for_date` 时，
+桩了 `_load_meta`/`_append_jsonl`/`_save_meta` 却**没有重绑四个路径全局**，
+而 `run_for_date` 收尾用的是 `_write_jsonl`（整体重写，不是追加），
+于是把 worktree 的 `paper_portfolio_state/` 写空（净值 93 行 → 1 行，
+持仓 13 条 → 0）。生产目录未受影响。三重修复：该测试沙盒化四个路径；
+`tests/conftest.py` 新增 autouse 的 `_isolate_paper_portfolio_state`，
+默认重定向四个全局**并在 teardown 比对真实文件的内容摘要**；
+`TestProductionStateIsIsolated` 两个方向都钉住。守卫已实测会触发。
+
+### Fixed — v0.45.100 条目的数据声明不实（已就地更正）
+
+原写「`volatility_20d` 覆盖 30 只 × 全部扫描日（1299 行）」。实测：1299 行 / 96 个
+日期不假，但**当日满 30 只的只有 10 天**，2026-03-10~08-14 每天仅 10 只左右
+**且值全是 0**，283/1299 行（21.8%）为 0 或 NULL、全部落在 08-14 及之前。
+含义不只是数字不准：拿 8 月下旬之前的历史做 vol_target vs tier 对照回放，
+绝大多数标的日会落回 `tier_fallback`，等于**分档比分档**——那种「看不出差别」
+不构成结论。跨世代对比只有 2026-08-25 之后的样本才有意义。
+
+---
+
+## [0.45.103] — 2026-09-03 — 组合 Greeks 聚合 + β·Delta 带状对冲（纸面 SPY 覆盖）+ 现货×IV 压力测试（期权路线图第 5 步）
+
+**背景**：「对冲量化」的核心不是选票，是控制组合暴露。`greeks_engine.calculate_portfolio_greeks`
+早就有但无人调用；`risk_engine` 的压力测试只冲击现货不冲击 IV；纸面组合的风控是
+逐票 7% 止损，没有组合层的 delta/vega/gamma 视图。本版把股票腿（paper_portfolio）、
+跨式腿（options_paper_leg）与新增的 SPY 对冲覆盖腿聚合成一张组合 Greeks 表，
+β·$Delta 出带才用 SPY 股票拉回，并给出现货×IV 联合冲击网格。
+
+### Added
+
+- `portfolio_greeks.py`
+  - 暴露：`stock_exposures`（qty 按方向带符号，$Delta = qty×close，β·$Delta）、
+    `option_exposures`（每张跨式两行，qty = ±contracts×100；用 `cboe_options.quote_contracts`
+    重报的 delta/gamma/vega/theta）、`hedge_exposures`（SPY，β=1 定义值）。
+  - **CBOE Greeks 单位实测**（NVDA S=227.19，2026-09-03）：225C 10-02 CBOE vega 0.2517 vs
+    BS 每 1 个 vol 点 0.2508；theta −0.1346 vs BS 每日历日 −0.1536。结论：vega 按
+    **每 1 个 vol 点**、theta 按**每日历日**，delta/gamma 与 BS 差 <1%，不做缩放。
+    数字写在模块头部。
+  - **β 自算**：60 日对数收益对 SPY 的 OLS（Twelve Data 日线，≥61 根对齐，
+    `hedge_state/beta_cache.json` 缓存 5 个交易日、拒绝来自未来的缓存）。
+    刻意**不用** `risk_engine._estimate_beta`——它失败静默返回 1.0，与真实 β=1.0 同形
+    （MEMORY「安全默认值」判据）。算不出 → `(None, None)`，聚合标 `partial`。
+  - `aggregate`：$Delta / β·$Delta / gamma$（1% 移动的凸性 P&L）/ vega$（每点）/
+    theta$（每日）及占 NAV %；`coverage` 块与 `band_status ∈ {inside, above, below, unknown, empty}`；
+    **任何一行的 β·$Delta 算不出就是 unknown**——不在部分数据上对冲。
+  - `hedge_recommendation`：出带 → `spy_shares = −excess / SPY`，edge 模式向外取整
+    （否则半股留在带外、次日再来一笔 1 股小单），center 模式四舍五入。
+  - 覆盖账本 `hedge_state/`：每日至多一笔 SPY 调整，成交价=收盘（SPY 点差 ≈1bp，
+    记录里 `spread_model` 明写无点差模型）；净值按日去重；同日重跑逐字节一致
+    （重跑时先扣掉当日成交重建"交易前视图"）；每日审计 `greeks_{date}.json`。
+  - `stress_table`：现货冲击 {−10,−5,0,+5,+10}% × IV {−10,0,+10,+20} 点。股票按 β×冲击，
+    期权用 `bs_price` 在 `S×(1+β·shock)`、`iv+pts` 重定价减当前 mid，SPY 按冲击；
+    β 缺失的行剔除并标 `partial`；`worst_cell`；(0,0) 格附 `bs_vs_mid_gap` 作模型基差诊断。
+  - `combined_nav_detail`：股票腿 + 跨式腿 + 覆盖腿；分量缺失 → None 并列出缺谁。
+    **跨式腿从未建账（净值文件不存在）按 0 计并标 `not_started`**——那是合法零状态，
+    否则对冲在腿建账前永远 unknown；文件存在但缺行仍是 None。
+  - `render_markdown`（日报小节「组合 Greeks 与对冲（观察项 + 纸面 SPY 覆盖）」）、
+    CLI `--date --dry-run --json`。
+- `alpha_hive_daily_report.py`：VRP 块之后 `run_for_date`，失败只 warning；markdown 追加小节。
+- `tests/test_portfolio_greeks.py` 36 条 + 本轮补 1 条（未建账 → 0 + not_started；
+  建账缺行 → None）：方向符号、β 缺失 → partial/unknown/不对冲、long 跨式 |Δ| 小且
+  gamma/vega 为正、short 镜像、vega 单位对照 `calculate_single`、带内/上/下三态与
+  edge/center、覆盖账本同日重跑一致、NaN 不落盘、压力网格 (0,0)=0、+10 IV 长跨式为正、
+  股票网格线性、worst_cell、CLI dry-run 不写状态。mutation：对冲方向反转 → 9 红；
+  去掉股票冲击的 β× → 1 红。
+
+### 实测（worktree 状态，`--dry-run --date 2026-09-02`）
+
+13 条股票仓，β 覆盖 100%，$Delta +$25,532，β·$Delta +$14,642（带宽 ±15% NAV 内），
+−10% 现货冲击 −$1,464。SPY 收盘 $765.16 来自 Twelve Data，**待验证**。
+
+### 边界
+
+- 合并 NAV 把跨式腿的 $100k 名义资本算进分母，% NAV 口径因此比只看股票腿
+  （≈$51k）小一半、带宽的美元宽度大一倍。先照此运行，攒一个月再定分母。
+- 期权行的 $Delta 用 Twelve Data 收盘，CBOE 的 delta 按其自身 `current_price` 算，
+  有几美分基差；`quote_contracts` 不暴露 payload 价格，留待需要时扩展。
+- 对冲工具 v1 只用 SPY 股票；指数 put 要等 SPY 进 quote_set 名单。
+
+### 路线图收口
+
+五步全部落地（v0.45.99～103）。真正的产出要等数据：quote_set 从下一次扫描起
+攒真实报价，财报跨式账本在下一个财报季出样本，VRP 约 14.7 周后过闸，
+组合 Greeks 每日出表。**生产目录 `~/Desktop/Alpha Hive` 需要 `git pull --ff-only`
+才能跑到这些代码**——编排器不自动拉取。
+
+## [0.45.102] — 2026-09-03 — VRP 信号：逐票时序记账 + 事后结算 + 就绪度闸（期权路线图第 4 步）
+
+**背景**：方差风险溢价（隐含波动率系统性高于其后实现的波动率，卖方赚这个差）
+是期权量化最经典的边。系统里 IV−RV 的原料早就有（`iv_rv_spread`），但从没按
+**标的自身的时间序列**记过账，更没有把「事后实现的 RV」结算回去——没有 y 就
+谈不上验证。真实 IV 历史（v0.43.18 起自攒）现在每票只有 7～11 条，离时序分位
+需要的 63 条还差约 3 个月。本版把承载物先建好：满 63 条之前**只测量不下注**，
+到期与否由数据条件决定，不由日历决定（同 `ic_rerun_readiness` 的设计理由）。
+
+### Added
+
+- `vrp_signal.py`
+  - `record_day(as_of)`：每票一行 `vrp_ex_ante = iv − rv_30d`（iv 取
+    `iv_raw_observed`，缺则退 `quote_set.iv30`，记 `iv_source`）；`n_obs` 只数
+    **严格早于 as_of** 的观测（无前视），≥63 才给时序分位 `ts_pct` 与标签
+    rich（≥0.80）/ cheap（≤0.20）/ mid，否则 `ready=False`、分位 None。
+    起步历史用 IV 索引的日期配同日快照的 rv_30d 补齐（只读，不写索引）。
+    按日幂等写 `vrp_state/vrp_signals.jsonl`。
+  - `settle(as_of)`：对满 21 个交易日的旧行回填 `rv_forward`
+    （与 `twelve_data.realized_vol` 逐字同口径：对数收益、剔 |r|≥0.5、ddof=1、
+    ×√252×100，仅差异是接受 rv=0）与 `vrp_realized = iv − rv_forward`。
+    只用 `≤ as_of` 的 bar；每票每次结算最多一次 Twelve Data 调用，无可结算行零网络。
+  - `assess()`：就绪度——`ready` 需 ≥20 只票各 ≥63 条；ETA 用 `iv_history`
+    实测积累速率折算成周，速率不可判定给 None 不猜日历天；附结算统计
+    （分标签均值 n<10 给 None）与**票内先排名再汇总**的 Spearman
+    （每票 ≥20 条已结算才计入）。读索引用 `_read_index`（纯函数），刻意不走
+    `load_iv_history`——后者会写迁移标记文件。
+  - CLI：`--date --record --settle --assess --json --out`，退出码 0 就绪 / 1 攒数中 /
+    3 无法判定（2 留给编排器）。**未**接进编排器；先随日报小节每日露出。
+- `alpha_hive_daily_report.py`：v0.45.101 块之后新增 record → settle，失败只 warning；
+  markdown 追加小节「VRP 信号（攒数期，未下注）」。
+- `tests/test_vrp_signal.py` 39 条：iv 来源顺序；62/63/70 条边界；标签阈值；同日
+  重写幂等；NaN 不落盘；结算数值手算核对（常数收盘 → RV 0；交替 ±1% → 手算值）；
+  前视守卫；每票一次 bars 调用；assess 三态；Spearman 完美单调 → 1.0；CLI 退出码。
+  mutation：n_obs 把当日计入 → 15 红；去掉 ×√252 → 1 红。
+
+### 实测就绪度（2026-09-03，只读主库缓存）
+
+`0/30 只票达标（需 20 只各 ≥63 条，中位 9 条），按实测速率约 14.7 周后到位`
+——积累速率 11 个有观测的扫描日 / 15 个交易日 = 0.73/日。ETA 以扫描连续性为准，
+机器没开的日子不攒。
+
+### 边界与陷阱
+
+- **禁横截面池化**：分位只在标的自身历史内算。IV 的横截面跨度是时序跨度的 6 倍，
+  池化阈值测的是「你是哪只票」（MEMORY `alpha-hive-cross-sectional-pooling`）。
+- `assess()` 的就绪度数 IV 索引条数，`record_day` 的 `n_obs` 数实际有 IV 且有 rv_30d
+  的行；9/2 快照 30/30 两者齐全时一致，rv_30d 掉线时会分叉——模块头部已写明。
+- 生产快照截至 9/3 尚无 `quote_set`（v0.45.99 落地在当日扫描之后），
+  `quote_set.iv30` 兜底目前不会触发；主源 `iv_raw_observed` 30/30 在。
+
+## [0.45.101] — 2026-09-03 — 财报事件波动率信号 + 期权纸面跨式腿（期权路线图第 3 步）
+
+**背景**：单票期权里证据最扎实的边是财报 IV 压缩——隐含事件波动 vs 历史实际
+波动的错配。零件此前散落三处（`iv_crush_analysis` / `earnings_pc_history` 只做过
+NVDA 单票、`earnings_watcher` 只取下次财报日），没有一个能逐日对 30 只票算信号、
+更没有一本用真实报价盯市的账。v0.45.99 的 `quote_set` 正好提供了跨式中间价、
+两腿点差与 ATM 行权价。本版把三者串成「信号 → 账本 → 事后结算」，**只测量不下单**。
+
+### Added
+
+- `earnings_history.py`：过去 8 次财报日（yfinance `get_earnings_dates` 经
+  `yf_gate`，30 天磁盘缓存；失败返回 None 不返回 `[]`）+ 两日窗口实际波动
+  （pre = 财报日前最后一根收盘，post = 财报日后第一根；对 BMO/AMC 不敏感，
+  跨度 >7 日历日的窗口视作数据洞跳过）+ `earnings_move_stats`（可用事件 <4 → None，
+  `_detail` 版带 `reason`）。日线优先 Twelve Data 一次拉 2 年，退本地价格索引。
+- `earnings_vol_signal.py`：`compute_signal` 纯函数。合格条件：`quote_set` 可用、
+  ATM 两腿 `quote_ok`、财报日落在 `(as_of, selected_expiry]`（跨式必须跨过事件）、
+  历史事件 ≥4。事件波动剥离扩散：`diffusion = 0.8·σ_rv30·√(dte/252)`，
+  `implied_event = √(straddle² − diffusion²)`（rv_30d 缺失退 `raw_straddle` 口径并标注
+  高估）。`ratio = implied_event / 历史 |move| 中位`：≥1.30 rich（卖跨式候选）、
+  ≤0.75 cheap（买跨式候选）、否则 fair。任一腿点差 >15% → `untradeable`
+  （COST 25Δ 27.6% vs NVDA 4.4% 的实测差距就是这条阈值的来历）；
+  **扩散 ≥ 跨式把事件波动压成 0 也判 untradeable**——那是 rv_30d 被别的跳空撑大的
+  退化数字，不是便宜。`scan(as_of)` 按日幂等写 `options_paper_state/earnings_signals.jsonl`；
+  `settle_signals` 在财报过后回填实际两日波动与 `realized_ratio`，是日后校准
+  阈值的 y；`summary_stats` n<3 一律给 None。
+- `options_paper_leg.py`：独立于股票纸面组合的跨式账本（`options_paper_state/`，
+  起始 $100k）。**成交付点差**：long 两腿按 ask 买、short 按 bid 卖，出场镜像，
+  盯市用 mid。`contracts = max(1, ⌊NAV×6% / (premium×100)⌋)`，一张就超预算则跳过
+  并记原因；short 同样按权利金封顶（它只是保证金代理，卖跨式真实风险无上界，
+  账本注释明写这不是实盘规则）。逐日用新增的 `cboe_options.quote_contracts` 按
+  OCC 符号重报两腿：报价合法 → `cboe_mid`；否则沿用 `last_mark` 标 `stale` 并计日；
+  财报过后第一个有报价的日子平仓；连续 stale 超 3 天或到期前 2 天 → 用标的收盘算
+  内在价值平仓并标 `intrinsic`；取不到收盘继续持有并告警，**绝不编价关仓**。
+  `compute_kpis` / `render_markdown`（日报小节「期权纸面腿：财报跨式（观察项）」）。
+- `alpha_hive_daily_report.py::_post_scan_enrichment`：纸面组合之后新增
+  scan → settle → run_for_date 三步，任何失败只 warning；markdown 追加小节。
+- 测试 79 条（`test_earnings_history` 19 / `test_earnings_vol_signal` 27 /
+  `test_options_paper_leg` 33），全部合成数据、临时目录、零网络。mutation：
+  换 ask/bid 成交方向 → 11 红；去掉扩散剥离 → 2 红。开发中被测试抓到并修掉
+  两个真 bug：同日重跑把入场日 `mark_source` 翻成 stale；净值快照的
+  `opened_today/closed_today` 取自运行计数器而非状态，破坏了同日重跑的逐字节一致。
+
+### 规模校准
+
+规格初值 $20k × 2% = $400/笔连一张 NVDA 跨式（≈$2,800）都开不出，账本会永远是空的。
+改为 $100k × 6% = $6,000，让主流名单的一张合约进得来（COST ≈ $5,300）。
+这是测量账本，规模只服务于「能攒到样本」。
+
+### 已知局限（模块头部明写）
+
+- **无 delta 对冲**：ATM 跨式只在入场时近似 delta 中性，之后标的一漂就带方向，
+  v1 把它当噪音记录；第 5 步的组合 Greeks 对冲会接管。
+- 阈值 1.30 / 0.75 是先验不是校准，`settle_signals` 攒够样本后再定。
+- 生产快照今天之前没有 `quote_set`，端到端目前只有合成数据验证；第一批真实
+  信号在下一次扫描出现。
+
+## [0.45.100] — 2026-09-03 — 纸面组合仓位改为波动率目标制（用上系统里 IC 最高的信号）
+
+**背景**：`vol_forecast.py`（v0.44.0）实测「未来 7 日已实现波动」的可学性
+是「未来 7 日收益方向」的 60 倍（IC +0.71 vs +0.01），但它至今只是日报末尾
+的观察表，没进任何下注。旧仓位规则是固定分档：高置信 5% NAV / 中置信 3%，
+于是 σ=15% 的 KO 与 σ=90% 的 MSTR 拿同样的钱，单仓对组合的波动贡献差 6 倍，
+组合风险实际由几只高波动票决定。这是把评分系统往期权对冲量化靠的第二步
+（第一步 v0.45.99 攒真实报价）：**风险预算按波动率定，不按分数档定**——
+这也是期权组合里 vega/gamma 预算的同一思路，先在股票腿上跑通。
+
+### Changed
+
+- `paper_portfolio.py` CONFIG 新增 `sizing_mode`（默认 `"vol_target"`）与
+  `vol_target` 块：`size_pct = clamp(target_position_vol_pct / σ₂₀ × 100,
+  size_pct_min, size_pct_max) × conf_multiplier[conf]`，再乘既有的
+  `_size_multiplier`、低置信减半逻辑不变。校准：`target=1.75%` 让 σ=35% 的
+  中位标的得 5% NAV，与旧 high 档持平；钳位 1.5–8%；置信乘数 1.0/0.6/0
+  保留旧 5:3 比例。**σ 用的是水平不是变化**——`vol_forecast` 已证明票内
+  时变不可预测、横截面水平高度持久，波动率目标制恰好只需要水平。
+- σ 来源：新增 `_lookup_vol_ann(ticker, as_of)` 直读 `pheromone.db`
+  `signal_archive` 的 `price.volatility_20d`（年化 %，`data_pipeline.py:375`
+  `std × √252 × 100`），只取 `date <= as_of` 且 5 天窗口内最近一行（**禁前视**）；
+  只读连接，只吞「表不存在」，`database is locked` 照抛（同 `vol_forecast.load_day`
+  的教训）。
+- `_compute_position_size` 返回 `(size_usd, sizing_note)`；`Position` 新增
+  末位默认字段 `sizing`，并把留痕追加进 `rationale`：`"vol_target(σ=35.0%→5.0%)"`
+  / `"...,clamp_min"` / `"tier"` / `"tier_fallback(no_vol)"`。
+- **诚实降级**：σ 缺失 / NaN / ≤0 时显式退回分档算法，打 warning 且仓位
+  记录里可见 `tier_fallback(no_vol)`——不能静默换成一个看起来合理的数字。
+  未知 `sizing_mode` 直接 `ValueError`。
+- `sizing_mode="tier"` 逐字节还原 v0.39.0 算法；`run_replay` docstring 注明
+  要复现 v0.39.0～v0.45.99 的历史数字必须显式传它。`run_replay` 的 CONFIG
+  备份改 `copy.deepcopy`（`vol_target.conf_multiplier` 二层嵌套，一层拷贝
+  挡不住就地改内层的覆盖泄漏到生产 CONFIG）。
+- `render_portfolio_card` 规则行改为按当前模式描述（`_sizing_rule_text`）。
+- `experiments/portfolio_capacity_replay.py` 两处 `run_replay` 覆盖钉上
+  `"sizing_mode": "tier"`——它扫的是分档乘数，新默认下不钉会变成扫一个
+  被忽略的参数。
+- `tests/test_vol_forecast.py::test_does_not_touch_position_sizing` docstring
+  更新：护栏继续拦的是「横截面分位乘数被接进仓位」，v0.45.100 接的是波动
+  水平，二者回答的是不同问题。
+
+### Added
+
+- `tests/test_paper_portfolio_vol_sizing.py`：29 条——σ=35 → 5%/3% 与旧档
+  持平（校准断言）；σ=70 减半；σ=10/200 触上下钳位；σ 缺失 → tier_fallback
+  且 `caplog` 有 warning；`sizing_mode="tier"` 三档逐字节复现旧数；低置信仍
+  减半；NaN σ 按缺失处理、输出无 NaN；旧 `positions.jsonl` 记录无 `sizing`
+  字段仍可加载；`_lookup_vol_ann` 对临时 sqlite：取窗口内最近一行、忽略
+  `date > as_of`（无前视）、窗口外 None、无表 None。mutation：钳位反转 →
+  6 红；去掉 `date <= as_of` → 1 红。
+- `tests/test_paper_portfolio_nan.py` 三处 `_compute_position_size` 桩改为
+  返回二元组。
+
+### 生效与可比性
+
+- 下一次真实 `run_for_date` 起新仓按新算法定量，存量仓不动；
+  `meta.json` 的 `config_snapshot` 自动记录新键。
+- ⚠️ **本条原先的覆盖率说法不实，v0.45.104 二次复查更正**。实测主库
+  `signal_archive` 的 `volatility_20d`：1299 行 / 96 个日期，但**当日满 30 只的
+  只有 10 天**，2026-03-10～08-14 每天仅 10 只左右且**值全是 0**；
+  283/1299 行（21.8%）为 0 或 NULL，全部落在 08-14 及之前；稳定的 30 只无零
+  是 08-25 之后才有的。0 值会正确落到 `tier_fallback(no_vol)`，别当故障——
+  但**它同时意味着：拿 8 月下旬之前的历史做 vol_target vs tier 对照回放，
+  绝大多数标的日会落回分档，等于 tier 比 tier**，那种"看不出差别"不是结论。
+  跨世代对比只有 2026-08-25 之后的样本才有意义。
+- 纸面组合 KPI 自本版起**跨越一条口径世代边界**：对比 v0.45.99 之前的
+  净值曲线时须用 `run_replay({"sizing_mode": "tier"}, ...)` 重放同口径。
+
+## [0.45.99] — 2026-09-03 — 期权快照持久化 ~30 DTE 四合约真实报价（期权对冲策略的数据地基）
+
+**背景**：系统现有的期权数据（IV Rank / P/C / GEX / 异动）全部只作为
+**方向评分的输入**；`options_backtester.py` 对期权策略的回测用的是
+Black-Scholes 加快照里的一个 IV 值——模型价不是可成交价。要把评分系统
+往期权对冲量化策略靠，第一步是**攒真实市场报价**，而不是先改评分。
+实盘抽查（2026-09-03 收盘后 CBOE 延迟报价）已说明为什么必须是真报价：
+NVDA 25Δ call 买卖价差占中间价 4.4%，COST 同一合约 **27.6%**——单票期权
+的成本差一个量级，BS 回测出来的 Sharpe 全是纸上的。
+
+### Added
+
+- `cboe_options.py::select_quote_set(data, S, *, target_dte=30, now=None)`：
+  纯函数，从 CBOE **原始 payload**（不是成品链——成品链每边只留 40 个
+  OI 最大行权价，25Δ 常被裁掉）选出四张合约：到期日取 dte≥7 中
+  |dte−30| 最小者（平手取更远）；ATM 取离 S 最近且 call/put 两边都有的
+  行权价；25Δ 按 CBOE 自带 delta 取最接近 ±0.25（只认有限非零 delta）。
+  每张合约持久化 `bid/ask/mid/spread_pct/iv/delta/gamma/vega/theta/oi/
+  volume/theo/last_trade_time/quote_ok`；附 `atm_straddle_mid` 与
+  `implied_move_pct`（跨式中间价 ÷ 现价，财报事件波动率信号的直接原料）。
+- `cboe_options.py::fetch_cboe_quote_set(ticker, stock_price=0.0, *, target_dte=30)`：
+  复用 `_fetch_cboe_payload` 的 120s 进程缓存，主链刚拉过时**零额外网络
+  开销**；永不抛错、永不返回 None——失败一律 `data_available=False` +
+  `error` 字符串，且 `contracts` 四个键仍在（值 None），下游可无脑 `.get`。
+- `options_analyzer.py::OptionsAgent.analyze`：新增出口字段 `quote_set`。
+  只在链 `_source == "cboe"` 时取（yfinance 链没有原始 payload）；异常吞掉
+  记 warning，绝不拖死 analyze。样本链早退分支同样带此键（不可用）。
+  **旧快照没有这个键，消费者必须 `.get("quote_set")`。**
+- `tests/test_quote_set.py`：23 条（到期日选择含 dte=3 必须忽略 / 28 vs 35
+  平手规则；ATM 最近行权价；25Δ 按 delta 而非行权价；bid=0 → `quote_ok`
+  False 且 mid/跨式为 None；delta 全 0 → 25Δ 槽位 None 但 ATM 仍在；
+  NaN bid 不崩；`analyze()` 接线两条）。5 处 mutation 各让一条测试变红。
+
+### 诚实降级约定（沿用项目硬规则）
+
+- bid=0 的合约 **不算 mid**：`(0+ask)/2` 是「一半的 ask」不是市价，拿它当
+  成交价等于凭空造出一个对手方。`quote_ok=False`、`mid=None`。
+- 云端快照模式（补跑历史日）payload 没有 options 数组 → 直接不可用。
+  补跑那天的真实报价谁也拿不到，用今天的链冒充比缺失更糟。
+- DTE 按**日历日差**（`expiry.date() − now.date()`）算，与 `_select_expiries`
+  的 `datetime` 相减略有不同（后者盘中会少读一天）；持久化字段取日历口径。
+
+### 下游（尚未接）
+
+期权纸面腿 / 财报 IV 压缩信号 / VRP 信号都读这个字段。当前**零消费者**，
+按 MEMORY「死字段」判据这是有意为之的攒数期，不是遗漏。
+
+## [0.45.98] — 2026-09-03 — 三处 close_t7 生产接入点未传 db 路径，worktree 下静默失效
+
+v0.45.87 上线后又做了一轮 10-agent 独立复查（针对 v0.45.87 提交本身），
+最高优先级发现：`generate_deep_v2.py` / `alpha_hive_daily_report.py` /
+`swarm_agents/queen_distiller.py` 三处新接入的
+`BacktestAnalyzer(..., clean_t7=True)` 都没有显式传 `close_t7_db_path`，
+于是落到 `feedback_loop.py` 自己的缺省值
+`Path(__file__).resolve().parent / "pheromone.db"`——这只反映"这份
+`feedback_loop.py` 副本在哪"，不是 `weekly_optimizer.py` 那套带 Cowork VM
+挂载点探测的 `ALPHAHIVE_DIR`。已在复查现场（本 worktree）实测验证：
+`Path('feedback_loop.py').resolve().parent / 'pheromone.db'` 解析到的是
+worktree 本地那个刚建的空库（0 条 `close_t7`），而真实数据在
+`~/Desktop/Alpha Hive/pheromone.db`（35MB，有数据）——三处只要不是从
+`feedback_loop.py` 自身所在的那份 checkout 运行，就会拿到
+`status="missing"`，悄悄退回脏口径 `actual_prices.t7`，且没有任何可见
+警示（`weekly_optimizer.main()` 的 `_warn_if_close_t7_unavailable()` 只
+覆盖它自己）。
+
+### Fixed
+
+- `generate_deep_v2.py::_load_ticker_accuracy`：显式传
+  `close_t7_db_path=ALPHAHIVE_DIR / "pheromone.db"`（本文件自己已有的
+  VM 挂载点探测逻辑）。
+- `alpha_hive_daily_report.py` 的 "feedback_loop 权重建议合并" 块：显式传
+  `close_t7_db_path=self.report_dir / "pheromone.db"`——与同一行 `_snap_dir`
+  用同一个基准目录（`self.report_dir`，即 `PATHS.home`），保证 snapshots
+  与 close_t7 库至少互相一致。
+- `swarm_agents/queen_distiller.py` 的历史胜率折扣块：显式传
+  `close_t7_db_path=_project_root_ta / "pheromone.db"`，同样与 `_snap_dir`
+  共用同一个刚计算出的基准目录（该功能目前默认关闭，
+  `config.TICKER_ACCURACY_FEEDBACK["enabled"]=False`，此次是防御性修复）。
+- 新增 `tests/test_close_t7_production_wiring.py`：3 个测试锁死
+  `generate_deep_v2.py`/`queen_distiller.py` 两处的路径接线（对照组验证
+  "db 不存在时保留旧行为"契约未被破坏）；修复前手动回退验证过这些测试
+  会失败（真回归测试，非重言式）。`alpha_hive_daily_report.py` 那处未补
+  独立测试——仓库里从未有对应路径的测试基础设施，构造完整
+  `AlphaHiveDailyReporter` 的成本超出这处机械改动应有的投入；已核实该
+  改动本身语法/导入正确（`self.report_dir` 经 `hive_logger.PATHS.home`
+  确认类型为 `Path`）。
+
+同一轮复查还报出 6 条较低优先级观察（`--min-samples` 与内部硬编码
+`MIN_SAMPLES` 脱节、另外两处 `entry_price` 真值判断未对齐、三个新接入点
+仍缺样本量下限、`PHEROMONE_DB_PATH` 与 `hive_logger.PATHS.db` 重复、
+"有效 T+7 样本"判定散落 3-4 处、`weekly_optimizer.py` 自身 4 处调用点
+仍用旧的两步包装）——均为 PLAUSIBLE、非本次修复范围（部分是刻意保留的
+向后兼容设计，部分是既有代码的预先存在问题，非本次改动引入），未处理，
+详见本 session 的复查记录。
+
+全量测试套件 `pytest tests/ -q`：**2201 passed, 18 skipped, 63 deselected,
+1 xfailed**，0 failed。
+
+## [0.45.97] — 2026-09-03 — 一根 NaN 日线，把纸面组合净值烂了四天
+
+## [0.45.97] — 2026-09-03 — 一根 NaN 日线，把纸面组合净值烂了四天
+
+### 现象
+
+`paper_portfolio_state/equity_curve.jsonl` 自 **2026-08-28 起连续 4 个扫描日
+`nav`/`cash` 全是 NaN**（8/28、8/31、9/1、9/2），13 条持仓里 6 条的
+`shares`/`size_usd` 也是 NaN。`meta.json` 的 `cash` 同样是 NaN。
+
+### 溯源：单点起因 + 不可逆传染
+
+起点是 **2026-08-28 TMUS 的 TIME 止损**——那天正是全站 HTTPS 断掉、
+扫描只跑到 20/30 的日子，`_fetch_ohlc` 拿回的 8/28 那根日线是 NaN：
+
+```
+_check_exit → ("TIME", NaN, "2026-08-28")        # NaN 价照样触发出场
+_close_position → gross_pct NaN → pnl_usd NaN
+cash += pos.size_usd + pnl                       # ← cash 从此永久 NaN
+nav_for_sizing = cash + sum(size_usd)            # 之后每天 NAV 都是 NaN
+_compute_position_size(NaN, ...) → NaN
+if size_usd <= 1: return None                    # ← NaN 穿过，仓位照开
+shares = size_usd / entry_price → NaN
+```
+
+**关键判据：6 条坏仓的 `entry_price` 全是好的**（367.95 / 170.48 / 676.08…
+都是真实收盘价），只有 `shares`/`size_usd` 是 NaN —— 说明毒源不在取价，
+在 `nav`。而 8/28 当天持仓还全是干净的，于是锁定到 `cash` 那一侧，
+再顺着 `cash += size_usd + pnl` 找到那条 `exit_price: NaN` 的 TMUS 平仓。
+
+三道守卫全是 `<= 0` / `<= 1` 形态，NaN 的任何比较都返回 False，**一道没拦住**。
+
+### Fixed
+
+- **`_fetch_ohlc` 出口丢弃含非有限值的 bar**（唯一源头，堵这里就不必在
+  `_check_exit` / `_mark_to_market` 各补一遍）。丢 bar 的后果是良性的：
+  该日不出场，顺延到有真实价格的下一个交易日（TIME 判据是
+  `dt >= time_stop`，不会漏触发）。
+- `_open_position` 两道守卫改成 NaN-proof（`math.isfinite` + 原有阈值）。
+- `run_for_date` 加纵深防御：`nav_for_sizing` 非有限值时**当天不开新仓并
+  报 ERROR**，而不是静默写出 NaN 仓位。NaN 一旦落盘，之后每天的 NAV
+  都继承它，且无法从状态文件反推原始数值。
+- 新增 `tests/test_paper_portfolio_nan.py`（7 条），含反向回归护栏
+  `test_healthy_inputs_still_open` / `test_all_finite_passes_through`。
+  5 个变异逐一验证会变红（含「过度修复：把好 bar 也丢掉」
+  与「NaN 日用 0 价冒充出场」两种错误修法）。
+
+### 数据修复
+
+备份 `paper_portfolio_state.bak-nanfix-20260903/`，回滚到 8/27 收盘状态后
+用修好的引擎重放 8/28→9/2 四天。
+
+回滚状态**逐项对平后才动手**：8/27 记录 `positions_count=8`、
+`deployed=$12,593.03`；保留的 7 条干净仓成本合计 $11,333.47，
+加上重建的 TMUS $1,259.55 = **$12,593.02**（1 分钱舍入）。
+TMUS 的 `sl/tp` 由 `CONFIG(-7%/+15%)` 反推，**同期 13 条仓位逐条验证
+公式吻合**后才采用；`rationale` 原文不可恢复，已在字段里如实注明。
+
+重放结果：
+
+```
+8/28  NAV $50,663.14  8 仓   （TMUS 的 NaN 日线被丢弃，不出场）
+8/31  NAV $50,711.63  9 仓   ← TIME TMUS $182.24→$181.37  PnL −$8.66
+9/01  NAV $50,512.05  12 仓
+9/02  NAV $51,031.21  13 仓
+```
+
+TMUS 最终按 **8/28 的真实收盘 $181.37** 平仓（重放时数据已可获取），
+`exit_date` 仍是 8/28，口径正确。全部状态文件 `: NaN` 字面量归零，
+KPI 恢复可算：total_return +2.06% / Sharpe 0.4 / 胜率 52.3% / 44 笔。
+
+### 已知残留（不修，记录）
+
+重放是逐日进行的，8/31 那天才处理掉 TMUS，故 `equity_curve` 的
+`realized_pnl_today: -8.66` 记在 8/31，而该笔交易的 `exit_date` 是 8/28。
+两者不一致但都不是错值 —— 交易本身的日期与价格都正确，
+只是现金效应落在引擎处理它的那天。
+
+
+## [0.45.96] — 2026-09-03 — 缓存测试写死 8 月日期，跨月自动变红（本次不含生产代码改动）
+
+### 现象
+
+`tests/test_treasury_yields.py::TestGetYieldCurve::test_caches_within_ttl`
+自 2026-09-01 起恒红（`assert 2 == 1`），隔离跑同样红，**与任何代码改动无关**。
+`treasury_yields.py` 上一次改动是 v0.45.61，此后一行未动。
+
+### 根因：两次调用的月份来自两个不同的钟
+
+`get_yield_curve` 的缓存键是**年月**：
+
+- `get_yield_curve()`（不带参数）→ 键取 **ET 当前月**（`_et_month()`，:147）
+- `get_yield_curve("2026-08-26")` → 键取**参数里的月**（:139）
+
+原测试把前者交给挂钟、后者写死 `"2026-08-26"`，再断言"同月，应复用"。
+这个配对只在挂钟停留在 **2026-08** 时成立。月份一翻，两次调用落进
+`202609` / `202608` 两个桶，`_fetch_month` 被调两次 —— 断言如实报告了
+一件真实发生的事，只是它测的不是缓存，是"今天是不是八月"。
+
+与 MEMORY v0.45.72「fixture 日期没从被测日期倒推」、v0.45.65
+`TestCoverageHorizon` 是同一形状：**夹具日期相对于测试自己控制不了的钟漂移**。
+
+### Fixed（测试）
+
+- `test_caches_within_ttl`：先 `monkeypatch.setattr(ty, "_et_month", lambda: "202608")`
+  把月份钉死，两次调用再配对。选钉时钟而不是"从 ET 今天倒推出 `YYYY-MM-15`"，
+  是因为 `_XML` 夹具里只有 8 月的行：让缓存键跟着真实月份走的话，第二次调用
+  会返回 `None`，测试照样绿，但**除了抓取次数什么都没断言**。钉住之后第二次
+  调用真的取到行，顺手补了 `["date"] == "2026-08-27"` 与 `["y10"] == 4.66`。
+  这个打桩打得中：`get_yield_curve` 里是模块级全局查找，不是 v0.45.72 那种
+  打不中的函数内局部 import。写法沿用 `test_macro_snapshot.py:381` 的既有惯例。
+
+### Added（测试）
+
+- `test_cache_key_is_per_month`：跨月方向的姐妹测试。钉 `_et_month` 到
+  `202609`，配一份 9 月夹具 `_XML_SEPT`（值与 8 月**刻意全不同**），断言
+  `seen == ["202609", "202608"]` 且 8 月的查询拿到的是 8 月的曲线。
+  两条测试守的是**互补而非重复**的性质："同月复用"与"跨月不复用"，
+  单有前者时把缓存键换成常量照样全绿 —— 而那会让 9 月的调用默默拿到
+  8 月的曲线，正是本模块开篇拒绝的那种"错值与真值无法区分"。
+
+### 变异验证
+
+按 MEMORY「修好一条长期变红的测试后必跑 mutation check」，逐个改
+`treasury_yields.py` 后重跑（每次跑完还原，已核对文件字节一致）：
+
+| 变异 | 实际改动处 | 变红的测试 |
+|---|---|---|
+| M0 `_et_month` → `"202612"`（模拟月度翻转） | 1 | **无** ✅ 正是本次要的：不再随挂钟漂移 |
+| M0b `_et_month` → `"202701"`（翻年） | 1 | **无** ✅ 排除"同年巧合" |
+| M1 缓存键换成常量（所有月共用一个桶） | 4 | `test_cache_key_is_per_month` |
+| M2 缓存键按年分桶 `yyyymm[:4]` | 4 | `test_cache_key_is_per_month` |
+| M3 彻底不缓存（`if True:`） | 1 | `test_caches_within_ttl` |
+
+M3 变红说明**没有把原测试唯一的覆盖一起"修"没**（v0.45.72 的坑）；
+M1/M2 只打中新增那条，说明姐妹测试确实补的是空白，不是冗余。
+
+**变异脚本自己也要验。** M1/M2 换缓存键时，除了判断行还有三处写回
+（`_CACHE[yyyymm]=` / `_CACHE_TS[yyyymm]=` / `rows=_CACHE[yyyymm]`）必须同步换，
+漏一处则永远 miss —— 那会变成 M3 的形状，表里却记成 M1。
+所以「实际改动处」这列是证据的一部分：4 = 四处全中；脚本另加
+`assert mutated != orig`（挡 no-op 替换）、禁 ERROR（挡变异把测试搞崩而非搞红）、
+跑完 sha256 比对还原。**没有这层，变异表本身就是一份没人验过的绿。**
+
+跨月那条钉的 `"202609"` 恰好等于本次执行时的真实 ET 月份 ——
+**光看它今天绿证明不了钉住了**，M0/M0b 才是证据。另：
+`monkeypatch.setattr` 未用 `raising=False`，`_et_month` 若被改名会当场抛
+`AttributeError`，不会像 v0.45.72 ② 那样静默失效（已实测）。
+
+### 遗留（本次未动，仅记录）
+
+M0 不变红同时暴露：**`_et_month()` 函数体本身无人守**。它的两个消费测试
+（本文件与 `test_macro_snapshot.py::test_treasury_month_key_uses_eastern_not_local`）
+都把它 monkeypatch 掉了 —— 后者验的是"`get_yield_curve` 调了 `_et_month`
+而不是本机 `strftime`"，不是"`_et_month` 返回的确实是美东月"。
+是 3 行 zoneinfo，风险低，先记不改。
+
+### 实测
+
+```
+修前：tests/test_treasury_yields.py  11 passed, 1 failed
+修后：tests/test_treasury_yields.py  13 passed（13 条逐条独立进程跑也全过，
+      排除顺序依赖与 _CACHE 跨用例污染）
+全量：2163 passed, 24 skipped, 63 deselected, 1 xfailed（0 failed）
+ruff check --select F821：All checks passed（全仓）
+```
+
+全量扫了一遍同形状风险（读挂钟 + 近期硬编码日期同现），
+`tests/` 下仅 `test_site_missing_fields.py` 命中，核对为假阳性
+（`datetime.now()` 出现在描述历史 bug 的 docstring 里，被测函数已收显式日期）。
+
+## [0.45.95] — 2026-09-03 — Step 3 的 ML 计数从来没准过（bash glob 撞 TCC readdir）
+
+⚠️ **本条改的是 `~/.claude/scripts/alpha-hive-orchestrator.sh`，不在本仓库**。
+备份 `alpha-hive-orchestrator.sh.bak-20260903`。
+
+### 先纠正一个我自己的错判
+
+上一轮我判断是「Step 3 在步骤运行时重新取今天」。**错了** —— Step 3 用的是
+启动时固定的 `DATE_STR`，值一直正确。
+
+### 真正的现象：每一次运行都是「已生成 0 / 预期 12」
+
+```
+8/27  8/28  8/31  9/1  9/2  →  全部「ML 报告：已生成 0 / 预期 12」
+```
+
+不是跨午夜特有，是**长期如此**。后果：Step 3 天天为另外 12 只补跑一遍，
+把上面 `ML_CAP` 那道限流直接翻倍 —— 正是同一段注释里记着的
+「2026-07-23 深夜限流连锁崩溃」的成因。9/1 的产物是 **24 份**报告而非 12。
+
+### 根因：同一个脚本里，glob 数不出来但 `[ -f ]` 数得出来
+
+```bash
+# line 610（坏）—— 恒为 0
+GENERATED_COUNT=$(ls "$PROJECT_DIR"/alpha-hive-*-ml-enhanced-${DATE_STR}.html 2>/dev/null | wc -l)
+# line 619（好）—— 一直准确
+if [ ! -f "$PROJECT_DIR/alpha-hive-${t}-ml-enhanced-${DATE_STR}.html" ]; then
+```
+
+差别是 **readdir vs stat**。macOS TCC 对 `~/Desktop` 允许 stat、拒绝 readdir。
+bash 展开 glob 需要 readdir → 无匹配 → `ls` 收到字面量而报错 →
+`2>/dev/null` 吞掉 → `wc` 数出 0。**报错被静默，0 看起来像个合法计数。**
+
+判据（供下次排查）：line 619 每次都**正确跳过**了 Step 2 已生成的那些标的
+（9/2 挑的是 TSLA BILI AMZN… 而非名单前 12 只 NVDA TSLA MSFT…），
+证明进程看得见文件 —— 于是问题被锁定在 glob 这一种访问方式上。
+
+### 启动那条「✅ Desktop 文件访问权限正常」测错了东西
+
+它用 `$PYTHON3`（有完全磁盘访问权）`open()` 一个**已知文件名**：
+两个维度都不对 —— 错的二进制（失败的是 bash），错的操作（失败的是 readdir）。
+所以 glob 全线失效时它照样打勾。
+
+### Fixed
+
+- **计数改用 `[ -f ]` 逐只累加**，不再依赖 glob（全脚本仅此一处 glob）。
+  实测：9/2 → 12/12 正确跳过；9/1 → 24/12 跳过；未来日期 → 0/12 正常补跑。
+- **启动预检补上 readdir 一维**，只告警不拦截，措辞改为
+  「stat + readdir 均可」。留着是为了下次有人写 glob 时能看见。
+- **新增跨日闸**：`generate_ml_report.py` 用 `pdt_today()` 命名、不接受
+  `--date`，日期翻篇后补跑会产出错标日期的报告。现改为此时跳过，
+  走**专属退出码 3**。⚠️ 不能在守卫里设 `RC=0` —— 下面
+  `if [ $STEP3_RC -eq 0 ]` 会打「✅ Step 3 成功」并把 skipped 覆盖成
+  success，又是一个假标签（初版就是这么写的，自查时改掉）。
+
+### 撤下 12 份错标报告
+
+2026-09-02 的扫描因电量耗尽（`Low Power Sleep, Charge:1%`）中途休眠 9 小时，
+Step 3 跑到次日 00:04，补出 12 份标着 `2026-09-03` 的报告 ——
+市场尚未开盘的日期，且 `swarm_results` **12/12 全为空**，33KB vs 正常 48KB。
+已从 gh-pages 撤下（`b3f7646`）并删除本地产物。同日正确标注 `2026-09-02`
+的 12 份保留。`index.html` 里的 `2026-09-03` 仅为 `_generated_at` 时间戳
+（`_date` 仍是 `2026-09-02`），无指向这些文件的链接，删除不产生死链。
+
+### 未修（记录）
+
+- 超时看门狗用 `sleep N` 计时，数的是进程被调度的秒数而非墙上时钟；
+  9/2 整机休眠 9 小时期间它也冻住，故 3600s 预算没开火。
+  这次没开火恰好是对的（醒来后扫描健康，杀掉反而白费），
+  改成墙钟会把「机器睡了」误判成「扫描卡了」。两者需要分开处理。
+- Step 12 `scan_coverage` 在跨日运行时按当前日期找结果文件，
+  9/2 的覆盖率因此未被测到。属**诚实降级**（`determinable: false`，
+  明说测不了），未伪装通过。
+
 ## [0.45.94] — 2026-09-03 — 占位（进行中：建立 Python CI，离线确定性子集）
 
-## [0.45.93] — 2026-09-03 — 占位（进行中：self_analyst NaN 价格污染 IC 表与胜率分母）
+## [0.45.93] — 2026-09-03 — 2 条 NaN 快照伪造了整张每蜂 IC 表
+
+### 现象
+
+月度自诊断简报（`self_analysis_2026-09.md`）把 `T+7 平均收益` 印成 `+nan%`。
+显眼的是那个 `+nan%`，但它恰好是三处伤害里最轻的一个。
+
+### 根因
+
+645 条快照里有 2 条 `entry_price=NaN`（2026-06-26 META / RKLB，疑似 yfinance
+429 期间落库）。`bool(float('nan')) is True`，所以下面这些**看起来像有效性检查、
+实际只是非空检查**的守卫，一条都没挡住：
+
+- `compute_stats`：`if ep and t7` → NaN 进入 `returns_t7`，均值被传染 → `+nan%`
+- `classify`：`if not entry or not actual_t7` → NaN 穿过，随后 `nan > 0` 与
+  `nan < 0` **同时为 False**，看多看空都落 `"wrong"` → 静默污染胜率分母
+- `compute_dimension_ic`：`if not t7 or not ep` → NaN 喂进 `_spearman()` 的
+  `sorted()`。NaN 与任何值比较均为 False，令比较关系自相矛盾，产出的名次数组是
+  **未定义的**（不是「NaN 排末尾」这种可预期偏差，而是整段序列被打乱）
+
+第三条是真正的破坏：**2 条坏行让全表 IC 位移最多 0.26**，凭空造出一份完整的、
+读起来很合理的「高 IC 蜂」排名——而该表的用途正是给 Track A 权重优化当依据：
+
+| 蜂 | 修复前 | 修复后 | 位移 |
+|-----|--------|--------|------|
+| ChronosBeeHorizon | +0.272 | +0.012 | −0.260 |
+| GuardBeeSentinel | +0.296 | +0.066 | −0.230 |
+| QueenDistiller | +0.252 | +0.050 | −0.202 |
+| BearBeeContrarian | +0.385 | +0.273 | −0.112 |
+| CodeExecutorAgent | −0.076 | +0.031 | +0.107 |
+
+### Fixed
+
+- `self_analyst.py` 新增 `_is_valid_price()`（有限、正、非 bool），替换
+  `classify` / `compute_stats` / `compute_dimension_ic` 三处真值判断守卫
+- `_spearman()` 入口成对剔除 NaN/inf——它是共享原语，放行 NaN 的排序函数会替
+  之后每一个调用方继续生产「看起来合理」的相关系数
+- 胜率 227/194（原 227/196），`avg_ret_7d` `+nan%` → **+1.31%**
+- 简报第一节增印「⚠️ 价格无效被剔除 N 条」——剔除必须留痕，静默丢弃只是把盲区
+  换个地方藏（本轮 4 条：2 条 NaN + 2 条 BRK-B `entry_price=0`）
+
+### Added
+
+- `tests/test_self_analyst_nan.py`（22 条）。已过 mutation check：把
+  `_is_valid_price` 改回 `bool(v)` 语义后 12 条转红，其中包含核心的
+  `test_dimension_ic_unmoved_by_added_nan_rows`
+
+### 诊断结论（写入 `self_analysis_briefs/self_analysis_2026-09.md` 第四节）
+
+修完数据又发现**简报的结论方式本身有系统性缺陷**：第二节印原始计数、不除基准率，
+三条「发现」全是同一个错误的三种外观——
+
+- 「看多偏斜」不存在：失败中 88.7% 看多，而方向性样本本就 88.6% 看多；
+  两方向胜率 53.9% vs 54.2%，实质相同
+- 「失败集中于 VKTX」是成交量假象：n≥20 的 10 个标的，Wilson CI **全部含 50%**
+- 「Oracle 最具误导」方向反了：Oracle 失败均分 7.99、**正确均分 8.28**，
+  它对什么都打 ~8 分。真正在失败案例上打更高分的是 ChronosBee（−0.26）与 ScoutBee（−0.21）
+- 模板固定文案「系统自信度越高越危险」与数据相反：score≥7 胜率 73.5%（n=34）
+  vs score<7 的 52.2%——但事后择优且样本薄，**列为线索不作结论**
+
+另记：`compute_dimension_ic` 跨标的且跨日期池化，落进 MEMORY「横截面池化陷阱」。
+改逐日横截面口径后**无一只蜂通过 Bonferroni**（最高 BuzzBee t=+1.89，需 |t|>2.9），
+BearBee 的 +0.273 因任何单日都凑不够 5 条横截面而**无法计算、应作废**。
+与 MEMORY 既有结论一致：sentiment 是唯一有证据的信号，聚合分 IC≈0。
+
 
 ## [0.45.92] — 2026-09-02 — 实时口径的宏观数据补上日期戳
 

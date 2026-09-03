@@ -109,6 +109,64 @@ def _isolate_weekly_optimizer_db(tmp_path, monkeypatch):
                         tmp_path / "_no_such_pheromone.db", raising=False)
 
 
+# ==================== paper_portfolio 生产状态隔离 ====================
+
+_PP_STATE_FILES = ("positions.jsonl", "closed_trades.jsonl",
+                   "equity_curve.jsonl", "meta.json")
+
+
+def _pp_state_digest(path):
+    """文件内容指纹；不存在给 'MISSING'（删除也算改动，不能悄悄放过）。"""
+    import hashlib
+    try:
+        return hashlib.md5(path.read_bytes()).hexdigest()
+    except (OSError, FileNotFoundError):
+        return "MISSING"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_paper_portfolio_state(tmp_path, monkeypatch):
+    """把 paper_portfolio 的四个状态文件全局重绑到 tmp，并核对真身没被动过。
+
+    v0.45.104。事故：一个只想验「run_for_date 入口会拒绝错模式」的测试，
+    monkeypatch 了 `_load_meta` / `_append_jsonl` / `_save_meta` 却漏了路径本身，
+    于是跑到收尾那两行——
+        `_write_jsonl(EQUITY_FILE, ...)` / `_write_jsonl(POSITIONS_FILE, ...)`
+    ——**整体重写**了生产状态：equity_curve 93 行 → 1 行、positions 13 行 → 0。
+    `_append_jsonl` 打桩挡不住它，因为收尾走的根本不是 append。
+
+    两道防线，缺一不可：
+      ① 四个路径全局默认指向 tmp —— 漏绑一个就出事，所以不靠各测试自觉；
+      ② teardown 比对真身指纹 —— 兜住任何绕过全局的写法（直接用 STATE_DIR、
+         subprocess 调 CLI 等）。没有②的话，将来有人加一条新写入路径，
+         ①会静默失效而没人知道。
+    需要读真实状态的测试自己 monkeypatch 回去即可覆盖①（②仍会看着它）。
+    """
+    try:
+        import paper_portfolio as _pp
+    except Exception:  # pragma: no cover - 模块不可得时无需隔离
+        return
+
+    real = {n: _pp.STATE_DIR / n for n in _PP_STATE_FILES}
+    before = {n: _pp_state_digest(p) for n, p in real.items()}
+
+    sandbox = tmp_path / "paper_portfolio_state"
+    sandbox.mkdir(exist_ok=True)
+    monkeypatch.setattr(_pp, "STATE_DIR", sandbox, raising=False)
+    monkeypatch.setattr(_pp, "POSITIONS_FILE", sandbox / "positions.jsonl")
+    monkeypatch.setattr(_pp, "CLOSED_FILE", sandbox / "closed_trades.jsonl")
+    monkeypatch.setattr(_pp, "EQUITY_FILE", sandbox / "equity_curve.jsonl")
+    monkeypatch.setattr(_pp, "META_FILE", sandbox / "meta.json")
+
+    yield
+
+    touched = [n for n, p in real.items() if _pp_state_digest(p) != before[n]]
+    assert not touched, (
+        f"测试写到了**生产** paper_portfolio_state/：{touched}。"
+        "四个路径全局已默认指向 tmp，还能改到真身说明有绕过它们的写入路径——"
+        "去把那条路径也接到模块级常量上，不要在这里放行。")
+
+
 @pytest.fixture(autouse=True)
 def _isolate_feedback_loop_close_t7_db(tmp_path, monkeypatch):
     """把 feedback_loop.PHEROMONE_DB_PATH 指向不存在的临时路径（v0.45.87）。
