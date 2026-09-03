@@ -6959,7 +6959,13 @@ def _load_ticker_accuracy(ticker: str, out_dir: Path) -> dict:
         snap_dir = str(out_dir / "report_snapshots")
         # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
         # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
-        analyzer = BacktestAnalyzer(directory=snap_dir, clean_t7=True)
+        # v0.45.98：显式传 close_t7_db_path=ALPHAHIVE_DIR（本文件自己的
+        # VM 挂载点探测逻辑），不用 feedback_loop.py 的 __file__ 相对缺省值
+        # ——后者只反映"这份 feedback_loop.py 副本在哪"，worktree/多 checkout
+        # 场景下与真实 pheromone.db 所在目录不是恒等的（已在复查中实测验证：
+        # worktree 本地空库 vs. ~/Desktop/Alpha Hive 下的真实生产库）。
+        analyzer = BacktestAnalyzer(directory=snap_dir, clean_t7=True,
+                                    close_t7_db_path=ALPHAHIVE_DIR / "pheromone.db")
         snaps = analyzer.get_snapshots_by_ticker(ticker)
         if not snaps:
             return {}

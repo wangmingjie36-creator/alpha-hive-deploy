@@ -5,7 +5,58 @@
 
 ---
 
-## [0.45.98] — 2026-09-03 — 占位（进行中：修复 v0.45.87 二次复查发现的 close_t7 路径解析问题）
+## [0.45.98] — 2026-09-03 — 三处 close_t7 生产接入点未传 db 路径，worktree 下静默失效
+
+v0.45.87 上线后又做了一轮 10-agent 独立复查（针对 v0.45.87 提交本身），
+最高优先级发现：`generate_deep_v2.py` / `alpha_hive_daily_report.py` /
+`swarm_agents/queen_distiller.py` 三处新接入的
+`BacktestAnalyzer(..., clean_t7=True)` 都没有显式传 `close_t7_db_path`，
+于是落到 `feedback_loop.py` 自己的缺省值
+`Path(__file__).resolve().parent / "pheromone.db"`——这只反映"这份
+`feedback_loop.py` 副本在哪"，不是 `weekly_optimizer.py` 那套带 Cowork VM
+挂载点探测的 `ALPHAHIVE_DIR`。已在复查现场（本 worktree）实测验证：
+`Path('feedback_loop.py').resolve().parent / 'pheromone.db'` 解析到的是
+worktree 本地那个刚建的空库（0 条 `close_t7`），而真实数据在
+`~/Desktop/Alpha Hive/pheromone.db`（35MB，有数据）——三处只要不是从
+`feedback_loop.py` 自身所在的那份 checkout 运行，就会拿到
+`status="missing"`，悄悄退回脏口径 `actual_prices.t7`，且没有任何可见
+警示（`weekly_optimizer.main()` 的 `_warn_if_close_t7_unavailable()` 只
+覆盖它自己）。
+
+### Fixed
+
+- `generate_deep_v2.py::_load_ticker_accuracy`：显式传
+  `close_t7_db_path=ALPHAHIVE_DIR / "pheromone.db"`（本文件自己已有的
+  VM 挂载点探测逻辑）。
+- `alpha_hive_daily_report.py` 的 "feedback_loop 权重建议合并" 块：显式传
+  `close_t7_db_path=self.report_dir / "pheromone.db"`——与同一行 `_snap_dir`
+  用同一个基准目录（`self.report_dir`，即 `PATHS.home`），保证 snapshots
+  与 close_t7 库至少互相一致。
+- `swarm_agents/queen_distiller.py` 的历史胜率折扣块：显式传
+  `close_t7_db_path=_project_root_ta / "pheromone.db"`，同样与 `_snap_dir`
+  共用同一个刚计算出的基准目录（该功能目前默认关闭，
+  `config.TICKER_ACCURACY_FEEDBACK["enabled"]=False`，此次是防御性修复）。
+- 新增 `tests/test_close_t7_production_wiring.py`：3 个测试锁死
+  `generate_deep_v2.py`/`queen_distiller.py` 两处的路径接线（对照组验证
+  "db 不存在时保留旧行为"契约未被破坏）；修复前手动回退验证过这些测试
+  会失败（真回归测试，非重言式）。`alpha_hive_daily_report.py` 那处未补
+  独立测试——仓库里从未有对应路径的测试基础设施，构造完整
+  `AlphaHiveDailyReporter` 的成本超出这处机械改动应有的投入；已核实该
+  改动本身语法/导入正确（`self.report_dir` 经 `hive_logger.PATHS.home`
+  确认类型为 `Path`）。
+
+同一轮复查还报出 6 条较低优先级观察（`--min-samples` 与内部硬编码
+`MIN_SAMPLES` 脱节、另外两处 `entry_price` 真值判断未对齐、三个新接入点
+仍缺样本量下限、`PHEROMONE_DB_PATH` 与 `hive_logger.PATHS.db` 重复、
+"有效 T+7 样本"判定散落 3-4 处、`weekly_optimizer.py` 自身 4 处调用点
+仍用旧的两步包装）——均为 PLAUSIBLE、非本次修复范围（部分是刻意保留的
+向后兼容设计，部分是既有代码的预先存在问题，非本次改动引入），未处理，
+详见本 session 的复查记录。
+
+全量测试套件 `pytest tests/ -q`：**2201 passed, 18 skipped, 63 deselected,
+1 xfailed**，0 failed。
+
+## [0.45.97] — 2026-09-03 — 一根 NaN 日线，把纸面组合净值烂了四天
 
 ## [0.45.97] — 2026-09-03 — 一根 NaN 日线，把纸面组合净值烂了四天
 

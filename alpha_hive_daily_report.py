@@ -823,7 +823,13 @@ class AlphaHiveDailyReporter:
             _snap_dir = os.path.join(str(self.report_dir), "report_snapshots")
             # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
             # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
-            _fb_analyzer = _FBAnalyzer(directory=_snap_dir, clean_t7=True)
+            # v0.45.98：显式传 close_t7_db_path=self.report_dir/"pheromone.db"，
+            # 与上一行 _snap_dir 用同一个基准目录（self.report_dir），不用
+            # feedback_loop.py 的 __file__ 相对缺省值——否则 snapshots 和
+            # close_t7 库可能来自两个不同目录，worktree 场景下已实测会不一致。
+            _fb_analyzer = _FBAnalyzer(
+                directory=_snap_dir, clean_t7=True,
+                close_t7_db_path=self.report_dir / "pheromone.db")
             if _fb_analyzer.snapshots:
                 _suggestion = _fb_analyzer.suggest_weight_adjustments()
                 if _suggestion and _suggestion.get("new_weights"):
