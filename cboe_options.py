@@ -103,6 +103,25 @@ _ET_TZ = ZoneInfo("America/New_York")
 _vintage_stats = {"checked": 0, "stale": 0}
 
 
+class CboeStaleVintageError(RuntimeError):
+    """CDN 发的是更早交易日的文件。**只在调用方显式要求时抛**（`on_stale="raise"`）。
+
+    v0.45.91：在此之前，陈旧一律 `return None` —— 和「网络失败 / 403 / 空期权链」
+    共用同一个出口，调用方无从分辨。实时路径不在乎（三者都该降级到 yfinance），
+    但云端快照在乎：它的补抓 pass 只认「陈旧」这一类，靠 `StaleVintageError`
+    分流。信号被压平后那条分支成了死代码，08-28 BILI / 08-31 TMO / 09-01 BILI
+    连着三次都以泛化 `RuntimeError: CBOE payload 为空` 落进普通失败，
+    一次都没被补抓过。
+    """
+
+    def __init__(self, ticker: str, vintage_date: str, expected_date: Optional[str]):
+        self.ticker = ticker
+        self.vintage_date = vintage_date
+        self.expected_date = expected_date
+        super().__init__(f"CBOE {ticker} 数据陈旧：last_trade={vintage_date}，"
+                         f"应为 {expected_date}")
+
+
 def _expected_vintage_date() -> Optional[str]:
     """本时点**应当**拿到的数据日期（ET 日历日）；无法判定返回 None。
 
@@ -129,22 +148,26 @@ def _expected_vintage_date() -> Optional[str]:
     return None
 
 
-def _payload_is_stale(ticker: str, data: dict) -> bool:
-    """payload 的成交时刻是否早于应有日期。判不了一律返回 False（fail-open）。"""
+def _payload_stale_vintage(ticker: str, data: dict) -> Optional[tuple]:
+    """陈旧则返回 `(实际日期, 应有日期)`，否则 None。判不了返回 None（fail-open）。
+
+    统计与告警都记在这里，所以每份 payload 只该调用一次
+    —— `_payload_is_stale` 是它的布尔外壳，两者别串着调。
+    """
     expected = _expected_vintage_date()
     raw = (data or {}).get("last_trade_time")
     if not expected or not raw or not isinstance(raw, str):
-        return False
+        return None
     try:
         dt_ = datetime.fromisoformat(raw.strip())
     except ValueError:
-        return False
+        return None
     if dt_.tzinfo is not None:
         dt_ = dt_.astimezone(_ET_TZ)
     got = dt_.strftime("%Y-%m-%d")
     _vintage_stats["checked"] += 1
     if got >= expected:
-        return False
+        return None
     _vintage_stats["stale"] += 1
     _log.warning("CBOE %s 数据陈旧：last_trade=%s，应为 %s —— 弃用本源，交由降级链",
                  ticker, got, expected)
@@ -152,7 +175,12 @@ def _payload_is_stale(ticker: str, data: dict) -> bool:
     if c >= 8 and st / c > 0.5:
         _log.error("CBOE vintage 陈旧率 %d/%d >50%% —— 疑似校验口径错误或 CBOE "
                    "大面积故障，请核对；此刻全部标的正在落到 yfinance", st, c)
-    return True
+    return got, expected
+
+
+def _payload_is_stale(ticker: str, data: dict) -> bool:
+    """payload 的成交时刻是否早于应有日期。判不了一律返回 False（fail-open）。"""
+    return _payload_stale_vintage(ticker, data) is not None
 
 
 def invalidate_payload_cache(ticker: Optional[str] = None) -> None:
@@ -241,13 +269,28 @@ def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: 
     return chosen, list(near_set)
 
 
-def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optional[dict]:
+def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
+                        on_stale: str = "none") -> Optional[dict]:
     """拉取 CBOE 延迟报价 JSON，返回 data 段（含 options / current_price / close）；失败返回 None。
+
+    `on_stale` 决定检出 CDN 陈旧文件时怎么办：
+      - `"none"`（默认）→ 返回 None，与网络失败同一个出口。实时路径要的就是这个：
+        三种失败都该降级到 yfinance，分辨它们没有意义。
+      - `"raise"` → 抛 `CboeStaleVintageError`。云端快照要的是这个：它必须把
+        「陈旧」（等 CDN 刷新就能补回）和「真失败」（补也白补）分开处理。
+        默认值保持 `"none"`，实时路径行为逐字节不变。
 
     串行化（`_CBOE_SEM` 限 1）：全进程一次只发一个出站请求，不给 CBOE 的限流器加压
     （⚠️ **不是**因为并发压垮 TLS 栈——那条归因 2026-08-25 已证伪，见 http_gate docstring）。
     进程缓存：同标的主链+全链共享一次下载。重试退避：瞬时网络故障错开即恢复。
     """
+    if on_stale not in ("none", "raise"):
+        # 拼错就静默退回旧行为 = 这次事故的同一形态，宁可当场炸。
+        raise ValueError(f"on_stale 只接受 'none' / 'raise'，收到 {on_stale!r}")
+
+    # 快照模式不做 vintage 校验：补跑的快照在**落盘时**已经验过一次
+    # （cloud_snapshot_fetch 拒绝陈旧才写文件），这里再验一次会拿今天的
+    # 日历去判那天的数据。`on_stale` 在这条路径上无意义。
     if _SNAPSHOT_PROVIDER is not None:
         snap = _snapshot(ticker)
         if not snap:
@@ -280,11 +323,19 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3) -> Optio
                 return None
             # v0.45.39：陈旧 CDN 文件在此拦下。**不写缓存** ——
             # 写了就等于把陈旧数据在进程内又保鲜 120 秒。
-            if _payload_is_stale(ticker, data):
+            stale = _payload_stale_vintage(ticker, data)
+            if stale is not None:
+                if on_stale == "raise":
+                    raise CboeStaleVintageError(ticker, stale[0], stale[1])
                 return None
             with _cache_lock:
                 _payload_cache[key] = (now, data)
             return data
+        except CboeStaleVintageError:
+            # 必须先于下面的兜底 except 捕获，否则会被当成网络故障吞掉、
+            # 白白重试 3 次、最后仍旧 return None —— 那等于这个参数没写。
+            # 重试本身也无意义：同一份 CDN 文件，再拉几次还是同一天的。
+            raise
         except Exception as e:  # 网络/SSL/解析失败 → 退避重试
             last_err = e
             if attempt < retries - 1:

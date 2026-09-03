@@ -199,6 +199,77 @@ def test_retry_needs_cache_invalidation_when_checks_disagree(monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════════════
+# on_stale —— 陈旧信号透传（v0.45.91）
+# ══════════════════════════════════════════════════════════════════
+# v0.45.39 只做到「拦下」，陈旧与网络失败共用 `return None` 一个出口。
+# 实时路径无所谓（都降级 yfinance），云端快照却要靠这个分类决定补不补抓，
+# 于是补抓 pass 对 CDN 陈旧从未触发过：08-28 BILI / 08-31 TMO / 09-01 BILI
+# 三次都以泛化 `RuntimeError: CBOE payload 为空` 落进普通失败。
+
+def test_on_stale_default_returns_none(monkeypatch):
+    """默认口径必须与 v0.45.39 逐字节一致 —— 实时路径不许因本次改动改行为。"""
+    monkeypatch.setattr(co, "_expected_vintage_date", lambda: "2026-08-26")
+    _patch_net(monkeypatch, _raw("2026-08-24T15:59:59"))
+    assert co._fetch_cboe_payload("TMO", 15) is None
+
+
+def test_on_stale_raise_surfaces_dates(monkeypatch):
+    """`on_stale="raise"` → 抛异常，且带上两个日期供调用方审计。"""
+    monkeypatch.setattr(co, "_expected_vintage_date", lambda: "2026-08-26")
+    _patch_net(monkeypatch, _raw("2026-08-24T15:59:59"))
+    with pytest.raises(co.CboeStaleVintageError) as ei:
+        co._fetch_cboe_payload("TMO", 15, on_stale="raise")
+    assert ei.value.ticker == "TMO"
+    assert ei.value.vintage_date == "2026-08-24"
+    assert ei.value.expected_date == "2026-08-26"
+
+
+def test_on_stale_raise_not_swallowed_by_retry_loop(monkeypatch):
+    """回归：抛点在重试 `try` 内，兜底 `except Exception` 会把它吞成 None。
+
+    这是本次改动最容易写错的地方——吞掉后行为与改动前完全一样，
+    参数形同虚设，而所有只断言「返回 None」的旧测试仍然全绿。
+    顺带守住「不重试」：同一份 CDN 文件重拉几次还是同一天的。
+    """
+    monkeypatch.setattr(co, "_expected_vintage_date", lambda: "2026-08-26")
+    hits = {"n": 0}
+
+    def _count(*a, **k):
+        hits["n"] += 1
+        return _Resp(_raw("2026-08-24T15:59:59"))
+
+    monkeypatch.setattr(co.urllib.request, "urlopen", _count)
+    with pytest.raises(co.CboeStaleVintageError):
+        co._fetch_cboe_payload("TMO", 15, on_stale="raise")
+    assert hits["n"] == 1, f"陈旧不该重试，实际拉了 {hits['n']} 次"
+
+
+def test_on_stale_raise_still_does_not_cache(monkeypatch):
+    """两种口径都不许把陈旧 payload 写进缓存（v0.45.39 的不变式）。"""
+    monkeypatch.setattr(co, "_expected_vintage_date", lambda: "2026-08-26")
+    _patch_net(monkeypatch, _raw("2026-08-24T15:59:59"))
+    with pytest.raises(co.CboeStaleVintageError):
+        co._fetch_cboe_payload("TMO", 15, on_stale="raise")
+    assert "TMO" not in co._payload_cache
+
+
+def test_on_stale_raise_leaves_other_failures_alone(monkeypatch):
+    """只有陈旧改走异常；空期权链等真失败仍旧 return None，不许被顺手改掉。"""
+    monkeypatch.setattr(co, "_expected_vintage_date", lambda: "2026-08-26")
+    body = json.loads(_raw())
+    body["data"]["options"] = []
+    _patch_net(monkeypatch, json.dumps(body).encode())
+    assert co._fetch_cboe_payload("X", 15, on_stale="raise") is None
+
+
+def test_on_stale_raise_fail_open_when_calendar_down(monkeypatch):
+    """日历挂了仍旧 fail-open —— 不许因为改了出口就把 30 只全打成陈旧。"""
+    monkeypatch.setattr(co, "_expected_vintage_date", lambda: None)
+    _patch_net(monkeypatch, _raw("1999-01-04T16:00:00"))
+    assert co._fetch_cboe_payload("X", 15, on_stale="raise") is not None
+
+
+# ══════════════════════════════════════════════════════════════════
 # ET 时钟：合并 v0.45.46 时统一到 ZoneInfo（v0.45.41）
 # ══════════════════════════════════════════════════════════════════
 
@@ -243,3 +314,9 @@ def test_premarket_in_est_not_reported_open(monkeypatch):
     _freeze_utc(monkeypatch, _dt.datetime.fromisoformat("2026-03-04T13:30:00+00:00"))
     assert co.is_market_open() is False, \
         "08:30 ET 是盘前，判成盘中会导致取 current_price（盘前价）而非 close"
+
+
+def test_on_stale_rejects_typo():
+    """拼错不许静默退回旧行为——那正是 v0.45.91 修的那种失败形态。"""
+    with pytest.raises(ValueError, match="on_stale"):
+        co._fetch_cboe_payload("X", 15, on_stale="Raise")
