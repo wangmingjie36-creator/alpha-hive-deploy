@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.107] — 2026-09-04 — 占位（进行中：二次复查 v0.45.106，全 neutral 标的假 PF=∞）
+
 ## [0.45.106] — 2026-09-04 — generate_deep_v2._load_ticker_accuracy() 同物种 direction 词表 bug——极性反转而非塌缩
 
 v0.45.85 修了 self_analyst.py 的 classify()：direction 字面量比较 `== "Long"`
