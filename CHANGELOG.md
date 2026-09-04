@@ -5,7 +5,51 @@
 
 ---
 
-## [0.45.107] — 2026-09-04 — 占位（进行中：二次复查 v0.45.106，全 neutral 标的假 PF=∞）
+## [0.45.107] — 2026-09-04 — 二次复查 v0.45.106：全 neutral 标的假 PF=∞；已核实历史已交付深度报告零受影响
+
+用户要求二次复查 v0.45.106 的改动，并核对已发布/已交付的深度报告要不要补说明性 note。
+两项都查完：前者挖出一个真实的相邻边界 bug 并修复，后者核实为**不需要补 note**。
+
+### Fixed — 全 neutral 历史标的显示"胜率 0% / PF ∞"的自相矛盾组合
+
+v0.45.106 把 neutral 排除出 `direction_adjusted_returns` 序列（正确），但没考虑
+一个标的**历史全是 neutral、一次方向性预测都没有**的情况：这时
+`gross_profit=gross_loss=0`，原公式 `else 999.0` 兜底会把它渲染成 PF=∞
+（绿色，暗示"零亏损的完美记录"），与同一张卡片上 `win_rate=0.0%`（红色）
+并排显示成自相矛盾的组合——真实原因是"压根没有方向性记录"，不是"从未
+输过"。实测生产库里 ICLN(n=1)/REGN(n=2)/MSTR(n=2)/ADBE(n=2)/ORCL(n=2)
+五只标的当时命中此分支。修法：`direction_adjusted_returns` 为空时
+`profit_factor` 给 0.0（配合 `sharpe` 同为 0.0，`_render_accuracy_card`
+第二行自然不渲染），保留"真实有方向性交易、零亏损"仍合法显示 999.0/∞ 的
+语义（用 NOW/JNJ 等标的真实数据核实未被误伤）。新增两条测试
+（`TestAllNeutralTickerDoesNotFakeInfinitePF`），已验证还原修复会让测试变红。
+
+### Notes — 历史已交付深度报告核实：零受影响，不需要补充说明性 note
+
+排查范围：本机全部 40 份带"历史回测"卡片的深度报告（`~/Desktop/深度分析报告/
+深度/deep-NVDA-*.html` 与 `deep-VKTX-2026-07-29.html`，另在 WeChat 消息目录 /
+旧 session 上传目录发现的均为同批次重复文件），逐份提取胜率/Sharpe/PF 数值，
+**零份显示 v0.45.106 bug 的"胜率恒 0%"特征签名**——全部显示合理数值
+（66.7%~100% 胜率）。同时确认 GitHub Pages（gh-pages 分支）上 1050 份已发布
+`*-ml-enhanced-*.html` 报告**不含**此卡片：`_load_ticker_accuracy()`/
+`_render_accuracy_card()` 只被深度模式（Template C，`generate_deep_v2.py`
+独立 CLI 脚本）调用，不接入日常自动化流水线（`alpha_hive_daily_report.py`
+只写快照、不读快照算卡片），也从不调用 `_sync_ghpages()` 或 Slack 推送——
+深度报告只落本地文件，从未被"发布"到网站，只曾以文件形式交付给用户。
+
+原因链已查清：`self_analyst.py` v0.45.85 的 docstring 早记录过
+"2026-07-29 前冻结的旧快照用的是 Long/Short/Neutral，之后 paper_portfolio.py
+v0.38.0 挂载起才切换成小写 bullish/bearish/neutral"——`git log` 确认
+`_load_ticker_accuracy()` 的 `== "Long"/"Short"` 比较是这个函数**从第一次提交
+起就有的写法**（非后期回归），只是在词表切换之前，生产数据本来就是大写
+`Long`/`Short`，字面量比较恰好对得上，bug 处于潜伏状态。本机全部 62 份本地
+深度报告最晚一份正是 **2026-07-29**（VKTX，边界当天）——用户此后再没跑过
+深度模式，所以词表切换之后、这次修复之前，这条代码路径实际上从未被真正
+执行过一次。**结论：这个 bug 存在于代码里很久，但从未在任何一次真实报告
+生成里产生过错误输出**，v0.45.106+v0.45.107 的两处修复只影响"从现在起
+新生成"的深度报告，历史交付物无需补充说明或重新生成。
+
+全量 2539 通过（0 failed，18 skipped，1 xfailed），ruff F821 干净。
 
 ## [0.45.106] — 2026-09-04 — generate_deep_v2._load_ticker_accuracy() 同物种 direction 词表 bug——极性反转而非塌缩
 

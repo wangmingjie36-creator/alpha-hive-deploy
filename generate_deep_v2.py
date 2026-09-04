@@ -7027,7 +7027,17 @@ def _load_ticker_accuracy(ticker: str, out_dir: Path) -> dict:
             if std_ex > 0:
                 sharpe = round((mean_ex / std_ex) * (periods_per_year ** 0.5), 3)
         # Profit Factor
-        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.0
+        # v0.45.106 复查：direction_adjusted_returns 为空（该 ticker 历史全是
+        # neutral，一次方向性预测都没有）时 gross_profit/gross_loss 都是 0，
+        # 若直接落到 `else 999.0`（=∞），会和同一张卡片上 win_rate=0.0% 并排
+        # 显示成「胜率 0% / PF ∞」的自相矛盾组合——不是「零亏损的完美记录」，
+        # 是「压根没有方向性记录」。只有真正有方向性交易时才允许 999.0 兜底
+        # （零亏损但有盈利，是合法的∞语义）；全无方向性交易时给 0.0，
+        # 配合 sharpe 同为 0.0，_render_accuracy_card 的第二行会自然不渲染。
+        if not direction_adjusted_returns:
+            profit_factor = 0.0
+        else:
+            profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.0
         return {
             "n": n,
             "win_rate": round(wins / n * 100, 1),

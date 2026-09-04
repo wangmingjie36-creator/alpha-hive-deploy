@@ -140,3 +140,41 @@ class TestLowercaseDirectionVocabulary:
         result = g._load_ticker_accuracy("TESTZ", out_dir)
 
         assert result["win_rate"] == pytest.approx(100.0)
+
+
+class TestAllNeutralTickerDoesNotFakeInfinitePF:
+    """v0.45.106 二次复查发现的相邻边界 bug：排除 neutral 出 Sharpe/PF 序列后，
+    一只从未有过方向性预测（历史全 neutral）的标的会让 gross_profit=
+    gross_loss=0，落进 `else 999.0` 分支——渲染成"胜率 0% / PF ∞"这种自相
+    矛盾组合（0% 胜率却显示"无亏损的完美记录"）。真实生产数据里 ICLN/REGN/
+    MSTR/ADBE/ORCL 五只标的当时全部命中这个分支。
+    """
+
+    def test_all_neutral_history_gives_zero_not_infinite_pf(self, snap_dir):
+        out_dir, d = snap_dir
+        _save(d, "TESTN", "2026-08-01", "neutral", 100.0, 105.0)
+        _save(d, "TESTN", "2026-08-08", "neutral", 100.0, 95.0)
+
+        import generate_deep_v2 as g
+        result = g._load_ticker_accuracy("TESTN", out_dir)
+
+        assert result["n"] == 2
+        assert result["win_rate"] == 0.0
+        assert result["profit_factor"] == 0.0, (
+            f"全 neutral 历史不应显示 PF=999.0（∞），实际: {result}"
+        )
+        assert result["sharpe"] == 0.0
+
+    def test_real_directional_zero_losses_still_shows_infinite_pf(self, snap_dir):
+        """对照组：真实有方向性交易、且从未亏损，999.0（∞）依然是正确语义，
+        不能被上面那条修复误伤。
+        """
+        out_dir, d = snap_dir
+        _save(d, "TESTP", "2026-08-01", "bullish", 100.0, 110.0)
+        _save(d, "TESTP", "2026-08-08", "bullish", 100.0, 112.0)
+
+        import generate_deep_v2 as g
+        result = g._load_ticker_accuracy("TESTP", out_dir)
+
+        assert result["win_rate"] == pytest.approx(100.0)
+        assert result["profit_factor"] == 999.0
