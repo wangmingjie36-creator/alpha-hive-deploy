@@ -3,7 +3,7 @@
   "starting_capital": 50000.0,
   "starting_date": "2026-03-09",
   "cash": 19295.147734300008,
-  "last_run_date": "2026-09-03",
+  "last_run_date": "2026-09-04",
   "config_snapshot": {
     "starting_capital": 50000.0,
     "bootstrap_date": "2026-03-09",
@@ -13,6 +13,18 @@
       "high": 5.0,
       "mid": 3.0,
       "low": 0.0
+    },
+    "sizing_mode": "vol_target",
+    "vol_target": {
+      "target_position_vol_pct": 1.75,
+      "size_pct_min": 1.5,
+      "size_pct_max": 8.0,
+      "conf_multiplier": {
+        "high": 1.0,
+        "mid": 0.6,
+        "low": 0.0
+      },
+      "vol_source_max_age_days": 5
     },
     "win_rate_multiplier": {
       "strong": 1.0,
@@ -24,7 +36,7 @@
     "time_stop_days": 10,
     "entry_conf_min": "mid",
     "entry_score_bull": 6.5,
-    "entry_score_bear": 3.5,
+    "entry_score_bear": 4.85,
     "min_samples_for_win_rate": 5,
     "live_start_date": "2026-04-16",
     "ticker_whitelist": []
