@@ -316,8 +316,15 @@ def _default_close(ticker: str, as_of: str) -> Optional[float]:
 
     try:
         import twelve_data
+        # v0.45.105：走共享缓存入口，并且**要 120 根而不是 10 根**。
+        # 本模块是日报里最先跑的那个消费方；只要 10 根的话，随后 vrp_signal /
+        # portfolio_greeks 各要 120 根，缓存里那条 10 根的条目不够用，会各自
+        # 重取一次——三次调用只省下零次。窗口要大不多花配额（同一次请求的
+        # outputsize），下面 `_pick` 取的是「≤ as_of 的最后一根」，
+        # 多给几十根旧数据一个字都不影响它的答案。
         if twelve_data.is_configured():
-            rows = twelve_data._fetch_rows(ticker, 10, end_date=as_of)
+            rows = twelve_data.fetch_bars(
+                ticker, twelve_data.SHARED_BARS_WINDOW, end_date=as_of)
             if rows:
                 px = _pick([(str(r.get("date"))[:10], r.get("close")) for r in rows])
                 if px is not None:

@@ -18,9 +18,11 @@ import twelve_data as td
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     td.reset_stats()
+    td.clear_bars_cache()           # v0.45.105：进程内日线缓存会跨测试泄漏
     monkeypatch.setattr(td, "_limiter", None)
     yield
     td.reset_stats()
+    td.clear_bars_cache()
 
 
 def _resp(payload):
@@ -461,3 +463,259 @@ class TestApiEndDateHelper:
                             lambda msg, *a, **k: said.append(msg % a if a else msg))
         assert td._api_end_date("not-a-date") == "not-a-date"
         assert any("原样透传" in m for m in said), f"非法 end_date 被静默透传了：{said}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 进程内日线缓存（v0.45.105）
+#
+# 同一只票的日线从前在一次扫描里被取 3 遍（options_paper_leg / vrp_signal /
+# portfolio_greeks 各一次），而 Twelve Data 是**串行 7 次/分钟**的队列 ——
+# 30 只票 × 多余的 2 次 ≈ 8.6 分钟纯排队，全是重复数据；编排器对 ~2700 秒的
+# 扫描只剩 ~900 秒余量，v0.45.89 已经被超时杀过一次。
+#
+# 这一族测试全部**数真实的 HTTP 调用次数**，不数缓存自己的计数器：
+# 「缓存说它命中了」和「真的没发请求」是两回事，本项目的教训是只信后者。
+# ══════════════════════════════════════════════════════════════════════════════
+
+_BARS_AS_OF = "2026-08-31"          # 钉死在过去：`_drop_forming_bar` 的「美东当日」
+                                    # 判断只会随时间越来越不可能命中，测试不会随日历漂
+
+
+def _bar_dates(n: int, end: str = _BARS_AS_OF):
+    """升序 n 个工作日日期，末根 = `end`（`end` 自己必须是工作日）。"""
+    import datetime as dt
+    d = dt.date.fromisoformat(end)
+    out = []
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.append(d.isoformat())
+        d -= dt.timedelta(days=1)
+    return list(reversed(out))
+
+
+def _bars_payload(n: int = 130, end: str = _BARS_AS_OF):
+    """n 根日线。成交量恒定 —— 让 `_drop_forming_bar` 的中位数闸不会误伤末根。"""
+    return {"values": [{"datetime": d, "close": f"{100 + i}", "volume": "1000000"}
+                       for i, d in enumerate(_bar_dates(n, end))]}
+
+
+class _HTTP:
+    """把 `http_gate.urlopen_gated` 换成计数桩。真正被数的就是网络调用本身。"""
+
+    def __init__(self, monkeypatch, payload=None):
+        self.calls = []
+        self.payload = payload if payload is not None else _bars_payload()
+        import http_gate
+
+        def _open(req, *a, **k):
+            self.calls.append(getattr(req, "full_url", str(req)))
+            p = self.payload
+            if isinstance(p, Exception):
+                raise p
+            if callable(p):
+                p = p(len(self.calls))
+            if isinstance(p, Exception):
+                raise p
+            return _resp(p)
+
+        monkeypatch.setattr(http_gate, "urlopen_gated", _open)
+
+    @property
+    def n(self) -> int:
+        return len(self.calls)
+
+
+@pytest.fixture
+def keyed(monkeypatch):
+    monkeypatch.setattr(td, "api_key", lambda: "K")
+    return True
+
+
+class TestBarsCacheWindows:
+    """窗口语义：大窗口喂得饱小窗口（切尾巴），小窗口喂不饱大窗口（重取并整条替换）。"""
+
+    def test_large_then_small_fetches_once_and_tail_slices(self, keyed, monkeypatch):
+        http = _HTTP(monkeypatch)
+        big = td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        small = td.fetch_bars("NVDA", 10, end_date=_BARS_AS_OF)
+        assert http.n == 1, f"小窗口本该切大窗口的尾巴，却又发了请求：{http.n} 次"
+        assert len(small) == 10
+        assert small == big[-10:], "切出来的不是最后 10 根（行是升序的）"
+        st = td.bars_cache_stats()
+        assert (st["fetches"], st["hits"], st["misses"]) == (1, 1, 1)
+
+    def test_small_then_large_refetches_and_replaces(self, keyed, monkeypatch):
+        http = _HTTP(monkeypatch)
+        small = td.fetch_bars("NVDA", 10, end_date=_BARS_AS_OF)
+        assert http.n == 1 and len(small) == 10
+        big = td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        assert http.n == 2, "更大的窗口必须重取，不能拿小条目糊弄"
+        assert td.bars_cache_stats()["refetch_larger"] == 1
+        # 替换之后，小窗口重新命中的是**新**条目
+        again = td.fetch_bars("NVDA", 10, end_date=_BARS_AS_OF)
+        assert http.n == 2, "大窗口取回来之后，小请求还在发网络调用"
+        assert again == big[-10:]
+
+    def test_same_window_twice_is_one_fetch(self, keyed, monkeypatch):
+        """新取与命中必须给出**逐字节相同**的东西。第一版只在命中时切尾巴、
+        新取时原样返回，同样的参数第一次 130 根第二次 120 根 —— 正是这条断言
+        抓到的。"""
+        http = _HTTP(monkeypatch)
+        a = td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        b = td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        assert http.n == 1
+        assert a == b and len(a) == 120
+
+
+class TestBarsCacheKeys:
+    """键必须把「不同口径」分开：`None` ≠ 具体日期，不同日期之间也不通用。"""
+
+    def test_none_and_date_do_not_share_an_entry(self, keyed, monkeypatch):
+        http = _HTTP(monkeypatch)
+        td.fetch_bars("NVDA", 120, end_date=None)
+        td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        assert http.n == 2, "`None`（最新）与显式 end_date 被当成了同一个键"
+        # 各自重来一次都该命中；没有缓存的话这里会变成 4 次
+        td.fetch_bars("NVDA", 120, end_date=None)
+        td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        assert http.n == 2
+        assert td.bars_cache_stats()["entries"] == 2
+
+    def test_different_dates_do_not_share(self, keyed, monkeypatch):
+        http = _HTTP(monkeypatch)
+        td.fetch_bars("NVDA", 120, end_date="2026-08-28")
+        td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        assert http.n == 2
+        td.fetch_bars("NVDA", 120, end_date="2026-08-28")
+        assert http.n == 2
+
+    def test_different_tickers_do_not_share(self, keyed, monkeypatch):
+        http = _HTTP(monkeypatch)
+        td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        td.fetch_bars("SPY", 120, end_date=_BARS_AS_OF)
+        assert http.n == 2
+        td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        td.fetch_bars("SPY", 120, end_date=_BARS_AS_OF)
+        assert http.n == 2
+
+
+class TestBarsCacheFailures:
+    """失败绝不入缓存 —— v0.45.50 有过「缓存住一次失败把整轮钉死」的教训
+    （`paper_portfolio._PRICE_CACHE` 就是为此修的）。"""
+
+    def test_none_is_not_cached_and_next_call_retries(self, keyed, monkeypatch):
+        # 第 1 次接口错（HTTP 200 但 status=error），第 2 次正常
+        http = _HTTP(monkeypatch, payload=lambda i: (
+            {"status": "error", "code": 429, "message": "limit"} if i == 1
+            else _bars_payload()))
+        assert td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF) is None
+        assert td.bars_cache_stats()["entries"] == 0, "失败被写进缓存了"
+        rows = td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        assert http.n == 2 and rows and len(rows) == 120
+
+    def test_failed_larger_request_keeps_the_smaller_entry(self, keyed, monkeypatch):
+        http = _HTTP(monkeypatch, payload=lambda i: (
+            _bars_payload() if i == 1 else {"status": "error", "code": 429, "message": "x"}))
+        small = td.fetch_bars("NVDA", 10, end_date=_BARS_AS_OF)
+        assert small and http.n == 1
+        assert td.fetch_bars("NVDA", 200, end_date=_BARS_AS_OF) is None
+        # 旧条目还在、还能用：大窗口取数失败不该把好数据一起赔进去
+        assert td.fetch_bars("NVDA", 10, end_date=_BARS_AS_OF) == small
+        assert http.n == 2, f"小窗口本该还在缓存里，却重取了：{http.n} 次"
+
+
+class TestBarsCacheIsolation:
+    """返回副本 —— 调用方拿到的 dict 会被到处传（portfolio_greeks 会重建、
+    vrp_signal 会排序），改坏缓存的话下一个消费方拿到的就是脏数据。"""
+
+    def test_caller_mutation_does_not_corrupt_the_cache(self, keyed, monkeypatch):
+        http = _HTTP(monkeypatch)
+        first = td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        first.clear()                                   # 改列表
+        second = td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        assert http.n == 1, "这一次必须是缓存命中，否则测的不是缓存"
+        assert len(second) == 120
+        second[0]["close"] = -999.0                     # 改行内的 dict
+        second[-1]["date"] = "1970-01-01"
+        third = td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        assert http.n == 1
+        assert third[0]["close"] == 110.0 and third[-1]["date"] == _BARS_AS_OF
+
+    def test_clear_bars_cache_forces_a_refetch_and_zeroes_stats(self, keyed, monkeypatch):
+        http = _HTTP(monkeypatch)
+        td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        assert http.n == 1
+        td.clear_bars_cache()
+        assert td.bars_cache_stats() == {"hits": 0, "misses": 0, "refetch_larger": 0,
+                                         "fetches": 0, "entries": 0}
+        td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
+        assert http.n == 2
+
+
+class TestOneFetchPerTickerPerScan:
+    """端到端：一次扫描里三个消费方碰同一只票，只准发**一次**网络调用。
+
+    这是整改动的目的本身。三个消费方在日报里的真实顺序是
+    options_paper_leg → vrp_signal → portfolio_greeks，但顺序是会变的
+    （小节顺序改过不止一次），所以三种排列都测：只要谁先跑谁请求的窗口更小，
+    缓存就会被穿透 —— 那正是把三方窗口统一到 `SHARED_BARS_WINDOW` 的原因。
+    """
+
+    def _consumers(self):
+        import options_paper_leg as opl
+        import portfolio_greeks as pg
+        import vrp_signal as vrp
+        pg._BARS_CACHE.clear()
+        return {
+            "options_paper_leg": lambda: opl._default_close("NVDA", _BARS_AS_OF),
+            "vrp_signal": lambda: vrp._default_bars("NVDA", _BARS_AS_OF),
+            "portfolio_greeks": lambda: pg.daily_bars("NVDA", _BARS_AS_OF),
+        }
+
+    @pytest.mark.parametrize("order", [
+        ("options_paper_leg", "vrp_signal", "portfolio_greeks"),   # 日报里的真实顺序
+        ("vrp_signal", "portfolio_greeks", "options_paper_leg"),
+        ("portfolio_greeks", "options_paper_leg", "vrp_signal"),
+    ])
+    def test_three_consumers_one_fetch(self, keyed, monkeypatch, order):
+        http = _HTTP(monkeypatch)
+        cons = self._consumers()
+        out = {name: cons[name]() for name in order}
+        assert http.n == 1, (
+            f"顺序 {order} 下同一只票的日线被取了 {http.n} 遍（应为 1）："
+            f"{[u.split('outputsize=')[1][:6] for u in http.calls]}")
+        # 三方都真的拿到了东西 —— 「只发一次请求」若靠的是谁没拿到数，那不叫省
+        assert out["options_paper_leg"] == 100.0 + 129
+        assert out["vrp_signal"] and len(out["vrp_signal"]) == 120
+        assert out["portfolio_greeks"] and len(out["portfolio_greeks"]) == 120
+
+    def test_all_three_request_the_same_window(self, keyed, monkeypatch):
+        """窗口对齐是「一次调用」的**前提**，单独钉一次：
+        任何一方把窗口改回自己的老值，上面三种顺序里至少一种会立刻变红，
+        但那时的报错指向顺序而不是根因，所以这里直接说出根因。"""
+        import portfolio_greeks as pg
+        assert pg._BARS_WINDOW == td.SHARED_BARS_WINDOW
+        http = _HTTP(monkeypatch)
+        self._consumers()["options_paper_leg"]()          # 日报里最先跑的那个
+        assert f"outputsize={td.SHARED_BARS_WINDOW}" in http.calls[0], (
+            "最先跑的消费方请求的窗口小于共享窗口，后面两个会各自重取一遍")
+
+
+class TestSharedCacheDoesNotChangeUncachedPaths:
+    """`_fetch_rows` 仍是**不带缓存**的取数层，`fetch_daily_closes` /
+    `fetch_volume_ratio` 走的还是它 —— 本次只给日线消费方加缓存，
+    RV/量比那两条口径一个字节都没动（它们的窗口不同，切尾巴会改变行数）。"""
+
+    def test_fetch_rows_still_hits_network_every_time(self, keyed, monkeypatch):
+        http = _HTTP(monkeypatch)
+        td._fetch_rows("NVDA", 120, _BARS_AS_OF)
+        td._fetch_rows("NVDA", 120, _BARS_AS_OF)
+        assert http.n == 2
+        assert td.bars_cache_stats()["entries"] == 0
+
+    def test_realized_vol_path_untouched(self, keyed, monkeypatch):
+        http = _HTTP(monkeypatch)
+        assert td.fetch_daily_closes("NVDA", 60) is not None
+        assert td.fetch_daily_closes("NVDA", 60) is not None
+        assert http.n == 2 and td.bars_cache_stats()["entries"] == 0

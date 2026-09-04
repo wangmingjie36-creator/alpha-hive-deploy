@@ -743,3 +743,73 @@ class TestCliAndMarkdown:
         assert src.index("期权纸面腿已更新") < src.index("vrp_signal")
         assert "vrp_signal" in src and "record_day(self.date_str)" in src and "settle(self.date_str)" in src
         assert "_vrp_markdown()" in inspect.getsource(ahdr)
+
+
+class TestSharedBarsCache:
+    """v0.45.105：settle 的取数腿改走 `twelve_data.fetch_bars`（进程内共享缓存），
+    并且把 `as_of` 当 `end_date` 传下去。
+
+    从前是裸 `_fetch_rows(t, 120)`（`end_date=None`），于是本模块的缓存键
+    与另外两个消费方（都传 as_of）不同，同一只票的日线一次扫描要取 3 遍 ——
+    而 Twelve Data 是串行 7 次/分钟的队列。
+    """
+
+    def test_default_bars_asks_the_shared_cache_with_as_of(self, monkeypatch):
+        import twelve_data as td
+        seen = []
+        monkeypatch.setattr(td, "is_configured", lambda: True)
+        monkeypatch.setattr(td, "fetch_bars",
+                            lambda t, d=None, end_date=None: seen.append((t, d, end_date)) or [])
+        monkeypatch.setattr(td, "_fetch_rows",
+                            lambda *a, **k: pytest.fail("绕过共享缓存直接取数了"))
+        vrp._default_bars("NVDA", "2026-08-31")
+        assert seen == [("NVDA", td.SHARED_BARS_WINDOW, "2026-08-31")]
+
+    def test_settle_threads_as_of_into_the_default_leg(self, monkeypatch):
+        """结算腿必须用**结算日**做 end_date —— 键要和另外两个消费方对得上，
+        而且 `_forward_closes` 本来就只用 `date <= as_of` 的 K 线。"""
+        import twelve_data as td
+        seen = []
+        monkeypatch.setattr(td, "is_configured", lambda: True)
+        monkeypatch.setattr(td, "fetch_bars",
+                            lambda t, d=None, end_date=None: seen.append((t, end_date)) or None)
+        vrp._write_jsonl(vrp.SIGNALS_FILE, [_row("AAA", _day(90), 8.0)])
+        vrp.settle("2026-09-01")
+        assert seen == [("AAA", "2026-09-01")], f"end_date 没跟着 as_of 走：{seen}"
+
+    def test_injected_bars_fn_keeps_its_one_arg_signature(self):
+        """注入版 `bars_fn` 的签名是外部契约（本文件里十几处在用）。
+        默认腿要吃 as_of，只能靠闭包，不能改 `bars_fn(ticker)` 的调用形状。"""
+        got = []
+        bars = [{"date": _day(90 - i), "close": 100.0 + i} for i in range(60)]
+        vrp._write_jsonl(vrp.SIGNALS_FILE, [_row("AAA", _day(90), 8.0)])
+        vrp.settle("2026-09-01", bars_fn=lambda t: got.append(t) or bars)
+        assert got == ["AAA"]
+
+    def test_settle_result_unchanged_by_the_shared_cache(self, monkeypatch):
+        """同一份 K 线，走共享缓存与走老的裸 `_fetch_rows` 必须结算出同一个数。
+        缓存只该省调用，不该动结果。"""
+        import twelve_data as td
+        bars = [{"date": _day(120 - i), "close": 100.0 + (i % 7)} for i in range(120)]
+        monkeypatch.setattr(td, "is_configured", lambda: True)
+
+        rows = [_row("AAA", _day(90), 8.0)]
+        vrp._write_jsonl(vrp.SIGNALS_FILE, rows)
+        monkeypatch.setattr(td, "fetch_bars", lambda t, d=None, end_date=None: list(bars))
+        assert vrp.settle("2026-09-01") == 1
+        via_cache = vrp.load_rows()[0]
+
+        vrp._write_jsonl(vrp.SIGNALS_FILE, [_row("AAA", _day(90), 8.0)])
+        assert vrp.settle("2026-09-01", bars_fn=lambda t: list(bars)) == 1
+        direct = vrp.load_rows()[0]
+
+        assert via_cache["rv_forward"] == direct["rv_forward"]
+        assert via_cache["vrp_realized"] == direct["vrp_realized"]
+
+    def test_settle_window_constant_matches_the_shared_window(self):
+        """`settle_window_bars`(=120) 那条放弃闸量的是「基准日还在取数窗口里吗」。
+        取数窗口现在由 `twelve_data.SHARED_BARS_WINDOW` 决定 —— 两者脱钩的话，
+        放弃闸要么放早（还能结算的行被丢），要么放晚（永远结算不了的行每天白取
+        一次 K 线，v0.45.104 修的就是这个）。"""
+        import twelve_data as td
+        assert int(vrp.CONFIG["settle_window_bars"]) == td.SHARED_BARS_WINDOW

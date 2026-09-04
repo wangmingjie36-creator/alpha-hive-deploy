@@ -116,7 +116,11 @@ class EarningsWatcher:
             result = {
                 "ticker": ticker.upper(),
                 "earnings_date": date_str,
-                "earnings_time": "AMC",  # 默认盘后，yfinance 不总提供时间
+                # ⚠️ 写死的假定值，**不是观测**：yfinance 的 calendar 不返回时段。
+                # 下游若要按盘前/盘后分层，必须先看 `earnings_time_assumed` 这个旗标，
+                # 否则会拿一个恒定值去分层、得到一个桶，再把空结果读成"时段无影响"。
+                "earnings_time": "AMC",
+                "earnings_time_assumed": True,
                 "source": "yfinance",
                 "cached": False,
                 "fetched_at": datetime.now().isoformat(),

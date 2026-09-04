@@ -1817,6 +1817,7 @@ class AlphaHiveDailyReporter:
                     return {"earnings_date": str(c["date"])[:10],
                             # ⚠️ 与 EarningsWatcher 一样是**假定值**不是观测值
                             "earnings_time": "AMC",
+                            "earnings_time_assumed": True,
                             "source": "chronos_bee_catalyst"}
             return {"earnings_date": None, "source": "chronos_bee_no_earnings"}
         return _fn

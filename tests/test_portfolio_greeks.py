@@ -708,3 +708,26 @@ class TestSharedBarsAccessor:
         assert pg.daily_bars("AAA", AS_OF) is pg._BARS_CACHE[("AAA", AS_OF)]
         assert pg._default_close("AAA", AS_OF) == 12.5          # 收盘价走的是同一份缓存
         assert calls == [("AAA", AS_OF)]                        # 一次取数供所有消费者
+
+
+class TestSharedBarsWindow:
+    """v0.45.105：三个消费方共用 `twelve_data` 的进程内日线缓存，前提是窗口一致。"""
+
+    def test_window_matches_the_shared_constant(self):
+        """100 → 120。β 只用最后 61 根，多出来的一根都不参与计算；提到 120 纯粹
+        是为了和 vrp_signal（真的要 120 根）对齐，好让三方共享同一次 API 调用。
+        Twelve Data 按调用次数计费、不按行数，所以多要 20 根不多花任何东西。"""
+        import twelve_data as td
+        assert pg._BARS_WINDOW == td.SHARED_BARS_WINDOW == 120
+
+    def test_goes_through_the_shared_cache_not_raw_fetch_rows(self, monkeypatch):
+        import twelve_data as td
+        seen = []
+        monkeypatch.setattr(td, "is_configured", lambda: True)
+        monkeypatch.setattr(td, "fetch_bars",
+                            lambda t, d=None, end_date=None: seen.append((t, d, end_date)) or None)
+        monkeypatch.setattr(td, "_fetch_rows",
+                            lambda *a, **k: pytest.fail("绕过共享缓存直接取数了"))
+        monkeypatch.setattr(pg, "load_price_history", lambda *a, **k: None, raising=False)
+        pg._fetch_bars_uncached("AAA", AS_OF)
+        assert seen == [("AAA", td.SHARED_BARS_WINDOW, AS_OF)]

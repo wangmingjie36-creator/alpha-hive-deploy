@@ -6983,20 +6983,38 @@ def _load_ticker_accuracy(ticker: str, out_dir: Path) -> dict:
         for s in t7_snaps:
             ret = (s.actual_price_t7 - s.entry_price) / s.entry_price * 100
             total_ret += ret
-            is_win = (s.direction == "Long" and ret > 0) or (s.direction == "Short" and ret < 0)
+            # v0.45.106：direction 规范化（同 self_analyst.py classify() 的
+            # v0.45.85 修法）。生产 report_snapshots/ 两套词表并存——
+            # generate_deep_v2._save_report_snapshot 写 Long/Short/Neutral，
+            # alpha_hive_daily_report 透传 QueenDistiller 原始的
+            # bullish/bearish/neutral；实测生产库 1051 条快照 100% 是后者，
+            # 0 条 Long/Short。旧写法 `== "Long"`/`== "Short"` 从未匹配过，
+            # 导致 is_win 恒 False、adj_ret 对全部 bullish 交易符号取反。
+            _dir = str(s.direction).strip().lower()
+            is_long = _dir in ("long", "bullish")
+            is_short = _dir in ("short", "bearish")
+            if is_long:
+                is_win = ret > 0
+            elif is_short:
+                is_win = ret < 0
+            else:
+                is_win = False  # neutral/未知方向：不计入"赢"，与旧结构一致
             if is_win:
                 wins += 1
                 cur_consec_loss = 0
             else:
                 cur_consec_loss += 1
                 max_consec_loss = max(max_consec_loss, cur_consec_loss)
-            # Direction-adjusted return
-            adj_ret = ret if s.direction == "Long" else -ret
-            direction_adjusted_returns.append(adj_ret)
-            if adj_ret > 0:
-                gross_profit += adj_ret
-            else:
-                gross_loss += abs(adj_ret)
+            # Direction-adjusted return：neutral 无方向论点，不参与 Sharpe/PF
+            # （与 feedback_loop.BacktestAnalyzer.calculate_accuracy() 里
+            # "neutral: 不计入方向性收益" 的既有口径一致，而非把它当空头处理）。
+            if is_long or is_short:
+                adj_ret = ret if is_long else -ret
+                direction_adjusted_returns.append(adj_ret)
+                if adj_ret > 0:
+                    gross_profit += adj_ret
+                else:
+                    gross_loss += abs(adj_ret)
         # Sharpe ratio (annualized, 252/7 periods)
         sharpe = 0.0
         if len(direction_adjusted_returns) >= 2:
@@ -7009,7 +7027,17 @@ def _load_ticker_accuracy(ticker: str, out_dir: Path) -> dict:
             if std_ex > 0:
                 sharpe = round((mean_ex / std_ex) * (periods_per_year ** 0.5), 3)
         # Profit Factor
-        profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.0
+        # v0.45.106 复查：direction_adjusted_returns 为空（该 ticker 历史全是
+        # neutral，一次方向性预测都没有）时 gross_profit/gross_loss 都是 0，
+        # 若直接落到 `else 999.0`（=∞），会和同一张卡片上 win_rate=0.0% 并排
+        # 显示成「胜率 0% / PF ∞」的自相矛盾组合——不是「零亏损的完美记录」，
+        # 是「压根没有方向性记录」。只有真正有方向性交易时才允许 999.0 兜底
+        # （零亏损但有盈利，是合法的∞语义）；全无方向性交易时给 0.0，
+        # 配合 sharpe 同为 0.0，_render_accuracy_card 的第二行会自然不渲染。
+        if not direction_adjusted_returns:
+            profit_factor = 0.0
+        else:
+            profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.0
         return {
             "n": n,
             "win_rate": round(wins / n * 100, 1),

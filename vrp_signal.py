@@ -406,14 +406,30 @@ def record_day(as_of: str, cache_dir=None) -> List[Dict]:
 
 
 # ---------------------------------------------------------------- 结算
-def _default_bars(ticker: str) -> Optional[List[dict]]:
-    """Twelve Data 已配置 → `_fetch_rows(t, 120)`（每票一次调用）；否则退回本地价格索引。
+def _default_bars(ticker: str, as_of: Optional[str] = None) -> Optional[List[dict]]:
+    """Twelve Data 已配置 → `fetch_bars(t, 120, end_date=as_of)`；否则退回本地价格索引。
     Twelve Data 配置了但这次拿不到（限流/断网）→ None，下次再试，**不**换源：
-    价格索引来自快照 `_snapshot_stock_price`，与日线收盘不是一个口径。"""
+    价格索引来自快照 `_snapshot_stock_price`，与日线收盘不是一个口径。
+
+    v0.45.105 两处改动，都是为了让同一只票的日线在一次扫描里**只取一次**
+    （从前 options_paper_leg / 本模块 / portfolio_greeks 各取一次，
+    而 Twelve Data 是串行 7 次/分钟的队列）：
+
+    ① 走 `twelve_data.fetch_bars`（进程内按 `(ticker, end_date)` 记忆）而不是
+       裸 `_fetch_rows`；
+    ② 传 `end_date=as_of`。另外两个消费方本来就传 as_of，本模块传 `None` 的话
+       键不同、缓存不共享 —— 而 `None` 在这里并没有换来任何东西：
+       `_forward_closes` 本来就只用 `date <= as_of` 的 K 线，多出来的部分一直是
+       被丢掉的。生产上 as_of 就是当天，两者取回的窗口一模一样；补跑历史时
+       `end_date=as_of` 反而**更**对——从前是「最新 120 根再截到 as_of」，
+       as_of 一旦落在 120 根之前就一根不剩，现在是「截至 as_of 的 120 根」，
+       正好对上 `settle_window_bars`(=120) 那条放弃闸量的东西。
+    `as_of=None` 仍然合法（老调用方/测试），语义照旧是「最新」。"""
     try:
         import twelve_data
         if twelve_data.is_configured():
-            return twelve_data._fetch_rows(ticker, 120)
+            return twelve_data.fetch_bars(
+                ticker, twelve_data.SHARED_BARS_WINDOW, end_date=as_of)
     except Exception as exc:  # noqa: BLE001
         _log.warning("[%s] Twelve Data 取 K 线失败: %s", ticker, exc)
         return None
@@ -463,7 +479,9 @@ def settle(as_of: str, bars_fn: Optional[Callable[[str], Optional[List[dict]]]] 
          `settle_max_attempts` 次。取不到 K 线（限流/断网）不计次，那是暂时的。
     放弃数在 `settlement_stats()['n_gave_up']` 与日报小节里可见。
     """
-    bars_fn = bars_fn or _default_bars
+    # 默认取数腿要吃到 as_of（见 `_default_bars` 的 v0.45.105 说明）。用闭包而不是
+    # 改 `bars_fn(ticker)` 的调用形状——注入版 bars_fn 的签名是外部契约，测试在用。
+    bars_fn = bars_fn or (lambda t: _default_bars(t, as_of))
     fwd = int(CONFIG["forward_days"])
     max_attempts = int(CONFIG["settle_max_attempts"])
     window = int(CONFIG["settle_window_bars"]) + int(CONFIG["settle_window_slack"])

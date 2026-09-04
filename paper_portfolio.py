@@ -115,7 +115,58 @@ CONFIG = {
     "time_stop_days": 10,       # T+10 强平
     "entry_conf_min": "mid",    # 最低置信 mid
     "entry_score_bull": 6.5,
-    "entry_score_bear": 3.5,
+    # v0.45.108：原为 3.5。
+    # （v0.45.109 更正归因：这里原写「以设计上的中性点 5 为中心、两侧各留 1.5」，
+    #   但 5 并不是独立的设计中性点——它就是当时的两闸中点 (6.5+3.5)/2。
+    #   因果方向反了：不是「因为中性点是 5 所以闸门定在 3.5」，而是
+    #   「6.5/3.5 这对闸门决定了排序中心是 5」。详见下方 candidate_sort_center。）
+    # 但 final_score 的实际分布右移且下尾被压短——生产 predictions 1127 条里
+    # 中位 5.52、81.5% 在 5 分以上、下尾最低只到 3.19，于是 `<= 3.5` 六个月
+    # 只够到过 1 次（2026-03-13 TSLA，组合成立第 3 天），四月起每月 0 次。
+    # 结果：纸面组合 60 笔（45 已平 + 15 在手）全是多头、零空单。
+    # 这是「闸门恒假」，与 v0.45.71 记的「守卫恒真」是同一枚硬币的两面：
+    # 代码路径没毛病、测试全绿，条件在真实数据上永远取不到。
+    #
+    # 现按**同向命中率**对齐，而不是在分数上几何对称：几何对称的 4.12
+    # 只放行 191 条 bearish 里的 4 条（2.1%），等于没改；4.85 放行 25.1%，
+    # 对上 bullish 侧 6.5 的 25.7%。
+    # 依据窗口 2026-06-01~09-03（中位稳定在 5.25~5.37 的同一世代；四、五月
+    # 中位 6.19/5.79 属另一世代，未混入）。逐月第 25.7 百分位 4.73/4.77/4.92/4.75，
+    # 极差 0.19——不是拿单月凑出来的。
+    #
+    # ⚠️ 改这个值造成口径世代边界：之后的净值不能直接和之前比，
+    #    要对比须 run_replay({"entry_score_bear": 3.5}) 重放旧口径。
+    # ⚠️ 排序中心必须跟着这个值走——v0.45.109 已改为导出，见下方
+    #    candidate_sort_center。改这里之前先读那段注释。
+    "entry_score_bear": 4.85,
+
+    # ── 候选排序中心（v0.45.109）────────────────────────────────────────────
+    # None = 从两闸中点导出 (entry_score_bull + entry_score_bear) / 2。
+    # 给数字 = 强制该中心（仅供 run_replay 做 A/B 重放旧口径；生产别写死）。
+    #
+    # 为什么必须导出而不是写死：排序键是 `abs(score - center)` 降序，两侧候选
+    # 集合的边界就是两个闸门，所以「离中心多远」在 center=两闸中点时**恒等于**
+    # 「超出自己那侧闸门多少」（已验证：2 万组随机配对零反例）。中心一旦偏离
+    # 两闸中点，偏向的那一侧就获得一段与信号强度无关的排序补贴。
+    #
+    # 历史：此处原本硬编码 5，而 (6.5 + 3.5) / 2 = 5.0 —— 那个 5 从来不是
+    # 「名义中性点」，它就是当时的两闸中点。v0.45.108 把 entry_score_bear
+    # 3.5→4.85，两闸中点随之移到 5.675，硬编码的 5 却留在原地，成了一个
+    # **输入变了却没跟着变的导出常数**（与 v0.45.71「守卫恒真」/ v0.45.108
+    # 「闸门恒假」同族：代码没毛病、测试全绿，语义已经悄悄错位）。
+    # 后果实测：C=5.0 下 bull 距心域 [1.50, 3.74]、bear 距心域 [0.16, 1.22]
+    # **完全不重叠**——不是「多头天然优先」，是每一个多头候选都压过每一个
+    # 空头候选（P(多头在前)=100.0%）。旧配置下这不成立也测不出来：
+    # entry_score_bear=3.5 在全部 92 个快照日里放行的空头候选是 **0 条**，
+    # 两方向从未同场竞争过，所以这个中心从未被真实检验。
+    #
+    # ⚠️ 不要改成 final_score 的实测中位。中位与两个闸门的位置无关，
+    #    修不动这个偏置：06-01 世代中位 5.35 只把 P(多头在前) 从 100.0%
+    #    降到 95.9%（等于没改），全期中位 5.60 也才到 77.9%；
+    #    两闸中点 5.675 → 61.4%。同 v0.45.108「几何对称的 4.12 只放行 2.1%」
+    #    的教训：要对齐的是**你真正在意的那个量**，不是看起来对称的那个数。
+    "candidate_sort_center": None,
+
     "min_samples_for_win_rate": 5,  # 低于 5 样本不用胜率过滤
 
     # ── 两层模式（v0.19.1）──────────────────────────────────────────────────
@@ -421,6 +472,34 @@ def _next_trading_date(ticker: str, after: str, max_lookahead_days: int = 5) -> 
 # ══════════════════════════════════════════════════════════════════════════════
 # 核心逻辑：建仓 / 平仓 / mark-to-market
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _candidate_sort_center() -> float:
+    """候选排序键的中心点。默认由两闸中点导出，不允许再出现硬编码副本。
+
+    见 CONFIG["candidate_sort_center"] 上方的长注释：这个值必须跟着
+    entry_score_bull / entry_score_bear 走，写死一份就会在改闸门时静默过期。
+    """
+    override = CONFIG.get("candidate_sort_center")
+    if override is not None:
+        return float(override)
+    return (float(CONFIG["entry_score_bull"]) + float(CONFIG["entry_score_bear"])) / 2.0
+
+
+def _sort_candidates(snapshots: List[Dict]) -> List[Dict]:
+    """按「离排序中心多远」倒序——离得越远＝越超出自己那侧的闸门＝越优先吃资金。
+
+    就地排序并返回同一个 list（调用方 run_for_date 依赖就地语义）。
+    独立成函数是为了让回归测试打到**生产用的这一份**排序，而不是测试里
+    再抄一遍 lambda（抄一遍就等于两个钟，改了生产那份测试照样全绿）。
+    """
+    center = _candidate_sort_center()
+    # 兜底值必须**等于 center**：它的语义是"没分数就排最后"，而只有 center
+    # 才能让距离取到 0。写死一个与 center 不同的数，无分快照会拿到非零距离，
+    # 反而排到部分真候选之前。
+    snapshots.sort(key=lambda s: abs(float(s.get("composite_score") or center) - center),
+                   reverse=True)
+    return snapshots
+
 
 def _should_open(snapshot: Dict, existing_tickers: set, as_of: str = "") -> Tuple[bool, str]:
     """判断是否符合开仓条件。返回 (是否开, 原因说明)"""
@@ -904,8 +983,8 @@ def run_for_date(as_of: str, verbose: bool = False) -> Dict:
                    as_of, cash, len(positions))
         snapshots = []
 
-    # 先按 score 排序，保证高分优先吃到资金
-    snapshots.sort(key=lambda s: abs(float(s.get("composite_score") or 5) - 5), reverse=True)
+    # 先按 score 排序，保证高分优先吃到资金（v0.45.109：中心由两闸中点导出）
+    _sort_candidates(snapshots)
 
     opened_count = 0
     for snap in snapshots:

@@ -227,7 +227,13 @@ def _save_meta(meta: Dict) -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 _BARS_CACHE: Dict[Tuple[str, str], Optional[List[dict]]] = {}
-_BARS_WINDOW = 100               # 每次取多少根日线（β 只要 61 根，留余量给节假日）
+# v0.45.105：100 → 120，与 `twelve_data.SHARED_BARS_WINDOW` 对齐。β 仍然只用最后
+# 61 根（`beta_window`+1），多出来的历史一根都用不上——提到 120 纯粹是为了让本模块、
+# vrp_signal（它的 `settle_window_bars` 真的要 120 根）、options_paper_leg 三方
+# **请求同一个窗口**，从而共享 `twelve_data` 的进程内缓存：窗口不齐的话，先跑的
+# 小窗口喂不饱后跑的大窗口，缓存等于白设。多取 20 根不多花配额（同一次请求的
+# outputsize），Twelve Data 按调用次数计费、不按行数。
+_BARS_WINDOW = 120
 
 
 def _fetch_bars_uncached(ticker: str, as_of: str) -> Optional[List[dict]]:
@@ -238,7 +244,10 @@ def _fetch_bars_uncached(ticker: str, as_of: str) -> Optional[List[dict]]:
     try:
         import twelve_data
         if twelve_data.is_configured():
-            rows = twelve_data._fetch_rows(ticker, _BARS_WINDOW, end_date=as_of)
+            # v0.45.105：网络层的去重已经下沉到 twelve_data.fetch_bars
+            #（按 (ticker, end_date) 记忆，三个消费方共享），本函数名里的
+            # "uncached" 说的是**本模块这一层**不记忆，仍然成立。
+            rows = twelve_data.fetch_bars(ticker, _BARS_WINDOW, end_date=as_of)
     except Exception as exc:  # noqa: BLE001
         _log.warning("[%s] Twelve Data 取 K 线失败: %s", ticker, exc)
         rows = None
@@ -267,12 +276,18 @@ def daily_bars(ticker: str, as_of: str) -> Optional[List[dict]]:
     （30 只票 + SPY ≈ 31 次/天，预算 800，且 Twelve Data 是串行 7 次/分钟）。
     Twelve Data 未配置/拿不到 → 本地价格索引（快照价，口径略不同，日志里说）。
 
-    还没接进来的两处（**本次不改它们**，那两个文件不归本改动管；来改的 session 直接调本函数）：
-        vrp_signal.py:342           twelve_data._fetch_rows(ticker, 120)
-        options_paper_leg.py:303    twelve_data._fetch_rows(ticker, 10, end_date=as_of)
-    同一只票的日线因此一次扫描最多被取 3 遍。接入前提是窗口谈拢：本函数取 `_BARS_WINDOW`
-    (=100) 根，vrp_signal 要 120 根——谁先接谁把这个常数提到 120（多取 20 根不多花调用，
-    同一次 API 的 outputsize 而已）；options_paper_leg 只要 10 根，100 根是超集，可直接用。"""
+    v0.45.105：这里的 `_BARS_CACHE` 记的是**归一化之后**的结果——按 as_of 截断、
+    去掉坏行、排好序，还可能来自本地价格索引而不是 Twelve Data。它和网络层
+    去重是两件事，所以两层都留着，但**不再各管各的**：
+      · 本层（`_BARS_CACHE`）省的是重复的归一化 + 兜底分支，并且给 `_bars_in_memory`
+        提供「重算 β 要不要网络」的判据；
+      · 网络层（`twelve_data.fetch_bars`，按 `(ticker, end_date)` 记忆）省的是
+        真正贵的东西——串行 7 次/分钟的 API 调用，且**跨模块共享**。
+    从前 vrp_signal 与 options_paper_leg 各自裸调 `twelve_data._fetch_rows`，
+    同一只票的日线一次扫描最多被取 3 遍；三方现在都走 `fetch_bars` 且都请求
+    `SHARED_BARS_WINDOW`(=120) 根，只剩 1 遍。缓存没放在本模块，是因为
+    本模块已经 import 了 options_paper_leg，反向 import 会成环；`twelve_data`
+    是三方共同的叶子依赖，放那里谁都不欠谁。"""
     key = (ticker, as_of)
     if key in _BARS_CACHE:
         return _BARS_CACHE[key]
