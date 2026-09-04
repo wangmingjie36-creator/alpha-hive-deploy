@@ -5,6 +5,101 @@
 
 ---
 
+## [0.45.107] — 2026-09-04 — 二次复查 v0.45.106：全 neutral 标的假 PF=∞；已核实历史已交付深度报告零受影响
+
+用户要求二次复查 v0.45.106 的改动，并核对已发布/已交付的深度报告要不要补说明性 note。
+两项都查完：前者挖出一个真实的相邻边界 bug 并修复，后者核实为**不需要补 note**。
+
+### Fixed — 全 neutral 历史标的显示"胜率 0% / PF ∞"的自相矛盾组合
+
+v0.45.106 把 neutral 排除出 `direction_adjusted_returns` 序列（正确），但没考虑
+一个标的**历史全是 neutral、一次方向性预测都没有**的情况：这时
+`gross_profit=gross_loss=0`，原公式 `else 999.0` 兜底会把它渲染成 PF=∞
+（绿色，暗示"零亏损的完美记录"），与同一张卡片上 `win_rate=0.0%`（红色）
+并排显示成自相矛盾的组合——真实原因是"压根没有方向性记录"，不是"从未
+输过"。实测生产库里 ICLN(n=1)/REGN(n=2)/MSTR(n=2)/ADBE(n=2)/ORCL(n=2)
+五只标的当时命中此分支。修法：`direction_adjusted_returns` 为空时
+`profit_factor` 给 0.0（配合 `sharpe` 同为 0.0，`_render_accuracy_card`
+第二行自然不渲染），保留"真实有方向性交易、零亏损"仍合法显示 999.0/∞ 的
+语义（用 NOW/JNJ 等标的真实数据核实未被误伤）。新增两条测试
+（`TestAllNeutralTickerDoesNotFakeInfinitePF`），已验证还原修复会让测试变红。
+
+### Notes — 历史已交付深度报告核实：零受影响，不需要补充说明性 note
+
+排查范围：本机全部 40 份带"历史回测"卡片的深度报告（`~/Desktop/深度分析报告/
+深度/deep-NVDA-*.html` 与 `deep-VKTX-2026-07-29.html`，另在 WeChat 消息目录 /
+旧 session 上传目录发现的均为同批次重复文件），逐份提取胜率/Sharpe/PF 数值，
+**零份显示 v0.45.106 bug 的"胜率恒 0%"特征签名**——全部显示合理数值
+（66.7%~100% 胜率）。同时确认 GitHub Pages（gh-pages 分支）上 1050 份已发布
+`*-ml-enhanced-*.html` 报告**不含**此卡片：`_load_ticker_accuracy()`/
+`_render_accuracy_card()` 只被深度模式（Template C，`generate_deep_v2.py`
+独立 CLI 脚本）调用，不接入日常自动化流水线（`alpha_hive_daily_report.py`
+只写快照、不读快照算卡片），也从不调用 `_sync_ghpages()` 或 Slack 推送——
+深度报告只落本地文件，从未被"发布"到网站，只曾以文件形式交付给用户。
+
+原因链已查清：`self_analyst.py` v0.45.85 的 docstring 早记录过
+"2026-07-29 前冻结的旧快照用的是 Long/Short/Neutral，之后 paper_portfolio.py
+v0.38.0 挂载起才切换成小写 bullish/bearish/neutral"——`git log` 确认
+`_load_ticker_accuracy()` 的 `== "Long"/"Short"` 比较是这个函数**从第一次提交
+起就有的写法**（非后期回归），只是在词表切换之前，生产数据本来就是大写
+`Long`/`Short`，字面量比较恰好对得上，bug 处于潜伏状态。本机全部 62 份本地
+深度报告最晚一份正是 **2026-07-29**（VKTX，边界当天）——用户此后再没跑过
+深度模式，所以词表切换之后、这次修复之前，这条代码路径实际上从未被真正
+执行过一次。**结论：这个 bug 存在于代码里很久，但从未在任何一次真实报告
+生成里产生过错误输出**，v0.45.106+v0.45.107 的两处修复只影响"从现在起
+新生成"的深度报告，历史交付物无需补充说明或重新生成。
+
+全量 2539 通过（0 failed，18 skipped，1 xfailed），ruff F821 干净。
+
+## [0.45.106] — 2026-09-04 — generate_deep_v2._load_ticker_accuracy() 同物种 direction 词表 bug——极性反转而非塌缩
+
+v0.45.85 修了 self_analyst.py 的 classify()：direction 字面量比较 `== "Long"`
+从未匹配生产快照实际写入的小写 `bullish`/`bearish`/`neutral`，导致 correct/wrong
+恒为 0（塌缩成 neutral）。复查同一物种 bug 时在 `_load_ticker_accuracy()`
+（深度报告模板 C 的历史准确率卡片：胜率/Sharpe/PF/最大连败）里发现更严重的
+变体——不是塌缩，是**极性反转**。
+
+### Fixed
+
+- `generate_deep_v2._load_ticker_accuracy()`：`is_win = (s.direction == "Long"
+  and ...) or (s.direction == "Short" and ...)` 与 `adj_ret = ret if
+  s.direction == "Long" else -ret` 同样从未匹配过小写词表——实测
+  `~/Desktop/Alpha Hive/report_snapshots/`（1051 条真实快照）100% 是
+  `bullish`/`bearish`/`neutral`，0 条 `Long`/`Short`。`is_win` 因此恒为
+  `False`（胜率恒 0%），而 `adj_ret` 的 else 分支对**全部**快照取反——
+  每一笔 bullish 盈利交易被算成等额亏损、bullish 亏损被算成等额盈利
+  （bearish 恰好因为"取反"本来就是其正确公式而被巧合抵消，未受影响）。
+  下游 `gross_profit`/`gross_loss`/`sharpe`/`profit_factor`/`max_consec_loss`
+  全部基于这个反转后的序列计算，同样失真。修法与 classify() 一致：
+  `direction = str(s.direction).strip().lower()`，同时接受
+  `long`/`bullish`→看多、`short`/`bearish`→看空，大小写不敏感；neutral/未知
+  方向不再被隐式当空头处理，改为直接排除出 Sharpe/PF 序列（对齐
+  `feedback_loop.BacktestAnalyzer.calculate_accuracy()` 里"neutral 不计入
+  方向性收益"的既有口径，而不是延续原公式"非 Long 即取反"的隐藏假设）。
+  真实 XOM 快照验证：2026-08-10 bullish、ret=+3.12%，修复前
+  `is_win=False, adj_ret=-3.12`；修复后 `is_win=True, adj_ret=+3.12`。
+  新增 `tests/test_ticker_accuracy_direction.py`，5 个用例覆盖小写词表下
+  win_rate/profit_factor 不再退化、neutral 正确排除、大写 Long/Short 旧词表
+  仍可识别；已验证还原修复会让 win_rate 退回 0.0、profit_factor 退回 0.5
+  （旧 bug 的可复现签名）。
+- 影响面：仅深度报告模板 C 的"历史预测记录"卡片（Sharpe/PF/胜率/最大连败
+  四个数字），不影响 paper_portfolio 实盘记账、不影响 weekly_optimizer 权重
+  学习闭环（两者读同一批快照但走不同代码路径，未触达这个 bug）。已生成的
+  历史深度报告不做回溯修正，仅影响本次修复起新生成的报告。
+
+### Notes — 同一文件里的姊妹函数：确认死代码，未动
+
+`feedback_loop.py` 的 `ReportSnapshot.check_direction_accuracy()` /
+`BacktestAnalyzer.calculate_accuracy()` / `generate_accuracy_dashboard_html()`
+/ `save_accuracy_dashboard()` / `analyze_misses_with_llm()` 有完全相同的
+`self.direction == "Long"/"Short"` 字面量比较，理论上是同一个 bug。全仓 grep
+确认：五个真实生产 `BacktestAnalyzer(...)` 实例化点（weekly_optimizer.py
+四处 + generate_deep_v2.py 一处）只用 `.snapshots`/`suggest_weight_adjustments()`
+/`get_snapshots_by_ticker()`，无一调用这条链路——唯一调用方是
+feedback_loop.py 自己的 `__main__` 演示块与 `tests/test_feedback_loop.py`
+（后者按当前字面量语义断言 7+ 条用例）。判定为死代码，未修，只在
+`check_direction_accuracy()` 加了一段指向本记录的注释，供日后接回生产前提醒。
+
 ## [0.45.105] — 2026-09-03 — 二次复查遗留三项：口径不对称、假数据顶观测值、K 线重复取数
 
 v0.45.104 修掉 41 处后仍有三项被刻意推迟。它们分别是**算错数**、**假数据**、

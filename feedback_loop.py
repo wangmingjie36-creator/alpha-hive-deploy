@@ -193,7 +193,23 @@ class ReportSnapshot:
         return returns
 
     def check_direction_accuracy(self) -> Dict:
-        """检查方向预测准确性"""
+        """检查方向预测准确性
+
+        ⚠️ v0.45.106 复查：`self.direction == "Long"/"Short"` 是与
+        generate_deep_v2._load_ticker_accuracy() 修复前同一物种的字面量
+        比较——生产 report_snapshots/ 实际写入的是小写 bullish/bearish/
+        neutral（100%，见该函数修复记录），这里同样从未匹配过。当前
+        **未修**：本方法（连同调用它的 calculate_accuracy() /
+        generate_accuracy_dashboard_html() / save_accuracy_dashboard() /
+        analyze_misses_with_llm()）经全仓 grep 确认无任何生产调用点——
+        weekly_optimizer.py 的四处与 generate_deep_v2.py 的一处
+        BacktestAnalyzer(...) 只用 .snapshots / suggest_weight_adjustments()
+        / get_snapshots_by_ticker()，唯一调用来自本文件自己的 __main__
+        演示块与 tests/test_feedback_loop.py（后者按当前字面量语义断言，
+        若在此改规范化逻辑需同步改测试）。若未来有人把这条链路接回生产，
+        必须先照 self_analyst.py classify()（v0.45.85）的写法规范化大小写
+        与词表，否则会复现同一个 bug。
+        """
         returns = self.calculate_returns()
         accuracy = {}
 
