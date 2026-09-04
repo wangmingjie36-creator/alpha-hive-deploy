@@ -5,7 +5,54 @@
 
 ---
 
-## [0.45.106] — 2026-09-04 — 占位（进行中：复查 v0.45.85 同物种 direction 词表 bug）
+## [0.45.106] — 2026-09-04 — generate_deep_v2._load_ticker_accuracy() 同物种 direction 词表 bug——极性反转而非塌缩
+
+v0.45.85 修了 self_analyst.py 的 classify()：direction 字面量比较 `== "Long"`
+从未匹配生产快照实际写入的小写 `bullish`/`bearish`/`neutral`，导致 correct/wrong
+恒为 0（塌缩成 neutral）。复查同一物种 bug 时在 `_load_ticker_accuracy()`
+（深度报告模板 C 的历史准确率卡片：胜率/Sharpe/PF/最大连败）里发现更严重的
+变体——不是塌缩，是**极性反转**。
+
+### Fixed
+
+- `generate_deep_v2._load_ticker_accuracy()`：`is_win = (s.direction == "Long"
+  and ...) or (s.direction == "Short" and ...)` 与 `adj_ret = ret if
+  s.direction == "Long" else -ret` 同样从未匹配过小写词表——实测
+  `~/Desktop/Alpha Hive/report_snapshots/`（1051 条真实快照）100% 是
+  `bullish`/`bearish`/`neutral`，0 条 `Long`/`Short`。`is_win` 因此恒为
+  `False`（胜率恒 0%），而 `adj_ret` 的 else 分支对**全部**快照取反——
+  每一笔 bullish 盈利交易被算成等额亏损、bullish 亏损被算成等额盈利
+  （bearish 恰好因为"取反"本来就是其正确公式而被巧合抵消，未受影响）。
+  下游 `gross_profit`/`gross_loss`/`sharpe`/`profit_factor`/`max_consec_loss`
+  全部基于这个反转后的序列计算，同样失真。修法与 classify() 一致：
+  `direction = str(s.direction).strip().lower()`，同时接受
+  `long`/`bullish`→看多、`short`/`bearish`→看空，大小写不敏感；neutral/未知
+  方向不再被隐式当空头处理，改为直接排除出 Sharpe/PF 序列（对齐
+  `feedback_loop.BacktestAnalyzer.calculate_accuracy()` 里"neutral 不计入
+  方向性收益"的既有口径，而不是延续原公式"非 Long 即取反"的隐藏假设）。
+  真实 XOM 快照验证：2026-08-10 bullish、ret=+3.12%，修复前
+  `is_win=False, adj_ret=-3.12`；修复后 `is_win=True, adj_ret=+3.12`。
+  新增 `tests/test_ticker_accuracy_direction.py`，5 个用例覆盖小写词表下
+  win_rate/profit_factor 不再退化、neutral 正确排除、大写 Long/Short 旧词表
+  仍可识别；已验证还原修复会让 win_rate 退回 0.0、profit_factor 退回 0.5
+  （旧 bug 的可复现签名）。
+- 影响面：仅深度报告模板 C 的"历史预测记录"卡片（Sharpe/PF/胜率/最大连败
+  四个数字），不影响 paper_portfolio 实盘记账、不影响 weekly_optimizer 权重
+  学习闭环（两者读同一批快照但走不同代码路径，未触达这个 bug）。已生成的
+  历史深度报告不做回溯修正，仅影响本次修复起新生成的报告。
+
+### Notes — 同一文件里的姊妹函数：确认死代码，未动
+
+`feedback_loop.py` 的 `ReportSnapshot.check_direction_accuracy()` /
+`BacktestAnalyzer.calculate_accuracy()` / `generate_accuracy_dashboard_html()`
+/ `save_accuracy_dashboard()` / `analyze_misses_with_llm()` 有完全相同的
+`self.direction == "Long"/"Short"` 字面量比较，理论上是同一个 bug。全仓 grep
+确认：五个真实生产 `BacktestAnalyzer(...)` 实例化点（weekly_optimizer.py
+四处 + generate_deep_v2.py 一处）只用 `.snapshots`/`suggest_weight_adjustments()`
+/`get_snapshots_by_ticker()`，无一调用这条链路——唯一调用方是
+feedback_loop.py 自己的 `__main__` 演示块与 `tests/test_feedback_loop.py`
+（后者按当前字面量语义断言 7+ 条用例）。判定为死代码，未修，只在
+`check_direction_accuracy()` 加了一段指向本记录的注释，供日后接回生产前提醒。
 
 ## [0.45.105] — 2026-09-03 — 二次复查遗留三项：口径不对称、假数据顶观测值、K 线重复取数
 
