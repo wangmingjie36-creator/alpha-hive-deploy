@@ -65,7 +65,7 @@ class TestArtifactClassification:
 
 
 class TestLedgerDirsAreCommitted:
-    """期权路线图三本账必须进白名单（v0.45.112）
+    """期权路线图三本账必须进白名单（v0.45.115）
 
     v0.45.101~103 建了 `options_paper_state/` `vrp_state/` `hedge_state/`，
     2026-09-04 首次落盘，但没人把它们加进白名单。后果是**慢性**的：

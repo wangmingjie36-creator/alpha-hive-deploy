@@ -5,15 +5,18 @@
 
 ---
 
-## [0.45.112] — 2026-09-05 — 期权三本账不在自动提交白名单里：每天被改、每天被跳过、永远不进 git
+## [0.45.115] — 2026-09-05 — 期权三本账不在自动提交白名单里：每天被改、每天被跳过、永远不进 git
 
 用户交办：「把 thesis_breaks_config.json 提交了，别再丢一次」。
 
-> 编号说明：本条**第二次让号**。原占 `0.45.111`（本地提交 00:11:26），
-> 另一 session 的占位 `0.45.111`（00:19:29）虽晚 8 分钟却**已推上 origin**。
+> 编号说明：本条**连让三次号**：`0.45.111` → `0.45.112` → `0.45.115`。
+> 三次都是同一 session 先把号推上了 `origin/main`（`175b83a` 占位 111、
+> `d7a1637` 正式 112），而我三次都只在本地提交、没推。
 > 按 CLAUDE.md 占号规则自身的逻辑「不推送的占号等于没占」，且改动已公开的
-> 提交比改本地提交风险大，故本条让到 `0.45.112`。
-> **两次撞号同一个根因：我没执行占号第 3 步（写完占位立刻推）。**
+> 提交比改本地提交风险大，每次都由我让。
+> **三次撞号是同一个根因的三次复现：我没执行占号第 3 步（写完占位立刻推）。**
+> 这条规则的成本在文档里写得很清楚——占号几十秒，撞号要改标题、改提交信息、
+> 重跑核对。我付了三遍。
 
 `thesis_breaks_config.json` **本身无需提交**——当前内容与 HEAD 逐字节相同
 （`a8f0d5b`），2026-09-04 15:00 那次扫描也未触碰它（生产代码只读不写，
@@ -90,8 +93,225 @@ gitignore）、`backups/` + `db_backups/` + nan 修复备份目录皆无副本�
 
 ---
 
-## [0.45.111] — 2026-09-05 — 占位（进行中：_open_position 的 `or 0.0` 会把缺分静默记成 0.0 分落进账本）
+## [0.45.114] — 2026-09-05 — 占位（进行中：_build_dim_dq_html 全 None 时返回空串、整行消失）
 
+## [0.45.113] — 2026-09-05 — `_radar_data` 五维全缺时画出一个「正常」五边形，而背后没有一个观测值
+
+v0.45.112 查 `chart_engine` 那处兜底时发现的活路径问题。v0.45.54 已经为
+「缺一部分维度」定过调子并写清了理由，但**只改了 `if dim:` 那一支**，
+全缺走的 `else` 分支原封不动——修的是缺一部分，漏的是全缺，恰好是最该管的那半。
+
+### Fixed — `else` 分支的五个输入没有一个能读到真数据
+
+实测命中范围：`.swarm_results_*.json` 100 份 / 1401 条目里 **7 条**，
+全是 BRK-B（2026-08-04 ~ 08-14）。旧分支产出
+
+    [50.0, 50.0, 50.0, 66.7, 50.0]
+
+一个毫无异常的正常五边形。逐项溯源后，**没有一个数字是观测值**：
+
+| 维度 | 读什么 | 实况 |
+|---|---|---|
+| signal / catalyst | `self_score` | 该键在两个数据源合计 **4294 条里存在 0 次**（真实键名是 `score`）⇒ 恒取默认 5.0 |
+| sentiment | 正则 `情绪 N%` 匹配 `discovery` | 当时 `discovery` 是错误消息 ⇒ 恒取默认 50.0 |
+| odds | `put_call_ratio` | 键不存在 ⇒ 默认 1.0 → 66.7 |
+| risk_adj | BearBee `score` | 键**在**、值 5.0 —— 但那是 `swarm_agents/base.py` 无效 ticker 分支的**硬编码常量** |
+
+前两行是关键：`self_score` 这个键名在全仓生产数据里**从未存在过**。
+也就是说这条 fallback 从写下那天起就读不到任何真数据，只是每一处都被
+`.get(k, 默认)` 填成了看起来合理的数——**一个永远读不到真数据的 fallback 不是
+fallback，是一台造数机**。这是「读错键被兜底掩盖」的形态：键名写错本该 KeyError
+当场暴露，`.get` 的第二参数把它变成了静默。
+
+第四行同样要紧：那 5.0 不是观测。同一条目里 **7 只蜂全都是
+`dimension='validation'` + `confidence=0.0` + `score=5.0`**，是无效 ticker
+错误路径的常量。而 `confidence=0.0` / `dimension='validation'` **正是「这只蜂
+没跑」的机读签名，数据里现成就有，旧分支一个都不看**。
+
+### Fixed — 三条本该报警的通道当时全是哑的
+
+1. **雷达图**画成正常五边形，视觉上看不出。
+2. **`dim_data_quality` 五项全 `None`** ⇒ `_build_dim_dq_html` 的
+   `if pct is None: continue` 把五项全跳过 ⇒ `items` 为空 ⇒ 返回**空串**，
+   页面上**整行不渲染**（不是显示 0%，是消失）。
+3. **零日志**：`if dim:` 那支的 `_log.debug` 只覆盖「缺一部分」。
+
+**修法**：`dimension_scores` 为空直接返回五个 0，并 `_log.warning`
+（全缺比缺一部分是更强的异常，故用 warning 不用 debug），不再从
+`agent_details` 重建。删掉 `else` 分支后 `if dim:` 成了恒真的冗余，一并去掉。
+
+⚠️ **`dim_dq` 消费端接不住全缺，这是已核实的事实，不是推测**——所以修完之后
+雷达图是唯一能看出「无数据」的通道。已把这个事实写成测试
+（`TestDimDqConsumerCannotCatchAllMissing`），将来谁修好了 `_build_dim_dq_html`
+那条会变红，提醒同步更新注释。
+
+### Fixed — 更正 v0.45.54 注释里的一处归因
+
+该段原写「缺失维度画 0 **并在 dim_dq 里标注**」。`_radar_data` **不写** `dim_dq`
+——它来自上游 `sd["dim_data_quality"]`，由扫描侧产出，与本函数无关；
+且实测全缺时它接不住。已就地更正（v0.45.75 教训：归因被推翻要改代码里的副本，
+不能只更新记忆）。
+
+### Notes — 根因已在别处修掉，但本分支仍可达
+
+BRK-B 那 7 天的根因是 `swarm_agents/base.py` 的 `_RE_TICKER` 拒绝了带连字符的
+ticker（`discovery` 里留着原话：`无效 ticker 格式: 'BRK-B'`）。该正则现已接受
+`-X`/`.X` 类份额后缀，故 08-26 起 BRK-B 恢复正常，最近 8 个扫描日全部有
+`dimension_scores`。**但本分支仍然可达，且它伪造数据的方式与根因无关**——
+任何未来导致 `dimension_scores` 为空的原因都会重新触发它，所以照修。
+
+### 验证
+
+实测三种输入：生产全缺条目 `[50.0, 50.0, 50.0, 66.7, 50.0]` → **`[0,0,0,0,0]`**；
+正常条目 MSFT `[53.9, 59.0, 39.7, 98.1, 64.6]` **不变**；
+部分缺失保持 v0.45.54 行为 `[70.0, 0, 40.0, 0, 60.0]`。
+`_re` 仍被其他 15 处使用，未成孤儿。
+
+**新增 `tests/test_dashboard_radar_all_missing.py`（13 条）**，夹具取自
+`.swarm_results_2026-08-04.json` 的 BRK-B 真实形状（含 7 只蜂的 validation 常量）。
+判别力靠**成对**：只断言「全缺要画 0」不够，`return [0]*5` 的粗暴修法也能全绿，
+必须同时断言正常条目原样通过、部分缺失保持 v0.45.54 行为。
+另把「为什么删掉而不是修好 else 分支」固化成两条断言
+（`self_score` 键不存在 / 蜂分是 validation 常量）。
+
+**mutation check（`--maxfail=99`，基线 `collected 13` / 13 passed）**：
+
+| 变异 | 结果 |
+|---|---|
+| M1 还原旧 `else` 分支 | **6 failed** / 7 passed ✅ |
+| M2 粗暴修法 `if True`（把正常数据一起抹平） | **2 failed** / 11 passed ✅ —— 正是成对断言的另一半抓到的 |
+
+⚠️ 过程记录：这组测试初稿有 2 条变红，是**夹具错不是代码错**——
+`dimension_scores` 是 **0~10** 量表（`_d()` 再 ×10 映射到雷达图 0~100），
+初稿按 0~1 写成 `0.539`。已改用 MSFT 2026-09-04 的真值 `5.39` 等。
+
+全量套件：**2635 passed, 18 skipped**；`ruff check` 通过。
+## [0.45.112] — 2026-09-05 — 删除死代码 `chart_engine.render_radar_chart`（110 行，零调用点）
+
+用户让查 `chart_engine.py` 里 `float(raw.get("score") or 0)` 这处兜底。
+查下来这行**不是问题**——它所在的整个函数从来没被调用过。与其给一个没人读的
+函数打补丁，不如把函数删掉。
+
+### Removed — `render_radar_chart`（蜂群七维雷达图，Chart 3）
+
+**判定依据（按「死字段」那条：查功能是否生效先数读者）**：
+
+| chart_engine 的 6 个 `render_*` | 外部引用 |
+|---|---|
+| `render_confidence_chart` / `render_options_chart` | 被 `generate_deep_v2` 导入 |
+| `render_iv_term_chart` / `render_gex_profile_chart` / `render_deep_skew_chart` | 同上 |
+| **`render_radar_chart`** | **0** |
+
+唯一的 importer `generate_deep_v2.py:4803` 一次性导入 6 个里的 5 个，
+**独独跳过它**。另已排查：无 `getattr` / 字符串名 / `__all__` 形式的动态调用，
+`tests/` 里零覆盖。它是个只有生产者、没有消费者的函数。
+
+**顺带确认那行 `or 0` 即使被调用也从未触发**：生产 803 份 `analysis-*.json`
+（746 份含 `agent_details`）里，7 只蜂的 `score` 缺失 0 次、非数/NaN 0 次、
+恰为 0 的 0 次，最低观测值 1.47（GuardBeeSentinel）。`or 0` 需要 falsy 才生效，
+这个字段在真实数据里从来不 falsy。**两个独立的失效理由**，故不做「修补丁」处理。
+
+（该函数内另有 `float(sr.get("final_score") or 0)` 同 species，且 `or 0` 挡不住
+NaN——`float(nan) or 0` 因 NaN 是 truthy 而返回 nan，画图时 matplotlib 会静默
+把多边形在那个轴断开。一并随函数删除。同文件 `:91` 等处的同形写法留在原地，
+它们在**活**函数里，不在本次范围内。）
+
+### Changed — 章节编号顺延
+
+原 Chart 4/5 顺延为 Chart 3/4，不留编号空洞。
+
+### 验证
+
+- 删除 110 行（含段落分隔线）。**无孤儿依赖**：函数内用到的 `_score_color`
+  (3/6)、`_GOLD`、`_fig_to_b64`、`_get_mpl`、`_BG`/`_CARD`/`_T1`/`_T3` 全部
+  仍被其他 `render_*` 使用。
+- `generate_deep_v2` 那条 5 项 import 实测仍成立；`chart_engine` 现存
+  5 个 `render_*`，`render_radar_chart` 在模块里 0 次出现。
+- 相关测试 39 passed / 1 skipped。
+- ⚠️ `ruff check chart_engine.py` 报 1 条 `E401`（`import base64, io, math`），
+  `--select F401` 另报 `math` 未使用——**两条均为既有问题，删除前后逐字节一致**
+  （已用 `git show HEAD:chart_engine.py` 对比确认），不是本次引入，也不在本次范围内。
+## [0.45.111] — 2026-09-05 — `_open_position` 的 `or 0.0` 会把缺分静默记成 0.0 分**落进账本**
+
+用户交办：把 v0.45.110 里保留的 `score=_snapshot_score(snapshot) or 0.0` 也去掉。
+
+去掉了，并且 v0.45.110 给它写的那句辩解（「上游 `_should_open` 已保证分数存在，
+这里的 `or 0.0` 只是类型收口」）**两点都站不住**，一并更正。
+
+### Fixed — 它不是「类型收口」，是一个会落盘的伪造值
+
+`Position.score` 不是只在内存里转一圈：
+
+    Position.score → _close_position → ClosedTrade.score → closed_trades.jsonl
+                  → ibkr_sync（导出给用户在 TWS 下单的 actions）
+                  → alpha_hive_mcp / chart_engine
+
+缺分记成 `0.0` 不是收口，是往账本里写一个**从没发生过的分数**。
+而 `0.0` 在这套量表里恰好是**最强看空信号**（`entry_score_bear = 4.85`，
+观测下尾 3.78），是所有可能的谎话里最糟的那一个——一条「拿不到分数」的记录
+会以「满分看空」的身份进入下游导出与图表。
+
+第二点，**「上游保证过」不构成不检查的理由**，它正是 v0.45.3 那条判据的反面教材：
+问「这个默认值会不会让下游误以为掌握了信息」——会。真要依赖上游，就该在依赖
+断掉时炸掉或降级，而不是无声地编一个数。v0.45.110 写下那句辩解时只想到了
+「这行代码执行不到」，没想到「万一执行到了，它写出去的是什么」。
+
+**修法**取本函数已有的降级惯例（`size_usd` / `entry_price` 两道守卫同款：
+非法输入 → `return None`，调用方 `run_for_date` 跳过该候选、当天继续）：
+
+```python
+score = _snapshot_score(snapshot)
+if score is None:
+    _log.warning(...)   # 走到这里说明与 _should_open 两处守卫不同步了
+    return None
+```
+
+选 `return None` 而不是 `raise`：本函数已有两道同形态守卫，调用方对 `None`
+的处理是现成且正确的；为一个上游已挡住的状态引入新的异常路径，收益不抵风险。
+
+顺带删掉 `rationale` 里的 `else "N/A"` 分支——加了顶部守卫后它不可达，
+留着会让人以为「缺分也能开仓、只是显示 N/A」，与实际行为相反。
+`_snapshot_score` 的重复调用（rationale 一次、`score=` 一次）也合并成一次。
+
+### 验证
+
+**零历史行为改变，已实测**：`run_replay` 四臂 92 日回放的 `final_nav` /
+已平仓账本 / 末态持仓与 v0.45.110 的结果**逐字节全等**。
+
+**新增 `tests/test_paper_open_position_score.py`（22 条）**。
+判别力全在**成对**断言上——只断言「缺分要拒绝」是不够的，
+一个偷懒的 `if not score: return None` 同样能让那半边全绿，
+但它会把**真实的 0.0 分**也一起拒掉。所以两半都写：
+
+    缺键 / None / NaN / ±inf / 非数字符串  → 不开仓，且绝不产出 score=0.0 的仓位
+    真实的 0.0 / 3.78 / 4.85 / 6.5 / 7.8 / 8.74 → 照常开仓，Position.score 原样记录
+
+同 v0.45.96 记的「缓存/分桶类断言必须成对」。另有一条端到端断言，
+验 score 确实一路流进 `ClosedTrade.to_dict()`——把「危害为什么值得堵」固化下来。
+
+**mutation check（`--maxfail=99`，基线 `collected 132 items` / 132 passed）**：
+
+| 变异 | 结果 |
+|---|---|
+| M1 退回 `or 0.0` | **12 failed** / 120 passed ✅ |
+| M2 偷懒修法 `if not score` | **2 failed** / 130 passed ✅（正是成对断言的「合法 0.0」那半边抓到的） |
+| M3 `Position(score=)` 退回 `or 0` | 132 passed —— **等价变异，非覆盖缺口** |
+
+M3 已单独证明为等价：给定顶部守卫，走到 `Position(...)` 时 `score` 必非 None
+且有限，此时 `float(snapshot.get("composite_score") or 0)` 与 `score` 在整个
+可达域上恒等（20012 个取值穷举，含 `0`/`0.0`/`-0.0`/`±1e-9` 边界，0 处不同）。
+**这本身就是本次改动的性质证明**：`Position(score=)` 那处去掉 `or 0.0` 是
+可读性修正，真正的行为修复是顶部那道守卫。
+
+⚠️ **过程记录：M2/M3 第一次跑出的 `132 passed` 是假的。**
+锚点 `score = _snapshot_score(snapshot)\n    if score is None:` 在 `_should_open`
+里也有一份（v0.45.110 加的），`s.count(old)==1` 断言抛错 ⇒ 变异**根本没打上**，
+跑的是未变异的代码。这次是 patch 脚本里的 `assert count==1` 把它拦下来的——
+上一版（v0.45.110）同类事故靠的是核对 `collected N items`，两道加起来才够。
+**判据：mutation check 要能证明「变异确实生效了」，而不只是「测试跑了」**；
+最省事的做法是让打补丁的脚本自己断言锚点唯一，并打印「变异已打上」。
+
+全量套件：**2622 passed, 18 skipped**；`ruff check` 通过。
 ## [0.45.110] — 2026-09-05 — `_should_open` 的 `or 0` 只是三个洞里最窄的一个：NaN 两侧全穿
 
 用户交办：把 v0.45.109 记录但未修的 `_should_open` 缺分兜底 `or 0` 一起修了。
