@@ -5,8 +5,73 @@
 
 ---
 
-## [0.45.116] — 2026-09-05 — 占位（进行中：补 v0.45.94 / v0.45.88 两条遗留的占位标题）
+## [0.45.116] — 2026-09-05 — 两条遗留占位标题：真相不是「忘了改标题」，是这两版从未并入 main
 
+v0.45.114 收尾时顺手数出 CHANGELOG 里还有 2 条「占位（进行中：…）」标题
+（v0.45.94 / v0.45.88），用户要求补上。补的过程发现它们久悬的原因不是笔误。
+
+### Fixed — 两条占位标题补写为如实标注
+
+先从 git 历史找原始正文——两条都**写过**，且写得完整：
+
+- v0.45.94 的 56 行正文在 `b232eaf` 里
+- v0.45.88 的 72 行正文在 `b03012c6` 里（标题为「CBOE 新鲜度分层：补抓从未触发
+  + 陈旧误入缓存 + 盘中冻结静默通过」）
+
+但**照搬回来是错的**。逐项核验发现两版的实质提交都不在 `main` 上，
+落地的只有占号提交（`d5a8c6a` / `b6c7f83`）——**恢复原标题等于宣称两个从未
+上线的功能已交付**，正是「文档只存指针不存陈旧结论」要治的那类误导。
+
+| | v0.45.94 | v0.45.88 |
+|---|---|---|
+| 意图 | Python CI，只跑离线确定性子集 | CBOE 快照新鲜度分层 |
+| 工作所在 | `origin/ci/python-tests`（领先 main 5 / 落后 45） | `origin/fix/cboe-stale-vintage-passthrough`（1/60）、`origin/fix/cboe-vintage-staleness-layering`（4/60） |
+| 落地部分 | 仅占号提交 | 仅占号提交 |
+
+**v0.45.94 在 main 上的实况**（逐项实测）：
+- `.github/workflows/tests.yml` 不存在，`.github/` 未被 git 跟踪
+- `.gitignore` 第 2 行仍是 `.github/`，整目录忽略未解除
+- `pyproject.toml` 未注册 `network` marker，`pytest -m network --collect-only`
+  收集 **0 条**（2755 全部 deselected）
+- `tests/test_scan_catchup.py:56` 的 `test_syntax_valid` 仍无 skip 保护
+- **仓库至今没有 CI**
+
+**v0.45.88 在 main 上的实况**：`intraday_frozen` 在 `origin/main` 上出现 **0 次**。
+
+⚠️ 核验时差点被一处同名字段骗过：main 上**确实有** `vintage` 相关代码
+（`cloud_snapshot_fetch.py` 的 payload 反解、`close_correction.py:255` 的引用注释），
+但那是 **v0.45.39** 的 vintage 校验，早已落地；v0.45.88 要做的是它之上的
+**新鲜度分层**，那部分没上。**判据用的是 `intraday_frozen` 这个本版独有的标识，
+不是笼统的 `vintage`**——grep 一个上下游共用的词，很容易把「上一版落地了」
+读成「这一版落地了」。
+
+两条均改写为「占号未兑现」并写明：意图、工作在哪条分支、分支上的完整正文在哪个
+提交里（合并时可直接取用）、以及 main 上逐项核验的实况。
+编号已进 git 历史不可回收，故保留条目、如实标注，**不复用给别的改动**。
+
+### Notes — 这暴露的是流程缺口，不是笔误
+
+占号规则（CLAUDE.md）解决的是「多 session 并发时别撞号」，它**没有覆盖**
+「占了号但工作最终没并入」。两次都是同一形态：分支上干完、CHANGELOG 正文
+也写好了，但分支没合，main 上只留下一个占位标题——**而占位标题恰好长得像
+「正在进行中」，读者不会怀疑它其实已经停摆两周**（v0.45.88 停摆至今 5 天、
+v0.45.94 停摆 2 天，两条分支分别落后 main 60 / 45 个提交）。
+
+建议（本次未做，属流程改动）：占号条目应在合并时才转正；或定期
+`grep -c "占位（进行中"` 核对悬挂数——这次就是这么数出来的。
+
+**未合并的两条分支要不要合，是单独的决定**，本条只负责让 CHANGELOG 不再说谎。
+CI 那条尤其值得单独评估：它落后 main 45 个提交，且合并需要走 GitHub App 的
+contents API（普通 push 含 `.github/workflows/` 会被拒）。
+
+### 验证
+
+- 占位**标题行**（锚定 `^## \[` 再匹配「占位（进行中」）：`origin/main` 上 3 条
+  （v0.45.94 / v0.45.88 / 本次占号的 v0.45.116）→ 本次提交后 **0 条**。
+  ⚠️ 别用 `grep -c "占位（进行中"` 数——本条正文自己就提到这个字符串好几次，
+  会被一起算进去（初稿据此误报成「剩余 3」）。必须锚定行首的 `## [`。
+- 本条为纯文档改动，未触碰任何代码；全量套件与 v0.45.114 一致
+  （**2667 passed, 18 skipped**），`ruff check` 通过
 ## [0.45.115] — 2026-09-05 — 期权三本账不在自动提交白名单里：每天被改、每天被跳过、永远不进 git
 
 用户交办：「把 thesis_breaks_config.json 提交了，别再丢一次」。
@@ -1730,7 +1795,34 @@ Step 3 跑到次日 00:04，补出 12 份标着 `2026-09-03` 的报告 ——
   9/2 的覆盖率因此未被测到。属**诚实降级**（`determinable: false`，
   明说测不了），未伪装通过。
 
-## [0.45.94] — 2026-09-03 — 占位（进行中：建立 Python CI，离线确定性子集）
+## [0.45.94] — 2026-09-03 — 占号未兑现：Python CI 从未并入 main（工作在 `origin/ci/python-tests`）
+
+> 标题由 v0.45.116 补写。原为占位行，久未替换的原因不是「忘了改标题」，
+> 而是**这一版的实质提交从未并入 `main`**：只有占号提交 `d5a8c6a` 落了地。
+
+**意图**：给仓库建 GitHub Actions CI，只跑离线确定性子集
+（`-m "not integration and not network"`）。不跑全量是因为有一批测试打真实
+外部端点（yfinance / Treasury / CNN），放进 CI 会因限流/端点改版无故转红——
+时红时绿的 CI 比没有 CI 更糟，它训练所有人忽略红灯。
+
+**工作所在**：`origin/ci/python-tests`，领先 main 5 个提交、落后 45 个。
+- `e4c1408` 注册 `network` marker + 补 `test_syntax_valid` 的 skip 保护
+- `79c4f89` `.github/workflows/tests.yml`
+- `315c7b8` 解除 `.gitignore` 对 `.github/` 的整目录忽略
+- `b232eaf` 29 项网络依赖测试标注 `network`（该提交里写着这一版完整的
+  56 行 CHANGELOG 正文，可在合并时直接取用）
+
+**main 上的实况（v0.45.116 逐项核验）**：
+- `.github/workflows/tests.yml` 不存在，`.github/` 未被 git 跟踪
+- `.gitignore` 第 2 行仍是 `.github/`，整目录忽略**未解除**
+- `pyproject.toml` **未**注册 `network` marker，`pytest -m network --collect-only`
+  收集 **0 条**（2755 全部 deselected）
+- `tests/test_scan_catchup.py:56` 的 `test_syntax_valid` **仍无** skip 保护，
+  仍直接 `subprocess` 跑 `bash -n ORCH`
+- **仓库至今没有 CI。**
+
+**这个号是烧掉的**：编号已进 git 历史不可回收，故保留条目并如实标注，
+不复用给别的改动。要兑现就合并那条分支，届时把标题与正文一并替换。
 
 ## [0.45.93] — 2026-09-03 — 2 条 NaN 快照伪造了整张每蜂 IC 表
 
@@ -2145,7 +2237,29 @@ COST −2.25 / RKLB −4.15 两只负 GEX 正确判成 low
 即修复走了低价股回落路径、且**没有波及正常标的**。
 
 
-## [0.45.88] — 2026-08-31 — 占位（进行中：CBOE vintage 陈旧信号透传，修补抓失效 + 盘中冻结记录静默通过）
+## [0.45.88] — 2026-08-31 — 占号未兑现：CBOE 新鲜度分层从未并入 main（工作在 `origin/fix/cboe-*`）
+
+> 标题由 v0.45.116 补写。与 v0.45.94 同一形态：占号提交 `b6c7f83` 落了地，
+> **实质提交没有**。
+
+**意图**：CBOE 快照的新鲜度分层——补抓从未触发、陈旧数据误入缓存、
+盘中冻结记录静默通过，三条一起修。
+
+**工作所在**：两条未合并分支
+- `origin/fix/cboe-stale-vintage-passthrough`（领先 1 / 落后 60）：`6d8f357`
+- `origin/fix/cboe-vintage-staleness-layering`（领先 4 / 落后 60）：`83bcab5` 合并
+  8/28 BILI 与 8/31 TMO 两条线并重编到本号，`b03012c6` 消费端默认拒绝盘中冻结快照。
+  后者含这一版完整的 72 行 CHANGELOG 正文，可在合并时直接取用。
+
+**main 上的实况（v0.45.116 逐项核验）**：`intraday_frozen` 在 `origin/main`
+上出现 **0 次**——盘中冻结的识别与拒绝逻辑不在 main 上。
+
+⚠️ **不要与 v0.45.39 的 vintage 校验混淆**：那一版**已在 main**
+（`cloud_snapshot_fetch.py` 的 `_fetch_cboe_payload` vintage 反解、
+`close_correction.py:255` 的注释即引用它）。本号要做的是它之上的**新鲜度分层**，
+那部分没上。读代码时看到 `vintage` 字样不等于本条已落地。
+
+**这个号同样是烧掉的**，处理方式同 v0.45.94。
 
 ## [0.45.87] — 2026-08-31 — weekly_optimizer close_t7 上线后 7-agent 复查修复（6 项）
 
