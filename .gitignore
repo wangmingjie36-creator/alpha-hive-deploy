@@ -48,6 +48,8 @@ db_backups/
 realtime_metrics.json
 status.json
 training_data_extended.json
+# v0.45.118：扫描耗时分解（每轮覆盖，编排器并进 status.json）
+logs/scan_timing.json
 
 # v0.23.6: sample-accumulator 产出，不应进入 git（agent_toolbox `git add -A` 会误 stage）
 .samples-only-*.json

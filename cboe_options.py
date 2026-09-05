@@ -86,6 +86,26 @@ _payload_cache = {}  # ticker -> (timestamp, data)
 _cache_lock = threading.Lock()
 _CACHE_TTL = 120.0
 
+# 观测计数（v0.45.118）：供 scan_timing 落进 status.json。
+# 2026-09-04 实测 29 只标的抓了 83 次全链（2.9×）——上面那句「共享一次下载」
+# 因为 TTL(120s) 短于单只标的的流水线(~330s) 从未成立过，而在此之前没人数过。
+#   hits     命中缓存、没发请求
+#   fetches  真正发出去的 HTTP 请求（含重试，每次 urlopen 计 1）
+#   stale    拉回来但 vintage 陈旧、被弃用（不入缓存）
+#   failed   重试耗尽 / 返回空链，最终 None
+_payload_stats = {"hits": 0, "fetches": 0, "stale": 0, "failed": 0}
+
+
+def payload_stats() -> dict:
+    with _cache_lock:
+        return dict(_payload_stats)
+
+
+def reset_payload_stats() -> None:
+    with _cache_lock:
+        for k in _payload_stats:
+            _payload_stats[k] = 0
+
 # ── 快照供给器（v0.45.38）：补跑历史交易日时接管全部取数 ──────────
 # 装载后本模块四个取数入口一律走快照，**不回落实时抓取** ——
 # 补跑的是过去某天，实时抓取会拿到今天的链再贴上那天的日期，
@@ -308,23 +328,30 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
     with _cache_lock:
         hit = _payload_cache.get(key)
         if hit and now - hit[0] < _CACHE_TTL:
+            _payload_stats["hits"] += 1
             return hit[1]
 
     url = _CBOE_URL.format(_cboe_symbol(key))
     last_err = None
     for attempt in range(retries):
         try:
+            with _cache_lock:
+                _payload_stats["fetches"] += 1
             with _CBOE_SEM:  # 串行化：不给对端限流器加压（非 TLS 栈原因，见 http_gate）
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
                 raw = urllib.request.urlopen(req, timeout=timeout).read()
             data = (json.loads(raw) or {}).get("data") or {}
             if not data.get("options"):
                 _log.warning("CBOE %s 返回空期权链", ticker)
+                with _cache_lock:
+                    _payload_stats["failed"] += 1
                 return None
             # v0.45.39：陈旧 CDN 文件在此拦下。**不写缓存** ——
             # 写了就等于把陈旧数据在进程内又保鲜 120 秒。
             stale = _payload_stale_vintage(ticker, data)
             if stale is not None:
+                with _cache_lock:
+                    _payload_stats["stale"] += 1
                 if on_stale == "raise":
                     raise CboeStaleVintageError(ticker, stale[0], stale[1])
                 return None
@@ -341,6 +368,8 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
             if attempt < retries - 1:
                 time.sleep(0.7 * (attempt + 1))
     _log.warning("CBOE 拉取 %s 失败（重试 %d 次耗尽）：%s", ticker, retries, last_err)
+    with _cache_lock:
+        _payload_stats["failed"] += 1
     return None
 
 

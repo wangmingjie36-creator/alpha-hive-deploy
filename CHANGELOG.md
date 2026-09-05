@@ -5,7 +5,86 @@
 
 ---
 
-## [0.45.118] — 2026-09-05 — 占位（进行中：扫描耗时可见化——五阶段计时 + yf_gate/Twelve Data/CBOE 计数器写进 status.json）
+## [0.45.118] — 2026-09-05 — 扫描耗时可见化：Step 2 八天涨 4.5×、被杀两次，没有一行日志说离预算还剩多少
+
+用户问「规则模式的定时任务为什么跑完这么慢，是不是代码沉重」。先量再答：
+
+| 日期 | Step 2 | |
+|---|---|---|
+| 08-26 / 08-27 | 749s / 934s | |
+| 08-28 / 08-31 | **被杀** | 1800s 超时，产出 0 / 20 只 |
+| 09-01 / 09-03 | 2657s / 2773s | 预算改为 30×120=3600s |
+| 09-04 | **3342s** | 距预算余 **258s（7%）** |
+
+**不是 CPU**：`feedback_loop` 载入 1081 份快照 0.3s、HGB 重训 2s、期权三本账 ~1s。
+09-04 全程 66 分钟的分解：Slack 确认空等 618s（15.5%）→ 预取 115s → **30 只并行
+蜂群 2466s（62%）** → 回测+权重 342s → 报告/组合/部署 420s。时间全在排队等网络。
+
+### 根因（六项，均已定位到行）
+
+- **L1 yfinance 全局闸门** `resilience.py:341` 0.5 req/s、burst 1：全进程一个桶。4 个
+  标的 worker × 5 个 Phase-1 蜂线程 ≈ 20 线程排同一个 0.5/s 的队 → 上限 30 次/分钟，
+  **调大 `max_workers` 无效**。09-04 全天 429 仅 1 次，离限流很远。
+- **L2 CBOE 链缓存 TTL 120s < 单只标的流水线 ~330s**（`cboe_options.py:87`）：注释写
+  「共享一次下载」，实测 29 只抓 83 次（2.9×），NVDA 单文件 1.58MB / 3.6s。
+- **L3 swarm yfinance 缓存**：`config.py:1050` 把 `cache.py` 的 300s 覆盖成 120s，注释写
+  「同一次扫描内共享」而扫描 2466s。L2/L3 同一族：**机制在、注释对、参数让它做不到**。
+- **L4 回测逐条取价无缓存**（`backtester.py:1100/1172`）：32 条待检全是同一预测日的
+  30 只票，逐条 `yf.Ticker().history()`，各过 2s 闸 → 那 342s 的主体。
+- **L5 Twelve Data 两条路径两个键**：蜂群段 `fetch_daily_closes(end_date=None)`、尾段
+  `fetch_bars(end_date=as_of)`，同一批 17 只票各取两遍，11s/次串行 ≈ 190s。
+  `twelve_data.py:344`「两个键绝不合并」是对的（口径不同）；正解是蜂群段也传业务日。
+- **L6 `pre_scan_notify --wait 10`**：规则模式下用户从不回复，每天空等满 10 分钟（不在
+  Step 2 预算内，但占墙钟）。
+
+### Added — 计时与计数器落盘（本版只做可见化，不改任何取数行为）
+
+- `scan_timing.py`（新）：`record/timed` 记阶段耗时（同名累加、异常照记）；`counters()`
+  收 `yf_gate.stats()` / `twelve_data.bars_cache_stats()` / `cboe_options.payload_stats()`，
+  **取不到写 None 不写 0**（0=测过为零，None=没测到，同 v0.45.114）；`write()` 原子落
+  `logs/scan_timing.json` 并打一行摘要。
+- `cboe_options.py`：新增 `_payload_stats {hits, fetches, stale, failed}` + `payload_stats()` /
+  `reset_payload_stats()`，接在 `_fetch_cboe_payload` 四个出口上。**此前 CBOE 根本没有计数器**，
+  「29 只抓 83 次」是事后从日志 grep 出来的。
+- `alpha_hive_daily_report.py`：8 个阶段 `prefetch / parallel / enrichment / swarm_total /
+  backtest_weights / ml_reports / save_report / deploy`；主流程末尾与空扫描护栏早退处各
+  `write()` 一次。
+- 编排器：Step 2 之后打「预算余量：Xs / Ys（Z%）」；`write_status()` 的 status.json 新增
+  `step2_budget{timeout,duration,headroom,headroom_pct}`（变量未设时为 `null`），并把
+  **本轮日期**的 `logs/scan_timing.json` 并进 `scan_timing` 键——昨天的文件不并（缺失≠零）。
+- `.gitignore` 加 `logs/scan_timing.json`（每轮覆盖的观测文件，不进 git、不触发白名单跳过提示）。
+- `tests/test_scan_timing.py` 15 条：计时累加/异常照记/缺失不补零；CBOE 四出口计数；None
+  不得变 `{}`；落盘原子；编排器两条 jq 过滤器**从脚本原文抠出来跑**（同日并入、换日拒绝）。
+
+### 验证
+
+- 变异检验五条全红：M1 拆 hits 计数（1 红）/ M2 拆 fetches 计数（4 红）/ M3 None 改 `{}`
+  （1 红）/ M4 `timed` 去 try-finally（1 红；首版变异删 `finally:` 是 SyntaxError、
+  `collected 0`，按「核对 collected N」规则重做）/ M5 编排器并入过滤器改恒等（1 红）。
+- 抽出编排器 `write_status()` 原文进沙箱实跑：同日并入 ✓、换日不并 ✓、Step 2 变量未设
+  → `null` 且 JSON 合法 ✓、无 `.tmp` 残留 ✓。⚠️ 抽函数时 `sed '/^write_status/,/^}/'`
+  会在 heredoc 里顶格的 `}` 处提前截断——用函数后面那行注释当结束锚。
+- 邻近 142 条既有测试 + 全量测试通过（见提交信息）。
+
+### 后续（已定方案，本版未做）
+
+- **A（长期价值最高）**：把 `prefetch_shared_data()` 做完整——按业务日键、一轮扫描唯一取数点：
+  `yf.download` 30 只一次、`.info` 每只 1 次、CBOE 每只 1 次、Twelve Data 每只 1 次且开后台
+  线程与其余并行；删蜂里 11 处直连（scout 375/389、rival 281/396、bear 270/414、
+  oracle 29/79/172、chronos 114）。护栏测试：patch `yf.Ticker/download` 抛异常跑一只票，
+  任何蜂还在自己上网即红；不变式「每轮 yfinance 调用 ≤ k×标的数」。
+- **B.2/B.3**：余量 < 20% 置 partial 进 alert_manager；`scan_continuity` 加周环比。
+- **C**：回测批量取价（独立小改，先拿回 ~5 分钟余量）；`ALPHA_HIVE_YF_RATE` 只在 A 之后、
+  按档实测；Slack 等待窗口是用户决策。
+- **不做**：调 `max_workers`；建通用缓存框架；动 `fetch_bars` 键规则（它是仓库里唯一做对的缓存）。
+
+### Notes — 两条判据
+
+- **TTL 短于作用域 = 设了等于没设**。批处理任务的缓存键应是**业务日**，不是挂钟秒数；
+  注释宣称的作用域（「一次扫描内」）和参数表达的作用域（120s）对不上时，以参数为准。
+- **「算了没人读」的变体**：`yf_gate._stats`、`bars_cache_stats()` 都在数，零读者；性能是
+  本项目唯一没有不变式的维度，所以能静默退化 8 天。
+
 
 ## [0.45.117] — 2026-09-05 — 占位（进行中：合并 origin/ci/python-tests，兑现 v0.45.94 的 CI）
 

@@ -24,6 +24,9 @@ from hive_logger import get_logger, PATHS, set_correlation_id, SafeJSONEncoder, 
 
 _log = get_logger("daily_report")
 
+# v0.45.118：扫描耗时可见化（叶子模块，只记时/计数/落盘，不碰取数）
+import scan_timing as _timing
+
 # 可选模块（optional_import 优雅降级）
 MetricsCollector = optional_import("metrics_collector", "MetricsCollector")
 from generate_ml_report import MLEnhancedReportGenerator
@@ -494,6 +497,7 @@ class AlphaHiveDailyReporter:
         prefetched = prefetch_shared_data(targets, retriever, target_date=self.date_str)
         inject_prefetched(all_agents, prefetched)
         prefetch_elapsed = time.time() - start_time
+        _timing.record("prefetch", prefetch_elapsed)
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
 
         # v0.15.3: checkpoint 文件名加日期隔离，防止跨天 stale 复用
@@ -712,6 +716,7 @@ class AlphaHiveDailyReporter:
 
     def _post_scan_metrics(self, ctx: '_SwarmContext', swarm_results: Dict, elapsed: float) -> None:
         """扫描后指标：LLM 统计 + MetricsCollector + SLO 检查 + 回测 + 权重自适应 + DB 清理"""
+        _timing.record("swarm_total", elapsed)
         # LLM Token 使用统计
         try:
             import llm_service
@@ -785,6 +790,9 @@ class AlphaHiveDailyReporter:
                 _log.warning("指标收集异常: %s", e)
 
         # 回测反馈循环
+        # v0.45.118：这一段 2026-09-04 实测 342s（逐条待检预测各发一次
+        # yf.history，全过 2s 闸门），单独计时以便日后批量取价时看得见收益。
+        _t_backtest = time.monotonic()
         adapted = None
         if Backtester:
             try:
@@ -859,6 +867,7 @@ class AlphaHiveDailyReporter:
                 _log.info("Agent 权重已按准确率更新")
             except (ImportError, OSError, ValueError, TypeError, AttributeError) as e:
                 _log.debug("AgentWeightManager 更新跳过: %s", e)
+        _timing.record("backtest_weights", time.monotonic() - _t_backtest)
 
         # ---- ML 增量学习（利用新验证的 T+7 数据）----
         if Backtester and bt:
@@ -1371,6 +1380,7 @@ class AlphaHiveDailyReporter:
                 done = set(swarm_results)
             return [it for it in pending_tickers if it[1] not in done]
 
+        _t_parallel = time.monotonic()
         if pending_tickers:
             _log.info("🚀 并行分析 %d 个标的（max_workers=4）", len(pending_tickers))
             _run_pool(pending_tickers)
@@ -1396,8 +1406,10 @@ class AlphaHiveDailyReporter:
                 _log.info("✅ 标的完整性：%d/%d 全部产出",
                           len(pending_tickers), len(pending_tickers))
 
+        _timing.record("parallel", time.monotonic() - _t_parallel)
         self._attach_thesis_breaks(swarm_results)
-        elapsed = self._post_scan_enrichment(ctx, swarm_results)
+        with _timing.timed("enrichment"):
+            elapsed = self._post_scan_enrichment(ctx, swarm_results)
         try:
             self._post_scan_metrics(ctx, swarm_results, elapsed)
         except Exception as e:
@@ -2367,7 +2379,8 @@ class AlphaHiveDailyReporter:
 
         # ML 增强 HTML 报告（必须在 index.html 前完成）
         try:
-            ml_tickers = self._generate_ml_reports(report)
+            with _timing.timed("ml_reports"):
+                ml_tickers = self._generate_ml_reports(report)
             if ml_tickers:
                 _log.info("ML 增强报告完成：%s", ml_tickers)
                 _log.info("ML 报告: %s", ", ".join(ml_tickers))
@@ -2824,10 +2837,12 @@ def main():
         print("   - 跳过 save_report（不覆盖本地 dashboard）")
         print("   - 跳过 auto_commit_and_notify（不推 gh-pages，保留线上好数据）")
         print("   - 常见原因：yfinance 429 限流 → 断路器熔断。请稍后重跑。")
+        _timing.write(reporter.date_str, extra={"early_exit": "empty_scan_guard"})
         return report
 
     # 保存报告（Hive app 通过 .swarm_results_{date}.json 自动同步）
-    report_path = reporter.save_report(report)
+    with _timing.timed("save_report"):
+        report_path = reporter.save_report(report)
     _log.info("报告已保存：%s", report_path)
 
     # v0.23.1: --samples-only 模式跳过所有部署 / Slack / gh-pages，只为积累 pheromone.db 样本
@@ -2844,7 +2859,8 @@ def main():
     # 三端同步：GitHub 提交推送 + Hive App + Slack
     print("\n📡 同步三端：GitHub / Hive App / Slack...")
     try:
-        sync_results = reporter.auto_commit_and_notify(report)
+        with _timing.timed("deploy"):
+            sync_results = reporter.auto_commit_and_notify(report)
         git_ok = sync_results.get("git_push", {}).get("success", False)
         deploy_env = sync_results.get("deploy_env", "production")
         remote_label = sync_results.get("git_push", {}).get("remote", "origin")
@@ -2857,6 +2873,8 @@ def main():
         _log.warning("三端同步部分失败: %s", e)
         print(f"   ⚠️  三端同步出错：{e}")
 
+    # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
+    _timing.write(reporter.date_str)
     return report
 
 
