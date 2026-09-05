@@ -71,13 +71,49 @@ def _sc_cls(score):
 
 
 def _build_dim_dq_html(dim_dq: dict) -> str:
-    """生成维度数据质量迷你条形图"""
-    if not dim_dq:
-        return ""
+    """生成维度数据质量迷你条形图。缺失的维度渲染成「—」，**不静默省略**。
+
+    v0.45.114：原实现对拿不到的维度 `continue` 掉，于是
+
+      * 部分缺失（生产 1401 条里 52 条，3.7%）→ 那几维从行里**消失**，
+        剩下的 bar 照常铺满整行，看起来像一行完整的数据质量。
+      * 全缺（7 条，0.5%）→ `items` 为空 ⇒ 返回**空串**，整行不渲染。
+        不是显示 0%，是这一行在卡片上直接不存在。
+
+    后者正是 v0.45.113 里记的「三条报警通道全哑」的第 ②条：那 7 张 BRK-B 卡片
+    同时拿到一个伪造的正常五边形雷达图和一行「不存在」的数据质量，
+    读者没有任何线索知道这张卡背后没有数据。
+
+    两种情况是**同一个 `if pct is None: continue`** 造成的，故一并修——
+    只特判全缺就正好重犯了 v0.45.54 那个「修一支漏一支」的错
+    （v0.45.113 刚因此付过代价）。
+
+    渲染约定（零 CSS 改动，复用既有类）：
+      有数值 → 彩色 `dq-fill` + `NN%`
+      拿不到 → **空的 `dq-bar`（`background:var(--border)` 本身就是灰底轨道）**
+               + `dq-val` 显示 `—` + title 写「无数据」
+    `—` 与 `0%` 的区别在读数与 tooltip 上：`0%` 是「测过，质量为零」，
+    `—` 是「没测到」。这个区分正是本次要恢复的东西。
+
+    `dim_dq` 为空 dict / None 时同样渲染五个「—」而不是返回空串：
+    五个维度名来自模块级 `_DIM_DQ_LABELS`，**不依赖入参**，所以「字段没来」
+    和「字段来了但值是 None」对读者是同一件事（都没测到），不该一个可见一个隐身。
+    （生产 1401 条里这两种形态各 0 次，故此改动今日零影响，只是把最后一条
+    静默路径也堵掉。）
+    """
+    dim_dq = dim_dq or {}
     items = []
     for dim, label in _DIM_DQ_LABELS.items():
         pct = dim_dq.get(dim)
-        if pct is None:
+        # bool 是 int 子类，必须当缺失处理（同 _radar_data 的护栏）
+        if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+            items.append(
+                f'<span class="dq-item" title="{label} 数据质量 无数据">'
+                f'<span class="dq-lbl">{label}</span>'
+                f'<span class="dq-bar"></span>'
+                f'<span class="dq-val">—</span>'
+                f'</span>'
+            )
             continue
         color = "#28a745" if pct >= 80 else ("#ffc107" if pct >= 50 else "#dc3545")
         items.append(
@@ -87,8 +123,6 @@ def _build_dim_dq_html(dim_dq: dict) -> str:
             f'<span class="dq-val">{pct:.0f}%</span>'
             f'</span>'
         )
-    if not items:
-        return ""
     return '<div class="dim-dq-row">' + "".join(items) + '</div>'
 
 

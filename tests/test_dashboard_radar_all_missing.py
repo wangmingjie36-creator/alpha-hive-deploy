@@ -25,7 +25,8 @@
                        （同条目 7 只蜂全是 dimension='validation'/confidence=0.0/score=5.0）
 
 三条本该报警的通道当时全哑：① 雷达图看起来正常 ② `dim_data_quality` 五项全 None
-⇒ `_build_dim_dq_html` 返回空串、整行不渲染 ③ `_log.debug` 只覆盖缺一部分。
+⇒ `_build_dim_dq_html` 返回空串、整行不渲染（**v0.45.114 已修**，现显示五个「—」）
+③ `_log.debug` 只覆盖缺一部分。
 
 修法：`dimension_scores` 为空直接返回五个 0 并 `_log.warning`，不再从
 `agent_details` 重建。根因（`_RE_TICKER` 不接受 `BRK-B` 的连字符）已在别处修掉，
@@ -133,14 +134,22 @@ class TestOldBranchWasUnsalvageable:
             assert bee["score"] == 5.0
 
 
-class TestDimDqConsumerCannotCatchAllMissing:
-    """已核实的事实：消费端接不住全缺，所以雷达图是唯一通道。
-    将来若有人修好 dim_dq，这条会变红，提醒同步更新上面的注释。"""
+class TestDimDqConsumerNowCatchesAllMissing:
+    """v0.45.113 写这组时断言的是「消费端接不住」（`== ""`），并注明
+    「将来若有人修好 dim_dq，这条会变红，提醒同步更新注释」。
+    v0.45.114 修好了，它如期变红——按设计更新为新契约。
 
-    def test_all_none_renders_nothing(self):
-        assert _build_dim_dq_html(PROD_ALL_MISSING["dim_data_quality"]) == ""
+    现在雷达图不再是唯一通道：全缺时这一行会显示五个「—」。
+    """
+
+    def test_all_none_renders_five_dashes(self):
+        html = _build_dim_dq_html(PROD_ALL_MISSING["dim_data_quality"])
+        assert html != ""
+        assert html.count("—") == 5
+        assert "无数据" in html
 
     def test_normal_dq_renders_bars(self):
         html = _build_dim_dq_html({"signal": 90.0, "catalyst": 100.0,
                                    "sentiment": 100.0, "odds": 85.0, "risk_adj": 100.0})
         assert "dim-dq-row" in html and "90%" in html
+        assert "—" not in html
