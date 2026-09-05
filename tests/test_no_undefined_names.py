@@ -36,7 +36,17 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-PY = "/usr/local/bin/python3"
+# 跑 ruff 用**当前正在跑测试的那个解释器**，不写死路径。
+#
+# 原先硬编码 `/usr/local/bin/python3`（CLAUDE.md 的 Mac 硬规则）。在本机两者
+# 完全等价——按规矩执行 `/usr/local/bin/python3 -m pytest` 时 `sys.executable`
+# 就是它——但 GitHub runner 上 Python 在 `/opt/hostedtoolcache/...`，
+# 那个路径不存在，`subprocess.run` 抛 FileNotFoundError，7 项全部 ERROR。
+#
+# 注意这**不是** fixture 里那句 `pytest.skip("ruff 不可用")` 能兜住的：
+# 它只看 returncode，而解释器不存在时根本走不到 returncode。
+# v0.45.117 把 CI 接上后首次运行即暴露（2634 passed / 7 errors）。
+PY = sys.executable
 
 
 def _run_ruff(*args: str) -> subprocess.CompletedProcess:
