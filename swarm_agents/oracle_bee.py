@@ -11,139 +11,94 @@ from swarm_agents.utils import (
 )
 
 
+def _finite_pos(x) -> bool:
+    """有限、正、非 bool 的数。`bool` 是 `int` 子类，True 会被当 1.0——仓库同类守卫一律显式排除。"""
+    import math as _m
+    return (isinstance(x, (int, float)) and not isinstance(x, bool)
+            and _m.isfinite(x) and x > 0)
+
+
 class OracleBeeEcho(BeeAgent):
     """市场预期蜂 - 期权分析 + Polymarket 预测市场赔率
     对应维度：Odds (权重 0.15)
     融合：期权信号 60% + Polymarket 赔率 40%
     """
 
-    # ---------- v0.45.122：同一只票一次 analyze 里共享 yfinance 期权链 ----------
+    # ---------- v0.45.128：期限结构 / 25Δ skew 改从 OptionsAgent 的 CBOE 结果派生 ----------
     #
-    # 此前 term structure / 25d skew / max pain 兜底三处各自 `yf.Ticker(ticker)` +
-    # `t.options` + `t.option_chain(近月)`：近月链被抓 2~3 次、到期日列表抓 3 次，
-    # 每次都过 yf_gate 的 0.5 req/s 闸。这里把「到期日列表 + 已抓的链」装进一个
-    # memo，由 analyze() 建一次、三处共用。**数据源与内容一字不变**（还是 yfinance
-    # 的那条链），只是少排队。memo 是局部对象、随 analyze 结束丢弃——蜂实例在
-    # 4 个标的 worker 之间共享，不能把逐票状态挂在 self 上。
+    # 此前这两项各自拉 yfinance 期权链（v0.45.122 把三处收成一份 memo）。2026-09-04
+    # 全量核对发现那条路「活着」但输出的是垃圾：近月 ATM IV 中位 15.6%、9/29 只 <8%
+    # （NVDA 4.44%、COST 4.16%，CBOE 同日前端 IV 33.4% / 23.8%）——yfinance 把 0~2 DTE
+    # 的到期日排最前、IV 字段在那儿常是残值，而 options_analyzer 的 CBOE 路径只选 DTE≥3。
+    # skew 同样系统性偏高（中位 ~1.2 vs CBOE ~1.0），把 -0.3 / -0.6 的「恐慌对冲」扣分
+    # 发给了大半个名单。
     #
-    # ⚠️ 为什么不顺手改成读 OptionsAgent 那份 CBOE 结果：2026-09-04 实测这条
-    # yfinance 路径在生产上是**活的**（期限结构 29/30 非 unknown、skew 30/30），
-    # 它是 options_score 的输入；换源 = 评分输入的数据源变更，要走世代边界，
-    # 不在本版范围。
+    # 换源后**档位与分值一字不改**（只换 IV 来源）。09-04 实测 options_score
+    # Δ 中位 +0.30、范围 [-0.5, +1.7]、21/30 非零——属评分输入变更，已追加世代边界
+    # （ic_rerun_readiness._COHORT_HISTORY，v0.45.128）。
+    #
+    # CBOE 结果缺席（data_available=False / skew_ratio=None）→ unknown、adj=0，
+    # **不再回退 yfinance**：回退到一个已证明输出垃圾的源，比诚实的 0 更糟。
+    # 本蜂自此不再直接碰 yfinance（静态守卫 tests/test_prefetch_market_bundle.py）。
 
     @staticmethod
-    def _yf_option_memo(ticker: str) -> dict:
-        import yfinance as yf
-        t = yf.Ticker(ticker)
-        # 不用 `hasattr(t, "options")`：`options` 是 yf_gate 包过的 property，
-        # hasattr 会**真的去访问它**——等于多付一次闸门排队再读第二次。此前三处
-        # 各写一遍 `hasattr + 访问`，同一份到期日列表每只票拉 6 次。
-        try:
-            expirations = list(t.options)
-        except AttributeError:
-            expirations = []
-        return {"t": t, "expirations": expirations, "chains": {}}
+    def _term_structure_adj(options_result: dict) -> dict:
+        """IV 期限结构（前端 vs 远端 ATM IV，单位 %）→ options_score 调整。
+        Contango（远端高）= 市场平静 → 偏多；Backwardation（前端高）= 近期恐慌/催化剂 → 偏空。"""
+        result = {"structure": "unknown", "spread": 0.0, "term_score_adj": 0.0,
+                  "summary": "", "source": "none"}
+        ts = (options_result or {}).get("iv_term_structure") or {}
+        if not isinstance(ts, dict) or not ts.get("data_available"):
+            return result
+        front, back = ts.get("front_iv"), ts.get("back_iv")
+        if not _finite_pos(front) or not _finite_pos(back):
+            return result
+        front, back = float(front), float(back)
+        spread = back - front
+        if spread > 2.0:
+            structure, adj = "contango", +0.3
+        elif spread > -2.0:
+            structure, adj = "flat", 0.0
+        elif spread > -5.0:
+            structure, adj = "backwardation", -0.4
+        else:
+            structure, adj = "severe_backwardation", -0.8
+        return {
+            "structure": structure, "spread": round(spread, 2),
+            "near_iv": round(front, 2), "far_iv": round(back, 2),
+            "term_score_adj": adj,
+            "summary": f"TermStr:{structure}({front:.0f}/{back:.0f})",
+            "source": ts.get("source") or "options_agent",
+        }
 
     @staticmethod
-    def _memo_chain(memo: dict, exp: str):
-        if exp not in memo["chains"]:
-            memo["chains"][exp] = memo["t"].option_chain(exp)
-        return memo["chains"][exp]
-
-    def _analyze_term_structure(self, ticker: str, stock_price: float, memo: dict = None) -> dict:
-        """IV 期限结构分析（近月 vs 远月 ATM IV）
-        Contango（远月高）= 市场平静 → 偏多
-        Backwardation（近月高）= 近期恐慌/催化剂 → 偏空
-        """
-        result = {"structure": "unknown", "spread": 0.0, "term_score_adj": 0.0, "summary": ""}
-        try:
-            from datetime import datetime
-            memo = memo or self._yf_option_memo(ticker)
-            expirations = memo["expirations"]
-            if len(expirations) < 2:
-                return result
-            ivs = []
-            for exp in expirations[:3]:
-                try:
-                    chain = self._memo_chain(memo, exp)
-                    calls = chain.calls
-                    if calls.empty:
-                        continue
-                    atm_idx = (calls["strike"] - stock_price).abs().idxmin()
-                    atm_iv = float(calls.loc[atm_idx, "impliedVolatility"])
-                    # 与 options_analyzer S15 同款合理性边界：过滤限流链的垃圾 IV
-                    if 0.02 < atm_iv < 2.0:
-                        exp_date = datetime.strptime(exp, "%Y-%m-%d")
-                        dte = max(1, (exp_date - datetime.now()).days)
-                        ivs.append({"expiry": exp, "dte": dte, "atm_iv": round(atm_iv * 100, 2)})
-                except (KeyError, ValueError, IndexError):
-                    continue
-            if len(ivs) < 2:
-                return result
-            near_iv = ivs[0]["atm_iv"]
-            far_iv = ivs[-1]["atm_iv"]
-            spread = far_iv - near_iv
-            if spread > 2.0:
-                structure, adj = "contango", +0.3
-            elif spread > -2.0:
-                structure, adj = "flat", 0.0
-            elif spread > -5.0:
-                structure, adj = "backwardation", -0.4
-            else:
-                structure, adj = "severe_backwardation", -0.8
-            result = {
-                "structure": structure, "spread": round(spread, 2),
-                "near_iv": near_iv, "far_iv": far_iv,
-                "term_score_adj": adj,
-                "summary": f"TermStr:{structure}({near_iv:.0f}/{far_iv:.0f})",
-            }
-        except Exception as e:
-            _log.debug("OracleBee term structure failed for %s: %s", ticker, e)
-        return result
-
-    def _analyze_deep_skew(self, ticker: str, stock_price: float, memo: dict = None) -> dict:
-        """25-delta Skew 分析（OTM Put IV vs OTM Call IV）
-        Skew > 1.3 → 机构恐慌对冲 → 偏空；Skew < 0.8 → Call 投机过热 → 偏多
-        """
-        result = {"skew_25d": None, "skew_score_adj": 0.0, "summary": ""}
-        try:
-            import math
-            memo = memo or self._yf_option_memo(ticker)
-            expirations = memo["expirations"]
-            if not expirations:
-                return result
-            chain = self._memo_chain(memo, expirations[0])
-            calls, puts = chain.calls, chain.puts
-            if calls.empty or puts.empty:
-                return result
-            otm_put_ivs = [row["impliedVolatility"] for _, row in puts.iterrows()
-                           if -20 < (row["strike"] / stock_price - 1) * 100 < -5
-                           and row.get("impliedVolatility", 0) > 0
-                           and not math.isnan(row["impliedVolatility"])]
-            otm_call_ivs = [row["impliedVolatility"] for _, row in calls.iterrows()
-                            if 5 < (row["strike"] / stock_price - 1) * 100 < 20
-                            and row.get("impliedVolatility", 0) > 0
-                            and not math.isnan(row["impliedVolatility"])]
-            if not otm_put_ivs or not otm_call_ivs:
-                return result
-            avg_put = sum(otm_put_ivs) / len(otm_put_ivs)
-            avg_call = sum(otm_call_ivs) / len(otm_call_ivs)
-            skew = avg_put / avg_call if avg_call > 0 else 1.0
-            if skew > 1.3:   adj = -0.6
-            elif skew > 1.15: adj = -0.3
-            elif skew < 0.7:  adj = +0.4
-            elif skew < 0.85: adj = +0.2
-            else:             adj = 0.0
-            result = {
-                "skew_25d": round(skew, 3),
-                "otm_put_iv": round(avg_put * 100, 1),
-                "otm_call_iv": round(avg_call * 100, 1),
-                "skew_score_adj": adj,
-                "summary": f"Skew25d:{skew:.2f}" + ("(恐慌对冲)" if skew > 1.3 else ""),
-            }
-        except Exception as e:
-            _log.debug("OracleBee deep skew failed for %s: %s", ticker, e)
-        return result
+    def _skew_adj(options_result: dict) -> dict:
+        """25Δ 近似 skew（OTM put IV / OTM call IV）→ options_score 调整。
+        Skew > 1.3 → 机构恐慌对冲 → 偏空；Skew < 0.8 → Call 投机过热 → 偏多。"""
+        result = {"skew_25d": None, "skew_score_adj": 0.0, "summary": "", "source": "none"}
+        r = options_result or {}
+        detail = r.get("iv_skew_detail") if isinstance(r.get("iv_skew_detail"), dict) else {}
+        skew = detail.get("skew_ratio", r.get("iv_skew_ratio"))
+        if not _finite_pos(skew):
+            return result
+        skew = float(skew)
+        if skew > 1.3:
+            adj = -0.6
+        elif skew > 1.15:
+            adj = -0.3
+        elif skew < 0.7:
+            adj = +0.4
+        elif skew < 0.85:
+            adj = +0.2
+        else:
+            adj = 0.0
+        return {
+            "skew_25d": round(skew, 3),
+            "otm_put_iv": detail.get("otm_put_iv"), "otm_call_iv": detail.get("otm_call_iv"),
+            "skew_score_adj": adj,
+            "summary": f"Skew25d:{skew:.2f}" + ("(恐慌对冲)" if skew > 1.3 else ""),
+            "source": "options_agent",
+        }
 
     @staticmethod
     def _max_pain_from_oi(call_oi: dict, put_oi: dict, stock_price: float):
@@ -172,12 +127,12 @@ class OracleBeeEcho(BeeAgent):
             return None  # 偏离现价 >50% = 数据垃圾
         return mp_strike
 
-    def _calc_max_pain(self, ticker: str, stock_price: float, memo: dict = None) -> dict:
+    def _calc_max_pain(self, ticker: str, stock_price: float) -> dict:
         """Max Pain 计算（期权到期时令所有持仓亏损最大的价位）。
 
-        v0.41.2: 主源改 CBOE（fetch_cboe_chain，与期权链同源），yfinance
-        仅兜底——旧实现裸调 yfinance 最近到期日，深夜限流全零 OI 时
-        退化取最低行权价（v40.1 同款反模式的期权版漏网）。
+        v0.41.2: 主源改 CBOE（fetch_cboe_chain，与期权链同源）；旧实现裸调 yfinance
+        最近到期日，深夜限流全零 OI 时退化取最低行权价（v40.1 同款反模式的期权版漏网）。
+        v0.45.128: 去掉 yfinance 兜底，CBOE 取不到即 None。
         """
         result = {"max_pain": None, "distance_pct": None, "summary": ""}
         call_oi, put_oi = {}, {}
@@ -197,19 +152,7 @@ class OracleBeeEcho(BeeAgent):
                             put_oi[float(p.get("strike", 0))] = put_oi.get(float(p.get("strike", 0)), 0) + int(p.get("openInterest") or 0)
         except Exception as e:
             _log.debug("OracleBee max pain CBOE 主源失败 %s: %s", ticker, e)
-        # ── 兜底：yfinance 最近到期日 ──
-        if not call_oi and not put_oi:
-            try:
-                memo = memo or self._yf_option_memo(ticker)
-                expirations = memo["expirations"]
-                if expirations:
-                    chain = self._memo_chain(memo, expirations[0])
-                    calls, puts = chain.calls, chain.puts
-                    if not calls.empty and not puts.empty:
-                        call_oi = dict(zip(calls["strike"].astype(float), calls["openInterest"].fillna(0).astype(int)))
-                        put_oi = dict(zip(puts["strike"].astype(float), puts["openInterest"].fillna(0).astype(int)))
-            except Exception as e:
-                _log.debug("OracleBee max pain yfinance 兜底失败 %s: %s", ticker, e)
+        # v0.45.128：不再回退 yfinance——CBOE 取不到就诚实返回 None（见 _term_structure_adj 注释）。
 
         try:
             mp_strike = self._max_pain_from_oi(call_oi, put_oi, stock_price)
@@ -274,15 +217,10 @@ class OracleBeeEcho(BeeAgent):
                     poly_markets = 0
 
             # ---- Phase 2: 期权深度分析（term structure / 25d skew / max pain）----
-            # v0.45.122：三处共用一份到期日列表与近月链（见 _yf_option_memo）
-            try:
-                _opt_memo = self._yf_option_memo(ticker)
-            except Exception as _e_memo:  # noqa: BLE001 - 与此前各函数各自吞掉一致
-                _log.debug("OracleBee option memo failed for %s: %s", ticker, _e_memo)
-                _opt_memo = {"t": None, "expirations": [], "chains": {}}
-            term_structure = self._analyze_term_structure(ticker, current_price, memo=_opt_memo)
-            deep_skew      = self._analyze_deep_skew(ticker, current_price, memo=_opt_memo)
-            max_pain       = self._calc_max_pain(ticker, current_price, memo=_opt_memo)
+            # v0.45.128：期限结构 / skew 从上面 OptionsAgent 的 CBOE 结果派生，不再碰 yfinance
+            term_structure = self._term_structure_adj(result)
+            deep_skew      = self._skew_adj(result)
+            max_pain       = self._calc_max_pain(ticker, current_price)
             _deep_adj = term_structure.get("term_score_adj", 0) + deep_skew.get("skew_score_adj", 0)
             options_score = max(0.0, min(10.0, options_score + _deep_adj))
             _deep_parts = [s for s in [

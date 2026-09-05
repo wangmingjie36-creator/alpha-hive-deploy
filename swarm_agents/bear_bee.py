@@ -266,15 +266,17 @@ class BearBeeContrarian(BeeAgent):
         pe = 0
         if price > 0:
             try:
-                # v0.45.122 复查：本想改读预取包 `.info["trailingPE"]`，实测发现
-                # yfinance 1.2.0 的 `fast_info.pe_ratio` 对 NVDA/COST/T **一律 None**——
-                # 这一项在生产上早就是死的（pe 恒 0，三档 elif 从未命中）。
-                # 换成 trailingPE 会**复活一个评分输入**，那是评分变更不是提速，
-                # 要单独决策 + 世代边界。故此处一字不动，只把事实记在 CHANGELOG。
-                import yfinance as yf
-                info = yf.Ticker(ticker).fast_info
-                pe = getattr(info, 'pe_ratio', 0) or 0
-            except (*NETWORK_ERRORS, AttributeError) as e:
+                # v0.45.128：P/E 复活（用户决策，已追加世代边界）。
+                # 此前读 `fast_info.pe_ratio`，在 yfinance 1.2.0 上对全部标的恒 None——
+                # 这一项自 v0.45.54 起 17 个扫描日 496 条 Bear 条目零命中，是死的。
+                # 改读 `.info["trailingPE"]`（现价 / TTM EPS，同一定义），走预取包访问器
+                # （v0.45.122），没预取才自己取一次。三档阈值 35/50/80 不变；
+                # 2026-09-05 实测名单 30 只：>80 一只、>50 一只、>35 四只、亏损无 P/E 四只。
+                import math as _math
+                _raw = (self._yf_info(ticker) or {}).get("trailingPE")
+                pe = (float(_raw) if (isinstance(_raw, (int, float)) and not isinstance(_raw, bool)
+                                      and _math.isfinite(_raw) and _raw > 0) else 0)
+            except Exception as e:  # noqa: BLE001 - 取不到按无 P/E；来源标签由下方按 pe 推导
                 _log.debug("BearBeeContrarian PE ratio unavailable for %s: %s", ticker, e)
                 pe = 0
 

@@ -227,8 +227,10 @@ class TestEtaAndExitCodes:
         扫描覆盖率实测只有 36.7%，按日历周外推会给出过于乐观的日期。
         """
         # 8 个日历周里只产出 4 个扫描周 ⇒ 产出率 0.5
+        # v0.45.128：today 由世代起点推导。此前写死 "2026-10-12"，与从 _COHORT_START
+        # 推出来的夹具日期是两个钟（v0.45.96 那类定时炸弹）——边界一动就把 8 周变成 4 周。
         rows = _weekly_rows(4)
-        res = rr.assess(db_path=db(rows), today="2026-10-12")
+        res = rr.assess(db_path=db(rows), today=_after_cohort(8))
         assert res["weeks_per_calendar_week"] < 1.0
         assert res["eta_calendar_weeks"] > res["weeks_remaining"], (
             "ETA 没有把产出率折算进去"

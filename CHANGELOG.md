@@ -5,9 +5,91 @@
 
 ---
 
-## [0.45.127] — 2026-09-05 — 占位（进行中：ml_predictor 重 CPU 测试单独放宽 timeout）
+## [0.45.128] — 2026-09-05 — 两项评分输入变更（用户决策）：Oracle 期限结构/skew 换 CBOE 源、Bear P/E 复活；追加世代边界
 
-## [0.45.127] — 2026-09-05 — 占位（进行中：Oracle 期限结构/skew 换 CBOE 源 + Bear P/E 复活——两项评分输入变更，追加世代边界）
+v0.45.122 留下的两条决策，用户拍板「做」。两项都改变 `options_score` / Bear 分 → `final_score`，
+按 [IC 重跑就绪度闸] 的规则追加了一条世代边界（`ic_rerun_readiness._COHORT_HISTORY`，第 4 条）。
+
+> **编号说明**：本条原占 0.45.127（`c1dddea`，13:21:50），另一 session 的同号占位 `1dfb791`
+> 早 38 秒进 git 历史且是本提交的祖先——按占号规则「先进历史者保留、后者改号」，本条让到 0.45.128。
+> 两次占号相隔不到一分钟：占号第 1 步（fetch 看号）与第 3 步（推）之间就是这么长的窗口，规则本身
+> 只能把撞号概率压低、不能归零；撞了按规则改号即可，成本几十秒。
+
+### 动手前的核对把问题的性质改了
+
+v0.45.122 判「Oracle 的 yfinance 路径活着」（期限结构 29/30 非 unknown、skew 30/30），本版
+逐票对照同日 CBOE 数据后发现：**活着，但输出的是垃圾**。
+
+| 09-04 全量 30 只 | yfinance 派生 | CBOE 派生 |
+|---|---|---|
+| 近月 ATM IV 中位 | **15.6%**（9/29 只 <8%；NVDA 4.44%、COST 4.16%、MSFT 3.35%） | 32.6%（NVDA 33.4、COST 23.8） |
+| skew 中位 | ~1.2（T 2.69、VZ 2.33、BILI 2.01） | ~1.0（T 1.10、VZ 1.12、BILI 0.92） |
+| 结构分布 | contango 22 / severe_backwardation 5 | contango 22 / flat 5 / backwardation 2 |
+
+原因：yfinance 把 0~2 DTE 的到期日排最前、IV 字段在那儿常是残值，Oracle 拿 `expirations[0]`
+当「近月」；`options_analyzer` 的 CBOE 路径只选 DTE≥3。所以 22 个「contango」里相当一部分是
+被一个 4% 的假近月 IV 撑出来的，5 个「severe_backwardation」（VZ/CVX/TMO/TMUS/BILI）在 CBOE
+口径下全是 contango/flat/backwardation。skew 偏高则把 -0.3/-0.6 的「恐慌对冲」扣分发给了大半个名单。
+
+### Changed — `swarm_agents/oracle_bee.py`
+
+- `_term_structure_adj(options_result)` / `_skew_adj(options_result)`（新，纯函数）：从上面
+  `OptionsAgent.analyze()` 已经返回的 `iv_term_structure`（front_iv / back_iv）与
+  `iv_skew_detail`（skew_ratio / otm_put_iv / otm_call_iv）派生。**档位与分值一字不改**
+  （term：>2 contango +0.3 / >-2 flat / >-5 backwardation -0.4 / else -0.8；skew：>1.3 -0.6 /
+  >1.15 -0.3 / <0.7 +0.4 / <0.85 +0.2），只换 IV 来源。
+- CBOE 结果缺席 → `unknown`、adj=0，**不回退 yfinance**——回退到一个已证明输出垃圾的源比诚实的
+  0 更糟。`_calc_max_pain` 同样去掉 yfinance 兜底（max pain 不进评分，只进摘要）。
+- 删 `_yf_option_memo` / `_memo_chain` / 旧的 `_analyze_term_structure` / `_analyze_deep_skew`。
+  **Oracle 自此零 yfinance 调用**：每只票再省 4 次闸门排队（到期日列表 + 3 条链），30 只 ≈ 120 次。
+  静态守卫白名单 `oracle_bee` 从 1 收到 0。
+- 数值守卫 `_finite_pos`：有限、正、**非 bool**——照抄仓库同类守卫那一句（v0.45.121 教训）。
+
+**影响量化（09-04 数据、同一套档位复算）**：options_score Δ 中位 **+0.30**、范围 [-0.5, +1.7]、
+21/30 只非零。方向上是**撤销**一批由假 IV 造成的扣分（VZ/BILI +1.7、CVX +1.4、TMO +1.1），
+少数变负（VKTX -0.5：CBOE 前端 113% 是真的财报前倒挂，yfinance 没看见）。
+
+### Changed — `swarm_agents/bear_bee.py`：P/E 复活
+
+- `_assess_valuation` 改读预取包 `.info["trailingPE"]`（v0.45.122 访问器，没预取才自己取一次）。
+  此前的 `fast_info.pe_ratio` 在 yfinance 1.2.0 上恒 None——该项自 v0.45.54 起 17 个扫描日
+  496 条 Bear 条目 **0 条 P/E 信号**，是死的。三档 35 / 50 / 80 不变（用户没要求重校）。
+- 守卫：None / bool / NaN / inf / 非正 / 字符串一律按无 P/E，`data_sources.valuation` 由 pe 推导。
+- **实测名单落档**（09-05 live）：>80 一只（TSLA 321.9）、>50 一只（ABBV 72.4）、>35 四只
+  （COST 46.1 / WMT 38.8 / DE 38.6 / ENPH 36.0）、亏损无 P/E 四只（VKTX/RKLB/AMC/SNOW）、
+  其余 20 只 ≤35。估值项权重 0.20，TSLA 的 Bear 分最多抬 1.4。
+
+### Changed — `ic_rerun_readiness.py`：世代边界
+
+追加 `("2026-09-05", "v0.45.128", …)`。**边界取部署日而非下一次扫描日 09-08**：任何自此起的
+扫描（含手动补跑）都是新口径；写成 09-08 的话，中间手动跑出的样本会混进旧世代。
+（09-07 Labor Day 休市，正常情况下 09-08 是第一批新口径样本。）
+
+### Fixed — 顺带修掉一个「两个钟」测试
+
+`tests/test_ic_rerun_readiness.py::test_eta_uses_observed_rate_not_calendar` 的夹具日期从
+`_COHORT_START` 推导，`today` 却写死 `"2026-10-12"`——边界一动，「8 个日历周」就变成 4 个，
+断言 `1.0 < 1.0` 红。改为 `today=_after_cohort(8)`。同 v0.45.96 记的那类定时炸弹。
+
+### 验证
+
+- `tests/test_oracle_cboe_source.py` 42 条：两套档位逐档 + 落在档内间隙的值（挪档必红）+ 09-04
+  NVDA/COST 复算；缺席/NaN/bool/非正 → unknown 且 `yfinance.Ticker/download` **一碰即 AssertionError**；
+  max pain 无兜底；Bear 三档 + 边界 + 垃圾值 + 取 max 不取和 + 取数失败；世代边界最后一条。
+- 变异六条全红：M1 term 档位挪到 3.0（首版测试没覆盖 (2,3] 间隙，全绿——补了 +2.5/-4.5 两例后红）/
+  M2 skew 只判 None / M3 term 无视 data_available（首次 collected=0 是采集期错误，按「核对 collected N」
+  重跑后 1 红）/ M4 skew 档位 1.3→1.5 / M5 Bear 去类型守卫 / M6 世代边界版本号改掉。
+- `test_prefetch_market_bundle.py` 同步：Bear 估值测试从「钉住未迁」翻成「已迁、零直连」，删 Oracle
+  memo 测试，白名单 bear/oracle 清零。触及的 9 个测试文件 200+ 条 + 全量套件通过（见提交信息）。
+
+### 提醒
+
+- 新世代从 2026-09-05 起攒样本，`replay_scoring.py` 默认只用新世代；旧世代 IC 结论对本版不适用。
+- 09-08 首轮实测多看两处：Oracle details 里 `term_structure.source` 应为 `cboe`、`deep_skew.source`
+  为 `options_agent`；Bear `data_sources.valuation` 应有 ~26/30 为 `yfinance`（此前 30/30 unavailable）。
+
+
+## [0.45.127] — 2026-09-05 — 占位（进行中：ml_predictor 重 CPU 测试单独放宽 timeout）
 
 ## [0.45.126] — 2026-09-05 — `deep_analysis` 的预取包被静默丢弃 6 个月：`inject_prefetched` 少传一个参数
 
