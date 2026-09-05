@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.124] — 2026-09-05 — 占位（进行中：清掉误提交的 worktree gitlink + 补 test_quote_set.py 漏桩 + CLAUDE.md 加「失败如何传导到下游」检查项）
+
 ## [0.45.123] — 2026-09-05 — CBOE payload 缓存按业务日判新鲜：120s TTL 短于单只流水线，「共享一次下载」从未成立
 
 v0.45.118 诊断的 A2。`cboe_options._payload_cache` 注释写「同一标的的主链与全链共享一次
