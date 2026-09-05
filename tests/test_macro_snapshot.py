@@ -146,6 +146,7 @@ class TestAsOfHistory:
         assert fm._asof_history(_YF, "^TNX", "2026-08-27") is None
 
 
+@pytest.mark.network  # 走真实取数路径（yfinance/Treasury），离线必挂；CI 排除，本机照跑
 class TestMacroContextUsesSnapshot:
     def _patch(self, monkeypatch, *, close=4.5):
         """把 yfinance 取数替换掉，只验快照逻辑，不打网。"""
@@ -246,6 +247,7 @@ class TestSameDayWithoutYfinance:
     （FRED 滞后 1–2 天，当日 17:00 ET 的定时任务等不到它）。
     """
 
+    @pytest.mark.network  # 打真实外部端点，离线必挂；CI 排除，本机照跑
     def test_same_day_prefers_non_yfinance(self, monkeypatch):
         monkeypatch.setattr(fm, "_same_day_macro_data", lambda as_of=None: (
             {"TNX": {"last": 4.67, "prev": 4.67, "change_pct": 0.0},
@@ -290,6 +292,7 @@ class TestSameDayWithoutYfinance:
         _REAL_SAME_DAY(None)
         assert called["n"] == len(fm._ETF_PROXY)
 
+    @pytest.mark.network  # 打真实外部端点，离线必挂；CI 排除，本机照跑
     def test_real_2y_beats_the_5y_approximation(self, monkeypatch):
         """真 2Y 必须压过 `5Y + 0.15` 近似 —— 那个近似会**错判曲线档位**。
 
@@ -309,6 +312,7 @@ class TestSameDayWithoutYfinance:
         assert r["yield_spread"] == 47.0
         assert r["yield_curve"] == "normal"
 
+    @pytest.mark.network  # 打真实外部端点，离线必挂；CI 排除，本机照跑
     def test_falls_back_to_approximation_and_labels_it(self, monkeypatch):
         """财政部不可得时仍可用近似，但**必须标出来**。"""
         monkeypatch.setattr(fm, "_same_day_macro_data", lambda as_of=None: (

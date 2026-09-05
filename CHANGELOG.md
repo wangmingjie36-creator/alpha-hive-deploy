@@ -86,8 +86,99 @@
   本项目唯一没有不变式的维度，所以能静默退化 8 天。
 
 
-## [0.45.117] — 2026-09-05 — 占位（进行中：合并 origin/ci/python-tests，兑现 v0.45.94 的 CI）
+## [0.45.117] — 2026-09-05 — 合并 `ci/python-tests`：仓库有了 CI（兑现 v0.45.94 的占号）
 
+用户交办：把 `origin/ci/python-tests` 合了。v0.45.116 刚查明这条分支写完却从未
+并入 main，本版兑现它。
+
+分支落后 main **45 个提交**，所以**没有直接信它当年写的任何结论**——
+marker 清单、测试数、CI 是否会绿，全部重新实测。实测挖出一条会让 CI 直接变红的
+既有脆弱性（见下）。
+
+### Added — GitHub Actions CI，只跑离线确定性子集
+
+- `.github/workflows/tests.yml`：push to main + PR 触发，Python 3.11
+  （与生产一致；3.9 会因 PEP604 `X | None` 注解直接崩），
+  跑 `pytest -m "not integration and not network" --maxfail=0`。
+  `--maxfail=0` 覆盖 `addopts` 里的 `-x`：CI 要一次看全所有失败。
+  concurrency 组取消同分支的过期运行。
+- `pyproject.toml` 注册 `network` marker。与 `integration` 的区别是**意图**：
+  integration 测的是「对接外部系统这件事本身」，network 测的是本地逻辑、
+  只是恰好在路径上碰了网络。**刻意不进 `addopts` 的默认排除**——本机有网，
+  这些测试照常跑照常有价值。
+- 解除 `.gitignore` 对 `.github/` 的整目录忽略（保留告警注释，见下方"部署"）。
+
+**为什么不跑全量**：本仓库有一批测试打真实外部端点（yfinance / Treasury / CNN）。
+它们在本机是绿的，放进 CI 就是噪音源——限流、端点改版、runner 出口 IP 被限速，
+任何一样都会让 CI 无故转红。**时红时绿的 CI 比没有 CI 更糟：它训练所有人
+忽略红灯。**
+
+### Fixed — 合并暴露的既有脆弱性：`TestSPYBenchmarkUnavailable` 三条会让 CI 变红
+
+在**干净检出（只含被跟踪文件，模拟 CI checkout）+ 断网**下跑合并后的子集，
+`tests/test_missing_value_not_zero.py::TestSPYBenchmarkUnavailable` **3 条失败**：
+`FileNotFoundError: 找不到 pheromone.db`（`portfolio_backtest.py:95`）。
+
+根因是**守卫只堵了两条失败路径中的一条**：这三条已有
+`if "error" in r: pytest.skip(...)`，但 `_find_db()` 是 **raise**，不是返回错误字典。
+
+**它此前从不现形**，两个条件缺一不可：
+1. 单独跑该文件时，`run_backtest` 会先在「无已验证预测数据」处返回错误字典，
+   根本走不到 `_find_db()` —— 实测单跑 19 passed / 3 skipped，一切正常；
+2. 全量跑时，前面某个测试留下的状态把它推过了那道早期检查，才撞上缺库的 raise。
+
+而 `network` marker 摘掉 29 项**改变了执行组合**，于是它现形了。
+`pheromone.db` 未被 git 跟踪，CI runner 上必然没有 ⇒ 不修 CI 必红。
+
+修法按仓库既有惯例（`test_ml_expected_return.py` / `test_catalyst_availability.py`
+都用同一句）加 class 级 autouse 守卫：生产库不存在就 `pytest.skip`。
+本机有 `pheromone.db`，行为不变。
+
+> 顺带：写这个守卫时漏了 `from pathlib import Path`，被 `ruff F821` 当场抓到。
+> 「改完代码必跑 ruff」这条纪律又救了一次。
+
+### 验证 — 没有采信分支的任何旧结论，逐条重测
+
+搭了两个一次性 pytest 插件做实测（在 scratchpad，不入库）：
+`nonet`（切断一切非本机 TCP + DNS）与 `netcount`（不拦截、只统计出网尝试）。
+两者都先做了反向自证——证明 `nonet` 真能拦、`netcount` 真能数，
+否则「离线全绿 / 零出网」可能只是插件没生效。
+
+| 检验 | 结果 |
+|---|---|
+| `-m network` 收集数 | **29**，与分支当年一致 |
+| CI 子集收集数 | 2663 / 2755 |
+| **干净检出 + 断网跑 CI 子集（修复前）** | **3 failed** ← 上一节 |
+| **干净检出 + 断网跑 CI 子集（修复后）** | **2639 passed, 24 skipped, 0 failed** ✅ |
+| 本机全量（有网） | **2674 passed, 18 skipped**（63 deselected = integration） |
+
+⚠️ **测错过一次树**：第一次用 `git archive HEAD` 打包，取到的是**上一个提交**，
+而合并当时只 staged 未 commit —— 跑的是合并前的状态（63 deselected 而非 92）。
+改用 `git archive $(git write-tree)` 才是真正要验的那棵树。
+**判据：验证前先确认「我打包的到底是哪棵树」**，`HEAD` 与 index 在合并中途不是一回事。
+
+### Notes — `network` marker 现已过期（本次**未动**，留作后续）
+
+那次误跑反而给出一个额外证据：不加 `network` 过滤时，**全部 2692 项非 integration
+测试在干净检出 + 断网下全绿**。顺着查下去用 `netcount` 实测：
+
+> **被标 `network` 的 29 项，在网络完全可用的条件下，出网尝试为 0 次。**
+
+原因应是 `tests/conftest.py` 的 autouse 闸（yfinance mock、v0.45.60 当日宏观层、
+v0.45.61 Twelve Data）已经把它们全部覆盖住了。也就是说这 29 项如今是
+离线确定性的，marker 把它们排除在 CI 之外**已无依据**，CI 因此少覆盖 1% 的用例。
+
+**本次刻意不动它**：一来这是「合并这条分支」之外的独立决定；二来上面刚证实
+摘不摘这 29 项会**改变执行组合并暴露隐藏的测试间状态泄漏**，再改一次就得把整套
+验证重跑一遍。留作后续，届时需重跑本节的全部检验。
+（也别据此以为「conftest 挡住了就不用 marker」——marker 防的是**有网时的
+不确定性**，判据应是「出网次数」，不是「离线跑不跑得过」。）
+
+### 部署注意
+
+`.github/workflows/` 的改动**普通 `git push` 会被 GitHub 拒**（凭据无 workflow
+scope）。`.gitignore` 里的告警注释已保留。本次推送结果见提交记录；
+若被拒需改走 GitHub App 的 contents API。
 ## [0.45.116] — 2026-09-05 — 两条遗留占位标题：真相不是「忘了改标题」，是这两版从未并入 main
 
 v0.45.114 收尾时顺手数出 CHANGELOG 里还有 2 条「占位（进行中：…）」标题
@@ -1905,7 +1996,11 @@ Step 3 跑到次日 00:04，补出 12 份标着 `2026-09-03` 的报告 ——
 - **仓库至今没有 CI。**
 
 **这个号是烧掉的**：编号已进 git 历史不可回收，故保留条目并如实标注，
-不复用给别的改动。要兑现就合并那条分支，届时把标题与正文一并替换。
+不复用给别的改动。
+
+> ✅ **已于 v0.45.117（2026-09-05）兑现**：分支已合并，仓库现在有 CI。
+> 实质内容记在 v0.45.117 条目下（合并时又实测出一条会让 CI 变红的既有脆弱性）。
+> 本条保留原样，作为「占了号但工作没合」这一形态的历史记录。
 
 ## [0.45.93] — 2026-09-03 — 2 条 NaN 快照伪造了整张每蜂 IC 表
 
