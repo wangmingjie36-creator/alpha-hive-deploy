@@ -8,7 +8,7 @@
   1. 访问器：有预取就用预取、没有就**原样**直连（回退路径 = 改动前路径）
   2. 预取包：一次 download 覆盖标的 + 板块 ETF；单项失败只缺席，不放占位值
   3. 四只蜂的迁移点：注入完整预取包后 `yfinance.Ticker` / `download` 零调用
-  4. Oracle 三处共用一份 memo：Ticker 建 1 次、options 读 1 次、每个到期日链只抓 1 次
+  4. （v0.45.128 起 Oracle 不再碰 yfinance，memo 测试已删；见 test_oracle_cboe_source.py）
   5. 静态守卫：swarm_agents/ 里不许再长出新的 yfinance 直连
 """
 
@@ -245,80 +245,30 @@ class TestBeesUseOnlyPrefetched:
         assert sb == 7.5 and si["short_pct_float"] == 25.0
         tk.assert_not_called(); dl.assert_not_called()
 
-    def test_bear_valuation_deliberately_still_uses_fast_info(self, monkeypatch):
-        """**故意没迁**：yfinance 1.2.0 的 fast_info.pe_ratio 实测恒 None，P/E 项在生产上
-        是死的；改读预取包 trailingPE 会复活一个评分输入，属评分变更、要世代边界。
-        这条测试钉住「未迁」——谁把它迁了，先去看 CHANGELOG v0.45.122 的说明再决定。"""
+    def test_bear_valuation_reads_prefetched_trailing_pe(self, monkeypatch):
+        """v0.45.128：P/E 复活（用户决策 + 世代边界）。预取包里的 trailingPE=90 → 最高档 7.0，零直连。"""
         from swarm_agents.bear_bee import BearBeeContrarian
-        obj = MagicMock(); obj.fast_info = MagicMock(pe_ratio=55.0)
-        tk, _ = _counting_yf(monkeypatch, obj)
+        tk, dl = _counting_yf(monkeypatch)
         bee = BearBeeContrarian(PheromoneBoard()); bee._prefetched_market = _full_market()
+        sig, src = [], {}
+        assert bee._assess_valuation("NVDA", {"price": 100.0}, 0.0, 100.0, sig, src) == 7.0
+        assert src["valuation"] == "yfinance" and any("P/E" in x for x in sig)
+        tk.assert_not_called(); dl.assert_not_called()
+
+    def test_bear_valuation_without_prefetch_fetches_info_once(self, monkeypatch):
+        from swarm_agents.bear_bee import BearBeeContrarian
+        obj = MagicMock(); obj.info = {"trailingPE": 55.0}
+        tk, _ = _counting_yf(monkeypatch, obj)
+        bee = BearBeeContrarian(PheromoneBoard()); bee._prefetched_market = {}
         assert bee._assess_valuation("NVDA", {"price": 100.0}, 0.0, 100.0, [], {}) == 5.0
         tk.assert_called_once_with("NVDA")
-
-
-# ───────────────────────────────────────────── 5. Oracle：三处共用 memo
-def _option_ticker():
-    fridays = []
-    d = date.today() + timedelta(days=7)
-    while len(fridays) < 3:
-        if d.weekday() == 4:
-            fridays.append(d.strftime("%Y-%m-%d"))
-        d += timedelta(days=1)
-    calls = pd.DataFrame({"strike": [90.0, 100.0, 110.0], "impliedVolatility": [0.5, 0.4, 0.45],
-                          "openInterest": [100, 200, 300]})
-    puts = pd.DataFrame({"strike": [90.0, 100.0, 110.0], "impliedVolatility": [0.6, 0.42, 0.4],
-                         "openInterest": [150, 250, 50]})
-    class _Tk(MagicMock):           # 独立子类：property 挂在它上，不污染全局 MagicMock
-        pass
-    opts = PropertyMock(return_value=tuple(fridays))
-    _Tk.options = opts
-    obj = _Tk()
-    obj.option_chain = MagicMock(return_value=MagicMock(calls=calls, puts=puts))
-    obj._opts_prop = opts
-    return obj, fridays
-
-
-class TestOracleMemo:
-    def _bee(self):
-        from swarm_agents.oracle_bee import OracleBeeEcho
-        return OracleBeeEcho(PheromoneBoard())
-
-    def test_shared_memo_fetches_each_chain_once(self, monkeypatch):
-        import cboe_options
-        monkeypatch.setattr(cboe_options, "fetch_cboe_chain", lambda *a, **k: None)   # 逼出 yfinance 兜底
-        obj, fridays = _option_ticker()
-        tk, _ = _counting_yf(monkeypatch, obj)
-        bee = self._bee()
-        memo = bee._yf_option_memo("NVDA")
-        ts = bee._analyze_term_structure("NVDA", 100.0, memo=memo)
-        sk = bee._analyze_deep_skew("NVDA", 100.0, memo=memo)
-        mp = bee._calc_max_pain("NVDA", 100.0, memo=memo)
-        assert ts["structure"] != "unknown" and sk["skew_25d"] is not None and mp["max_pain"] is not None
-        assert tk.call_count == 1, "Ticker 只建一次"
-        assert obj._opts_prop.call_count == 1, "到期日列表只读一次"
-        assert obj.option_chain.call_count == 3, "三个到期日各抓一次；近月链被三处共用"
-        assert sorted(memo["chains"]) == sorted(fridays)
-
-    def test_without_memo_each_helper_fetches_on_its_own(self, monkeypatch):
-        """对照：不传 memo 就是改动前的行为——三处各自建 Ticker、近月链重复抓。"""
-        import cboe_options
-        monkeypatch.setattr(cboe_options, "fetch_cboe_chain", lambda *a, **k: None)
-        obj, _ = _option_ticker()
-        tk, _ = _counting_yf(monkeypatch, obj)
-        bee = self._bee()
-        bee._analyze_term_structure("NVDA", 100.0)
-        bee._analyze_deep_skew("NVDA", 100.0)
-        bee._calc_max_pain("NVDA", 100.0)
-        assert tk.call_count == 3 and obj.option_chain.call_count == 5
 
 
 # ───────────────────────────────────────────── 6. 静态守卫
 _ALLOWED = {
     "base.py": 7,        # 4 个访问器的回退（Ticker×4）+ 面板回退（download）+ 预取包（download + Ticker）
     "cache.py": 2,       # _fetch_stock_data 的 yfinance 回退 + ticker 有效性检查
-    "bear_bee.py": 1,    # _assess_valuation 未预取时的 fast_info 回退
-    "oracle_bee.py": 1,  # _yf_option_memo（期权链换源要走世代边界，本版不动）
+    # v0.45.128：bear_bee（P/E 改走访问器）与 oracle_bee（期权链改从 CBOE 结果派生）清零
 }
 
 

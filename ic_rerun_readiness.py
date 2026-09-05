@@ -86,6 +86,16 @@ _COHORT_HISTORY = [
      "**从未触发过一次**；按全历史 1191 观测的分位重新校准后触发率 6.35%。"
      "⑥ paper_portfolio alpha 不再等于组合收益本身；信息素坏值由 1.0 最大值改 0.5 中位。"
      "以上均改变 final_score / dimension_scores / 训练样本，故为世代边界"),
+    ("2026-09-05", "v0.45.128",
+     "① Oracle 期限结构 / 25Δ skew 的 IV 来源由 yfinance 期权链换为 OptionsAgent 的 CBOE 结果"
+     "（档位与分值不变，只换源）。2026-09-04 全量核对：yfinance 近月 ATM IV 中位 15.6%、"
+     "9/29 只 <8%（NVDA 4.44% vs CBOE 33.4%），skew 系统性偏高（~1.2 vs ~1.0）→ "
+     "options_score Δ 中位 +0.30、范围 [-0.5, +1.7]、21/30 非零。"
+     "② Bear 估值项 P/E 复活：fast_info.pe_ratio 在 yfinance 1.2.0 恒 None，该项自 v0.45.54 "
+     "起 496 条零命中；改读 .info trailingPE，档位 35/50/80 不变，09-05 实测 6/30 只命中。"
+     "两项均改变 options_score / Bear 分 → final_score，故为世代边界。"
+     "边界取部署日 2026-09-05（下一次定时扫描 2026-09-08，09-07 Labor Day 休市）：任何自此起的扫描"
+     "都是新口径，含手动补跑——边界若写成 09-08，中间手动跑出的样本会混进旧世代"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
