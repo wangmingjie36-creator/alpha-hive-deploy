@@ -105,3 +105,12 @@ design_current/
 DESIGN_BRIEF.md
 .fuse_hidden*
 paper_portfolio_state.bak-*/
+
+# ==================== Claude Code worktrees ====================
+# v0.45.124：`.claude/worktrees/` 是**每台机器各自的**临时 checkout，不该进版本库。
+# 事故：`.claude/worktrees/recursing-hopper` 以 gitlink（mode 160000，裸 commit 指针）
+# 的形式被 `78369d3 蜂群日报 2026-03-01 12:17` 扫进索引——自动提交按白名单 `git add`，
+# 而这条路径当时正好落在白名单目录里。gitlink 在别的 checkout 上只会还原成一个**空目录**，
+# 既没内容也没子模块配置，是纯噪音。
+# ⚠️ 只忽略 worktrees/，不要忽略整个 `.claude/`——`.claude/launch.json` 是要跟踪的。
+.claude/worktrees/

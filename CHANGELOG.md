@@ -5,7 +5,67 @@
 
 ---
 
-## [0.45.124] — 2026-09-05 — 占位（进行中：清掉误提交的 worktree gitlink + 补 test_quote_set.py 漏桩 + CLAUDE.md 加「失败如何传导到下游」检查项）
+## [0.45.124] — 2026-09-05 — test_quote_set.py 的「全部离线」是句空话：实测 9 个测试每轮出网 42 次、整文件 221s；顺带清掉误提交的 worktree gitlink
+
+三件事，共一个主题：**一个失败没有传导到依赖它的下一步**。
+
+### Fixed — `tests/test_quote_set.py`：新增 autouse fixture `_offline`
+
+文件 docstring 第 3 行写着「全部离线：不碰网络」。**是假的。**
+socket + curl_cffi 双探针实测：42 项全绿，其中 **9 个测试函数（11 个 item）
+每轮共打 42 次外网**，整文件 221s；把出网拦掉后 **22s**。
+
+漏的不是一处，是 `analyze()` 里**三条互相独立**的取数支路，每条同一形状
+——「CBOE 主源 → yfinance 降级 → `except Exception` 吞掉」：
+
+| # | 路径 | 谁本该发现 |
+|---|---|---|
+| ① | `analyze:2142 → calculate_iv_term_structure → cboe_options.fetch_cboe_iv_term_structure → _fetch_cboe_payload` | 无人 |
+| ② | 同上，降级支 `OptionsAnalyzer._iv_term_points_yfinance` | 无人 |
+| ③ | `analyze:2163 → _fetch_full_chain_oi:1500 → yf.Ticker(t).options` | 无人 |
+
+因为异常被吞，**出网失败不改变任何断言**：唯一症状是慢。这就是本次要立的那条
+检查项本身（见 CLAUDE.md 新增章节）。
+
+修法**不是逐条打桩**——排查过程中逐条打桩漏了两轮（先漏 ②、再漏 ③），
+是标准的打地鼠。改为钉**降级源本身**：
+
+- ① `cboe_options._fetch_cboe_payload` → `None`（`TestUnavailableShapeIsUniform` 早就在自己手写这个桩）
+- ② `yfinance.Ticker` / `yfinance.download` → raise（全仓无 `from yfinance import X`，改模块属性即覆盖所有调用点；将来 analyze 再加支路自动被罩住）
+- ③ `_iv_term_points_yfinance` → `([], [错因])`（该支路自带重试退避，靠 ② 抛异常会被放大成秒级等待）
+- ④ **teardown 探针**：记录（不拦截）本条测试期间的 `socket.socket.connect` /
+  `socket.create_connection` / `curl_cffi.Session.request`，非空即断言失败。
+  没有 ④ 的话，将来多一条支路时 ①②③ 会静默失效而没人知道——与 conftest 里
+  `_isolate_paper_portfolio_state`「默认重绑 + teardown 比对真身」同构。
+
+⚠️ **探针的假阴性值得单独记一笔**：只钩 `socket.socket.connect` 时报告「0 次出网」，
+而实际仍有 42 次——yfinance 1.2 走 **curl_cffi**，libcurl 在 C 层开 socket，
+Python 的 socket 钩子完全看不见。是「整文件仍要 165s」这个矛盾数字暴露了它。
+**探针的「没发现」不等于「没有」**；两层都钩之后才对得上。
+
+mutation check（两条，锚点均已断言唯一、`collected` 数已核对）：
+- M1 拆掉 `yfinance.Ticker` 桩 → `TestAnalyzeMount` 5 项中 **4 项 teardown 报错**，消息列出 23 个 Yahoo URL ✅
+- M2 拆掉 `_fetch_cboe_payload` 桩 → **1 项 teardown 报错**（其余被 `_payload_cache` 的 120s TTL 挡住）✅
+
+### Fixed — `.claude/worktrees/recursing-hopper` 误提交（gitlink）
+
+`git ls-files -s` 显示 mode **160000**——是个裸 commit 指针（子模块式 gitlink），
+由 `78369d3 蜂群日报 2026-03-01 12:17` 的自动提交扫入。它指向的 `62ab438`
+本来就在 main 历史里，在别的 checkout 上只会还原成一个**空目录**，纯噪音。
+
+- `git rm --cached` 解除跟踪（磁盘上的目录不动）
+- `.gitignore` 新增 `.claude/worktrees/`。⚠️ **只忽略 worktrees/，不是整个 `.claude/`**
+  ——`.claude/launch.json` 要继续跟踪。
+- 复发风险已由 v0.45.115 时代的白名单 `REPORT_ARTIFACT_PATHS` 覆盖（`.claude` 不在表内），
+  这条 `.gitignore` 是防手工 `git add -A` 的第二道。
+
+### Added — `CLAUDE.md`：「这个失败，下游怎么知道？」检查项
+
+同一形状四天内四次，横跨三个 session 与一个自动流程，表层原因毫无关系：
+v0.45.91（`pass` 吞掉 `None`）、v0.45.119（守卫只判 returncode，接不住 `raise`）、
+v0.45.121（`&&` 链断在前一步）、v0.45.124（`except Exception` 吞掉出网失败）。
+落成两条可执行推论 + 一条「『这个测试文件是离线的』是需要被执行的断言，不是注释」。
+
 
 ## [0.45.123] — 2026-09-05 — 占位（进行中：CBOE payload 缓存改按业务日键——TTL 120s 短于单只流水线，29 只抓 83 次）
 
