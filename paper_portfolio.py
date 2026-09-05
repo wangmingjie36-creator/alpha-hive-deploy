@@ -314,7 +314,10 @@ def _infer_confidence(snapshot: Dict) -> str:
     - agent_votes 分散度 → dim_std
     - 无 bear_signals 列表时视为 0
     """
-    score = float(snapshot.get("composite_score") or 0)
+    # v0.45.110：此处原有一行 `score = float(snapshot.get("composite_score") or 0)`，
+    # 但函数体只用 dim_std 与 bear_sig_count，score 从未被读过——是死读
+    # （ruff F841 能抓，本仓 pyproject 全局 ignore 了它，故一直没暴露）。
+    # 连带后果：置信度**完全不看分数**，所以缺分快照从这里拿到的是 "high"。
     votes = snapshot.get("agent_votes") or {}
     if votes:
         vals = [float(v) for v in votes.values() if v is not None]
@@ -473,6 +476,33 @@ def _next_trading_date(ticker: str, after: str, max_lookahead_days: int = 5) -> 
 # 核心逻辑：建仓 / 平仓 / mark-to-market
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _snapshot_score(snapshot: Dict) -> Optional[float]:
+    """取 snapshot 的 composite_score；缺失 / None / 非有限一律返回 None。
+
+    v0.45.110：本函数存在的理由是原来那句 `float(snapshot.get("composite_score") or 0)`
+    会把「拿不到分数」伪装成「分数是 0」，而 `_should_open` 的两道闸门都是
+    **取反才拒绝**（`score < bull` 拒 / `score > bear` 拒），任何让比较返回 False
+    的值都自动放行：
+
+        缺键 / None / 0  → 0.0，`0 > 4.85` 为假 ⇒ **穿透看空侧**
+        NaN             → 任何比较都是 False ⇒ **两侧同时穿透**
+        +inf / -inf     → 各穿透一侧（+inf 以「满分看多」身份进场）
+
+    而且三者都会带着 `conf=high` 出来——`_infer_confidence` 根本不看分数。
+    这是 v0.45.93/97「NaN 穿透守卫」的第三种形态，也是 v0.45.3 记的
+    「安全默认值」判据的正例：问「这个默认值会不会让下游误以为掌握了信息」——
+    `or 0` 会，所以不给默认值，返回 None 让调用方显式拒绝。
+    """
+    raw = snapshot.get("composite_score")
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if math.isfinite(val) else None
+
+
 def _candidate_sort_center() -> float:
     """候选排序键的中心点。默认由两闸中点导出，不允许再出现硬编码副本。
 
@@ -493,11 +523,21 @@ def _sort_candidates(snapshots: List[Dict]) -> List[Dict]:
     再抄一遍 lambda（抄一遍就等于两个钟，改了生产那份测试照样全绿）。
     """
     center = _candidate_sort_center()
-    # 兜底值必须**等于 center**：它的语义是"没分数就排最后"，而只有 center
-    # 才能让距离取到 0。写死一个与 center 不同的数，无分快照会拿到非零距离，
-    # 反而排到部分真候选之前。
-    snapshots.sort(key=lambda s: abs(float(s.get("composite_score") or center) - center),
-                   reverse=True)
+
+    def _dist(snapshot: Dict) -> float:
+        # 取不到分 → 距离 0 → 排最后，与「没分数就别抢资金」的语义一致。
+        #
+        # v0.45.110：改走 _snapshot_score。原来写的是
+        # `float(s.get("composite_score") or center)`，只挡住了缺键/None，
+        # **挡不住 NaN**——NaN 是 truthy，`or` 短路不了，`abs(nan - center)`
+        # 仍是 NaN，而 NaN 与任何数比较都返回 False ⇒ 名次未定义
+        # （v0.45.93 记的「NaN 进排序函数」原型：2 条坏行让整张 IC 表位移 0.26）。
+        # 排序发生在 _should_open **之前**，所以那边新加的守卫救不了这里，
+        # 两处必须各自堵。
+        score = _snapshot_score(snapshot)
+        return 0.0 if score is None else abs(score - center)
+
+    snapshots.sort(key=_dist, reverse=True)
     return snapshots
 
 
@@ -513,7 +553,12 @@ def _should_open(snapshot: Dict, existing_tickers: set, as_of: str = "") -> Tupl
     if whitelist and live_start and as_of >= live_start:
         if ticker not in whitelist:
             return False, f"实时模式仅追踪 {whitelist}，跳过 {ticker}"
-    score = float(snapshot.get("composite_score") or 0)
+    # v0.45.110：拿不到分数就拒绝，不再用 0 顶替（见 _snapshot_score 的 docstring）。
+    # 顺序上放在 direction 判定之前无所谓——两者都是无条件拒绝，不存在
+    # "先判方向能少拒几条"的情况。
+    score = _snapshot_score(snapshot)
+    if score is None:
+        return False, f"composite_score 缺失或非有限值（{snapshot.get('composite_score')!r}）"
     direction = (snapshot.get("direction") or "").lower()
     if "bull" in direction:
         if score < CONFIG["entry_score_bull"]:
@@ -706,8 +751,8 @@ def _open_position(
     entry_dt = datetime.strptime(as_of, "%Y-%m-%d")
     time_stop_dt = entry_dt + timedelta(days=14)
 
-    _cs = snapshot.get("composite_score")
-    _cs_txt = f"{float(_cs):.1f}" if _cs is not None else "N/A"
+    _cs = _snapshot_score(snapshot)   # v0.45.110：NaN 也走 N/A，不再渲染成 "nan"
+    _cs_txt = f"{_cs:.1f}" if _cs is not None else "N/A"
     rationale = f"score={_cs_txt} · {conf}"
     if low_conv:
         rationale += " · ⚠️低置信-减半仓"
@@ -725,7 +770,9 @@ def _open_position(
         size_usd=round(size_usd, 2),
         time_stop_date=time_stop_dt.strftime("%Y-%m-%d"),
         confidence=conf,
-        score=float(snapshot.get("composite_score") or 0),
+        # 上游 _should_open 已保证分数存在且有限（v0.45.110）；这里的 or 0.0
+        # 只是类型收口，不是"缺分当 0 分"的兜底。
+        score=_snapshot_score(snapshot) or 0.0,
         rationale=rationale,
         sizing=sizing_note,
     )

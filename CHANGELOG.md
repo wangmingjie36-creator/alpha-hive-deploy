@@ -5,8 +5,103 @@
 
 ---
 
-## [0.45.110] — 2026-09-04 — 占位（进行中：_should_open 缺分兜底 `or 0` 让缺分 bearish 快照当满分看空信号通过）
+## [0.45.110] — 2026-09-05 — `_should_open` 的 `or 0` 只是三个洞里最窄的一个：NaN 两侧全穿
 
+用户交办：把 v0.45.109 记录但未修的 `_should_open` 缺分兜底 `or 0` 一起修了。
+
+动手前先把这道闸门的形态看清楚，结果比记录的那条宽——**`or 0` 是三个穿透形态里
+最窄的一个，NaN 能同时穿透两侧**，而且排序键上还有一个**独立的、闸门守卫救不了**
+的同类洞。
+
+### Fixed — 闸门的两个分支都是「取反才拒绝」，任何比较为假的值都自动放行
+
+```python
+if "bull" in direction and score < CONFIG["entry_score_bull"]:  return False
+if "bear" in direction and score > CONFIG["entry_score_bear"]:  return False
+```
+
+配上 `score = float(snapshot.get("composite_score") or 0)`，实测穿透矩阵
+（gates 6.5 / 4.85）：
+
+| `composite_score` | 取到的 score | bullish | bearish |
+|---|---|---|---|
+| 缺键 / `None` / `0` | `0.0` | 拒绝 | **✅ 穿透**（`0 > 4.85` 为假） |
+| **`NaN`** | `nan` | **✅ 穿透** | **✅ 穿透** |
+| `+inf` | `inf` | **✅ 穿透**（以「满分看多」进场） | 拒绝 |
+| `-inf` | `-inf` | 拒绝 | **✅ 穿透** |
+
+三者还都带着 `conf=high` 出来——见下一节。
+
+`or 0` 只挡得住 falsy 值；**NaN 是 truthy**，`or` 短路不了它，而 NaN 与任何数的
+比较都返回 `False`，于是两道「取反才拒绝」的闸门同时失效。这是
+v0.45.93/97「NaN 穿透守卫」的**第三种形态**（前两种是 `if x:` 与 `<= 0`）。
+
+**修法**：新增 `_snapshot_score(snapshot) -> Optional[float]`——缺失 / `None` /
+非数 / 非有限一律返回 `None`，由调用方显式拒绝。这是 v0.45.3「安全默认值」判据的
+正例：问「这个默认值会不会让下游误以为掌握了信息」，`or 0` 会，所以**不给默认值**。
+`_should_open` 拿到 `None` 直接拒并说明原因。
+
+⚠️ **本次只区分「拿不到」与「拿到了」，不新增分数合理区间。** 一个真实的 `0.0`
+仍被当作合法的极端看空分放行——给它加下限属于另一个决定（需要校准依据），
+且生产 1051 条里 `composite_score` 为 0 的有 **0 条**，此分支实际不触发。
+
+### Fixed — 排序键有独立的同一个洞，闸门那道守卫救不了它
+
+`_sort_candidates` 里的 `float(s.get("composite_score") or center)` 挡得住
+缺键 / `None`（falsy），**挡不住 NaN**：`abs(nan - center)` 仍是 `NaN`，
+NaN 进排序键 ⇒ 名次未定义（v0.45.93 记的原型：2 条坏行让整张 IC 表位移 0.26）。
+
+**关键点：排序发生在 `_should_open` 之前**，所以上一节新加的守卫对它无效，
+两处必须各自堵。已改为同样走 `_snapshot_score`，取不到分 → 距离 0 → 排最后。
+实测 `['NAN', 'BULL', 'BEAR', 'MISS']` 输入现在稳定排成 `BEAR, BULL, NAN, MISS`。
+
+### Fixed — `_infer_confidence` 里的 `score` 是死读，置信度完全不看分数
+
+同一个 `or 0` 写法在 `_infer_confidence` 里还有一份，但**函数体只用 `dim_std`
+与 `bear_sig_count`，`score` 从未被读过**。ruff `F841` 本可抓到，
+本仓 `pyproject.toml` 全局 `ignore` 了它（注释写的理由是「many in except blocks」），
+所以一直没暴露。已删除该行。
+
+连带说明：置信度不看分数是**既有设计**，不是本次引入的——这正是上面穿透矩阵里
+每一行都得到 `conf=high` 的原因。已加测试固化，免得后来者看到「缺分快照拿到 high」
+误以为是 `_infer_confidence` 的 bug 而去改它。
+
+### Changed — `_open_position` 的 `score=` 与 rationale 一并收口
+
+- `score=_snapshot_score(snapshot) or 0.0`：上游已保证分数存在且有限，
+  这里的 `or 0.0` 只是类型收口，注释已写明它不是「缺分当 0 分」的兜底。
+- rationale 的 `_cs` 改走同一函数：`NaN` 现在渲染成 `N/A` 而不是字面的 `nan`。
+
+### 验证
+
+**生产影响为零，已实测**：92 天 1051 条 snapshot 里 `composite_score`
+缺失或为 0 的 **0 条**；`run_replay` 四臂 92 日回放的 `final_nav` / 已平仓账本 /
+末态持仓与 v0.45.109 的结果**逐字节全等**。本次是堵潜在陷阱，不改变任何历史行为。
+
+**新增 `tests/test_paper_score_fallback.py`（35 条）**：退化取值 6 种
+（缺键 / `None` / `NaN` / `+inf` / `-inf` / 非数字符串）× 两个方向全拒 /
+`_snapshot_score` 对有限值透传（含合法的 `0.0`）/ 排序键在任何退化输入下必须有限 /
+真实分数 7.15、4.60 仍开得出来 / 置信度不看分数。
+含一条**反向自证** `test_nan_would_pass_both_gates_under_old_code`，
+直接验 `not (nan < 6.5)` 与 `not (nan > 4.85)` 都成立，证明夹具选得对不是碰巧。
+
+**mutation check（`--maxfail=99`，基线 `collected 61 items` / 61 passed）**：
+
+| 变异 | 结果 |
+|---|---|
+| M1 `_should_open` 退回 `or 0` | **12 failed** / 49 passed ✅ |
+| M2 排序键退回 `or center` | **4 failed** / 57 passed ✅ |
+| M3 `_snapshot_score` 丢掉 `isfinite` | **13 failed** / 48 passed ✅ |
+
+⚠️ **第一次跑 mutation check 时三个变异全报「无失败」，其实是一条测试都没跑。**
+`pytest $TESTS` 里 `TESTS` 是多路径字符串，而 **zsh 不对未加引号的参数展开做分词**，
+整串被当成单个路径 ⇒ `collected 0 items`，pytest 退出码 5。
+输出里没有 `FAILED` 行，只扫一眼会把「一条没跑」读成「变异没打破任何东西」。
+**教训：mutation check 必须核对 `collected N items` 与基线一致，不能只看有没有
+FAILED**——这就是「查『跑完了吗』必须核对产出数量」那条纪律在测试工具上的形态。
+（bash 会分词，zsh 不会；要在 zsh 里分词得写 `${=TESTS}`。本仓 shell 是 zsh。）
+
+全量套件：**2600 passed, 18 skipped**；`ruff check` 通过。
 ## [0.45.109] — 2026-09-04 — 候选排序中心是从两闸导出的常数，v0.45.108 改了闸没改它
 
 用户交办：评估 `run_for_date` 里排序键 `abs(score - 5)` 的中心该不该从名义中性点 5
