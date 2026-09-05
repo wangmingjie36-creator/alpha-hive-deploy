@@ -17,7 +17,7 @@ import json
 import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 # ── 切换到脚本所在目录 ─────────────────────────────────────
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -54,8 +54,13 @@ AGENT_META = {
 }
 
 
-def run_agent(name: str, board, ticker: str) -> Dict:
-    """运行单个 Agent，返回结构化结果"""
+def run_agent(name: str, board, ticker: str, prefetched: Optional[Dict] = None) -> Dict:
+    """运行单个 Agent，返回结构化结果。
+
+    v0.45.126：新增 `prefetched` 参数。此前 Phase 0 取好的预取包**从未真正注入**
+    （见下方调用点注释），各蜂只能自己去抓 yfinance。注入点必须在这里而不是
+    Phase 0：agent 是每个线程各自 `cls(board)` 现建的，Phase 0 那时还不存在。
+    """
     t0 = time.time()
     try:
         mod_path, cls_name = AGENTS[name]
@@ -63,6 +68,9 @@ def run_agent(name: str, board, ticker: str) -> Dict:
         mod = importlib.import_module(mod_path)
         cls = getattr(mod, cls_name)
         agent = cls(board)
+        if prefetched:
+            from swarm_agents import inject_prefetched
+            inject_prefetched([agent], prefetched)
         result = agent.analyze(ticker)
         result["_elapsed"] = round(time.time() - t0, 1)
         result["_agent_key"] = name
@@ -89,16 +97,26 @@ def analyze(ticker: str) -> Dict:
     llm_service.disable()
 
     from pheromone_board import PheromoneBoard
-    from swarm_agents import prefetch_shared_data, inject_prefetched
+    from swarm_agents import prefetch_shared_data
 
     # Phase 0: 预取共享数据
+    #
+    # v0.45.126：原写 `inject_prefetched(prefetched)` —— 少传一个参数。
+    # 签名是 `inject_prefetched(agents, prefetched)`（2026-03-09 定型），
+    # 而这行是 2026-03-11 写的，**从写下那天起就抛 TypeError**，
+    # 被下面的 `except Exception` 吞掉，只留一句「⚠ 预取部分失败」。
+    # 于是预取包每次都被整包丢弃、各蜂自行抓 yfinance，持续约 6 个月。
+    #
+    # 修法不是补一个参数：这里 agent 还没建（每个线程在 run_agent 里各自
+    # `cls(board)`），所以改为把包留到 Phase 1，由 run_agent 注入。
     p(f"{Y}[Phase 0] 预取市场数据...{R}")
+    prefetched = None
     try:
         prefetched = prefetch_shared_data([ticker])
-        inject_prefetched(prefetched)
         p(f"{G}✓ 数据预取完成{R}")
     except Exception as e:
-        p(f"{D}⚠ 预取部分失败: {e}，Agent 将自行获取数据{R}")
+        # 消息要说清是**取**失败：注入失败已经不可能走到这里了
+        p(f"{D}⚠ 预取失败: {e}，Agent 将自行获取数据{R}")
 
     board = PheromoneBoard()
 
@@ -106,7 +124,7 @@ def analyze(ticker: str) -> Dict:
     p(f"\n{Y}[Phase 1] 并行运行 7 Agent...{R}")
     agent_results = {}
     with ThreadPoolExecutor(max_workers=7) as pool:
-        futures = {pool.submit(run_agent, name, board, ticker): name
+        futures = {pool.submit(run_agent, name, board, ticker, prefetched): name
                    for name in AGENTS}
         for fut in as_completed(futures):
             name = futures[fut]

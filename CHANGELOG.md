@@ -5,8 +5,104 @@
 
 ---
 
-## [0.45.126] — 2026-09-05 — 占位（进行中：deep_analysis 的 inject_prefetched 少传一个参数，预取被静默丢弃 6 个月）
+## [0.45.126] — 2026-09-05 — `deep_analysis` 的预取包被静默丢弃 6 个月：`inject_prefetched` 少传一个参数
 
+用户要求二次复查上一轮的更新。上一轮我**没有改任何代码**（v0.45.122 早已在 main 上，
+我只是同步 + 验证），所以复查对象是我那些断言本身、以及同步进来但只做过表面检查的
+v0.45.122。查 v0.45.122 的接线时，在**相邻代码**里翻出一个坏了半年的 bug。
+
+### Fixed — `inject_prefetched(prefetched)` 少一个参数，从写下那天起就抛 TypeError
+
+`deep_analysis.py` 的 Phase 0：
+
+```python
+prefetched = prefetch_shared_data([ticker])
+inject_prefetched(prefetched)          # ← 签名是 (agents, prefetched)
+```
+
+`inject_prefetched(agents, prefetched)` 的两参签名 **2026-03-09** 定型，
+而这行是 **2026-03-11** 写的——**晚两天，从落笔起就是坏的**，持续约 6 个月。
+
+**三个让它藏住的条件，缺一不可**：
+1. 异常被外层宽 `except Exception` 捕获——不是崩溃，是降级；
+2. 降级消息写「⚠ 预取部分失败」——**把调用签名错误说成数据问题**。
+   读到的人会去查网络、查限流，不会怀疑代码；
+3. **回退路径本身是正确的**——各蜂自己抓数据，产出完全正常。
+   受损的只有速度与 yfinance 配额，而这两样没有告警。
+
+第 ③ 条是关键：它不是「坏了没人发现」，是**坏了也看不出坏**。
+与 v0.45.113「永远读不到真数据的 fallback」同族——
+**当降级路径与正常路径产出同形时，降级就等于隐身**。
+
+⚠️ **修法不是补一个参数**：Phase 0 那个位置 **agent 还不存在**
+（七只蜂是每个线程在 `run_agent` 里各自 `cls(board)` 现建的）。
+补参数只会得到 `inject_prefetched([], prefetched)` —— 一个不报错的空转。
+故改为把包留到 Phase 1，由 `run_agent` 在建好 agent 后注入：
+
+- `run_agent(name, board, ticker, prefetched=None)`，建好 agent 立即注入
+- `pool.submit(run_agent, name, board, ticker, prefetched)` 把包传下去
+- Phase 0 只负责取，不再注入；降级消息改为「预取失败」（注入已不可能在此失败）
+
+**影响面**：`deep_analysis.py` 是手动 CLI（`python3 deep_analysis.py NVDA`），
+不在编排器里，日报流水线走的是自己的 `inject_prefetched(all_agents, prefetched)`
+（`alpha_hive_daily_report.py:498`，**接线正确、未受影响**）。
+故此修复改善的是手动深度分析的耗时与配额，不动自动化产出。
+
+### Added — `tests/test_deep_analysis_prefetch_injection.py`（9 条）
+
+桩掉一只蜂（`AGENTS` 项指向本文件的 `_StubAgent`），不碰网络。覆盖：
+预取包到达蜂身上 / `stock_data` 同路注入 / **无包时照常跑**（护栏：
+挡住「必须有包才跑」的过度修法）/ 反向自证旧写法确实抛 `TypeError`。
+
+**mutation check（基线 `collected 9`）**：
+
+| 变异 | 结果 |
+|---|---|
+| M1 删掉 `run_agent` 里的注入 | **2 failed** ✅ |
+| M2 `pool.submit` 不传预取包 | 初版 **7 passed —— 漏了**；补测后 **1 failed** ✅ |
+| M3 无包时也强行注入（过度修法） | **1 failed** ✅ |
+
+⚠️ **M2 暴露了一个真实覆盖缺口**：前 7 条测试全部直接调 `run_agent`，
+**从不经过 `pool.submit`**，所以「提交任务时忘了把包传下去」不会被发现——
+那正好是这个 bug 的原始形态（接线断在调用点，不在被调函数里）。
+已补 `TestPhase1PassesTheBundle`，用 **AST** 而非文本匹配核对
+`pool.submit(run_agent, ...)` 的实参里有 `prefetched`（正则会被换行/注释晃到），
+并配一条成对断言（形参也得在）。
+**判据：测被调函数不等于测接线；bug 在调用点时，只测函数永远抓不到。**
+
+### Notes — 复查中撤回的两个假结论
+
+**① 「`_prefetched_market` 只在测试里被赋值」——假的，是我的 grep 过滤器造成的。**
+我 `grep -v swarm_agents/base.py` 排除了 base.py，而生产接线恰好全在那里
+（`base.py:282` 取、`:423` 注入、`alpha_hive_daily_report.py:498` 调用）。
+**判据：为降噪加的 `grep -v` 会连同证据一起排除掉；** 排除某个文件前先问
+「要找的东西会不会正好在里面」。
+
+**② 「bear_bee 保留的那处 `yf.Ticker` 是浪费的一次请求」——假的。**
+本想指出既然 `fast_info.pe_ratio` 恒 None、删掉可省 30 次请求/轮。
+实测推翻：真实网络调用 **2868 ms**，而 `fast_info.pe_ratio` 只要 **0.05–0.20 ms**
+（`FastInfo` 根本没有 `pe_ratio` 属性，`getattr(..., 0)` 直接返回默认值），
+**不走网络**，保留零成本。v0.45.122 保留它的判断完全正确。
+
+> ⚠️ 第一次测这个时我用 socket 层计数器，得出「0 次出网」——但**反向自证显示
+> 真实的 `history()` 也是 0 次**，说明 yfinance 走 `curl_cffi` 绕开了 Python
+> socket 层，**计数器根本没在数**。没有那道自证，我就要拿一个假测量去下结论。
+> **判据：测量工具要先证明它测得到，再信它测出的 0。**
+
+### Notes — 一条与本次无关的 CI 稳定性观察
+
+全量套件曾出现 1 次 `test_ml_predictor.py::TestMLPredictionService::test_prediction_structure`
+失败，根因是 `pytest-timeout` 超 60s，卡在 sklearn 的 `permutation_importance`。
+调用栈全在 ml_predictor/sklearn 里，与预取改动无关；单独跑 5.4s（60s 上限约 10× 余量），
+两次 CI 模拟均未复现，本次全量也未复现。
+**未改动别人的测试**——证据只是一次本机高负载下的偶发。
+若 CI 后续出现零星红灯，对症修法是给这几条加 `@pytest.mark.timeout(...)` 单独放宽，
+而不是调全局 60s。
+
+### 验证
+
+全量套件 **2783 passed, 18 skipped**；`ruff check --select F821` 干净
+（`deep_analysis.py` 另有 2 处 E722 bare except，为既有、非本次引入）。
 ## [0.45.125] — 2026-09-05 — 占位（进行中：Twelve Data 日线一轮扫描只取一次——None 键归一到业务日、蜂群段消费方走 fetch_bars 缓存、开扫即预热）
 
 ## [0.45.124] — 2026-09-05 — test_quote_set.py 的「全部离线」是句空话：实测 9 个测试每轮出网 42 次、整文件 221s；顺带清掉误提交的 worktree gitlink
