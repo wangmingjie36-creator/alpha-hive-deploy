@@ -1,0 +1,30 @@
+{
+  "version": "0.45.103",
+  "starting_date": "2026-09-04",
+  "cash": 10051.20974,
+  "last_run_date": "2026-09-04",
+  "config_snapshot": {
+    "beta_delta_band_pct": 15.0,
+    "beta_delta_target_pct": 0.0,
+    "vega_alert_pct": 1.0,
+    "gamma_alert_pct": 0.5,
+    "hedge_instrument": "SPY",
+    "rebalance_to": "edge",
+    "stress_spot_pct": [
+      -10,
+      -5,
+      0,
+      5,
+      10
+    ],
+    "stress_iv_pts": [
+      -10,
+      0,
+      10,
+      20
+    ],
+    "risk_free": 0.045,
+    "beta_window": 60,
+    "beta_cache_trading_days": 5
+  }
+}

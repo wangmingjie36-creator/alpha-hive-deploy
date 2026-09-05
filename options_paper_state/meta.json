@@ -1,0 +1,19 @@
+{
+  "version": "0.45.101",
+  "starting_capital": 100000.0,
+  "starting_date": "2026-09-04",
+  "cash": 104600.0,
+  "last_run_date": "2026-09-04",
+  "config_snapshot": {
+    "starting_capital": 100000.0,
+    "risk_per_trade_pct": 6.0,
+    "max_open": 6,
+    "trade_rich": true,
+    "trade_cheap": true,
+    "exit_after_event": true,
+    "expiry_buffer_days": 2,
+    "fallback_stale_max_days": 3,
+    "write_off_days_after_expiry": 30
+  },
+  "skipped_entries": []
+}
