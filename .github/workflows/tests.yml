@@ -38,9 +38,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # pytest / pytest-timeout 是纯测试依赖，刻意不写进 requirements.txt
+          # pytest / pytest-timeout / ruff 是纯测试依赖，刻意不写进 requirements.txt
           # （那是生产依赖清单，扫描进程不该为跑测试装东西）
-          pip install -r requirements.txt pytest pytest-timeout
+          #
+          # ruff 不装的话 test_no_undefined_names.py 会整体 skip —— 那正是它
+          # 存在前的状态（"本仓库早已装好并配置了 ruff，只是没人跑"）。
+          # F821 守卫治的是「异常分支里的 NameError」这类只在生产触发的 bug，
+          # 在 CI 里跳过它等于把这个守卫又关回去。
+          pip install -r requirements.txt pytest pytest-timeout ruff
 
       - name: Run offline-deterministic tests
         run: |
