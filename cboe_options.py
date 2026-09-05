@@ -81,10 +81,22 @@ try:
 except Exception:  # pragma: no cover - 闸门不可得时退回本地锁，至少保住 CBOE
     _CBOE_SEM = threading.Semaphore(1)
 # 进程内 payload 缓存：同一标的的主链(fetch_cboe_chain)与全链(fetch_cboe_full_chain_oi)
-# 共享一次下载，避免每标的拉 2 次大 JSON。短 TTL 防长驻进程取到陈旧数据。
+# 共享一次下载，避免每标的拉 2 次大 JSON。
+#
+# v0.45.123：新鲜度改按**业务日**判，不再按 120s 挂钟。
+# 此前 `_CACHE_TTL = 120.0` 短于单只标的的流水线（~330s 工作线程时间），上面那句
+# 「共享一次下载」从未成立：2026-09-04 实测 29 只标的抓了 83 次（2.9×），每次
+# 1.5MB JSON。批处理任务的缓存键应是「这份数据还是我此刻想要的那一份吗」——
+# 也就是 payload 的 vintage（last_trade_time 的 ET 日期）是否仍等于
+# `_expected_vintage_date()`。开盘 09:30 ET 一翻页，昨天的 payload 自动失效；
+# 收盘后跑的扫描则整轮只抓一次。
+#
+#   _CACHE_MAX_AGE  vintage 相符时的年龄上限：兜住长驻进程盘中把 09:31 的价端一整天
+#   _CACHE_TTL      fail-open 退路：交易日历不可用（expected=None）时退回旧的 120s
 _payload_cache = {}  # ticker -> (timestamp, data)
 _cache_lock = threading.Lock()
 _CACHE_TTL = 120.0
+_CACHE_MAX_AGE = 4 * 3600.0
 
 # 观测计数（v0.45.118）：供 scan_timing 落进 status.json。
 # 2026-09-04 实测 29 只标的抓了 83 次全链（2.9×）——上面那句「共享一次下载」
@@ -93,7 +105,8 @@ _CACHE_TTL = 120.0
 #   fetches  真正发出去的 HTTP 请求（含重试，每次 urlopen 计 1）
 #   stale    拉回来但 vintage 陈旧、被弃用（不入缓存）
 #   failed   重试耗尽 / 返回空链，最终 None
-_payload_stats = {"hits": 0, "fetches": 0, "stale": 0, "failed": 0}
+#   evicted  缓存里有但已不新鲜（vintage 翻页 / 超年龄上限），被弃、重抓（v0.45.123）
+_payload_stats = {"hits": 0, "fetches": 0, "stale": 0, "failed": 0, "evicted": 0}
 
 
 def payload_stats() -> dict:
@@ -168,15 +181,10 @@ def _expected_vintage_date() -> Optional[str]:
     return None
 
 
-def _payload_stale_vintage(ticker: str, data: dict) -> Optional[tuple]:
-    """陈旧则返回 `(实际日期, 应有日期)`，否则 None。判不了返回 None（fail-open）。
-
-    统计与告警都记在这里，所以每份 payload 只该调用一次
-    —— `_payload_is_stale` 是它的布尔外壳，两者别串着调。
-    """
-    expected = _expected_vintage_date()
+def _payload_vintage_date(data: dict) -> Optional[str]:
+    """payload 的成交日期（ET 日历日，"YYYY-MM-DD"）；缺失或解析不了返回 None。纯函数。"""
     raw = (data or {}).get("last_trade_time")
-    if not expected or not raw or not isinstance(raw, str):
+    if not raw or not isinstance(raw, str):
         return None
     try:
         dt_ = datetime.fromisoformat(raw.strip())
@@ -184,7 +192,37 @@ def _payload_stale_vintage(ticker: str, data: dict) -> Optional[tuple]:
         return None
     if dt_.tzinfo is not None:
         dt_ = dt_.astimezone(_ET_TZ)
-    got = dt_.strftime("%Y-%m-%d")
+    return dt_.strftime("%Y-%m-%d")
+
+
+def _cache_entry_fresh(entry: tuple, now: float) -> bool:
+    """缓存条目此刻还能不能用（v0.45.123，按业务日判）。
+
+    · 交易日历不可用（expected=None）→ fail-open 退回旧的 120s 挂钟规则；
+    · payload 没有可解析的 vintage → 同样只能按 120s；
+    · 否则：vintage ≥ 应有日期 **且** 年龄 < `_CACHE_MAX_AGE` 才算新鲜。
+    """
+    ts, data = entry
+    age = now - ts
+    expected = _expected_vintage_date()
+    got = _payload_vintage_date(data)
+    if expected is None or got is None:
+        return age < _CACHE_TTL
+    return got >= expected and age < _CACHE_MAX_AGE
+
+
+def _payload_stale_vintage(ticker: str, data: dict) -> Optional[tuple]:
+    """陈旧则返回 `(实际日期, 应有日期)`，否则 None。判不了返回 None（fail-open）。
+
+    统计与告警都记在这里，所以每份 payload 只该调用一次
+    —— `_payload_is_stale` 是它的布尔外壳，两者别串着调。
+    """
+    expected = _expected_vintage_date()
+    if not expected:
+        return None
+    got = _payload_vintage_date(data)
+    if got is None:
+        return None
     _vintage_stats["checked"] += 1
     if got >= expected:
         return None
@@ -327,9 +365,13 @@ def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
     now = time.time()
     with _cache_lock:
         hit = _payload_cache.get(key)
-        if hit and now - hit[0] < _CACHE_TTL:
-            _payload_stats["hits"] += 1
-            return hit[1]
+        if hit:
+            if _cache_entry_fresh(hit, now):
+                _payload_stats["hits"] += 1
+                return hit[1]
+            # vintage 翻页或超年龄：弃掉再抓，别让旧数据靠 dict 里的存在感续命
+            _payload_cache.pop(key, None)
+            _payload_stats["evicted"] += 1
 
     url = _CBOE_URL.format(_cboe_symbol(key))
     last_err = None
