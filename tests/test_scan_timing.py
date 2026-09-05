@@ -80,7 +80,7 @@ class TestCounters:
     def test_counters_pick_up_real_stats_dicts(self):
         c = st.counters()
         assert set(c["twelve_data"]) >= {"hits", "misses", "fetches"}
-        assert set(c["cboe"]) == {"hits", "fetches", "stale", "failed"}
+        assert set(c["cboe"]) == {"hits", "fetches", "stale", "failed", "evicted"}
 
 
 class TestCboePayloadStats:
@@ -110,7 +110,7 @@ class TestCboePayloadStats:
                             self._fake_urlopen({"options": [{"option": "X"}], "current_price": 1.0}))
         assert cb._fetch_cboe_payload("ZZZ", 5) is not None
         assert cb._fetch_cboe_payload("ZZZ", 5) is not None   # TTL 内 → 命中
-        assert cb.payload_stats() == {"hits": 1, "fetches": 1, "stale": 0, "failed": 0}
+        assert cb.payload_stats() == {"hits": 1, "fetches": 1, "stale": 0, "failed": 0, "evicted": 0}
 
     def test_empty_chain_counts_failed(self, cb, monkeypatch):
         monkeypatch.setattr(cb.urllib.request, "urlopen",

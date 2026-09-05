@@ -67,7 +67,50 @@ v0.45.121（`&&` 链断在前一步）、v0.45.124（`except Exception` 吞掉�
 落成两条可执行推论 + 一条「『这个测试文件是离线的』是需要被执行的断言，不是注释」。
 
 
-## [0.45.123] — 2026-09-05 — 占位（进行中：CBOE payload 缓存改按业务日键——TTL 120s 短于单只流水线，29 只抓 83 次）
+## [0.45.123] — 2026-09-05 — CBOE payload 缓存按业务日判新鲜：120s TTL 短于单只流水线，「共享一次下载」从未成立
+
+v0.45.118 诊断的 A2。`cboe_options._payload_cache` 注释写「同一标的的主链与全链共享一次
+下载」，参数是 `_CACHE_TTL = 120.0`，而一只标的的流水线约 330s 工作线程时间（Oracle 的
+OptionsAgent、Bear 的 OptionsAgent、全链 OI、quote_set 先后各来取一次）。2026-09-04 实测
+29 只标的抓了 **83 次**全链 JSON（2.9×，NVDA 单文件 1.58MB / 3.6s）。同 v0.45.118 记的
+判据：**TTL 短于作用域 = 设了等于没设**；批处理任务的缓存键应是业务日，不是秒数。
+
+### Changed — `cboe_options.py`
+
+- **`_cache_entry_fresh(entry, now)`**（新）：条目新鲜 ⇔ payload 的 vintage
+  （`last_trade_time` 的 ET 日期）≥ `_expected_vintage_date()` **且** 年龄 < `_CACHE_MAX_AGE`
+  （4h）。换句话说「这份数据还是我此刻想要的那一份吗」——09:30 ET 业务日翻页，昨天的
+  payload 自动失效；收盘后跑的扫描整轮只抓一次。
+- **fail-open 两条**：交易日历不可用（expected=None）或 payload 没有可解析的 vintage →
+  退回旧的 120s 规则，行为与改动前逐字一致（沿用 v0.45.39 的原则：日历挂了不能把 30 只
+  全打成陈旧、连锁压到 yfinance 上）。
+- 命中判定处：不新鲜的条目**弹出**再抓（不让旧数据靠 dict 里的存在感续命），计入新计数器
+  `evicted`；`payload_stats()` 多这一个键，`scan_timing` 会把它带进 `status.json`。
+- 抽出纯函数 `_payload_vintage_date(data)`，`_payload_stale_vintage` 改用它——那个函数的
+  统计与告警一字未动（它本来就写着「每份 payload 只该调一次」，这次没动那条约定）。
+
+### 验证
+
+- `tests/test_cboe_payload_cache_vintage.py` 19 条：vintage 解析（含 UTC 跨午夜仍是 ET 同日）；
+  **同日过了 50 分钟仍命中**（改动的全部意义）；翻页即失效、弹出、重抓；比预期更新不误杀；
+  年龄上限；日历不可用 / 无 vintage 两条 fail-open 退回 120s；走真实入口的三个场景——
+  尤其 **「翻页了但 CDN 文件还没更新」（TMUS 09-04 实况）**：不许把昨天的缓存端出来冒充
+  今天，必须重抓、判陈旧、返回 None 交给降级链，且陈旧 payload 不回写缓存。
+- 变异五条全红：M1 退回纯 120s 挂钟（6 红）/ M2 去年龄上限（1 红）/ M3 翻页不失效（3 红）/
+  M4 fail-open 变永远新鲜（3 红）/ M5 不弹出不计 evicted（2 红）。
+- 全部 10 个 import `cboe_options` 的既有测试文件 270 条 + 全量套件通过（见提交信息）。
+
+### 预期
+
+29 只 83 次 → 29 次（每只一次，`evicted` 应为 0）。省下的不只是 ~54 次 × 2~4s 下载，
+还有 54 次 1.5MB JSON 解析。**等 09-08 `status.json.scan_timing.counters.cboe`
+的 `fetches` / `hits` / `evicted` 实测**。
+
+### 后续（A 项剩余）
+
+- A3：Twelve Data 蜂群段 `fetch_daily_closes(end_date=None)` 改传业务日，与尾段 `fetch_bars(end_date=as_of)` 同键（17 只重复 × 11s）。
+- `swarm_agents/cache.py` 的 `yfinance_cache_ttl=120`：A1 之后蜂不再自己取，这个 TTL 只剩 `_fetch_stock_data` 回退路径在用，待观察 09-08 计数后决定是否同样改业务日键。
+
 
 ## [0.45.122] — 2026-09-05 — 预取成为一轮扫描的 yfinance 唯一取数点：四只蜂 8 处直连收进预取包，Oracle 三处共用一份期权链
 
