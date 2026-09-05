@@ -277,8 +277,7 @@ class RivalBeeVanguard(BeeAgent):
         """
         result: Dict = {"revision_signal": "unknown", "revision_summary": ""}
         try:
-            import yfinance as yf
-            info = yf.Ticker(ticker).info
+            info = self._yf_info(ticker)          # v0.45.122：走预取包
 
             fwd_eps  = info.get("forwardEps")
             trail_eps = info.get("trailingEps")
@@ -390,10 +389,7 @@ class RivalBeeVanguard(BeeAgent):
             "summary": "",
         }
         try:
-            import yfinance as yf
-            import math
-
-            hist = yf.Ticker(ticker).history(period="3mo")
+            hist = self._yf_history(ticker, period="3mo")   # v0.45.122：走预取包
             if hist.empty or len(hist) < 26:
                 return result
 

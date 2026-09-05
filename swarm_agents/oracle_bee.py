@@ -17,23 +17,55 @@ class OracleBeeEcho(BeeAgent):
     融合：期权信号 60% + Polymarket 赔率 40%
     """
 
-    def _analyze_term_structure(self, ticker: str, stock_price: float) -> dict:
+    # ---------- v0.45.122：同一只票一次 analyze 里共享 yfinance 期权链 ----------
+    #
+    # 此前 term structure / 25d skew / max pain 兜底三处各自 `yf.Ticker(ticker)` +
+    # `t.options` + `t.option_chain(近月)`：近月链被抓 2~3 次、到期日列表抓 3 次，
+    # 每次都过 yf_gate 的 0.5 req/s 闸。这里把「到期日列表 + 已抓的链」装进一个
+    # memo，由 analyze() 建一次、三处共用。**数据源与内容一字不变**（还是 yfinance
+    # 的那条链），只是少排队。memo 是局部对象、随 analyze 结束丢弃——蜂实例在
+    # 4 个标的 worker 之间共享，不能把逐票状态挂在 self 上。
+    #
+    # ⚠️ 为什么不顺手改成读 OptionsAgent 那份 CBOE 结果：2026-09-04 实测这条
+    # yfinance 路径在生产上是**活的**（期限结构 29/30 非 unknown、skew 30/30），
+    # 它是 options_score 的输入；换源 = 评分输入的数据源变更，要走世代边界，
+    # 不在本版范围。
+
+    @staticmethod
+    def _yf_option_memo(ticker: str) -> dict:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+        # 不用 `hasattr(t, "options")`：`options` 是 yf_gate 包过的 property，
+        # hasattr 会**真的去访问它**——等于多付一次闸门排队再读第二次。此前三处
+        # 各写一遍 `hasattr + 访问`，同一份到期日列表每只票拉 6 次。
+        try:
+            expirations = list(t.options)
+        except AttributeError:
+            expirations = []
+        return {"t": t, "expirations": expirations, "chains": {}}
+
+    @staticmethod
+    def _memo_chain(memo: dict, exp: str):
+        if exp not in memo["chains"]:
+            memo["chains"][exp] = memo["t"].option_chain(exp)
+        return memo["chains"][exp]
+
+    def _analyze_term_structure(self, ticker: str, stock_price: float, memo: dict = None) -> dict:
         """IV 期限结构分析（近月 vs 远月 ATM IV）
         Contango（远月高）= 市场平静 → 偏多
         Backwardation（近月高）= 近期恐慌/催化剂 → 偏空
         """
         result = {"structure": "unknown", "spread": 0.0, "term_score_adj": 0.0, "summary": ""}
         try:
-            import yfinance as yf
             from datetime import datetime
-            t = yf.Ticker(ticker)
-            expirations = list(t.options) if hasattr(t, "options") else []
+            memo = memo or self._yf_option_memo(ticker)
+            expirations = memo["expirations"]
             if len(expirations) < 2:
                 return result
             ivs = []
             for exp in expirations[:3]:
                 try:
-                    chain = t.option_chain(exp)
+                    chain = self._memo_chain(memo, exp)
                     calls = chain.calls
                     if calls.empty:
                         continue
@@ -69,18 +101,18 @@ class OracleBeeEcho(BeeAgent):
             _log.debug("OracleBee term structure failed for %s: %s", ticker, e)
         return result
 
-    def _analyze_deep_skew(self, ticker: str, stock_price: float) -> dict:
+    def _analyze_deep_skew(self, ticker: str, stock_price: float, memo: dict = None) -> dict:
         """25-delta Skew 分析（OTM Put IV vs OTM Call IV）
         Skew > 1.3 → 机构恐慌对冲 → 偏空；Skew < 0.8 → Call 投机过热 → 偏多
         """
         result = {"skew_25d": None, "skew_score_adj": 0.0, "summary": ""}
         try:
-            import yfinance as yf, math
-            t = yf.Ticker(ticker)
-            expirations = list(t.options) if hasattr(t, "options") else []
+            import math
+            memo = memo or self._yf_option_memo(ticker)
+            expirations = memo["expirations"]
             if not expirations:
                 return result
-            chain = t.option_chain(expirations[0])
+            chain = self._memo_chain(memo, expirations[0])
             calls, puts = chain.calls, chain.puts
             if calls.empty or puts.empty:
                 return result
@@ -140,7 +172,7 @@ class OracleBeeEcho(BeeAgent):
             return None  # 偏离现价 >50% = 数据垃圾
         return mp_strike
 
-    def _calc_max_pain(self, ticker: str, stock_price: float) -> dict:
+    def _calc_max_pain(self, ticker: str, stock_price: float, memo: dict = None) -> dict:
         """Max Pain 计算（期权到期时令所有持仓亏损最大的价位）。
 
         v0.41.2: 主源改 CBOE（fetch_cboe_chain，与期权链同源），yfinance
@@ -168,11 +200,10 @@ class OracleBeeEcho(BeeAgent):
         # ── 兜底：yfinance 最近到期日 ──
         if not call_oi and not put_oi:
             try:
-                import yfinance as yf
-                t = yf.Ticker(ticker)
-                expirations = list(t.options) if hasattr(t, "options") else []
+                memo = memo or self._yf_option_memo(ticker)
+                expirations = memo["expirations"]
                 if expirations:
-                    chain = t.option_chain(expirations[0])
+                    chain = self._memo_chain(memo, expirations[0])
                     calls, puts = chain.calls, chain.puts
                     if not calls.empty and not puts.empty:
                         call_oi = dict(zip(calls["strike"].astype(float), calls["openInterest"].fillna(0).astype(int)))
@@ -243,9 +274,15 @@ class OracleBeeEcho(BeeAgent):
                     poly_markets = 0
 
             # ---- Phase 2: 期权深度分析（term structure / 25d skew / max pain）----
-            term_structure = self._analyze_term_structure(ticker, current_price)
-            deep_skew      = self._analyze_deep_skew(ticker, current_price)
-            max_pain       = self._calc_max_pain(ticker, current_price)
+            # v0.45.122：三处共用一份到期日列表与近月链（见 _yf_option_memo）
+            try:
+                _opt_memo = self._yf_option_memo(ticker)
+            except Exception as _e_memo:  # noqa: BLE001 - 与此前各函数各自吞掉一致
+                _log.debug("OracleBee option memo failed for %s: %s", ticker, _e_memo)
+                _opt_memo = {"t": None, "expirations": [], "chains": {}}
+            term_structure = self._analyze_term_structure(ticker, current_price, memo=_opt_memo)
+            deep_skew      = self._analyze_deep_skew(ticker, current_price, memo=_opt_memo)
+            max_pain       = self._calc_max_pain(ticker, current_price, memo=_opt_memo)
             _deep_adj = term_structure.get("term_score_adj", 0) + deep_skew.get("skew_score_adj", 0)
             options_score = max(0.0, min(10.0, options_score + _deep_adj))
             _deep_parts = [s for s in [

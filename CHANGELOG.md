@@ -5,7 +5,74 @@
 
 ---
 
-## [0.45.122] — 2026-09-05 — 占位（进行中：预取做成一轮扫描唯一取数点——按业务日键、删各蜂里的 yfinance 直连）
+## [0.45.122] — 2026-09-05 — 预取成为一轮扫描的 yfinance 唯一取数点：四只蜂 8 处直连收进预取包，Oracle 三处共用一份期权链
+
+v0.45.118 诊断里的 A 项第一步。2026-09-04 蜂群段 2466s（占全程 62%）的结构性原因：
+每只票的 `.info` 被 Scout / Rival / Bear **各取一次**，`.history` 被 Rival 取一次、Scout 又
+`download` 一次，Chronos 再取 `.calendar` + `analyst_price_targets`，Oracle 三个函数各自
+`yf.Ticker` + `t.options` + `option_chain(近月)`——每一次都过 `yf_gate` 0.5 req/s 的闸。
+30 只 × ~14 次 ≈ 420 次排队。**架构早就是对的**（`prefetch_shared_data` +
+`inject_prefetched`，v0.41 起就有），只是只覆盖了 `_fetch_stock_data` 那一个 blob。
+
+### Changed — `swarm_agents/base.py`：预取包 + 访问器
+
+- **`prefetch_market_bundle(tickers)`**（新）：一轮扫描取一次——
+  `history`（标的 + 板块 ETF **一次** `yf.download(period="3mo", group_by="ticker",
+  threads=False)`，复用 v0.45.120 的 `_split_download_frame` 拆帧）、`info`、`calendar`、
+  `analyst_targets`（每只 1 次）。**每项失败只缺席、不放占位值**，蜂发现缺席就回退直连，
+  行为与没预取时完全一致。挂在 `prefetch_shared_data` 末尾，随 `market` 键注入。
+- **`BeeAgent._yf_info / _yf_calendar / _yf_analyst_targets / _yf_history / _yf_close_panel`**
+  （新）：预取优先、落空回退到**逐字相同**的直连。`_yf_history` 请求比预取包短的 period
+  时按日历日切尾巴（yfinance 的 `period="Nd"` 就是从现在往回 N 个日历日）；请求更长 →
+  不猜，回退。`_yf_close_panel` 两列有一列不在包里就**整个面板回退**，不拼一半预取一半实时。
+- 迁移点（8 处直连 → 访问器）：Scout 板块兜底 `.info` + 25 日收盘面板 `download`；
+  Rival 分析师 `.info` + 3 个月 `.history`；Bear 空头仓位 `.info`；Chronos `.calendar` +
+  `analyst_price_targets`（不再复用 Ticker 对象，`t` 退化成「步骤 1 进入过」的标记）。
+- **Oracle 三处共用 memo**：`_yf_option_memo(ticker)` 在 `analyze()` 里建一次（到期日列表 +
+  已抓的链），`_analyze_term_structure / _analyze_deep_skew / _calc_max_pain` 加可选 `memo=`
+  参数共用；不传 memo 的旧调用方行为不变。memo 是局部对象——蜂实例在 4 个标的 worker
+  间共享，逐票状态不能挂 `self`。顺带修掉 `hasattr(t, "options")`：`options` 是闸门包过的
+  property，`hasattr` 会真的访问一次再读第二次，此前三处各写一遍 = 每只票拉 6 次到期日列表。
+
+### 两处**故意不迁**，都是因为它们是评分输入
+
+- **Oracle 的 yfinance 期权链不换成 CBOE**：本想改读 `OptionsAgent` 那份 CBOE 结果
+  （`iv_term_structure` / `iv_skew_ratio` 现成），实测 09-04 这条 yfinance 路径**是活的**
+  （期限结构 29/30 非 unknown、skew 30/30）且进 `options_score`。换源 = 评分输入的数据源
+  变更，要走世代边界（[IC 重跑就绪度闸]），本版只去重不换源。
+- **Bear 估值 P/E 不迁**（本版最重要的副产品）：本想改读预取包 `.info["trailingPE"]`，
+  验证等价时实测 yfinance 1.2.0 的 **`fast_info.pe_ratio` 对 NVDA/COST/T 一律 None**。
+  回头数生产：08-04~09-04 共 17 个扫描日 496 条 Bear 条目，**含 P/E 信号 0 条**；
+  `data_sources.valuation` 08-27 起 30/30 `unavailable`（此前的 `yfinance` 标签是 v0.45.54
+  修掉的那个无条件假标签）。**这一项从头就是死的**。换成 trailingPE 会复活一个评分输入
+  ——那是评分变更不是提速，要单独决策。代码一字未动，加了测试钉住「未迁」。
+  → 待决策：要不要让 P/E 项活过来（阈值 35/50/80 从未被生产数据校过）。
+
+### 验证
+
+- `tests/test_prefetch_market_bundle.py` 31 条：period 解析与切片；五个访问器命中/落空；
+  预取包一次 download 覆盖标的+ETF、单项失败缺席不占位、空名单零网络；**四只蜂注入完整包后
+  `yfinance.Ticker` / `download` 零调用**；Oracle 共用 memo → Ticker 建 1 次、options 读 1 次、
+  三个到期日链各抓 1 次（对照：不传 memo 是 3 / 5）；**静态守卫**用 AST 数
+  `swarm_agents/` 里真正的 `yf.Ticker(` / `yf.download(` 调用（注释与 docstring 不算），
+  白名单 base 7 / cache 2 / bear 1 / oracle 1，多一处即红、少一处也红（提醒收紧）。
+- 变异六条全红：M1 `_yf_info` 无视预取（3 红）/ M2 短 period 不切片（2 红）/ M3 面板缺列
+  拼半份（1 红）/ M4 预取失败放 `{}` 占位（1 红）/ M5 memo 不缓存链（1 红）/ M6 buzz_bee
+  长出直连（1 红）。
+- 触及这些蜂的 7 个既有测试文件 153 条 + 全量套件通过（见提交信息）。
+
+### 预期
+
+每只票 yfinance 调用从 ~14 次降到 ~6 次（Oracle 4 次期权链 + 预取里 info/calendar 各 1），
+30 只 ≈ 420 → 240 次闸门排队；预取段多约 60 次（可与 CBOE 预取并行）。**推算值，
+等 09-08 `scan_timing.counters.yfinance.calls` 实测**——这正是 v0.45.118 装表盘的目的。
+
+### 后续（A 项剩余）
+
+- A2：CBOE payload 缓存改业务日键（`cboe_options.py:87` TTL 120s 短于单只流水线）。
+- A3：Twelve Data 蜂群段传业务日 `end_date`，与尾段同键。
+- 待决策两条：Oracle 期权链换 CBOE 源（世代边界）；Bear P/E 复活（评分变更）。
+
 
 ## [0.45.121] — 2026-09-05 — 二次复查本 session 全部改动：查出 3 个真 bug，其中 2 个是我自己制造的
 

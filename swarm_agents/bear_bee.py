@@ -266,6 +266,11 @@ class BearBeeContrarian(BeeAgent):
         pe = 0
         if price > 0:
             try:
+                # v0.45.122 复查：本想改读预取包 `.info["trailingPE"]`，实测发现
+                # yfinance 1.2.0 的 `fast_info.pe_ratio` 对 NVDA/COST/T **一律 None**——
+                # 这一项在生产上早就是死的（pe 恒 0，三档 elif 从未命中）。
+                # 换成 trailingPE 会**复活一个评分输入**，那是评分变更不是提速，
+                # 要单独决策 + 世代边界。故此处一字不动，只把事实记在 CHANGELOG。
                 import yfinance as yf
                 info = yf.Ticker(ticker).fast_info
                 pe = getattr(info, 'pe_ratio', 0) or 0
@@ -410,8 +415,7 @@ class BearBeeContrarian(BeeAgent):
         short_bear = 0.0
         si_data: Dict[str, Any] = {}
         try:
-            import yfinance as yf
-            info = yf.Ticker(ticker).info
+            info = self._yf_info(ticker)          # v0.45.122：走预取包
             si_raw = info.get("shortPercentOfFloat")   # yfinance 返回 0-1 的小数
             dtc    = info.get("shortRatio")             # Days to Cover (float)
 
