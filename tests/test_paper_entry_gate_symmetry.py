@@ -5,7 +5,10 @@
 `_should_open` 的两道闸门以 5 分为中性点、各留 1.5 分：
     bullish 需 `composite_score >= entry_score_bull`（6.5）
     bearish 需 `composite_score <= entry_score_bear`（原 3.5）
-候选排序也是按 `abs(score - 5)` 倒序，可见「5 = 中性」是设计意图。
+（v0.45.109 更正：本段原写「候选排序也是按 `abs(score - 5)` 倒序，可见
+「5 = 中性」是设计意图」。归因反了——那个 5 是**两闸中点** (6.5+3.5)/2，
+是从闸门导出的，不是独立的中性点设定。排序中心已改为导出，见
+`CONFIG["candidate_sort_center"]` 与 tests/test_paper_sort_center.py。）
 
 但 `final_score` 的实际分布并不以 5 为中心，而是右移且下尾被压短：
 生产 `predictions` 表 2026-03-09~09-03 共 1127 条，中位 5.52、81.5% 在 5 分以上，
@@ -34,7 +37,10 @@ from paper_portfolio import CONFIG, _should_open
 # ── 生产观测夹具：2026-06-01~09-03 各方向分数的十分位（p0,p10,...,p100）──
 BULLISH_DECILES = [3.80, 4.72, 4.96, 5.14, 5.29, 5.51, 5.82, 6.20, 6.63, 7.15, 8.74]
 BEARISH_DECILES = [3.78, 4.60, 4.78, 4.92, 5.05, 5.14, 5.25, 5.42, 5.68, 6.25, 7.86]
-NEUTRAL_CENTER = 5.0          # 设计上的中性点（排序键 abs(score-5) 也用它）
+# 5 分作为**标签语义**的中性点：分数 > 5 却标 bearish 的样本不该被开空
+# （该世代 263 条 bearish 里有 162 条分数 > 5）。这条依据独立于排序键——
+# 排序中心是两闸中点，与本常数同为 5.0 纯属旧配置下的巧合，勿再混为一谈。
+LABEL_NEUTRAL = 5.0
 OBSERVED_BEARISH_MIN = 3.78   # 该世代 bearish 的实际最低分
 
 
@@ -64,7 +70,7 @@ class TestBearGateReachable:
         """另一边的护栏：闸门不能松到中性点以上，
         否则「标 bearish 但分数在看多侧」的样本也会被开空
         （该世代 263 条 bearish 里有 162 条分数 > 5）"""
-        assert CONFIG["entry_score_bear"] < NEUTRAL_CENTER
+        assert CONFIG["entry_score_bear"] < LABEL_NEUTRAL
 
 
 class TestGateSymmetry:
