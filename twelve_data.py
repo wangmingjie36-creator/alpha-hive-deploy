@@ -38,6 +38,7 @@ Twelve Data 日K 客户端（v0.45.61）
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -70,8 +71,14 @@ _DAILY_BUDGET = 800
 SHARED_BARS_WINDOW = 120   # 三个消费方谈拢的统一窗口，见 `fetch_bars`
 
 # key = (ticker, end_date)；value = (请求过的最大窗口, 该次返回的行)
+# v0.45.125：`end_date=None` 在键上归一为美东当日（见 `_bars_key`），
+# 蜂群段（fetch_daily_closes / fetch_volume_ratio，None）与尾段
+# （portfolio_greeks / vrp / options_paper_leg，end_date=as_of=今天）共用一份。
 _BARS_CACHE: Dict[Tuple[str, Optional[str]], Tuple[int, List[dict]]] = {}
-_bars_cache_stats = {"hits": 0, "misses": 0, "refetch_larger": 0, "fetches": 0}
+_bars_cache_stats = {"hits": 0, "misses": 0, "refetch_larger": 0, "fetches": 0,
+                     "inflight_waits": 0, "warmed": 0}
+_BARS_LOCK = threading.Lock()                       # 护 _BARS_CACHE / _INFLIGHT / 计数
+_INFLIGHT: Dict[Tuple[str, Optional[str]], threading.Lock] = {}   # 同键并发只发一次请求
 
 
 class TwelveDataUnavailable(ConnectionError):
@@ -185,9 +192,14 @@ def fetch_daily_closes(ticker: str, days: int = 60,
     **绝不返回空列表或 0.0 填充** —— 下游 `np.std` 拿到常数列会算出
     `rv=0`，与「波动率真的是 0」不可区分（MEMORY 静默降级三件套）。
     """
-    rows = _fetch_rows(ticker, days, end_date)
+    # v0.45.125：走 `fetch_bars` 缓存，且一次多要到 SHARED_BARS_WINDOW 根——
+    # outputsize 不多花配额，却让尾段的 120 根请求直接命中，不必 refetch_larger。
+    # 末尾按 `days` 切尾巴：与旧的直接 `_fetch_rows(ticker, days)` 相比，输出取的是
+    # 同一条时间序列的最后 `days` 根，下游 `realized_vol` 只用尾部收益，结果不变。
+    rows = fetch_bars(ticker, max(days, SHARED_BARS_WINDOW), end_date)
     if rows is None:
         return None
+    rows = rows[-days:]
 
     closes = [r["close"] for r in rows]
     if len(closes) < 10:
@@ -338,10 +350,15 @@ def fetch_bars(ticker: str, days: int = SHARED_BARS_WINDOW,
 
     缓存语义
     --------
-    · **键 = `(ticker, end_date)`**。`end_date=None`（"最新"）与显式日期是
-      **两个键**，绝不合并：`_api_end_date` 会把显式日期 +1 天抵掉接口的开
-      区间，而 `None` 那条路末根还要过 `_drop_forming_bar`，两者的尾巴本来
-      就可能不同。合并等于用一个口径冒充另一个（本项目「静默降级」那一族）。
+    · **键 = `(ticker, end_date)`，其中 `None` 归一为美东当日**（v0.45.125，
+      见 `_bars_key`）。为什么现在可以合并：`_fetch_rows` 对显式 `end_date` 也过
+      `_drop_forming_bar`，所以同一个美东日里 `None`（最新，丢当日半根）与
+      `end_date=今天`（接口 +1 天拉进当日那根，再被同一道闸丢掉）返回**逐行相同**
+      ——2026-09-04 实测蜂群段 30 只与尾段 17 只取的就是同一份数据、各发一次。
+      显式的**过去**日期仍是独立键，与 `None` 不同（补跑窗口末端不是今天）。
+      `_et_today()` 取不到时退回 `None` 键，不猜。
+    · **同键并发只发一次请求**：4 个标的 worker + 预热线程可能同时要同一只票，
+      第二个到的等第一个拿回来再读缓存（`inflight_waits`），不重复排限流队。
     · **存"迄今请求过的最大窗口"**。后来的**小**窗口请求切尾巴返回
       （行是升序的，"小窗口"就是最后 N 行），不再发请求；后来的**大**窗口
       请求会重新取数并整条替换。
@@ -375,25 +392,84 @@ def fetch_bars(ticker: str, days: int = SHARED_BARS_WINDOW,
     end_date : 与 `fetch_daily_closes` 同义，**截至该日（含）**。
     """
     days = max(int(days), 1)
-    key = (ticker, end_date)
+    key = _bars_key(ticker, end_date)
 
-    ent = _BARS_CACHE.get(key)
-    if ent is not None:
-        cached_days, cached_rows = ent
-        if days <= cached_days:
+    def _lookup():
+        ent = _BARS_CACHE.get(key)
+        if ent is not None and days <= ent[0]:
+            return [dict(r) for r in ent[1][-days:]]
+        return None
+
+    with _BARS_LOCK:
+        got = _lookup()
+        if got is not None:
             _bars_cache_stats["hits"] += 1
-            return [dict(r) for r in cached_rows[-days:]]
-        _bars_cache_stats["refetch_larger"] += 1
-    else:
-        _bars_cache_stats["misses"] += 1
+            return got
+        ent = _BARS_CACHE.get(key)
+        _bars_cache_stats["refetch_larger" if ent is not None else "misses"] += 1
+        gate = _INFLIGHT.setdefault(key, threading.Lock())
 
-    _bars_cache_stats["fetches"] += 1
-    rows = _fetch_rows(ticker, days, end_date)
-    if not rows:
-        # None / [] 都不入缓存，且不动已有条目（见上面「失败不入缓存」）
-        return rows
-    _BARS_CACHE[key] = (days, rows)
-    return [dict(r) for r in rows[-days:]]
+    # 同键并发：第二个到的在这里等第一个拿回来，然后直接读缓存
+    with gate:
+        with _BARS_LOCK:
+            got = _lookup()
+            if got is not None:
+                _bars_cache_stats["inflight_waits"] += 1
+                _bars_cache_stats["hits"] += 1
+                return got
+            _bars_cache_stats["fetches"] += 1
+        rows = _fetch_rows(ticker, days, end_date)
+        if not rows:
+            # None / [] 都不入缓存，且不动已有条目（见上面「失败不入缓存」）
+            return rows
+        with _BARS_LOCK:
+            _BARS_CACHE[key] = (days, rows)
+        return [dict(r) for r in rows[-days:]]
+
+
+def _bars_key(ticker: str, end_date: Optional[str]) -> Tuple[str, Optional[str]]:
+    """缓存键。`None`（最新）归一为美东当日——同日里两者返回逐行相同（见 fetch_bars 文档）。
+    只改键，**不改请求**：`None` 调用方发出的请求仍不带 `end_date` 参数。"""
+    return (ticker, end_date if end_date else _et_today())
+
+
+def warm_bars_cache(tickers: List[str], days: int = SHARED_BARS_WINDOW,
+                    end_date: Optional[str] = None) -> Dict[str, int]:
+    """顺序预热：把这些票的日线各取一次进缓存。单票失败只记数、不中断。
+
+    Twelve Data 是 7 次/分的串行队列，30 只 ≈ 4.4 分钟——放在**后台线程**里跑
+    （见 `start_bars_warmer`），蜂群段和尾段的消费方到时直接命中；先于预热到达
+    的消费方自己取，预热线程随后命中同一键，总请求数不变。
+    """
+    out = {"warmed": 0, "failed": 0}
+    for t in tickers:
+        try:
+            rows = fetch_bars(t, days, end_date)
+        except Exception as e:  # noqa: BLE001 - 预热是优化，不是前提
+            _log.debug("[%s] 日线预热异常: %s", t, e)
+            rows = None
+        if rows:
+            out["warmed"] += 1
+        else:
+            out["failed"] += 1
+    with _BARS_LOCK:
+        _bars_cache_stats["warmed"] += out["warmed"]
+    _log.info("Twelve Data 日线预热完成：%d/%d 只", out["warmed"], len(tickers))
+    return out
+
+
+def start_bars_warmer(tickers: List[str], days: int = SHARED_BARS_WINDOW,
+                      end_date: Optional[str] = None) -> Optional[threading.Thread]:
+    """开后台守护线程跑 `warm_bars_cache`。未配置 key / 空名单 → 不开、返回 None。"""
+    symbols = [t for t in dict.fromkeys(tickers) if t]
+    if not symbols or not is_configured():
+        return None
+    th = threading.Thread(target=warm_bars_cache, args=(symbols, days, end_date),
+                          name="twelvedata-warmer", daemon=True)
+    th.start()
+    _log.info("Twelve Data 日线预热已启动：%d 只（后台，串行 %.1f 次/分）",
+              len(symbols), _RATE_PER_SEC * 60)
+    return th
 
 
 def bars_cache_stats() -> Dict:
@@ -406,9 +482,11 @@ def bars_cache_stats() -> Dict:
 
 def clear_bars_cache() -> None:
     """清空日线缓存并把计数归零（测试之间、以及长驻进程换日时用）。"""
-    _BARS_CACHE.clear()
-    for k in _bars_cache_stats:
-        _bars_cache_stats[k] = 0
+    with _BARS_LOCK:
+        _BARS_CACHE.clear()
+        _INFLIGHT.clear()
+        for k in _bars_cache_stats:
+            _bars_cache_stats[k] = 0
 
 
 def fetch_volume_ratio(ticker: str, window: int = 20,
@@ -426,7 +504,9 @@ def fetch_volume_ratio(ticker: str, window: int = 20,
     （生产端 `data_pipeline._fill_volume_from_twelvedata` 目前只走实时口径、
     不传这个参数；语义仍与另外两个入口保持一致，免得将来接补跑时又差一根。）
     """
-    rows = _fetch_rows(ticker, days=window + 10, end_date=end_date)
+    # v0.45.125：走 `fetch_bars` 缓存（与 fetch_daily_closes / 尾段三个消费方同键），
+    # 只用尾部 `window` 根，多取的不参与计算。
+    rows = fetch_bars(ticker, max(window + 10, SHARED_BARS_WINDOW), end_date)
     if not rows or len(rows) < window:
         return None
 

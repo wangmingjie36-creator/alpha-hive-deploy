@@ -103,7 +103,67 @@ inject_prefetched(prefetched)          # ← 签名是 (agents, prefetched)
 
 全量套件 **2783 passed, 18 skipped**；`ruff check --select F821` 干净
 （`deep_analysis.py` 另有 2 处 E722 bare except，为既有、非本次引入）。
-## [0.45.125] — 2026-09-05 — 占位（进行中：Twelve Data 日线一轮扫描只取一次——None 键归一到业务日、蜂群段消费方走 fetch_bars 缓存、开扫即预热）
+## [0.45.125] — 2026-09-05 — Twelve Data 日线一轮扫描只取一次：蜂群段与尾段取的是同一份数据、却各发一次
+
+v0.45.118 诊断的 A3。Twelve Data 免费档 7 次/分**严格串行**，实测 11s 一次。2026-09-04
+共 47 次：蜂群段 30 只（`market_intelligence.realized_vol` → `fetch_daily_closes(end_date=None)`）
++ 尾段 17 只（portfolio_greeks / vrp / options_paper_leg → `fetch_bars(end_date=as_of)`），
+其中 17 只**同一批票取了两遍** ≈ 190s。
+
+### 为什么现在能合并（v0.45.105 当年刻意不合）
+
+`fetch_bars` 的 docstring 写着「`None` 与显式日期是两个键，绝不合并——两者的尾巴本来就
+可能不同」。这次逐行核对 `_fetch_rows`：它对**显式** `end_date` 也过 `_drop_forming_bar`。
+于是同一个美东日里，`None`（最新，丢当日半根）与 `end_date=今天`（接口 +1 天把当日那根
+拉进来，再被同一道闸丢掉）返回**逐行相同**——`_api_end_date` 的注释自己就记着这个实测
+（`end_date=2026-09-02` → 末根仍是 2026-08-31）。当年的顾虑对**过去**日期成立、对
+「今天」不成立。所以合并只发生在键层、只针对「今天」，显式过去日期仍是独立键。
+
+### Changed — `twelve_data.py`
+
+- **`_bars_key`**：`None` 在缓存键上归一为 `_et_today()`；**请求不变**——`None` 调用方发出
+  的请求仍不带 `end_date` 参数（既有测试 `test_realtime_path_has_no_end_date` 钉着）。
+  `_et_today()` 取不到时退回 `None` 键，不猜。
+- **`fetch_daily_closes` / `fetch_volume_ratio` 改走 `fetch_bars` 缓存**，且一次多要到
+  `SHARED_BARS_WINDOW`（120 根，outputsize 不多花配额）再按各自的 `days`/`window` 切尾巴。
+  两者都只用序列尾部（RV 取最后 lookback 个收益、量比取最后 window 根），**输出逐值不变**；
+  多要 120 根让随后尾段的 120 根请求直接命中，不触发 `refetch_larger`。
+- **同键并发只发一次**：`_INFLIGHT` 每键一把锁，4 个标的 worker + 预热线程同时要同一只票时，
+  后到者等先到者拿回来再读缓存（计 `inflight_waits`）。`_BARS_CACHE` 读写也补上锁——
+  此前 4 个 worker 无锁写 dict。
+- **`warm_bars_cache` / `start_bars_warmer`**（新）：开扫时把标的 + SPY 顺序各取一次进缓存，
+  跑在**后台守护线程**里——7 次/分串行 ≈ 4.4 分钟本来横在蜂群关键路径上，现在与 CBOE、
+  yfinance 并行；先于预热到达的消费方自己取、预热线程随后命中同一键，**总请求数不变**。
+  未配置 key / 空名单不开。挂在 `prefetch_shared_data` 末尾（`swarm_agents/base.py`）。
+- `bars_cache_stats()` 多两键 `inflight_waits` / `warmed`；`clear_bars_cache` 连 `_INFLIGHT` 一起清。
+
+### Fixed — 两处既有测试编码的是旧设计
+
+- `test_twelve_data.py::TestSharedCacheDoesNotChangeUncachedPaths::test_realized_vol_path_untouched`
+  断言的正是「RV 路径不走缓存」——那是 v0.45.105 的决定，本版有意反转，测试改为断言
+  「现在共用缓存」并在类 docstring 写明为什么。`_fetch_rows` 本身仍不带缓存的断言保留。
+- `test_volume_ratio_fallback.py` 的 autouse fixture 没清日线缓存（当年 `fetch_volume_ratio`
+  不走缓存、用不着），改动后 4 条测试被上一条的缓存穿透；补 `clear_bars_cache()`，与
+  `test_twelve_data.py` 的 fixture 一致。
+
+### 验证
+
+- `tests/test_twelve_data_single_fetch.py` 14 条：`None`/今天同键（两种顺序）；`None` 请求仍不带
+  end_date；过去日期独立键；`fetch_daily_closes` / `fetch_volume_ratio` 输出与旧的直接
+  `_fetch_rows` 逐值相同；RV + 量比 + 尾段三类消费方一个进程只 1 次请求；4 路并发同键 1 次；
+  预热顺序各一次、单票失败不中断、未配置不开、`prefetch_shared_data` 带 SPY 启动。
+- 变异六条全红：M1 键不归一（2 红）/ M2 `fetch_daily_closes` 绕开缓存（5 红）/ M3 并发不去重
+  （1 红）/ M4 预热遇失败中断（1 红）/ M5 只要 `days` 根不多要（3 红）/ M6 预热漏 SPY（1 红）。
+- 触及 twelve_data / prefetch 的 8 个既有测试文件 271 条 + 全量套件通过（见提交信息）。
+
+### 预期
+
+Twelve Data 47 → 31 次/扫描（30 只 + SPY），且 31 次全部移出蜂群关键路径。
+**等 09-08 `status.json.scan_timing.counters.twelve_data` 实测**：`fetches` 应 ≈31、
+`hits` ≥ 47−31、`warmed` ≈31。
+
+至此 v0.45.118 诊断的 A 项（A1/A2/A3）全部落地。09-08 那一轮是第一次能拿到全套实测的扫描。
+
 
 ## [0.45.124] — 2026-09-05 — test_quote_set.py 的「全部离线」是句空话：实测 9 个测试每轮出网 42 次、整文件 221s；顺带清掉误提交的 worktree gitlink
 

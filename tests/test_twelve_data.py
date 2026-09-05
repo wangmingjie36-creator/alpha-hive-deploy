@@ -648,7 +648,8 @@ class TestBarsCacheIsolation:
         assert http.n == 1
         td.clear_bars_cache()
         assert td.bars_cache_stats() == {"hits": 0, "misses": 0, "refetch_larger": 0,
-                                         "fetches": 0, "entries": 0}
+                                         "fetches": 0, "inflight_waits": 0, "warmed": 0,
+                                         "entries": 0}
         td.fetch_bars("NVDA", 120, end_date=_BARS_AS_OF)
         assert http.n == 2
 
@@ -703,9 +704,15 @@ class TestOneFetchPerTickerPerScan:
 
 
 class TestSharedCacheDoesNotChangeUncachedPaths:
-    """`_fetch_rows` 仍是**不带缓存**的取数层，`fetch_daily_closes` /
-    `fetch_volume_ratio` 走的还是它 —— 本次只给日线消费方加缓存，
-    RV/量比那两条口径一个字节都没动（它们的窗口不同，切尾巴会改变行数）。"""
+    """`_fetch_rows` 仍是**不带缓存**的取数层。
+
+    v0.45.105 时 `fetch_daily_closes` / `fetch_volume_ratio` 刻意绕开缓存
+    （「切尾巴会改变行数」）。v0.45.125 把它们也接进 `fetch_bars`：一次多要到
+    `SHARED_BARS_WINDOW` 根再按 `days` 切尾巴——消费方只用尾部（RV 取最后
+    lookback 个收益、量比取最后 window 根），输出逐值不变，见
+    tests/test_twelve_data_single_fetch.py::TestConsumersUnchanged。
+    2026-09-04 实测蜂群段 30 只 + 尾段 17 只取的是同一份数据、各发一次，
+    这正是当年那条「不接」决定的代价。"""
 
     def test_fetch_rows_still_hits_network_every_time(self, keyed, monkeypatch):
         http = _HTTP(monkeypatch)
@@ -714,8 +721,8 @@ class TestSharedCacheDoesNotChangeUncachedPaths:
         assert http.n == 2
         assert td.bars_cache_stats()["entries"] == 0
 
-    def test_realized_vol_path_untouched(self, keyed, monkeypatch):
+    def test_realized_vol_path_now_shares_the_cache(self, keyed, monkeypatch):
         http = _HTTP(monkeypatch)
         assert td.fetch_daily_closes("NVDA", 60) is not None
         assert td.fetch_daily_closes("NVDA", 60) is not None
-        assert http.n == 2 and td.bars_cache_stats()["entries"] == 0
+        assert http.n == 1 and td.bars_cache_stats()["entries"] == 1
