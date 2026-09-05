@@ -722,6 +722,31 @@ def _open_position(
     direction = snapshot["direction"]
     conf = _infer_confidence(snapshot)
     low_conv = bool(snapshot.get("low_conviction", False))
+
+    # v0.45.111：分数拿不到就不开仓，与下面 size_usd / entry_price 两道守卫同款
+    # （非法输入 → return None，调用方 continue）。
+    #
+    # 原来写的是 `score=_snapshot_score(snapshot) or 0.0`，注释还辩解说"上游
+    # _should_open 已保证分数存在，这里只是类型收口"。两点都站不住：
+    #   1. **它是个会落盘的伪造值**。score 从 Position 传进 ClosedTrade（见
+    #      _close_position），写进 closed_trades.jsonl，再被 ibkr_sync（导出给
+    #      用户下单的 actions）、alpha_hive_mcp、chart_engine 读走。缺分记成
+    #      0.0 不是"收口"，是往账本里写一个没人发生过的分数——而 0.0 在这套
+    #      量表里还恰好是"最强看空"，是所有可能的谎话里最糟的一个。
+    #   2. **"上游保证过"不是不检查的理由**，是 v0.45.3 那条判据的反面教材：
+    #      问"这个默认值会不会让下游误以为掌握了信息"——会。真要依赖上游，
+    #      就该在依赖断掉时炸掉或降级，而不是无声地编一个数。
+    #
+    # 选 return None 而不是 raise：本函数已有两道同形态守卫，调用方 run_for_date
+    # 对 None 的处理（跳过该候选、当天继续）是现成且正确的；为一个上游已挡住的
+    # 状态引入新的异常路径，收益不抵风险。
+    score = _snapshot_score(snapshot)
+    if score is None:
+        _log.warning("[PaperPortfolio] %s %s composite_score 缺失或非有限值（%r）——"
+                     "跳过开仓。正常情况下 _should_open 已经挡住，走到这里说明"
+                     "两处守卫不同步了。", as_of, ticker, snapshot.get("composite_score"))
+        return None
+
     size_usd, sizing_note = _compute_position_size(
         nav, conf, ticker, closed, low_conviction=low_conv, as_of=as_of)
     # v0.45.97：`size_usd <= 1` 挡不住 NaN（NaN 的任何比较都返回 False），
@@ -751,9 +776,10 @@ def _open_position(
     entry_dt = datetime.strptime(as_of, "%Y-%m-%d")
     time_stop_dt = entry_dt + timedelta(days=14)
 
-    _cs = _snapshot_score(snapshot)   # v0.45.110：NaN 也走 N/A，不再渲染成 "nan"
-    _cs_txt = f"{_cs:.1f}" if _cs is not None else "N/A"
-    rationale = f"score={_cs_txt} · {conf}"
+    # v0.45.111：复用上面已校验的 score。此处原有一次独立的 _snapshot_score 调用
+    # 和一个 `else "N/A"` 分支——加了顶部守卫后该分支不可达，留着会让人以为
+    # "缺分也能开仓、只是显示 N/A"，与实际行为相反，故一并删掉。
+    rationale = f"score={score:.1f} · {conf}"
     if low_conv:
         rationale += " · ⚠️低置信-减半仓"
     if sizing_note:
@@ -770,9 +796,7 @@ def _open_position(
         size_usd=round(size_usd, 2),
         time_stop_date=time_stop_dt.strftime("%Y-%m-%d"),
         confidence=conf,
-        # 上游 _should_open 已保证分数存在且有限（v0.45.110）；这里的 or 0.0
-        # 只是类型收口，不是"缺分当 0 分"的兜底。
-        score=_snapshot_score(snapshot) or 0.0,
+        score=score,
         rationale=rationale,
         sizing=sizing_note,
     )

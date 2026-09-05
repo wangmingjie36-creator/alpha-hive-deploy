@@ -5,8 +5,87 @@
 
 ---
 
-## [0.45.111] — 2026-09-05 — 占位（进行中：_open_position 的 `or 0.0` 会把缺分静默记成 0.0 分落进账本）
+## [0.45.111] — 2026-09-05 — `_open_position` 的 `or 0.0` 会把缺分静默记成 0.0 分**落进账本**
 
+用户交办：把 v0.45.110 里保留的 `score=_snapshot_score(snapshot) or 0.0` 也去掉。
+
+去掉了，并且 v0.45.110 给它写的那句辩解（「上游 `_should_open` 已保证分数存在，
+这里的 `or 0.0` 只是类型收口」）**两点都站不住**，一并更正。
+
+### Fixed — 它不是「类型收口」，是一个会落盘的伪造值
+
+`Position.score` 不是只在内存里转一圈：
+
+    Position.score → _close_position → ClosedTrade.score → closed_trades.jsonl
+                  → ibkr_sync（导出给用户在 TWS 下单的 actions）
+                  → alpha_hive_mcp / chart_engine
+
+缺分记成 `0.0` 不是收口，是往账本里写一个**从没发生过的分数**。
+而 `0.0` 在这套量表里恰好是**最强看空信号**（`entry_score_bear = 4.85`，
+观测下尾 3.78），是所有可能的谎话里最糟的那一个——一条「拿不到分数」的记录
+会以「满分看空」的身份进入下游导出与图表。
+
+第二点，**「上游保证过」不构成不检查的理由**，它正是 v0.45.3 那条判据的反面教材：
+问「这个默认值会不会让下游误以为掌握了信息」——会。真要依赖上游，就该在依赖
+断掉时炸掉或降级，而不是无声地编一个数。v0.45.110 写下那句辩解时只想到了
+「这行代码执行不到」，没想到「万一执行到了，它写出去的是什么」。
+
+**修法**取本函数已有的降级惯例（`size_usd` / `entry_price` 两道守卫同款：
+非法输入 → `return None`，调用方 `run_for_date` 跳过该候选、当天继续）：
+
+```python
+score = _snapshot_score(snapshot)
+if score is None:
+    _log.warning(...)   # 走到这里说明与 _should_open 两处守卫不同步了
+    return None
+```
+
+选 `return None` 而不是 `raise`：本函数已有两道同形态守卫，调用方对 `None`
+的处理是现成且正确的；为一个上游已挡住的状态引入新的异常路径，收益不抵风险。
+
+顺带删掉 `rationale` 里的 `else "N/A"` 分支——加了顶部守卫后它不可达，
+留着会让人以为「缺分也能开仓、只是显示 N/A」，与实际行为相反。
+`_snapshot_score` 的重复调用（rationale 一次、`score=` 一次）也合并成一次。
+
+### 验证
+
+**零历史行为改变，已实测**：`run_replay` 四臂 92 日回放的 `final_nav` /
+已平仓账本 / 末态持仓与 v0.45.110 的结果**逐字节全等**。
+
+**新增 `tests/test_paper_open_position_score.py`（22 条）**。
+判别力全在**成对**断言上——只断言「缺分要拒绝」是不够的，
+一个偷懒的 `if not score: return None` 同样能让那半边全绿，
+但它会把**真实的 0.0 分**也一起拒掉。所以两半都写：
+
+    缺键 / None / NaN / ±inf / 非数字符串  → 不开仓，且绝不产出 score=0.0 的仓位
+    真实的 0.0 / 3.78 / 4.85 / 6.5 / 7.8 / 8.74 → 照常开仓，Position.score 原样记录
+
+同 v0.45.96 记的「缓存/分桶类断言必须成对」。另有一条端到端断言，
+验 score 确实一路流进 `ClosedTrade.to_dict()`——把「危害为什么值得堵」固化下来。
+
+**mutation check（`--maxfail=99`，基线 `collected 132 items` / 132 passed）**：
+
+| 变异 | 结果 |
+|---|---|
+| M1 退回 `or 0.0` | **12 failed** / 120 passed ✅ |
+| M2 偷懒修法 `if not score` | **2 failed** / 130 passed ✅（正是成对断言的「合法 0.0」那半边抓到的） |
+| M3 `Position(score=)` 退回 `or 0` | 132 passed —— **等价变异，非覆盖缺口** |
+
+M3 已单独证明为等价：给定顶部守卫，走到 `Position(...)` 时 `score` 必非 None
+且有限，此时 `float(snapshot.get("composite_score") or 0)` 与 `score` 在整个
+可达域上恒等（20012 个取值穷举，含 `0`/`0.0`/`-0.0`/`±1e-9` 边界，0 处不同）。
+**这本身就是本次改动的性质证明**：`Position(score=)` 那处去掉 `or 0.0` 是
+可读性修正，真正的行为修复是顶部那道守卫。
+
+⚠️ **过程记录：M2/M3 第一次跑出的 `132 passed` 是假的。**
+锚点 `score = _snapshot_score(snapshot)\n    if score is None:` 在 `_should_open`
+里也有一份（v0.45.110 加的），`s.count(old)==1` 断言抛错 ⇒ 变异**根本没打上**，
+跑的是未变异的代码。这次是 patch 脚本里的 `assert count==1` 把它拦下来的——
+上一版（v0.45.110）同类事故靠的是核对 `collected N items`，两道加起来才够。
+**判据：mutation check 要能证明「变异确实生效了」，而不只是「测试跑了」**；
+最省事的做法是让打补丁的脚本自己断言锚点唯一，并打印「变异已打上」。
+
+全量套件：**2622 passed, 18 skipped**；`ruff check` 通过。
 ## [0.45.110] — 2026-09-05 — `_should_open` 的 `or 0` 只是三个洞里最窄的一个：NaN 两侧全穿
 
 用户交办：把 v0.45.109 记录但未修的 `_should_open` 缺分兜底 `or 0` 一起修了。
