@@ -5,6 +5,30 @@
 
 ---
 
+## [0.45.118] — 2026-09-05 — 事后补跑云端快照：业务日必须是参数，墙上时钟补不了昨天
+
+2026-09-04 云端抓数 29/30，TMUS 因 `StaleVintageError` 被拒绝落盘。排查结论是
+**CBOE 源站停更该符号**，不是 CDN 边缘缓存：`TMUS.json` 的 `last-modified` 停在
+09-04 11:20 GMT（周五开盘前），`x-cache: RefreshHit` 表示 CloudFront 回源校验后
+源站确认对象未变；对照组 NVDA 同一时刻是 `Miss` + 已刷新。云沙箱内 yfinance
+不可达，降级链拿不到第二来源，故只能弃掉。同一天 Mac 扫描则由 yfinance 兜住
+（`iv=39.03`、`put_call_ratio=0.55`），说明数据存在，缺的只是云端这条路。
+
+补跑受阻于一个设计约束：`cloud_snapshot_fetch._business_date()` 取墙上时钟，
+事后补跑会解析成「今天」——补 09-04 时若今天是 09-05（周六），既建出周六目录，
+又要求 vintage=09-05 这个永不成立的条件。主脚本无 `--date` 入口，故新增独立工具
+而非改动主流程。
+
+### Added
+- `backfill_cloud_snapshot.py`：单标的事后补跑工具。业务日作为必填参数钉死；
+  vintage 不等于目标业务日即拒绝落盘（与主脚本同一判据，且落盘前二次确认，
+  防的是 `_fetch_one_ticker` 日后被改松）；拒绝覆盖已有快照；拒绝新建不存在的
+  日期目录；`--dry-run` 只探测不落盘。成功后原子更新 manifest（`tickers_ok`、
+  `failed`、`vintage_stale`、`vintage_ok`）并追加 `backfilled` 溯源条目，
+  其中 `source` 如实记录实际来源，yfinance 不冒充 cboe。
+
+
+
 ## [0.45.117] — 2026-09-05 — 占位（进行中：合并 origin/ci/python-tests，兑现 v0.45.94 的 CI）
 
 ## [0.45.116] — 2026-09-05 — 两条遗留占位标题：真相不是「忘了改标题」，是这两版从未并入 main
