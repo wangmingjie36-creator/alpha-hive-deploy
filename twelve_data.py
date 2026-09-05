@@ -405,8 +405,6 @@ def fetch_bars(ticker: str, days: int = SHARED_BARS_WINDOW,
         if got is not None:
             _bars_cache_stats["hits"] += 1
             return got
-        ent = _BARS_CACHE.get(key)
-        _bars_cache_stats["refetch_larger" if ent is not None else "misses"] += 1
         gate = _INFLIGHT.setdefault(key, threading.Lock())
 
     # 同键并发：第二个到的在这里等第一个拿回来，然后直接读缓存
@@ -417,6 +415,10 @@ def fetch_bars(ticker: str, days: int = SHARED_BARS_WINDOW,
                 _bars_cache_stats["inflight_waits"] += 1
                 _bars_cache_stats["hits"] += 1
                 return got
+            # v0.45.130：misses / refetch_larger 只在**真要发请求**时计——此前在闸前计，
+            # 并发首次请求时输的那个线程既计了 miss 又计了 hit，`fetches == misses +
+            # refetch_larger` 这条文档写明的不变式就破了（独立审查抓到）。
+            _bars_cache_stats["refetch_larger" if _BARS_CACHE.get(key) is not None else "misses"] += 1
             _bars_cache_stats["fetches"] += 1
         rows = _fetch_rows(ticker, days, end_date)
         if not rows:

@@ -141,6 +141,10 @@ class TestInflightDedupe:
         assert all(r and len(r) == 120 for r in results)
         s = td.bars_cache_stats()
         assert s["inflight_waits"] >= 1 and s["fetches"] == 1
+        # v0.45.130：统计不变式（模块文档写明的两条）在并发下也得成立——
+        # 输的线程不能既计 miss 又计 hit
+        assert s["misses"] + s["refetch_larger"] == s["fetches"] == 1, s
+        assert s["hits"] + s["misses"] + s["refetch_larger"] == 4, s
 
     def test_different_keys_do_not_block_each_other_into_one(self, monkeypatch):
         calls = _patch_fetch(monkeypatch)

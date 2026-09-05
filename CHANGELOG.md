@@ -5,7 +5,50 @@
 
 ---
 
-## [0.45.130] — 2026-09-05 — 占位（进行中：二次检查本 session 六版改动——fetch_bars 并发 misses 双计 + 两处 CHANGELOG 更正）
+## [0.45.130] — 2026-09-05 — 二次检查本 session 六版改动：一处计数 bug、两处 CHANGELOG 说多了、零功能缺陷
+
+用户要求对 v0.45.118 / 120 / 122 / 123 / 125 / 128 全部改动做二次检查。三路并行：
+① 按项目判据（谁会红 / 失败是返回还是抛 / bool·NaN 守卫 / 缓存键等价 / 线程安全）逐项核实；
+② 一个独立审查 agent 只看这六个提交的 diff；③ socket 探针实测六个新测试文件是否真离线。
+
+### Fixed — `twelve_data.fetch_bars` 并发首次请求 `misses` 双计（独立审查抓到）
+
+同键并发时，两个线程都在 `_INFLIGHT` 闸**前**计了 `misses`，但只有赢闸的那个真发请求；输的那个
+随后又计 `hits` + `inflight_waits`。模块文档写明的两条不变式 `fetches == misses + refetch_larger`、
+`hits + misses + refetch_larger == 总调用` 在并发下就破了。纯观测 bug，不影响数据，但它正是
+09-08 要拿来读的数（`scan_timing.counters.twelve_data`）——数错的表盘比没有表盘更糟。
+修法：`misses / refetch_larger` 只在闸内、真要发请求时计。并发测试加两条不变式断言；
+变异（挪回闸前）红。
+
+### Fixed — 两处 CHANGELOG 说多了
+
+- v0.45.122 标题与正文写「8 处直连」，diff 里 `self._yf_*` 替换实为 **7 处**——第 8 处（Bear
+  `fast_info`）是 v0.45.128 才迁的。已更正并注明。
+- v0.45.125 写 `fetch_daily_closes` 走缓存后「输出逐值不变」。尾部取值确实不变，但
+  `_drop_forming_bar` 的「末根成交量 < 窗口中位 30%」判据，中位数现在按 120 根算而非 60/30 根。
+  扫描日末根由日期规则丢掉与此无关；只在**补跑过去日期且末根成交量异常低**（半日交易）时，
+  两种窗口的中位可能落在阈值两侧，至多影响一根尾巴。独立审查也独立指出了这一点。
+  判定：三个尾段消费方本来就共用 120 根窗口的丢弃决定，把 RV/量比也统一进来是**一票一天一个
+  真相**，接受；已在 v0.45.125 条目补注。
+
+### 核实无误的（列出来，免得下次再查一遍）
+
+- Oracle `deep_skew.otm_put_iv` 现在可能是 None：下游 `chart_engine.py:595` 已 `or 0`，
+  `generate_deep_v2` 读的是 CBOE 的 `iv_skew_detail` 不是这份。
+- Oracle 发给信息素板的 `iv_skew` 一直取自 `result["iv_skew_ratio"]`（CBOE），Bear 读它的那条
+  路**不因换源而变**。
+- `iv_term_structure["source"]` 键存在（cboe / yfinance / none）；`OptionsAgent` 自己在 CBOE 链
+  不可得时也会落到 yfinance，那时 Oracle 的 `term_structure.source` 会如实写 `yfinance`。
+- 全仓 ruff F821 干净；触及的 11 个模块导入冒烟通过；被删的 Oracle 三个方法名全仓零引用。
+- Chronos 里 `t` 改成 `True` 哨兵后只剩 `if t is not None` 一处用法。
+- `_cache_entry_fresh` 在 `_cache_lock` 内调 `is_trading_day`：无重入、无锁，不会死锁。
+- 蜂实例在 4 个 worker 间共享：`_prefetched_*` 注入后只读，无逐票状态挂在 `self` 上。
+- 六个新测试文件在 socket 断网（`connect / create_connection / getaddrinfo` 全 patch，先用
+  example.com canary 自证探针有效）下 161 条全过、拦截 0 次——**「离线」是被执行过的断言**，
+  不是注释。
+- `ic_rerun_readiness` CLI 在零样本新世代下正常输出 0/25，不崩。
+- 已知未做：`--samples-only` 早退路径不落 `scan_timing.json`（该路径注释已标死代码兜底）。
+
 
 ## [0.45.129] — 2026-09-05 — 占位（进行中：复查 v0.45.127——类级 pytestmark 插到 docstring 之前，类丢了 __doc__）
 
@@ -291,6 +334,9 @@ v0.45.118 诊断的 A3。Twelve Data 免费档 7 次/分**严格串行**，实�
   `SHARED_BARS_WINDOW`（120 根，outputsize 不多花配额）再按各自的 `days`/`window` 切尾巴。
   两者都只用序列尾部（RV 取最后 lookback 个收益、量比取最后 window 根），**输出逐值不变**；
   多要 120 根让随后尾段的 120 根请求直接命中，不触发 `refetch_larger`。
+  ⚠️ 二次检查补一处不逐字等价的边角：`_drop_forming_bar` 的「末根成交量 < 窗口中位 30%」判据，
+  中位数现在按 120 根算而非 60/30 根。扫描日末根由日期规则丢掉、与此无关；只有末根不是当日
+  且成交量异常低（半日交易）时两种窗口的中位可能落在阈值两侧。120 根的中位更稳，接受。
 - **同键并发只发一次**：`_INFLIGHT` 每键一把锁，4 个标的 worker + 预热线程同时要同一只票时，
   后到者等先到者拿回来再读缓存（计 `inflight_waits`）。`_BARS_CACHE` 读写也补上锁——
   此前 4 个 worker 无锁写 dict。
@@ -435,7 +481,7 @@ OptionsAgent、Bear 的 OptionsAgent、全链 OI、quote_set 先后各来取一�
 - `swarm_agents/cache.py` 的 `yfinance_cache_ttl=120`：A1 之后蜂不再自己取，这个 TTL 只剩 `_fetch_stock_data` 回退路径在用，待观察 09-08 计数后决定是否同样改业务日键。
 
 
-## [0.45.122] — 2026-09-05 — 预取成为一轮扫描的 yfinance 唯一取数点：四只蜂 8 处直连收进预取包，Oracle 三处共用一份期权链
+## [0.45.122] — 2026-09-05 — 预取成为一轮扫描的 yfinance 唯一取数点：四只蜂 7 处直连收进预取包，Oracle 三处共用一份期权链
 
 v0.45.118 诊断里的 A 项第一步。2026-09-04 蜂群段 2466s（占全程 62%）的结构性原因：
 每只票的 `.info` 被 Scout / Rival / Bear **各取一次**，`.history` 被 Rival 取一次、Scout 又
@@ -455,7 +501,7 @@ v0.45.118 诊断里的 A 项第一步。2026-09-04 蜂群段 2466s（占全程 6
   （新）：预取优先、落空回退到**逐字相同**的直连。`_yf_history` 请求比预取包短的 period
   时按日历日切尾巴（yfinance 的 `period="Nd"` 就是从现在往回 N 个日历日）；请求更长 →
   不猜，回退。`_yf_close_panel` 两列有一列不在包里就**整个面板回退**，不拼一半预取一半实时。
-- 迁移点（8 处直连 → 访问器）：Scout 板块兜底 `.info` + 25 日收盘面板 `download`；
+- 迁移点（7 处直连 → 访问器；二次检查更正，原文写 8——第 8 处 Bear `fast_info` 是在 v0.45.128 才迁的）：Scout 板块兜底 `.info` + 25 日收盘面板 `download`；
   Rival 分析师 `.info` + 3 个月 `.history`；Bear 空头仓位 `.info`；Chronos `.calendar` +
   `analyst_price_targets`（不再复用 Ticker 对象，`t` 退化成「步骤 1 进入过」的标记）。
 - **Oracle 三处共用 memo**：`_yf_option_memo(ticker)` 在 `analyze()` 里建一次（到期日列表 +
