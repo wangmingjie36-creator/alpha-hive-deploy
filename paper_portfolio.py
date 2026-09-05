@@ -494,12 +494,19 @@ def _snapshot_score(snapshot: Dict) -> Optional[float]:
     `or 0` 会，所以不给默认值，返回 None 让调用方显式拒绝。
     """
     raw = snapshot.get("composite_score")
-    if raw is None:
+    # v0.45.121：类型闸收紧到仓库既有惯例
+    # （`dashboard_renderer` 里 `_radar_data` / `_detail` / `_build_dim_dq_html`
+    #  等 5 处全是这一句）。v0.45.110 初版写的是 `float(raw)` + try/except，
+    # 漏了两类：
+    #   · **bool**——`bool` 是 `int` 子类，`float(True)` = 1.0，于是
+    #     `composite_score=True` 会以「强看空」身份通过看空闸（`1.0 <= 4.85`）。
+    #     讽刺的是同一天 v0.45.114 给 `_build_dim_dq_html` 写的守卫**挡了** bool，
+    #     这里没挡——「修一支漏一支」这次漏在我自己两处新代码之间。
+    #   · **数字字符串**——`float("7.5")` 成功，一个类型已经错掉的值被当好数收下。
+    # 生产 1081 条快照的 `composite_score` 100% 是 `float`，故收紧零影响。
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
         return None
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        return None
+    val = float(raw)
     return val if math.isfinite(val) else None
 
 

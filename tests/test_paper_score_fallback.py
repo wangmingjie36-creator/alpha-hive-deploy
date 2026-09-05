@@ -54,6 +54,14 @@ DEGENERATE = [
     pytest.param({"composite_score": float("inf")}, id="+inf"),
     pytest.param({"composite_score": float("-inf")}, id="-inf"),
     pytest.param({"composite_score": "N/A"}, id="非数字符串"),
+    # v0.45.121 补：初版遗漏的两类。
+    # bool 是 int 子类 ⇒ float(True)=1.0 会以「强看空」通过看空闸（1.0 <= 4.85）；
+    # 数字字符串 float("7.5") 会成功，一个类型已经错掉的值被当好数收下。
+    # 讽刺的是同一天 v0.45.114 给 _build_dim_dq_html 写的守卫**挡了** bool，
+    # 这里没挡——「修一支漏一支」漏在同 session 我自己两处新代码之间。
+    pytest.param({"composite_score": True}, id="True"),
+    pytest.param({"composite_score": False}, id="False"),
+    pytest.param({"composite_score": "7.5"}, id="数字字符串"),
 ]
 # 真实出现过的分数（2026-06-01~09-03 世代），改后必须仍然开得出来
 REAL_BULL, REAL_BEAR = 7.15, 4.60
@@ -83,6 +91,14 @@ class TestGateRejectsDegenerateScores:
         ok, why = _should_open(_snap(extra, direction), set(), as_of="2026-09-03")
         assert not ok, f"{direction} + {extra} 通过了闸门：{why}"
         assert "composite_score" in why
+
+    def test_bool_would_pass_bear_gate_under_old_code(self):
+        """反向自证：`float(True)` = 1.0，而 `1.0 <= entry_score_bear`，
+        所以旧的 `float(raw)` 写法下 `composite_score=True` 会以
+        「强看空」身份进场。判据验的是那个比较本身，不是碰巧。"""
+        assert float(True) == 1.0
+        assert not (1.0 > CONFIG["entry_score_bear"])    # bear 侧不拒绝
+        assert isinstance(True, int) and not isinstance(True, float)
 
     def test_nan_would_pass_both_gates_under_old_code(self):
         """反向自证：判据必须能判出旧写法是坏的。

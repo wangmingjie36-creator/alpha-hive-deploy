@@ -5,8 +5,106 @@
 
 ---
 
-## [0.45.121] — 2026-09-05 — 占位（进行中：二次复查本 session 改动——bool 穿透 + 陈旧断言 + CI 机器假设排查）
+## [0.45.121] — 2026-09-05 — 二次复查本 session 全部改动：查出 3 个真 bug，其中 2 个是我自己制造的
 
+用户要求二次复查 v0.45.109~117 的全部改动。查出 3 个真问题，另有 2 处「看着像 bug
+实际不是」已证伪。3 个里有 2 个是本 session 自己引入的，且**都是我这几版反复写在
+CHANGELOG 里警告别人的那两个形态**。
+
+### Fixed — ① `_snapshot_score` 不拒绝 bool：`composite_score=True` 以「强看空」进场
+
+v0.45.110 建 `_snapshot_score()` 时写的是 `float(raw)` + `try/except`，
+漏了两类输入：
+
+| 输入 | 旧行为 | 后果 |
+|---|---|---|
+| `True` | `float(True)` = **1.0** | `1.0 <= entry_score_bear(4.85)` ⇒ **通过看空闸** |
+| `False` | `float(False)` = **0.0** | 同上，且 0.0 是本量表最强看空 |
+| `"7.5"` | `float("7.5")` = 7.5 | 类型已经错掉的值被当好数收下 |
+
+`bool` 是 `int` 子类，`isinstance` 不加显式排除就漏。**而仓库里同类守卫共 5 处
+（`_radar_data` / `_detail` / 行 2372 等）全都写了 `not isinstance(x, bool)`——
+包括我在同一天 v0.45.114 给 `_build_dim_dq_html` 写的那一处。**
+也就是说「修一支漏一支」这次漏在**同一个 session 我自己的两处新代码之间**。
+
+修法收紧到仓库既有惯例 `isinstance(raw, (int, float)) and not isinstance(raw, bool)`。
+生产 1081 条快照的 `composite_score` **100% 是 `float`**，收紧零影响。
+
+测试补 3 个夹具（`True` / `False` / `"7.5"`）与一条反向自证
+（直接验 `float(True)==1.0` 且 `not (1.0 > 4.85)`）。
+mutation（基线 `collected 86`）：M1 还原 v0.45.110 初版写法 → **12 failed**；
+M2 只去掉 `bool` 那半边 → **8 failed**。
+
+### Fixed — ② 三处已被推翻的断言还留在代码里，其中一处是运行时 warning
+
+v0.45.114 修好了 `_build_dim_dq_html`（全缺不再返回空串），但 `dashboard_renderer.py`
+里有 3 处仍在断言旧行为：
+
+- **行 722-723：`_log.warning` 的文案** —— 「dim_data_quality 很可能同时为空
+  （整行不渲染），此时雷达图是**唯一**能看出无数据的通道」。这是会打进**生产日志**
+  的话，现在是假的，会把排查的人引去别处。已改为「两条通道应当同时报警；
+  只有一条报警说明上游 `dimension_scores` 与 `dim_data_quality` 不同步」——
+  顺带把它变成一条更有用的诊断。
+- **行 734：注释**「`_build_dim_dq_html` 会返回空串（整行不渲染），**接不住这种情况**」
+  —— 已被推翻，标注更正。
+- **行 714：历史叙述**「三条通道当时全是哑的」的第 ② 条 —— 叙述本身是过去时、
+  没错，但补一行「✅ v0.45.114 已修」，免得读者以为仍然成立。
+
+⚠️ **更要紧的是：v0.45.114 的 CHANGELOG 声称「`_radar_data` 注释里
+『接不住这种情况』的说法一并更正」——那句话是假的。** 我当时只改了测试文件，
+生产源码 4 处引用里改了 0 处。
+
+这正是 v0.45.75「证伪了，但代码里没改」的复现，且多出一层：
+**「我已经改了」这句话本身也要核对**。写 CHANGELOG 时若说了「顺带更正了 X」，
+提交前必须 grep 一遍 X 还在不在。
+
+### Notes — ③ CI 首次运行即红（v0.45.117 的验证盲区，已由 v0.45.119 认领）
+
+v0.45.117 合并的 CI 第一次跑就红：`tests/test_no_undefined_names.py:39`
+硬编码 `PY = "/usr/local/bin/python3"`，ubuntu runner 上不存在。
+
+**它和我在 v0.45.117 亲手修的那条是同一物种**：
+`ruff_available` 守卫只判 `returncode != 0`，而可执行文件不存在时
+`subprocess.run` 抛的是 `FileNotFoundError`——**守卫只堵了两条失败路径中的一条**。
+我在 v0.45.117 的 CHANGELOG 里把这个判据写下来了，却**没有 grep 同类实例**。
+
+**验证盲区的根因**：v0.45.117 做了干净检出（只含被跟踪文件）+ 断网 + 后来又补了
+干净 venv，唯独**三样全在同一台 Mac 上跑**，而 `/usr/local/bin/python3` 在这台机器上
+存在。CI 的第四个差异是「**另一台机器**」，我没模拟。
+
+本次做了同物种系统排查：`tests/` 25 处 `subprocess.run` 中，
+用绝对路径可执行文件且无 `shutil.which` / `FileNotFoundError` / `OSError` 前置的
+**只有这 1 处**。另两处硬编码绝对路径
+（`test_scan_catchup.py:112`、`test_thesis_break_schema.py:85`）**都有正确的
+`os.path.isdir/exists` + `pytest.skip` 守卫**，不受影响。
+
+修复归 v0.45.119（另一 session 已占号），本条不重复动手，只记录判据：
+**给 CI 做验证要同时模拟四件事——干净检出、无网络、干净依赖、以及「不是你这台机器」。**
+
+### Notes — 两处「看着像 bug、实际不是」
+
+**`requirements.txt` 是否缺依赖（不是问题）**：v0.45.117 的 CI 验证用的是本机完整
+Python 环境，而 CI 只装 `requirements.txt + pytest + pytest-timeout`。本次建干净 venv
+按 workflow 原样安装后重跑：**2653 passed, 23 skipped, 0 failed**，
+`yfinance/pandas/numpy/matplotlib/jinja2/sklearn/bs4/plotly/seaborn/pytz/requests/httpx/schedule`
+全部可 import。依赖清单齐全。
+
+**`run_replay` 结果与昨天不一致（不是问题）**：复查时四臂回放 NAV 由 $53,111.32
+变成 $53,070.92，已平仓账本与末态持仓却逐笔全等。查因：
+`equity_n` **92 → 93** —— 09-04 的日常扫描已落库，**回放窗口多了一天**，
+末日不再是 09-03。不是回放不确定，也不是数据修订。
+把本次改动临时还原、在同一时刻数据下重跑对照，**四臂逐字节全等**，
+证实本次改动零行为影响。
+（⚠️ 顺带记下判据：**跨天比对 `run_replay` 输出前先核对 `equity_n`／末日**，
+窗口会随扫描增长；同日内的比对才是可比的。）
+
+### 验证
+
+- 全量套件 **2702 passed, 18 skipped**（v0.45.117 的 2674 + 另一 session 新增 + 本次 4 条）
+- `ruff check` 通过（`paper_portfolio.py` / `dashboard_renderer.py` / 新测试）
+- 92→93 天四臂回放：本次改动前后**逐字节全等**
+- v0.45.112 删除的 `render_radar_chart` 无悬挂引用；
+  `candidate_sort_center=None` 可正常写进 `meta.json` 的 `config_snapshot`
 ## [0.45.120] — 2026-09-05 — 占位（进行中：回测批量取价——同一预测日的待检预测一次 yf.download，替代逐条 yf.history）
 
 ## [0.45.119] — 2026-09-05 — 占位（进行中：CI 首红——F821 守卫硬编码 Mac 解释器路径）
