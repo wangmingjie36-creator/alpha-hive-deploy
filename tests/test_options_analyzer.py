@@ -324,6 +324,7 @@ class TestGexNoneContract:
         assert (analyzer.generate_options_score(50.0, 1.0, None, [])
                 == analyzer.generate_options_score(50.0, 1.0, 0.0, []))
 
+    @pytest.mark.network  # 打真实外部端点，离线必挂；CI 排除，本机照跑
     def test_analyze_survives_none_gex(self, monkeypatch):
         """整条链 gamma×OI 全为 0 → GEX 为 None → analyze() 不得抛异常。
 

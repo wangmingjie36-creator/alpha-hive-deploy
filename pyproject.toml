@@ -22,6 +22,12 @@ addopts = [
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks integration tests requiring external APIs",
+    # v0.45.94: 打真实外部端点（yfinance / Treasury / CNN）因而**结果不确定**的测试。
+    # 与 integration 的区别是意图：integration 测的是「对接外部系统这件事本身」，
+    # network 测的是本地逻辑、只是恰好在路径上碰了网络。
+    # **刻意不加进 addopts 的默认排除**——本机有网，这些测试照常跑、照常有价值；
+    # 只有 CI 用 `-m "not integration and not network"` 把它们摘掉换取确定性。
+    "network: hits live external endpoints; excluded in CI (run locally with -m network)",
 ]
 
 [tool.coverage.run]

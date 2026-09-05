@@ -1,5 +1,12 @@
-# ==================== GitHub Actions（PAT 无 workflow scope，不提交）====================
-.github/
+# ==================== GitHub Actions ====================
+# v0.45.94 解除此前的 `.github/` 整目录忽略。原因写的是「PAT 无 workflow scope」——
+# 那对 git 远程凭据确实成立（push 含 .github/workflows/ 的提交会被 GitHub 拒绝），
+# 但**不是没有 CI 的充分理由**：GitHub App / MCP 的 contents API 带 workflows 权限，
+# 可以直接写。workflow 文件因此改由 API 提交，仓库里正常跟踪、正常 review。
+#
+# ⚠️ 改 `.github/workflows/*.yml` 时注意：`git push` 仍可能因 PAT 缺 workflow scope
+# 被拒。走 GitHub API（Claude Code 的 create_or_update_file / push_files）提交那个文件，
+# 其余改动照常 push。
 
 # ==================== Python ====================
 __pycache__/

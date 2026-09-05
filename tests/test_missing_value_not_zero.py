@@ -16,6 +16,7 @@
 """
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -98,6 +99,30 @@ class TestBearSkewReadsOracleBee:
 # ─────────────── ③ SPY 基准：取数失败 ≠ 大盘没动 ───────────────
 
 class TestSPYBenchmarkUnavailable:
+    """v0.45.117：补 `pheromone.db` 缺失时的 skip 守卫。
+
+    这三条已有守卫 `if "error" in r: pytest.skip(...)`，但它接不住
+    `portfolio_backtest._find_db()` 抛的 `FileNotFoundError`——**返回错误字典与
+    抛异常是两条不同的失败路径，守卫只堵了前一条。**
+
+    单独跑时看不出来：`run_backtest` 会先在「无已验证预测数据」处返回错误字典，
+    根本走不到 `_find_db()`。只有在全量跑里，前面某个测试留下的状态把它推过了
+    那道早期检查，才会撞上缺库的 raise。所以这是一条**只在特定执行组合下才现形**
+    的脆弱性——v0.45.117 接 CI 时，`network` marker 摘掉 29 项改变了执行组合，
+    它就现形了（干净检出 + 断网下 3 failed）。
+
+    生产库 `pheromone.db` 未被 git 跟踪，CI runner 上必然没有，
+    故按仓库既有惯例（`test_ml_expected_return.py` / `test_catalyst_availability.py`）
+    显式 skip。
+    """
+
+    PROD_DB = Path(__file__).resolve().parent.parent / "pheromone.db"
+
+    @pytest.fixture(autouse=True)
+    def _require_prod_db(self):
+        if not self.PROD_DB.exists():
+            pytest.skip("生产 pheromone.db 不存在")
+
     def test_empty_prices_yields_none_not_zero(self, monkeypatch):
         import portfolio_backtest as pb
         monkeypatch.setattr(pb, "_fetch_spy_prices", lambda *a, **k: {})

@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 # ==================== _build_swarm_report 测试 ====================
 
+@pytest.mark.network  # 走真实取数路径（yfinance/Treasury），离线必挂；CI 排除，本机照跑
 class TestBuildSwarmReport:
     """测试 _build_swarm_report 的核心逻辑（不启动完整 reporter）"""
 
@@ -131,6 +132,7 @@ class TestBuildSwarmReport:
 
 # ==================== 方案9: 数据质量关卡测试 ====================
 
+@pytest.mark.network  # 走真实取数路径（yfinance/Treasury），离线必挂；CI 排除，本机照跑
 class TestDataQualityGate:
     """方案9: _build_swarm_report 数据质量关卡"""
 
