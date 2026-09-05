@@ -7,6 +7,7 @@
 
 ## [0.45.121] — 2026-09-05 — 二次复查本 session 全部改动：查出 3 个真 bug，其中 2 个是我自己制造的
 
+<<<<<<< HEAD
 用户要求二次复查 v0.45.109~117 的全部改动。查出 3 个真问题，另有 2 处「看着像 bug
 实际不是」已证伪。3 个里有 2 个是本 session 自己引入的，且**都是我这几版反复写在
 CHANGELOG 里警告别人的那两个形态**。
@@ -106,6 +107,61 @@ Python 环境，而 CI 只装 `requirements.txt + pytest + pytest-timeout`。本
 - v0.45.112 删除的 `render_radar_chart` 无悬挂引用；
   `candidate_sort_center=None` 可正常写进 `meta.json` 的 `config_snapshot`
 ## [0.45.120] — 2026-09-05 — 占位（进行中：回测批量取价——同一预测日的待检预测一次 yf.download，替代逐条 yf.history）
+=======
+## [0.45.120] — 2026-09-05 — 回测批量取价：32 条同日待检逐条各打一次 yfinance，改为一次 download 全覆盖
+
+v0.45.118 诊断里的 C 项。2026-09-04 回测段 342s（全程 66 分钟的 8.6%），来源是
+`run_backtest` 对每条待检预测各发一次 `yf.Ticker().history()`：t1/t30 一条 1 次，
+t7 一条 4 次（路径 OHLC、SPY 同期收盘、SPY 入场价、未截断 T+7 收盘）。当天
+32 条待检**全是同一预测日的 30 只票**，每次都过 `yf_gate` 0.5 req/s 的闸，
+~40 次串行 × (2s 闸 + 延迟) 就是那 5 分钟——而这几十次取的是高度重叠的窗口。
+
+### Changed — `backtester.py`
+
+- **`_prefetch_backtest_prices(pending_map)`**（新）：开跑前按三个周期全部待检预测
+  算出 `[最早预测日, 今天+11)` 的窗口（+11 覆盖 `_get_price_at_date` 的目标日+10），
+  所有票 + SPY 一次 `yf.download(group_by="ticker", auto_adjust=True, threads=False)`
+  填 `_ohlc_cache`。`threads=False`：顺序打 Yahoo，不拿 30 并发去撞 429。
+- **`_history(ticker, start, end)`**（新）：`yf.Ticker(t).history(start=, end=)` 的等价物。
+  命中缓存且窗口覆盖 → 按 `index.date` 切 `[start, end)`（与 `history` 同为左闭右开）；
+  否则**原样**逐票 `history`——退化路径就是改动前的路径，不是另一套逻辑。
+- 三个取价点（`_get_price_at_date` / `_simulate_trade_path` / `_get_spy_entry_price`）
+  改走 `_history`；`run_backtest` 先取齐三个周期的待检再预取，结束打一行
+  「批量下载 N 次覆盖 M 只 | 缓存切片 X 次 | 逐票回退 Y 次」。
+- 模块级纯函数 `_split_download_frame` / `_slice_by_date`，便于离线测试：
+  多票帧 MultiIndex 两种层序都认、单票平列名认、**多票却平列名不猜（整轮回退）**、
+  各票日历不同的 NaN 对齐行 `dropna(subset=["Close"])`（`Ticker.history` 没有这些行）、
+  全 NaN 票不入缓存（否则下游拿到空切片会当「无数据」跳过评分）。
+
+**不变的部分**：未收盘护栏照旧作用在切片上（批量下载同样带回今天正在形成的
+bar）；失败不入缓存（download 抛错 / 空帧只记 warning，本轮全部回退）；
+`backfill_trading_costs.py` 等直接调三个取价点的脚本没有预取，走的就是回退路径。
+
+### Fixed — 首版在既有测试上炸了 8 条
+
+`tests/test_backtest_forming_bar.py` 用 `Backtester.__new__` 绕过 `__init__` 造实例，
+首版 `_history` 直接读 `self._ohlc_window` → AttributeError。修在代码不修在测试：
+`getattr(..., None)` 带默认，没有缓存属性的实例必须表现得和「没预取」完全一样。
+已加回归测试 `test_instance_built_without_init_behaves_like_no_prefetch`。
+
+### 验证
+
+- `tests/test_backtester_batch_prices.py` 22 条。核心一条是**等价性**：同一份合成
+  OHLC，批量路径（download 成功、`Ticker` 一碰即 AssertionError）与逐票路径
+  （download 抛错、`Ticker.history` 切同一份数据）跑 `run_backtest`，三个周期的
+  结果字典与写库调用（`update_check_result` / `update_t7_path_result` 逐字段）**相等**；
+  批量路径 download 恰 1 次、逐票 0 次，缓存切片 ≥5 次。
+- 变异五条全红：M1 `_history` 永不查缓存（3 红）/ M2 拆帧不丢 NaN 行（2 红）/
+  M3 不检查窗口覆盖（2 红）/ M4 切片改闭区间（3 红）/ M5 预取漏掉 SPY（2 红）。
+- 邻近 8 个测试文件 198 条 + 全量套件通过（见提交信息）。
+
+### 预期
+
+回测段 ~40 次闸门排队 → 1 次 download（内部顺序 31 个 HTTP，无闸门间隔）。
+按 09-04 的数推算回测段从 342s 降到 30s 量级，Step 2 余量从 7% 回到 ~15%。
+**待 09-08 扫描的 `status.json.scan_timing.phases.backtest_weights` 实测**，此前不算数。
+
+>>>>>>> origin/main
 
 ## [0.45.119] — 2026-09-05 — 占位（进行中：CI 首红——F821 守卫硬编码 Mac 解释器路径）
 

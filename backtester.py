@@ -775,6 +775,48 @@ class PredictionStore:
             return []
 
 
+# ==================== v0.45.120：批量日线帧的拆分与切片（纯函数，便于离线测试） ====================
+
+def _split_download_frame(raw, tickers: List[str]) -> Dict[str, "object"]:
+    """把多票 `yf.download(group_by="ticker")` 的结果拆成 {ticker: 平列名 OHLC 帧}。
+
+    只收「有 Close 且去 NaN 后非空」的票；其余不进字典，调用方按未缓存处理
+    （走逐票回退）。形状不认识（多票却平列名）→ 空字典，整轮回退。
+    """
+    out: Dict[str, "object"] = {}
+    if raw is None or getattr(raw, "empty", True):
+        return out
+    cols = raw.columns
+    picked: Dict[str, "object"] = {}
+    if hasattr(cols, "levels"):
+        lvl0 = set(cols.get_level_values(0))
+        lvl1 = set(cols.get_level_values(1))
+        for t in tickers:
+            if t in lvl0:
+                picked[t] = raw[t]
+            elif t in lvl1:
+                picked[t] = raw.xs(t, axis=1, level=1)
+    elif len(tickers) == 1:
+        picked[tickers[0]] = raw
+    else:
+        return out
+    for t, sub in picked.items():
+        if "Close" not in sub.columns:
+            continue
+        sub = sub.dropna(subset=["Close"])
+        if sub.empty:
+            continue
+        out[t] = sub
+    return out
+
+
+def _slice_by_date(df, start, end):
+    """`df` 中日期落在 [start, end) 的行。按 `index.date` 比较，tz-aware / naive 皆可。"""
+    dates = df.index.date
+    mask = (dates >= start) & (dates < end)
+    return df[mask]
+
+
 class Backtester:
     """
     回测引擎 - 自动检验预测准确率
@@ -789,6 +831,13 @@ class Backtester:
     def __init__(self, db_path: str = DB_PATH):
         self.store = PredictionStore(db_path)
         self._spy_entry_cache: Dict[str, float] = {}
+        # v0.45.120：一轮回测内的日线缓存（ticker → 整段 OHLC），由
+        # `_prefetch_backtest_prices` 一次 `yf.download` 填满，三个取价点
+        # 通过 `_history()` 切片。窗口外/未缓存的请求走原来的逐票 history。
+        self._ohlc_cache: Dict[str, "object"] = {}
+        self._ohlc_window: Optional[tuple] = None      # (start_date, end_date)，[start, end)
+        self._ohlc_stats = {"batch_downloads": 0, "batch_tickers": 0,
+                            "cache_hits": 0, "fallback_history": 0}
 
     def _store_path_result(
         self, pred_id, price_t7, return_t7, is_correct,
@@ -816,6 +865,108 @@ class Backtester:
             dir_ambiguous_t7=dir_ambiguous_t7,
         )
 
+    # ==================== v0.45.120：回测批量取价 ====================
+    #
+    # 2026-09-04 实测：回测段 342s，其中待检预测 32 条全是**同一预测日**的 30 只票，
+    # 却逐条各发一次 `yf.Ticker().history()`；t7 一条还要发 4 次（路径 OHLC、
+    # SPY 收盘、SPY 入场、未截断 T+7 收盘）。每次都过 `yf_gate` 的 0.5 req/s 闸门，
+    # 于是 ~40 次串行 × (2s 闸 + 延迟) 就是那 5 分钟。
+    #
+    # 改法：开跑前按全部待检预测算出一个 [最早预测日, 今天+11) 的窗口，所有票
+    # （含 SPY）一次 `yf.download` 拉回来放进 `_ohlc_cache`，三个取价点改走
+    # `_history()` 从缓存切 [start, end)——切片语义与 `Ticker.history(start, end)`
+    # 一致（含 start、不含 end、按交易所日历的日期比较）。
+    #
+    # 不变的部分：
+    #   · 缓存未覆盖（窗口外 / 批量下载失败 / 某票全 NaN）→ 原样走逐票 history，
+    #     退化路径就是改动前的路径，不是另一套逻辑；
+    #   · 未收盘护栏（`_get_price_at_date` 里的 `_exchange_now` 判定）照旧作用在
+    #     切片结果上——批量下载同样会带回今天正在形成的那根 bar；
+    #   · 失败不入缓存：download 抛错/空帧只记 warning，本轮全部回退。
+    #
+    # 多票 download 的两个坑（见记忆 alpha-hive-yfinance-multiindex）：
+    #   · 列是 MultiIndex，`group_by="ticker"` 时 level-0 是票名；单票有时平列名；
+    #   · 各票交易日历不同时用 NaN 行对齐——`Ticker.history` 不会有这些行，
+    #     必须 `dropna(subset=["Close"])` 才是同一口径。
+
+    _OHLC_TAIL_DAYS = 11   # 窗口末尾裕度：_get_price_at_date 的 end = 目标日 + 10
+
+    def _prefetch_backtest_prices(self, pending_map: Dict[str, List[Dict]]) -> None:
+        """按待检预测一次性批量下载日线。失败静默回退（记 warning），不抛。"""
+        if yf is None:
+            return
+        tickers = set()
+        dates = []
+        for rows in pending_map.values():
+            for pred in rows or []:
+                t = pred.get("ticker")
+                d = pred.get("date")
+                if t and d:
+                    tickers.add(str(t))
+                    dates.append(str(d))
+        if not tickers or not dates:
+            return
+        tickers.add("SPY")   # t7 基准：入场价 + 同期收盘
+        try:
+            start_date = datetime.strptime(min(dates), "%Y-%m-%d").date()
+            # `_pdt_today()` 回的是 "YYYY-MM-DD" 字符串（与 get_pending_checks 同钟）
+            end_date = (datetime.strptime(_pdt_today(), "%Y-%m-%d").date()
+                        + timedelta(days=self._OHLC_TAIL_DAYS))
+        except (ValueError, TypeError) as e:
+            _log.warning("回测批量取价：日期解析失败，回退逐票取价：%s", e)
+            return
+
+        symbols = sorted(tickers)
+        try:
+            raw = yf.download(
+                tickers=symbols,
+                start=start_date.strftime("%Y-%m-%d"),
+                end=end_date.strftime("%Y-%m-%d"),
+                group_by="ticker",
+                auto_adjust=True,      # 与 Ticker.history() 的默认一致
+                progress=False,
+                threads=False,         # 顺序打 Yahoo，不用 30 并发去撞 429
+            )
+        except Exception as e:  # noqa: BLE001 - 批量失败只回退，不阻断回测
+            _log.warning("回测批量取价失败（%s: %s），本轮回退逐票取价",
+                         type(e).__name__, e)
+            return
+
+        frames = _split_download_frame(raw, symbols)
+        if not frames:
+            _log.warning("回测批量取价：download 返回空帧或形状不认识，本轮回退逐票取价")
+            return
+        self._ohlc_cache = frames
+        self._ohlc_window = (start_date, end_date)
+        self._ohlc_stats["batch_downloads"] += 1
+        self._ohlc_stats["batch_tickers"] += len(frames)
+        missing = sorted(set(symbols) - set(frames))
+        _log.info("回测批量取价：1 次 download 覆盖 %d/%d 只（%s ~ %s）%s",
+                  len(frames), len(symbols), start_date, end_date,
+                  f"，缺 {' '.join(missing)} 走逐票回退" if missing else "")
+
+    def _history(self, ticker: str, start: str, end: str):
+        """`yf.Ticker(ticker).history(start=, end=)` 的等价物：命中缓存就切片，
+        否则原样逐票取。异常行为与原来完全一致（回退分支抛什么，这里就抛什么）。"""
+        # getattr 带默认：`Backtester.__new__` 造出来的实例（既有测试与备份脚本
+        # 的用法）没有这几个属性，必须表现得和「没预取」完全一样，而不是 AttributeError。
+        win = getattr(self, "_ohlc_window", None)
+        stats = getattr(self, "_ohlc_stats", None)
+        df = getattr(self, "_ohlc_cache", {}).get(ticker) if win else None
+        if df is not None:
+            try:
+                s = datetime.strptime(start, "%Y-%m-%d").date()
+                e = datetime.strptime(end, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                s = e = None
+            if s is not None and win[0] <= s and e <= win[1]:
+                if stats is not None:
+                    stats["cache_hits"] += 1
+                return _slice_by_date(df, s, e)
+        if stats is not None:
+            stats["fallback_history"] += 1
+        return yf.Ticker(ticker).history(start=start, end=end)
+
     def _get_spy_entry_price(self, predict_date: str) -> Optional[float]:
         """获取 SPY 在 predict_date 的收盘价（作为 benchmark 入场价），带缓存。"""
         if predict_date in self._spy_entry_cache:
@@ -825,10 +976,7 @@ class Backtester:
         try:
             start = datetime.strptime(predict_date, "%Y-%m-%d")
             end = start + timedelta(days=5)
-            hist = yf.Ticker("SPY").history(
-                start=start.strftime("%Y-%m-%d"),
-                end=end.strftime("%Y-%m-%d"),
-            )
+            hist = self._history("SPY", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
             if hist.empty:
                 return None
             px = float(hist["Close"].iloc[0])
@@ -946,8 +1094,15 @@ class Backtester:
         # 回测检验
         results = {}
 
+        # v0.45.120：先把三个周期的待检都取出来，一次批量下载覆盖全部取价点
+        pending_map = {p: (self.store.get_pending_checks(p) or []) for p in ("t1", "t7", "t30")}
+        try:
+            self._prefetch_backtest_prices(pending_map)
+        except Exception as _pe:  # noqa: BLE001 - 预取是优化，不是前提
+            _log.warning("回测批量取价异常（%s: %s），回退逐票取价", type(_pe).__name__, _pe)
+
         for period in ["t1", "t7", "t30"]:
-            pending = self.store.get_pending_checks(period)
+            pending = pending_map[period]
             if not pending:
                 results[period] = {"checked": 0, "correct": 0, "skipped": 0}
                 continue
@@ -1095,6 +1250,11 @@ class Backtester:
 
             pass  # 准确率已计算
 
+        st = getattr(self, "_ohlc_stats", None) or {
+            "batch_downloads": 0, "batch_tickers": 0, "cache_hits": 0, "fallback_history": 0}
+        _log.info("回测取价：批量下载 %d 次覆盖 %d 只 | 缓存切片 %d 次 | 逐票回退 %d 次",
+                  st["batch_downloads"], st["batch_tickers"],
+                  st["cache_hits"], st["fallback_history"])
         return results
 
     def _get_price_at_date(
@@ -1118,11 +1278,8 @@ class Backtester:
             # 向后留 10 天窗口应对节假日连休
             end_date = target_date + timedelta(days=10)
 
-            stock = yf.Ticker(ticker)
-            hist = stock.history(
-                start=target_date.strftime("%Y-%m-%d"),
-                end=end_date.strftime("%Y-%m-%d"),
-            )
+            hist = self._history(
+                ticker, target_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
 
             if hist.empty:
                 return None
@@ -1233,10 +1390,10 @@ class Backtester:
             else:
                 end_dt = start_dt + timedelta(days=int((days_ahead + 3) * 1.5))
 
-            stock = yf.Ticker(ticker)
-            hist = stock.history(
-                start=(start_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
-                end=(end_dt + timedelta(days=2)).strftime("%Y-%m-%d"),
+            hist = self._history(
+                ticker,
+                (start_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                (end_dt + timedelta(days=2)).strftime("%Y-%m-%d"),
             )
 
             if hist.empty:
