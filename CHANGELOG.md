@@ -7,8 +7,51 @@
 
 ## [0.45.113] — 2026-09-05 — 占位（进行中：_radar_data 的 else 分支五维全缺时用 5.0 伪装成中性）
 
-## [0.45.112] — 2026-09-05 — 占位（进行中：删除死代码 chart_engine.render_radar_chart）
+## [0.45.112] — 2026-09-05 — 删除死代码 `chart_engine.render_radar_chart`（110 行，零调用点）
 
+用户让查 `chart_engine.py` 里 `float(raw.get("score") or 0)` 这处兜底。
+查下来这行**不是问题**——它所在的整个函数从来没被调用过。与其给一个没人读的
+函数打补丁，不如把函数删掉。
+
+### Removed — `render_radar_chart`（蜂群七维雷达图，Chart 3）
+
+**判定依据（按「死字段」那条：查功能是否生效先数读者）**：
+
+| chart_engine 的 6 个 `render_*` | 外部引用 |
+|---|---|
+| `render_confidence_chart` / `render_options_chart` | 被 `generate_deep_v2` 导入 |
+| `render_iv_term_chart` / `render_gex_profile_chart` / `render_deep_skew_chart` | 同上 |
+| **`render_radar_chart`** | **0** |
+
+唯一的 importer `generate_deep_v2.py:4803` 一次性导入 6 个里的 5 个，
+**独独跳过它**。另已排查：无 `getattr` / 字符串名 / `__all__` 形式的动态调用，
+`tests/` 里零覆盖。它是个只有生产者、没有消费者的函数。
+
+**顺带确认那行 `or 0` 即使被调用也从未触发**：生产 803 份 `analysis-*.json`
+（746 份含 `agent_details`）里，7 只蜂的 `score` 缺失 0 次、非数/NaN 0 次、
+恰为 0 的 0 次，最低观测值 1.47（GuardBeeSentinel）。`or 0` 需要 falsy 才生效，
+这个字段在真实数据里从来不 falsy。**两个独立的失效理由**，故不做「修补丁」处理。
+
+（该函数内另有 `float(sr.get("final_score") or 0)` 同 species，且 `or 0` 挡不住
+NaN——`float(nan) or 0` 因 NaN 是 truthy 而返回 nan，画图时 matplotlib 会静默
+把多边形在那个轴断开。一并随函数删除。同文件 `:91` 等处的同形写法留在原地，
+它们在**活**函数里，不在本次范围内。）
+
+### Changed — 章节编号顺延
+
+原 Chart 4/5 顺延为 Chart 3/4，不留编号空洞。
+
+### 验证
+
+- 删除 110 行（含段落分隔线）。**无孤儿依赖**：函数内用到的 `_score_color`
+  (3/6)、`_GOLD`、`_fig_to_b64`、`_get_mpl`、`_BG`/`_CARD`/`_T1`/`_T3` 全部
+  仍被其他 `render_*` 使用。
+- `generate_deep_v2` 那条 5 项 import 实测仍成立；`chart_engine` 现存
+  5 个 `render_*`，`render_radar_chart` 在模块里 0 次出现。
+- 相关测试 39 passed / 1 skipped。
+- ⚠️ `ruff check chart_engine.py` 报 1 条 `E401`（`import base64, io, math`），
+  `--select F401` 另报 `math` 未使用——**两条均为既有问题，删除前后逐字节一致**
+  （已用 `git show HEAD:chart_engine.py` 对比确认），不是本次引入，也不在本次范围内。
 ## [0.45.111] — 2026-09-05 — `_open_position` 的 `or 0.0` 会把缺分静默记成 0.0 分**落进账本**
 
 用户交办：把 v0.45.110 里保留的 `score=_snapshot_score(snapshot) or 0.0` 也去掉。
