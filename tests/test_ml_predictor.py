@@ -659,9 +659,14 @@ _HEAVY_CPU_TIMEOUT = 300
 
 
 class TestMLPredictionService:
-    pytestmark = pytest.mark.timeout(_HEAVY_CPU_TIMEOUT)
-
     """测试 MLPredictionService"""
+
+    # v0.45.129：`pytestmark` 必须放在 docstring **之后**。
+    # v0.45.127 把它插在了 docstring 前面，于是那行三引号字符串不再是类体的
+    # 第一条语句 —— 它退化成一个求值即丢弃的表达式，**类的 `__doc__` 变成 None**。
+    # 语法合法、测试全绿、ruff 也不报，只有实际读 `__doc__` 时才看得出来
+    # （实测：同文件另外 8 个类 `__doc__` 都在，只有这个是 None）。
+    pytestmark = pytest.mark.timeout(_HEAVY_CPU_TIMEOUT)
 
     def test_init(self):
         svc = MLPredictionService()

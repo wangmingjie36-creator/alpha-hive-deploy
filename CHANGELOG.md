@@ -50,8 +50,67 @@
 - 已知未做：`--samples-only` 早退路径不落 `scan_timing.json`（该路径注释已标死代码兜底）。
 
 
-## [0.45.129] — 2026-09-05 — 占位（进行中：复查 v0.45.127——类级 pytestmark 插到 docstring 之前，类丢了 __doc__）
+## [0.45.129] — 2026-09-05 — 复查 v0.45.127：`pytestmark` 插到了 docstring 之前，类的 `__doc__` 静默变成 None
 
+用户要求二次复查 v0.45.127。查出一个我自己引入的缺陷，另有三项核实为无问题。
+
+### Fixed — 三引号字符串一旦不是类体第一条语句，就不再是 docstring
+
+v0.45.127 给 `TestMLPredictionService` 加类级 `pytestmark` 时插到了 docstring **上面**：
+
+```python
+class TestMLPredictionService:
+    pytestmark = pytest.mark.timeout(300)
+
+    """测试 MLPredictionService"""      # ← 不再是第一条语句
+```
+
+于是那行三引号字符串从 docstring **退化成一个求值即丢弃的表达式**，
+`TestMLPredictionService.__doc__` 静默变成 `None`。
+
+**为什么整套工具链都没抓到它**：
+- 语法完全合法；
+- **不改变任何运行时行为** ⇒ 58 条测试全绿、全量 2797 全绿，
+  mutation check 也无从下手（没有行为可变异）；
+- `ruff`（本仓 `select = ["E","F","W"]`）不覆盖这一类。
+
+**是靠与兄弟类对照发现的**：同文件另外 8 个类 `__doc__` 都在，只有这个是 `None`。
+⇒ **判据：改一个类的头部之后，拿它和同文件的兄弟类比一比结构性属性**
+（`__doc__` / `__mro__` / 类属性），别只看测试绿不绿。
+
+修法：`pytestmark` 移到 docstring 之后。
+
+### Added — `tests/test_pytestmark_placement.py`（314 条）
+
+把上面那次「对照兄弟类」的动作固化成守卫：扫全仓 `tests/test_*.py`，
+凡是**源码里写了 docstring 字面量**的测试类，该字面量必须是类体第一条语句。
+
+判据取自 **AST 而不是 `__doc__`**：只看 `__doc__ is None` 分不出
+「本来就没写 docstring」和「写了但被挤掉」——前者不该管，后者必须报。
+
+含三条**反向自证**（喂坏形态必须判坏、喂好形态不得误判、没写 docstring 的类不该被管），
+外加一条夹具非空护栏（`len(ALL) > 50`）——扫描逻辑若坏掉返回空表，
+参数化测试会**零条用例且全绿**，那正是本 session 反复踩的「守卫恒真」。
+
+**mutation check**（基线 `collected 314` / 314 passed）：
+把 `pytestmark` 放回 docstring 之前 → **1 failed**，
+且失败用例直接点名 `test_ml_predictor::TestMLPredictionService`。
+
+### Notes — 另外三项核实为无问题
+
+1. **方法级标注干净**：`TestIncrementalTrainingLoop` 那处是装饰器加在 `def` 之前，
+   docstring 未受影响。
+2. **marker 不影响用例选择**：`timeout` 由 pytest-timeout 注册，本仓未启用
+   `--strict-markers`；CI 子集收集 **2846/2938，deselected 仍是 92**——
+   与加 marker 前一致，`-m "not integration and not network"` 未被干扰。
+3. **该文件其余 8 个类 `__doc__` 全在**，问题范围就是我动过的那一个类。
+
+### 验证
+
+`tests/test_ml_predictor.py` **58 passed**（`__doc__` 与 `pytestmark` 同时在位）；
+新守卫 **314 passed**；`ruff check` 通过；
+干净检出 + 干净 venv + 断网的 CI 模拟（真实 `--timeout=60`）**3150 passed, 23 skipped, 0 failed**；
+本机全量 **3171 passed, 18 skipped**。
 ## [0.45.128] — 2026-09-05 — 两项评分输入变更（用户决策）：Oracle 期限结构/skew 换 CBOE 源、Bear P/E 复活；追加世代边界
 
 v0.45.122 留下的两条决策，用户拍板「做」。两项都改变 `options_score` / Bear 分 → `final_score`，
