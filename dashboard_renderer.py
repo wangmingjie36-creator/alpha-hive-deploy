@@ -648,34 +648,67 @@ def _radar_data(ticker: str, swarm_detail: dict) -> list:
     """生成单个 ticker 的雷达图 5 维数据 [signal, catalyst, sentiment, odds, risk_adj]"""
     sd  = swarm_detail.get(ticker, {})
     dim = sd.get("dimension_scores", {})
-    if dim:
-        # ── v0.45.54：缺失维度不再补 5.0（雷达图上 = 50/100 正中间）──
-        # 5.0 会画出一个「不好不坏」的正常形状，与真实的中性评分完全同形。
-        # 雷达图画不出「—」，所以缺失维度画 **0** 并在 dim_dq 里标注 ——
-        # 0 在雷达图上是一个塌陷的角，视觉上就能看出「这一维没有」，
-        # 而 50 看起来完全正常。
-        def _d(k):
-            v = dim.get(k)
-            return float(v) * 10 if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
-        _missing_dims = [k for k in ("signal", "catalyst", "sentiment", "odds", "risk_adj")
-                         if not isinstance(dim.get(k), (int, float)) or isinstance(dim.get(k), bool)]
-        if _missing_dims:
-            _log.debug("[%s] 雷达图 %d/5 维缺失（%s），画 0 而非 50 中位",
-                       ticker, len(_missing_dims), ", ".join(_missing_dims))
-        signal, catalyst, sentiment, odds, risk_adj = (
-            _d("signal"), _d("catalyst"), _d("sentiment"), _d("odds"), _d("risk_adj"))
-    else:
-        ad = sd.get("agent_details", {})
-        signal   = float(ad.get("ScoutBeeNova",     {}).get("self_score", 5.0)) * 10
-        catalyst = float(ad.get("ChronosBeeHorizon",{}).get("self_score", 5.0)) * 10
-        oracle_det = ad.get("OracleBeeEcho", {}).get("details", {})
-        pc_r    = oracle_det.get("put_call_ratio", 1.0) or 1.0
-        odds    = max(0.0, min(100.0, (2.0 - float(pc_r)) / 1.5 * 100))
-        buzz_d  = ad.get("BuzzBeeWhisper", {}).get("discovery", "")
-        sm3     = _re.search(r'情绪\s*([\d.]+)%', buzz_d)
-        sentiment = float(sm3.group(1)) if sm3 else 50.0
-        bear_s  = float(ad.get("BearBeeContrarian", {}).get("score", 5.0))
-        risk_adj = max(0.0, (10.0 - bear_s) * 10)
+
+    # ── v0.45.113：五维**全缺**时不再从 agent_details 重建，直接全画 0 ──
+    #
+    # v0.45.54 已经为「缺一部分维度」定过调子：缺失画 0 不画 50，因为
+    # 「5.0 会画出一个不好不坏的正常形状，与真实的中性评分完全同形」。
+    # 但当时只改了下面 `if dim:` 那一支，**全缺走的 else 分支原封不动**——
+    # 修的是缺一部分，漏的是全缺，恰好是最该管的那一半。
+    #
+    # 实测后果（.swarm_results_*.json 100 份 / 1401 条目里命中 7 条，
+    # 全是 BRK-B，2026-08-04~08-14）：旧 else 分支产出
+    # `[50.0, 50.0, 50.0, 66.7, 50.0]` —— 一个毫无异常的正常五边形，
+    # 而它背后**没有一个数字是观测值**：
+    #   signal / catalyst  读 `self_score`，该键在两个数据源合计 4294 条里
+    #                      **存在 0 次**（真实键名是 `score`）⇒ 恒取默认 5.0
+    #   sentiment          正则 `情绪 N%` 匹配 discovery，而 discovery 当时是
+    #                      一条错误消息 ⇒ 恒取默认 50.0
+    #   odds               读 `put_call_ratio`，键不存在 ⇒ 默认 1.0 → 66.7
+    #   risk_adj           读 BearBee `score`，键**在**、值 5.0 —— 但那 5.0 是
+    #                      `swarm_agents/base.py` 无效 ticker 分支的硬编码常量，
+    #                      同一条目里 7 只蜂全都是 `dimension='validation'`、
+    #                      `confidence=0.0`、`score=5.0`
+    #
+    # 也就是说：这个 fallback 的五个输入分别是「不存在的键」「匹配不上的正则」
+    # 「不存在的键」和「错误路径常量」。**它从写下那天起就读不到任何真数据**，
+    # 只是每一处都被兜底值填成了看起来合理的数。留着它比没有更糟。
+    #
+    # 更糟的是三条本该报警的通道当时全是哑的：
+    #   ① 雷达图画成正常五边形（视觉上看不出）
+    #   ② `dim_data_quality` 五项全 None ⇒ `_build_dim_dq_html` 返回空串，
+    #      页面上**什么都不显示**（不是 0%，是整行消失）
+    #   ③ 下面 `if dim:` 那支的 `_log.debug` 只覆盖缺一部分，全缺时零日志
+    # 所以这里用 warning 而不是 debug：全缺比缺一部分是更强的异常。
+    #
+    # 根因已在别处修掉（`_RE_TICKER` 现接受 `-X`/`.X` 类份额后缀，故 08-26
+    # 之后 BRK-B 恢复正常），但这条分支仍然可达，且它伪造数据的方式与根因无关。
+    if not dim:
+        _log.warning("[%s] 雷达图 dimension_scores 全缺，五维全部画 0。"
+                     "注意页面上 dim_data_quality 很可能同时为空（整行不渲染），"
+                     "此时雷达图是唯一能看出「无数据」的通道。", ticker)
+        return [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # ── v0.45.54：缺失维度不再补 5.0（雷达图上 = 50/100 正中间）──
+    # 5.0 会画出一个「不好不坏」的正常形状，与真实的中性评分完全同形。
+    # 雷达图画不出「—」，所以缺失维度画 **0**：0 在雷达图上是一个塌陷的角，
+    # 视觉上就能看出「这一维没有」，而 50 看起来完全正常。
+    #
+    # v0.45.113 更正：本段原写「缺失维度画 0 **并在 dim_dq 里标注**」。
+    # 本函数不写 dim_dq —— 它来自上游的 `sd["dim_data_quality"]`，
+    # 由扫描侧产出，与这里无关。而且实测全缺时它五项皆为 None，
+    # `_build_dim_dq_html` 会返回空串（整行不渲染），**接不住这种情况**。
+    # 别再把它当成这里的配套标注。
+    def _d(k):
+        v = dim.get(k)
+        return float(v) * 10 if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+    _missing_dims = [k for k in ("signal", "catalyst", "sentiment", "odds", "risk_adj")
+                     if not isinstance(dim.get(k), (int, float)) or isinstance(dim.get(k), bool)]
+    if _missing_dims:
+        _log.debug("[%s] 雷达图 %d/5 维缺失（%s），画 0 而非 50 中位",
+                   ticker, len(_missing_dims), ", ".join(_missing_dims))
+    signal, catalyst, sentiment, odds, risk_adj = (
+        _d("signal"), _d("catalyst"), _d("sentiment"), _d("odds"), _d("risk_adj"))
     return [round(min(100, max(0, signal)),   1),
             round(min(100, max(0, catalyst)), 1),
             round(min(100, max(0, sentiment)),1),
