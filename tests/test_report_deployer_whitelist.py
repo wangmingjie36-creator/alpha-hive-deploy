@@ -64,6 +64,57 @@ class TestArtifactClassification:
         assert all(isinstance(p, str) for p in rd.REPORT_ARTIFACT_PATHS)
 
 
+class TestLedgerDirsAreCommitted:
+    """期权路线图三本账必须进白名单（v0.45.115）
+
+    v0.45.101~103 建了 `options_paper_state/` `vrp_state/` `hedge_state/`，
+    2026-09-04 首次落盘，但没人把它们加进白名单。后果是**慢性**的：
+    扫描每天改它们 → 白名单每天跳过 → 永远挂在工作区未提交。
+    2026-09-04 一次 `git reset --hard` 就把这类未提交状态清掉了
+    （`thesis_breaks_config.json` 的改动就是那样没的，至今没救回来）。
+
+    这三本装的是攒数期数据，**丢了无法回溯重取**：历史 CBOE 双边报价拿不回来、
+    逐日 iv−rv 记账无法补算、已开跨式腿的成本价没有第二个来源。
+    """
+
+    LEDGERS = [
+        "options_paper_state/earnings_signals.jsonl",
+        "options_paper_state/positions.jsonl",
+        "vrp_state/vrp_signals.jsonl",
+        "hedge_state/trades.jsonl",
+        "hedge_state/greeks_2026-09-04.json",
+    ]
+
+    @pytest.mark.parametrize("path", LEDGERS)
+    def test_ledger_files_are_artifacts(self, path):
+        assert rd._is_report_artifact(path), (
+            f"{path} 未进白名单 → 每日扫描改了它却不会自动提交 → "
+            "长期挂在工作区，一次 git reset --hard 即全部丢失（且无法回溯重取）"
+        )
+
+    def test_prefixes_stay_in_sync_with_path_list(self):
+        """两处清单必须同向。
+
+        `REPORT_ARTIFACT_PATHS` 决定**实际提交什么**，`_ARTIFACT_PREFIXES`
+        决定**「跳过了哪些」的提示怎么说**。只改一处，提示就会说谎——
+        说被跳过实际被提交，或反之。这正是 v0.45.23 记的那类
+        「两处默认值不同向」缺陷，只是这次两处都是清单。
+        """
+        dir_entries = {p for p in rd.REPORT_ARTIFACT_PATHS if p.endswith("/")}
+        assert dir_entries == set(rd._ARTIFACT_PREFIXES), (
+            "REPORT_ARTIFACT_PATHS 的目录项与 _ARTIFACT_PREFIXES 不一致：\n"
+            f"  只在路径表里: {sorted(dir_entries - set(rd._ARTIFACT_PREFIXES))}\n"
+            f"  只在前缀表里: {sorted(set(rd._ARTIFACT_PREFIXES) - dir_entries)}"
+        )
+
+    def test_code_under_similar_names_still_skipped(self):
+        """反向自证：加了三个目录不等于把闸门开松了。
+        名字相近但不在白名单的路径仍须被跳过。"""
+        for p in ("hedge_state.py", "vrp_signal.py", "portfolio_greeks.py",
+                  "options_paper_leg.py", "hedge_state_backup/x.json"):
+            assert not rd._is_report_artifact(p), f"{p} 不该被自动提交"
+
+
 class TestWhitelistCommitInRealGit:
     """在真实 git 仓库里验证 —— 分类函数对了不代表 git add 行为对"""
 
