@@ -623,7 +623,44 @@ class TestCreateMLModel:
 # MLPredictionService 测试
 # ===========================================================================
 
+# ── v0.45.127：重 CPU 测试单独放宽 timeout ──────────────────────────────
+#
+# 全局 `--timeout=60`（pyproject addopts）对这一族偏紧。它们每条都走
+# `train_model()` → sklearn `permutation_importance(n_repeats=5)`，是**纯 CPU**
+# 的重活，不是等 I/O。
+#
+# 空载实测（本机 Mac，`--durations=0`）：
+#     12.73s  test_predict_for_opportunity
+#      8.86s  test_predict_auto_trains
+#      8.14s  test_train_model
+#      7.31s  test_prediction_structure
+#      7.23s  test_incremental_train
+#      6.80s  test_get_model_info
+#      5.41s  TestIncrementalTrainingLoop::test_incremental_improves_or_maintains
+#   ≤ 0.40s  其余 51 条 ← 断层 13×，分界干净，不必逐条判断
+#
+# 为什么 60s 不够：2026-09-05 本机高负载下 `test_prediction_structure`
+# （空载 7.31s）**超过 60s** 被 pytest-timeout 杀掉 —— 实测慢化 ≥8.2×。
+# 同样的倍数套到最重的 12.73s 就是 ~104s，已经越界。而 CI runner
+# （ubuntu-latest，共享 2~4 vCPU）基线本就比本机慢，再叠加争用。
+#
+# 取 300s 的理由：对最重的 12.73s 留 23.6× 余量（覆盖上面那个 8.2× 再翻 2.9 倍）。
+# **放宽的代价是有界的**——workflow 的 `timeout-minutes: 20` 兜底，
+# 单条卡死最多吃掉 25% 的 job 预算，且 pytest-timeout 会先开火并**报出是哪一条**；
+# 而收紧的代价是 CI 零星变红，那正是这套 CI 设计要避免的头号问题
+# （「时红时绿的 CI 比没有 CI 更糟：它训练所有人忽略红灯」）。
+#
+# ⚠️ 这是**放宽超时**，不是放宽断言。若这些测试开始真的跑几分钟，
+# 说明 `permutation_importance` 的成本变了，该查的是那个，不是再调这个数。
+#
+# 用类级 `pytestmark`：本类 7 条里 6 条重，且它们重的原因是**本类的职责**
+# （训模型）。新加进本类的测试大概率同样重，类级标注让它自动继承。
+_HEAVY_CPU_TIMEOUT = 300
+
+
 class TestMLPredictionService:
+    pytestmark = pytest.mark.timeout(_HEAVY_CPU_TIMEOUT)
+
     """测试 MLPredictionService"""
 
     def test_init(self):
@@ -735,6 +772,9 @@ class TestIncrementalTrainingLoop:
         finally:
             os.unlink(path)
 
+    # v0.45.127：本类另外 4 条都 ≤0.03s，只有这条重（空载 5.41s），
+    # 故方法级标注而不是类级——不让快测试连坐失去 60s 的守卫强度。
+    @pytest.mark.timeout(_HEAVY_CPU_TIMEOUT)
     def test_incremental_improves_or_maintains(self):
         """增量学习后模型应保持功能正常（不崩溃，能预测）"""
         svc = MLPredictionService()

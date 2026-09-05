@@ -5,8 +5,81 @@
 
 ---
 
-## [0.45.127] — 2026-09-05 — 占位（进行中：ml_predictor 重 CPU 测试单独放宽 timeout）
+## [0.45.127] — 2026-09-05 — ml_predictor 七条重 CPU 测试单独放宽 timeout：60s 在负载下不够用
 
+v0.45.126 记下一条待办：全量套件曾有一次 `test_prediction_structure` 因
+`pytest-timeout` 超 60s 被杀，当时判定证据不足（只一次偶发），未动别人的测试。
+本版按用户要求处理，并在做的过程中**拿到了远比当初有力的证据**。
+
+### Changed — 七条走 `permutation_importance` 的测试改用 300s
+
+它们每条都走 `train_model()` → sklearn `permutation_importance(n_repeats=5)`，
+是**纯 CPU 的重活，不是等 I/O**。空载实测（`--durations=0`）：
+
+| 测试 | 空载 |
+|---|---|
+| `TestMLPredictionService::test_predict_for_opportunity` | **12.73s** |
+| `::test_predict_auto_trains` | 8.86s |
+| `::test_train_model` | 8.14s |
+| `::test_prediction_structure` | 7.31s |
+| `::test_incremental_train` | 7.23s |
+| `::test_get_model_info` | 6.80s |
+| `TestIncrementalTrainingLoop::test_incremental_improves_or_maintains` | 5.41s |
+| 其余 51 条 | **≤ 0.40s** |
+
+5.41s 与 0.40s 之间有 **13× 断层**，分界干净——不必逐条拍脑袋判断谁算「重」。
+
+**标注粒度按类的职责定，不是一刀切**：
+- `TestMLPredictionService` 用**类级** `pytestmark`——7 条里 6 条重，
+  且它们重的原因正是本类的职责（训模型），新加进来的测试大概率同样重；
+- `TestIncrementalTrainingLoop` 用**方法级**——该类另外 4 条都 ≤0.03s，
+  不该连坐失去 60s 的守卫强度。
+
+### 为什么是 300s
+
+**证据一（v0.45.126 观察到的）**：本机高负载下 `test_prediction_structure`
+（空载 7.31s）超过 60s 被杀 ⇒ 慢化 **≥8.2×**。
+
+**证据二（本次意外拿到的，强得多）**：验证过程中，同一文件在我并发跑其他任务时
+跑了 **739.44s**，而空载只要 **55.66s** —— **13.3×**。
+且**58 条全部通过**：旧的 60s 全局上限下它们本会成片超时。
+
+由此估算最重那条在该负载下的耗时：七条重测试空载合计 56.48s，
+扣掉 51 条快测试在 13× 下的开销后，重测试段约占 485s ⇒ 慢化约 **8.6×**
+⇒ 最重的 12.73s ≈ **110s**。（**这是估算，不是实测**——那次跑没开 `--durations`，
+负载条件也不可复现。）
+
+300s 相对该估算留 **2.7×** 余量，相对空载最大值 12.73s 留 **23.6×**。
+
+**为什么敢放这么宽**：放宽的代价**有界**——workflow 的 `timeout-minutes: 20`
+（1200s）兜底，单条卡死最多吃掉 25% 的 job 预算，而 pytest-timeout 会先开火
+并**报出是哪一条**（这正是 per-test timeout 相对 job timeout 的价值）。
+收紧的代价则是 CI 零星变红，那是这套 CI 设计要避免的头号问题：
+**「时红时绿的 CI 比没有 CI 更糟：它训练所有人忽略红灯」**。
+
+⚠️ 这是**放宽超时，不是放宽断言**。若这些测试将来真的跑到几分钟，
+说明 `permutation_importance` 的成本变了，该查的是那个，不是再调这个数。
+
+### 验证 — 先证明 marker 真能**抬高**全局阈值
+
+pytest-timeout 的 marker 与命令行 `--timeout` 谁优先、是取 min 还是覆盖，
+**不能靠猜**：方向若反了（取 min），这整个改动就是装饰品。
+先用一个一次性夹具证明：全局 `--timeout=1` 下，
+无 marker 的 `sleep(2)` **超时失败**、带 `@pytest.mark.timeout(5)` 的 **通过**
+⇒ marker 确实覆盖且能抬高。
+
+再把整个文件放进全局 `--timeout=1` 跑（人为极限压测）：
+**被标注的 7 条全部存活**，失败的都是未标注的快测试。
+这比「跑一遍全绿」有判别力得多——全绿并不能证明 marker 生效，
+存活于 1s 全局之下才能。
+
+> 顺带记一个同名坑：失败清单里出现 `test_incremental_train`，
+> 但那是 `TestSGDMLModel::test_incremental_train`，与被标注的
+> `TestMLPredictionService::test_incremental_train` **同名不同类**。
+> 核对测试结果时**只按方法名匹配会张冠李戴**，要带类名。
+
+`tests/test_ml_predictor.py` 正常配置下 **58 passed**；
+`ruff check` 通过；全量套件 **2797 passed, 18 skipped**。
 ## [0.45.126] — 2026-09-05 — `deep_analysis` 的预取包被静默丢弃 6 个月：`inject_prefetched` 少传一个参数
 
 用户要求二次复查上一轮的更新。上一轮我**没有改任何代码**（v0.45.122 早已在 main 上，
