@@ -283,6 +283,14 @@ def prefetch_shared_data(tickers: list, retriever=None, target_date: Optional[st
     except Exception as e:  # noqa: BLE001 - 预取是优化不是前提，失败各蜂自行回退直连
         _log.warning("市场数据包预取失败（各蜂回退直连）: %s", e)
 
+    # 5. v0.45.125：Twelve Data 日线后台预热（标的 + SPY）。7 次/分串行 ≈ 4.4 分钟，
+    #    放后台线程跑、不占蜂群关键路径；蜂群段 RV/量比与尾段三本账到时直接命中。
+    try:
+        import twelve_data as _td
+        _td.start_bars_warmer(list(tickers) + ["SPY"])
+    except Exception as e:  # noqa: BLE001 - 预热是优化不是前提
+        _log.debug("Twelve Data 预热未启动: %s", e)
+
     return {"stock_data": stock_data, "contexts": contexts, "target_date": target_date,
             "market": market}
 
