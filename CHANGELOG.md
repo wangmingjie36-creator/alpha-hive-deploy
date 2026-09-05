@@ -115,6 +115,28 @@ Python 环境，而 CI 只装 `requirements.txt + pytest + pytest-timeout`。本
 （origin/main 与更早的 `749f037` 上都在，非本次引入，疑似更早某次合并的残留）。
 已去重。全库 269 条标题现已确认唯一。
 
+### Notes — 并入 v0.45.119 的 F821 修复（未重写，验证后合并）
+
+用户要求把 v0.45.119 那条也修了。查下来另一 session 已在
+`origin/fix/ci-hardcoded-interpreter` 上做完（`a764ec7`），**故合并而非重写**——
+他们的方案比我会写的更完整，多抓到一点我没想到的：
+
+- `PY = sys.executable` 取代硬编码路径（本机等价，runner 上才有区别）
+- **workflow 的 `pip install` 补上 `ruff`**。不装的话该文件会整体 `skip`，
+  「CI 绿了」但 F821 守卫等于被关回去——这一点我没想到。
+
+⚠️ 顺带查清一个此前被掩盖的机制：硬编码 `/usr/local/bin/python3` 会让测试
+**逃出当前 venv**去用系统 Python 的 ruff。所以我在 v0.45.121 早先那次
+「干净 venv（未装 ruff）」的验证里，这 8 项**照样跑过了**——不是因为它们不需要
+ruff，而是因为它们借道跑到了 venv 外面。换成 `sys.executable` 后守卫留在 venv 内，
+`ruff` 就成了硬依赖。**这也解释了为什么我的 venv 验证没能提前发现 CI 会红。**
+
+**验证（干净检出 + 干净 venv + 按新 workflow 装 ruff + 断网）**：
+- `tests/test_no_undefined_names.py` **8 passed**（是 passed 不是 skipped —— 守卫真的在跑）
+- 完整 CI 子集 **2703 passed, 23 skipped, 0 failed**
+- 反向自证：解释器路径不存在时 `subprocess.run` 抛 `FileNotFoundError`，
+  确认 `returncode` 守卫接不住（这就是 CI 首红的机制）
+
 ### 验证
 
 - 全量套件 **2702 passed, 18 skipped**（v0.45.117 的 2674 + 另一 session 新增 + 本次 4 条）
@@ -176,7 +198,57 @@ bar）；失败不入缓存（download 抛错 / 空帧只记 warning，本轮全
 **待 09-08 扫描的 `status.json.scan_timing.phases.backtest_weights` 实测**，此前不算数。
 
 
-## [0.45.119] — 2026-09-05 — 占位（进行中：CI 首红——F821 守卫硬编码 Mac 解释器路径）
+## [0.45.119] — 2026-09-05 — CI 第一次跑就红了：F821 守卫写死了 Mac 的解释器路径
+
+### 现象
+
+v0.45.117 把 CI 接上，首次运行（run #1，push 到 main）即失败：
+
+```
+2634 passed, 35 skipped, 92 deselected, 1 xfailed, 7 errors in 89.94s
+ERROR tests/test_no_undefined_names.py::… —
+  FileNotFoundError: [Errno 2] No such file or directory: '/usr/local/bin/python3'
+```
+
+**2634 项全过**，红的只有一个文件的 7 项——v0.45.94 标注 `network` 时留的那条
+残留风险（「离线通过、有网可能转红」）**没有出现**，是另一回事。
+
+### 根因
+
+`tests/test_no_undefined_names.py` 写死 `PY = "/usr/local/bin/python3"`
+（CLAUDE.md 的 Mac 硬规则），再 `subprocess.run([PY, "-m", "ruff", ...])`。
+GitHub runner 上 Python 在 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python`，
+那个路径不存在。
+
+关键在于**这不是 fixture 里那句 `pytest.skip("ruff 不可用")` 能兜住的**：
+它只检查 `returncode != 0`，而解释器本身不存在时 `subprocess.run` 直接抛
+`FileNotFoundError`，根本走不到 returncode。所以本该「优雅跳过」的场景
+变成了 7 个 ERROR。
+
+形状与 v0.45.91 修的那个 bug 同类：**一个在 A 环境成立、在 B 环境不可能成立
+的假设，而验证只在 A 里做过**。云沙箱里 `/usr/local/bin/python3` 恰好存在，
+所以 v0.45.94 的离线验证（2133 passed）漏掉了它。
+
+### Fixed
+
+- `tests/test_no_undefined_names.py`：`PY = sys.executable`。
+  在本机两者**完全等价**——按 CLAUDE.md 规矩执行 `/usr/local/bin/python3 -m pytest`
+  时 `sys.executable` 就是那个路径——语义也更准：这个测试要的本就是
+  「用正在跑测试的那个解释器去跑 ruff」。不违反 Mac 硬规则。
+
+### Changed
+
+- `.github/workflows/tests.yml` 安装步骤加 `ruff`。不装的话该文件会整体
+  skip——那正是它诞生前的状态（「本仓库早已装好并配置了 ruff，只是没人跑」）。
+  F821 守卫治的是异常分支里的 NameError 这类只在生产触发的 bug，
+  在 CI 里跳过等于把守卫又关回去。实测装上后 8 项全过，
+  即全仓库 F821 扫描当前是干净的。
+
+### 验证
+
+- **先复现再修**：把路径改成 `/nonexistent/python3`，本地得到与 CI 一致的
+  `1 passed, 7 errors`；改回 `sys.executable` 后 8 passed。
+
 
 ## [0.45.118] — 2026-09-05 — 扫描耗时可见化：Step 2 八天涨 4.5×、被杀两次，没有一行日志说离预算还剩多少
 
