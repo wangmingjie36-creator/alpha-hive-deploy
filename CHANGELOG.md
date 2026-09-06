@@ -5,7 +5,75 @@
 
 ---
 
-## [0.45.133] — 2026-09-06 — 占位（进行中：剩余四个根因的出网闸——CBOE payload / yfinance 经 yf_gate / reddit_sentiment / cboe_vix，10 个文件 110 次）
+## [0.45.133] — 2026-09-06 — 整套测试默认离线：闸设在**三个传输层入口**，不再逐个数据源打桩
+
+v0.45.131 修掉 Slack 之后，双层探针仍记到 **110 次出网 / 10 个文件**。它们分属
+**六个**源（不是最初以为的四个）：
+
+| 源 | 传输 |
+|---|---|
+| `cboe_options._fetch_cboe_payload` | `urllib.request.urlopen` |
+| `cboe_vix._download` | 同上 |
+| `http_gate.urlopen_gated`（AlphaVantage / Finnhub） | 同上 |
+| `vix_term_structure._get_vx_futures`（vixcentral） | 同上 |
+| `reddit_sentiment._fetch_ranking` | `requests.Session.request` |
+| yfinance 1.2（经 `yf_gate`） | `curl_cffi.Session.request` |
+
+**六个源只用了三种传输**——所以闸设在传输层，逐源打桩到此为止（那已经是第三轮
+打地鼠：v0.45.124 一轮、本次排查中又漏了两轮）。
+
+### Added — `tests/conftest.py::_offline_transport`（autouse）
+
+本文件已有四条「关掉某个源」的 fixture（`_block_llm_api` / `_block_same_day_macro`
+的财政部+Finnhub / Twelve Data / v0.45.131 的 `_block_slack`），而它们 docstring
+里那句**「新增任何外部数据源，同一个 commit 里必须在这里加一行」已经失败四次**
+（v0.45.56 / .60 / .61，加上这次的六个源）。传输层只有三个入口且几乎不变，
+新增数据源自动被罩住——这是那条政策本身的修法。
+
+- 抛 `_OfflineInTests(OSError)`。**故意继承 `OSError`**：真离线抛的 `gaierror` /
+  `ConnectionRefusedError` 都是它的子类，生产代码因此走**和真离线一模一样**的降级
+  分支。实测差别很大——同一批测试探针抛 `RuntimeError` 时 9 红、抛 `OSError` 时 1 红。
+- ⚠️ **主机名白名单只放行 localhost，且必须设在库级 API 而非 `socket.connect`**：
+  本机出网走 `127.0.0.1:7897` 的代理，按 socket 地址放行等于全放。
+- 带 `network` / `integration` 标记的测试豁免——它们的意图就是打真外网
+  （实测 `-m network` 那 24 个测试确实出网 168 次，marker 是准的）。
+- 观测点：被挡下的请求逐条记账，teardown 比对 `_KNOWN_NETWORK_REACHERS`；
+  **表外模块一伸手立刻判红**。没有它，将来新增的取数支路会被静默挡下、
+  悄悄走降级分支——正是 CLAUDE.md「这个失败，下游怎么知道？」要治的形状。
+
+`_KNOWN_NETWORK_REACHERS` 是 10 个模块的**债务表，只能缩短**：闸让它们变得确定、
+不再真打外网，但它们仍在调用数据源，该逐个补显式源桩（参考
+`tests/test_quote_set.py::_offline`）。表里每项都记了它伸向哪个源。
+
+### Added — `tests/test_offline_transport_gate.py`（6 条）
+
+三条「各传输被堵」+ 三条对照（localhost 不误挡 / 普通测试不误判 / `network`
+标记豁免）。前三条用新增的 `offline_gate_blocked` 出口 fixture 免去 teardown 判红——
+闸的测试必然要触发闸；**不要改成把本文件塞进 `_KNOWN_NETWORK_REACHERS`**，
+那会让债务表说谎、且永远缩不到空。
+
+mutation check 三条（锚点唯一性已断言、每次核对 `collected 6 items`）：
+拆掉 urlopen / requests / curl 任一道闸，**恰好对应那一条**变红 ✅
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 全套（带探针） | **0 次出网 / 0 个文件**（此前 110 / 10） |
+| 全套（干净） | 3147 passed，唯一失败是既有的日历告警 |
+| 墙钟 | 168s → **154s**（等网络本身就是成本） |
+| `-m network` 那 24 个 | 照常出网、照常通过 |
+| 债务表准确性 | 清空豁免表后在 **`git archive` 干净检出**里重跑，实际伸手的**正好是这 10 个** |
+
+⚠️ 债务表必须用干净检出量：`cboe_vix` 的缓存是 `Path(__file__).parent / "cache"`——
+**仓库本地目录，不受 conftest 的 `ALPHA_HIVE_CACHE_DIR` 隔离**。本机缓存是热的，
+`test_fred_macro.py` 因此不伸手；CI 是冷的，会伸手。只在本机量会漏掉它。
+
+⚠️ 本版自造过一个 bug，靠对照测试当场抓到：`_offline_transport` 是**生成器
+fixture**，豁免分支里写 `return` 而不是 `yield; return` 会让 pytest 报
+`did not yield a value`，**把 24 个 network 标记测试全打死——而 CI 用
+`-m "not network"` 摘掉它们，照样全绿**。这条回归只有本地跑得到。
+
 
 ## [0.45.132] — 2026-09-06 — 占位（进行中：ML 深度报告第五章情景推演改读 pheromone.db 真实 T+7 结果分布，删除 advanced_analyzer 的 6 条手写历史库）
 

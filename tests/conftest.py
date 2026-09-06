@@ -85,6 +85,166 @@ def _block_same_day_macro(monkeypatch):
     monkeypatch.setattr(twelve_data, "api_key", lambda: "")
 
 
+# ==================== 全局离线闸（传输层）====================
+
+#: 已知**仍会伸手取数**的测试模块。闸会把它们的请求挡在传输层、让生产代码走
+#: 「取不到」的降级分支（行为与真离线一致），但不为此把测试判红——它们本来
+#: 就是这么跑的，只是此前挡不住、真打了外网。
+#:
+#: ⚠️ **这张表只能缩短，不能加长。** 给某个模块补上显式的源桩（像
+#: `tests/test_quote_set.py::_offline` 那样）之后，把它从这里删掉；
+#: 表外的任何模块一旦伸手，`_offline_transport` 的 teardown 立刻判红。
+#: 表里每一项后面记的是它伸向哪个源，方便逐个还债。
+_KNOWN_NETWORK_REACHERS = {
+    "test_iv_history.py":                    "CBOE payload + yfinance",
+    "test_options_analyzer.py":              "CBOE payload + yfinance",
+    "test_catalyst_availability.py":         "CBOE payload + AlphaVantage/Finnhub(http_gate)",
+    "test_snapshot_price_derived_refresh.py": "yfinance(fetch_historical_hv)",
+    "test_iv_structure_guards.py":           "yfinance(iv_rv spread)",
+    "test_score_dual_display.py":            "yfinance(dashboard_renderer._detail)",
+    "test_site_missing_fields.py":           "yfinance(dashboard_renderer._detail)",
+    "test_rival_bee_peer_features.py":       "yfinance + reddit_sentiment",
+    "test_fred_macro.py":                    "cboe_vix._download",
+    "test_macro_degradation.py":             "yfinance + vix_term_structure(vixcentral)",
+}
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "", None}
+
+
+def _host_of(url) -> str:
+    """从 str / urllib Request 里取主机名；取不到当作外网（宁可误挡不可漏放）。"""
+    from urllib.parse import urlparse
+    raw = getattr(url, "full_url", None) or getattr(url, "url", None) or url
+    try:
+        return (urlparse(str(raw)).hostname or "").lower()
+    except Exception:  # pragma: no cover
+        return "<unparseable>"
+
+
+class _OfflineInTests(OSError):
+    """故意继承 OSError —— 真离线抛的 gaierror / ConnectionRefusedError 都是它的
+    子类，生产代码的 `except OSError` / `except requests...ConnectionError`
+    因此会走**和真离线一模一样**的降级分支。若换成 RuntimeError，接得住真离线的
+    代码会接不住它，测出来的就不是「离线行为」而是「探针行为」——实测差别很大：
+    同一批测试 RuntimeError 下 9 红、OSError 下 1 红。"""
+
+
+@pytest.fixture(autouse=True)
+def _offline_transport(request, monkeypatch):
+    """整套测试默认离线。**挡在传输层，不逐个源打桩**（v0.45.133）。
+
+    背景：双层探针实测，CI 选择集里有 12 个文件在偷偷出网（修完 Slack 后剩 10 个、
+    110 次）。它们分属**六个**源——`cboe_options._fetch_cboe_payload`、
+    yfinance（经 `yf_gate`）、`cboe_vix._download`、`reddit_sentiment._fetch_ranking`、
+    `http_gate.urlopen_gated`（AlphaVantage / Finnhub）、
+    `vix_term_structure._get_vx_futures`——但只用了**三种传输**：
+
+        urllib.request.urlopen          ← CBOE payload / CBOE VIX / http_gate / vixcentral
+        requests.Session.request        ← reddit_sentiment（及 Slack，另有专闸）
+        curl_cffi.Session.request       ← yfinance 1.2（libcurl 在 C 层开 socket）
+
+    本文件已有的四条「关掉某个源」的 fixture（`_block_llm_api` /
+    `_block_same_day_macro` 的财政部+Finnhub / Twelve Data / `_block_slack`）
+    都是源级的，而它们的 docstring 里那句**「新增任何外部数据源，同一个 commit
+    里必须在这里加一行」已经失败四次**（v0.45.56 / .60 / .61，以及这次的六个源）。
+    传输层只有三个入口且几乎不变，新增数据源自动被罩住——这是那条政策本身的修法。
+
+    ⚠️ 主机名白名单只放行 localhost：**不能按 socket 地址判断**，因为本机出网
+    走 127.0.0.1 的代理，按地址放行等于全放。所以闸设在**库级 API**（拿得到真实
+    URL），而不是 `socket.connect`。
+
+    ⚠️ 带 `network` / `integration` 标记的测试不受本闸约束——它们的意图就是打真
+    外网（实测 `-m network` 那 24 个测试确实出网 168 次，marker 是准的）。
+
+    观测点：任何被挡下的请求都会记账，teardown 比对 `_KNOWN_NETWORK_REACHERS`；
+    表外模块一伸手立刻判红。没有它，将来新增的取数支路会被静默挡下、
+    悄悄走降级分支——那正是 CLAUDE.md「这个失败，下游怎么知道？」要治的形状。
+    """
+    if (request.node.get_closest_marker("network")
+            or request.node.get_closest_marker("integration")):
+        # ⚠️ 必须 yield 后再 return —— 本 fixture 是生成器 fixture，
+        # 豁免分支里直接 return 会让 pytest 报 `did not yield a value`，
+        # 把**恰好是 CI 用 -m "not network" 摘掉的那 24 个测试**全打死（CI 照样全绿）。
+        yield
+        return
+
+    blocked = []
+
+    def _deny(kind, url):
+        host = _host_of(url)
+        if host in _LOCAL_HOSTS:
+            return None                      # 本机服务照常
+        blocked.append(f"{kind} {host}")
+        raise _OfflineInTests(
+            f"测试默认离线，已挡下 {kind} → {host}"
+            "（tests/conftest.py::_offline_transport）")
+
+    import urllib.request
+    _real_urlopen = urllib.request.urlopen
+
+    def _gated_urlopen(url, *a, **k):
+        _deny("urlopen", url)
+        return _real_urlopen(url, *a, **k)
+
+    _gated_urlopen._offline_gated = True
+    monkeypatch.setattr(urllib.request, "urlopen", _gated_urlopen)
+
+    try:
+        import requests.sessions as _rs
+    except ImportError:  # pragma: no cover
+        pass
+    else:
+        _real_req = _rs.Session.request
+
+        def _gated_request(self, method, url, *a, **k):
+            _deny(f"requests.{method}", url)
+            return _real_req(self, method, url, *a, **k)
+
+        _gated_request._offline_gated = True
+        monkeypatch.setattr(_rs.Session, "request", _gated_request)
+
+    try:
+        from curl_cffi import requests as _curl
+    except ImportError:  # pragma: no cover
+        pass
+    else:
+        _real_curl = _curl.Session.request
+
+        def _gated_curl(self, method, url, *a, **k):
+            _deny(f"curl.{method}", url)
+            return _real_curl(self, method, url, *a, **k)
+
+        _gated_curl._offline_gated = True
+        monkeypatch.setattr(_curl.Session, "request", _gated_curl)
+
+    request.node._offline_blocked = blocked
+
+    yield
+
+    module = os.path.basename(str(request.node.fspath))
+    if getattr(request.node, "_offline_expect_blocks", False):
+        return                               # 闸自身的测试，见 offline_gate_blocked
+    if blocked and module not in _KNOWN_NETWORK_REACHERS:
+        raise AssertionError(
+            f"{module} 伸手取外网了：{sorted(set(blocked))}。\n"
+            "整套测试默认离线（tests/conftest.py::_offline_transport）。"
+            "请给这条测试补一个显式的源桩（参考 tests/test_quote_set.py::_offline），"
+            "而不是把模块加进 _KNOWN_NETWORK_REACHERS —— 那张表只能缩短。\n"
+            "若这条测试的意图**就是**打真外网，给它加 @pytest.mark.network。")
+
+
+@pytest.fixture
+def offline_gate_blocked(request):
+    """给**闸自身的测试**用：拿到本条测试被拦下的记录，并免去 teardown 判红。
+
+    闸的测试必然要触发闸，否则证明不了它在工作。用这个出口，而不是把测试文件
+    塞进 `_KNOWN_NETWORK_REACHERS` —— 那张表的含义是「还没还的债」，
+    把闸的自证混进去会让债务表说谎，也会让它永远缩不到空。
+    """
+    request.node._offline_expect_blocks = True
+    yield lambda: list(getattr(request.node, "_offline_blocked", []))
+
+
 # ==================== 禁止测试碰 Slack ====================
 
 @pytest.fixture(autouse=True)
