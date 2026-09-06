@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.135] — 2026-09-06 — 占位（进行中：generate_ml_report 的 catalyst_quality 死特征——把 recommendation.rating 的四种字符串喂进 A+/A/B+/B/C 映射表，全部落到 mapping.get 的 0.5 默认值，该特征恒为常数）
+
 ## [0.45.134] — 2026-09-06 — 占位（进行中：第 5 章旁边的概率与止盈两节去常数化——win_probability_pct 恒 65.0 / _estimate_expected_gain 恒 20.0 改读 pheromone.db 真实频率，并补 Brier 记分追踪）
 
 ## [0.45.133] — 2026-09-06 — 整套测试默认离线：闸设在**三个传输层入口**，不再逐个数据源打桩
