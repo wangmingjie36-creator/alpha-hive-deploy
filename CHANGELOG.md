@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.133] — 2026-09-06 — 占位（进行中：剩余四个根因的出网闸——CBOE payload / yfinance 经 yf_gate / reddit_sentiment / cboe_vix，10 个文件 110 次）
+
 ## [0.45.132] — 2026-09-06 — 占位（进行中：ML 深度报告第五章情景推演改读 pheromone.db 真实 T+7 结果分布，删除 advanced_analyzer 的 6 条手写历史库）
 
 ## [0.45.131] — 2026-09-06 — 测试套件会真往 #alpha-hive 发 Slack 告警：在测试里 `new` 一个通知器对象＝一次对外动作
