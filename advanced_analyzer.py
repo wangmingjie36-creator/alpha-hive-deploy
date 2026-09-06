@@ -1179,98 +1179,58 @@ class AdvancedAnalyzer:
             return None
         return rr
 
-    #: 评级闸。⚠️ 这两组阈值是从 `calculate_win_probability` 那个常数量表
-    #: （base 0.55 + 常数调整，值域被 clamp 在 30~85、生产实际只出现 6 个值）
-    #: 继承下来的，**从未在真实命中率的量表上验证过**。v0.45.134 换数据源时
-    #: 原样保留，是为了不在同一次改动里既换来源又改判据；它们的合理性是一个
-    #: 独立的、需要证据的问题（当前证据：final_score 的 IC 不显著）。
-    _RATING_GATES = (
-        ("STRONG BUY", "积极布局", 70.0, 2.0),
-        ("BUY", "分批建仓", 60.0, 1.5),
-    )
-
     def _generate_recommendation(self, ticker: str, analysis: Dict) -> Dict:
-        """生成投资建议。
+        """投资「建议」——v0.45.139 起**不再产出评级词**，只汇总三个可核对的数。
 
-        v0.45.134：判据从 `win_probability_pct`（常数）换成 `hit_rate_pct`
-        （同标的同方向历史 T+7 命中率）。命中率不可得时**不评级**——旧实现
-        `.get("win_probability_pct", 50)` 的默认值 50 恰好卡在 HOLD 闸
-        （`prob >= 50`）上，与 v0.45.50 修掉的 rr 默认值 2.0 / 1.5 同一形状：
-        「不知道」必须是不达标，而不是刚好达标。
+        为什么撤掉评级（2026-09-06 实测，n=438 份能对上 T+7 结果的生产报告）：
+          · 第 1 章「建议」：BUY 命中 54.5% vs HOLD 56.9%，z = −0.55 —— 不区分结果
+          · 本函数旧评级：STRONG BUY 命中 38.3% [25.8, 52.6] vs BUY 59.0% —— **是反的**。
+            STRONG BUY 就是 VKTX / NVDA 那几只写死高常数的票，而 VKTX 真实命中率 37%
+          · ML 概率五等分命中率 59.8 / 64.4 / 51.7 / 54.0 / 54.4，非单调；
+            Spearman +0.026 ± 0.099，不显著
+          · 前瞻量自 v0.45.138 起全书池化、各标的相同 ⇒ 概率闸在结构上不可能区分标的
+        没有任何一个概率输入分得开标的。零区分度的评级带着警示发出去，只会让读者
+        学会忽略警示；对一个不随标的变化的输入重定阈值毫无意义。
+        三道闸（STRONG BUY 70/2.0、BUY 60/1.5、HOLD 50）连同来历记在 CHANGELOG v0.45.139。
+
+        保留的三个数都能被 `probability_scorecard.py` 核对：前瞻量（池化 + Wilson 区间）、
+        描述量（本标的本方向历史频率）、rr（本标的）。等 `ic_rerun_readiness.py` 的
+        25 周闸开、真有区分信号时再引回评级——那时它有证据。
+        字段形状保持（`rating` / `action` 键仍在、值为 None），下游读者不会崩。
         """
         _pa = analysis.get("probability_analysis") or {}
-        # v0.45.138：评级读**前瞻量**，不读描述量。
-        # v0.45.134 曾直接用分票分方向频率（hit_rate_pct）当评级输入，记分卡
-        # 随即判定它作为预测显著劣于池化（配对 t=+2.12）。描述量留在报告里
-        # 给人看历史，但不该驱动「该不该买」。
-        prob = _pa.get("forward_estimate_pct")
+        fwd = _pa.get("forward_estimate_pct")
+        hr = _pa.get("hit_rate_pct")
         rr = _pa.get("risk_reward_ratio")
-        _prob_known = (isinstance(prob, (int, float)) and not isinstance(prob, bool)
-                       and math.isfinite(prob))
-        if not _prob_known:
-            _log.debug("[%s] 历史命中率不可得，不评级（basis=%s, n=%s）",
-                       ticker, _pa.get("basis"), _pa.get("sample_size"))
-            return {
-                "rating": "UNRATED",
-                "action": "不评级",
-                "confidence": None,
-                "probability_is_ticker_specific": False,
-                "rationale": (
-                    f"前瞻命中率不可得（池化样本 n={_pa.get('forward_sample_size')}），"
-                    f"不给方向也不给评级"
-                ),
-            }
-        # v0.45.50：rr 不可得时**不许升级评级**。
-        # 旧默认值 1.5 恰好是 BUY 闸的阈值（`prob >= 60 and rr >= 1.5`），
-        # 与上面 _calculate_risk_reward_ratio 的 2.0 一样卡在门槛上。
-        # 两个闸都要求 rr 达标，所以「不知道」必须是不达标，而不是刚好达标。
-        _rr_known = isinstance(rr, (int, float)) and not isinstance(rr, bool)
-        if not _rr_known:
-            _log.debug("风险收益比不可得，评级不因缺数据而升级")
 
-        # 评估建议
-        # 起点：命中率过半 → HOLD，不过半 → AVOID；再由上面两道闸向上升级。
-        # （不用 for/else —— 那个结构对，但太容易被后来的人读反。）
-        rating, action = ("HOLD", "观察等待") if prob >= 50 else ("AVOID", "回避或减仓")
-        for _r, _a, _p_gate, _rr_gate in self._RATING_GATES:
-            if prob >= _p_gate and _rr_known and rr >= _rr_gate:
-                rating, action = _r, _a
-                break
-
-        # ── 这个评级此刻分不分得开标的？（v0.45.138）────────────────────
-        # 概率输入自本版起是全书池化的、各标的相同；唯一的逐标的输入是 rr，
-        # 而 rr 只出现在**升级**闸里。所以当 prob 够不到最低那道升级闸时，
-        # **任何 rr 都不改变结果** ⇒ 该评级不携带任何逐标的信息。
-        #
-        # 实测（2026-09-06）：池化命中率 55.6%，最低升级闸 60.0 ⇒ 全部 HOLD。
-        # 把这件事算成一个字段而不是写进注释，是因为注释不会随数据变化，
-        # 而 `tests/test_rating_discrimination.py` 盯着它：池化率一旦越过 60，
-        # 断言变红、有人回来重看这三道从未验证过的闸。
-        _min_gate = min(g[2] for g in self._RATING_GATES)
-        _discriminating = prob >= _min_gate
+        def _num(v) -> bool:
+            return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
         _ci = _pa.get("forward_ci95")
-        _fn = _pa.get("forward_sample_size")
-        _ci_txt = f"，95% 区间 [{_ci[0]}, {_ci[1]}]" if isinstance(_ci, (list, tuple)) and len(_ci) == 2 else ""
-        return {
-            "rating": rating,
-            "action": action,
-            "confidence": f"{prob:.1f}%",
-            # v0.45.138：**这个评级的概率输入是全书池化的，各标的相同**。
-            # 显式标出来，免得「所有票都 HOLD」被读成「系统逐个评估后都选了 HOLD」——
-            # 那正是本轮在清的那类假象（把常数渲染成判断）。
-            "probability_is_ticker_specific": False,
-            "rating_discriminates_tickers": _discriminating,
+        _ci_txt = (f"，95% 区间 [{_ci[0]}, {_ci[1]}]"
+                   if isinstance(_ci, (list, tuple)) and len(_ci) == 2 else "")
+        parts = [
+            (f"前瞻命中率 {fwd:.1f}%（全书池化 n={_pa.get('forward_sample_size')}{_ci_txt}；各标的相同）"
+             if _num(fwd) else
+             f"前瞻命中率不可得（池化样本 n={_pa.get('forward_sample_size')}）"),
+            (f"本标的本方向历史命中率 {hr:.1f}%（n={_pa.get('sample_size')}, basis={_pa.get('basis')}）"
+             if _num(hr) else
+             f"本标的本方向历史命中率不可得（n={_pa.get('sample_size')}）"),
             # v0.45.50：rr 为 None 时印「未知」，不印 "None:1" 也不编一个数
-            # v0.45.134：文案不再说「赚钱概率」——那是前瞻断言
-            "rationale": (
-                f"前瞻命中率 {prob:.1f}%（全书池化 n={_fn}{_ci_txt}；各标的相同），"
-                + (f"风险收益比 {rr}:1（本标的）" if _rr_known
-                   else "风险收益比未知（样本里没有亏损单，多半是样本太少）")
-                + ("" if _discriminating else
-                   f"。⚠️ 前瞻命中率未达最低升级闸 {_min_gate:.0f}%，"
-                   f"此时任何风险收益比都不改变评级 —— **本评级不区分标的**")
+            (f"风险收益比 {rr}:1（本标的）" if _num(rr)
+             else "风险收益比未知（样本里没有亏损单，多半是样本太少）"),
+        ]
+        return {
+            "rating": None,
+            "action": None,
+            "confidence": f"{fwd:.1f}%" if _num(fwd) else None,
+            "probability_is_ticker_specific": False,
+            "rating_retired": "v0.45.139",
+            "rating_retired_reason": (
+                "无任何概率输入能区分标的：BUY 命中 54.5% vs HOLD 56.9%（z=−0.55），"
+                "旧 STRONG BUY 38.3% vs BUY 59.0% 反向"
             ),
+            "rationale": "；".join(parts),
         }
 
 
@@ -1368,7 +1328,7 @@ if __name__ == "__main__":
             rec = analysis.get("recommendation", {})
             print(f"\n✅ 投资建议：")
             print(
-                f"   评级：{rec.get('rating')} | 行动：{rec.get('action')}"
+                f"   评级：已于 {rec.get('rating_retired')} 撤销（{rec.get('rating_retired_reason')}）"
             )
             print(f"   理由：{rec.get('rationale')}")
 

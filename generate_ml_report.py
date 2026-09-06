@@ -313,6 +313,7 @@ class MLEnhancedReportGenerator:
         ml_input = self._prepare_ml_input(
             ticker, realtime_metrics, advanced_analysis,
             swarm_dimension_scores=swarm_dimension_scores,
+            swarm_direction=swarm_direction,
         )
 
         # 获取 ML 预测
@@ -357,6 +358,9 @@ class MLEnhancedReportGenerator:
         try:
             from probability_scorecard import record_published
             _pa = advanced_analysis.get("probability_analysis") or {}
+            _mp = (ml_prediction.get("prediction") or {}).get("probability")
+            _ml_pct = (float(_mp) * 100.0
+                       if isinstance(_mp, (int, float)) and not isinstance(_mp, bool) else None)
             record_published(
                 report_date=self.timestamp.date().isoformat(),
                 ticker=ticker,
@@ -366,6 +370,7 @@ class MLEnhancedReportGenerator:
                 sample_size=_pa.get("sample_size"),
                 forward_estimate_pct=_pa.get("forward_estimate_pct"),
                 forward_sample_size=_pa.get("forward_sample_size"),
+                ml_probability_pct=_ml_pct,      # v0.45.139：融合权重扫描的第二个输入
             )
         except Exception as _led_err:   # noqa: BLE001 —— 记账失败不得阻断报告
             self._ledger_failures = getattr(self, "_ledger_failures", 0) + 1
@@ -377,6 +382,7 @@ class MLEnhancedReportGenerator:
     def _prepare_ml_input(
         self, ticker: str, metrics: dict, analysis: dict,
         swarm_dimension_scores: Optional[dict] = None,
+        swarm_direction: Optional[str] = None,
     ) -> TrainingData:
         """为 ML 模型准备输入数据"""
 
@@ -457,7 +463,13 @@ class MLEnhancedReportGenerator:
         _opts = analysis.get("options_analysis", {})
         _rec = analysis.get("recommendation", {})
         _ds = analysis.get("dimension_scores", {})
-        _rating_dir = {"STRONG BUY": 1.0, "BUY": 0.5, "HOLD": 0.0, "AVOID": -1.0}
+        # v0.45.139：direction_encoded 改读**蜂群方向**，与训练路径同一张表
+        # （ml_predictor.build_training_data_from_db 的 direction_map）。
+        # 旧实现读 recommendation.rating 再映射 {STRONG BUY:1, BUY:.5, HOLD:0, AVOID:-1}
+        # —— 训练用 bullish/neutral/bearish、服务用评级词，与 v0.45.135 修掉的
+        # catalyst_quality 是同种 train/serve skew；评级词撤销后它还会静默恒为 0.0。
+        _direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
+        _dir_known = swarm_direction in _direction_map
 
         # ── v0.45.50：记录哪些特征是**补齐的**，不是观测到的 ──
         # 下面五个 .get(k, 默认值) 在缺失时产出 iv_rank=50 / pc=1.0 / 三个 5.0，
@@ -467,7 +479,8 @@ class MLEnhancedReportGenerator:
         # 与同文件已有的 `training_data_source` 来源标记同一思路。
         # v0.45.135：catalyst_quality 也进这张表——否则「蜂群没跑/板上没条目」
         # 与「催化剂正好中等」在输出里长得一样（同 v0.45.113 的判据）。
-        self._ml_input_missing = ([] if _catalyst_known else ["catalyst_quality"]) + [
+        self._ml_input_missing = (([] if _catalyst_known else ["catalyst_quality"])
+                                  + ([] if _dir_known else ["direction"])) + [
             _name for _name, _val in (
                 ("iv_rank", _opts.get("iv_rank")),
                 ("put_call_ratio", _opts.get("put_call_ratio")),
@@ -503,7 +516,7 @@ class MLEnhancedReportGenerator:
             odds_score=_ds.get("odds", 5.0),
             risk_adj_score=_ds.get("risk_adj", 5.0),
             agent_agreement=0.5,  # 预测时无蜂群上下文
-            direction_encoded=_rating_dir.get(_rec.get("rating", "HOLD"), 0.0),
+            direction_encoded=_direction_map.get(swarm_direction, 0.0),
         )
 
     def _generate_options_section_html(self, options: dict) -> str:
@@ -692,19 +705,12 @@ class MLEnhancedReportGenerator:
             _reasoning = (f"前瞻命中率不可得（池化样本 n={_pa.get('forward_sample_size')}），"
                           f"综合分退化为纯 ML 预测 {ml_prob:.1f}%")
 
-        # 生成最终建议
-        if combined_prob >= 75:
-            rating = "STRONG BUY"
-            action = "积极布局"
-        elif combined_prob >= 65:
-            rating = "BUY"
-            action = "分批建仓"
-        elif combined_prob >= 50:
-            rating = "HOLD"
-            action = "观察等待"
-        else:
-            rating = "AVOID"
-            action = "回避或减仓"
+        # v0.45.139：**不再产出评级词**。实测（n=438 份能对上 T+7 结果的报告）
+        # BUY 命中 54.5% vs HOLD 56.9%，z = −0.55；ML 概率五等分非单调、
+        # Spearman +0.026 ± 0.099。评级只是 combined_prob 的阈值重标记，而
+        # combined_prob 本身不区分结果。撤掉评级词、保留数字与出处。
+        # 三道闸（75 / 65 / 50）连同来历记在 CHANGELOG v0.45.139。
+        rating, action = None, None
 
         return {
             # v0.45.134：`human_probability` 这个名字随字段一起退休——它从来不是
@@ -720,8 +726,9 @@ class MLEnhancedReportGenerator:
             "ml_probability": round(ml_prob, 1),
             "combined_probability": round(combined_prob, 1),
             "combined_basis": "forward*0.7+ml*0.3" if _fwd_known else "ml_only",
-            "rating": rating,
+            "rating": rating,                 # v0.45.139 起恒为 None，键保留免下游崩
             "action": action,
+            "rating_retired": "v0.45.139",
             "confidence": f"{combined_prob:.1f}%",
             "reasoning": _reasoning,
         }
@@ -747,8 +754,13 @@ class MLEnhancedReportGenerator:
         ab = swarm.get("agent_breakdown", {})
         resonance = swarm.get("resonance", {})
         combined_prob = combined.get("combined_probability", 50)
-        rating = combined.get("rating", "HOLD")
-        action = combined.get("action", "观察等待")
+        # v0.45.139：评级已撤（实测不区分结果），这一格改印本标的本方向的历史命中率——
+        # 那是第 1 章里唯一逐标的、且能被记分卡核对的数
+        _pa1 = analysis.get("probability_analysis") or {}
+        _hr1 = _pa1.get("hit_rate_pct")
+        _hr_row = (f"{_hr1:.1f}%（n={_pa1.get('sample_size')}）"
+                   if isinstance(_hr1, (int, float)) and not isinstance(_hr1, bool)
+                   else "不可得")
         dir_cn = self._dir_cn(direction)
         dir_color = self._dir_color(direction)
         # 3句摘要：从overview + 最高分维度 + 最大风险
@@ -783,7 +795,7 @@ class MLEnhancedReportGenerator:
                 <div style="flex:1;min-width:180px;">
                     <div class="metric"><span class="metric-label">综合胜率</span><span class="metric-value" style="color:{dir_color};">{combined_prob:.1f}%</span></div>
                     <div class="metric"><span class="metric-label">投票</span><span class="metric-value">{ab.get('bullish',0)}多 / {ab.get('bearish',0)}空 / {ab.get('neutral',0)}中</span></div>
-                    <div class="metric"><span class="metric-label">建议</span><span class="metric-value">{rating} — {action}</span></div>
+                    <div class="metric"><span class="metric-label">历史命中率（本标的本方向）</span><span class="metric-value">{_hr_row}</span></div>
                 </div>
             </div>
             {summary_html}
@@ -1988,16 +2000,8 @@ class MLEnhancedReportGenerator:
         prob = analysis.get('probability_analysis', {})
         swarm = enhanced_report.get('swarm_results', {})
 
-        # 评级颜色
-        rating = combined.get('rating', 'HOLD')
-        if rating == 'STRONG BUY':
-            rating_color = 'var(--bull)'
-        elif rating == 'BUY':
-            rating_color = 'var(--acc2)'
-        elif rating == 'AVOID':
-            rating_color = 'var(--bear)'
-        else:
-            rating_color = 'var(--neut)'
+        # v0.45.139：评级已撤，刊头徽章改印前瞻命中率；颜色随蜂群方向走
+        rating_color = self._dir_color(swarm.get('direction', 'neutral'))
 
         # ML 预测部分（提前计算，用于修正蜂群表中 RivalBee 的旧概率值）
         pred = ml_pred.get('prediction', {})
@@ -2079,6 +2083,9 @@ class MLEnhancedReportGenerator:
                    + "；各标的相同）"
                    if isinstance(_fw, (int, float)) and not isinstance(_fw, bool)
                    else "不可得")
+        _fw_hdr = ((f"{_fw:.1f}%" + (f" [{_fci[0]}, {_fci[1]}]"
+                                    if isinstance(_fci, (list, tuple)) and len(_fci) == 2 else ""))
+                   if isinstance(_fw, (int, float)) and not isinstance(_fw, bool) else "不可得")
         position    = analysis.get('position_management', {})
         stop_loss   = position.get('stop_loss', {})
         # v0.45.134：分布不可得时上游给 None（不是 {}）。`or {}` 会把它悄悄
@@ -2372,7 +2379,7 @@ class MLEnhancedReportGenerator:
     <div class="header">
         <span class="eyebrow">Alpha Hive · 蜂群智能深度研究</span>
         <h1><span class="tk">{ticker}</span> 深度研究报告</h1>
-        <div class="rating">{rating} — {combined['action']}</div>
+        <div class="rating">前瞻命中率 {_fw_hdr}</div>
         <p class="meta">
             {self.timestamp.strftime('%Y-%m-%d %H:%M')} PDT
             &nbsp;·&nbsp; 综合胜率 <b>{combined['combined_probability']:.1f}%</b>

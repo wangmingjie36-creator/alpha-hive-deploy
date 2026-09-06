@@ -106,45 +106,37 @@ def test_take_profit_rejects_bool_quantile(a):
     assert a._take_profit_gains("X", _er(expected_7d=e7), "bullish") is None
 
 
-# ── 3. 评级：不可得不许卡在闸上 ──────────────────────────────────────
-# ⚠️ v0.45.138 起评级的输入从 `hit_rate_pct`（描述量）换成
-# `forward_estimate_pct`（前瞻量，全书池化）——理由见
-# tests/test_forward_estimate.py 的文件头（记分卡实测配对 t=+2.12）。
-# 下面四条守的**不变式没变**（不可得不许卡在闸上、rr 未知不许升级、低概率必须
-# AVOID、文案不许说「赚钱概率」），只是判据字段换了。原样保留而非删除，
-# 是因为它们记的是 v0.45.134 之前那些默认值卡在闸上的具体缺陷。
-def test_unknown_probability_is_unrated_not_hold(a):
-    """旧实现 `.get("win_probability_pct", 50)` 的 50 恰好满足 HOLD 闸 `prob >= 50`"""
+# ── 3. 评级已撤（v0.45.139）——这里守的是「不可得不许被默认值顶替」这条老不变式 ──
+# v0.45.134 前：`.get("win_probability_pct", 50)` 的 50 卡在 HOLD 闸上；rr 默认 1.5 / 2.0
+# 卡在 BUY / STRONG BUY 闸上（v0.45.50）。评级词撤了，但「不知道」仍不许变成一个数。
+def test_unknown_probability_is_said_not_defaulted(a):
     out = a._generate_recommendation("X", {"probability_analysis":
                                            {"forward_estimate_pct": None,
                                             "forward_sample_size": 7}})
-    assert out["rating"] == "UNRATED"
-    assert out["confidence"] is None
-    assert "n=7" in out["rationale"]
+    assert out["confidence"] is None and out["rating"] is None
+    assert "不可得" in out["rationale"] and "n=7" in out["rationale"]
 
 
-def test_unknown_rr_does_not_upgrade_rating(a):
-    """成对：概率够 STRONG BUY，但 rr 未知 ⇒ 只能停在 HOLD（v0.45.50）"""
-    pa = {"forward_estimate_pct": 81.8, "risk_reward_ratio": None,
-          "forward_sample_size": 684}
-    assert a._generate_recommendation("X", {"probability_analysis": pa})["rating"] == "HOLD"
+def test_unknown_rr_prints_unknown_not_none_colon_one(a):
+    """v0.45.50：rr 为 None 时印「未知」，不印 "None:1" 也不编一个数"""
+    pa = {"forward_estimate_pct": 81.8, "risk_reward_ratio": None, "forward_sample_size": 684}
+    r = a._generate_recommendation("X", {"probability_analysis": pa})["rationale"]
+    assert "None:1" not in r and "未知" in r
     pa2 = dict(pa, risk_reward_ratio=2.5)
-    assert a._generate_recommendation("X", {"probability_analysis": pa2})["rating"] == "STRONG BUY"
+    assert "2.5:1" in a._generate_recommendation("X", {"probability_analysis": pa2})["rationale"]
 
 
-def test_low_probability_is_avoid(a):
-    """旧实现无论真实情况如何都印 65.0 并给 HOLD"""
-    pa = {"forward_estimate_pct": 37.0, "risk_reward_ratio": 0.84,
-          "forward_sample_size": 684}
+def test_low_probability_is_printed_truthfully(a):
+    """旧实现无论真实情况如何都印 65.0 —— 现在 37.0 就印 37.0"""
+    pa = {"forward_estimate_pct": 37.0, "risk_reward_ratio": 0.84, "forward_sample_size": 684}
     out = a._generate_recommendation("X", {"probability_analysis": pa})
-    assert out["rating"] == "AVOID"
     assert "37.0%" in out["rationale"] and "n=684" in out["rationale"]
+    assert out["confidence"] == "37.0%"
 
 
 def test_rationale_never_calls_it_a_probability(a):
     """文案不许说「赚钱概率」——那是前瞻断言，这个数是历史频率"""
-    pa = {"forward_estimate_pct": 60.0, "risk_reward_ratio": 1.8,
-          "forward_sample_size": 684}
+    pa = {"forward_estimate_pct": 60.0, "risk_reward_ratio": 1.8, "forward_sample_size": 684}
     r = a._generate_recommendation("X", {"probability_analysis": pa})["rationale"]
     assert "赚钱概率" not in r
     assert "命中率" in r and "n=684" in r

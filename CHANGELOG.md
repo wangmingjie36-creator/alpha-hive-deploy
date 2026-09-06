@@ -5,7 +5,83 @@
 
 ---
 
-## [0.45.139] — 2026-09-06 — 占位（进行中：用记分卡定融合权重 0.7/0.3 与评级去留——两者现在都是可记分的量，扫 w∈[0,1] 求 Brier 最优，按结果决定评级读什么或撤掉）
+## [0.45.139] — 2026-09-06 — 评级词撤销、融合权重变成受监控量；顺带修第二处 train/serve skew
+
+两个待决（v0.45.138 遗留）都能测，所以都测了，按数据办。
+
+### 决策一：融合权重 0.7/0.3 —— 不改数，改成受监控量
+
+时点隔离扫描 w∈[0,1]（n=393，embargo 14 天，2026-03-23→08-26）：
+
+| w（前瞻权重） | Brier | 说明 |
+|---|---|---|
+| 0.0 | 0.2661 | 纯 ML |
+| 0.7 | 0.2500 | **生产在用** |
+| 0.9 | 0.2493 | Brier 最优 |
+| 1.0 | 0.2497 | 纯池化基准率 |
+
+[0.7, 1.0] 区间极差 **0.0007，低于告警阈 0.002**；ML 概率自身 Spearman +0.026 ± 0.099，不显著。
+在噪声里调参是假优化，且改了会破坏前向账本可比性——故 **0.7 不动**。
+`probability_scorecard.py` 新增 `--blend-scan` + `PRODUCTION_BLEND_W`：判据与 walk_forward
+同型（网格上有没有 w 明显打得过生产在用的），等 ML 真有区分度那天曲线会向左倾斜、这里会红。
+110 份 timestamp≠文件名日期的报告核对：间隔恒为 1 天（次日重跑、同模型），无泄漏；
+`load_ml_probabilities` 按文件名日期建键。
+
+### 决策二：评级词撤销 —— 没有任何概率输入分得开标的
+
+n=438 份能对上 T+7 结果的生产报告：
+- 第 1 章「建议」：BUY 命中 **54.5%** vs HOLD **56.9%**，z = −0.55 —— 不区分结果
+- 旧 `advanced_analysis.recommendation`：STRONG BUY 命中 **38.3%** [25.8, 52.6] vs BUY **59.0%**
+  —— **反的**。STRONG BUY 就是 VKTX / NVDA 那几只写死高常数的票，而 VKTX 真实命中率 37%
+- ML 概率五等分命中率 59.8 / 64.4 / 51.7 / 54.0 / 54.4，非单调
+- 前瞻量自 v0.45.138 起全书池化、各标的相同 ⇒ 概率闸在结构上不可能区分标的
+
+零区分度的评级带着警示发出去，只会让读者学会忽略警示；对一个不随标的变化的输入
+重定阈值毫无意义。撤掉评级**词**，保留三个能被记分卡核对的数。
+
+#### Changed
+- `advanced_analyzer._generate_recommendation`：`rating` / `action` 键保留、值恒为 None
+  （下游不崩）；新增 `rating_retired="v0.45.139"` 与 `rating_retired_reason`；rationale
+  汇总前瞻量（池化 + Wilson 区间）、描述量（本标的本方向）、rr（本标的）三个数。
+  删除 `_RATING_GATES`（STRONG BUY 70/2.0、BUY 60/1.5、HOLD 50）与
+  `rating_discriminates_tickers`——没有评级就没有区分力可言
+- `generate_ml_report._combine_recommendations`：同上，三道闸（75/65/50）删除
+- 第 1 章「建议」一格改印**本标的本方向历史命中率**（第 1 章里唯一逐标的、可核对的数）；
+  刊头徽章改印**前瞻命中率 + 区间**，颜色随蜂群方向
+- deep_v2 的 `extract()` 仍把 `rating`/`action` 写进 ctx，但**无人读取**（4480 行的
+  `action` 是 `_build_executive_summary` 自己的局部变量），未改
+- 等 `ic_rerun_readiness.py` 的 25 周闸开、真有区分信号时再引回评级——那时它有证据
+
+### Fixed — 第二处 train/serve skew：`direction_encoded`
+
+撤评级时数读者数到的：`_prepare_ml_input` 把 `recommendation.rating` 映射成
+`{STRONG BUY:1, BUY:.5, HOLD:0, AVOID:-1}` 喂给 `direction_encoded`，而训练路径
+`ml_predictor.build_training_data_from_db` 用的是 `{bullish:1, neutral:0, bearish:-1}`
+（蜂群方向）。与 v0.45.135 修掉的 `catalyst_quality` 同种。评级词撤销后旧路径会静默
+恒为 0.0——「没发生过」形状。改为服务端读 `swarm_direction`、与训练同一张表；
+方向不可得时进 `_ml_input_missing`。影响面：报告期 ML 预测 + 前向账本，不进
+`predictions` 表 / IC，无世代边界。
+
+### Changed — 账本
+`record_published` 多记 `ml_probability_pct`（融合权重扫描的第二个输入）。
+
+### 验证
+- 全量离线套件通过（唯一 1 failed 是 `TestCoverageHorizon` 那个设计内的日历告警）
+- mutation check Q1–Q7 全部被捕获，每次核对 `collected 87 items`：
+  Q1 评级退回默认 HOLD、Q2 direction_encoded 退回读评级、Q3 方向不可得不进缺失表、
+  Q4 blend-scan 告警恒不触发、Q5 ML 概率按 timestamp 而非文件名日期建键、
+  Q6 blend-scan 时点隔离失效、Q7 rr 缺失时印 None:1
+- blend-scan 的泄漏测试与 walk_forward 同一对（embargo=14 看不见 / embargo=0 看得见）；
+  告警测试成对（ML 完美预知 ⇒ 红；ML 恒常数 ⇒ 绿）
+- `tests/test_ml_input_direction.py`：服务端三个取值与训练端 `direction_map` 逐一相等，
+  塞进 STRONG BUY 评级不再影响特征
+- 真实数据端到端：VKTX 看多 → rating None，rationale 三个数齐全；AST 核对 `_fw_hdr` /
+  `_hr_row` 落在 f-string 插值位
+
+### 顺带发现，未在本版处理
+`_prepare_ml_input` 的 `final_score=_rec.get("score", 5.0)`：recommendation 字典从来没有
+`score` 键，该特征恒为默认 5.0 且每份报告都被记为缺失——同一物种的第三处。已开任务卡。
+
 
 ## [0.45.138] — 2026-09-06 — 描述量与前瞻量分列：「这只票过去赢过几成」不等于「下一笔赢面多大」
 

@@ -130,65 +130,56 @@ def test_forward_estimate_zero_is_a_conclusion(a):
     assert a._forward_estimate("X", {"hit_rate_pct": 0.0}) == 0.0
 
 
-# ── 3. 评级读前瞻量，不读描述量（本版的全部意义）─────────────────────
-def test_rating_reads_forward_not_hit_rate(a):
-    """描述量高得离谱、前瞻量低 ⇒ 评级必须跟前瞻量走"""
-    pa = {"hit_rate_pct": 95.0, "sample_size": 40, "basis": "same_direction",
-          "forward_estimate_pct": 45.0, "forward_sample_size": 684,
-          "risk_reward_ratio": 3.0}
-    assert a._generate_recommendation("X", {"probability_analysis": pa})["rating"] == "AVOID"
-
-
-def test_rating_unrated_when_forward_missing_even_if_hit_rate_present(a):
-    """成对：描述量在、前瞻量缺 ⇒ 仍然不评级（描述量不许顶替前瞻量）"""
-    pa = {"hit_rate_pct": 81.8, "sample_size": 22, "basis": "same_direction",
-          "forward_estimate_pct": None, "forward_sample_size": 40,
-          "risk_reward_ratio": 2.5}
-    assert a._generate_recommendation("X", {"probability_analysis": pa})["rating"] == "UNRATED"
-
-
-def test_rationale_states_the_probability_is_book_wide(a):
-    """「所有票都 HOLD」不能被读成「系统逐个评估后都选了 HOLD」"""
+# ── 3. 评级已撤（v0.45.139）：只剩三个可核对的数 ─────────────────────
+# 实测（n=438 份能对上 T+7 结果的报告）：第 1 章 BUY 命中 54.5% vs HOLD 56.9%
+# （z=−0.55）；旧 STRONG BUY 38.3% vs BUY 59.0% —— 反向；ML 五等分非单调；
+# 前瞻量各标的相同。没有任何一个概率输入分得开标的。
+def test_rating_is_retired_not_defaulted(a):
+    """rating / action 键保留（下游不崩），值为 None —— 不是 HOLD、不是 UNRATED"""
     pa = {"forward_estimate_pct": 55.6, "forward_sample_size": 684,
-          "forward_ci95": [51.8, 59.2], "risk_reward_ratio": 1.67}
+          "hit_rate_pct": 37.0, "sample_size": 46, "basis": "same_direction",
+          "risk_reward_ratio": 0.84}
     out = a._generate_recommendation("X", {"probability_analysis": pa})
+    assert out["rating"] is None and out["action"] is None
+    assert out["rating_retired"] == "v0.45.139"
     assert out["probability_is_ticker_specific"] is False
-    assert "各标的相同" in out["rationale"] and "684" in out["rationale"]
 
 
-# ── 4. 区分力 ────────────────────────────────────────────────────────
-@pytest.mark.parametrize("fwd,expect", [
-    (45.0, False),   # 够不到最低升级闸 ⇒ rr 无从发挥
-    (55.6, False),   # 2026-09-06 生产实测值
-    (59.9, False),   # 闸下一线
-    (60.0, True),    # 最低升级闸 —— 此处起 rr 开始改变结果
-    (75.0, True),
-])
-def test_rating_discrimination_boundary(a, fwd, expect):
-    """概率够不到最低升级闸时，**任何 rr 都不改变评级** ⇒ 该评级不区分标的。
-
-    ⚠️ 这条断言会随生产池化率变化而变红：2026-09-06 实测 55.6%（闸 60.0），
-    评级此刻不携带任何逐标的信息。池化率一旦越过 60，就该回来重看这三道
-    从未验证过的闸（它们是从 v0.45.134 前的常数量表继承下来的）。
-    """
-    pa = {"forward_estimate_pct": fwd, "forward_sample_size": 684,
-          "risk_reward_ratio": 2.5}
-    assert a._generate_recommendation("X", {"probability_analysis": pa})[
-        "rating_discriminates_tickers"] is expect
+def test_rationale_carries_all_three_numbers(a):
+    pa = {"forward_estimate_pct": 55.6, "forward_sample_size": 684,
+          "forward_ci95": [51.8, 59.2],
+          "hit_rate_pct": 37.0, "sample_size": 46, "basis": "same_direction",
+          "risk_reward_ratio": 0.84}
+    r = a._generate_recommendation("X", {"probability_analysis": pa})["rationale"]
+    assert "55.6%" in r and "684" in r and "[51.8, 59.2]" in r and "各标的相同" in r
+    assert "37.0%" in r and "n=46" in r
+    assert "0.84:1" in r
 
 
-def test_non_discriminating_rating_says_so_in_rationale(a):
-    pa = {"forward_estimate_pct": 55.6, "forward_sample_size": 684, "risk_reward_ratio": 9.9}
-    r = a._generate_recommendation("X", {"probability_analysis": pa})
-    assert "不区分标的" in r["rationale"]
+@pytest.mark.parametrize("missing", ["forward_estimate_pct", "hit_rate_pct", "risk_reward_ratio"])
+def test_each_missing_number_is_said_not_faked(a, missing):
+    """任一数不可得 ⇒ 说「不可得 / 未知」，不印 None、不挑兜底"""
+    pa = {"forward_estimate_pct": 55.6, "forward_sample_size": 684,
+          "hit_rate_pct": 37.0, "sample_size": 46, "basis": "same_direction",
+          "risk_reward_ratio": 0.84}
+    pa[missing] = None
+    out = a._generate_recommendation("X", {"probability_analysis": pa})
+    assert "None" not in out["rationale"]
+    assert ("不可得" in out["rationale"]) or ("未知" in out["rationale"])
+    if missing == "forward_estimate_pct":
+        assert out["confidence"] is None
 
 
-def test_rr_truly_cannot_change_a_non_discriminating_rating(a):
-    """把区分力字段算对还不够 —— 直接穷举 rr 证明结果确实不动"""
-    base = {"forward_estimate_pct": 55.6, "forward_sample_size": 684}
-    got = {a._generate_recommendation("X", {"probability_analysis": dict(base, risk_reward_ratio=rr)})["rating"]
-           for rr in (None, 0.0, 0.5, 1.5, 2.0, 5.0, 100.0)}
-    assert got == {"HOLD"}, f"rr 竟然改变了评级: {got}"
+def test_no_rating_word_survives_in_user_facing_fields(a):
+    """成对：撤掉的是评级**词** —— rating / action / rationale 里不许再出现任何旧词。
+    （`rating_retired_reason` 是文档字段，引用旧词说明理由，不在此列）"""
+    pa = {"forward_estimate_pct": 95.0, "forward_sample_size": 684,
+          "hit_rate_pct": 95.0, "sample_size": 99, "basis": "same_direction",
+          "risk_reward_ratio": 9.9}
+    out = a._generate_recommendation("X", {"probability_analysis": pa})
+    blob = " ".join(str(out[k]) for k in ("rating", "action", "rationale"))
+    for w in ("STRONG BUY", "BUY", "HOLD", "AVOID", "UNRATED"):
+        assert w not in blob, f"评级词 {w} 仍在面向读者的字段里"
 
 
 # ── 5. 账本口径 ──────────────────────────────────────────────────────

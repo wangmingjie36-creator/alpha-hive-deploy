@@ -57,7 +57,7 @@ import sqlite3
 import sys
 from datetime import date as _date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 _log = _logging.getLogger("alpha_hive.probability_scorecard")
 
@@ -88,6 +88,13 @@ PRODUCTION_MODEL = "base_rate"
 #: 「生产 vs 旧常数」是个差判据——基准率几乎必然赢过一个固定常数，
 #: 那样的告警永远不会红，等于没装。这里问的是「就在旁边有没有更好的」。
 BRIER_MARGIN = 0.002
+
+#: 生产当前的融合权重（generate_ml_report._combine_recommendations：
+#: combined = w·前瞻 + (1−w)·ML）。v0.45.139 实测 w∈[0.7, 1.0] 的 Brier 极差
+#: 0.0007 < BRIER_MARGIN ⇒ **不改数，只监控**——在噪声里调参是假优化，
+#: 而改了会破坏前向账本的可比性。**改生产权重时必须同时改这里。**
+PRODUCTION_BLEND_W = 0.7
+BLEND_GRID = tuple(i / 10 for i in range(11))
 
 _EPS = 1e-9
 
@@ -144,6 +151,7 @@ def record_published(
     ledger_path: Optional[Path] = None,
     forward_estimate_pct: Optional[float] = None,
     forward_sample_size: Optional[int] = None,
+    ml_probability_pct: Optional[float] = None,
 ) -> bool:
     """把**当天真正印出去的**两个数记进账本；返回是否写入。
 
@@ -178,6 +186,7 @@ def record_published(
         "sample_size": sample_size,
         "forward_estimate_pct": forward_estimate_pct,
         "forward_sample_size": forward_sample_size,
+        "ml_probability_pct": ml_probability_pct,     # v0.45.139：融合权重扫描的第二个输入
         "recorded_at": datetime.now().isoformat(timespec="seconds"),
     }
     with path.open("a", encoding="utf-8") as fh:
@@ -257,6 +266,40 @@ def load_outcomes(db_path: Optional[Path] = None) -> Tuple[List[Dict], str]:
     if skipped:
         _log.info("[scorecard] 跳过 %d 条坏行", skipped)
     out.sort(key=lambda r: r["date"])
+    return out, "ok"
+
+
+def load_ml_probabilities(
+    reports_dir: Optional[Path] = None,
+) -> Tuple[Dict[Tuple[str, str], float], str]:
+    """从 analysis-*-ml-*.json 读每天**印出去的** ML 概率（百分数）。
+
+    键 = (文件名日期, ticker)。用文件名日期而非 `timestamp`：后者是生成时刻，
+    次日重跑会晚一天——2026-09-06 核对 110 份重跑，间隔恒为 1 天、同模型，无泄漏。
+    v0.45.139 起账本也记 `ml_probability_pct`，日后可改读账本；历史只有 JSON 里有。
+    """
+    d = Path(reports_dir) if reports_dir else ALPHAHIVE_DIR
+    files = sorted(d.glob("analysis-*-ml-*.json"))
+    if not files:
+        return {}, "no_reports"
+    out: Dict[Tuple[str, str], float] = {}
+    bad = 0
+    for p in files:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            bad += 1
+            continue
+        m = (data.get("combined_recommendation") or {}).get("ml_probability")
+        if not isinstance(m, (int, float)) or isinstance(m, bool) or not math.isfinite(m):
+            continue
+        fdate = p.name.split("-ml-")[-1][:10]
+        tk = data.get("ticker")
+        if not tk:
+            continue
+        out[(fdate, str(tk))] = float(m)
+    if bad:
+        _log.warning("[scorecard] %d 份报告 JSON 读取失败，已跳过", bad)
     return out, "ok"
 
 
@@ -348,6 +391,86 @@ def walk_forward(
 
 
 # ══════════════════════════════════════════════════════════════════════
+# 融合权重扫描（时点隔离）
+# ══════════════════════════════════════════════════════════════════════
+def blend_scan(
+    rows: Optional[List[Dict]] = None,
+    ml: Optional[Dict[Tuple[str, str], float]] = None,
+    embargo_days: int = EMBARGO_DAYS,
+    db_path: Optional[Path] = None,
+    reports_dir: Optional[Path] = None,
+    grid: Sequence[float] = BLEND_GRID,
+) -> Dict:
+    """扫 w ∈ grid：combined = w·时点基准率 + (1−w)·ML，给每个 w 记分。
+
+    这是 v0.45.139 把「0.7/0.3」从魔数变成受监控量的承载物。判据与
+    walk_forward 同型：**网格上有没有 w 明显打得过生产在用的 PRODUCTION_BLEND_W**。
+    实测（2026-09-06，n=393）曲线在 [0.7, 1.0] 是平的——那正是「不该调」的证据；
+    等 ML 真有区分度那天，曲线会向左倾斜、这里会红。
+    """
+    status = "ok"
+    if rows is None:
+        rows, status = load_outcomes(db_path)
+    if status != "ok" or not rows:
+        return {"status": status if status != "ok" else "no_samples",
+                "embargo_days": embargo_days}
+    if ml is None:
+        ml, mstatus = load_ml_probabilities(reports_dir)
+        if mstatus != "ok":
+            return {"status": mstatus, "embargo_days": embargo_days}
+
+    dated = [(r, _parse_day(r["date"])) for r in rows]
+    dated = [(r, d) for r, d in dated if d is not None]
+    dated.sort(key=lambda t: t[1])
+
+    recs: List[Tuple[int, float, float]] = []   # (y, base_pit, ml)
+    first: Optional[str] = None
+    for r, d in dated:
+        key = (r["date"], r["ticker"])
+        if key not in ml:
+            continue
+        cutoff = d - timedelta(days=embargo_days)
+        hist = [h for h, hd in dated if hd <= cutoff]
+        if not hist:
+            continue
+        base = sum(h["hit"] for h in hist) / len(hist)
+        recs.append((r["hit"], base, ml[key] / 100.0))
+        if first is None:
+            first = r["date"]
+    if not recs:
+        return {"status": "no_joined_rows", "embargo_days": embargo_days,
+                "outcome_rows": len(dated), "ml_rows": len(ml)}
+
+    ys = [y for y, _, _ in recs]
+    grid_out = []
+    for w in grid:
+        ps = [w * b + (1 - w) * m for _, b, m in recs]
+        grid_out.append({"w": round(w, 3), **_score_block(ps, ys)})
+    best = min(grid_out, key=lambda g: g["brier"])
+    prod = next((g for g in grid_out if abs(g["w"] - PRODUCTION_BLEND_W) < 1e-9), None)
+    if prod is None:   # 生产权重不在网格上 → 单独算一次，别拿最近的格点冒充
+        ps = [PRODUCTION_BLEND_W * b + (1 - PRODUCTION_BLEND_W) * m for _, b, m in recs]
+        prod = {"w": PRODUCTION_BLEND_W, **_score_block(ps, ys)}
+    gap = round(prod["brier"] - best["brier"], 4)
+    beaten = gap > BRIER_MARGIN
+    return {
+        "status": "ok",
+        "embargo_days": embargo_days,
+        "n": len(ys),
+        "date_range": [first, recs and dated[-1][0]["date"]],
+        "grid": grid_out,
+        "production_model": f"blend_w={PRODUCTION_BLEND_W}",
+        "production_w": PRODUCTION_BLEND_W,
+        "production_brier": prod["brier"],
+        "best_w": best["w"],
+        "best_brier": best["brier"],
+        "gap": gap,
+        "beaten_by": ({f"blend_w={best['w']}": gap} if beaten else {}),
+        "production_is_beaten": beaten,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════
 # 前向记分
 # ══════════════════════════════════════════════════════════════════════
 def score_published(
@@ -423,6 +546,23 @@ def _fmt(res: Dict, title: str) -> str:
             lines.append(f"  {names[k]:22}{m['brier']:>9.4f}{m['log_loss']:>10.4f}"
                          f"{m['calibration_error_pp']:>9.1f}pp{m['mean_pred_pct']:>9.1f}%{tag}")
         lines += ["", f"  实际命中率：{res['models']['base_rate']['observed_pct']}%"]
+    elif "grid" in res:
+        lines += [
+            f"  样本 {res['n']} 条（embargo {res['embargo_days']} 天，"
+            f"{res['date_range'][0]} → {res['date_range'][1]}）",
+            "",
+            f"  {'w(前瞻权重)':>11}{'Brier↓':>9}{'LogLoss↓':>10}{'校准误差':>10}",
+        ]
+        for g in res["grid"]:
+            tag = ""
+            if abs(g["w"] - res["production_w"]) < 1e-9:
+                tag += " ← 生产在用"
+            if abs(g["w"] - res["best_w"]) < 1e-9:
+                tag += " ← Brier 最优"
+            lines.append(f"  {g['w']:>11.1f}{g['brier']:>9.4f}{g['log_loss']:>10.4f}"
+                         f"{g['calibration_error_pp']:>9.1f}pp{tag}")
+        lines += ["", f"  生产 w={res['production_w']} 与最优 w={res['best_w']} 的 Brier 差 {res['gap']:.4f}"
+                      f"（告警阈 {BRIER_MARGIN}）"]
     else:
         lines += [
             f"  账本 {res['ledger_rows']} 行，其中印出概率 {res['with_probability']} 行"
@@ -451,6 +591,10 @@ def main(argv=None) -> int:
                     help="回溯记分（时点隔离），今天就能跑")
     ap.add_argument("--published", action="store_true",
                     help="前向记分：只给账本里真正印出去的数打分")
+    ap.add_argument("--blend-scan", action="store_true",
+                    help="扫融合权重 w∈[0,1]（时点隔离），判 PRODUCTION_BLEND_W 是否被打过")
+    ap.add_argument("--reports-dir", default=None,
+                    help="analysis-*-ml-*.json 所在目录（默认模块目录）")
     ap.add_argument("--embargo-days", type=int, default=EMBARGO_DAYS)
     ap.add_argument("--min-sample", type=int, default=MIN_SAMPLE)
     ap.add_argument("--json", action="store_true")
@@ -459,16 +603,22 @@ def main(argv=None) -> int:
     ap.add_argument("--ledger", default=None, help="前向账本路径")
     args = ap.parse_args(argv)
 
-    if not args.walk_forward and not args.published:
+    if not (args.walk_forward or args.published or args.blend_scan):
         args.walk_forward = True
 
     _db = Path(args.db) if args.db else None
-    res = (walk_forward(embargo_days=args.embargo_days, min_sample=args.min_sample,
-                        db_path=_db)
-           if args.walk_forward
-           else score_published(ledger_path=Path(args.ledger) if args.ledger else None,
-                                db_path=_db))
-    title = "回溯（时点隔离）" if args.walk_forward else "前向（已印出的）"
+    if args.blend_scan:
+        res = blend_scan(embargo_days=args.embargo_days, db_path=_db,
+                         reports_dir=Path(args.reports_dir) if args.reports_dir else None)
+        title = "融合权重扫描（时点隔离）"
+    elif args.walk_forward:
+        res = walk_forward(embargo_days=args.embargo_days, min_sample=args.min_sample,
+                           db_path=_db)
+        title = "回溯（时点隔离）"
+    else:
+        res = score_published(ledger_path=Path(args.ledger) if args.ledger else None,
+                              db_path=_db)
+        title = "前向（已印出的）"
     print(json.dumps(res, ensure_ascii=False, indent=2) if args.json else _fmt(res, title))
 
     if res.get("status") != "ok":

@@ -242,3 +242,115 @@ def test_json_output_is_parseable(tmp_path, capsys):
                           for i in range(25)])
     PS.main(["--walk-forward", "--db", str(db), "--json"])
     json.loads(capsys.readouterr().out)
+
+
+# ── 5. 融合权重扫描（v0.45.139）─────────────────────────────────────
+# 把「0.7/0.3」从魔数变成受监控量。判据与 walk_forward 同型：网格上有没有 w
+# 明显打得过生产在用的 PRODUCTION_BLEND_W。生产实测曲线在 [0.7,1.0] 是平的。
+def _ml_const(rows, pct):
+    return {(r[0], r[1]): pct for r in rows}
+
+
+def _write_report(dir_, fdate, ticker, ml_pct, ts=None):
+    p = dir_ / f"analysis-{ticker}-ml-{fdate}.json"
+    p.write_text(json.dumps({"ticker": ticker, "timestamp": ts or fdate,
+                             "combined_recommendation": {"ml_probability": ml_pct}}),
+                 encoding="utf-8")
+
+
+def test_blend_scan_embargo_excludes_future(tmp_path):
+    """与 walk_forward 同一条泄漏证明（成对）：近期全败样本不许进 w=1.0 那一列"""
+    rows = [(f"2026-01-{i % 28 + 1:02d}", "AAA", "bullish", 100.0, 110.0) for i in range(25)]
+    rows += [(f"2026-02-{i + 18:02d}", "AAA", "bullish", 100.0, 90.0) for i in range(10)]
+    rows.append(("2026-03-01", "AAA", "bullish", 100.0, 110.0))
+    db = _mkdb(tmp_path, rows)
+    ml = _ml_const(rows, 50.0)
+    tight = PS.blend_scan(db_path=db, ml=ml, embargo_days=14)
+    loose = PS.blend_scan(db_path=db, ml=ml, embargo_days=0)
+    w1 = lambda res: next(g for g in res["grid"] if abs(g["w"] - 1.0) < 1e-9)  # noqa: E731
+    assert w1(tight)["mean_pred_pct"] == pytest.approx(100.0, abs=1.0)
+    assert w1(loose)["mean_pred_pct"] < w1(tight)["mean_pred_pct"], "放松 embargo 没改变结果"
+
+
+def test_blend_scan_alarms_when_ml_is_informative(tmp_path):
+    """ML 完美预知结果 ⇒ w=0 远优于生产 0.7 ⇒ 必须红"""
+    import random
+    rng = random.Random(3)
+    rows = []
+    for m in (1, 2, 4, 5):
+        for i in range(28):
+            for tk in ("AAA", "BBB"):
+                win = rng.random() < 0.5
+                rows.append((f"2026-{m:02d}-{i + 1:02d}", tk, "bullish", 100.0,
+                             110.0 if win else 90.0))
+    db = _mkdb(tmp_path, rows)
+    ml = {(d, t): (95.0 if c7 > p0 else 5.0) for d, t, _, p0, c7 in rows}
+    res = PS.blend_scan(db_path=db, ml=ml, embargo_days=14)
+    assert res["status"] == "ok"
+    assert res["best_w"] == pytest.approx(0.0)
+    assert res["production_is_beaten"] is True and res["gap"] > PS.BRIER_MARGIN
+
+
+def test_blend_scan_green_when_ml_adds_nothing(tmp_path):
+    """成对：ML 恒为一个接近基准率的常数 ⇒ 曲线平 ⇒ 生产 w 不被打过——否则恒红等于没装"""
+    import random
+    rng = random.Random(11)
+    rows = []
+    for m in (1, 2, 3, 4, 5, 6):
+        for i in range(28):
+            for tk in ("AAA", "BBB", "CCC"):
+                rows.append((f"2026-{m:02d}-{i + 1:02d}", tk, "bullish", 100.0,
+                             110.0 if rng.random() < 0.6 else 90.0))
+    db = _mkdb(tmp_path, rows)
+    res = PS.blend_scan(db_path=db, ml=_ml_const(rows, 60.0), embargo_days=14)
+    assert res["status"] == "ok"
+    assert res["production_is_beaten"] is False, res["beaten_by"]
+
+
+def test_blend_scan_reports_production_w(tmp_path):
+    rows = [(f"2026-0{m}-{i % 28 + 1:02d}", "AAA", "bullish", 100.0, 110.0)
+            for m in (1, 2, 3) for i in range(20)]
+    db = _mkdb(tmp_path, rows)
+    res = PS.blend_scan(db_path=db, ml=_ml_const(rows, 50.0), embargo_days=14)
+    assert res["production_w"] == PS.PRODUCTION_BLEND_W
+    assert res["production_model"] == f"blend_w={PS.PRODUCTION_BLEND_W}"
+    assert any(abs(g["w"] - PS.PRODUCTION_BLEND_W) < 1e-9 for g in res["grid"])
+
+
+def test_load_ml_probabilities_keys_by_filename_date(tmp_path):
+    """次日重跑的文件 timestamp 晚一天——键必须用文件名日期，否则对不上 T+7 结果"""
+    _write_report(tmp_path, "2026-01-05", "AAA", 61.0, ts="2026-01-06T05:00:00")
+    _write_report(tmp_path, "2026-01-06", "BBB", None)          # 无 ML 概率 → 跳过
+    ml, st = PS.load_ml_probabilities(tmp_path)
+    assert st == "ok" and ml == {("2026-01-05", "AAA"): 61.0}
+
+
+def test_load_ml_probabilities_empty_dir_is_status(tmp_path):
+    assert PS.load_ml_probabilities(tmp_path)[1] == "no_reports"
+
+
+def test_blend_scan_cli_exit_codes(tmp_path):
+    """通过 CLI 端到端：有更好的 w ⇒ 1；找不到报告 ⇒ 3"""
+    import random
+    rng = random.Random(5)
+    rdir = tmp_path / "reports"; rdir.mkdir()
+    rows = []
+    for m in (1, 2, 4, 5):
+        for i in range(28):
+            d = f"2026-{m:02d}-{i + 1:02d}"
+            win = rng.random() < 0.5
+            rows.append((d, "AAA", "bullish", 100.0, 110.0 if win else 90.0))
+            _write_report(rdir, d, "AAA", 95.0 if win else 5.0)
+    db = _mkdb(tmp_path, rows)
+    assert PS.main(["--blend-scan", "--db", str(db), "--reports-dir", str(rdir)]) == 1
+    empty = tmp_path / "empty"; empty.mkdir()
+    assert PS.main(["--blend-scan", "--db", str(db), "--reports-dir", str(empty)]) == 3
+
+
+def test_ledger_records_ml_probability(tmp_path):
+    led = tmp_path / "published.jsonl"
+    PS.record_published("2026-09-06", "NVDA", "bullish", 50.8, "same_direction", 59,
+                        ledger_path=led, forward_estimate_pct=55.6, forward_sample_size=684,
+                        ml_probability_pct=59.0)
+    rows, _ = PS.load_ledger(led)
+    assert rows[0]["ml_probability_pct"] == 59.0
