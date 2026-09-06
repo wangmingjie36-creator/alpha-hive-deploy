@@ -7,7 +7,7 @@ import logging as _logging
 import json
 import math
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 from pathlib import Path
 import sqlite3
 import statistics
@@ -716,36 +716,6 @@ class ProbabilityCalculator:
     def __init__(self):
         pass
 
-    def calculate_win_probability(
-        self, ticker: str, crowding_score: float, catalyst_quality: str
-    ) -> float:
-        """计算赚钱概率"""
-        # 基于历史数据的概率计算
-        base_prob = 0.55  # 基础 55% 赚钱概率
-
-        # 拥挤度调整
-        if crowding_score < 30:
-            crowding_adj = 0.08  # +8%
-        elif crowding_score < 50:
-            crowding_adj = 0.05  # +5%
-        elif crowding_score < 70:
-            crowding_adj = 0.02  # +2%
-        else:
-            crowding_adj = -0.05  # -5%
-
-        # 催化剂质量调整
-        catalyst_adj = {
-            "A+": 0.10,  # +10%
-            "A": 0.08,  # +8%
-            "B+": 0.05,  # +5%
-            "B": 0.02,  # +2%
-            "C": -0.02,  # -2%
-        }.get(catalyst_quality, 0)
-
-        win_prob = min(max(base_prob + crowding_adj + catalyst_adj, 0.3), 0.85)
-
-        return round(win_prob * 100, 1)
-
     def calculate_stop_loss_positions(
         self, current_price: float, risk_tolerance_pct: float = 5.0
     ) -> Dict:
@@ -756,34 +726,83 @@ class ProbabilityCalculator:
             "aggressive": round(current_price * (1 - 0.08), 2),  # -8%
         }
 
-    def calculate_take_profit_levels(
-        self, current_price: float, expected_gain_pct: float
-    ) -> Dict:
-        """计算止盈位置（分批了结）"""
-        level_1 = round(current_price * (1 + expected_gain_pct * 0.3 / 100), 2)  # 30% 涨幅
-        level_2 = round(current_price * (1 + expected_gain_pct * 0.6 / 100), 2)  # 60% 涨幅
-        level_3 = round(current_price * (1 + expected_gain_pct / 100), 2)  # 100% 涨幅
+    #: 三档止盈 = 历史 T+7 收益分布的三个分位点（v0.45.134）。
+    #: `reason` 一律写「观测到的频率」，不写交易建议——这张表是历史频次的陈述，
+    #: 不是「该在哪减仓」的意见。
+    TP_LEVELS = (
+        ("level_1", 0.33, "历史 T+7 中位：同类持仓约一半走到过这里"),
+        ("level_2", 0.33, "历史 T+7 四分位：约四次里一次走到过"),
+        ("level_3", 0.34, "历史 T+7 十分位：约十次里一次走到过"),
+    )
 
-        return {
-            "level_1": {
-                "price": level_1,
-                "gain_pct": round(30, 1),
-                "sell_ratio": 0.33,  # 卖出 1/3
-                "reason": "锁定初步收益",
-            },
-            "level_2": {
-                "price": level_2,
-                "gain_pct": round(60, 1),
-                "sell_ratio": 0.33,  # 再卖出 1/3
-                "reason": "追踪止损，保护利润",
-            },
-            "level_3": {
-                "price": level_3,
-                "gain_pct": round(expected_gain_pct, 1),
-                "sell_ratio": 0.34,  # 卖出剩余
-                "reason": "达到目标收益，全部清仓",
-            },
-        }
+    #: 盈利符号：空头的价格下跌是盈利
+    _DIRECTION_SIGN = {"bullish": 1.0, "bearish": -1.0}
+
+    def calculate_take_profit_levels(
+        self, current_price: float, level_gains: Sequence[float], direction: str
+    ) -> Dict:
+        """计算止盈位置（分批了结）。
+
+        `level_gains`：三档的**原始价格变动**（%），按 `direction` 折算后盈利递增，
+        来自 `expected_7d` 的分位数（多头 P50/P75/P90、空头 P50/P25/P10，
+        见 `_TP_QUANTILES_BY_DIRECTION`）。**没有默认值**——拿不到分布时调用方
+        必须整节渲染「不可得」，不许挑一个兜底数。
+
+        产出两个数，别混用：
+          · `gain_pct`  = 相对现价的**价格变动**，与 `price` 严格一致（可为负）
+          · `profit_pct`= 按持仓方向折算的**盈利**，空头是 `-gain_pct`
+        空头的 `gain_pct` 为负正是它在赚钱。渲染时标「涨幅」必须用 `gain_pct`、
+        标「盈利」必须用 `profit_pct`，混了就是 v0.45.134 修的那个口径错位。
+
+        v0.45.134 之前这里吃的是 `_estimate_expected_gain(ticker, crowding)`：
+        NVDA 15 / VKTX 25 / 其他 12 的写死基数 + 拥挤度四档调整。而拥挤度入参
+        在当前流水线里恒为 0（`realtime_metrics` 不含 `crowding_input`），
+        于是 803 份生产报告里 **76% 的目标涨幅恒等于 20.0%** —— 而同期
+        pheromone.db 实测同标的同方向 T+7 中位收益只有 **0.01%**，
+        11 个够样本的组合里 5 个为负。
+
+        ⚠️ 分位数为负是**真实结论**（「历史上一半的同类持仓 T+7 是亏的」），
+        照常渲染、不过滤。跳过它等于把「测出来是负的」渲染成「没测过」，
+        与 v0.45.114 同一形状。
+
+        ⚠️ `gain_pct` 一律**由该档成交价反算**，不写常数（v0.45.134）。
+
+        旧实现 level_1 / level_2 把 `gain_pct` 写死成 30 / 60，而价格算的是目标涨幅
+        的 0.3 / 0.6 倍——「占目标的比例」与「相对现价的涨幅」是两个口径，但渲染时
+        进的是同一列（`generate_ml_report` 的「涨幅」列 `+{gain_pct:.0f}%`）。
+        本机 1045 份已发布 ML 报告里 **998 份**因此印出「价格递增、标签 30→60→20」
+        的自相矛盾表（TMUS 2026-09-04 现价 $181.52：level_1 $192.41 标 +30%，
+        实为 +6.0%；标签误差中位 24pp）。
+
+        反算而非按公式重算一遍，是为了让标签与 **round(…, 2) 之后**的价格严格一致：
+        低价股（AMC ≈ $2.6）上四舍五入本身就有 0.2% 量级的相对误差。
+        不变式固化在 `tests/test_take_profit_labels.py`，与 `expected_gain_pct`
+        的来源无关——Step 2 换数据源后仍然有效。
+        """
+        gains = list(level_gains)
+        if len(gains) != len(self.TP_LEVELS):
+            raise ValueError(
+                f"level_gains 需要 {len(self.TP_LEVELS)} 个分位点，实得 {len(gains)}"
+            )
+
+        if direction not in self._DIRECTION_SIGN:
+            raise ValueError(f"direction 必须是 bullish / bearish，实得 {direction!r}")
+        sign = self._DIRECTION_SIGN[direction]
+
+        out: Dict = {}
+        for (key, sell_ratio, reason), target in zip(self.TP_LEVELS, gains):
+            price = round(current_price * (1 + target / 100), 2)
+            # 标签由 round(…, 2) 之后的成交价反算，与印出去的价严格一致
+            gain_pct = round((price / current_price - 1) * 100, 1)
+            out[key] = {
+                "price": price,
+                "gain_pct": gain_pct,
+                "profit_pct": round(sign * gain_pct, 1),
+                "sell_ratio": sell_ratio,
+                "reason": reason,
+                "direction": direction,
+            }
+        return out
 
     def calculate_optimal_holding_time(
         self, similar_opportunities: List[Dict]
@@ -852,24 +871,25 @@ class AdvancedAnalyzer:
         """
 
         # 提取关键数据
-        crowding_score = realtime_metrics.get("crowding_input", {}).get(
-            "social_messages_per_day", 0
-        )
+        #
+        # v0.45.134 删除：`crowding_pct` 及其两条来源。
+        #   · `realtime_metrics["crowding_input"]` 在**当前流水线里从不存在**——
+        #     两个入口（alpha_hive_daily_report._analyze_ticker_safe、
+        #     generate_ml_report.__main__）构造的 dict 只有 ticker 与
+        #     sources.yahoo_finance；唯一生产该键的 data_fetcher.collect_all_metrics()
+        #     全仓没有生产调用点。于是 crowding_score 恒为 0。
+        #   · 那条「> 1000 → NVDA 63.5 / VKTX 44.1 / 其他 63.8」的魔数分支因此
+        #     从不触发；否则走的是「把消息条数直接当百分比」——两条路都不是拥挤度。
+        #   · 恒为 0 落进两个消费者的最看多档（胜率 +8pp、目标涨幅 +8pp）：
+        #     **一条数据都没拿到被系统当成了利好**，与 crowding_detector.py
+        #     v0.45.50 修掉的是同一形状，那次漏了这个孪生兄弟。
+        # 真实拥挤度另有其人：ScoutBeeNova 走 CrowdingDetector 算出的
+        # `swarm_results.agent_details.ScoutBeeNova.details.crowding_score`
+        # （TMUS 2026-09-04 实测 18.07）。本函数在蜂群结果注入之前运行、拿不到它，
+        # 故此处不重建一个假的。
         current_price = realtime_metrics.get("sources", {}).get("yahoo_finance", {}).get(
             "current_price", 0
         )
-
-        # 如果 crowding_score 是消息数量，需要转换
-        if crowding_score > 1000:
-            # 这是消息数量，需要估算拥挤度评分
-            if ticker == "NVDA":
-                crowding_pct = 63.5
-            elif ticker == "VKTX":
-                crowding_pct = 44.1
-            else:
-                crowding_pct = 63.8
-        else:
-            crowding_pct = crowding_score
 
         analysis = {
             "ticker": ticker,
@@ -892,33 +912,43 @@ class AdvancedAnalyzer:
             "expected_returns": expected_returns,
         }
 
-        # 3. 概率和止损止盈
+        # 3. 历史命中率与止损止盈（v0.45.134：两者都改读 expected_returns，
+        #    不可得时字段为 None —— 调用方必须按「不可得」渲染，见下方字段契约）
         if current_price > 0:
             analysis["probability_analysis"] = {
-                "win_probability_pct": self.probability.calculate_win_probability(
-                    ticker, crowding_pct, self._estimate_catalyst_quality(ticker)
-                ),
+                # ⚠️ 字段名从 win_probability_pct 改成 hit_rate_pct 是有意的：
+                #    它是样本内历史频率，不是前瞻概率。旧名字会让读的人以为
+                #    系统在预测赢面，而那个数六个月没动过。
+                "hit_rate_pct": self._history_hit_rate(ticker, expected_returns),
+                "basis": expected_returns.get("basis"),
+                "sample_size": expected_returns.get("sample_size"),
+                "return_basis": HistoricalAnalyzer.RETURN_BASIS,
                 "risk_reward_ratio": self._calculate_risk_reward_ratio(
                     ticker, expected_returns
                 ),
             }
 
+            _tp = self._take_profit_gains(ticker, expected_returns, direction)
+            _tp_gains, _tp_keys = _tp if _tp is not None else (None, None)
             analysis["position_management"] = {
                 "stop_loss": self.probability.calculate_stop_loss_positions(
                     current_price
                 ),
-                "take_profit": self.probability.calculate_take_profit_levels(
-                    current_price, self._estimate_expected_gain(ticker, crowding_pct)
+                # 拿不到分布就整节不可得。不挑兜底值——0.0 在本量表上恰是
+                # 「一分不赚」这个明确结论，而我们要表达的是「不知道」。
+                "take_profit": (
+                    self.probability.calculate_take_profit_levels(
+                        current_price, _tp_gains, direction)
+                    if _tp_gains is not None else None
                 ),
+                "take_profit_quantiles": _tp_keys,
                 "optimal_holding_time": self.probability.calculate_optimal_holding_time(
                     analysis["historical_analysis"]["similar_opportunities"]
                 ),
             }
 
         # 4. 投资建议
-        analysis["recommendation"] = self._generate_recommendation(
-            ticker, analysis, crowding_pct, current_price
-        )
+        analysis["recommendation"] = self._generate_recommendation(ticker, analysis)
 
         # 5. 期权分析（OptionsAgent）
         if OPTIONS_AGENT_AVAILABLE and OptionsAgent is not None:
@@ -963,33 +993,78 @@ class AdvancedAnalyzer:
         }
         return overviews.get(ticker, "标的基本面分析")
 
-    def _estimate_catalyst_quality(self, ticker: str) -> str:
-        """估算催化剂质量"""
-        return {
-            "NVDA": "A",  # 财报催化强
-            "VKTX": "A+",  # 试验结果催化非常强
-            "TSLA": "B+",  # 交付指引中等强
-        }.get(ticker, "B")
+    #: 止盈三档取 `expected_7d` 的哪三个分位——**按方向取，不是固定三个键**。
+    #:
+    #: `expected_7d` 的分位数是**原始收益**（close_t7/price−1），没有按方向调整。
+    #: 对多头，收益越大越赚，阶梯是 P50 → P75 → P90；对空头，价格跌得越多越赚，
+    #: 阶梯必须反过来走 P50 → P25 → P10。两者共同的性质是「**盈利递增**」。
+    #: 中性方向没有「止盈」可言（没有持仓方向就没有盈利方向），返回 None。
+    _TP_QUANTILES_BY_DIRECTION = {
+        "bullish": ("median", "p75", "p90"),
+        "bearish": ("median", "p25", "p10"),
+    }
 
-    def _estimate_expected_gain(self, ticker: str, crowding: float) -> float:
-        """估算预期涨幅"""
-        base_gains = {
-            "NVDA": 15.0,  # 基础 15% 涨幅预期
-            "VKTX": 25.0,  # 更高波动性
-            "TSLA": 12.0,
-        }
+    def _take_profit_gains(
+        self, ticker: str, expected_returns: Dict, direction: Optional[str]
+    ) -> Optional[Tuple[List[float], List[str]]]:
+        """止盈三档的目标涨幅；**分布不可得时返回 None**，不以常数冒充。
 
-        base = base_gains.get(ticker, 12.0)
+        v0.45.134：来源改为 `HistoricalAnalyzer` 在同标的（同方向优先）真实
+        T+7 样本上算出的 P50 / P75 / P90。旧实现 `_estimate_expected_gain`
+        是「NVDA 15 / VKTX 25 / 其他 12 的写死基数 + 拥挤度四档调整」，而
+        拥挤度入参恒为 0 ⇒ 803 份生产报告里 76% 的目标涨幅恒等于 20.0%。
 
-        # 拥挤度调整
-        if crowding < 40:
-            return base + 8  # 低拥挤 +8%
-        elif crowding < 60:
-            return base + 3  # 中等拥挤 +3%
-        elif crowding < 75:
-            return base - 2  # 高拥挤 -2%
-        else:
-            return base - 5  # 极度拥挤 -5%
+        守卫与 `_calculate_risk_reward_ratio` 同源、逐字同型：
+        `bool` 是 `int` 的子类，必须显式排除（v0.45.121 的教训——同类守卫在
+        本仓 5 处全写了 `not isinstance(x, bool)`）。
+        """
+        keys = self._TP_QUANTILES_BY_DIRECTION.get(direction or "")
+        if keys is None:
+            _log.debug("[%s] 止盈不可得：方向为 %r —— 没有持仓方向就没有盈利方向",
+                       ticker, direction)
+            return None
+        e7 = (expected_returns or {}).get("expected_7d") or {}
+        vals: List[float] = []
+        for key in keys:
+            v = e7.get(key)
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+                _log.debug("[%s] 止盈目标不可得：expected_7d.%s = %r（basis=%s, n=%s）",
+                           ticker, key, v, (expected_returns or {}).get("basis"),
+                           (expected_returns or {}).get("sample_size"))
+                return None
+            vals.append(float(v))
+        # 按方向折算成盈利后必须单调不减；不满足说明上游分位数算坏了，
+        # 宁可整节不可得，也不印一张「越靠后越不赚」的倒序阶梯
+        sign = 1.0 if direction == "bullish" else -1.0
+        profits = [sign * v for v in vals]
+        if not all(a <= b for a, b in zip(profits, profits[1:])):
+            _log.warning("[%s] 止盈目标不可得：%s 方向折算盈利后非单调 %s（原始 %s）"
+                         " —— 上游 expected_7d 有问题", ticker, direction, profits, vals)
+            return None
+        return [round(v, 2) for v in vals], list(keys)
+
+    def _history_hit_rate(self, ticker: str, expected_returns: Dict) -> Optional[float]:
+        """同标的同方向历史 T+7 命中率（%）；**不可得返回 None**。
+
+        ⚠️ 这是**样本内的历史频率**，不是校准过的前瞻概率——本项目实测
+        `final_score` 的 Spearman IC = +0.042（n=683，95%CI 半宽 ±0.075，不显著），
+        五个维度无一显著。所以它只能回答「这只票这个方向过去赢过几成」，
+        不能回答「这次赢面多大」。字段名与渲染文案必须体现这个区别。
+
+        v0.45.134 之前这里是 `calculate_win_probability`：base 0.55 + 拥挤度
+        常数 + 催化剂常数。生产 803 份报告里 **81% 恒等于 65.0**，34 只标的
+        中 31 只六个月一动不动；而真实命中率实测跨度 37.0%~81.8%，
+        11 个够样本的组合里 4 个低于 50%（VKTX 看多印 70~73%、实测 37.0%）。
+        """
+        if not isinstance(expected_returns, dict):
+            return None
+        hr = expected_returns.get("hit_rate_pct")
+        if not isinstance(hr, (int, float)) or isinstance(hr, bool) or not math.isfinite(hr):
+            _log.debug("[%s] 历史命中率不可得（basis=%s, n=%s），不以常数冒充",
+                       ticker, (expected_returns or {}).get("basis"),
+                       (expected_returns or {}).get("sample_size"))
+            return None
+        return float(hr)
 
     def _calculate_risk_reward_ratio(self, ticker: str, expected_returns: Dict):
         """风险收益比；**无历史可比时返回 None**。
@@ -1013,12 +1088,42 @@ class AdvancedAnalyzer:
             return None
         return rr
 
-    def _generate_recommendation(
-        self, ticker: str, analysis: Dict, crowding: float, price: float
-    ) -> Dict:
-        """生成投资建议"""
-        prob = analysis.get("probability_analysis", {}).get("win_probability_pct", 50)
-        rr = analysis.get("probability_analysis", {}).get("risk_reward_ratio")
+    #: 评级闸。⚠️ 这两组阈值是从 `calculate_win_probability` 那个常数量表
+    #: （base 0.55 + 常数调整，值域被 clamp 在 30~85、生产实际只出现 6 个值）
+    #: 继承下来的，**从未在真实命中率的量表上验证过**。v0.45.134 换数据源时
+    #: 原样保留，是为了不在同一次改动里既换来源又改判据；它们的合理性是一个
+    #: 独立的、需要证据的问题（当前证据：final_score 的 IC 不显著）。
+    _RATING_GATES = (
+        ("STRONG BUY", "积极布局", 70.0, 2.0),
+        ("BUY", "分批建仓", 60.0, 1.5),
+    )
+
+    def _generate_recommendation(self, ticker: str, analysis: Dict) -> Dict:
+        """生成投资建议。
+
+        v0.45.134：判据从 `win_probability_pct`（常数）换成 `hit_rate_pct`
+        （同标的同方向历史 T+7 命中率）。命中率不可得时**不评级**——旧实现
+        `.get("win_probability_pct", 50)` 的默认值 50 恰好卡在 HOLD 闸
+        （`prob >= 50`）上，与 v0.45.50 修掉的 rr 默认值 2.0 / 1.5 同一形状：
+        「不知道」必须是不达标，而不是刚好达标。
+        """
+        _pa = analysis.get("probability_analysis") or {}
+        prob = _pa.get("hit_rate_pct")
+        rr = _pa.get("risk_reward_ratio")
+        _prob_known = (isinstance(prob, (int, float)) and not isinstance(prob, bool)
+                       and math.isfinite(prob))
+        if not _prob_known:
+            _log.debug("[%s] 历史命中率不可得，不评级（basis=%s, n=%s）",
+                       ticker, _pa.get("basis"), _pa.get("sample_size"))
+            return {
+                "rating": "UNRATED",
+                "action": "不评级",
+                "confidence": None,
+                "rationale": (
+                    f"无同方向历史可比样本（basis={_pa.get('basis')}, "
+                    f"n={_pa.get('sample_size')}），不给方向也不给评级"
+                ),
+            }
         # v0.45.50：rr 不可得时**不许升级评级**。
         # 旧默认值 1.5 恰好是 BUY 闸的阈值（`prob >= 60 and rr >= 1.5`），
         # 与上面 _calculate_risk_reward_ratio 的 2.0 一样卡在门槛上。
@@ -1028,26 +1133,28 @@ class AdvancedAnalyzer:
             _log.debug("风险收益比不可得，评级不因缺数据而升级")
 
         # 评估建议
-        if prob >= 70 and _rr_known and rr >= 2.0:
-            rating = "STRONG BUY"
-            action = "积极布局"
-        elif prob >= 60 and _rr_known and rr >= 1.5:
-            rating = "BUY"
-            action = "分批建仓"
-        elif prob >= 50:
-            rating = "HOLD"
-            action = "观察等待"
-        else:
-            rating = "AVOID"
-            action = "回避或减仓"
+        # 起点：命中率过半 → HOLD，不过半 → AVOID；再由上面两道闸向上升级。
+        # （不用 for/else —— 那个结构对，但太容易被后来的人读反。）
+        rating, action = ("HOLD", "观察等待") if prob >= 50 else ("AVOID", "回避或减仓")
+        for _r, _a, _p_gate, _rr_gate in self._RATING_GATES:
+            if prob >= _p_gate and _rr_known and rr >= _rr_gate:
+                rating, action = _r, _a
+                break
 
+        _n = _pa.get("sample_size")
+        _basis = _pa.get("basis")
         return {
             "rating": rating,
             "action": action,
             "confidence": f"{prob:.1f}%",
             # v0.45.50：rr 为 None 时印「未知」，不印 "None:1" 也不编一个数
-            "rationale": (f"赚钱概率 {prob:.1f}%，风险收益比 {rr}:1" if _rr_known
-                          else f"赚钱概率 {prob:.1f}%，风险收益比未知（无历史可比样本）"),
+            # v0.45.134：文案不再说「赚钱概率」——那是前瞻断言；这个数是历史频率，
+            #            必须连 n 和 basis 一起报，否则读的人无从判断它有多硬
+            "rationale": (
+                f"同方向历史 T+7 命中率 {prob:.1f}%（n={_n}, basis={_basis}），"
+                + (f"风险收益比 {rr}:1" if _rr_known
+                   else "风险收益比未知（样本里没有亏损单，多半是样本太少）")
+            ),
         }
 
 
@@ -1106,9 +1213,12 @@ if __name__ == "__main__":
             else:
                 print(f"\n💰 T+7 收益分布不可得：{er.get('note') or er.get('db_status')}")
 
-            # 概率
+            # 历史命中率（v0.45.134：不是「赚钱概率」——那是前瞻断言）
             pa = analysis.get("probability_analysis", {})
-            print(f"\n🎲 赚钱概率：{pa.get('win_probability_pct', '?')}%")
+            _hr = pa.get("hit_rate_pct")
+            print(f"\n🎲 同方向历史 T+7 命中率："
+                  + (f"{_hr:.1f}%（n={pa.get('sample_size')}, basis={pa.get('basis')}）"
+                     if isinstance(_hr, (int, float)) else "不可得（无同方向可比样本）"))
             _rr_p = pa.get("risk_reward_ratio")
             print(f"   风险收益比：{_rr_p}:1" if isinstance(_rr_p, (int, float))
                   else "   风险收益比：未知（无历史可比样本）")
@@ -1122,12 +1232,16 @@ if __name__ == "__main__":
                     [f"{sl.get('conservative')}", f"{sl.get('moderate')}", f"{sl.get('aggressive')}"]
                 ))
 
-                tp = pm.get("take_profit", {})
-                print(f"   止盈方案（分批了结）：")
-                for level, data in list(tp.items())[:3]:
-                    print(
-                        f"     • {level.upper()}：${data['price']} (+{data['gain_pct']}%)，卖 {int(data['sell_ratio']*100)}%"
-                    )
+                tp = pm.get("take_profit")
+                if tp:
+                    print(f"   止盈方案（历史 T+7 分位，分批了结）：")
+                    for level, data in list(tp.items())[:3]:
+                        print(
+                            f"     • {level.upper()}：${data['price']} ({data['gain_pct']:+}%)，"
+                            f"卖 {int(data['sell_ratio']*100)}% — {data['reason']}"
+                        )
+                else:
+                    print(f"   止盈方案：不可得（无历史 T+7 分布）")
 
                 oht = pm.get("optimal_holding_time", {})
                 print(

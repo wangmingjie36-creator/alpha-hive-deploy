@@ -19,6 +19,16 @@ import pytest
 from options_analyzer import OptionsAgent
 
 
+@pytest.fixture(autouse=True)
+def _offline_sources(stub_yfinance):
+    """本文件的取数支路显式钉死，不依赖 conftest 的传输层兜底（v0.45.136）。
+
+    补算 rv_30d / iv_rank 会调 OptionsDataFetcher.fetch_historical_hv。
+
+    桩的定义与各自的「取不到」契约见 tests/conftest.py 的可复用源桩一节。
+    """
+
+
 @pytest.fixture
 def agent():
     return OptionsAgent()

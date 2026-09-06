@@ -16,6 +16,16 @@ import pytest
 from dashboard_renderer import _build_top_cards_html
 
 
+@pytest.fixture(autouse=True)
+def _offline_sources(stub_yfinance):
+    """本文件的取数支路显式钉死，不依赖 conftest 的传输层兜底（v0.45.136）。
+
+    dashboard_renderer._detail 会为标的补取价格。
+
+    桩的定义与各自的「取不到」契约见 tests/conftest.py 的可复用源桩一节。
+    """
+
+
 def _render(swarm_detail, tickers, tmp_path):
     return _build_top_cards_html(
         tickers,

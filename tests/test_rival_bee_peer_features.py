@@ -29,6 +29,16 @@ import ml_predictor as mp
 from pheromone_board import PheromoneBoard, PheromoneEntry
 from swarm_agents.rival_bee import RivalBeeVanguard
 
+
+@pytest.fixture(autouse=True)
+def _offline_sources(stub_yfinance, stub_reddit):
+    """本文件的取数支路显式钉死，不依赖 conftest 的传输层兜底（v0.45.136）。
+
+    RivalBee.analyze → get_real_crowding_metrics，链上有 yfinance 与 reddit_sentiment。
+
+    桩的定义与各自的「取不到」契约见 tests/conftest.py 的可复用源桩一节。
+    """
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 

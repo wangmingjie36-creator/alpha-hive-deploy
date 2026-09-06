@@ -25,6 +25,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import report_formatters as rf  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _offline_sources(stub_yfinance):
+    """本文件的取数支路显式钉死，不依赖 conftest 的传输层兜底（v0.45.136）。
+
+    同 test_score_dual_display：dashboard_renderer._detail。
+
+    桩的定义与各自的「取不到」契约见 tests/conftest.py 的可复用源桩一节。
+    """
+
+
 def _row(**over):
     det = {
         "iv_rank": 47.41, "iv_rank_source": "hv_proxy",

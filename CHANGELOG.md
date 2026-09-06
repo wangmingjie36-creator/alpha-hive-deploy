@@ -5,9 +5,201 @@
 
 ---
 
+## [0.45.136] — 2026-09-06 — 还债：10 个模块逐个补显式源桩，`_KNOWN_NETWORK_REACHERS` 清空
+
+v0.45.133 的传输层闸让整套测试**行为上**离线了，但那 10 个模块仍在调用数据源、
+只是被兜住——债务表记的就是这笔债。本版把它还清：每个模块声明自己钉死了哪几个源，
+确定性**由构造保证**，而不是靠一张网兜住。
+
+### Added — `tests/conftest.py`：6 个可复用源桩
+
+`stub_cboe_payload` / `stub_cboe_vix` / `stub_vixcentral` / `stub_reddit` /
+`stub_http_gate` / `stub_yfinance`。各模块按需 opt-in：
+
+    @pytest.fixture(autouse=True)
+    def _offline_sources(stub_cboe_payload, stub_yfinance):
+        """本文件会走 IV 期限结构与全链 OI 两条支路，显式钉死。"""
+
+⚠️ **每个桩的返回值都取该源自己文档承诺的「取不到」契约**，不是随手挑一个看着
+合理的值——挑出来的默认值会让下游误以为掌握了信息（v0.45.3 判据）。
+`_fetch_cboe_payload`→`None`（模块 docstring：「失败一律返回 None」）、
+`cboe_vix._download`→`None`（「不抛，让调用方走缓存」）、
+`_get_vx_futures`→`[]`、`_fetch_ranking`→`[]`（`requests is None` 分支）、
+`urlopen_gated`→抛（它是 urlopen 的串行化版本，失败就是抛）。
+
+⚠️ **`stub_yfinance` 的替身必须是 class 而不是函数**：`yf_gate.install()` 用
+`type("Ticker", (yfinance.Ticker,), ...)` 继承它，并 `isinstance(..., property)`
+判断哪些按 property 重建；换成函数会直接 TypeError。而 `yf_gate.ensure()` 散布在
+options_analyzer / fred_macro / dashboard_renderer / market_intelligence 四个热点
+函数入口，测试里随时会被调到。替身提供了闸会包的 3 个方法 + 4 个 property，
+外加 `__getattr__` 兜住 `fast_info` 之类。
+
+### Changed — 10 个测试模块各加一条 `_offline_sources`
+
+| 模块 | 钉死的源 |
+|---|---|
+| `test_iv_history` / `test_options_analyzer` | CBOE payload + yfinance |
+| `test_catalyst_availability` | CBOE payload + http_gate(AV/Finnhub) + yfinance |
+| `test_snapshot_price_derived_refresh` | yfinance（`fetch_historical_hv`） |
+| `test_iv_structure_guards` | yfinance（`calculate_iv_rv_spread` 失败路径） |
+| `test_score_dual_display` / `test_site_missing_fields` | yfinance（`dashboard_renderer._detail`） |
+| `test_rival_bee_peer_features` | yfinance + reddit |
+| `test_fred_macro` | cboe_vix + yfinance |
+| `test_macro_degradation` | yfinance + vixcentral |
+
+### Changed — `_KNOWN_NETWORK_REACHERS` 清空，并写明**应保持为空**
+
+新测试伸手取网时，正确做法是补源桩，或者——若意图就是打真外网——加
+`@pytest.mark.network`。往表里加模块等于把「测试不确定」变成「不确定但没人管」。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 全套（债务表已空，本机） | **0 个模块伸手**，3184 passed（与改动前同一通过数） |
+| 全套（债务表已空，`git archive` 干净检出） | **0 个模块伸手**，3178 passed |
+| mutation ×10 | 逐个拆掉模块自己的 `_offline_sources`，**10/10 都判红** ✅ |
+| 闸与相邻文件 | `test_offline_transport_gate` / `test_slack_notifier` / `test_yf_gate` / `test_quote_set` 共 93 项全绿 |
+
+⚠️ **mutation 必须在冷缓存下做**：`test_rival_bee_peer_features` / `test_fred_macro` /
+`test_macro_degradation` 这三个在**本机热缓存单独跑**时拆掉桩「毫无变化」——
+`cboe_vix` 的缓存是 `Path(__file__).parent/"cache"`（仓库本地目录，不受
+`ALPHA_HIVE_CACHE_DIR` 隔离），reddit / vixcentral 同理。只在本机做 mutation
+会得出「这三个桩是装饰品」的**错误结论**、删掉它们、然后 CI 冷缓存变红。
+在 `git archive` 干净检出里复测，三个分别伸手 7 / 6 / 1 次，全部检出。
+**判据：涉及带磁盘缓存的数据源时，mutation check 与「需不需要这个桩」都要在冷缓存下判。**
+
+⚠️ 另记一个自造的坑：批量插 fixture 时用「最后一个匹配 `^(import|from)` 的行」
+定位会插进**跨行 import 的括号里**（`from iv_history import (` … `)`）。
+改用 `ast` 取最后一个 import 节点的 `end_lineno`，并在写回前 `ast.parse` 自证。
+
+
 ## [0.45.135] — 2026-09-06 — 占位（进行中：generate_ml_report 的 catalyst_quality 死特征——把 recommendation.rating 的四种字符串喂进 A+/A/B+/B/C 映射表，全部落到 mapping.get 的 0.5 默认值，该特征恒为常数）
 
-## [0.45.134] — 2026-09-06 — 占位（进行中：第 5 章旁边的概率与止盈两节去常数化——win_probability_pct 恒 65.0 / _estimate_expected_gain 恒 20.0 改读 pheromone.db 真实频率，并补 Brier 记分追踪）
+## [0.45.134] — 2026-09-06 — 概率与止盈两节去常数化；并给概率装上会红的记分卡（它第一次运行就红了）
+
+第 5 章旁边的两个数从来不是观测。换成 pheromone.db 真实频率之后，新装的记分卡
+**当场判定新估计器仍不如它替换掉的常数**——分票分方向那一层在拟合噪声。
+详见文末「记分卡第一次运行的结果」。
+
+### 两台常数机（2026-09-06 生产实测，803 份 ML analysis JSON + pheromone.db 945 条）
+
+- `calculate_win_probability` = base 0.55 + 拥挤度常数 + 催化剂常数
+  - 只有 6 个取值，**81% 恒为 65.0**；34 只标的中 **31 只六个月一动不动**
+  - 真实同方向 T+7 命中率跨度 **37.0%~81.8%**，11 个够样本的组合里 4 个 < 50%
+  - VKTX 看多印 70~73%（全表最高），实测 **37.0%**（全表最低）
+- `_estimate_expected_gain` = NVDA 15 / VKTX 25 / 其他 12 + 拥挤度调整
+  - **76% 恒为 20.0%**；真实 T+7 中位跨度 −5.67%~+6.82%，中位数 **0.01%**
+
+根因同一个：**拥挤度入参恒为 0**。`realtime_metrics` 从不含 `crowding_input`
+（两个入口只构造 ticker + sources.yahoo_finance；唯一生产该键的
+`data_fetcher.collect_all_metrics()` 全仓无生产调用点）。于是
+「> 1000 → NVDA 63.5 / VKTX 44.1 / 其他 63.8」的魔数分支从不触发，
+而恒 0 落进两个函数的**最看多档**（各 +8pp）：一条拥挤度数据都没拿到，被当成了利好。
+与 `crowding_detector.py` v0.45.50 修掉的是同一形状，那次漏了这个孪生兄弟。
+
+### Fixed — 止盈表自相矛盾（998/1045 份已发布报告）
+
+价格按 `expected_gain × {0.3,0.6,1.0}` 算，`gain_pct` 却写死成 30/60，
+而 `generate_ml_report` 把它直接渲染进标着「涨幅」的一列。
+TMUS 2026-09-04（现价 $181.52）：level_1 $192.41 印 +30%，实为 +6.0%；
+整表读作「价格递增、标签 30→60→20」。标签误差中位 24pp。
+改为**由 round(…,2) 之后的成交价反算**。全量 diff 682 份 × 3 档：
+价格改变 0 处、标签修正 1374 处（中位 27pp、最大 54pp）。
+
+### Fixed — 看空标的印的是做多出场计划（9 月 22/22 份）
+
+`expected_7d` 的分位数是**原始收益**，没按方向调整。BILI 看空（T+7 中位 −5.67%）
+若一律取 P50/P75/P90，level_3 会取到 P90=+3.89%——对空头那是**最差**情况。
+改为按方向取（多头 P50/P75/P90、空头 P50/P25/P10），并把两个口径拆成两个字段：
+`gain_pct`（价格变动，与印出去的价严格一致，可为负）与 `profit_pct`（按持仓方向
+折算的盈利）。中性方向没有盈利方向可言，整节渲染「不可得」。
+
+### Changed — `advanced_analyzer.py`
+
+- 删 `calculate_win_probability` / `_estimate_expected_gain` /
+  `_estimate_catalyst_quality`（三只票的写死等级表）/ `crowding_pct` 整块
+- 新增 `_history_hit_rate` / `_take_profit_gains`，读 v0.45.132 起已存在的
+  `expected_returns`；守卫与隔壁 `_calculate_risk_reward_ratio` 逐字同型
+  （含 `not isinstance(x, bool)`——`bool` 是 `int` 子类，v0.45.121 的教训）
+- 字段改名 `win_probability_pct` → `hit_rate_pct`，补 `basis` / `sample_size` /
+  `return_basis`。改名是有意的：它是样本内历史频率，不是前瞻概率
+- `_generate_recommendation`：不可得 → `UNRATED`。旧实现 `.get(…, 50)` 的默认 50
+  恰好卡在 HOLD 闸 `prob >= 50` 上，与 v0.45.50 修掉的 rr 默认 2.0/1.5 同型
+
+### Changed — 下游（generate_ml_report / generate_deep_v2 / alpha_hive_mcp）
+
+- `_combine_recommendations`：不可得时退化为纯 ML，不拿默认值顶替。旧口径
+  `0.7×65 + 0.3×ml` 把 ML 的 0~100 压进 **[47.0, 74.0]**——触发 AVOID 需
+  ML<15.0%、STRONG BUY 需 ML>98.3%（803 份里 STRONG BUY 只出现 3 次）
+- MCP：旧字段与真实 `sample_size` 并排放、`sample_caveat` 说的是那 n 条样本，
+  而那个「概率」一次也没碰过样本。现在两者同源，caveat 才名副其实
+- `take_profit` 不可得时上游给 `None`（不是 `{}`）；`{}` 会被渲染成「有这节、
+  只是空的」——v0.45.114 的形状
+- deep_v2 `float(… or 0)` 会把不可得压成 **0.0**，而 0.0 在本量表恰是最强看空
+- 顺带修一处死读：`_hr_txt` 算了没人用，其前身 `win_prob` 同样是定义了从不使用
+  （本仓 ruff F841 全局 ignore，两代都没被抓到）。已接进渲染并用 **AST** 核对
+  它确实落在 f-string 插值位
+
+### Added — `probability_scorecard.py`（Step 3）
+
+给概率装一个**会红的观测点**：没有记分规则，一个概率模型就是不可证伪的。
+
+- `--walk-forward`：按时点重建估计量并记分，**今天就能跑**。时点隔离是全部：
+  T+7 是 7 个交易日（`US_BDAY`），最长约 11 个自然日，故 embargo 默认 14 天。
+  放松它就是数据泄漏，而泄漏出来的记分卡会**好看**——最难发现的那种错
+- `--published`：读 `probability_scorecard_state/published.jsonl`，给**当天真正
+  印出去的**数打分。回溯重建假设估计量是 DB 的纯函数，换估计量或补跑历史就破了
+- 退出码 **1 = 新估计器 Brier 劣于被它替换的常数**；3 = 无法判定
+- 状态目录三件套已做齐：`git add` + `REPORT_ARTIFACT_PATHS` + `_ARTIFACT_PREFIXES`
+  （v0.45.111 的教训：只做前两件，账本会每天被自动提交跳过、永远挂工作区）
+
+### 记分卡第一次运行的结果 —— 它红了，而红的是本版自己的改动
+
+n=629，时点隔离 embargo 14 天，2026-03-23 → 2026-08-26，实际命中率 55.8%：
+
+| 估计量 | Brier↓ | LogLoss↓ | 校准误差 |
+|---|---|---|---|
+| v0.45.134 前的常数 65.0 | 0.2551 | 0.7044 | 9.2pp |
+| **时点池化基准率** | **0.2494** | 0.7210 | 1.5pp |
+| 分票分方向频率（本版所用） | 0.2561 | 0.7384 | **0.6pp** |
+
+定位到真正用上分票频率的 147 条子集：分票 Brier 0.2898 vs 基准率 0.2611，
+**配对差 +0.0287 ± 0.0135，t = +2.12（显著）**。
+经验贝叶斯收缩 α 扫描（0→∞）**单调递减到完全收缩**，没有内部最优——
+即分票那一层的信息量为零，该整个收掉。
+
+这与本项目既有证据一致：`final_score` 的 Spearman IC = +0.042（n=683，
+95%CI 半宽 ±0.075），五个维度无一显著。**校准 ≠ 区分度**：一个完美校准的模型
+作用在零区分度的分数上，输出就是基准率。
+
+⚠️ **未处理，等决策**：把前瞻估计量换成池化基准率意味着所有标的显示同一个数。
+本版先保留分票频率（它作为**历史描述**是真的），并让记分卡的红保持可见。
+
+### 有意保留、需独立证据
+
+评级三道闸 70/60/50 与 `_combine_recommendations` 的 0.7/0.3 权重，都是从常数量表
+继承来的、从未在真实命中率量表上验证过。本次只换来源、不动判据——换来源与改判据
+不该挤在同一次改动里。两处已在代码里写明。
+
+### 验证
+
+- 全量离线套件通过（唯一 1 failed 是 `TestCoverageHorizon`，项目里唯一不注入时钟
+  的测试，按设计于 2026-09-06 起变红，`economic_calendar.py` 及其测试均未改动）
+- mutation check 十六个变异全部被捕获，每次核对 `collected N items`：
+  M1–M4 标签、M5–M10 换源守卫、MS1–MS6 记分卡（含 MS1 时点隔离失效）
+- **一个「等价变异」被证伪**：M3（标签按公式重算而非反算价格）初判全绿=等价，
+  穷举后找到反例 price=$0.81 / 目标 +6.17% / 30% 档——公式标 +1.9%、印出的 $0.82
+  实为 +1.2%。据此把容差从跟价格挂钩的写法收紧为价格无关的 0.06pp
+- 零世代边界代价（已追证）：`final_score` 写库走
+  `backtester.save_predictions(swarm_results)`，只读 QueenDistiller 的蒸馏结果；
+  本节数据不进 `predictions` 表、不进 IC
+
+### 顺带发现，未在本版处理
+
+`generate_ml_report.py:357` 把 `recommendation.rating` 塞进 `catalyst_quality`，
+而 `ml_predictor.encode_catalyst_quality` 只认 A+/A/B+/B/C —— 四种评级字符串
+全部编码成默认值 **0.5**，该特征在这条路径上恒为常数。已单独开任务卡。
 
 ## [0.45.133] — 2026-09-06 — 整套测试默认离线：闸设在**三个传输层入口**，不再逐个数据源打桩
 

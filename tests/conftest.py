@@ -87,26 +87,16 @@ def _block_same_day_macro(monkeypatch):
 
 # ==================== 全局离线闸（传输层）====================
 
-#: 已知**仍会伸手取数**的测试模块。闸会把它们的请求挡在传输层、让生产代码走
-#: 「取不到」的降级分支（行为与真离线一致），但不为此把测试判红——它们本来
-#: 就是这么跑的，只是此前挡不住、真打了外网。
+#: 允许**伸手取数**的测试模块白名单。**v0.45.136 起为空，并且应当保持为空。**
 #:
-#: ⚠️ **这张表只能缩短，不能加长。** 给某个模块补上显式的源桩（像
-#: `tests/test_quote_set.py::_offline` 那样）之后，把它从这里删掉；
-#: 表外的任何模块一旦伸手，`_offline_transport` 的 teardown 立刻判红。
-#: 表里每一项后面记的是它伸向哪个源，方便逐个还债。
-_KNOWN_NETWORK_REACHERS = {
-    "test_iv_history.py":                    "CBOE payload + yfinance",
-    "test_options_analyzer.py":              "CBOE payload + yfinance",
-    "test_catalyst_availability.py":         "CBOE payload + AlphaVantage/Finnhub(http_gate)",
-    "test_snapshot_price_derived_refresh.py": "yfinance(fetch_historical_hv)",
-    "test_iv_structure_guards.py":           "yfinance(iv_rv spread)",
-    "test_score_dual_display.py":            "yfinance(dashboard_renderer._detail)",
-    "test_site_missing_fields.py":           "yfinance(dashboard_renderer._detail)",
-    "test_rival_bee_peer_features.py":       "yfinance + reddit_sentiment",
-    "test_fred_macro.py":                    "cboe_vix._download",
-    "test_macro_degradation.py":             "yfinance + vix_term_structure(vixcentral)",
-}
+#: v0.45.133 建表时有 10 个模块欠债；v0.45.136 逐个补了显式源桩
+#: （各模块自己的 `_offline_sources` fixture + 本文件的可复用桩），债已还清。
+#:
+#: ⚠️ **只能缩短，不能加长。** 新测试伸手取网时，正确做法是给它补一个源桩，
+#: 或者——如果它的意图**就是**打真外网——给它加 `@pytest.mark.network`。
+#: 往这里加模块等于把「测试不确定」变成「测试不确定但没人管」。
+#: 空表也是有意义的：它让 `_offline_transport` 的 teardown 对**每一个**模块生效。
+_KNOWN_NETWORK_REACHERS: set = set()
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "", None}
 
@@ -231,6 +221,147 @@ def _offline_transport(request, monkeypatch):
             "请给这条测试补一个显式的源桩（参考 tests/test_quote_set.py::_offline），"
             "而不是把模块加进 _KNOWN_NETWORK_REACHERS —— 那张表只能缩短。\n"
             "若这条测试的意图**就是**打真外网，给它加 @pytest.mark.network。")
+
+
+# ==================== 可复用的显式源桩（各模块 opt-in）====================
+#
+# `_offline_transport` 是**兜底**：它让取数失败、行为与真离线一致，但生产代码
+# 仍会一路走到传输层才被挡下。下面这些是**显式源桩**：在源头就返回该源自己
+# 文档承诺的「取不到」形态，测试因此**由构造保证确定**，而不是靠一张网兜住。
+#
+# 用法——在测试模块里声明需要哪几个：
+#
+#     @pytest.fixture(autouse=True)
+#     def _offline_sources(stub_cboe_payload, stub_yfinance):
+#         """本文件会走到 CBOE 全链与 yfinance 降级，显式钉死。"""
+#
+# ⚠️ 桩的返回值**必须是该源自己的「取不到」契约**，不能随手挑一个看着合理的值
+#    —— 挑出来的默认值会让下游误以为掌握了信息（[[alpha-hive-silent-degradation]]
+#    v0.45.3 那条判据）。每个桩下面都注了契约出处。
+# ⚠️ 需要真行为的测试在自己函数体里再 setattr 一次即可覆盖（fixture 先跑，后设的赢）。
+
+
+@pytest.fixture
+def stub_cboe_payload(monkeypatch):
+    """`cboe_options._fetch_cboe_payload` → None。
+
+    契约：模块 docstring「失败一律返回 None（调用方据此再降级到样本数据）」。
+    这也正是 `test_quote_set.py` / `TestUnavailableShapeIsUniform` 早就手写的那个桩。
+    """
+    import cboe_options
+    monkeypatch.setattr(cboe_options, "_fetch_cboe_payload", lambda *a, **k: None)
+
+
+@pytest.fixture
+def stub_cboe_vix(monkeypatch):
+    """`cboe_vix._download` → None。
+
+    契约：函数 docstring「失败返回 None（不抛，让调用方走缓存）」。
+    ⚠️ 走缓存是刻意保留的既有行为：`cboe_vix` 的缓存是
+    `Path(__file__).parent / "cache"`（仓库本地目录，**不受 ALPHA_HIVE_CACHE_DIR
+    隔离**），本机热、CI 冷。桩只负责不出网，不改缓存语义。
+    """
+    import cboe_vix
+    monkeypatch.setattr(cboe_vix, "_download", lambda: None)
+
+
+@pytest.fixture
+def stub_vixcentral(monkeypatch):
+    """`vix_term_structure._get_vx_futures` → []。契约：函数失败分支 `return []`。"""
+    import vix_term_structure
+    monkeypatch.setattr(vix_term_structure, "_get_vx_futures", lambda: [])
+
+
+@pytest.fixture
+def stub_reddit(monkeypatch):
+    """`RedditSentimentClient._fetch_ranking` → []。
+
+    契约：函数内 `if requests is None: return []`（拿不到就是空排名）。
+    """
+    import reddit_sentiment
+    monkeypatch.setattr(reddit_sentiment.RedditSentimentClient, "_fetch_ranking",
+                        lambda self, filter_name="all-stocks": [])
+
+
+@pytest.fixture
+def stub_http_gate(monkeypatch):
+    """`http_gate.urlopen_gated` → 抛 OSError（AlphaVantage / Finnhub 走它）。
+
+    契约：它是 `urllib.request.urlopen` 的串行化版本，失败就是抛——
+    `data_pipeline` 的两个 Source 都用 try/except 接住并降级。
+    ⚠️ 必须 patch `http_gate` 模块上的名字：两个调用方都是**函数内局部 import**
+    （`from http_gate import urlopen_gated`），每次调用重新取模块属性，所以打得中；
+    若改成模块顶层 `from ... import`，这个桩就会失效（v0.45.72 那条教训）。
+    """
+    import http_gate
+    monkeypatch.setattr(http_gate, "urlopen_gated",
+                        _raise_offline("http_gate.urlopen_gated"))
+
+
+def _raise_offline(what):
+    def _f(*_a, **_k):
+        raise _OfflineInTests(f"{what} 在测试里被显式钉死（tests/conftest.py 源桩）")
+    return _f
+
+
+class _OfflineTicker:
+    """`yfinance.Ticker` 的离线替身。
+
+    ⚠️ **必须是 class，不能是函数**：`yf_gate.install()` 用
+    `type("Ticker", (yfinance.Ticker,), ...)` 继承它，还会
+    `isinstance(getattr(base, name), property)` 判断哪些要按 property 重建。
+    换成函数会让 `install()` 直接 TypeError —— 而 `ensure()` 散布在
+    options_analyzer / fred_macro / dashboard_renderer / market_intelligence
+    四个热点函数入口，测试里随时会被调到。
+
+    所以这里把 `yf_gate` 会包的 3 个方法 + 4 个 property 都按原形态提供，
+    另用 `__getattr__` 兜住 `fast_info` 之类没列出的属性。
+    """
+
+    def __init__(self, *_a, **_k):
+        pass
+
+    def history(self, *_a, **_k):
+        raise _OfflineInTests("yfinance Ticker.history 在测试里被显式钉死")
+
+    def option_chain(self, *_a, **_k):
+        raise _OfflineInTests("yfinance Ticker.option_chain 在测试里被显式钉死")
+
+    def get_earnings_dates(self, *_a, **_k):
+        raise _OfflineInTests("yfinance Ticker.get_earnings_dates 在测试里被显式钉死")
+
+    @property
+    def info(self):
+        raise _OfflineInTests("yfinance Ticker.info 在测试里被显式钉死")
+
+    @property
+    def calendar(self):
+        raise _OfflineInTests("yfinance Ticker.calendar 在测试里被显式钉死")
+
+    @property
+    def options(self):
+        raise _OfflineInTests("yfinance Ticker.options 在测试里被显式钉死")
+
+    @property
+    def news(self):
+        raise _OfflineInTests("yfinance Ticker.news 在测试里被显式钉死")
+
+    def __getattr__(self, name):
+        if name.startswith("_"):            # dunder / 私有走正常 AttributeError
+            raise AttributeError(name)
+        raise _OfflineInTests(f"yfinance Ticker.{name} 在测试里被显式钉死")
+
+
+@pytest.fixture
+def stub_yfinance(monkeypatch):
+    """`yfinance.Ticker` / `yfinance.download` 钉成离线。
+
+    全仓已核实无 `from yfinance import X`，所以改模块属性即覆盖所有调用点
+    （这也正是 `yf_gate` 选择 patch 模块本身而非逐处接线的理由）。
+    """
+    import yfinance
+    monkeypatch.setattr(yfinance, "Ticker", _OfflineTicker)
+    monkeypatch.setattr(yfinance, "download", _raise_offline("yfinance.download"))
 
 
 @pytest.fixture

@@ -4,6 +4,16 @@ import pytest
 from options_analyzer import OptionsAnalyzer, OptionsAgent, OptionsDataFetcher
 
 
+@pytest.fixture(autouse=True)
+def _offline_sources(stub_cboe_payload, stub_yfinance):
+    """本文件的取数支路显式钉死，不依赖 conftest 的传输层兜底（v0.45.136）。
+
+    同 test_iv_history：analyze 的两条取数支路。
+
+    桩的定义与各自的「取不到」契约见 tests/conftest.py 的可复用源桩一节。
+    """
+
+
 # ==================== OptionsAnalyzer 纯计算测试 ====================
 
 class TestIVRank:
