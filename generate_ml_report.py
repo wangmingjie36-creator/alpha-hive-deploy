@@ -314,6 +314,7 @@ class MLEnhancedReportGenerator:
         self, ticker: str, realtime_metrics: dict,
         swarm_direction: Optional[str] = None,
         swarm_dimension_scores: Optional[dict] = None,
+        swarm_final_score: Optional[float] = None,
     ) -> dict:
         """生成 ML 增强的分析报告
 
@@ -321,7 +322,10 @@ class MLEnhancedReportGenerator:
         「同标的 + 同方向」的历史回溯（第 5 章情景推演的样本条件）。
 
         swarm_dimension_scores：蜂群当日五维分，v0.45.135 起用于 `catalyst_quality`。
-        ⚠️ 两个参数都取自同一个 `swarm_data[ticker]`，**必须成对传**——传一个漏
+
+        swarm_final_score：蜂群当日综合分，v0.45.141 起是 ML 特征 `final_score`
+        的唯一来源（与训练端 `predictions.final_score` 同一个量）。
+        ⚠️ 三个参数都取自同一个 `swarm_data[ticker]`，**必须成对传**——传一个漏
         一个是本仓反复出现的半接线故障（守卫见
         `tests/test_ml_catalyst_quality_source.py::TestProductionWiring`）。
         """
@@ -336,6 +340,7 @@ class MLEnhancedReportGenerator:
             ticker, realtime_metrics, advanced_analysis,
             swarm_dimension_scores=swarm_dimension_scores,
             swarm_direction=swarm_direction,
+            swarm_final_score=swarm_final_score,
         )
 
         # 获取 ML 预测
@@ -405,6 +410,7 @@ class MLEnhancedReportGenerator:
         self, ticker: str, metrics: dict, analysis: dict,
         swarm_dimension_scores: Optional[dict] = None,
         swarm_direction: Optional[str] = None,
+        swarm_final_score: Optional[float] = None,
     ) -> TrainingData:
         """为 ML 模型准备输入数据"""
 
@@ -489,8 +495,24 @@ class MLEnhancedReportGenerator:
 
         # v2 新特征（从 analysis 上下文提取）
         _opts = analysis.get("options_analysis", {})
-        _rec = analysis.get("recommendation", {})
         _ds = analysis.get("dimension_scores", {})
+
+        # ── v0.45.141：final_score 的唯一来源 = 蜂群综合分（与训练端同一个量）──
+        # 旧实现读 `analysis["recommendation"]["score"]`，但
+        # `advanced_analyzer._generate_recommendation` **从未**返回过 `score` 键
+        # （803 份生产 analysis-*-ml-*.json 里 0 次存在；v0.45.139 前后的字段
+        # 都是 rating/action/confidence/rationale 那一组）⇒ 特征恒为字面量 5.0，
+        # 且自 v0.45.50 有缺失表起 120/120 份都记着 "final_score"——
+        # 「永远缺失」与「真缺失」在输出里同形。
+        # 训练路径 `ml_predictor.build_training_data_from_db` 取
+        # `predictions.final_score`，那一列由 `backtester.save_predictions` 从
+        # `swarm_results[t]["final_score"]` 落库——就是蜂群综合分。服务端直接
+        # 取同一个量，两端不经任何映射表。这是 v0.45.135（catalyst_quality）、
+        # v0.45.139（direction_encoded）之后同一物种的第三处：ML 特征去读评级
+        # 字典，而评级字典里没有任何一个 ML 特征该读的量。
+        # 取不到就是 None，进缺失表，不挑兜底值（理由同 v0.45.137）。
+        _final_known = _usable_dim(swarm_final_score)
+        final_score = float(swarm_final_score) if _final_known else None
         # v0.45.139：direction_encoded 改读**蜂群方向**，与训练路径同一张表
         # （ml_predictor.build_training_data_from_db 的 direction_map）。
         # 旧实现读 recommendation.rating 再映射 {STRONG BUY:1, BUY:.5, HOLD:0, AVOID:-1}
@@ -513,16 +535,19 @@ class MLEnhancedReportGenerator:
         # 这两个特征的值现在是 None，ml_predictor 自己的 `_missing_features`
         # 也会数到，`input_features_missing` 与 `feature_completeness` 两套账
         # 因此对得上（此前生产有 118 份记录两者当面矛盾）。
+        # v0.45.141：final_score 同样改由蜂群参数判可得。旧条目
+        # `("final_score", _rec.get("score"))` 因键从不存在而**恒上榜**——
+        # 一条永远亮着的告警等于没有告警。
         self._ml_input_missing = (
             ([] if _catalyst_known else ["catalyst_quality"])
             + ([] if _dir_known else ["direction"])
             + ([] if _risk_adj_known else ["volatility"])
             + ([] if _sentiment_known else ["market_sentiment"])
+            + ([] if _final_known else ["final_score"])
             + [
                 _name for _name, _val in (
                     ("iv_rank", _opts.get("iv_rank")),
                     ("put_call_ratio", _opts.get("put_call_ratio")),
-                    ("final_score", _rec.get("score")),
                     ("odds_score", _ds.get("odds")),
                     ("risk_adj_score", _ds.get("risk_adj")),
                 ) if not _usable_dim(_val)
@@ -551,7 +576,7 @@ class MLEnhancedReportGenerator:
             # v2
             iv_rank=_opts.get("iv_rank", 50.0),
             put_call_ratio=_opts.get("put_call_ratio", 1.0),
-            final_score=_rec.get("score", 5.0),
+            final_score=final_score,
             odds_score=_ds.get("odds", 5.0),
             risk_adj_score=_ds.get("risk_adj", 5.0),
             agent_agreement=0.5,  # 预测时无蜂群上下文
@@ -2676,6 +2701,7 @@ def main():
                 ticker, ticker_data,
                 swarm_direction=_sr.get("direction"),
                 swarm_dimension_scores=_sr.get("dimension_scores"),
+                swarm_final_score=_sr.get("final_score"),
             )
 
             # 注入蜂群数据到报告

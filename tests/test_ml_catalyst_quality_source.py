@@ -237,14 +237,15 @@ class TestNoRatingDerivedCatalyst:
 
 
 class TestProductionWiring:
-    """接线守卫：蜂群派生的两个参数必须**成对**出现在每个调用点。
+    """接线守卫：蜂群派生的三个参数必须**成对**出现在每个调用点。
 
     「测被调函数 ≠ 测接线」——v0.45.126 的 `inject_prefetched` 少传一参
     抛了六个月 TypeError，而所有测试都直接调被调函数，全绿。
     """
 
     CALL = "generate_ml_enhanced_report"
-    SWARM_KWARGS = {"swarm_direction", "swarm_dimension_scores"}
+    # v0.45.141：第三个参数 swarm_final_score 同样取自 swarm_data[ticker]
+    SWARM_KWARGS = {"swarm_direction", "swarm_dimension_scores", "swarm_final_score"}
 
     def _call_sites(self, rel):
         tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))
@@ -260,7 +261,7 @@ class TestProductionWiring:
         assert len(self._call_sites(rel)) == total
 
     def test_swarm_kwargs_travel_together(self):
-        """两个参数来自同一个 `swarm_data[ticker]`，传一个漏一个就是半接线。"""
+        """三个参数来自同一个 `swarm_data[ticker]`，传一个漏一个就是半接线。"""
         for rel in ("generate_ml_report.py", "alpha_hive_daily_report.py"):
             for call in self._call_sites(rel):
                 keys = {k.arg for k in call.keywords}
