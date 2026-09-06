@@ -386,6 +386,8 @@ class MLEnhancedReportGenerator:
                 hit_rate_pct=_pa.get("hit_rate_pct"),
                 basis=_pa.get("basis"),
                 sample_size=_pa.get("sample_size"),
+                forward_estimate_pct=_pa.get("forward_estimate_pct"),
+                forward_sample_size=_pa.get("forward_sample_size"),
             )
         except Exception as _led_err:   # noqa: BLE001 —— 记账失败不得阻断报告
             self._ledger_failures = getattr(self, "_ledger_failures", 0) + 1
@@ -712,19 +714,21 @@ class MLEnhancedReportGenerator:
         50 恰好卡在 HOLD 闸上；改为退化成「只看 ML」，并在 reasoning 里说明。
         """
         _pa = advanced_analysis.get("probability_analysis") or {}
-        hit_rate = _pa.get("hit_rate_pct")
-        _hr_known = (isinstance(hit_rate, (int, float)) and not isinstance(hit_rate, bool)
-                     and math.isfinite(hit_rate))
+        # v0.45.138：融合读**前瞻量**（全书池化），不读描述量（分票分方向频率）。
+        # v0.45.134 用的是后者，记分卡随即判定它作为预测显著更差（配对 t=+2.12）。
+        fwd = _pa.get("forward_estimate_pct")
+        _fwd_known = (isinstance(fwd, (int, float)) and not isinstance(fwd, bool)
+                      and math.isfinite(fwd))
         ml_prob = ml_prediction.get("prediction", {}).get("probability", 0.5) * 100
 
-        if _hr_known:
-            combined_prob = hit_rate * 0.7 + ml_prob * 0.3
-            _reasoning = (f"同方向历史 T+7 命中率 {hit_rate:.1f}%"
-                          f"（n={_pa.get('sample_size')}, basis={_pa.get('basis')}）× 0.7"
+        if _fwd_known:
+            combined_prob = fwd * 0.7 + ml_prob * 0.3
+            _reasoning = (f"前瞻命中率 {fwd:.1f}%"
+                          f"（全书池化 n={_pa.get('forward_sample_size')}；各标的相同）× 0.7"
                           f" + ML 预测 {ml_prob:.1f}% × 0.3 = 综合 {combined_prob:.1f}%")
         else:
             combined_prob = ml_prob
-            _reasoning = (f"无同方向历史可比样本（n={_pa.get('sample_size')}），"
+            _reasoning = (f"前瞻命中率不可得（池化样本 n={_pa.get('forward_sample_size')}），"
                           f"综合分退化为纯 ML 预测 {ml_prob:.1f}%")
 
         # 生成最终建议
@@ -744,12 +748,17 @@ class MLEnhancedReportGenerator:
         return {
             # v0.45.134：`human_probability` 这个名字随字段一起退休——它从来不是
             # 「人工分析」，是一条 base 0.55 加常数的公式。不可得时保持 None。
-            "hit_rate_pct": round(hit_rate, 1) if _hr_known else None,
+            # v0.45.138：两个口径分列，别混——前者描述过去、后者预测下一笔。
+            "hit_rate_pct": _pa.get("hit_rate_pct"),              # 描述：本标的本方向
             "hit_rate_basis": _pa.get("basis"),
             "hit_rate_sample_size": _pa.get("sample_size"),
+            "forward_estimate_pct": round(fwd, 1) if _fwd_known else None,   # 预测：全书池化
+            "forward_ci95": _pa.get("forward_ci95"),
+            "forward_sample_size": _pa.get("forward_sample_size"),
+            "forward_is_ticker_specific": False,
             "ml_probability": round(ml_prob, 1),
             "combined_probability": round(combined_prob, 1),
-            "combined_basis": "hit_rate*0.7+ml*0.3" if _hr_known else "ml_only",
+            "combined_basis": "forward*0.7+ml*0.3" if _fwd_known else "ml_only",
             "rating": rating,
             "action": action,
             "confidence": f"{combined_prob:.1f}%",
@@ -2099,6 +2108,16 @@ class MLEnhancedReportGenerator:
         _hr_txt = (f"{win_prob:.1f}%（n={prob.get('sample_size')},"
                    f" basis={prob.get('basis')}）"
                    if win_prob is not None else "不可得（无同方向历史可比样本）")
+        # v0.45.138：前瞻量与描述量分两行印。合成一行必然被读成同一件事，
+        # 而它们恰恰是本版要区分的两件事。
+        _fw = prob.get("forward_estimate_pct")
+        _fci = prob.get("forward_ci95")
+        _fw_txt = (f"{_fw:.1f}%（全书池化 n={prob.get('forward_sample_size')}"
+                   + (f"，95% 区间 [{_fci[0]}, {_fci[1]}]"
+                      if isinstance(_fci, (list, tuple)) and len(_fci) == 2 else "")
+                   + "；各标的相同）"
+                   if isinstance(_fw, (int, float)) and not isinstance(_fw, bool)
+                   else "不可得")
         position    = analysis.get('position_management', {})
         stop_loss   = position.get('stop_loss', {})
         # v0.45.134：分布不可得时上游给 None（不是 {}）。`or {}` 会把它悄悄
@@ -2145,7 +2164,9 @@ class MLEnhancedReportGenerator:
             sl_tp_html = f"""
             <div style="margin-bottom:20px;">
                 <p style="margin:0 0 10px;color:var(--ts);font-size:0.92em;">
-                    出场阶梯取自同标的同方向历史 T+7 收益分布 · 命中率 {_hr_txt}
+                    出场阶梯取自同标的同方向历史 T+7 收益分布<br>
+                    · <strong>历史描述</strong>（本标的本方向）：命中率 {_hr_txt}<br>
+                    · <strong>前瞻估计</strong>（用于评级）：{_fw_txt}
                 </p>
                 <div class="grid-2">
                     <div><h3 style="color:var(--bear);">止损位</h3><table>{sl_rows}</table></div>
