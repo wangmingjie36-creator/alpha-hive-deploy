@@ -325,9 +325,8 @@ class MLEnhancedReportGenerator:
         v0.45.137 起用于 `volatility` / `market_sentiment`，
         v0.45.140 起用于 `odds_score` / `risk_adj_score`。
 
-        swarm_final_score：蜂群当日综合分，v0.45.140 起用于 `final_score`。
-        此前该特征读 `advanced_analysis["recommendation"]["score"]`——那个键在
-        803/803 份生产 JSON 里都不存在，恒落到字面量 5.0。
+        swarm_final_score：蜂群当日综合分，v0.45.141 起是 ML 特征 `final_score`
+        的唯一来源（与训练端 `predictions.final_score` 同一个量）。
 
         ⚠️ 三个参数都取自同一个 `swarm_data[ticker]`，**必须成组传**——传一个漏
         一个是本仓反复出现的半接线故障（守卫见
@@ -525,6 +524,12 @@ class MLEnhancedReportGenerator:
         _final_raw = swarm_final_score
         _odds_known = _usable_dim(_odds_raw)
         _final_known = _usable_dim(_final_raw)
+        # ⚠️ 三条旧读点还有第二重危害（v0.45.141 就 final_score 一支记过）：
+        # 缺失表条目 `("final_score", _rec.get("score"))` 等三条因键从不存在而
+        # **恒上榜**——自 v0.45.50 有缺失表起，`input_features_missing` 里这三个
+        # 名字一次没落下过。「永远缺失」与「真缺失」在输出里同形，
+        # **一条永远亮着的告警等于没有告警**。
+        #
         # 取不到就是 None（同 volatility / market_sentiment 的约定）——
         # 字面量会让 `input_features_missing` 说缺、`feature_completeness`
         # 说 12/12，生产现存 118 份这种当面矛盾的记录，根因就在这里。
@@ -556,6 +561,9 @@ class MLEnhancedReportGenerator:
         # 这两个特征的值现在是 None，ml_predictor 自己的 `_missing_features`
         # 也会数到，`input_features_missing` 与 `feature_completeness` 两套账
         # 因此对得上（此前生产有 118 份记录两者当面矛盾）。
+        # v0.45.141：final_score 同样改由蜂群参数判可得。旧条目
+        # `("final_score", _rec.get("score"))` 因键从不存在而**恒上榜**——
+        # 一条永远亮着的告警等于没有告警。
         self._ml_input_missing = (
             ([] if _catalyst_known else ["catalyst_quality"])
             + ([] if _dir_known else ["direction"])

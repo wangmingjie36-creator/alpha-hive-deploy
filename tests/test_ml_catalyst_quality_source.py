@@ -248,6 +248,7 @@ class TestProductionWiring:
     """
 
     CALL = "generate_ml_enhanced_report"
+    # v0.45.141：第三个参数 swarm_final_score 同样取自 swarm_data[ticker]
     SWARM_KWARGS = {"swarm_direction", "swarm_dimension_scores", "swarm_final_score"}
 
     def _call_sites(self, rel):
@@ -264,7 +265,7 @@ class TestProductionWiring:
         assert len(self._call_sites(rel)) == total
 
     def test_swarm_kwargs_travel_together(self):
-        """两个参数来自同一个 `swarm_data[ticker]`，传一个漏一个就是半接线。"""
+        """三个参数来自同一个 `swarm_data[ticker]`，传一个漏一个就是半接线。"""
         for rel in ("generate_ml_report.py", "alpha_hive_daily_report.py"):
             for call in self._call_sites(rel):
                 keys = {k.arg for k in call.keywords}

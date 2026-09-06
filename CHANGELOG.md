@@ -5,6 +5,88 @@
 
 ---
 
+## [0.45.141] — 2026-09-06 — ML 特征 `final_score` 读了一个从不存在的键：服务端改读蜂群综合分（同物种第三处）
+
+v0.45.139 处理 `direction_encoded` 时顺带发现、未在该版处理。与 v0.45.135（`catalyst_quality`）、
+v0.45.139（`direction_encoded`）同物种的第三处：**ML 特征去读评级字典，而评级字典里没有任何一个
+ML 特征该读的量。**
+
+### 现象
+
+`generate_ml_report._prepare_ml_input`：`_rec = analysis.get("recommendation", {})` →
+`final_score=_rec.get("score", 5.0)`，并用 `("final_score", _rec.get("score"))` 判缺失。
+但 `advanced_analyzer._generate_recommendation` **从来没有返回过 `score` 键**
+（v0.45.139 前后的字段都是 rating/action/confidence/rationale 那一组）。
+
+生产实测 803 份 `analysis-*-ml-*.json`：
+
+| 项 | 数 |
+|---|---|
+| `advanced_analysis.recommendation` 含 `score` 键 | **0 / 803** |
+| 有 `input_features_missing` 字段的报告（v0.45.50 起，08-27→09-04 共 7 个扫描日） | 120 |
+| 其中记着 `final_score` | **120 / 120** |
+| 同一份里 `swarm_results.final_score` 可用（数值） | 746 / 803 |
+
+⇒ 特征恒为字面量 5.0；缺失表那一条**永远亮着**，「永远缺失」与「真缺失」在输出里同形——
+一条永远亮着的告警等于没有告警。
+
+### 先数读者：训练端用的是哪个量
+
+- `ml_predictor.build_training_data_from_db` 与 `generate_ml_report._build_real_training_data`
+  都取 `predictions.final_score`；那一列由 `backtester.save_predictions` 从
+  `swarm_results[t]["final_score"]` 落库——就是蜂群综合分。
+- `ml_predictor` 里 `final_score` 的消费点：`_FEATURE_SOURCES` / `_missing_features`（缺失清单）、
+  `_extract_features`（12 维向量第 8 维）、SimpleMLModel 的 `feature_stats` 与 `weights["final_score"]`。
+- 服务端读**同一个量**即可，两端不经任何映射表。
+
+### 修法（`generate_ml_report.py` / `alpha_hive_daily_report.py`）
+
+- `generate_ml_enhanced_report` 与 `_prepare_ml_input` 各加第三个蜂群参数 `swarm_final_score`，
+  与 v0.45.137/139 的 `swarm_direction` / `swarm_dimension_scores` 同源同传（都取自 `swarm_data[ticker]`）。
+- `final_score = float(swarm_final_score) if _usable_dim(swarm_final_score) else None`——类型闸照抄
+  仓库那一句（排 bool、排 NaN，不自己发明）；不可得进 `_ml_input_missing`、值为 None，
+  让 `ml_predictor._missing_features` 那本账与之对上，**不挑兜底值**。
+- 删掉 `_rec` 死读者与 `("final_score", _rec.get("score"))` 那条恒亮的缺失项。
+- 两个生产调用点（`alpha_hive_daily_report._generate_ml_reports`、`generate_ml_report.main`）
+  各加一行 `swarm_final_score=_sr.get("final_score")`。
+- `tests/test_ml_catalyst_quality_source.py::TestProductionWiring.SWARM_KWARGS` 扩成三个
+  （传一漏二就红）。
+
+### 影响面：不需世代边界
+
+该特征只进报告期 ML 预测（`ml_prediction` → HTML/JSON 展示 + `probability_scorecard` 前向账本的
+`ml_probability_pct`）。核过 `backtester.save_predictions` **只读 `swarm_results`**；`ml_prediction`
+在 backtester / ic_diagnostics / ic_rerun_readiness / replay_scoring / signal_archive / feedback_loop /
+weekly_optimizer / self_analyst 里零消费者 ⇒ 不进 `predictions` 表、不进 IC。
+`input_features_missing` 全仓只有一个写入点、无读者，条目顺序变化无人依赖。
+无 swarm 数据的路径（`_analyze_ticker_safe`，非 `--swarm`）此后 `final_score` 如实记缺失，
+而不是伪装成 5.0 的观测。
+
+### 测试
+
+- 新 `tests/test_ml_input_final_score.py`（14 项）：合法值（含恰好 5.0 与 int）原样进特征且不上
+  缺失表 ↔ None/NaN/bool/str 一律 None + 上榜（成对）；塞 `recommendation.score=9.9` 不许再影响
+  特征；**训练/服务端到端同源**——同一份 swarm_results 经 `save_predictions` → 临时 predictions 表 →
+  `build_training_data_from_db` 得到的 `final_score` 与服务端相等（走真实落库链而非比源码，
+  「读的是哪一列」只有落库链能证明；对照集先断言非空）；两条 AST 守卫（`_prepare_ml_input` 不再
+  出现 `"recommendation"` 常量与 `_rec` 名；`generate_ml_enhanced_report` 按名转发 `swarm_final_score`）。
+- 邻域 5 个测试文件 collected 105 / 105 passed。
+- mutation check **8/8 击杀**（每次核对 collected==105，锚点唯一由脚本断言）：缺失喂 5.0 /
+  守卫退化成 `is not None` / 缺失表不登记 / 回退读 `recommendation.score` / main 调用点漏传 /
+  日报调用点漏传 / 收了不传 / 值被 round。
+- ruff：2 条与 origin/main 基线完全相同（E401/E731，均在 `main()` 旧代码），无新增；F821 全过。
+
+### 过程记录
+
+- 占号时撞上并发：`funny-thompson` session 早一分钟推了 0.45.140 占位、范围写了三处（含 final_score），
+  其会话标题却只有 odds/risk_adj。已用 session 间消息提出分工（它保留 odds/risk_adj，final_score 归本版），
+  本版占位标题明写重叠；后推的一方合并 `_ml_input_missing` 那组 tuple 与 `return TrainingData(...)` 块。
+- 自造一次小事故：改码脚本末尾用**子串** `"_rec" not in 函数体` 自检，被自己写的注释（引用旧代码
+  `_rec.get("score")`）触发而中止，两处调用点没改上——正是 v0.45.137「子串守卫被解释修复的注释自己
+  触发」；改用 AST（Name 节点）后通过。另一次 mutation 脚本误传两个 `-q`（`-qq` 吞掉 collected 行 → −1），
+  重跑单 `-q` 后 8 次 collected 均为 105。
+
+
 ## [0.45.140] — 2026-09-06 — 三个「诚实地一直缺」的特征接上蜂群真值；ML 估计量换代登记
 
 ### Fixed
@@ -89,8 +171,26 @@
 - mutation check **7/7 全被抓**，`collected 124 items` 全程一致、基线绿、
   锚点唯一（M1 退回死读者 / M2 兜底 5.0 / M3 类型闸换 truthiness /
   M4 账本漏报 / M5 调用点漏传第三参 / M6 代际写死 False / M7 登记表清空）。
-- ruff：新增文件 clean；`generate_ml_report.py` 余下 2 项经 HEAD 基线比对确认
-  为既有问题（line 2815/2825，与本次改动无关）。
+- ruff：新增文件 clean。合并后全量 8 项经 `origin/main` 基线逐一比对确认**全为既有**
+  （`generate_ml_report.py` 2 项 + `tests/` 6 项），本次引入 0 项。
+
+### 与 v0.45.141 的范围重叠（并发撞车，已合并）
+
+本版开工时占号 0.45.140 并推送；另一 session 随后占 0.45.141（其占位提交信息即写
+「与 0.45.140 范围重叠」），并先于本版落地了**三个死读者中的 `final_score` 那一支**。
+
+版本号无争议（先进 git 历史的占号保留，对方已让号）。内容按合并处理，不是覆盖：
+- `final_score` 一支两边实现语义等价，采用对方分支的接线与措辞，
+  并把对方的洞察并进注释——**缺失表条目因键从不存在而恒上榜，
+  「永远缺失」与「真缺失」在输出里同形，一条永远亮着的告警等于没有告警**。
+  该判据对 `odds_score` / `risk_adj_score` 同样成立（自 v0.45.50 起同样恒上榜）。
+- v0.45.141 只修了三支中的一支：合并前 `odds_score` / `risk_adj_score` 仍在
+  `_ds.get(..., 5.0)` 读那个不存在的键，`_ds` 也仍在。本版补齐另两支并删掉
+  两个死读点——**「改二分支先问另一支是不是同病更重」**（v0.45.113 同族）。
+
+合并后**整套重跑**（改变了执行组合就是新的组合）：**3424 passed, 19 skipped**；
+mutation check 重做，`collected 137 items`（含对方新增 13 项）、基线绿、7/7 全被抓；
+803 份真实路径复跑结果与合并前逐项一致。
 
 ## [0.45.139] — 2026-09-06 — 评级词撤销、融合权重变成受监控量；顺带修第二处 train/serve skew
 
