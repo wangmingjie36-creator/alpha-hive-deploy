@@ -76,8 +76,18 @@ EMBARGO_DAYS = 14
 MIN_SAMPLE = 20
 
 #: v0.45.134 删掉的那个常数（base 0.55 + 拥挤度 0.08 + 催化剂 0.02）。
-#: 生产 803 份报告里 81% 就是它。新估计器至少要打赢它，否则这次改动是退步。
+#: 生产 803 份报告里 81% 就是它，作为对照行保留。
 LEGACY_CONSTANT_PCT = 65.0
+
+#: 生产当前真正用的是哪个候选量（v0.45.138 起 = 全书池化基准率）。
+#: **改生产估计量时必须同时改这里**，否则告警会盯着一个没人在用的行——
+#: 一个不对应实际产品的红，比没有红更糟：它训练人忽略告警。
+PRODUCTION_MODEL = "base_rate"
+
+#: 告警判据：**有没有别的候选量明显打得过生产用的那个**。
+#: 「生产 vs 旧常数」是个差判据——基准率几乎必然赢过一个固定常数，
+#: 那样的告警永远不会红，等于没装。这里问的是「就在旁边有没有更好的」。
+BRIER_MARGIN = 0.002
 
 _EPS = 1e-9
 
@@ -132,12 +142,20 @@ def record_published(
     basis: Optional[str],
     sample_size: Optional[int],
     ledger_path: Optional[Path] = None,
+    forward_estimate_pct: Optional[float] = None,
+    forward_sample_size: Optional[int] = None,
 ) -> bool:
-    """把**当天真正印出去的**概率记进账本；返回是否写入。
+    """把**当天真正印出去的**两个数记进账本；返回是否写入。
+
+    v0.45.138 起记两个口径，因为报告里就是两个：
+      · `hit_rate_pct`        —— 描述量，本标的本方向的历史频率
+      · `forward_estimate_pct`—— 前瞻量，全书池化，**评级与融合用的就是它**
+    记分（`score_published`）打的是**前瞻量**——那才是被当作预测印出去的数。
+    描述量一并记下，是为了日后能回答「当初若用描述量会怎样」而不必重建历史。
 
     幂等：同一 (report_date, ticker) 已存在则不重复追加（补跑扫描不会污染账本）。
-    `hit_rate_pct` 为 None 也要记 —— 「这天没印出概率」本身是需要被记住的事实，
-    不记就没法回答「覆盖率是多少」，而覆盖率正是这次换源的主要代价。
+    两个数为 None 也要记 —— 「这天没印出概率」本身是需要被记住的事实，
+    不记就没法回答「覆盖率是多少」，而覆盖率正是换源的主要代价。
     """
     path = Path(ledger_path) if ledger_path else LEDGER_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +176,8 @@ def record_published(
         "hit_rate_pct": hit_rate_pct,
         "basis": basis,
         "sample_size": sample_size,
+        "forward_estimate_pct": forward_estimate_pct,
+        "forward_sample_size": forward_sample_size,
         "recorded_at": datetime.now().isoformat(timespec="seconds"),
     }
     with path.open("a", encoding="utf-8") as fh:
@@ -275,7 +295,8 @@ def walk_forward(
     dated = [(r, d) for r, d in dated if d is not None]
     dated.sort(key=lambda t: t[1])
 
-    preds: Dict[str, List[float]] = {"legacy_constant": [], "base_rate": [], "hit_rate": []}
+    preds: Dict[str, List[float]] = {"legacy_constant": [], "base_rate": [],
+                                     "per_ticker_hit_rate": []}
     ys: List[int] = []
     covered = 0          # hit_rate 真的用上了分票频率的次数
     first_scored: Optional[str] = None
@@ -295,7 +316,7 @@ def walk_forward(
             hr = base
         preds["legacy_constant"].append(LEGACY_CONSTANT_PCT / 100.0)
         preds["base_rate"].append(base)
-        preds["hit_rate"].append(hr)
+        preds["per_ticker_hit_rate"].append(hr)
         ys.append(r["hit"])
         if first_scored is None:
             first_scored = r["date"]
@@ -306,9 +327,16 @@ def walk_forward(
                 "total_rows": len(dated)}
 
     models = {k: _score_block(v, ys) for k, v in preds.items()}
-    worse = models["hit_rate"]["brier"] > models["legacy_constant"]["brier"]
+    best = min(models, key=lambda k: models[k]["brier"])
+    prod = models[PRODUCTION_MODEL]["brier"]
+    beaten_by = {k: round(prod - m["brier"], 4) for k, m in models.items()
+                 if prod - m["brier"] > BRIER_MARGIN}
     return {
         "status": "ok",
+        "production_model": PRODUCTION_MODEL,
+        "best_model": best,
+        "beaten_by": beaten_by,
+        "production_is_beaten": bool(beaten_by),
         "embargo_days": embargo_days,
         "min_sample": min_sample,
         "total_rows": len(dated),
@@ -316,7 +344,6 @@ def walk_forward(
         "date_range": [first_scored, dated[-1][0]["date"]],
         "per_ticker_coverage_pct": round(covered / len(ys) * 100, 1),
         "models": models,
-        "hit_rate_worse_than_legacy": worse,
     }
 
 
@@ -339,9 +366,13 @@ def score_published(
     ys: List[int] = []
     printed = matched = 0
     for row in led:
-        hr = row.get("hit_rate_pct")
+        # v0.45.138：记分打**前瞻量**——那才是被当作预测印出去的数。
+        # ⚠️ 不要 `row.get("forward_estimate_pct") or row.get("hit_rate_pct")`：
+        # 那会让新旧两个口径的行混进同一张记分卡，而它们测的不是同一件事。
+        # v0.45.138 之前的行没有这个键 → 一律跳过，宁可样本少也不混算。
+        hr = row.get("forward_estimate_pct")
         if not isinstance(hr, (int, float)) or isinstance(hr, bool) or not math.isfinite(hr):
-            continue  # 那天没印出概率 —— 计入覆盖率，不计入记分
+            continue  # 那天没印出前瞻概率 —— 计入覆盖率，不计入记分
         printed += 1
         y = realized.get((row.get("date"), row.get("ticker")))
         if y is None:
@@ -385,12 +416,13 @@ def _fmt(res: Dict, title: str) -> str:
             f"  {'估计量':22}{'Brier↓':>9}{'LogLoss↓':>10}{'校准误差':>10}{'平均预测':>10}",
         ]
         names = {"legacy_constant": "v0.45.134 前的常数 65.0",
-                 "base_rate": "时点基准率", "hit_rate": "分票分方向频率"}
-        for k in ("legacy_constant", "base_rate", "hit_rate"):
+                 "base_rate": "时点池化基准率", "per_ticker_hit_rate": "分票分方向频率"}
+        for k in ("legacy_constant", "base_rate", "per_ticker_hit_rate"):
             m = res["models"][k]
+            tag = " ← 生产在用" if k == res.get("production_model") else ""
             lines.append(f"  {names[k]:22}{m['brier']:>9.4f}{m['log_loss']:>10.4f}"
-                         f"{m['calibration_error_pp']:>9.1f}pp{m['mean_pred_pct']:>9.1f}%")
-        lines += ["", f"  实际命中率：{res['models']['hit_rate']['observed_pct']}%"]
+                         f"{m['calibration_error_pp']:>9.1f}pp{m['mean_pred_pct']:>9.1f}%{tag}")
+        lines += ["", f"  实际命中率：{res['models']['base_rate']['observed_pct']}%"]
     else:
         lines += [
             f"  账本 {res['ledger_rows']} 行，其中印出概率 {res['with_probability']} 行"
@@ -402,9 +434,13 @@ def _fmt(res: Dict, title: str) -> str:
                       f"  实际印出去的：Brier {p['brier']:.4f} | 校准误差 {p['calibration_error_pp']:.1f}pp",
                       f"  旧常数对照：  Brier {l0['brier']:.4f} | 校准误差 {l0['calibration_error_pp']:.1f}pp"]
     lines.append(bar)
-    worse = res.get("hit_rate_worse_than_legacy") or res.get("worse_than_legacy")
-    lines.append("❌ 新估计器 Brier 劣于它替换掉的常数 —— 这次换源是退步，去查"
-                 if worse else "✅ 新估计器不劣于它替换掉的常数")
+    if res.get("production_is_beaten"):
+        _by = "、".join(f"{k}（Brier 低 {d:.4f}）" for k, d in res["beaten_by"].items())
+        lines.append(f"❌ 生产在用的 `{res.get('production_model')}` 被别的候选打过：{_by}")
+    elif res.get("worse_than_legacy"):
+        lines.append("❌ 已印出去的概率 Brier 劣于它替换掉的常数 —— 去查")
+    else:
+        lines.append(f"✅ 生产在用的 `{res.get('production_model', '?')}` 未被任何候选量明显打过")
     lines.append(bar)
     return "\n".join(lines)
 
@@ -437,7 +473,7 @@ def main(argv=None) -> int:
 
     if res.get("status") != "ok":
         return 3
-    if res.get("hit_rate_worse_than_legacy") or res.get("worse_than_legacy"):
+    if res.get("production_is_beaten") or res.get("worse_than_legacy"):
         return 1
     return 0
 

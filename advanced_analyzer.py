@@ -703,6 +703,67 @@ class HistoricalAnalyzer:
             }
         return out
 
+    #: 前瞻估计量的最小样本。远低于分票口径的 MIN_SAMPLE——池化是全书汇总，
+    #: 几百条起步，这个闸只防「库刚建起来」的极早期。
+    MIN_POOLED_SAMPLE = 100
+
+    @staticmethod
+    def _wilson_ci(k: int, n: int, z: float = 1.96) -> Tuple[float, float]:
+        """比例的 Wilson 95% 区间（百分数）。
+
+        不用正态近似 `p ± z·√(p(1−p)/n)`：它在 p 靠近 0/1 时会给出超出 [0,1]
+        的界，而「命中率区间上界 103%」这种数印出去就是错的。Wilson 不会越界。
+        """
+        if n <= 0:
+            raise ValueError("n must be positive")
+        p = k / n
+        d = 1 + z * z / n
+        centre = (p + z * z / (2 * n)) / d
+        half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+        return (round(max(0.0, centre - half) * 100, 1),
+                round(min(1.0, centre + half) * 100, 1))
+
+    def pooled_hit_rate(self) -> Dict:
+        """全书方向性预测的**池化**命中率——前瞻估计量（v0.45.138）。
+
+        为什么前瞻用池化、而不是同一份数据里的分票分方向频率：
+        v0.45.134 的记分卡按时点隔离实测（n=629，2026-03-23→08-26），
+        在真正用上分票频率的 147 条上 **分票 Brier 0.2898 vs 池化 0.2611**，
+        配对差 +0.0287 ± 0.0135（**t = +2.12，显著**）；经验贝叶斯收缩 α 从 0
+        扫到 ∞，Brier **单调递减到完全收缩、没有内部最优** ⇒ 分票那一层的
+        信息量为零，是在拟合噪声。
+
+        ⚠️ 这不代表分票频率是假的——它作为「这只票这个方向历史上赢过几成」的
+        **描述**完全成立（见 `calculate_expected_returns` 的 `hit_rate_pct`）。
+        两者的区别正是「描述过去」与「预测下一笔」，本函数只管后者。
+
+        口径与 `calculate_expected_returns` 逐字一致：命中 = 方向调整后收益 > 0
+        （恰好为 0 计入分母算未命中），只算 bullish / bearish。
+
+        生产运行时不需要时点隔离：库里 `close_t7` 非空的行全部已实现，
+        不含未来信息。embargo 只在 `probability_scorecard --walk-forward`
+        的回测里才需要。
+        """
+        rows = self._rows()
+        out: Dict = {"basis": "pooled_directional", "db_status": self.db_status}
+        dirn = [r for r in rows if r["direction"] in ("bullish", "bearish")]
+        n = len(dirn)
+        out["sample_size"] = n
+        if n < self.MIN_POOLED_SAMPLE:
+            out["hit_rate_pct"] = None
+            out["ci95"] = None
+            out["note"] = (f"池化样本 {n} 条，低于 {self.MIN_POOLED_SAMPLE}"
+                           f"（db_status={self.db_status}）")
+            _log.debug("[HistoricalAnalyzer] 前瞻估计量不可得：%s", out["note"])
+            return out
+        k = sum(1 for r in dirn
+                if (r["return_7d_pct"] if r["direction"] == "bullish"
+                    else -r["return_7d_pct"]) > 0)
+        out["hit_rate_pct"] = round(k / n * 100.0, 1)
+        out["ci95"] = list(self._wilson_ci(k, n))
+        out["date_range"] = [min(r["date"] for r in dirn), max(r["date"] for r in dirn)]
+        return out
+
     def get_similar_opportunities_summary(
         self, ticker: str, direction: Optional[str] = None
     ) -> List[Dict]:
@@ -914,15 +975,25 @@ class AdvancedAnalyzer:
 
         # 3. 历史命中率与止损止盈（v0.45.134：两者都改读 expected_returns，
         #    不可得时字段为 None —— 调用方必须按「不可得」渲染，见下方字段契约）
+        _pooled = self.history.pooled_hit_rate()
         if current_price > 0:
             analysis["probability_analysis"] = {
                 # ⚠️ 字段名从 win_probability_pct 改成 hit_rate_pct 是有意的：
                 #    它是样本内历史频率，不是前瞻概率。旧名字会让读的人以为
                 #    系统在预测赢面，而那个数六个月没动过。
+                # ── 描述量：这只票这个方向**过去**赢过几成 ──────────────
                 "hit_rate_pct": self._history_hit_rate(ticker, expected_returns),
                 "basis": expected_returns.get("basis"),
                 "sample_size": expected_returns.get("sample_size"),
                 "return_basis": HistoricalAnalyzer.RETURN_BASIS,
+                # ── 前瞻量：**下一笔**赢面多大（v0.45.138）────────────────
+                # 全书池化，故各标的相同。这不是偷懒——记分卡实测分票频率
+                # 作为预测显著更差（t=+2.12），且收缩曲线单调到底。
+                "forward_estimate_pct": self._forward_estimate(ticker, _pooled),
+                "forward_ci95": _pooled.get("ci95"),
+                "forward_sample_size": _pooled.get("sample_size"),
+                "forward_basis": _pooled.get("basis"),
+                "forward_is_ticker_specific": False,
                 "risk_reward_ratio": self._calculate_risk_reward_ratio(
                     ticker, expected_returns
                 ),
@@ -1043,6 +1114,26 @@ class AdvancedAnalyzer:
             return None
         return [round(v, 2) for v in vals], list(keys)
 
+    def _forward_estimate(self, ticker: str, pooled: Dict) -> Optional[float]:
+        """前瞻命中率估计（%）；**不可得返回 None**，不以常数冒充。
+
+        与 `_history_hit_rate` 的分工是本版的核心（v0.45.138）：
+          · `_history_hit_rate` 回答「**这只票这个方向过去**赢过几成」——描述
+          · `_forward_estimate` 回答「**下一笔**赢面多大」——预测
+
+        两者用同一批样本、却必须是两个数：v0.45.134 的记分卡按时点隔离实测，
+        分票频率作为**预测**显著劣于池化（配对 t=+2.12），收缩曲线单调到底。
+        把描述量直接当预测量用，正是那次红的原因。
+        """
+        if not isinstance(pooled, dict):
+            return None
+        v = pooled.get("hit_rate_pct")
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+            _log.debug("[%s] 前瞻估计不可得（n=%s）：%s", ticker,
+                       (pooled or {}).get("sample_size"), (pooled or {}).get("note"))
+            return None
+        return float(v)
+
     def _history_hit_rate(self, ticker: str, expected_returns: Dict) -> Optional[float]:
         """同标的同方向历史 T+7 命中率（%）；**不可得返回 None**。
 
@@ -1108,7 +1199,11 @@ class AdvancedAnalyzer:
         「不知道」必须是不达标，而不是刚好达标。
         """
         _pa = analysis.get("probability_analysis") or {}
-        prob = _pa.get("hit_rate_pct")
+        # v0.45.138：评级读**前瞻量**，不读描述量。
+        # v0.45.134 曾直接用分票分方向频率（hit_rate_pct）当评级输入，记分卡
+        # 随即判定它作为预测显著劣于池化（配对 t=+2.12）。描述量留在报告里
+        # 给人看历史，但不该驱动「该不该买」。
+        prob = _pa.get("forward_estimate_pct")
         rr = _pa.get("risk_reward_ratio")
         _prob_known = (isinstance(prob, (int, float)) and not isinstance(prob, bool)
                        and math.isfinite(prob))
@@ -1119,9 +1214,10 @@ class AdvancedAnalyzer:
                 "rating": "UNRATED",
                 "action": "不评级",
                 "confidence": None,
+                "probability_is_ticker_specific": False,
                 "rationale": (
-                    f"无同方向历史可比样本（basis={_pa.get('basis')}, "
-                    f"n={_pa.get('sample_size')}），不给方向也不给评级"
+                    f"前瞻命中率不可得（池化样本 n={_pa.get('forward_sample_size')}），"
+                    f"不给方向也不给评级"
                 ),
             }
         # v0.45.50：rr 不可得时**不许升级评级**。
@@ -1141,19 +1237,39 @@ class AdvancedAnalyzer:
                 rating, action = _r, _a
                 break
 
-        _n = _pa.get("sample_size")
-        _basis = _pa.get("basis")
+        # ── 这个评级此刻分不分得开标的？（v0.45.138）────────────────────
+        # 概率输入自本版起是全书池化的、各标的相同；唯一的逐标的输入是 rr，
+        # 而 rr 只出现在**升级**闸里。所以当 prob 够不到最低那道升级闸时，
+        # **任何 rr 都不改变结果** ⇒ 该评级不携带任何逐标的信息。
+        #
+        # 实测（2026-09-06）：池化命中率 55.6%，最低升级闸 60.0 ⇒ 全部 HOLD。
+        # 把这件事算成一个字段而不是写进注释，是因为注释不会随数据变化，
+        # 而 `tests/test_rating_discrimination.py` 盯着它：池化率一旦越过 60，
+        # 断言变红、有人回来重看这三道从未验证过的闸。
+        _min_gate = min(g[2] for g in self._RATING_GATES)
+        _discriminating = prob >= _min_gate
+
+        _ci = _pa.get("forward_ci95")
+        _fn = _pa.get("forward_sample_size")
+        _ci_txt = f"，95% 区间 [{_ci[0]}, {_ci[1]}]" if isinstance(_ci, (list, tuple)) and len(_ci) == 2 else ""
         return {
             "rating": rating,
             "action": action,
             "confidence": f"{prob:.1f}%",
+            # v0.45.138：**这个评级的概率输入是全书池化的，各标的相同**。
+            # 显式标出来，免得「所有票都 HOLD」被读成「系统逐个评估后都选了 HOLD」——
+            # 那正是本轮在清的那类假象（把常数渲染成判断）。
+            "probability_is_ticker_specific": False,
+            "rating_discriminates_tickers": _discriminating,
             # v0.45.50：rr 为 None 时印「未知」，不印 "None:1" 也不编一个数
-            # v0.45.134：文案不再说「赚钱概率」——那是前瞻断言；这个数是历史频率，
-            #            必须连 n 和 basis 一起报，否则读的人无从判断它有多硬
+            # v0.45.134：文案不再说「赚钱概率」——那是前瞻断言
             "rationale": (
-                f"同方向历史 T+7 命中率 {prob:.1f}%（n={_n}, basis={_basis}），"
-                + (f"风险收益比 {rr}:1" if _rr_known
+                f"前瞻命中率 {prob:.1f}%（全书池化 n={_fn}{_ci_txt}；各标的相同），"
+                + (f"风险收益比 {rr}:1（本标的）" if _rr_known
                    else "风险收益比未知（样本里没有亏损单，多半是样本太少）")
+                + ("" if _discriminating else
+                   f"。⚠️ 前瞻命中率未达最低升级闸 {_min_gate:.0f}%，"
+                   f"此时任何风险收益比都不改变评级 —— **本评级不区分标的**")
             ),
         }
 

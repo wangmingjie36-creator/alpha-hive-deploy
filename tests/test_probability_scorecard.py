@@ -92,7 +92,7 @@ def test_embargo_excludes_future_samples(tmp_path):
     res = PS.walk_forward(db_path=db, embargo_days=14, min_sample=20)
     assert res["status"] == "ok"
     # 只看老历史 ⇒ 分票频率应为 1.0 ⇒ 对一条命中样本 Brier 贡献 0
-    assert res["models"]["hit_rate"]["mean_pred_pct"] == pytest.approx(100.0, abs=1.0), (
+    assert res["models"]["per_ticker_hit_rate"]["mean_pred_pct"] == pytest.approx(100.0, abs=1.0), (
         "分票频率不是 100% —— embargo 漏了近期样本，记分卡在用未来数据"
     )
 
@@ -110,7 +110,7 @@ def test_embargo_relaxed_would_leak(tmp_path):
 
     tight = PS.walk_forward(db_path=db, embargo_days=14, min_sample=20)
     loose = PS.walk_forward(db_path=db, embargo_days=0, min_sample=20)
-    assert loose["models"]["hit_rate"]["mean_pred_pct"] < tight["models"]["hit_rate"]["mean_pred_pct"], (
+    assert loose["models"]["per_ticker_hit_rate"]["mean_pred_pct"] < tight["models"]["per_ticker_hit_rate"]["mean_pred_pct"], (
         "放松 embargo 没有改变结果 —— 说明这个参数根本没在起作用"
     )
 
@@ -175,8 +175,9 @@ def test_missing_ledger_is_status_not_crash(tmp_path):
 
 def test_score_published_joins_and_counts_coverage(tmp_path):
     led = tmp_path / "published.jsonl"
+    # v0.45.138：记分打**前瞻量**，故这里要给 forward_estimate_pct
     PS.record_published("2026-01-01", "AAA", "bullish", 100.0, "same_direction", 30,
-                        ledger_path=led)
+                        ledger_path=led, forward_estimate_pct=100.0, forward_sample_size=684)
     PS.record_published("2026-01-02", "BBB", "bullish", None, None, 3, ledger_path=led)
     db = _mkdb(tmp_path, [("2026-01-01", "AAA", "bullish", 100.0, 110.0)])
     res = PS.score_published(ledger_path=led, db_path=db)
@@ -187,19 +188,49 @@ def test_score_published_joins_and_counts_coverage(tmp_path):
 
 
 # ── 4. 退出码：会红的那个观测点 ──────────────────────────────────────
-def test_exit_code_1_when_estimator_worse_than_legacy(tmp_path, capsys, monkeypatch):
-    """构造一个分票频率必然更差的库：某票历史全胜、之后全败。
+#
+# v0.45.138 改了判据。旧判据是「生产估计量 vs 旧常数 65.0」——生产自 v0.45.138
+# 起是池化基准率，而基准率几乎必然赢过一个固定常数，那样的告警永远不会红，
+# 等于没装。新判据问的是：**就在旁边，有没有别的候选量明显打得过生产在用的那个。**
+# 这也正是它第一次真正有用的那次所回答的问题（v0.45.134 用分票频率、被基准率打过）。
 
-    这一条是整个模块的存在理由 —— 它绿了才说明「变差会被发现」。
+
+def test_exit_code_1_when_another_candidate_beats_production(tmp_path):
+    """构造一个「分票频率确实有信息」的库：AAA 恒胜、BBB 恒败。
+
+    此时池化基准率 ≈ 50%（毫无区分），而分票频率近乎完美 ⇒ 生产在用的那个
+    被打过，必须红。这一条绿了才说明「有更好的选择时会被发现」。
     """
-    rows = [(f"2026-01-{i % 28 + 1:02d}", "AAA", "bullish", 100.0, 110.0) for i in range(30)]
-    # 之后全部翻车：分票频率仍报 ~100%，实际全败
-    rows += [(f"2026-04-{i % 28 + 1:02d}", "AAA", "bullish", 100.0, 90.0) for i in range(30)]
+    rows = [(f"2026-{m:02d}-{i % 28 + 1:02d}", "AAA", "bullish", 100.0, 110.0)
+            for m in (1, 2, 5) for i in range(30)]
+    rows += [(f"2026-{m:02d}-{i % 28 + 1:02d}", "BBB", "bullish", 100.0, 90.0)
+             for m in (1, 2, 5) for i in range(30)]
     db = _mkdb(tmp_path, rows)
     res = PS.walk_forward(db_path=db, embargo_days=14, min_sample=20)
-    assert res["hit_rate_worse_than_legacy"] is True
-    code = PS.main(["--walk-forward", "--db", str(db)])
-    assert code == 1, "估计器明显更差，退出码却不是 1 —— 这个观测点是哑的"
+    assert res["production_model"] == PS.PRODUCTION_MODEL
+    assert res["best_model"] == "per_ticker_hit_rate", res["models"]
+    assert res["production_is_beaten"] is True
+    assert PS.main(["--walk-forward", "--db", str(db)]) == 1, "这个观测点是哑的"
+
+
+def test_exit_code_0_when_production_is_best(tmp_path):
+    """成对：没有更好的候选时必须绿 —— 否则告警恒红，同样等于没装。
+
+    构造无逐票信息的库：所有票同一个 ~60% 命中率，分票频率只是噪声。
+    """
+    import random
+    rng = random.Random(7)
+    rows = []
+    for tk in ("AAA", "BBB", "CCC", "DDD"):
+        for m in (1, 2, 5):
+            for i in range(30):
+                win = rng.random() < 0.6
+                rows.append((f"2026-{m:02d}-{i % 28 + 1:02d}", tk, "bullish",
+                             100.0, 110.0 if win else 90.0))
+    db = _mkdb(tmp_path, rows)
+    res = PS.walk_forward(db_path=db, embargo_days=14, min_sample=20)
+    assert res["production_is_beaten"] is False, res["beaten_by"]
+    assert PS.main(["--walk-forward", "--db", str(db)]) == 0
 
 
 def test_exit_code_3_when_undeterminable(tmp_path):

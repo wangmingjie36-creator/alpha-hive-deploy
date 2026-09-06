@@ -2973,6 +2973,9 @@ def _hr_or_none(data: dict):
     「不可得」压成 **0.0**，而 0.0 在这个量表上恰是「一次都没赢过」这个最强的
     看空结论。与 v0.45.111 `_open_position` 的 `or 0.0` 同型。
     """
+    # v0.45.138：这张卡展示的是**描述量**（本标的本方向的历史频率），
+    # 故标题写「历史命中率」而非「胜率」——后者是前瞻断言，那个数在
+    # probability_analysis.forward_estimate_pct 里，且全书池化、各标的相同。
     v = ((data.get("advanced_analysis") or {}).get("probability_analysis") or {}).get("hit_rate_pct")
     if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
         return None
@@ -3015,7 +3018,7 @@ def _build_odds_boost_card(ctx: dict) -> str:
             f'<div style="font-size:13px;font-weight:700;color:var(--green2);margin-bottom:8px;">'
             f'⚡ Odds Boost 第6维融合（probability_analysis）</div>'
             f'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;font-size:12px;">'
-            f'<div><div style="color:var(--text2)">胜率</div>'
+            f'<div><div style="color:var(--text2)">历史命中率</div>'
             f'<div style="font-size:18px;font-weight:700;color:var(--green2)">{_win_txt}</div></div>'
             f'<div><div style="color:var(--text2)">赔率</div>'
             f'<div style="font-size:18px;font-weight:700;color:var(--accent)">{_rr_txt}</div></div>'
@@ -3028,7 +3031,7 @@ def _build_odds_boost_card(ctx: dict) -> str:
             f'{dir_tag}</div>'
             f'</div></div>')
     else:
-        reason = pb.get("reason", f"命中率 {_win_txt} / 赔率 {_rr_txt} 未达阈值")
+        reason = pb.get("reason", f"历史命中率 {_win_txt} / 赔率 {_rr_txt} 未达阈值")
         return (
             f'<div style="background:var(--bg3);border:1px dashed var(--border);'
             f'border-radius:12px;padding:12px;margin:12px 0;font-size:12px;color:var(--text2);">'

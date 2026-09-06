@@ -290,8 +290,12 @@ async def alphahive_get_swarm_scores(params: TickerDateInput) -> str:
             - bee_scores (dict): per-bee score, sentiment, weight
             - confidence_calibration: band [lo,hi], band_width, discrimination, dimension_std
             - hit_rate_pct (float | null): 同标的同方向历史 T+7 命中率。
-              **样本内历史频率，不是前瞻概率**；无同方向可比样本时为 null。
-              与 sample_size / hit_rate_basis 一起读（v0.45.134）
+              **描述量**：样本内历史频率，回答「这只票这个方向过去赢过几成」。
+              无同方向可比样本时为 null。与 sample_size / hit_rate_basis 一起读
+            - forward_estimate_pct (float | null): **前瞻量**，回答「下一笔赢面
+              多大」。全书池化，故各标的相同（forward_is_ticker_specific=false）。
+              评级与综合分用的是它，不是上面那个——v0.45.134 的记分卡实测分票
+              频率作为预测显著更差（配对 t=+2.12）。配 forward_ci95 一起读
             - sample_size (int): historical n — caveat if < 10
             - stop_loss (dict): conservative / moderate / aggressive levels
     """
@@ -336,6 +340,13 @@ async def alphahive_get_swarm_scores(params: TickerDateInput) -> str:
             # 也没碰过样本。** 现在两者同源，sample_caveat 才名副其实。
             "hit_rate_pct":        prob.get("hit_rate_pct"),
             "hit_rate_basis":      prob.get("basis"),
+            # v0.45.138：前瞻量与描述量分列。上面那个是「这只票这个方向过去
+            # 赢过几成」，下面这个是「下一笔赢面多大」——评级用的是后者，
+            # 且它全书池化、各标的相同。合成一个字段必然被读成同一件事。
+            "forward_estimate_pct": prob.get("forward_estimate_pct"),
+            "forward_ci95":         prob.get("forward_ci95"),
+            "forward_sample_size":  prob.get("forward_sample_size"),
+            "forward_is_ticker_specific": prob.get("forward_is_ticker_specific"),
             "return_basis":        prob.get("return_basis"),
             "sample_size":         n,
             "sample_caveat": (
