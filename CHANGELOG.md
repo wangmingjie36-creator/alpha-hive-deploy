@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.136] — 2026-09-06 — 占位（进行中：还债——10 个模块逐个补显式源桩，清空 _KNOWN_NETWORK_REACHERS）
+
+## [0.45.135] — 2026-09-06 — 占位（进行中：generate_ml_report 的 catalyst_quality 死特征——把 recommendation.rating 的四种字符串喂进 A+/A/B+/B/C 映射表，全部落到 mapping.get 的 0.5 默认值，该特征恒为常数）
+
 ## [0.45.134] — 2026-09-06 — 概率与止盈两节去常数化；并给概率装上会红的记分卡（它第一次运行就红了）
 
 第 5 章旁边的两个数从来不是观测。换成 pheromone.db 真实频率之后，新装的记分卡
@@ -129,7 +133,6 @@ n=629，时点隔离 embargo 14 天，2026-03-23 → 2026-08-26，实际命中�
 `generate_ml_report.py:357` 把 `recommendation.rating` 塞进 `catalyst_quality`，
 而 `ml_predictor.encode_catalyst_quality` 只认 A+/A/B+/B/C —— 四种评级字符串
 全部编码成默认值 **0.5**，该特征在这条路径上恒为常数。已单独开任务卡。
-
 
 ## [0.45.133] — 2026-09-06 — 整套测试默认离线：闸设在**三个传输层入口**，不再逐个数据源打桩
 
