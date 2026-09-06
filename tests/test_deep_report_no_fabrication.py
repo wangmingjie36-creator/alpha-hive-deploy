@@ -58,12 +58,27 @@ class TestConfidenceBand:
 
 
 class TestScenarioTable:
-    """`generate_ml_report._ch5_scenarios` —— 同一形状，另一份报告"""
+    """`generate_ml_report._ch5_scenarios` —— 同一形状，另一份报告
+
+    v0.45.132 起数据源是 pheromone.db 的真实 T+7 分布（见
+    tests/test_ch5_real_distribution.py）；这里只守「退化输入不得渲染出编造的数」。
+    """
 
     @staticmethod
     def _render(analysis, swarm=None):
         from generate_ml_report import MLEnhancedReportGenerator as G
         return G._ch5_scenarios(G.__new__(G), analysis, swarm or {})
+
+    @staticmethod
+    def _real_exp(**over):
+        exp = {"sample_size": 40, "basis": "same_direction", "direction": "bullish",
+               "same_direction_n": 40, "any_direction_n": 70, "min_sample": 20,
+               "date_range": ["2026-03-09", "2026-08-27"], "db_status": "ok",
+               "return_basis": "close_t7 / price_at_predict − 1",
+               "expected_7d": {"mean": 1.2, "median": 0.8, "min": -9.0, "max": 12.0,
+                               "p10": -5.0, "p25": -2.0, "p75": 3.5, "p90": 7.0, "std": 4.0}}
+        exp.update(over)
+        return exp
 
     def test_no_data_skips_table(self):
         html = self._render({})
@@ -72,40 +87,36 @@ class TestScenarioTable:
             assert fake not in html, f"退化输入渲染出编造的 {fake}"
 
     def test_no_formula_line_when_unavailable(self):
-        """那行「Σ(概率 × 情景价格) = …」最像量化结论，最不该编"""
+        """那行「Σ(概率 × 情景价格) = …」最像量化结论，最不该编——现在任何路径都不该有"""
         html = self._render({})
         assert "Σ(概率" not in html
 
     def test_real_data_still_renders_table(self):
         html = self._render({
-            "historical_analysis": {"expected_returns": {
-                "max_gain": {"mean": 18.0},
-                "expected_7d": {"mean": 4.2},
-                "max_drawdown": {"mean": -8.0, "min": -14.0}}},
-            "position_management": {"stop_loss": {"conservative": 194.0}},
+            "historical_analysis": {"expected_returns": self._real_exp()},
+            "position_management": {"stop_loss": {"conservative": 97.0}},
         })
-        assert "概率加权期望价格" in html
-        assert "Σ(概率" in html
+        assert "样本均值期望价" in html and "情景推演不可用" not in html
+        assert "Σ(概率" not in html and "概率加权期望价格" not in html
 
-    @pytest.mark.parametrize("missing", ["max_gain", "expected_7d", "max_drawdown"])
-    def test_any_missing_component_skips_table(self, missing):
-        """任一分量缺失即跳过 —— 部分真实 + 部分常量的表比全常量更难识破"""
-        exp = {"max_gain": {"mean": 18.0}, "expected_7d": {"mean": 4.2},
-               "max_drawdown": {"mean": -8.0}}
-        exp.pop(missing)
+    @pytest.mark.parametrize("missing", ["p10", "p25", "median", "p75", "p90", "mean"])
+    def test_any_missing_quantile_skips_table(self, missing):
+        """任一分位缺失即跳过 —— 部分真实 + 部分常量的表比全常量更难识破"""
+        exp = self._real_exp()
+        exp["expected_7d"].pop(missing)
         html = self._render({
             "historical_analysis": {"expected_returns": exp},
-            "position_management": {"stop_loss": {"conservative": 194.0}},
+            "position_management": {"stop_loss": {"conservative": 97.0}},
         })
         assert "情景推演不可用" in html
 
     def test_zero_return_is_not_treated_as_missing(self):
-        """`or 20` 会把真实的 0 换成常量；0 是合法的期望收益"""
+        """`or 20` 会把真实的 0 换成常量；0 是合法的收益分位"""
+        exp = self._real_exp()
+        exp["expected_7d"] = {k: 0.0 for k in exp["expected_7d"]}
         html = self._render({
-            "historical_analysis": {"expected_returns": {
-                "max_gain": {"mean": 0.0},
-                "expected_7d": {"mean": 0.0},
-                "max_drawdown": {"mean": 0.0}}},
-            "position_management": {"stop_loss": {"conservative": 194.0}},
+            "historical_analysis": {"expected_returns": exp},
+            "position_management": {"stop_loss": {"conservative": 97.0}},
         })
-        assert "情景推演不可用" not in html, "真实的 0 不是缺失"
+        assert "情景推演不可用" not in html
+        assert "$100.00" in html and "+0.0%" in html

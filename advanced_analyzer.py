@@ -8,7 +8,8 @@ import json
 import math
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass
+from pathlib import Path
+import sqlite3
 import statistics
 
 _log = _logging.getLogger("alpha_hive.advanced_analyzer")
@@ -388,23 +389,6 @@ class DealerGEXAnalyzer:
         }
 
 
-@dataclass
-class HistoricalOpportunity:
-    """历史机会数据结构"""
-    date: str
-    ticker: str
-    event: str
-    initial_crowding: float
-    days_to_peak: int
-    max_gain: float
-    gain_at_3d: float
-    gain_at_7d: float
-    gain_at_30d: float
-    drawdown: float
-    volatility: float
-    beat_miss: str  # "beat", "miss", "inline"
-
-
 class IndustryComparator:
     """行业对标分析"""
 
@@ -534,192 +518,196 @@ class IndustryComparator:
         return threats.get(ticker, [])
 
 
+def _percentile(sorted_vals: List[float], p: float) -> float:
+    """线性插值分位数（与 numpy 默认 `linear` 一致）；入参必须已升序。"""
+    n = len(sorted_vals)
+    if n == 0:
+        raise ValueError("empty sample")
+    k = (n - 1) * p / 100.0
+    f = math.floor(k)
+    c = min(f + 1, n - 1)
+    return sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f)
+
+
 class HistoricalAnalyzer:
-    """历史回溯分析"""
+    """历史回溯：读 pheromone.db 里蜂群自己的预测与 T+7 真实结果（v0.45.132）。
 
-    def __init__(self):
-        # 历史机会数据库（基于真实市场数据）
-        self.historical_data: List[HistoricalOpportunity] = [
-            # NVDA 历史
-            HistoricalOpportunity(
-                date="2023-04-19",
-                ticker="NVDA",
-                event="Q1 2024 Earnings",
-                initial_crowding=72.0,
-                days_to_peak=5,
-                max_gain=28.5,
-                gain_at_3d=12.8,
-                gain_at_7d=22.3,
-                gain_at_30d=18.5,
-                drawdown=-3.2,
-                volatility=4.8,
-                beat_miss="beat",
-            ),
-            HistoricalOpportunity(
-                date="2023-10-18",
-                ticker="NVDA",
-                event="Q3 2024 Earnings",
-                initial_crowding=68.0,
-                days_to_peak=8,
-                max_gain=35.2,
-                gain_at_3d=8.5,
-                gain_at_7d=18.9,
-                gain_at_30d=32.1,
-                drawdown=-2.1,
-                volatility=5.2,
-                beat_miss="beat",
-            ),
-            HistoricalOpportunity(
-                date="2024-01-24",
-                ticker="NVDA",
-                event="Q4 2024 Earnings",
-                initial_crowding=75.0,
-                days_to_peak=12,
-                max_gain=42.8,
-                gain_at_3d=5.2,
-                gain_at_7d=15.6,
-                gain_at_30d=38.9,
-                drawdown=-1.8,
-                volatility=6.1,
-                beat_miss="beat",
-            ),
-            # VKTX 历史
-            HistoricalOpportunity(
-                date="2023-06-15",
-                ticker="VKTX",
-                event="Trial Results",
-                initial_crowding=58.0,
-                days_to_peak=3,
-                max_gain=45.2,
-                gain_at_3d=42.1,
-                gain_at_7d=38.5,
-                gain_at_30d=22.3,
-                drawdown=-8.5,
-                volatility=12.3,
-                beat_miss="beat",
-            ),
-            HistoricalOpportunity(
-                date="2023-11-22",
-                ticker="VKTX",
-                event="Conference Presentation",
-                initial_crowding=42.0,
-                days_to_peak=7,
-                max_gain=18.9,
-                gain_at_3d=8.2,
-                gain_at_7d=12.5,
-                gain_at_30d=15.8,
-                drawdown=-2.3,
-                volatility=8.9,
-                beat_miss="beat",
-            ),
-            # TSLA 历史
-            HistoricalOpportunity(
-                date="2024-01-17",
-                ticker="TSLA",
-                event="Delivery Guidance",
-                initial_crowding=71.0,
-                days_to_peak=4,
-                max_gain=21.5,
-                gain_at_3d=12.3,
-                gain_at_7d=18.2,
-                gain_at_30d=12.5,
-                drawdown=-5.2,
-                volatility=7.8,
-                beat_miss="beat",
-            ),
-        ]
+    v0.45.132 之前这里是 **6 条手写记录**（NVDA 3 / VKTX 2 / TSLA 1，全是 2023 年
+    的财报、全是 beat，2026-02-24 落笔后从未增补），按「拥挤度 ±10」匹配——
+    对 30 只标的里 27 只**结构上不可能命中**；能命中的两只也只是一个常数
+    （旧 generate_comprehensive_analysis 的「消息数 > 1000 → 63.5」）去撞两年半前
+    的三条记录。同期 pheromone.db 已攒下 900+ 条核对过 T+7 收盘的真实预测。
 
+    口径：
+      · 收益 = close_t7 / price_at_predict − 1（干净收盘口径，与 v0.45.87
+        feedback_loop.clean_t7 同源）。**不用 return_t7**——它对 SL/TP 方向单是
+        钳位离场收益、对中性单是原始收益，混在一起没有意义。
+      · 条件：同标的 + 同方向（蜂群当日 direction）。同方向样本 < MIN_SAMPLE 时
+        退回同标的**不分方向**，结果里 basis 标明；仍不足则只返回样本数与 note，
+        **不给任何分位数**——调用方必须按「不可得」渲染。
+      · 只读连接；库不存在 / 读失败 → db_status 标出，结果同「样本不足」。
+        看报告的人能从 db_status 分清「没库」与「没样本」。
+    """
+
+    MIN_SAMPLE = 20   # P10/P90 在 20 个样本上分别落在第 2/19 个点；再少分位数就是单点噪声
+    RETURN_BASIS = "close_t7 / price_at_predict − 1"
+
+    def __init__(self, db_path: Optional[Path] = None):
+        if db_path is None:
+            from feedback_loop import PHEROMONE_DB_PATH   # 路径唯一真相在 feedback_loop
+            db_path = PHEROMONE_DB_PATH
+        self.db_path = Path(db_path)
+        self._rows_cache: Optional[List[Dict]] = None
+        self.db_status: Optional[str] = None
+        self.skipped_rows = 0
+
+    # ── 读库 ────────────────────────────────────────────────────────────
+    def _load(self) -> Tuple[List[Dict], str]:
+        try:
+            exists = self.db_path.exists()
+        except OSError as e:
+            _log.warning("[HistoricalAnalyzer] 检查 %s 失败: %s", self.db_path, e)
+            return [], "error"
+        if not exists:
+            _log.warning("[HistoricalAnalyzer] %s 不存在，历史回溯不可得", self.db_path)
+            return [], "missing"
+        try:
+            con = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+            try:
+                rows = con.execute(
+                    "SELECT date, ticker, direction, final_score, price_at_predict, close_t7 "
+                    "FROM predictions WHERE close_t7 IS NOT NULL AND price_at_predict > 0"
+                ).fetchall()
+            finally:
+                con.close()
+        except (sqlite3.Error, OSError) as e:
+            _log.warning("[HistoricalAnalyzer] 读取 %s 失败: %s", self.db_path, e)
+            return [], "error"
+
+        out: List[Dict] = []
+        skipped = 0
+        for date, ticker, direction, score, p0, c7 in rows:
+            try:
+                p0 = float(p0)
+                c7 = float(c7)
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            if not (math.isfinite(p0) and math.isfinite(c7)) or p0 <= 0:
+                skipped += 1
+                continue
+            out.append({
+                "date": str(date),
+                "ticker": str(ticker),
+                "direction": str(direction or "").lower(),
+                "final_score": score,
+                "return_7d_pct": round((c7 / p0 - 1.0) * 100.0, 3),
+            })
+        self.skipped_rows = skipped
+        if skipped:
+            # 「这个失败，下游怎么知道」——坏行不能静默消失
+            _log.warning("[HistoricalAnalyzer] %d 行 price_at_predict/close_t7 非法，已剔除", skipped)
+        return out, ("ok" if out else "empty")
+
+    def _rows(self) -> List[Dict]:
+        if self._rows_cache is None:
+            self._rows_cache, self.db_status = self._load()
+        return self._rows_cache
+
+    # ── 查询 ────────────────────────────────────────────────────────────
     def find_similar_opportunities(
-        self, ticker: str, current_crowding: float, crowding_tolerance: float = 5.0
+        self, ticker: str, direction: Optional[str] = None
     ) -> List[Dict]:
-        """找相似的历史机会"""
+        """同标的（可选同方向）的历史预测及其 T+7 真实收益，最近的在前。"""
+        d = (direction or "").lower() or None
         similar = []
-
-        for opp in self.historical_data:
-            if opp.ticker != ticker:
+        for r in self._rows():
+            if r["ticker"] != ticker:
                 continue
-
-            # 拥挤度相近
-            if abs(opp.initial_crowding - current_crowding) > crowding_tolerance:
+            if d is not None and r["direction"] != d:
                 continue
-
-            similar.append(
-                {
-                    "date": opp.date,
-                    "event": opp.event,
-                    "crowding_then": opp.initial_crowding,
-                    "crowding_now": current_crowding,
-                    "crowding_diff": opp.initial_crowding - current_crowding,
-                    "days_to_peak": opp.days_to_peak,
-                    "max_gain_pct": opp.max_gain,
-                    "gain_3d_pct": opp.gain_at_3d,
-                    "gain_7d_pct": opp.gain_at_7d,
-                    "gain_30d_pct": opp.gain_at_30d,
-                    "max_drawdown_pct": opp.drawdown,
-                    "volatility_pct": opp.volatility,
-                    "result": opp.beat_miss,
-                }
-            )
-
-        # 按日期排序（最近的优先）
+            ret = r["return_7d_pct"]
+            if r["direction"] in ("bullish", "bearish"):
+                hit = (ret > 0) if r["direction"] == "bullish" else (ret < 0)
+                result = "hit" if hit else "miss"
+            else:
+                result = "—"
+            similar.append({
+                "date": r["date"],
+                "event": f"蜂群 {r['direction'] or '—'} · 综合分 {r['final_score']}",
+                "direction": r["direction"],
+                "final_score": r["final_score"],
+                "gain_7d_pct": ret,
+                "result": result,
+            })
         similar.sort(key=lambda x: x["date"], reverse=True)
         return similar
 
     def calculate_expected_returns(
-        self, ticker: str, current_crowding: float
+        self, ticker: str, direction: Optional[str] = None
     ) -> Dict:
-        """计算预期收益（基于历史）"""
-        similar = self.find_similar_opportunities(ticker, current_crowding, crowding_tolerance=10.0)
-
-        if not similar:
+        """T+7 真实收益分布；样本不足时**不返回 expected_7d**（调用方据此判不可得）。"""
+        same = self.find_similar_opportunities(ticker, direction) if direction else []
+        anyd = self.find_similar_opportunities(ticker)
+        base = {
+            "source": "pheromone.db",
+            "db_status": self.db_status,
+            "return_basis": self.RETURN_BASIS,
+            "min_sample": self.MIN_SAMPLE,
+            "direction": (direction or "").lower() or None,
+            "same_direction_n": len(same),
+            "any_direction_n": len(anyd),
+        }
+        if len(same) >= self.MIN_SAMPLE:
+            rows, basis = same, "same_direction"
+        elif len(anyd) >= self.MIN_SAMPLE:
+            rows, basis = anyd, "any_direction"
+        else:
             return {
-                "note": "历史数据不足",
-                "sample_size": 0,
+                **base,
+                "sample_size": len(anyd),
+                "basis": None,
+                "note": (f"样本不足：{ticker} 同方向 {len(same)} / 不分方向 {len(anyd)}，"
+                         f"低于 {self.MIN_SAMPLE}"),
             }
 
-        # 提取收益数据
-        gains_3d = [s["gain_3d_pct"] for s in similar]
-        gains_7d = [s["gain_7d_pct"] for s in similar]
-        gains_30d = [s["gain_30d_pct"] for s in similar]
-        max_gains = [s["max_gain_pct"] for s in similar]
-        drawdowns = [s["max_drawdown_pct"] for s in similar]
-
-        return {
-            "sample_size": len(similar),
-            "expected_3d": {
-                "mean": round(statistics.mean(gains_3d), 2),
-                "median": round(statistics.median(gains_3d), 2),
-                "min": round(min(gains_3d), 2),
-                "max": round(max(gains_3d), 2),
-            },
+        rets = sorted(r["gain_7d_pct"] for r in rows)
+        dates = [r["date"] for r in rows]
+        q = lambda p: round(_percentile(rets, p), 2)  # noqa: E731
+        out = {
+            **base,
+            "sample_size": len(rets),
+            "basis": basis,
+            "date_range": [min(dates), max(dates)],
             "expected_7d": {
-                "mean": round(statistics.mean(gains_7d), 2),
-                "median": round(statistics.median(gains_7d), 2),
-                "min": round(min(gains_7d), 2),
-                "max": round(max(gains_7d), 2),
-            },
-            "expected_30d": {
-                "mean": round(statistics.mean(gains_30d), 2),
-                "median": round(statistics.median(gains_30d), 2),
-                "min": round(min(gains_30d), 2),
-                "max": round(max(gains_30d), 2),
-            },
-            "max_gain": {
-                "mean": round(statistics.mean(max_gains), 2),
-                "median": round(statistics.median(max_gains), 2),
-            },
-            "max_drawdown": {
-                "mean": round(statistics.mean(drawdowns), 2),
-                "min": round(min(drawdowns), 2),
+                "mean": round(statistics.mean(rets), 2),
+                "median": q(50),
+                "min": round(rets[0], 2),
+                "max": round(rets[-1], 2),
+                "p10": q(10), "p25": q(25), "p75": q(75), "p90": q(90),
+                "std": round(statistics.pstdev(rets), 2) if len(rets) > 1 else 0.0,
             },
         }
+        # 方向口径的胜率与风险收益比：只在「同方向 + 有方向」时有定义
+        d = base["direction"]
+        if basis == "same_direction" and d in ("bullish", "bearish"):
+            adj = [r if d == "bullish" else -r for r in rets]
+            wins = [a for a in adj if a > 0]
+            losses = [a for a in adj if a < 0]
+            out["hit_rate_pct"] = round(len(wins) / len(adj) * 100.0, 1)
+            out["risk_reward"] = {
+                "avg_gain_pct": round(statistics.mean(wins), 2) if wins else None,
+                "avg_loss_pct": round(statistics.mean(losses), 2) if losses else None,
+                "ratio": (round(statistics.mean(wins) / abs(statistics.mean(losses)), 2)
+                          if wins and losses else None),
+            }
+        return out
 
     def get_similar_opportunities_summary(
-        self, ticker: str, current_crowding: float
+        self, ticker: str, direction: Optional[str] = None
     ) -> List[Dict]:
-        """获取相似机会摘要"""
-        similar = self.find_similar_opportunities(ticker, current_crowding)
-        return similar[:3]  # 返回最近的 3 个
+        """最近 3 次同标的（同方向）预测及其 T+7 结果。"""
+        return self.find_similar_opportunities(ticker, direction)[:3]
 
 
 class ProbabilityCalculator:
@@ -800,10 +788,19 @@ class ProbabilityCalculator:
     def calculate_optimal_holding_time(
         self, similar_opportunities: List[Dict]
     ) -> Dict:
-        """计算最优持仓时间"""
+        """计算最优持仓时间
+
+        需要同一样本在 3 / 7 / 30 天三个持仓期的收益才能比较。v0.45.132 起历史样本
+        来自 pheromone.db，只有 T+7 一个持仓期的干净结果——比较无从做起，诚实返回
+        「不可得」，不拿 7 天当「最优」冒充测算。
+        """
         if not similar_opportunities:
             return {
                 "note": "数据不足",
+            }
+        if any(("gain_3d_pct" not in o or "gain_30d_pct" not in o) for o in similar_opportunities):
+            return {
+                "note": "历史样本只有 T+7 结果，无法比较持仓期（v0.45.132）",
             }
 
         # 分析历史数据中的最优持仓时间
@@ -846,9 +843,13 @@ class AdvancedAnalyzer:
         self.dealer_gex = DealerGEXAnalyzer()
 
     def generate_comprehensive_analysis(
-        self, ticker: str, realtime_metrics: Dict
+        self, ticker: str, realtime_metrics: Dict, direction: Optional[str] = None
     ) -> Dict:
-        """生成综合高级分析报告"""
+        """生成综合高级分析报告
+
+        direction：蜂群当日方向（bullish / bearish / neutral），v0.45.132 起用于
+        历史回溯的「同标的 + 同方向」条件；不传则历史回溯只按标的不分方向。
+        """
 
         # 提取关键数据
         crowding_score = realtime_metrics.get("crowding_input", {}).get(
@@ -881,13 +882,14 @@ class AdvancedAnalyzer:
             ticker, realtime_metrics
         )
 
-        # 2. 历史回溯分析
-        similar_opps = self.history.get_similar_opportunities_summary(ticker, crowding_pct)
+        # 2. 历史回溯分析（v0.45.132：读 pheromone.db 真实 T+7，同标的 + 同方向；
+        #    此前的拥挤度匹配连同 6 条手写记录一起删除）
+        expected_returns = self.history.calculate_expected_returns(ticker, direction)
         analysis["historical_analysis"] = {
-            "similar_opportunities": similar_opps,
-            "expected_returns": self.history.calculate_expected_returns(
-                ticker, crowding_pct
+            "similar_opportunities": self.history.get_similar_opportunities_summary(
+                ticker, direction
             ),
+            "expected_returns": expected_returns,
         }
 
         # 3. 概率和止损止盈
@@ -897,7 +899,7 @@ class AdvancedAnalyzer:
                     ticker, crowding_pct, self._estimate_catalyst_quality(ticker)
                 ),
                 "risk_reward_ratio": self._calculate_risk_reward_ratio(
-                    ticker, similar_opps
+                    ticker, expected_returns
                 ),
             }
 
@@ -909,7 +911,7 @@ class AdvancedAnalyzer:
                     current_price, self._estimate_expected_gain(ticker, crowding_pct)
                 ),
                 "optimal_holding_time": self.probability.calculate_optimal_holding_time(
-                    similar_opps
+                    analysis["historical_analysis"]["similar_opportunities"]
                 ),
             }
 
@@ -989,31 +991,27 @@ class AdvancedAnalyzer:
         else:
             return base - 5  # 极度拥挤 -5%
 
-    def _calculate_risk_reward_ratio(self, ticker: str, similar_opps: List):
-        """计算风险收益比；**无历史可比时返回 None**。
+    def _calculate_risk_reward_ratio(self, ticker: str, expected_returns: Dict):
+        """风险收益比；**无历史可比时返回 None**。
 
         v0.45.50：旧实现无历史返回 **2.0**，而 `_generate_recommendation` 的
         STRONG BUY 闸正是 `prob >= 70 and rr >= 2.0` —— 「一次历史比对都没做成」
         恰好卡在阈值上通过，于是缺数据不但不降级，反而让评级门槛自动满足。
-        `avg_loss == 0` 那条返回 3.0 更宽。
 
-        报告里的 rationale 会逐字印成「风险收益比 {rr}:1」，读者无法与真实
-        测算结果区分。现在改为 None，由调用方显式走「不可得」路径。
+        v0.45.132：来源改为 HistoricalAnalyzer 在同标的 + 同方向真实 T+7 样本上
+        算出的 `risk_reward.ratio`（方向口径的平均盈利 / 平均亏损）。退回不分方向
+        或没有方向时该项不存在 → None；样本里没有亏损单也是 None（那是样本太少的
+        症状，不是「风险收益比 ∞」）。
         """
-        if not similar_opps:
-            _log.debug("[%s] 无历史相似机会，风险收益比不可得（不以 2.0 冒充）", ticker)
+        if not isinstance(expected_returns, dict):
             return None
-
-        avg_gain = statistics.mean([s["gain_7d_pct"] for s in similar_opps])
-        avg_loss = abs(statistics.mean([s["max_drawdown_pct"] for s in similar_opps]))
-
-        if avg_loss == 0:
-            # 历史样本里一次回撤都没有 —— 这是样本太少的症状，不是「风险收益比 3:1」
-            _log.debug("[%s] 历史样本平均回撤为 0（n=%d），风险收益比不可得",
-                       ticker, len(similar_opps))
+        rr = (expected_returns.get("risk_reward") or {}).get("ratio")
+        if not isinstance(rr, (int, float)) or isinstance(rr, bool) or not math.isfinite(rr):
+            _log.debug("[%s] 风险收益比不可得（basis=%s, n=%s），不以常数冒充",
+                       ticker, (expected_returns or {}).get("basis"),
+                       (expected_returns or {}).get("sample_size"))
             return None
-
-        return round(avg_gain / avg_loss, 2)
+        return rr
 
     def _generate_recommendation(
         self, ticker: str, analysis: Dict, crowding: float, price: float
@@ -1098,19 +1096,15 @@ if __name__ == "__main__":
                         f"      3 日收益：{opp['gain_3d_pct']}% | 7 日收益：{opp['gain_7d_pct']}% | 30 日收益：{opp['gain_30d_pct']}%"
                     )
 
-            # 收益预期
+            # 收益预期（v0.45.132：只有 T+7 真实分布，没有 3 天 / 30 天）
             er = ha.get("expected_returns", {})
-            if er.get("sample_size", 0) > 0:
-                print(f"\n💰 预期收益（基于 {er['sample_size']} 次类似机会）：")
-                print(
-                    f"   3 天：{er['expected_3d']['mean']}% (中位: {er['expected_3d']['median']}%)"
-                )
-                print(
-                    f"   7 天：{er['expected_7d']['mean']}% (中位: {er['expected_7d']['median']}%)"
-                )
-                print(
-                    f"   30天：{er['expected_30d']['mean']}% (中位: {er['expected_30d']['median']}%)"
-                )
+            e7 = er.get("expected_7d")
+            if e7:
+                print(f"\n💰 T+7 收益分布（{er.get('basis')}，n={er['sample_size']}）：")
+                print(f"   均值 {e7['mean']}% | 中位 {e7['median']}% | "
+                      f"P10 {e7['p10']}% | P90 {e7['p90']}%")
+            else:
+                print(f"\n💰 T+7 收益分布不可得：{er.get('note') or er.get('db_status')}")
 
             # 概率
             pa = analysis.get("probability_analysis", {})

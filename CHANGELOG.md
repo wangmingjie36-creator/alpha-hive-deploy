@@ -75,7 +75,82 @@ fixture**，豁免分支里写 `return` 而不是 `yield; return` 会让 pytest 
 `-m "not network"` 摘掉它们，照样全绿**。这条回归只有本地跑得到。
 
 
-## [0.45.132] — 2026-09-06 — 占位（进行中：ML 深度报告第五章情景推演改读 pheromone.db 真实 T+7 结果分布，删除 advanced_analyzer 的 6 条手写历史库）
+## [0.45.132] — 2026-09-06 — ML 深度报告第 5 章情景推演改读 pheromone.db 真实 T+7 分布；删 6 条手写「历史库」
+
+零世代边界代价：`historical_analysis` 只进展示层、MCP 与评级文案，不进 `predictions` 表、不进 IC。
+
+### 为什么第 5 章一直「不可用」（2026-09-06 查明）
+
+- 网站 ML 深度报告自 v0.45.54（08-27）起第 5 章几乎全部显示「情景推演不可用：缺少最大涨幅、7日期望、最大回撤」。
+  那条守卫是对的——它拦下的是四个写死常量（+20%/+5%/−5%/−15%，期望价永远 ≈ +4.7%）撑起的表。
+- 但守卫背后那份「历史同类信号收益分布」**从来不存在**：`advanced_analyzer.HistoricalAnalyzer`
+  是 **6 条手写记录**（NVDA 3 / VKTX 2 / TSLA 1，全是 2023 年财报、全是 beat，2026-02-24 落笔后
+  从未增补），按「拥挤度 ±10」匹配。30 只标的里 27 只**结构上永远缺失**。
+- 更糟的一层：拥挤度入参是 `social_messages_per_day`，**> 1000 时按标的换成常数**
+  （NVDA→63.5 / VKTX→44.1 / 其他→63.8），否则**把消息条数直接当百分比**。09-01 NVDA/TSLA
+  能「通过」，只因那天消息数破千 → 常数 63.5 恰好落在 2023 年两条记录的 ±10 窗口里；
+  09-04 没破千 → 原始条数当拥挤度 → 窗口外 → 不可用。即便「可用」也是一个常数去撞两年半前的三条手写记录。
+- 同期 `pheromone.db.predictions` 已有 **937 条**核对过 T+7 收盘的真实预测，覆盖 52 只标的，主力票每只 70 条上下。
+
+### Changed — `advanced_analyzer.py`
+
+- `HistoricalAnalyzer` 整体重写：只读连接 `pheromone.db`，样本 = 同标的 + 同方向（蜂群当日 `direction`）
+  的历史预测及其 T+7 真实收盘。收益口径 **`close_t7 / price_at_predict − 1`**（v0.45.87 干净口径；
+  **不读 `return_t7`**——它对 SL/TP 方向单是钳位离场收益）。
+- 分层：同方向 ≥ `MIN_SAMPLE=20` → `basis="same_direction"`；不足则退回同标的不分方向
+  （`basis="any_direction"`）；仍不足 → **不返回 `expected_7d`**，只返回 `sample_size` / `same_direction_n` /
+  `any_direction_n` / `note`。`db_status`（ok / empty / missing / error）随结果带出，看报告的人分得清「没库」与「没样本」。
+- `expected_7d` 从 `{mean, median, min, max}` 扩成含 `p10/p25/p75/p90/std`；同方向且有方向时另给
+  `hit_rate_pct` 与 `risk_reward{avg_gain_pct, avg_loss_pct, ratio}`（方向口径：看空以跌为盈）。
+- `generate_comprehensive_analysis(ticker, realtime_metrics, direction=None)` 新增 `direction`；
+  `_calculate_risk_reward_ratio(ticker, expected_returns)` 改读上面的 `risk_reward.ratio`
+  （仍是 None 即不达标；bool / NaN / ±inf / 非 dict 一律 None）；`calculate_optimal_holding_time`
+  在样本没有 3d/30d 收益时诚实返回「只有 T+7 结果，无法比较持仓期」而不是拿 7 天冒充最优。
+- 坏行（`price_at_predict` / `close_t7` 非法）计入 `skipped_rows` 并打 warning——「谁会红」。
+
+### Changed — `generate_ml_report.py`
+
+- `_ch5_scenarios` 五行 = 该标的 T+7 真实收益分布的 **P10 / P25 / P50 / P75 / P90**，期望价 = 样本均值；
+  「概率」列是累计分位的定义本身，**不再有 25%/45%/20%/10% 这组写死的概率**，也没有那行
+  「Σ(概率 × 情景价格)」。表下注明依据：`同标的、同方向（bullish）的 59 次蜂群预测 … 2026-03-09 ~ 2026-08-26，
+  方向命中率 50.8%；口径 close_t7 / price_at_predict − 1`，并声明「分位数是历史频率，不是对本次的预测」。
+- 不可用时把原因与样本数说出来（`样本不足：CRM 同方向 4 / 不分方向 8，低于 20`），不再只列缺失字段名。
+- `generate_ml_enhanced_report(..., swarm_direction=None)` → `generate_comprehensive_analysis(direction=…)`；
+  主流程从 `swarm_data[ticker]["direction"]` 取值传入。
+
+### Removed
+
+- `advanced_analyzer.HistoricalOpportunity` 数据类与那 6 条手写记录；`find_similar_opportunities` 的拥挤度匹配。
+
+### 实测（2026-09-04 蜂群方向 × 当前库）
+
+| 层 | 标的 |
+|---|---|
+| 同方向 ≥ 20 | NVDA(59) / META(37) / RKLB(30) / BILI(22) |
+| 退回不分方向 | AMZN / CRCL / MSFT / QCOM / TSLA / VKTX（同方向 10–19 条） |
+| 样本不足 | 其余 20 只（08-25 才进名单，每只 7–9 条；按当前节奏约 3 周后陆续过 20） |
+
+NVDA 09-04 示例：P10 −5.7% / P50 +0.0% / P90 +10.1%，均值 +1.4%，59 次同方向命中率 50.8%——
+与「final_score IC≈0」的已知事实一致，表格现在**说的是真话**。
+
+### 测试
+
+- 新增 `tests/test_ch5_real_distribution.py`（27 条）：读库 / 口径 / 分层边界成对（20 过、19 退）/ 线性插值分位数 /
+  看空翻号 / 渲染五行与文案 / 手写库残留静态守卫 / 接线（AST 核 `direction=` 实参 + 主流程字面量）。
+- `tests/test_deep_report_no_fabrication.py::TestScenarioTable` 改到新形状（仍守「退化输入不得渲染出 $104.75/$120.00」）；
+  `tests/test_degraded_input_harness.py` 的 rr 闸用例改新入参并加旧形状不崩。
+- 变异 7 个全红（M1 读 return_t7 / M2 阈值 `>=`→`>` / M3 看空不翻号 / M4 主流程不传 direction /
+  M5 不分方向也印命中率 / M6 rr 闸只判 None——首轮全绿，补 bool/NaN/inf 用例后红 / M7 坏行不计数）。
+- socket + curl_cffi 双层探针（canary 先自证）：两个测试文件断网 47 条全过、拦截 0 次。
+  ⚠️ 第一版接线测试拦到 **4 次**——`generate_comprehensive_analysis` 第 5 步会 new 一个 `OptionsAgent` 真打 CBOE，
+  已在测试里关 `OPTIONS_AGENT_AVAILABLE`；「这个测试是离线的」又一次是靠探针而不是靠 docstring 证明的。
+
+### 遗留（本版不动，记在这）
+
+- `generate_comprehensive_analysis` 里「消息数 > 1000 → 常数拥挤度 / 否则把消息条数当百分比」仍在，
+  它现在只喂 `calculate_win_probability`（base 0.55 + 常数调整）与 `_estimate_expected_gain`
+  （NVDA 15 / VKTX 25 / 其他 12 的写死基数）——**概率与止盈那两节是同一物种**，该另开一版处理。
+- `generate_deep_v2` 的历史对标卡片读 `gain_30d_pct` / `max_drawdown_pct` 默认 0——该路径自 2026-07-29 起没跑过，未改。
 
 ## [0.45.131] — 2026-09-06 — 测试套件会真往 #alpha-hive 发 Slack 告警：在测试里 `new` 一个通知器对象＝一次对外动作
 
