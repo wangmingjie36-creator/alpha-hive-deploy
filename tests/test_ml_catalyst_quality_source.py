@@ -62,6 +62,12 @@ def _gen():
     return MLEnhancedReportGenerator.__new__(MLEnhancedReportGenerator)
 
 
+def _real_ledger_size():
+    """真实概率账本的字节数；不存在记 -1。用于自证测试没碰生产状态。"""
+    led = REPO / "probability_scorecard_state" / "published.jsonl"
+    return led.stat().st_size if led.exists() else -1
+
+
 def _metrics():
     return {"ticker": "XOM",
             "sources": {"yahoo_finance": {"current_price": 110.0,
@@ -153,6 +159,21 @@ class TestParamThreadsThrough:
     """
 
     def _wire(self, monkeypatch, captured):
+        # ⚠️ 走完整条链就会碰到链上的副作用：v0.45.134 起
+        # `generate_ml_enhanced_report` 会往**真实**的
+        # `probability_scorecard_state/published.jsonl` 落一行账。本测试第一版
+        # 就真写进去了一条 XOM——同 v0.45.131「在测试里 new 一个通知器对象＝
+        # 一次对外动作」。穿透测试的价值来自完整，隔离必须显式做。
+        #
+        # 打 **源模块**的属性（不是消费方模块的）——被测代码是函数内
+        # `from probability_scorecard import record_published`，调用时才求值源
+        # 模块属性，所以打得中；实测确认过。反过来打消费方模块打不中
+        # （MEMORY v0.45.72 记的正是那个方向）。
+        import probability_scorecard as _ps
+        ledger = []
+        monkeypatch.setattr(_ps, "record_published",
+                            lambda **kw: ledger.append(kw) or True)
+        self._ledger = ledger
         gen = _gen()
 
         class _Analyzer:
@@ -170,6 +191,7 @@ class TestParamThreadsThrough:
         return gen
 
     def test_dimension_scores_reach_the_model_input(self, monkeypatch):
+        before = _real_ledger_size()
         captured = []
         gen = self._wire(monkeypatch, captured)
         gen.generate_ml_enhanced_report(
@@ -178,6 +200,9 @@ class TestParamThreadsThrough:
         assert captured, "predict_for_opportunity 未被调用"
         assert captured[0].catalyst_quality == "A+", (
             f"催化剂分 8.6 应穿透成 A+，实得 {captured[0].catalyst_quality}")
+        # 隔离自证：桩确实截住了，真账本一个字节没长
+        assert self._ledger, "record_published 未被调用——桩没打中，隔离结论不成立"
+        assert _real_ledger_size() == before, "测试写进了真实的 published.jsonl"
 
     def test_omitting_the_param_degrades_honestly(self, monkeypatch):
         """不传时不得崩，且必须标为缺失（旧调用方式仍可用）。"""

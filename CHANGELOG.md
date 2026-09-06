@@ -182,6 +182,22 @@ TypeError，藏住它的正是「所有测试都直接调被调函数」。新�
 - ruff：新测试文件 clean；`generate_ml_report.py` 剩的 2 个 error（E401/E731，
   line 2638/2648）已用 `git show HEAD:` 对照确认是改动前就有的
 
+### 自造并修掉的一处：穿透测试写进了真实概率账本
+
+`TestParamThreadsThrough` 走完整条链，于是碰到了链上的副作用——v0.45.134 起
+`generate_ml_enhanced_report` 会往**真实**的
+`probability_scorecard_state/published.jsonl` 落一行账。第一版测试真写进去了一条
+XOM，同 v0.45.131「在测试里 `new` 一个通知器对象＝一次对外动作」。
+
+**穿透测试的价值来自完整，隔离就必须显式做**，两者是同一枚硬币。已 monkeypatch
+**源模块** `probability_scorecard.record_published`——被测代码是函数内
+`from probability_scorecard import record_published`，调用时才求值源模块属性，
+**打得中**；反过来打消费方模块打不中（MEMORY v0.45.72 记的正是那个方向，
+两个方向结论相反，已实测区分而非照搬）。
+
+隔离本身**反向自证**过：拆掉桩 → `test_dimension_scores_reach_the_model_input`
+变红。断言也成对——桩被调用过（否则隔离结论不成立）＋ 真账本字节数没变。
+
 ### 未修（已登记为独立任务）
 
 `_prepare_ml_input` 里 `self._swarm_cache` **全仓从未被赋值**（AST 实测：赋值点 0、
