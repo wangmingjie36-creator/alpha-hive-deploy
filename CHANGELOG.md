@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.138] — 2026-09-06 — 占位（进行中：概率两个口径分列——hit_rate_pct 仅作历史描述，新增 forward_estimate_pct（池化基准率 + Wilson 区间）供评级与融合使用；承接 v0.45.134 记分卡实测：分票频率配对 t=+2.12 显著劣于池化）
+
 ## [0.45.137] — 2026-09-06 — 占位（进行中：修 generate_ml_report 死读者 `self._swarm_cache`，volatility/market_sentiment 两个 ML 特征恒走 fallback）
 
 ## [0.45.136] — 2026-09-06 — 还债：10 个模块逐个补显式源桩，`_KNOWN_NETWORK_REACHERS` 清空
