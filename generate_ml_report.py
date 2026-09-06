@@ -605,15 +605,36 @@ class MLEnhancedReportGenerator:
     def _combine_recommendations(
         self, advanced_analysis: dict, ml_prediction: dict
     ) -> dict:
-        """合并人工和 ML 推荐"""
+        """合并历史命中率与 ML 预测。
 
-        human_prob = advanced_analysis.get("probability_analysis", {}).get(
-            "win_probability_pct", 50
-        )
+        v0.45.134：第一项从 `win_probability_pct`（常数）换成 `hit_rate_pct`
+        （同标的同方向历史 T+7 命中率）。
+
+        旧口径为什么必须换：那一项在生产 803 份报告里 **81% 恒等于 65.0**，
+        于是 `combined = 0.7×65 + 0.3×ml` 把 ML 的 0~100 全程压进 **[47.0, 74.0]**
+        这 27 个点里——触发 AVOID 需 ML<15.0%、触发 STRONG BUY 需 ML>98.3%
+        （803 份里 STRONG BUY 只出现过 3 次）。评级实际退化成 ml_prob 的阈值重标记。
+
+        ⚠️ 0.7 / 0.3 这组权重与下面 75/65/50 三道闸，都是从常数量表继承下来的，
+        **没有任何验证**。本次只换来源、不动判据（换来源与改判据不该挤在同一次
+        改动里）。命中率不可得时**不拿默认值顶替**——那正是旧实现 `, 50)` 的错，
+        50 恰好卡在 HOLD 闸上；改为退化成「只看 ML」，并在 reasoning 里说明。
+        """
+        _pa = advanced_analysis.get("probability_analysis") or {}
+        hit_rate = _pa.get("hit_rate_pct")
+        _hr_known = (isinstance(hit_rate, (int, float)) and not isinstance(hit_rate, bool)
+                     and math.isfinite(hit_rate))
         ml_prob = ml_prediction.get("prediction", {}).get("probability", 0.5) * 100
 
-        # 加权平均（70% 高级分析 + 30% ML）
-        combined_prob = human_prob * 0.7 + ml_prob * 0.3
+        if _hr_known:
+            combined_prob = hit_rate * 0.7 + ml_prob * 0.3
+            _reasoning = (f"同方向历史 T+7 命中率 {hit_rate:.1f}%"
+                          f"（n={_pa.get('sample_size')}, basis={_pa.get('basis')}）× 0.7"
+                          f" + ML 预测 {ml_prob:.1f}% × 0.3 = 综合 {combined_prob:.1f}%")
+        else:
+            combined_prob = ml_prob
+            _reasoning = (f"无同方向历史可比样本（n={_pa.get('sample_size')}），"
+                          f"综合分退化为纯 ML 预测 {ml_prob:.1f}%")
 
         # 生成最终建议
         if combined_prob >= 75:
@@ -630,13 +651,18 @@ class MLEnhancedReportGenerator:
             action = "回避或减仓"
 
         return {
-            "human_probability": round(human_prob, 1),
+            # v0.45.134：`human_probability` 这个名字随字段一起退休——它从来不是
+            # 「人工分析」，是一条 base 0.55 加常数的公式。不可得时保持 None。
+            "hit_rate_pct": round(hit_rate, 1) if _hr_known else None,
+            "hit_rate_basis": _pa.get("basis"),
+            "hit_rate_sample_size": _pa.get("sample_size"),
             "ml_probability": round(ml_prob, 1),
             "combined_probability": round(combined_prob, 1),
+            "combined_basis": "hit_rate*0.7+ml*0.3" if _hr_known else "ml_only",
             "rating": rating,
             "action": action,
             "confidence": f"{combined_prob:.1f}%",
-            "reasoning": f"人工分析 {human_prob:.1f}% + ML 预测 {ml_prob:.1f}% = 综合 {combined_prob:.1f}%",
+            "reasoning": _reasoning,
         }
 
     # ─────────────────────────────────────────────────────────────
@@ -1967,7 +1993,10 @@ class MLEnhancedReportGenerator:
         ch7          = self._ch7_tasks(agent_details, options)
 
         # ── 折叠详情区（止损 / 止盈 / 期权 / ML 特征）──────────────
-        win_prob    = prob.get('win_probability_pct', 50)
+        # v0.45.134：换成历史命中率；**不可得时是 None，不是 50**
+        # （旧默认 50 与 v0.45.50 修掉的 rr 默认 1.5/2.0 同型：卡在闸上的「不知道」）
+        _hr = prob.get('hit_rate_pct')
+        win_prob = _hr if isinstance(_hr, (int, float)) and not isinstance(_hr, bool) else None
         # v0.45.54：1.00 的 R:R 是一个明确的（很差的）交易结论，不是「不知道」。
         # 上游 _calculate_risk_reward_ratio 现已在无历史时返回 None（v0.45.50）。
         _rr = prob.get('risk_reward_ratio')
@@ -1976,9 +2005,15 @@ class MLEnhancedReportGenerator:
         # ⚠️ 预先算好 —— 不在下面的 f-string 里放条件逻辑（v0.45.50/53 各犯过一次）
         _rr_txt = f"{risk_reward:.2f}" if risk_reward is not None else "未知"
         _mlp_txt = f"{ml_prob_val:.1f}%" if ml_prob_val is not None else "未知"
+        _hr_txt = (f"{win_prob:.1f}%（n={prob.get('sample_size')},"
+                   f" basis={prob.get('basis')}）"
+                   if win_prob is not None else "不可得（无同方向历史可比样本）")
         position    = analysis.get('position_management', {})
         stop_loss   = position.get('stop_loss', {})
-        take_profit = position.get('take_profit', {})
+        # v0.45.134：分布不可得时上游给 None（不是 {}）。`or {}` 会把它悄悄
+        # 变成「有这一节、只是空的」——那正是 v0.45.114「跳过缺失项＝把缺失
+        # 渲染成不存在」的形状。这里保留 None 并在下面显式渲染「不可得」。
+        take_profit = position.get('take_profit')
         holding     = position.get('optimal_holding_time', '')
 
         sl_rows = ""
@@ -1995,16 +2030,20 @@ class MLEnhancedReportGenerator:
         tp_rows = ""
         if isinstance(take_profit, dict):
             for k, v in take_profit.items():
-                if isinstance(v, dict):
-                    tp_rows += (f"<tr><td>{k}</td><td>${v.get('price',0):.2f}</td>"
-                                f"<td>+{v.get('gain_pct',0):.0f}%</td>"
-                                f"<td>{v.get('sell_ratio',0):.0%} | {v.get('reason','')}</td></tr>")
-                elif isinstance(v, (int, float)):
-                    tp_rows += f"<tr><td>{k}</td><td>${v:.2f}</td><td></td><td></td></tr>"
-        elif isinstance(take_profit, list):
-            for item in take_profit:
-                if isinstance(item, dict):
-                    tp_rows += f"<tr><td>{item.get('level','')}</td><td>${item.get('price',0):.2f}</td><td></td><td></td></tr>"
+                if not isinstance(v, dict):
+                    continue
+                # 两列不同口径，别混：价格变动（可为负）与按方向折算的盈利。
+                # 空头的价格变动为负正是它在赚钱 —— 只印一个数必然误导一半的行。
+                _g = v.get('gain_pct')
+                _pf = v.get('profit_pct')
+                _g_txt = f"{_g:+.1f}%" if isinstance(_g, (int, float)) else "—"
+                _pf_txt = f"{_pf:+.1f}%" if isinstance(_pf, (int, float)) else "—"
+                tp_rows += (f"<tr><td>{k}</td><td>${v.get('price',0):.2f}</td>"
+                            f"<td>{_g_txt}</td><td>{_pf_txt}</td>"
+                            f"<td>{v.get('sell_ratio',0):.0%} | {v.get('reason','')}</td></tr>")
+        elif take_profit is None:
+            tp_rows = ('<tr><td colspan="5">不可得：无同标的同方向的历史 T+7 '
+                       '收益分布（或方向为中性）</td></tr>')
 
         holding_txt = ""
         if holding:
@@ -2017,7 +2056,7 @@ class MLEnhancedReportGenerator:
                 <div class="grid-2">
                     <div><h3 style="color:var(--bear);">止损位</h3><table>{sl_rows}</table></div>
                     <div><h3 style="color:var(--bull);">止盈位</h3>
-                        <table><tr><th>档位</th><th>价格</th><th>涨幅</th><th>操作</th></tr>{tp_rows}</table>
+                        <table><tr><th>档位</th><th>价格</th><th>价格变动</th><th>盈利</th><th>操作</th></tr>{tp_rows}</table>
                     </div>
                 </div>
                 {holding_txt}
@@ -2542,14 +2581,14 @@ def main():
                         "probability_analysis", {}) or {}
                     # v0.45.54：`or 0` 把「不可得」与「真实的 0」混为一谈；
                     # 该结构只用于记录被禁用的加成，保留 None 更诚实。
-                    _wp = _prob.get("win_probability_pct")
+                    _wp = _prob.get("hit_rate_pct")   # v0.45.134 改名
                     _win = float(_wp) if isinstance(_wp, (int, float)) else None
                     _rrv = _prob.get("risk_reward_ratio")
                     _rr = float(_rrv) if isinstance(_rrv, (int, float)) else None
                     enhanced_report["swarm_results"]["probability_boost"] = {
                         "applied": False,
                         "disabled": True,
-                        "win_probability_pct": _win,
+                        "hit_rate_pct": _win,
                         "risk_reward_ratio": _rr,
                         "reason": "v0.16.0 已禁用: probability_analysis 数据源不可靠 (sample_size<5, 启发式 win_prob)",
                     }
