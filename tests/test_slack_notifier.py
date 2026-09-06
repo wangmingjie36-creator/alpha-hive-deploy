@@ -219,3 +219,59 @@ class TestRetryQueue:
 
     def test_empty_queue_returns_zero(self, notifier):
         assert notifier.retry_failed() == 0
+
+
+# ==================== conftest._block_slack 的反向自证 ====================
+
+class TestTestsCanNeverReachSlack:
+    """三道闸的自证：任何一道被摘掉，这里就红（v0.45.131）。
+
+    ⚠️ 本类**刻意不带** `TestSlackReportNotifierInit._no_disk_creds` 那个
+    类级 fixture —— 那个 fixture 自己也把 `_read_user_token` 打成 None，
+    带上它就会把闸①的效果掩盖掉，这条自证会退化成永真。
+    """
+
+    def test_production_credentials_are_never_used(self):
+        """闸①：测试里读到的 user_token 恒为 None，不碰你 Mac 上的真 token。"""
+        from slack_report_notifier import SlackReportNotifier
+        n = SlackReportNotifier()
+        assert n._read_user_token() is None
+
+    def test_construction_does_not_probe_the_webhook(self):
+        """闸②：构造时那次 requests.head 被换成常量 False。"""
+        from slack_report_notifier import SlackReportNotifier
+        assert SlackReportNotifier._check_webhook_alive(
+            "https://hooks.slack.com/services/T/B/x") is False
+
+    def test_notifier_is_disabled_in_tests(self):
+        """①②合起来的效果：enabled 恒 False，发送在守卫处就短路。
+
+        这一条才是真正拦住事故的那句 —— `_try_src_slack_alert` 里的
+        `if getattr(n, "enabled", False)`。
+        """
+        from slack_report_notifier import SlackReportNotifier
+        assert SlackReportNotifier().enabled is False
+
+    def test_slack_session_is_the_recorder_not_the_real_one(self):
+        """闸③：两个模块的 get_session 都已被换掉。
+
+        只比对象身份、不实际调用 —— 调用会记进 attempts 让 teardown 断言变红。
+        """
+        import resilience
+        import slack_notifier
+        import slack_report_notifier
+        for mod in (slack_report_notifier, slack_notifier):
+            assert mod.get_session is not resilience.get_session, mod.__name__
+
+    def test_the_original_accident_path_sends_nothing(self, monkeypatch):
+        """端到端回归：v0.45.131 事故的那条链路，走完不产生任何 Slack 调用。
+
+        `_record_src_failure` 连续失败达阈值 → `_try_src_slack_alert`。
+        若闸失效，teardown 的 attempts 断言会带着 URL 变红。
+        """
+        import real_data_sources as r
+        monkeypatch.setattr(r, "_src_fail_counts", {}, raising=False)
+        monkeypatch.setattr(r, "_src_degraded", {}, raising=False)
+        for _ in range(r._HEALTH_FAIL_THRESHOLD):
+            r._record_src_failure("yfinance_short_interest")
+        assert r._src_degraded.get("yfinance_short_interest") is True

@@ -85,6 +85,91 @@ def _block_same_day_macro(monkeypatch):
     monkeypatch.setattr(twelve_data, "api_key", lambda: "")
 
 
+# ==================== 禁止测试碰 Slack ====================
+
+@pytest.fixture(autouse=True)
+def _block_slack(monkeypatch):
+    """禁止任何测试使用生产 Slack 凭证、出网、或真的发消息（v0.45.131）。
+
+    事故：双层出网探针（socket + curl_cffi）实测发现
+    `test_instrument_integrity.py::TestSourceHealthTracking::
+    test_three_empty_responses_trigger_alert` 会**真的往 #alpha-hive
+    （C0AGUUWJXJS）发一条「数据源降级」告警**——
+
+        _record_src_failure → _try_src_slack_alert → SlackReportNotifier()
+          ├ __init__ 里 requests.head(真 webhook)                  ← 出网
+          └ enabled = bool(user_token)，而本机 user_token 解析得到 59 字符
+             → send_risk_alert → _send_slack_message
+             → get_session("slack").post(chat.postMessage)         ← 真发送
+
+    `test_utilities.py::TestSlackWebhookEnvVar::test_report_notifier_env_var`
+    是同一根因的轻症版（只走到 head）。而这类告警本就被 CLAUDE.md 的
+    「Slack 通知精简规则」明令禁止发送。**在测试里 `new` 一个通知器对象
+    ＝一次对外动作**——这是本仓库此前没有覆盖到的一类副作用。
+
+    三道闸，各管一件事：
+
+      ① `_read_user_token → None`
+         测试永不使用**生产**凭证。要测 token 分支的测试自己 setattr 一个假
+         token（`test_slack_notifier.py` 已有 3 处这么写），后设的赢。
+      ② `_check_webhook_alive → False`
+         掐掉 `__init__` 里那次 `requests.head`。
+         ①② 合起来让 `enabled` 恒为 False，于是 `_try_src_slack_alert` 的
+         `if getattr(n, "enabled", False)` 守卫会在任何发送之前短路。
+      ③ `get_session` 换成记录器 —— 掐掉三处 `get_session("slack").post`，
+         并**兼作观测点**：teardown 断言没有任何测试试图发送。
+         没有③的话，将来谁把 `enabled` 又弄成 True，①②会静默失效而没人知道
+         （与本文件 `_isolate_paper_portfolio_state`「默认重绑 + teardown
+         核对真身」同构，也是 CLAUDE.md「这个失败，下游怎么知道？」那条）。
+
+    真要测发送的测试自己 `patch("slack_report_notifier.get_session")`
+    （现成 4 处这么写），会覆盖③，本 fixture 不改它们的语义。
+    """
+    import importlib
+
+    attempts = []
+
+    class _SlackSessionRecorder:
+        """任何 .post/.get 都记一笔并炸掉——不允许测试真的发出去。"""
+
+        def __getattr__(self, name):
+            def _call(*args, **kwargs):
+                url = args[0] if args else kwargs.get("url", "?")
+                attempts.append(f"{name} {str(url)[:90]}")
+                raise RuntimeError(
+                    "测试试图真的调用 Slack（conftest._block_slack 拦下）。"
+                    "要测发送请自行 patch('<模块>.get_session')。")
+            return _call
+
+    def _fake_get_session(*_a, **_k):
+        return _SlackSessionRecorder()
+
+    for mod_name in ("slack_report_notifier", "slack_notifier"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:  # pragma: no cover - 模块不可得时无需拦
+            continue
+        monkeypatch.setattr(mod, "get_session", _fake_get_session, raising=False)
+
+    try:
+        from slack_report_notifier import SlackReportNotifier
+    except Exception:  # pragma: no cover
+        pass
+    else:
+        monkeypatch.setattr(SlackReportNotifier, "_read_user_token",
+                            lambda self: None)
+        monkeypatch.setattr(SlackReportNotifier, "_check_webhook_alive",
+                            staticmethod(lambda url: False))
+
+    yield
+
+    assert not attempts, (
+        f"本条测试试图真的往 Slack 发消息：{sorted(set(attempts))}。"
+        "①② 两道闸本该让 enabled 恒为 False、在发送前就短路——"
+        "走到这里说明有测试把 enabled 又弄成了 True 而没有自己 patch "
+        "get_session。去那条测试里补 patch，不要在这里放行。")
+
+
 # ==================== weekly_optimizer 生产库隔离 ====================
 
 @pytest.fixture(autouse=True)
