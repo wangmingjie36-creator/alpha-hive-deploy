@@ -64,7 +64,7 @@ weekly_optimizer / self_analyst 里零消费者 ⇒ 不进 `predictions` 表、�
 
 ### 测试
 
-- 新 `tests/test_ml_input_final_score.py`（14 项）：合法值（含恰好 5.0 与 int）原样进特征且不上
+- 新 `tests/test_ml_input_final_score.py`（13 项；首版 CHANGELOG 误写 14，合并后 `--collect-only` 实数为 13）：合法值（含恰好 5.0 与 int）原样进特征且不上
   缺失表 ↔ None/NaN/bool/str 一律 None + 上榜（成对）；塞 `recommendation.score=9.9` 不许再影响
   特征；**训练/服务端到端同源**——同一份 swarm_results 经 `save_predictions` → 临时 predictions 表 →
   `build_training_data_from_db` 得到的 `final_score` 与服务端相等（走真实落库链而非比源码，

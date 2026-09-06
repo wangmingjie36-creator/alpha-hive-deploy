@@ -110,12 +110,13 @@ BLEND_GRID = tuple(i / 10 for i in range(11))
 #: 反过来，不要因此去动 `_COHORT_HISTORY`：`_prepare_ml_input` 的产物不进
 #: `predictions` 表（44 列实测无 ML 特征列），往那里加条目会白白作废几个月样本。
 _ML_ESTIMATOR_GENERATIONS = [
-    ("2026-09-06", "v0.45.137+v0.45.140",
+    ("2026-09-06", "v0.45.137+v0.45.140+v0.45.141",
      "服务端特征来源三批修复合并为一代（同日落地）："
      "① volatility / market_sentiment 由死读者 `self._swarm_cache`（全仓零赋值）"
      "改为蜂群 risk_adj / sentiment 维分派生；"
      "② odds_score / risk_adj_score / final_score 由 `advanced_analysis` 的两个"
-     "不存在的键（803/803 份实测缺失）改为蜂群维分与 `swarm_results.final_score`。"
+     "不存在的键（803/803 份实测缺失）改为蜂群维分与 `swarm_results.final_score`"
+     "（final_score 一支落在 v0.45.141，同日与 v0.45.140 合并）。"
      "两批合计：803 份重放 probability 变动 > 0.02 的样本分别占 52.4% 与 27.3%。"
      "此日之前的 `ml_probability` 由旧估计量产出，与之后不可比"),
 ]
