@@ -6,6 +6,8 @@
 import atexit
 import html as _html
 import json
+import math
+from typing import Optional
 import argparse
 from datetime import datetime
 from pathlib import Path
@@ -287,13 +289,17 @@ class MLEnhancedReportGenerator:
         self._file_writer_pool.submit(self._write_file_async, json_path, json_data, True)
 
     def generate_ml_enhanced_report(
-        self, ticker: str, realtime_metrics: dict
+        self, ticker: str, realtime_metrics: dict, swarm_direction: Optional[str] = None
     ) -> dict:
-        """生成 ML 增强的分析报告"""
+        """生成 ML 增强的分析报告
+
+        swarm_direction：蜂群当日方向，v0.45.132 起交给 AdvancedAnalyzer 做
+        「同标的 + 同方向」的历史回溯（第 5 章情景推演的样本条件）。
+        """
 
         # 获取高级分析
         advanced_analysis = self.analyzer.generate_comprehensive_analysis(
-            ticker, realtime_metrics
+            ticker, realtime_metrics, direction=swarm_direction
         )
 
         # 构建 ML 输入数据
@@ -1544,88 +1550,119 @@ class MLEnhancedReportGenerator:
             </table>
         </div>"""
 
+    # 第 5 章五个情景 = 同标的历史 T+7 收益分布的五个分位点（v0.45.132）。
+    # 「概率」列是累计频率的定义本身（P10 = 10% 的历史样本比它更差），不是拍的。
+    _CH5_QUANTILES = (
+        ("悲观", "p10", 10, "历史上 10% 的同类预测 T+7 更差"),
+        ("偏弱", "p25", 25, "下四分位"),
+        ("中位", "median", 50, "一半好于此、一半差于此"),
+        ("偏强", "p75", 75, "上四分位"),
+        ("乐观", "p90", 90, "历史上 10% 的同类预测 T+7 更好"),
+    )
+
     def _ch5_scenarios(self, analysis: dict, swarm: dict) -> str:
-        """第5章：情景推演（4场景 + 概率加权期望收益）"""
-        hist = analysis.get("historical_analysis", {})
-        exp = hist.get("expected_returns", {})
-        pos = analysis.get("position_management", {})
+        """第5章：情景推演——同标的历史预测的 T+7 真实收益分布
+
+        v0.45.132 之前：`historical_analysis.expected_returns` 来自 advanced_analyzer
+        里 6 条手写记录（NVDA/VKTX/TSLA，2023 年），27/30 只标的结构上永远缺失；
+        v0.45.54 起守卫把它渲染成「不可用」。现在数据源换成 pheromone.db 里蜂群
+        自己 900+ 条核对过 T+7 收盘的预测，本表五行是该标的（同方向，不足时
+        不分方向）真实收益分布的 P10/P25/P50/P75/P90，期望价 = 均值。
+        表里每个数都是观测到的频率，不再有 25%/45%/20%/10% 这种写死的概率。
+        """
+        hist = analysis.get("historical_analysis", {}) or {}
+        exp = hist.get("expected_returns", {}) or {}
+        e7 = exp.get("expected_7d") or {}
+        pos = analysis.get("position_management", {}) or {}
         sl = pos.get("stop_loss", {})
-        tp = pos.get("take_profit", {})
         # 当前价：从 agent_details 或 stop_loss 反推（防 None 污染）
         scout = swarm.get("agent_details", {}).get("ScoutBeeNova", {})
         curr_price = float(scout.get("details", {}).get("price") or 0) if scout else 0
         if not curr_price and isinstance(sl, dict):
             conservative = sl.get("conservative", 0)
             curr_price = conservative / 0.97 if conservative else 0
-        # ── v0.45.54：四个常量不许撑起一张带概率和公式的定量结论表 ──
-        # 旧实现：curr_price 兜底 100（"防零"）、gain_max or 20、gain_7d or 5、
-        # drawdown or -10 —— 四个都是写死的常量，却产出
-        #   「$120.00 / $105.00 / $95.00 / $85.00，概率加权期望价 $104.75，+4.75%」
-        # 外加一行公式展开「Σ(概率 × 情景价格) = 25%×$120 + …」。
-        # 这是全报告最像量化结论的部分，而每一个数字都是编的。
-        # 注意 `or` 比 `if is None` 更糟：真实的 0 收益也会被换成常量。
+
+        def _num(v):
+            return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
         _missing = []
         if not curr_price:
             _missing.append("现价")
-        for _name, _v in (("最大涨幅", exp.get("max_gain", {}).get("mean")),
-                          ("7日期望", exp.get("expected_7d", {}).get("mean")),
-                          ("最大回撤", exp.get("max_drawdown", {}).get("mean"))):
-            if not isinstance(_v, (int, float)) or isinstance(_v, bool):
-                _missing.append(_name)
+        if not e7:
+            _missing.append("T+7 收益分布")
+        else:
+            # 部分分位缺失 / 非有限数：逐项点名——「部分真实 + 部分常量」的表比全常量更难识破
+            for _label, _key, _, _ in self._CH5_QUANTILES:
+                if not _num(e7.get(_key)):
+                    _missing.append(f"T+7 {_label}分位")
+            if not _num(e7.get("mean")):
+                _missing.append("T+7 均值")
         if _missing:
-            _log.warning("[_ch5_scenarios] %s 不可得，跳过情景推演表"
-                         "（不以常量撑起带概率与公式的定量结论）", "、".join(_missing))
+            n_same = exp.get("same_direction_n")
+            n_any = exp.get("any_direction_n")
+            why = exp.get("note") or (
+                f"pheromone.db 状态 {exp.get('db_status')}" if exp.get("db_status") not in (None, "ok")
+                else "历史分布缺失"
+            )
+            _log.warning("[_ch5_scenarios] 情景推演不可得：%s（%s）", "、".join(_missing), why)
             return f"""
         <div class="section">
             <h2>第 5 章：情景推演</h2>
             <div style="padding:14px 16px;border:1px solid var(--border);border-radius:2px;
                         font-size:.9em;color:var(--tm);">
-                情景推演不可用：缺少 {', '.join(_missing)}。
-                本表依赖历史同类信号的收益分布，数据不足时不做推演 ——
+                情景推演不可用：{why}。缺少 {', '.join(_missing)}。<br>
+                本表依赖该标的历史蜂群预测的 T+7 真实收益分布
+                （同方向样本 {n_same if n_same is not None else '—'}，
+                不分方向 {n_any if n_any is not None else '—'}，
+                最低 {exp.get('min_sample', '—')}）；样本不足时不做推演 ——
                 以常量生成的目标价与期望收益无法与真实测算区分。
             </div>
         </div>"""
 
-        gain_max = exp["max_gain"]["mean"]
-        gain_7d = exp["expected_7d"]["mean"]
-        drawdown = exp["max_drawdown"]["mean"]
-        _dm = exp.get("max_drawdown", {}).get("min")
-        drawdown_min = _dm if isinstance(_dm, (int, float)) else drawdown * 1.5
-        # 4 场景
-        scenarios = [
-            ("强多", 25, curr_price * (1 + gain_max / 100), "催化剂超预期 + 出口管制缓和"),
-            ("温和多", 45, curr_price * (1 + gain_7d / 100), "催化剂符合预期，指引维持"),
-            ("震荡", 20, curr_price * (1 + drawdown / 200), "获利回吐，等待下一催化剂"),
-            ("回调", 10, curr_price * (1 + drawdown_min / 100), "政策恶化 或 竞品重大突破"),
-        ]
-        exp_price = sum(prob / 100 * price for _, prob, price, _ in scenarios)
-        exp_return = (exp_price - curr_price) / curr_price * 100 if curr_price else 0
-        exp_color = "var(--bull)" if exp_return > 0 else "var(--bear)"
-        rows = "".join(
-            f"""<tr>
-                <td>{icon}</td>
-                <td>{prob}%</td>
-                <td>${price:.2f}</td>
-                <td style="color:{'var(--bull)' if price>curr_price else 'var(--bear)'}">{(price-curr_price)/curr_price*100:+.1f}%</td>
-                <td style="font-size:0.85em;color:var(--ts)">{trigger}</td>
-            </tr>"""
-            for icon, prob, price, trigger in scenarios
+        n = exp.get("sample_size")
+        basis = exp.get("basis")
+        direction = exp.get("direction") or swarm.get("direction") or "—"
+        d0, d1 = (exp.get("date_range") or ["—", "—"])[:2]
+        basis_txt = (
+            f"同标的、同方向（{direction}）" if basis == "same_direction"
+            else f"同标的、不分方向（同方向 {direction} 仅 {exp.get('same_direction_n', 0)} 条，"
+                 f"不足 {exp.get('min_sample', '—')}）"
         )
+        rows = ""
+        for label, key, cum, note in self._CH5_QUANTILES:
+            r = e7[key]
+            price = curr_price * (1 + r / 100.0)
+            color = "var(--bull)" if r > 0 else ("var(--bear)" if r < 0 else "var(--tm)")
+            rows += f"""<tr>
+                <td>{label}</td>
+                <td>P{cum}</td>
+                <td>${price:.2f}</td>
+                <td style="color:{color}">{r:+.1f}%</td>
+                <td style="font-size:0.85em;color:var(--ts)">{note}</td>
+            </tr>"""
+        mean = e7["mean"]
+        exp_price = curr_price * (1 + mean / 100.0)
+        exp_color = "var(--bull)" if mean > 0 else ("var(--bear)" if mean < 0 else "var(--tm)")
+        hit = exp.get("hit_rate_pct")
+        # 命中率只在「同方向」口径下有定义；不分方向时即便上游带了也不印
+        hit_txt = f"，方向命中率 {hit:.1f}%" if basis == "same_direction" and _num(hit) else ""
         return f"""
         <div class="section">
             <h2>第 5 章：情景推演</h2>
             <table>
-                <tr><th>情景</th><th>概率</th><th>目标价</th><th>涨跌幅</th><th>触发条件</th></tr>
+                <tr><th>情景</th><th>累计分位</th><th>T+7 价格</th><th>涨跌幅</th><th>含义</th></tr>
                 {rows}
                 <tr style="background:var(--surface2);font-weight:bold;">
-                    <td colspan="2">概率加权期望价格</td>
+                    <td colspan="2">样本均值期望价</td>
                     <td style="color:{exp_color}">${exp_price:.2f}</td>
-                    <td style="color:{exp_color}">{exp_return:+.1f}%</td>
+                    <td style="color:{exp_color}">{mean:+.1f}%</td>
                     <td>from ${curr_price:.2f}</td>
                 </tr>
             </table>
             <p style="margin-top:10px;font-size:0.85em;color:var(--tm);">
-                期望价格 = Σ(概率 × 情景价格) = {' + '.join(f'{p}%×${pr:.0f}' for _,p,pr,_ in scenarios)} = <strong style="color:{exp_color}">${exp_price:.2f}</strong>
+                依据：pheromone.db 中 {basis_txt} 的 {n} 次蜂群预测，T+7 真实收盘收益分布
+                （{d0} ~ {d1}{hit_txt}；口径 {exp.get('return_basis', '—')}）。
+                分位数是历史频率，不是对本次的预测；样本跨度内的市场环境与当下未必相同。
             </p>
         </div>"""
 
@@ -2474,7 +2511,8 @@ def main():
 
             # 生成分析
             enhanced_report = report_gen.generate_ml_enhanced_report(
-                ticker, ticker_data
+                ticker, ticker_data,
+                swarm_direction=(swarm_data.get(ticker) or {}).get("direction"),
             )
 
             # 注入蜂群数据到报告
