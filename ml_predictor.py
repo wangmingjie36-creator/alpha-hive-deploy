@@ -247,6 +247,53 @@ def catalyst_quality_from_score(score) -> str:
             return grade
     return "C"
 
+
+# ── ML 特征 volatility / market_sentiment 的唯一口径（v0.45.137）──────────
+#
+# 这两个槽的**训练**值一直由 `build_training_data_from_db` 从蜂群维度分派生，
+# 而**服务**端（`generate_ml_report._prepare_ml_input`）读的是一个从未被赋值过
+# 的 `self._swarm_cache`，于是恒为常数 5.0 / 0.0（803 份生产 JSON 实测 802 份
+# 如此）。提为模块级函数是为了让两端**调同一个函数**，而不是各抄一份常数——
+# 同 v0.44.3 对 `catalyst_quality_from_score` 的处理。
+#
+# ⚠️ 名实不符，且**本版不修**：`volatility` 槽里装的不是波动率，是 risk_adj 的
+# 反转代理。真实年化波动率（BuzzBee `volatility_20d`，中位 39.66）与本口径
+# （中位 11.65）Spearman ρ=+0.068、scale 差约 4×，**不能**直接接进来——那会用
+# A 训练、拿 B 服务。要真的喂波动率，得先让 `predictions` 表带上波动率列并前向
+# 累积，属世代边界范畴（`ic_rerun_readiness._COHORT_HISTORY`）。
+
+# risk_adj 满分（10）时的下限。低于 1.0 的"波动率"在本坐标系里没有意义。
+_VOLATILITY_FLOOR = 1.0
+# 维度分是 0~10、中性 5；两个尺度因子决定派生值域：
+#   volatility       → [1.0, 25.0]，训练实测 [1.00, 19.40]
+#   market_sentiment → [-100, 100]，训练实测 [-46.8, 62.0]
+_VOLATILITY_PER_POINT = 2.5
+_SENTIMENT_PER_POINT = 20.0
+_DIMENSION_NEUTRAL = 5.0
+_DIMENSION_MAX = 10.0
+
+
+def volatility_from_risk_adj(risk_adj: float) -> float:
+    """蜂群 risk_adj 维度分（0~10）→ ML `volatility` 特征。
+
+    风控分越低 = 风险越高 = 波动越大，故取反转映射。
+    调用方必须**先**确认 `risk_adj` 是可用数值（非 None/NaN/bool）——
+    取不到时正确的做法是把特征标为缺失（`None`），不是喂一个中性值进来。
+    """
+    return max(_VOLATILITY_FLOOR,
+               (_DIMENSION_MAX - risk_adj) * _VOLATILITY_PER_POINT)
+
+
+def market_sentiment_from_score(sentiment: float) -> float:
+    """蜂群 sentiment 维度分（0~10，中性 5）→ ML `market_sentiment` 特征（-100~+100）。
+
+    ⚠️ 返回值**已经**归到 -100~+100。服务端旧代码在这一步之后还套了一层
+    「三段式量表自动识别」（`abs(x)<=1 → *100`、`abs(x)<=10 → *10`），
+    那是为来源不明的原始情绪分准备的；对本函数的输出再跑一遍会把接近中性的
+    值放大 10~100 倍（维分 5.2 → 4.0 → 40.0）。别加回去。
+    """
+    return (sentiment - _DIMENSION_NEUTRAL) * _SENTIMENT_PER_POINT
+
 # ── 拥挤度：**刻意不进入 expected_returns**（v0.44.2 决定）───────────────
 #
 # v0.44.1 曾把拥挤度做成双向倾斜项。v0.44.2 用现成的四口径工具
@@ -1171,7 +1218,10 @@ def build_training_data_from_db(
             _momentum = (_sig - 5.0) * 2.0 + (_sent - 5.0) * 1.5
 
             # volatility: risk_adj 低 → 高风险 → 高波动（反转映射）
-            _vol = max(1.0, (10.0 - _risk) * 2.5)
+            # v0.45.137：公式提为 `volatility_from_risk_adj`，与服务路径
+            # （`generate_ml_report._prepare_ml_input`）调**同一个函数**。
+            # 此前服务端读一个从未被赋值的 `self._swarm_cache`，恒得常数 5.0。
+            _vol = volatility_from_risk_adj(_risk)
 
             # iv_rank: 优先 DB 真实值，否则从 odds 维度推导
             try:
@@ -1194,7 +1244,7 @@ def build_training_data_from_db(
                 catalyst_quality=_cat_qual(_cat),
                 momentum_5d=round(_momentum, 2),
                 volatility=round(_vol, 2),
-                market_sentiment=(_sent - 5) * 20,
+                market_sentiment=market_sentiment_from_score(_sent),
                 actual_return_3d=return_t7 * 0.4,
                 actual_return_7d=return_t7,
                 actual_return_30d=return_t7 * 2.5,
