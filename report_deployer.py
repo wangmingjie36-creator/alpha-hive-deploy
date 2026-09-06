@@ -315,6 +315,10 @@ REPORT_ARTIFACT_PATHS: List[str] = [
     "hedge_state/",
     "options_paper_state/",
     "vrp_state/",
+    # v0.45.134：概率记分账本。装的是**当天真正印出去的那个概率**——
+    # 回溯记分能重算估计量，但重算不出「那天实际印的是什么」，
+    # 丢了无法回溯重取。与 paper_portfolio_state/ 同类。
+    "probability_scorecard_state/",
 ]
 
 #: 与上表对应的匹配规则（用于"哪些被跳过"的提示）
@@ -322,7 +326,8 @@ REPORT_ARTIFACT_PATHS: List[str] = [
 #:    （提示说被跳过、实际被提交，或反之）。tests/test_report_deployer_whitelist.py
 #:    有一条断言盯着这两处的一致性。
 _ARTIFACT_PREFIXES = ("report_snapshots/", "paper_portfolio_state/", ".factor_cache/",
-                      "hedge_state/", "options_paper_state/", "vrp_state/")
+                      "hedge_state/", "options_paper_state/", "vrp_state/",
+                      "probability_scorecard_state/")
 _ARTIFACT_GLOBS = (
     "alpha-hive-daily-*.json", "alpha-hive-daily-*.md", "alpha-hive-thread-*.txt",
     "alpha-hive-*-ml-enhanced-*.html", "analysis-*-ml-*.json",

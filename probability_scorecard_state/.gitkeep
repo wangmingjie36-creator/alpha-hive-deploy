@@ -1,0 +1,10 @@
+# 概率记分账本目录（v0.45.134 Step 3）
+#
+# 这里的 published.jsonl 记的是**每天真正印出去的那个概率**。
+# 目录必须被 git 跟踪，否则会重演 v0.45.111：新账本没进白名单 →
+# 每天被改、每天被自动提交跳过、永远挂在工作区 → 一次 git reset --hard 清零。
+#
+# 三件套（新增 *_state/ 必须同 PR 做齐）：
+#   ① git add（本文件）
+#   ② report_deployer.REPORT_ARTIFACT_PATHS
+#   ③ report_deployer._ARTIFACT_PREFIXES   ← 与 ② 必须同向，否则「跳过了哪些」的提示会说谎

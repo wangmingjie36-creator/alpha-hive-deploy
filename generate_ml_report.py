@@ -336,6 +336,30 @@ class MLEnhancedReportGenerator:
             },
         }
 
+        # ── 前向记分账本（v0.45.134 Step 3）────────────────────────────
+        # 记下**这一天真正印出去的**那个数。回溯记分（probability_scorecard
+        # --walk-forward）假设估计量是 DB 的纯函数，一旦换了估计量或补跑了历史
+        # 这个假设就破了；账本不受影响。
+        #
+        # ⚠️ 失败不阻断报告，但**必须留下会被看见的痕迹**——静默 except 会把
+        # 「账本一行没记」变成「没发生过」，那正是本项目 v0.45.91/119/121/124
+        # 反复踩的形状。故 WARNING 且计数。
+        try:
+            from probability_scorecard import record_published
+            _pa = advanced_analysis.get("probability_analysis") or {}
+            record_published(
+                report_date=self.timestamp.date().isoformat(),
+                ticker=ticker,
+                direction=swarm_direction,
+                hit_rate_pct=_pa.get("hit_rate_pct"),
+                basis=_pa.get("basis"),
+                sample_size=_pa.get("sample_size"),
+            )
+        except Exception as _led_err:   # noqa: BLE001 —— 记账失败不得阻断报告
+            self._ledger_failures = getattr(self, "_ledger_failures", 0) + 1
+            _log.warning("[%s] 概率账本写入失败（累计 %d 次）：%s",
+                         ticker, self._ledger_failures, _led_err)
+
         return enhanced_report
 
     def _prepare_ml_input(
