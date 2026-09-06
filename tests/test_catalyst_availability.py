@@ -14,6 +14,17 @@ import sys
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _offline_sources(stub_cboe_payload, stub_http_gate, stub_yfinance):
+    """本文件的取数支路显式钉死，不依赖 conftest 的传输层兜底（v0.45.136）。
+
+    走 data_pipeline.fetch_stock_data 的多源链：CBOE → yfinance → AlphaVantage/Finnhub
+    （后两个经 http_gate.urlopen_gated）。
+
+    桩的定义与各自的「取不到」契约见 tests/conftest.py 的可复用源桩一节。
+    """
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 

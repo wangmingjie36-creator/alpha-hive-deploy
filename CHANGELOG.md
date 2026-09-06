@@ -5,7 +5,74 @@
 
 ---
 
-## [0.45.136] — 2026-09-06 — 占位（进行中：还债——10 个模块逐个补显式源桩，清空 _KNOWN_NETWORK_REACHERS）
+## [0.45.136] — 2026-09-06 — 还债：10 个模块逐个补显式源桩，`_KNOWN_NETWORK_REACHERS` 清空
+
+v0.45.133 的传输层闸让整套测试**行为上**离线了，但那 10 个模块仍在调用数据源、
+只是被兜住——债务表记的就是这笔债。本版把它还清：每个模块声明自己钉死了哪几个源，
+确定性**由构造保证**，而不是靠一张网兜住。
+
+### Added — `tests/conftest.py`：6 个可复用源桩
+
+`stub_cboe_payload` / `stub_cboe_vix` / `stub_vixcentral` / `stub_reddit` /
+`stub_http_gate` / `stub_yfinance`。各模块按需 opt-in：
+
+    @pytest.fixture(autouse=True)
+    def _offline_sources(stub_cboe_payload, stub_yfinance):
+        """本文件会走 IV 期限结构与全链 OI 两条支路，显式钉死。"""
+
+⚠️ **每个桩的返回值都取该源自己文档承诺的「取不到」契约**，不是随手挑一个看着
+合理的值——挑出来的默认值会让下游误以为掌握了信息（v0.45.3 判据）。
+`_fetch_cboe_payload`→`None`（模块 docstring：「失败一律返回 None」）、
+`cboe_vix._download`→`None`（「不抛，让调用方走缓存」）、
+`_get_vx_futures`→`[]`、`_fetch_ranking`→`[]`（`requests is None` 分支）、
+`urlopen_gated`→抛（它是 urlopen 的串行化版本，失败就是抛）。
+
+⚠️ **`stub_yfinance` 的替身必须是 class 而不是函数**：`yf_gate.install()` 用
+`type("Ticker", (yfinance.Ticker,), ...)` 继承它，并 `isinstance(..., property)`
+判断哪些按 property 重建；换成函数会直接 TypeError。而 `yf_gate.ensure()` 散布在
+options_analyzer / fred_macro / dashboard_renderer / market_intelligence 四个热点
+函数入口，测试里随时会被调到。替身提供了闸会包的 3 个方法 + 4 个 property，
+外加 `__getattr__` 兜住 `fast_info` 之类。
+
+### Changed — 10 个测试模块各加一条 `_offline_sources`
+
+| 模块 | 钉死的源 |
+|---|---|
+| `test_iv_history` / `test_options_analyzer` | CBOE payload + yfinance |
+| `test_catalyst_availability` | CBOE payload + http_gate(AV/Finnhub) + yfinance |
+| `test_snapshot_price_derived_refresh` | yfinance（`fetch_historical_hv`） |
+| `test_iv_structure_guards` | yfinance（`calculate_iv_rv_spread` 失败路径） |
+| `test_score_dual_display` / `test_site_missing_fields` | yfinance（`dashboard_renderer._detail`） |
+| `test_rival_bee_peer_features` | yfinance + reddit |
+| `test_fred_macro` | cboe_vix + yfinance |
+| `test_macro_degradation` | yfinance + vixcentral |
+
+### Changed — `_KNOWN_NETWORK_REACHERS` 清空，并写明**应保持为空**
+
+新测试伸手取网时，正确做法是补源桩，或者——若意图就是打真外网——加
+`@pytest.mark.network`。往表里加模块等于把「测试不确定」变成「不确定但没人管」。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| 全套（债务表已空，本机） | **0 个模块伸手**，3184 passed（与改动前同一通过数） |
+| 全套（债务表已空，`git archive` 干净检出） | **0 个模块伸手**，3178 passed |
+| mutation ×10 | 逐个拆掉模块自己的 `_offline_sources`，**10/10 都判红** ✅ |
+| 闸与相邻文件 | `test_offline_transport_gate` / `test_slack_notifier` / `test_yf_gate` / `test_quote_set` 共 93 项全绿 |
+
+⚠️ **mutation 必须在冷缓存下做**：`test_rival_bee_peer_features` / `test_fred_macro` /
+`test_macro_degradation` 这三个在**本机热缓存单独跑**时拆掉桩「毫无变化」——
+`cboe_vix` 的缓存是 `Path(__file__).parent/"cache"`（仓库本地目录，不受
+`ALPHA_HIVE_CACHE_DIR` 隔离），reddit / vixcentral 同理。只在本机做 mutation
+会得出「这三个桩是装饰品」的**错误结论**、删掉它们、然后 CI 冷缓存变红。
+在 `git archive` 干净检出里复测，三个分别伸手 7 / 6 / 1 次，全部检出。
+**判据：涉及带磁盘缓存的数据源时，mutation check 与「需不需要这个桩」都要在冷缓存下判。**
+
+⚠️ 另记一个自造的坑：批量插 fixture 时用「最后一个匹配 `^(import|from)` 的行」
+定位会插进**跨行 import 的括号里**（`from iv_history import (` … `)`）。
+改用 `ast` 取最后一个 import 节点的 `end_lineno`，并在写回前 `ast.parse` 自证。
+
 
 ## [0.45.135] — 2026-09-06 — 占位（进行中：generate_ml_report 的 catalyst_quality 死特征——把 recommendation.rating 的四种字符串喂进 A+/A/B+/B/C 映射表，全部落到 mapping.get 的 0.5 默认值，该特征恒为常数）
 

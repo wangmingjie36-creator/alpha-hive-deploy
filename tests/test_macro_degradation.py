@@ -23,6 +23,16 @@ import pytest
 
 from swarm_agents.guard_bee import GuardBeeSentinel
 
+
+@pytest.fixture(autouse=True)
+def _offline_sources(stub_yfinance, stub_vixcentral):
+    """本文件的取数支路显式钉死，不依赖 conftest 的传输层兜底（v0.45.136）。
+
+    vix_term_structure 的现货（yfinance）与 VX 期货（vixcentral）两条腿。
+
+    桩的定义与各自的「取不到」契约见 tests/conftest.py 的可复用源桩一节。
+    """
+
 _FALLBACK = {
     "macro_regime": "neutral", "macro_score": 5.0,
     "vix": 20.0, "vix_regime": "elevated",

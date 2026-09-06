@@ -21,6 +21,17 @@ import re
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _offline_sources(stub_yfinance):
+    """本文件的取数支路显式钉死，不依赖 conftest 的传输层兜底（v0.45.136）。
+
+    calculate_iv_rv_spread 用一个不存在的 ticker 触发失败路径，此前是靠真 yfinance
+    返回空来「失败」的。
+
+    桩的定义与各自的「取不到」契约见 tests/conftest.py 的可复用源桩一节。
+    """
+
+
 # ───────────────── ① None 不得被 .get 默认值伪装成 0 ─────────────────
 
 class TestNoneNotCoercedToZero:
