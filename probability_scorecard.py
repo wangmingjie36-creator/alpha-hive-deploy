@@ -96,6 +96,39 @@ BRIER_MARGIN = 0.002
 PRODUCTION_BLEND_W = 0.7
 BLEND_GRID = tuple(i / 10 for i in range(11))
 
+#: ML 概率**估计量**的换代记录（首个受影响的业务日, 版本, 改了什么）。
+#: **只追加，不改写**（审计轨迹）。
+#:
+#: 为什么需要这张表：`blend_scan` 用 `load_ml_probabilities()` 把历史全部
+#: `analysis-*-ml-*.json` 的 `ml_probability` 池化成一条时间序列来给 w 记分。
+#: 那个假设是「同一个估计量在不同日子上的输出」。一旦 `_prepare_ml_input`
+#: 的特征来源变了，序列就跨了两代口径，而混算是**静默**的——数字照出，
+#: 只是没有意义（同 `ic_rerun_readiness._COHORT_HISTORY` 的道理，
+#: 但那张表管的是 `final_score` → IC，与这里是两条独立的测量管道）。
+#:
+#: ⚠️ 改 `generate_ml_report._prepare_ml_input` 的任何特征来源时**必须追加一条**。
+#: 反过来，不要因此去动 `_COHORT_HISTORY`：`_prepare_ml_input` 的产物不进
+#: `predictions` 表（44 列实测无 ML 特征列），往那里加条目会白白作废几个月样本。
+_ML_ESTIMATOR_GENERATIONS = [
+    ("2026-09-06", "v0.45.137+v0.45.140",
+     "服务端特征来源三批修复合并为一代（同日落地）："
+     "① volatility / market_sentiment 由死读者 `self._swarm_cache`（全仓零赋值）"
+     "改为蜂群 risk_adj / sentiment 维分派生；"
+     "② odds_score / risk_adj_score / final_score 由 `advanced_analysis` 的两个"
+     "不存在的键（803/803 份实测缺失）改为蜂群维分与 `swarm_results.final_score`。"
+     "两批合计：803 份重放 probability 变动 > 0.02 的样本分别占 52.4% 与 27.3%。"
+     "此日之前的 `ml_probability` 由旧估计量产出，与之后不可比"),
+]
+
+
+def ml_estimator_generation(day: str) -> str:
+    """某个业务日的 ML 概率属于哪一代。早于首条边界的记 `pre-<首条版本>`。"""
+    gen = f"pre-{_ML_ESTIMATOR_GENERATIONS[0][1]}"
+    for boundary, version, _ in _ML_ESTIMATOR_GENERATIONS:
+        if day >= boundary:
+            gen = version
+    return gen
+
 _EPS = 1e-9
 
 
@@ -442,6 +475,13 @@ def blend_scan(
                 "outcome_rows": len(dated), "ml_rows": len(ml)}
 
     ys = [y for y, _, _ in recs]
+    # 样本跨了几代 ML 估计量。跨代时这条扫描在混算两个不同的量——
+    # 不阻断（早期样本仍有信息），但**必须说出来**，否则就是静默混算。
+    _gens: Dict[str, int] = {}
+    for r, _d in dated:
+        if (r["date"], r["ticker"]) in ml:
+            _gens[ml_estimator_generation(r["date"])] = \
+                _gens.get(ml_estimator_generation(r["date"]), 0) + 1
     grid_out = []
     for w in grid:
         ps = [w * b + (1 - w) * m for _, b, m in recs]
@@ -467,6 +507,9 @@ def blend_scan(
         "gap": gap,
         "beaten_by": ({f"blend_w={best['w']}": gap} if beaten else {}),
         "production_is_beaten": beaten,
+        # v0.45.140：估计量代际。>1 代表本次扫描在混算两代口径的 ML 概率。
+        "ml_estimator_generations": dict(sorted(_gens.items())),
+        "spans_estimator_generations": len(_gens) > 1,
     }
 
 

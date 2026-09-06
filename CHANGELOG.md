@@ -5,7 +5,92 @@
 
 ---
 
-## [0.45.140] — 2026-09-06 — 占位（进行中：修 _prepare_ml_input 的 odds_score/risk_adj_score/final_score 三处死读者）
+## [0.45.140] — 2026-09-06 — 三个「诚实地一直缺」的特征接上蜂群真值；ML 估计量换代登记
+
+### Fixed
+
+- **`generate_ml_report._prepare_ml_input` 的三处死读者**（`odds_score` /
+  `risk_adj_score` / `final_score`）。旧实现读
+  `analysis["dimension_scores"]` 与 `analysis["recommendation"]["score"]`，
+  而 `analysis` 就是 `advanced_analyzer.generate_comprehensive_analysis()`
+  的返回值 —— 实测 **803/803 份生产 `analysis-*-ml-*.json` 的
+  `advanced_analysis` 里没有 `dimension_scores` 键、`recommendation` 里也没有
+  `score` 键** ⇒ 三个特征在生产上恒为字面量 5.0。
+  改由蜂群取值：`swarm_dimension_scores["odds"] / ["risk_adj"]`（参数自
+  v0.45.135 已接线）与新增的第三个参数 `swarm_final_score`
+  （← `swarm_results["final_score"]`）。
+
+  **与 v0.45.137 那两个死读者的关键区别：这三个不是静默降级，而是「诚实地
+  一直缺」** —— `_ml_input_missing` 早就如实报出（生产 118 份 JSON 的
+  `input_features_missing` 逐字就是这三个名字）。但诚实不等于无害：
+  ① 喂进模型的仍是常数 5.0，而它在训练分布里**不是中性**——
+     odds 落在 **7.6 分位**、final_score **16.9 分位**、risk_adj 40.2 分位
+     （训练端实测 n=497：中位 7.54 / 5.44 / 5.34）；
+  ② 账本本身也不准：真值一直躺在**同一份 JSON** 的 `swarm_results` 里
+     （745/803 三个全齐），「取不到」与「没去取」被记成了同一件事。
+
+  与训练端**逐字节同源**：`build_training_data_from_db` 读
+  `predictions.dimension_scores` / `predictions.final_score`，而
+  `Backtester.save_predictions(swarm_results)` 正是从 `swarm_results[ticker]`
+  的同名键写进去的 —— 不是抄第二份公式。
+
+  缺失一律取 `None` 而非兜底值，让 `input_features_missing` 与
+  `imputed_features` / `feature_completeness` 两套账目对上。
+  实测：803/803 份两套账目现已一致（此前 118 份当面矛盾）。
+
+  **实测影响面**（803 份重放，模型按生产口径训练于 497 条真实样本）：
+  `|Δprobability|` 中位 0.0063、**27.3% 变动 > 0.02**、max 0.0625；
+  分布 sd 0.0280 → 0.0333；三特征 permutation importance 合计 **0.1357**
+  （`odds_score` 单项排 5/12）。真实路径复跑：三个特征的唯一值
+  **1 → 306 / 375 / 314**；57 份无蜂群数据的报告现按实情标 `unreliable=True`
+  （此前它们静默产出一个看着可信的概率）。
+
+  ⚠️ **重放工具自己先栽了一次**：`MLPredictionService().train_model()` 内部走
+  默认 db_path，在 worktree 里返回空集 → 降级到 8 条硬编码样本 → 模型恒输出
+  0.5（sd=0.0000）→ 对**任何**改动都报「无差异」。识别标志不是 Δ 那一列，
+  是分布 sd。判据：每个「没有差异」先问对照集多大、工具有没有判别力
+  （已在脚本里补 probe 断言自证）。
+
+### Added
+
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` + `ml_estimator_generation()`
+  + `blend_scan` 输出里的 `ml_estimator_generations` / `spans_estimator_generations`。
+
+  **世代边界复核的第四条发现**（用户清单里没有）：IC 重跑闸不受影响，
+  但 `blend_scan` **受影响** —— 它 `load_ml_probabilities()` 把历史全部
+  `analysis-*-ml-*.json` 的 `ml_probability` 池化成一条序列给融合权重 w 记分，
+  隐含假设是「同一个估计量」。2026-09-06 这天 `_prepare_ml_input` 的特征来源
+  被改了两批（v0.45.137 + 本版），序列自此跨代，而混算是静默的。
+  按「谁会红？」补一个观测点：不阻断扫描（早期样本仍有信息），但结果里
+  必须带出代际。
+
+  ⚠️ **没有**往 `ic_rerun_readiness._COHORT_HISTORY` 追加 —— 那是另一条测量
+  管道（`final_score` → IC），`_prepare_ml_input` 的产物不进 `predictions` 表，
+  往那里加条目会白白作废几个月样本。
+
+- `tests/test_ml_swarm_score_dead_readers.py`（33 项，四层守卫）：
+  单元（三特征取蜂群原值 / 缺失取 None / 合法 0.0 保留 / `bool`·NaN 拒绝）
+  → 跨模块对账（`_ml_input_missing` 与 `ml_predictor._missing_features` 必须
+  给同一答案）→ AST 源码守卫（两个死读点必须**删掉**而非留作 fallback；
+  取 AST 不取子串，否则解释这件事的注释自己会触发）→ 生产接线（AST 核对两个
+  调用点真的传了第三参）。
+
+### Changed
+
+- `tests/test_ml_catalyst_quality_source.py::TestProductionWiring.SWARM_KWARGS`
+  加入 `swarm_final_score` —— 三个蜂群派生参数同取自一个 `swarm_data[ticker]`，
+  必须**成组**传，漏一个就是半接线。
+
+### 验证
+
+- 全套测试 **3406 passed, 24 skipped**（`-m "not integration and not network"`）。
+  唯一的红是 `TestCoverageHorizon`，MEMORY 已记为**设计意图**：全项目唯一不注入
+  时钟的测试，2026-09-06 起按设计变红（含义 = 去看 BLS 发 2027 日程没）。
+- mutation check **7/7 全被抓**，`collected 124 items` 全程一致、基线绿、
+  锚点唯一（M1 退回死读者 / M2 兜底 5.0 / M3 类型闸换 truthiness /
+  M4 账本漏报 / M5 调用点漏传第三参 / M6 代际写死 False / M7 登记表清空）。
+- ruff：新增文件 clean；`generate_ml_report.py` 余下 2 项经 HEAD 基线比对确认
+  为既有问题（line 2815/2825，与本次改动无关）。
 
 ## [0.45.139] — 2026-09-06 — 评级词撤销、融合权重变成受监控量；顺带修第二处 train/serve skew
 

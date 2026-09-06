@@ -314,14 +314,22 @@ class MLEnhancedReportGenerator:
         self, ticker: str, realtime_metrics: dict,
         swarm_direction: Optional[str] = None,
         swarm_dimension_scores: Optional[dict] = None,
+        swarm_final_score: Optional[float] = None,
     ) -> dict:
         """生成 ML 增强的分析报告
 
         swarm_direction：蜂群当日方向，v0.45.132 起交给 AdvancedAnalyzer 做
         「同标的 + 同方向」的历史回溯（第 5 章情景推演的样本条件）。
 
-        swarm_dimension_scores：蜂群当日五维分，v0.45.135 起用于 `catalyst_quality`。
-        ⚠️ 两个参数都取自同一个 `swarm_data[ticker]`，**必须成对传**——传一个漏
+        swarm_dimension_scores：蜂群当日五维分，v0.45.135 起用于 `catalyst_quality`，
+        v0.45.137 起用于 `volatility` / `market_sentiment`，
+        v0.45.140 起用于 `odds_score` / `risk_adj_score`。
+
+        swarm_final_score：蜂群当日综合分，v0.45.140 起用于 `final_score`。
+        此前该特征读 `advanced_analysis["recommendation"]["score"]`——那个键在
+        803/803 份生产 JSON 里都不存在，恒落到字面量 5.0。
+
+        ⚠️ 三个参数都取自同一个 `swarm_data[ticker]`，**必须成组传**——传一个漏
         一个是本仓反复出现的半接线故障（守卫见
         `tests/test_ml_catalyst_quality_source.py::TestProductionWiring`）。
         """
@@ -336,6 +344,7 @@ class MLEnhancedReportGenerator:
             ticker, realtime_metrics, advanced_analysis,
             swarm_dimension_scores=swarm_dimension_scores,
             swarm_direction=swarm_direction,
+            swarm_final_score=swarm_final_score,
         )
 
         # 获取 ML 预测
@@ -405,6 +414,7 @@ class MLEnhancedReportGenerator:
         self, ticker: str, metrics: dict, analysis: dict,
         swarm_dimension_scores: Optional[dict] = None,
         swarm_direction: Optional[str] = None,
+        swarm_final_score: Optional[float] = None,
     ) -> TrainingData:
         """为 ML 模型准备输入数据"""
 
@@ -487,10 +497,43 @@ class MLEnhancedReportGenerator:
         # 取不到时用缺失约定 "B"（不是基准档 "B+"）——见 catalyst_quality_from_score
         catalyst_quality = _cat_qual(_catalyst_raw) if _catalyst_known else "B"
 
+        # ── v0.45.140：odds / risk_adj / final_score 的唯一来源 = 蜂群 ──
+        # 旧实现读 `analysis["dimension_scores"]` 与 `recommendation["score"]`，
+        # 而 `analysis` 就是 `advanced_analyzer.generate_comprehensive_analysis()`
+        # 的返回值——实测 **803/803 份生产 analysis-*-ml-*.json 的
+        # `advanced_analysis` 里没有 `dimension_scores` 键、`recommendation` 里
+        # 也没有 `score` 键** ⇒ 三个特征恒为字面量 5.0。
+        #
+        # 与 v0.45.137 那两个死读者的区别：这三个**已被 `_ml_input_missing`
+        # 如实报出**（生产 118 份 JSON 的 `input_features_missing` 逐字就是
+        # 这三个名字），没有说谎。但「诚实地缺」不等于无害：
+        #   · 喂进模型的仍是常数 5.0，而它在训练分布里**不是中性**——
+        #     odds 落在 **7.6 分位**、final_score 落在 **16.9 分位**
+        #     （训练端实测 n=497：odds 中位 7.54 / risk_adj 5.34 / final 5.44）
+        #   · 账本本身也不准：真值一直躺在**同一份 JSON** 的 `swarm_results` 里
+        #     （745/803 三个全齐），「取不到」与「没去取」被记成了同一件事
+        #
+        # 真值与训练端**逐字节同源**，不是抄第二份公式：
+        #   训练 `build_training_data_from_db` 读 `predictions.dimension_scores`
+        #   / `predictions.final_score`，而 `Backtester.save_predictions(
+        #   swarm_results)` 正是从 `swarm_results[ticker]` 的同名键写进去的。
+        #
+        # 803 份重放（模型按生产口径训练于 497 条真实样本）：
+        # |Δprobability| 中位 0.0063、**27.3% 变动 > 0.02**、max 0.0625；
+        # 分布 sd 0.0280 → 0.0333；三特征 permutation importance 合计 0.1357。
+        _odds_raw = _dims.get("odds")
+        _final_raw = swarm_final_score
+        _odds_known = _usable_dim(_odds_raw)
+        _final_known = _usable_dim(_final_raw)
+        # 取不到就是 None（同 volatility / market_sentiment 的约定）——
+        # 字面量会让 `input_features_missing` 说缺、`feature_completeness`
+        # 说 12/12，生产现存 118 份这种当面矛盾的记录，根因就在这里。
+        odds_score = float(_odds_raw) if _odds_known else None
+        risk_adj_score = float(_risk_adj_raw) if _risk_adj_known else None
+        final_score = float(_final_raw) if _final_known else None
+
         # v2 新特征（从 analysis 上下文提取）
         _opts = analysis.get("options_analysis", {})
-        _rec = analysis.get("recommendation", {})
-        _ds = analysis.get("dimension_scores", {})
         # v0.45.139：direction_encoded 改读**蜂群方向**，与训练路径同一张表
         # （ml_predictor.build_training_data_from_db 的 direction_map）。
         # 旧实现读 recommendation.rating 再映射 {STRONG BUY:1, BUY:.5, HOLD:0, AVOID:-1}
@@ -518,13 +561,13 @@ class MLEnhancedReportGenerator:
             + ([] if _dir_known else ["direction"])
             + ([] if _risk_adj_known else ["volatility"])
             + ([] if _sentiment_known else ["market_sentiment"])
+            + ([] if _final_known else ["final_score"])
+            + ([] if _odds_known else ["odds_score"])
+            + ([] if _risk_adj_known else ["risk_adj_score"])
             + [
                 _name for _name, _val in (
                     ("iv_rank", _opts.get("iv_rank")),
                     ("put_call_ratio", _opts.get("put_call_ratio")),
-                    ("final_score", _rec.get("score")),
-                    ("odds_score", _ds.get("odds")),
-                    ("risk_adj_score", _ds.get("risk_adj")),
                 ) if not _usable_dim(_val)
             ]
         )
@@ -551,9 +594,9 @@ class MLEnhancedReportGenerator:
             # v2
             iv_rank=_opts.get("iv_rank", 50.0),
             put_call_ratio=_opts.get("put_call_ratio", 1.0),
-            final_score=_rec.get("score", 5.0),
-            odds_score=_ds.get("odds", 5.0),
-            risk_adj_score=_ds.get("risk_adj", 5.0),
+            final_score=final_score,
+            odds_score=odds_score,
+            risk_adj_score=risk_adj_score,
             agent_agreement=0.5,  # 预测时无蜂群上下文
             direction_encoded=_direction_map.get(swarm_direction, 0.0),
         )
@@ -2676,6 +2719,7 @@ def main():
                 ticker, ticker_data,
                 swarm_direction=_sr.get("direction"),
                 swarm_dimension_scores=_sr.get("dimension_scores"),
+                swarm_final_score=_sr.get("final_score"),
             )
 
             # 注入蜂群数据到报告

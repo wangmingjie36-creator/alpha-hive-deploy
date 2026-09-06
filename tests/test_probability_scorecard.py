@@ -354,3 +354,52 @@ def test_ledger_records_ml_probability(tmp_path):
                         ml_probability_pct=59.0)
     rows, _ = PS.load_ledger(led)
     assert rows[0]["ml_probability_pct"] == 59.0
+
+
+class TestMLEstimatorGenerations:
+    """ML 概率估计量的换代登记（v0.45.140）。
+
+    `blend_scan` 把历史全部报告的 `ml_probability` 池化成一条序列给 w 记分，
+    隐含假设是「同一个估计量」。2026-09-06 这天 `_prepare_ml_input` 的特征
+    来源被改了两批（v0.45.137 的 volatility/sentiment、v0.45.140 的
+    odds/risk_adj/final_score），序列自此跨代。换代而无人记录 = 静默混算。
+
+    判据「谁会红？」：不阻断扫描（早期样本仍有信息），但结果里必须带出代际，
+    否则没有任何观测点会因为混算而变化。
+    """
+
+    def test_boundary_partitions_days(self):
+        from probability_scorecard import ml_estimator_generation
+        assert ml_estimator_generation("2026-08-26").startswith("pre-")
+        assert not ml_estimator_generation("2026-09-06").startswith("pre-")
+        assert ml_estimator_generation("2026-09-06") == ml_estimator_generation("2026-09-08")
+
+    def test_registry_is_append_only_and_sorted(self):
+        """只追加不改写；日期必须递增，否则 `ml_estimator_generation` 的
+        「取最后一条匹配」会给出错的代。"""
+        from probability_scorecard import _ML_ESTIMATOR_GENERATIONS as G
+        assert G, "登记表不得为空——空表会让本类所有断言在空集上恒真"
+        days = [d for d, _, _ in G]
+        assert days == sorted(days)
+        assert len(set(days)) == len(days)
+
+    def test_blend_scan_reports_the_span(self):
+        """跨代时 `spans_estimator_generations` 必须为真；同代时为假。
+        成对断言——少了后半边，写死 True 也会全绿。"""
+        from probability_scorecard import blend_scan
+        rows_1gen = [{"date": "2026-09-08", "ticker": f"T{i}", "hit": i % 2}
+                     for i in range(40)]
+        rows_2gen = ([{"date": "2026-08-01", "ticker": f"T{i}", "hit": i % 2}
+                      for i in range(40)]
+                     + [{"date": "2026-09-08", "ticker": f"U{i}", "hit": i % 2}
+                        for i in range(40)])
+
+        def _ml(rows):
+            return {(r["date"], r["ticker"]): 50.0 + (i % 7) for i, r in enumerate(rows)}
+
+        one = blend_scan(rows=list(rows_1gen), ml=_ml(rows_1gen), embargo_days=0)
+        two = blend_scan(rows=list(rows_2gen), ml=_ml(rows_2gen), embargo_days=0)
+        assert one["status"] == "ok" and two["status"] == "ok"
+        assert one["spans_estimator_generations"] is False, one["ml_estimator_generations"]
+        assert two["spans_estimator_generations"] is True, two["ml_estimator_generations"]
+        assert len(two["ml_estimator_generations"]) == 2
