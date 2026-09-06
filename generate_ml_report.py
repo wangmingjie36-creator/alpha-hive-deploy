@@ -53,6 +53,20 @@ def _pdt_now():
         return datetime.now()
 
 
+def _usable_dim(value) -> bool:
+    """蜂群维度分是不是一个可用的数值。
+
+    三处派生特征（catalyst_quality / volatility / market_sentiment）共用。
+    `bool` 是 `int` 子类，必须显式排除：`True` 会当成 1.0 一路通过 float 比较，
+    在本仓已经酿过事故（v0.45.121 把 `True` 当"强看空"放行）。NaN 同理——
+    它对任何比较都返回 False，却是 truthy，`or` / `if x:` 都拦不住。
+    写法与本仓其余守卫一致，不自己发明。
+    """
+    return (isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value == value)
+
+
 class MLEnhancedReportGenerator:
     """ML 增强的报告生成器"""
 
@@ -156,6 +170,10 @@ class MLEnhancedReportGenerator:
             # v0.44.3：阈值唯一真相 = ml_predictor.catalyst_quality_from_score
             # （此前同一套阈值在三处各写一份嵌套 _cat_qual）
             from ml_predictor import catalyst_quality_from_score as _cat_qual
+            from ml_predictor import (
+                market_sentiment_from_score as _sent_from_score,
+            )
+            from ml_predictor import volatility_from_risk_adj as _vol_from_risk_adj
 
             direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
             result = []
@@ -174,8 +192,12 @@ class MLEnhancedReportGenerator:
                     crowding_score=ds.get("signal", 5.0) * 10,
                     catalyst_quality=_cat_qual(ds.get("catalyst", 5.0)),
                     momentum_5d=0.0,
-                    volatility=5.0,
-                    market_sentiment=(ds.get("sentiment", 5.0) - 5) * 20,
+                    # v0.45.137：此前这里把 volatility 写死成 5.0——若本降级
+                    # 分支真的触发（`build_training_data_from_db` 返回空时），
+                    # 训练集该特征方差为 0，模型学不到任何切分。三处口径统一到
+                    # `ml_predictor` 的两个函数，不再各写一份常数。
+                    volatility=_vol_from_risk_adj(ds.get("risk_adj", 5.0)),
+                    market_sentiment=_sent_from_score(ds.get("sentiment", 5.0)),
                     actual_return_3d=float(r["return_t7"] or 0) * 0.4,
                     actual_return_7d=float(r["return_t7"] or 0),
                     actual_return_30d=float(r["return_t7"] or 0) * 2.5,
@@ -399,38 +421,47 @@ class MLEnhancedReportGenerator:
         crowding_score = min(100.0, max(0.0, crowding_score))  # 防御性边界保护
         momentum_5d = _yf.get("price_change_5d", 0.0) or 0.0
 
-        # BUG-6 修复：volatility 从 swarm BuzzBee details 提取，fallback 才用 5.0
-        _buzz_details = (
-            self._swarm_cache.get(metrics.get("_ticker", ""), {})
-            .get("agent_details", {})
-            .get("BuzzBeeWhisper", {})
-            .get("details", {})
-        ) if hasattr(self, "_swarm_cache") else {}
-        volatility = (
-            _yf.get("volatility_20d")
-            or _yf.get("atr_pct")
-            or _buzz_details.get("volatility_20d")
-            or analysis.get("options_analysis", {}).get("historical_volatility")
-            or 5.0
-        )
-
-        # BUG-7 修复：market_sentiment 从 swarm BuzzBee details 提取
-        _buzz_sentiment_raw = _buzz_details.get("sentiment_pct")  # 0-100
-        _raw_sentiment = (
-            (_buzz_sentiment_raw - 50) * 2  # 转为 -100~+100
-            if _buzz_sentiment_raw is not None
-            else metrics.get("sentiment_score", 0.0)
-        )
-        # BUG FIX: 原来 abs(_raw_sentiment) <= 10 → *10 的逻辑无法区分 0-1（概率）量表：
-        #   0-1 范围  → *10 → 0-10（实际应 *100 → 0-100）
-        #   0-10 范围 → *10 → 0-100 ✓  |  0-100 范围 → 不变 ✓
-        # 修复：三段式量表自动识别，统一输出 -100~+100
-        if abs(_raw_sentiment) <= 1.0 and _raw_sentiment != 0.0:
-            market_sentiment = _raw_sentiment * 100   # 概率/归一化量表 (0~1 or -1~1)
-        elif abs(_raw_sentiment) <= 10.0:
-            market_sentiment = _raw_sentiment * 10    # Agent 评分量表 (0~10)
-        else:
-            market_sentiment = _raw_sentiment          # 已在 -100~+100 范围，直接使用
+        # ── v0.45.137：volatility / market_sentiment 的唯一来源 = 蜂群维度分 ──
+        # 旧实现声称从 BuzzBee details 提取（"BUG-6/BUG-7 修复"），但它读的
+        # `self._swarm_cache` **全仓从未被赋值过**（AST 实测：赋值点 0、读取点 1，
+        # 类属性里也没有）⇒ `hasattr(self, "_swarm_cache")` 恒 False ⇒ 那段是死码。
+        # 叠加第二个独立缺陷：查表键 `metrics.get("_ticker")` 在生产
+        # `realtime_metrics` 里也不存在（生产用 `"ticker"`），即便缓存存在也会空串落空。
+        #
+        # 实测 803 份生产 analysis-*-ml-*.json：volatility 恒 5.0、
+        # market_sentiment 恒 0.0（各 802/803，剩 1 份是 v2 之前的旧 schema）。
+        # volatility 那条四级 fallback 链**每级都是死的**——`_yf` 里没有
+        # volatility_20d/atr_pct（生产只有三个价格字段），
+        # `options_analysis["historical_volatility"]` 这个键 803/803 份都不存在
+        # （真实字段名是 `rv_30d`）。只有字面量 5.0 会触发。
+        #
+        # ⚠️ 为什么**不**照注释说的接 BuzzBee 真实波动率：这个特征槽在训练路径
+        # （`build_training_data_from_db`，n=497）里装的是 `(10-risk_adj)*2.5`，
+        # 中位 11.65；BuzzBee 的 `volatility_20d` 是真年化波动率，中位 39.66，
+        # 与训练口径 Spearman ρ=+0.068、scale 差 ~4×。接进来 = 用 A 训练拿 B 服务，
+        # 制造一个与 v0.45.135 同 species 的 train/serve skew，比现在的常数更糟。
+        # sentiment 侧没有这个矛盾（维分与 BuzzBee sentiment_pct ρ=+0.987，
+        # 是同一个量的两种刻度），取维分可与训练路径逐字节同源。
+        #
+        # 常数 5.0 落在训练 volatility 分布的 **9.1 分位**——它不是"中性"，
+        # 是系统性偏低；803 份重放显示 52.4% 的 probability 变动 > 0.02。
+        from ml_predictor import market_sentiment_from_score, volatility_from_risk_adj
+        _dims = swarm_dimension_scores or {}
+        _risk_adj_raw = _dims.get("risk_adj")
+        _sentiment_raw = _dims.get("sentiment")
+        _risk_adj_known = _usable_dim(_risk_adj_raw)
+        _sentiment_known = _usable_dim(_sentiment_raw)
+        # 取不到就是 None，不挑兜底值——None 会被 ml_predictor 自己的
+        # `_missing_features` 数进 `imputed_features` / `feature_completeness`，
+        # 两套账目因此一致。喂字面量则会让 `input_features_missing` 说缺、
+        # `feature_completeness` 说 12/12（生产现存 118 份这种自相矛盾的记录）。
+        volatility = volatility_from_risk_adj(_risk_adj_raw) if _risk_adj_known else None
+        market_sentiment = (market_sentiment_from_score(_sentiment_raw)
+                            if _sentiment_known else None)
+        # ⚠️ 派生值**已经**归到 -100~+100，不得再过一遍旧的「三段式量表自动识别」
+        # （`abs(x)<=1 → *100`、`abs(x)<=10 → *10`）——那是给来源不明的原始情绪分
+        # 准备的，对已归一的输入会把接近中性的值放大 10~100 倍（维分 5.2 → 4.0 → 40.0），
+        # 而 sentiment 维分落在 [4.5, 5.5] 的样本在生产里并不罕见。
 
         # ── v0.45.135：催化剂等级的唯一来源 = ChronosBee 催化剂维度分 ──
         # 旧实现由 `recommendation.rating` 反推（STRONG BUY→A+ / BUY→A /
@@ -451,11 +482,8 @@ class MLEnhancedReportGenerator:
         _catalyst_raw = (swarm_dimension_scores or {}).get("catalyst")
         # bool 是 int 子类，`_cat_qual(True)` 会当成 1.0 判成 "C"（最差档）——
         # 与本仓其余 5 处守卫同写法，显式排除。NaN 同理不能进 float 比较。
-        _catalyst_known = (
-            isinstance(_catalyst_raw, (int, float))
-            and not isinstance(_catalyst_raw, bool)
-            and _catalyst_raw == _catalyst_raw
-        )
+        # v0.45.137：三个维度派生特征共用 `_usable_dim`，不再各抄一份 isinstance 行。
+        _catalyst_known = _usable_dim(_catalyst_raw)
         # 取不到时用缺失约定 "B"（不是基准档 "B+"）——见 catalyst_quality_from_score
         catalyst_quality = _cat_qual(_catalyst_raw) if _catalyst_known else "B"
 
@@ -479,18 +507,29 @@ class MLEnhancedReportGenerator:
         # 与同文件已有的 `training_data_source` 来源标记同一思路。
         # v0.45.135：catalyst_quality 也进这张表——否则「蜂群没跑/板上没条目」
         # 与「催化剂正好中等」在输出里长得一样（同 v0.45.113 的判据）。
-        self._ml_input_missing = (([] if _catalyst_known else ["catalyst_quality"])
-                                  + ([] if _dir_known else ["direction"])) + [
-            _name for _name, _val in (
-                ("iv_rank", _opts.get("iv_rank")),
-                ("put_call_ratio", _opts.get("put_call_ratio")),
-                ("final_score", _rec.get("score")),
-                ("odds_score", _ds.get("odds")),
-                ("risk_adj_score", _ds.get("risk_adj")),
-            ) if not isinstance(_val, (int, float)) or isinstance(_val, bool)
-        ]
+        # v0.45.137：volatility / market_sentiment 也进这张表。它们此前
+        # **不可能**上榜——旧代码在缺数时喂的是字面量 5.0 / 0.0，一个合法数值，
+        # 于是「蜂群没跑」与「波动正好偏低、情绪正好中性」在输出里完全同形。
+        # 这两个特征的值现在是 None，ml_predictor 自己的 `_missing_features`
+        # 也会数到，`input_features_missing` 与 `feature_completeness` 两套账
+        # 因此对得上（此前生产有 118 份记录两者当面矛盾）。
+        self._ml_input_missing = (
+            ([] if _catalyst_known else ["catalyst_quality"])
+            + ([] if _dir_known else ["direction"])
+            + ([] if _risk_adj_known else ["volatility"])
+            + ([] if _sentiment_known else ["market_sentiment"])
+            + [
+                _name for _name, _val in (
+                    ("iv_rank", _opts.get("iv_rank")),
+                    ("put_call_ratio", _opts.get("put_call_ratio")),
+                    ("final_score", _rec.get("score")),
+                    ("odds_score", _ds.get("odds")),
+                    ("risk_adj_score", _ds.get("risk_adj")),
+                ) if not _usable_dim(_val)
+            ]
+        )
         if self._ml_input_missing:
-            _log.warning("[%s] ML 输入有 %d 个特征不可得，已补中位值——"
+            _log.warning("[%s] ML 输入有 %d 个特征不可得——"
                          "本次预测的输入不是干净观测：%s",
                          ticker, len(self._ml_input_missing),
                          ", ".join(self._ml_input_missing))

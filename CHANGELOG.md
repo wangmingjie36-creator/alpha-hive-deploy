@@ -155,7 +155,143 @@ Brier **单调递减到完全收缩、没有内部最优** ⇒ 分票那一层�
 - v0.45.134 的四条评级测试原样保留、只换判据字段——它们记的是那些默认值卡在闸上的
   具体缺陷（修红测试时连唯一覆盖一起修没，是本项目 v0.45.72 的教训）
 
-## [0.45.137] — 2026-09-06 — 占位（进行中：修 generate_ml_report 死读者 `self._swarm_cache`，volatility/market_sentiment 两个 ML 特征恒走 fallback）
+## [0.45.137] — 2026-09-06 — 死读者：`self._swarm_cache` 从未被赋值过，两个 ML 特征恒为常数
+
+`generate_ml_report._prepare_ml_input` 里两条注释声称的修复（"BUG-6"/"BUG-7"）
+**从未生效**。它们读 `self._swarm_cache` 取 BuzzBee 的 `volatility_20d` 与
+`sentiment_pct`，而该属性**全仓从未被赋值过**——AST 实测赋值点 **0** 个、
+读取点 **1** 个，类属性里也没有 ⇒ `hasattr(self, "_swarm_cache")` 恒 False
+⇒ `_buzz_details` 恒 `{}`。（`tests/conftest.py` 里的
+`from swarm_agents import cache as _swarm_cache` 是同名局部变量，无关。）
+
+叠加**第二个独立缺陷**：即便缓存存在，查表键 `metrics.get("_ticker", "")`
+在生产 `realtime_metrics` 里也不存在（生产用 `"ticker"`），会用空串落空。
+
+与 v0.45.135 的 `catalyst_quality` 同 species：同一个特征槽，训练路径喂 A、
+服务路径喂 B。
+
+### 实测影响面（803 份生产 `analysis-*-ml-*.json` 全量重放）
+
+| 特征 | 生产实测 | 训练集（n=497） | 常数落在训练分布的 |
+|---|---|---|---|
+| `volatility` | 恒 **5.0**，802/803（99.9%） | 中位 11.65，方差 14.394，291 唯一值 | **9.1 分位** ← 系统性偏低，非中性 |
+| `market_sentiment` | 恒 **0.0**，802/803 | 中位 0.40，方差 355.256，261 唯一值 | 48.9 分位 ← 偏差小，但方差全丢 |
+
+（剩下 1 份是 v2 之前的旧 schema，无这两个键。）
+
+所需数据一直就在**同一份文件**里：743/803 份有 BuzzBee details，其中
+`sentiment_pct` 743 份齐全、`volatility_20d` 730 份齐全。
+
+`volatility` 的四级 fallback 链**每一级都是死的**：`_yf` 里没有
+`volatility_20d`/`atr_pct`（生产 `yahoo_finance` 只有 current_price /
+price_change_5d / change_pct 三个键）；`_buzz_details` 见上；
+`options_analysis["historical_volatility"]` 这个键在 **803/803** 份里不存在
+（真实字段名是 `rv_30d`，655 份有值）。只有字面量 `5.0` 会触发。
+
+模型确实吃这两个特征：HGB 在 volatility ≈13、sentiment ≈±10/+40 处有切分。
+803 份重放（按生产路径训练）显示 `probability` 有 **52.4%** 的样本变动 > 0.02，
+唯一值 **102 → 213**。
+
+### Changed — 两个特征改由 `swarm_dimension_scores` 派生
+
+**为什么不照注释说的接 BuzzBee 真实波动率。** 该特征槽在生产训练路径
+（`ml_predictor.build_training_data_from_db`）里装的**不是**波动率，是
+`(10 - risk_adj) * 2.5`；BuzzBee 的 `volatility_20d` 是真年化波动率
+（中位 39.66，与 `options_analysis.rv_30d` ρ=+0.787），与训练口径
+Spearman **ρ=+0.068**（≈无关）、scale 差约 **4×**。接进来就是用 A 训练拿 B 服务
+——在修一个 skew 的同时造一个同 species 的新 skew，比现在的常数更糟。
+
+`sentiment` 侧没有这个矛盾：蜂群 sentiment 维分与 BuzzBee `sentiment_pct`
+**ρ=+0.987**，是同一个量的两种刻度，取维分可与训练路径逐字节同源。
+
+⚠️ **名实不符这一条没修**：`volatility` 槽里装的是 risk_adj 的反转代理。
+要真的喂波动率得让 `predictions` 表带上波动率列并前向累积，属世代边界范畴。
+本版只保证两端同源。
+
+### Added — `ml_predictor`：两端共用的口径函数
+
+`volatility_from_risk_adj()` / `market_sentiment_from_score()`，提为模块级
+单一真相（同 v0.44.3 对 `catalyst_quality_from_score` 的处理）。判据来自
+v0.45.109：**看到魔数先问它是不是等于别处两个数的组合**——`(10-risk_adj)*2.5`
+与 `(sentiment-5)*20` 在服务端与训练端各写一份，改一处漏一处就是下一个 skew。
+
+三处口径统一（此前各写一份常数）：
+- `ml_predictor.build_training_data_from_db`（生产训练路径，n=497）
+- `generate_ml_report._build_real_training_data`（降级训练路径，此前把
+  `volatility` **写死成 5.0**——真触发的话训练集该特征方差为 0，模型学不到任何切分）
+- `generate_ml_report._prepare_ml_input`（服务路径）
+
+训练侧是**纯重构**：对真实 DB 逐条比对，497 条 volatility 与旧公式
+**0 条不一致**，中位/方差/唯一值三项与改动前实测逐位相同
+（11.65 / 14.394 / 291）；两个函数与旧式在 10000 组随机输入上最大绝对差 **0.0**。
+
+### Fixed — 缺失不再伪装成中性
+
+取不到维度分时两个特征取 `None` 并进 `_ml_input_missing`（v0.45.50 机制）。
+此前**不可能**上榜：旧代码喂的是字面量 5.0 / 0.0，一个合法数值，于是
+「蜂群没跑」与「波动正好偏低、情绪正好中性」在输出里完全同形（v0.45.113 判据）。
+
+取 `None` 而非挑一个兜底值，是为了让 `ml_predictor._missing_features` 也数得到:
+`imputed_features` / `feature_completeness` 与 `input_features_missing`
+**两套账目因此对得上**——生产现存 **118 份**记录里两者当面矛盾
+（`input_features_missing: ["final_score",...]` 紧挨着 `feature_completeness: "12/12"`）。
+已实测 `None` 能走通 HGB 全链，产出 `10/12` + `imputed_features: ['volatility','sentiment']`。
+
+⚠️ **派生值已归到 -100~+100，删掉了其后的「三段式量表自动识别」**
+（`abs(x)<=1 → *100`、`abs(x)<=10 → *10`）。那段是给来源不明的原始情绪分准备的，
+对已归一的输入会把接近中性的值放大 10~100 倍（维分 5.2 → 4.0 → **40.0**），
+而 sentiment 维分落在 [4.5, 5.5] 的样本在生产里并不罕见。这是本次最容易漏的一步。
+
+### Changed — `_usable_dim()` 提为模块级，三处派生特征共用
+
+顺带把缺失清单的判据从 `not isinstance(v,(int,float)) or isinstance(v,bool)`
+换成 `not _usable_dim(v)`，**多了一道 NaN 闸**：NaN 此前会被当成"存在"混进去
+（它是 `float` 且不是 `bool`），正是本仓 v0.45.93/97/110 反复踩的形状。
+
+### 影响面：不需要世代边界（独立复核，三条）
+
+1. `predictions` 表列清单里**无** ML 特征列；其 `iv_rank`/`put_call_ratio`/
+   `options_score` 来自蜂群与期权路径，不经 `_prepare_ml_input`。
+2. `save_predictions(swarm_results)` 在 `alpha_hive_daily_report.py:812` 执行，
+   ML 报告在 line 2394 才生成，且 `generate_ml_report` 不写 pheromone.db。
+3. 蜂群 `final_score` 里的 `ml_adjustment` 来自 `dimension == "ml_auxiliary"`，
+   产出方是 `RivalBeeVanguard`/`CodeExecutorAgent`（`parallel_agent_runner.py:296/299`），
+   **不经过** `_prepare_ml_input`——后者全仓只有 1 个生产调用点。
+
+⇒ 不进 IC 测量管道，不往 `ic_rerun_readiness._COHORT_HISTORY` 追加世代边界。
+
+### Added — `tests/test_ml_swarm_cache_dead_reader.py`（34 项）
+
+写在修改**之前**，实测 31 红 3 绿；3 条绿的都是已知的空转
+（`m(5.0)=0.0` 恰好等于旧常数、"合法值不该被标缺失"在旧代码里恒真、
+被测的 helper 是新加的），留着是因为它们是成对断言的另一半。
+
+⚠️ **源码守卫一律取 AST 节点，不取子串**。第一版写的是
+`assert "_swarm_cache" not in src`，它被**解释这次修复的注释**触发了——
+要说清缺陷就必须写出这个名字。子串守卫在这里只有两个结局：逼着注释绕开事实，
+或被改宽成装饰品。同 v0.45.129「判据取 AST 而非 `__doc__`」、v0.45.112
+「数读者时要排除自身 def 行与自身错误消息字符串」。
+
+Mutation check **14/14 全部被抓到**，每轮 `collected 59 items` 一致。
+其中 M12~M14 专门反向自证「守卫从子串改成 AST 之后仍然会红」——
+**改判据的那一次必须证明新判据没变弱**。
+
+⚠️ 自证工具本身先栽了两次，两次都是护栏兜住的：
+- `collected` 正则匹配不到（`-q` 会吞掉那一行），返回 -1 → 断言拦下。
+  若无那条断言，"0 条变异打破测试"会被读成"测试很稳"。
+- 训练侧"纯重构"的第一次比对在 `n=0` 的空集上跑出"0 条不一致"。
+  补了 `assert len(td) > 100` 的判别力护栏后重跑才是真的（n=497）。
+
+### 未修，已登记
+
+- `odds_score` / `risk_adj_score` 读的是 `analysis["dimension_scores"]`，
+  该键在 803/803 份 `advanced_analysis` 里**不存在** ⇒ 恒 5.0。
+  与本条不同的是它**已被 `_ml_input_missing` 如实报出**（生产 118 份有记录），
+  没有说谎，故不在本版一并改——它会实质改变模型输入（训练集 odds 中位 7.54）。
+- `generate_ml_report._build_real_training_data` 把结果赋给
+  `data_builder.historical_records`，而 `train_model()` 只在
+  `build_training_data_from_db()` 返回空时才读它 ⇒ 该赋值在常规路径上是**死写**。
+
 
 ## [0.45.136] — 2026-09-06 — 还债：10 个模块逐个补显式源桩，`_KNOWN_NETWORK_REACHERS` 清空
 
