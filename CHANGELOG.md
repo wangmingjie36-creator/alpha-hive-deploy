@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.133] — 2026-09-06 — 占位（进行中：剩余四个根因的出网闸——CBOE payload / yfinance 经 yf_gate / reddit_sentiment / cboe_vix，10 个文件 110 次）
+
 ## [0.45.132] — 2026-09-06 — ML 深度报告第 5 章情景推演改读 pheromone.db 真实 T+7 分布；删 6 条手写「历史库」
 
 零世代边界代价：`historical_analysis` 只进展示层、MCP 与评级文案，不进 `predictions` 表、不进 IC。
@@ -82,7 +84,80 @@ NVDA 09-04 示例：P10 −5.7% / P50 +0.0% / P90 +10.1%，均值 +1.4%，59 次
   （NVDA 15 / VKTX 25 / 其他 12 的写死基数）——**概率与止盈那两节是同一物种**，该另开一版处理。
 - `generate_deep_v2` 的历史对标卡片读 `gain_30d_pct` / `max_drawdown_pct` 默认 0——该路径自 2026-07-29 起没跑过，未改。
 
-## [0.45.131] — 2026-09-06 — 占位（进行中：测试套件会真往 #alpha-hive 发 Slack 告警——conftest 加 Slack 出网闸 + 观测点；沿用 1b80e2b 撤回后空出的号）
+## [0.45.131] — 2026-09-06 — 测试套件会真往 #alpha-hive 发 Slack 告警：在测试里 `new` 一个通知器对象＝一次对外动作
+
+（沿用 `1b80e2b` 撤回后空出的号，不留空档。）
+
+用双层出网探针（socket + `curl_cffi.Session.request`）跑全套 CI 选择集时发现的，
+**不是「慢」这一类问题**：
+
+    _record_src_failure → _try_src_slack_alert → SlackReportNotifier()
+      ├ __init__ 里 requests.head(真 webhook)                 ← 出网
+      └ enabled = bool(user_token)，本机 user_token 解析得到 59 字符 ⇒ True
+         → send_risk_alert → _send_slack_message
+         → get_session("slack").post(chat.postMessage)        ← 真发送到 C0AGUUWJXJS
+
+`tests/test_instrument_integrity.py::TestSourceHealthTracking::
+test_three_empty_responses_trigger_alert` 走完整条链；
+`tests/test_utilities.py::TestSlackWebhookEnvVar::test_report_notifier_env_var`
+是同一根因的轻症版（只到 head）。`CHANNEL_ID = C0AGUUWJXJS` 正是 #alpha-hive，
+而「数据源降级预警」本就在 CLAUDE.md「Slack 通知精简规则」的禁发清单里。
+
+⚠️ 这类副作用此前没有任何覆盖：仓库里已有的防线针对**写盘**
+（`_isolate_paper_portfolio_state`）与**付费 API**（`_block_llm_api`），
+没有一条针对「测试对外发消息」。
+
+### Added — `tests/conftest.py`：autouse fixture `_block_slack`
+
+三道闸，各管一件事；根因在**构造函数**，所以放 conftest 而不是逐文件补
+（逐文件补等于赌「以后没人再 `new` 它」）：
+
+| 闸 | 内容 | 管什么 |
+|---|---|---|
+| ① | `_read_user_token → None` | 测试永不使用**生产**凭证 |
+| ② | `_check_webhook_alive → False`（staticmethod） | 掐掉 `__init__` 里那次 `requests.head` |
+| ③ | `slack_report_notifier` / `slack_notifier` 的 `get_session` 换成记录器 | 掐掉三处 `get_session("slack").post`，**兼作观测点** |
+
+①② 合起来让 `enabled` 恒为 False，于是 `_try_src_slack_alert` 里**生产代码自己那句**
+`if getattr(n, "enabled", False)` 会在任何发送之前短路——这里是复用既有守卫，不是新造。
+③ 只负责在那个守卫将来失效时把事情闹大：teardown 断言 `not attempts`，
+消息直接列出被拦下的 URL。没有③的话，将来谁把 `enabled` 又弄成 True，
+①②会静默失效而没人知道（＝本仓 `_isolate_paper_portfolio_state`「默认重绑 + teardown
+核对真身」同构，也是 CLAUDE.md「这个失败，下游怎么知道？」那条）。
+
+真要测发送的测试自己 `patch("slack_report_notifier.get_session")`（现成 4 处这么写，
+外加 2 处 `patch.object(notifier, "_send_via_api")`），在函数体里、后设的赢，语义不变。
+
+### Added — `tests/test_slack_notifier.py::TestTestsCanNeverReachSlack`（5 条自证）
+
+⚠️ 刻意**不带** `TestSlackReportNotifierInit._no_disk_creds` 那个类级 fixture——
+它自己也把 `_read_user_token` 打成 None，带上就会把闸①掩盖掉、自证退化成永真。
+
+mutation check 三条（每条都断言了锚点唯一 + 核对 `collected 22 items`）：
+
+| 变异 | 结果 |
+|---|---|
+| M1 拆掉闸① | 2 failed + 1 teardown error，错误消息里带 `post https://slack.com/api/chat.postMessage` ✅ |
+| M2 闸②翻成 `True` | 2 failed + 1 teardown error ✅ |
+| M3 拆掉闸③ | 1 failed ✅ |
+
+M1 的那个 teardown error 顺带**把原事故完整复现了一遍**——拆掉闸就真的走到
+`chat.postMessage` 的 POST。
+⚠️ M2 刻意用「翻成 True」而不是「拆桩打真网」：后者会真去 HEAD 一次生产 webhook。
+「真函数会出网」这一点由上一轮探针实测坐实（命中 `slack_report_notifier.py:65`），
+不需要再打一次。
+
+### 验证
+
+- 原两条测试 + `test_slack_notifier.py` 共 28 项：全绿，探针 **0 次出网**
+- 全套 CI 选择集：出网 **112 次 / 12 个文件 → 110 次 / 10 个文件**，
+  `test_instrument_integrity` 与 `test_utilities` 已从清单消失
+- 剩余 10 个文件是**另外四个根因**（CBOE payload / yfinance 经 yf_gate /
+  Reddit `_fetch_ranking` / `cboe_vix._download`），本版未动
+- ⚠️ 同日 `test_economic_calendar.py::TestCoverageHorizon` 开始变红，
+  **与本版无关**：`nfp` 只覆盖到 2026-12-04（剩 89 天 < 阈值 90），
+  是 v0.45.65 设计好的「日历过期即报警」按期触发，含义＝去 BLS 抄 2027 日程
+
 
 ## [0.45.130] — 2026-09-05 — 二次检查本 session 六版改动：一处计数 bug、两处 CHANGELOG 说多了、零功能缺陷
 
