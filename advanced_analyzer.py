@@ -759,27 +759,46 @@ class ProbabilityCalculator:
     def calculate_take_profit_levels(
         self, current_price: float, expected_gain_pct: float
     ) -> Dict:
-        """计算止盈位置（分批了结）"""
-        level_1 = round(current_price * (1 + expected_gain_pct * 0.3 / 100), 2)  # 30% 涨幅
-        level_2 = round(current_price * (1 + expected_gain_pct * 0.6 / 100), 2)  # 60% 涨幅
-        level_3 = round(current_price * (1 + expected_gain_pct / 100), 2)  # 100% 涨幅
+        """计算止盈位置（分批了结）：三档价格 = 目标涨幅的 30% / 60% / 100% 处。
+
+        ⚠️ `gain_pct` 一律**由该档成交价反算**，不写常数（v0.45.134）。
+
+        旧实现 level_1 / level_2 把 `gain_pct` 写死成 30 / 60，而价格算的是目标涨幅
+        的 0.3 / 0.6 倍——「占目标的比例」与「相对现价的涨幅」是两个口径，但渲染时
+        进的是同一列（`generate_ml_report` 的「涨幅」列 `+{gain_pct:.0f}%`）。
+        本机 1045 份已发布 ML 报告里 **998 份**因此印出「价格递增、标签 30→60→20」
+        的自相矛盾表（TMUS 2026-09-04 现价 $181.52：level_1 $192.41 标 +30%，
+        实为 +6.0%；标签误差中位 24pp）。
+
+        反算而非按公式重算一遍，是为了让标签与 **round(…, 2) 之后**的价格严格一致：
+        低价股（AMC ≈ $2.6）上四舍五入本身就有 0.2% 量级的相对误差。
+        不变式固化在 `tests/test_take_profit_labels.py`，与 `expected_gain_pct`
+        的来源无关——Step 2 换数据源后仍然有效。
+        """
+        def _level(fraction: float) -> "tuple[float, float]":
+            price = round(current_price * (1 + expected_gain_pct * fraction / 100), 2)
+            return price, round((price / current_price - 1) * 100, 1)
+
+        level_1, gain_1 = _level(0.3)
+        level_2, gain_2 = _level(0.6)
+        level_3, gain_3 = _level(1.0)
 
         return {
             "level_1": {
                 "price": level_1,
-                "gain_pct": round(30, 1),
+                "gain_pct": gain_1,
                 "sell_ratio": 0.33,  # 卖出 1/3
                 "reason": "锁定初步收益",
             },
             "level_2": {
                 "price": level_2,
-                "gain_pct": round(60, 1),
+                "gain_pct": gain_2,
                 "sell_ratio": 0.33,  # 再卖出 1/3
                 "reason": "追踪止损，保护利润",
             },
             "level_3": {
                 "price": level_3,
-                "gain_pct": round(expected_gain_pct, 1),
+                "gain_pct": gain_3,
                 "sell_ratio": 0.34,  # 卖出剩余
                 "reason": "达到目标收益，全部清仓",
             },
