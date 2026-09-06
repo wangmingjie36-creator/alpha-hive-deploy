@@ -74,7 +74,122 @@ options_analyzer / fred_macro / dashboard_renderer / market_intelligence 四个�
 改用 `ast` 取最后一个 import 节点的 `end_lineno`，并在写回前 `ast.parse` 自证。
 
 
-## [0.45.135] — 2026-09-06 — 占位（进行中：generate_ml_report 的 catalyst_quality 死特征——把 recommendation.rating 的四种字符串喂进 A+/A/B+/B/C 映射表，全部落到 mapping.get 的 0.5 默认值，该特征恒为常数）
+## [0.45.135] — 2026-09-06 — `catalyst_quality` 换了个量：服务路径喂的不是催化剂
+
+报修的现象是「四种 rating 字符串全落 `mapping.get` 的 0.5 默认值，特征恒为常数」。
+**先数读者，这条不成立**：`generate_ml_report.py:357` 的赋值在 **43 行后被
+line 400 的 `rating_to_quality` 整个覆盖**，生产从不把 rating 原文喂给
+`encode_catalyst_quality`。那个死赋值恰好把注意力引向了一个不成立的机制。
+
+真正的缺陷更严重：**服务路径喂的根本不是催化剂**。
+
+### Fixed — `generate_ml_report._prepare_ml_input` 的 `catalyst_quality` 来源
+
+旧实现由 `recommendation.rating` 反推等级，而 rating 的上游链是：
+
+    advanced_analyzer._estimate_catalyst_quality(ticker)   ← 硬编码三只票的表
+      → ProbabilityCalculator.calculate_win_probability(crowding, grade)
+        → _generate_recommendation(prob, rr)               ← 四档阈值
+          → 本函数把 rating 再映射回一个等级
+
+`_estimate_catalyst_quality` 只认 NVDA/VKTX/TSLA，其余 27 只一律 "B"。于是这个
+特征实际编码的是**拥挤度**（经 win_probability 洗了一道），不是催化剂——而
+`crowding_score` 本来就已经是同一个 `TrainingData` 里的独立特征。
+
+而**训练**路径 `_build_real_training_data` 与 `swarm_agents/rival_bee.py` 喂的都是
+ChronosBee 催化剂维度分经 `catalyst_quality_from_score`。同一个特征槽两套口径
+⇒ **train/serve skew**。
+
+实测 803 份生产 `analysis-*-ml-*.json`（745 份两条口径都能取到）：
+
+| 指标 | 值 |
+|---|---|
+| 两条口径等级一致率 | **7.1%**（按边缘分布独立时期望 8.1%——**低于**独立） |
+| Spearman ρ | **+0.087**（≈ 无关） |
+| 服务路径产出 "B"/"C" 的次数 | **0 / 745**，而真实分布里两档共占 **70.5%** |
+| 服务路径落在 "A"(0.85) | 75.6%；真实分布落在 "B"(0.55) 61.9% |
+
+即：模型在 0.55 附近训练、在 0.85 附近服务。
+
+**修法**：改读 `swarm_dimension_scores["catalyst"]` 经 `catalyst_quality_from_score`，
+与训练路径、rival_bee 三处同源。**阈值表 `_CATALYST_GRADE_CUTS` 一个字没动**——
+那条「勿改」约定管的是阈值（历史样本可比性），不是禁止消费方改用它。
+
+逐条重放全部 803 份生产报告：**93.4% 的等级会变**，新分布与训练集分布对齐
+（B 档 64.6% vs 训练 61.9%）。最能说明「死特征」的是离散度：编码值标准差
+**0.073 → 0.132**，近乎翻倍——旧特征几乎没有变化空间，报修者感觉到的
+「恒为常数」是真的，只是机制不是兜底默认值，而是**上游被压成了两三档**。
+
+**不需要世代边界**：`predictions` 表无 `catalyst_quality` 列；写库的
+`save_predictions(swarm_results)` 在 `alpha_hive_daily_report.py:812`，而 ML 报告
+在 line 2383 才生成，且 `generate_ml_report` 不写 pheromone.db ⇒ 本特征不进 IC
+测量管道。`ic_rerun_readiness._COHORT_HISTORY` 守的是 `expected_returns` /
+`predict_probability` / RivalBee 特征来源三条进 IC 的路径。
+
+### Fixed — `swarm_direction` 在生产日扫路径上从未接通（v0.45.132 遗留）
+
+排查中顺带发现：`swarm_direction` 只接在 `generate_ml_report.main()` 的 CLI 路径，
+而生产日扫走 `--swarm` → `run_swarm_scan` → `_generate_ml_reports`
+（`alpha_hive_daily_report.py:2170`），**那里一直没传**，于是第 5 章的
+「同标的 + 同方向」历史回溯在生产上从未生效。
+
+护它的测试比对的是 main() 里的**字面量**
+`'swarm_direction=(swarm_data.get(ticker) or {}).get("direction")'`——只看一个文件，
+且分不出「接线断了」与「变量名改了」（本次重构该行后它就红了，而接线其实更全了）。
+已改为 AST 判据。
+
+⚠️ **这是本仓反复出现的形状**：v0.45.126 的 `inject_prefetched` 少传一参抛了六个月
+TypeError，藏住它的正是「所有测试都直接调被调函数」。新守卫因此分三层：
+
+- `TestProductionWiring`（AST）——两个蜂群参数必须**成对**出现在每个调用点，
+  并锚定调用点总数（1 + 2），防守卫在空集上恒真
+- `TestParamThreadsThrough`（运行时）——`generate_ml_enhanced_report` →
+  `_prepare_ml_input` **中间那一跳**，两头都测过、中间没人测正是那次的缺口
+- `TestCatalystQualitySource`（单元）——等级由催化剂分决定、rating 不得影响
+
+### Changed — 取不到催化剂分要**报出来**
+
+`catalyst_quality` 加入 `_ml_input_missing`（v0.45.50 建立的机制）。否则
+「蜂群没跑 / 板上没 ChronosBee 条目」与「催化剂正好中等」在输出里长得一样
+——同 v0.45.113 的判据。实测 803 份里 58 份（7.2%）拿不到，此前全部静默。
+
+守卫写法照抄仓库既有那句：`bool` 是 `int` 子类，`_cat_qual(True)` 会当成 1.0
+判成 **"C"（最差档）**；NaN 也不能进 float 比较。缺失回落 **"B"** 而非基准档
+"B+"（后者会让「拿不到」与「正好中等」不可区分）。
+
+### Fixed — 4 处已被 v0.44.3 推翻却仍用现在时的表述
+
+`ml_predictor.py:192` 写着「⚠️ 生产里 `rival_bee.py` **还**把特征写死成常量
+（`catalyst_quality="B+"`、`crowding_score=50.0`、`iv_rank=50.0`、
+`put_call_ratio=1.0`）」。四项**全部**在 v0.44.3 改成了从信息素板读真实值
+（回落值刻意可与真实值区分 + debug 日志）。
+
+**这条陈旧注释今天真的误导了人**——本次任务的报修描述就直接引用了它当作现状。
+同 v0.45.75 的教训（一条已撤回的因果在 7 个文件里继续当设计理由用了 4 天）：
+**结论被推翻后要 grep 它在注释里的所有副本**。grep 查出
+`experiments/ml_expected_return_replay.py` 另有 3 处同样的现在时表述，一并改为
+历史时态并标注 v0.44.3 已修。
+
+### 验证
+
+- 新测试 25 条，先全红（21 failed / 2 passed，两条通过的是调用点计数锚点）
+- mutation check **9 个变异全部被捕获**，每次都核对 `collected 25 items`
+  （patch 脚本 assert 锚点唯一——v0.45.111 正是锚点有 2 份导致变异没打上却全绿）
+- 被我改动的 v0.45.132 断言也单独做了 mutation check（去掉 `swarm_direction=` → 红）
+- 整套 `-m "not integration and not network"`：**3286 passed**，唯一的红是
+  `TestCoverageHorizon`（BLS 2027 日程未发布，**2026-09-06 起变红是设计意图**，
+  与本次改动无关）
+- ruff：新测试文件 clean；`generate_ml_report.py` 剩的 2 个 error（E401/E731，
+  line 2638/2648）已用 `git show HEAD:` 对照确认是改动前就有的
+
+### 未修（已登记为独立任务）
+
+`_prepare_ml_input` 里 `self._swarm_cache` **全仓从未被赋值**（AST 实测：赋值点 0、
+读取点 1），`hasattr` 恒为 False ⇒ 相邻两条「BUG-6 / BUG-7 修复」注释声称的
+volatility / market_sentiment 取数**从未生效**，永远走 fallback。叠加
+`metrics.get("_ticker", "")` 这个键在生产 `realtime_metrics` 里也不存在（生产用
+`"ticker"`）——两个独立缺陷叠在一起。不夹带进本次改动。
+
 
 ## [0.45.134] — 2026-09-06 — 概率与止盈两节去常数化；并给概率装上会红的记分卡（它第一次运行就红了）
 
