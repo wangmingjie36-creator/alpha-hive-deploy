@@ -17,8 +17,9 @@ MEMORY 里的硬规则：「任何评分/权重改动上线前必须跑基准对
 口径
 ----
 · 旧公式闭式：`expected_7d = 8.0 + 0.8 × momentum_5d`
-  （由 rival_bee 硬编码 catalyst_quality="B+"、crowding_score=50.0 代入旧公式所得，
-   已在 1057 个配对样本上零反例验证）
+  （由**当时**的 rival_bee 硬编码 catalyst_quality="B+"、crowding_score=50.0
+   代入旧公式所得，已在 1057 个配对样本上零反例验证。⚠️ v0.44.3 起这四个特征
+   已改读信息素板真实值——本脚本是历史重放，勿据此描述现状）
 · 新公式：`mag("B+")=1.0`、crowding=50 ⇒ tilt=0 ⇒ `expected_7d = 0.8 × momentum_5d`
 · 真实收益：由 `predictions.price_at_predict` 与 `price_t7` 直接算（不用
   `return_t7`，后者是路径依赖的，42.5% 被 SL/TP 截断）
@@ -77,13 +78,15 @@ def load_pairs(db_path: Path) -> List[Tuple[str, str, float, float, float]]:
 
 
 def old_expected(mom: float, crd: float) -> float:
-    """旧闭式。rival_bee 把 catalyst_quality="B+"、crowding_score=50.0 写死，
-    代入旧式 `(15 + mom − 5) × 0.8` ⇒ `8.0 + 0.8×mom`（真实 crowding 被丢弃）。"""
+    """旧闭式。**v0.44.3 之前**的 rival_bee 把 catalyst_quality="B+"、
+    crowding_score=50.0 写死，代入旧式 `(15 + mom − 5) × 0.8` ⇒ `8.0 + 0.8×mom`
+    （真实 crowding 被丢弃）。现已改读信息素板真实值。"""
     return 8.0 + 0.8 * mom
 
 
 def v441_expected(mom: float, crd: float) -> float:
-    """v0.44.1：公式已居中，但 rival_bee 仍写死 crowding=50.0 ⇒ tilt 恒为 0。"""
+    """v0.44.1：公式已居中，但**当时**的 rival_bee 仍写死 crowding=50.0
+    ⇒ tilt 恒为 0（v0.44.3 已改读真实拥挤度）。"""
     return 0.8 * mom
 
 

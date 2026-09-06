@@ -289,12 +289,19 @@ class MLEnhancedReportGenerator:
         self._file_writer_pool.submit(self._write_file_async, json_path, json_data, True)
 
     def generate_ml_enhanced_report(
-        self, ticker: str, realtime_metrics: dict, swarm_direction: Optional[str] = None
+        self, ticker: str, realtime_metrics: dict,
+        swarm_direction: Optional[str] = None,
+        swarm_dimension_scores: Optional[dict] = None,
     ) -> dict:
         """生成 ML 增强的分析报告
 
         swarm_direction：蜂群当日方向，v0.45.132 起交给 AdvancedAnalyzer 做
         「同标的 + 同方向」的历史回溯（第 5 章情景推演的样本条件）。
+
+        swarm_dimension_scores：蜂群当日五维分，v0.45.135 起用于 `catalyst_quality`。
+        ⚠️ 两个参数都取自同一个 `swarm_data[ticker]`，**必须成对传**——传一个漏
+        一个是本仓反复出现的半接线故障（守卫见
+        `tests/test_ml_catalyst_quality_source.py::TestProductionWiring`）。
         """
 
         # 获取高级分析
@@ -303,7 +310,10 @@ class MLEnhancedReportGenerator:
         )
 
         # 构建 ML 输入数据
-        ml_input = self._prepare_ml_input(ticker, realtime_metrics, advanced_analysis)
+        ml_input = self._prepare_ml_input(
+            ticker, realtime_metrics, advanced_analysis,
+            swarm_dimension_scores=swarm_dimension_scores,
+        )
 
         # 获取 ML 预测
         ml_prediction = self.ml_service.predict_for_opportunity(ml_input)
@@ -339,7 +349,8 @@ class MLEnhancedReportGenerator:
         return enhanced_report
 
     def _prepare_ml_input(
-        self, ticker: str, metrics: dict, analysis: dict
+        self, ticker: str, metrics: dict, analysis: dict,
+        swarm_dimension_scores: Optional[dict] = None,
     ) -> TrainingData:
         """为 ML 模型准备输入数据"""
 
@@ -354,7 +365,6 @@ class MLEnhancedReportGenerator:
         _fallback_crowding = (_sir * 10) if _sir is not None else 50.0
         crowding_score = float(metrics.get("crowding_score", _fallback_crowding))
         crowding_score = min(100.0, max(0.0, crowding_score))  # 防御性边界保护
-        catalyst_quality = analysis.get("recommendation", {}).get("rating", "B")
         momentum_5d = _yf.get("price_change_5d", 0.0) or 0.0
 
         # BUG-6 修复：volatility 从 swarm BuzzBee details 提取，fallback 才用 5.0
@@ -390,16 +400,32 @@ class MLEnhancedReportGenerator:
         else:
             market_sentiment = _raw_sentiment          # 已在 -100~+100 范围，直接使用
 
-        # 映射评级到催化剂质量
-        rating_to_quality = {
-            "STRONG BUY": "A+",
-            "BUY": "A",
-            "HOLD": "B+",
-            "AVOID": "C",
-        }
-        catalyst_quality = rating_to_quality.get(
-            analysis.get("recommendation", {}).get("rating", "B"), "B"
+        # ── v0.45.135：催化剂等级的唯一来源 = ChronosBee 催化剂维度分 ──
+        # 旧实现由 `recommendation.rating` 反推（STRONG BUY→A+ / BUY→A /
+        # HOLD→B+ / AVOID→C）。但 rating 不是催化剂的度量，它的上游是
+        #   advanced_analyzer._estimate_catalyst_quality(ticker)   ← 硬编码三只票
+        #     → calculate_win_probability(crowding, grade)
+        #       → _generate_recommendation(prob, rr)               ← 四档阈值
+        # 于是这个特征实际编码的是**拥挤度**，不是催化剂。
+        #
+        # 实测 803 份生产 analysis-*-ml-*.json（745 份两条口径都能取到）：
+        #   · 等级一致率 7.1%，低于按边缘分布独立时的期望 8.1%
+        #   · Spearman ρ = +0.087（≈ 无关）
+        #   · 旧路径**从未**产出 "B"/"C"（0/745），而真实分布里两档共占 70.5%
+        # 训练路径 `_build_real_training_data` 与 `swarm_agents/rival_bee.py`
+        # 都走 `catalyst_quality_from_score`；此处对齐后三处同源，
+        # train/serve skew 消除。阈值本身不动（历史样本可比性由那张表保证）。
+        from ml_predictor import catalyst_quality_from_score as _cat_qual
+        _catalyst_raw = (swarm_dimension_scores or {}).get("catalyst")
+        # bool 是 int 子类，`_cat_qual(True)` 会当成 1.0 判成 "C"（最差档）——
+        # 与本仓其余 5 处守卫同写法，显式排除。NaN 同理不能进 float 比较。
+        _catalyst_known = (
+            isinstance(_catalyst_raw, (int, float))
+            and not isinstance(_catalyst_raw, bool)
+            and _catalyst_raw == _catalyst_raw
         )
+        # 取不到时用缺失约定 "B"（不是基准档 "B+"）——见 catalyst_quality_from_score
+        catalyst_quality = _cat_qual(_catalyst_raw) if _catalyst_known else "B"
 
         # v2 新特征（从 analysis 上下文提取）
         _opts = analysis.get("options_analysis", {})
@@ -413,7 +439,9 @@ class MLEnhancedReportGenerator:
         # 会照常吐出一个概率，而那个概率随后被当成真实预测渲染。
         # 预测本身仍然做（有部分特征也比不做强），但**不能声称输入是干净的**。
         # 与同文件已有的 `training_data_source` 来源标记同一思路。
-        self._ml_input_missing = [
+        # v0.45.135：catalyst_quality 也进这张表——否则「蜂群没跑/板上没条目」
+        # 与「催化剂正好中等」在输出里长得一样（同 v0.45.113 的判据）。
+        self._ml_input_missing = ([] if _catalyst_known else ["catalyst_quality"]) + [
             _name for _name, _val in (
                 ("iv_rank", _opts.get("iv_rank")),
                 ("put_call_ratio", _opts.get("put_call_ratio")),
@@ -2510,9 +2538,11 @@ def main():
                 }
 
             # 生成分析
+            _sr = swarm_data.get(ticker) or {}
             enhanced_report = report_gen.generate_ml_enhanced_report(
                 ticker, ticker_data,
-                swarm_direction=(swarm_data.get(ticker) or {}).get("direction"),
+                swarm_direction=_sr.get("direction"),
+                swarm_dimension_scores=_sr.get("dimension_scores"),
             )
 
             # 注入蜂群数据到报告

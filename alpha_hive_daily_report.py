@@ -2167,7 +2167,18 @@ class AlphaHiveDailyReporter:
                     },
                 }
 
-                enhanced = self.ml_generator.generate_ml_enhanced_report(ticker, ticker_data)
+                # v0.45.135：蜂群派生参数成对传入。
+                # ⚠️ `swarm_direction` 自 v0.45.132 起就有，但**只接在
+                # `generate_ml_report.main()` 的 CLI 路径上**——生产日扫走的是
+                # `--swarm` → `run_swarm_scan` → 本函数，这里一直没传，于是
+                # 第 5 章的「同标的 + 同方向」历史回溯在生产上从未生效。
+                # 同一份 swarm_data[ticker] 就在下一行被用，拿得到。
+                _sr = swarm_data.get(ticker) or {}
+                enhanced = self.ml_generator.generate_ml_enhanced_report(
+                    ticker, ticker_data,
+                    swarm_direction=_sr.get("direction"),
+                    swarm_dimension_scores=_sr.get("dimension_scores"),
+                )
 
                 if ticker in swarm_data:
                     enhanced["swarm_results"] = swarm_data[ticker]

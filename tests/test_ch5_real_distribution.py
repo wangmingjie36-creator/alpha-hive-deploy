@@ -266,5 +266,17 @@ class TestWiring:
         calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                  and getattr(n.func, "attr", "") == "generate_comprehensive_analysis"]
         assert calls and any(k.arg == "direction" for k in calls[0].keywords)
-        main_src = open(M.__file__, encoding="utf-8").read()
-        assert 'swarm_direction=(swarm_data.get(ticker) or {}).get("direction")' in main_src
+
+        # v0.45.135：原断言比对的是 main() 里的**字面量**
+        #   'swarm_direction=(swarm_data.get(ticker) or {}).get("direction")'
+        # 那条断言分不出「接线断了」与「变量名改了」——本次把该行重构成
+        # `_sr = swarm_data.get(ticker) or {}` 后它就红了，而接线其实更全了
+        # （v0.45.132 只接了 CLI 路径，生产日扫 `--swarm` 那条一直没传）。
+        # 改判 AST：调用点确实传了 swarm_direction 关键字即可。
+        # 更完整的「两个蜂群参数必须成对出现在每个调用点」守卫见
+        # tests/test_ml_catalyst_quality_source.py::TestProductionWiring
+        main_tree = ast.parse(open(M.__file__, encoding="utf-8").read())
+        wired = [n for n in ast.walk(main_tree) if isinstance(n, ast.Call)
+                 and getattr(n.func, "attr", "") == "generate_ml_enhanced_report"
+                 and any(k.arg == "swarm_direction" for k in n.keywords)]
+        assert wired, "generate_ml_report.main() 必须把蜂群方向传给报告生成器"

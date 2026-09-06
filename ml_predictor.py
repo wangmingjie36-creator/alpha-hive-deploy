@@ -189,11 +189,22 @@ class HistoricalDataBuilder:
 # 却直接与 `momentum_5d`（**百分点**）相加当预期收益。于是"B 级催化剂"
 # = +10 个百分点的 7 日预期收益。
 #
-# ⚠️ 生产里 `rival_bee.py` 还把特征写死成常量（`catalyst_quality="B+"`、
-# `crowding_score=50.0`、`iv_rank=50.0`、`put_call_ratio=1.0`），代入旧公式得
-# **`expected_7d = 8.0 + 0.8 × momentum_5d`** —— 一个截距 +8% 的一元线性式。
-# 该闭式在 1057 个配对样本上**零反例**。特征硬编码是另一个独立缺陷，
-# 见 `swarm_agents/rival_bee.py` 处注释，本次未动。
+# 📌 历史（写于 v0.44.1，**已不再成立**，保留是因为下面那个闭式的实证依据
+# 建立在它之上）：当时 `rival_bee.py` 把四个特征写死成常量
+# （`catalyst_quality="B+"`、`crowding_score=50.0`、`iv_rank=50.0`、
+# `put_call_ratio=1.0`），代入旧公式得 **`expected_7d = 8.0 + 0.8 × momentum_5d`**
+# —— 一个截距 +8% 的一元线性式，在 1057 个配对样本上**零反例**。
+#
+# ✅ v0.44.3 已修：四个特征改为从信息素板读真实值，回落值刻意选**可与真实值
+# 区分**的中性档并留 debug 日志（`catalyst_quality` 走
+# `catalyst_quality_from_score(ChronosBee.self_score)`、缺失回落 "B" 而非 "B+"；
+# `crowding_score` 走 `get_real_crowding_metrics`；`iv_rank`/`put_call_ratio`
+# 读 OracleBee 的 `details`）。
+#
+# ⚠️ v0.45.135 记：本段的旧表述用的是现在时（"还把特征写死成常量"），
+# 在 v0.44.3 之后又当作现状被引用了一次。**结论被推翻后要 grep 它在注释里的
+# 所有副本**——同 v0.45.75 的教训（一条已撤回的因果在 7 个文件里继续当设计
+# 理由用了 4 天）。
 #
 # 怎么修
 # -----
