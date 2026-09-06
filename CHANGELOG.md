@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.137] — 2026-09-06 — 占位（进行中：修 generate_ml_report 死读者 `self._swarm_cache`，volatility/market_sentiment 两个 ML 特征恒走 fallback）
+
 ## [0.45.136] — 2026-09-06 — 还债：10 个模块逐个补显式源桩，`_KNOWN_NETWORK_REACHERS` 清空
 
 v0.45.133 的传输层闸让整套测试**行为上**离线了，但那 10 个模块仍在调用数据源、
