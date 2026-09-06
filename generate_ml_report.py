@@ -2053,6 +2053,9 @@ class MLEnhancedReportGenerator:
         if sl_rows or tp_rows:
             sl_tp_html = f"""
             <div style="margin-bottom:20px;">
+                <p style="margin:0 0 10px;color:var(--ts);font-size:0.92em;">
+                    出场阶梯取自同标的同方向历史 T+7 收益分布 · 命中率 {_hr_txt}
+                </p>
                 <div class="grid-2">
                     <div><h3 style="color:var(--bear);">止损位</h3><table>{sl_rows}</table></div>
                     <div><h3 style="color:var(--bull);">止盈位</h3>
