@@ -126,7 +126,11 @@ class TestCatalystQualitySource:
                                  swarm_dimension_scores=None)
         assert "catalyst_quality" in g._ml_input_missing, (
             f"缺催化剂分必须进 _ml_input_missing，实测 {g._ml_input_missing}")
-        assert td.catalyst_quality == "B", "缺失约定是 B（不是基准档 B+）"
+        # v0.45.147：缺失约定由 "B" 改为 `None`。v0.45.135 选 "B" 的理由
+        # （"B+" 是基准档、会与"质量正好中等"同形）方向对，但**选中了众数**——
+        # 生产实测 "B" 占真实等级 57.4%（461/803），58 份缺失与它完全同形，
+        # 且 "B" 是合法枚举值 ⇒ `ml_predictor._missing_features` 不算它缺。
+        assert td.catalyst_quality is None, "缺失必须是 None，不是任何一个合法等级"
 
     @pytest.mark.parametrize("bad", [None, "n/a", float("nan"), True])
     def test_non_numeric_catalyst_is_treated_as_missing(self, bad):
@@ -135,7 +139,7 @@ class TestCatalystQualitySource:
         td = g._prepare_ml_input("XOM", _metrics(), _analysis(),
                                  swarm_dimension_scores={"catalyst": bad})
         assert "catalyst_quality" in g._ml_input_missing, f"{bad!r} 应视为缺失"
-        assert td.catalyst_quality == "B"
+        assert td.catalyst_quality is None      # v0.45.147：曾是 "B"
 
     def test_present_catalyst_is_not_flagged_missing(self):
         """成对断言：合法值必须**不**被标成缺失。
@@ -209,7 +213,7 @@ class TestParamThreadsThrough:
         captured = []
         gen = self._wire(monkeypatch, captured)
         gen.generate_ml_enhanced_report("XOM", _metrics())
-        assert captured[0].catalyst_quality == "B"
+        assert captured[0].catalyst_quality is None    # v0.45.147：曾是 "B"
         assert "catalyst_quality" in gen._ml_input_missing
 
 

@@ -500,8 +500,14 @@ class MLEnhancedReportGenerator:
         # 与本仓其余 5 处守卫同写法，显式排除。NaN 同理不能进 float 比较。
         # v0.45.137：三个维度派生特征共用 `_usable_dim`，不再各抄一份 isinstance 行。
         _catalyst_known = _usable_dim(_catalyst_raw)
-        # 取不到时用缺失约定 "B"（不是基准档 "B+"）——见 catalyst_quality_from_score
-        catalyst_quality = _cat_qual(_catalyst_raw) if _catalyst_known else "B"
+        # ── v0.45.147：取不到时是 None，不是 "B" ──
+        # v0.45.135 选 "B" 的理由是「"B+" 是 magnitude 1.0 的基准档，用它会让
+        # 『拿不到数据』与『质量正好中等』不可区分」——方向对，但**选中了众数**：
+        # 生产实测 "B" 占真实等级的 **57.4%**（461/803），是五档里最常见的一档，
+        # 于是 58 份缺失与 461 份真实 "B" 完全同形，比用 "B+" 更糟。
+        # 且它是合法枚举值 ⇒ `ml_predictor._missing_features` 不算它缺 ⇒
+        # `input_features_missing` 说缺、`feature_completeness` 说 12/12（58/803 份）。
+        catalyst_quality = _cat_qual(_catalyst_raw) if _catalyst_known else None
 
         # ── v0.45.140：odds / risk_adj / final_score 的唯一来源 = 蜂群 ──
         # 旧实现读 `analysis["dimension_scores"]` 与 `recommendation["score"]`，
@@ -654,7 +660,10 @@ class MLEnhancedReportGenerator:
             odds_score=odds_score,
             risk_adj_score=risk_adj_score,
             agent_agreement=agent_agreement,  # v0.45.146：蜂群逐蜂方向的共识度
-            direction_encoded=_direction_map.get(swarm_direction, 0.0),
+            # v0.45.147：方向不可得时是 None，不是 0.0 —— **0.0 在这张表里
+            # 正是 "neutral"**，一个真实类别。旧兜底让「方向拿不到」与
+            # 「蜂群判中性」在特征与账目上都同形（57/803 份）。
+            direction_encoded=(_direction_map[swarm_direction] if _dir_known else None),
         )
 
     def _generate_options_section_html(self, options: dict) -> str:
