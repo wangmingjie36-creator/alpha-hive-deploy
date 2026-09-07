@@ -455,6 +455,7 @@ def blend_scan(
     rows: Optional[List[Dict]] = None,
     ml: Optional[Dict[Tuple[str, str], float]] = None,
     embargo_days: int = EMBARGO_DAYS,
+    generation: str = "all",
     db_path: Optional[Path] = None,
     reports_dir: Optional[Path] = None,
     grid: Sequence[float] = BLEND_GRID,
@@ -492,6 +493,21 @@ def blend_scan(
     # 也就是 `pre-` 那一代 ⇒ 漏掉它会系统性高报旧世代，能在实际记分样本
     # 全属同一代时报出 `spans=True`（假警报）。v0.45.143 修。
     _gens: Dict[str, int] = {}
+    _excluded: Dict[str, int] = {}
+    # 先扫一遍确定「有哪些代」，`latest` 才有得挑。用 `ml` 的键而非 `dated`：
+    # 只有两边都有的行才可能被记分，拿全部结果日去推「最新代」会指向一个
+    # 一条样本都没有的代，然后过滤出空集 —— 空集上任何断言都恒真。
+    _joined_days = sorted({d for d, _ in ml} & {r["date"] for r, _ in dated})
+    _present = sorted({ml_estimator_generation(day) for day in _joined_days})
+    if generation == "all":
+        _sel = None
+    elif generation == "latest":
+        _sel = ml_estimator_generation(_joined_days[-1]) if _joined_days else None
+    else:
+        _sel = generation
+        if _sel not in _present:
+            return {"status": "unknown_generation", "requested": generation,
+                    "available_generations": _present, "embargo_days": embargo_days}
     for r, d in dated:
         key = (r["date"], r["ticker"])
         if key not in ml:
@@ -501,8 +517,15 @@ def blend_scan(
         if not hist:
             continue
         base = sum(h["hit"] for h in hist) / len(hist)
-        recs.append((r["hit"], base, ml[key] / 100.0))
         _g = ml_estimator_generation(r["date"])
+        # v0.45.159：`--generation` 把「跨代」这个警告变得可行动 —— 只报警而
+        # 没有干净答案可拿，读的人只能忽略它。过滤放在 base（时点基准率）**之后**：
+        # 基准率是纯收益序列、与 ML 估计量无关，用全部历史算才对；被滤掉的只是
+        # 不属于该代的**被记分行**。滤在前面会连带缩短基准率的历史窗口。
+        if _sel is not None and _g != _sel:
+            _excluded[_g] = _excluded.get(_g, 0) + 1
+            continue
+        recs.append((r["hit"], base, ml[key] / 100.0))
         _gens[_g] = _gens.get(_g, 0) + 1
         if first is None:
             first = r["date"]
@@ -545,6 +568,10 @@ def blend_scan(
         # v0.45.140：估计量代际。>1 代表本次扫描在混算两代口径的 ML 概率。
         "ml_estimator_generations": dict(sorted(_gens.items())),
         "spans_estimator_generations": len(_gens) > 1,
+        "generation_filter": generation,
+        "scored_generation": _sel,                      # None = 未过滤（池化全部）
+        "available_generations": _present,
+        "excluded_by_generation": dict(sorted(_excluded.items())),
     }
 
 
@@ -641,6 +668,27 @@ def _fmt(res: Dict, title: str) -> str:
                          f"{g['calibration_error_pp']:>9.1f}pp{tag}")
         lines += ["", f"  生产 w={res['production_w']} 与最优 w={res['best_w']} 的 Brier 差 {res['gap']:.4f}"
                       f"（告警阈 {BRIER_MARGIN}）"]
+        # v0.45.159：代际**必须**出现在人看的这一层。v0.45.140 把
+        # `spans_estimator_generations` 放进了返回字典，但 `_fmt` 一次没印过 ——
+        # 于是「本次记分跨了两代不可比口径」只有读 --json 的人看得见，
+        # 而跑 CLI 的人看到的是一张干净的表。算了没人读＝没算。
+        _g = res.get("ml_estimator_generations") or {}
+        _scored = res.get("scored_generation")
+        lines += ["", "  ML 估计量代际（样本数）：" if _g else "  ML 估计量代际：无"]
+        for _name, _cnt in _g.items():
+            lines.append(f"    {_cnt:>5}  {_name}")
+        if res.get("excluded_by_generation"):
+            _ex = "、".join(f"{k}×{v}" for k, v in res["excluded_by_generation"].items())
+            lines.append(f"    （--generation={res.get('generation_filter')} 已排除：{_ex}）")
+        if res.get("spans_estimator_generations"):
+            lines += [
+                "",
+                "  ⚠️ 本次记分**跨了多代 ML 估计量**：不同代的 ml_probability 由不同",
+                "     特征来源产出，彼此不可比，池化出的最优 w 是两个口径的平均，",
+                "     对任何一代都不成立。要拿干净答案：--generation latest",
+            ]
+        elif _scored:
+            lines.append(f"    ↑ 本次只记分 {_scored} 这一代")
     else:
         lines += [
             f"  账本 {res['ledger_rows']} 行，其中印出概率 {res['with_probability']} 行"
@@ -673,6 +721,9 @@ def main(argv=None) -> int:
                     help="扫融合权重 w∈[0,1]（时点隔离），判 PRODUCTION_BLEND_W 是否被打过")
     ap.add_argument("--reports-dir", default=None,
                     help="analysis-*-ml-*.json 所在目录（默认模块目录）")
+    ap.add_argument("--generation", default="all",
+                    help="只记分某一代 ML 估计量：latest / <版本标签> / all（默认）。"
+                         "跨代池化出的最优 w 对任何一代都不成立，见 --blend-scan 输出的 ⚠️")
     ap.add_argument("--embargo-days", type=int, default=EMBARGO_DAYS)
     ap.add_argument("--min-sample", type=int, default=MIN_SAMPLE)
     ap.add_argument("--json", action="store_true")
@@ -687,8 +738,10 @@ def main(argv=None) -> int:
     _db = Path(args.db) if args.db else None
     if args.blend_scan:
         res = blend_scan(embargo_days=args.embargo_days, db_path=_db,
-                         reports_dir=Path(args.reports_dir) if args.reports_dir else None)
-        title = "融合权重扫描（时点隔离）"
+                         reports_dir=Path(args.reports_dir) if args.reports_dir else None,
+                         generation=args.generation)
+        title = ("融合权重扫描（时点隔离）" if args.generation == "all"
+                 else f"融合权重扫描（时点隔离 · generation={args.generation}）")
     elif args.walk_forward:
         res = walk_forward(embargo_days=args.embargo_days, min_sample=args.min_sample,
                            db_path=_db)
