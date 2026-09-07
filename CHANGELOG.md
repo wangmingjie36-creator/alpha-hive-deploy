@@ -5,10 +5,130 @@
 
 ---
 
-## [0.45.151] — 2026-09-07 — 占位（进行中：`swarm_agents/rival_bee.py:87` 的 `_cat_quality = "B"` —— v0.45.147 同族**最后一处**缺失哨兵选中众数。**本条先量再决定，可能以「不改代码、只登记」收尾。**
-范围＝① 量命中率：`expected_returns` 是闭式 `mag × momentum_5d × scale`，而 `expected_30d` 与 `momentum_5d` 双双落在 803 份生产 `analysis-*-ml-*.json` 里 ⇒ 可**反解**出 rival_bee 当时实际用的 `catalyst_quality`，再与同文件 `pheromone_compact` 里 ChronosBee 的 `s` 经 `catalyst_quality_from_score` 算出的应得等级逐份对照，得出「板上读不到 ChronosBee」的真实命中率（同 v0.45.108 判据：先数生产数据里这个条件历史命中几次，0 或个位数即恒假分支、不值得付代价）；② 若命中率可观，再量 `ml_auxiliary` → `ml_adjustment` → `final_score` 的实际位移幅度；③ 据②决定是否往 **`ic_rerun_readiness._COHORT_HISTORY`** 追加世代边界（**不是** `probability_scorecard._ML_ESTIMATOR_GENERATIONS`，两条是独立测量管道），追加会作废已累积样本，代价实打实；④ 连带处理/登记 `ml_predictor_extended.py` 内第四份 catalyst 编码副本（`SimpleMLModel.encode_catalyst_quality` 的 `.get(quality, 0.5)` 与 `_CATALYST_MAGNITUDE.get(..., 1.0)`）——rival_bee 若开始传 `None`，这两处会静默给合法中性值而非 NaN。
-**不动** `ml_predictor.catalyst_quality_from_score` 的函数契约（v0.45.147 已在其 docstring 记录理由被推翻的证据并声明 rival_bee 依赖它）、**不动** `_prefetched`/训练口径、**不动** `EVALUATION_WEIGHTS`。
-⚠️ 与 v0.45.149 / v0.45.150 **不重叠**（那两条管模型文件路径与求值时机，本条管一个特征的缺失语义）；与 v0.45.147 **同族续集**，会碰 `ml_predictor.py` `catalyst_quality_from_score` 附近的注释，合并时逐块核对）
+## [0.45.151] — 2026-09-07 — 缺失哨兵选中众数（同族最后一处），而缺失本身是板挤出来的
+
+v0.45.147 的同族收尾。**结论与立项假设不同**：`rival_bee.py:87` 的
+`_cat_quality = "B"` 命中率不是「个位数的恒假分支」，而是当前世代 **14.4%**；
+且它之所以被命中，不是「上游没跑」，是 **`PheromoneBoard` 把 ChronosBee 的条目挤掉了**。
+
+### 怎么量的（无需插桩，803 份历史 JSON 可回溯反解）
+
+`expected_returns()` 是闭式 `mag × momentum_5d × horizon_scale`，而 `expected_30d`
+与 `momentum_5d` 双双落在生产 `analysis-*-ml-*.json` 里 ⇒ **反解**出 rival_bee 当时
+实际用过的 `catalyst_quality`，再与同文件 ChronosBee 的真分对照。
+
+判据用**精确一致**而非容差 snap：五个候选等级各自检查 `round(mag·mom·s, 2)` 是否
+对三个期限全部吻合，恰好一个候选成立才算可判定。
+
+三个必须先做的自证，缺一个结论就不成立：
+
+1. **世代切分**：闭式在 2026-08-24 之前**不成立**（v0.44.1 前的旧公式），
+   逐日检验后只取 2026-08-24 起的 188 份。不先切分会得到 86% 的「两者皆不相容」。
+2. **仪器自证**：首轮拿 `pheromone_compact` 的分数当判据，得出 5.5% 的「读错」——
+   **全部是假的**：compact 把分数舍到 1 位小数，真值 `7.45`（B+）被存成 `7.5`，
+   恰好压在 A 的切点上。改用 `agent_details` 的 2 位小数后归零。
+3. **重放自证**：用 `ml_predictor_extended.MLPredictionService`（rival_bee 实际走的那个，
+   **不是** `ml_predictor` 的同名类）重建输入，**172/172 份 `probability` 逐位复现**生产值。
+   附带证明：`iv_rank`/`put_call_ratio` 的 50.0/1.0 兜底在这 172 份里命中 0 次
+   ⇒ OracleBee 的板读**没有**失败，问题专属于 ChronosBee 的低分条目。
+
+### 实测
+
+| 量 | 值 |
+|---|---|
+| 当前世代样本 | 188 份（2026-08-24 ~ 09-04，10 个扫描日） |
+| 真值 ≠ `"B"`（有判别力） | 39 份 |
+| 其中用了缺失哨兵 `"B"` | **27 份（69.2%）** |
+| 占全体 | **27/188 = 14.4%** |
+| 等级流向 | **全部是 `C → B`**，无一例外 |
+
+按 ChronosBee 分数分层完全单调：`4.00` 分 26/28 读丢、`5.00` 分 1/1 读丢、
+`7.45` 分 **0/10** 读丢。`5.50~6.02`（共 149 份）真值本来就是 `"B"`，同形不可区分。
+
+### 根因：`MAX_ENTRIES` 还停在「9 只标的」的年代
+
+`PheromoneBoard.MAX_ENTRIES = 80`，注释写着「7 Agent × 9 Ticker = 63 条，80 条保留
+完整一轮 + 余量」——而 `config.WATCHLIST` 现为 **30 只**，一轮约 210 条。溢出淘汰键是
+`nlargest(80, key=(self_score, support_count, pheromone_strength))`，即**先扔分最低的**。
+ChronosBee「无近期催化剂」恒落 **4.0**，是全板最低的一档，于是它在 RivalBee（Phase-1.4）
+读到之前就被挤出去了。
+
+⚠️ **缺失与被测量的量反相关**：越是「没有催化剂」越读不到，而回落值 `"B"`(0.9) 比真值
+`"C"`(0.7) **高** ⇒ `expected_7d/30d` 幅度系统性高估 **28.6%**，单向。
+
+用生产发布序列跑真实 `PheromoneBoard` 重放复现了同一形状：≤16 只标的的日子 **0 条**丢失，
+24~30 只的日子丢 3~11 条（重放取「Chronos 最后发」这一对它最有利的顺序，故是下界）。
+
+### 下游位移（改前/改后全量对照，n=173）
+
+- `probability` 变化 **0/173** ⇒ `ml_score` / `ml_adjustment` / **`final_score` 位移恒为 0**。
+  原因：当前 HGB（`ml_predictor_extended` 的 30 条硬编码样本训练）catalyst 置换重要度 **0.0**，
+  `B`(0.55) 与 `C`(0.40) 落同一叶。
+- `expected_30d` 变化 **24/173**，最大 |Δ| **6.13 个百分点**（CRM 09-01：+27.57 → +21.44）。
+  方向 **0 例翻转**（`mag > 0` 保号）。
+- 这两个量以 `ml.expected_7d` / `ml.expected_30d` 进 `signal_archive`，
+  正是 `ic_rerun_readiness` 收尾推荐的 `signal_archive.py --analyze` 所分析的对象。
+
+### Fixed
+
+- `pheromone_board.py`：新增 `get_agent_entry(ticker, agent_id)` 与其背后的
+  `_latest_by_agent` 定点索引，**不受 MAX_ENTRIES 溢出淘汰影响**；`clear()` 一并清空。
+  保留墙钟过期（3600s，与 `publish` 存活检查 2 同值）——那个判的是「上一轮的陈货」，
+  该拦；被容量挤掉则不该拦。`_entries` / `get_top_signals` / `detect_resonance` 语义**未动**。
+- `swarm_agents/base.py`：`_read_peer` 改走定点索引，`get_top_signals` 保留为回退
+  （测试替身与旧 board 对象只有那一个方法）。全仓 `_read_peer` 只有 rival_bee 两个调用点，
+  影响面封闭。
+- `swarm_agents/rival_bee.py`：读不到时 `catalyst_quality` 由 `"B"` 改为 **`None`**
+  （→ `_encode_catalyst` → NaN → HGB 原生缺失处理，v0.45.147 已铺好这条路）。
+  分数可用性检查照抄本仓既有那一句（`isinstance(x,(int,float)) and not isinstance(x,bool)`）——
+  `bool` 是 `int` 子类，漏掉它会让 `True` 变成 1.0 分的「真实观测」。
+- `ml_predictor_extended.py`：第四份 catalyst 编码表 `encode_catalyst_quality(None)`
+  由 `0.5` 改为 `NaN`，与主表 `_encode_catalyst` 对齐（`0.5` 恰好夹在 C=0.40 与 B=0.55
+  **之间**，是任何真实等级都产不出的值）；同时补 `normalize_feature` 的 NaN 闸
+  （否则新的 NaN 会一路传成 `probability=NaN`，再被 rival_bee 的守卫改写成 0.5，
+  又一次「把失败改写成没发生过」）。未知字面量仍 `0.5`，与主表同，**未动**。
+
+### Added
+
+- `swarm_agents/rival_bee.py`：`data_quality["catalyst_quality"]` = `"peer_read"` / `"unreadable"`。
+  CLAUDE.md 硬检查项「这个失败，下游怎么知道？」——此前只有一行 `_log.debug`，
+  生产日志级别之下等于没有观测点，而回落值又与真值同形。读不到现在还打 `INFO`/`WARNING`。
+- `ic_rerun_readiness._COHORT_HISTORY`：追加 `("2026-09-07", "v0.45.151", ...)`。
+  **`final_score` 位移为 0 仍登记**，两条理由：① `ml.expected_*` 进 `signal_archive`，
+  那是另一条测量管道（v0.45.140 的教训：世代边界要按管道分别问）；
+  ② Δ=0 是**当前模型**的性质而非定义性质——降级链上的 `SimpleMLModel` 给 catalyst
+  0.25 权重，同一改动在它上面 Δ≠0。定义变了就登记。
+  **本次追加不作废任何已累积样本**：上一条边界 09-05 至今 `predictions` 内 0 条样本
+  （`ic_rerun_readiness` 输出「世代内总样本 0 条」），下次定时扫描 09-08。
+  这个窗口不是永远开着的——晚一天做，代价就实打实了。
+- `tests/test_rival_bee_catalyst_missing.py`（15 项）：溢出后仍读得到 / 真读不到给 None /
+  低分条目要到达模型为 `"C"` / 观测点 / 第四份编码副本 / 世代边界。
+  每条都配了反向的成对断言（防「一律 None」「永远返回点什么」「恒写 peer_read」）。
+
+### Changed
+
+- `tests/test_rival_bee_peer_features.py`：`test_falls_back_distinguishably_when_peers_absent`
+  的期望由 `"B"` 改为 `None`。原约定「回落 "B" 而不是 "B+"」方向对但**选错了值**——
+  `"B"` 是众数（461/803 = 57.4%）。
+- `tests/test_oracle_cboe_source.py`：`TestCohortBoundaryAppended` 由「`_COHORT_HISTORY[-1]`
+  必须是 v0.45.128」改为「v0.45.128 那一条在且内容正确」。原断言与同一份表 docstring 里
+  「任何再次改动 RivalBee 特征来源都必须追加一条」**直接冲突**：照规矩追加就会让它变红，
+  于是它保护的不是不变式，而是「别再追加了」。单调递增与内容检查保留。
+
+### 教训
+
+- **「先量再决定」两次都推翻了立项时的假设**：命中率不是个位数（是 14.4%），
+  代价不是「实打实」（当前是 0 条样本）。两个假设都合理，都错了。
+- **仪器要先自证**：`pheromone_compact` 的 1 位小数舍入凭空造出 5.5% 的「读错率」，
+  差点被当成结论。同 v0.45.140。
+- **只改哨兵会让事情变糟**：`_CATALYST_MAGNITUDE.get(None, 1.0)` = 1.0 比现行的 0.9
+  **更远离**真值 0.7。哨兵是症状，板淘汰是病因；只改症状那一处 = 把 28.6% 的高估变成 42.9%。
+  改一个「缺失表示法」之前，先看它落到下游的**每一条**兜底路径上会变成什么。
+- **mutation 脚手架自己栽了一次**：`shutil.copy` 不保留 mtime ⇒ `shutil.move` 还原后源文件
+  比变异时写出的 `__pycache__` 还旧 ⇒ Python 继续用变异后的字节码，
+  下一个变异的基线带着上一个变异。**是收尾那次「还原后 FAILED=3 ≠ 基线 0」把它暴露的**——
+  没有那道反向检查就会得到一份「全部被抓到 ✓」的假报告（M7 实测由 3 变 2，确认第一轮确实被污染）。
+  ⇒ mutation 脚手架必须：每次跑前清 `__pycache__` + 每个变异**还原后再验一次全绿**。
 
 ---
 
