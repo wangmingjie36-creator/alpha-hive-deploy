@@ -2179,6 +2179,7 @@ class AlphaHiveDailyReporter:
                     swarm_direction=_sr.get("direction"),
                     swarm_dimension_scores=_sr.get("dimension_scores"),
                     swarm_final_score=_sr.get("final_score"),
+                    swarm_agent_directions=_sr.get("agent_directions"),
                 )
 
                 if ticker in swarm_data:

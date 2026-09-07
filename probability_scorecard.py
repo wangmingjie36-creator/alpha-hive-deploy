@@ -119,6 +119,18 @@ _ML_ESTIMATOR_GENERATIONS = [
      "（final_score 一支落在 v0.45.141，同日与 v0.45.140 合并）。"
      "两批合计：803 份重放 probability 变动 > 0.02 的样本分别占 52.4% 与 27.3%。"
      "此日之前的 `ml_probability` 由旧估计量产出，与之后不可比"),
+    ("2026-09-07", "v0.45.146",
+     "服务端最后两个常数特征槽接蜂群真值："
+     "① crowding_score 由字面量 50.0（生产 777/803 恒定；上游 `realtime_metrics`"
+     "里 `crowding_score` 与 `short_interest_ratio` 两个键都不存在）改为蜂群"
+     "signal 维分 × 10 —— 与训练端 `crowding_score=_sig * 10` 同一个量"
+     "（**不是** ScoutBee 真拥挤度，那个与本槽 Spearman ρ=−0.46）；"
+     "② agent_agreement 由字面量 0.5 改为 `agent_directions` 里与蜂群方向"
+     "一致的蜂占比，公式与取数链均照训练端。"
+     "803 份重放：|Δprobability| 中位 0.0166 / max 0.1809，"
+     "**46.0% 的样本变动 > 0.02**（历次接线中最大的一次——`crowding` 是当前"
+     "模型 permutation importance 排名第一的特征，+0.0826）；"
+     "probability 唯一值 308 → 462。与前一代不可比"),
 ]
 
 
