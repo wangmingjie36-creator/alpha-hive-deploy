@@ -156,9 +156,18 @@ class TestPredicateHasTeeth:
 # ===================================================================
 # 2. 磁盘读取 —— 成对
 # ===================================================================
-def _write_day(tmp_path, date, probs, *, broken=None, no_prob=()):
+def _write_day(tmp_path, date, probs, *, broken=None, no_prob=(),
+               inputs=None, swarm=True):
+    """`inputs`：逐份的 `ml_prediction.input`（None = 各不相同）。
+    `swarm`：是否写 `swarm_results`（False 模拟蜂群没跑）。"""
     for i, p in enumerate(probs):
-        payload = {"ml_prediction": {"prediction": {"probability": p}}}
+        payload = {"ml_prediction": {
+            "prediction": {"probability": p},
+            "input": (inputs[i] if inputs is not None
+                      else {"momentum_5d": float(i), "crowding_score": 50.0}),
+        }}
+        if swarm:
+            payload["swarm_results"] = {"final_score": 5.0}
         (tmp_path / f"analysis-T{i:02d}-ml-{date}.json").write_text(
             json.dumps(payload), encoding="utf-8")
     for t in no_prob:
@@ -208,6 +217,93 @@ class TestDiskGate:
         v = G.check_day(tmp_path, "2026-09-04")
         assert v.verdict == "undetermined"
         assert v.exit_code == 3
+
+
+class TestInputSideCollapse:
+    """区分「蜂群没跑」与「模型退化」—— 但**两者都红**。
+
+    2026-06-25 实测：9 份 probability 逐位相同，而当日 **9/9 份无
+    `swarm_results`**、记录的输入只有 **2** 个不同向量（其余四槽全是兜底常数）。
+    闸若照旧说「拿当日模型快照重放」，就是把人指向错的地方。
+
+    ⚠️ 本组**刻意断言退出码不变**。有人提议把这类日子放行，三条理由不放：
+    ① 记录的 `input` 只有 5/12 维，据它放行会漏掉真模型退化（漏报比误报危险）；
+    ② 那天全站照样印出 9 份相同的「ML 预测 51.7%」，报告一样误导；
+    ③ 「当日全无 swarm_results」并不必然塌成常数 —— 06-30(10 份, distinct=5)、
+       07-02(3 份, distinct=3) 同样全缺却根本没被点亮，拿它当排除条件过宽。
+    """
+
+    #: 06-25 的真实形状：四槽兜底常数 + catalyst 只有 A / A+ 两种
+    _P0625 = [0.5173705844225501] * 9
+    _I0625 = [{"catalyst_quality": q, "crowding_score": 50.0,
+               "market_sentiment": 0.0, "momentum_5d": 0.0, "volatility": 5.0}
+              for q in ("A", "A", "A", "A", "A+", "A", "A", "A", "A+")]
+
+    def test_collapsed_inputs_still_hard_error(self, tmp_path):
+        _write_day(tmp_path, "2026-06-25", self._P0625,
+                   inputs=self._I0625, swarm=False)
+        v = G.check_day(tmp_path, "2026-06-25")
+        assert v.is_degenerate, "输入塌了也要红：全站印出 9 份相同预测同样是误导"
+        assert v.exit_code == 1, "退出码不得因输入塌了而放行"
+        assert v.inputs_also_collapsed is True
+        assert v.distinct_inputs == 2
+        assert v.n_without_swarm_results == 9
+
+    def test_collapsed_inputs_message_points_upstream(self, tmp_path):
+        _write_day(tmp_path, "2026-06-25", self._P0625,
+                   inputs=self._I0625, swarm=False)
+        msg = G.check_day(tmp_path, "2026-06-25").describe()
+        assert "先查蜂群" in msg
+        assert "重放" not in msg, "输入塌了的日子不该叫人去重放模型快照"
+
+    def test_discriminating_inputs_message_points_at_model(self, tmp_path):
+        """成对的另一半：输入有区分度时，措辞必须指向模型。
+
+        只写上一条的话，把 `inputs_also_collapsed` 改成恒 True 也全绿。
+        """
+        _write_day(tmp_path, "2026-09-04", PROD_0904_CONSTANT)  # 12 个不同输入
+        v = G.check_day(tmp_path, "2026-09-04")
+        assert v.inputs_also_collapsed is False
+        assert v.distinct_inputs == 12
+        msg = v.describe()
+        assert "恒定来自模型" in msg and "重放" in msg
+        assert "先查蜂群" not in msg
+
+    def test_healthy_day_is_unaffected(self, tmp_path):
+        """成对：新观测量不得把健康日弄红。"""
+        _write_day(tmp_path, "2026-09-03", PROD_0903_HEALTHY)
+        v = G.check_day(tmp_path, "2026-09-03")
+        assert v.verdict == "ok" and v.exit_code == 0
+        assert v.inputs_also_collapsed is False
+
+    def test_missing_swarm_alone_does_not_flag(self, tmp_path):
+        """06-30 / 07-02 的形状：全无 swarm_results 但概率有区分度 ⇒ 必须绿。
+
+        这条钉死「别拿 no-swarm 当排除/触发条件」——它与退化不是一回事。
+        """
+        _write_day(tmp_path, "2026-06-30", PROD_0903_HEALTHY, swarm=False)
+        v = G.check_day(tmp_path, "2026-06-30")
+        assert v.n_without_swarm_results == 12
+        assert v.verdict == "ok" and v.exit_code == 0
+
+    def test_verdict_does_not_read_unreliable_or_missing_fields(self, tmp_path):
+        """⚠️ 不得改用 `unreliable` / `input_features_missing` 做判据。
+
+        实测 2026-06-25 那 9 份里这两个键的值都是 **None**（那天 schema 没有它们）。
+        照此实现的排除逻辑会在**它唯一要排除的那一天**永不触发
+        ——即 v0.45.108「闸门自己恒假」。这条用「两个字段都 None」的夹具钉住：
+        判定必须照常成立。
+        """
+        for i, p in enumerate(self._P0625):
+            (tmp_path / f"analysis-T{i:02d}-ml-2026-06-25.json").write_text(
+                json.dumps({"ml_prediction": {
+                    "prediction": {"probability": p, "unreliable": None},
+                    "input": self._I0625[i],
+                    "input_features_missing": None,
+                }}), encoding="utf-8")
+        v = G.check_day(tmp_path, "2026-06-25")
+        assert v.is_degenerate and v.exit_code == 1
+        assert v.inputs_also_collapsed is True
 
 
 class TestEnforceDay:
