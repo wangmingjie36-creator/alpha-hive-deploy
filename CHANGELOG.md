@@ -5,6 +5,89 @@
 
 ---
 
+## [0.45.152] — 2026-09-07 — 运维：生产 `ml_model.json` 从 `pheromone.db` 重训恢复（不改代码）
+
+**本条不改任何代码**，只记录一次生产产物的恢复，以及恢复过程中拿到的四条实测。
+根因归 v0.45.149（`save_model` 相对路径默认值），修复也归它——**本条不是修复**。
+
+### 背景
+
+v0.45.149 查明：`ml_predictor` 三处 `save_model(filename="ml_model.json")` 的默认值是
+**相对路径**，而 `MLPredictionService.train_model()` 成功后**无参**调用它 ⇒
+在主 checkout 跑 pytest 就会把夹具模型写到仓库根。2026-09-07 01:15 实际发生过一次：
+
+| | 污染前 | 污染后 |
+|---|---|---|
+| `n_samples_seen` | 497 | 30 |
+| `training_accuracy` | 71.6297786720322 | 96.66666666666667 |
+| `oos_accuracy` | 44.354838709677416 | `None` |
+| 文件大小 | 61,234 B | 18,839 B |
+
+### 恢复
+
+`build_training_data_from_db(db_path=<生产 db 绝对路径>)` 取 **497** 条重训，
+`save_model(<生产路径绝对值>)` 落盘。**两个路径都显式给绝对值**——正是绕开
+出事的那两个默认值（本次从 worktree 执行，用默认值会写错地方）。
+
+**结果与污染前的健康副本逐字节相同**（`cmp` 通过），
+`acc 71.6297786720322` / `oos 44.354838709677416` 全部逐位吻合。
+HGB 的 `random_state=42` ⇒ 同一份 db + 同一份代码，重建是确定性的。
+
+⚠️ 只看 `n_samples_seen=497` 不够，另做三项判别性检查：
+- **不是常数函数**：训练集上输出唯一值 358/497、sd 0.0840、范围 [0.3016, 0.6853]
+- **往返一致**：`load_model()` 回来后逐条最大差 `0.00e+00`
+- **端到端**：按生产路径加载后重放近四个扫描日，输出均有区分度
+  （09-01 唯一值 19/24、09-02 11/12、09-03 12/12、09-04 12/12）
+
+保留的证据（均被 `.gitignore:30` 的 `ml_model*.json` 忽略，不进仓库）：
+- `ml_model.corrupted-2026-09-07T0130.json` —— 被污染的那份，**v0.45.149 的调查证据，特意不删**
+- `ml_model_cache.pre-restore-2026-09-07.json` —— 污染前的健康副本
+
+### 四条实测
+
+1. **`ml_model_cache.json` 从头到尾没被污染**（`n=497` 完好）。
+   因为它走 `PATHS.home / "ml_model_cache.json"` 是**绝对**路径，而 `ml_model.json`
+   走那个相对默认值。**一个绝对一个相对，正是这次只坏一半的原因**——
+   也正是 v0.45.149 第 ① 项（路径收敛到单一真相）要消掉的不对称。
+
+2. **判模型真伪不能用 accuracy。**
+   夹具模型的 `training_accuracy` 是 **96.67**，比真模型的 **71.63 更好看** ⇒
+   拿 accuracy 当健康度会把假的判成更好的。可用信号是
+   `oos_accuracy is None` + `n_samples_seen`（与 v0.45.149 第 ③ 项的设计一致）。
+
+3. **09-04 的恒定输出归因到模型，不是输入。**
+   方法：**固定一端换另一端**——用**污染前的旧服务端代码** + **恢复后的模型**
+   重放 09-04 那 12 只票，得 **11 个不同值**（sd 0.0425）；
+   而当日真实落盘是 **1 个值**（12 份全是 `0.5899693787928219`）。
+   ⇒ 输入是有区分度的，是当时在用的模型退化了。
+   判据：**要分离「输入没区分度」与「模型退化」，就固定一端换另一端**，别只看输出。
+
+4. **v0.45.145 的「当日概率全同」闸有一个确定的假阳性日。**
+   全部 77 个扫描日里「当日唯一值 == 1」有 **2 天**：09-04（真退化）与
+   **2026-06-25**——但后者那 9 份**全都没有 `swarm_results`** ⇒ 12 维全 `None` ⇒
+   输入向量逐份相同 ⇒ 输出相同**属预期**。
+   ⇒ 闸门要先排除「当日全部标的都无蜂群数据」的日子，否则每逢蜂群整体挂掉误报一次，
+   而那天真正该报的是「蜂群没跑」不是「模型退化」。
+
+### ⚠️ 这不是修复
+
+**本条一行代码没改**，下次从主 checkout 跑 pytest 照样会再覆盖一次。
+v0.45.149 的 ①（路径收敛）②（tests autouse fixture 重定向到 tmp_path）
+③（加载守卫）⑤（成对测试 + mutation check）**仍然全部需要**。
+
+「无版本快照」≠「不可复原」——只要 **db + 代码 + 随机种子**三者都在，模型就是可重建的；
+真正缺的是**当时用的是哪个模型**这一事实的记录（v0.45.145 第 ② 项的版本快照目录治这个）。
+
+已分别通知 v0.45.149（`pensive-williams-cd697b`，告知第 ④ 项勿重复做）
+与 v0.45.145（`relaxed-hellman-58c448`，告知假阳性日与基线换代）。
+
+⚠️ 给 v0.45.145 的另一条：本次 v0.45.146 已让 803 份重放的 probability
+唯一值 **308 → 462**、46.0% 样本 |Δ| > 0.02 ⇒ **闸门阈值若从历史 `ml_probability`
+估基线，不能跨代池化**，世代边界见 `probability_scorecard._ML_ESTIMATOR_GENERATIONS`
+（`2026-09-07 → v0.45.146+v0.45.147`）。
+
+---
+
 ## [0.45.151] — 2026-09-07 — 占位（进行中：`swarm_agents/rival_bee.py:87` 的 `_cat_quality = "B"` —— v0.45.147 同族**最后一处**缺失哨兵选中众数。**本条先量再决定，可能以「不改代码、只登记」收尾。**
 范围＝① 量命中率：`expected_returns` 是闭式 `mag × momentum_5d × scale`，而 `expected_30d` 与 `momentum_5d` 双双落在 803 份生产 `analysis-*-ml-*.json` 里 ⇒ 可**反解**出 rival_bee 当时实际用的 `catalyst_quality`，再与同文件 `pheromone_compact` 里 ChronosBee 的 `s` 经 `catalyst_quality_from_score` 算出的应得等级逐份对照，得出「板上读不到 ChronosBee」的真实命中率（同 v0.45.108 判据：先数生产数据里这个条件历史命中几次，0 或个位数即恒假分支、不值得付代价）；② 若命中率可观，再量 `ml_auxiliary` → `ml_adjustment` → `final_score` 的实际位移幅度；③ 据②决定是否往 **`ic_rerun_readiness._COHORT_HISTORY`** 追加世代边界（**不是** `probability_scorecard._ML_ESTIMATOR_GENERATIONS`，两条是独立测量管道），追加会作废已累积样本，代价实打实；④ 连带处理/登记 `ml_predictor_extended.py` 内第四份 catalyst 编码副本（`SimpleMLModel.encode_catalyst_quality` 的 `.get(quality, 0.5)` 与 `_CATALYST_MAGNITUDE.get(..., 1.0)`）——rival_bee 若开始传 `None`，这两处会静默给合法中性值而非 NaN。
 **不动** `ml_predictor.catalyst_quality_from_score` 的函数契约（v0.45.147 已在其 docstring 记录理由被推翻的证据并声明 rival_bee 依赖它）、**不动** `_prefetched`/训练口径、**不动** `EVALUATION_WEIGHTS`。
