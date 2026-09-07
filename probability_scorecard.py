@@ -466,7 +466,7 @@ def blend_scan(
     # 本循环有两道过滤（`key not in ml` 与 embargo 的 `not hist`），
     # 而被第二道丢掉的恰好是**最早那批行**（cutoff 之前没有历史），
     # 也就是 `pre-` 那一代 ⇒ 漏掉它会系统性高报旧世代，能在实际记分样本
-    # 全属同一代时报出 `spans=True`（假警报）。v0.45.142 修。
+    # 全属同一代时报出 `spans=True`（假警报）。v0.45.143 修。
     _gens: Dict[str, int] = {}
     for r, d in dated:
         key = (r["date"], r["ticker"])

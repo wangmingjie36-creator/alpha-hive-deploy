@@ -386,7 +386,7 @@ class TestMLEstimatorGenerations:
     def test_generation_counts_reconcile_with_n(self):
         """两套账目必须对上：代际计数之和 == 实际记分的样本数 `n`。
 
-        v0.45.142：`recs` 构建循环有**两个**过滤（`key not in ml` 与
+        v0.45.143：`recs` 构建循环有**两个**过滤（`key not in ml` 与
         embargo 的 `not hist`），而代际计数只复制了第一个 ⇒ 计数之和 > n。
         被第二个过滤丢掉的恰好是**最早那批行**（它们的 cutoff 之前没有历史），
         也就是 `pre-` 那一代 ⇒ 系统性高报旧世代。
