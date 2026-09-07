@@ -5,7 +5,173 @@
 
 ---
 
-## [0.45.149] — 2026-09-07 — 占位（进行中：跑 pytest 会覆盖生产 `ml_model.json` —— `ml_predictor` 三处 `save_model(filename="ml_model.json")` 默认值是**相对路径**，`MLPredictionService.train_model()` 成功后**无参**调用它，而 `tests/` 约 12 处 `svc.train_model()` 不传 tmp 路径 ⇒ **在主 checkout 跑测试 = 用夹具模型覆盖生产模型**。2026-09-07 01:15 已实际发生：`n=497 / acc 71.63 / oos 44.35` → `n=30 / acc 96.67 / oos None`，且已退化成常数函数。范围＝① 模型路径收敛到单一真相（模块级常量 / `hive_logger.PATHS` 家族），默认值不再是相对字符串；② `tests/` autouse fixture 把模型写入重定向到 tmp_path，任何测试都不可能写到仓库根；③ 加载时 `oos_accuracy is None` 且 `n_samples_seen` 明显偏低即拒绝并报错（**不能用 accuracy 判**——夹具的 96.67/100.0 比真模型 71.63 更好看）；④ 从 `pheromone.db` 重训恢复生产模型；⑤ 成对测试 + mutation check。⚠️ 与 v0.45.145 **互补**（那条查症状＝当日唯一值闸 + `ml_model.json` 版本快照目录，本条堵源头＝路径收敛与加载守卫），两边都会碰 `ml_predictor.save_model` 附近，合并时逐块核对。**不动**训练口径、**不动** `_prepare_ml_input`（归 v0.45.146 / v0.45.147）、**不动** `EVALUATION_WEIGHTS`）
+## [0.45.149] — 2026-09-07 — 跑测试会覆盖生产模型：默认参数里的相对路径，与一个 import 时冻住的类属性
+
+承接 v0.45.148 补记 B。机制属实并已复现，但**被覆盖的不是生产在读的那个文件**——
+核查过程中反而撞出了同物种的第二处，那处才真的打在生产模型上。
+
+### 先更正前提：`ml_model.json` 有 0 个读者
+
+AST 枚举全仓 25 个 `save_model` / `load_model` 调用点（不是子串 grep——v0.45.143 的
+教训是 `grep -v` 会把证据一起排除）：
+
+| | 数量 | 位置 |
+|---|---|---|
+| 无参 `save_model()` | 2 | `ml_predictor:1681`、`ml_predictor_extended:802` |
+| 无参 `load_model()` | **0** | —— |
+
+`"ml_model.json"` 这个字面量此前**只出现在 6 个默认参数值里**。生产三个消费点
+（`alpha_hive_daily_report` L463/L920、`generate_ml_report._model_file`、
+`queen_distiller._ml_oos_trust_factor`）**全部显式**指向另一个文件
+`ml_model_cache.json`。
+
+实测两份文件（探针先自证判别力，见下）：
+
+| 文件 | n | acc | oos | 15 组不同输入 → 几个不同值 |
+|---|---|---|---|---|
+| `ml_model_cache.json`（生产真正读的） | 497 | 71.63 | 44.35 | **8** ✅ |
+| `ml_model.json`（被测试覆盖的孤儿） | 30 | 96.67 | None | **1** ❌ 常数函数 |
+
+⇒ **那次测试运行对生产的实际损害是 0**，纯属侥幸：两个写入者恰好用了不同文件名。
+
+这条侥幸直接推出本次最重要的一条设计约束：**「路径收敛到单一真相」绝不能收敛成
+同一个文件。** `train_model()` 会无参保存到 `ml_model`，而 `tests/` 里有 11 处无参
+调它——把两者合并（「统一到单一真相」最容易踩的那种统一法）等于让每次跑测试
+都直接写穿生产模型。已把这句话写进 `PATHS.ml_model_cache` 的 docstring。
+
+### 真正打在生产模型上的那处：类属性在 import 那一刻就冻住了
+
+新加的 conftest 守卫**第一次跑全套就抓到一条我没在找的 bug**——日志里两行并排，
+一行落在 tmp（修好的默认路径 ✅），另一行落在**仓库根的 `ml_model_cache.json`**。
+
+根因：`generate_ml_report.MLEnhancedReportGenerator._model_file` 是**类属性**
+`PATHS.home / "ml_model_cache.json"`。
+
+- `PATHS.home` 是 property，每次读 `ALPHA_HIVE_HOME`，而 `conftest::_isolate_env`
+  （autouse）把它指向 tmp_path——隔离本该生效。
+- 但 **7 个测试模块在模块级 import 这个类**，pytest 在**收集期** import 它们，
+  那时任何 fixture 都还没跑、env 未设 ⇒ 类属性就地冻成**仓库根**，整个 session
+  不再变。
+
+最小演示（`os.environ.pop` 模拟收集期，再 setenv 模拟 fixture）：
+
+```
+收集期冻住的 _model_file : <repo>/ml_model_cache.json
+setenv 之后再读          : <repo>/ml_model_cache.json   ← 没变 = 冻住了
+对照 PATHS.home          : /tmp/sandbox                 ← 跟着变了
+```
+
+⇒ **在主 checkout 跑一次全套测试，就会把生产真正读的那份模型换成测试夹具模型。**
+比原报的事故严重：`ml_model.json` 有 0 个读者，`ml_model_cache.json` 有 3 个。
+
+同一物种全仓另有 **22 处**（`backtester.DB_PATH = PATHS.db`、
+`memory_store.MemoryStore.DB_PATH`、`vector_memory.DEFAULT_DB_PATH` 等），
+超出本条范围，已登记为独立任务。
+
+### Changed
+
+- `hive_logger._HivePaths` 新增三个 property：`ml_model` / `ml_model_cache` /
+  `ml_model_extended`（与既有 `PATHS.db` / `PATHS.chroma_db` 同族）。三个文件名
+  此前散落在六个函数签名默认值 + 一个类属性 + 三处字面量里，现在只此一份。
+  **选 property 不只是整洁**：它是调用时求值的，天然读得到测试逐条 setenv 的
+  `ALPHA_HIVE_HOME`，写不出上面那个冻结 bug。
+- `ml_predictor`：新增 `default_model_path()`（**函数**，不是模块级常量——常量会在
+  import 时冻住，与被修的 bug 同形）。`SimpleMLModel` / `SGDMLModel` / `HGBModel`
+  的 6 个 `save_model` / `load_model` 默认值由 `"ml_model.json"` 改为 `None` +
+  函数解析。
+- `ml_predictor_extended`：同上，2 个默认值 + `default_extended_model_path()`。
+  它是 `ml_predictor` 导入失败时的降级实现，同病一起治（「改二分支先问另一支」）。
+- `generate_ml_report`：`_model_file` 类属性 → `@property`。**本条的核心修复。**
+- `alpha_hive_daily_report`（2 处）、`swarm_agents/queen_distiller`（1 处）：
+  字面量改走 `PATHS.ml_model_cache`。queen 那处原有 `if not exists: _path =
+  "ml_model_cache.json"` 的**相对路径兜底**（会读到 cwd 里的野文件），一并去掉——
+  绝对路径取不到就该放弃，不该改读 cwd。
+- `ml_predictor`：`train()` 里硬编码的 `60` 与日志文案里的 `"样本<60"` 收敛到
+  `_OOS_MIN_SAMPLES`（守卫要**导出**自这个闸门，不能另写一个魔数——v0.45.109）。
+
+### Added
+
+- `ml_predictor.PoisonedModelError(ValueError)` + `HGBModel.load_model` 的加载守卫：
+  `oos_accuracy is None` **且** `n_samples_seen < _OOS_MIN_SAMPLES` 时先 `_log.error`
+  再抛，拒绝加载。
+
+  - **判据是 oos 不是 accuracy**，这是本条最关键的一句：夹具模型的训练精度
+    **反而更好看**（96.67% / 100.0% vs 真模型 71.63%），拿精度判会把最该拦的
+    那个当成「训练得好」放行。已固化为 mutation M5。
+  - **两个条件必须同时成立**：样本够却 oos 缺失是另一件事（OOS 验证自己抛了异常），
+    那种模型不该被拒，否则守卫会顺手废掉一个合法的大样本模型。已固化为 M3。
+  - **继承 `ValueError` 是有意的**：AST 查过，生产三个 `load_model` 调用点的
+    except 全都写了 `ValueError` ⇒ 抛它会走进它们**既有的**重训恢复分支；换个
+    基类就把一次拒绝升级成生产中断。
+  - **先 log 再 raise**：调用方之一（`alpha_hive_daily_report` L469）只把异常记成
+    `_log.debug`，INFO 级别下等于没人知道。CLAUDE.md 硬检查项「这个失败，下游
+    怎么知道？」要求观测点不依赖调用方的心情。
+  - 类型闸照抄本仓既有的 `usable_dim`（`bool` 是 `int` 子类、NaN 对任何比较都
+    返回 False），不自己发明（v0.45.121）。
+
+- `tests/conftest.py::_isolate_ml_model_file`（autouse），两道防线，照
+  `_isolate_paper_portfolio_state`（v0.45.104）的房规写：
+  ① setup **正面核对**默认落盘位置确实在沙箱内——不是再 monkeypatch 一遍把问题
+     盖住（盖住了就再也测不出它退化）；
+  ② teardown 比对**仓库根与 cwd** 三个模型文件的指纹。②抓到了上面那条
+     `_model_file` 冻结 bug；没有②的话，①将来静默失效不会有人知道。
+
+- `tests/test_ml_model_path_isolation.py`：15 条，全部成对。
+
+### 测试与自证
+
+- 全套 `-m "not integration and not network"`：**3471 passed / 1 failed**。
+  唯一失败 `TestCoverageHorizon` 已用 `git archive HEAD` 干净检出复核为**基线就红**
+  （设计意图：去看 BLS 发 2027 日程没）。改动前那次全套跑出的
+  `ERROR test_pipeline.py::...test_no_static_files_skips` 已消失——那正是②抓到的
+  冻结 bug。跑完仓库根无任何模型文件。
+- **mutation check 9 条全部被抓住**，每条都核对了 `collected 15 items`（≠0）
+  且锚点唯一：
+
+  | | 变异 | 结果 |
+  |---|---|---|
+  | M1 | HGB `save_model` 默认值改回相对路径 | ✅ 红（且**真的重现了事故**：在仓库根写出了模型文件，②随之报警） |
+  | M2 | 删掉整个中毒守卫 | ✅ 红 ×4 |
+  | M3 | 守卫少一半（不判样本量） | ✅ 红 |
+  | M4 | 类型闸退化成 `is not None` | ✅ 红 |
+  | M5 | 改用 `training_accuracy` 判 | ✅ 红 |
+  | M6 | `_model_file` 退回 import 时求值的类属性 | ✅ 红 |
+  | M7~M9 | Simple / SGD / extended 三个 `save_model` 函数体改回相对字面量 | ✅ 红 |
+
+- ⚠️ **M7 第一轮是全绿的**，暴露了一个真覆盖缺口：原来那条 extended 测试只断言
+  `default_extended_model_path()` 返回绝对路径——**测的是被调函数，不是接线**
+  （v0.45.126 同一教训）。M7 改的是 `save_model` **函数体**，绕过了那个 helper。
+  补了参数化的 `test_no_arg_save_lands_in_sandbox`，逐个类真调无参 `save_model()`
+  并只认「调完之后文件出现在哪」，M7~M9 才转红。
+- ⚠️ **M9 第一轮报「锚点 0 次」、第二轮报「2 次」**，两次都被 harness 的唯一性
+  断言拦下。若没有这道断言，变异根本没打上却会读成「全绿 = 没有缺口」
+  （v0.45.111 栽过）。
+- 探针自证：判断模型是否退化成常数的扫描器，先在**已知健康**的
+  `ml_model_cache.json` 上断言得到 ≥2 个不同值，通过后才用它下结论
+  （v0.45.140 的教训：重放工具本身可能没有判别力）。
+- ruff 逐文件与基线对比：7 个文件全部 0 新增（`generate_ml_report` 2 条、
+  `queen_distiller` 1 条均为先前存在）。
+
+### 未做（明确说明）
+
+- **没有重训、没有触碰生产 `ml_model_cache.json`。** 它现在就是
+  `n=497 / accuracy 71.6297786720322 / oos 44.354838709677416`，与任务要求「重训后
+  应当确认」的数字逐位相同，且探针实测 15 组输入产出 8 个不同值（非常数函数）。
+  重训是不必要的写操作，且会与并发 session 抢文件。
+- **没有删主 checkout 那份中毒的 `ml_model.json`。** 它 0 个读者；且本次修复后，
+  生产下次扫描的 `train_model()` 会把它按 `PATHS.ml_model` 重新写成好的内容
+  （生产 `ALPHA_HIVE_HOME` 未设 ⇒ `PATHS.home` = 仓库根），自愈。
+- 全仓另外 22 处 import 时冻结的 `PATHS` 派生路径（含生产数据库路径），
+  已登记独立任务，本条不动。
+
+### 与并发 session 的关系
+
+- v0.45.145（当日唯一值闸 + 模型版本快照目录）**互补**：那条查症状，本条堵源头。
+  两条都碰 `ml_predictor.save_model` 附近与 `generate_ml_report`，合并时逐块核对。
+  ⚠️ 若 v0.45.145 的快照目录挂在 `save_model` 上，注意它现在拿到的是**绝对路径**，
+  且快照的应当是 `PATHS.ml_model_cache`（有读者的那个）而不是 `ml_model`（孤儿）。
+- v0.45.146 / v0.45.147 在 `generate_ml_report._prepare_ml_input` 内部，本条只动
+  该文件的类体顶部与 `_model_file`，预期无冲突。
 
 ---
 

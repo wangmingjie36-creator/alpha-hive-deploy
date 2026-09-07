@@ -241,9 +241,9 @@ class QueenDistiller:
         try:
             import os as _os, json as _json
             from hive_logger import PATHS as _PATHS
-            _path = str(_PATHS.home / "ml_model_cache.json")
-            if not _os.path.exists(_path):
-                _path = "ml_model_cache.json"
+            # v0.45.149：兜底曾是相对路径 `"ml_model_cache.json"`，会读到
+            # 当前工作目录里的野文件。绝对路径取不到就应当放弃，不该改读 cwd。
+            _path = str(_PATHS.ml_model_cache)
             _mtime = _os.path.getmtime(_path)
             if cls._OOS_TRUST_CACHE and cls._OOS_TRUST_CACHE[0] == _mtime:
                 return cls._OOS_TRUST_CACHE[1]
