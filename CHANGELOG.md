@@ -5,7 +5,124 @@
 
 ---
 
-## [0.45.163] — 2026-09-07 — 占位（进行中：量化 `get_top_signals` 这条截断通道对 GuardBee risk_adj 与 final_score 的实际影响 —— v0.45.156 只修了 `detect_resonance`、v0.45.151 只修了 `_read_peer`，仍读被 `MAX_ENTRIES=80` 截断的 `self._entries` 的还有三处：`get_top_signals` / `snapshot` / `compact_snapshot`。其中 `get_top_signals` 有实测且有物质影响：guard_bee.py 用它同时导出 `avg_score` 与 `consistency`，二者直接决定 risk_adj 维度分（共振时 `7.0+consistency*2.0`，否则 `avg_score*0.8*adj_factor`），而 risk_adj 是 `config.EVALUATION_WEIGHTS` 里的加权维度 ⇒ 流进 final_score。已测本世代 70/191=36.6% 的场次板上不足 5 条、`n=5` 窗口根本填不满，且淘汰方向相关（bearish 50.7% vs bullish 12.6%）。范围＝① 用生产 JSON 里的 `swarm_results.pheromone_compact`（就是同一次 distill 里拍的 `compact_snapshot`）直接量测，不做模拟；② 先测再决定改不改；③ 若改，必须往 `ic_rerun_readiness._COHORT_HISTORY` 追加世代边界（先跑该脚本确认样本数接近零、追加才便宜）；④ 顺带判 `snapshot` / `compact_snapshot` 要不要一起改——后者经 backtester 落盘、用于逐蜂归因，截断可能同样有偏。⚠️ 不动 `EVALUATION_WEIGHTS` 数值、不动训练口径、不动 `_prepare_ml_input`。⚠️ 会碰 `pheromone_board.py` / `swarm_agents/guard_bee.py` / `tests/`，与其它 session 合并时逐块核对）
+## [0.45.163] — 2026-09-07 — 拿排行榜当普查用：GuardBee 的窗口 100% 装不下蜂群
+
+`swarm_agents/guard_bee.py` 从 `board.get_top_signals(ticker, n=5)` **同时**导出
+`avg_score`（窗口均分）与 `consistency`（`max(bull,bear)/total`），两者直接决定
+risk_adj 维分 —— 共振时 `7.0 + consistency*2.0`，否则 `avg_score*0.8*adj_factor`。
+实测 `dimension_scores.risk_adj == agent_details.GuardBeeSentinel.score`，
+**193/193 逐份相等**；risk_adj 权重实测 ≈0.20 ⇒ 直接进 `final_score`。
+
+问题不是「板偶尔少给几条」，是**两个缺陷叠在同一个调用上**：
+
+| | 缺陷 | 后果 |
+|---|---|---|
+| ① | `_entries` 溢出按 `nlargest(80, key=(self_score, ...))` 截断，**先扔分最低的** | 幸存者均值**按构造**偏高 |
+| ② | `n=5` 本身 | Guard 之前恒有 **6** 只蜂发布 ⇒ 窗口 **191/191 = 100%** 装不下 |
+
+②是这一版与 v0.45.151 / v0.45.156 的区别：那两版只需换个不受淘汰影响的读法，
+这里**换了读法还不够** —— `get_top_signals` 是**排行榜**（按 pheromone_strength
+取前 N），而调用方要的是**普查**。对排行榜取均值不等于对蜂群取均值。
+
+### 量测（生产 `analysis-*-ml-*.json`，当前世代 30 只 watchlist、2026-08-24 起、n=191）
+
+窗口大小是**直接观测量**，不需要模拟：`guard_bee.py:214` 自己把 `len(top_signals)`
+写进 `details.top_signals_count`。
+
+两条仪器自证：
+
+1. 用它 + `consistency` + `adjustment_factor` + 落盘的全部下游修正
+   （macro_adj / regime / opex / alpha_decay / llm_conflict_type）逐份重算
+   GuardBee.score，**191/191 命中**。
+2. `agent_details[蜂].score` vs `pheromone_compact` 的 `s`：780 对上、16 对不上，
+   16 条**全部**是 CodeExecutorAgent 且形状一致（落盘 3.0/4.5，快照里只剩 5.0 占位）
+   ⇒ **0 条无法解释**。
+
+窗口取不满 5 条：**91/191 = 47.6%**（旧世代 ≤16 只标的时只有 10/555 = 1.8%）。
+按窗口条数分层，Δ（反事实 − 生产）**单调**：
+
+| 窗口 n | 份数 | Δ risk_adj | avg_score 被高估 |
+|---|---|---|---|
+| 1 | 10 | **−1.480** | +1.542 |
+| 2 | 21 | −1.090 | +1.174 |
+| 3 | 24 | −0.804 | +1.095 |
+| 4 | 36 | −0.565 | +0.812 |
+| 5 | 100 | −0.124 | +0.260 |
+
+**n=5 那一层不是零** —— 窗口填满仍有 70/100 偏高，那是②号缺陷单独的贡献。
+
+合计：risk_adj **185/191 = 96.9%** 与真值不同，Δ 均值 **−0.485**
+（生产偏高 160 / 偏低 25），|Δ|≥1.0 有 27 份、≥2.0 有 3 份。
+GuardBee 方向 **50/191 = 26.2%** 不一致，bearish **32→63**（几乎翻倍）。
+`consistency` 被高估 129/191 = 67.5%（均值 +0.116）；生产记成
+**1.0「完全一致」的 35 份，反事实无一为 1.0** —— 与 v0.45.156 同一形状：
+板不只是丢数据，它**制造了从未存在过的一致**。
+传导到 `final_score`（Δrisk_adj × 权重）：|Δ| 均值 0.089，67/191 ≥0.1，
+6 份 ≥0.3，最大 0.404。
+
+⚠️ **别沿用 v0.45.156 记的「70/191 = 36.6%」来描述这条通道** —— 那个数出自
+`pheromone_compact`（distill 末尾的板快照，含 Guard/Bear 自己的条目、且不设 n 上限），
+是**另一个量**。同一批 191 份上，这条通道的直接观测量是 **91/191 = 47.6%**。
+
+### Changed
+
+- `pheromone_board.py`：新增 `get_live_signals(ticker)` —— 每蜂最新一条的**普查**
+  视图，复用 v0.45.151 的 `_latest_by_agent`，条数只取决于「有几只蜂发布过」，
+  与 `MAX_ENTRIES` 无关。同一只蜂重复发布只算最新一条 ⇒ CodeExecutorAgent 在
+  `analyze` 开头无条件发的 5.0/neutral 占位不再算一票（`code_executor_agent.py:75`）。
+  保留墙钟过期，口径与 `get_agent_entry` 一致。
+- `swarm_agents/guard_bee.py`：新增 `_read_census()`，`analyze` 改走它；
+  保留 `get_top_signals` 作为回退（测试替身 / 旧版 board），但回退窗口取
+  `_CENSUS_FALLBACK_N = 24` 而非 5 —— **回退是为了不崩，不是为了复刻旧截断**。
+- 同源子通道一并修好，无需另改：`guard_bee.py:52` 把窗口里的 `bull` 覆盖进
+  `real_metrics["bullish_agents"]`，而 `crowding_detector.py:84` 算
+  `bullish_agents / 6 * 100` —— 分母写死 6、分子被窗口截断到 ≤n。改普查后分子
+  回到真值（测试实测：改前传进去 1，真值 2）。
+
+### Added
+
+- `details.census_source`（`live_agent_view` / `top_signals_fallback` / `unavailable`）。
+  ⚠️ `details.top_signals_count` 的**语义在本版改变**（排行榜窗口条数 ≤5 →
+  本轮发布过的蜂数）。键名保留以免断掉 `signal_archive.py:312` 的时间序列，
+  口径由相邻的 `census_source` **机读**区分 —— 否则新旧两段数字长得一样、无从分辨。
+- `tests/test_guard_census_eviction.py`（17 项），含三条夹具反向自证
+  （`_flood` 真的挤掉了 / 挤掉的确实是低分 / 淘汰留下的是 CodeExec 的**桩**而非真实结论）。
+- `ic_rerun_readiness._COHORT_HISTORY` 追加世代边界（第 7 条）。改动前实跑
+  `ic_rerun_readiness.py` 确认世代内 `predictions` **0 条样本**，下一次定时扫描 09-08
+  ⇒ 追加**不作废任何已累积样本**；与同日的 v0.45.151 / v0.45.156 **扩展同一标签**，
+  不新开空分区。
+
+### 契约边界（明确没做什么）
+
+- **`MAX_ENTRIES` 的值仍未动。** 测试里有一条 `test_get_live_signals_identical_under_any_max_entries`
+  钉住「结论与 MAX_ENTRIES 取值无关」，同时挡住「调大就算修好了」——
+  调大只是让当前 watchlist 恰好不溢出，标的数再涨一次就复发。
+- **`get_top_signals` 的排行榜语义未动。** 它还剩 3 个调用方，各自需要独立量测，
+  不搭本版的车：`bear_bee.py:39/512`(n=20)、`real_data_sources.py:261`(n=10)、
+  `base.py:85`（仅 `get_agent_entry` 的回退）。
+
+### 顺带量测：`snapshot` 这条通道更糟，但**本版不改**（见下）
+
+`alpha_hive_daily_report.py:1171` 用 `board.snapshot()` 填 `ReportSnapshot.agent_votes`
+（→ `weekly_optimizer` / `self_analyst` / `feedback_loop` / `paper_portfolio` 的逐蜂归因）。
+实测当前世代 300 份 `report_snapshots/`：
+
+- 凑齐 8 只蜂的 **只有 1 份 = 0.3%**，中位 3 只；
+  BearBee 缺席 **97.3%**、BuzzBee 91.0%、ScoutBee 81.0%。
+- 与同日 `analysis-*.json` 配对（191 对）后，偏斜方向明确：
+  进入归因的条目均分 **7.00**，被丢掉的 **4.67**，差 **+2.34**；
+  逐份「幸存者均分 − 真均分」**177/178 为正**。
+- 这是**逐蜂的选择效应**，不是随机缺失：**每一只蜂都只在它自己表现好的日子被记账**
+  （BearBee 总体均分 3.06，被记账的那 6 次均分 **6.25**）。
+  归因/rank-IC 的样本条件在「该蜂当天分高」上 ⇒ 结论方向不可信。
+
+**为什么不在本版一起改**：① 它**不进 `final_score`**，与本版的世代边界不是一回事；
+② 它的正确修法多半**不是换板读法**，而是根本别读板 ——
+`swarm_results[ticker]['agent_details']` 里本来就有每蜂分数，且没有墙钟过期问题；
+③ 它是**全扫描结束后**取板（一轮 ~56 分钟），除溢出淘汰外还叠加 3600s 墙钟过期，
+两个成因尚未分离，而 `_latest_by_agent` 同样有那道过期 ⇒ 换读法救不了它；
+④ 改它会移动 `weekly_optimizer` / `self_analyst` 的输入，需要自己的改前/改后对照。
+已单开一条跟进项，勿当作「已经顺手修了」。
 
 ## [0.45.162] — 2026-09-07 — 「不进那张表」只回答了两个问题里的一个
 

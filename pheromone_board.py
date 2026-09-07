@@ -64,11 +64,24 @@ class PheromoneBoard:
     # 生产实测（2026-08-24 起 191 份）：bearish 条目丢 50.7%、bullish 只丢 12.6%，
     # 相差 4.0 倍。详见 tests/test_resonance_eviction.py 模块 docstring。
     #
-    # **本值 v0.45.156 未动**，因为改它会一次性改变每一个板消费方；两条读路径
-    # 改为不依赖它：`get_agent_entry`（v0.45.151）与 `detect_resonance`（v0.45.156）
-    # 都走 `_latest_by_agent`。仍受截断的是 `get_top_signals` / `snapshot` /
-    # `compact_snapshot` —— 其中 GuardBee 的 `get_top_signals(ticker, n=5)` 在当前
-    # 世代 70/191 = 36.6% 的标的上连 5 条都取不满，那条通道待独立测量后处理。
+    # **本值至今未动**，因为改它会一次性改变每一个板消费方；改的是**读法**：
+    # `get_agent_entry`（v0.45.151，定点）、`detect_resonance`（v0.45.156，共振）、
+    # `get_live_signals`（v0.45.163，普查；GuardBee 的 risk_adj 维分走它）
+    # 都不依赖 `_entries`。
+    #
+    # 仍受截断的读法（各自待独立测量，勿搭车）：
+    #   · `get_top_signals` 的**排行榜**语义本身是对的，但还剩 3 个调用方：
+    #     `bear_bee.py:39/512`(n=20)、`real_data_sources.py:261`(n=10)、
+    #     `base.py:85`（仅 `get_agent_entry` 的回退）。
+    #   · `snapshot` —— `alpha_hive_daily_report.py:1171` 用它填
+    #     `ReportSnapshot.agent_votes`（逐蜂归因 → weekly_optimizer / self_analyst /
+    #     feedback_loop）。生产实测当前世代 300 份里**只有 1 份**凑齐 8 只蜂，
+    #     中位 3 只；BearBee 缺席 97.3%、BuzzBee 91.0%、ScoutBee 81.0%。
+    #     ⚠️ 该处是**全扫描结束后**取板，因此除溢出淘汰外还叠加了 3600s 墙钟过期
+    #     （一轮扫描 ~56 分钟），两个成因未分离 —— 且它正确的修法多半不是换板读法，
+    #     而是根本别读板：`swarm_results[ticker]['agent_details']` 里本来就有每蜂分数。
+    #   · `compact_snapshot` —— `queen_distiller.py:1161` 落进 analysis JSON 的
+    #     `pheromone_compact`（正是上面几次量测所用的仪器），另两处走 LLM 路径。
     MAX_ENTRIES = 80
     DECAY_RATE = 0.1
     MIN_STRENGTH = 0.2
@@ -344,6 +357,38 @@ class PheromoneBoard:
         for key in expired:
             del self._latest_by_agent[key]
         return live
+
+    def get_live_signals(self, ticker: str) -> List[PheromoneEntry]:
+        """该标的本轮的**普查**视图：每只蜂最新一条，不受 MAX_ENTRIES 溢出淘汰影响。
+
+        与 `get_top_signals` 的区别是**口径**，不是参数（v0.45.163）
+        ------------------------------------------------------------------
+        `get_top_signals` 是**排行榜**：从 `_entries` 里按 `pheromone_strength`
+        取前 N。调用方若要的是「这一轮蜂群整体怎么看」（均分、方向一致性、
+        看多蜂数），排行榜给不了 —— 两层都会骗它：
+
+        ① `_entries` 溢出时按 `nlargest(MAX_ENTRIES, key=(self_score, ...))`
+           截断，**先扔分最低的** ⇒ 幸存者均值**按构造**偏高，且缺失与被测量的
+           量反相关（低分/看空先消失）。
+        ② 即使板没溢出，`n` 仍会砍掉一部分蜂。生产实测：Guard 之前恒有 6 只蜂
+           发布，而 `n=5` 的窗口 **191/191 = 100%** 装不下。
+
+        本方法只按身份取（复用 `_latest_by_agent`），因此条数只取决于**有几只蜂
+        发布过**，与 `MAX_ENTRIES` 无关。同一只蜂重复发布只算最新一条 ——
+        CodeExecutorAgent 在 `analyze` 开头无条件发的 5.0/neutral 占位
+        （`code_executor_agent.py:75`）因此不会被当成一票；而在排行榜口径下它
+        分比真实结论高，溢出时留下的恰恰是那个**桩**（生产实测 16 例）。
+
+        仍保留墙钟过期（`_AGENT_ENTRY_MAX_AGE_S`，口径与 `get_agent_entry`
+        完全一致）—— 那判的是「这是不是上一轮的陈货」，该拦；被容量挤掉纯属
+        容量问题，不该拦。
+
+        返回按 `pheromone_strength` 降序（只为输出稳定，普查不依赖顺序）。
+        量测与影响面见 `tests/test_guard_census_eviction.py` 模块 docstring。
+        """
+        with self._lock:
+            entries = self._live_agent_entries(ticker)
+            return sorted(entries, key=lambda x: x.pheromone_strength, reverse=True)
 
     def detect_resonance(self, ticker: str) -> Dict:
         """
