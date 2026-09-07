@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.164] — 2026-09-07 — 占位（进行中：agent_votes 改读 agent_details，绕开信息素板 80 条淘汰）
+
 ## [0.45.163] — 2026-09-07 — 拿排行榜当普查用：GuardBee 的窗口 100% 装不下蜂群
 
 `swarm_agents/guard_bee.py` 从 `board.get_top_signals(ticker, n=5)` **同时**导出
