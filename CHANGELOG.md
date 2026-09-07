@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.148] — 2026-09-07 — 占位（进行中：核查 ML 深度报告三个「胜率」数字的真实性 —— 范围＝**纯核查记录，不改任何代码**。三条独立结论：① 08-28/09-04 模型退化成常数函数（12 份 probability 逐位相同）；② 综合胜率 ≥60 是 `0.7×常数65.0` 的算术必然；③ 438 份与真实 T+7 对账：三个印出去的概率 Brier 全部劣于零信息基准率、AUC 的 95% CI 全部跨 0.5。⚠️ 与 v0.45.145/146/147 同域但**无文件冲突**：那三条改代码，本条只写 CHANGELOG）
+
+---
+
 ## [0.45.147] — 2026-09-07 — 占位（进行中：补上两套账目最后的真缺口 —— `_prepare_ml_input` 的 `catalyst_quality` 兜底 `"B"`（58/803）与 `direction_encoded` 兜底 `0.0`（57/803）两个合法字面量，使 `_ml_input_missing` 说缺而 `ml_predictor._missing_features` 说不缺。范围＝这两槽改 None + `_encode_catalyst` 的缺失编码 + `KNOWN_LEDGER_GAPS` 收缩 + `_ML_ESTIMATOR_GENERATIONS` 追加一条。**不动** `_COHORT_HISTORY`、不动训练端口径、不动 `crowding_score`/`agent_agreement`（归 v0.45.146）。⚠️ 与 v0.45.146 同函数相邻：对方改 crowding/agreement 两槽，本条改 catalyst/direction 两槽，两边都会碰 `_ml_input_missing`、`TrainingData(...)` 与世代表，合并时逐块核对）
 
 ## [0.45.146] — 2026-09-07 — 占位（进行中：`generate_ml_report._prepare_ml_input` 最后两个常数特征槽 —— `crowding_score`（777/803 恒 50.0）与 `agent_agreement`（恒 0.5）接蜂群同源真值；范围＝服务端这两槽取数 + `_ml_input_missing` 记账 + 成对测试 + `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 追加一条。**不动** `_COHORT_HISTORY`、不动训练端口径、不动 EVALUATION_WEIGHTS。⚠️ 与 v0.45.145 同文件相邻：对方在 `generate_ml_report.py` 批量收尾加唯一值闸，本条改 `_prepare_ml_input` 内部，预期无冲突但合并时需核对）
