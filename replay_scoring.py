@@ -52,7 +52,28 @@ import sys
 from statistics import mean
 from typing import Callable, Dict, List, Optional
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pheromone.db")
+# v0.45.160：`DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
+# 原本是 `os.path.join(os.path.dirname(os.path.abspath(__file__)), "pheromone.db")` —— 那个写法**压根不读任何环境变量**
+# （`ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME` 设成什么都无效，连懒求值都救不了），
+# 比「模块级常量冻在 import 期」更彻底，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "DB_PATH", ...)` 依赖它。
+# ⚠️ 本模块的**默认参数**早在 v0.45.37 就改成 `None` 了（`load_samples` 的
+#   `db_path=DB_PATH` 曾绑死默认值，让退化测试变成假守卫）；本版补的是常量自身。
+DB_PATH = None
+
+
+def _db_path() -> str:
+    """本模块的库路径。**调用时求值。**
+
+    返回 `str` 而非 `Path`——本模块通篇用 `os.path`，跟着它的惯例走。
+
+    ⚠️ 默认参数与 argparse 的 `default` 一律写 `None`，不要塞这个值——
+    两者都在 import 期求值，等于换个地方冻同一个值（同型 v0.45.37 / v0.45.150）。
+    """
+    if DB_PATH is not None:
+        return os.fspath(DB_PATH)
+    from hive_logger import PATHS
+    return str(PATHS.db)
 DIMS = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
 
 
@@ -103,7 +124,7 @@ def load_samples(db_path: Optional[str] = None, all_cohorts: bool = False,
     （v0.45.37 实测：功效护栏的退化测试自诞生起从未真正生效，
     它在主 checkout 变绿只是因为真库样本量恰好落在「功效不足」区间）。
     """
-    db_path = db_path or DB_PATH
+    db_path = db_path or _db_path()      # v0.45.160：常量本身也不再冻结
     notes: List[str] = []
     cohort = None if all_cohorts else latest_cohort_start()
     if all_cohorts:

@@ -55,7 +55,30 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Callable, Dict, List, Optional
 
-DB_PATH = Path(__file__).parent / "pheromone.db"
+# v0.45.160：`DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
+# 保留这个名字是因为 `tests/` 有多处 `monkeypatch.setattr(<mod>, "DB_PATH", ...)`
+# 依赖它做隔离；把它删掉会把那些测试打红。
+DB_PATH = None
+
+def _db_path() -> Path:
+    """本模块用的 `pheromone.db` 路径。**调用时求值。**
+
+    v0.45.160：这里原本是 `Path(__file__).parent / "pheromone.db"`。
+    那个写法比「模块级常量冻在 import 期」更彻底——它**压根不读任何环境变量**：
+    `ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME` 设成什么都无效，连改成懒求值都救不了，
+    只能显式改去读 `PATHS.db`。于是 `tests/conftest.py::_isolate_env` 对它完全无效。
+    实测：无参 `ensure_schema()` 会在 **checkout 根目录**的 `pheromone.db` 里建出
+    `signal_archive` 表；主 checkout 上那就是生产库（`signal_archive` 84839 行，
+    喂 IC 闸 / 概率记分卡 / 权重学习闭环）。
+
+    ⚠️ 下面所有默认参数一律写 `None`，**不要**写 `= DB_PATH` 或 `= _db_path()`——
+    默认参数在 `def` 执行时（＝import 期）求值，等于换个地方冻同一个值
+    （同型 v0.45.37 / v0.45.150）。
+    """
+    if DB_PATH is not None:
+        return Path(DB_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.db)
 TABLE = "signal_archive"
 
 
@@ -374,7 +397,8 @@ def is_quarantined(date: str, signal: str) -> bool:
     return False
 
 
-def ensure_schema(db_path: Path = DB_PATH) -> None:
+def ensure_schema(db_path: Optional[Path] = None) -> None:
+    db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     with sqlite3.connect(db_path) as conn:
         conn.execute(f"""
             CREATE TABLE IF NOT EXISTS {TABLE} (
@@ -407,7 +431,7 @@ def extract(ticker_result: Dict) -> Dict[str, float]:
     return out
 
 
-def archive(swarm_results: Dict, date: str, db_path: Path = DB_PATH) -> int:
+def archive(swarm_results: Dict, date: str, db_path: Optional[Path] = None) -> int:
     """把一次扫描的全部原始信号写入档案。
 
     Args:
@@ -416,6 +440,7 @@ def archive(swarm_results: Dict, date: str, db_path: Path = DB_PATH) -> int:
     Returns:
         写入的 (ticker, signal) 行数
     """
+    db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     if not swarm_results:
         return 0
     ensure_schema(db_path)
@@ -440,8 +465,9 @@ def archive(swarm_results: Dict, date: str, db_path: Path = DB_PATH) -> int:
 
 
 def backfill(pattern: str = ".swarm_results_*.json",
-             db_path: Path = DB_PATH) -> Dict[str, int]:
+             db_path: Optional[Path] = None) -> Dict[str, int]:
     """从历史 .swarm_results_*.json 回填。幂等（UNIQUE + REPLACE）。"""
+    db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     base = Path(db_path).parent
     files = sorted(glob.glob(str(base / pattern)))
     stats = {"files": 0, "rows": 0, "skipped": 0}
@@ -671,7 +697,7 @@ def _forward_realized_vol(tickers: List[str], dates: List[str],
         return {}
 
 
-def load_panel(db_path: Path = DB_PATH, horizon: str = "t7",
+def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
                min_width: int = 5,
                with_ticker: bool = False,
                target_metric: str = "return") -> Dict[str, Dict[str, List]]:
@@ -681,6 +707,7 @@ def load_panel(db_path: Path = DB_PATH, horizon: str = "t7",
     ——后者是 `_simulate_trade_path` 的路径依赖收益，42.5% 的行被 SL/TP 档位截断，
     会制造大量并列值破坏 rank-IC 的尾部排序（详见 ic_diagnostics 模块注释）。
     """
+    db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     price_col, checked_col = f"price_{horizon}", f"checked_{horizon}"
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
@@ -722,7 +749,7 @@ def load_panel(db_path: Path = DB_PATH, horizon: str = "t7",
             for s, bd in panel.items()}
 
 
-def analyze(db_path: Path = DB_PATH, horizon: str = "t7",
+def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
             min_samples: int = 50, min_width: int = 5,
             draws: int = 200, target_metric: str = "return") -> List[Dict]:
     """对每个归档信号跑四口径 IC + 噪音地板对照。
@@ -732,6 +759,7 @@ def analyze(db_path: Path = DB_PATH, horizon: str = "t7",
             "vol" = 预测未来已实现波动。后者的可学性高一个数量级
             （实测同宇宙同特征 IC 0.710 vs 0.012），见 `_forward_realized_vol` 注释。
     """
+    db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     sys.path.insert(0, str(Path(__file__).parent))
     import ic_diagnostics as icd
 
@@ -843,9 +871,10 @@ def main() -> int:
     ap.add_argument("--target", choices=TARGET_METRICS, default="return",
                     help="预测目标：return=方向收益（现状）；vol=未来已实现波动"
                          "（实测可学性高一个数量级，需联网取行情）")
-    ap.add_argument("--db", type=str, default=str(DB_PATH))
+    # v0.45.160：default 不能是 str(DB_PATH)——argparse 的 default 在 import 期求值
+    ap.add_argument("--db", type=str, default=None)
     args = ap.parse_args()
-    db = Path(args.db)
+    db = Path(args.db) if args.db else _db_path()
 
     if args.backfill:
         st = backfill(db_path=db)

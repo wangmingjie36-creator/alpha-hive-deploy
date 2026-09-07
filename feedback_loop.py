@@ -23,7 +23,27 @@ _log = _logging.getLogger("alpha_hive.feedback_loop")
 # 的 Ticker().history() ±3天容差取价，backfill_dir_accuracy.py 已记录弃用
 # 理由）。现在五处消费者通过 BacktestAnalyzer(clean_t7=True) 共用这一份。
 
-PHEROMONE_DB_PATH = Path(__file__).resolve().parent / "pheromone.db"
+# v0.45.160：`PHEROMONE_DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
+# 原本是 `Path(__file__).resolve().parent / "pheromone.db"` —— 那个写法**压根不读任何环境变量**
+# （`ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME` 设成什么都无效，连懒求值都救不了），
+# 比「模块级常量冻在 import 期」更彻底，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "PHEROMONE_DB_PATH", ...)` 依赖它。
+# ⚠️ `conftest::_isolate_feedback_loop_close_t7_db` 已经在**测试侧**把它重绑到 tmp
+#   （v0.45.87），所以测试是安全的；本版补的是**常量自身**不再是硬编码路径——
+#   逐模块打补丁是打地鼠，源头修掉才不依赖「有人记得写那个 fixture」。
+PHEROMONE_DB_PATH = None
+
+
+def _db_path() -> Path:
+    """本模块的库路径。**调用时求值。**
+
+    ⚠️ 默认参数与 argparse 的 `default` 一律写 `None`，不要塞这个值——
+    两者都在 import 期求值，等于换个地方冻同一个值（同型 v0.45.37 / v0.45.150）。
+    """
+    if PHEROMONE_DB_PATH is not None:
+        return Path(PHEROMONE_DB_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.db)
 
 _CLOSE_T7_CACHE: dict = {}
 

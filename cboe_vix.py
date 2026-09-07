@@ -52,7 +52,20 @@ except Exception:  # pragma: no cover
     _CBOE_SEM = threading.Semaphore(1)
 
 _VIX_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv"
-_CACHE_PATH = Path(__file__).parent / "cache" / "vix_history_cboe.csv"
+# v0.45.160：`_CACHE_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.*`。
+# 原本是 `Path(__file__).parent / "cache" / "vix_history_cboe.csv"` —— 它**压根不读任何环境变量**，
+# 比「模块级常量冻在 import 期」更彻底：`ALPHA_HIVE_HOME` / `ALPHA_HIVE_CACHE_DIR`
+# 设成什么都无效，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "_CACHE_PATH", ...)` 依赖它。
+_CACHE_PATH = None
+
+
+def _cache_path() -> Path:
+    """本模块的缓存落点。**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if _CACHE_PATH is not None:
+        return Path(_CACHE_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.cache_dir) / "vix_history_cboe.csv"
 _CACHE_TTL = 6 * 3600           # 6 小时：日频数据，一天扫一次绰绰有余
 _NET_TIMEOUT = 15.0
 
@@ -82,19 +95,19 @@ def _download() -> Optional[str]:
 
 def _write_cache(text: str) -> None:
     try:
-        _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = str(_CACHE_PATH) + ".tmp"
+        _cache_path().parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(_cache_path()) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
-        os.replace(tmp, _CACHE_PATH)  # 原子替换，避免读到半截文件
+        os.replace(tmp, _cache_path())  # 原子替换，避免读到半截文件
     except OSError as e:
         _log.debug("CBOE VIX 缓存写入失败（不阻断）: %s", e)
 
 
 def _read_cache() -> Optional[str]:
     try:
-        if _CACHE_PATH.exists():
-            return _CACHE_PATH.read_text(encoding="utf-8")
+        if _cache_path().exists():
+            return _cache_path().read_text(encoding="utf-8")
     except OSError as e:
         _log.debug("CBOE VIX 缓存读取失败: %s", e)
     return None
@@ -102,7 +115,7 @@ def _read_cache() -> Optional[str]:
 
 def _cache_fresh() -> bool:
     try:
-        return _CACHE_PATH.exists() and (time.time() - _CACHE_PATH.stat().st_mtime) < _CACHE_TTL
+        return _cache_path().exists() and (time.time() - _cache_path().stat().st_mtime) < _CACHE_TTL
     except OSError:
         return False
 

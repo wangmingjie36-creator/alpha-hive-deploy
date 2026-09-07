@@ -49,7 +49,20 @@ except Exception:
 # 配置
 # ══════════════════════════════════════════════════════════════════════════════
 
-BASE_DIR = Path(__file__).parent
+# v0.45.160：`BASE_DIR` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.home`。
+# 原本是 `Path(__file__).parent`——**压根不读任何环境变量**。
+# ⚠️ 下面的 `SNAPSHOT_DIR` / `STATE_DIR` 仍是模块级常量（求值于 import 期）：
+#   `STATE_DIR` 由 `conftest::_isolate_paper_portfolio_state` 在测试侧重绑，
+#   本版只把根锚点解冻；把这两个也改懒会牵动全模块几十个使用点，留待后续。
+BASE_DIR = None
+
+
+def _base_dir() -> Path:
+    """本模块根锚点。**调用时求值。**"""
+    if BASE_DIR is not None:
+        return Path(BASE_DIR)
+    from hive_logger import PATHS
+    return Path(PATHS.home)
 
 
 def _pheromone_db_path() -> Path:
@@ -69,8 +82,8 @@ def _pheromone_db_path() -> Path:
     return Path(PATHS.db)
 
 
-SNAPSHOT_DIR = BASE_DIR / "report_snapshots"
-STATE_DIR = BASE_DIR / "paper_portfolio_state"
+SNAPSHOT_DIR = _base_dir() / "report_snapshots"
+STATE_DIR = _base_dir() / "paper_portfolio_state"
 STATE_DIR.mkdir(exist_ok=True)
 
 POSITIONS_FILE = STATE_DIR / "positions.jsonl"      # 当前持仓
@@ -1590,7 +1603,7 @@ def main():
 
     if args.cmd == "card":
         html = render_portfolio_card()
-        out = BASE_DIR / "paper_portfolio_card.html"
+        out = _base_dir() / "paper_portfolio_card.html"
         out.write_text(f'<!DOCTYPE html><html><head><meta charset="utf-8">'
                        f'<style>:root{{--bg2:#1a1d2e;--bg3:#252840;--border1:#2e3348;--border2:#3a4055;'
                        f'--text1:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--green2:#10b981;--red2:#ef4444;--gold2:#f59e0b;}}'

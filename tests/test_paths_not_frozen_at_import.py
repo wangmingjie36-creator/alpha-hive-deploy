@@ -218,7 +218,7 @@ class TestSpeciesDoesNotSpread:
         return files, "rglob"
 
     @staticmethod
-    def _scan(_stats=None):
+    def _scan(_stats=None, marker="PATHS"):
         """列出所有「import 期求值的 PATHS 派生赋值」。
 
         会下钻到 Try/If/With/For 体内——那些同样在 import 期执行。
@@ -239,7 +239,7 @@ class TestSpeciesDoesNotSpread:
         def walk(body, rel, depth=0):
             for s in body:
                 if isinstance(s, (ast.Assign, ast.AnnAssign)) and s.value:
-                    if "PATHS" in ast.unparse(s.value):
+                    if marker in ast.unparse(s.value):
                         tgts = [s.target] if isinstance(s, ast.AnnAssign) else s.targets
                         for t in tgts:
                             if isinstance(t, ast.Name):
@@ -442,3 +442,333 @@ class TestSpeciesDoesNotSpread:
                                    ("vector_memory.py", "DEFAULT_DB_PATH")}}
         assert not regressed, (
             f"v0.45.150 修掉的高危处又被写回成 import 期常量：{sorted(regressed)}")
+
+
+class TestFileDerivedSpeciesDoesNotSpread:
+    """不许**新增**「`__file__` 派生的数据路径常量」（v0.45.160）。
+
+    这一族比 `PATHS` 冻结**更严重**：`Path(__file__).parent / "pheromone.db"`
+    压根不读任何环境变量，`ALPHA_HIVE_HOME` / `ALPHA_HIVE_DB_PATH` 设成什么都无效，
+    **连改成懒求值都救不了**——只能显式改去读 `PATHS.*`。
+
+    ⚠️ 但 `__file__` **本身不是错的**，一刀切会制造新 bug。它是**代码同址资源**的
+    正确锚点：模板、prompt、随代码发布的只读配置、`sys.path.insert`、`git -C <仓库>`
+    ——这些要的就是「代码在哪」，改成 `PATHS.home` 会在测试把 HOME 指向 tmp 后
+    直接找不到文件。判据是**这个路径指向「代码」还是「数据」**：
+    数据（库/账本/状态/缓存/产物）→ 必须走 `PATHS.*`；代码同址资源 → `__file__` 正确。
+
+    与 `TestSpeciesDoesNotSpread` 一样是**子集**语义：清掉存量不会变红，新增必红。
+    """
+
+    # 存量白名单（v0.45.160 清理后实测 **17 处**）。清掉一处就从这里删一行。
+    # ⚠️ 子集语义的副作用：**清干净了也不会变红**，过期项会悄悄留下。
+    #    定期对账：`KNOWN - _scan(marker="__file__")` 非空即是过期项
+    #    （本版就这么揪出 2 条已清却还挂着的）。
+    # 分三类，都是**经判定后确认应当保留**或已另有覆盖的：
+    KNOWN = {
+        # ── A. 代码同址资源 / 工程根：`__file__` 是**正确**锚点，不该改 ──
+        ("dashboard_renderer.py", "_TPL_DIR"),        # templates/，随代码发布
+        ("prompt_loader.py", "_PROMPTS_DIR"),         # prompts/，随代码发布
+        ("probability_scorecard.py", "ALPHAHIVE_DIR"),  # sys.path.insert
+        ("scan_continuity.py", "ALPHAHIVE_DIR"),        # sys.path.insert
+        ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),     # sys.path.insert
+        ("health_check.py", "PROJECT"),               # git -C <仓库>
+        ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
+        ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
+        # ── B. 仓库内随代码发布的**只读**配置/文档 ──
+        ("thesis_breaks.py", "_CONFIG_JSON_PATH"),    # thesis_breaks_config.json，生产只读
+        ("market_intelligence.py", "_BASE"),          # 同上
+        ("watchlist_events.py", "EVENTS_FILE"),       # watchlist_events.md
+        # ── C. 已读 `ALPHA_HIVE_HOME`、`__file__` 只作兜底（另一个子物种，冻在 import 期）──
+        ("agent_toolbox.py", "ALLOWED_ROOTS"),        # 沙箱白名单；冻结只会更保守不会越权
+        ("gui/app.py", "_PROJECT_ROOT"),              # sys.path
+        ("scheduler.py", "_PROJECT_ROOT"),            # scheduler.log
+        # ── D. 未清，已登记（读多写少 / 牵动面大）──
+        ("pead_analyzer.py", "_CACHE_DIR"),           # try 分支已走 PATHS，这是 except 兜底
+        ("push_report_to_slack.py", "PROJECT_DIR"),   # 读报告 json（CLI 脚本）
+        ("scan_coverage_gate.py", "ROOT"),            # 读 .swarm_results_*.json
+    }
+
+    def test_scanner_has_teeth(self):
+        """反向自证：换成 `__file__` 标记后扫描器必须仍能扫到东西。"""
+        found = TestSpeciesDoesNotSpread._scan(marker="__file__")
+        assert len(found) >= 10, (
+            f"只找到 {len(found)} 处——几乎肯定是扫描器坏了，而不是仓库突然干净了")
+
+    def test_no_new_file_derived_paths(self):
+        new = TestSpeciesDoesNotSpread._scan(marker="__file__") - self.KNOWN
+        assert not new, (
+            "新增了「`__file__` 派生的路径常量」：\n"
+            + "\n".join(f"  - {f}:{n}" for f, n in sorted(new))
+            + "\n\n先判它指向**代码**还是**数据**：\n"
+              "  · 数据（库/账本/状态/缓存/产物）⇒ 必须改成运行时读 `PATHS.*`，"
+              "`__file__` 派生值完全无视环境变量，测试隔离对它无效；\n"
+              "  · 代码同址资源（模板/prompt/只读配置/sys.path/git -C）⇒ `__file__` 正确，"
+              "把它加进本类的 KNOWN 白名单并注明属于哪一类。")
+
+    def test_detection_actually_finds_a_synthetic_offender(self, tmp_path, monkeypatch):
+        """正向对照：往一棵 tmp 树里放一个真违规，检测机制必须发现它。
+
+        没有这条的话，`test_no_new_file_derived_paths` 只证明了「现在没有新增」，
+        证明不了「新增了能被发现」——扫描器若某天不再匹配 `__file__` 形态，
+        它会安静地永远绿（v0.45.71「守卫自己恒真」）。
+
+        ⚠️ 说明一下 mutation 的边界：把上面那条断言直接改成 `new = set()`
+        （恒真）**没有任何测试抓得住**——那是「变异到断言自身」，是 mutation
+        测自己断言的固有上限，不是覆盖缺口。本条能挡的是另一件事：
+        **检测机制**（文件集 + 下钻 + 标记匹配）失效。
+        """
+        import sys
+        (tmp_path / "offender.py").write_text(
+            "from pathlib import Path\n"
+            'DB_PATH = Path(__file__).parent / "pheromone.db"\n', encoding="utf-8")
+        # 嵌套在 try 里的违规——**加宽扫描的全部意义就在这里**：当初正是靠下钻
+        # 复合语句才发现 `pead_analyzer.py` 那处藏在 try 里的。夹具若只放模块级的，
+        # 「关掉下钻」这个变异会全绿（v0.45.160 实测 M20）。
+        (tmp_path / "nested_offender.py").write_text(
+            "from pathlib import Path\n"
+            "try:\n"
+            '    NESTED_DIR = Path(__file__).parent / "state"\n'
+            "except ImportError:\n"
+            "    NESTED_DIR = None\n", encoding="utf-8")
+        (tmp_path / "innocent.py").write_text(
+            "from hive_logger import PATHS\n"
+            "def _db():\n    return PATHS.db      # 调用时求值，不该被报\n",
+            encoding="utf-8")
+        monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+        found = TestSpeciesDoesNotSpread._scan(marker="__file__")
+        assert ("offender.py", "DB_PATH") in found, (
+            "检测机制没发现明摆着的 `Path(__file__).parent / \"pheromone.db\"`——"
+            "扫描器坏了，上面那条「无新增」断言因此是恒真的")
+        assert ("nested_offender.py", "NESTED_DIR") in found, (
+            "藏在 `try:` 里的违规没被发现——扫描器不再下钻复合语句了。"
+            "那些语句在 import 期同样执行，漏掉它们等于普查是低估的")
+        assert ("innocent.py", "_db") not in found, (
+            "把「函数内调用时求值」也报成违规了——会逼着人把正确写法加进白名单")
+
+    def test_cleaned_modules_stay_clean(self):
+        """v0.45.160 清掉的那些不许回退成 `__file__` 派生常量。"""
+        cleaned = {
+            ("signal_archive.py","DB_PATH"), ("vol_forecast.py","DB_PATH"),
+            ("ic_diagnostics.py","DB_PATH"), ("close_correction.py","DB_PATH"),
+            ("backfill_dir_accuracy.py","DB"), ("replay_scoring.py","DB_PATH"),
+            ("feedback_loop.py","PHEROMONE_DB_PATH"),
+            ("cboe_vix.py","_CACHE_PATH"), ("congress_trades_scraper.py","_CACHE_PATH"),
+            ("fear_greed.py","_CACHE_PATH"), ("vix_term_structure.py","_CACHE_PATH"),
+            ("yahoo_trending.py","_CACHE_PATH"), ("real_data_sources.py","CACHE_DIR"),
+            ("reddit_sentiment.py","CACHE_DIR"), ("factor_attribution.py","_CACHE_DIR"),
+            ("risk_engine.py","_SNAPSHOTS_DIR"), ("risk_engine.py","_CACHE_DIR"),
+            ("ibkr_sync.py","BASE"), ("param_optimizer.py","BASE_DIR"),
+        }
+        regressed = TestSpeciesDoesNotSpread._scan(marker="__file__") & cleaned
+        assert not regressed, (
+            f"v0.45.160 清掉的又被写回成 `__file__` 派生常量：{sorted(regressed)}")
+
+
+def _discover_path_resolvers():
+    """结构性枚举**所有**「零参数的 `PATHS.*` 路径解析器」。
+
+    v0.45.160（承 v0.45.146/152 session 的判据）：**按名字匹配的检测器，只能证明
+    「匹配到的是对的」，不能证明「没匹配到的是错的」。** 实证就在本仓：这类解析器
+    有 27 个，**名字互不相同**（`default_db_path` / `_cache_path` / `_base_dir` /
+    `DB_PATH` / `default_model_path` / `_sentiment_db_path` / `default_path` …）。
+    列一张名单去测，只会覆盖到你想起来的那几个；本函数改为**从 AST 枚举**，
+    新增的解析器**自动**进入下面的行为测试，不必有人记得来加一行。
+
+    判据（全部结构性，不看名字）：
+      · 零必需参数（能直接调用）
+      · 每一条 `return` 的表达式要么含 `PATHS.`，要么是从 `PATHS.` 派生的局部变量，
+        要么是覆盖钩子形态 `Path(<全大写名>)`（本仓 v0.45.150/160 的统一写法）
+      · 函数体 ≤ 14 条语句（排除顺手引用了 PATHS 的业务函数）
+    """
+    import ast
+    import subprocess
+    files, _mode = TestSpeciesDoesNotSpread._own_python_files()
+    found = []
+    for p in sorted(files):
+        rel = p.relative_to(REPO_ROOT)
+        if any(x in rel.parts for x in ("tests", "experiments", "__pycache__")):
+            continue
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.FunctionDef) or len(n.body) > 14:
+                continue
+            a = n.args
+            required = (len(a.posonlyargs) + len(a.args) - len(a.defaults)
+                        + len([k for k, d in zip(a.kwonlyargs, a.kw_defaults) if d is None]))
+            if required:
+                continue
+            derived = {t.id for st in ast.walk(n) if isinstance(st, ast.Assign)
+                       for t in st.targets
+                       if isinstance(t, ast.Name) and "PATHS." in ast.unparse(st.value)}
+            rets = [st for st in ast.walk(n) if isinstance(st, ast.Return) and st.value]
+            if not rets or not any("PATHS." in ast.unparse(st) for st in ast.walk(n)):
+                continue
+
+            def _is_hook(expr):
+                """覆盖钩子形态：`Path(HOOK)` / `str(HOOK)` / `os.fspath(HOOK)`。"""
+                return (isinstance(expr, ast.Call) and len(expr.args) == 1
+                        and isinstance(expr.args[0], ast.Name)
+                        and expr.args[0].id.isupper())
+
+            if all("PATHS." in ast.unparse(r.value)
+                   or any(d in ast.unparse(r.value) for d in derived)
+                   or _is_hook(r.value)
+                   for r in rets):
+                # 顺带带出「覆盖钩子」的名字（`if HOOK is not None: return Path(HOOK)`），
+                # 行为测试要先把它清成 None 再验 env——否则 autouse fixture 设过的
+                # 覆盖会让断言失败，而那恰恰是**正确行为**（v0.45.160 实测
+                # `feedback_loop` 就这么假红了一次）。
+                hook = next((h.args[0].id for r in rets if _is_hook(r.value)
+                             for h in [r.value]), None)
+                found.append((str(rel)[:-3].replace("/", "."), n.name, hook))
+    return sorted(set(found))
+
+
+_PATH_RESOLVERS = _discover_path_resolvers()
+
+
+class TestEveryResolverFollowsEnv:
+    """**每一个**路径解析器都必须跟着 `ALPHA_HIVE_HOME` 走（v0.45.160）。
+
+    结构守卫（`TestSpeciesDoesNotSpread` / `TestFileDerivedSpeciesDoesNotSpread`）
+    能证明「它不是 import 期常量」，**证明不了「它跟着 env 走」**——
+    比如哪天有人给某个解析器加上 `@lru_cache`，结构守卫不会红（它只看
+    `Assign`/`AnnAssign`，看不见装饰器），只有行为测试会。
+
+    参数化列表来自 AST **枚举**而非人工名单，所以新增解析器自动被覆盖。
+    """
+
+    # 必须在枚举里的最小集合。**这不是冗余**：参数化测试有个隐蔽的规避路径——
+    # 把某个解析器改成不再引用 `PATHS.`（比如冻回 `Path(__file__)…`），它就
+    # **不再被枚举到**，那条用例直接消失，`collected` 少 1、**没有任何红**。
+    # 实测（v0.45.160 mutation M22）：56 → 55 passed，静默失去覆盖。
+    # 这是「跳过缺失项＝把缺失渲染成不存在」的 parametrize 版本。
+    MUST_BE_ENUMERATED = {
+        ("backtester", "default_db_path"), ("signal_archive", "_db_path"),
+        ("vol_forecast", "_db_path"), ("ic_diagnostics", "_db_path"),
+        ("close_correction", "_db_path"), ("replay_scoring", "_db_path"),
+        ("feedback_loop", "_db_path"), ("backfill_dir_accuracy", "_db_path"),
+        ("paper_portfolio", "_pheromone_db_path"), ("ibkr_sync", "_base_dir"),
+        ("param_optimizer", "_base_dir"), ("risk_engine", "_cache_dir"),
+        ("risk_engine", "_snapshots_dir"), ("factor_attribution", "_cache_dir"),
+        ("reddit_sentiment", "_cache_dir"), ("real_data_sources", "_cache_dir"),
+        ("fear_greed", "_cache_path"), ("cboe_vix", "_cache_path"),
+        ("yahoo_trending", "_cache_path"), ("vix_term_structure", "_cache_path"),
+        ("congress_trades_scraper", "_cache_path"),
+        ("economic_calendar_watch", "_state_path"),
+    }
+
+    def test_discovery_has_teeth(self):
+        """反向自证：枚举必须真找到东西，且**已知的那些一个都不能少**。"""
+        assert len(_PATH_RESOLVERS) >= 15, (
+            f"只枚举到 {len(_PATH_RESOLVERS)} 个解析器——几乎肯定是枚举器坏了")
+        names = {n for _, n, _ in _PATH_RESOLVERS}
+        assert len(names) >= 8, (
+            f"解析器名字只有 {len(names)} 种，与「名字互不相同」的实测不符，枚举可疑")
+        missing = self.MUST_BE_ENUMERATED - {(m, f) for m, f, _ in _PATH_RESOLVERS}
+        assert not missing, (
+            f"这些解析器**从枚举里消失了**：{sorted(missing)}\n"
+            "多半是它不再引用 `PATHS.`（被冻回 `Path(__file__)…` 或写死了路径）。"
+            "消失＝那条行为测试静默不再运行，比它变红更危险。")
+
+    @pytest.mark.parametrize("modname,fnname,hook", _PATH_RESOLVERS,
+                             ids=[f"{m}.{f}" for m, f, _ in _PATH_RESOLVERS])
+    def test_resolver_follows_env(self, modname, fnname, hook, tmp_path, monkeypatch):
+        """改 `ALPHA_HIVE_HOME` 后，解析出来的路径必须落进新目录。
+
+        ⚠️ 先把该模块的**覆盖钩子清成 `None`**：`conftest` 里有 autouse fixture
+        （如 `_isolate_feedback_loop_close_t7_db`）会把钩子指向别处，那是**正确行为**，
+        不清掉就会假红。本条要验的是「**没有覆盖时**它跟不跟 env」。
+        """
+        import importlib
+        mod = importlib.import_module(modname)
+        if hook is not None and hasattr(mod, hook):
+            monkeypatch.setattr(mod, hook, None)
+        fn = getattr(mod, fnname)
+        fn = fn.fget if isinstance(fn, property) else fn
+
+        sandbox = tmp_path / "envprobe"
+        sandbox.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(sandbox))
+        monkeypatch.delenv("ALPHA_HIVE_DB_PATH", raising=False)
+        monkeypatch.delenv("ALPHA_HIVE_CHROMA_PATH", raising=False)
+        monkeypatch.delenv("ALPHA_HIVE_CACHE_DIR", raising=False)
+        monkeypatch.delenv("ALPHA_HIVE_LOGS_DIR", raising=False)
+
+        got = str(fn())
+        assert str(sandbox) in got, (
+            f"{modname}.{fnname}() 返回 {got}，没落进 ALPHA_HIVE_HOME。\n"
+            "要么它把值冻住了（模块级常量 / 默认参数 / `@lru_cache`），"
+            "要么它读的是别的锚点（`__file__`）。两者都会让测试隔离失效。")
+
+
+class TestNoCachedResolvers:
+    """路径解析器不许被缓存装饰器修饰（v0.45.160）。
+
+    `@lru_cache` / `@cache` / `@cached_property` 修饰的解析器**首次调用后冻住**——
+    不是 import 期冻，但一样穿透逐测试隔离：第一个用到它的测试决定了整个 session
+    的落点。而 `TestSpeciesDoesNotSpread._scan()` 只看 `Assign`/`AnnAssign`，
+    **结构上看不见函数装饰器**，所以这条要单列。
+
+    由 v0.45.146/152 session 提出；实测本仓当前 **0 处**，本条是防复发。
+    """
+
+    @staticmethod
+    def _cached_resolvers():
+        import ast
+        files, _ = TestSpeciesDoesNotSpread._own_python_files()
+        bad = []
+        for p in sorted(files):
+            rel = p.relative_to(REPO_ROOT)
+            if any(x in rel.parts for x in ("tests", "experiments", "__pycache__")):
+                continue
+            try:
+                tree = ast.parse(p.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError, OSError):
+                continue
+            for n in ast.walk(tree):
+                if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if not n.decorator_list:
+                    continue
+                body = "\n".join(ast.unparse(s) for s in n.body)
+                if "PATHS." not in body and "__file__" not in body:
+                    continue
+                # **白名单**，不是黑名单：按名字匹配的黑名单会被别名绕过——
+                # `from functools import lru_cache as _lc` + `@_lc(maxsize=1)`
+                # 的 `ast.unparse` 是 `_lc(maxsize=1)`，不含 "lru_cache"
+                # （v0.45.160 mutation M23 实测绕过）。所以改成
+                # 「除这几个之外的装饰器一律报出来，由人判断」。
+                ALLOWED = {"property", "staticmethod", "classmethod",
+                           "overload", "abstractmethod"}
+                offending = [d for d in n.decorator_list
+                             if ast.unparse(d).split("(")[0].split(".")[-1] not in ALLOWED]
+                if offending:
+                    bad.append((str(rel), n.name, [ast.unparse(d) for d in offending]))
+        return bad
+
+    def test_detector_has_teeth(self, tmp_path, monkeypatch):
+        """正向对照：造一个被 `@lru_cache` 修饰的解析器，检测器必须发现。"""
+        import sys
+        (tmp_path / "cached_offender.py").write_text(
+            "from functools import lru_cache\n"
+            "from hive_logger import PATHS\n"
+            "@lru_cache(maxsize=1)\n"
+            "def _db():\n    return PATHS.db\n", encoding="utf-8")
+        monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+        hits = {(f, n) for f, n, _ in self._cached_resolvers()}
+        assert ("cached_offender.py", "_db") in hits, (
+            "检测器没发现被 @lru_cache 修饰的解析器——它是恒真的")
+
+    def test_no_unexpected_decorators_on_resolvers(self):
+        bad = self._cached_resolvers()
+        assert not bad, (
+            "路径解析器带了非白名单装饰器（缓存类会让它首次调用后冻住）：\n"
+            + "\n".join(f"  - {f}:{n} {d}" for f, n, d in bad)
+            + "\n\n缓存会让它**首次调用后冻住**：第一个用到它的测试决定整个 session "
+              "的落点，逐测试隔离失效。要缓存就缓存**解析之后的内容**，别缓存路径本身。")

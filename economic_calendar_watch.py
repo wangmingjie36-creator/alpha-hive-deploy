@@ -62,7 +62,17 @@ from typing import Any, Dict, List, Optional, Tuple
 _DEFAULT_CONTACT = "alpha-hive-calendar-watch@localhost.invalid"
 _UA_TEMPLATE = "AlphaHive-calendar-watch/1.0 ({contact})"
 
-_STATE_PATH = Path(__file__).resolve().parent / "cache" / "economic_calendar_watch.json"
+# v0.45.160：`_STATE_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.cache_dir`。
+# 原本是 `Path(__file__).resolve().parent / "cache" / ...`——它**压根不读环境变量**。
+_STATE_PATH = None
+
+
+def _state_path() -> Path:
+    """节流状态文件。**调用时求值。**"""
+    if _STATE_PATH is not None:
+        return Path(_STATE_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.cache_dir) / "economic_calendar_watch.json"
 _DEFAULT_MAX_AGE_DAYS = 7
 
 _MONTHS = {m: i for i, m in enumerate(
@@ -322,9 +332,10 @@ def check_upstream(timeout: int = 20, ua: Optional[str] = None) -> Dict[str, Any
 
 
 def check(force: bool = False, max_age_days: int = _DEFAULT_MAX_AGE_DAYS,
-          state_path: Path = _STATE_PATH, timeout: int = 20,
+          state_path: Optional[Path] = None, timeout: int = 20,
           today: Optional[date] = None) -> Dict[str, Any]:
     """本地体检（免费、每次都做）+ 上游探查（按周节流）"""
+    state_path = Path(state_path) if state_path else _state_path()   # v0.45.160：调用时求值
     from economic_calendar import get_calendar_health
 
     today = today or date.today()
@@ -449,13 +460,15 @@ def main() -> int:
     ap.add_argument("--max-age-days", type=int, default=_DEFAULT_MAX_AGE_DAYS,
                     help=f"节流窗口天数（默认 {_DEFAULT_MAX_AGE_DAYS}）")
     ap.add_argument("--timeout", type=int, default=20, help="单个源抓取超时秒数")
-    ap.add_argument("--state", default=str(_STATE_PATH), help="节流状态文件路径")
+    # v0.45.160：argparse 的 default 在 import 期求值，不能塞冻结值
+    ap.add_argument("--state", default=None, help="节流状态文件路径（默认 PATHS.cache_dir 下）")
     ap.add_argument("--quiet", action="store_true", help="只输出结论行")
     ap.add_argument("--out", default=None, help="把完整结果写成 JSON")
     args = ap.parse_args()
 
     res = check(force=args.force, max_age_days=args.max_age_days,
-                state_path=Path(args.state), timeout=args.timeout)
+                state_path=Path(args.state) if args.state else None,
+                timeout=args.timeout)
 
     if args.out:
         try:

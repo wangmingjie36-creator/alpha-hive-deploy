@@ -28,8 +28,22 @@ except ImportError:
     requests = None
 
 # 缓存目录
-CACHE_DIR = Path(__file__).parent / "reddit_cache"
-CACHE_DIR.mkdir(exist_ok=True)
+# v0.45.160：`CACHE_DIR` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.*`。
+# 原本是 `Path(__file__).parent / "reddit_cache"` —— 它**压根不读任何环境变量**，
+# 比「模块级常量冻在 import 期」更彻底：`ALPHA_HIVE_HOME` / `ALPHA_HIVE_CACHE_DIR`
+# 设成什么都无效，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "CACHE_DIR", ...)` 依赖它。
+CACHE_DIR = None
+
+
+def _cache_dir() -> Path:
+    """本模块的缓存落点。**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if CACHE_DIR is not None:
+        return Path(CACHE_DIR)
+    from hive_logger import PATHS
+    d = Path(PATHS.home) / "reddit_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 # ApeWisdom API
 APEWISDOM_BASE = "https://apewisdom.io/api/v1.0"
@@ -60,7 +74,7 @@ class RedditSentimentClient:
             return cached["data"]
 
         # 磁盘缓存
-        cache_path = CACHE_DIR / f"ranking_{filter_name}.json"
+        cache_path = _cache_dir() / f"ranking_{filter_name}.json"
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
             if age < _REDDIT_DISK_TTL:
@@ -126,7 +140,7 @@ class RedditSentimentClient:
         }
         """
         # 缓存 10 分钟
-        cache_path = CACHE_DIR / f"{ticker}_sentiment.json"
+        cache_path = _cache_dir() / f"{ticker}_sentiment.json"
         if cache_path.exists():
             age = time.time() - cache_path.stat().st_mtime
             if age < 600:

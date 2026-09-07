@@ -30,7 +30,20 @@ from typing import Dict, List, Optional
 _log = logging.getLogger("alpha_hive.congress_trades")
 
 _ENDPOINT = "https://api.quiverquant.com/beta/live/congresstrading"
-_CACHE_PATH = Path(__file__).parent / "cache" / "congress_trades.json"
+# v0.45.160：`_CACHE_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.*`。
+# 原本是 `Path(__file__).parent / "cache" / "congress_trades.json"` —— 它**压根不读任何环境变量**，
+# 比「模块级常量冻在 import 期」更彻底：`ALPHA_HIVE_HOME` / `ALPHA_HIVE_CACHE_DIR`
+# 设成什么都无效，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "_CACHE_PATH", ...)` 依赖它。
+_CACHE_PATH = None
+
+
+def _cache_path() -> Path:
+    """本模块的缓存落点。**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if _CACHE_PATH is not None:
+        return Path(_CACHE_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.cache_dir) / "congress_trades.json"
 _CACHE_TTL = 3600 * 4  # 4 小时（国会披露通常有 45 天延迟，无需高频刷新）
 _lock = threading.Lock()
 
@@ -300,10 +313,10 @@ def _format_summary(
 
 
 def _load_cached(force_refresh: bool) -> Optional[List]:
-    if force_refresh or not _CACHE_PATH.exists():
+    if force_refresh or not _cache_path().exists():
         return None
     try:
-        cached = json.loads(_CACHE_PATH.read_text())
+        cached = json.loads(_cache_path().read_text())
         ts = datetime.fromisoformat(cached.get("_ts", "2000-01-01"))
         if (datetime.now() - ts).total_seconds() < _CACHE_TTL:
             return cached.get("data")
@@ -314,8 +327,8 @@ def _load_cached(force_refresh: bool) -> Optional[List]:
 
 def _save_cache(data: List) -> None:
     try:
-        _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _CACHE_PATH.write_text(json.dumps(
+        _cache_path().parent.mkdir(parents=True, exist_ok=True)
+        _cache_path().write_text(json.dumps(
             {"_ts": datetime.now().isoformat(), "data": data},
             ensure_ascii=False,
         ))

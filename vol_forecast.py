@@ -58,7 +58,28 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-DB_PATH = Path(__file__).parent / "pheromone.db"
+# v0.45.160：`DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
+# 保留这个名字是因为 `tests/` 有多处 `monkeypatch.setattr(<mod>, "DB_PATH", ...)`
+# 依赖它做隔离；把它删掉会把那些测试打红。
+DB_PATH = None
+
+def _db_path() -> Path:
+    """本模块用的 `pheromone.db` 路径。**调用时求值。**
+
+    v0.45.160：这里原本是 `Path(__file__).parent / "pheromone.db"`。
+    那个写法比「模块级常量冻在 import 期」更彻底——它**压根不读任何环境变量**：
+    `ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME` 设成什么都无效，连改成懒求值都救不了，
+    只能显式改去读 `PATHS.db`。于是 `tests/conftest.py::_isolate_env` 对它完全无效。
+    本模块只读（`load_day`），但 `sqlite3.connect` 对不存在的路径会**创建**文件。
+
+    ⚠️ 下面所有默认参数一律写 `None`，**不要**写 `= DB_PATH` 或 `= _db_path()`——
+    默认参数在 `def` 执行时（＝import 期）求值，等于换个地方冻同一个值
+    （同型 v0.45.37 / v0.45.150）。
+    """
+    if DB_PATH is not None:
+        return Path(DB_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.db)
 
 #: 组合权重。**等权是刻意的**：样本量不足以支撑更精细的权重估计，
 #: 且等权对参数误设最稳健。
@@ -154,8 +175,9 @@ def size_multipliers(vol_scores: Dict[str, float]) -> Dict[str, Dict]:
     return out
 
 
-def load_day(date: str, db_path: Path = DB_PATH) -> Dict[str, Dict[str, float]]:
+def load_day(date: str, db_path: Optional[Path] = None) -> Dict[str, Dict[str, float]]:
     """从 signal_archive 读某一天的分量信号。"""
+    db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     q = ",".join("?" * len(COMPONENTS))
     # ⚠️ 用 exists() 判断，**不要**去匹配 OperationalError 的消息文本。
     # 实测（SQLite 3.39.4）：「文件不存在」与「权限被拒」给出的消息**完全相同**
@@ -196,11 +218,13 @@ def load_day(date: str, db_path: Path = DB_PATH) -> Dict[str, Dict[str, float]]:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Alpha Hive 波动率预测与仓位分层")
     ap.add_argument("--date", required=True, help="业务日期 YYYY-MM-DD")
-    ap.add_argument("--db", default=str(DB_PATH))
+    # v0.45.160：argparse 的 default 在 import 期求值，不能塞冻结值
+    ap.add_argument("--db", default=None)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
-    rows = load_day(args.date, Path(args.db))
+    # v0.45.160：argparse 的 default 是 None（不能塞 import 期冻结值），此处解析
+    rows = load_day(args.date, Path(args.db) if args.db else None)
     if not rows:
         print(f"⏭  {args.date} 无归档信号。先跑 signal_archive.py --backfill",
               file=sys.stderr)
