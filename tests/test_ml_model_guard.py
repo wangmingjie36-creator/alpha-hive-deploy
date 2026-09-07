@@ -124,6 +124,59 @@ class TestPredicateHasTeeth:
         assert v.distinct == 2
         assert v.verdict == "ok", "n=3 不该被 near_constant 判据碰到"
 
+    def test_large_scan_day_moderate_collapse_is_flagged(self):
+        """v0.45.154：n=30、distinct=3 必须红。
+
+        旧判据（单一绝对数 `distinct <= 2`）会放行它 —— **扫描日越大闸越松**，
+        方向与诊断力相反。n=30 那一档的健康下界实测是 **13**，掉到 3 是
+        4 倍级塌缩。
+        """
+        vals = [0.40] * 28 + [0.50, 0.60]          # n=30, distinct=3
+        v = G.evaluate_probabilities(vals)
+        assert v.n_numeric == 30 and v.distinct == 3
+        assert v.verdict == "near_constant"
+        assert v.exit_code == 1
+
+    def test_large_scan_day_at_band_edge_is_flagged(self):
+        """门槛边界：n>=20 档允许的最大 distinct 是 4，等于 4 仍要红。"""
+        vals = [0.40] * 27 + [0.50, 0.60, 0.70]    # n=30, distinct=4
+        v = G.evaluate_probabilities(vals)
+        assert v.distinct == 4 and v.verdict == "near_constant"
+
+    def test_large_scan_day_healthy_floor_is_green(self):
+        """成对的另一半：该档实测健康下界 13 必须绿。
+
+        只写上两条的话，把门槛调成 `distinct <= 99` 也全绿。
+        """
+        vals = [0.40 + i * 0.01 for i in range(13)] + [0.40] * 17   # n=30, distinct=13
+        v = G.evaluate_probabilities(vals)
+        assert v.n_numeric == 30 and v.distinct == 13
+        assert v.verdict == "ok" and v.exit_code == 0
+
+    def test_small_band_threshold_did_not_loosen(self):
+        """成对：小扫描日那一档不得被顺手放宽。
+
+        n=12/distinct=3 在旧判据下是 `ok`（该档健康下界 9）。分段后仍须 `ok`
+        —— 若两档共用了 n>=20 的门槛 4，这条会红。
+        """
+        vals = [0.40] * 10 + [0.50, 0.60]          # n=12, distinct=3
+        v = G.evaluate_probabilities(vals)
+        assert v.n_numeric == 12 and v.distinct == 3
+        assert v.verdict == "ok"
+
+    def test_band_lookup_is_monotone_and_bounded(self):
+        """门槛表本身的不变式：随 n 单调不减，且 n<地板时判不了。
+
+        写死一张表最容易犯的错是档位排序反了（`NEAR_CONSTANT_BANDS` 按 n
+        下界降序匹配第一个命中的，顺序写反会让大扫描日落到小档门槛上）。
+        """
+        assert G.near_constant_max_distinct(7) is None
+        caps = [G.near_constant_max_distinct(n) for n in range(8, 41)]
+        assert all(c is not None for c in caps)
+        assert caps == sorted(caps), "门槛随 n 必须单调不减"
+        assert G.near_constant_max_distinct(19) == 2
+        assert G.near_constant_max_distinct(20) == 4
+
     def test_bool_is_not_treated_as_probability(self):
         """`bool` 是 `int` 的子类，`float(True)` = 1.0 会被当成合法概率。
 
