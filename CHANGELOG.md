@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.150] — 2026-09-07 — 占位（进行中：审计 `hive_logger.PATHS.*` 派生路径被求值成**模块级常量 / 类属性**的物种 —— import 那一刻冻住，`conftest.py::_isolate_env` 的 `monkeypatch.setenv("ALPHA_HIVE_HOME")` 对它无效，因为 pytest **收集期**就 import 了模块，那时 fixture 还没跑。先例 v0.45.149 的 `MLEnhancedReportGenerator._model_file` 已证实会让「跑一次全套测试」覆盖生产 `ml_model_cache.json`。范围＝① AST 全仓扫描列清单（预计约 22 处，排除 tests/）；② **逐处实证判定危害等级**（判据＝这个冻住的路径会不会被**写**、写的是不是生产数据；高危：`backtester.DB_PATH` / `MemoryStore.DB_PATH` / `vector_memory.DEFAULT_DB_PATH`；中危：各模块 `CACHE_DIR`/`BASE_DIR`；待判：`config.py` 里那批 `str(...)` 快照 dict）；③ 先数 conftest 里哪些已被针对性 monkeypatch 管住，不重复劳动；④ 高危处改 property/函数（调用时求值）+ **成对**测试（「改 env 路径跟着变」+「跑完测试生产文件指纹未变」）+ mutation check + 核对 `collected N items` 不为 0。⚠️ 与 v0.45.149 **相邻不重叠**：那条管 `ml_predictor.save_model` 的相对路径默认值与加载守卫，本条管 `PATHS.*` 派生值的**求值时机**；两边都可能碰 `conftest.py` 的隔离 fixture，合并时逐块核对。**不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`）
+
+---
+
 ## [0.45.149] — 2026-09-07 — 占位（进行中：跑 pytest 会覆盖生产 `ml_model.json` —— `ml_predictor` 三处 `save_model(filename="ml_model.json")` 默认值是**相对路径**，`MLPredictionService.train_model()` 成功后**无参**调用它，而 `tests/` 约 12 处 `svc.train_model()` 不传 tmp 路径 ⇒ **在主 checkout 跑测试 = 用夹具模型覆盖生产模型**。2026-09-07 01:15 已实际发生：`n=497 / acc 71.63 / oos 44.35` → `n=30 / acc 96.67 / oos None`，且已退化成常数函数。范围＝① 模型路径收敛到单一真相（模块级常量 / `hive_logger.PATHS` 家族），默认值不再是相对字符串；② `tests/` autouse fixture 把模型写入重定向到 tmp_path，任何测试都不可能写到仓库根；③ 加载时 `oos_accuracy is None` 且 `n_samples_seen` 明显偏低即拒绝并报错（**不能用 accuracy 判**——夹具的 96.67/100.0 比真模型 71.63 更好看）；④ 从 `pheromone.db` 重训恢复生产模型；⑤ 成对测试 + mutation check。⚠️ 与 v0.45.145 **互补**（那条查症状＝当日唯一值闸 + `ml_model.json` 版本快照目录，本条堵源头＝路径收敛与加载守卫），两边都会碰 `ml_predictor.save_model` 附近，合并时逐块核对。**不动**训练口径、**不动** `_prepare_ml_input`（归 v0.45.146 / v0.45.147）、**不动** `EVALUATION_WEIGHTS`）
 
 ---
