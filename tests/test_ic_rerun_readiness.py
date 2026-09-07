@@ -88,10 +88,22 @@ class TestCohortBoundary:
         assert c["n_generations"] == len(rr._COHORT_HISTORY)
 
     def test_history_is_append_only_and_ordered(self):
-        """世代历史是审计轨迹：只追加、按时间递增。"""
-        dates = [d for d, _, _ in rr._COHORT_HISTORY]
+        """世代历史是审计轨迹：只追加、按时间递增，(日期, 版本) 不重复。
+
+        v0.45.156：原断言是 `len(set(dates)) == len(dates)`（**日期**唯一）。
+        它与同一份表 docstring 里「再次改动 … **必须追加一条**」直接冲突——
+        同一天部署两个都改 final_score 的版本时，照规矩追加就会让它变红，
+        于是它保护的不是不变式，而是「别在同一天改两次」。
+        （与 v0.45.151 改 `TestCohortBoundaryAppended` 是同一物种。）
+
+        真正的不变式：日期**非降**（`sorted` 本就允许并列）+ (日期, 版本) 唯一。
+        同日多条不影响语义——`cohort_start()` 取 `[-1]`，`assess` 按 `date >= 边界`
+        过滤，两者都只看日期值本身。
+        """
+        entries = [(d, v) for d, v, _ in rr._COHORT_HISTORY]
+        dates = [d for d, _ in entries]
         assert dates == sorted(dates), f"世代边界未按时间排序: {dates}"
-        assert len(set(dates)) == len(dates), "世代边界有重复日期"
+        assert len(set(entries)) == len(entries), f"(日期, 版本) 重复: {entries}"
 
     def test_every_generation_records_why(self):
         """只有日期没有原因的边界，半年后无法判断它是否仍然适用。"""

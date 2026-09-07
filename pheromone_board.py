@@ -55,7 +55,21 @@ class PheromoneEntry:
 class PheromoneBoard:
     """线程安全的信息素板（蜂群通信中枢）"""
 
-    MAX_ENTRIES = 80  # 7 Agent × 9 Ticker = 63 条，80 条保留完整一轮 + 余量
+    # ⚠️ 80 这个值**按 9 只标的定的，早已不够**：`config.WATCHLIST` 现为 30 只，
+    # 一轮满编 9 条/标的（8 只蜂 + CodeExecutorAgent 在 analyze 开头无条件发的
+    # 5.0/neutral 占位，见 code_executor_agent.py:75）≈ **270 条**。
+    #
+    # 溢出淘汰键是 `nlargest(MAX_ENTRIES, key=(self_score, support_count,
+    # pheromone_strength))`，即**先扔分最低的** ⇒ 缺失与被测量的量**反相关**。
+    # 生产实测（2026-08-24 起 191 份）：bearish 条目丢 50.7%、bullish 只丢 12.6%，
+    # 相差 4.0 倍。详见 tests/test_resonance_eviction.py 模块 docstring。
+    #
+    # **本值 v0.45.156 未动**，因为改它会一次性改变每一个板消费方；两条读路径
+    # 改为不依赖它：`get_agent_entry`（v0.45.151）与 `detect_resonance`（v0.45.156）
+    # 都走 `_latest_by_agent`。仍受截断的是 `get_top_signals` / `snapshot` /
+    # `compact_snapshot` —— 其中 GuardBee 的 `get_top_signals(ticker, n=5)` 在当前
+    # 世代 70/191 = 36.6% 的标的上连 5 条都取不满，那条通道待独立测量后处理。
+    MAX_ENTRIES = 80
     DECAY_RATE = 0.1
     MIN_STRENGTH = 0.2
 
@@ -305,12 +319,57 @@ class PheromoneBoard:
                 return None
             return e
 
+    def _live_agent_entries(self, ticker: str) -> List[PheromoneEntry]:
+        """该标的本轮「每只蜂最新一条」的存活视图，**不受 MAX_ENTRIES 溢出淘汰影响**。
+
+        需持有 `_lock` 调用。过期条目就地清除，口径与 `get_agent_entry` 完全一致
+        （同一个 `_AGENT_ENTRY_MAX_AGE_S`）—— 墙钟过期判的是「这是不是上一轮的
+        陈货」，该拦；被容量挤掉纯属容量问题，不该拦。
+        """
+        now = datetime.now()
+        live: List[PheromoneEntry] = []
+        expired = []
+        for key, e in self._latest_by_agent.items():
+            if key[0] != ticker:
+                continue
+            try:
+                age_s = (now - datetime.fromisoformat(e.timestamp)).total_seconds()
+            except (ValueError, TypeError):
+                expired.append(key)          # 时间戳不可解析 → 视为过期
+                continue
+            if age_s >= self._AGENT_ENTRY_MAX_AGE_S:
+                expired.append(key)
+                continue
+            live.append(e)
+        for key in expired:
+            del self._latest_by_agent[key]
+        return live
+
     def detect_resonance(self, ticker: str) -> Dict:
         """
         检测信号共振：同向信号来自 >= 3 个不同数据维度时才触发增强
 
         旧逻辑：同向 Agent 数量 >= 3（存在虚假放大：多个 Agent 基于相同 yfinance 数据）
         新逻辑：同向 Agent 覆盖 >= 3 个不同数据维度（真正的多源独立印证）
+
+        为什么读 `_live_agent_entries` 而不是 `_entries`（v0.45.156）
+        ------------------------------------------------------------
+        `_entries` 溢出时按 `nlargest(MAX_ENTRIES, key=(self_score, ...))` 截断，
+        **先扔分最低的**，而低分与看空/中性相关 ⇒ 共振计数、`supporting_agents`、
+        `consistency`、多空对比全部单向偏斜。这不是「偶尔少数一票」：生产实测
+        （当前世代 191 份）共振方向翻转 **15.2%**、`resonance_detected` 翻转
+        **20.9%**，且 **20.4%** 的样本把 `consistency` 记成 **1.0（完全一致）**
+        —— 板不只是丢数据，它**制造了从未存在过的一致**。
+        `analysis-AMC-ml-2026-09-03.json`：9 只蜂 5 只看空，板上只剩 3 条全看多，
+        于是记成 `bullish / consistency=1.0 / +15 boost`。
+        证据与方法见 `tests/test_resonance_eviction.py` 模块 docstring。
+
+        ⚠️ 同一只蜂重复发布只算最新一条（`_latest_by_agent` 按 (ticker, agent_id)
+        建键）。这与旧行为有一处**有意的**差别：CodeExecutorAgent 每轮发两条
+        （5.0/neutral 占位 + 真实结论），旧行为下两条都进 `consistency` 分母。
+        全量对照实测：collapse 前后 `resonance_detected` / `direction` /
+        `supporting_agents` / `cross_dim_count` / `confidence_boost` **0/712 不同**，
+        只有 `consistency` 的分母差 1（占位条本就不是独立观点，不该稀释一致性）。
 
         Args:
             ticker: 标的代码
@@ -319,7 +378,7 @@ class PheromoneBoard:
             共振检测结果字典，新增 cross_dim_count / resonant_dimensions 字段
         """
         with self._lock:
-            ticker_entries = [e for e in self._entries if e.ticker == ticker]
+            ticker_entries = self._live_agent_entries(ticker)
             bullish = [e for e in ticker_entries if e.direction == "bullish"]
             bearish = [e for e in ticker_entries if e.direction == "bearish"]
 

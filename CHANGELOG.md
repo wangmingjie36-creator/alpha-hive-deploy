@@ -5,7 +5,126 @@
 
 ---
 
-## [0.45.156] — 2026-09-07 — 占位（进行中：v0.45.151 只修了 `_read_peer` 一条路径，`detect_resonance` 仍直读 `self._entries` ⇒ 同一 `MAX_ENTRIES=80` 截断（注释按「9 只标的」定，`config.WATCHLIST` 现 30 只、一轮约 210 条）会系统性删掉**低分**蜂，而低分与看空/中性相关 ⇒ 假设它是 chronos_bee.py 记的「信息素多5/空0 自我强化看多」的结构性成因之一。范围＝① 用 803 份生产 `analysis-*-ml-*.json` 重放真实发布序列，量 `detect_resonance` 的`ticker_entries` 实际丢了几条、与生产 `swarm_results.resonance` / `supporting_agents` 对照；② 命中率显著才动代码（抬 MAX_ENTRIES 或给共振一条抗淘汰视图），并按需追加 `ic_rerun_readiness._COHORT_HISTORY`。**先量再决定**，命中率为零或个位数则只改注释不改行为。不动评分权重、不动 `get_agent_entry` 语义、不动 probability_scorecard）
+## [0.45.156] — 2026-09-07 — 共振读的是被截断的板：它不只丢数据，还伪造了「完全一致」
+
+v0.45.151 的续集。那一版修了 `_read_peer` 一条路径，并**有意**没动
+`detect_resonance`（收敛影响面）。本版量了那条留下的路径，命中率远超预期：
+**不是「偶尔少一票」，而是共振结论本身被改写，且方向单一偏多。**
+
+### 怎么量的（生产 JSON 直读，不需要模拟）
+
+`swarm_results.pheromone_compact` 就是 `board.compact_snapshot(ticker)`，与
+`detect_resonance` **同在一次 `distill()` 调用内**（`queen_distiller.py:334` 取共振、
+`:1161` 取快照、`:1230` 才发布 Queen 自己的条目 ⇒ 快照不含 Queen）。
+所以「共振当时实际看到几条」是**直接观测量**。
+
+三条仪器自证（缺一条结论不成立）：
+
+1. 用快照重算 `detect_resonance`，**712/725 = 98.21% 逐字段复现**生产记录的 `resonance`。
+   剩 13 份偏差方向一致（生产比快照多看到 1 条）——那是并发标的在 `:334` 与 `:1161`
+   之间又挤掉一条，属**同一现象**而非反例；主测量只取可复现的 712 份。
+2. 快照必须是「实际发布集」的子多重集：**0/725 违反**（截断只删不造）。
+3. 第二个独立仪器：反解 `supporting_agents / consistency == len(快照)`，
+   **712/725 一致**，与自证 1 命中同一批样本。
+
+⚠️ **第一版仪器是错的，被自证 2 当场抓住**：先拿 `agent_directions`（8 只蜂）当
+「发布集」，算出「丢 3.50%」这个看着合理、可以直接写进结论的数——同时
+**428/724 出现「看到的比发布的还多」**这一不可能事件。查下来满编一轮是 **9 条**：
+`CodeExecutorAgent` 在 `analyze` 开头**无条件**先发一条 `5.0/neutral` 占位
+（`code_executor_agent.py:75`），随后才发真实结论（生产快照 592/745 份可见两条 `CodeExec`）。
+没有那道「本该不可能」的反向检查，这版会带着一个错了 4 倍的数字发出去。
+
+### 实测（当前世代＝30 只 watchlist，2026-08-24 起，n=191）
+
+条目层面丢 **628/1719 = 36.53%**，且**缺失与被测量的量反相关**：
+
+| 方向 | 满编 | 丢失 | 丢失率 |
+|---|---|---|---|
+| bullish | 588 | 74 | **12.6%** |
+| bearish | 550 | 279 | **50.7%** |
+| neutral | 581 | 275 | 47.3% |
+
+→ **看空/看多淘汰率之比 4.0×**（旧世代 ≤16 只时是 15.7×，但基数小）。
+
+后果是共振结论本身被改写：
+
+| 量 | 值 |
+|---|---|
+| 共振**方向**翻转 | **29/191 = 15.2%** |
+| `resonance_detected` 翻转 | **40/191 = 20.9%**（生产判 81 次，真值 61 次） |
+| `consistency` 被高估 | 113/191 = 59.2%，均值 **+0.301**，最大 +0.667 |
+| 记成 `consistency = 1.0`（完全一致）而那轮其实有条目被挤掉 | **39/191 = 20.4%** |
+
+`analysis-AMC-ml-2026-09-03.json`：9 只蜂 **5 只看空**（Buzz/CodeExec/Chronos/Rival/Bear），
+板上只剩 Oracle/Scout/Guard **三条全看多** ⇒ 生产记成
+`direction=bullish, consistency=1.0, resonance_detected=True, boost=+15`，`final_score` 6.64。
+无截断时应为 `direction=bearish`。
+
+⇒ 这正是 `swarm_agents/chronos_bee.py:405` 记的「信息素多5/空0 自我强化看多」的
+**结构性成因之一**：立项时它只是假设，现在是实测。淘汰键
+`nlargest(MAX_ENTRIES, key=(self_score, support_count, pheromone_strength))`
+**先扔分最低的**，而低分与看空/中性相关 ⇒ 板**制造了从未存在过的一致**。
+
+共振驱动**两处** `final_score`，故必须登记世代边界：
+① GuardBeeSentinel 的 risk_adj 维分（`7.0 + consistency*2.0` vs `avg_score*0.8`）——
+它自己那次共振调用（Guard/Bear 尚未发布时）实测翻转 **25/191 = 13.1%**；
+② QueenDistiller 的 `confidence_boost`（`rule_score = adjusted_score*(1+boost/100)`）。
+
+### Fixed
+
+- `pheromone_board.py`：新增 `_live_agent_entries(ticker)`——该标的「每只蜂最新一条」
+  的存活视图，复用 v0.45.151 的 `_latest_by_agent`，**不受 MAX_ENTRIES 溢出淘汰影响**；
+  `detect_resonance` 改读它。墙钟过期（`_AGENT_ENTRY_MAX_AGE_S`，与 `publish` 存活
+  检查 2 同值）**保留**——那判的是「上一轮的陈货」，该拦；被容量挤掉不该拦。
+  端到端重放三个生产扫描日（09-04 / 08-27 / 08-25，共 72 只标的）：
+  修复后 **72/72** 与「无截断」真值一致；**同一序列下旧行为只有 2/72**。
+
+### Changed
+
+- `pheromone_board.py`：`MAX_ENTRIES` 的注释改写为事实（原文「7 Agent × 9 Ticker = 63 条，
+  80 条保留完整一轮 + 余量」按 9 只标的定，现为 30 只、满编 ≈270 条）。
+  **值本身未动**：改它会一次性改变每一个板消费方，而其余消费方没有独立测量。
+- `tests/test_ic_rerun_readiness.py`：`test_history_is_append_only_and_ordered` 的
+  「**日期**唯一」改为「**(日期, 版本)** 唯一」。原断言与同一份表 docstring 里
+  「再次改动 … 必须追加一条」直接冲突——同一天部署两个都改 `final_score` 的版本时，
+  照规矩追加就会让它变红，于是它保护的不是不变式，而是「别在同一天改两次」。
+  与 v0.45.151 改 `TestCohortBoundaryAppended` 是**同一物种**。日期非降的断言保留
+  （`sorted` 本就允许并列），`cohort_start()` 取 `[-1]`、`assess` 按 `date >= 边界`
+  过滤，两者都只看日期值，同日多条不影响语义。
+
+### Added
+
+- `ic_rerun_readiness._COHORT_HISTORY`：追加 `("2026-09-07", "v0.45.156", ...)`。
+  上一条边界（同日 v0.45.151）至今 `predictions` 内 **0 条样本**
+  （`ic_rerun_readiness` 输出「世代内还没有扫描产出」），下次定时扫描 09-08
+  ⇒ 本次追加**不作废任何已累积样本**，且不新开空分区（**扩展**同日标签，同 v0.45.147）。
+- `tests/test_resonance_eviction.py`（18 项）：溢出后低分蜂仍要计票 / 不得伪造
+  `consistency=1.0` / **共振结论与 `MAX_ENTRIES` 取值无关** / 陈货仍要拦 /
+  未发布的蜂不得凭空出现 / 跨标的不串味 / 同蜂重发取最新 / 未溢出时语义不变 / 世代边界。
+  每条配反向成对断言（防「一律算全部」「永远返回点什么」）。
+
+### 遗留（**已量，未修**，不该搭本版的车）
+
+`_entries` 的其余消费方仍受截断：`get_top_signals` / `snapshot` / `compact_snapshot`。
+其中 GuardBee 的 `get_top_signals(ticker, n=5)` 驱动 `avg_score` 与它自己的
+`consistency`，而当前世代 **70/191 = 36.6%** 的标的连 5 条都取不满
+（旧世代仅 7/554 = 1.3%）。同病同源，但影响面与世代边界都独立。
+
+### 教训
+
+- **「本该不可能」的反向检查比主结果更值钱。** 主结果（丢 3.50%）看着合理、可直接
+  发布；是 `seen > published` 这个不可能事件在 59% 的样本上亮红，才逼出真正的满编
+  条数。**只检查「数字合不合理」是查不出这个的。**
+- **两种修法要分别量，别假设它们等价。** 抬 `MAX_ENTRIES` 恢复 9 条（含占位），
+  定点视图恢复 8 条（占位被真实结论覆盖）——`consistency` 分母不同。全量对照实测：
+  判定字段 **0/712 不同**、只有 `consistency` 差一个分母，于是选影响面小的那个；
+  但这是**量出来的**，不是推出来的。
+- **同一份表里「必须追加」与「日期唯一」不能并存**，第二次撞上了。看到断言与
+  它所在模块的 docstring 冲突时，先问「它保护的是不变式，还是保护『别再改了』」。
+- **v0.45.151 的「影响面封闭」是对的决定，但封闭的那一半必须记账。** 本版之所以
+  能直接开工，是因为上一版把「`detect_resonance` 语义未动」写进了 CHANGELOG——
+  没写的话它会变成一个没人知道还欠着的洞。同理本版把 `get_top_signals` 通道
+  连**数字**一起留在上面。
 
 ---
 

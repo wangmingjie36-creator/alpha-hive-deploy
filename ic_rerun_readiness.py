@@ -113,6 +113,28 @@ _COHORT_HISTORY = [
      "降级链上的 SimpleMLModel 给 catalyst 0.25 权重，同一改动在它上面 Δ≠0。定义变了就登记。"
      "边界取部署日 2026-09-07（上一条边界 09-05 至今 `predictions` 内 0 条样本，"
      "下一次定时扫描 09-08）⇒ 本次追加**不作废任何已累积样本**"),
+    ("2026-09-07", "v0.45.156",
+     "`PheromoneBoard.detect_resonance` 改读不受 MAX_ENTRIES 溢出淘汰影响的定点视图"
+     "（`_live_agent_entries`，复用 v0.45.151 的 `_latest_by_agent`）。"
+     "旧行为：共振直读 `_entries`，而它溢出时按 `nlargest(80, key=(self_score,...))` "
+     "截断、**先扔分最低的**；MAX_ENTRIES=80 是按「9 只标的」的年代定的，"
+     "watchlist 现 30 只、一轮满编 9 条/标的 ≈ 270 条。"
+     "实测（生产 `pheromone_compact` 即共振同一次 distill 内的板快照，"
+     "712/725 = 98.21% 逐字段复现生产 `resonance`，另有两条独立自证）："
+     "当前世代 191 份丢 628/1719 = 36.53% 条目，且**缺失与方向强相关**——"
+     "bearish 丢 50.7% vs bullish 丢 12.6%（4.0×）⇒ "
+     "共振方向翻转 **29/191 = 15.2%**，`resonance_detected` 翻转 **40/191 = 20.9%**"
+     "（生产判共振 81 次、真值 61 次），`consistency` 被高估 59.2%（均值 +0.301），"
+     "其中 **39/191 = 20.4%** 被记成 1.0「完全一致」而那轮其实有条目被挤掉。"
+     "共振同时驱动两处 `final_score`：① GuardBeeSentinel 的 risk_adj 维分"
+     "（`7.0 + consistency*2.0` vs `avg_score*0.8`，其自身那次共振判定实测翻转 13.1%）、"
+     "② QueenDistiller 的 `confidence_boost`（`rule_score = adjusted_score*(1+boost/100)`）。"
+     "**MAX_ENTRIES 的值未动**（改它会一次性改变每个板消费方）；"
+     "`get_top_signals` / `snapshot` / `compact_snapshot` 仍受截断，待独立测量。"
+     "边界取部署日 2026-09-07：上一条边界（同日 v0.45.151）至今 `predictions` 内 "
+     "**0 条样本**（`ic_rerun_readiness` 输出「世代内还没有扫描产出」），"
+     "下一次定时扫描 09-08 ⇒ 本次追加**不作废任何已累积样本**，"
+     "且不新开空分区（与 v0.45.151 同日，**扩展**该标签而非另起）"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
