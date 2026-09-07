@@ -798,6 +798,98 @@ property 或函数，不用常量**；配套三条（路径要集中但文件不
 - v0.45.150 已占号做「`PATHS.*` 派生值求值时机」的全仓审计（即本条发现的 22 处），
   其占位标题写明与本条「相邻不重叠」。v0.45.152 已从 `pheromone.db` 重训恢复了
   生产 `ml_model.json`——**恢复不是修复**，本条才是堵源头的那半。
+
+### 补记（同日）：在**主 checkout** 实跑全套，确认没写进生产库
+
+用户要求做端到端确认。此前所有验证都跑在 worktree 里，而 worktree 恰恰是这个
+物种**看不见**的地方（`PATHS.home` 在那儿冻成 worktree，写入落在 worktree）。
+
+**开跑前的处置**（因为预计会写、且写的是不可再生的数据）：
+
+- 主 checkout 落后 `origin/main` 25 个提交，**不含本条修复** ⇒ 直接跑测的是旧代码。
+  经用户明示授权后 `git pull --ff-only`（MEMORY 的「生产目录不自动 pull」理解为
+  禁止**自动**、不禁止明示授权）。先核对过待进来的 26 个文件**不含**工作区里
+  未提交的 `thesis_breaks_config.json`（该文件正是 v0.45.111 事故中丢失且未恢复的那个）。
+- 备份：32410 个文件的 `(mtime, size)` 全量指纹 + 7 个关键文件的字节副本
+  （`pheromone.db` 39 MB、三个模型文件、两份事故证据文件、`thesis_breaks_config.json`）。
+
+**结果：生产数据零改动。**
+
+| | 跑前 | 跑后 |
+|---|---|---|
+| `pheromone.db` sha256 | `9b5c1ffb…` | `9b5c1ffb…` ✅ |
+| `barrier_outcomes` / `predictions` / `signal_archive` | 46 / 1157 / 84839 | 46 / 1157 / 84839 ✅ |
+| `pheromone.db-wal` | — | **0 字节**（无待写入） |
+| `ml_model.json` / `_cache` / `_extended` | | 三份逐字节未变 ✅ |
+
+全套 `3638 passed`。全量指纹只有 6 个文件变动，逐个查过：两个日志（正常增长）、
+两个 SQLite 边车文件（`-wal`/`-shm`，mtime 变、内容空）、两个**跑测前就存在、
+本次被同内容重写**的缓存（`cache/vix_term_structure.json` 是 `source:"unavailable"`
+的诚实占位；`data_cache/social_TEST.json` 是夹具票 `TEST`，不在 `WATCHLIST`）。
+
+⇒ **v0.45.149（模型路径）与 v0.45.150（`_pheromone_db_path()`）两条修复在生产
+目录实测有效**，不需要还原。备份保留。
+
+#### ⚠️ 只比内容哈希，会把「被打开过」判成「无事发生」
+
+结论敢写成「**被打开过但没被写**」，是因为同时用了两个轴：
+
+- **内容轴**：`pheromone.db` sha256 前后相同、三张表行数不变
+- **时间轴**：`-wal` / `-shm` 的 mtime **变了**
+
+只有内容轴的话，那句话说不出来——而「打开过」正是排查下一次事故的起点。
+v0.45.150 在 conftest 里加的 `_guard_production_artifacts` 用 `(size, mtime_ns)`，
+与本条 `_isolate_ml_model_file` 的 md5 内容指纹**刻意不同轴，两个都要保留**。
+
+#### 这次跑暴露了两条**只在生产目录可见**的问题（worktree 里全绿）
+
+这两条本身就是「必须在主 checkout 跑一次」的理由：
+
+1. **v0.45.150 刚上线的守卫在生产目录是死的。**
+   `test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread` 三条全红，
+   `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa4`。元凶是全仓唯一一个
+   非 UTF-8 的 `.py`——`mcp-servers/maverick-mcp/.venv/…/joblib/test/test_func_inspect_special_encoding.py`
+   （joblib 故意的编码夹具）。worktree 没有那个未跟踪的 `.venv` ⇒ **守卫在
+   worktree 全绿、在最该生效的地方崩溃**；且「崩溃」与「没有违规」在它的
+   `test_scanner_has_teeth` 里都表现为红，分不开。已告知该 session，建议
+   改扫 `git ls-files "*.py"`（天然排除 vendored 与未跟踪内容，且口径可钉提交）
+   并对编码异常**计数跳过**而非崩溃。
+
+2. **`TestSPYBenchmarkUnavailable` 只在主 checkout 执行，且一执行就打 yahoo 外网。**
+   守卫是「缺 `pheromone.db` 就 skip」（v0.45.117 加），而该库未被 git 跟踪 ⇒
+   所有 worktree 与 CI 上**恒 skip**，唯一真正执行它的地方是生产目录，
+   在那里被 v0.45.133 的离线闸抓到 `curl.GET query1.finance.yahoo.com`。
+   ⇒ **「加一个 skip 守卫」与「让这条测试在任何地方都跑不到」之间只隔一个
+   未跟踪文件。** 写 `if not X.exists(): pytest.skip()` 时要问：**X 在哪些环境里存在？**
+   已拆给 v0.45.157。
+
+#### 顺带补做的一项检查：谁在**显式**传路径
+
+v0.45.150 提的判据——「改完默认值要 grep 谁在显式传这个参数」（他们那边
+`alpha_hive_daily_report.py:220` 显式传 `VECTOR_MEMORY_CONFIG.get("db_path")`，
+绕过了刚加的 property）。对本条同样适用，已跑：**5 个显式调用点全部是函数内
+求值**（`alpha_hive_daily_report` 三处的 `PATHS.ml_model_cache` 在函数体内、
+`generate_ml_report` 两处走 property），无一是模块级冻结值。
+扫描用的是 v0.45.150 指出的**加宽版**（下钻 `Try`/`If`/`With`/`For`/`except`）。
+
+#### ❌ 本条作者的一处错误归因，就地更正
+
+本条曾对外（两个 peer session + 记忆文件）称
+`paper_portfolio.py:98 BASE_DIR = PATHS.home`。**该行不存在**：
+`paper_portfolio.py:52` 一直是 `BASE_DIR = Path(__file__).parent`，且该文件
+**从未引用过 `PATHS`**——所以它根本不在本条那份 22 处 AST 清单里（那个扫描
+找的是 RHS 含 `PATHS` 的赋值），却被断言在其中。
+
+`BASE_DIR = PATHS.home` 的真实位置是 **`options_paper_leg.py:98`**（v0.45.150 指出：
+**行号相同正是「把两份输出拼在一起」的特征信号**，不是单纯记错）。
+
+**观测到的行为没错**（测试确实往仓库根的库写了 `barrier_outcomes`），**结论也没错**
+（conftest 管不着它），错的是机制。而且 `Path(__file__).parent` 比 `PATHS.home`
+**更严重**：后者至少认 `ALPHA_HIVE_HOME`，前者对环境变量完全免疫。
+
+⇒ 判据：**引用行号前先 `sed -n '<N>p' <file>` 打开看一眼。**
+另：本条那份 AST 扫描器只走 `tree.body` + `ClassDef.body`、不下钻嵌套块，
+「22 处」是**低估**（v0.45.150 加宽后 72 处，其中 `__file__` 派生 49 处）。
 - v0.45.146 / v0.45.147 在 `generate_ml_report._prepare_ml_input` 内部，本条只动
   该文件的类体顶部与 `_model_file`，预期无冲突。
 
