@@ -262,11 +262,17 @@ monkeypatch 只有 3 个模块——`weekly_optimizer.PHEROMONE_DB_PATH`、
 
 ### 验证
 
-- **全量套**：基线 `1 failed / 3508 passed`（唯一失败＝设计使然的
+- **全量套（rebase 前）**：基线 `1 failed / 3508 passed`（唯一失败＝设计使然的
   `TestCoverageHorizon`，见 MEMORY.md）→ 改后 `1 failed / 3529 passed`。
   差 21 **已逐项对平**：本版新增 17 项 + `test_pytestmark_placement.py`
   按全仓测试类参数化、因新增 4 个类而多出 4 项（`3533 + 17 + 4 = 3554` 实测相符）。
-  **零回归。**
+- **全量套（rebase 到含 v0.45.149~153 的 main 之后**，整套重跑而非沿用旧结论**）**：
+  `1 failed / 3596 passed`，唯一失败仍是那条设计使然的。**零回归。**
+  mutation check 在合并树上**重跑**：仍 6/6，`collected=17`。
+  ⚠️ 顺带发现 `KNOWN` 清单**已过期一项**——`generate_ml_report._model_file`
+  已被 v0.45.149 改成 property。子集语义有个副作用：**修好存量不会让守卫变红**，
+  过期项会悄悄留下。已剪枝（21→20）并把对账办法写进注释：
+  `KNOWN - _scan()` 非空即是过期项。
 - **归因复测**：patch `sqlite3.connect` / `builtins.open` / `os.makedirs` /
   `Path.mkdir` 记 `nodeid` 与调用栈 —— 改后 `pheromone.db` 与 `chroma_db`
   写入记录**双双归零**（改前各有 5 条 / 1 条）。
@@ -308,6 +314,15 @@ monkeypatch 只有 3 个模块——`weekly_optimizer.PHEROMONE_DB_PATH`、
 7. **对不上的数字要追到底。** `+21 passed` 与「我加了 17 项」差 4，追下去是
    `test_pytestmark_placement.py` 按全仓测试类参数化、被我新增的 4 个类撑大。
    不追就等于放弃了「基线可比」这个前提。
+8. ⚠️ **自造事故（已完全恢复）：`rm -rf pheromone.db*` 的 `*` 吃掉了 7 个
+   git 跟踪的备份**（`pheromone.db.bak_*` / `.backup_corrupted_*`，约 60 MB）。
+   本意只想删 `pheromone.db` 与它的 `-wal`/`-shm`。讽刺的是这些文件**正是我
+   自己在本次调查里列出来并标注过「是 git 跟踪的」**——知道它存在，仍写了会
+   吃掉它的 glob。已 `git checkout --` 逐字节恢复，`git diff HEAD` 为空。
+   ⇒ **清理临时产物要写精确路径，别用前缀 glob**（`pheromone.db` 后面可以跟
+   `-wal` `-shm` `.bak_*` `.backup_*` 四类完全不同的东西）；
+   **删之前先 `git ls-files <pattern>` 看看会不会打到跟踪文件**。
+   同族：MEMORY.md 里「`git reset --hard` 撤自己的提交前没查工作区」。
 
 ### 范围
 

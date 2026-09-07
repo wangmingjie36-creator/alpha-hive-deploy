@@ -151,12 +151,14 @@ class TestSpeciesDoesNotSpread:
     但清单外冒出新的一处必红。这条守的是「物种不要继续扩散」。
     """
 
-    # 存量清单（v0.45.150 实测）。修好一处就从这里删掉一行。
+    # 存量清单（v0.45.150 实测，20 处）。**修好一处就从这里删掉一行。**
     # 高危三处（backtester / memory_store / vector_memory）已在 v0.45.150 修掉，
     # 故不在此列——它们若复发，会被本文件 ① 组直接抓住。
+    # `generate_ml_report._model_file` 已由 v0.45.149 改成 property，同样不在此列。
+    #
+    # ⚠️ 子集语义有个副作用：**修好存量不会让本条变红**，于是过期项会悄悄留下。
+    #    定期对账：把 `_scan()` 的结果与本集合相减，`KNOWN - actual` 非空即是过期项。
     KNOWN = {
-        # 归 v0.45.149（`ml_model_cache.json`，另一 session 在改）
-        ("generate_ml_report.py", "_model_file"),
         # 中危：缓存目录，会往 checkout 根目录写缓存
         ("earnings_watcher.py", "CACHE_DIR"),
         ("sec_edgar.py", "CACHE_DIR"),
