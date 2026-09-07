@@ -5,7 +5,92 @@
 
 ---
 
-## [0.45.147] — 2026-09-07 — 占位（进行中：补上两套账目最后的真缺口 —— `_prepare_ml_input` 的 `catalyst_quality` 兜底 `"B"`（58/803）与 `direction_encoded` 兜底 `0.0`（57/803）两个合法字面量，使 `_ml_input_missing` 说缺而 `ml_predictor._missing_features` 说不缺。范围＝这两槽改 None + `_encode_catalyst` 的缺失编码 + `KNOWN_LEDGER_GAPS` 收缩 + `_ML_ESTIMATOR_GENERATIONS` 追加一条。**不动** `_COHORT_HISTORY`、不动训练端口径、不动 `crowding_score`/`agent_agreement`（归 v0.45.146）。⚠️ 与 v0.45.146 同函数相邻：对方改 crowding/agreement 两槽，本条改 catalyst/direction 两槽，两边都会碰 `_ml_input_missing`、`TrainingData(...)` 与世代表，合并时逐块核对）
+## [0.45.147] — 2026-09-07 — 缺失哨兵选中了众数：`catalyst_quality` 的 `"B"` 与 `direction_encoded` 的 `0.0`
+
+v0.45.143 全 12 维对账查出的最后两个**真**缺口。两者同一形状：
+**缺失时兜底成一个合法值，于是「没测到」与「测了正好是这个值」不可区分**，
+且 `ml_predictor._missing_features` 只认 `None`/NaN ⇒ 两套账目对不上。
+
+### Fixed
+
+- **`catalyst_quality` 缺失时不再兜底 `"B"`，改为 `None`。**
+  v0.45.135 选 `"B"` 的理由是「`"B+"` 是 magnitude 1.0 的基准档，用它会让
+  『拿不到数据』与『质量正好中等』不可区分」——方向对，但**选中了众数**：
+  生产实测 `"B"` 占真实等级的 **57.4%**（461/803），是五档里最常见的一档。
+  于是 58 份缺失与 461 份真实 `"B"` 完全同形，**比用 `"B+"` 更糟**。
+  ⇒ 判据：挑缺失哨兵前先数这个值在真实分布里占多少，别只看它「语义上中不中性」。
+
+- **`direction_encoded` 缺失时不再兜底 `0.0`，改为 `None`。**
+  `0.0` 在 `direction_map` 里**正是 `"neutral"`**，一个真实类别（生产 148/803 份）。
+  ⚠️ `tests/test_ml_input_direction.py::test_unknown_direction_is_flagged_missing_not_faked`
+  的**名字与失败消息从 v0.45.139 起就说对了**（「与『中性』同形」），
+  可它的断言写的是 `== 0.0` —— 正是它自己警告的那种伪造。已改为 `is None`
+  并补上跨模块断言。
+
+- **`ml_predictor._encode_catalyst(None)` 由 `0.5` 改为 NaN。**
+  `0.5` 落在 `C`(0.40) 与 `B`(0.55) **之间** —— 一个真实等级永远产不出的值，
+  树模型却会拿它当一个真实的中间档去切分。改 NaN 后 HGB 走原生缺失处理。
+  未知字面量（如 `"X"`）仍返回 `0.5`：本仓无生产路径产得出它，且
+  `_missing_features` 检查的是原始字符串字段，对 `"X"` 既非 None 也非 NaN，
+  改成 NaN 反而会让两套账目重新对不上。
+
+### Changed
+
+- **`SimpleMLModel.encode_catalyst_quality` 改为委托 `_encode_catalyst`，
+  编码表收敛为模块内唯一真相 `_CATALYST_ENCODING`。**
+  此前本类与模块级函数各有一份**内容相同**的映射——正是
+  `catalyst_quality_from_score` docstring 抱怨的「阈值在三处各写一份」同一个反模式
+  （v0.45.142 收掉了档位阈值，编码表留到了这里）。
+  ⚠️ `ml_predictor_extended.py:567` 还有第四份：那是本模块导入失败时的应急降级，
+  只有 rival_bee 会走且从不传 `None`，本版不动，已在代码与测试里登记以免遗忘。
+
+- `catalyst_quality_from_score` 的 docstring 补记这条理由被推翻的实测证据。
+  **函数契约不变**（`swarm_agents/rival_bee.py:87` 依赖它），改的是调用方。
+
+### 实测
+
+- **全 12 维两套账目 803/803 完全一致**（v0.45.143 时是 742/803）。
+  `catalyst_quality` 取值 B 461 / B+ 136 / C 64 / **None 58** / A 48 / A+ 36；
+  `direction_encoded` 取值 1.0 384 / −1.0 214 / **0.0 148** / **None 57**
+  —— 缺失与真实的 `"B"`、真实的 `neutral` 现在都可区分。
+- `imputed_features` 计数由 {0:739, 1:7, 5:55, 7:2} 变为 {0:739, 1:7, **7:55, 9:2**}；
+  `unreliable` **无翻转**（那 57 份本就已超阈值）。
+
+- **⚠️ 当日 HGB 模型上 803 份重放 Δprobability 恒为 0** —— 但这不是「改动没效果」，
+  而是**这棵训练出来的树**把 NaN 路由到样本更多那一支、恰好与 0.55 / 0.0 同向
+  （sklearn 在训练集该列无缺失时的既定行为）。反向自证：同一改动在降级模型
+  `SimpleMLModel` 上 **Δ=+0.041**；判别力 probe 也证明模型对这两维的**取值**敏感
+  （C→A+ 且 −1→+1 时 Δ=+0.0175）。
+  ⇒ **估计量的定义变了就登记，不以当日输出恰好相同为免登记的理由。**
+
+### 世代边界
+
+`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 的 2026-09-06 条目**扩展**为
+`v0.45.137+v0.45.140+v0.45.141+v0.45.147`，而非新开一条：09-06 与 09-07 均无生产扫描
+（`predictions` 最近业务日 09-04，下次 09-08），中间估计量未产出任何样本，
+新开边界只会造出一个空分区。做法与 v0.45.141 加标签时一致。
+**仍不动** `ic_rerun_readiness._COHORT_HISTORY`（`_prepare_ml_input` 的产物不进
+`predictions` 表）。
+
+### 验证
+
+- 全套 **3472 passed, 19 skipped**（唯一红仍是 `TestCoverageHorizon`，按设计）。
+- mutation check **14/14 全被抓**，`collected 165 items`、基线绿、锚点唯一。
+  新增 M10~M14：两槽各自退回兜底常数、`_encode_catalyst(None)` 退回 0.5、
+  `SimpleMLModel` 重新自带一份表、真实 `neutral` 被当成缺失。
+- ruff：F821 全仓干净；F841 与 `origin/main` 基线**逐文件相等**（1/1、2/2、0/0），
+  本次引入 0 项；默认配置下余 2 项为既有。
+
+### 过程记录
+
+- **四条既有测试因约定改变而变红，全部是被全套跑出来的、不是被我的窄循环跑出来的**：
+  `test_ml_catalyst_quality_source.py` 三条（mutation 脚本的**基线守卫**抓到）、
+  `test_ml_input_direction.py` 一条（全套抓到）。
+  ⇒ 改一条「约定」时，先 grep 该约定的所有断言副本；
+  ⇒ mutation 脚本的「基线必须全绿」那道 assert 值回票价。
+- 断言里的档位期望值第一次是凭印象写的（`4.0→"B"`、`5.9→"B+"`），实际切点是
+  `_CATALYST_GRADE_CUTS = (8.5, 7.5, 6.5, 5.5)`（`5.9→"B"`、`6.5→"B+"`）。
+  已改为逐档实测取值。**别把猜的期望值写进断言**——它红了你会先怀疑代码。
 
 ## [0.45.146] — 2026-09-07 — 占位（进行中：`generate_ml_report._prepare_ml_input` 最后两个常数特征槽 —— `crowding_score`（777/803 恒 50.0）与 `agent_agreement`（恒 0.5）接蜂群同源真值；范围＝服务端这两槽取数 + `_ml_input_missing` 记账 + 成对测试 + `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 追加一条。**不动** `_COHORT_HISTORY`、不动训练端口径、不动 EVALUATION_WEIGHTS。⚠️ 与 v0.45.145 同文件相邻：对方在 `generate_ml_report.py` 批量收尾加唯一值闸，本条改 `_prepare_ml_input` 内部，预期无冲突但合并时需核对）
 

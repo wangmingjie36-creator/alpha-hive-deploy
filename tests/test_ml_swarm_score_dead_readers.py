@@ -217,18 +217,24 @@ class TestMissingLedgerIsAccurate:
                             swarm_direction="bullish", swarm_final_score=None)
         assert {"odds_score", "risk_adj_score", "final_score"} <= set(g._ml_input_missing)
 
-    #: 两套账目对同一特征用的不同名字（诊断字段，无程序读者，不改名以保历史可比）
-    LEDGER_ALIAS = {"market_sentiment": "sentiment", "direction": "direction_encoded"}
+    #: 两套账目对同一特征用的不同名字（诊断字段，无程序读者，不改名以保历史可比）。
+    #: `catalyst_quality → catalyst` 是 v0.45.147 修完 direction 之后**测试自己抓出来的**
+    #: 第三对：此前 catalyst 两边都「说缺」，命名差异被同向掩盖着看不见。
+    LEDGER_ALIAS = {"market_sentiment": "sentiment", "direction": "direction_encoded",
+                    "catalyst_quality": "catalyst"}
 
     #: **已知仍未对上的特征**——它们缺失时喂的仍是合法字面量，于是
     #: `_ml_input_missing` 说缺、`ml_predictor._missing_features` 说不缺。
     #: 写成会失效的断言而不是注释（v0.45.113 判据）：新增缺口会红，
     #: 修好某一个也会红（提醒把它从这张表里删掉）。
-    #:   catalyst_quality → 兜底 "B"（v0.45.135 有意为之的缺失约定，但仍与账目不符）
-    #:   direction_encoded → 兜底 0.0（v0.45.139；0.0 在方向表里正是 "neutral"）
-    #:   iv_rank / put_call_ratio → 兜底 50.0 / 1.0（v0.45.50 起如此）
-    KNOWN_LEDGER_GAPS = {"catalyst_quality", "direction_encoded",
-                         "iv_rank", "put_call_ratio"}
+    #:   iv_rank / put_call_ratio → 兜底 50.0 / 1.0（v0.45.50 起如此）。
+    #:     与已修的几个不同：这两个的兜底只在**键缺失**时触发，而生产 803 份里
+    #:     键都存在（值为 None ⇒ `.get(k, 默认)` 返回 None，两账恰好一致），
+    #:     所以是**潜在**缺口而非实际发生的。留作已知，不在 v0.45.147 范围内。
+    #: 已修并从本表移除：
+    #:   catalyst_quality 兜底 "B"（v0.45.147；"B" 是生产众数 57.4%）
+    #:   direction_encoded 兜底 0.0（v0.45.147；0.0 正是 "neutral"）
+    KNOWN_LEDGER_GAPS = {"iv_rank", "put_call_ratio"}
 
     def _ledgers(self, dims, final):
         from ml_predictor import _missing_features
@@ -421,3 +427,96 @@ class TestFinalScoreParamThreadsThrough:
                 if "swarm_final_score" in {k.arg for k in call.keywords}:
                     wired += 1
         assert wired == 2, f"两个有蜂群数据的调用点都应传，实测 {wired} 个"
+
+# ═══════════════════════════════════════════════════════════════════════
+#  v0.45.147：两套账目最后两个真缺口
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestCatalystMissingIsNone:
+    """`catalyst_quality` 缺失时不得兜底成 `"B"`。
+
+    v0.45.135 选 `"B"` 的理由是「`B+` 是 magnitude 1.0 的基准档，用它会让
+    『拿不到数据』与『质量正好中等』不可区分」——方向对，但选中了**众数**：
+    生产实测 `"B"` 占真实等级的 **57.4%**（461/803），是全部五档里最常见的一档。
+    于是 58 份缺失与 461 份真实 "B" 完全同形，比用 "B+" 更糟。
+    """
+
+    def test_missing_catalyst_is_none_not_b(self):
+        td = _prep(_dims(catalyst=None), final=5.4)
+        assert td.catalyst_quality is None, \
+            f"缺失兜底成了 {td.catalyst_quality!r} —— 与真实等级同形"
+
+    @pytest.mark.parametrize("bad", [None, True, False, float("nan"), "B"])
+    def test_unusable_catalyst_scores_rejected(self, bad):
+        assert _prep(_dims(catalyst=bad), final=5.4).catalyst_quality is None
+
+    # 切点唯一真相 = `ml_predictor._CATALYST_GRADE_CUTS`（8.5/7.5/6.5/5.5），
+    # 逐档实测取值，不凭印象写期望
+    @pytest.mark.parametrize("score,grade", [(1.0, "C"), (5.0, "C"), (5.9, "B"),
+                                             (6.5, "B+"), (7.5, "A"), (9.5, "A+")])
+    def test_real_scores_still_map_normally(self, score, grade):
+        """成对断言的另一半：真实分照常出等级，含真实的 "B"。
+        少了它，「无条件返回 None」也能让上面全绿。"""
+        assert _prep(_dims(catalyst=score), final=5.4).catalyst_quality == grade
+
+    def test_encoder_maps_none_to_nan_not_a_phantom_grade(self):
+        """`_encode_catalyst(None)` 必须是 NaN，不是 0.5。
+
+        0.5 落在 C(0.40) 与 B(0.55) **之间**——一个真实等级永远产不出的值，
+        树模型却会拿它当一个真实的中间档去切分。改 NaN 后 HGB 走原生缺失处理，
+        与其余五个 `None` 特征同一条路。
+        """
+        from ml_predictor import _encode_catalyst
+        assert math.isnan(_encode_catalyst(None))
+        for g, v in (("A+", 1.0), ("A", 0.85), ("B+", 0.70), ("B", 0.55), ("C", 0.40)):
+            assert _encode_catalyst(g) == pytest.approx(v), f"{g} 的编码被改动了"
+
+    def test_encoding_table_has_one_source_of_truth(self):
+        """`ml_predictor` 内三处编码入口必须给出同一答案（含 None）。
+
+        v0.45.142 已为**档位阈值**收掉重复，**编码表**当时还各写一份
+        （`SimpleMLModel.encode_catalyst_quality` 与 `_encode_catalyst`），
+        改一处漏一处就会静默产生两套口径。
+        ⚠️ `ml_predictor_extended.py:567` 还有第三份——它是 `ml_predictor`
+        导入失败时的应急降级、只有 rival_bee 会走且从不传 None，本版不动，
+        在此登记以免遗忘。
+        """
+        from ml_predictor import _encode_catalyst, SimpleMLModel, HGBModel
+        m = SimpleMLModel()
+        for q in ("A+", "A", "B+", "B", "C"):
+            assert m.encode_catalyst_quality(q) == _encode_catalyst(q), q
+        assert math.isnan(m.encode_catalyst_quality(None)), \
+            "SimpleMLModel 仍有自己那份表（None → 0.5）"
+        h = HGBModel.__new__(HGBModel)
+        assert math.isnan(h.encode_catalyst_quality(None))
+
+
+class TestDirectionMissingIsNone:
+    """`direction_encoded` 缺失时不得兜底成 `0.0` —— 0.0 在方向表里正是
+    `"neutral"`，一个**真实类别**。「方向不可得」与「蜂群判中性」因此同形。"""
+
+    def test_missing_direction_is_none_not_zero(self):
+        g = _gen()
+        td = g._prepare_ml_input("XOM", _metrics(), _analysis(),
+                                 swarm_dimension_scores=_dims(),
+                                 swarm_direction=None, swarm_final_score=5.4)
+        assert td.direction_encoded is None, \
+            f"方向缺失兜底成了 {td.direction_encoded!r} —— 与 neutral 同形"
+
+    @pytest.mark.parametrize("bad", [None, "", "BUY", "STRONG BUY", "Bullish", 1.0])
+    def test_unknown_direction_words_are_none(self, bad):
+        g = _gen()
+        td = g._prepare_ml_input("XOM", _metrics(), _analysis(),
+                                 swarm_dimension_scores=_dims(),
+                                 swarm_direction=bad, swarm_final_score=5.4)
+        assert td.direction_encoded is None
+
+    @pytest.mark.parametrize("d,v", [("bullish", 1.0), ("neutral", 0.0), ("bearish", -1.0)])
+    def test_real_directions_pass_through(self, d, v):
+        """成对断言：真实的 `neutral` 必须照常得到 0.0，不能被当成缺失。"""
+        g = _gen()
+        td = g._prepare_ml_input("XOM", _metrics(), _analysis(),
+                                 swarm_dimension_scores=_dims(),
+                                 swarm_direction=d, swarm_final_score=5.4)
+        assert td.direction_encoded == pytest.approx(v)
+        assert "direction" not in g._ml_input_missing

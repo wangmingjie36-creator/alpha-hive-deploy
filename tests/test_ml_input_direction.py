@@ -35,9 +35,19 @@ def test_direction_encoded_reads_swarm_direction(g, d, enc):
 
 
 def test_unknown_direction_is_flagged_missing_not_faked(g):
+    """v0.45.147：本测试的**名字**从一开始就说对了，断言却写反了 ——
+    旧断言 `direction_encoded == 0.0` 恰恰就是它警告的那种伪造：
+    **0.0 在 direction_map 里正是 "neutral"**，一个真实类别。
+    于是「方向不可得」与「蜂群判中性」在特征值上完全同形，
+    而 `ml_predictor._missing_features` 也因 0.0 是合法数值而不算它缺
+    （57/803 份两套账目因此对不上）。现在值是 None，两处都说得上话。
+    """
     td = g._prepare_ml_input("X", _METRICS, {}, swarm_direction=None)
-    assert td.direction_encoded == 0.0
+    assert td.direction_encoded is None, "缺失必须是 None —— 0.0 就是 neutral 本身"
     assert "direction" in g._ml_input_missing, "方向不可得却没记进缺失表 —— 与「中性」同形"
+    from ml_predictor import _missing_features
+    assert "direction_encoded" in _missing_features(td), \
+        "两套账目必须同时说缺（此前 _missing_features 因 0.0 合法而说不缺）"
 
 
 def test_rating_no_longer_feeds_direction(g):

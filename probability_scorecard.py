@@ -110,7 +110,7 @@ BLEND_GRID = tuple(i / 10 for i in range(11))
 #: 反过来，不要因此去动 `_COHORT_HISTORY`：`_prepare_ml_input` 的产物不进
 #: `predictions` 表（44 列实测无 ML 特征列），往那里加条目会白白作废几个月样本。
 _ML_ESTIMATOR_GENERATIONS = [
-    ("2026-09-06", "v0.45.137+v0.45.140+v0.45.141",
+    ("2026-09-06", "v0.45.137+v0.45.140+v0.45.141+v0.45.147",
      "服务端特征来源三批修复合并为一代（同日落地）："
      "① volatility / market_sentiment 由死读者 `self._swarm_cache`（全仓零赋值）"
      "改为蜂群 risk_adj / sentiment 维分派生；"
@@ -118,6 +118,15 @@ _ML_ESTIMATOR_GENERATIONS = [
      "不存在的键（803/803 份实测缺失）改为蜂群维分与 `swarm_results.final_score`"
      "（final_score 一支落在 v0.45.141，同日与 v0.45.140 合并）。"
      "两批合计：803 份重放 probability 变动 > 0.02 的样本分别占 52.4% 与 27.3%。"
+     "③ v0.45.147：`catalyst_quality` 由兜底 `\"B\"`（生产众数，占真实等级 57.4%）"
+     "改为 `None`→NaN、`direction_encoded` 由兜底 `0.0`（正是 \"neutral\"）改为 `None`。"
+     "⚠️ 该项在**当日的 HGB 模型**上 803 份重放 Δprobability **恒为 0** —— 但那是这棵"
+     "训练出来的树把 NaN 路由到样本更多那一支的巧合，不是改动的性质："
+     "降级模型 `SimpleMLModel` 上同一改动 Δ=+0.041，重训后的 HGB 也可能不同。"
+     "**估计量的定义变了就登记，不以当日输出恰好相同为免登记的理由。**"
+     "并入本条而非新开一条：09-06 与 09-07 均无生产扫描"
+     "（predictions 最近业务日 09-04，下次 09-08），中间估计量未产出任何样本，"
+     "新开边界只会造出一个空分区。"
      "此日之前的 `ml_probability` 由旧估计量产出，与之后不可比"),
 ]
 
