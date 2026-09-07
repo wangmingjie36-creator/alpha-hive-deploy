@@ -26,6 +26,13 @@ def _isolate_env(tmp_path, monkeypatch):
     # 经 OptionsAgent.analyze() 写进生产 cache/options_snapshot_NVDA_*.json
     # （data_quality 标 real），被当日正式扫描按"快照命中"复用进日报
     monkeypatch.setenv("OPTIONS_SNAPSHOT_DISABLE", "1")
+    # v0.45.145 同款第二层防线：禁止测试把模型写进 ml_model_history/。
+    # `HGBModel.save_model` 的默认文件名是**相对路径**，tests/ 里约 12 处
+    # `svc.train_model()` 不传 tmp 路径 ⇒ 在主 checkout 跑 pytest 会往 cwd 写
+    # ml_model.json，本模块会顺手快照它。而 ml_model_history/ 是 git 跟踪 +
+    # 在自动提交白名单里的 ⇒ 夹具模型会被当成生产模型提交推送。
+    # ml_model_guard 自己也在 pytest 下默认关闭（两层），这里再显式关一次。
+    monkeypatch.setenv("ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE", "1")
 
 
 # ==================== 禁止测试调用真实 Anthropic API ====================

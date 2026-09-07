@@ -12,6 +12,21 @@ from dataclasses import dataclass
 
 _log = _logging.getLogger("alpha_hive.ml_predictor_extended")
 
+def _snapshot_saved_model(filename: str) -> None:
+    """模型版本快照（v0.45.145）。与 `ml_predictor._snapshot_saved_model` 同形。
+
+    本模块是 `ml_predictor` **导入失败时**的降级实现（`swarm_agents/rival_bee.py`
+    唯一读者）。降级路径同样会覆盖模型文件，一起钩上，免得留一支漏网。
+    """
+    try:
+        from ml_model_guard import snapshot_model_file
+        snapshot_model_file(filename)
+    except ImportError as e:
+        _log.error(
+            "🚨 模型快照模块缺失（%s）——本次保存没有留版本，下次退化将无法归因", e
+        )
+
+
 
 # v0.45.149: 与 `ml_predictor.default_model_path()` 同一套规矩 —— 默认落盘位置
 # 绝不能是 cwd 相对路径，否则「在哪跑就写到哪」。这里不 import ml_predictor：
@@ -782,6 +797,7 @@ class SimpleMLModel:
         }
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(model_data, f, ensure_ascii=False, indent=2)
+        _snapshot_saved_model(filename)
 
     def load_model(self, filename=None):
         """加载模型（JSON 格式，安全反序列化）"""

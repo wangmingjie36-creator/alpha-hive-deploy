@@ -13,6 +13,31 @@ from dataclasses import dataclass
 
 _log = logging.getLogger("alpha_hive.ml_predictor")
 
+def _snapshot_saved_model(filename: str) -> None:
+    """把刚写盘的模型留一份带日期快照（v0.45.145）。
+
+    2026-09-04 模型退化成常数函数**无法事后归因**，因为 `ml_model.json` /
+    `ml_model_cache.json` 是原地覆盖、没有任何版本留存。快照落在
+    `ml_model_history/{stem}-YYYY-MM-DD.json`，配 `manifest.jsonl` 记
+    sha256 / 样本数 / 训练精度，下次退化可直接捞出当天的模型重放。
+
+    ⚠️ 保住模型本身比留快照重要，所以这里吞掉快照自身的失败——
+    「谁会红」的答案是：`ml_model_guard` 会在失败时 `_log.error`，
+    且当日快照缺失会出现在每日那条闸的日志里（`snapshot_present`）。
+
+    ⚠️ 每一个 `def save_model` 都必须调它。
+    `tests/test_ml_model_guard.py::TestSnapshotWiring` 用 AST 盯着这件事
+    （取 AST 不取子串——子串守卫会被解释它的注释自己触发）。
+    """
+    try:
+        from ml_model_guard import snapshot_model_file
+        snapshot_model_file(filename)
+    except ImportError as e:
+        _log.error(
+            "🚨 模型快照模块缺失（%s）——本次保存没有留版本，下次退化将无法归因", e
+        )
+
+
 
 # ---------------------------------------------------------------------------
 # 模型产物路径 —— 唯一真相（v0.45.149）
@@ -280,6 +305,17 @@ def catalyst_quality_from_score(score) -> str:
     分数不可用（None/NaN/非数值）时返回 "B"（对应 magnitude 0.9，接近中性），
     **不返回 "B+"** —— "B+" 是 magnitude 1.0 的基准档，用它做缺失值会让
     "拿不到数据"与"质量正好中等"不可区分。
+
+    ⚠️ v0.45.147：上面这条理由方向对，但**"B" 恰好是众数**——生产实测
+    "B" 占真实等级的 **57.4%**（461/803），是五档里最常见的一档，
+    于是缺失与它完全同形，比用 "B+" 更糟。而且 "B" 是合法枚举值 ⇒
+    `_missing_features` 不算它缺 ⇒ 两套账目对不上（58/803 份）。
+    **本函数的契约不变**（`swarm_agents/rival_bee.py:87` 依赖它），
+    改的是调用方：`generate_ml_report._prepare_ml_input` 自 v0.45.147 起
+    在分数不可用时**根本不调本函数**，直接给 `None`。
+    rival_bee 那一处未改——它的产物经 `ml_auxiliary` → `ml_adjustment` →
+    `final_score` 进 `predictions` 表，动它需要 `_COHORT_HISTORY` 世代边界，
+    是另一个量级的改动，已登记为独立任务。
     """
     try:
         v = float(score)
@@ -532,10 +568,15 @@ class SimpleMLModel:
         self.training_accuracy = 0.0
         self.feature_stats: Dict = {}
 
-    def encode_catalyst_quality(self, quality: str) -> float:
-        """编码催化剂质量"""
-        mapping = {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}
-        return mapping.get(quality, 0.5)
+    def encode_catalyst_quality(self, quality) -> float:
+        """编码催化剂质量。v0.45.147 起委托 `_encode_catalyst`，不再各写一份表。
+
+        此前本类与模块级 `_encode_catalyst` 各有一份**内容相同**的映射 ——
+        与 `catalyst_quality_from_score` docstring 抱怨的「阈值在三处各写一份」
+        同一个反模式（v0.45.142 收掉了档位阈值，编码表留到了这里）。
+        改一处漏一处就会静默产生两套口径。
+        """
+        return _encode_catalyst(quality)
 
     def normalize_feature(
         self, value, min_val: float, max_val: float
@@ -772,6 +813,7 @@ class SimpleMLModel:
             json.dump(model_data, f, ensure_ascii=False, indent=2)
 
         _log.info("模型已保存：%s", filename)
+        _snapshot_saved_model(filename)
 
     def load_model(self, filename: Optional[str] = None):
         """加载模型（JSON 格式，安全反序列化）"""
@@ -809,9 +851,28 @@ FEATURE_NAMES = [
 FEATURE_NAMES_V1 = ["crowding", "catalyst", "momentum", "volatility", "sentiment"]
 
 
-def _encode_catalyst(quality: str) -> float:
-    """编码催化剂质量（共享工具函数）"""
-    return {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}.get(quality, 0.5)
+#: 等级 → 数值编码。**本模块唯一真相**，三个模型类都走 `_encode_catalyst`。
+#: （`ml_predictor_extended.py:567` 还有第四份，那是本模块导入失败时的应急降级，
+#: 只有 rival_bee 会走且从不传 None，v0.45.147 未动，在此登记以免遗忘。）
+_CATALYST_ENCODING = {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}
+
+
+def _encode_catalyst(quality) -> float:
+    """编码催化剂质量；`None` → NaN（缺失），未知字面量 → 0.5（沿用旧行为）。
+
+    v0.45.147：`None` 此前和未知字面量一样落到 **0.5**，而 0.5 恰好落在
+    C(0.40) 与 B(0.55) **之间** —— 一个真实等级永远产不出的值，树模型却会
+    拿它当一个真实的中间档去切分。改 NaN 后 HGB 走原生缺失处理，
+    与其余 `None` 特征同一条路；`SimpleMLModel` 侧由 `normalize_feature`
+    的 `_FEATURE_NEUTRAL` 接住，也不会抛。
+
+    未知字面量（如上游传了 "X"）仍返回 0.5：本仓无生产路径产得出它，
+    改它属于另一个问题（`_missing_features` 检查的是原始字符串字段，
+    对 "X" 既不是 None 也不是 NaN，改成 NaN 反而会让两套账目重新对不上）。
+    """
+    if quality is None:
+        return float("nan")
+    return _CATALYST_ENCODING.get(quality, 0.5)
 
 
 def _extract_features(data: TrainingData) -> list:
@@ -1072,6 +1133,7 @@ class SGDMLModel:
             json.dump(model_data, f, ensure_ascii=False, indent=2)
 
         _log.info("SGD 模型已保存：%s", filename)
+        _snapshot_saved_model(filename)
 
     def load_model(self, filename: Optional[str] = None):
         """从 JSON 加载模型（兼容旧 SimpleMLModel 格式）"""
@@ -1613,6 +1675,8 @@ class HGBModel:
             _log.info("HGB 模型已保存：%s", filename)
         except (OSError, TypeError) as e:
             _log.warning("HGB save_model 失败：%s", e)
+        else:
+            _snapshot_saved_model(filename)
 
     def load_model(self, filename: Optional[str] = None) -> bool:
         """加载 HGB 模型（支持 pickle base64 恢复）"""

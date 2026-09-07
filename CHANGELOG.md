@@ -5,6 +5,100 @@
 
 ---
 
+## [0.45.152] — 2026-09-07 — 运维：生产 `ml_model.json` 从 `pheromone.db` 重训恢复（不改代码）
+
+**本条不改任何代码**，只记录一次生产产物的恢复，以及恢复过程中拿到的四条实测。
+根因归 v0.45.149（`save_model` 相对路径默认值），修复也归它——**本条不是修复**。
+
+### 背景
+
+v0.45.149 查明：`ml_predictor` 三处 `save_model(filename="ml_model.json")` 的默认值是
+**相对路径**，而 `MLPredictionService.train_model()` 成功后**无参**调用它 ⇒
+在主 checkout 跑 pytest 就会把夹具模型写到仓库根。2026-09-07 01:15 实际发生过一次：
+
+| | 污染前 | 污染后 |
+|---|---|---|
+| `n_samples_seen` | 497 | 30 |
+| `training_accuracy` | 71.6297786720322 | 96.66666666666667 |
+| `oos_accuracy` | 44.354838709677416 | `None` |
+| 文件大小 | 61,234 B | 18,839 B |
+
+### 恢复
+
+`build_training_data_from_db(db_path=<生产 db 绝对路径>)` 取 **497** 条重训，
+`save_model(<生产路径绝对值>)` 落盘。**两个路径都显式给绝对值**——正是绕开
+出事的那两个默认值（本次从 worktree 执行，用默认值会写错地方）。
+
+**结果与污染前的健康副本逐字节相同**（`cmp` 通过），
+`acc 71.6297786720322` / `oos 44.354838709677416` 全部逐位吻合。
+HGB 的 `random_state=42` ⇒ 同一份 db + 同一份代码，重建是确定性的。
+
+⚠️ 只看 `n_samples_seen=497` 不够，另做三项判别性检查：
+- **不是常数函数**：训练集上输出唯一值 358/497、sd 0.0840、范围 [0.3016, 0.6853]
+- **往返一致**：`load_model()` 回来后逐条最大差 `0.00e+00`
+- **端到端**：按生产路径加载后重放近四个扫描日，输出均有区分度
+  （09-01 唯一值 19/24、09-02 11/12、09-03 12/12、09-04 12/12）
+
+保留的证据（均被 `.gitignore:30` 的 `ml_model*.json` 忽略，不进仓库）：
+- `ml_model.corrupted-2026-09-07T0130.json` —— 被污染的那份，**v0.45.149 的调查证据，特意不删**
+- `ml_model_cache.pre-restore-2026-09-07.json` —— 污染前的健康副本
+
+### 四条实测
+
+1. **`ml_model_cache.json` 从头到尾没被污染**（`n=497` 完好）。
+   因为它走 `PATHS.home / "ml_model_cache.json"` 是**绝对**路径，而 `ml_model.json`
+   走那个相对默认值。**一个绝对一个相对，正是这次只坏一半的原因**——
+   也正是 v0.45.149 第 ① 项（路径收敛到单一真相）要消掉的不对称。
+
+2. **判模型真伪不能用 accuracy。**
+   夹具模型的 `training_accuracy` 是 **96.67**，比真模型的 **71.63 更好看** ⇒
+   拿 accuracy 当健康度会把假的判成更好的。可用信号是
+   `oos_accuracy is None` + `n_samples_seen`（与 v0.45.149 第 ③ 项的设计一致）。
+
+3. **09-04 的恒定输出归因到模型，不是输入。**
+   方法：**固定一端换另一端**——用**污染前的旧服务端代码** + **恢复后的模型**
+   重放 09-04 那 12 只票，得 **11 个不同值**（sd 0.0425）；
+   而当日真实落盘是 **1 个值**（12 份全是 `0.5899693787928219`）。
+   ⇒ 输入是有区分度的，是当时在用的模型退化了。
+   判据：**要分离「输入没区分度」与「模型退化」，就固定一端换另一端**，别只看输出。
+
+4. **v0.45.145 的「当日概率全同」闸有一个确定的假阳性日。**
+   全部 77 个扫描日里「当日唯一值 == 1」有 **2 天**：09-04（真退化）与
+   **2026-06-25**——但后者那 9 份**全都没有 `swarm_results`** ⇒ 12 维全 `None` ⇒
+   输入向量逐份相同 ⇒ 输出相同**属预期**。
+   ⇒ 闸门要先排除「当日全部标的都无蜂群数据」的日子，否则每逢蜂群整体挂掉误报一次，
+   而那天真正该报的是「蜂群没跑」不是「模型退化」。
+
+### ⚠️ 这不是修复
+
+**本条一行代码没改**，下次从主 checkout 跑 pytest 照样会再覆盖一次。
+v0.45.149 的 ①（路径收敛）②（tests autouse fixture 重定向到 tmp_path）
+③（加载守卫）⑤（成对测试 + mutation check）**仍然全部需要**。
+
+「无版本快照」≠「不可复原」——只要 **db + 代码 + 随机种子**三者都在，模型就是可重建的；
+真正缺的是**当时用的是哪个模型**这一事实的记录（v0.45.145 第 ② 项的版本快照目录治这个）。
+
+已分别通知 v0.45.149（`pensive-williams-cd697b`，告知第 ④ 项勿重复做）
+与 v0.45.145（`relaxed-hellman-58c448`，告知假阳性日与基线换代）。
+
+⚠️ 给 v0.45.145 的另一条：本次 v0.45.146 已让 803 份重放的 probability
+唯一值 **308 → 462**、46.0% 样本 |Δ| > 0.02 ⇒ **闸门阈值若从历史 `ml_probability`
+估基线，不能跨代池化**，世代边界见 `probability_scorecard._ML_ESTIMATOR_GENERATIONS`
+（`2026-09-07 → v0.45.146+v0.45.147`）。
+
+---
+
+## [0.45.151] — 2026-09-07 — 占位（进行中：`swarm_agents/rival_bee.py:87` 的 `_cat_quality = "B"` —— v0.45.147 同族**最后一处**缺失哨兵选中众数。**本条先量再决定，可能以「不改代码、只登记」收尾。**
+范围＝① 量命中率：`expected_returns` 是闭式 `mag × momentum_5d × scale`，而 `expected_30d` 与 `momentum_5d` 双双落在 803 份生产 `analysis-*-ml-*.json` 里 ⇒ 可**反解**出 rival_bee 当时实际用的 `catalyst_quality`，再与同文件 `pheromone_compact` 里 ChronosBee 的 `s` 经 `catalyst_quality_from_score` 算出的应得等级逐份对照，得出「板上读不到 ChronosBee」的真实命中率（同 v0.45.108 判据：先数生产数据里这个条件历史命中几次，0 或个位数即恒假分支、不值得付代价）；② 若命中率可观，再量 `ml_auxiliary` → `ml_adjustment` → `final_score` 的实际位移幅度；③ 据②决定是否往 **`ic_rerun_readiness._COHORT_HISTORY`** 追加世代边界（**不是** `probability_scorecard._ML_ESTIMATOR_GENERATIONS`，两条是独立测量管道），追加会作废已累积样本，代价实打实；④ 连带处理/登记 `ml_predictor_extended.py` 内第四份 catalyst 编码副本（`SimpleMLModel.encode_catalyst_quality` 的 `.get(quality, 0.5)` 与 `_CATALYST_MAGNITUDE.get(..., 1.0)`）——rival_bee 若开始传 `None`，这两处会静默给合法中性值而非 NaN。
+**不动** `ml_predictor.catalyst_quality_from_score` 的函数契约（v0.45.147 已在其 docstring 记录理由被推翻的证据并声明 rival_bee 依赖它）、**不动** `_prefetched`/训练口径、**不动** `EVALUATION_WEIGHTS`。
+⚠️ 与 v0.45.149 / v0.45.150 **不重叠**（那两条管模型文件路径与求值时机，本条管一个特征的缺失语义）；与 v0.45.147 **同族续集**，会碰 `ml_predictor.py` `catalyst_quality_from_score` 附近的注释，合并时逐块核对）
+
+---
+
+## [0.45.150] — 2026-09-07 — 占位（进行中：审计 `hive_logger.PATHS.*` 派生路径被求值成**模块级常量 / 类属性**的物种 —— import 那一刻冻住，`conftest.py::_isolate_env` 的 `monkeypatch.setenv("ALPHA_HIVE_HOME")` 对它无效，因为 pytest **收集期**就 import 了模块，那时 fixture 还没跑。先例 v0.45.149 的 `MLEnhancedReportGenerator._model_file` 已证实会让「跑一次全套测试」覆盖生产 `ml_model_cache.json`。范围＝① AST 全仓扫描列清单（预计约 22 处，排除 tests/）；② **逐处实证判定危害等级**（判据＝这个冻住的路径会不会被**写**、写的是不是生产数据；高危：`backtester.DB_PATH` / `MemoryStore.DB_PATH` / `vector_memory.DEFAULT_DB_PATH`；中危：各模块 `CACHE_DIR`/`BASE_DIR`；待判：`config.py` 里那批 `str(...)` 快照 dict）；③ 先数 conftest 里哪些已被针对性 monkeypatch 管住，不重复劳动；④ 高危处改 property/函数（调用时求值）+ **成对**测试（「改 env 路径跟着变」+「跑完测试生产文件指纹未变」）+ mutation check + 核对 `collected N items` 不为 0。⚠️ 与 v0.45.149 **相邻不重叠**：那条管 `ml_predictor.save_model` 的相对路径默认值与加载守卫，本条管 `PATHS.*` 派生值的**求值时机**；两边都可能碰 `conftest.py` 的隔离 fixture，合并时逐块核对。**不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`）
+
+---
+
 ## [0.45.149] — 2026-09-07 — 跑测试会覆盖生产模型：默认参数里的相对路径，与一个 import 时冻住的类属性
 
 承接 v0.45.148 补记 B。机制属实并已复现，但**被覆盖的不是生产在读的那个文件**——
@@ -166,10 +260,20 @@ setenv 之后再读          : <repo>/ml_model_cache.json   ← 没变 = 冻住�
 
 ### 与并发 session 的关系
 
-- v0.45.145（当日唯一值闸 + 模型版本快照目录）**互补**：那条查症状，本条堵源头。
-  两条都碰 `ml_predictor.save_model` 附近与 `generate_ml_report`，合并时逐块核对。
-  ⚠️ 若 v0.45.145 的快照目录挂在 `save_model` 上，注意它现在拿到的是**绝对路径**，
-  且快照的应当是 `PATHS.ml_model_cache`（有读者的那个）而不是 `ml_model`（孤儿）。
+- **v0.45.145 已合并，逐块核对结果如下**（它给每个 `save_model` 尾部加了
+  `_snapshot_saved_model(filename)`，并用 `TestSnapshotWiring` 的 AST 断言盯着）：
+  - 自动合并成功，但**自动合并成功 ≠ 语义正确**，故用 AST 复核了四个 `save_model`：
+    快照调用、路径解析、`默认值 is None` 三项**全部同时在位**（`ml_predictor`
+    三处 + `ml_predictor_extended` 一处）。
+  - **两条改动的交互是改善不是回归**：`snapshot_model_file` 用
+    `hist = src.parent / "ml_model_history"` 定位快照目录。此前它拿到的是相对
+    路径 `"ml_model.json"` ⇒ 快照目录跟着 **cwd** 走（生产恰好对，别处就错）；
+    本条改成绝对路径后，快照目录**跟着模型文件**走。
+  - 测试里 `_snapshot_disabled()` 已由对方处理（`ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE`
+    + conftest autouse），我新增的 fixture 与它不冲突。
+- v0.45.150 已占号做「`PATHS.*` 派生值求值时机」的全仓审计（即本条发现的 22 处），
+  其占位标题写明与本条「相邻不重叠」。v0.45.152 已从 `pheromone.db` 重训恢复了
+  生产 `ml_model.json`——**恢复不是修复**，本条才是堵源头的那半。
 - v0.45.146 / v0.45.147 在 `generate_ml_report._prepare_ml_input` 内部，本条只动
   该文件的类体顶部与 `_model_file`，预期无冲突。
 
@@ -431,13 +535,464 @@ v0.45.132 改读 `pheromone.db` 后已有真数，实测当前代码：
 
 ---
 
-## [0.45.147] — 2026-09-07 — 占位（进行中：补上两套账目最后的真缺口 —— `_prepare_ml_input` 的 `catalyst_quality` 兜底 `"B"`（58/803）与 `direction_encoded` 兜底 `0.0`（57/803）两个合法字面量，使 `_ml_input_missing` 说缺而 `ml_predictor._missing_features` 说不缺。范围＝这两槽改 None + `_encode_catalyst` 的缺失编码 + `KNOWN_LEDGER_GAPS` 收缩 + `_ML_ESTIMATOR_GENERATIONS` 追加一条。**不动** `_COHORT_HISTORY`、不动训练端口径、不动 `crowding_score`/`agent_agreement`（归 v0.45.146）。⚠️ 与 v0.45.146 同函数相邻：对方改 crowding/agreement 两槽，本条改 catalyst/direction 两槽，两边都会碰 `_ml_input_missing`、`TrainingData(...)` 与世代表，合并时逐块核对）
 
-## [0.45.146] — 2026-09-07 — 占位（进行中：`generate_ml_report._prepare_ml_input` 最后两个常数特征槽 —— `crowding_score`（777/803 恒 50.0）与 `agent_agreement`（恒 0.5）接蜂群同源真值；范围＝服务端这两槽取数 + `_ml_input_missing` 记账 + 成对测试 + `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 追加一条。**不动** `_COHORT_HISTORY`、不动训练端口径、不动 EVALUATION_WEIGHTS。⚠️ 与 v0.45.145 同文件相邻：对方在 `generate_ml_report.py` 批量收尾加唯一值闸，本条改 `_prepare_ml_input` 内部，预期无冲突但合并时需核对）
+## [0.45.147] — 2026-09-07 — 缺失哨兵选中了众数：`catalyst_quality` 的 `"B"` 与 `direction_encoded` 的 `0.0`
+
+v0.45.143 全 12 维对账查出的最后两个**真**缺口。两者同一形状：
+**缺失时兜底成一个合法值，于是「没测到」与「测了正好是这个值」不可区分**，
+且 `ml_predictor._missing_features` 只认 `None`/NaN ⇒ 两套账目对不上。
+
+### Fixed
+
+- **`catalyst_quality` 缺失时不再兜底 `"B"`，改为 `None`。**
+  v0.45.135 选 `"B"` 的理由是「`"B+"` 是 magnitude 1.0 的基准档，用它会让
+  『拿不到数据』与『质量正好中等』不可区分」——方向对，但**选中了众数**：
+  生产实测 `"B"` 占真实等级的 **57.4%**（461/803），是五档里最常见的一档。
+  于是 58 份缺失与 461 份真实 `"B"` 完全同形，**比用 `"B+"` 更糟**。
+  ⇒ 判据：挑缺失哨兵前先数这个值在真实分布里占多少，别只看它「语义上中不中性」。
+
+- **`direction_encoded` 缺失时不再兜底 `0.0`，改为 `None`。**
+  `0.0` 在 `direction_map` 里**正是 `"neutral"`**，一个真实类别（生产 148/803 份）。
+  ⚠️ `tests/test_ml_input_direction.py::test_unknown_direction_is_flagged_missing_not_faked`
+  的**名字与失败消息从 v0.45.139 起就说对了**（「与『中性』同形」），
+  可它的断言写的是 `== 0.0` —— 正是它自己警告的那种伪造。已改为 `is None`
+  并补上跨模块断言。
+
+- **`ml_predictor._encode_catalyst(None)` 由 `0.5` 改为 NaN。**
+  `0.5` 落在 `C`(0.40) 与 `B`(0.55) **之间** —— 一个真实等级永远产不出的值，
+  树模型却会拿它当一个真实的中间档去切分。改 NaN 后 HGB 走原生缺失处理。
+  未知字面量（如 `"X"`）仍返回 `0.5`：本仓无生产路径产得出它，且
+  `_missing_features` 检查的是原始字符串字段，对 `"X"` 既非 None 也非 NaN，
+  改成 NaN 反而会让两套账目重新对不上。
+
+### Changed
+
+- **`SimpleMLModel.encode_catalyst_quality` 改为委托 `_encode_catalyst`，
+  编码表收敛为模块内唯一真相 `_CATALYST_ENCODING`。**
+  此前本类与模块级函数各有一份**内容相同**的映射——正是
+  `catalyst_quality_from_score` docstring 抱怨的「阈值在三处各写一份」同一个反模式
+  （v0.45.142 收掉了档位阈值，编码表留到了这里）。
+  ⚠️ `ml_predictor_extended.py:567` 还有第四份：那是本模块导入失败时的应急降级，
+  只有 rival_bee 会走且从不传 `None`，本版不动，已在代码与测试里登记以免遗忘。
+
+- `catalyst_quality_from_score` 的 docstring 补记这条理由被推翻的实测证据。
+  **函数契约不变**（`swarm_agents/rival_bee.py:87` 依赖它），改的是调用方。
+
+### 实测
+
+- **全 12 维两套账目 803/803 完全一致**（v0.45.143 时是 742/803）。
+  `catalyst_quality` 取值 B 461 / B+ 136 / C 64 / **None 58** / A 48 / A+ 36；
+  `direction_encoded` 取值 1.0 384 / −1.0 214 / **0.0 148** / **None 57**
+  —— 缺失与真实的 `"B"`、真实的 `neutral` 现在都可区分。
+- `imputed_features` 计数由 {0:739, 1:7, 5:55, 7:2} 变为 {0:739, 1:7, **7:55, 9:2**}；
+  `unreliable` **无翻转**（那 57 份本就已超阈值）。
+
+- **⚠️ 当日 HGB 模型上 803 份重放 Δprobability 恒为 0** —— 但这不是「改动没效果」，
+  而是**这棵训练出来的树**把 NaN 路由到样本更多那一支、恰好与 0.55 / 0.0 同向
+  （sklearn 在训练集该列无缺失时的既定行为）。反向自证：同一改动在降级模型
+  `SimpleMLModel` 上 **Δ=+0.041**；判别力 probe 也证明模型对这两维的**取值**敏感
+  （C→A+ 且 −1→+1 时 Δ=+0.0175）。
+  ⇒ **估计量的定义变了就登记，不以当日输出恰好相同为免登记的理由。**
+
+### 世代边界
+
+`probability_scorecard._ML_ESTIMATOR_GENERATIONS` 的 2026-09-06 条目**扩展**为
+`v0.45.137+v0.45.140+v0.45.141+v0.45.147`，而非新开一条：09-06 与 09-07 均无生产扫描
+（`predictions` 最近业务日 09-04，下次 09-08），中间估计量未产出任何样本，
+新开边界只会造出一个空分区。做法与 v0.45.141 加标签时一致。
+**仍不动** `ic_rerun_readiness._COHORT_HISTORY`（`_prepare_ml_input` 的产物不进
+`predictions` 表）。
+
+### 验证
+
+- 全套 **3472 passed, 19 skipped**（唯一红仍是 `TestCoverageHorizon`，按设计）。
+- mutation check **14/14 全被抓**，`collected 165 items`、基线绿、锚点唯一。
+  新增 M10~M14：两槽各自退回兜底常数、`_encode_catalyst(None)` 退回 0.5、
+  `SimpleMLModel` 重新自带一份表、真实 `neutral` 被当成缺失。
+- ruff：F821 全仓干净；F841 与 `origin/main` 基线**逐文件相等**（1/1、2/2、0/0），
+  本次引入 0 项；默认配置下余 2 项为既有。
+
+### 过程记录
+
+- **四条既有测试因约定改变而变红，全部是被全套跑出来的、不是被我的窄循环跑出来的**：
+  `test_ml_catalyst_quality_source.py` 三条（mutation 脚本的**基线守卫**抓到）、
+  `test_ml_input_direction.py` 一条（全套抓到）。
+  ⇒ 改一条「约定」时，先 grep 该约定的所有断言副本；
+  ⇒ mutation 脚本的「基线必须全绿」那道 assert 值回票价。
+- 断言里的档位期望值第一次是凭印象写的（`4.0→"B"`、`5.9→"B+"`），实际切点是
+  `_CATALYST_GRADE_CUTS = (8.5, 7.5, 6.5, 5.5)`（`5.9→"B"`、`6.5→"B+"`）。
+  已改为逐档实测取值。**别把猜的期望值写进断言**——它红了你会先怀疑代码。
+
+## [0.45.146] — 2026-09-07 — 最后两个常数特征槽接蜂群真值：其中一个是模型头号特征
+
+`_prepare_ml_input` 的 12 维里，v0.45.135/137/139/140/141 已逐批接线，本版接完剩下两个。
+两处的共同判据仍是 v0.45.137 那条：**改服务端口径前，先去训练端读那个槽实际装的是什么量。**
+
+### Fixed
+
+1. **`crowding_score`：777/803 份恒为字面量 50.0。**
+   旧读 `metrics.get("crowding_score", _fallback_crowding)`，而生产 `realtime_metrics`
+   里 `crowding_score` 与 `short_interest_ratio` **两个键都不存在** ⇒ 两级兜底全部
+   落到字面量。实测 803 份生产 `analysis-*-ml-*.json`：**777 份 50.0**、
+   25 份 500.0（clamp 之前的越界残留）、1 份 45.0。
+
+   ⚠️ **这个槽的名字说谎，不能接「名字对得上」的那个源。**
+   训练端 `build_training_data_from_db` 往它里面装的是 `crowding_score=_sig * 10`，
+   也就是**信号维度分 ×10**，不是拥挤度。三者实测对照：
+
+   | 量 | 生产中位 | sd | 与本槽 Spearman |
+   |---|---|---|---|
+   | `dimension_scores.signal × 10`（训练端同源） | 49.60 | 12.31 | — |
+   | 训练端该槽实际分布（n=497） | 52.30 | 7.60 | — |
+   | `ScoutBeeNova.details.crowding_score`（真拥挤度） | 23.75 | 12.28 | **−0.46** |
+
+   接真拥挤度不只是量纲不对——v0.45.137 volatility 那次是 ρ=+0.068 的**无关**，
+   这次是 **ρ=−0.46 的近似反号**，会主动把模型学到的方向喂反，比留着常数更糟。
+   故取 `swarm_dimension_scores["signal"] * 10`，与训练端逐字节同源
+   （`save_predictions` 把 `swarm_results[t]["dimension_scores"]` 原样落库）。
+
+   **常数 50.0 不是中性**：落在训练分布 **36.0 分位**。而 `crowding` 是当前模型
+   permutation importance **排名第一**的特征（+0.0826，12 维之首）——
+   这是历次接线里杠杆最大的一个槽。
+
+   顺带移除旧的 `min(100, max(0, ·))` clamp：它是为 `_sir * 10` 越界准备的，
+   而训练端 `_sig * 10` **不做** clamp，留着会在尾部制造新的口径差。
+   生产实测 signal ∈ [1.88, 9.64] ⇒ ×10 ∈ [18.8, 96.4]，clamp 从未生效过。
+
+2. **`agent_agreement`：恒为字面量 0.5，且那条注释已经过期。**
+   旧代码 `agent_agreement=0.5,  # 预测时无蜂群上下文`。该注释自 v0.45.140 起
+   **已不成立**——本函数此刻就收着三个蜂群参数，而逐蜂方向躺在**同一个**
+   `swarm_data[ticker]` 里（生产 746/746 份都有，长度恒为 8）。
+
+   公式**照抄训练端**，不自己发明共识度：`一致蜂数 / 总蜂数`，取数链同源
+   （`swarm_results[t]["agent_directions"]` → `predictions.agent_directions`）。
+   两端方向词表实测完全一致（5968 条逐蜂方向只有 bullish/bearish/neutral）。
+
+   ⚠️ **这个槽与前几次接线的重要区别：0.5 在训练分布里接近众数**
+   （39.0 分位，且恰好 **37.0%** 的样本就是 0.5 —— 八蜂里四蜂同向）。
+   所以它的危害不是「系统性偏移」，而是**零区分度**。permutation importance
+   也确实偏低（+0.0077，12 维第 10），扫遍全值域只改变 63.6% 的行、极差中位 0.0053。
+   **「影响小」是测出来的，不是猜的**——记在这里免得下次有人当它没接。
+
+   新增第四个成组参数 `swarm_agent_directions`，两个生产调用点同步接线，
+   `TestProductionWiring.SWARM_KWARGS` 扩到 4 个。
+
+### 验证
+
+**803 份生产 JSON 全量重放**（对照组＝`git archive HEAD` 导出的干净树，
+两侧只差这两个槽；模型两侧都由 `pheromone.db` 的 497 条真实样本现训）：
+
+| 指标 | 值 |
+|---|---|
+| \|Δprobability\| 中位 / p90 / max | 0.0166 / 0.0560 / 0.1809 |
+| **变动 > 0.02 的占比** | **46.0%（369/803）** ← 历次接线中最大 |
+| 完全无变动 | 19.3%（155/803） |
+| probability 唯一值 | 308 → **462** |
+| `crowding_score` 唯一值 | 1 → 357（另 67 份为 None） |
+| `agent_agreement` 唯一值 | 1 → 8（另 57 份为 None） |
+
+重放工具**自带五条自证**，任一失败即 abort（v0.45.140 的教训：裸 `train_model()`
+在 worktree 取不到 db → 8 条硬编码样本 → 模型恒输出 0.5 → 对任何改动都报零差异）：
+`P0` 训练集 n≥100（实测 497）、`P1` 对照集非空（803）、`P2a` 模型非常数
+（输出 sd 0.0840）、`P2b/P2c` 两个槽各自对本工具可见（100% / 63.6%）。
+
+⚠️ **初版探针阈值定错了，它红了——这正是它的价值。** 我最初要求单次扰动
+移动 > 0.05，而模型输出**全域**只有 0.30~0.685。改阈值前先去量了分布，
+才发现 `agent_agreement` 单独扫描在 5 个抽样行里有 3 行**极差恰好 0.0000**
+（树模型在那些区域根本不在这一维分裂）。**若跳过探针直接看到小 Δ，
+就无从分辨「这个特征杠杆本来就小」与「我的工具是瞎的」。**
+
+### ⚠️ 一条要记住的负面结论：两套账目「一致」不等于「对」
+
+全 12 维逐维对账，**改动前后都是 745/803（92.8%）一致**——本次改动
+**没有提高一致率**。因为改动前那 57 份无 `swarm_results` 的报告里，
+两套账目是**一致地说了假话**（都说 crowding / agreement「不缺」，
+而它们其实是字面量）。改动后两边都如实说缺。
+
+⇒ **对账率无法区分「都对」与「都以同一方向错」。** 一致是必要条件，不是充分条件。
+（v0.45.143「对账测试若先筛掉一半特征就证明不了账目对上了」的下一层。）
+
+剩余 58 处不一致**恰好等于**已知缺口 `catalyst_quality` / `direction_encoded`
+（归 v0.45.147），本版未新增任何缺口——`KNOWN_LEDGER_GAPS` 一字未改。
+`unreliable` 标记零翻转（那 57 份此前已因其他维超阈值而被标记）。
+
+### Changed
+
+- `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 追加 `2026-09-07 / v0.45.146`。
+  **未动** `_COHORT_HISTORY`（另一条管道，动了会白白作废几个月样本）。
+  IC 闸不受影响（ML 特征不进 `predictions` 表）。
+- `test_boundary_partitions_days` 由**写死日期常量**改为**从登记表派生**。
+  原实现断言 `gen("2026-09-06") == gen("2026-09-08")`，在 09-07 新增边界时如期
+  变红——这是它该有的行为。但「每加一代就手改一次常量」的守卫，改着改着就会被
+  改成恒真。现改为：逐条验边界前后异代（否则那条边界等于没划）＋验末代内部同代
+  （否则前一条在「每天一代」的退化表上也恒真）。两条成对。
+- `TestMissingLedgerIsAccurate` 夹具补齐：`LEDGER_ALIAS` 加 `crowding_score → crowding`
+  （两套账目对同一维的不同叫法），`_ledgers` 补传 `agent_directions`——
+  否则「数据齐全」那半边测的是一个残缺场景。
+  常量 `FIVE`（已装七个）改名 `NONE_BACKED_FEATURES` 并加空集护栏：
+  **名字里写数量就是给自己埋「列名说谎」**。
+
+### Added
+
+- `tests/test_ml_input_crowding_agreement.py`（34 条，全部成对）：
+  真值可得 ⇒ 用真值且不上缺失表 / 不可得 ⇒ `None` 且上缺失表；
+  合法边界值 `0.0`、`0.5`、`50.0` 必须被当作**真实观测**（`or` 型兜底会同时吃掉它们）；
+  `bool`/NaN 类型闸；未知方向不得静默算出 `0.0`（与「真的没蜂同向」同形）；
+  不 clamp；旧的两条 `metrics` 来源不得复活；
+  经 `save_predictions → predictions → build_training_data_from_db` 的**端到端同源**断言；
+  以及一条**反陷阱守卫**——训练端那个槽一旦从 `_sig * 10` 改成别的量，本条先红。
+
+**mutation check**：10 个变异全部被抓（挑兜底值 / 漏记缺失表 / 量纲 ×1 /
+类型闸退化不排除 bool / 共识度不看方向退化成「数蜂」/ 未知方向也算 /
+半接线不传参 / 世代边界不登记）。每个变异均断言**锚点唯一**，
+且逐次核对 `collected=93` 不变（v0.45.110/111 两次栽在这两条上）。
+
+### ⚠️ 新踩到的坑：恢复源码 ≠ 恢复被导入的模块（变异脚本自身的缺陷）
+
+变异检验跑完、单文件测试全绿，**整套重跑却红了两条世代表断言**，
+而 `probability_scorecard.py` 在磁盘上内容完全正确（09-06 / 09-07 两条）。
+真因是 `__pycache__` 里留着**变异版编译出的 `.pyc`**：
+
+- 脚本用 `shutil.copy` 做备份，它**不保留 mtime** ⇒ restore 后源文件带的是
+  备份时刻的时间戳；
+- M10 的替换 `"2026-09-07"` → `"2026-09-06"` **字节长度不变**；
+- Python 的 `.pyc` 失效判据正是 **(源 mtime, 源 size)** 这一对 —— 两项都对上，
+  于是恢复后的源码继续用着变异体的字节码。
+
+⇒ **`git status` 干净、文件内容也对，但 `import` 进来的还是变异体。**
+这又是本仓那条元形状：**一次失败被静默改写成「没发生过」**。
+它能浮出水面，只因为整套重跑里有一条单文件跑不到的断言
+（呼应 v0.45.117「改变测试选择集＝新的执行组合，必须整套重跑」）。
+
+修法：变异脚本在**每次写入与每次恢复之后**都清 `__pycache__`。
+清完重跑，10 个变异结论**逐条不变**；803 份重放两侧也**逐条字节相同**，
+故本条报告的全部数字未受污染。
+
+判据：**任何「改文件 → 跑 → 改回来」的工具，都要把字节码缓存一起还原**；
+尤其当替换是等长的时候——等长恰好是最不容易被 (mtime,size) 判据发现的那种。
+
+### 与 v0.45.147 并发合并（同函数、同表）
+
+两条占位标题都写明了范围重叠，合并时逐块核对，三处需要人判断：
+
+1. **`TrainingData(...)` 返回块**：对方改 `direction_encoded`、本条改 `agent_agreement`，
+   两边各取所改。
+2. **`LEDGER_ALIAS`**：两边各自发现一对命名不一致（`catalyst_quality → catalyst` /
+   `crowding_score → crowding`），合并为四对。
+3. **世代表标签，本条做了一次撤回性更正。**
+   对方把 v0.45.147 并进了 **09-06** 那条，理由是「09-06 与 09-07 均无生产扫描，
+   新开边界只会造出一个空分区」——这个理由成立。但合并后，我的 09-07 边界已经
+   存在，于是两条标签**同时说错**：09-06 那条声称包含 v0.45.147（它落在 09-07），
+   而 09-07 那条只写 v0.45.146（09-08 起的报告其实两次改动都含）。
+   ⇒ 09-06 撤回 `+v0.45.147`，09-07 改为 `v0.45.146+v0.45.147`，
+   对方的说明段整段移交过去（不丢内容，`ml_estimator_generation("2026-09-08")`
+   现返回 `v0.45.146+v0.45.147`）。
+   判据：**这张表唯一真正要紧的，是「下一个有样本的日子」适用的那条标签列全了没**——
+   中间的空分区叫什么无所谓，标签漏了版本才会让未来的分析读错。
+0. **合并后重跑了对照，没有沿用合并前的数字。**
+   基线换成 `git archive origin/main`（已含 v0.45.147），新版为合并结果，
+   两侧同一时刻各自现训模型。结果与合并前**逐条字节相同**
+   （803/803），上表数字在合并后依然成立——与对方「其改动在当日 HGB 上
+   Δ 恒为 0」的实测互相印证。判据同 v0.45.121：**证明「零影响」必须同一时刻
+   还原跑对照，不能拿旧数字充数。**
+4. `NONE_BACKED_FEATURES` 补上对方新 None 化的 `catalyst` / `direction_encoded`。
+   这张表**漏一项 = 那一维的账目差异不会有人红**（那条断言只比交集），
+   故顺手加了一行注释说明它与全 12 维那条的分工。
+   注释里也不再写总数——写了就会过期，只列版本。
+
+### 备注：本次跑测试**没有**污染生产模型
+
+v0.45.149 发现「跑 pytest 会覆盖生产 `ml_model.json`」。本次全部命令的 cwd 都是
+worktree，相对路径落在 `worktree/ml_model.json`（已被 `.gitignore:30` 忽略），
+生产文件未被本 session 写入。重放亦不读该文件——它由 `pheromone.db` 现训
+（`P0` 已断言 n=497），故本条的全部数字与那次损坏无关。
 
 ---
 
-## [0.45.145] — 2026-09-07 — 占位（进行中：ML 模型退化成常数函数时全线无告警——09-04 全部 12 份 probability 逐位相同 = 0.5899693787928219 仍照常渲染；范围＝当日唯一值闸（放在批量收尾真实调用点，硬错误+非零退出码，不发 Slack）+ ml_model.json 保存时版本快照目录（同 PR 做 git add / REPORT_ARTIFACT_PATHS / _ARTIFACT_PREFIXES 三件事）+ 成对测试与 mutation check；不动 probability_scorecard.py，不动评分权重）
+## [0.45.145] — 2026-09-07 — ML 模型退化成常数函数时没有任何东西会变红
+
+2026-09-04 当日全部 12 份 `analysis-*-ml-*.json` 的
+`ml_prediction.prediction.probability` **逐位相同** = `0.5899693787928219`，
+报告照常印「ML 预测 59.0%」、退出码 0、日志正常。
+2026-08-28 同样：12/14 份恒为 `0.14901620144018954`。
+同期输入并不相同（09-04 的 `iv_rank` 跨 0→98.61、`put_call_ratio` 0.26→1.23），
+拿**当前**模型重放同一批输入得 7 个不同值 ⇒ 当天的模型确实是常数函数。
+
+缺的是一个观测点：**「今天这批 probability 只有 1 个唯一值」没人会红。**
+记分卡管不到——它记「准不准」，而零区分度的常数预测校准误差可以很小
+（09-04 那个 59.0% 离真实基准率 56.8% 只差 2.2pp）。**校准 ≠ 区分度。**
+
+### Added
+
+1. **`ml_model_guard.py`** —— 判定谓词 + 磁盘读取 + 模型版本快照 + CLI。
+   退出码沿用 Step 10/11/12 约定：**0 健康 / 1 要人动手 / 3 无法判定**
+   （2 被编排器 `run_step` 占用）。**不发任何 Slack**（CLAUDE.md
+   「Slack 通知精简规则」），观测点 = ERROR 日志 + 退出码。
+
+2. **`ml_model_history/`** —— 每次 `save_model()` 之后留一份
+   `{stem}-YYYY-MM-DD.json` 全文快照 + `manifest.jsonl`
+   （每次保存一行：sha256 / 字节数 / `model_type` / `n_samples_seen` /
+   `training_accuracy`）。09-04 那次**无法事后归因**正是因为
+   `ml_model_cache.json` 原地覆盖、无任何历史版本。
+   实测快照可被 `load_model()` 读回 —— 归因重放的前提。
+   保留 180 天，裁剪只认自己那套命名（`{stem}-YYYY-MM-DD.json`）。
+
+3. **`tests/test_ml_model_guard.py`**（41 项）。夹具是**真实生产取值**，
+   逐位抄自 09-04 / 08-28 / 09-02 三天的 JSON，不是编的数。
+
+### 判据不是拍脑袋的 —— 全量 77 个扫描日实测
+
+| | distinct（唯一值个数） |
+|---|---|
+| 当前世代（08-10 起，30 只池）健康日 | **9 ~ 21**（n=11~30） |
+| 已知事故 08-28 | 2（n=14） |
+| 已知事故 09-04 | 1（n=12） |
+
+⚠️ **字面 `unique == 1` 会漏掉 08-28**（distinct=2）。只写那一条就是
+「修一支漏一支」：两次已知事故只抓到一次。故判据是两条：
+
+- `n > 1 且 distinct == 1` → `constant`
+- `n >= 8 且 distinct <= 2` → `near_constant`
+
+`n >= 8` 那道地板是必需的：**合法的精确并列确实存在**（09-02 有三只共享
+`0.4805419596430596`，但那天 12 份输入各不相同，是树模型叶子离散化）。
+所以判据取 `distinct` 而非「有没有并列」，且小样本不参与第 2 条。
+
+实测该判据在当前世代 15 天里只点亮 2 天（正是两次事故），10 个健康多标的日
+零误报，3 个 n=1 的补跑日诚实返回 `undetermined`（3）而非假警报。
+旧世代（3~4 月）另有 17 天命中——那段时期模型本来就长期退化，不是误报。
+
+### Changed —— 闸装在哪（「查功能是否生效先数读者」）
+
+**用户提议的那一处不是主力生产者。** 编排器只把
+`generate_ml_report.main()` 当 **Step 3 补跑**（`--tickers $MISSING_TICKERS`）；
+每天出 12 份 JSON 的是 `alpha_hive_daily_report._generate_ml_reports`
+（Step 2 内部）。只堵前者＝加一个几乎没人调的死闸。两处都接上了：
+
+- **`alpha_hive_daily_report._generate_ml_reports`**（Step 2 主力）：
+  ⚠️ 刻意 `raise_on_degenerate=False`。该函数的调用点 `_save_output_files`
+  只兜 `(OSError, ValueError, KeyError, TypeError)`，`MLModelDegenerateError`
+  是 `RuntimeError`、**会穿透并连带杀掉 index.html 生成与 gh-pages 部署**
+  ——正是那段 except 上方注释记着的 v0.43.17 事故。改为把判决挂到 `report`
+  （main() 返回的同一个对象）→ `__main__` 出退出码 1。
+- **`generate_ml_report.main()`**（Step 3 补跑）：退化时**跳过 gh-pages 同步**
+  （常数概率的报告不该进网站）+ `sys.exit(1)`。读磁盘而非读内存，
+  这样补跑那 1~2 只会和 Step 2 的 12 份合在一起算 —— 否则 n 太小、判据形同虚设。
+- **`_force_exit_if_threads_stuck`** 原本硬写 `os._exit(0)`。加 `exit_code` 参数：
+  不带上退出码的话，「线程卡死」会把「ML 退化」悄悄改写成成功
+  ——正是本版要治的那个形状。
+- **`ml_predictor.py` 三个 + `ml_predictor_extended.py` 一个** `save_model`
+  全部钩上快照，四处均由 `tests/...::TestSnapshotWiring` 的 **AST** 断言盯着
+  （新增第 5 个 `save_model` 忘了钩 → 变红）。
+
+  ⚠️ 本条初稿写「`ml_predictor_extended` 是 `ml_predictor` 导入失败时的降级实现」，
+  **是错的，已更正**。逐条核实后的实情：
+  `swarm_agents/rival_bee.py:30` **无条件**导入 `ml_predictor_extended`，
+  它是 RivalBee 的**主路径**；只有其中的 `SimpleMLModel` **类**才是
+  `ml_predictor` 导不进来（sklearn 缺失）时的降级——`_create_ml_model()`
+  先试 `from ml_predictor import create_ml_model`，本机实测返回 `HGBModel`。
+  且 rival_bee 只调 `predict_for_opportunity`、**从不调 `train_model`**，
+  所以扫描路径不会每只标的写一次模型。
+  ⇒ 那个钩子是一条正确但常态休眠的备用闸。
+  **判据：别把测试 docstring 里对某个类的说法读成对整个模块的说法。**
+
+### Fixed —— 新产物目录的「三件事」其实是四件
+
+`.gitignore:30` 的 `ml_model*.json` **会连快照一起吞掉**：无斜杠的 gitignore
+模式匹配任意层级的 basename，`ml_model_history/ml_model-2026-09-07.json`
+实测被它命中。不加反向规则的话，第 3 项整个白做 —— 快照每天写、每天不进库，
+与 v0.45.111「新账本没进白名单」同形，只是凶手换成了 gitignore。
+
+- `.gitignore` 加 `!ml_model_history/*.json`（**必须在那条之后**，gitignore 后者胜）
+- `report_deployer.REPORT_ARTIFACT_PATHS` 加 `"ml_model_history/"`
+- `report_deployer._ARTIFACT_PREFIXES` 加 `"ml_model_history/"`
+- `git add ml_model_history/README.md`（空目录不进 git）
+
+⚠️ `git check-ignore -v` **对反向规则也会打印匹配行、退出码同样是 0**，
+不能直接当「被忽略」读。决定性判据是 `git add --dry-run`，且要配反向 canary
+（仓库根的 `ml_model.json` 必须仍被忽略——实测仍被忽略，反向规则没有过宽）。
+
+### Fixed —— 快照差点变成「有误导性的假证据」
+
+⚠️ **加完快照后实测发现它会被测试污染，且污染物会被自动提交。**
+
+`HGBModel.save_model(filename="ml_model.json")` 的默认值是**相对路径**，
+而 `tests/` 里约 12 处 `svc.train_model()` 不传 tmp 路径 ⇒ 在主 checkout 跑
+pytest 就会往 cwd 写 `ml_model.json`。实测单跑
+`tests/test_ml_real_training.py::TestTrainModelIntegration::test_train_model_prefers_real_data`
+→ 仓库根凭空出现 `ml_model.json`，**且本版的快照钩子顺手把它写进了
+`ml_model_history/`**。而该目录是 git 跟踪 + 在自动提交白名单里的
+⇒ 夹具模型会被当成生产模型提交推送。
+
+**那比没有快照更糟**：把「没有归因材料」换成了「有一份长得很真的假证据」。
+下次排查会捞到一个 `n=30 / acc=96.67 / oos=None` 的夹具模型当成当天的生产模型。
+
+加两层隔离（照抄本仓 `OPTIONS_SNAPSHOT_DISABLE` 的「第二层防线」写法）：
+
+- `ml_model_guard._snapshot_disabled()`：显式环境变量
+  `ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE` 优先；**没设时在 pytest 下默认关闭**
+- `tests/conftest.py::_isolate_env` autouse 显式设 `"1"`
+
+（相对路径默认值本身是另一条独立缺陷，已由其他 session 挂任务，不在本版改动面内。）
+
+### Fixed —— 顺带修一条被本版改动照出来的子串守卫
+
+`tests/test_parallel_agent_runner.py::TestForceExitSafetyNet::test_function_exists_and_is_wired`
+断言的是**字面量** `"_force_exit_if_threads_stuck()" in tail`（空括号）。
+给它加一个合法参数 `exit_code=_exit_code` 就误红 —— **子串守卫盯的是写法不是行为**
+（同 v0.45.140「源码守卫取 AST 别取子串」）。
+
+改成 AST，并**加严**：断言实参里确实带上了退出码。
+谁把它去掉（让强退路径重新把失败改写成成功）就红 —— mutation M23 验证。
+
+### 验证
+
+- 新增测试 **45 passed**；连同被改的 `test_parallel_agent_runner.py`
+  共 **57 passed**，`collected 57 items`。
+- **mutation check 24/24 全被抓**，基线绿、每条锚点唯一、collected 稳定在 57；合并后重做一遍，仍 24/24。
+- ⚠️ 第一轮 **M13 漏网，是我自己的测试缺口**：断言只要求
+  `report["ml_model_guard"]` 在函数里「某处出现过」，而 ImportError 兜底分支里
+  也有一份 ⇒ 摘掉成功路径的赋值照样全绿。**又是「改二分支只盯显眼的那一支」。**
+  已改为对 `Try.body` 与 `handlers` 各断一次，并补 M13b 成对验证。
+- 端到端拿真实生产数据跑 CLI：09-04 → 1、08-28 → 1、09-03 → 0、08-11 → 3。
+- **全套 3558 passed / 18 skipped / 1 xfailed / 0 failed**（已含 v0.45.146~149 合并后重跑）（`TestCoverageHorizon` 按设计
+  单独 deselect，它 2026-09-06 起变红是设计意图：去看 BLS 发 2027 日程没）。
+  跑完 `ml_model_history/` 里**只有 `README.md`** —— 隔离层在整套规模下也成立。
+- **CI 条件模拟**（v0.45.121 教训：本机绿证明不了 CI 绿）：
+  `git archive $(git write-tree)` 干净检出（**取 index 不取 HEAD**，暂存中两者不同）
+  + `sitecustomize` 断网 + CI 的 `-m "not integration and not network"`
+  → 93 passed。断网层配自证 canary（`getaddrinfo` 确实抛）。
+- 端到端跑真实模型类（`HGBModel`）：快照与原文件逐字节相同，且
+  **能被 `load_model()` 读回**。
+- 隔离层配**反向 canary**：临时把两层都停掉重跑那条会覆盖生产模型的测试，
+  `ml_model_history/` 里如期冒出 `manifest.jsonl` + `ml_model-2026-09-07.json`；
+  还原后同一条测试跑完只剩 `README.md`。
+  ⚠️ 第一次 canary 是**假阴性**——只关了环境变量那一层，conftest 的
+  `monkeypatch.setenv` 会覆盖 shell 变量。「没有差异」先问工具有没有判别力。
+- ⚠️ 另修一处**从未被证明会触发的守卫**：`test_disabled_under_pytest_by_default`
+  原本没 `delenv`，conftest 把变量设成 "1" ⇒ `_snapshot_disabled` 走的是
+  「显式环境变量」那一支就返回了，`PYTEST_CURRENT_TEST` 那一支**永远没被求值**。
+  两层里有一层从没被测过（BullVeto 同款）。已改为先 `delenv` 把第二层单独暴露，
+  并补 `test_env_var_layer_wins_when_set` 成对覆盖第一层。
+
+### 与并发 session 的关系
+
+- **v0.45.149 是本条的源头**（另一 session）：`save_model` 默认相对路径导致
+  跑 pytest 会覆盖生产模型。本条查**症状**（当日唯一值闸 + 版本快照），
+  那条堵**源头**（路径收敛 + 加载守卫），互补不重叠。
+  合并后按对方占位标题的提醒**逐块核对**：四处 `save_model` 的快照钩子
+  用 AST 确认全在，两处闸全在，对方的改动集中在 catalyst 编码、与本条不重叠。
+- 本条的 pytest 隔离层（`ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE`）在 v0.45.149
+  把路径收敛掉之后仍有意义：它管的是「快照目录不许收测试产物」，
+  与「模型文件写到哪」是两件事。
+
+### 不在改动面内（刻意）
+
+- **不动 `probability_scorecard.py`** —— 校准与区分度是两件事，分开观测。
+- **不改任何评分权重 / 特征来源** ⇒ 不需要追加世代边界
+  （判定法：数这个字段流到哪儿。本版只加观测点与快照，不改任何进测量管道的量）。
+- **ML 批量整体失败**（闸都没跑到）的退出码语义**未改**：那条路径另有
+  `_log.warning` 记录，改它超出本版范围。键缺失 ≠ 健康，已写进注释。
 
 ---
 

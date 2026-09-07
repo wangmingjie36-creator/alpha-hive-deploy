@@ -301,6 +301,7 @@ class MLEnhancedReportGenerator:
         swarm_direction: Optional[str] = None,
         swarm_dimension_scores: Optional[dict] = None,
         swarm_final_score: Optional[float] = None,
+        swarm_agent_directions: Optional[dict] = None,
     ) -> dict:
         """生成 ML 增强的分析报告
 
@@ -314,7 +315,11 @@ class MLEnhancedReportGenerator:
         swarm_final_score：蜂群当日综合分，v0.45.141 起是 ML 特征 `final_score`
         的唯一来源（与训练端 `predictions.final_score` 同一个量）。
 
-        ⚠️ 三个参数都取自同一个 `swarm_data[ticker]`，**必须成组传**——传一个漏
+        swarm_agent_directions：蜂群当日**逐蜂方向**（8 只蜂的 name → direction），
+        v0.45.146 起是 ML 特征 `agent_agreement` 的唯一来源——与训练端
+        `predictions.agent_directions` 同一个量，共识度公式也照抄训练端那三行。
+
+        ⚠️ 四个参数都取自同一个 `swarm_data[ticker]`，**必须成组传**——传一个漏
         一个是本仓反复出现的半接线故障（守卫见
         `tests/test_ml_catalyst_quality_source.py::TestProductionWiring`）。
         """
@@ -330,6 +335,7 @@ class MLEnhancedReportGenerator:
             swarm_dimension_scores=swarm_dimension_scores,
             swarm_direction=swarm_direction,
             swarm_final_score=swarm_final_score,
+            swarm_agent_directions=swarm_agent_directions,
         )
 
         # 获取 ML 预测
@@ -400,20 +406,12 @@ class MLEnhancedReportGenerator:
         swarm_dimension_scores: Optional[dict] = None,
         swarm_direction: Optional[str] = None,
         swarm_final_score: Optional[float] = None,
+        swarm_agent_directions: Optional[dict] = None,
     ) -> TrainingData:
         """为 ML 模型准备输入数据"""
 
         # 从实时数据中提取特征（有则用真实值，无则降级到合理默认）
         _yf = metrics.get("sources", {}).get("yahoo_finance", {})
-        # BUG FIX: 原来的 _yf.get("short_interest_ratio", 50.0) * 10 当两个来源均缺失时
-        # 返回 50.0 * 10 = 500，严重超出 [0,100] 范围，导致 crowding_penalty = 50，
-        # 使 expected_7d = -23.24%（强烈看空），与评级矛盾。
-        # 修复：当 short_interest_ratio 缺失时使用中性默认值 5.0（5.0 * 10 = 50），
-        # 并对最终结果强制 clamp 到 [0, 100]。
-        _sir = _yf.get("short_interest_ratio")
-        _fallback_crowding = (_sir * 10) if _sir is not None else 50.0
-        crowding_score = float(metrics.get("crowding_score", _fallback_crowding))
-        crowding_score = min(100.0, max(0.0, crowding_score))  # 防御性边界保护
         momentum_5d = _yf.get("price_change_5d", 0.0) or 0.0
 
         # ── v0.45.137：volatility / market_sentiment 的唯一来源 = 蜂群维度分 ──
@@ -442,6 +440,40 @@ class MLEnhancedReportGenerator:
         # 是系统性偏低；803 份重放显示 52.4% 的 probability 变动 > 0.02。
         from ml_predictor import market_sentiment_from_score, volatility_from_risk_adj
         _dims = swarm_dimension_scores or {}
+
+        # ── v0.45.146：crowding_score 的唯一来源 = 蜂群 signal 维度分 × 10 ──
+        # 旧实现 `metrics.get("crowding_score", _fallback_crowding)`：生产
+        # `realtime_metrics` 里**既没有** `crowding_score`、**也没有**
+        # `short_interest_ratio`（两个键在 803 份落盘 JSON 的上游结构里都不存在），
+        # 于是两级兜底全部落到字面量 50.0 —— 实测 777/803 恒 50.0，
+        # 另 25 份 500.0（clamp 之前的越界残留）、1 份 45.0。
+        #
+        # ⚠️ **不要**去接 ScoutBeeNova 的 `details.crowding_score`（那才是真拥挤度）。
+        # 这个特征槽的名字说谎：训练端 `build_training_data_from_db` 往它里面装的是
+        # `crowding_score=_sig * 10`，也就是**信号维度分×10**，不是拥挤度。实测：
+        #   · signal×10          生产中位 49.60 / sd 12.31，训练分布 mean 52.77 / sd 7.60
+        #   · ScoutBee 真拥挤度   生产中位 23.75 / sd 12.28
+        #   · 二者 Spearman ρ = **−0.46**
+        # 接真拥挤度不只是量纲不对（v0.45.137 volatility 那次是 ρ=+0.068 的无关），
+        # 这次是**近似反号**——会主动把模型学到的方向喂反。
+        # 「改服务端口径前先去训练端读那个槽实际装的是什么量」——名字一致≠同一个量。
+        #
+        # 与训练端逐字节同源：`Backtester.save_predictions` 把
+        # `swarm_results[ticker]["dimension_scores"]` 原样写进 `predictions.dimension_scores`，
+        # 训练端再从中取 `signal`。此处取的是同一个 `swarm_data[ticker]`。
+        #
+        # 常数 50.0 **不是中性**：它落在训练 crowding 分布的 **36.0 分位**。
+        # 而 `crowding` 是当前模型 permutation importance **排名第一**的特征
+        # （+0.0826，12 维之首）—— 这是历次接线里杠杆最大的一个槽。
+        #
+        # 旧的 `min(100, max(0, ·))` clamp 一并移除：它是为 `_sir * 10` 越界准备的，
+        # 而训练端 `_sig * 10` **不做** clamp。留着 clamp 会在尾部制造新的口径差；
+        # 且维度分本就 0~10（生产实测 signal ∈ [1.88, 9.64] ⇒ ×10 ∈ [18.8, 96.4]），
+        # clamp 在真实数据上从未生效过。
+        _signal_raw = _dims.get("signal")
+        _signal_known = _usable_dim(_signal_raw)
+        crowding_score = float(_signal_raw) * 10.0 if _signal_known else None
+
         _risk_adj_raw = _dims.get("risk_adj")
         _sentiment_raw = _dims.get("sentiment")
         _risk_adj_known = _usable_dim(_risk_adj_raw)
@@ -479,8 +511,14 @@ class MLEnhancedReportGenerator:
         # 与本仓其余 5 处守卫同写法，显式排除。NaN 同理不能进 float 比较。
         # v0.45.137：三个维度派生特征共用 `_usable_dim`，不再各抄一份 isinstance 行。
         _catalyst_known = _usable_dim(_catalyst_raw)
-        # 取不到时用缺失约定 "B"（不是基准档 "B+"）——见 catalyst_quality_from_score
-        catalyst_quality = _cat_qual(_catalyst_raw) if _catalyst_known else "B"
+        # ── v0.45.147：取不到时是 None，不是 "B" ──
+        # v0.45.135 选 "B" 的理由是「"B+" 是 magnitude 1.0 的基准档，用它会让
+        # 『拿不到数据』与『质量正好中等』不可区分」——方向对，但**选中了众数**：
+        # 生产实测 "B" 占真实等级的 **57.4%**（461/803），是五档里最常见的一档，
+        # 于是 58 份缺失与 461 份真实 "B" 完全同形，比用 "B+" 更糟。
+        # 且它是合法枚举值 ⇒ `ml_predictor._missing_features` 不算它缺 ⇒
+        # `input_features_missing` 说缺、`feature_completeness` 说 12/12（58/803 份）。
+        catalyst_quality = _cat_qual(_catalyst_raw) if _catalyst_known else None
 
         # ── v0.45.140：odds / risk_adj / final_score 的唯一来源 = 蜂群 ──
         # 旧实现读 `analysis["dimension_scores"]` 与 `recommendation["score"]`，
@@ -533,6 +571,42 @@ class MLEnhancedReportGenerator:
         _direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
         _dir_known = swarm_direction in _direction_map
 
+        # ── v0.45.146：agent_agreement 的唯一来源 = 蜂群 agent_directions ──
+        # 旧实现是字面量 `agent_agreement=0.5,  # 预测时无蜂群上下文`。
+        # 那条注释自 v0.45.140 起**已经不成立**——本函数此刻就收着
+        # `swarm_dimension_scores` / `swarm_direction` / `swarm_final_score`，
+        # 而逐蜂方向躺在**同一个** `swarm_data[ticker]` 里（生产 746/746 份都有，
+        # 长度恒为 8：ScoutBeeNova / OracleBeeEcho / BuzzBeeWhisper /
+        # ChronosBeeHorizon / RivalBeeVanguard / GuardBeeSentinel /
+        # BearBeeContrarian / CodeExecutorAgent）。
+        #
+        # 公式**照抄训练端**，不自己发明共识度：
+        #   ad = json.loads(r["agent_directions"]); _dir = r["direction"] or "neutral"
+        #   _agree = sum(1 for d in ad.values() if d == _dir) / len(ad)
+        # 取数链同源：`Backtester.save_predictions` 把
+        # `swarm_results[ticker]["agent_directions"]` 原样写进
+        # `predictions.agent_directions`，训练端再从那里读回来。
+        # 两端方向词表实测完全一致（生产 5968 条逐蜂方向只有
+        # bullish/bearish/neutral 三个值），不存在 v0.45.139 那种评级词 vs 方向词的 skew。
+        #
+        # 训练端的两条兜底（`ad` 为空 → 0.5、`direction` 为 NULL → "neutral"）
+        # 在库里**都是死分支**（500 条候选中各 0 条），所以这里改用「取不到就是
+        # None」不会与训练端产生实际口径差；而共识度是**相对于方向定义**的，
+        # 没有已知方向就没有「与之一致」可言，故 `_dir_known` 也是前提。
+        #
+        # ⚠️ 这个槽与前几次接线的重要区别：0.5 在训练分布里**接近众数**
+        # （39.0 分位，且恰好 37.0% 的样本就是 0.5 —— 8 只蜂里 4 只同向）。
+        # 所以它的危害不是「系统性偏移」，而是**零区分度**：常数不携带任何
+        # 跨标的信息。permutation importance 也确实偏低（+0.0077，12 维第 10），
+        # 实测扫遍全值域只能改变 63.6% 的行、极差中位 0.0053 —— 预期影响小，
+        # 但「小」是测出来的，不是猜的。
+        _ad = swarm_agent_directions if isinstance(swarm_agent_directions, dict) else {}
+        _agree_known = bool(_ad) and _dir_known
+        agent_agreement = (
+            sum(1 for _d in _ad.values() if _d == swarm_direction) / len(_ad)
+            if _agree_known else None
+        )
+
         # ── v0.45.50：记录哪些特征是**补齐的**，不是观测到的 ──
         # 下面五个 .get(k, 默认值) 在缺失时产出 iv_rank=50 / pc=1.0 / 三个 5.0，
         # 组成一份内部完全自洽的「典型标的」画像。模型不会拒绝它，
@@ -550,8 +624,13 @@ class MLEnhancedReportGenerator:
         # v0.45.141：final_score 同样改由蜂群参数判可得。旧条目
         # `("final_score", _rec.get("score"))` 因键从不存在而**恒上榜**——
         # 一条永远亮着的告警等于没有告警。
+        # v0.45.146：crowding_score / agent_agreement 补进这张表。此前它们
+        # **不可能**上榜——旧代码缺数时喂字面量 50.0 / 0.5，两个合法数值，
+        # 于是「蜂群没跑」与「信号正好中等、八蜂正好四比四」在输出里完全同形。
         self._ml_input_missing = (
-            ([] if _catalyst_known else ["catalyst_quality"])
+            ([] if _signal_known else ["crowding_score"])
+            + ([] if _agree_known else ["agent_agreement"])
+            + ([] if _catalyst_known else ["catalyst_quality"])
             + ([] if _dir_known else ["direction"])
             + ([] if _risk_adj_known else ["volatility"])
             + ([] if _sentiment_known else ["market_sentiment"])
@@ -591,8 +670,11 @@ class MLEnhancedReportGenerator:
             final_score=final_score,
             odds_score=odds_score,
             risk_adj_score=risk_adj_score,
-            agent_agreement=0.5,  # 预测时无蜂群上下文
-            direction_encoded=_direction_map.get(swarm_direction, 0.0),
+            agent_agreement=agent_agreement,  # v0.45.146：蜂群逐蜂方向的共识度
+            # v0.45.147：方向不可得时是 None，不是 0.0 —— **0.0 在这张表里
+            # 正是 "neutral"**，一个真实类别。旧兜底让「方向拿不到」与
+            # 「蜂群判中性」在特征与账目上都同形（57/803 份）。
+            direction_encoded=(_direction_map[swarm_direction] if _dir_known else None),
         )
 
     def _generate_options_section_html(self, options: dict) -> str:
@@ -2714,6 +2796,7 @@ def main():
                 swarm_direction=_sr.get("direction"),
                 swarm_dimension_scores=_sr.get("dimension_scores"),
                 swarm_final_score=_sr.get("final_score"),
+                swarm_agent_directions=_sr.get("agent_directions"),
             )
 
             # 注入蜂群数据到报告
@@ -2800,8 +2883,44 @@ def main():
     _log.info("所有文件已完成写入")
     _log.info("=" * 60)
 
+    # ── v0.45.145：ML 概率常数退化闸 ─────────────────────────────────
+    # 2026-09-04 全部 12 份 probability 逐位相同（0.5899693787928219），
+    # 报告照常印「ML 预测 59.0%」、退出码 0、日志正常——没有任何东西会红。
+    # 闸放在这里而不是循环内：判据是「当日这一批的唯一值个数」，必须等
+    # 全部文件落盘（上面的 shutdown(wait=True)）之后才能求值。
+    #
+    # 读磁盘而非读内存，因为本进程通常只是 Step 3 补跑（编排器只在 Step 2
+    # 漏了标的时才调本 main），单看自己写的那 1~2 份 n 太小、判据形同虚设；
+    # 读磁盘会把 Step 2 的 12 份一起算进来。
+    #
+    # ⚠️ 不发 Slack（CLAUDE.md「Slack 通知精简规则」）。观测点 = 日志 + 退出码。
+    _exit_code = 0
+    _guard_date = report_gen.timestamp.strftime("%Y-%m-%d")
+    try:
+        from ml_model_guard import enforce_day as _enforce_day
+        _verdict = _enforce_day(
+            report_dir, _guard_date, raise_on_degenerate=False, logger=_log
+        )
+        if _verdict.is_degenerate:
+            _exit_code = 1
+    except ImportError as _ge:
+        # 「闸装不上」与「闸响了」一样严重：两种情况都不该报告健康。
+        # 沿用 Step 10/11/12 约定的 3 = 无法判定，绝不静默当成 0。
+        _log.error(
+            "🚨 ML 常数退化闸未装上（%s）——本次运行没有这道观测点，按「无法判定」处理",
+            _ge,
+        )
+        _exit_code = 3
+
     # ── 自动同步 gh-pages（GitHub Pages 从此分支部署）──
-    _sync_ghpages(tickers, successful_count)
+    if _exit_code == 1:
+        _log.error("已跳过 gh-pages 同步：当日 ML 概率退化成常数，先查模型再发布。")
+    else:
+        _sync_ghpages(tickers, successful_count)
+
+    if _exit_code:
+        import sys as _sys_exit
+        _sys_exit.exit(_exit_code)
 
 
 def _sync_ghpages(tickers: list, successful_count: int) -> None:

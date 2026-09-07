@@ -369,10 +369,29 @@ class TestMLEstimatorGenerations:
     """
 
     def test_boundary_partitions_days(self):
-        from probability_scorecard import ml_estimator_generation
+        """每条边界都必须真的**切开**日期，且同一代内的日期仍然相等。
+
+        v0.45.146 记：原实现写死 `gen("2026-09-06") == gen("2026-09-08")`，
+        在 09-07 新增一条边界时如期变红——这是它该有的行为。但「每加一代就来
+        手改一次常量」的守卫，改着改着就会被改成恒真。故改为**从登记表派生**：
+        逐条验边界前后异代（否则那条边界等于没划），再验代内同日期（否则
+        前一条在「每天一代」的退化表上也恒真）。两条成对，缺任一条都能被绕过。
+        """
+        from datetime import date, timedelta
+        from probability_scorecard import (ml_estimator_generation,
+                                           _ML_ESTIMATOR_GENERATIONS as G)
+        assert G, "登记表为空则以下全部在空集上恒真"
         assert ml_estimator_generation("2026-08-26").startswith("pre-")
         assert not ml_estimator_generation("2026-09-06").startswith("pre-")
-        assert ml_estimator_generation("2026-09-06") == ml_estimator_generation("2026-09-08")
+        for day, version, _ in G:
+            prev = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+            assert ml_estimator_generation(day) == version
+            assert ml_estimator_generation(prev) != version, (
+                f"{day} 这条边界没切开任何日期——前一天与当天同代")
+        last = date.fromisoformat(G[-1][0])
+        assert (ml_estimator_generation(G[-1][0])
+                == ml_estimator_generation((last + timedelta(days=30)).isoformat())), (
+            "末代内部被切开了——ml_estimator_generation 的「取最后一条匹配」坏了")
 
     def test_registry_is_append_only_and_sorted(self):
         """只追加不改写；日期必须递增，否则 `ml_estimator_generation` 的
