@@ -248,12 +248,15 @@ class TestProductionWiring:
 
     v0.45.140 加入第三个 `swarm_final_score`（此前 `final_score` 特征读
     `advanced_analysis["recommendation"]["score"]`，该键 803/803 份不存在）。
-    三者同取自一个 `swarm_data[ticker]`，任何一个漏传都是半接线。
+    v0.45.146 加入第四个 `swarm_agent_directions`（此前 `agent_agreement`
+    是字面量 0.5，注释「预测时无蜂群上下文」自 v0.45.140 起已不成立）。
+    四者同取自一个 `swarm_data[ticker]`，任何一个漏传都是半接线。
     """
 
     CALL = "generate_ml_enhanced_report"
-    # v0.45.141：第三个参数 swarm_final_score 同样取自 swarm_data[ticker]
-    SWARM_KWARGS = {"swarm_direction", "swarm_dimension_scores", "swarm_final_score"}
+    # v0.45.146：第四个参数 swarm_agent_directions 同样取自 swarm_data[ticker]
+    SWARM_KWARGS = {"swarm_direction", "swarm_dimension_scores",
+                    "swarm_final_score", "swarm_agent_directions"}
 
     def _call_sites(self, rel):
         tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))

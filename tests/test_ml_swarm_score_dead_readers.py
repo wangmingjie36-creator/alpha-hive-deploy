@@ -220,8 +220,10 @@ class TestMissingLedgerIsAccurate:
     #: 两套账目对同一特征用的不同名字（诊断字段，无程序读者，不改名以保历史可比）。
     #: `catalyst_quality → catalyst` 是 v0.45.147 修完 direction 之后**测试自己抓出来的**
     #: 第三对：此前 catalyst 两边都「说缺」，命名差异被同向掩盖着看不见。
+    #: `crowding_score → crowding` 同理（v0.45.146）：报告端用 TrainingData 字段名，
+    #: `ml_predictor._FEATURE_SOURCES` 用短名。
     LEDGER_ALIAS = {"market_sentiment": "sentiment", "direction": "direction_encoded",
-                    "catalyst_quality": "catalyst"}
+                    "catalyst_quality": "catalyst", "crowding_score": "crowding"}
 
     #: **已知仍未对上的特征**——它们缺失时喂的仍是合法字面量，于是
     #: `_ml_input_missing` 说缺、`ml_predictor._missing_features` 说不缺。
@@ -236,28 +238,46 @@ class TestMissingLedgerIsAccurate:
     #:   direction_encoded 兜底 0.0（v0.45.147；0.0 正是 "neutral"）
     KNOWN_LEDGER_GAPS = {"iv_rank", "put_call_ratio"}
 
+    #: v0.45.146：agent_agreement 的真值来源。与 `dims` 同步给/不给——
+    #: 生产里它们同取自一个 `swarm_data[ticker]`，一有俱有、一无俱无。
+    AGENT_DIRECTIONS = {"ScoutBeeNova": "bullish", "OracleBeeEcho": "bullish",
+                        "BuzzBeeWhisper": "neutral", "BearBeeContrarian": "bearish"}
+
     def _ledgers(self, dims, final):
         from ml_predictor import _missing_features
         g = _gen()
         td = g._prepare_ml_input("XOM", _metrics(), _analysis(),
                                  swarm_dimension_scores=dims,
                                  swarm_direction="bullish" if dims else None,
-                                 swarm_final_score=final)
+                                 swarm_final_score=final,
+                                 swarm_agent_directions=(self.AGENT_DIRECTIONS
+                                                         if dims else None))
         mine = {self.LEDGER_ALIAS.get(n, n) for n in g._ml_input_missing}
         return mine, set(_missing_features(td))
 
-    def test_two_ledgers_agree_on_the_five_none_features(self):
-        """本版 + v0.45.137 + v0.45.141 改成 `None` 的五个特征必须完全对上。
+    #: 缺失时值为 `None`（而非字面量）的特征——两套账目在这些维上必须完全一致。
+    #: v0.45.137 三个 + v0.45.141 一个 + v0.45.146 两个 + v0.45.147 两个。
+    #: 名字里不写数量：`FIVE` 装了七个就是「列名说谎」，本仓已为此付过账；
+    #: 数量写进注释也一样会过期，故只列版本、不写总数。
+    #: ⚠️ 这张表漏一项 = 那一维的账目差异**不会有人红**（下面那条只比交集）。
+    #: 全 12 维的兜底由 `test_remaining_ledger_gaps_are_exactly_the_known_ones` 兜。
+    NONE_BACKED_FEATURES = {"volatility", "sentiment", "final_score", "odds_score",
+                            "risk_adj_score", "crowding", "agent_agreement",
+                            "catalyst", "direction_encoded"}
+
+    def test_two_ledgers_agree_on_none_backed_features(self):
+        """改成 `None` 的那批特征必须两套账目完全对上。
 
         生产现存 118 份记录两者当面矛盾（前者说缺三个、后者说 12/12 齐全），
         根因就是喂了字面量 5.0。
         """
-        FIVE = {"volatility", "sentiment", "final_score", "odds_score", "risk_adj_score"}
+        F = self.NONE_BACKED_FEATURES
+        assert F, "集合为空则以下断言在空集上恒真"
         for dims, final in ((_dims(), 5.4), (None, None)):
             mine, theirs = self._ledgers(dims, final)
-            assert mine & FIVE == theirs & FIVE, (
-                f"五个 None 特征上两套账目不一致："
-                f"我 {sorted(mine & FIVE)} vs ml_predictor {sorted(theirs & FIVE)}")
+            assert mine & F == theirs & F, (
+                f"None 化特征上两套账目不一致："
+                f"我 {sorted(mine & F)} vs ml_predictor {sorted(theirs & F)}")
 
     def test_remaining_ledger_gaps_are_exactly_the_known_ones(self):
         """全 12 维对账：不一致的集合必须**恰好**等于已知缺口。
