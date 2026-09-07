@@ -5,7 +5,88 @@
 
 ---
 
-## [0.45.144] — 2026-09-07 — 占位（进行中：`weekly_optimizer.bootstrap_validate` 重采样不做时间衰减，与带 exp(−days/30) 衰减的 WLS 点估计口径不符 ⇒ 闸门比的是两个不同估计量；范围＝bootstrap 内部估计量对齐 + 判别性测试，不动 clamp/写入/世代表）
+## [0.45.144] — 2026-09-07 — bootstrap 闸门比的是两个不同的估计量：点估计带时间衰减，重采样不带
+
+周度诊断里 `bootstrap 稳健性` 长期报 🛑（近 9 次记录里 7 次未通过）。查下来
+**不是"权重有噪声"，是闸门两侧口径不同**。
+
+### Fixed
+
+1. **`bootstrap_validate` 补上与点估计相同的时间衰减。**
+   `compute_new_weights_wls` 走 `exp(−days_ago / 30)` 时间衰减，而
+   `bootstrap_validate` 每次重采样直接 `dim_correct / dim_total`、838 条等权。
+   于是它产出的 CI 是**另一个估计量**的抽样分布，闸门等于拿苹果去比橘子的置信区间。
+
+   判别性实测（生产 N=838）：
+   - 把**不衰减**的点估计送进旧闸 → **5/5 全部落在 CI 内**
+   - 带衰减的点估计 → catalyst 超上界 1.61×、sentiment 低于下界 2.30× 半宽
+
+   ⇒ 出界 100% 源自口径差，与抽样噪声无关。底层是真实的世代漂移：近 45 天
+   （N=212）vs 更早（N=626）的维度命中率 catalyst **+19.6pp**、sentiment
+   **−11.4pp**，而 ESS 只有 270/838、快照年龄中位 116 天，点估计基本由近一个月决定。
+
+   修复后核心不变式成立：抽样分布中心偏离点估计从 **2.55× → 0.05×** CI 半宽。
+
+2. **`bootstrap_validate` 的判定不再用舍入后的界。**
+   `confidence_95` 的 lo/hi 先 `round(x, 4)` 再拿去夹未舍入的点估计 ⇒ CI 比
+   1e-4 还窄时点估计会因纯舍入"出界"（退化夹具上实测：点估计 0.25、
+   CI 恰为 [0.25, 0.25]，仍判 🛑）。生产 CI 宽 3~6pp 碰不到，属潜伏缺陷不是活 bug，
+   但守卫没有理由不精确。判定改用未舍入的界，返回值仍舍入供展示。
+   这一条是写测试时被退化夹具逼出来的——**夹具不现实反而先撞上真缺陷**。
+
+### Changed
+
+3. **抽出三个共享辅助函数，两条路径只允许一份实现**：`_time_decay_weights` /
+   `_snapshot_dim_accuracy` / `_weights_from_accuracy`，并新增常数
+   `TIME_DECAY_TAU_DAYS`。此前时间衰减、Bug #7 的维度内平均、v0.42.2 的
+   `agent_vote_correct` 记分在两处**各写了一遍**，衰减那一遍就是这么漏掉的。
+   `_time_decay_weights(now=...)` 可注入：两条路径必须锚在**同一个钟**上。
+   ⚠️ `compute_new_weights_wls` 的点估计经实测为**纯重构**：五个维度
+   逐位不变（|Δ| = 0.00e+00，对照集 838 非空）。
+
+4. **bootstrap 只在索引上重采样**，每条快照的维度命中率与时间权重预算一次。
+   既去掉了 838×500 次 `agent_vote_correct` 的重复计算，也消除了"同一条快照
+   在两次迭代里算出不同命中率"的可能。命中率与其时间权重必须**成对**被抽中。
+
+### Removed
+
+5. **两处死导入**：`compute_new_weights_wls` / `bootstrap_validate` 里的
+   `agent_vote_correct`（真正调用点已移进 `_snapshot_dim_accuracy`）。
+   删前用 AST 核对两个函数体内读点均为 0——子串判断会把注释里的提及算成读者。
+
+### ⚠️ 语义变化（这次改动的真实代价）
+
+修好之后闸门测的是它**自称**要测的东西（同一估计量在重采样下稳不稳），
+但它**不再捕捉世代漂移**——而漂移正是它过去几周实际在报的东西。
+本次运行 bootstrap 由 🛑 转 ✅（CI 宽度 1.4~2.4pp → 3.0~6.4pp，因 ESS 只有 270）。
+
+今天没有实际风险：权重自 v0.44.0 起只读，`config.py` 不会被写。
+但若将来有人跑 `--apply`，新闸门比旧闸门**更宽松**。若要保留漂移检测，
+应当另加一道显式的平稳性闸，而不是靠这道闸的口径 bug 顺带实现。
+
+### 影响面
+
+`bootstrap_validate` / `bootstrap_stable` 的读者只有 `weekly_optimizer.py` 自身
+（闸门判定 + `weight_history.jsonl` 审计字段）与测试，**无评分链消费者**，
+故**不需要**追加 `_COHORT_HISTORY` 或 `_ML_ESTIMATOR_GENERATIONS` 世代边界。
+
+### 测试
+
+新增 `tests/test_weekly_optimizer_bootstrap_decay.py`（5 项，离线）：
+中心性不变式 + **靶向** mutation + 衰减单测 + `now` 可注入 + 缺维必须为 `None` 不是 `0.0`。
+
+⚠️ 记两次踩坑：
+- **第一版 mutation 无效**：改 `TIME_DECAY_TAU_DAYS` 常数会让两条路径**一起**失效，
+  中心仍然对齐 ⇒ 探针打印出"检验没有判别力"的**假结论**。有效 mutation 必须
+  monkeypatch `_time_decay_weights` 本身，只打掉 bootstrap 一侧。
+  一个改动若让"只破坏其中一侧"变难，通常说明耦合方向对了——但测试因此必须靶向注入。
+- **第一版夹具三个维度 100% 命中** ⇒ CI 宽度为 0，中心性断言在退化分布上恒真。
+  夹具改成 60% 基线 + 90/30 世代差。
+
+源码级 mutation check：把 bootstrap 传入的时间权重换成全 1 → `collected 5 items`、
+1 failed（锚点唯一性已断言）。回归：`tests/test_weekly_optimizer.py` 67 项全绿；
+全量离线套件 3469 passed。`TestCoverageHorizon`（BLS 日历，设计上到期变红）与
+`TestSPYBenchmarkUnavailable`（2 error）经 stash 实测为**既有失败**，与本次无关。
 
 ---
 
