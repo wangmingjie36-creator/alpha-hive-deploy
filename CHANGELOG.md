@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.145] — 2026-09-07 — 占位（进行中：ML 模型退化成常数函数时全线无告警——09-04 全部 12 份 probability 逐位相同 = 0.5899693787928219 仍照常渲染；范围＝当日唯一值闸（放在批量收尾真实调用点，硬错误+非零退出码，不发 Slack）+ ml_model.json 保存时版本快照目录（同 PR 做 git add / REPORT_ARTIFACT_PATHS / _ARTIFACT_PREFIXES 三件事）+ 成对测试与 mutation check；不动 probability_scorecard.py，不动评分权重）
+
+---
+
 ## [0.45.144] — 2026-09-07 — 占位（进行中：`weekly_optimizer.bootstrap_validate` 重采样不做时间衰减，与带 exp(−days/30) 衰减的 WLS 点估计口径不符 ⇒ 闸门比的是两个不同估计量；范围＝bootstrap 内部估计量对齐 + 判别性测试，不动 clamp/写入/世代表）
 
 ---
