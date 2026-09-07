@@ -250,6 +250,21 @@ setenv 之后再读          : <repo>/ml_model_cache.json   ← 没变 = 冻住�
 - ruff 逐文件与基线对比：7 个文件全部 0 新增（`generate_ml_report` 2 条、
   `queen_distiller` 1 条均为先前存在）。
 
+- **拿真实事故原件端到端验过守卫**（不只是合成夹具）。v0.45.152 那个 session
+  特意保留了两份证据文件（都在生产目录、被 `.gitignore` 忽略），四例全对：
+
+  | 文件 | 签名 | 期望 | 实际 |
+  |---|---|---|---|
+  | `ml_model.corrupted-2026-09-07T0130.json`（**事故原件**） | n=30 / 96.67 / None | 拒绝 | ✅ `PoisonedModelError` |
+  | `ml_model_cache.pre-restore-2026-09-07.json`（污染前健康副本） | n=497 / 71.63 / 44.35 | 放行 | ✅ True |
+  | `ml_model.json`（v0.45.152 恢复后） | n=497 / 71.63 / 44.35 | 放行 | ✅ True |
+  | `ml_model_cache.json`（生产在读） | n=497 / 71.63 / 44.35 | 放行 | ✅ True |
+
+  ⚠️ 这四例**刻意没写成测试**：那两份文件在仓库外、被 gitignore，CI 上不存在，
+  写成测试会变成一条在 CI 永远 skip 的装饰品。真实签名已作为常量固化进
+  `test_rejection_does_not_depend_on_accuracy`（96.67 / 100.0 vs 71.63），
+  测试本身不依赖那两个文件。
+
 ### 未做（明确说明）
 
 - **没有重训、没有触碰生产 `ml_model_cache.json`。** 它现在就是
