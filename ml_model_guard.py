@@ -49,6 +49,35 @@
 而并列在生产上确实合法。第 1 条规则不设地板（`n > 1` 即可），因为
 「全体逐位相同」在任何 n 下都不可能是叶子离散化的巧合。
 
+## 阈值是编译期常数，**不从历史池化**（所以不需要世代边界）
+
+本模块只读**当日**产物，两个阈值（`distinct == 1`、`n>=8 且 distinct<=2`）
+是写死的常数。上面那张 77 天的表是**离线选常数时**用的一次性证据，
+运行时不会去读历史 `ml_probability`。
+
+⇒ 因此 `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 的世代边界
+（`2026-09-07 → v0.45.146+v0.45.147`）**不影响本模块**。
+若将来有人把阈值改成「从历史学出来的基线」，那一刻必须补世代边界，
+否则新旧口径会被静默混算 —— 这是本注释存在的唯一理由。
+
+顺带：v0.45.146/147 让服务端特征接上真值后，唯一值总数从 308 升到 462
+（并发 session 实测，未由本模块复核）。方向上只会**加宽**健康日与事故日
+之间那道空隙，不会让阈值变松。
+
+## 复现 2026-09-04 需要当时那份模型
+
+生产 `ml_model.json` 已于 v0.45.152 从 `pheromone.db` 重训恢复
+（`n=497 / acc 71.63 / oos 44.35`），**已不是 09-04 当时那份**。
+当时那份被污染的模型保留在
+`ml_model.corrupted-2026-09-07T0130.json`（`n=30 / acc 96.67 / oos None`），
+污染前健康副本在 `ml_model_cache.pre-restore-2026-09-07.json`。
+两者都被 `.gitignore` 的 `ml_model*.json` 忽略（实测确认本模块的
+`!ml_model_history/*.json` 反向规则只作用于该目录内，未误放行它们）。
+
+⚠️ **判模型真伪不能用 accuracy** —— 夹具模型 96.67 比真模型 71.63 更好看。
+可用信号是 `oos_accuracy is None` + `n_samples_seen` 明显偏低，
+本模块的 `manifest.jsonl` 两个字段都记了。
+
 ## 为什么读磁盘而不是读内存
 
 当日 `analysis-*-ml-*.json` 有**两个**生产者：
@@ -113,6 +142,11 @@ MANIFEST_NAME = "manifest.jsonl"
 #: 每个 stem 保留的带日期快照份数。180 × (19KB + 61KB) ≈ 14MB。
 RETAIN_SNAPSHOTS = 180
 
+#: 「输入侧本身也塌了」的判据：不同输入向量数 × 2 <= 有效标的数。
+#: 只影响 `describe()` 的措辞（该往哪查），**不影响 verdict 与退出码**——
+#: 见 `DegeneracyVerdict.inputs_also_collapsed` 的说明。
+INPUT_COLLAPSE_RATIO = 2
+
 #: 关掉快照的环境变量。测试里必须关掉——见 `_snapshot_disabled` 的说明。
 SNAPSHOT_DISABLE_ENV = "ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE"
 
@@ -150,10 +184,46 @@ class DegeneracyVerdict:
     modal_value: Optional[float]
     tickers_without_probability: List[str] = field(default_factory=list)
     snapshot_present: bool = False
+    #: 当日有几份报告根本没有 `swarm_results`（蜂群没跑 / 没接上）。
+    n_without_swarm_results: int = 0
+    #: 当日有几个**不同的**输入向量。⚠️ 只统计 JSON 里记录的 `ml_prediction.input`，
+    #: 那是 **5/12 维的展示子集**（catalyst_quality / crowding_score /
+    #: market_sentiment / momentum_5d / volatility），不含 iv_rank、put_call_ratio 等。
+    #: 所以它**只能用来加一句提示，绝不能用来放行**：真实 12 维有差异而这 5 维
+    #: 恰好相同的日子，据它放行就会把真退化判成「输入塌了」——漏报比误报危险。
+    distinct_inputs: Optional[int] = None
 
     @property
     def is_degenerate(self) -> bool:
         return self.verdict in ("constant", "near_constant")
+
+    @property
+    def inputs_also_collapsed(self) -> bool:
+        """输入侧本身是否也塌了 —— **只用于措辞，不参与判定**。
+
+        2026-06-25：9 份 probability 逐位相同，但当日 **9/9 份无
+        `swarm_results`**，记录的输入只有 2 个不同向量（其余四槽全是兜底常数
+        crowding 50.0 / sentiment 0.0 / momentum 0.0 / volatility 5.0）。
+        那天真正该查的是「蜂群没跑」，不是「模型退化」——闸若照旧说
+        「拿当日模型快照重放」，就是把人指向错的地方
+        （同 v0.45.126：降级消息别替失败原因下结论）。
+
+        ⚠️ **刻意不据此放行**，三条理由：
+        1. 记录的 `input` 只有 5/12 维，据它放行会漏掉真模型退化；
+        2. 那天全站印出 9 份相同的「ML 预测 51.7%」，报告一样是误导性的，
+           本就该红；
+        3. 「当日全无 swarm_results」并不必然塌成常数——06-30(10 份)、
+           07-02(3 份) 同样全缺，distinct 分别是 5 和 3，闸压根没点亮它们。
+           拿它当排除条件是个**过宽**的闸。
+
+        ⚠️ 另：**不要改用 `unreliable` / `input_features_missing` 做判据**。
+        实测 06-25 那 9 份里这两个键的值都是 `None`（那天的 schema 里没有它们），
+        照此实现出来的排除逻辑会在**它唯一要排除的那一天**永不触发
+        ——即 v0.45.108「闸门自己恒假」。
+        """
+        if self.distinct_inputs is None or self.n_numeric <= 1:
+            return False
+        return self.distinct_inputs * INPUT_COLLAPSE_RATIO <= self.n_numeric
 
     @property
     def exit_code(self) -> int:
@@ -182,6 +252,10 @@ class DegeneracyVerdict:
             parts.append(
                 "无数值 probability 的标的：" + ", ".join(sorted(self.tickers_without_probability))
             )
+        if self.distinct_inputs is not None:
+            parts.append(f"记录的输入向量 {self.distinct_inputs} 个不同（仅 5/12 维）")
+        if self.n_without_swarm_results:
+            parts.append(f"无 swarm_results 的报告 {self.n_without_swarm_results}/{self.n_files} 份")
         parts.append(
             "当日模型快照：" + ("已留存" if self.snapshot_present
                               else f"缺失（{HISTORY_DIRNAME}/ 里没有当日文件；"
@@ -190,9 +264,25 @@ class DegeneracyVerdict:
         if self.is_degenerate:
             parts.append(
                 "这不是记分卡能发现的问题——常数预测的校准误差可以很小"
-                "（09-04 那次 59.0% 离基准率只差 2.2pp）。"
-                f"归因材料在 {HISTORY_DIRNAME}/，拿当日快照重放当日输入即可复现。"
+                "（09-04 那次 59.0% 离基准率只差 2.2pp）"
             )
+            if self.inputs_also_collapsed:
+                # 别替失败原因下结论：输入侧也塌了的日子，先查上游。
+                parts.append(
+                    "⚠️ **输入侧本身也塌了**（不同输入向量 "
+                    f"{self.distinct_inputs} 个 / 有效标的 {self.n_numeric} 只"
+                    + (f"，其中 {self.n_without_swarm_results} 份无 swarm_results"
+                       if self.n_without_swarm_results else "")
+                    + "）。**先查蜂群/上游取数有没有跑**，不要先查模型——"
+                    "模型拿到的本来就是同一批输入，输出相同不构成退化证据。"
+                    f"（仍判为硬错误：全站印出 {self.n_numeric} 份相同的预测，"
+                    "报告一样是误导性的。）"
+                )
+            else:
+                parts.append(
+                    f"输入是有区分度的 ⇒ 恒定来自模型。归因材料在 {HISTORY_DIRNAME}/，"
+                    "拿当日快照重放当日输入即可复现"
+                )
         return "；".join(parts)
 
 
@@ -206,6 +296,8 @@ def evaluate_probabilities(
     n_files: Optional[int] = None,
     tickers_without_probability: Optional[Sequence[str]] = None,
     snapshot_present: bool = False,
+    n_without_swarm_results: int = 0,
+    distinct_inputs: Optional[int] = None,
 ) -> DegeneracyVerdict:
     """对一批 probability 下判定。纯函数，判据全部在这里，没有第二份实现。
 
@@ -245,38 +337,66 @@ def evaluate_probabilities(
         modal_value=modal_value,
         tickers_without_probability=list(tickers_without_probability or []),
         snapshot_present=snapshot_present,
+        n_without_swarm_results=n_without_swarm_results,
+        distinct_inputs=distinct_inputs,
     )
 
 
 # ---------------------------------------------------------------------------
 # 磁盘读取
 # ---------------------------------------------------------------------------
-def read_day_probabilities(
-    report_dir, date_str: str
-) -> Tuple[Dict[str, Optional[float]], List[str]]:
-    """读当日全部 `analysis-*-ml-{date}.json` 的 probability。
+@dataclass(frozen=True)
+class DayRecord:
+    """当日一份 `analysis-*-ml-*.json` 里与本闸相关的那几样东西。"""
 
-    返回 `({ticker: probability|None}, [读不动的文件名])`。
+    ticker: str
+    probability: Optional[float]
+    #: `ml_prediction.input` 的规范化签名（仅 5/12 维，见 `distinct_inputs` 说明）
+    input_signature: Optional[str]
+    #: `swarm_results` 是否存在且非空。**跨 schema 世代都可用**——
+    #: 不像 `unreliable` / `input_features_missing`，那两个在 2026-06-25 是 `None`。
+    has_swarm_results: bool
+
+
+def read_day_records(report_dir, date_str: str) -> Tuple[List[DayRecord], List[str]]:
+    """读当日全部 `analysis-*-ml-{date}.json`。
+
+    返回 `([DayRecord], [读不动的文件名])`。
     读不动的文件单独列出、不静默丢弃——「少一份」和「这份坏了」必须可区分。
     """
     d = Path(report_dir)
-    out: Dict[str, Optional[float]] = {}
+    out: List[DayRecord] = []
     unreadable: List[str] = []
     for path in sorted(d.glob(f"analysis-*-ml-{date_str}.json")):
         m = _ANALYSIS_RE.match(path.name)
         if not m:
             continue
-        ticker = m.group("ticker")
         try:
             with open(path, encoding="utf-8") as f:
                 payload = json.load(f)
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             unreadable.append(path.name)
             continue
-        pred = ((payload.get("ml_prediction") or {}).get("prediction") or {})
-        raw = pred.get("probability")
-        out[ticker] = raw if isinstance(raw, (int, float)) and not isinstance(raw, bool) else None
+        mlp = payload.get("ml_prediction") or {}
+        raw = (mlp.get("prediction") or {}).get("probability")
+        inp = mlp.get("input")
+        out.append(DayRecord(
+            ticker=m.group("ticker"),
+            probability=(raw if isinstance(raw, (int, float))
+                         and not isinstance(raw, bool) else None),
+            input_signature=(json.dumps(inp, sort_keys=True, default=str)
+                             if isinstance(inp, dict) and inp else None),
+            has_swarm_results=bool(payload.get("swarm_results")),
+        ))
     return out, unreadable
+
+
+def read_day_probabilities(
+    report_dir, date_str: str
+) -> Tuple[Dict[str, Optional[float]], List[str]]:
+    """`read_day_records` 的薄封装，只要 `{ticker: probability|None}`。"""
+    records, unreadable = read_day_records(report_dir, date_str)
+    return {r.ticker: r.probability for r in records}, unreadable
 
 
 def _snapshot_exists(report_dir, date_str: str) -> bool:
@@ -288,15 +408,18 @@ def _snapshot_exists(report_dir, date_str: str) -> bool:
 
 def check_day(report_dir, date_str: str) -> DegeneracyVerdict:
     """读当日产物并给出判定。不抛、不改任何东西。"""
-    probs, unreadable = read_day_probabilities(report_dir, date_str)
-    missing = [t for t, p in probs.items() if p is None]
+    records, unreadable = read_day_records(report_dir, date_str)
+    missing = [r.ticker for r in records if r.probability is None]
     missing.extend(f"<读取失败:{name}>" for name in unreadable)
+    sigs = {r.input_signature for r in records if r.input_signature is not None}
     return evaluate_probabilities(
-        [p for p in probs.values() if p is not None],
+        [r.probability for r in records if r.probability is not None],
         date=date_str,
-        n_files=len(probs) + len(unreadable),
+        n_files=len(records) + len(unreadable),
         tickers_without_probability=missing,
         snapshot_present=_snapshot_exists(report_dir, date_str),
+        n_without_swarm_results=sum(1 for r in records if not r.has_swarm_results),
+        distinct_inputs=(len(sigs) if sigs else None),
     )
 
 
