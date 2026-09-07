@@ -262,9 +262,20 @@ HGB 的 `random_state=42` ⇒ 同一份 db + 同一份代码，重建是确定�
    （`9f761fa` 2 处 → `f12a780` 3 处）。它现在无害，但**理由不是「调用点没了」，
    而是「默认值变了」**：`def save_model(filename: str = "ml_model.json")`
    已改成 `filename: Optional[str] = None` → `default_model_path()` → `PATHS.ml_model`。
-   逐个核过 `ml_predictor.py` 里 **3 个 `save_model` + 3 个 `load_model` 共 6 个定义体
-   全部**解析 `None` 为 `default_model_path()`（无遗漏的兄弟分支），
-   且 `PATHS.ml_model` 是 `@property` 而非模块级常量（不会在 import 期冻结）
+   ⚠️ **本条初版把「核过 6 个定义体」写成了「无遗漏的兄弟分支」，是错的**——
+   我只扫了 `ml_predictor.py`，漏掉整个 `ml_predictor_extended.py`。
+   **在做「有没有漏掉兄弟分支」的检查时漏了一个文件**，由 v0.45.149 复查指出。
+   全仓实际是 **8 个定义**（`ml_predictor.py` 3 save + 3 load，
+   `ml_predictor_extended.py` 1 save + 1 load），**全部**解析 `None` 为绝对路径，
+   且 `PATHS.ml_model` / `ml_model_cache` / `ml_model_extended` 三个都是
+   `@property` 而非模块级常量（不会在 import 期冻结）。
+
+   ⚠️ 补扫时我的检测脚本又**反向出错一次**：它按「函数体里出现 `default_model_path`
+   或 `PATHS.`」判定，于是把 `ml_predictor_extended` 那两个判成 ✗——
+   实际它们走的是**另一个同义但不同名**的解析器 `default_extended_model_path()`
+   （同样 `→ str(PATHS.ml_model_extended)`，实测绝对路径）。
+   **若不读源码就报「发现 2 处未修」，就是一次假警报。**
+   判据：**按名字匹配的检测器，只能证明「匹配到的是对的」，不能证明「没匹配到的是错的」**
    ⇒ 01:15 那次覆盖对生产的**实际损害是 0**，纯属两个写入者恰好用了不同文件名。
    由此定下的约束：**路径要集中，文件不能合并**——合并＝让每次跑测试直写生产模型。
 
