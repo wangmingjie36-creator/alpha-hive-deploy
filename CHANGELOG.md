@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.162] — 2026-09-07 — 占位（进行中：核 v0.45.161 交待的遗留「IC 闸不受影响未重核」。结论方向：判断成立但**理由不完整** —— v0.45.146 记的是「ML 特征不进 `predictions` 表」，那只覆盖**数据通路**；而 v0.45.147 同时改了**两条管道共用**的 `ml_predictor.py`(+49)，共用模块的改动不能靠「报告侧产物被丢弃」推理（正是 v0.45.142 记下的物种）。范围＝① 把 `probability_scorecard` 里那条成文规则补上共用模块的但书 —— 现文写死「不要因此去动 `_COHORT_HISTORY`」，下一个人若在改 `_prepare_ml_input` 的同时动了 `ml_predictor`，照它推理会漏登记；② 给 v0.45.146 自己引入的**引用传递**加守卫 —— `swarm_agent_directions=_sr.get("agent_directions")` 传的是引用，而同一对象正被 `save_predictions` 写进 `predictions.agent_directions` 列，就地改写会让报告侧渗进 IC 管道；③ 记录本次实测。⚠️ **不动** `_prepare_ml_input` 的特征口径、**不动** `_COHORT_HISTORY`、**不动** `_ML_ESTIMATOR_GENERATIONS`、**不动**训练侧 —— 本版不改任何评分行为）
+
+---
+
 ## [0.45.161] — 2026-09-07 — 二次复查 v0.45.146/152/155：八项对抗性检查，未发现 bug
 
 **本条不改任何代码**，只记录一次对本 session 全部改动的对抗性复查，
