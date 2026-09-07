@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.160] — 2026-09-07 — 占位（进行中：清 `__file__` 派生的路径常量 —— 比 v0.45.150 治的 `PATHS` 冻结**更严重的同族**。`Path(__file__).parent / "pheromone.db"` 这类写法**压根不读任何环境变量**：`ALPHA_HIVE_HOME` / `ALPHA_HIVE_DB_PATH` 设成什么都无效，连「改成懒求值」都救不了，只能显式改去读 `PATHS.*`。已知含 `feedback_loop` / `ic_diagnostics` / `close_correction` / `replay_scoring` / `signal_archive` / `vol_forecast` 各自的 `pheromone.db`，以及一批 `CACHE_DIR` / `BASE_DIR` / `_CACHE_PATH`。范围＝① **先用 `git ls-files` 干净口径重新普查并钉提交**——v0.45.150 报的「49 处」出自已作废的 `rglob` 污染口径（那口径在主 checkout 会扫进 15349 个 .py、98% 是第三方库），**不得直接沿用该数字**；② 逐处判危害等级，判据仍是「这个冻住的值在**主 checkout** 里指向什么、会不会被**写**、写的是不是生产数据」，**不是「跑测试坏没坏」**（所有人都在 worktree 里跑，所以所有人都不会坏）；③ 高危处改调用时求值，成对测试（改 env 路径跟着变 + 显式传参仍生效 + 生产产物指纹不变）+ mutation check + 核对 `collected N` 非 0；④ 先数 conftest 里哪些已被针对性 monkeypatch 管住（已知 `weekly_optimizer` / `feedback_loop` 的 `PHEROMONE_DB_PATH`、`paper_portfolio` 的 `STATE_DIR`），不重复劳动；⑤ 把清掉的从 `TestSpeciesDoesNotSpread.KNOWN` 里删行，并考虑给 `__file__` 族加一条同构的结构守卫。⚠️ **不动** `PATHS` 族本身（v0.45.150 已治）、**不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`。⚠️ 会碰 `tests/conftest.py` 与 `tests/test_paths_not_frozen_at_import.py`，与其它 session 合并时逐块核对）
+
+---
+
 ## [0.45.159] — 2026-09-07 — 跨代混算只进了返回字典，没进人看的那一层
 
 v0.45.140 给 `blend_scan` 登记了 ML 估计量世代表，并在测试 docstring 里写明判据：
@@ -48,7 +52,6 @@ v0.45.140 给 `blend_scan` 登记了 ML 估计量世代表，并在测试 docstr
   补后 R7 如期变红
 - 警告成对（跨代出 / 单代不出）——恒亮的警告等于没有警告，同 v0.45.141 记的
   「三条名字一次没落下过」
-
 
 ## [0.45.158] — 2026-09-07 — 占位（进行中：v0.45.145 的快照目录位置 = `模型文件.parent / ml_model_history`，而 v0.45.149 把模型默认路径改成 `PATHS.ml_model` 之后，**这个位置从此取决于别处的一个值**——`PATHS` 家族一旦改指向（如挪进 cache 目录），快照会静默落到 git 跟踪范围之外，白名单与 .gitignore 反向规则全部失效，且症状是「文件在、但永远不进库」（v0.45.111 同形）。该耦合当前无任何守卫。范围＝加两条不变式测试：① 快照目录必须落在 `PATHS.home` 下且等于仓库里那个被跟踪的目录；② manifest 必须记 `oos_accuracy` 与 `n_samples_seen`（v0.45.149 认定的「夹具覆盖」机读签名，**不能用 accuracy 判**）。+ mutation check。**不改任何实现**，纯补守卫）
 
