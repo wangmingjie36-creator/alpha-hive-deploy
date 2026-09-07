@@ -497,13 +497,13 @@ pytest 就会往 cwd 写 `ml_model.json`。实测单跑
 
 - 新增测试 **45 passed**；连同被改的 `test_parallel_agent_runner.py`
   共 **57 passed**，`collected 57 items`。
-- **mutation check 24/24 全被抓**，基线绿、每条锚点唯一、collected 稳定在 57。
+- **mutation check 24/24 全被抓**，基线绿、每条锚点唯一、collected 稳定在 57；合并后重做一遍，仍 24/24。
 - ⚠️ 第一轮 **M13 漏网，是我自己的测试缺口**：断言只要求
   `report["ml_model_guard"]` 在函数里「某处出现过」，而 ImportError 兜底分支里
   也有一份 ⇒ 摘掉成功路径的赋值照样全绿。**又是「改二分支只盯显眼的那一支」。**
   已改为对 `Try.body` 与 `handlers` 各断一次，并补 M13b 成对验证。
 - 端到端拿真实生产数据跑 CLI：09-04 → 1、08-28 → 1、09-03 → 0、08-11 → 3。
-- **全套 3525 passed / 18 skipped / 1 xfailed / 0 failed**（`TestCoverageHorizon` 按设计
+- **全套 3558 passed / 18 skipped / 1 xfailed / 0 failed**（已含 v0.45.146~149 合并后重跑）（`TestCoverageHorizon` 按设计
   单独 deselect，它 2026-09-06 起变红是设计意图：去看 BLS 发 2027 日程没）。
   跑完 `ml_model_history/` 里**只有 `README.md`** —— 隔离层在整套规模下也成立。
 - **CI 条件模拟**（v0.45.121 教训：本机绿证明不了 CI 绿）：
@@ -522,6 +522,17 @@ pytest 就会往 cwd 写 `ml_model.json`。实测单跑
   「显式环境变量」那一支就返回了，`PYTEST_CURRENT_TEST` 那一支**永远没被求值**。
   两层里有一层从没被测过（BullVeto 同款）。已改为先 `delenv` 把第二层单独暴露，
   并补 `test_env_var_layer_wins_when_set` 成对覆盖第一层。
+
+### 与并发 session 的关系
+
+- **v0.45.149 是本条的源头**（另一 session）：`save_model` 默认相对路径导致
+  跑 pytest 会覆盖生产模型。本条查**症状**（当日唯一值闸 + 版本快照），
+  那条堵**源头**（路径收敛 + 加载守卫），互补不重叠。
+  合并后按对方占位标题的提醒**逐块核对**：四处 `save_model` 的快照钩子
+  用 AST 确认全在，两处闸全在，对方的改动集中在 catalyst 编码、与本条不重叠。
+- 本条的 pytest 隔离层（`ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE`）在 v0.45.149
+  把路径收敛掉之后仍有意义：它管的是「快照目录不许收测试产物」，
+  与「模型文件写到哪」是两件事。
 
 ### 不在改动面内（刻意）
 
