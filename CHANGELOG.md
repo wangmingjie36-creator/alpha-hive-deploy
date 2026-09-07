@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.142] — 2026-09-07 — 占位（进行中：训练侧另一条构建路径 `generate_ml_report._build_real_training_data` 仍在补 5.0；范围＝该函数 vs `ml_predictor.build_training_data_from_db` 的口径合并，含 SQL 口径 / 缺维处理 / momentum 死特征）
+
+---
+
 ## [0.45.141] — 2026-09-06 — ML 特征 `final_score` 读了一个从不存在的键：服务端改读蜂群综合分（同物种第三处）
 
 v0.45.139 处理 `direction_encoded` 时顺带发现、未在该版处理。与 v0.45.135（`catalyst_quality`）、
