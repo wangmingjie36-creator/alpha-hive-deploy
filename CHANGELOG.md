@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.156] — 2026-09-07 — 占位（进行中：v0.45.151 只修了 `_read_peer` 一条路径，`detect_resonance` 仍直读 `self._entries` ⇒ 同一 `MAX_ENTRIES=80` 截断（注释按「9 只标的」定，`config.WATCHLIST` 现 30 只、一轮约 210 条）会系统性删掉**低分**蜂，而低分与看空/中性相关 ⇒ 假设它是 chronos_bee.py 记的「信息素多5/空0 自我强化看多」的结构性成因之一。范围＝① 用 803 份生产 `analysis-*-ml-*.json` 重放真实发布序列，量 `detect_resonance` 的`ticker_entries` 实际丢了几条、与生产 `swarm_results.resonance` / `supporting_agents` 对照；② 命中率显著才动代码（抬 MAX_ENTRIES 或给共振一条抗淘汰视图），并按需追加 `ic_rerun_readiness._COHORT_HISTORY`。**先量再决定**，命中率为零或个位数则只改注释不改行为。不动评分权重、不动 `get_agent_entry` 语义、不动 probability_scorecard）
+
+---
+
 ## [0.45.155] — 2026-09-07 — 环境记录：`~/Desktop` 的 iCloud 重名副本（不改代码）
 
 **本条不改任何代码**，只把一个常年存在、今天第一次造成实际故障的环境问题
