@@ -479,8 +479,15 @@ ChronosBee「无近期催化剂」恒落 **4.0**，是全板最低的一档，�
 
 > **口径与提交号**（不钉的话别人复跑对不上，也分不清是口径不同还是代码变了）：
 > 普查＝「模块级 / 类体 / `Try`·`If`·`With`·`For` 体内、RHS 引用 `PATHS` 的赋值」，
-> 排除 `tests/` 与 `experiments/`；跑在占号提交 `bb6f772` 的树上（窄版 23 处 /
-> 加宽 72 处）。结构守卫的 `KNOWN`（20 处）复核并剪枝于 `de0f073`（已含 v0.45.149~153）。
+> 文件集 = **`git ls-files "*.py"`**（327 个），排除 `tests/` 与 `experiments/`。
+> 命中 **20 处**，worktree 与主 checkout **完全一致**。
+>
+> ⚠️ 本条最初报的「窄版 23 处 / 加宽 72 处」是**污染口径，已作废**：当时用
+> `rglob("*.py")`，在主 checkout 里会扫到 **15349** 个 `.py`
+> （含 `mcp-servers/*/.venv/**/site-packages`），98% 是第三方库——等于拿本仓
+> 规范去审计 joblib，且**计数随本地装了哪些 venv 漂移**（worktree 与主 checkout
+> 报的数不一样）。换 `git ls-files` 后计数不再随环境变化，才是可复现的口径。
+>
 > **会随树漂的量必须钉提交**；不随树漂的结论（如「`__file__` 族对 `ALPHA_HIVE_HOME`
 > 完全免疫」「无参 `load_model` 读者 = 0」）才可以裸报。
 
@@ -571,6 +578,12 @@ monkeypatch 只有 3 个模块——`weekly_optimizer.PHEROMONE_DB_PATH`、
 - **全量套（rebase 到含 v0.45.149~153 的 main 之后**，整套重跑而非沿用旧结论**）**：
   `1 failed / 3596 passed`，唯一失败仍是那条设计使然的。**零回归。**
   mutation check 在合并树上**重跑**：仍 6/6，`collected=17`。
+- **全量套（修掉扫描器缺陷后）**：`1 failed / 3631 passed`，唯一失败仍是那条
+  设计使然的。守卫文件 17→**23** 项；mutation 扩到 **M7~M14 共 8 个，全部变红**
+  （其中 M9/M13 最初全绿——夹具里没有病灶，被测分支到不了，见教训 11）。
+  扫描器口径在 worktree 与**主 checkout** 上实测**完全一致**（均 `git` 口径 /
+  327 文件 / 20 命中 / 零跳过）；回退路径用 `git archive $(git write-tree)` 导出的
+  **无 `.git`** 检出实测走通（先验证 `git ls-files` 确实 returncode=128 才算数）。
   ⚠️ 顺带发现 `KNOWN` 清单**已过期一项**——`generate_ml_report._model_file`
   已被 v0.45.149 改成 property。子集语义有个副作用：**修好存量不会让守卫变红**，
   过期项会悄悄留下。已剪枝（21→20）并把对账办法写进注释：
@@ -625,6 +638,45 @@ monkeypatch 只有 3 个模块——`weekly_optimizer.PHEROMONE_DB_PATH`、
    `-wal` `-shm` `.bak_*` `.backup_*` 四类完全不同的东西）；
    **删之前先 `git ls-files <pattern>` 看看会不会打到跟踪文件**。
    同族：MEMORY.md 里「`git reset --hard` 撤自己的提交前没查工作区」。
+
+9. ⚠️ **守卫本身在主 checkout 崩了 —— 而它在 worktree 全绿。**
+   由 v0.45.149 那个 session 在**生产目录**跑全套时报回：`TestSpeciesDoesNotSpread`
+   三条全红，`UnicodeDecodeError: 'utf-8' codec can't decode byte 0xa4`。元凶是
+   vendored 进来的 `…/site-packages/joblib/test/test_func_inspect_special_encoding.py`
+   （joblib 自带的 **big5** 编码夹具，全仓唯一一个非 UTF-8 的 `.py`）。
+   worktree 里没有那个 `.venv`（未跟踪、不随 worktree 走），所以我永远看不到它。
+   两个缺陷叠在一起：
+   ① **范围错**：`rglob` 扫进 vendored 第三方库（主 checkout 15349 vs 跟踪 327）；
+   ② **`except SyntaxError` 接不住 `UnicodeDecodeError`** ⇒ 守卫**抛死**而非报告。
+   ⇒ ②**正是本条第 1/6 项自己写下的判据**（「写守卫先问失败时是返回还是抛，
+   两条路径各堵一次」，v0.45.119 同款）。**把判据写进 CHANGELOG 不等于用过它——
+   写完要立刻拿它 grep 自己这一版的新代码。**
+   修法：文件集改 `git ls-files`（不可用时回退 `rglob` + 排除 vendored/隐藏目录，
+   **两条 git 失败路径各测一次**）；解码/语法失败**记账再跳过**，并断言
+   「本仓自己的文件里跳过项为空」——直接 `continue` 是
+   「跳过缺失项＝把缺失渲染成不存在」（v0.45.114），直接抛则是「守卫死掉」
+   冒充「没有违规」，而这两者在测试结果上都只是一个红点。
+10. ⚠️ **「测 helper ≠ 测接线」在同一版里犯了两次。** 新加的两条守卫最初都在测试里
+   **重抄一遍**被测逻辑（重抄读文件循环 / 直接断言 `_own_python_files()` 返回值），
+   于是 mutation「把 `_scan` 里的文件集换回全量 rglob」**全绿**。改成造一棵含
+   vendored 目录与 big5 文件的 tmp 树、`monkeypatch` `REPO_ROOT`、
+   **驱动真的 `_scan()`** 之后才变红。
+11. ⚠️ **在没有病灶的环境里测防御，等于没测。** M9/M13 两个变异一开始全绿，
+   原因都是「worktree 里没有 `.venv` / git 一直可用」，被测分支压根到不了。
+   ⇒ **夹具要自带病灶**，且**每道过滤器各配一个只有它拦得住的样本**：
+   点号目录（`.venv`）、`node_modules`（**两道过滤都有它，单删一道是等价变异**）、
+   非点号 vendored（`libs/site-packages`/`vendor`/`third_party`——只有 `_VENDORED` 拦得住）、
+   非 vendored 隐藏目录（`.cache`/`.tox`——只有点号那道拦得住）。
+12. ⚠️ **「不含关键字」的黑名单断言漏得过**：`leaked = [f for f in found if
+   "site-packages" in f or …]` 放过了 `.cache/build/…`（不含任何关键字）。凡是
+   「只有这一个才对」的场合，写**精确相等**（`== {"ours.py"}`）比写黑名单可靠。
+13. ⚠️ **自造：一条失败的编辑后面挂了无条件的 `git commit`。** 上面这几条教训第一次
+   写入时 Python 因锚点差一个字（`含` vs `已含`）而 `AssertionError` 退出，但同一
+   命令里换行后的 `git add && git commit && git push` **照常执行**，于是把只含代码、
+   不含 CHANGELOG 的版本推上了 main（`442b5d7`），本条随后补齐。
+   ⇒ 与 MEMORY.md「`&&` 链里别在 grep/diff/test 后面挂要干活的步骤」同源，
+   但更普适：**任何「先改文件、再提交」的组合命令，提交必须条件依赖于改文件成功**
+   （用 `&&` 串起来，或分两次调用并核对中间产物）。
 
 ### 范围
 
