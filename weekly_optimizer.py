@@ -406,6 +406,82 @@ def compute_new_weights(snapshots_dir: Path) -> Optional[dict]:
         return None
 
 
+# ── 时间衰减：WLS 点估计与 bootstrap 重采样的共用口径 ────────────────────────
+# ⚠️ v0.45.144 之前只有 WLS 点估计做衰减，bootstrap 重采样等权 ⇒ 闸门拿
+# 「带衰减的点估计」去比「不带衰减的重采样分布」，是两个不同估计量。
+# 实测判据：把**不衰减**的点估计送进当时那道闸，5/5 全部落在 CI 内，
+# 证明出界 100% 源于口径差、与抽样噪声无关（ESS 270/838，快照年龄中位 116 天）。
+# 因此三个辅助函数只允许存在一份实现，两条路径都必须走它们。
+TIME_DECAY_TAU_DAYS = 30.0
+TIME_DECAY_FALLBACK = 0.5   # 日期不可解析时的中性权重（沿用旧行为）
+
+
+def _time_decay_weights(snaps, now: Optional[datetime] = None) -> list:
+    """exp(−days_ago / TIME_DECAY_TAU_DAYS)，再缩放成均值 1。
+
+    `now` 可注入：两条路径必须锚在**同一个钟**上，否则又是一处「配对的
+    两个值来自两个不同的钟」。缩放对下游 num/den 之比是恒等的，保留只为
+    与旧实现逐字对齐，便于比对。
+    """
+    if now is None:
+        now = datetime.now()
+    weights = []
+    for snap in snaps:
+        try:
+            days_ago = (now - datetime.strptime(snap.date, "%Y-%m-%d")).days
+            weights.append(math.exp(-days_ago / TIME_DECAY_TAU_DAYS))
+        except (ValueError, TypeError):
+            weights.append(TIME_DECAY_FALLBACK)
+    total = sum(weights)
+    if total > 0:
+        n = len(weights)
+        weights = [w / total * n for w in weights]
+    return weights
+
+
+def _snapshot_dim_accuracy(snap) -> dict:
+    """单条快照的「各维度平均命中率」；该维度无有效票时为 **None** 而非 0.0。
+
+    None 与 0.0 必须可区分：0.0 是「投了票且全错」，None 是「没有可计票」。
+    记成 0.0 会把缺票伪造成最差表现，且会进入分母。
+    """
+    from feedback_loop import agent_vote_correct   # 延迟导入，与既有结构一致
+
+    ret_t7 = (snap.actual_price_t7 - snap.entry_price) / snap.entry_price * 100
+    per_dim = {dim: [] for dim in DEFAULT_WEIGHTS}
+    for agent_name, vote in snap.agent_votes.items():
+        dim = AGENT_TO_DIM.get(agent_name)
+        if dim is None:
+            continue
+        ok = agent_vote_correct(vote, ret_t7)
+        if ok is None:
+            continue  # 弃权票不计入分母
+        per_dim[dim].append(1.0 if ok else 0.0)
+    return {d: (sum(a) / len(a) if a else None) for d, a in per_dim.items()}
+
+
+def _weights_from_accuracy(acc_rows, time_weights) -> dict:
+    """时间加权聚合各维度命中率并归一化。acc_rows 与 time_weights 一一对应。
+
+    修复 Bug #7 的语义在此保留：先按 (维度, 快照) 取维度内 Agent 平均，
+    再跨快照加权平均——而非按 Agent 数累加（否则 signal 维度因两只蜂而恒翻倍）。
+    """
+    num = {dim: 0.0 for dim in DEFAULT_WEIGHTS}
+    den = {dim: 0.0 for dim in DEFAULT_WEIGHTS}
+    for row, tw in zip(acc_rows, time_weights):
+        for dim, acc in row.items():
+            if acc is None:
+                continue
+            num[dim] += tw * acc
+            den[dim] += tw
+    raw = {d: (num[d] / den[d] if den[d] > 0 else DEFAULT_WEIGHTS[d])
+           for d in DEFAULT_WEIGHTS}
+    total = sum(raw.values())
+    if total <= 0:
+        return dict(DEFAULT_WEIGHTS)
+    return {d: v / total for d, v in raw.items()}
+
+
 def compute_new_weights_wls(snapshots_dir: Path) -> Optional[dict]:
     """
     加权最小二乘法（WLS）权重优化 — 替代简单归一化
@@ -417,7 +493,7 @@ def compute_new_weights_wls(snapshots_dir: Path) -> Optional[dict]:
     """
     try:
         sys.path.insert(0, str(ALPHAHIVE_DIR))
-        from feedback_loop import BacktestAnalyzer, agent_vote_correct
+        from feedback_loop import BacktestAnalyzer
     except ImportError as e:
         print(f"❌ 无法导入 feedback_loop: {e}")
         return None
@@ -436,66 +512,17 @@ def compute_new_weights_wls(snapshots_dir: Path) -> Optional[dict]:
         if len(valid_snaps) < MIN_SAMPLES:
             return None
 
-        # 时间衰减权重：exp(-(today - date) / 30)
-        today = datetime.now()
-        time_weights = []
-        for snap in valid_snaps:
-            try:
-                snap_date = datetime.strptime(snap.date, "%Y-%m-%d")
-                days_ago = (today - snap_date).days
-                tw = math.exp(-days_ago / 30.0)
-            except (ValueError, TypeError):
-                tw = 0.5
-            time_weights.append(tw)
-
-        # 标准化时间权重
-        tw_sum = sum(time_weights)
-        if tw_sum > 0:
-            time_weights = [w / tw_sum * len(time_weights) for w in time_weights]
-
-        # 修复 Bug #7：按"维度内 Agent 平均准确度"算权重，而非"Agent 数累加"
-        # 旧实现下 signal 维度（Scout+Rival 两蜂）比单蜂维度永远高一倍，结构性偏差
-        # 新实现：先按 (维度, 快照) 聚合，取维度内所有 Agent 的平均准确度
-        dim_weighted_accuracy = {dim: 0.0 for dim in DEFAULT_WEIGHTS}
-        dim_weighted_count = {dim: 0.0 for dim in DEFAULT_WEIGHTS}
-
-        for i, snap in enumerate(valid_snaps):
-            tw = time_weights[i]
-            ret_t7 = (snap.actual_price_t7 - snap.entry_price) / snap.entry_price * 100
-
-            # v0.42.2 修复：用 agent_vote_correct（蜂自己的票 vs 实际涨跌）替代
-            # 「快照 direction 推出 is_correct，再拿去判每只蜂」的旧逻辑。
-            # 旧逻辑对 neutral 快照（实测占 32%）恒判「vote<=5 即正确」，与价格无关。
-            per_dim_acc = {dim: [] for dim in DEFAULT_WEIGHTS}
-            for agent_name, vote in snap.agent_votes.items():
-                dim = AGENT_TO_DIM.get(agent_name)
-                if dim is None:
-                    continue
-                ok = agent_vote_correct(vote, ret_t7)
-                if ok is None:
-                    continue  # 弃权票不计入分母
-                per_dim_acc[dim].append(1.0 if ok else 0.0)
-
-            for dim, accs in per_dim_acc.items():
-                if not accs:
-                    continue
-                dim_weighted_accuracy[dim] += tw * (sum(accs) / len(accs))
-                dim_weighted_count[dim] += tw
-
-        # 归一化为权重
-        raw_weights = {}
-        for dim in DEFAULT_WEIGHTS:
-            if dim_weighted_count[dim] > 0:
-                raw_weights[dim] = dim_weighted_accuracy[dim] / dim_weighted_count[dim]
-            else:
-                raw_weights[dim] = DEFAULT_WEIGHTS[dim]
-
-        # 归一化
-        total = sum(raw_weights.values())
-        if total > 0:
-            new_weights = {k: v / total for k, v in raw_weights.items()}
-        else:
-            new_weights = dict(DEFAULT_WEIGHTS)
+        # 时间衰减 + 维度聚合：v0.45.144 起抽到 _time_decay_weights /
+        # _snapshot_dim_accuracy / _weights_from_accuracy 三个共享辅助函数，
+        # 与 bootstrap_validate 共用**同一份**实现——此前两处各写一遍，
+        # 且 bootstrap 那份漏了时间衰减，导致闸门比的是两个不同估计量。
+        #
+        # 保留的既有语义：
+        #   Bug #7 —— 先按 (维度, 快照) 取维度内 Agent 平均，再跨快照加权平均
+        #   v0.42.2 —— 用 agent_vote_correct（蜂自己的票 vs 实际涨跌）记分
+        time_weights = _time_decay_weights(valid_snaps)
+        acc_rows = [_snapshot_dim_accuracy(snap) for snap in valid_snaps]
+        new_weights = _weights_from_accuracy(acc_rows, time_weights)
 
         # 升级5: clamp 每个维度的权重到安全范围（复用共享辅助函数）
         clamped_weights = _apply_weight_clamps(new_weights)
@@ -529,7 +556,7 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
     """
     try:
         sys.path.insert(0, str(ALPHAHIVE_DIR))
-        from feedback_loop import BacktestAnalyzer, agent_vote_correct
+        from feedback_loop import BacktestAnalyzer
     except ImportError:
         return {"stable": False, "error": "无法导入 feedback_loop"}
 
@@ -541,69 +568,65 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
         if len(valid_snaps) < MIN_SAMPLES:
             return {"stable": False, "error": f"样本不足 ({len(valid_snaps)} < {MIN_SAMPLES})"}
 
-        # Bootstrap: 重采样 N 次
+        # 每条快照的维度命中率与时间权重只算一次，重采样只在**索引**上做。
+        # 这既是提速（原实现 838×500 次 agent_vote_correct），也消除了
+        # 「同一条快照在两次迭代里算出不同命中率」的可能。
+        #
+        # ⚠️ v0.45.144 关键修复：这里以前不做任何时间衰减，而点估计
+        # (compute_new_weights_wls) 带 exp(−days/30)。于是本函数产出的 CI 是
+        # **另一个估计量**的抽样分布，闸门等于拿苹果去比橘子的置信区间。
+        # 实测：把不衰减的点估计送进旧闸 5/5 全过、带衰减的 2/5 出界 ——
+        # 出界与抽样噪声无关，纯粹是口径差。现在两边共用 _time_decay_weights。
+        #
+        # `now` 显式取一次再传下去：点估计与本函数必须锚在同一个钟上。
+        now = datetime.now()
+        time_weights = _time_decay_weights(valid_snaps, now=now)
+        acc_rows = [_snapshot_dim_accuracy(snap) for snap in valid_snaps]
+
         weight_samples = {dim: [] for dim in DEFAULT_WEIGHTS}
+        n = len(valid_snaps)
+        indices = range(n)
 
         for _ in range(n_iterations):
-            # 有放回抽样
-            sample = random.choices(valid_snaps, k=len(valid_snaps))
-
-            # 修复 Bug #7：使用统一 AGENT_TO_DIM + 维度内平均（非累加）
-            dim_snap_acc = {dim: 0.0 for dim in DEFAULT_WEIGHTS}
-            dim_snap_count = {dim: 0 for dim in DEFAULT_WEIGHTS}
-
-            for snap in sample:
-                ret_t7 = (snap.actual_price_t7 - snap.entry_price) / snap.entry_price * 100
-
-                # v0.42.2 修复：与主路径共用 agent_vote_correct，消除记分逻辑重复
-                per_dim = {dim: [] for dim in DEFAULT_WEIGHTS}
-                for agent_name, vote in snap.agent_votes.items():
-                    dim = AGENT_TO_DIM.get(agent_name)
-                    if dim is None:
-                        continue
-                    ok = agent_vote_correct(vote, ret_t7)
-                    if ok is None:
-                        continue  # 弃权票不计入分母
-                    per_dim[dim].append(1.0 if ok else 0.0)
-                for dim, accs in per_dim.items():
-                    if accs:
-                        dim_snap_acc[dim] += sum(accs) / len(accs)
-                        dim_snap_count[dim] += 1
-
-            # 保持旧变量名供下游计算
-            dim_correct = dim_snap_acc
-            dim_total = dim_snap_count
-
-            # 计算这次抽样的权重
-            raw = {}
+            # 有放回抽样：命中率与它的时间权重必须**成对**被抽中，
+            # 否则等于把某条快照的表现安到另一条的日期上。
+            picked = random.choices(indices, k=n)
+            w = _weights_from_accuracy(
+                [acc_rows[i] for i in picked],
+                [time_weights[i] for i in picked],
+            )
             for dim in DEFAULT_WEIGHTS:
-                if dim_total[dim] > 0:
-                    raw[dim] = dim_correct[dim] / dim_total[dim]
-                else:
-                    raw[dim] = DEFAULT_WEIGHTS[dim]
-            total = sum(raw.values())
-            if total > 0:
-                for dim in raw:
-                    weight_samples[dim].append(raw[dim] / total)
+                weight_samples[dim].append(w[dim])
 
         # 计算 95% 置信区间
+        #
+        # ⚠️ 判定用**未舍入**的界，返回值里才舍入。
+        # 旧实现拿 round(x, 4) 之后的界去夹未舍入的点估计：当 CI 比 1e-4 还窄时，
+        # 点估计会因为纯舍入而"出界"（实测退化夹具上 signal 点估计 0.25、
+        # CI 恰为 [0.25, 0.25]，仍被判 🛑）。生产 CI 宽 3~6pp 碰不到这个带，
+        # 属潜伏缺陷而非活 bug，但守卫没有理由不精确。
         confidence = {}
         median_weights = {}
+        exact_bounds = {}
         for dim in DEFAULT_WEIGHTS:
             sorted_w = sorted(weight_samples[dim])
             n = len(sorted_w)
             lo_idx = int(n * 0.025)
             hi_idx = int(n * 0.975)
+            lo, hi = sorted_w[lo_idx], sorted_w[hi_idx]
+            exact_bounds[dim] = (lo, hi)
             confidence[dim] = {
-                "lo_95": round(sorted_w[lo_idx], 4),
-                "hi_95": round(sorted_w[hi_idx], 4),
-                "range_pp": round((sorted_w[hi_idx] - sorted_w[lo_idx]) * 100, 1),
+                "lo_95": round(lo, 4),
+                "hi_95": round(hi, 4),
+                "range_pp": round((hi - lo) * 100, 1),
             }
             median_weights[dim] = round(sorted_w[n // 2], 4)
 
         # 判断稳健性：如果新权重在所有维度的 95% CI 内，则稳健
         stable = all(
-            confidence[dim]["lo_95"] <= new_weights.get(dim, DEFAULT_WEIGHTS[dim]) <= confidence[dim]["hi_95"]
+            exact_bounds[dim][0]
+            <= new_weights.get(dim, DEFAULT_WEIGHTS[dim])
+            <= exact_bounds[dim][1]
             for dim in DEFAULT_WEIGHTS
         )
 
