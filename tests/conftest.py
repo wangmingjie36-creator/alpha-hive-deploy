@@ -778,3 +778,102 @@ def _isolate_ml_model_file(tmp_path, monkeypatch):
         "默认落盘位置已经全局指向 tmp，还能改到真身说明有绕过它的写入路径"
         "（硬编码相对路径？subprocess？）——去把那条路径也接到 "
         "`ml_predictor.default_model_path()` 上，不要在这里放行。")
+
+# ==================== 生产产物总闸（v0.45.150） ====================
+
+# ⚠️ 这里刻意用 `__file__` 而不是 `PATHS.home`：本闸要盯的正是**真实 checkout
+#    根目录**，必须免受 `_isolate_env` 影响。同一写法在生产模块里是 bug，
+#    在这里是需求。
+_REPO_ROOT_FOR_GUARD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 只盯「生产数据」级别的产物：样本库、向量库、三本期权账本。
+# 缓存目录（cache/ data_cache/ reddit_cache/ …）与 ml_model*.json 暂不入闸——
+# 前者危害是脏缓存、后者归 v0.45.149，另见 CHANGELOG v0.45.150 的分级表。
+_GUARDED_PRODUCTION_ARTIFACTS = (
+    "pheromone.db",
+    "metrics.db",
+    "chroma_db",
+    "vrp_state",
+    "options_paper_state",
+    "hedge_state",
+)
+
+
+def _artifact_signature(path):
+    """(存在性, 大小, mtime_ns) 摘要；目录则递归汇总。
+
+    用 stat 而非内容哈希：本闸问的是「有没有被写过」，而 sqlite 以读写模式
+    打开就会顶 mtime（v0.45.150 实测：内容逐字节未变，但 mtime 变了并留下
+    `-wal`/`-shm`）。内容哈希反而会把这种「打开了但没改行」判成无事发生。
+    """
+    if not os.path.exists(path):
+        return "MISSING"
+    if os.path.isfile(path):
+        st = os.stat(path)
+        return f"file:{st.st_size}:{st.st_mtime_ns}"
+    acc = []
+    for dirpath, _dirnames, filenames in os.walk(path):
+        for fn in sorted(filenames):
+            fp = os.path.join(dirpath, fn)
+            try:
+                st = os.stat(fp)
+                acc.append(f"{os.path.relpath(fp, path)}:{st.st_size}:{st.st_mtime_ns}")
+            except OSError:
+                acc.append(f"{os.path.relpath(fp, path)}:ERR")
+    return "dir:" + "|".join(sorted(acc))
+
+
+@pytest.fixture
+def artifact_signature():
+    """把上面的指纹函数暴露给测试用。
+
+    `tests/` 不是包、`conftest` 不可直接 import，所以走 fixture 而不是
+    `from conftest import ...`。目的是让 session 级总闸和逐条测试**共用同一个
+    判据**——两份实现早晚漂移，而漂移的那一刻两边都还是绿的。
+    """
+    return _artifact_signature
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_production_artifacts():
+    """第二道防线：整个 session 跑完，生产产物指纹必须没变。
+
+    第一道防线是「路径调用时求值」——`PATHS.*` 全是 property，配上
+    `_isolate_env` 的 `monkeypatch.setenv` 本该够了。它失效过：把 `PATHS.x`
+    求值成模块级常量或类属性，值就冻在 import 那一刻，而 pytest 在**收集期**
+    就 import 生产模块，那时本文件的 fixture 一次都没跑过（实测收集结束时
+    `ALPHA_HIVE_HOME` 确为 `<UNSET>`）⇒ 冻成 checkout 根目录，隔离形同不存在。
+
+    v0.45.150 之前的实测后果：跑一次全套测试，`PredictionStore.__init__` →
+    `_init_table()` 会以读写模式打开**生产** `pheromone.db`（37 MB，喂 IC 闸 /
+    权重优化 / 概率记分卡的样本库），执行 `CREATE TABLE IF NOT EXISTS`、进入
+    WAL 模式、留下 `-wal`/`-shm`；`MemoryStore()` 还会在其上跑 `schema_migrate`。
+
+    为什么需要这一道而不是只修路径（照 `_isolate_paper_portfolio_state` 的理由）：
+    逐模块打补丁是打地鼠——本仓库已经为 `weekly_optimizer` / `feedback_loop` /
+    `paper_portfolio` 各写过一个专属 fixture，每次都是**事后**补的。本闸不认
+    模块、只认盘上的产物，因此对将来新增的写入路径同样有效。
+
+    ⚠️ 它是 session 级的，红在整轮末尾，不会指出是哪条测试写的。定位办法：
+    patch `sqlite3.connect` / `builtins.open` / `os.makedirs` 记 `nodeid` 与调用栈
+    （v0.45.150 就是这么把 `pheromone.db` 归因到 `backtester.py:99` 的）。
+    ⚠️ 若此时机器上正好在跑每日扫描，本闸也会红——那不是假警报，是提示你
+    「测试与生产写同一批文件的时间窗真实存在」。
+    """
+    real = {name: os.path.join(_REPO_ROOT_FOR_GUARD, name)
+            for name in _GUARDED_PRODUCTION_ARTIFACTS}
+    before = {n: _artifact_signature(p) for n, p in real.items()}
+
+    yield
+
+    touched = sorted(n for n, p in real.items()
+                     if _artifact_signature(p) != before[n])
+    assert not touched, (
+        f"测试写到了**生产**产物：{touched}\n"
+        f"（checkout 根目录 = {_REPO_ROOT_FOR_GUARD}）\n\n"
+        "十有八九是某处把 `PATHS.*` 派生的路径求值成了模块级常量、类属性，"
+        "或者写成了默认参数 `def f(db_path=DB_PATH)`——三者都冻在 import 期，"
+        "而 pytest 收集期 import ⇒ `_isolate_env` 的 setenv 追不上它。\n"
+        "改法：改成 property / 函数（调用时求值）；默认参数写 `= None` "
+        "再在函数体里解析。结构守卫见 "
+        "`tests/test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread`。")

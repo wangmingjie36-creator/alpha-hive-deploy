@@ -193,7 +193,142 @@ v0.45.149 的 ①（路径收敛）②（tests autouse fixture 重定向到 tmp_
 
 ---
 
-## [0.45.150] — 2026-09-07 — 占位（进行中：审计 `hive_logger.PATHS.*` 派生路径被求值成**模块级常量 / 类属性**的物种 —— import 那一刻冻住，`conftest.py::_isolate_env` 的 `monkeypatch.setenv("ALPHA_HIVE_HOME")` 对它无效，因为 pytest **收集期**就 import 了模块，那时 fixture 还没跑。先例 v0.45.149 的 `MLEnhancedReportGenerator._model_file` 已证实会让「跑一次全套测试」覆盖生产 `ml_model_cache.json`。范围＝① AST 全仓扫描列清单（预计约 22 处，排除 tests/）；② **逐处实证判定危害等级**（判据＝这个冻住的路径会不会被**写**、写的是不是生产数据；高危：`backtester.DB_PATH` / `MemoryStore.DB_PATH` / `vector_memory.DEFAULT_DB_PATH`；中危：各模块 `CACHE_DIR`/`BASE_DIR`；待判：`config.py` 里那批 `str(...)` 快照 dict）；③ 先数 conftest 里哪些已被针对性 monkeypatch 管住，不重复劳动；④ 高危处改 property/函数（调用时求值）+ **成对**测试（「改 env 路径跟着变」+「跑完测试生产文件指纹未变」）+ mutation check + 核对 `collected N items` 不为 0。⚠️ 与 v0.45.149 **相邻不重叠**：那条管 `ml_predictor.save_model` 的相对路径默认值与加载守卫，本条管 `PATHS.*` 派生值的**求值时机**；两边都可能碰 `conftest.py` 的隔离 fixture，合并时逐块核对。**不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`）
+## [0.45.150] — 2026-09-07 — `PATHS` 派生路径冻在 import 期：测试隔离对它无效
+
+### Fixed
+
+**物种**：`hive_logger.PATHS` 的每个成员都是 property（读一次查一次环境变量），
+设计本身没问题。出问题的是**消费方**——把它求值成模块级常量、类属性或**默认参数**，
+值就冻在 import 那一刻。而 pytest 在**收集期**就 import 各 test 模块、连带 import
+生产模块，那时 `tests/conftest.py::_isolate_env`（autouse，function scope）
+一次都还没跑过 ⇒ 冻住的值 = checkout 根目录 = **生产目录**，此后整个 session 不变。
+
+**收集期实证**：自写 pytest 插件在 `pytest_collection_finish` 里读环境——
+`ALPHA_HIVE_HOME` 确为 `<UNSET>`，14 个候选模块中 **10 个**已进 `sys.modules`。
+
+**落盘实证**：全量套（3533 项）跑完，checkout 根目录**新增 7 个产物**：
+`pheromone.db` / `ml_model.json` / `ml_model_cache.json` / `cache/pead_NVDA.json` /
+`cache/vix_term_structure.json` / `data_cache/social_TEST.json` / `reddit_cache/`。
+
+**危害标定**（拿**生产** `pheromone.db`（37 MB，喂 IC 闸 / 权重优化 / 概率记分卡）
+的副本实测）：9 张表 112333 行 → 112333 行、**内容逐字节未变**；但 **mtime 变了、
+并留下 `-wal`/`-shm`** ⇒ 以读写模式打开过、进了 WAL 模式。
+即「那一轮恰好没 INSERT，但写通道全开」——同一个 `PredictionStore` 上的
+`save_predictions()` 就是往里 INSERT 的。⚠️ 只比内容哈希会把这判成「无事发生」。
+
+#### 分级（逐处实证，不一刀切）
+
+判据＝**这个冻住的路径会不会被写、写的是不是生产数据**。
+
+| 等级 | 站点 | 实证依据 | 本版处置 |
+|---|---|---|---|
+| **高危·确证** | `backtester.py:53 DB_PATH` + 3 处默认参数 | 归因栈 3 条：`:99 __init__`→`:103 _init_table`→`sqlite3.connect`，两条独立路径（`generate_ml_report._build_real_training_data`、`swarm_agents/base.py:265 prefetch_shared_data`） | 改 `default_db_path()`，3 处默认参数改 `None` |
+| **高危·潜伏** | `memory_store.py:63 MemoryStore.DB_PATH` | 无参构造实测连到 checkout 根 `pheromone.db` 并跑 `schema_migrate` **建表**；全量套未触发 | 改 `@property` |
+| **高危·潜伏** | `vector_memory.py:48 VectorMemory.DEFAULT_DB_PATH` | 无参构造实测建出 checkout 根 `chroma_db/`（生产 20 MB）；全量套未触发 | 改 `@property` |
+| **高危·绕过**（新发现） | `alpha_hive_daily_report.py:220` 显式传 `VECTOR_MEMORY_CONFIG["db_path"]` | 该键是 config 模块级 dict 里的 `PATHS.chroma_db`，冻结；显式传入会**绕过**上一行刚改好的 property | 不再传该参数（取值相同，只差求值时刻） |
+| **高危·同族**（新发现，非 `PATHS`） | `paper_portfolio.py:913`（写）`:606`（读）`BASE_DIR / "pheromone.db"` | 归因栈：`_close_position`→`_record_barrier_outcome`→`sqlite3.connect` + `CREATE TABLE` + INSERT。`BASE_DIR = Path(__file__).parent` **连环境变量都不看**，比「冻结」更彻底；`_isolate_paper_portfolio_state` 只重绑了 `STATE_DIR` 与四个状态文件，接不住它 | 加 `_pheromone_db_path()` 调用时求值 |
+| 归 **v0.45.149** | `generate_ml_report.py:66 _model_file` | 归因栈确证写 `ml_model_cache.json` | **不动**（见下「范围」） |
+| 中危·确证在写 | `pead_analyzer.py:20 _CACHE_DIR` | 实测建出 `cache/pead_{NVDA,ABBV}.json` | 未改，进结构守卫清单 |
+| 中危·只建空目录 | `earnings_watcher.py:44`、`real_data_sources.py:32`、`reddit_sentiment.py:31` | import 期 `mkdir`，无内容写入 | 同上 |
+| 中危·未触发 | `sec_edgar` / `polymarket_client` / `newsapi_client` / `edgar_rss` 的 `CACHE_DIR` | 全量套跑完无新增 | 同上 |
+| **中高危·账本**（重新分级） | `vrp_signal` / `options_paper_leg` / `portfolio_greeks` / `earnings_vol_signal` 的 `BASE_DIR` | 派生 `vrp_state/` `options_paper_state/` `hedge_state/` —— 是**账本**不是缓存（MEMORY.md v0.45.111）。原任务把它们归「中危：会往仓库写缓存」，**低估了**：账本被测试改写正是 v0.45.104 事故形状 | 未改，进清单 + 进 session 总闸监控 |
+| 低危·逐键判定 | `config.py` 那批 dict | `PHEROMONE_CONFIG` / `MEMORY_CONFIG` / `METRICS_CONFIG` 的 `db_path` 键**零生产读者**（死键）；`CACHE_CONFIG["cache_dir"]` + `RUNTIME_CONFIG["log_file"]` 只被 `init_cache()` 用来 mkdir；`CODE_EXECUTION_CONFIG["sandbox_dir"]` = `/tmp/...` 不在仓库；`ConfigLoader._OVERRIDE_*` 只读不写 | 未改（唯一有真读者的 `VECTOR_MEMORY_CONFIG["db_path"]` 已见上） |
+
+**先数谁已经有人管了**（避免重复劳动）：`tests/conftest.py` 里针对性路径
+monkeypatch 只有 3 个模块——`weekly_optimizer.PHEROMONE_DB_PATH`、
+`feedback_loop.PHEROMONE_DB_PATH`、`paper_portfolio` 的 `STATE_DIR` + 四个状态文件。
+**高危三处一个都没被管**。而这三个已被管的全是 `__file__` 派生、且都是**事后**
+逐个补的——逐模块打补丁是打地鼠，故本版补一道不认模块只认产物的总闸。
+
+### Added
+
+- `tests/test_paths_not_frozen_at_import.py`（17 项，4 个类）四层成对守卫：
+  ① `TestResolvedAtCallTime` —— 改 env 路径必须跟着变（含**元守卫**先证
+     `_isolate_env` 本身生效，否则其余断言全部作废）；
+  ② `TestExplicitPathStillWins` —— **成对的另一半**：显式传入的路径必须照常生效。
+     少了它，「把参数整个忽略、永远返回 `PATHS.x`」这种偷懒修法会全绿；
+  ③ `TestProductionArtifactsNotTouched` —— 无参构造前后生产产物**指纹**不变；
+  ④ `TestSpeciesDoesNotSpread` —— **AST** 结构守卫，不许**新增**冻结点
+     （子集语义：修好存量不会变红，新增必红），配 `>= 15` 反向自证防扫描器坏掉。
+  ⚠️ 本文件的 import 刻意留在**模块级**——挪进函数体就会在 `_isolate_env` 之后
+     才 import，坏代码也照样全绿。
+- `tests/conftest.py::_guard_production_artifacts`（session 级 autouse）第二道防线：
+  盯 `pheromone.db` / `metrics.db` / `chroma_db` / `vrp_state` / `options_paper_state`
+  / `hedge_state` 六项，整轮跑完指纹必须没变。判据用 `(size, mtime_ns)` 而非内容
+  哈希——sqlite 以读写模式打开就顶 mtime，内容哈希会把这判成无事发生。
+  写法参照 `_isolate_paper_portfolio_state` 的「两道防线」注释。
+  配套 `artifact_signature` fixture，让总闸与逐条测试**共用同一个判据**
+  （`tests/` 不是包，`from conftest import` 会 `ModuleNotFoundError`）。
+
+### 验证
+
+- **全量套**：基线 `1 failed / 3508 passed`（唯一失败＝设计使然的
+  `TestCoverageHorizon`，见 MEMORY.md）→ 改后 `1 failed / 3529 passed`。
+  差 21 **已逐项对平**：本版新增 17 项 + `test_pytestmark_placement.py`
+  按全仓测试类参数化、因新增 4 个类而多出 4 项（`3533 + 17 + 4 = 3554` 实测相符）。
+  **零回归。**
+- **归因复测**：patch `sqlite3.connect` / `builtins.open` / `os.makedirs` /
+  `Path.mkdir` 记 `nodeid` 与调用栈 —— 改后 `pheromone.db` 与 `chroma_db`
+  写入记录**双双归零**（改前各有 5 条 / 1 条）。
+- **mutation check 6/6 全被抓住**（M1 常量回退 / M2 默认参数回退 /
+  M3+M4 退回类属性 / M5 忽略显式参数 / M6 扫描器返回空集），每次均核对
+  `collected=16` 非 0，且 patch 脚本对每个锚点断言**恰好出现 1 次**。
+- `ruff check` 干净（仓库另有 6 处既存 F811，均在本版未触及的文件里）。
+- 类 `__doc__` 未被挤掉：按 **AST** 核对 `MemoryStore` / `VectorMemory` 首条语句
+  仍是 docstring（v0.45.129 教训）。
+
+### 教训
+
+1. **`PATHS` 是 property 不代表消费方安全。** 求值时刻才是关键：模块级常量、
+   类属性、**默认参数**三者等价地冻在 import 期。默认参数最隐蔽——
+   把常量改懒了但默认参数写 `= 某常量`，等于换个地方冻同一个值
+   （同型：v0.45.37 `load_samples(db_path=DB_PATH)`）。
+2. **修了「无参路径」不等于修完了。** 只要还有调用方从别处**显式传入**一个
+   冻结值（此处 `VECTOR_MEMORY_CONFIG["db_path"]`），property 就被绕过。
+   ⇒ 改完默认值要 grep 「谁在显式传这个参数」。
+3. **给的 AST 扫描有盲区，先加宽再信它的普查。** 原扫描只走 `tree.body` 与
+   `ClassDef.body`，不下钻 `Try`/`If`/`With`/`For` —— 而那些同样在 import 期执行。
+   `pead_analyzer.py:20` 就藏在一个 `try` 里，窄版扫 23 处、加宽后 72 处。
+   顺带暴露**更严重的同族**：`__file__` 派生（`Path(__file__).parent / "pheromone.db"`
+   等 49 处）压根不看环境变量，连懒求值都救不了。
+4. **「这个文件不该存在」可能只是当前环境的偶然。** ③ 组第一版写的是
+   `assert not (REPO_ROOT / artifact).exists()`，在开发用的 worktree 里全绿——
+   而**主 checkout** 上 `pheromone.db`(37 MB) / `chroma_db/`(20 MB) / `metrics.db`
+   本来就该存在，那一版会对所有人**恒红**。判据必须是**指纹比对**（问「有没有被
+   动过」）而不是存在性（问「在不在」）。是我自己的 session 总闸与它结论不一致
+   才暴露的 —— 两道防线语义不同，本身就是交叉验证。
+5. **测量工具先自证。** 快照脚本第一版 `entries=0`：SKIP 清单里有 `.claude`，
+   而 worktree 本身就住在 `…/.claude/worktrees/…` 下，`rglob` 给的是绝对路径 ⇒
+   **每个文件都被过滤掉**。只因为打印了 `entries=` 才发现；若只打印 diff，
+   「没有差异」会被读成干净。已加 `assert len(out) > 100`。
+   （同族：v0.45.143「匹配不到任何东西的过滤器 = 恒真的守卫」。）
+6. **对照跑要核对「跑了几条」。** `-x` 写在 `pyproject.toml` 的 `addopts` 里，
+   第一次全量跑在第 622 项就停了（撞上设计使然的 `TestCoverageHorizon`），
+   差点把「只泄漏 2 个文件」当成全貌。全量需 `--maxfail=200` 覆盖它。
+7. **对不上的数字要追到底。** `+21 passed` 与「我加了 17 项」差 4，追下去是
+   `test_pytestmark_placement.py` 按全仓测试类参数化、被我新增的 4 个类撑大。
+   不追就等于放弃了「基线可比」这个前提。
+
+### 范围
+
+- **不动** `generate_ml_report.py:66 _model_file`：归 **v0.45.149**。
+  ⚠️ 本版**开工时**任务描述里「v0.45.149 已修，可作参照」**当时并不成立**——
+  其实质改动还躺在兄弟 worktree `pensive-williams-cd697b` 的工作区里，
+  `origin/main` 上 `_model_file` 仍是类属性、`PATHS` 尚无 `ml_model_cache` 属性、
+  `_isolate_ml_model_file` fixture 也还不存在（同 v0.45.116
+  「占位标题久悬 ≠ 忘了改标题」：**引用另一版做参照前先核实它落地没**）。
+  收尾 rebase 时它已随 v0.45.149~153 并入 main，两版**不重叠**。
+- **合并实况**：`tests/conftest.py` 冲突为「双方各自追加一个独立 fixture」，
+  已保留双方——v0.45.149 的 `_isolate_ml_model_file`（function 级、md5 内容指纹、
+  盯三个模型文件）与本版的 `_guard_production_artifacts`（session 级、
+  `(size, mtime_ns)`、盯六项生产产物）**职责不重叠，指纹口径不同是刻意的**：
+  前者要抓「内容被换掉」，后者要抓「被读写打开过」。
+  `CHANGELOG.md` 冲突为占位标题 vs 正式条目，取后者。
+- **不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`。
+- **未改但已登记**：`__file__` 派生一族（49 处，含 `feedback_loop` /
+  `ic_diagnostics` / `close_correction` / `replay_scoring` / `signal_archive` /
+  `vol_forecast` 各自的 `pheromone.db`）。严格来说比本版治的物种更重
+  （完全无视环境变量），但已超出本版范围，宜单独一版。
 
 ---
 
