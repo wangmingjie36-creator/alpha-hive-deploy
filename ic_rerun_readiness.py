@@ -96,6 +96,23 @@ _COHORT_HISTORY = [
      "两项均改变 options_score / Bear 分 → final_score，故为世代边界。"
      "边界取部署日 2026-09-05（下一次定时扫描 2026-09-08，09-07 Labor Day 休市）：任何自此起的扫描"
      "都是新口径，含手动补跑——边界若写成 09-08，中间手动跑出的样本会混进旧世代"),
+    ("2026-09-07", "v0.45.151",
+     "RivalBee 的 catalyst_quality 来源修复，两处："
+     "① `PheromoneBoard` 新增不受 MAX_ENTRIES 溢出淘汰影响的定点索引，`_read_peer` 改走它——"
+     "旧行为下 `_entries` 溢出按 `nlargest(80, key=(self_score,...))` 截断、**先扔分最低的**，"
+     "而 MAX_ENTRIES=80 是按注释里「9 只标的」的年代定的、watchlist 现为 30 只（一轮约 210 条），"
+     "于是 ChronosBee「无近期催化剂」恒落的 4.0 在 RivalBee（Phase-1.4）读到之前就被挤出去了。"
+     "② 真读不到时 `catalyst_quality` 由众数哨兵 \"B\" 改为 `None`（→ `_encode_catalyst` → NaN）。"
+     "实测（当前世代 188 份生产 JSON，用 `expected_returns` 闭式反解出实际用过的等级）："
+     "真值≠\"B\" 的 39 份里 27 份被记成 \"B\"，流向**全部**是 C→B，即 magnitude 0.7 当成 0.9。"
+     "改前/改后全量对照 n=173：**probability 变化 0/173 ⇒ final_score / ml_adjustment 位移恒为 0**，"
+     "`expected_30d` 变化 24/173、最大 |Δ| 6.13 百分点。"
+     "⚠️ 之所以 final_score 位移为 0 仍登记边界：`ml.expected_7d` / `ml.expected_30d` 进 "
+     "`signal_archive`（本工具收尾推荐的 `signal_archive.py --analyze` 正是分析它们），"
+     "且 Δ=0 是**当前 HGB 模型**的性质（catalyst 置换重要度 0.0、B/C 落同一叶）而非定义性质——"
+     "降级链上的 SimpleMLModel 给 catalyst 0.25 权重，同一改动在它上面 Δ≠0。定义变了就登记。"
+     "边界取部署日 2026-09-07（上一条边界 09-05 至今 `predictions` 内 0 条样本，"
+     "下一次定时扫描 09-08）⇒ 本次追加**不作废任何已累积样本**"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）

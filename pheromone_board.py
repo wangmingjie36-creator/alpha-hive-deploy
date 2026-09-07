@@ -76,6 +76,10 @@ class PheromoneBoard:
     def __init__(self, memory_store=None, session_id=None):
         self._lock = RLock()
         self._entries: List[PheromoneEntry] = []
+        # (ticker, agent_id) → 该蜂本轮最新条目。**不受 MAX_ENTRIES 溢出淘汰影响**，
+        # 供 `get_agent_entry` / `BeeAgent._read_peer` 做「上游蜂这轮说了什么」的定点
+        # 查询。理由见 `get_agent_entry` docstring。天然有界：|标的| × |蜂|。
+        self._latest_by_agent: Dict[tuple, PheromoneEntry] = {}
         self._memory_store = memory_store
         self._session_id = session_id or "default_session"
         # Phase 2: 使用线程池替代 daemon 线程，确保退出时等待写入完成
@@ -220,6 +224,9 @@ class PheromoneBoard:
             if not entry.supporting_agents:
                 entry.supporting_agents = [entry.agent_id]
             self._entries.append(entry)
+            # 定点索引与 _entries 并行维护：后者按显著度排序并截断，前者只按
+            # 身份记「最新一条」。两者用途不同，不要合并（见 get_agent_entry）。
+            self._latest_by_agent[(entry.ticker, entry.agent_id)] = entry
             if len(self._entries) > self.MAX_ENTRIES:
                 self._entries = _heapq.nlargest(
                     self.MAX_ENTRIES, self._entries,
@@ -258,6 +265,45 @@ class PheromoneBoard:
         with self._lock:
             entries = [e for e in self._entries if ticker is None or e.ticker == ticker]
             return sorted(entries, key=lambda x: x.pheromone_strength, reverse=True)[:n]
+
+    #: `get_agent_entry` 认定「上一轮的陈货」的墙钟阈值，与 `publish` 里
+    #: 存活检查 2 用的是同一个 3600s —— 两处必须一致，否则同一条目在
+    #: 排行榜里已过期、在定点查询里还活着。
+    _AGENT_ENTRY_MAX_AGE_S = 3600
+
+    def get_agent_entry(self, ticker: str, agent_id: str):
+        """定点取「某只蜂对某只标的本轮发布的最新条目」，取不到返回 None。
+
+        为什么不能用 `get_top_signals(ticker, n=...)` 代替（v0.45.151）
+        ---------------------------------------------------------------
+        `get_top_signals` 从 `_entries` 里挑，而 `_entries` 在 `publish` 溢出时会按
+        `nlargest(MAX_ENTRIES, key=(self_score, support_count, pheromone_strength))`
+        截断 —— **先扔分最低的**。`MAX_ENTRIES = 80` 是按注释里那个「9 只标的」的
+        年代定的，而 `config.WATCHLIST` 现为 30 只（一轮约 210 条），于是低分条目
+        在同轮的下游蜂读到它之前就被挤出去了。
+
+        后果不是「偶尔读不到」，而是**缺失与被测量的量反相关**：越是低分（例如
+        ChronosBee 的「无近期催化剂」恒落 4.0）越读不到，而调用方的回落值通常比
+        真值高 ⇒ 系统性单向偏斜。生产实测见 `tests/test_rival_bee_catalyst_missing.py`
+        的模块 docstring（当前世代 188 份里 27 份被记成了错的等级，流向全是 C→B）。
+
+        本方法只按身份查，不参与显著度排序，因此不受截断影响。仍保留墙钟过期
+        （`_AGENT_ENTRY_MAX_AGE_S`）—— 那个判的是「这是不是上一轮的陈货」，
+        是真的该拦；被 MAX_ENTRIES 挤掉则纯属容量问题，不该拦。
+        """
+        with self._lock:
+            e = self._latest_by_agent.get((ticker, agent_id))
+            if e is None:
+                return None
+            try:
+                age_s = (datetime.now()
+                         - datetime.fromisoformat(e.timestamp)).total_seconds()
+            except (ValueError, TypeError):
+                return None                      # 时间戳不可解析 → 视为过期
+            if age_s >= self._AGENT_ENTRY_MAX_AGE_S:
+                del self._latest_by_agent[(ticker, agent_id)]
+                return None
+            return e
 
     def detect_resonance(self, ticker: str) -> Dict:
         """
@@ -483,3 +529,4 @@ class PheromoneBoard:
         """清空信息素板"""
         with self._lock:
             self._entries.clear()
+            self._latest_by_agent.clear()

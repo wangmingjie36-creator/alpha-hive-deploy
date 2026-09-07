@@ -5,6 +5,56 @@
 
 ---
 
+## [0.45.155] — 2026-09-07 — 环境记录：`~/Desktop` 的 iCloud 重名副本（不改代码）
+
+**本条不改任何代码**，只把一个常年存在、今天第一次造成实际故障的环境问题
+写进 `CLAUDE.md`，免得下一个 session 再花时间重新诊断一遍。
+
+### Added
+
+- `CLAUDE.md` 新增章节「环境：`~/Desktop` 在 iCloud 同步下会造「重名副本」」。
+- 同步写入记忆 `alpha-hive-environment-facts.md` 与 MEMORY.md 环境行。
+
+### 事实
+
+macOS「桌面与文稿同步 iCloud」在 `~/Desktop/Alpha Hive` 里**常年**产出名字带
+**空格+数字**的副本（`xxx 2.py` / `index 3` / `settings.local 2.json`）。
+2026-09-07 一次清理扫出 **53 个**，最早可回溯到 **2026-03-16**——不是偶发。
+
+**已造成的故障：`git fetch` 失败**——
+`fatal: bad object refs/heads/... 2` + `did not send all necessary objects`。
+
+⚠️ 这条报错有**两重误导**，都用注入探针实测确认（探针本身反向自证过）：
+
+1. **说「对象缺失」，实为 refname 非法**（git 引用名不许含空格）。
+   副本指向**存在的 commit** 与指向**不存在的 object**，`git fetch` **报同一条错**
+   ⇒ 与对象在不在**无关**。当年那四个副本指向的 commit 至今 `cat-file -t` 全是 `commit`，
+   仓库没有任何损坏。
+2. **坏的是 `fetch` 不是 `push`。** 首遇时命令是 `git fetch … && … && git push …`，
+   fetch 失败后 `&&` 短路、push 根本没跑，而错误紧挨着 push 出现 ⇒ 极易记成
+   「push 坏了」。**本条最初就是这么写错的，已按实测改正**——同本文件既有的
+   「`&&` 链里别在前一步后面挂要干活的步骤」。
+
+### 清理规则（写进 CLAUDE.md 的那份）
+
+副本**可能含未提交内容，不能无脑删**：两道安全闸（名字必须真是 `… N` 形式、
+被 git 跟踪的一律不动）；源码类副本先 `cmp`，不同则用 `git hash-object` 查它是不是
+某个已提交版本——本次实测遇到一个**匹配不上任何提交**的
+（`swarm_agents/oracle_bee 2.py`），查下来是**编辑中途的快照**（比最终版早 16 分钟、
+版本号停在改名前、少一条守卫子句），确认无独有内容才删；
+删除用**移进废纸篓**而不是 `rm`（本仓 ~19 个 worktree + 多 session 并发，可逆成本近乎为零）；
+`pheromone 2.db-wal/-shm` 先确认 `pheromone 2.db` 本体不存在；
+清完验 `git fsck --connectivity-only` + **逐个 worktree `git rev-parse HEAD`** + 跑测试
+（本次：0 残留、fsck 干净、19/19 worktree 正常、3580 passed）。
+
+⚠️ **别误诊**：副本 mode 常为 `0600`（仓库文件 `0644`），既不是没清干净的中间产物、
+也不是 merge 残留；`ruff` / `pytest` 会把它们**当真文件收进来**，
+统计「新增了几个 lint 问题」时必须先排除，否则基线对不上。
+
+### 根治
+
+清理只是重置计时器。根治要把项目移出 iCloud 同步——
+**那是用户的机器设置，由用户决定，Claude 不自行更改。**
 ## [0.45.154] — 2026-09-07 — 退化闸的判据「扫描日越大越松」，方向反了
 
 v0.45.148 补记 C 指出 v0.45.145 的一处残留盲区，核实成立：
@@ -186,10 +236,29 @@ HGB 的 `random_state=42` ⇒ 同一份 db + 同一份代码，重建是确定�
    **判据：「用了绝对路径」不等于「测试写不到它」——要问的是那个绝对值是什么时候
    求的值。import 期求值的派生路径，任何 fixture 隔离都对它无效。**
 
-   同源侥幸还有一处：`ml_model.json` **全仓 0 个读者**——
-   本条已独立复核：AST 枚举 `load_model` 调用点 **20 个，无参调用 0 个**
-   （v0.45.149 报的是 25 个调用点；口径差异不影响载荷结论——**无参 0 处**两边一致，
-   而只有无参调用才会落到默认的 `"ml_model.json"`）
+   同源侥幸还有一处：`ml_model.json` **全仓 0 个读者**。
+
+   ⚠️ 这个数**会随代码漂，必须钉提交**。与 v0.45.149 对过账后逐格复跑确认，
+   差异**有两层不是一层**（我最初只写了「口径差异」，那是把两层说成了一层）：
+
+   | 提交 | `save_model` | `load_model` | 合计 | **无参 `load_model()`** |
+   |---|---|---|---|---|
+   | `9f761fa`（v0.45.149 开工基点） | 11 | 14 | **25** | **0** |
+   | `f12a780`（其测试文件已进树） | 12 | **20** | 32 | **0** |
+
+   ⇒ v0.45.149 报的 25 是**两个方法合计、在改动前的树**；
+   我先前报的 20 是**只数 `load_model`、在改动后的树**。
+   两层差异（**方法集** + **提交**）恰好抵成了「像是同一件事的两种口径」的样子。
+   **稳的是载荷结论：无参 `load_model()` 在两个提交上都是 0**——
+   而只有无参调用才会落到默认文件名。
+
+   本条复核时另外查到一点（v0.45.149 的表未覆盖）：**无参 `save_model()` 并不是 0**
+   （`9f761fa` 2 处 → `f12a780` 3 处）。它现在无害，但**理由不是「调用点没了」，
+   而是「默认值变了」**：`def save_model(filename: str = "ml_model.json")`
+   已改成 `filename: Optional[str] = None` → `default_model_path()` → `PATHS.ml_model`。
+   逐个核过 `ml_predictor.py` 里 **3 个 `save_model` + 3 个 `load_model` 共 6 个定义体
+   全部**解析 `None` 为 `default_model_path()`（无遗漏的兄弟分支），
+   且 `PATHS.ml_model` 是 `@property` 而非模块级常量（不会在 import 期冻结）
    ⇒ 01:15 那次覆盖对生产的**实际损害是 0**，纯属两个写入者恰好用了不同文件名。
    由此定下的约束：**路径要集中，文件不能合并**——合并＝让每次跑测试直写生产模型。
 
@@ -237,14 +306,325 @@ v0.45.149 的 ①（路径收敛）②（tests autouse fixture 重定向到 tmp_
 
 ---
 
-## [0.45.151] — 2026-09-07 — 占位（进行中：`swarm_agents/rival_bee.py:87` 的 `_cat_quality = "B"` —— v0.45.147 同族**最后一处**缺失哨兵选中众数。**本条先量再决定，可能以「不改代码、只登记」收尾。**
-范围＝① 量命中率：`expected_returns` 是闭式 `mag × momentum_5d × scale`，而 `expected_30d` 与 `momentum_5d` 双双落在 803 份生产 `analysis-*-ml-*.json` 里 ⇒ 可**反解**出 rival_bee 当时实际用的 `catalyst_quality`，再与同文件 `pheromone_compact` 里 ChronosBee 的 `s` 经 `catalyst_quality_from_score` 算出的应得等级逐份对照，得出「板上读不到 ChronosBee」的真实命中率（同 v0.45.108 判据：先数生产数据里这个条件历史命中几次，0 或个位数即恒假分支、不值得付代价）；② 若命中率可观，再量 `ml_auxiliary` → `ml_adjustment` → `final_score` 的实际位移幅度；③ 据②决定是否往 **`ic_rerun_readiness._COHORT_HISTORY`** 追加世代边界（**不是** `probability_scorecard._ML_ESTIMATOR_GENERATIONS`，两条是独立测量管道），追加会作废已累积样本，代价实打实；④ 连带处理/登记 `ml_predictor_extended.py` 内第四份 catalyst 编码副本（`SimpleMLModel.encode_catalyst_quality` 的 `.get(quality, 0.5)` 与 `_CATALYST_MAGNITUDE.get(..., 1.0)`）——rival_bee 若开始传 `None`，这两处会静默给合法中性值而非 NaN。
-**不动** `ml_predictor.catalyst_quality_from_score` 的函数契约（v0.45.147 已在其 docstring 记录理由被推翻的证据并声明 rival_bee 依赖它）、**不动** `_prefetched`/训练口径、**不动** `EVALUATION_WEIGHTS`。
-⚠️ 与 v0.45.149 / v0.45.150 **不重叠**（那两条管模型文件路径与求值时机，本条管一个特征的缺失语义）；与 v0.45.147 **同族续集**，会碰 `ml_predictor.py` `catalyst_quality_from_score` 附近的注释，合并时逐块核对）
+## [0.45.151] — 2026-09-07 — 缺失哨兵选中众数（同族最后一处），而缺失本身是板挤出来的
+
+v0.45.147 的同族收尾。**结论与立项假设不同**：`rival_bee.py:87` 的
+`_cat_quality = "B"` 命中率不是「个位数的恒假分支」，而是当前世代 **14.4%**；
+且它之所以被命中，不是「上游没跑」，是 **`PheromoneBoard` 把 ChronosBee 的条目挤掉了**。
+
+### 怎么量的（无需插桩，803 份历史 JSON 可回溯反解）
+
+`expected_returns()` 是闭式 `mag × momentum_5d × horizon_scale`，而 `expected_30d`
+与 `momentum_5d` 双双落在生产 `analysis-*-ml-*.json` 里 ⇒ **反解**出 rival_bee 当时
+实际用过的 `catalyst_quality`，再与同文件 ChronosBee 的真分对照。
+
+判据用**精确一致**而非容差 snap：五个候选等级各自检查 `round(mag·mom·s, 2)` 是否
+对三个期限全部吻合，恰好一个候选成立才算可判定。
+
+三个必须先做的自证，缺一个结论就不成立：
+
+1. **世代切分**：闭式在 2026-08-24 之前**不成立**（v0.44.1 前的旧公式），
+   逐日检验后只取 2026-08-24 起的 188 份。不先切分会得到 86% 的「两者皆不相容」。
+2. **仪器自证**：首轮拿 `pheromone_compact` 的分数当判据，得出 5.5% 的「读错」——
+   **全部是假的**：compact 把分数舍到 1 位小数，真值 `7.45`（B+）被存成 `7.5`，
+   恰好压在 A 的切点上。改用 `agent_details` 的 2 位小数后归零。
+3. **重放自证**：用 `ml_predictor_extended.MLPredictionService`（rival_bee 实际走的那个，
+   **不是** `ml_predictor` 的同名类）重建输入，**172/172 份 `probability` 逐位复现**生产值。
+   附带证明：`iv_rank`/`put_call_ratio` 的 50.0/1.0 兜底在这 172 份里命中 0 次
+   ⇒ OracleBee 的板读**没有**失败，问题专属于 ChronosBee 的低分条目。
+
+### 实测
+
+| 量 | 值 |
+|---|---|
+| 当前世代样本 | 188 份（2026-08-24 ~ 09-04，10 个扫描日） |
+| 真值 ≠ `"B"`（有判别力） | 39 份 |
+| 其中用了缺失哨兵 `"B"` | **27 份（69.2%）** |
+| 占全体 | **27/188 = 14.4%** |
+| 等级流向 | **全部是 `C → B`**，无一例外 |
+
+按 ChronosBee 分数分层完全单调：`4.00` 分 26/28 读丢、`5.00` 分 1/1 读丢、
+`7.45` 分 **0/10** 读丢。`5.50~6.02`（共 149 份）真值本来就是 `"B"`，同形不可区分。
+
+### 根因：`MAX_ENTRIES` 还停在「9 只标的」的年代
+
+`PheromoneBoard.MAX_ENTRIES = 80`，注释写着「7 Agent × 9 Ticker = 63 条，80 条保留
+完整一轮 + 余量」——而 `config.WATCHLIST` 现为 **30 只**，一轮约 210 条。溢出淘汰键是
+`nlargest(80, key=(self_score, support_count, pheromone_strength))`，即**先扔分最低的**。
+ChronosBee「无近期催化剂」恒落 **4.0**，是全板最低的一档，于是它在 RivalBee（Phase-1.4）
+读到之前就被挤出去了。
+
+⚠️ **缺失与被测量的量反相关**：越是「没有催化剂」越读不到，而回落值 `"B"`(0.9) 比真值
+`"C"`(0.7) **高** ⇒ `expected_7d/30d` 幅度系统性高估 **28.6%**，单向。
+
+用生产发布序列跑真实 `PheromoneBoard` 重放复现了同一形状：≤16 只标的的日子 **0 条**丢失，
+24~30 只的日子丢 3~11 条（重放取「Chronos 最后发」这一对它最有利的顺序，故是下界）。
+
+### 下游位移（改前/改后全量对照，n=173）
+
+- `probability` 变化 **0/173** ⇒ `ml_score` / `ml_adjustment` / **`final_score` 位移恒为 0**。
+  原因：当前 HGB（`ml_predictor_extended` 的 30 条硬编码样本训练）catalyst 置换重要度 **0.0**，
+  `B`(0.55) 与 `C`(0.40) 落同一叶。
+- `expected_30d` 变化 **24/173**，最大 |Δ| **6.13 个百分点**（CRM 09-01：+27.57 → +21.44）。
+  方向 **0 例翻转**（`mag > 0` 保号）。
+- 这两个量以 `ml.expected_7d` / `ml.expected_30d` 进 `signal_archive`，
+  正是 `ic_rerun_readiness` 收尾推荐的 `signal_archive.py --analyze` 所分析的对象。
+
+### Fixed
+
+- `pheromone_board.py`：新增 `get_agent_entry(ticker, agent_id)` 与其背后的
+  `_latest_by_agent` 定点索引，**不受 MAX_ENTRIES 溢出淘汰影响**；`clear()` 一并清空。
+  保留墙钟过期（3600s，与 `publish` 存活检查 2 同值）——那个判的是「上一轮的陈货」，
+  该拦；被容量挤掉则不该拦。`_entries` / `get_top_signals` / `detect_resonance` 语义**未动**。
+- `swarm_agents/base.py`：`_read_peer` 改走定点索引，`get_top_signals` 保留为回退
+  （测试替身与旧 board 对象只有那一个方法）。全仓 `_read_peer` 只有 rival_bee 两个调用点，
+  影响面封闭。
+- `swarm_agents/rival_bee.py`：读不到时 `catalyst_quality` 由 `"B"` 改为 **`None`**
+  （→ `_encode_catalyst` → NaN → HGB 原生缺失处理，v0.45.147 已铺好这条路）。
+  分数可用性检查照抄本仓既有那一句（`isinstance(x,(int,float)) and not isinstance(x,bool)`）——
+  `bool` 是 `int` 子类，漏掉它会让 `True` 变成 1.0 分的「真实观测」。
+- `ml_predictor_extended.py`：第四份 catalyst 编码表 `encode_catalyst_quality(None)`
+  由 `0.5` 改为 `NaN`，与主表 `_encode_catalyst` 对齐（`0.5` 恰好夹在 C=0.40 与 B=0.55
+  **之间**，是任何真实等级都产不出的值）；同时补 `normalize_feature` 的 NaN 闸
+  （否则新的 NaN 会一路传成 `probability=NaN`，再被 rival_bee 的守卫改写成 0.5，
+  又一次「把失败改写成没发生过」）。未知字面量仍 `0.5`，与主表同，**未动**。
+
+### Added
+
+- `swarm_agents/rival_bee.py`：`data_quality["catalyst_quality"]` = `"peer_read"` / `"unreadable"`。
+  CLAUDE.md 硬检查项「这个失败，下游怎么知道？」——此前只有一行 `_log.debug`，
+  生产日志级别之下等于没有观测点，而回落值又与真值同形。读不到现在还打 `INFO`/`WARNING`。
+- `ic_rerun_readiness._COHORT_HISTORY`：追加 `("2026-09-07", "v0.45.151", ...)`。
+  **`final_score` 位移为 0 仍登记**，两条理由：① `ml.expected_*` 进 `signal_archive`，
+  那是另一条测量管道（v0.45.140 的教训：世代边界要按管道分别问）；
+  ② Δ=0 是**当前模型**的性质而非定义性质——降级链上的 `SimpleMLModel` 给 catalyst
+  0.25 权重，同一改动在它上面 Δ≠0。定义变了就登记。
+  **本次追加不作废任何已累积样本**：上一条边界 09-05 至今 `predictions` 内 0 条样本
+  （`ic_rerun_readiness` 输出「世代内总样本 0 条」），下次定时扫描 09-08。
+  这个窗口不是永远开着的——晚一天做，代价就实打实了。
+- `tests/test_rival_bee_catalyst_missing.py`（15 项）：溢出后仍读得到 / 真读不到给 None /
+  低分条目要到达模型为 `"C"` / 观测点 / 第四份编码副本 / 世代边界。
+  每条都配了反向的成对断言（防「一律 None」「永远返回点什么」「恒写 peer_read」）。
+
+### Changed
+
+- `tests/test_rival_bee_peer_features.py`：`test_falls_back_distinguishably_when_peers_absent`
+  的期望由 `"B"` 改为 `None`。原约定「回落 "B" 而不是 "B+"」方向对但**选错了值**——
+  `"B"` 是众数（461/803 = 57.4%）。
+- `tests/test_oracle_cboe_source.py`：`TestCohortBoundaryAppended` 由「`_COHORT_HISTORY[-1]`
+  必须是 v0.45.128」改为「v0.45.128 那一条在且内容正确」。原断言与同一份表 docstring 里
+  「任何再次改动 RivalBee 特征来源都必须追加一条」**直接冲突**：照规矩追加就会让它变红，
+  于是它保护的不是不变式，而是「别再追加了」。单调递增与内容检查保留。
+
+### 教训
+
+- **「先量再决定」两次都推翻了立项时的假设**：命中率不是个位数（是 14.4%），
+  代价不是「实打实」（当前是 0 条样本）。两个假设都合理，都错了。
+- **仪器要先自证**：`pheromone_compact` 的 1 位小数舍入凭空造出 5.5% 的「读错率」，
+  差点被当成结论。同 v0.45.140。
+- **只改哨兵会让事情变糟**：`_CATALYST_MAGNITUDE.get(None, 1.0)` = 1.0 比现行的 0.9
+  **更远离**真值 0.7。哨兵是症状，板淘汰是病因；只改症状那一处 = 把 28.6% 的高估变成 42.9%。
+  改一个「缺失表示法」之前，先看它落到下游的**每一条**兜底路径上会变成什么。
+- **mutation 脚手架自己栽了一次**：`shutil.copy` 不保留 mtime ⇒ `shutil.move` 还原后源文件
+  比变异时写出的 `__pycache__` 还旧 ⇒ Python 继续用变异后的字节码，
+  下一个变异的基线带着上一个变异。**是收尾那次「还原后 FAILED=3 ≠ 基线 0」把它暴露的**——
+  没有那道反向检查就会得到一份「全部被抓到 ✓」的假报告（M7 实测由 3 变 2，确认第一轮确实被污染）。
+  ⇒ mutation 脚手架必须：每次跑前清 `__pycache__` + 每个变异**还原后再验一次全绿**。
 
 ---
 
-## [0.45.150] — 2026-09-07 — 占位（进行中：审计 `hive_logger.PATHS.*` 派生路径被求值成**模块级常量 / 类属性**的物种 —— import 那一刻冻住，`conftest.py::_isolate_env` 的 `monkeypatch.setenv("ALPHA_HIVE_HOME")` 对它无效，因为 pytest **收集期**就 import 了模块，那时 fixture 还没跑。先例 v0.45.149 的 `MLEnhancedReportGenerator._model_file` 已证实会让「跑一次全套测试」覆盖生产 `ml_model_cache.json`。范围＝① AST 全仓扫描列清单（预计约 22 处，排除 tests/）；② **逐处实证判定危害等级**（判据＝这个冻住的路径会不会被**写**、写的是不是生产数据；高危：`backtester.DB_PATH` / `MemoryStore.DB_PATH` / `vector_memory.DEFAULT_DB_PATH`；中危：各模块 `CACHE_DIR`/`BASE_DIR`；待判：`config.py` 里那批 `str(...)` 快照 dict）；③ 先数 conftest 里哪些已被针对性 monkeypatch 管住，不重复劳动；④ 高危处改 property/函数（调用时求值）+ **成对**测试（「改 env 路径跟着变」+「跑完测试生产文件指纹未变」）+ mutation check + 核对 `collected N items` 不为 0。⚠️ 与 v0.45.149 **相邻不重叠**：那条管 `ml_predictor.save_model` 的相对路径默认值与加载守卫，本条管 `PATHS.*` 派生值的**求值时机**；两边都可能碰 `conftest.py` 的隔离 fixture，合并时逐块核对。**不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`）
+## [0.45.150] — 2026-09-07 — `PATHS` 派生路径冻在 import 期：测试隔离对它无效
+
+### Fixed
+
+**物种**：`hive_logger.PATHS` 的每个成员都是 property（读一次查一次环境变量），
+设计本身没问题。出问题的是**消费方**——把它求值成模块级常量、类属性或**默认参数**，
+值就冻在 import 那一刻。而 pytest 在**收集期**就 import 各 test 模块、连带 import
+生产模块，那时 `tests/conftest.py::_isolate_env`（autouse，function scope）
+一次都还没跑过 ⇒ 冻住的值 = checkout 根目录 = **生产目录**，此后整个 session 不变。
+
+**收集期实证**：自写 pytest 插件在 `pytest_collection_finish` 里读环境——
+`ALPHA_HIVE_HOME` 确为 `<UNSET>`，14 个候选模块中 **10 个**已进 `sys.modules`。
+
+**落盘实证**：全量套（3533 项）跑完，checkout 根目录**新增 7 个产物**：
+`pheromone.db` / `ml_model.json` / `ml_model_cache.json` / `cache/pead_NVDA.json` /
+`cache/vix_term_structure.json` / `data_cache/social_TEST.json` / `reddit_cache/`。
+
+**危害标定**（拿**生产** `pheromone.db`（37 MB，喂 IC 闸 / 权重优化 / 概率记分卡）
+的副本实测）：9 张表 112333 行 → 112333 行、**内容逐字节未变**；但 **mtime 变了、
+并留下 `-wal`/`-shm`** ⇒ 以读写模式打开过、进了 WAL 模式。
+即「那一轮恰好没 INSERT，但写通道全开」——同一个 `PredictionStore` 上的
+`save_predictions()` 就是往里 INSERT 的。⚠️ 只比内容哈希会把这判成「无事发生」。
+
+> **口径与提交号**（不钉的话别人复跑对不上，也分不清是口径不同还是代码变了）：
+> 普查＝「模块级 / 类体 / `Try`·`If`·`With`·`For` 体内、RHS 引用 `PATHS` 的赋值」，
+> 排除 `tests/` 与 `experiments/`；跑在占号提交 `bb6f772` 的树上（窄版 23 处 /
+> 加宽 72 处）。结构守卫的 `KNOWN`（20 处）复核并剪枝于 `de0f073`（已含 v0.45.149~153）。
+> **会随树漂的量必须钉提交**；不随树漂的结论（如「`__file__` 族对 `ALPHA_HIVE_HOME`
+> 完全免疫」「无参 `load_model` 读者 = 0」）才可以裸报。
+
+#### 分级（逐处实证，不一刀切）
+
+判据＝**这个冻住的路径会不会被写、写的是不是生产数据**。
+
+| 等级 | 站点 | 实证依据 | 本版处置 |
+|---|---|---|---|
+| **高危·确证** | `backtester.py:53 DB_PATH` + 3 处默认参数 | 归因栈 3 条：`:99 __init__`→`:103 _init_table`→`sqlite3.connect`，两条独立路径（`generate_ml_report._build_real_training_data`、`swarm_agents/base.py:265 prefetch_shared_data`） | 改 `default_db_path()`，3 处默认参数改 `None` |
+| **高危·潜伏** | `memory_store.py:63 MemoryStore.DB_PATH` | 无参构造实测连到 checkout 根 `pheromone.db` 并跑 `schema_migrate` **建表**；全量套未触发 | 改 `@property` |
+| **高危·潜伏** | `vector_memory.py:48 VectorMemory.DEFAULT_DB_PATH` | 无参构造实测建出 checkout 根 `chroma_db/`（生产 20 MB）；全量套未触发 | 改 `@property` |
+| **高危·绕过**（新发现） | `alpha_hive_daily_report.py:220` 显式传 `VECTOR_MEMORY_CONFIG["db_path"]` | 该键是 config 模块级 dict 里的 `PATHS.chroma_db`，冻结；显式传入会**绕过**上一行刚改好的 property | 不再传该参数（取值相同，只差求值时刻） |
+| **高危·同族**（新发现，非 `PATHS`） | `paper_portfolio.py:913`（写）`:606`（读）`BASE_DIR / "pheromone.db"` | 归因栈：`_close_position`→`_record_barrier_outcome`→`sqlite3.connect` + `CREATE TABLE` + INSERT。`BASE_DIR = Path(__file__).parent` **连环境变量都不看**，比「冻结」更彻底；`_isolate_paper_portfolio_state` 只重绑了 `STATE_DIR` 与四个状态文件，接不住它 | 加 `_pheromone_db_path()` 调用时求值 |
+| 归 **v0.45.149** | `generate_ml_report.py:66 _model_file` | 归因栈确证写 `ml_model_cache.json` | **不动**（见下「范围」） |
+| 中危·确证在写 | `pead_analyzer.py:20 _CACHE_DIR` | 实测建出 `cache/pead_{NVDA,ABBV}.json` | 未改，进结构守卫清单 |
+| 中危·只建空目录 | `earnings_watcher.py:44`、`real_data_sources.py:32`、`reddit_sentiment.py:31` | import 期 `mkdir`，无内容写入 | 同上 |
+| 中危·未触发 | `sec_edgar` / `polymarket_client` / `newsapi_client` / `edgar_rss` 的 `CACHE_DIR` | 全量套跑完无新增 | 同上 |
+| **中高危·账本**（重新分级） | `vrp_signal` / `options_paper_leg` / `portfolio_greeks` / `earnings_vol_signal` 的 `BASE_DIR` | 派生 `vrp_state/` `options_paper_state/` `hedge_state/` —— 是**账本**不是缓存（MEMORY.md v0.45.111）。原任务把它们归「中危：会往仓库写缓存」，**低估了**：账本被测试改写正是 v0.45.104 事故形状 | 未改，进清单 + 进 session 总闸监控 |
+| 低危·逐键判定 | `config.py` 那批 dict | `PHEROMONE_CONFIG` / `MEMORY_CONFIG` / `METRICS_CONFIG` 的 `db_path` 键**零生产读者**（死键）；`CACHE_CONFIG["cache_dir"]` + `RUNTIME_CONFIG["log_file"]` 只被 `init_cache()` 用来 mkdir；`CODE_EXECUTION_CONFIG["sandbox_dir"]` = `/tmp/...` 不在仓库；`ConfigLoader._OVERRIDE_*` 只读不写 | 未改（唯一有真读者的 `VECTOR_MEMORY_CONFIG["db_path"]` 已见上） |
+
+⚠️ **一处流传中的归属错误，本版已核实纠正**：`paper_portfolio` 的 `BASE_DIR`
+**不是** `PATHS.home`，也不在第 98 行——它是 `paper_portfolio.py:52
+BASE_DIR = Path(__file__).parent`。`BASE_DIR = PATHS.home` 那行属于
+**`options_paper_leg.py:98`**（行号 98 就是串台的线索）。
+核法：`git log --all -S'BASE_DIR = PATHS.home' -- paper_portfolio.py` **全历史零命中**。
+**这不是笔误层面的差别**——若真是 `PATHS.home`，把 `ALPHA_HIVE_HOME` 指向 tmp 就能救；
+而 `Path(__file__).parent` 对环境变量**完全免疫**，只能改成显式读 `PATHS.db`
+（本版即如此修）。判据：**引用别人的行号前先自己 `sed -n '<N>p'` 打开看一眼。**
+
+#### 「没触发」不是「不存在」
+
+⚠️ **所有人都在 worktree 里跑测试，所以所有人都不会坏。** 在 worktree 里
+`PATHS.home` 冻成 worktree 根，在主 checkout 里冻成**生产目录**——同一份代码
+换个 cwd 就换个落点。v0.45.152 那个 session 的原话值得原样留着：
+
+> 「在我这边是**没触发**而不是**不存在**——因为我恰好不在主 checkout 里跑。」
+
+⇒ **判危害的判据不是「跑测试没坏过」，是「这个冻住的值在主 checkout 里指向什么」。**
+本版正是据此把 `memory_store` / `vector_memory` 判成**高危·潜伏**并单独实证——
+全量套从未触发它们，但无参构造实测就落到 checkout 根。
+
+**查生产库到底被污染没：按 `created_at` 筛，别按内容匹配。**
+生产库里恰好有一行 TSLA 与夹具行**逐字段完全相同**，看着像被污染，其实不是
+（生产那行 `created_at` = 09-05 08:53:53，夹具行 = 09-07 08:52:50，两次不同写入）。
+本版只读复核**生产** `pheromone.db`：
+
+| 表 | 行数 | 最新 `created_at` | 09-06 之后写入 |
+|---|---|---|---|
+| `barrier_outcomes` | 46 | 2026-09-05 08:53:53 | **0** |
+| `predictions` | 1157 | 2026-09-04 21:53:36 | **0** |
+
+文件 mtime 仍停在 `2026-09-05 01:53:53` ⇒ **生产库未被污染**；本版全程只在
+worktree 与副本上作业。**别把「长得一样」读成「被污染了」，也别读成「没事」。**
+
+**先数谁已经有人管了**（避免重复劳动）：`tests/conftest.py` 里针对性路径
+monkeypatch 只有 3 个模块——`weekly_optimizer.PHEROMONE_DB_PATH`、
+`feedback_loop.PHEROMONE_DB_PATH`、`paper_portfolio` 的 `STATE_DIR` + 四个状态文件。
+**高危三处一个都没被管**。而这三个已被管的全是 `__file__` 派生、且都是**事后**
+逐个补的——逐模块打补丁是打地鼠，故本版补一道不认模块只认产物的总闸。
+
+### Added
+
+- `tests/test_paths_not_frozen_at_import.py`（17 项，4 个类）四层成对守卫：
+  ① `TestResolvedAtCallTime` —— 改 env 路径必须跟着变（含**元守卫**先证
+     `_isolate_env` 本身生效，否则其余断言全部作废）；
+  ② `TestExplicitPathStillWins` —— **成对的另一半**：显式传入的路径必须照常生效。
+     少了它，「把参数整个忽略、永远返回 `PATHS.x`」这种偷懒修法会全绿；
+  ③ `TestProductionArtifactsNotTouched` —— 无参构造前后生产产物**指纹**不变；
+  ④ `TestSpeciesDoesNotSpread` —— **AST** 结构守卫，不许**新增**冻结点
+     （子集语义：修好存量不会变红，新增必红），配 `>= 15` 反向自证防扫描器坏掉。
+  ⚠️ 本文件的 import 刻意留在**模块级**——挪进函数体就会在 `_isolate_env` 之后
+     才 import，坏代码也照样全绿。
+- `tests/conftest.py::_guard_production_artifacts`（session 级 autouse）第二道防线：
+  盯 `pheromone.db` / `metrics.db` / `chroma_db` / `vrp_state` / `options_paper_state`
+  / `hedge_state` 六项，整轮跑完指纹必须没变。判据用 `(size, mtime_ns)` 而非内容
+  哈希——sqlite 以读写模式打开就顶 mtime，内容哈希会把这判成无事发生。
+  写法参照 `_isolate_paper_portfolio_state` 的「两道防线」注释。
+  配套 `artifact_signature` fixture，让总闸与逐条测试**共用同一个判据**
+  （`tests/` 不是包，`from conftest import` 会 `ModuleNotFoundError`）。
+
+### 验证
+
+- **全量套（rebase 前）**：基线 `1 failed / 3508 passed`（唯一失败＝设计使然的
+  `TestCoverageHorizon`，见 MEMORY.md）→ 改后 `1 failed / 3529 passed`。
+  差 21 **已逐项对平**：本版新增 17 项 + `test_pytestmark_placement.py`
+  按全仓测试类参数化、因新增 4 个类而多出 4 项（`3533 + 17 + 4 = 3554` 实测相符）。
+- **全量套（rebase 到含 v0.45.149~153 的 main 之后**，整套重跑而非沿用旧结论**）**：
+  `1 failed / 3596 passed`，唯一失败仍是那条设计使然的。**零回归。**
+  mutation check 在合并树上**重跑**：仍 6/6，`collected=17`。
+  ⚠️ 顺带发现 `KNOWN` 清单**已过期一项**——`generate_ml_report._model_file`
+  已被 v0.45.149 改成 property。子集语义有个副作用：**修好存量不会让守卫变红**，
+  过期项会悄悄留下。已剪枝（21→20）并把对账办法写进注释：
+  `KNOWN - _scan()` 非空即是过期项。
+- **归因复测**：patch `sqlite3.connect` / `builtins.open` / `os.makedirs` /
+  `Path.mkdir` 记 `nodeid` 与调用栈 —— 改后 `pheromone.db` 与 `chroma_db`
+  写入记录**双双归零**（改前各有 5 条 / 1 条）。
+- **mutation check 6/6 全被抓住**（M1 常量回退 / M2 默认参数回退 /
+  M3+M4 退回类属性 / M5 忽略显式参数 / M6 扫描器返回空集），每次均核对
+  `collected=16` 非 0，且 patch 脚本对每个锚点断言**恰好出现 1 次**。
+- `ruff check` 干净（仓库另有 6 处既存 F811，均在本版未触及的文件里）。
+- 类 `__doc__` 未被挤掉：按 **AST** 核对 `MemoryStore` / `VectorMemory` 首条语句
+  仍是 docstring（v0.45.129 教训）。
+
+### 教训
+
+1. **`PATHS` 是 property 不代表消费方安全。** 求值时刻才是关键：模块级常量、
+   类属性、**默认参数**三者等价地冻在 import 期。默认参数最隐蔽——
+   把常量改懒了但默认参数写 `= 某常量`，等于换个地方冻同一个值
+   （同型：v0.45.37 `load_samples(db_path=DB_PATH)`）。
+2. **修了「无参路径」不等于修完了。** 只要还有调用方从别处**显式传入**一个
+   冻结值（此处 `VECTOR_MEMORY_CONFIG["db_path"]`），property 就被绕过。
+   ⇒ 改完默认值要 grep 「谁在显式传这个参数」。
+3. **给的 AST 扫描有盲区，先加宽再信它的普查。** 原扫描只走 `tree.body` 与
+   `ClassDef.body`，不下钻 `Try`/`If`/`With`/`For` —— 而那些同样在 import 期执行。
+   `pead_analyzer.py:20` 就藏在一个 `try` 里，窄版扫 23 处、加宽后 72 处。
+   顺带暴露**更严重的同族**：`__file__` 派生（`Path(__file__).parent / "pheromone.db"`
+   等 49 处）压根不看环境变量，连懒求值都救不了。
+4. **「这个文件不该存在」可能只是当前环境的偶然。** ③ 组第一版写的是
+   `assert not (REPO_ROOT / artifact).exists()`，在开发用的 worktree 里全绿——
+   而**主 checkout** 上 `pheromone.db`(37 MB) / `chroma_db/`(20 MB) / `metrics.db`
+   本来就该存在，那一版会对所有人**恒红**。判据必须是**指纹比对**（问「有没有被
+   动过」）而不是存在性（问「在不在」）。是我自己的 session 总闸与它结论不一致
+   才暴露的 —— 两道防线语义不同，本身就是交叉验证。
+5. **测量工具先自证。** 快照脚本第一版 `entries=0`：SKIP 清单里有 `.claude`，
+   而 worktree 本身就住在 `…/.claude/worktrees/…` 下，`rglob` 给的是绝对路径 ⇒
+   **每个文件都被过滤掉**。只因为打印了 `entries=` 才发现；若只打印 diff，
+   「没有差异」会被读成干净。已加 `assert len(out) > 100`。
+   （同族：v0.45.143「匹配不到任何东西的过滤器 = 恒真的守卫」。）
+6. **对照跑要核对「跑了几条」。** `-x` 写在 `pyproject.toml` 的 `addopts` 里，
+   第一次全量跑在第 622 项就停了（撞上设计使然的 `TestCoverageHorizon`），
+   差点把「只泄漏 2 个文件」当成全貌。全量需 `--maxfail=200` 覆盖它。
+7. **对不上的数字要追到底。** `+21 passed` 与「我加了 17 项」差 4，追下去是
+   `test_pytestmark_placement.py` 按全仓测试类参数化、被我新增的 4 个类撑大。
+   不追就等于放弃了「基线可比」这个前提。
+8. ⚠️ **自造事故（已完全恢复）：`rm -rf pheromone.db*` 的 `*` 吃掉了 7 个
+   git 跟踪的备份**（`pheromone.db.bak_*` / `.backup_corrupted_*`，约 60 MB）。
+   本意只想删 `pheromone.db` 与它的 `-wal`/`-shm`。讽刺的是这些文件**正是我
+   自己在本次调查里列出来并标注过「是 git 跟踪的」**——知道它存在，仍写了会
+   吃掉它的 glob。已 `git checkout --` 逐字节恢复，`git diff HEAD` 为空。
+   ⇒ **清理临时产物要写精确路径，别用前缀 glob**（`pheromone.db` 后面可以跟
+   `-wal` `-shm` `.bak_*` `.backup_*` 四类完全不同的东西）；
+   **删之前先 `git ls-files <pattern>` 看看会不会打到跟踪文件**。
+   同族：MEMORY.md 里「`git reset --hard` 撤自己的提交前没查工作区」。
+
+### 范围
+
+- **不动** `generate_ml_report.py:66 _model_file`：归 **v0.45.149**。
+  ⚠️ 本版**开工时**任务描述里「v0.45.149 已修，可作参照」**当时并不成立**——
+  其实质改动还躺在兄弟 worktree `pensive-williams-cd697b` 的工作区里，
+  `origin/main` 上 `_model_file` 仍是类属性、`PATHS` 尚无 `ml_model_cache` 属性、
+  `_isolate_ml_model_file` fixture 也还不存在（同 v0.45.116
+  「占位标题久悬 ≠ 忘了改标题」：**引用另一版做参照前先核实它落地没**）。
+  收尾 rebase 时它已随 v0.45.149~153 并入 main，两版**不重叠**。
+- **合并实况**：`tests/conftest.py` 冲突为「双方各自追加一个独立 fixture」，
+  已保留双方——v0.45.149 的 `_isolate_ml_model_file`（function 级、md5 内容指纹、
+  盯三个模型文件）与本版的 `_guard_production_artifacts`（session 级、
+  `(size, mtime_ns)`、盯六项生产产物）**职责不重叠，指纹口径不同是刻意的**：
+  前者要抓「内容被换掉」，后者要抓「被读写打开过」。
+  `CHANGELOG.md` 冲突为占位标题 vs 正式条目，取后者。
+- **不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`。
+- **未改但已登记**：`__file__` 派生一族（49 处，含 `feedback_loop` /
+  `ic_diagnostics` / `close_correction` / `replay_scoring` / `signal_archive` /
+  `vol_forecast` 各自的 `pheromone.db`）。严格来说比本版治的物种更重
+  （完全无视环境变量），但已超出本版范围，宜单独一版。
 
 ---
 
