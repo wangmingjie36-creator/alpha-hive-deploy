@@ -216,8 +216,14 @@ class AlphaHiveDailyReporter:
         self.vector_memory = None
         if VectorMemory and VECTOR_MEMORY_CONFIG.get("enabled"):
             try:
+                # v0.45.150：刻意**不传** db_path。
+                # `VECTOR_MEMORY_CONFIG["db_path"]` 是 config 模块级 dict 里的
+                # `PATHS.chroma_db`——求值于 import 期、此后冻住不动。把它显式
+                # 传进来会绕过 `VectorMemory.DEFAULT_DB_PATH` 那个调用时求值的
+                # property，等于让改好的懒求值白改。两者取值完全相同（都是
+                # `PATHS.chroma_db`），差别只在**求值时刻**：不传 ⇒ 由 property
+                # 在构造时读环境变量，测试隔离与 ALPHA_HIVE_CHROMA_PATH 才生效。
                 self.vector_memory = VectorMemory(
-                    db_path=VECTOR_MEMORY_CONFIG.get("db_path"),
                     retention_days=VECTOR_MEMORY_CONFIG.get("retention_days", 90)
                 )
                 if self.vector_memory.enabled:

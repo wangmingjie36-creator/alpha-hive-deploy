@@ -60,10 +60,21 @@ class MemoryEntry:
 class MemoryStore:
     """持久化记忆存储 - SQLite 后端（WAL 模式 + 连接安全）"""
 
-    DB_PATH = PATHS.db
     TABLE_AGENT_MEMORY = "agent_memory"
     TABLE_SESSIONS = "reasoning_sessions"
     TABLE_WEIGHTS = "agent_weights"
+
+    @property
+    def DB_PATH(self) -> str:
+        """生产记忆库路径（= `pheromone.db`）。
+
+    ⚠️ 必须是 property（调用时求值）。写成类属性 `DB_PATH = PATHS.db` 会把值冻在
+        import 那一刻：pytest 在**收集期**就 import 本模块，那时
+        `tests/conftest.py::_isolate_env` 的 `monkeypatch.setenv` 还没跑，
+        于是整个 session 冻成 checkout 根目录，环境隔离对它完全无效。
+        v0.45.150 实测：无参构造会在 checkout 根目录建出 `pheromone.db` 并在其上跑 `schema_migrate`（建表）。
+        """
+        return PATHS.db
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or self.DB_PATH
