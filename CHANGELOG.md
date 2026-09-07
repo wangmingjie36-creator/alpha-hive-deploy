@@ -5,6 +5,82 @@
 
 ---
 
+## [0.45.161] — 2026-09-07 — 二次复查 v0.45.146/152/155：八项对抗性检查，未发现 bug
+
+**本条不改任何代码**，只记录一次对本 session 全部改动的对抗性复查，
+以及复查本身暴露的一个方法学盲区。
+
+### 结论
+
+八项检查全过，v0.45.146（两个特征槽）/ 152（模型恢复）/ 155（环境记录）**未发现 bug**。
+整套 3625 passed / 1 failed（`TestCoverageHorizon` 的 BLS 日历告警，设计上到点该红，
+`origin/main` 上同样红）；ruff 与 `origin/main` 基线同为 48，**零新增**；`F821` 全过。
+
+### 检查项与实测
+
+1. **`unreliable` 阈值回归**（最大实际风险）。本版两个槽 + v0.45.147 两个槽
+   现在**共用** `_MAX_IMPUTED_FEATURES = 4`。803 份实测只有 **2 份**新翻
+   `unreliable`，都是 **08-28 断网日**、缺 **11/12** 维——此前它们记着
+   `unreliable: False` 而缺 11 个特征，**那才是缺陷，现在是修好了**。
+   缺失数分布 `{0: 733, 1: 9, 2: 4, 9: 55, 11: 2}`：干净双峰，无中间地带。
+2. **`None` 进降级模型**。`crowding_score` 此前恒为 float，现可为 `None`。
+   三个模型类 × 五种缺失组合逐个探针：`SimpleMLModel` / `SGDMLModel` / `HGBModel`
+   **全部无异常**，`predict_return`（含 `expected_returns`）亦正常。
+3. **缺失表名字口径**。报告端用 `"crowding_score"`、`_FEATURE_SOURCES` 用 `"crowding"`。
+   查全部消费者：唯一生产消费点只把它写进 JSON 当诊断字段，**无名字映射表**；
+   `ml_predictor` 只取 `len()`；`ml_model_guard` 明确写着**禁止**拿它当判据。无风险。
+4. **世代表**。递增、无重复；`ml_estimator_generation("2026-09-08")`（下次扫描日）
+   返回 `v0.45.146+v0.45.147`，**两个版本都在**——合并时那次撤回性更正未被后续合并冲掉。
+5. **恢复的模型 vs v0.45.149 新守卫**。四份真实文件跑 `load_model`：
+   恢复后的 `ml_model.json`、`ml_model_cache.json`、健康副本三份**放行**；
+   `ml_model.corrupted-2026-09-07T0130.json` 被 **`PoisonedModelError` 拒绝**。
+6. **未接线的调用点**。`alpha_hive_daily_report.py:321` 不传任何蜂群参数。
+   **未采信测试 docstring 的说法**，直接查编排器：`orchestrator.sh:527` 是唯一
+   真实调用行（另 3 处是存在性检查）且带 `--swarm` ⇒ 非生产路径，不接线是对的
+   （它确实没有蜂群上下文，如实报缺才是正确行为）。
+7. **清理副作用**。8 个「本体」文件逐个确认在位，残留副本 0。
+8. **测试改动的变异检验** —— 见下，这是复查暴露的盲区。
+
+### ⚠️ 方法学盲区：改了测试也要单独做一次变异检验
+
+先前的 mutation check **只变异了生产代码**，没有变异「我改过的测试所保护的对象」。
+补做 5 个变异，`collected=127` 逐次不变，**全部被抓**。其中：
+
+- **M-C**（把 `ml_estimator_generation` 改成「取第一条匹配」）只有**重写后**的
+  `test_boundary_partitions_days` 能抓到，**写死日期常量的原版抓不到**
+  ⇒ 那次重写是净增强，不是等价替换。
+- M-A/M-B（世代表乱序 / 重复日期）、M-D/M-E（缺失表漏记两个槽）均被抓。
+
+⇒ **「改了代码」与「改了测试」需要各自做一次变异检验**：前者问「测试能不能抓住
+代码退化」，后者问「测试改动之后还能不能抓住它本该抓的东西」。
+
+### ⚠️ 另一个盲区（同日第二次踩，方向相反）
+
+复核「8 个定义体是否都解析成绝对路径」时，我的检测器按
+**「函数体里出现 `default_model_path` 或 `PATHS.`」**判定，把
+`ml_predictor_extended.py` 那两个判成 ✗ —— 实际它们走**同义但不同名**的
+`default_extended_model_path()`（→ `str(PATHS.ml_model_extended)`，实测绝对路径）。
+**不读源码就报「发现 2 处未修」即是假警报。**
+
+与本 session 早先那次 socket 探针对 `curl_cffi` 恒 0（**假阴性**）方向相反、同族：
+**探针的两个方向都要自证，而我只习惯自证「能不能抓到」，没自证「会不会误抓」。**
+
+判据（已转告 v0.45.150 / v0.45.160）：**按名字匹配的检测器，只能证明
+「匹配到的是对的」，不能证明「没匹配到的是错的」。** 实证：全仓「体内引用
+`PATHS.` 的路径解析器」共 **10 个、名字各不相同**（`default_db_path` /
+`_resolve_cache_dir` / `DB_PATH` / `default_model_path` /
+`default_extended_model_path` / `_pheromone_db_path` / `default_path` /
+`DEFAULT_DB_PATH` / `_cache_dir` / `_sentiment_db_path`）——
+**按单一名字匹配只覆盖 1/10。**
+
+### 遗留（未做，交待清楚）
+
+v0.45.146 的世代边界只登记了 `blend_scan` 那条管道。「IC 闸不受影响」
+（ML 特征不进 `predictions` 表，44 列无 ML 列）是**改动当时**核的，
+v0.45.147/153 之后**未重核**。
+
+---
+
 ## [0.45.160] — 2026-09-07 — 占位（进行中：清 `__file__` 派生的路径常量 —— 比 v0.45.150 治的 `PATHS` 冻结**更严重的同族**。`Path(__file__).parent / "pheromone.db"` 这类写法**压根不读任何环境变量**：`ALPHA_HIVE_HOME` / `ALPHA_HIVE_DB_PATH` 设成什么都无效，连「改成懒求值」都救不了，只能显式改去读 `PATHS.*`。已知含 `feedback_loop` / `ic_diagnostics` / `close_correction` / `replay_scoring` / `signal_archive` / `vol_forecast` 各自的 `pheromone.db`，以及一批 `CACHE_DIR` / `BASE_DIR` / `_CACHE_PATH`。范围＝① **先用 `git ls-files` 干净口径重新普查并钉提交**——v0.45.150 报的「49 处」出自已作废的 `rglob` 污染口径（那口径在主 checkout 会扫进 15349 个 .py、98% 是第三方库），**不得直接沿用该数字**；② 逐处判危害等级，判据仍是「这个冻住的值在**主 checkout** 里指向什么、会不会被**写**、写的是不是生产数据」，**不是「跑测试坏没坏」**（所有人都在 worktree 里跑，所以所有人都不会坏）；③ 高危处改调用时求值，成对测试（改 env 路径跟着变 + 显式传参仍生效 + 生产产物指纹不变）+ mutation check + 核对 `collected N` 非 0；④ 先数 conftest 里哪些已被针对性 monkeypatch 管住（已知 `weekly_optimizer` / `feedback_loop` 的 `PHEROMONE_DB_PATH`、`paper_portfolio` 的 `STATE_DIR`），不重复劳动；⑤ 把清掉的从 `TestSpeciesDoesNotSpread.KNOWN` 里删行，并考虑给 `__file__` 族加一条同构的结构守卫。⚠️ **不动** `PATHS` 族本身（v0.45.150 已治）、**不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`。⚠️ 会碰 `tests/conftest.py` 与 `tests/test_paths_not_frozen_at_import.py`，与其它 session 合并时逐块核对）
 
 ---
@@ -100,7 +176,97 @@ v0.45.149 随后把 `save_model` 的默认路径从 cwd 相对字符串改成
 
 ---
 
-## [0.45.157] — 2026-09-07 — 占位（进行中：`tests/test_missing_value_not_zero.py` 里「生产 `pheromone.db` 不存在就 skip」的守卫，把三条测试变成了「只在主 checkout 跑、且一跑就打 yahoo 外网」——`pheromone.db` 未被 git 跟踪 ⇒ 所有 worktree 与 CI 上恒 skip。范围＝按 `tests/test_quote_set.py::_offline` 的写法补显式源桩让它离线可跑、拆掉「缺生产库就 skip」对这几条的适用性（真需要历史数据的部分单独标 `@pytest.mark.integration`）、成对验证（无库的干净检出必须真执行 + 有库环境必须不出网）+ mutation check。**不**加进 `_KNOWN_NETWORK_REACHERS`（该表按 v0.45.136 只能缩短）、**不**加 `@pytest.mark.network`。不动 `conftest.py` 的离线闸本身、不动生产代码）
+## [0.45.157] — 2026-09-07 — 一个 skip 守卫，让三条测试的断言在任何环境下都没被求值过
+
+`tests/test_missing_value_not_zero.py::TestSPYBenchmarkUnavailable` 的三条测试
+挂着 `if not PROD_DB.exists(): pytest.skip("生产 pheromone.db 不存在")`（v0.45.117 加，
+当时是为了让 CI runner 跳过）。而 `pheromone.db` 命中 `.gitignore` 的 `*.db`，
+**任何按被跟踪文件检出的目录里都没有它**。三种环境各卡在不同一层：
+
+| 环境 | 卡在哪 | 结果 |
+|---|---|---|
+| 干净检出 / CI | ① `PROD_DB.exists()` | SKIPPED |
+| 多数 worktree | ② `if "error" in r`（库在，但是别的测试写出的空壳，0 行 predictions） | SKIPPED |
+| 只有主 checkout | 两层都过，真跑 | `_fetch_spy_prices` 打 yahoo → 离线闸判红 |
+
+⇒ **这三条测试唯一会执行的地方，正是它唯一会失败的地方。**
+
+而且即使在主 checkout，测试体也没测到东西：离线闸挡下取数 ⇒ `available` 为 False
+⇒ 撞上**第三层** skip（`"本次 SPY 取数失败（网络），正例无法验证"`）。
+判红的是 conftest 的 teardown，不是任何一条断言。
+**三条测试的断言，在任何环境下都从未被求值过。**
+
+### Fixed
+
+- 两个外部依赖改由测试构造，三层 skip **全部升级为断言**：
+  - `_seed_predictions_db()` —— 建表 DDL 取自生产 `backtester.PredictionStore`，不手抄
+    （`predictions` 有 40+ 列且仍在 `_migrate_options_columns` 演进，手抄等于冻快照）。
+  - `_synthetic_spy()` —— `_fetch_spy_prices` 的确定性替身。⚠️ 它**不是** conftest 那批
+    「取不到」源桩：本节要验的正例恰是「报价拿得到时基准可用」，所以桩照抄真源的三条
+    形态约束（`[start-60d, end+10d]`、只含工作日、单调微涨好让 `macro_gate` 不把样本全拦掉）。
+    单调 ⇒ 起止价确定 ⇒ `spy_return_pct` 现在断言的是**数值**（421.0 → 425.0，0.95%），
+    不再只是「非 None」。
+  - autouse fixture 里加**正面核对**：读到的条数与 ticker 集合必须等于夹具的
+    （CLAUDE.md「断言要成对」：「没读生产库」必须配「确实读到了夹具库」）。
+- `test_nontrading_boundary_still_resolves` 此前是**空转**的：它抹掉报价序列首尾各 3 天，
+  而序列首端在 `first_date - 60d`（真源就是这么拉的），离被查的 `first_date` 有 60 天，
+  `_nearest_close` 根本走不到「找最近交易日」两个分支。改为抹掉**被查的那两个日期本身**，
+  并前置核对洞确实落在查询点上。**已实测**：拆掉 `_nearest_close` 回退后，
+  旧写法 PASSED、新写法 FAILED。
+
+### Added
+
+- `TestRealSPYFetchContract`（`@pytest.mark.integration`）——补上「没有任何离线测试再执行
+  真取数函数」这段空白（`TestSPYFetchGuarded` 只做静态源码核对）。
+  ⚠️ 它**刻意不写** `if not px: pytest.skip()`：取数长期挂掉时若跳过就没有任何东西会红，
+  那正是本版要治的形状。整个文件现已无一处 `pytest.skip`。
+
+### 判据（本版的一般教训）
+
+> **「加一个 skip 守卫」和「让这条测试在任何地方都跑不到」之间，只隔着一个未被 git 跟踪的文件。**
+>
+> 写 `if not X.exists(): pytest.skip()` 时先问一句：**X 在哪些环境里存在？**
+> 若答案是「只有一台机器上的一个目录」，那这条测试等于没有。
+
+与 v0.45.114「跳过缺失项＝把缺失渲染成不存在」同源：`continue` 把「这项缺了」渲染成
+「这项不存在」，`skip` 把「这条没验」渲染成「这条没问题」。两者都答不出
+CLAUDE.md 那句硬检查「**谁会红？**」。
+
+区别值得记：**同样的条件性，写在 marker 上就是可见的，写在 skip 里就是不可见的。**
+`-m integration` 由命令行显式选中、由 addopts 显式排除；skip 只在 `-rs` 时才吐一行，
+默认输出里它和 PASSED 一样是个点。
+
+### 验证（2×2，每格处置完全相同）
+
+| | 旧代码 | 新代码 |
+|---|---|---|
+| **无** `pheromone.db`（干净检出＝CI） | 3 SKIPPED「生产 pheromone.db 不存在」 | **22 passed, 0 skipped** |
+| **有**生产 `pheromone.db`（复制进干净检出） | 2 ERROR（yahoo 外网）+ 2 SKIPPED | **22 passed, 0 skipped，不出网** |
+
+- 干净检出用 `git archive $(git write-tree) | tar -x`（只含被跟踪文件，也正是根因的直接演示）。
+  **没在主 checkout 里跑过测试**；生产库是复制进临时检出的，sha256 与 mtime 前后逐位未变。
+- mutation check 4/4，每次核对 `collected 23 items / 22 selected` ≠ 0，且每次还原后复验全绿：
+  M1 拿掉 SPY 源桩 → 2 红；M2 拿掉 `_find_db` 桩 → 3 红（正面核对生效）；
+  M3 生产代码基准不可用时回填 `0.0`（＝v0.45.42 原始 bug）→ `test_empty_prices…` 红；
+  M4 拆掉 `_nearest_close` 回退 → `test_nontrading_boundary…` 红。
+- 全套 `-m "not integration and not network"`：**3624 passed, 1 failed**。
+  唯一失败是 `TestCoverageHorizon`（CLAUDE.md 记载 2026-09-06 起变红是设计意图），
+  已在旧代码上复现同一条，与本版无关。
+
+⚠️ 自造的一次误判，记下来免得重犯：核对「测试有没有写生产库」时，我看到 `-wal`/`-shm`
+边车文件出现、差点记成回归。**那是我自己那条只读 `sqlite3` 探针造的**——生产
+`pheromone.db` 是 WAL 模式，*任何*连接（含 `mode=ro`）都会就地造出边车；
+对照格没跑过那条探针，才显出差异。真正的证据一直是 sha256 + mtime，两者前后未变。
+⇒ **2×2 只有在每一格处置完全相同时才成立**；同 MEMORY「测量工具要先自证」。
+
+### 顺带发现（未在本版处理，已开任务）
+
+同一物种在干净检出里还让 **17 条**测试恒 skip：`test_distribution_invariants.py`（14）、
+`test_ml_expected_return.py`（2）、`test_catalyst_availability.py`（1）——
+后两个正是本文件当初 docstring 里援引的「仓库既有惯例」。
+⚠️ **不宜一刀切**：`test_distribution_invariants` 顾名思义就是在核对*生产数据本身*
+有没有退化，换夹具就测不到它要测的东西；那类的修法是标 `@pytest.mark.integration`
+让条件性可见，不是补桩。
 
 ## [0.45.156] — 2026-09-07 — 占位（进行中：v0.45.151 只修了 `_read_peer` 一条路径，`detect_resonance` 仍直读 `self._entries` ⇒ 同一 `MAX_ENTRIES=80` 截断（注释按「9 只标的」定，`config.WATCHLIST` 现 30 只、一轮约 210 条）会系统性删掉**低分**蜂，而低分与看空/中性相关 ⇒ 假设它是 chronos_bee.py 记的「信息素多5/空0 自我强化看多」的结构性成因之一。范围＝① 用 803 份生产 `analysis-*-ml-*.json` 重放真实发布序列，量 `detect_resonance` 的`ticker_entries` 实际丢了几条、与生产 `swarm_results.resonance` / `supporting_agents` 对照；② 命中率显著才动代码（抬 MAX_ENTRIES 或给共振一条抗淘汰视图），并按需追加 `ic_rerun_readiness._COHORT_HISTORY`。**先量再决定**，命中率为零或个位数则只改注释不改行为。不动评分权重、不动 `get_agent_entry` 语义、不动 probability_scorecard）
 
