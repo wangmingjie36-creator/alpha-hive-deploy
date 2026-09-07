@@ -5,7 +5,152 @@
 
 ---
 
-## [0.45.142] — 2026-09-07 — 占位（进行中：训练侧另一条构建路径 `generate_ml_report._build_real_training_data` 仍在补 5.0；范围＝该函数 vs `ml_predictor.build_training_data_from_db` 的口径合并，含 SQL 口径 / 缺维处理 / momentum 死特征）
+## [0.45.142] — 2026-09-07 — 训练侧两条构建路径口径相反：合并成一条，并证明生产估计量未换代
+
+v0.45.140/141 修的是**服务**侧的死读者。本条是同一批排查里剩下的**训练**侧遗留：
+`generate_ml_report._build_real_training_data` 与 `ml_predictor.build_training_data_from_db`
+都从 `predictions` 表构建 `TrainingData`，口径长期相反，属「口径并存陷阱」。
+
+### 先量：差异远不止「缺维处理相反」
+
+报修时的假设是「差异只来自缺维样本的处理」。实测不成立——缺维是三块差异里**最小**的一块：
+
+| 项 | `_build_real_training_data`（旧） | `build_training_data_from_db` |
+|---|---|---|
+| 行集 | `checked_t7=1` `LIMIT 200` | 另加 `return_t7 IS NOT NULL` + `COALESCE(ambiguous_t7,0)=0`，`LIMIT 500` |
+| 维度缺失 | `ds.get("signal", 5.0)` 补 5.0 | v0.45.50 起**剔除** |
+| `ambiguous_t7=1` | 收下 | v0.45.9 P0 起排除（标签无意义＝灌噪音） |
+| `return_t7 IS NULL` | `or 0` → 记成 0.0 收益 | 排除 |
+| `momentum_5d` | **写死 `0.0`** | 由 signal/sentiment 派生 |
+| `iv_rank` / `put_call_ratio` | 只判 None，哨兵值原样收 | 哨兵值改由 odds 派生 |
+
+真库实测（2026-09-07，`pheromone.db`，44 列）：
+
+| 项 | 数 |
+|---|---|
+| 旧口径行数 / 新口径行数 | 200 / 497 |
+| 两者交集 | 174 |
+| **仅旧口径可见** | **26 —— 全部是 `ambiguous_t7=1`**（`return_t7 IS NULL` 的 0 条） |
+| 旧口径 200 行中缺维 | 2（BRK-B 08-13 / 08-10，`dimension_scores` 是**空字典**，五维全补 5.0） |
+
+旧路径产出的 11 个特征里 **3 个 sd=0**——树模型在常数列上无法分裂，等于只有 8 维：
+
+| 特征 | 旧路径取值种数 | 新路径 |
+|---|---|---|
+| `momentum_5d` | **1**（恒 0.0，写死） | 170 |
+| `iv_rank` | **1**（恒 50.0，DB 列全 NULL） | 90 |
+| `put_call_ratio` | **1**（恒 1.0，同上） | 64 |
+
+标签也被污染：`win_7d` 正例率 0.435（旧，含模糊样本）vs 0.487（新），系统性偏低 **5.2pp**。
+
+### 关键发现：这条路径的产物在生产上被**整包丢弃**
+
+报修单说它「是活的生产路径」——函数确实每次扫描都被调用，但**产物到不了模型**。
+`MLPredictionService.train_model()` 自己会再直读一次 DB：
+
+```python
+real_data = build_training_data_from_db(min_samples=30, max_rows=500)
+if real_data:            training_data = real_data                      # ← 直读结果胜出
+else:                    training_data = self.data_builder.get_training_data()   # ← 才轮到预载
+```
+
+而 `_build_real_training_data` 的结果是写进 `historical_records` 的。探针钉在
+`model.train()` 的**实参**上（不看日志、不看标签），生产配置实测：
+
+| 项 | 值 |
+|---|---|
+| `_build_real_training_data` 产出 | 200 条 |
+| `build_training_data_from_db` 产出 | 497 条 |
+| **真正进 `model.train()` 的** | **497 条，键集与后者逐条相同、与前者不同** |
+
+⇒ 旧路径补的 5.0、收的模糊样本、三个常数列，今天一条都没进过模型。
+它只在 `build_training_data_from_db` 返回空（可用样本 < 30）时才轮得到——
+而那正是样本最稀少、最经不起假样本的时候。回退窗口里的代价实测：
+**|Δprobability| max 0.4019、mean 0.0853、84.2% 的预测移动 > 0.02**
+（自证扰动的 max 才 0.166 —— 真实差异比"已知会变"的对照还大）。
+
+### 改法：合并成一条，不是对齐两条
+
+`_build_real_training_data` 改为**委托** `build_training_data_from_db`，删掉自己那份
+SQL 与特征映射。合并后两条路径唯一的区别是样本量下限（10 vs 30），而那正是这个
+函数存在的理由——`train_model()` 用 30 作闸，闸不过时才轮到预载，两处都写 30
+的话这条回退永远够不着。故把 `MIN_REAL_SAMPLES = 10` 从函数内局部变量提为类常量，
+调用方与被调方共用一个真相。
+
+SQL 口径的三处差异**都不是有意为之**，是没跟上后来的迁移：`ambiguous_t7` 排除是
+v0.45.9 P0 加的、`return_t7 IS NOT NULL` 与缺维剔除是 v0.45.50 加的，旧路径三次都
+没被一起改。`db_path` 现在显式传（`PredictionStore().db_path`，与
+`build_training_data_from_db` 默认的 `PATHS.db` 同源：`backtester.DB_PATH = PATHS.db`）。
+
+### 世代边界：两条测量管道分别问，答案都是「不需要」——但理由不同
+
+- **IC 重跑闸 `ic_rerun_readiness._COHORT_HISTORY`：不需要。** 独立数过列名，
+  `predictions` 表 44 列里含 `ml`/`prob` 的列数 = **0**，ML 输出不进这条管道。
+- **概率记分卡 `probability_scorecard._ML_ESTIMATOR_GENERATIONS`：不需要，但这条必须实测。**
+  本次确实动了 `build_training_data_from_db` 本身（类型闸、`_cat_qual`），号称等价不算数。
+  取生产配置下的改前/改后快照逐条比对：497 行序列化后 **SHA 相同**、
+  进 `model.train()` 的键集相同、模型输出 **|Δ| = 0.00e+00**。
+  比对工具先用一处已知扰动自证判别力（基线 probability sd = 0.0749，扰动被接住）。
+  ⇒ 估计量未换代，**不往那张表追加边界**（追加会白白作废几个月池化样本）。
+  ⚠️ 附带条件：若未来真的落进回退窗口（可用样本 < 30），估计量就变了——
+  但那时本来就是退化状态，且旧路径在那个窗口里喂的是 3 个常数列。
+
+### 顺带修（同源，各自独立成立）
+
+1. **类型闸统一。** `build_training_data_from_db` 的守卫是
+   `isinstance(ds.get(k), (int, float))`——`bool` 是 `int` 子类、NaN 是 float 且
+   truthy，两者都能穿（v0.45.121 / v0.45.93 同物种）。而
+   `generate_ml_report._usable_dim` 就是本仓为此写好的标准谓词。既然两条训练路径
+   现在只剩这一个闸，洞就集中了：谓词搬到 `ml_predictor.usable_dim`（与
+   `catalyst_quality_from_score` 等共享特征函数同处；`generate_ml_report` 反向依赖
+   `ml_predictor`，只能住这一端），两侧共用。生产 945 行实测 bool 0 次、NaN 0 次，
+   属防御性加固；⚠️ 但 `json.loads` **接受**裸 `NaN` 字面量，所以路径是通的。
+2. **`_cat_qual` 的第三份副本删除。** `catalyst_quality_from_score` 的 docstring 从
+   v0.44.3 起就写着「提为模块级单一真相……此前在**至少三处**各写一份嵌套
+   `_cat_qual`（`ml_predictor.py` 内、…）」——而 `ml_predictor.py` 内那一份**至今还在**，
+   就在同一个文件里，离那段 docstring 900 行。v0.44.3 收掉了另外两处，这段话替它
+   宣称了 4 个月「已经统一」。判据是 v0.45.121 那条：**「我已经改了」这句话本身要核对**。
+   docstring 已同步改成与代码相符。
+3. **降级日志不再替失败原因下结论。** `train_model()` 的
+   「真实数据不足，使用 %d 条硬编码数据」在回退窗口里是假的——`historical_records`
+   可能是调用方预载进来的**真实**数据。本次探针实测就撞见了：日志说
+   「使用 200 条硬编码数据」，那 200 条全是库里的真实记录。改为只陈述观察到的：
+   「DB 直读未过 N 条样本闸，改用 data_builder 现有的 M 条记录训练」（v0.45.126 判据）。
+   另：委托失败的两支（依赖导入失败 / 库路径解析失败）改为 WARNING 出声——
+   「拿不到」与「库里没有」不能同形。
+
+### 测试
+
+`tests/test_ml_training_path_unification.py`，**14 项**，改动前跑 9 红 2 绿
+（绿的两条是**成对的反面**：合法行照收、阈值差异存在，防 `return []` 式偷懒修法全绿）。
+每条「拒绝」断言都配一条「照收」断言。接线用 spy 钉**实参**（`db_path` 真的传了、
+`min_samples` 真的是 10），不是只测被调函数（v0.45.126）。
+
+⚠️ **夹具改过之后重新验证了「会红」**：为让 `iv_rank`/`put_call_ratio` 有方差，
+夹具里的 `odds` 从常数改成逐条不同——改完把新夹具配旧代码再跑一遍，仍是同样 9 红。
+改夹具不重验，等于把「会红的断言」变成没验证过的断言。
+
+**Mutation check 8 项全部被接住**（脚本自断言锚点唯一、逐次核对 `collected 14 items`）。
+其中 **M4 第一轮全绿，且不是等价变异**：拆掉 SQL 的 `return_t7 IS NOT NULL` 后，
+NULL 行照样进不了结果——它在循环里被 `float(None)` 的 `TypeError` 兜住了。
+**下游守卫把上游缺陷掩护掉了。** 但两者并不等价：坏行进了结果集就会**占掉 `LIMIT`
+的名额**、也会混进 `len(rows) < min_samples` 的计数，而夹具只有 41 行、远低于
+`LIMIT 500`，看不出来。已补 `TestBadRowsDoNotConsumeLimit`（`max_rows=2` + 一条最新的
+NULL 行）专门分辨这一点。
+
+### Changed
+
+- `generate_ml_report.py`：`_build_real_training_data` 改为委托 `build_training_data_from_db`
+  （−70 行自拼 SQL 与特征映射）；`MIN_REAL_SAMPLES` 由函数内局部变量提为类常量；
+  `_usable_dim` 改为从 `ml_predictor` 导入。
+- `ml_predictor.py`：新增 `usable_dim()`（从 `generate_ml_report` 搬入）；
+  `build_training_data_from_db` 的维度守卫改用它；删除局部 `_cat_qual` 副本，
+  改调模块级 `catalyst_quality_from_score`；`catalyst_quality_from_score` docstring
+  更正；`train_model()` 降级日志改为不替失败原因下结论。
+
+### Added
+
+- `tests/test_ml_training_path_unification.py`（14 项）。
 
 ---
 

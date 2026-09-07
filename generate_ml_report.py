@@ -7,6 +7,7 @@ import atexit
 import html as _html
 import json
 import math
+import sqlite3
 from typing import Optional
 import argparse
 from datetime import datetime
@@ -17,6 +18,8 @@ from advanced_analyzer import AdvancedAnalyzer
 from ml_predictor import (
     MLPredictionService,
     TrainingData,
+    # v0.45.142：类型闸的单一真相搬到 ml_predictor，与训练侧共用一个谓词
+    usable_dim as _usable_dim,
 )
 from config import WATCHLIST
 from hive_logger import PATHS, get_logger, pdt_today
@@ -53,20 +56,6 @@ def _pdt_now():
         return datetime.now()
 
 
-def _usable_dim(value) -> bool:
-    """蜂群维度分是不是一个可用的数值。
-
-    三处派生特征（catalyst_quality / volatility / market_sentiment）共用。
-    `bool` 是 `int` 子类，必须显式排除：`True` 会当成 1.0 一路通过 float 比较，
-    在本仓已经酿过事故（v0.45.121 把 `True` 当"强看空"放行）。NaN 同理——
-    它对任何比较都返回 False，却是 truthy，`or` / `if x:` 都拦不住。
-    写法与本仓其余守卫一致，不自己发明。
-    """
-    return (isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and value == value)
-
-
 class MLEnhancedReportGenerator:
     """ML 增强的报告生成器"""
 
@@ -79,6 +68,12 @@ class MLEnhancedReportGenerator:
     # ⭐ Task 3: 异步 HTML 生成（后台文件写入）
     _file_writer_pool = None   # 异步文件写入线程池
     _writer_lock = Lock()      # 文件写入锁（防止并发冲突）
+
+    # 回退预加载的样本量下限。**有意**低于 `ML_TRAINING_CONFIG.min_real_samples`
+    # （30）：`MLPredictionService.train_model()` 自己会用 30 作闸直读 DB，闸过了
+    # 就用它的结果、这里预载的数据被整包丢弃；只有闸不过（样本稀少）时才轮得到
+    # `historical_records`。两处都用 30 的话，这条回退永远够不着。
+    MIN_REAL_SAMPLES = 10
 
     def __init__(self):
         self.analyzer = AdvancedAnalyzer()
@@ -113,9 +108,8 @@ class MLEnhancedReportGenerator:
                 # 双重检查（防止并发重复训练）
                 if today not in self._model_cache and not self._check_disk_cache(today):
                     _log.info("初始化 ML 模型（首次训练）...")
-                    MIN_REAL_SAMPLES = 10
                     real_data = self._build_real_training_data()
-                    if len(real_data) >= MIN_REAL_SAMPLES:
+                    if len(real_data) >= self.MIN_REAL_SAMPLES:
                         _log.info("✅ [ML-REAL] 使用 %d 条真实验证数据训练 ML 模型", len(real_data))
                         self._training_data_source = "real"
                         self.ml_service.data_builder.historical_records = real_data
@@ -124,13 +118,13 @@ class MLEnhancedReportGenerator:
                             _log.warning(
                                 "⚠️ [ML-MIXED] 真实数据仅 %d 条（不足 %d），"
                                 "回退到硬编码样本训练，预测置信度受限",
-                                len(real_data), MIN_REAL_SAMPLES,
+                                len(real_data), self.MIN_REAL_SAMPLES,
                             )
                         else:
                             _log.warning(
                                 "⚠️ [ML-SAMPLE] 无真实验证数据，使用硬编码样本训练，"
                                 "预测结果仅供参考（请积累 %d+ 条 T+7 验证记录后重训）",
-                                MIN_REAL_SAMPLES,
+                                self.MIN_REAL_SAMPLES,
                             )
                         self._training_data_source = "sample"
                     self.ml_service.train_model()
@@ -148,75 +142,56 @@ class MLEnhancedReportGenerator:
                         self._model_cache[today] = self.ml_service.model
 
     def _build_real_training_data(self) -> list:
-        """从 pheromone.db 读取真实验证数据构建训练集（T+7 已验证）"""
+        """从 pheromone.db 读取真实验证数据构建训练集（T+7 已验证）。
+
+        v0.45.142：**委托** `ml_predictor.build_training_data_from_db`，不再
+        自己拼 SQL 与特征映射。此前两条路径并存且口径长期相反——
+
+        | 项 | 本函数（旧） | `build_training_data_from_db` |
+        |---|---|---|
+        | 维度缺失 | `ds.get("signal", 5.0)` 补 5.0 | v0.45.50 起剔除 |
+        | `ambiguous_t7=1` | 收下 | v0.45.9 P0 起排除（标签无意义） |
+        | `return_t7 IS NULL` | `or 0` → 0.0 收益 | 排除 |
+        | `momentum_5d` | 写死 `0.0` | 由 signal/sentiment 派生 |
+        | `iv_rank`/`put_call_ratio` | 只判 None，哨兵值原样收 | 哨兵值改由 odds 派生 |
+
+        真库实测（2026-09-07，旧口径 `checked_t7=1 LIMIT 200` 的 200 行）：
+        2 行 `dimension_scores` 为空字典（五维全补 5.0 → 整行自洽的假样本）、
+        26 行 `ambiguous_t7=1`；产出的 11 个特征里 **3 个 sd=0**
+        （`momentum_5d` / `iv_rank` / `put_call_ratio`），树模型无法在常数列上分裂。
+
+        合并后两条路径唯一的区别是样本量下限（见 `MIN_REAL_SAMPLES`）。
+        """
         try:
-            import sqlite3 as _sq3
-            import json as _json
             from backtester import PredictionStore
-            ps = PredictionStore()
-            with _sq3.connect(ps.db_path) as conn:
-                conn.row_factory = _sq3.Row
-                rows = conn.execute("""
-                    SELECT ticker, date, final_score, direction,
-                           dimension_scores, iv_rank, put_call_ratio,
-                           agent_directions,
-                           return_t7, correct_t7
-                    FROM predictions
-                    WHERE checked_t7 = 1
-                    ORDER BY date DESC
-                    LIMIT 200
-                """).fetchall()
-
-            # v0.44.3：阈值唯一真相 = ml_predictor.catalyst_quality_from_score
-            # （此前同一套阈值在三处各写一份嵌套 _cat_qual）
-            from ml_predictor import catalyst_quality_from_score as _cat_qual
-            from ml_predictor import (
-                market_sentiment_from_score as _sent_from_score,
-            )
-            from ml_predictor import volatility_from_risk_adj as _vol_from_risk_adj
-
-            direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
-            result = []
-            for r in rows:
-                ds = _json.loads(r["dimension_scores"] or "{}")
-                _ad = _json.loads(r["agent_directions"] or "{}") if r["agent_directions"] else {}
-                _dir = r["direction"] or "neutral"
-                if _ad:
-                    _majority = sum(1 for d in _ad.values() if d == _dir)
-                    _agree = _majority / len(_ad)
-                else:
-                    _agree = 0.5
-                result.append(TrainingData(
-                    ticker=r["ticker"],
-                    date=r["date"],
-                    crowding_score=ds.get("signal", 5.0) * 10,
-                    catalyst_quality=_cat_qual(ds.get("catalyst", 5.0)),
-                    momentum_5d=0.0,
-                    # v0.45.137：此前这里把 volatility 写死成 5.0——若本降级
-                    # 分支真的触发（`build_training_data_from_db` 返回空时），
-                    # 训练集该特征方差为 0，模型学不到任何切分。三处口径统一到
-                    # `ml_predictor` 的两个函数，不再各写一份常数。
-                    volatility=_vol_from_risk_adj(ds.get("risk_adj", 5.0)),
-                    market_sentiment=_sent_from_score(ds.get("sentiment", 5.0)),
-                    actual_return_3d=float(r["return_t7"] or 0) * 0.4,
-                    actual_return_7d=float(r["return_t7"] or 0),
-                    actual_return_30d=float(r["return_t7"] or 0) * 2.5,
-                    win_3d=bool(r["correct_t7"]),
-                    win_7d=bool(r["correct_t7"]),
-                    win_30d=bool(r["correct_t7"]),
-                    # v2 新特征
-                    iv_rank=float(r["iv_rank"]) if r["iv_rank"] is not None else 50.0,
-                    put_call_ratio=float(r["put_call_ratio"]) if r["put_call_ratio"] is not None else 1.0,
-                    final_score=float(r["final_score"]) if r["final_score"] is not None else 5.0,
-                    odds_score=ds.get("odds", 5.0),
-                    risk_adj_score=ds.get("risk_adj", 5.0),
-                    agent_agreement=_agree,
-                    direction_encoded=direction_map.get(_dir, 0.0),
-                ))
-            return result
-        except (ImportError, KeyError, TypeError, ValueError, OSError) as e:
-            _log.debug("_build_real_training_data 失败: %s", e)
+            from ml_predictor import build_training_data_from_db
+        except ImportError as e:
+            # 「拿不到」与「没有」必须可区分：这一支是**失败**，不是「库里没数据」。
+            # 调用方那句 "无真实验证数据" 描述的是后者，所以这里必须自己出声。
+            _log.warning("_build_real_training_data: 依赖导入失败，"
+                         "本次训练将退化为硬编码样本: %s", e)
             return []
+
+        try:
+            db_path = str(PredictionStore().db_path)
+        except (sqlite3.Error, OSError) as e:
+            _log.warning("_build_real_training_data: 无法解析 predictions 库路径，"
+                         "本次训练将退化为硬编码样本: %s", e)
+            return []
+
+        try:
+            from config import ML_TRAINING_CONFIG as _MTC
+            max_rows = _MTC.get("max_training_rows", 500)
+        except (ImportError, AttributeError):
+            max_rows = 500
+
+        # db_path 必须显式传：不传会走 `PATHS.db` 默认值，在 git worktree 里
+        # 那是一个空桩库，函数会安静地返回 []（v0.45.140 的踩坑点）。
+        return build_training_data_from_db(
+            db_path=db_path,
+            min_samples=self.MIN_REAL_SAMPLES,
+            max_rows=max_rows,
+        )
 
     def _check_disk_cache(self, today: str) -> bool:
         """检查磁盘缓存是否存在且有效"""

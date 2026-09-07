@@ -227,10 +227,14 @@ _CATALYST_GRADE_CUTS = ((8.5, "A+"), (7.5, "A"), (6.5, "B+"), (5.5, "B"))
 def catalyst_quality_from_score(score) -> str:
     """把 ChronosBee 的催化剂维度分（0~10）转成 A+/A/B+/B/C 等级。
 
-    v0.44.3 提为模块级单一真相。此前同一套阈值在**至少三处**各写一份嵌套
-    `_cat_qual`（`ml_predictor.py` 内、`alpha_hive_daily_report.py`、
-    `generate_ml_report.py`），与 `expected_returns` 曾经的三重复制是同一个
-    反模式 —— 阈值一改就得记住改三处，漏一处就静默产生两套口径的历史样本。
+    v0.44.3 提为模块级单一真相，v0.45.142 才真的做到。此前同一套阈值在
+    **至少三处**各写一份嵌套 `_cat_qual`（`ml_predictor.py` 内、
+    `alpha_hive_daily_report.py`、`generate_ml_report.py`），与
+    `expected_returns` 曾经的三重复制是同一个反模式 —— 阈值一改就得记住改
+    三处，漏一处就静默产生两套口径的历史样本。⚠️ v0.44.3 收掉了另外两处，
+    **本模块内 `build_training_data_from_db` 里的那一份留到了 v0.45.142**，
+    而这段 docstring 在这 4 个月里一直宣称已经统一——「我已经改了」这句话
+    本身要核对（v0.45.121）。
 
     分数不可用（None/NaN/非数值）时返回 "B"（对应 magnitude 0.9，接近中性），
     **不返回 "B+"** —— "B+" 是 magnitude 1.0 的基准档，用它做缺失值会让
@@ -271,6 +275,24 @@ _VOLATILITY_PER_POINT = 2.5
 _SENTIMENT_PER_POINT = 20.0
 _DIMENSION_NEUTRAL = 5.0
 _DIMENSION_MAX = 10.0
+
+
+def usable_dim(value) -> bool:
+    """蜂群维度分是不是一个可用的数值。
+
+    v0.45.142 从 `generate_ml_report._usable_dim` 搬到这里：训练侧
+    （`build_training_data_from_db`）与服务侧本就该用同一个类型闸，而
+    `generate_ml_report` 反向依赖 `ml_predictor`，谓词只能住在这一端。
+
+    `bool` 是 `int` 子类，必须显式排除：`True` 会当成 1.0 一路通过 float
+    比较，在本仓已经酿过事故（v0.45.121 把 `True` 当"强看空"放行）。NaN 同理
+    ——它对任何比较都返回 False，却是 truthy，`or` / `if x:` 都拦不住；且
+    `json.loads` **接受**裸 `NaN` 字面量，所以从 `dimension_scores` 解出
+    NaN 是可能的。写法与本仓其余守卫一致，不自己发明。
+    """
+    return (isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value == value)
 
 
 def volatility_from_risk_adj(risk_adj: float) -> float:
@@ -1134,13 +1156,6 @@ def build_training_data_from_db(
     if not os.path.exists(db_path):
         return []
 
-    def _cat_qual(v: float) -> str:
-        if v >= 8.5: return "A+"
-        if v >= 7.5: return "A"
-        if v >= 6.5: return "B+"
-        if v >= 5.5: return "B"
-        return "C"
-
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
@@ -1190,7 +1205,7 @@ def build_training_data_from_db(
             #
             # 实测代价：910 条训练候选里 96.9% 五维齐全，剔除只损失 28 条（3.1%）。
             # 用 3% 样本换掉伪造特征向量，划算。
-            if not all(isinstance(ds.get(k), (int, float)) for k in _REQUIRED_DIMS):
+            if not all(usable_dim(ds.get(k)) for k in _REQUIRED_DIMS):
                 _skipped_incomplete += 1
                 continue
             ad = json.loads(r["agent_directions"] or "{}")
@@ -1241,7 +1256,7 @@ def build_training_data_from_db(
                 ticker=r["ticker"],
                 date=r["date"],
                 crowding_score=_sig * 10,
-                catalyst_quality=_cat_qual(_cat),
+                catalyst_quality=catalyst_quality_from_score(_cat),
                 momentum_5d=round(_momentum, 2),
                 volatility=round(_vol, 2),
                 market_sentiment=market_sentiment_from_score(_sent),
@@ -1634,11 +1649,13 @@ class MLPredictionService:
     def train_model(self) -> Dict:
         """训练模型 — 优先使用真实数据，不足时降级到硬编码"""
         real_data = []
+        _min_samples = 30
         try:
             from config import ML_TRAINING_CONFIG as _MTC
+            _min_samples = _MTC.get("min_real_samples", 30)
             if _MTC.get("use_real_data", True):
                 real_data = build_training_data_from_db(
-                    min_samples=_MTC.get("min_real_samples", 30),
+                    min_samples=_min_samples,
                     max_rows=_MTC.get("max_training_rows", 500),
                 )
         except (ImportError, OSError) as e:
@@ -1649,7 +1666,13 @@ class MLPredictionService:
             training_data = real_data
         else:
             training_data = self.data_builder.get_training_data()
-            _log.info("真实数据不足，使用 %d 条硬编码数据", len(training_data))
+            # v0.45.142：别替失败原因下结论。`historical_records` 既可能是
+            # `HistoricalDataBuilder.__init__` 的硬编码样本，也可能是调用方
+            # （`generate_ml_report`）用更低的阈值预载进来的**真实**数据——
+            # 旧文案一律说成「硬编码数据」，在后一种情形下是假的（实测过：
+            # 日志说「使用 200 条硬编码数据」，那 200 条全是库里的真实记录）。
+            _log.info("DB 直读未过 %d 条样本闸，改用 data_builder 现有的 %d 条记录训练",
+                      _min_samples, len(training_data))
 
         result = self.model.train(training_data)
 
