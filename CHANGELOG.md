@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.158] — 2026-09-07 — 占位（进行中：v0.45.145 的快照目录位置 = `模型文件.parent / ml_model_history`，而 v0.45.149 把模型默认路径改成 `PATHS.ml_model` 之后，**这个位置从此取决于别处的一个值**——`PATHS` 家族一旦改指向（如挪进 cache 目录），快照会静默落到 git 跟踪范围之外，白名单与 .gitignore 反向规则全部失效，且症状是「文件在、但永远不进库」（v0.45.111 同形）。该耦合当前无任何守卫。范围＝加两条不变式测试：① 快照目录必须落在 `PATHS.home` 下且等于仓库里那个被跟踪的目录；② manifest 必须记 `oos_accuracy` 与 `n_samples_seen`（v0.45.149 认定的「夹具覆盖」机读签名，**不能用 accuracy 判**）。+ mutation check。**不改任何实现**，纯补守卫）
+
+---
+
 ## [0.45.157] — 2026-09-07 — 占位（进行中：`tests/test_missing_value_not_zero.py` 里「生产 `pheromone.db` 不存在就 skip」的守卫，把三条测试变成了「只在主 checkout 跑、且一跑就打 yahoo 外网」——`pheromone.db` 未被 git 跟踪 ⇒ 所有 worktree 与 CI 上恒 skip。范围＝按 `tests/test_quote_set.py::_offline` 的写法补显式源桩让它离线可跑、拆掉「缺生产库就 skip」对这几条的适用性（真需要历史数据的部分单独标 `@pytest.mark.integration`）、成对验证（无库的干净检出必须真执行 + 有库环境必须不出网）+ mutation check。**不**加进 `_KNOWN_NETWORK_REACHERS`（该表按 v0.45.136 只能缩短）、**不**加 `@pytest.mark.network`。不动 `conftest.py` 的离线闸本身、不动生产代码）
 
 ## [0.45.156] — 2026-09-07 — 占位（进行中：v0.45.151 只修了 `_read_peer` 一条路径，`detect_resonance` 仍直读 `self._entries` ⇒ 同一 `MAX_ENTRIES=80` 截断（注释按「9 只标的」定，`config.WATCHLIST` 现 30 只、一轮约 210 条）会系统性删掉**低分**蜂，而低分与看空/中性相关 ⇒ 假设它是 chronos_bee.py 记的「信息素多5/空0 自我强化看多」的结构性成因之一。范围＝① 用 803 份生产 `analysis-*-ml-*.json` 重放真实发布序列，量 `detect_resonance` 的`ticker_entries` 实际丢了几条、与生产 `swarm_results.resonance` / `supporting_agents` 对照；② 命中率显著才动代码（抬 MAX_ENTRIES 或给共振一条抗淘汰视图），并按需追加 `ic_rerun_readiness._COHORT_HISTORY`。**先量再决定**，命中率为零或个位数则只改注释不改行为。不动评分权重、不动 `get_agent_entry` 语义、不动 probability_scorecard）
