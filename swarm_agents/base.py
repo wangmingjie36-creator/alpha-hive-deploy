@@ -70,6 +70,17 @@ class BeeAgent(ABC):
         `analyze(ticker)` 的签名是所有蜂共用的契约，改它会牵动全部蜂与测试；
         而板上的 `details` 字段本来就是为结构化数据交换设计的（S3）。
         """
+        # v0.45.151：优先走定点索引。`get_top_signals` 从 `_entries` 里挑，而
+        # `_entries` 在 MAX_ENTRIES 溢出时**先扔分最低的** —— 上游蜂分越低越读
+        # 不到，缺失因而与被测量的量反相关（生产实测见 get_agent_entry docstring）。
+        # 保留 get_top_signals 作为回退：测试替身与旧版 board 对象只有这一个方法。
+        _pointed = getattr(self.board, "get_agent_entry", None)
+        if callable(_pointed):
+            try:
+                return _pointed(ticker, agent_id)
+            except (AttributeError, TypeError) as e:
+                _log.debug("_read_peer(%s, %s) 定点查询失败，回退排行榜: %s",
+                           ticker, agent_id, e)
         try:
             entries = self.board.get_top_signals(ticker, n=self._PEER_LOOKUP_N)
         except (AttributeError, TypeError) as e:      # board 不可用/替身对象

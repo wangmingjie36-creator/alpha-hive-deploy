@@ -591,17 +591,43 @@ class SimpleMLModel:
         self.training_accuracy = 0.0
         self.feature_stats = {}
 
-    def encode_catalyst_quality(self, quality: str) -> float:
-        """编码催化剂质量"""
+    def encode_catalyst_quality(self, quality) -> float:
+        """编码催化剂质量。**这是全仓第四份表**，须与主表语义逐项一致。
+
+        ⚠️ 本类只在 `ml_predictor` 导入失败时生效（见 `_create_ml_model`），
+        因此**不能**改成 import 主表 —— 那正是它不可用的场景。重复是结构性
+        强制的，由 `tests/test_rival_bee_catalyst_missing.py::
+        TestExtendedFallbackEncoderMirrorsPrimary` 逐档断言两份一致兜住。
+
+        `None` → NaN（缺失），与主表 `_encode_catalyst` 一致（v0.45.151）。
+        此前落 0.5，而 0.5 恰好夹在 C(0.40) 与 B(0.55) **之间** —— 一个真实等级
+        永远产不出的值，模型却会拿它当一个真实的中间档。rival_bee 自 v0.45.151
+        起在读不到 ChronosBee 时传 `None`，本路径于是真的会被走到。
+
+        未知字面量（如 "X"）仍返回 0.5，与主表同（本仓无生产路径产得出它）。
+        """
+        if quality is None:
+            return float("nan")
         mapping = {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}
         return mapping.get(quality, 0.5)
 
+    #: 归一化后的"无观点"点。与 `ml_predictor._FEATURE_NEUTRAL` 同值同义。
+    _FEATURE_NEUTRAL = 0.5
+
     def normalize_feature(
-        self, value: float, min_val: float, max_val: float
+        self, value, min_val: float, max_val: float
     ) -> float:
-        """特征归一化"""
+        """特征归一化；None/NaN → `_FEATURE_NEUTRAL`（v0.45.151）。
+
+        缺一个 NaN 闸的话，上面新加的 `encode_catalyst_quality(None) → NaN` 会
+        一路传成 `probability = NaN`，再被 rival_bee 的 NaN 守卫改写成 0.5 并只
+        留一行 warning —— 那正是"把失败改写成没发生过"。此处按主表
+        `SimpleMLModel.normalize_feature` 的同一契约挡住。
+        """
+        if value is None or (isinstance(value, float) and value != value):
+            return self._FEATURE_NEUTRAL
         if max_val == min_val:
-            return 0.5
+            return self._FEATURE_NEUTRAL
         return (value - min_val) / (max_val - min_val)
 
     def train(self, training_data: List[TrainingData]) -> Dict:

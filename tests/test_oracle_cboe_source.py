@@ -188,11 +188,22 @@ class TestBearPeRevived:
 
 # ───────────────────────────────────────────── 5. 世代边界
 class TestCohortBoundaryAppended:
-    def test_last_entry_is_this_version(self):
+    def test_this_versions_entry_is_registered(self):
+        """v0.45.128 的世代边界登记了、内容对、且表仍是「只追加、按时间递增」。
+
+        ⚠️ v0.45.151 改写：原断言取 `_COHORT_HISTORY[-1]` 并钉死 v0.45.128，
+        即「本版必须**永远**是最后一条」——而同一份表的 docstring 要求
+        「任何再次改动 expected_returns / predict_probability / RivalBee 特征来源
+        都必须追加一条」。两者直接冲突：**照规矩追加就会让这条测试变红**，
+        于是它保护的不是不变式，而是「别再追加了」。
+        本版改为断言这一条**存在且内容正确**，把「还是不是最新」交给
+        各自版本自己的测试（如 test_rival_bee_catalyst_missing.py）。
+        """
         import ic_rerun_readiness as rr
-        date, version, reason = rr._COHORT_HISTORY[-1]
-        assert version == "v0.45.128" and date == "2026-09-05"
+        hits = [(d, v, r) for d, v, r in rr._COHORT_HISTORY if v == "v0.45.128"]
+        assert len(hits) == 1, "v0.45.128 的世代边界应恰好登记一条"
+        date, _, reason = hits[0]
+        assert date == "2026-09-05"
         assert "Oracle" in reason and "P/E" in reason and "世代边界" in reason
         dates = [d for d, _, _ in rr._COHORT_HISTORY]
         assert dates == sorted(dates), "只追加、按时间递增"
-        assert rr.cohort_start()["version"] == "v0.45.128"
