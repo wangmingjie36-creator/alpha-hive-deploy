@@ -218,7 +218,7 @@ class TestSpeciesDoesNotSpread:
         return files, "rglob"
 
     @staticmethod
-    def _scan(_stats=None):
+    def _scan(_stats=None, marker="PATHS"):
         """列出所有「import 期求值的 PATHS 派生赋值」。
 
         会下钻到 Try/If/With/For 体内——那些同样在 import 期执行。
@@ -239,7 +239,7 @@ class TestSpeciesDoesNotSpread:
         def walk(body, rel, depth=0):
             for s in body:
                 if isinstance(s, (ast.Assign, ast.AnnAssign)) and s.value:
-                    if "PATHS" in ast.unparse(s.value):
+                    if marker in ast.unparse(s.value):
                         tgts = [s.target] if isinstance(s, ast.AnnAssign) else s.targets
                         for t in tgts:
                             if isinstance(t, ast.Name):
@@ -442,3 +442,125 @@ class TestSpeciesDoesNotSpread:
                                    ("vector_memory.py", "DEFAULT_DB_PATH")}}
         assert not regressed, (
             f"v0.45.150 修掉的高危处又被写回成 import 期常量：{sorted(regressed)}")
+
+
+class TestFileDerivedSpeciesDoesNotSpread:
+    """不许**新增**「`__file__` 派生的数据路径常量」（v0.45.160）。
+
+    这一族比 `PATHS` 冻结**更严重**：`Path(__file__).parent / "pheromone.db"`
+    压根不读任何环境变量，`ALPHA_HIVE_HOME` / `ALPHA_HIVE_DB_PATH` 设成什么都无效，
+    **连改成懒求值都救不了**——只能显式改去读 `PATHS.*`。
+
+    ⚠️ 但 `__file__` **本身不是错的**，一刀切会制造新 bug。它是**代码同址资源**的
+    正确锚点：模板、prompt、随代码发布的只读配置、`sys.path.insert`、`git -C <仓库>`
+    ——这些要的就是「代码在哪」，改成 `PATHS.home` 会在测试把 HOME 指向 tmp 后
+    直接找不到文件。判据是**这个路径指向「代码」还是「数据」**：
+    数据（库/账本/状态/缓存/产物）→ 必须走 `PATHS.*`；代码同址资源 → `__file__` 正确。
+
+    与 `TestSpeciesDoesNotSpread` 一样是**子集**语义：清掉存量不会变红，新增必红。
+    """
+
+    # 存量白名单（v0.45.160 清理后实测 **17 处**）。清掉一处就从这里删一行。
+    # ⚠️ 子集语义的副作用：**清干净了也不会变红**，过期项会悄悄留下。
+    #    定期对账：`KNOWN - _scan(marker="__file__")` 非空即是过期项
+    #    （本版就这么揪出 2 条已清却还挂着的）。
+    # 分三类，都是**经判定后确认应当保留**或已另有覆盖的：
+    KNOWN = {
+        # ── A. 代码同址资源 / 工程根：`__file__` 是**正确**锚点，不该改 ──
+        ("dashboard_renderer.py", "_TPL_DIR"),        # templates/，随代码发布
+        ("prompt_loader.py", "_PROMPTS_DIR"),         # prompts/，随代码发布
+        ("probability_scorecard.py", "ALPHAHIVE_DIR"),  # sys.path.insert
+        ("scan_continuity.py", "ALPHAHIVE_DIR"),        # sys.path.insert
+        ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),     # sys.path.insert
+        ("health_check.py", "PROJECT"),               # git -C <仓库>
+        ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
+        ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
+        # ── B. 仓库内随代码发布的**只读**配置/文档 ──
+        ("thesis_breaks.py", "_CONFIG_JSON_PATH"),    # thesis_breaks_config.json，生产只读
+        ("market_intelligence.py", "_BASE"),          # 同上
+        ("watchlist_events.py", "EVENTS_FILE"),       # watchlist_events.md
+        # ── C. 已读 `ALPHA_HIVE_HOME`、`__file__` 只作兜底（另一个子物种，冻在 import 期）──
+        ("agent_toolbox.py", "ALLOWED_ROOTS"),        # 沙箱白名单；冻结只会更保守不会越权
+        ("gui/app.py", "_PROJECT_ROOT"),              # sys.path
+        ("scheduler.py", "_PROJECT_ROOT"),            # scheduler.log
+        # ── D. 未清，已登记（读多写少 / 牵动面大）──
+        ("pead_analyzer.py", "_CACHE_DIR"),           # try 分支已走 PATHS，这是 except 兜底
+        ("push_report_to_slack.py", "PROJECT_DIR"),   # 读报告 json（CLI 脚本）
+        ("scan_coverage_gate.py", "ROOT"),            # 读 .swarm_results_*.json
+    }
+
+    def test_scanner_has_teeth(self):
+        """反向自证：换成 `__file__` 标记后扫描器必须仍能扫到东西。"""
+        found = TestSpeciesDoesNotSpread._scan(marker="__file__")
+        assert len(found) >= 10, (
+            f"只找到 {len(found)} 处——几乎肯定是扫描器坏了，而不是仓库突然干净了")
+
+    def test_no_new_file_derived_paths(self):
+        new = TestSpeciesDoesNotSpread._scan(marker="__file__") - self.KNOWN
+        assert not new, (
+            "新增了「`__file__` 派生的路径常量」：\n"
+            + "\n".join(f"  - {f}:{n}" for f, n in sorted(new))
+            + "\n\n先判它指向**代码**还是**数据**：\n"
+              "  · 数据（库/账本/状态/缓存/产物）⇒ 必须改成运行时读 `PATHS.*`，"
+              "`__file__` 派生值完全无视环境变量，测试隔离对它无效；\n"
+              "  · 代码同址资源（模板/prompt/只读配置/sys.path/git -C）⇒ `__file__` 正确，"
+              "把它加进本类的 KNOWN 白名单并注明属于哪一类。")
+
+    def test_detection_actually_finds_a_synthetic_offender(self, tmp_path, monkeypatch):
+        """正向对照：往一棵 tmp 树里放一个真违规，检测机制必须发现它。
+
+        没有这条的话，`test_no_new_file_derived_paths` 只证明了「现在没有新增」，
+        证明不了「新增了能被发现」——扫描器若某天不再匹配 `__file__` 形态，
+        它会安静地永远绿（v0.45.71「守卫自己恒真」）。
+
+        ⚠️ 说明一下 mutation 的边界：把上面那条断言直接改成 `new = set()`
+        （恒真）**没有任何测试抓得住**——那是「变异到断言自身」，是 mutation
+        测自己断言的固有上限，不是覆盖缺口。本条能挡的是另一件事：
+        **检测机制**（文件集 + 下钻 + 标记匹配）失效。
+        """
+        import sys
+        (tmp_path / "offender.py").write_text(
+            "from pathlib import Path\n"
+            'DB_PATH = Path(__file__).parent / "pheromone.db"\n', encoding="utf-8")
+        # 嵌套在 try 里的违规——**加宽扫描的全部意义就在这里**：当初正是靠下钻
+        # 复合语句才发现 `pead_analyzer.py` 那处藏在 try 里的。夹具若只放模块级的，
+        # 「关掉下钻」这个变异会全绿（v0.45.160 实测 M20）。
+        (tmp_path / "nested_offender.py").write_text(
+            "from pathlib import Path\n"
+            "try:\n"
+            '    NESTED_DIR = Path(__file__).parent / "state"\n'
+            "except ImportError:\n"
+            "    NESTED_DIR = None\n", encoding="utf-8")
+        (tmp_path / "innocent.py").write_text(
+            "from hive_logger import PATHS\n"
+            "def _db():\n    return PATHS.db      # 调用时求值，不该被报\n",
+            encoding="utf-8")
+        monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+        found = TestSpeciesDoesNotSpread._scan(marker="__file__")
+        assert ("offender.py", "DB_PATH") in found, (
+            "检测机制没发现明摆着的 `Path(__file__).parent / \"pheromone.db\"`——"
+            "扫描器坏了，上面那条「无新增」断言因此是恒真的")
+        assert ("nested_offender.py", "NESTED_DIR") in found, (
+            "藏在 `try:` 里的违规没被发现——扫描器不再下钻复合语句了。"
+            "那些语句在 import 期同样执行，漏掉它们等于普查是低估的")
+        assert ("innocent.py", "_db") not in found, (
+            "把「函数内调用时求值」也报成违规了——会逼着人把正确写法加进白名单")
+
+    def test_cleaned_modules_stay_clean(self):
+        """v0.45.160 清掉的那些不许回退成 `__file__` 派生常量。"""
+        cleaned = {
+            ("signal_archive.py","DB_PATH"), ("vol_forecast.py","DB_PATH"),
+            ("ic_diagnostics.py","DB_PATH"), ("close_correction.py","DB_PATH"),
+            ("backfill_dir_accuracy.py","DB"), ("replay_scoring.py","DB_PATH"),
+            ("feedback_loop.py","PHEROMONE_DB_PATH"),
+            ("cboe_vix.py","_CACHE_PATH"), ("congress_trades_scraper.py","_CACHE_PATH"),
+            ("fear_greed.py","_CACHE_PATH"), ("vix_term_structure.py","_CACHE_PATH"),
+            ("yahoo_trending.py","_CACHE_PATH"), ("real_data_sources.py","CACHE_DIR"),
+            ("reddit_sentiment.py","CACHE_DIR"), ("factor_attribution.py","_CACHE_DIR"),
+            ("risk_engine.py","_SNAPSHOTS_DIR"), ("risk_engine.py","_CACHE_DIR"),
+            ("ibkr_sync.py","BASE"), ("param_optimizer.py","BASE_DIR"),
+        }
+        regressed = TestSpeciesDoesNotSpread._scan(marker="__file__") & cleaned
+        assert not regressed, (
+            f"v0.45.160 清掉的又被写回成 `__file__` 派生常量：{sorted(regressed)}")

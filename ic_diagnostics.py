@@ -49,7 +49,27 @@ from pathlib import Path
 from statistics import mean, stdev
 from typing import Dict, List, Optional, Tuple
 
-DB_PATH = Path(__file__).parent / "pheromone.db"
+# v0.45.160：`DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
+# 保留这个名字是因为 `tests/` 有多处 `monkeypatch.setattr(<mod>, "DB_PATH", ...)`
+# 依赖它做隔离；把它删掉会把那些测试打红。
+DB_PATH = None
+
+def _db_path() -> Path:
+    """本模块用的 `pheromone.db` 路径。**调用时求值。**
+
+    v0.45.160：这里原本是 `Path(__file__).parent / "pheromone.db"`。
+    那个写法比「模块级常量冻在 import 期」更彻底——它**压根不读任何环境变量**：
+    `ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME` 设成什么都无效，连改成懒求值都救不了，
+    只能显式改去读 `PATHS.db`。于是 `tests/conftest.py::_isolate_env` 对它完全无效。
+
+    ⚠️ 下面所有默认参数一律写 `None`，**不要**写 `= DB_PATH` 或 `= _db_path()`——
+    默认参数在 `def` 执行时（＝import 期）求值，等于换个地方冻同一个值
+    （同型 v0.45.37 / v0.45.150）。
+    """
+    if DB_PATH is not None:
+        return Path(DB_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.db)
 DIMS = ["signal", "catalyst", "sentiment", "odds", "risk_adj"]
 
 # regime 分段（按 SPY 月度 T+7 收益方向划分，见 CHANGELOG v0.42.3）
@@ -611,7 +631,8 @@ def main() -> int:
                     help="前瞻期（默认 both）")
     ap.add_argument("--min-width", type=int, default=5,
                     help="每日最少标的数，低于此值的交易日不参与（默认 5）")
-    ap.add_argument("--db", type=str, default=str(DB_PATH), help="pheromone.db 路径")
+    # v0.45.160：argparse 的 default 在 import 期求值，不能塞冻结值
+    ap.add_argument("--db", type=str, default=None, help="pheromone.db 路径（默认 PATHS.db）")
     ap.add_argument("--target", choices=TARGETS, default="close",
                     help="目标变量口径：price=纯价格变动（默认，推荐）；"
                          "path=return_t7 列（含 SL/TP 截断，42.5%% 样本被钉在出场档位）")
@@ -622,7 +643,8 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="输出 JSON 而非表格")
     args = ap.parse_args()
 
-    db = Path(args.db)
+    # v0.45.160：argparse 的 default 是 None（不能塞 import 期冻结值），此处解析
+    db = Path(args.db) if args.db else _db_path()
     if not db.exists():
         print(f"❌ 找不到数据库：{db}", file=sys.stderr)
         return 1

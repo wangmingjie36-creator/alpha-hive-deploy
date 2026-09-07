@@ -40,12 +40,44 @@ _log = logging.getLogger("alpha_hive.ibkr_sync")
 # 路径
 # ══════════════════════════════════════════════════════════════════════════════
 
-BASE = Path(__file__).resolve().parent / "paper_account"
-ACTIONS_DIR = BASE / "actions"           # 每日待执行订单
-FILLS_FILE = BASE / "real_fills.jsonl"   # IBKR 真实成交
-RECONCILE_DIR = BASE / "reconcile"       # 对账报告
-for _d in (ACTIONS_DIR, RECONCILE_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
+# v0.45.160：以下路径全部改成**调用时求值**。原本是
+#   BASE = Path(__file__).resolve().parent / "paper_account"
+# 这类 `Path(__file__).parent` 派生值**压根不读任何环境变量**，比「模块级常量冻在
+# import 期」更彻底：`ALPHA_HIVE_HOME` 设成什么都无效，`conftest::_isolate_env`
+# 对它完全无效。保留同名钩子（默认 `None`）以便测试 `monkeypatch.setattr` 覆盖。
+BASE = None
+ACTIONS_DIR = None
+FILLS_FILE = None
+RECONCILE_DIR = None
+
+def _base_dir() -> Path:
+    """本模块的根锚点。**调用时求值。**"""
+    if BASE is not None:
+        return Path(BASE)
+    from hive_logger import PATHS
+    return Path(PATHS.home) / "paper_account"
+
+def _actions_dir() -> Path:
+    """**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if ACTIONS_DIR is not None:
+        return Path(ACTIONS_DIR)
+    d = _base_dir() / "actions"
+    d.mkdir(parents=True, exist_ok=True)   # 原先在模块级 for 循环里建
+    return d
+
+def _fills_file() -> Path:
+    """**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if FILLS_FILE is not None:
+        return Path(FILLS_FILE)
+    return _base_dir() / "real_fills.jsonl"
+
+def _reconcile_dir() -> Path:
+    """**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if RECONCILE_DIR is not None:
+        return Path(RECONCILE_DIR)
+    d = _base_dir() / "reconcile"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 数据结构
@@ -137,7 +169,7 @@ def export_daily_actions(
             meta={"exit_price_est": cl.get("exit_price")},
         ))
 
-    out_file = ACTIONS_DIR / f"actions_{target_date}.json"
+    out_file = _actions_dir() / f"actions_{target_date}.json"
     payload = {
         "date": target_date,
         "generated_at": datetime.utcnow().isoformat() + "Z",
@@ -174,15 +206,15 @@ def import_ibkr_statement(csv_path: str) -> int:
 
     count = 0
     existing_ids = set()
-    if FILLS_FILE.exists():
-        with FILLS_FILE.open() as f:
+    if _fills_file().exists():
+        with _fills_file().open() as f:
             for line in f:
                 try:
                     existing_ids.add(json.loads(line).get("fill_id"))
                 except Exception:
                     pass
 
-    with p.open(newline="") as f, FILLS_FILE.open("a") as out:
+    with p.open(newline="") as f, _fills_file().open("a") as out:
         reader = csv.DictReader(f)
         for row in reader:
             # 标准化字段
@@ -239,8 +271,8 @@ def reconcile(target_date: Optional[str] = None) -> Dict:
 
     # 加载真实 fills
     real_fills: List[Dict] = []
-    if FILLS_FILE.exists():
-        with FILLS_FILE.open() as f:
+    if _fills_file().exists():
+        with _fills_file().open() as f:
             for line in f:
                 try:
                     real_fills.append(json.loads(line))
@@ -297,7 +329,7 @@ def reconcile(target_date: Optional[str] = None) -> Dict:
             for r in unmatched_real[:20]
         ],
     }
-    out_file = RECONCILE_DIR / f"reconcile_{target_date or 'all'}.json"
+    out_file = _reconcile_dir() / f"reconcile_{target_date or 'all'}.json"
     with out_file.open("w") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
     _log.info(

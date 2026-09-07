@@ -30,7 +30,20 @@ from typing import Dict, List, Optional
 
 _log = logging.getLogger("alpha_hive.vix_term_structure")
 
-_CACHE_PATH = Path(__file__).parent / "cache" / "vix_term_structure.json"
+# v0.45.160：`_CACHE_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.*`。
+# 原本是 `Path(__file__).parent / "cache" / "vix_term_structure.json"` —— 它**压根不读任何环境变量**，
+# 比「模块级常量冻在 import 期」更彻底：`ALPHA_HIVE_HOME` / `ALPHA_HIVE_CACHE_DIR`
+# 设成什么都无效，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "_CACHE_PATH", ...)` 依赖它。
+_CACHE_PATH = None
+
+
+def _cache_path() -> Path:
+    """本模块的缓存落点。**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if _CACHE_PATH is not None:
+        return Path(_CACHE_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.cache_dir) / "vix_term_structure.json"
 _CACHE_TTL = 1800  # 30 分钟
 _lock = threading.Lock()
 
@@ -55,9 +68,9 @@ def get_vix_term_structure(force_refresh: bool = False) -> Dict:
     """
     with _lock:
         # ── 读取缓存 ─────────────────────────────────────────────────────
-        if not force_refresh and _CACHE_PATH.exists():
+        if not force_refresh and _cache_path().exists():
             try:
-                cached = json.loads(_CACHE_PATH.read_text())
+                cached = json.loads(_cache_path().read_text())
                 ts = datetime.fromisoformat(cached.get("timestamp", "2000-01-01"))
                 if (datetime.now() - ts).total_seconds() < _CACHE_TTL:
                     return cached
@@ -68,8 +81,8 @@ def get_vix_term_structure(force_refresh: bool = False) -> Dict:
 
         # 写缓存
         try:
-            _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _CACHE_PATH.write_text(json.dumps(result, ensure_ascii=False))
+            _cache_path().parent.mkdir(parents=True, exist_ok=True)
+            _cache_path().write_text(json.dumps(result, ensure_ascii=False))
         except Exception:
             pass
 

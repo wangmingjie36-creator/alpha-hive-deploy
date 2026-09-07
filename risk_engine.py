@@ -77,10 +77,34 @@ def _sigma_annual(stock_data: dict, method: str):
 # ─────────────────────────────────────────────────────────────
 # 配置常量
 # ─────────────────────────────────────────────────────────────
-_HOME = Path(__file__).parent
-_SNAPSHOTS_DIR = _HOME / "report_snapshots"
-_CACHE_DIR = _HOME / ".risk_cache"
-_CACHE_DIR.mkdir(exist_ok=True)
+# v0.45.160：`_SNAPSHOTS_DIR` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.*`。
+# 原本是 `Path(__file__).parent / "report_snapshots"`——`Path(__file__).parent` 派生出来的值
+# **压根不读任何环境变量**，比「模块级常量冻在 import 期」更彻底：
+# `ALPHA_HIVE_HOME` 设成什么都无效，`conftest::_isolate_env` 对它完全无效。
+_SNAPSHOTS_DIR = None
+
+
+def _snapshots_dir() -> Path:
+    """本模块的落点。**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if _SNAPSHOTS_DIR is not None:
+        return Path(_SNAPSHOTS_DIR)
+    from hive_logger import PATHS
+    return Path(PATHS.home) / "report_snapshots"
+# v0.45.160：`_CACHE_DIR` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.*`。
+# 原本是 `Path(__file__).parent / ".risk_cache"`——`Path(__file__).parent` 派生出来的值
+# **压根不读任何环境变量**，比「模块级常量冻在 import 期」更彻底：
+# `ALPHA_HIVE_HOME` 设成什么都无效，`conftest::_isolate_env` 对它完全无效。
+_CACHE_DIR = None
+
+
+def _cache_dir() -> Path:
+    """本模块的落点。**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if _CACHE_DIR is not None:
+        return Path(_CACHE_DIR)
+    from hive_logger import PATHS
+    d = Path(PATHS.home) / ".risk_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 N_SIM = 10_000           # Monte Carlo 模拟次数
 TRADING_DAYS = 252       # 年化交易日
@@ -99,9 +123,9 @@ def _load_snapshot_returns(ticker: Optional[str] = None,
     horizon: "t1" | "t7" | "t30"
     """
     returns = []
-    if not _SNAPSHOTS_DIR.exists():
+    if not _snapshots_dir().exists():
         return returns
-    for fp in sorted(_SNAPSHOTS_DIR.glob("*.json")):
+    for fp in sorted(_snapshots_dir().glob("*.json")):
         try:
             with open(fp) as fh:
                 snap = json.load(fh)
@@ -570,7 +594,7 @@ def _estimate_beta(ticker: str, benchmark: str = "SPY",
     估算标的对 benchmark 的 60 日 OLS beta，结果缓存 24 小时
     失败时安全返回 1.0（市场中性假设）
     """
-    cache_file = _CACHE_DIR / f"beta_{ticker}_{benchmark}.json"
+    cache_file = _cache_dir() / f"beta_{ticker}_{benchmark}.json"
     if cache_file.exists():
         try:
             age = time.time() - cache_file.stat().st_mtime

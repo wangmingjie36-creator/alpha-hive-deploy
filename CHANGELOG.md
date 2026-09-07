@@ -203,7 +203,132 @@ v0.45.147/153 之后**未重核**。
 
 ---
 
-## [0.45.160] — 2026-09-07 — 占位（进行中：清 `__file__` 派生的路径常量 —— 比 v0.45.150 治的 `PATHS` 冻结**更严重的同族**。`Path(__file__).parent / "pheromone.db"` 这类写法**压根不读任何环境变量**：`ALPHA_HIVE_HOME` / `ALPHA_HIVE_DB_PATH` 设成什么都无效，连「改成懒求值」都救不了，只能显式改去读 `PATHS.*`。已知含 `feedback_loop` / `ic_diagnostics` / `close_correction` / `replay_scoring` / `signal_archive` / `vol_forecast` 各自的 `pheromone.db`，以及一批 `CACHE_DIR` / `BASE_DIR` / `_CACHE_PATH`。范围＝① **先用 `git ls-files` 干净口径重新普查并钉提交**——v0.45.150 报的「49 处」出自已作废的 `rglob` 污染口径（那口径在主 checkout 会扫进 15349 个 .py、98% 是第三方库），**不得直接沿用该数字**；② 逐处判危害等级，判据仍是「这个冻住的值在**主 checkout** 里指向什么、会不会被**写**、写的是不是生产数据」，**不是「跑测试坏没坏」**（所有人都在 worktree 里跑，所以所有人都不会坏）；③ 高危处改调用时求值，成对测试（改 env 路径跟着变 + 显式传参仍生效 + 生产产物指纹不变）+ mutation check + 核对 `collected N` 非 0；④ 先数 conftest 里哪些已被针对性 monkeypatch 管住（已知 `weekly_optimizer` / `feedback_loop` 的 `PHEROMONE_DB_PATH`、`paper_portfolio` 的 `STATE_DIR`），不重复劳动；⑤ 把清掉的从 `TestSpeciesDoesNotSpread.KNOWN` 里删行，并考虑给 `__file__` 族加一条同构的结构守卫。⚠️ **不动** `PATHS` 族本身（v0.45.150 已治）、**不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`。⚠️ 会碰 `tests/conftest.py` 与 `tests/test_paths_not_frozen_at_import.py`，与其它 session 合并时逐块核对）
+## [0.45.160] — 2026-09-07 — 清 `__file__` 派生的数据路径常量（`PATHS` 冻结的更重同族）
+
+### Fixed
+
+**物种**：`Path(__file__).parent / "pheromone.db"` 这类写法**压根不读任何环境变量**。
+`ALPHA_HIVE_HOME` / `ALPHA_HIVE_DB_PATH` 设成什么都无效，**连改成懒求值都救不了**
+——只能显式改去读 `PATHS.*`。比 v0.45.150 治的「`PATHS` 派生值冻在 import 期」更彻底：
+那个至少还认环境变量，只是求值太早。
+
+> **口径与提交号**：普查＝「模块级 / 类体 / `Try`·`If`·`With`·`For` 体内、
+> RHS 引用 `__file__` 的赋值」，文件集 = `git ls-files "*.py"`（327 个），
+> 排除 `tests/` 与 `experiments/`。跑在占号提交 `f392baa` 上：**37 处**。
+>
+> ⚠️ **v0.45.150 报的「49 处」作废**，本版**未沿用**：那个数出自已作废的 `rglob`
+> 污染口径（含 `experiments/` 与 vendored `site-packages`）。清理后复测 **17 处**。
+
+#### 实证（不靠读代码推断）
+
+最锐利的一处是 `signal_archive.py:58` —— **三重叠加**：`__file__` 冻结常量 +
+**6 处默认参数** + 写生产库，与 v0.45.150 修的 `backtester` 完全同构。
+模拟「收集期 import（env 未设）→ 测试期 env 已设」实测：无参 `ensure_schema()`
+在 **checkout 根目录**的 `pheromone.db` 里建出 `signal_archive` 表。
+主 checkout 上那就是生产库（`signal_archive` 84839 行，喂 IC 闸 / 概率记分卡 /
+权重学习闭环）。
+
+⚠️ `param_optimizer.py:87-103` 值得单独点出：它对 `paper_portfolio_state`
+做 `shutil.rmtree` + `copytree`，**销毁并恢复另一个模块的生产账本**
+——正是 v0.45.104 事故的形状。
+
+#### 分级：`__file__` **本身不是错的**，一刀切会制造新 bug
+
+判据是**这个路径指向「代码」还是「数据」**：
+
+| 类 | 处理 | 站点 |
+|---|---|---|
+| **数据落点**（库/账本/状态/缓存/产物） | **必须**改成运行时读 `PATHS.*` | 见下「已清 20 处」 |
+| **代码同址资源** | `__file__` **正确**，不改 | `dashboard_renderer._TPL_DIR`(templates/)、`prompt_loader._PROMPTS_DIR`(prompts/) |
+| **工程根 / sys.path / git 仓库** | `__file__` **正确**，不改 | 3×`ALPHAHIVE_DIR`(`sys.path.insert`)、`health_check.PROJECT`(`git -C`)、`cloud_snapshot_loader.REPO_DIR`(git cwd)、`collect_data._SCRIPT_DIR`(环境探测) |
+| **仓库内随代码发布的只读配置** | `__file__` **正确**，不改 | `thesis_breaks._CONFIG_JSON_PATH`、`market_intelligence._BASE`、`watchlist_events.EVENTS_FILE` |
+| 已读 env、`__file__` 仅兜底 | 另一子物种，未动 | `agent_toolbox.ALLOWED_ROOTS`（沙箱白名单，冻结只会更保守不会越权）、`gui/app._PROJECT_ROOT`、`scheduler._PROJECT_ROOT` |
+
+**改成 `PATHS.home` 反而会制造 bug**：模板/prompt 随代码发布，测试把
+`ALPHA_HIVE_HOME` 指向 tmp 后就找不到了。这是本版最重要的一条判据。
+
+#### 已清 20 处（横跨 16 个模块）
+
+统一改法：**常量名保留为「覆盖钩子」（默认 `None`）+ 调用时解析**。
+保留名字是因为 `tests/` 有大量 `monkeypatch.setattr(<mod>, "<常量>", ...)`
+依赖它做隔离，**删掉会把现有测试打红**。
+
+- **生产库 `pheromone.db`（7 个模块）**：`signal_archive`（+6 处默认参数/argparse）、
+  `vol_forecast`、`ic_diagnostics`、`close_correction`、`backfill_dir_accuracy`、
+  `replay_scoring`（默认参数 v0.45.37 已修，本版补常量自身）、
+  `feedback_loop`（`conftest` 已在测试侧重绑，本版补源头——逐模块打补丁是打地鼠）
+- **账本 / 状态（4 个模块）**：`ibkr_sync`(paper_account/)、
+  `param_optimizer`(paper_portfolio_state/ + backup)、`risk_engine`(report_snapshots/、.risk_cache/)、
+  `factor_attribution`(.factor_cache/)
+- **缓存（8 个模块）**：`cboe_vix`、`congress_trades_scraper`、`fear_greed`、
+  `vix_term_structure`、`yahoo_trending`、`real_data_sources`(data_cache/)、
+  `reddit_sentiment`(reddit_cache/)、`economic_calendar_watch`
+- **根锚点解冻**：`paper_portfolio.BASE_DIR`（`SNAPSHOT_DIR`/`STATE_DIR` 仍是常量，
+  后者由 `conftest` 重绑；全改懒会牵动几十个使用点，留待后续）
+
+顺带清掉 **4 处 import 期副作用**：`real_data_sources` / `reddit_sentiment` /
+`factor_attribution` / `risk_engine` 原本在**模块级** `mkdir`，现已搬进解析器。
+
+### Added
+
+- `tests/test_paths_not_frozen_at_import.py::TestFileDerivedSpeciesDoesNotSpread`
+  （4 项）：`__file__` 族的结构守卫。`_scan()` 加 `marker` 参数复用同一套
+  文件集 / 下钻 / 记账逻辑。子集语义（清存量不变红、新增必红）+ 白名单按
+  **四类**分组注明「为什么这处该留」，失败消息直接给出「先判指向代码还是数据」的判据。
+- 正向对照 `test_detection_actually_finds_a_synthetic_offender`：往 tmp 树放
+  真违规，检测机制必须发现——含一个**嵌套在 `try:` 里**的（见教训 3）。
+
+### 验证
+
+- **全量套**：同树基线（`git archive HEAD`）`1 failed / 3631 passed / 24 skipped`
+  → 改后 `1 failed / 3635 passed / 24 skipped`。唯一失败仍是设计使然的
+  `TestCoverageHorizon`。差 4 已对平（新增 3 项 + `test_pytestmark_placement`
+  因新增 1 个类而 +1）。**跳过清单逐项相同（23/23）**——没有测试被悄悄变成跳过。
+- **归因复测**（patch `sqlite3.connect`/`open`/`makedirs`/`Path.mkdir` 记 nodeid+栈）：
+  `pheromone.db` / `chroma_db` / `data_cache` / `reddit_cache` / `paper_account` /
+  `report_snapshots` 写入**全部为 0**。仍在写的只剩 `cache/`（`PATHS.cache_dir`
+  在 import 期求值，属 v0.45.150 的 `PATHS` 清单）与 `cache/pead_*.json`。
+- **mutation M15~M21 共 6 个全部变红**，每次核对 `collected=27` 非 0、锚点唯一。
+- 逐处成对验证：改 env 路径跟随 ✅ / 显式传参仍生效 ✅ / 覆盖钩子仍生效 ✅ /
+  无参调用不再落到 checkout 根 ✅。
+
+### 教训
+
+1. **`__file__` 不是「错的写法」，是「用错地方的写法」。** 一刀切会把
+   模板/prompt/`sys.path`/`git -C` 全改坏。判据只有一条：**这个路径指向代码还是数据。**
+2. **改常量不够，要连它的「第二跳」一起改。** 这些站点大多是**链式冻结**：
+   根锚点冻 → 派生常量跟着冻（`BASE = …` → `ACTIONS_DIR = BASE / "actions"`）。
+   只解冻根，派生的仍在 import 期求值。同理**默认参数与 argparse 的 `default`**
+   都在 import 期求值——`signal_archive` 一个模块就有 6 处。
+3. **夹具要覆盖「每种被测能力」，不然那能力等于没测。** mutation「关掉复合语句
+   下钻」最初全绿：合成违规全在模块级，而下钻的**全部意义**就是抓嵌套的
+   （当初正是靠它发现藏在 `try:` 里的 `pead_analyzer`）。补一个 `try:` 里的违规后才变红。
+4. **子集语义的白名单会悄悄过期。** 清干净了守卫也不会红，于是过期项留着。
+   本版用 `KNOWN - _scan()` 对账，当场揪出 2 条已清却还挂着的
+   （`paper_portfolio.BASE_DIR` / `economic_calendar_watch._STATE_PATH`）。对账办法已写进注释。
+5. **「变异到断言自身」是 mutation 的固有上限，不是覆盖缺口。** 把
+   `new = _scan() - KNOWN` 改成 `new = set()` 没有任何测试抓得住——那等于删测试。
+   能测的是**检测机制**是否失效，故补正向对照。看到全绿要先分清是哪一种。
+6. ⚠️ **自造事故重犯：`rm -rf pheromone.db*` 又吃掉了那 7 个跟踪备份。**
+   同一形状**在同一天、写进 CHANGELOG（v0.45.150 教训 13）与 memory 之后仍然原样重犯**。
+   已再次 `git checkout --` 恢复（`git diff HEAD` 为空）。
+   ⇒ **把教训写下来对「手滑型」错误无效**——它不经过判断，写多少遍都会再犯。
+   有效的只有机械约束：**清理临时产物一律写完整文件名，前缀 glob 直接禁用。**
+   （`pheromone.db` 后面能跟 `-wal`/`-shm`/`.bak_*`/`.backup_*` 四类完全不同的东西。）
+7. ⚠️ **`collected 0` 连着骗了两次。** 一次是我列的测试文件名压根不存在
+   （`test_cboe_vix.py` 等无专属测试），一次是**zsh 不对未加引号的变量分词**
+   （`pytest $EXIST` 变成一个整串参数）——后者是 MEMORY.md 已记过的坑。
+   两次都靠核对 `collected N` 才发现「什么都没验」。
+
+### 范围
+
+- **未清、已登记**（17 处，全在 `TestFileDerivedSpeciesDoesNotSpread.KNOWN` 里
+  按四类注明）：其中 11 处**判定为应当保留**（代码同址 / sys.path / git 仓库 /
+  只读配置），3 处属「已读 env、`__file__` 仅兜底」的另一子物种，
+  余下几处（`pead_analyzer` 的 except 兜底、`paper_portfolio` 的派生常量、
+  `push_report_to_slack` / `scan_coverage_gate` 的只读用法）牵动面大或危害低。
+- **不动** `PATHS` 族本身（v0.45.150 已治）、**不动**训练口径、
+  **不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`。
 
 ---
 

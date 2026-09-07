@@ -51,7 +51,24 @@ from pathlib import Path
 
 _log = logging.getLogger("backfill_dir_accuracy")
 
-DB = Path(__file__).resolve().parent / "pheromone.db"
+# v0.45.160：`DB` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
+# 原本是 `Path(__file__).resolve().parent / "pheromone.db"` —— 那个写法**压根不读任何环境变量**
+# （`ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME` 设成什么都无效，连懒求值都救不了），
+# 比「模块级常量冻在 import 期」更彻底，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "DB", ...)` 依赖它。
+DB = None
+
+
+def _db_path() -> Path:
+    """本模块的库路径。**调用时求值。**
+
+    ⚠️ 默认参数与 argparse 的 `default` 一律写 `None`，不要塞这个值——
+    两者都在 import 期求值，等于换个地方冻同一个值（同型 v0.45.37 / v0.45.150）。
+    """
+    if DB is not None:
+        return Path(DB)
+    from hive_logger import PATHS
+    return Path(PATHS.db)
 HOLD_TRADING_DAYS = 7
 # 自校验判据：护栏要防的是**系统性偏移**（交易日数算错、复权口径不一致），
 # 这类错误必然体现在**中位偏离**上；而尾部零星偏离来自原始跑批当时的数据毛刺
@@ -140,7 +157,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="只统计不写库")
     ap.add_argument("--all", action="store_true", help="重算全部（默认只补空缺）")
-    ap.add_argument("--db", default=str(DB))
+    # v0.45.160：argparse 的 default 在 import 期求值，不能塞冻结值
+    ap.add_argument("--db", default=None)
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -151,6 +169,8 @@ def main() -> int:
 
     us_bday = CustomBusinessDay(calendar=USFederalHolidayCalendar())
 
+    # v0.45.160：argparse 的 default 是 None（不能塞 import 期冻结值），此处解析
+    args.db = args.db or _db_path()
     conn = sqlite3.connect(args.db)
     # 确保新列存在（幂等；正常由 backtester 的迁移建好）
     for col, typ in (("close_t7", "REAL"), ("dir_correct_t7", "INTEGER"),

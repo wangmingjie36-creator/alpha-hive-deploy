@@ -78,7 +78,26 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 _log = logging.getLogger("alpha_hive.close_correction")
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pheromone.db")
+# v0.45.160：`DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
+# 原本是 `os.path.join(os.path.dirname(os.path.abspath(__file__)), "pheromone.db")` —— 那个写法**压根不读任何环境变量**
+# （`ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME` 设成什么都无效，连懒求值都救不了），
+# 比「模块级常量冻在 import 期」更彻底，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "DB_PATH", ...)` 依赖它。
+DB_PATH = None
+
+
+def _db_path() -> str:
+    """本模块的库路径。**调用时求值。**
+
+    返回 `str` 而非 `Path`——本模块通篇用 `os.path`，跟着它的惯例走。
+
+    ⚠️ 默认参数与 argparse 的 `default` 一律写 `None`，不要塞这个值——
+    两者都在 import 期求值，等于换个地方冻同一个值（同型 v0.45.37 / v0.45.150）。
+    """
+    if DB_PATH is not None:
+        return os.fspath(DB_PATH)
+    from hive_logger import PATHS
+    return str(PATHS.db)
 
 # 低于此偏离视为同一个价，不动（浮点/复权噪声）
 CORRECT_TOL = 0.001
@@ -399,12 +418,15 @@ def _prev_trading_day() -> Optional[str]:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     ap = argparse.ArgumentParser(description="用官方收盘校正被盘后价污染的 price_at_predict")
-    ap.add_argument("--db", default=DB_PATH)
+    # v0.45.160：argparse 的 default 在 import 期求值，不能塞冻结值
+    ap.add_argument("--db", default=None)
     ap.add_argument("--since", default=None, help="只处理该日期及之后（YYYY-MM-DD）")
     ap.add_argument("--apply", action="store_true", help="真的写入（默认 dry-run）")
     ap.add_argument("--no-cboe", action="store_true", help="跳过 CBOE 交叉印证")
     args = ap.parse_args()
 
+    # v0.45.160：argparse 的 default 是 None（不能塞 import 期冻结值），此处解析
+    args.db = args.db or _db_path()
     if not os.path.exists(args.db):
         _log.error("⛔ 样本库不存在：%s", args.db)
         return 3
