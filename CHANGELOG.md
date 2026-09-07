@@ -405,6 +405,13 @@ ChronosBee「无近期催化剂」恒落 **4.0**，是全板最低的一档，�
 即「那一轮恰好没 INSERT，但写通道全开」——同一个 `PredictionStore` 上的
 `save_predictions()` 就是往里 INSERT 的。⚠️ 只比内容哈希会把这判成「无事发生」。
 
+> **口径与提交号**（不钉的话别人复跑对不上，也分不清是口径不同还是代码变了）：
+> 普查＝「模块级 / 类体 / `Try`·`If`·`With`·`For` 体内、RHS 引用 `PATHS` 的赋值」，
+> 排除 `tests/` 与 `experiments/`；跑在占号提交 `bb6f772` 的树上（窄版 23 处 /
+> 加宽 72 处）。结构守卫的 `KNOWN`（20 处）复核并剪枝于 `de0f073`（已含 v0.45.149~153）。
+> **会随树漂的量必须钉提交**；不随树漂的结论（如「`__file__` 族对 `ALPHA_HIVE_HOME`
+> 完全免疫」「无参 `load_model` 读者 = 0」）才可以裸报。
+
 #### 分级（逐处实证，不一刀切）
 
 判据＝**这个冻住的路径会不会被写、写的是不是生产数据**。
@@ -422,6 +429,40 @@ ChronosBee「无近期催化剂」恒落 **4.0**，是全板最低的一档，�
 | 中危·未触发 | `sec_edgar` / `polymarket_client` / `newsapi_client` / `edgar_rss` 的 `CACHE_DIR` | 全量套跑完无新增 | 同上 |
 | **中高危·账本**（重新分级） | `vrp_signal` / `options_paper_leg` / `portfolio_greeks` / `earnings_vol_signal` 的 `BASE_DIR` | 派生 `vrp_state/` `options_paper_state/` `hedge_state/` —— 是**账本**不是缓存（MEMORY.md v0.45.111）。原任务把它们归「中危：会往仓库写缓存」，**低估了**：账本被测试改写正是 v0.45.104 事故形状 | 未改，进清单 + 进 session 总闸监控 |
 | 低危·逐键判定 | `config.py` 那批 dict | `PHEROMONE_CONFIG` / `MEMORY_CONFIG` / `METRICS_CONFIG` 的 `db_path` 键**零生产读者**（死键）；`CACHE_CONFIG["cache_dir"]` + `RUNTIME_CONFIG["log_file"]` 只被 `init_cache()` 用来 mkdir；`CODE_EXECUTION_CONFIG["sandbox_dir"]` = `/tmp/...` 不在仓库；`ConfigLoader._OVERRIDE_*` 只读不写 | 未改（唯一有真读者的 `VECTOR_MEMORY_CONFIG["db_path"]` 已见上） |
+
+⚠️ **一处流传中的归属错误，本版已核实纠正**：`paper_portfolio` 的 `BASE_DIR`
+**不是** `PATHS.home`，也不在第 98 行——它是 `paper_portfolio.py:52
+BASE_DIR = Path(__file__).parent`。`BASE_DIR = PATHS.home` 那行属于
+**`options_paper_leg.py:98`**（行号 98 就是串台的线索）。
+核法：`git log --all -S'BASE_DIR = PATHS.home' -- paper_portfolio.py` **全历史零命中**。
+**这不是笔误层面的差别**——若真是 `PATHS.home`，把 `ALPHA_HIVE_HOME` 指向 tmp 就能救；
+而 `Path(__file__).parent` 对环境变量**完全免疫**，只能改成显式读 `PATHS.db`
+（本版即如此修）。判据：**引用别人的行号前先自己 `sed -n '<N>p'` 打开看一眼。**
+
+#### 「没触发」不是「不存在」
+
+⚠️ **所有人都在 worktree 里跑测试，所以所有人都不会坏。** 在 worktree 里
+`PATHS.home` 冻成 worktree 根，在主 checkout 里冻成**生产目录**——同一份代码
+换个 cwd 就换个落点。v0.45.152 那个 session 的原话值得原样留着：
+
+> 「在我这边是**没触发**而不是**不存在**——因为我恰好不在主 checkout 里跑。」
+
+⇒ **判危害的判据不是「跑测试没坏过」，是「这个冻住的值在主 checkout 里指向什么」。**
+本版正是据此把 `memory_store` / `vector_memory` 判成**高危·潜伏**并单独实证——
+全量套从未触发它们，但无参构造实测就落到 checkout 根。
+
+**查生产库到底被污染没：按 `created_at` 筛，别按内容匹配。**
+生产库里恰好有一行 TSLA 与夹具行**逐字段完全相同**，看着像被污染，其实不是
+（生产那行 `created_at` = 09-05 08:53:53，夹具行 = 09-07 08:52:50，两次不同写入）。
+本版只读复核**生产** `pheromone.db`：
+
+| 表 | 行数 | 最新 `created_at` | 09-06 之后写入 |
+|---|---|---|---|
+| `barrier_outcomes` | 46 | 2026-09-05 08:53:53 | **0** |
+| `predictions` | 1157 | 2026-09-04 21:53:36 | **0** |
+
+文件 mtime 仍停在 `2026-09-05 01:53:53` ⇒ **生产库未被污染**；本版全程只在
+worktree 与副本上作业。**别把「长得一样」读成「被污染了」，也别读成「没事」。**
 
 **先数谁已经有人管了**（避免重复劳动）：`tests/conftest.py` 里针对性路径
 monkeypatch 只有 3 个模块——`weekly_optimizer.PHEROMONE_DB_PATH`、
