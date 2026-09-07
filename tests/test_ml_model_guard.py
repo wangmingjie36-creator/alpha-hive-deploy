@@ -682,6 +682,82 @@ class TestGateWiring:
 # ===================================================================
 # 5. 新产物目录的「三件事」（v0.45.111 教训）
 # ===================================================================
+class TestSnapshotLandsInTheTrackedDir:
+    """快照必须落在**仓库里那个被 git 跟踪的** `ml_model_history/`。
+
+    v0.45.145 把快照目录写成 `模型文件.parent / HISTORY_DIRNAME`。
+    v0.45.149 随后把 `save_model` 的默认路径从 cwd 相对字符串改成
+    `default_model_path()` → `PATHS.ml_model`（绝对路径）。
+    **于是快照落在哪，从此取决于 `PATHS` 家族的指向** —— 那是本模块之外的值。
+
+    若将来有人把 `PATHS.ml_model` 挪进 cache 目录或用户目录，快照会静默落到
+    git 跟踪范围之外：`REPORT_ARTIFACT_PATHS` 白名单、`.gitignore` 的
+    `!ml_model_history/*.json` 反向规则**全部失效**，而症状是
+    「文件确实生成了、但永远不进库」——与 v0.45.111「新账本没进白名单」同形，
+    是本仓最难自己发现的那一类。这一组就是那个耦合的守卫。
+    """
+
+    def test_default_model_path_stays_under_paths_home(self):
+        from hive_logger import PATHS
+        from ml_predictor import default_model_path
+        assert Path(default_model_path()).parent == Path(PATHS.home), (
+            "模型默认路径不在 PATHS.home 下 ⇒ 快照会落到仓库外，"
+            "白名单与 .gitignore 反向规则一起失效"
+        )
+
+    def test_production_cache_path_stays_under_paths_home(self):
+        """有读者的是 `ml_model_cache.json`，不是 `ml_model.json`。
+
+        v0.45.149 实测：`ml_model.json` 全仓 0 个读者，生产三个消费点
+        （`alpha_hive_daily_report` / `generate_ml_report._model_file` /
+        `queen_distiller._ml_oos_trust_factor`）**全部显式**指 cache 那份。
+        所以这一条比上一条更要紧。
+        """
+        from hive_logger import PATHS
+        assert Path(PATHS.ml_model_cache).parent == Path(PATHS.home)
+
+    def test_snapshot_of_cache_file_lands_in_the_tracked_dir(self, tmp_path,
+                                                             snapshots_enabled):
+        """端到端：对 cache 路径调 `snapshot_model_file`，快照必须落在它旁边。
+
+        用 tmp_path 而非真目录 —— 断言的是**相对关系**（快照目录 =
+        模型文件同级的 HISTORY_DIRNAME），上面两条负责把这个同级目录钉在仓库根。
+        """
+        src = tmp_path / "ml_model_cache.json"
+        src.write_text('{"model_type": "hgb"}', encoding="utf-8")
+        dest = G.snapshot_model_file(src, date_str="2026-09-07")
+        assert dest is not None
+        assert dest.parent == tmp_path / G.HISTORY_DIRNAME
+
+    def test_manifest_records_the_fixture_overwrite_signature(self, tmp_path,
+                                                              snapshots_enabled):
+        """manifest 必须记 `oos_accuracy` 与 `n_samples_seen`。
+
+        v0.45.149 认定「模型被测试夹具覆盖」的机读签名是
+        **`oos_accuracy is None` + `n_samples_seen` 明显偏低**
+        （真实训练路径样本 ≥60 一定走 `_eval_oos_purged` 填 oos）。
+
+        ⚠️ **不能用 `training_accuracy` 判** —— 夹具模型的精度**反而更好看**
+        （实测 96.67 / 100.0，真模型只有 71.63），拿精度判会把最该拦的那个
+        当「训练得好」放行。这两个字段是事后归因唯一能用的判据，
+        manifest 少记任何一个，快照就失去了它存在的意义。
+        """
+        src = tmp_path / "ml_model.json"
+        src.write_text(json.dumps({
+            "model_type": "hgb", "is_trained": True,
+            "n_samples_seen": 30, "training_accuracy": 96.67, "oos_accuracy": None,
+        }), encoding="utf-8")
+        G.snapshot_model_file(src, date_str="2026-09-07")
+        rec = json.loads((tmp_path / G.HISTORY_DIRNAME / G.MANIFEST_NAME)
+                         .read_text().strip().split("\n")[-1])
+        assert "oos_accuracy" in rec and rec["oos_accuracy"] is None
+        assert rec["n_samples_seen"] == 30
+        assert rec["training_accuracy"] == 96.67, (
+            "accuracy 也要记 —— 但记它是为了让人看见「夹具的反而更好看」，"
+            "不是拿它当判据"
+        )
+
+
 class TestArtifactPlumbing:
     def test_history_dir_in_both_whitelists(self):
         import report_deployer as rd

@@ -5,7 +5,50 @@
 
 ---
 
-## [0.45.158] — 2026-09-07 — 占位（进行中：v0.45.145 的快照目录位置 = `模型文件.parent / ml_model_history`，而 v0.45.149 把模型默认路径改成 `PATHS.ml_model` 之后，**这个位置从此取决于别处的一个值**——`PATHS` 家族一旦改指向（如挪进 cache 目录），快照会静默落到 git 跟踪范围之外，白名单与 .gitignore 反向规则全部失效，且症状是「文件在、但永远不进库」（v0.45.111 同形）。该耦合当前无任何守卫。范围＝加两条不变式测试：① 快照目录必须落在 `PATHS.home` 下且等于仓库里那个被跟踪的目录；② manifest 必须记 `oos_accuracy` 与 `n_samples_seen`（v0.45.149 认定的「夹具覆盖」机读签名，**不能用 accuracy 判**）。+ mutation check。**不改任何实现**，纯补守卫）
+## [0.45.158] — 2026-09-07 — 快照落在哪，从 v0.45.149 起取决于别处的一个值
+
+v0.45.145 把快照目录写成 `模型文件.parent / ml_model_history`。
+v0.45.149 随后把 `save_model` 的默认路径从 cwd 相对字符串改成
+`default_model_path()` → `PATHS.ml_model`（绝对路径）。
+
+**这对我是净改善**——此前快照目录跟着 cwd 走（生产恰好对，从别处跑就落到别处），
+现在跟着 `PATHS.home` 确定性地走。实测确认：
+
+- `default_model_path()` = `PATHS.home / ml_model.json` ⇒ 快照目录 =
+  仓库根的 `ml_model_history/`，正是被 git 跟踪的那个
+- `_model_file` 已由 v0.45.149 改成 property（返回 `PATHS.ml_model_cache`），
+  `_save_model_to_disk` 仍走被钩的 `save_model` ⇒ **有读者的那份
+  （`ml_model_cache.json`）确实被快照**，端到端验过
+- manifest 记了 `oos_accuracy`，正是 v0.45.149 认定的「夹具覆盖」机读签名
+
+**但这个耦合此前没有任何守卫。** 若将来有人把 `PATHS.ml_model` 挪进 cache 目录
+或用户目录，快照会静默落到 git 跟踪范围之外：`REPORT_ARTIFACT_PATHS` 白名单与
+`.gitignore` 的 `!ml_model_history/*.json` 反向规则**一起失效**，
+而症状是「文件确实生成了、但永远不进库」——与 v0.45.111「新账本没进白名单」同形，
+是本仓最难自己发现的那一类。
+
+### Added —— 四条不变式（**不改任何实现**）
+
+`tests/test_ml_model_guard.py::TestSnapshotLandsInTheTrackedDir`：
+
+1. `default_model_path()` 的父目录必须是 `PATHS.home`
+2. `PATHS.ml_model_cache` 的父目录必须是 `PATHS.home`
+   —— 这条比上一条要紧：v0.45.149 实测 **`ml_model.json` 全仓 0 个读者**，
+   生产三个消费点全部显式指 cache 那份
+3. 端到端：对 cache 路径调 `snapshot_model_file`，快照必须落在它同级的
+   `ml_model_history/`
+4. manifest 必须记 `oos_accuracy` 与 `n_samples_seen`
+   ⚠️ **不能用 `training_accuracy` 判「模型是不是被夹具覆盖了」**——
+   夹具模型的精度**反而更好看**（实测 96.67 / 100.0，真模型只有 71.63），
+   拿精度判会把最该拦的那个当「训练得好」放行。
+   manifest 少记这两个字段中的任何一个，快照就失去了它存在的意义。
+
+### 验证
+
+- 新增 4 项，`collected 72 items`（含 `test_parallel_agent_runner.py`）。
+- mutation check **34/34**：新增 M32（快照改落到 `.cache/` 子目录 ⇒ 7 条红）
+  与 M33（manifest 不再记 `oos_accuracy` ⇒ 1 条红）。
+- 全套 **3665 passed / 0 failed**，跑完 `ml_model_history/` 仍只有 `README.md`。
 
 ---
 
