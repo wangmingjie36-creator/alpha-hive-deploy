@@ -96,7 +96,7 @@ v0.45.149 随后把 `save_model` 的默认路径从 cwd 相对字符串改成
 - 新增 4 项，`collected 72 items`（含 `test_parallel_agent_runner.py`）。
 - mutation check **34/34**：新增 M32（快照改落到 `.cache/` 子目录 ⇒ 7 条红）
   与 M33（manifest 不再记 `oos_accuracy` ⇒ 1 条红）。
-- 全套 **3665 passed / 0 failed**，跑完 `ml_model_history/` 仍只有 `README.md`。
+- 全套 **3680 passed / 0 failed**（含 v0.45.159/160 合并后重跑），跑完 `ml_model_history/` 仍只有 `README.md`。
 
 ---
 
