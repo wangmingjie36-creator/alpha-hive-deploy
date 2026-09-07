@@ -460,7 +460,7 @@ class AlphaHiveDailyReporter:
         try:
             from ml_predictor import MLPredictionService as _MPS
             _ml_svc_tmp = _MPS()
-            _ml_model_file = PATHS.home / "ml_model_cache.json"
+            _ml_model_file = PATHS.ml_model_cache
             if _ml_model_file.exists():
                 _ml_svc_tmp.model.load_model(str(_ml_model_file))
                 if _ml_svc_tmp.model.is_trained:
@@ -917,7 +917,7 @@ class AlphaHiveDailyReporter:
                         ))
 
                     ml_svc = MLPredictionService()
-                    model_file = PATHS.home / "ml_model_cache.json"
+                    model_file = PATHS.ml_model_cache
                     if model_file.exists():
                         ml_svc.model.load_model(str(model_file))
 
@@ -2239,6 +2239,41 @@ class AlphaHiveDailyReporter:
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
 
+        # ── v0.45.145：ML 概率常数退化闸 ─────────────────────────────
+        # 2026-09-04 全部 12 份 probability 逐位相同（0.5899693787928219），
+        # 报告照常印「ML 预测 59.0%」、退出码 0、日志正常——没有任何东西会红。
+        # 本函数是当日 analysis-*-ml-*.json 的**主力生产者**（编排器 Step 2
+        # 内部；generate_ml_report.main() 只是 Step 3 补跑），闸必须在这里。
+        #
+        # ⚠️ 刻意 raise_on_degenerate=False，**不要改成抛**：本函数的调用点
+        # `_save_output_files` 只兜 (OSError, ValueError, KeyError, TypeError)，
+        # MLModelDegenerateError 是 RuntimeError、会穿透并连带杀掉 index.html
+        # 生成与 gh-pages 部署——正是那段 except 上方注释记着的 v0.43.17 事故。
+        # 「变红」靠：ERROR 日志 + 判决挂到 report（main 最终返回的同一个对象）
+        # + __main__ 出非零退出码。不发 Slack（CLAUDE.md「Slack 通知精简规则」）。
+        try:
+            from ml_model_guard import enforce_day as _enforce_day
+            _mg = _enforce_day(
+                self.report_dir, self.date_str,
+                raise_on_degenerate=False, logger=_log,
+            )
+            report["ml_model_guard"] = {
+                "verdict": _mg.verdict,
+                "n_files": _mg.n_files,
+                "n_numeric": _mg.n_numeric,
+                "distinct": _mg.distinct,
+                "modal_count": _mg.modal_count,
+                "snapshot_present": _mg.snapshot_present,
+                "exit_code": _mg.exit_code,
+            }
+        except ImportError as _ge:
+            # 「闸装不上」与「闸响了」一样不该报告健康：记成 guard_missing，
+            # 沿用 Step 10/11/12 的 3 = 无法判定。
+            _log.error(
+                "🚨 ML 常数退化闸未装上（%s）——本次扫描没有这道观测点", _ge
+            )
+            report["ml_model_guard"] = {"verdict": "guard_missing", "exit_code": 3}
+
         return generated
 
     # ── save_report helper methods ──────────────────────────────────
@@ -2891,7 +2926,7 @@ def main():
     return report
 
 
-def _force_exit_if_threads_stuck(grace_seconds: float = 10.0) -> None:
+def _force_exit_if_threads_stuck(grace_seconds: float = 10.0, exit_code: int = 0) -> None:
     """全部工作完成后，若仍有卡死的工作线程则强制退出（v0.42.8 安全网）
 
     为什么需要：`concurrent.futures` 通过 `threading._register_atexit` 注册了
@@ -2903,7 +2938,11 @@ def _force_exit_if_threads_stuck(grace_seconds: float = 10.0) -> None:
 
     本函数只在**所有产出都已落盘之后**调用，因此强退是安全的：
     数据库、报告、gh-pages 同步均已完成。给 grace_seconds 让线程有机会自然结束，
-    超时则 `os._exit(0)` 跳过 atexit 直接结束进程。
+    超时则 `os._exit(exit_code)` 跳过 atexit 直接结束进程。
+
+    ⚠️ v0.45.145：`exit_code` 不是可有可无的参数。此前这里硬写 `os._exit(0)`，
+    于是「线程卡死」这条路径会把调用方要传出去的失败（如 ML 概率退化成常数）
+    悄悄改写成成功——正是本项目反复犯的那个形状。调用方必须把码传进来。
     """
     import sys
     import threading
@@ -2935,9 +2974,20 @@ def _force_exit_if_threads_stuck(grace_seconds: float = 10.0) -> None:
         )
         sys.stdout.flush()
         sys.stderr.flush()
-        os._exit(0)
+        # v0.45.145：这里原本硬写 0。线程卡死这条路径同样要把 exit_code 带出去，
+        # 否则「ML 退化」会被强退悄悄改写成成功——正是本次要治的那个形状。
+        os._exit(exit_code)
 
 
 if __name__ == "__main__":
-    main()
-    _force_exit_if_threads_stuck()
+    _result = main()
+    # v0.45.145：ML 概率退化成常数 → 退出码 1（Step 10/11/12 约定：1 = 要人动手）。
+    # 判决由 _generate_ml_reports 挂在 report 上，main() 返回的正是同一个对象。
+    # ⚠️ 键缺失 ≠ 健康：那说明 ML 批量根本没跑到闸（另有 warning 记录），
+    # 那条路径的退出码语义不在本版改动面内，刻意不改。
+    _guard = (_result.get("ml_model_guard") or {}) if isinstance(_result, dict) else {}
+    _exit_code = 1 if _guard.get("verdict") in ("constant", "near_constant") else 0
+    _force_exit_if_threads_stuck(exit_code=_exit_code)
+    if _exit_code:
+        import sys as _sys_main
+        _sys_main.exit(_exit_code)
