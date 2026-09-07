@@ -5,6 +5,82 @@
 
 ---
 
+## [0.45.161] — 2026-09-07 — 二次复查 v0.45.146/152/155：八项对抗性检查，未发现 bug
+
+**本条不改任何代码**，只记录一次对本 session 全部改动的对抗性复查，
+以及复查本身暴露的一个方法学盲区。
+
+### 结论
+
+八项检查全过，v0.45.146（两个特征槽）/ 152（模型恢复）/ 155（环境记录）**未发现 bug**。
+整套 3625 passed / 1 failed（`TestCoverageHorizon` 的 BLS 日历告警，设计上到点该红，
+`origin/main` 上同样红）；ruff 与 `origin/main` 基线同为 48，**零新增**；`F821` 全过。
+
+### 检查项与实测
+
+1. **`unreliable` 阈值回归**（最大实际风险）。本版两个槽 + v0.45.147 两个槽
+   现在**共用** `_MAX_IMPUTED_FEATURES = 4`。803 份实测只有 **2 份**新翻
+   `unreliable`，都是 **08-28 断网日**、缺 **11/12** 维——此前它们记着
+   `unreliable: False` 而缺 11 个特征，**那才是缺陷，现在是修好了**。
+   缺失数分布 `{0: 733, 1: 9, 2: 4, 9: 55, 11: 2}`：干净双峰，无中间地带。
+2. **`None` 进降级模型**。`crowding_score` 此前恒为 float，现可为 `None`。
+   三个模型类 × 五种缺失组合逐个探针：`SimpleMLModel` / `SGDMLModel` / `HGBModel`
+   **全部无异常**，`predict_return`（含 `expected_returns`）亦正常。
+3. **缺失表名字口径**。报告端用 `"crowding_score"`、`_FEATURE_SOURCES` 用 `"crowding"`。
+   查全部消费者：唯一生产消费点只把它写进 JSON 当诊断字段，**无名字映射表**；
+   `ml_predictor` 只取 `len()`；`ml_model_guard` 明确写着**禁止**拿它当判据。无风险。
+4. **世代表**。递增、无重复；`ml_estimator_generation("2026-09-08")`（下次扫描日）
+   返回 `v0.45.146+v0.45.147`，**两个版本都在**——合并时那次撤回性更正未被后续合并冲掉。
+5. **恢复的模型 vs v0.45.149 新守卫**。四份真实文件跑 `load_model`：
+   恢复后的 `ml_model.json`、`ml_model_cache.json`、健康副本三份**放行**；
+   `ml_model.corrupted-2026-09-07T0130.json` 被 **`PoisonedModelError` 拒绝**。
+6. **未接线的调用点**。`alpha_hive_daily_report.py:321` 不传任何蜂群参数。
+   **未采信测试 docstring 的说法**，直接查编排器：`orchestrator.sh:527` 是唯一
+   真实调用行（另 3 处是存在性检查）且带 `--swarm` ⇒ 非生产路径，不接线是对的
+   （它确实没有蜂群上下文，如实报缺才是正确行为）。
+7. **清理副作用**。8 个「本体」文件逐个确认在位，残留副本 0。
+8. **测试改动的变异检验** —— 见下，这是复查暴露的盲区。
+
+### ⚠️ 方法学盲区：改了测试也要单独做一次变异检验
+
+先前的 mutation check **只变异了生产代码**，没有变异「我改过的测试所保护的对象」。
+补做 5 个变异，`collected=127` 逐次不变，**全部被抓**。其中：
+
+- **M-C**（把 `ml_estimator_generation` 改成「取第一条匹配」）只有**重写后**的
+  `test_boundary_partitions_days` 能抓到，**写死日期常量的原版抓不到**
+  ⇒ 那次重写是净增强，不是等价替换。
+- M-A/M-B（世代表乱序 / 重复日期）、M-D/M-E（缺失表漏记两个槽）均被抓。
+
+⇒ **「改了代码」与「改了测试」需要各自做一次变异检验**：前者问「测试能不能抓住
+代码退化」，后者问「测试改动之后还能不能抓住它本该抓的东西」。
+
+### ⚠️ 另一个盲区（同日第二次踩，方向相反）
+
+复核「8 个定义体是否都解析成绝对路径」时，我的检测器按
+**「函数体里出现 `default_model_path` 或 `PATHS.`」**判定，把
+`ml_predictor_extended.py` 那两个判成 ✗ —— 实际它们走**同义但不同名**的
+`default_extended_model_path()`（→ `str(PATHS.ml_model_extended)`，实测绝对路径）。
+**不读源码就报「发现 2 处未修」即是假警报。**
+
+与本 session 早先那次 socket 探针对 `curl_cffi` 恒 0（**假阴性**）方向相反、同族：
+**探针的两个方向都要自证，而我只习惯自证「能不能抓到」，没自证「会不会误抓」。**
+
+判据（已转告 v0.45.150 / v0.45.160）：**按名字匹配的检测器，只能证明
+「匹配到的是对的」，不能证明「没匹配到的是错的」。** 实证：全仓「体内引用
+`PATHS.` 的路径解析器」共 **10 个、名字各不相同**（`default_db_path` /
+`_resolve_cache_dir` / `DB_PATH` / `default_model_path` /
+`default_extended_model_path` / `_pheromone_db_path` / `default_path` /
+`DEFAULT_DB_PATH` / `_cache_dir` / `_sentiment_db_path`）——
+**按单一名字匹配只覆盖 1/10。**
+
+### 遗留（未做，交待清楚）
+
+v0.45.146 的世代边界只登记了 `blend_scan` 那条管道。「IC 闸不受影响」
+（ML 特征不进 `predictions` 表，44 列无 ML 列）是**改动当时**核的，
+v0.45.147/153 之后**未重核**。
+
+---
+
 ## [0.45.160] — 2026-09-07 — 占位（进行中：清 `__file__` 派生的路径常量 —— 比 v0.45.150 治的 `PATHS` 冻结**更严重的同族**。`Path(__file__).parent / "pheromone.db"` 这类写法**压根不读任何环境变量**：`ALPHA_HIVE_HOME` / `ALPHA_HIVE_DB_PATH` 设成什么都无效，连「改成懒求值」都救不了，只能显式改去读 `PATHS.*`。已知含 `feedback_loop` / `ic_diagnostics` / `close_correction` / `replay_scoring` / `signal_archive` / `vol_forecast` 各自的 `pheromone.db`，以及一批 `CACHE_DIR` / `BASE_DIR` / `_CACHE_PATH`。范围＝① **先用 `git ls-files` 干净口径重新普查并钉提交**——v0.45.150 报的「49 处」出自已作废的 `rglob` 污染口径（那口径在主 checkout 会扫进 15349 个 .py、98% 是第三方库），**不得直接沿用该数字**；② 逐处判危害等级，判据仍是「这个冻住的值在**主 checkout** 里指向什么、会不会被**写**、写的是不是生产数据」，**不是「跑测试坏没坏」**（所有人都在 worktree 里跑，所以所有人都不会坏）；③ 高危处改调用时求值，成对测试（改 env 路径跟着变 + 显式传参仍生效 + 生产产物指纹不变）+ mutation check + 核对 `collected N` 非 0；④ 先数 conftest 里哪些已被针对性 monkeypatch 管住（已知 `weekly_optimizer` / `feedback_loop` 的 `PHEROMONE_DB_PATH`、`paper_portfolio` 的 `STATE_DIR`），不重复劳动；⑤ 把清掉的从 `TestSpeciesDoesNotSpread.KNOWN` 里删行，并考虑给 `__file__` 族加一条同构的结构守卫。⚠️ **不动** `PATHS` 族本身（v0.45.150 已治）、**不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`。⚠️ 会碰 `tests/conftest.py` 与 `tests/test_paths_not_frozen_at_import.py`，与其它 session 合并时逐块核对）
 
 ---
