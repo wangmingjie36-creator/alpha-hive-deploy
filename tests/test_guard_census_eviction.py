@@ -96,10 +96,15 @@ TRUE_AVG = sum(s for _, s in CENSUS_TRUTH.values()) / len(CENSUS_TRUTH)
 
 @pytest.fixture(autouse=True)
 def _offline_sources(stub_yfinance, stub_reddit, stub_http_gate,
-                     stub_cboe_payload, stub_cboe_vix):
+                     stub_cboe_payload, stub_cboe_vix, stub_vixcentral):
     """本文件跑 GuardBee.analyze() 全链（拥挤度 / 宏观 / market_intelligence），
     每个外部源在源头钉成它自己的「取不到」契约，而不是靠 `_offline_transport`
-    在传输层兜底。"""
+    在传输层兜底。
+
+    ⚠️ `stub_vixcentral` 一开始漏了却没红：`vix_term_structure` 当时的缓存路径是
+    `__file__` 派生常量，读到的是**仓库根**那份真缓存 ⇒ 命中、不出网。v0.45.160 把它
+    改成读 `PATHS`（受 `_isolate_env` 沙箱化）后缓存必然 miss，这条出网才现形。
+    ⇒ **「离线跑得过」不等于「不出网」**，靠的可能只是某台机器上恰好存在的一个文件。"""
 
 
 @pytest.fixture
