@@ -109,6 +109,26 @@ BLEND_GRID = tuple(i / 10 for i in range(11))
 #: ⚠️ 改 `generate_ml_report._prepare_ml_input` 的任何特征来源时**必须追加一条**。
 #: 反过来，不要因此去动 `_COHORT_HISTORY`：`_prepare_ml_input` 的产物不进
 #: `predictions` 表（44 列实测无 ML 特征列），往那里加条目会白白作废几个月样本。
+#:
+#: ⚠️⚠️ v0.45.162：上面那句「产物不进 `predictions`」是**数据通路**的论证，
+#: 它只回答了两个问题中的**第一个**。要判 `_COHORT_HISTORY` 要不要跟着动，
+#: 两个都得问：
+#:
+#:   ① **通路**：报告侧的产物流到哪？（→ `analysis-*-ml-*.json` → `blend_scan`，
+#:      不进 `predictions` / `signal_archive`。后两者只从 `swarm_results` 取值，
+#:      而 IC 侧那份 `TrainingData` 是 `swarm_agents/rival_bee.py` 自己造的。）
+#:   ② **可达性**：这次改动有没有顺手动了**两条管道共用**的代码
+#:      （`ml_predictor.py` / `ml_predictor_extended.py`）？动了就**不能**再用①推理——
+#:      得单独问：那个行为差在 **rival_bee 那条路上够不够得着**。
+#:
+#: 实例（v0.45.147）：它在改 `_prepare_ml_input` 的同时改了共用的
+#: `_encode_catalyst(None)`：`0.5` → `NaN`。只凭①会判「不受影响」，但那是**碰巧**对——
+#: 真正的理由是②：当时 rival_bee 的 `catalyst_quality` 只经 `catalyst_quality_from_score`
+#: 取得，而该函数的返回集是 `{'C','B',grade}`、**产不出 `None`** ⇒ 改掉的那条分支
+#: 在 IC 侧不可达 ⇒ 输出逐位不变。后来 v0.45.151 把 rival_bee 改成真的发 `None`，
+#: 同一行代码就变得可达了 —— 那一版**登记了** `_COHORT_HISTORY` 边界，是对的。
+#: ⇒ 同一处共用改动，「要不要登记」随另一条路的可达性而变，不随本表而变。
+#: （同族教训：v0.45.142「动了共享函数就不能靠『A 被丢弃』推理世代边界」。）
 _ML_ESTIMATOR_GENERATIONS = [
     ("2026-09-06", "v0.45.137+v0.45.140+v0.45.141",
      "服务端特征来源三批修复合并为一代（同日落地）："

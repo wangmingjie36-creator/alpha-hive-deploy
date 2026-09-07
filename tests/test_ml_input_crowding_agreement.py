@@ -256,3 +256,68 @@ def test_both_slots_are_in_the_missing_table_source():
     consts = {n.value for n in ast.walk(assign[0])
               if isinstance(n, ast.Constant) and isinstance(n.value, str)}
     assert {"crowding_score", "agent_agreement"} <= consts
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  v0.45.162：两条管道之间那道墙 —— 报告侧拿到的是**引用**
+# ═══════════════════════════════════════════════════════════════════════
+#
+# v0.45.146 起，调用点传的是 `_sr.get("agent_directions")` 与
+# `_sr.get("dimension_scores")` —— **同一个 dict 对象**，不是副本。
+# 而 `Backtester.save_predictions` 正把这两个对象 `json.dumps` 进
+# `predictions.agent_directions` / `predictions.dimension_scores`，
+# 后者是 `ic_diagnostics.load_daily_ic` **唯一**读的那一列。
+#
+# 所以「报告侧的改动不影响 IC 闸」这句话，除了「产物不进 predictions」
+# （数据通路）之外，还依赖一条从没被断言过的不变式：**报告侧不得就地改写入参**。
+# 一旦哪天有人在 `_prepare_ml_input` 里写了 `dims.setdefault(...)` 之类，
+# 墙就破了，而且是**静默**的 —— 报告照出、库照写、IC 照算。
+
+class TestPreparedInputDoesNotMutateSwarmDicts:
+    """成对：① 没写回入参　② 但确实读了它们。
+
+    只有①会被**空实现**满足（什么都不干的函数当然不改写入参），
+    那样这条守卫就退化成恒真。②把它钉在「读了、算了、只是没写回」上。
+
+    ⚠️ 别再补一条「对象身份没被换掉」（`id(dims)` 调用前后相等）：
+    v0.45.162 写过又删了 —— 那是**恒真断言**。被调用方无论怎么写都改不了
+    调用方局部名字的绑定，不存在能让它变红的实现。变异实测：给函数里植入
+    「换成副本再改写副本」，被另外 11 条既有断言抓到，那条身份断言**全绿**。
+    （同 v0.45.71「守卫自己恒真」：写 `assert` 前先问哪个实现能让它失败。）
+    """
+
+    @staticmethod
+    def _live():
+        """生产形状：五维 + 逐蜂方向（3 多 1 空 ⇒ 一致率 0.75）。"""
+        return (
+            {"signal": 6.4, "catalyst": 5.0, "sentiment": 5.0,
+             "odds": 5.0, "risk_adj": 5.0},
+            {"ScoutBeeNova": "bullish", "BuzzBeeWhisper": "bullish",
+             "OracleBeeEcho": "bullish", "BearBeeContrarian": "bearish"},
+        )
+
+    def test_inputs_are_untouched_and_still_actually_read(self, g):
+        import json
+
+        dims, adirs = self._live()
+        before = (json.dumps(dims, sort_keys=True),
+                  json.dumps(adirs, sort_keys=True))
+
+        td = g._prepare_ml_input(
+            "X", _METRICS, {},
+            swarm_dimension_scores=dims,
+            swarm_agent_directions=adirs,
+            swarm_direction="bullish",
+        )
+
+        # ② 先证它真的读了 —— 否则①对空实现也全绿
+        assert td.crowding_score == pytest.approx(64.0), "没读 dimension_scores"
+        assert td.agent_agreement == pytest.approx(0.75), "没读 agent_directions"
+
+        # ① 再证它没写回。库里那两列的内容就是这两个对象序列化的结果。
+        assert (json.dumps(dims, sort_keys=True),
+                json.dumps(adirs, sort_keys=True)) == before, (
+            "`_prepare_ml_input` 就地改写了入参 —— 这两个对象会被 "
+            "`save_predictions` 写进 `predictions`，`dimension_scores` 更是 "
+            "IC 闸唯一读的列 ⇒ 报告侧的改动会渗进 IC 管道，且渗得静默。"
+        )

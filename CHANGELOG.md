@@ -5,9 +5,125 @@
 
 ---
 
-## [0.45.162] — 2026-09-07 — 占位（进行中：核 v0.45.161 交待的遗留「IC 闸不受影响未重核」。结论方向：判断成立但**理由不完整** —— v0.45.146 记的是「ML 特征不进 `predictions` 表」，那只覆盖**数据通路**；而 v0.45.147 同时改了**两条管道共用**的 `ml_predictor.py`(+49)，共用模块的改动不能靠「报告侧产物被丢弃」推理（正是 v0.45.142 记下的物种）。范围＝① 把 `probability_scorecard` 里那条成文规则补上共用模块的但书 —— 现文写死「不要因此去动 `_COHORT_HISTORY`」，下一个人若在改 `_prepare_ml_input` 的同时动了 `ml_predictor`，照它推理会漏登记；② 给 v0.45.146 自己引入的**引用传递**加守卫 —— `swarm_agent_directions=_sr.get("agent_directions")` 传的是引用，而同一对象正被 `save_predictions` 写进 `predictions.agent_directions` 列，就地改写会让报告侧渗进 IC 管道；③ 记录本次实测。⚠️ **不动** `_prepare_ml_input` 的特征口径、**不动** `_COHORT_HISTORY`、**不动** `_ML_ESTIMATOR_GENERATIONS`、**不动**训练侧 —— 本版不改任何评分行为）
+## [0.45.162] — 2026-09-07 — 「不进那张表」只回答了两个问题里的一个
 
----
+v0.45.161 交待的遗留：「IC 闸不受影响」是 v0.45.146 **改动当时**核的，
+v0.45.147/153 之后未重核。本版重核完毕。
+
+**结论：判断成立，IC 闸确实不受影响，无需改任何评分行为。**
+但**当时记下的理由是不完整的**，而且不完整的方式恰好会误导下一个人。
+
+### 理由为什么不完整
+
+v0.45.146 在 CHANGELOG 里写的是「ML 特征不进 `predictions` 表」。
+那是一条**数据通路**论证 —— 它回答的是「报告侧的产物流到哪」。
+但 v0.45.147 在改 `_prepare_ml_input` 的**同时**改了 `ml_predictor.py`（42 增 7 删），
+而那是**两条管道共用**的模块：报告侧走 `_prepare_ml_input`，
+IC 侧走 `swarm_agents/rival_bee.py:138` 自己造的 `TrainingData`。
+共用模块的改动，**不能**靠「报告侧产物被丢弃」推理 ——
+那正是 v0.45.142 记下的物种（「动了共享函数就不能靠『A 被丢弃』推理世代边界」）。
+
+判据得是两问，不是一问：
+
+| | 问题 | 本例答案 |
+|---|---|---|
+| ① 通路 | 报告侧产物流到哪？ | `analysis-*-ml-*.json` → `blend_scan`；不进 `predictions` / `signal_archive` |
+| ② 可达性 | 有没有动共用代码？动了的话，那个行为差在 **rival_bee 那条路上**够不够得着？ | 够不着（见下） |
+
+**②的实测**：v0.45.147 对共用代码的行为差**收敛到唯一一处** ——
+`_encode_catalyst(None)` 由 `0.5` 改 `NaN`（编码表内容与 `.get(未知, 0.5)`
+均未变，`catalyst_quality_from_score` 的契约也未变）。
+取 `9b02557^`（v0.45.147 的父提交）AST 实测：`catalyst_quality_from_score`
+的返回集是 `{'C', 'B', 'B', grade}`、**产不出 `None`**，
+而当时 rival_bee 的 `_cat_quality` 只有两个来源（默认字面量 `"B"` 或该函数）
+⇒ 改掉的那条分支在 IC 侧**不可达** ⇒ 输出逐位不变。
+
+⇒ 只凭①会得到「不受影响」，但那是**碰巧对**；真正承重的是②。
+
+**后来它变得可达了，而那一版做对了**：v0.45.151 把 rival_bee 改成读不到时真发
+`None`，同一行代码于是可达 —— 那一版**登记了** `_COHORT_HISTORY` 边界，
+并同时把 `ml_predictor_extended.py` 里第四份编码表改成 `None → NaN` + 补 NaN 闸。
+⇒ 同一处共用改动「要不要登记世代边界」，随**另一条路的可达性**而变。
+
+### 另一条从没被断言过的不变式（v0.45.146 自己引入的）
+
+调用点传的是 `_sr.get("agent_directions")` / `_sr.get("dimension_scores")` ——
+**同一个 dict 对象，不是副本**。而 `Backtester.save_predictions` 正把这两个对象
+`json.dumps` 进 `predictions.agent_directions` / `predictions.dimension_scores`，
+后者是 `ic_diagnostics.load_daily_ic` **唯一**读的那一列。
+所以那道墙除了①之外，还依赖「报告侧不得就地改写入参」——
+一旦有人写了 `dims.setdefault(...)`，墙就破了，而且是**静默**的：
+报告照出、库照写、IC 照算。此前无任何断言覆盖它。
+
+拿 2026-09-04 生产快照（30 只）实测，探针先自证判别力：
+注入 `1e-9` 改写 → 检出 **30/30**；真实 `_prepare_ml_input` → 改写 **0/30**。
+
+### 其余四项核对
+
+- `predictions` **44 列实测无 ML 特征列**（与 v0.45.146 所记一致）。
+- **生产写入点穷举 2 处**，均在 `run_swarm_scan()` [1306-1425]：
+  `alpha_hive_daily_report.py:809`（`signal_archive`）与 `:818`（`save_predictions`），
+  两者的入参都是 `swarm_results`。ML 报告在 `_save_output_files()` [2418-2474]
+  里跑，**不写任何库**。
+- `signal_archive` 的 `ml.probability` / `ml.expected_7d` / `ml.expected_30d`
+  三个键读的是 `agent_details.RivalBeeVanguard.details.*`，即 rival_bee 自己那份
+  `TrainingData`，**不经** `_prepare_ml_input`。
+- 样本层面影响为 0：`predictions` 最近业务日 **2026-09-04**，
+  `date >= 2026-09-05` 共 **0 行** ⇒ 无论判断如何都不存在已被混算的样本。
+
+### Changed — `probability_scorecard.py`
+
+那条成文规则（v0.45.140 写的）原文是「不要因此去动 `_COHORT_HISTORY`：
+`_prepare_ml_input` 的产物不进 `predictions` 表」。**它本身没说错，但只写了①**，
+下一个人若在改 `_prepare_ml_input` 的同时动了 `ml_predictor`，照它推理会漏登记。
+现补上②的但书与 v0.45.147/151 这对实例。**未动**表内容
+（`_ML_ESTIMATOR_GENERATIONS` 一字未改），**未动** `_COHORT_HISTORY`。
+
+### Added — `tests/test_ml_input_crowding_agreement.py`
+
+`TestPreparedInputDoesNotMutateSwarmDicts`：成对断言 ——
+① 入参序列化前后逐字不变（库里那两列的内容就是它们）；
+② **但确实读了**（`crowding_score == 64.0`、`agent_agreement == 0.75`）。
+只有①会被**空实现**满足，②把它钉在「读了、算了、只是没写回」上。
+
+变异检验 3/3 打上（锚点均唯一；`collected 35 items` 逐次核对；
+每次写入与还原后清 `__pycache__` —— 沿用 v0.45.146 的教训：`shutil.copy` 不保 mtime
+＋等长替换会让 `.pyc` 的 `(mtime, size)` 判据全对上，git 干净而 import 到的仍是变异体）：
+
+| | 变异 | 谁红了 |
+|---|---|---|
+| M1 | 就地改写入参 | **只有本条**（1 failed）⇒ 新增覆盖，不是重复覆盖 |
+| M2 | 不读 `dims`（恒定 64.0） | 8 条既有断言（本条的②同向） |
+| M3 | 换成副本再改写副本 | 11 条，**含本条** |
+
+M3 值得单记：它改的是**副本**，调用方的入参没变 ⇒ ①结构上抓不到它，
+红的是**②**（毒化副本多一条 bullish ⇒ 一致率 4/5=0.8≠0.75）。
+成对断言的价值正在这里 —— 两半各自覆盖对方结构上够不着的那类实现。
+
+### Removed — 自己写的一条恒真守卫（同一版内删掉）
+
+本版一度还加了 `test_identity_is_preserved_not_silently_replaced`
+（断言 `id(dims)` 调用前后相等）。**它是恒真断言**：Python 里被调用方
+无论怎么写都改不了调用方局部名字的绑定，不存在能让它变红的实现。
+M3 实测坐实 —— 「换成副本再改写副本」被另外 11 条既有断言抓到，
+**它自己全绿**。已删，理由留在类 docstring 里防止有人再加一遍。
+（同 v0.45.71「守卫自己恒真」：写 `assert` 前先问哪个实现能让它失败。）
+
+### 验证
+
+全套 **3705 passed / 1 failed**，唯一的红是 `TestCoverageHorizon`
+——CLAUDE.md 写明「2026-09-06 起陆续变红是设计意图」的 BLS 日历闸，非回归。
+`ruff` 改动的两个文件 `All checks passed!`，全仓 46 与基线相等、零新增。
+**本版不改任何评分行为**：`_prepare_ml_input` 的特征口径、`_COHORT_HISTORY`、
+`_ML_ESTIMATOR_GENERATIONS`、训练侧均一字未动。
+
+### 顺带记一条检测器口径
+
+本次第一条 `grep -rn "INSERT INTO predictions"` 在**生产代码里零命中**，
+只匹配到 tests —— 真正的写入点是 `INSERT OR REPLACE INTO {self.TABLE}`
+（f-string + 类属性表名，`backtester.py:262`）。
+同 v0.45.161 记的判据：**按名字匹配只能证明「匹配到的是对的」，
+证不了「没匹配到的是错的」**。这次它差点把「没有生产写入点」读成结论。
 
 ## [0.45.161] — 2026-09-07 — 二次复查 v0.45.146/152/155：八项对抗性检查，未发现 bug
 
