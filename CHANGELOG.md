@@ -320,6 +320,49 @@ v0.45.147/153 之后**未重核**。
    （`pytest $EXIST` 变成一个整串参数）——后者是 MEMORY.md 已记过的坑。
    两次都靠核对 `collected N` 才发现「什么都没验」。
 
+#### 追加（同版，承 v0.45.146/152 session 的判据）
+
+**判据：按名字匹配的检测器，只能证明「匹配到的是对的」，不能证明
+「没匹配到的是错的」。** 实证就在本仓——「零参数 `PATHS.*` 路径解析器」共
+**27 个、名字互不相同**（`default_db_path` / `_cache_path` / `_base_dir` /
+`DB_PATH` / `default_model_path` / `_sentiment_db_path` / `default_path` …，
+其中 16 个是本版自己新造的）。**列名单去测只会覆盖到你想起来的那几个。**
+
+对方另指出一处我**结构上看不见**的：`@lru_cache` / `@cached_property` 修饰的
+解析器**首次调用后冻住**——不是 import 期冻，但一样穿透逐测试隔离
+（第一个用到它的测试决定整个 session 的落点），而 `_scan()` 只看
+`Assign`/`AnnAssign`。实测本仓当前 **0 处**，属未来风险。
+
+新增两个类：
+
+- `TestEveryResolverFollowsEnv`（1 + 27 项）：**从 AST 枚举**全部解析器并逐个
+  驱动，断言「改 `ALPHA_HIVE_HOME` 后路径跟着走」。新增解析器**自动**进入覆盖，
+  不必有人记得来加一行。结构守卫只能证明「不是 import 期常量」，
+  **证明不了「跟着 env 走」**——这一层由行为测试补。
+- `TestNoUnexpectedDecoratorsOnResolvers`：解析器不许带非白名单装饰器，配正向对照。
+
+**三条自造缺陷，都是当场被 mutation 抓出来的：**
+
+1. **我这条新测试自己产生了假阳性。** `feedback_loop._db_path` 首跑就红——
+   真因是 `conftest::_isolate_feedback_loop_close_t7_db`（autouse）把覆盖钩子
+   指向了别处，而那是**正确行为**。⇒ 行为测试必须**先把钩子清成 `None`**，
+   验的是「**没有覆盖时**它跟不跟 env」。枚举因此要一并带出钩子名。
+2. **参数化测试能靠「让目标不再被枚举到」来规避。** mutation 把
+   `signal_archive._db_path()` 冻回 `Path(__file__)…` 后，它不再引用 `PATHS.`
+   ⇒ **从枚举里消失、那条用例直接不存在**，`collected` 56→55、**零红**。
+   这是「跳过缺失项＝把缺失渲染成不存在」的 parametrize 版本。
+   ⇒ 已加 `MUST_BE_ENUMERATED` 最小集合：**消失比变红更危险，必须单独钉。**
+   （顺带说明：`__file__` 藏在**函数体内**时 `_scan()` 也看不见——它只扫模块级
+   与类体的赋值。行为测试与最小集合正好补上这一层。）
+3. **我的黑名单检测器被别名当场绕过。** `from functools import lru_cache as _lc`
+   + `@_lc(maxsize=1)` 的 `ast.unparse` 是 `_lc(maxsize=1)`，**不含 "lru_cache"**
+   ⇒ 检测器全绿。这正是对方那句判据落在我几分钟前刚写的检测器上。
+   ⇒ 已**反转为白名单**：除 `property`/`staticmethod`/`classmethod`/`overload`/
+   `abstractmethod` 外一律报出。白名单绕不过，黑名单永远能靠改名绕过。
+
+mutation M22~M27：5 个中 4 个变红；M27（清空 `MUST_BE_ENUMERATED`）属
+**「变异到断言自身」**，等于删测试，按本条教训 5 归类为固有上限而非缺口。
+
 ### 范围
 
 - **未清、已登记**（17 处，全在 `TestFileDerivedSpeciesDoesNotSpread.KNOWN` 里
