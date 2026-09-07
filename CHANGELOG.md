@@ -265,6 +265,24 @@ setenv 之后再读          : <repo>/ml_model_cache.json   ← 没变 = 冻住�
   `test_rejection_does_not_depend_on_accuracy`（96.67 / 100.0 vs 71.63），
   测试本身不依赖那两个文件。
 
+### 固化进 CLAUDE.md
+
+新增硬检查项**「新产物的默认路径不许是相对路径」**（与「这个失败，下游怎么知道？」
+同源、并列一节）。放**项目** CLAUDE.md 不放用户级 `~/.claude/CLAUDE.md`——后者
+自己写着「只放在哪都必须成立的规则，每加一行成本乘以所有项目」，而本条引用
+`PATHS` / conftest fixture / 具体事故，是项目级的。
+
+要点：文件名唯一真相在 `hive_logger.PATHS`；**两种写错法**（相对字符串默认值 /
+把 `PATHS.*` 求值成模块级常量或类属性 ⇒ import 时冻住）；**产物路径一律用
+property 或函数，不用常量**；配套三条（路径要集中但文件不能合并 / 单文件跑验证
+不了②，要用干净目录跑全套 / 新产物必须在 conftest 配两道防线）；末尾附「断言要
+成对」与「测 helper ≠ 测接线」。
+
+⚠️ 该节引用的 9 个标识符与数字（三个 `PATHS` property、两个 conftest fixture 名
+及其版本号、`_model_file` 已是 property、读者数 0 与 3）**逐条用 AST 实测核对过**
+才写进去——CLAUDE.md 每个 session 都加载，写错的代价乘以所有 session
+（同 v0.45.121「『我已经改了』这句话本身要核对」）。
+
 ### 未做（明确说明）
 
 - **没有重训、没有触碰生产 `ml_model_cache.json`。** 它现在就是
