@@ -383,6 +383,42 @@ class TestMLEstimatorGenerations:
         assert days == sorted(days)
         assert len(set(days)) == len(days)
 
+    def test_generation_counts_reconcile_with_n(self):
+        """两套账目必须对上：代际计数之和 == 实际记分的样本数 `n`。
+
+        v0.45.142：`recs` 构建循环有**两个**过滤（`key not in ml` 与
+        embargo 的 `not hist`），而代际计数只复制了第一个 ⇒ 计数之和 > n。
+        被第二个过滤丢掉的恰好是**最早那批行**（它们的 cutoff 之前没有历史），
+        也就是 `pre-` 那一代 ⇒ 系统性高报旧世代。
+        """
+        from probability_scorecard import blend_scan, EMBARGO_DAYS
+        rows = ([{"date": "2026-08-01", "ticker": f"T{i}", "hit": i % 2} for i in range(20)]
+                + [{"date": "2026-09-08", "ticker": f"U{i}", "hit": i % 2} for i in range(20)])
+        ml = {(r["date"], r["ticker"]): 50.0 + (i % 7) for i, r in enumerate(rows)}
+        out = blend_scan(rows=rows, ml=ml, embargo_days=EMBARGO_DAYS)
+        assert out["status"] == "ok"
+        assert sum(out["ml_estimator_generations"].values()) == out["n"], (
+            f"代际计数之和 {sum(out['ml_estimator_generations'].values())} "
+            f"≠ 记分样本数 {out['n']} —— 两个数在描述不同的population")
+
+    def test_no_false_alarm_when_scored_samples_are_one_generation(self):
+        """跨代标志必须描述**实际记分的**样本，不是候选行。
+
+        用生产默认 embargo（14 天）：08-01 那批因 cutoff 之前无历史被丢弃，
+        真正记分的 20 条全部来自 09-08（新代）⇒ 不得报 spans=True。
+        ⚠️ 原断言用 `embargo_days=0`，那恰好让第二个过滤永不触发 ——
+        「为了夹具简单」挑的参数值关掉了被测路径。
+        """
+        from probability_scorecard import blend_scan, EMBARGO_DAYS, ml_estimator_generation
+        rows = ([{"date": "2026-08-01", "ticker": f"T{i}", "hit": i % 2} for i in range(20)]
+                + [{"date": "2026-09-08", "ticker": f"U{i}", "hit": i % 2} for i in range(20)])
+        ml = {(r["date"], r["ticker"]): 50.0 + (i % 7) for i, r in enumerate(rows)}
+        out = blend_scan(rows=rows, ml=ml, embargo_days=EMBARGO_DAYS)
+        assert out["n"] == 20, out["n"]
+        assert out["ml_estimator_generations"] == {
+            ml_estimator_generation("2026-09-08"): 20}, out["ml_estimator_generations"]
+        assert out["spans_estimator_generations"] is False
+
     def test_blend_scan_reports_the_span(self):
         """跨代时 `spans_estimator_generations` 必须为真；同代时为假。
         成对断言——少了后半边，写死 True 也会全绿。"""

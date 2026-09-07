@@ -217,23 +217,66 @@ class TestMissingLedgerIsAccurate:
                             swarm_direction="bullish", swarm_final_score=None)
         assert {"odds_score", "risk_adj_score", "final_score"} <= set(g._ml_input_missing)
 
-    def test_two_ledgers_agree(self):
-        """跨模块对账：`_ml_input_missing` 与 `ml_predictor._missing_features`
-        对这三维必须给出同一个答案。生产现存 118 份记录两者当面矛盾
-        （前者说缺三个、后者说 12/12 齐全），根因就是喂了字面量 5.0。"""
-        from ml_predictor import _missing_features
-        _ALIAS = {"odds_score": "odds_score", "risk_adj_score": "risk_adj_score",
-                  "final_score": "final_score"}
-        for dims, final in ((_dims(), 5.4), (None, None)):
-            g = _gen()
-            td = g._prepare_ml_input("XOM", _metrics(), _analysis(),
-                                     swarm_dimension_scores=dims,
-                                     swarm_direction="bullish",
-                                     swarm_final_score=final)
-            mine = {n for n in g._ml_input_missing if n in _ALIAS}
-            theirs = {n for n in _missing_features(td) if n in _ALIAS.values()}
-            assert mine == theirs, f"两套账目不一致：我 {mine} vs ml_predictor {theirs}"
+    #: 两套账目对同一特征用的不同名字（诊断字段，无程序读者，不改名以保历史可比）
+    LEDGER_ALIAS = {"market_sentiment": "sentiment", "direction": "direction_encoded"}
 
+    #: **已知仍未对上的特征**——它们缺失时喂的仍是合法字面量，于是
+    #: `_ml_input_missing` 说缺、`ml_predictor._missing_features` 说不缺。
+    #: 写成会失效的断言而不是注释（v0.45.113 判据）：新增缺口会红，
+    #: 修好某一个也会红（提醒把它从这张表里删掉）。
+    #:   catalyst_quality → 兜底 "B"（v0.45.135 有意为之的缺失约定，但仍与账目不符）
+    #:   direction_encoded → 兜底 0.0（v0.45.139；0.0 在方向表里正是 "neutral"）
+    #:   iv_rank / put_call_ratio → 兜底 50.0 / 1.0（v0.45.50 起如此）
+    KNOWN_LEDGER_GAPS = {"catalyst_quality", "direction_encoded",
+                         "iv_rank", "put_call_ratio"}
+
+    def _ledgers(self, dims, final):
+        from ml_predictor import _missing_features
+        g = _gen()
+        td = g._prepare_ml_input("XOM", _metrics(), _analysis(),
+                                 swarm_dimension_scores=dims,
+                                 swarm_direction="bullish" if dims else None,
+                                 swarm_final_score=final)
+        mine = {self.LEDGER_ALIAS.get(n, n) for n in g._ml_input_missing}
+        return mine, set(_missing_features(td))
+
+    def test_two_ledgers_agree_on_the_five_none_features(self):
+        """本版 + v0.45.137 + v0.45.141 改成 `None` 的五个特征必须完全对上。
+
+        生产现存 118 份记录两者当面矛盾（前者说缺三个、后者说 12/12 齐全），
+        根因就是喂了字面量 5.0。
+        """
+        FIVE = {"volatility", "sentiment", "final_score", "odds_score", "risk_adj_score"}
+        for dims, final in ((_dims(), 5.4), (None, None)):
+            mine, theirs = self._ledgers(dims, final)
+            assert mine & FIVE == theirs & FIVE, (
+                f"五个 None 特征上两套账目不一致："
+                f"我 {sorted(mine & FIVE)} vs ml_predictor {sorted(theirs & FIVE)}")
+
+    def test_remaining_ledger_gaps_are_exactly_the_known_ones(self):
+        """全 12 维对账：不一致的集合必须**恰好**等于已知缺口。
+
+        `!=` 两个方向都测：多出新缺口会红（回归），少了某个也会红
+        （有人修好了 → 该更新这张表，而不是让它继续说谎）。
+        ⚠️ 早先我只比对三个 score 特征就宣称「803/803 两套账目一致」——
+        那个过滤把 catalyst_quality / direction / 命名不一致全挡在视野外。
+        对账测试若先筛掉一半特征，它证明的就不是「账目对上了」。
+        """
+        mine, theirs = self._ledgers(None, None)   # 全缺场景，缺口全部现形
+        assert not (theirs - mine), \
+            f"ml_predictor 说缺、_ml_input_missing 没说：{sorted(theirs - mine)}"
+        assert (mine - theirs) == self.KNOWN_LEDGER_GAPS, (
+            f"实际缺口 {sorted(mine - theirs)} ≠ 已知缺口 "
+            f"{sorted(self.KNOWN_LEDGER_GAPS)}——新增了缺口，或修好了某个"
+            f"（修好了就把它从 KNOWN_LEDGER_GAPS 删掉）")
+
+    def test_no_gap_when_everything_is_available(self):
+        """成对断言的另一半：数据齐全时两套账目都应为空。
+        少了它，「无条件报缺」也能让上面那条全绿。"""
+        mine, theirs = self._ledgers(_dims(), 5.4)
+        assert theirs == set(), f"ml_predictor 报了缺失：{sorted(theirs)}"
+        assert mine <= {"iv_rank", "put_call_ratio"}, (
+            f"数据齐全却报缺（iv/pcr 由夹具的空 options_analysis 造成）：{sorted(mine)}")
 
 # ───────────────────── 第 2 层：源码守卫（AST，非子串）─────────────────────
 

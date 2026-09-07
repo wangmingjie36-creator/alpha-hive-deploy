@@ -459,6 +459,15 @@ def blend_scan(
 
     recs: List[Tuple[int, float, float]] = []   # (y, base_pit, ml)
     first: Optional[str] = None
+    # 样本跨了几代 ML 估计量。跨代时这条扫描在混算两个不同的量——
+    # 不阻断（早期样本仍有信息），但**必须说出来**，否则就是静默混算。
+    #
+    # ⚠️ 必须在**这个**循环里数，不能另起一个循环照抄部分过滤条件：
+    # 本循环有两道过滤（`key not in ml` 与 embargo 的 `not hist`），
+    # 而被第二道丢掉的恰好是**最早那批行**（cutoff 之前没有历史），
+    # 也就是 `pre-` 那一代 ⇒ 漏掉它会系统性高报旧世代，能在实际记分样本
+    # 全属同一代时报出 `spans=True`（假警报）。v0.45.142 修。
+    _gens: Dict[str, int] = {}
     for r, d in dated:
         key = (r["date"], r["ticker"])
         if key not in ml:
@@ -469,6 +478,8 @@ def blend_scan(
             continue
         base = sum(h["hit"] for h in hist) / len(hist)
         recs.append((r["hit"], base, ml[key] / 100.0))
+        _g = ml_estimator_generation(r["date"])
+        _gens[_g] = _gens.get(_g, 0) + 1
         if first is None:
             first = r["date"]
     if not recs:
@@ -476,13 +487,12 @@ def blend_scan(
                 "outcome_rows": len(dated), "ml_rows": len(ml)}
 
     ys = [y for y, _, _ in recs]
-    # 样本跨了几代 ML 估计量。跨代时这条扫描在混算两个不同的量——
-    # 不阻断（早期样本仍有信息），但**必须说出来**，否则就是静默混算。
-    _gens: Dict[str, int] = {}
-    for r, _d in dated:
-        if (r["date"], r["ticker"]) in ml:
-            _gens[ml_estimator_generation(r["date"])] = \
-                _gens.get(ml_estimator_generation(r["date"]), 0) + 1
+    # 不变式「sum(_gens.values()) == len(ys)」由上面的**同循环构造**保证；
+    # 会红的观测点在 `tests/test_probability_scorecard.py::
+    # TestMLEstimatorGenerations::test_generation_counts_reconcile_with_n`。
+    # 不在这里写裸 assert：本仓生产模块无此先例（147 个用 assert 的文件全在
+    # tests/ 下），且 `python -O` 会把它剥掉 —— 一个会被剥掉的不变式，
+    # 正是「把失败改写成没发生过」。
     grid_out = []
     for w in grid:
         ps = [w * b + (1 - w) * m for _, b, m in recs]

@@ -118,7 +118,22 @@ weekly_optimizer / self_analyst 里零消费者 ⇒ 不进 `predictions` 表、�
 
   缺失一律取 `None` 而非兜底值，让 `input_features_missing` 与
   `imputed_features` / `feature_completeness` 两套账目对上。
-  实测：803/803 份两套账目现已一致（此前 118 份当面矛盾）。
+  实测：**这五个改用 `None` 的特征**（volatility / market_sentiment / final_score /
+  odds_score / risk_adj_score）上两套账目 803/803 份一致（此前 118 份当面矛盾）。
+
+  ⚠️ **这句话初版写成了全局结论，二次复查时被自己推翻**：无过滤地比对全 12 维，
+  实际只有 742/803 完全一致。剩下的三类都**不属于本版改动**、且都是同一物种：
+  ① `catalyst_quality` 缺失时兜底 `"B"`（58 份）、② `direction_encoded` 兜底 `0.0`
+  （57 份，而 0.0 在方向表里正是 "neutral"）——两个兜底值都合法，于是
+  `_missing_features` 不算它们缺；③ `market_sentiment` / `sentiment` 是同一特征的
+  两个名字（60 份，纯命名不一致，该字段无程序读者，不改名以保历史可比）。
+  `iv_rank` / `put_call_ratio` 的 `50.0` / `1.0` 兜底是同款潜在缺口，
+  在这 803 份里恰好未触发（键存在且为 None）。
+
+  根因是我早先的对账**先筛掉了九个特征**再宣称一致——对账测试若先筛掉一半，
+  它证明的就不是「账目对上了」。现已把 `test_two_ledgers_agree` 重写为全 12 维对账，
+  并把上述缺口写成 `KNOWN_LEDGER_GAPS` 的**精确相等**断言：新增缺口会红，
+  修好某一个也会红（提醒更新该表），而不是留一句注释。
 
   **实测影响面**（803 份重放，模型按生产口径训练于 497 条真实样本）：
   `|Δprobability|` 中位 0.0063、**27.3% 变动 > 0.02**、max 0.0625；
@@ -126,6 +141,13 @@ weekly_optimizer / self_analyst 里零消费者 ⇒ 不进 `predictions` 表、�
   （`odds_score` 单项排 5/12）。真实路径复跑：三个特征的唯一值
   **1 → 306 / 375 / 314**；57 份无蜂群数据的报告现按实情标 `unreliable=True`
   （此前它们静默产出一个看着可信的概率）。
+
+  **用户可见变化**：`unreliable=True` 会让 `_generate_recommendation` 返回
+  `"NO CALL - 12 维特征缺 N 个，数据不足以支撑结论"`（v0.45.3 的设计意图）。
+  这 57 份按月分布 19/8/3/20/3/4/**0**（3~9 月），**2026-09 为 0/60** ——
+  是零星的历史失败模式而非普遍现象，8 月基准率 4/159 ≈ 2.5%。
+  即：今后蜂群对某只票真的没跑出结果时，那份报告会明说「不给方向」，
+  而不是照常印一个评级。
 
   ⚠️ **重放工具自己先栽了一次**：`MLPredictionService().train_model()` 内部走
   默认 db_path，在 worktree 里返回空集 → 降级到 8 条硬编码样本 → 模型恒输出
@@ -173,6 +195,28 @@ weekly_optimizer / self_analyst 里零消费者 ⇒ 不进 `predictions` 表、�
   M4 账本漏报 / M5 调用点漏传第三参 / M6 代际写死 False / M7 登记表清空）。
 - ruff：新增文件 clean。合并后全量 8 项经 `origin/main` 基线逐一比对确认**全为既有**
   （`generate_ml_report.py` 2 项 + `tests/` 6 项），本次引入 0 项。
+
+### 二次复查（同版自查，改了两处）
+
+1. **`blend_scan` 的代际计数是我自己引入的假警报，已修。**
+   `recs` 构建循环有**两道**过滤（`key not in ml` 与 embargo 的 `not hist`），
+   而我另起的计数循环只照抄了第一道 ⇒ 计数之和 ≠ 实际记分样本数 `n`。
+   被第二道丢掉的恰好是**最早那批行**（cutoff 之前没有历史），也就是 `pre-` 那一代
+   ⇒ 系统性高报旧世代，**能在实际记分样本全属同一代时报出 `spans=True`**。
+   实测夹具（08-01 二十条 + 09-08 二十条、embargo 14 天）：`n=20` 而代际计数之和 40、
+   `spans=True`，但真正记分的 20 条全来自新代。改为**在同一个循环里就地记代际**。
+
+   ⚠️ 原断言为什么没抓到：它用了 `embargo_days=0`，而 `embargo_days=0` 时
+   `cutoff = d`、`hist` 含同日行本身 ⇒ **第二道过滤永不触发**。
+   「为了夹具简单」挑的参数值恰好关掉了被测路径。判据：**断言要在生产实际参数下
+   有判别力**（生产默认 `EMBARGO_DAYS=14`）。新增两条断言均按生产 embargo 跑。
+
+2. **撤掉初版在 `blend_scan` 里加的裸 `assert`。**
+   实测本仓 147 个用 `assert` 的文件**全部在 `tests/` 下**，
+   `probability_scorecard.py` 会是唯一的生产模块例外；且 `python -O` 会把它剥掉——
+   一个会被剥掉的不变式正是「把失败改写成没发生过」。
+   不变式改由**同循环构造**保证，会红的观测点留在
+   `test_generation_counts_reconcile_with_n`。
 
 ### 与 v0.45.141 的范围重叠（并发撞车，已合并）
 
