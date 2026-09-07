@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.163] — 2026-09-07 — 占位（进行中：量化 `get_top_signals` 这条截断通道对 GuardBee risk_adj 与 final_score 的实际影响 —— v0.45.156 只修了 `detect_resonance`、v0.45.151 只修了 `_read_peer`，仍读被 `MAX_ENTRIES=80` 截断的 `self._entries` 的还有三处：`get_top_signals` / `snapshot` / `compact_snapshot`。其中 `get_top_signals` 有实测且有物质影响：guard_bee.py 用它同时导出 `avg_score` 与 `consistency`，二者直接决定 risk_adj 维度分（共振时 `7.0+consistency*2.0`，否则 `avg_score*0.8*adj_factor`），而 risk_adj 是 `config.EVALUATION_WEIGHTS` 里的加权维度 ⇒ 流进 final_score。已测本世代 70/191=36.6% 的场次板上不足 5 条、`n=5` 窗口根本填不满，且淘汰方向相关（bearish 50.7% vs bullish 12.6%）。范围＝① 用生产 JSON 里的 `swarm_results.pheromone_compact`（就是同一次 distill 里拍的 `compact_snapshot`）直接量测，不做模拟；② 先测再决定改不改；③ 若改，必须往 `ic_rerun_readiness._COHORT_HISTORY` 追加世代边界（先跑该脚本确认样本数接近零、追加才便宜）；④ 顺带判 `snapshot` / `compact_snapshot` 要不要一起改——后者经 backtester 落盘、用于逐蜂归因，截断可能同样有偏。⚠️ 不动 `EVALUATION_WEIGHTS` 数值、不动训练口径、不动 `_prepare_ml_input`。⚠️ 会碰 `pheromone_board.py` / `swarm_agents/guard_bee.py` / `tests/`，与其它 session 合并时逐块核对）
+
 ## [0.45.162] — 2026-09-07 — 「不进那张表」只回答了两个问题里的一个
 
 v0.45.161 交待的遗留：「IC 闸不受影响」是 v0.45.146 **改动当时**核的，
