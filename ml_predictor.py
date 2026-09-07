@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 import statistics
 from dataclasses import dataclass
 
@@ -37,6 +37,47 @@ def _snapshot_saved_model(filename: str) -> None:
             "🚨 模型快照模块缺失（%s）——本次保存没有留版本，下次退化将无法归因", e
         )
 
+
+
+# ---------------------------------------------------------------------------
+# 模型产物路径 —— 唯一真相（v0.45.149）
+# ---------------------------------------------------------------------------
+# 模型文件名的唯一真相在 `hive_logger.PATHS.ml_model`（与 PATHS.db 同族）。
+# 这里刻意不再复制一份文件名常量：复制一份就有两个真相。
+
+# `_eval_oos_purged` 的最小样本量。`train()` 的闸门、它的日志文案、以及
+# `HGBModel.load_model` 的中毒守卫共用这**一个**数：守卫判的正是「样本少到
+# OOS 验证根本没被尝试过」，所以它必须**导出**自这个闸门，而不是在别处再写
+# 一遍 60（v0.45.109 的教训：魔数若等于别处某个数，就不该被写死第二遍）。
+_OOS_MIN_SAMPLES = 60
+
+
+class PoisonedModelError(ValueError):
+    """磁盘上的模型带着「被测试夹具覆盖」的机读签名，拒绝加载。
+
+    **继承 `ValueError` 是有意的**：生产三个 `load_model` 调用点
+    （`alpha_hive_daily_report` L460 / L874 两个 try、
+    `generate_ml_report._load_model_from_disk`）的 except 子句都已经捕获
+    `ValueError`，抛它会走进它们**既有的**「重训」恢复分支，而不是把整条
+    流水线打断。换成自定义基类或 `RuntimeError` 就变成生产事故。
+    """
+
+
+def default_model_path() -> str:
+    """`save_model` / `load_model` 的默认落盘位置。
+
+    **必须是函数，不能是模块级常量。** `PATHS.home` 每次都重读
+    `ALPHA_HIVE_HOME` 环境变量，而 `tests/conftest.py::_isolate_env` 是在
+    **每个测试开始时**才 setenv 的。写成模块级常量的话，值在 import 那一刻
+    就冻住了 —— 只要 `ml_predictor` 被任何一个更早的测试导入过，隔离就静默
+    失效，失效方式和本次事故一模一样（把夹具模型写回仓库根）。
+
+    不做 try/except 兜底：兜底只能兜出一个相对路径，而相对路径正是本次
+    事故的根因。`hive_logger` 无项目内依赖，导不进来是环境整体坏了，
+    不该在这里被改写成「悄悄退回 cwd」。
+    """
+    from hive_logger import PATHS
+    return str(PATHS.ml_model)
 
 
 @dataclass
@@ -756,8 +797,11 @@ class SimpleMLModel:
             }
         return dict(sorted(importance.items(), key=lambda x: -x[1]["weight"]))
 
-    def save_model(self, filename: str = "ml_model.json"):
+    def save_model(self, filename: Optional[str] = None):
         """保存模型（JSON 格式，安全序列化）"""
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
         model_data = {
             "weights": self.weights,
             "feature_stats": self.feature_stats,
@@ -771,8 +815,11 @@ class SimpleMLModel:
         _log.info("模型已保存：%s", filename)
         _snapshot_saved_model(filename)
 
-    def load_model(self, filename: str = "ml_model.json"):
+    def load_model(self, filename: Optional[str] = None):
         """加载模型（JSON 格式，安全反序列化）"""
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
         # 兼容旧版 pickle 文件
         if filename.endswith(".pkl") and not os.path.exists(filename):
             filename = filename.replace(".pkl", ".json")
@@ -1044,9 +1091,13 @@ class SGDMLModel:
         }
 
     # ---- 序列化（JSON，无 pickle）----
-    def save_model(self, filename: str = "ml_model.json"):
+    def save_model(self, filename: Optional[str] = None):
         """保存模型到 JSON"""
         import numpy as np
+
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
 
         model_data: Dict = {
             "model_type": "sgd",
@@ -1084,9 +1135,13 @@ class SGDMLModel:
         _log.info("SGD 模型已保存：%s", filename)
         _snapshot_saved_model(filename)
 
-    def load_model(self, filename: str = "ml_model.json"):
+    def load_model(self, filename: Optional[str] = None):
         """从 JSON 加载模型（兼容旧 SimpleMLModel 格式）"""
         import numpy as np
+
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
 
         if filename.endswith(".pkl") and not os.path.exists(filename):
             filename = filename.replace(".pkl", ".json")
@@ -1483,7 +1538,7 @@ class HGBModel:
         # embargo_days（=标签横跨期 7 天，防 t+7 标签泄漏），在 clone 模型上
         # 评估真实泛化精度，然后才全样本重训供生产预测（验证与部署分离）。
         self.oos_accuracy = None
-        if len(training_data) >= 60:
+        if len(training_data) >= _OOS_MIN_SAMPLES:
             try:
                 self.oos_accuracy = self._eval_oos_purged(
                     training_data, test_pct=0.25, embargo_days=7)
@@ -1525,7 +1580,8 @@ class HGBModel:
             _log.debug("Permutation importance 计算失败: %s", _e_pi)
 
         _n_iter = getattr(self._clf, "n_iter_", 0)
-        _oos_txt = f"{self.oos_accuracy:.1f}%" if self.oos_accuracy is not None else "N/A(样本<60)"
+        _oos_txt = (f"{self.oos_accuracy:.1f}%" if self.oos_accuracy is not None
+                    else f"N/A(样本<{_OOS_MIN_SAMPLES})")
         _log.info(
             "HGB 训练完成：%d 样本，%d 轮迭代，OOS准确率 %s（in-sample %.1f%% 仅参考），Top 特征 %s",
             len(training_data), _n_iter, _oos_txt, self.training_accuracy,
@@ -1585,10 +1641,14 @@ class HGBModel:
         }
 
     # ---- 序列化 ----
-    def save_model(self, filename: str = "ml_model.json"):
+    def save_model(self, filename: Optional[str] = None):
         """保存模型到 JSON（pickle base64 + 元数据）"""
         import base64
         import pickle
+
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
 
         model_data: Dict = {
             "model_type": "hgb",
@@ -1618,10 +1678,14 @@ class HGBModel:
         else:
             _snapshot_saved_model(filename)
 
-    def load_model(self, filename: str = "ml_model.json") -> bool:
+    def load_model(self, filename: Optional[str] = None) -> bool:
         """加载 HGB 模型（支持 pickle base64 恢复）"""
         import base64
         import pickle
+
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
 
         if not os.path.exists(filename):
             return False
@@ -1640,6 +1704,37 @@ class HGBModel:
             _log.warning("特征维度不匹配（%d vs %d），需重新训练",
                          data.get("feature_count", 0), len(FEATURE_NAMES))
             return False
+
+        # ── v0.45.149: 拒绝「被测试夹具覆盖」的模型 ──────────────────────
+        # 判据是 `oos_accuracy` 而**不是** `training_accuracy`。夹具模型的训练
+        # 精度反而更好看（实测 96.67% / 100.0%，真模型只有 71.63%），拿精度判
+        # 会把最该拦的那个当成「训练得好」放行 —— 这是本条最关键的一句。
+        #
+        # 为什么 `oos_accuracy is None` 是机读签名：真实训练路径只要样本
+        # >= `_OOS_MIN_SAMPLES` 就一定走 `_eval_oos_purged` 把它填上；样本不足
+        # 才留 None（见 `train()` 里那个同名闸门）。
+        #
+        # 两个条件必须**同时**成立。样本够却 oos 为 None 是另一件事——OOS 验证
+        # 自己抛了异常（`train()` 里那条 except 会 warning）——那种模型不该被拒，
+        # 否则本守卫会顺手废掉一个合法的大样本模型。
+        _n_raw = data.get("n_samples_seen")
+        _n = _n_raw if usable_dim(_n_raw) else 0   # 类型闸照抄本仓 `usable_dim`
+        if data.get("oos_accuracy") is None and _n < _OOS_MIN_SAMPLES:
+            # 先 log 再 raise：调用方之一（alpha_hive_daily_report L469）
+            # 只把异常记成 `_log.debug`，INFO 级别下等于没人知道。
+            # CLAUDE.md 的硬检查项——「这个失败，下游怎么知道？」——要求
+            # 观测点不能依赖调用方的心情，所以这里自己红一次。
+            _log.error(
+                "拒绝加载模型 %s：oos_accuracy 缺失且样本仅 %s 条（< %d）。"
+                "这是「跑测试时被夹具模型覆盖」的机读签名 —— "
+                "训练精度 %.1f%% 看着很高恰恰是夹具的特征，不要拿它判。",
+                filename, _n_raw, _OOS_MIN_SAMPLES,
+                data.get("training_accuracy", 0.0) or 0.0,
+            )
+            raise PoisonedModelError(
+                f"{filename}: oos_accuracy=None 且 n_samples_seen={_n_raw} "
+                f"(< {_OOS_MIN_SAMPLES})，疑似被测试夹具覆盖，拒绝加载"
+            )
 
         # 恢复 pickle 模型
         model_bytes_str = data.get("model_bytes")

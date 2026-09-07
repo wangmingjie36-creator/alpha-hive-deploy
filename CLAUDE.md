@@ -113,6 +113,51 @@ v0.45.124 的 `test_quote_set.py` docstring 写着「不碰网络」，实测 5 
 核法是 socket 探针（patch `socket.socket.connect` / `create_connection` /
 `getaddrinfo` 后跑一遍），**且探针本身要先用一个真出网的 canary 反向自证**。
 
+## 硬检查项：新产物的默认路径不许是相对路径（2026-09-07 起）
+
+给任何会落盘的产物写默认位置前，先回答一句：
+**这个默认值在「不是从仓库根跑」的时候会写到哪？**
+答案若是「跟着 cwd 走」，它就是一颗定时炸弹——**测试的 cwd 不受控**。
+
+**文件名唯一真相在 `hive_logger.PATHS`**（与 `PATHS.db` / `PATHS.chroma_db` 同族）。
+新产物在那里加一个 property；函数默认值写 `None`，在函数体里解析。
+
+有两种写错法，第二种更隐蔽：
+
+| | 写法 | 后果 |
+|---|---|---|
+| ① | `def save_model(self, filename="ml_model.json")` | 在哪跑就写到哪 |
+| ② | `X = PATHS.home / "..."`（模块级常量 / 类属性） | **import 那一刻冻住** |
+
+②为什么隐蔽：`PATHS.home` 是 property、每次重读 `ALPHA_HIVE_HOME`，而
+`conftest::_isolate_env` 把它指向 tmp_path ——隔离**本该**生效。但 pytest
+在**收集期**（跑在任何 fixture 之前）就 import 了测试模块及其依赖，常量就地冻成
+**仓库根**，整个 session 不再变。v0.45.149 实测：`generate_ml_report` 的类属性
+`_model_file` 因此让「跑一次全套测试」写穿了生产**真正在读**的那份模型。
+⇒ **产物路径一律用 property / 函数，不用常量。**
+
+三条配套判据：
+
+1. **路径要集中，但文件不能合并。** `ml_model.json`（**0 个读者**）与
+   `ml_model_cache.json`（3 个读者）恰好不同名，才使那次事故的实际损害为 0。
+   把两者「统一到单一真相」——最自然的那种统一法——等于让每次跑测试
+   直接写穿生产产物。集中的是**解析路径的地方**，不是文件本身。
+2. **只跑单文件验证不了②**（ordering-dependent，模块可能在测试内部才被 import）。
+   必须在一个**没有该产物**的干净目录（`git archive HEAD | tar -x -C <tmp>`）
+   跑全套，看它有没有凭空造出来。
+3. **新增产物必须在 `tests/conftest.py` 配两道防线**，照
+   `_isolate_paper_portfolio_state`(v0.45.104) / `_isolate_ml_model_file`(v0.45.149) 写：
+   ① setup **正面核对**默认位置确实在沙箱内——**不是再 monkeypatch 一遍把问题盖住**
+   （盖住了就再也测不出它退化）；② teardown 比对**仓库根与 cwd** 的真身指纹。
+   **②抓到过①漏掉的那处 bug**；缺了②，①将来静默失效不会有人知道。
+
+⚠️ 断言要**成对**：「没写到仓库根」必须配「确实写到了沙箱」，否则把写入改成
+空函数也全绿。且**测 helper ≠ 测接线**——断言 `default_model_path()` 返回绝对
+路径，挡不住有人在函数体里改回相对字面量（v0.45.149 的 mutation M7 实测全绿）。
+只认「调完之后文件出现在哪」。
+
+与上一节同源：②号写法把「隔离失效」改写成了「隔离生效」，同样答不出「谁会红？」。
+
 ## 已知问题 / 注意事项（长期有效项）
 
 - `realtime_metrics` 在部分 JSON 里是空字典 `{}`，导致 `current_price = 0`

@@ -28,6 +28,20 @@ def _snapshot_saved_model(filename: str) -> None:
 
 
 
+# v0.45.149: 与 `ml_predictor.default_model_path()` 同一套规矩 —— 默认落盘位置
+# 绝不能是 cwd 相对路径，否则「在哪跑就写到哪」。这里不 import ml_predictor：
+# 本模块整个存在的理由就是 `ml_predictor` 导不进来时的降级实现（见 SimpleMLModel
+# 的 docstring），跟它耦合会让降级路径跟着一起坏。
+def default_extended_model_path() -> str:
+    """`SimpleMLModel.save_model` / `load_model` 的默认落盘位置。
+
+    与 `ml_predictor.default_model_path` 一样必须是**函数**：`PATHS.home` 读的是
+    `ALPHA_HIVE_HOME`，而测试隔离是逐测试 setenv 的，模块级常量会在 import 时冻住。
+    """
+    from hive_logger import PATHS
+    return str(PATHS.ml_model_extended)
+
+
 @dataclass
 class TrainingData:
     """训练数据结构"""
@@ -771,8 +785,10 @@ class SimpleMLModel:
 
         return {k: mag * mom * s for k, s in self._HORIZON_SCALE.items()}
 
-    def save_model(self, filename: str = "ml_model_extended.json"):
+    def save_model(self, filename=None):
         """保存模型（JSON 格式，安全序列化）"""
+        if filename is None:
+            filename = default_extended_model_path()
         model_data = {
             "weights": self.weights,
             "feature_stats": self.feature_stats,
@@ -783,8 +799,10 @@ class SimpleMLModel:
             json.dump(model_data, f, ensure_ascii=False, indent=2)
         _snapshot_saved_model(filename)
 
-    def load_model(self, filename: str = "ml_model_extended.json"):
+    def load_model(self, filename=None):
         """加载模型（JSON 格式，安全反序列化）"""
+        if filename is None:
+            filename = default_extended_model_path()
         if filename.endswith(".pkl") and not os.path.exists(filename):
             filename = filename.replace(".pkl", ".json")
         with open(filename, "r", encoding="utf-8") as f:

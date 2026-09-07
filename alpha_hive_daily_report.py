@@ -460,7 +460,7 @@ class AlphaHiveDailyReporter:
         try:
             from ml_predictor import MLPredictionService as _MPS
             _ml_svc_tmp = _MPS()
-            _ml_model_file = PATHS.home / "ml_model_cache.json"
+            _ml_model_file = PATHS.ml_model_cache
             if _ml_model_file.exists():
                 _ml_svc_tmp.model.load_model(str(_ml_model_file))
                 if _ml_svc_tmp.model.is_trained:
@@ -917,7 +917,7 @@ class AlphaHiveDailyReporter:
                         ))
 
                     ml_svc = MLPredictionService()
-                    model_file = PATHS.home / "ml_model_cache.json"
+                    model_file = PATHS.ml_model_cache
                     if model_file.exists():
                         ml_svc.model.load_model(str(model_file))
 

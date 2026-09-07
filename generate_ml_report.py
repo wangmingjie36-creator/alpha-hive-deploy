@@ -63,7 +63,13 @@ class MLEnhancedReportGenerator:
     _model_cache = {}          # 内存缓存（同一进程内）
     _cache_date = None         # 缓存日期
     _training_lock = Lock()    # 防止并发重复训练
-    _model_file = PATHS.home / "ml_model_cache.json"  # 磁盘缓存文件（JSON，安全序列化）
+    # ⚠️ v0.45.149：这里**不能**是类属性。它曾是
+    #     `_model_file = PATHS.home / "ml_model_cache.json"`
+    # —— 类体在 import 那一刻求值一次就冻住，而 `tests/` 里有 7 个模块在**模块级**
+    # import 本类，pytest 收集期跑在任何 fixture 之前（`ALPHA_HIVE_HOME` 尚未设），
+    # 于是整个 session 冻成**仓库根**，`_isolate_env` 的沙箱对它完全无效
+    # ⇒ 跑一次全套测试就把生产真正读的那份模型换成了测试夹具模型。
+    # property 是调用时求值，写不出这个 bug。
 
     # ⭐ Task 3: 异步 HTML 生成（后台文件写入）
     _file_writer_pool = None   # 异步文件写入线程池
@@ -212,6 +218,11 @@ class MLEnhancedReportGenerator:
         except (FileNotFoundError, OSError, KeyError, ValueError, json.JSONDecodeError) as e:
             # 缓存检查失败，重新训练
             return False
+
+    @property
+    def _model_file(self):
+        """磁盘缓存文件（JSON，安全序列化）。见类体顶部为何必须是 property。"""
+        return PATHS.ml_model_cache
 
     def _load_model_from_disk(self):
         """从磁盘加载模型（委托给 model.load_model，兼容 SGD/Simple 格式）"""
