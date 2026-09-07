@@ -50,7 +50,28 @@ FeatureRegistry.register("yfinance", yf is not None,
 
 _log = get_logger("backtester")
 
-DB_PATH = PATHS.db
+def default_db_path() -> str:
+    """生产样本库路径。**必须调用时求值，不要求值成模块级常量。**
+
+    v0.45.150：这里原本是 `DB_PATH = PATHS.db`。`PATHS.db` 自己是 property
+    （每次读 `ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME`），但一旦把它求值成模块级
+    常量，值就冻在 import 那一刻。而 pytest 在**收集期**就 import 本模块
+    （多个 `tests/*.py` 有模块级 `from backtester import ...`），那时
+    `tests/conftest.py::_isolate_env` 的 `monkeypatch.setenv` 还没跑
+    ⇒ 整个 session 冻成 checkout 根目录，环境隔离对它完全无效。
+
+    实测（v0.45.150）：跑一次全套测试，`PredictionStore.__init__` →
+    `_init_table()` 会以读写模式打开**生产** `pheromone.db`（37 MB）、执行
+    `CREATE TABLE IF NOT EXISTS`、进入 WAL 模式并留下 `-wal`/`-shm`。
+    那一次没改到行，但写通道是全开的——同一条 `PredictionStore` 上的
+    `save_predictions()` 就是往里 INSERT 的。
+
+    ⚠️ 连带约束：**下面三处默认参数一律写 `None`，不要写 `= default_db_path()`。**
+    默认参数在 `def` 执行时求值，也就是 import 期，等于换个地方冻同一个值。
+    同型教训见 `tests/test_replay_scoring.py::test_main_actually_uses_patched_db`
+    （v0.45.37：`load_samples(db_path=DB_PATH)` 绑死默认值，退化测试变成假守卫）。
+    """
+    return PATHS.db
 
 
 def _wilson_ci(k: int, n: int, z: float = 1.96) -> Optional[tuple]:
@@ -94,8 +115,8 @@ class PredictionStore:
 
     TABLE = "predictions"
 
-    def __init__(self, db_path: str = DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = db_path or default_db_path()
         self._init_table()
 
     def _init_table(self):
@@ -828,8 +849,8 @@ class Backtester:
     4. adapt_weights()：根据准确率调整 5 维公式权重
     """
 
-    def __init__(self, db_path: str = DB_PATH):
-        self.store = PredictionStore(db_path)
+    def __init__(self, db_path: Optional[str] = None):
+        self.store = PredictionStore(db_path or default_db_path())
         self._spy_entry_cache: Dict[str, float] = {}
         # v0.45.120：一轮回测内的日线缓存（ticker → 整段 OHLC），由
         # `_prefetch_backtest_prices` 一次 `yf.download` 填满，三个取价点
@@ -1986,7 +2007,7 @@ class Backtester:
             return 0
 
     @staticmethod
-    def load_adapted_weights(db_path: str = DB_PATH) -> Optional[Dict]:
+    def load_adapted_weights(db_path: Optional[str] = None) -> Optional[Dict]:
         """
         加载最近的自适应权重（供 QueenDistiller 使用）
 
@@ -1996,6 +2017,7 @@ class Backtester:
         Returns:
             {signal: 0.xx, ..., _meta: {period, samples}} 或 None
         """
+        db_path = db_path or default_db_path()      # v0.45.150：调用时求值
         try:
             with sqlite3.connect(db_path) as conn:
                 # 优先取 T+7，再取 T+1

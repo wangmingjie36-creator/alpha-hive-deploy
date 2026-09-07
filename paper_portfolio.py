@@ -50,6 +50,25 @@ except Exception:
 # ══════════════════════════════════════════════════════════════════════════════
 
 BASE_DIR = Path(__file__).parent
+
+
+def _pheromone_db_path() -> Path:
+    """`pheromone.db` 的路径，**调用时求值**（v0.45.150）。
+
+    这里刻意不写成 `BASE_DIR / "pheromone.db"`。`BASE_DIR` 是
+    `Path(__file__).parent`，压根不看 `ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME`，
+    所以 `tests/conftest.py::_isolate_env` 对它无效——比「模块级常量冻在 import
+    期」更彻底：连懒求值都救不了它。
+
+    实测（v0.45.150）：`_record_barrier_outcome` 因此在跑测试时以读写模式打开
+    **生产** `pheromone.db`（37 MB），`CREATE TABLE IF NOT EXISTS
+    barrier_outcomes` 并 INSERT。`_isolate_paper_portfolio_state` 接不住它——
+    那个 fixture 只重绑了 `STATE_DIR` 与四个状态文件，没管本模块的 DB 路径。
+    """
+    from hive_logger import PATHS
+    return Path(PATHS.db)
+
+
 SNAPSHOT_DIR = BASE_DIR / "report_snapshots"
 STATE_DIR = BASE_DIR / "paper_portfolio_state"
 STATE_DIR.mkdir(exist_ok=True)
@@ -603,7 +622,7 @@ def _lookup_vol_ann(ticker: str, as_of: str,
     """
     import sqlite3
 
-    db = Path(db_path) if db_path is not None else BASE_DIR / "pheromone.db"
+    db = Path(db_path) if db_path is not None else _pheromone_db_path()
     # v0.45.104：max_age 必须进 key。它是**查询条件的一部分**（下面的 since 由它算），
     # 却曾被漏在 key 之外：同进程里先用 max_age=1 查出 None，再改成 max_age=10
     # 重查，拿回的是缓存里那个 None——一次 run_replay 的窗口覆盖会污染下一次。
@@ -910,7 +929,7 @@ _REPLAY_MODE = False
 def _record_barrier_outcome(trade: "ClosedTrade") -> None:
     """把三重屏障出场结果幂等写入 pheromone.db 的 barrier_outcomes 表。"""
     import sqlite3
-    db_path = BASE_DIR / "pheromone.db"
+    db_path = _pheromone_db_path()
     con = sqlite3.connect(str(db_path), timeout=10)
     try:
         con.execute("""

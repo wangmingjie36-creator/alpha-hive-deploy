@@ -45,9 +45,20 @@ class VectorMemory:
     """
 
     COLLECTION_NAME = "alpha_hive_memories"
-    DEFAULT_DB_PATH = PATHS.chroma_db
     MAX_RESULTS = 10
     RETENTION_DAYS = 90
+
+    @property
+    def DEFAULT_DB_PATH(self) -> str:
+        """生产向量库目录（= `chroma_db/`）。
+
+    ⚠️ 必须是 property（调用时求值）。写成类属性 `DEFAULT_DB_PATH = PATHS.chroma_db` 会把值冻在
+        import 那一刻：pytest 在**收集期**就 import 本模块，那时
+        `tests/conftest.py::_isolate_env` 的 `monkeypatch.setenv` 还没跑，
+        于是整个 session 冻成 checkout 根目录，环境隔离对它完全无效。
+        v0.45.150 实测：无参构造会在 checkout 根目录建出 `chroma_db/` 并由 Chroma 在其中持久化 collection。
+        """
+        return PATHS.chroma_db
 
     def __init__(self, db_path: str = None, retention_days: int = None):
         self.db_path = db_path or self.DEFAULT_DB_PATH

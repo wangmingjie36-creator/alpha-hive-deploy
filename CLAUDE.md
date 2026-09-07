@@ -158,6 +158,75 @@ v0.45.124 的 `test_quote_set.py` docstring 写着「不碰网络」，实测 5 
 
 与上一节同源：②号写法把「隔离失效」改写成了「隔离生效」，同样答不出「谁会红？」。
 
+## 环境：`~/Desktop` 在 iCloud 同步下会造「重名副本」（2026-09-07 起）
+
+本项目位于 `~/Desktop/Alpha Hive`，而 macOS「桌面与文稿同步 iCloud」会**持续**
+产出形如 `xxx 2.py` / `index 3` / `settings.local 2.json` 的副本（名字里带**空格 + 数字**）。
+2026-09-07 清理时一次扫出 **53 个**，最早的可回溯到 **2026-03-16**——
+它不是偶发，是常年在积累。
+
+### 它已经造成过的实际故障
+
+**`git fetch` 失败**，报的是：
+```
+fatal: bad object refs/heads/claude/funny-thompson-d7c175 2
+error: ...did not send all necessary objects
+```
+
+⚠️ **这条报错有两重误导，两重都实测确认过**：
+
+1. **它说「对象缺失」，实际是 refname 非法。** git 的引用名不允许含空格，
+   而 iCloud 在 `.git/refs/` 里造了 `refs/heads/... 2`、`refs/remotes/origin/main 2`。
+   注入探针实测：副本指向**存在的 commit** 与指向**不存在的 object**，
+   `git fetch` **报同一条错**——所以与对象在不在**无关**，纯粹是名字非法。
+   当年那四个副本指向的 commit 至今 `git cat-file -t` 全部为 `commit`，仓库没有任何损坏。
+
+2. **failing 的是 `fetch`，不是 `push`。** 首次遇到时命令是
+   `git fetch … && … && git push …`，`fetch` 失败后 `&&` 短路、`push` 根本没跑，
+   而错误紧挨着 push 出现 ⇒ 很容易记成「push 坏了」。
+   实测把 `push` 单独跑（无副本 / 有副本）行为完全一致。
+   ——同 CLAUDE.md 既有的「`&&` 链里别在前一步后面挂要干活的步骤」。
+
+### 遇到 git 行为诡异时的第一件事
+
+```bash
+find .git/refs -type f -name "* *"
+```
+有输出就是这个病。**清掉带空格的 ref 即恢复**（副本本身无价值）。
+
+想确认这条判据没失效，可以反向自证（探针指向什么都行，报错一样）：
+
+```bash
+git rev-parse HEAD > ".git/refs/heads/__probe 2" && git fetch origin; rm -f ".git/refs/heads/__probe 2"
+```
+
+### 清理规则（副本可能含未提交内容，别无脑删）
+
+1. **两道安全闸**：名字必须真是 `… N` / `… N.ext` 形式；**被 git 跟踪的一律不动**。
+2. **源码类副本先验内容**：与本体 `cmp` 相同 ⇒ 垃圾；**不同则先查它是不是某个
+   已提交版本**（`git hash-object` 比对 `HEAD` / `origin/main` / 近期提交）。
+   实测遇到过一个匹配不上任何提交的（`swarm_agents/oracle_bee 2.py`）——
+   查下来是**编辑中途的快照**（比最终版早 16 分钟、版本号还停在改名前、
+   少一条守卫子句），确认无独有内容才删。
+3. **删除用「移进废纸篓」而不是 `rm`**：本仓同时有 ~19 个 worktree 与多个并发
+   session，可逆的删除代价近乎为零。
+4. `pheromone 2.db-wal` / `-shm` 这类 SQLite sidecar：**先确认 `pheromone 2.db`
+   本体不存在**，否则它们是活的。
+5. 清完必须验：`git fsck --connectivity-only`、**逐个 worktree `git rev-parse HEAD`**、
+   跑一次测试。
+
+### 别把它误诊成别的问题
+
+- 工作区里冒出的 `xxx 2.py` **不是**谁没清理干净的中间产物，也**不是** merge 残留；
+  它们 mode 常为 `0600`（与仓库文件的 `0644` 不同），是 iCloud 写的。
+- `ruff` / `pytest` 会把这些副本**当成真文件收进来**，导致凭空多出报错与用例；
+  统计「新增了几个 lint 问题」时要先把它们排除，否则基线对不上。
+
+### 根治
+
+清理只是重置计时器。**要根治得把 `~/Desktop/Alpha Hive` 移出 iCloud 同步**
+（或整个关掉「桌面与文稿同步」）——这是用户的机器设置，**由用户决定，不要自行更改**。
+
 ## 已知问题 / 注意事项（长期有效项）
 
 - `realtime_metrics` 在部分 JSON 里是空字典 `{}`，导致 `current_price = 0`
