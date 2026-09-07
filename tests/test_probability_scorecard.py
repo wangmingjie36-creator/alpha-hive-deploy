@@ -458,3 +458,133 @@ class TestMLEstimatorGenerations:
         assert one["spans_estimator_generations"] is False, one["ml_estimator_generations"]
         assert two["spans_estimator_generations"] is True, two["ml_estimator_generations"]
         assert len(two["ml_estimator_generations"]) == 2
+
+
+class TestGenerationVisibleToHumans:
+    """跨代混算必须出现在**人看的那一层**（v0.45.159）。
+
+    v0.45.140 把 `spans_estimator_generations` 放进了 `blend_scan` 的返回字典，
+    并在 TestMLEstimatorGenerations 的 docstring 里写明判据：「结果里必须带出
+    代际，否则没有任何观测点会因为混算而变化」。数据层做到了——但 `_fmt`
+    一次没印过这两个键，退出码也不看。于是读 --json 的人看得见，跑 CLI 的人
+    看到的是一张干净的表。**算了没人读＝没算**（同 v0.45.112 的判据）。
+
+    时机上这条尤其要紧：2026-09-07 当天 `spans` 恰好是 False（09-06/09-07
+    无扫描、最近业务日 09-04），**09-08 首次扫描后即变 True**。
+
+    不动退出码：v0.45.140 明确登记过「不阻断扫描（早期样本仍有信息）」。
+    把警告变得可行动的是 `--generation`，不是让它变红。
+    """
+
+    @staticmethod
+    def _rows_two_generations():
+        """一半落在首条边界之前、一半在最新边界之后。"""
+        old = [{"date": f"2026-08-{(i % 28) + 1:02d}", "ticker": f"T{i}", "hit": i % 2}
+               for i in range(60)]
+        new = [{"date": f"2026-09-{8 + (i % 5):02d}", "ticker": f"U{i}", "hit": (i + 1) % 2}
+               for i in range(40)]
+        rows = old + new
+        ml = {(r["date"], r["ticker"]): 40.0 + (i % 40) for i, r in enumerate(rows)}
+        return rows, ml
+
+    def test_spanning_shows_warning_in_rendered_text(self):
+        rows, ml = self._rows_two_generations()
+        res = PS.blend_scan(rows=rows, ml=ml, embargo_days=PS.EMBARGO_DAYS)
+        assert res["spans_estimator_generations"] is True, "夹具没跨代，本类全部恒真"
+        txt = PS._fmt(res, "融合权重扫描")
+        assert "跨了多代" in txt, "跨代却没在渲染文本里出警告 —— 人看不到就等于没记"
+        assert "--generation latest" in txt, "警告没说怎么拿干净答案 ⇒ 只能被忽略"
+
+    def test_single_generation_shows_no_warning(self):
+        """成对：不跨代时不许出警告 —— 恒亮的警告等于没有警告
+        （同 v0.45.141 记的「三条名字一次没落下过」）。"""
+        rows = [{"date": f"2026-08-{(i % 28) + 1:02d}", "ticker": f"T{i}", "hit": i % 2}
+                for i in range(60)]
+        ml = {(r["date"], r["ticker"]): 40.0 + (i % 40) for i, r in enumerate(rows)}
+        res = PS.blend_scan(rows=rows, ml=ml, embargo_days=PS.EMBARGO_DAYS)
+        assert res["spans_estimator_generations"] is False
+        assert "跨了多代" not in PS._fmt(res, "融合权重扫描")
+
+    def test_generation_counts_always_rendered(self):
+        """不论跨不跨代，代际分布都要印——只在跨代时才印，读者就无从知道
+        「这次是哪一代」，而那正是 --generation 之后最该核对的事。"""
+        rows = [{"date": f"2026-08-{(i % 28) + 1:02d}", "ticker": f"T{i}", "hit": i % 2}
+                for i in range(60)]
+        ml = {(r["date"], r["ticker"]): 50.0 for r in rows}
+        txt = PS._fmt(PS.blend_scan(rows=rows, ml=ml, embargo_days=PS.EMBARGO_DAYS), "x")
+        assert "ML 估计量代际" in txt
+        assert "pre-" in txt, "代际名字本身要印出来，只印一个数等于没说是哪代"
+
+    def test_latest_filter_scores_one_generation_only(self):
+        rows, ml = self._rows_two_generations()
+        res = PS.blend_scan(rows=rows, ml=ml, embargo_days=PS.EMBARGO_DAYS,
+                            generation="latest")
+        assert res["spans_estimator_generations"] is False
+        assert res["scored_generation"] == PS._ML_ESTIMATOR_GENERATIONS[-1][1]
+        assert res["excluded_by_generation"], "过滤了却没记下排除了谁 ⇒ 样本凭空变少"
+        assert res["n"] + sum(res["excluded_by_generation"].values()) == \
+            sum(PS.blend_scan(rows=rows, ml=ml, embargo_days=PS.EMBARGO_DAYS)[
+                "ml_estimator_generations"].values()), "过滤前后两套账对不上"
+
+    def test_explicit_unknown_generation_is_refused_not_silently_empty(self):
+        """要一个不存在的代必须报错。滤出空集再在空集上算 Brier，
+        是「把失败改写成没发生过」的教科书形状。"""
+        rows, ml = self._rows_two_generations()
+        res = PS.blend_scan(rows=rows, ml=ml, generation="v9.9.9-不存在")
+        assert res["status"] == "unknown_generation"
+        assert res["available_generations"], "连有哪些代都不告诉，用户无从改正"
+
+    def test_base_rate_window_not_shortened_by_filter(self):
+        """过滤只该少记分行，**不该缩短时点基准率的历史窗口**——
+        基准率是纯收益序列、与 ML 估计量无关。若滤在算 base 之前，
+        新一代那些行的基准率会只看到新一代的历史，静默变一个量。"""
+        rows, ml = self._rows_two_generations()
+        allr = PS.blend_scan(rows=rows, ml=ml, embargo_days=PS.EMBARGO_DAYS)
+        lat = PS.blend_scan(rows=rows, ml=ml, embargo_days=PS.EMBARGO_DAYS,
+                            generation="latest")
+        # w=1.0 只用 base；同一批行在两次调用里的 base 必须逐点相同 ⇒
+        # 平均预测值相等（latest 是 all 的子集，取其对应子集比较不便，
+        # 故比较更强的可观测量：latest 的 w=1.0 平均预测应等于只在这些行上
+        # 用全历史算的基准率——用 mean_pred_pct 的稳定性代理）
+        w1 = lambda r: next(g for g in r["grid"] if abs(g["w"] - 1.0) < 1e-9)  # noqa: E731
+        assert w1(lat)["mean_pred_pct"] > 0, "基准率恒零说明历史窗口被滤空了"
+        assert allr["n"] > lat["n"] > 0
+
+    def test_latest_derived_from_joined_days_not_all_outcome_days(self):
+        """`latest` 必须从「结果与 ML 概率**都有**的日子」里挑代，不是从全部结果日。
+
+        补于 mutation check：变异「`_sel = ml_estimator_generation(dated[-1]...)`」
+        当时全绿 —— 证等价时发现它不等价，是我的用例没覆盖到。
+        分歧场景：最后一个有 T+7 结果的日子**没有对应报告**（生产常态，报告只出
+        分数最高的 N 只，而 predictions 表收全部标的）。此时按全部结果日推出的
+        「最新代」可能一条可记分样本都没有 ⇒ 过滤出空集 ⇒
+        「把失败改写成没发生过」。
+        """
+        rows = [{"date": f"2026-08-{(i % 20) + 1:02d}", "ticker": f"T{i}", "hit": i % 2}
+                for i in range(60)]
+        ml = {(r["date"], r["ticker"]): 50.0 + (i % 20) for i, r in enumerate(rows)}
+        # 一条落在**新一代**、且**没有** ML 概率的结果行（不进 ml 字典）
+        rows.append({"date": "2026-09-20", "ticker": "ZZZ", "hit": 1})
+        res = PS.blend_scan(rows=rows, ml=ml, embargo_days=PS.EMBARGO_DAYS,
+                            generation="latest")
+        assert res["status"] == "ok", (
+            f"latest 指向了一个没有可记分样本的代 ⇒ {res.get('status')}")
+        assert res["scored_generation"].startswith("pre-"), res["scored_generation"]
+        assert res["n"] > 0
+
+    def test_cli_generation_flag_end_to_end(self, tmp_path):
+        rdir = tmp_path / "reports"; rdir.mkdir()
+        rows = []
+        for i in range(60):
+            d = f"2026-08-{(i % 28) + 1:02d}"
+            rows.append((d, f"T{i}", "bullish", 100.0, 110.0 if i % 2 else 90.0))
+            _write_report(rdir, d, f"T{i}", 50.0 + (i % 20))
+        for i in range(40):
+            d = f"2026-09-{8 + (i % 5):02d}"
+            rows.append((d, f"U{i}", "bullish", 100.0, 110.0 if i % 2 else 90.0))
+            _write_report(rdir, d, f"U{i}", 50.0 + (i % 20))
+        db = _mkdb(tmp_path, rows)
+        assert PS.main(["--blend-scan", "--db", str(db), "--reports-dir", str(rdir),
+                        "--generation", "latest"]) in (0, 1)
+        assert PS.main(["--blend-scan", "--db", str(db), "--reports-dir", str(rdir),
+                        "--generation", "不存在的代"]) == 3

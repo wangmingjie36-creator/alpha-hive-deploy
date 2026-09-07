@@ -124,6 +124,59 @@ class TestPredicateHasTeeth:
         assert v.distinct == 2
         assert v.verdict == "ok", "n=3 不该被 near_constant 判据碰到"
 
+    def test_large_scan_day_moderate_collapse_is_flagged(self):
+        """v0.45.154：n=30、distinct=3 必须红。
+
+        旧判据（单一绝对数 `distinct <= 2`）会放行它 —— **扫描日越大闸越松**，
+        方向与诊断力相反。n=30 那一档的健康下界实测是 **13**，掉到 3 是
+        4 倍级塌缩。
+        """
+        vals = [0.40] * 28 + [0.50, 0.60]          # n=30, distinct=3
+        v = G.evaluate_probabilities(vals)
+        assert v.n_numeric == 30 and v.distinct == 3
+        assert v.verdict == "near_constant"
+        assert v.exit_code == 1
+
+    def test_large_scan_day_at_band_edge_is_flagged(self):
+        """门槛边界：n>=20 档允许的最大 distinct 是 4，等于 4 仍要红。"""
+        vals = [0.40] * 27 + [0.50, 0.60, 0.70]    # n=30, distinct=4
+        v = G.evaluate_probabilities(vals)
+        assert v.distinct == 4 and v.verdict == "near_constant"
+
+    def test_large_scan_day_healthy_floor_is_green(self):
+        """成对的另一半：该档实测健康下界 13 必须绿。
+
+        只写上两条的话，把门槛调成 `distinct <= 99` 也全绿。
+        """
+        vals = [0.40 + i * 0.01 for i in range(13)] + [0.40] * 17   # n=30, distinct=13
+        v = G.evaluate_probabilities(vals)
+        assert v.n_numeric == 30 and v.distinct == 13
+        assert v.verdict == "ok" and v.exit_code == 0
+
+    def test_small_band_threshold_did_not_loosen(self):
+        """成对：小扫描日那一档不得被顺手放宽。
+
+        n=12/distinct=3 在旧判据下是 `ok`（该档健康下界 9）。分段后仍须 `ok`
+        —— 若两档共用了 n>=20 的门槛 4，这条会红。
+        """
+        vals = [0.40] * 10 + [0.50, 0.60]          # n=12, distinct=3
+        v = G.evaluate_probabilities(vals)
+        assert v.n_numeric == 12 and v.distinct == 3
+        assert v.verdict == "ok"
+
+    def test_band_lookup_is_monotone_and_bounded(self):
+        """门槛表本身的不变式：随 n 单调不减，且 n<地板时判不了。
+
+        写死一张表最容易犯的错是档位排序反了（`NEAR_CONSTANT_BANDS` 按 n
+        下界降序匹配第一个命中的，顺序写反会让大扫描日落到小档门槛上）。
+        """
+        assert G.near_constant_max_distinct(7) is None
+        caps = [G.near_constant_max_distinct(n) for n in range(8, 41)]
+        assert all(c is not None for c in caps)
+        assert caps == sorted(caps), "门槛随 n 必须单调不减"
+        assert G.near_constant_max_distinct(19) == 2
+        assert G.near_constant_max_distinct(20) == 4
+
     def test_bool_is_not_treated_as_probability(self):
         """`bool` 是 `int` 的子类，`float(True)` = 1.0 会被当成合法概率。
 
@@ -629,6 +682,82 @@ class TestGateWiring:
 # ===================================================================
 # 5. 新产物目录的「三件事」（v0.45.111 教训）
 # ===================================================================
+class TestSnapshotLandsInTheTrackedDir:
+    """快照必须落在**仓库里那个被 git 跟踪的** `ml_model_history/`。
+
+    v0.45.145 把快照目录写成 `模型文件.parent / HISTORY_DIRNAME`。
+    v0.45.149 随后把 `save_model` 的默认路径从 cwd 相对字符串改成
+    `default_model_path()` → `PATHS.ml_model`（绝对路径）。
+    **于是快照落在哪，从此取决于 `PATHS` 家族的指向** —— 那是本模块之外的值。
+
+    若将来有人把 `PATHS.ml_model` 挪进 cache 目录或用户目录，快照会静默落到
+    git 跟踪范围之外：`REPORT_ARTIFACT_PATHS` 白名单、`.gitignore` 的
+    `!ml_model_history/*.json` 反向规则**全部失效**，而症状是
+    「文件确实生成了、但永远不进库」——与 v0.45.111「新账本没进白名单」同形，
+    是本仓最难自己发现的那一类。这一组就是那个耦合的守卫。
+    """
+
+    def test_default_model_path_stays_under_paths_home(self):
+        from hive_logger import PATHS
+        from ml_predictor import default_model_path
+        assert Path(default_model_path()).parent == Path(PATHS.home), (
+            "模型默认路径不在 PATHS.home 下 ⇒ 快照会落到仓库外，"
+            "白名单与 .gitignore 反向规则一起失效"
+        )
+
+    def test_production_cache_path_stays_under_paths_home(self):
+        """有读者的是 `ml_model_cache.json`，不是 `ml_model.json`。
+
+        v0.45.149 实测：`ml_model.json` 全仓 0 个读者，生产三个消费点
+        （`alpha_hive_daily_report` / `generate_ml_report._model_file` /
+        `queen_distiller._ml_oos_trust_factor`）**全部显式**指 cache 那份。
+        所以这一条比上一条更要紧。
+        """
+        from hive_logger import PATHS
+        assert Path(PATHS.ml_model_cache).parent == Path(PATHS.home)
+
+    def test_snapshot_of_cache_file_lands_in_the_tracked_dir(self, tmp_path,
+                                                             snapshots_enabled):
+        """端到端：对 cache 路径调 `snapshot_model_file`，快照必须落在它旁边。
+
+        用 tmp_path 而非真目录 —— 断言的是**相对关系**（快照目录 =
+        模型文件同级的 HISTORY_DIRNAME），上面两条负责把这个同级目录钉在仓库根。
+        """
+        src = tmp_path / "ml_model_cache.json"
+        src.write_text('{"model_type": "hgb"}', encoding="utf-8")
+        dest = G.snapshot_model_file(src, date_str="2026-09-07")
+        assert dest is not None
+        assert dest.parent == tmp_path / G.HISTORY_DIRNAME
+
+    def test_manifest_records_the_fixture_overwrite_signature(self, tmp_path,
+                                                              snapshots_enabled):
+        """manifest 必须记 `oos_accuracy` 与 `n_samples_seen`。
+
+        v0.45.149 认定「模型被测试夹具覆盖」的机读签名是
+        **`oos_accuracy is None` + `n_samples_seen` 明显偏低**
+        （真实训练路径样本 ≥60 一定走 `_eval_oos_purged` 填 oos）。
+
+        ⚠️ **不能用 `training_accuracy` 判** —— 夹具模型的精度**反而更好看**
+        （实测 96.67 / 100.0，真模型只有 71.63），拿精度判会把最该拦的那个
+        当「训练得好」放行。这两个字段是事后归因唯一能用的判据，
+        manifest 少记任何一个，快照就失去了它存在的意义。
+        """
+        src = tmp_path / "ml_model.json"
+        src.write_text(json.dumps({
+            "model_type": "hgb", "is_trained": True,
+            "n_samples_seen": 30, "training_accuracy": 96.67, "oos_accuracy": None,
+        }), encoding="utf-8")
+        G.snapshot_model_file(src, date_str="2026-09-07")
+        rec = json.loads((tmp_path / G.HISTORY_DIRNAME / G.MANIFEST_NAME)
+                         .read_text().strip().split("\n")[-1])
+        assert "oos_accuracy" in rec and rec["oos_accuracy"] is None
+        assert rec["n_samples_seen"] == 30
+        assert rec["training_accuracy"] == 96.67, (
+            "accuracy 也要记 —— 但记它是为了让人看见「夹具的反而更好看」，"
+            "不是拿它当判据"
+        )
+
+
 class TestArtifactPlumbing:
     def test_history_dir_in_both_whitelists(self):
         import report_deployer as rd

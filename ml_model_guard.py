@@ -130,10 +130,53 @@ _log = logging.getLogger(__name__)
 #: 第 1 条判据的最小标的数（「全体逐位相同」在任何 n>1 下都不可能是巧合）
 CONSTANT_MIN_N = 2
 
-#: 第 2 条判据的地板与门槛。见模块 docstring 的实测表：
-#: 当前世代健康日 distinct ∈ [9, 21]，两次事故 distinct ∈ {1, 2}。
+#: 第 2 条判据的地板。
 NEAR_CONSTANT_MIN_N = 8
-NEAR_CONSTANT_MAX_DISTINCT = 2
+
+#: 第 2 条判据的门槛，**按 n 分段**。见 `near_constant_max_distinct()`。
+#: (n 下界, 该档允许的最大 distinct)，按 n 下界降序匹配第一个命中的。
+NEAR_CONSTANT_BANDS = ((20, 4), (NEAR_CONSTANT_MIN_N, 2))
+
+#: 兼容名：小扫描日那一档的门槛。外部若要引用，请改用
+#: `near_constant_max_distinct(n)` —— 单一常数正是 v0.45.154 要治的问题。
+NEAR_CONSTANT_MAX_DISTINCT = NEAR_CONSTANT_BANDS[-1][1]
+
+
+def near_constant_max_distinct(n: int) -> Optional[int]:
+    """该扫描规模下，distinct 低到多少算「准常数」。n 不够判则返回 None。
+
+    **为什么必须按 n 分段**（v0.45.154）：原判据是单一绝对数 `distinct <= 2`，
+    于是**扫描日越大、闸越松**——方向与诊断力恰好相反。
+    n=12 时 distinct<=2 才红（相对健康下界 9 是 4.5 倍塌缩）；
+    而 n=30 时同样要 distinct<=2，相对该档健康下界 **13** 已是 6.5 倍塌缩，
+    中间的 3、4 全部放行。实测：n=30 / distinct=3 在旧判据下是 `ok`。
+
+    **为什么不换成比值 `distinct/n`**：健康日的比值带是 **[0.43, 0.82]**
+    （n=11/distinct=9 → 0.82；n=30/distinct=13 → 0.43），比绝对数
+    2-vs-9 的空隙**更窄、更易误报**。且换量纲＝换了一个估计量，
+    标定表必须整体重标（同 v0.45.144「闸门比的是两个不同估计量」）。
+
+    ## 标定（77 个扫描日实测，n>=8 的那些）
+
+    | n 档 | 当前世代健康日 distinct | 门槛 | 余量 |
+    |---|---|---|---|
+    | [8, 20)  | 最小 **9**（n=11/12/16 各有一天取到 9） | <= 2 | 4.5× |
+    | [20, ∞)  | 最小 **13**（另有 13 / 20 / 21） | <= 4 | 3.25× |
+
+    两档在当前世代均**零误报**，三个已知事故（06-25 / 08-28 / 09-04）全中，
+    且 n=30/distinct=3 与 n=30/distinct=4 都被抓住。
+
+    ⚠️ **`n>=20` 那一档只有 4 天样本**（08-25/26/27 的 n=30 与 09-01 的 n=24）。
+    门槛取 4 是刻意的保守选择：它离该档实测下界 13 还有 3.25 倍，
+    不靠「13 附近」这个尚未站稳的估计。**要把门槛往上抬，先攒够 n>=20 的样本**
+    ——扫描池 08-25 才扩到 30 只，几周后再谈。
+    """
+    if n < NEAR_CONSTANT_MIN_N:
+        return None
+    for lo, cap in NEAR_CONSTANT_BANDS:
+        if n >= lo:
+            return cap
+    return None
 
 #: 模型快照目录名（相对 report_dir）
 HISTORY_DIRNAME = "ml_model_history"
@@ -236,7 +279,8 @@ class DegeneracyVerdict:
     def describe(self) -> str:
         head = {
             "constant": "🚨 ML 模型退化成常数函数",
-            "near_constant": "🚨 ML 模型准常数（唯一值 ≤ %d）" % NEAR_CONSTANT_MAX_DISTINCT,
+            "near_constant": "🚨 ML 模型准常数（%d 只标的那一档的门槛是唯一值 ≤ %s）" % (
+                self.n_numeric, near_constant_max_distinct(self.n_numeric)),
             "ok": "ML 概率分布正常",
             "undetermined": "ML 概率无法判定",
         }[self.verdict]
@@ -322,7 +366,7 @@ def evaluate_probabilities(
         verdict = "undetermined"
     elif distinct == 1:
         verdict = "constant"
-    elif n_numeric >= NEAR_CONSTANT_MIN_N and distinct <= NEAR_CONSTANT_MAX_DISTINCT:
+    elif (_cap := near_constant_max_distinct(n_numeric)) is not None and distinct <= _cap:
         verdict = "near_constant"
     else:
         verdict = "ok"

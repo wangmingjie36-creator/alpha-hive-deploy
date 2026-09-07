@@ -180,8 +180,45 @@ class TestSpeciesDoesNotSpread:
         ("config.py", "_OVERRIDE_YAML"), ("config.py", "_OVERRIDE_JSON"),
     }
 
+    # 只扫**我们自己的**文件。生产 checkout 里 `rglob("*.py")` 会扫到 15349 个
+    # .py（含 `mcp-servers/*/.venv/**/site-packages`），而 git 跟踪的只有 327 个
+    # ——98% 是第三方库。拿我们的规范去审计 joblib 既无意义，又会让计数随
+    # 「本地装了哪些 venv」漂移（worktree 与主 checkout 报的数会不一样）。
+    _VENDORED = ("node_modules", "site-packages", "vendor", "third_party")
+
     @staticmethod
-    def _scan():
+    def _own_python_files():
+        """本仓自己的 .py 清单 + 用的是哪种口径。
+
+        首选 `git ls-files`：天然排除未跟踪与 vendored 内容，且**口径可复现**
+        （别人复跑对得上）。但本仓 CI 自检会用 `git archive` 导出**没有 .git**
+        的干净检出，那里 git 口径不可用，故必须有回退。
+
+        ⚠️ 子进程有**两条**失败路径，各堵一次（v0.45.117/119 同款教训）：
+           `git` 不存在会**抛** `FileNotFoundError`，仓库不可用会**返回**非零。
+           只判返回值的守卫接不住抛，只判异常的接不住返回。
+        """
+        import subprocess
+        try:
+            r = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=str(REPO_ROOT),
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode == 0 and r.stdout.strip("\x00").strip():
+                rels = [x for x in r.stdout.split("\x00") if x]
+                return [REPO_ROOT / x for x in rels], "git"
+        except (OSError, subprocess.SubprocessError):
+            pass                                    # 落到 rglob 回退
+        files = []
+        for p in REPO_ROOT.rglob("*.py"):
+            rel = p.relative_to(REPO_ROOT)
+            if any(x in rel.parts for x in TestSpeciesDoesNotSpread._VENDORED):
+                continue
+            if any(part.startswith(".") for part in rel.parts):   # .venv/.git/.claude…
+                continue
+            files.append(p)
+        return files, "rglob"
+
+    @staticmethod
+    def _scan(_stats=None):
         """列出所有「import 期求值的 PATHS 派生赋值」。
 
         会下钻到 Try/If/With/For 体内——那些同样在 import 期执行。
@@ -191,6 +228,7 @@ class TestSpeciesDoesNotSpread:
         import ast
         compound = (ast.Try, ast.If, ast.With, ast.For, ast.While)
         found = set()
+        undecodable, unparsable = [], []
 
         def bodies(s):
             for f in ("body", "orelse", "finalbody"):
@@ -211,16 +249,169 @@ class TestSpeciesDoesNotSpread:
                 elif isinstance(s, compound) and depth < 6:
                     walk(list(bodies(s)), rel, depth + 1)
 
-        for p in sorted(REPO_ROOT.rglob("*.py")):
+        files, mode = TestSpeciesDoesNotSpread._own_python_files()
+        for p in sorted(files):
             r = p.relative_to(REPO_ROOT)
             if any(x in r.parts for x in (".git", "tests", "__pycache__", ".claude",
                                           "experiments", "node_modules")):
                 continue
             try:
-                walk(ast.parse(p.read_text(encoding="utf-8")).body, str(r))
+                src = p.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                # 非 UTF-8 源文件。**记账**再跳过——直接 continue 就是
+                # 「跳过缺失项＝把缺失渲染成不存在」（v0.45.114）；
+                # 直接让它抛则是「守卫死掉」冒充「没有违规」。
+                undecodable.append(str(r)); continue
+            except OSError:
+                undecodable.append(str(r)); continue
+            try:
+                walk(ast.parse(src).body, str(r))
             except SyntaxError:
-                continue
+                unparsable.append(str(r)); continue
+        if _stats is not None:
+            _stats.update(mode=mode, n_files=len(files),
+                          undecodable=undecodable, unparsable=unparsable)
         return found
+
+    def test_scanner_survives_non_utf8_source(self, tmp_path, monkeypatch):
+        """非 UTF-8 源文件必须被**记账跳过**，而不是让整条守卫崩掉。
+
+        v0.45.150 事故：本守卫在 worktree 全绿、在**主 checkout 三条全红**——
+        `UnicodeDecodeError` 不是 `SyntaxError`，原来的 `except SyntaxError`
+        接不住它，扫描器就地抛死。元凶是 vendored 进来的
+        `…/site-packages/joblib/test/test_func_inspect_special_encoding.py`
+        （joblib 自带的 big5 编码夹具，全仓唯一一个非 UTF-8 的 .py）。
+
+        ⚠️ 守卫**崩掉**和**没有违规**是两回事，但在测试结果上都表现为一个红点，
+        所以必须单独钉住这条路径。下面用同样的 big5 字节复现。
+
+        ⚠️ 本条刻意**驱动真的 `_scan()`**（改 `REPO_ROOT` 指向 tmp 树），
+        不在测试里重抄一遍读文件的循环——抄一遍就变成「测 helper 不测接线」：
+        把 `_scan` 里的 `except UnicodeDecodeError` 删掉，抄版照样全绿
+        （v0.45.126 同款教训）。
+        """
+        import sys
+        (tmp_path / "big5_fixture.py").write_bytes(
+            b"# -*- coding: big5 -*-\n"
+            b"# Traditional Chinese: \xa4@\xa8\xc7\xa4\xa4\xa4\xe5\n"
+            b"X = 1\n")
+        (tmp_path / "offender.py").write_text(
+            "from hive_logger import PATHS\nBAD_DIR = PATHS.home / 'x'\n", encoding="utf-8")
+        (tmp_path / "broken_syntax.py").write_text("def (\n", encoding="utf-8")
+
+        monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+        stats = {}
+        found = self._scan(stats)          # ← 真的 _scan，不抛才算过
+
+        assert stats["undecodable"] == ["big5_fixture.py"], (
+            f"非 UTF-8 文件没被记账（实际 {stats.get('undecodable')}）——"
+            "要么它抛穿了整轮扫描，要么被静默吞掉")
+        assert stats["unparsable"] == ["broken_syntax.py"], (
+            f"语法错文件没被记账（实际 {stats.get('unparsable')}）")
+        assert ("offender.py", "BAD_DIR") in found, (
+            "坏文件之后的好文件没被扫到——一个坏文件带走了整轮扫描")
+
+    def test_scanner_does_not_audit_vendored_code(self, tmp_path, monkeypatch):
+        """vendored 第三方代码里的同款写法**不得**被报成本仓违规。
+
+        主 checkout 里 `rglob("*.py")` 命中 15349 个（含
+        `mcp-servers/*/.venv/**/site-packages`），git 跟踪的只有 327 个
+        ——98% 是第三方库。扫进去有两重害处：拿本仓规范审计 joblib，
+        且**计数随本地装了哪些 venv 漂移**（worktree 与主 checkout 报的数不一样）。
+
+        ⚠️ 本条造一棵**含 vendored 目录**的 tmp 树并驱动真的 `_scan()`。
+        早期版本改成断言 `_own_python_files()` 的返回值，结果 mutation
+        「把 `_scan` 里的 `files, mode = _own_python_files()` 换回全量 rglob」
+        **在 worktree 里全绿**——因为 worktree 根本没有 `.venv` 可撞。
+        既是「测 helper 不测接线」，也是「在没有病灶的环境里测防御」。
+        """
+        import sys
+        (tmp_path / "ours.py").write_text(
+            "from hive_logger import PATHS\nOURS_DIR = PATHS.home / 'x'\n", encoding="utf-8")
+        # 三类必须各覆盖一次，否则 mutation 分不出是哪道过滤器在起作用：
+        #   ① 点号开头目录（`.venv`）—— 由「隐藏目录」那道过滤拦下
+        #   ② `node_modules` —— **两道**过滤里都有它，单删一道属等价变异
+        #   ③ 非点号、非 node_modules 的 vendored（`libs/site-packages`、
+        #      `vendor`、`third_party`）—— **只有** `_VENDORED` 那道拦得住，
+        #      少了这类样本，「删掉 _VENDORED」会全绿（v0.45.150 实测 M11）
+        for vendored in (".venv/lib/python3.12/site-packages/thirdparty",
+                         "mcp-servers/x/.venv/site-packages/lib",
+                         "node_modules/pkg",
+                         "libs/site-packages/pkg",
+                         "vendor/dep",
+                         "third_party/dep",
+                         # ④ 隐藏目录但**名字不含任何 vendored 关键字**——
+                         #    只有「隐藏目录」那道过滤拦得住它。少了这类样本，
+                         #    「删掉隐藏目录过滤」是等价变异（实测 M12 全绿）
+                         ".cache/build",
+                         ".tox/py311"):
+            d = tmp_path / vendored
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "vendored_mod.py").write_text(
+                "from hive_logger import PATHS\nTHEIR_DIR = PATHS.home / 'y'\n",
+                encoding="utf-8")
+
+        monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+        found = self._scan()
+
+        assert ("ours.py", "OURS_DIR") in found, "本仓自己的违规反而没扫到"
+        # **精确相等**，不是「不含 site-packages 之类关键字」的黑名单。
+        # 黑名单版实测漏过 M12：`.cache/build/…` 不含任何关键字，删掉「隐藏目录」
+        # 那道过滤后它照样泄漏、断言却仍全绿。凡是「只有这一个才对」的场合，
+        # 写等号比写黑名单可靠。
+        assert {f for f, _ in found} == {"ours.py"}, (
+            "扫描器把本仓之外的文件当成违规报出来了："
+            f"{sorted(f for f, _ in found if f != 'ours.py')}\n"
+            "这会让计数随本地装了哪些 venv / 缓存目录漂移，"
+            "也等于拿本仓规范去审计第三方库。")
+
+    @pytest.mark.parametrize("failure", ["raises", "returns_nonzero"])
+    def test_falls_back_to_rglob_when_git_unavailable(self, failure, monkeypatch):
+        """git 口径不可用时必须回退到 rglob，而不是交出空清单。
+
+        本仓 CI 自检会用 `git archive` 导出**没有 .git** 的干净检出
+        （v0.45.117 的做法），那里 `git ls-files` 必然失败。若此时返回空清单，
+        `_scan()` 就恒返回空集 —— **一个恒真的守卫**，比没有守卫更糟。
+
+        ⚠️ 子进程有**两条**失败路径，各测一次：
+          `raises`          —— git 不存在，`subprocess.run` 抛 `FileNotFoundError`
+          `returns_nonzero` —— 不是仓库，返回码 128
+        只堵一条的守卫会被另一条穿过（v0.45.117/119 同款）。
+        """
+        import subprocess as _sp
+
+        real_run = _sp.run
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:2] == ["git", "ls-files"]:
+                if failure == "raises":
+                    raise FileNotFoundError("git not found")
+                return _sp.CompletedProcess(cmd, 128, stdout="", stderr="not a repo")
+            return real_run(cmd, *a, **k)
+
+        monkeypatch.setattr(_sp, "run", fake_run)
+        files, mode = self._own_python_files()
+        assert mode == "rglob", f"git 不可用时没走回退（mode={mode}）"
+        assert len(files) > 50, (
+            f"回退只找到 {len(files)} 个 .py —— 空/近空清单会让 _scan() 恒返回空集，"
+            "变成一个永远不会红的假守卫")
+
+    def test_own_file_list_is_sane(self):
+        """扫描范围的量级护栏：本仓自己的 .py 是几百量级。"""
+        files, mode = self._own_python_files()
+        assert 50 < len(files) < 2000, (
+            f"口径={mode} 扫到 {len(files)} 个 .py。"
+            "过多＝混进了第三方库（生产 checkout 全量 rglob 是 15349 个）；"
+            "过少＝清单机制自己坏了")
+
+    def test_scan_reports_no_undecodable_among_own_files(self):
+        """本仓自己的 .py 应当全是 UTF-8；若某天不是，要**看得见**而不是静默跳过。"""
+        stats = {}
+        self._scan(stats)
+        assert stats["undecodable"] == [], (
+            f"本仓有非 UTF-8 源文件，已被跳过（因而不受本守卫保护）：{stats['undecodable']}")
+        assert stats["unparsable"] == [], (
+            f"本仓有语法不可解析的 .py，已被跳过：{stats['unparsable']}")
 
     def test_scanner_has_teeth(self):
         """反向自证：扫描器必须真能扫到东西。
