@@ -5,7 +5,179 @@
 
 ---
 
-## [0.45.145] — 2026-09-07 — 占位（进行中：ML 模型退化成常数函数时全线无告警——09-04 全部 12 份 probability 逐位相同 = 0.5899693787928219 仍照常渲染；范围＝当日唯一值闸（放在批量收尾真实调用点，硬错误+非零退出码，不发 Slack）+ ml_model.json 保存时版本快照目录（同 PR 做 git add / REPORT_ARTIFACT_PATHS / _ARTIFACT_PREFIXES 三件事）+ 成对测试与 mutation check；不动 probability_scorecard.py，不动评分权重）
+## [0.45.145] — 2026-09-07 — ML 模型退化成常数函数时没有任何东西会变红
+
+2026-09-04 当日全部 12 份 `analysis-*-ml-*.json` 的
+`ml_prediction.prediction.probability` **逐位相同** = `0.5899693787928219`，
+报告照常印「ML 预测 59.0%」、退出码 0、日志正常。
+2026-08-28 同样：12/14 份恒为 `0.14901620144018954`。
+同期输入并不相同（09-04 的 `iv_rank` 跨 0→98.61、`put_call_ratio` 0.26→1.23），
+拿**当前**模型重放同一批输入得 7 个不同值 ⇒ 当天的模型确实是常数函数。
+
+缺的是一个观测点：**「今天这批 probability 只有 1 个唯一值」没人会红。**
+记分卡管不到——它记「准不准」，而零区分度的常数预测校准误差可以很小
+（09-04 那个 59.0% 离真实基准率 56.8% 只差 2.2pp）。**校准 ≠ 区分度。**
+
+### Added
+
+1. **`ml_model_guard.py`** —— 判定谓词 + 磁盘读取 + 模型版本快照 + CLI。
+   退出码沿用 Step 10/11/12 约定：**0 健康 / 1 要人动手 / 3 无法判定**
+   （2 被编排器 `run_step` 占用）。**不发任何 Slack**（CLAUDE.md
+   「Slack 通知精简规则」），观测点 = ERROR 日志 + 退出码。
+
+2. **`ml_model_history/`** —— 每次 `save_model()` 之后留一份
+   `{stem}-YYYY-MM-DD.json` 全文快照 + `manifest.jsonl`
+   （每次保存一行：sha256 / 字节数 / `model_type` / `n_samples_seen` /
+   `training_accuracy`）。09-04 那次**无法事后归因**正是因为
+   `ml_model_cache.json` 原地覆盖、无任何历史版本。
+   实测快照可被 `load_model()` 读回 —— 归因重放的前提。
+   保留 180 天，裁剪只认自己那套命名（`{stem}-YYYY-MM-DD.json`）。
+
+3. **`tests/test_ml_model_guard.py`**（41 项）。夹具是**真实生产取值**，
+   逐位抄自 09-04 / 08-28 / 09-02 三天的 JSON，不是编的数。
+
+### 判据不是拍脑袋的 —— 全量 77 个扫描日实测
+
+| | distinct（唯一值个数） |
+|---|---|
+| 当前世代（08-10 起，30 只池）健康日 | **9 ~ 21**（n=11~30） |
+| 已知事故 08-28 | 2（n=14） |
+| 已知事故 09-04 | 1（n=12） |
+
+⚠️ **字面 `unique == 1` 会漏掉 08-28**（distinct=2）。只写那一条就是
+「修一支漏一支」：两次已知事故只抓到一次。故判据是两条：
+
+- `n > 1 且 distinct == 1` → `constant`
+- `n >= 8 且 distinct <= 2` → `near_constant`
+
+`n >= 8` 那道地板是必需的：**合法的精确并列确实存在**（09-02 有三只共享
+`0.4805419596430596`，但那天 12 份输入各不相同，是树模型叶子离散化）。
+所以判据取 `distinct` 而非「有没有并列」，且小样本不参与第 2 条。
+
+实测该判据在当前世代 15 天里只点亮 2 天（正是两次事故），10 个健康多标的日
+零误报，3 个 n=1 的补跑日诚实返回 `undetermined`（3）而非假警报。
+旧世代（3~4 月）另有 17 天命中——那段时期模型本来就长期退化，不是误报。
+
+### Changed —— 闸装在哪（「查功能是否生效先数读者」）
+
+**用户提议的那一处不是主力生产者。** 编排器只把
+`generate_ml_report.main()` 当 **Step 3 补跑**（`--tickers $MISSING_TICKERS`）；
+每天出 12 份 JSON 的是 `alpha_hive_daily_report._generate_ml_reports`
+（Step 2 内部）。只堵前者＝加一个几乎没人调的死闸。两处都接上了：
+
+- **`alpha_hive_daily_report._generate_ml_reports`**（Step 2 主力）：
+  ⚠️ 刻意 `raise_on_degenerate=False`。该函数的调用点 `_save_output_files`
+  只兜 `(OSError, ValueError, KeyError, TypeError)`，`MLModelDegenerateError`
+  是 `RuntimeError`、**会穿透并连带杀掉 index.html 生成与 gh-pages 部署**
+  ——正是那段 except 上方注释记着的 v0.43.17 事故。改为把判决挂到 `report`
+  （main() 返回的同一个对象）→ `__main__` 出退出码 1。
+- **`generate_ml_report.main()`**（Step 3 补跑）：退化时**跳过 gh-pages 同步**
+  （常数概率的报告不该进网站）+ `sys.exit(1)`。读磁盘而非读内存，
+  这样补跑那 1~2 只会和 Step 2 的 12 份合在一起算 —— 否则 n 太小、判据形同虚设。
+- **`_force_exit_if_threads_stuck`** 原本硬写 `os._exit(0)`。加 `exit_code` 参数：
+  不带上退出码的话，「线程卡死」会把「ML 退化」悄悄改写成成功
+  ——正是本版要治的那个形状。
+- **`ml_predictor.py` 三个 + `ml_predictor_extended.py` 一个** `save_model`
+  全部钩上快照，四处均由 `tests/...::TestSnapshotWiring` 的 **AST** 断言盯着
+  （新增第 5 个 `save_model` 忘了钩 → 变红）。
+
+  ⚠️ 本条初稿写「`ml_predictor_extended` 是 `ml_predictor` 导入失败时的降级实现」，
+  **是错的，已更正**。逐条核实后的实情：
+  `swarm_agents/rival_bee.py:30` **无条件**导入 `ml_predictor_extended`，
+  它是 RivalBee 的**主路径**；只有其中的 `SimpleMLModel` **类**才是
+  `ml_predictor` 导不进来（sklearn 缺失）时的降级——`_create_ml_model()`
+  先试 `from ml_predictor import create_ml_model`，本机实测返回 `HGBModel`。
+  且 rival_bee 只调 `predict_for_opportunity`、**从不调 `train_model`**，
+  所以扫描路径不会每只标的写一次模型。
+  ⇒ 那个钩子是一条正确但常态休眠的备用闸。
+  **判据：别把测试 docstring 里对某个类的说法读成对整个模块的说法。**
+
+### Fixed —— 新产物目录的「三件事」其实是四件
+
+`.gitignore:30` 的 `ml_model*.json` **会连快照一起吞掉**：无斜杠的 gitignore
+模式匹配任意层级的 basename，`ml_model_history/ml_model-2026-09-07.json`
+实测被它命中。不加反向规则的话，第 3 项整个白做 —— 快照每天写、每天不进库，
+与 v0.45.111「新账本没进白名单」同形，只是凶手换成了 gitignore。
+
+- `.gitignore` 加 `!ml_model_history/*.json`（**必须在那条之后**，gitignore 后者胜）
+- `report_deployer.REPORT_ARTIFACT_PATHS` 加 `"ml_model_history/"`
+- `report_deployer._ARTIFACT_PREFIXES` 加 `"ml_model_history/"`
+- `git add ml_model_history/README.md`（空目录不进 git）
+
+⚠️ `git check-ignore -v` **对反向规则也会打印匹配行、退出码同样是 0**，
+不能直接当「被忽略」读。决定性判据是 `git add --dry-run`，且要配反向 canary
+（仓库根的 `ml_model.json` 必须仍被忽略——实测仍被忽略，反向规则没有过宽）。
+
+### Fixed —— 快照差点变成「有误导性的假证据」
+
+⚠️ **加完快照后实测发现它会被测试污染，且污染物会被自动提交。**
+
+`HGBModel.save_model(filename="ml_model.json")` 的默认值是**相对路径**，
+而 `tests/` 里约 12 处 `svc.train_model()` 不传 tmp 路径 ⇒ 在主 checkout 跑
+pytest 就会往 cwd 写 `ml_model.json`。实测单跑
+`tests/test_ml_real_training.py::TestTrainModelIntegration::test_train_model_prefers_real_data`
+→ 仓库根凭空出现 `ml_model.json`，**且本版的快照钩子顺手把它写进了
+`ml_model_history/`**。而该目录是 git 跟踪 + 在自动提交白名单里的
+⇒ 夹具模型会被当成生产模型提交推送。
+
+**那比没有快照更糟**：把「没有归因材料」换成了「有一份长得很真的假证据」。
+下次排查会捞到一个 `n=30 / acc=96.67 / oos=None` 的夹具模型当成当天的生产模型。
+
+加两层隔离（照抄本仓 `OPTIONS_SNAPSHOT_DISABLE` 的「第二层防线」写法）：
+
+- `ml_model_guard._snapshot_disabled()`：显式环境变量
+  `ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE` 优先；**没设时在 pytest 下默认关闭**
+- `tests/conftest.py::_isolate_env` autouse 显式设 `"1"`
+
+（相对路径默认值本身是另一条独立缺陷，已由其他 session 挂任务，不在本版改动面内。）
+
+### Fixed —— 顺带修一条被本版改动照出来的子串守卫
+
+`tests/test_parallel_agent_runner.py::TestForceExitSafetyNet::test_function_exists_and_is_wired`
+断言的是**字面量** `"_force_exit_if_threads_stuck()" in tail`（空括号）。
+给它加一个合法参数 `exit_code=_exit_code` 就误红 —— **子串守卫盯的是写法不是行为**
+（同 v0.45.140「源码守卫取 AST 别取子串」）。
+
+改成 AST，并**加严**：断言实参里确实带上了退出码。
+谁把它去掉（让强退路径重新把失败改写成成功）就红 —— mutation M23 验证。
+
+### 验证
+
+- 新增测试 **45 passed**；连同被改的 `test_parallel_agent_runner.py`
+  共 **57 passed**，`collected 57 items`。
+- **mutation check 24/24 全被抓**，基线绿、每条锚点唯一、collected 稳定在 57。
+- ⚠️ 第一轮 **M13 漏网，是我自己的测试缺口**：断言只要求
+  `report["ml_model_guard"]` 在函数里「某处出现过」，而 ImportError 兜底分支里
+  也有一份 ⇒ 摘掉成功路径的赋值照样全绿。**又是「改二分支只盯显眼的那一支」。**
+  已改为对 `Try.body` 与 `handlers` 各断一次，并补 M13b 成对验证。
+- 端到端拿真实生产数据跑 CLI：09-04 → 1、08-28 → 1、09-03 → 0、08-11 → 3。
+- **全套 3525 passed / 18 skipped / 1 xfailed / 0 failed**（`TestCoverageHorizon` 按设计
+  单独 deselect，它 2026-09-06 起变红是设计意图：去看 BLS 发 2027 日程没）。
+  跑完 `ml_model_history/` 里**只有 `README.md`** —— 隔离层在整套规模下也成立。
+- **CI 条件模拟**（v0.45.121 教训：本机绿证明不了 CI 绿）：
+  `git archive $(git write-tree)` 干净检出（**取 index 不取 HEAD**，暂存中两者不同）
+  + `sitecustomize` 断网 + CI 的 `-m "not integration and not network"`
+  → 93 passed。断网层配自证 canary（`getaddrinfo` 确实抛）。
+- 端到端跑真实模型类（`HGBModel`）：快照与原文件逐字节相同，且
+  **能被 `load_model()` 读回**。
+- 隔离层配**反向 canary**：临时把两层都停掉重跑那条会覆盖生产模型的测试，
+  `ml_model_history/` 里如期冒出 `manifest.jsonl` + `ml_model-2026-09-07.json`；
+  还原后同一条测试跑完只剩 `README.md`。
+  ⚠️ 第一次 canary 是**假阴性**——只关了环境变量那一层，conftest 的
+  `monkeypatch.setenv` 会覆盖 shell 变量。「没有差异」先问工具有没有判别力。
+- ⚠️ 另修一处**从未被证明会触发的守卫**：`test_disabled_under_pytest_by_default`
+  原本没 `delenv`，conftest 把变量设成 "1" ⇒ `_snapshot_disabled` 走的是
+  「显式环境变量」那一支就返回了，`PYTEST_CURRENT_TEST` 那一支**永远没被求值**。
+  两层里有一层从没被测过（BullVeto 同款）。已改为先 `delenv` 把第二层单独暴露，
+  并补 `test_env_var_layer_wins_when_set` 成对覆盖第一层。
+
+### 不在改动面内（刻意）
+
+- **不动 `probability_scorecard.py`** —— 校准与区分度是两件事，分开观测。
+- **不改任何评分权重 / 特征来源** ⇒ 不需要追加世代边界
+  （判定法：数这个字段流到哪儿。本版只加观测点与快照，不改任何进测量管道的量）。
+- **ML 批量整体失败**（闸都没跑到）的退出码语义**未改**：那条路径另有
+  `_log.warning` 记录，改它超出本版范围。键缺失 ≠ 健康，已写进注释。
 
 ---
 

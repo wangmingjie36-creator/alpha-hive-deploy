@@ -13,6 +13,31 @@ from dataclasses import dataclass
 
 _log = logging.getLogger("alpha_hive.ml_predictor")
 
+def _snapshot_saved_model(filename: str) -> None:
+    """把刚写盘的模型留一份带日期快照（v0.45.145）。
+
+    2026-09-04 模型退化成常数函数**无法事后归因**，因为 `ml_model.json` /
+    `ml_model_cache.json` 是原地覆盖、没有任何版本留存。快照落在
+    `ml_model_history/{stem}-YYYY-MM-DD.json`，配 `manifest.jsonl` 记
+    sha256 / 样本数 / 训练精度，下次退化可直接捞出当天的模型重放。
+
+    ⚠️ 保住模型本身比留快照重要，所以这里吞掉快照自身的失败——
+    「谁会红」的答案是：`ml_model_guard` 会在失败时 `_log.error`，
+    且当日快照缺失会出现在每日那条闸的日志里（`snapshot_present`）。
+
+    ⚠️ 每一个 `def save_model` 都必须调它。
+    `tests/test_ml_model_guard.py::TestSnapshotWiring` 用 AST 盯着这件事
+    （取 AST 不取子串——子串守卫会被解释它的注释自己触发）。
+    """
+    try:
+        from ml_model_guard import snapshot_model_file
+        snapshot_model_file(filename)
+    except ImportError as e:
+        _log.error(
+            "🚨 模型快照模块缺失（%s）——本次保存没有留版本，下次退化将无法归因", e
+        )
+
+
 
 @dataclass
 class TrainingData:
@@ -728,6 +753,7 @@ class SimpleMLModel:
             json.dump(model_data, f, ensure_ascii=False, indent=2)
 
         _log.info("模型已保存：%s", filename)
+        _snapshot_saved_model(filename)
 
     def load_model(self, filename: str = "ml_model.json"):
         """加载模型（JSON 格式，安全反序列化）"""
@@ -1021,6 +1047,7 @@ class SGDMLModel:
             json.dump(model_data, f, ensure_ascii=False, indent=2)
 
         _log.info("SGD 模型已保存：%s", filename)
+        _snapshot_saved_model(filename)
 
     def load_model(self, filename: str = "ml_model.json"):
         """从 JSON 加载模型（兼容旧 SimpleMLModel 格式）"""
@@ -1553,6 +1580,8 @@ class HGBModel:
             _log.info("HGB 模型已保存：%s", filename)
         except (OSError, TypeError) as e:
             _log.warning("HGB save_model 失败：%s", e)
+        else:
+            _snapshot_saved_model(filename)
 
     def load_model(self, filename: str = "ml_model.json") -> bool:
         """加载 HGB 模型（支持 pickle base64 恢复）"""

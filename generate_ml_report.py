@@ -2789,8 +2789,44 @@ def main():
     _log.info("所有文件已完成写入")
     _log.info("=" * 60)
 
+    # ── v0.45.145：ML 概率常数退化闸 ─────────────────────────────────
+    # 2026-09-04 全部 12 份 probability 逐位相同（0.5899693787928219），
+    # 报告照常印「ML 预测 59.0%」、退出码 0、日志正常——没有任何东西会红。
+    # 闸放在这里而不是循环内：判据是「当日这一批的唯一值个数」，必须等
+    # 全部文件落盘（上面的 shutdown(wait=True)）之后才能求值。
+    #
+    # 读磁盘而非读内存，因为本进程通常只是 Step 3 补跑（编排器只在 Step 2
+    # 漏了标的时才调本 main），单看自己写的那 1~2 份 n 太小、判据形同虚设；
+    # 读磁盘会把 Step 2 的 12 份一起算进来。
+    #
+    # ⚠️ 不发 Slack（CLAUDE.md「Slack 通知精简规则」）。观测点 = 日志 + 退出码。
+    _exit_code = 0
+    _guard_date = report_gen.timestamp.strftime("%Y-%m-%d")
+    try:
+        from ml_model_guard import enforce_day as _enforce_day
+        _verdict = _enforce_day(
+            report_dir, _guard_date, raise_on_degenerate=False, logger=_log
+        )
+        if _verdict.is_degenerate:
+            _exit_code = 1
+    except ImportError as _ge:
+        # 「闸装不上」与「闸响了」一样严重：两种情况都不该报告健康。
+        # 沿用 Step 10/11/12 约定的 3 = 无法判定，绝不静默当成 0。
+        _log.error(
+            "🚨 ML 常数退化闸未装上（%s）——本次运行没有这道观测点，按「无法判定」处理",
+            _ge,
+        )
+        _exit_code = 3
+
     # ── 自动同步 gh-pages（GitHub Pages 从此分支部署）──
-    _sync_ghpages(tickers, successful_count)
+    if _exit_code == 1:
+        _log.error("已跳过 gh-pages 同步：当日 ML 概率退化成常数，先查模型再发布。")
+    else:
+        _sync_ghpages(tickers, successful_count)
+
+    if _exit_code:
+        import sys as _sys_exit
+        _sys_exit.exit(_exit_code)
 
 
 def _sync_ghpages(tickers: list, successful_count: int) -> None:

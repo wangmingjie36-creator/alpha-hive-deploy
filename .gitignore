@@ -28,6 +28,12 @@ build/
 # ML 模型
 ml_model*.pkl
 ml_model*.json
+# v0.45.145：但**模型版本快照必须进 git**。上面那条 `ml_model*.json` 会连
+# `ml_model_history/ml_model-2026-09-07.json` 一起吞掉（gitignore 无斜杠的
+# 模式匹配任意层级的 basename，实测 `git check-ignore` 命中第 30 行）。
+# 不加这条反向规则，快照就是「每天写、每天不进库」——2026-09-04 那次退化
+# 无法归因，正是因为模型被原地覆盖、没有任何历史版本。
+!ml_model_history/*.json
 
 # 日志（含轮转文件 .log.1, .log.2 等）
 *.log
