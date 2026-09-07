@@ -4,6 +4,7 @@ Alpha Hive 测试 fixtures - 共享 mock 数据 + 隔离数据库
 
 import sys
 import os
+import pathlib
 import pytest
 import tempfile
 
@@ -25,6 +26,13 @@ def _isolate_env(tmp_path, monkeypatch):
     # 经 OptionsAgent.analyze() 写进生产 cache/options_snapshot_NVDA_*.json
     # （data_quality 标 real），被当日正式扫描按"快照命中"复用进日报
     monkeypatch.setenv("OPTIONS_SNAPSHOT_DISABLE", "1")
+    # v0.45.145 同款第二层防线：禁止测试把模型写进 ml_model_history/。
+    # `HGBModel.save_model` 的默认文件名是**相对路径**，tests/ 里约 12 处
+    # `svc.train_model()` 不传 tmp 路径 ⇒ 在主 checkout 跑 pytest 会往 cwd 写
+    # ml_model.json，本模块会顺手快照它。而 ml_model_history/ 是 git 跟踪 +
+    # 在自动提交白名单里的 ⇒ 夹具模型会被当成生产模型提交推送。
+    # ml_model_guard 自己也在 pytest 下默认关闭（两层），这里再显式关一次。
+    monkeypatch.setenv("ALPHA_HIVE_MODEL_SNAPSHOT_DISABLE", "1")
 
 
 # ==================== 禁止测试调用真实 Anthropic API ====================
@@ -695,3 +703,78 @@ def _fast_yfinance_limiter(monkeypatch):
             monkeypatch.setattr(_m, "yfinance_limiter", fast)
         if _mod == "yf_gate":
             monkeypatch.setattr(_m, "_bucket", fast, raising=False)
+
+
+# ==================== ML 模型产物隔离（v0.45.149）====================
+
+_ML_MODEL_FILES = ("ml_model.json", "ml_model_cache.json", "ml_model_extended.json")
+
+
+def _ml_model_digest(path):
+    """文件内容指纹；不存在给 'MISSING'（删除/新建也算改动，不能悄悄放过）。"""
+    import hashlib
+    try:
+        return hashlib.md5(path.read_bytes()).hexdigest()
+    except (OSError, FileNotFoundError):
+        return "MISSING"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_ml_model_file(tmp_path, monkeypatch):
+    """核对测试没把 ML 模型写进仓库根（或 pytest 的 cwd）。
+
+    v0.45.149。事故：`ml_predictor` 的三对 `save_model/load_model` 默认值是
+    **cwd 相对路径** `"ml_model.json"`，而 `MLPredictionService.train_model()`
+    在训练成功后**无参**调用 `save_model()`，`tests/` 里有 11 处
+    `svc.train_model()` 不传路径 —— 于是**在主 checkout 跑一次 pytest，就用
+    夹具模型覆盖了仓库根的模型文件**。2026-09-07 01:15 实际发生：
+    `n=497 / acc 71.63 / oos 44.35` 被写成 `n=30 / acc 96.67 / oos None`，
+    且后者对 15 组不同输入只吐 1 个值（常数函数）。
+
+    两道防线：
+
+      ① **路径侧**（在生产代码里，不在这个 fixture 里）：默认值改为
+         `ml_predictor.default_model_path()` → `PATHS.home / MODEL_FILENAME`，
+         而 `PATHS.home` 读 `ALPHA_HIVE_HOME`，上面的 `_isolate_env` 已经把它
+         指向 tmp_path。**注意这道防线本来就该罩住模型文件，是那六个裸相对
+         路径默认值从它底下钻了出去** —— 与限流器只覆盖 6/40 个调用点同形。
+         本 fixture 因此在 setup 时**正面核对**这道防线真的生效，而不是再
+         monkeypatch 一遍把问题盖住（盖住了就再也测不出它退化）。
+
+      ② **指纹侧**：teardown 比对真身。兜住任何绕过①的写法 —— 新写的测试
+         硬编码相对路径、subprocess 调 CLI、有人把默认值改回相对字符串。
+         没有②的话，①将来静默失效不会有人知道（CLAUDE.md 硬检查项：
+         「这个失败，下游怎么知道？」）。
+
+    被保护的是**三个**文件，不只是出事的那个：`ml_model_cache.json` 才是生产
+    真正读的那份（`alpha_hive_daily_report` / `generate_ml_report` /
+    `queen_distiller` 三处都显式传它），这次侥幸没被写到，纯粹因为两个写入者
+    恰好用了不同文件名。
+    """
+    try:
+        import ml_predictor as _mp
+    except Exception:  # pragma: no cover - 模块不可得时无需隔离
+        return
+
+    # 真身所在：模块自己的目录。不能用 PATHS.home —— 它已经被 _isolate_env
+    # 指向 tmp 了，拿它找真身等于什么都没查（恒真的守卫）。
+    repo_root = pathlib.Path(_mp.__file__).resolve().parent
+    watched = {repo_root / n for n in _ML_MODEL_FILES}
+    watched |= {pathlib.Path.cwd().resolve() / n for n in _ML_MODEL_FILES}
+    before = {p: _ml_model_digest(p) for p in watched}
+
+    # 防线①的正面核对：默认落盘位置必须落在 tmp 沙箱里。
+    resolved = pathlib.Path(_mp.default_model_path()).resolve()
+    assert resolved.is_relative_to(tmp_path.resolve()), (
+        f"ML 模型默认落盘位置逃出了测试沙箱：{resolved}（沙箱应为 {tmp_path}）。"
+        "多半是 save_model/load_model 的默认值又被改回相对路径，"
+        "或 default_model_path() 被写成了模块级常量（import 时求值 = 冻住旧值）。")
+
+    yield
+
+    touched = sorted(str(p) for p in watched if _ml_model_digest(p) != before[p])
+    assert not touched, (
+        f"测试写到了**仓库根/cwd** 的 ML 模型文件：{touched}。"
+        "默认落盘位置已经全局指向 tmp，还能改到真身说明有绕过它的写入路径"
+        "（硬编码相对路径？subprocess？）——去把那条路径也接到 "
+        "`ml_predictor.default_model_path()` 上，不要在这里放行。")

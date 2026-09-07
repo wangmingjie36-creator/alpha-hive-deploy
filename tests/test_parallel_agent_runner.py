@@ -165,14 +165,31 @@ class TestForceExitSafetyNet:
         assert time.time() - t0 < 1.0, "无卡住线程时不应等待"
 
     def test_function_exists_and_is_wired(self):
-        """必须在 __main__ 里被调用，否则安全网形同虚设"""
+        """必须在 __main__ 里被调用，且**必须把退出码传进去**。
+
+        ⚠️ v0.45.145 把断言从子串改成 AST。原断言是字面量
+        `"_force_exit_if_threads_stuck()" in tail`（空括号），
+        于是给它加一个合法参数就会误红——**子串守卫盯的是写法不是行为**
+        （同 v0.45.140「源码守卫取 AST 别取子串」）。
+
+        顺带加严：`os._exit` 此前硬写 0，会把调用方要传出去的失败
+        （如 ML 概率退化成常数）改写成成功。现在断言实参里带上了退出码，
+        谁把它去掉就红。
+        """
+        import ast
         import alpha_hive_daily_report as m
         assert callable(getattr(m, "_force_exit_if_threads_stuck", None))
         with open(m.__file__, encoding="utf-8") as f:
             src = f.read()
         tail = src[src.rindex('if __name__ == "__main__":'):]
-        assert "_force_exit_if_threads_stuck()" in tail, \
-            "_force_exit_if_threads_stuck 未在 __main__ 中调用"
+        tree = ast.parse(tail.replace('if __name__ == "__main__":', "if True:", 1))
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "_force_exit_if_threads_stuck"]
+        assert calls, "_force_exit_if_threads_stuck 未在 __main__ 中调用"
+        assert any(k.arg == "exit_code" for c in calls for k in c.keywords), (
+            "强退路径必须带上退出码，否则「线程卡死」会把失败改写成成功"
+        )
 
     def test_daemon_threads_are_ignored(self):
         """守护线程不阻止进程退出，不该被计入"""
