@@ -5,6 +5,13 @@
 
 ---
 
+## [0.45.151] — 2026-09-07 — 占位（进行中：`swarm_agents/rival_bee.py:87` 的 `_cat_quality = "B"` —— v0.45.147 同族**最后一处**缺失哨兵选中众数。**本条先量再决定，可能以「不改代码、只登记」收尾。**
+范围＝① 量命中率：`expected_returns` 是闭式 `mag × momentum_5d × scale`，而 `expected_30d` 与 `momentum_5d` 双双落在 803 份生产 `analysis-*-ml-*.json` 里 ⇒ 可**反解**出 rival_bee 当时实际用的 `catalyst_quality`，再与同文件 `pheromone_compact` 里 ChronosBee 的 `s` 经 `catalyst_quality_from_score` 算出的应得等级逐份对照，得出「板上读不到 ChronosBee」的真实命中率（同 v0.45.108 判据：先数生产数据里这个条件历史命中几次，0 或个位数即恒假分支、不值得付代价）；② 若命中率可观，再量 `ml_auxiliary` → `ml_adjustment` → `final_score` 的实际位移幅度；③ 据②决定是否往 **`ic_rerun_readiness._COHORT_HISTORY`** 追加世代边界（**不是** `probability_scorecard._ML_ESTIMATOR_GENERATIONS`，两条是独立测量管道），追加会作废已累积样本，代价实打实；④ 连带处理/登记 `ml_predictor_extended.py` 内第四份 catalyst 编码副本（`SimpleMLModel.encode_catalyst_quality` 的 `.get(quality, 0.5)` 与 `_CATALYST_MAGNITUDE.get(..., 1.0)`）——rival_bee 若开始传 `None`，这两处会静默给合法中性值而非 NaN。
+**不动** `ml_predictor.catalyst_quality_from_score` 的函数契约（v0.45.147 已在其 docstring 记录理由被推翻的证据并声明 rival_bee 依赖它）、**不动** `_prefetched`/训练口径、**不动** `EVALUATION_WEIGHTS`。
+⚠️ 与 v0.45.149 / v0.45.150 **不重叠**（那两条管模型文件路径与求值时机，本条管一个特征的缺失语义）；与 v0.45.147 **同族续集**，会碰 `ml_predictor.py` `catalyst_quality_from_score` 附近的注释，合并时逐块核对）
+
+---
+
 ## [0.45.150] — 2026-09-07 — 占位（进行中：审计 `hive_logger.PATHS.*` 派生路径被求值成**模块级常量 / 类属性**的物种 —— import 那一刻冻住，`conftest.py::_isolate_env` 的 `monkeypatch.setenv("ALPHA_HIVE_HOME")` 对它无效，因为 pytest **收集期**就 import 了模块，那时 fixture 还没跑。先例 v0.45.149 的 `MLEnhancedReportGenerator._model_file` 已证实会让「跑一次全套测试」覆盖生产 `ml_model_cache.json`。范围＝① AST 全仓扫描列清单（预计约 22 处，排除 tests/）；② **逐处实证判定危害等级**（判据＝这个冻住的路径会不会被**写**、写的是不是生产数据；高危：`backtester.DB_PATH` / `MemoryStore.DB_PATH` / `vector_memory.DEFAULT_DB_PATH`；中危：各模块 `CACHE_DIR`/`BASE_DIR`；待判：`config.py` 里那批 `str(...)` 快照 dict）；③ 先数 conftest 里哪些已被针对性 monkeypatch 管住，不重复劳动；④ 高危处改 property/函数（调用时求值）+ **成对**测试（「改 env 路径跟着变」+「跑完测试生产文件指纹未变」）+ mutation check + 核对 `collected N items` 不为 0。⚠️ 与 v0.45.149 **相邻不重叠**：那条管 `ml_predictor.save_model` 的相对路径默认值与加载守卫，本条管 `PATHS.*` 派生值的**求值时机**；两边都可能碰 `conftest.py` 的隔离 fixture，合并时逐块核对。**不动**训练口径、**不动** `_prepare_ml_input`、**不动** `EVALUATION_WEIGHTS`）
 
 ---
