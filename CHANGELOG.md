@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.143] — 2026-09-07 — 占位（进行中：v0.45.140 二次自查——blend_scan 代际计数假警报 + 两套账目对账范围被自己的过滤挡住）
+
 ## [0.45.142] — 2026-09-07 — 占位（进行中：训练侧另一条构建路径 `generate_ml_report._build_real_training_data` 仍在补 5.0；范围＝该函数 vs `ml_predictor.build_training_data_from_db` 的口径合并，含 SQL 口径 / 缺维处理 / momentum 死特征）
 
 ---
