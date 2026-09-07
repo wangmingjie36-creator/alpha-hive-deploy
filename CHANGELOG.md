@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.146] — 2026-09-07 — 占位（进行中：`generate_ml_report._prepare_ml_input` 最后两个常数特征槽 —— `crowding_score`（777/803 恒 50.0）与 `agent_agreement`（恒 0.5）接蜂群同源真值；范围＝服务端这两槽取数 + `_ml_input_missing` 记账 + 成对测试 + `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 追加一条。**不动** `_COHORT_HISTORY`、不动训练端口径、不动 EVALUATION_WEIGHTS。⚠️ 与 v0.45.145 同文件相邻：对方在 `generate_ml_report.py` 批量收尾加唯一值闸，本条改 `_prepare_ml_input` 内部，预期无冲突但合并时需核对）
+
+---
+
 ## [0.45.145] — 2026-09-07 — 占位（进行中：ML 模型退化成常数函数时全线无告警——09-04 全部 12 份 probability 逐位相同 = 0.5899693787928219 仍照常渲染；范围＝当日唯一值闸（放在批量收尾真实调用点，硬错误+非零退出码，不发 Slack）+ ml_model.json 保存时版本快照目录（同 PR 做 git add / REPORT_ARTIFACT_PATHS / _ARTIFACT_PREFIXES 三件事）+ 成对测试与 mutation check；不动 probability_scorecard.py，不动评分权重）
 
 ---
