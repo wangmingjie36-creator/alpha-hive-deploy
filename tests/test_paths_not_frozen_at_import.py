@@ -601,6 +601,45 @@ class TestFileDerivedSpeciesDoesNotSpread:
               "若确实要改（比如该资源真的变成了可写数据），请连同本集合一起改，"
               "并在 CHANGELOG 说明它为什么不再是代码同址资源。")
 
+    @pytest.mark.parametrize("modname,attr", sorted(
+        (f[:-3].replace("/", "."), n) for f, n in MUST_STAY_FILE_ANCHORED))
+    def test_code_anchored_paths_resolve_inside_the_repo(self, modname, attr):
+        """代码同址锚点解出来的东西必须**真的存在**、且**在仓库内**。
+
+        v0.45.170：这条盯的是**值**，前两条盯的是**成员关系**，盲区不一样。
+        成员关系守卫（`MUST_STAY_FILE_ANCHORED` / `KNOWN`）对「仍是 `__file__`
+        派生、只是指错了地方」结构上够不到。全套实测四种指错：
+        `prompt_loader` 指 `prompts_WRONG` / `thesis_breaks` 指 `WRONG.json` /
+        `market_intelligence` 上跳一级 —— 三者被各模块自己的测试接住；
+        而 **`probability_scorecard.ALPHAHIVE_DIR` 上跳一级全套零红**
+        （它只喂 `sys.path.insert`，多一条错路径不影响 import 解析，
+        所以没有任何断言依赖它）。
+
+        判据刻意做成**通用**的，不再列「每项应该指向什么」的表（那又是快照）：
+          · **存在** —— 指向不存在的目录/文件即红（覆盖 `prompts_WRONG` / `WRONG.json`）
+          · **在仓库内** —— 上跳一级会跑到 `…/worktrees/` 去，即红
+        两条合起来把上面四种形态全堵住，且新增条目自动纳入。
+        """
+        import importlib
+        mod = importlib.import_module(modname)
+        raw = getattr(mod, attr)
+        # 少数是 list（如 agent_toolbox.ALLOWED_ROOTS），只查其中落在仓库内的那些
+        vals = raw if isinstance(raw, (list, tuple)) else [raw]
+        checked = 0
+        for v in vals:
+            pth = Path(str(v)).resolve()
+            if isinstance(raw, (list, tuple)) and REPO_ROOT not in pth.parents and pth != REPO_ROOT:
+                continue                       # list 里指向 ~ 之类的项不在本条管辖内
+            checked += 1
+            assert pth.exists(), (
+                f"{modname}.{attr} 指向不存在的位置：{pth}\n"
+                "代码同址资源必须真的在那儿——指错目录/文件名时，"
+                "成员关系守卫看不见（它仍然是 `__file__` 派生）。")
+            assert pth == REPO_ROOT or REPO_ROOT in pth.parents, (
+                f"{modname}.{attr} 解到了**仓库之外**：{pth}\n"
+                f"（仓库根 = {REPO_ROOT}）多一级 `.parent` 就会跑到 worktrees/ 去。")
+        assert checked, f"{modname}.{attr} 没有任何值落在仓库内，本条等于没测"
+
     def test_both_directions_are_guarded(self):
         """元守卫：两个方向的集合不许重叠，也不许有一边空掉。
 
