@@ -5,6 +5,45 @@
 
 ---
 
+## [0.45.169] — 2026-09-08 — CLAUDE.md 四段「硬检查项」被自己违反了开篇第一条
+
+### Changed
+
+CLAUDE.md 开篇「文档分工原则」写着「本文件只存指针与不变式，不存快照」，但
+2026-09-05~07 新增的四段硬检查项（失败传导 / skip 守卫 / 产物默认路径 / iCloud
+重名副本）逐条写成了完整事故复盘：版本表、forensic 细节、反向自证命令全文——
+而这些内容**已经**逐字或更详细地存在于对应的 auto-memory topic 文件里
+（`alpha-hive-failure-propagation.md` / `alpha-hive-test-writes-production.md` /
+`alpha-hive-environment-facts.md`）。CLAUDE.md 的版本只是早期快照，此后
+memory 侧持续追加（v0.45.133/136/150/157/160 等）而 CLAUDE.md 没跟着更新——
+两份说明**开始互相矛盾**（细节数量、结论都对不上），正是本文件自己第一条
+原则要防的那类陈旧误导，只是这次载体从「参数值」换成了「事故叙事」。
+
+四段各压缩成「核心规则 + 一句 why + 判据速览 + 指回 memory 全文」，CLAUDE.md
+526→439 行（含同一 CHANGELOG 周期内合并进来的 v0.45.168 新增段落）。**规则本身
+一个字没删**——「谁会红？」「返回还是抛」等判据、Slack/LLM/GitHub Pages 等硬性
+规则全部原样保留，删的只是已经在别处更完整存在的叙事细节。
+
+顺带修一处真断链：输出模板 C 一节写着「完整规范见 MEMORY.md「📐 深度模式模板C
+规范」章节」，但 grep 遍 auto-memory 目录**这个章节根本不存在**（可能是早年被
+housekeeping 清掉、指针没跟着改）。改指向真正的唯一真相：`generate_ml_report.py`
+的 `_ch1_core_conclusion` ~ `_ch7_tasks` 七个方法。
+
+核对方式：`git grep -n "CLAUDE\.md" --include='*.py'` 确认没有任何生产代码
+真正 `open()` 读取本文件——所有引用都是注释里的规则溯源（提及规则名而非解析
+文件），所以本条重写不影响 alpha-hive-orchestrator.sh 的每日扫描（本来就是
+纯 Python，不调用 Claude CLI，CLAUDE.md 从未参与运行时）。
+
+### 另（不改仓库代码）：auto-memory 侧同步去重
+
+`~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/alpha-hive-user-preferences.md`
+四条里三条（中文对话 / 禁 Opus / CHANGELOG 纪律）与本仓 CLAUDE.md 完全重复且已
+46 天未更新——CLAUDE.md 是 git 跟踪、每 session 自动加载的权威版本，留着重复的
+memory 副本只会两边不同步。已删这三条，只留 CLAUDE.md 里没有的「日期精度硬约束」，
+MEMORY.md 索引行同步改名「日期精度纪律」。另把 `alpha-hive-environment-facts.md`
+里那句「详见项目 CLAUDE.md 同名章节」删掉——CLAUDE.md 那节现在反过来是指回这里
+的摘要，原句方向已倒。
+
 ## [0.45.168] — 2026-09-08 — `__file__` 守卫只防「新增」不防「错删」
 
 ### Fixed
