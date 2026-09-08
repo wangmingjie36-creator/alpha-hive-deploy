@@ -10,6 +10,7 @@ import json
 import argparse
 import contextlib
 import logging
+import math
 import os
 import time
 from datetime import datetime
@@ -157,6 +158,71 @@ def _format_break_condition(cond) -> "str | None":
         label = note or field
         return f"{label}：{expr}" + (f"（{tag}）" if tag else "")
     return None
+
+
+#: `build_agent_votes` 的口径标签，随快照落盘（`ReportSnapshot.agent_votes_source`）。
+VOTES_FROM_AGENT_DETAILS = "agent_details"
+VOTES_UNAVAILABLE = "unavailable"
+
+
+def build_agent_votes(data: dict) -> "tuple[dict, str]":
+    """从一份 `swarm_results[ticker]` 建 `ReportSnapshot.agent_votes`。
+
+    返回 `(votes, source)`。**不读信息素板**（v0.45.164）
+    ------------------------------------------------------
+    旧实现是 `{e["agent_id"]: e["self_score"] for e in ctx.board.snapshot()
+    if e["ticker"] == tk}`，而 `snapshot()` 直接返回 `PheromoneBoard._entries` ——
+    那上面有**两道**减法，且这里两道全中：
+
+      ① 溢出淘汰 `nlargest(MAX_ENTRIES=80, key=(self_score, ...))`，**先扔分最低的**；
+      ② 墙钟过期（`publish` 里 `_age_s >= 3600`）。而本函数的调用点跑在**整轮扫描
+         结束之后**（一轮 ~56 分钟），板的存活状态冻结在最后一次 publish 那一刻。
+
+    后果不是「偶尔少一票」，是**逐蜂的选择效应**：淘汰键就是 `self_score` 本身，
+    于是每只蜂只在自己分数高于自身均值时才被记账（生产实测 BearBee 真均值 3.06、
+    被记录时 6.25）。下游全是拿蜂票对实际收益做相关的估计量
+    （`weekly_optimizer` / `self_analyst` / `feedback_loop.calculate_agent_contribution`），
+    它们回归的自变量被自身取值截断 —— 系数会被伪造出来。量测与影响面见
+    `tests/test_agent_votes_census.py` 模块 docstring。
+
+    `agent_details` 里本来就有每只蜂的分数，无截断、无过期，且就在调用点的
+    `_data` 里。它还**更正确**：CodeExecutorAgent 在 `analyze` 开头无条件发一条
+    `5.0/neutral` 占位（`code_executor_agent.py:75`），溢出淘汰按分留下的恰恰是
+    那个桩，把真实结论挤掉 —— 生产 1024 对里 16 例不一致，**全部**是这一形状。
+
+    `QueenDistiller` 不在 `agent_details` 里（它是**聚合**不是蜂），但它今天确实
+    是 agent_votes 的合法键（生产 300 份里 82 份 = 27.3%），且 `self_analyst` /
+    `paper_portfolio` / `backtest_engine` 三处会读到，故从 `final_score` 补回。
+    本版只改「在不在」，不改「是什么」。
+
+    ⚠️ 取不到 `agent_details` 时**不静默兜底回板**：那会把「这一份退化了」重新
+    渲染成「没退化」。改为返回 `VOTES_UNAVAILABLE`，让口径随快照落盘可查
+    （CLAUDE.md「这个失败，下游怎么知道？」）。
+    """
+    details = (data or {}).get("agent_details") or {}
+    votes = {}
+    for agent_id, det in details.items():
+        score = (det or {}).get("score") if isinstance(det, dict) else None
+        # 坏值直接不记：`or 5.0` 之类兜底会把「没分」伪装成一张中位票，
+        # 而中位票在 agent_vote_correct 里是弃权 —— 两者进的分母不同。
+        # 拒绝路径有三条，缺一条就是一个洞：非数字 / bool（是 int 的子类，
+        # `isinstance(x, int)` 会放它过）/ NaN 与 ±Inf。
+        # `math.isfinite` 一次堵住后两者 —— 只判 `score != score` 接不住 Inf，
+        # 而一个 Inf 票会把下游每个均值/标准差（paper_portfolio 的 dim_std、
+        # weekly_optimizer 的维度命中率）整列毒死。板自己的 `_validate_entry`
+        # 也是 NaN 与 Inf 一起判的，这里与它同口径。
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            continue
+        if not math.isfinite(score):
+            continue
+        votes[str(agent_id)] = float(score)
+
+    final_score = (data or {}).get("final_score")
+    if (isinstance(final_score, (int, float)) and not isinstance(final_score, bool)
+            and math.isfinite(final_score) and final_score > 0):
+        votes["QueenDistiller"] = float(final_score)
+
+    return votes, (VOTES_FROM_AGENT_DETAILS if details else VOTES_UNAVAILABLE)
 
 
 class AlphaHiveDailyReporter:
@@ -1166,11 +1232,14 @@ class AlphaHiveDailyReporter:
                             )
                     except Exception as _shg_e:
                         _log.debug("score_high 守卫计算跳过 (%s): %s", _tk, _shg_e)
-                    _snap.agent_votes = {
-                        e.get("agent_id", ""): e.get("self_score", 5.0)
-                        for e in ctx.board.snapshot()
-                        if e.get("ticker") == _tk
-                    }
+                    # v0.45.164: 不再读 ctx.board.snapshot()。板有 MAX_ENTRIES=80
+                    # 溢出淘汰（先扔分最低的）+ 3600s 墙钟过期，而本循环跑在整轮
+                    # 扫描之后 —— 两道全中，实测 300 份里 8 只蜂齐全的只有 1 份。
+                    # 见 build_agent_votes 的 docstring。
+                    _snap.agent_votes, _snap.agent_votes_source = build_agent_votes(_data)
+                    if _snap.agent_votes_source == VOTES_UNAVAILABLE:
+                        _log.warning("快照 %s：swarm_results 无 agent_details，"
+                                     "agent_votes 仅含聚合票", _tk)
                     # v0.40.0: 横截面排名埋点随快照落盘（供未来 rank-IC 回测）
                     _snap.cs_rank = _data.get("cs_rank")
                     # v0.43.16: 入场价优先复用 swarm 里 ScoutBee 的共享快照价

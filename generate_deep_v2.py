@@ -6959,6 +6959,11 @@ def _save_report_snapshot(ctx: dict, ticker: str, report_date: str, out_dir: Pat
             "GuardBeeSentinel":   float(ctx["guard"].get("score",   0) or 0),
             "BearBeeContrarian":  float(ctx["bear"].get("score",    0) or 0),
         }
+        # v0.45.164: 本路径本来就是普查（直接取 7 只蜂的 ctx，不读信息素板），
+        # 但**口径与日报不同**：无 CodeExecutorAgent、无 QueenDistiller。
+        # 必须自报家门 —— 留空会与「v0.45.164 之前被板截断的历史快照」撞在
+        # 同一个 ""，那正是这个字段要区分的两件事。
+        snap.agent_votes_source = "deep_report_ctx"
         fname = snap.save_to_json(snap_dir)
         print(f"📸 预测快照已保存: {Path(fname).name}")
     except Exception as e:

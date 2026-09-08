@@ -5,7 +5,119 @@
 
 ---
 
-## [0.45.164] — 2026-09-07 — 占位（进行中：agent_votes 改读 agent_details，绕开信息素板 80 条淘汰）
+## [0.45.164] — 2026-09-08 — 逐蜂归因的自变量被自己的取值截断：agent_votes 不再读板
+
+`alpha_hive_daily_report._post_scan_notify` 用 `ctx.board.snapshot()` 过滤 ticker 填
+`ReportSnapshot.agent_votes`。`snapshot()` 直接返回 `PheromoneBoard._entries`，
+而这里**两道减法全中**：
+
+| | 减法 | 为什么这里特别糟 |
+|---|---|---|
+| ① | 溢出淘汰 `nlargest(80, key=(self_score, support_count, pheromone_strength))` | **先扔分最低的** —— 淘汰键就是被记录的那个量 |
+| ② | 墙钟过期（`publish` 里 `_age_s >= 3600`） | 本循环跑在**整轮扫描之后**（一轮 ~56 分钟），板的存活状态冻结在最后一次 publish |
+
+### 量测（生产 `report_snapshots/*.json`，当前世代 30 只 watchlist、2026-08-24 起）
+
+300 份快照里 8 只蜂齐全的只有 **1 份 = 0.3%**，中位 **3 只**。逐蜂缺席率
+BearBee 97.3% / BuzzBee 91.0% / Chronos 83.0% / Scout 81.0% / Rival 68.3% /
+Guard 53.3% / CodeExec 50.0% / Oracle 33.7%。
+
+**关键不是「丢了多少」，是「按什么丢」。** 配对同日 `analysis-*-ml-*.json` 的
+`agent_details`（191 对）：进了 agent_votes 的条目均分 **7.00**(n=503)、被丢掉的
+**4.67**(n=1025)，差 **+2.34**；逐份「幸存均值 − 真均值」为正 **177/178**。
+拆到每只蜂，是**逐蜂的选择效应** —— 每只蜂只在自己分数高于自身均值时才被记账：
+
+    BearBee 真均值 3.06 / 被记录时 6.25（+3.19）· BuzzBee +1.52 · CodeExec +1.22
+    Scout +1.11 · Guard +1.00 · Oracle +0.73 · Chronos +0.72 · Rival +0.16
+
+下游全是拿蜂票对实际收益做相关的估计量，**自变量被自身取值截断** ⇒ 系数是伪造的。
+
+### 下游影响（沙箱重建 622 份可配对快照，两侧同一批文件，差异只来自 agent_votes）
+
+· `weekly_optimizer.compute_new_weights_wls`（n=495）：risk_adj **−4.43pp**、
+  sentiment **+4.32pp**，Σ|Δ| **10.77pp**。两者都越过 `MIN_CHANGE_PP=3.0`
+  ⇒ 在 v0.44.0 改为只读之前，这个偏差**足以真的写进 config.py**。
+  方向尤其刺眼：被压低的正是 sentiment —— 干净口径下唯一有证据的维度。
+· `self_analyst` 逐蜂 rank-IC：**每一只在截断下显得有预测力的蜂都失去了它**。
+  BearBee **+0.239(n=92) → −0.077(n=431)**、Guard +0.092 → −0.006、
+  Buzz +0.068 → −0.030。修好后每只蜂 n 一律 431（此前 92~431 参差，
+  逐蜂 IC 本来就不可横向比较）。
+· `paper_portfolio._infer_confidence`：dim_std 均值 1.067 → 1.539，
+  置信 tier 与旧口径不同 **223/622 = 35.9%**。**这是本版唯一改变生产行为的下游**
+  —— 板此前把蜂群的分歧藏了起来，于是什么都看着像 high confidence；
+  现在更多标的落到 mid（仓位减半）。方向是保守的。
+
+### Fixed
+
+- `alpha_hive_daily_report.py`：新增模块级 `build_agent_votes(data) -> (votes, source)`，
+  从 `swarm_results[ticker]["agent_details"]` 取普查（无截断、无过期，且就在调用点的
+  `_data` 里，生产实测 191/191 份恒有 8 只蜂）。调用点改为它，**不再读板**。
+  `agent_details` 还**更正确**：`agent_details[蜂].score` vs `pheromone_compact.s`
+  逐份对照 **1008 对上 / 16 对不上**，16 条**全部**是 CodeExecutorAgent ——
+  该蜂在 `analyze` 开头无条件发 `5.0/neutral` 占位（`code_executor_agent.py:75`），
+  溢出淘汰按分留下的恰恰是那个**桩**，把真实结论挤掉。
+- 顺带解决 O(n²)：旧实现在**每只标的**的循环里调一次 `ctx.board.snapshot()`
+  （整板序列化）。改后完全不碰板，无需再 hoist。
+
+### Added
+
+- `ReportSnapshot.agent_votes_source`（落盘 + 回读）：`"agent_details"`（日报普查）/
+  `"deep_report_ctx"`（`generate_deep_v2` 的 7 蜂口径，无 CodeExec/Queen）/
+  `"unavailable"`（上游没给 agent_details，并记 warning）。
+  **历史快照没有这个键，回读时不兜底** —— 缺键即「v0.45.164 之前的板截断口径」。
+  把缺键兜成 `"agent_details"` 会把「这一份没验过」渲染成「这一份没问题」。
+- `tests/test_agent_votes_census.py`（22 条）：含三条**夹具反向自证**
+  （灌洪真的触发淘汰 / 丢的确实是低分 / 复现「占位顶掉真实结论」）。
+  ⚠️ 灌洪分是**载荷参数**不是装饰：7.0 会把 CodeExec 两条一起挤掉（测成「整只蜂消失」），
+  只有卡在 2.0~5.0 之间才复现生产那 16 例的形状。
+  ⚠️ 填充条目必须**每条不同 ticker**（衰减是 ticker-scoped，同 ticker 会互相衰减到
+  MIN_STRENGTH 以下，板根本涨不到 MAX_ENTRIES，整组测试假绿）——
+  同 `tests/test_resonance_eviction.py` / `test_guard_census_eviction.py`。
+
+### Changed
+
+- `generate_deep_v2._save_report_snapshot`：补 `agent_votes_source = "deep_report_ctx"`。
+  该路径本来就不读板（直接取 7 只蜂的 ctx），没有截断问题，但键域与日报不同；
+  留空会与「历史截断快照」撞在同一个 `""`，而区分这两件事正是该字段的存在理由。
+
+### 未做 / 边界（各有理由，勿当遗漏）
+
+- **不追加 `ic_rerun_readiness._COHORT_HISTORY` 边界。** 世代边界的语义是
+  「final_score 口径变了，前后样本不可比」，而 agent_votes **到不了 final_score**。
+  三条路径逐一实测（不是推理）：
+  1. `weekly_optimizer` → `config.EVALUATION_WEIGHTS`：`write_requested = args.apply
+     and not args.dry_run`，且 `weight_history.jsonl` **17 条记录里 applied 且非
+     dry_run 的有 0 条**；编排器与 launchd 都不调它。**已断**。
+  2. **本清单此前漏掉的一条**：`alpha_hive_daily_report.py:848` **每轮扫描都跑**
+     `suggest_weight_adjustments()`（读 agent_votes）→ 混进 `adapted` →
+     `AgentWeightManager.apply_dimension_feedback` → memory_store 的 agent 权重表。
+     但 `QueenDistiller` 构造时**没传** `weight_manager`，且 `self.weight_manager`
+     **全仓零读者** ⇒ **死路**（同 MEMORY「死字段：算了没人读」）。
+  3. 真正决定下一轮 `QueenDistiller.DIMENSION_WEIGHTS` 的 `adapt_weights` 读的是
+     `predictions.agent_directions`（来自 `swarm_results[ticker].agent_directions`），
+     **不经过板、不经过 agent_votes**。**不受影响**。
+  ⇒ 明知当前世代样本为 0（追加是免费的）仍不加：加一条假的不可比声明，会误导
+  以后每一个读这份只追加审计轨迹的人。**理由记在这里，免得下次再推一遍。**
+- **不回填 `report_snapshots/` 历史。** 只有 **57.5%**（622/1081）有同日
+  `analysis-*.json` 可重建，而覆盖率**与月份强相关**：2026-04 82.2% / 05 66.8% /
+  **06 仅 9.6%** / 07 34.4% / 08 52.7%。两个消费者都是时间加权的
+  （`weekly_optimizer` 带 `exp(−days/30)`、`self_analyst` 切最近 1/3），
+  部分回填会让「这份有几只蜂投票」变成**日期的代理变量** ——
+  用一个时间结构化的新偏差换掉一个大致平稳的旧偏差，更难察觉。
+  且历史快照是「系统当时真信了什么」的审计轨迹，改写它就再也重放不了旧简报。
+  上面那组下游影响数字**不需要动生产就能拿到**（沙箱副本重建），已拿到。
+- `MAX_ENTRIES` 的值未动；`get_top_signals` 的排行榜语义未动
+  （仍剩 `bear_bee.py:39/512`、`real_data_sources.py:261`、`base.py:85` 三个调用方）。
+  `guard_bee.py:155` 的 `snapshot()` 在 LLM 路径上（本项目禁用），未动。
+  `alpha_hive_daily_report.py:1171` 的 `snapshot()` 是向量记忆（Chroma）另一个消费者，
+  语义不同，未动。
+- `QueenDistiller` 仍留在 agent_votes 里（从 `final_score` 补回）：它今天就是合法键
+  （300 份里 82 份 = 27.3%），`self_analyst` / `paper_portfolio` / `backtest_engine`
+  三处会读到。本版**只改「在不在」，不改「是什么」**。
+  「把聚合值放进蜂群离散度（`_infer_confidence` 的 dim_std）」本身可疑，另案。
+- `finrl_bridge.py:271` 按「出现才 append」建逐蜂特征列表，旧口径下各蜂列表长度
+  8~199 不等且与 `returns_t7` **不对齐**；本版让它们等长，属顺带修好，未单独测。
+
 
 ## [0.45.163] — 2026-09-07 — 拿排行榜当普查用：GuardBee 的窗口 100% 装不下蜂群
 

@@ -178,6 +178,12 @@ class ReportSnapshot:
 
         # Agent 评分
         self.agent_votes = {}  # {"ScoutBeeNova": 8.2, "BuzzBeeWhisper": 7.5, ...}
+        # v0.45.164: agent_votes 的口径来源。历史快照**没有**这个键，而它们正是
+        # 被信息素板截断过的那一批（当前世代 300 份里 8 只蜂齐全的只有 1 份）。
+        # 缺键 ⇒ 旧口径，不要拿它与新快照混算逐蜂 rank-IC。
+        #   "agent_details" —— 从 swarm_results[ticker].agent_details 普查而来（完整）
+        #   "unavailable"   —— 上游没给 agent_details，本份只有 QueenDistiller 或为空
+        self.agent_votes_source = ""
 
         # 使用的权重（从 config 读取，带兜底）
         _fallback_w = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
@@ -258,6 +264,7 @@ class ReportSnapshot:
             "stop_loss": self.stop_loss,
             "entry_price": self.entry_price,
             "agent_votes": self.agent_votes,
+            "agent_votes_source": self.agent_votes_source,
             "weights_used": self.weights_used,
             "low_conviction": self.low_conviction,
             "low_conviction_reason": self.low_conviction_reason,
@@ -286,6 +293,8 @@ class ReportSnapshot:
         snapshot.stop_loss = data.get("stop_loss", 0.0)
         snapshot.entry_price = data.get("entry_price", 0.0)
         snapshot.agent_votes = data.get("agent_votes", {})
+        # 缺键 = v0.45.164 之前的板截断口径（见 __init__ 注释），不兜成 "agent_details"
+        snapshot.agent_votes_source = data.get("agent_votes_source", "")
         snapshot.weights_used = data.get("weights_used", {})
         snapshot.low_conviction = data.get("low_conviction", False)
         snapshot.low_conviction_reason = data.get("low_conviction_reason", "")
