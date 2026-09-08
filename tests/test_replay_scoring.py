@@ -23,24 +23,31 @@ import replay_scoring as rs  # noqa: E402
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _write_predictions_db(path, rows):
+    """rows: (date, ticker, dims dict, p0, close_t7, ambiguous) → 返回 path 字符串。
+
+    v0.45.165 从 `db` fixture 里抽出来：需要**两个**夹具库的测试
+    （`test_cli_power_verdict_tracks_sample_size` 要比较少样本/多样本两种结论）
+    调两次 fixture 会撞同一个 `t.db`，报 "table predictions already exists"。
+    """
+    p = str(path)
+    con = sqlite3.connect(p)
+    con.execute(
+        "CREATE TABLE predictions (date TEXT, ticker TEXT, final_score REAL,"
+        " dimension_scores TEXT, price_at_predict REAL, close_t7 REAL,"
+        " dir_ambiguous_t7 INTEGER, return_t7 REAL)")
+    con.executemany(
+        "INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?)",
+        [(d, t, sum(dims.values()) / len(dims), json.dumps(dims), p0, c7, amb, 999.0)
+         for d, t, dims, p0, c7, amb in rows])
+    con.commit()
+    con.close()
+    return p
+
+
 @pytest.fixture
 def db(tmp_path):
-    def _make(rows):
-        """rows: (date, ticker, dims dict, p0, close_t7, ambiguous)"""
-        p = str(tmp_path / "t.db")
-        con = sqlite3.connect(p)
-        con.execute(
-            "CREATE TABLE predictions (date TEXT, ticker TEXT, final_score REAL,"
-            " dimension_scores TEXT, price_at_predict REAL, close_t7 REAL,"
-            " dir_ambiguous_t7 INTEGER, return_t7 REAL)")
-        con.executemany(
-            "INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?)",
-            [(d, t, sum(dims.values()) / len(dims), json.dumps(dims), p0, c7, amb, 999.0)
-             for d, t, dims, p0, c7, amb in rows])
-        con.commit()
-        con.close()
-        return p
-    return _make
+    return lambda rows: _write_predictions_db(tmp_path / "t.db", rows)
 
 
 def _rows(n_weeks, start="2026-01-05", tickers=("AAA", "BBB"), amb=0):
@@ -89,17 +96,64 @@ class TestPowerHonesty:
         monkeypatch.setattr(sys, "argv", ["replay_scoring.py"])
         assert rs.main() == 3
 
-    def test_cli_prints_power_warning(self):
-        """端到端：真实库跑一次，输出里必须有功效结论。"""
+    def test_cli_prints_power_warning(self, db, tmp_path):
+        """端到端跑一次真 CLI，输出里必须有功效结论。
+
+        v0.45.165 —— 这条此前**在每一台机器上都恒 skip**，包括生产机，
+        而根因和「生产库在不在」毫无关系：
+
+          · CLI 经 `PATHS.db` 解析库位置，`PATHS.db` 读 `ALPHA_HIVE_HOME`
+          · conftest 的 autouse `_isolate_env` 把 `ALPHA_HIVE_HOME` 指向 tmp 沙箱
+          · **子进程继承了这个环境变量** ⇒ 它读的永远是空沙箱库
+          · 于是输出恒为「无可用样本」⇒ `pytest.skip` 恒中 ⇒ 下面两条断言从未求值
+
+        也就是说：**测试隔离泄漏进了子进程**，把一条端到端测试悄悄变成了空转。
+        与 v0.45.157 同一个后果（断言从未被求值），但机制不同 ——
+        那次是 gitignore 的文件只在一台机器上，这次是环境变量穿透进程边界。
+
+        修法照 v0.45.157：依赖由测试自己构造 —— 用 `ALPHA_HIVE_DB_PATH` 把 CLI
+        显式钉到夹具库上（比 `ALPHA_HIVE_HOME` 更直接，绕开沙箱的其他产物），
+        skip 随之升级为断言：库既然是本测试造的，造坏了就必须变红。
+        """
+        env = dict(os.environ)
+        env["ALPHA_HIVE_DB_PATH"] = db(_rows(8))     # 8 个不重叠周 < 25 ⇒ 功效不足
         out = subprocess.run(
             [sys.executable, os.path.join(_ROOT, "replay_scoring.py"), "--all-cohorts"],
-            capture_output=True, text=True, timeout=180, cwd=_ROOT)
+            capture_output=True, text=True, timeout=180, cwd=_ROOT, env=env)
         combined = out.stdout + out.stderr
-        if "无可用样本" in combined:
-            pytest.skip("生产库无到期样本")
+
+        # 正面核对夹具真的接上了 —— 少了这句，`ALPHA_HIVE_DB_PATH` 将来改名
+        # 或被内联，CLI 会静默退回读别的库，本条又变回空转（同 v0.45.157 的
+        # 「断言要成对」：「没读生产库」必须配「确实读到了夹具库」）。
+        assert "无可用样本" not in combined, (
+            f"CLI 没读到夹具库 —— ALPHA_HIVE_DB_PATH 这条钩子没打中。输出：\n{combined[:600]}"
+        )
         assert ("功效不足" in combined) or ("达到检出" in combined), \
             "输出未给出功效结论，IC 会被当成可直接采信的数字"
         assert "不重叠" in combined
+
+    def test_cli_power_verdict_tracks_sample_size(self, tmp_path):
+        """配对的另一半：样本够多时必须给出**另一个**结论，不是同一句话。
+
+        只验「功效不足」会被一个恒输出该字样的实现骗过 —— 那正是本文件
+        `test_main_actually_uses_patched_db` 那条元守卫要防的形状，
+        只不过这次防的是「结论有没有真的随样本量变化」。
+        """
+        def verdict(n_weeks):
+            env = dict(os.environ)
+            env["ALPHA_HIVE_DB_PATH"] = _write_predictions_db(
+                tmp_path / f"w{n_weeks}.db", _rows(n_weeks))
+            o = subprocess.run(
+                [sys.executable, os.path.join(_ROOT, "replay_scoring.py"),
+                 "--all-cohorts"],
+                capture_output=True, text=True, timeout=180, cwd=_ROOT, env=env)
+            return o.stdout + o.stderr
+
+        few, many = verdict(8), verdict(40)
+        assert "无可用样本" not in few and "无可用样本" not in many, "夹具没接上"
+        assert "功效不足" in few, f"8 个不重叠周应判功效不足：\n{few[:400]}"
+        assert "功效不足" not in many, (
+            f"40 个不重叠周仍报功效不足 —— 结论没有随样本量变化：\n{many[:400]}")
 
 
 class TestCohortDefault:

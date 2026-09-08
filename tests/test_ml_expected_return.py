@@ -162,6 +162,7 @@ class TestCrowdingStaysOutOfExpectedReturns:
             assert math.isfinite(out)
 
 
+@pytest.mark.integration   # 读生产 pheromone.db —— 条件性写在 marker 上，不写进 skip
 class TestCrowdingCalibrationDrift:
     """`CROWDING_NEUTRAL` 是**经验常数**，会过期。
 
@@ -179,14 +180,24 @@ class TestCrowdingCalibrationDrift:
     ⚠️ 为什么容许带这么宽（±40%）：这是**过期告警**，不是精度断言。
     目的是在常数明显失配时吵醒人，而不是每次小幅漂移就红。
 
-    本组读生产库，数据不足时 skip。
+    v0.45.165：本组核对的是**生产分布本身**（常数还跟不跟得上实测中位），
+    换夹具就测不到它要测的东西 —— 所以不补桩，改标 `@pytest.mark.integration`：
+    条件性写在 marker 上（默认输出里是 `N deselected`），不藏在一条默认执行时
+    静默跳过的 skip 里。`pheromone.db` 命中 `.gitignore` 的 `*.db`，
+    旧写法在干净检出与 CI 上恒 skip —— 断言从未被求值过。
+
+    ⚠️ 纯常数钉桩那半条（「别把 CROWDING_NEUTRAL 改回 50」）已拆到
+    `TestCrowdingNeutralIsNotScaleMidpoint`，它不需要任何生产数据，无条件跑。
     """
 
     PROD_DB = Path(__file__).resolve().parent.parent / "pheromone.db"
 
     def _crowding_scores(self):
-        if not self.PROD_DB.exists():
-            pytest.skip("生产 pheromone.db 不存在")
+        # 只有 `-m integration` 显式选中才走到这里 —— 缺库即判红，不跳过。
+        assert self.PROD_DB.exists(), (
+            f"生产 pheromone.db 不在 {self.PROD_DB} —— 本组核对生产分布，"
+            "已标 @pytest.mark.integration（默认排除）；显式选中却没有库就该红。"
+        )
         con = sqlite3.connect(f"file:{self.PROD_DB}?mode=ro", uri=True)
         try:
             rows = [v for (v,) in con.execute(
@@ -202,8 +213,11 @@ class TestCrowdingCalibrationDrift:
             raise
         finally:
             con.close()
-        if len(rows) < 100:
-            pytest.skip(f"crowding.score 样本不足（{len(rows)}）")
+        # 实测生产库 1356 条。低于 100 不是「样本还不够」，是收录断了。
+        assert len(rows) >= 100, (
+            f"crowding.score 只有 {len(rows)} 条（地板 100）—— signal_archive "
+            "很可能已停止收录它，CROWDING_NEUTRAL 的漂移将无从观测。"
+        )
         return sorted(float(v) for v in rows)
 
     def test_neutral_still_tracks_observed_median(self):
@@ -217,10 +231,15 @@ class TestCrowdingCalibrationDrift:
             f"重标方式见 ml_predictor.py 的长注释。"
         )
 
-    def test_scale_midpoint_50_would_be_wrong(self):
-        """钉住"为什么不用 50"这个判断本身。
+    def test_observed_distribution_still_makes_50_a_bad_fallback(self):
+        """选择理由的**数据侧**：≥50 的占比必须仍然很小。
 
-        若将来有人把回落值改回量表中点 50，这条会红并给出实测占比。
+        v0.45.165 拆分说明：本条原名 `test_scale_midpoint_50_would_be_wrong`，
+        同时挂着两句断言 —— 一句要生产数据（这句），一句是纯常数钉桩
+        （`abs(CROWDING_NEUTRAL - 50) > 5`，不需要任何数据）。两句挂在一起，
+        意味着**纯常数那句也跟着在 CI 上恒不执行**：有人把常数改回 50，
+        没有任何东西会红。现已拆走，见
+        `TestCrowdingNeutralIsNotScaleMidpoint::test_not_reverted_to_scale_midpoint`。
         """
         v = self._crowding_scores()
         ge50 = sum(1 for x in v if x >= 50.0) / len(v)
@@ -228,10 +247,23 @@ class TestCrowdingCalibrationDrift:
             f"实测 ≥50 的占比 {ge50:.1%} —— 若已接近半数，"
             f"CROWDING_NEUTRAL 的选择理由（50 在此分布里代表极不拥挤）需重新评估"
         )
+
+
+class TestCrowdingNeutralIsNotScaleMidpoint:
+    """钉住"为什么不用 50"这个**判断本身** —— 零外部依赖，任何环境都跑。
+
+    从 `TestCrowdingCalibrationDrift` 拆出来（v0.45.165）。原先它和一句读生产库的
+    断言同处一条测试，于是被生产库的 skip 连坐，在干净检出与 CI 上从未求值 ——
+    「谁会红？」的答案曾是「没人」。这条断言只看常数，不看数据，没有任何理由
+    跟着生产库走。
+    """
+
+    def test_not_reverted_to_scale_midpoint(self):
         assert abs(mp.CROWDING_NEUTRAL - 50.0) > 5.0, (
-            "CROWDING_NEUTRAL 被改回量表中点 50 附近 —— "
-            f"但实测只有 {ge50:.1%} 的样本 ≥50，50 在此分布里代表极不拥挤，"
-            "用它作回落值会让降级悄悄变成偏斜"
+            f"CROWDING_NEUTRAL 被改回量表中点 50 附近（当前 {mp.CROWDING_NEUTRAL}）—— "
+            "但 2026-08-16 实测只有 4.6% 的样本 ≥50，50 在此分布里代表极不拥挤，"
+            "用它作回落值会让降级悄悄变成偏斜。实测占比由 "
+            "TestCrowdingCalibrationDrift（-m integration）持续核对。"
         )
 
 

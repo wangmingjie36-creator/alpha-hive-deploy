@@ -107,6 +107,24 @@
 
 与上一节同源：`skip` 把「这条没验」渲染成「这条没问题」，都答不出「谁会红？」。实测案例（`TestSPYBenchmarkUnavailable`/`pheromone.db`）+ WAL 边车取证陷阱见 auto-memory `alpha-hive-failure-propagation.md`。
 
+v0.45.165 普查全仓（20 条，5 个文件）后补三条：
+
+1. **模块级 `pytestmark = skipif(...)` 会连坐**整个文件，包括与该条件毫无关系的测试。
+   实测最刺眼的一处：`TestGuardsHaveTeeth`（纯合成数据、零外部依赖，docstring 写着
+   「没有这一组，本文件的全绿证明不了任何事」）跟着一起恒 skip ——
+   **证明守卫有牙的那把尺子，自己从未被拿出来过。** 条件性要挂在**用到它的那个类**上。
+2. **「数一数还有多少条挂在同一个 X 上」要按后果数，不能按 token 数。** 同样的恒 skip
+   还能由**测试隔离泄漏进子进程**造出来：`_isolate_env` 把 `ALPHA_HIVE_HOME` 指向沙箱，
+   `subprocess.run(..., cwd=_ROOT)` 继承了它 ⇒ CLI 永远读空库 ⇒ 输出恒为「无可用样本」
+   ⇒ skip 恒中，**在每一台机器上，生产机也不例外**。那条测试里一个产物名 token 都没有。
+3. **判据不是「不许 skip」，是「谁会红？」。** 反例：`git check-ignore` 返回 128 时
+   skip 是正当的 —— 「git 仓库在哪些环境里存在」答「开发检出/worktree/CI 全都是」，
+   条件为真的是全集减一个人造特例。⚠️ 顺带：`git check-ignore` 退出码有**三**个含义
+   （0=忽略 / 1=未忽略 / **128=这里不是 git 仓库**），把 128 揉进另外两个就是
+   「把一种失败误报成另一种」，正是本节要治的形状。
+
+守卫落地在 `tests/test_no_invisible_prod_data_skips.py`（元守卫，命中即红）。
+
 ## 硬检查项：新产物的默认路径不许是相对路径（2026-09-07 起）
 
 给任何会落盘的产物写默认位置前，先回答一句：
