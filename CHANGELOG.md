@@ -5,6 +5,82 @@
 
 ---
 
+## [0.45.168] — 2026-09-08 — 占位（进行中：`__file__` 守卫只防「新增」不防「错删」—— 反向 mutination 实测 **4/5 全绿**。v0.45.160 判定「这 11 处应保留 `__file__`」（模板 / prompt / `sys.path.insert` / `git -C` / 随代码发布的只读配置——它们指向**代码**不是数据，改成 `PATHS.home` 后测试把 HOME 指向 tmp 就找不到文件），但 `TestFileDerivedSpeciesDoesNotSpread.KNOWN` 是**子集语义**：只对新增冻结路径变红，对「把该留的错误清掉」一声不响。实测把 `prompt_loader._PROMPTS_DIR` / `thesis_breaks._CONFIG_JSON_PATH` / `market_intelligence._BASE` / `probability_scorecard.ALPHAHIVE_DIR` / `collect_data._SCRIPT_DIR` 改成 `PATHS.home` ⇒ **全绿**，只有 `dashboard_renderer._TPL_DIR` 因为它的测试真去读 CSS 才红 4 条。范围＝① 加**超集**语义守卫 `MUST_STAY_FILE_ANCHORED`（11 处必须仍是 `__file__` 派生）+ 元守卫（两方向集合不许重叠/空）；② 反向 mutation 复验 5/5 变红；③ **CLAUDE.md 只加不变式与指针，不加那 11 条清单**——清单是快照，违反本文件开篇第一条，且本 session 实测这类白名单几小时内过期两次。⚠️ **不动**生产代码、**不动** `KNOWN` 白名单内容）
+
+---
+
+## [0.45.167] — 2026-09-08 — 索引行长到装不下：删之前得先证明「topic 文件里已经有了」
+
+**本条不改仓库代码**，改的是 `~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/`
+下的 Auto Memory。记在这里是因为教训里有两条直接适用于本仓的日常操作。
+
+### Fixed
+
+`MEMORY.md` **46,609 → 22,639 字节**（限额 24.4KB 的 191% → 91%），
+harness 此前每个 session 只加载其中一部分 —— **召回在静默退化**，而索引行本身
+长得像正常内容，没有任何地方会红。根因是索引条目从"指针"长成了"摘要"：
+四条最长的（`silent-degradation` 含换行续行 17,528 B、`test-writes-production` 4,979 B、
+`constant-model-days` 3,808 B、`probability-scorecard` 1,900 B）压成 800~1,362 B 的密集指针。
+压缩前**逐条核对内容已在对应 topic 文件里**，缺的先补进去再删。
+
+### Added
+
+补进 topic 文件（原先只在索引行里、删了就没了）：
+- `silent-degradation.md`：CI 落点 `.github/workflows/tests.yml` + 选择集
+  `-m "not integration and not network"`（与 v0.45.129 的 `-m "network and not integration"`
+  是相反的两档）；以及 **v0.45.94 注释里「PAT 没有 workflow scope」实测不成立** ——
+  一条从未验证就被当成约束的假设，同 v0.45.75「证伪了但代码里没改」。
+- `silent-degradation.md`：v0.45.127 的具体落点（`permutation_importance` 是七条重测试的
+  唯一慢源；类级 `pytestmark` 在 `TestMLPredictionService`、方法级在 `TestIncrementalTrainingLoop`）。
+- `probability-scorecard.md`：两张世代表的区分 + `[[alpha-hive-train-serve-skew]]` 链接。
+- `locked-tasks.md`：补 `v0.43.9` 版本号（此前只在索引行里）。
+
+### Changed
+
+`weight-learning-loop.md` 的 `[[weekly_optimizer.py:461-504]]` 改成普通 code span ——
+它是代码引用不是记忆链接，挂在 wiki 语法里等于一条恒久悬空的链。
+
+### 教训一：检测器不自证，「0 missing」可能是它没看
+
+写了个脚本核对「索引行里的版本号/标识符是不是都在 topic 文件里」，
+**先拿 canary 反向自证，当场抓出脚本自己的 bug**：版本正则写死 `v?0\.4\d+\.\d+`，
+canary `v0.99.999` 落在域外 ⇒ 提取到 0 个 token ⇒ 报告「0 missing」。
+不自证的话，这份"全绿"是正则没看，不是真没缺。
+⇒ 同 v0.45.124 socket 探针、v0.45.157 skip 守卫：**检测器和被检测对象一样需要一个会红的理由**。
+
+反向也栽了一次：`grep -c "PAT"` 命中 3 次，看着像已覆盖，
+**三次全在 `REPORT_ARTIFACT_PATHS` 里** —— 唯一真缺的那条差点被判成已覆盖。
+⇒ **子串命中不等于概念覆盖**，短 token 要么加边界要么读命中处那句话。
+
+### 教训二：`set -e` 在本环境的 zsh 下没有阻断，一个 assert 失败后 `git push` 照跑
+
+占号时写了 `cd … && set -euo pipefail`，脚本里 Python 的
+`assert '0.45.165' not in ...` **失败了**，但后续步骤**继续执行**，
+把一个空提交推上了 main（`3b1216b`，tree 与父 `bd004f7` 逐字节相同、
+不含任何 heading，因此 CHANGELOG 内容未受污染，只是历史里多一条错号的空提交；
+0.45.165 属先提交者 `bd004f7`，`8b74e92` 那位同伴已让号到 166）。
+⇒ 与 v0.45.121「一条失败的编辑后面挂了无条件 `git commit`」**同一物种，第二次**。
+⇒ **修法不是再写一遍 `set -e`，是把 fail-fast 交给会抛的语言**：
+改用 Python + `subprocess.run(check=True)`，并在 push 前加三道断言
+（tree 必须不等于父 tree、`--name-only` 必须恰好是 `CHANGELOG.md`、push 后 re-fetch 核对
+`origin/main` 确实等于本次 commit）。
+
+### 教训三：worktree 之间共享 remote-tracking ref，占号必须是一个原子步骤
+
+读 `origin/main:CHANGELOG.md` 拿到「下一个可用号 165」，
+到下一条命令 `git rev-parse origin/main` 时**号已经过期** ——
+中间我没有 fetch，是**另一个 worktree 的 session fetch 了**：
+`refs/remotes/` 在 common `.git` 目录里，**19 个 worktree 共用一份**。
+⇒ CLAUDE.md 的占号协议要补一句：**fetch → 算号 → 提交 → 推送必须在同一个原子步骤里完成**，
+中间隔着别的工具调用，读到的号就可能已被推进。
+
+### 核对
+
+42 条索引指针全部解析成功；40 个 topic 文件**每个都仍有指针**（无孤儿）；
+40 份 frontmatter `---\nname:` 全部完整；悬空 `[[wiki]]` 链 0 条；
+索引行里出现的版本号 100% 能在其 topic 文件中找到。
+原始 `MEMORY.md` 备份在本次 session 的 scratchpad。
+
 ## [0.45.166] — 2026-09-08 — 两张世代登记表都写着「只追加，不改写」，而没有任何东西执行这句话
 
 （占号 09-07，落地 09-08。不改任何生产代码，只加守卫。）
@@ -93,7 +169,7 @@ M6 也补上了 v0.45.161 记的另一个盲区：**「改了测试」要单独�
 
 全套 **3763 passed / 1 failed**（15 skipped / 64 deselected / 1 xfailed），唯一的红是 `TestCoverageHorizon`
 ——CLAUDE.md 写明「2026-09-06 起陆续变红是设计意图」的 BLS 日历闸，非回归。
-`ruff` 改动的两个文件 `All checks passed!`，全仓 46 与基线相等、零新增。
+`ruff` 全仓 46；**零新增的直接证据是改动的两个文件 `All checks passed!`** —— 全仓数与 v0.45.162 实测同为 46，但那期间并入了别的 session 的代码，所以「相等」只是旁证，不作为判据。
 **两张表的内容一条都没加没改**，`cohort_start` / `ml_estimator_generation`
 的取值逻辑未动，无任何评分行为变化。
 
