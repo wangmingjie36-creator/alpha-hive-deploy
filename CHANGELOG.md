@@ -5,7 +5,65 @@
 
 ---
 
-## [0.45.168] — 2026-09-08 — 占位（进行中：`__file__` 守卫只防「新增」不防「错删」—— 反向 mutination 实测 **4/5 全绿**。v0.45.160 判定「这 11 处应保留 `__file__`」（模板 / prompt / `sys.path.insert` / `git -C` / 随代码发布的只读配置——它们指向**代码**不是数据，改成 `PATHS.home` 后测试把 HOME 指向 tmp 就找不到文件），但 `TestFileDerivedSpeciesDoesNotSpread.KNOWN` 是**子集语义**：只对新增冻结路径变红，对「把该留的错误清掉」一声不响。实测把 `prompt_loader._PROMPTS_DIR` / `thesis_breaks._CONFIG_JSON_PATH` / `market_intelligence._BASE` / `probability_scorecard.ALPHAHIVE_DIR` / `collect_data._SCRIPT_DIR` 改成 `PATHS.home` ⇒ **全绿**，只有 `dashboard_renderer._TPL_DIR` 因为它的测试真去读 CSS 才红 4 条。范围＝① 加**超集**语义守卫 `MUST_STAY_FILE_ANCHORED`（11 处必须仍是 `__file__` 派生）+ 元守卫（两方向集合不许重叠/空）；② 反向 mutation 复验 5/5 变红；③ **CLAUDE.md 只加不变式与指针，不加那 11 条清单**——清单是快照，违反本文件开篇第一条，且本 session 实测这类白名单几小时内过期两次。⚠️ **不动**生产代码、**不动** `KNOWN` 白名单内容）
+## [0.45.168] — 2026-09-08 — `__file__` 守卫只防「新增」不防「错删」
+
+### Fixed
+
+v0.45.160 判定**这 11 处应当保留 `__file__`**（模板 / prompt / `sys.path.insert` /
+`git -C <仓库>` / 随代码发布的只读配置 —— 它们指向**代码**不是数据，改成
+`PATHS.home` 后测试把 `ALPHA_HIVE_HOME` 指向 tmp 就**找不到文件**）。
+但承载这个判定的 `TestFileDerivedSpeciesDoesNotSpread.KNOWN` 是**子集语义**：
+只对「新增冻结路径」变红，**对「把该留的错误清掉」一声不响。**
+
+#### 反向 mutation 实测：4/5 全绿
+
+把「应保留」的处**错误地**改成 `PATHS.home`，看现有测试会不会红：
+
+| 站点 | 改前守卫 | 
+|---|---|
+| `prompt_loader._PROMPTS_DIR`（prompts/） | ❌ 全绿 |
+| `thesis_breaks._CONFIG_JSON_PATH`（只读配置） | ❌ 全绿 |
+| `market_intelligence._BASE`（只读配置） | ❌ 全绿 |
+| `probability_scorecard.ALPHAHIVE_DIR`（`sys.path`） | ❌ 全绿 |
+| `collect_data._SCRIPT_DIR`（环境探测） | ❌ 全绿 |
+| `dashboard_renderer._TPL_DIR`（templates/） | ✅ 红 4 条（它的测试真去读 CSS） |
+
+⇒ **在此之前「错误清理」这件事没有任何东西会发现**，只有恰好被别的测试
+间接覆盖的那一处例外。
+
+### Added
+
+- `MUST_STAY_FILE_ANCHORED`（11 处）+ `test_code_anchored_paths_were_not_wrongly_converted`：
+  **超集**语义 —— 断言这些站点**仍然**是 `__file__` 派生。
+  与 `KNOWN`（子集：防新增）是**两个方向，缺一不可**。
+- `test_both_directions_are_guarded`：元守卫 —— 两方向集合不许重叠、不许有一边空掉
+  （空掉 ⇒ 那个方向恒真）。
+
+### 验证
+
+- 反向 mutation **5/5 全部变红**（改前同样 5 处是 4 绿 1 红）。
+- 全量：`1 failed`（设计使然的 `TestCoverageHorizon`）/ **3726 passed**。零回归。
+- 守卫文件 56 → **58** 项。
+
+### 教训
+
+**「子集语义防漂移」只防了一个方向。** v0.45.160 的教训 4 记的是「白名单会悄悄
+过期」（清干净了也不红），但**同一个子集语义还有第二个盲区：它也不防错删**。
+两者根子相同 —— 子集断言只约束「集合别变大」，对「变小」和「内容被换掉」都无话可说。
+⇒ **写白名单时问一句：我怕的是它变大，还是也怕它变小？** 怕两头就要两条断言。
+
+⚠️ **这 11 条清单该待在测试里，不在 CLAUDE.md。**（用户提过把它写进 CLAUDE.md
+硬检查项，分析后未采纳，理由记此：）
+1. CLAUDE.md 开篇第一条就是「**只存指针与不变式，不存快照**」，并附了
+   v0.19 参数快照停留数月、误导每个新 session 的教训。11 条 `文件:名字` 正是快照。
+2. 本 session 实测这类白名单**几小时内过期两次**
+   （`generate_ml_report._model_file` / `paper_portfolio.BASE_DIR` +
+   `economic_calendar_watch._STATE_PATH`）。
+3. **CLAUDE.md 不会被执行。** 项目反复记过的判据是「把已知缺陷写成会失效的断言，
+   比写进注释可靠」——同一份清单存两处，迟早有一处说谎。
+
+CLAUDE.md 里该加的是**不变式 + 指针**（判据「路径指向代码还是数据」
++ 指向这两个集合），已单独加为一节，不含清单。
 
 ---
 
