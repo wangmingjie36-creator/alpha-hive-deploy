@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.168] — 2026-09-08 — 占位（进行中：`__file__` 守卫只防「新增」不防「错删」—— 反向 mutination 实测 **4/5 全绿**。v0.45.160 判定「这 11 处应保留 `__file__`」（模板 / prompt / `sys.path.insert` / `git -C` / 随代码发布的只读配置——它们指向**代码**不是数据，改成 `PATHS.home` 后测试把 HOME 指向 tmp 就找不到文件），但 `TestFileDerivedSpeciesDoesNotSpread.KNOWN` 是**子集语义**：只对新增冻结路径变红，对「把该留的错误清掉」一声不响。实测把 `prompt_loader._PROMPTS_DIR` / `thesis_breaks._CONFIG_JSON_PATH` / `market_intelligence._BASE` / `probability_scorecard.ALPHAHIVE_DIR` / `collect_data._SCRIPT_DIR` 改成 `PATHS.home` ⇒ **全绿**，只有 `dashboard_renderer._TPL_DIR` 因为它的测试真去读 CSS 才红 4 条。范围＝① 加**超集**语义守卫 `MUST_STAY_FILE_ANCHORED`（11 处必须仍是 `__file__` 派生）+ 元守卫（两方向集合不许重叠/空）；② 反向 mutation 复验 5/5 变红；③ **CLAUDE.md 只加不变式与指针，不加那 11 条清单**——清单是快照，违反本文件开篇第一条，且本 session 实测这类白名单几小时内过期两次。⚠️ **不动**生产代码、**不动** `KNOWN` 白名单内容）
+
+---
+
 ## [0.45.167] — 2026-09-08 — 索引行长到装不下：删之前得先证明「topic 文件里已经有了」
 
 **本条不改仓库代码**，改的是 `~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/`
