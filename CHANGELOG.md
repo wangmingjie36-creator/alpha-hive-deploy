@@ -167,7 +167,7 @@ M6 也补上了 v0.45.161 记的另一个盲区：**「改了测试」要单独�
 
 ### 验证
 
-全套 **3763 passed / 1 failed**（15 skipped / 64 deselected / 1 xfailed），唯一的红是 `TestCoverageHorizon`
+全套 **3765 passed / 1 failed**（15 skipped / 64 deselected / 1 xfailed）——此为**并入 v0.45.167/168 之后**重跑的数；合并前为 3763，差的 2 项来自并发 session，唯一的红是 `TestCoverageHorizon`
 ——CLAUDE.md 写明「2026-09-06 起陆续变红是设计意图」的 BLS 日历闸，非回归。
 `ruff` 全仓 46；**零新增的直接证据是改动的两个文件 `All checks passed!`** —— 全仓数与 v0.45.162 实测同为 46，但那期间并入了别的 session 的代码，所以「相等」只是旁证，不作为判据。
 **两张表的内容一条都没加没改**，`cohort_start` / `ml_estimator_generation`
