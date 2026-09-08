@@ -5,7 +5,77 @@
 
 ---
 
-## [0.45.167] — 2026-09-08 — 占位（进行中：MEMORY.md 索引条目压缩回 24.4KB 限额内）
+## [0.45.167] — 2026-09-08 — 索引行长到装不下：删之前得先证明「topic 文件里已经有了」
+
+**本条不改仓库代码**，改的是 `~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/`
+下的 Auto Memory。记在这里是因为教训里有两条直接适用于本仓的日常操作。
+
+### Fixed
+
+`MEMORY.md` **46,609 → 22,639 字节**（限额 24.4KB 的 191% → 91%），
+harness 此前每个 session 只加载其中一部分 —— **召回在静默退化**，而索引行本身
+长得像正常内容，没有任何地方会红。根因是索引条目从"指针"长成了"摘要"：
+四条最长的（`silent-degradation` 含换行续行 17,528 B、`test-writes-production` 4,979 B、
+`constant-model-days` 3,808 B、`probability-scorecard` 1,900 B）压成 800~1,362 B 的密集指针。
+压缩前**逐条核对内容已在对应 topic 文件里**，缺的先补进去再删。
+
+### Added
+
+补进 topic 文件（原先只在索引行里、删了就没了）：
+- `silent-degradation.md`：CI 落点 `.github/workflows/tests.yml` + 选择集
+  `-m "not integration and not network"`（与 v0.45.129 的 `-m "network and not integration"`
+  是相反的两档）；以及 **v0.45.94 注释里「PAT 没有 workflow scope」实测不成立** ——
+  一条从未验证就被当成约束的假设，同 v0.45.75「证伪了但代码里没改」。
+- `silent-degradation.md`：v0.45.127 的具体落点（`permutation_importance` 是七条重测试的
+  唯一慢源；类级 `pytestmark` 在 `TestMLPredictionService`、方法级在 `TestIncrementalTrainingLoop`）。
+- `probability-scorecard.md`：两张世代表的区分 + `[[alpha-hive-train-serve-skew]]` 链接。
+- `locked-tasks.md`：补 `v0.43.9` 版本号（此前只在索引行里）。
+
+### Changed
+
+`weight-learning-loop.md` 的 `[[weekly_optimizer.py:461-504]]` 改成普通 code span ——
+它是代码引用不是记忆链接，挂在 wiki 语法里等于一条恒久悬空的链。
+
+### 教训一：检测器不自证，「0 missing」可能是它没看
+
+写了个脚本核对「索引行里的版本号/标识符是不是都在 topic 文件里」，
+**先拿 canary 反向自证，当场抓出脚本自己的 bug**：版本正则写死 `v?0\.4\d+\.\d+`，
+canary `v0.99.999` 落在域外 ⇒ 提取到 0 个 token ⇒ 报告「0 missing」。
+不自证的话，这份"全绿"是正则没看，不是真没缺。
+⇒ 同 v0.45.124 socket 探针、v0.45.157 skip 守卫：**检测器和被检测对象一样需要一个会红的理由**。
+
+反向也栽了一次：`grep -c "PAT"` 命中 3 次，看着像已覆盖，
+**三次全在 `REPORT_ARTIFACT_PATHS` 里** —— 唯一真缺的那条差点被判成已覆盖。
+⇒ **子串命中不等于概念覆盖**，短 token 要么加边界要么读命中处那句话。
+
+### 教训二：`set -e` 在本环境的 zsh 下没有阻断，一个 assert 失败后 `git push` 照跑
+
+占号时写了 `cd … && set -euo pipefail`，脚本里 Python 的
+`assert '0.45.165' not in ...` **失败了**，但后续步骤**继续执行**，
+把一个空提交推上了 main（`3b1216b`，tree 与父 `bd004f7` 逐字节相同、
+不含任何 heading，因此 CHANGELOG 内容未受污染，只是历史里多一条错号的空提交；
+0.45.165 属先提交者 `bd004f7`，`8b74e92` 那位同伴已让号到 166）。
+⇒ 与 v0.45.121「一条失败的编辑后面挂了无条件 `git commit`」**同一物种，第二次**。
+⇒ **修法不是再写一遍 `set -e`，是把 fail-fast 交给会抛的语言**：
+改用 Python + `subprocess.run(check=True)`，并在 push 前加三道断言
+（tree 必须不等于父 tree、`--name-only` 必须恰好是 `CHANGELOG.md`、push 后 re-fetch 核对
+`origin/main` 确实等于本次 commit）。
+
+### 教训三：worktree 之间共享 remote-tracking ref，占号必须是一个原子步骤
+
+读 `origin/main:CHANGELOG.md` 拿到「下一个可用号 165」，
+到下一条命令 `git rev-parse origin/main` 时**号已经过期** ——
+中间我没有 fetch，是**另一个 worktree 的 session fetch 了**：
+`refs/remotes/` 在 common `.git` 目录里，**19 个 worktree 共用一份**。
+⇒ CLAUDE.md 的占号协议要补一句：**fetch → 算号 → 提交 → 推送必须在同一个原子步骤里完成**，
+中间隔着别的工具调用，读到的号就可能已被推进。
+
+### 核对
+
+42 条索引指针全部解析成功；40 个 topic 文件**每个都仍有指针**（无孤儿）；
+40 份 frontmatter `---\nname:` 全部完整；悬空 `[[wiki]]` 链 0 条；
+索引行里出现的版本号 100% 能在其 topic 文件中找到。
+原始 `MEMORY.md` 备份在本次 session 的 scratchpad。
 
 ## [0.45.166] — 2026-09-07 — 占位（进行中：两张世代登记表都挡不住「少了一条」。起因是同伴 session 把我 v0.45.161 那条判据推进了一层：**枚举驱动优于名单驱动，但枚举本身要钉最小集合** —— 让目标不再被枚举到时，参数化用例会**消失**而不是变红，`collected` 少一条、零 FAILED。拿它测自己当场中：删掉 `_ML_ESTIMATOR_GENERATIONS` **最新**一条 ⇒ 42 passed 零红（删**最早**一条会红，因为循环前钉了两个日期，但那对断言只夹住第一条边界，之后追加的每一代都未钉，而未钉的恰是**会增长的那头**）；兄弟表 `ic_rerun_readiness._COHORT_HISTORY` **更重**：删最新、删最早**两头都全绿**，且 `cohort_start()` 取 `[-1]` ⇒ 删末条＝边界**回退**＝上一代样本被静默并进当前世代，正是那张表存在的理由。两表注释都写着「只追加，不改写（审计轨迹）」，而本仓约 19 个 worktree、历史上出过合并事故进 main（v0.45.121 冲突标记）。范围＝① 两表各钉一个最小集合（已知世代必须在表里），配对断言用现有循环；② 两个方向各做变异（删末条/删首条），核对 `collected N` 与锚点唯一。⚠️ **不动**两表的内容（一条都不加不改）、**不动** `cohort_start`/`ml_estimator_generation` 的取值逻辑、**不动**任何评分行为。⚠️ 会碰 `tests/test_probability_scorecard.py` 与 `tests/test_ic_rerun_readiness.py`，与并发 session 合并时逐块核对）
 
