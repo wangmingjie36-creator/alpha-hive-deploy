@@ -5,6 +5,482 @@
 
 ---
 
+## [0.45.170] — 2026-09-08 — 两个写死集合加「不许改成派生」警告；更正一处过度声称
+
+### Changed
+
+- `MUST_BE_ENUMERATED`（v0.45.160）与 `MUST_STAY_FILE_ANCHORED`（v0.45.168）
+  各加一段警告：**这两个集合必须写死，不许改成从 `_scan()` 派生。**
+
+  由 v0.45.146/152 那个 session 指出，同一仓里两条守卫的写法要求**相反**，
+  而它们看起来像矛盾：
+
+  | 守卫问的是 | 写法 |
+  |---|---|
+  | 表/集合的**当前内容**对不对 | **必须派生**（写死则每加一项手改一次，改着改着变恒真——v0.45.146 正是为此改的） |
+  | 有没有哪项**消失**了 | **必须写死**（唯一参照物就是「过去确实有过这项」；派生＝拿被测物证明自己） |
+
+  ⚠️ **风险正在于此**：读过前一条教训的人，最可能做的事就是「顺手把这两个
+  也统一成派生」。本版实测：把 `MUST_STAY_FILE_ANCHORED` 改成
+  `_scan(marker="__file__")` 派生 ⇒ **58 passed 零红，彻底恒真**。
+  对方在 `_ML_ESTIMATOR_GENERATIONS` 上实测同样结果（M6）。
+  这段警告比守卫本身更难重建，故写进 docstring 而不是只留在 CHANGELOG。
+
+### 更正
+
+⚠️ **我先前报的「仍是 `__file__` 派生但指向错目录 ⇒ 3/3 全绿」是测量假象，撤回。**
+那三次只选了守卫文件（`-p no:cacheprovider <guard>`），**没跑全套**。
+全套实测：`prompt_loader._PROMPTS_DIR` 改指 `prompts_WRONG` ⇒
+`tests/test_prompt_loader.py::test_loads_real_md_and_strips_frontmatter`
+与 `::test_step1_md_loads` 变红。⇒ **模块自己的测试接得住「路径指错」**，
+不是缺口。
+
+⚠️ 但这次对照顺带暴露一件更有意思的事，**它反而加强了 `MUST_STAY_FILE_ANCHORED`
+存在的理由**：把 `_PROMPTS_DIR` 错改成 `PATHS.home / "prompts"` 时全套是**绿的**，
+而错改成 `prompts_WRONG` 是**红的**。差别在于——`PATHS.home` 求值于 import 期，
+那时 `ALPHA_HIVE_HOME` 未设、`PATHS.home` **恰好等于仓库根**，于是路径依然正确。
+**「转成 `PATHS.home`」这类改动在测试里天然隐身，正是因为它踩中了被守卫的那个冻结**；
+只有结构守卫看得见它。危害要等 `ALPHA_HIVE_HOME` 真被设成别处（或有人把常量改懒）
+才显形。
+
+### 教训
+
+**「只跑相关测试」会把「测量范围不够」读成「没有守卫」。** 判缺口必须跑全套，
+或至少明确写清所选范围——本版差一步就把一个不存在的缺口记进了 CHANGELOG。
+与既有的「`collected 0` 连骗两次」同源：都是先怀疑被测物、没先怀疑测量工具。
+
+---
+
+## [0.45.169] — 2026-09-08 — CLAUDE.md 四段「硬检查项」被自己违反了开篇第一条
+
+### Changed
+
+CLAUDE.md 开篇「文档分工原则」写着「本文件只存指针与不变式，不存快照」，但
+2026-09-05~07 新增的四段硬检查项（失败传导 / skip 守卫 / 产物默认路径 / iCloud
+重名副本）逐条写成了完整事故复盘：版本表、forensic 细节、反向自证命令全文——
+而这些内容**已经**逐字或更详细地存在于对应的 auto-memory topic 文件里
+（`alpha-hive-failure-propagation.md` / `alpha-hive-test-writes-production.md` /
+`alpha-hive-environment-facts.md`）。CLAUDE.md 的版本只是早期快照，此后
+memory 侧持续追加（v0.45.133/136/150/157/160 等）而 CLAUDE.md 没跟着更新——
+两份说明**开始互相矛盾**（细节数量、结论都对不上），正是本文件自己第一条
+原则要防的那类陈旧误导，只是这次载体从「参数值」换成了「事故叙事」。
+
+四段各压缩成「核心规则 + 一句 why + 判据速览 + 指回 memory 全文」，CLAUDE.md
+526→439 行（含同一 CHANGELOG 周期内合并进来的 v0.45.168 新增段落）。**规则本身
+一个字没删**——「谁会红？」「返回还是抛」等判据、Slack/LLM/GitHub Pages 等硬性
+规则全部原样保留，删的只是已经在别处更完整存在的叙事细节。
+
+顺带修一处真断链：输出模板 C 一节写着「完整规范见 MEMORY.md「📐 深度模式模板C
+规范」章节」，但 grep 遍 auto-memory 目录**这个章节根本不存在**（可能是早年被
+housekeeping 清掉、指针没跟着改）。改指向真正的唯一真相：`generate_ml_report.py`
+的 `_ch1_core_conclusion` ~ `_ch7_tasks` 七个方法。
+
+核对方式：`git grep -n "CLAUDE\.md" --include='*.py'` 确认没有任何生产代码
+真正 `open()` 读取本文件——所有引用都是注释里的规则溯源（提及规则名而非解析
+文件），所以本条重写不影响 alpha-hive-orchestrator.sh 的每日扫描（本来就是
+纯 Python，不调用 Claude CLI，CLAUDE.md 从未参与运行时）。
+
+### 另（不改仓库代码）：auto-memory 侧同步去重
+
+`~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/alpha-hive-user-preferences.md`
+四条里三条（中文对话 / 禁 Opus / CHANGELOG 纪律）与本仓 CLAUDE.md 完全重复且已
+46 天未更新——CLAUDE.md 是 git 跟踪、每 session 自动加载的权威版本，留着重复的
+memory 副本只会两边不同步。已删这三条，只留 CLAUDE.md 里没有的「日期精度硬约束」，
+MEMORY.md 索引行同步改名「日期精度纪律」。另把 `alpha-hive-environment-facts.md`
+里那句「详见项目 CLAUDE.md 同名章节」删掉——CLAUDE.md 那节现在反过来是指回这里
+的摘要，原句方向已倒。
+
+## [0.45.168] — 2026-09-08 — `__file__` 守卫只防「新增」不防「错删」
+
+### Fixed
+
+v0.45.160 判定**这 11 处应当保留 `__file__`**（模板 / prompt / `sys.path.insert` /
+`git -C <仓库>` / 随代码发布的只读配置 —— 它们指向**代码**不是数据，改成
+`PATHS.home` 后测试把 `ALPHA_HIVE_HOME` 指向 tmp 就**找不到文件**）。
+但承载这个判定的 `TestFileDerivedSpeciesDoesNotSpread.KNOWN` 是**子集语义**：
+只对「新增冻结路径」变红，**对「把该留的错误清掉」一声不响。**
+
+#### 反向 mutation 实测：4/5 全绿
+
+把「应保留」的处**错误地**改成 `PATHS.home`，看现有测试会不会红：
+
+| 站点 | 改前守卫 | 
+|---|---|
+| `prompt_loader._PROMPTS_DIR`（prompts/） | ❌ 全绿 |
+| `thesis_breaks._CONFIG_JSON_PATH`（只读配置） | ❌ 全绿 |
+| `market_intelligence._BASE`（只读配置） | ❌ 全绿 |
+| `probability_scorecard.ALPHAHIVE_DIR`（`sys.path`） | ❌ 全绿 |
+| `collect_data._SCRIPT_DIR`（环境探测） | ❌ 全绿 |
+| `dashboard_renderer._TPL_DIR`（templates/） | ✅ 红 4 条（它的测试真去读 CSS） |
+
+⇒ **在此之前「错误清理」这件事没有任何东西会发现**，只有恰好被别的测试
+间接覆盖的那一处例外。
+
+### Added
+
+- `MUST_STAY_FILE_ANCHORED`（11 处）+ `test_code_anchored_paths_were_not_wrongly_converted`：
+  **超集**语义 —— 断言这些站点**仍然**是 `__file__` 派生。
+  与 `KNOWN`（子集：防新增）是**两个方向，缺一不可**。
+- `test_both_directions_are_guarded`：元守卫 —— 两方向集合不许重叠、不许有一边空掉
+  （空掉 ⇒ 那个方向恒真）。
+
+### 验证
+
+- 反向 mutation **5/5 全部变红**（改前同样 5 处是 4 绿 1 红）。
+- 全量：`1 failed`（设计使然的 `TestCoverageHorizon`）/ **3726 passed**。零回归。
+- 守卫文件 56 → **58** 项。
+
+### 教训
+
+**「子集语义防漂移」只防了一个方向。** v0.45.160 的教训 4 记的是「白名单会悄悄
+过期」（清干净了也不红），但**同一个子集语义还有第二个盲区：它也不防错删**。
+两者根子相同 —— 子集断言只约束「集合别变大」，对「变小」和「内容被换掉」都无话可说。
+⇒ **写白名单时问一句：我怕的是它变大，还是也怕它变小？** 怕两头就要两条断言。
+
+⚠️ **这 11 条清单该待在测试里，不在 CLAUDE.md。**（用户提过把它写进 CLAUDE.md
+硬检查项，分析后未采纳，理由记此：）
+1. CLAUDE.md 开篇第一条就是「**只存指针与不变式，不存快照**」，并附了
+   v0.19 参数快照停留数月、误导每个新 session 的教训。11 条 `文件:名字` 正是快照。
+2. 本 session 实测这类白名单**几小时内过期两次**
+   （`generate_ml_report._model_file` / `paper_portfolio.BASE_DIR` +
+   `economic_calendar_watch._STATE_PATH`）。
+3. **CLAUDE.md 不会被执行。** 项目反复记过的判据是「把已知缺陷写成会失效的断言，
+   比写进注释可靠」——同一份清单存两处，迟早有一处说谎。
+
+CLAUDE.md 里该加的是**不变式 + 指针**（判据「路径指向代码还是数据」
++ 指向这两个集合），已单独加为一节，不含清单。
+
+---
+
+## [0.45.167] — 2026-09-08 — 索引行长到装不下：删之前得先证明「topic 文件里已经有了」
+
+**本条不改仓库代码**，改的是 `~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/`
+下的 Auto Memory。记在这里是因为教训里有两条直接适用于本仓的日常操作。
+
+### Fixed
+
+`MEMORY.md` **46,609 → 22,639 字节**（限额 24.4KB 的 191% → 91%），
+harness 此前每个 session 只加载其中一部分 —— **召回在静默退化**，而索引行本身
+长得像正常内容，没有任何地方会红。根因是索引条目从"指针"长成了"摘要"：
+四条最长的（`silent-degradation` 含换行续行 17,528 B、`test-writes-production` 4,979 B、
+`constant-model-days` 3,808 B、`probability-scorecard` 1,900 B）压成 800~1,362 B 的密集指针。
+压缩前**逐条核对内容已在对应 topic 文件里**，缺的先补进去再删。
+
+### Added
+
+补进 topic 文件（原先只在索引行里、删了就没了）：
+- `silent-degradation.md`：CI 落点 `.github/workflows/tests.yml` + 选择集
+  `-m "not integration and not network"`（与 v0.45.129 的 `-m "network and not integration"`
+  是相反的两档）；以及 **v0.45.94 注释里「PAT 没有 workflow scope」实测不成立** ——
+  一条从未验证就被当成约束的假设，同 v0.45.75「证伪了但代码里没改」。
+- `silent-degradation.md`：v0.45.127 的具体落点（`permutation_importance` 是七条重测试的
+  唯一慢源；类级 `pytestmark` 在 `TestMLPredictionService`、方法级在 `TestIncrementalTrainingLoop`）。
+- `probability-scorecard.md`：两张世代表的区分 + `[[alpha-hive-train-serve-skew]]` 链接。
+- `locked-tasks.md`：补 `v0.43.9` 版本号（此前只在索引行里）。
+
+### Changed
+
+`weight-learning-loop.md` 的 `[[weekly_optimizer.py:461-504]]` 改成普通 code span ——
+它是代码引用不是记忆链接，挂在 wiki 语法里等于一条恒久悬空的链。
+
+### 教训一：检测器不自证，「0 missing」可能是它没看
+
+写了个脚本核对「索引行里的版本号/标识符是不是都在 topic 文件里」，
+**先拿 canary 反向自证，当场抓出脚本自己的 bug**：版本正则写死 `v?0\.4\d+\.\d+`，
+canary `v0.99.999` 落在域外 ⇒ 提取到 0 个 token ⇒ 报告「0 missing」。
+不自证的话，这份"全绿"是正则没看，不是真没缺。
+⇒ 同 v0.45.124 socket 探针、v0.45.157 skip 守卫：**检测器和被检测对象一样需要一个会红的理由**。
+
+反向也栽了一次：`grep -c "PAT"` 命中 3 次，看着像已覆盖，
+**三次全在 `REPORT_ARTIFACT_PATHS` 里** —— 唯一真缺的那条差点被判成已覆盖。
+⇒ **子串命中不等于概念覆盖**，短 token 要么加边界要么读命中处那句话。
+
+### 教训二：`set -e` 在本环境的 zsh 下没有阻断，一个 assert 失败后 `git push` 照跑
+
+占号时写了 `cd … && set -euo pipefail`，脚本里 Python 的
+`assert '0.45.165' not in ...` **失败了**，但后续步骤**继续执行**，
+把一个空提交推上了 main（`3b1216b`，tree 与父 `bd004f7` 逐字节相同、
+不含任何 heading，因此 CHANGELOG 内容未受污染，只是历史里多一条错号的空提交；
+0.45.165 属先提交者 `bd004f7`，`8b74e92` 那位同伴已让号到 166）。
+⇒ 与 v0.45.121「一条失败的编辑后面挂了无条件 `git commit`」**同一物种，第二次**。
+⇒ **修法不是再写一遍 `set -e`，是把 fail-fast 交给会抛的语言**：
+改用 Python + `subprocess.run(check=True)`，并在 push 前加三道断言
+（tree 必须不等于父 tree、`--name-only` 必须恰好是 `CHANGELOG.md`、push 后 re-fetch 核对
+`origin/main` 确实等于本次 commit）。
+
+### 教训三：worktree 之间共享 remote-tracking ref，占号必须是一个原子步骤
+
+读 `origin/main:CHANGELOG.md` 拿到「下一个可用号 165」，
+到下一条命令 `git rev-parse origin/main` 时**号已经过期** ——
+中间我没有 fetch，是**另一个 worktree 的 session fetch 了**：
+`refs/remotes/` 在 common `.git` 目录里，**19 个 worktree 共用一份**。
+⇒ CLAUDE.md 的占号协议要补一句：**fetch → 算号 → 提交 → 推送必须在同一个原子步骤里完成**，
+中间隔着别的工具调用，读到的号就可能已被推进。
+
+### 核对
+
+42 条索引指针全部解析成功；40 个 topic 文件**每个都仍有指针**（无孤儿）；
+40 份 frontmatter `---\nname:` 全部完整；悬空 `[[wiki]]` 链 0 条；
+索引行里出现的版本号 100% 能在其 topic 文件中找到。
+原始 `MEMORY.md` 备份在本次 session 的 scratchpad。
+
+## [0.45.166] — 2026-09-08 — 两张世代登记表都写着「只追加，不改写」，而没有任何东西执行这句话
+
+（占号 09-07，落地 09-08。不改任何生产代码，只加守卫。）
+
+起因是同伴 session 把我 v0.45.161 那条判据推进了一层。原判据是
+「**按名字匹配的检测器只能证明「匹配到的是对的」，证不了「没匹配到的是错的」**」，
+他们补上的是：**枚举驱动优于名单驱动，但枚举本身要钉最小集合** ——
+让目标不再被枚举到时，参数化用例会**消失**而不是变红，
+`collected` 少一条、零 `FAILED`。**消失比变红危险**，因为红是信号、少一条不是。
+（他们那边的实例：把 `signal_archive._db_path()` 冻回 `Path(__file__)…` 后它不再引用
+`PATHS.`，于是从 AST 枚举里消失，用例数 56→55、全绿。）
+
+拿它测自己，当场中。
+
+### 缺口（先测后修，两张表方向不同）
+
+| 变异 | 修前 |
+|---|---|
+| `_ML_ESTIMATOR_GENERATIONS` 删**最新**一条 | **42 passed，零红** |
+| 同表删**最早**一条 | 1 failed（`test_boundary_partitions_days`） |
+| `ic_rerun_readiness._COHORT_HISTORY` 删**最新** | **22 passed，零红** |
+| 同表删**最早** | **22 passed，零红** |
+
+ML 表只有**单边**覆盖：v0.45.146 把该守卫从写死日期改成**从表派生**，
+循环前留的两个锚点（`2026-08-26` 是 `pre-` / `2026-09-06` 不是）**只夹住第一条边界**，
+之后追加的每一代都无人看守 —— 而无人看守的恰是**会增长的那头**。
+兄弟表 `_COHORT_HISTORY` **两头都没有**，且它更危险：`cohort_start()` 取 `[-1]`，
+末条一没边界就**往回退**，`assess()` 按 `date >= 边界` 过滤 ⇒
+上一代样本被静默并进当前世代，正是这张表存在要防的那件事。
+
+不是杞人忧天：两表表头都写着「**只追加，不改写**（审计轨迹）」，
+而本仓约 19 个 worktree 并发、历史上出过合并事故进 main（v0.45.121 冲突标记）。
+世代表正是最容易在三方合并里被「整理」掉一条的那种结构。
+
+### Added — 两条最小集合守卫 + 一条成对的后果守卫
+
+- `tests/test_probability_scorecard.py::test_no_known_generation_has_vanished`
+- `tests/test_ic_rerun_readiness.py::test_no_known_cohort_has_vanished`
+- `tests/test_ic_rerun_readiness.py::test_cohort_start_never_moves_backwards`
+  —— 成对的另一半，钉的是**消费方看到的值**而非表的内容：
+  `cohort_start()["date"]` 不得早于已钉的最大日期。对追加安全（只会往后推）。
+
+均为**子集断言**：追加新世代不需要动最小集合，只有**删掉**历史条目才会红。
+
+### ⚠️ 本版最要紧的一条设计判据：同一仓里两条守卫，一条必须派生、一条必须写死
+
+它们看着矛盾，其实问的是两个问题：
+
+| 守卫 | 问的是 | 该怎么写 |
+|---|---|---|
+| `test_boundary_partitions_days` | 每条边界都真的**切开**日期吗 → 表的**当前内容** | **必须派生**，否则每加一代手改一次常量，改着改着被改成恒真（v0.45.146 就是为此改的） |
+| `test_no_known_*_has_vanished` | 有没有哪条边界**消失**了 → 表的**历史** | **必须写死**，唯一的参照物就是「过去确实有过这条」 |
+
+⇒ **看到 `MUST_BE_ENUMERATED` 别「顺手统一成派生」。**
+已把这段写进两处 docstring —— 因为「统一成派生」正是读过 v0.45.146 那条教训的人
+最可能做的事。**M6 实测坐实**：把最小集合改成从表派生、再删掉一条，**零红**。
+
+### 变异检验 8/8（锚点均自证唯一，`collected N` 逐次核对）
+
+| | 变异 | 红了 |
+|---|---|---|
+| M1 | ML 表·删最新 | **只有** `test_no_known_generation_has_vanished` ⇐ 新增覆盖 |
+| M2 | ML 表·删最早 | `test_boundary_partitions_days` + 新守卫 |
+| M3 | 世代表·删最新（v0.45.163） | 只有 `test_no_known_cohort_has_vanished` |
+| M4 | 世代表·删最早 | 同上 |
+| M5 | 世代表·删中间（09-05） | 同上 |
+| M6 | **测试侧**：最小集合改成从表派生 + 删一条 | **零红** ⇒ docstring 那句警告属实 |
+| M7 | 删光 09-07 三条（边界真回退到 09-05） | 两条都红 |
+| M8 | 追加一条**更早**日期（无条目消失） | `test_cohort_start_never_moves_backwards` + 排序守卫，**最小集合守卫全绿** |
+
+M3 值得单记：删 v0.45.163 后同日还有 v0.45.156 兜着，边界**没有真的回退** ⇒
+`test_cohort_start_never_moves_backwards` **正确地没响**。
+但「没响过的断言等于没被证明」—— 故补 M7/M8 逼它响；
+M8 更进一步证明它覆盖了最小集合守卫**结构上够不到**的情形。
+
+⚠️ 这条纪律是 v0.45.162 现学的：那一版写了个 `assert id(dims) 调用前后相等`，
+**恒真**（被调用方改不了调用方局部名字的绑定），同版删掉。
+⇒ **每加一条断言，必须有一个能让它变红的变异**；举不出来就先别加。
+M6 也补上了 v0.45.161 记的另一个盲区：**「改了测试」要单独做一次变异检验**。
+
+⚠️ 顺带一次锚点自证生效：变异脚本首跑 `AssertionError: 锚点不唯一(0)` ——
+`ver` 传的已是正则却又被 `re.escape` 二次转义。若无那句 assert，
+它会「变异根本没打上」却报全绿（v0.45.111 栽过同一处）。
+
+### 验证
+
+全套 **3765 passed / 1 failed**（15 skipped / 64 deselected / 1 xfailed）——此为**并入 v0.45.167/168 之后**重跑的数；合并前为 3763，差的 2 项来自并发 session，唯一的红是 `TestCoverageHorizon`
+——CLAUDE.md 写明「2026-09-06 起陆续变红是设计意图」的 BLS 日历闸，非回归。
+`ruff` 全仓 46；**零新增的直接证据是改动的两个文件 `All checks passed!`** —— 全仓数与 v0.45.162 实测同为 46，但那期间并入了别的 session 的代码，所以「相等」只是旁证，不作为判据。
+**两张表的内容一条都没加没改**，`cohort_start` / `ml_estimator_generation`
+的取值逻辑未动，无任何评分行为变化。
+
+## [0.45.165] — 2026-09-08 — 证明守卫有牙的那组测试，自己从未被执行过
+
+v0.45.157 修了 `TestSPYBenchmarkUnavailable` 的 skip 守卫后，本版普查全仓余下同族。
+干净检出（`git archive HEAD | tar -x`，无 `pheromone.db`）跑
+`-m "not integration and not network"`，**21 条 skip 里 20 条属本 species**，
+横跨 5 个文件（预估 17 条、3 个文件；另外 2 个文件是普查时新发现的）。
+
+### 逐条分类的结果不是一刀切 —— 三类，修法各不相同
+
+| 类 | 条数 | 是什么 | 修法 |
+|---|---|---|---|
+| A | 5 | **纯合成数据，被误伤** | 解除连坐，无条件跑 |
+| B | 14 | 真的在核对**生产数据本身** | `@pytest.mark.integration` |
+| C | 1 | 一条测试里混着两种断言 | 拆开，纯常数那半无条件跑 |
+
+### A 类：`pytestmark` 连坐（本版最刺眼的一处）
+
+`tests/test_distribution_invariants.py` 挂的是**模块级**
+`pytestmark = skipif(not PROD_DB.exists())`。它作用于**整个文件**，
+包括 `TestGuardsHaveTeeth` —— 那 5 条喂手搓 `Counter` 给三个纯函数谓词，
+**不碰 DB、不碰文件、不碰网**，跟那个条件毫无关系。
+
+而那个类自己的 docstring 写着：
+
+> 没有这一组，本文件的"全绿"证明不了任何事。
+
+**证明守卫有牙的那一组，在任何干净检出与 CI 上从未被执行过。**
+同 v0.45.157 的形状升了一层：不是「守卫没牙」，是「验牙的那把尺子没被拿出来过」。
+
+成对实测（同一个 mutation：把 `single_direction_offenders` 的命中分支改成 `if False`）：
+
+| | 结果 |
+|---|---|
+| 改动前 | `15 skipped`，退出码 0，**全绿** |
+| 改动后 | `1 failed` |
+
+### B 类：条件性写在 marker 上，不写进 skip
+
+10 条（`TestAgentDirectionReachability` / `TestDimensionScoreSpread` /
+`TestMacroNotSilentlyDegraded` / `TestScanNotDead`）+ `TestCrowdingCalibrationDrift`(2)
++ `test_production_recent_days_not_collapsed` + `test_real_scan_results_are_honest`。
+
+这些核对的是**生产分布本身**（某方向可不可达、维度分有没有塌成常数、扫描停没停），
+换夹具就测不到它要测的东西 —— 所以不补桩。改标 integration 后：
+默认摘要里是 `N deselected`（**可见**），而 skip 只在 `-rs` 时吐一行、平时和 PASSED 一样是个点。
+
+**存在性 skip 一律升级为断言**：`-m integration` 是显式 opt-in，你点名要跑却给不了库，
+那是必须有人知道的事（同 v0.45.157 `TestRealSPYFetchContract` 的「取不到就该判红」）。
+连带把 6 处「数据不足就 skip」也改成断言 —— `recent_dates` 的 `len(dates) < 3`
+恰恰**就是** `TestScanNotDead` 要报的告警条件，跳过等于把它渲染成「没问题」。
+生产库实测 12 个扫描日 / 358 行 / macro_adj 357 条，断言不会误红。
+
+### C 类：一条测试里混着两种断言
+
+`test_scale_midpoint_50_would_be_wrong` 同时挂着
+`ge50 < 0.25`（要生产数据）与 `abs(CROWDING_NEUTRAL - 50) > 5`（**纯常数钉桩**）。
+两句挂在一起 ⇒ 纯常数那句也跟着在 CI 上恒不执行。拆出
+`TestCrowdingNeutralIsNotScaleMidpoint`，无条件跑。
+
+成对实测（把 `CROWDING_NEUTRAL` 改回 `50.0` —— 正是这条要抓的回归）：
+
+| | 结果 |
+|---|---|
+| 改动前 | `41 passed, 2 skipped`，**回归畅通无阻** |
+| 改动后 | `1 failed` |
+
+### 顺带查出：同样的后果，另一种机制
+
+`test_replay_scoring.py::test_cli_prints_power_warning` 的 skip 条件是
+「生产库无到期样本」。第一版按 B 类处理（标 integration + 断言），
+**但有生产库时它依然红** —— 查下来根因和「库在不在」毫无关系：
+
+- CLI 经 `PATHS.db` 解析库位置，`PATHS.db` 读 `ALPHA_HIVE_HOME`
+- conftest 的 autouse `_isolate_env` 把 `ALPHA_HIVE_HOME` 指向 tmp 沙箱
+- **子进程继承了这个环境变量** ⇒ 它读的永远是空沙箱库
+- 于是输出恒为「无可用样本」⇒ skip 恒中
+
+即：**测试隔离泄漏进了子进程**，让这条端到端测试在**每一台机器上**都恒 skip，
+生产机也不例外 —— 两条断言从未在任何环境下被求值过。
+⇒ 它其实是 C 类里的「只是懒得造夹具」：断言测的是 CLI 的**输出契约**（必须给出功效结论），
+那是本地逻辑。改用 `ALPHA_HIVE_DB_PATH` 把 CLI 钉到夹具库上，并补一条配对测试
+（8 周 ⇒「功效不足」/ 40 周 ⇒ 不再报），防止「结论恒为同一句话」的实现骗过它。
+
+⚠️ 教训：**「数一数还有多少条挂在同一个 X 上」要按后果数，不能按 token 数。**
+这条一个产物名 token 都不出现。
+
+### Added
+
+- `tests/test_no_invisible_prod_data_skips.py`：元守卫，扫全部测试模块，
+  找「条件依赖 git 忽略的生产产物、却用 skip 表达」的地方，命中即红。
+  含 `TestDetectorHasTeeth` 正反各喂一次（该抓的抓到 / 不该抓的不抓）。
+  对**改动前**的 5 个文件实测抓到 10 处 skip 点。
+- `tests/test_replay_scoring.py::test_cli_power_verdict_tracks_sample_size`：
+  功效结论必须随样本量变化，不是恒输出同一句。
+- `tests/test_distribution_invariants.py`：`_con()` 的存在性断言；
+  `test_cboe_vix_history_is_fresh` 的缓存存在性断言。
+
+### Changed
+
+- `tests/test_distribution_invariants.py`：删模块级 `pytestmark`；
+  4 个读生产库的类标 `@pytest.mark.integration`；6 处 skip → 断言。
+- `tests/test_ml_expected_return.py`：`TestCrowdingCalibrationDrift` 标 integration；
+  拆出 `TestCrowdingNeutralIsNotScaleMidpoint`。
+- `tests/test_catalyst_availability.py`：`test_production_recent_days_not_collapsed` 标 integration。
+- `tests/test_scan_coverage_gate.py`：`test_real_scan_results_are_honest` 标 integration，
+  两层 skip → 断言；**顺带修 glob 的相对路径** —— 原先 glob 的是
+  `Path(".")`（测试进程的 cwd，不受控），改为从 `__file__` 派生仓库根。
+- `tests/test_replay_scoring.py`：建库逻辑抽成模块级 `_write_predictions_db`
+  （`db` fixture 调两次会撞同一个 `t.db`，报 "table already exists"）。
+- `pyproject.toml`：`integration` marker 的说明从「requiring external APIs」扩到
+  「external APIs **or** production artifacts absent from a clean checkout」——
+  本版把它用在了「需要生产产物」上，说明不改就是**列名说谎**（同 v0.45.57 那类）。
+
+### 反面教训（写在这里，因为我在同一版里犯了两次同类错误）
+
+**把一种失败误报成另一种**，正是本版要治的形状，而检测器自己踩了两次：
+
+1. `git check-ignore` 的退出码有**三**个含义：`0`=被忽略 / `1`=未被忽略 /
+   `128`=这里不是 git 仓库。第一版把 128 也判成「名单错了」，
+   于是在 `git archive` 出来的树里报了一句与真实原因无关的错。
+2. 第二版改成「非 git 仓库 ⇒ 该文件不该存在」—— 又错：验证「有生产库」那一侧用的
+   `clean3` 正是**非 git 树 + 手工拷进生产产物**。把「不是 git 仓库」当成了「干净检出」。
+
+最终形态：128 走 `pytest.skip`，且这条 skip 过得了判据 ——
+「git 仓库在哪些环境里存在？」答：**开发检出 / worktree / CI actions-checkout 全都是**，
+唯一不是的只有手造的 `git archive` 临时树。
+**判据从来不是「不许 skip」，是「谁会红？」。**
+
+另：token 名单由 `git check-ignore` 逐个校验（不靠人记），
+**第一次跑就抓出 6 个 token 里有 2 个是错的** ——
+`paper_portfolio_state` / `ml_model_history` 其实**被 git 跟踪**，干净检出里确实存在。
+只验「该抓的抓到了」的检测器，会带着 33% 的错误名单上线。
+
+### 实测
+
+全量口径 `-m "not integration and not network"`，跑在 `git archive HEAD | tar -x` 出来的
+干净检出里（**无** `pheromone.db`）：
+
+| | 改动前 | 改动后（已合并 main） |
+|---|---|---|
+| passed | 3724 | 3746 |
+| **skipped** | **21** | **5** |
+| failed | 1 | 1 |
+| deselected | 94 | 108 |
+
+本 species 的 20 条 skip **全部清零**。剩下 5 条：
+
+- `test_scheduler.py` ×1 —— 缺 python 包 `schedule`，另一 species。
+- `test_no_invisible_prod_data_skips.py` ×4 —— 新增元守卫的 `check-ignore` 那条，
+  **只在非 git 树里跳**（`git archive` 出来的验证环境）；在真实 git 仓库里全跑，
+  实测本 worktree `11 passed`。
+
+其余环境：
+
+| 环境 | 结果 |
+|---|---|
+| 有生产库 · `-m integration`（6 个改动文件） | **14 passed, 0 skipped**，离线闸未报警 ⇒ 未出网 |
+| 有生产库 · 默认口径（6 个改动文件） | 120 passed / 4 skipped（同上，非 git 树那条） |
+| 本 worktree（真 git 仓库）· 元守卫单跑 | 11 passed |
+
+- 唯一的红是 `TestCoverageHorizon`，**2026-09-06 起变红是设计意图**（含义＝去看 BLS 发 2027 日程没）。
+- ruff 全绿。
+- **生产 `pheromone.db` 全程未被写**：sha256 `9b5c1ff…cefc56` + mtime `1788598433` 前后逐位一致。
+  验证一律在临时干净检出里跑，生产库只**复制**进去，不在主 checkout 里跑测试。
+
 ## [0.45.164] — 2026-09-08 — 逐蜂归因的自变量被自己的取值截断：agent_votes 不再读板
 
 `alpha_hive_daily_report._post_scan_notify` 用 `ctx.board.snapshot()` 过滤 ticker 填

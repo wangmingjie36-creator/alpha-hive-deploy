@@ -547,6 +547,72 @@ class TestFileDerivedSpeciesDoesNotSpread:
         assert ("innocent.py", "_db") not in found, (
             "把「函数内调用时求值」也报成违规了——会逼着人把正确写法加进白名单")
 
+    # 「必须**保持** `__file__`」的站点 —— 与 `KNOWN` 是**两个方向**：
+    #   `KNOWN`（子集语义）防的是「新增冻结路径」；
+    #   本集合（**超集**语义）防的是「把该留的错误地清掉」。
+    # 二者缺一不可。v0.45.168 反向 mutation 实测：把这些错改成 `PATHS.home`，
+    # **4/5 全绿**（只有 `dashboard_renderer` 因为它的测试真去读 CSS 才红）——
+    # 也就是说在此之前，「错误清理」这件事没有任何东西会发现。
+    #
+    # 为什么它们必须是 `__file__`：这些路径指向**代码**，不是数据。模板、prompt、
+    # 随代码发布的只读配置、`sys.path.insert`、`git -C <仓库>` 要的都是
+    # 「代码在哪」。改成 `PATHS.home` 后，测试把 `ALPHA_HIVE_HOME` 指向 tmp
+    # 就**找不到文件**——那不是修 bug，是造 bug。
+    # ⚠️⚠️ **这个集合必须写死，不许改成「从 `_scan()` 派生」。**
+    # 同一仓里两条守卫的写法要求是**相反**的，而它们看起来像矛盾：
+    #   · 问「表的**当前内容**对不对」的守卫 —— **必须派生**
+    #     （写死则每加一项手改一次，改着改着变恒真）
+    #   · 问「有没有哪项**消失**了」的守卫 —— **必须写死**
+    #     （唯一参照物就是「过去确实有过这项」；派生了就等于拿被测物证明自己）
+    # 读过前一条教训的人最可能做的事，正是「顺手把这个也统一成派生」。
+    # v0.45.166 那个 session 实测过：改成派生、再删一项 ⇒ **零红**。
+    # 这段警告比守卫本身更难重建，所以写在这里而不是 CHANGELOG。
+    MUST_STAY_FILE_ANCHORED = {
+        # 代码同址资源：随代码发布
+        ("dashboard_renderer.py", "_TPL_DIR"),        # templates/
+        ("prompt_loader.py", "_PROMPTS_DIR"),         # prompts/
+        # 工程根 / sys.path / git 仓库：要的是「代码在哪」
+        ("probability_scorecard.py", "ALPHAHIVE_DIR"),
+        ("scan_continuity.py", "ALPHAHIVE_DIR"),
+        ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),
+        ("health_check.py", "PROJECT"),               # git -C <仓库>
+        ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
+        ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
+        # 仓库内随代码发布的**只读**配置/文档
+        ("thesis_breaks.py", "_CONFIG_JSON_PATH"),
+        ("market_intelligence.py", "_BASE"),
+        ("watchlist_events.py", "EVENTS_FILE"),
+    }
+
+    def test_code_anchored_paths_were_not_wrongly_converted(self):
+        """这 11 处必须**仍然**是 `__file__` 派生 —— 防「一刀切清理」。
+
+        ⚠️ 这条断言的方向和 `test_no_new_file_derived_paths` **相反**。
+        只有子集守卫时，「把模板路径改成 `PATHS.home`」会静默通过，
+        而它会在测试隔离下让模板找不到（生产上则要等到 HOME 被设时才炸）。
+        """
+        still = TestSpeciesDoesNotSpread._scan(marker="__file__")
+        converted = sorted(self.MUST_STAY_FILE_ANCHORED - still)
+        assert not converted, (
+            "这些路径被从 `__file__` 改走了，但它们指向的是**代码**不是数据：\n"
+            + "\n".join(f"  - {f}:{n}" for f, n in converted)
+            + "\n\n模板 / prompt / 只读配置 / `sys.path` / `git -C` 要的是"
+              "「代码在哪」，`PATHS.home` 会跟着 `ALPHA_HIVE_HOME` 跑到 tmp 去。\n"
+              "若确实要改（比如该资源真的变成了可写数据），请连同本集合一起改，"
+              "并在 CHANGELOG 说明它为什么不再是代码同址资源。")
+
+    def test_both_directions_are_guarded(self):
+        """元守卫：两个方向的集合不许重叠，也不许有一边空掉。
+
+        重叠 ⇒ 同一处既要求「是 `__file__`」又列在「允许是 `__file__`」里，
+        语义混乱；空掉 ⇒ 那个方向的守卫恒真。
+        """
+        assert self.MUST_STAY_FILE_ANCHORED, "超集守卫的集合空了，它恒真"
+        assert self.KNOWN, "子集守卫的白名单空了"
+        overlap = self.MUST_STAY_FILE_ANCHORED & {
+            k for k in self.KNOWN if k not in self.MUST_STAY_FILE_ANCHORED}
+        assert not overlap, f"两个方向的集合重叠：{sorted(overlap)}"
+
     def test_cleaned_modules_stay_clean(self):
         """v0.45.160 清掉的那些不许回退成 `__file__` 派生常量。"""
         cleaned = {
@@ -648,6 +714,15 @@ class TestEveryResolverFollowsEnv:
     # **不再被枚举到**，那条用例直接消失，`collected` 少 1、**没有任何红**。
     # 实测（v0.45.160 mutation M22）：56 → 55 passed，静默失去覆盖。
     # 这是「跳过缺失项＝把缺失渲染成不存在」的 parametrize 版本。
+    # ⚠️⚠️ **这个集合必须写死，不许改成「从 `_scan()` 派生」。**
+    # 同一仓里两条守卫的写法要求是**相反**的，而它们看起来像矛盾：
+    #   · 问「表的**当前内容**对不对」的守卫 —— **必须派生**
+    #     （写死则每加一项手改一次，改着改着变恒真）
+    #   · 问「有没有哪项**消失**了」的守卫 —— **必须写死**
+    #     （唯一参照物就是「过去确实有过这项」；派生了就等于拿被测物证明自己）
+    # 读过前一条教训的人最可能做的事，正是「顺手把这个也统一成派生」。
+    # v0.45.166 那个 session 实测过：改成派生、再删一项 ⇒ **零红**。
+    # 这段警告比守卫本身更难重建，所以写在这里而不是 CHANGELOG。
     MUST_BE_ENUMERATED = {
         ("backtester", "default_db_path"), ("signal_archive", "_db_path"),
         ("vol_forecast", "_db_path"), ("ic_diagnostics", "_db_path"),

@@ -145,13 +145,23 @@ class TestCatalystDistributionInvariant:
         share = self._daily_share_of_4(rows)
         assert share["2026-08-25"] <= 0.75, "健康日被误报"
 
+    @pytest.mark.integration   # 读生产 pheromone.db —— 条件性写在 marker 上，不写进 skip
     def test_production_recent_days_not_collapsed(self):
-        """生产库近 30 个业务日不应有 >75% 落 4.0 的天（有则数据源故障）。"""
+        """生产库近 30 个业务日不应有 >75% 落 4.0 的天（有则数据源故障）。
+
+        v0.45.165：本条核对的是**生产分布本身**，换夹具就测不到它要测的东西
+        （旁边两条 `test_invariant_*` 才是喂合成数据验谓词有没有牙的，它们无条件跑）。
+        原先挂 `if not os.path.exists(db): pytest.skip(...)`，而 `pheromone.db`
+        命中 `.gitignore` 的 `*.db` ⇒ 干净检出与 CI 上恒 skip，断言从未被求值。
+        改标 integration：默认输出里显示为 deselected（可见），显式选中却缺库则判红。
+        """
         import sqlite3
         db = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "pheromone.db")
-        if not os.path.exists(db):
-            pytest.skip("生产 pheromone.db 不存在")
+        assert os.path.exists(db), (
+            f"生产 pheromone.db 不在 {db} —— 本条已标 @pytest.mark.integration"
+            "（默认排除）；显式选中却没有库就该红，不是跳过。"
+        )
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         try:
             rs = con.execute(

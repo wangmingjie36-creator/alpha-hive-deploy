@@ -22,9 +22,17 @@
 
 设计约束
 --------
-1. 读**生产** `pheromone.db`，因此显式绕过 conftest 的 tmp 隔离（那个 autouse
-   fixture 只改环境变量，不影响这里的直接路径读取）。全程只读（`mode=ro`）。
-2. 数据不足时 **skip 而非 fail** —— 新克隆、CI、干净环境下必须绿。
+1. 读**生产** `pheromone.db` 的那几组标 `@pytest.mark.integration`，因此显式绕过
+   conftest 的 tmp 隔离（那个 autouse fixture 只改环境变量，不影响这里的直接路径
+   读取）。全程只读（`mode=ro`）。
+2. **条件性写在 marker 上，不写进 skip**（v0.45.165）。此前是模块级
+   `pytestmark = skipif(not PROD_DB.exists())`，而 `pheromone.db` 命中 `.gitignore`
+   的 `*.db` —— 于是干净检出与 CI 上**整个文件**恒 skip，连下面那组纯合成数据的
+   `TestGuardsHaveTeeth` 都被连坐（它一条外部依赖都没有）。
+   「没有这一组，本文件的全绿证明不了任何事」—— 而这一组自己从未被执行过。
+   现在：读生产库的类标 integration（addopts 默认排除、`-m integration` 显式选中，
+   默认输出里显示为 `N deselected`）；纯合成的那组无条件跑。
+   显式选中却没有生产库 = **判红**，不是跳过 —— 你要的就是它，给不了就得有人知道。
 3. 门槛守的是**结构性退化**（某方向不可达），不是"分布好不好看"。
    现状最偏的是 `RivalBeeVanguard` 95.2% 看多——离门槛只剩 4pp，
    刻意不把门槛设到能拦住它：那属于建模判断，不该由测试替用户拍板。
@@ -80,10 +88,9 @@ VIX_MAX_STALE_TRADING_DAYS = 5
 CATASTROPHIC_NO_SCAN_TRADING_DAYS = 10
 
 
-pytestmark = pytest.mark.skipif(
-    not PROD_DB.exists(),
-    reason="生产 pheromone.db 不存在（新克隆/CI 环境）——分布不变式不适用",
-)
+# ⚠️ 这里**刻意没有** `pytestmark = pytest.mark.skipif(not PROD_DB.exists(), ...)`。
+# 它曾经在，代价是把 `TestGuardsHaveTeeth`（纯合成数据、零外部依赖）一起连坐掉。
+# 依赖生产库的类逐个标 `@pytest.mark.integration`；见模块 docstring 约束 2。
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -91,6 +98,14 @@ pytestmark = pytest.mark.skipif(
 # ────────────────────────────────────────────────────────────────────────────
 
 def _con():
+    # 只有 `-m integration` 显式选中时才走到这里。此刻库不在 = 判红：
+    # 你点名要跑这几条，环境给不了，那是必须有人知道的事，不是可以静默跳过的事。
+    # （同 v0.45.157 `TestRealSPYFetchContract` 里那段「取不到就该判红」的理由。）
+    assert PROD_DB.exists(), (
+        f"生产 pheromone.db 不在 {PROD_DB} —— 本组分布不变式核对的是生产数据本身，"
+        "只在生产机上有意义，已标 @pytest.mark.integration（默认排除）。"
+        "你显式 `-m integration` 选中了它们却没有那份库：判红，不跳过。"
+    )
     return sqlite3.connect(f"file:{PROD_DB}?mode=ro", uri=True)
 
 
@@ -103,8 +118,13 @@ def recent_dates():
             (RECENT_SCAN_DAYS,),
         ).fetchall()
     dates = sorted(r[0] for r in rows)
-    if len(dates) < 3:
-        pytest.skip(f"扫描日不足 3 天（{len(dates)}）")
+    # 这里曾是 `pytest.skip`。但 `TestScanNotDead` 正是靠这个 fixture 判「扫描是不是
+    # 死了」—— 扫描日少到 3 天以下恰恰**就是**那个告警条件，跳过等于把它渲染成
+    # 「没问题」。实测生产库当前 12 天，断言不会误红。
+    assert len(dates) >= 3, (
+        f"生产库里只有 {len(dates)} 个扫描日（{dates}）—— 这本身就是 TestScanNotDead "
+        "要抓的形状：扫描实质上没在跑。"
+    )
     return dates
 
 
@@ -128,8 +148,11 @@ def agent_directions(recent_dates):
         for agent, direction in d.items():
             if isinstance(direction, str) and direction:
                 out[agent][direction] += 1
-    if not out:
-        pytest.skip("窗口内没有可解析的 agent_directions")
+    # 「一条都解析不出来」不是样本不足，是结构性退化 —— 正是本文件要抓的东西。
+    assert out, (
+        f"窗口内 {len(rows)} 行 agent_directions 一条都解析不出方向 —— "
+        "写入格式已变或全是空串，蜂群方向信号实质上已消失。"
+    )
     return dict(out)
 
 
@@ -185,8 +208,10 @@ def dimension_scores(recent_dates):
                 out[dim].append(float(val))
             except (TypeError, ValueError):
                 continue
-    if not out:
-        pytest.skip("窗口内没有可解析的 dimension_scores")
+    assert out, (
+        f"窗口内 {len(rows)} 行 dimension_scores 一条都解析不出维度分 —— "
+        "写入格式已变，五维评分实质上已消失。"
+    )
     return dict(out)
 
 
@@ -285,6 +310,7 @@ class TestGuardsHaveTeeth:
 # 不变式 1：每只蜂的方向都必须真的可达
 # ────────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.integration   # 读生产 pheromone.db —— 条件性写在 marker 上，不写进 skip
 class TestAgentDirectionReachability:
     """守的正是 ChronosBee「950 条记录 bearish=0」那一类缺陷。
 
@@ -324,6 +350,7 @@ class TestAgentDirectionReachability:
 # 不变式 2：维度分数不得塌成常数
 # ────────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.integration   # 读生产 pheromone.db —— 条件性写在 marker 上，不写进 skip
 class TestDimensionScoreSpread:
     """去重比过低 → 大量并列 → rank-IC 尾部排序失真。
 
@@ -372,6 +399,7 @@ class TestDimensionScoreSpread:
 # 不变式 3：宏观数据没有静默退回兜底常量
 # ────────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.integration   # 读生产 pheromone.db —— 条件性写在 marker 上，不写进 skip
 class TestMacroNotSilentlyDegraded:
     def test_macro_adjustment_is_not_frozen(self, recent_dates):
         """`guard.macro_adj` 塌成单一值 = 宏观上游全挂后 GuardBee 在吃常量。
@@ -385,19 +413,31 @@ class TestMacroNotSilentlyDegraded:
                 "WHERE signal = 'guard.macro_adj' AND date >= ?",
                 (recent_dates[0],),
             )]
-        if len(vals) < MIN_RECORDS:
-            pytest.skip(f"guard.macro_adj 样本不足（{len(vals)}）")
+        # 曾是 skip。窗口内 12 个扫描日 x 30 只 ⇒ 实测 357 条；掉到 60 条以下
+        # 意味着 signal_archive 停止收录该信号，那是降级本身，不是「样本还不够」。
+        assert len(vals) >= MIN_RECORDS, (
+            f"guard.macro_adj 在窗口内只有 {len(vals)} 条（地板 {MIN_RECORDS}）—— "
+            "signal_archive 很可能已停止收录它，宏观降级将无从观测。"
+        )
         assert len(set(vals)) > 1, (
             f"guard.macro_adj 在 {len(vals)} 条记录里只有一个取值 "
             f"{vals[0]} —— 宏观输入很可能已全程降级到兜底常量"
         )
 
-    @pytest.mark.skipif(not VIX_CSV.exists(),
-                        reason="CBOE VIX 历史缓存不存在")
     def test_cboe_vix_history_is_fresh(self):
         """CBOE 抓取静默死掉的表现就是这个文件停止增长，
         而系统会无声地退回 `vix=20.0` 常量。守住源头比守下游便宜。
+
+        v0.45.165：原先另挂一层 `skipif(not VIX_CSV.exists())`。`cache/` 同样命中
+        `.gitignore`，那层与外面那层模块级 skipif 是同一个病 —— 而「文件根本不存在」
+        恰恰是「停止增长」的极端情形，跳过它等于放过本条要守的东西。
+        随所在类走 `-m integration` 显式 opt-in，缺文件即判红。
         """
+        assert VIX_CSV.exists(), (
+            f"CBOE VIX 历史缓存不在 {VIX_CSV} —— 抓取从未成功过或缓存被清，"
+            "下游会静默退回 vix=20.0 兜底常量（v0.43.24 事故：撑了 13/88 天，"
+            "而真实 VIX 是 14.6，方向相反）。"
+        )
         lines = [ln for ln in VIX_CSV.read_text().splitlines() if ln.strip()]
         assert len(lines) > 1, "VIX 历史文件只有表头"
         last = lines[-1].split(",")[0].strip()
@@ -426,6 +466,7 @@ class TestMacroNotSilentlyDegraded:
 # 不变式 4：扫描没有实质性停摆
 # ────────────────────────────────────────────────────────────────────────────
 
+@pytest.mark.integration   # 读生产 pheromone.db —— 条件性写在 marker 上，不写进 skip
 class TestScanNotDead:
     """刻意只拦"扫描实质上已经死了"。
 
@@ -457,8 +498,8 @@ class TestScanNotDead:
                 (recent_dates[0],),
             ).fetchall()
         counts = {d: n for d, n in rows}
-        if len(counts) < 3:
-            pytest.skip("扫描日不足")
+        # 曾是 skip；与上面 `recent_dates` 同理，这是告警条件本身。
+        assert len(counts) >= 3, f"窗口内只有 {len(counts)} 个扫描日 —— 扫描已实质停摆"
         peak = max(counts.values())
         latest_date = max(counts)
         latest = counts[latest_date]

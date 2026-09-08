@@ -393,6 +393,46 @@ class TestMLEstimatorGenerations:
                 == ml_estimator_generation((last + timedelta(days=30)).isoformat())), (
             "末代内部被切开了——ml_estimator_generation 的「取最后一条匹配」坏了")
 
+    #: 已知世代的**最小集合**：这些 (日期, 版本) 必须在表里。
+    #:
+    #: ⚠️ **这份字面量刻意写死，不许从登记表派生** —— 派生即恒真。
+    #: 它与同类 `test_boundary_partitions_days`（v0.45.146 特意从**写死常量**改成
+    #: **从表派生**）看似矛盾，其实问的是两个不同的问题：
+    #:   · 「每条边界都真的切开日期吗」问的是表的**当前内容** ⇒ 必须派生，
+    #:     否则每加一代就要手改常量，改着改着就被改成恒真。
+    #:   · 「有没有哪条边界**消失**了」问的是表的**历史** ⇒ 必须写死，
+    #:     因为唯一的参照物就是「过去确实有过这条」。
+    #: ⇒ 看到本常量别「顺手统一成派生」，那会把守卫变成装饰品。
+    #:
+    #: 追加新世代**不需要**动这里（子集断言，多出来的不管）。
+    #: 只有当你要**删掉**一条历史世代时它才会红 —— 而那正是它存在的理由：
+    #: 表头写着「只追加，不改写（审计轨迹）」，但此前没有任何东西执行这句话。
+    MUST_BE_ENUMERATED = frozenset({
+        ("2026-09-06", "v0.45.137+v0.45.140+v0.45.141"),
+        ("2026-09-07", "v0.45.146+v0.45.147"),
+    })
+
+    def test_no_known_generation_has_vanished(self):
+        """审计轨迹只能变长。少一条 = 静默换代，且**没有任何既有断言会红**。
+
+        v0.45.166 实测（变异）：删掉表里**最新**那条，全套 42 项 **零红** ——
+        `test_boundary_partitions_days` 循环的是表本身，少一条只是少转一圈；
+        它循环前钉的那两个日期（`2026-08-26` / `2026-09-06`）只夹住**第一条**
+        边界，之后追加的每一代都无人看守，而无人看守的恰是**会增长的那头**。
+        （删**最早**那条会红，所以此前的覆盖是**单边**的。）
+
+        为什么这不是杞人忧天：本仓约 19 个 worktree 并发，历史上出过
+        合并事故进 main（v0.45.121 冲突标记）。世代表正是最容易在
+        三方合并里被「整理」掉一条的那种结构。
+        """
+        from probability_scorecard import _ML_ESTIMATOR_GENERATIONS as G
+        assert self.MUST_BE_ENUMERATED, "最小集合被清空了——本条已退化为恒真"
+        live = {(d, v) for d, v, _ in G}
+        missing = self.MUST_BE_ENUMERATED - live
+        assert not missing, (
+            f"世代登记表少了已知条目 {sorted(missing)}；表头写明「只追加，不改写」。"
+            "若确实要改写审计轨迹，请连同本最小集合一起显式修改，别只删表里那条。")
+
     def test_registry_is_append_only_and_sorted(self):
         """只追加不改写；日期必须递增，否则 `ml_estimator_generation` 的
         「取最后一条匹配」会给出错的代。"""
