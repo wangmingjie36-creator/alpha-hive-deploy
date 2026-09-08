@@ -1,0 +1,51 @@
+{
+ "schema_version": 1,
+ "fetched_at_utc": "2026-09-08T21:03:16.444776+00:00",
+ "cboe": {
+  "pcce": {
+   "total_pc_ratio": 0.95,
+   "call_volume": 0,
+   "put_volume": 0,
+   "date": "2026-09-08",
+   "signal": "neutral",
+   "source": "default_fallback",
+   "tickers_used": []
+  },
+  "vix_term": {
+   "vix_spot": 15.3,
+   "vix_1m": 16.27,
+   "vix_3m": 18.77,
+   "term_structure": "contango",
+   "contango_pct": 6.34,
+   "source": "vx_futures"
+  },
+  "skew": {
+   "skew_value": 120.0,
+   "signal": "normal",
+   "date": "2026-09-08",
+   "source": "default_fallback"
+  },
+  "vvix": {
+   "vvix_value": 85.0,
+   "signal": "normal",
+   "date": "2026-09-08",
+   "source": "default_fallback"
+  },
+  "macro_score": 4.38,
+  "macro_sentiment": "neutral",
+  "timestamp": "2026-09-08T21:05:18.642997"
+ },
+ "fear_greed": {
+  "value": 41,
+  "classification": "Fear",
+  "sentiment_score": 4.1,
+  "is_real_data": true,
+  "source": "cnn",
+  "timestamp": "2026-09-08T21:05:19.226189"
+ },
+ "degraded_sections": {
+  "skew": "explicit_default_fallback",
+  "vvix": "explicit_default_fallback",
+  "pcce": "explicit_default_fallback"
+ }
+}
