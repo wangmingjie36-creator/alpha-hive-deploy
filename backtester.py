@@ -1426,6 +1426,23 @@ class Backtester:
                 hist = hist[~hist.index.isna()]
             except Exception:
                 pass
+
+            # v0.45.173：未收盘护栏——`_get_price_at_date` 早在 v0.45.10 就加了这道
+            # （见 tests/test_backtest_forming_bar.py），但当时只补在它自己身上，没有
+            # 挪到这个姊妹取价路径。`self._history()` 与 `_get_price_at_date` 共用同一份
+            # 批量预取缓存，**同样会带回今天正在形成的那根 bar**（v0.45.120 那段注释已
+            # 写明"批量下载同样会带回今天正在形成的那根 bar"，只是没人接着问"这条路径
+            # 也会吗"）。不剔除的后果：`_simulate_trade_path` 在盘中把这根 bar 当**已收盘**
+            # 价参与 SL/TP 判定与 T7_CLOSE 平仓 → `checked_t7=1`/`price_t7`/`return_t7`/
+            # `correct_t7` 全部被盘中价污染；而同一行的 `close_t7`（走 `_get_price_at_date`）
+            # 因为护栏生效而正确留 None——两者从此永久不一致，`backfill_dir_accuracy.py`
+            # 事后拿收盘价重算时自然测出"系统性偏离"，其实错的是这边而不是它。
+            # 直接复用 `data_pipeline._drop_forming_bar`（不是重新手写判据）——它当初没被
+            # `_get_price_at_date` 复用是因为那边常只有 1 根 bar、够不到它的 `len>=3` 门槛；
+            # 这里 `hist` 是宽窗口批量取价，len 远大于 3，条件天然满足。
+            from data_pipeline import _drop_forming_bar
+            hist = _drop_forming_bar(hist)
+
             hist = hist.head(days_ahead) if len(hist) > days_ahead else hist
             if hist.empty:
                 return None
@@ -1525,6 +1542,14 @@ class Backtester:
                         }
 
             # 未触发 → 按最后一根 K 线收盘平仓
+            # v0.45.173：上面已把「今天正在形成」的那根 bar 剔除；若剔除后剩下的
+            # 已收盘 bar 数还不够 days_ahead（=T+7 当天盘中评分的典型情形），
+            # 说明**真正的 T7_CLOSE 还没有发生**，不能拿倒数第二天的收盘价顶替
+            # ——那答的是「T+6 收在哪」不是「T+7 收在哪」。留到下次（次日或收盘后
+            # 重跑）再评，语义与 `_get_price_at_date` 返回 None 时的"留待收盘后重评"一致。
+            if len(hist) < days_ahead:
+                return None
+
             last_row = hist.iloc[-1]
             last_close = float(last_row["Close"])
             last_idx = hist.index[-1]

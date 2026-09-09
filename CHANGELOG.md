@@ -5,7 +5,91 @@
 
 ---
 
-## [0.45.173] — 2026-09-09 — 占位（进行中：诊断并修复 backfill_dir_accuracy.py 自校验中止导致 close_t7 自 08-28 起全部 NULL）
+## [0.45.173] — 2026-09-09 — close_t7 长期 NULL 根因修复：T+7 路径依赖退出缺一道「未收盘护栏」
+
+### 背景
+
+`backfill_dir_accuracy.py --dry-run` 自 2026-08-27 起持续报「中位偏离 ~1pp 超阈值
+0.10pp，存在系统性口径错误，已中止未写库」，导致 `predictions.close_t7` 对
+08-28 及以后 210+ 条预测全为 NULL，`ic_rerun_readiness`/`replay_scoring` 拿不到
+新样本。表面像交易日数/复权口径错，逐条排查后两者皆已验证正确
+（Labor Day 09-07 被 `CustomBusinessDay(USFederalHolidayCalendar)` 正确跳过；
+30 只标的价格量级无拆股/复权异常）。
+
+### 根因
+
+`backtester.py::_get_price_at_date`（`close_t7` 的取价路径）早在 v0.45.10 就加了
+「未收盘护栏」——盘中调用时，目标交易日那根 yfinance bar 还在形成，其 `Close`
+是此刻最新价不是收盘价，护栏检测到就返回 `None`，把评分推迟到收盘后重跑
+（见 `tests/test_backtest_forming_bar.py`）。但 T+7 用的是**另一条**取价路径——
+`_simulate_trade_path`（路径依赖退出，决定 `checked_t7`/`price_t7`/`return_t7`/
+`correct_t7`）——护栏当时只补在 `_get_price_at_date` 自己身上，从未挪到这条
+姊妹路径。两者共用同一份批量预取缓存（v0.45.120 的注释已经写明"批量下载同样
+会带回今天正在形成的那根 bar"，但没人接着问"这条路径也会吗"）。
+
+后果：当 T+7 到期日恰好落在检查当天（`get_pending_checks` 的到期判据本就是
+`预测日+7交易日 <= 今天`，第一次变为「到期」必然是到期日当天），
+`_simulate_trade_path` 在窗口不足 7 个已收盘交易日时就把最后一根不完整/
+正在形成的 bar 当 T7_CLOSE 收盘价平仓，`checked_t7` 被提前置 1、`price_t7`
+被这根不完整 bar 污染；而同一行的 `close_t7`（走有护栏的 `_get_price_at_date`）
+正确留 None。两者从此永久对不上——`checked_t7=1 AND close_t7 IS NULL`
+永久卡死，`backfill_dir_accuracy.py` 事后拿收盘价重算自然测出"系统性偏离"，
+其实错的是回测这边，不是它的口径。
+
+复测样本：2026-08-28 那批 30 条 T+7 到期日恰好是 2026-09-09（今天），
+`exit_date` 记录为 2026-09-08——证实窗口在检查当时确实不足 7 个已收盘交易日
+就被提前平仓。
+
+### Fixed — `backtester.py`
+
+`_simulate_trade_path`：
+
+- 复用既有共享护栏 `data_pipeline._drop_forming_bar`（不是重新手写判据——
+  它当初没被 `_get_price_at_date` 复用是因为那边常只有 1 根 bar 够不到它的
+  `len>=3` 门槛；这里 `hist` 是宽窗口批量取价，天然满足）剔除正在形成的
+  最后一根 bar；
+- 剔除后若已收盘 bar 数仍不足 `days_ahead`，返回 `None`（留待下次/收盘后
+  重评），不再拿窗口内最后一根不完整数据顶替 T7_CLOSE。
+- SL/TP 在**已收盘**日触发的路径不受影响（不依赖最后一根 bar，逐日扫描
+  提前 return）。
+
+### Fixed — `backfill_dir_accuracy.py`
+
+`_close_after`：命中的第一根 bar 若恰好是「今天」且交易所未收盘，同样返回
+`(None, None)`（计入 `misses`），不再让自校验拿盘中价跟库里的 `price_t7`
+比出假阳性的"系统性偏离"再中止整个批次的写入——防御性补丁，与根因修复
+互为纵深，避免有人在盘中手动运行本脚本时复现同一类故障。
+
+### Changed — 生产数据修复（`pheromone.db`，非代码）
+
+2026-08-28 批次 30 条 `checked_t7=1 AND close_t7 IS NULL` 的预测（`exit_date`
+均为 2026-09-08，即用不完整窗口平仓的产物）已重置为未检查状态
+（`checked_t7=0`，清空 `price_t7`/`return_t7`/`correct_t7`/`ambiguous_t7`/
+`net_return_t7`/`exit_reason`/`exit_date`/`exit_price`/`holding_days`/
+`cost_breakdown`/`spy_return_t7`/`close_t7`/`dir_correct_t7`/
+`dir_ambiguous_t7`），写库前已备份至
+`db_backups/pheromone_pre_v0.45.173_forming_bar_reset_20260909_090711.db`。
+用户已在会话内明确授权本次生产库写操作（写操作本身被 auto-mode 安全分类器
+拦下，经询问后授权）。
+
+⚠️ **实际 close_t7 回填与 `ic_rerun_readiness`/`replay_scoring` 验证尚未完成**
+——本次修复发生在美股盘中（2026-09-09 约 12:20 ET），真实收盘价要等
+16:00 ET 收盘后才存在，护栏的整个意义就是拒绝在此之前编造数据。今晚
+14:00 PT（=17:00 ET，收盘后）的常规定时任务会自动用修复后的代码重跑
+这批预测；后续 session 需在收盘后核对 `predictions` 表 close_t7 是否已
+从 2026-08-27 前进，并跑 `ic_rerun_readiness.py`/`replay_scoring.py
+--all-cohorts` 确认样本量真的往前走了。
+
+### Added — `tests/`
+
+- `tests/test_backtest_forming_bar.py`：新增 `TestSimulateTradePathFormingBar`
+  （4 条）覆盖 `_simulate_trade_path` 的护栏——盘中窗口不足时 defer、收盘后
+  正常平仓、SL 在已收盘日触发不受影响、交易所时钟拿不到时降级放行。
+- `tests/test_backfill_dir_accuracy.py`（新文件，8 条）：覆盖 `_close_after`
+  的同一护栏，含复刻本次事故（2026-08-28 批次、目标日 2026-09-09）的
+  回归测试。
+
+## [0.45.172] — 2026-09-09 — EVALUATION_WEIGHTS 改写（用户明确决策，非自动优化写入）
 
 ## [0.45.172] — 2026-09-09 — EVALUATION_WEIGHTS 改写（用户明确决策，非自动优化写入）
 

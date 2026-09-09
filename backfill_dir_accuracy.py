@@ -132,14 +132,37 @@ def _fetch_closes(tickers: list[str], start: str, end: str) -> dict:
 
 
 def _close_after(series, target_date):
-    """取 target_date 当天或之后第一个有效收盘价。"""
+    """取 target_date 当天或之后第一个有效收盘价。
+
+    v0.45.173：若命中的第一根 bar 恰好是**今天**、且交易所还没收盘，它的
+    值是盘中最新价不是收盘价——与 `backtester._get_price_at_date` /
+    `_simulate_trade_path` 同一个坑（`_simulate_trade_path` 那次是这坑第二次
+    在本仓出现，见 tests/test_backtest_forming_bar.py 的模块 docstring）。
+
+    本函数不像那两处能等下次自动重跑：这里没有 `checked_t7` 那样的状态位
+    拦住重复写入，护栏只能靠"当场拒收"。拒收后按 `(None, None)` 处理——
+    调用方本就把它计入 `misses`（取价失败），而不是让自校验拿这批盘中价
+    跟库里的收盘价比出一个"系统性偏离"再中止整个批次的写入。
+    """
     import pandas as pd
     idx = series.index
     tgt = pd.Timestamp(target_date)
     if getattr(idx, "tz", None) is not None:
         tgt = tgt.tz_localize(idx.tz)
     hit = series[idx >= tgt]
-    return (float(hit.iloc[0]), hit.index[0].date().isoformat()) if len(hit) else (None, None)
+    if not len(hit):
+        return None, None
+    hit_date = hit.index[0].date()
+    try:
+        from datetime import time as _dt_time
+        from data_pipeline import _exchange_now
+        _xnow = _exchange_now()
+        if (_xnow is not None and hit_date == _xnow.date()
+                and _xnow.time() < _dt_time(15, 59)):
+            return None, None
+    except Exception:  # noqa: BLE001 - 护栏失效不该阻断取价
+        pass
+    return float(hit.iloc[0]), hit_date.isoformat()
 
 
 def _close_at_or_before(series, target_date):
