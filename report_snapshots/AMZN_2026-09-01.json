@@ -11,6 +11,7 @@
     "QueenDistiller": 6.82,
     "GuardBeeSentinel": 6.22
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -20,18 +21,11 @@
   },
   "low_conviction": false,
   "low_conviction_reason": "",
-  "cs_rank": {
-    "final": 0.897,
-    "signal": 0.103,
-    "catalyst": 0.179,
-    "sentiment": 0.724,
-    "odds": 0.828,
-    "risk_adj": 0.345
-  },
+  "cs_rank": null,
   "actual_prices": {
-    "t1": null,
+    "t1": 254.98,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-09-01T14:51:21.901448"
+  "created_at": "2026-09-09T00:24:40.988153"
 }
