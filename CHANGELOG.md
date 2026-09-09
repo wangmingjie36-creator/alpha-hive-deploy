@@ -5,7 +5,64 @@
 
 ---
 
-## [0.45.172] — 2026-09-09 — 占位（进行中：EVALUATION_WEIGHTS 用户明确决策改写——归零 signal/risk_adj、剩余三维按原比例重归一化；不构成"证据已确立"，是用户在知情单维证据未过 Bonferroni 校正情况下的主动决定）
+## [0.45.172] — 2026-09-09 — EVALUATION_WEIGHTS 改写（用户明确决策，非自动优化写入）
+
+### 背景
+
+用户看完两批诊断（[final_score 抵消机制](../.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/alpha-hive-final-score-cancellation.md)：
+`experiments/final_score_dilution_report.md`）后要求给出改权重方案。该报告第 6 节原文标题是
+「不建议现在改权重」——三条理由：反事实是样本内构造、单维证据未过 Bonferroni、写入会重置样本世代。
+项目 CLAUDE.md 与 MEMORY.md 此前也都写着「不得据此改权重」。这次是**用户在看过完整证据强度
+（含未过 Bonferroni 这一条）后的主动覆盖决定**，不是证据新近达标——本条目与相关记忆文件都如实
+标注了这一点，避免以后有人把「权重已改」误读成「已验证有效」。
+
+### Changed — `config.py`
+
+`EVALUATION_WEIGHTS`：signal / risk_adj 两维归零，catalyst / sentiment / odds 按**原比例**
+重归一化：
+
+| 维度 | 旧权重 | 新权重 | 干净口径 IC（诊断报告实测） |
+|---|---|---|---|
+| signal | 0.2094 | **0.0000** | −0.088（反向） |
+| catalyst | 0.1878 | 0.3320 | +0.001 |
+| sentiment | 0.1838 | 0.3250 | +0.168（唯一方向显著，未校正 p=0.012） |
+| odds | 0.1940 | 0.3430 | +0.028 |
+| risk_adj | 0.2250 | **0.0000** | −0.084（反向） |
+
+用的是诊断报告里**已实测过**的「仅剔除负向维度」反事实（IC=+0.106, t=+1.23, p=0.219），
+不是另配一套未测过的分配——剩余三维保持原有相对比例，只是归一化到 1.0。
+
+`swarm_agents/queen_distiller.DEFAULT_WEIGHTS`（config.py 注释明确承诺的 ImportError 兜底备份）
+同步更新——此前这份备份长期停在 0.30/0.20/0.20/0.15/0.15 的旧值，未同步会让 ImportError 时
+静默退回已被判定净拖累的旧方案。`weekly_optimizer.py` 的 `DEFAULT_WEIGHTS`/`WEIGHT_CLAMPS`
+**未动**（它是自 v0.44.0 起独立锁定的只读优化器，本次走的是直接改 `config.py`，不是解锁它）；
+`WEIGHT_CLAMPS` 里 `"signal": (0.15, 0.40)` 与新的 signal=0 存在張力，留作已知缺口，
+不在本次范围内处理。
+
+### Added — 世代边界（`ic_rerun_readiness._COHORT_HISTORY`）
+
+权重是纯聚合层改动（不改任何维度自身怎么算），本可用 `replay_scoring.py` 离线验证不必等
+前向累积，但既然是直接生产改动仍按惯例登记世代边界。**边界代价如实记录**：`predictions`
+内 2026-09-08 已有 30 条样本在旧权重下产生（09-07 那条边界 v0.45.163 内唯一一天的扫描
+产出），本次边界作废它们——与近期几条「0 条样本、不作废」不同，这次是真实成本。
+边界取部署日 2026-09-09。
+
+### 一并更新的文档
+
+- `CLAUDE.md`「评分与决策规则」：原「这不构成改权重的依据」一句已过期，改为指向 config.py
+  注释与本条目，并重申权重已改**不等于**证据已验证。
+- MEMORY.md `alpha-hive-final-score-cancellation.md` / `alpha-hive-tradeable-signal.md`：
+  补记本次决定，两条既有的统计边界（未过 Bonferroni、样本内构造）原样保留，不因权重已改而撤回。
+
+### 验证
+
+- `config.validate_weights()` 通过（权重和 1.0000，容差 0.01）。
+- `queen_distiller` 实例化冒烟：`DIMENSION_WEIGHTS` 与新权重逐项一致。
+- 全仓 grep 确认没有代码对 `EVALUATION_WEIGHTS[dim]` 做除法或非零假设，零权重不引入
+  `ZeroDivisionError` 风险。
+- `ic_rerun_readiness.assess()` 世代已切到 2026-09-09/v0.45.172，样本重新从 0 开始计数
+  （25 周门槛不变）。
+- 全量测试套件见下方 sanity 记录。
 
 ## [0.45.171] — 2026-09-08 — 09-08 定时任务零产出、网站未更新：`_db_path()` 解析器写了没接线
 

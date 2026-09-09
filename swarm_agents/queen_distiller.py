@@ -34,17 +34,21 @@ class QueenDistiller:
     1. 规则引擎（始终运行）：加权评分 + 共振 + 投票 → base_score
     2. LLM 引擎（有 API Key 时启用）：Claude 分析推理 → 调整评分 + 生成推理链
 
-    Opportunity Score = 0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds + 0.15×RiskAdj
+    Opportunity Score = Σ wᵢ×维度分，权重唯一真相见 config.EVALUATION_WEIGHTS
+    （此处硬编码的 0.30/0.20/0.20/0.15/0.15 是 v0.45.172 之前的旧值快照，早已
+    与实际配置不符——本文件不再抄写数值，见下方 DEFAULT_WEIGHTS 的定义与注释）。
     """
 
     # 硬编码备份 —— 仅在 config.EVALUATION_WEIGHTS 导入失败时由 __init__ 使用。
     # 正常运行时权重以 config.EVALUATION_WEIGHTS 为准（单一入口）。
+    # v0.45.172：随 config.py 同步更新（此前长期未同步，ImportError 时会静默
+    # 退回已被实测判定净拖累的旧权重方案——signal/risk_adj 各占权重却拖累 IC）。
     DEFAULT_WEIGHTS = {
-        "signal":    0.30,
-        "catalyst":  0.20,
-        "sentiment": 0.20,
-        "odds":      0.15,
-        "risk_adj":  0.15,
+        "signal":    0.0000,
+        "catalyst":  0.3320,
+        "sentiment": 0.3250,
+        "odds":      0.3430,
+        "risk_adj":  0.0000,
     }
 
     # 数据质量源分类契约（_apply_triple_penalty 评分用）

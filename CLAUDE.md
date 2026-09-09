@@ -347,7 +347,7 @@ QueenDistiller 职责：
 
 **权重唯一真相 = `config.EVALUATION_WEIGHTS`，本文件不再抄写数值**（本文件此前硬写的 0.30/0.20/0.20/0.15/0.15 与 config 实际值长期不符，属「文档只存指针不存参数值」原则要治的那类陈旧误导）。
 
-⚠️ 已知：干净口径下加权后净 IC ≈ 0——两个反向维度占 43% 权重、抵消掉唯一有效的 sentiment，详见 `experiments/final_score_dilution_report.md`。**这不构成改权重的依据**（单维证据均不过 Bonferroni，且权重自动写入自 v0.44.0 已只读）。
+⚠️ **v0.45.172（2026-09-09）起权重已改**——原诊断（干净口径下加权后净 IC≈0，两反向维度占 43% 权重抵消掉唯一有效的 sentiment，详见 `experiments/final_score_dilution_report.md`）本身**从未过 Bonferroni 校正**，报告第 6 节原文标题是「不建议现在改权重」。这次是用户在看过完整证据强度后的**主动决定**，不是证据新近达标——不要把权重已改这件事本身读成"已验证有效"。改动理由与代价的完整记录见 `config.py` 的 `EVALUATION_WEIGHTS` 上方注释与 `ic_rerun_readiness._COHORT_HISTORY` 2026-09-09 条（含它作废了哪些已累积样本）。`weekly_optimizer.py` 自身的自动写入机制**未解锁**，仍是只读诊断——本次是直接改 `config.py`，走的不是它的路径。
 
 说明：
 - Signal: 披露与基本面共振强度
