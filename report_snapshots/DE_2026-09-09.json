@@ -1,0 +1,44 @@
+{
+  "ticker": "DE",
+  "date": "2026-09-09",
+  "composite_score": 5.9,
+  "direction": "bearish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 675.26,
+  "agent_votes": {
+    "BuzzBeeWhisper": 3.19,
+    "OracleBeeEcho": 6.1,
+    "ChronosBeeHorizon": 5.62,
+    "CodeExecutorAgent": 3.0,
+    "ScoutBeeNova": 5.67,
+    "RivalBeeVanguard": 5.89,
+    "GuardBeeSentinel": 4.72,
+    "BearBeeContrarian": 2.76,
+    "QueenDistiller": 5.9
+  },
+  "agent_votes_source": "agent_details",
+  "weights_used": {
+    "signal": 0.0,
+    "catalyst": 0.332,
+    "sentiment": 0.325,
+    "odds": 0.343,
+    "risk_adj": 0.0
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.483,
+    "signal": 0.517,
+    "catalyst": 0.828,
+    "sentiment": 0.103,
+    "odds": 0.276,
+    "risk_adj": 0.207
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-09T14:40:25.683807"
+}

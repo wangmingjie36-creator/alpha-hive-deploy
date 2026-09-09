@@ -10,6 +10,7 @@
     "CodeExecutorAgent": 6.5,
     "ScoutBeeNova": 5.718000000000001
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -22,8 +23,8 @@
   "cs_rank": null,
   "actual_prices": {
     "t1": 630.66,
-    "t7": null,
+    "t7": 698.37,
     "t30": null
   },
-  "created_at": "2026-08-28T05:56:22.944280"
+  "created_at": "2026-09-09T14:41:25.671010"
 }

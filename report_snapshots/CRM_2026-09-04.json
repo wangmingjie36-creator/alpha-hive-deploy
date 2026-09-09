@@ -10,6 +10,7 @@
     "GuardBeeSentinel": 7.61,
     "ScoutBeeNova": 7.19351829
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -19,18 +20,11 @@
   },
   "low_conviction": false,
   "low_conviction_reason": "",
-  "cs_rank": {
-    "final": 0.586,
-    "signal": 0.966,
-    "catalyst": 0.448,
-    "sentiment": 0.241,
-    "odds": 0.138,
-    "risk_adj": 0.724
-  },
+  "cs_rank": null,
   "actual_prices": {
-    "t1": null,
+    "t1": 249.12,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-09-04T14:59:34.789131"
+  "created_at": "2026-09-09T14:41:14.139308"
 }

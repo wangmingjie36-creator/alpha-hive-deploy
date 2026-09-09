@@ -10,6 +10,7 @@
     "ScoutBeeNova": 6.3822399999999995,
     "BuzzBeeWhisper": 6.35
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -22,8 +23,8 @@
   "cs_rank": null,
   "actual_prices": {
     "t1": 256.0,
-    "t7": null,
+    "t7": 249.12,
     "t30": null
   },
-  "created_at": "2026-09-01T04:32:13.384130"
+  "created_at": "2026-09-09T14:41:11.447664"
 }
