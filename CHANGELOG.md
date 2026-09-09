@@ -5,7 +5,83 @@
 
 ---
 
-## [0.45.171] — 2026-09-08 — 占位（进行中：09-08 定时任务零产出、网站未更新——`PHEROMONE_DB_PATH` 改成 None 覆盖钩子后三处消费方未接线，autouse 夹具让整套测试看不见）
+## [0.45.171] — 2026-09-08 — 09-08 定时任务零产出、网站未更新：`_db_path()` 解析器写了没接线
+
+### 现象
+
+2026-09-08 是 09-04 以来第一个交易日（09-05/06 周末、09-07 劳动节假日，两者跳过均属正常）。
+当天 14:00 的定时任务 **Step 2 启动 2 秒即崩、零产出**：`.swarm_results_2026-09-08.json` 未生成
+⇒ Step 3/4/5 连锁失败 ⇒ **网站停留在 09-04 15:05 那次部署**，日报未生成，09-08 的 T+7 观测缺失。
+编排器把这些都如实报了（`status=failed`、「本轮零产出」「本轮网站不会更新」），
+`step2_budget.headroom_pct=99` 也正确指出这不是超时。
+
+```
+File "advanced_analyzer.py", line 559, in __init__
+    self.db_path = Path(db_path)
+TypeError: expected str, bytes or os.PathLike object, not NoneType
+```
+
+### 根因
+
+v0.45.160 把 `feedback_loop.PHEROMONE_DB_PATH` 从 `Path(__file__).parent / "pheromone.db"`
+改成**默认 `None` 的覆盖钩子** + 新增 `_db_path()` 运行时解析。**这个改动本身是对的**
+（原写法压根不读 `ALPHA_HIVE_HOME`，`conftest::_isolate_env` 对它完全无效）。
+问题是 **`_db_path()` 当时零调用者**——三处消费方仍在读原始常量，生产上全部拿到 `None`：
+
+| 位置 | 症状 | 波及 |
+|---|---|---|
+| `advanced_analyzer.HistoricalAnalyzer.__init__`（v0.45.132 我写的） | `Path(None)` → `TypeError` | `AdvancedAnalyzer` → `MLEnhancedReportGenerator` → `AlphaHiveDailyReporter` **构造期即崩** ⇒ 整轮扫描 |
+| `feedback_loop._load_close_t7_map` 自己的缺省分支 | `None.exists()` → `AttributeError`（**不是 OSError，那个 except 接不住**） | `BacktestAnalyzer(clean_t7=True)` 的 5 个消费者 |
+| `probability_scorecard.load_outcomes` | `Path(None)` → `TypeError` | 概率记分卡 |
+
+运行时探针实测（不加载 conftest、按默认参数调）：改前 6 个入口崩 5 个，改后 6/6 正常。
+`ic_rerun_readiness.assess()` / `scan_continuity.assess()` / `replay_scoring._db_path()` 本来就没事
+（`replay_scoring` 那处传的是 `None`，被 `db_path or _db_path()` 正确接住）。
+`weekly_optimizer.PHEROMONE_DB_PATH` 是**它自己的**同名常量（真路径、显式传入），不受影响。
+
+### ⭐ 为什么整套测试是绿的（这条比 bug 本身重要）
+
+`tests/conftest.py::_isolate_feedback_loop_close_t7_db` 是 **autouse**，
+在**每一个**测试里都把这个钩子设成一个真实 tmp 路径。
+⇒ **整套 3000+ 条测试没有任何一条见过生产值 `None`**。
+夹具做的正是它该做的隔离，代价是把「默认分支」变成了不可达代码。
+
+**判据：给常量加「默认 `None` + 运行时解析」时，必须有一条测试把它设回 `None`。**
+否则 autouse 夹具会替你把这条路径永久遮住——它不会变红，它根本不存在。
+与「`skip` 把『这条没验』渲染成『这条没问题』」（v0.45.157/165）、
+「`continue` 把『这项缺了』渲染成『这项不存在』」（v0.45.114）同源。
+
+推论二：**解析器写完要立刻数调用者**。`_db_path()` 零调用者时，
+「常量还是 None」与「解析器工作正常」在测试里长得完全一样。
+
+### Fixed
+
+- `feedback_loop._load_close_t7_map`：缺省分支改调 `_db_path()`（v0.45.160 漏的正是自己这处）
+- `advanced_analyzer.HistoricalAnalyzer.__init__`：改调 `feedback_loop._db_path()`
+- `probability_scorecard.load_outcomes`：同上
+- 三处都保留覆盖钩子优先级，`conftest` 与 `tests/test_weekly_optimizer.py` 的 monkeypatch 照常生效
+
+### Added — `tests/test_pheromone_db_path_hook.py`（12 条）
+
+- `production_hook` 夹具**显式把钩子设回 `None`**（撤销 autouse 的隔离赋值），
+  安全性改由 `_isolate_env` 提供（`PATHS.db` 本身已在沙箱内）；
+  另有一条前置断言核对解析结果确实在沙箱、不在仓库内——否则后面几条会去读真生产库。
+- 六个消费方在生产值下逐个构造/调用；覆盖钩子优先级与显式实参优先级各一条。
+- 静态守卫：生产代码不许 `from feedback_loop import PHEROMONE_DB_PATH`
+  （⚠️ **按 AST 认「从 feedback_loop 取这个名字」，不按裸名字 grep**——
+  `weekly_optimizer` 有自己的同名常量，按名字数会误报）；
+  `_load_close_t7_map` 的缺省分支不许读回常量；`_db_path()` 不许零调用者。
+- 变异 4 个全红（三处各读回常量 / 解析器无视覆盖钩子）；
+  socket + curl_cffi 双层探针（canary 自证）断网 12 条全过、拦截 0 次。
+
+### Fixed — 编排器：数据库备份失败原因不再被吞（`~/.claude/scripts/alpha-hive-orchestrator.sh`，不在本仓）
+
+顺带查出的**独立问题**：`cp "$DB_FILE" "$BACKUP_DIR/..." 2>/dev/null` 把失败原因丢掉，
+日志只留一句「数据库备份失败」。实测**自 2026-08-26 起 16 次运行只成功过 1 次**，
+`db_backups/` 里没有任何一份 `pheromone_YYYY-MM-DD.db` 日备份（现存的都是手工 `pre_*` 备份）。
+磁盘余量 280Gi 不是原因；在交互 shell 里手动 `cp` 成功 ⇒ 是 launchd 上下文特有的问题，
+**具体原因待验证**。本版先把 stderr 与退出码打进日志（已用「强制失败」自证能印出原因）。
+⚠️ 这条与 09-08 零产出**无因果关系**，只是同一次排查里发现的。
 
 ## [0.45.170] — 2026-09-08 — 两个写死集合加「不许改成派生」警告；更正一处过度声称
 

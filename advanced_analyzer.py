@@ -554,8 +554,12 @@ class HistoricalAnalyzer:
 
     def __init__(self, db_path: Optional[Path] = None):
         if db_path is None:
-            from feedback_loop import PHEROMONE_DB_PATH   # 路径唯一真相在 feedback_loop
-            db_path = PHEROMONE_DB_PATH
+            # v0.45.171：调解析器，不读常量。PHEROMONE_DB_PATH 自 v0.45.160 起是默认
+            # None 的**覆盖钩子**（测试用 monkeypatch 重绑），真正的解析在 _db_path()。
+            # 读常量在生产上拿到 None ⇒ Path(None) 抛 TypeError ⇒ 整轮扫描在构造期
+            # 就崩（2026-09-08 零产出的根因）。
+            from feedback_loop import _db_path as _fl_db_path
+            db_path = _fl_db_path()
         self.db_path = Path(db_path)
         self._rows_cache: Optional[List[Dict]] = None
         self.db_status: Optional[str] = None

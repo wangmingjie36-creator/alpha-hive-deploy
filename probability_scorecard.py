@@ -304,8 +304,9 @@ def load_outcomes(db_path: Optional[Path] = None) -> Tuple[List[Dict], str]:
     命中 = 方向调整后 > 0（恰好为 0 计入分母算未命中）。
     """
     if db_path is None:
-        from feedback_loop import PHEROMONE_DB_PATH  # 路径唯一真相在 feedback_loop
-        db_path = PHEROMONE_DB_PATH
+        # v0.45.171：调解析器不读常量，理由同 advanced_analyzer（见那里的注释）
+        from feedback_loop import _db_path as _fl_db_path
+        db_path = _fl_db_path()
     db_path = Path(db_path)
     if not db_path.exists():
         _log.warning("[scorecard] %s 不存在，记分不可得", db_path)

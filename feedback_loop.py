@@ -74,7 +74,11 @@ def _load_close_t7_map(db_path: Optional[Path] = None) -> "tuple[dict, str]":
     同一次运行里后续所有调用都直接命中空缓存、不会重试。
     """
     if db_path is None:
-        db_path = PHEROMONE_DB_PATH
+        # v0.45.171：必须走 _db_path()。v0.45.160 把 PHEROMONE_DB_PATH 变成默认 None 的
+        # 覆盖钩子、并写了 _db_path()，但**没有接线**——这里仍在读原始钩子，于是
+        # 生产上 db_path 恒为 None，下一行 .exists() 抛 AttributeError（不是 OSError，
+        # 接不住），BacktestAnalyzer(clean_t7=True) 的五个消费者全线崩。
+        db_path = _db_path()
     if db_path in _CLOSE_T7_CACHE:
         return _CLOSE_T7_CACHE[db_path]
 
