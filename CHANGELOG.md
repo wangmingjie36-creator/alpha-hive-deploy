@@ -5,7 +5,83 @@
 
 ---
 
-## [0.45.175] — 2026-09-10 — 占位（进行中：发现 config.EVALUATION_WEIGHTS 被 adapted_weights 静默旁路，v0.45.174 的修法需改读 swarm.dimension_weights）
+## [0.45.175] — 2026-09-10 — ⚠️ 重大发现：config.EVALUATION_WEIGHTS 被 adapted_weights 静默旁路，v0.45.172 决策从未在生产实际生效
+
+### 背景
+
+用户要求「重新生成并重新部署」被 v0.45.174 发现有 bug 的 09-09 那批已发布报告。
+准备用 `.swarm_results_2026-09-09.json` 里每只标的当天实际的 `dimension_weights`
+字段（而不是重跑扫描）做外科手术式重渲染时，发现这个字段**从未等于**
+`config.EVALUATION_WEIGHTS`——v0.45.172 明明已经把 signal/risk_adj 归零，
+但 09-09 全部 30 只标的的 `dimension_weights` 里这两维仍各占 ~14%~23%。
+
+### 根因
+
+`alpha_hive_daily_report.py:892` 每天调用 `Backtester.adapt_weights(min_samples=10,
+period="t7")`——这是一套独立于 `weekly_optimizer.py`（CLAUDE.md 文档里唯一记载的
+权重优化机制，Track A，v0.44.0 起已锁定只读）的**第三条、此前完全未被文档记录**
+的权重学习通道：按 T+7 回测准确率逐维打分、指数平滑、写入 `pheromone.db` 的
+`adapted_weights` 表（09-09 当天两条记录，`sample_count=1851`，远超 10 的门槛，
+持续生效）。
+
+`alpha_hive_daily_report.py:527/556` 每次扫描把这张表的最新结果通过
+`QueenDistiller(board, adapted_weights=adapted_w)` 传入蜂后。而
+`swarm_agents/queen_distiller.py::__init__`：
+
+```python
+if adapted_weights:
+    self.DIMENSION_WEIGHTS = adapted_weights   # 直接短路，不读 config
+else:
+    ...importlib.reload(config)...             # 只有这条分支会读 config.EVALUATION_WEIGHTS
+```
+
+`adapted_weights` 只要非空就完全跳过 config 热加载分支——`config.EVALUATION_WEIGHTS`
+从 v0.45.172 起归零的 signal/risk_adj，在这条路径下从未被使用过。`gex_regime.py`
+的 `RegimeWeightAdjuster` 再在此基础上做 ±15% 的政体微调（正/负 GEX、risk-on/off、
+高/低 IV），这是 `dimension_weights` 字段里逐标的略有差异的原因，但底子始终是
+`adapted_weights`，不是 config。
+
+### 影响范围
+
+- **v0.45.172 这次用户明知证据未过 Bonferroni、主动选择覆盖项目默认建议的决策，
+  从落地那一刻起就没有在生产评分里实际生效过**——第1章展示的 `final_score`、
+  网站排序/筛选、纸面组合建仓依据的分数，全部来自 `adapted_weights` 路径，不是
+  `config.EVALUATION_WEIGHTS`。
+- `ic_rerun_readiness._COHORT_HISTORY` 2026-09-09 条写的「此刻起的任何扫描…均为
+  新权重口径」**不成立**——只要 `adapted_weights` 表持续有数据（`min_samples=10`
+  门槛在当前 1851 样本下必然满足），世代边界两侧用的其实是同一套权重来源，边界
+  作废掉的那 30 条 09-08 样本、以及后续所有累积样本，在这个意义上并无口径差异。
+- `experiments/final_score_dilution.py` 的诊断本身**不受影响**——它测的是各维度
+  自身的原始分数（0-10 分，agent 独立算出，与权重无关）与 T+7 收益的相关性，
+  权重只在"如何合成 final_score"这一步介入。`replay_scoring.py` 的离线重放同理
+  不受影响，它直接拿存量 `dimension_scores` 套任意候选权重重算，从不依赖生产端
+  实际用了哪套权重。**受影响的只是"生产端有没有真的照着 v0.45.172 的决定去做"**
+  这一件事，不是诊断或离线验证的正确性。
+
+### Fixed（本次会话范围内）
+
+- `generate_ml_report.py::_ch2_five_dim_table`：权重改为优先读
+  `swarm["dimension_weights"]`（当时实际用于合成 final_score 的权重），只有该字段
+  缺失（旧记录）才退回 `config.EVALUATION_WEIGHTS`。新增一行 ⚠️ 提示：当实际权重
+  与 `config.EVALUATION_WEIGHTS` 偏离 >5pp 时如实标注，不掩盖 adapted_weights
+  旁路的存在。这样第2章**始终**和第1章的真实 `final_score` 一致，不必关心究竟是
+  哪条权重路径生效。
+- **已重新生成并重新部署 09-09 那批 12 只标的的 ML 报告**（ABBV/AMC/BILI/COST/
+  CRM/JNJ/NFLX/SNOW/T/TMUS/TSLA/WMT）：用当天原始 `.swarm_results_2026-09-09.json`
+  里每只标的的真实 `dimension_weights`/`dimension_scores`/`final_score` 外科手术式
+  重渲染第2章（只替换 `<!-- 第 2 章 -->`~`<!-- 第 3 章 -->` 之间的 HTML，未重新
+  扫描、未引入 09-10 的实时数据污染 09-09 的历史记录），已用 `html.parser` 验证
+  无解析错误。
+
+### 未处理（需要用户决定，超出本次会话授权范围）
+
+- **是否要让 `adapted_weights` 尊重 config.EVALUATION_WEIGHTS 的决策**（例如：
+  只在未被显式清零的维度上应用自适应学习，或彻底停用这条通道，或反过来接受
+  "adapted_weights 才是真正的自适应权重系统、config 只是其未生效的上限声明"
+  这个现状）——这需要用户在看过完整根因后做一次新的决策，本次只如实记录，
+  不擅自改 `alpha_hive_daily_report.py`/`backtester.py`。
+- `ic_rerun_readiness._COHORT_HISTORY` 的 2026-09-09 世代边界条目描述是否需要
+  更正/补充说明——待用户决定上一条之后再处理，避免边界记录被改两次。
 
 ---
 

@@ -963,11 +963,17 @@ class MLEnhancedReportGenerator:
     def _ch2_five_dim_table(self, swarm: dict) -> str:
         """第2章：五维评分明细
 
-        权重唯一真相 = config.EVALUATION_WEIGHTS（v0.45.173 前这里是硬编码的
-        0.30/0.20/0.20/0.15/0.15，v0.45.172 改权重后未同步，导致本章「综合
-        Opportunity Score」与第1章真实 final_score 长期对不上——本章本身就是
-        「文档只存指针不存参数值」原则要治的那类陈旧快照，只是快照对象是代码
-        不是 CLAUDE.md）。
+        权重优先读 `swarm["dimension_weights"]`——这是 queen_distiller 当时
+        实际用于合成 final_score 的权重（`_regime_weights_used`，config 基准
+        经政体调整后的结果），只有它缺失（旧记录）时才退回 `config.EVALUATION_
+        WEIGHTS`。v0.45.174 曾直接用 config 权重，但 2026-09-10 发现二者可能
+        不是一回事：`alpha_hive_daily_report.py` 会把 `Backtester.adapt_weights()`
+        算出的 `adapted_weights`（存在 pheromone.db 的 adapted_weights 表，daily
+        跑、按 T+7 回测准确率重新学习）直接传给 `QueenDistiller(adapted_weights=)`，
+        这会让 `__init__` 跳过 config 热加载分支——实测 09-09 全部 30 只标的
+        `dimension_weights` 里 signal/risk_adj 仍有 ~14-23% 权重，config 里
+        明明已经归零。读 swarm 自带的字段就不必关心究竟是哪条路径生效，
+        永远和第1章的真实 final_score 一致。
         """
         if not swarm:
             return ""
@@ -981,7 +987,11 @@ class MLEnhancedReportGenerator:
             ("odds",     "赔率 (Odds)",          "期权 P/C / IV Rank / Polymarket"),
             ("risk_adj", "风险调整 (RiskAdj)",  "拥挤度 / 波动 / 交叉验证调整"),
         ]
-        weights = config.EVALUATION_WEIGHTS
+        weights_from_config = False
+        weights = swarm.get("dimension_weights")
+        if not weights:
+            weights = config.EVALUATION_WEIGHTS
+            weights_from_config = True
         rows = ""
         formula_terms = []
         total_weighted = 0.0
@@ -1004,13 +1014,29 @@ class MLEnhancedReportGenerator:
                 </div></td>
             </tr>"""
         score_lv = "高优先级" if total_weighted >= 7.5 else ("观察名单" if total_weighted >= 6.0 else "不行动")
+        weight_src_note = (
+            "本表按 config.EVALUATION_WEIGHTS 重算（swarm 数据未带 dimension_weights，旧记录）"
+            if weights_from_config else
+            "本表权重 = 该标的当日实际合成 final_score 时用的权重（政体调整后），非置信度加权"
+        )
         rows += f"""<tr style="background:var(--surface2);font-weight:bold;">
-            <td><strong>综合 Opportunity Score</strong>（本表按当前权重重算，非置信度加权）</td>
+            <td><strong>综合 Opportunity Score</strong>（{weight_src_note}）</td>
             <td style="color:var(--tp);font-size:1.2em;">{total_weighted:.2f}</td>
             <td></td>
             <td style="color:var(--tp);font-size:1.2em;">{total_weighted:.2f}</td>
             <td>{score_lv}</td>
         </tr>"""
+        config_mismatch_note = ""
+        if not weights_from_config:
+            _cfg_w = config.EVALUATION_WEIGHTS
+            _drift = {k: (weights.get(k, 0.0) - _cfg_w.get(k, 0.0))
+                      for k, _, _ in HINTS if abs(weights.get(k, 0.0) - _cfg_w.get(k, 0.0)) > 0.05}
+            if _drift:
+                _drift_txt = "、".join(f"{k} 实际{weights.get(k,0):.0%} vs config{_cfg_w.get(k,0):.0%}" for k in _drift)
+                config_mismatch_note = f"""<p style="margin-top:4px;font-size:0.85em;color:var(--bear);">
+                    ⚠️ 实际权重与 config.EVALUATION_WEIGHTS 偏离 >5pp：{_drift_txt}——
+                    说明本次合成未直接采用 config 权重（可能经由 adapted_weights/政体调整覆盖），
+                    如实展示，不代表 config 配置有误。</p>"""
         real_final = swarm.get("final_score")
         compare_note = ""
         if real_final is not None:
@@ -1026,6 +1052,7 @@ class MLEnhancedReportGenerator:
             </table>
             <p style="margin-top:12px;font-size:0.85em;color:var(--tm);">公式：Score = {' + '.join(formula_terms)}</p>
             {compare_note}
+            {config_mismatch_note}
         </div>"""
 
     def _ch3_scout(self, agent_details: dict) -> str:
