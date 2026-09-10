@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.175] — 2026-09-10 — 占位（进行中：发现 config.EVALUATION_WEIGHTS 被 adapted_weights 静默旁路，v0.45.174 的修法需改读 swarm.dimension_weights）
+
+---
+
 ## [0.45.174] — 2026-09-10 — ML 报告第2章五维表改读 config.EVALUATION_WEIGHTS（v0.45.172 遗漏的一处消费者）
 
 ### 背景
