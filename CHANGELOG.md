@@ -5,7 +5,76 @@
 
 ---
 
-## [0.45.177] — 2026-09-10 — 占位（进行中：v0.45.176 自查，修 4 个 bug——夹具被 reload 冲掉/观测点在政体层上游/死代码/--json 吐 NaN）
+## [0.45.177] — 2026-09-10 — v0.45.176 自查：修 4 个 bug，其中两个让上一版的守卫本身是假的
+
+对 v0.45.176 做对抗性复查，查出 4 个真 bug。**前两个直接削弱了上一版新加的守卫**——
+它们各自都是本项目反复栽的那两个形状（「夹具没接上」与「探针放在了它要防的 bug 的上游」）。
+
+### Fixed
+
+**① 夹具被 `importlib.reload` 冲掉 ⇒ 5 条新测试是假绿。**
+`tests/test_zero_weight_invariant.py` 用 `monkeypatch.setattr(config,
+"EVALUATION_WEIGHTS", ...)` 注入，而 `QueenDistiller.__init__`（Bug #18 的热加载
+修复）与当时的 `_assert_config_zeros_survive` 都会 `importlib.reload(config)` ——
+**reload 重新执行 config.py，monkeypatch 设的属性随之丢失**，函数读到的是真 config。
+探针实测：注入一张「无任何零维」的权重表后，函数**仍报告有零维被违反**。
+这 5 条测试之所以全绿，只是因为真 config 恰好等于夹具值。
+
+两条修法缺一不可：
+- `_pin_config()` 把 `importlib.reload` 变成 no-op，让注入活过 reload；
+- 夹具值**故意与真 config 不同**（catalyst/sentiment/odds = 0.5/0.3/0.2，
+  真值 .332/.325/.343），并在每处用到它的地方**正面断言夹具确实接上了**。
+  ⭐ **判据：夹具值必须与生产值可区分，否则「接上了」和「没接上」长得一模一样。**
+  实测有效性：去掉 no-op reload 后**红了 7 条**（修之前这 7 条静默全绿）。
+
+`_assert_config_zeros_survive` 同时**去掉了自己那次 reload**：调用点在
+`QueenDistiller.__init__` 之后，那里刚 reload 过，再 reload 一次不但多余，
+还可能与蜂后拿到的是**两个不同快照**——比的就不是同一个东西。改为可注入
+`cfg_weights=` 参数供测试用，默认读当下的 `config.EVALUATION_WEIGHTS`。
+
+**② 扫描期观测点检在了政体层的上游 ⇒ 对上一版刚修的那个 bug 是瞎的。**
+`_assert_config_zeros_survive(queen.DIMENSION_WEIGHTS)` 检的是蜂后**基准**权重
+（即 09-09 adapted_weights 事故那一层），而真正乘进 `_compute_weighted_score`
+的是 `distill()` 里逐标的算出的 `_regime_weights_used`。
+实测：把 `gex_regime` 的 `max(0.02,·)` 地板 bug 放回去，**观测点仍返回 True**，
+而逐标的权重已经是 signal=0.0192。
+⭐ **判据：探针要放在「真正被消费的那个值」上**——放在它要防的 bug 的上游等于没放。
+
+新增 `QueenDistiller._assert_regime_preserved_zeros()`，在 `distill()` 里
+`_regime_weights_used` 算出之后调用。**刻意放在 try/except 之外**：上面那个
+except 吞一切到 debug，写在里面会被静默吃掉；放外面还能同时覆盖降级路径。
+不抛异常（无人值守扫描不该为一条不变式炸掉整轮），打 error + 每实例只报一次。
+
+**③ `_iso_weeks()` 变成死代码。** v0.45.176 把 `evaluate` 改横截面口径后，
+它的调用者归零。同时 `import datetime as _dt` 与 `from statistics import mean`
+成了孤儿 import（后者在改动前就已无用）。⚠️ 本仓 ruff 配置 `ignore = [..., "F401"]`，
+**「ruff 全过」不代表没有孤儿 import**，得自己数读者。
+
+**④ `--json` 在退化数据下产出非法 JSON。** 周度 IC 全部相同（stdev=0）时
+`basic_stats` 的 t 是 NaN，`json.dumps` 吐出裸 `NaN` —— Python 自己读得回来，
+但 jq / JS `JSON.parse` / Go 一律拒收。`--json` 是给别的程序读的，
+静默产出解析不了的输出属「失败没传导到下游」。非有限值现一律降为 `None`。
+（真实数据上不触发，故上一版没发现——**退化夹具是必须的，不能只拿真数据验**。）
+
+### Added
+
+- `tests/test_zero_weight_invariant.py` 29 条（+7）：新增政体层守卫的三条
+  （能判违反 / 合规不误报 / **`distill()` 确实调用了它**——守卫写了没人调用就是
+  死代码，MEMORY「数读者」判据），加一条 `test_upstream_guard_alone_is_insufficient`
+  把「为什么需要两层」变成可执行断言（上游返回 True 而下游返回 False），
+  以及 `test_reads_live_config_when_not_injected`（bug ① 的守卫）。
+- `tests/test_replay_scoring.py::test_degenerate_series_emits_no_nan`：
+  退化夹具 + 严格 JSON 解析（`parse_constant` 抛异常）。
+
+### 验证
+
+- 本轮 6 个变异全部定向变红，基线闸（54 passed 才开跑）生效。
+- 全量套件 **3879 passed / 1 skipped**，唯一红的仍是 `TestCoverageHorizon`
+  （既有，MEMORY 记载属设计意图）。
+- 真实链路复核：config → ML 反馈 → 最不利政体分支（risk_off + negative_gex +
+  IV 80）后 signal=risk_adj=**0.0000**，五维齐全时 final_score=7.0，
+  **ERROR 日志 0 条**（新守卫不误报）。
+
 
 ## [0.45.176] — 2026-09-10 — adapted_weights 通道降级为只读诊断；零权重复活地板与 replay_scoring 池化口径两处修复
 

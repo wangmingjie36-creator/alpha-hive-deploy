@@ -126,6 +126,38 @@ class QueenDistiller:
                         {k: round(v, 3) for k, v in self.DIMENSION_WEIGHTS.items()},
                     )
 
+    def _assert_regime_preserved_zeros(self, ticker: str, regime_weights: Dict) -> bool:
+        """政体层保零守卫（v0.45.176）：喂进评分的权重里，零维必须仍为零。
+
+        **这是「谁会红？」在运行期的落点。** 姊妹守卫
+        `alpha_hive_daily_report._assert_config_zeros_survive` 检的是本对象的
+        `DIMENSION_WEIGHTS`（蜂后基准权重，即 09-09 adapted_weights 事故那一层），
+        但**真正乘进 `_compute_weighted_score` 的是这里的 `regime_weights`**。
+        实测：把 `gex_regime` 的 `max(0.02, ·)` 地板 bug 放回去，姊妹守卫
+        **仍返回 True**，而逐标的权重已经是 signal=0.0192 —— 探针放在它要防的
+        那个 bug 的上游，等于没放。两层缺一不可。
+
+        不抛异常：无人值守的定时扫描里，为一条权重不变式炸掉整轮扫描
+        得不偿失；打 error 日志（编排器与日志检查会看到）+ 每个实例只报一次，
+        避免 30 只标的刷 30 条同样的错。
+        """
+        zeroed = [d for d, v in self.DIMENSION_WEIGHTS.items() if v == 0]
+        if not zeroed:
+            return True
+        bad = {d: regime_weights.get(d) for d in zeroed
+               if isinstance(regime_weights.get(d), (int, float)) and regime_weights[d] != 0}
+        if not bad:
+            return True
+        if not getattr(self, "_regime_zero_violation_logged", False):
+            self._regime_zero_violation_logged = True
+            _log.error(
+                "[%s] 政体层保零违反：基准权重已归零 %s，政体调整后却是 %s"
+                " —— 评分实际用的是后者。历史成因是 `gex_regime.RegimeWeightAdjuster`"
+                " 的 `max(0.02, ·)` 地板把显式零复活成 2%%（v0.45.176 已修）。",
+                ticker, zeroed, {k: round(v, 4) for k, v in bad.items()},
+            )
+        return False
+
     def _compute_ml_weight_adjustments(self) -> Dict[str, float]:
         """Enhancement C: 从 ML 模型特征重要性计算维度调整因子。
 
@@ -996,6 +1028,13 @@ class QueenDistiller:
                           {k: f"{v:.3f}" for k, v in _regime_weights_used.items()})
         except Exception as _e_regime:
             _log.debug("政体权重/GEX 预计算失败 (%s): %s", ticker, _e_regime)
+
+        # v0.45.176：政体层保零守卫。**刻意放在 try/except 之外** ——
+        # 上面那个 except 吞一切到 debug，检查写在里面会被静默吃掉
+        # （见 MEMORY `alpha-hive-failure-propagation`：容错把失败改写成「没发生过」）。
+        # 放在外面还能同时覆盖降级路径（异常时 _regime_weights_used 退回
+        # dict(self.DIMENSION_WEIGHTS)，那条路也必须保零）。
+        self._assert_regime_preserved_zeros(ticker, _regime_weights_used)
 
         # ===== 0.5 提取 F&G 值（供步骤 4 门槛 + 步骤 4.6 评分调整使用）=====
         _fg_value = None

@@ -225,7 +225,8 @@ def build_agent_votes(data: dict) -> "tuple[dict, str]":
     return votes, (VOTES_FROM_AGENT_DETAILS if details else VOTES_UNAVAILABLE)
 
 
-def _assert_config_zeros_survive(effective: dict, adapted_diag: "dict | None" = None) -> bool:
+def _assert_config_zeros_survive(effective: dict, adapted_diag: "dict | None" = None,
+                                 cfg_weights: "dict | None" = None) -> bool:
     """扫描期观测点：`config.EVALUATION_WEIGHTS` 里被显式归零的维度，必须仍为零。
 
     v0.45.176 新增。**这条存在的理由是「谁会红？」答不上来。**
@@ -240,17 +241,34 @@ def _assert_config_zeros_survive(effective: dict, adapted_diag: "dict | None" = 
     也保零。所以它红了就一定意味着**有人新接了一条会改写 config 的通道**，
     不会被 ML 反馈这类合法调整误触发。
 
+    ⚠️ **本函数只覆盖蜂后的基准权重（即 09-09 那次事故所在的那一层）。**
+    真正喂进评分的是 `QueenDistiller.distill` 里逐标的算出的 `_regime_weights_used`，
+    政体层的保零由 `QueenDistiller._assert_regime_preserved_zeros` 单独把守 ——
+    两层缺一不可：实测把 `gex_regime` 的地板 bug 放回去后，**本函数仍返回 True**，
+    而逐标的权重已是 signal=0.0192。探针放在它要防的那个 bug 的上游，等于没放。
+
+    Args:
+        cfg_weights: 供测试注入。**默认 None 时读 `config.EVALUATION_WEIGHTS`
+            但不 reload** —— 调用点在 `QueenDistiller.__init__` 之后，那里刚
+            `importlib.reload(config)` 过，模块属性已是最新。
+            ⚠️ 这里曾经自己也 reload 过一次，有两个问题：① 与蜂后拿到的可能是
+            **两个不同快照**，比的就不是同一个东西；② `importlib.reload` 会
+            **冲掉 `monkeypatch.setattr(config, "EVALUATION_WEIGHTS", ...)`**，
+            于是本函数的测试实际读的是真 config，只因真 config 恰好等于夹具值
+            才是绿的 —— 典型的「夹具没接上」（见 MEMORY 同名判据）。
+
     Returns:
         True = 不变式成立。False = 已违反（同时打 error 日志 + stdout 告警）。
     """
-    try:
-        import importlib
-        import config as _cfg
-        importlib.reload(_cfg)
-        cfg_w = dict(_cfg.EVALUATION_WEIGHTS)
-    except (ImportError, AttributeError) as e:
-        _log.warning("权重不变式检查跳过（config 读取失败）: %s", e)
-        return True
+    if cfg_weights is not None:
+        cfg_w = dict(cfg_weights)
+    else:
+        try:
+            import config as _cfg
+            cfg_w = dict(_cfg.EVALUATION_WEIGHTS)
+        except (ImportError, AttributeError) as e:
+            _log.warning("权重不变式检查跳过（config 读取失败）: %s", e)
+            return True
 
     zeroed = [d for d, v in cfg_w.items() if v == 0]
     violated = {d: effective.get(d) for d in zeroed

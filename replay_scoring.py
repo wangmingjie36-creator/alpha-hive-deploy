@@ -43,13 +43,11 @@
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
 import json
 import math
 import os
 import sqlite3
 import sys
-from statistics import mean
 from typing import Callable, Dict, List, Optional
 
 # v0.45.160：`DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
@@ -96,10 +94,6 @@ def rank_ic(xs: List[float], ys: List[float]) -> Optional[float]:
         return None
     from ic_diagnostics import spearman
     return spearman(xs, ys)
-
-
-def _iso_weeks(dates: List[str]) -> int:
-    return len({_dt.date.fromisoformat(d).isocalendar()[:2] for d in dates})
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -269,8 +263,16 @@ def evaluate(name: str, score_fn: Callable[[Dict], Optional[float]],
     weekly = subsample_non_overlapping(daily, "周") if daily else []
     if len(weekly) >= 2:
         m, _se, t, _n = basic_stats(weekly)
-        ic_val, t_val = m, t
-        p_val = normal_two_sided_p(t)
+        # v0.45.176：非有限值一律降成 None，**不要**让 NaN 漏出去。
+        # 周度 IC 全部相同（stdev=0）时 basic_stats 的 t 是 NaN，
+        # 而 `json.dumps(float("nan"))` 会吐出裸 `NaN` —— Python 自己读得回来，
+        # 但那不是合法 JSON，jq / JS `JSON.parse` / Go 一律拒收。
+        # `--json` 是给别的程序读的，静默产出解析不了的输出属「失败没传导到下游」。
+        ic_val = m if isinstance(m, float) and math.isfinite(m) else None
+        t_val = t if isinstance(t, float) and math.isfinite(t) else None
+        p_val = normal_two_sided_p(t) if t_val is not None else None
+        if p_val is not None and not math.isfinite(p_val):
+            p_val = None
     else:
         ic_val = t_val = p_val = None
 

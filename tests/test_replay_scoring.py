@@ -9,12 +9,18 @@
 
 import datetime as dt
 import json
+import math
 import os
 import sqlite3
 import subprocess
 import sys
 
 import pytest
+
+
+def _reject_json_constant(name):
+    """给 `json.loads(parse_constant=...)`：碰到 NaN/Infinity 就抛，模拟严格解析器。"""
+    raise ValueError(f"非法 JSON 常量: {name}")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -219,6 +225,36 @@ class TestCrossSectionalCaliber:
         assert r["sign_conflict"] is True, (
             "横截面 −、池化 + 却没标符号冲突 —— 下一个读输出的人无从知道"
             "自己看的是哪个量")
+
+    def test_degenerate_series_emits_no_nan(self, db):
+        """周度 IC 全部相同（stdev=0）时 t 是 NaN —— 不许让它漏进输出。
+
+        `json.dumps(float("nan"))` 吐出裸 `NaN`：Python 自己读得回来，但那不是
+        合法 JSON，jq / JS `JSON.parse` / Go 一律拒收。`--json` 是给别的程序读的，
+        静默产出解析不了的输出属「失败没传导到下游」。
+
+        变红的变异：把 `evaluate` 里的
+        `t_val = t if isinstance(t, float) and math.isfinite(t) else None`
+        改回 `t_val = t`。
+        """
+        rows = []
+        for day in ("2026-01-05", "2026-01-12", "2026-01-19"):
+            for i in range(6):
+                rows.append((day, f"T{i}", {k: float(i) for k in rs.DIMS},
+                             100.0, 100.0 + i, 0))
+        loaded = rs.load_samples(db(rows), all_cohorts=True)["rows"]
+        r = rs.evaluate("退化：每日 IC 恒为 +1", lambda row: row["dims"]["signal"], loaded)
+
+        assert r["ic"] == pytest.approx(1.0), "本夹具的前提是每日 IC 恒为 +1"
+        assert r["weeks"] == 3, "前提二：确实取到 3 个不重叠周（否则走的是另一条分支）"
+        for k in ("ic", "t", "p", "ic_pooled"):
+            v = r[k]
+            assert v is None or math.isfinite(v), f"{k} 是非有限值 {v!r}"
+
+        dumped = json.dumps(r)
+        assert "NaN" not in dumped and "Infinity" not in dumped, \
+            f"--json 会产出非法 JSON：{dumped[:200]}"
+        json.loads(dumped, parse_constant=_reject_json_constant)   # 严格解析必须过
 
     def test_narrow_day_contributes_no_week(self, db):
         """单日标的数 < MIN_WIDTH 的日子没有横截面信息，不许计入功效分母。
