@@ -21,6 +21,7 @@ from ml_predictor import (
     # v0.45.142：类型闸的单一真相搬到 ml_predictor，与训练侧共用一个谓词
     usable_dim as _usable_dim,
 )
+import config
 from config import WATCHLIST
 from hive_logger import PATHS, get_logger, pdt_today
 
@@ -960,29 +961,41 @@ class MLEnhancedReportGenerator:
         </div>"""
 
     def _ch2_five_dim_table(self, swarm: dict) -> str:
-        """第2章：五维评分明细"""
+        """第2章：五维评分明细
+
+        权重唯一真相 = config.EVALUATION_WEIGHTS（v0.45.173 前这里是硬编码的
+        0.30/0.20/0.20/0.15/0.15，v0.45.172 改权重后未同步，导致本章「综合
+        Opportunity Score」与第1章真实 final_score 长期对不上——本章本身就是
+        「文档只存指针不存参数值」原则要治的那类陈旧快照，只是快照对象是代码
+        不是 CLAUDE.md）。
+        """
         if not swarm:
             return ""
         dim_scores = swarm.get("dimension_scores", {})
         if not dim_scores:
             return ""
-        DIMS = [
-            ("signal",   "信号强度 (Signal)",   0.30, "聪明钱 SEC Form4 / 机构持仓"),
-            ("catalyst", "催化剂 (Catalyst)",   0.20, "事件日历 / 财报 / 产品发布"),
-            ("sentiment","情绪 (Sentiment)",    0.20, "X 平台 / Reddit / 新闻情绪"),
-            ("odds",     "赔率 (Odds)",          0.15, "期权 P/C / IV Rank / Polymarket"),
-            ("risk_adj", "风险调整 (RiskAdj)",  0.15, "拥挤度 / 波动 / 交叉验证调整"),
+        HINTS = [
+            ("signal",   "信号强度 (Signal)",   "聪明钱 SEC Form4 / 机构持仓"),
+            ("catalyst", "催化剂 (Catalyst)",   "事件日历 / 财报 / 产品发布"),
+            ("sentiment","情绪 (Sentiment)",    "X 平台 / Reddit / 新闻情绪"),
+            ("odds",     "赔率 (Odds)",          "期权 P/C / IV Rank / Polymarket"),
+            ("risk_adj", "风险调整 (RiskAdj)",  "拥挤度 / 波动 / 交叉验证调整"),
         ]
+        weights = config.EVALUATION_WEIGHTS
         rows = ""
+        formula_terms = []
         total_weighted = 0.0
-        for key, label, weight, hint in DIMS:
+        for key, label, hint in HINTS:
+            weight = weights.get(key, 0.0)
             score = dim_scores.get(key, 0)
             weighted = score * weight
             total_weighted += weighted
+            formula_terms.append(f"{weight:.0%}×{label.split(' ')[0]}")
             bar_pct = int(score / 10 * 100)
             bar_color = "var(--bull)" if score >= 7 else ("var(--neut)" if score >= 5 else "var(--bear)")
+            zero_w_note = '<br><small style="color:var(--bear)">权重=0（当前不计入合成分）</small>' if weight == 0 else ""
             rows += f"""<tr>
-                <td>{label}<br><small style="color:var(--tm)">{hint}</small></td>
+                <td>{label}<br><small style="color:var(--tm)">{hint}</small>{zero_w_note}</td>
                 <td style="font-weight:bold;color:{bar_color}">{score:.1f}</td>
                 <td>{weight:.0%}</td>
                 <td style="font-weight:bold">{weighted:.2f}</td>
@@ -992,12 +1005,18 @@ class MLEnhancedReportGenerator:
             </tr>"""
         score_lv = "高优先级" if total_weighted >= 7.5 else ("观察名单" if total_weighted >= 6.0 else "不行动")
         rows += f"""<tr style="background:var(--surface2);font-weight:bold;">
-            <td><strong>综合 Opportunity Score</strong></td>
+            <td><strong>综合 Opportunity Score</strong>（本表按当前权重重算，非置信度加权）</td>
             <td style="color:var(--tp);font-size:1.2em;">{total_weighted:.2f}</td>
             <td></td>
             <td style="color:var(--tp);font-size:1.2em;">{total_weighted:.2f}</td>
             <td>{score_lv}</td>
         </tr>"""
+        real_final = swarm.get("final_score")
+        compare_note = ""
+        if real_final is not None:
+            compare_note = f"""<p style="margin-top:4px;font-size:0.85em;color:var(--tm);">
+                蜂群实际输出的 final_score（含置信度加权，第1章展示的数字）= {float(real_final):.2f}，
+                与本表差异属预期——置信度低的维度在真实合成中被打折，本表只演示权重结构。</p>"""
         return f"""
         <div class="section">
             <h2>第 2 章：五维评分明细</h2>
@@ -1005,7 +1024,8 @@ class MLEnhancedReportGenerator:
                 <tr><th>维度</th><th>分数</th><th>权重</th><th>加权</th><th>进度</th></tr>
                 {rows}
             </table>
-            <p style="margin-top:12px;font-size:0.85em;color:var(--tm);">公式：Score = 0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds + 0.15×RiskAdj</p>
+            <p style="margin-top:12px;font-size:0.85em;color:var(--tm);">公式：Score = {' + '.join(formula_terms)}</p>
+            {compare_note}
         </div>"""
 
     def _ch3_scout(self, agent_details: dict) -> str:

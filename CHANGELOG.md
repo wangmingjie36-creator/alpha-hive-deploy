@@ -5,7 +5,54 @@
 
 ---
 
-## [0.45.174] — 2026-09-10 — 占位（进行中：ML 报告第2章五维表硬编码旧权重未随 v0.45.172 同步）
+## [0.45.174] — 2026-09-10 — ML 报告第2章五维表改读 config.EVALUATION_WEIGHTS（v0.45.172 遗漏的一处消费者）
+
+### 背景
+
+用户要求评估 `alpha-hive-final-score-cancellation.md` 里 Track 0（"把 final_score 和
+sentiment 并排展示"）与 Track A（"用 replay_scoring.py 离线验证候选权重再动手"）在
+v0.45.172 已直接改 config.py 之后是否还有必要做。分析过程中顺手核对
+`generate_ml_report.py` 是否已有类似展示，发现 `_ch2_five_dim_table`（第2章"五维评分
+明细"）里的权重是**硬编码的本地 `DIMS` 列表**（0.30/0.20/0.20/0.15/0.15），完全不读
+`config.EVALUATION_WEIGHTS`——这正是 `queen_distiller.py::DEFAULT_WEIGHTS` 那类"权重
+唯一真相在 config.py，消费者各自留一份副本"的坑，v0.45.172 改权重时只同步了
+`queen_distiller.py`（ImportError 兜底路径），漏了这一处纯展示层的消费者。
+
+**已确认为真实的线上问题**：v0.45.172 于 09-09 05:48 落地，09-09 14:42 的日报
+（提交 `5feb7e1`，14:43 已部署到 gh-pages，此刻仍是网站在服务的版本）用的是旧代码，
+第2章公式栏原样印出 `0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds +
+0.15×RiskAdj`，与第1章真实 `final_score`（读 `swarm.get("final_score")`，本就是
+蜂群按新权重算出的数）完全对不上——同一份报告里两章给出两个不同口径的分数。
+
+### Fixed
+
+- `generate_ml_report.py::_ch2_five_dim_table`：权重列表改为运行时读
+  `config.EVALUATION_WEIGHTS`（新增 `import config`），公式栏文案随之动态生成，
+  不再是写死字符串。
+- 零权重维度（当前 signal/risk_adj）在表格里加一行红色小字提示"权重=0（当前不计入
+  合成分）"——顺带落实了 Track 0 想要的"哪个信号真的在起作用"可见性，不需要单独
+  新开一个展示模块。
+- 表格下方新增一行对照：蜂群真实输出的 `final_score`（含置信度加权，第1章展示的
+  数字）与本表按裸权重重算的合计分，并注明两者不同属预期（置信度低的维度在真实
+  合成里被打折，本表只演示权重结构），避免用户看到两个数字打架却不知道为什么。
+
+### 验证
+
+- `ast.parse` 语法检查通过。
+- 用 mock `swarm` dict（含 5 维分数 + `final_score`）直接调用
+  `_ch2_five_dim_table`，确认权重列渲染为 0%/33%/32%/34%/0%（与当前
+  `config.EVALUATION_WEIGHTS` 一致）、零权重维度提示正确出现、公式栏与对照行文案
+  正确。
+- `pytest -k "ml_report or generate_ml"`：22 passed, 1 skipped（无用例断言过第2章
+  硬编码权重，未破坏既有测试）。
+
+### 遗留
+
+- **已部署到 gh-pages 的 09-09 报告仍是旧代码渲染的**（30 只标的的 ML 报告 +
+  daily md/json），本次只修了源码，未重新生成/重新部署那批已发布文件——这是对外
+  发布动作，需要用户明确同意才做，已在本次会话回复里问用户要不要重跑。
+- Track 0 / Track A 的完整评估结论见本次会话回复，未写入本文件（避免与
+  `alpha-hive-final-score-cancellation.md` auto-memory 重复维护同一份分析）。
 
 ---
 
