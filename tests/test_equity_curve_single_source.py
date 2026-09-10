@@ -281,3 +281,119 @@ class TestExitCountsCoverEnteredTradesOnly:
         real = d["trading_stats"]["realistic"]
         assert last["cum_net_pct"] == pytest.approx(real["total_return_pct"], abs=0.02)
         assert last["cum_spy_pct"] == pytest.approx(real["spy_return_pct"], abs=0.02)
+
+
+# ── ⑤ v0.45.180 自查：失败路径上的东西，自己得先能被执行到 ────────────────
+class TestUnavailableStateIsActuallyReachable:
+    """v0.45.179 写了一条「真实策略回测本次不可用」的提示，而它在自己存在的
+    唯一场景里**不可达** —— `initTradingStats` 只从 `initEquityCurve` 里调用，
+    且在「曲线为空就 return」之后。曲线为空正是回测失败的表现。
+
+    同一形状：CLAUDE.md 里「证明守卫有牙的那把尺子，自己从未被拿出来过」。
+    """
+
+    def _js(self):
+        from pathlib import Path
+        return Path("templates/dashboard.js").read_text(encoding="utf-8")
+
+    def _js_code_only(self):
+        """去掉整行 `//` 注释后的 JS。
+
+        ⚠️ 为什么必须去注释：拿文案当标志物，会被**解释这次修复的注释**打红。
+        本 session 栽了两次 —— 第二次是在把第一次的教训写进 CHANGELOG 之后。
+        所以这不是「记住就行」的事，得由代码强制：断言只看代码，不看注释。
+        （只剥整行注释，不动行尾 `//`，避免误伤字符串里的 `https://`。）
+        """
+        return "\n".join(ln for ln in self._js().splitlines()
+                          if not ln.lstrip().startswith("//"))
+
+    def test_trading_stats_rendered_before_empty_curve_return(self):
+        """`initTradingStats()` 的调用必须排在「曲线为空就 return」之前。
+
+        变异：把那行调用移回 `if(container)container.style.display='none'` 之后 ⇒ 红。
+        """
+        code = self._js_code_only()
+        start = code.index("window.AH.initEquityCurve=function()")
+        body = code[start:start + 3000]
+        call_at = body.find("window.AH.initTradingStats()")
+        empty_guard_at = body.find("if(!eq||!eq.length){")
+        assert call_at != -1, "initEquityCurve 里找不到 initTradingStats 调用"
+        assert empty_guard_at != -1, "找不到空曲线守卫，本条断言的锚点失效了"
+        assert call_at < empty_guard_at, (
+            "initTradingStats() 排在了空曲线 early-return 之后 —— "
+            "曲线为空（= 回测失败/冷启动）时整个卡片区块不渲染，"
+            "「本次不可用」提示成为死代码，正是它要说明的那个场景。")
+
+    def test_header_does_not_claim_fixed_position_size(self):
+        """卡片表头不许再说「固定每笔 $N」——那是被删掉的独立累加模型的参数。
+
+        变异：把表头改回 `固定每笔 $'+Math.round(initCap*...)` ⇒ 红。
+        """
+        code = self._js_code_only()
+        assert "固定每笔 $" not in code, (
+            "表头又在宣称「固定每笔 $N」，而下面那批数字用的是 NAV 百分比 + 复利")
+
+
+class TestColdStartIsNotRenderedAsCrash:
+    """`{"error": "无已验证预测数据"}` 是冷启动的**正常**状态，不该打堆栈。"""
+
+    def test_no_traceback_for_backtest_error(self, monkeypatch, caplog):
+        """变异：把 `_BacktestUnavailable` 改回 `RuntimeError`（落进通用 except，
+        带 exc_info=True）⇒ 红。
+        """
+        import dashboard_renderer as dr
+        import portfolio_backtest as pb
+
+        monkeypatch.setattr(pb, "run_backtest",
+                            lambda *a, **k: {"error": "无已验证预测数据"})
+        with caplog.at_level("WARNING"):
+            dr._load_accuracy_data()
+        rel = [r for r in caplog.records if "本次不渲染" in r.getMessage()]
+        assert rel, "冷启动时应有一条 warning 说明区块不渲染"
+        assert all(r.exc_info is None for r in rel), (
+            "冷启动（正常状态）打了整条 traceback —— 把正常渲染成了异常")
+
+
+class TestWindowCutoffNotCountedAsHeldToT7:
+    """WINDOW_CUTOFF = 窗口结束时强平（按 0 收益），不是「持有到 T+7 未触发 SL/TP」。
+
+    当前生产里恰好 0 笔 —— **恰好为零不等于分类正确**，所以直接喂一个合成结果测分类器。
+    """
+
+    def test_cutoff_has_its_own_bucket(self, monkeypatch):
+        """变异：删掉 `if "CUTOFF" in _key:` 分支（落回 else）⇒ 红。"""
+        import dashboard_renderer as dr
+        import portfolio_backtest as pb
+
+        fake = {
+            "portfolio": {"initial_nav": 50000.0, "final_nav": 50000.0,
+                          "total_return_pct": 0.0, "total_pnl_usd": 0.0},
+            "risk_metrics": {"sharpe_ratio": 0.0, "profit_factor": 1.0,
+                             "max_drawdown_pct": 0.0, "win_rate_pct": 0.0},
+            "benchmark": {"spy_return_pct": None, "spy_end_nav": None,
+                          "period_start": None, "period_end": None},
+            "alpha": None,
+            "trade_stats": {"total_trades": 6},
+            "filter_stats": {"total_predictions": 10},
+            "by_exit_reason": {"T7_CLOSE": {"count": 3}, "SL": {"count": 1},
+                               "TP": {"count": 1}, "WINDOW_CUTOFF": {"count": 1}},
+            "all_trades": [], "equity_curve": [],
+        }
+        monkeypatch.setattr(pb, "run_backtest", lambda *a, **k: fake)
+        ts = dr._load_accuracy_data()["trading_stats"]
+        assert ts["exit_cutoff_count"] == 1
+        assert ts["exit_close_count"] == 3, (
+            "WINDOW_CUTOFF 被算进了「持有到 T+7」——那是两回事")
+        assert (ts["exit_close_count"] + ts["exit_sl_count"]
+                + ts["exit_tp_count"] + ts["exit_cutoff_count"]) == 6
+
+
+class TestNoDeadCorrectField:
+    """v0.45.179 曾输出一个零消费者、且语义被悄悄改过的 `correct` 字段。"""
+
+    def test_curve_points_have_no_correct_field(self, dash):
+        """变异：把 `"correct": bool(...)` 加回曲线点 ⇒ 红。"""
+        d = dash()
+        assert d["equity_curve"], "夹具没产生曲线点，这条断言证明不了什么"
+        assert all("correct" not in pt for pt in d["equity_curve"]), (
+            "曲线点又带上了没人读的 correct 字段（且它的语义变过）")

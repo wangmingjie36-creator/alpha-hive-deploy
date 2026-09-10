@@ -321,8 +321,10 @@ async def cmd_scorecard(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"  净胜率 {_fmt_num(ts.get('net_win_rate'))}% · 夏普 {_fmt_num(ts.get('sharpe_net'), 2)} · "
         f"盈亏比 {_fmt_num(ts.get('profit_factor'), 2)}"
     )
-    # vs SPY 超额：优先用 realistic 组合买入持有口径（portfolio_backtest，与 SPY buy-and-hold 同基准），
-    # 而非净值曲线"每笔 $5K 累加重叠窗口"口径（方法偏弱、与基准不可比）。realistic 缺失时回退。
+    # vs SPY 超额：读 realistic（portfolio_backtest，与 SPY buy-and-hold 同基准）。
+    # v0.45.180 更正注释：这里原本写着「而非净值曲线'每笔 $5K 累加重叠窗口'口径」——
+    # 那套独立累加模型已在 v0.45.179 删除，曲线与 realistic 现在同源，
+    # 顶层 ts.alpha_vs_spy 也来自同一次回测。回退分支保留只为兼容旧快照 JSON。
     _alpha_disp = (ts.get('realistic') or {}).get('alpha_vs_spy', ts.get('alpha_vs_spy'))
     lines.append(
         f"  最大回撤 {_fmt_num(ts.get('max_dd_net_pct'))}% · vs SPY 超额 {_fmt_num(_alpha_disp)}%"

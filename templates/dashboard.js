@@ -640,6 +640,9 @@ window.AH.initTradingStats=function(){
     var winRate=Number(real.win_rate_pct)||0;
     var trades=Number(real.trades_entered)||0;
     var maxConc=Number(real.max_concurrent)||15;
+    // 起始资金优先读 realistic（这一支必定有值），别退到外层那个 ||50000 兜底 ——
+    // 那是 BacktestConfig 的又一份硬编码拷贝。
+    if(real.initial_capital!=null)initCap=Number(real.initial_capital);
 
     var netColor=netPct>=0?'var(--bull)':'var(--bear)';
     var spyColor=!spyAvail?'var(--mt)':(spyPct>=0?'var(--bull)':'var(--bear)');
@@ -648,8 +651,11 @@ window.AH.initTradingStats=function(){
     var shColor=sharpe>=1?'var(--bull)':(sharpe>=0?'#f59e0b':'var(--bear)');
 
     html+='<div style="grid-column:1/-1;font-size:.78em;color:var(--mt);margin:2px 0 6px">'+
-      '<b>真实回测口径</b>（max_concurrent='+maxConc+' 并发限制 / 固定每笔 $'+
-      Math.round(initCap*(Number(ts.position_size_pct)||0.10)).toLocaleString()+'）'+
+      // v0.45.180：这行以前写「固定每笔 $5,000」——那是被删掉的独立累加模型的参数，
+      // 就印在一批用 NAV×8%/12%/10% 复利算出来的数字正上方。v0.45.179 修了
+      // Python 侧那份方法学文案，漏了**用户实际看到的**这一份。
+      '<b>真实回测口径</b>（max_concurrent='+maxConc+' 并发限制 / '+
+      '每笔 = 当前 NAV 的固定比例，按已实现盈亏复利）'+
       '</div>';
     html+=card((netPct>=0?'+':'')+netPct.toFixed(2)+'%','Net 累计收益',netColor,
       '$'+Math.round(real.final_nav).toLocaleString()+' / 起始 $'+Math.round(initCap).toLocaleString());
@@ -672,6 +678,10 @@ window.AH.initTradingStats=function(){
       (ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
     html+=card(ts.exit_tp_count!=null?ts.exit_tp_count:'—','止盈触发','var(--bull)','+10% 止盈');
     html+=card(ts.exit_close_count!=null?ts.exit_close_count:'—','持有到 T+7','var(--t)','未触发 SL/TP');
+    // 只在真出现时才占一张卡：WINDOW_CUTOFF = 回测窗口结束时仍未到期、按 0 收益强平。
+    // 它以前被并进「持有到 T+7」；单列出来又不给它读者，就成了另一个死字段。
+    if(ts.exit_cutoff_count)
+      html+=card(ts.exit_cutoff_count,'窗口截断强平','#f59e0b','未到期，按 0 收益结算');
     html+=card(ts.avg_cost!=null?(ts.avg_cost*100).toFixed(1)+'bp':'—','平均单笔成本','var(--ts)','滑点+佣金+借券');
 
     // v0.45.179：曲线与本区块**同源**——都来自 portfolio_backtest 的同一次
@@ -702,6 +712,24 @@ window.AH.initEquityCurve=function(){
   var eq=__AH__.equity_curve;
   var container=document.getElementById('eqCurveContainer');
   var cold=document.getElementById('eqCold');
+
+  // ⚠️ v0.45.180：这一行必须在下面的 early-return **之前**。
+  // 它原本在 return 之后 —— 于是曲线为空时（= 回测失败/冷启动，正是
+  // 「真实策略回测本次不可用」那条分支存在的唯一场景）整个卡片区块根本不渲染，
+  // 那条提示是**死代码**。v0.45.179 写它的时候就没被执行过一次。
+  // 同一形状：CLAUDE.md 里「证明守卫有牙的那把尺子，自己从未被拿出来过」。
+  if(window.AH.initTradingStats)window.AH.initTradingStats();
+
+  // 冷启动文案要区分「还没有 T+7 数据」和「回测失败了」——
+  // 两者都会让曲线为空，但只有前者是「等等就好」。
+  if(cold){
+    var _ts0=__AH__.trading_stats||{};
+    var _hasReal=!!(_ts0.realistic&&_ts0.realistic.final_nav!=null);
+    cold.innerHTML=_hasReal
+      ? '<div>本期没有任何入场交易，无资金曲线可画</div>'
+      : '<div>资金曲线暂不可用<br><span style="font-size:.82em;opacity:.7">'
+        +'尚无 T+7 验证数据，或 portfolio_backtest 未能产出结果（见上方说明与扫描日志）</span></div>';
+  }
   if(!eq||!eq.length){
     if(container)container.style.display='none';
     if(cold)cold.style.display='';
@@ -709,8 +737,6 @@ window.AH.initEquityCurve=function(){
   }
   if(container)container.style.display='';
   if(cold)cold.style.display='none';
-  // Trading stats cards
-  if(window.AH.initTradingStats)window.AH.initTradingStats();
 
   var cv=document.getElementById('eqCurveChart');
   if(!cv)return;

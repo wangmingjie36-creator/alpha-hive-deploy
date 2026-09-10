@@ -768,6 +768,14 @@ def _radar_data(ticker: str, swarm_detail: dict) -> list:
 # Extracted helpers (formerly inlined in render_dashboard_html)
 # ---------------------------------------------------------------------------
 
+class _BacktestUnavailable(RuntimeError):
+    """portfolio_backtest 没有可用结果（冷启动无数据，或它自己报了 error）。
+
+    与「渲染这段代码时崩了」区分开：前者是正常状态、不该打堆栈，
+    后者是 bug、必须带 exc_info。
+    """
+
+
 def _load_accuracy_data() -> dict:
     """Load backtester accuracy stats and enhanced metrics."""
     _acc_stats: dict = {}
@@ -970,6 +978,7 @@ def _load_accuracy_data() -> dict:
     # 回测失败时它们会一起冒充一份完整结果。
     _trading_stats: dict = {
         "exit_tp_count": None, "exit_sl_count": None, "exit_close_count": None,
+        "exit_cutoff_count": None,
         "avg_gross_ret": None, "avg_net_ret": None, "avg_cost": None,
         "net_win_rate": None, "sharpe_net": None,
         "max_dd_net_pct": None, "max_dd_gross_pct": None,
@@ -1000,7 +1009,10 @@ def _load_accuracy_data() -> dict:
             # ——取不到入场清单就把全部 963 笔都算进去，曲线静默换成另一个模型
             # （实测 Gross 会从 +5.14% 跳到 +20.09%），页面照常渲染、日志只有 debug。
             # 那正是 CLAUDE.md「这个失败，下游怎么知道？」要治的形状：没人会红。
-            raise RuntimeError(f"portfolio_backtest 返回错误：{_bt_result['error']}")
+            # 用专用异常，与「真崩了」区分开：`{"error": "无已验证预测数据"}` 是
+            # 冷启动的**正常**状态，打一整条 traceback 会把正常渲染成异常
+            # ——本项目反过来的毛病（把异常渲染成正常）刚治过，别在对面翻车。
+            raise _BacktestUnavailable(_bt_result["error"])
 
         # 配置值也等回测成功之后再写 —— 失败时连半截状态都不留，
         # 否则「失败时 trading_stats 里不许有数字」这条不变式就有了例外，
@@ -1033,16 +1045,24 @@ def _load_accuracy_data() -> dict:
                 # 与买入持有不可比，却曾被图例标成「买入持有」（实测差 3.6pp）。
                 # 取不到就是 None，绝不用 0 冒充「大盘没动」。
                 "cum_spy_pct": _pt.get("spy_nav_pct"),
-                "correct": bool((_pt.get("net_ret_pct") or 0) > 0),
+                # 不再输出 `correct` 字段：全仓零消费者，而 v0.45.179 还把它的语义
+                # 从 `correct_t7`（方向判对）悄悄换成了 `net > 0`（这笔赚没赚钱）——
+                # 一个没人读、语义又变过的字段，留着只会误导下一个读它的人。
+                # 死字段的判据见 auto-memory `alpha-hive-dead-field`：查功能是否生效先数读者。
             })
 
         # ── 卡片统计：全部只在**实际入场的那些笔**上算 ──
         _by_exit = _bt_result.get("by_exit_reason", {}) or {}
-        _exit_tp = _exit_sl = _exit_close = 0
+        _exit_tp = _exit_sl = _exit_close = _exit_cutoff = 0
         for _reason, _es in _by_exit.items():
             _key = str(_reason or "T7_CLOSE").upper()
             _cnt = int(_es.get("count") or 0)
-            if "TP" in _key:
+            if "CUTOFF" in _key:
+                # WINDOW_CUTOFF = 回测窗口结束时仍未到期，按 0 收益强平。
+                # **不是**「持有到 T+7 未触发 SL/TP」。旧的 else 分支把它算进
+                # exit_close，当前恰好 0 笔所以看不出来 —— 恰好为零不等于正确。
+                _exit_cutoff += _cnt
+            elif "TP" in _key:
                 _exit_tp += _cnt
             elif "SL" in _key:
                 _exit_sl += _cnt
@@ -1051,6 +1071,7 @@ def _load_accuracy_data() -> dict:
         _trading_stats["exit_tp_count"] = _exit_tp
         _trading_stats["exit_sl_count"] = _exit_sl
         _trading_stats["exit_close_count"] = _exit_close
+        _trading_stats["exit_cutoff_count"] = _exit_cutoff
 
         _gross_rets = [float(_t.get("gross_pct") or 0.0) for _t in _bt_trades]
         _net_rets = [float(_t.get("net_pct") or 0.0) for _t in _bt_trades]
@@ -1102,9 +1123,22 @@ def _load_accuracy_data() -> dict:
             "predictions_total": _bt_result.get("filter_stats", {}).get(
                 "total_predictions", 0),
             "max_concurrent": _bt_cfg.max_concurrent,
+            # ── 配置溯源 ──
+            # 这几个不是「算出来的结果」，是「这批数字是用哪套参数算的」。
+            # 它们在页面上没有直接读者，但已部署的 index.html 是**唯一**记录了
+            # 当时配置的地方 —— 2026-09-10 排查「累计收益为什么越改越低」，
+            # 靠的就是翻 gh-pages 历史里这个 __AH__ 负载。留着，并且补全，
+            # 免得下次只能靠猜。（`correct` 字段被删是因为它零读者**且语义变过**，
+            # 与这里的性质不同。）
+            "bull_size_pct": _bt_cfg.bull_size_pct,
+            "bear_size_pct": _bt_cfg.bear_size_pct,
+            "neutral_size_pct": _bt_cfg.position_size_pct,
             "methodology": "portfolio_backtest_with_concurrency_limit",
         }
 
+    except _BacktestUnavailable as _bt_na:
+        # 正常状态：没有可回测的数据。warning 但不带堆栈。
+        _log.warning("资金曲线与「真实策略回测」区块本次不渲染：%s", _bt_na)
     except Exception as _eq_err:
         # v0.45.43：debug → warning + 堆栈。
         # 这条 debug 让一个 TypeError 隐身了三次重跑：资金曲线、SPY 基准、
@@ -2002,16 +2036,24 @@ def render_dashboard_html(report: Dict, date_str: str,
     # v0.45.179 把预置值改成 None 之后，**key 存在、值是 None**，`.get` 的默认值
     # 根本不会生效 → `float(None)` 抛 TypeError，整个 dashboard 渲染挂掉。
     # 「`.get` 默认值救不了 None」是本仓 silent-degradation 记忆里的第一条。
+    # ⚠️ 读不到就**不报数**。旧写法在 except 里硬写 50000/0.10/0.08/0.12/15，
+    # 那是 BacktestConfig 的第二份拷贝 —— 它一旦漂移，页面会理直气壮地印出
+    # 一套没人在用的参数，而且没有任何信号。宁可少说一句话。
     try:
         from portfolio_backtest import BacktestConfig as _BC_desc
         _bc_desc = _BC_desc()
-        _initial_capital = float(_bc_desc.initial_capital)
-        _pos_pct = float(_bc_desc.position_size_pct)
-        _bull_pct, _bear_pct = float(_bc_desc.bull_size_pct), float(_bc_desc.bear_size_pct)
-        _max_conc = int(_bc_desc.max_concurrent)
-    except Exception:
-        _initial_capital, _pos_pct = 50000.0, 0.10
-        _bull_pct, _bear_pct, _max_conc = 0.08, 0.12, 15
+        _methodology_html = (
+            f"${int(float(_bc_desc.initial_capital) / 1000)}K 起始资金，"
+            f"每笔 = 当前 NAV × {float(_bc_desc.bull_size_pct) * 100:.0f}%（看多）"
+            f"/ {float(_bc_desc.bear_size_pct) * 100:.0f}%（看空）"
+            f"/ {float(_bc_desc.position_size_pct) * 100:.0f}%（中性），"
+            f"按已实现盈亏复利、最多同时持仓 {int(_bc_desc.max_concurrent)} 笔、"
+            f"总敞口不超过 NAV；现金不足即跳过。"
+        )
+    except Exception as _bc_err:
+        _log.warning("方法学参数读取失败，页面改为不列具体参数（不写死第二份拷贝）: %s",
+                     _bc_err)
+        _methodology_html = "仓位与并发参数本次读取失败，见 portfolio_backtest.BacktestConfig。"
 
     try:
         from zoneinfo import ZoneInfo as _ZI
@@ -2601,9 +2643,7 @@ def render_dashboard_html(report: Dict, date_str: str,
     <div class="acc-section-title" style="margin-top:18px">真实策略回测（扣成本 · 路径依赖 · Sprint 1）</div>
     <div id="tradingStatsBox" style="margin:10px 0 16px">
       <div style="font-size:.78em;color:var(--ts);margin-bottom:8px">
-        <strong>方法学</strong>：${int(_initial_capital/1000)}K 起始资金，
-        每笔 = 当前 NAV × {_bull_pct*100:.0f}%（看多）/ {_bear_pct*100:.0f}%（看空）/ {_pos_pct*100:.0f}%（中性），
-        按已实现盈亏复利、最多同时持仓 {_max_conc} 笔、总敞口不超过 NAV；现金不足即跳过。
+        <strong>方法学</strong>：{_methodology_html}
         -5% 硬止损 / +10% 止盈（盘中触发，跳空时 gap-aware），扣滑点 + 佣金 + 借券费（空头）。
         <span style="color:#e99;">下方资金曲线就是这次回测的 NAV 路径，终点 = 上面的组合终值。</span>
         <span style="color:var(--mt);">Sharpe 已年化（×√36，T+7 周期）。</span>
