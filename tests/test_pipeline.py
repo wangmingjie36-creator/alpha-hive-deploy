@@ -640,7 +640,10 @@ class TestBacktesterCleanup:
         conn.commit()
         conn.close()
 
-        deleted = bt.cleanup_old_predictions(days=180)
+        # max_fraction=1.0：本用例的表只有 2 行，删 1 行 = 50%，会被 v0.45.178 的
+        # 安全闸（默认 5%）拦下。这里测的是「旧行删、近行留」，不是安全闸本身。
+        # ⚠️ 别把这个 override 复制到生产调用点，那等于把闸门拆了。
+        deleted = bt.cleanup_old_predictions(days=180, max_fraction=1.0)
         assert deleted == 1
 
         conn = sqlite3.connect(db)

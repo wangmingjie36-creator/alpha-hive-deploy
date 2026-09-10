@@ -1111,9 +1111,15 @@ class AlphaHiveDailyReporter:
                 _log.debug("向量记忆清理失败: %s", e)
         if Backtester:
             try:
-                Backtester().cleanup_old_predictions(180)
+                # v0.45.178：不再硬编码 180。保留期唯一真相 =
+                # `config.PREDICTION_RETENTION_DAYS`（现 3650 天）。
+                # 旧的硬编码 180 天每天从库头永久删一个扫描日，自 2026-08-25 起
+                # 累计销毁 115 条已回填样本，且全程无日志可见 —— 详见该函数 docstring。
+                Backtester().cleanup_old_predictions()
             except Exception as e:
-                _log.debug("预测清理失败: %s", e)
+                # debug → warning：这一步失败本身无害（不删而已），但它被 debug
+                # 吞掉过一次，让「清理到底跑没跑、删了什么」在生产里完全不可观测。
+                _log.warning("预测清理失败（本次未清理，数据未受影响）: %s", e)
 
     @staticmethod
     def _evaluate_thesis_breaks(ticker: str, row: Dict) -> "list":

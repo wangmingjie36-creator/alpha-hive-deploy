@@ -2037,22 +2037,86 @@ class Backtester:
         except (sqlite3.Error, OSError, TypeError) as e:
             _log.warning("保存自适应权重失败: %s", e)
 
-    def cleanup_old_predictions(self, days: int = 180) -> int:
-        """删除超过 days 天的旧预测记录
+    def cleanup_old_predictions(self, days: Optional[int] = None,
+                                max_fraction: Optional[float] = None) -> int:
+        """删除超过 *days* 天的旧预测记录。**不可逆、不备份。**
+
+        ⚠️ `days=None`（默认）时在**函数体内**解析 `config.PREDICTION_RETENTION_DAYS`，
+        不写成模块级常量、也不写进函数默认值 —— 后两者会在 import 那一刻冻死，
+        env 覆盖与 monkeypatch 都失效（本仓栽过一整族，见 CLAUDE.md「新产物的默认
+        路径不许是相对路径」一节的同源判据）。
+
+        ⚠️ **这条删除曾经是隐形的**（v0.45.178 之前）：调用点硬编码 180 天，
+        成功路径只打 info、失败路径在调用点被 `except: _log.debug` 吞掉，
+        于是「每天从库头永久删一天」这件事在生产日志里没有任何痕迹，
+        直到 2026-09-10 才因为「网站累计收益怎么越改越低」被反查出来。
+        现在：真删了就打 warning（含条数与被删日期区间），删得过多直接拒绝并打 error。
+
+        Args:
+            days: 保留天数。None = 用 `config.PREDICTION_RETENTION_DAYS`。
+            max_fraction: 本次允许删除的最大占比。None = 用
+                `config.PREDICTION_CLEANUP_MAX_FRACTION`。**显式传值 = 声明
+                「我知道这次要删很多」**，供一次性维护脚本与测试使用。
+                ⚠️ 生产扫描路径不许传它 —— 守卫见
+                `tests/test_prediction_retention.py::test_no_fraction_override_at_call_site`。
 
         Returns:
-            删除的记录数
+            实际删除的记录数（被安全闸拦下时为 0）
         """
+        if days is None:
+            try:
+                import config as _cfg_ret
+                days = int(_cfg_ret.PREDICTION_RETENTION_DAYS)
+            except (ImportError, AttributeError, TypeError, ValueError) as e:
+                # 读不到配置时**不删**。这条删除不可逆，兜底必须偏向「什么都不做」。
+                _log.error("cleanup_old_predictions: 读不到 PREDICTION_RETENTION_DAYS，"
+                           "本次不清理（宁可不删也不误删）: %s", e)
+                return 0
+
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         try:
             with sqlite3.connect(self.store.db_path) as conn:
+                total = conn.execute(
+                    f"SELECT COUNT(*) FROM {PredictionStore.TABLE}"
+                ).fetchone()[0]
+                doomed = conn.execute(
+                    f"SELECT COUNT(*), MIN(date), MAX(date) FROM {PredictionStore.TABLE}"
+                    f" WHERE date < ?", (cutoff,)
+                ).fetchone()
+                n_doomed, d_min, d_max = doomed[0], doomed[1], doomed[2]
+                if not n_doomed:
+                    return 0
+
+                # ── 安全闸：一次删掉超过 max_fraction 的表，视为参数配错 ──
+                # 生产里这条不可逆删除唯一会红的地方。
+                if max_fraction is not None:
+                    max_frac = float(max_fraction)
+                else:
+                    try:
+                        import config as _cfg_frac
+                        max_frac = float(_cfg_frac.PREDICTION_CLEANUP_MAX_FRACTION)
+                    except (ImportError, AttributeError, TypeError, ValueError):
+                        max_frac = 0.05
+                if total and (n_doomed / total) > max_frac:
+                    _log.error(
+                        "cleanup_old_predictions 拒绝执行：本次将删除 %d/%d 条"
+                        "（%.1f%% > 上限 %.1f%%），日期 %s~%s，保留期 %d 天。"
+                        "这通常意味着保留期被配小了，而不是数据真的该删。"
+                        "确要清理请显式传 days= 并先备份 %s",
+                        n_doomed, total, n_doomed / total * 100, max_frac * 100,
+                        d_min, d_max, days, self.store.db_path,
+                    )
+                    return 0
+
                 cursor = conn.execute(
                     f"DELETE FROM {PredictionStore.TABLE} WHERE date < ?", (cutoff,)
                 )
                 deleted = cursor.rowcount
                 conn.commit()
                 if deleted:
-                    _log.info("清理旧预测 %d 条（>%d 天）", deleted, days)
+                    # warning 而非 info：这是不可逆的数据销毁，要在扫描日志里看得见。
+                    _log.warning("清理旧预测 %d 条（保留期 %d 天，删除日期区间 %s~%s，"
+                                 "剩余 %d 条）", deleted, days, d_min, d_max, total - deleted)
                 return deleted
         except (sqlite3.Error, OSError) as e:
             _log.warning("cleanup_old_predictions 失败: %s", e)
