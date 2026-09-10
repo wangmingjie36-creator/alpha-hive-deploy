@@ -67,6 +67,7 @@
 
 - **纸面组合** `paper_portfolio.py`：参数唯一真相 = 模块内 `CONFIG`（v0.39.0 起为回放拐点配置，历史变更查 CHANGELOG）；挂载点 = 日报主流程 `alpha_hive_daily_report._post_scan_enrichment`（v0.38.0 起，**不再**依赖 generate_deep_v2）；状态文件 `paper_portfolio_state/`（meta.json 的 config_snapshot 自 v0.40.2 每次运行刷新）；KPI 看 `compute_kpis()`
 - **权重优化** `weekly_optimizer.py`（Track A）：T+7 回测 → clamp ±10pp → 原子写 config.py，审计日志 `weight_history.jsonl`
+- **⚠️ 另一条权重通道（v0.45.175 才发现，与上面这条无关）** `Backtester.adapt_weights()`：每日扫描内调用，写 `pheromone.db.adapted_weights` 表，经 `QueenDistiller(adapted_weights=...)` 在运行时短路掉 `config.EVALUATION_WEIGHTS` 热加载——不写 config.py、不受 weekly_optimizer 的锁保护、此前未被本文件记录。判断生产实际用了哪套权重看 `swarm.dimension_weights`，不看 config。详见 auto-memory `alpha-hive-adapted-weights-bypass.md`
 - **月度自诊断** `self_analyst.py`（Track B）：输出 `self_analysis_briefs/YYYY-MM.md`，含每蜂维度 rank-IC 小节（v0.40.0）
 - **IBKR 桥接** `ibkr_sync.py`：手动流程（export actions → 用户 TWS 下单 → import CSV → reconcile），状态在 `paper_account/`
 
@@ -345,9 +346,11 @@ QueenDistiller 职责：
 ### 候选机会综合分（Opportunity Score）
 `Opportunity Score = Σ wᵢ × 维度分`，五个维度：signal / catalyst / sentiment / odds / risk_adj。
 
-**权重唯一真相 = `config.EVALUATION_WEIGHTS`，本文件不再抄写数值**（本文件此前硬写的 0.30/0.20/0.20/0.15/0.15 与 config 实际值长期不符，属「文档只存指针不存参数值」原则要治的那类陈旧误导）。
+**`config.EVALUATION_WEIGHTS` 是权重的「配置意图」唯一真相，不是「生产实际生效值」唯一真相——二者自 v0.45.175 起已知不同，见下条。**（本文件此前硬写的 0.30/0.20/0.20/0.15/0.15 与 config 实际值长期不符，属「文档只存指针不存参数值」原则要治的那类陈旧误导；现在连 config 本身是否生效都不能想当然。）
 
 ⚠️ **v0.45.172（2026-09-09）起权重已改**——原诊断（干净口径下加权后净 IC≈0，两反向维度占 43% 权重抵消掉唯一有效的 sentiment，详见 `experiments/final_score_dilution_report.md`）本身**从未过 Bonferroni 校正**，报告第 6 节原文标题是「不建议现在改权重」。这次是用户在看过完整证据强度后的**主动决定**，不是证据新近达标——不要把权重已改这件事本身读成"已验证有效"。改动理由与代价的完整记录见 `config.py` 的 `EVALUATION_WEIGHTS` 上方注释与 `ic_rerun_readiness._COHORT_HISTORY` 2026-09-09 条（含它作废了哪些已累积样本）。`weekly_optimizer.py` 自身的自动写入机制**未解锁**，仍是只读诊断——本次是直接改 `config.py`，走的不是它的路径。
+
+🚨 **v0.45.175（2026-09-10）发现：这次决策从未在生产评分里实际生效过。** `alpha_hive_daily_report.py` 每天调用 `Backtester.adapt_weights()`——一条独立于 `weekly_optimizer.py`、此前完全未被本文件记录的第三条权重通道，写 `pheromone.db.adapted_weights` 表，经 `QueenDistiller(adapted_weights=...)` **在运行时短路掉 config 热加载**。09-09 全部 30 只标的实际权重（`swarm.dimension_weights`）signal/risk_adj 仍占 14%~23%，config 里明明已归零。判断"生产实际用了哪套权重"必须看 `swarm.dimension_weights`（或 ML 报告第2章，v0.45.175 已改读这个字段），不能只看 config。完整根因见 auto-memory `alpha-hive-adapted-weights-bypass.md`；是否让 `adapted_weights` 尊重 config 待用户决定，本文件所有"权重唯一真相"表述在此之前都只对配置意图成立。
 
 说明：
 - Signal: 披露与基本面共振强度
