@@ -11,6 +11,7 @@
     "QueenDistiller": 6.74,
     "OracleBeeEcho": 6.269230769230769
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -23,8 +24,8 @@
   "cs_rank": null,
   "actual_prices": {
     "t1": 269.8,
-    "t7": null,
+    "t7": 278.43,
     "t30": null
   },
-  "created_at": "2026-08-29T09:10:08.371059"
+  "created_at": "2026-09-10T14:42:52.040314"
 }

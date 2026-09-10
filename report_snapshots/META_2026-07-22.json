@@ -14,6 +14,7 @@
     "ScoutBeeNova": 5.21145,
     "QueenDistiller": 5.05
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -27,7 +28,7 @@
   "actual_prices": {
     "t1": 606.0999755859375,
     "t7": 594.9199829101562,
-    "t30": null
+    "t30": 592.85
   },
-  "created_at": "2026-08-11T06:07:57.385203"
+  "created_at": "2026-09-10T14:42:57.553836"
 }

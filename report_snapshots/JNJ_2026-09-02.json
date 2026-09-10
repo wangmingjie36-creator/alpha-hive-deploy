@@ -12,6 +12,7 @@
     "RivalBeeVanguard": 5.99,
     "ChronosBeeHorizon": 5.9
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -21,18 +22,11 @@
   },
   "low_conviction": false,
   "low_conviction_reason": "",
-  "cs_rank": {
-    "final": 0.621,
-    "signal": 0.103,
-    "catalyst": 0.828,
-    "sentiment": 0.69,
-    "odds": 0.69,
-    "risk_adj": 0.897
-  },
+  "cs_rank": null,
   "actual_prices": {
-    "t1": null,
+    "t1": 278.43,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-09-03T00:01:03.026513"
+  "created_at": "2026-09-10T14:42:55.422119"
 }
