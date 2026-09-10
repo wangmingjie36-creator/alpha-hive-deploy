@@ -76,6 +76,11 @@ class QueenDistiller:
         self.enable_llm = enable_llm
         self.ml_model = ml_model
         if adapted_weights:
+            # ⚠️ v0.45.176 起**生产不再走这条分支**：`alpha_hive_daily_report` 不再传
+            # `adapted_weights=`（理由见 `Backtester.adapt_weights` 的 docstring —— 它学的是
+            # 「谁更爱说中性」而不是准头）。参数保留仅供测试注入自定义权重。
+            # **不要在生产代码里传它。** 传了就整体顶掉 config，且下方 config 热加载
+            # （Bug #18 的修复）会被恒真短路掉——那正是它六个月来的真实状态。
             self.DIMENSION_WEIGHTS = adapted_weights
         else:
             # 修复 Bug #18：config 热加载 — 旧实现权重在 __init__ 时快照，

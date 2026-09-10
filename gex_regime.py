@@ -154,6 +154,10 @@ class RegimeWeightAdjuster:
     - Negative GEX → 加权 Oracle（odds/期权信号更重要）, 降 Scout
     - 高 IV 环境 → 加权 Oracle, 降 Buzz（情绪在高 IV 下是噪音）
     - 调整幅度 ±15%（相对于基准权重），总和始终归一化到 1.0
+
+    ⚠️ **不变式（v0.45.176）：`base_weights` 里为 0 的维度，返回值里必须仍为 0。**
+    偏移是相对的，所以零维本就不会被偏移；真正的坑是 `max(0.02, ·)` 地板会把
+    零复活成 2%。守卫见 `tests/test_zero_weight_invariant.py`。
     """
 
     # 最大偏移百分比（相对于基准权重）
@@ -223,7 +227,17 @@ class RegimeWeightAdjuster:
                 reasons.append(f"低IV({iv_rank:.0f}):加权情绪/降期权")
 
         # ── 施加偏移（clamp 到 ±MAX_SHIFT_PCT）──
+        # v0.45.176：显式零权重豁免地板。旧实现是 `w[k] = max(0.02, w[k] + shift*w[k])`，
+        # 而偏移量是**相对**的（`shift * w[k]`）⇒ w=0 时偏移恒为 0，紧接着的
+        # `max(0.02, 0)` 把它**复活成 2%**。后果：这条链路上不存在「零权重」这个状态，
+        # 无论上游（config / adapt_weights / ML 反馈）怎么归零，逐标的政体调整都会顶回来。
+        # 实测三种政体下 config 的 signal/risk_adj=0 全部落到 1.92%~1.97%，
+        # 即 v0.45.172 的决策哪怕修好上游也只能兑现 ~94%。
+        # 地板的本意是「别把某维压到没有」，不是「不许某维为零」——0 是显式意图，
+        # 不是「太小了」，两者必须分开。
         for k in w:
+            if w[k] <= 0:
+                continue  # 显式归零：既不偏移（相对偏移本就为 0）也不受地板抬升
             shift = max(-self.MAX_SHIFT_PCT, min(self.MAX_SHIFT_PCT, shifts[k]))
             w[k] = max(0.02, w[k] + shift * w[k])  # 相对偏移，最小 2%
 

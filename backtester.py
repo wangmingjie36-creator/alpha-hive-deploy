@@ -1832,6 +1832,33 @@ class Backtester:
         """
         根据历史方向准确率自动调整 5 维公式权重
 
+        🔒 **v0.45.176 起：只读诊断，不再参与生产评分。**
+        照 v0.44.0 对 `weekly_optimizer` 的处置——保留计算与 `adapted_weights` 表的
+        审计轨迹，但断掉写入生产的那条线（`alpha_hive_daily_report` 不再把
+        `load_adapted_weights()` 的结果传给 `QueenDistiller`）。**不要接回去。**
+
+        断掉的理由（实测，非设计洁癖）：
+
+        1. **学的量与用的量不是一个量。** 这里学的是「每只蜂的方向判对率」，
+           权重却作用在「维度分数」上。两者排名 Spearman ρ≈+0.2。
+        2. **那个判对率几乎全是方向配比的人工制品。** 零技能置换检验（保持每只蜂
+           看多/看空/中性配比不变、只打乱它在哪只标的哪一天下注）：5 只蜂里 4 只的
+           技能 Δ 在 ±2.2pp 内且 95%CI 全部跨 0，唯一例外是 BuzzBee(+5.5pp)。
+           而喂进本函数的原始准确率差有 8.7pp（41.6%~50.3%）。
+           差额来自口径而非判断力：同一批 887 条收益，永远说 bullish 命中 52.2%、
+           永远说 neutral 只有 35.5%（T+7 常走出 ±5% 中性带）。
+           ⇒ 本函数实际在排的是「**谁更爱说中性**」。
+        3. **函数形式说不出该说的话。** 下方 `max(0.05, acc**2)`：41.6%（反向有信息）
+           与 58.4%（正向有信息）拿到完全相同的权重，且归一化后零权重/负权重
+           **不可表达**。v0.45.172「把负向维度归零」这个决定，本函数在结构上编码不了。
+        4. **实测反向后果**：ChronosBee 说中性 76%~82% ⇒ catalyst 在 122 条历史记录里
+           有 94 条是五维中权重最低的；而 catalyst 当前单维横截面 rank-IC=+0.097，
+           是五维最高的那个。
+
+        ⚠️ 附带发现：`outcome_utils.DEFAULT_NEUTRAL_TOLERANCE_PCT`（±5% 中性带）此前
+        经本函数直通生产权重——v0.38.1 那次 3.0→5.0 改的是生产评分，而它的注释写着
+        「不影响交易行为」。断线后该注释才重新为真。
+
         优先使用 T+7（更可靠），T+7 样本不足时自动降级到 T+1：
         - T+7：平滑因子 80% 新权重（充分信任）
         - T+1：平滑因子 50% 新权重（T+1 噪声更大，保守调整）
@@ -2034,10 +2061,19 @@ class Backtester:
     @staticmethod
     def load_adapted_weights(db_path: Optional[str] = None) -> Optional[Dict]:
         """
-        加载最近的自适应权重（供 QueenDistiller 使用）
+        加载最近的自适应权重（**只读诊断**）
+
+        🔒 v0.45.176 起**不再供 QueenDistiller 使用**——理由见 `adapt_weights` 的
+        docstring。现存消费者只剩两个，都是展示/对照用途：
+        `alpha_hive_daily_report`（打对照日志）与 `gui/interactions.py`（面板展示）。
+        **把返回值传进 `QueenDistiller(adapted_weights=...)` 就是把 bug 接回来。**
+
+        ⚠️ 另一个旧坑（保留记录）：本查询没有任何日期过滤，`sample_count >= 3`
+        一旦满足就永远返回最近一条 ⇒ 自 2026-02-27 起从未返回过 None ⇒
+        `QueenDistiller.__init__` 里那段修 Bug #18 的 `importlib.reload(config)`
+        热加载分支，在生产里**六个月来是死代码**（`if adapted_weights:` 恒真短路）。
 
         优先加载 T+7 权重（更可靠），其次加载 T+1 权重（早期降级）。
-        返回的权重已附加 _meta 字段，QueenDistiller 会自动忽略未知 key。
 
         Returns:
             {signal: 0.xx, ..., _meta: {period, samples}} 或 None

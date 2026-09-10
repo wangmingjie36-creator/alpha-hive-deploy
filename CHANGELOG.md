@@ -5,7 +5,121 @@
 
 ---
 
-## [0.45.176] — 2026-09-10 — 占位（进行中：停掉 adapted_weights 喂生产的通道，修零权重复活地板与 replay_scoring 池化口径）
+## [0.45.176] — 2026-09-10 — adapted_weights 通道降级为只读诊断；零权重复活地板与 replay_scoring 池化口径两处修复
+
+### 背景
+
+v0.45.175 发现 `config.EVALUATION_WEIGHTS` 被 `Backtester.adapt_weights()` 静默旁路。
+本次决定怎么处理这条通道，先做了取证：
+
+**① 不是 100% 旁路，是 80% 旁路。** `smoothed = 0.2×config + 0.8×学习值`。
+用 09-09 库里两条记录逐位复算吻合：纯学习分量 signal=0.176 / risk_adj=0.228，
+config 归零后落库 0.141 / 0.182 —— **config 只拿到两成投票权**。
+
+**② `adapt_weights` 学的不是准头，是「谁更爱说中性」。** 零技能置换检验
+（保持每只蜂看多/看空/中性的配比不变、只打乱它在哪只标的哪一天下注，
+块 bootstrap 按扫描日重采样）：
+
+| 蜂 / 维度 | 看多 | 看空 | 中性 | 实测 | 零技能基准 | 技能 Δ | 95%CI |
+|---|---|---|---|---|---|---|---|
+| Scout / signal | 5.6% | 8.3% | 86.1% | 44.2% | 42.2% | +2.0pp | [−4.0, +7.2] |
+| Oracle / odds | 87.7% | 5.5% | 6.8% | 49.2% | 51.4% | −2.2pp | [−9.2, +3.3] |
+| Buzz / sentiment | 6.4% | 35.7% | 57.9% | 49.6% | 44.1% | +5.5pp | [−0.5, +11.9] |
+| Chronos / catalyst | 7.8% | 16.1% | 76.1% | 41.6% | 43.0% | −1.4pp | [−8.2, +5.1] |
+| Guard / risk_adj | 83.3% | 7.4% | 9.3% | 50.3% | 51.0% | −0.8pp | [−7.5, +4.9] |
+
+喂进 `adapt_weights` 的原始准确率差 **8.7pp**，技能差 **±2.2pp 且五条 CI 全跨 0**。
+差额是口径产物：同一批 887 条 T+7 收益，永远说 bullish 命中 52.2%、
+永远说 bearish 47.8%、**永远说 neutral 只有 35.5%**（T+7 常走出 ±5% 中性带）。
+
+**③ 实测反向后果**：ChronosBee 说中性 76%~82% ⇒ catalyst 在 122 条历史记录里
+有 **94 条（77%）**是五维中权重最低的（区间 0.110~0.198）；
+而 catalyst 当前单维横截面 rank-IC = **+0.097，是五维最高的**。
+这条通道系统性压低了当前最好的维度，理由与该维度的预测力无关。
+
+**④ 函数形式编码不了那个决定。** `raw = max(0.05, acc**2)`：
+41.6%（反向有信息）与 58.4%（正向有信息）拿到相同权重，归一化后
+零/负权重**不可表达**。v0.45.172 那个决定不是被这条通道否决的，是没法被它表示。
+
+**⑤ IC 排不出顺序，故本次不靠 IC 做决定。** 横截面口径配对检验（逐日 IC 相减
+→ 按周取不重叠），20/25 周下所有方案两两分不开（唯一 p<0.05 的 A-vs-B 是事后
+挑的比较，5 个比较 Bonferroni 后 p≈0.08）。点估计仅供排除明显更差者：
+现行 config +0.084 / 停通道 +0.070 / adapted 落库 +0.051 / **生产实际 +0.003** /
+旧 config −0.000 / 等权 +0.012。
+
+处置照 **v0.44.0 对 `weekly_optimizer` 的先例**：保留计算与审计轨迹，断掉写入生产的线。
+
+### Changed
+
+- `alpha_hive_daily_report.py`：`QueenDistiller(...)` 不再传 `adapted_weights=`。
+  `load_adapted_weights()` 保留但只用于对照日志（变量改名 `_adapted_diag`）。
+- `backtester.py`：`adapt_weights` / `load_adapted_weights` docstring 标注
+  「只读诊断，不要接回生产」，并写清上面五条依据。
+- `swarm_agents/queen_distiller.py`：`adapted_weights=` 参数标注仅供测试注入。
+  附带记录：`load_adapted_weights` 无日期过滤、自 2026-02-27 起从未返回 None，
+  故 `if adapted_weights:` 恒真短路 ⇒ 修 Bug #18 的 `importlib.reload(config)`
+  热加载分支**在生产里六个月是死代码**。
+- `replay_scoring.py`：`evaluate()` 改为**横截面** rank-IC（日度横截面 → 每 ISO 周
+  取第一天 → 周序列 t 检验），输出增列 t / p，并保留 `ic_pooled` 与
+  `sign_conflict` 告警。新增 `MIN_WIDTH = 5`。
+- `tests/test_replay_scoring.py`：`_rows` 默认标的 2 → 6。旧夹具每天只有 2 只，
+  横截面口径下算不出 IC ⇒ 0 周。**夹具编码的是旧语义**：一天 1~2 只标的本就
+  没有「该挑哪只票」的信息，把它算作一周功效一直是高估。
+- `tests/test_close_t7_production_wiring.py`：载体维度 `signal` → `sentiment`。
+  该条主题是 close_t7 路径接线，不是权重方案；signal 现权重为 0 会让它
+  无关地变红（行为本身另有守卫，见下）。
+
+### Fixed
+
+- `gex_regime.py::RegimeWeightAdjuster.adjust_weights`：**零权重被地板复活**。
+  `w[k] = max(0.02, w[k] + shift * w[k])` —— 偏移是**相对**的（`shift * w[k]`），
+  w=0 时偏移恒为 0，紧接着的 `max(0.02, 0)` 把零抬成 2%。后果是这条链路上
+  **不存在「零权重」这个状态**：实测三种政体下 config 的 signal/risk_adj=0
+  全部落到 1.92%~1.97%，即哪怕修好上游，决策也只能兑现 ~94%。
+  已改为显式零豁免地板（地板对「极小但非零」照常生效 —— 0 是意图，不是「太小了」）。
+- `replay_scoring.py::evaluate` 的**池化 IC**（见 Changed）。同一份 pheromone.db、
+  同一天：池化把 risk_adj 算成 **+0.047**，横截面是 **−0.060**，**符号相反** ——
+  而 risk_adj 的负 IC 正是 v0.45.172 归零它的依据之一。CLAUDE.md 指定本工具做
+  聚合层决策第一站，故该偏差污染的是**将来每一个**聚合层结论。
+  ⚠️ **用 v0.45.176 之前的 `replay_scoring` 复核过的任何聚合层结论都需要重跑。**
+- `outcome_utils.py`：`DEFAULT_NEUTRAL_TOLERANCE_PCT` 的注释「不影响交易行为」
+  **在 v0.38.1~v0.45.175 之间是假的** —— 该带宽经 `_check_direction` →
+  `adapt_weights` → `QueenDistiller` 直通生产权重，3.0→5.0 那次改的不只是记账。
+  断线后该注释重新为真，已在原处如实记录这段历史。
+
+### Added
+
+- `alpha_hive_daily_report._assert_config_zeros_survive()`：扫描期观测点。
+  不变式取「config 里显式归零的维度必须仍为零」—— 它对下游所有**合法**变换
+  都稳健（ML 反馈是乘法、政体偏移是相对的），故红了就一定意味着有人新接了
+  一条会改写 config 的通道，不会被设计内调整误触发。违反时打 error + stdout 告警。
+- `tests/test_zero_weight_invariant.py`（22 条）：政体层保零 ×8 政体、
+  归一化仍成立、极小非零仍受地板、ML 反馈乘法保零（含「ML 确实被激活且确实在
+  放大 signal」两条前提断言）、AST 枚举全仓禁止生产代码传 `adapted_weights=`
+  （含探针自证）、观测点能判出 09-09 真实事故权重且合规权重不误报、
+  「只剩零权重维度 ⇒ 中性 5.0」及其配对的「非零维度仍能推动分数」。
+- `tests/test_replay_scoring.py::TestCrossSectionalCaliber`：辛普森悖论夹具
+  （日内 IC 为负、跨日池化为正）钉住横截面口径、符号冲突告警、
+  单日宽度 < MIN_WIDTH 不计入功效分母。
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 2026-09-10 / v0.45.176 边界。
+  **世代边界看的是数据不是意图**：09-09 的分是 signal≈0.207 打的、09-10 起是 0，
+  两者不可比。代价：作废 09-09 的 30 条样本（本代唯一一天的产出），如实记录。
+  ⚠️ 不改写 09-09 那条（审计轨迹只追加），在新条目里说明它最后一句不成立。
+
+### 验证
+
+- **每条新断言都举出了能让它变红的变异并实跑确认**（11 个变异，全部定向变红，
+  `collected` 数全程不变）。⚠️ 过程中变异校验器自己犯了本次要治的形状两次：
+  ① pyproject 的 `-x` 让第一条红之后的用例**没跑**却被读成「通过」，
+  加 `--maxfail=999` 才暴露；② `set -e` 在 pytest 变红时杀掉脚本 ⇒ EXIT trap
+  没复原 ⇒ 下一轮备份了变异态、基线自己是红的、每条「变红」都不可归因。
+  已给校验器加基线闸（基线不是全绿就中止）。
+- 全量套件 3872 passed / 1 skipped，唯一红的是 `TestCoverageHorizon`
+  （MEMORY 记载 2026-09-06 起变红是设计意图，且改动前即红）。
+- 全链路模拟下次扫描：config → QueenDistiller → 政体调整（最不利分支
+  risk_off + negative_gex + IV 80）后 **signal=0.0000 / risk_adj=0.0000**，
+  对比 09-09 生产实际的 0.2059 / 0.1982。
+
 
 ## [0.45.175] — 2026-09-10 — ⚠️ 重大发现：config.EVALUATION_WEIGHTS 被 adapted_weights 静默旁路，v0.45.172 决策从未在生产实际生效
 

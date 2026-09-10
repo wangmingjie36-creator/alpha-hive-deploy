@@ -50,7 +50,14 @@ def db(tmp_path):
     return lambda rows: _write_predictions_db(tmp_path / "t.db", rows)
 
 
-def _rows(n_weeks, start="2026-01-05", tickers=("AAA", "BBB"), amb=0):
+#: v0.45.176：默认从 2 只加宽到 6 只。`evaluate` 改成横截面口径后，单日不足
+#: `rs.MIN_WIDTH`(=5) 只标的**算不出横截面 IC**，该日不贡献任何「周」。
+#: 旧夹具每天只有 2 只 ⇒ 全部 0 周 ⇒ 功效护栏那两条会红。
+#: 这不是实现退化，是**夹具编码了旧语义**：一天只有 1~2 只标的本来就没有
+#: 「同一天该挑哪只票」的信息，把它算作一周的功效一直是高估。
+#: 生产是每天 30 只，6 只是能过闸的最小生产形状。
+def _rows(n_weeks, start="2026-01-05",
+          tickers=("AAA", "BBB", "CCC", "DDD", "EEE", "FFF"), amb=0):
     out = []
     d0 = dt.date.fromisoformat(start)
     for w in range(n_weeks):
@@ -68,7 +75,7 @@ class TestPowerHonesty:
         r = rs.evaluate("x", lambda row: row["dims"]["signal"],
                         rs.load_samples(db(_rows(4)), all_cohorts=True)["rows"])
         assert r["weeks"] == 4, "有效样本量必须按不重叠 ISO 周报"
-        assert r["n"] == 8, "naive n 也要报，但不能只报它"
+        assert r["n"] == 24, "naive n 也要报，但不能只报它"   # 4 周 × 6 只
 
     def test_underpowered_run_exits_nonzero(self, db, monkeypatch):
         """喂退化：只有 4 周（远低于 25）→ 必须非 0 退出码 + 明确警示。"""
@@ -156,6 +163,78 @@ class TestPowerHonesty:
             f"40 个不重叠周仍报功效不足 —— 结论没有随样本量变化：\n{many[:400]}")
 
 
+class TestCrossSectionalCaliber:
+    """v0.45.176：`evaluate` 必须算**横截面** IC，不是池化 IC。
+
+    此前 `evaluate` 把所有日期的所有行摊平成一个大 Spearman，ISO 周只用来
+    数周数打功效警告。那测的是「哪天分高哪天涨」（时序），不是「同一天该挑
+    哪只票」（横截面）—— 而后者才是评分的用途。
+
+    实测代价：同一份 pheromone.db，池化把 risk_adj 算成 **+0.047**，
+    横截面是 **−0.060**，符号相反。而 risk_adj 的负 IC 正是 v0.45.172
+    归零它的依据之一 ⇒ 用旧口径的本工具复核那个决策会得出相反结论。
+    CLAUDE.md 又指定本工具做聚合层决策的第一站，所以这个偏差污染的是
+    **将来每一个**聚合层结论，不只是过去某一次。
+    """
+
+    @staticmethod
+    def _simpson_rows():
+        """构造「池化为正、横截面为负」的数据（辛普森悖论的标准形状）。
+
+        每天内部：分越高收益越低（横截面 IC = −1）。
+        跨天之间：第二、三天分整体更高、收益也整体更高（池化被这个层级差主导）。
+        三天分属三个 ISO 周，故不重叠子采样后是 3 个观测。
+        """
+        out = []
+        for wk, (day, base_score, base_ret) in enumerate([
+                ("2026-01-05", 1.0, 1.0), ("2026-01-12", 4.0, 8.0),
+                ("2026-01-19", 7.0, 15.0)]):
+            for i in range(6):
+                score = base_score + i * 0.3
+                ret = base_ret + (5 - i) * 0.2          # 日内与 score 反向
+                dims = {k: score for k in rs.DIMS}
+                out.append((day, f"T{i}", dims, 100.0, 100.0 + ret, 0))
+        return out
+
+    def test_reports_cross_sectional_not_pooled(self, db):
+        """变红的变异：把 `evaluate` 改回跨日期摊平的池化 Spearman。"""
+        rows = rs.load_samples(db(self._simpson_rows()), all_cohorts=True)["rows"]
+        r = rs.evaluate("x", lambda row: row["dims"]["signal"], rows)
+
+        assert r["ic"] is not None and r["ic"] < -0.5, (
+            f"横截面 IC 应为强负（日内分越高收益越低），实得 {r['ic']}——"
+            "多半是又在跨日期池化")
+        assert r["ic_pooled"] is not None and r["ic_pooled"] > 0.5, (
+            "本夹具的前提是池化口径会给出**正**值；前提不成立的话，"
+            "上一条断言就不是在区分两种口径了（同 MEMORY「探针要先自证」）")
+        assert r["weeks"] == 3, f"应有 3 个不重叠周，实得 {r['weeks']}"
+
+    def test_sign_conflict_is_surfaced(self, db):
+        """两种口径符号相反时必须显式告警，不能悄悄换掉了事。
+
+        变红的变异：把 `sign_conflict` 恒设为 False。
+        """
+        rows = rs.load_samples(db(self._simpson_rows()), all_cohorts=True)["rows"]
+        r = rs.evaluate("x", lambda row: row["dims"]["signal"], rows)
+        assert r["sign_conflict"] is True, (
+            "横截面 −、池化 + 却没标符号冲突 —— 下一个读输出的人无从知道"
+            "自己看的是哪个量")
+
+    def test_narrow_day_contributes_no_week(self, db):
+        """单日标的数 < MIN_WIDTH 的日子没有横截面信息，不许计入功效分母。
+
+        变红的变异：把 `MIN_WIDTH` 降到 1（那会让「一天一只票」也算一周功效，
+        正是旧口径高估功效的方式之一）。
+        """
+        narrow = rs.load_samples(
+            db(_rows(4, tickers=("AAA", "BBB"))), all_cohorts=True)["rows"]
+        r = rs.evaluate("x", lambda row: row["dims"]["signal"], narrow)
+        assert r["n"] == 8, "样本行本身应照常载入（naive n 不受影响）"
+        assert r["weeks"] == 0, (
+            f"每天只有 2 只标的却报了 {r['weeks']} 周功效——"
+            "「同一天该挑哪只票」在 2 只票上算不出来")
+
+
 class TestCohortDefault:
     def test_defaults_to_latest_cohort(self, db, monkeypatch):
         """默认只取最新世代 —— 混算是静默的，数字照出但没意义。"""
@@ -184,7 +263,7 @@ class TestCleanReturnCaliber:
     def test_ambiguous_samples_excluded(self, db):
         rows = _rows(3) + _rows(2, start="2026-03-02", amb=1)
         d = rs.load_samples(db(rows), all_cohorts=True)
-        assert len(d["rows"]) == 6
+        assert len(d["rows"]) == 18          # 3 周 × 6 只；amb 的那 2 周全被剔除
         assert any("模糊样本" in n for n in d["notes"])
 
 

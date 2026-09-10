@@ -225,6 +225,60 @@ def build_agent_votes(data: dict) -> "tuple[dict, str]":
     return votes, (VOTES_FROM_AGENT_DETAILS if details else VOTES_UNAVAILABLE)
 
 
+def _assert_config_zeros_survive(effective: dict, adapted_diag: "dict | None" = None) -> bool:
+    """扫描期观测点：`config.EVALUATION_WEIGHTS` 里被显式归零的维度，必须仍为零。
+
+    v0.45.176 新增。**这条存在的理由是「谁会红？」答不上来。**
+    `config.EVALUATION_WEIGHTS` 的文档一直写着「权重唯一真相」，实际却有三层
+    在它下游改写（adapt_weights 的 0.2/0.8 混合、ML 反馈的乘法、政体调整的
+    `max(0.02,·)` 地板）。v0.45.172 把 signal/risk_adj 归零后，生产实际权重里
+    这两维仍占 ~20%，**整整藏了一天没有任何东西变红**——发现它靠的是人肉
+    去比对 `.swarm_results` 的字段，不是任何自动观测。
+
+    为什么挑「零维必须仍为零」当不变式：它对下游所有已知变换都稳健——
+    乘法保零，政体偏移是相对的（`shift * w[k]`，w=0 时恒为 0），修好地板后
+    也保零。所以它红了就一定意味着**有人新接了一条会改写 config 的通道**，
+    不会被 ML 反馈这类合法调整误触发。
+
+    Returns:
+        True = 不变式成立。False = 已违反（同时打 error 日志 + stdout 告警）。
+    """
+    try:
+        import importlib
+        import config as _cfg
+        importlib.reload(_cfg)
+        cfg_w = dict(_cfg.EVALUATION_WEIGHTS)
+    except (ImportError, AttributeError) as e:
+        _log.warning("权重不变式检查跳过（config 读取失败）: %s", e)
+        return True
+
+    zeroed = [d for d, v in cfg_w.items() if v == 0]
+    violated = {d: effective.get(d) for d in zeroed
+                if isinstance(effective.get(d), (int, float)) and effective[d] != 0}
+    if violated:
+        _log.error(
+            "权重不变式违反：config 已归零 %s，但 QueenDistiller 实际权重为 %s"
+            " —— 说明有通道在改写 config.EVALUATION_WEIGHTS（历史上是 adapted_weights，"
+            "v0.45.176 已断开）。本次评分不反映配置意图。",
+            zeroed, {k: round(v, 4) for k, v in violated.items()},
+        )
+        print(f"⚠️  权重不变式违反：config 归零的 {sorted(violated)} 在生产权重里非零 "
+              f"{ {k: round(v, 4) for k, v in violated.items()} }")
+        return False
+
+    if adapted_diag:
+        drift = {d: (round(adapted_diag[d] - cfg_w.get(d, 0.0), 3))
+                 for d in cfg_w if d in adapted_diag}
+        _log.info(
+            "权重通道对照（仅诊断，adapted 自 v0.45.176 不参与评分）："
+            "生效=%s | adapted 若启用会是=%s | 差=%s",
+            {k: round(v, 3) for k, v in cfg_w.items()},
+            {k: round(v, 3) for k, v in adapted_diag.items() if k in cfg_w},
+            drift,
+        )
+    return True
+
+
 class AlphaHiveDailyReporter:
     """Alpha Hive 日报生成引擎"""
 
@@ -524,7 +578,19 @@ class AlphaHiveDailyReporter:
             self.code_executor_agent.board = board
             phase1_agents.append(self.code_executor_agent)
 
-        adapted_w = Backtester.load_adapted_weights() if Backtester else None
+        # ── v0.45.176：adapted_weights 降级为只读诊断，不再喂给 QueenDistiller ──
+        # 照 v0.44.0 对 weekly_optimizer 的处置（保留计算与审计轨迹、断掉写入生产的那条线）。
+        # 为什么断：`Backtester.adapt_weights` 学的是**每只蜂的方向判对率**，而权重要
+        # 作用在**维度分数**上——两个量的排名 Spearman ρ≈+0.2，基本无关。更要命的是
+        # 那个「判对率」本身几乎全是方向配比的人工制品：零技能置换检验（保持每只蜂
+        # 看多/看空/中性的配比不变、只打乱它在哪只标的哪一天下注）显示 5 只蜂里 4 只的
+        # 技能 Δ 落在 ±2.2pp 且 95%CI 全部跨 0，而喂给 adapt_weights 的原始准确率差有 8.7pp。
+        # 差额来自口径：同一批 887 条收益，永远说 bullish 命中 52.2%、永远说 neutral 只有
+        # 35.5%（T+7 常走出 ±5% 中性带）⇒ 它实际在排的是「谁更爱说中性」。
+        # 实测反向后果：ChronosBee 说中性 76%~82%，于是 catalyst 在 122 条历史记录里有
+        # 94 条是五维中权重最低的——而 catalyst 当前单维横截面 rank-IC=+0.097，是五维最高。
+        # 保留 load 仅为对照日志（下方 _log），**不要**再把它接回 QueenDistiller。
+        _adapted_diag = Backtester.load_adapted_weights() if Backtester else None
         import llm_service as _llm_check_q
 
         # Enhancement C: 尝试加载已训练的 ML 模型用于 QueenDistiller 维度权重反馈
@@ -553,10 +619,11 @@ class AlphaHiveDailyReporter:
             _log.debug("ML 每日重训跳过: %s", e)
 
         queen = QueenDistiller(
-            board, adapted_weights=adapted_w,
+            board,
             enable_llm=_llm_check_q.is_available(),
             ml_model=_ml_model_for_queen,
         )
+        _assert_config_zeros_survive(queen.DIMENSION_WEIGHTS, _adapted_diag)
 
         # rival_agent 必须在 all_agents 里：下面的 inject_prefetched 靠它注入
         # `_prefetched_stock`，漏了会让 Rival 逐标的直接抓 yfinance（限流风险）。
