@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.176] — 2026-09-10 — 占位（进行中：停掉 adapted_weights 喂生产的通道，修零权重复活地板与 replay_scoring 池化口径）
+
 ## [0.45.175] — 2026-09-10 — ⚠️ 重大发现：config.EVALUATION_WEIGHTS 被 adapted_weights 静默旁路，v0.45.172 决策从未在生产实际生效
 
 ### 背景
