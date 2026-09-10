@@ -636,8 +636,15 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
         cands = [d for d in spy_prices if d >= _target]  # 找 >= target 的最近一天
         return spy_prices[min(cands)] if cands else None
 
+    # 基准区间的终点 = **最后一笔结算日**，不是 last_date。
+    # last_date = max(最后一个预测日, 最后一个 exit)，可能晚于最后一笔平仓
+    # （当前实测晚一天）。用它量 SPY 会让卡片上的「SPY 同期」比资金曲线的
+    # SPY 末点多走一天 —— 同页两个「SPY 基准」又对不上，正是 v0.45.179 在治的
+    # 那类不一致。closed 在此处已完整（日循环 + 收尾强平都在前面），可以直接取。
+    _bench_end = (max((t.exit_date or t.entry_date) for t in closed)
+                  if closed else last_date)
     spy_start = _nearest_close(first_date, "fwd")
-    spy_end = _nearest_close(last_date, "back")
+    spy_end = _nearest_close(_bench_end, "back")
     if spy_start and spy_start > 0 and spy_end and spy_end > 0:
         spy_bh_pct = (spy_end - spy_start) / spy_start * 100
         spy_bh_end_nav = cfg.initial_capital * (1 + spy_bh_pct / 100)
@@ -722,21 +729,48 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
     # Equity Curve（按交易结算日排列）
     # ══════════════════════════════════════════════════════════════════════════
 
+    # 这条曲线是**卡片数字的 NAV 路径本身**（终点 == final_nav），不是另一套模型。
+    # v0.45.179 起 dashboard 直接消费它，不再自己累加一遍 —— 此前 dashboard 用
+    # 「固定 $5,000/笔、不复利」独立累加，与卡片同页显示却差 0.81pp，而两处代码
+    # 注释都写着「曲线 = 卡片」。差额全部来自仓位权重（不对称仓位把亏钱的中性桶
+    # 超配、赚钱的看多桶低配）。
+    #
+    # 同时补两条同口径的对照线，供 dashboard 画 Gross / SPY：
+    #   gross_*  = 同样的仓位与结算顺序，只是用扣成本前的 gross_return_pct
+    #   spy_*    = **真·买入持有**（首日 spy_start 建仓、持有到该点日期）。
+    #              注意不是「每笔 7 日 SPY 收益累加」—— 那个口径会随交易笔数放大，
+    #              与买入持有不可比，却曾被图例标成「买入持有」。
     equity_points = []
     running_nav = cfg.initial_capital
+    running_gross = cfg.initial_capital
     sorted_closed = sorted(closed, key=lambda t: t.exit_date or t.entry_date)
     for t in sorted_closed:
         pnl = t.size_usd * t.net_return_pct / 100
+        pnl_gross = t.size_usd * t.gross_return_pct / 100
         running_nav += pnl
+        running_gross += pnl_gross
+        _dt_point = t.exit_date or t.entry_date
+        # SPY 买入持有：取「不晚于该点日期的最近一个交易日」收盘，索引到 spy_start。
+        # 取不到就给 None —— 绝不用 0 冒充「大盘当天没动」（v0.45.42/43 的教训）。
+        _spy_pct = None
+        if spy_start and spy_start > 0:
+            _px = _nearest_close(_dt_point, "back")
+            if _px and _px > 0:
+                _spy_pct = (_px - spy_start) / spy_start * 100
         equity_points.append({
-            "date": t.exit_date or t.entry_date,
+            "date": _dt_point,
             "ticker": t.ticker,
             "direction": t.direction,
             "exit_reason": t.exit_reason,
             "net_ret_pct": t.net_return_pct,
+            "gross_ret_pct": t.gross_return_pct,
             "pnl_usd": round(pnl, 2),
+            "size_usd": t.size_usd,
             "nav": round(running_nav, 2),
             "nav_pct": round((running_nav - cfg.initial_capital) / cfg.initial_capital * 100, 2),
+            "gross_nav": round(running_gross, 2),
+            "gross_nav_pct": round((running_gross - cfg.initial_capital) / cfg.initial_capital * 100, 2),
+            "spy_nav_pct": (round(_spy_pct, 2) if _spy_pct is not None else None),
         })
 
     return {
@@ -767,6 +801,10 @@ def run_backtest(cfg: BacktestConfig) -> Dict:
             "spy_end_nav": round(spy_bh_end_nav, 2) if spy_bh_end_nav is not None else None,
             # 取数失败时为 False —— 下游据此渲染「基准不可用」而非 0%
             "available": spy_bh_pct is not None,
+            # 基准实际量到哪一天（= 最后一笔结算日）。显式暴露，免得下游
+            # 拿它跟 period.end 混起来又造出一个对不上的数。
+            "period_start": first_date,
+            "period_end": _bench_end,
         },
         "alpha": (round(total_return_pct - spy_bh_pct, 2)
                   if spy_bh_pct is not None else None),

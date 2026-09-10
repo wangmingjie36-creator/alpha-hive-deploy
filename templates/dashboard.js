@@ -654,56 +654,44 @@ window.AH.initTradingStats=function(){
     html+=card((netPct>=0?'+':'')+netPct.toFixed(2)+'%','Net 累计收益',netColor,
       '$'+Math.round(real.final_nav).toLocaleString()+' / 起始 $'+Math.round(initCap).toLocaleString());
     html+=card(spyAvail?((spyPct>=0?'+':'')+spyPct.toFixed(2)+'%'):'—','SPY 同期基准',spyColor,
-      spyAvail?('$'+Math.round(real.spy_end_nav||initCap).toLocaleString()):'基准取数失败');
+      spyAvail?((real.spy_period_start&&real.spy_period_end)
+                 ? (real.spy_period_start+' ~ '+real.spy_period_end+' 买入持有')
+                 : ('$'+Math.round(real.spy_end_nav||initCap).toLocaleString()))
+              :'基准取数失败');
     html+=card((alphaPct!=null)?((alphaPct>=0?'+':'')+alphaPct.toFixed(2)+'%'):'—','Alpha vs SPY',alphaColor,
       (alphaPct!=null)?'剥离市场后超额':'无基准，无法计算');
     html+=card((sharpe!=null?(sharpe>=0?'+':'')+Number(sharpe).toFixed(2):'—'),'Sharpe (净值)',shColor,'年化 ×√36');
     html+=card((pf!=null?Number(pf).toFixed(2):'—'),'Profit Factor',pfColor,'>1.5 好');
     html+=card(winRate.toFixed(1)+'%','净值胜率','var(--t)',trades+' 笔入场');
     html+=card('-'+maxDd.toFixed(2)+'%','最大回撤','var(--bear)','基于 NAV');
-    html+=card(ts.exit_sl_count||0,'止损触发',(ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
-    html+=card(ts.exit_tp_count||0,'止盈触发','var(--bull)','+10% 止盈');
-    html+=card(ts.exit_close_count||0,'持有到 T+7','var(--t)','未触发 SL/TP');
-    html+=card(((ts.avg_cost||0)*100).toFixed(1)+'bp','平均单笔成本','var(--ts)','滑点+佣金+借券');
+    // v0.45.179：这四张卡以前在**全部候选预测**（963 条）上算，却渲染在写着
+    // 「172 笔入场」的「真实回测口径」标题下。现在与上面同源，只数实际入场的笔。
+    // 且 null 渲染「—」——0 在这些位置全是合法可解读的假读数（「止损从没触发过」
+    // 「平均成本 0bp」）。
+    html+=card(ts.exit_sl_count!=null?ts.exit_sl_count:'—','止损触发',
+      (ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
+    html+=card(ts.exit_tp_count!=null?ts.exit_tp_count:'—','止盈触发','var(--bull)','+10% 止盈');
+    html+=card(ts.exit_close_count!=null?ts.exit_close_count:'—','持有到 T+7','var(--t)','未触发 SL/TP');
+    html+=card(ts.avg_cost!=null?(ts.avg_cost*100).toFixed(1)+'bp':'—','平均单笔成本','var(--ts)','滑点+佣金+借券');
 
-    // v0.23.5: 删除"理论上限"参考（避免视觉幻觉）
-    // 之前的"独立每笔 $5K，无并发约束"模型在主曲线图上仍显示 +54%，对用户误导
-    // 现在 _equity_curve 也用 portfolio_backtest 真实入场的 48 笔累加，曲线 = 卡片
+    // v0.45.179：曲线与本区块**同源**——都来自 portfolio_backtest 的同一次
+    // run_backtest()，曲线就是那次回测的 NAV 路径，终点 == 上面的 final_nav。
+    // 这行以前写的是「曲线 = 卡片」，而当时曲线走的是「固定 $5K/笔、不复利」
+    // 独立累加，实测从未相等（+1.85% vs +1.04%，差额全部来自仓位权重）。
+    // 现在这句话是构造性事实，不是断言——改动任一侧前先看 dashboard_renderer
+    // 里那段注释。
   } else {
-    // === 退回到独立每笔模型（理论上限）===
-    var netRetT=(Number(ts.final_cap_net)||initCap)/initCap-1;
-    var grossRetT=(Number(ts.final_cap_gross)||initCap)/initCap-1;
-    // v0.45.43：这条「理论上限口径」分支正是 realistic 缺失时实际渲染的那条。
-    // 旧写法 `||initCap` / `||0` 把「没算出来」变成「大盘 0%、无超额」——
-    // 2026-08-26 用户看到的就是它。缺失一律 —。
-    var spyAvailT=(ts.final_cap_spy!=null);
-    var spyRetT=spyAvailT?(Number(ts.final_cap_spy)/initCap-1):null;
-    var alphaAvailT=(ts.alpha_vs_spy!=null);
-    var netColorT=netRetT>=0?'var(--bull)':'var(--bear)';
-    var alphaColorT=!alphaAvailT?'var(--mt)':((ts.alpha_vs_spy>=0)?'var(--bull)':'var(--bear)');
-    var pfColorT=ts.profit_factor>=1.5?'var(--bull)':(ts.profit_factor>=1?'#f59e0b':'var(--bear)');
-    var shColorT=ts.sharpe_net>=1?'var(--bull)':(ts.sharpe_net>=0?'#f59e0b':'var(--bear)');
-
-    html+='<div style="grid-column:1/-1;font-size:.78em;color:#f59e0b;margin:2px 0 6px">'+
-      '<b>理论上限口径</b>（每笔独立 $'+Math.round(initCap*0.10).toLocaleString()+
-      '，无并发约束 — portfolio_backtest 真实数字暂不可用）'+
-      '</div>';
-    html+=card((netRetT*100).toFixed(2)+'%','Net 累计收益（理论上限）',netColorT,
-      '$'+Math.round(ts.final_cap_net||initCap).toLocaleString());
-    html+=card((grossRetT*100).toFixed(2)+'%','Gross 累计（不扣成本）','var(--t)','纸面参考');
-    html+=card(spyAvailT?((spyRetT*100).toFixed(2)+'%'):'—','SPY 同期',
-      !spyAvailT?'var(--mt)':(spyRetT>=0?'var(--bull)':'var(--bear)'),
-      spyAvailT?('$'+Math.round(ts.final_cap_spy).toLocaleString()):'基准取数失败');
-    html+=card(alphaAvailT?(((ts.alpha_vs_spy>=0)?'+':'')+Number(ts.alpha_vs_spy).toFixed(2)+'%'):'—',
-      'vs SPY Alpha (上限)',alphaColorT,alphaAvailT?'独立每笔假设':'无基准，无法计算');
-    html+=card((ts.sharpe_net!=null?ts.sharpe_net.toFixed(2):'—'),'Sharpe (净值)',shColorT,'>1 可用');
-    html+=card((ts.profit_factor!=null?ts.profit_factor.toFixed(2):'—'),'Profit Factor',pfColorT,'>1.5 好');
-    html+=card((ts.net_win_rate||0).toFixed(1)+'%','净值胜率','var(--t)','每笔扣成本后');
-    html+=card('-'+(ts.max_dd_net_pct||0).toFixed(2)+'%','最大回撤 (Net)','var(--bear)');
-    html+=card(ts.exit_sl_count||0,'止损触发',(ts.exit_sl_count>ts.exit_tp_count?'var(--bear)':'var(--t)'),'-5% 硬止损');
-    html+=card(ts.exit_tp_count||0,'止盈触发','var(--bull)','+10% 止盈');
-    html+=card(ts.exit_close_count||0,'持有到 T+7','var(--t)','未触发 SL/TP');
-    html+=card(((ts.avg_cost||0)*100).toFixed(1)+'bp','平均单笔成本','var(--ts)','滑点+佣金+借券');
+    // === 回测不可用 ===
+    // v0.45.179：这条分支以前渲染一份「理论上限口径」——「独立每笔 $5K、无并发
+    // 约束」的另一套模型，用 ts.final_cap_* 等预置默认值算出来。那些默认值当时是
+    // 0.0 / 100000.0，于是"回测没算出来"长得和"回测算出来了，结果是这样"一模一样
+    // （2026-08-26 用户看到的 Alpha +4.29% 就是这么来的，真值 −5.62%，符号还是反的）。
+    // 现在后端预置值全为 null、失败时 equity_curve 为空，这里只说实话。
+    html+='<div style="grid-column:1/-1;font-size:.85em;color:#f59e0b;padding:10px 0">'+
+      '<b>真实策略回测本次不可用</b><br>'+
+      '<span style="font-size:.9em;color:var(--ts)">portfolio_backtest 未能产出结果'+
+      '（详见扫描日志里的 warning）。此处不显示任何替代口径的数字 —— '+
+      '一个"看着像结果"的默认值比空白更危险。</span></div>';
   }
 
   box.innerHTML=html;
@@ -743,7 +731,8 @@ window.AH.initEquityCurve=function(){
   // 三条曲线：net (绿, 主), gross (蓝, 辅参考), spy (灰, 基准)
   var netData =eq.map(function(d){return d.cum_net_pct!=null?d.cum_net_pct:d.cum;});
   var grossData=eq.map(function(d){return d.cum_gross_pct!=null?d.cum_gross_pct:d.cum;});
-  var spyData =eq.map(function(d){return d.cum_spy_pct!=null?d.cum_spy_pct:0;});
+  // null 保持 null（Chart.js 会断开该点），不许变 0 —— 0 读作"大盘当天没动"。
+  var spyData =eq.map(function(d){return d.cum_spy_pct!=null?d.cum_spy_pct:null;});
 
   chartInstances.push(new Chart(cv,{
     type:'line',
@@ -756,6 +745,10 @@ window.AH.initEquityCurve=function(){
         {label:'Gross (不扣成本)', data:grossData,
          borderColor:'#667eea', backgroundColor:'rgba(102,126,234,.0)', fill:false,
          tension:.25, pointRadius:0, borderWidth:1.5, borderDash:[4,3], order:2},
+        // v0.45.179：这条线现在**真的是**买入持有（首日建仓、持有至各结算日），
+        // 与上方卡片「SPY 同期基准」同口径同区间。旧实现是"每笔 7 日 SPY 收益 ×
+        // $5K 累加"——会随交易笔数放大，实测 +19.33% vs 买入持有 +15.73%，
+        // 同页两个"SPY 基准"差 3.6pp，而图例就写着"买入持有"。
         {label:'SPY 基准 (买入持有)', data:spyData,
          borderColor:'rgba(150,150,150,.8)', backgroundColor:'rgba(150,150,150,.04)', fill:false,
          tension:.25, pointRadius:0, borderWidth:1.5, order:3}
@@ -781,17 +774,19 @@ window.AH.initEquityCurve=function(){
   var statsEl=document.getElementById('eqStats');
   if(statsEl){
     var last=eq[eq.length-1];
-    var netCum=last.cum_net_pct!=null?last.cum_net_pct:last.cum;
-    var grossCum=last.cum_gross_pct!=null?last.cum_gross_pct:last.cum;
-    var spyCum=last.cum_spy_pct!=null?last.cum_spy_pct:0;
     var ts=__AH__.trading_stats||{};
-    var netColor=netCum>=0?'var(--bull)':'var(--bear)';
+    function pct(v){return v==null?'—':((v>=0?'+':'')+Number(v).toFixed(2)+'%');}
+    var netCum=last.cum_net_pct, grossCum=last.cum_gross_pct, spyCum=last.cum_spy_pct;
+    var netColor=netCum==null?'var(--mt)':(netCum>=0?'var(--bull)':'var(--bear)');
+    // Max DD 取 trading_stats（= 回测 NAV 路径口径），与卡片「最大回撤」同一个数。
+    // 旧实现这里另算一份、且 ||0 会把"没算出来"渲染成"零回撤"。
+    var mdd=ts.max_dd_net_pct;
     statsEl.innerHTML=
-      '<div class="eq-stat"><span class="ev" style="color:'+netColor+'">'+(netCum>=0?'+':'')+netCum.toFixed(2)+'%</span><span class="el">Net 累计</span></div>'+
-      '<div class="eq-stat"><span class="ev">'+(grossCum>=0?'+':'')+grossCum.toFixed(2)+'%</span><span class="el">Gross 累计</span></div>'+
-      '<div class="eq-stat"><span class="ev">'+(spyCum>=0?'+':'')+spyCum.toFixed(2)+'%</span><span class="el">SPY 基准</span></div>'+
-      '<div class="eq-stat"><span class="ev" style="color:var(--bear)">-'+(ts.max_dd_net_pct||0).toFixed(2)+'%</span><span class="el">Max DD (Net)</span></div>'+
-      '<div class="eq-stat"><span class="ev">'+eq.length+'</span><span class="el">已验证笔数</span></div>';
+      '<div class="eq-stat"><span class="ev" style="color:'+netColor+'">'+pct(netCum)+'</span><span class="el">Net 累计</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+pct(grossCum)+'</span><span class="el">Gross 累计</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+pct(spyCum)+'</span><span class="el">SPY 基准 (买入持有)</span></div>'+
+      '<div class="eq-stat"><span class="ev" style="color:var(--bear)">'+(mdd==null?'—':'-'+Number(mdd).toFixed(2)+'%')+'</span><span class="el">Max DD (Net)</span></div>'+
+      '<div class="eq-stat"><span class="ev">'+eq.length+'</span><span class="el">入场笔数</span></div>';
   }
 };
 window.AH.initEquityCurve();

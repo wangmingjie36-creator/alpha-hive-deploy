@@ -409,13 +409,21 @@ class TestEquityCurveSurvivesNullSpy:
     消费点都找出来 —— 漏掉一个，就是一次新的静默降级。
     """
 
-    def test_round_guarded_at_spy_ret(self):
+    def test_round_guarded_at_spy_pct(self):
+        """v0.45.179 重定向：SPY 的可空值搬到了 `portfolio_backtest` 的
+        `spy_nav_pct`（dashboard 不再自己算 SPY）。原断言盯的是
+        `dashboard_renderer` 里 `"spy_ret": round(_spy, 2)` 那个消费点，
+        那段代码已随「独立累加曲线」一起删除 —— 不变式不变，位置变了。
+        ⚠️ 不是「测试过时了就删掉」：同一条「可空值的每个消费点都要守」在新
+        位置上仍然成立，且行为断言（缺失时为 None 而非 0）在
+        tests/test_equity_curve_single_source.py::test_spy_missing_stays_none_never_zero。
+        """
         import inspect
-        import dashboard_renderer
-        src = inspect.getsource(dashboard_renderer)
-        assert '"spy_ret": round(_spy, 2),' not in src, \
-            "_spy 可为 None，裸 round() 会抛 TypeError 并被整块吞掉"
-        assert '"spy_ret": (round(_spy, 2) if _spy is not None else None)' in src
+        import portfolio_backtest
+        src = inspect.getsource(portfolio_backtest)
+        assert '"spy_nav_pct": round(_spy_pct, 2),' not in src, \
+            "_spy_pct 可为 None，裸 round() 会抛 TypeError"
+        assert '"spy_nav_pct": (round(_spy_pct, 2) if _spy_pct is not None else None)' in src
 
     def test_equity_failure_is_not_debug_level(self):
         """吞掉这条异常的 except 必须是 warning —— 它让 bug 隐身了三次重跑"""
@@ -434,10 +442,35 @@ class TestEquityCurveSurvivesNullSpy:
         assert '"total_spy_ret": 0.0, "alpha_vs_spy": 0.0,' not in src
         assert '"total_spy_ret": None, "alpha_vs_spy": None,' in src
 
-    def test_js_upper_bound_branch_no_coercion(self):
-        """realistic 缺失时实际渲染的是「理论上限口径」分支 —— 它也不许把 null 变 0"""
+    def test_js_fallback_branch_shows_nothing_rather_than_zero(self):
+        """v0.45.179 重定向：realistic 缺失时那条分支从「理论上限口径」
+        改成了**显式「本次不可用」**——不再渲染任何替代口径的数字。
+
+        原断言要求那条分支「不把 null 变 0」；现在它连数字都不渲染，
+        是**更强**的保证。这里守住这个更强的形态别退化回去。
+        变异：把 `真实策略回测本次不可用` 改回渲染 ts.final_cap_* ⇒ 红。
+        """
         from pathlib import Path
         js = Path("templates/dashboard.js").read_text()
-        assert "Math.round(ts.final_cap_spy||initCap)" not in js
-        assert "(ts.alpha_vs_spy||0).toFixed(2)" not in js
-        assert "spyAvailT" in js and "alphaAvailT" in js
+        assert "真实策略回测本次不可用" in js, "回测不可用时必须显式说不可用"
+        # 旧分支的标志物一个都不许回来。
+        # ⚠️ 这里**只用代码级标识符**，不用中文文案当标志物：
+        # 第一版把「理论上限口径」这几个字也列进来了，结果被**这条测试所守护的那次
+        # 修改自己的注释**打红了 —— 一段解释「这个分支为什么被删」的注释，
+        # 与「这个分支回来了」在纯文本匹配下长得一模一样。
+        # 文字标志物分不清「它回来了」和「我们记下了它为什么走」。
+        for ghost in ("spyAvailT", "alphaAvailT", "netRetT", "grossRetT",
+                      "Math.round(ts.final_cap_spy||initCap)",
+                      "(ts.alpha_vs_spy||0).toFixed(2)"):
+            assert ghost not in js, f"旧「理论上限口径」分支复活了：{ghost}"
+
+    def test_js_never_coerces_null_stats_to_zero(self):
+        """真实口径分支里也不许 `ts.<字段>||0` —— 0 在这些位置是假读数。
+
+        变异：把 `ts.exit_sl_count!=null?...:'—'` 改回 `ts.exit_sl_count||0` ⇒ 红。
+        """
+        import re
+        from pathlib import Path
+        js = Path("templates/dashboard.js").read_text()
+        bad = re.findall(r"ts\.(exit_\w+|avg_cost|net_win_rate|max_dd_\w+)\s*\|\|\s*0", js)
+        assert not bad, f"这些字段用 ||0 把 null 变成了 0：{sorted(set(bad))}"
