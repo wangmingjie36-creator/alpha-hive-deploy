@@ -768,6 +768,14 @@ def _radar_data(ticker: str, swarm_detail: dict) -> list:
 # Extracted helpers (formerly inlined in render_dashboard_html)
 # ---------------------------------------------------------------------------
 
+class _BacktestUnavailable(RuntimeError):
+    """portfolio_backtest 没有可用结果（冷启动无数据，或它自己报了 error）。
+
+    与「渲染这段代码时崩了」区分开：前者是正常状态、不该打堆栈，
+    后者是 bug、必须带 exc_info。
+    """
+
+
 def _load_accuracy_data() -> dict:
     """Load backtester accuracy stats and enhanced metrics."""
     _acc_stats: dict = {}
@@ -956,268 +964,191 @@ def _load_accuracy_data() -> dict:
     except Exception as _e11:
         _log.debug("F11 准确率增强数据加载失败: %s", _e11)
 
-    # ── Sprint 1 / P0-3: 复利 Equity Curve（Gross/Net/SPY 三曲线）──
-    # 语义：固定仓位比例（10% 本金/笔）、日度聚合、复利累积
+    # ── 资金曲线 / 真实策略回测指标 ──
+    # 语义（v0.45.179 起）：**全部来自 `portfolio_backtest.run_backtest()` 的同一次返回**。
+    # 曲线 = 那次回测的 NAV 路径（按结算日排列，终点 == 卡片 final_nav），
+    # 仓位 = NAV×8%(多)/12%(空)/10%(中)、复利、并发≤15、受现金与总敞口约束。
+    # 旧注释写的「固定仓位比例（10% 本金/笔）、日度聚合、复利累积」三项全不对，
+    # 且与它描述的那套独立累加模型一起被删了 —— 那套与卡片同页显示却差 0.81pp。
     _equity_curve: list = []
+    # ⚠️ 预置值一律 None，不许 0。v0.45.43 已经为 total_spy_ret/alpha 立过这条规矩，
+    # 但同一个字典里其余七个字段当时留着 0.0 —— 而 0 在这些位置全是**合法可解读的
+    # 假读数**：「止损从没触发过」「平均成本 0bp」「净值胜率 0%」「零回撤」，
+    # 外加 initial_capital=100000（真值 50000，来自一个早已不存在的 PORTFOLIO_CONFIG）。
+    # 回测失败时它们会一起冒充一份完整结果。
     _trading_stats: dict = {
-        "exit_tp_count": 0, "exit_sl_count": 0, "exit_close_count": 0,
-        "avg_gross_ret": 0.0, "avg_net_ret": 0.0, "avg_cost": 0.0,
-        "net_win_rate": 0.0, "sharpe_net": None,
-        "max_dd_net_pct": 0.0, "max_dd_gross_pct": 0.0,
+        "exit_tp_count": None, "exit_sl_count": None, "exit_close_count": None,
+        "exit_cutoff_count": None,
+        "avg_gross_ret": None, "avg_net_ret": None, "avg_cost": None,
+        "net_win_rate": None, "sharpe_net": None,
+        "max_dd_net_pct": None, "max_dd_gross_pct": None,
         "profit_factor": None,
-        # v0.45.43：None 而非 0.0。0.0 读作「大盘同期零涨跌 / 无超额收益」，
-        # 是个合法可解读的假读数；计算失败时它会冒充真实结果（本次实测如此）。
         "total_spy_ret": None, "alpha_vs_spy": None,
-        "initial_capital": 100000.0,
+        "initial_capital": None,
     }
     try:
-        from backtester import PredictionStore as _PS_eq
-        import sqlite3 as _sq_eq
-        # v0.23.4 修复：单一真相来源 — 优先用 portfolio_backtest.BacktestConfig 默认值
-        # 旧实现：默认 100000 / pos_pct 0.10 来自不存在的 PORTFOLIO_CONFIG，与代码实际 50000 不符
-        try:
-            from portfolio_backtest import BacktestConfig as _BC
-            _bc_default = _BC()
-            _initial_capital = float(_bc_default.initial_capital)
-            _pos_pct = float(_bc_default.position_size_pct)
-        except Exception:
-            try:
-                import config as _cfg_eq
-                _PF_CFG = getattr(_cfg_eq, "PORTFOLIO_CONFIG", {})
-            except Exception:
-                _PF_CFG = {}
-            _initial_capital = float(_PF_CFG.get("initial_capital", 50000.0))
-            _pos_pct = float(_PF_CFG.get("position_size_pct", 0.10))
-        _trading_stats["initial_capital"] = _initial_capital
-        _trading_stats["position_size_pct"] = _pos_pct
+        # ── v0.45.179：曲线与卡片同源，且只跑一次回测 ──────────────────────
+        # 旧实现有两个同族缺陷，都在「同一页两个数对不上」这条线上：
+        #   ① 曲线用「固定 $5,000/笔、不复利」独立累加，卡片用 portfolio_backtest
+        #      （NAV×8%多/12%空/10%中、复利、并发≤15、现金约束）。同一批笔，
+        #      末值差 0.81pp（+1.85% vs +1.04%），差额全部来自仓位权重 ——
+        #      不对称仓位把唯一亏钱的中性桶超配、赚钱的看多桶低配。
+        #      而**本文件与 templates/dashboard.js 的注释都写着「曲线 = 卡片」**。
+        #   ② 「止损/止盈/持有到T+7/平均单笔成本」四张卡在**全部 963 条候选**上算，
+        #      却渲染在写着「172 笔入场」的「真实回测口径」标题下。
+        # 现在这些数字全部来自 run_backtest 的同一次返回，「曲线 = 卡片」成为构造性事实。
+        # 顺带：旧实现调用 run_backtest **两次**（一次拿入场清单、一次拿卡片数字），
+        # 两次之间若数据变化还会自相矛盾。
+        from portfolio_backtest import BacktestConfig as _BC, run_backtest as _run_bt
 
-        _ps_eq = _PS_eq()
-        with _sq_eq.connect(_ps_eq.db_path) as _cn_eq:
-            _cn_eq.row_factory = _sq_eq.Row
-            # v0.23.4 修复：必须过滤 net_return_t7 IS NOT NULL，否则未回填的样本会被
-            # gross-0.1 兜底污染统计（v0.23.5：加 id 字段供 portfolio_backtest 匹配）
-            _eq_rows = _cn_eq.execute("""
-                SELECT id, date, ticker, direction, final_score,
-                       return_t7, correct_t7,
-                       net_return_t7, exit_reason, exit_date, holding_days,
-                       spy_return_t7
-                FROM predictions
-                WHERE checked_t7=1
-                  AND return_t7 IS NOT NULL
-                  AND net_return_t7 IS NOT NULL
-                ORDER BY date ASC, id ASC
-            """).fetchall()
+        _bt_cfg = _BC(exclude_nontrading_days=True)  # v32.3: 门面只算核心交易日
+        _bt_result = _run_bt(_bt_cfg)
+        if "error" in _bt_result:
+            # ⚠️ 失败 = **没有曲线**，不是退回另一套模型。
+            # 旧实现在这里的写法是 `_is_accepted = (not _accepted_pred_ids) or ...`
+            # ——取不到入场清单就把全部 963 笔都算进去，曲线静默换成另一个模型
+            # （实测 Gross 会从 +5.14% 跳到 +20.09%），页面照常渲染、日志只有 debug。
+            # 那正是 CLAUDE.md「这个失败，下游怎么知道？」要治的形状：没人会红。
+            # 用专用异常，与「真崩了」区分开：`{"error": "无已验证预测数据"}` 是
+            # 冷启动的**正常**状态，打一整条 traceback 会把正常渲染成异常
+            # ——本项目反过来的毛病（把异常渲染成正常）刚治过，别在对面翻车。
+            raise _BacktestUnavailable(_bt_result["error"])
 
-            # v32.3 option(a)：dashboard 门面只算核心实盘策略 —— 剔除非交易日预测
-            # （周日 sample-accumulator 扩展池样本 + 早期漂移幽灵）。样本仍留 DB 供 optimizer。
-            # fail-open 逐行：日期解析失败的行保留，不破坏曲线。
-            try:
-                from is_trading_day import is_trading_day as _itd_eq
-                from datetime import date as _d_eq
+        # 配置值也等回测成功之后再写 —— 失败时连半截状态都不留，
+        # 否则「失败时 trading_stats 里不许有数字」这条不变式就有了例外，
+        # 而例外正是这类 bug 的藏身处。
+        _trading_stats["initial_capital"] = float(_bt_cfg.initial_capital)
+        _trading_stats["position_size_pct"] = float(_bt_cfg.position_size_pct)
 
-                def _keep_eq(_r):
-                    try:
-                        return _itd_eq(_d_eq.fromisoformat(_r["date"]))[0]
-                    except Exception:
-                        return True
-                _eq_rows = [_r for _r in _eq_rows if _keep_eq(_r)]
-            except Exception:
-                pass
+        _portfolio = _bt_result.get("portfolio", {})
+        _risk = _bt_result.get("risk_metrics", {})
+        _bench = _bt_result.get("benchmark", {})
+        _bt_trades = _bt_result.get("all_trades", []) or []
+        _bt_points = _bt_result.get("equity_curve", []) or []
 
-            # 初始化三条曲线：Gross / Net / SPY buy-and-hold
-            _cap_gross = _initial_capital
-            _cap_net = _initial_capital
-            _cap_spy = _initial_capital
-            _peak_gross = _initial_capital
-            _peak_net = _initial_capital
-            _max_dd_gross = 0.0
-            _max_dd_net = 0.0
+        # ── 资金曲线 = 回测自己的 NAV 路径（按结算日排列，终点 == 卡片 final_nav）──
+        for _pt in _bt_points:
+            _equity_curve.append({
+                "date": _pt.get("date"),
+                "ticker": _pt.get("ticker"),
+                "direction": _pt.get("direction"),
+                "gross_ret": _pt.get("gross_ret_pct"),
+                "net_ret": _pt.get("net_ret_pct"),
+                "exit_reason": _pt.get("exit_reason") or "T7_CLOSE",
+                "pnl_usd": _pt.get("pnl_usd"),
+                "size_usd": _pt.get("size_usd"),
+                "nav": _pt.get("nav"),
+                "cum_gross_pct": _pt.get("gross_nav_pct"),
+                "cum_net_pct": _pt.get("nav_pct"),
+                # SPY 现在是**真·买入持有**（首日建仓持有至该点），不再是
+                # 「每笔 7 日 SPY 收益 × $5K 累加」——后者会随交易笔数放大，
+                # 与买入持有不可比，却曾被图例标成「买入持有」（实测差 3.6pp）。
+                # 取不到就是 None，绝不用 0 冒充「大盘没动」。
+                "cum_spy_pct": _pt.get("spy_nav_pct"),
+                # 不再输出 `correct` 字段：全仓零消费者，而 v0.45.179 还把它的语义
+                # 从 `correct_t7`（方向判对）悄悄换成了 `net > 0`（这笔赚没赚钱）——
+                # 一个没人读、语义又变过的字段，留着只会误导下一个读它的人。
+                # 死字段的判据见 auto-memory `alpha-hive-dead-field`：查功能是否生效先数读者。
+            })
 
-            _gross_rets, _net_rets, _spy_rets = [], [], []
-            _wins_net, _losses_net = [], []
+        # ── 卡片统计：全部只在**实际入场的那些笔**上算 ──
+        _by_exit = _bt_result.get("by_exit_reason", {}) or {}
+        _exit_tp = _exit_sl = _exit_close = _exit_cutoff = 0
+        for _reason, _es in _by_exit.items():
+            _key = str(_reason or "T7_CLOSE").upper()
+            _cnt = int(_es.get("count") or 0)
+            if "CUTOFF" in _key:
+                # WINDOW_CUTOFF = 回测窗口结束时仍未到期，按 0 收益强平。
+                # **不是**「持有到 T+7 未触发 SL/TP」。旧的 else 分支把它算进
+                # exit_close，当前恰好 0 笔所以看不出来 —— 恰好为零不等于正确。
+                _exit_cutoff += _cnt
+            elif "TP" in _key:
+                _exit_tp += _cnt
+            elif "SL" in _key:
+                _exit_sl += _cnt
+            else:
+                _exit_close += _cnt
+        _trading_stats["exit_tp_count"] = _exit_tp
+        _trading_stats["exit_sl_count"] = _exit_sl
+        _trading_stats["exit_close_count"] = _exit_close
+        _trading_stats["exit_cutoff_count"] = _exit_cutoff
 
-            # v0.23.5 修复：用 portfolio_backtest 实际入场的 trade_ids 子集累加曲线
-            # 旧 v0.23.4 修复仍累加全部 260 笔（"独立每笔 $5K 无并发约束"上限模型），
-            # 导致曲线显示 +54.27% 视觉幻觉。
-            # 新方案：调用 run_backtest() 拿到含 max_concurrent=15 约束的真实入场清单，
-            # 只累加这 ~48 笔，曲线对应真实可达 NAV（$52.5K / +5%）
-            _accepted_pred_ids: set = set()
-            try:
-                import portfolio_backtest as _pb_eq
-                _bt_for_eq = _pb_eq.run_backtest(_pb_eq.BacktestConfig(exclude_nontrading_days=True))
-                if "error" not in _bt_for_eq:
-                    _accepted_pred_ids = {t["id"] for t in _bt_for_eq.get("all_trades", [])
-                                          if t.get("exit_reason") != "WINDOW_CUTOFF"}
-            except Exception as _bt_eq_err:
-                _log.debug("portfolio_backtest equity 曲线源加载失败，退回独立累加: %s", _bt_eq_err)
+        _gross_rets = [float(_t.get("gross_pct") or 0.0) for _t in _bt_trades]
+        _net_rets = [float(_t.get("net_pct") or 0.0) for _t in _bt_trades]
+        if _net_rets:
+            _n_bt = len(_net_rets)
+            _trading_stats["avg_gross_ret"] = round(sum(_gross_rets) / _n_bt, 3)
+            _trading_stats["avg_net_ret"] = round(sum(_net_rets) / _n_bt, 3)
+            _trading_stats["avg_cost"] = round(
+                (sum(_gross_rets) - sum(_net_rets)) / _n_bt, 3)
+            _trading_stats["net_win_rate"] = round(
+                sum(1 for _r in _net_rets if _r > 0) / _n_bt * 100, 1)
 
-            _fixed_size_usd = _initial_capital * _pos_pct  # $50K × 10% = $5,000
-            for _eqr in _eq_rows:
-                # v0.23.5: 只对真实入场的 pred_id 累加曲线（其它笔贡献 0，模拟"未入场"）
-                _is_accepted = (not _accepted_pred_ids) or (_eqr["id"] in _accepted_pred_ids if "id" in _eqr.keys() else True)
-                _r7_raw = _eqr["return_t7"]
-                _dir_lc = str(_eqr["direction"]).lower()
-                # Gross (direction-adjusted) = strategy P&L before costs
-                _gross_dir_adj = -_r7_raw if _dir_lc == "bearish" else _r7_raw
-                _net = _eqr["net_return_t7"]
-                # net_return_t7 已在 SQL WHERE 保证 NOT NULL，无需兜底
-                # v0.45.42：缺 SPY 基准的样本不再兜底成 0.0（=「那周大盘没动」），
-                # 改为整笔跳过基准累加——曲线少一个点，好过多一个假点。
-                _spy_raw = _eqr["spy_return_t7"]
-                _spy = _spy_raw if _spy_raw is not None else None
+        # 风险指标一律取回测的值，不再另算一份（另算就会有第二个数）
+        _trading_stats["sharpe_net"] = _risk.get("sharpe_ratio")
+        _trading_stats["profit_factor"] = _risk.get("profit_factor")
+        # 不写 `or 0.0` —— 0 在回撤这个位置读作「从未回撤」，是个合法可解读的假读数
+        _trading_stats["max_dd_net_pct"] = _risk.get("max_drawdown_pct")
+        # Gross 没有独立的 NAV 路径回撤口径，用 Net 的，别造第二个数
+        _trading_stats["max_dd_gross_pct"] = _risk.get("max_drawdown_pct")
+        _trading_stats["final_cap_net"] = _portfolio.get("final_nav")
+        _trading_stats["final_cap_gross"] = (
+            round(_bt_points[-1]["gross_nav"], 2)
+            if _bt_points and _bt_points[-1].get("gross_nav") is not None else None)
+        _trading_stats["final_cap_spy"] = _bench.get("spy_end_nav")
+        _trading_stats["total_spy_ret"] = _bench.get("spy_return_pct")
+        _trading_stats["alpha_vs_spy"] = _bt_result.get("alpha")
+        _trading_stats["methodology"] = "portfolio_backtest_with_concurrency_limit"
 
-                _gross_rets.append(_gross_dir_adj)
-                _net_rets.append(_net)
-                if _spy is not None:
-                    _spy_rets.append(_spy)
+        # v0.23.4：准确率板块的 max_dd 复用回测的 NAV-based 值
+        # （旧实现用 100% 仓位 NAV 复利，对实际 8~12% 仓位偏离严重）
+        if _risk.get("max_drawdown_pct"):
+            _acc_max_dd = round(float(_risk["max_drawdown_pct"]), 2)
 
-                if _net > 0:
-                    _wins_net.append(_net)
-                elif _net < 0:
-                    _losses_net.append(_net)
+        _trading_stats["realistic"] = {
+            "initial_capital": _portfolio.get("initial_nav"),
+            "final_nav": _portfolio.get("final_nav"),
+            "total_return_pct": _portfolio.get("total_return_pct"),
+            "total_pnl_usd": _portfolio.get("total_pnl_usd"),
+            "spy_end_nav": _bench.get("spy_end_nav"),
+            "spy_return_pct": _bench.get("spy_return_pct"),
+            "spy_period_start": _bench.get("period_start"),
+            "spy_period_end": _bench.get("period_end"),
+            "alpha_vs_spy": _bt_result.get("alpha"),
+            "sharpe_ratio": _risk.get("sharpe_ratio"),
+            "profit_factor": _risk.get("profit_factor"),
+            "max_drawdown_pct": _risk.get("max_drawdown_pct"),
+            "win_rate_pct": _risk.get("win_rate_pct"),
+            "trades_entered": _bt_result.get("trade_stats", {}).get("total_trades"),
+            "predictions_total": _bt_result.get("filter_stats", {}).get(
+                "total_predictions", 0),
+            "max_concurrent": _bt_cfg.max_concurrent,
+            # ── 配置溯源 ──
+            # 这几个不是「算出来的结果」，是「这批数字是用哪套参数算的」。
+            # 它们在页面上没有直接读者，但已部署的 index.html 是**唯一**记录了
+            # 当时配置的地方 —— 2026-09-10 排查「累计收益为什么越改越低」，
+            # 靠的就是翻 gh-pages 历史里这个 __AH__ 负载。留着，并且补全，
+            # 免得下次只能靠猜。（`correct` 字段被删是因为它零读者**且语义变过**，
+            # 与这里的性质不同。）
+            "bull_size_pct": _bt_cfg.bull_size_pct,
+            "bear_size_pct": _bt_cfg.bear_size_pct,
+            "neutral_size_pct": _bt_cfg.position_size_pct,
+            "methodology": "portfolio_backtest_with_concurrency_limit",
+        }
 
-                # v0.23.5: 仅对 portfolio_backtest 真实入场（含并发约束）的笔累加
-                # 未入场的笔贡献 0（模拟"被并发限制 / 现金不足跳过"）
-                if _is_accepted:
-                    _pnl_gross = _fixed_size_usd * (_gross_dir_adj / 100.0)
-                    _pnl_net = _fixed_size_usd * (_net / 100.0)
-                    _pnl_spy = _fixed_size_usd * (_spy / 100.0) if _spy is not None else 0.0
-                    _cap_gross += _pnl_gross
-                    _cap_net += _pnl_net
-                    _cap_spy += _pnl_spy
-
-                if _cap_gross > _peak_gross:
-                    _peak_gross = _cap_gross
-                if _cap_net > _peak_net:
-                    _peak_net = _cap_net
-                _dd_g = (_peak_gross - _cap_gross) / _peak_gross * 100 if _peak_gross else 0
-                _dd_n = (_peak_net - _cap_net) / _peak_net * 100 if _peak_net else 0
-                if _dd_g > _max_dd_gross:
-                    _max_dd_gross = _dd_g
-                if _dd_n > _max_dd_net:
-                    _max_dd_net = _dd_n
-
-                _equity_curve.append({
-                    "date": _eqr["date"],
-                    "ticker": _eqr["ticker"],
-                    "direction": _eqr["direction"],
-                    "gross_ret": round(_gross_dir_adj, 2),
-                    "net_ret": round(_net, 2),
-                    # v0.45.43：_spy 自 v0.45.42 起可为 None（缺基准的样本）。
-                    # 旧行 `round(_spy, 2)` 对 None 抛 TypeError，被下方
-                    # `except ... _log.debug` 整块吞掉 → equity_curve 与
-                    # trading_stats["realistic"] 全部不生成，而 _trading_stats
-                    # 的预置默认值（total_spy_ret=0.0 / alpha_vs_spy=0.0）让
-                    # 结果看起来"算过了"。这是我在 v0.45.42 自己引入的回归。
-                    "spy_ret": (round(_spy, 2) if _spy is not None else None),
-                    "exit_reason": _eqr["exit_reason"] or "T7_CLOSE",
-                    "cap_gross": round(_cap_gross, 2),
-                    "cap_net": round(_cap_net, 2),
-                    "cap_spy": round(_cap_spy, 2),
-                    "cum_gross_pct": round((_cap_gross / _initial_capital - 1) * 100, 2),
-                    "cum_net_pct": round((_cap_net / _initial_capital - 1) * 100, 2),
-                    "cum_spy_pct": round((_cap_spy / _initial_capital - 1) * 100, 2),
-                    "correct": bool(_eqr["correct_t7"]),
-                })
-
-            # ── 填充 trading_stats ──
-            # v32.3: exit 分布从已过滤的 _eq_rows 统计，与净值/胜率同口径（核心交易日）
-            _exit_tp = _exit_sl = _exit_close = 0
-            for _eqr2 in _eq_rows:
-                _ekey = (_eqr2["exit_reason"] or "T7_CLOSE").upper()
-                if "TP" in _ekey:
-                    _exit_tp += 1
-                elif "SL" in _ekey:
-                    _exit_sl += 1
-                else:
-                    _exit_close += 1
-            _trading_stats["exit_tp_count"] = _exit_tp
-            _trading_stats["exit_sl_count"] = _exit_sl
-            _trading_stats["exit_close_count"] = _exit_close
-
-            if _net_rets:
-                _n = len(_net_rets)
-                _trading_stats["avg_gross_ret"] = round(sum(_gross_rets) / _n, 3)
-                _trading_stats["avg_net_ret"] = round(sum(_net_rets) / _n, 3)
-                _trading_stats["avg_cost"] = round(
-                    (sum(_gross_rets) - sum(_net_rets)) / _n, 3
-                )
-                _trading_stats["net_win_rate"] = round(
-                    sum(1 for r in _net_rets if r > 0) / _n * 100, 1
-                )
-                # 年化 Sharpe (T+7 ≈ 52 周期/年)
-                try:
-                    from trading_costs import sharpe_ratio
-                    _trading_stats["sharpe_net"] = sharpe_ratio(_net_rets, periods_per_year=36)  # 修复 #8
-                except Exception:
-                    pass
-                # Profit Factor
-                _win_sum = sum(_wins_net)
-                _loss_sum = abs(sum(_losses_net))
-                if _loss_sum > 0:
-                    _trading_stats["profit_factor"] = round(_win_sum / _loss_sum, 2)
-                # SPY 累计 & alpha
-                _trading_stats["total_spy_ret"] = round(
-                    (_cap_spy / _initial_capital - 1) * 100, 2
-                )
-                _trading_stats["alpha_vs_spy"] = round(
-                    (_cap_net / _initial_capital - 1) * 100 -
-                    (_cap_spy / _initial_capital - 1) * 100, 2
-                )
-
-            _trading_stats["max_dd_gross_pct"] = round(_max_dd_gross, 2)
-            _trading_stats["max_dd_net_pct"] = round(_max_dd_net, 2)
-            _trading_stats["final_cap_gross"] = round(_cap_gross, 2)
-            _trading_stats["final_cap_net"] = round(_cap_net, 2)
-            _trading_stats["final_cap_spy"] = round(_cap_spy, 2)
-            # 标记此组数字为"独立 $5K 假设，无并发限制"上限参考
-            _trading_stats["methodology"] = "independent_per_trade_no_concurrency"
-
-            # v0.23.4 修复：准确率板块的 max_dd 复用 trading_stats 真实 NAV-based 值
-            # 旧实现 _acc_max_dd 用 100% 仓位 NAV 复利（_nav *= (1+ret)），对实际
-            # 10% 仓位策略偏离严重（96.87% vs 真实 11.64%）
-            if _max_dd_net > 0:
-                _acc_max_dd = round(_max_dd_net, 2)
-
-        # v0.23.4 修复：用 portfolio_backtest 真实结果（含 max_concurrent=15 并发约束）
-        # 覆盖关键卡片数字。equity_curve 保留独立 $5K 模型作为"理论上限参考"
-        try:
-            import portfolio_backtest as _pb
-            _bt_cfg = _pb.BacktestConfig(exclude_nontrading_days=True)  # v32.3: 门面只算核心交易日
-            _bt_result = _pb.run_backtest(_bt_cfg)
-            if "error" not in _bt_result:
-                _portfolio = _bt_result.get("portfolio", {})
-                _risk = _bt_result.get("risk_metrics", {})
-                _bench = _bt_result.get("benchmark", {})
-                _trade_stats_real = _bt_result.get("trade_stats", {})
-                _trading_stats["realistic"] = {
-                    "initial_capital": _portfolio.get("initial_nav"),
-                    "final_nav": _portfolio.get("final_nav"),
-                    "total_return_pct": _portfolio.get("total_return_pct"),
-                    "total_pnl_usd": _portfolio.get("total_pnl_usd"),
-                    "spy_end_nav": _bench.get("spy_end_nav"),
-                    "spy_return_pct": _bench.get("spy_return_pct"),
-                    "alpha_vs_spy": _bt_result.get("alpha"),
-                    "sharpe_ratio": _risk.get("sharpe_ratio"),
-                    "profit_factor": _risk.get("profit_factor"),
-                    "max_drawdown_pct": _risk.get("max_drawdown_pct"),
-                    "win_rate_pct": _risk.get("win_rate_pct"),
-                    "trades_entered": _trade_stats_real.get("total_trades"),
-                    "predictions_total": _bt_result.get("filter_stats", {}).get("entered", 0)
-                                       + sum(v for k, v in _bt_result.get("filter_stats", {}).items() if "skipped" in k),
-                    "max_concurrent": _bt_cfg.max_concurrent,
-                    "methodology": "portfolio_backtest_with_concurrency_limit",
-                }
-        except Exception as _pb_err:
-            _log.debug("portfolio_backtest 真实数字加载失败（dashboard 仅显示理论上限）: %s", _pb_err)
-
+    except _BacktestUnavailable as _bt_na:
+        # 正常状态：没有可回测的数据。warning 但不带堆栈。
+        _log.warning("资金曲线与「真实策略回测」区块本次不渲染：%s", _bt_na)
     except Exception as _eq_err:
         # v0.45.43：debug → warning + 堆栈。
         # 这条 debug 让一个 TypeError 隐身了三次重跑：资金曲线、SPY 基准、
         # Alpha、realistic 全部没生成，而页面照常渲染（读到的是
         # _trading_stats 的预置默认值）。静默降级三件套的第二条。
-        _log.warning("Equity curve / trading_stats 计算失败，页面将回落到预置默认值"
-                     "（SPY 与 Alpha 因此不可信）: %s", _eq_err, exc_info=True)
+        # v0.45.179：预置值已全部改成 None ⇒ 这里不再「回落到一份看着完整的假结果」，
+        # 而是让 equity_curve 为空、trading_stats 全 None，页面显式渲染「回测不可用」。
+        _log.warning("Equity curve / trading_stats 计算失败 —— 资金曲线与"
+                     "「真实策略回测」区块本次不渲染（不以默认值冒充结果）: %s",
+                     _eq_err, exc_info=True)
 
     return {
         "stats": _acc_stats,
@@ -2099,10 +2030,30 @@ def render_dashboard_html(report: Dict, date_str: str,
     _acc_win_streak = _acc["win_streak"]
     _acc_equity_curve = _acc.get("equity_curve", [])
     _acc_trading_stats = _acc.get("trading_stats", {})
-    # v0.23.4 修复 #F：把 initial_capital / position_size_pct 提到 render_dashboard_html scope
-    # 供下方方法学描述使用（避免 NameError）
-    _initial_capital = float(_acc_trading_stats.get("initial_capital", 50000.0))
-    _pos_pct = float(_acc_trading_stats.get("position_size_pct", 0.10))
+    # 方法学文案的参数**从 BacktestConfig 取**，不从 trading_stats 取。
+    # 它们是「策略怎么配的」（配置，永远可得），不是「回测算出了什么」（结果，可能没有）。
+    # ⚠️ 旧写法 `_acc_trading_stats.get("initial_capital", 50000.0)` 有个隐蔽 bug：
+    # v0.45.179 把预置值改成 None 之后，**key 存在、值是 None**，`.get` 的默认值
+    # 根本不会生效 → `float(None)` 抛 TypeError，整个 dashboard 渲染挂掉。
+    # 「`.get` 默认值救不了 None」是本仓 silent-degradation 记忆里的第一条。
+    # ⚠️ 读不到就**不报数**。旧写法在 except 里硬写 50000/0.10/0.08/0.12/15，
+    # 那是 BacktestConfig 的第二份拷贝 —— 它一旦漂移，页面会理直气壮地印出
+    # 一套没人在用的参数，而且没有任何信号。宁可少说一句话。
+    try:
+        from portfolio_backtest import BacktestConfig as _BC_desc
+        _bc_desc = _BC_desc()
+        _methodology_html = (
+            f"${int(float(_bc_desc.initial_capital) / 1000)}K 起始资金，"
+            f"每笔 = 当前 NAV × {float(_bc_desc.bull_size_pct) * 100:.0f}%（看多）"
+            f"/ {float(_bc_desc.bear_size_pct) * 100:.0f}%（看空）"
+            f"/ {float(_bc_desc.position_size_pct) * 100:.0f}%（中性），"
+            f"按已实现盈亏复利、最多同时持仓 {int(_bc_desc.max_concurrent)} 笔、"
+            f"总敞口不超过 NAV；现金不足即跳过。"
+        )
+    except Exception as _bc_err:
+        _log.warning("方法学参数读取失败，页面改为不列具体参数（不写死第二份拷贝）: %s",
+                     _bc_err)
+        _methodology_html = "仓位与并发参数本次读取失败，见 portfolio_backtest.BacktestConfig。"
 
     try:
         from zoneinfo import ZoneInfo as _ZI
@@ -2692,9 +2643,9 @@ def render_dashboard_html(report: Dict, date_str: str,
     <div class="acc-section-title" style="margin-top:18px">真实策略回测（扣成本 · 路径依赖 · Sprint 1）</div>
     <div id="tradingStatsBox" style="margin:10px 0 16px">
       <div style="font-size:.78em;color:var(--ts);margin-bottom:8px">
-        <strong>方法学</strong>：${int(_initial_capital/1000)}K 起始资金，每笔固定 ${int(_initial_capital * _pos_pct)}（{_pos_pct*100:.0f}% 仓位、不复利），
+        <strong>方法学</strong>：{_methodology_html}
         -5% 硬止损 / +10% 止盈（盘中触发，跳空时 gap-aware），扣滑点 + 佣金 + 借券费（空头）。
-        <span style="color:#e99;">Gross 曲线不扣成本（参考），Net 曲线 = 真实可拿收益。</span>
+        <span style="color:#e99;">下方资金曲线就是这次回测的 NAV 路径，终点 = 上面的组合终值。</span>
         <span style="color:var(--mt);">Sharpe 已年化（×√36，T+7 周期）。</span>
       </div>
       <div id="tradingStatsCards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px"></div>
