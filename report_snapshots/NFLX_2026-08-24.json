@@ -13,6 +13,7 @@
     "RivalBeeVanguard": 5.89,
     "QueenDistiller": 5.82
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -25,8 +26,8 @@
   "cs_rank": null,
   "actual_prices": {
     "t1": 81.87,
-    "t7": null,
+    "t7": 82.73,
     "t30": null
   },
-  "created_at": "2026-08-28T05:56:26.648323"
+  "created_at": "2026-09-11T14:46:39.944727"
 }

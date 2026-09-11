@@ -10,6 +10,7 @@
     "OracleBeeEcho": 7.8561538461538465,
     "GuardBeeSentinel": 7.54
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -22,8 +23,8 @@
   "cs_rank": null,
   "actual_prices": {
     "t1": 80.95,
-    "t7": null,
+    "t7": 82.67,
     "t30": null
   },
-  "created_at": "2026-08-29T09:10:11.051229"
+  "created_at": "2026-09-11T14:46:40.630609"
 }
