@@ -120,3 +120,17 @@ paper_portfolio_state.bak-*/
 # 既没内容也没子模块配置，是纯噪音。
 # ⚠️ 只忽略 worktrees/，不要忽略整个 `.claude/`——`.claude/launch.json` 是要跟踪的。
 .claude/worktrees/
+
+# ==================== iCloud「桌面与文稿同步」重名副本 ====================
+# v0.45.187：`~/Desktop` 开着 iCloud 同步，会**常年**产出名字带「空格 + 数字」的
+# 重名副本（`report 2.json`、`settings.local 2.json`、`xxx 2.py`）。
+# 2026-09-09 有 46 个这样的副本被自动提交流程扫进了 git 跟踪——一旦进了跟踪，
+# 每台 checkout 都会拿到，且 `report_snapshots/*.json` 的三个消费者
+# （self_analyst / weekly_optimizer / finrl_bridge）会把它们当**真样本**吃进去，
+# 使那一天的样本权重凭空翻倍。
+# ⚠️ 本规则只能防**新增**（gitignore 对已跟踪文件无效）。存量清理见 CHANGELOG v0.45.187。
+# ⚠️ 根治是把项目移出 iCloud 同步，属用户的机器设置，勿自行更改。
+* [0-9].*
+* [0-9][0-9].*
+* [0-9]
+* [0-9][0-9]

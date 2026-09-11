@@ -5,7 +5,69 @@
 
 ---
 
-## [0.45.187] — 2026-09-11 — 占位（进行中：清理 46 个被误提交进 git 跟踪的 iCloud 重名副本）
+## [0.45.187] — 2026-09-11 — 清掉 46 个进了 git 跟踪的 iCloud 重名副本；09-09 的学习样本权重曾凭空翻倍
+
+### Removed
+
+- **46 个名字带「空格 + 数字」的 iCloud 重名副本**，全部是 2026-09-09 的产物：
+  `report_snapshots/<TICKER>_2026-09-09 2.json` × 30、
+  `alpha-hive-<TICKER>-ml-enhanced-2026-09-09 2.html` × 12、
+  仓库根 `alpha-hive-daily-2026-09-09 2.{json,md}` 与 `alpha-hive-thread-2026-09-09-1 2.txt`、
+  `hedge_state/greeks_2026-09-09 2.json`。
+
+  以往记录的 iCloud 副本都只在**工作区**或 `.git/refs`（见 CLAUDE.md 同名章节），
+  这批**进了 git 跟踪** —— 差别是每台 checkout 都会拿到，且被下游当真文件读。
+
+  逐个 `git hash-object` 取证后分两类，**两类都零信息损失**：
+  - **34 个**与正本 blob 逐位相同（纯冗余）。
+  - **12 个** ml-enhanced HTML 与正本不同，但**全部精确等于正本在 `c7a728b`
+    （Deploy 2026-09-09 14:43）时的已提交版本**，无一匹配不上历史。它们冻住的正是
+    `f261682`（v0.45.175「ML 五维表改读实际合成权重」）修掉的那张**错误权重表**
+    （TSLA 实测 21%/1.47 → 30%/2.13）。留着是误导源，不是备份。
+
+  删除可逆：两类内容都在 git 历史里，`git checkout c7a728b -- <path>` 随时取回。
+
+### Fixed
+
+- **`report_snapshots/` 的三个消费者把副本当真样本吃进去，使 09-09 的样本权重翻倍。**
+  `self_analyst.py:92`（Track B 月度自诊断）、`weekly_optimizer.py:214`（Track A 权重优化）、
+  `finrl_bridge.py:242` 都是 `glob("*.json")` 后**逐文件**累加，**没有按 `(ticker, date)` 去重**。
+  实测：`report_snapshots/*.json` 命中 1201 个，09-09 当天 60 个而真样本只有 30 个
+  ⇒ 那一天在这两条学习通道眼里是别的日子的**两倍**权重。清理后 1201 → 1171，
+  09-09 回到 30，与其余日子齐平。
+  ⚠️ 这也是**不能只用 `git rm --cached`** 的原因：glob 读的是文件系统不是 git 索引，
+  只脱管、文件留在磁盘的话双计数照旧。
+
+### Added
+
+- **`.gitignore` 新增 iCloud 重名副本规则**（`* [0-9].*` / `* [0-9][0-9].*` /
+  `* [0-9]` / `* [0-9][0-9]`），防**新增**混入。
+  按「每加一条断言必须举出能让它变红的变异」双向验过：
+  - 精确性：对全仓已跟踪文件跑 `git check-ignore --no-index`，命中 **46 个，
+    与已知副本集合完全相等**，零误伤。
+  - 正向 canary **9/9 挡住**（`xxx 2.py`、`settings.local 2.json`、`report 3.md`、
+    `notes 10.txt`、子目录与深路径、无扩展名的 `some_dir 2`）。
+  - 反向 canary **10/10 放行**（`chapter2.md`、`v2.json`、`report-2.json`、`foo_2.py`、
+    `test_step2.py`、`prompts/v2/system.md`、`data 2x.json`）——
+    判据是**空格 + 数字 + 结尾**，`-2` `_2` 与数字后还有字符的一律不碰。
+  ⚠️ gitignore 对**已跟踪**文件无效，这条只防新增；存量靠本次 `git rm`。
+  ⚠️ **更重要的是它挡不住 glob**：`dashboard_renderer` 等消费者读的是磁盘目录，
+    不是 git 索引，见下节。
+
+### 发现（本版未修，待议）
+
+- **`dashboard_renderer.py:1206` 的日期解析器会把重名副本当成一个「新日期」。**
+  `glob("alpha-hive-daily-*.json")` 后 `stem.replace("alpha-hive-daily-", "")`，
+  对 `alpha-hive-daily-2026-09-09 2.json` 得到 `_hdate = "2026-09-09 2"` ——
+  一个不是日期的字符串。紧邻的「非交易日幽灵」守卫**没拦住**：
+  `filename_is_nontrading_day("2026-09-09 2")` 实测返回 `False`（「不是非交易日」）
+  而**不是抛异常**，所以那条 `fail-safe：解析失败时不跳过` 的分支根本没进。
+  后果（gh-pages 上实测）：index.html 的历史列表多出一行 `2026-09-09 2`，
+  5 个链接里 **4 个是死链**（那 4 份 ml-enhanced 副本压根没部署上去），
+  并且 `_fg_history` 被塞进一个 `date="2026-09-09 2"` 的点。
+  同一形状在 `:2389` 的 `_score_deltas` 再出现一次。
+  ⇒ 属 CLAUDE.md「这个失败，下游怎么知道？」的标准案例：解析器接受了非日期输入，
+    没有任何东西会红。`.gitignore` 治不了它（glob 读磁盘），**下一个 iCloud 副本会复发**。
 
 ## [0.45.186] — 2026-09-11 — 占位（进行中：test_zero_weight_invariant 的 rglob 扫进 .claude/worktrees/，生产 checkout 恒红）
 
