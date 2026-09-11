@@ -88,6 +88,11 @@
   （2026-09-11 实测教训：索引曾涨到 40KB、单条 2054 字符，且**有些教训只活在索引行里、
   topic 文件一个字都没有** ⇒ 照字数裁会无声丢知识。裁之前必须先把索引行里的标志物
   逐个 grep topic 文件，缺的先搬回去再裁。）
+- **这条上限自 v0.45.208 起有会红的守卫**：memory 仓的 `check_index_line_length.py`
+  （pre-commit）。**动了 `MEMORY.md` 才拦，没动只吵** —— 例行拦无关提交会把人
+  养成 `--no-verify` 的习惯。**只检测，绝不自动裁**：裁哪里是语义判断，
+  自动裁剪器正是上一条要防的东西。接手 / 重装（幂等，钩子不进 git、clone 之后就没了
+  且无人知晓）：`/usr/local/bin/python3 check_index_line_length.py --install-hook`
 
 ### memory 目录已纳入 git，**每次 session 收尾必须提交**（2026-09-11 起）
 
