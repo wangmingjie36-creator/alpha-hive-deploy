@@ -64,24 +64,49 @@ def test_daily_report_does_not_import_crewai():
     )
 
 
+def _scanned_files(root=None):
+    """`_crewai_offenders` **实际会读**的文件清单，返回 `([(绝对路径, 相对路径)], 口径名)`。
+
+    ⚠️ 抽出来是为了让真仓库量级护栏能打到**本文件的枚举**，而不是打到
+    `tests/_repo_files.own_python_files`。v0.45.199 自查实测：护栏此前直接调
+    `own_python_files(PROJECT_ROOT)`，于是「把 `_crewai_offenders` 的枚举换回裸
+    rglob」这条变异**根本不会让它变红**——而它的 docstring 白纸黑字说会。
+    测 helper 没坏 ≠ 测本文件没坏；**中间隔着的正是本文件自己那几行**。
+
+    v0.45.189：枚举**不是** `os.walk(root)`。生产 checkout 的 `.claude/worktrees/`
+    下挂着 14 个嵌套 git worktree，`os.walk` 在那里走过 5029 个 .py
+    （其中 4295 个在 `.claude/` 下）——**2026-09-11 实测的历史值**，当时 git 跟踪的是 340 个。
+    理由全文见 `tests/_repo_files.py`；本文件末尾那组测试是它的守卫。
+
+    ⚠️ **已知覆盖取舍（v0.45.199 补记，此前守卫里一个字都没写）**：git 口径只列
+    **被跟踪**的文件，因此**全新未提交**的 .py 扫不到（已跟踪文件的未提交修改照常
+    扫得到——只拿 git 要路径清单，内容从磁盘读）。实测：新建一个未跟踪的
+    `zz.py` 写上 `import crewai`，本守卫**看不见**；`git add -N` 之后立刻看得见。
+    这是 v0.45.150 就明确接受的取舍（口径可复现 > 把「本地碰巧有什么」算进来），
+    v0.45.189 把它扩到了本守卫却没有复述——**取舍不写在守卫里，下一个人只会读到
+    模块 docstring 那句「全仓源码不该再有」，并信以为真**。
+    """
+    root = Path(PROJECT_ROOT if root is None else root)
+    files, mode = own_python_files(root)
+    out = []
+    for py in files:
+        rel = py.relative_to(root)
+        if any(part in _SKIP_DIRS for part in rel.parts):
+            continue
+        if py.resolve() == Path(__file__).resolve():
+            continue  # 本文件的正则字面量不算
+        out.append((py, rel))
+    return out, mode
+
+
 def _crewai_offenders(root=None):
     """扫出所有 `import crewai` 的文件，返回相对 `root` 的路径清单。
 
     `root` 是**参数**不是模块常量——调用时求值，测试才能把它指向一棵带病灶的
     tmp 树（本文件里这棵树是 `.claude/worktrees/<副本>/`）。
     """
-    root = Path(PROJECT_ROOT if root is None else root)
     offenders = []
-    # v0.45.189：**不是** `os.walk(root)`。生产 checkout 的 `.claude/worktrees/`
-    # 下挂着 14 个嵌套 git worktree，`os.walk` 在那里走过 5029 个 .py
-    # （其中 4295 个在 `.claude/` 下），git 跟踪的只有 340 个。
-    # 理由全文见 `tests/_repo_files.py`；本文件末尾那组测试是它的守卫。
-    for py in own_python_files(root)[0]:
-        rel = py.relative_to(root)
-        if any(part in _SKIP_DIRS for part in rel.parts):
-            continue
-        if py.resolve() == Path(__file__).resolve():
-            continue  # 本文件的正则字面量不算
+    for py, rel in _scanned_files(root)[0]:
         try:
             src = py.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -169,9 +194,11 @@ def test_scanner_has_teeth(tmp_path):
     变红的变异：把 `_IMPORT_RE` 改成匹配不到的东西（如 `crewaiX`）。
     """
     _build_pathological_tree(tmp_path)
-    assert _crewai_offenders(tmp_path) and "crewai_adapter.py" in _crewai_offenders(tmp_path), (
-        "仓库根那份 `import crewai` 都没扫出来，探针坏了，不是「没有违规」："
-        f"{_crewai_offenders(tmp_path)}")
+    # ⚠️ 只调**一次**并绑住结果：原写法在断言与失败信息里各调一遍，
+    #    扫描器若不确定，断言看到的和人看到的会是两个不同的清单。
+    hits = _crewai_offenders(tmp_path)
+    assert "crewai_adapter.py" in hits, (
+        f"仓库根那份 `import crewai` 都没扫出来，探针坏了，不是「没有违规」：{hits}")
 
 
 def test_scanner_does_not_cross_into_nested_worktrees(tmp_path):
@@ -233,16 +260,31 @@ def test_enumeration_covers_the_real_repo():
     几千 ⇒ 又混进了嵌套 worktree 或第三方库（生产 checkout 上 `os.walk`
     走的是 5029 个）；零/个位数 ⇒ 枚举自己坏了，而坏掉的枚举让主断言恒真地绿。
 
-    变红的变异：把 `_crewai_offenders` 的枚举换回
-    `os.walk(root)` + 不含 `.claude` 的 `_SKIP_DIRS`（生产 checkout 上跳到 5029）。
+    变红的变异：把 `_scanned_files` 的枚举换回 `root.rglob("*.py")`
+    （生产 checkout 上跳到 **24123**，越过 2000 上界）。
+
+    ⚠️ 别把 24123 和正文里的 5029 搞混，它们是**两个不同的量**：
+    5029 是 v0.45.189 之前 `os.walk` + 旧六项 `_SKIP_DIRS` 的历史实测；
+    24123 是**今天**把枚举换成裸 rglob 会得到的数（`_SKIP_DIRS` 已缩到
+    `{"venv"}`，不再挡 `.git/` 等目录）。v0.45.199 自查时这里原本写的是 5029
+    ——**一个在改动中失效的旧数**，同样是「docstring 说了没人核的话」。
+
+    ⚠️ v0.45.199 更正：这条此前直接调 `own_python_files(PROJECT_ROOT)`，
+    于是上面那条变异**根本打不到它**（实测只有 `..._nested_worktrees` 变红）。
+    **测的是 helper 没坏，而不是本文件的枚举没坏。** 现在改打 `_scanned_files`。
+    ⚠️ 这条只在**生产 checkout** 上能被上述变异钉住（那里裸枚举是 5029）；
+    在 worktree 里裸枚举只有几百，落在界内不会红。**处处可红的是
+    `test_scanner_does_not_cross_into_nested_worktrees`（tmp 夹具）**，
+    量级护栏是它的补充、不是替代。
     """
-    from tests._repo_files import own_python_files
-    files, mode = own_python_files(PROJECT_ROOT)
-    assert 50 < len(files) < 2000, (
-        f"口径={mode} 扫到 {len(files)} 个 .py。过多＝混进了嵌套 worktree / "
+    scanned, mode = _scanned_files()
+    assert 50 < len(scanned) < 2000, (
+        f"口径={mode} 扫到 {len(scanned)} 个 .py。过多＝混进了嵌套 worktree / "
         "第三方；过少＝清单机制自己坏了")
-    rels = [os.path.relpath(str(f), PROJECT_ROOT) for f in files]
+    rels = [str(rel) for _py, rel in scanned]
     assert "alpha_hive_daily_report.py" in rels, (
         "日报主入口不在扫描范围内——守卫覆盖不到生产主路径")
     leaked = [r for r in rels if r.split(os.sep)[0] == ".claude"]
     assert not leaked, f"枚举里还有 `.claude/` 下的文件：{leaked[:5]}"
+    assert os.path.basename(__file__) not in [os.path.basename(r) for r in rels], (
+        "本文件没有被 `_scanned_files` 排掉——自排除搬家时掉了")

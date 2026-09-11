@@ -303,19 +303,20 @@ class TestCohortBoundary:
             "Oracle 方向口径变了却没追加世代边界"
         )
 
-    def test_entry_opens_a_new_partition(self):
-        """本条必须**新开**一个分区：2026-09-10 那 30 条里有 7 条方向会变，不可比。
+    def test_entry_invalidates_the_previous_cohort(self):
+        """本条必须落在**晚于上一世代标签**的日期：2026-09-10 那 30 条里
+        有 7 条 Oracle 方向会变，不可比，必须被作废。
 
-        判据是「相对**前一条**严格更晚」，不是「本条在队尾」——
-        绑队尾会让下一个 session 的任何合法边界把这条改红
-        （v0.45.191 的 test_it_extends_the_same_label 正是这么红的，同版已修）。
+        ⚠️ 判据只引用**具名的两条**（v0.45.201 与 v0.45.191），既不绑队尾、
+        也不绑「前一条」。实测教训：本条写完当天，另一 session 的 v0.45.197
+        也落在 2026-09-11 —— 若判据写成「严格晚于前一条」，两条同日就会误红，
+        而它们其实**同属**这个新分区、都作废 09-10 那 30 条，毫不矛盾。
+        （v0.45.191 把主张绑在 `cohort_start()` 上而被本版改红，是同一个坑。）
         """
-        h = self._history()
-        idx = [i for i, (_, v, _) in enumerate(h) if v == "v0.45.201"]
-        assert len(idx) == 1, "v0.45.201 应恰好登记一条"
-        i = idx[0]
-        assert i > 0 and h[i][0] > h[i - 1][0], (
-            f"本条日期 {h[i][0]} 未严格晚于前一条 {h[i-1][0]} —— 那就不是新分区"
+        by_ver = dict((v, d) for d, v, _ in self._history())
+        assert by_ver["v0.45.201"] > by_ver["v0.45.191"], (
+            f"本条 {by_ver['v0.45.201']} 未晚于上一世代标签 "
+            f"{by_ver['v0.45.191']} —— 09-10 的样本不会被作废"
         )
 
     def test_history_is_append_only(self):
