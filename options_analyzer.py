@@ -40,6 +40,11 @@ except ImportError:
     pass
 
 
+# v0.45.190：`OptionsAgent._calc_total_oi` 的空操作 warning 的一次性标志。
+# 测试要复现「第一次打、第二次不打」时把它设回 False。
+_TOTAL_OI_NOOP_WARNED = False
+
+
 class OptionsDataFetcher:
     """期权数据采集器 - 支持多源降级策略"""
 
@@ -1629,12 +1634,40 @@ class OptionsAgent:
         目的：Opex 周到期日脱落会导致 OI 日环比骤降 50-80%，产生虚假异常告警。
         稳定口径只统计 DTE ≥ 7 的合约 OI，使日环比对比更平滑。
         当所有合约都是 DTE < 7 时，退化为原始总和（避免返回 0）。
+
+        ⚠️ **在 CBOE 主源路径上这段排除逻辑排除不到任何东西。**
+        上游 `cboe_options._select_expiries` 已经把 DTE<7 的到期日全部滤掉
+        （`far` 恒占满 4 个配额），所以 `near_set` 虽然非空，却与链里实际出现的
+        到期日**不相交** ⇒ `stable_oi` 恒等于全量求和。2026-09-11 实测 AMZN
+        96,705 == 96,705。v0.45.188 把这件事写进了 `_select_expiries` 的
+        docstring；v0.45.190 补上观测点——文档解决「读代码的人别误会」，
+        但「这个意图哪天开始生效了 / 或者永远不生效」此前没有任何落点，
+        答不出本仓那句判据：**谁会红？**
         """
         near_set = set(options_chain.get("near_expiry_set", []))
         if not near_set:
             # 无近期标记，退化为原始求和
             return (sum(c.get("openInterest", 0) for c in calls_df)
                     + sum(p.get("openInterest", 0) for p in puts_df))
+
+        # v0.45.190 观测点：near_set 非空但链里一个都匹配不上 = 上游已经滤过了，
+        # 本函数是空操作。**不改行为**（改了就是口径变更，要付世代边界），只让它可见。
+        #
+        # ⚠️ **进程内只打一次。** 这个条件在 CBOE 主源路径上结构上恒为真（30 只标的
+        # 每轮扫描全命中），逐次打印就成了一盏恒亮的灯 —— 那和不打是一个效果。
+        # 需要逐次的聚合数字在 `status.json` 的 `counters.cboe_chain` 里
+        # （`near_excluded` / `near_excluded_oi`）；这一行只负责让读日志的人**知道
+        # 有这回事**，说一遍就够。
+        global _TOTAL_OI_NOOP_WARNED
+        _chain_exps = {str(r.get("expiry", ""))[:10] for r in (list(calls_df) + list(puts_df))}
+        if _chain_exps and not (near_set & _chain_exps) and not _TOTAL_OI_NOOP_WARNED:
+            _TOTAL_OI_NOOP_WARNED = True
+            _log.warning(
+                "total_oi 稳定口径是空操作（本进程只报一次）：near_expiry_set=%s 与"
+                "链内到期日 %s 不相交，上游已滤掉近月 ⇒ 排除 0 个合约"
+                "（见 cboe_options._select_expiries；逐次计数见 status.json "
+                "counters.cboe_chain）",
+                sorted(near_set), sorted(_chain_exps))
 
         stable_oi = 0
         for c in calls_df:

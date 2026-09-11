@@ -140,9 +140,12 @@ class OracleBeeEcho(BeeAgent):
         """把 `full_chain_oi` 的 {行权价: {到期日: OI}} 矩阵按窗口聚合成 {行权价: OI}。
 
         窗口判据 `0 <= DTE <= window_days`（DTE 按日历日算，与到期日本身同口径）。
-        返回 `(call_oi, put_oi, expiries_used, unparsable)`；`unparsable` 是解析
-        失败的键数，供调用方打观测点——**静默跳过解析失败等于把「没算进去」
-        渲染成「本来就没有」**。
+
+        返回 `(call_oi, put_oi, expiries_used, unparsable)`：
+        - `expiries_used` = **落在窗口内的到期日**，不保证每个都真的贡献了 OI
+          （实测 33403 条里只有 3 条 OI=0，可忽略；OI 总量看调用方的 `near_total_oi`）。
+        - `unparsable` = 解析失败的键数，供调用方打观测点 ——
+          **静默跳过解析失败等于把「没算进去」渲染成「本来就没有」**。
         """
         used: set = set()
         unparsable = 0
@@ -418,14 +421,14 @@ class OracleBeeEcho(BeeAgent):
                 if max_pain.get("max_pain") is not None:
                     _pub_details["max_pain"]          = max_pain["max_pain"]
                     _pub_details["max_pain_dist_pct"] = max_pain.get("distance_pct", 0)
-                    # v0.45.188 观测点：把口径一起落进审计轨迹。只记数值时，
-                    # 事后无法分辨「窗口选错了」和「仓位真的变了」——09-08→09-10
-                    # 那次 225→200 的误判正是卡在这里（要翻 CBOE 原始链才看得出
-                    # 用的是哪个到期日）。
-                    _pub_details["max_pain_window_days"] = max_pain.get("window_days")
-                    _pub_details["max_pain_expiries"]    = max_pain.get("expiries_used", [])
-                elif max_pain.get("unavailable_reason"):
-                    _pub_details["max_pain_unavailable"] = max_pain["unavailable_reason"]
+                    # ⚠️ 口径字段（window_days / expiries_used）**不往这里加**。
+                    # 这个 dict 去的是信息素板，而板上的 max_pain* 目前零读者
+                    # （`max_pain_dist_pct` 本身就是既有死字段）；板还有 80 条上限
+                    # 且按分数淘汰，往里塞没人读的负载纯属有害。
+                    # 审计轨迹走另一条路：下方 AgentResult 的 details 里带的是
+                    # **完整的 max_pain dict**（含 window_days / expiries_used /
+                    # near_total_oi / unavailable_reason），它才是落进
+                    # `.swarm_results_*.json` 并被看板与报告读到的那一份。
                 # 期权大单/异动信号（合并 OptionsAgent + unusual_options 两源）
                 _ua = list(result.get("unusual_activity", []))
                 if unusual_flow.get("signals"):

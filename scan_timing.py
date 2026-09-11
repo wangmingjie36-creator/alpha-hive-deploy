@@ -73,12 +73,17 @@ def reset() -> None:
 
 # ───────────────────────────────────────────── 计数器
 def counters() -> Dict[str, Optional[dict]]:
-    """三个取数源的进程内计数。
+    """三个取数源的进程内计数，外加一项链构造观测（`cboe_chain`，v0.45.190）。
 
     每一项要么是那个模块自己的 stats dict，要么是 None（模块不可导入 /
     没装闸门）。**不要把 None 改成 {}**——空 dict 会被下游读成「零调用」。
+
+    `cboe_chain` 与前三项不同：它不数「发了几次请求」，数的是「构出来的链
+    把多少近月挡在外面了」。放在这里是因为编排器已把本文件并进 status.json，
+    挂上即随每轮扫描落盘，无需改编排器（同 `code_version` 的走法）。
     """
-    out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None, "cboe": None}
+    out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None,
+                                      "cboe": None, "cboe_chain": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -92,6 +97,7 @@ def counters() -> Dict[str, Optional[dict]]:
     try:
         import cboe_options
         out["cboe"] = cboe_options.payload_stats()
+        out["cboe_chain"] = cboe_options.chain_selection_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("cboe stats 不可得: %s", e)
     return out
