@@ -237,6 +237,33 @@ class OracleBeeEcho(BeeAgent):
             result["unavailable_reason"] = f"计算异常：{type(e).__name__}"
         return result
 
+    @staticmethod
+    def _decide_direction(unusual_flow: dict, score: float,
+                          signal_summary: Optional[str] = None) -> str:
+        """方向只走两条：专职方向探测器（异常期权流）→ 分数带。
+
+        `signal_summary` 保留为入参仅供调用方可读性，**不参与判定**。
+
+        v0.45.201 之前这里夹着第三条「在中文摘要里数关键词」的投票。台账实测
+        （agent_memory 1789 行，2026-04-06~09-10）：它决定了 982 行（55.0%），
+        **982 行全部判为 bullish，五个月零次 bearish**。成因是词表在本语料里单边：
+        唯一会命中的是 `检测到 N 个看涨异动`（options_analyzer.py:1397，
+        `bullish_unusual > 0` 时无条件拼上；上游**没有** bearish 对应量），
+        而五个看空词五个月零出现 ⇒ 看空半边结构上不可达（同 ChronosBee v0.43.0）。
+        更糟的是这 982 行的 unusual_direction 全是 neutral/absent —— 专职探测器
+        说「无方向」，被一个子串计数改判成看多，其中 127/467 实际 Put > Call。
+
+        取证、位移与世代边界见 tests/test_oracle_direction_keyword_vote.py 模块 docstring。
+        """
+        _uf = unusual_flow or {}
+        if _uf.get("unusual_direction") in ("bullish", "bearish"):
+            return _uf["unusual_direction"]
+        if score < _AS.get("oracle_bearish_score_threshold", 4.0):
+            return "bearish"
+        if score > _AS.get("oracle_bullish_score_threshold", 6.5):
+            return "bullish"
+        return "neutral"
+
     def analyze(self, ticker: str) -> Dict:
         _err = self._validate_ticker(ticker)
         if _err:
@@ -344,25 +371,7 @@ class OracleBeeEcho(BeeAgent):
             # 叠加异常流调整
             score = clamp_score(score + unusual_score_adj)
 
-            # 从 signal_summary 推断方向（异常流可覆盖）
-            # 修复 Bug #11：用具体词组而非子串 "多"/"空"（旧实现命中"多头空头很多"等混合词歧义）
-            _ss = signal_summary or ""
-            _bull_keywords = ("看多", "看涨", "多头", "走高", "上行")
-            _bear_keywords = ("看空", "看跌", "空头", "下行", "走低")
-            _bull_count = sum(1 for kw in _bull_keywords if kw in _ss)
-            _bear_count = sum(1 for kw in _bear_keywords if kw in _ss)
-            if unusual_flow.get("unusual_direction") in ("bullish", "bearish"):
-                direction = unusual_flow["unusual_direction"]
-            elif _bull_count > _bear_count:
-                direction = "bullish"
-            elif _bear_count > _bull_count:
-                direction = "bearish"
-            elif score < _AS.get("oracle_bearish_score_threshold", 4.0):
-                direction = "bearish"
-            elif score > _AS.get("oracle_bullish_score_threshold", 6.5):
-                direction = "bullish"
-            else:
-                direction = "neutral"
+            direction = self._decide_direction(unusual_flow, score, signal_summary)
 
             discovery = f"{signal_summary} | ${current_price:.1f}"
             if poly_signal:

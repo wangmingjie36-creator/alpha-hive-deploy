@@ -100,6 +100,7 @@ v0.45.172 那次恰好是空标题，但那是运气，不是 ② 的能力边�
 from __future__ import annotations
 
 import collections
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -116,6 +117,10 @@ _RULE_CHARS = set("-*_")
 
 #: 占位条目的标志物。并发协议规定的写法见 CLAUDE.md「并发开工必须先占号」。
 _PLACEHOLDER_MARK = "占位"
+
+#: git 冲突标记：**恰好 7 个**字符，后接空格或行尾。
+#: `<<<<<<< HEAD` / `=======` / `>>>>>>> origin/main` / `||||||| merged common ancestors`（diff3）
+_CONFLICT_RE = re.compile(r"^(?:<{7}|={7}|>{7}|\|{7})(?=[ \t]|$)")
 
 #: 全文件枚举的下限。成对断言用：「没抓到畸形」必须配「确实解析到了条目」，
 #: 否则正则失配、解析出 0 条也会全绿。2026-09-11 实测 337 条，只增不减；
@@ -193,6 +198,26 @@ def bodyless_entries(text: str) -> list[str]:
             if not e.has_body and not e.is_placeholder]
 
 
+def conflict_markers(text: str) -> list[str]:
+    """断言 ③：文件里有没有**未解决的合并冲突标记**。
+
+    ⚠️ 两个约束都不是装饰，各挡一类误报：
+
+    1. **必须锚定行首。** 不锚行首就会命中**正在讨论冲突标记**的条目 ——
+       本仓 L7500/7501 就有一条，记的正是「一份含冲突标记的 CHANGELOG 被推上
+       main、存活约 3 分钟」那次事故。v0.45.200 那个 session 用
+       `"<<<<<<<" not in s` 做解冲突自检，命中的就是那两行散文。
+       「**在讨论 X**」被误判成「**是 X**」—— 本仓文本探针第四次栽在这上面。
+    2. **必须要求「恰好 7 个」**（靠 `(?=[ \t]|$)` 断住）。否则 `={7}` 会吃掉
+       markdown 的 setext H1 下划线（`=====…`，长度任意）。本仓实测零行首全 `=`
+       的行、风险当下为 0，但判据不该靠「本仓碰巧不用 setext 标题」撑着 ——
+       那是内容依赖，不是结构性（v0.45.195 补记 1 的判据）。
+    """
+    return [f"L{i} {line.rstrip()[:60]}"
+            for i, line in enumerate(text.splitlines(), 1)
+            if _CONFLICT_RE.match(line)]
+
+
 def _real_changelog_text() -> str:
     return (_repo_dir() / "CHANGELOG.md").read_text(encoding="utf-8")
 
@@ -217,6 +242,31 @@ class TestChangelogEntryIntegrity:
             "它正在读另一份 checkout 的 CHANGELOG，本文件其余断言全部作废")
         assert (_ROOT / "CHANGELOG.md").is_file(), "本 worktree 里没有 CHANGELOG.md"
 
+    def test_no_unresolved_conflict_markers(self):
+        """③ 不许有未解决的合并冲突标记。**本条必须定义在 ① 之前。**
+
+        位置是语义的一部分：`pyproject.toml` 的 addopts 带 `-x`，**谁先红，
+        谁就是人看到的那句诊断**。一份含冲突标记的 CHANGELOG 会让 ① 报
+        「重复的版本号标题」—— 但**真因是冲突，重号只是症状**。
+        那正是 CLAUDE.md 记的「把一种失败误报成另一种」。
+
+        不是假想：`4b5e4d9` 是一份**真被推上 main** 的含冲突标记 CHANGELOG
+        （存活约 3 分钟）。把它喂给本文件的 ①，报的是
+        `[0.45.120] 出现 2 次，行 109, 111` —— 109/111 正好骑在第 110 行那条
+        `=======` 的两侧。本 session 自己合并 origin/main 时也复现过一次。
+
+        ⚠️ 刻意**不**去读 `4b5e4d9` 那份历史文件来做断言：那会让这条测试依赖
+        git 历史存在（浅克隆 / `git archive` 出来的树就没有），等于给自己埋一条
+        「只在某些机器上跑得到」的测试（CLAUDE.md skip 守卫那节）。
+        历史文件只用于开发期核对，常驻断言喂的是合成夹具。
+        """
+        hits = conflict_markers(_real_changelog_text())
+        assert not hits, (
+            "CHANGELOG.md 里有**未解决的合并冲突标记**：\n  " + "\n  ".join(hits)
+            + "\n\n先解冲突再谈别的 —— 下面那条「重复的版本号标题」多半只是"
+              "它的症状（冲突两侧各带一份标题）。\n"
+              "前科：`4b5e4d9` 就是一份含冲突标记、真被推上 main 的 CHANGELOG。")
+
     def test_no_duplicate_version_headings(self):
         """① 一个版本号只许有一条条目。
 
@@ -237,7 +287,9 @@ class TestChangelogEntryIntegrity:
               "MEMORY.md 指定 `grep -m1 '^## \\['` 为下一个可用号的唯一真相，"
               "而占号协议建立在「一个号一条条目」之上——号重了它就失去仲裁能力。\n"
               "处置：`git log -S '<那条标题>' -- CHANGELOG.md` 数出现次数定位引入的提交，"
-              "删掉无正文的那条，保留挂着正文的那条。")
+              "删掉无正文的那条，保留挂着正文的那条。\n"
+              "⚠️ 若 `test_no_unresolved_conflict_markers` 同时红了，**先看那条** —— "
+              "本条多半只是它的症状（冲突两侧各带一份标题），真因是冲突没解完。")
 
     def test_every_entry_has_body(self):
         """② 每条标题下必须有正文；占位条目豁免。
@@ -407,6 +459,83 @@ class TestDetectorHasTeeth:
         assert [e.version for e in entries] == ["0.2.0"], (
             f"解析到 {[e.version for e in entries]}——"
             "正则不再锚定行首，正文里引用的版本号被数成了标题")
+
+    # ── ③ 冲突标记 ──────────────────────────────────────────────────
+    # 形状照 `4b5e4d9`（真被推上 main 的那份）复刻：冲突两侧**各带一份标题**。
+    CONFLICTED = (
+        "## [0.2.0] — d — 甲\n\n正文甲。\n\n---\n\n"
+        "<<<<<<< HEAD\n"
+        "## [0.1.0] — d — 我这侧\n\n正文乙。\n"
+        "=======\n"
+        "## [0.1.0] — d — 对方那侧\n\n正文丙。\n"
+        ">>>>>>> origin/main\n"
+    )
+    # v0.45.200 那个 session 的**真实误报**：散文在讨论冲突标记，行内引用。
+    #
+    # ⚠️ 第 3 行是**刻意不加反引号**的。第一版夹具两行都写成 `` `<<<<<<<` ``，
+    # 结果它**根本测不到行首锚定**——反引号让 `(?=[ \t]|$)` 那道 lookahead
+    # 先把它挡掉了，于是「去掉 `^`」这个变异照样全绿。夹具通过的理由
+    # 和它声称要测的东西不是同一件事（MEMORY「断言两边是同一种东西吗」）。
+    # 加上这行**裸写 + 后跟空格**的引用，本条才真正验的是 `^`。
+    PROSE_ABOUT_CONFLICT = (
+        "## [0.2.0] — d — 甲\n\n"
+        "那次 `git add && git commit && git push` 照跑——一份含 `<<<<<<<` /\n"
+        "`=======` / `>>>>>>>` 的 CHANGELOG 被推上 main（`4b5e4d9`，存活约 3 分钟）。\n"
+        "排查手法：先搜 <<<<<<< 定位，再看 ======= 两侧各是谁。\n"
+    )
+
+    def test_catches_real_conflict_shape(self):
+        """三种标记各认一条（照 4b5e4d9 的真实形状复刻）。"""
+        hits = conflict_markers(self.CONFLICTED)
+        assert len(hits) == 3, hits
+
+    def test_catches_diff3_base_marker(self):
+        """diff3 风格还会多一条 `|||||||`，漏掉它等于只认半种冲突。"""
+        assert conflict_markers("||||||| merged common ancestors\n")
+
+    def test_prose_discussing_conflict_markers_is_not_flagged(self):
+        """**在讨论 X ≠ 是 X。** 不锚行首就会把本仓 L7500/7501 那条条目报成冲突。
+
+        这是 v0.45.200 那个 session 真撞到的误报（它用 `"<<<<<<<" not in s`），
+        也是本仓文本探针第四次栽在同一形状上。
+
+        **能让本条红的变异（已实测）**：同时去掉 `^` 且把 `.match` 换成 `.search`。
+        单改任一个都不红——又是一组合取护栏（`re.match()` 本就只从串首匹配，
+        `^` 对它恒冗余），同 `test_only_line_start_headings_count` 的四象限。
+        """
+        assert conflict_markers(self.PROSE_ABOUT_CONFLICT) == [], (
+            "把「散文里引用冲突标记」报成了未解决冲突——"
+            "守卫会在一份完全正常的 CHANGELOG 上恒红")
+
+    def test_setext_underline_is_not_a_conflict_marker(self):
+        """markdown 的 H1 下划线（任意长的 `=`）不是冲突标记。
+
+        **能让本条红的变异（已实测两条，各自独立）**：
+          · 去掉 `(?=[ \\t]|$)` ⇒ `={7}` 吃掉下划线的前 7 个 `=`
+          · 去 `^` 且换 `.search` ⇒ `.search` 会滑到下划线**末尾**那 7 个 `=`，
+            它们后面正是行尾，lookahead 通过 ⇒ 误判
+        第二条说明 lookahead 与行首锚定**不是**各管各的：`.search` 一旦放开，
+        lookahead 就不再护得住 setext。
+        本仓当下零行首全 `=` 的行，但那是**内容依赖**，判据不能靠它撑着。
+        """
+        assert conflict_markers("一级标题\n" + "=" * 20 + "\n") == []
+        assert conflict_markers("=======\n"), "恰好 7 个 `=` 仍须认作冲突标记"
+
+    def test_conflicted_file_also_looks_like_a_duplicate(self):
+        """把「③ 为什么必须排在 ① 前面」写成可执行断言，而不是注释。
+
+        同一份含冲突的文件：③ 说「有冲突」，① 说「重号」。两句都对，但只有
+        前者是**真因**。addopts 带 `-x` ⇒ 先定义的先红 ⇒ 谁先定义决定了人
+        看到哪句诊断。这条一旦红，说明有人调换了顺序或删了 ③。
+        """
+        assert conflict_markers(self.CONFLICTED), "③ 该抓到"
+        assert duplicate_versions(self.CONFLICTED), (
+            "① 在含冲突的文件上**本该**也报重号——若它不报了，"
+            "本条所说的「误报风险」就不存在了，③ 的排序理由需重新评估")
+        names = [n for n in vars(TestChangelogEntryIntegrity) if n.startswith("test_")]
+        assert names.index("test_no_unresolved_conflict_markers") < \
+               names.index("test_no_duplicate_version_headings"), (
+            "③ 被挪到 ① 后面了——`-x` 下人会先看到「重号」这句误导性诊断")
 
     def test_parser_finds_nothing_in_empty_input(self):
         """空输入解析出 0 条——这正是成对断言 `_MIN_ENTRIES` 要挡的情形。"""

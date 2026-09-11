@@ -5,11 +5,187 @@
 
 ---
 
-## [0.45.202] — 2026-09-11 — 占位（进行中：CHANGELOG 守卫补第三条 —— 行首冲突标记要报「冲突」而不是「重号」）
+## [0.45.203] — 2026-09-11 — 占位（进行中：修 `test_both_directions_are_guarded` 里结构性恒真的重叠断言）
+
+## [0.45.202] — 2026-09-11 — 守卫补第三条：冲突标记要报「冲突」，不要报「重号」
+
+由 v0.45.200 那个 session 指出的邻域。**不是假想**：`4b5e4d9` 是一份含
+`<<<<<<<` / `=======` / `>>>>>>>`、**真被推上 main** 的 CHANGELOG（存活约 3 分钟）。
+把它喂给 v0.45.195 的守卫，报的是 `[0.45.120] 出现 2 次，行 109, 111` ——
+109/111 正好骑在第 110 行那条 `=======` 两侧。
+
+即：守卫会红，但它说的是**重号**，真因是**冲突没解完**。
+这正是 CLAUDE.md 记的「把一种失败误报成另一种」。本 session 自己合并
+origin/main 时也复现过一次。
+
+### Added — 断言 ③ `test_no_unresolved_conflict_markers`
+
+**定义位置就是语义**：它必须排在 ① 之前。addopts 带 `-x` ⇒ **谁先红，谁就是人
+看到的那句诊断**。这一点由 `test_conflicted_file_also_looks_like_a_duplicate`
+用反射核对类内方法顺序，挪动即红（已实测）——不是靠注释提醒。
+① 的报错信息里也加了一句指回 ③。
+
+`_CONFLICT_RE` 两个约束，各挡一类误报：
+* **锚定行首** —— 否则命中**正在讨论冲突标记**的条目（本仓 L7500/7501 就有一条，
+  记的正是 `4b5e4d9` 那次事故）。v0.45.200 用 `"<<<<<<<" not in s` 自检就栽在这，
+  是本仓文本探针第四次把「**在讨论 X**」误判成「**是 X**」。
+* **恰好 7 个**（`(?=[ \t]|$)`）—— 否则 `={7}` 吃掉 markdown setext H1 下划线。
+  本仓当下零行首全 `=` 的行，但那是**内容依赖**，判据不该靠它撑着（v0.45.195 补记 1）。
+
+### Fixed — 一条**通过的理由和它声称要测的东西不是同一件事**的夹具
+
+第一版 `PROSE_ABOUT_CONFLICT` 两处引用都写成 `` `<<<<<<<` ``（带反引号）。
+它确实绿，但**绿的原因是反引号让 lookahead 先挡掉了**，与行首锚定无关 ——
+实测「去掉 `^`」这个变异**照样全绿**。夹具没有判别力，却看起来在守。
+
+修法：补一行**裸写、后跟空格**的引用（`先搜 <<<<<<< 定位，再看 ======= 两侧`），
+这才真正逼出 `^`。同 MEMORY「断言两边是同一种东西吗」那一族，只是位置在夹具上。
+
+### 实测：四条变异，每条对应一处护栏
+
+| 变异 | 结果 |
+|---|---|
+| 真文件插入真实冲突标记 | **③ 先红**（`-x` 下唯一那条），诊断正确 |
+| 只把 `.match` 换 `.search`（留 `^`） | 全绿 —— 又一组合取护栏 |
+| 去 `^` **且**换 `.search` | 「散文」+「setext」两条红 |
+| 去掉 `(?=[ \t]|$)` lookahead | 只有「setext」红 |
+| 把 ③ 挪到 ① 后面 | 顺序自检红 |
+
+第 2/3 行合起来说明：`^` 对 `.match()` **恒冗余**，护栏是二者的合取 —— 与
+v0.45.195 补记 1 同一形状。第 3/4 行说明 lookahead 与行首锚定**不是**各管各的：
+`.search` 一旦放开，lookahead 就护不住 setext 了。
+
+### 如实记两条本次自己犯的（都是本 session 刚记过的形状，当场复发）
+
+1. **又写了一条没跑的变异说法**：`conflict_markers` 的 docstring 初版写
+   「去掉 `^` ⇒ 红」，实跑全绿，原因与 v0.45.195 补记 1 **一字不差** ——
+   `re.match()` 本就只从串首匹配。**在刚写完那条教训的同一个文件里复发。**
+2. **又一次把替换串多写了一层反斜杠**（`(?=[ \\t]` 找 `(?=[ \t]`），
+   导致 M3 变异压根没施加、却显示为「全绿」。这正是 v0.45.195 记进
+   auto-memory 的「变异施加后也要比一次指纹」那条要挡的 —— 护栏起作用了
+   （断言 `count==1` 当场炸），但说明那条教训还没变成肌肉记忆。
+
+⇒ 这两条不是补记，是**证据**：判据写进文档不等于写进手。所以 ③ 的每一条
+docstring 现在只写**实测过的**变异，写不出就不写。
 
 ---
 
-## [0.45.201] — 2026-09-11 — 占位（进行中：Oracle/Guard/Rival 看多率 82~88% 的成因普查 —— 先量方向分布的真实口径，判断是结构性偏斜还是市场状态）
+## [0.45.201] — 2026-09-11 — OracleBee 的方向来自一张单边词表：看空半边五个月不可达
+
+用户问「Oracle 88.1% / Guard 83.3% / Rival 82.8% 看多，账在哪三只」。
+先量后改，结论**推翻了问题里「自我强化」的前提**，也推翻了我自己的一个预判。
+
+### 量到了什么
+
+**仪器先自证**：`agent_memory` 的写入点在 `pheromone_board.publish` 里
+（`_write_buffer.append`，pheromone_board.py:277），**每次 publish 无条件记一条**，
+与 `nlargest(80)` 截断无关 ⇒ 这张台账不受淘汰偏置影响，可以用来数方向。
+反向自证：BearBeeContrarian 读出 6.5% 看多 / 86.8% 看空 —— 台账看得见 bearish。
+
+三只「看多蜂」恰好是三只**几乎从不说 neutral** 的蜂（Rival 1929 行里只有 34 行
+neutral），而 Scout/Chronos/Buzz 是 76~80% neutral。不是看多倾向，是缺中性区。
+
+**逐月拆开后，三只里只有一只还活着**：
+
+| 月份 | Oracle | Guard | Rival |
+|---|---|---|---|
+| 2026-06 | 94.9% | 95.1% | 98.0% |
+| 2026-09 | **86.0%** | 61.4% | 51.5% |
+
+Rival 已被 v0.44.1（单向棘轮）+ expected_returns 居中修掉，腰斩；Guard 是派生蜂
+（`direction = resonance["direction"]`，读板）。**全历史 82.8% 是个混了修复前后两代的陈旧聚合。**
+
+**置换检验（同月内打乱标签保边际，R=2000）推翻「自我强化」**：
+
+| 配对 | 实测 | 零假设 | z |
+|---|---|---|---|
+| Guard vs Rival | 83.7% | 74.7% | 13.7 |
+| Guard vs Oracle | 81.7% | 76.4% | 10.1 |
+| **Oracle vs Rival** | 75.8% | 75.1% | **1.3（无依赖）** |
+| Scout vs Chronos（负对照） | 62.4% | 63.3% | −1.3 |
+
+Oracle 与 Rival 的超额一致率是 **0**。两个都 ~85% 看多的变量本就该在 74% 上下相遇 ——
+不给零假设就会把边际读成耦合。**正确模型是「三条各自单边的规则」，不是「互相强化」。**
+
+### Fixed — `swarm_agents/oracle_bee.py`
+
+Oracle 方向是三级级联，唯一有中性区、唯一均衡的分数带排在**最后**。
+闭式反解 1789 行台账（`discovery` 原样存着 `signal_summary`，无需插桩；
+复现率 **99.8%**，去掉分支1 掉到 93.3%、关键词换无关词掉到 81.9% ⇒ 判据有鉴别力）：
+
+| 分支 | 行数 | 占比 | 判为 bullish |
+|---|---|---|---|
+| 关键词投票 | 982 | **55.0%** | **982（100%）** |
+| 异常流方向 | 662 | 37.1% | 567 |
+| 分数带 | 141 | **7.9%** | 22 |
+
+关键词分支**五个月零次 bearish**，因为词表在本语料里单边：
+
+- 五个看多词只有「看涨」出现过（1542 行），且**永远来自同一句**
+  `检测到 N 个看涨异动`（`options_analyzer.py:1397`，`bullish_unusual > 0` 时无条件拼上）。
+  `bearish_unusual` 这个量**全仓不存在**。
+- 五个看空词**一次都没出现过** ⇒ `_bear_count` 恒 0 ⇒
+  `elif _bear_count > _bull_count` 结构上不可达（同 ChronosBee v0.43.0）。
+- 真正有方向含义的 `做多气氛浓厚（P/C低）`（811 行）**不匹配任何关键词、从不投票**。
+  会投票的反倒是那句不含方向的计数。
+
+且这 982 行的 `unusual_direction` **全部**是 neutral/absent —— 专职方向探测器说
+「无方向」，被一个子串计数改判成看多；其中能看到 Call/Put 明细的 467 行里
+**127 行（27.2%）实际 Put > Call**。与 CodeExecutor 兜底（v0.45.191）同物种：
+把「这类数据存在」渲染成「方向看多」。
+
+处置：删掉关键词分支，方向抽成 `_decide_direction()`（照 ChronosBee
+`_apply_pead_direction` 的先例，便于直接断言）。**上游 `options_analyzer` 一个字未动** ——
+摘要串是展示物，错的是拿它当方向证据的调用方。
+
+**幅度**（用修复后的真实函数重放台账，与离线模型逐数一致）：
+bullish 88.0%→69.9%、neutral 6.3%→23.7%，迁移 311 + 13 行，**81.9% 的行逐字节不变**。
+下游 `BULLISH_GATE_CONFIG(min_agents=3)` 吸收掉大部分：1028 个过门格子里 76 个（7.4%）跌破门槛。
+⚠️ `min_weight_pct=0.50` 要 confidence，台账不存该列 ⇒ 无法反解，**不报加权门槛翻转率**。
+
+### Added — `ic_rerun_readiness._COHORT_HISTORY`（第 11 条，2026-09-11）
+
+方向经 `_compute_direction_vote` 的 `bullish_count`/`bullish_w`（遍历全部
+`valid_results`）直通 `rule_direction` → `final_score`。
+**作废 30 条**（2026-09-10 全天 predictions，其中 7 行 Oracle 方向会变）。
+代价如实算：这 30 条 `checked_t7` 全为 0，尚未成熟为可用证据，
+损失是**一个扫描日的累积量**，不是已实现的回测结果。
+
+### Added — `tests/test_oracle_direction_keyword_vote.py`（34 条）
+
+主守卫是 `test_direction_is_independent_of_summary_text`：固定
+（专职探测器, 分数）后摘要文本不得改变方向 —— 谁再接一个文本投票它就红。
+结构守卫走 AST `_code_only()` 剥注释与 docstring（修复后的 docstring **引用**了
+这些关键词来解释为何删除，按原始源码断言会把解释误判成重新引入），
+并配了两条互补自证：塞回投票必须抓到、只写在注释里必须不报。
+`TestGuardsHaveTeeth` 另立两条上游正对照（那句话还在 / `bearish_unusual` 仍不存在）,
+后者变红就是提醒回来重评是否该恢复方向投票。
+
+变异 7/7 被抓到（含还原后复验 34 passed）；ruff 干净。
+
+### Fixed — `tests/test_code_executor_fallback.py`（我自己上一版埋的雷）
+
+`test_it_extends_the_same_label_not_a_new_partition` 原写
+`cohort_start()["date"] == "2026-09-10"` —— 把一条关于**本条目**的主张绑在了
+列表**尾部**上，于是本次这条合法新边界让它变红，红的原因与 CodeExecutor 毫无关系。
+改为断言「本条与 v0.45.176 共用同一日期标签」。
+讽刺的是 v0.45.191 当时正是这样改红了 `test_oracle_cboe_source`，而我随后在自己的
+新测试里又写了一遍同样的绑定（`cohort_start()["version"] == "v0.45.201"`），同版一并改掉。
+
+### 两个被推翻的预判（都写在这里，别在下次重犯）
+
+1. **「自我强化看多」**：置换检验下 Oracle 与 Rival 零耦合。大头是各自的边际，不是互相强化。
+2. **占号时以为 `origin/main` 是稳的**：worktree 与主 checkout **共用 `.git`**，
+   别的 session 一 `git fetch`，我这边的 `refs/remotes/origin/main` 就会**在我没 fetch 的情况下前进**。
+   本次因此撞号（0.45.200 被另一 session 占走），改占 0.45.201。
+   「下一个可用号」的快照保质期是秒级 —— 提交前必须重读一次，并让非快进推送做最终仲裁。
+   顺带：这次撞号给了 v0.45.195 那条崭新的重号守卫一个**真实（非合成）正对照**，它红了。
+
+### 仍然没查的（比本条大）
+
+`options_analyzer._score()` 的 `unusual_signal = min(2.0, bullish_unusual * 0.5)`
+同样单边 —— 只有看多异动加分，看空异动**对分数毫无影响**，分数只能往上走。
+这条改的是 `score` 不是 `direction`，影响面与世代成本都更大，**本版未动**，单独立项。
 
 ---
 
@@ -75,11 +251,231 @@
 
 ---
 
-## [0.45.199] — 2026-09-11 — 占位（进行中：v0.45.189 自查 —— 两条 docstring 声称的变异并不会让它变红 + 未跟踪文件的覆盖回退没写进守卫）
+## [0.45.199] — 2026-09-11 — v0.45.189 自查：变异校验做了，但没核对**自己写的 docstring 说了什么**
+
+### 背景
+
+v0.45.189 给两条守卫各加了 4 条测试，每条 docstring 都写明「变红的变异是什么」，
+并跑了 13 条变异校验、报告 0 条等价。**校验结果是对的，报告也是诚实的**——
+漏掉的是把两者**对上一遍**：变异结果显示 M1/M6 各只杀 1 条测试，
+而那两条测试的 docstring 白纸黑字写着它们也会被杀。**两份记录同时在手上，
+没有互相核对。**
+
+⇒ 判据：**变异校验跑完，要拿结果去核对每条 docstring 的声称，不是只核对总数。**
+「0 条等价」回答的是「有没有测不到的代码」，回答不了「文档说的是不是真的」。
+
+### Fixed
+
+#### 1. `test_no_crewai_dependency.py` —— 真仓库量级护栏**测的是 helper，不是本文件**
+
+它直接调 `own_python_files(PROJECT_ROOT)`，绕过了 `_crewai_offenders` 自己的枚举。
+⇒ 「把 `_crewai_offenders` 的枚举换回裸 rglob」这条变异**结构上打不到它**
+（实测只有 `..._nested_worktrees` 变红），而 docstring 说会。
+**测 helper 没坏 ≠ 测本文件没坏，中间隔着的正是本文件自己那几行。**
+
+- 抽出 `_scanned_files(root=None) -> ([(绝对路径, 相对路径)], 口径名)`，
+  `_crewai_offenders` 与量级护栏**都走它**。
+- 护栏新增一条断言：本文件必须被自排除掉（此前自排除只有 1 条测试盯着）。
+- 实测修复生效：「git 分支返回空」由杀 1 条 → **杀 2 条**（两个文件的护栏都红了）；
+  「删掉自排除」由杀 2 条 → **杀 3 条**。
+
+#### 2. 两条 `test_enumeration_covers_the_real_repo` 的 docstring 过度断言
+
+它们声称的变异**只在生产 checkout 上让它变红**，在 worktree 里落在界内、不会红。
+实测（本版补测）：
+
+| | 变异后枚举 | 界 | worktree 会红吗 | 生产会红吗 |
+|---|---|---|---|---|
+| `test_no_fake_price` | worktree 153 / 生产 **2741** | 50..500 | ❌ | ✅ |
+| `test_no_crewai_dependency` | worktree 344 / 生产 **24123** | 50..2000 | ❌ | ✅ |
+
+⭐ **v0.45.189 要修的那个「红只在生产 checkout 上可见」，在守卫自己的文档里
+又复发了一次**——这次不是代码的可见性反转，是**文档对自己适用范围的可见性反转**。
+docstring 已改成明说这一点，并指明处处可红的是 tmp 夹具那条。
+
+#### 3. 一个在改动中失效的旧数字
+
+`test_enumeration_covers_the_real_repo` 写「生产上裸枚举是 5029」——5029 是
+**v0.45.189 之前** `os.walk` + 旧六项 `_SKIP_DIRS` 的历史值；v0.45.189 把
+`_SKIP_DIRS` 缩到 `{"venv"}` 之后，同一条变异的真值是 **24123**。
+已改正并标注两个数各是什么，历史数字一律加「当时实测」时间戳。
+
+#### 4. `test_scanner_has_teeth` 在断言与失败信息里各调一次扫描器
+
+`assert f(x) and "y" in f(x), f"{f(x)}"` ——调三次。扫描器若不确定，
+断言看到的和人看到的会是两个不同的清单。已改成绑一次。
+
+### Added — 记下 v0.45.189 引入的**覆盖回退**（此前守卫里一个字都没写）
+
+换到 `own_python_files` 后 git 口径只列**被跟踪**的文件，
+⇒ **全新未提交的 .py 扫不到**（已跟踪文件的未提交修改照常扫得到——
+只拿 git 要路径清单，内容从磁盘读）。实测：新建未跟踪 `zz.py` 写上
+`price = 100.0` + `import crewai`，两条守卫**都看不见**；`git add -N` 之后
+两条**立刻都看得见**。
+
+这是 v0.45.150 明确接受的取舍（口径可复现 > 把「本地碰巧有什么」算进来），
+v0.45.189 把它扩到了这两条守卫**却没有复述**——于是
+`test_no_fake_price` 的模块 docstring 那句「**永久禁止**该反模式重新进入代码库」
+从那一版起就在承诺一件它做不到的事。两处已补写覆盖边界。
+
+⚠️ **本版不动那个取舍本身。** 真要堵这个窗口是给 `own_python_files` 的 git 分支加
+`--others --exclude-standard`（`.claude/worktrees/` 自 v0.45.124 已在 .gitignore，
+`_is_ours` 还有第二道；实测今天两个 checkout 上都是 **0 个**未跟踪未忽略的 .py，
+所以是零风险改动）——但那是**推翻 v0.45.150 的既定取舍**，影响 4 条守卫，
+要单独决定，不在自查里顺手做。
+
+### 验证
+
+- 新变异校验 4 条，0 条等价，`collected=12` 稳定，还原后全绿：
+  N1 枚举换裸 rglob → `..._nested_worktrees` 红；**N2 git 分支返回空 → 两个文件的
+  护栏都红（修复前只红 1 个）**；**N3 删自排除 → 3 条红（修复前 2 条）**；
+  N4 `_SKIP_DIRS` 清空 → `..._nested_worktrees` 红。
+- 两条更正后的 docstring 声称，**逐条数值复核过**（表见上），不是推理。
+- ruff：两个文件 `All checks passed`，全仓与基线一致。
+
+### 没找到问题的地方（查过，留档免得重查）
+
+- `p.relative_to(root)` 在两条分支下都安全（`own_python_files` 用同一个 `root` 构造）。
+- 从**别的 cwd** 跑（`cd /tmp && pytest <绝对路径>`）：12 passed，
+  `from tests._repo_files import` 照常解析（rootdir 由 pyproject.toml 认定并进 sys.path）。
+- G1 的 `50..500` 上界在 **rglob 回退**（无 git 的机器）下是 153，不会误红。
+- 移除 `_EXCLUDE_DIRS` 的 `.git`/`__pycache__` 确为等价：`_is_ours` 滤点号目录、
+  `__pycache__` 里没有 .py，两个 checkout 上口径都不变。
 
 ---
 
-## [0.45.198] — 2026-09-11 — 占位（进行中：agent_toolbox 死代码普查与处置）
+## [0.45.198] — 2026-09-11 — `agent_toolbox` 死代码处置：删两个零读者的类，并手动摘掉随之过期的白名单项
+
+v0.45.189 的溢出发现。那一版修的是测试守卫 `rglob` 越界；普查时在生产代码里
+撞见 `agent_toolbox.py:96` 的 `Path(root).rglob("*")`，但**数读者后发现它是死的**，
+故当时刻意没动（判据不同：它不是断言，不存在「把红伪装成绿」）。本版处置死代码本身。
+
+### Removed — `FilesystemTool` 与 `NotificationTool`（413 → 203 行）
+
+两个类的**外部读者均为 0**（2026-09-11 在本 worktree 用 `git ls-files` 重数，
+不用 `rglob`/`grep -r`——生产 checkout 的 `.claude/worktrees/` 下有 14 个嵌套仓库副本，
+裸递归会把陈旧副本算进读者数，正是 v0.45.189 修的那个形状）：
+
+| 符号 | 外部读者 | 备注 |
+|---|---|---|
+| `FilesystemTool`（4 方法 + `_is_safe_path` + `ALLOWED_ROOTS`） | **0** | `list_directory` 唯一读者是本文件 `main()` 的演示段 |
+| `NotificationTool`（3 方法 + 2 加载器） | **0** | — |
+| `AgentHelper.fs` / `AgentHelper.notify` | **0** | 全仓 14 处 `agent_helper.*` 访问**全部**是 `.git` |
+| `GitHubTool` | 14 处，**未动** | `report_deployer.py` 的 gh-pages / main 部署链路依赖 |
+
+连带清掉：`AgentHelper.__init__` 的两个属性、`summary()` 的两段菜单、`main()` 的两段演示，
+以及随之死掉的 `json` / `Path` / `datetime` / `get_session` 四个 import 和零读者的
+模块级 `_log`（+ `import logging as _logging`）。
+
+⚠️ **`_log` 那条 ruff 抓不到**——`_logging` 在第 30 行被用了一次（就是定义 `_log` 那句），
+F401 结构上看不见「变量定义了但没人读」。而且**本仓 `pyproject.toml` 把 F401 整条 ignore 了**
+（连同 F541/F841），所以 `ruff check agent_toolbox.py` 那句 "All checks passed!"
+对「有没有死 import」一个字都没说，它是恒真的。四个死 import 是
+`ruff check --select F401 --isolated` 单独开规则查出来的。
+
+### Changed — 模块 docstring：那句「后续升级为真正的 MCP 服务器」是**已兑现的过期承诺**
+
+删之前要过的一关是：docstring 自称「Python-native MCP replacement…后续升级为
+真正的 MCP 服务器」，即**有意保留的脚手架**，那么「零读者」就不构成删除理由。
+
+判据不是 docstring 说了什么，而是**它预留的那个未来有没有已经以别的方式到来**。
+到来了：`alpha_hive_mcp.py` 是独立另写的 718 行真 MCP 服务器（FastMCP + stdio，
+8 个 `alphahive_*` tool，已注册进 Claude Desktop 并在线），它**从不 import 本模块**，
+且暴露的是**领域数据**（行情 / 分析 JSON / GEX / Form 4）而非文件系统 / 通知原语。
+`agent_toolbox` 从来不是那颗种子。docstring 已改写成指针（要加 MCP 工具去
+`alpha_hive_mcp.py`，要发 Slack 去 `slack_report_notifier.py`），并写明别再往这里加通用工具。
+
+另两条支撑：
+
+- `NotificationTool` 不是「保留能力」，是**被取代的重复实现**。`slack_report_notifier.py`
+  更成熟（熔断走 `resilience.slack_breaker`、有 DM 兜底、11 处调用 + 自己的测试）。
+  ⚠️ 留着它是**活的危害**而非仅仅不整洁：全仓 `send_slack_message` 有 15 处
+  `agent_toolbox` 之外的引用，看着像它是活的，实际全属另一份同名实现——
+  这个同名陷阱已经实际消耗过一次核查。
+- `main()` 的「演示」是**带电的**：`~/.alpha_hive_slack_webhook` 在本机存在
+  （82 字节，mode 0600），所以 `python3 agent_toolbox.py` 会真的往 #alpha-hive
+  发一条 "🧪 Agent Toolbox 测试"。这与 `CLAUDE.md`「Slack 通知精简规则：Bot 只发两类消息」
+  直接冲突。删除后 `main()` 只剩只读的 `git status`，不写文件、不对外发消息。
+
+沙箱旁路也考虑过：`code_executor.py` 用的是黑名单 `BLOCKED_IMPORTS`（含 `os`/`subprocess`/
+`pathlib`，**不含 `agent_toolbox`**），且 `config.CODE_EXECUTION_CONFIG["enabled"]` 默认 `True`，
+理论上 LLM 生成的代码可以 `import agent_toolbox` 拿到 `write_file`。删除**只减少**这条路径的
+可达能力，不引入新风险。补一句实测：该旁路今天在 `sys.path` 层是堵的——执行器用
+`subprocess.Popen([sys.executable, script], cwd=sandbox_dir/data)` 起子进程，脚本的
+`sys.path[0]` 是沙箱 scripts 目录而非仓库根，且编排器未导出 `PYTHONPATH`。
+**「黑名单漏了」与「实际可达」是两件事，结论里要分开说。**
+
+### Fixed — 手动摘掉 `("agent_toolbox.py", "ALLOWED_ROOTS")`，否则它会静默变成过期项
+
+`tests/test_paths_not_frozen_at_import.py` 的 `KNOWN` 是**子集语义**
+（原文注释：「清掉存量不会变红，新增必红」「⚠️ 子集语义的副作用：清干净了也不会变红，
+过期项会悄悄留下」）。删掉 `ALLOWED_ROOTS` 后**没有任何测试会红**——
+按值检查的那条参数化测试 `test_code_anchored_paths_resolve_inside_the_repo`
+取参自 `MUST_STAY_FILE_ANCHORED`（11 项，A+B 类），而本项在 `KNOWN` 的 C 类、不在其中。
+
+按该类 docstring 自带的对账法手动揪出并摘除：
+
+- 改动**前**：`KNOWN` 17 / `_scan(marker="__file__")` 17，过期项 **0**（干净基线）
+- 只删代码不摘白名单：17 / 16 ⇒ 过期项 **1**，全套**零红**（当场复现该盲区）
+- 摘除后：16 / 16，过期项 **0**
+
+### 核对记录
+
+- 解释器 `/usr/local/bin/python3` (3.11.1)；收集数改动前后均 **4038/4118, 80 deselected**
+- 全套：改动前 `1 failed, 4035 passed, 1 skipped, 2 xfailed`（唯一的红是
+  `test_economic_calendar.py::TestCoverageHorizon`，按设计红，非回归）；改动后同
+- ruff：worktree 基线 46 → 改后 46，零新增
+- ruff：`--select F401 --isolated agent_toolbox.py` 改后 0（改前 4）
+- 上述数字是**本次改动隔离测得**的（合并 origin/main 之前）。合并 v0.45.199~202 后复跑：
+  collected 4103/4183（多出的 65 条是那几版带来的），`1 failed / 4100 passed`，同一条按设计红；ruff 仍 46
+
+### 变异检查：4 条里 **3 条是等价变异**，且其中一条推翻了我的预期
+
+每条都在清 `__pycache__` 后跑全套 `--maxfail=200`，还原后复核。
+基线的 `TestCoverageHorizon`（按设计红）在下表中一律不计入"变红"。
+
+| | 变异 | 预期 | 实测 | 结论 |
+|---|---|---|---|---|
+| M1 | 把 `("agent_toolbox.py","ALLOWED_ROOTS")` 塞回 `KNOWN`（模拟"忘了摘"） | 绿 | **绿**（零新增红） | ✅ 等价变异，坐实子集语义盲区 |
+| M2 | 拿掉 `AgentHelper.self.git`（模拟过度删除） | **红** | **绿** ❗ | ❌ **预期被推翻**，见下 |
+| M3 | 把 `self.fs = object()` 留着（模拟漏删） | 绿 | **绿** | ✅ 等价变异，`.fs` 确无覆盖 |
+| M4 | 从 `_ALLOWED_GIT_CMDS` 拿掉 `"commit"` | 红 | **红 2 条** | ✅ `GitHubTool` 有牙 |
+
+M4 变红的两条：`test_report_deployer_whitelist.py::TestWhitelistCommitInRealGit::`
+`test_only_artifacts_get_committed` / `test_default_still_stages_everything`。
+
+#### ❗ M2：删掉整个 `AgentHelper.git`，测试套件也接不住
+
+M2 的全套跑里多出一条 `test_macro_snapshot.py::TestMacroContextUsesSnapshot::`
+`test_no_snapshot_keeps_live_semantics`。**它不是 M2 造成的**：机制上讲不通
+（`GitHubTool.__init__` 只赋一个 `repo_path`，无副作用），且带 M2 单跑该文件
+**19/19 全过、不复现**；基线与改动后的全套里它也都是绿的。该条调用实时
+`fm.get_macro_context()` 并断言 `data_source` 字符串，归为**全套偶发抖动**
+（仅此定性到"未能复现"，未进一步定根因）。
+
+**扣掉那条抖动，M2 的真实结果是零新增红。** 带 M2 定向重跑两个「本该接住」的
+文件：`tests/test_pipeline.py` + `tests/test_report_deployer_whitelist.py`
+⇒ **77 passed**。原因是两条路径都绕开了 `AgentHelper.__init__`：
+
+- `tests/test_pipeline.py:320` 把**整个 `agent_helper` 换成 `MagicMock()`**
+  （`r.agent_helper = MagicMock()`），`MagicMock` 访问 `.git` 会自动造一个出来；
+- `tests/test_report_deployer_whitelist.py` 直接 `GitHubTool(repo_path=...)` 构造。
+
+⚠️ **所以「删完 `.fs`/`.notify` 全套零红」本身不构成删对了的证据——
+因为删 `.git` 同样零红。** 本次删除的安全性**完全建立在数读者上，
+不建立在测试覆盖上**；套件接不住这个方向的过度删除。
+同 auto-memory `alpha-hive-none-hook-unwired` 的形状：全绿是因为夹具让生产值不可达。
+
+### Fixed — 顺手修一条悬空注释
+
+`tests/test_paths_not_frozen_at_import.py` 的
+`test_code_anchored_paths_resolve_inside_the_repo` 里
+`# 少数是 list（如 agent_toolbox.ALLOWED_ROOTS）` 举的例子，
+在我删掉该符号后成了悬空引用。查下去发现**这个例子对这条测试从一开始就不成立**：
+本条参数化自 `MUST_STAY_FILE_ANCHORED`（11 项，实测取值**全是标量**），
+而 `ALLOWED_ROOTS` 在 `KNOWN` 里、从不在本条参数里
+⇒ 那个 `isinstance(raw, (list, tuple))` 分支**一次也没被执行过**。
+注释已改成如实说明它是防御性的。
 
 ---
 

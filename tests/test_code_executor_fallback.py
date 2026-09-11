@@ -186,10 +186,19 @@ class TestCohortBoundary:
     def test_it_extends_the_same_label_not_a_new_partition(self):
         """边界日期与 v0.45.176 同为 2026-09-10 —— 实测 09-10 起兜底触发 0 次，
         本代已有的 30 条样本改动前后逐位相同，**不该**被这条作废。
+
+        ⚠️ 这里断言的是「**本条**与 v0.45.176 同日」，**不是**「本条在队尾」。
+        v0.45.201 实测教训：原写法是 `cohort_start()["date"] == "2026-09-10"`，
+        它把一条关于本条目的主张绑在了列表尾部上 —— 此后**任何一条合法的新边界**
+        都会让它变红，而红的原因与 CodeExecutor 毫无关系。
+        （同族：v0.45.191 当时也正是这样改红了 test_oracle_cboe_source。）
         """
-        from ic_rerun_readiness import _COHORT_HISTORY, cohort_start
-        assert dict((v, d) for d, v, _ in _COHORT_HISTORY)["v0.45.191"] == "2026-09-10"
-        assert cohort_start()["date"] == "2026-09-10", "不该新开一个更晚的空分区"
+        from ic_rerun_readiness import _COHORT_HISTORY
+        by_ver = dict((v, d) for d, v, _ in _COHORT_HISTORY)
+        assert by_ver["v0.45.191"] == "2026-09-10"
+        assert by_ver["v0.45.191"] == by_ver["v0.45.176"], (
+            "本条应与 v0.45.176 共用同一个日期标签，而不是新开一个更晚的空分区"
+        )
 
     def test_history_stays_append_only_and_monotonic(self):
         from ic_rerun_readiness import _COHORT_HISTORY
