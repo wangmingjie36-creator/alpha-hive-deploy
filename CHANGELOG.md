@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.186] — 2026-09-11 — 占位（进行中：test_zero_weight_invariant 的 rglob 扫进 .claude/worktrees/，生产 checkout 恒红）
+
 ## [0.45.185] — 2026-09-11 — 工作区脏就打 warning；顺带一个「单测各自对、组合起来错」的 bug
 
 ### Added
