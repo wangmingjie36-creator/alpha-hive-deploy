@@ -78,7 +78,94 @@
 
 ## [0.45.204] — 2026-09-11 — 占位（进行中：GitHubTool 方法粒度死代码判定 —— push/create_issue/list_branches/diff）
 
-## [0.45.203] — 2026-09-11 — 占位（进行中：修 `test_both_directions_are_guarded` 里结构性恒真的重叠断言）
+## [0.45.203] — 2026-09-11 — 一条恒真断言守住的其实是**真实不变式的否定**
+
+`tests/test_paths_not_frozen_at_import.py::TestFileDerivedSpeciesDoesNotSpread::test_both_directions_are_guarded`
+里的重叠检查**结构性恒真**：
+
+```python
+overlap = self.MUST_STAY_FILE_ANCHORED & {
+    k for k in self.KNOWN if k not in self.MUST_STAY_FILE_ANCHORED}
+```
+
+**为什么恒真**：集合推导式先把 `MUST_STAY_FILE_ANCHORED` 里的元素**全部滤掉**，
+剩下的按定义与 `MUST_STAY_FILE_ANCHORED` 不相交，再与它求交 ⇒ 对**任意**两个集合
+都恒为空集，与实际内容无关。这是 `x and not x` 的集合版。
+实测：`A={1,2,3}; B={1,2,3,4,5}` ⇒ 恒真写法得 `set()`，本意写法 `A & B` 得 `{1,2,3}`。
+本仓实测（v0.45.198 清理后）：`|KNOWN|=16`、`|MUST_STAY|=11`、真实交集 **11 项**，
+而该断言报 0 项。它从未检查过 docstring 声称要检查的东西。
+
+### 处置：方案 A —— 守卫写错了，但错得比「重叠该允许」更深
+
+不是「重叠可以允许」，而是**重叠必须成立**。两条内容守卫是
+
+```
+G1（子集语义）_scan() - KNOWN      == ∅   ⇔  _scan() ⊆ KNOWN
+G2（超集语义）MUST_STAY - _scan()  == ∅   ⇔  MUST_STAY ⊆ _scan()
+```
+
+合起来 ⇒ `MUST_STAY ⊆ _scan() ⊆ KNOWN` ⇒ **`MUST_STAY ⊆ KNOWN`**。
+穷举 4 元素全集的 `(MUST_STAY, KNOWN, scan)` 三元组，「G1∧G2 为绿但 `MUST_STAY ⊄ KNOWN`」
+的反例数为 **0**。
+
+所以老 docstring 要求的「不许重叠」在 `MUST_STAY` 非空时与 G1∧G2 **结构上不可同时满足**——
+那条断言恒真地断言了真实不变式的**否定**。**恰恰因为它恒真，这个自相矛盾的规格才没炸**：
+一条死断言把一个矛盾的规格伪装成了「已被守住」。这比单纯的「少测了一项」更隐蔽，
+因为它让规格看起来经过了审查。
+
+`MUST_STAY ⊆ KNOWN` 此前一直**靠巧合成立**（没有任何东西断言它），现改为显式断言。
+`KNOWN` 严格大于 `MUST_STAY` 是正常的：多出的 5 项是 C/D 两类
+（`gui/app.py` / `scheduler.py` / `pead_analyzer.py` / `push_report_to_slack.py` /
+`scan_coverage_gate.py`），已登记但并不要求永远是 `__file__`。
+同类另两条断言（两个集合非空）本来就有效，原样保留。
+
+### Changed — `test_both_directions_are_guarded` 连**定义位置**一起改
+
+**位置是语义**（沿用 v0.45.202）：`addopts` 带 `-x` ⇒ **谁先红，谁就是人看到的诊断**。
+这条元守卫原先定义在类**末尾**，即便断言改对了也永远抢不到话——两张表不自洽时
+`test_no_new_file_derived_paths` 会先红。现移到 `test_scanner_has_teeth` 之后、
+两条内容守卫之前（扫描器坏掉仍先于内容问题报出，这个优先级是对的）。
+
+**这不是推测，是实测**。同一张不自洽的表（`KNOWN` 删一项，`MUST_STAY` 仍留着）：
+
+| | 人看到的第一个红 | 那句诊断 |
+|---|---|---|
+| 改动**前**的文件 | `test_no_new_file_derived_paths` | 「**新增**了 `__file__` 派生的路径常量」 |
+| 改动**后**的文件 | `test_both_directions_are_guarded` | 「这些项要求保持 `__file__` 锚定，却没登记进 `KNOWN`」 |
+
+前者指着一个**生产文件**让你判断它是代码还是数据，而真因是白名单**少**了一项——
+没有任何东西被「新增」。正是 CLAUDE.md 记的「把一种失败误报成另一种」。
+
+### Added — `test_meta_guard_speaks_first`
+
+用反射核对类内方法定义顺序，挪动即红——不靠注释提醒（注释不会变红）。
+同时钉住两个改名面：主体改名、参照物改名，各给一句明确诊断而不是 `KeyError`。
+
+### 变异校验（7 条，**全部真跑过**，不是举例）
+
+| # | 变异 | 新写法 | 原恒真写法 |
+|---|---|---|---|
+| M0 | 不变异（对照） | 🟢 18 passed | — |
+| M1 | `MUST_STAY` 加一项、`KNOWN` 无 | 🔴 **首红** | 🟢 **绿** |
+| M2 | 从 `KNOWN` 删一项（`MUST_STAY` 仍有） | 🔴 **首红** | 🟢 **绿** |
+| M3 | 把元守卫挪到两条内容守卫之后 | 🔴 `test_meta_guard_speaks_first` | — |
+| M4 | M2 的表 + 改动前的文件 | 首红＝`test_no_new_file_derived_paths`（误诊，见上表） | — |
+| M5 | 改动前的文件、表不动 | 🟢 全绿（断言活着但没判别力） | — |
+| M6 | 主体方法改名 | 🔴 给出诊断而非 `KeyError` | — |
+| M7 | 参照物方法改名 | 🔴 「已失去参照物」 | — |
+
+M1′/M2′ 那两个「原写法仍绿」的格子是本条的**核心证据**：同一个输入下
+新断言红、老断言绿 ⇒ 老断言从未起过作用。
+
+⚠️ M4 第一版做坏了：我在「元守卫挪回末尾」的同时保留了 `test_meta_guard_speaks_first`，
+于是先红的是顺序守卫本身，证明不了「人会看到误诊」。重做时直接取
+`git show HEAD:tests/...` 的**改动前真实文件**再施加同一变异，才得到上表那一行。
+教训与 v0.45.202 的坏夹具同源：**变异跑绿/跑红的理由，必须和它声称要证明的东西是同一件事**。
+
+### 测试
+
+全套 `--maxfail=200`：**4101 passed, 1 failed**（仅 `TestCoverageHorizon`，按设计红）、
+1 skipped、80 deselected、2 xfailed。ruff 全仓 error 数 46 → 46（零新增）。
 
 ## [0.45.202] — 2026-09-11 — 守卫补第三条：冲突标记要报「冲突」，不要报「重号」
 

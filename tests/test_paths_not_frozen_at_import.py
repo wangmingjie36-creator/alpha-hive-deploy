@@ -522,6 +522,85 @@ class TestFileDerivedSpeciesDoesNotSpread:
         assert len(found) >= 10, (
             f"只找到 {len(found)} 处——几乎肯定是扫描器坏了，而不是仓库突然干净了")
 
+    # —— 元守卫：先于两条内容守卫回答「这两张表彼此自洽吗」 ——
+    # **定义位置就是语义**（同 v0.45.202）：addopts 带 `-x` ⇒ 谁先红谁就是人看到的
+    # 那句诊断。两张表不自洽时，下面 `test_no_new_file_derived_paths` 也会红，但它
+    # 说的是「**新增**了 `__file__` 派生路径」——真因却是「登记漏了一张表」，正是
+    # CLAUDE.md 记的「把一种失败误报成另一种」。故本条必须排在它前面；顺序由
+    # `test_meta_guard_speaks_first` 反射核对，挪动即红。
+    # （`MUST_STAY_FILE_ANCHORED` 定义在本类稍下方，属性在**调用时**取，不受影响。）
+
+    def test_both_directions_are_guarded(self):
+        """元守卫：`MUST_STAY_FILE_ANCHORED ⊆ KNOWN`，且两边都不许空掉。
+
+        ⚠️ v0.45.203 之前这里断言的是**不许重叠**，而且那句写法是**结构性恒真**的：
+
+            overlap = MUST_STAY & {k for k in KNOWN if k not in MUST_STAY}
+
+        推导式先把 `MUST_STAY` 里的元素全滤掉，再与 `MUST_STAY` 求交 ⇒ 对**任意**
+        两个集合都恒为空集，与它们的实际内容无关（`x and not x` 的集合版）。
+        实测：`A={1,2,3}; B={1,2,3,4,5}` ⇒ 恒真写法得 `set()`，本意写法 `A & B`
+        得 `{1,2,3}`。也就是说这条断言从未检查过它 docstring 声称要检查的东西。
+
+        更要命的是：它恒真地断言了**真实不变式的否定**。两条内容守卫是
+
+            G1（子集）`_scan() - KNOWN == ∅`        ⇔ `_scan() ⊆ KNOWN`
+            G2（超集）`MUST_STAY - _scan() == ∅`    ⇔ `MUST_STAY ⊆ _scan()`
+
+        合起来 ⇒ `MUST_STAY ⊆ _scan() ⊆ KNOWN` ⇒ **`MUST_STAY ⊆ KNOWN`**。
+        所以重叠不是「可以允许」，是**必须成立**：真要求「不许重叠」且 `MUST_STAY`
+        非空，G1 与 G2 结构上永远不可能同时为绿。恰恰因为那句恒真，这个矛盾才
+        没炸——一条死断言把一个自相矛盾的规格伪装成了已被守住的规格。
+
+        两集合语义不同（`KNOWN` = 子集语义「不许新增」，`MUST_STAY` = 超集语义
+        「不许错清」），同一项同时出现在两边完全正常：一处路径既「是已登记的
+        `__file__` 派生项」又「必须保持 `__file__` 锚定」并不矛盾。反过来，
+        `KNOWN` 可以**严格大于** `MUST_STAY`——多出来的是 C/D 两类（读 HOME 只拿
+        `__file__` 兜底、或未清已登记），它们已登记但并不要求永远是 `__file__`。
+
+        此前 `MUST_STAY ⊆ KNOWN` 一直靠巧合成立：没有任何东西断言它。
+        """
+        assert self.MUST_STAY_FILE_ANCHORED, "超集守卫的集合空了，它恒真"
+        assert self.KNOWN, "子集守卫的白名单空了"
+        unregistered = self.MUST_STAY_FILE_ANCHORED - self.KNOWN
+        assert not unregistered, (
+            "这些项要求「必须保持 `__file__` 锚定」，却没登记进 `KNOWN`：\n"
+            + "\n".join(f"  - {f}:{n}" for f, n in sorted(unregistered))
+            + "\n\n这不是风格问题，是**规格自相矛盾**：\n"
+              "  · `test_code_anchored_paths_were_not_wrongly_converted` 要求它出现在"
+              " `_scan()` 里；\n"
+              "  · `test_no_new_file_derived_paths` 要求 `_scan()` 里的每一项都在"
+              " `KNOWN` 里。\n"
+              "两者不可能同时满足。改法：把上面这些项补进 `KNOWN`"
+              "（注明属于 A/B 哪一类），而不是从 `MUST_STAY_FILE_ANCHORED` 里删掉——"
+              "删掉等于放弃「不许被一刀切清理」那个方向的保护。")
+
+    def test_meta_guard_speaks_first(self):
+        """`test_both_directions_are_guarded` 必须排在两条内容守卫**之前**。
+
+        `-x` 下只有第一个红点会被人读到。这条元守卫若排在后面，两张表不自洽时
+        人看到的是「新增了 `__file__` 派生路径」——指着一个**生产文件**让你判断
+        它是代码还是数据，而真因是白名单登记漏了一张表。
+
+        照 v0.45.202 的做法**用反射核对定义顺序**，不靠注释提醒——注释不会变红。
+
+        会变红的变异：把 `test_both_directions_are_guarded` 的整个方法体挪到
+        `test_no_new_file_derived_paths` 之后（已实测）。
+        """
+        names = [k for k, v in vars(type(self)).items()
+                 if k.startswith("test_") and callable(v)]
+        pos = {n: i for i, n in enumerate(names)}
+        assert "test_both_directions_are_guarded" in pos, (
+            "`test_both_directions_are_guarded` 改名或被删了 —— 本条顺序守卫"
+            "失去了主体。若确实要改名，连同本条一起改，别让它变成 KeyError。")
+        for later in ("test_no_new_file_derived_paths",
+                      "test_code_anchored_paths_were_not_wrongly_converted"):
+            assert later in pos, f"{later} 改名或被删了，本条顺序守卫已失去参照物"
+            assert pos["test_both_directions_are_guarded"] < pos[later], (
+                f"`test_both_directions_are_guarded` 被挪到了 {later} 之后。\n"
+                "addopts 带 `-x`，谁先红谁就是人看到的诊断；两张表不自洽时，"
+                f"{later} 会把「登记漏表」误报成「新增/错清了路径」。")
+
     def test_no_new_file_derived_paths(self):
         new = TestSpeciesDoesNotSpread._scan(marker="__file__") - self.KNOWN
         assert not new, (
@@ -670,18 +749,6 @@ class TestFileDerivedSpeciesDoesNotSpread:
                 f"{modname}.{attr} 解到了**仓库之外**：{pth}\n"
                 f"（仓库根 = {REPO_ROOT}）多一级 `.parent` 就会跑到 worktrees/ 去。")
         assert checked, f"{modname}.{attr} 没有任何值落在仓库内，本条等于没测"
-
-    def test_both_directions_are_guarded(self):
-        """元守卫：两个方向的集合不许重叠，也不许有一边空掉。
-
-        重叠 ⇒ 同一处既要求「是 `__file__`」又列在「允许是 `__file__`」里，
-        语义混乱；空掉 ⇒ 那个方向的守卫恒真。
-        """
-        assert self.MUST_STAY_FILE_ANCHORED, "超集守卫的集合空了，它恒真"
-        assert self.KNOWN, "子集守卫的白名单空了"
-        overlap = self.MUST_STAY_FILE_ANCHORED & {
-            k for k in self.KNOWN if k not in self.MUST_STAY_FILE_ANCHORED}
-        assert not overlap, f"两个方向的集合重叠：{sorted(overlap)}"
 
     def test_cleaned_modules_stay_clean(self):
         """v0.45.160 清掉的那些不许回退成 `__file__` 派生常量。"""
