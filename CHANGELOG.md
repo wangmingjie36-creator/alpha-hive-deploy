@@ -424,6 +424,8 @@ F401 结构上看不见「变量定义了但没人读」。而且**本仓 `pypro
   `test_economic_calendar.py::TestCoverageHorizon`，按设计红，非回归）；改动后同
 - ruff：worktree 基线 46 → 改后 46，零新增
 - ruff：`--select F401 --isolated agent_toolbox.py` 改后 0（改前 4）
+- 上述数字是**本次改动隔离测得**的（合并 origin/main 之前）。合并 v0.45.199~202 后复跑：
+  collected 4103/4183（多出的 65 条是那几版带来的），`1 failed / 4100 passed`，同一条按设计红；ruff 仍 46
 
 ### 变异检查：4 条里 **3 条是等价变异**，且其中一条推翻了我的预期
 
