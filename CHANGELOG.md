@@ -165,7 +165,134 @@ MEMORY.md 指定 `git show origin/main:CHANGELOG.md | grep -m1 '^## \['` 为**�
 
 ---
 
-## [0.45.189] — 2026-09-11 — 占位（进行中：另两条守卫也用 rglob/os.walk 扫进 .claude/worktrees/，改走 own_python_files）
+## [0.45.189] — 2026-09-11 — 同一形状第二、三例：另两条守卫也在扫 14 个嵌套 worktree
+
+### 背景
+
+v0.45.186 修的是 `test_zero_weight_invariant.py`，并把枚举抽成
+`tests/_repo_files.py::own_python_files(root)`。本版普查其余枚举驱动的守卫，
+又找到**两条同形状的**——都在生产 checkout 上越界扫进 `.claude/worktrees/`：
+
+| 守卫 | 旧枚举 | 生产 checkout 实测 | 其中 `.claude/` 下 |
+|---|---|---|---|
+| `test_no_fake_price.py:37` | `ROOT.rglob("*.py")` | 2128 | **1975（92%）** |
+| `test_no_crewai_dependency.py:61` | `os.walk(PROJECT_ROOT)` | 5029 | **4295（85%）** |
+
+git 跟踪的只有 **340** 个。嵌套 worktree 现在是 **14 个**（v0.45.186 记录的是
+10 个——**这个数在长，不是静态的**），每个是一份停在各自版本的完整仓库副本。
+
+⚠️ **两条当时都是绿的，而绿不等于没事**，且泄漏面**各不相同**（所以判据逐条重推、
+没有批量转换）：
+
+* `test_no_fake_price`：`_EXCLUDE_DIRS` 用 `any(part in p.parts)` 判**绝对**路径段，
+  于是嵌套副本里的 `tests/` `experiments/` **恰好**被排掉了，但它们根目录下的
+  `data_pipeline.py` / `alpha_hive_daily_report.py` 一个都没排掉。
+* `test_no_crewai_dependency`：`_SKIP_DIRS` **不含 `.claude`**，一个都没排——
+  嵌套副本里的测试、实验脚本全算进「全仓源码」。而 crewai 是 v0.45.74 才移除的，
+  **任何一个那之前分出去的 worktree 里都还留着 `crewai_adapter.py`**。
+
+绿的唯一原因是「碰巧没有哪份陈旧副本命中」。红一旦出现，**只在生产 checkout 上
+可见**（worktree 里没有嵌套 worktree），造成它的人看到的是绿 ——
+MEMORY `alpha-hive-test-writes-production`：病灶只长在没人看的地方。
+
+### Changed
+
+- `tests/test_no_fake_price.py`
+  - `_iter_prod_py()` → `_iter_prod_py(root=None)`，枚举换 `own_python_files(root)[0]`。
+    `root` 是**参数**不是模块常量（调用时求值，测试才能指向带病灶的 tmp 树）。
+  - `_EXCLUDE_DIRS` 改判 `p.relative_to(root).parts`。按绝对路径判时，
+    **仓库被 checkout 到的位置会改变守卫的覆盖面**——放进任何叫 `gui`/`tests`/
+    `experiments` 的目录，整条守卫静默扫零个文件且照样是绿的。
+  - 扫描体抽成 `_scan_violations(root)`（此前内联在断言里，没法用夹具驱动）。
+  - `_EXCLUDE_DIRS` 移除 `.git` / `__pycache__`：已被 `_is_ours` 的点号过滤与
+    「`__pycache__` 里没有 .py」覆盖，**留着就是删掉也没有任何测试会红的行**。
+  - 实测：生产 checkout 2128 → **153**，`.claude/` 下 0 个，命中数仍为 0
+    （被扫掉的 92% 全是噪音，没有藏着真违规）。
+- `tests/test_no_crewai_dependency.py`
+  - `test_repo_has_no_crewai_import` 的扫描抽成 `_crewai_offenders(root=None)`，
+    `os.walk` → `own_python_files(root)[0]`。
+  - `_SKIP_DIRS` 六项缩到 **`{"venv"}`**：`.git`/`.pytest_cache`/`.venv` 被
+    `_is_ours` 的点号过滤覆盖，`node_modules` 被它的 `VENDORED` 覆盖，
+    `__pycache__` 里没有 .py。**只有裸 `venv` 两道都盖不到**（无点号、不在
+    `VENDORED` 里），显式留下——真装了 crewai 的话源码就在那儿。
+  - 实测：生产 checkout 5029 → **340**，`.claude/` 下 0 个，命中数仍为 0。
+
+### Added — 枚举范围本身的守卫（每条都写明什么变异会让它变红）
+
+两个文件各 4 条，**必须用 tmp 夹具**：夹具里造一棵带 `.claude/worktrees/<name>/`
+的假仓库，三到四份**内容完全相同、只有位置不同**的文件（于是「该排的没排」
+只能由路径过滤解释，不会被内容差异混淆）。
+⚠️ **在 worktree 里跑什么都证明不了**——病灶只存在于生产 checkout。
+
+- `test_scanner_has_teeth` — 先自证探针有效。没有它，「嵌套副本不许被扫到」
+  可以靠「什么都扫不到」通过；而真仓库里本就该是零命中，主断言自己分不清这两种情况。
+- `test_scanner_does_not_cross_into_nested_worktrees` — **本版修的那件事**，
+  修前红、修后绿。夹具**断言 `own_python_files(...)[1] == "rglob"`**：病灶只在
+  回退分支上（嵌套 worktree 从不被外层索引跟踪，`git ls-files '*.py' | grep
+  ^.claude` 实测 0 条），不钉住这点，未来夹具悄悄走到 git 分支就测的不是它要测的。
+- `test_exclude_dirs_are_matched_relative_to_root`（仅 no_fake_price）—— 把仓库放进
+  一个叫 `gui` 的目录，证明按绝对路径判时守卫会**静默空跑**。
+- `test_this_file_is_excluded_from_its_own_scan`（仅 no_crewai）——
+  夹具载荷刻意写成**缩进在三引号串里的 `import crewai`**，于是本文件自己会被
+  `_IMPORT_RE`（`^\s*import\s+crewai`，re.M）命中，那句自排除**因而是承重的**。
+  改之前它不承重：正则匹配不到本文件，删掉自排除没有任何测试会红。
+- `test_enumeration_covers_the_real_repo` — 量级护栏（上百量级）+ 必须含
+  `alpha_hive_daily_report.py` + `.claude/` 下必须 0 个。
+
+### 过程中发现的两个「断言两边不是同一种东西」
+
+1. **我写的第一版 `.claude` 泄漏断言用了 `f.parts`（绝对路径）**。本仓的 worktree
+   自己就住在 `…/Alpha Hive/.claude/worktrees/<name>/`，绝对路径里**恒含
+   `.claude`** ⇒ 那条断言在每个 worktree 里恒红、且红的理由是假的。
+   与本版要修的 bug 同一个混淆，只是升了一层。
+2. **`assert os.path.basename(__file__) not in _crewai_offenders()` 是恒真的**——
+   返回的是相对路径（`tests/test_no_crewai_dependency.py`），拿 basename 去
+   `not in` 一个字符串列表永远为真。实测：把自排除两行删掉，它照样绿。
+   已改成按 basename 逐条比。**抓到它的不是推理，是真的把变异跑了一遍。**
+   判据：**断言两边若不是同一种东西（basename vs 路径），它永远不会红。**
+
+### 验证
+
+- 变异检查 13 条，**0 条等价**，全程 `collected=12` 稳定，每条还原后复核全绿：
+  - 回退两条枚举（M1/M6）→ 各自文件的 `..._nested_worktrees` 红
+  - `rel.parts`→`p.parts`（M2）→ `test_exclude_dirs_are_matched_relative_to_root` 红
+  - 删 `_EXCLUDE_DIRS` continue / 去掉 `"tests"`（M3/M4）→ 主断言 + 夹具断言 红
+  - 正则失效（M5/M9）→ 各文件 `test_scanner_has_teeth` 等 3 条红
+  - `_SKIP_DIRS` 清空（M7）→ `venv` 样本泄漏，红
+  - 删自排除（M8）→ `test_repo_has_no_crewai_import` + `..._own_scan` 红
+  - `own_python_files` **rglob 分支**返回空（M10）→ 两文件的夹具测试共 5 条红
+  - `_is_ours` 不滤点号目录（M11）→ 两文件各 1 条红
+  - **git 分支**返回空（M12）→ 两文件的 `test_enumeration_covers_the_real_repo` 红
+- ⭐ **M10 与 M12 各只杀一半**：真仓库走 git 分支、tmp 夹具走 rglob 回退，
+  两类测试**分别**覆盖 `own_python_files` 的两条分支。只有一类测试就有一半没测。
+- ⚠️ **诚实记录一条等价变异**：M13「git 分支去掉 `if _is_ours(x)`」在本版这两个
+  文件范围内**没有任何测试变红**（今天没有任何被跟踪的 .py 落在点号目录下）。
+  它由 v0.45.186 写的
+  `test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread::test_git_branch_applies_the_same_filter_as_the_fallback`
+  杀掉（实测已复核）——**共享枚举的回报就在这里：覆盖跟着代码走，不必每个调用方重造。**
+- ruff：**46 errors（与 worktree 基线逐字一致，新增 0）**，两个改动文件本身
+  `All checks passed`。
+- 全套：`collected 4043 → 4051`（**恰好 +8 = 每条守卫 4 条新测试**），
+  **2 failed / 3968 passed**。两条红都不是本版造成的：
+  - `tests/test_economic_calendar.py::TestCoverageHorizon` —— 干净 HEAD 上
+    按设计就红（硬编码日历到期，见 `alpha-hive-hardcoded-calendar`），非回归。
+  - `tests/test_pipeline.py::TestBuildSwarmReport` —— CBOE VIX 实时下载撞 60s
+    `--timeout` 的网络抖动。基线里红 2 条、本次红 1 条（**不确定性本身就是证据**），
+    **单独重跑 41 passed**。
+
+### 普查结果：这一类到此为止（不是「只看了两个」）
+
+对**递归**遍历（`rglob` / `os.walk` / `glob("**")`）做了全仓普查：
+
+- `tests/` 里除本版这两条外，**没有第三条**递归枚举全仓的守卫。其余 `glob`
+  全部**结构上免疫**：或是定深的 `ROOT.glob("*.py")` / `TESTS_DIR.glob("test_*.py")`
+  （不下降到 `.claude/`），或是对准某个具体产物目录
+  （`conftest._artifact_signature` 的 `os.walk(path)` 走的是状态目录，不是仓库根）。
+- 生产代码里递归遍历只有**一处**：`agent_toolbox.py:96`
+  `FileTool.search_files()` 的 `Path(root).rglob("*")`。它也会走进
+  `.claude/worktrees/`，但它是**通用文件搜索工具（上限 100 条）而不是断言**——
+  后果是「搜索结果里混进陈旧副本」，不是「把红伪装成绿」。**本版不改**：
+  它没有「谁会红」这个问题，判据不同，混在一起改会把两件事的理由搅在一起。
 
 ---
 
