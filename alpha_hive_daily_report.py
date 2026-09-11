@@ -569,6 +569,16 @@ class AlphaHiveDailyReporter:
         """初始化蜂群扫描上下文：Board + Agents + 预取数据"""
         set_correlation_id(self._session_id or f"swarm_{self.date_str}")
         _log.info("蜂群协作启动 %s", self.date_str)
+        # v0.45.182：把「在跑的是哪一版代码」记进日志。
+        # 2026-09-10 事故（CHANGELOG v0.45.181）：修复推到了 main，生产 checkout
+        # 不自动 pull、落后六个提交，当天扫描照旧跑旧代码把 125 条样本又删了一遍——
+        # 而当时日志与 status.json 里都没有任何版本记录。观测代码不得影响主流程，
+        # 故整体 try 住；解析结果同时进 scan_timing 快照（→ status.json）。
+        try:
+            import code_version as _cv
+            _cv.log_startup()
+        except Exception as _cv_err:  # noqa: BLE001
+            _log.warning("代码版本记录失败（不影响扫描）: %s", _cv_err)
         try:
             from hive_logger import FeatureRegistry
             FeatureRegistry.log_status()

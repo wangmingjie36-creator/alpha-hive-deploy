@@ -5,6 +5,113 @@
 
 ---
 
+## [0.45.185] — 2026-09-11 — 占位（进行中：dirty_tracked=True 时打 warning——定时扫描跑的是工作区不是任何一个提交）
+
+---
+
+## [0.45.184] — 2026-09-11 — 「生产在跑的是哪一版代码」终于有了观测点
+
+v0.45.181 事故的收尾：那次能查出来纯属**数据消失得够显眼**（对账 `1293+30−125=1198`
+正好对上）。换成一个不改变行数的行为差异——评分口径、权重、阈值——就无从发现，
+因为当时日志与 `status.json` 里**都没有任何版本记录**。「谁会红？」答不上来。
+
+### Added
+
+- **`code_version.py`**：解析 `git rev-parse --short HEAD` + 分支 + 已跟踪文件是否 dirty
+  + CHANGELOG 顶部版本号。
+- **接线两处**：
+  - `alpha_hive_daily_report._init_scan_context()` 扫描启动时打一行 INFO：
+    `代码版本 v0.45.184 | commit abc1234 | 分支 main | 工作区 干净`
+  - `scan_timing.snapshot()` 带上 `code_version` ⇒ 编排器已有的那行
+    `jq '. + {scan_timing: $t[0]}'` 把它并进 `status.json`，落点
+    `.scan_timing.code_version`。**无需改编排器**（它在仓库外、属用户的定时任务）。
+    已用真的 jq 实测过这条路径。
+- `tests/test_code_version.py`（10 条）。变异 **8/8** 各打红，`collected` 恒为 10。
+  其中两条是**接线测试**（V7 删掉快照字段、V8 删掉启动调用，各自打红）——
+  没有它们，其余 8 条全绿也证明不了这个观测点真的被调用过
+  （v0.45.180 那条「本次不可用」提示就是这么成为死代码的）。
+
+### 设计约束（两条都来自本仓既有教训）
+
+1. **仓库路径用 `Path(__file__)` 而不是 `PATHS.home`**，且在**函数体内**求值。
+   这里要的是「代码在哪」不是「数据在哪」（CLAUDE.md「这个路径指向代码还是数据？」；
+   同族先例 `health_check.PROJECT` 的 `git -C <仓库>`）。函数内求值 ⇒ 既不冻在 import 期，
+   也不进 `test_paths_not_frozen_at_import` 的两张模块级清单。
+   变异 V1（改成 `PATHS.home`）⇒ 测试隔离把 HOME 指向 tmp ⇒ 3 条红。
+2. **缺失一律 `None`，不写占位串。** `"unknown"` / `"0000000"` 会被读成
+   「有个版本，只是长这样」。变异 V5（sha 兜底成 `"unknown"`）⇒ 2 条红。
+
+### Fixed（自查，写的时候差点发出去）
+
+**`_git()` 把「成功但没有输出」和「命令失败」混成了同一个 `None`。**
+第一版写的是 `return r.stdout.strip() or None` —— 而 `git status --porcelain`
+在**干净工作区**输出就是空的，于是 `dirty_tracked` 再也分不出「干净」和「没测到」。
+这正是本轮从头到尾在抓的那一族（0/空值冒充真读数）。
+现 `_git` 失败返回 `None`、成功返回可能为空的字符串，`dirty_tracked` 为三态
+（`None` 没测到 / `False` 干净 / `True` 有改动）。变异 V2、V3 各打红。
+
+另：`git` 退出码 **128 = 这里不是 git 仓库**，与普通失败分开打日志——
+CLAUDE.md 就 `git check-ignore` 的三义退出码记过同一条。变异 V4 打红。
+
+### 过程教训
+
+**原则写对了、做的相反。** 编排器核对那条测试，docstring 写着
+「用 marker 而非静默 skip，让『这条没验』在报告里可见」，而正文写的是 `pytest.skip`。
+已改 `@pytest.mark.integration`：默认摘要里是 `9 passed, 1 deselected`（看得见），
+`-m integration` 可单跑。CLAUDE.md 那节的判据本来就写着「真需要外部系统的测试标
+marker 别写 skip」。
+
+**并发让号两次。** 本条最初占的是 `0.45.182`，推占位前发现已被另一 session
+先提交（v0.45.163/164 二次检查）；改 `0.45.183` 时又发现被第三个 session 占了
+（云端快照 routine）。按 CLAUDE.md「先提交进 git 历史的占号保留」两次让号到 `0.45.184`。
+⚠️ 0.45.182 那条声明会碰 `alpha_hive_daily_report.py`，与本条在同一文件
+（本条只在 `_init_scan_context` 开头插 6 行），合并时逐块核对。
+
+全套 **3923 passed**（`TestCoverageHorizon` 那条按设计随日历变红的除外）。
+
+---
+
+## [0.45.183] — 2026-09-11 — 云端快照 routine：merge 三天静默失败的真因是浅克隆，不是 main 被 force-push
+
+**改动落在调度器**（claude.ai routine `trig_01QzhoHiNxSWMgxWAQztnLA6` / `alpha-hive-cloud-snapshot`），**不在本仓**。本条只记根因取证与判据——供下次有人读到 `cloud-snapshots` 分支上 `36df50b` 那句提交信息（「force-push 重写历史后两支失去共同祖先」）时，不要再继承那个错误结论。
+
+### Fixed（调度器提示词）
+
+- **步骤 1 增加解除浅克隆**：`git rev-parse --is-shallow-repository` 为 true 才跑 `git fetch --unshallow origin`。这是根因修复。
+- **步骤 1 的退出码改为直接取，禁止接管道。** 2026-09-10 那次运行写的是 `git merge … | tail -20; echo "MERGE_EXIT=$?"`，打印出 `MERGE_EXIT=0`，而那条 merge 实际是 `fatal:` —— `$?` 取到的是 `tail` 的退出码。步骤 3 从一开始就写着「不要接管道（管道会吃掉退出码）」，步骤 1 没写，于是**同一个坑在同一份提示词里被踩了**。
+- **兜底从「`checkout -B` + 必须 force push」换成两父合并**（`read-tree` 拼树 + `commit-tree` 记两个父提交），不丢数据也不需要 force。旧兜底与同一句里的「严禁 force push」直接矛盾，真触发时三个云端 agent 各自独立地判定「三条路都超出授权」，全部停在保守一侧。
+- **最终回复加固定第 ⓪ 行**：`STEP1=OK / UNSHALLOW_OK / FALLBACK / NEW_BRANCH / FAIL`，且必须带 `落后 main N 个提交`（N = `git rev-list --count origin/main ^HEAD`，同步成功时必为 0）。走了 unshallow 或兜底时还要把 ⓪ 行原文写进 commit message，可 `git log --grep=STEP1` 查到。
+- **fail fast 放在两道防线之后**，不是 merge 失败的第一反应——理由见下文「判断」。
+
+### 根因（与此前记录相反，取证如下）
+
+**`main` 从未被 force-push。** 云沙箱发的是**浅克隆**，`origin/main` 在沙箱里只有 125 个提交。
+
+| 证据 | 结果 |
+|---|---|
+| GitHub 活动流全量翻查（1060 次 push / 16 次 force_push） | `main` 最后一次 force_push = **2026-02-26**，九月零次；九月 `cloud-snapshots` 三次推送也全是普通 push |
+| 真实 `origin/main` | **920 个提交、1 个根提交**（`0705e6b`，2026-02-23）；沙箱里是 125 个提交、**5 个「根提交」** |
+| `git merge-base --is-ancestor 141cb52 389a451` | **YES** —— 云端 agent 认定「被 force-push 冲掉」的那个提交，是 main 的正常祖先 |
+| 共同祖先距离 | `141cb52` 距 main 各日 tip：09-08 **218**、09-09 **225**、今天 **247** —— 全在 125 的窗口之外 |
+
+即：git 报「无关历史」没有说谎，**它是在被截断的视野里如实汇报**。浅克隆同时制造另外两个假象——`git fetch` 把正常推进标成 `(forced update)`（因为它无法证明快进），`git rev-list --max-parents=0` 把每个截断点都列成「根提交」。**三个假象一起指向同一个错误结论**，三个独立的云端 agent 加一次人工复核都接受了它。
+
+**为什么是 09-08 开始、且再也好不了（棘轮）**：merge 每天成功时分支追平 main，次日差距 = 一天的提交量（5~30，远在窗口内）。09-05 那天没跑（`cloud_snapshots/` 从 09-04 直接跳到 09-08），而**光 09-05 一天 main 就有 59 个提交**。差距一旦越过 125，merge 就失败 → 分支不再追平 → 差距每天继续拉大 → **结构上不可能自行回到窗口内**。
+
+### 判断：fail fast 该放在哪一层
+
+原提议是「merge 失败即 fail fast」。**直接照做会用一个可恢复的问题换一个不可恢复的问题**：快照是当日 CBOE 期权链，跳过一天就永久没有了——而 09-05 缺的那一天正是本次故障的触发条件。且事后核实，那三天 merge 失败**实际零损失**（`cloud_snapshot_fetch.py` 与 main 逐字节相同）。所以 fail fast 放在 `--unshallow` 与两父兜底**都失败之后**：走到那一步说明仓库拓扑异常，此时停下才是对的。
+
+### 观测点此前为什么没起作用（与原判断不同）
+
+步骤 1 的失败**三天都报了**——09-08 / 09-09 / 09-10 每次都在最终回复里单列说明并额外发了 PushNotification；09-10 那次甚至自己算出「09-08、09-09 两次快照提交前均无 merge 提交，说明这个失败至少已连续发生三次而未被报出」。所以缺口不是「没报」，而是：
+
+1. **报在固定五行之外**，是 agent 自愿附加的第六段——没有任何结构阻止它哪天不写；
+2. **没有机器可查的落点**，只能靠人读散文；
+3. **重复不升级**——第三天的措辞和第一天同级，「三天没人管」和「第一天刚出现」长得一模一样。
+
+三个 agent 都附了同一个论证：「`cloud_snapshot_fetch.py` 与 main 字节一致，本次无实际损失」。**那个论证是对的**，也正因为它对，没有任何东西逼着升级——这是 auto-memory 里「**安全性论证与可观测性是同一个事实的两面**」的又一例。所以 ⓪ 行的规定里专门写了一句：那个论证即使成立也只能写在 ⓪ 行之外。
+
 ## [0.45.182] — 2026-09-11 — 两个「结构上看不见」：崩掉的蜂长得像中位票，换了定义的序列长得像同一条
 
 v0.45.163/164 的二次检查。两个 bug 形状相同：**判别所需的信息存在于上游，
