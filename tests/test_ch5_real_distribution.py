@@ -259,7 +259,8 @@ class TestWiring:
 
     def test_ml_report_passes_swarm_direction(self, monkeypatch):
         """generate_ml_enhanced_report 必须把方向交给 generate_comprehensive_analysis"""
-        import ast, inspect
+        import ast
+        import inspect
         import generate_ml_report as M
         src = inspect.getsource(M.MLEnhancedReportGenerator.generate_ml_enhanced_report)
         tree = ast.parse(src.lstrip() if not src.startswith("    ") else "\n".join(l[4:] for l in src.splitlines()))

@@ -1166,7 +1166,8 @@ def llm_cross_context(ctx: dict, api_key: str) -> str:
     ticker  = ctx["ticker"]
     score   = ctx["final_score"]
     master  = ctx.get("master_thesis", "")
-    fmt     = lambda v: f"{float(v):.1f}" if v not in (None, "") else "N/A"
+    def fmt(v):
+        return f"{float(v):.1f}" if v not in (None, "") else "N/A"
 
     # GEX 锚点
     gex     = ctx.get("_raw_data", {}).get("advanced_analysis", {}).get("dealer_gex", {})
@@ -1219,7 +1220,9 @@ def llm_cross_context(ctx: dict, api_key: str) -> str:
 def llm_scenario_data(ctx: dict, api_key: str) -> dict:
     """调用 LLM 生成结构化情景数据，返回 dict；失败返回空 dict（调用方降级到 ML 值）"""
     try:
-        import anthropic as _ant, json as _json, re as _re
+        import anthropic as _ant
+        import json as _json
+        import re as _re
     except ImportError:
         return {}
 

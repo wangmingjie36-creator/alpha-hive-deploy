@@ -1,4 +1,4 @@
-"""
+r"""
 earnings_pc_history.py
 ======================
 NVDA 历史 8/9 次财报前期权 P/C 比对
@@ -15,7 +15,9 @@ NVDA 历史 8/9 次财报前期权 P/C 比对
   财报后涨跌 - 全部8次已有实际数据（系统存储）
 """
 
-import json, os, warnings
+import json
+import os
+import warnings
 from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf

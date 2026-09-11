@@ -98,7 +98,7 @@ class PriceBackfiller:
                  save_callback: Optional[callable] = None) -> Dict:
         """
         补全所有缺失的 actual_prices
-        
+
         Returns:
             {"filled": int, "skipped": int, "failed": int, "details": [...]}
         """
@@ -192,7 +192,7 @@ class RiskMetrics:
                      period_days: int = 7) -> Optional[float]:
         """
         Sharpe Ratio = (E[R] - Rf) / σ(R)，年化
-        
+
         Args:
             returns: 收益率列表（百分比）
             risk_free_annual: 年化无风险利率
@@ -378,7 +378,7 @@ class BacktestEngine:
     def generate_accuracy_report(self) -> Dict:
         """
         生成完整准确率报告（对标投行标准）
-        
+
         包含：
         1. 总体胜率（T+1/T+7/T+30）
         2. 按方向分拆胜率

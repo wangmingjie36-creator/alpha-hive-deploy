@@ -487,7 +487,8 @@ class TestRealtimeAsOf:
     def test_fallback_dict_labels_itself_fallback(self):
         """降级路径的兜底常量不属于任何一天：as_of=None 且 mode=fallback，
         不得冒充 realtime，也不得让键干脆缺失。"""
-        import inspect, fred_macro
+        import inspect
+        import fred_macro
         src = inspect.getsource(fred_macro._fetch_macro_data)
         assert '"as_of_mode": "fallback"' in src
         assert '"as_of": None' in src

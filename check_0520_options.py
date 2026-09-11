@@ -95,8 +95,13 @@ for e in opts[:6]:  # 前6个到期日
         c = ch.calls.copy(); c['expiry'] = e; c['type'] = 'C'
         p = ch.puts.copy();  p['expiry'] = e; p['type'] = 'P'
         all_calls.append(c); all_puts.append(p)
-    except:
-        pass
+    except Exception as _err:   # ← 不能命名为 e：循环变量就叫 e
+        print(f"  ⚠️  到期日 {e} 的期权链拉取失败，已跳过：{type(_err).__name__}: {_err}")
+
+if not all_calls:
+    # 全部失败时 pd.concat([]) 只会抛一句不知所云的
+    # "No objects to concatenate"，读的人会去查 pandas 而不是去查网络。
+    raise SystemExit("✗ 前 6 个到期日的期权链全部拉取失败，无数据可分析（失败原因见上）")
 
 combined = pd.concat(all_calls + all_puts, ignore_index=True)
 combined['vol_oi'] = combined.volume / combined.openInterest.replace(0, np.nan)

@@ -666,7 +666,8 @@ def format_attribution_html(result: Dict) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _cli():
-    import argparse, sys
+    import argparse
+    import sys
 
     logging.basicConfig(
         level=logging.INFO,

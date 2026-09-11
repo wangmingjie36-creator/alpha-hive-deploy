@@ -2981,7 +2981,9 @@ def main():
 
 def _sync_ghpages(tickers: list, successful_count: int) -> None:
     """将当日 ML 增强报告同步到 gh-pages 分支并推送。"""
-    import subprocess, os, re as _re
+    import subprocess
+    import os
+    import re as _re
     if successful_count == 0:
         return
     repo = str(Path(__file__).parent)
@@ -2991,7 +2993,8 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     try:
         from is_trading_day import filename_is_nontrading_day as _fnt_dep
     except Exception:
-        _fnt_dep = lambda _n: False  # fail-safe：导入失败则不过滤，不误删
+        def _fnt_dep(_n):
+            return False  # fail-safe：导入失败则不过滤，不误删
     files = [f for f in os.listdir(repo)
              if (f in _CORE or _ml_pat.match(f)
                  or (f.startswith("alpha-hive-daily-") and f.endswith((".json", ".md"))))

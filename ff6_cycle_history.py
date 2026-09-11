@@ -1,4 +1,4 @@
-"""
+r"""
 ff6_cycle_history.py
 =====================
 过去 20 年 NVDA FF6 因子周期比对分析
@@ -16,7 +16,10 @@ ff6_cycle_history.py
   python3 ff6_cycle_history.py
 """
 
-import os, io, zipfile, warnings
+import os
+import io
+import zipfile
+import warnings
 import numpy as np
 import pandas as pd
 import yfinance as yf
