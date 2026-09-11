@@ -6,6 +6,18 @@
 
 规约：现价取不到时用 0.0 哨兵（下游注入/显示逻辑跳过 0），
 取价一律走 data_pipeline.fetch_stock_data（CBOE 起头多源链）。
+
+⚠️ **覆盖边界（v0.45.199 补记）**：上面那句「永久禁止该反模式重新进入代码库」
+**对全新未提交的文件不成立**。v0.45.189 把枚举换到 `own_python_files` 之后，
+git 口径只列**被跟踪**的文件（已跟踪文件的未提交修改照常扫得到——只拿 git 要
+路径清单，内容从磁盘读）。实测：新建未跟踪的 `zz.py` 写上 `price = 100.0`，
+本守卫**看不见**；`git add -N` 之后立刻看得见。
+这是 v0.45.150 明确接受的取舍（口径可复现 > 把「本地碰巧有什么」算进来），
+v0.45.189 把它扩到了本守卫**却没有在这里复述**——于是这段 docstring 在那一版
+之后一直在承诺一件它做不到的事。真要堵这个窗口，是改
+`tests/_repo_files.own_python_files`（加 `--others --exclude-standard`，
+`.claude/worktrees/` 自 v0.45.124 已在 .gitignore 里、`_is_ours` 还有第二道），
+那是**推翻 v0.45.150 的既定取舍**，要单独决定、不在自查里顺手做。
 """
 from __future__ import annotations
 
@@ -223,8 +235,18 @@ def test_enumeration_covers_the_real_repo():
     几千 ⇒ 又混进了嵌套 worktree 或第三方库；
     零/个位数 ⇒ 清单机制自己坏了，而坏掉的清单让上面那条主断言恒真地绿。
 
-    变红的变异：把 `_iter_prod_py` 换回 `ROOT.rglob`（在生产 checkout 上
-    会跳到 2128，本 worktree 里约 340）。
+    变红的变异：把 `_iter_prod_py` 换回 `ROOT.rglob`。
+
+    ⚠️ v0.45.199 更正：**这条变异只在生产 checkout 上让本条变红**
+    （那里裸 rglob 是 2741，越过 500 上界）；**在 worktree 里是 153，不会红**。
+    实测确认过——原 docstring 写「变红的变异」是过度断言。
+    ⭐ 也就是说：**本版要修的那个「红只在生产 checkout 上可见」，
+    在守卫自己的文档里又复发了一次。** 处处可红的是
+    `test_scanner_does_not_cross_into_nested_worktrees`（tmp 夹具），
+    量级护栏是它的补充、不是替代。
+
+    ⚠️ 顺带钉住 rglob 回退分支：无 git 的机器上口径是 153（`_is_ours` 已滤掉
+    `.claude/`），仍在 50..500 内 —— 上界不会在那种机器上误红。
     """
     files = list(_iter_prod_py())
     assert 50 < len(files) < 500, (
