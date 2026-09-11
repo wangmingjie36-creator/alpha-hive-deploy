@@ -221,6 +221,27 @@ _COHORT_HISTORY = [
      "摊平成一个大 Spearman，把 risk_adj 算成 **+0.047**（横截面口径是 −0.060，符号相反）。"
      "本表上一条的依据之一正是 risk_adj 的负 IC，故**用 v0.45.176 之前的 "
      "`replay_scoring` 复核过的任何聚合层结论都需要重跑**。"),
+    ("2026-09-10", "v0.45.191",
+     "CodeExecutorAgent 兜底分支去掉方向票。`analyze()` 第 6 步「技术分析不可用」的兜底"
+     "原本是 `if price and market_cap: score=6.0; direction=bullish` ——「价格与市值都拿到了」"
+     "⇒「看多」是范畴错误，数据可用性不含方向信息。`agent_memory` 台账（2026-04-06~09-10，"
+     "18,120 行）：`code_executor_data` 共 870 条，**870 条（100%）是 6.0/bullish**，"
+     "else 支五个月一次没走过 ⇒ 是一张恒定看多票，不是观测。现改为方向恒 neutral、"
+     "分数落量表中性点 5.0，并加 data_quality={technical: fallback} 机读标记"
+     "（值取 PROXY_SOURCES 既有档位，否则 DQ 汇总按 0 质量计，等于把降级升格成数据全废）。"
+     "同版删掉 execute_and_analyze 等五个零调用点方法（AST 零调用 + 台账五个月零执行）。 "
+     "**为什么算世代边界**：`_compute_direction_vote`（queen_distiller.py:567/595）的 "
+     "bullish_count / bullish_w 遍历**全部** valid_results、不看维度 —— CodeExecutorAgent "
+     "虽是 technical 维（不进五维加权），方向票照样算，直通 rule_direction → final_score；"
+     "新增的 data_quality 键同样进 `_apply_triple_penalty` 的 data_real_pct → quality_factor。"
+     "两条都是实读源码逐条出边走出来的，不是照抄清单（判据一）。 "
+     "**幅度如实读**：兜底触发率现为 1.2%（2026-09 共 3/243 条结论条目），"
+     "其余 98.8% 的行改动前后逐位相同。⚠️ **未能干净测出这一票是否 pivotal**："
+     "台账里的兜底行与同日 analysis JSON 无法可靠配对（同日重扫会产生多行，"
+     "如 MU 2026-09-09 两行、且当天无对应 JSON）⇒ 只给结构性判定，不给翻转率。 "
+     "**边界日期取 2026-09-10（与 v0.45.176 同日、扩展同一标签，不新开空分区）**："
+     "实测 2026-09-10 起兜底触发 **0 次** ⇒ 本代已有的 30 条样本改动前后逐位相同、"
+     "确实可比，**作废 0 条**。同 v0.45.163 对 09-07 那三条的处置。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
