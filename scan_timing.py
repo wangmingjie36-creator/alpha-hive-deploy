@@ -98,10 +98,25 @@ def counters() -> Dict[str, Optional[dict]]:
 
 
 # ───────────────────────────────────────────── 快照与落盘
+def code_version() -> Optional[dict]:
+    """这一轮跑的是哪一版代码。取不到返回 None（不写 {}——空 dict 会被读成「测过、没版本」）。
+
+    v0.45.182。编排器 `write_status()` 已用 jq 把本文件并进 `status.json`，
+    所以挂在这里即可让版本随每轮扫描落进 status.json，**无需改编排器**。
+    """
+    try:
+        import code_version as _cv
+        return _cv.resolve()
+    except Exception as e:  # noqa: BLE001 - 观测代码不得影响主流程
+        _log.warning("code_version 不可得（status.json 将缺版本字段）: %s", e)
+        return None
+
+
 def snapshot(date_str: str, extra: Optional[dict] = None) -> dict:
     snap = {
         "date": date_str,
         "written_at": datetime.now().isoformat(timespec="seconds"),
+        "code_version": code_version(),
         "phases": phases(),
         "counters": counters(),
     }

@@ -5,7 +5,65 @@
 
 ---
 
-## [0.45.184] — 2026-09-11 — 占位（进行中：新增 code_version.py，扫描开始把在跑的代码版本写进日志与 status.json；碰 alpha_hive_daily_report.py 的 _init_scan_context 与 scan_timing.snapshot）
+## [0.45.184] — 2026-09-11 — 「生产在跑的是哪一版代码」终于有了观测点
+
+v0.45.181 事故的收尾：那次能查出来纯属**数据消失得够显眼**（对账 `1293+30−125=1198`
+正好对上）。换成一个不改变行数的行为差异——评分口径、权重、阈值——就无从发现，
+因为当时日志与 `status.json` 里**都没有任何版本记录**。「谁会红？」答不上来。
+
+### Added
+
+- **`code_version.py`**：解析 `git rev-parse --short HEAD` + 分支 + 已跟踪文件是否 dirty
+  + CHANGELOG 顶部版本号。
+- **接线两处**：
+  - `alpha_hive_daily_report._init_scan_context()` 扫描启动时打一行 INFO：
+    `代码版本 v0.45.184 | commit abc1234 | 分支 main | 工作区 干净`
+  - `scan_timing.snapshot()` 带上 `code_version` ⇒ 编排器已有的那行
+    `jq '. + {scan_timing: $t[0]}'` 把它并进 `status.json`，落点
+    `.scan_timing.code_version`。**无需改编排器**（它在仓库外、属用户的定时任务）。
+    已用真的 jq 实测过这条路径。
+- `tests/test_code_version.py`（10 条）。变异 **8/8** 各打红，`collected` 恒为 10。
+  其中两条是**接线测试**（V7 删掉快照字段、V8 删掉启动调用，各自打红）——
+  没有它们，其余 8 条全绿也证明不了这个观测点真的被调用过
+  （v0.45.180 那条「本次不可用」提示就是这么成为死代码的）。
+
+### 设计约束（两条都来自本仓既有教训）
+
+1. **仓库路径用 `Path(__file__)` 而不是 `PATHS.home`**，且在**函数体内**求值。
+   这里要的是「代码在哪」不是「数据在哪」（CLAUDE.md「这个路径指向代码还是数据？」；
+   同族先例 `health_check.PROJECT` 的 `git -C <仓库>`）。函数内求值 ⇒ 既不冻在 import 期，
+   也不进 `test_paths_not_frozen_at_import` 的两张模块级清单。
+   变异 V1（改成 `PATHS.home`）⇒ 测试隔离把 HOME 指向 tmp ⇒ 3 条红。
+2. **缺失一律 `None`，不写占位串。** `"unknown"` / `"0000000"` 会被读成
+   「有个版本，只是长这样」。变异 V5（sha 兜底成 `"unknown"`）⇒ 2 条红。
+
+### Fixed（自查，写的时候差点发出去）
+
+**`_git()` 把「成功但没有输出」和「命令失败」混成了同一个 `None`。**
+第一版写的是 `return r.stdout.strip() or None` —— 而 `git status --porcelain`
+在**干净工作区**输出就是空的，于是 `dirty_tracked` 再也分不出「干净」和「没测到」。
+这正是本轮从头到尾在抓的那一族（0/空值冒充真读数）。
+现 `_git` 失败返回 `None`、成功返回可能为空的字符串，`dirty_tracked` 为三态
+（`None` 没测到 / `False` 干净 / `True` 有改动）。变异 V2、V3 各打红。
+
+另：`git` 退出码 **128 = 这里不是 git 仓库**，与普通失败分开打日志——
+CLAUDE.md 就 `git check-ignore` 的三义退出码记过同一条。变异 V4 打红。
+
+### 过程教训
+
+**原则写对了、做的相反。** 编排器核对那条测试，docstring 写着
+「用 marker 而非静默 skip，让『这条没验』在报告里可见」，而正文写的是 `pytest.skip`。
+已改 `@pytest.mark.integration`：默认摘要里是 `9 passed, 1 deselected`（看得见），
+`-m integration` 可单跑。CLAUDE.md 那节的判据本来就写着「真需要外部系统的测试标
+marker 别写 skip」。
+
+**并发让号两次。** 本条最初占的是 `0.45.182`，推占位前发现已被另一 session
+先提交（v0.45.163/164 二次检查）；改 `0.45.183` 时又发现被第三个 session 占了
+（云端快照 routine）。按 CLAUDE.md「先提交进 git 历史的占号保留」两次让号到 `0.45.184`。
+⚠️ 0.45.182 那条声明会碰 `alpha_hive_daily_report.py`，与本条在同一文件
+（本条只在 `_init_scan_context` 开头插 6 行），合并时逐块核对。
+
+全套 **3923 passed**（`TestCoverageHorizon` 那条按设计随日历变红的除外）。
 
 ---
 
