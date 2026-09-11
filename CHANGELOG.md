@@ -5,7 +5,46 @@
 
 ---
 
-## [0.45.183] — 2026-09-11 — 占位（进行中：云端快照 routine 步骤 1 连续三天静默失败——真因是云沙箱浅克隆不是 main 被 force-push，已改调度器提示词）
+## [0.45.183] — 2026-09-11 — 云端快照 routine：merge 三天静默失败的真因是浅克隆，不是 main 被 force-push
+
+**改动落在调度器**（claude.ai routine `trig_01QzhoHiNxSWMgxWAQztnLA6` / `alpha-hive-cloud-snapshot`），**不在本仓**。本条只记根因取证与判据——供下次有人读到 `cloud-snapshots` 分支上 `36df50b` 那句提交信息（「force-push 重写历史后两支失去共同祖先」）时，不要再继承那个错误结论。
+
+### Fixed（调度器提示词）
+
+- **步骤 1 增加解除浅克隆**：`git rev-parse --is-shallow-repository` 为 true 才跑 `git fetch --unshallow origin`。这是根因修复。
+- **步骤 1 的退出码改为直接取，禁止接管道。** 2026-09-10 那次运行写的是 `git merge … | tail -20; echo "MERGE_EXIT=$?"`，打印出 `MERGE_EXIT=0`，而那条 merge 实际是 `fatal:` —— `$?` 取到的是 `tail` 的退出码。步骤 3 从一开始就写着「不要接管道（管道会吃掉退出码）」，步骤 1 没写，于是**同一个坑在同一份提示词里被踩了**。
+- **兜底从「`checkout -B` + 必须 force push」换成两父合并**（`read-tree` 拼树 + `commit-tree` 记两个父提交），不丢数据也不需要 force。旧兜底与同一句里的「严禁 force push」直接矛盾，真触发时三个云端 agent 各自独立地判定「三条路都超出授权」，全部停在保守一侧。
+- **最终回复加固定第 ⓪ 行**：`STEP1=OK / UNSHALLOW_OK / FALLBACK / NEW_BRANCH / FAIL`，且必须带 `落后 main N 个提交`（N = `git rev-list --count origin/main ^HEAD`，同步成功时必为 0）。走了 unshallow 或兜底时还要把 ⓪ 行原文写进 commit message，可 `git log --grep=STEP1` 查到。
+- **fail fast 放在两道防线之后**，不是 merge 失败的第一反应——理由见下文「判断」。
+
+### 根因（与此前记录相反，取证如下）
+
+**`main` 从未被 force-push。** 云沙箱发的是**浅克隆**，`origin/main` 在沙箱里只有 125 个提交。
+
+| 证据 | 结果 |
+|---|---|
+| GitHub 活动流全量翻查（1060 次 push / 16 次 force_push） | `main` 最后一次 force_push = **2026-02-26**，九月零次；九月 `cloud-snapshots` 三次推送也全是普通 push |
+| 真实 `origin/main` | **920 个提交、1 个根提交**（`0705e6b`，2026-02-23）；沙箱里是 125 个提交、**5 个「根提交」** |
+| `git merge-base --is-ancestor 141cb52 389a451` | **YES** —— 云端 agent 认定「被 force-push 冲掉」的那个提交，是 main 的正常祖先 |
+| 共同祖先距离 | `141cb52` 距 main 各日 tip：09-08 **218**、09-09 **225**、今天 **247** —— 全在 125 的窗口之外 |
+
+即：git 报「无关历史」没有说谎，**它是在被截断的视野里如实汇报**。浅克隆同时制造另外两个假象——`git fetch` 把正常推进标成 `(forced update)`（因为它无法证明快进），`git rev-list --max-parents=0` 把每个截断点都列成「根提交」。**三个假象一起指向同一个错误结论**，三个独立的云端 agent 加一次人工复核都接受了它。
+
+**为什么是 09-08 开始、且再也好不了（棘轮）**：merge 每天成功时分支追平 main，次日差距 = 一天的提交量（5~30，远在窗口内）。09-05 那天没跑（`cloud_snapshots/` 从 09-04 直接跳到 09-08），而**光 09-05 一天 main 就有 59 个提交**。差距一旦越过 125，merge 就失败 → 分支不再追平 → 差距每天继续拉大 → **结构上不可能自行回到窗口内**。
+
+### 判断：fail fast 该放在哪一层
+
+原提议是「merge 失败即 fail fast」。**直接照做会用一个可恢复的问题换一个不可恢复的问题**：快照是当日 CBOE 期权链，跳过一天就永久没有了——而 09-05 缺的那一天正是本次故障的触发条件。且事后核实，那三天 merge 失败**实际零损失**（`cloud_snapshot_fetch.py` 与 main 逐字节相同）。所以 fail fast 放在 `--unshallow` 与两父兜底**都失败之后**：走到那一步说明仓库拓扑异常，此时停下才是对的。
+
+### 观测点此前为什么没起作用（与原判断不同）
+
+步骤 1 的失败**三天都报了**——09-08 / 09-09 / 09-10 每次都在最终回复里单列说明并额外发了 PushNotification；09-10 那次甚至自己算出「09-08、09-09 两次快照提交前均无 merge 提交，说明这个失败至少已连续发生三次而未被报出」。所以缺口不是「没报」，而是：
+
+1. **报在固定五行之外**，是 agent 自愿附加的第六段——没有任何结构阻止它哪天不写；
+2. **没有机器可查的落点**，只能靠人读散文；
+3. **重复不升级**——第三天的措辞和第一天同级，「三天没人管」和「第一天刚出现」长得一模一样。
+
+三个 agent 都附了同一个论证：「`cloud_snapshot_fetch.py` 与 main 字节一致，本次无实际损失」。**那个论证是对的**，也正因为它对，没有任何东西逼着升级——这是 auto-memory 里「**安全性论证与可观测性是同一个事实的两面**」的又一例。所以 ⓪ 行的规定里专门写了一句：那个论证即使成立也只能写在 ⓪ 行之外。
 
 ## [0.45.182] — 2026-09-11 — 占位（进行中：二次检查 v0.45.163/164 抓到的两个 bug。① v0.45.164 的 `build_agent_votes` 把**崩掉的蜂**记成一张 5.0 中位票 —— `make_error_result` 返回 score=5.0/confidence=0.0，而 `queen_distiller` 的 `agent_details` 白名单把 `error` 键丢了 ⇒ 该函数结构上看不见失败；旧的板口径天然排除它（崩在 `_publish` 之前、从没上过板），故属本版引入。实测 782 份 6256 个蜂-份里 13 例（Scout 9/Buzz 3/Chronos 1），09-08 起 0 例 ⇒ **潜伏、无已污染快照**。修法：白名单透出 `error`，`build_agent_votes` 判 `error is not None`。**判据必须是错误标记不是取值**——实测 38 个合法结果恰好 score==5.0（3:1 误伤），`confidence==0.0` 零误报但属巧合非契约，`dimension_status` 只覆盖 5/8 只蜂（Rival/Bear/CodeExec 在表外）。顺带改掉 `models.py::clean_results_batch` 那句说谎的 docstring（写着「过滤 error 结果」，实际不过滤——它现在的作用是阻止下一个人做这次检查）。② v0.45.163 的 `census_source` 没进归档 ⇒ `guard.consistency` / `guard.top_signals_count` 两条归档序列在 2026-09-08 **静默换了定义**（逐扫描日实测：count 3.43~4.33 → 恒 6.00；consistency 0.50~0.72 → 0.47~0.49），而 `signal_archive.analyze()` 既不按日期也不按 `_COHORT_HISTORY` 切片。修法**改名不加判别列**（`value` 列是 REAL 存不下字符串标签；加列等于要求每个消费方记得 join，忘了就退回同一个静默 bug）：`guard.consistency` → `guard.consistency_census`；`guard.top_signals_count` 现恒为 6.0 已非信号，从 `_SIGNALS` 摘掉、改挂 `tests/test_distribution_invariants.py` 的不变式（断言等于本轮 Guard 之前实际启用的蜂数，不写死 6）。⚠️ 两者均**不加** `_COHORT_HISTORY` 边界：①不进 final_score，②归档层，v0.45.163 的边界已登记、缺的只是归档没照着切。⚠️ 会碰 `queen_distiller.py` / `alpha_hive_daily_report.py` / `signal_archive.py` / `models.py` / `ic_rerun_readiness.py` 与 tests/，与其它 session 合并时逐块核对）
 
