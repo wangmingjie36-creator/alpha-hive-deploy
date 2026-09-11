@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.192] — 2026-09-11 — 占位（进行中：dashboard_renderer 日期解析器接受非日期串，造出幽灵历史行）
+
 ## [0.45.191] — 2026-09-11 — 占位（进行中：`code_executor_agent.py` 两件事，**顺序不能反**。
 ① **先改兜底**（第 190~196 行）：技术分析脚本失败后的兜底分支把「price 与 market_cap 都拿到了」发布成 **`6.0 / bullish`** —— 「数据可用 ⇒ 看多」是范畴错误，正是 v0.43.10 条目自己命名过的那一类。台账实测：870 条 `code_executor_data` 里 **870 条（100%）是 `6.0/bullish`**，`else` 分支五个月一次没走过。v0.43.10 修的是**上游**（技术分析脚本不再崩 MultiIndex），让这条兜底不再被频繁走到；**兜底本身的范畴错误原样保留**，2026-08 触发 45 次、2026-09 触发 3 次（1.2%）。范围＝方向改 neutral + 加机读标记（让「兜底」与「真的中性」可区分，不是再挑一个好看的常数）。
 ② **后删死代码**：`execute_and_analyze`(246) / `auto_debug`(314) / `generate_data_fetch_code`(225) / `generate_analysis_code`(238) / `generate_visualization_code`(242) 五个方法。判据两条独立：AST 零调用点（`analyze` 的 17 个生产调用点是工具正对照）+ `agent_memory` 台账五个月零执行（三个独有 source 各 0 行，而同表同 agent 的 `analyze` 三个 source 共 3,884 行是正对照）；字符串/仓库外/动态派发三个盲区均已查空。
