@@ -47,7 +47,20 @@ class TestResolvesRealValues:
     def test_changelog_version_matches_file_top(self):
         """读出来的版本号必须等于 CHANGELOG.md 行首第一条 `## [x.y.z]`。
 
-        变异：把正则的 `^` 去掉（不锚定行首）⇒ 可能命中正文里引用的版本号 ⇒ 红。
+        ⚠️ **本条没有它原先声称的那颗牙**（2026-09-11 三档实测，v0.45.200 更正）。
+        原 docstring 写「把正则的 `^` 去掉 ⇒ 命中正文里引用的版本号 ⇒ 红」，实跑是绿：
+        `^` 对 `re.match()` **恒冗余**——`.match` 本就只从串首匹配，而
+        `_CHANGELOG_RE` 全部走逐行 `.match`。护栏是 `^` 与 `.match` 的**合取**，
+        二者互为冗余，去掉任一单独都不会红。
+
+        且本条用的是**真** CHANGELOG，所以连「去 `^` 且换 `.search`」也照样绿：
+        文件里确有非行首的 `## [x.y.z]` 散文引用，但都排在第一条真标题**之后**，
+        而 `changelog_version()` 取首个匹配即 return ⇒ 位置巧合掩盖了变异。
+        ⭐ 「X 会让它红」必须分清红的原因是**结构**还是**当前内容**：后者随文件漂，
+        而 CHANGELOG 每天被十几个 session 追加。
+
+        本条守的是「读出来的 == 文件顶部那条」这件事本身；牙在
+        `TestHeadingMustBeLineAnchored` 的合成夹具里（把散文引用放到第一条真标题**之前**）。
         """
         import code_version as cv
 
@@ -60,6 +73,68 @@ class TestResolvesRealValues:
                     break
         assert want, "CHANGELOG.md 里没有行首版本号，本条断言的锚点失效了"
         assert cv.changelog_version() == want
+
+
+class TestHeadingMustBeLineAnchored:
+    """给上面那条补牙：**非行首**的 `## [x.y.z]` 不许被当成标题。
+
+    真 CHANGELOG 验不了这件事——它的第一条行首标题排在所有散文引用之前，
+    `changelog_version()` 取首个匹配即 return，于是变异被位置掩盖（见上）。
+    本类用合成夹具把散文引用挪到第一条真标题**之前**，让护栏可观测。
+    """
+
+    #: 第 3 行在**非行首**位置写了 `## [9.9.9]`，且排在真标题 `## [1.2.3]` 之前。
+    #: 缩进两格是有意的——顶格写会被 CHANGELOG 结构守卫
+    #: （`tests/test_changelog_entry_integrity.py`，v0.45.195）算成真标题。
+    _FIXTURE = (
+        "# Alpha Hive · 版本变更历史\n"
+        "\n"
+        "> 举例说明：一条叫 `## [9.9.9]` 的标题——这是散文，不是标题。\n"
+        "\n"
+        "---\n"
+        "\n"
+        "## [1.2.3] — 2026-01-01 — 真标题\n"
+        "\n"
+        "正文\n"
+    )
+
+    def test_prose_mention_before_first_heading_is_not_taken(self, tmp_path, monkeypatch):
+        """变异（**必须同时改两处**）：`_CHANGELOG_RE` 去掉 `^` **且**
+        `changelog_version()` 里 `.match(line)` 换成 `.search(line)`
+        ⇒ 命中第 3 行散文的 `9.9.9` ⇒ 红。
+
+        ⭐ 单改其一恒绿，因为 `^` 与 `.match` 互为冗余——这正是原 docstring
+        错在哪。合取型护栏无法用单点变异证伪，只能靠这样的夹具正面钉住行为。
+        """
+        import code_version as cv
+
+        (tmp_path / "CHANGELOG.md").write_text(self._FIXTURE, encoding="utf-8")
+        monkeypatch.setattr(cv, "_repo_dir", lambda: tmp_path)
+
+        got = cv.changelog_version()
+        assert got == "1.2.3", (
+            f"取到 {got!r}——非行首的 `## [9.9.9]` 被当成了标题；"
+            "护栏是「逐行 `.match`」这个遍历形状，不是 `^`")
+
+    def test_fixture_really_contains_the_trap(self):
+        """夹具自检：没有这条，上面那条可能是在一份**没有陷阱**的文件上绿的。
+
+        （同 v0.45.195 `TestBothAssertionsAreNeeded` 的用意：证明样本真有牙。）
+        变异：把 `_FIXTURE` 第 3 行的 `## [9.9.9]` 删掉 ⇒ 红。
+        """
+        import re
+
+        from code_version import _CHANGELOG_RE
+
+        lines = self._FIXTURE.split("\n")
+        trap = [i for i, l in enumerate(lines, 1)
+                if re.search(r"##\s*\[[0-9]", l) and not _CHANGELOG_RE.match(l)]
+        heads = [i for i, l in enumerate(lines, 1) if _CHANGELOG_RE.match(l)]
+        assert trap, "夹具里没有「非行首的 `## [x.y.z]`」，陷阱不存在"
+        assert heads, "夹具里没有真标题"
+        assert min(trap) < min(heads), (
+            f"陷阱在第 {min(trap)} 行、真标题在第 {min(heads)} 行——"
+            "陷阱必须排在真标题**之前**，否则 `changelog_version()` 先 return 就测不到")
 
 
 class TestFailureNeverFabricates:
