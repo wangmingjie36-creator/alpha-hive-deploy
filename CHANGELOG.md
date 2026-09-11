@@ -5,7 +5,108 @@
 
 ---
 
-## [0.45.197] — 2026-09-11 — 占位（进行中：GEX 改走同 payload 全到期日第二视图，不再吃为 IV 设计的截断链）
+## [0.45.197] — 2026-09-11 — Dealer GEX 改吃全到期日视图：`total_gex` 此前只是全链的一个符号不可靠的部分和
+
+### 背景
+
+承 v0.45.190。那一版把「主链 `DTE≥7` 实为 ≥8 个日历日」钉住了，但**没修**——修它要
+付世代边界，且它同时喂四个消费者，其中 IV rank / 25Δ skew / 期限结构三个**本来就该
+剔近月**（近月 theta 扭曲）。本版走另一条路：照 v0.45.188 `_calc_max_pain` 的先例，
+给 GEX 一个**同 payload 的第二视图**，主链一个字节不动。
+
+### ⚠️ 实测推翻了「加上近月就够了」这个前提
+
+原以为问题是「丢了近月」。实测 26 只标的「取最近 K 个到期日捕获的 net GEX 占全链
+百分比」：
+
+| K | 中位 | 最低 | <90% 的标的数 |
+|---|---|---|---|
+| 4（≈旧规模） | 63.9% | **−73.3%** | 22/26 |
+| 8 | 73.6% | −29.8% | 17/26 |
+| 12 | 96.3% | 20.6% | 8/26 |
+| 16 | 100.0% | 72.3% | 1/26 |
+| 24 | 100.0% | 99.4% | 0/26 |
+
+**负百分比 = 部分和与全链符号相反。** 净 GEX 是带符号求和，**任何**对到期日集合的
+截断都可能翻转符号，不只是丢近月那一种 ⇒ `total_gex` 只有在全链上才是良定义的量。
+旧口径不是「偏小」，是**符号不可靠**。「近月窗口」是另一个指标（pin gamma），不是这个；
+而下游 `RegimeWeightAdjuster` 消费的语义（做市商整体净 gamma 多还是空）本就是全书概念。
+⇒ 目标定为**全链**，`max_expiries=24`（与 `fetch_cboe_full_chain_oi` 同值；实测当日
+全链到期日数中位 18 / 最大 25）。
+
+### Added
+
+- `cboe_options.fetch_cboe_chain_for_gex()` + `_select_expiries_for_gex()`：
+  日历口径、未到期全要、按日期升序、上限 24。与主链选择器的三处差别各有理由，
+  写在 docstring 里。
+- `cboe_options.fetch_cboe_chain(..., expiry_selector=None)`：到期日选择器旁路。
+  **默认 None ⇒ 走 `_select_expiries`，主链行为逐字节不变**（有行为断言守着，
+  不是靠 `inspect.getsource` 匹配源码文案——那种标志物改个变量名就绕过去了）。
+- `cboe_options.gex_view_stats()` → `scan_timing.counters().gex_view` → status.json：
+  `ok` / `unavailable` / `capped_expiries`。
+- `ic_rerun_readiness.cohort_boundary_evidence()` + CLI 里一行「边界日期的数据证据」。
+- `tests/test_gex_full_chain_view.py`（9 条）、`tests/test_ic_rerun_readiness.py`
+  新增 `TestBoundaryDateHasDataEvidence`（6 条）。变异校验 8/8 + 5/5 全部变红。
+
+### Changed
+
+- `advanced_analyzer.DealerGEXAnalyzer`：取链由 `OptionsDataFetcher.fetch_options_chain`
+  改为 `fetch_cboe_chain_for_gex`；返回值新增 `chain_view` / `expiries_used`。
+  ⚠️ **CBOE 取不到就不算，不回退 yfinance 降级链**——那条路径给的是同样截断的链
+  （且 yfinance 分支有同一个差一天），回退等于把「没数据」悄悄换成「错数据」
+  （v0.45.188 `_calc_max_pain` 的同一判据）。
+
+### 实测（2026-09-11 端到端，30 只全 watchlist）
+
+- 可比 27 只，**符号翻转 2 只**（CRM neg→pos、NEE pos→neg）；量级 NVDA 11.52→535.90，
+  到期日数 4→24。
+- **零额外网络开销已实测，不是推断**：`payload_stats` 为
+  `{hits: 54, fetches: 30, stale: 3}` —— 30 只标的每只三次构链（旧路径 + 新视图 +
+  payload 直取）合计只发 **30 次** HTTP。靠的是 `_fetch_cboe_payload` 的 4h 进程缓存
+  （`_CACHE_MAX_AGE`），而 Step 2 全程约 30–55 分钟。
+- `capped_expiries: 1` —— 有一只标的 25 个到期日，被 24 的上限砍掉 1 个，**且被计数了**。
+  上限够不够是个可测量的数，不是假设。
+- 代价：3 只标的（BILI/DE/TMO）当日 CBOE 陈旧 ⇒ GEX 不可得 ⇒ `regime="unknown"` ⇒
+  `RegimeWeightAdjuster` 不做偏移（基准权重），安全降级。旧实现会在这里降级 yfinance
+  并算出一个截断链上的数。频次记在 `gex_view.unavailable`。
+
+### ⚠️ 不要读成「评分会变好」
+
+GEX 只经三值 `regime` 进评分。v0.45.190 已测：翻转一次的 `|Δfinal_score|`
+中位 **0.050** / 最大 **0.127**，249 条归档里跨决策阈值 **2/249**。
+本版修的是「这个数等于它声称的东西」，不是分数。同 v0.45.172 那条教训的形状。
+
+### 世代边界（已登记，第 10 条）
+
+`ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-09-11", "v0.45.197", ...)`。
+**这是换数据源不是聚合层改动**——历史上没存过近月合约的 gamma/OI，
+`replay_scoring` 离线重放做不到，只能前向累积。
+代价核算：登记前实测世代内**已回填样本 0 条**（30 条未到期，边界 09-10 昨天刚设），
+所以这条边界的损失是**一个扫描日**；09-21 起才开始吃真样本。
+
+⚠️ **边界日期是预判不是事实**：写入时生产 checkout 尚未合入（用户明确要求本轮不动生产），
+而它不自动 pull ⇒ 首个真正受影响的业务日可能晚于 09-11。
+所以同版做了**判别器**：`cohort_boundary_evidence()` 读归档的
+`advanced_analysis.dealer_gex.chain_view`，报出首次出现 `cboe_full_expiries` 的日期
+并与边界比对，四种判定（matches / too_early / too_late / **no_evidence_yet**）。
+加它是因为本仓记过同一处栽跟头——**此前几条边界「核过了」其实零判别力**：
+世代内 0 条样本时，日期写对和写错的输出一模一样。
+
+### 纪律注记：变异校验又抓到两条我自己写的没牙断言
+
+1. `cohort_boundary_evidence` 初版 `home` 有默认值 `ALPHAHIVE_DIR`（= **代码**目录），
+   而归档是**数据**、在生产目录 ⇒ 在 worktree 里跑它恒返回 `no_evidence_yet`。
+   今天它「答对了」纯属巧合（生产确实没跑）——**即使生产已经跑了它也会答同一句**。
+   一个永远说「还没证据」的判别器，和没有判别器是一回事，正是它自己要防的失效。
+   已改为 `home` 必传、调用方传 `--db` 所在目录。
+   （`tests/test_ic_rerun_readiness.py` 开篇那句「一个永远说未就绪的就绪度判定器，
+   和没有它是一样的」写于 v0.44.4——同一个坑，一年后换个面目又来一次。）
+2. 「取最早那天」的断言对 `min→max` 变异**没有牙**：归档按文件名排序遍历，
+   而文件名是 `analysis-<TICKER>-ml-<DATE>.json` ⇒ **先按 ticker 排，不按日期**；
+   初版夹具恰好让日期最早的 ticker 排在最前，`min`/`max` 走不到分歧点。
+   已把 ticker 名改成「日期最晚的排最前」，并把这个理由写进 docstring
+   （不写下来，下一个人会「顺手」把它改回去）。
+
 
 ---
 

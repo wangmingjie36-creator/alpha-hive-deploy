@@ -86,11 +86,13 @@ class DealerGEXAnalyzer:
     RISK_FREE_RATE = 0.045  # 美国10年期国债参考利率
 
     def __init__(self):
+        # v0.45.197：改吃 CBOE 全到期日视图，不再共用为 IV 设计的截断主链。
+        # 见 `cboe_options.fetch_cboe_chain_for_gex` 上方的实测表。
         try:
-            from options_analyzer import OptionsDataFetcher
-            self._fetcher = OptionsDataFetcher()
+            from cboe_options import fetch_cboe_chain_for_gex
+            self._fetch_chain = fetch_cboe_chain_for_gex
         except ImportError:
-            self._fetcher = None
+            self._fetch_chain = None
 
     # ── 核心计算 ──────────────────────────────────────────────────
 
@@ -301,25 +303,30 @@ class DealerGEXAnalyzer:
           - largest_put_wall: put GEX 绝对值最大的行权价（支撑）
           - regime: "positive_gex"（压制波动）| "negative_gex"（放大波动）
         """
-        if self._fetcher is None:
-            return {"error": "options_analyzer 未安装", "total_gex": 0.0}
+        if self._fetch_chain is None:
+            return {"error": "cboe_options 未安装", "total_gex": 0.0}
 
         try:
-            chain = self._fetcher.fetch_options_chain(ticker)
+            chain = self._fetch_chain(ticker)
         except Exception as e:
-            _log.warning("DealerGEX fetch_options_chain failed for %s: %s", ticker, e)
+            _log.warning("DealerGEX 取链失败 %s: %s", ticker, e)
             return {"error": str(e), "total_gex": 0.0}
+
+        # ⚠️ v0.45.197：**CBOE 取不到就不算，不回退 yfinance 主链。**
+        # 那条降级路径给的是 `_select_expiries` 那条截断链（且 yfinance 分支有
+        # 同一个差一天），拿它算 GEX 是构造上就不对的数 —— 照 v0.45.188
+        # `_calc_max_pain` 的先例：回退等于把「没数据」悄悄换成「错数据」。
+        # 代价（本次改动唯一的代价）：CBOE 当日陈旧/失败的标的 GEX 变为不可得 ⇒
+        # `regime="unknown"` ⇒ `RegimeWeightAdjuster` 不做偏移（基准权重），
+        # 是安全降级。频次记在 `cboe_options.gex_view_stats()` 里，别靠估。
+        if not chain:
+            return {"error": "CBOE 全链视图不可得（不回退截断链）", "total_gex": 0.0}
 
         calls_raw = chain.get("calls", [])
         puts_raw  = chain.get("puts",  [])
 
         if not calls_raw and not puts_raw:
             return {"error": "期权链为空", "total_gex": 0.0}
-
-        # P0-1 (v0.38.0): 样本链不算 Dealer GEX——假链算出的 GEX/flip 全是噪声
-        if chain.get("source") == "sample":
-            _log.warning("[%s] 期权链为样本数据，跳过 Dealer GEX 计算", ticker)
-            return {"error": "期权链为样本数据（真实链获取失败）", "total_gex": 0.0}
 
         S = stock_price
         if S <= 0:
@@ -384,6 +391,10 @@ class DealerGEXAnalyzer:
             "call_strikes":      len(call_gex),
             "put_strikes":       len(put_gex),
             "gamma_source":      "bs_computed",
+            # v0.45.197 口径字段：只记数值时，事后分不清「到期日集合变了」和
+            # 「仓位真变了」—— v0.45.188 的 NVDA 225→200 误判正是卡在这里。
+            "chain_view":        "cboe_full_expiries",
+            "expiries_used":     list(chain.get("expirations") or []),
             "flip_acceleration": flip_accel,
             "vanna_stress":      vanna_stress,
         }
