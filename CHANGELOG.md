@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.182] — 2026-09-11 — 占位（进行中：二次检查 v0.45.163/164 抓到的两个 bug。① v0.45.164 的 `build_agent_votes` 把**崩掉的蜂**记成一张 5.0 中位票 —— `make_error_result` 返回 score=5.0/confidence=0.0，而 `queen_distiller` 的 `agent_details` 白名单把 `error` 键丢了 ⇒ 该函数结构上看不见失败；旧的板口径天然排除它（崩在 `_publish` 之前、从没上过板），故属本版引入。实测 782 份 6256 个蜂-份里 13 例（Scout 9/Buzz 3/Chronos 1），09-08 起 0 例 ⇒ **潜伏、无已污染快照**。修法：白名单透出 `error`，`build_agent_votes` 判 `error is not None`。**判据必须是错误标记不是取值**——实测 38 个合法结果恰好 score==5.0（3:1 误伤），`confidence==0.0` 零误报但属巧合非契约，`dimension_status` 只覆盖 5/8 只蜂（Rival/Bear/CodeExec 在表外）。顺带改掉 `models.py::clean_results_batch` 那句说谎的 docstring（写着「过滤 error 结果」，实际不过滤——它现在的作用是阻止下一个人做这次检查）。② v0.45.163 的 `census_source` 没进归档 ⇒ `guard.consistency` / `guard.top_signals_count` 两条归档序列在 2026-09-08 **静默换了定义**（逐扫描日实测：count 3.43~4.33 → 恒 6.00；consistency 0.50~0.72 → 0.47~0.49），而 `signal_archive.analyze()` 既不按日期也不按 `_COHORT_HISTORY` 切片。修法**改名不加判别列**（`value` 列是 REAL 存不下字符串标签；加列等于要求每个消费方记得 join，忘了就退回同一个静默 bug）：`guard.consistency` → `guard.consistency_census`；`guard.top_signals_count` 现恒为 6.0 已非信号，从 `_SIGNALS` 摘掉、改挂 `tests/test_distribution_invariants.py` 的不变式（断言等于本轮 Guard 之前实际启用的蜂数，不写死 6）。⚠️ 两者均**不加** `_COHORT_HISTORY` 边界：①不进 final_score，②归档层，v0.45.163 的边界已登记、缺的只是归档没照着切。⚠️ 会碰 `queen_distiller.py` / `alpha_hive_daily_report.py` / `signal_archive.py` / `models.py` / `ic_rerun_readiness.py` 与 tests/，与其它 session 合并时逐块核对）
+
 ## [0.45.181] — 2026-09-11 — 事故：修复推到了 main，生产在跑的是另一份代码
 
 v0.45.178 的回灌**当天就被删掉了**。根因不在代码，在「我验证了错的东西」。
