@@ -151,6 +151,13 @@ def parse_entries(text: str) -> list[Entry]:
     纯函数是刻意的：牙齿测试要喂十来个畸形样本，走磁盘就得造临时文件，
     而临时文件一旦造在仓库里，就成了「跑测试写穿生产产物」那一族
     （MEMORY `alpha-hive-test-writes-production`）。
+
+    ⚠️ 已知边界：口径是**行首** `## [`，所以**代码围栏里顶格写的**
+    `## [x.y.z]` 会被算成标题，可能报出一条假重号。当前文件零命中
+    （两处非行首出现都在行内，L22/L7304）。真撞上了有两种情况：要么把那行
+    缩进两格，要么它本来就是一条该被发现的真重复 —— 先看一眼再决定。
+    **刻意没做围栏跟踪**：为一个尚未出现的形态加状态机，换来的是一个更难
+    自证的解析器，不划算。
     """
     lines = text.splitlines()
     heads = [(i, ln) for i, ln in enumerate(lines) if _CHANGELOG_RE.match(ln)]
@@ -372,8 +379,24 @@ class TestDetectorHasTeeth:
 
         所以护住行首锚定的是 `^` **与** `.match()` 的**合取**，两者互为冗余，
         单独改任一个都不会红（实测 A：只把 `.match` 换 `.search` ⇒ 13 passed）。
-        **能让本条红的变异是：去掉 `^` 且把 `.match` 换成 `.search`**
-        （实测 B ⇒ 本条 + `test_no_duplicate_version_headings` 同时红）。
+        **能让本条红的变异是：去掉 `^` 且把 `.match` 换成 `.search`**（实测 B）。
+
+        ⚠️ B 让两条测试变红，但**两条的性质不同，不许混着说**。判据由 v0.45.193
+        那个 session 复核时提出：**「X 会让它红」必须分清红的是「结构」还是
+        「当下内容」** —— 前者永真，后者随文件漂，而 CHANGELOG 每天被十几个
+        session 追加。分开看：
+          · **本条是结构性的**：夹具 `VERSION_IN_BODY` 自带、把非行首出现放在
+            第 2/3 行、断言比的是**整份列表**，与真 CHANGELOG 当天长什么样无关。
+          · `test_no_duplicate_version_headings` 在 B 下的红是**内容依赖**的：
+            它只是因为正文里恰好写过两处 `## [x.y.z]`（L22/L7304）。实测把那两行
+            删掉再跑 B ⇒ 重号归零、那条转绿。**别把它算进「B 的牙」。**
+
+        ⚠️ 再澄清一个易混点：同一个 B 变异下 `code_version.changelog_version()`
+        **不红**。它取**首个**匹配即 return，而第一条真标题（行 8）排在那两处
+        散文**前面** ⇒ 结果不变。本文件的 `parse_entries` 枚举**全部**匹配行
+        ⇒ 342 条 vs 基线 340 条。**同一变异对两个消费者结论相反**，所以
+        `tests/test_code_version.py:48` 那条说法不能靠本条的结果去修
+        （详见 CHANGELOG v0.45.195 补记）。
 
         记在这里而不是只改掉旧话，是因为「举得出变异」和「变异真的跑过」是两件事
         （MEMORY `alpha-hive-dte-off-by-one` 同款教训）。
