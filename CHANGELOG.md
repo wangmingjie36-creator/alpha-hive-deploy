@@ -5,7 +5,118 @@
 
 ---
 
-## [0.45.190] — 2026-09-11 — 占位（进行中：GEX 截断链调查的 P0 —— _select_expiries 补测试+观测点、修差一天的文档）
+## [0.45.190] — 2026-09-11 — 期权链的 `DTE≥7` 其实是「≥8 个日历日」：给零覆盖的 `_select_expiries` 补守卫与观测点
+
+### 背景
+
+用户问「GEX 是不是也跑在同一条截断链上」（`DealerGEXAnalyzer → fetch_options_chain
+→ fetch_cboe_chain`），并指出它与 v0.45.188 的 max_pain 不同——**这条链进评分**
+（`gex_regime.RegimeWeightAdjuster` → 逐标的权重 → `final_score`），所以值得单独查。
+
+**是，而且根因比「DTE<7 被排除」更具体：`_select_expiries` 的 DTE 比日历天数少 1。**
+`today` 是 `_pdt_now()`（**带时分秒**的 datetime），`datetime.strptime(到期日)` 是当天
+零点，`timedelta.days` 向下取整 ⇒ 只要不在 00:00:00 整跑，每个到期日都少算一天。
+于是 `DTE>=7` 实际要求「≥8 个日历日」、`DTE>=3` 实际是「≥4 日历日」。
+
+2026-09-11（周五）全 30 只 watchlist 实测，**只修这一处、别的一字不动**：
+
+| | 结果 |
+|---|---|
+| 选中到期日集合被改变 | **30 / 30**（全部：+09-18，挤掉最远的一个）|
+| `DealerGEXAnalyzer.total_gex` 符号翻转 | **7 / 30** — AMZN / DE / CRM / TMO / TMUS / ENPH / NEE |
+| 量级最大偏差 | NVDA `4.01 → 168.64`（**42×**）；09-18 一个到期日占全链 GEX 的 91% |
+| 生产链看到的持仓量 | AMZN 96,705 / 886,327 = **11%** |
+
+⚠️ **这是锁死在周五的缺陷。** 差一天只在「恰好有到期日落在 3 或 7 个日历日」时才
+改变选集，而周五那天正是下周五的标准周权（全周 OI 最大）。按真实到期日清单换参照日
+重算：**周五 30/30、周一 6/30、周三 5/30、周二与周四 0/30**。上表因此是一周里最狠
+的那一天，不要当作日常幅度。
+
+⚠️ **评分侧后果很小，别把它读成「修了分会变好」。** `RegimeWeightAdjuster` 只消费
+`regime` 这个三值字符串（不用 `total_gex` 的大小），而 `signal`/`risk_adj` 已归零 ⇒
+pos→neg 的全部效果是 odds +2.9pp / sentiment −2.1pp / catalyst −0.8pp。拿 249 条归档
+记录（2026-08-01 起，用真实 `dimension_scores` + 真实 `dimension_weights`）做反事实：
+`|Δfinal_score|` 中位 **0.050**、p90 0.098、最大 **0.127**；跨决策阈值的 **2/249**
+（CVX 5.96→6.02、META 5.94→6.04，都在 6.0 线，7.5 主简报线零）。收益是「GEX 这个数
+等于它声称的东西」，不是分数。
+
+### 本版**不修**那个口径，只把它钉住
+
+修它要改 `odds` 维度的输入，按 `ic_rerun_readiness._COHORT_HISTORY` 得付世代边界；
+那是单独的决定（下一步方案见本条末尾）。本版做的是 P0：**让这件事在仓库里可见、
+可测、可取证**。
+
+### Added
+
+- `tests/test_select_expiries_dte.py`（11 条）——`_select_expiries` 此前**零测试
+  覆盖**，而它是全部 30 只标的取链的唯一闸门（IV rank / 25Δ skew / 期限结构 /
+  Dealer GEX 全吃它的输出）。每条断言的 docstring 里写明什么变异会让它变红。
+  - `test_selection_must_not_depend_on_time_of_day` 是 **`xfail(strict=True)`**：
+    选到期日是**日期**运算，同一天哪个钟点跑都该给同一答案。今天它 xfail（绿），
+    **修好的那一刻 XPASS ⇒ 变红**，reason 里写着「先去 `_COHORT_HISTORY` 登记
+    世代边界」。危险的从来不是「没人修」，是**有人静默修了、新旧口径的分被混算**。
+  - 零外部依赖（夹具全是内存 dict）⇒ 结构上不存在写 `skip` 的余地。
+- `cboe_options.chain_selection_stats()` / `reset_chain_selection_stats()` /
+  `_record_chain_selection()`——链构造观测，经 `scan_timing.counters()` 落进
+  `status.json`（`counters.cboe_chain`），无需改编排器（同 v0.45.184 `code_version`）。
+  - 计数：`chains` / `min_cal_dte_max` / `near_excluded` / `near_excluded_oi` /
+    `chosen_oi` / **`errors`**。
+  - ⚠️ `errors` 不是凑数：没有它，「统计崩了」和「真的一个都没挡掉」在 status.json
+    里都表现为 `near_excluded==0`——正是 MEMORY 记了六次的「失败没传导到下游」。
+  - ⚠️ 观测点**刻意用日历口径**（`.date()` 差），与被观测的那套差一天的口径不同；
+    否则观测点自己也差一天 = 复制了它要观测的 bug。有断言钉死（M5）。
+
+### Changed
+
+- `cboe_options.py::fetch_cboe_chain`：INFO 日志加后缀
+  `，最近到期 N 日历日，挡掉近月 M 个（原始 OI 占 P%）`。实测 2026-09-11：
+  NVDA「最近到期 10 日历日，挡掉近月 3 个（原始 OI 占 67%）」。观测失败时印 `?`
+  而**不是** 0。
+- `cboe_options.py::_select_expiries` docstring：v0.45.188 刚按实测重写过，但那份
+  仍差一天——「DTE≥7 的前 4 个」实为「≥8 日历日」、「`near_expiry_set` 取 DTE∈[3,7)」
+  实为日历 [4,8)（实测 AMZN 该集合为 09-16/09-18，日历 DTE 5 与 7）。
+  ⚠️ 教训：**按实测重写的文档，只在被实测的那个维度上是准的**——上一版验的是
+  「两桶会不会都进」，没验「DTE 本身算得对不对」。
+  并记下同仓**两种 DTE 口径**并存：`_build_quote_set` / `fetch_cboe_full_chain_oi` /
+  `oracle_bee._near_oi_by_strike` 用的是正确的 `.date()` 写法，所以 `_QS_MIN_DTE`
+  上方那句「与主链一致」不成立——它比主链宽一天。
+- `options_analyzer.py::OptionsAgent._calc_total_oi`：`near_expiry_set` 与链内到期日
+  **不相交**时打一行 warning，**进程内只打一次**。**行为逐字节不变**（改了就是口径
+  变更）。v0.45.188 已把「这是空操作」写进 docstring；本版补的是落点——文档解决
+  「读代码的人别误会」，但「这个意图哪天开始生效 / 还是永远不生效」此前答不出那句
+  判据：**谁会红？** 实测 AMZN 96,705 == 96,705。
+  ⚠️ 一次性不是省事：这个条件在 CBOE 主源路径上**结构性恒为真**（30 只标的每轮全
+  命中），逐次打印就成了一盏恒亮的灯——和不打一个效果。逐次的聚合数字在
+  `counters.cboe_chain` 里。（初版就是逐次打的，自查时按本仓那条「方差为零的量不是
+  信号是探针」改掉；配套断言 `test_calc_total_oi_stays_silent_…` 必须先把一次性标志
+  清回 False，否则「沉默」可能只是去重的副作用 ⇒ 又一条没牙的断言。）
+- `scan_timing.py::counters()`：新增第四项 `cboe_chain`；`tests/test_scan_timing.py`
+  的三条精确键集断言同步更新（它们是精确比较**by design**——用来抓「有人加了一路
+  计数却没说」，更新它们就是在说）。
+
+### 纪律注记
+
+变异校验（10 个变异逐条跑，先断言基线全绿、`--maxfail=0` 覆盖 pyproject 的 `-x`、
+核对 `collected 10 items`）**当场抓到我自己写的一条没牙的断言**：配对测试里造了
+`logging.Handler` 却从没挂到任何 logger 上 ⇒ 收集器恒空 ⇒ `assert not logged` 恒真，
+「warning 改成恒亮」这个变异无人变红。已改成与配对断言同一套注入方式，10/10 全部变红。
+——**举不出变异就别加断言，这条规矩对写规矩的人同样生效。**
+
+### 不需要世代边界
+
+本版**不改任何进评分的量**：新增的是测试与观测计数，唯一的行为变化是一行 warning。
+`_calc_total_oi` 的返回值、`_select_expiries` 的选集、GEX/IV 的全部口径逐字节不变。
+
+### 下一步（未做，待决定）
+
+推荐**不要**去改 `_select_expiries` 本身——它同时喂四个消费者，其中 IV rank /
+25Δ skew / 期限结构三个**本来就该剔近月**（近月 theta 扭曲），改它是为修一个弄坏三个，
+且要付最大范围的世代边界。更好的路是照 v0.45.188 `_calc_max_pain` 的先例，给
+`DealerGEXAnalyzer` 一个**同 payload 的第二视图**（`_fetch_cboe_payload` 有 4h 进程
+缓存，Step 2 约 30–55 分钟 ⇒ 零额外网络调用）。届时需要一条世代边界，但范围只含 GEX 一维。
+⏰ 成本窗口：当前世代（2026-09-10 / v0.45.176）**已回填样本 0 条、0/25 周**，
+现在改的损失是一个扫描日；09-21（09-10 那批的 T+7）起开始吃真样本，此后每拖一周多赔一周。
+
 
 ---
 
