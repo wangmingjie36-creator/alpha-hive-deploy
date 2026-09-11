@@ -5,7 +5,51 @@
 
 ---
 
-## [0.45.185] — 2026-09-11 — 占位（进行中：dirty_tracked=True 时打 warning——定时扫描跑的是工作区不是任何一个提交）
+## [0.45.185] — 2026-09-11 — 工作区脏就打 warning；顺带一个「单测各自对、组合起来错」的 bug
+
+### Added
+
+- **`code_version.log_startup()`：`dirty_tracked is True` ⇒ `warning`，否则 `info`。**
+  理由不是洁癖：`~/Desktop/Alpha Hive` 既是生产目录**又**被当成开发工作目录
+  （2026-09-11 实测一次有另一个 session 未提交的 11 个文件，含
+  `alpha_hive_daily_report.py`），而 13:30 的定时扫描跑的就是那份**工作区**
+  —— 一个写到一半的编辑会被定时任务捡去执行。
+  这时上面那个 `commit sha` **不能唯一确定实际跑了什么代码**，事后照它 checkout
+  复现，复现的是另一份东西。**这是 v0.45.181 事故的镜像**：那次生产太旧，
+  这次可能太新且处在未完成状态；两者都让「跑的是哪一版」失去意义。
+- `resolve()` 增 `dirty_count`（全量）与 `dirty_files`（样本，上限 12 个）。
+  只报一个布尔值，事后没法用；报全量会把 `status.json` 撑爆。两者同样三态
+  （`None` 没测到 / `[]`、`0` 干净 / 非空）。
+- 守卫增至 17 条，变异 **5/5** 各打红。
+
+### Fixed —— 一个只有真机跑才暴露的 bug
+
+**`_git()` 对整段 stdout 做 `.strip()`，削掉了 porcelain 首行状态列的前导空格。**
+`git status --porcelain` 每行是 `XY<空格><路径>`，未暂存修改的 X 位就是一个**空格**；
+`.strip()` 把第一行那个空格削掉后，首行只剩 2 字符前缀，按 `line[3:]` 切路径
+就吃掉了文件名首字母 —— 实测 `code_version.py` → **`ode_version.py`**。
+一个被削过的文件名写进 `status.json` 当取证记录，比没有更糟。
+
+修法：`_git(*args, raw=False)`；`raw=True` 只 `rstrip("\n")`、保留前导空白，
+`status` 调用走 raw。非 raw 路径仍 `strip()`（否则 sha 会带换行）。
+
+⭐ **为什么我自己的单测抓不到它：夹具喂的是已经正确成形的输入。**
+`test_dirty_files_is_tri_state` 直接 monkeypatch `_git` 返回 `" M a.py"`
+——带着前导空格、从没经过那道 `.strip()`。`_git` 对、`_parse_dirty` 也对，
+**错在两者之间的接缝**。已补 `TestGitToParseSeam`：从 `subprocess` 出口注入
+真实形状的 porcelain，让两段代码真的串起来跑；再配一条反向断言
+（非 raw 调用仍要 strip，否则 sha 带空格）。
+变异 S1（`_git` 一律 strip）精确复现原 bug 并打红。
+
+**判据：monkeypatch 打在自己模块的内部函数上时，你测的是「下游对不对」，
+不是「上下游接得对不对」。** 接缝要从**外部依赖的出口**（这里是 `subprocess.run`）
+注入才验得到。同族：本轮 v0.45.179 的假断言 N7 也是「测错了层」。
+
+### 附带
+
+新增的 `raw=` 关键字让 6 处 `monkeypatch.setattr(cv, "_git", lambda *a: ...)`
+抛 `TypeError` —— 已改 `lambda *a, **k:`。（第一轮替换漏了 1 处，因为那行被折行了，
+锚点没覆盖到；`-x` 让它只报第一个失败，逐个修的。）
 
 ---
 

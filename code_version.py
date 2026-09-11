@@ -41,6 +41,9 @@ except Exception:  # pragma: no cover - 叶子模块降级
     _log = logging.getLogger("alpha_hive.code_version")
 
 _GIT_TIMEOUT_S = 10
+# 脏文件名最多带几个进快照/日志。全量可能上百条（生产目录被当工作目录用时），
+# 塞进 status.json 会把它撑爆；但只报一个数字事后又没法用 —— 取中间。
+_DIRTY_SAMPLE = 12
 _CHANGELOG_RE = re.compile(r"^##\s*\[([0-9]+(?:\.[0-9]+)*)\]")
 
 
@@ -53,8 +56,14 @@ def _repo_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def _git(*args: str) -> Optional[str]:
-    """跑一条 git 命令。**失败返回 None；成功返回 stdout（strip 后，可能是空串）。**
+def _git(*args: str, raw: bool = False) -> Optional[str]:
+    """跑一条 git 命令。**失败返回 None；成功返回 stdout（可能是空串）。**
+
+    `raw=True` 时**只剥尾部换行**，保留前导空白 —— `git status --porcelain`
+    的每行是 `XY<空格><路径>`，未暂存修改的 X 位就是一个**空格**。
+    对整段输出做 `.strip()` 会把第一行的那个空格削掉，于是首行变成 2 字符前缀，
+    按 `line[3:]` 切路径就会吃掉文件名的第一个字符
+    （实测 `code_version.py` → `ode_version.py`）。
 
     ⚠️ 不要写成 `return r.stdout.strip() or None` —— 那会把「成功但没有输出」
     （`git status --porcelain` 在干净工作区就是空输出）和「命令失败」混成同一个
@@ -82,7 +91,25 @@ def _git(*args: str) -> Optional[str]:
         _log.warning("code_version: git %s 退出码 %d，记为 None: %s",
                      " ".join(args), r.returncode, (r.stderr or "").strip()[:200])
         return None
-    return r.stdout.strip()
+    return r.stdout.rstrip("\n") if raw else r.stdout.strip()
+
+
+def _parse_dirty(porcelain: str) -> list:
+    """把 `git status --porcelain` 的输出解析成路径列表。
+
+    只取路径，不取状态码 —— 这里回答的是「哪些文件与提交不一致」，
+    不是「怎么个不一致法」。重命名行形如 `R  old -> new`，取 new。
+    """
+    out = []
+    for line in porcelain.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip()
+        if " -> " in path:                      # 重命名：取目标路径
+            path = path.split(" -> ", 1)[1].strip()
+        if path:
+            out.append(path)
+    return out
 
 
 def changelog_version() -> Optional[str]:
@@ -111,12 +138,17 @@ def resolve() -> dict:
     branch = _git("rev-parse", "--abbrev-ref", "HEAD") or None
     # 只看**已跟踪**文件的改动：生产 checkout 常年有未跟踪产物（日报 HTML、
     # iCloud 重名副本），把它们算进 dirty 会让这个字段恒为 True、失去信号。
-    porcelain = _git("status", "--porcelain", "--untracked-files=no")
+    # raw=True：porcelain 的前导空格有语义，见 `_git` docstring
+    porcelain = _git("status", "--porcelain", "--untracked-files=no", raw=True)
+    dirty_files = None if porcelain is None else _parse_dirty(porcelain)
     return {
         "sha": sha,
         "branch": branch,
         # None = 没测到；False = 测了、干净；True = 有未提交改动。三者必须可区分。
         "dirty_tracked": (None if porcelain is None else bool(porcelain)),
+        # 同样三态：None 没测到 / [] 干净 / 非空列表。只给样本，不给全量。
+        "dirty_count": (None if dirty_files is None else len(dirty_files)),
+        "dirty_files": (None if dirty_files is None else dirty_files[:_DIRTY_SAMPLE]),
         "changelog_version": changelog_version(),
         "repo_dir": str(_repo_dir()),
     }
@@ -129,12 +161,36 @@ def summary_line(info: Optional[dict] = None) -> str:
     ver = i.get("changelog_version") or "—"
     br = i.get("branch") or "—"
     d = i.get("dirty_tracked")
-    dirty = "—" if d is None else ("有未提交改动" if d else "干净")
+    n = i.get("dirty_count")
+    dirty = ("—" if d is None
+             else (f"有未提交改动（{n} 个文件）" if n else "有未提交改动") if d
+             else "干净")
     return f"代码版本 v{ver} | commit {sha} | 分支 {br} | 工作区 {dirty}"
 
 
 def log_startup(info: Optional[dict] = None) -> dict:
-    """扫描开始时调用：解析并打一条 INFO。返回解析结果供写进快照。"""
+    """扫描开始时调用：解析并打日志。返回解析结果供写进快照。
+
+    **工作区脏 ⇒ warning，不是 info。** 理由不是洁癖：
+    `~/Desktop/Alpha Hive` 既是生产目录**又**被当成开发工作目录（2026-09-11 实测
+    一次有另一个 session 未提交的 10 个文件），而 13:30 的定时扫描跑的就是那份
+    **工作区**——一个写到一半的编辑会被定时任务捡去执行。
+    这时候上面那个 `commit sha` **不能唯一确定实际跑了什么代码**，
+    事后照着它去 checkout 复现，复现的是另一份东西。
+
+    这是 v0.45.181 事故（生产跑旧代码）的镜像：那次是生产太旧，
+    这次是生产可能太新、且处在未完成状态。两者都让「跑的是哪一版」失去意义。
+    """
     i = info if info is not None else resolve()
-    _log.info("%s", summary_line(i))
+    if i.get("dirty_tracked") is True:
+        n = i.get("dirty_count")
+        files = i.get("dirty_files") or []
+        more = "" if (n is None or n <= len(files)) else f" 等 {n} 个"
+        _log.warning(
+            "%s ⚠️ 工作区有未提交改动，本轮跑的是**工作区**不是 commit %s —— "
+            "事后照该 sha 复现会得到另一份代码。脏文件：%s%s",
+            summary_line(i), i.get("sha") or "—",
+            ", ".join(files) if files else "（列不出）", more)
+    else:
+        _log.info("%s", summary_line(i))
     return i

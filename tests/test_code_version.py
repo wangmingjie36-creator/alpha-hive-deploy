@@ -130,12 +130,147 @@ class TestCleanTreeIsNotConfusedWithFailure:
         """
         import code_version as cv
 
-        monkeypatch.setattr(cv, "_git", lambda *a: None)
+        monkeypatch.setattr(cv, "_git", lambda *a, **k: None)
         assert cv.resolve()["dirty_tracked"] is None
-        monkeypatch.setattr(cv, "_git", lambda *a: "")
+        monkeypatch.setattr(cv, "_git", lambda *a, **k: "")
         assert cv.resolve()["dirty_tracked"] is False
-        monkeypatch.setattr(cv, "_git", lambda *a: " M foo.py")
+        monkeypatch.setattr(cv, "_git", lambda *a, **k: " M foo.py")
         assert cv.resolve()["dirty_tracked"] is True
+
+
+class TestDirtyWorktreeIsWarned:
+    """v0.45.185：工作区脏必须打 **warning**，不是 info。
+
+    `~/Desktop/Alpha Hive` 既是生产目录**又**被当成开发工作目录（2026-09-11
+    实测一次有另一个 session 未提交的 10 个文件），而定时扫描跑的就是那份工作区
+    ⇒ 一个写到一半的编辑会被定时任务捡去执行，此时 `sha` **不能唯一确定**
+    实际跑了什么代码。这是 v0.45.181 事故的镜像（那次生产太旧，这次太新且未完成）。
+    """
+
+    _DIRTY = {"sha": "abc1234", "branch": "main", "dirty_tracked": True,
+              "dirty_count": 10, "dirty_files": ["models.py", "signal_archive.py"],
+              "changelog_version": "0.45.185"}
+    _CLEAN = dict(_DIRTY, dirty_tracked=False, dirty_count=0, dirty_files=[])
+
+    def test_dirty_logs_warning(self, caplog):
+        """变异：把 `if i.get("dirty_tracked") is True:` 那支删掉（一律 info）⇒ 红。"""
+        import code_version as cv
+
+        with caplog.at_level("DEBUG"):
+            cv.log_startup(dict(self._DIRTY))
+        warns = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert warns, "工作区脏却没有 warning —— 这条提醒等于没有"
+        msg = warns[0].getMessage()
+        assert "工作区" in msg and "abc1234" in msg
+        assert "models.py" in msg, "warning 里没列脏文件 —— 事后没法用"
+
+    def test_clean_does_not_warn(self, caplog):
+        """反向自证：干净时不许 warning，否则上一条在任何输入下都绿。
+
+        变异：把判据改成 `is not None`（干净也警告）⇒ 红。
+        """
+        import code_version as cv
+
+        with caplog.at_level("DEBUG"):
+            cv.log_startup(dict(self._CLEAN))
+        assert not [r for r in caplog.records if r.levelname == "WARNING"], (
+            "工作区干净却打了 warning —— 警告会被当噪音忽略")
+
+    def test_unmeasured_does_not_warn_as_dirty(self, caplog):
+        """没测到（None）不是脏。变异：判据写成 `if i.get("dirty_tracked"):`
+        对 None 仍为假、这条绿；但写成 `is not False` ⇒ 红。"""
+        import code_version as cv
+
+        unknown = {k: None for k in self._DIRTY}
+        with caplog.at_level("DEBUG"):
+            cv.log_startup(unknown)
+        assert not [r for r in caplog.records
+                    if r.levelname == "WARNING" and "未提交改动" in r.getMessage()]
+
+    def test_dirty_files_is_tri_state(self, monkeypatch):
+        """`dirty_files` / `dirty_count` 同样三态：None 没测到 / [] 干净 / 非空。
+
+        变异：`dirty_files` 失败兜底写成 `[]` ⇒ 红（[] 读作「测了、干净」）。
+        """
+        import code_version as cv
+
+        monkeypatch.setattr(cv, "_git", lambda *a, **k: None)
+        i = cv.resolve()
+        assert i["dirty_files"] is None and i["dirty_count"] is None
+        monkeypatch.setattr(cv, "_git", lambda *a, **k: "")
+        i = cv.resolve()
+        assert i["dirty_files"] == [] and i["dirty_count"] == 0
+        monkeypatch.setattr(cv, "_git", lambda *a, **k: " M a.py\nM  b.py\nR  old.py -> new.py")
+        i = cv.resolve()
+        assert i["dirty_count"] == 3
+        assert i["dirty_files"] == ["a.py", "b.py", "new.py"], (
+            f"解析错了：{i['dirty_files']} —— 重命名行应取目标路径")
+
+    def test_dirty_files_capped(self, monkeypatch):
+        """脏文件很多时只带样本，别把 status.json 撑爆；但 count 要给全量。
+
+        变异：去掉 `[:_DIRTY_SAMPLE]` 切片 ⇒ 红。
+        """
+        import code_version as cv
+
+        monkeypatch.setattr(cv, "_git",
+                            lambda *a, **k: "\n".join(f" M f{n}.py" for n in range(50)))
+        i = cv.resolve()
+        assert i["dirty_count"] == 50, "count 应是全量"
+        assert len(i["dirty_files"]) == cv._DIRTY_SAMPLE, "样本没有截断"
+
+
+class TestGitToParseSeam:
+    """⚠️ 这一组补的是 `_git` 与 `_parse_dirty` **之间的接缝**。
+
+    v0.45.185 实测：两者各自的单测全绿，组合起来却把 `code_version.py` 解析成
+    `ode_version.py`。原因是 `_git` 对整段 stdout 做了 `.strip()`，削掉了
+    **第一行**状态列的前导空格（porcelain 的未暂存修改 X 位就是空格），
+    于是首行只剩 2 字符前缀，`line[3:]` 吃掉了文件名首字母。
+
+    为什么原有单测抓不到：`test_dirty_files_is_tri_state` 直接 monkeypatch
+    `_git` 返回 `" M a.py"` —— **夹具喂的是已经正确成形的输入**，从没经过那道
+    `.strip()`。所以这里从 `subprocess` 出口注入，让两段代码真的串起来跑。
+    """
+
+    _PORCELAIN = " M code_version.py\nM  staged.py\n M tests/test_x.py\nR  old.py -> new.py\n"
+
+    def _fake_run(self, stdout):
+        class _R:
+            returncode = 0
+            stderr = ""
+        _R.stdout = stdout
+        return lambda *a, **k: _R()
+
+    def test_first_line_leading_space_survives(self, monkeypatch):
+        """从 subprocess 出口喂真实 porcelain，文件名必须一个字符都不少。
+
+        变异：`_git` 的 `raw` 分支去掉、一律 `.strip()` ⇒ 首个文件名缺首字母 ⇒ 红。
+        """
+        import subprocess
+
+        import code_version as cv
+
+        monkeypatch.setattr(subprocess, "run", self._fake_run(self._PORCELAIN))
+        i = cv.resolve()
+        assert i["dirty_files"][0] == "code_version.py", (
+            f"首个文件名被削了：{i['dirty_files'][0]!r} —— "
+            "porcelain 第一行的前导空格是状态列，不能 strip 掉")
+        assert i["dirty_files"] == ["code_version.py", "staged.py",
+                                    "tests/test_x.py", "new.py"], i["dirty_files"]
+        assert i["dirty_count"] == 4
+
+    def test_rev_parse_still_stripped(self, monkeypatch):
+        """反向自证：非 raw 的调用仍要 strip —— 否则 sha 会带上换行。
+
+        变异：把 `_git` 改成一律 `rstrip("\n")`（连空格都不剥）⇒ 这里 sha 带空格 ⇒ 红。
+        """
+        import subprocess
+
+        import code_version as cv
+
+        monkeypatch.setattr(subprocess, "run", self._fake_run("  abc1234  \n"))
+        assert cv._git("rev-parse", "--short", "HEAD") == "abc1234"
 
 
 class TestActuallyWired:
