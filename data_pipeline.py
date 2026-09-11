@@ -16,7 +16,7 @@ Alpha Hive 升级 — Phase 1.1: 多源数据降级链
   将本文件放入项目根目录，然后在 swarm_agents/cache.py 中：
   from data_pipeline import MultiSourceFetcher
   _fetcher = MultiSourceFetcher()
-  
+
   替换 _fetch_stock_data:
   def _fetch_stock_data(ticker: str) -> Dict:
       return _fetcher.fetch(ticker)

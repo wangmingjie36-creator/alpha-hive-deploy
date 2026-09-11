@@ -133,7 +133,10 @@ class RegimeAnalyzer:
             try:
                 std_dev = statistics.stdev(returns)
                 sharpe = (avg_return / std_dev * (252 ** 0.5)) if std_dev > 0 else 0.0
-            except:
+            except (statistics.StatisticsError, TypeError) as _err:
+                # 0.0 在下游读起来是「无超额收益」，不是「算不出来」。
+                logger.warning("Sharpe 计算失败（%s: %s），n=%d，该组记为 0.0",
+                               type(_err).__name__, _err, len(returns))
                 sharpe = 0.0
         else:
             sharpe = 0.0
@@ -293,7 +296,11 @@ class RegimeAnalyzer:
             try:
                 report_date = datetime.fromisoformat(report_date_str)
                 day_name = days[report_date.weekday()]
-            except:
+            except (ValueError, TypeError) as _err:
+                # 与 v0.45.192 修的 dashboard 幽灵日期同一形状：
+                # 解析器吃下一个不是日期的串，静默跳过，没有任何东西会红。
+                logger.warning("快照的 report_date=%r 不是合法日期（%s），"
+                               "该快照不计入星期分组", report_date_str, _err)
                 continue
 
             outcome, return_pct = self._extract_outcome(snapshot, horizon)

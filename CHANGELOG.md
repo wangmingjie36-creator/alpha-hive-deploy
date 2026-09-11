@@ -5,7 +5,90 @@
 
 ---
 
-## [0.45.206] — 2026-09-11 — 占位（进行中：全量 ruff check . 从未在 CI 跑过（46 个错），补 lint job 并清掉 ci.yml 旧稿）
+## [0.45.206] — 2026-09-11 — 全量 `ruff check .` 从未在 CI 跑过：46 个错，其中 7 个是本仓头号故障形状
+
+起因是查一个无关的问题：`.github/workflows/ci.yml` 半年来一直躺在磁盘上却**未被跟踪**
+—— 也就是 GitHub Actions 从来没见过它。顺着查下去发现它是 `tests.yml` 的**前身**，
+而它定义的 `ruff check .` 全量 lint 至今没有任何地方在跑。
+
+### Added
+
+- **`tests.yml` 增加 `ruff` job（全量规则）。**
+  本仓库早已装好并配置 ruff（`pyproject` 的 `select = ["E","F","W"]` + 一串 ignore），
+  但 CI 里只有 `test_no_undefined_names.py` 以 `--select F821`/`F823` 跑了**两条窄规则**。
+  其余规则半年无人执行，首次全量跑出 **46 个错**。
+  - 独立成 job 而非并入 pytest：lint 30 秒、pytest 4 分钟，分开后
+    「lint 错」与「测试挂」在 Actions 页面是两个格子。
+  - **刻意不加 `needs:`** —— 与 pytest 并行，lint 红不该挡住看测试结果。
+    （旧 `ci.yml` 的 `test` job 写着 `needs: lint`，在当前 46 个错下
+    会让测试**永远跑不到**。）
+
+### Fixed —— 46 个 lint 错，分两批处置
+
+**第 1 批：25 个安全自动修**（`ruff --fix`，不带 `--unsafe-fixes`）
+- 16 × E401（多 import 同行）、3 × W293、4 × W605、2 × F811。
+- W605 是每次跑 pytest 都在刷屏的 `DeprecationWarning: invalid escape sequence '\ '`
+  —— 4 个模块 docstring 含 `\ `，改为 `r"""`。
+  **逐个用 `ast.get_docstring` 比对求值后的字符串，4/4 逐字符相同**
+  （`r"""` 会把 `\n`、`\t` 变成字面量，不验就改是在赌）。
+- 2 × F811 是函数内多余的 `import math`/`import os`，已断言模块级 import 仍在。
+
+**第 2 批：7 个裸 `except:`（E722）—— 逐个收窄异常类型 + 补观测点**
+
+不是简单换成 `except Exception:`。裸 `except:` 正是 CLAUDE.md
+「这个失败，下游怎么知道？」要治的形状，逐处给了能回答「谁会红」的观测点：
+
+| 位置 | 原来 | 现在 |
+|---|---|---|
+| `check_0520_options.py:98` | `except: pass` | 收窄 + 打印**哪个到期日**失败；并加「6 个全失败就 `SystemExit`」——原先 `pd.concat([])` 只抛一句 `No objects to concatenate`，读的人会去查 pandas 而不是查网络 |
+| `check_short_positions.py:107` | 同上 | 同上（8 个到期日） |
+| `deep_analysis.py:191` | `except: score = 5.0` | 收窄 `(TypeError, ValueError)` + warning。**5.0 在图上与真实中性分不可区分** —— 参 MEMORY.md「崩掉的蜂被记成 5.0 中位票」 |
+| `deep_analysis.py:532` | `except: return 0` | 收窄 + warning 带上无法解析的区间串。返回 0 会静默抹掉该情景对期望收益的贡献，而 `ev` 看上去完全正常 |
+| `oi_wall.py:38` | `except:` → 兜底 `226.0` | 收窄 + 日线为空时 **`SystemExit` 而不是用兜底常数**。`current_price` 驱动整张图（轴范围/ITM-OTM 标注/当前价竖线/标题），陈年常数会画出一张**看起来正常但是错的**图 |
+| `regime_analyzer.py:136` | `except: sharpe = 0.0` | 收窄 `(StatisticsError, TypeError)` + warning 带 n。0.0 在下游读起来是「无超额收益」而非「算不出来」 |
+| `regime_analyzer.py:296` | `except: continue` | 收窄 `(ValueError, TypeError)` + warning 带坏值。**与 v0.45.192 修的 dashboard 幽灵日期同一形状**：解析器吃下不是日期的串，静默跳过 |
+
+⚠️ `check_0520_options.py` 的**循环变量就叫 `e`**，异常变量必须另起名
+（写成 `except Exception as e` 会当场覆盖掉要打印的到期日）。
+
+**其余 14 个**：4 × E731（`lambda` 赋值 → `def`，ruff 视作 unsafe fix 因为改变 `__name__`，
+故手工改）、10 × W293 —— 这 10 个**全部落在 docstring 内**，
+所以 `--fix` 正确地拒绝自动改（改它等于改字符串内容）；已逐行断言确为纯空白行后清除。
+
+### Removed
+
+- **`.github/workflows/ci.yml`**（未跟踪的 2026-03-03 旧稿，移入废纸篓）。
+  它是 `tests.yml` 的前身，而 `tests.yml` 逐条推翻了它的设计：
+
+  | | `ci.yml`（旧稿） | `tests.yml`（在跑，注释有论证） |
+  |---|---|---|
+  | Python | 3.10 / 3.11 / 3.12 矩阵 | **仅 3.11**（与生产扫描一致） |
+  | 测试选择 | `-m "not slow"` → **4057** 条 | `-m "not integration and not network"` → **3949** 条 |
+  | `-x` | 未覆盖，撞第一个失败就停 | `--maxfail=0`，一次看全 |
+  | 并发 | 无 | `concurrency` + cancel-in-progress |
+
+  差额 **110 条**正是打真实外部 API、或需要干净检出里不存在的生产产物的测试
+  —— `tests.yml` 的注释明确论证过为什么排除它们
+  （「一个时红时绿的 CI 比没有 CI 更糟：它训练所有人忽略红灯」）。
+  照原样提交 `ci.yml` 会得到一个**常红**的第二条流水线，与「让 CI 跑起来」相反。
+
+### 附：`ci.yml` 为什么会有个悬空 blob（查清了，与本次改动无关）
+
+它**从未被提交过**，不存在「脱管」。对象库里那个 blob 是悬空的松散对象，
+来自 2026-09-10 01:56:30 的一次 `git stash -u`：`-u` 会把未跟踪文件扫进一个
+单独的 `untracked files on main` commit（实测 `142a5b6a` 只含这一个文件），
+`stash pop` 后 stash 被 drop，三个 commit 失去引用、blob 悬空至今。
+`ci.yml` 的 inode 生于 `01:56:38`，比 blob 晚 8 秒 —— 这个「内容先进 git、
+文件后落盘」的倒序只有 `stash pop` 能解释。
+⚠️ 那次用的是**裸 `git stash`/`pop`**，正是 CLAUDE.md 明令禁止的
+（19 个 worktree 共享 stash 栈）。
+
+### 已知：本版不改变 CI 当前的红
+
+`tests` job 在 main 上**本来就是红的**，唯一失败项是
+`TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`
+—— CLAUDE.md 写明的**设计内变红**（含义＝去看 BLS 发 2027 日程没，不是调阈值）。
+本版改动后本地全量离线套件复现的失败项**与之完全一致**，即零回归。
 
 ## [0.45.205] — 2026-09-11 — 同形状不等于同物种：`unusual_signal` 的单边性实测后**决定不改**
 

@@ -15,9 +15,12 @@ import sys
 import os
 import json
 import time
+import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
+
+_log = logging.getLogger("alpha_hive.deep_analysis")
 
 # ── 切换到脚本所在目录 ─────────────────────────────────────
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -187,8 +190,14 @@ def _direction_badge(direction):
 
 def _score_ring(score, color):
     """SVG 圆环评分"""
-    try: score = float(score)
-    except: score = 5.0
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        # 5.0 在图上与一个真实的中性评分长得一模一样。
+        # 参 MEMORY.md「崩掉的蜂被记成 5.0 中位票」：判据必须是错误标记、不是取值。
+        # 此处保留渲染不变，但至少让它在日志里留下痕迹。
+        _log.warning("_score_ring 收到非数值评分 %r，渲染为 5.0（与真实中性分不可区分）", score)
+        score = 5.0
     pct = score / 10
     r = 28; circ = 2 * 3.14159 * r
     dash = pct * circ
@@ -529,7 +538,11 @@ def _scenarios(final_score: float, direction: str, ticker: str, agents: Dict) ->
         try:
             parts = s.replace("%","").replace("+","").split("~")
             return (float(parts[0]) + float(parts[1])) / 2
-        except: return 0
+        except (ValueError, IndexError, AttributeError) as _err:
+            # 返回 0 会把这一情景的贡献静默抹掉，
+            # 而 ev 的数字看上去依然完全正常。
+            _log.warning("情景收益区间 %r 解析失败（%s），该情景按 0 计入期望收益", s, _err)
+            return 0
     ev = sum(float(r[1].replace("%",""))/100 * mid(r[2]) for r in rows)
 
     tr = ""

@@ -186,7 +186,6 @@ class TestTargetDateIsValidated:
 
     def test_malformed_target_falls_back_to_today_slot(self, agent, monkeypatch, tmp_path):
         """格式非法时退回当日口径，且路径不得逃出 cache 目录。"""
-        import os
 
         from hive_logger import pdt_today
 

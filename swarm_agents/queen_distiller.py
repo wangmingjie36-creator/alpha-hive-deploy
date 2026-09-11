@@ -280,7 +280,8 @@ class QueenDistiller:
         half_th = float(_MFC.get("oos_trust_half_threshold", 55.0))
         zero_th = float(_MFC.get("oos_trust_zero_threshold", 50.0))
         try:
-            import os as _os, json as _json
+            import os as _os
+            import json as _json
             from hive_logger import PATHS as _PATHS
             # v0.45.149：兜底曾是相对路径 `"ml_model_cache.json"`，会读到
             # 当前工作目录里的野文件。绝对路径取不到就应当放弃，不该改读 cwd。
