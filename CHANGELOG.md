@@ -142,6 +142,23 @@ marker 别写 skip」。
 
 **为什么是 09-08 开始、且再也好不了（棘轮）**：merge 每天成功时分支追平 main，次日差距 = 一天的提交量（5~30，远在窗口内）。09-05 那天没跑（`cloud_snapshots/` 从 09-04 直接跳到 09-08），而**光 09-05 一天 main 就有 59 个提交**。差距一旦越过 125，merge 就失败 → 分支不再追平 → 差距每天继续拉大 → **结构上不可能自行回到窗口内**。
 
+### 修复验证（实测复现 + 实测修复，不是断言）
+
+在本机用 `--depth=1` 克隆 `cloud-snapshots` + `--depth=1` 取 `main` 复现出**同一条 fatal**，
+再原样应用修复：
+
+| | 解除浅克隆前 | 后 |
+|---|---|---|
+| `git rev-parse --is-shallow-repository` | `true` | `false` |
+| 可见提交（分支 / main） | 1 / 1 | 941 / 927 |
+| `rev-list --max-parents=0` | **2 个「根提交」** | **1 个** |
+| `git merge-base` | **空** | `ea97c50` |
+| `git merge origin/main` | **`fatal: refusing to merge unrelated histories`**（退出码 128） | **成功**（退出码 0） |
+
+而这两支**证明是相关的**——`a9db22f` 的第二个父提交就是 main 的 `ea97c50`。
+⚠️ `git fetch --unshallow` 实测 **50 秒**、`.git` 涨到约 40MB，**不是秒级**；
+提示词里已写明，免得下次有人当它卡住。（初稿我写的是「秒级」，是没量就写的数字，已更正。）
+
 ### 判断：fail fast 该放在哪一层
 
 原提议是「merge 失败即 fail fast」。**直接照做会用一个可恢复的问题换一个不可恢复的问题**：快照是当日 CBOE 期权链，跳过一天就永久没有了——而 09-05 缺的那一天正是本次故障的触发条件。且事后核实，那三天 merge 失败**实际零损失**（`cloud_snapshot_fetch.py` 与 main 逐字节相同）。所以 fail fast 放在 `--unshallow` 与两父兜底**都失败之后**：走到那一步说明仓库拓扑异常，此时停下才是对的。
@@ -156,7 +173,104 @@ marker 别写 skip」。
 
 三个 agent 都附了同一个论证：「`cloud_snapshot_fetch.py` 与 main 字节一致，本次无实际损失」。**那个论证是对的**，也正因为它对，没有任何东西逼着升级——这是 auto-memory 里「**安全性论证与可观测性是同一个事实的两面**」的又一例。所以 ⓪ 行的规定里专门写了一句：那个论证即使成立也只能写在 ⓪ 行之外。
 
-## [0.45.182] — 2026-09-11 — 占位（进行中：二次检查 v0.45.163/164 抓到的两个 bug。① v0.45.164 的 `build_agent_votes` 把**崩掉的蜂**记成一张 5.0 中位票 —— `make_error_result` 返回 score=5.0/confidence=0.0，而 `queen_distiller` 的 `agent_details` 白名单把 `error` 键丢了 ⇒ 该函数结构上看不见失败；旧的板口径天然排除它（崩在 `_publish` 之前、从没上过板），故属本版引入。实测 782 份 6256 个蜂-份里 13 例（Scout 9/Buzz 3/Chronos 1），09-08 起 0 例 ⇒ **潜伏、无已污染快照**。修法：白名单透出 `error`，`build_agent_votes` 判 `error is not None`。**判据必须是错误标记不是取值**——实测 38 个合法结果恰好 score==5.0（3:1 误伤），`confidence==0.0` 零误报但属巧合非契约，`dimension_status` 只覆盖 5/8 只蜂（Rival/Bear/CodeExec 在表外）。顺带改掉 `models.py::clean_results_batch` 那句说谎的 docstring（写着「过滤 error 结果」，实际不过滤——它现在的作用是阻止下一个人做这次检查）。② v0.45.163 的 `census_source` 没进归档 ⇒ `guard.consistency` / `guard.top_signals_count` 两条归档序列在 2026-09-08 **静默换了定义**（逐扫描日实测：count 3.43~4.33 → 恒 6.00；consistency 0.50~0.72 → 0.47~0.49），而 `signal_archive.analyze()` 既不按日期也不按 `_COHORT_HISTORY` 切片。修法**改名不加判别列**（`value` 列是 REAL 存不下字符串标签；加列等于要求每个消费方记得 join，忘了就退回同一个静默 bug）：`guard.consistency` → `guard.consistency_census`；`guard.top_signals_count` 现恒为 6.0 已非信号，从 `_SIGNALS` 摘掉、改挂 `tests/test_distribution_invariants.py` 的不变式（断言等于本轮 Guard 之前实际启用的蜂数，不写死 6）。⚠️ 两者均**不加** `_COHORT_HISTORY` 边界：①不进 final_score，②归档层，v0.45.163 的边界已登记、缺的只是归档没照着切。⚠️ 会碰 `queen_distiller.py` / `alpha_hive_daily_report.py` / `signal_archive.py` / `models.py` / `ic_rerun_readiness.py` 与 tests/，与其它 session 合并时逐块核对）
+## [0.45.182] — 2026-09-11 — 两个「结构上看不见」：崩掉的蜂长得像中位票，换了定义的序列长得像同一条
+
+v0.45.163/164 的二次检查。两个 bug 形状相同：**判别所需的信息存在于上游，
+却在流到判别点的路上被一层白名单/一张表丢掉了**，于是下游不是判错，
+是**根本没有能力判**。
+
+### Fixed ① 崩掉的蜂被记成一张 5.0 中位票（v0.45.164 引入）
+
+`make_error_result`（`swarm_agents/utils.py:35`）返回 `score=5.0, confidence=0.0,
+error=<str>` —— 5.0 只是为了让调用方拿到一个数，不是一次表态。而
+`QueenDistiller` 的 `agent_details` 白名单只抄 6 个键、**把 `error` 丢在外面**
+⇒ `build_agent_votes` 拿到的 det 里只剩 `score=5.0`，与「这只蜂真的打了 5.0」
+**逐字节同形**。
+
+旧的板口径天然排除它：崩溃发生在 `self._publish()` **之前**，那只蜂从没上过板。
+所以这是 v0.45.164 改读 `agent_details` 时带进来的新行为，不是历史遗留。
+
+实测：782 份 / 6256 个蜂-份里 **13 例**（Scout 9 / Buzz 3 / Chronos 1），
+09-08 之后 **0 例** ⇒ **潜伏，无已污染快照**，不需要回填。
+
+**判据必须是错误标记，不能是取值。三条取值捷径逐条实测否掉：**
+
+| 捷径 | 否决理由 |
+|---|---|
+| `score == 5.0` | **38 个合法结果恰好是 5.0**（Bear 18 / Oracle 10 / Scout 4 / Guard 3 / Buzz 2 / CodeExec 1），error 只有 13 个 ⇒ **3:1 误伤** |
+| `confidence == 0.0` | 今天 13/13 命中、6256 条零误报 —— 但没有任何代码保证合法蜂不返回 0.0，**是巧合不是契约** |
+| `dimension_status` | 只覆盖 `DIMENSION_WEIGHTS` 那 5 维；Rival(`ml_auxiliary`) / Bear(`contrarian`) / CodeExec(`technical`) 在表外 ⇒ **半修** |
+
+改动：`queen_distiller.py` 白名单补 `"error": r.get("error")`；
+`build_agent_votes` 在数值检查**之前**判 `det.get("error") is not None` 并 warning。
+旧快照没这个键 ⇒ `.get` 取到 `None` ⇒ 按「没失败」读，与历史语义一致。
+
+### Fixed ② 两条归档序列在 2026-09-08 静默换了定义（v0.45.163 引入）
+
+v0.45.163 的 CHANGELOG 写的是「键名保留以免断掉 `signal_archive` 的时间序列，
+口径由相邻的 `census_source` 机读区分」。**前半句成立，后半句在归档里不成立**——
+`signal_archive` 只抽 `guard.top_signals_count`，**从不抽 `census_source`**
+（实测归档里 0 行），而 `analyze()` 既不按日期、也不按 `_COHORT_HISTORY` 切片
+（`load_panel` 直接拉整张表）⇒ 两段定义被池化。
+
+逐扫描日实测，断点干净地落在 09-08：
+
+| 归档序列 | 08-24 ~ 09-04 | 09-08 起 |
+|---|---|---|
+| `guard.top_signals_count` | 3.43 ~ 4.33 | **6.00 / 6.00 / 6.00** |
+| `guard.consistency` | 0.50 ~ 0.72 | 0.47 / 0.49 / 0.47 |
+
+时间序列不是「保住了」，是被**静默重新定义**了。
+
+**修法：改名，不加判别列。**
+- `guard.consistency` → `guard.consistency_census`
+- `guard.top_signals_count` **摘除** —— v0.45.163 之后它恒等于蜂数、票内方差为零，
+  已不是信号；改挂 `tests/test_distribution_invariants.py::TestGuardCensusCoverage`
+  当健康探针（期望值**从 `agent_details` 导出**，不写死 6 —— 关掉 CodeExecutor 时应得是 5；
+  且要扣掉崩掉的蜂，与 ① 是同一件事）。库里历史行不改写，只是不再写入新行。
+
+为什么不加判别列：① `value` 列是 REAL，存不下字符串标签；② 加列等于要求每个
+消费方**记得**去 join，忘了就退回同一个静默 bug，而改名之后「忘了」在结构上
+不可能发生；③ `experiments/signal_ic_sweep_report.md:47` 已经把 `guard.consistency`
+的 IC(+0.134 / t +2.12) 发表在**旧定义**上，同名延续会让下一个人拿两个量比。
+
+⚠️ **判据：名字变了，还是「量」变了？** 同一个量换名字（`stocktwits_volume` →
+`social_volume`）⇒ 合并读（见 `_crowding_comp` 的 `_legacy`）；同一个名字换量
+⇒ 必须拆成两条序列。两者写法相反，别套错。
+
+### Fixed ③ `models.py::clean_results_batch` 的 docstring 说谎
+
+写着「过滤 error 结果」，函数体从来没有过滤过（实测：喂一条 `make_error_result`
+进去，带着 `error` 键原样出来）。`_prepare_dimension_data` 正是**依赖**它们留下的。
+**这句错话的实际作用是让读到它的人停止检查** —— 本次复查差点就被它挡回去。
+
+### Added
+
+- `tests/test_agent_votes_census.py` +7 项（29 项）：崩掉的蜂不计票、
+  **合法的 5.0 照常计票**、**合法的 0.0 置信度照常计票**（后两条是成对断言，
+  没有它们「判据换成取值」是全绿变异）、三只表外蜂各一条、
+  以及一条**接线**测试走真 `QueenDistiller._prepare_dimension_data` + **AST** 核对白名单
+  （不按方法名 `inspect` —— 方法改名时那会以 `AttributeError` 的形式「变红」，
+  那是测试坏了不是代码坏了）。
+- `tests/test_signal_archive.py` +2 项（40 项）：`RETIRED_SIGNAL_NAMES` 黑名单
+  （我怕的是旧名**变回去**）+ 成对的「新序列必须存在」（防止退役变成悄悄删掉一个信号）。
+- `tests/test_distribution_invariants.py` +6 项：`TestCensusCoverageGuardHasTeeth`
+  五条合成反向自证 + `TestGuardCensusCoverage` 一条 integration（读生产 `analysis-*.json`，
+  **条件性写在 marker 上不写进 skip**，取不到数就判红）。实测核对 36 份新口径文件、0 份不一致。
+
+### 核对
+
+mutation **9/9 被杀**（含「判据换成 `score==5.0`」「换成 `confidence==0.0`」
+「白名单去掉 error」「改回旧信号名」「期望值写死 6」各一条），
+每个变异锚点唯一、每轮清 `__pycache__`、核对 `collected 90 items`、还原后重验全绿。
+ruff 149 = 基线（本 checkout 含未跟踪文件，与 worktree 的 46 不是同一口径）。
+
+### 不做
+
+**两者都不加 `_COHORT_HISTORY` 边界**：① `agent_votes` 不进 `final_score`
+（v0.45.164 已逐路径实测）；② 归档层的事，v0.45.163 的边界早已登记，
+缺的只是归档没照着切。同时**更正**了 `_COHORT_HISTORY` 里 v0.45.163 那条的
+措辞（原文那句「口径由 `census_source` 机读区分」在归档里是假的）。
 
 ## [0.45.181] — 2026-09-11 — 事故：修复推到了 main，生产在跑的是另一份代码
 

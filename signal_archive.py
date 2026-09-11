@@ -329,10 +329,29 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     "options.iv_rank_is_real": _iv_rank_is_real,
 
     # ── 共振 / 一致性（回声源头）─────────────────────────────────
-    "guard.consistency": _path("agent_details.GuardBeeSentinel.details.consistency"),
+    # v0.45.182：`guard.consistency` → `guard.consistency_census`。**改名不是洁癖。**
+    # v0.45.163 把 GuardBee 改走普查读法后，这个量的分母由「排行榜窗口条数(≤5)」
+    # 变成「本轮发布过的蜂数」—— 逐扫描日实测 0.50~0.72 → 0.47~0.49，是**换了量**
+    # 不是换了名字。而 `analyze()` 既不按日期、也不按 `_COHORT_HISTORY` 切片
+    # （`load_panel` 直接拉整张表），同名延续 = 两段定义被池化。
+    #
+    # ⚠️ 判据：**名字变了，还是「量」变了？**
+    #   · 同一个量换名字（`stocktwits_volume` → `social_volume`）⇒ 合并读，
+    #     见上面 `_crowding_comp` 的 `_legacy` 映射。
+    #   · 同一个名字换量（本条）⇒ 拆成两条序列。
+    # 为什么不加一列口径标记：`value` 是 REAL 存不下字符串标签；且加列等于要求
+    # 每个消费方**记得**去 join，忘了就退回同一个静默 bug。改名之后「忘了」
+    # 在结构上不可能发生。退役名单钉在 `tests/test_signal_archive.py::RETIRED_SIGNAL_NAMES`。
+    "guard.consistency_census": _path("agent_details.GuardBeeSentinel.details.consistency"),
     "guard.adj_factor": _path("agent_details.GuardBeeSentinel.details.adjustment_factor"),
     "guard.macro_adj": _path("agent_details.GuardBeeSentinel.details.macro_adj"),
-    "guard.top_signals_count": _path("agent_details.GuardBeeSentinel.details.top_signals_count"),
+    # v0.45.182：`guard.top_signals_count` 已摘除。v0.45.163 之后它恒等于「本轮
+    # Guard 之前发布过的蜂数」，票内方差为零 —— 不是信号，只会被 `analyze()`
+    # 年年判成「纯标签」占位。它仍是一条**会红**的健康探针（不再恒定 ⇒ 有蜂停发，
+    # 或普查读法被改回排行榜），改挂
+    # `tests/test_distribution_invariants.py::TestGuardCensusCoverage`
+    # （期望值从 `agent_details` 导出，不写死 6 —— 关掉 CodeExecutor 时应得是 5）。
+    # 库里的历史行不改写，只是不再写入新行。
 
     # ── ML 预测 ───────────────────────────────────────────────
     "ml.probability": _path("agent_details.RivalBeeVanguard.details.probability"),

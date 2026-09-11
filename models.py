@@ -353,9 +353,16 @@ class DataQualityChecker:
         """
         批量清洗 Agent 结果列表
 
-        - 过滤 None
-        - 过滤 error 结果
-        - 清洗有效结果
+        - 过滤 None（含 `clean_agent_result` 判定为不可用而返回 None 的）
+        - 清洗保留下来的结果
+
+        ⚠️ **不过滤 error 结果** —— 此处原文曾写「过滤 error 结果」，而函数体
+        从来没有过滤过（v0.45.182 实测：喂一条 `make_error_result` 进去，
+        它带着 `error` 键原样出来）。`QueenDistiller._prepare_dimension_data`
+        正是**依赖**它们留下的：`valid_results` 自己再滤一次给评分用，
+        `all_results` 保留全量给 `dim_status` / `agent_details` 用。
+        这句错话的实际作用是让读到它的人停止检查 —— v0.45.182 的复查差点
+        就被它挡回去。
         """
         if not results:
             return []
