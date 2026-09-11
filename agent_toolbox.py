@@ -14,6 +14,33 @@ MCP 服务器是独立另写的 `alpha_hive_mcp.py`（FastMCP + stdio，8 个
 / 通知原语。两个类因此按「零读者即死」删除（判据见 auto-memory
 `alpha-hive-dead-field.md`）。
 
+v0.45.204 续做**方法粒度**：`GitHubTool` 是活类，但类里的方法不全是活的。
+删掉零读者的 `push` / `create_issue` / `list_branches` / `diff`（及其私有助手
+`_parse_diff_stats`）。两条独立证据、各带正对照：
+
+1. **静态**（`git ls-files | xargs grep`，**别用** `rglob`/`grep -r`——生产 checkout
+   的 `.claude/worktrees/` 下有 14 个嵌套仓库副本会把陈旧代码算成读者）：
+   全仓 `agent_helper.*` 访问**全部**是 `.git`，只碰 4 个成员——
+   `run_git_cmd` 9、`repo_path` 3、`commit` 1+3、`status` 1；被删的四个为 0。
+   三个盲区均已复查：方法名作为字符串（全文件类型，零命中）、仓库外调用者
+   （`~/.claude/scripts/` 与 `mcp-servers/` 五个 submodule，零命中）、
+   动态派发（`report_deployer` / 本模块零 `getattr`/`eval`）。
+2. **运行期**（录制真实部署路径上的 dispatch，覆盖生产与测试两条分支）：
+   实际被调到的只有 `run_git_cmd` / `status` / `commit`——正对照三个全部出现，
+   证明探针真跑到了产线；被删的五个零调用。
+
+`.push()` 不是「暂时没人用」：**有一条并行路径取代了它**——`report_deployer`
+推送走的是 `run_git_cmd("git push origin main")`，绕开本方法。留着就是同一件事
+两种做法。另两个（`list_branches` / `diff`）还是**坏的**：它们无条件读
+`result["stdout"]`，而 `run_git_cmd` 的异常分支返回的 dict 里根本没有这个键
+（实测 `KeyError: 'stdout'`），非仓库目录下则静默返回空结果冒充成功。
+零读者恰恰是这两个 bug 从没被发现的原因。
+
+⚠️ **别把「删了测试不红」当成删它们的理由。** 实测：删**活的** `status`
+（`report_deployer.py:389` 在用）同样零红——本仓测试根本没覆盖 `status`/`push`/`diff`。
+能变红的正对照是 `run_git_cmd` 与 `commit`（各 3 红）。判死靠的是上面两条证据，
+不是测试。
+
 要加 MCP 工具 → `alpha_hive_mcp.py`；要发 Slack → `slack_report_notifier.py`。
 """
 
@@ -30,7 +57,18 @@ class GitHubTool:
     def __init__(self, repo_path: str = None):
         self.repo_path = repo_path or os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__)))
 
-    # 允许的 git 子命令白名单
+    # 允许的 git 子命令白名单。
+    #
+    # ⚠️ **不要按「本类还剩哪些方法」来收窄它。** 它约束的是 `run_git_cmd` 收到的
+    # **字符串**，而调用方是直接下发整条命令的：`report_deployer` 就自己传
+    # `"git push origin main"` / `"git branch -D …"` / `"git fetch origin"`。
+    # v0.45.204 删掉 `push()`/`diff()` 这两个同名方法时，`push`/`diff` 两项**照旧保留**——
+    # 方法没了不等于子命令没人用了，跟着删会打断现役 gh-pages / main 部署链路。
+    #
+    # ⚠️ 已知缺口（v0.45.204 实测，未在本版修）：`report_deployer` 测试模式分支下发的
+    # `git checkout` 与 `git reset` **不在**表里，会被静默拒绝，而其后那句
+    # 「本地 main 已恢复至 origin/main」是无条件 log 的 —— 失败没传导到下游。
+    # 这属另一个改动面，已另开任务，勿在此顺手加项（加了会放宽安全边界且无人验证）。
     _ALLOWED_GIT_CMDS = {
         "status", "log", "diff", "branch", "add", "commit", "push",
         "pull", "fetch", "remote", "show", "tag", "stash", "rev-parse",
@@ -109,52 +147,6 @@ class GitHubTool:
             "details": commit
         }
 
-    def push(self, branch: str = "main") -> Dict[str, Any]:
-        """推送到远程"""
-        result = self.run_git_cmd(f"git push origin {branch}")
-        return {
-            "success": result["success"],
-            "output": result.get("stdout") or result.get("stderr")
-        }
-
-    def create_issue(self, title: str, body: str) -> Dict[str, Any]:
-        """创建 GitHub Issue（需要 gh CLI）"""
-        try:
-            result = subprocess.run(
-                ["gh", "issue", "create", "--title", title, "--body", body],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode == 0:
-                return {"success": True, "issue_url": result.stdout.strip()}
-            else:
-                return {"success": False, "error": result.stderr}
-        except FileNotFoundError:
-            return {"error": "GitHub CLI (gh) not installed"}
-
-    def list_branches(self) -> Dict[str, Any]:
-        """列出分支"""
-        result = self.run_git_cmd("git branch -a")
-        branches = [line.strip() for line in result["stdout"].split("\n") if line.strip()]
-        return {"branches": branches}
-
-    def diff(self, branch1: str, branch2: str) -> Dict[str, Any]:
-        """查看 diff"""
-        result = self.run_git_cmd(f"git diff {branch1}...{branch2}")
-        return {
-            "diff": result["stdout"],
-            "stats": self._parse_diff_stats(result["stdout"])
-        }
-
-    @staticmethod
-    def _parse_diff_stats(diff: str) -> Dict[str, int]:
-        """解析 diff 统计"""
-        lines = diff.split("\n")
-        additions = sum(1 for line in lines if line.startswith("+") and not line.startswith("+++"))
-        deletions = sum(1 for line in lines if line.startswith("-") and not line.startswith("---"))
-        return {"additions": additions, "deletions": deletions, "total_changes": additions + deletions}
-
 
 # ==================== Agent 助手 ====================
 
@@ -181,10 +173,9 @@ class AgentHelper:
         🚀 Agent Toolbox 已就绪
 
         🐙 GitHub
+           - run_git_cmd(cmd) ✓
            - status() ✓
-           - commit(message) ✓
-           - push(branch) ✓
-           - diff(branch1, branch2) ✓
+           - commit(message, paths=…) ✓
         """
 
 

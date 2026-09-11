@@ -153,7 +153,6 @@ class InfoPanel:
 
     def _draw_radar(self, top_y, dim_scores):
         """绘制五维雷达图（纯 Canvas 多边形）"""
-        import math
 
         cx = self.x + self.width // 2
         cy = top_y + 75

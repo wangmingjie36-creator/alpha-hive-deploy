@@ -154,7 +154,8 @@ def _run_main(monkeypatch, tmp_path, payload_fn, tickers="A,B,C,D,E"):
     monkeypatch.setattr(co, "fetch_cboe_full_chain_oi", lambda *a, **k: {})
     monkeypatch.setattr(csf, "_business_date", lambda: "2026-08-26")
     monkeypatch.setattr(csf.time, "sleep", lambda s: None)      # 别真等 0.5s × N
-    import cboe_fetcher, fear_greed
+    import cboe_fetcher
+    import fear_greed
     monkeypatch.setattr(cboe_fetcher.CBOEDailyFetcher, "fetch_all", lambda self: {})
     monkeypatch.setattr(fear_greed, "get_fear_greed", lambda: {"value": 50})
     monkeypatch.setattr(sys, "argv",
@@ -324,7 +325,8 @@ def test_e2e_cdn_stale_ticker_is_backfilled(_real_payload_path, monkeypatch, tmp
     monkeypatch.setattr(co.urllib.request, "urlopen", _net)
     monkeypatch.setattr(csf, "_business_date", lambda: "2026-08-26")
     monkeypatch.setattr(csf.time, "sleep", lambda s: None)
-    import cboe_fetcher, fear_greed
+    import cboe_fetcher
+    import fear_greed
     monkeypatch.setattr(cboe_fetcher.CBOEDailyFetcher, "fetch_all", lambda self: {})
     monkeypatch.setattr(fear_greed, "get_fear_greed", lambda: {"value": 50})
     monkeypatch.setattr(sys, "argv", ["x", "--out", str(tmp_path), "--tickers", "BILI"])
@@ -349,7 +351,8 @@ def test_e2e_manifest_does_not_lie_about_stale(_real_payload_path, monkeypatch, 
                         lambda *a, **k: _Resp(_cboe_body("2026-08-25T16:00:02")))
     monkeypatch.setattr(csf, "_business_date", lambda: "2026-08-26")
     monkeypatch.setattr(csf.time, "sleep", lambda s: None)
-    import cboe_fetcher, fear_greed
+    import cboe_fetcher
+    import fear_greed
     monkeypatch.setattr(cboe_fetcher.CBOEDailyFetcher, "fetch_all", lambda self: {})
     monkeypatch.setattr(fear_greed, "get_fear_greed", lambda: {"value": 50})
     monkeypatch.setattr(sys, "argv", ["x", "--out", str(tmp_path), "--tickers", "BILI"])

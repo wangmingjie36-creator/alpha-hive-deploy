@@ -104,8 +104,11 @@ for exp in opts[:8]:
         p  = ch.puts[ch.puts.strike > 5].copy()
         p['expiry'] = exp
         all_puts.append(p)
-    except:
-        pass
+    except Exception as _err:
+        print(f"  ⚠️  到期日 {exp} 的期权链拉取失败，已跳过：{type(_err).__name__}: {_err}")
+
+if not all_puts:
+    raise SystemExit("✗ 前 8 个到期日的期权链全部拉取失败，无数据可分析（失败原因见上）")
 
 puts_all = pd.concat(all_puts, ignore_index=True)
 

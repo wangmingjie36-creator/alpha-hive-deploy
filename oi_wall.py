@@ -1,4 +1,4 @@
-"""
+r"""
 oi_wall.py
 ==========
 NVDA 完整 OI 墙（Max Pain 图）
@@ -11,7 +11,9 @@ NVDA 完整 OI 墙（Max Pain 图）
 网络：需要连接互联网
 """
 
-import warnings, os, json
+import warnings
+import os
+import json
 from datetime import datetime
 import yfinance as yf
 import pandas as pd
@@ -33,9 +35,17 @@ nvda = yf.Ticker(TICKER)
 
 try:
     current_price = nvda.fast_info["lastPrice"]
-except:
+except Exception as _err:
+    print(f"  ⚠️  fast_info 取价失败（{type(_err).__name__}: {_err}），改用日线收盘")
     hist = nvda.history(period="1d")
-    current_price = float(hist["Close"].iloc[-1]) if not hist.empty else 226.0
+    if hist.empty:
+        # 原先这里兑底到写死的 226.0。current_price 驱动整张图：
+        # 轴范围、ITM/OTM 标注、当前价竖线、标题 —— 用一个陈年常数
+        # 会画出一张**看起来完全正常但是错的**图，没人会发现。
+        raise SystemExit(
+            f"✗ {TICKER} 当前价不可用：fast_info 与日线都没拿到。"
+            f"整张图以它为基准，故直接中止而不用兑底常数。")
+    current_price = float(hist["Close"].iloc[-1])
 
 print(f"  当前价格: ${current_price:.2f}")
 

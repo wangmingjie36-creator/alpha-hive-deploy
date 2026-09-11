@@ -153,7 +153,8 @@ def deploy_static_to_ghpages(reporter):
     try:
         from is_trading_day import filename_is_nontrading_day as _fnt_dep
     except Exception:
-        _fnt_dep = lambda _n: False  # fail-safe：导入失败则不过滤，不误删
+        def _fnt_dep(_n):
+            return False  # fail-safe：导入失败则不过滤，不误删
     files = []
     for f in os.listdir(repo):
         # 非交易日（周末/假日）幽灵报告不部署（_CORE 文件无日期，永不被过滤）
@@ -247,7 +248,8 @@ def deploy_static_to_ghpages(reporter):
     # 防止"连续网络差时中间几天的 dashboard 永久丢失"
     _ghp_queue = os.path.join(repo, ".gh_pages_deploy_log.jsonl")
     try:
-        import json as _json_q, datetime as _dt_q
+        import json as _json_q
+        import datetime as _dt_q
         _status = {
             "timestamp": _dt_q.datetime.utcnow().isoformat() + "Z",
             "date_str": reporter.date_str,

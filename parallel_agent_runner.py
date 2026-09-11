@@ -40,12 +40,12 @@ class AgentTiming:
 class ParallelAgentRunner:
     """
     两阶段并行 Agent 执行引擎
-    
+
     Phase 1 (并行): ScoutBee, OracleBee, BuzzBee, ChronosBee, RivalBee, CodeExecutor
                     这些 Agent 互不依赖，可以安全并行
     Phase 2 (并行): GuardBee, BearBee
                     依赖 Phase 1 的信息素板数据
-    
+
     线程安全：
     - PheromoneBoard.publish() 已有锁保护
     - 每个 Agent 的 _prefetched_stock / _prefetched_context 是只读的
@@ -85,23 +85,23 @@ class ParallelAgentRunner:
                 on_agent_done: Optional[Callable] = None) -> List[Dict]:
         """
         对单个 ticker 运行所有 Agent（两阶段并行）
-        
+
         Args:
             ticker: 股票代码
             agents: {agent_name: agent_instance} 字典
             on_agent_done: 可选回调，每个 Agent 完成时调用 (agent_name, result, timing)
-        
+
         Returns:
             所有 Agent 结果的列表（保持与原始串行接口兼容）
         """
         all_results = []
-        
+
         # ===== Phase 1: 并行执行独立 Agent =====
         phase1_agents = {
             name: agent for name, agent in agents.items()
             if name in self.PHASE_1_AGENTS
         }
-        
+
         if phase1_agents:
             p1_results = self._run_phase(
                 phase=1,
@@ -135,13 +135,13 @@ class ParallelAgentRunner:
                   on_agent_done: Optional[Callable] = None) -> Dict[str, List[Dict]]:
         """
         批量扫描多个 ticker（ticker 之间串行，Agent 之间并行）
-        
+
         Args:
             tickers: 标的列表
             agents_factory: 工厂函数，返回 {agent_name: agent_instance}
             on_ticker_done: 可选回调 (idx, total, ticker, results)
             on_agent_done: 可选回调 (agent_name, result, timing)
-        
+
         Returns:
             {ticker: [agent_results]}
         """
@@ -170,7 +170,7 @@ class ParallelAgentRunner:
                    on_done: Optional[Callable] = None) -> List[Dict]:
         """运行一个阶段的所有 Agent（并行）"""
         results = []
-        
+
         if not agents:
             return results
 
