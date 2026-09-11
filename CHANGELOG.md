@@ -380,10 +380,47 @@ MSFT 同型：显示 500→450，真值 500→495。
   是 CLAUDE.md 写明的设计性变红；两条 `test_zero_weight_invariant` 是 `rglob`
   扫进 `.claude/worktrees/` 导致的 **60s 超时**（v0.45.186 占位正在修），非断言失败。
 
+### 二次检查（同版补修，发现 2 个自己引入的问题）
+
+**① 看板标签与数字不同源（本次引入，已修）。** `dashboard_renderer` 的近端磁吸卡片
+副标题读的是 `expiration_dates`（主链 DTE≥7 列表），而数字换源到了 ≤7 天口径 ——
+换源前两者恰好同源（一起错），换源后就会出现「$225」旁边标着 09-18/09-21/09-23，
+而那三个到期日一张合约都没参与这个数。改为读 `max_pain.expiries_used`。
+⚠️ 顺带修掉一个更早就有的错：旧文案 `近 {len} 周到期` 数的是**到期日个数**却写成
+**周数**（NVDA 那三个到期日前后只跨 5 天，会被说成「近 3 周」）。
+现文案 `≤7天 · 3 个到期日`，两个量都按实际算。
+
+**② 口径字段加错了地方（本次引入，已撤）。** 原本把 `max_pain_window_days` /
+`max_pain_expiries` 加进 `_pub_details`，但那个 dict 去的是**信息素板**，
+而板上的 `max_pain*` **零读者**（既有的 `max_pain_dist_pct` 本身就是死字段），
+且板有 80 条上限并按分数淘汰。已撤回；审计轨迹本就走 `AgentResult.details` 里的
+**完整 max_pain dict**，那份才落进 `.swarm_results_*.json` 并被看板与报告读到
+（已实测确认 `near_mp_window=7` / `near_mp_expiries=[...]` 一路到达渲染层）。
+
+**③ 接缝实测（我的测试全喂手搓 dict，接不上也发现不了）。** 用 30 份真实
+`cache/options_snapshot_*_2026-09-10.json`（快照命中时 `analyze` 原样 return 的就是它）
+逐只过 `_calc_max_pain`：**29 只算出，1 只（BILI）返回 None**。
+BILI 无周权（最近到期 DTE=8），**且旧口径当天也是 None** ⇒ 不是回归。
+
+**④ 复查未采纳的项（如实记录）**：`int(oi or 0)` 遇非数值字符串会抛到外层
+`except` ⇒ 整只标的不可用 + warning，属可观测的降级，未加额外分支；
+`window_days` 的 `isinstance(int)` 对 `bool` 为真，但该值由本仓自己写入，未加 bool 守卫。
+
+守卫相应扩到 **12 条**，变异校验 **8/8 全部被抓住**（新增：看板标签改回读主链 /
+口径字段塞回信息素板）。⚠️ 新增的看板用例一度被 conftest 的离线守卫拦下——
+`_detail` 缺价格时会退回打 yfinance，夹具补上 ScoutBee price 后通过；
+**那条守卫是对的，不该给它开白名单。**
+
 ### 遗留
 
 线上 09-10 那批已发布报告仍是旧口径的数（NVDA 仍显示 $200），本次只改源码未重新
 生成部署——对外发布动作待用户确认。
+
+⚠️ **与本次无关但同跑时发现**：`tests/test_no_crewai_dependency.py` 也有
+`rglob` 扫进 `.claude/worktrees/` 的毛病（扫到别的 session worktree 里那份同名测试
+文件本身就含 "crewai" 字样 ⇒ 只要存在任一别的 session 的 worktree 就红，
+当前有 10+ 个，两轮全量均红）。v0.45.186 修的是 `test_zero_weight_invariant.py`
+的同一个物种，**同族还没数干净**。
 
 ## [0.45.187] — 2026-09-11 — 清掉 46 个进了 git 跟踪的 iCloud 重名副本；09-09 的学习样本权重曾凭空翻倍
 

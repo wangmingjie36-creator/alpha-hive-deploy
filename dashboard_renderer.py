@@ -606,13 +606,21 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     near_call_total = sum(near_call_by_strike.values())
     near_put_total = sum(near_put_by_strike.values())
     near_pc = (near_put_total / near_call_total) if near_call_total > 0 else None
-    # v0.26.1: 近端 Max Pain（基于最近 3 个到期日，真正的磁吸目标价）
-    # 全链 Max Pain（max_pain 字段）含远期 LEAPS，磁吸效应弱
-    # 近端 Max Pain（oracle.max_pain dict）来自 OptionsAgent 基于 expiration_dates 计算
+    # 近端 Max Pain（`oracle.max_pain` dict）：v0.45.188 起口径 = **≤7 天内全部到期日**
+    # 聚合，源自 `full_chain_oi` 的完整矩阵，见 `oracle_bee._calc_max_pain`。
+    # ⚠️ 这里原注释写「基于最近 3 个到期日」「基于 expiration_dates 计算」，两句都不成立：
+    # 旧实现取的是主链里最早的那个到期日，而主链按设计排除 DTE<7。
+    # 全链 Max Pain（`max_pain` 字段，下方另取）含远期 LEAPS，磁吸效应弱，是另一个量。
     _near_mp_dict = oracle.get("max_pain") or {}
     near_max_pain = _near_mp_dict.get("max_pain") if isinstance(_near_mp_dict, dict) else None
     near_max_pain_pct = _near_mp_dict.get("distance_pct") if isinstance(_near_mp_dict, dict) else None
-    near_expiry_dates = oracle.get("expiration_dates") or []  # 近端到期日列表
+    # v0.45.188：给近端 Max Pain 配标签用的到期日，必须取**实际算出那个数的那几个**
+    # （`max_pain.expiries_used`），不能用 `expiration_dates` —— 后者是
+    # `_select_expiries` 截断后的 DTE≥7 列表，与 ≤7 天口径的 Max Pain 不是一回事。
+    # 换源前两者恰好同源（都错），换源后就会一个说 $225、旁边标着另外三个到期日。
+    near_mp_expiries = _near_mp_dict.get("expiries_used") if isinstance(_near_mp_dict, dict) else None
+    near_mp_window = _near_mp_dict.get("window_days") if isinstance(_near_mp_dict, dict) else None
+    near_expiry_dates = oracle.get("expiration_dates") or []  # 主链到期日（DTE≥7，非近端）
     # v0.45.54：`or 0` 把「全链 OI 采集失败」渲染成「一张持仓都没有」——
     # 对活跃标的是不可能事件。上游现返回 {"data_available": False}（见
     # options_analyzer._fetch_full_chain_oi），这里据此置 None。
@@ -710,6 +718,8 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
         "near_max_pain": near_max_pain,
         "near_max_pain_pct": near_max_pain_pct,
         "near_expiry_dates": near_expiry_dates,
+        "near_mp_expiries": near_mp_expiries,
+        "near_mp_window": near_mp_window,
         # v0.26.2 近端 OI 墙（≤30 天到期）
         "near_call_walls": near_call_walls,
         "near_put_walls": near_put_walls,
@@ -1877,7 +1887,8 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
             # 远期全链 Max Pain 作为参考次要显示
             _near_mp = _detd.get("near_max_pain")
             _near_mp_pct = _detd.get("near_max_pain_pct")
-            _near_exps = _detd.get("near_expiry_dates", [])
+            _near_exps = _detd.get("near_mp_expiries") or []
+            _near_win = _detd.get("near_mp_window")
 
             # 主显示：近端 MP
             if _near_mp:
@@ -1887,8 +1898,13 @@ def _build_deep_analysis_html(all_tickers_sorted, opp_by_ticker, swarm_detail,
                     _mp_color = "#28a745" if _near_mp_pct > 1 else ("#dc3545" if _near_mp_pct < -1 else "#94a3b8")
                     _mp_main_str += f' <span style="color:{_mp_color};font-size:.78em">{_mp_arrow}{_near_mp_pct:+.1f}%</span>'
                 # 到期日数量提示
+                # ⚠️ 旧文案是 `近 {len} 周到期` —— 数的是**到期日个数**却写成**周数**
+                # （NVDA 09-10 那三个到期日前后只跨 5 天，却会被说成「近 3 周」）。
+                # 现在两个量都按实际算：窗口天数 + 参与聚合的到期日个数。
                 _exp_label = (
-                    f"近 {len(_near_exps)} 周到期" if len(_near_exps) > 0 else "近端到期"
+                    f"≤{_near_win}天 · {len(_near_exps)} 个到期日"
+                    if _near_win and _near_exps else
+                    (f"{len(_near_exps)} 个到期日" if _near_exps else "近端到期")
                 )
             else:
                 # 回退到全链 MP
