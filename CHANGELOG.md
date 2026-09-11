@@ -5,7 +5,116 @@
 
 ---
 
-## [0.45.186] — 2026-09-11 — 占位（进行中：test_zero_weight_invariant 的 rglob 扫进 .claude/worktrees/，生产 checkout 恒红）
+## [0.45.186] — 2026-09-11 — 只有生产 checkout 看得见的红：守卫扫进了 10 个嵌套 worktree
+
+### Fixed —— `test_zero_weight_invariant` 的枚举越过了仓库边界
+
+v0.45.176 那条「生产代码不许把 `adapted_weights` 传回 `QueenDistiller`」的守卫，
+用裸 `root.rglob("*.py")` 枚举生产调用点。在生产 checkout `~/Desktop/Alpha Hive`
+上，`.claude/worktrees/` 下挂着 **10 个嵌套 git worktree**，每个都是一份完整的
+仓库副本，停在各自的版本上。于是：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| `rglob("*.py")` 走到的文件 | **22037** | — |
+| 实际枚举的文件 | 21864 | **165**（`git ls-files` 338 减 `tests/`/`experiments/`） |
+| 扫到的 `QueenDistiller(...)` 调用点 | **227** | **2** |
+| 其中落在 `.claude/worktrees/` 里 | **225** | **0** |
+| 报出的违规 | **5** | **0** |
+| 耗时 | **81.6s** | **1.3s** |
+
+5 条违规**全部**来自别的 worktree 里停留在 v0.45.176 之前的
+`alpha_hive_daily_report.py`。真正的生产文件是干净的
+（`alpha_hive_daily_report.py:663` 只有 `enable_llm` / `ml_model`）。
+
+两个放大器：
+
+1. **`_SKIP_TOP` 对嵌套树整个失效。** 它判的是 `rel.parts[0]`，而越界文件的
+   `parts[0]` 是 `.claude` —— 于是 225 条命中里绝大多数是**别的 worktree 的
+   测试文件**（`tests/test_queen_distiller.py` 一类），被当成生产代码审计。
+2. **60s 的 `--timeout` 把断言失败伪装成 Timeout。** 那轮要跑 81.6s，
+   全套运行时报出来的是 `Timeout`，守卫精心写的失败信息一个字都到不了人眼前。
+
+⭐ **真正要命的不是红，是红的可见性是反的。** 这条守卫在 **10 个 worktree 里
+全是绿的**（worktree 里没有嵌套 worktree），只在**跑每日扫描的那一台**上红；
+而那台机器没人跑测试。写它的人看到的是全绿。这是 MEMORY
+`alpha-hive-test-writes-production`「在没有病灶的环境里测防御＝没测」的镜像：
+不是防御没被测到，是**病灶只长在没人看的地方**。
+
+⭐ **同一物种的第二次。** v0.45.150 已经在 `test_paths_not_frozen_at_import.py`
+上修过一模一样的毛病（`rglob` 扫进 vendored 树，15349 vs 327），结论就是
+「改用 `git ls-files`」。v0.45.176 在一个新守卫里**又写了一份裸 rglob**。
+写下教训对「下一个人另起一份实现」无效 —— 只能把实现收成一份。
+
+### Added
+
+- **`tests/_repo_files.py`：「本仓自己的 .py 有哪些」的唯一实现。**
+  `git ls-files` 优先（口径可复现、天然排除未跟踪与嵌套 worktree），
+  子进程**两条**失败路径各堵一次（不存在会**抛**、不是仓库会**返回** 128），
+  回退 rglob。两条分支的输出都过同一道 `_is_ours()`（点号目录 + vendored）。
+  已知取舍：git 分支只列被跟踪的文件，**全新未提交**的生产 .py 扫不到
+  （已跟踪文件的未提交修改照常扫得到 —— 只拿 git 要路径，内容从磁盘读）。
+- **`test_scan_excludes_nested_checkouts`（带病灶的 tmp 树夹具）。**
+  造 `.claude/worktrees/<name>/alpha_hive_daily_report.py` + 同树下的
+  `tests/test_queen_distiller.py`，断言两者都不被报出来。
+  **必须用 tmp 树**：病灶只存在于生产 checkout，10 个 worktree 里一个都没有，
+  在真仓库上跑这条断言在 worktree 里恒真。
+- `test_pathology_fixture_actually_bites`：反向自证夹具确实造出了会被旧写法
+  命中的东西 —— 否则上一条可能只因夹具没写出匹配项而恒绿。
+- `test_git_branch_applies_the_same_filter_as_the_fallback`：**真建一个 tmp git
+  仓库**，提交一个 `.claude/hooks/theirs.py`，钉住 git 分支也过 `_is_ours`。
+  ⭐ 加这条是因为不加的话，git 分支上那句 `if _is_ours(x)` 是**等价变异**
+  （本仓今天没有被跟踪的 .py 落在点号目录下，删掉它 338 还是 338，全套照绿）。
+  MEMORY 的纪律是「举不出能让它变红的变异就别加」—— 这里造得出来，
+  于是造出来，而不是留一行测不到的代码。
+  口径分歧不是假想：`.claude/` **被跟踪**（`.claude/launch.json` 在库里）
+  且**不在 .gitignore**，哪天有人提交 `.claude/hooks/x.py`，
+  git 分支会扫到、回退分支不会，而哪条生效取决于这台机器有没有装 git。
+
+### Changed
+
+- `test_paths_not_frozen_at_import.py` 的 `_own_python_files` 改为**委托**
+  （`REPO_ROOT` 在调用时取，原有的 monkeypatch 注入 tmp 树的测试全部不动）。
+  抽走不是为了去重好看，是为了让下一个人**没机会**再写第三份。
+
+### Fixed —— 两处说谎的注释（同版顺手）
+
+- `test_enumeration_actually_found_something` 的「变红的变异」写的是
+  「把 `rglob("*.py")` 写成 `rglob("*.pyx")`」—— 枚举已经不用 rglob，
+  这条变异**做不出来**。改成 `QueenDistiller` → `QueenDistillerX`。
+- 类 docstring 的「扫全仓每一个非测试 .py」改为「扫本仓被 git 跟踪的」。
+
+（MEMORY `alpha-hive-board-eviction`：说谎的 docstring 危害不在于它错，
+在于它让人停止检查。）
+
+### 验证
+
+- **生产 checkout 实测**（用修复后的扫描器 × 有病灶的那棵树，
+  `ALPHA_HIVE_HOME` 指向沙箱，生产产物零改动）：227→2 调用点、
+  225→0 越界、5→0 违规、81.6s→1.3s。
+- **变异校验 7/7 全红，等价变异 0 个**，`collected = 102` 七轮不变，
+  每轮清 `__pycache__`、锚点唯一性先校验、还原后逐轮复验全绿；
+  校验器**先断言基线全绿再开跑**（v0.45.177 的教训：pyproject 的 `-x`
+  会让「没跑」长得和「通过」一模一样）。
+- ruff：worktree 基线 46，改动后仍 46，三个改动文件零命中。
+
+### 未修（留档，不是漏了）
+
+全仓还有 **2 个守卫**在做同样的全树枚举，**当前都是绿的**（latent，不是 active）：
+
+| 守卫 | 枚举方式 | 生产上扫到 | 其中在 `.claude/` 下 | 现状 |
+|---|---|---|---|---|
+| `tests/test_no_fake_price.py:37` | `ROOT.rglob("*.py")` | 1822 | **1669（92%）** | 绿 |
+| `tests/test_no_crewai_dependency.py:61` | `os.walk(PROJECT_ROOT)` | 4336 | **3605（83%）** | 绿 |
+
+它们绿只是因为嵌套 worktree 里眼下没有 `price = 100.0` 或 `import crewai`。
+**没有一条机制阻止它们明天变红**，且变红时同样只有生产 checkout 看得见。
+没有顺手一起改，是因为每个守卫都要单独重做变异校验（判据是 per-guard 的）；
+共享实现已经就位，改法是 `own_python_files(ROOT)[0]` 加各自现有的排除清单。
+
+其余用 `.glob()` 的守卫（`test_rival_bee_peer_features` / `test_pheromone_db_path_hook`
+/ `test_yf_gate` / `test_pytestmark_placement` / `test_no_invisible_prod_data_skips`）
+**不下钻**，天然到不了 `.claude/worktrees/`，无需改动。
 
 ## [0.45.185] — 2026-09-11 — 工作区脏就打 warning；顺带一个「单测各自对、组合起来错」的 bug
 
