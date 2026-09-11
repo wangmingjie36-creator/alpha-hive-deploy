@@ -146,8 +146,41 @@ class TestAsOfHistory:
         assert fm._asof_history(_YF, "^TNX", "2026-08-27") is None
 
 
-@pytest.mark.network  # 走真实取数路径（yfinance/Treasury），离线必挂；CI 排除，本机照跑
 class TestMacroContextUsesSnapshot:
+
+    # v0.45.207：本类不再标 `network`（接 v0.45.196）。三条取数腿，探针实测：
+    #   `_fetch_macro_data:416` yfinance 7 symbol ＋ :916 板块 ETF（`_fetch_one`）
+    #   `_fetch_macro_data:456` → `cboe_vix._download`
+    #   `_fetch_macro_data:566` → `_fetch_fred_series` → api.stlouisfed.org
+    # 本文件的 `_clean` 每条测试前后都调 `set_macro_snapshot(None)`，而它会清空
+    # `fred_macro._CACHE` —— 所以**每条**测试都付全额取数代价（实测 11~13s），
+    # 不像别处只有第一条付。
+    #
+    # 断言全部建立在自己 monkeypatch 出来的值上（`_same_day_macro_data` /
+    # `_asof_history` / 快照），没有一条读实时行情，出网纯属顺路副作用。
+    @pytest.fixture(autouse=True)
+    def _offline_sources(self, stub_yfinance, stub_cboe_vix, stub_fred):
+        """三条取数腿全部显式钉死成离线。"""
+
+    @pytest.fixture
+    def live_same_day(self, monkeypatch):
+        """让「当日非 yfinance 源」供上数据，使**实时分支**真的被走到。
+
+        必须有它：`_fetch_macro_data` 在 `if not data: return base`
+        （fred_macro.py:472）处早退，而 conftest 的 autouse
+        `_block_same_day_macro` 把 `_same_day_macro_data` 钉成 `({}, {})`。
+        全部源钉死后 `data` 为空 ⇒ 恒走降级 ⇒ `as_of_mode` 恒为 `fallback`。
+
+        这不是「为了让测试变绿而喂数据」：这两条测试守的就是**实时口径**的标签
+        语义，降级分支下它们要么恒 skip、要么断言退化成恒真
+        （`"fallback" != "backfill"` 永远成立）。值是合成的、刻意不带 `@` 后缀
+        （那是补跑口径的标记，本类有断言禁止它出现在实时口径里）。
+        """
+        monkeypatch.setattr(fm, "_same_day_macro_data", lambda as_of=None: (
+            {"TNX": {"last": 4.67, "prev": 4.65, "change_pct": 0.04},
+             "SPX": {"last": 771.10, "prev": 766.08, "change_pct": 0.66}},
+            {"TNX": "treasury_gov", "SPX": "finnhub:SPY"}))
+
     def _patch(self, monkeypatch, *, close=4.5):
         """把 yfinance 取数替换掉，只验快照逻辑，不打网。"""
         rows = [(dt.date(2026, 8, 26), close), (dt.date(2026, 8, 27), close)]
@@ -173,7 +206,7 @@ class TestMacroContextUsesSnapshot:
         assert "2026-08-27" in r["data_source"], "data_source 必须写明口径日"
         assert r["data_source"] != "yfinance", "补跑标成实时口径会误导读者"
 
-    def test_no_snapshot_keeps_live_semantics(self, monkeypatch):
+    def test_no_snapshot_keeps_live_semantics(self, monkeypatch, live_same_day):
         """回归：不装快照时不得走补跑取数路径，标签也不得写成补跑。
 
         v0.45.92 更新：原先这里断言 `as_of is None` —— 那是拿"哨兵为空"
@@ -187,14 +220,16 @@ class TestMacroContextUsesSnapshot:
         fm.set_macro_snapshot(None)
         r = fm.get_macro_context()
         assert called["n"] == 0, "未装快照却走了 as_of 取数路径"
-        assert r.get("as_of_mode") != "backfill", "未装快照却自称补跑口径"
+        # v0.45.207：`!= "backfill"` 在降级下恒真（fallback 也满足），
+        # 故连同正向一起断言 —— 要的是实时口径，不是「只要不是补跑就行」。
+        assert r.get("as_of_mode") == "realtime", "未装快照时应为实时口径"
         # 反向：实时口径绝不能带上补跑才有的标签，否则又是一个假标签
         assert "cloud_snapshot" not in str(r.get("data_source", "")), \
             "实时口径不得写 cloud_snapshot"
         assert "@" not in str(r.get("data_source", "")), \
             "实时口径的 data_source 不该带 @日期 后缀"
 
-    def test_no_snapshot_still_stamps_a_date(self, monkeypatch):
+    def test_no_snapshot_still_stamps_a_date(self, monkeypatch, live_same_day):
         """实时口径也要有日期戳 —— 这是 v0.45.92 补上的那件事本身。
 
         时钟冻在 2026-09-01 17:00 ET（定时任务的真实时点，已收盘），
@@ -207,9 +242,12 @@ class TestMacroContextUsesSnapshot:
         monkeypatch.setattr(fm, "_asof_history", lambda *a, **k: None)
         fm.set_macro_snapshot(None)
         r = fm.get_macro_context()
-        if r.get("as_of_mode") == "fallback":
-            import pytest as _p
-            _p.skip("宏观取数整体降级，本条只测非降级路径")
+        # v0.45.207：原先这里是 `if fallback: skip(...)`。`live_same_day` 之后
+        # 降级分支已不可达，那条 skip 就成了「这条没验」伪装成「这条没问题」
+        # （CLAUDE.md 的 skip 判据）。改成断言：真降级了要**红**。
+        assert r.get("as_of_mode") != "fallback", (
+            "宏观整体降级了——实时分支没走到，本条断言会退化成恒真；"
+            "检查 live_same_day 是否仍然供得上 data（fred_macro.py:472 的早退）")
         assert r.get("as_of_mode") == "realtime"
         assert r.get("as_of") == "2026-09-01"
 
@@ -247,7 +285,14 @@ class TestSameDayWithoutYfinance:
     （FRED 滞后 1–2 天，当日 17:00 ET 的定时任务等不到它）。
     """
 
-    @pytest.mark.network  # 打真实外部端点，离线必挂；CI 排除，本机照跑
+    # v0.45.207：原先其中三条各标一个 `network`。marker 去掉，改钉源——
+    # 理由同 `TestMacroContextUsesSnapshot` 那段。挂在类上而不是那三条上：
+    # 其余几条本就不出网，多钉一层不改变其行为，却能防止以后类里新增测试又漏出去。
+    @pytest.fixture(autouse=True)
+    def _offline_sources(self, stub_yfinance, stub_cboe_vix, stub_fred):
+        """三条取数腿全部显式钉死成离线。"""
+
+
     def test_same_day_prefers_non_yfinance(self, monkeypatch):
         monkeypatch.setattr(fm, "_same_day_macro_data", lambda as_of=None: (
             {"TNX": {"last": 4.67, "prev": 4.67, "change_pct": 0.0},
@@ -292,7 +337,6 @@ class TestSameDayWithoutYfinance:
         _REAL_SAME_DAY(None)
         assert called["n"] == len(fm._ETF_PROXY)
 
-    @pytest.mark.network  # 打真实外部端点，离线必挂；CI 排除，本机照跑
     def test_real_2y_beats_the_5y_approximation(self, monkeypatch):
         """真 2Y 必须压过 `5Y + 0.15` 近似 —— 那个近似会**错判曲线档位**。
 
@@ -312,7 +356,6 @@ class TestSameDayWithoutYfinance:
         assert r["yield_spread"] == 47.0
         assert r["yield_curve"] == "normal"
 
-    @pytest.mark.network  # 打真实外部端点，离线必挂；CI 排除，本机照跑
     def test_falls_back_to_approximation_and_labels_it(self, monkeypatch):
         """财政部不可得时仍可用近似，但**必须标出来**。"""
         monkeypatch.setattr(fm, "_same_day_macro_data", lambda as_of=None: (

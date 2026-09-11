@@ -306,6 +306,23 @@ def stub_http_gate(monkeypatch):
                         _raise_offline("http_gate.urlopen_gated"))
 
 
+@pytest.fixture
+def stub_fred(monkeypatch):
+    """`fred_macro._load_fred_key` → `""`（于是 FRED 整段被跳过）。
+
+    契约：`_fetch_macro_data` 里写的就是 `if fred_key:` —— **没有 key 就不取
+    FRED**，`fred_data` 保持 `{}`。所以这里钉的是"拿不到 key"，不是伪造一份
+    观测；下游看到的形态与真实无 key 环境完全一致。
+
+    ⚠️ 钉 key 而不是钉 `_fetch_fred_series`，因为 `_load_fred_key` 读的是
+    `~/.alpha_hive_fred_key`（**真实 home**，不受 `ALPHA_HIVE_HOME` 隔离）与
+    `FRED_API_KEY` 环境变量。于是同一条测试在有 key 的开发机上打 FRED、
+    在 CI 上不打 —— 两台机器跑的是两条分支。钉死它顺带把这个环境依赖也去掉了。
+    """
+    import fred_macro
+    monkeypatch.setattr(fred_macro, "_load_fred_key", lambda: "")
+
+
 def _raise_offline(what):
     def _f(*_a, **_k):
         raise _OfflineInTests(f"{what} 在测试里被显式钉死（tests/conftest.py 源桩）")

@@ -21,7 +21,9 @@ marker 原文写的契约是「打真实外部端点，离线必挂」。v0.45.1
 （用户处 36s），而 addopts 的 `--timeout=60` 正卡在中间。
 随机变红与真实回归无法区分 —— 信号变成噪音。
 
-v0.45.196 已按此清掉 `test_pipeline.py` 的两个类（12 条 → 0 条）。
+v0.45.196 清掉 `test_pipeline.py` 两个类（12 → 0）；
+v0.45.207 清掉余下的 `test_macro_snapshot.py`(7) 与
+`test_dashboard_renderer.py`(4)。**默认选择集现在 0 条出网。**
 本文件的作用是**不让它悄悄长回来**：marker 是默认离线的唯一豁免口，
 新增一个就等于新增一条红绿不由代码决定的测试。
 
@@ -57,19 +59,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用
 #: / `stub_http_gate` / `stub_reddit` / `stub_vixcentral`），参考
 #: `test_pipeline.py::TestBuildSwarmReport::_offline_sources` 的写法。
 #:
-#: 表里这 8 条的现状（v0.45.196 探针实测）：
-#:   · 前 5 条**确实出网**，但都是顺路副作用，断言不依赖实时值 —— 可按同样
-#:     手法清掉，本版未动（不在本次改动范围内，留给后续单独一版）。
+#: v0.45.207 起只剩 3 条（v0.45.196 时是 8 条）：
 #:   · `test_offline_transport_gate::test_network_marked_tests_are_exempt`
 #:     是闸自身的自证，marker 是它的**被测对象**，必须留。
-#:   · 另 2 条（options_analyzer / treasury_yields）实测**没有**真的出网，
-#:     marker 属于过度标注，同样留待后续核实后再清。
+#:   · 另 2 条（options_analyzer / treasury_yields）探针实测**并没有**真的出网
+#:     （标错了）。留着不是因为该留，是因为核实它们各自该配什么源桩需要单独一版；
+#:     它们不产生 flake，优先级低于已清掉的 23 条。
 _KNOWN_NETWORK_MARKED = {
-    "test_dashboard_renderer.py::TestRenderDashboard",
-    "test_macro_snapshot.py::TestMacroContextUsesSnapshot",
-    "test_macro_snapshot.py::test_falls_back_to_approximation_and_labels_it",
-    "test_macro_snapshot.py::test_real_2y_beats_the_5y_approximation",
-    "test_macro_snapshot.py::test_same_day_prefers_non_yfinance",
     "test_offline_transport_gate.py::test_network_marked_tests_are_exempt",
     "test_options_analyzer.py::test_analyze_survives_none_gex",
     "test_treasury_yields.py::test_caches_within_ttl",

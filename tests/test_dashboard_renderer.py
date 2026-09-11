@@ -22,8 +22,25 @@ class TestDashboardImport:
 
 # ==================== render_dashboard_html 测试 ====================
 
-@pytest.mark.network  # 走真实取数路径（yfinance/Treasury），离线必挂；CI 排除，本机照跑
 class TestRenderDashboard:
+
+    # v0.45.207：本类不再标 `network`（接 v0.45.196）。它断言的是渲染出来的
+    # HTML（字符串非空、方向标签中文化、自定义 CSS 注入、能读 swarm_results
+    # 文件），没有一条依赖实时行情。出网有两条腿，探针实测：
+    #   · `render_dashboard_html:2381` → `fred_macro.get_macro_context()`
+    #     （只有本类第一条测试付代价，其余吃 `fred_macro._CACHE`）
+    #   · `render_dashboard_html` → `_detail()`（dashboard_renderer.py:548）
+    #     → `yf_gate` → `yfinance.Ticker(...).history("5d")` 逐票补价，
+    #     **每条测试都走**，一条测试里调 4 次
+    #
+    # 这条曾是全套最慢的一条：`test_renders_html_string` 实测 30.3s，
+    # 是下一个要撞上 `--timeout=60` 的候选。
+    #
+    # `_detail` 的取价包在 `except Exception: pass` 里（注释写明"取价失败绝不能
+    # 拖垮仪表板渲染与部署"），所以钉死 yfinance 后它就是产线上限流时的真实形态。
+    @pytest.fixture(autouse=True)
+    def _offline_sources(self, stub_yfinance, stub_cboe_vix):
+        """渲染会走宏观 + 逐票补价两条取数腿，显式钉死成离线。"""
 
     @pytest.fixture
     def minimal_report(self):

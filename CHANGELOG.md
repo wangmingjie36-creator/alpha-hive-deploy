@@ -5,7 +5,88 @@
 
 ---
 
-## [0.45.207] — 2026-09-11 — 占位（进行中：清掉默认测试里剩余 11 条出网 —— macro_snapshot 7 + dashboard_renderer 4）
+## [0.45.207] — 2026-09-11 — 默认测试出网清零：剩余 11 条也清掉，并撤掉一条被我自己造出来的 skip
+
+接 v0.45.196（那版清掉 `test_pipeline.py` 的 12 条）。本版清掉余下 11 条，
+**默认选择集（`-m "not integration"`）现在 0 条出网。**
+
+### Fixed — `test_dashboard_renderer.py`：4 条，30.3s → 0.78s（全文件）
+
+两条取数腿：`render_dashboard_html:2381` → `get_macro_context()`，以及
+`render_dashboard_html` → `_detail()`（dashboard_renderer.py:548）→ `yf_gate`
+→ `yfinance.Ticker(...).history("5d")` 逐票补价（**每条测试都走，一条调 4 次**）。
+挂 `stub_yfinance` + `stub_cboe_vix`。`test_renders_html_string` 此前是全套最慢的
+一条（30.3s），是下一个要撞 `--timeout=60` 的候选。
+
+### Fixed — `test_macro_snapshot.py`：7 条，44.3s → 0.5s（全文件）
+
+三条腿，第三条是 v0.45.196 没遇到的 **FRED**：
+
+    _fetch_macro_data:416  yfinance 7 symbol ＋ :916 板块 ETF（_fetch_one）
+    _fetch_macro_data:456  → cboe_vix._download
+    _fetch_macro_data:566  → _fetch_fred_series → api.stlouisfed.org
+
+本文件每条测试都付全额代价（不像别处只有第一条付）：它的 `_clean` fixture
+每条测试前后都调 `set_macro_snapshot(None)`，而那会清空 `fred_macro._CACHE`。
+
+### Added — `tests/conftest.py::stub_fred`（可复用源桩）
+
+钉 `_load_fred_key` → `""`，契约是 `_fetch_macro_data` 自己写的 `if fred_key:`
+（没 key 就整段跳过）。**刻意钉 key 而不是钉 `_fetch_fred_series`**：
+`_load_fred_key` 读 `~/.alpha_hive_fred_key`（**真实 home，不受 `ALPHA_HIVE_HOME`
+隔离**）与 `FRED_API_KEY` 环境变量，于是同一条测试在有 key 的开发机上打 FRED、
+在 CI 上不打 —— 两台机器跑的是两条分支。钉死它顺带消掉这个环境依赖。
+
+### ⚠️ Fixed — 我自己造出来的一条 skip，当场撤掉
+
+把三条腿全钉死后，`test_no_snapshot_still_stamps_a_date` **开始恒 skip**
+（19 passed → 18 passed + 1 skipped）。根因：`_fetch_macro_data` 在
+`if not data: return base`（fred_macro.py:472）早退，而 conftest 的 autouse
+`_block_same_day_macro` 已把 `_same_day_macro_data` 钉成 `({}, {})` ——
+源全钉死后 `data` 恒空 ⇒ 恒降级 ⇒ 那条测试自带的
+`if as_of_mode == "fallback": skip(...)` 恒中。
+
+**这正是 CLAUDE.md skip 判据要治的形状，而且是我自己制造的**：
+「把 11 条 flaky 换成 1 条恒 skip」不是修好了，是把噪音换成了静音。处置：
+
+1. 新增 `live_same_day` fixture 供上合成的当日非 yfinance 数据，让**实时分支
+   真的被走到**（值刻意不带 `@` 后缀 —— 那是补跑口径标记，本类有断言禁止它
+   出现在实时口径里）。
+2. 那条 `skip` 改成**断言**：真降级了要红，不许再渲染成「没问题」。
+3. 顺带收紧同类的一条恒真断言：`test_no_snapshot_keeps_live_semantics` 原本
+   断言 `as_of_mode != "backfill"`，而降级值 `"fallback"` 也满足它 ——
+   改为正向断言 `== "realtime"`。
+
+⚠️ 记一笔口径：19 passed 是**改动前后同一个数**，不是"多修了一条"。
+
+### Changed — 棘轮白名单 8 → 3
+
+`tests/test_network_marker_discipline.py` 的 `_KNOWN_NETWORK_MARKED` 缩到 3 条。
+**它的「白名单过期」那条断言在本版第一次真正发挥作用**：marker 一清掉它就报
+「已不存在 5 条」，逼着表跟着缩 —— 这正是当初为它写反向断言的理由
+（只有子集语义时，表会悄悄退化成历史快照）。
+
+剩余 3 条：`test_offline_transport_gate::test_network_marked_tests_are_exempt`
+（闸的自证，marker 是被测对象，必须留）；`test_options_analyzer` 与
+`test_treasury_yields` 各 1 条 —— 探针实测**并没有**真的出网，属标错，
+核实各自该配什么源桩需单独一版，且它们不产生 flake。
+
+### 变异校验（每条都实测判红）
+
+| 变异 | 结果 |
+|---|---|
+| macro_snapshot 去 `stub_yfinance` | `伸手取外网了：['curl.GET query1.finance.yahoo.com']` |
+| macro_snapshot 去 `stub_cboe_vix` | `伸手取外网了：['urlopen cdn.cboe.com']`（6 条） |
+| macro_snapshot 去 `stub_fred` | `伸手取外网了：['requests.GET api.stlouisfed.org']` |
+| macro_snapshot 去 `live_same_day` | `AssertionError: 宏观整体降级了——实时分支没走到` |
+| dashboard 去 `stub_yfinance` | 4 条 `curl.GET query1.finance.yahoo.com` |
+| dashboard 去 `stub_cboe_vix` | 1 条 `urlopen cdn.cboe.com` |
+
+⚠️ 取证纪律记一笔：`stub_cboe_vix` 那条变异第一次跑出来报的是 **yahoo**，
+与预期不符。原因是 addopts 的 `-x` 在第一条 error 就停，加上我的
+`sort -u | head` 按字母序把 `curl` 排在 `urlopen` 前面 —— 去掉 `-x` 重跑才
+看到真实分布（6 条全是 cdn.cboe.com）。**解释不了的变异结果不能写进结论。**
+
 
 ---
 
