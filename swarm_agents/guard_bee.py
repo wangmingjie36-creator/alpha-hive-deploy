@@ -43,6 +43,10 @@ class GuardBeeSentinel(BeeAgent):
 
             # 4. 拥挤度风险折扣（使用真实数据源）
             adj_factor = 1.0
+            # v0.45.209：默认就是降级档，只有真算出拥挤度才改成 "real"。
+            # 反过来写（默认 real、出错改降级）会漏掉 `crowd is None` 那条
+            # 不抛异常的路径 —— 那正是此前 40 行降级被上报成满分的原因。
+            _crowd_source = "unavailable"
             try:
                 from crowding_detector import CrowdingDetector
                 from real_data_sources import get_real_crowding_metrics
@@ -57,6 +61,8 @@ class GuardBeeSentinel(BeeAgent):
                 if crowd is None:
                     _log.warning("GuardBeeSentinel %s 拥挤度全分量不可得，"
                                  "调整因子取 1.0 中性（不加分也不折扣）", ticker)
+                else:
+                    _crowd_source = "real"
                 adj_factor = detector.get_adjustment_factor(crowd)
             except (ImportError, ValueError, KeyError, TypeError) as e:
                 _log.warning("GuardBeeSentinel crowding analysis unavailable for %s: %s", ticker, e)
@@ -206,7 +212,12 @@ class GuardBeeSentinel(BeeAgent):
                 dimension="risk_adj",
                 data_quality={
                     "pheromone_board": "real",
-                    "crowding": "real",
+                    # v0.45.209：曾是硬编码 "real"。台账 1710 行里 40 行（2.3%）
+                    # 走了 v0.45.50 的降级路径（adj_factor == 1.00 —— 正常三档
+                    # 1.2/0.95/0.70 里没有 1.0，是降级的精确指纹），却一律向
+                    # `_apply_triple_penalty` 的 data_real_pct 上报满分。
+                    # `_log.warning` 只进日志 ⇒ 「这个失败，下游怎么知道？」答不上来。
+                    "crowding": _crowd_source,
                     "llm_conflict": "llm_enhanced" if llm_guard else "rule_only",
                 },
                 details={
