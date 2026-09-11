@@ -5,7 +5,136 @@
 
 ---
 
-## [0.45.198] — 2026-09-11 — 占位（进行中：agent_toolbox 死代码普查与处置）
+## [0.45.198] — 2026-09-11 — `agent_toolbox` 死代码处置：删两个零读者的类，并手动摘掉随之过期的白名单项
+
+v0.45.189 的溢出发现。那一版修的是测试守卫 `rglob` 越界；普查时在生产代码里
+撞见 `agent_toolbox.py:96` 的 `Path(root).rglob("*")`，但**数读者后发现它是死的**，
+故当时刻意没动（判据不同：它不是断言，不存在「把红伪装成绿」）。本版处置死代码本身。
+
+### Removed — `FilesystemTool` 与 `NotificationTool`（413 → 197 行）
+
+两个类的**外部读者均为 0**（2026-09-11 在本 worktree 用 `git ls-files` 重数，
+不用 `rglob`/`grep -r`——生产 checkout 的 `.claude/worktrees/` 下有 14 个嵌套仓库副本，
+裸递归会把陈旧副本算进读者数，正是 v0.45.189 修的那个形状）：
+
+| 符号 | 外部读者 | 备注 |
+|---|---|---|
+| `FilesystemTool`（4 方法 + `_is_safe_path` + `ALLOWED_ROOTS`） | **0** | `list_directory` 唯一读者是本文件 `main()` 的演示段 |
+| `NotificationTool`（3 方法 + 2 加载器） | **0** | — |
+| `AgentHelper.fs` / `AgentHelper.notify` | **0** | 全仓 14 处 `agent_helper.*` 访问**全部**是 `.git` |
+| `GitHubTool` | 14 处，**未动** | `report_deployer.py` 的 gh-pages / main 部署链路依赖 |
+
+连带清掉：`AgentHelper.__init__` 的两个属性、`summary()` 的两段菜单、`main()` 的两段演示，
+以及随之死掉的 `json` / `Path` / `datetime` / `get_session` 四个 import 和零读者的
+模块级 `_log`（+ `import logging as _logging`）。
+
+⚠️ **`_log` 那条 ruff 抓不到**——`_logging` 在第 30 行被用了一次（就是定义 `_log` 那句），
+F401 结构上看不见「变量定义了但没人读」。而且**本仓 `pyproject.toml` 把 F401 整条 ignore 了**
+（连同 F541/F841），所以 `ruff check agent_toolbox.py` 那句 "All checks passed!"
+对「有没有死 import」一个字都没说，它是恒真的。四个死 import 是
+`ruff check --select F401 --isolated` 单独开规则查出来的。
+
+### Changed — 模块 docstring：那句「后续升级为真正的 MCP 服务器」是**已兑现的过期承诺**
+
+删之前要过的一关是：docstring 自称「Python-native MCP replacement…后续升级为
+真正的 MCP 服务器」，即**有意保留的脚手架**，那么「零读者」就不构成删除理由。
+
+判据不是 docstring 说了什么，而是**它预留的那个未来有没有已经以别的方式到来**。
+到来了：`alpha_hive_mcp.py` 是独立另写的 718 行真 MCP 服务器（FastMCP + stdio，
+8 个 `alphahive_*` tool，已注册进 Claude Desktop 并在线），它**从不 import 本模块**，
+且暴露的是**领域数据**（行情 / 分析 JSON / GEX / Form 4）而非文件系统 / 通知原语。
+`agent_toolbox` 从来不是那颗种子。docstring 已改写成指针（要加 MCP 工具去
+`alpha_hive_mcp.py`，要发 Slack 去 `slack_report_notifier.py`），并写明别再往这里加通用工具。
+
+另两条支撑：
+
+- `NotificationTool` 不是「保留能力」，是**被取代的重复实现**。`slack_report_notifier.py`
+  更成熟（熔断走 `resilience.slack_breaker`、有 DM 兜底、11 处调用 + 自己的测试）。
+  ⚠️ 留着它是**活的危害**而非仅仅不整洁：全仓 `send_slack_message` 有 15 处
+  `agent_toolbox` 之外的引用，看着像它是活的，实际全属另一份同名实现——
+  这个同名陷阱已经实际消耗过一次核查。
+- `main()` 的「演示」是**带电的**：`~/.alpha_hive_slack_webhook` 在本机存在
+  （82 字节，mode 0600），所以 `python3 agent_toolbox.py` 会真的往 #alpha-hive
+  发一条 "🧪 Agent Toolbox 测试"。这与 `CLAUDE.md`「Slack 通知精简规则：Bot 只发两类消息」
+  直接冲突。删除后 `main()` 只剩只读的 `git status`，不写文件、不对外发消息。
+
+沙箱旁路也考虑过：`code_executor.py` 用的是黑名单 `BLOCKED_IMPORTS`（含 `os`/`subprocess`/
+`pathlib`，**不含 `agent_toolbox`**），且 `config.CODE_EXECUTION_CONFIG["enabled"]` 默认 `True`，
+理论上 LLM 生成的代码可以 `import agent_toolbox` 拿到 `write_file`。删除**只减少**这条路径的
+可达能力，不引入新风险。补一句实测：该旁路今天在 `sys.path` 层是堵的——执行器用
+`subprocess.Popen([sys.executable, script], cwd=sandbox_dir/data)` 起子进程，脚本的
+`sys.path[0]` 是沙箱 scripts 目录而非仓库根，且编排器未导出 `PYTHONPATH`。
+**「黑名单漏了」与「实际可达」是两件事，结论里要分开说。**
+
+### Fixed — 手动摘掉 `("agent_toolbox.py", "ALLOWED_ROOTS")`，否则它会静默变成过期项
+
+`tests/test_paths_not_frozen_at_import.py` 的 `KNOWN` 是**子集语义**
+（原文注释：「清掉存量不会变红，新增必红」「⚠️ 子集语义的副作用：清干净了也不会变红，
+过期项会悄悄留下」）。删掉 `ALLOWED_ROOTS` 后**没有任何测试会红**——
+按值检查的那条参数化测试 `test_code_anchored_paths_resolve_inside_the_repo`
+取参自 `MUST_STAY_FILE_ANCHORED`（11 项，A+B 类），而本项在 `KNOWN` 的 C 类、不在其中。
+
+按该类 docstring 自带的对账法手动揪出并摘除：
+
+- 改动**前**：`KNOWN` 17 / `_scan(marker="__file__")` 17，过期项 **0**（干净基线）
+- 只删代码不摘白名单：17 / 16 ⇒ 过期项 **1**，全套**零红**（当场复现该盲区）
+- 摘除后：16 / 16，过期项 **0**
+
+### 核对记录
+
+- 解释器 `/usr/local/bin/python3` (3.11.1)；收集数改动前后均 **4038/4118, 80 deselected**
+- 全套：改动前 `1 failed, 4035 passed, 1 skipped, 2 xfailed`（唯一的红是
+  `test_economic_calendar.py::TestCoverageHorizon`，按设计红，非回归）；改动后同
+- ruff：worktree 基线 46 → 改后 46，零新增
+- ruff：`--select F401 --isolated agent_toolbox.py` 改后 0（改前 4）
+
+### 变异检查：4 条里 **3 条是等价变异**，且其中一条推翻了我的预期
+
+每条都在清 `__pycache__` 后跑全套 `--maxfail=200`，还原后复核。
+基线的 `TestCoverageHorizon`（按设计红）在下表中一律不计入"变红"。
+
+| | 变异 | 预期 | 实测 | 结论 |
+|---|---|---|---|---|
+| M1 | 把 `("agent_toolbox.py","ALLOWED_ROOTS")` 塞回 `KNOWN`（模拟"忘了摘"） | 绿 | **绿**（零新增红） | ✅ 等价变异，坐实子集语义盲区 |
+| M2 | 拿掉 `AgentHelper.self.git`（模拟过度删除） | **红** | **绿** ❗ | ❌ **预期被推翻**，见下 |
+| M3 | 把 `self.fs = object()` 留着（模拟漏删） | 绿 | **绿** | ✅ 等价变异，`.fs` 确无覆盖 |
+| M4 | 从 `_ALLOWED_GIT_CMDS` 拿掉 `"commit"` | 红 | **红 2 条** | ✅ `GitHubTool` 有牙 |
+
+M4 变红的两条：`test_report_deployer_whitelist.py::TestWhitelistCommitInRealGit::`
+`test_only_artifacts_get_committed` / `test_default_still_stages_everything`。
+
+#### ❗ M2：删掉整个 `AgentHelper.git`，测试套件也接不住
+
+M2 的全套跑里多出一条 `test_macro_snapshot.py::TestMacroContextUsesSnapshot::`
+`test_no_snapshot_keeps_live_semantics`。**它不是 M2 造成的**：机制上讲不通
+（`GitHubTool.__init__` 只赋一个 `repo_path`，无副作用），且带 M2 单跑该文件
+**19/19 全过、不复现**；基线与改动后的全套里它也都是绿的。该条调用实时
+`fm.get_macro_context()` 并断言 `data_source` 字符串，归为**全套偶发抖动**
+（仅此定性到"未能复现"，未进一步定根因）。
+
+**扣掉那条抖动，M2 的真实结果是零新增红。** 带 M2 定向重跑两个「本该接住」的
+文件：`tests/test_pipeline.py` + `tests/test_report_deployer_whitelist.py`
+⇒ **77 passed**。原因是两条路径都绕开了 `AgentHelper.__init__`：
+
+- `tests/test_pipeline.py:320` 把**整个 `agent_helper` 换成 `MagicMock()`**
+  （`r.agent_helper = MagicMock()`），`MagicMock` 访问 `.git` 会自动造一个出来；
+- `tests/test_report_deployer_whitelist.py` 直接 `GitHubTool(repo_path=...)` 构造。
+
+⚠️ **所以「删完 `.fs`/`.notify` 全套零红」本身不构成删对了的证据——
+因为删 `.git` 同样零红。** 本次删除的安全性**完全建立在数读者上，
+不建立在测试覆盖上**；套件接不住这个方向的过度删除。
+同 auto-memory `alpha-hive-none-hook-unwired` 的形状：全绿是因为夹具让生产值不可达。
+
+### Fixed — 顺手修一条悬空注释
+
+`tests/test_paths_not_frozen_at_import.py` 的
+`test_code_anchored_paths_resolve_inside_the_repo` 里
+`# 少数是 list（如 agent_toolbox.ALLOWED_ROOTS）` 举的例子，
+在我删掉该符号后成了悬空引用。查下去发现**这个例子对这条测试从一开始就不成立**：
+本条参数化自 `MUST_STAY_FILE_ANCHORED`（11 项，实测取值**全是标量**），
+而 `ALLOWED_ROOTS` 在 `KNOWN` 里、从不在本条参数里
+⇒ 那个 `isinstance(raw, (list, tuple))` 分支**一次也没被执行过**。
+注释已改成如实说明它是防御性的。
 
 ---
 

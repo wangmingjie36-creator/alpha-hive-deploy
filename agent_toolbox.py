@@ -1,105 +1,26 @@
 #!/usr/bin/env python3
 """
-🚀 Agent Toolbox - Python-native MCP replacement
-统一的 Agent 工具集：文件系统 + GitHub + 通知
-可直接用于蜂群系统，后续升级为真正的 MCP 服务器
+🚀 Agent Toolbox —— 日报流程用的 Git 封装
+
+唯一在产的能力是 `GitHubTool`（子命令白名单 + 无 shell 模式），经
+`AgentHelper.git` 供 `report_deployer.py` 的 gh-pages / main 部署链路调用。
+
+⚠️ **这里不是「预留的 MCP 脚手架」，不要再往这里加通用工具。**
+v0.45.198 前本模块的 docstring 自称「Python-native MCP replacement …
+后续升级为真正的 MCP 服务器」，并据此保留了零读者的 `FilesystemTool`
+与 `NotificationTool`。那个「后续」**早已到来、且没走这条路**：真正的
+MCP 服务器是独立另写的 `alpha_hive_mcp.py`（FastMCP + stdio，8 个
+`alphahive_*` tool），它从不 import 本模块，暴露的是领域数据而非文件系统
+/ 通知原语。两个类因此按「零读者即死」删除（判据见 auto-memory
+`alpha-hive-dead-field.md`）。
+
+要加 MCP 工具 → `alpha_hive_mcp.py`；要发 Slack → `slack_report_notifier.py`。
 """
 
-import logging as _logging
 import os
-import json
 import shlex
 import subprocess
-from pathlib import Path
 from typing import Dict, List, Optional, Any
-from datetime import datetime
-from resilience import get_session
-
-_log = _logging.getLogger("alpha_hive.toolbox")
-
-# ==================== 文件系统工具 ====================
-
-class FilesystemTool:
-    """文件系统操作（替代 Filesystem MCP）"""
-
-    ALLOWED_ROOTS = [
-        os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__))),
-        os.path.expanduser("~/.claude/projects"),
-        "/tmp"
-    ]
-
-    @staticmethod
-    def _is_safe_path(path: str) -> bool:
-        """检查路径是否在允许的根目录中"""
-        abs_path = str(Path(path).resolve())
-        return any(abs_path.startswith(root) for root in FilesystemTool.ALLOWED_ROOTS)
-
-    @classmethod
-    def read_file(cls, file_path: str) -> str:
-        """读取文件内容"""
-        if not cls._is_safe_path(file_path):
-            raise PermissionError(f"Path not allowed: {file_path}")
-
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return f.read()
-        except FileNotFoundError:
-            raise FileNotFoundError(f"File not found: {file_path}")
-        except (OSError, UnicodeDecodeError) as e:
-            raise OSError(f"Error reading file: {e}") from e
-
-    @classmethod
-    def write_file(cls, file_path: str, content: str) -> str:
-        """创建/更新文件"""
-        if not cls._is_safe_path(file_path):
-            raise PermissionError(f"Path not allowed: {file_path}")
-
-        try:
-            path = Path(file_path)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-            return f"✅ File written: {file_path}"
-        except OSError as e:
-            raise OSError(f"Error writing file: {e}") from e
-
-    @classmethod
-    def list_directory(cls, dir_path: str) -> List[Dict[str, Any]]:
-        """列出目录内容"""
-        if not cls._is_safe_path(dir_path):
-            raise PermissionError(f"Path not allowed: {dir_path}")
-
-        try:
-            entries = []
-            for item in Path(dir_path).iterdir():
-                entries.append({
-                    "name": item.name,
-                    "type": "directory" if item.is_dir() else "file",
-                    "size": item.stat().st_size if item.is_file() else None,
-                    "modified": datetime.fromtimestamp(item.stat().st_mtime).isoformat()
-                })
-            return sorted(entries, key=lambda x: x["name"])
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Directory not found: {dir_path}")
-        except OSError as e:
-            raise OSError(f"Error listing directory: {e}") from e
-
-    @classmethod
-    def search_files(cls, pattern: str, root: str = None) -> List[str]:
-        """全文搜索文件"""
-        root = root or cls.ALLOWED_ROOTS[0]
-        if not cls._is_safe_path(root):
-            raise PermissionError(f"Path not allowed: {root}")
-
-        try:
-            results = []
-            for file_path in Path(root).rglob("*"):
-                if file_path.is_file() and pattern.lower() in file_path.name.lower():
-                    results.append(str(file_path))
-            return results[:100]  # 限制结果数
-        except OSError as e:
-            raise OSError(f"Error searching files: {e}") from e
-
 
 # ==================== GitHub 工具 ====================
 
@@ -235,178 +156,47 @@ class GitHubTool:
         return {"additions": additions, "deletions": deletions, "total_changes": additions + deletions}
 
 
-# ==================== 通知工具 ====================
-
-class NotificationTool:
-    """通知工具（替代 Slack + Email MCP）"""
-
-    def __init__(self):
-        self.slack_webhook = self._load_slack_webhook()
-        self.gmail_creds = self._load_gmail_creds()
-
-    @staticmethod
-    def _load_slack_webhook() -> Optional[str]:
-        """加载 Slack Webhook"""
-        try:
-            from config import get_secret
-            url = get_secret("SLACK_WEBHOOK_URL")
-            if url:
-                return url
-        except ImportError:
-            pass
-        env_url = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
-        if env_url:
-            return env_url
-        try:
-            with open(os.path.expanduser("~/.alpha_hive_slack_webhook"), "r") as f:
-                return f.read().strip()
-        except FileNotFoundError:
-            return None
-
-    @staticmethod
-    def _load_gmail_creds() -> Optional[Dict]:
-        """加载 Gmail 凭据"""
-        try:
-            creds_path = os.path.expanduser("~/.alpha_hive_gmail_credentials.json")
-            if os.path.exists(creds_path):
-                with open(creds_path, "r") as f:
-                    return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            _log.debug("Gmail creds load failed: %s", e)
-        return None
-
-    def send_slack_message(self, channel: str, text: str, blocks: List[Dict] = None) -> Dict[str, Any]:
-        """发送 Slack 消息"""
-        if not self.slack_webhook:
-            return {"error": "Slack webhook not configured"}
-
-        try:
-            import requests
-            payload = {
-                "channel": channel,
-                "text": text
-            }
-            if blocks:
-                payload["blocks"] = blocks
-
-            response = get_session("slack").post(self.slack_webhook, json=payload, timeout=15)
-            return {
-                "success": response.status_code == 200,
-                "status_code": response.status_code,
-                "response": response.text
-            }
-        except ImportError:
-            return {"error": "requests library not installed"}
-        except (ConnectionError, TimeoutError, OSError, ValueError) as e:
-            return {"error": str(e)}
-
-    def send_email(self, to: str, subject: str, body: str) -> Dict[str, Any]:
-        """发送邮件"""
-        try:
-            import smtplib
-            from email.mime.text import MIMEText
-            from email.mime.multipart import MIMEMultipart
-
-            # 从 config 读取
-            from config import ALERT_CONFIG
-
-            sender = ALERT_CONFIG["email_config"]["sender_email"]
-            password = os.getenv("GMAIL_APP_PASSWORD")
-
-            if not password:
-                return {"error": "GMAIL_APP_PASSWORD environment variable not set"}
-
-            msg = MIMEMultipart()
-            msg["From"] = sender
-            msg["To"] = to
-            msg["Subject"] = subject
-            msg.attach(MIMEText(body, "html"))
-
-            server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
-            server.login(sender, password)
-            server.send_message(msg)
-            server.quit()
-
-            return {"success": True, "message": f"Email sent to {to}"}
-        except (ImportError, ConnectionError, TimeoutError, OSError, ValueError) as e:
-            return {"error": str(e)}
-
-    def notify_all(self, message: str, channels: List[str] = None) -> Dict[str, Any]:
-        """发送到多个渠道"""
-        results = {}
-
-        if "slack" in (channels or ["slack"]):
-            results["slack"] = self.send_slack_message("#alpha-hive", message)
-
-        if "email" in (channels or []):
-            results["email"] = self.send_email(
-                os.environ.get("ALPHA_HIVE_EMAIL_SENDER", ""),
-                "Alpha Hive Alert",
-                message
-            )
-
-        return results
-
-
 # ==================== Agent 助手 ====================
 
 class AgentHelper:
-    """Agent 使用的统一工具集"""
+    """Agent 使用的统一工具集（现仅剩 Git 一条）。
+
+    历史上还挂过 `.fs`（`FilesystemTool`）与 `.notify`（`NotificationTool`），
+    v0.45.198 随那两个类一并删除——全仓 14 处 `agent_helper.*` 访问**全部**是
+    `.git`，另两个属性从未被读过。新增属性前请先确认它真有读者。
+
+    ⚠️ **动这个 `__init__` 时别指望测试接住你。** v0.45.198 实测：把
+    `self.git` 整个拿掉，`tests/test_pipeline.py` + `tests/test_report_deployer_whitelist.py`
+    共 77 条**全绿**——前者 `r.agent_helper = MagicMock()` 把整个 helper 换掉了
+    （真 `__init__` 从没执行，`MagicMock` 访问 `.git` 会自动造一个出来），
+    后者直接 `GitHubTool(repo_path=...)` 构造。改这里要靠数读者，不是靠跑测试。
+    """
 
     def __init__(self):
-        self.fs = FilesystemTool()
         self.git = GitHubTool()
-        self.notify = NotificationTool()
 
     def summary(self) -> str:
         """打印工具摘要"""
-        return f"""
+        return """
         🚀 Agent Toolbox 已就绪
-
-        📁 文件系统
-           - read_file(path) ✓
-           - write_file(path, content) ✓
-           - list_directory(path) ✓
-           - search_files(pattern) ✓
 
         🐙 GitHub
            - status() ✓
            - commit(message) ✓
            - push(branch) ✓
            - diff(branch1, branch2) ✓
-
-        🔔 通知
-           - send_slack_message(channel, text) ✓
-           - send_email(to, subject, body) ✓
-           - notify_all(message, channels) ✓
         """
 
 
 def main():
-    """演示用法"""
+    """演示用法（只读：不写文件、不对外发消息）"""
     helper = AgentHelper()
     print(helper.summary())
-
-    # 测试文件系统
-    print("\n测试文件系统...")
-    try:
-        files = helper.fs.list_directory(os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__))))
-        print(f"✅ 列出 {len(files)} 个文件")
-    except (OSError, FileNotFoundError) as e:
-        print(f"❌ {e}")
 
     # 测试 GitHub
     print("\nGit 状态...")
     status = helper.git.status()
     print(f"✅ {status}")
-
-    # 测试通知
-    print("\n测试通知...")
-    result = helper.notify.send_slack_message("#alpha-hive", "🧪 Agent Toolbox 测试")
-    if result.get("success"):
-        print("✅ Slack 消息已发送")
-    else:
-        print(f"⚠️ {result.get('error', 'Unknown error')}")
 
 
 if __name__ == "__main__":

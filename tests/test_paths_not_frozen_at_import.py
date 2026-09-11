@@ -484,7 +484,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
     与 `TestSpeciesDoesNotSpread` 一样是**子集**语义：清掉存量不会变红，新增必红。
     """
 
-    # 存量白名单（v0.45.160 清理后实测 **17 处**）。清掉一处就从这里删一行。
+    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**）。清掉一处就从这里删一行。
     # ⚠️ 子集语义的副作用：**清干净了也不会变红**，过期项会悄悄留下。
     #    定期对账：`KNOWN - _scan(marker="__file__")` 非空即是过期项
     #    （本版就这么揪出 2 条已清却还挂着的）。
@@ -504,7 +504,10 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("market_intelligence.py", "_BASE"),          # 同上
         ("watchlist_events.py", "EVENTS_FILE"),       # watchlist_events.md
         # ── C. 已读 `ALPHA_HIVE_HOME`、`__file__` 只作兜底（另一个子物种，冻在 import 期）──
-        ("agent_toolbox.py", "ALLOWED_ROOTS"),        # 沙箱白名单；冻结只会更保守不会越权
+        # v0.45.198: ("agent_toolbox.py", "ALLOWED_ROOTS") 已摘除 —— `FilesystemTool`
+        # 零读者被删，`ALLOWED_ROOTS` 随之消失。⚠️ 摘它**不是**因为有测试变红：
+        # 子集语义下清干净不会红，它会静默变成过期项。是按本类 docstring 的对账法
+        # （`KNOWN - _scan(marker="__file__")` 非空即过期）手动揪出来的。
         ("gui/app.py", "_PROJECT_ROOT"),              # sys.path
         ("scheduler.py", "_PROJECT_ROOT"),            # scheduler.log
         # ── D. 未清，已登记（读多写少 / 牵动面大）──
@@ -647,7 +650,11 @@ class TestFileDerivedSpeciesDoesNotSpread:
         import importlib
         mod = importlib.import_module(modname)
         raw = getattr(mod, attr)
-        # 少数是 list（如 agent_toolbox.ALLOWED_ROOTS），只查其中落在仓库内的那些
+        # 取值可能是 list，只查其中落在仓库内的那些。
+        # ⚠️ v0.45.198：本条参数化自 `MUST_STAY_FILE_ANCHORED`，而那 11 项**取值全是标量**
+        #    ⇒ 下面这个 list 分支目前**一次也没被执行过**，是防御性的。
+        #    （原注释举的例子 `agent_toolbox.ALLOWED_ROOTS` 在 `KNOWN` 里、从不在本条参数里，
+        #     所以那个例子对本条从一开始就不成立；该符号已随 `FilesystemTool` 一并删除。）
         vals = raw if isinstance(raw, (list, tuple)) else [raw]
         checked = 0
         for v in vals:
