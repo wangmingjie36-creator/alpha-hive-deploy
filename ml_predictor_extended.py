@@ -12,6 +12,35 @@ from dataclasses import dataclass
 
 _log = _logging.getLogger("alpha_hive.ml_predictor_extended")
 
+def _snapshot_saved_model(filename: str) -> None:
+    """模型版本快照（v0.45.145）。与 `ml_predictor._snapshot_saved_model` 同形。
+
+    本模块是 `ml_predictor` **导入失败时**的降级实现（`swarm_agents/rival_bee.py`
+    唯一读者）。降级路径同样会覆盖模型文件，一起钩上，免得留一支漏网。
+    """
+    try:
+        from ml_model_guard import snapshot_model_file
+        snapshot_model_file(filename)
+    except ImportError as e:
+        _log.error(
+            "🚨 模型快照模块缺失（%s）——本次保存没有留版本，下次退化将无法归因", e
+        )
+
+
+
+# v0.45.149: 与 `ml_predictor.default_model_path()` 同一套规矩 —— 默认落盘位置
+# 绝不能是 cwd 相对路径，否则「在哪跑就写到哪」。这里不 import ml_predictor：
+# 本模块整个存在的理由就是 `ml_predictor` 导不进来时的降级实现（见 SimpleMLModel
+# 的 docstring），跟它耦合会让降级路径跟着一起坏。
+def default_extended_model_path() -> str:
+    """`SimpleMLModel.save_model` / `load_model` 的默认落盘位置。
+
+    与 `ml_predictor.default_model_path` 一样必须是**函数**：`PATHS.home` 读的是
+    `ALPHA_HIVE_HOME`，而测试隔离是逐测试 setenv 的，模块级常量会在 import 时冻住。
+    """
+    from hive_logger import PATHS
+    return str(PATHS.ml_model_extended)
+
 
 @dataclass
 class TrainingData:
@@ -562,17 +591,43 @@ class SimpleMLModel:
         self.training_accuracy = 0.0
         self.feature_stats = {}
 
-    def encode_catalyst_quality(self, quality: str) -> float:
-        """编码催化剂质量"""
+    def encode_catalyst_quality(self, quality) -> float:
+        """编码催化剂质量。**这是全仓第四份表**，须与主表语义逐项一致。
+
+        ⚠️ 本类只在 `ml_predictor` 导入失败时生效（见 `_create_ml_model`），
+        因此**不能**改成 import 主表 —— 那正是它不可用的场景。重复是结构性
+        强制的，由 `tests/test_rival_bee_catalyst_missing.py::
+        TestExtendedFallbackEncoderMirrorsPrimary` 逐档断言两份一致兜住。
+
+        `None` → NaN（缺失），与主表 `_encode_catalyst` 一致（v0.45.151）。
+        此前落 0.5，而 0.5 恰好夹在 C(0.40) 与 B(0.55) **之间** —— 一个真实等级
+        永远产不出的值，模型却会拿它当一个真实的中间档。rival_bee 自 v0.45.151
+        起在读不到 ChronosBee 时传 `None`，本路径于是真的会被走到。
+
+        未知字面量（如 "X"）仍返回 0.5，与主表同（本仓无生产路径产得出它）。
+        """
+        if quality is None:
+            return float("nan")
         mapping = {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}
         return mapping.get(quality, 0.5)
 
+    #: 归一化后的"无观点"点。与 `ml_predictor._FEATURE_NEUTRAL` 同值同义。
+    _FEATURE_NEUTRAL = 0.5
+
     def normalize_feature(
-        self, value: float, min_val: float, max_val: float
+        self, value, min_val: float, max_val: float
     ) -> float:
-        """特征归一化"""
+        """特征归一化；None/NaN → `_FEATURE_NEUTRAL`（v0.45.151）。
+
+        缺一个 NaN 闸的话，上面新加的 `encode_catalyst_quality(None) → NaN` 会
+        一路传成 `probability = NaN`，再被 rival_bee 的 NaN 守卫改写成 0.5 并只
+        留一行 warning —— 那正是"把失败改写成没发生过"。此处按主表
+        `SimpleMLModel.normalize_feature` 的同一契约挡住。
+        """
+        if value is None or (isinstance(value, float) and value != value):
+            return self._FEATURE_NEUTRAL
         if max_val == min_val:
-            return 0.5
+            return self._FEATURE_NEUTRAL
         return (value - min_val) / (max_val - min_val)
 
     def train(self, training_data: List[TrainingData]) -> Dict:
@@ -756,8 +811,10 @@ class SimpleMLModel:
 
         return {k: mag * mom * s for k, s in self._HORIZON_SCALE.items()}
 
-    def save_model(self, filename: str = "ml_model_extended.json"):
+    def save_model(self, filename=None):
         """保存模型（JSON 格式，安全序列化）"""
+        if filename is None:
+            filename = default_extended_model_path()
         model_data = {
             "weights": self.weights,
             "feature_stats": self.feature_stats,
@@ -766,9 +823,12 @@ class SimpleMLModel:
         }
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(model_data, f, ensure_ascii=False, indent=2)
+        _snapshot_saved_model(filename)
 
-    def load_model(self, filename: str = "ml_model_extended.json"):
+    def load_model(self, filename=None):
         """加载模型（JSON 格式，安全反序列化）"""
+        if filename is None:
+            filename = default_extended_model_path()
         if filename.endswith(".pkl") and not os.path.exists(filename):
             filename = filename.replace(".pkl", ".json")
         with open(filename, "r", encoding="utf-8") as f:

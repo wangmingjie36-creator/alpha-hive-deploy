@@ -11,6 +11,7 @@
     "CodeExecutorAgent": 7.0,
     "GuardBeeSentinel": 6.11
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -23,8 +24,8 @@
   "cs_rank": null,
   "actual_prices": {
     "t1": 266.43,
-    "t7": null,
+    "t7": 256.97,
     "t30": null
   },
-  "created_at": "2026-09-01T04:32:05.666869"
+  "created_at": "2026-09-09T00:24:40.448570"
 }

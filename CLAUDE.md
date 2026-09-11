@@ -67,6 +67,7 @@
 
 - **纸面组合** `paper_portfolio.py`：参数唯一真相 = 模块内 `CONFIG`（v0.39.0 起为回放拐点配置，历史变更查 CHANGELOG）；挂载点 = 日报主流程 `alpha_hive_daily_report._post_scan_enrichment`（v0.38.0 起，**不再**依赖 generate_deep_v2）；状态文件 `paper_portfolio_state/`（meta.json 的 config_snapshot 自 v0.40.2 每次运行刷新）；KPI 看 `compute_kpis()`
 - **权重优化** `weekly_optimizer.py`（Track A）：T+7 回测 → clamp ±10pp → 原子写 config.py，审计日志 `weight_history.jsonl`
+- **第三条权重通道，v0.45.176 已断开** `Backtester.adapt_weights()`：曾经每日扫描内调用后经 `QueenDistiller(adapted_weights=...)` 短路掉 `config.EVALUATION_WEIGHTS`（`0.2×config + 0.8×学习值`，即 config 只有两成投票权）。**现降级为只读诊断**，照 v0.44.0 处置 `weekly_optimizer` 的先例：继续算、继续写 `adapted_weights` 表留审计轨迹，**不再进评分**。⚠️ **不要接回去**——它学的是「谁更爱说中性」而非准头（零技能置换检验：5 只蜂 4 只技能 Δ 在 ±2.2pp 内且 CI 全跨 0），且 `max(0.05, acc**2)` 的形式结构上表达不了零权重。理由全文见 `Backtester.adapt_weights` 的 docstring；守卫 `tests/test_zero_weight_invariant.py`（AST 枚举全仓，谁传 `adapted_weights=` 谁红）。详见 auto-memory `alpha-hive-adapted-weights-bypass.md`
 - **月度自诊断** `self_analyst.py`（Track B）：输出 `self_analysis_briefs/YYYY-MM.md`，含每蜂维度 rank-IC 小节（v0.40.0）
 - **IBKR 桥接** `ibkr_sync.py`：手动流程（export actions → 用户 TWS 下单 → import CSV → reconcile），状态在 `paper_account/`
 
@@ -83,6 +84,109 @@
 - 每次 session 修改了代码/新增模块/修复 bug 后，Claude 必须自动更新 MEMORY.md 对应章节
 - 控制在 200 行以内；超出时压缩旧版本历史或移除已被代码覆盖的实现细节
 - 旧记忆路径 `~/.claude/projects/-Users-igg/memory/` 已弃用，勿再写入
+
+## 硬检查项：「这个失败，下游怎么知道？」（2026-09-05 起）
+
+写下任何一段「A 失败了、B 接着跑」的代码前，先回答一句：
+**A 失败这件事，B（以及看输出的人）从哪里能看出来？**
+答不上来就是缺一个观测点——那不叫「已经容错了」，那叫把失败改写成了「没发生过」。
+
+判据：
+1. 写 `except` / `or 默认值` / `if 取不到: continue` 时，问「**谁会红？**」——没人就补一个会红的观测点（断言、计数、探针）。
+2. 写守卫先问「失败时是返回还是抛」，两条路径各堵一次（只判返回值接不住 `raise`；只判异常接不住 `return None`）。
+3. **「这个测试文件是离线的」是需要被执行的断言，不是注释**——核法是 socket 探针，且探针本身要先用一个真出网的 canary 反向自证。
+
+同一形状在 2026-09-05~07 四天内出现四次，横跨三个 session 与一个自动流程，表层原因毫无关系、机制完全相同（含 v0.45.91/119/121/124 逐版本细节）。完整取证见 auto-memory `alpha-hive-failure-propagation.md`。
+
+## 硬检查项：`skip` 守卫要问「X 在哪些环境里存在？」（2026-09-07 起）
+
+写 `if not X.exists(): pytest.skip()` 之前先回答一句：**X 在哪些环境里存在？**
+若答案是「只有一台机器上的一个目录」，那这条测试**等于没有**——
+**「加一个 skip 守卫」和「让这条测试在任何地方都跑不到」之间，只隔着一个未被 git 跟踪的文件。**
+
+判据：依赖若由测试自己构造，守卫该是断言不是 skip，且要正面核对夹具真的接上了（不能只断言「没读生产库」）；同样的条件性写在 marker 上可见、写在 skip 里不可见，真需要外部系统的测试标 marker 别写 skip；数一数还有多少条挂在同一个 X 上，但别一刀切——生产数据本身退化的测试该标 marker 不是补桩。
+
+与上一节同源：`skip` 把「这条没验」渲染成「这条没问题」，都答不出「谁会红？」。实测案例（`TestSPYBenchmarkUnavailable`/`pheromone.db`）+ WAL 边车取证陷阱见 auto-memory `alpha-hive-failure-propagation.md`。
+
+v0.45.165 普查全仓（20 条，5 个文件）后补三条：
+
+1. **模块级 `pytestmark = skipif(...)` 会连坐**整个文件，包括与该条件毫无关系的测试。
+   实测最刺眼的一处：`TestGuardsHaveTeeth`（纯合成数据、零外部依赖，docstring 写着
+   「没有这一组，本文件的全绿证明不了任何事」）跟着一起恒 skip ——
+   **证明守卫有牙的那把尺子，自己从未被拿出来过。** 条件性要挂在**用到它的那个类**上。
+2. **「数一数还有多少条挂在同一个 X 上」要按后果数，不能按 token 数。** 同样的恒 skip
+   还能由**测试隔离泄漏进子进程**造出来：`_isolate_env` 把 `ALPHA_HIVE_HOME` 指向沙箱，
+   `subprocess.run(..., cwd=_ROOT)` 继承了它 ⇒ CLI 永远读空库 ⇒ 输出恒为「无可用样本」
+   ⇒ skip 恒中，**在每一台机器上，生产机也不例外**。那条测试里一个产物名 token 都没有。
+3. **判据不是「不许 skip」，是「谁会红？」。** 反例：`git check-ignore` 返回 128 时
+   skip 是正当的 —— 「git 仓库在哪些环境里存在」答「开发检出/worktree/CI 全都是」，
+   条件为真的是全集减一个人造特例。⚠️ 顺带：`git check-ignore` 退出码有**三**个含义
+   （0=忽略 / 1=未忽略 / **128=这里不是 git 仓库**），把 128 揉进另外两个就是
+   「把一种失败误报成另一种」，正是本节要治的形状。
+
+守卫落地在 `tests/test_no_invisible_prod_data_skips.py`（元守卫，命中即红）。
+
+## 硬检查项：新产物的默认路径不许是相对路径（2026-09-07 起）
+
+给任何会落盘的产物写默认位置前，先回答一句：
+**这个默认值在「不是从仓库根跑」的时候会写到哪？**
+答案若是「跟着 cwd 走」，它就是一颗定时炸弹——**测试的 cwd 不受控**。
+
+**文件名唯一真相在 `hive_logger.PATHS`**（与 `PATHS.db` / `PATHS.chroma_db` 同族）。
+新产物在那里加一个 property；函数默认值写 `None`，在函数体里解析——**不要**写成
+模块级常量或类属性（那会在 pytest **收集期**——早于任何 fixture、任何 env 隔离——
+被 import 时就地冻死，`_isolate_env` 类的隔离对它完全无效）。
+
+判据：路径要集中，但**文件不能合并**（两个同族文件恰好不同名，才使某次事故实际损害为 0）；
+只跑单文件验证不了这类冻结 bug（ordering-dependent），必须在没有该产物的干净目录跑全套看它
+有没有凭空造出来；新增产物必须在 `tests/conftest.py` 配两道防线——① setup 正面核对默认位置
+确实在沙箱内，② teardown 比对仓库根与 cwd 的真身指纹（②专门抓①会漏掉的那类 bug）。
+
+与上一节同源：把路径冻成模块级常量，等于把「隔离失效」改写成了「隔离生效」，同样答不出「谁会红？」。
+全套判据、事故取证（v0.45.149/150/160，含 `__file__` 派生一族）见 auto-memory `alpha-hive-test-writes-production.md`。
+
+## 硬检查项：这个路径指向「代码」还是「数据」？（2026-09-08 起）
+
+改任何 `Path(__file__).parent / …` 之前先回答一句：**它指向代码还是数据？**
+
+| 指向 | 正确锚点 | 典型 |
+|---|---|---|
+| **数据**（库 / 账本 / 状态 / 缓存 / 产物） | `PATHS.*`，**调用时求值** | `pheromone.db`、`*_state/`、`cache/` |
+| **代码**（随代码发布、或就是要「代码在哪」） | **`__file__` 才对** | `templates/`、`prompts/`、只读配置、`sys.path.insert`、`git -C <仓库>` |
+
+⚠️ **`__file__` 不是错的写法，是用错地方的写法。一刀切会制造新 bug**——
+把模板/prompt 改成 `PATHS.home` 后，测试把 `ALPHA_HIVE_HOME` 指向 tmp 就找不到文件。
+
+**两个方向各有一条断言，清单只在那里维护，本文件不抄**
+（抄一份就是快照，见开篇「文档分工原则」）：
+
+- `tests/test_paths_not_frozen_at_import.py::TestFileDerivedSpeciesDoesNotSpread`
+  - `KNOWN`（**子集**语义）——防**新增**冻结路径
+  - `MUST_STAY_FILE_ANCHORED`（**超集**语义）——防把该留的**错误清掉**
+
+**判据：写白名单时问一句「我怕它变大，还是也怕它变小？」** 怕两头就要两条断言。
+v0.45.168 实测：只有子集守卫时，把 5 处「应保留」的错改成 `PATHS.home`
+**4 处全绿**（唯一变红的那处是恰好被别的测试间接覆盖）。
+同源盲区：子集语义也不防白名单**过期**——清干净了它同样不红，
+要靠 `KNOWN - _scan()` 定期对账（v0.45.160 实测揪出 2 条）。
+
+## 环境：`~/Desktop` 在 iCloud 同步下会造「重名副本」（2026-09-07 起）
+
+本项目位于 `~/Desktop/Alpha Hive`，而 macOS「桌面与文稿同步 iCloud」会**持续**
+产出形如 `xxx 2.py` / `settings.local 2.json` 的副本（名字里带**空格 + 数字**，
+2026-09-07 一次扫出 53 个、最早可回溯 2026-03-16，不是偶发）。
+
+**已知故障**：这些副本会让 `git fetch` 报 `fatal: bad object refs/heads/... 2`——
+报错说「对象缺失」，**实际是 refname 非法**（git 引用名不允许含空格），与对象存不存在无关；
+且坏的是 `fetch` 不是紧邻它的 `push`（`&&` 链短路的老问题，见「并发开工必须先占号」一节）。
+
+**诊断**：`find .git/refs -type f -name "* *"`，有输出就是这个病，清掉带空格的 ref 即恢复。
+
+⚠️ **清理前必读** auto-memory `alpha-hive-environment-facts.md`——副本可能含未提交内容，
+不能无脑 `rm`（正确删除方式、mode 0600 误诊陷阱、SQLite sidecar 陷阱都在里面）。
+
+**根治**：把 `~/Desktop/Alpha Hive` 移出 iCloud 同步——这是用户的机器设置，
+**由用户决定，不要自行更改**；清理只是重置计时器。
 
 ## 已知问题 / 注意事项（长期有效项）
 
@@ -242,9 +346,13 @@ QueenDistiller 职责：
 ### 候选机会综合分（Opportunity Score）
 `Opportunity Score = Σ wᵢ × 维度分`，五个维度：signal / catalyst / sentiment / odds / risk_adj。
 
-**权重唯一真相 = `config.EVALUATION_WEIGHTS`，本文件不再抄写数值**（本文件此前硬写的 0.30/0.20/0.20/0.15/0.15 与 config 实际值长期不符，属「文档只存指针不存参数值」原则要治的那类陈旧误导）。
+**`config.EVALUATION_WEIGHTS` 是权重的「配置意图」唯一真相，不是「生产实际生效值」唯一真相——二者自 v0.45.175 起已知不同，见下条。**（本文件此前硬写的 0.30/0.20/0.20/0.15/0.15 与 config 实际值长期不符，属「文档只存指针不存参数值」原则要治的那类陈旧误导；现在连 config 本身是否生效都不能想当然。）
 
-⚠️ 已知：干净口径下加权后净 IC ≈ 0——两个反向维度占 43% 权重、抵消掉唯一有效的 sentiment，详见 `experiments/final_score_dilution_report.md`。**这不构成改权重的依据**（单维证据均不过 Bonferroni，且权重自动写入自 v0.44.0 已只读）。
+⚠️ **v0.45.172（2026-09-09）起权重已改**——原诊断（干净口径下加权后净 IC≈0，两反向维度占 43% 权重抵消掉唯一有效的 sentiment，详见 `experiments/final_score_dilution_report.md`）本身**从未过 Bonferroni 校正**，报告第 6 节原文标题是「不建议现在改权重」。这次是用户在看过完整证据强度后的**主动决定**，不是证据新近达标——不要把权重已改这件事本身读成"已验证有效"。改动理由与代价的完整记录见 `config.py` 的 `EVALUATION_WEIGHTS` 上方注释与 `ic_rerun_readiness._COHORT_HISTORY` 2026-09-09 条（含它作废了哪些已累积样本）。`weekly_optimizer.py` 自身的自动写入机制**未解锁**，仍是只读诊断——本次是直接改 `config.py`，走的不是它的路径。
+
+🚨 **v0.45.175 发现该决策从未在生产实际生效；v0.45.176（2026-09-10）已断开旁路，自此 config 才真是唯一真相。** 旁路是 `Backtester.adapt_weights()`（第三条通道，见上文「核心组件指针」），config 只拿到两成投票权；下游 `gex_regime.RegimeWeightAdjuster` 的 `max(0.02, ·)` 地板还会把零复活成 2%，两处同版修完。全链路实测（含最不利政体分支）signal=risk_adj=**0.0000**，对比 09-09 生产实际的 0.2059/0.1982。
+
+⚠️ **仍然：判断「生产实际用了哪套权重」看 `swarm.dimension_weights`，不看 config。** 断开的是已知那一条，ML 反馈（乘法）与政体调整（相对偏移）依然会逐标的改写权重——它们是设计内的，且都保零。扫描期有观测点 `_assert_config_zeros_survive`（config 归零的维度非零就打 error），不变式守卫在 `tests/test_zero_weight_invariant.py`。世代边界 2026-09-10 / v0.45.176（作废 09-09 的 30 条样本）。
 
 说明：
 - Signal: 披露与基本面共振强度
@@ -309,7 +417,9 @@ QueenDistiller 职责：
 
 ## 输出模板 C：深度研究报告（深度模式 🔬 专用）
 
-**数据驱动版 v2.0（2026-03-10 升级）。完整规范见 MEMORY.md「📐 深度模式模板C规范」章节。**
+**数据驱动版 v2.0（2026-03-10 升级）。7 章结构唯一真相在 `generate_ml_report.py`
+的 `_ch1_core_conclusion` ~ `_ch7_tasks`（7 个同名方法）；MEMORY.md 里曾经的
+「模板C规范」章节已不存在，勿再引用该指针。**
 
 核心原则：7 Agent 先拉实时数据，基于数字推理，结论从数据涌现，禁止套模板填文字。
 

@@ -1,5 +1,12 @@
-# ==================== GitHub Actions（PAT 无 workflow scope，不提交）====================
-.github/
+# ==================== GitHub Actions ====================
+# v0.45.94 解除此前的 `.github/` 整目录忽略。原因写的是「PAT 无 workflow scope」——
+# 那对 git 远程凭据确实成立（push 含 .github/workflows/ 的提交会被 GitHub 拒绝），
+# 但**不是没有 CI 的充分理由**：GitHub App / MCP 的 contents API 带 workflows 权限，
+# 可以直接写。workflow 文件因此改由 API 提交，仓库里正常跟踪、正常 review。
+#
+# ⚠️ 改 `.github/workflows/*.yml` 时注意：`git push` 仍可能因 PAT 缺 workflow scope
+# 被拒。走 GitHub API（Claude Code 的 create_or_update_file / push_files）提交那个文件，
+# 其余改动照常 push。
 
 # ==================== Python ====================
 __pycache__/
@@ -21,6 +28,12 @@ build/
 # ML 模型
 ml_model*.pkl
 ml_model*.json
+# v0.45.145：但**模型版本快照必须进 git**。上面那条 `ml_model*.json` 会连
+# `ml_model_history/ml_model-2026-09-07.json` 一起吞掉（gitignore 无斜杠的
+# 模式匹配任意层级的 basename，实测 `git check-ignore` 命中第 30 行）。
+# 不加这条反向规则，快照就是「每天写、每天不进库」——2026-09-04 那次退化
+# 无法归因，正是因为模型被原地覆盖、没有任何历史版本。
+!ml_model_history/*.json
 
 # 日志（含轮转文件 .log.1, .log.2 等）
 *.log
@@ -48,6 +61,8 @@ db_backups/
 realtime_metrics.json
 status.json
 training_data_extended.json
+# v0.45.118：扫描耗时分解（每轮覆盖，编排器并进 status.json）
+logs/scan_timing.json
 
 # v0.23.6: sample-accumulator 产出，不应进入 git（agent_toolbox `git add -A` 会误 stage）
 .samples-only-*.json
@@ -96,3 +111,12 @@ design_current/
 DESIGN_BRIEF.md
 .fuse_hidden*
 paper_portfolio_state.bak-*/
+
+# ==================== Claude Code worktrees ====================
+# v0.45.124：`.claude/worktrees/` 是**每台机器各自的**临时 checkout，不该进版本库。
+# 事故：`.claude/worktrees/recursing-hopper` 以 gitlink（mode 160000，裸 commit 指针）
+# 的形式被 `78369d3 蜂群日报 2026-03-01 12:17` 扫进索引——自动提交按白名单 `git add`，
+# 而这条路径当时正好落在白名单目录里。gitlink 在别的 checkout 上只会还原成一个**空目录**，
+# 既没内容也没子模块配置，是纯噪音。
+# ⚠️ 只忽略 worktrees/，不要忽略整个 `.claude/`——`.claude/launch.json` 是要跟踪的。
+.claude/worktrees/

@@ -10,6 +10,7 @@ import json
 import argparse
 import contextlib
 import logging
+import math
 import os
 import time
 from datetime import datetime
@@ -23,6 +24,9 @@ from config import WATCHLIST
 from hive_logger import get_logger, PATHS, set_correlation_id, SafeJSONEncoder, optional_import
 
 _log = get_logger("daily_report")
+
+# v0.45.118：扫描耗时可见化（叶子模块，只记时/计数/落盘，不碰取数）
+import scan_timing as _timing
 
 # 可选模块（optional_import 优雅降级）
 MetricsCollector = optional_import("metrics_collector", "MetricsCollector")
@@ -156,6 +160,143 @@ def _format_break_condition(cond) -> "str | None":
     return None
 
 
+#: `build_agent_votes` 的口径标签，随快照落盘（`ReportSnapshot.agent_votes_source`）。
+VOTES_FROM_AGENT_DETAILS = "agent_details"
+VOTES_UNAVAILABLE = "unavailable"
+
+
+def build_agent_votes(data: dict) -> "tuple[dict, str]":
+    """从一份 `swarm_results[ticker]` 建 `ReportSnapshot.agent_votes`。
+
+    返回 `(votes, source)`。**不读信息素板**（v0.45.164）
+    ------------------------------------------------------
+    旧实现是 `{e["agent_id"]: e["self_score"] for e in ctx.board.snapshot()
+    if e["ticker"] == tk}`，而 `snapshot()` 直接返回 `PheromoneBoard._entries` ——
+    那上面有**两道**减法，且这里两道全中：
+
+      ① 溢出淘汰 `nlargest(MAX_ENTRIES=80, key=(self_score, ...))`，**先扔分最低的**；
+      ② 墙钟过期（`publish` 里 `_age_s >= 3600`）。而本函数的调用点跑在**整轮扫描
+         结束之后**（一轮 ~56 分钟），板的存活状态冻结在最后一次 publish 那一刻。
+
+    后果不是「偶尔少一票」，是**逐蜂的选择效应**：淘汰键就是 `self_score` 本身，
+    于是每只蜂只在自己分数高于自身均值时才被记账（生产实测 BearBee 真均值 3.06、
+    被记录时 6.25）。下游全是拿蜂票对实际收益做相关的估计量
+    （`weekly_optimizer` / `self_analyst` / `feedback_loop.calculate_agent_contribution`），
+    它们回归的自变量被自身取值截断 —— 系数会被伪造出来。量测与影响面见
+    `tests/test_agent_votes_census.py` 模块 docstring。
+
+    `agent_details` 里本来就有每只蜂的分数，无截断、无过期，且就在调用点的
+    `_data` 里。它还**更正确**：CodeExecutorAgent 在 `analyze` 开头无条件发一条
+    `5.0/neutral` 占位（`code_executor_agent.py:75`），溢出淘汰按分留下的恰恰是
+    那个桩，把真实结论挤掉 —— 生产 1024 对里 16 例不一致，**全部**是这一形状。
+
+    `QueenDistiller` 不在 `agent_details` 里（它是**聚合**不是蜂），但它今天确实
+    是 agent_votes 的合法键（生产 300 份里 82 份 = 27.3%），且 `self_analyst` /
+    `paper_portfolio` / `backtest_engine` 三处会读到，故从 `final_score` 补回。
+    本版只改「在不在」，不改「是什么」。
+
+    ⚠️ 取不到 `agent_details` 时**不静默兜底回板**：那会把「这一份退化了」重新
+    渲染成「没退化」。改为返回 `VOTES_UNAVAILABLE`，让口径随快照落盘可查
+    （CLAUDE.md「这个失败，下游怎么知道？」）。
+    """
+    details = (data or {}).get("agent_details") or {}
+    votes = {}
+    for agent_id, det in details.items():
+        score = (det or {}).get("score") if isinstance(det, dict) else None
+        # 坏值直接不记：`or 5.0` 之类兜底会把「没分」伪装成一张中位票，
+        # 而中位票在 agent_vote_correct 里是弃权 —— 两者进的分母不同。
+        # 拒绝路径有三条，缺一条就是一个洞：非数字 / bool（是 int 的子类，
+        # `isinstance(x, int)` 会放它过）/ NaN 与 ±Inf。
+        # `math.isfinite` 一次堵住后两者 —— 只判 `score != score` 接不住 Inf，
+        # 而一个 Inf 票会把下游每个均值/标准差（paper_portfolio 的 dim_std、
+        # weekly_optimizer 的维度命中率）整列毒死。板自己的 `_validate_entry`
+        # 也是 NaN 与 Inf 一起判的，这里与它同口径。
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            continue
+        if not math.isfinite(score):
+            continue
+        votes[str(agent_id)] = float(score)
+
+    final_score = (data or {}).get("final_score")
+    if (isinstance(final_score, (int, float)) and not isinstance(final_score, bool)
+            and math.isfinite(final_score) and final_score > 0):
+        votes["QueenDistiller"] = float(final_score)
+
+    return votes, (VOTES_FROM_AGENT_DETAILS if details else VOTES_UNAVAILABLE)
+
+
+def _assert_config_zeros_survive(effective: dict, adapted_diag: "dict | None" = None,
+                                 cfg_weights: "dict | None" = None) -> bool:
+    """扫描期观测点：`config.EVALUATION_WEIGHTS` 里被显式归零的维度，必须仍为零。
+
+    v0.45.176 新增。**这条存在的理由是「谁会红？」答不上来。**
+    `config.EVALUATION_WEIGHTS` 的文档一直写着「权重唯一真相」，实际却有三层
+    在它下游改写（adapt_weights 的 0.2/0.8 混合、ML 反馈的乘法、政体调整的
+    `max(0.02,·)` 地板）。v0.45.172 把 signal/risk_adj 归零后，生产实际权重里
+    这两维仍占 ~20%，**整整藏了一天没有任何东西变红**——发现它靠的是人肉
+    去比对 `.swarm_results` 的字段，不是任何自动观测。
+
+    为什么挑「零维必须仍为零」当不变式：它对下游所有已知变换都稳健——
+    乘法保零，政体偏移是相对的（`shift * w[k]`，w=0 时恒为 0），修好地板后
+    也保零。所以它红了就一定意味着**有人新接了一条会改写 config 的通道**，
+    不会被 ML 反馈这类合法调整误触发。
+
+    ⚠️ **本函数只覆盖蜂后的基准权重（即 09-09 那次事故所在的那一层）。**
+    真正喂进评分的是 `QueenDistiller.distill` 里逐标的算出的 `_regime_weights_used`，
+    政体层的保零由 `QueenDistiller._assert_regime_preserved_zeros` 单独把守 ——
+    两层缺一不可：实测把 `gex_regime` 的地板 bug 放回去后，**本函数仍返回 True**，
+    而逐标的权重已是 signal=0.0192。探针放在它要防的那个 bug 的上游，等于没放。
+
+    Args:
+        cfg_weights: 供测试注入。**默认 None 时读 `config.EVALUATION_WEIGHTS`
+            但不 reload** —— 调用点在 `QueenDistiller.__init__` 之后，那里刚
+            `importlib.reload(config)` 过，模块属性已是最新。
+            ⚠️ 这里曾经自己也 reload 过一次，有两个问题：① 与蜂后拿到的可能是
+            **两个不同快照**，比的就不是同一个东西；② `importlib.reload` 会
+            **冲掉 `monkeypatch.setattr(config, "EVALUATION_WEIGHTS", ...)`**，
+            于是本函数的测试实际读的是真 config，只因真 config 恰好等于夹具值
+            才是绿的 —— 典型的「夹具没接上」（见 MEMORY 同名判据）。
+
+    Returns:
+        True = 不变式成立。False = 已违反（同时打 error 日志 + stdout 告警）。
+    """
+    if cfg_weights is not None:
+        cfg_w = dict(cfg_weights)
+    else:
+        try:
+            import config as _cfg
+            cfg_w = dict(_cfg.EVALUATION_WEIGHTS)
+        except (ImportError, AttributeError) as e:
+            _log.warning("权重不变式检查跳过（config 读取失败）: %s", e)
+            return True
+
+    zeroed = [d for d, v in cfg_w.items() if v == 0]
+    violated = {d: effective.get(d) for d in zeroed
+                if isinstance(effective.get(d), (int, float)) and effective[d] != 0}
+    if violated:
+        _log.error(
+            "权重不变式违反：config 已归零 %s，但 QueenDistiller 实际权重为 %s"
+            " —— 说明有通道在改写 config.EVALUATION_WEIGHTS（历史上是 adapted_weights，"
+            "v0.45.176 已断开）。本次评分不反映配置意图。",
+            zeroed, {k: round(v, 4) for k, v in violated.items()},
+        )
+        print(f"⚠️  权重不变式违反：config 归零的 {sorted(violated)} 在生产权重里非零 "
+              f"{ {k: round(v, 4) for k, v in violated.items()} }")
+        return False
+
+    if adapted_diag:
+        drift = {d: (round(adapted_diag[d] - cfg_w.get(d, 0.0), 3))
+                 for d in cfg_w if d in adapted_diag}
+        _log.info(
+            "权重通道对照（仅诊断，adapted 自 v0.45.176 不参与评分）："
+            "生效=%s | adapted 若启用会是=%s | 差=%s",
+            {k: round(v, 3) for k, v in cfg_w.items()},
+            {k: round(v, 3) for k, v in adapted_diag.items() if k in cfg_w},
+            drift,
+        )
+    return True
+
+
 class AlphaHiveDailyReporter:
     """Alpha Hive 日报生成引擎"""
 
@@ -213,8 +354,14 @@ class AlphaHiveDailyReporter:
         self.vector_memory = None
         if VectorMemory and VECTOR_MEMORY_CONFIG.get("enabled"):
             try:
+                # v0.45.150：刻意**不传** db_path。
+                # `VECTOR_MEMORY_CONFIG["db_path"]` 是 config 模块级 dict 里的
+                # `PATHS.chroma_db`——求值于 import 期、此后冻住不动。把它显式
+                # 传进来会绕过 `VectorMemory.DEFAULT_DB_PATH` 那个调用时求值的
+                # property，等于让改好的懒求值白改。两者取值完全相同（都是
+                # `PATHS.chroma_db`），差别只在**求值时刻**：不传 ⇒ 由 property
+                # 在构造时读环境变量，测试隔离与 ALPHA_HIVE_CHROMA_PATH 才生效。
                 self.vector_memory = VectorMemory(
-                    db_path=VECTOR_MEMORY_CONFIG.get("db_path"),
                     retention_days=VECTOR_MEMORY_CONFIG.get("retention_days", 90)
                 )
                 if self.vector_memory.enabled:
@@ -449,7 +596,19 @@ class AlphaHiveDailyReporter:
             self.code_executor_agent.board = board
             phase1_agents.append(self.code_executor_agent)
 
-        adapted_w = Backtester.load_adapted_weights() if Backtester else None
+        # ── v0.45.176：adapted_weights 降级为只读诊断，不再喂给 QueenDistiller ──
+        # 照 v0.44.0 对 weekly_optimizer 的处置（保留计算与审计轨迹、断掉写入生产的那条线）。
+        # 为什么断：`Backtester.adapt_weights` 学的是**每只蜂的方向判对率**，而权重要
+        # 作用在**维度分数**上——两个量的排名 Spearman ρ≈+0.2，基本无关。更要命的是
+        # 那个「判对率」本身几乎全是方向配比的人工制品：零技能置换检验（保持每只蜂
+        # 看多/看空/中性的配比不变、只打乱它在哪只标的哪一天下注）显示 5 只蜂里 4 只的
+        # 技能 Δ 落在 ±2.2pp 且 95%CI 全部跨 0，而喂给 adapt_weights 的原始准确率差有 8.7pp。
+        # 差额来自口径：同一批 887 条收益，永远说 bullish 命中 52.2%、永远说 neutral 只有
+        # 35.5%（T+7 常走出 ±5% 中性带）⇒ 它实际在排的是「谁更爱说中性」。
+        # 实测反向后果：ChronosBee 说中性 76%~82%，于是 catalyst 在 122 条历史记录里有
+        # 94 条是五维中权重最低的——而 catalyst 当前单维横截面 rank-IC=+0.097，是五维最高。
+        # 保留 load 仅为对照日志（下方 _log），**不要**再把它接回 QueenDistiller。
+        _adapted_diag = Backtester.load_adapted_weights() if Backtester else None
         import llm_service as _llm_check_q
 
         # Enhancement C: 尝试加载已训练的 ML 模型用于 QueenDistiller 维度权重反馈
@@ -457,7 +616,7 @@ class AlphaHiveDailyReporter:
         try:
             from ml_predictor import MLPredictionService as _MPS
             _ml_svc_tmp = _MPS()
-            _ml_model_file = PATHS.home / "ml_model_cache.json"
+            _ml_model_file = PATHS.ml_model_cache
             if _ml_model_file.exists():
                 _ml_svc_tmp.model.load_model(str(_ml_model_file))
                 if _ml_svc_tmp.model.is_trained:
@@ -478,10 +637,11 @@ class AlphaHiveDailyReporter:
             _log.debug("ML 每日重训跳过: %s", e)
 
         queen = QueenDistiller(
-            board, adapted_weights=adapted_w,
+            board,
             enable_llm=_llm_check_q.is_available(),
             ml_model=_ml_model_for_queen,
         )
+        _assert_config_zeros_survive(queen.DIMENSION_WEIGHTS, _adapted_diag)
 
         # rival_agent 必须在 all_agents 里：下面的 inject_prefetched 靠它注入
         # `_prefetched_stock`，漏了会让 Rival 逐标的直接抓 yfinance（限流风险）。
@@ -494,6 +654,7 @@ class AlphaHiveDailyReporter:
         prefetched = prefetch_shared_data(targets, retriever, target_date=self.date_str)
         inject_prefetched(all_agents, prefetched)
         prefetch_elapsed = time.time() - start_time
+        _timing.record("prefetch", prefetch_elapsed)
         _log.info("预取完成 (%.1fs) | 开始并行分析", prefetch_elapsed)
 
         # v0.15.3: checkpoint 文件名加日期隔离，防止跨天 stale 复用
@@ -712,6 +873,7 @@ class AlphaHiveDailyReporter:
 
     def _post_scan_metrics(self, ctx: '_SwarmContext', swarm_results: Dict, elapsed: float) -> None:
         """扫描后指标：LLM 统计 + MetricsCollector + SLO 检查 + 回测 + 权重自适应 + DB 清理"""
+        _timing.record("swarm_total", elapsed)
         # LLM Token 使用统计
         try:
             import llm_service
@@ -785,6 +947,9 @@ class AlphaHiveDailyReporter:
                 _log.warning("指标收集异常: %s", e)
 
         # 回测反馈循环
+        # v0.45.118：这一段 2026-09-04 实测 342s（逐条待检预测各发一次
+        # yf.history，全过 2s 闸门），单独计时以便日后批量取价时看得见收益。
+        _t_backtest = time.monotonic()
         adapted = None
         if Backtester:
             try:
@@ -859,6 +1024,7 @@ class AlphaHiveDailyReporter:
                 _log.info("Agent 权重已按准确率更新")
             except (ImportError, OSError, ValueError, TypeError, AttributeError) as e:
                 _log.debug("AgentWeightManager 更新跳过: %s", e)
+        _timing.record("backtest_weights", time.monotonic() - _t_backtest)
 
         # ---- ML 增量学习（利用新验证的 T+7 数据）----
         if Backtester and bt:
@@ -908,7 +1074,7 @@ class AlphaHiveDailyReporter:
                         ))
 
                     ml_svc = MLPredictionService()
-                    model_file = PATHS.home / "ml_model_cache.json"
+                    model_file = PATHS.ml_model_cache
                     if model_file.exists():
                         ml_svc.model.load_model(str(model_file))
 
@@ -945,9 +1111,15 @@ class AlphaHiveDailyReporter:
                 _log.debug("向量记忆清理失败: %s", e)
         if Backtester:
             try:
-                Backtester().cleanup_old_predictions(180)
+                # v0.45.178：不再硬编码 180。保留期唯一真相 =
+                # `config.PREDICTION_RETENTION_DAYS`（现 3650 天）。
+                # 旧的硬编码 180 天每天从库头永久删一个扫描日，自 2026-08-25 起
+                # 累计销毁 115 条已回填样本，且全程无日志可见 —— 详见该函数 docstring。
+                Backtester().cleanup_old_predictions()
             except Exception as e:
-                _log.debug("预测清理失败: %s", e)
+                # debug → warning：这一步失败本身无害（不删而已），但它被 debug
+                # 吞掉过一次，让「清理到底跑没跑、删了什么」在生产里完全不可观测。
+                _log.warning("预测清理失败（本次未清理，数据未受影响）: %s", e)
 
     @staticmethod
     def _evaluate_thesis_breaks(ticker: str, row: Dict) -> "list":
@@ -1151,11 +1323,14 @@ class AlphaHiveDailyReporter:
                             )
                     except Exception as _shg_e:
                         _log.debug("score_high 守卫计算跳过 (%s): %s", _tk, _shg_e)
-                    _snap.agent_votes = {
-                        e.get("agent_id", ""): e.get("self_score", 5.0)
-                        for e in ctx.board.snapshot()
-                        if e.get("ticker") == _tk
-                    }
+                    # v0.45.164: 不再读 ctx.board.snapshot()。板有 MAX_ENTRIES=80
+                    # 溢出淘汰（先扔分最低的）+ 3600s 墙钟过期，而本循环跑在整轮
+                    # 扫描之后 —— 两道全中，实测 300 份里 8 只蜂齐全的只有 1 份。
+                    # 见 build_agent_votes 的 docstring。
+                    _snap.agent_votes, _snap.agent_votes_source = build_agent_votes(_data)
+                    if _snap.agent_votes_source == VOTES_UNAVAILABLE:
+                        _log.warning("快照 %s：swarm_results 无 agent_details，"
+                                     "agent_votes 仅含聚合票", _tk)
                     # v0.40.0: 横截面排名埋点随快照落盘（供未来 rank-IC 回测）
                     _snap.cs_rank = _data.get("cs_rank")
                     # v0.43.16: 入场价优先复用 swarm 里 ScoutBee 的共享快照价
@@ -1371,6 +1546,7 @@ class AlphaHiveDailyReporter:
                 done = set(swarm_results)
             return [it for it in pending_tickers if it[1] not in done]
 
+        _t_parallel = time.monotonic()
         if pending_tickers:
             _log.info("🚀 并行分析 %d 个标的（max_workers=4）", len(pending_tickers))
             _run_pool(pending_tickers)
@@ -1396,8 +1572,10 @@ class AlphaHiveDailyReporter:
                 _log.info("✅ 标的完整性：%d/%d 全部产出",
                           len(pending_tickers), len(pending_tickers))
 
+        _timing.record("parallel", time.monotonic() - _t_parallel)
         self._attach_thesis_breaks(swarm_results)
-        elapsed = self._post_scan_enrichment(ctx, swarm_results)
+        with _timing.timed("enrichment"):
+            elapsed = self._post_scan_enrichment(ctx, swarm_results)
         try:
             self._post_scan_metrics(ctx, swarm_results, elapsed)
         except Exception as e:
@@ -2155,7 +2333,20 @@ class AlphaHiveDailyReporter:
                     },
                 }
 
-                enhanced = self.ml_generator.generate_ml_enhanced_report(ticker, ticker_data)
+                # v0.45.135：蜂群派生参数成对传入。
+                # ⚠️ `swarm_direction` 自 v0.45.132 起就有，但**只接在
+                # `generate_ml_report.main()` 的 CLI 路径上**——生产日扫走的是
+                # `--swarm` → `run_swarm_scan` → 本函数，这里一直没传，于是
+                # 第 5 章的「同标的 + 同方向」历史回溯在生产上从未生效。
+                # 同一份 swarm_data[ticker] 就在下一行被用，拿得到。
+                _sr = swarm_data.get(ticker) or {}
+                enhanced = self.ml_generator.generate_ml_enhanced_report(
+                    ticker, ticker_data,
+                    swarm_direction=_sr.get("direction"),
+                    swarm_dimension_scores=_sr.get("dimension_scores"),
+                    swarm_final_score=_sr.get("final_score"),
+                    swarm_agent_directions=_sr.get("agent_directions"),
+                )
 
                 if ticker in swarm_data:
                     enhanced["swarm_results"] = swarm_data[ticker]
@@ -2213,6 +2404,41 @@ class AlphaHiveDailyReporter:
                 )
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
+
+        # ── v0.45.145：ML 概率常数退化闸 ─────────────────────────────
+        # 2026-09-04 全部 12 份 probability 逐位相同（0.5899693787928219），
+        # 报告照常印「ML 预测 59.0%」、退出码 0、日志正常——没有任何东西会红。
+        # 本函数是当日 analysis-*-ml-*.json 的**主力生产者**（编排器 Step 2
+        # 内部；generate_ml_report.main() 只是 Step 3 补跑），闸必须在这里。
+        #
+        # ⚠️ 刻意 raise_on_degenerate=False，**不要改成抛**：本函数的调用点
+        # `_save_output_files` 只兜 (OSError, ValueError, KeyError, TypeError)，
+        # MLModelDegenerateError 是 RuntimeError、会穿透并连带杀掉 index.html
+        # 生成与 gh-pages 部署——正是那段 except 上方注释记着的 v0.43.17 事故。
+        # 「变红」靠：ERROR 日志 + 判决挂到 report（main 最终返回的同一个对象）
+        # + __main__ 出非零退出码。不发 Slack（CLAUDE.md「Slack 通知精简规则」）。
+        try:
+            from ml_model_guard import enforce_day as _enforce_day
+            _mg = _enforce_day(
+                self.report_dir, self.date_str,
+                raise_on_degenerate=False, logger=_log,
+            )
+            report["ml_model_guard"] = {
+                "verdict": _mg.verdict,
+                "n_files": _mg.n_files,
+                "n_numeric": _mg.n_numeric,
+                "distinct": _mg.distinct,
+                "modal_count": _mg.modal_count,
+                "snapshot_present": _mg.snapshot_present,
+                "exit_code": _mg.exit_code,
+            }
+        except ImportError as _ge:
+            # 「闸装不上」与「闸响了」一样不该报告健康：记成 guard_missing，
+            # 沿用 Step 10/11/12 的 3 = 无法判定。
+            _log.error(
+                "🚨 ML 常数退化闸未装上（%s）——本次扫描没有这道观测点", _ge
+            )
+            report["ml_model_guard"] = {"verdict": "guard_missing", "exit_code": 3}
 
         return generated
 
@@ -2367,7 +2593,8 @@ class AlphaHiveDailyReporter:
 
         # ML 增强 HTML 报告（必须在 index.html 前完成）
         try:
-            ml_tickers = self._generate_ml_reports(report)
+            with _timing.timed("ml_reports"):
+                ml_tickers = self._generate_ml_reports(report)
             if ml_tickers:
                 _log.info("ML 增强报告完成：%s", ml_tickers)
                 _log.info("ML 报告: %s", ", ".join(ml_tickers))
@@ -2824,10 +3051,12 @@ def main():
         print("   - 跳过 save_report（不覆盖本地 dashboard）")
         print("   - 跳过 auto_commit_and_notify（不推 gh-pages，保留线上好数据）")
         print("   - 常见原因：yfinance 429 限流 → 断路器熔断。请稍后重跑。")
+        _timing.write(reporter.date_str, extra={"early_exit": "empty_scan_guard"})
         return report
 
     # 保存报告（Hive app 通过 .swarm_results_{date}.json 自动同步）
-    report_path = reporter.save_report(report)
+    with _timing.timed("save_report"):
+        report_path = reporter.save_report(report)
     _log.info("报告已保存：%s", report_path)
 
     # v0.23.1: --samples-only 模式跳过所有部署 / Slack / gh-pages，只为积累 pheromone.db 样本
@@ -2844,7 +3073,8 @@ def main():
     # 三端同步：GitHub 提交推送 + Hive App + Slack
     print("\n📡 同步三端：GitHub / Hive App / Slack...")
     try:
-        sync_results = reporter.auto_commit_and_notify(report)
+        with _timing.timed("deploy"):
+            sync_results = reporter.auto_commit_and_notify(report)
         git_ok = sync_results.get("git_push", {}).get("success", False)
         deploy_env = sync_results.get("deploy_env", "production")
         remote_label = sync_results.get("git_push", {}).get("remote", "origin")
@@ -2857,10 +3087,12 @@ def main():
         _log.warning("三端同步部分失败: %s", e)
         print(f"   ⚠️  三端同步出错：{e}")
 
+    # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
+    _timing.write(reporter.date_str)
     return report
 
 
-def _force_exit_if_threads_stuck(grace_seconds: float = 10.0) -> None:
+def _force_exit_if_threads_stuck(grace_seconds: float = 10.0, exit_code: int = 0) -> None:
     """全部工作完成后，若仍有卡死的工作线程则强制退出（v0.42.8 安全网）
 
     为什么需要：`concurrent.futures` 通过 `threading._register_atexit` 注册了
@@ -2872,7 +3104,11 @@ def _force_exit_if_threads_stuck(grace_seconds: float = 10.0) -> None:
 
     本函数只在**所有产出都已落盘之后**调用，因此强退是安全的：
     数据库、报告、gh-pages 同步均已完成。给 grace_seconds 让线程有机会自然结束，
-    超时则 `os._exit(0)` 跳过 atexit 直接结束进程。
+    超时则 `os._exit(exit_code)` 跳过 atexit 直接结束进程。
+
+    ⚠️ v0.45.145：`exit_code` 不是可有可无的参数。此前这里硬写 `os._exit(0)`，
+    于是「线程卡死」这条路径会把调用方要传出去的失败（如 ML 概率退化成常数）
+    悄悄改写成成功——正是本项目反复犯的那个形状。调用方必须把码传进来。
     """
     import sys
     import threading
@@ -2904,9 +3140,20 @@ def _force_exit_if_threads_stuck(grace_seconds: float = 10.0) -> None:
         )
         sys.stdout.flush()
         sys.stderr.flush()
-        os._exit(0)
+        # v0.45.145：这里原本硬写 0。线程卡死这条路径同样要把 exit_code 带出去，
+        # 否则「ML 退化」会被强退悄悄改写成成功——正是本次要治的那个形状。
+        os._exit(exit_code)
 
 
 if __name__ == "__main__":
-    main()
-    _force_exit_if_threads_stuck()
+    _result = main()
+    # v0.45.145：ML 概率退化成常数 → 退出码 1（Step 10/11/12 约定：1 = 要人动手）。
+    # 判决由 _generate_ml_reports 挂在 report 上，main() 返回的正是同一个对象。
+    # ⚠️ 键缺失 ≠ 健康：那说明 ML 批量根本没跑到闸（另有 warning 记录），
+    # 那条路径的退出码语义不在本版改动面内，刻意不改。
+    _guard = (_result.get("ml_model_guard") or {}) if isinstance(_result, dict) else {}
+    _exit_code = 1 if _guard.get("verdict") in ("constant", "near_constant") else 0
+    _force_exit_if_threads_stuck(exit_code=_exit_code)
+    if _exit_code:
+        import sys as _sys_main
+        _sys_main.exit(_exit_code)

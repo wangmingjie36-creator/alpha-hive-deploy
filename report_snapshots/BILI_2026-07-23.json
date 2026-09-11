@@ -16,6 +16,7 @@
     "QueenDistiller": 5.11,
     "BuzzBeeWhisper": 4.77
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -29,7 +30,7 @@
   "actual_prices": {
     "t1": 18.530000686645508,
     "t7": 18.989999771118164,
-    "t30": null
+    "t30": 15.48
   },
-  "created_at": "2026-08-11T06:07:43.817117"
+  "created_at": "2026-09-09T00:24:43.718137"
 }

@@ -7,11 +7,77 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 import statistics
 from dataclasses import dataclass
 
 _log = logging.getLogger("alpha_hive.ml_predictor")
+
+def _snapshot_saved_model(filename: str) -> None:
+    """把刚写盘的模型留一份带日期快照（v0.45.145）。
+
+    2026-09-04 模型退化成常数函数**无法事后归因**，因为 `ml_model.json` /
+    `ml_model_cache.json` 是原地覆盖、没有任何版本留存。快照落在
+    `ml_model_history/{stem}-YYYY-MM-DD.json`，配 `manifest.jsonl` 记
+    sha256 / 样本数 / 训练精度，下次退化可直接捞出当天的模型重放。
+
+    ⚠️ 保住模型本身比留快照重要，所以这里吞掉快照自身的失败——
+    「谁会红」的答案是：`ml_model_guard` 会在失败时 `_log.error`，
+    且当日快照缺失会出现在每日那条闸的日志里（`snapshot_present`）。
+
+    ⚠️ 每一个 `def save_model` 都必须调它。
+    `tests/test_ml_model_guard.py::TestSnapshotWiring` 用 AST 盯着这件事
+    （取 AST 不取子串——子串守卫会被解释它的注释自己触发）。
+    """
+    try:
+        from ml_model_guard import snapshot_model_file
+        snapshot_model_file(filename)
+    except ImportError as e:
+        _log.error(
+            "🚨 模型快照模块缺失（%s）——本次保存没有留版本，下次退化将无法归因", e
+        )
+
+
+
+# ---------------------------------------------------------------------------
+# 模型产物路径 —— 唯一真相（v0.45.149）
+# ---------------------------------------------------------------------------
+# 模型文件名的唯一真相在 `hive_logger.PATHS.ml_model`（与 PATHS.db 同族）。
+# 这里刻意不再复制一份文件名常量：复制一份就有两个真相。
+
+# `_eval_oos_purged` 的最小样本量。`train()` 的闸门、它的日志文案、以及
+# `HGBModel.load_model` 的中毒守卫共用这**一个**数：守卫判的正是「样本少到
+# OOS 验证根本没被尝试过」，所以它必须**导出**自这个闸门，而不是在别处再写
+# 一遍 60（v0.45.109 的教训：魔数若等于别处某个数，就不该被写死第二遍）。
+_OOS_MIN_SAMPLES = 60
+
+
+class PoisonedModelError(ValueError):
+    """磁盘上的模型带着「被测试夹具覆盖」的机读签名，拒绝加载。
+
+    **继承 `ValueError` 是有意的**：生产三个 `load_model` 调用点
+    （`alpha_hive_daily_report` L460 / L874 两个 try、
+    `generate_ml_report._load_model_from_disk`）的 except 子句都已经捕获
+    `ValueError`，抛它会走进它们**既有的**「重训」恢复分支，而不是把整条
+    流水线打断。换成自定义基类或 `RuntimeError` 就变成生产事故。
+    """
+
+
+def default_model_path() -> str:
+    """`save_model` / `load_model` 的默认落盘位置。
+
+    **必须是函数，不能是模块级常量。** `PATHS.home` 每次都重读
+    `ALPHA_HIVE_HOME` 环境变量，而 `tests/conftest.py::_isolate_env` 是在
+    **每个测试开始时**才 setenv 的。写成模块级常量的话，值在 import 那一刻
+    就冻住了 —— 只要 `ml_predictor` 被任何一个更早的测试导入过，隔离就静默
+    失效，失效方式和本次事故一模一样（把夹具模型写回仓库根）。
+
+    不做 try/except 兜底：兜底只能兜出一个相对路径，而相对路径正是本次
+    事故的根因。`hive_logger` 无项目内依赖，导不进来是环境整体坏了，
+    不该在这里被改写成「悄悄退回 cwd」。
+    """
+    from hive_logger import PATHS
+    return str(PATHS.ml_model)
 
 
 @dataclass
@@ -189,11 +255,22 @@ class HistoricalDataBuilder:
 # 却直接与 `momentum_5d`（**百分点**）相加当预期收益。于是"B 级催化剂"
 # = +10 个百分点的 7 日预期收益。
 #
-# ⚠️ 生产里 `rival_bee.py` 还把特征写死成常量（`catalyst_quality="B+"`、
-# `crowding_score=50.0`、`iv_rank=50.0`、`put_call_ratio=1.0`），代入旧公式得
-# **`expected_7d = 8.0 + 0.8 × momentum_5d`** —— 一个截距 +8% 的一元线性式。
-# 该闭式在 1057 个配对样本上**零反例**。特征硬编码是另一个独立缺陷，
-# 见 `swarm_agents/rival_bee.py` 处注释，本次未动。
+# 📌 历史（写于 v0.44.1，**已不再成立**，保留是因为下面那个闭式的实证依据
+# 建立在它之上）：当时 `rival_bee.py` 把四个特征写死成常量
+# （`catalyst_quality="B+"`、`crowding_score=50.0`、`iv_rank=50.0`、
+# `put_call_ratio=1.0`），代入旧公式得 **`expected_7d = 8.0 + 0.8 × momentum_5d`**
+# —— 一个截距 +8% 的一元线性式，在 1057 个配对样本上**零反例**。
+#
+# ✅ v0.44.3 已修：四个特征改为从信息素板读真实值，回落值刻意选**可与真实值
+# 区分**的中性档并留 debug 日志（`catalyst_quality` 走
+# `catalyst_quality_from_score(ChronosBee.self_score)`、缺失回落 "B" 而非 "B+"；
+# `crowding_score` 走 `get_real_crowding_metrics`；`iv_rank`/`put_call_ratio`
+# 读 OracleBee 的 `details`）。
+#
+# ⚠️ v0.45.135 记：本段的旧表述用的是现在时（"还把特征写死成常量"），
+# 在 v0.44.3 之后又当作现状被引用了一次。**结论被推翻后要 grep 它在注释里的
+# 所有副本**——同 v0.45.75 的教训（一条已撤回的因果在 7 个文件里继续当设计
+# 理由用了 4 天）。
 #
 # 怎么修
 # -----
@@ -216,14 +293,29 @@ _CATALYST_GRADE_CUTS = ((8.5, "A+"), (7.5, "A"), (6.5, "B+"), (5.5, "B"))
 def catalyst_quality_from_score(score) -> str:
     """把 ChronosBee 的催化剂维度分（0~10）转成 A+/A/B+/B/C 等级。
 
-    v0.44.3 提为模块级单一真相。此前同一套阈值在**至少三处**各写一份嵌套
-    `_cat_qual`（`ml_predictor.py` 内、`alpha_hive_daily_report.py`、
-    `generate_ml_report.py`），与 `expected_returns` 曾经的三重复制是同一个
-    反模式 —— 阈值一改就得记住改三处，漏一处就静默产生两套口径的历史样本。
+    v0.44.3 提为模块级单一真相，v0.45.142 才真的做到。此前同一套阈值在
+    **至少三处**各写一份嵌套 `_cat_qual`（`ml_predictor.py` 内、
+    `alpha_hive_daily_report.py`、`generate_ml_report.py`），与
+    `expected_returns` 曾经的三重复制是同一个反模式 —— 阈值一改就得记住改
+    三处，漏一处就静默产生两套口径的历史样本。⚠️ v0.44.3 收掉了另外两处，
+    **本模块内 `build_training_data_from_db` 里的那一份留到了 v0.45.142**，
+    而这段 docstring 在这 4 个月里一直宣称已经统一——「我已经改了」这句话
+    本身要核对（v0.45.121）。
 
     分数不可用（None/NaN/非数值）时返回 "B"（对应 magnitude 0.9，接近中性），
     **不返回 "B+"** —— "B+" 是 magnitude 1.0 的基准档，用它做缺失值会让
     "拿不到数据"与"质量正好中等"不可区分。
+
+    ⚠️ v0.45.147：上面这条理由方向对，但**"B" 恰好是众数**——生产实测
+    "B" 占真实等级的 **57.4%**（461/803），是五档里最常见的一档，
+    于是缺失与它完全同形，比用 "B+" 更糟。而且 "B" 是合法枚举值 ⇒
+    `_missing_features` 不算它缺 ⇒ 两套账目对不上（58/803 份）。
+    **本函数的契约不变**（`swarm_agents/rival_bee.py:87` 依赖它），
+    改的是调用方：`generate_ml_report._prepare_ml_input` 自 v0.45.147 起
+    在分数不可用时**根本不调本函数**，直接给 `None`。
+    rival_bee 那一处未改——它的产物经 `ml_auxiliary` → `ml_adjustment` →
+    `final_score` 进 `predictions` 表，动它需要 `_COHORT_HISTORY` 世代边界，
+    是另一个量级的改动，已登记为独立任务。
     """
     try:
         v = float(score)
@@ -235,6 +327,71 @@ def catalyst_quality_from_score(score) -> str:
         if v >= cut:
             return grade
     return "C"
+
+
+# ── ML 特征 volatility / market_sentiment 的唯一口径（v0.45.137）──────────
+#
+# 这两个槽的**训练**值一直由 `build_training_data_from_db` 从蜂群维度分派生，
+# 而**服务**端（`generate_ml_report._prepare_ml_input`）读的是一个从未被赋值过
+# 的 `self._swarm_cache`，于是恒为常数 5.0 / 0.0（803 份生产 JSON 实测 802 份
+# 如此）。提为模块级函数是为了让两端**调同一个函数**，而不是各抄一份常数——
+# 同 v0.44.3 对 `catalyst_quality_from_score` 的处理。
+#
+# ⚠️ 名实不符，且**本版不修**：`volatility` 槽里装的不是波动率，是 risk_adj 的
+# 反转代理。真实年化波动率（BuzzBee `volatility_20d`，中位 39.66）与本口径
+# （中位 11.65）Spearman ρ=+0.068、scale 差约 4×，**不能**直接接进来——那会用
+# A 训练、拿 B 服务。要真的喂波动率，得先让 `predictions` 表带上波动率列并前向
+# 累积，属世代边界范畴（`ic_rerun_readiness._COHORT_HISTORY`）。
+
+# risk_adj 满分（10）时的下限。低于 1.0 的"波动率"在本坐标系里没有意义。
+_VOLATILITY_FLOOR = 1.0
+# 维度分是 0~10、中性 5；两个尺度因子决定派生值域：
+#   volatility       → [1.0, 25.0]，训练实测 [1.00, 19.40]
+#   market_sentiment → [-100, 100]，训练实测 [-46.8, 62.0]
+_VOLATILITY_PER_POINT = 2.5
+_SENTIMENT_PER_POINT = 20.0
+_DIMENSION_NEUTRAL = 5.0
+_DIMENSION_MAX = 10.0
+
+
+def usable_dim(value) -> bool:
+    """蜂群维度分是不是一个可用的数值。
+
+    v0.45.142 从 `generate_ml_report._usable_dim` 搬到这里：训练侧
+    （`build_training_data_from_db`）与服务侧本就该用同一个类型闸，而
+    `generate_ml_report` 反向依赖 `ml_predictor`，谓词只能住在这一端。
+
+    `bool` 是 `int` 子类，必须显式排除：`True` 会当成 1.0 一路通过 float
+    比较，在本仓已经酿过事故（v0.45.121 把 `True` 当"强看空"放行）。NaN 同理
+    ——它对任何比较都返回 False，却是 truthy，`or` / `if x:` 都拦不住；且
+    `json.loads` **接受**裸 `NaN` 字面量，所以从 `dimension_scores` 解出
+    NaN 是可能的。写法与本仓其余守卫一致，不自己发明。
+    """
+    return (isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value == value)
+
+
+def volatility_from_risk_adj(risk_adj: float) -> float:
+    """蜂群 risk_adj 维度分（0~10）→ ML `volatility` 特征。
+
+    风控分越低 = 风险越高 = 波动越大，故取反转映射。
+    调用方必须**先**确认 `risk_adj` 是可用数值（非 None/NaN/bool）——
+    取不到时正确的做法是把特征标为缺失（`None`），不是喂一个中性值进来。
+    """
+    return max(_VOLATILITY_FLOOR,
+               (_DIMENSION_MAX - risk_adj) * _VOLATILITY_PER_POINT)
+
+
+def market_sentiment_from_score(sentiment: float) -> float:
+    """蜂群 sentiment 维度分（0~10，中性 5）→ ML `market_sentiment` 特征（-100~+100）。
+
+    ⚠️ 返回值**已经**归到 -100~+100。服务端旧代码在这一步之后还套了一层
+    「三段式量表自动识别」（`abs(x)<=1 → *100`、`abs(x)<=10 → *10`），
+    那是为来源不明的原始情绪分准备的；对本函数的输出再跑一遍会把接近中性的
+    值放大 10~100 倍（维分 5.2 → 4.0 → 40.0）。别加回去。
+    """
+    return (sentiment - _DIMENSION_NEUTRAL) * _SENTIMENT_PER_POINT
 
 # ── 拥挤度：**刻意不进入 expected_returns**（v0.44.2 决定）───────────────
 #
@@ -411,10 +568,15 @@ class SimpleMLModel:
         self.training_accuracy = 0.0
         self.feature_stats: Dict = {}
 
-    def encode_catalyst_quality(self, quality: str) -> float:
-        """编码催化剂质量"""
-        mapping = {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}
-        return mapping.get(quality, 0.5)
+    def encode_catalyst_quality(self, quality) -> float:
+        """编码催化剂质量。v0.45.147 起委托 `_encode_catalyst`，不再各写一份表。
+
+        此前本类与模块级 `_encode_catalyst` 各有一份**内容相同**的映射 ——
+        与 `catalyst_quality_from_score` docstring 抱怨的「阈值在三处各写一份」
+        同一个反模式（v0.45.142 收掉了档位阈值，编码表留到了这里）。
+        改一处漏一处就会静默产生两套口径。
+        """
+        return _encode_catalyst(quality)
 
     def normalize_feature(
         self, value, min_val: float, max_val: float
@@ -635,8 +797,11 @@ class SimpleMLModel:
             }
         return dict(sorted(importance.items(), key=lambda x: -x[1]["weight"]))
 
-    def save_model(self, filename: str = "ml_model.json"):
+    def save_model(self, filename: Optional[str] = None):
         """保存模型（JSON 格式，安全序列化）"""
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
         model_data = {
             "weights": self.weights,
             "feature_stats": self.feature_stats,
@@ -648,9 +813,13 @@ class SimpleMLModel:
             json.dump(model_data, f, ensure_ascii=False, indent=2)
 
         _log.info("模型已保存：%s", filename)
+        _snapshot_saved_model(filename)
 
-    def load_model(self, filename: str = "ml_model.json"):
+    def load_model(self, filename: Optional[str] = None):
         """加载模型（JSON 格式，安全反序列化）"""
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
         # 兼容旧版 pickle 文件
         if filename.endswith(".pkl") and not os.path.exists(filename):
             filename = filename.replace(".pkl", ".json")
@@ -682,9 +851,28 @@ FEATURE_NAMES = [
 FEATURE_NAMES_V1 = ["crowding", "catalyst", "momentum", "volatility", "sentiment"]
 
 
-def _encode_catalyst(quality: str) -> float:
-    """编码催化剂质量（共享工具函数）"""
-    return {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}.get(quality, 0.5)
+#: 等级 → 数值编码。**本模块唯一真相**，三个模型类都走 `_encode_catalyst`。
+#: （`ml_predictor_extended.py:567` 还有第四份，那是本模块导入失败时的应急降级，
+#: 只有 rival_bee 会走且从不传 None，v0.45.147 未动，在此登记以免遗忘。）
+_CATALYST_ENCODING = {"A+": 1.0, "A": 0.85, "B+": 0.70, "B": 0.55, "C": 0.40}
+
+
+def _encode_catalyst(quality) -> float:
+    """编码催化剂质量；`None` → NaN（缺失），未知字面量 → 0.5（沿用旧行为）。
+
+    v0.45.147：`None` 此前和未知字面量一样落到 **0.5**，而 0.5 恰好落在
+    C(0.40) 与 B(0.55) **之间** —— 一个真实等级永远产不出的值，树模型却会
+    拿它当一个真实的中间档去切分。改 NaN 后 HGB 走原生缺失处理，
+    与其余 `None` 特征同一条路；`SimpleMLModel` 侧由 `normalize_feature`
+    的 `_FEATURE_NEUTRAL` 接住，也不会抛。
+
+    未知字面量（如上游传了 "X"）仍返回 0.5：本仓无生产路径产得出它，
+    改它属于另一个问题（`_missing_features` 检查的是原始字符串字段，
+    对 "X" 既不是 None 也不是 NaN，改成 NaN 反而会让两套账目重新对不上）。
+    """
+    if quality is None:
+        return float("nan")
+    return _CATALYST_ENCODING.get(quality, 0.5)
 
 
 def _extract_features(data: TrainingData) -> list:
@@ -903,9 +1091,13 @@ class SGDMLModel:
         }
 
     # ---- 序列化（JSON，无 pickle）----
-    def save_model(self, filename: str = "ml_model.json"):
+    def save_model(self, filename: Optional[str] = None):
         """保存模型到 JSON"""
         import numpy as np
+
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
 
         model_data: Dict = {
             "model_type": "sgd",
@@ -941,10 +1133,15 @@ class SGDMLModel:
             json.dump(model_data, f, ensure_ascii=False, indent=2)
 
         _log.info("SGD 模型已保存：%s", filename)
+        _snapshot_saved_model(filename)
 
-    def load_model(self, filename: str = "ml_model.json"):
+    def load_model(self, filename: Optional[str] = None):
         """从 JSON 加载模型（兼容旧 SimpleMLModel 格式）"""
         import numpy as np
+
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
 
         if filename.endswith(".pkl") and not os.path.exists(filename):
             filename = filename.replace(".pkl", ".json")
@@ -1076,13 +1273,6 @@ def build_training_data_from_db(
     if not os.path.exists(db_path):
         return []
 
-    def _cat_qual(v: float) -> str:
-        if v >= 8.5: return "A+"
-        if v >= 7.5: return "A"
-        if v >= 6.5: return "B+"
-        if v >= 5.5: return "B"
-        return "C"
-
     try:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
@@ -1132,7 +1322,7 @@ def build_training_data_from_db(
             #
             # 实测代价：910 条训练候选里 96.9% 五维齐全，剔除只损失 28 条（3.1%）。
             # 用 3% 样本换掉伪造特征向量，划算。
-            if not all(isinstance(ds.get(k), (int, float)) for k in _REQUIRED_DIMS):
+            if not all(usable_dim(ds.get(k)) for k in _REQUIRED_DIMS):
                 _skipped_incomplete += 1
                 continue
             ad = json.loads(r["agent_directions"] or "{}")
@@ -1160,7 +1350,10 @@ def build_training_data_from_db(
             _momentum = (_sig - 5.0) * 2.0 + (_sent - 5.0) * 1.5
 
             # volatility: risk_adj 低 → 高风险 → 高波动（反转映射）
-            _vol = max(1.0, (10.0 - _risk) * 2.5)
+            # v0.45.137：公式提为 `volatility_from_risk_adj`，与服务路径
+            # （`generate_ml_report._prepare_ml_input`）调**同一个函数**。
+            # 此前服务端读一个从未被赋值的 `self._swarm_cache`，恒得常数 5.0。
+            _vol = volatility_from_risk_adj(_risk)
 
             # iv_rank: 优先 DB 真实值，否则从 odds 维度推导
             try:
@@ -1180,10 +1373,10 @@ def build_training_data_from_db(
                 ticker=r["ticker"],
                 date=r["date"],
                 crowding_score=_sig * 10,
-                catalyst_quality=_cat_qual(_cat),
+                catalyst_quality=catalyst_quality_from_score(_cat),
                 momentum_5d=round(_momentum, 2),
                 volatility=round(_vol, 2),
-                market_sentiment=(_sent - 5) * 20,
+                market_sentiment=market_sentiment_from_score(_sent),
                 actual_return_3d=return_t7 * 0.4,
                 actual_return_7d=return_t7,
                 actual_return_30d=return_t7 * 2.5,
@@ -1345,7 +1538,7 @@ class HGBModel:
         # embargo_days（=标签横跨期 7 天，防 t+7 标签泄漏），在 clone 模型上
         # 评估真实泛化精度，然后才全样本重训供生产预测（验证与部署分离）。
         self.oos_accuracy = None
-        if len(training_data) >= 60:
+        if len(training_data) >= _OOS_MIN_SAMPLES:
             try:
                 self.oos_accuracy = self._eval_oos_purged(
                     training_data, test_pct=0.25, embargo_days=7)
@@ -1387,7 +1580,8 @@ class HGBModel:
             _log.debug("Permutation importance 计算失败: %s", _e_pi)
 
         _n_iter = getattr(self._clf, "n_iter_", 0)
-        _oos_txt = f"{self.oos_accuracy:.1f}%" if self.oos_accuracy is not None else "N/A(样本<60)"
+        _oos_txt = (f"{self.oos_accuracy:.1f}%" if self.oos_accuracy is not None
+                    else f"N/A(样本<{_OOS_MIN_SAMPLES})")
         _log.info(
             "HGB 训练完成：%d 样本，%d 轮迭代，OOS准确率 %s（in-sample %.1f%% 仅参考），Top 特征 %s",
             len(training_data), _n_iter, _oos_txt, self.training_accuracy,
@@ -1447,10 +1641,14 @@ class HGBModel:
         }
 
     # ---- 序列化 ----
-    def save_model(self, filename: str = "ml_model.json"):
+    def save_model(self, filename: Optional[str] = None):
         """保存模型到 JSON（pickle base64 + 元数据）"""
         import base64
         import pickle
+
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
 
         model_data: Dict = {
             "model_type": "hgb",
@@ -1477,11 +1675,17 @@ class HGBModel:
             _log.info("HGB 模型已保存：%s", filename)
         except (OSError, TypeError) as e:
             _log.warning("HGB save_model 失败：%s", e)
+        else:
+            _snapshot_saved_model(filename)
 
-    def load_model(self, filename: str = "ml_model.json") -> bool:
+    def load_model(self, filename: Optional[str] = None) -> bool:
         """加载 HGB 模型（支持 pickle base64 恢复）"""
         import base64
         import pickle
+
+        # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
+        if filename is None:
+            filename = default_model_path()
 
         if not os.path.exists(filename):
             return False
@@ -1500,6 +1704,37 @@ class HGBModel:
             _log.warning("特征维度不匹配（%d vs %d），需重新训练",
                          data.get("feature_count", 0), len(FEATURE_NAMES))
             return False
+
+        # ── v0.45.149: 拒绝「被测试夹具覆盖」的模型 ──────────────────────
+        # 判据是 `oos_accuracy` 而**不是** `training_accuracy`。夹具模型的训练
+        # 精度反而更好看（实测 96.67% / 100.0%，真模型只有 71.63%），拿精度判
+        # 会把最该拦的那个当成「训练得好」放行 —— 这是本条最关键的一句。
+        #
+        # 为什么 `oos_accuracy is None` 是机读签名：真实训练路径只要样本
+        # >= `_OOS_MIN_SAMPLES` 就一定走 `_eval_oos_purged` 把它填上；样本不足
+        # 才留 None（见 `train()` 里那个同名闸门）。
+        #
+        # 两个条件必须**同时**成立。样本够却 oos 为 None 是另一件事——OOS 验证
+        # 自己抛了异常（`train()` 里那条 except 会 warning）——那种模型不该被拒，
+        # 否则本守卫会顺手废掉一个合法的大样本模型。
+        _n_raw = data.get("n_samples_seen")
+        _n = _n_raw if usable_dim(_n_raw) else 0   # 类型闸照抄本仓 `usable_dim`
+        if data.get("oos_accuracy") is None and _n < _OOS_MIN_SAMPLES:
+            # 先 log 再 raise：调用方之一（alpha_hive_daily_report L469）
+            # 只把异常记成 `_log.debug`，INFO 级别下等于没人知道。
+            # CLAUDE.md 的硬检查项——「这个失败，下游怎么知道？」——要求
+            # 观测点不能依赖调用方的心情，所以这里自己红一次。
+            _log.error(
+                "拒绝加载模型 %s：oos_accuracy 缺失且样本仅 %s 条（< %d）。"
+                "这是「跑测试时被夹具模型覆盖」的机读签名 —— "
+                "训练精度 %.1f%% 看着很高恰恰是夹具的特征，不要拿它判。",
+                filename, _n_raw, _OOS_MIN_SAMPLES,
+                data.get("training_accuracy", 0.0) or 0.0,
+            )
+            raise PoisonedModelError(
+                f"{filename}: oos_accuracy=None 且 n_samples_seen={_n_raw} "
+                f"(< {_OOS_MIN_SAMPLES})，疑似被测试夹具覆盖，拒绝加载"
+            )
 
         # 恢复 pickle 模型
         model_bytes_str = data.get("model_bytes")
@@ -1573,11 +1808,13 @@ class MLPredictionService:
     def train_model(self) -> Dict:
         """训练模型 — 优先使用真实数据，不足时降级到硬编码"""
         real_data = []
+        _min_samples = 30
         try:
             from config import ML_TRAINING_CONFIG as _MTC
+            _min_samples = _MTC.get("min_real_samples", 30)
             if _MTC.get("use_real_data", True):
                 real_data = build_training_data_from_db(
-                    min_samples=_MTC.get("min_real_samples", 30),
+                    min_samples=_min_samples,
                     max_rows=_MTC.get("max_training_rows", 500),
                 )
         except (ImportError, OSError) as e:
@@ -1588,7 +1825,13 @@ class MLPredictionService:
             training_data = real_data
         else:
             training_data = self.data_builder.get_training_data()
-            _log.info("真实数据不足，使用 %d 条硬编码数据", len(training_data))
+            # v0.45.142：别替失败原因下结论。`historical_records` 既可能是
+            # `HistoricalDataBuilder.__init__` 的硬编码样本，也可能是调用方
+            # （`generate_ml_report`）用更低的阈值预载进来的**真实**数据——
+            # 旧文案一律说成「硬编码数据」，在后一种情形下是假的（实测过：
+            # 日志说「使用 200 条硬编码数据」，那 200 条全是库里的真实记录）。
+            _log.info("DB 直读未过 %d 条样本闸，改用 data_builder 现有的 %d 条记录训练",
+                      _min_samples, len(training_data))
 
         result = self.model.train(training_data)
 

@@ -21,9 +21,11 @@ import data_pipeline as dp
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch):
     td.reset_stats()
+    td.clear_bars_cache()      # v0.45.125：fetch_volume_ratio 走进程内日线缓存，会跨测试泄漏
     monkeypatch.setattr(td, "_limiter", None)
     yield
     td.reset_stats()
+    td.clear_bars_cache()
 
 
 def _resp(payload):

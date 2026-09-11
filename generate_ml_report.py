@@ -6,6 +6,9 @@
 import atexit
 import html as _html
 import json
+import math
+import sqlite3
+from typing import Optional
 import argparse
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +18,10 @@ from advanced_analyzer import AdvancedAnalyzer
 from ml_predictor import (
     MLPredictionService,
     TrainingData,
+    # v0.45.142：类型闸的单一真相搬到 ml_predictor，与训练侧共用一个谓词
+    usable_dim as _usable_dim,
 )
+import config
 from config import WATCHLIST
 from hive_logger import PATHS, get_logger, pdt_today
 
@@ -58,11 +64,23 @@ class MLEnhancedReportGenerator:
     _model_cache = {}          # 内存缓存（同一进程内）
     _cache_date = None         # 缓存日期
     _training_lock = Lock()    # 防止并发重复训练
-    _model_file = PATHS.home / "ml_model_cache.json"  # 磁盘缓存文件（JSON，安全序列化）
+    # ⚠️ v0.45.149：这里**不能**是类属性。它曾是
+    #     `_model_file = PATHS.home / "ml_model_cache.json"`
+    # —— 类体在 import 那一刻求值一次就冻住，而 `tests/` 里有 7 个模块在**模块级**
+    # import 本类，pytest 收集期跑在任何 fixture 之前（`ALPHA_HIVE_HOME` 尚未设），
+    # 于是整个 session 冻成**仓库根**，`_isolate_env` 的沙箱对它完全无效
+    # ⇒ 跑一次全套测试就把生产真正读的那份模型换成了测试夹具模型。
+    # property 是调用时求值，写不出这个 bug。
 
     # ⭐ Task 3: 异步 HTML 生成（后台文件写入）
     _file_writer_pool = None   # 异步文件写入线程池
     _writer_lock = Lock()      # 文件写入锁（防止并发冲突）
+
+    # 回退预加载的样本量下限。**有意**低于 `ML_TRAINING_CONFIG.min_real_samples`
+    # （30）：`MLPredictionService.train_model()` 自己会用 30 作闸直读 DB，闸过了
+    # 就用它的结果、这里预载的数据被整包丢弃；只有闸不过（样本稀少）时才轮得到
+    # `historical_records`。两处都用 30 的话，这条回退永远够不着。
+    MIN_REAL_SAMPLES = 10
 
     def __init__(self):
         self.analyzer = AdvancedAnalyzer()
@@ -97,9 +115,8 @@ class MLEnhancedReportGenerator:
                 # 双重检查（防止并发重复训练）
                 if today not in self._model_cache and not self._check_disk_cache(today):
                     _log.info("初始化 ML 模型（首次训练）...")
-                    MIN_REAL_SAMPLES = 10
                     real_data = self._build_real_training_data()
-                    if len(real_data) >= MIN_REAL_SAMPLES:
+                    if len(real_data) >= self.MIN_REAL_SAMPLES:
                         _log.info("✅ [ML-REAL] 使用 %d 条真实验证数据训练 ML 模型", len(real_data))
                         self._training_data_source = "real"
                         self.ml_service.data_builder.historical_records = real_data
@@ -108,13 +125,13 @@ class MLEnhancedReportGenerator:
                             _log.warning(
                                 "⚠️ [ML-MIXED] 真实数据仅 %d 条（不足 %d），"
                                 "回退到硬编码样本训练，预测置信度受限",
-                                len(real_data), MIN_REAL_SAMPLES,
+                                len(real_data), self.MIN_REAL_SAMPLES,
                             )
                         else:
                             _log.warning(
                                 "⚠️ [ML-SAMPLE] 无真实验证数据，使用硬编码样本训练，"
                                 "预测结果仅供参考（请积累 %d+ 条 T+7 验证记录后重训）",
-                                MIN_REAL_SAMPLES,
+                                self.MIN_REAL_SAMPLES,
                             )
                         self._training_data_source = "sample"
                     self.ml_service.train_model()
@@ -132,67 +149,56 @@ class MLEnhancedReportGenerator:
                         self._model_cache[today] = self.ml_service.model
 
     def _build_real_training_data(self) -> list:
-        """从 pheromone.db 读取真实验证数据构建训练集（T+7 已验证）"""
+        """从 pheromone.db 读取真实验证数据构建训练集（T+7 已验证）。
+
+        v0.45.142：**委托** `ml_predictor.build_training_data_from_db`，不再
+        自己拼 SQL 与特征映射。此前两条路径并存且口径长期相反——
+
+        | 项 | 本函数（旧） | `build_training_data_from_db` |
+        |---|---|---|
+        | 维度缺失 | `ds.get("signal", 5.0)` 补 5.0 | v0.45.50 起剔除 |
+        | `ambiguous_t7=1` | 收下 | v0.45.9 P0 起排除（标签无意义） |
+        | `return_t7 IS NULL` | `or 0` → 0.0 收益 | 排除 |
+        | `momentum_5d` | 写死 `0.0` | 由 signal/sentiment 派生 |
+        | `iv_rank`/`put_call_ratio` | 只判 None，哨兵值原样收 | 哨兵值改由 odds 派生 |
+
+        真库实测（2026-09-07，旧口径 `checked_t7=1 LIMIT 200` 的 200 行）：
+        2 行 `dimension_scores` 为空字典（五维全补 5.0 → 整行自洽的假样本）、
+        26 行 `ambiguous_t7=1`；产出的 11 个特征里 **3 个 sd=0**
+        （`momentum_5d` / `iv_rank` / `put_call_ratio`），树模型无法在常数列上分裂。
+
+        合并后两条路径唯一的区别是样本量下限（见 `MIN_REAL_SAMPLES`）。
+        """
         try:
-            import sqlite3 as _sq3
-            import json as _json
             from backtester import PredictionStore
-            ps = PredictionStore()
-            with _sq3.connect(ps.db_path) as conn:
-                conn.row_factory = _sq3.Row
-                rows = conn.execute("""
-                    SELECT ticker, date, final_score, direction,
-                           dimension_scores, iv_rank, put_call_ratio,
-                           agent_directions,
-                           return_t7, correct_t7
-                    FROM predictions
-                    WHERE checked_t7 = 1
-                    ORDER BY date DESC
-                    LIMIT 200
-                """).fetchall()
-
-            # v0.44.3：阈值唯一真相 = ml_predictor.catalyst_quality_from_score
-            # （此前同一套阈值在三处各写一份嵌套 _cat_qual）
-            from ml_predictor import catalyst_quality_from_score as _cat_qual
-
-            direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
-            result = []
-            for r in rows:
-                ds = _json.loads(r["dimension_scores"] or "{}")
-                _ad = _json.loads(r["agent_directions"] or "{}") if r["agent_directions"] else {}
-                _dir = r["direction"] or "neutral"
-                if _ad:
-                    _majority = sum(1 for d in _ad.values() if d == _dir)
-                    _agree = _majority / len(_ad)
-                else:
-                    _agree = 0.5
-                result.append(TrainingData(
-                    ticker=r["ticker"],
-                    date=r["date"],
-                    crowding_score=ds.get("signal", 5.0) * 10,
-                    catalyst_quality=_cat_qual(ds.get("catalyst", 5.0)),
-                    momentum_5d=0.0,
-                    volatility=5.0,
-                    market_sentiment=(ds.get("sentiment", 5.0) - 5) * 20,
-                    actual_return_3d=float(r["return_t7"] or 0) * 0.4,
-                    actual_return_7d=float(r["return_t7"] or 0),
-                    actual_return_30d=float(r["return_t7"] or 0) * 2.5,
-                    win_3d=bool(r["correct_t7"]),
-                    win_7d=bool(r["correct_t7"]),
-                    win_30d=bool(r["correct_t7"]),
-                    # v2 新特征
-                    iv_rank=float(r["iv_rank"]) if r["iv_rank"] is not None else 50.0,
-                    put_call_ratio=float(r["put_call_ratio"]) if r["put_call_ratio"] is not None else 1.0,
-                    final_score=float(r["final_score"]) if r["final_score"] is not None else 5.0,
-                    odds_score=ds.get("odds", 5.0),
-                    risk_adj_score=ds.get("risk_adj", 5.0),
-                    agent_agreement=_agree,
-                    direction_encoded=direction_map.get(_dir, 0.0),
-                ))
-            return result
-        except (ImportError, KeyError, TypeError, ValueError, OSError) as e:
-            _log.debug("_build_real_training_data 失败: %s", e)
+            from ml_predictor import build_training_data_from_db
+        except ImportError as e:
+            # 「拿不到」与「没有」必须可区分：这一支是**失败**，不是「库里没数据」。
+            # 调用方那句 "无真实验证数据" 描述的是后者，所以这里必须自己出声。
+            _log.warning("_build_real_training_data: 依赖导入失败，"
+                         "本次训练将退化为硬编码样本: %s", e)
             return []
+
+        try:
+            db_path = str(PredictionStore().db_path)
+        except (sqlite3.Error, OSError) as e:
+            _log.warning("_build_real_training_data: 无法解析 predictions 库路径，"
+                         "本次训练将退化为硬编码样本: %s", e)
+            return []
+
+        try:
+            from config import ML_TRAINING_CONFIG as _MTC
+            max_rows = _MTC.get("max_training_rows", 500)
+        except (ImportError, AttributeError):
+            max_rows = 500
+
+        # db_path 必须显式传：不传会走 `PATHS.db` 默认值，在 git worktree 里
+        # 那是一个空桩库，函数会安静地返回 []（v0.45.140 的踩坑点）。
+        return build_training_data_from_db(
+            db_path=db_path,
+            min_samples=self.MIN_REAL_SAMPLES,
+            max_rows=max_rows,
+        )
 
     def _check_disk_cache(self, today: str) -> bool:
         """检查磁盘缓存是否存在且有效"""
@@ -213,6 +219,11 @@ class MLEnhancedReportGenerator:
         except (FileNotFoundError, OSError, KeyError, ValueError, json.JSONDecodeError) as e:
             # 缓存检查失败，重新训练
             return False
+
+    @property
+    def _model_file(self):
+        """磁盘缓存文件（JSON，安全序列化）。见类体顶部为何必须是 property。"""
+        return PATHS.ml_model_cache
 
     def _load_model_from_disk(self):
         """从磁盘加载模型（委托给 model.load_model，兼容 SGD/Simple 格式）"""
@@ -287,17 +298,46 @@ class MLEnhancedReportGenerator:
         self._file_writer_pool.submit(self._write_file_async, json_path, json_data, True)
 
     def generate_ml_enhanced_report(
-        self, ticker: str, realtime_metrics: dict
+        self, ticker: str, realtime_metrics: dict,
+        swarm_direction: Optional[str] = None,
+        swarm_dimension_scores: Optional[dict] = None,
+        swarm_final_score: Optional[float] = None,
+        swarm_agent_directions: Optional[dict] = None,
     ) -> dict:
-        """生成 ML 增强的分析报告"""
+        """生成 ML 增强的分析报告
+
+        swarm_direction：蜂群当日方向，v0.45.132 起交给 AdvancedAnalyzer 做
+        「同标的 + 同方向」的历史回溯（第 5 章情景推演的样本条件）。
+
+        swarm_dimension_scores：蜂群当日五维分，v0.45.135 起用于 `catalyst_quality`，
+        v0.45.137 起用于 `volatility` / `market_sentiment`，
+        v0.45.140 起用于 `odds_score` / `risk_adj_score`。
+
+        swarm_final_score：蜂群当日综合分，v0.45.141 起是 ML 特征 `final_score`
+        的唯一来源（与训练端 `predictions.final_score` 同一个量）。
+
+        swarm_agent_directions：蜂群当日**逐蜂方向**（8 只蜂的 name → direction），
+        v0.45.146 起是 ML 特征 `agent_agreement` 的唯一来源——与训练端
+        `predictions.agent_directions` 同一个量，共识度公式也照抄训练端那三行。
+
+        ⚠️ 四个参数都取自同一个 `swarm_data[ticker]`，**必须成组传**——传一个漏
+        一个是本仓反复出现的半接线故障（守卫见
+        `tests/test_ml_catalyst_quality_source.py::TestProductionWiring`）。
+        """
 
         # 获取高级分析
         advanced_analysis = self.analyzer.generate_comprehensive_analysis(
-            ticker, realtime_metrics
+            ticker, realtime_metrics, direction=swarm_direction
         )
 
         # 构建 ML 输入数据
-        ml_input = self._prepare_ml_input(ticker, realtime_metrics, advanced_analysis)
+        ml_input = self._prepare_ml_input(
+            ticker, realtime_metrics, advanced_analysis,
+            swarm_dimension_scores=swarm_dimension_scores,
+            swarm_direction=swarm_direction,
+            swarm_final_score=swarm_final_score,
+            swarm_agent_directions=swarm_agent_directions,
+        )
 
         # 获取 ML 预测
         ml_prediction = self.ml_service.predict_for_opportunity(ml_input)
@@ -330,76 +370,243 @@ class MLEnhancedReportGenerator:
             },
         }
 
+        # ── 前向记分账本（v0.45.134 Step 3）────────────────────────────
+        # 记下**这一天真正印出去的**那个数。回溯记分（probability_scorecard
+        # --walk-forward）假设估计量是 DB 的纯函数，一旦换了估计量或补跑了历史
+        # 这个假设就破了；账本不受影响。
+        #
+        # ⚠️ 失败不阻断报告，但**必须留下会被看见的痕迹**——静默 except 会把
+        # 「账本一行没记」变成「没发生过」，那正是本项目 v0.45.91/119/121/124
+        # 反复踩的形状。故 WARNING 且计数。
+        try:
+            from probability_scorecard import record_published
+            _pa = advanced_analysis.get("probability_analysis") or {}
+            _mp = (ml_prediction.get("prediction") or {}).get("probability")
+            _ml_pct = (float(_mp) * 100.0
+                       if isinstance(_mp, (int, float)) and not isinstance(_mp, bool) else None)
+            record_published(
+                report_date=self.timestamp.date().isoformat(),
+                ticker=ticker,
+                direction=swarm_direction,
+                hit_rate_pct=_pa.get("hit_rate_pct"),
+                basis=_pa.get("basis"),
+                sample_size=_pa.get("sample_size"),
+                forward_estimate_pct=_pa.get("forward_estimate_pct"),
+                forward_sample_size=_pa.get("forward_sample_size"),
+                ml_probability_pct=_ml_pct,      # v0.45.139：融合权重扫描的第二个输入
+            )
+        except Exception as _led_err:   # noqa: BLE001 —— 记账失败不得阻断报告
+            self._ledger_failures = getattr(self, "_ledger_failures", 0) + 1
+            _log.warning("[%s] 概率账本写入失败（累计 %d 次）：%s",
+                         ticker, self._ledger_failures, _led_err)
+
         return enhanced_report
 
     def _prepare_ml_input(
-        self, ticker: str, metrics: dict, analysis: dict
+        self, ticker: str, metrics: dict, analysis: dict,
+        swarm_dimension_scores: Optional[dict] = None,
+        swarm_direction: Optional[str] = None,
+        swarm_final_score: Optional[float] = None,
+        swarm_agent_directions: Optional[dict] = None,
     ) -> TrainingData:
         """为 ML 模型准备输入数据"""
 
         # 从实时数据中提取特征（有则用真实值，无则降级到合理默认）
         _yf = metrics.get("sources", {}).get("yahoo_finance", {})
-        # BUG FIX: 原来的 _yf.get("short_interest_ratio", 50.0) * 10 当两个来源均缺失时
-        # 返回 50.0 * 10 = 500，严重超出 [0,100] 范围，导致 crowding_penalty = 50，
-        # 使 expected_7d = -23.24%（强烈看空），与评级矛盾。
-        # 修复：当 short_interest_ratio 缺失时使用中性默认值 5.0（5.0 * 10 = 50），
-        # 并对最终结果强制 clamp 到 [0, 100]。
-        _sir = _yf.get("short_interest_ratio")
-        _fallback_crowding = (_sir * 10) if _sir is not None else 50.0
-        crowding_score = float(metrics.get("crowding_score", _fallback_crowding))
-        crowding_score = min(100.0, max(0.0, crowding_score))  # 防御性边界保护
-        catalyst_quality = analysis.get("recommendation", {}).get("rating", "B")
         momentum_5d = _yf.get("price_change_5d", 0.0) or 0.0
 
-        # BUG-6 修复：volatility 从 swarm BuzzBee details 提取，fallback 才用 5.0
-        _buzz_details = (
-            self._swarm_cache.get(metrics.get("_ticker", ""), {})
-            .get("agent_details", {})
-            .get("BuzzBeeWhisper", {})
-            .get("details", {})
-        ) if hasattr(self, "_swarm_cache") else {}
-        volatility = (
-            _yf.get("volatility_20d")
-            or _yf.get("atr_pct")
-            or _buzz_details.get("volatility_20d")
-            or analysis.get("options_analysis", {}).get("historical_volatility")
-            or 5.0
-        )
+        # ── v0.45.137：volatility / market_sentiment 的唯一来源 = 蜂群维度分 ──
+        # 旧实现声称从 BuzzBee details 提取（"BUG-6/BUG-7 修复"），但它读的
+        # `self._swarm_cache` **全仓从未被赋值过**（AST 实测：赋值点 0、读取点 1，
+        # 类属性里也没有）⇒ `hasattr(self, "_swarm_cache")` 恒 False ⇒ 那段是死码。
+        # 叠加第二个独立缺陷：查表键 `metrics.get("_ticker")` 在生产
+        # `realtime_metrics` 里也不存在（生产用 `"ticker"`），即便缓存存在也会空串落空。
+        #
+        # 实测 803 份生产 analysis-*-ml-*.json：volatility 恒 5.0、
+        # market_sentiment 恒 0.0（各 802/803，剩 1 份是 v2 之前的旧 schema）。
+        # volatility 那条四级 fallback 链**每级都是死的**——`_yf` 里没有
+        # volatility_20d/atr_pct（生产只有三个价格字段），
+        # `options_analysis["historical_volatility"]` 这个键 803/803 份都不存在
+        # （真实字段名是 `rv_30d`）。只有字面量 5.0 会触发。
+        #
+        # ⚠️ 为什么**不**照注释说的接 BuzzBee 真实波动率：这个特征槽在训练路径
+        # （`build_training_data_from_db`，n=497）里装的是 `(10-risk_adj)*2.5`，
+        # 中位 11.65；BuzzBee 的 `volatility_20d` 是真年化波动率，中位 39.66，
+        # 与训练口径 Spearman ρ=+0.068、scale 差 ~4×。接进来 = 用 A 训练拿 B 服务，
+        # 制造一个与 v0.45.135 同 species 的 train/serve skew，比现在的常数更糟。
+        # sentiment 侧没有这个矛盾（维分与 BuzzBee sentiment_pct ρ=+0.987，
+        # 是同一个量的两种刻度），取维分可与训练路径逐字节同源。
+        #
+        # 常数 5.0 落在训练 volatility 分布的 **9.1 分位**——它不是"中性"，
+        # 是系统性偏低；803 份重放显示 52.4% 的 probability 变动 > 0.02。
+        from ml_predictor import market_sentiment_from_score, volatility_from_risk_adj
+        _dims = swarm_dimension_scores or {}
 
-        # BUG-7 修复：market_sentiment 从 swarm BuzzBee details 提取
-        _buzz_sentiment_raw = _buzz_details.get("sentiment_pct")  # 0-100
-        _raw_sentiment = (
-            (_buzz_sentiment_raw - 50) * 2  # 转为 -100~+100
-            if _buzz_sentiment_raw is not None
-            else metrics.get("sentiment_score", 0.0)
-        )
-        # BUG FIX: 原来 abs(_raw_sentiment) <= 10 → *10 的逻辑无法区分 0-1（概率）量表：
-        #   0-1 范围  → *10 → 0-10（实际应 *100 → 0-100）
-        #   0-10 范围 → *10 → 0-100 ✓  |  0-100 范围 → 不变 ✓
-        # 修复：三段式量表自动识别，统一输出 -100~+100
-        if abs(_raw_sentiment) <= 1.0 and _raw_sentiment != 0.0:
-            market_sentiment = _raw_sentiment * 100   # 概率/归一化量表 (0~1 or -1~1)
-        elif abs(_raw_sentiment) <= 10.0:
-            market_sentiment = _raw_sentiment * 10    # Agent 评分量表 (0~10)
-        else:
-            market_sentiment = _raw_sentiment          # 已在 -100~+100 范围，直接使用
+        # ── v0.45.146：crowding_score 的唯一来源 = 蜂群 signal 维度分 × 10 ──
+        # 旧实现 `metrics.get("crowding_score", _fallback_crowding)`：生产
+        # `realtime_metrics` 里**既没有** `crowding_score`、**也没有**
+        # `short_interest_ratio`（两个键在 803 份落盘 JSON 的上游结构里都不存在），
+        # 于是两级兜底全部落到字面量 50.0 —— 实测 777/803 恒 50.0，
+        # 另 25 份 500.0（clamp 之前的越界残留）、1 份 45.0。
+        #
+        # ⚠️ **不要**去接 ScoutBeeNova 的 `details.crowding_score`（那才是真拥挤度）。
+        # 这个特征槽的名字说谎：训练端 `build_training_data_from_db` 往它里面装的是
+        # `crowding_score=_sig * 10`，也就是**信号维度分×10**，不是拥挤度。实测：
+        #   · signal×10          生产中位 49.60 / sd 12.31，训练分布 mean 52.77 / sd 7.60
+        #   · ScoutBee 真拥挤度   生产中位 23.75 / sd 12.28
+        #   · 二者 Spearman ρ = **−0.46**
+        # 接真拥挤度不只是量纲不对（v0.45.137 volatility 那次是 ρ=+0.068 的无关），
+        # 这次是**近似反号**——会主动把模型学到的方向喂反。
+        # 「改服务端口径前先去训练端读那个槽实际装的是什么量」——名字一致≠同一个量。
+        #
+        # 与训练端逐字节同源：`Backtester.save_predictions` 把
+        # `swarm_results[ticker]["dimension_scores"]` 原样写进 `predictions.dimension_scores`，
+        # 训练端再从中取 `signal`。此处取的是同一个 `swarm_data[ticker]`。
+        #
+        # 常数 50.0 **不是中性**：它落在训练 crowding 分布的 **36.0 分位**。
+        # 而 `crowding` 是当前模型 permutation importance **排名第一**的特征
+        # （+0.0826，12 维之首）—— 这是历次接线里杠杆最大的一个槽。
+        #
+        # 旧的 `min(100, max(0, ·))` clamp 一并移除：它是为 `_sir * 10` 越界准备的，
+        # 而训练端 `_sig * 10` **不做** clamp。留着 clamp 会在尾部制造新的口径差；
+        # 且维度分本就 0~10（生产实测 signal ∈ [1.88, 9.64] ⇒ ×10 ∈ [18.8, 96.4]），
+        # clamp 在真实数据上从未生效过。
+        _signal_raw = _dims.get("signal")
+        _signal_known = _usable_dim(_signal_raw)
+        crowding_score = float(_signal_raw) * 10.0 if _signal_known else None
 
-        # 映射评级到催化剂质量
-        rating_to_quality = {
-            "STRONG BUY": "A+",
-            "BUY": "A",
-            "HOLD": "B+",
-            "AVOID": "C",
-        }
-        catalyst_quality = rating_to_quality.get(
-            analysis.get("recommendation", {}).get("rating", "B"), "B"
-        )
+        _risk_adj_raw = _dims.get("risk_adj")
+        _sentiment_raw = _dims.get("sentiment")
+        _risk_adj_known = _usable_dim(_risk_adj_raw)
+        _sentiment_known = _usable_dim(_sentiment_raw)
+        # 取不到就是 None，不挑兜底值——None 会被 ml_predictor 自己的
+        # `_missing_features` 数进 `imputed_features` / `feature_completeness`，
+        # 两套账目因此一致。喂字面量则会让 `input_features_missing` 说缺、
+        # `feature_completeness` 说 12/12（生产现存 118 份这种自相矛盾的记录）。
+        volatility = volatility_from_risk_adj(_risk_adj_raw) if _risk_adj_known else None
+        market_sentiment = (market_sentiment_from_score(_sentiment_raw)
+                            if _sentiment_known else None)
+        # ⚠️ 派生值**已经**归到 -100~+100，不得再过一遍旧的「三段式量表自动识别」
+        # （`abs(x)<=1 → *100`、`abs(x)<=10 → *10`）——那是给来源不明的原始情绪分
+        # 准备的，对已归一的输入会把接近中性的值放大 10~100 倍（维分 5.2 → 4.0 → 40.0），
+        # 而 sentiment 维分落在 [4.5, 5.5] 的样本在生产里并不罕见。
+
+        # ── v0.45.135：催化剂等级的唯一来源 = ChronosBee 催化剂维度分 ──
+        # 旧实现由 `recommendation.rating` 反推（STRONG BUY→A+ / BUY→A /
+        # HOLD→B+ / AVOID→C）。但 rating 不是催化剂的度量，它的上游是
+        #   advanced_analyzer._estimate_catalyst_quality(ticker)   ← 硬编码三只票
+        #     → calculate_win_probability(crowding, grade)
+        #       → _generate_recommendation(prob, rr)               ← 四档阈值
+        # 于是这个特征实际编码的是**拥挤度**，不是催化剂。
+        #
+        # 实测 803 份生产 analysis-*-ml-*.json（745 份两条口径都能取到）：
+        #   · 等级一致率 7.1%，低于按边缘分布独立时的期望 8.1%
+        #   · Spearman ρ = +0.087（≈ 无关）
+        #   · 旧路径**从未**产出 "B"/"C"（0/745），而真实分布里两档共占 70.5%
+        # 训练路径 `_build_real_training_data` 与 `swarm_agents/rival_bee.py`
+        # 都走 `catalyst_quality_from_score`；此处对齐后三处同源，
+        # train/serve skew 消除。阈值本身不动（历史样本可比性由那张表保证）。
+        from ml_predictor import catalyst_quality_from_score as _cat_qual
+        _catalyst_raw = (swarm_dimension_scores or {}).get("catalyst")
+        # bool 是 int 子类，`_cat_qual(True)` 会当成 1.0 判成 "C"（最差档）——
+        # 与本仓其余 5 处守卫同写法，显式排除。NaN 同理不能进 float 比较。
+        # v0.45.137：三个维度派生特征共用 `_usable_dim`，不再各抄一份 isinstance 行。
+        _catalyst_known = _usable_dim(_catalyst_raw)
+        # ── v0.45.147：取不到时是 None，不是 "B" ──
+        # v0.45.135 选 "B" 的理由是「"B+" 是 magnitude 1.0 的基准档，用它会让
+        # 『拿不到数据』与『质量正好中等』不可区分」——方向对，但**选中了众数**：
+        # 生产实测 "B" 占真实等级的 **57.4%**（461/803），是五档里最常见的一档，
+        # 于是 58 份缺失与 461 份真实 "B" 完全同形，比用 "B+" 更糟。
+        # 且它是合法枚举值 ⇒ `ml_predictor._missing_features` 不算它缺 ⇒
+        # `input_features_missing` 说缺、`feature_completeness` 说 12/12（58/803 份）。
+        catalyst_quality = _cat_qual(_catalyst_raw) if _catalyst_known else None
+
+        # ── v0.45.140：odds / risk_adj / final_score 的唯一来源 = 蜂群 ──
+        # 旧实现读 `analysis["dimension_scores"]` 与 `recommendation["score"]`，
+        # 而 `analysis` 就是 `advanced_analyzer.generate_comprehensive_analysis()`
+        # 的返回值——实测 **803/803 份生产 analysis-*-ml-*.json 的
+        # `advanced_analysis` 里没有 `dimension_scores` 键、`recommendation` 里
+        # 也没有 `score` 键** ⇒ 三个特征恒为字面量 5.0。
+        #
+        # 与 v0.45.137 那两个死读者的区别：这三个**已被 `_ml_input_missing`
+        # 如实报出**（生产 118 份 JSON 的 `input_features_missing` 逐字就是
+        # 这三个名字），没有说谎。但「诚实地缺」不等于无害：
+        #   · 喂进模型的仍是常数 5.0，而它在训练分布里**不是中性**——
+        #     odds 落在 **7.6 分位**、final_score 落在 **16.9 分位**
+        #     （训练端实测 n=497：odds 中位 7.54 / risk_adj 5.34 / final 5.44）
+        #   · 账本本身也不准：真值一直躺在**同一份 JSON** 的 `swarm_results` 里
+        #     （745/803 三个全齐），「取不到」与「没去取」被记成了同一件事
+        #
+        # 真值与训练端**逐字节同源**，不是抄第二份公式：
+        #   训练 `build_training_data_from_db` 读 `predictions.dimension_scores`
+        #   / `predictions.final_score`，而 `Backtester.save_predictions(
+        #   swarm_results)` 正是从 `swarm_results[ticker]` 的同名键写进去的。
+        #
+        # 803 份重放（模型按生产口径训练于 497 条真实样本）：
+        # |Δprobability| 中位 0.0063、**27.3% 变动 > 0.02**、max 0.0625；
+        # 分布 sd 0.0280 → 0.0333；三特征 permutation importance 合计 0.1357。
+        _odds_raw = _dims.get("odds")
+        _final_raw = swarm_final_score
+        _odds_known = _usable_dim(_odds_raw)
+        _final_known = _usable_dim(_final_raw)
+        # ⚠️ 三条旧读点还有第二重危害（v0.45.141 就 final_score 一支记过）：
+        # 缺失表条目 `("final_score", _rec.get("score"))` 等三条因键从不存在而
+        # **恒上榜**——自 v0.45.50 有缺失表起，`input_features_missing` 里这三个
+        # 名字一次没落下过。「永远缺失」与「真缺失」在输出里同形，
+        # **一条永远亮着的告警等于没有告警**。
+        #
+        # 取不到就是 None（同 volatility / market_sentiment 的约定）——
+        # 字面量会让 `input_features_missing` 说缺、`feature_completeness`
+        # 说 12/12，生产现存 118 份这种当面矛盾的记录，根因就在这里。
+        odds_score = float(_odds_raw) if _odds_known else None
+        risk_adj_score = float(_risk_adj_raw) if _risk_adj_known else None
+        final_score = float(_final_raw) if _final_known else None
 
         # v2 新特征（从 analysis 上下文提取）
         _opts = analysis.get("options_analysis", {})
-        _rec = analysis.get("recommendation", {})
-        _ds = analysis.get("dimension_scores", {})
-        _rating_dir = {"STRONG BUY": 1.0, "BUY": 0.5, "HOLD": 0.0, "AVOID": -1.0}
+        # v0.45.139：direction_encoded 改读**蜂群方向**，与训练路径同一张表
+        # （ml_predictor.build_training_data_from_db 的 direction_map）。
+        # 旧实现读 recommendation.rating 再映射 {STRONG BUY:1, BUY:.5, HOLD:0, AVOID:-1}
+        # —— 训练用 bullish/neutral/bearish、服务用评级词，与 v0.45.135 修掉的
+        # catalyst_quality 是同种 train/serve skew；评级词撤销后它还会静默恒为 0.0。
+        _direction_map = {"bullish": 1.0, "neutral": 0.0, "bearish": -1.0}
+        _dir_known = swarm_direction in _direction_map
+
+        # ── v0.45.146：agent_agreement 的唯一来源 = 蜂群 agent_directions ──
+        # 旧实现是字面量 `agent_agreement=0.5,  # 预测时无蜂群上下文`。
+        # 那条注释自 v0.45.140 起**已经不成立**——本函数此刻就收着
+        # `swarm_dimension_scores` / `swarm_direction` / `swarm_final_score`，
+        # 而逐蜂方向躺在**同一个** `swarm_data[ticker]` 里（生产 746/746 份都有，
+        # 长度恒为 8：ScoutBeeNova / OracleBeeEcho / BuzzBeeWhisper /
+        # ChronosBeeHorizon / RivalBeeVanguard / GuardBeeSentinel /
+        # BearBeeContrarian / CodeExecutorAgent）。
+        #
+        # 公式**照抄训练端**，不自己发明共识度：
+        #   ad = json.loads(r["agent_directions"]); _dir = r["direction"] or "neutral"
+        #   _agree = sum(1 for d in ad.values() if d == _dir) / len(ad)
+        # 取数链同源：`Backtester.save_predictions` 把
+        # `swarm_results[ticker]["agent_directions"]` 原样写进
+        # `predictions.agent_directions`，训练端再从那里读回来。
+        # 两端方向词表实测完全一致（生产 5968 条逐蜂方向只有
+        # bullish/bearish/neutral 三个值），不存在 v0.45.139 那种评级词 vs 方向词的 skew。
+        #
+        # 训练端的两条兜底（`ad` 为空 → 0.5、`direction` 为 NULL → "neutral"）
+        # 在库里**都是死分支**（500 条候选中各 0 条），所以这里改用「取不到就是
+        # None」不会与训练端产生实际口径差；而共识度是**相对于方向定义**的，
+        # 没有已知方向就没有「与之一致」可言，故 `_dir_known` 也是前提。
+        #
+        # ⚠️ 这个槽与前几次接线的重要区别：0.5 在训练分布里**接近众数**
+        # （39.0 分位，且恰好 37.0% 的样本就是 0.5 —— 8 只蜂里 4 只同向）。
+        # 所以它的危害不是「系统性偏移」，而是**零区分度**：常数不携带任何
+        # 跨标的信息。permutation importance 也确实偏低（+0.0077，12 维第 10），
+        # 实测扫遍全值域只能改变 63.6% 的行、极差中位 0.0053 —— 预期影响小，
+        # 但「小」是测出来的，不是猜的。
+        _ad = swarm_agent_directions if isinstance(swarm_agent_directions, dict) else {}
+        _agree_known = bool(_ad) and _dir_known
+        agent_agreement = (
+            sum(1 for _d in _ad.values() if _d == swarm_direction) / len(_ad)
+            if _agree_known else None
+        )
 
         # ── v0.45.50：记录哪些特征是**补齐的**，不是观测到的 ──
         # 下面五个 .get(k, 默认值) 在缺失时产出 iv_rank=50 / pc=1.0 / 三个 5.0，
@@ -407,17 +614,39 @@ class MLEnhancedReportGenerator:
         # 会照常吐出一个概率，而那个概率随后被当成真实预测渲染。
         # 预测本身仍然做（有部分特征也比不做强），但**不能声称输入是干净的**。
         # 与同文件已有的 `training_data_source` 来源标记同一思路。
-        self._ml_input_missing = [
-            _name for _name, _val in (
-                ("iv_rank", _opts.get("iv_rank")),
-                ("put_call_ratio", _opts.get("put_call_ratio")),
-                ("final_score", _rec.get("score")),
-                ("odds_score", _ds.get("odds")),
-                ("risk_adj_score", _ds.get("risk_adj")),
-            ) if not isinstance(_val, (int, float)) or isinstance(_val, bool)
-        ]
+        # v0.45.135：catalyst_quality 也进这张表——否则「蜂群没跑/板上没条目」
+        # 与「催化剂正好中等」在输出里长得一样（同 v0.45.113 的判据）。
+        # v0.45.137：volatility / market_sentiment 也进这张表。它们此前
+        # **不可能**上榜——旧代码在缺数时喂的是字面量 5.0 / 0.0，一个合法数值，
+        # 于是「蜂群没跑」与「波动正好偏低、情绪正好中性」在输出里完全同形。
+        # 这两个特征的值现在是 None，ml_predictor 自己的 `_missing_features`
+        # 也会数到，`input_features_missing` 与 `feature_completeness` 两套账
+        # 因此对得上（此前生产有 118 份记录两者当面矛盾）。
+        # v0.45.141：final_score 同样改由蜂群参数判可得。旧条目
+        # `("final_score", _rec.get("score"))` 因键从不存在而**恒上榜**——
+        # 一条永远亮着的告警等于没有告警。
+        # v0.45.146：crowding_score / agent_agreement 补进这张表。此前它们
+        # **不可能**上榜——旧代码缺数时喂字面量 50.0 / 0.5，两个合法数值，
+        # 于是「蜂群没跑」与「信号正好中等、八蜂正好四比四」在输出里完全同形。
+        self._ml_input_missing = (
+            ([] if _signal_known else ["crowding_score"])
+            + ([] if _agree_known else ["agent_agreement"])
+            + ([] if _catalyst_known else ["catalyst_quality"])
+            + ([] if _dir_known else ["direction"])
+            + ([] if _risk_adj_known else ["volatility"])
+            + ([] if _sentiment_known else ["market_sentiment"])
+            + ([] if _final_known else ["final_score"])
+            + ([] if _odds_known else ["odds_score"])
+            + ([] if _risk_adj_known else ["risk_adj_score"])
+            + [
+                _name for _name, _val in (
+                    ("iv_rank", _opts.get("iv_rank")),
+                    ("put_call_ratio", _opts.get("put_call_ratio")),
+                ) if not _usable_dim(_val)
+            ]
+        )
         if self._ml_input_missing:
-            _log.warning("[%s] ML 输入有 %d 个特征不可得，已补中位值——"
+            _log.warning("[%s] ML 输入有 %d 个特征不可得——"
                          "本次预测的输入不是干净观测：%s",
                          ticker, len(self._ml_input_missing),
                          ", ".join(self._ml_input_missing))
@@ -439,11 +668,14 @@ class MLEnhancedReportGenerator:
             # v2
             iv_rank=_opts.get("iv_rank", 50.0),
             put_call_ratio=_opts.get("put_call_ratio", 1.0),
-            final_score=_rec.get("score", 5.0),
-            odds_score=_ds.get("odds", 5.0),
-            risk_adj_score=_ds.get("risk_adj", 5.0),
-            agent_agreement=0.5,  # 预测时无蜂群上下文
-            direction_encoded=_rating_dir.get(_rec.get("rating", "HOLD"), 0.0),
+            final_score=final_score,
+            odds_score=odds_score,
+            risk_adj_score=risk_adj_score,
+            agent_agreement=agent_agreement,  # v0.45.146：蜂群逐蜂方向的共识度
+            # v0.45.147：方向不可得时是 None，不是 0.0 —— **0.0 在这张表里
+            # 正是 "neutral"**，一个真实类别。旧兜底让「方向拿不到」与
+            # 「蜂群判中性」在特征与账目上都同形（57/803 份）。
+            direction_encoded=(_direction_map[swarm_direction] if _dir_known else None),
         )
 
     def _generate_options_section_html(self, options: dict) -> str:
@@ -599,38 +831,65 @@ class MLEnhancedReportGenerator:
     def _combine_recommendations(
         self, advanced_analysis: dict, ml_prediction: dict
     ) -> dict:
-        """合并人工和 ML 推荐"""
+        """合并历史命中率与 ML 预测。
 
-        human_prob = advanced_analysis.get("probability_analysis", {}).get(
-            "win_probability_pct", 50
-        )
+        v0.45.134：第一项从 `win_probability_pct`（常数）换成 `hit_rate_pct`
+        （同标的同方向历史 T+7 命中率）。
+
+        旧口径为什么必须换：那一项在生产 803 份报告里 **81% 恒等于 65.0**，
+        于是 `combined = 0.7×65 + 0.3×ml` 把 ML 的 0~100 全程压进 **[47.0, 74.0]**
+        这 27 个点里——触发 AVOID 需 ML<15.0%、触发 STRONG BUY 需 ML>98.3%
+        （803 份里 STRONG BUY 只出现过 3 次）。评级实际退化成 ml_prob 的阈值重标记。
+
+        ⚠️ 0.7 / 0.3 这组权重与下面 75/65/50 三道闸，都是从常数量表继承下来的，
+        **没有任何验证**。本次只换来源、不动判据（换来源与改判据不该挤在同一次
+        改动里）。命中率不可得时**不拿默认值顶替**——那正是旧实现 `, 50)` 的错，
+        50 恰好卡在 HOLD 闸上；改为退化成「只看 ML」，并在 reasoning 里说明。
+        """
+        _pa = advanced_analysis.get("probability_analysis") or {}
+        # v0.45.138：融合读**前瞻量**（全书池化），不读描述量（分票分方向频率）。
+        # v0.45.134 用的是后者，记分卡随即判定它作为预测显著更差（配对 t=+2.12）。
+        fwd = _pa.get("forward_estimate_pct")
+        _fwd_known = (isinstance(fwd, (int, float)) and not isinstance(fwd, bool)
+                      and math.isfinite(fwd))
         ml_prob = ml_prediction.get("prediction", {}).get("probability", 0.5) * 100
 
-        # 加权平均（70% 高级分析 + 30% ML）
-        combined_prob = human_prob * 0.7 + ml_prob * 0.3
-
-        # 生成最终建议
-        if combined_prob >= 75:
-            rating = "STRONG BUY"
-            action = "积极布局"
-        elif combined_prob >= 65:
-            rating = "BUY"
-            action = "分批建仓"
-        elif combined_prob >= 50:
-            rating = "HOLD"
-            action = "观察等待"
+        if _fwd_known:
+            combined_prob = fwd * 0.7 + ml_prob * 0.3
+            _reasoning = (f"前瞻命中率 {fwd:.1f}%"
+                          f"（全书池化 n={_pa.get('forward_sample_size')}；各标的相同）× 0.7"
+                          f" + ML 预测 {ml_prob:.1f}% × 0.3 = 综合 {combined_prob:.1f}%")
         else:
-            rating = "AVOID"
-            action = "回避或减仓"
+            combined_prob = ml_prob
+            _reasoning = (f"前瞻命中率不可得（池化样本 n={_pa.get('forward_sample_size')}），"
+                          f"综合分退化为纯 ML 预测 {ml_prob:.1f}%")
+
+        # v0.45.139：**不再产出评级词**。实测（n=438 份能对上 T+7 结果的报告）
+        # BUY 命中 54.5% vs HOLD 56.9%，z = −0.55；ML 概率五等分非单调、
+        # Spearman +0.026 ± 0.099。评级只是 combined_prob 的阈值重标记，而
+        # combined_prob 本身不区分结果。撤掉评级词、保留数字与出处。
+        # 三道闸（75 / 65 / 50）连同来历记在 CHANGELOG v0.45.139。
+        rating, action = None, None
 
         return {
-            "human_probability": round(human_prob, 1),
+            # v0.45.134：`human_probability` 这个名字随字段一起退休——它从来不是
+            # 「人工分析」，是一条 base 0.55 加常数的公式。不可得时保持 None。
+            # v0.45.138：两个口径分列，别混——前者描述过去、后者预测下一笔。
+            "hit_rate_pct": _pa.get("hit_rate_pct"),              # 描述：本标的本方向
+            "hit_rate_basis": _pa.get("basis"),
+            "hit_rate_sample_size": _pa.get("sample_size"),
+            "forward_estimate_pct": round(fwd, 1) if _fwd_known else None,   # 预测：全书池化
+            "forward_ci95": _pa.get("forward_ci95"),
+            "forward_sample_size": _pa.get("forward_sample_size"),
+            "forward_is_ticker_specific": False,
             "ml_probability": round(ml_prob, 1),
             "combined_probability": round(combined_prob, 1),
-            "rating": rating,
+            "combined_basis": "forward*0.7+ml*0.3" if _fwd_known else "ml_only",
+            "rating": rating,                 # v0.45.139 起恒为 None，键保留免下游崩
             "action": action,
+            "rating_retired": "v0.45.139",
             "confidence": f"{combined_prob:.1f}%",
-            "reasoning": f"人工分析 {human_prob:.1f}% + ML 预测 {ml_prob:.1f}% = 综合 {combined_prob:.1f}%",
+            "reasoning": _reasoning,
         }
 
     # ─────────────────────────────────────────────────────────────
@@ -654,8 +913,13 @@ class MLEnhancedReportGenerator:
         ab = swarm.get("agent_breakdown", {})
         resonance = swarm.get("resonance", {})
         combined_prob = combined.get("combined_probability", 50)
-        rating = combined.get("rating", "HOLD")
-        action = combined.get("action", "观察等待")
+        # v0.45.139：评级已撤（实测不区分结果），这一格改印本标的本方向的历史命中率——
+        # 那是第 1 章里唯一逐标的、且能被记分卡核对的数
+        _pa1 = analysis.get("probability_analysis") or {}
+        _hr1 = _pa1.get("hit_rate_pct")
+        _hr_row = (f"{_hr1:.1f}%（n={_pa1.get('sample_size')}）"
+                   if isinstance(_hr1, (int, float)) and not isinstance(_hr1, bool)
+                   else "不可得")
         dir_cn = self._dir_cn(direction)
         dir_color = self._dir_color(direction)
         # 3句摘要：从overview + 最高分维度 + 最大风险
@@ -690,36 +954,58 @@ class MLEnhancedReportGenerator:
                 <div style="flex:1;min-width:180px;">
                     <div class="metric"><span class="metric-label">综合胜率</span><span class="metric-value" style="color:{dir_color};">{combined_prob:.1f}%</span></div>
                     <div class="metric"><span class="metric-label">投票</span><span class="metric-value">{ab.get('bullish',0)}多 / {ab.get('bearish',0)}空 / {ab.get('neutral',0)}中</span></div>
-                    <div class="metric"><span class="metric-label">建议</span><span class="metric-value">{rating} — {action}</span></div>
+                    <div class="metric"><span class="metric-label">历史命中率（本标的本方向）</span><span class="metric-value">{_hr_row}</span></div>
                 </div>
             </div>
             {summary_html}
         </div>"""
 
     def _ch2_five_dim_table(self, swarm: dict) -> str:
-        """第2章：五维评分明细"""
+        """第2章：五维评分明细
+
+        权重优先读 `swarm["dimension_weights"]`——这是 queen_distiller 当时
+        实际用于合成 final_score 的权重（`_regime_weights_used`，config 基准
+        经政体调整后的结果），只有它缺失（旧记录）时才退回 `config.EVALUATION_
+        WEIGHTS`。v0.45.174 曾直接用 config 权重，但 2026-09-10 发现二者可能
+        不是一回事：`alpha_hive_daily_report.py` 会把 `Backtester.adapt_weights()`
+        算出的 `adapted_weights`（存在 pheromone.db 的 adapted_weights 表，daily
+        跑、按 T+7 回测准确率重新学习）直接传给 `QueenDistiller(adapted_weights=)`，
+        这会让 `__init__` 跳过 config 热加载分支——实测 09-09 全部 30 只标的
+        `dimension_weights` 里 signal/risk_adj 仍有 ~14-23% 权重，config 里
+        明明已经归零。读 swarm 自带的字段就不必关心究竟是哪条路径生效，
+        永远和第1章的真实 final_score 一致。
+        """
         if not swarm:
             return ""
         dim_scores = swarm.get("dimension_scores", {})
         if not dim_scores:
             return ""
-        DIMS = [
-            ("signal",   "信号强度 (Signal)",   0.30, "聪明钱 SEC Form4 / 机构持仓"),
-            ("catalyst", "催化剂 (Catalyst)",   0.20, "事件日历 / 财报 / 产品发布"),
-            ("sentiment","情绪 (Sentiment)",    0.20, "X 平台 / Reddit / 新闻情绪"),
-            ("odds",     "赔率 (Odds)",          0.15, "期权 P/C / IV Rank / Polymarket"),
-            ("risk_adj", "风险调整 (RiskAdj)",  0.15, "拥挤度 / 波动 / 交叉验证调整"),
+        HINTS = [
+            ("signal",   "信号强度 (Signal)",   "聪明钱 SEC Form4 / 机构持仓"),
+            ("catalyst", "催化剂 (Catalyst)",   "事件日历 / 财报 / 产品发布"),
+            ("sentiment","情绪 (Sentiment)",    "X 平台 / Reddit / 新闻情绪"),
+            ("odds",     "赔率 (Odds)",          "期权 P/C / IV Rank / Polymarket"),
+            ("risk_adj", "风险调整 (RiskAdj)",  "拥挤度 / 波动 / 交叉验证调整"),
         ]
+        weights_from_config = False
+        weights = swarm.get("dimension_weights")
+        if not weights:
+            weights = config.EVALUATION_WEIGHTS
+            weights_from_config = True
         rows = ""
+        formula_terms = []
         total_weighted = 0.0
-        for key, label, weight, hint in DIMS:
+        for key, label, hint in HINTS:
+            weight = weights.get(key, 0.0)
             score = dim_scores.get(key, 0)
             weighted = score * weight
             total_weighted += weighted
+            formula_terms.append(f"{weight:.0%}×{label.split(' ')[0]}")
             bar_pct = int(score / 10 * 100)
             bar_color = "var(--bull)" if score >= 7 else ("var(--neut)" if score >= 5 else "var(--bear)")
+            zero_w_note = '<br><small style="color:var(--bear)">权重=0（当前不计入合成分）</small>' if weight == 0 else ""
             rows += f"""<tr>
-                <td>{label}<br><small style="color:var(--tm)">{hint}</small></td>
+                <td>{label}<br><small style="color:var(--tm)">{hint}</small>{zero_w_note}</td>
                 <td style="font-weight:bold;color:{bar_color}">{score:.1f}</td>
                 <td>{weight:.0%}</td>
                 <td style="font-weight:bold">{weighted:.2f}</td>
@@ -728,13 +1014,35 @@ class MLEnhancedReportGenerator:
                 </div></td>
             </tr>"""
         score_lv = "高优先级" if total_weighted >= 7.5 else ("观察名单" if total_weighted >= 6.0 else "不行动")
+        weight_src_note = (
+            "本表按 config.EVALUATION_WEIGHTS 重算（swarm 数据未带 dimension_weights，旧记录）"
+            if weights_from_config else
+            "本表权重 = 该标的当日实际合成 final_score 时用的权重（政体调整后），非置信度加权"
+        )
         rows += f"""<tr style="background:var(--surface2);font-weight:bold;">
-            <td><strong>综合 Opportunity Score</strong></td>
+            <td><strong>综合 Opportunity Score</strong>（{weight_src_note}）</td>
             <td style="color:var(--tp);font-size:1.2em;">{total_weighted:.2f}</td>
             <td></td>
             <td style="color:var(--tp);font-size:1.2em;">{total_weighted:.2f}</td>
             <td>{score_lv}</td>
         </tr>"""
+        config_mismatch_note = ""
+        if not weights_from_config:
+            _cfg_w = config.EVALUATION_WEIGHTS
+            _drift = {k: (weights.get(k, 0.0) - _cfg_w.get(k, 0.0))
+                      for k, _, _ in HINTS if abs(weights.get(k, 0.0) - _cfg_w.get(k, 0.0)) > 0.05}
+            if _drift:
+                _drift_txt = "、".join(f"{k} 实际{weights.get(k,0):.0%} vs config{_cfg_w.get(k,0):.0%}" for k in _drift)
+                config_mismatch_note = f"""<p style="margin-top:4px;font-size:0.85em;color:var(--bear);">
+                    ⚠️ 实际权重与 config.EVALUATION_WEIGHTS 偏离 >5pp：{_drift_txt}——
+                    说明本次合成未直接采用 config 权重（可能经由 adapted_weights/政体调整覆盖），
+                    如实展示，不代表 config 配置有误。</p>"""
+        real_final = swarm.get("final_score")
+        compare_note = ""
+        if real_final is not None:
+            compare_note = f"""<p style="margin-top:4px;font-size:0.85em;color:var(--tm);">
+                蜂群实际输出的 final_score（含置信度加权，第1章展示的数字）= {float(real_final):.2f}，
+                与本表差异属预期——置信度低的维度在真实合成中被打折，本表只演示权重结构。</p>"""
         return f"""
         <div class="section">
             <h2>第 2 章：五维评分明细</h2>
@@ -742,7 +1050,9 @@ class MLEnhancedReportGenerator:
                 <tr><th>维度</th><th>分数</th><th>权重</th><th>加权</th><th>进度</th></tr>
                 {rows}
             </table>
-            <p style="margin-top:12px;font-size:0.85em;color:var(--tm);">公式：Score = 0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds + 0.15×RiskAdj</p>
+            <p style="margin-top:12px;font-size:0.85em;color:var(--tm);">公式：Score = {' + '.join(formula_terms)}</p>
+            {compare_note}
+            {config_mismatch_note}
         </div>"""
 
     def _ch3_scout(self, agent_details: dict) -> str:
@@ -1544,88 +1854,119 @@ class MLEnhancedReportGenerator:
             </table>
         </div>"""
 
+    # 第 5 章五个情景 = 同标的历史 T+7 收益分布的五个分位点（v0.45.132）。
+    # 「概率」列是累计频率的定义本身（P10 = 10% 的历史样本比它更差），不是拍的。
+    _CH5_QUANTILES = (
+        ("悲观", "p10", 10, "历史上 10% 的同类预测 T+7 更差"),
+        ("偏弱", "p25", 25, "下四分位"),
+        ("中位", "median", 50, "一半好于此、一半差于此"),
+        ("偏强", "p75", 75, "上四分位"),
+        ("乐观", "p90", 90, "历史上 10% 的同类预测 T+7 更好"),
+    )
+
     def _ch5_scenarios(self, analysis: dict, swarm: dict) -> str:
-        """第5章：情景推演（4场景 + 概率加权期望收益）"""
-        hist = analysis.get("historical_analysis", {})
-        exp = hist.get("expected_returns", {})
-        pos = analysis.get("position_management", {})
+        """第5章：情景推演——同标的历史预测的 T+7 真实收益分布
+
+        v0.45.132 之前：`historical_analysis.expected_returns` 来自 advanced_analyzer
+        里 6 条手写记录（NVDA/VKTX/TSLA，2023 年），27/30 只标的结构上永远缺失；
+        v0.45.54 起守卫把它渲染成「不可用」。现在数据源换成 pheromone.db 里蜂群
+        自己 900+ 条核对过 T+7 收盘的预测，本表五行是该标的（同方向，不足时
+        不分方向）真实收益分布的 P10/P25/P50/P75/P90，期望价 = 均值。
+        表里每个数都是观测到的频率，不再有 25%/45%/20%/10% 这种写死的概率。
+        """
+        hist = analysis.get("historical_analysis", {}) or {}
+        exp = hist.get("expected_returns", {}) or {}
+        e7 = exp.get("expected_7d") or {}
+        pos = analysis.get("position_management", {}) or {}
         sl = pos.get("stop_loss", {})
-        tp = pos.get("take_profit", {})
         # 当前价：从 agent_details 或 stop_loss 反推（防 None 污染）
         scout = swarm.get("agent_details", {}).get("ScoutBeeNova", {})
         curr_price = float(scout.get("details", {}).get("price") or 0) if scout else 0
         if not curr_price and isinstance(sl, dict):
             conservative = sl.get("conservative", 0)
             curr_price = conservative / 0.97 if conservative else 0
-        # ── v0.45.54：四个常量不许撑起一张带概率和公式的定量结论表 ──
-        # 旧实现：curr_price 兜底 100（"防零"）、gain_max or 20、gain_7d or 5、
-        # drawdown or -10 —— 四个都是写死的常量，却产出
-        #   「$120.00 / $105.00 / $95.00 / $85.00，概率加权期望价 $104.75，+4.75%」
-        # 外加一行公式展开「Σ(概率 × 情景价格) = 25%×$120 + …」。
-        # 这是全报告最像量化结论的部分，而每一个数字都是编的。
-        # 注意 `or` 比 `if is None` 更糟：真实的 0 收益也会被换成常量。
+
+        def _num(v):
+            return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
         _missing = []
         if not curr_price:
             _missing.append("现价")
-        for _name, _v in (("最大涨幅", exp.get("max_gain", {}).get("mean")),
-                          ("7日期望", exp.get("expected_7d", {}).get("mean")),
-                          ("最大回撤", exp.get("max_drawdown", {}).get("mean"))):
-            if not isinstance(_v, (int, float)) or isinstance(_v, bool):
-                _missing.append(_name)
+        if not e7:
+            _missing.append("T+7 收益分布")
+        else:
+            # 部分分位缺失 / 非有限数：逐项点名——「部分真实 + 部分常量」的表比全常量更难识破
+            for _label, _key, _, _ in self._CH5_QUANTILES:
+                if not _num(e7.get(_key)):
+                    _missing.append(f"T+7 {_label}分位")
+            if not _num(e7.get("mean")):
+                _missing.append("T+7 均值")
         if _missing:
-            _log.warning("[_ch5_scenarios] %s 不可得，跳过情景推演表"
-                         "（不以常量撑起带概率与公式的定量结论）", "、".join(_missing))
+            n_same = exp.get("same_direction_n")
+            n_any = exp.get("any_direction_n")
+            why = exp.get("note") or (
+                f"pheromone.db 状态 {exp.get('db_status')}" if exp.get("db_status") not in (None, "ok")
+                else "历史分布缺失"
+            )
+            _log.warning("[_ch5_scenarios] 情景推演不可得：%s（%s）", "、".join(_missing), why)
             return f"""
         <div class="section">
             <h2>第 5 章：情景推演</h2>
             <div style="padding:14px 16px;border:1px solid var(--border);border-radius:2px;
                         font-size:.9em;color:var(--tm);">
-                情景推演不可用：缺少 {', '.join(_missing)}。
-                本表依赖历史同类信号的收益分布，数据不足时不做推演 ——
+                情景推演不可用：{why}。缺少 {', '.join(_missing)}。<br>
+                本表依赖该标的历史蜂群预测的 T+7 真实收益分布
+                （同方向样本 {n_same if n_same is not None else '—'}，
+                不分方向 {n_any if n_any is not None else '—'}，
+                最低 {exp.get('min_sample', '—')}）；样本不足时不做推演 ——
                 以常量生成的目标价与期望收益无法与真实测算区分。
             </div>
         </div>"""
 
-        gain_max = exp["max_gain"]["mean"]
-        gain_7d = exp["expected_7d"]["mean"]
-        drawdown = exp["max_drawdown"]["mean"]
-        _dm = exp.get("max_drawdown", {}).get("min")
-        drawdown_min = _dm if isinstance(_dm, (int, float)) else drawdown * 1.5
-        # 4 场景
-        scenarios = [
-            ("强多", 25, curr_price * (1 + gain_max / 100), "催化剂超预期 + 出口管制缓和"),
-            ("温和多", 45, curr_price * (1 + gain_7d / 100), "催化剂符合预期，指引维持"),
-            ("震荡", 20, curr_price * (1 + drawdown / 200), "获利回吐，等待下一催化剂"),
-            ("回调", 10, curr_price * (1 + drawdown_min / 100), "政策恶化 或 竞品重大突破"),
-        ]
-        exp_price = sum(prob / 100 * price for _, prob, price, _ in scenarios)
-        exp_return = (exp_price - curr_price) / curr_price * 100 if curr_price else 0
-        exp_color = "var(--bull)" if exp_return > 0 else "var(--bear)"
-        rows = "".join(
-            f"""<tr>
-                <td>{icon}</td>
-                <td>{prob}%</td>
-                <td>${price:.2f}</td>
-                <td style="color:{'var(--bull)' if price>curr_price else 'var(--bear)'}">{(price-curr_price)/curr_price*100:+.1f}%</td>
-                <td style="font-size:0.85em;color:var(--ts)">{trigger}</td>
-            </tr>"""
-            for icon, prob, price, trigger in scenarios
+        n = exp.get("sample_size")
+        basis = exp.get("basis")
+        direction = exp.get("direction") or swarm.get("direction") or "—"
+        d0, d1 = (exp.get("date_range") or ["—", "—"])[:2]
+        basis_txt = (
+            f"同标的、同方向（{direction}）" if basis == "same_direction"
+            else f"同标的、不分方向（同方向 {direction} 仅 {exp.get('same_direction_n', 0)} 条，"
+                 f"不足 {exp.get('min_sample', '—')}）"
         )
+        rows = ""
+        for label, key, cum, note in self._CH5_QUANTILES:
+            r = e7[key]
+            price = curr_price * (1 + r / 100.0)
+            color = "var(--bull)" if r > 0 else ("var(--bear)" if r < 0 else "var(--tm)")
+            rows += f"""<tr>
+                <td>{label}</td>
+                <td>P{cum}</td>
+                <td>${price:.2f}</td>
+                <td style="color:{color}">{r:+.1f}%</td>
+                <td style="font-size:0.85em;color:var(--ts)">{note}</td>
+            </tr>"""
+        mean = e7["mean"]
+        exp_price = curr_price * (1 + mean / 100.0)
+        exp_color = "var(--bull)" if mean > 0 else ("var(--bear)" if mean < 0 else "var(--tm)")
+        hit = exp.get("hit_rate_pct")
+        # 命中率只在「同方向」口径下有定义；不分方向时即便上游带了也不印
+        hit_txt = f"，方向命中率 {hit:.1f}%" if basis == "same_direction" and _num(hit) else ""
         return f"""
         <div class="section">
             <h2>第 5 章：情景推演</h2>
             <table>
-                <tr><th>情景</th><th>概率</th><th>目标价</th><th>涨跌幅</th><th>触发条件</th></tr>
+                <tr><th>情景</th><th>累计分位</th><th>T+7 价格</th><th>涨跌幅</th><th>含义</th></tr>
                 {rows}
                 <tr style="background:var(--surface2);font-weight:bold;">
-                    <td colspan="2">概率加权期望价格</td>
+                    <td colspan="2">样本均值期望价</td>
                     <td style="color:{exp_color}">${exp_price:.2f}</td>
-                    <td style="color:{exp_color}">{exp_return:+.1f}%</td>
+                    <td style="color:{exp_color}">{mean:+.1f}%</td>
                     <td>from ${curr_price:.2f}</td>
                 </tr>
             </table>
             <p style="margin-top:10px;font-size:0.85em;color:var(--tm);">
-                期望价格 = Σ(概率 × 情景价格) = {' + '.join(f'{p}%×${pr:.0f}' for _,p,pr,_ in scenarios)} = <strong style="color:{exp_color}">${exp_price:.2f}</strong>
+                依据：pheromone.db 中 {basis_txt} 的 {n} 次蜂群预测，T+7 真实收盘收益分布
+                （{d0} ~ {d1}{hit_txt}；口径 {exp.get('return_basis', '—')}）。
+                分位数是历史频率，不是对本次的预测；样本跨度内的市场环境与当下未必相同。
             </p>
         </div>"""
 
@@ -1864,16 +2205,8 @@ class MLEnhancedReportGenerator:
         prob = analysis.get('probability_analysis', {})
         swarm = enhanced_report.get('swarm_results', {})
 
-        # 评级颜色
-        rating = combined.get('rating', 'HOLD')
-        if rating == 'STRONG BUY':
-            rating_color = 'var(--bull)'
-        elif rating == 'BUY':
-            rating_color = 'var(--acc2)'
-        elif rating == 'AVOID':
-            rating_color = 'var(--bear)'
-        else:
-            rating_color = 'var(--neut)'
+        # v0.45.139：评级已撤，刊头徽章改印前瞻命中率；颜色随蜂群方向走
+        rating_color = self._dir_color(swarm.get('direction', 'neutral'))
 
         # ML 预测部分（提前计算，用于修正蜂群表中 RivalBee 的旧概率值）
         pred = ml_pred.get('prediction', {})
@@ -1930,7 +2263,10 @@ class MLEnhancedReportGenerator:
         ch7          = self._ch7_tasks(agent_details, options)
 
         # ── 折叠详情区（止损 / 止盈 / 期权 / ML 特征）──────────────
-        win_prob    = prob.get('win_probability_pct', 50)
+        # v0.45.134：换成历史命中率；**不可得时是 None，不是 50**
+        # （旧默认 50 与 v0.45.50 修掉的 rr 默认 1.5/2.0 同型：卡在闸上的「不知道」）
+        _hr = prob.get('hit_rate_pct')
+        win_prob = _hr if isinstance(_hr, (int, float)) and not isinstance(_hr, bool) else None
         # v0.45.54：1.00 的 R:R 是一个明确的（很差的）交易结论，不是「不知道」。
         # 上游 _calculate_risk_reward_ratio 现已在无历史时返回 None（v0.45.50）。
         _rr = prob.get('risk_reward_ratio')
@@ -1939,9 +2275,28 @@ class MLEnhancedReportGenerator:
         # ⚠️ 预先算好 —— 不在下面的 f-string 里放条件逻辑（v0.45.50/53 各犯过一次）
         _rr_txt = f"{risk_reward:.2f}" if risk_reward is not None else "未知"
         _mlp_txt = f"{ml_prob_val:.1f}%" if ml_prob_val is not None else "未知"
+        _hr_txt = (f"{win_prob:.1f}%（n={prob.get('sample_size')},"
+                   f" basis={prob.get('basis')}）"
+                   if win_prob is not None else "不可得（无同方向历史可比样本）")
+        # v0.45.138：前瞻量与描述量分两行印。合成一行必然被读成同一件事，
+        # 而它们恰恰是本版要区分的两件事。
+        _fw = prob.get("forward_estimate_pct")
+        _fci = prob.get("forward_ci95")
+        _fw_txt = (f"{_fw:.1f}%（全书池化 n={prob.get('forward_sample_size')}"
+                   + (f"，95% 区间 [{_fci[0]}, {_fci[1]}]"
+                      if isinstance(_fci, (list, tuple)) and len(_fci) == 2 else "")
+                   + "；各标的相同）"
+                   if isinstance(_fw, (int, float)) and not isinstance(_fw, bool)
+                   else "不可得")
+        _fw_hdr = ((f"{_fw:.1f}%" + (f" [{_fci[0]}, {_fci[1]}]"
+                                    if isinstance(_fci, (list, tuple)) and len(_fci) == 2 else ""))
+                   if isinstance(_fw, (int, float)) and not isinstance(_fw, bool) else "不可得")
         position    = analysis.get('position_management', {})
         stop_loss   = position.get('stop_loss', {})
-        take_profit = position.get('take_profit', {})
+        # v0.45.134：分布不可得时上游给 None（不是 {}）。`or {}` 会把它悄悄
+        # 变成「有这一节、只是空的」——那正是 v0.45.114「跳过缺失项＝把缺失
+        # 渲染成不存在」的形状。这里保留 None 并在下面显式渲染「不可得」。
+        take_profit = position.get('take_profit')
         holding     = position.get('optimal_holding_time', '')
 
         sl_rows = ""
@@ -1958,16 +2313,20 @@ class MLEnhancedReportGenerator:
         tp_rows = ""
         if isinstance(take_profit, dict):
             for k, v in take_profit.items():
-                if isinstance(v, dict):
-                    tp_rows += (f"<tr><td>{k}</td><td>${v.get('price',0):.2f}</td>"
-                                f"<td>+{v.get('gain_pct',0):.0f}%</td>"
-                                f"<td>{v.get('sell_ratio',0):.0%} | {v.get('reason','')}</td></tr>")
-                elif isinstance(v, (int, float)):
-                    tp_rows += f"<tr><td>{k}</td><td>${v:.2f}</td><td></td><td></td></tr>"
-        elif isinstance(take_profit, list):
-            for item in take_profit:
-                if isinstance(item, dict):
-                    tp_rows += f"<tr><td>{item.get('level','')}</td><td>${item.get('price',0):.2f}</td><td></td><td></td></tr>"
+                if not isinstance(v, dict):
+                    continue
+                # 两列不同口径，别混：价格变动（可为负）与按方向折算的盈利。
+                # 空头的价格变动为负正是它在赚钱 —— 只印一个数必然误导一半的行。
+                _g = v.get('gain_pct')
+                _pf = v.get('profit_pct')
+                _g_txt = f"{_g:+.1f}%" if isinstance(_g, (int, float)) else "—"
+                _pf_txt = f"{_pf:+.1f}%" if isinstance(_pf, (int, float)) else "—"
+                tp_rows += (f"<tr><td>{k}</td><td>${v.get('price',0):.2f}</td>"
+                            f"<td>{_g_txt}</td><td>{_pf_txt}</td>"
+                            f"<td>{v.get('sell_ratio',0):.0%} | {v.get('reason','')}</td></tr>")
+        elif take_profit is None:
+            tp_rows = ('<tr><td colspan="5">不可得：无同标的同方向的历史 T+7 '
+                       '收益分布（或方向为中性）</td></tr>')
 
         holding_txt = ""
         if holding:
@@ -1977,10 +2336,15 @@ class MLEnhancedReportGenerator:
         if sl_rows or tp_rows:
             sl_tp_html = f"""
             <div style="margin-bottom:20px;">
+                <p style="margin:0 0 10px;color:var(--ts);font-size:0.92em;">
+                    出场阶梯取自同标的同方向历史 T+7 收益分布<br>
+                    · <strong>历史描述</strong>（本标的本方向）：命中率 {_hr_txt}<br>
+                    · <strong>前瞻估计</strong>（用于评级）：{_fw_txt}
+                </p>
                 <div class="grid-2">
                     <div><h3 style="color:var(--bear);">止损位</h3><table>{sl_rows}</table></div>
                     <div><h3 style="color:var(--bull);">止盈位</h3>
-                        <table><tr><th>档位</th><th>价格</th><th>涨幅</th><th>操作</th></tr>{tp_rows}</table>
+                        <table><tr><th>档位</th><th>价格</th><th>价格变动</th><th>盈利</th><th>操作</th></tr>{tp_rows}</table>
                     </div>
                 </div>
                 {holding_txt}
@@ -2220,7 +2584,7 @@ class MLEnhancedReportGenerator:
     <div class="header">
         <span class="eyebrow">Alpha Hive · 蜂群智能深度研究</span>
         <h1><span class="tk">{ticker}</span> 深度研究报告</h1>
-        <div class="rating">{rating} — {combined['action']}</div>
+        <div class="rating">前瞻命中率 {_fw_hdr}</div>
         <p class="meta">
             {self.timestamp.strftime('%Y-%m-%d %H:%M')} PDT
             &nbsp;·&nbsp; 综合胜率 <b>{combined['combined_probability']:.1f}%</b>
@@ -2473,8 +2837,13 @@ def main():
                 }
 
             # 生成分析
+            _sr = swarm_data.get(ticker) or {}
             enhanced_report = report_gen.generate_ml_enhanced_report(
-                ticker, ticker_data
+                ticker, ticker_data,
+                swarm_direction=_sr.get("direction"),
+                swarm_dimension_scores=_sr.get("dimension_scores"),
+                swarm_final_score=_sr.get("final_score"),
+                swarm_agent_directions=_sr.get("agent_directions"),
             )
 
             # 注入蜂群数据到报告
@@ -2504,14 +2873,14 @@ def main():
                         "probability_analysis", {}) or {}
                     # v0.45.54：`or 0` 把「不可得」与「真实的 0」混为一谈；
                     # 该结构只用于记录被禁用的加成，保留 None 更诚实。
-                    _wp = _prob.get("win_probability_pct")
+                    _wp = _prob.get("hit_rate_pct")   # v0.45.134 改名
                     _win = float(_wp) if isinstance(_wp, (int, float)) else None
                     _rrv = _prob.get("risk_reward_ratio")
                     _rr = float(_rrv) if isinstance(_rrv, (int, float)) else None
                     enhanced_report["swarm_results"]["probability_boost"] = {
                         "applied": False,
                         "disabled": True,
-                        "win_probability_pct": _win,
+                        "hit_rate_pct": _win,
                         "risk_reward_ratio": _rr,
                         "reason": "v0.16.0 已禁用: probability_analysis 数据源不可靠 (sample_size<5, 启发式 win_prob)",
                     }
@@ -2561,8 +2930,44 @@ def main():
     _log.info("所有文件已完成写入")
     _log.info("=" * 60)
 
+    # ── v0.45.145：ML 概率常数退化闸 ─────────────────────────────────
+    # 2026-09-04 全部 12 份 probability 逐位相同（0.5899693787928219），
+    # 报告照常印「ML 预测 59.0%」、退出码 0、日志正常——没有任何东西会红。
+    # 闸放在这里而不是循环内：判据是「当日这一批的唯一值个数」，必须等
+    # 全部文件落盘（上面的 shutdown(wait=True)）之后才能求值。
+    #
+    # 读磁盘而非读内存，因为本进程通常只是 Step 3 补跑（编排器只在 Step 2
+    # 漏了标的时才调本 main），单看自己写的那 1~2 份 n 太小、判据形同虚设；
+    # 读磁盘会把 Step 2 的 12 份一起算进来。
+    #
+    # ⚠️ 不发 Slack（CLAUDE.md「Slack 通知精简规则」）。观测点 = 日志 + 退出码。
+    _exit_code = 0
+    _guard_date = report_gen.timestamp.strftime("%Y-%m-%d")
+    try:
+        from ml_model_guard import enforce_day as _enforce_day
+        _verdict = _enforce_day(
+            report_dir, _guard_date, raise_on_degenerate=False, logger=_log
+        )
+        if _verdict.is_degenerate:
+            _exit_code = 1
+    except ImportError as _ge:
+        # 「闸装不上」与「闸响了」一样严重：两种情况都不该报告健康。
+        # 沿用 Step 10/11/12 约定的 3 = 无法判定，绝不静默当成 0。
+        _log.error(
+            "🚨 ML 常数退化闸未装上（%s）——本次运行没有这道观测点，按「无法判定」处理",
+            _ge,
+        )
+        _exit_code = 3
+
     # ── 自动同步 gh-pages（GitHub Pages 从此分支部署）──
-    _sync_ghpages(tickers, successful_count)
+    if _exit_code == 1:
+        _log.error("已跳过 gh-pages 同步：当日 ML 概率退化成常数，先查模型再发布。")
+    else:
+        _sync_ghpages(tickers, successful_count)
+
+    if _exit_code:
+        import sys as _sys_exit
+        _sys_exit.exit(_exit_code)
 
 
 def _sync_ghpages(tickers: list, successful_count: int) -> None:

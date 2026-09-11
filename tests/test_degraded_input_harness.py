@@ -178,10 +178,15 @@ class TestRatingGateDegraded:
         assert_not_fabricated(rr, "risk_reward_ratio")
 
     def test_zero_avg_loss_gives_none(self):
+        """v0.45.132：入参改为 HistoricalAnalyzer 的 expected_returns；样本里没有
+        亏损单时 ratio 为 None（不是 ∞），闸也不得放行。"""
         from advanced_analyzer import AdvancedAnalyzer
         a = AdvancedAnalyzer.__new__(AdvancedAnalyzer)
-        opps = [{"gain_7d_pct": 5.0, "max_drawdown_pct": 0.0}]
-        assert a._calculate_risk_reward_ratio("TEST", opps) is None
+        er = {"basis": "same_direction", "sample_size": 25,
+              "risk_reward": {"avg_gain_pct": 5.0, "avg_loss_pct": None, "ratio": None}}
+        assert a._calculate_risk_reward_ratio("TEST", er) is None
+        # 旧形状（相似机会列表）也不得让它崩或放行
+        assert a._calculate_risk_reward_ratio("TEST", [{"gain_7d_pct": 5.0}]) is None
 
 
 # ─────────────────────────────────────────────────────────────

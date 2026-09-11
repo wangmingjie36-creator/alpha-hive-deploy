@@ -438,12 +438,13 @@ def extract(data: dict) -> dict:
     _existing_pb = sr.get("probability_boost") or {}
     if not _existing_pb:
         _prob = aa.get("probability_analysis") or {}
-        _win = float(_prob.get("win_probability_pct", 0) or 0)
+        _wp = _prob.get("hit_rate_pct")   # v0.45.134 改名；不可得保持 None
+        _win = float(_wp) if isinstance(_wp, (int, float)) and not isinstance(_wp, bool) else None
         _rr  = float(_prob.get("risk_reward_ratio", 0) or 0)
         sr["probability_boost"] = {
             "applied": False,
             "disabled": True,
-            "win_probability_pct": _win,
+            "hit_rate_pct": _win,
             "risk_reward_ratio": _rr,
             "reason": "v0.16.0 已禁用: probability_analysis 数据源不可靠",
         }
@@ -831,7 +832,7 @@ def extract(data: dict) -> dict:
         "analyst_count":     int(((rival.get("details") or {}).get("eps_revision", {}) or {}).get("num_analyst_opinions", 0) or 0),
         # v0.15.0: Probability Boost 审计字段（来自 generate_ml_report.py 注入）
         "probability_boost": (data.get("swarm_results") or {}).get("probability_boost", {}),
-        "win_probability_pct": float(((data.get("advanced_analysis") or {}).get("probability_analysis") or {}).get("win_probability_pct", 0) or 0),
+        "hit_rate_pct": _hr_or_none(data),
         "risk_reward_ratio":   float(((data.get("advanced_analysis") or {}).get("probability_analysis") or {}).get("risk_reward_ratio", 0) or 0),
         # Raw JSON for LLM context
         "_raw": data,
@@ -2965,13 +2966,40 @@ def _build_macro_narrative(ctx: dict) -> str:
             + supply_chain_para)
 
 
+def _hr_or_none(data: dict):
+    """取历史命中率；不是有限实数就返回 None（v0.45.134）。
+
+    旧实现是 `float(... .get("win_probability_pct", 0) or 0)` —— 两层兜底把
+    「不可得」压成 **0.0**，而 0.0 在这个量表上恰是「一次都没赢过」这个最强的
+    看空结论。与 v0.45.111 `_open_position` 的 `or 0.0` 同型。
+    """
+    # v0.45.138：这张卡展示的是**描述量**（本标的本方向的历史频率），
+    # 故标题写「历史命中率」而非「胜率」——后者是前瞻断言，那个数在
+    # probability_analysis.forward_estimate_pct 里，且全书池化、各标的相同。
+    v = ((data.get("advanced_analysis") or {}).get("probability_analysis") or {}).get("hit_rate_pct")
+    if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+        return None
+    return float(v)
+
+
 def _build_odds_boost_card(ctx: dict) -> str:
     """v0.15.0: Odds Boost 第 6 维融合卡片 — 展示 swarm final_score 的概率加成审计"""
     pb = ctx.get("probability_boost") or {}
-    win = ctx.get("win_probability_pct", 0) or pb.get("win_probability_pct", 0)
-    rr  = ctx.get("risk_reward_ratio", 0) or pb.get("risk_reward_ratio", 0)
-    if not win and not rr:
+
+    def _n(*vals):
+        """第一个有限实数；没有就 None。**不拿 0 兜底**——0% 命中率是结论不是缺失。"""
+        for v in vals:
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                return float(v)
+        return None
+
+    win = _n(ctx.get("hit_rate_pct"), pb.get("hit_rate_pct"))
+    rr = _n(ctx.get("risk_reward_ratio"), pb.get("risk_reward_ratio"))
+    if win is None and rr is None:
         return ""
+    # ⚠️ 预先算好，不在下面的 f-string 里放条件逻辑（同 v0.45.50/53 的教训）
+    _win_txt = "%.0f%%" % win if win is not None else "不可得"
+    _rr_txt = "%.1fx" % rr if rr is not None else "不可得"
     applied = pb.get("applied", False)
     if applied:
         before = pb.get("score_before", 0)
@@ -2990,10 +3018,10 @@ def _build_odds_boost_card(ctx: dict) -> str:
             f'<div style="font-size:13px;font-weight:700;color:var(--green2);margin-bottom:8px;">'
             f'⚡ Odds Boost 第6维融合（probability_analysis）</div>'
             f'<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;font-size:12px;">'
-            f'<div><div style="color:var(--text2)">胜率</div>'
-            f'<div style="font-size:18px;font-weight:700;color:var(--green2)">{win:.0f}%</div></div>'
+            f'<div><div style="color:var(--text2)">历史命中率</div>'
+            f'<div style="font-size:18px;font-weight:700;color:var(--green2)">{_win_txt}</div></div>'
             f'<div><div style="color:var(--text2)">赔率</div>'
-            f'<div style="font-size:18px;font-weight:700;color:var(--accent)">{rr:.1f}x</div></div>'
+            f'<div style="font-size:18px;font-weight:700;color:var(--accent)">{_rr_txt}</div></div>'
             f'<div><div style="color:var(--text2)">加成</div>'
             f'<div style="font-size:18px;font-weight:700;color:var(--green2)">+{boost:.2f}</div>'
             f'{bear_tag}</div>'
@@ -3003,7 +3031,7 @@ def _build_odds_boost_card(ctx: dict) -> str:
             f'{dir_tag}</div>'
             f'</div></div>')
     else:
-        reason = pb.get("reason", f"win {win:.0f}% / rr {rr:.1f}x 未达阈值")
+        reason = pb.get("reason", f"历史命中率 {_win_txt} / 赔率 {_rr_txt} 未达阈值")
         return (
             f'<div style="background:var(--bg3);border:1px dashed var(--border);'
             f'border-radius:12px;padding:12px;margin:12px 0;font-size:12px;color:var(--text2);">'
@@ -6931,6 +6959,11 @@ def _save_report_snapshot(ctx: dict, ticker: str, report_date: str, out_dir: Pat
             "GuardBeeSentinel":   float(ctx["guard"].get("score",   0) or 0),
             "BearBeeContrarian":  float(ctx["bear"].get("score",    0) or 0),
         }
+        # v0.45.164: 本路径本来就是普查（直接取 7 只蜂的 ctx，不读信息素板），
+        # 但**口径与日报不同**：无 CodeExecutorAgent、无 QueenDistiller。
+        # 必须自报家门 —— 留空会与「v0.45.164 之前被板截断的历史快照」撞在
+        # 同一个 ""，那正是这个字段要区分的两件事。
+        snap.agent_votes_source = "deep_report_ctx"
         fname = snap.save_to_json(snap_dir)
         print(f"📸 预测快照已保存: {Path(fname).name}")
     except Exception as e:

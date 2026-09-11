@@ -276,15 +276,31 @@ class TestLabelHonesty:
         assert r["determinable"] is False
         assert "healthy" not in r, "无法判定时不得给出健康结论"
 
+    @pytest.mark.integration   # 读生产 .swarm_results_*.json —— 只在生产机上存在
     def test_real_scan_results_are_honest(self):
-        """对真实扫描结果跑一遍 —— 现网不该有矛盾"""
+        """对真实扫描结果跑一遍 —— 现网不该有矛盾。
+
+        v0.45.165：`.swarm_results_*.json` 是生产扫描产物（gitignore），
+        干净检出与 CI 上一个都没有 ⇒ 第一层 `if not files: skip` 恒中，
+        断言从未被求值。改标 integration 显式 opt-in；两层 skip 一并升级为断言 ——
+        「拿不到判定」正是本条要报的东西，跳过等于把它渲染成「没问题」。
+
+        ⚠️ 顺带修一处：原先 glob 的是 `pathlib.Path(".")`，即**测试进程的 cwd**，
+        不是仓库根。cwd 不受控（CLAUDE.md 硬检查项：新产物默认路径不许是相对路径），
+        换非仓库根的目录跑就恒为空 —— 又一条「跳过缺失项＝把缺失渲染成不存在」。
+        """
         import pathlib
-        files = sorted(pathlib.Path(".").glob(".swarm_results_*.json"))
-        if not files:
-            pytest.skip("无扫描结果")
+        root = pathlib.Path(__file__).resolve().parent.parent
+        files = sorted(root.glob(".swarm_results_*.json"))
+        assert files, (
+            f"{root} 下没有 .swarm_results_*.json —— 本条已标 "
+            "@pytest.mark.integration（默认排除）；显式选中却没有生产扫描产物就该红。"
+        )
         r = gate.check_label_honesty("x", files[-1])
-        if not r.get("determinable"):
-            pytest.skip(r.get("reason"))
+        assert r.get("determinable"), (
+            f"最新扫描结果 {files[-1].name} 无法判定标签诚实性：{r.get('reason')!r} —— "
+            "「判不了」不等于「没问题」，这本身就是要报的东西。"
+        )
         assert r["healthy"], f"现网存在标签矛盾：{r['contradictions'][:3]}"
 
 

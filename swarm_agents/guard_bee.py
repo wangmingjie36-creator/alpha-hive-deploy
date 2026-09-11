@@ -25,7 +25,7 @@ class GuardBeeSentinel(BeeAgent):
 
             # 1. 检测信息素板共振
             resonance = self.board.detect_resonance(ticker)
-            top_signals = self.board.get_top_signals(ticker, n=5)
+            top_signals, census_source = self._read_census(ticker)
 
             # 2. 从信息素板读取已有 Agent 分数
             avg_score = sum(e.self_score for e in top_signals) / len(top_signals) if top_signals else 5.0
@@ -211,7 +211,11 @@ class GuardBeeSentinel(BeeAgent):
                 },
                 details={
                     "resonance": resonance,
+                    # v0.45.163：语义已从「排行榜窗口条数（≤5）」变为「本轮发布过的
+                    # 蜂数」。键名保持不变以免断掉 signal_archive.py:312 的时间序列，
+                    # 口径由相邻的 census_source 机读区分。
                     "top_signals_count": len(top_signals),
+                    "census_source": census_source,
                     "consistency": consistency,
                     "adjustment_factor": adj_factor,
                     "llm_conflict_type": llm_guard.get("conflict_type", "") if llm_guard else "",
@@ -234,6 +238,50 @@ class GuardBeeSentinel(BeeAgent):
         except AGENT_ERRORS as e:
             _log.error("GuardBeeSentinel failed for %s: %s", ticker, e, exc_info=True)
             return make_error_result("GuardBeeSentinel", "risk_adj", e)
+
+    #: 回退路径的窗口宽度。旧版 board / 测试替身只有 `get_top_signals` 时用它，
+    #: 取值与 `base.BeeAgent._PEER_LOOKUP_N` 一致（80 条上限的 30%），足以覆盖
+    #: 单标的一轮的全部条目 —— 回退是为了不崩，不是为了复刻旧的 n=5 截断。
+    _CENSUS_FALLBACK_N = 24
+
+    def _read_census(self, ticker: str):
+        """取「本轮 Guard 之前发布过的每只蜂各一条」，返回 (条目列表, 口径标记)。
+
+        为什么不能用 `get_top_signals(ticker, n=5)`（v0.45.163）
+        ------------------------------------------------------------------
+        本方法的两个消费者 —— `avg_score`（均分）与 `consistency`
+        （`max(bull,bear)/total`）—— 要的是**普查**，而 `get_top_signals` 是
+        **排行榜**。对排行榜取均值不等于对蜂群取均值，且两层都朝同一个方向骗：
+
+        ① `_entries` 溢出时 `nlargest(MAX_ENTRIES, key=(self_score, ...))`
+           **先扔分最低的** ⇒ 幸存者均值按构造偏高。生产实测按窗口条数分层，
+           Δrisk_adj 单调：n=1 时 −1.48、n=2 −1.09、n=3 −0.80、n=4 −0.57。
+        ② `n=5` 本身：`alpha_hive_daily_report.py:442` 的顺序契约让 Guard 之前
+           恒有 6 只蜂发布，窗口 **191/191 = 100%** 装不下；n=5 那层仍有
+           Δ −0.124、70/100 偏高。
+
+        合计 risk_adj 维分 96.9% 与真值不同（Δ 均值 −0.485，生产偏高 160/185），
+        GuardBee 方向 26.2% 不一致（bearish 32→63），`consistency` 被记成
+        1.0「完全一致」的 35 份**无一为真**。完整量测见
+        `tests/test_guard_census_eviction.py` 模块 docstring。
+
+        回退保留 `get_top_signals`：测试替身与旧版 board 对象只有这一个方法
+        （同 `base.BeeAgent._read_peer` 的处理）。口径标记随 details 落盘，
+        让「这份数据是哪种读法产出的」可机读 —— 否则新旧两段数字长得一样。
+        """
+        _census = getattr(self.board, "get_live_signals", None)
+        if callable(_census):
+            try:
+                return list(_census(ticker) or []), "live_agent_view"
+            except (AttributeError, TypeError) as e:
+                # warning 不是 debug：回退会改变 risk_adj 维分，属于要有人看见的降级。
+                _log.warning("GuardBeeSentinel %s 普查视图不可用，回退排行榜: %s", ticker, e)
+        try:
+            entries = self.board.get_top_signals(ticker, n=self._CENSUS_FALLBACK_N)
+        except (AttributeError, TypeError) as e:
+            _log.warning("GuardBeeSentinel %s 板读取失败，普查为空: %s", ticker, e)
+            return [], "unavailable"
+        return list(entries or []), "top_signals_fallback"
 
     # ---------- macro adjustment helper ----------
 

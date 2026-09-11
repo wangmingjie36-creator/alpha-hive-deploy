@@ -108,11 +108,10 @@ class ChronosBeeHorizon(BeeAgent):
             _calendar_failed = False
             _calendar_error = ""
 
-            # 1. 从 yfinance 获取真实财报日期
+            # 1. 从 yfinance 获取真实财报日期（v0.45.122：走预取包）
             try:
-                import yfinance as yf
-                t = yf.Ticker(ticker)
-                cal = t.calendar
+                t = True   # 标记步骤 1 成功进入；1b 的目标价改走访问器，不再复用 Ticker 对象
+                cal = self._yf_calendar(ticker)
                 if cal is not None:
                     # cal 可能是 DataFrame 或 dict
                     if hasattr(cal, 'to_dict'):
@@ -202,8 +201,8 @@ class ChronosBeeHorizon(BeeAgent):
             # 1b. 分析师目标价（补强2：yfinance analyst_price_targets）
             _analyst_info: Dict = {}
             try:
-                if t is not None:  # reuse yfinance Ticker from step 1
-                    _apt = getattr(t, "analyst_price_targets", None)
+                if t is not None:  # 步骤 1 进入过（v0.45.122：目标价走预取包访问器）
+                    _apt = self._yf_analyst_targets(ticker)
                     if _apt is not None and hasattr(_apt, "get"):
                         _low = _apt.get("low", 0) or 0
                         _high = _apt.get("high", 0) or 0

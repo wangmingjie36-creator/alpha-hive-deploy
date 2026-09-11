@@ -693,12 +693,28 @@ CATALYSTS = {
 #   - ML 预测 → RivalBeeVanguard → dimension="ml_auxiliary" → 不参与主公式
 #     作为独立调整项附加：final_score += (ml_score - 5.0) * 0.1 * ml_confidence（最大 ±0.5 分）
 #   - 两者不存在双重计算
+#
+# v0.45.172（2026-09-09，用户明确决策，非自动优化写入）：
+#   `experiments/final_score_dilution_report.md`（干净口径 close_t7、N_eff≈23 不重叠周）
+#   实测旧权重加权后净 IC = -0.005（等同抛硬币）——不是稀释是抵消：signal(IC -0.088)
+#   与 risk_adj(IC -0.084) 两个反向维度合计占 43.4% 权重，抵消掉唯一方向一致的
+#   sentiment(IC +0.168)。归零这两维、其余三维按原比例重归一化后实测 IC=+0.106
+#   （`仅剔除负向维度` 反事实，t=+1.23, p=0.219）——用的正是这个已实测过的方案，
+#   不是另发明一套未测过的分配。
+#   ⚠️ 证据强度必须如实标注：sentiment 的 p=0.012 是**未校正值**，按 5 维做
+#   Bonferroni 校正后 p≈0.06，不过 0.05；两反向维自身的负 IC 也都不显著
+#   （p=0.29 / 0.11）。报告原文第 6 节标题是「不建议现在改权重」，`weekly_optimizer.py`
+#   自 v0.44.0 起默认只读正是为了防止基于这类未校正证据的改动。本次是用户在
+#   看过完整证据强度后的主动决定，不代表证据已达到项目一贯要求的显著性门槛，
+#   往后任何人重读这个数字都不要当成"已验证有效"。
+#   世代边界见 `ic_rerun_readiness._COHORT_HISTORY` 2026-09-09 条——
+#   `predictions` 内 2026-09-08 已有 30 条样本在旧权重下产生，本次边界作废它们。
 EVALUATION_WEIGHTS = {
-    "signal":    0.2094,   # ScoutBeeNova: SEC 披露 + 聪明钱 + 拥挤度
-    "catalyst":    0.1878,   # ChronosBeeHorizon: 催化剂与时间线
-    "sentiment":    0.1838,   # BuzzBeeWhisper: 情绪与叙事
-    "odds":    0.1940,   # OracleBeeEcho: 期权 IV(55%) + Polymarket(35%) + 异动(10%)
-    "risk_adj":    0.2250,   # GuardBeeSentinel: 交叉验证 + 风险调整
+    "signal":    0.0000,   # ScoutBeeNova: SEC 披露 + 聪明钱 + 拥挤度 —— IC -0.088，归零（见上）
+    "catalyst":    0.3320,   # ChronosBeeHorizon: 催化剂与时间线
+    "sentiment":    0.3250,   # BuzzBeeWhisper: 情绪与叙事 —— 三维中唯一方向显著（未校正）
+    "odds":    0.3430,   # OracleBeeEcho: 期权 IV(55%) + Polymarket(35%) + 异动(10%)
+    "risk_adj":    0.0000,   # GuardBeeSentinel: 交叉验证 + 风险调整 —— IC -0.084，归零（见上）
     # ml_auxiliary: 不在此处（RivalBeeVanguard 作为 ±0.5 独立调整项）
 }
 
@@ -922,6 +938,30 @@ METRICS_CONFIG = {
         "deployment_status": True,
     }
 }
+
+# ==================== predictions 保留期 ====================
+# ⚠️ 这是**样本量的唯一上限**，不是磁盘配额。
+#
+# `Backtester.cleanup_old_predictions()` 会 `DELETE FROM predictions WHERE date < cutoff`，
+# 每次日报扫描调用一次，删除**不可逆且不备份**。
+#
+# 2026-09-10 取证：该值曾是硬编码的 180，于是自 2026-08-25 起（= 最早样本
+# 2026-02-25 满 180 天那天），每天从库头永久删掉一个扫描日。到 09-09 已删掉
+# 115 条**已完整回填 T+7 的**预测（id 61–494 / 2026-02-25 ~ 2026-03-12）。
+# 后果有两层：
+#   ① 网站"累计收益"其实是 180 天滚动窗口，不是自开始以来 —— 看着像"越改越低"；
+#   ② 已验证样本的 ISO 周数卡在 22 周不再增长（8/12 与 9/10 实测同为 22），
+#      而 `ic_rerun_readiness` 要 ~25 个不重叠周 ⇒ 那道闸结构上几乎永远到不了。
+#
+# predictions 表总共约 1,200 行、在 40MB 的库里占不到 1MB —— 从来没有存储上的理由。
+# 现设 3650 天（10 年）＝ 在可预见范围内不删，但保留这条阀门可被测试与监控。
+# 真要清理请显式传 days=，别改小这个默认值。
+PREDICTION_RETENTION_DAYS = _env_int("ALPHA_HIVE_PREDICTION_RETENTION_DAYS", 3650)
+
+# 单次清理允许删掉的最大占比。超过即视为「参数配错 / 库被误判」，
+# 拒绝执行并打 error —— 这是这条不可逆删除在生产里唯一会红的观测点。
+PREDICTION_CLEANUP_MAX_FRACTION = 0.05
+
 
 # ==================== 信息素板持久化配置 (Phase 2) ====================
 PHEROMONE_CONFIG = {

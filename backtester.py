@@ -50,7 +50,28 @@ FeatureRegistry.register("yfinance", yf is not None,
 
 _log = get_logger("backtester")
 
-DB_PATH = PATHS.db
+def default_db_path() -> str:
+    """生产样本库路径。**必须调用时求值，不要求值成模块级常量。**
+
+    v0.45.150：这里原本是 `DB_PATH = PATHS.db`。`PATHS.db` 自己是 property
+    （每次读 `ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME`），但一旦把它求值成模块级
+    常量，值就冻在 import 那一刻。而 pytest 在**收集期**就 import 本模块
+    （多个 `tests/*.py` 有模块级 `from backtester import ...`），那时
+    `tests/conftest.py::_isolate_env` 的 `monkeypatch.setenv` 还没跑
+    ⇒ 整个 session 冻成 checkout 根目录，环境隔离对它完全无效。
+
+    实测（v0.45.150）：跑一次全套测试，`PredictionStore.__init__` →
+    `_init_table()` 会以读写模式打开**生产** `pheromone.db`（37 MB）、执行
+    `CREATE TABLE IF NOT EXISTS`、进入 WAL 模式并留下 `-wal`/`-shm`。
+    那一次没改到行，但写通道是全开的——同一条 `PredictionStore` 上的
+    `save_predictions()` 就是往里 INSERT 的。
+
+    ⚠️ 连带约束：**下面三处默认参数一律写 `None`，不要写 `= default_db_path()`。**
+    默认参数在 `def` 执行时求值，也就是 import 期，等于换个地方冻同一个值。
+    同型教训见 `tests/test_replay_scoring.py::test_main_actually_uses_patched_db`
+    （v0.45.37：`load_samples(db_path=DB_PATH)` 绑死默认值，退化测试变成假守卫）。
+    """
+    return PATHS.db
 
 
 def _wilson_ci(k: int, n: int, z: float = 1.96) -> Optional[tuple]:
@@ -94,8 +115,8 @@ class PredictionStore:
 
     TABLE = "predictions"
 
-    def __init__(self, db_path: str = DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[str] = None):
+        self.db_path = db_path or default_db_path()
         self._init_table()
 
     def _init_table(self):
@@ -775,6 +796,48 @@ class PredictionStore:
             return []
 
 
+# ==================== v0.45.120：批量日线帧的拆分与切片（纯函数，便于离线测试） ====================
+
+def _split_download_frame(raw, tickers: List[str]) -> Dict[str, "object"]:
+    """把多票 `yf.download(group_by="ticker")` 的结果拆成 {ticker: 平列名 OHLC 帧}。
+
+    只收「有 Close 且去 NaN 后非空」的票；其余不进字典，调用方按未缓存处理
+    （走逐票回退）。形状不认识（多票却平列名）→ 空字典，整轮回退。
+    """
+    out: Dict[str, "object"] = {}
+    if raw is None or getattr(raw, "empty", True):
+        return out
+    cols = raw.columns
+    picked: Dict[str, "object"] = {}
+    if hasattr(cols, "levels"):
+        lvl0 = set(cols.get_level_values(0))
+        lvl1 = set(cols.get_level_values(1))
+        for t in tickers:
+            if t in lvl0:
+                picked[t] = raw[t]
+            elif t in lvl1:
+                picked[t] = raw.xs(t, axis=1, level=1)
+    elif len(tickers) == 1:
+        picked[tickers[0]] = raw
+    else:
+        return out
+    for t, sub in picked.items():
+        if "Close" not in sub.columns:
+            continue
+        sub = sub.dropna(subset=["Close"])
+        if sub.empty:
+            continue
+        out[t] = sub
+    return out
+
+
+def _slice_by_date(df, start, end):
+    """`df` 中日期落在 [start, end) 的行。按 `index.date` 比较，tz-aware / naive 皆可。"""
+    dates = df.index.date
+    mask = (dates >= start) & (dates < end)
+    return df[mask]
+
+
 class Backtester:
     """
     回测引擎 - 自动检验预测准确率
@@ -786,9 +849,16 @@ class Backtester:
     4. adapt_weights()：根据准确率调整 5 维公式权重
     """
 
-    def __init__(self, db_path: str = DB_PATH):
-        self.store = PredictionStore(db_path)
+    def __init__(self, db_path: Optional[str] = None):
+        self.store = PredictionStore(db_path or default_db_path())
         self._spy_entry_cache: Dict[str, float] = {}
+        # v0.45.120：一轮回测内的日线缓存（ticker → 整段 OHLC），由
+        # `_prefetch_backtest_prices` 一次 `yf.download` 填满，三个取价点
+        # 通过 `_history()` 切片。窗口外/未缓存的请求走原来的逐票 history。
+        self._ohlc_cache: Dict[str, "object"] = {}
+        self._ohlc_window: Optional[tuple] = None      # (start_date, end_date)，[start, end)
+        self._ohlc_stats = {"batch_downloads": 0, "batch_tickers": 0,
+                            "cache_hits": 0, "fallback_history": 0}
 
     def _store_path_result(
         self, pred_id, price_t7, return_t7, is_correct,
@@ -816,6 +886,108 @@ class Backtester:
             dir_ambiguous_t7=dir_ambiguous_t7,
         )
 
+    # ==================== v0.45.120：回测批量取价 ====================
+    #
+    # 2026-09-04 实测：回测段 342s，其中待检预测 32 条全是**同一预测日**的 30 只票，
+    # 却逐条各发一次 `yf.Ticker().history()`；t7 一条还要发 4 次（路径 OHLC、
+    # SPY 收盘、SPY 入场、未截断 T+7 收盘）。每次都过 `yf_gate` 的 0.5 req/s 闸门，
+    # 于是 ~40 次串行 × (2s 闸 + 延迟) 就是那 5 分钟。
+    #
+    # 改法：开跑前按全部待检预测算出一个 [最早预测日, 今天+11) 的窗口，所有票
+    # （含 SPY）一次 `yf.download` 拉回来放进 `_ohlc_cache`，三个取价点改走
+    # `_history()` 从缓存切 [start, end)——切片语义与 `Ticker.history(start, end)`
+    # 一致（含 start、不含 end、按交易所日历的日期比较）。
+    #
+    # 不变的部分：
+    #   · 缓存未覆盖（窗口外 / 批量下载失败 / 某票全 NaN）→ 原样走逐票 history，
+    #     退化路径就是改动前的路径，不是另一套逻辑；
+    #   · 未收盘护栏（`_get_price_at_date` 里的 `_exchange_now` 判定）照旧作用在
+    #     切片结果上——批量下载同样会带回今天正在形成的那根 bar；
+    #   · 失败不入缓存：download 抛错/空帧只记 warning，本轮全部回退。
+    #
+    # 多票 download 的两个坑（见记忆 alpha-hive-yfinance-multiindex）：
+    #   · 列是 MultiIndex，`group_by="ticker"` 时 level-0 是票名；单票有时平列名；
+    #   · 各票交易日历不同时用 NaN 行对齐——`Ticker.history` 不会有这些行，
+    #     必须 `dropna(subset=["Close"])` 才是同一口径。
+
+    _OHLC_TAIL_DAYS = 11   # 窗口末尾裕度：_get_price_at_date 的 end = 目标日 + 10
+
+    def _prefetch_backtest_prices(self, pending_map: Dict[str, List[Dict]]) -> None:
+        """按待检预测一次性批量下载日线。失败静默回退（记 warning），不抛。"""
+        if yf is None:
+            return
+        tickers = set()
+        dates = []
+        for rows in pending_map.values():
+            for pred in rows or []:
+                t = pred.get("ticker")
+                d = pred.get("date")
+                if t and d:
+                    tickers.add(str(t))
+                    dates.append(str(d))
+        if not tickers or not dates:
+            return
+        tickers.add("SPY")   # t7 基准：入场价 + 同期收盘
+        try:
+            start_date = datetime.strptime(min(dates), "%Y-%m-%d").date()
+            # `_pdt_today()` 回的是 "YYYY-MM-DD" 字符串（与 get_pending_checks 同钟）
+            end_date = (datetime.strptime(_pdt_today(), "%Y-%m-%d").date()
+                        + timedelta(days=self._OHLC_TAIL_DAYS))
+        except (ValueError, TypeError) as e:
+            _log.warning("回测批量取价：日期解析失败，回退逐票取价：%s", e)
+            return
+
+        symbols = sorted(tickers)
+        try:
+            raw = yf.download(
+                tickers=symbols,
+                start=start_date.strftime("%Y-%m-%d"),
+                end=end_date.strftime("%Y-%m-%d"),
+                group_by="ticker",
+                auto_adjust=True,      # 与 Ticker.history() 的默认一致
+                progress=False,
+                threads=False,         # 顺序打 Yahoo，不用 30 并发去撞 429
+            )
+        except Exception as e:  # noqa: BLE001 - 批量失败只回退，不阻断回测
+            _log.warning("回测批量取价失败（%s: %s），本轮回退逐票取价",
+                         type(e).__name__, e)
+            return
+
+        frames = _split_download_frame(raw, symbols)
+        if not frames:
+            _log.warning("回测批量取价：download 返回空帧或形状不认识，本轮回退逐票取价")
+            return
+        self._ohlc_cache = frames
+        self._ohlc_window = (start_date, end_date)
+        self._ohlc_stats["batch_downloads"] += 1
+        self._ohlc_stats["batch_tickers"] += len(frames)
+        missing = sorted(set(symbols) - set(frames))
+        _log.info("回测批量取价：1 次 download 覆盖 %d/%d 只（%s ~ %s）%s",
+                  len(frames), len(symbols), start_date, end_date,
+                  f"，缺 {' '.join(missing)} 走逐票回退" if missing else "")
+
+    def _history(self, ticker: str, start: str, end: str):
+        """`yf.Ticker(ticker).history(start=, end=)` 的等价物：命中缓存就切片，
+        否则原样逐票取。异常行为与原来完全一致（回退分支抛什么，这里就抛什么）。"""
+        # getattr 带默认：`Backtester.__new__` 造出来的实例（既有测试与备份脚本
+        # 的用法）没有这几个属性，必须表现得和「没预取」完全一样，而不是 AttributeError。
+        win = getattr(self, "_ohlc_window", None)
+        stats = getattr(self, "_ohlc_stats", None)
+        df = getattr(self, "_ohlc_cache", {}).get(ticker) if win else None
+        if df is not None:
+            try:
+                s = datetime.strptime(start, "%Y-%m-%d").date()
+                e = datetime.strptime(end, "%Y-%m-%d").date()
+            except (ValueError, TypeError):
+                s = e = None
+            if s is not None and win[0] <= s and e <= win[1]:
+                if stats is not None:
+                    stats["cache_hits"] += 1
+                return _slice_by_date(df, s, e)
+        if stats is not None:
+            stats["fallback_history"] += 1
+        return yf.Ticker(ticker).history(start=start, end=end)
+
     def _get_spy_entry_price(self, predict_date: str) -> Optional[float]:
         """获取 SPY 在 predict_date 的收盘价（作为 benchmark 入场价），带缓存。"""
         if predict_date in self._spy_entry_cache:
@@ -825,10 +997,7 @@ class Backtester:
         try:
             start = datetime.strptime(predict_date, "%Y-%m-%d")
             end = start + timedelta(days=5)
-            hist = yf.Ticker("SPY").history(
-                start=start.strftime("%Y-%m-%d"),
-                end=end.strftime("%Y-%m-%d"),
-            )
+            hist = self._history("SPY", start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
             if hist.empty:
                 return None
             px = float(hist["Close"].iloc[0])
@@ -946,8 +1115,15 @@ class Backtester:
         # 回测检验
         results = {}
 
+        # v0.45.120：先把三个周期的待检都取出来，一次批量下载覆盖全部取价点
+        pending_map = {p: (self.store.get_pending_checks(p) or []) for p in ("t1", "t7", "t30")}
+        try:
+            self._prefetch_backtest_prices(pending_map)
+        except Exception as _pe:  # noqa: BLE001 - 预取是优化，不是前提
+            _log.warning("回测批量取价异常（%s: %s），回退逐票取价", type(_pe).__name__, _pe)
+
         for period in ["t1", "t7", "t30"]:
-            pending = self.store.get_pending_checks(period)
+            pending = pending_map[period]
             if not pending:
                 results[period] = {"checked": 0, "correct": 0, "skipped": 0}
                 continue
@@ -1095,6 +1271,11 @@ class Backtester:
 
             pass  # 准确率已计算
 
+        st = getattr(self, "_ohlc_stats", None) or {
+            "batch_downloads": 0, "batch_tickers": 0, "cache_hits": 0, "fallback_history": 0}
+        _log.info("回测取价：批量下载 %d 次覆盖 %d 只 | 缓存切片 %d 次 | 逐票回退 %d 次",
+                  st["batch_downloads"], st["batch_tickers"],
+                  st["cache_hits"], st["fallback_history"])
         return results
 
     def _get_price_at_date(
@@ -1118,11 +1299,8 @@ class Backtester:
             # 向后留 10 天窗口应对节假日连休
             end_date = target_date + timedelta(days=10)
 
-            stock = yf.Ticker(ticker)
-            hist = stock.history(
-                start=target_date.strftime("%Y-%m-%d"),
-                end=end_date.strftime("%Y-%m-%d"),
-            )
+            hist = self._history(
+                ticker, target_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
 
             if hist.empty:
                 return None
@@ -1233,10 +1411,10 @@ class Backtester:
             else:
                 end_dt = start_dt + timedelta(days=int((days_ahead + 3) * 1.5))
 
-            stock = yf.Ticker(ticker)
-            hist = stock.history(
-                start=(start_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
-                end=(end_dt + timedelta(days=2)).strftime("%Y-%m-%d"),
+            hist = self._history(
+                ticker,
+                (start_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                (end_dt + timedelta(days=2)).strftime("%Y-%m-%d"),
             )
 
             if hist.empty:
@@ -1248,6 +1426,23 @@ class Backtester:
                 hist = hist[~hist.index.isna()]
             except Exception:
                 pass
+
+            # v0.45.173：未收盘护栏——`_get_price_at_date` 早在 v0.45.10 就加了这道
+            # （见 tests/test_backtest_forming_bar.py），但当时只补在它自己身上，没有
+            # 挪到这个姊妹取价路径。`self._history()` 与 `_get_price_at_date` 共用同一份
+            # 批量预取缓存，**同样会带回今天正在形成的那根 bar**（v0.45.120 那段注释已
+            # 写明"批量下载同样会带回今天正在形成的那根 bar"，只是没人接着问"这条路径
+            # 也会吗"）。不剔除的后果：`_simulate_trade_path` 在盘中把这根 bar 当**已收盘**
+            # 价参与 SL/TP 判定与 T7_CLOSE 平仓 → `checked_t7=1`/`price_t7`/`return_t7`/
+            # `correct_t7` 全部被盘中价污染；而同一行的 `close_t7`（走 `_get_price_at_date`）
+            # 因为护栏生效而正确留 None——两者从此永久不一致，`backfill_dir_accuracy.py`
+            # 事后拿收盘价重算时自然测出"系统性偏离"，其实错的是这边而不是它。
+            # 直接复用 `data_pipeline._drop_forming_bar`（不是重新手写判据）——它当初没被
+            # `_get_price_at_date` 复用是因为那边常只有 1 根 bar、够不到它的 `len>=3` 门槛；
+            # 这里 `hist` 是宽窗口批量取价，len 远大于 3，条件天然满足。
+            from data_pipeline import _drop_forming_bar
+            hist = _drop_forming_bar(hist)
+
             hist = hist.head(days_ahead) if len(hist) > days_ahead else hist
             if hist.empty:
                 return None
@@ -1347,6 +1542,14 @@ class Backtester:
                         }
 
             # 未触发 → 按最后一根 K 线收盘平仓
+            # v0.45.173：上面已把「今天正在形成」的那根 bar 剔除；若剔除后剩下的
+            # 已收盘 bar 数还不够 days_ahead（=T+7 当天盘中评分的典型情形），
+            # 说明**真正的 T7_CLOSE 还没有发生**，不能拿倒数第二天的收盘价顶替
+            # ——那答的是「T+6 收在哪」不是「T+7 收在哪」。留到下次（次日或收盘后
+            # 重跑）再评，语义与 `_get_price_at_date` 返回 None 时的"留待收盘后重评"一致。
+            if len(hist) < days_ahead:
+                return None
+
             last_row = hist.iloc[-1]
             last_close = float(last_row["Close"])
             last_idx = hist.index[-1]
@@ -1629,6 +1832,33 @@ class Backtester:
         """
         根据历史方向准确率自动调整 5 维公式权重
 
+        🔒 **v0.45.176 起：只读诊断，不再参与生产评分。**
+        照 v0.44.0 对 `weekly_optimizer` 的处置——保留计算与 `adapted_weights` 表的
+        审计轨迹，但断掉写入生产的那条线（`alpha_hive_daily_report` 不再把
+        `load_adapted_weights()` 的结果传给 `QueenDistiller`）。**不要接回去。**
+
+        断掉的理由（实测，非设计洁癖）：
+
+        1. **学的量与用的量不是一个量。** 这里学的是「每只蜂的方向判对率」，
+           权重却作用在「维度分数」上。两者排名 Spearman ρ≈+0.2。
+        2. **那个判对率几乎全是方向配比的人工制品。** 零技能置换检验（保持每只蜂
+           看多/看空/中性配比不变、只打乱它在哪只标的哪一天下注）：5 只蜂里 4 只的
+           技能 Δ 在 ±2.2pp 内且 95%CI 全部跨 0，唯一例外是 BuzzBee(+5.5pp)。
+           而喂进本函数的原始准确率差有 8.7pp（41.6%~50.3%）。
+           差额来自口径而非判断力：同一批 887 条收益，永远说 bullish 命中 52.2%、
+           永远说 neutral 只有 35.5%（T+7 常走出 ±5% 中性带）。
+           ⇒ 本函数实际在排的是「**谁更爱说中性**」。
+        3. **函数形式说不出该说的话。** 下方 `max(0.05, acc**2)`：41.6%（反向有信息）
+           与 58.4%（正向有信息）拿到完全相同的权重，且归一化后零权重/负权重
+           **不可表达**。v0.45.172「把负向维度归零」这个决定，本函数在结构上编码不了。
+        4. **实测反向后果**：ChronosBee 说中性 76%~82% ⇒ catalyst 在 122 条历史记录里
+           有 94 条是五维中权重最低的；而 catalyst 当前单维横截面 rank-IC=+0.097，
+           是五维最高的那个。
+
+        ⚠️ 附带发现：`outcome_utils.DEFAULT_NEUTRAL_TOLERANCE_PCT`（±5% 中性带）此前
+        经本函数直通生产权重——v0.38.1 那次 3.0→5.0 改的是生产评分，而它的注释写着
+        「不影响交易行为」。断线后该注释才重新为真。
+
         优先使用 T+7（更可靠），T+7 样本不足时自动降级到 T+1：
         - T+7：平滑因子 80% 新权重（充分信任）
         - T+1：平滑因子 50% 新权重（T+1 噪声更大，保守调整）
@@ -1807,38 +2037,112 @@ class Backtester:
         except (sqlite3.Error, OSError, TypeError) as e:
             _log.warning("保存自适应权重失败: %s", e)
 
-    def cleanup_old_predictions(self, days: int = 180) -> int:
-        """删除超过 days 天的旧预测记录
+    def cleanup_old_predictions(self, days: Optional[int] = None,
+                                max_fraction: Optional[float] = None) -> int:
+        """删除超过 *days* 天的旧预测记录。**不可逆、不备份。**
+
+        ⚠️ `days=None`（默认）时在**函数体内**解析 `config.PREDICTION_RETENTION_DAYS`，
+        不写成模块级常量、也不写进函数默认值 —— 后两者会在 import 那一刻冻死，
+        env 覆盖与 monkeypatch 都失效（本仓栽过一整族，见 CLAUDE.md「新产物的默认
+        路径不许是相对路径」一节的同源判据）。
+
+        ⚠️ **这条删除曾经是隐形的**（v0.45.178 之前）：调用点硬编码 180 天，
+        成功路径只打 info、失败路径在调用点被 `except: _log.debug` 吞掉，
+        于是「每天从库头永久删一天」这件事在生产日志里没有任何痕迹，
+        直到 2026-09-10 才因为「网站累计收益怎么越改越低」被反查出来。
+        现在：真删了就打 warning（含条数与被删日期区间），删得过多直接拒绝并打 error。
+
+        Args:
+            days: 保留天数。None = 用 `config.PREDICTION_RETENTION_DAYS`。
+            max_fraction: 本次允许删除的最大占比。None = 用
+                `config.PREDICTION_CLEANUP_MAX_FRACTION`。**显式传值 = 声明
+                「我知道这次要删很多」**，供一次性维护脚本与测试使用。
+                ⚠️ 生产扫描路径不许传它 —— 守卫见
+                `tests/test_prediction_retention.py::test_no_fraction_override_at_call_site`。
 
         Returns:
-            删除的记录数
+            实际删除的记录数（被安全闸拦下时为 0）
         """
+        if days is None:
+            try:
+                import config as _cfg_ret
+                days = int(_cfg_ret.PREDICTION_RETENTION_DAYS)
+            except (ImportError, AttributeError, TypeError, ValueError) as e:
+                # 读不到配置时**不删**。这条删除不可逆，兜底必须偏向「什么都不做」。
+                _log.error("cleanup_old_predictions: 读不到 PREDICTION_RETENTION_DAYS，"
+                           "本次不清理（宁可不删也不误删）: %s", e)
+                return 0
+
         cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
         try:
             with sqlite3.connect(self.store.db_path) as conn:
+                total = conn.execute(
+                    f"SELECT COUNT(*) FROM {PredictionStore.TABLE}"
+                ).fetchone()[0]
+                doomed = conn.execute(
+                    f"SELECT COUNT(*), MIN(date), MAX(date) FROM {PredictionStore.TABLE}"
+                    f" WHERE date < ?", (cutoff,)
+                ).fetchone()
+                n_doomed, d_min, d_max = doomed[0], doomed[1], doomed[2]
+                if not n_doomed:
+                    return 0
+
+                # ── 安全闸：一次删掉超过 max_fraction 的表，视为参数配错 ──
+                # 生产里这条不可逆删除唯一会红的地方。
+                if max_fraction is not None:
+                    max_frac = float(max_fraction)
+                else:
+                    try:
+                        import config as _cfg_frac
+                        max_frac = float(_cfg_frac.PREDICTION_CLEANUP_MAX_FRACTION)
+                    except (ImportError, AttributeError, TypeError, ValueError):
+                        max_frac = 0.05
+                if total and (n_doomed / total) > max_frac:
+                    _log.error(
+                        "cleanup_old_predictions 拒绝执行：本次将删除 %d/%d 条"
+                        "（%.1f%% > 上限 %.1f%%），日期 %s~%s，保留期 %d 天。"
+                        "这通常意味着保留期被配小了，而不是数据真的该删。"
+                        "确要清理请显式传 days= 并先备份 %s",
+                        n_doomed, total, n_doomed / total * 100, max_frac * 100,
+                        d_min, d_max, days, self.store.db_path,
+                    )
+                    return 0
+
                 cursor = conn.execute(
                     f"DELETE FROM {PredictionStore.TABLE} WHERE date < ?", (cutoff,)
                 )
                 deleted = cursor.rowcount
                 conn.commit()
                 if deleted:
-                    _log.info("清理旧预测 %d 条（>%d 天）", deleted, days)
+                    # warning 而非 info：这是不可逆的数据销毁，要在扫描日志里看得见。
+                    _log.warning("清理旧预测 %d 条（保留期 %d 天，删除日期区间 %s~%s，"
+                                 "剩余 %d 条）", deleted, days, d_min, d_max, total - deleted)
                 return deleted
         except (sqlite3.Error, OSError) as e:
             _log.warning("cleanup_old_predictions 失败: %s", e)
             return 0
 
     @staticmethod
-    def load_adapted_weights(db_path: str = DB_PATH) -> Optional[Dict]:
+    def load_adapted_weights(db_path: Optional[str] = None) -> Optional[Dict]:
         """
-        加载最近的自适应权重（供 QueenDistiller 使用）
+        加载最近的自适应权重（**只读诊断**）
+
+        🔒 v0.45.176 起**不再供 QueenDistiller 使用**——理由见 `adapt_weights` 的
+        docstring。现存消费者只剩两个，都是展示/对照用途：
+        `alpha_hive_daily_report`（打对照日志）与 `gui/interactions.py`（面板展示）。
+        **把返回值传进 `QueenDistiller(adapted_weights=...)` 就是把 bug 接回来。**
+
+        ⚠️ 另一个旧坑（保留记录）：本查询没有任何日期过滤，`sample_count >= 3`
+        一旦满足就永远返回最近一条 ⇒ 自 2026-02-27 起从未返回过 None ⇒
+        `QueenDistiller.__init__` 里那段修 Bug #18 的 `importlib.reload(config)`
+        热加载分支，在生产里**六个月来是死代码**（`if adapted_weights:` 恒真短路）。
 
         优先加载 T+7 权重（更可靠），其次加载 T+1 权重（早期降级）。
-        返回的权重已附加 _meta 字段，QueenDistiller 会自动忽略未知 key。
 
         Returns:
             {signal: 0.xx, ..., _meta: {period, samples}} 或 None
         """
+        db_path = db_path or default_db_path()      # v0.45.150：调用时求值
         try:
             with sqlite3.connect(db_path) as conn:
                 # 优先取 T+7，再取 T+1

@@ -18,6 +18,17 @@ from iv_history import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _offline_sources(stub_cboe_payload, stub_yfinance):
+    """本文件的取数支路显式钉死，不依赖 conftest 的传输层兜底（v0.45.136）。
+
+    本文件跑 OptionsAgent.analyze，会走 IV 期限结构（CBOE 主源 + yfinance 降级）
+    与 _fetch_full_chain_oi 的 yfinance 兜底。
+
+    桩的定义与各自的「取不到」契约见 tests/conftest.py 的可复用源桩一节。
+    """
+
+
 def _write_snap(cache_dir, ticker, date, **fields):
     p = cache_dir / f"options_snapshot_{ticker}_{date}.json"
     p.write_text(json.dumps({"ticker": ticker, "date": date, **fields}), encoding="utf-8")

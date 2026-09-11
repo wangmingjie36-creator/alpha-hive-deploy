@@ -41,6 +41,15 @@ DEFAULT_TOLERANCE_PCT = 1.0
 # 该标的的正常波动而非预测错误；±5% 命中 52%，与波动率缩放口径（53%）几乎等效
 # 但实现简单（±5% ≈ 0.674×σ7 在本组合典型 σ7≈7.4% 下的近似）。
 # 仅影响准确率记账（backtester 统计 / outcomes_fetcher 回填标签），不影响交易行为。
+#
+# ⚠️ v0.45.176：**上面这句话在 v0.38.1~v0.45.175 之间是假的**，如实记录。
+# 这个带宽经 `Backtester._check_direction` → `adapt_weights` → `QueenDistiller`
+# 直通生产评分权重：中性标签的命中率结构性低于方向标签（同一批 887 条 T+7 收益，
+# 永远说 bullish 命中 52.2%、永远说 neutral 只有 35.5% —— T+7 常走出 ±5%），
+# 于是「哪只蜂更爱说中性」被 `adapt_weights` 当成「哪只蜂更不准」写进了权重。
+# 3.0 → 5.0 那次改的不只是记账，还改了生产权重，而当时没人知道。
+# v0.45.176 断开该通道后这句话才重新为真 —— **若有人把 adapt_weights 接回
+# QueenDistiller，本注释同时作废**（见 `Backtester.adapt_weights` 的 docstring）。
 DEFAULT_NEUTRAL_TOLERANCE_PCT = 5.0
 
 

@@ -51,7 +51,24 @@ from pathlib import Path
 
 _log = logging.getLogger("backfill_dir_accuracy")
 
-DB = Path(__file__).resolve().parent / "pheromone.db"
+# v0.45.160：`DB` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
+# 原本是 `Path(__file__).resolve().parent / "pheromone.db"` —— 那个写法**压根不读任何环境变量**
+# （`ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME` 设成什么都无效，连懒求值都救不了），
+# 比「模块级常量冻在 import 期」更彻底，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "DB", ...)` 依赖它。
+DB = None
+
+
+def _db_path() -> Path:
+    """本模块的库路径。**调用时求值。**
+
+    ⚠️ 默认参数与 argparse 的 `default` 一律写 `None`，不要塞这个值——
+    两者都在 import 期求值，等于换个地方冻同一个值（同型 v0.45.37 / v0.45.150）。
+    """
+    if DB is not None:
+        return Path(DB)
+    from hive_logger import PATHS
+    return Path(PATHS.db)
 HOLD_TRADING_DAYS = 7
 # 自校验判据：护栏要防的是**系统性偏移**（交易日数算错、复权口径不一致），
 # 这类错误必然体现在**中位偏离**上；而尾部零星偏离来自原始跑批当时的数据毛刺
@@ -115,14 +132,37 @@ def _fetch_closes(tickers: list[str], start: str, end: str) -> dict:
 
 
 def _close_after(series, target_date):
-    """取 target_date 当天或之后第一个有效收盘价。"""
+    """取 target_date 当天或之后第一个有效收盘价。
+
+    v0.45.173：若命中的第一根 bar 恰好是**今天**、且交易所还没收盘，它的
+    值是盘中最新价不是收盘价——与 `backtester._get_price_at_date` /
+    `_simulate_trade_path` 同一个坑（`_simulate_trade_path` 那次是这坑第二次
+    在本仓出现，见 tests/test_backtest_forming_bar.py 的模块 docstring）。
+
+    本函数不像那两处能等下次自动重跑：这里没有 `checked_t7` 那样的状态位
+    拦住重复写入，护栏只能靠"当场拒收"。拒收后按 `(None, None)` 处理——
+    调用方本就把它计入 `misses`（取价失败），而不是让自校验拿这批盘中价
+    跟库里的收盘价比出一个"系统性偏离"再中止整个批次的写入。
+    """
     import pandas as pd
     idx = series.index
     tgt = pd.Timestamp(target_date)
     if getattr(idx, "tz", None) is not None:
         tgt = tgt.tz_localize(idx.tz)
     hit = series[idx >= tgt]
-    return (float(hit.iloc[0]), hit.index[0].date().isoformat()) if len(hit) else (None, None)
+    if not len(hit):
+        return None, None
+    hit_date = hit.index[0].date()
+    try:
+        from datetime import time as _dt_time
+        from data_pipeline import _exchange_now
+        _xnow = _exchange_now()
+        if (_xnow is not None and hit_date == _xnow.date()
+                and _xnow.time() < _dt_time(15, 59)):
+            return None, None
+    except Exception:  # noqa: BLE001 - 护栏失效不该阻断取价
+        pass
+    return float(hit.iloc[0]), hit_date.isoformat()
 
 
 def _close_at_or_before(series, target_date):
@@ -140,7 +180,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="只统计不写库")
     ap.add_argument("--all", action="store_true", help="重算全部（默认只补空缺）")
-    ap.add_argument("--db", default=str(DB))
+    # v0.45.160：argparse 的 default 在 import 期求值，不能塞冻结值
+    ap.add_argument("--db", default=None)
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -151,6 +192,8 @@ def main() -> int:
 
     us_bday = CustomBusinessDay(calendar=USFederalHolidayCalendar())
 
+    # v0.45.160：argparse 的 default 是 None（不能塞 import 期冻结值），此处解析
+    args.db = args.db or _db_path()
     conn = sqlite3.connect(args.db)
     # 确保新列存在（幂等；正常由 backtester 的迁移建好）
     for col, typ in (("close_t7", "REAL"), ("dir_correct_t7", "INTEGER"),

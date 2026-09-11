@@ -35,7 +35,20 @@ try:
 except ImportError:
     _req = None
 
-_CACHE_PATH = Path(__file__).parent / "cache" / "yahoo_trending.json"
+# v0.45.160：`_CACHE_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.*`。
+# 原本是 `Path(__file__).parent / "cache" / "yahoo_trending.json"` —— 它**压根不读任何环境变量**，
+# 比「模块级常量冻在 import 期」更彻底：`ALPHA_HIVE_HOME` / `ALPHA_HIVE_CACHE_DIR`
+# 设成什么都无效，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "_CACHE_PATH", ...)` 依赖它。
+_CACHE_PATH = None
+
+
+def _cache_path() -> Path:
+    """本模块的缓存落点。**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if _CACHE_PATH is not None:
+        return Path(_CACHE_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.cache_dir) / "yahoo_trending.json"
 try:
     from config import CACHE_CONFIG as _CC
     _CACHE_TTL = _CC["ttl"].get("yahoo_trending", 900)
@@ -47,7 +60,7 @@ _lock = threading.Lock()
 def get_trending_tickers(count: int = 25) -> List[str]:
     """获取 Yahoo Finance 美股热搜榜（返回 ticker 列表，按热度降序）"""
     with _lock:
-        cached = read_json_cache(_CACHE_PATH, _CACHE_TTL)
+        cached = read_json_cache(_cache_path(), _CACHE_TTL)
         if cached is not None:
             return cached
 
@@ -68,7 +81,7 @@ def get_trending_tickers(count: int = 25) -> List[str]:
             tickers = [q["symbol"] for q in quotes if "symbol" in q]
 
             try:
-                atomic_json_write(_CACHE_PATH, tickers)
+                atomic_json_write(_cache_path(), tickers)
             except (OSError, TypeError):
                 pass
 

@@ -79,6 +79,43 @@ class _HivePaths:
     def sandbox_dir(self) -> Path:
         return Path(os.environ.get("ALPHA_HIVE_SANDBOX_DIR", "/tmp/alpha_hive_sandbox"))
 
+    # ── ML 模型产物（v0.45.149）─────────────────────────────────────────
+    # 三个文件名此前散落在 `ml_predictor` 的六个函数签名默认值、
+    # `generate_ml_report` 的一个**类属性**、以及三处字面量里。收进这里的
+    # 理由不只是整洁：`_HivePaths` 的属性是**调用时求值**的，天然读得到
+    # 测试逐条 setenv 的 `ALPHA_HIVE_HOME`；写成模块级常量或类属性就会在
+    # import 那一刻冻住（v0.45.149 实测：`MLEnhancedReportGenerator._model_file`
+    # 在 pytest 收集期冻成仓库根，隔离对它完全无效）。
+
+    @property
+    def ml_model(self) -> Path:
+        """`ml_predictor.save_model()` 无参调用时的落盘位置。
+
+        ⚠️ 生产**不读**这个文件（全仓 `load_model` 无参调用点 = 0），它只是
+        `MLPredictionService.train_model()` 的副产物。此前默认值是 cwd 相对
+        路径 `"ml_model.json"`，于是「在哪跑 pytest 就写到哪」。
+        """
+        return self.home / "ml_model.json"
+
+    @property
+    def ml_model_cache(self) -> Path:
+        """生产**真正读**的那份 ML 模型。
+
+        三个消费点都显式指它：`alpha_hive_daily_report`（两处）、
+        `generate_ml_report._model_file`、`queen_distiller._ml_oos_trust_factor`。
+
+        ⚠️ 必须与 `ml_model` 保持为**不同文件**。`train_model()` 会无参保存到
+        `ml_model`，而 `tests/` 里有 11 处无参调它 —— 把两者合并成同一个路径
+        （「统一到单一真相」最容易踩的那种统一法）等于让每次跑测试都直接
+        写穿生产模型。
+        """
+        return self.home / "ml_model_cache.json"
+
+    @property
+    def ml_model_extended(self) -> Path:
+        """`ml_predictor_extended.SimpleMLModel` 的落盘位置（降级实现专用）。"""
+        return self.home / "ml_model_extended.json"
+
     @property
     def google_credentials(self) -> str:
         return os.environ.get(

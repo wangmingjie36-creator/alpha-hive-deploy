@@ -92,6 +92,7 @@ class TestGetYieldCurve:
         self._patch(monkeypatch, "<feed><entry><d:FOO>1</d:FOO></entry></feed>")
         assert ty.get_yield_curve() is None
 
+    @pytest.mark.network  # 打真实外部端点，离线必挂；CI 排除，本机照跑
     def test_caches_within_ttl(self, monkeypatch):
         """同月的两次调用只抓一次。
 

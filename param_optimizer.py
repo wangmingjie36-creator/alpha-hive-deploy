@@ -45,11 +45,40 @@ QUICK_COMBOS = [
     (7.0, 15.0, 40.0),
 ]
 
-BASE_DIR = Path(__file__).resolve().parent
-STATE_DIR = BASE_DIR / "paper_portfolio_state"
-BACKUP_DIR = BASE_DIR / "paper_portfolio_state_backup"
-RESULTS_FILE = BASE_DIR / "param_optimization_results.json"
+# v0.45.160：以下路径全部改成**调用时求值**。原本是
+#   BASE_DIR = Path(__file__).resolve().parent
+# 这类 `Path(__file__).parent` 派生值**压根不读任何环境变量**，比「模块级常量冻在
+# import 期」更彻底：`ALPHA_HIVE_HOME` 设成什么都无效，`conftest::_isolate_env`
+# 对它完全无效。保留同名钩子（默认 `None`）以便测试 `monkeypatch.setattr` 覆盖。
+BASE_DIR = None
+STATE_DIR = None
+BACKUP_DIR = None
+RESULTS_FILE = None
 
+def _base_dir() -> Path:
+    """本模块的根锚点。**调用时求值。**"""
+    if BASE_DIR is not None:
+        return Path(BASE_DIR)
+    from hive_logger import PATHS
+    return Path(PATHS.home)
+
+def _state_dir() -> Path:
+    """**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if STATE_DIR is not None:
+        return Path(STATE_DIR)
+    return _base_dir() / "paper_portfolio_state"
+
+def _backup_dir() -> Path:
+    """**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if BACKUP_DIR is not None:
+        return Path(BACKUP_DIR)
+    return _base_dir() / "paper_portfolio_state_backup"
+
+def _results_file() -> Path:
+    """**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if RESULTS_FILE is not None:
+        return Path(RESULTS_FILE)
+    return _base_dir() / "param_optimization_results.json"
 
 @dataclass
 class RunResult:
@@ -84,23 +113,23 @@ class RunResult:
 
 
 def _backup_state():
-    if STATE_DIR.exists():
-        if BACKUP_DIR.exists():
-            shutil.rmtree(BACKUP_DIR)
-        shutil.copytree(STATE_DIR, BACKUP_DIR)
+    if _state_dir().exists():
+        if _backup_dir().exists():
+            shutil.rmtree(_backup_dir())
+        shutil.copytree(_state_dir(), _backup_dir())
 
 
 def _restore_state():
-    if BACKUP_DIR.exists():
-        if STATE_DIR.exists():
-            shutil.rmtree(STATE_DIR)
-        shutil.copytree(BACKUP_DIR, STATE_DIR)
+    if _backup_dir().exists():
+        if _state_dir().exists():
+            shutil.rmtree(_state_dir())
+        shutil.copytree(_backup_dir(), _state_dir())
 
 
 def _clear_state():
-    if STATE_DIR.exists():
-        shutil.rmtree(STATE_DIR)
-    STATE_DIR.mkdir(exist_ok=True)
+    if _state_dir().exists():
+        shutil.rmtree(_state_dir())
+    _state_dir().mkdir(exist_ok=True)
 
 
 def _run_one_combo(sl: float, tp: float, deploy: float) -> RunResult:
@@ -205,8 +234,8 @@ def run_grid(quick: bool = False) -> List[RunResult]:
         "combos_tested": len(results),
         "results": [r.to_dict() for r in results],
     }
-    RESULTS_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"\n💾 结果已保存 → {RESULTS_FILE.name}")
+    _results_file().write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"\n💾 结果已保存 → {_results_file().name}")
 
     return results
 
@@ -460,15 +489,15 @@ def main():
     args = p.parse_args()
 
     if args.html:
-        if not RESULTS_FILE.exists():
+        if not _results_file().exists():
             print("❌ 找不到 param_optimization_results.json，先跑一次 grid")
             sys.exit(1)
-        data = json.loads(RESULTS_FILE.read_text(encoding="utf-8"))
+        data = json.loads(_results_file().read_text(encoding="utf-8"))
         results = []
         for d in data["results"]:
             results.append(RunResult(**d))
         html = render_html(results)
-        out = BASE_DIR / "param_optimization_report.html"
+        out = _base_dir() / "param_optimization_report.html"
         out.write_text(html, encoding="utf-8")
         print(f"✅ HTML 报告 → {out}")
         return
@@ -477,7 +506,7 @@ def main():
 
     # 生成 HTML
     html = render_html(results)
-    out = BASE_DIR / "param_optimization_report.html"
+    out = _base_dir() / "param_optimization_report.html"
     out.write_text(html, encoding="utf-8")
     print(f"\n✅ HTML 报告 → {out}")
 

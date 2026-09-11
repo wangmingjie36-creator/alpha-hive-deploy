@@ -87,11 +87,70 @@ class TestCohortBoundary:
         assert c["date"] == rr._COHORT_HISTORY[-1][0]
         assert c["n_generations"] == len(rr._COHORT_HISTORY)
 
+    #: 已知世代的**最小集合**：这些 (日期, 版本) 必须在表里。
+    #: ⚠️ **刻意写死，不许从 `_COHORT_HISTORY` 派生** —— 派生即恒真。
+    #: 追加新世代不需要动这里（子集断言）；只有**删掉**一条历史世代才会红。
+    #: 表头写着「只追加，不改写（审计轨迹）」，此前没有任何东西执行这句话。
+    MUST_BE_ENUMERATED = frozenset({
+        ("2026-08-17", "v0.44.1~0.44.3"),
+        ("2026-08-26", "v0.45.30"),
+        ("2026-08-27", "v0.45.50"),
+        ("2026-09-05", "v0.45.128"),
+        ("2026-09-07", "v0.45.151"),
+        ("2026-09-07", "v0.45.156"),
+        ("2026-09-07", "v0.45.163"),
+    })
+
+    def test_no_known_cohort_has_vanished(self):
+        """审计轨迹只能变长。
+
+        v0.45.166 实测（变异）：删掉**最新**一条 → 22 项全绿；
+        删掉**最早**一条 → 同样 22 项全绿。**两头都没人看守** ——
+        比姊妹表 `probability_scorecard._ML_ESTIMATOR_GENERATIONS` 还松
+        （那张至少钉住了最早那条）。
+        """
+        assert self.MUST_BE_ENUMERATED, "最小集合被清空了——本条已退化为恒真"
+        live = {(d, v) for d, v, _ in rr._COHORT_HISTORY}
+        missing = self.MUST_BE_ENUMERATED - live
+        assert not missing, (
+            f"世代边界表少了已知条目 {sorted(missing)}；表头写明「只追加，不改写」。"
+            "若确实要改写审计轨迹，请连同本最小集合一起显式修改。")
+
+    def test_cohort_start_never_moves_backwards(self):
+        """成对的另一半：钉的是**消费方看到的值**，不是表的内容。
+
+        这两条抓的东西不一样，缺一不可：
+          · 删掉**中间**一条 → 只有 `test_no_known_cohort_has_vanished` 红。
+          · 删掉**末尾**一条 → 两条都红，而这条说出的是**后果**：
+            `cohort_start()` 取 `[-1]`，末条一没，边界就**往回退**，
+            于是上一代的样本被静默并进当前世代 —— 正是这张表存在要防的那件事
+            （`assess()` 按 `date >= 边界` 过滤，边界退了没有任何告警）。
+
+        对追加安全：新世代只会把边界往后推，`>=` 恒成立。
+        """
+        pinned_max = max(d for d, _ in self.MUST_BE_ENUMERATED)
+        got = rr.cohort_start()["date"]
+        assert got >= pinned_max, (
+            f"世代边界回退了：cohort_start()={got} 早于已知的 {pinned_max}。"
+            "边界前的样本会被当作本代样本混算，且混算是静默的。")
+
     def test_history_is_append_only_and_ordered(self):
-        """世代历史是审计轨迹：只追加、按时间递增。"""
-        dates = [d for d, _, _ in rr._COHORT_HISTORY]
+        """世代历史是审计轨迹：只追加、按时间递增，(日期, 版本) 不重复。
+
+        v0.45.156：原断言是 `len(set(dates)) == len(dates)`（**日期**唯一）。
+        它与同一份表 docstring 里「再次改动 … **必须追加一条**」直接冲突——
+        同一天部署两个都改 final_score 的版本时，照规矩追加就会让它变红，
+        于是它保护的不是不变式，而是「别在同一天改两次」。
+        （与 v0.45.151 改 `TestCohortBoundaryAppended` 是同一物种。）
+
+        真正的不变式：日期**非降**（`sorted` 本就允许并列）+ (日期, 版本) 唯一。
+        同日多条不影响语义——`cohort_start()` 取 `[-1]`，`assess` 按 `date >= 边界`
+        过滤，两者都只看日期值本身。
+        """
+        entries = [(d, v) for d, v, _ in rr._COHORT_HISTORY]
+        dates = [d for d, _ in entries]
         assert dates == sorted(dates), f"世代边界未按时间排序: {dates}"
-        assert len(set(dates)) == len(dates), "世代边界有重复日期"
+        assert len(set(entries)) == len(entries), f"(日期, 版本) 重复: {entries}"
 
     def test_every_generation_records_why(self):
         """只有日期没有原因的边界，半年后无法判断它是否仍然适用。"""
@@ -227,8 +286,10 @@ class TestEtaAndExitCodes:
         扫描覆盖率实测只有 36.7%，按日历周外推会给出过于乐观的日期。
         """
         # 8 个日历周里只产出 4 个扫描周 ⇒ 产出率 0.5
+        # v0.45.128：today 由世代起点推导。此前写死 "2026-10-12"，与从 _COHORT_START
+        # 推出来的夹具日期是两个钟（v0.45.96 那类定时炸弹）——边界一动就把 8 周变成 4 周。
         rows = _weekly_rows(4)
-        res = rr.assess(db_path=db(rows), today="2026-10-12")
+        res = rr.assess(db_path=db(rows), today=_after_cohort(8))
         assert res["weeks_per_calendar_week"] < 1.0
         assert res["eta_calendar_weeks"] > res["weeks_remaining"], (
             "ETA 没有把产出率折算进去"

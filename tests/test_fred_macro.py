@@ -9,6 +9,16 @@ import numpy as np
 
 
 @pytest.fixture(autouse=True)
+def _offline_sources(stub_cboe_vix, stub_yfinance):
+    """本文件的取数支路显式钉死，不依赖 conftest 的传输层兜底（v0.45.136）。
+
+    _fetch_macro_data → get_vix_spot → cboe_vix._download；同函数另有 yfinance 取数。
+
+    桩的定义与各自的「取不到」契约见 tests/conftest.py 的可复用源桩一节。
+    """
+
+
+@pytest.fixture(autouse=True)
 def _clear_fred_cache():
     """每个测试后自动清理 fred_macro 缓存，防止测试污染"""
     yield

@@ -84,18 +84,42 @@ class RivalBeeVanguard(BeeAgent):
                 # ⚠️ 三个都必须能接受"读不到"：板上条目会衰减淘汰、上游蜂可能失败。
                 # 回落值刻意选**可与真实值区分**的中性档，并留 debug 日志 ——
                 # 这样"没读到"不会伪装成"读到了一个中性值"。
-                _cat_quality = "B"        # 见 catalyst_quality_from_score 的缺失约定
+                # v0.45.151：读不到时给 **None**，不给 "B"。
+                #
+                # "B" 是生产**众数**（461/803 = 57.4%，五档里最常见的一档），
+                # 拿它当缺失哨兵 ⇒「读不到」与「质量正好是 B」在特征上完全同形。
+                # 当前世代 188 份生产 JSON 反解实测：真值≠"B" 的 39 份里 27 份
+                # 被记成了 "B"，流向**全部**是 C→B，即 magnitude 0.7 当成 0.9、
+                # `expected_7d/30d` 幅度系统性高估 28.6%。
+                #
+                # None 一路走到 `ml_predictor._encode_catalyst` → NaN，由 HGB 的
+                # 原生缺失处理接住（v0.45.147 已铺好这条路）。
+                #
+                # ⚠️ `catalyst_quality_from_score` 的契约**不变**（它对 None 仍返回
+                # "B"，理由被推翻的证据见其 docstring）—— 改的是本调用方：分数不可用
+                # 时**根本不调它**。
+                _cat_quality = None
+                _cat_source = "unreadable"
                 _chronos = self._read_peer(ticker, "ChronosBeeHorizon")
-                if _chronos is not None:
+                _cat_raw = getattr(_chronos, "self_score", None) if _chronos else None
+                # 类型闸照抄本仓既有那一句（advanced_analyzer.py:1207 等 5 处）：
+                # `bool` 是 `int` 子类，漏掉它会让 True 变成 1.0 分的"真实观测"。
+                if (isinstance(_cat_raw, (int, float))
+                        and not isinstance(_cat_raw, bool)
+                        and _cat_raw == _cat_raw):
                     try:
                         from ml_predictor import catalyst_quality_from_score
-                        _cat_quality = catalyst_quality_from_score(
-                            getattr(_chronos, "self_score", None))
+                        _cat_quality = catalyst_quality_from_score(_cat_raw)
+                        _cat_source = "peer_read"
                     except ImportError:
-                        pass
+                        _log.warning("RivalBeeVanguard %s: ml_predictor 不可用，"
+                                     "catalyst_quality 记为缺失", ticker)
+                elif _chronos is None:
+                    _log.info("RivalBeeVanguard %s: 板上无 ChronosBee 条目，"
+                              "catalyst_quality 记为缺失（不再伪装成 \"B\"）", ticker)
                 else:
-                    _log.debug("RivalBeeVanguard %s: 板上无 ChronosBee 条目，"
-                               "catalyst_quality 回落 %s", ticker, _cat_quality)
+                    _log.warning("RivalBeeVanguard %s: ChronosBee 条目分数不可用"
+                                 "（%r），catalyst_quality 记为缺失", ticker, _cat_raw)
 
                 # OracleBee 发布的键名是 `pc_ratio`（不是 put_call_ratio）与 `iv_rank`
                 _iv_rank, _pc_ratio = 50.0, 1.0
@@ -241,6 +265,10 @@ class RivalBeeVanguard(BeeAgent):
                 dimension="ml_auxiliary",
                 data_quality={
                     "ml_prediction": "real" if prediction else "fallback_momentum",
+                    # CLAUDE.md 硬检查项「这个失败，下游怎么知道？」——此前读不到
+                    # 只有一行 _log.debug，生产日志级别之下等于没有观测点，
+                    # 而回落值 "B" 又与真值同形 ⇒ 失败被改写成「没发生过」。
+                    "catalyst_quality": _cat_source,
                 },
                 details={
                     **(prediction if prediction else {"momentum_5d": stock.get("momentum_5d")}),
@@ -277,8 +305,7 @@ class RivalBeeVanguard(BeeAgent):
         """
         result: Dict = {"revision_signal": "unknown", "revision_summary": ""}
         try:
-            import yfinance as yf
-            info = yf.Ticker(ticker).info
+            info = self._yf_info(ticker)          # v0.45.122：走预取包
 
             fwd_eps  = info.get("forwardEps")
             trail_eps = info.get("trailingEps")
@@ -390,10 +417,7 @@ class RivalBeeVanguard(BeeAgent):
             "summary": "",
         }
         try:
-            import yfinance as yf
-            import math
-
-            hist = yf.Ticker(ticker).history(period="3mo")
+            hist = self._yf_history(ticker, period="3mo")   # v0.45.122：走预取包
             if hist.empty or len(hist) < 26:
                 return result
 

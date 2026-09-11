@@ -555,7 +555,11 @@ class TestBacktesterCleanupPredictions:
                 VALUES (?, 'OLD', 5.0, 'neutral')
             """, (old_date,))
             conn.commit()
-        deleted = bt.cleanup_old_predictions(days=180)
+        # max_fraction=1.0：本用例的表只有 1 行，删它就是 100%，会被 v0.45.178 的
+        # 安全闸（默认 5%）拦下。这里测的是「旧行会被删」，不是安全闸本身 ——
+        # 安全闸的正反两向在 tests/test_prediction_retention.py 里各有一条。
+        # ⚠️ 别把这个 override 复制到生产调用点，那等于把闸门拆了。
+        deleted = bt.cleanup_old_predictions(days=180, max_fraction=1.0)
         assert deleted == 1
 
     def test_cleanup_keeps_recent(self, tmp_path):

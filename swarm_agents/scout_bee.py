@@ -355,8 +355,6 @@ class ScoutBeeNova(BeeAgent):
         """
         result: Dict = {"rs_signal": "unknown"}
         try:
-            import yfinance as yf
-
             # 1. 找板块 ETF
             sector_etf = ""
             sector_name = ""
@@ -372,7 +370,7 @@ class ScoutBeeNova(BeeAgent):
             # 2. 若 WATCHLIST 未给出板块，用 yfinance info fallback
             if not sector_etf:
                 try:
-                    info = yf.Ticker(ticker).info
+                    info = self._yf_info(ticker)          # v0.45.122：走预取包
                     _yf_sector = info.get("sector", "")
                     from fred_macro import _SECTOR_TO_ETF, _SECTOR_ETFS
                     sector_etf  = _SECTOR_TO_ETF.get(_yf_sector, "")
@@ -384,12 +382,9 @@ class ScoutBeeNova(BeeAgent):
                 result["rs_signal"] = "unknown"
                 return result
 
-            # 3. 拉取 20 日收盘价
+            # 3. 拉取 20 日收盘价（v0.45.122：走预取包的日线，两列都在才用，否则回退直连）
             tickers_to_fetch = [ticker, sector_etf]
-            hist = yf.download(
-                tickers_to_fetch, period="25d", interval="1d",
-                progress=False, auto_adjust=True
-            )["Close"]
+            hist = self._yf_close_panel(tickers_to_fetch, period="25d")
 
             if hist is None or len(hist) < 5:
                 return result

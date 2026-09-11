@@ -49,9 +49,41 @@ except Exception:
 # 配置
 # ══════════════════════════════════════════════════════════════════════════════
 
-BASE_DIR = Path(__file__).parent
-SNAPSHOT_DIR = BASE_DIR / "report_snapshots"
-STATE_DIR = BASE_DIR / "paper_portfolio_state"
+# v0.45.160：`BASE_DIR` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.home`。
+# 原本是 `Path(__file__).parent`——**压根不读任何环境变量**。
+# ⚠️ 下面的 `SNAPSHOT_DIR` / `STATE_DIR` 仍是模块级常量（求值于 import 期）：
+#   `STATE_DIR` 由 `conftest::_isolate_paper_portfolio_state` 在测试侧重绑，
+#   本版只把根锚点解冻；把这两个也改懒会牵动全模块几十个使用点，留待后续。
+BASE_DIR = None
+
+
+def _base_dir() -> Path:
+    """本模块根锚点。**调用时求值。**"""
+    if BASE_DIR is not None:
+        return Path(BASE_DIR)
+    from hive_logger import PATHS
+    return Path(PATHS.home)
+
+
+def _pheromone_db_path() -> Path:
+    """`pheromone.db` 的路径，**调用时求值**（v0.45.150）。
+
+    这里刻意不写成 `BASE_DIR / "pheromone.db"`。`BASE_DIR` 是
+    `Path(__file__).parent`，压根不看 `ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME`，
+    所以 `tests/conftest.py::_isolate_env` 对它无效——比「模块级常量冻在 import
+    期」更彻底：连懒求值都救不了它。
+
+    实测（v0.45.150）：`_record_barrier_outcome` 因此在跑测试时以读写模式打开
+    **生产** `pheromone.db`（37 MB），`CREATE TABLE IF NOT EXISTS
+    barrier_outcomes` 并 INSERT。`_isolate_paper_portfolio_state` 接不住它——
+    那个 fixture 只重绑了 `STATE_DIR` 与四个状态文件，没管本模块的 DB 路径。
+    """
+    from hive_logger import PATHS
+    return Path(PATHS.db)
+
+
+SNAPSHOT_DIR = _base_dir() / "report_snapshots"
+STATE_DIR = _base_dir() / "paper_portfolio_state"
 STATE_DIR.mkdir(exist_ok=True)
 
 POSITIONS_FILE = STATE_DIR / "positions.jsonl"      # 当前持仓
@@ -314,7 +346,10 @@ def _infer_confidence(snapshot: Dict) -> str:
     - agent_votes 分散度 → dim_std
     - 无 bear_signals 列表时视为 0
     """
-    score = float(snapshot.get("composite_score") or 0)
+    # v0.45.110：此处原有一行 `score = float(snapshot.get("composite_score") or 0)`，
+    # 但函数体只用 dim_std 与 bear_sig_count，score 从未被读过——是死读
+    # （ruff F841 能抓，本仓 pyproject 全局 ignore 了它，故一直没暴露）。
+    # 连带后果：置信度**完全不看分数**，所以缺分快照从这里拿到的是 "high"。
     votes = snapshot.get("agent_votes") or {}
     if votes:
         vals = [float(v) for v in votes.values() if v is not None]
@@ -473,6 +508,40 @@ def _next_trading_date(ticker: str, after: str, max_lookahead_days: int = 5) -> 
 # 核心逻辑：建仓 / 平仓 / mark-to-market
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _snapshot_score(snapshot: Dict) -> Optional[float]:
+    """取 snapshot 的 composite_score；缺失 / None / 非有限一律返回 None。
+
+    v0.45.110：本函数存在的理由是原来那句 `float(snapshot.get("composite_score") or 0)`
+    会把「拿不到分数」伪装成「分数是 0」，而 `_should_open` 的两道闸门都是
+    **取反才拒绝**（`score < bull` 拒 / `score > bear` 拒），任何让比较返回 False
+    的值都自动放行：
+
+        缺键 / None / 0  → 0.0，`0 > 4.85` 为假 ⇒ **穿透看空侧**
+        NaN             → 任何比较都是 False ⇒ **两侧同时穿透**
+        +inf / -inf     → 各穿透一侧（+inf 以「满分看多」身份进场）
+
+    而且三者都会带着 `conf=high` 出来——`_infer_confidence` 根本不看分数。
+    这是 v0.45.93/97「NaN 穿透守卫」的第三种形态，也是 v0.45.3 记的
+    「安全默认值」判据的正例：问「这个默认值会不会让下游误以为掌握了信息」——
+    `or 0` 会，所以不给默认值，返回 None 让调用方显式拒绝。
+    """
+    raw = snapshot.get("composite_score")
+    # v0.45.121：类型闸收紧到仓库既有惯例
+    # （`dashboard_renderer` 里 `_radar_data` / `_detail` / `_build_dim_dq_html`
+    #  等 5 处全是这一句）。v0.45.110 初版写的是 `float(raw)` + try/except，
+    # 漏了两类：
+    #   · **bool**——`bool` 是 `int` 子类，`float(True)` = 1.0，于是
+    #     `composite_score=True` 会以「强看空」身份通过看空闸（`1.0 <= 4.85`）。
+    #     讽刺的是同一天 v0.45.114 给 `_build_dim_dq_html` 写的守卫**挡了** bool，
+    #     这里没挡——「修一支漏一支」这次漏在我自己两处新代码之间。
+    #   · **数字字符串**——`float("7.5")` 成功，一个类型已经错掉的值被当好数收下。
+    # 生产 1081 条快照的 `composite_score` 100% 是 `float`，故收紧零影响。
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        return None
+    val = float(raw)
+    return val if math.isfinite(val) else None
+
+
 def _candidate_sort_center() -> float:
     """候选排序键的中心点。默认由两闸中点导出，不允许再出现硬编码副本。
 
@@ -493,11 +562,21 @@ def _sort_candidates(snapshots: List[Dict]) -> List[Dict]:
     再抄一遍 lambda（抄一遍就等于两个钟，改了生产那份测试照样全绿）。
     """
     center = _candidate_sort_center()
-    # 兜底值必须**等于 center**：它的语义是"没分数就排最后"，而只有 center
-    # 才能让距离取到 0。写死一个与 center 不同的数，无分快照会拿到非零距离，
-    # 反而排到部分真候选之前。
-    snapshots.sort(key=lambda s: abs(float(s.get("composite_score") or center) - center),
-                   reverse=True)
+
+    def _dist(snapshot: Dict) -> float:
+        # 取不到分 → 距离 0 → 排最后，与「没分数就别抢资金」的语义一致。
+        #
+        # v0.45.110：改走 _snapshot_score。原来写的是
+        # `float(s.get("composite_score") or center)`，只挡住了缺键/None，
+        # **挡不住 NaN**——NaN 是 truthy，`or` 短路不了，`abs(nan - center)`
+        # 仍是 NaN，而 NaN 与任何数比较都返回 False ⇒ 名次未定义
+        # （v0.45.93 记的「NaN 进排序函数」原型：2 条坏行让整张 IC 表位移 0.26）。
+        # 排序发生在 _should_open **之前**，所以那边新加的守卫救不了这里，
+        # 两处必须各自堵。
+        score = _snapshot_score(snapshot)
+        return 0.0 if score is None else abs(score - center)
+
+    snapshots.sort(key=_dist, reverse=True)
     return snapshots
 
 
@@ -513,7 +592,12 @@ def _should_open(snapshot: Dict, existing_tickers: set, as_of: str = "") -> Tupl
     if whitelist and live_start and as_of >= live_start:
         if ticker not in whitelist:
             return False, f"实时模式仅追踪 {whitelist}，跳过 {ticker}"
-    score = float(snapshot.get("composite_score") or 0)
+    # v0.45.110：拿不到分数就拒绝，不再用 0 顶替（见 _snapshot_score 的 docstring）。
+    # 顺序上放在 direction 判定之前无所谓——两者都是无条件拒绝，不存在
+    # "先判方向能少拒几条"的情况。
+    score = _snapshot_score(snapshot)
+    if score is None:
+        return False, f"composite_score 缺失或非有限值（{snapshot.get('composite_score')!r}）"
     direction = (snapshot.get("direction") or "").lower()
     if "bull" in direction:
         if score < CONFIG["entry_score_bull"]:
@@ -551,7 +635,7 @@ def _lookup_vol_ann(ticker: str, as_of: str,
     """
     import sqlite3
 
-    db = Path(db_path) if db_path is not None else BASE_DIR / "pheromone.db"
+    db = Path(db_path) if db_path is not None else _pheromone_db_path()
     # v0.45.104：max_age 必须进 key。它是**查询条件的一部分**（下面的 since 由它算），
     # 却曾被漏在 key 之外：同进程里先用 max_age=1 查出 None，再改成 max_age=10
     # 重查，拿回的是缓存里那个 None——一次 run_replay 的窗口覆盖会污染下一次。
@@ -677,6 +761,31 @@ def _open_position(
     direction = snapshot["direction"]
     conf = _infer_confidence(snapshot)
     low_conv = bool(snapshot.get("low_conviction", False))
+
+    # v0.45.111：分数拿不到就不开仓，与下面 size_usd / entry_price 两道守卫同款
+    # （非法输入 → return None，调用方 continue）。
+    #
+    # 原来写的是 `score=_snapshot_score(snapshot) or 0.0`，注释还辩解说"上游
+    # _should_open 已保证分数存在，这里只是类型收口"。两点都站不住：
+    #   1. **它是个会落盘的伪造值**。score 从 Position 传进 ClosedTrade（见
+    #      _close_position），写进 closed_trades.jsonl，再被 ibkr_sync（导出给
+    #      用户下单的 actions）、alpha_hive_mcp、chart_engine 读走。缺分记成
+    #      0.0 不是"收口"，是往账本里写一个没人发生过的分数——而 0.0 在这套
+    #      量表里还恰好是"最强看空"，是所有可能的谎话里最糟的一个。
+    #   2. **"上游保证过"不是不检查的理由**，是 v0.45.3 那条判据的反面教材：
+    #      问"这个默认值会不会让下游误以为掌握了信息"——会。真要依赖上游，
+    #      就该在依赖断掉时炸掉或降级，而不是无声地编一个数。
+    #
+    # 选 return None 而不是 raise：本函数已有两道同形态守卫，调用方 run_for_date
+    # 对 None 的处理（跳过该候选、当天继续）是现成且正确的；为一个上游已挡住的
+    # 状态引入新的异常路径，收益不抵风险。
+    score = _snapshot_score(snapshot)
+    if score is None:
+        _log.warning("[PaperPortfolio] %s %s composite_score 缺失或非有限值（%r）——"
+                     "跳过开仓。正常情况下 _should_open 已经挡住，走到这里说明"
+                     "两处守卫不同步了。", as_of, ticker, snapshot.get("composite_score"))
+        return None
+
     size_usd, sizing_note = _compute_position_size(
         nav, conf, ticker, closed, low_conviction=low_conv, as_of=as_of)
     # v0.45.97：`size_usd <= 1` 挡不住 NaN（NaN 的任何比较都返回 False），
@@ -706,9 +815,10 @@ def _open_position(
     entry_dt = datetime.strptime(as_of, "%Y-%m-%d")
     time_stop_dt = entry_dt + timedelta(days=14)
 
-    _cs = snapshot.get("composite_score")
-    _cs_txt = f"{float(_cs):.1f}" if _cs is not None else "N/A"
-    rationale = f"score={_cs_txt} · {conf}"
+    # v0.45.111：复用上面已校验的 score。此处原有一次独立的 _snapshot_score 调用
+    # 和一个 `else "N/A"` 分支——加了顶部守卫后该分支不可达，留着会让人以为
+    # "缺分也能开仓、只是显示 N/A"，与实际行为相反，故一并删掉。
+    rationale = f"score={score:.1f} · {conf}"
     if low_conv:
         rationale += " · ⚠️低置信-减半仓"
     if sizing_note:
@@ -725,7 +835,7 @@ def _open_position(
         size_usd=round(size_usd, 2),
         time_stop_date=time_stop_dt.strftime("%Y-%m-%d"),
         confidence=conf,
-        score=float(snapshot.get("composite_score") or 0),
+        score=score,
         rationale=rationale,
         sizing=sizing_note,
     )
@@ -832,7 +942,7 @@ _REPLAY_MODE = False
 def _record_barrier_outcome(trade: "ClosedTrade") -> None:
     """把三重屏障出场结果幂等写入 pheromone.db 的 barrier_outcomes 表。"""
     import sqlite3
-    db_path = BASE_DIR / "pheromone.db"
+    db_path = _pheromone_db_path()
     con = sqlite3.connect(str(db_path), timeout=10)
     try:
         con.execute("""
@@ -1493,7 +1603,7 @@ def main():
 
     if args.cmd == "card":
         html = render_portfolio_card()
-        out = BASE_DIR / "paper_portfolio_card.html"
+        out = _base_dir() / "paper_portfolio_card.html"
         out.write_text(f'<!DOCTYPE html><html><head><meta charset="utf-8">'
                        f'<style>:root{{--bg2:#1a1d2e;--bg3:#252840;--border1:#2e3348;--border2:#3a4055;'
                        f'--text1:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--green2:#10b981;--red2:#ef4444;--gold2:#f59e0b;}}'

@@ -34,17 +34,21 @@ class QueenDistiller:
     1. 规则引擎（始终运行）：加权评分 + 共振 + 投票 → base_score
     2. LLM 引擎（有 API Key 时启用）：Claude 分析推理 → 调整评分 + 生成推理链
 
-    Opportunity Score = 0.30×Signal + 0.20×Catalyst + 0.20×Sentiment + 0.15×Odds + 0.15×RiskAdj
+    Opportunity Score = Σ wᵢ×维度分，权重唯一真相见 config.EVALUATION_WEIGHTS
+    （此处硬编码的 0.30/0.20/0.20/0.15/0.15 是 v0.45.172 之前的旧值快照，早已
+    与实际配置不符——本文件不再抄写数值，见下方 DEFAULT_WEIGHTS 的定义与注释）。
     """
 
     # 硬编码备份 —— 仅在 config.EVALUATION_WEIGHTS 导入失败时由 __init__ 使用。
     # 正常运行时权重以 config.EVALUATION_WEIGHTS 为准（单一入口）。
+    # v0.45.172：随 config.py 同步更新（此前长期未同步，ImportError 时会静默
+    # 退回已被实测判定净拖累的旧权重方案——signal/risk_adj 各占权重却拖累 IC）。
     DEFAULT_WEIGHTS = {
-        "signal":    0.30,
-        "catalyst":  0.20,
-        "sentiment": 0.20,
-        "odds":      0.15,
-        "risk_adj":  0.15,
+        "signal":    0.0000,
+        "catalyst":  0.3320,
+        "sentiment": 0.3250,
+        "odds":      0.3430,
+        "risk_adj":  0.0000,
     }
 
     # 数据质量源分类契约（_apply_triple_penalty 评分用）
@@ -72,6 +76,11 @@ class QueenDistiller:
         self.enable_llm = enable_llm
         self.ml_model = ml_model
         if adapted_weights:
+            # ⚠️ v0.45.176 起**生产不再走这条分支**：`alpha_hive_daily_report` 不再传
+            # `adapted_weights=`（理由见 `Backtester.adapt_weights` 的 docstring —— 它学的是
+            # 「谁更爱说中性」而不是准头）。参数保留仅供测试注入自定义权重。
+            # **不要在生产代码里传它。** 传了就整体顶掉 config，且下方 config 热加载
+            # （Bug #18 的修复）会被恒真短路掉——那正是它六个月来的真实状态。
             self.DIMENSION_WEIGHTS = adapted_weights
         else:
             # 修复 Bug #18：config 热加载 — 旧实现权重在 __init__ 时快照，
@@ -116,6 +125,38 @@ class QueenDistiller:
                         "[ML-Feedback] 维度权重已调整: %s",
                         {k: round(v, 3) for k, v in self.DIMENSION_WEIGHTS.items()},
                     )
+
+    def _assert_regime_preserved_zeros(self, ticker: str, regime_weights: Dict) -> bool:
+        """政体层保零守卫（v0.45.176）：喂进评分的权重里，零维必须仍为零。
+
+        **这是「谁会红？」在运行期的落点。** 姊妹守卫
+        `alpha_hive_daily_report._assert_config_zeros_survive` 检的是本对象的
+        `DIMENSION_WEIGHTS`（蜂后基准权重，即 09-09 adapted_weights 事故那一层），
+        但**真正乘进 `_compute_weighted_score` 的是这里的 `regime_weights`**。
+        实测：把 `gex_regime` 的 `max(0.02, ·)` 地板 bug 放回去，姊妹守卫
+        **仍返回 True**，而逐标的权重已经是 signal=0.0192 —— 探针放在它要防的
+        那个 bug 的上游，等于没放。两层缺一不可。
+
+        不抛异常：无人值守的定时扫描里，为一条权重不变式炸掉整轮扫描
+        得不偿失；打 error 日志（编排器与日志检查会看到）+ 每个实例只报一次，
+        避免 30 只标的刷 30 条同样的错。
+        """
+        zeroed = [d for d, v in self.DIMENSION_WEIGHTS.items() if v == 0]
+        if not zeroed:
+            return True
+        bad = {d: regime_weights.get(d) for d in zeroed
+               if isinstance(regime_weights.get(d), (int, float)) and regime_weights[d] != 0}
+        if not bad:
+            return True
+        if not getattr(self, "_regime_zero_violation_logged", False):
+            self._regime_zero_violation_logged = True
+            _log.error(
+                "[%s] 政体层保零违反：基准权重已归零 %s，政体调整后却是 %s"
+                " —— 评分实际用的是后者。历史成因是 `gex_regime.RegimeWeightAdjuster`"
+                " 的 `max(0.02, ·)` 地板把显式零复活成 2%%（v0.45.176 已修）。",
+                ticker, zeroed, {k: round(v, 4) for k, v in bad.items()},
+            )
+        return False
 
     def _compute_ml_weight_adjustments(self) -> Dict[str, float]:
         """Enhancement C: 从 ML 模型特征重要性计算维度调整因子。
@@ -241,9 +282,9 @@ class QueenDistiller:
         try:
             import os as _os, json as _json
             from hive_logger import PATHS as _PATHS
-            _path = str(_PATHS.home / "ml_model_cache.json")
-            if not _os.path.exists(_path):
-                _path = "ml_model_cache.json"
+            # v0.45.149：兜底曾是相对路径 `"ml_model_cache.json"`，会读到
+            # 当前工作目录里的野文件。绝对路径取不到就应当放弃，不该改读 cwd。
+            _path = str(_PATHS.ml_model_cache)
             _mtime = _os.path.getmtime(_path)
             if cls._OOS_TRUST_CACHE and cls._OOS_TRUST_CACHE[0] == _mtime:
                 return cls._OOS_TRUST_CACHE[1]
@@ -987,6 +1028,13 @@ class QueenDistiller:
                           {k: f"{v:.3f}" for k, v in _regime_weights_used.items()})
         except Exception as _e_regime:
             _log.debug("政体权重/GEX 预计算失败 (%s): %s", ticker, _e_regime)
+
+        # v0.45.176：政体层保零守卫。**刻意放在 try/except 之外** ——
+        # 上面那个 except 吞一切到 debug，检查写在里面会被静默吃掉
+        # （见 MEMORY `alpha-hive-failure-propagation`：容错把失败改写成「没发生过」）。
+        # 放在外面还能同时覆盖降级路径（异常时 _regime_weights_used 退回
+        # dict(self.DIMENSION_WEIGHTS)，那条路也必须保零）。
+        self._assert_regime_preserved_zeros(ticker, _regime_weights_used)
 
         # ===== 0.5 提取 F&G 值（供步骤 4 门槛 + 步骤 4.6 评分调整使用）=====
         _fg_value = None

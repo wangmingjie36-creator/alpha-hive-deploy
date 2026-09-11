@@ -34,9 +34,21 @@ import yfinance as yf
 
 _log = logging.getLogger("alpha_hive.factor_attribution")
 _factor_download_lock = threading.Lock()   # 防止并发写 parquet 缓存
-_HOME = Path(__file__).parent
-_CACHE_DIR = _HOME / ".factor_cache"
-_CACHE_DIR.mkdir(exist_ok=True)
+# v0.45.160：`_CACHE_DIR` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.*`。
+# 原本是 `Path(__file__).parent / ".factor_cache"`——`Path(__file__).parent` 派生出来的值
+# **压根不读任何环境变量**，比「模块级常量冻在 import 期」更彻底：
+# `ALPHA_HIVE_HOME` 设成什么都无效，`conftest::_isolate_env` 对它完全无效。
+_CACHE_DIR = None
+
+
+def _cache_dir() -> Path:
+    """本模块的落点。**调用时求值**（别求值成模块级常量或默认参数）。"""
+    if _CACHE_DIR is not None:
+        return Path(_CACHE_DIR)
+    from hive_logger import PATHS
+    d = Path(PATHS.home) / ".factor_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 TRADING_DAYS = 252
 
@@ -126,7 +138,7 @@ def _load_cached(path: Path, max_age: int = _CACHE_TTL) -> Optional[pd.DataFrame
 
 def _download_ff5(force: bool = False) -> pd.DataFrame:
     """返回 FF5 日频因子 DataFrame (Mkt-RF, SMB, HML, RMW, CMA, RF)，百分比 → 小数。"""
-    cache_path = _CACHE_DIR / "ff5_daily.parquet"
+    cache_path = _cache_dir() / "ff5_daily.parquet"
     if not force:
         df = _load_cached(cache_path)
         if df is not None:
@@ -149,7 +161,7 @@ def _download_ff5(force: bool = False) -> pd.DataFrame:
 
 def _download_mom(force: bool = False) -> pd.DataFrame:
     """返回 MOM 日频因子 DataFrame，百分比 → 小数。"""
-    cache_path = _CACHE_DIR / "mom_daily.parquet"
+    cache_path = _cache_dir() / "mom_daily.parquet"
     if not force:
         df = _load_cached(cache_path)
         if df is not None:

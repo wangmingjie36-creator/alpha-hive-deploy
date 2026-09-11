@@ -384,117 +384,7 @@ def render_options_chart(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Chart 3  —  蜂群七维雷达图
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def render_radar_chart(
-    data: dict,
-    ticker: str,
-    date_str: str,
-) -> Optional[str]:
-    """
-    生成蜂群7蜜蜂评分雷达图（spider chart），返回 base64 PNG 字符串。
-    数据来源：data['swarm_results']
-    返回 None 表示数据不足。
-    """
-    try:
-        import math as _math
-        plt, mpatches, fm = _get_mpl()
-
-        sr = data.get("swarm_results", {})
-        ad = sr.get("agent_details", {})
-        if not ad:
-            return None
-
-        BEE_MAP = [
-            ("ChronosBeeHorizon", "催化剂"),
-            ("OracleBeeEcho",     "期权/赔率"),
-            ("BuzzBeeWhisper",    "消息情绪"),
-            ("ScoutBeeNova",      "基本面"),
-            ("GuardBeeSentinel",  "宏观/情绪"),
-            ("RivalBeeVanguard",  "ML辅助"),
-            ("BearBeeContrarian", "逆向"),
-        ]
-
-        labels = []
-        values = []
-        for key, label in BEE_MAP:
-            raw = ad.get(key, {})
-            if isinstance(raw, dict):
-                s = float(raw.get("score") or 0)
-            else:
-                s = 0.0
-            labels.append(label)
-            values.append(s)
-
-        if not any(v > 0 for v in values):
-            return None
-
-        N = len(labels)
-        angles = [_math.pi / 2 + 2 * _math.pi * i / N for i in range(N)]
-        angles_closed = angles + [angles[0]]
-        values_closed = values + [values[0]]
-        norm_vals = [v / 10.0 for v in values]
-        norm_closed = norm_vals + [norm_vals[0]]
-
-        fig, ax = plt.subplots(figsize=(7, 6), subplot_kw=dict(polar=True), facecolor=_BG)
-        ax.set_facecolor(_CARD)
-
-        # Grid circles
-        for r in [0.2, 0.4, 0.6, 0.8, 1.0]:
-            circle = plt.Circle((0, 0), r, transform=ax.transData._b, fill=False,
-                                 color="#30363d", lw=0.7, zorder=1)
-            ax.add_artist(circle)
-
-        # Fill + line
-        final_score = float(sr.get("final_score") or 0)
-        fill_col = _score_color(final_score)
-        ax.plot([a for a in angles_closed], norm_closed,
-                color=fill_col, lw=2, zorder=3)
-        ax.fill([a for a in angles_closed], norm_closed,
-                color=fill_col, alpha=0.20, zorder=2)
-
-        # Score reference: final_score ring
-        ref_r = final_score / 10.0
-        ax.plot([a for a in angles_closed], [ref_r] * len(angles_closed),
-                color=_GOLD, lw=1, ls="--", alpha=0.5, zorder=2)
-
-        # Data points
-        for angle, nv, v in zip(angles, norm_vals, values):
-            col = _score_color(v)
-            ax.plot(angle, nv, "o", ms=7, color=col, zorder=5, mec="white", mew=1)
-
-        # Labels
-        for i, (angle, label, v) in enumerate(zip(angles, labels, values)):
-            x = (1.18) * _math.cos(angle)
-            y = (1.18) * _math.sin(angle)
-            col = _score_color(v)
-            ax.text(angle, 1.25, f"{label}\n{v:.1f}",
-                    ha="center", va="center", fontsize=8.5,
-                    color=col, fontweight="bold")
-
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_ylim(0, 1.4)
-        ax.spines["polar"].set_visible(False)
-
-        direction = sr.get("direction", "–")
-        fig.text(0.5, 0.97,
-                 f"{ticker}  ·  蜂群七蜜蜂评分雷达图  ·  {date_str}",
-                 ha="center", va="top", fontsize=12, fontweight="bold", color=_T1)
-        fig.text(0.5, 0.92,
-                 f"综合评分 {final_score:.2f}/10  ·  方向 {direction}  ·  金虚线=综合评分参考环",
-                 ha="center", va="top", fontsize=8, color=_T3)
-
-        return _fig_to_b64(fig)
-
-    except Exception as e:
-        print(f"[chart_engine] render_radar_chart failed: {e}")
-        return None
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Chart 4  —  IV 期限结构曲线
+# Chart 3  —  IV 期限结构曲线
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def render_iv_term_chart(
@@ -574,7 +464,7 @@ def render_iv_term_chart(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Chart 5  —  GEX Profile（Gamma Exposure 分布图）
+# Chart 4  —  GEX Profile（Gamma Exposure 分布图）
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def render_gex_profile_chart(

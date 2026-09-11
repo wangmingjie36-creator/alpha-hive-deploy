@@ -4,15 +4,101 @@
 """
 
 import math
+import socket
 from datetime import datetime
 
 import pytest
 
+import yfinance
+
 import cboe_options
+import options_analyzer
 from cboe_options import select_quote_set
 from options_analyzer import OptionsAgent
 
 NOW = datetime(2026, 9, 3, 10, 0)  # 固定「今天」，DTE 全部从它倒推
+
+
+@pytest.fixture(autouse=True)
+def _offline(monkeypatch):
+    """本文件 docstring 承诺的「全部离线」，由这条 fixture 真正兑现（v0.45.124）。
+
+    此前那句话是空头支票。`_agent()` 打桩的是 fetcher 的四个方法，而
+    `OptionsAgent.analyze` 里还有**若干条与报价集无关的独立取数支路**，每条都是
+    同一形状「CBOE 主源 → yfinance 降级 → `except Exception` 吞掉」：
+
+        analyze:2142 → calculate_iv_term_structure
+                         ├ cboe_options.fetch_cboe_iv_term_structure → _fetch_cboe_payload
+                         └ OptionsAnalyzer._iv_term_points_yfinance
+        analyze:2163 → _fetch_full_chain_oi:1500 → yf.Ticker(t).options
+
+    因为异常被吞，**出网失败不改变任何断言**：测试照常全绿，代价只是慢。
+    socket 探针实测：补桩前整文件 221s / 出网 42 次，补桩后 23s / 0 次。
+
+    ⚠️ 逐条打桩是打地鼠——本次排查就漏了两轮（先漏 yfinance 降级支路、
+    再漏 `_fetch_full_chain_oi`）。所以这里**钉的是降级源本身**，将来 analyze
+    再多一条支路也自动被罩住。
+
+    ⚠️ 需要真 payload 的测试在自己函数体里再 `setattr` 一次即可覆盖——autouse
+    fixture 先跑，后设的赢。`TestFetchQuoteSet` /
+    `TestCallerPriceIsNotAStrikeMedian` 就是这么工作的，本 fixture 不改它们的语义。
+    """
+    # ① CBOE 主源钉成「取不到」——这正是 TestUnavailableShapeIsUniform 早就手写的那个桩
+    monkeypatch.setattr(cboe_options, "_fetch_cboe_payload", lambda *a, **k: None)
+
+    # ② yfinance 降级源整个钉死（全仓无 `from yfinance import X`，改模块属性即可覆盖所有调用点）
+    def _no_net(*a, **k):
+        raise RuntimeError("offline: tests/test_quote_set.py::_offline 禁止出网")
+
+    monkeypatch.setattr(yfinance, "Ticker", _no_net)
+    monkeypatch.setattr(yfinance, "download", _no_net)
+
+    # ③ 期限结构的 yfinance 支路自带重试+退避，靠 ② 抛异常会被重试放大成秒级等待。
+    #    直接给「空 + 一条错因」，与生产里真取不到时的形状一致。
+    monkeypatch.setattr(options_analyzer.OptionsAnalyzer, "_iv_term_points_yfinance",
+                        staticmethod(lambda ticker, stock_price: ([], ["offline: 本文件禁止出网"])))
+
+    # ④ teardown 核对真的没出网。没有④的话，将来 analyze 再多一条取数支路，
+    #    ①②③ 会静默失效而没人知道——正是本次要修的那个形状本身。与 conftest 里
+    #    `_isolate_paper_portfolio_state`「默认重绑 + teardown 比对真身」同构。
+    #    只记录不拦截：拦截会改变被测代码的失败形态，而记录既不改行为、又照样变红。
+    #    ⚠️ 必须同时钩 socket 与 curl_cffi：yfinance 1.2 走 curl_cffi，libcurl 在 C 层
+    #    开 socket，只钩 `socket.socket.connect` 会得到**假阴性**（本次亲身踩过）。
+    attempts = []
+    _real_connect = socket.socket.connect
+    _real_create = socket.create_connection
+
+    def _spy_connect(self, address):
+        attempts.append(f"socket {address}")
+        return _real_connect(self, address)
+
+    def _spy_create(address, *a, **k):
+        attempts.append(f"socket {address}")
+        return _real_create(address, *a, **k)
+
+    monkeypatch.setattr(socket.socket, "connect", _spy_connect)
+    monkeypatch.setattr(socket, "create_connection", _spy_create)
+
+    try:
+        from curl_cffi import requests as _curl
+    except ImportError:  # pragma: no cover - 没装就没这条出网路径
+        pass
+    else:
+        _real_request = _curl.Session.request
+
+        def _spy_request(self, method, url, *a, **k):
+            attempts.append(f"curl {method} {str(url)[:80]}")
+            return _real_request(self, method, url, *a, **k)
+
+        monkeypatch.setattr(_curl.Session, "request", _spy_request)
+
+    yield
+
+    assert not attempts, (
+        f"本文件 docstring 承诺离线，本条测试却出网 {len(attempts)} 次："
+        f"{sorted(set(attempts))}。多半是 analyze 又多了一条取数支路——"
+        "去上面 ①②③ 那里把它的数据源也钉成「取不到」，不要在这里放行。")
+
 
 
 def _occ(expiry: str, cp: str, strike: float, tk: str = "XYZ") -> str:

@@ -134,7 +134,16 @@ class TestQueenDistillerClosePathWiring:
         _make_pheromone_db(tmp_path / "pheromone.db",
                            [("AAA", "2026-08-14", 50.0)])  # 干净价：亏损
 
-        results = [self._make_result("signal", 7.0)]
+        # ⚠️ v0.45.176：这里必须用一个**权重非零**的维度当载体。
+        # 原本写的是 "signal"——而 v0.45.172 已把 signal 归零，v0.45.176 又修掉了
+        # `RegimeWeightAdjuster` 里 `max(0.02,·)` 把零复活成 2% 的地板，于是
+        # 「唯一可用维度权重为 0」⇒ `weight_total==0` ⇒ base_score 退回中性 5.0
+        # ⇒ 折扣恒为 0，本条与 close_t7 接线毫无关系地变红。
+        # 本条的主题是 close_t7_db_path 接到哪个项目根，不是权重方案，
+        # 故换成 sentiment（当前 0.325）——**不要**为了让它变绿去动地板。
+        # 「只剩零权重维度 ⇒ 中性」这个行为本身另有守卫：
+        # tests/test_zero_weight_invariant.py::TestZeroWeightDownstreamBehaviour
+        results = [self._make_result("sentiment", 7.0)]
         out = queen.distill("AAA", results)
 
         assert out["ticker_accuracy_discount"] > 0, (

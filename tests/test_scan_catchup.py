@@ -53,7 +53,10 @@ class TestCatchupGate:
         assert "exit 0" in seg
         assert "exit 1" not in seg
 
-    def test_syntax_valid(self):
+    def test_syntax_valid(self, orch_text):
+        # 取 orch_text 只为借它「不在本机就 skip」那一步：同 class 其他用例都有
+        # 这层保护，唯独这条漏了，于是在任何没有编排器的环境（CI、云沙箱）
+        # 都以 `returncode 127 / No such file` 假报「编排器语法错误」。
         r = subprocess.run(["bash", "-n", ORCH], capture_output=True, text=True)
         assert r.returncode == 0, f"编排器语法错误：{r.stderr}"
 

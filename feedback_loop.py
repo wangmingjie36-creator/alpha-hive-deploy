@@ -23,7 +23,27 @@ _log = _logging.getLogger("alpha_hive.feedback_loop")
 # 的 Ticker().history() ±3天容差取价，backfill_dir_accuracy.py 已记录弃用
 # 理由）。现在五处消费者通过 BacktestAnalyzer(clean_t7=True) 共用这一份。
 
-PHEROMONE_DB_PATH = Path(__file__).resolve().parent / "pheromone.db"
+# v0.45.160：`PHEROMONE_DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
+# 原本是 `Path(__file__).resolve().parent / "pheromone.db"` —— 那个写法**压根不读任何环境变量**
+# （`ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME` 设成什么都无效，连懒求值都救不了），
+# 比「模块级常量冻在 import 期」更彻底，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "PHEROMONE_DB_PATH", ...)` 依赖它。
+# ⚠️ `conftest::_isolate_feedback_loop_close_t7_db` 已经在**测试侧**把它重绑到 tmp
+#   （v0.45.87），所以测试是安全的；本版补的是**常量自身**不再是硬编码路径——
+#   逐模块打补丁是打地鼠，源头修掉才不依赖「有人记得写那个 fixture」。
+PHEROMONE_DB_PATH = None
+
+
+def _db_path() -> Path:
+    """本模块的库路径。**调用时求值。**
+
+    ⚠️ 默认参数与 argparse 的 `default` 一律写 `None`，不要塞这个值——
+    两者都在 import 期求值，等于换个地方冻同一个值（同型 v0.45.37 / v0.45.150）。
+    """
+    if PHEROMONE_DB_PATH is not None:
+        return Path(PHEROMONE_DB_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.db)
 
 _CLOSE_T7_CACHE: dict = {}
 
@@ -54,7 +74,11 @@ def _load_close_t7_map(db_path: Optional[Path] = None) -> "tuple[dict, str]":
     同一次运行里后续所有调用都直接命中空缓存、不会重试。
     """
     if db_path is None:
-        db_path = PHEROMONE_DB_PATH
+        # v0.45.171：必须走 _db_path()。v0.45.160 把 PHEROMONE_DB_PATH 变成默认 None 的
+        # 覆盖钩子、并写了 _db_path()，但**没有接线**——这里仍在读原始钩子，于是
+        # 生产上 db_path 恒为 None，下一行 .exists() 抛 AttributeError（不是 OSError，
+        # 接不住），BacktestAnalyzer(clean_t7=True) 的五个消费者全线崩。
+        db_path = _db_path()
     if db_path in _CLOSE_T7_CACHE:
         return _CLOSE_T7_CACHE[db_path]
 
@@ -158,6 +182,12 @@ class ReportSnapshot:
 
         # Agent 评分
         self.agent_votes = {}  # {"ScoutBeeNova": 8.2, "BuzzBeeWhisper": 7.5, ...}
+        # v0.45.164: agent_votes 的口径来源。历史快照**没有**这个键，而它们正是
+        # 被信息素板截断过的那一批（当前世代 300 份里 8 只蜂齐全的只有 1 份）。
+        # 缺键 ⇒ 旧口径，不要拿它与新快照混算逐蜂 rank-IC。
+        #   "agent_details" —— 从 swarm_results[ticker].agent_details 普查而来（完整）
+        #   "unavailable"   —— 上游没给 agent_details，本份只有 QueenDistiller 或为空
+        self.agent_votes_source = ""
 
         # 使用的权重（从 config 读取，带兜底）
         _fallback_w = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
@@ -238,6 +268,7 @@ class ReportSnapshot:
             "stop_loss": self.stop_loss,
             "entry_price": self.entry_price,
             "agent_votes": self.agent_votes,
+            "agent_votes_source": self.agent_votes_source,
             "weights_used": self.weights_used,
             "low_conviction": self.low_conviction,
             "low_conviction_reason": self.low_conviction_reason,
@@ -266,6 +297,8 @@ class ReportSnapshot:
         snapshot.stop_loss = data.get("stop_loss", 0.0)
         snapshot.entry_price = data.get("entry_price", 0.0)
         snapshot.agent_votes = data.get("agent_votes", {})
+        # 缺键 = v0.45.164 之前的板截断口径（见 __init__ 注释），不兜成 "agent_details"
+        snapshot.agent_votes_source = data.get("agent_votes_source", "")
         snapshot.weights_used = data.get("weights_used", {})
         snapshot.low_conviction = data.get("low_conviction", False)
         snapshot.low_conviction_reason = data.get("low_conviction_reason", "")

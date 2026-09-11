@@ -43,16 +43,35 @@
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
 import json
 import math
 import os
 import sqlite3
 import sys
-from statistics import mean
 from typing import Callable, Dict, List, Optional
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pheromone.db")
+# v0.45.160：`DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
+# 原本是 `os.path.join(os.path.dirname(os.path.abspath(__file__)), "pheromone.db")` —— 那个写法**压根不读任何环境变量**
+# （`ALPHA_HIVE_DB_PATH` / `ALPHA_HIVE_HOME` 设成什么都无效，连懒求值都救不了），
+# 比「模块级常量冻在 import 期」更彻底，`tests/conftest.py::_isolate_env` 对它完全无效。
+# 保留这个名字是因为 `tests/` 有 `monkeypatch.setattr(<mod>, "DB_PATH", ...)` 依赖它。
+# ⚠️ 本模块的**默认参数**早在 v0.45.37 就改成 `None` 了（`load_samples` 的
+#   `db_path=DB_PATH` 曾绑死默认值，让退化测试变成假守卫）；本版补的是常量自身。
+DB_PATH = None
+
+
+def _db_path() -> str:
+    """本模块的库路径。**调用时求值。**
+
+    返回 `str` 而非 `Path`——本模块通篇用 `os.path`，跟着它的惯例走。
+
+    ⚠️ 默认参数与 argparse 的 `default` 一律写 `None`，不要塞这个值——
+    两者都在 import 期求值，等于换个地方冻同一个值（同型 v0.45.37 / v0.45.150）。
+    """
+    if DB_PATH is not None:
+        return os.fspath(DB_PATH)
+    from hive_logger import PATHS
+    return str(PATHS.db)
 DIMS = ("signal", "catalyst", "sentiment", "odds", "risk_adj")
 
 
@@ -77,10 +96,6 @@ def rank_ic(xs: List[float], ys: List[float]) -> Optional[float]:
     return spearman(xs, ys)
 
 
-def _iso_weeks(dates: List[str]) -> int:
-    return len({_dt.date.fromisoformat(d).isocalendar()[:2] for d in dates})
-
-
 # ══════════════════════════════════════════════════════════════════════════
 # 样本
 # ══════════════════════════════════════════════════════════════════════════
@@ -103,7 +118,7 @@ def load_samples(db_path: Optional[str] = None, all_cohorts: bool = False,
     （v0.45.37 实测：功效护栏的退化测试自诞生起从未真正生效，
     它在主 checkout 变绿只是因为真库样本量恰好落在「功效不足」区间）。
     """
-    db_path = db_path or DB_PATH
+    db_path = db_path or _db_path()      # v0.45.160：常量本身也不再冻结
     notes: List[str] = []
     cohort = None if all_cohorts else latest_cohort_start()
     if all_cohorts:
@@ -183,21 +198,94 @@ def _attach_inputs(rows: List[Dict], db_path: str) -> None:
 # 评估
 # ══════════════════════════════════════════════════════════════════════════
 
+# 单日横截面最少标的数，与 ic_diagnostics.load_daily_ic / final_score_dilution 同口径
+MIN_WIDTH = 5
+
+
 def evaluate(name: str, score_fn: Callable[[Dict], Optional[float]],
              rows: List[Dict]) -> Dict:
-    """对一个打分方案求 rank-IC。score_fn(row) 返回 None 表示该样本弃权。"""
-    xs, ys, dates = [], [], []
+    """对一个打分方案求**横截面** rank-IC。score_fn(row) 返回 None 表示该样本弃权。
+
+    ⚠️ v0.45.176 修：初版把**所有日期的所有行摊平成一个大 Spearman**
+    （`xs.append(...)` 跨日期累积 → `rank_ic(xs, ys)` 一次性池化），ISO 周只用来
+    数周数打功效警告。那是**池化 IC**，与本项目其余各处（`ic_diagnostics`、
+    `experiments/final_score_dilution.py`）用的横截面 IC 不是一个量：
+
+    - 横截面 IC 问的是「**同一天该挑哪只票**」——这才是评分的用途。
+    - 池化 IC 里收益的时序跨度（哪周大盘涨跌）远大于横截面跨度，
+      于是它主要在测「哪天分高哪天涨」。
+
+    实测后果（同一份 pheromone.db、同一天跑出的两套数）：
+
+    | 维度 | 池化（旧） | 横截面（新） | 08-25 报告 |
+    |---|---|---|---|
+    | sentiment | +0.046 | **+0.120** | +0.168 |
+    | risk_adj | **+0.047** | **−0.060** | −0.084 |
+    | catalyst | +0.075 | +0.097 | +0.001 |
+    | signal | −0.069 | −0.078 | −0.088 |
+
+    **risk_adj 符号是反的**，而它的负 IC 正是 v0.45.172 归零它的依据之一 ——
+    拿旧口径的本工具复核那个决策会得出相反结论。而 CLAUDE.md 指定本工具做
+    聚合层决策的第一站，所以这个偏差污染的是**将来每一个**聚合层决定。
+
+    ⚠️ 别把「`final_score` 是为跨标的可比而设计的」读成「所以能池化」——
+    **可比的量不蕴含可池化的相关性**（见 MEMORY `alpha-hive-cross-sectional-pooling`）。
+
+    保留 `ic_pooled` 字段并在两者符号相反时显式告警，是为了让这个坑
+    对下一个读代码的人可见，而不是悄悄换掉了事。
+
+    Returns:
+        {ic: 周度横截面 IC 均值, t, p, weeks: 不重叠周数, n, coverage_pct,
+         ic_pooled: 旧口径值（仅作对照）, sign_conflict: bool}
+    """
+    from ic_diagnostics import basic_stats, normal_two_sided_p, spearman, subsample_non_overlapping
+
+    by_day: Dict[str, List] = {}
+    kept = 0
     for r in rows:
         v = score_fn(r)
         if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
             continue
-        xs.append(float(v))
-        ys.append(r["fwd_return_pct"])
-        dates.append(r["date"])
-    ic = rank_ic(xs, ys)
-    weeks = _iso_weeks(dates) if dates else 0
-    return {"name": name, "ic": ic, "n": len(xs), "weeks": weeks,
-            "coverage_pct": round(100 * len(xs) / len(rows), 1) if rows else 0.0}
+        kept += 1
+        by_day.setdefault(r["date"], []).append((float(v), r["fwd_return_pct"]))
+
+    daily: Dict[str, float] = {}
+    for day, pairs in by_day.items():
+        if len(pairs) < MIN_WIDTH:
+            continue
+        xs = [p[0] for p in pairs]
+        if len({round(x, 9) for x in xs}) < 2:   # 全并列 → 无排序信息
+            continue
+        ic = spearman(xs, [p[1] for p in pairs])
+        if ic is not None:
+            daily[day] = ic
+
+    weekly = subsample_non_overlapping(daily, "周") if daily else []
+    if len(weekly) >= 2:
+        m, _se, t, _n = basic_stats(weekly)
+        # v0.45.176：非有限值一律降成 None，**不要**让 NaN 漏出去。
+        # 周度 IC 全部相同（stdev=0）时 basic_stats 的 t 是 NaN，
+        # 而 `json.dumps(float("nan"))` 会吐出裸 `NaN` —— Python 自己读得回来，
+        # 但那不是合法 JSON，jq / JS `JSON.parse` / Go 一律拒收。
+        # `--json` 是给别的程序读的，静默产出解析不了的输出属「失败没传导到下游」。
+        ic_val = m if isinstance(m, float) and math.isfinite(m) else None
+        t_val = t if isinstance(t, float) and math.isfinite(t) else None
+        p_val = normal_two_sided_p(t) if t_val is not None else None
+        if p_val is not None and not math.isfinite(p_val):
+            p_val = None
+    else:
+        ic_val = t_val = p_val = None
+
+    # 旧口径，仅作对照 —— 不参与排序、不用于决策
+    pooled = rank_ic([p[0] for d in by_day.values() for p in d],
+                     [p[1] for d in by_day.values() for p in d])
+    conflict = (ic_val is not None and pooled is not None
+                and ic_val * pooled < 0 and abs(ic_val) > 0.02 and abs(pooled) > 0.02)
+
+    return {"name": name, "ic": ic_val, "t": t_val, "p": p_val,
+            "n": kept, "weeks": len(weekly),
+            "coverage_pct": round(100 * kept / len(rows), 1) if rows else 0.0,
+            "ic_pooled": pooled, "sign_conflict": conflict}
 
 
 def required_weeks(target_ic: float = 0.090) -> int:
@@ -293,11 +381,25 @@ def main() -> int:
     else:
         print(f"  ✅ 不重叠周 {weeks} ≥ {need}，达到检出 |IC|={args.target_ic} 的功效")
     print()
-    print(f"  {'情景':<26} {'rank-IC':>9}  {'n':>5} {'周':>4} {'覆盖':>7}")
-    print(f"  {'-'*26} {'-'*9}  {'-'*5} {'-'*4} {'-'*7}")
-    for r in sorted(results, key=lambda x: -(x["ic"] or -9)):
+    print("  口径：日度横截面 rank-IC → 每 ISO 周取第一天（近似不重叠）→ 周序列 t 检验")
+    print(f"  {'情景':<26} {'rank-IC':>9} {'t':>6} {'p':>6}  {'n':>5} {'周':>4} {'覆盖':>7}")
+    print(f"  {'-'*26} {'-'*9} {'-'*6} {'-'*6}  {'-'*5} {'-'*4} {'-'*7}")
+    for r in sorted(results, key=lambda x: -(x["ic"] if x["ic"] is not None else -9)):
         ic = f"{r['ic']:+.4f}" if r["ic"] is not None else "   n/a"
-        print(f"  {r['name']:<26} {ic:>9}  {r['n']:>5} {r['weeks']:>4} {r['coverage_pct']:>6.1f}%")
+        tt = f"{r['t']:+.2f}" if r.get("t") is not None else "   n/a"
+        pp = f"{r['p']:.3f}" if r.get("p") is not None else "  n/a"
+        flag = " ⚠️符号冲突" if r.get("sign_conflict") else ""
+        print(f"  {r['name']:<26} {ic:>9} {tt:>6} {pp:>6}  {r['n']:>5} {r['weeks']:>4} "
+              f"{r['coverage_pct']:>6.1f}%{flag}")
+
+    conflicts = [r for r in results if r.get("sign_conflict")]
+    if conflicts:
+        print()
+        print("  ⚠️ **符号冲突**：以下情景的横截面 IC 与旧的池化口径符号相反。")
+        print("     池化 IC（跨日期摊平成一个大 Spearman）测的是「哪天分高哪天涨」，")
+        print("     不是「同一天该挑哪只票」。**本表用的是横截面口径，池化值仅供对照。**")
+        for r in conflicts:
+            print(f"       {r['name']:<26} 横截面 {r['ic']:+.4f}  vs  池化 {r['ic_pooled']:+.4f}")
     print()
     print("  ⚠️ 本表不产出「最优权重」建议：权重自 v0.44.0 只读，且实测单维 IC")
     print("     均不过 Bonferroni（见 experiments/final_score_dilution_report.md）。")

@@ -307,10 +307,32 @@ REPORT_ARTIFACT_PATHS: List[str] = [
     "paper_portfolio_state/",
     ".factor_cache/",
     "weight_history.jsonl",
+    # v0.45.115：期权路线图三本账（v0.45.101~103 建，2026-09-04 首次落盘）。
+    # 不加进来的话，扫描每天改它们、白名单每天跳过它们，于是永远挂在工作区
+    # ——2026-09-04 一次 `git reset --hard` 就把这类未提交状态清掉了。
+    # 这三本装的是**攒数期数据，丢了无法回溯重取**：历史 CBOE 双边报价、
+    # 逐日 iv−rv 记账、已开跨式腿的成本价。与 paper_portfolio_state/ 同类。
+    "hedge_state/",
+    "options_paper_state/",
+    "vrp_state/",
+    # v0.45.134：概率记分账本。装的是**当天真正印出去的那个概率**——
+    # 回溯记分能重算估计量，但重算不出「那天实际印的是什么」，
+    # 丢了无法回溯重取。与 paper_portfolio_state/ 同类。
+    "probability_scorecard_state/",
+    # v0.45.145：ML 模型版本快照。装的是**当天真正做出预测的那个模型**——
+    # 2026-09-04 模型退化成常数函数无法事后归因，就是因为 ml_model_cache.json
+    # 原地覆盖、没有任何历史版本可捞出来重放。丢了无法回溯重取。
+    # 与 paper_portfolio_state/ 同类。
+    "ml_model_history/",
 ]
 
 #: 与上表对应的匹配规则（用于"哪些被跳过"的提示）
-_ARTIFACT_PREFIXES = ("report_snapshots/", "paper_portfolio_state/", ".factor_cache/")
+#: ⚠️ 必须与 REPORT_ARTIFACT_PATHS 同向——只改一处会让「跳过了哪些」的提示说谎
+#:    （提示说被跳过、实际被提交，或反之）。tests/test_report_deployer_whitelist.py
+#:    有一条断言盯着这两处的一致性。
+_ARTIFACT_PREFIXES = ("report_snapshots/", "paper_portfolio_state/", ".factor_cache/",
+                      "hedge_state/", "options_paper_state/", "vrp_state/",
+                      "probability_scorecard_state/", "ml_model_history/")
 _ARTIFACT_GLOBS = (
     "alpha-hive-daily-*.json", "alpha-hive-daily-*.md", "alpha-hive-thread-*.txt",
     "alpha-hive-*-ml-enhanced-*.html", "analysis-*-ml-*.json",
