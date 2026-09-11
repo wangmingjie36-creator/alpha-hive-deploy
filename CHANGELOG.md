@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.184] — 2026-09-11 — 占位（进行中：新增 code_version.py，扫描开始把在跑的代码版本写进日志与 status.json；碰 alpha_hive_daily_report.py 的 _init_scan_context 与 scan_timing.snapshot）
+
+---
+
 ## [0.45.183] — 2026-09-11 — 云端快照 routine：merge 三天静默失败的真因是浅克隆，不是 main 被 force-push
 
 **改动落在调度器**（claude.ai routine `trig_01QzhoHiNxSWMgxWAQztnLA6` / `alpha-hive-cloud-snapshot`），**不在本仓**。本条只记根因取证与判据——供下次有人读到 `cloud-snapshots` 分支上 `36df50b` 那句提交信息（「force-push 重写历史后两支失去共同祖先」）时，不要再继承那个错误结论。
