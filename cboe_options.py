@@ -310,8 +310,34 @@ def _pdt_now() -> datetime:
 
 
 def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: int = 4):
-    """镜像 yfinance 路径：DTE≥3，优先 DTE≥7 前 4 + DTE 3-6 前 2，封顶 max_expiries。
-    返回 (选中到期日列表, near_expiry_set=DTE<7)。"""
+    """镜像 yfinance 路径选到期日。返回 `(选中到期日列表, near_expiry_set)`。
+
+    实际规则（v0.45.188 按实测重写——旧文案写的是「优先 DTE≥7 前 4 + DTE 3-6 前 2」，
+    读起来像两桶都会进，与真实行为不符）：
+
+    1. `DTE < 3` 一律排除，任何情况下都拿不到。
+    2. `far` = DTE≥7 的前 4 个；`near` = DTE 3-6 的前 2 个。
+    3. `chosen = (far + near)[:max_expiries]` —— **`far` 先占满配额**。
+
+    ⚠️ `max_expiries=4` 且 `far` 凑满 4 个时，**`near` 一个都进不来**。2026-09-10
+    实测当前 30 只标的 `far` 全部 ≥4 ⇒ `near` 分支对整个观察名单恒不生效；它只在
+    期权稀疏、远月到期日不足 4 个的标的上才会被用到，所以**不是死代码，是对主力
+    名单恒不生效的代码**。
+
+    ⚠️ **不要「照字面把它修好」。** 让 near 真的进来会改变 IV rank / 25Δ skew /
+    期限结构 / Dealer GEX 的输入，而这些都流进 `final_score` ⇒ 属口径变更，
+    要按 `ic_rerun_readiness._COHORT_HISTORY` 付世代边界的代价（~25 周）。
+    要动先读那张表的规则。
+
+    ⚠️ 连带语义：`near_expiry_set` 取的是 DTE∈[3,7) 的到期日，由上一条它通常与
+    `chosen` **不相交** ⇒ 下游 `options_analyzer._calc_total_oi` 的「排除近端合约」
+    在这条路径上排除不到任何东西（恒等于全量求和）。那不是 bug，但读那段代码时
+    别以为「稳定口径」真的在这里生效了。
+
+    ⚠️ 「近端 Max Pain」**不要**再从这条链推导：本函数按设计就排除 DTE<7，
+    与「近端」二字相反。正确数据源是 `full_chain_oi` 的全到期日矩阵，
+    见 `swarm_agents/oracle_bee.py::_calc_max_pain`（v0.45.188）。
+    """
     dte_pairs = []
     for e in sorted(by_expiry.keys()):
         try:

@@ -1164,6 +1164,7 @@ class MLEnhancedReportGenerator:
         _near_mp_raw = (det or {}).get("max_pain") if isinstance(det, dict) else None
         _near_mp_val = None
         _near_mp_dist = None
+        _near_mp_window = None
         if isinstance(_near_mp_raw, dict):
             _v = _near_mp_raw.get("max_pain")
             if isinstance(_v, (int, float)) and _v > 0:
@@ -1171,13 +1172,21 @@ class MLEnhancedReportGenerator:
                 _d = _near_mp_raw.get("distance_pct")
                 if isinstance(_d, (int, float)):
                     _near_mp_dist = float(_d)
+                _w = _near_mp_raw.get("window_days")
+                if isinstance(_w, int) and _w > 0:
+                    _near_mp_window = _w
         elif isinstance(_near_mp_raw, (int, float)) and _near_mp_raw > 0:
             _near_mp_val = float(_near_mp_raw)
         if _near_mp_val is not None:
             _dist_txt = f"（距现价 {_near_mp_dist:+.1f}%）" if _near_mp_dist is not None else ""
+            # v0.45.188：口径写进标签。「近端」此前在代码里没有定义，实际取的是
+            # 「最早的 DTE≥7 那一个到期日」——标签说近端、数字不是，用户就是从
+            # 「怎么两天差了 25 美元」问上来的。window_days 缺失＝旧口径记录，
+            # 此时不假装知道窗口。
+            _win_txt = f"≤{_near_mp_window}天 " if _near_mp_window else ""
             _near_max_pain_html = (
                 f'<div class="stat"><div class="num" style="color:var(--tp)">${_near_mp_val:.0f}</div>'
-                f'<div class="lbl">近端磁吸目标价{_dist_txt}</div></div>'
+                f'<div class="lbl">{_win_txt}近端磁吸目标价{_dist_txt}</div></div>'
             )
 
         # ── v0.27.0：全链 OI 结构卡片 ──────────────────────────────────────

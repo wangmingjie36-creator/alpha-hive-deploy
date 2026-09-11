@@ -5,6 +5,99 @@
 
 ---
 
+## [0.45.189] — 2026-09-11 — 占位（进行中：另两条守卫也用 rglob/os.walk 扫进 .claude/worktrees/，改走 own_python_files）
+
+---
+
+## [0.45.188] — 2026-09-11 — 「近端磁吸目标价」此前没有「近端」：口径定为 ≤7 天并改从 full_chain_oi 同源算
+
+### 背景
+
+用户问「NVDA 深度报告前两天的近端磁吸目标价还是 225，怎么 09-10 变成 200 了」。
+核对结论：**$200 不是假数据（CBOE 真实 OI 算出来的），但它答的不是标签问的那个问题。**
+
+`swarm_agents/oracle_bee.py::_calc_max_pain` 旧实现取 `fetch_cboe_chain` 返回链里
+最早的到期日当「最近」。而那条链经 `cboe_options._select_expiries` 截断为
+「DTE≥7 的前 4 个到期日」——`far` 先占满配额，周权标的 `far` 恒满 4 个 ⇒
+**DTE<7 的到期日一个都进不来**。于是「最近」实际是「最早的 DTE≥7 那一个」，
+与「近端」字面意思相反；它还会随时间推移每隔几天整个换一个到期日，
+从而产生与仓位无关的跳变。
+
+实测（用当日已落盘的 `full_chain_oi` 重算，零额外网络调用）：
+
+| | 报告显示 | ≤7天真值 | 偏差 |
+|---|---|---|---|
+| AMC | 2.0 | 2.5 | −20.0% |
+| DELL | 425 | 520 | −18.3% |
+| SNOW | 270 | 330 | −18.2% |
+| CRM | 207.5 | 250 | −17.0% |
+| **NVDA** | **200** | **225** | **−11.1%** |
+
+2026-09-10 全 30 只标的、29 只有数据，**28 只偏差 >1%**。而 NVDA 那次「跳变」
+在正确口径下根本不存在：≤7 天真值 09-08 与 09-10 **都是 225**（显示值 225→200）。
+MSFT 同型：显示 500→450，真值 500→495。
+
+### Changed
+
+- `swarm_agents/oracle_bee.py`
+  - 新增类常量 `NEAR_WINDOW_DAYS = 7`——「近端」**此前在代码里没有定义**，
+    被上游过滤器悄悄定义成了它的反面。
+  - 新增 `_near_oi_by_strike()`：把 `full_chain_oi` 的 {行权价: {到期日: OI}}
+    矩阵按 `0 <= DTE <= window_days` 聚合；解析失败的键**计数并 warning**，
+    不静默跳过。
+  - `_calc_max_pain()` 换源到 `full_chain_oi`（与全链 OI 卡片同源，且它本就
+    每次扫描都抓了完整矩阵，30/30 可得），新增 `window_days` / `expiries_used`
+    / `near_total_oi` / `unavailable_reason` 四个字段。
+    ⚠️ **取不到时返回 None，不回退旧链**——旧链给的是构造上就不符合标签含义的数，
+    回退等于把「没数据」悄悄换成「错数据」。
+  - 异常分支 `_log.debug` → `_log.warning`（旧写法让算错/算不出在生产日志里不可见）。
+  - 类 docstring 里的「权重 0.15」快照删掉，改指 `config.EVALUATION_WEIGHTS`。
+- `generate_ml_report.py`：卡片标签带上口径 → 「≤7天 近端磁吸目标价（距现价 −3.0%）」。
+  `window_days` 缺失（旧记录）时不假装知道窗口。
+- `cboe_options.py::_select_expiries`：**docstring 按实测重写**。旧文案
+  「优先 DTE≥7 前 4 + DTE 3-6 前 2」读起来像两桶都会进，与真实行为不符。
+
+### 观测点（此前「谁会红？」答不上来）
+
+- `_pub_details` 新增 `max_pain_window_days` / `max_pain_expiries`（不可用时
+  `max_pain_unavailable`）——只记数值时，事后无法分辨「窗口选错了」和「仓位真变了」，
+  这次误判正是卡在这里。
+- `tests/test_near_max_pain_window.py`（9 条）：口径回归 / 窗口上下界 / 不可回退旧链 /
+  不可用必须带原因。**每条断言的 docstring 里写明什么变异会让它变红。**
+
+### 不需要世代边界
+
+`max_pain` 只往 `signal_summary` 追加一段文本，**不进 `options_score`**（后者只被
+`term_score_adj + skew_score_adj` 调整），全仓无代码解析 `MaxPain` 文本 ⇒
+不影响任何维度分与 `final_score`。
+
+### 已知不改（重要）
+
+`_select_expiries` 的 `near` 桶对当前 30 只标的恒不生效（`far` 全部 ≥4），
+但**不是死代码**——`far` 不足 4 个的稀疏期权标的会用到它。
+⚠️ **不要「照字面把它修好」**：让 near 真的进来会改变 IV rank / 25Δ skew /
+期限结构 / Dealer GEX 的输入，而这些都流进 `final_score` ⇒ 属口径变更，
+要按 `ic_rerun_readiness._COHORT_HISTORY` 付世代边界的代价。已写进该函数 docstring。
+
+### 验证
+
+- 用 09-08 / 09-10 两天已落盘的真实 `full_chain_oi` 重算 NVDA：两天都是 $225
+  （旧实现 225→200），到期日分别为 09-09/09-11/09-14 与 09-11/09-14/09-16。
+- 端到端渲染核对：卡片输出 `$225 / ≤7天 近端磁吸目标价（距现价 -3.0%）`。
+- **变异校验 6/6 全部被抓住**（先断言基线全绿再开跑、`--maxfail=999`、列出全部变红项）：
+  还原旧口径 / 去掉窗口下界 / 上界改严格小于 / 窗口常量 7→30 / 不给 unavailable_reason /
+  加一条 `fetch_cboe_chain` 兜底。
+- `tests/test_oracle_cboe_source.py::TestMaxPainNoFallback` 两条**改写而非删除**
+  （旧的钉的是已被废弃的数据源），「不回退 yfinance」的原意保留。
+- 全量 `pytest`：**3955 passed**。3 条既有红与本次无关——`TestCoverageHorizon`
+  是 CLAUDE.md 写明的设计性变红；两条 `test_zero_weight_invariant` 是 `rglob`
+  扫进 `.claude/worktrees/` 导致的 **60s 超时**（v0.45.186 占位正在修），非断言失败。
+
+### 遗留
+
+线上 09-10 那批已发布报告仍是旧口径的数（NVDA 仍显示 $200），本次只改源码未重新
+生成部署——对外发布动作待用户确认。
+
 ## [0.45.187] — 2026-09-11 — 清掉 46 个进了 git 跟踪的 iCloud 重名副本；09-09 的学习样本权重曾凭空翻倍
 
 ### Removed
@@ -69,7 +162,116 @@
   ⇒ 属 CLAUDE.md「这个失败，下游怎么知道？」的标准案例：解析器接受了非日期输入，
     没有任何东西会红。`.gitignore` 治不了它（glob 读磁盘），**下一个 iCloud 副本会复发**。
 
-## [0.45.186] — 2026-09-11 — 占位（进行中：test_zero_weight_invariant 的 rglob 扫进 .claude/worktrees/，生产 checkout 恒红）
+## [0.45.186] — 2026-09-11 — 只有生产 checkout 看得见的红：守卫扫进了 10 个嵌套 worktree
+
+### Fixed —— `test_zero_weight_invariant` 的枚举越过了仓库边界
+
+v0.45.176 那条「生产代码不许把 `adapted_weights` 传回 `QueenDistiller`」的守卫，
+用裸 `root.rglob("*.py")` 枚举生产调用点。在生产 checkout `~/Desktop/Alpha Hive`
+上，`.claude/worktrees/` 下挂着 **10 个嵌套 git worktree**，每个都是一份完整的
+仓库副本，停在各自的版本上。于是：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| `rglob("*.py")` 走到的文件 | **22037** | — |
+| 实际枚举的文件 | 21864 | **165**（`git ls-files` 338 减 `tests/`/`experiments/`） |
+| 扫到的 `QueenDistiller(...)` 调用点 | **227** | **2** |
+| 其中落在 `.claude/worktrees/` 里 | **225** | **0** |
+| 报出的违规 | **5** | **0** |
+| 耗时 | **81.6s** | **1.3s** |
+
+5 条违规**全部**来自别的 worktree 里停留在 v0.45.176 之前的
+`alpha_hive_daily_report.py`。真正的生产文件是干净的
+（`alpha_hive_daily_report.py:663` 只有 `enable_llm` / `ml_model`）。
+
+两个放大器：
+
+1. **`_SKIP_TOP` 对嵌套树整个失效。** 它判的是 `rel.parts[0]`，而越界文件的
+   `parts[0]` 是 `.claude` —— 于是 225 条命中里绝大多数是**别的 worktree 的
+   测试文件**（`tests/test_queen_distiller.py` 一类），被当成生产代码审计。
+2. **60s 的 `--timeout` 把断言失败伪装成 Timeout。** 那轮要跑 81.6s，
+   全套运行时报出来的是 `Timeout`，守卫精心写的失败信息一个字都到不了人眼前。
+
+⭐ **真正要命的不是红，是红的可见性是反的。** 这条守卫在 **10 个 worktree 里
+全是绿的**（worktree 里没有嵌套 worktree），只在**跑每日扫描的那一台**上红；
+而那台机器没人跑测试。写它的人看到的是全绿。这是 MEMORY
+`alpha-hive-test-writes-production`「在没有病灶的环境里测防御＝没测」的镜像：
+不是防御没被测到，是**病灶只长在没人看的地方**。
+
+⭐ **同一物种的第二次。** v0.45.150 已经在 `test_paths_not_frozen_at_import.py`
+上修过一模一样的毛病（`rglob` 扫进 vendored 树，15349 vs 327），结论就是
+「改用 `git ls-files`」。v0.45.176 在一个新守卫里**又写了一份裸 rglob**。
+写下教训对「下一个人另起一份实现」无效 —— 只能把实现收成一份。
+
+### Added
+
+- **`tests/_repo_files.py`：「本仓自己的 .py 有哪些」的唯一实现。**
+  `git ls-files` 优先（口径可复现、天然排除未跟踪与嵌套 worktree），
+  子进程**两条**失败路径各堵一次（不存在会**抛**、不是仓库会**返回** 128），
+  回退 rglob。两条分支的输出都过同一道 `_is_ours()`（点号目录 + vendored）。
+  已知取舍：git 分支只列被跟踪的文件，**全新未提交**的生产 .py 扫不到
+  （已跟踪文件的未提交修改照常扫得到 —— 只拿 git 要路径，内容从磁盘读）。
+- **`test_scan_excludes_nested_checkouts`（带病灶的 tmp 树夹具）。**
+  造 `.claude/worktrees/<name>/alpha_hive_daily_report.py` + 同树下的
+  `tests/test_queen_distiller.py`，断言两者都不被报出来。
+  **必须用 tmp 树**：病灶只存在于生产 checkout，10 个 worktree 里一个都没有，
+  在真仓库上跑这条断言在 worktree 里恒真。
+- `test_pathology_fixture_actually_bites`：反向自证夹具确实造出了会被旧写法
+  命中的东西 —— 否则上一条可能只因夹具没写出匹配项而恒绿。
+- `test_git_branch_applies_the_same_filter_as_the_fallback`：**真建一个 tmp git
+  仓库**，提交一个 `.claude/hooks/theirs.py`，钉住 git 分支也过 `_is_ours`。
+  ⭐ 加这条是因为不加的话，git 分支上那句 `if _is_ours(x)` 是**等价变异**
+  （本仓今天没有被跟踪的 .py 落在点号目录下，删掉它 338 还是 338，全套照绿）。
+  MEMORY 的纪律是「举不出能让它变红的变异就别加」—— 这里造得出来，
+  于是造出来，而不是留一行测不到的代码。
+  口径分歧不是假想：`.claude/` **被跟踪**（`.claude/launch.json` 在库里）
+  且**不在 .gitignore**，哪天有人提交 `.claude/hooks/x.py`，
+  git 分支会扫到、回退分支不会，而哪条生效取决于这台机器有没有装 git。
+
+### Changed
+
+- `test_paths_not_frozen_at_import.py` 的 `_own_python_files` 改为**委托**
+  （`REPO_ROOT` 在调用时取，原有的 monkeypatch 注入 tmp 树的测试全部不动）。
+  抽走不是为了去重好看，是为了让下一个人**没机会**再写第三份。
+
+### Fixed —— 两处说谎的注释（同版顺手）
+
+- `test_enumeration_actually_found_something` 的「变红的变异」写的是
+  「把 `rglob("*.py")` 写成 `rglob("*.pyx")`」—— 枚举已经不用 rglob，
+  这条变异**做不出来**。改成 `QueenDistiller` → `QueenDistillerX`。
+- 类 docstring 的「扫全仓每一个非测试 .py」改为「扫本仓被 git 跟踪的」。
+
+（MEMORY `alpha-hive-board-eviction`：说谎的 docstring 危害不在于它错，
+在于它让人停止检查。）
+
+### 验证
+
+- **生产 checkout 实测**（用修复后的扫描器 × 有病灶的那棵树，
+  `ALPHA_HIVE_HOME` 指向沙箱，生产产物零改动）：227→2 调用点、
+  225→0 越界、5→0 违规、81.6s→1.3s。
+- **变异校验 7/7 全红，等价变异 0 个**，`collected = 102` 七轮不变，
+  每轮清 `__pycache__`、锚点唯一性先校验、还原后逐轮复验全绿；
+  校验器**先断言基线全绿再开跑**（v0.45.177 的教训：pyproject 的 `-x`
+  会让「没跑」长得和「通过」一模一样）。
+- ruff：worktree 基线 46，改动后仍 46，三个改动文件零命中。
+
+### 未修（留档，不是漏了）
+
+全仓还有 **2 个守卫**在做同样的全树枚举，**当前都是绿的**（latent，不是 active）：
+
+| 守卫 | 枚举方式 | 生产上扫到 | 其中在 `.claude/` 下 | 现状 |
+|---|---|---|---|---|
+| `tests/test_no_fake_price.py:37` | `ROOT.rglob("*.py")` | 1822 | **1669（92%）** | 绿 |
+| `tests/test_no_crewai_dependency.py:61` | `os.walk(PROJECT_ROOT)` | 4336 | **3605（83%）** | 绿 |
+
+它们绿只是因为嵌套 worktree 里眼下没有 `price = 100.0` 或 `import crewai`。
+**没有一条机制阻止它们明天变红**，且变红时同样只有生产 checkout 看得见。
+没有顺手一起改，是因为每个守卫都要单独重做变异校验（判据是 per-guard 的）；
+共享实现已经就位，改法是 `own_python_files(ROOT)[0]` 加各自现有的排除清单。
+
+其余用 `.glob()` 的守卫（`test_rival_bee_peer_features` / `test_pheromone_db_path_hook`
+/ `test_yf_gate` / `test_pytestmark_placement` / `test_no_invisible_prod_data_skips`）
+**不下钻**，天然到不了 `.claude/worktrees/`，无需改动。
 
 ## [0.45.185] — 2026-09-11 — 工作区脏就打 warning；顺带一个「单测各自对、组合起来错」的 bug
 

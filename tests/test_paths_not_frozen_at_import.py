@@ -33,6 +33,8 @@ import vector_memory
 from hive_logger import PATHS
 
 
+from tests._repo_files import VENDORED, own_python_files
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -180,42 +182,22 @@ class TestSpeciesDoesNotSpread:
         ("config.py", "_OVERRIDE_YAML"), ("config.py", "_OVERRIDE_JSON"),
     }
 
-    # 只扫**我们自己的**文件。生产 checkout 里 `rglob("*.py")` 会扫到 15349 个
-    # .py（含 `mcp-servers/*/.venv/**/site-packages`），而 git 跟踪的只有 327 个
-    # ——98% 是第三方库。拿我们的规范去审计 joblib 既无意义，又会让计数随
+    # 只扫**我们自己的**文件。生产 checkout 里 `rglob("*.py")` 会扫到两万多个
+    # .py（含 `mcp-servers/*/.venv/**/site-packages` 与 `.claude/worktrees/` 下的
+    # 10 个嵌套 worktree），而 git 跟踪的只有 338 个——绝大多数是第三方库和
+    # 别的 checkout。拿我们的规范去审计 joblib 既无意义，又会让计数随
     # 「本地装了哪些 venv」漂移（worktree 与主 checkout 报的数会不一样）。
-    _VENDORED = ("node_modules", "site-packages", "vendor", "third_party")
+    #
+    # v0.45.186：实现已抽到 `tests/_repo_files.py`，本处只剩委托。
+    # 抽走的理由不是去重好看——v0.45.176 在 `test_zero_weight_invariant.py` 里
+    # 写了第二份（裸 rglob），在 10 个 worktree 里全绿、只在生产 checkout 上红，
+    # 而生产 checkout 没人跑测试。共享实现是为了让下一个人**没机会**再写一份。
+    _VENDORED = VENDORED
 
     @staticmethod
     def _own_python_files():
-        """本仓自己的 .py 清单 + 用的是哪种口径。
-
-        首选 `git ls-files`：天然排除未跟踪与 vendored 内容，且**口径可复现**
-        （别人复跑对得上）。但本仓 CI 自检会用 `git archive` 导出**没有 .git**
-        的干净检出，那里 git 口径不可用，故必须有回退。
-
-        ⚠️ 子进程有**两条**失败路径，各堵一次（v0.45.117/119 同款教训）：
-           `git` 不存在会**抛** `FileNotFoundError`，仓库不可用会**返回**非零。
-           只判返回值的守卫接不住抛，只判异常的接不住返回。
-        """
-        import subprocess
-        try:
-            r = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=str(REPO_ROOT),
-                               capture_output=True, text=True, timeout=60)
-            if r.returncode == 0 and r.stdout.strip("\x00").strip():
-                rels = [x for x in r.stdout.split("\x00") if x]
-                return [REPO_ROOT / x for x in rels], "git"
-        except (OSError, subprocess.SubprocessError):
-            pass                                    # 落到 rglob 回退
-        files = []
-        for p in REPO_ROOT.rglob("*.py"):
-            rel = p.relative_to(REPO_ROOT)
-            if any(x in rel.parts for x in TestSpeciesDoesNotSpread._VENDORED):
-                continue
-            if any(part.startswith(".") for part in rel.parts):   # .venv/.git/.claude…
-                continue
-            files.append(p)
-        return files, "rglob"
+        """委托给共享实现。`REPO_ROOT` 在**调用时**取，故 monkeypatch 仍然生效。"""
+        return own_python_files(REPO_ROOT)
 
     @staticmethod
     def _scan(_stats=None, marker="PATHS"):
@@ -395,6 +377,48 @@ class TestSpeciesDoesNotSpread:
         assert len(files) > 50, (
             f"回退只找到 {len(files)} 个 .py —— 空/近空清单会让 _scan() 恒返回空集，"
             "变成一个永远不会红的假守卫")
+
+    def test_git_branch_applies_the_same_filter_as_the_fallback(self, tmp_path):
+        """两条分支必须**同口径** —— 用一个真 git 仓库把 git 分支单独钉住。
+
+        没有这一条，`own_python_files` 里 git 分支上那句 `if _is_ours(x)`
+        是个**等价变异**：本仓今天没有任何被跟踪的 .py 落在点号目录下，
+        删掉它 338 还是 338，全套照绿（v0.45.186 实测）。
+        MEMORY 的纪律是「举不出能让它变红的变异就别加」——这里造得出来，
+        于是把它造出来，而不是留一行测不到的代码。
+
+        为什么这条口径分歧不是假想：`.claude/` 本身**被跟踪**
+        （`.claude/launch.json` 在库里）且**不在 .gitignore**，
+        所以哪天有人提交 `.claude/hooks/x.py`，git 分支会扫到、回退分支不会，
+        而哪条分支生效取决于「这台机器有没有装 git」。
+
+        变红的变异：把 git 分支的 `if _is_ours(x)` 去掉
+        （`return [root / x for x in rels], "git"`）。
+        """
+        import subprocess
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                cwd=str(tmp_path), capture_output=True, text=True, timeout=60)
+
+        assert git("init", "-q").returncode == 0, "tmp 仓库没建起来"
+        (tmp_path / "ours.py").write_text("x = 1\n", encoding="utf-8")
+        hidden = tmp_path / ".claude" / "hooks"
+        hidden.mkdir(parents=True)
+        (hidden / "theirs.py").write_text("x = 1\n", encoding="utf-8")
+        assert git("add", "-A").returncode == 0
+        assert git("commit", "-qm", "fixture").returncode == 0
+
+        files, mode = own_python_files(tmp_path)
+        assert mode == "git", (
+            f"夹具没走到 git 分支（mode={mode}），这条测的就不是它要测的东西")
+        rels = sorted(str(f.relative_to(tmp_path)) for f in files)
+        # 正面断言夹具确实接上了：两个文件都被 git 跟踪，只是其中一个该被滤掉。
+        assert git("ls-files", "*.py").stdout.count(".py") == 2, (
+            "夹具本身没造出两个被跟踪的 .py —— 下面那条会恒真地绿")
+        assert rels == ["ours.py"], (
+            f"git 分支没应用 `_is_ours`，点号目录下的文件漏了进来：{rels}")
 
     def test_own_file_list_is_sane(self):
         """扫描范围的量级护栏：本仓自己的 .py 是几百量级。"""
