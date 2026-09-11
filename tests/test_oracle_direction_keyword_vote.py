@@ -254,15 +254,24 @@ class TestGuardsHaveTeeth:
         )
 
     def test_bearish_counterpart_still_absent_upstream(self):
-        """登记现状：上游只数看多异动，没有 bearish_unusual。
+        """登记现状：上游只数 call 侧异动，没有 bearish_unusual。
 
-        不是在固化缺陷，是在标记「单边」这个前提仍然成立；
-        哪天补上了对应项，这条会红，提醒回来重评方向逻辑。
+        ⚠️ **v0.45.205 更正了这条断言原本的言外之意。** 它原先写着
+        「哪天补上了对应项，回来重评方向逻辑」—— 那句话暗示补上对应项会让
+        Oracle 的方向投票值得恢复。实测**不成立**：put 侧异动与 call 侧
+        Spearman 0.886、对 T+7 的 rank-IC **同号**（+0.155 vs +0.119），
+        而 call−put 的 IC 是 +0.035 p=0.90。put 侧不是方向信号，
+        补上它也**不会**让「从异动计数里读方向」重新变得正当。
+
+        这条现在只是一个现状锚点：上游形状变了就红，红了去读
+        `options_analyzer._score` 上方的取证，别直接改 Oracle 的方向逻辑。
         """
         import options_analyzer
         src = open(options_analyzer.__file__, encoding="utf-8").read()
-        assert "bearish_unusual" not in src, (
-            "上游新增了 bearish_unusual —— 单边前提已变，回来重评方向逻辑"
+        code = "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("#"))
+        assert "bearish_unusual" not in code, (
+            "上游新增了 bearish_unusual —— 去读 _score 上方的取证，"
+            "put 侧不是方向信号，不要据此恢复 Oracle 的方向投票"
         )
 
     def test_reintroduction_would_be_caught(self):

@@ -1373,7 +1373,32 @@ class OptionsAnalyzer:
         else:
             gex_signal = 2.0 if gex < -0.001 else 1.0
 
-        # Unusual Signal (0-2)：多头异动加分
+        # Unusual Signal (0-2)：按 call 侧异动条数加分。
+        #
+        # ⚠️ v0.45.205 **实测后决定保持单边，不要「修」成对称**。看着像
+        # v0.45.201（OracleBee 单边词表）的同族错误 —— 我也是这么以为的，量完不是。
+        #
+        # `detect_unusual_activity` 用**完全相同**的五条规则扫 calls 与 puts
+        # （`_scan(calls, is_call=True)` / `_scan(puts, is_call=False)`），
+        # 且 `"bullish": is_call`。所以 put 侧那一半一直在列表里，只是没被数
+        # （838 份 analysis JSON、2026-03-10~09-10：14303 条 call 侧、**9993 条 put 侧**，
+        # 79.6% 的行至少有一条 put 侧，18.6% 的行 put 侧比 call 侧还多）。
+        #
+        # 但「补上 put 侧」的前提是 put 侧异动意味着看跌 —— **这条前提不成立**：
+        #   · Spearman(call侧, put侧) = **0.886**，两者主要在测同一个东西
+        #     （该标的当日异动总量 / 关注度），不是方向。
+        #   · 逐日横截面 rank-IC 对 T+7（`close_t7`，未被 SL/TP 截断）：
+        #         call 侧      +0.119      put 侧      **+0.155**（同号！）
+        #         call+put     +0.136
+        #         call−put     **+0.035  p=0.90**      (call−put)/(call+put)  −0.034  p=0.88
+        #     取差把共同的、有信息的成分消掉了，只剩噪声残差。
+        #   ⇒ 改成净额/对称，是把 IC≈0.12 的量换成 IC≈0.03 的量，**是回归不是修复**。
+        #
+        # ⚠️ 以上 IC 全部**过不了多重比较校正**（21 个不重叠周、试过约 10 种变换；
+        # 最好的 `bullish_unusual > 0` 二值 p=0.004、×10 后 0.04，且是事后挑出来的）。
+        # 所以这段话只支持**不动**这个结论，**不支持**「现行形式已被证明有效」。
+        #
+        # 守卫：tests/test_options_analyzer.py::TestUnusualSignalOneSidedIsDeliberate
         bullish_unusual = sum(1 for u in unusual if u.get("bullish", False))
         unusual_signal = min(2.0, bullish_unusual * 0.5)
 
