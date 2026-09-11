@@ -69,7 +69,8 @@ class TestCounters:
         monkeypatch.setattr(builtins, "__import__", _imp)
         c = st.counters()
         assert c == {"yfinance": None, "twelve_data": None, "cboe": None,
-                     "cboe_chain": None}   # v0.45.190 新增链构造观测
+                     "cboe_chain": None,   # v0.45.190 链构造观测
+                     "gex_view": None}     # v0.45.197 GEX 全链视图可得性
         line = st.summary_line({"phases": {}, "counters": c})
         assert "—" in line and "0次" not in line
 
@@ -86,6 +87,8 @@ class TestCounters:
         # 前者数「构出来的链挡掉了多少近月」，后者数「发了几次 HTTP」）。
         assert set(c["cboe_chain"]) == {"chains", "min_cal_dte_max", "near_excluded",
                                         "near_excluded_oi", "chosen_oi", "errors"}
+        # v0.45.197：GEX 视图不可得的次数是那次改动唯一的代价，必须可数。
+        assert set(c["gex_view"]) == {"ok", "unavailable", "capped_expiries"}
 
 
 class TestCboePayloadStats:
@@ -154,7 +157,8 @@ class TestWrite:
         d = json.loads(p.read_text())
         assert d["date"] == "2026-09-05"
         assert d["phases"]["prefetch"] == 12.3
-        assert set(d["counters"]) == {"yfinance", "twelve_data", "cboe", "cboe_chain"}
+        assert set(d["counters"]) == {"yfinance", "twelve_data", "cboe",
+                                      "cboe_chain", "gex_view"}
         assert d["extra"] == {"note": "x"}
         assert not (tmp_path / "t.json.tmp").exists(), "临时文件必须被 os.replace 掉"
 

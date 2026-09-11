@@ -79,11 +79,14 @@ def counters() -> Dict[str, Optional[dict]]:
     没装闸门）。**不要把 None 改成 {}**——空 dict 会被下游读成「零调用」。
 
     `cboe_chain` 与前三项不同：它不数「发了几次请求」，数的是「构出来的链
-    把多少近月挡在外面了」。放在这里是因为编排器已把本文件并进 status.json，
-    挂上即随每轮扫描落盘，无需改编排器（同 `code_version` 的走法）。
+    把多少近月挡在外面了」。`gex_view`（v0.45.197）数的是 Dealer GEX 专用全链视图
+    的可得性——它取不到时**不回退截断链**，所以「今天有几只标的没有 GEX」是这次
+    改动唯一的代价，必须可数而不是可估。两者放在这里是因为编排器已把本文件并进
+    status.json，挂上即随每轮扫描落盘，无需改编排器（同 `code_version` 的走法）。
     """
     out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None,
-                                      "cboe": None, "cboe_chain": None}
+                                      "cboe": None, "cboe_chain": None,
+                                      "gex_view": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -98,6 +101,7 @@ def counters() -> Dict[str, Optional[dict]]:
         import cboe_options
         out["cboe"] = cboe_options.payload_stats()
         out["cboe_chain"] = cboe_options.chain_selection_stats()
+        out["gex_view"] = cboe_options.gex_view_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("cboe stats 不可得: %s", e)
     return out
