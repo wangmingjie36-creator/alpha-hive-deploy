@@ -175,6 +175,21 @@ class TestNoSilentFallback:
         assert r["max_pain"] is None
         assert r["unavailable_reason"], "不可用时必须带原因"
 
+    def test_pub_details_does_not_carry_dead_kaijing_fields(self):
+        """口径字段不许往信息素板塞 —— 板上的 `max_pain*` 零读者且板有 80 条上限。
+
+        审计轨迹走 `AgentResult.details` 里的完整 max_pain dict（那份才落进
+        `.swarm_results_*.json` 并被看板/报告读到）。
+
+        变红条件：把 `_pub_details["max_pain_window_days"] = ...` 之类加回去。
+        """
+        import inspect
+
+        src = inspect.getsource(OracleBeeEcho.analyze)
+        for dead in ("max_pain_window_days", "max_pain_expiries", "max_pain_unavailable"):
+            assert f'_pub_details["{dead}"]' not in src, (
+                f"{dead} 被塞进信息素板，但板上 max_pain* 没有任何读者")
+
     def test_empty_window_is_reported_not_faked(self, frozen_today):
         """窗口内没有到期日时报 None + 原因，而不是拿远月凑一个数。
 
@@ -186,3 +201,46 @@ class TestNoSilentFallback:
         r = _bee()._calc_max_pain("TEST", STOCK_PRICE, {"full_chain_oi": chain})
         assert r["max_pain"] is None
         assert "无到期日" in r["unavailable_reason"]
+
+
+class TestDashboardLabelSameSource:
+    """看板卡片的「到期日」标签必须与算出那个数字的到期日同源。
+
+    换源前两者恰好同源（都取自被截断的主链，一起错）；换源后若标签仍读
+    `expiration_dates`，就会出现「$225」旁边标着 09-18/09-21/09-23 —— 而那三个
+    到期日一张合约都没参与这个数。同 auto-memory `alpha-hive-prediction-retention`：
+    **同量在同页出现两次就迟早是两个数 —— 要同源，不要「保持一致」。**
+    """
+
+    MP_EXPIRIES = ["2026-09-11", "2026-09-14", "2026-09-16"]
+    MAIN_CHAIN = ["2026-09-18", "2026-09-21", "2026-09-23"]
+
+    def _row(self):
+        import dashboard_renderer as D
+        detail = {
+            "max_pain": {"max_pain": 225.0, "distance_pct": -2.95,
+                         "window_days": 7, "expiries_used": self.MP_EXPIRIES},
+            "expiration_dates": self.MAIN_CHAIN,
+            "full_chain_oi": {"data_available": True},
+        }
+        # ScoutBee 的 price 必须给 —— 缺了 `_detail` 会退回打 yfinance 取价，
+        # 被 conftest 的离线守卫拦下（这条守卫是对的：测试不许伸手取外网）。
+        sd = {"TEST": {"agent_details": {
+            "OracleBeeEcho": {"details": detail},
+            "ScoutBeeNova": {"details": {"price": 218.36}},
+        }}}
+        return D._detail("TEST", sd)
+
+    def test_label_expiries_come_from_max_pain_not_main_chain(self):
+        """变红条件：把 `near_mp_expiries` 改回读 `expiration_dates`。"""
+        row = self._row()
+        assert row["near_mp_expiries"] == self.MP_EXPIRIES
+        assert row["near_mp_expiries"] != self.MAIN_CHAIN
+        assert row["near_mp_window"] == 7
+
+    def test_main_chain_list_still_available_separately(self):
+        """主链列表本身保留（它是另一个量），只是不再用于磁吸标签。
+
+        变红条件：删掉 `near_expiry_dates` 这个键。
+        """
+        assert self._row()["near_expiry_dates"] == self.MAIN_CHAIN
