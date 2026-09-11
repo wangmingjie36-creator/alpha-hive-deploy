@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.188] — 2026-09-11 — 占位（进行中：近端磁吸目标价口径改 ≤7 天、从 full_chain_oi 同源算）
+
 ## [0.45.187] — 2026-09-11 — 占位（进行中：清理 46 个被误提交进 git 跟踪的 iCloud 重名副本）
 
 ## [0.45.186] — 2026-09-11 — 占位（进行中：test_zero_weight_invariant 的 rglob 扫进 .claude/worktrees/，生产 checkout 恒红）
