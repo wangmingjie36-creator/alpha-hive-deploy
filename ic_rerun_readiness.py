@@ -242,6 +242,30 @@ _COHORT_HISTORY = [
      "**边界日期取 2026-09-10（与 v0.45.176 同日、扩展同一标签，不新开空分区）**："
      "实测 2026-09-10 起兜底触发 **0 次** ⇒ 本代已有的 30 条样本改动前后逐位相同、"
      "确实可比，**作废 0 条**。同 v0.45.163 对 09-07 那三条的处置。"),
+    ("2026-09-11", "v0.45.201",
+     "OracleBeeEcho 方向去掉「在中文摘要里数关键词」那层投票。方向原为三级级联，"
+     "分数带（唯一有中性区的那条）排最后。闭式反解 agent_memory 1789 行"
+     "（2026-04-06~09-10；`discovery` 原样存着 signal_summary，无需插桩）："
+     "关键词分支决定 **982 行（55.0%）且 982 行全部判 bullish，五个月零次 bearish**；"
+     "分数带只决定 141 行（7.9%）。成因是词表在本语料里单边 —— 五个看多词只有「看涨」"
+     "出现过（1542 行，永远来自同一句 `检测到 N 个看涨异动`，options_analyzer.py:1397 在 "
+     "`bullish_unusual > 0` 时无条件拼上，而 `bearish_unusual` 全仓不存在），"
+     "五个看空词**一次都没出现过** ⇒ `_bear_count` 恒 0 ⇒ 看空半边结构上不可达"
+     "（同 ChronosBee v0.43.0、CodeExecutor v0.45.191 的同族错误）。"
+     "更糟的是这 982 行的 `unusual_direction` **全部**是 neutral/absent —— 专职方向"
+     "探测器说「无方向」，被一个子串计数改判成看多；其中能看到 Call/Put 明细的 467 行里"
+     "有 **127 行（27.2%）实际 Put > Call**。而真正有方向含义的 `做多气氛浓厚（P/C低）`"
+     "（811 行）不匹配任何关键词、从不投票。 "
+     "**为什么算世代边界**：Oracle 方向经 `_compute_direction_vote` 的 bullish_count / "
+     "bullish_w（遍历全部 valid_results）直通 rule_direction → final_score。 "
+     "**幅度**（用修复后的真实函数重放台账，与离线模型逐数一致）：bullish 88.0%→69.9%、"
+     "neutral 6.3%→23.7%，迁移 bullish→neutral 311 行 + bullish→bearish 13 行，"
+     "**81.9% 的行逐字节不变**。下游 `BULLISH_GATE_CONFIG(min_agents=3)` 吸收掉大部分："
+     "1028 个过门格子里 76 个（7.4%）会跌破门槛。⚠️ `min_weight_pct=0.50` 需要 confidence，"
+     "agent_memory 不存该列 ⇒ 无法反解，故**不报加权门槛的翻转率**。 "
+     "**作废 30 条**（2026-09-10 当日全部 predictions；其中 7 行 Oracle 方向会改判）。"
+     "代价按实际算：这 30 条 `checked_t7` 全为 0，尚未成熟为可用证据，"
+     "损失是一个扫描日的累积量，不是已实现的回测结果。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）

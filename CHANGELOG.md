@@ -5,7 +5,122 @@
 
 ---
 
-## [0.45.201] — 2026-09-11 — 占位（进行中：Oracle/Guard/Rival 看多率 82~88% 的成因普查 —— 先量方向分布的真实口径，判断是结构性偏斜还是市场状态）
+## [0.45.201] — 2026-09-11 — OracleBee 的方向来自一张单边词表：看空半边五个月不可达
+
+用户问「Oracle 88.1% / Guard 83.3% / Rival 82.8% 看多，账在哪三只」。
+先量后改，结论**推翻了问题里「自我强化」的前提**，也推翻了我自己的一个预判。
+
+### 量到了什么
+
+**仪器先自证**：`agent_memory` 的写入点在 `pheromone_board.publish` 里
+（`_write_buffer.append`，pheromone_board.py:277），**每次 publish 无条件记一条**，
+与 `nlargest(80)` 截断无关 ⇒ 这张台账不受淘汰偏置影响，可以用来数方向。
+反向自证：BearBeeContrarian 读出 6.5% 看多 / 86.8% 看空 —— 台账看得见 bearish。
+
+三只「看多蜂」恰好是三只**几乎从不说 neutral** 的蜂（Rival 1929 行里只有 34 行
+neutral），而 Scout/Chronos/Buzz 是 76~80% neutral。不是看多倾向，是缺中性区。
+
+**逐月拆开后，三只里只有一只还活着**：
+
+| 月份 | Oracle | Guard | Rival |
+|---|---|---|---|
+| 2026-06 | 94.9% | 95.1% | 98.0% |
+| 2026-09 | **86.0%** | 61.4% | 51.5% |
+
+Rival 已被 v0.44.1（单向棘轮）+ expected_returns 居中修掉，腰斩；Guard 是派生蜂
+（`direction = resonance["direction"]`，读板）。**全历史 82.8% 是个混了修复前后两代的陈旧聚合。**
+
+**置换检验（同月内打乱标签保边际，R=2000）推翻「自我强化」**：
+
+| 配对 | 实测 | 零假设 | z |
+|---|---|---|---|
+| Guard vs Rival | 83.7% | 74.7% | 13.7 |
+| Guard vs Oracle | 81.7% | 76.4% | 10.1 |
+| **Oracle vs Rival** | 75.8% | 75.1% | **1.3（无依赖）** |
+| Scout vs Chronos（负对照） | 62.4% | 63.3% | −1.3 |
+
+Oracle 与 Rival 的超额一致率是 **0**。两个都 ~85% 看多的变量本就该在 74% 上下相遇 ——
+不给零假设就会把边际读成耦合。**正确模型是「三条各自单边的规则」，不是「互相强化」。**
+
+### Fixed — `swarm_agents/oracle_bee.py`
+
+Oracle 方向是三级级联，唯一有中性区、唯一均衡的分数带排在**最后**。
+闭式反解 1789 行台账（`discovery` 原样存着 `signal_summary`，无需插桩；
+复现率 **99.8%**，去掉分支1 掉到 93.3%、关键词换无关词掉到 81.9% ⇒ 判据有鉴别力）：
+
+| 分支 | 行数 | 占比 | 判为 bullish |
+|---|---|---|---|
+| 关键词投票 | 982 | **55.0%** | **982（100%）** |
+| 异常流方向 | 662 | 37.1% | 567 |
+| 分数带 | 141 | **7.9%** | 22 |
+
+关键词分支**五个月零次 bearish**，因为词表在本语料里单边：
+
+- 五个看多词只有「看涨」出现过（1542 行），且**永远来自同一句**
+  `检测到 N 个看涨异动`（`options_analyzer.py:1397`，`bullish_unusual > 0` 时无条件拼上）。
+  `bearish_unusual` 这个量**全仓不存在**。
+- 五个看空词**一次都没出现过** ⇒ `_bear_count` 恒 0 ⇒
+  `elif _bear_count > _bull_count` 结构上不可达（同 ChronosBee v0.43.0）。
+- 真正有方向含义的 `做多气氛浓厚（P/C低）`（811 行）**不匹配任何关键词、从不投票**。
+  会投票的反倒是那句不含方向的计数。
+
+且这 982 行的 `unusual_direction` **全部**是 neutral/absent —— 专职方向探测器说
+「无方向」，被一个子串计数改判成看多；其中能看到 Call/Put 明细的 467 行里
+**127 行（27.2%）实际 Put > Call**。与 CodeExecutor 兜底（v0.45.191）同物种：
+把「这类数据存在」渲染成「方向看多」。
+
+处置：删掉关键词分支，方向抽成 `_decide_direction()`（照 ChronosBee
+`_apply_pead_direction` 的先例，便于直接断言）。**上游 `options_analyzer` 一个字未动** ——
+摘要串是展示物，错的是拿它当方向证据的调用方。
+
+**幅度**（用修复后的真实函数重放台账，与离线模型逐数一致）：
+bullish 88.0%→69.9%、neutral 6.3%→23.7%，迁移 311 + 13 行，**81.9% 的行逐字节不变**。
+下游 `BULLISH_GATE_CONFIG(min_agents=3)` 吸收掉大部分：1028 个过门格子里 76 个（7.4%）跌破门槛。
+⚠️ `min_weight_pct=0.50` 要 confidence，台账不存该列 ⇒ 无法反解，**不报加权门槛翻转率**。
+
+### Added — `ic_rerun_readiness._COHORT_HISTORY`（第 11 条，2026-09-11）
+
+方向经 `_compute_direction_vote` 的 `bullish_count`/`bullish_w`（遍历全部
+`valid_results`）直通 `rule_direction` → `final_score`。
+**作废 30 条**（2026-09-10 全天 predictions，其中 7 行 Oracle 方向会变）。
+代价如实算：这 30 条 `checked_t7` 全为 0，尚未成熟为可用证据，
+损失是**一个扫描日的累积量**，不是已实现的回测结果。
+
+### Added — `tests/test_oracle_direction_keyword_vote.py`（34 条）
+
+主守卫是 `test_direction_is_independent_of_summary_text`：固定
+（专职探测器, 分数）后摘要文本不得改变方向 —— 谁再接一个文本投票它就红。
+结构守卫走 AST `_code_only()` 剥注释与 docstring（修复后的 docstring **引用**了
+这些关键词来解释为何删除，按原始源码断言会把解释误判成重新引入），
+并配了两条互补自证：塞回投票必须抓到、只写在注释里必须不报。
+`TestGuardsHaveTeeth` 另立两条上游正对照（那句话还在 / `bearish_unusual` 仍不存在）,
+后者变红就是提醒回来重评是否该恢复方向投票。
+
+变异 7/7 被抓到（含还原后复验 34 passed）；ruff 干净。
+
+### Fixed — `tests/test_code_executor_fallback.py`（我自己上一版埋的雷）
+
+`test_it_extends_the_same_label_not_a_new_partition` 原写
+`cohort_start()["date"] == "2026-09-10"` —— 把一条关于**本条目**的主张绑在了
+列表**尾部**上，于是本次这条合法新边界让它变红，红的原因与 CodeExecutor 毫无关系。
+改为断言「本条与 v0.45.176 共用同一日期标签」。
+讽刺的是 v0.45.191 当时正是这样改红了 `test_oracle_cboe_source`，而我随后在自己的
+新测试里又写了一遍同样的绑定（`cohort_start()["version"] == "v0.45.201"`），同版一并改掉。
+
+### 两个被推翻的预判（都写在这里，别在下次重犯）
+
+1. **「自我强化看多」**：置换检验下 Oracle 与 Rival 零耦合。大头是各自的边际，不是互相强化。
+2. **占号时以为 `origin/main` 是稳的**：worktree 与主 checkout **共用 `.git`**，
+   别的 session 一 `git fetch`，我这边的 `refs/remotes/origin/main` 就会**在我没 fetch 的情况下前进**。
+   本次因此撞号（0.45.200 被另一 session 占走），改占 0.45.201。
+   「下一个可用号」的快照保质期是秒级 —— 提交前必须重读一次，并让非快进推送做最终仲裁。
+   顺带：这次撞号给了 v0.45.195 那条崭新的重号守卫一个**真实（非合成）正对照**，它红了。
+
+### 仍然没查的（比本条大）
+
+`options_analyzer._score()` 的 `unusual_signal = min(2.0, bullish_unusual * 0.5)`
+同样单边 —— 只有看多异动加分，看空异动**对分数毫无影响**，分数只能往上走。
+这条改的是 `score` 不是 `direction`，影响面与世代成本都更大，**本版未动**，单独立项。
 
 ---
 
