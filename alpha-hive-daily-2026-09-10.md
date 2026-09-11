@@ -263,7 +263,7 @@
 ## 3) 市场隐含预期
 
 ### XOM
-- 检测到 8 个看涨异动 | TermStr:flat(30/30) | Skew25d:1.02 | MaxPain:$155(+6.6%) | 异常流:异常Call流 13个信号 溢价$352.4M | $165.2 | 历史5条:多5/空0,均分6.1|历史T+7准确率67%(6次,均收益+3.52%)
+- 检测到 8 个看涨异动 | TermStr:flat(30/30) | Skew25d:1.02 | MaxPain≤7d:$160(+3.3%) | 异常流:异常Call流 13个信号 溢价$352.4M | $165.2 | 历史5条:多5/空0,均分6.1|历史T+7准确率67%(6次,均收益+3.52%)
 - IV Rank：37.03（来源 hv_proxy）
 - Put/Call Ratio：0.91
 - Gamma Exposure：36.5805
@@ -276,7 +276,7 @@
   - 看涨 large call volume $175.0 (1,080手)
 
 ### JNJ
-- IV 处于理想水位 | 检测到 6 个看涨异动 | TermStr:contango(23/26) | Skew25d:1.05 | MaxPain:$255(+4.5%) | 异常流:异常Call流 8个信号 溢价$12.2M | $266.4 | 历史5条:多5/空0,均分6.3|历史T+7准确率86%(7次,均收益+3.80%)
+- IV 处于理想水位 | 检测到 6 个看涨异动 | TermStr:contango(23/26) | Skew25d:1.05 | MaxPain≤7d:$270(-1.4%) | 异常流:异常Call流 8个信号 溢价$12.2M | $266.4 | 历史5条:多5/空0,均分6.3|历史T+7准确率86%(7次,均收益+3.80%)
 - IV Rank：56.85（来源 hv_proxy）
 - Put/Call Ratio：0.71
 - Gamma Exposure：21.894
@@ -289,7 +289,7 @@
   - 看涨 large call volume $275.0 (183手)
 
 ### VKTX
-- 做多气氛浓厚（P/C低） | 检测到 8 个看涨异动 | TermStr:severe_backwardation(134/101) | Skew25d:0.96 | MaxPain:$34(-6.9%) | 异常流:异常Call流 17个信号 溢价$0.2M | $32.1 | 历史5条:多5/空0,均分6.0|历史T+7准确率32%(19次,均收益+4.34%)
+- 做多气氛浓厚（P/C低） | 检测到 8 个看涨异动 | TermStr:severe_backwardation(134/101) | Skew25d:0.96 | MaxPain≤7d:$34(-4.1%) | 异常流:异常Call流 17个信号 溢价$0.2M | $32.1 | 历史5条:多5/空0,均分6.0|历史T+7准确率32%(19次,均收益+4.34%)
 - IV Rank：28.9（来源 hv_proxy）
 - Put/Call Ratio：0.29
 - Gamma Exposure：2.0762
@@ -302,7 +302,7 @@
   - 看涨 call sweep $44.0 (230手)
 
 ### MSFT
-- 做多气氛浓厚（P/C低） | 检测到 23 个看涨异动 | TermStr:contango(26/29) | Skew25d:1.10 | MaxPain:$450(+9.4%) | 异常流:混合期权流 Call:47 Put:34 | $492.4 | 历史5条:多5/空0,均分6.1|历史T+7准确率65%(23次,均收益+1.25%)
+- 做多气氛浓厚（P/C低） | 检测到 23 个看涨异动 | TermStr:contango(26/29) | Skew25d:1.10 | MaxPain≤7d:$495(-0.5%) | 异常流:混合期权流 Call:47 Put:34 | $492.4 | 历史5条:多5/空0,均分6.1|历史T+7准确率65%(23次,均收益+1.25%)
 - IV Rank：17.05（来源 hv_proxy）
 - Put/Call Ratio：0.59
 - Gamma Exposure：58.1872
@@ -315,7 +315,7 @@
   - 看涨 large call volume $430.0 (181手)
 
 ### AMC
-- 做多气氛浓厚（P/C低） | 检测到 8 个看涨异动 | TermStr:severe_backwardation(92/85) | Skew25d:0.93 | MaxPain:$2(+18.0%) | 异常流:异常Call流 19个信号 溢价$0.1M | $2.4 | 历史5条:多5/空0,均分6.7|历史T+7准确率22%(9次,均收益-1.01%)
+- 做多气氛浓厚（P/C低） | 检测到 8 个看涨异动 | TermStr:severe_backwardation(92/85) | Skew25d:0.93 | MaxPain≤7d:$2(-5.6%) | 异常流:异常Call流 19个信号 溢价$0.1M | $2.4 | 历史5条:多5/空0,均分6.7|历史T+7准确率22%(9次,均收益-1.01%)
 - IV Rank：16.82（来源 hv_proxy）
 - Put/Call Ratio：0.29
 - Gamma Exposure：13.275
@@ -328,7 +328,7 @@
   - 看跌 large put volume $2.0 (5,035手)
 
 ### NEE
-- 负 GEX 利于趋势 | TermStr:contango(21/24) | Skew25d:1.15 | MaxPain:$85(-2.9%) | 异常流:异常Call流 5个信号 溢价$13.8M | $82.5 | 历史5条:多2/空1,均分5.5|历史T+7准确率80%(5次,均收益-1.44%)
+- 负 GEX 利于趋势 | TermStr:contango(21/24) | Skew25d:1.15 | MaxPain≤7d:$83(-0.6%) | 异常流:异常Call流 5个信号 溢价$13.8M | $82.5 | 历史5条:多2/空1,均分5.5|历史T+7准确率80%(5次,均收益-1.44%)
 - IV Rank：1.62（来源 hv_proxy）
 - Put/Call Ratio：0.92
 - Gamma Exposure：-9.3539
@@ -337,7 +337,7 @@
 - IV Skew 比值：1.15（neutral）
 
 ### ABBV
-- IV 处于理想水位 | 做多气氛浓厚（P/C低） | TermStr:contango(25/29) | Skew25d:1.11 | MaxPain:$240(+5.2%) | 异常流:异常Put流 3个信号 溢价$0.0M | $252.4 | 历史5条:多5/空0,均分6.3|历史T+7准确率67%(9次,均收益+1.64%)
+- IV 处于理想水位 | 做多气氛浓厚（P/C低） | TermStr:contango(25/29) | Skew25d:1.11 | MaxPain≤7d:$252(-0.0%) | 异常流:异常Put流 3个信号 溢价$0.0M | $252.4 | 历史5条:多5/空0,均分6.3|历史T+7准确率67%(9次,均收益+1.64%)
 - IV Rank：46.31（来源 hv_proxy）
 - Put/Call Ratio：0.49
 - Gamma Exposure：7.1383
@@ -348,7 +348,7 @@
   - 看跌 large put volume $235.0 (131手)
 
 ### COST
-- IV 处于理想水位 | 负 GEX 利于趋势 | 检测到 12 个看涨异动 | TermStr:flat(25/24) | Skew25d:1.02 | MaxPain:$930(-3.0%) | 异常流:异常Put流 39个信号 溢价$13.3M | $902.4 | 历史5条:多5/空0,均分6.4|历史T+7准确率57%(7次,均收益-2.85%)
+- IV 处于理想水位 | 负 GEX 利于趋势 | 检测到 12 个看涨异动 | TermStr:flat(25/24) | Skew25d:1.02 | MaxPain≤7d:$915(-1.4%) | 异常流:异常Put流 39个信号 溢价$13.3M | $902.4 | 历史5条:多5/空0,均分6.4|历史T+7准确率57%(7次,均收益-2.85%)
 - IV Rank：40.81（来源 hv_proxy）
 - Put/Call Ratio：1.24
 - Gamma Exposure：-15.0406
@@ -361,7 +361,7 @@
   - 看跌 large put volume $920.0 (564手)
 
 ### NVDA
-- 检测到 56 个看涨异动 | TermStr:contango(34/38) | Skew25d:1.11 | MaxPain:$200(+9.2%) | 异常流:混合期权流 Call:99 Put:116 | $218.4 | 历史5条:多4/空0,均分6.0|历史T+7准确率33%(21次,均收益+0.31%)
+- 检测到 56 个看涨异动 | TermStr:contango(34/38) | Skew25d:1.11 | MaxPain≤7d:$225(-3.0%) | 异常流:混合期权流 Call:99 Put:116 | $218.4 | 历史5条:多4/空0,均分6.0|历史T+7准确率33%(21次,均收益+0.31%)
 - IV Rank：84.9（来源 hv_proxy）
 - Put/Call Ratio：0.9
 - Gamma Exposure：114.583
@@ -374,7 +374,7 @@
   - 看涨 large call volume $220.0 (27,348手)
 
 ### CRCL
-- IV 处于理想水位 | 检测到 18 个看涨异动 | TermStr:flat(79/80) | Skew25d:0.97 | MaxPain:$85(+6.3%) | 异常流:异常Call流 42个信号 溢价$7.0M | $90.3 | 历史5条:多5/空0,均分6.0|历史T+7准确率38%(24次,均收益+1.32%)
+- IV 处于理想水位 | 检测到 18 个看涨异动 | TermStr:flat(79/80) | Skew25d:0.97 | MaxPain≤7d:$94(-3.4%) | 异常流:异常Call流 42个信号 溢价$7.0M | $90.3 | 历史5条:多5/空0,均分6.0|历史T+7准确率38%(24次,均收益+1.32%)
 - IV Rank：42.66（来源 hv_proxy）
 - Put/Call Ratio：1.03
 - Gamma Exposure：2.3659
@@ -400,7 +400,7 @@
   - 看跌 large put volume $110.0 (4,299手)
 
 ### QCOM
-- 检测到 18 个看涨异动 | TermStr:flat(49/50) | Skew25d:0.97 | MaxPain:$170(+4.0%) | 异常流:异常Call流 34个信号 溢价$43.9M | $176.9 | 历史5条:多5/空0,均分5.8|历史T+7准确率39%(23次,均收益-3.40%)
+- 检测到 18 个看涨异动 | TermStr:flat(49/50) | Skew25d:0.97 | MaxPain≤7d:$165(+7.2%) | 异常流:异常Call流 34个信号 溢价$43.9M | $176.9 | 历史5条:多5/空0,均分5.8|历史T+7准确率39%(23次,均收益-3.40%)
 - IV Rank：7.69（来源 hv_proxy）
 - Put/Call Ratio：0.72
 - Gamma Exposure：10.1893
@@ -413,7 +413,7 @@
   - 看跌 large put volume $180.0 (941手)
 
 ### TMO
-- 信号平衡 | TermStr:contango(28/31) | Skew25d:1.13 | MaxPain:$540(+11.7%) | 异常流:异常Call流 7个信号 溢价$2.5M | $603.2 | 历史5条:多2/空0,均分5.9|历史T+7准确率33%(9次,均收益+0.13%)
+- 信号平衡 | TermStr:contango(28/31) | Skew25d:1.13 | MaxPain≤7d:$608(-0.7%) | 异常流:异常Call流 7个信号 溢价$2.5M | $603.2 | 历史5条:多2/空0,均分5.9|历史T+7准确率33%(9次,均收益+0.13%)
 - IV Rank：33.08（来源 hv_proxy）
 - Put/Call Ratio：0.98
 - Gamma Exposure：1.8532
@@ -422,7 +422,7 @@
 - IV Skew 比值：1.13（neutral）
 
 ### TMUS
-- 做多气氛浓厚（P/C低） | 负 GEX 利于趋势 | TermStr:contango(29/31) | Skew25d:1.05 | MaxPain:$185(-5.3%) | 异常流:混合期权流 Call:3 Put:4 | $175.2 | 历史5条:多5/空0,均分5.6|历史T+7准确率29%(7次,均收益+3.07%)
+- 做多气氛浓厚（P/C低） | 负 GEX 利于趋势 | TermStr:contango(29/31) | Skew25d:1.05 | MaxPain≤7d:$182(-4.0%) | 异常流:混合期权流 Call:3 Put:4 | $175.2 | 历史5条:多5/空0,均分5.6|历史T+7准确率29%(7次,均收益+3.07%)
 - IV Rank：29.29（来源 hv_proxy）
 - Put/Call Ratio：0.68
 - Gamma Exposure：-0.9952
@@ -443,7 +443,7 @@
   - 看涨 large call volume $17.0 (182手)
 
 ### BRK-B
-- 检测到 1 个看涨异动 | TermStr:contango(14/16) | Skew25d:1.23 | MaxPain:$495(+2.4%) | 异常流:异常Call流 3个信号 溢价$4.9M | $507.0 | 历史5条:多5/空0,均分6.8
+- 检测到 1 个看涨异动 | TermStr:contango(14/16) | Skew25d:1.23 | MaxPain≤7d:$505(+0.4%) | 异常流:异常Call流 3个信号 溢价$4.9M | $507.0 | 历史5条:多5/空0,均分6.8
 - IV Rank：10.53（来源 hv_proxy）
 - Put/Call Ratio：1.08
 - Gamma Exposure：24.7776
@@ -456,7 +456,7 @@
   - 看跌 put sweep $330.0 (277手)
 
 ### CVX
-- 检测到 3 个看涨异动 | TermStr:flat(26/27) | Skew25d:1.03 | MaxPain:$195(+9.3%) | 异常流:异常Call流 9个信号 溢价$0.9M | $213.2 | 历史5条:多5/空0,均分6.5|历史T+7准确率44%(9次,均收益+4.20%)
+- 检测到 3 个看涨异动 | TermStr:flat(26/27) | Skew25d:1.03 | MaxPain≤7d:$208(+2.7%) | 异常流:异常Call流 9个信号 溢价$0.9M | $213.2 | 历史5条:多5/空0,均分6.5|历史T+7准确率44%(9次,均收益+4.20%)
 - IV Rank：19.7（来源 hv_proxy）
 - Put/Call Ratio：0.99
 - Gamma Exposure：21.9995
@@ -469,7 +469,7 @@
   - 看涨 large call volume $222.5 (336手)
 
 ### AMZN
-- 做多气氛浓厚（P/C低） | 检测到 33 个看涨异动 | TermStr:contango(30/36) | Skew25d:1.08 | MaxPain:$250(+0.8%) | 异常流:混合期权流 Call:57 Put:38 | $251.9 | 历史5条:多5/空0,均分5.2|历史T+7准确率62%(21次,均收益+0.49%)
+- 做多气氛浓厚（P/C低） | 检测到 33 个看涨异动 | TermStr:contango(30/36) | Skew25d:1.08 | MaxPain≤7d:$255(-1.2%) | 异常流:混合期权流 Call:57 Put:38 | $251.9 | 历史5条:多5/空0,均分5.2|历史T+7准确率62%(21次,均收益+0.49%)
 - IV Rank：16.01（来源 hv_proxy）
 - Put/Call Ratio：0.68
 - Gamma Exposure：26.1206
@@ -482,7 +482,7 @@
   - 看跌 large put volume $250.0 (3,313手)
 
 ### T
-- 检测到 3 个看涨异动 | TermStr:contango(22/26) | Skew25d:1.09 | MaxPain:$25(+2.2%) | 异常流:异常Call流 4个信号 溢价$0.0M | $25.6 | 历史5条:多5/空0,均分7.4|历史T+7准确率86%(7次,均收益+2.27%)
+- 检测到 3 个看涨异动 | TermStr:contango(22/26) | Skew25d:1.09 | MaxPain≤7d:$26(+0.2%) | 异常流:异常Call流 4个信号 溢价$0.0M | $25.6 | 历史5条:多5/空0,均分7.4|历史T+7准确率86%(7次,均收益+2.27%)
 - IV Rank：23.27（来源 hv_proxy）
 - Put/Call Ratio：0.81
 - Gamma Exposure：19.0886
@@ -495,7 +495,7 @@
   - 看涨 large call volume $26.5 (132手)
 
 ### WMT
-- 做多气氛浓厚（P/C低） | 检测到 15 个看涨异动 | TermStr:contango(23/27) | Skew25d:1.04 | MaxPain:$108(-2.1%) | 异常流:混合期权流 Call:22 Put:12 | $105.7 | 历史5条:多5/空0,均分5.9|历史T+7准确率25%(8次,均收益-1.20%)
+- 做多气氛浓厚（P/C低） | 检测到 15 个看涨异动 | TermStr:contango(23/27) | Skew25d:1.04 | MaxPain≤7d:$106(-0.2%) | 异常流:混合期权流 Call:22 Put:12 | $105.7 | 历史5条:多5/空0,均分5.9|历史T+7准确率25%(8次,均收益-1.20%)
 - IV Rank：94.98（来源 hv_proxy）
 - Put/Call Ratio：0.48
 - Gamma Exposure：24.6188
@@ -508,7 +508,7 @@
   - 看跌 large put volume $130.0 (1,988手)
 
 ### META
-- IV 处于理想水位 | 检测到 41 个看涨异动 | TermStr:contango(39/43) | Skew25d:1.01 | MaxPain:$600(+7.4%) | 异常流:混合期权流 Call:107 Put:118 | $644.4 | 历史5条:多4/空0,均分6.6|历史T+7准确率46%(24次,均收益+1.45%)
+- IV 处于理想水位 | 检测到 41 个看涨异动 | TermStr:contango(39/43) | Skew25d:1.01 | MaxPain≤7d:$618(+4.3%) | 异常流:混合期权流 Call:107 Put:118 | $644.4 | 历史5条:多4/空0,均分6.6|历史T+7准确率46%(24次,均收益+1.45%)
 - IV Rank：51.55（来源 hv_proxy）
 - Put/Call Ratio：0.7
 - Gamma Exposure：47.9732
@@ -521,7 +521,7 @@
   - 看跌 large put volume $650.0 (1,748手)
 
 ### DE
-- IV 处于理想水位 | TermStr:contango(31/34) | Skew25d:1.07 | MaxPain:$610(+10.9%) | 异常流:异常Call流 1个信号 溢价$0.0M | $676.3 | 历史5条:多3/空1,均分6.6|历史T+7准确率33%(9次,均收益+3.10%)
+- IV 处于理想水位 | TermStr:contango(31/34) | Skew25d:1.07 | MaxPain≤7d:$662(+2.1%) | 异常流:异常Call流 1个信号 溢价$0.0M | $676.3 | 历史5条:多3/空1,均分6.6|历史T+7准确率33%(9次,均收益+3.10%)
 - IV Rank：69.68（来源 hv_proxy）
 - Put/Call Ratio：0.91
 - Gamma Exposure：2.88
@@ -530,7 +530,7 @@
 - IV Skew 比值：1.07（neutral）
 
 ### CRM
-- 检测到 11 个看涨异动 | TermStr:contango(39/43) | Skew25d:1.04 | MaxPain:$208(+17.1%) | 异常流:混合期权流 Call:20 Put:18 | $243.0 | 历史5条:多5/空0,均分6.4|历史T+7准确率62%(8次,均收益+7.38%)
+- 检测到 11 个看涨异动 | TermStr:contango(39/43) | Skew25d:1.04 | MaxPain≤7d:$250(-2.8%) | 异常流:混合期权流 Call:20 Put:18 | $243.0 | 历史5条:多5/空0,均分6.4|历史T+7准确率62%(8次,均收益+7.38%)
 - IV Rank：99.04（来源 hv_proxy）
 - Put/Call Ratio：1.12
 - Gamma Exposure：2.5518
@@ -543,7 +543,7 @@
   - 看跌 large put volume $230.0 (2,227手)
 
 ### SNOW
-- 检测到 13 个看涨异动 | TermStr:contango(46/52) | Skew25d:1.01 | MaxPain:$270(+22.1%) | 异常流:异常Call流 32个信号 溢价$3.8M | $329.7 | 历史5条:多0/空4,均分6.2|历史T+7准确率33%(9次,均收益+2.45%)
+- 检测到 13 个看涨异动 | TermStr:contango(46/52) | Skew25d:1.01 | MaxPain≤7d:$330(-0.1%) | 异常流:异常Call流 32个信号 溢价$3.8M | $329.7 | 历史5条:多0/空4,均分6.2|历史T+7准确率33%(9次,均收益+2.45%)
 - IV Rank：39.59（来源 hv_proxy）
 - Put/Call Ratio：1.07
 - Gamma Exposure：5.7627
@@ -556,7 +556,7 @@
   - 看涨 large call volume $340.0 (277手)
 
 ### VZ
-- 检测到 2 个看涨异动 | TermStr:contango(22/24) | Skew25d:1.16 | MaxPain:$46(+8.6%) | 异常流:混合期权流 Call:4 Put:3 | $49.9 | 历史5条:多5/空0,均分5.8|历史T+7准确率80%(5次,均收益+3.98%)
+- 检测到 2 个看涨异动 | TermStr:contango(22/24) | Skew25d:1.16 | MaxPain≤7d:$50(-0.1%) | 异常流:混合期权流 Call:4 Put:3 | $49.9 | 历史5条:多5/空0,均分5.8|历史T+7准确率80%(5次,均收益+3.98%)
 - IV Rank：13.78（来源 hv_proxy）
 - Put/Call Ratio：0.72
 - Gamma Exposure：75.9142
@@ -569,7 +569,7 @@
   - 看涨 large call volume $52.0 (150手)
 
 ### RKLB
-- 负 GEX 利于趋势 | 检测到 24 个看涨异动 | TermStr:contango(71/75) | Skew25d:0.93 | MaxPain:$70(-11.5%) | 异常流:异常Call流 38个信号 溢价$2.1M | $62.0 | 历史5条:多5/空0,均分7.0|历史T+7准确率39%(23次,均收益-7.78%)
+- 负 GEX 利于趋势 | 检测到 24 个看涨异动 | TermStr:contango(71/75) | Skew25d:0.93 | MaxPain≤7d:$65(-4.7%) | 异常流:异常Call流 38个信号 溢价$2.1M | $62.0 | 历史5条:多5/空0,均分7.0|历史T+7准确率39%(23次,均收益-7.78%)
 - IV Rank：1.41（来源 hv_proxy）
 - Put/Call Ratio：1.04
 - Gamma Exposure：-1.9432
@@ -595,7 +595,7 @@
   - 看跌 large put volume $35.0 (331手)
 
 ### TSLA
-- IV 处于理想水位 | 检测到 64 个看涨异动 | TermStr:contango(40/45) | Skew25d:1.00 | MaxPain:$370(-1.7%) | 异常流:混合期权流 Call:142 Put:134 | $363.6 | 历史5条:多4/空1,均分6.3|历史T+7准确率43%(23次,均收益+1.37%)
+- IV 处于理想水位 | 检测到 64 个看涨异动 | TermStr:contango(40/45) | Skew25d:1.00 | MaxPain≤7d:$360(+1.0%) | 异常流:混合期权流 Call:142 Put:134 | $363.6 | 历史5条:多4/空1,均分6.3|历史T+7准确率43%(23次,均收益+1.37%)
 - IV Rank：48.58（来源 hv_proxy）
 - Put/Call Ratio：1.08
 - Gamma Exposure：5.7479
@@ -608,7 +608,7 @@
   - 看跌 large put volume $365.0 (8,002手)
 
 ### MU
-- 检测到 63 个看涨异动 | TermStr:backwardation(65/62) | Skew25d:0.99 | MaxPain:$850(+15.0%) | 异常流:混合期权流 Call:87 Put:122 | $977.4 | 历史5条:多5/空0,均分6.8|历史T+7准确率33%(9次,均收益+3.48%)
+- 检测到 63 个看涨异动 | TermStr:backwardation(65/62) | Skew25d:0.99 | MaxPain≤7d:$995(-1.8%) | 异常流:混合期权流 Call:87 Put:122 | $977.4 | 历史5条:多5/空0,均分6.8|历史T+7准确率33%(9次,均收益+3.48%)
 - IV Rank：6.57（来源 hv_proxy）
 - Put/Call Ratio：1.16
 - Gamma Exposure：13.1207
@@ -621,7 +621,7 @@
   - 看涨 large call volume $950.0 (1,386手)
 
 ### DELL
-- IV 处于理想水位 | 检测到 17 个看涨异动 | TermStr:contango(60/66) | Skew25d:0.98 | MaxPain:$425(+19.2%) | 异常流:混合期权流 Call:62 Put:78 | $506.6 | 历史5条:多4/空0,均分6.3|历史T+7准确率0%(9次,均收益-2.37%)
+- IV 处于理想水位 | 检测到 17 个看涨异动 | TermStr:contango(60/66) | Skew25d:0.98 | MaxPain≤7d:$520(-2.6%) | 异常流:混合期权流 Call:62 Put:78 | $506.6 | 历史5条:多4/空0,均分6.3|历史T+7准确率0%(9次,均收益-2.37%)
 - IV Rank：42.09（来源 hv_proxy）
 - Put/Call Ratio：1.08
 - Gamma Exposure：4.4714
