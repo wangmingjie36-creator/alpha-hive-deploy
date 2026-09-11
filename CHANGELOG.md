@@ -5,6 +5,12 @@
 
 ---
 
+## [0.45.205] — 2026-09-11 — 占位（进行中：options_analyzer 单边 unusual_signal 实测后**决定不改** —— 登记证据防下一个人把它「修」成回归）
+
+---
+
+## [0.45.204] — 2026-09-11 — 占位（进行中：GitHubTool 方法粒度死代码判定 —— push/create_issue/list_branches/diff）
+
 ## [0.45.203] — 2026-09-11 — 一条恒真断言守住的其实是**真实不变式的否定**
 
 `tests/test_paths_not_frozen_at_import.py::TestFileDerivedSpeciesDoesNotSpread::test_both_directions_are_guarded`
@@ -673,7 +679,78 @@ GEX 只经三值 `regime` 进评分。v0.45.190 已测：翻转一次的 `|Δfin
 
 ---
 
-## [0.45.196] — 2026-09-11 — 占位（进行中：默认测试出网普查 —— test_returns_required_keys 打宏观桩 + socket 探针守卫）
+## [0.45.196] — 2026-09-11 — 默认测试里真正出网的 23 条：普查、清掉 12 条、给 marker 上棘轮
+
+起因：`test_pipeline.py::TestBuildSwarmReport::test_returns_required_keys` 在全量
+`pytest` 下报 `Timeout (>60.0s)`，单跑却过。
+
+### Fixed — `test_pipeline.py` 两个类改为真离线（12 条 → 0 条出网）
+
+根因**不是**「漏标 marker」——它标了，标的是 `@pytest.mark.network`。而
+`network` 是**刻意不进** addopts 默认排除的（v0.45.94），于是它既照常跑、
+又被 `conftest._offline_transport` 豁免：**marker 正是默认离线闸的唯一豁免口**。
+
+实测链路（tracehook 取证）：
+
+    _build_swarm_report → _fetch_report_context(alpha_hive_daily_report.py:1816)
+      → fred_macro.get_macro_context → _fetch_macro_data
+         ├─ :416 yfinance 7 个 symbol（curl_cffi → query1.finance.yahoo.com）
+         └─ :456 cboe_vix._download（urllib → cdn.cboe.com）
+
+处置：去掉两个类的 `network` marker，改挂 conftest 已有的 `stub_yfinance` +
+`stub_cboe_vix`。**两个桩缺一不可**，各自变异实测判红：
+
+    缺 stub_yfinance → AssertionError: 伸手取外网了：['curl.GET query1.finance.yahoo.com']
+    缺 stub_cboe_vix → AssertionError: 伸手取外网了：['urlopen cdn.cboe.com']
+
+刻意钉**源**而不是钉 `get_macro_context` 的返回值：① 降级快照由生产代码自己
+产出（`_fetch_macro_data` 的 `base`），测试里不写死任何宏观数值，契约变了不会漂；
+② yfinance 的 cookie/crumb 引导（`/v1/test/getcrumb`）**跑在 worker 线程上**，
+只钉返回值挡不住它。
+
+`TestBuildSwarmReport` + `TestDataQualityGate` 15 条：63s（单条）→ 3.9s（全部）。
+
+### Added — `tests/test_network_marker_discipline.py`：marker 棘轮，只能减不能增
+
+两条断言方向相反（CLAUDE.md「我怕它变大，还是也怕它变小？」），各有变异实测：
+
+  · `_scan() - KNOWN` 非空 → 新增 marker。变异：随便给一条测试加上 marker ⇒ 红
+  · `KNOWN - _scan()` 非空 → 表过期。变异：删掉一个已有 marker 不动表 ⇒ 红
+
+枚举走 `tests/_repo_files.py::own_python_files`，不走 rglob（v0.45.186/189 的
+嵌套 worktree 教训；该行为已由 `test_paths_not_frozen_at_import.py` 覆盖）。
+
+### 普查结论：默认选择集 4002 条里，真正出网的是 23 条，全部集中在 3 个文件
+
+探针分 block/observe 两模式，拦 `socket.socket.connect` + `curl_cffi.Curl.perform`。
+
+| 文件 | 修复前 | 修复后 |
+|---|---:|---:|
+| `tests/test_pipeline.py` | 12 | **0** |
+| `tests/test_macro_snapshot.py` | 7 | 7 |
+| `tests/test_dashboard_renderer.py` | 4 | 4 |
+
+**绕过 `_offline_transport` 闸的：0 条。** 23 条全部是 `network` 标注过的，
+闸本身在 socket/curl 这一层没有漏洞。
+
+⚠️ **marker 原文写的「打真实外部端点，离线必挂」不成立**：这 23 条在探针 block
+模式下**全部 passed**，断言一条都不依赖实时值。剩下 11 条同为顺路副作用，
+可按同样手法清掉，**本版未动**（留待单独一版核实后处理）。
+
+### 取证方法学：探针必须先被 canary 反向自证，否则「全仓无出网」是假的
+
+第一版探针按教科书写法「放行 loopback」，跑 canary 报 **0 命中** —— 而 canary
+当时正拿着服务器的真实 HTTP 响应。两条失明路径，各自都足以单独造出假的全清：
+
+1. **本机 `HTTP_PROXY=127.0.0.1:7897`** ⇒ 所有出网在 socket 层都长得像 loopback，
+   「放行 loopback」实际等于「放行全部外网」。
+2. **`curl_cffi`（yfinance 1.2 在用）在 C 层自管 socket** ⇒ 对任何 socket 探针
+   完全不可见。实测：403 从服务器回来了，socket 探针 0 记录。
+
+`tests/conftest.py::_offline_transport` 的 docstring 早已记过这两条 —— 本次是
+在不知情的情况下**原地重踩了一遍**，canary 是唯一拦住它的东西。
+
+
 
 ---
 
