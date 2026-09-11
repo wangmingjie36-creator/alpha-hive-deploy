@@ -49,6 +49,9 @@ import pytest
 from gex_regime import RegimeWeightAdjuster
 from pheromone_board import PheromoneBoard
 from swarm_agents.queen_distiller import QueenDistiller
+from tests._repo_files import own_python_files
+
+REPO_ROOT = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
 
 _ZEROED = ("signal", "risk_adj")
 
@@ -165,8 +168,9 @@ class TestAdaptedWeightsNotWiredToProduction:
     """v0.45.176 断线守卫：生产代码不许再把 adapted_weights 传给 QueenDistiller。
 
     ⚠️ 枚举驱动而非名单驱动（MEMORY：按名字匹配只能证明「匹配到的是对的」）——
-    扫全仓每一个非测试 .py，AST 找出所有 `QueenDistiller(...)` 调用，
-    断言没有一个带 `adapted_weights=` 关键字。
+    扫**本仓被 git 跟踪的**每一个非测试 .py（v0.45.186 起；此前是裸 rglob，
+    在生产 checkout 上会越界扫进 `.claude/worktrees/` 下 10 个嵌套 worktree），
+    AST 找出所有 `QueenDistiller(...)` 调用，断言没有一个带 `adapted_weights=`。
     """
 
     #: 跳过的顶层目录。`tests/` 与 `experiments/` 都是**离线**代码：
@@ -175,11 +179,19 @@ class TestAdaptedWeightsNotWiredToProduction:
     _SKIP_TOP = {"tests", ".git", "experiments"}
 
     @classmethod
-    def _production_calls(cls):
-        root = Path(__file__).resolve().parent.parent   # 指向**代码**，故用 __file__
+    def _production_calls(cls, root=None):
+        root = Path(root) if root is not None else REPO_ROOT
         hits = []
-        for py in root.rglob("*.py"):
+        # v0.45.186：**不是** `root.rglob("*.py")`。生产 checkout 的
+        # `.claude/worktrees/` 下挂着 10 个嵌套 worktree，裸 rglob 在那里扫到
+        # 22037 个 .py（git 跟踪的 338 个），于是本守卫报的是别的 worktree 里
+        # 停留在 v0.45.176 之前的陈旧副本。理由全文见 `tests/_repo_files.py`。
+        for py in own_python_files(root)[0]:
             rel = py.relative_to(root)
+            # ⚠️ `_SKIP_TOP` 判的是 `rel.parts[0]`，只在 rel 确实以仓库根为基准时
+            # 才成立。越界扫到 `.claude/worktrees/x/tests/…` 时 parts[0] 是
+            # `.claude`，**整张跳过清单对嵌套树失效** —— 实测那轮把 225 个别的
+            # worktree 的测试文件也当成了生产代码。
             if rel.parts[0] in cls._SKIP_TOP:
                 continue
             try:
@@ -197,7 +209,12 @@ class TestAdaptedWeightsNotWiredToProduction:
     def test_enumeration_actually_found_something(self):
         """先自证探针有效 —— 一个调用点都没扫到时，下一条会恒真地绿。
 
-        变红的变异：把 `rglob("*.py")` 写成 `rglob("*.pyx")`。
+        变红的变异：把 `node.func.id == "QueenDistiller"` 写成 `"QueenDistillerX"`。
+
+        ⚠️ v0.45.186 更正：这里原本写的是「把 `rglob("*.py")` 写成
+        `rglob("*.pyx")`」—— 枚举已经不用 rglob 了，那条变异做不出来。
+        **说谎的 docstring 危害不在于它错，在于它让人停止检查**
+        （MEMORY `alpha-hive-board-eviction` 同款）。
         """
         calls = self._production_calls()
         assert calls, ("AST 扫描没找到任何生产侧 QueenDistiller 调用点 —— "
@@ -215,6 +232,76 @@ class TestAdaptedWeightsNotWiredToProduction:
             "该通道自 v0.45.176 起是只读诊断 —— 它学的是「谁更爱说中性」而不是准头，"
             "接回去会整体顶掉 config.EVALUATION_WEIGHTS（理由见 "
             "`Backtester.adapt_weights` 的 docstring）。")
+
+    # ────────────────────────────────────────────────────────────────
+    # v0.45.186：枚举口径守卫。**必须自带病灶** —— 见下面 docstring。
+    # ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _plant_pathology(root):
+        """造一棵带病灶的树：根上一个干净的生产文件 + 嵌套 checkout 里一个脏的。
+
+        病灶形状照抄生产 checkout 的真实情况（2026-09-11 实测）：
+        `.claude/worktrees/<name>/` 下是 10 个**嵌套 git worktree**，各自带一份
+        完整的仓库副本。停留在 v0.45.176 之前的那几份，`alpha_hive_daily_report.py`
+        里仍写着 `QueenDistiller(..., adapted_weights=...)`。
+        """
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "alpha_hive_daily_report.py").write_text(
+            "q = QueenDistiller(board, enable_llm=False, ml_model=m)\n", encoding="utf-8")
+        stale = root / ".claude" / "worktrees" / "stale-worktree-fixture"
+        (stale / "tests").mkdir(parents=True, exist_ok=True)
+        (stale / "alpha_hive_daily_report.py").write_text(
+            "q = QueenDistiller(board, adapted_weights=_adapted_diag, enable_llm=False)\n",
+            encoding="utf-8")
+        # 嵌套树里的 `tests/` 也要造一个：`_SKIP_TOP` 判的是 `rel.parts[0]`，
+        # 而这里的 parts[0] 是 `.claude` ⇒ 跳过清单对嵌套树**整个失效**。
+        (stale / "tests" / "test_queen_distiller.py").write_text(
+            "q = QueenDistiller(board, adapted_weights={'signal': 1.0})\n", encoding="utf-8")
+        return stale
+
+    def test_scan_excludes_nested_checkouts(self, tmp_path):
+        """嵌套 checkout 里的陈旧副本**不得**被当成本仓生产代码报出来。
+
+        ⚠️ 这条必须用 tmp 树，**不能只在真仓库上跑** —— 病灶只存在于生产
+        checkout（`~/Desktop/Alpha Hive` 下有 10 个嵌套 worktree），10 个
+        worktree 里一个都没有。「在没有病灶的环境里测防御＝没测」：
+        v0.45.176 加这条守卫的人在 worktree 里看到的是全绿，而生产上它自
+        提交之日起就是红的 —— 可见性是**反的**，唯一会红的那台机器没人看。
+
+        变红的变异：把 `_production_calls` 的枚举换回 `root.rglob("*.py")`
+        （即 v0.45.176~185 的写法）—— 实测报出 2 条嵌套树命中。
+        """
+        self._plant_pathology(tmp_path)
+        hits = self._production_calls(tmp_path)
+        files = sorted(f for f, _ln, _kw in hits)
+
+        assert files == ["alpha_hive_daily_report.py"], (
+            f"枚举越过了仓库边界，扫到嵌套 checkout：{files}。"
+            "这些副本停留在别的版本上，它们的违规不是本仓的违规。")
+
+    def test_pathology_fixture_actually_bites(self, tmp_path):
+        """反向自证：夹具真的**造出了**会被旧写法命中的东西。
+
+        没有这一条，上一条可能只是因为夹具压根没写出匹配项而恒绿
+        （MEMORY：探针要先自证有效；「没扫到」和「没有违规」长得一样）。
+        """
+        stale = self._plant_pathology(tmp_path)
+        naive = [str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*.py")
+                 if "adapted_weights" in p.read_text(encoding="utf-8")]
+        assert len(naive) == 2, f"夹具没造出预期的 2 个病灶文件：{naive}"
+        assert stale.is_dir()
+
+    def test_real_scan_stays_inside_the_repo(self):
+        """真仓库上的正面断言：扫出来的路径一个都不许落在 `.claude/` 里。
+
+        ⚠️ 这条在 worktree 里是**恒真**的（worktree 没有嵌套 worktree），
+        所以它不能单独存在 —— 它的价值只在生产 checkout 上，
+        病灶的可测性由上面两条 tmp 树负责。
+        """
+        outside = sorted({f for f, _ln, _kw in self._production_calls()
+                          if f.startswith(".claude") or f.startswith("..")})
+        assert not outside, f"扫描越过仓库边界：{outside}"
 
 
 class TestZeroWeightDownstreamBehaviour:

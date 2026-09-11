@@ -21,6 +21,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # v0.45.206：全量 `ruff check .` 此前**从未在 CI 跑过**。
+  # 本仓库早已装好并配置了 ruff（pyproject 的 select = E/F/W + 一串 ignore），
+  # 但 CI 里只有 test_no_undefined_names.py 以 `--select F821`/`F823` 跑了两条窄规则
+  # —— 其余规则半年没人看，首次全量跑出 46 个错，其中 7 个是裸 `except:`
+  # （本仓头号故障形状：把失败改写成没发生过）、4 个是让每次 pytest 都刷
+  # `DeprecationWarning: invalid escape sequence` 的 W605。
+  #
+  # 独立成 job 而不是塞进 pytest：lint 30 秒出结果，pytest 要 4 分钟，
+  # 分开后「代码有 lint 错」和「测试挂了」在 Actions 页面上是两个格子，不用点进日志区分。
+  # 刻意**不加** `needs:` —— 让它和 pytest 并行；lint 红不该挡住看测试结果。
+  ruff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install ruff
+      - name: Ruff lint (全量规则，配置在 pyproject.toml)
+        run: ruff check .
+
   pytest:
     runs-on: ubuntu-latest
     timeout-minutes: 20

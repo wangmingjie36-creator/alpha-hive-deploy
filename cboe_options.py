@@ -119,6 +119,79 @@ def reset_payload_stats() -> None:
         for k in _payload_stats:
             _payload_stats[k] = 0
 
+
+# 链构造观测（v0.45.190）：供 scan_timing 落进 status.json。
+# 回答的问题是「那天这条链把多少近月挡在外面了」——排查「那天的 GEX 为什么是
+# 这个数」时，能分辨「链里本来就没有这些合约」与「算错了」。定位同 v0.45.184
+# 的 `code_version`：**事后取证**，不是闸门；链构造的正确性由
+# `tests/test_select_expiries_dte.py` 守。
+#   chains            成功构成的链数（分母）
+#   min_cal_dte_max   各链「选中集合里最近的到期日」的**日历** DTE，取其中最大的
+#                     ——周五那天它会是 10，一眼看出「最近的合约在 10 天后」
+#   near_excluded     被挡在选中集合外、日历 DTE∈[0,7) 的到期日个数
+#   near_excluded_oi  ↑ 它们的 OI 之和（**过滤前原始口径**）
+#   chosen_oi         选中集合的 OI 之和（同为过滤前原始口径，故与上一行可比）
+#   errors            统计本身失败的次数
+# ⚠️ `errors` 不是凑数的：没有它，「统计崩了」和「真的一个都没挡掉」都表现为
+#    near_excluded==0 ——那正是本仓 MEMORY 记了六次的「失败没传导到下游」。
+_chain_stats = {"chains": 0, "min_cal_dte_max": None, "near_excluded": 0,
+                "near_excluded_oi": 0.0, "chosen_oi": 0.0, "errors": 0}
+
+
+def chain_selection_stats() -> dict:
+    with _cache_lock:
+        return dict(_chain_stats)
+
+
+def reset_chain_selection_stats() -> None:
+    with _cache_lock:
+        _chain_stats.update({"chains": 0, "min_cal_dte_max": None, "near_excluded": 0,
+                             "near_excluded_oi": 0.0, "chosen_oi": 0.0, "errors": 0})
+
+
+def _record_chain_selection(by_expiry: Dict[str, dict], chosen: List[str],
+                            today: datetime) -> Optional[tuple]:
+    """记一条链的到期日选择结果，返回 `(最近日历DTE, 挡掉的近月个数, 挡掉的OI, 选中的OI)`。
+
+    ⚠️ **这里刻意用日历口径**（`.date()` 差），与 `_select_expiries` 内部那套
+    少一天的口径不同——本函数要回答的是「人看到的那天，链里最近的合约还有几天
+    到期」，那个数必须是日历天，否则观测点自己也会差一天，就复制了要观测的 bug。
+    """
+    try:
+        today_d = today.date()
+        chosen_set = set(chosen)
+        min_cal = None
+        chosen_oi = near_oi = 0.0
+        near_n = 0
+        for e, bucket in by_expiry.items():
+            try:
+                d = (datetime.strptime(e, "%Y-%m-%d").date() - today_d).days
+            except ValueError:
+                continue
+            oi = (sum(r["openInterest"] for r in bucket["C"])
+                  + sum(r["openInterest"] for r in bucket["P"]))
+            if e in chosen_set:
+                chosen_oi += oi
+                min_cal = d if min_cal is None else min(min_cal, d)
+            elif 0 <= d < 7:
+                near_n += 1
+                near_oi += oi
+        with _cache_lock:
+            _chain_stats["chains"] += 1
+            _chain_stats["near_excluded"] += near_n
+            _chain_stats["near_excluded_oi"] += near_oi
+            _chain_stats["chosen_oi"] += chosen_oi
+            if min_cal is not None:
+                cur = _chain_stats["min_cal_dte_max"]
+                _chain_stats["min_cal_dte_max"] = (
+                    min_cal if cur is None else max(cur, min_cal))
+        return min_cal, near_n, near_oi, chosen_oi
+    except Exception as exc:  # noqa: BLE001 - 观测代码不得影响主流程
+        with _cache_lock:
+            _chain_stats["errors"] += 1
+        _log.warning("链选择观测失败（不影响扫描）：%s", exc)
+        return None
+
 # ── 快照供给器（v0.45.38）：补跑历史交易日时接管全部取数 ──────────
 # 装载后本模块四个取数入口一律走快照，**不回落实时抓取** ——
 # 补跑的是过去某天，实时抓取会拿到今天的链再贴上那天的日期，
@@ -310,8 +383,53 @@ def _pdt_now() -> datetime:
 
 
 def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: int = 4):
-    """镜像 yfinance 路径：DTE≥3，优先 DTE≥7 前 4 + DTE 3-6 前 2，封顶 max_expiries。
-    返回 (选中到期日列表, near_expiry_set=DTE<7)。"""
+    """镜像 yfinance 路径选到期日。返回 `(选中到期日列表, near_expiry_set)`。
+
+    实际规则（v0.45.188 按实测重写——旧文案写的是「优先 DTE≥7 前 4 + DTE 3-6 前 2」，
+    读起来像两桶都会进，与真实行为不符）：
+
+    1. `DTE < 3` 一律排除，任何情况下都拿不到。
+    2. `far` = DTE≥7 的前 4 个；`near` = DTE 3-6 的前 2 个。
+    3. `chosen = (far + near)[:max_expiries]` —— **`far` 先占满配额**。
+
+    ⚠️ **上面三条里的 DTE 比日历天数少 1 天**（v0.45.190 实测）。`today` 是
+    `_pdt_now()`——**带时分秒**的 datetime，而 `datetime.strptime(到期日)` 是当天
+    零点，`timedelta.days` 向下取整 ⇒ 只要不在 00:00:00 整跑，每个到期日都少算
+    一天。所以 `DTE≥7` 实际要求「**≥8 个日历日**」、`DTE≥3` 实际是「≥4 日历日」。
+    2026-09-11（周五）实测：7 个日历日之外的 09-18 标准周权被判成 DTE=6 而落选，
+    30/30 只标的的选中集合都因此改变；单修这一处，`DealerGEXAnalyzer` 的
+    `total_gex` 有 7/30 只符号翻转、NVDA 量级差 42×（4.01 → 168.64）。
+    ⚠️ 这是**锁死在周五**的缺陷：差一天只在「恰好有到期日落在 3 或 7 个日历日」
+    时才改变选集，而那一天正好是下周五的标准周权（全周 OI 最大）。按真实到期日
+    清单换参照日重算：周五 30/30、周一 6/30、周三 5/30、**周二与周四 0/30**。
+    ⚠️ 同文件内已有两处用的是**正确**写法（`…strptime(e).date() - today`，
+    `today` 为 `date`）：`_build_quote_set` 与 `fetch_cboe_full_chain_oi`。
+    v0.45.188 的 `oracle_bee._near_oi_by_strike` 也是正确的那一族。
+    所以本仓现存**两种 DTE 口径**，`_QS_MIN_DTE` 上方那句「与主链一致」
+    并不成立——它比主链宽一天。
+
+    ⚠️ `max_expiries=4` 且 `far` 凑满 4 个时，**`near` 一个都进不来**。2026-09-10
+    实测当前 30 只标的 `far` 全部 ≥4 ⇒ `near` 分支对整个观察名单恒不生效；它只在
+    期权稀疏、远月到期日不足 4 个的标的上才会被用到，所以**不是死代码，是对主力
+    名单恒不生效的代码**。
+
+    ⚠️ **不要「照字面把它修好」。** 让 near 真的进来会改变 IV rank / 25Δ skew /
+    期限结构 / Dealer GEX 的输入，而这些都流进 `final_score` ⇒ 属口径变更，
+    要按 `ic_rerun_readiness._COHORT_HISTORY` 付世代边界的代价（~25 周）。
+    要动先读那张表的规则。
+
+    ⚠️ 连带语义：`near_expiry_set` 取的是 DTE∈[3,7) 的到期日（**日历口径是
+    [4,8)**，同上一条差一天；2026-09-11 实测 AMZN 该集合为 09-16/09-18，日历
+    DTE 5 与 7）。由上一条它通常与 `chosen` **不相交** ⇒ 下游
+    `options_analyzer._calc_total_oi` 的「排除近端合约」在这条路径上排除不到
+    任何东西（恒等于全量求和，v0.45.190 实测 AMZN 96,705 == 96,705）。
+    那不是 bug，但读那段代码时别以为「稳定口径」真的在这里生效了；
+    v0.45.190 起该函数在交集为空时会打一行 warning，让「意图从未生效」有落点。
+
+    ⚠️ 「近端 Max Pain」**不要**再从这条链推导：本函数按设计就排除 DTE<7，
+    与「近端」二字相反。正确数据源是 `full_chain_oi` 的全到期日矩阵，
+    见 `swarm_agents/oracle_bee.py::_calc_max_pain`（v0.45.188）。
+    """
     dte_pairs = []
     for e in sorted(by_expiry.keys()):
         try:
@@ -325,6 +443,94 @@ def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: 
     chosen = (far + near)[:max_expiries] if far else [e for e, _ in dte_pairs[:max_expiries]]
     near_set = {e for e, d in dte_pairs if d < 7}
     return chosen, list(near_set)
+
+
+# ── Dealer GEX 专用视图（v0.45.197）──────────────────────────────────────
+# 为什么不共用主链：那条链的过滤器是为 IV / skew / 期限结构设计的（近月 theta
+# 扭曲，剔掉是对的），而 GEX 的需求相反 —— gamma ∝ 1/(S·σ·√T)，峰值就在近月。
+#
+# ⚠️ **但「加上近月」并不够，这是 2026-09-11 实测推翻的一个前提。**
+# 净 GEX 是带符号求和，任何对到期日集合的截断都可能翻转符号，不只是丢近月那一种。
+# 26 只标的实测「取最近 K 个到期日捕获的 net GEX 占全链百分比」：
+#     K= 4 → 中位 63.9%、**最低 −73.3%**（22/26 只 <90%）
+#     K= 8 → 中位 73.6%、最低 −29.8%
+#     K=12 → 中位 96.3%、最低  20.6%
+#     K=16 → 中位 100.0%、最低 72.3%
+#     K=24 → 中位 100.0%、最低 99.4%（0 只 <90%）
+# 负百分比 = 部分和与全链**符号相反**。⇒ `total_gex` 只有在全链上才是良定义的量，
+# 「近月窗口」是另一个指标（pin gamma），不是这个。下游
+# `RegimeWeightAdjuster` 消费的语义也是「做市商整体净 gamma 多还是空」，本就是全书概念。
+#
+# 24 与 `fetch_cboe_full_chain_oi` 的 `max_expirations` 同值（实测当日全链到期日数
+# 中位 18 / 最大 25）；被上限砍掉的到期日数**记进计数**，别让上限的够不够变成假设。
+_GEX_MAX_EXPIRIES = 24
+
+# GEX 视图可得性计数（v0.45.197）。`unavailable` 是这次改动**唯一的代价**：
+# 旧实现在 CBOE 不可用时降级 yfinance，而那条 yfinance 路径有同样的截断
+# （`options_analyzer.py` 里 `datetime.now()` 的差一天）⇒ 拿到的是构造上就不对的数。
+# 照 v0.45.188 `_calc_max_pain` 的先例：**取不到就返回不可得，不回退旧口径** ——
+# 回退等于把「没数据」悄悄换成「错数据」。代价可见，才谈得上评估。
+_gex_view_stats = {"ok": 0, "unavailable": 0, "capped_expiries": 0}
+
+
+def gex_view_stats() -> dict:
+    with _cache_lock:
+        return dict(_gex_view_stats)
+
+
+def reset_gex_view_stats() -> None:
+    with _cache_lock:
+        for k in _gex_view_stats:
+            _gex_view_stats[k] = 0
+
+
+def _select_expiries_for_gex(by_expiry: Dict[str, dict], today: datetime,
+                             max_expiries: int = _GEX_MAX_EXPIRIES):
+    """GEX 视图的到期日选择：**日历口径**、未到期的全要、按日期升序、上限 max_expiries。
+
+    与 `_select_expiries` 的三处区别，每一处都有理由：
+      1. **日历 DTE**（`.date()` 差）—— 主链那套带时分秒的算法恒少一天（见
+         `_select_expiries` docstring 的实测）。这里不复制那个 bug。
+      2. **不设 DTE 下限** —— 只排除已到期的（DTE<0）。gamma 峰值在近月，
+         排除近月正是要修的事。⚠️ 扫描在收盘后跑（编排器时间闸 1330 PT），
+         当天到期（DTE=0）的合约已结算，CBOE 通常已从 feed 里撤下；若还在，
+         其 OI 会被算进去 —— 这是已知且有意的，因为「今天是否已结算」不该由
+         本函数猜（判据在 `_select_expiries` 那条差一天的教训里：别用时刻去推日期）。
+      3. **上限 24 而非 4** —— 见上方实测表。
+
+    返回 `(chosen, [])`：第二个值是 `near_expiry_set`，GEX 视图里没有「被排除的
+    近月」这个概念，故为空。下游 `_calc_total_oi` 见空集会退化为全量求和（正确）。
+    """
+    pairs = []
+    for e in sorted(by_expiry.keys()):
+        try:
+            dte = (datetime.strptime(e, "%Y-%m-%d").date() - today.date()).days
+        except ValueError:
+            continue
+        if dte >= 0:
+            pairs.append((e, dte))
+    chosen = [e for e, _ in pairs[:max_expiries]]
+    dropped = len(pairs) - len(chosen)
+    if dropped:
+        with _cache_lock:
+            _gex_view_stats["capped_expiries"] += dropped
+    return chosen, []
+
+
+def fetch_cboe_chain_for_gex(ticker: str, stock_price: float = 0.0,
+                             *, timeout: int = 15) -> Optional[Dict]:
+    """Dealer GEX 专用期权链：同一份 CBOE payload，全到期日视图。失败返回 None。
+
+    ⚠️ `stock_price` 默认 0 —— 与旧调用方一致，让 ATM 过滤用 CBOE 自己的现价
+    （与链同源）。**本次改动只动到期日选择这一件事**，ATM 区间 / 每边 40 strike /
+    gamma 取数（CBOE 优先、BS 兜底）全部沿用，免得口径变更掺进多个自变量。
+    """
+    chain = fetch_cboe_chain(ticker, stock_price, timeout=timeout,
+                             max_expiries=_GEX_MAX_EXPIRIES,
+                             expiry_selector=_select_expiries_for_gex)
+    with _cache_lock:
+        _gex_view_stats["ok" if chain else "unavailable"] += 1
+    return chain
 
 
 def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
@@ -497,8 +703,23 @@ def fetch_cboe_chain(
     *,
     timeout: int = 15,
     max_expiries: int = 4,
+    expiry_selector=None,
 ) -> Optional[Dict]:
-    """拉取并解析 CBOE 期权链 → options_analyzer 兼容 result dict；任何失败返回 None。"""
+    """拉取并解析 CBOE 期权链 → options_analyzer 兼容 result dict；任何失败返回 None。
+
+    `expiry_selector`（v0.45.197）：到期日选择器，签名同 `_select_expiries`
+    （`(by_expiry, today, max_expiries) -> (chosen, near_set)`）。**默认 None ⇒
+    走 `_select_expiries`，行为逐字节不变。** 存在的理由是同一份 payload 要给
+    口径需求相反的两类消费者各出一个视图：
+
+      · IV rank / 25Δ skew / 期限结构 —— 近月 theta 扭曲，**该剔近月**（默认选择器）
+      · Dealer GEX —— gamma ∝ 1/√T 且净 GEX 只在全链上良定义，**该全要**
+        （`fetch_cboe_chain_for_gex`）
+
+    先例是 v0.45.188 的 `oracle_bee._calc_max_pain` 改走 `full_chain_oi`：
+    **同一份 payload 的第二个视图，零额外网络调用**（`_fetch_cboe_payload`
+    有 4h 进程缓存，Step 2 约 30–55 分钟 ⇒ 同标的第二次取链必然命中）。
+    """
     if _SNAPSHOT_PROVIDER is not None:
         return (_snapshot(ticker) or {}).get("chain")
 
@@ -545,9 +766,13 @@ def fetch_cboe_chain(
         return None
 
     today = _pdt_now()
-    expirations, near_expiry_set = _select_expiries(by_expiry, today, max_expiries)
+    _select = expiry_selector or _select_expiries
+    expirations, near_expiry_set = _select(by_expiry, today, max_expiries)
     if not expirations:
         return None
+
+    # 观测（v0.45.190）：这条链把多少近月挡在外面了。见 `_record_chain_selection`。
+    _sel_obs = _record_chain_selection(by_expiry, expirations, today)
 
     def _finalize_side(rows: List[dict], expiry: str) -> List[dict]:
         """单到期日单边：ATM 过滤 → 40-cap → DTE/gamma 注入。"""
@@ -594,9 +819,20 @@ def fetch_cboe_chain(
     _apply_dte_weight(puts)
 
     total_oi = sum(r["openInterest"] for r in calls) + sum(r["openInterest"] for r in puts)
+    # 观测后缀（v0.45.190）：`?` 表示统计本身失败了，**不是** 0 ——
+    # 把「没测出来」印成 0 就是这一行想防的事。
+    if _sel_obs is None:
+        _sel_suffix = "，最近到期 ? 日历日，挡掉近月 ? 个（观测失败）"
+    else:
+        _min_cal, _near_n, _near_oi, _chosen_oi = _sel_obs
+        _denom = _near_oi + _chosen_oi
+        _pct = (_near_oi / _denom * 100) if _denom > 0 else 0.0
+        _sel_suffix = (f"，最近到期 {_min_cal} 日历日，挡掉近月 {_near_n} 个"
+                       f"（原始 OI 占 {_pct:.0f}%）")
     _log.info(
-        "CBOE %s 期权链：%d 到期日，%d calls + %d puts，总 OI %s，现价 $%.2f",
+        "CBOE %s 期权链：%d 到期日，%d calls + %d puts，总 OI %s，现价 $%.2f%s",
         ticker, len(expirations), len(calls), len(puts), f"{int(total_oi):,}", S,
+        _sel_suffix,
     )
 
     return {

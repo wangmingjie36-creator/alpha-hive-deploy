@@ -33,6 +33,8 @@ import vector_memory
 from hive_logger import PATHS
 
 
+from tests._repo_files import VENDORED, own_python_files
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -180,42 +182,22 @@ class TestSpeciesDoesNotSpread:
         ("config.py", "_OVERRIDE_YAML"), ("config.py", "_OVERRIDE_JSON"),
     }
 
-    # 只扫**我们自己的**文件。生产 checkout 里 `rglob("*.py")` 会扫到 15349 个
-    # .py（含 `mcp-servers/*/.venv/**/site-packages`），而 git 跟踪的只有 327 个
-    # ——98% 是第三方库。拿我们的规范去审计 joblib 既无意义，又会让计数随
+    # 只扫**我们自己的**文件。生产 checkout 里 `rglob("*.py")` 会扫到两万多个
+    # .py（含 `mcp-servers/*/.venv/**/site-packages` 与 `.claude/worktrees/` 下的
+    # 10 个嵌套 worktree），而 git 跟踪的只有 338 个——绝大多数是第三方库和
+    # 别的 checkout。拿我们的规范去审计 joblib 既无意义，又会让计数随
     # 「本地装了哪些 venv」漂移（worktree 与主 checkout 报的数会不一样）。
-    _VENDORED = ("node_modules", "site-packages", "vendor", "third_party")
+    #
+    # v0.45.186：实现已抽到 `tests/_repo_files.py`，本处只剩委托。
+    # 抽走的理由不是去重好看——v0.45.176 在 `test_zero_weight_invariant.py` 里
+    # 写了第二份（裸 rglob），在 10 个 worktree 里全绿、只在生产 checkout 上红，
+    # 而生产 checkout 没人跑测试。共享实现是为了让下一个人**没机会**再写一份。
+    _VENDORED = VENDORED
 
     @staticmethod
     def _own_python_files():
-        """本仓自己的 .py 清单 + 用的是哪种口径。
-
-        首选 `git ls-files`：天然排除未跟踪与 vendored 内容，且**口径可复现**
-        （别人复跑对得上）。但本仓 CI 自检会用 `git archive` 导出**没有 .git**
-        的干净检出，那里 git 口径不可用，故必须有回退。
-
-        ⚠️ 子进程有**两条**失败路径，各堵一次（v0.45.117/119 同款教训）：
-           `git` 不存在会**抛** `FileNotFoundError`，仓库不可用会**返回**非零。
-           只判返回值的守卫接不住抛，只判异常的接不住返回。
-        """
-        import subprocess
-        try:
-            r = subprocess.run(["git", "ls-files", "-z", "*.py"], cwd=str(REPO_ROOT),
-                               capture_output=True, text=True, timeout=60)
-            if r.returncode == 0 and r.stdout.strip("\x00").strip():
-                rels = [x for x in r.stdout.split("\x00") if x]
-                return [REPO_ROOT / x for x in rels], "git"
-        except (OSError, subprocess.SubprocessError):
-            pass                                    # 落到 rglob 回退
-        files = []
-        for p in REPO_ROOT.rglob("*.py"):
-            rel = p.relative_to(REPO_ROOT)
-            if any(x in rel.parts for x in TestSpeciesDoesNotSpread._VENDORED):
-                continue
-            if any(part.startswith(".") for part in rel.parts):   # .venv/.git/.claude…
-                continue
-            files.append(p)
-        return files, "rglob"
+        """委托给共享实现。`REPO_ROOT` 在**调用时**取，故 monkeypatch 仍然生效。"""
+        return own_python_files(REPO_ROOT)
 
     @staticmethod
     def _scan(_stats=None, marker="PATHS"):
@@ -396,6 +378,48 @@ class TestSpeciesDoesNotSpread:
             f"回退只找到 {len(files)} 个 .py —— 空/近空清单会让 _scan() 恒返回空集，"
             "变成一个永远不会红的假守卫")
 
+    def test_git_branch_applies_the_same_filter_as_the_fallback(self, tmp_path):
+        """两条分支必须**同口径** —— 用一个真 git 仓库把 git 分支单独钉住。
+
+        没有这一条，`own_python_files` 里 git 分支上那句 `if _is_ours(x)`
+        是个**等价变异**：本仓今天没有任何被跟踪的 .py 落在点号目录下，
+        删掉它 338 还是 338，全套照绿（v0.45.186 实测）。
+        MEMORY 的纪律是「举不出能让它变红的变异就别加」——这里造得出来，
+        于是把它造出来，而不是留一行测不到的代码。
+
+        为什么这条口径分歧不是假想：`.claude/` 本身**被跟踪**
+        （`.claude/launch.json` 在库里）且**不在 .gitignore**，
+        所以哪天有人提交 `.claude/hooks/x.py`，git 分支会扫到、回退分支不会，
+        而哪条分支生效取决于「这台机器有没有装 git」。
+
+        变红的变异：把 git 分支的 `if _is_ours(x)` 去掉
+        （`return [root / x for x in rels], "git"`）。
+        """
+        import subprocess
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                cwd=str(tmp_path), capture_output=True, text=True, timeout=60)
+
+        assert git("init", "-q").returncode == 0, "tmp 仓库没建起来"
+        (tmp_path / "ours.py").write_text("x = 1\n", encoding="utf-8")
+        hidden = tmp_path / ".claude" / "hooks"
+        hidden.mkdir(parents=True)
+        (hidden / "theirs.py").write_text("x = 1\n", encoding="utf-8")
+        assert git("add", "-A").returncode == 0
+        assert git("commit", "-qm", "fixture").returncode == 0
+
+        files, mode = own_python_files(tmp_path)
+        assert mode == "git", (
+            f"夹具没走到 git 分支（mode={mode}），这条测的就不是它要测的东西")
+        rels = sorted(str(f.relative_to(tmp_path)) for f in files)
+        # 正面断言夹具确实接上了：两个文件都被 git 跟踪，只是其中一个该被滤掉。
+        assert git("ls-files", "*.py").stdout.count(".py") == 2, (
+            "夹具本身没造出两个被跟踪的 .py —— 下面那条会恒真地绿")
+        assert rels == ["ours.py"], (
+            f"git 分支没应用 `_is_ours`，点号目录下的文件漏了进来：{rels}")
+
     def test_own_file_list_is_sane(self):
         """扫描范围的量级护栏：本仓自己的 .py 是几百量级。"""
         files, mode = self._own_python_files()
@@ -460,7 +484,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
     与 `TestSpeciesDoesNotSpread` 一样是**子集**语义：清掉存量不会变红，新增必红。
     """
 
-    # 存量白名单（v0.45.160 清理后实测 **17 处**）。清掉一处就从这里删一行。
+    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**）。清掉一处就从这里删一行。
     # ⚠️ 子集语义的副作用：**清干净了也不会变红**，过期项会悄悄留下。
     #    定期对账：`KNOWN - _scan(marker="__file__")` 非空即是过期项
     #    （本版就这么揪出 2 条已清却还挂着的）。
@@ -480,7 +504,10 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("market_intelligence.py", "_BASE"),          # 同上
         ("watchlist_events.py", "EVENTS_FILE"),       # watchlist_events.md
         # ── C. 已读 `ALPHA_HIVE_HOME`、`__file__` 只作兜底（另一个子物种，冻在 import 期）──
-        ("agent_toolbox.py", "ALLOWED_ROOTS"),        # 沙箱白名单；冻结只会更保守不会越权
+        # v0.45.198: ("agent_toolbox.py", "ALLOWED_ROOTS") 已摘除 —— `FilesystemTool`
+        # 零读者被删，`ALLOWED_ROOTS` 随之消失。⚠️ 摘它**不是**因为有测试变红：
+        # 子集语义下清干净不会红，它会静默变成过期项。是按本类 docstring 的对账法
+        # （`KNOWN - _scan(marker="__file__")` 非空即过期）手动揪出来的。
         ("gui/app.py", "_PROJECT_ROOT"),              # sys.path
         ("scheduler.py", "_PROJECT_ROOT"),            # scheduler.log
         # ── D. 未清，已登记（读多写少 / 牵动面大）──
@@ -494,6 +521,85 @@ class TestFileDerivedSpeciesDoesNotSpread:
         found = TestSpeciesDoesNotSpread._scan(marker="__file__")
         assert len(found) >= 10, (
             f"只找到 {len(found)} 处——几乎肯定是扫描器坏了，而不是仓库突然干净了")
+
+    # —— 元守卫：先于两条内容守卫回答「这两张表彼此自洽吗」 ——
+    # **定义位置就是语义**（同 v0.45.202）：addopts 带 `-x` ⇒ 谁先红谁就是人看到的
+    # 那句诊断。两张表不自洽时，下面 `test_no_new_file_derived_paths` 也会红，但它
+    # 说的是「**新增**了 `__file__` 派生路径」——真因却是「登记漏了一张表」，正是
+    # CLAUDE.md 记的「把一种失败误报成另一种」。故本条必须排在它前面；顺序由
+    # `test_meta_guard_speaks_first` 反射核对，挪动即红。
+    # （`MUST_STAY_FILE_ANCHORED` 定义在本类稍下方，属性在**调用时**取，不受影响。）
+
+    def test_both_directions_are_guarded(self):
+        """元守卫：`MUST_STAY_FILE_ANCHORED ⊆ KNOWN`，且两边都不许空掉。
+
+        ⚠️ v0.45.203 之前这里断言的是**不许重叠**，而且那句写法是**结构性恒真**的：
+
+            overlap = MUST_STAY & {k for k in KNOWN if k not in MUST_STAY}
+
+        推导式先把 `MUST_STAY` 里的元素全滤掉，再与 `MUST_STAY` 求交 ⇒ 对**任意**
+        两个集合都恒为空集，与它们的实际内容无关（`x and not x` 的集合版）。
+        实测：`A={1,2,3}; B={1,2,3,4,5}` ⇒ 恒真写法得 `set()`，本意写法 `A & B`
+        得 `{1,2,3}`。也就是说这条断言从未检查过它 docstring 声称要检查的东西。
+
+        更要命的是：它恒真地断言了**真实不变式的否定**。两条内容守卫是
+
+            G1（子集）`_scan() - KNOWN == ∅`        ⇔ `_scan() ⊆ KNOWN`
+            G2（超集）`MUST_STAY - _scan() == ∅`    ⇔ `MUST_STAY ⊆ _scan()`
+
+        合起来 ⇒ `MUST_STAY ⊆ _scan() ⊆ KNOWN` ⇒ **`MUST_STAY ⊆ KNOWN`**。
+        所以重叠不是「可以允许」，是**必须成立**：真要求「不许重叠」且 `MUST_STAY`
+        非空，G1 与 G2 结构上永远不可能同时为绿。恰恰因为那句恒真，这个矛盾才
+        没炸——一条死断言把一个自相矛盾的规格伪装成了已被守住的规格。
+
+        两集合语义不同（`KNOWN` = 子集语义「不许新增」，`MUST_STAY` = 超集语义
+        「不许错清」），同一项同时出现在两边完全正常：一处路径既「是已登记的
+        `__file__` 派生项」又「必须保持 `__file__` 锚定」并不矛盾。反过来，
+        `KNOWN` 可以**严格大于** `MUST_STAY`——多出来的是 C/D 两类（读 HOME 只拿
+        `__file__` 兜底、或未清已登记），它们已登记但并不要求永远是 `__file__`。
+
+        此前 `MUST_STAY ⊆ KNOWN` 一直靠巧合成立：没有任何东西断言它。
+        """
+        assert self.MUST_STAY_FILE_ANCHORED, "超集守卫的集合空了，它恒真"
+        assert self.KNOWN, "子集守卫的白名单空了"
+        unregistered = self.MUST_STAY_FILE_ANCHORED - self.KNOWN
+        assert not unregistered, (
+            "这些项要求「必须保持 `__file__` 锚定」，却没登记进 `KNOWN`：\n"
+            + "\n".join(f"  - {f}:{n}" for f, n in sorted(unregistered))
+            + "\n\n这不是风格问题，是**规格自相矛盾**：\n"
+              "  · `test_code_anchored_paths_were_not_wrongly_converted` 要求它出现在"
+              " `_scan()` 里；\n"
+              "  · `test_no_new_file_derived_paths` 要求 `_scan()` 里的每一项都在"
+              " `KNOWN` 里。\n"
+              "两者不可能同时满足。改法：把上面这些项补进 `KNOWN`"
+              "（注明属于 A/B 哪一类），而不是从 `MUST_STAY_FILE_ANCHORED` 里删掉——"
+              "删掉等于放弃「不许被一刀切清理」那个方向的保护。")
+
+    def test_meta_guard_speaks_first(self):
+        """`test_both_directions_are_guarded` 必须排在两条内容守卫**之前**。
+
+        `-x` 下只有第一个红点会被人读到。这条元守卫若排在后面，两张表不自洽时
+        人看到的是「新增了 `__file__` 派生路径」——指着一个**生产文件**让你判断
+        它是代码还是数据，而真因是白名单登记漏了一张表。
+
+        照 v0.45.202 的做法**用反射核对定义顺序**，不靠注释提醒——注释不会变红。
+
+        会变红的变异：把 `test_both_directions_are_guarded` 的整个方法体挪到
+        `test_no_new_file_derived_paths` 之后（已实测）。
+        """
+        names = [k for k, v in vars(type(self)).items()
+                 if k.startswith("test_") and callable(v)]
+        pos = {n: i for i, n in enumerate(names)}
+        assert "test_both_directions_are_guarded" in pos, (
+            "`test_both_directions_are_guarded` 改名或被删了 —— 本条顺序守卫"
+            "失去了主体。若确实要改名，连同本条一起改，别让它变成 KeyError。")
+        for later in ("test_no_new_file_derived_paths",
+                      "test_code_anchored_paths_were_not_wrongly_converted"):
+            assert later in pos, f"{later} 改名或被删了，本条顺序守卫已失去参照物"
+            assert pos["test_both_directions_are_guarded"] < pos[later], (
+                f"`test_both_directions_are_guarded` 被挪到了 {later} 之后。\n"
+                "addopts 带 `-x`，谁先红谁就是人看到的诊断；两张表不自洽时，"
+                f"{later} 会把「登记漏表」误报成「新增/错清了路径」。")
 
     def test_no_new_file_derived_paths(self):
         new = TestSpeciesDoesNotSpread._scan(marker="__file__") - self.KNOWN
@@ -623,7 +729,11 @@ class TestFileDerivedSpeciesDoesNotSpread:
         import importlib
         mod = importlib.import_module(modname)
         raw = getattr(mod, attr)
-        # 少数是 list（如 agent_toolbox.ALLOWED_ROOTS），只查其中落在仓库内的那些
+        # 取值可能是 list，只查其中落在仓库内的那些。
+        # ⚠️ v0.45.198：本条参数化自 `MUST_STAY_FILE_ANCHORED`，而那 11 项**取值全是标量**
+        #    ⇒ 下面这个 list 分支目前**一次也没被执行过**，是防御性的。
+        #    （原注释举的例子 `agent_toolbox.ALLOWED_ROOTS` 在 `KNOWN` 里、从不在本条参数里，
+        #     所以那个例子对本条从一开始就不成立；该符号已随 `FilesystemTool` 一并删除。）
         vals = raw if isinstance(raw, (list, tuple)) else [raw]
         checked = 0
         for v in vals:
@@ -639,18 +749,6 @@ class TestFileDerivedSpeciesDoesNotSpread:
                 f"{modname}.{attr} 解到了**仓库之外**：{pth}\n"
                 f"（仓库根 = {REPO_ROOT}）多一级 `.parent` 就会跑到 worktrees/ 去。")
         assert checked, f"{modname}.{attr} 没有任何值落在仓库内，本条等于没测"
-
-    def test_both_directions_are_guarded(self):
-        """元守卫：两个方向的集合不许重叠，也不许有一边空掉。
-
-        重叠 ⇒ 同一处既要求「是 `__file__`」又列在「允许是 `__file__`」里，
-        语义混乱；空掉 ⇒ 那个方向的守卫恒真。
-        """
-        assert self.MUST_STAY_FILE_ANCHORED, "超集守卫的集合空了，它恒真"
-        assert self.KNOWN, "子集守卫的白名单空了"
-        overlap = self.MUST_STAY_FILE_ANCHORED & {
-            k for k in self.KNOWN if k not in self.MUST_STAY_FILE_ANCHORED}
-        assert not overlap, f"两个方向的集合重叠：{sorted(overlap)}"
 
     def test_cleaned_modules_stay_clean(self):
         """v0.45.160 清掉的那些不许回退成 `__file__` 派生常量。"""

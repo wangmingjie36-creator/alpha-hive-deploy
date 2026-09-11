@@ -1,3 +1,4 @@
 {"date": "2026-09-04", "cash": 104600.0, "open_premium_at_risk": 4600.0, "unrealized": -245.0, "nav": 99755.0, "positions": 1, "stale_positions": 0, "closed_today": 0, "realized_pnl_today": 0, "opened_today": 1}
 {"date": "2026-09-08", "cash": 104600.0, "open_premium_at_risk": 4600.0, "unrealized": -272.5, "nav": 99727.5, "positions": 1, "stale_positions": 0, "closed_today": 0, "realized_pnl_today": 0, "opened_today": 0}
 {"date": "2026-09-09", "cash": 104600.0, "open_premium_at_risk": 4600.0, "unrealized": -127.5, "nav": 99872.5, "positions": 1, "stale_positions": 0, "closed_today": 0, "realized_pnl_today": 0, "opened_today": 0}
+{"date": "2026-09-10", "cash": 104600.0, "open_premium_at_risk": 4600.0, "unrealized": -197.5, "nav": 99802.5, "positions": 1, "stale_positions": 0, "closed_today": 0, "realized_pnl_today": 0, "opened_today": 0}

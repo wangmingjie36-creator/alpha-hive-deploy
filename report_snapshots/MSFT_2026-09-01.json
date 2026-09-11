@@ -10,6 +10,7 @@
     "OracleBeeEcho": 8.671384615384616,
     "CodeExecutorAgent": 6.5
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -19,18 +20,11 @@
   },
   "low_conviction": false,
   "low_conviction_reason": "",
-  "cs_rank": {
-    "final": 0.379,
-    "signal": 0.828,
-    "catalyst": 0.679,
-    "sentiment": 0.103,
-    "odds": 0.862,
-    "risk_adj": 0.207
-  },
+  "cs_rank": null,
   "actual_prices": {
-    "t1": null,
+    "t1": 496.82,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-09-01T14:51:21.900602"
+  "created_at": "2026-09-10T14:43:09.448423"
 }

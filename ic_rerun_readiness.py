@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -161,8 +162,16 @@ _COHORT_HISTORY = [
      "`real_metrics[\"bullish_agents\"]`，而 `crowding_detector.py:84` 算 `bullish_agents/6*100` —— "
      "分母写死 6、分子被窗口截断，改普查后分子回到真值（测试实测变异前后 1 → 2）。"
      "⚠️ `details.top_signals_count` 的**语义**在本边界改变（排行榜窗口条数 ≤5 → 本轮发布过的蜂数），"
-     "键名保留以免断掉 `signal_archive.py:312` 的时间序列，新增相邻的 `details.census_source` "
+     "键名保留（`details.top_signals_count` 不改名），新增相邻的 `details.census_source` "
      "（`live_agent_view` / `top_signals_fallback` / `unavailable`）供机读区分两段口径。"
+     "⚠️ **v0.45.182 更正**：本条当初写的「键名保留以免断掉 `signal_archive` 的时间序列，"
+     "口径由 `census_source` 机读区分」——**后半句在归档里不成立**。`signal_archive` 只抽 "
+     "`guard.top_signals_count`，从不抽 `census_source`（实测归档里 0 行），而 `analyze()` "
+     "既不按日期也不按本表切片 ⇒ 两段定义被池化，时间序列不是「保住了」而是被**静默重新定义**了"
+     "（逐扫描日实测 count 3.43~4.33 → 恒 6.00、consistency 0.50~0.72 → 0.47~0.49）。"
+     "v0.45.182 改为**改名**：`guard.consistency` → `guard.consistency_census`，"
+     "`guard.top_signals_count` 摘除并改挂分布不变式。判据：判别器要放在做聚合的那一层，"
+     "不是产生数据的那一层。"
      "**MAX_ENTRIES 的值仍未动**；`get_top_signals` 的排行榜语义未动（另 3 个调用方各自待测）；"
      "`snapshot` / `compact_snapshot` 仍受截断——其中 `alpha_hive_daily_report.py:1171` 的 "
      "`agent_votes` 实测当前世代 300 份**只有 1 份**凑齐 8 只蜂（中位 3 只，BearBee 缺席 97.3%），"
@@ -213,6 +222,93 @@ _COHORT_HISTORY = [
      "摊平成一个大 Spearman，把 risk_adj 算成 **+0.047**（横截面口径是 −0.060，符号相反）。"
      "本表上一条的依据之一正是 risk_adj 的负 IC，故**用 v0.45.176 之前的 "
      "`replay_scoring` 复核过的任何聚合层结论都需要重跑**。"),
+    ("2026-09-10", "v0.45.191",
+     "CodeExecutorAgent 兜底分支去掉方向票。`analyze()` 第 6 步「技术分析不可用」的兜底"
+     "原本是 `if price and market_cap: score=6.0; direction=bullish` ——「价格与市值都拿到了」"
+     "⇒「看多」是范畴错误，数据可用性不含方向信息。`agent_memory` 台账（2026-04-06~09-10，"
+     "18,120 行）：`code_executor_data` 共 870 条，**870 条（100%）是 6.0/bullish**，"
+     "else 支五个月一次没走过 ⇒ 是一张恒定看多票，不是观测。现改为方向恒 neutral、"
+     "分数落量表中性点 5.0，并加 data_quality={technical: fallback} 机读标记"
+     "（值取 PROXY_SOURCES 既有档位，否则 DQ 汇总按 0 质量计，等于把降级升格成数据全废）。"
+     "同版删掉 execute_and_analyze 等五个零调用点方法（AST 零调用 + 台账五个月零执行）。 "
+     "**为什么算世代边界**：`_compute_direction_vote`（queen_distiller.py:567/595）的 "
+     "bullish_count / bullish_w 遍历**全部** valid_results、不看维度 —— CodeExecutorAgent "
+     "虽是 technical 维（不进五维加权），方向票照样算，直通 rule_direction → final_score；"
+     "新增的 data_quality 键同样进 `_apply_triple_penalty` 的 data_real_pct → quality_factor。"
+     "两条都是实读源码逐条出边走出来的，不是照抄清单（判据一）。 "
+     "**幅度如实读**：兜底触发率现为 1.2%（2026-09 共 3/243 条结论条目），"
+     "其余 98.8% 的行改动前后逐位相同。⚠️ **未能干净测出这一票是否 pivotal**："
+     "台账里的兜底行与同日 analysis JSON 无法可靠配对（同日重扫会产生多行，"
+     "如 MU 2026-09-09 两行、且当天无对应 JSON）⇒ 只给结构性判定，不给翻转率。 "
+     "**边界日期取 2026-09-10（与 v0.45.176 同日、扩展同一标签，不新开空分区）**："
+     "实测 2026-09-10 起兜底触发 **0 次** ⇒ 本代已有的 30 条样本改动前后逐位相同、"
+     "确实可比，**作废 0 条**。同 v0.45.163 对 09-07 那三条的处置。"),
+    ("2026-09-11", "v0.45.197",
+     "Dealer GEX 换取数视图：由与 IV/skew/期限结构共用的截断主链"
+     "（`cboe_options._select_expiries`，DTE≥7 的前 4 个到期日，且那个 DTE 因 "
+     "`today` 带时分秒而恒少一天 ⇒ 实为「≥8 个日历日」）改为同一份 CBOE payload 的"
+     "**全到期日视图**（`fetch_cboe_chain_for_gex`，日历口径、未到期全要、上限 24）。"
+     "⚠️ 这是**换数据源**不是聚合层改动 —— 历史上没存过近月合约的 gamma/OI，"
+     "`replay_scoring` 离线重放**做不到**，只能前向累积。"
+     "依据：26 只标的实测「取最近 K 个到期日捕获的 net GEX 占全链百分比」"
+     "K=4 → 中位 63.9%/最低 **−73.3%**（22/26 只 <90%）；K=8 → 73.6%/−29.8%；"
+     "K=12 → 96.3%/20.6%；K=16 → 100%/72.3%；K=24 → 100%/99.4%。"
+     "负百分比 = 部分和与全链**符号相反** ⇒ `total_gex` 只有在全链上才良定义，"
+     "旧口径不是「偏小」而是**符号不可靠**。2026-09-11 端到端实测 27 只可比标的"
+     "符号翻转 2 只（CRM neg→pos、NEE pos→neg），量级 NVDA 11.52→535.90。"
+     "⚠️ 影响面：GEX 只经 `gex_regime.RegimeWeightAdjuster` 的三值 `regime` 进评分，"
+     "249 条归档反事实测得翻转一次的 `|Δfinal_score|` 中位 0.050 / 最大 0.127、"
+     "跨决策阈值 2/249 —— **不要把本条读成「评分会变好」**，它修的是「这个数等于"
+     "它声称的东西」。代价：CBOE 当日陈旧的标的 GEX 变为不可得（不回退截断链，"
+     "照 v0.45.188 `_calc_max_pain` 的先例），`regime=\"unknown\"` ⇒ 不做权重偏移，"
+     "是安全降级；频次见 `scan_timing.counters().gex_view`。"
+     "⚠️ **本条日期是写入时的预判，不是已核实的事实。** 写入时生产 checkout "
+     "（`~/Desktop/Alpha Hive`）尚未合入本次改动，而它不自动 pull ⇒ 首个真正受影响的"
+     "业务日可能晚于 2026-09-11。本表只追加不改写，若实测更晚**请追加一条更正**"
+     "（先例：v0.45.176 就是这么更正 v0.45.172 的）。"
+     "判别方法已做成可执行的：`cohort_boundary_evidence()` 读 `analysis-*-ml-*.json` 的 "
+     "`advanced_analysis.dealer_gex.chain_view`，报出首次出现 `cboe_full_expiries` 的日期，"
+     "CLI 每次都会印一行。加这个是因为本仓记过同一处栽跟头 —— 此前几条边界"
+     "「核过了」其实零判别力：世代内 0 条样本时，日期写对写错的输出一模一样。"
+"⚠️ 与同日落地的 v0.45.191（边界 2026-09-10）的交互：那条为了不新开空分区刻意与 v0.45.176 同日、并据实测记「作废 0 条」。本条比它晚一天，**按只取最后一条的判据，09-10 那 30 条样本会被本条作废** —— 不是它算错了，是本条改的是数据源、09-10 的分确实是用旧 GEX 口径打的。记在这里免得下一个人以为两条矛盾。"),
+    ("2026-09-11", "v0.45.201",
+     "OracleBeeEcho 方向去掉「在中文摘要里数关键词」那层投票。方向原为三级级联，"
+     "分数带（唯一有中性区的那条）排最后。闭式反解 agent_memory 1789 行"
+     "（2026-04-06~09-10；`discovery` 原样存着 signal_summary，无需插桩）："
+     "关键词分支决定 **982 行（55.0%）且 982 行全部判 bullish，五个月零次 bearish**；"
+     "分数带只决定 141 行（7.9%）。成因是词表在本语料里单边 —— 五个看多词只有「看涨」"
+     "出现过（1542 行，永远来自同一句 `检测到 N 个看涨异动`，options_analyzer.py:1397 在 "
+     "`bullish_unusual > 0` 时无条件拼上，而 `bearish_unusual` 全仓不存在），"
+     "五个看空词**一次都没出现过** ⇒ `_bear_count` 恒 0 ⇒ 看空半边结构上不可达"
+     "（同 ChronosBee v0.43.0、CodeExecutor v0.45.191 的同族错误）。"
+     "更糟的是这 982 行的 `unusual_direction` **全部**是 neutral/absent —— 专职方向"
+     "探测器说「无方向」，被一个子串计数改判成看多；其中能看到 Call/Put 明细的 467 行里"
+     "有 **127 行（27.2%）实际 Put > Call**。而真正有方向含义的 `做多气氛浓厚（P/C低）`"
+     "（811 行）不匹配任何关键词、从不投票。 "
+     "**为什么算世代边界**：Oracle 方向经 `_compute_direction_vote` 的 bullish_count / "
+     "bullish_w（遍历全部 valid_results）直通 rule_direction → final_score。 "
+     "**幅度**（用修复后的真实函数重放台账，与离线模型逐数一致）：bullish 88.0%→69.9%、"
+     "neutral 6.3%→23.7%，迁移 bullish→neutral 311 行 + bullish→bearish 13 行，"
+     "**81.9% 的行逐字节不变**。下游 `BULLISH_GATE_CONFIG(min_agents=3)` 吸收掉大部分："
+     "1028 个过门格子里 76 个（7.4%）会跌破门槛。⚠️ `min_weight_pct=0.50` 需要 confidence，"
+     "agent_memory 不存该列 ⇒ 无法反解，故**不报加权门槛的翻转率**。 "
+     "**作废 30 条**（2026-09-10 当日全部 predictions；其中 7 行 Oracle 方向会改判）。"
+     "代价按实际算：这 30 条 `checked_t7` 全为 0，尚未成熟为可用证据，"
+     "损失是一个扫描日的累积量，不是已实现的回测结果。"),
+    ("2026-09-11", "v0.45.209",
+     "GuardBeeSentinel 的 `data_quality[\"crowding\"]` 由硬编码 \"real\" 改为按实际可得性上报。"
+     "v0.45.50 给拥挤度加了降级路径（全分量不可得 ⇒ `get_adjustment_factor(None)` 返回 1.0 "
+     "中性），但 DQ 标记没跟着改 ⇒ 降级行照样以 `REAL_SOURCES` 满分计入 "
+     "`_apply_triple_penalty` 的 `data_real_pct` → `quality_factor` → `rule_score`。"
+     "**1.0 在正常三档（1.2/0.95/0.70）里不存在**，是降级的精确指纹：台账 1710 行里 "
+     "**40 行（2.3%）** adj_factor == 1.00，全部上报 \"real\"。降级值取 \"unavailable\""
+     "（`PROXY_SOURCES`，0.7 档）而非新字面量 —— 按契约未分类算 0.0 分，"
+     "等于把「这一项降级」升格成「这一项全废」（同 v0.45.191 选 \"fallback\" 的理由）。 "
+     "**边界日期取 2026-09-11、与 v0.45.201/197 同日扩展同一标签，不新开空分区**："
+     "实测 2026-09-10 起降级触发 **0 次**（40 行分布在 05-17~09-01），"
+     "本代样本改动前后逐位相同，**作废 0 条**。 "
+     "⚠️ 同版**未动** GuardBee 的方向票（实测它 100% 复述其余六只的多数，"
+     "去掉它会让 17.5% 的过门格子跌破 min_agents=3）—— 那是设计决定，留给用户。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -355,6 +451,71 @@ def summary_line(res: Dict) -> str:
             f"个不重叠周{eta}")
 
 
+def cohort_boundary_evidence(home: Path) -> dict:
+    """边界日期写对没写对，从**数据**上回答，而不是从意图上。
+
+    v0.45.197 的口径切换在归档里留了个可判别的印记：
+    `analysis-<TK>-ml-<DATE>.json` 的 `advanced_analysis.dealer_gex.chain_view`
+    自该口径起为 `"cboe_full_expiries"`，此前的记录没有这个键。
+    本函数报出它**首次出现**的日期，与 `_COHORT_HISTORY` 最后一条的日期比对。
+
+    ⚠️ 为什么要有这个：本仓记过同一处栽跟头 —— 此前几条世代边界「核过了」其实
+    **零判别力**：世代内 0 条样本时，日期写对和写错的输出一模一样
+    （见 auto-memory `alpha-hive-failure-propagation` 的「安全性论证与可观测性是
+    同一个事实的两面」）。所以判据必须挂在一个**新旧可区分**的印记上。
+
+    返回 `{"marker_first_seen": 日期或 None, "boundary": 边界日期,
+           "verdict": "matches"|"boundary_too_early"|"boundary_too_late"|"no_evidence_yet"}`。
+    取不到归档时返回 `no_evidence_yet` —— **不返回 "matches"**，
+    「还没有证据」和「证据说对了」必须可区分。
+
+    ⚠️ `home` **是必传的，不给默认值**，这是初版的 bug 改出来的：初版默认
+    `ALPHAHIVE_DIR`（= 代码所在目录），而归档是**数据**、在生产目录里。
+    在 worktree 里跑它永远扫到一个没有归档的目录 ⇒ 恒返回 `no_evidence_yet` ⇒
+    **一个永远说「还没证据」的判别器，和没有判别器是一回事** —— 正是本函数
+    要防的那种失效。调用方（`main()`）传 `--db` 所在目录，与库同一个安装。
+    """
+    root = Path(home)
+    boundary = _COHORT_HISTORY[-1][0]
+    first = None
+    try:
+        for f in sorted(root.glob("analysis-*-ml-*.json")):
+            m = re.search(r"-ml-(\d{4}-\d{2}-\d{2})\.json$", f.name)
+            if not m:
+                continue
+            date = m.group(1)
+            if first is not None and date >= first:
+                continue
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    d = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                continue
+            view = ((d.get("advanced_analysis") or {}).get("dealer_gex") or {}).get("chain_view")
+            if view == "cboe_full_expiries":
+                first = date if first is None else min(first, date)
+    except OSError:
+        first = None
+
+    if first is None:
+        verdict = "no_evidence_yet"
+    elif first == boundary:
+        verdict = "matches"
+    elif first > boundary:
+        verdict = "boundary_too_early"      # 边界之后、印记之前的样本是旧口径 ⇒ 会被混算
+    else:
+        verdict = "boundary_too_late"       # 边界之前就已是新口径 ⇒ 白白丢掉一些新样本
+    return {"marker_first_seen": first, "boundary": boundary, "verdict": verdict}
+
+
+_BOUNDARY_VERDICT_TEXT = {
+    "matches": "✅ 与归档印记一致",
+    "boundary_too_early": "🚨 边界写早了 —— 边界至印记之间的样本是旧口径，会被混算，请追加一条更正",
+    "boundary_too_late": "⚠️ 边界写晚了 —— 印记之前已是新口径，白丢了一些新样本",
+    "no_evidence_yet": "⏳ 归档里还没有该口径的印记（生产尚未跑到这一版，或归档不可读）",
+}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="IC 重跑就绪度")
     ap.add_argument("--db", default=str(DB_PATH))
@@ -411,6 +572,10 @@ def main() -> int:
           f"（世代内总样本 {res['n_all_samples']} 条，其余未到期）")
     print(f"  已攒不重叠周:          {res['weeks_accrued']} / "
           f"{res['weeks_required']}   还差 {res['weeks_remaining']}")
+    # 归档与 DB 同处一个安装 ⇒ 用 --db 的所在目录，别用代码目录（见函数 docstring）
+    _ev = cohort_boundary_evidence(db.parent)
+    print(f"  边界日期的数据证据:    {_BOUNDARY_VERDICT_TEXT[_ev['verdict']]}"
+          + (f"（印记首见 {_ev['marker_first_seen']}）" if _ev["marker_first_seen"] else ""))
     print(f"  世代内有扫描的周:      {res['scan_weeks_in_cohort']}"
           f"（已过 {res['calendar_weeks_elapsed']} 个日历周，"
           f"产出率 {res['weeks_per_calendar_week']:.2f} 周/周）")

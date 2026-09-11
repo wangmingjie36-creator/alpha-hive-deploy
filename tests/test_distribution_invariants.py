@@ -507,3 +507,130 @@ class TestScanNotDead:
             f"最近一次扫描（{latest_date}）只有 {latest} 只标的，"
             f"而窗口内峰值是 {peak} —— 疑似标的池被静默截断"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# v0.45.182：GuardBee 普查覆盖度（原 `guard.top_signals_count` 归档信号）
+#
+# v0.45.163 之后这个量恒等于「本轮 Guard 之前实际发布过的蜂数」，方差为零 ——
+# 它已经不是信号，放在 `signal_archive._SIGNALS` 里只会年年被 `analyze()`
+# 判成「纯标签」占位。但它是一条**真的会红**的健康探针：一旦不再恒定，
+# 就说明有蜂停发了（或普查读法被人改回排行榜）。故从信号表挪到这里。
+#
+# ⚠️ 期望值**从数据导出，不写死 6**：`CODE_EXECUTION_CONFIG` 关掉时 CodeExecutor
+# 不跑，蜂数就是 5。写死 6 会让关掉它的人收到一条假红。
+# ⚠️ 崩掉的蜂在 `agent_details` 里**在**、在板上**不在**（崩在 `_publish` 之前），
+# 所以期望值要扣掉它们 —— 这正是 v0.45.182 另一半修的那件事。
+# ══════════════════════════════════════════════════════════════════════════
+
+#: `alpha_hive_daily_report.py` 的顺序契约：Phase-1 并行 → Rival → Guard → Bear。
+#: Guard 读板时，板上恰好是这几只（Guard 自己与 Bear 都还没发）。
+PRE_GUARD_BEES = frozenset({
+    "ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper",
+    "ChronosBeeHorizon", "CodeExecutorAgent", "RivalBeeVanguard",
+})
+
+
+def expected_census_size(agent_details: dict) -> int:
+    """本轮 Guard 之前**应当**被普查到的蜂数：发布过且没崩的那些。"""
+    n = 0
+    for bee in PRE_GUARD_BEES:
+        det = (agent_details or {}).get(bee)
+        if not isinstance(det, dict):
+            continue                      # 这只蜂本轮根本没跑
+        if det.get("error") is not None:
+            continue                      # 崩了 ⇒ 从没上过板
+        n += 1
+    return n
+
+
+def census_coverage_offenders(rows) -> list:
+    """rows: [(标签, swarm_results dict)]。返回 [(标签, 实得, 应得)]。
+
+    只核对 `census_source == "live_agent_view"` 的那些 —— 旧口径（v0.45.163
+    之前）本来就装不下全部蜂，拿新契约去核对它们只会得到一堆预期内的红。
+    """
+    bad = []
+    for label, sr in rows:
+        det = (sr or {}).get("agent_details") or {}
+        g = det.get("GuardBeeSentinel")
+        if not isinstance(g, dict):
+            continue
+        gd = g.get("details") or {}
+        if gd.get("census_source") != "live_agent_view":
+            continue
+        got = gd.get("top_signals_count")
+        want = expected_census_size(det)
+        if got != want:
+            bad.append((label, got, want))
+    return bad
+
+
+class TestCensusCoverageGuardHasTeeth:
+    """喂合成的退化数据，确认上面那个谓词真的会触发。
+
+    没有这一组，下面那条 integration 的「全绿」证明不了任何事
+    （同本文件 `TestGuardsHaveTeeth` 的理由）。
+    """
+
+    @staticmethod
+    def _row(count, bees=PRE_GUARD_BEES, errored=(), source="live_agent_view"):
+        det = {b: ({"score": 5.0, "error": "boom"} if b in errored
+                   else {"score": 5.0}) for b in bees}
+        det["GuardBeeSentinel"] = {"details": {"top_signals_count": count,
+                                               "census_source": source}}
+        return {"agent_details": det}
+
+    def test_full_census_passes(self):
+        assert census_coverage_offenders([("ok", self._row(6))]) == []
+
+    def test_truncated_census_is_caught(self):
+        """把普查读法改回 `get_top_signals(n=5)` 的形状：6 只蜂只数到 5。"""
+        assert census_coverage_offenders([("bad", self._row(5))]) == [("bad", 5, 6)]
+
+    def test_disabled_code_executor_is_not_a_false_red(self):
+        """关掉 CodeExecutor 时应得就是 5 —— 期望值必须从数据导出，不能写死 6。"""
+        bees = PRE_GUARD_BEES - {"CodeExecutorAgent"}
+        assert census_coverage_offenders([("ok", self._row(5, bees=bees))]) == []
+
+    def test_errored_bee_is_excluded_from_expectation(self):
+        """崩掉的蜂在 agent_details 里在、在板上不在 ⇒ 应得扣掉它。"""
+        rows = [("ok", self._row(5, errored={"BuzzBeeWhisper"}))]
+        assert census_coverage_offenders(rows) == []
+        rows = [("bad", self._row(6, errored={"BuzzBeeWhisper"}))]
+        assert census_coverage_offenders(rows) == [("bad", 6, 5)]
+
+    def test_old_caliber_rows_are_skipped_not_failed(self):
+        """v0.45.163 之前的行没有 census_source，本就装不下全部蜂，不该判红。"""
+        assert census_coverage_offenders([("old", self._row(3, source=None))]) == []
+
+
+@pytest.mark.integration   # 读生产 analysis-*.json —— 条件性写在 marker 上，不写进 skip
+class TestGuardCensusCoverage:
+    def test_production_census_is_complete(self):
+        import json
+        files = sorted(PROJECT_ROOT.glob("analysis-*-ml-*.json"))
+        assert files, (
+            f"{PROJECT_ROOT} 下没有 analysis-*-ml-*.json —— 本条核对的是生产数据本身，"
+            "只在生产机上有意义，已标 @pytest.mark.integration（默认排除）。"
+            "你显式选中了它却没有那批文件：判红，不跳过。"
+        )
+        rows = []
+        for f in files:
+            try:
+                sr = (json.loads(f.read_text(encoding="utf-8")) or {}).get("swarm_results")
+            except (ValueError, OSError):
+                continue
+            if isinstance(sr, dict):
+                rows.append((f.name, sr))
+        checked = [r for r in rows
+                   if ((((r[1].get("agent_details") or {}).get("GuardBeeSentinel") or {})
+                        .get("details") or {}).get("census_source") == "live_agent_view")]
+        assert checked, (
+            "一份带 census_source=live_agent_view 的生产文件都没有 —— "
+            "要么 v0.45.163 的普查读法没生效，要么这批文件不是这台机器产的"
+        )
+        bad = census_coverage_offenders(rows)
+        assert not bad, (
+            f"{len(bad)}/{len(checked)} 份普查数不对（文件, 实得, 应得）：{bad[:8]}"
+        )

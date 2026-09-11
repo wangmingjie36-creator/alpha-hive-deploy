@@ -202,6 +202,20 @@ def build_agent_votes(data: dict) -> "tuple[dict, str]":
     details = (data or {}).get("agent_details") or {}
     votes = {}
     for agent_id, det in details.items():
+        # v0.45.182：崩掉的蜂没有分。`make_error_result` 返回 `score=5.0` 只是为了
+        # 让调用方拿到一个数，不是一次表态；旧的板口径天然排除它（崩在
+        # `self._publish()` **之前**，那只蜂从没上过板），故 v0.45.164 改读
+        # agent_details 时把它带了进来。
+        # ⚠️ 判据必须是**错误标记**，不能是取值 —— 三条取值捷径都实测否掉了：
+        #   · `score == 5.0`      38 个**合法**结果恰好是 5.0，error 只有 13 个 ⇒ 3:1 误伤
+        #   · `confidence == 0.0` 今天零误报，但没有任何代码保证合法蜂不返回 0.0
+        #   · `dimension_status`  只覆盖 DIMENSION_WEIGHTS 那 5 维，Rival/Bear/
+        #                         CodeExec 的维度在表外 ⇒ 半修
+        if isinstance(det, dict) and det.get("error") is not None:
+            _log.warning("快照 %s：%s 本轮失败（%s），不计票（原 score=%s）",
+                         (data or {}).get("ticker", "?"), agent_id,
+                         str(det.get("error"))[:60], det.get("score"))
+            continue
         score = (det or {}).get("score") if isinstance(det, dict) else None
         # 坏值直接不记：`or 5.0` 之类兜底会把「没分」伪装成一张中位票，
         # 而中位票在 agent_vote_correct 里是弃权 —— 两者进的分母不同。
@@ -555,6 +569,16 @@ class AlphaHiveDailyReporter:
         """初始化蜂群扫描上下文：Board + Agents + 预取数据"""
         set_correlation_id(self._session_id or f"swarm_{self.date_str}")
         _log.info("蜂群协作启动 %s", self.date_str)
+        # v0.45.182：把「在跑的是哪一版代码」记进日志。
+        # 2026-09-10 事故（CHANGELOG v0.45.181）：修复推到了 main，生产 checkout
+        # 不自动 pull、落后六个提交，当天扫描照旧跑旧代码把 125 条样本又删了一遍——
+        # 而当时日志与 status.json 里都没有任何版本记录。观测代码不得影响主流程，
+        # 故整体 try 住；解析结果同时进 scan_timing 快照（→ status.json）。
+        try:
+            import code_version as _cv
+            _cv.log_startup()
+        except Exception as _cv_err:  # noqa: BLE001
+            _log.warning("代码版本记录失败（不影响扫描）: %s", _cv_err)
         try:
             from hive_logger import FeatureRegistry
             FeatureRegistry.log_status()

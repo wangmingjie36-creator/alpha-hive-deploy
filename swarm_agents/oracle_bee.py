@@ -1,6 +1,8 @@
-"""OracleBeeEcho - 市场预期蜂 (Odds 维度, 权重 0.15)"""
+"""OracleBeeEcho - 市场预期蜂（odds 维度；权重唯一真相见 config.EVALUATION_WEIGHTS）"""
 
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
+from hive_logger import pdt_today
 from swarm_agents._config import _log, _AS
 from swarm_agents.cache import _safe_score
 from swarm_agents.base import BeeAgent
@@ -20,9 +22,15 @@ def _finite_pos(x) -> bool:
 
 class OracleBeeEcho(BeeAgent):
     """市场预期蜂 - 期权分析 + Polymarket 预测市场赔率
-    对应维度：Odds (权重 0.15)
+    对应维度：odds（权重唯一真相 = `config.EVALUATION_WEIGHTS`，此处不抄数值）
     融合：期权信号 60% + Polymarket 赔率 40%
     """
+
+    # 「近端」的唯一定义：到期日距今 ≤ 7 个日历日。v0.45.188 之前这个词在代码里
+    # 根本没有定义 —— 见 `_calc_max_pain` 的 docstring。改窗口 = 改口径，
+    # 展示层（`near_max_pain` 卡片）会跟着 `window_days` 字段自动说出新口径，
+    # 但历史值不可比，动它之前先想清楚要不要留一条对照。
+    NEAR_WINDOW_DAYS = 7
 
     # ---------- v0.45.128：期限结构 / 25Δ skew 改从 OptionsAgent 的 CBOE 结果派生 ----------
     #
@@ -127,44 +135,134 @@ class OracleBeeEcho(BeeAgent):
             return None  # 偏离现价 >50% = 数据垃圾
         return mp_strike
 
-    def _calc_max_pain(self, ticker: str, stock_price: float) -> dict:
-        """Max Pain 计算（期权到期时令所有持仓亏损最大的价位）。
+    @staticmethod
+    def _near_oi_by_strike(full_chain_oi: dict, today: date, window_days: int):
+        """把 `full_chain_oi` 的 {行权价: {到期日: OI}} 矩阵按窗口聚合成 {行权价: OI}。
 
-        v0.41.2: 主源改 CBOE（fetch_cboe_chain，与期权链同源）；旧实现裸调 yfinance
-        最近到期日，深夜限流全零 OI 时退化取最低行权价（v40.1 同款反模式的期权版漏网）。
-        v0.45.128: 去掉 yfinance 兜底，CBOE 取不到即 None。
+        窗口判据 `0 <= DTE <= window_days`（DTE 按日历日算，与到期日本身同口径）。
+
+        返回 `(call_oi, put_oi, expiries_used, unparsable)`：
+        - `expiries_used` = **落在窗口内的到期日**，不保证每个都真的贡献了 OI
+          （实测 33403 条里只有 3 条 OI=0，可忽略；OI 总量看调用方的 `near_total_oi`）。
+        - `unparsable` = 解析失败的键数，供调用方打观测点 ——
+          **静默跳过解析失败等于把「没算进去」渲染成「本来就没有」**。
         """
-        result = {"max_pain": None, "distance_pct": None, "summary": ""}
-        call_oi, put_oi = {}, {}
-        # ── 主源：CBOE（取返回链中最近到期日）──
-        try:
-            from cboe_options import fetch_cboe_chain
-            cb = fetch_cboe_chain(ticker, stock_price)
-            if cb and (cb.get("calls") or cb.get("puts")):
-                _exps = sorted({c.get("expiry") for c in (cb.get("calls") or []) if c.get("expiry")})
-                if _exps:
-                    _near = _exps[0]
-                    for c in cb.get("calls") or []:
-                        if c.get("expiry") == _near:
-                            call_oi[float(c.get("strike", 0))] = call_oi.get(float(c.get("strike", 0)), 0) + int(c.get("openInterest") or 0)
-                    for p in cb.get("puts") or []:
-                        if p.get("expiry") == _near:
-                            put_oi[float(p.get("strike", 0))] = put_oi.get(float(p.get("strike", 0)), 0) + int(p.get("openInterest") or 0)
-        except Exception as e:
-            _log.debug("OracleBee max pain CBOE 主源失败 %s: %s", ticker, e)
-        # v0.45.128：不再回退 yfinance——CBOE 取不到就诚实返回 None（见 _term_structure_adj 注释）。
+        used: set = set()
+        unparsable = 0
+
+        def _agg(src: dict) -> dict:
+            nonlocal unparsable
+            out: Dict[float, int] = {}
+            for strike_s, exp_map in (src or {}).items():
+                try:
+                    strike = float(strike_s)
+                except (TypeError, ValueError):
+                    unparsable += 1
+                    continue
+                total = 0
+                for exp, oi in (exp_map or {}).items():
+                    exp_s = str(exp)[:10]
+                    try:
+                        dte = (datetime.strptime(exp_s, "%Y-%m-%d").date() - today).days
+                    except (TypeError, ValueError):
+                        unparsable += 1
+                        continue
+                    if 0 <= dte <= window_days:
+                        total += int(oi or 0)
+                        used.add(exp_s)
+                if total:
+                    out[strike] = total
+            return out
+
+        calls = _agg(full_chain_oi.get("call_exp_oi"))
+        puts = _agg(full_chain_oi.get("put_exp_oi"))
+        return calls, puts, sorted(used), unparsable
+
+    def _calc_max_pain(self, ticker: str, stock_price: float,
+                       options_result: Optional[dict] = None) -> dict:
+        """近端 Max Pain：**≤ `NEAR_WINDOW_DAYS` 天内全部到期日**聚合后求解。
+
+        数据源 = OptionsAgent 的 `full_chain_oi`（完整「全到期日 × 全行权价」OI
+        矩阵，与全链 OI 卡片同源），**不再另调 `fetch_cboe_chain`**。
+
+        v0.45.188 换源理由：`fetch_cboe_chain` 返回的链经
+        `cboe_options._select_expiries` 截断为「DTE≥7 的前 4 个到期日」——周权标的
+        `far` 恒满 4 个 ⇒ DTE<7 的一律进不来。旧实现取该链的 `_exps[0]` 当「最近」，
+        实际拿到的是**最早的 DTE≥7 那一个**，与「近端」字面意思相反。实测
+        2026-09-10 全 30 只标的（29 只有数据）**28 只与真·≤7天口径不符**，最大偏
+        20%；NVDA 显示值 09-08→09-10 是 225→200，而 ≤7 天真值两天都是 225 ——
+        那次跳变全部是「换了一个到期日」造成的假象，不是仓位变了。
+
+        ⚠️ 取不到 `full_chain_oi` 时**返回 None、不回退旧链**：旧链给的是构造上
+        就不符合标签含义的数，回退等于把「没数据」悄悄换成「错数据」。
+        """
+        result = {
+            "max_pain": None, "distance_pct": None, "summary": "",
+            "window_days": self.NEAR_WINDOW_DAYS, "expiries_used": [],
+            "near_total_oi": 0, "unavailable_reason": "",
+        }
+        fco = (options_result or {}).get("full_chain_oi")
+        if (not isinstance(fco, dict) or fco.get("data_available") is False
+                or not (fco.get("call_exp_oi") or fco.get("put_exp_oi"))):
+            result["unavailable_reason"] = "full_chain_oi 不可得"
+            _log.warning("[%s] 近端 Max Pain 跳过：full_chain_oi 不可得（不回退旧截断链）", ticker)
+            return result
 
         try:
+            today = date.fromisoformat(pdt_today())
+            call_oi, put_oi, used, unparsable = self._near_oi_by_strike(
+                fco, today, self.NEAR_WINDOW_DAYS)
+            if unparsable:
+                _log.warning("[%s] 近端 Max Pain：%d 个行权价/到期日键解析失败，已跳过",
+                             ticker, unparsable)
+            result["expiries_used"] = used
+            result["near_total_oi"] = sum(call_oi.values()) + sum(put_oi.values())
+            if not used:
+                result["unavailable_reason"] = f"≤{self.NEAR_WINDOW_DAYS}天内无到期日"
+                _log.warning("[%s] 近端 Max Pain：窗口内无到期日（全链 %d 个行权价）",
+                             ticker, len(fco.get("call_exp_oi") or {}))
+                return result
             mp_strike = self._max_pain_from_oi(call_oi, put_oi, stock_price)
-            if mp_strike is not None:
-                dist = (stock_price / mp_strike - 1) * 100 if mp_strike > 0 else 0
-                result = {
-                    "max_pain": mp_strike, "distance_pct": round(dist, 2),
-                    "summary": f"MaxPain:${mp_strike:.0f}({dist:+.1f}%)",
-                }
+            if mp_strike is None:
+                result["unavailable_reason"] = "退化保护拦截（OI 过薄或偏离现价 >50%）"
+                return result
+            dist = (stock_price / mp_strike - 1) * 100 if mp_strike > 0 else 0
+            result.update({
+                "max_pain": mp_strike, "distance_pct": round(dist, 2),
+                "summary": f"MaxPain≤{self.NEAR_WINDOW_DAYS}d:${mp_strike:.0f}({dist:+.1f}%)",
+            })
         except Exception as e:
-            _log.debug("OracleBee max pain failed for %s: %s", ticker, e)
+            # 旧实现这里是 _log.debug ⇒ 算错/算不出在生产日志里不可见。
+            _log.warning("[%s] 近端 Max Pain 计算失败：%s", ticker, e)
+            result["unavailable_reason"] = f"计算异常：{type(e).__name__}"
         return result
+
+    @staticmethod
+    def _decide_direction(unusual_flow: dict, score: float,
+                          signal_summary: Optional[str] = None) -> str:
+        """方向只走两条：专职方向探测器（异常期权流）→ 分数带。
+
+        `signal_summary` 保留为入参仅供调用方可读性，**不参与判定**。
+
+        v0.45.201 之前这里夹着第三条「在中文摘要里数关键词」的投票。台账实测
+        （agent_memory 1789 行，2026-04-06~09-10）：它决定了 982 行（55.0%），
+        **982 行全部判为 bullish，五个月零次 bearish**。成因是词表在本语料里单边：
+        唯一会命中的是 `检测到 N 个看涨异动`（options_analyzer.py:1397，
+        `bullish_unusual > 0` 时无条件拼上；上游**没有** bearish 对应量），
+        而五个看空词五个月零出现 ⇒ 看空半边结构上不可达（同 ChronosBee v0.43.0）。
+        更糟的是这 982 行的 unusual_direction 全是 neutral/absent —— 专职探测器
+        说「无方向」，被一个子串计数改判成看多，其中 127/467 实际 Put > Call。
+
+        取证、位移与世代边界见 tests/test_oracle_direction_keyword_vote.py 模块 docstring。
+        """
+        _uf = unusual_flow or {}
+        if _uf.get("unusual_direction") in ("bullish", "bearish"):
+            return _uf["unusual_direction"]
+        if score < _AS.get("oracle_bearish_score_threshold", 4.0):
+            return "bearish"
+        if score > _AS.get("oracle_bullish_score_threshold", 6.5):
+            return "bullish"
+        return "neutral"
 
     def analyze(self, ticker: str) -> Dict:
         _err = self._validate_ticker(ticker)
@@ -220,7 +318,7 @@ class OracleBeeEcho(BeeAgent):
             # v0.45.128：期限结构 / skew 从上面 OptionsAgent 的 CBOE 结果派生，不再碰 yfinance
             term_structure = self._term_structure_adj(result)
             deep_skew      = self._skew_adj(result)
-            max_pain       = self._calc_max_pain(ticker, current_price)
+            max_pain       = self._calc_max_pain(ticker, current_price, result)
             _deep_adj = term_structure.get("term_score_adj", 0) + deep_skew.get("skew_score_adj", 0)
             options_score = max(0.0, min(10.0, options_score + _deep_adj))
             _deep_parts = [s for s in [
@@ -273,25 +371,7 @@ class OracleBeeEcho(BeeAgent):
             # 叠加异常流调整
             score = clamp_score(score + unusual_score_adj)
 
-            # 从 signal_summary 推断方向（异常流可覆盖）
-            # 修复 Bug #11：用具体词组而非子串 "多"/"空"（旧实现命中"多头空头很多"等混合词歧义）
-            _ss = signal_summary or ""
-            _bull_keywords = ("看多", "看涨", "多头", "走高", "上行")
-            _bear_keywords = ("看空", "看跌", "空头", "下行", "走低")
-            _bull_count = sum(1 for kw in _bull_keywords if kw in _ss)
-            _bear_count = sum(1 for kw in _bear_keywords if kw in _ss)
-            if unusual_flow.get("unusual_direction") in ("bullish", "bearish"):
-                direction = unusual_flow["unusual_direction"]
-            elif _bull_count > _bear_count:
-                direction = "bullish"
-            elif _bear_count > _bull_count:
-                direction = "bearish"
-            elif score < _AS.get("oracle_bearish_score_threshold", 4.0):
-                direction = "bearish"
-            elif score > _AS.get("oracle_bullish_score_threshold", 6.5):
-                direction = "bullish"
-            else:
-                direction = "neutral"
+            direction = self._decide_direction(unusual_flow, score, signal_summary)
 
             discovery = f"{signal_summary} | ${current_price:.1f}"
             if poly_signal:
@@ -350,6 +430,14 @@ class OracleBeeEcho(BeeAgent):
                 if max_pain.get("max_pain") is not None:
                     _pub_details["max_pain"]          = max_pain["max_pain"]
                     _pub_details["max_pain_dist_pct"] = max_pain.get("distance_pct", 0)
+                    # ⚠️ 口径字段（window_days / expiries_used）**不往这里加**。
+                    # 这个 dict 去的是信息素板，而板上的 max_pain* 目前零读者
+                    # （`max_pain_dist_pct` 本身就是既有死字段）；板还有 80 条上限
+                    # 且按分数淘汰，往里塞没人读的负载纯属有害。
+                    # 审计轨迹走另一条路：下方 AgentResult 的 details 里带的是
+                    # **完整的 max_pain dict**（含 window_days / expiries_used /
+                    # near_total_oi / unavailable_reason），它才是落进
+                    # `.swarm_results_*.json` 并被看板与报告读到的那一份。
                 # 期权大单/异动信号（合并 OptionsAgent + unusual_options 两源）
                 _ua = list(result.get("unusual_activity", []))
                 if unusual_flow.get("signals"):

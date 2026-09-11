@@ -13,9 +13,42 @@ from datetime import datetime, timedelta
 
 # ==================== _build_swarm_report 测试 ====================
 
-@pytest.mark.network  # 走真实取数路径（yfinance/Treasury），离线必挂；CI 排除，本机照跑
+# ── v0.45.196：下面两个类**不再**标 `@pytest.mark.network` ─────────────────
+#
+# 它们断言的都是 `_build_swarm_report` 的本地行为（返回键、排序、中文方向、
+# 数据质量关卡的状态文案与告警横幅），没有一条依赖实时行情。碰网络是
+# `_fetch_report_context` → `fred_macro.get_macro_context()` 顺路带出来的副作用。
+#
+# 标 `network` 的代价不是「跑得慢」：`network` 刻意不进 addopts 的默认排除
+# （v0.45.94），而 `conftest._offline_transport` 又豁免它 —— 两件事合起来，
+# marker 成了**默认离线闸的唯一豁免口**，红绿因此交给对方的限流：
+# `test_returns_required_keys` 单跑实测 63s（用户处 36s），而 `--timeout=60`
+# 正卡在中间。随机变红与真实回归无法区分，等于把这条测试的信号变成噪音。
+#
+# 改用 conftest 已有的显式源桩。**两个桩缺一不可**，各自变异实测判红：
+#   stub_yfinance  缺 → 伸手取外网了：['curl.GET query1.finance.yahoo.com']
+#   stub_cboe_vix  缺 → 伸手取外网了：['urlopen cdn.cboe.com']
+#
+# 刻意钉**源**而不是钉 `get_macro_context` 的返回值，两个理由：
+#   ① 降级快照由生产代码自己产出（`_fetch_macro_data` 的 `base`），测试里不
+#      写死任何宏观数值，契约变了不会漂（conftest「显式源桩」那节的约定）。
+#   ② yfinance 自己的 cookie/crumb 引导（`/v1/test/getcrumb`）**跑在 worker
+#      线程上**，只钉返回值挡不住它。
+#
+# 普查见 CHANGELOG v0.45.196；防回潮的棘轮在
+# `tests/test_network_marker_discipline.py`。
+# ──────────────────────────────────────────────────────────────────────────
+
+
 class TestBuildSwarmReport:
     """测试 _build_swarm_report 的核心逻辑（不启动完整 reporter）"""
+
+    @pytest.fixture(autouse=True)
+    def _offline_sources(self, stub_yfinance, stub_cboe_vix):
+        """本类经 `_fetch_report_context` 会走到宏观取数，显式钉死成离线。
+
+        两个桩缺一不可，理由见本文件顶部 v0.45.196 那段。
+        """
 
     @pytest.fixture
     def reporter(self, monkeypatch, tmp_path):
@@ -132,9 +165,15 @@ class TestBuildSwarmReport:
 
 # ==================== 方案9: 数据质量关卡测试 ====================
 
-@pytest.mark.network  # 走真实取数路径（yfinance/Treasury），离线必挂；CI 排除，本机照跑
 class TestDataQualityGate:
     """方案9: _build_swarm_report 数据质量关卡"""
+
+    @pytest.fixture(autouse=True)
+    def _offline_sources(self, stub_yfinance, stub_cboe_vix):
+        """本类经 `_fetch_report_context` 会走到宏观取数，显式钉死成离线。
+
+        两个桩缺一不可，理由见本文件顶部 v0.45.196 那段。
+        """
 
     @pytest.fixture
     def reporter(self, monkeypatch, tmp_path):

@@ -200,7 +200,8 @@ def poll_slack_reply(channel: str, thread_ts: str, after_ts: str) -> str | None:
 def send_macos_notification(title: str, message: str) -> bool:
     """通过 macOS 通知中心发送通知"""
     try:
-        _esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
+        def _esc(s):
+            return s.replace("\\", "\\\\").replace('"', '\\"')
         script = f'display notification "{_esc(message)}" with title "{_esc(title)}" sound name "Glass"'
         subprocess.run(
             ["osascript", "-e", script],

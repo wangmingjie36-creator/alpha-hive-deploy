@@ -40,6 +40,11 @@ except ImportError:
     pass
 
 
+# v0.45.190：`OptionsAgent._calc_total_oi` 的空操作 warning 的一次性标志。
+# 测试要复现「第一次打、第二次不打」时把它设回 False。
+_TOTAL_OI_NOOP_WARNED = False
+
+
 class OptionsDataFetcher:
     """期权数据采集器 - 支持多源降级策略"""
 
@@ -1368,7 +1373,32 @@ class OptionsAnalyzer:
         else:
             gex_signal = 2.0 if gex < -0.001 else 1.0
 
-        # Unusual Signal (0-2)：多头异动加分
+        # Unusual Signal (0-2)：按 call 侧异动条数加分。
+        #
+        # ⚠️ v0.45.205 **实测后决定保持单边，不要「修」成对称**。看着像
+        # v0.45.201（OracleBee 单边词表）的同族错误 —— 我也是这么以为的，量完不是。
+        #
+        # `detect_unusual_activity` 用**完全相同**的五条规则扫 calls 与 puts
+        # （`_scan(calls, is_call=True)` / `_scan(puts, is_call=False)`），
+        # 且 `"bullish": is_call`。所以 put 侧那一半一直在列表里，只是没被数
+        # （838 份 analysis JSON、2026-03-10~09-10：14303 条 call 侧、**9993 条 put 侧**，
+        # 79.6% 的行至少有一条 put 侧，18.6% 的行 put 侧比 call 侧还多）。
+        #
+        # 但「补上 put 侧」的前提是 put 侧异动意味着看跌 —— **这条前提不成立**：
+        #   · Spearman(call侧, put侧) = **0.886**，两者主要在测同一个东西
+        #     （该标的当日异动总量 / 关注度），不是方向。
+        #   · 逐日横截面 rank-IC 对 T+7（`close_t7`，未被 SL/TP 截断）：
+        #         call 侧      +0.119      put 侧      **+0.155**（同号！）
+        #         call+put     +0.136
+        #         call−put     **+0.035  p=0.90**      (call−put)/(call+put)  −0.034  p=0.88
+        #     取差把共同的、有信息的成分消掉了，只剩噪声残差。
+        #   ⇒ 改成净额/对称，是把 IC≈0.12 的量换成 IC≈0.03 的量，**是回归不是修复**。
+        #
+        # ⚠️ 以上 IC 全部**过不了多重比较校正**（21 个不重叠周、试过约 10 种变换；
+        # 最好的 `bullish_unusual > 0` 二值 p=0.004、×10 后 0.04，且是事后挑出来的）。
+        # 所以这段话只支持**不动**这个结论，**不支持**「现行形式已被证明有效」。
+        #
+        # 守卫：tests/test_options_analyzer.py::TestUnusualSignalOneSidedIsDeliberate
         bullish_unusual = sum(1 for u in unusual if u.get("bullish", False))
         unusual_signal = min(2.0, bullish_unusual * 0.5)
 
@@ -1629,12 +1659,40 @@ class OptionsAgent:
         目的：Opex 周到期日脱落会导致 OI 日环比骤降 50-80%，产生虚假异常告警。
         稳定口径只统计 DTE ≥ 7 的合约 OI，使日环比对比更平滑。
         当所有合约都是 DTE < 7 时，退化为原始总和（避免返回 0）。
+
+        ⚠️ **在 CBOE 主源路径上这段排除逻辑排除不到任何东西。**
+        上游 `cboe_options._select_expiries` 已经把 DTE<7 的到期日全部滤掉
+        （`far` 恒占满 4 个配额），所以 `near_set` 虽然非空，却与链里实际出现的
+        到期日**不相交** ⇒ `stable_oi` 恒等于全量求和。2026-09-11 实测 AMZN
+        96,705 == 96,705。v0.45.188 把这件事写进了 `_select_expiries` 的
+        docstring；v0.45.190 补上观测点——文档解决「读代码的人别误会」，
+        但「这个意图哪天开始生效了 / 或者永远不生效」此前没有任何落点，
+        答不出本仓那句判据：**谁会红？**
         """
         near_set = set(options_chain.get("near_expiry_set", []))
         if not near_set:
             # 无近期标记，退化为原始求和
             return (sum(c.get("openInterest", 0) for c in calls_df)
                     + sum(p.get("openInterest", 0) for p in puts_df))
+
+        # v0.45.190 观测点：near_set 非空但链里一个都匹配不上 = 上游已经滤过了，
+        # 本函数是空操作。**不改行为**（改了就是口径变更，要付世代边界），只让它可见。
+        #
+        # ⚠️ **进程内只打一次。** 这个条件在 CBOE 主源路径上结构上恒为真（30 只标的
+        # 每轮扫描全命中），逐次打印就成了一盏恒亮的灯 —— 那和不打是一个效果。
+        # 需要逐次的聚合数字在 `status.json` 的 `counters.cboe_chain` 里
+        # （`near_excluded` / `near_excluded_oi`）；这一行只负责让读日志的人**知道
+        # 有这回事**，说一遍就够。
+        global _TOTAL_OI_NOOP_WARNED
+        _chain_exps = {str(r.get("expiry", ""))[:10] for r in (list(calls_df) + list(puts_df))}
+        if _chain_exps and not (near_set & _chain_exps) and not _TOTAL_OI_NOOP_WARNED:
+            _TOTAL_OI_NOOP_WARNED = True
+            _log.warning(
+                "total_oi 稳定口径是空操作（本进程只报一次）：near_expiry_set=%s 与"
+                "链内到期日 %s 不相交，上游已滤掉近月 ⇒ 排除 0 个合约"
+                "（见 cboe_options._select_expiries；逐次计数见 status.json "
+                "counters.cboe_chain）",
+                sorted(near_set), sorted(_chain_exps))
 
         stable_oi = 0
         for c in calls_df:

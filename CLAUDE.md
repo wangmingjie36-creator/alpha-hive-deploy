@@ -84,6 +84,31 @@
 - 每次 session 修改了代码/新增模块/修复 bug 后，Claude 必须自动更新 MEMORY.md 对应章节
 - 控制在 200 行以内；超出时压缩旧版本历史或移除已被代码覆盖的实现细节
 - 旧记忆路径 `~/.claude/projects/-Users-igg/memory/` 已弃用，勿再写入
+- **索引行只写「这条是什么 + 什么时候该打开它」，单条 ≤150 字符**；细节一律进 topic 文件
+  （2026-09-11 实测教训：索引曾涨到 40KB、单条 2054 字符，且**有些教训只活在索引行里、
+  topic 文件一个字都没有** ⇒ 照字数裁会无声丢知识。裁之前必须先把索引行里的标志物
+  逐个 grep topic 文件，缺的先搬回去再裁。）
+- **这条上限自 v0.45.208 起有会红的守卫**：memory 仓的 `check_index_line_length.py`
+  （pre-commit）。**动了 `MEMORY.md` 才拦，没动只吵** —— 例行拦无关提交会把人
+  养成 `--no-verify` 的习惯。**只检测，绝不自动裁**：裁哪里是语义判断，
+  自动裁剪器正是上一条要防的东西。接手 / 重装（幂等，钩子不进 git、clone 之后就没了
+  且无人知晓）：`/usr/local/bin/python3 check_index_line_length.py --install-hook`
+
+### memory 目录已纳入 git，**每次 session 收尾必须提交**（2026-09-11 起）
+
+`~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/` 是一个独立的本地 git 仓库
+（分支 `main`，**无远端**——记忆内容不外推）。没有任何东西会替你提交，
+所以这是 session 收尾清单的一项，与「更新 CHANGELOG.md」并列：
+
+```bash
+git -C ~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory add -A && git -C ~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory commit -m "<本次记了什么>"
+```
+
+- **没有改动就不提交**，别造空提交。
+- ⚠️ **这个目录会被多个 session 并发写**。`add -A` 可能捎上别人未提交的编辑——
+  记忆是追加性的，捎上比让它一直裸着好，**但 commit message 必须如实说明
+  哪些文件不是本次改的**，否则历史会张冠李戴（同「并发开工必须先占号」那节的教训）。
+- 建仓前扫过凭据、确认零命中；**日后若要加远端，属对外动作，必须先问用户**。
 
 ## 硬检查项：「这个失败，下游怎么知道？」（2026-09-05 起）
 

@@ -5,6 +5,2439 @@
 
 ---
 
+## [0.45.209] — 2026-09-11 — GuardBee 的方向是其余六只的复述：100%，零例外
+
+用户让我把 Guard 这只派生蜂也量一下。量到的比「派生」更极端。
+
+### Guard 的方向没有独立信息 —— 不是近似，是恒等
+
+它的 `direction` 只在四处被赋值：`resonance["direction"]`、census 的 bull/bear
+多数三分支、一条 LLM 分支（项目禁用 LLM，台账五个月零命中）。
+**每一个输入都是别的蜂的输出。**
+
+按 `session_id` 分组反解 `agent_memory`（一次扫描 = 一个 session）：
+
+| 窗口 | 用「其余六只的多数」预测 Guard 方向 | 打乱配对对照 |
+|---|---|---|
+| 2026-09-07 起（普查口径） | **100.0%（90/90）** | 38.9% |
+| 2026-09-07 之前（n=5 排行榜） | 85.5% | 70.7% |
+
+共振支 15/15、信号分散支 75/75，**零例外**。方向分布也逐格相同
+（Guard 41 多 / 37 空 / 12 中性 ≡ 六只的多数）。
+
+**顺带验证了 v0.45.163/164 的修复确实生效**（不是「推到 main 了」，是实测）：
+`一致性` 是 Guard 当时看见了什么的指纹 —— 修复后六只口径逐位吻合 **100%**、
+五只口径 0%；修复前正相反（六只 8.3% / 五只 46.8%），
+且修复前 **68.6%** 的一致性取值分母只能是 5。
+
+### 于是 Guard 在投票里是什么
+
+`risk_adj` 权重自 v0.45.172 归零，且 **v0.45.176 断开旁路后生产实测确实是 0**
+（2026-09-10 起 12/12 份 JSON 的 `swarm.dimension_weights.risk_adj == 0.0000`；
+09-08/09-09 还是 0.149/0.201 —— 这是按 MEMORY「判生产权重看 dimension_weights，
+不看 config」实读的，不是想当然）。
+
+⇒ **Guard 的分数对加权维度分毫无贡献；它对 `final_score` 唯一活着的通道就是那张方向票**，
+而那张票是其余六只多数方向的复述，`_compute_direction_vote` 把它当第 7 张独立票再数一遍。
+
+去掉那一票，782 份 JSON 里看多票 ≥3 的 628 行中 **110 行（17.5%）**跌破
+`BULLISH_GATE_CONFIG(min_agents=3)`（对比 v0.45.201 修 Oracle 只有 7.4%）。
+
+还有一处错配：Guard 被 `CONFLICT_ARBITRATION_CONFIG` 列为**异议蜂**、异议时权重 ×1.5。
+但它对自己读的那六只**零异议（0/90）**。它对最终方向 36.3% 的「异议」全部来自
+闸门机械（另一只异议蜂 BearBee 是 66.6%），不来自独立判断。
+
+⚠️ **本版不动这张票。** 它不是看多偏斜 —— 它放大的是「多数」而非「看多」——
+但它让共识看起来比证据更强。要不要让派生蜂投票是设计决定，留给用户。
+
+### Fixed — `swarm_agents/guard_bee.py`：crowding 降级没传导到下游
+
+`data_quality["crowding"]` 是**硬编码字面量 `"real"`**，而 v0.45.50 给拥挤度加过降级路径
+（全分量不可得 ⇒ `get_adjustment_factor(None)` 返回 1.0 中性）。
+**1.0 在正常三档（1.2 / 0.95 / 0.70）里不存在**，所以它是降级的精确指纹：
+
+    台账 1710 行里 **40 行（2.3%）** adj_factor == 1.00，
+    这 40 行**全部**向 `_apply_triple_penalty` 的 `data_real_pct` 上报满分。
+
+正是 CLAUDE.md 的头号硬检查项：**「这个失败，下游怎么知道？」** —— 答案是「不知道」，
+`_log.warning` 只进日志。改为降级时报 `"unavailable"`（`PROXY_SOURCES`，0.7 档）。
+取既有档位而非新字面量：按契约未分类算 **0.0 分**，那等于把「这一项降级」
+升格成「这一项全废」（同 v0.45.191 选 `"fallback"` 的理由）。
+
+默认值**写成降级、真算出来才改 `"real"`** —— 反过来写会漏掉 `crowd is None`
+那条**不抛异常**的路径，而那正是此前 40 行被上报成满分的原因（M2 变异专测这条）。
+
+### Added — `tests/test_guard_derived_and_crowding_dq.py`（9 条）
+
+变异 **5/5** 被抓到（含退回硬编码、默认值写反、降级值用未分类字面量、
+正常路径不再报 real、以及派生性锚点被换掉），还原后复验 7 passed。
+`TestGuardHasNoIndependentDirection` **不锁行为只锁输入集合** ——
+哪天 Guard 真接了独立观测源、或 `risk_adj` 权重不再为 0，它会红，提醒回来重测派生性。
+
+### Added — 世代边界第 13 条（2026-09-11，与 v0.45.201/197 同日扩展同一标签）
+
+实测 2026-09-10 起降级触发 **0 次**（40 行分布在 05-17~09-01）⇒ **作废 0 条**。
+
+### 我自己两次读错，都在半路自证里翻出来
+
+1. **按 (date,ticker) 分组反解，指纹只对上 9.4%** —— 我差点据此说「Guard 看见的板是错的」。
+   真因是**35.3% 的 (date,ticker,agent) 组合有多行**（同日重扫），我的键只留了最后一条。
+   换成 `session_id` 分组后修复后期直接 100%。**9.4% 这种数字应该先怀疑仪器，不是先怀疑生产。**
+2. **`census_source` 在台账里全是 None**，我一度当成「v0.45.163 承诺的机读口径标记没落盘」。
+   它在 `AgentResult.details`（→ analysis JSON），不是 `_publish(details=)`（→ agent_memory）。
+   **两个 details 不是一个 sink。**
+
+全套 **4120 passed**，唯一的红是既有设计意图的 BLS `TestCoverageHorizon`。
+
+---
+
+## [0.45.208] — 2026-09-11 — 「索引行 ≤150 字符」规约终于有了会红的东西
+
+规约（v0.45.194）只规定了**怎么裁**，没规定**谁在什么时候检查**，于是它是一次性
+动作，而索引膨胀是持续压力。按本仓判据问「**谁会红？**」——在此之前**没人**。
+
+### Added
+
+- memory 仓（`~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/`，独立本地
+  库、无远端）新增 `check_index_line_length.py` + 由其 `HOOK` 常量生成的
+  `.git/hooks/pre-commit`。**改动不在 Alpha Hive 仓**，本仓只加一条指针。
+- **为什么不是 pytest**：`MEMORY.md` 在本仓之外，worktree / CI 里不存在 ⇒ 只能挂
+  `pytest.skip` ⇒「只有一台机器上的一个目录」⇒ 等于没有。
+  ⚠️ 实测补充：元守卫 `tests/test_no_invisible_prod_data_skips.py` **抓不到**这一
+  形状——它的 token 名单是路径专用的（`pheromone.db` / `PROD_DB` / …）。
+  **同物种但不在名单上，比在名单上更危险**：没有任何东西会红。
+- **只检测，绝不自动裁。** 裁剪前的「标志物逐个核对 topic 文件」是语义判断，
+  脚本做不了；自动裁剪器会无声丢知识（v0.45.194 实测：有些教训只活在索引行里）。
+  报错信息交还的是核对**程序**（语义锚点、U+2212 之类字符规范化陷阱），不是数字。
+- **拦 / 吵分界**：动了 `MEMORY.md` ⇒ 拦；没动 ⇒ 只吵。例行拦截无关提交会把人
+  养成 `--no-verify` 的习惯，比没有护栏更糟。
+
+### 判据落地（这几条是本次真正的产出）
+
+- **选行是结构规则，不是裸串**：第 0 列列表项（`- `/`* `/`+ `/`1. `）+ 缩进续行，
+  续行长度**累加**（否则折成两行即可绕过），围栏代码块内不算。
+  配**条目数下限 20** 作成对断言——「没抓到超限」必须配「确实抓到了条目」。
+- **口径由可执行断言钉死**，不靠注释：长度 = `len(str)` 字符数（`≤150` 合法、
+  151 起红）。自证里「150 字符（含中文）不红」那例在任何按字节计的实现下都会变红
+  （150 个中文字 ≈ 420 字节，实测 396）。
+- **`_self_test()` 在每次提交时先跑**：守卫在每次生效时自证有牙，而不是「某个已
+  成为历史的 session 里验过一次」。
+- **钩子用 `exec`**：python 的退出码**就是**钩子的退出码。本仓四次「编辑失败、
+  提交照跑」（v0.45.121/167/194 + memory 库 `cbcd834`）的共同机制是断言正确失败、
+  退出码却没传导；本环境 zsh 下 `set -e` 不阻断。缺解释器/缺脚本一律 fail-closed。
+
+### 实测（全部真跑，非推断）
+
+- 行为五例（干净克隆、每次复位后强制同步被测版本）：动+151⇒**拦**且 `HEAD` 不动 /
+  动+150⇒放行 / 未动且合规⇒放行 / 未动但继承越界⇒**吵**且放行 / 再动⇒拦。
+- 检测器变异 5 种（边界 `>`改`>=`、选行收窄成裸串 `startswith("- [")`、去掉围栏、
+  不累加续行、长度改字节数）**全部被自证抓到并拦下提交**。
+- 历史回放：`MEMORY.md` 的 19 个版本里 **10 个会被拦**。`97fca18` 裁完之后**第二个**
+  提交就把它顶回越界，直到 8 个提交后才被下一次人工裁剪撞上。
+- 现状核对：`MEMORY.md` 49 条索引条目、最长 147、超限 **0**；`CLAUDE.md` 的表述是
+  「≤150」，150 本身合法，守卫边界与之一致。
+
+### 过程中撞到的坑（已记入 memory）
+
+- `git checkout -- <file>` 从**索引**还原，暂存的变异会静默留存 ⇒ 后续两例归因全错。
+- `git clean -fd` 删掉未跟踪的被测脚本 ⇒「被挡」实为脚本缺失，差点报成守卫结论。
+- 变异脚本的锚点转义写错 ⇒ 变异**未落盘**，而编辑失败后提交照跑（第五次同物种，
+  这次发生在我自己的测试夹具里）。已加「命中数≠1 就中止」。
+- 并发：另一 session 的 `git add -A` 把我未提交的在建脚本卷进了他们的提交
+  `eca9c35`（信息为「派生蜂…」，与该文件无关），已在后续提交信息里如实标注。
+
+Changed / Removed：删掉仓库内第二份 `hooks/pre-commit`（钩子正文唯一真相收口到
+`HOOK` 常量）；修 `_read_staged()` 的不可达分支——`git show :<file>` 对被跟踪文件
+**永远成功**，改用 `git diff --cached --name-only` 判「本次动没动它」。
+
+---
+
+## [0.45.207] — 2026-09-11 — 默认测试出网清零：剩余 11 条也清掉，并撤掉一条被我自己造出来的 skip
+
+接 v0.45.196（那版清掉 `test_pipeline.py` 的 12 条）。本版清掉余下 11 条，
+**默认选择集（`-m "not integration"`）现在 0 条出网。**
+
+### Fixed — `test_dashboard_renderer.py`：4 条，30.3s → 0.78s（全文件）
+
+两条取数腿：`render_dashboard_html:2381` → `get_macro_context()`，以及
+`render_dashboard_html` → `_detail()`（dashboard_renderer.py:548）→ `yf_gate`
+→ `yfinance.Ticker(...).history("5d")` 逐票补价（**每条测试都走，一条调 4 次**）。
+挂 `stub_yfinance` + `stub_cboe_vix`。`test_renders_html_string` 此前是全套最慢的
+一条（30.3s），是下一个要撞 `--timeout=60` 的候选。
+
+### Fixed — `test_macro_snapshot.py`：7 条，44.3s → 0.5s（全文件）
+
+三条腿，第三条是 v0.45.196 没遇到的 **FRED**：
+
+    _fetch_macro_data:416  yfinance 7 symbol ＋ :916 板块 ETF（_fetch_one）
+    _fetch_macro_data:456  → cboe_vix._download
+    _fetch_macro_data:566  → _fetch_fred_series → api.stlouisfed.org
+
+本文件每条测试都付全额代价（不像别处只有第一条付）：它的 `_clean` fixture
+每条测试前后都调 `set_macro_snapshot(None)`，而那会清空 `fred_macro._CACHE`。
+
+### Added — `tests/conftest.py::stub_fred`（可复用源桩）
+
+钉 `_load_fred_key` → `""`，契约是 `_fetch_macro_data` 自己写的 `if fred_key:`
+（没 key 就整段跳过）。**刻意钉 key 而不是钉 `_fetch_fred_series`**：
+`_load_fred_key` 读 `~/.alpha_hive_fred_key`（**真实 home，不受 `ALPHA_HIVE_HOME`
+隔离**）与 `FRED_API_KEY` 环境变量，于是同一条测试在有 key 的开发机上打 FRED、
+在 CI 上不打 —— 两台机器跑的是两条分支。钉死它顺带消掉这个环境依赖。
+
+### ⚠️ Fixed — 我自己造出来的一条 skip，当场撤掉
+
+把三条腿全钉死后，`test_no_snapshot_still_stamps_a_date` **开始恒 skip**
+（19 passed → 18 passed + 1 skipped）。根因：`_fetch_macro_data` 在
+`if not data: return base`（fred_macro.py:472）早退，而 conftest 的 autouse
+`_block_same_day_macro` 已把 `_same_day_macro_data` 钉成 `({}, {})` ——
+源全钉死后 `data` 恒空 ⇒ 恒降级 ⇒ 那条测试自带的
+`if as_of_mode == "fallback": skip(...)` 恒中。
+
+**这正是 CLAUDE.md skip 判据要治的形状，而且是我自己制造的**：
+「把 11 条 flaky 换成 1 条恒 skip」不是修好了，是把噪音换成了静音。处置：
+
+1. 新增 `live_same_day` fixture 供上合成的当日非 yfinance 数据，让**实时分支
+   真的被走到**（值刻意不带 `@` 后缀 —— 那是补跑口径标记，本类有断言禁止它
+   出现在实时口径里）。
+2. 那条 `skip` 改成**断言**：真降级了要红，不许再渲染成「没问题」。
+3. 顺带收紧同类的一条恒真断言：`test_no_snapshot_keeps_live_semantics` 原本
+   断言 `as_of_mode != "backfill"`，而降级值 `"fallback"` 也满足它 ——
+   改为正向断言 `== "realtime"`。
+
+⚠️ 记一笔口径：19 passed 是**改动前后同一个数**，不是"多修了一条"。
+
+### Changed — 棘轮白名单 8 → 3
+
+`tests/test_network_marker_discipline.py` 的 `_KNOWN_NETWORK_MARKED` 缩到 3 条。
+**它的「白名单过期」那条断言在本版第一次真正发挥作用**：marker 一清掉它就报
+「已不存在 5 条」，逼着表跟着缩 —— 这正是当初为它写反向断言的理由
+（只有子集语义时，表会悄悄退化成历史快照）。
+
+剩余 3 条：`test_offline_transport_gate::test_network_marked_tests_are_exempt`
+（闸的自证，marker 是被测对象，必须留）；`test_options_analyzer` 与
+`test_treasury_yields` 各 1 条 —— 探针实测**并没有**真的出网，属标错，
+核实各自该配什么源桩需单独一版，且它们不产生 flake。
+
+### 变异校验（每条都实测判红）
+
+| 变异 | 结果 |
+|---|---|
+| macro_snapshot 去 `stub_yfinance` | `伸手取外网了：['curl.GET query1.finance.yahoo.com']` |
+| macro_snapshot 去 `stub_cboe_vix` | `伸手取外网了：['urlopen cdn.cboe.com']`（6 条） |
+| macro_snapshot 去 `stub_fred` | `伸手取外网了：['requests.GET api.stlouisfed.org']` |
+| macro_snapshot 去 `live_same_day` | `AssertionError: 宏观整体降级了——实时分支没走到` |
+| dashboard 去 `stub_yfinance` | 4 条 `curl.GET query1.finance.yahoo.com` |
+| dashboard 去 `stub_cboe_vix` | 1 条 `urlopen cdn.cboe.com` |
+
+⚠️ 取证纪律记一笔：`stub_cboe_vix` 那条变异第一次跑出来报的是 **yahoo**，
+与预期不符。原因是 addopts 的 `-x` 在第一条 error 就停，加上我的
+`sort -u | head` 按字母序把 `curl` 排在 `urlopen` 前面 —— 去掉 `-x` 重跑才
+看到真实分布（6 条全是 cdn.cboe.com）。**解释不了的变异结果不能写进结论。**
+
+
+
+---
+
+## [0.45.206] — 2026-09-11 — 全量 `ruff check .` 从未在 CI 跑过：46 个错，其中 7 个是本仓头号故障形状
+
+起因是查一个无关的问题：`.github/workflows/ci.yml` 半年来一直躺在磁盘上却**未被跟踪**
+—— 也就是 GitHub Actions 从来没见过它。顺着查下去发现它是 `tests.yml` 的**前身**，
+而它定义的 `ruff check .` 全量 lint 至今没有任何地方在跑。
+
+### Added
+
+- **`tests.yml` 增加 `ruff` job（全量规则）。**
+  本仓库早已装好并配置 ruff（`pyproject` 的 `select = ["E","F","W"]` + 一串 ignore），
+  但 CI 里只有 `test_no_undefined_names.py` 以 `--select F821`/`F823` 跑了**两条窄规则**。
+  其余规则半年无人执行，首次全量跑出 **46 个错**。
+  - 独立成 job 而非并入 pytest：lint 30 秒、pytest 4 分钟，分开后
+    「lint 错」与「测试挂」在 Actions 页面是两个格子。
+  - **刻意不加 `needs:`** —— 与 pytest 并行，lint 红不该挡住看测试结果。
+    （旧 `ci.yml` 的 `test` job 写着 `needs: lint`，在当前 46 个错下
+    会让测试**永远跑不到**。）
+
+### Fixed —— 46 个 lint 错，分两批处置
+
+**第 1 批：25 个安全自动修**（`ruff --fix`，不带 `--unsafe-fixes`）
+- 16 × E401（多 import 同行）、3 × W293、4 × W605、2 × F811。
+- W605 是每次跑 pytest 都在刷屏的 `DeprecationWarning: invalid escape sequence '\ '`
+  —— 4 个模块 docstring 含 `\ `，改为 `r"""`。
+  **逐个用 `ast.get_docstring` 比对求值后的字符串，4/4 逐字符相同**
+  （`r"""` 会把 `\n`、`\t` 变成字面量，不验就改是在赌）。
+- 2 × F811 是函数内多余的 `import math`/`import os`，已断言模块级 import 仍在。
+
+**第 2 批：7 个裸 `except:`（E722）—— 逐个收窄异常类型 + 补观测点**
+
+不是简单换成 `except Exception:`。裸 `except:` 正是 CLAUDE.md
+「这个失败，下游怎么知道？」要治的形状，逐处给了能回答「谁会红」的观测点：
+
+| 位置 | 原来 | 现在 |
+|---|---|---|
+| `check_0520_options.py:98` | `except: pass` | 收窄 + 打印**哪个到期日**失败；并加「6 个全失败就 `SystemExit`」——原先 `pd.concat([])` 只抛一句 `No objects to concatenate`，读的人会去查 pandas 而不是查网络 |
+| `check_short_positions.py:107` | 同上 | 同上（8 个到期日） |
+| `deep_analysis.py:191` | `except: score = 5.0` | 收窄 `(TypeError, ValueError)` + warning。**5.0 在图上与真实中性分不可区分** —— 参 MEMORY.md「崩掉的蜂被记成 5.0 中位票」 |
+| `deep_analysis.py:532` | `except: return 0` | 收窄 + warning 带上无法解析的区间串。返回 0 会静默抹掉该情景对期望收益的贡献，而 `ev` 看上去完全正常 |
+| `oi_wall.py:38` | `except:` → 兜底 `226.0` | 收窄 + 日线为空时 **`SystemExit` 而不是用兜底常数**。`current_price` 驱动整张图（轴范围/ITM-OTM 标注/当前价竖线/标题），陈年常数会画出一张**看起来正常但是错的**图 |
+| `regime_analyzer.py:136` | `except: sharpe = 0.0` | 收窄 `(StatisticsError, TypeError)` + warning 带 n。0.0 在下游读起来是「无超额收益」而非「算不出来」 |
+| `regime_analyzer.py:296` | `except: continue` | 收窄 `(ValueError, TypeError)` + warning 带坏值。**与 v0.45.192 修的 dashboard 幽灵日期同一形状**：解析器吃下不是日期的串，静默跳过 |
+
+⚠️ `check_0520_options.py` 的**循环变量就叫 `e`**，异常变量必须另起名
+（写成 `except Exception as e` 会当场覆盖掉要打印的到期日）。
+
+**其余 14 个**：4 × E731（`lambda` 赋值 → `def`，ruff 视作 unsafe fix 因为改变 `__name__`，
+故手工改）、10 × W293 —— 这 10 个**全部落在 docstring 内**，
+所以 `--fix` 正确地拒绝自动改（改它等于改字符串内容）；已逐行断言确为纯空白行后清除。
+
+### Removed
+
+- **`.github/workflows/ci.yml`**（未跟踪的 2026-03-03 旧稿，移入废纸篓）。
+  它是 `tests.yml` 的前身，而 `tests.yml` 逐条推翻了它的设计：
+
+  | | `ci.yml`（旧稿） | `tests.yml`（在跑，注释有论证） |
+  |---|---|---|
+  | Python | 3.10 / 3.11 / 3.12 矩阵 | **仅 3.11**（与生产扫描一致） |
+  | 测试选择 | `-m "not slow"` → **4057** 条 | `-m "not integration and not network"` → **3949** 条 |
+  | `-x` | 未覆盖，撞第一个失败就停 | `--maxfail=0`，一次看全 |
+  | 并发 | 无 | `concurrency` + cancel-in-progress |
+
+  差额 **110 条**正是打真实外部 API、或需要干净检出里不存在的生产产物的测试
+  —— `tests.yml` 的注释明确论证过为什么排除它们
+  （「一个时红时绿的 CI 比没有 CI 更糟：它训练所有人忽略红灯」）。
+  照原样提交 `ci.yml` 会得到一个**常红**的第二条流水线，与「让 CI 跑起来」相反。
+
+### 附：`ci.yml` 为什么会有个悬空 blob（查清了，与本次改动无关）
+
+它**从未被提交过**，不存在「脱管」。对象库里那个 blob 是悬空的松散对象，
+来自 2026-09-10 01:56:30 的一次 `git stash -u`：`-u` 会把未跟踪文件扫进一个
+单独的 `untracked files on main` commit（实测 `142a5b6a` 只含这一个文件），
+`stash pop` 后 stash 被 drop，三个 commit 失去引用、blob 悬空至今。
+`ci.yml` 的 inode 生于 `01:56:38`，比 blob 晚 8 秒 —— 这个「内容先进 git、
+文件后落盘」的倒序只有 `stash pop` 能解释。
+⚠️ 那次用的是**裸 `git stash`/`pop`**，正是 CLAUDE.md 明令禁止的
+（19 个 worktree 共享 stash 栈）。
+
+### 已知：本版不改变 CI 当前的红
+
+`tests` job 在 main 上**本来就是红的**，唯一失败项是
+`TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`
+—— CLAUDE.md 写明的**设计内变红**（含义＝去看 BLS 发 2027 日程没，不是调阈值）。
+本版改动后本地全量离线套件复现的失败项**与之完全一致**，即零回归。
+
+## [0.45.205] — 2026-09-11 — 同形状不等于同物种：`unusual_signal` 的单边性实测后**决定不改**
+
+接 v0.45.201。那条结尾我自己留了个待办：`options_analyzer._score()` 的
+`unusual_signal = min(2.0, bullish_unusual * 0.5)` 同样单边，看空异动对分数毫无影响。
+**我当场就把它记成了同物种的第 5 例。量完发现不是，而且「修」它会造成回归。**
+
+### 量到了什么
+
+`detect_unusual_activity` 用**完全相同**的五条规则扫 calls 与 puts
+（`_scan(calls, is_call=True)` / `_scan(puts, is_call=False)`），且 `"bullish": is_call`。
+所以 put 侧那一半一直在同一个列表里，只是没被数 —— 838 份 analysis JSON
+（2026-03-10~09-10）：call 侧 14303 条、**put 侧 9993 条**（41.1%），
+79.6% 的行至少有一条 put 侧，**18.6% 的行 put 侧比 call 侧还多却照样加分**。
+
+**先自证仪器**：从 `iv_rank / put_call_ratio / gamma_exposure / unusual_activity`
+四个分量重建 `options_score`，**97.6% 逐位相同**；对照（抹掉 unusual 项）
+掉到 14.9%（−82.7pp）⇒ 重建率有鉴别力。
+
+**但「补上 put 侧」的前提不成立。** 逐日横截面 rank-IC 对 T+7
+（用 `close_t7`，未被 SL/TP 截断；不池化，逐日算再按周聚合）：
+
+| 信号 | 均 IC | >0 天 | p（21 不重叠周） |
+|---|---|---|---|
+| call 侧计数（现行） | +0.119 | 67.9% | 0.14 |
+| **put 侧计数**（被丢的一半） | **+0.155** | 71.7% | 0.14 |
+| call + put | +0.136 | 73.6% | 0.13 |
+| **call − put（对称化后的量）** | **+0.035** | 50.9% | **0.90** |
+| (call−put)/(call+put) | −0.034 | 49.1% | 0.88 |
+
+**机制**：`Spearman(call侧, put侧) = 0.886`。两者主要在测同一个东西 ——
+**该标的当日异动总量/关注度**，不是方向（`bullish = is_call` 分不出
+「买 put 对冲」与「卖 put 看多」）。取差把共同的、有信息的成分消掉，只剩噪声残差。
+⇒ 对称化是把 IC≈0.12 的量换成 IC≈0.03 的量。
+
+### ⚠️ 反过来也不要过度解读
+
+以上 IC **全部过不了多重比较校正**：21 个不重叠周、本轮试了约 10 种变换，
+最好的 `bullish_unusual > 0` 二值 p=0.004、×10 后 0.04，**且是事后从同一批数据里挑出来的**。
+所以证据只支持**不动**，**不支持**「现行形式已被证明有效」。同
+`final_score_dilution_report` 那次的教训：别把「没证伪」读成「已验证」。
+
+### Changed — 无行为改动
+
+- `options_analyzer._score()`：只加注释，记下取证与判据。**评分逐位不变 ⇒ 不需要世代边界。**
+- `tests/test_oracle_direction_keyword_vote.py`：更正 `test_bearish_counterpart_still_absent_upstream`
+  的言外之意。它原先写「哪天补上对应项，回来重评方向逻辑」——
+  那句话暗示补上 put 侧会让 Oracle 的方向投票值得恢复，**实测是反的**。
+  （我在 v0.45.201 里写下它时，用的正是这次被证伪的那个直觉。）
+
+### Added — `tests/test_options_analyzer.py::TestUnusualSignalOneSidedIsDeliberate`（4 条）
+
+判据本体是 `test_put_side_does_not_reduce_the_score` —— 加 put 侧异动不得改变分数，
+谁对称化谁红，报错信息里直接给出净额 IC 与去哪读取证。
+配 `test_call_side_still_drives_the_score` 作正对照（否则一个恒返回常数的实现也能满足它）。
+变异 **5/5 被抓到**，含最可能被写出来的两版「修复」：净额、以及照本函数里
+`iv_signal`/`gex_signal`「缺失取中性」先例写的居中对称。
+
+### 判据（值得带走的那一句）
+
+**「同形状」不等于「同物种」。** 问一句：*缺的那一半，是根本不存在，还是存在、只是不叫那个名字？*
+
+| | Oracle 关键词投票（真缺陷，v0.45.201 已修） | `unusual_signal`（不是） |
+|---|---|---|
+| 看空那半的数据 | 五个看空词五个月**零出现** | put 侧 **9993 条** |
+| 分支可达性 | 结构上**不可达** | 两侧同规则扫描，数据齐备 |
+| 补上它 | 恢复应有的对称 | **是回归** |
+
+这个物种的清单很好用，也正因为好用会让人照形状认 —— 我照到第五个就认错了。
+
+---
+
+## [0.45.204] — 2026-09-11 — `GitHubTool` 是活类，但方法不全是活的：删四个零读者方法，并按住白名单不动
+
+v0.45.198 按当时简报明令没动 `GitHubTool`（`report_deployer` 的 gh-pages / main
+部署链路依赖它），只留下一个方法粒度的判定交给本版。结论：**删**
+`push` / `create_issue` / `list_branches` / `diff`（及其私有助手 `_parse_diff_stats`）。
+
+### Removed — 五个零读者方法
+
+判死按 auto-memory `alpha-hive-dead-field.md`：两条独立证据，每条自带正对照。
+
+**证据①（静态，重数一遍）** —— 口径必须是 `git ls-files '*.py' | xargs grep`，
+**不能**用 `rglob` / `grep -r`：生产 checkout 的 `.claude/worktrees/` 下有 14 个
+嵌套仓库副本，会把陈旧代码算成读者。全仓 `agent_helper.*` 访问**全部**是 `.git`：
+
+| 成员 | 读者 | 来源 |
+|---|---|---|
+| `run_git_cmd` | 9 | `report_deployer.py` |
+| `repo_path` | 3 | `report_deployer.py` |
+| `commit` | 1+3 | `report_deployer.py:405` + `tests/test_report_deployer_whitelist.py` |
+| `status` | 1 | `report_deployer.py:389` |
+| `push` / `create_issue` / `list_branches` / `diff` / `_parse_diff_stats` | **0** | — |
+
+`.push` 全仓唯一命中是 logger 名字串 `"alpha_hive_bot.push"`；`.diff` 四处全是
+pandas `Series.diff()`。正对照：同一套检索找得出上面四个活成员，检索本身有效。
+
+三个盲区逐个复查，均零命中：**方法名作字符串**（全跟踪文件类型含 .md/.json/.sh，
+`create_issue`/`list_branches` 仅命中本条 CHANGELOG 自己）、**仓库外调用者**
+（`~/.claude/scripts/` 12 个文件 + `mcp-servers/` 五个 submodule + LaunchAgents）、
+**动态派发**（`report_deployer` 与 `agent_toolbox` 零 `getattr`/`eval`；
+`alpha_hive_bot/bot.py:252` 的 `action == "push"` 是 Telegram 定时推简报，不 import 本模块）。
+
+**证据②（运行期，与 grep 独立）** —— 给 `GitHubTool` 每个成员挂调用记录器，在
+无远端的沙箱仓库里跑真实的 `report_deployer.auto_commit_and_notify`，**生产与
+测试两条分支都走**（含 gh-pages 分支）。实际被 dispatch 到的只有
+`run_git_cmd` / `status` / `commit`；被删的五个零调用。正对照 = 那三个活方法全部
+出现，证明探针真跑到了产线而不是在空转。删除后复跑，行为逐字不变。
+
+**`.push()` 不是「暂时没人用」，是被并行路径取代了**：`report_deployer` 推送走
+`run_git_cmd("git push origin main")`，绕开本方法。留着就是同一件事两种做法。
+
+**另两个还是坏的。** `list_branches` / `diff` 无条件读 `result["stdout"]`，而
+`run_git_cmd` 有**两种**失败形状：git 非零退出返回 `{"success":False,"stdout":…}`，
+subprocess 自己炸则返回 `{"success":False,"error":…}`——**没有 `stdout` 键**。
+实测后者 `KeyError: 'stdout'`；非仓库目录下则静默返回 `{"branches": []}` 冒充成功。
+即 CLAUDE.md「写守卫先问失败时是返回还是抛，两条路径各堵一次」，两条都没堵。
+零读者正是这两个 bug 从没被发现的原因。`create_issue` 另有一点：它直接
+`subprocess.run(["gh", …])`，是本模块里**唯一绕过自家子命令白名单**的出口。
+
+### Changed — `_ALLOWED_GIT_CMDS` 保持原样，并写明为什么
+
+**本任务最容易掉的坑**：删了 `push()`/`diff()` 顺手把白名单里的 `push`/`diff` 也收窄。
+不能。白名单约束的是 `run_git_cmd` 收到的**字符串**，而调用方直接下发整条命令——
+`report_deployer` 自己传 `"git push origin main"` / `"git branch -D …"` / `"git fetch origin"`。
+方法没了不等于子命令没人用了。已把这条理由写进白名单上方注释，省得下一个人再推一遍。
+
+`AgentHelper.summary()` 原文宣传 `push(branch) ✓` 与 `diff(branch1, branch2) ✓`，
+删完就成了假话，同步改为 `run_git_cmd` / `status` / `commit`。
+
+### 变异校验：一次**等价变异**，和一次**探针自己坏了**
+
+清 `__pycache__` → 基线 `4100 passed, 1 failed`（`TestCoverageHorizon` 按设计红）
+`, 1 skipped, 80 deselected, 2 xfailed`，收集数 4184 稳定。五个 def 行 anchor 各唯一；
+全仓无枚举 `GitHubTool` 成员的测试（删方法不会因「方法数变了」而红）。
+
+| 变异 | 测试红 | 真实生产读者 |
+|---|---|---|
+| 删 `run_git_cmd` | **3 红** | 9 |
+| 删 `commit` | **3 红** | 1 |
+| 删 **`status`** | **0 红** | **1（`report_deployer.py:389`）** |
+| 删 `push`/`create_issue`/`list_branches`/`diff`/`_parse_diff_stats` | 0 红 | 0 |
+
+⚠️ **五条全是等价变异，而这不构成删它们的理由。** 关键校准是 `status` 那行：
+它**在生产里被调用**，删掉照样零红——本仓测试根本没覆盖 `status`/`push`/`diff`。
+所以「零红」在这里对「死不死」**零信息量**，判死全靠上面两条证据。
+变异校验真正测出来的是另一件事：**这些方法从来没被测过**。
+
+**探针自己坏过一次，是正对照抓出来的。** 第一版批量变异脚本对 `run_git_cmd`
+（9 个读者）报「等价变异」——荒谬到一眼可见，才发现循环里变异根本没落地而输出被
+静默吞掉。若当初只变异那四个疑似死方法、不带活方法作正对照，七条「零红」会原样
+进结论。修法：变异后先断言 `def X(` 计数 1→0，不落地就作废本条并出声。
+即 CLAUDE.md「谁会红？」用在量具自己身上。
+
+删除后全套复跑与基线逐字一致（`4100 passed, 1 failed, 1 skipped, 80 deselected, 2 xfailed`）。
+`ruff check .` 46 errors，与基线持平；`ruff check --select F401 --isolated agent_toolbox.py`
+全绿（`pyproject` ignore 了 F401，查死 import 必须 `--isolated`），无残留死 import。
+
+### 顺带发现（**未在本版修**，已另开任务）
+
+`report_deployer` 测试模式分支下发的 `git checkout -b …` / `git checkout main` /
+`git reset --hard origin/main`，其子命令 `checkout`、`reset` **不在**
+`_ALLOWED_GIT_CMDS` 里，被静默拒绝——而紧随其后那句
+`_log.info("本地 main 已恢复至 origin/main（测试数据不污染生产）")` 是**无条件**打的。
+即失败没传导到下游：日志声称回滚完成，实际回滚从未执行。已实测确认。
+本版**不修**——修它要放宽安全边界（往白名单加 `checkout`/`reset`）或改控制流，
+属另一个改动面，不该混进一次死代码清理。已在白名单注释里标出，勿顺手加项。
+
+
+## [0.45.203] — 2026-09-11 — 一条恒真断言守住的其实是**真实不变式的否定**
+
+`tests/test_paths_not_frozen_at_import.py::TestFileDerivedSpeciesDoesNotSpread::test_both_directions_are_guarded`
+里的重叠检查**结构性恒真**：
+
+```python
+overlap = self.MUST_STAY_FILE_ANCHORED & {
+    k for k in self.KNOWN if k not in self.MUST_STAY_FILE_ANCHORED}
+```
+
+**为什么恒真**：集合推导式先把 `MUST_STAY_FILE_ANCHORED` 里的元素**全部滤掉**，
+剩下的按定义与 `MUST_STAY_FILE_ANCHORED` 不相交，再与它求交 ⇒ 对**任意**两个集合
+都恒为空集，与实际内容无关。这是 `x and not x` 的集合版。
+实测：`A={1,2,3}; B={1,2,3,4,5}` ⇒ 恒真写法得 `set()`，本意写法 `A & B` 得 `{1,2,3}`。
+本仓实测（v0.45.198 清理后）：`|KNOWN|=16`、`|MUST_STAY|=11`、真实交集 **11 项**，
+而该断言报 0 项。它从未检查过 docstring 声称要检查的东西。
+
+### 处置：方案 A —— 守卫写错了，但错得比「重叠该允许」更深
+
+不是「重叠可以允许」，而是**重叠必须成立**。两条内容守卫是
+
+```
+G1（子集语义）_scan() - KNOWN      == ∅   ⇔  _scan() ⊆ KNOWN
+G2（超集语义）MUST_STAY - _scan()  == ∅   ⇔  MUST_STAY ⊆ _scan()
+```
+
+合起来 ⇒ `MUST_STAY ⊆ _scan() ⊆ KNOWN` ⇒ **`MUST_STAY ⊆ KNOWN`**。
+穷举 4 元素全集的 `(MUST_STAY, KNOWN, scan)` 三元组，「G1∧G2 为绿但 `MUST_STAY ⊄ KNOWN`」
+的反例数为 **0**。
+
+所以老 docstring 要求的「不许重叠」在 `MUST_STAY` 非空时与 G1∧G2 **结构上不可同时满足**——
+那条断言恒真地断言了真实不变式的**否定**。**恰恰因为它恒真，这个自相矛盾的规格才没炸**：
+一条死断言把一个矛盾的规格伪装成了「已被守住」。这比单纯的「少测了一项」更隐蔽，
+因为它让规格看起来经过了审查。
+
+`MUST_STAY ⊆ KNOWN` 此前一直**靠巧合成立**（没有任何东西断言它），现改为显式断言。
+`KNOWN` 严格大于 `MUST_STAY` 是正常的：多出的 5 项是 C/D 两类
+（`gui/app.py` / `scheduler.py` / `pead_analyzer.py` / `push_report_to_slack.py` /
+`scan_coverage_gate.py`），已登记但并不要求永远是 `__file__`。
+同类另两条断言（两个集合非空）本来就有效，原样保留。
+
+### Changed — `test_both_directions_are_guarded` 连**定义位置**一起改
+
+**位置是语义**（沿用 v0.45.202）：`addopts` 带 `-x` ⇒ **谁先红，谁就是人看到的诊断**。
+这条元守卫原先定义在类**末尾**，即便断言改对了也永远抢不到话——两张表不自洽时
+`test_no_new_file_derived_paths` 会先红。现移到 `test_scanner_has_teeth` 之后、
+两条内容守卫之前（扫描器坏掉仍先于内容问题报出，这个优先级是对的）。
+
+**这不是推测，是实测**。同一张不自洽的表（`KNOWN` 删一项，`MUST_STAY` 仍留着）：
+
+| | 人看到的第一个红 | 那句诊断 |
+|---|---|---|
+| 改动**前**的文件 | `test_no_new_file_derived_paths` | 「**新增**了 `__file__` 派生的路径常量」 |
+| 改动**后**的文件 | `test_both_directions_are_guarded` | 「这些项要求保持 `__file__` 锚定，却没登记进 `KNOWN`」 |
+
+前者指着一个**生产文件**让你判断它是代码还是数据，而真因是白名单**少**了一项——
+没有任何东西被「新增」。正是 CLAUDE.md 记的「把一种失败误报成另一种」。
+
+### Added — `test_meta_guard_speaks_first`
+
+用反射核对类内方法定义顺序，挪动即红——不靠注释提醒（注释不会变红）。
+同时钉住两个改名面：主体改名、参照物改名，各给一句明确诊断而不是 `KeyError`。
+
+### 变异校验（7 条，**全部真跑过**，不是举例）
+
+| # | 变异 | 新写法 | 原恒真写法 |
+|---|---|---|---|
+| M0 | 不变异（对照） | 🟢 18 passed | — |
+| M1 | `MUST_STAY` 加一项、`KNOWN` 无 | 🔴 **首红** | 🟢 **绿** |
+| M2 | 从 `KNOWN` 删一项（`MUST_STAY` 仍有） | 🔴 **首红** | 🟢 **绿** |
+| M3 | 把元守卫挪到两条内容守卫之后 | 🔴 `test_meta_guard_speaks_first` | — |
+| M4 | M2 的表 + 改动前的文件 | 首红＝`test_no_new_file_derived_paths`（误诊，见上表） | — |
+| M5 | 改动前的文件、表不动 | 🟢 全绿（断言活着但没判别力） | — |
+| M6 | 主体方法改名 | 🔴 给出诊断而非 `KeyError` | — |
+| M7 | 参照物方法改名 | 🔴 「已失去参照物」 | — |
+
+M1′/M2′ 那两个「原写法仍绿」的格子是本条的**核心证据**：同一个输入下
+新断言红、老断言绿 ⇒ 老断言从未起过作用。
+
+⚠️ M4 第一版做坏了：我在「元守卫挪回末尾」的同时保留了 `test_meta_guard_speaks_first`，
+于是先红的是顺序守卫本身，证明不了「人会看到误诊」。重做时直接取
+`git show HEAD:tests/...` 的**改动前真实文件**再施加同一变异，才得到上表那一行。
+教训与 v0.45.202 的坏夹具同源：**变异跑绿/跑红的理由，必须和它声称要证明的东西是同一件事**。
+
+### 测试
+
+全套 `--maxfail=200`：**4101 passed, 1 failed**（仅 `TestCoverageHorizon`，按设计红）、
+1 skipped、80 deselected、2 xfailed。ruff 全仓 error 数 46 → 46（零新增）。
+
+## [0.45.202] — 2026-09-11 — 守卫补第三条：冲突标记要报「冲突」，不要报「重号」
+
+由 v0.45.200 那个 session 指出的邻域。**不是假想**：`4b5e4d9` 是一份含
+`<<<<<<<` / `=======` / `>>>>>>>`、**真被推上 main** 的 CHANGELOG（存活约 3 分钟）。
+把它喂给 v0.45.195 的守卫，报的是 `[0.45.120] 出现 2 次，行 109, 111` ——
+109/111 正好骑在第 110 行那条 `=======` 两侧。
+
+即：守卫会红，但它说的是**重号**，真因是**冲突没解完**。
+这正是 CLAUDE.md 记的「把一种失败误报成另一种」。本 session 自己合并
+origin/main 时也复现过一次。
+
+### Added — 断言 ③ `test_no_unresolved_conflict_markers`
+
+**定义位置就是语义**：它必须排在 ① 之前。addopts 带 `-x` ⇒ **谁先红，谁就是人
+看到的那句诊断**。这一点由 `test_conflicted_file_also_looks_like_a_duplicate`
+用反射核对类内方法顺序，挪动即红（已实测）——不是靠注释提醒。
+① 的报错信息里也加了一句指回 ③。
+
+`_CONFLICT_RE` 两个约束，各挡一类误报：
+* **锚定行首** —— 否则命中**正在讨论冲突标记**的条目（本仓 L7500/7501 就有一条，
+  记的正是 `4b5e4d9` 那次事故）。v0.45.200 用 `"<<<<<<<" not in s` 自检就栽在这，
+  是本仓文本探针第四次把「**在讨论 X**」误判成「**是 X**」。
+* **恰好 7 个**（`(?=[ \t]|$)`）—— 否则 `={7}` 吃掉 markdown setext H1 下划线。
+  本仓当下零行首全 `=` 的行，但那是**内容依赖**，判据不该靠它撑着（v0.45.195 补记 1）。
+
+### Fixed — 一条**通过的理由和它声称要测的东西不是同一件事**的夹具
+
+第一版 `PROSE_ABOUT_CONFLICT` 两处引用都写成 `` `<<<<<<<` ``（带反引号）。
+它确实绿，但**绿的原因是反引号让 lookahead 先挡掉了**，与行首锚定无关 ——
+实测「去掉 `^`」这个变异**照样全绿**。夹具没有判别力，却看起来在守。
+
+修法：补一行**裸写、后跟空格**的引用（`先搜 <<<<<<< 定位，再看 ======= 两侧`），
+这才真正逼出 `^`。同 MEMORY「断言两边是同一种东西吗」那一族，只是位置在夹具上。
+
+### 实测：四条变异，每条对应一处护栏
+
+| 变异 | 结果 |
+|---|---|
+| 真文件插入真实冲突标记 | **③ 先红**（`-x` 下唯一那条），诊断正确 |
+| 只把 `.match` 换 `.search`（留 `^`） | 全绿 —— 又一组合取护栏 |
+| 去 `^` **且**换 `.search` | 「散文」+「setext」两条红 |
+| 去掉 `(?=[ \t]|$)` lookahead | 只有「setext」红 |
+| 把 ③ 挪到 ① 后面 | 顺序自检红 |
+
+第 2/3 行合起来说明：`^` 对 `.match()` **恒冗余**，护栏是二者的合取 —— 与
+v0.45.195 补记 1 同一形状。第 3/4 行说明 lookahead 与行首锚定**不是**各管各的：
+`.search` 一旦放开，lookahead 就护不住 setext 了。
+
+### 如实记两条本次自己犯的（都是本 session 刚记过的形状，当场复发）
+
+1. **又写了一条没跑的变异说法**：`conflict_markers` 的 docstring 初版写
+   「去掉 `^` ⇒ 红」，实跑全绿，原因与 v0.45.195 补记 1 **一字不差** ——
+   `re.match()` 本就只从串首匹配。**在刚写完那条教训的同一个文件里复发。**
+2. **又一次把替换串多写了一层反斜杠**（`(?=[ \\t]` 找 `(?=[ \t]`），
+   导致 M3 变异压根没施加、却显示为「全绿」。这正是 v0.45.195 记进
+   auto-memory 的「变异施加后也要比一次指纹」那条要挡的 —— 护栏起作用了
+   （断言 `count==1` 当场炸），但说明那条教训还没变成肌肉记忆。
+
+⇒ 这两条不是补记，是**证据**：判据写进文档不等于写进手。所以 ③ 的每一条
+docstring 现在只写**实测过的**变异，写不出就不写。
+
+---
+
+## [0.45.201] — 2026-09-11 — OracleBee 的方向来自一张单边词表：看空半边五个月不可达
+
+用户问「Oracle 88.1% / Guard 83.3% / Rival 82.8% 看多，账在哪三只」。
+先量后改，结论**推翻了问题里「自我强化」的前提**，也推翻了我自己的一个预判。
+
+### 量到了什么
+
+**仪器先自证**：`agent_memory` 的写入点在 `pheromone_board.publish` 里
+（`_write_buffer.append`，pheromone_board.py:277），**每次 publish 无条件记一条**，
+与 `nlargest(80)` 截断无关 ⇒ 这张台账不受淘汰偏置影响，可以用来数方向。
+反向自证：BearBeeContrarian 读出 6.5% 看多 / 86.8% 看空 —— 台账看得见 bearish。
+
+三只「看多蜂」恰好是三只**几乎从不说 neutral** 的蜂（Rival 1929 行里只有 34 行
+neutral），而 Scout/Chronos/Buzz 是 76~80% neutral。不是看多倾向，是缺中性区。
+
+**逐月拆开后，三只里只有一只还活着**：
+
+| 月份 | Oracle | Guard | Rival |
+|---|---|---|---|
+| 2026-06 | 94.9% | 95.1% | 98.0% |
+| 2026-09 | **86.0%** | 61.4% | 51.5% |
+
+Rival 已被 v0.44.1（单向棘轮）+ expected_returns 居中修掉，腰斩；Guard 是派生蜂
+（`direction = resonance["direction"]`，读板）。**全历史 82.8% 是个混了修复前后两代的陈旧聚合。**
+
+**置换检验（同月内打乱标签保边际，R=2000）推翻「自我强化」**：
+
+| 配对 | 实测 | 零假设 | z |
+|---|---|---|---|
+| Guard vs Rival | 83.7% | 74.7% | 13.7 |
+| Guard vs Oracle | 81.7% | 76.4% | 10.1 |
+| **Oracle vs Rival** | 75.8% | 75.1% | **1.3（无依赖）** |
+| Scout vs Chronos（负对照） | 62.4% | 63.3% | −1.3 |
+
+Oracle 与 Rival 的超额一致率是 **0**。两个都 ~85% 看多的变量本就该在 74% 上下相遇 ——
+不给零假设就会把边际读成耦合。**正确模型是「三条各自单边的规则」，不是「互相强化」。**
+
+### Fixed — `swarm_agents/oracle_bee.py`
+
+Oracle 方向是三级级联，唯一有中性区、唯一均衡的分数带排在**最后**。
+闭式反解 1789 行台账（`discovery` 原样存着 `signal_summary`，无需插桩；
+复现率 **99.8%**，去掉分支1 掉到 93.3%、关键词换无关词掉到 81.9% ⇒ 判据有鉴别力）：
+
+| 分支 | 行数 | 占比 | 判为 bullish |
+|---|---|---|---|
+| 关键词投票 | 982 | **55.0%** | **982（100%）** |
+| 异常流方向 | 662 | 37.1% | 567 |
+| 分数带 | 141 | **7.9%** | 22 |
+
+关键词分支**五个月零次 bearish**，因为词表在本语料里单边：
+
+- 五个看多词只有「看涨」出现过（1542 行），且**永远来自同一句**
+  `检测到 N 个看涨异动`（`options_analyzer.py:1397`，`bullish_unusual > 0` 时无条件拼上）。
+  `bearish_unusual` 这个量**全仓不存在**。
+- 五个看空词**一次都没出现过** ⇒ `_bear_count` 恒 0 ⇒
+  `elif _bear_count > _bull_count` 结构上不可达（同 ChronosBee v0.43.0）。
+- 真正有方向含义的 `做多气氛浓厚（P/C低）`（811 行）**不匹配任何关键词、从不投票**。
+  会投票的反倒是那句不含方向的计数。
+
+且这 982 行的 `unusual_direction` **全部**是 neutral/absent —— 专职方向探测器说
+「无方向」，被一个子串计数改判成看多；其中能看到 Call/Put 明细的 467 行里
+**127 行（27.2%）实际 Put > Call**。与 CodeExecutor 兜底（v0.45.191）同物种：
+把「这类数据存在」渲染成「方向看多」。
+
+处置：删掉关键词分支，方向抽成 `_decide_direction()`（照 ChronosBee
+`_apply_pead_direction` 的先例，便于直接断言）。**上游 `options_analyzer` 一个字未动** ——
+摘要串是展示物，错的是拿它当方向证据的调用方。
+
+**幅度**（用修复后的真实函数重放台账，与离线模型逐数一致）：
+bullish 88.0%→69.9%、neutral 6.3%→23.7%，迁移 311 + 13 行，**81.9% 的行逐字节不变**。
+下游 `BULLISH_GATE_CONFIG(min_agents=3)` 吸收掉大部分：1028 个过门格子里 76 个（7.4%）跌破门槛。
+⚠️ `min_weight_pct=0.50` 要 confidence，台账不存该列 ⇒ 无法反解，**不报加权门槛翻转率**。
+
+### Added — `ic_rerun_readiness._COHORT_HISTORY`（第 11 条，2026-09-11）
+
+方向经 `_compute_direction_vote` 的 `bullish_count`/`bullish_w`（遍历全部
+`valid_results`）直通 `rule_direction` → `final_score`。
+**作废 30 条**（2026-09-10 全天 predictions，其中 7 行 Oracle 方向会变）。
+代价如实算：这 30 条 `checked_t7` 全为 0，尚未成熟为可用证据，
+损失是**一个扫描日的累积量**，不是已实现的回测结果。
+
+### Added — `tests/test_oracle_direction_keyword_vote.py`（34 条）
+
+主守卫是 `test_direction_is_independent_of_summary_text`：固定
+（专职探测器, 分数）后摘要文本不得改变方向 —— 谁再接一个文本投票它就红。
+结构守卫走 AST `_code_only()` 剥注释与 docstring（修复后的 docstring **引用**了
+这些关键词来解释为何删除，按原始源码断言会把解释误判成重新引入），
+并配了两条互补自证：塞回投票必须抓到、只写在注释里必须不报。
+`TestGuardsHaveTeeth` 另立两条上游正对照（那句话还在 / `bearish_unusual` 仍不存在）,
+后者变红就是提醒回来重评是否该恢复方向投票。
+
+变异 7/7 被抓到（含还原后复验 34 passed）；ruff 干净。
+
+### Fixed — `tests/test_code_executor_fallback.py`（我自己上一版埋的雷）
+
+`test_it_extends_the_same_label_not_a_new_partition` 原写
+`cohort_start()["date"] == "2026-09-10"` —— 把一条关于**本条目**的主张绑在了
+列表**尾部**上，于是本次这条合法新边界让它变红，红的原因与 CodeExecutor 毫无关系。
+改为断言「本条与 v0.45.176 共用同一日期标签」。
+讽刺的是 v0.45.191 当时正是这样改红了 `test_oracle_cboe_source`，而我随后在自己的
+新测试里又写了一遍同样的绑定（`cohort_start()["version"] == "v0.45.201"`），同版一并改掉。
+
+### 两个被推翻的预判（都写在这里，别在下次重犯）
+
+1. **「自我强化看多」**：置换检验下 Oracle 与 Rival 零耦合。大头是各自的边际，不是互相强化。
+2. **占号时以为 `origin/main` 是稳的**：worktree 与主 checkout **共用 `.git`**，
+   别的 session 一 `git fetch`，我这边的 `refs/remotes/origin/main` 就会**在我没 fetch 的情况下前进**。
+   本次因此撞号（0.45.200 被另一 session 占走），改占 0.45.201。
+   「下一个可用号」的快照保质期是秒级 —— 提交前必须重读一次，并让非快进推送做最终仲裁。
+   顺带：这次撞号给了 v0.45.195 那条崭新的重号守卫一个**真实（非合成）正对照**，它红了。
+
+### 仍然没查的（比本条大）
+
+`options_analyzer._score()` 的 `unusual_signal = min(2.0, bullish_unusual * 0.5)`
+同样单边 —— 只有看多异动加分，看空异动**对分数毫无影响**，分数只能往上走。
+这条改的是 `score` 不是 `direction`，影响面与世代成本都更大，**本版未动**，单独立项。
+
+---
+
+## [0.45.200] — 2026-09-11 — 一条声称「会红」却恒绿的断言：`^` 对 `.match()` 恒冗余
+
+### 背景
+
+`tests/test_code_version.py:48` 的 docstring 写着「变异：把正则的 `^` 去掉
+（不锚定行首）⇒ 可能命中正文里引用的版本号 ⇒ 红」。**实跑是绿的。**
+该文件头一句自述是「每条断言都附了能让它变红的变异」——这条没有。
+
+由 v0.45.195 那条线（CHANGELOG 结构守卫）在自查时发现并移交；本次独立复跑后
+结论比移交时更强，见下。
+
+### Fixed — `tests/test_code_version.py`
+
+原 docstring 的更正（三档实测，`changelog_version()` 为消费者）：
+
+| 变异 | 结果 |
+|---|---|
+| 基线（`^` + `.match`） | 绿 |
+| 只去 `^`（仍 `.match`） | **绿** ← 原 docstring 声称这里会红 |
+| 只换 `.search`（仍带 `^`） | **绿** |
+| **同改两处** | ★红 |
+
+`^` 对 `re.match()` **恒冗余**（`.match` 本就只从串首匹配），而 `_CHANGELOG_RE`
+全部走逐行 `.match`。护栏是 `^` 与 `.match` 的**合取**，二者互为冗余 ⇒
+**合取型护栏无法用单点变异证伪**，这是原断言没牙的结构性原因。
+
+### Added — `TestHeadingMustBeLineAnchored`（2 条，牙已实测）
+
+真 CHANGELOG **验不了**这件事：它确有非行首的 `## [x.y.z]` 散文引用，但都排在
+第一条行首标题**之后**，而 `changelog_version()` 取首个匹配即 return ⇒
+位置巧合掩盖了变异。故用合成夹具把陷阱挪到真标题**之前**：
+
+  # Alpha Hive · 版本变更历史
+  （空行）
+  > 举例说明：一条叫 `## [9.9.9]` 的标题——这是散文，不是标题。
+  （空行 + --- + 空行）
+  ## [1.2.3] — 2026-01-01 — 真标题
+
+- `test_prose_mention_before_first_heading_is_not_taken`：断言取到 `1.2.3`。
+  变异（**须同时改两处**）去 `^` + `.match`→`.search` ⇒ 命中 `9.9.9` ⇒ ★红（实测）。
+- `test_fixture_really_contains_the_trap`：夹具自检——陷阱存在、且行号排在真标题
+  之前。**没有这条，上一条可能是在一份没有陷阱的文件上绿的。**
+  变异：删掉夹具里的 `## [9.9.9]` ⇒ ★红（实测）。同 v0.45.195
+  `TestBothAssertionsAreNeeded` 的用意。
+
+⚠️ 夹具字符串刻意缩进两格：顶格写会被 `tests/test_changelog_entry_integrity.py`
+（v0.45.195）算成真标题 —— 该守卫的口径是行首 `## [`，不跟踪代码围栏。
+本条目上面那段示例同理缩进。
+
+### ⭐ 判据：「X 会让它红」必须分清红的原因是结构还是当前内容
+
+移交时的说法是「需同时去 `^` 且换 `.search` 才红」。**对 `changelog_version()`
+今天也是绿的**——红与不红取决于散文引用排在第一条真标题之前还是之后，
+而 CHANGELOG 每天被十几个 session 追加，这是**内容依赖**不是结构保证。
+（同一变异对 v0.45.195 守卫的 `parse_entries()` 是红的：那个消费者**枚举全部**
+匹配行而不是取首个即返回。两边各自实测都对，**别跨消费者搬结论**。）
+
+结构性的红永真，内容性的红随文件漂。测试文件 19 条 collected（原 17）、全绿；
+`ruff check` 干净。
+
+---
+
+## [0.45.199] — 2026-09-11 — v0.45.189 自查：变异校验做了，但没核对**自己写的 docstring 说了什么**
+
+### 背景
+
+v0.45.189 给两条守卫各加了 4 条测试，每条 docstring 都写明「变红的变异是什么」，
+并跑了 13 条变异校验、报告 0 条等价。**校验结果是对的，报告也是诚实的**——
+漏掉的是把两者**对上一遍**：变异结果显示 M1/M6 各只杀 1 条测试，
+而那两条测试的 docstring 白纸黑字写着它们也会被杀。**两份记录同时在手上，
+没有互相核对。**
+
+⇒ 判据：**变异校验跑完，要拿结果去核对每条 docstring 的声称，不是只核对总数。**
+「0 条等价」回答的是「有没有测不到的代码」，回答不了「文档说的是不是真的」。
+
+### Fixed
+
+#### 1. `test_no_crewai_dependency.py` —— 真仓库量级护栏**测的是 helper，不是本文件**
+
+它直接调 `own_python_files(PROJECT_ROOT)`，绕过了 `_crewai_offenders` 自己的枚举。
+⇒ 「把 `_crewai_offenders` 的枚举换回裸 rglob」这条变异**结构上打不到它**
+（实测只有 `..._nested_worktrees` 变红），而 docstring 说会。
+**测 helper 没坏 ≠ 测本文件没坏，中间隔着的正是本文件自己那几行。**
+
+- 抽出 `_scanned_files(root=None) -> ([(绝对路径, 相对路径)], 口径名)`，
+  `_crewai_offenders` 与量级护栏**都走它**。
+- 护栏新增一条断言：本文件必须被自排除掉（此前自排除只有 1 条测试盯着）。
+- 实测修复生效：「git 分支返回空」由杀 1 条 → **杀 2 条**（两个文件的护栏都红了）；
+  「删掉自排除」由杀 2 条 → **杀 3 条**。
+
+#### 2. 两条 `test_enumeration_covers_the_real_repo` 的 docstring 过度断言
+
+它们声称的变异**只在生产 checkout 上让它变红**，在 worktree 里落在界内、不会红。
+实测（本版补测）：
+
+| | 变异后枚举 | 界 | worktree 会红吗 | 生产会红吗 |
+|---|---|---|---|---|
+| `test_no_fake_price` | worktree 153 / 生产 **2741** | 50..500 | ❌ | ✅ |
+| `test_no_crewai_dependency` | worktree 344 / 生产 **24123** | 50..2000 | ❌ | ✅ |
+
+⭐ **v0.45.189 要修的那个「红只在生产 checkout 上可见」，在守卫自己的文档里
+又复发了一次**——这次不是代码的可见性反转，是**文档对自己适用范围的可见性反转**。
+docstring 已改成明说这一点，并指明处处可红的是 tmp 夹具那条。
+
+#### 3. 一个在改动中失效的旧数字
+
+`test_enumeration_covers_the_real_repo` 写「生产上裸枚举是 5029」——5029 是
+**v0.45.189 之前** `os.walk` + 旧六项 `_SKIP_DIRS` 的历史值；v0.45.189 把
+`_SKIP_DIRS` 缩到 `{"venv"}` 之后，同一条变异的真值是 **24123**。
+已改正并标注两个数各是什么，历史数字一律加「当时实测」时间戳。
+
+#### 4. `test_scanner_has_teeth` 在断言与失败信息里各调一次扫描器
+
+`assert f(x) and "y" in f(x), f"{f(x)}"` ——调三次。扫描器若不确定，
+断言看到的和人看到的会是两个不同的清单。已改成绑一次。
+
+### Added — 记下 v0.45.189 引入的**覆盖回退**（此前守卫里一个字都没写）
+
+换到 `own_python_files` 后 git 口径只列**被跟踪**的文件，
+⇒ **全新未提交的 .py 扫不到**（已跟踪文件的未提交修改照常扫得到——
+只拿 git 要路径清单，内容从磁盘读）。实测：新建未跟踪 `zz.py` 写上
+`price = 100.0` + `import crewai`，两条守卫**都看不见**；`git add -N` 之后
+两条**立刻都看得见**。
+
+这是 v0.45.150 明确接受的取舍（口径可复现 > 把「本地碰巧有什么」算进来），
+v0.45.189 把它扩到了这两条守卫**却没有复述**——于是
+`test_no_fake_price` 的模块 docstring 那句「**永久禁止**该反模式重新进入代码库」
+从那一版起就在承诺一件它做不到的事。两处已补写覆盖边界。
+
+⚠️ **本版不动那个取舍本身。** 真要堵这个窗口是给 `own_python_files` 的 git 分支加
+`--others --exclude-standard`（`.claude/worktrees/` 自 v0.45.124 已在 .gitignore，
+`_is_ours` 还有第二道；实测今天两个 checkout 上都是 **0 个**未跟踪未忽略的 .py，
+所以是零风险改动）——但那是**推翻 v0.45.150 的既定取舍**，影响 4 条守卫，
+要单独决定，不在自查里顺手做。
+
+### 验证
+
+- 新变异校验 4 条，0 条等价，`collected=12` 稳定，还原后全绿：
+  N1 枚举换裸 rglob → `..._nested_worktrees` 红；**N2 git 分支返回空 → 两个文件的
+  护栏都红（修复前只红 1 个）**；**N3 删自排除 → 3 条红（修复前 2 条）**；
+  N4 `_SKIP_DIRS` 清空 → `..._nested_worktrees` 红。
+- 两条更正后的 docstring 声称，**逐条数值复核过**（表见上），不是推理。
+- ruff：两个文件 `All checks passed`，全仓与基线一致。
+
+### 没找到问题的地方（查过，留档免得重查）
+
+- `p.relative_to(root)` 在两条分支下都安全（`own_python_files` 用同一个 `root` 构造）。
+- 从**别的 cwd** 跑（`cd /tmp && pytest <绝对路径>`）：12 passed，
+  `from tests._repo_files import` 照常解析（rootdir 由 pyproject.toml 认定并进 sys.path）。
+- G1 的 `50..500` 上界在 **rglob 回退**（无 git 的机器）下是 153，不会误红。
+- 移除 `_EXCLUDE_DIRS` 的 `.git`/`__pycache__` 确为等价：`_is_ours` 滤点号目录、
+  `__pycache__` 里没有 .py，两个 checkout 上口径都不变。
+
+---
+
+## [0.45.198] — 2026-09-11 — `agent_toolbox` 死代码处置：删两个零读者的类，并手动摘掉随之过期的白名单项
+
+v0.45.189 的溢出发现。那一版修的是测试守卫 `rglob` 越界；普查时在生产代码里
+撞见 `agent_toolbox.py:96` 的 `Path(root).rglob("*")`，但**数读者后发现它是死的**，
+故当时刻意没动（判据不同：它不是断言，不存在「把红伪装成绿」）。本版处置死代码本身。
+
+### Removed — `FilesystemTool` 与 `NotificationTool`（413 → 203 行）
+
+两个类的**外部读者均为 0**（2026-09-11 在本 worktree 用 `git ls-files` 重数，
+不用 `rglob`/`grep -r`——生产 checkout 的 `.claude/worktrees/` 下有 14 个嵌套仓库副本，
+裸递归会把陈旧副本算进读者数，正是 v0.45.189 修的那个形状）：
+
+| 符号 | 外部读者 | 备注 |
+|---|---|---|
+| `FilesystemTool`（4 方法 + `_is_safe_path` + `ALLOWED_ROOTS`） | **0** | `list_directory` 唯一读者是本文件 `main()` 的演示段 |
+| `NotificationTool`（3 方法 + 2 加载器） | **0** | — |
+| `AgentHelper.fs` / `AgentHelper.notify` | **0** | 全仓 14 处 `agent_helper.*` 访问**全部**是 `.git` |
+| `GitHubTool` | 14 处，**未动** | `report_deployer.py` 的 gh-pages / main 部署链路依赖 |
+
+连带清掉：`AgentHelper.__init__` 的两个属性、`summary()` 的两段菜单、`main()` 的两段演示，
+以及随之死掉的 `json` / `Path` / `datetime` / `get_session` 四个 import 和零读者的
+模块级 `_log`（+ `import logging as _logging`）。
+
+⚠️ **`_log` 那条 ruff 抓不到**——`_logging` 在第 30 行被用了一次（就是定义 `_log` 那句），
+F401 结构上看不见「变量定义了但没人读」。而且**本仓 `pyproject.toml` 把 F401 整条 ignore 了**
+（连同 F541/F841），所以 `ruff check agent_toolbox.py` 那句 "All checks passed!"
+对「有没有死 import」一个字都没说，它是恒真的。四个死 import 是
+`ruff check --select F401 --isolated` 单独开规则查出来的。
+
+### Changed — 模块 docstring：那句「后续升级为真正的 MCP 服务器」是**已兑现的过期承诺**
+
+删之前要过的一关是：docstring 自称「Python-native MCP replacement…后续升级为
+真正的 MCP 服务器」，即**有意保留的脚手架**，那么「零读者」就不构成删除理由。
+
+判据不是 docstring 说了什么，而是**它预留的那个未来有没有已经以别的方式到来**。
+到来了：`alpha_hive_mcp.py` 是独立另写的 718 行真 MCP 服务器（FastMCP + stdio，
+8 个 `alphahive_*` tool，已注册进 Claude Desktop 并在线），它**从不 import 本模块**，
+且暴露的是**领域数据**（行情 / 分析 JSON / GEX / Form 4）而非文件系统 / 通知原语。
+`agent_toolbox` 从来不是那颗种子。docstring 已改写成指针（要加 MCP 工具去
+`alpha_hive_mcp.py`，要发 Slack 去 `slack_report_notifier.py`），并写明别再往这里加通用工具。
+
+另两条支撑：
+
+- `NotificationTool` 不是「保留能力」，是**被取代的重复实现**。`slack_report_notifier.py`
+  更成熟（熔断走 `resilience.slack_breaker`、有 DM 兜底、11 处调用 + 自己的测试）。
+  ⚠️ 留着它是**活的危害**而非仅仅不整洁：全仓 `send_slack_message` 有 15 处
+  `agent_toolbox` 之外的引用，看着像它是活的，实际全属另一份同名实现——
+  这个同名陷阱已经实际消耗过一次核查。
+- `main()` 的「演示」是**带电的**：`~/.alpha_hive_slack_webhook` 在本机存在
+  （82 字节，mode 0600），所以 `python3 agent_toolbox.py` 会真的往 #alpha-hive
+  发一条 "🧪 Agent Toolbox 测试"。这与 `CLAUDE.md`「Slack 通知精简规则：Bot 只发两类消息」
+  直接冲突。删除后 `main()` 只剩只读的 `git status`，不写文件、不对外发消息。
+
+沙箱旁路也考虑过：`code_executor.py` 用的是黑名单 `BLOCKED_IMPORTS`（含 `os`/`subprocess`/
+`pathlib`，**不含 `agent_toolbox`**），且 `config.CODE_EXECUTION_CONFIG["enabled"]` 默认 `True`，
+理论上 LLM 生成的代码可以 `import agent_toolbox` 拿到 `write_file`。删除**只减少**这条路径的
+可达能力，不引入新风险。补一句实测：该旁路今天在 `sys.path` 层是堵的——执行器用
+`subprocess.Popen([sys.executable, script], cwd=sandbox_dir/data)` 起子进程，脚本的
+`sys.path[0]` 是沙箱 scripts 目录而非仓库根，且编排器未导出 `PYTHONPATH`。
+**「黑名单漏了」与「实际可达」是两件事，结论里要分开说。**
+
+### Fixed — 手动摘掉 `("agent_toolbox.py", "ALLOWED_ROOTS")`，否则它会静默变成过期项
+
+`tests/test_paths_not_frozen_at_import.py` 的 `KNOWN` 是**子集语义**
+（原文注释：「清掉存量不会变红，新增必红」「⚠️ 子集语义的副作用：清干净了也不会变红，
+过期项会悄悄留下」）。删掉 `ALLOWED_ROOTS` 后**没有任何测试会红**——
+按值检查的那条参数化测试 `test_code_anchored_paths_resolve_inside_the_repo`
+取参自 `MUST_STAY_FILE_ANCHORED`（11 项，A+B 类），而本项在 `KNOWN` 的 C 类、不在其中。
+
+按该类 docstring 自带的对账法手动揪出并摘除：
+
+- 改动**前**：`KNOWN` 17 / `_scan(marker="__file__")` 17，过期项 **0**（干净基线）
+- 只删代码不摘白名单：17 / 16 ⇒ 过期项 **1**，全套**零红**（当场复现该盲区）
+- 摘除后：16 / 16，过期项 **0**
+
+### 核对记录
+
+- 解释器 `/usr/local/bin/python3` (3.11.1)；收集数改动前后均 **4038/4118, 80 deselected**
+- 全套：改动前 `1 failed, 4035 passed, 1 skipped, 2 xfailed`（唯一的红是
+  `test_economic_calendar.py::TestCoverageHorizon`，按设计红，非回归）；改动后同
+- ruff：worktree 基线 46 → 改后 46，零新增
+- ruff：`--select F401 --isolated agent_toolbox.py` 改后 0（改前 4）
+- 上述数字是**本次改动隔离测得**的（合并 origin/main 之前）。合并 v0.45.199~202 后复跑：
+  collected 4103/4183（多出的 65 条是那几版带来的），`1 failed / 4100 passed`，同一条按设计红；ruff 仍 46
+
+### 变异检查：4 条里 **3 条是等价变异**，且其中一条推翻了我的预期
+
+每条都在清 `__pycache__` 后跑全套 `--maxfail=200`，还原后复核。
+基线的 `TestCoverageHorizon`（按设计红）在下表中一律不计入"变红"。
+
+| | 变异 | 预期 | 实测 | 结论 |
+|---|---|---|---|---|
+| M1 | 把 `("agent_toolbox.py","ALLOWED_ROOTS")` 塞回 `KNOWN`（模拟"忘了摘"） | 绿 | **绿**（零新增红） | ✅ 等价变异，坐实子集语义盲区 |
+| M2 | 拿掉 `AgentHelper.self.git`（模拟过度删除） | **红** | **绿** ❗ | ❌ **预期被推翻**，见下 |
+| M3 | 把 `self.fs = object()` 留着（模拟漏删） | 绿 | **绿** | ✅ 等价变异，`.fs` 确无覆盖 |
+| M4 | 从 `_ALLOWED_GIT_CMDS` 拿掉 `"commit"` | 红 | **红 2 条** | ✅ `GitHubTool` 有牙 |
+
+M4 变红的两条：`test_report_deployer_whitelist.py::TestWhitelistCommitInRealGit::`
+`test_only_artifacts_get_committed` / `test_default_still_stages_everything`。
+
+#### ❗ M2：删掉整个 `AgentHelper.git`，测试套件也接不住
+
+M2 的全套跑里多出一条 `test_macro_snapshot.py::TestMacroContextUsesSnapshot::`
+`test_no_snapshot_keeps_live_semantics`。**它不是 M2 造成的**：机制上讲不通
+（`GitHubTool.__init__` 只赋一个 `repo_path`，无副作用），且带 M2 单跑该文件
+**19/19 全过、不复现**；基线与改动后的全套里它也都是绿的。该条调用实时
+`fm.get_macro_context()` 并断言 `data_source` 字符串，归为**全套偶发抖动**
+（仅此定性到"未能复现"，未进一步定根因）。
+
+**扣掉那条抖动，M2 的真实结果是零新增红。** 带 M2 定向重跑两个「本该接住」的
+文件：`tests/test_pipeline.py` + `tests/test_report_deployer_whitelist.py`
+⇒ **77 passed**。原因是两条路径都绕开了 `AgentHelper.__init__`：
+
+- `tests/test_pipeline.py:320` 把**整个 `agent_helper` 换成 `MagicMock()`**
+  （`r.agent_helper = MagicMock()`），`MagicMock` 访问 `.git` 会自动造一个出来；
+- `tests/test_report_deployer_whitelist.py` 直接 `GitHubTool(repo_path=...)` 构造。
+
+⚠️ **所以「删完 `.fs`/`.notify` 全套零红」本身不构成删对了的证据——
+因为删 `.git` 同样零红。** 本次删除的安全性**完全建立在数读者上，
+不建立在测试覆盖上**；套件接不住这个方向的过度删除。
+同 auto-memory `alpha-hive-none-hook-unwired` 的形状：全绿是因为夹具让生产值不可达。
+
+### Fixed — 顺手修一条悬空注释
+
+`tests/test_paths_not_frozen_at_import.py` 的
+`test_code_anchored_paths_resolve_inside_the_repo` 里
+`# 少数是 list（如 agent_toolbox.ALLOWED_ROOTS）` 举的例子，
+在我删掉该符号后成了悬空引用。查下去发现**这个例子对这条测试从一开始就不成立**：
+本条参数化自 `MUST_STAY_FILE_ANCHORED`（11 项，实测取值**全是标量**），
+而 `ALLOWED_ROOTS` 在 `KNOWN` 里、从不在本条参数里
+⇒ 那个 `isinstance(raw, (list, tuple))` 分支**一次也没被执行过**。
+注释已改成如实说明它是防御性的。
+
+---
+
+## [0.45.197] — 2026-09-11 — Dealer GEX 改吃全到期日视图：`total_gex` 此前只是全链的一个符号不可靠的部分和
+
+### 背景
+
+承 v0.45.190。那一版把「主链 `DTE≥7` 实为 ≥8 个日历日」钉住了，但**没修**——修它要
+付世代边界，且它同时喂四个消费者，其中 IV rank / 25Δ skew / 期限结构三个**本来就该
+剔近月**（近月 theta 扭曲）。本版走另一条路：照 v0.45.188 `_calc_max_pain` 的先例，
+给 GEX 一个**同 payload 的第二视图**，主链一个字节不动。
+
+### ⚠️ 实测推翻了「加上近月就够了」这个前提
+
+原以为问题是「丢了近月」。实测 26 只标的「取最近 K 个到期日捕获的 net GEX 占全链
+百分比」：
+
+| K | 中位 | 最低 | <90% 的标的数 |
+|---|---|---|---|
+| 4（≈旧规模） | 63.9% | **−73.3%** | 22/26 |
+| 8 | 73.6% | −29.8% | 17/26 |
+| 12 | 96.3% | 20.6% | 8/26 |
+| 16 | 100.0% | 72.3% | 1/26 |
+| 24 | 100.0% | 99.4% | 0/26 |
+
+**负百分比 = 部分和与全链符号相反。** 净 GEX 是带符号求和，**任何**对到期日集合的
+截断都可能翻转符号，不只是丢近月那一种 ⇒ `total_gex` 只有在全链上才是良定义的量。
+旧口径不是「偏小」，是**符号不可靠**。「近月窗口」是另一个指标（pin gamma），不是这个；
+而下游 `RegimeWeightAdjuster` 消费的语义（做市商整体净 gamma 多还是空）本就是全书概念。
+⇒ 目标定为**全链**，`max_expiries=24`（与 `fetch_cboe_full_chain_oi` 同值；实测当日
+全链到期日数中位 18 / 最大 25）。
+
+### Added
+
+- `cboe_options.fetch_cboe_chain_for_gex()` + `_select_expiries_for_gex()`：
+  日历口径、未到期全要、按日期升序、上限 24。与主链选择器的三处差别各有理由，
+  写在 docstring 里。
+- `cboe_options.fetch_cboe_chain(..., expiry_selector=None)`：到期日选择器旁路。
+  **默认 None ⇒ 走 `_select_expiries`，主链行为逐字节不变**（有行为断言守着，
+  不是靠 `inspect.getsource` 匹配源码文案——那种标志物改个变量名就绕过去了）。
+- `cboe_options.gex_view_stats()` → `scan_timing.counters().gex_view` → status.json：
+  `ok` / `unavailable` / `capped_expiries`。
+- `ic_rerun_readiness.cohort_boundary_evidence()` + CLI 里一行「边界日期的数据证据」。
+- `tests/test_gex_full_chain_view.py`（9 条）、`tests/test_ic_rerun_readiness.py`
+  新增 `TestBoundaryDateHasDataEvidence`（6 条）。变异校验 8/8 + 5/5 全部变红。
+
+### Changed
+
+- `advanced_analyzer.DealerGEXAnalyzer`：取链由 `OptionsDataFetcher.fetch_options_chain`
+  改为 `fetch_cboe_chain_for_gex`；返回值新增 `chain_view` / `expiries_used`。
+  ⚠️ **CBOE 取不到就不算，不回退 yfinance 降级链**——那条路径给的是同样截断的链
+  （且 yfinance 分支有同一个差一天），回退等于把「没数据」悄悄换成「错数据」
+  （v0.45.188 `_calc_max_pain` 的同一判据）。
+
+### 实测（2026-09-11 端到端，30 只全 watchlist）
+
+- 可比 27 只，**符号翻转 2 只**（CRM neg→pos、NEE pos→neg）；量级 NVDA 11.52→535.90，
+  到期日数 4→24。
+- **零额外网络开销已实测，不是推断**：`payload_stats` 为
+  `{hits: 54, fetches: 30, stale: 3}` —— 30 只标的每只三次构链（旧路径 + 新视图 +
+  payload 直取）合计只发 **30 次** HTTP。靠的是 `_fetch_cboe_payload` 的 4h 进程缓存
+  （`_CACHE_MAX_AGE`），而 Step 2 全程约 30–55 分钟。
+- `capped_expiries: 1` —— 有一只标的 25 个到期日，被 24 的上限砍掉 1 个，**且被计数了**。
+  上限够不够是个可测量的数，不是假设。
+- 代价：3 只标的（BILI/DE/TMO）当日 CBOE 陈旧 ⇒ GEX 不可得 ⇒ `regime="unknown"` ⇒
+  `RegimeWeightAdjuster` 不做偏移（基准权重），安全降级。旧实现会在这里降级 yfinance
+  并算出一个截断链上的数。频次记在 `gex_view.unavailable`。
+
+### ⚠️ 不要读成「评分会变好」
+
+GEX 只经三值 `regime` 进评分。v0.45.190 已测：翻转一次的 `|Δfinal_score|`
+中位 **0.050** / 最大 **0.127**，249 条归档里跨决策阈值 **2/249**。
+本版修的是「这个数等于它声称的东西」，不是分数。同 v0.45.172 那条教训的形状。
+
+### 世代边界（已登记，第 10 条）
+
+`ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-09-11", "v0.45.197", ...)`。
+**这是换数据源不是聚合层改动**——历史上没存过近月合约的 gamma/OI，
+`replay_scoring` 离线重放做不到，只能前向累积。
+代价核算：登记前实测世代内**已回填样本 0 条**（30 条未到期，边界 09-10 昨天刚设），
+所以这条边界的损失是**一个扫描日**；09-21 起才开始吃真样本。
+
+⚠️ **边界日期是预判不是事实**：写入时生产 checkout 尚未合入（用户明确要求本轮不动生产），
+而它不自动 pull ⇒ 首个真正受影响的业务日可能晚于 09-11。
+所以同版做了**判别器**：`cohort_boundary_evidence()` 读归档的
+`advanced_analysis.dealer_gex.chain_view`，报出首次出现 `cboe_full_expiries` 的日期
+并与边界比对，四种判定（matches / too_early / too_late / **no_evidence_yet**）。
+加它是因为本仓记过同一处栽跟头——**此前几条边界「核过了」其实零判别力**：
+世代内 0 条样本时，日期写对和写错的输出一模一样。
+
+### 纪律注记：变异校验又抓到两条我自己写的没牙断言
+
+1. `cohort_boundary_evidence` 初版 `home` 有默认值 `ALPHAHIVE_DIR`（= **代码**目录），
+   而归档是**数据**、在生产目录 ⇒ 在 worktree 里跑它恒返回 `no_evidence_yet`。
+   今天它「答对了」纯属巧合（生产确实没跑）——**即使生产已经跑了它也会答同一句**。
+   一个永远说「还没证据」的判别器，和没有判别器是一回事，正是它自己要防的失效。
+   已改为 `home` 必传、调用方传 `--db` 所在目录。
+   （`tests/test_ic_rerun_readiness.py` 开篇那句「一个永远说未就绪的就绪度判定器，
+   和没有它是一样的」写于 v0.44.4——同一个坑，一年后换个面目又来一次。）
+2. 「取最早那天」的断言对 `min→max` 变异**没有牙**：归档按文件名排序遍历，
+   而文件名是 `analysis-<TICKER>-ml-<DATE>.json` ⇒ **先按 ticker 排，不按日期**；
+   初版夹具恰好让日期最早的 ticker 排在最前，`min`/`max` 走不到分歧点。
+   已把 ticker 名改成「日期最晚的排最前」，并把这个理由写进 docstring
+   （不写下来，下一个人会「顺手」把它改回去）。
+
+
+---
+
+---
+
+## [0.45.196] — 2026-09-11 — 默认测试里真正出网的 23 条：普查、清掉 12 条、给 marker 上棘轮
+
+起因：`test_pipeline.py::TestBuildSwarmReport::test_returns_required_keys` 在全量
+`pytest` 下报 `Timeout (>60.0s)`，单跑却过。
+
+### Fixed — `test_pipeline.py` 两个类改为真离线（12 条 → 0 条出网）
+
+根因**不是**「漏标 marker」——它标了，标的是 `@pytest.mark.network`。而
+`network` 是**刻意不进** addopts 默认排除的（v0.45.94），于是它既照常跑、
+又被 `conftest._offline_transport` 豁免：**marker 正是默认离线闸的唯一豁免口**。
+
+实测链路（tracehook 取证）：
+
+    _build_swarm_report → _fetch_report_context(alpha_hive_daily_report.py:1816)
+      → fred_macro.get_macro_context → _fetch_macro_data
+         ├─ :416 yfinance 7 个 symbol（curl_cffi → query1.finance.yahoo.com）
+         └─ :456 cboe_vix._download（urllib → cdn.cboe.com）
+
+处置：去掉两个类的 `network` marker，改挂 conftest 已有的 `stub_yfinance` +
+`stub_cboe_vix`。**两个桩缺一不可**，各自变异实测判红：
+
+    缺 stub_yfinance → AssertionError: 伸手取外网了：['curl.GET query1.finance.yahoo.com']
+    缺 stub_cboe_vix → AssertionError: 伸手取外网了：['urlopen cdn.cboe.com']
+
+刻意钉**源**而不是钉 `get_macro_context` 的返回值：① 降级快照由生产代码自己
+产出（`_fetch_macro_data` 的 `base`），测试里不写死任何宏观数值，契约变了不会漂；
+② yfinance 的 cookie/crumb 引导（`/v1/test/getcrumb`）**跑在 worker 线程上**，
+只钉返回值挡不住它。
+
+`TestBuildSwarmReport` + `TestDataQualityGate` 15 条：63s（单条）→ 3.9s（全部）。
+
+### Added — `tests/test_network_marker_discipline.py`：marker 棘轮，只能减不能增
+
+两条断言方向相反（CLAUDE.md「我怕它变大，还是也怕它变小？」），各有变异实测：
+
+  · `_scan() - KNOWN` 非空 → 新增 marker。变异：随便给一条测试加上 marker ⇒ 红
+  · `KNOWN - _scan()` 非空 → 表过期。变异：删掉一个已有 marker 不动表 ⇒ 红
+
+枚举走 `tests/_repo_files.py::own_python_files`，不走 rglob（v0.45.186/189 的
+嵌套 worktree 教训；该行为已由 `test_paths_not_frozen_at_import.py` 覆盖）。
+
+### 普查结论：默认选择集 4002 条里，真正出网的是 23 条，全部集中在 3 个文件
+
+探针分 block/observe 两模式，拦 `socket.socket.connect` + `curl_cffi.Curl.perform`。
+
+| 文件 | 修复前 | 修复后 |
+|---|---:|---:|
+| `tests/test_pipeline.py` | 12 | **0** |
+| `tests/test_macro_snapshot.py` | 7 | 7 |
+| `tests/test_dashboard_renderer.py` | 4 | 4 |
+
+**绕过 `_offline_transport` 闸的：0 条。** 23 条全部是 `network` 标注过的，
+闸本身在 socket/curl 这一层没有漏洞。
+
+⚠️ **marker 原文写的「打真实外部端点，离线必挂」不成立**：这 23 条在探针 block
+模式下**全部 passed**，断言一条都不依赖实时值。剩下 11 条同为顺路副作用，
+可按同样手法清掉，**本版未动**（留待单独一版核实后处理）。
+
+### 取证方法学：探针必须先被 canary 反向自证，否则「全仓无出网」是假的
+
+第一版探针按教科书写法「放行 loopback」，跑 canary 报 **0 命中** —— 而 canary
+当时正拿着服务器的真实 HTTP 响应。两条失明路径，各自都足以单独造出假的全清：
+
+1. **本机 `HTTP_PROXY=127.0.0.1:7897`** ⇒ 所有出网在 socket 层都长得像 loopback，
+   「放行 loopback」实际等于「放行全部外网」。
+2. **`curl_cffi`（yfinance 1.2 在用）在 C 层自管 socket** ⇒ 对任何 socket 探针
+   完全不可见。实测：403 从服务器回来了，socket 探针 0 记录。
+
+`tests/conftest.py::_offline_transport` 的 docstring 早已记过这两条 —— 本次是
+在不知情的情况下**原地重踩了一遍**，canary 是唯一拦住它的东西。
+
+
+
+---
+
+## [0.45.195] — 2026-09-11 — CHANGELOG 重复版本号：加上那个「会红的人」
+
+v0.45.193 删掉了重复的 `## [0.45.172]` 标题，但没回答 CLAUDE.md 那句判据：
+**谁会红？** 那次重复在 `main` 上从 09-09 躺到 09-11，是**人眼**发现的。
+本次补上守卫。
+
+### Added — `tests/test_changelog_entry_integrity.py`（13 条）
+
+两条独立断言，各覆盖一类畸形：
+
+① **版本号不重复**（结构性，兜底靠它）
+② **每条标题下必须有正文**（best-effort 补充，占位条目豁免）
+
+②**不是**与 ① 等价的第二道锁：两条重复标题之间只要夹进任意一行真正文，
+② 就测不出来。v0.45.172 那次恰好是空标题，那是运气。**要精简就删 ② 留 ①。**
+反过来 ① 也盖不住 ②：一条号不重复的空标题只有 ② 够得到。两条各有一个
+只有己方抓得到的样本常驻（`TestBothAssertionsAreNeeded`），免得哪天其中
+一条其实是冗余的却没人知道（v0.45.168 那种「反向改 5 处、4 处全绿」）。
+
+口径上的两个复用（CLAUDE.md「不要手搓已有的东西」）：
+* 正则直接 `from code_version import _CHANGELOG_RE`，不另写一套
+* 仓库锚点用 `code_version._repo_dir()`（由 `__file__` 派生）——CHANGELOG.md
+  是随代码发布的**只读文档 = 代码**，不是数据；`test_guard_reads_this_worktrees_changelog`
+  把它钉死 == 本 worktree 根，免得守卫跑去审 `.claude/worktrees/` 下别的副本
+* `tests/` 被 `test_paths_not_frozen_at_import.py::_scan` 第 237 行显式排除，
+  故本文件**不需要**登记进 `MUST_STAY_FILE_ANCHORED`（已核对，非推测）
+
+### Fixed — 简报里一条没核实的前提（由 v0.45.193 那个 session 自查发现）
+
+原简报称「占位条目本身就没有正文，当前 main 上就有多条」，用来论证豁免必需。
+**实测这句依赖于「什么算正文」这个口径**，不连口径一起报就是会骗人的快照。
+origin/main @ `e54ca02`（337 条标题）：
+
+| 口径 | 无正文条数 | 其中非占位 |
+|---|---|---|
+| 窄（`---` **算**正文） | 0 | 0 |
+| 本文件的宽（`---` **不算**） | 2（`0.45.195`/`0.45.190`） | 0 |
+
+即：**豁免此刻就必需，是因为本文件选了宽口径**；窄口径下它只是前瞻性保险。
+宽口径换来的是能抓住 `标题 / --- / 标题`（本仓每条条目之间都隔着 `---`，
+把分隔线当正文会让 ② 对绝大多数形态失去判别力）。
+
+⚠️ 连带修掉一个更隐蔽的：豁免**只验合成样本，不验当天的真文件**。
+「仓库里此刻有没有占位条目」是**瞬时工作流状态**，不是不变式——拿它当证据
+等于断言「任何时刻都有人正在开工」，安静的那天会假红。本次 session 内实测到
+这个数从 2 漂到 1（`0.45.190` 中途换上真标题）。
+
+### Fixed — 一条我先写下、后才跑的变异说法
+
+原 docstring 写「把正则的 `^` 去掉 ⇒ 红」。**实跑全绿。** 四象限实测：
+
+    ^ + .match()    → ['0.2.0']                     安全
+    ^ + .search()   → ['0.2.0']                     安全（^ 独立够用）
+    无^ + .match()  → ['0.2.0']                     安全（.match 独立够用）
+    无^ + .search() → ['0.2.0','0.1.0','0.3.0']     **破**
+
+`re.match()` 本来就只从串首匹配，而本文件与 `changelog_version()` 都是逐行
+`.match()`，`^` 在这条路径上**冗余**。护住行首锚定的是二者的**合取**，
+单改任一个都不红。真正能让它红的变异是**同时**去掉 `^` 且换 `.search`（已实测）。
+教训：**「举得出变异」和「变异真的跑过」是两件事。**
+
+### 实测：每条断言都举出了能让它变红的变异
+
+在**真** `CHANGELOG.md` 上做（改完逐字节 sha256 核对还原）：
+
+| 变异 | 结果 |
+|---|---|
+| 插一条重号标题（两条都有正文） | 只有 ① 红 |
+| 插一条无正文、非占位标题（号不重复） | 只有 ② 红 |
+| v0.45.193 原样形状（逐字节相同、相邻、上条无正文） | ① ② 同时红 |
+
+检测器自身的变异（证明守卫不是恒真）：`_is_rule` 恒 False ⇒ 2 红；
+去掉占位豁免 ⇒ 2 红（含真文件那条，即豁免确实在承重）；
+`duplicate_versions` 恒返回空 ⇒ 4 红。
+
+### 顺带记下，**不在本次改动面内**
+
+* `tests/test_code_version.py:48` 挂着与上面同一条未跑过的 `^` 变异说法，本次未改
+* **不要加第三条「版本号单调递减」断言**——会当场红。`origin/main` 上有 5 处
+  既存相邻逆序（均同日成对，全部早于 v0.45.193）：`0.45.17/0.45.18`(L14356)、
+  `0.45.9/0.45.11`(L14797)、`0.42.4/0.42.5`(L17306)、`0.29.1/0.29.3`(L18354)、
+  `0.17.0/0.17.1`(L19950)。已独立复算。MEMORY.md 真正依赖的不变式是
+  **顶部 == 全局最大**，这一条成立（顶部 `0.45.195` 即全局最大），`grep -m1` 安全
+* 全仓复核「谁真的打开 CHANGELOG.md」：只有 `code_version.py:121` 与
+  `tests/test_code_version.py:55`（本次 +1），非 Python 与编排器均无消费者。
+  故 v0.45.172 那次重复**从未影响版本上报**——`changelog_version()` 取首个匹配
+  即返回。这句由 `TestProductionReaderIsUnaffected` 喂一份带重复的 CHANGELOG
+  直接验过，不是 docstring 里的散文
+
+### 补记 1（同日，v0.45.193 那个 session 复核后）——「结构性红」与「内容依赖红」要分开说
+
+上面「一条我先写下、后才跑的变异说法」那节里，**更正本身又带了一条没分清的断言**：
+「能让它红的变异是同时去 `^` 且换 `.search`」。这句话不假，但 B 让**两条**测试变红，
+而两条性质完全不同：
+
+| 测试 | B 下变红的性质 |
+|---|---|
+| `test_only_line_start_headings_count` | **结构性** —— 夹具自带、把非行首出现放在第 2/3 行、断言比整份列表，与真文件无关 |
+| `test_no_duplicate_version_headings` | **内容依赖** —— 只因正文恰好写过两处 `## [x.y.z]`（L22/L7304）。实测删掉那两行再跑 B ⇒ 重号归零、转绿 |
+
+⭐ **判据：「X 会让它红」必须分清红的是「结构」还是「当下内容」。**
+前者永真，后者随文件漂 —— 而 CHANGELOG 每天被十几个 session 追加。
+
+**且 `test_code_version.py:48` 不能照本条结论去修。** 同一个 B 变异下
+`changelog_version()` **不红**：它取**首个**匹配即 return，而第一条真标题（行 8）
+排在那两处散文**前面** ⇒ 结果不变。本守卫的 `parse_entries` 枚举**全部**匹配行
+⇒ 342 条 vs 基线 340 条。**同一变异，两个消费者结论相反。**
+要给 `test_code_version.py:48` 一个真会红的变异，得造「**文件头里就有非行首
+`## [x.y.z]`**」的合成夹具 —— 它真正锚的是「逐行 `.match`」这个遍历形状，不是 `^`
+（`^` 对 `.match()` 恒冗余）。
+
+这是同一形状第三次出现：简报把推断当实测 → 我的 `^` 变异没跑就写 →
+这次更正里没分清结构/内容。三次都是「说了一句自己没验到那一层的话」。
+
+### 补记 2 —— 解析器的已知边界（刻意不修）
+
+口径是**行首** `## [`，所以**代码围栏里顶格写的** `## [x.y.z]` 会被算成标题、
+可能报出一条假重号。当前文件零命中（两处非行首出现都在行内）。撞上了先看一眼：
+要么把那行缩进两格，要么它本来就是一条该被发现的真重复。
+**没做围栏跟踪是刻意的** —— 为一个尚未出现的形态加状态机，换来的是一个更难
+自证的解析器，不划算。
+
+---
+
+## [0.45.194] — 2026-09-11 — memory 目录纳入 git，并把索引规约写成规则
+
+不改任何生产代码，只动 `CLAUDE.md`（记忆库本身在它自己的仓库里）。
+
+### Added — memory 目录已是本地 git 仓库
+
+`~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/` 现为独立本地仓库
+（分支 `main`，**无远端** —— 记忆内容不外推；日后要加远端属对外动作，须先问用户）。
+建仓前扫过凭据，零命中。
+
+**用户明确选定**：每次 session 收尾提交，与「更新 `CHANGELOG.md`」并列进收尾清单
+（被否掉的另一个选项是「下次跑 `/consolidate-memory` 时连提交一起做」）。
+三条注意事项同时进 `CLAUDE.md`：无改动不提交 / 并发写时 message 要如实标注
+哪些文件不是本次改的 / 加远端须先问。
+
+⚠️ 如实记一笔：**40KB 那版 `MEMORY.md` 进不了历史**。它在建仓前就被 `cat >` 覆写，
+当时尚无版本控制，字面文件不可恢复；内容因覆写前做过守恒核对而未丢。
+
+### Added — 索引行 ≤150 字符，且**裁之前必须先核对**
+
+`MEMORY.md` 索引曾涨到 40084 字节、单条 2054 字符，现 8406 字节 / 46 条 / 最长 142。
+
+⚠️ 关键不是字数上限，是**顺序**：实测 v0.45.168/170（`MUST_STAY_FILE_ANCHORED`
+超集守卫等）与 v0.45.179（同页同量两个数）等教训**只活在索引行里，topic 文件
+一个字都没有** —— 照字数直接裁会无声丢知识。故规则写成「先把索引行里的标志物
+逐个 grep topic 文件，缺的搬回去，再裁」。70 个标志物复查后仅 1 个缺失，已补。
+
+同日观察到这个形状**反复出现**：两个并发 session 各自把细节正确写进 topic 文件，
+却同时把摘要塞进索引行（179 与 730 字符），索引因此变成第二份正文。
+
+### 过程教训（本版自己犯的）
+
+写这条 CHANGELOG 时**又犯了「编辑失败、提交照跑」**：Python 编辑脚本 `sys.exit`
+非零退出，而 `git add`/`git commit` 写在**换行之后**不是 `&&` 链上 ⇒ 照常执行，
+产出一个**占了 v0.45.194 号却没有 CHANGELOG 条目**的提交。
+与 v0.45.121 / v0.45.167 同物种，而 `CLAUDE.md` 里那条规则**正是本次改动自己加的**。
+⭐ 附带一条新判据：**脚本的失败消息不许把「0 次」和「2 次」说成同一句话**
+——当时断言写的是 `count != 1` 却报「锚点不唯一」，真实情况是本地 CHANGELOG
+落后 origin、那个锚点**一次都没有**，误导了第一轮归因。
+
+## [0.45.193] — 2026-09-11 — CHANGELOG 里 v0.45.172 标题重复两行，删掉无正文的那条
+
+### 背景
+
+`git show origin/main:CHANGELOG.md | grep -n '^## \[0\.45\.172\]'` 返回**两行相邻**的
+同一条标题。两条逐字节相同，其中**上面那条无正文**（下一非空行就是第二条标题），
+正文（`### 背景` 起）挂在下面那条上。
+
+考古定位到引入点（`git log -S` 数标题出现次数，非「碰过文件」）：
+
+| 提交 | 标题出现次数 |
+|---|---|
+| `8f51bdd`（写入 v0.45.172 本体） | 1 |
+| `389a451`（写入 v0.45.173） | **2** |
+
+`389a451` 的 diff 里，上面那条是 `+` 行、下面那条是上下文行——v0.45.173 那次把自己的
+占位标题换成真标题、补正文时，连带把相邻的 172 标题多吐了一份。**与 v0.45.187 的
+iCloud 重名副本清理无关**（那次在动手前用 `git show origin/main:CHANGELOG.md` 核过）。
+
+### 为什么值得修
+
+MEMORY.md 指定 `git show origin/main:CHANGELOG.md | grep -m1 '^## \['` 为**下一个版本号的
+唯一真相**。重复标题让任何对版本条目的程序化扫描产生歧义——按版本号去重会报
+「0.45.172 重复」，而占号协议正建立在「一个号一条条目」之上。
+
+### Fixed — `CHANGELOG.md`
+
+删掉无正文的那条标题及其后空行（−2 行）。存活条目正文原样未动。
+改动用断言而非行号定位：先断言「恰 2 条、相邻、只隔一个空行、第二条后是 `###` 正文」，
+再断言「删完恰剩 1 条、行数差恰为 2」——任一不成立就中止，而不是照行号盲删。
+
+全仓复查（`grep '^## \[' | sed 's/ —.*//' | sort | uniq -d`）：**此前仅此一处重复，现已无。**
+
+## [0.45.192] — 2026-09-11 — 日期解析器接受了不是日期的串：幽灵历史行、幽灵趋势点、幽灵对比基准日
+
+承 v0.45.187（清 46 个进了 git 跟踪的 iCloud 重名副本）。那一版只清了存量并加了
+`.gitignore` 防新增；**但 `.gitignore` 挡得住副本进 git，挡不住它被 `glob()` 吃掉**
+—— 消费者读的是磁盘目录不是 git 索引。本版修的是被吃掉之后发生的事。
+
+### Fixed
+
+- **`dashboard_renderer.py` 的两处 `stem.replace("alpha-hive-daily-", "")`
+  会把非日期串当成一个独立日期用下去。**
+  对 `alpha-hive-daily-2026-09-09 2.json`（iCloud 重名副本）得到
+  `_hdate = "2026-09-09 2"`。gh-pages 上实测三处后果：
+  1. 历史时间线多出一张幽灵卡片（出现 2 次），其 5 个链接**全是死链**
+     —— 那 4 份 `*-ml-enhanced-2026-09-09 2.html` 压根没部署上去；
+  2. 趋势序列多一个 `{"date": "2026-09-09 2", "score": 5.9}` 数据点；
+  3. **分数变化卡片的基准日变成了幽灵**（页面上写着「与 2026-09-09 2 对比」），
+     即「较上日涨跌」是拿副本当基准算出来的。
+
+  ⚠️ **紧邻的那道「非交易日幽灵」守卫没拦住，而且不是 fail-safe 生效的结果。**
+  `filename_is_nontrading_day()` 用 `re.search`（子串搜索）而非 fullmatch，
+  会从 `"2026-09-09 2"` 里**找到** `2026-09-09`、判定其为交易日、返回 `False`
+  （「不是非交易日」）⇒ 它连自己那条 `fail-safe：解析失败时不跳过` 的分支都没进。
+  **实测 `filename_is_nontrading_day("2026-09-09 2") is False`。**
+  ⇒ 标准的 CLAUDE.md「这个失败，下游怎么知道？」：解析器接受了非日期输入，
+    没有任何东西会红。**「已经有一道守卫了」不等于那道守卫够得到这个 bug。**
+
+- 修法是**加一道独立的闸**，不动 `filename_is_nontrading_day`：
+  新增 `dashboard_renderer._report_stem_date()`，`re.fullmatch` 形状 +
+  `date.fromisoformat()` 真实性双重校验（`"2026-13-45"` 形状合法但不是日期），
+  不是日期返回 `None` 并**打 warning 带上坏值**。两处调用点均已改走它。
+  ⚠️ **刻意不改 `filename_is_nontrading_day`**：它的 fail-safe 语义对它自己是对的
+  （宁可漏滤也绝不误滤合法报告），且有 **5 个调用者**含 `report_deployer`，
+  改它会让合法报告被漏发。缺的是「这串到底是不是日期」这道独立判断，不是它错了。
+
+### Added
+
+- `tests/test_phantom_date_guard.py`（16 条），三组断言缺一不可：
+  - **取值表**正反两向（真日期放行 / 副本、形状合法的假日期、非零填充一律拒）。
+  - **成对断言**：显式断言 `filename_is_nontrading_day("2026-09-09 2") is False`，
+    把「旧闸结构上够不到这个 bug」钉成可执行事实 ——
+    没有这条，后来的人会觉得「都有幽灵守卫了，这道新闸多余」而删掉它。
+  - **AST 结构检查**：枚举全文件每一处 `.replace("alpha-hive-daily-", "")`，
+    断言都被 `_report_stem_date()` 包住。**故意不按变量名匹配**
+    （`_hdate`/`_pdate` 是名单驱动，第三处叫别的名字就溜过去了）。
+  - **观测点断言**：拒绝时必须留 warning 且 warning 要带真实坏值。
+
+  变异校验 **6/6 全部打红**，每轮核对 `collected=16` 未变、跑完从 pristine 恢复复验：
+  M1/M2 摘掉任一调用点的闸 → AST 那条红；M3 helper 一律放行 → 11 条红；
+  M4 删 warning → 观测点那条红；M5 去掉 `fromisoformat` 只比正则 →
+  `2026-13-45`/`2026-02-30` 两条红；M6 warning 不带真实坏值 → 观测点那条红。
+
+  ⚠️ 过程中被自己坑了一次，值得记：观测点断言最初写的是
+  `assert "2026-09-09 2" in caplog.text`，**M6 变异下全绿** ——
+  因为那个字符串**硬编码在告警正文里**（作为给人看的例子），
+  消息模板自己就满足了断言。同 MEMORY.md「**守卫标志物别用源码文案**」。
+  改法：探针值换成源码里不可能出现的 `"1999-01-02 7"`（并断言它确实不在源码里），
+  且断言落在 `record.args`（真实传入的值）而非渲染后的文本。
+
+### 未做（需用户操作）
+
+- **生产 checkout `~/Desktop/Alpha Hive` 磁盘上仍有 45 个副本**
+  （15 个仓库根 + 30 个 `report_snapshots/`），且落后 main 数个提交。
+  本版让幽灵**不再进入渲染**，但那些文件本身还在，`report_snapshots` 的样本
+  双计数要等它们被删掉才真正消失。
+  ⚠️ 当时生产工作区有**别的 session 未提交的 5 个改动**（含 `dashboard_renderer.py`），
+  按 MEMORY.md「看到别人的未提交改动就停手」未动。
+- **gh-pages 的 index.html 仍带着那张幽灵卡片**：它是生成物，且 2/3 的污染
+  （趋势点、对比基准日）属派生数字，手改等于伪造。应由生产清掉副本后
+  重新部署覆盖 —— 本版修好生成器正是为了让那次覆盖是干净的。
+
+## [0.45.191] — 2026-09-11 — 「数据可用 ⇒ 看多」：一张恒定的看多票，和它旁边五个零调用点的方法
+
+用户指定顺序：**先改兜底，再删死代码**。理由是两者是**同一个范畴错误**的两处实例，
+先删掉死代码会把线索一起丢掉。
+
+### Fixed — `code_executor_agent.py::analyze` 第 6 步兜底
+
+技术分析脚本解析失败后的兜底原本是：
+
+```python
+if price and market_cap:  score = 6.0; direction = "bullish"
+else:                     score = 5.0; direction = "neutral"
+```
+
+**「价格与市值都拿到了」⇒「看多」是范畴错误** —— 数据可用性不含任何方向信息。
+
+`pheromone.db::agent_memory` 台账实测（2026-04-06 ~ 09-10，18,120 行）：
+`code_executor_data` 共 **870 条，870 条（100%）是 `6.0 / bullish`**，
+`else` 支五个月一次没走过 ⇒ 它是一张**恒定的看多票**，不是观测。
+
+改为：拿没拿到数据只决定**说辞**，方向恒 `neutral`、分数落量表中性点 `5.0`；
+并加 `data_quality={"technical": "fallback"}` 机读标记 —— 没有它，
+「兜底的中性」与「真的中性」完全同形，就是 v0.45.151「缺失哨兵选中众数」的形状。
+标记值取 `QueenDistiller.PROXY_SOURCES` 里既有的 `"fallback"`：
+写一个它不认的字面量，DQ 汇总会按 0 质量计，等于把「降级」悄悄升格成「数据全废」。
+
+### Removed — 五个零调用点的方法
+
+`generate_data_fetch_code` / `generate_analysis_code` / `generate_visualization_code` /
+`execute_and_analyze` / `auto_debug`（369 → 258 行）。判据两条独立、**各带正对照**：
+
+| | 判据 | 正对照 |
+|---|---|---|
+| 静态 | AST 全仓零调用点 | 同类 `analyze` 有 **17** 个生产调用点 ⇒ 扫描器有效 |
+| 运行时 | `execute_and_analyze` 独有的 `code_executor_success` / `_fixed` / `_error` 三个 source 在台账里**各 0 行** | 同表同 agent 的 `analyze` 三个 source 共 **3,884 行** ⇒ 台账记得住这只蜂 |
+
+三个盲区均查空：方法名作为**字符串**出现在全仓任何文件（只剩定义本身 +
+一份设计文档 `PHASE3_P1_CODE_EXECUTION_PLAN.md`）、仓库外（`~/.claude/scripts/`、
+`mcp-servers/`）、动态派发（`getattr`/`eval`/注册表）。
+
+它们内含 `成功→8.0/bullish`、`修好→7.0/bullish`、`报错→2.0/bearish` ——
+与上面那条兜底是同一个范畴错误。**死代码，不是活 bug**；但谁复活它，那是颗地雷。
+
+### Added — 世代边界（`ic_rerun_readiness._COHORT_HISTORY` 第 10 条）
+
+**为什么算**：`_compute_direction_vote`（`queen_distiller.py:567/595`）的
+`bullish_count` / `bullish_w` 遍历**全部** `valid_results`、**不看维度** ——
+`CodeExecutorAgent` 虽是 `technical` 维（不进五维加权），它的**方向票照样算**，
+直通 `rule_direction` → `final_score`；新增的 `data_quality` 键同样进
+`_apply_triple_penalty` 的 `data_real_pct` → `quality_factor`。
+两条都是**实读源码逐条出边走出来的**，不是照抄清单（v0.45.164 判据一）。
+
+**边界日期取 2026-09-10，与 v0.45.176 同日、扩展同一标签，不新开空分区**：
+实测 2026-09-10 起兜底触发 **0 次** ⇒ 本代已有的 30 条样本改动前后逐位相同、
+确实可比，**作废 0 条**。同 v0.45.163 对 09-07 那三条的处置。
+
+### 核实：v0.43.10 的「已修复」**属实**（MEMORY 勿再提议清单是对的）
+
+台账逐日对照，`code_executor_analysis` 在 2026-08-14 之前 **0 行**、之后 570 行
+（v0.43.10 于 08-12 提交，08-12/08-13 无 CodeExec 结论条目，08-14 首扫即生效）：
+
+| 时期 | 恒 6.0/bullish | 有信息 | 恒定占比 |
+|---|---|---|---|
+| 2026-08-14 前 | **852** | **0** | **100.0%** |
+| 2026-08-14 后 | 18 | 570 | 3.1% |
+
+v0.43.10 修的是**上游**（技术分析脚本撞 yfinance MultiIndex 崩溃，使兜底被 100% 走到）。
+**兜底本身的范畴错误原样留到了本版**——「修好上游」与「修好兜底」是两件事。
+
+### 影响面的边界（别夸大）
+
+- 兜底触发率现为 **1.2%**（2026-09 共 3/243 条结论条目），其余 **98.8%** 的行逐位相同。
+- ⚠️ **未能干净测出这一票是否 pivotal**：台账里的兜底行与同日 `analysis-*.json`
+  **无法可靠配对**（同日重扫会产生多行 —— `MU 2026-09-09` 两行且当天无对应 JSON）。
+  ⇒ 只给结构性判定，**不给翻转率**。
+- **2026-04 ~ 2026-07 的板数据里 CodeExec 是一票无条件看多**（852 条，100%）。
+  池化那段窗口的回测/归因要知道这件事；当前世代（2026-09-10 起）不受影响。
+- 各蜂方向分布（全历史）显示 CodeExec **不是**最偏多的：Oracle 88.1% 多 /
+  Guard 83.3% / Rival 82.8%，CodeExec 仅 29.4%。
+  ⇒ **别把「自我强化看多」的账记到它头上**，那三只才是大头（本版未查）。
+
+### Added — `tests/test_code_executor_fallback.py`（16 项）
+
+兜底两条子支都不给方向 / 分数落中性点 / 机读标记存在 / 标记值必须被
+`PROXY_SOURCES` 认得 / 五个死方法已删 / 世代边界已登记且不新开分区。
+每条都配反向成对断言：真分析仍给方向（防「一律 neutral」）、
+成功分支不打 fallback 标记（防「永远打标记」）、`analyze` 仍在（防「把类删空」）。
+
+### 教训
+
+- **「修好上游」≠「修好兜底」。** v0.43.10 把兜底的触发率从 100% 压到 3.1%，
+  症状消失了，于是那条 `direction="bullish"` 又活了一个月。
+  ⇒ 修复「兜底被大量走到」时，**顺手看一眼兜底本身对不对**。
+- **两处正对照缺一不可。** 「AST 零调用点」若没有 `analyze` 的 17 个作对照，
+  只能证明「我没搜到」；「台账 0 行」若没有 3,884 行作对照，
+  只能证明「台账没记」。
+- ⚠️ **又一次栽在陈旧字节码上。** 中途读 `_COHORT_HISTORY` 得到「5 条、
+  当前世代 2026-09-07」，据此差点按「零成本」下结论；清掉 `__pycache__`
+  重读是 **9 条、2026-09-10**（与源文件 `grep -c` 及 `origin/main` 三方一致）。
+  与 v0.45.151 mutation 脚手架那次同一个根因。
+  ⇒ **合并之后、拿 import 出来的常量下决定之前，先清一次 `__pycache__`。**
+- 删代码时把 1-indexed 的行号直接当下标用，**断言当场抓到**（`lines[240]` 是空行
+  不是 `}`）。切片删除前逐条断言边界，比事后 diff 便宜。
+
+---
+
+## [0.45.190] — 2026-09-11 — 期权链的 `DTE≥7` 其实是「≥8 个日历日」：给零覆盖的 `_select_expiries` 补守卫与观测点
+
+### 背景
+
+用户问「GEX 是不是也跑在同一条截断链上」（`DealerGEXAnalyzer → fetch_options_chain
+→ fetch_cboe_chain`），并指出它与 v0.45.188 的 max_pain 不同——**这条链进评分**
+（`gex_regime.RegimeWeightAdjuster` → 逐标的权重 → `final_score`），所以值得单独查。
+
+**是，而且根因比「DTE<7 被排除」更具体：`_select_expiries` 的 DTE 比日历天数少 1。**
+`today` 是 `_pdt_now()`（**带时分秒**的 datetime），`datetime.strptime(到期日)` 是当天
+零点，`timedelta.days` 向下取整 ⇒ 只要不在 00:00:00 整跑，每个到期日都少算一天。
+于是 `DTE>=7` 实际要求「≥8 个日历日」、`DTE>=3` 实际是「≥4 日历日」。
+
+2026-09-11（周五）全 30 只 watchlist 实测，**只修这一处、别的一字不动**：
+
+| | 结果 |
+|---|---|
+| 选中到期日集合被改变 | **30 / 30**（全部：+09-18，挤掉最远的一个）|
+| `DealerGEXAnalyzer.total_gex` 符号翻转 | **7 / 30** — AMZN / DE / CRM / TMO / TMUS / ENPH / NEE |
+| 量级最大偏差 | NVDA `4.01 → 168.64`（**42×**）；09-18 一个到期日占全链 GEX 的 91% |
+| 生产链看到的持仓量 | AMZN 96,705 / 886,327 = **11%** |
+
+⚠️ **这是锁死在周五的缺陷。** 差一天只在「恰好有到期日落在 3 或 7 个日历日」时才
+改变选集，而周五那天正是下周五的标准周权（全周 OI 最大）。按真实到期日清单换参照日
+重算：**周五 30/30、周一 6/30、周三 5/30、周二与周四 0/30**。上表因此是一周里最狠
+的那一天，不要当作日常幅度。
+
+⚠️ **评分侧后果很小，别把它读成「修了分会变好」。** `RegimeWeightAdjuster` 只消费
+`regime` 这个三值字符串（不用 `total_gex` 的大小），而 `signal`/`risk_adj` 已归零 ⇒
+pos→neg 的全部效果是 odds +2.9pp / sentiment −2.1pp / catalyst −0.8pp。拿 249 条归档
+记录（2026-08-01 起，用真实 `dimension_scores` + 真实 `dimension_weights`）做反事实：
+`|Δfinal_score|` 中位 **0.050**、p90 0.098、最大 **0.127**；跨决策阈值的 **2/249**
+（CVX 5.96→6.02、META 5.94→6.04，都在 6.0 线，7.5 主简报线零）。收益是「GEX 这个数
+等于它声称的东西」，不是分数。
+
+### 本版**不修**那个口径，只把它钉住
+
+修它要改 `odds` 维度的输入，按 `ic_rerun_readiness._COHORT_HISTORY` 得付世代边界；
+那是单独的决定（下一步方案见本条末尾）。本版做的是 P0：**让这件事在仓库里可见、
+可测、可取证**。
+
+### Added
+
+- `tests/test_select_expiries_dte.py`（11 条）——`_select_expiries` 此前**零测试
+  覆盖**，而它是全部 30 只标的取链的唯一闸门（IV rank / 25Δ skew / 期限结构 /
+  Dealer GEX 全吃它的输出）。每条断言的 docstring 里写明什么变异会让它变红。
+  - `test_selection_must_not_depend_on_time_of_day` 是 **`xfail(strict=True)`**：
+    选到期日是**日期**运算，同一天哪个钟点跑都该给同一答案。今天它 xfail（绿），
+    **修好的那一刻 XPASS ⇒ 变红**，reason 里写着「先去 `_COHORT_HISTORY` 登记
+    世代边界」。危险的从来不是「没人修」，是**有人静默修了、新旧口径的分被混算**。
+  - 零外部依赖（夹具全是内存 dict）⇒ 结构上不存在写 `skip` 的余地。
+- `cboe_options.chain_selection_stats()` / `reset_chain_selection_stats()` /
+  `_record_chain_selection()`——链构造观测，经 `scan_timing.counters()` 落进
+  `status.json`（`counters.cboe_chain`），无需改编排器（同 v0.45.184 `code_version`）。
+  - 计数：`chains` / `min_cal_dte_max` / `near_excluded` / `near_excluded_oi` /
+    `chosen_oi` / **`errors`**。
+  - ⚠️ `errors` 不是凑数：没有它，「统计崩了」和「真的一个都没挡掉」在 status.json
+    里都表现为 `near_excluded==0`——正是 MEMORY 记了六次的「失败没传导到下游」。
+  - ⚠️ 观测点**刻意用日历口径**（`.date()` 差），与被观测的那套差一天的口径不同；
+    否则观测点自己也差一天 = 复制了它要观测的 bug。有断言钉死（M5）。
+
+### Changed
+
+- `cboe_options.py::fetch_cboe_chain`：INFO 日志加后缀
+  `，最近到期 N 日历日，挡掉近月 M 个（原始 OI 占 P%）`。实测 2026-09-11：
+  NVDA「最近到期 10 日历日，挡掉近月 3 个（原始 OI 占 67%）」。观测失败时印 `?`
+  而**不是** 0。
+- `cboe_options.py::_select_expiries` docstring：v0.45.188 刚按实测重写过，但那份
+  仍差一天——「DTE≥7 的前 4 个」实为「≥8 日历日」、「`near_expiry_set` 取 DTE∈[3,7)」
+  实为日历 [4,8)（实测 AMZN 该集合为 09-16/09-18，日历 DTE 5 与 7）。
+  ⚠️ 教训：**按实测重写的文档，只在被实测的那个维度上是准的**——上一版验的是
+  「两桶会不会都进」，没验「DTE 本身算得对不对」。
+  并记下同仓**两种 DTE 口径**并存：`_build_quote_set` / `fetch_cboe_full_chain_oi` /
+  `oracle_bee._near_oi_by_strike` 用的是正确的 `.date()` 写法，所以 `_QS_MIN_DTE`
+  上方那句「与主链一致」不成立——它比主链宽一天。
+- `options_analyzer.py::OptionsAgent._calc_total_oi`：`near_expiry_set` 与链内到期日
+  **不相交**时打一行 warning，**进程内只打一次**。**行为逐字节不变**（改了就是口径
+  变更）。v0.45.188 已把「这是空操作」写进 docstring；本版补的是落点——文档解决
+  「读代码的人别误会」，但「这个意图哪天开始生效 / 还是永远不生效」此前答不出那句
+  判据：**谁会红？** 实测 AMZN 96,705 == 96,705。
+  ⚠️ 一次性不是省事：这个条件在 CBOE 主源路径上**结构性恒为真**（30 只标的每轮全
+  命中），逐次打印就成了一盏恒亮的灯——和不打一个效果。逐次的聚合数字在
+  `counters.cboe_chain` 里。（初版就是逐次打的，自查时按本仓那条「方差为零的量不是
+  信号是探针」改掉；配套断言 `test_calc_total_oi_stays_silent_…` 必须先把一次性标志
+  清回 False，否则「沉默」可能只是去重的副作用 ⇒ 又一条没牙的断言。）
+- `scan_timing.py::counters()`：新增第四项 `cboe_chain`；`tests/test_scan_timing.py`
+  的三条精确键集断言同步更新（它们是精确比较**by design**——用来抓「有人加了一路
+  计数却没说」，更新它们就是在说）。
+
+### 纪律注记
+
+变异校验（10 个变异逐条跑，先断言基线全绿、`--maxfail=0` 覆盖 pyproject 的 `-x`、
+核对 `collected 10 items`）**当场抓到我自己写的一条没牙的断言**：配对测试里造了
+`logging.Handler` 却从没挂到任何 logger 上 ⇒ 收集器恒空 ⇒ `assert not logged` 恒真，
+「warning 改成恒亮」这个变异无人变红。已改成与配对断言同一套注入方式，10/10 全部变红。
+——**举不出变异就别加断言，这条规矩对写规矩的人同样生效。**
+
+### 不需要世代边界
+
+本版**不改任何进评分的量**：新增的是测试与观测计数，唯一的行为变化是一行 warning。
+`_calc_total_oi` 的返回值、`_select_expiries` 的选集、GEX/IV 的全部口径逐字节不变。
+
+### 下一步（未做，待决定）
+
+推荐**不要**去改 `_select_expiries` 本身——它同时喂四个消费者，其中 IV rank /
+25Δ skew / 期限结构三个**本来就该剔近月**（近月 theta 扭曲），改它是为修一个弄坏三个，
+且要付最大范围的世代边界。更好的路是照 v0.45.188 `_calc_max_pain` 的先例，给
+`DealerGEXAnalyzer` 一个**同 payload 的第二视图**（`_fetch_cboe_payload` 有 4h 进程
+缓存，Step 2 约 30–55 分钟 ⇒ 零额外网络调用）。届时需要一条世代边界，但范围只含 GEX 一维。
+⏰ 成本窗口：当前世代（2026-09-10 / v0.45.176）**已回填样本 0 条、0/25 周**，
+现在改的损失是一个扫描日；09-21（09-10 那批的 T+7）起开始吃真样本，此后每拖一周多赔一周。
+
+
+---
+
+---
+
+## [0.45.189] — 2026-09-11 — 同一形状第二、三例：另两条守卫也在扫 14 个嵌套 worktree
+
+### 背景
+
+v0.45.186 修的是 `test_zero_weight_invariant.py`，并把枚举抽成
+`tests/_repo_files.py::own_python_files(root)`。本版普查其余枚举驱动的守卫，
+又找到**两条同形状的**——都在生产 checkout 上越界扫进 `.claude/worktrees/`：
+
+| 守卫 | 旧枚举 | 生产 checkout 实测 | 其中 `.claude/` 下 |
+|---|---|---|---|
+| `test_no_fake_price.py:37` | `ROOT.rglob("*.py")` | 2128 | **1975（92%）** |
+| `test_no_crewai_dependency.py:61` | `os.walk(PROJECT_ROOT)` | 5029 | **4295（85%）** |
+
+git 跟踪的只有 **340** 个。嵌套 worktree 现在是 **14 个**（v0.45.186 记录的是
+10 个——**这个数在长，不是静态的**），每个是一份停在各自版本的完整仓库副本。
+
+⚠️ **两条当时都是绿的，而绿不等于没事**，且泄漏面**各不相同**（所以判据逐条重推、
+没有批量转换）：
+
+* `test_no_fake_price`：`_EXCLUDE_DIRS` 用 `any(part in p.parts)` 判**绝对**路径段，
+  于是嵌套副本里的 `tests/` `experiments/` **恰好**被排掉了，但它们根目录下的
+  `data_pipeline.py` / `alpha_hive_daily_report.py` 一个都没排掉。
+* `test_no_crewai_dependency`：`_SKIP_DIRS` **不含 `.claude`**，一个都没排——
+  嵌套副本里的测试、实验脚本全算进「全仓源码」。而 crewai 是 v0.45.74 才移除的，
+  **任何一个那之前分出去的 worktree 里都还留着 `crewai_adapter.py`**。
+
+绿的唯一原因是「碰巧没有哪份陈旧副本命中」。红一旦出现，**只在生产 checkout 上
+可见**（worktree 里没有嵌套 worktree），造成它的人看到的是绿 ——
+MEMORY `alpha-hive-test-writes-production`：病灶只长在没人看的地方。
+
+### Changed
+
+- `tests/test_no_fake_price.py`
+  - `_iter_prod_py()` → `_iter_prod_py(root=None)`，枚举换 `own_python_files(root)[0]`。
+    `root` 是**参数**不是模块常量（调用时求值，测试才能指向带病灶的 tmp 树）。
+  - `_EXCLUDE_DIRS` 改判 `p.relative_to(root).parts`。按绝对路径判时，
+    **仓库被 checkout 到的位置会改变守卫的覆盖面**——放进任何叫 `gui`/`tests`/
+    `experiments` 的目录，整条守卫静默扫零个文件且照样是绿的。
+  - 扫描体抽成 `_scan_violations(root)`（此前内联在断言里，没法用夹具驱动）。
+  - `_EXCLUDE_DIRS` 移除 `.git` / `__pycache__`：已被 `_is_ours` 的点号过滤与
+    「`__pycache__` 里没有 .py」覆盖，**留着就是删掉也没有任何测试会红的行**。
+  - 实测：生产 checkout 2128 → **153**，`.claude/` 下 0 个，命中数仍为 0
+    （被扫掉的 92% 全是噪音，没有藏着真违规）。
+- `tests/test_no_crewai_dependency.py`
+  - `test_repo_has_no_crewai_import` 的扫描抽成 `_crewai_offenders(root=None)`，
+    `os.walk` → `own_python_files(root)[0]`。
+  - `_SKIP_DIRS` 六项缩到 **`{"venv"}`**：`.git`/`.pytest_cache`/`.venv` 被
+    `_is_ours` 的点号过滤覆盖，`node_modules` 被它的 `VENDORED` 覆盖，
+    `__pycache__` 里没有 .py。**只有裸 `venv` 两道都盖不到**（无点号、不在
+    `VENDORED` 里），显式留下——真装了 crewai 的话源码就在那儿。
+  - 实测：生产 checkout 5029 → **340**，`.claude/` 下 0 个，命中数仍为 0。
+
+### Added — 枚举范围本身的守卫（每条都写明什么变异会让它变红）
+
+两个文件各 4 条，**必须用 tmp 夹具**：夹具里造一棵带 `.claude/worktrees/<name>/`
+的假仓库，三到四份**内容完全相同、只有位置不同**的文件（于是「该排的没排」
+只能由路径过滤解释，不会被内容差异混淆）。
+⚠️ **在 worktree 里跑什么都证明不了**——病灶只存在于生产 checkout。
+
+- `test_scanner_has_teeth` — 先自证探针有效。没有它，「嵌套副本不许被扫到」
+  可以靠「什么都扫不到」通过；而真仓库里本就该是零命中，主断言自己分不清这两种情况。
+- `test_scanner_does_not_cross_into_nested_worktrees` — **本版修的那件事**，
+  修前红、修后绿。夹具**断言 `own_python_files(...)[1] == "rglob"`**：病灶只在
+  回退分支上（嵌套 worktree 从不被外层索引跟踪，`git ls-files '*.py' | grep
+  ^.claude` 实测 0 条），不钉住这点，未来夹具悄悄走到 git 分支就测的不是它要测的。
+- `test_exclude_dirs_are_matched_relative_to_root`（仅 no_fake_price）—— 把仓库放进
+  一个叫 `gui` 的目录，证明按绝对路径判时守卫会**静默空跑**。
+- `test_this_file_is_excluded_from_its_own_scan`（仅 no_crewai）——
+  夹具载荷刻意写成**缩进在三引号串里的 `import crewai`**，于是本文件自己会被
+  `_IMPORT_RE`（`^\s*import\s+crewai`，re.M）命中，那句自排除**因而是承重的**。
+  改之前它不承重：正则匹配不到本文件，删掉自排除没有任何测试会红。
+- `test_enumeration_covers_the_real_repo` — 量级护栏（上百量级）+ 必须含
+  `alpha_hive_daily_report.py` + `.claude/` 下必须 0 个。
+
+### 过程中发现的两个「断言两边不是同一种东西」
+
+1. **我写的第一版 `.claude` 泄漏断言用了 `f.parts`（绝对路径）**。本仓的 worktree
+   自己就住在 `…/Alpha Hive/.claude/worktrees/<name>/`，绝对路径里**恒含
+   `.claude`** ⇒ 那条断言在每个 worktree 里恒红、且红的理由是假的。
+   与本版要修的 bug 同一个混淆，只是升了一层。
+2. **`assert os.path.basename(__file__) not in _crewai_offenders()` 是恒真的**——
+   返回的是相对路径（`tests/test_no_crewai_dependency.py`），拿 basename 去
+   `not in` 一个字符串列表永远为真。实测：把自排除两行删掉，它照样绿。
+   已改成按 basename 逐条比。**抓到它的不是推理，是真的把变异跑了一遍。**
+   判据：**断言两边若不是同一种东西（basename vs 路径），它永远不会红。**
+
+### 验证
+
+- 变异检查 13 条，**0 条等价**，全程 `collected=12` 稳定，每条还原后复核全绿：
+  - 回退两条枚举（M1/M6）→ 各自文件的 `..._nested_worktrees` 红
+  - `rel.parts`→`p.parts`（M2）→ `test_exclude_dirs_are_matched_relative_to_root` 红
+  - 删 `_EXCLUDE_DIRS` continue / 去掉 `"tests"`（M3/M4）→ 主断言 + 夹具断言 红
+  - 正则失效（M5/M9）→ 各文件 `test_scanner_has_teeth` 等 3 条红
+  - `_SKIP_DIRS` 清空（M7）→ `venv` 样本泄漏，红
+  - 删自排除（M8）→ `test_repo_has_no_crewai_import` + `..._own_scan` 红
+  - `own_python_files` **rglob 分支**返回空（M10）→ 两文件的夹具测试共 5 条红
+  - `_is_ours` 不滤点号目录（M11）→ 两文件各 1 条红
+  - **git 分支**返回空（M12）→ 两文件的 `test_enumeration_covers_the_real_repo` 红
+- ⭐ **M10 与 M12 各只杀一半**：真仓库走 git 分支、tmp 夹具走 rglob 回退，
+  两类测试**分别**覆盖 `own_python_files` 的两条分支。只有一类测试就有一半没测。
+- ⚠️ **诚实记录一条等价变异**：M13「git 分支去掉 `if _is_ours(x)`」在本版这两个
+  文件范围内**没有任何测试变红**（今天没有任何被跟踪的 .py 落在点号目录下）。
+  它由 v0.45.186 写的
+  `test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread::test_git_branch_applies_the_same_filter_as_the_fallback`
+  杀掉（实测已复核）——**共享枚举的回报就在这里：覆盖跟着代码走，不必每个调用方重造。**
+- ruff：**46 errors（与 worktree 基线逐字一致，新增 0）**，两个改动文件本身
+  `All checks passed`。
+- 全套：`collected 4043 → 4051`（**恰好 +8 = 每条守卫 4 条新测试**），
+  **2 failed / 3968 passed**。两条红都不是本版造成的：
+  - `tests/test_economic_calendar.py::TestCoverageHorizon` —— 干净 HEAD 上
+    按设计就红（硬编码日历到期，见 `alpha-hive-hardcoded-calendar`），非回归。
+  - `tests/test_pipeline.py::TestBuildSwarmReport` —— CBOE VIX 实时下载撞 60s
+    `--timeout` 的网络抖动。基线里红 2 条、本次红 1 条（**不确定性本身就是证据**），
+    **单独重跑 41 passed**。
+
+### 普查结果：这一类到此为止（不是「只看了两个」）
+
+对**递归**遍历（`rglob` / `os.walk` / `glob("**")`）做了全仓普查：
+
+- `tests/` 里除本版这两条外，**没有第三条**递归枚举全仓的守卫。其余 `glob`
+  全部**结构上免疫**：或是定深的 `ROOT.glob("*.py")` / `TESTS_DIR.glob("test_*.py")`
+  （不下降到 `.claude/`），或是对准某个具体产物目录
+  （`conftest._artifact_signature` 的 `os.walk(path)` 走的是状态目录，不是仓库根）。
+- 生产代码里递归遍历只有**一处**：`agent_toolbox.py:96`
+  `FileTool.search_files()` 的 `Path(root).rglob("*")`。它也会走进
+  `.claude/worktrees/`，但它是**通用文件搜索工具（上限 100 条）而不是断言**——
+  后果是「搜索结果里混进陈旧副本」，不是「把红伪装成绿」。**本版不改**：
+  它没有「谁会红」这个问题，判据不同，混在一起改会把两件事的理由搅在一起。
+
+---
+
+## [0.45.188] — 2026-09-11 — 「近端磁吸目标价」此前没有「近端」：口径定为 ≤7 天并改从 full_chain_oi 同源算
+
+### 背景
+
+用户问「NVDA 深度报告前两天的近端磁吸目标价还是 225，怎么 09-10 变成 200 了」。
+核对结论：**$200 不是假数据（CBOE 真实 OI 算出来的），但它答的不是标签问的那个问题。**
+
+`swarm_agents/oracle_bee.py::_calc_max_pain` 旧实现取 `fetch_cboe_chain` 返回链里
+最早的到期日当「最近」。而那条链经 `cboe_options._select_expiries` 截断为
+「DTE≥7 的前 4 个到期日」——`far` 先占满配额，周权标的 `far` 恒满 4 个 ⇒
+**DTE<7 的到期日一个都进不来**。于是「最近」实际是「最早的 DTE≥7 那一个」，
+与「近端」字面意思相反；它还会随时间推移每隔几天整个换一个到期日，
+从而产生与仓位无关的跳变。
+
+实测（用当日已落盘的 `full_chain_oi` 重算，零额外网络调用）：
+
+| | 报告显示 | ≤7天真值 | 偏差 |
+|---|---|---|---|
+| AMC | 2.0 | 2.5 | −20.0% |
+| DELL | 425 | 520 | −18.3% |
+| SNOW | 270 | 330 | −18.2% |
+| CRM | 207.5 | 250 | −17.0% |
+| **NVDA** | **200** | **225** | **−11.1%** |
+
+2026-09-10 全 30 只标的、29 只有数据，**28 只偏差 >1%**。而 NVDA 那次「跳变」
+在正确口径下根本不存在：≤7 天真值 09-08 与 09-10 **都是 225**（显示值 225→200）。
+MSFT 同型：显示 500→450，真值 500→495。
+
+### Changed
+
+- `swarm_agents/oracle_bee.py`
+  - 新增类常量 `NEAR_WINDOW_DAYS = 7`——「近端」**此前在代码里没有定义**，
+    被上游过滤器悄悄定义成了它的反面。
+  - 新增 `_near_oi_by_strike()`：把 `full_chain_oi` 的 {行权价: {到期日: OI}}
+    矩阵按 `0 <= DTE <= window_days` 聚合；解析失败的键**计数并 warning**，
+    不静默跳过。
+  - `_calc_max_pain()` 换源到 `full_chain_oi`（与全链 OI 卡片同源，且它本就
+    每次扫描都抓了完整矩阵，30/30 可得），新增 `window_days` / `expiries_used`
+    / `near_total_oi` / `unavailable_reason` 四个字段。
+    ⚠️ **取不到时返回 None，不回退旧链**——旧链给的是构造上就不符合标签含义的数，
+    回退等于把「没数据」悄悄换成「错数据」。
+  - 异常分支 `_log.debug` → `_log.warning`（旧写法让算错/算不出在生产日志里不可见）。
+  - 类 docstring 里的「权重 0.15」快照删掉，改指 `config.EVALUATION_WEIGHTS`。
+- `generate_ml_report.py`：卡片标签带上口径 → 「≤7天 近端磁吸目标价（距现价 −3.0%）」。
+  `window_days` 缺失（旧记录）时不假装知道窗口。
+- `cboe_options.py::_select_expiries`：**docstring 按实测重写**。旧文案
+  「优先 DTE≥7 前 4 + DTE 3-6 前 2」读起来像两桶都会进，与真实行为不符。
+
+### 观测点（此前「谁会红？」答不上来）
+
+- `_pub_details` 新增 `max_pain_window_days` / `max_pain_expiries`（不可用时
+  `max_pain_unavailable`）——只记数值时，事后无法分辨「窗口选错了」和「仓位真变了」，
+  这次误判正是卡在这里。
+- `tests/test_near_max_pain_window.py`（9 条）：口径回归 / 窗口上下界 / 不可回退旧链 /
+  不可用必须带原因。**每条断言的 docstring 里写明什么变异会让它变红。**
+
+### 不需要世代边界
+
+`max_pain` 只往 `signal_summary` 追加一段文本，**不进 `options_score`**（后者只被
+`term_score_adj + skew_score_adj` 调整），全仓无代码解析 `MaxPain` 文本 ⇒
+不影响任何维度分与 `final_score`。
+
+### 已知不改（重要）
+
+`_select_expiries` 的 `near` 桶对当前 30 只标的恒不生效（`far` 全部 ≥4），
+但**不是死代码**——`far` 不足 4 个的稀疏期权标的会用到它。
+⚠️ **不要「照字面把它修好」**：让 near 真的进来会改变 IV rank / 25Δ skew /
+期限结构 / Dealer GEX 的输入，而这些都流进 `final_score` ⇒ 属口径变更，
+要按 `ic_rerun_readiness._COHORT_HISTORY` 付世代边界的代价。已写进该函数 docstring。
+
+### 验证
+
+- 用 09-08 / 09-10 两天已落盘的真实 `full_chain_oi` 重算 NVDA：两天都是 $225
+  （旧实现 225→200），到期日分别为 09-09/09-11/09-14 与 09-11/09-14/09-16。
+- 端到端渲染核对：卡片输出 `$225 / ≤7天 近端磁吸目标价（距现价 -3.0%）`。
+- **变异校验 6/6 全部被抓住**（先断言基线全绿再开跑、`--maxfail=999`、列出全部变红项）：
+  还原旧口径 / 去掉窗口下界 / 上界改严格小于 / 窗口常量 7→30 / 不给 unavailable_reason /
+  加一条 `fetch_cboe_chain` 兜底。
+- `tests/test_oracle_cboe_source.py::TestMaxPainNoFallback` 两条**改写而非删除**
+  （旧的钉的是已被废弃的数据源），「不回退 yfinance」的原意保留。
+- 全量 `pytest`：**3955 passed**。3 条既有红与本次无关——`TestCoverageHorizon`
+  是 CLAUDE.md 写明的设计性变红；两条 `test_zero_weight_invariant` 是 `rglob`
+  扫进 `.claude/worktrees/` 导致的 **60s 超时**（v0.45.186 占位正在修），非断言失败。
+
+### 二次检查（同版补修，发现 2 个自己引入的问题）
+
+**① 看板标签与数字不同源（本次引入，已修）。** `dashboard_renderer` 的近端磁吸卡片
+副标题读的是 `expiration_dates`（主链 DTE≥7 列表），而数字换源到了 ≤7 天口径 ——
+换源前两者恰好同源（一起错），换源后就会出现「$225」旁边标着 09-18/09-21/09-23，
+而那三个到期日一张合约都没参与这个数。改为读 `max_pain.expiries_used`。
+⚠️ 顺带修掉一个更早就有的错：旧文案 `近 {len} 周到期` 数的是**到期日个数**却写成
+**周数**（NVDA 那三个到期日前后只跨 5 天，会被说成「近 3 周」）。
+现文案 `≤7天 · 3 个到期日`，两个量都按实际算。
+
+**② 口径字段加错了地方（本次引入，已撤）。** 原本把 `max_pain_window_days` /
+`max_pain_expiries` 加进 `_pub_details`，但那个 dict 去的是**信息素板**，
+而板上的 `max_pain*` **零读者**（既有的 `max_pain_dist_pct` 本身就是死字段），
+且板有 80 条上限并按分数淘汰。已撤回；审计轨迹本就走 `AgentResult.details` 里的
+**完整 max_pain dict**，那份才落进 `.swarm_results_*.json` 并被看板与报告读到
+（已实测确认 `near_mp_window=7` / `near_mp_expiries=[...]` 一路到达渲染层）。
+
+**③ 接缝实测（我的测试全喂手搓 dict，接不上也发现不了）。** 用 30 份真实
+`cache/options_snapshot_*_2026-09-10.json`（快照命中时 `analyze` 原样 return 的就是它）
+逐只过 `_calc_max_pain`：**29 只算出，1 只（BILI）返回 None**。
+BILI 无周权（最近到期 DTE=8），**且旧口径当天也是 None** ⇒ 不是回归。
+
+**④ 复查未采纳的项（如实记录）**：`int(oi or 0)` 遇非数值字符串会抛到外层
+`except` ⇒ 整只标的不可用 + warning，属可观测的降级，未加额外分支；
+`window_days` 的 `isinstance(int)` 对 `bool` 为真，但该值由本仓自己写入，未加 bool 守卫。
+
+守卫相应扩到 **12 条**，变异校验 **8/8 全部被抓住**（新增：看板标签改回读主链 /
+口径字段塞回信息素板）。⚠️ 新增的看板用例一度被 conftest 的离线守卫拦下——
+`_detail` 缺价格时会退回打 yfinance，夹具补上 ScoutBee price 后通过；
+**那条守卫是对的，不该给它开白名单。**
+
+### 遗留
+
+~~线上 09-10 那批仍是旧口径~~ **已于 2026-09-11 重渲染并部署**（用户确认后）。
+数值全部从当天存档的 `full_chain_oi` 重算，`pdt_today` 钉在 2026-09-10，
+**未重新扫描、未引入 09-11 实时数据**。30 只中 28 只有变，NVDA $200 → $225；
+新值「距现价」普遍收敛到 ±3% 以内，符合近月磁吸本该贴着现价的形态。
+改到 12 份 ml-enhanced 报告 + `index.html` 30 张卡片 + daily md/json 各 27 处
+`MaxPain` 文本；gh-pages 实测变更 17 个文件。
+`index.html` 的卡片靠「往前找最近的标的锚点」定位，以「卡片印的旧值必须等于存档
+旧值」自证映射 —— **这道自证当场拦下了我一个错误假设**（近端为 None 时卡片回退
+显示的是全链 Max Pain 而非「-」，BILI 的 $18 即此），30 张全部自证通过后才写入。
+
+⚠️ **顺带发现一处机制脆弱性（未修）**：`generate_ml_report._sync_ghpages` 取
+**本地** `gh-pages` ref 当父提交并 `push --force`。本次实测父提交是 `22d9c18`
+而非当时的远端头 `b1ae86f`（v0.45.187 清 iCloud 副本那次）⇒ 那条提交被挤出了
+gh-pages 历史。**本次内容无损**（我的树里同样没有那两个副本，删除效果一致，
+已逐项核对），但若另一个 session 在两次部署之间往 gh-pages 推了**本地没有的
+内容**，就会被静默冲掉。修法方向：部署前 `git fetch origin gh-pages` 并以
+`origin/gh-pages` 为父，或改用非 force 推送 + 冲突时重试。
+
+⚠️ **与本次无关但同跑时发现**：`tests/test_no_crewai_dependency.py` 也有
+`rglob` 扫进 `.claude/worktrees/` 的毛病（扫到别的 session worktree 里那份同名测试
+文件本身就含 "crewai" 字样 ⇒ 只要存在任一别的 session 的 worktree 就红，
+当前有 10+ 个，两轮全量均红）。v0.45.186 修的是 `test_zero_weight_invariant.py`
+的同一个物种，**同族还没数干净**。
+
+## [0.45.187] — 2026-09-11 — 清掉 46 个进了 git 跟踪的 iCloud 重名副本；09-09 的学习样本权重曾凭空翻倍
+
+### Removed
+
+- **46 个名字带「空格 + 数字」的 iCloud 重名副本**，全部是 2026-09-09 的产物：
+  `report_snapshots/<TICKER>_2026-09-09 2.json` × 30、
+  `alpha-hive-<TICKER>-ml-enhanced-2026-09-09 2.html` × 12、
+  仓库根 `alpha-hive-daily-2026-09-09 2.{json,md}` 与 `alpha-hive-thread-2026-09-09-1 2.txt`、
+  `hedge_state/greeks_2026-09-09 2.json`。
+
+  以往记录的 iCloud 副本都只在**工作区**或 `.git/refs`（见 CLAUDE.md 同名章节），
+  这批**进了 git 跟踪** —— 差别是每台 checkout 都会拿到，且被下游当真文件读。
+
+  逐个 `git hash-object` 取证后分两类，**两类都零信息损失**：
+  - **34 个**与正本 blob 逐位相同（纯冗余）。
+  - **12 个** ml-enhanced HTML 与正本不同，但**全部精确等于正本在 `c7a728b`
+    （Deploy 2026-09-09 14:43）时的已提交版本**，无一匹配不上历史。它们冻住的正是
+    `f261682`（v0.45.175「ML 五维表改读实际合成权重」）修掉的那张**错误权重表**
+    （TSLA 实测 21%/1.47 → 30%/2.13）。留着是误导源，不是备份。
+
+  删除可逆：两类内容都在 git 历史里，`git checkout c7a728b -- <path>` 随时取回。
+
+### Fixed
+
+- **`report_snapshots/` 的三个消费者把副本当真样本吃进去，使 09-09 的样本权重翻倍。**
+  `self_analyst.py:92`（Track B 月度自诊断）、`weekly_optimizer.py:214`（Track A 权重优化）、
+  `finrl_bridge.py:242` 都是 `glob("*.json")` 后**逐文件**累加，**没有按 `(ticker, date)` 去重**。
+  实测：`report_snapshots/*.json` 命中 1201 个，09-09 当天 60 个而真样本只有 30 个
+  ⇒ 那一天在这两条学习通道眼里是别的日子的**两倍**权重。清理后 1201 → 1171，
+  09-09 回到 30，与其余日子齐平。
+  ⚠️ 这也是**不能只用 `git rm --cached`** 的原因：glob 读的是文件系统不是 git 索引，
+  只脱管、文件留在磁盘的话双计数照旧。
+
+### Added
+
+- **`.gitignore` 新增 iCloud 重名副本规则**（`* [0-9].*` / `* [0-9][0-9].*` /
+  `* [0-9]` / `* [0-9][0-9]`），防**新增**混入。
+  按「每加一条断言必须举出能让它变红的变异」双向验过：
+  - 精确性：对全仓已跟踪文件跑 `git check-ignore --no-index`，命中 **46 个，
+    与已知副本集合完全相等**，零误伤。
+  - 正向 canary **9/9 挡住**（`xxx 2.py`、`settings.local 2.json`、`report 3.md`、
+    `notes 10.txt`、子目录与深路径、无扩展名的 `some_dir 2`）。
+  - 反向 canary **10/10 放行**（`chapter2.md`、`v2.json`、`report-2.json`、`foo_2.py`、
+    `test_step2.py`、`prompts/v2/system.md`、`data 2x.json`）——
+    判据是**空格 + 数字 + 结尾**，`-2` `_2` 与数字后还有字符的一律不碰。
+  ⚠️ gitignore 对**已跟踪**文件无效，这条只防新增；存量靠本次 `git rm`。
+  ⚠️ **更重要的是它挡不住 glob**：`dashboard_renderer` 等消费者读的是磁盘目录，
+    不是 git 索引，见下节。
+
+### 发现（本版未修，待议）
+
+- **`dashboard_renderer.py:1206` 的日期解析器会把重名副本当成一个「新日期」。**
+  `glob("alpha-hive-daily-*.json")` 后 `stem.replace("alpha-hive-daily-", "")`，
+  对 `alpha-hive-daily-2026-09-09 2.json` 得到 `_hdate = "2026-09-09 2"` ——
+  一个不是日期的字符串。紧邻的「非交易日幽灵」守卫**没拦住**：
+  `filename_is_nontrading_day("2026-09-09 2")` 实测返回 `False`（「不是非交易日」）
+  而**不是抛异常**，所以那条 `fail-safe：解析失败时不跳过` 的分支根本没进。
+  后果（gh-pages 上实测）：index.html 的历史列表多出一行 `2026-09-09 2`，
+  5 个链接里 **4 个是死链**（那 4 份 ml-enhanced 副本压根没部署上去），
+  并且 `_fg_history` 被塞进一个 `date="2026-09-09 2"` 的点。
+  同一形状在 `:2389` 的 `_score_deltas` 再出现一次。
+  ⇒ 属 CLAUDE.md「这个失败，下游怎么知道？」的标准案例：解析器接受了非日期输入，
+    没有任何东西会红。`.gitignore` 治不了它（glob 读磁盘），**下一个 iCloud 副本会复发**。
+
+## [0.45.186] — 2026-09-11 — 只有生产 checkout 看得见的红：守卫扫进了 10 个嵌套 worktree
+
+### Fixed —— `test_zero_weight_invariant` 的枚举越过了仓库边界
+
+v0.45.176 那条「生产代码不许把 `adapted_weights` 传回 `QueenDistiller`」的守卫，
+用裸 `root.rglob("*.py")` 枚举生产调用点。在生产 checkout `~/Desktop/Alpha Hive`
+上，`.claude/worktrees/` 下挂着 **10 个嵌套 git worktree**，每个都是一份完整的
+仓库副本，停在各自的版本上。于是：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| `rglob("*.py")` 走到的文件 | **22037** | — |
+| 实际枚举的文件 | 21864 | **165**（`git ls-files` 338 减 `tests/`/`experiments/`） |
+| 扫到的 `QueenDistiller(...)` 调用点 | **227** | **2** |
+| 其中落在 `.claude/worktrees/` 里 | **225** | **0** |
+| 报出的违规 | **5** | **0** |
+| 耗时 | **81.6s** | **1.3s** |
+
+5 条违规**全部**来自别的 worktree 里停留在 v0.45.176 之前的
+`alpha_hive_daily_report.py`。真正的生产文件是干净的
+（`alpha_hive_daily_report.py:663` 只有 `enable_llm` / `ml_model`）。
+
+两个放大器：
+
+1. **`_SKIP_TOP` 对嵌套树整个失效。** 它判的是 `rel.parts[0]`，而越界文件的
+   `parts[0]` 是 `.claude` —— 于是 225 条命中里绝大多数是**别的 worktree 的
+   测试文件**（`tests/test_queen_distiller.py` 一类），被当成生产代码审计。
+2. **60s 的 `--timeout` 把断言失败伪装成 Timeout。** 那轮要跑 81.6s，
+   全套运行时报出来的是 `Timeout`，守卫精心写的失败信息一个字都到不了人眼前。
+
+⭐ **真正要命的不是红，是红的可见性是反的。** 这条守卫在 **10 个 worktree 里
+全是绿的**（worktree 里没有嵌套 worktree），只在**跑每日扫描的那一台**上红；
+而那台机器没人跑测试。写它的人看到的是全绿。这是 MEMORY
+`alpha-hive-test-writes-production`「在没有病灶的环境里测防御＝没测」的镜像：
+不是防御没被测到，是**病灶只长在没人看的地方**。
+
+⭐ **同一物种的第二次。** v0.45.150 已经在 `test_paths_not_frozen_at_import.py`
+上修过一模一样的毛病（`rglob` 扫进 vendored 树，15349 vs 327），结论就是
+「改用 `git ls-files`」。v0.45.176 在一个新守卫里**又写了一份裸 rglob**。
+写下教训对「下一个人另起一份实现」无效 —— 只能把实现收成一份。
+
+### Added
+
+- **`tests/_repo_files.py`：「本仓自己的 .py 有哪些」的唯一实现。**
+  `git ls-files` 优先（口径可复现、天然排除未跟踪与嵌套 worktree），
+  子进程**两条**失败路径各堵一次（不存在会**抛**、不是仓库会**返回** 128），
+  回退 rglob。两条分支的输出都过同一道 `_is_ours()`（点号目录 + vendored）。
+  已知取舍：git 分支只列被跟踪的文件，**全新未提交**的生产 .py 扫不到
+  （已跟踪文件的未提交修改照常扫得到 —— 只拿 git 要路径，内容从磁盘读）。
+- **`test_scan_excludes_nested_checkouts`（带病灶的 tmp 树夹具）。**
+  造 `.claude/worktrees/<name>/alpha_hive_daily_report.py` + 同树下的
+  `tests/test_queen_distiller.py`，断言两者都不被报出来。
+  **必须用 tmp 树**：病灶只存在于生产 checkout，10 个 worktree 里一个都没有，
+  在真仓库上跑这条断言在 worktree 里恒真。
+- `test_pathology_fixture_actually_bites`：反向自证夹具确实造出了会被旧写法
+  命中的东西 —— 否则上一条可能只因夹具没写出匹配项而恒绿。
+- `test_git_branch_applies_the_same_filter_as_the_fallback`：**真建一个 tmp git
+  仓库**，提交一个 `.claude/hooks/theirs.py`，钉住 git 分支也过 `_is_ours`。
+  ⭐ 加这条是因为不加的话，git 分支上那句 `if _is_ours(x)` 是**等价变异**
+  （本仓今天没有被跟踪的 .py 落在点号目录下，删掉它 338 还是 338，全套照绿）。
+  MEMORY 的纪律是「举不出能让它变红的变异就别加」—— 这里造得出来，
+  于是造出来，而不是留一行测不到的代码。
+  口径分歧不是假想：`.claude/` **被跟踪**（`.claude/launch.json` 在库里）
+  且**不在 .gitignore**，哪天有人提交 `.claude/hooks/x.py`，
+  git 分支会扫到、回退分支不会，而哪条生效取决于这台机器有没有装 git。
+
+### Changed
+
+- `test_paths_not_frozen_at_import.py` 的 `_own_python_files` 改为**委托**
+  （`REPO_ROOT` 在调用时取，原有的 monkeypatch 注入 tmp 树的测试全部不动）。
+  抽走不是为了去重好看，是为了让下一个人**没机会**再写第三份。
+
+### Fixed —— 两处说谎的注释（同版顺手）
+
+- `test_enumeration_actually_found_something` 的「变红的变异」写的是
+  「把 `rglob("*.py")` 写成 `rglob("*.pyx")`」—— 枚举已经不用 rglob，
+  这条变异**做不出来**。改成 `QueenDistiller` → `QueenDistillerX`。
+- 类 docstring 的「扫全仓每一个非测试 .py」改为「扫本仓被 git 跟踪的」。
+
+（MEMORY `alpha-hive-board-eviction`：说谎的 docstring 危害不在于它错，
+在于它让人停止检查。）
+
+### 验证
+
+- **生产 checkout 实测**（用修复后的扫描器 × 有病灶的那棵树，
+  `ALPHA_HIVE_HOME` 指向沙箱，生产产物零改动）：227→2 调用点、
+  225→0 越界、5→0 违规、81.6s→1.3s。
+- **变异校验 7/7 全红，等价变异 0 个**，`collected = 102` 七轮不变，
+  每轮清 `__pycache__`、锚点唯一性先校验、还原后逐轮复验全绿；
+  校验器**先断言基线全绿再开跑**（v0.45.177 的教训：pyproject 的 `-x`
+  会让「没跑」长得和「通过」一模一样）。
+- ruff：worktree 基线 46，改动后仍 46，三个改动文件零命中。
+
+### 未修（留档，不是漏了）
+
+全仓还有 **2 个守卫**在做同样的全树枚举，**当前都是绿的**（latent，不是 active）：
+
+| 守卫 | 枚举方式 | 生产上扫到 | 其中在 `.claude/` 下 | 现状 |
+|---|---|---|---|---|
+| `tests/test_no_fake_price.py:37` | `ROOT.rglob("*.py")` | 1822 | **1669（92%）** | 绿 |
+| `tests/test_no_crewai_dependency.py:61` | `os.walk(PROJECT_ROOT)` | 4336 | **3605（83%）** | 绿 |
+
+它们绿只是因为嵌套 worktree 里眼下没有 `price = 100.0` 或 `import crewai`。
+**没有一条机制阻止它们明天变红**，且变红时同样只有生产 checkout 看得见。
+没有顺手一起改，是因为每个守卫都要单独重做变异校验（判据是 per-guard 的）；
+共享实现已经就位，改法是 `own_python_files(ROOT)[0]` 加各自现有的排除清单。
+
+其余用 `.glob()` 的守卫（`test_rival_bee_peer_features` / `test_pheromone_db_path_hook`
+/ `test_yf_gate` / `test_pytestmark_placement` / `test_no_invisible_prod_data_skips`）
+**不下钻**，天然到不了 `.claude/worktrees/`，无需改动。
+
+## [0.45.185] — 2026-09-11 — 工作区脏就打 warning；顺带一个「单测各自对、组合起来错」的 bug
+
+### Added
+
+- **`code_version.log_startup()`：`dirty_tracked is True` ⇒ `warning`，否则 `info`。**
+  理由不是洁癖：`~/Desktop/Alpha Hive` 既是生产目录**又**被当成开发工作目录
+  （2026-09-11 实测一次有另一个 session 未提交的 11 个文件，含
+  `alpha_hive_daily_report.py`），而 13:30 的定时扫描跑的就是那份**工作区**
+  —— 一个写到一半的编辑会被定时任务捡去执行。
+  这时上面那个 `commit sha` **不能唯一确定实际跑了什么代码**，事后照它 checkout
+  复现，复现的是另一份东西。**这是 v0.45.181 事故的镜像**：那次生产太旧，
+  这次可能太新且处在未完成状态；两者都让「跑的是哪一版」失去意义。
+- `resolve()` 增 `dirty_count`（全量）与 `dirty_files`（样本，上限 12 个）。
+  只报一个布尔值，事后没法用；报全量会把 `status.json` 撑爆。两者同样三态
+  （`None` 没测到 / `[]`、`0` 干净 / 非空）。
+- 守卫增至 17 条，变异 **5/5** 各打红。
+
+### Fixed —— 一个只有真机跑才暴露的 bug
+
+**`_git()` 对整段 stdout 做 `.strip()`，削掉了 porcelain 首行状态列的前导空格。**
+`git status --porcelain` 每行是 `XY<空格><路径>`，未暂存修改的 X 位就是一个**空格**；
+`.strip()` 把第一行那个空格削掉后，首行只剩 2 字符前缀，按 `line[3:]` 切路径
+就吃掉了文件名首字母 —— 实测 `code_version.py` → **`ode_version.py`**。
+一个被削过的文件名写进 `status.json` 当取证记录，比没有更糟。
+
+修法：`_git(*args, raw=False)`；`raw=True` 只 `rstrip("\n")`、保留前导空白，
+`status` 调用走 raw。非 raw 路径仍 `strip()`（否则 sha 会带换行）。
+
+⭐ **为什么我自己的单测抓不到它：夹具喂的是已经正确成形的输入。**
+`test_dirty_files_is_tri_state` 直接 monkeypatch `_git` 返回 `" M a.py"`
+——带着前导空格、从没经过那道 `.strip()`。`_git` 对、`_parse_dirty` 也对，
+**错在两者之间的接缝**。已补 `TestGitToParseSeam`：从 `subprocess` 出口注入
+真实形状的 porcelain，让两段代码真的串起来跑；再配一条反向断言
+（非 raw 调用仍要 strip，否则 sha 带空格）。
+变异 S1（`_git` 一律 strip）精确复现原 bug 并打红。
+
+**判据：monkeypatch 打在自己模块的内部函数上时，你测的是「下游对不对」，
+不是「上下游接得对不对」。** 接缝要从**外部依赖的出口**（这里是 `subprocess.run`）
+注入才验得到。同族：本轮 v0.45.179 的假断言 N7 也是「测错了层」。
+
+### 附带
+
+新增的 `raw=` 关键字让 6 处 `monkeypatch.setattr(cv, "_git", lambda *a: ...)`
+抛 `TypeError` —— 已改 `lambda *a, **k:`。（第一轮替换漏了 1 处，因为那行被折行了，
+锚点没覆盖到；`-x` 让它只报第一个失败，逐个修的。）
+
+---
+
+## [0.45.184] — 2026-09-11 — 「生产在跑的是哪一版代码」终于有了观测点
+
+v0.45.181 事故的收尾：那次能查出来纯属**数据消失得够显眼**（对账 `1293+30−125=1198`
+正好对上）。换成一个不改变行数的行为差异——评分口径、权重、阈值——就无从发现，
+因为当时日志与 `status.json` 里**都没有任何版本记录**。「谁会红？」答不上来。
+
+### Added
+
+- **`code_version.py`**：解析 `git rev-parse --short HEAD` + 分支 + 已跟踪文件是否 dirty
+  + CHANGELOG 顶部版本号。
+- **接线两处**：
+  - `alpha_hive_daily_report._init_scan_context()` 扫描启动时打一行 INFO：
+    `代码版本 v0.45.184 | commit abc1234 | 分支 main | 工作区 干净`
+  - `scan_timing.snapshot()` 带上 `code_version` ⇒ 编排器已有的那行
+    `jq '. + {scan_timing: $t[0]}'` 把它并进 `status.json`，落点
+    `.scan_timing.code_version`。**无需改编排器**（它在仓库外、属用户的定时任务）。
+    已用真的 jq 实测过这条路径。
+- `tests/test_code_version.py`（10 条）。变异 **8/8** 各打红，`collected` 恒为 10。
+  其中两条是**接线测试**（V7 删掉快照字段、V8 删掉启动调用，各自打红）——
+  没有它们，其余 8 条全绿也证明不了这个观测点真的被调用过
+  （v0.45.180 那条「本次不可用」提示就是这么成为死代码的）。
+
+### 设计约束（两条都来自本仓既有教训）
+
+1. **仓库路径用 `Path(__file__)` 而不是 `PATHS.home`**，且在**函数体内**求值。
+   这里要的是「代码在哪」不是「数据在哪」（CLAUDE.md「这个路径指向代码还是数据？」；
+   同族先例 `health_check.PROJECT` 的 `git -C <仓库>`）。函数内求值 ⇒ 既不冻在 import 期，
+   也不进 `test_paths_not_frozen_at_import` 的两张模块级清单。
+   变异 V1（改成 `PATHS.home`）⇒ 测试隔离把 HOME 指向 tmp ⇒ 3 条红。
+2. **缺失一律 `None`，不写占位串。** `"unknown"` / `"0000000"` 会被读成
+   「有个版本，只是长这样」。变异 V5（sha 兜底成 `"unknown"`）⇒ 2 条红。
+
+### Fixed（自查，写的时候差点发出去）
+
+**`_git()` 把「成功但没有输出」和「命令失败」混成了同一个 `None`。**
+第一版写的是 `return r.stdout.strip() or None` —— 而 `git status --porcelain`
+在**干净工作区**输出就是空的，于是 `dirty_tracked` 再也分不出「干净」和「没测到」。
+这正是本轮从头到尾在抓的那一族（0/空值冒充真读数）。
+现 `_git` 失败返回 `None`、成功返回可能为空的字符串，`dirty_tracked` 为三态
+（`None` 没测到 / `False` 干净 / `True` 有改动）。变异 V2、V3 各打红。
+
+另：`git` 退出码 **128 = 这里不是 git 仓库**，与普通失败分开打日志——
+CLAUDE.md 就 `git check-ignore` 的三义退出码记过同一条。变异 V4 打红。
+
+### 过程教训
+
+**原则写对了、做的相反。** 编排器核对那条测试，docstring 写着
+「用 marker 而非静默 skip，让『这条没验』在报告里可见」，而正文写的是 `pytest.skip`。
+已改 `@pytest.mark.integration`：默认摘要里是 `9 passed, 1 deselected`（看得见），
+`-m integration` 可单跑。CLAUDE.md 那节的判据本来就写着「真需要外部系统的测试标
+marker 别写 skip」。
+
+**并发让号两次。** 本条最初占的是 `0.45.182`，推占位前发现已被另一 session
+先提交（v0.45.163/164 二次检查）；改 `0.45.183` 时又发现被第三个 session 占了
+（云端快照 routine）。按 CLAUDE.md「先提交进 git 历史的占号保留」两次让号到 `0.45.184`。
+⚠️ 0.45.182 那条声明会碰 `alpha_hive_daily_report.py`，与本条在同一文件
+（本条只在 `_init_scan_context` 开头插 6 行），合并时逐块核对。
+
+全套 **3923 passed**（`TestCoverageHorizon` 那条按设计随日历变红的除外）。
+
+---
+
+## [0.45.183] — 2026-09-11 — 云端快照 routine：merge 三天静默失败的真因是浅克隆，不是 main 被 force-push
+
+**改动落在调度器**（claude.ai routine `trig_01QzhoHiNxSWMgxWAQztnLA6` / `alpha-hive-cloud-snapshot`），**不在本仓**。本条只记根因取证与判据——供下次有人读到 `cloud-snapshots` 分支上 `36df50b` 那句提交信息（「force-push 重写历史后两支失去共同祖先」）时，不要再继承那个错误结论。
+
+### Fixed（调度器提示词）
+
+- **步骤 1 增加解除浅克隆**：`git rev-parse --is-shallow-repository` 为 true 才跑 `git fetch --unshallow origin`。这是根因修复。
+- **步骤 1 的退出码改为直接取，禁止接管道。** 2026-09-10 那次运行写的是 `git merge … | tail -20; echo "MERGE_EXIT=$?"`，打印出 `MERGE_EXIT=0`，而那条 merge 实际是 `fatal:` —— `$?` 取到的是 `tail` 的退出码。步骤 3 从一开始就写着「不要接管道（管道会吃掉退出码）」，步骤 1 没写，于是**同一个坑在同一份提示词里被踩了**。
+- **兜底从「`checkout -B` + 必须 force push」换成两父合并**（`read-tree` 拼树 + `commit-tree` 记两个父提交），不丢数据也不需要 force。旧兜底与同一句里的「严禁 force push」直接矛盾，真触发时三个云端 agent 各自独立地判定「三条路都超出授权」，全部停在保守一侧。
+- **最终回复加固定第 ⓪ 行**：`STEP1=OK / UNSHALLOW_OK / FALLBACK / NEW_BRANCH / FAIL`，且必须带 `落后 main N 个提交`（N = `git rev-list --count origin/main ^HEAD`，同步成功时必为 0）。走了 unshallow 或兜底时还要把 ⓪ 行原文写进 commit message，可 `git log --grep=STEP1` 查到。
+- **fail fast 放在两道防线之后**，不是 merge 失败的第一反应——理由见下文「判断」。
+
+### 根因（与此前记录相反，取证如下）
+
+**`main` 从未被 force-push。** 云沙箱发的是**浅克隆**，`origin/main` 在沙箱里只有 125 个提交。
+
+| 证据 | 结果 |
+|---|---|
+| GitHub 活动流全量翻查（1060 次 push / 16 次 force_push） | `main` 最后一次 force_push = **2026-02-26**，九月零次；九月 `cloud-snapshots` 三次推送也全是普通 push |
+| 真实 `origin/main` | **920 个提交、1 个根提交**（`0705e6b`，2026-02-23）；沙箱里是 125 个提交、**5 个「根提交」** |
+| `git merge-base --is-ancestor 141cb52 389a451` | **YES** —— 云端 agent 认定「被 force-push 冲掉」的那个提交，是 main 的正常祖先 |
+| 共同祖先距离 | `141cb52` 距 main 各日 tip：09-08 **218**、09-09 **225**、今天 **247** —— 全在 125 的窗口之外 |
+
+即：git 报「无关历史」没有说谎，**它是在被截断的视野里如实汇报**。浅克隆同时制造另外两个假象——`git fetch` 把正常推进标成 `(forced update)`（因为它无法证明快进），`git rev-list --max-parents=0` 把每个截断点都列成「根提交」。**三个假象一起指向同一个错误结论**，三个独立的云端 agent 加一次人工复核都接受了它。
+
+**为什么是 09-08 开始、且再也好不了（棘轮）**：merge 每天成功时分支追平 main，次日差距 = 一天的提交量（5~30，远在窗口内）。09-05 那天没跑（`cloud_snapshots/` 从 09-04 直接跳到 09-08），而**光 09-05 一天 main 就有 59 个提交**。差距一旦越过 125，merge 就失败 → 分支不再追平 → 差距每天继续拉大 → **结构上不可能自行回到窗口内**。
+
+### 修复验证（实测复现 + 实测修复，不是断言）
+
+在本机用 `--depth=1` 克隆 `cloud-snapshots` + `--depth=1` 取 `main` 复现出**同一条 fatal**，
+再原样应用修复：
+
+| | 解除浅克隆前 | 后 |
+|---|---|---|
+| `git rev-parse --is-shallow-repository` | `true` | `false` |
+| 可见提交（分支 / main） | 1 / 1 | 941 / 927 |
+| `rev-list --max-parents=0` | **2 个「根提交」** | **1 个** |
+| `git merge-base` | **空** | `ea97c50` |
+| `git merge origin/main` | **`fatal: refusing to merge unrelated histories`**（退出码 128） | **成功**（退出码 0） |
+
+而这两支**证明是相关的**——`a9db22f` 的第二个父提交就是 main 的 `ea97c50`。
+⚠️ `git fetch --unshallow` 实测 **50 秒**、`.git` 涨到约 40MB，**不是秒级**；
+提示词里已写明，免得下次有人当它卡住。（初稿我写的是「秒级」，是没量就写的数字，已更正。）
+
+### 判断：fail fast 该放在哪一层
+
+原提议是「merge 失败即 fail fast」。**直接照做会用一个可恢复的问题换一个不可恢复的问题**：快照是当日 CBOE 期权链，跳过一天就永久没有了——而 09-05 缺的那一天正是本次故障的触发条件。且事后核实，那三天 merge 失败**实际零损失**（`cloud_snapshot_fetch.py` 与 main 逐字节相同）。所以 fail fast 放在 `--unshallow` 与两父兜底**都失败之后**：走到那一步说明仓库拓扑异常，此时停下才是对的。
+
+### 观测点此前为什么没起作用（与原判断不同）
+
+步骤 1 的失败**三天都报了**——09-08 / 09-09 / 09-10 每次都在最终回复里单列说明并额外发了 PushNotification；09-10 那次甚至自己算出「09-08、09-09 两次快照提交前均无 merge 提交，说明这个失败至少已连续发生三次而未被报出」。所以缺口不是「没报」，而是：
+
+1. **报在固定五行之外**，是 agent 自愿附加的第六段——没有任何结构阻止它哪天不写；
+2. **没有机器可查的落点**，只能靠人读散文；
+3. **重复不升级**——第三天的措辞和第一天同级，「三天没人管」和「第一天刚出现」长得一模一样。
+
+三个 agent 都附了同一个论证：「`cloud_snapshot_fetch.py` 与 main 字节一致，本次无实际损失」。**那个论证是对的**，也正因为它对，没有任何东西逼着升级——这是 auto-memory 里「**安全性论证与可观测性是同一个事实的两面**」的又一例。所以 ⓪ 行的规定里专门写了一句：那个论证即使成立也只能写在 ⓪ 行之外。
+
+## [0.45.182] — 2026-09-11 — 两个「结构上看不见」：崩掉的蜂长得像中位票，换了定义的序列长得像同一条
+
+v0.45.163/164 的二次检查。两个 bug 形状相同：**判别所需的信息存在于上游，
+却在流到判别点的路上被一层白名单/一张表丢掉了**，于是下游不是判错，
+是**根本没有能力判**。
+
+### Fixed ① 崩掉的蜂被记成一张 5.0 中位票（v0.45.164 引入）
+
+`make_error_result`（`swarm_agents/utils.py:35`）返回 `score=5.0, confidence=0.0,
+error=<str>` —— 5.0 只是为了让调用方拿到一个数，不是一次表态。而
+`QueenDistiller` 的 `agent_details` 白名单只抄 6 个键、**把 `error` 丢在外面**
+⇒ `build_agent_votes` 拿到的 det 里只剩 `score=5.0`，与「这只蜂真的打了 5.0」
+**逐字节同形**。
+
+旧的板口径天然排除它：崩溃发生在 `self._publish()` **之前**，那只蜂从没上过板。
+所以这是 v0.45.164 改读 `agent_details` 时带进来的新行为，不是历史遗留。
+
+实测：782 份 / 6256 个蜂-份里 **13 例**（Scout 9 / Buzz 3 / Chronos 1），
+09-08 之后 **0 例** ⇒ **潜伏，无已污染快照**，不需要回填。
+
+**判据必须是错误标记，不能是取值。三条取值捷径逐条实测否掉：**
+
+| 捷径 | 否决理由 |
+|---|---|
+| `score == 5.0` | **38 个合法结果恰好是 5.0**（Bear 18 / Oracle 10 / Scout 4 / Guard 3 / Buzz 2 / CodeExec 1），error 只有 13 个 ⇒ **3:1 误伤** |
+| `confidence == 0.0` | 今天 13/13 命中、6256 条零误报 —— 但没有任何代码保证合法蜂不返回 0.0，**是巧合不是契约** |
+| `dimension_status` | 只覆盖 `DIMENSION_WEIGHTS` 那 5 维；Rival(`ml_auxiliary`) / Bear(`contrarian`) / CodeExec(`technical`) 在表外 ⇒ **半修** |
+
+改动：`queen_distiller.py` 白名单补 `"error": r.get("error")`；
+`build_agent_votes` 在数值检查**之前**判 `det.get("error") is not None` 并 warning。
+旧快照没这个键 ⇒ `.get` 取到 `None` ⇒ 按「没失败」读，与历史语义一致。
+
+### Fixed ② 两条归档序列在 2026-09-08 静默换了定义（v0.45.163 引入）
+
+v0.45.163 的 CHANGELOG 写的是「键名保留以免断掉 `signal_archive` 的时间序列，
+口径由相邻的 `census_source` 机读区分」。**前半句成立，后半句在归档里不成立**——
+`signal_archive` 只抽 `guard.top_signals_count`，**从不抽 `census_source`**
+（实测归档里 0 行），而 `analyze()` 既不按日期、也不按 `_COHORT_HISTORY` 切片
+（`load_panel` 直接拉整张表）⇒ 两段定义被池化。
+
+逐扫描日实测，断点干净地落在 09-08：
+
+| 归档序列 | 08-24 ~ 09-04 | 09-08 起 |
+|---|---|---|
+| `guard.top_signals_count` | 3.43 ~ 4.33 | **6.00 / 6.00 / 6.00** |
+| `guard.consistency` | 0.50 ~ 0.72 | 0.47 / 0.49 / 0.47 |
+
+时间序列不是「保住了」，是被**静默重新定义**了。
+
+**修法：改名，不加判别列。**
+- `guard.consistency` → `guard.consistency_census`
+- `guard.top_signals_count` **摘除** —— v0.45.163 之后它恒等于蜂数、票内方差为零，
+  已不是信号；改挂 `tests/test_distribution_invariants.py::TestGuardCensusCoverage`
+  当健康探针（期望值**从 `agent_details` 导出**，不写死 6 —— 关掉 CodeExecutor 时应得是 5；
+  且要扣掉崩掉的蜂，与 ① 是同一件事）。库里历史行不改写，只是不再写入新行。
+
+为什么不加判别列：① `value` 列是 REAL，存不下字符串标签；② 加列等于要求每个
+消费方**记得**去 join，忘了就退回同一个静默 bug，而改名之后「忘了」在结构上
+不可能发生；③ `experiments/signal_ic_sweep_report.md:47` 已经把 `guard.consistency`
+的 IC(+0.134 / t +2.12) 发表在**旧定义**上，同名延续会让下一个人拿两个量比。
+
+⚠️ **判据：名字变了，还是「量」变了？** 同一个量换名字（`stocktwits_volume` →
+`social_volume`）⇒ 合并读（见 `_crowding_comp` 的 `_legacy`）；同一个名字换量
+⇒ 必须拆成两条序列。两者写法相反，别套错。
+
+### Fixed ③ `models.py::clean_results_batch` 的 docstring 说谎
+
+写着「过滤 error 结果」，函数体从来没有过滤过（实测：喂一条 `make_error_result`
+进去，带着 `error` 键原样出来）。`_prepare_dimension_data` 正是**依赖**它们留下的。
+**这句错话的实际作用是让读到它的人停止检查** —— 本次复查差点就被它挡回去。
+
+### Added
+
+- `tests/test_agent_votes_census.py` +7 项（29 项）：崩掉的蜂不计票、
+  **合法的 5.0 照常计票**、**合法的 0.0 置信度照常计票**（后两条是成对断言，
+  没有它们「判据换成取值」是全绿变异）、三只表外蜂各一条、
+  以及一条**接线**测试走真 `QueenDistiller._prepare_dimension_data` + **AST** 核对白名单
+  （不按方法名 `inspect` —— 方法改名时那会以 `AttributeError` 的形式「变红」，
+  那是测试坏了不是代码坏了）。
+- `tests/test_signal_archive.py` +2 项（40 项）：`RETIRED_SIGNAL_NAMES` 黑名单
+  （我怕的是旧名**变回去**）+ 成对的「新序列必须存在」（防止退役变成悄悄删掉一个信号）。
+- `tests/test_distribution_invariants.py` +6 项：`TestCensusCoverageGuardHasTeeth`
+  五条合成反向自证 + `TestGuardCensusCoverage` 一条 integration（读生产 `analysis-*.json`，
+  **条件性写在 marker 上不写进 skip**，取不到数就判红）。实测核对 36 份新口径文件、0 份不一致。
+
+### 核对
+
+mutation **9/9 被杀**（含「判据换成 `score==5.0`」「换成 `confidence==0.0`」
+「白名单去掉 error」「改回旧信号名」「期望值写死 6」各一条），
+每个变异锚点唯一、每轮清 `__pycache__`、核对 `collected 90 items`、还原后重验全绿。
+ruff 149 = 基线（本 checkout 含未跟踪文件，与 worktree 的 46 不是同一口径）。
+
+### 不做
+
+**两者都不加 `_COHORT_HISTORY` 边界**：① `agent_votes` 不进 `final_score`
+（v0.45.164 已逐路径实测）；② 归档层的事，v0.45.163 的边界早已登记，
+缺的只是归档没照着切。同时**更正**了 `_COHORT_HISTORY` 里 v0.45.163 那条的
+措辞（原文那句「口径由 `census_source` 机读区分」在归档里是假的）。
+
 ## [0.45.181] — 2026-09-11 — 事故：修复推到了 main，生产在跑的是另一份代码
 
 v0.45.178 的回灌**当天就被删掉了**。根因不在代码，在「我验证了错的东西」。
@@ -762,8 +3195,6 @@ v0.45.172 已直接改 config.py 之后是否还有必要做。分析过程中�
 - `tests/test_backfill_dir_accuracy.py`（新文件，8 条）：覆盖 `_close_after`
   的同一护栏，含复刻本次事故（2026-08-28 批次、目标日 2026-09-09）的
   回归测试。
-
-## [0.45.172] — 2026-09-09 — EVALUATION_WEIGHTS 改写（用户明确决策，非自动优化写入）
 
 ## [0.45.172] — 2026-09-09 — EVALUATION_WEIGHTS 改写（用户明确决策，非自动优化写入）
 

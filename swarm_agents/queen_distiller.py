@@ -280,7 +280,8 @@ class QueenDistiller:
         half_th = float(_MFC.get("oos_trust_half_threshold", 55.0))
         zero_th = float(_MFC.get("oos_trust_zero_threshold", 50.0))
         try:
-            import os as _os, json as _json
+            import os as _os
+            import json as _json
             from hive_logger import PATHS as _PATHS
             # v0.45.149：兜底曾是相对路径 `"ml_model_cache.json"`，会读到
             # 当前工作目录里的野文件。绝对路径取不到就应当放弃，不该改读 cwd。
@@ -926,6 +927,13 @@ class QueenDistiller:
                 "confidence": r.get("confidence", 0.5),
                 "dimension": r.get("dimension", ""),
                 "details": r.get("details") or {},
+                # v0.45.182：把失败标记透出来。本白名单此前只抄 6 个键，
+                # `error` 被丢在外面 ⇒ 下游看到的只有 `make_error_result` 的
+                # `score=5.0`，与「这只蜂真的打了 5.0」**逐字节同形**。
+                # 生产里合法打 5.0 的有 38 例、崩掉的有 13 例，靠取值分不开。
+                # 旧快照没有这个键，`.get("error")` 取到 None ⇒ 按「没失败」读，
+                # 与历史语义一致。
+                "error": r.get("error"),
             }
             if src == "BearBeeContrarian":
                 agent_details[src]["llm_thesis"] = r.get("llm_thesis", "")

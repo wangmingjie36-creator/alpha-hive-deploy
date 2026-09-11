@@ -73,12 +73,20 @@ def reset() -> None:
 
 # ───────────────────────────────────────────── 计数器
 def counters() -> Dict[str, Optional[dict]]:
-    """三个取数源的进程内计数。
+    """三个取数源的进程内计数，外加一项链构造观测（`cboe_chain`，v0.45.190）。
 
     每一项要么是那个模块自己的 stats dict，要么是 None（模块不可导入 /
     没装闸门）。**不要把 None 改成 {}**——空 dict 会被下游读成「零调用」。
+
+    `cboe_chain` 与前三项不同：它不数「发了几次请求」，数的是「构出来的链
+    把多少近月挡在外面了」。`gex_view`（v0.45.197）数的是 Dealer GEX 专用全链视图
+    的可得性——它取不到时**不回退截断链**，所以「今天有几只标的没有 GEX」是这次
+    改动唯一的代价，必须可数而不是可估。两者放在这里是因为编排器已把本文件并进
+    status.json，挂上即随每轮扫描落盘，无需改编排器（同 `code_version` 的走法）。
     """
-    out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None, "cboe": None}
+    out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None,
+                                      "cboe": None, "cboe_chain": None,
+                                      "gex_view": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -92,16 +100,33 @@ def counters() -> Dict[str, Optional[dict]]:
     try:
         import cboe_options
         out["cboe"] = cboe_options.payload_stats()
+        out["cboe_chain"] = cboe_options.chain_selection_stats()
+        out["gex_view"] = cboe_options.gex_view_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("cboe stats 不可得: %s", e)
     return out
 
 
 # ───────────────────────────────────────────── 快照与落盘
+def code_version() -> Optional[dict]:
+    """这一轮跑的是哪一版代码。取不到返回 None（不写 {}——空 dict 会被读成「测过、没版本」）。
+
+    v0.45.182。编排器 `write_status()` 已用 jq 把本文件并进 `status.json`，
+    所以挂在这里即可让版本随每轮扫描落进 status.json，**无需改编排器**。
+    """
+    try:
+        import code_version as _cv
+        return _cv.resolve()
+    except Exception as e:  # noqa: BLE001 - 观测代码不得影响主流程
+        _log.warning("code_version 不可得（status.json 将缺版本字段）: %s", e)
+        return None
+
+
 def snapshot(date_str: str, extra: Optional[dict] = None) -> dict:
     snap = {
         "date": date_str,
         "written_at": datetime.now().isoformat(timespec="seconds"),
+        "code_version": code_version(),
         "phases": phases(),
         "counters": counters(),
     }

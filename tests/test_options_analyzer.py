@@ -420,3 +420,62 @@ class TestNearestStrikeAveraging:
             c = list(calls)
             random.Random(seed).shuffle(c)
             assert analyzer.calculate_iv_skew(c, puts, 2.00) == base
+
+
+class TestUnusualSignalOneSidedIsDeliberate:
+    """`unusual_signal` 只数 call 侧 —— v0.45.205 实测后**决定不改**的锁。
+
+    这不是在固化一个缺陷，是在锁住一个**用数据做出的决定**：
+    看着像 v0.45.201（OracleBee 单边词表）的同族，量完发现前提不成立 ——
+    put 侧异动与 call 侧 Spearman **0.886**、对 T+7 的 rank-IC **同号**
+    （call +0.119 / put +0.155），而 call−put 的 IC 是 **+0.035 p=0.90**。
+    改成净额 = 把 IC≈0.12 换成 IC≈0.03，是回归。
+
+    ⚠️ 这些 IC **过不了多重比较校正**，所以本组只支持「不动」，
+    **不支持**「现行形式已证明有效」。要动它，先重跑取证、别只读这段话。
+    """
+
+    def _bee(self):
+        from options_analyzer import OptionsAnalyzer
+        return OptionsAnalyzer.__new__(OptionsAnalyzer)
+
+    def _u(self, n_call, n_put):
+        return ([{"bullish": True}] * n_call) + ([{"bullish": False}] * n_put)
+
+    def test_put_side_does_not_reduce_the_score(self):
+        """判据本体：加 put 侧异动不得让分数下降。改成对称就红。"""
+        a = self._bee()
+        s_bull, _ = a.generate_options_score(50.0, 1.0, None, self._u(4, 0))
+        s_both, _ = a.generate_options_score(50.0, 1.0, None, self._u(4, 20))
+        assert s_both == s_bull, (
+            f"put 侧异动改变了分数（{s_bull} → {s_both}）。若这是刻意的对称化改动，"
+            "先重跑 v0.45.205 的取证：净额 IC +0.035 p=0.90，对称化是回归不是修复；"
+            "证据见 options_analyzer._score 上方注释与 memory alpha-hive-one-sided-rules.md"
+        )
+
+    def test_call_side_still_drives_the_score(self):
+        """正对照：没有这一条，上一条可以被一个恒返回常数的实现满足。"""
+        a = self._bee()
+        s0, _ = a.generate_options_score(50.0, 1.0, None, self._u(0, 0))
+        s1, _ = a.generate_options_score(50.0, 1.0, None, self._u(4, 0))
+        assert s1 > s0, f"call 侧异动对分数已无影响（{s0} → {s1}）—— 那上一条测不到东西"
+
+    def test_saturates_at_two_points(self):
+        """上限 2.0：61.2% 的生产行落在饱和区，是这个分量的主要形态。"""
+        a = self._bee()
+        s4, _ = a.generate_options_score(50.0, 1.0, None, self._u(4, 0))
+        s40, _ = a.generate_options_score(50.0, 1.0, None, self._u(40, 0))
+        assert s4 == s40, "min(2.0, ·) 的封顶没了"
+
+    def test_bearish_counterpart_is_still_not_computed(self):
+        """登记现状：全仓没有 bearish_unusual 这个量。
+
+        它变红 = 有人补了对应项 ⇒ 请**先读**上面那段取证再决定要不要接进评分。
+        """
+        import options_analyzer
+        src = open(options_analyzer.__file__, encoding="utf-8").read()
+        code = "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("#"))
+        assert "bearish_unusual" not in code, (
+            "新增了 bearish_unusual。注意 v0.45.205 实测：put 侧不是方向信号，"
+            "与 call 侧相关 0.886、对 T+7 的 IC 同号；接进评分前请重跑取证。"
+        )

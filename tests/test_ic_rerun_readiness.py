@@ -353,3 +353,99 @@ class TestRequirementsTraceToPowerReport:
         assert rr._WEEKS_REQUIRED[0.090] == 25    # 系统综合分实测
         assert rr._WEEKS_REQUIRED[0.077] == 35    # 噪音地板
         assert rr._WEEKS_REQUIRED[0.135] == 11    # 20 日动量基准
+
+
+class TestBoundaryDateHasDataEvidence:
+    """世代边界的日期，能不能从**数据**上判对错（v0.45.197）。
+
+    背景：本仓记过同一处栽跟头 —— 此前几条边界「核过了」其实**零判别力**，
+    因为世代内 0 条样本时，日期写对和写错的输出一模一样
+    （auto-memory `alpha-hive-failure-propagation`：「安全性论证与可观测性是
+    同一个事实的两面」）。v0.45.197 给口径切换留了个归档印记
+    （`advanced_analysis.dealer_gex.chain_view == "cboe_full_expiries"`），
+    `cohort_boundary_evidence()` 就是拿它对账的。
+
+    与本文件开篇那句同源：**一个永远说「还没证据」的判别器，和没有判别器是一回事。**
+    """
+
+    MARKER = "cboe_full_expiries"
+
+    def _write(self, root, date, view=MARKER, ticker="NVDA"):
+        import json as _json
+        body = {"advanced_analysis": {"dealer_gex": {}}}
+        if view is not None:
+            body["advanced_analysis"]["dealer_gex"]["chain_view"] = view
+        (root / f"analysis-{ticker}-ml-{date}.json").write_text(
+            _json.dumps(body), encoding="utf-8")
+
+    @pytest.fixture
+    def boundary(self, monkeypatch):
+        monkeypatch.setattr(
+            rr, "_COHORT_HISTORY",
+            list(rr._COHORT_HISTORY[:-1]) + [("2026-09-11", "vTEST", "测试用边界")])
+        return "2026-09-11"
+
+    def test_marker_on_boundary_date_matches(self, tmp_path, boundary):
+        """印记首见日 == 边界日 → matches。
+
+        变红的变异：把 `root = Path(home)` 改成 `root = ALPHAHIVE_DIR`
+        —— 那样它去扫代码目录（没有归档）⇒ 恒返回 no_evidence_yet。
+        这正是本函数初版的 bug。
+        """
+        self._write(tmp_path, "2026-09-11")
+        assert rr.cohort_boundary_evidence(tmp_path)["verdict"] == "matches"
+
+    def test_marker_later_than_boundary_is_flagged_too_early(self, tmp_path, boundary):
+        """印记晚于边界 → boundary_too_early（危险方向：中间那几天是旧口径，会被混算）。
+
+        变红的变异：把 `first > boundary` 与 `first < boundary` 两个分支对调。
+        """
+        self._write(tmp_path, "2026-09-15")
+        ev = rr.cohort_boundary_evidence(tmp_path)
+        assert ev["verdict"] == "boundary_too_early"
+        assert ev["marker_first_seen"] == "2026-09-15"
+
+    def test_marker_earlier_than_boundary_is_flagged_too_late(self, tmp_path, boundary):
+        """印记早于边界 → boundary_too_late（保守方向：白丢了一些新口径样本）。
+
+        变红的变异：同上，两个分支对调。
+        """
+        self._write(tmp_path, "2026-09-09")
+        assert rr.cohort_boundary_evidence(tmp_path)["verdict"] == "boundary_too_late"
+
+    def test_no_marker_is_not_reported_as_matching(self, tmp_path, boundary):
+        """没有印记时必须说「还没有证据」，**不能**说「一致」。
+
+        「还没验」和「验过了没问题」必须可区分 —— 本仓六次「失败没传导到下游」
+        全是这两者被混成一个。
+
+        变红的变异：把 `verdict = "no_evidence_yet"` 改成 `"matches"`。
+        """
+        ev = rr.cohort_boundary_evidence(tmp_path)
+        assert ev["verdict"] == "no_evidence_yet"
+        assert ev["marker_first_seen"] is None
+
+    def test_archives_without_the_marker_are_not_evidence(self, tmp_path, boundary):
+        """没有该口径字段的旧归档不算证据 —— 否则判别器会把旧口径认成新口径。
+
+        变红的变异：把 `if view == "cboe_full_expiries"` 改成 `if True`。
+        """
+        self._write(tmp_path, "2026-09-01", view=None)
+        self._write(tmp_path, "2026-09-02", view="something_else")
+        assert rr.cohort_boundary_evidence(tmp_path)["verdict"] == "no_evidence_yet"
+
+    def test_first_seen_is_the_earliest_not_the_last(self, tmp_path, boundary):
+        """多天都有印记时取**最早**那天 —— 那才是「首个受影响的业务日」。
+
+        变红的变异：把 `min(first, date)` 改成 `max(first, date)`。
+
+        ⚠️ 夹具的 ticker 名是**刻意**挑的，不是随手起的：归档按文件名排序遍历，
+        而文件名是 `analysis-<TICKER>-ml-<DATE>.json` ⇒ **先按 ticker 排，不按日期**。
+        若让日期最早的 ticker 恰好排在最前，扫描过程中 `first` 单调下降、
+        `min` 与 `max` 走不到分歧点 ⇒ 这条断言对该变异**没有牙**（初版就是这样，
+        变异校验当场抓到）。所以要让**日期最晚的 ticker 排在最前**。
+        """
+        self._write(tmp_path, "2026-09-30", ticker="AAA")   # 排最前、日期最晚
+        self._write(tmp_path, "2026-09-20", ticker="MMM")
+        self._write(tmp_path, "2026-09-12", ticker="ZZZ")   # 排最后、日期最早
+        assert rr.cohort_boundary_evidence(tmp_path)["marker_first_seen"] == "2026-09-12"
