@@ -5,7 +5,94 @@
 
 ---
 
-## [0.45.188] — 2026-09-11 — 占位（进行中：近端磁吸目标价口径改 ≤7 天、从 full_chain_oi 同源算）
+## [0.45.188] — 2026-09-11 — 「近端磁吸目标价」此前没有「近端」：口径定为 ≤7 天并改从 full_chain_oi 同源算
+
+### 背景
+
+用户问「NVDA 深度报告前两天的近端磁吸目标价还是 225，怎么 09-10 变成 200 了」。
+核对结论：**$200 不是假数据（CBOE 真实 OI 算出来的），但它答的不是标签问的那个问题。**
+
+`swarm_agents/oracle_bee.py::_calc_max_pain` 旧实现取 `fetch_cboe_chain` 返回链里
+最早的到期日当「最近」。而那条链经 `cboe_options._select_expiries` 截断为
+「DTE≥7 的前 4 个到期日」——`far` 先占满配额，周权标的 `far` 恒满 4 个 ⇒
+**DTE<7 的到期日一个都进不来**。于是「最近」实际是「最早的 DTE≥7 那一个」，
+与「近端」字面意思相反；它还会随时间推移每隔几天整个换一个到期日，
+从而产生与仓位无关的跳变。
+
+实测（用当日已落盘的 `full_chain_oi` 重算，零额外网络调用）：
+
+| | 报告显示 | ≤7天真值 | 偏差 |
+|---|---|---|---|
+| AMC | 2.0 | 2.5 | −20.0% |
+| DELL | 425 | 520 | −18.3% |
+| SNOW | 270 | 330 | −18.2% |
+| CRM | 207.5 | 250 | −17.0% |
+| **NVDA** | **200** | **225** | **−11.1%** |
+
+2026-09-10 全 30 只标的、29 只有数据，**28 只偏差 >1%**。而 NVDA 那次「跳变」
+在正确口径下根本不存在：≤7 天真值 09-08 与 09-10 **都是 225**（显示值 225→200）。
+MSFT 同型：显示 500→450，真值 500→495。
+
+### Changed
+
+- `swarm_agents/oracle_bee.py`
+  - 新增类常量 `NEAR_WINDOW_DAYS = 7`——「近端」**此前在代码里没有定义**，
+    被上游过滤器悄悄定义成了它的反面。
+  - 新增 `_near_oi_by_strike()`：把 `full_chain_oi` 的 {行权价: {到期日: OI}}
+    矩阵按 `0 <= DTE <= window_days` 聚合；解析失败的键**计数并 warning**，
+    不静默跳过。
+  - `_calc_max_pain()` 换源到 `full_chain_oi`（与全链 OI 卡片同源，且它本就
+    每次扫描都抓了完整矩阵，30/30 可得），新增 `window_days` / `expiries_used`
+    / `near_total_oi` / `unavailable_reason` 四个字段。
+    ⚠️ **取不到时返回 None，不回退旧链**——旧链给的是构造上就不符合标签含义的数，
+    回退等于把「没数据」悄悄换成「错数据」。
+  - 异常分支 `_log.debug` → `_log.warning`（旧写法让算错/算不出在生产日志里不可见）。
+  - 类 docstring 里的「权重 0.15」快照删掉，改指 `config.EVALUATION_WEIGHTS`。
+- `generate_ml_report.py`：卡片标签带上口径 → 「≤7天 近端磁吸目标价（距现价 −3.0%）」。
+  `window_days` 缺失（旧记录）时不假装知道窗口。
+- `cboe_options.py::_select_expiries`：**docstring 按实测重写**。旧文案
+  「优先 DTE≥7 前 4 + DTE 3-6 前 2」读起来像两桶都会进，与真实行为不符。
+
+### 观测点（此前「谁会红？」答不上来）
+
+- `_pub_details` 新增 `max_pain_window_days` / `max_pain_expiries`（不可用时
+  `max_pain_unavailable`）——只记数值时，事后无法分辨「窗口选错了」和「仓位真变了」，
+  这次误判正是卡在这里。
+- `tests/test_near_max_pain_window.py`（9 条）：口径回归 / 窗口上下界 / 不可回退旧链 /
+  不可用必须带原因。**每条断言的 docstring 里写明什么变异会让它变红。**
+
+### 不需要世代边界
+
+`max_pain` 只往 `signal_summary` 追加一段文本，**不进 `options_score`**（后者只被
+`term_score_adj + skew_score_adj` 调整），全仓无代码解析 `MaxPain` 文本 ⇒
+不影响任何维度分与 `final_score`。
+
+### 已知不改（重要）
+
+`_select_expiries` 的 `near` 桶对当前 30 只标的恒不生效（`far` 全部 ≥4），
+但**不是死代码**——`far` 不足 4 个的稀疏期权标的会用到它。
+⚠️ **不要「照字面把它修好」**：让 near 真的进来会改变 IV rank / 25Δ skew /
+期限结构 / Dealer GEX 的输入，而这些都流进 `final_score` ⇒ 属口径变更，
+要按 `ic_rerun_readiness._COHORT_HISTORY` 付世代边界的代价。已写进该函数 docstring。
+
+### 验证
+
+- 用 09-08 / 09-10 两天已落盘的真实 `full_chain_oi` 重算 NVDA：两天都是 $225
+  （旧实现 225→200），到期日分别为 09-09/09-11/09-14 与 09-11/09-14/09-16。
+- 端到端渲染核对：卡片输出 `$225 / ≤7天 近端磁吸目标价（距现价 -3.0%）`。
+- **变异校验 6/6 全部被抓住**（先断言基线全绿再开跑、`--maxfail=999`、列出全部变红项）：
+  还原旧口径 / 去掉窗口下界 / 上界改严格小于 / 窗口常量 7→30 / 不给 unavailable_reason /
+  加一条 `fetch_cboe_chain` 兜底。
+- `tests/test_oracle_cboe_source.py::TestMaxPainNoFallback` 两条**改写而非删除**
+  （旧的钉的是已被废弃的数据源），「不回退 yfinance」的原意保留。
+- 全量 `pytest`：**3955 passed**。3 条既有红与本次无关——`TestCoverageHorizon`
+  是 CLAUDE.md 写明的设计性变红；两条 `test_zero_weight_invariant` 是 `rglob`
+  扫进 `.claude/worktrees/` 导致的 **60s 超时**（v0.45.186 占位正在修），非断言失败。
+
+### 遗留
+
+线上 09-10 那批已发布报告仍是旧口径的数（NVDA 仍显示 $200），本次只改源码未重新
+生成部署——对外发布动作待用户确认。
 
 ## [0.45.187] — 2026-09-11 — 占位（进行中：清理 46 个被误提交进 git 跟踪的 iCloud 重名副本）
 

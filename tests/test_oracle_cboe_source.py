@@ -15,6 +15,7 @@
 
 import os
 import sys
+from datetime import date, timedelta
 from unittest.mock import MagicMock
 
 import pytest
@@ -124,24 +125,33 @@ class TestFinitePos:
 
 # ───────────────────────────────────────────── 3. max pain 不再回退 yfinance
 class TestMaxPainNoFallback:
-    def test_cboe_failure_yields_none_without_yfinance(self, monkeypatch):
-        import cboe_options
-        monkeypatch.setattr(cboe_options, "fetch_cboe_chain", lambda *a, **k: None)
+    """⚠️ v0.45.188 起 `_calc_max_pain` 的数据源换成 `full_chain_oi`。
+
+    「不回退 yfinance」这条承诺不变（本类原本的用意），但「拿得到数据就能算」
+    那条必须换到新源上测 —— 旧版用 `fetch_cboe_chain` 喂链，而那条链按设计排除
+    DTE<7，正是 v0.45.188 要治的病。口径本身的守卫在
+    `tests/test_near_max_pain_window.py`。
+    """
+
+    def test_missing_chain_yields_none_without_yfinance(self, monkeypatch):
         tk, dl = _no_yf(monkeypatch)
         bee = OracleBeeEcho(PheromoneBoard())
-        r = bee._calc_max_pain("NVDA", 100.0)
+        r = bee._calc_max_pain("NVDA", 100.0, {"full_chain_oi": None})
         assert r["max_pain"] is None and r["summary"] == ""
         tk.assert_not_called(); dl.assert_not_called()
 
-    def test_cboe_chain_still_computes(self, monkeypatch):
-        import cboe_options
-        chain = {"calls": [{"expiry": "2026-10-02", "strike": k, "openInterest": oi}
-                           for k, oi in ((90.0, 100), (100.0, 5000), (110.0, 100))],
-                 "puts": [{"expiry": "2026-10-02", "strike": k, "openInterest": oi}
-                          for k, oi in ((90.0, 100), (100.0, 5000), (110.0, 100))]}
-        monkeypatch.setattr(cboe_options, "fetch_cboe_chain", lambda *a, **k: chain)
+    def test_full_chain_oi_still_computes(self, monkeypatch):
+        """有 `full_chain_oi` 就照常算，且全程不碰 yfinance。"""
+        today = date(2026, 9, 10)
+        monkeypatch.setattr("swarm_agents.oracle_bee.pdt_today", lambda: today.isoformat())
+        near = (today + timedelta(days=2)).isoformat()
+        leg = {str(k): {near: oi} for k, oi in ((90.0, 100), (100.0, 5000), (110.0, 100))}
+        chain = {"data_available": True, "call_exp_oi": leg, "put_exp_oi": leg}
         _no_yf(monkeypatch)
-        assert OracleBeeEcho(PheromoneBoard())._calc_max_pain("NVDA", 100.0)["max_pain"] == 100.0
+        r = OracleBeeEcho(PheromoneBoard())._calc_max_pain(
+            "NVDA", 100.0, {"full_chain_oi": chain})
+        assert r["max_pain"] == 100.0
+        assert r["expiries_used"] == [near]
 
 
 # ───────────────────────────────────────────── 4. Bear P/E 复活
