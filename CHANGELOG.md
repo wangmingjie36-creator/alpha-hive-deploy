@@ -5,6 +5,18 @@
 
 ---
 
+## [0.45.209] — 2026-09-11 — 占位（进行中：GuardBee 派生性实测 —— 方向 100% 复述同伴；顺手修 crowding 降级被上报成 real）
+
+---
+
+## [0.45.208] — 2026-09-11 — 占位（进行中：MEMORY.md「索引行 ≤150 字符」规约没有会红的守卫，在 memory 仓补 pre-commit 检测器）
+
+---
+
+## [0.45.207] — 2026-09-11 — 占位（进行中：清掉默认测试里剩余 11 条出网 —— macro_snapshot 7 + dashboard_renderer 4）
+
+---
+
 ## [0.45.206] — 2026-09-11 — 全量 `ruff check .` 从未在 CI 跑过：46 个错，其中 7 个是本仓头号故障形状
 
 起因是查一个无关的问题：`.github/workflows/ci.yml` 半年来一直躺在磁盘上却**未被跟踪**
@@ -161,7 +173,102 @@
 
 ---
 
-## [0.45.204] — 2026-09-11 — 占位（进行中：GitHubTool 方法粒度死代码判定 —— push/create_issue/list_branches/diff）
+## [0.45.204] — 2026-09-11 — `GitHubTool` 是活类，但方法不全是活的：删四个零读者方法，并按住白名单不动
+
+v0.45.198 按当时简报明令没动 `GitHubTool`（`report_deployer` 的 gh-pages / main
+部署链路依赖它），只留下一个方法粒度的判定交给本版。结论：**删**
+`push` / `create_issue` / `list_branches` / `diff`（及其私有助手 `_parse_diff_stats`）。
+
+### Removed — 五个零读者方法
+
+判死按 auto-memory `alpha-hive-dead-field.md`：两条独立证据，每条自带正对照。
+
+**证据①（静态，重数一遍）** —— 口径必须是 `git ls-files '*.py' | xargs grep`，
+**不能**用 `rglob` / `grep -r`：生产 checkout 的 `.claude/worktrees/` 下有 14 个
+嵌套仓库副本，会把陈旧代码算成读者。全仓 `agent_helper.*` 访问**全部**是 `.git`：
+
+| 成员 | 读者 | 来源 |
+|---|---|---|
+| `run_git_cmd` | 9 | `report_deployer.py` |
+| `repo_path` | 3 | `report_deployer.py` |
+| `commit` | 1+3 | `report_deployer.py:405` + `tests/test_report_deployer_whitelist.py` |
+| `status` | 1 | `report_deployer.py:389` |
+| `push` / `create_issue` / `list_branches` / `diff` / `_parse_diff_stats` | **0** | — |
+
+`.push` 全仓唯一命中是 logger 名字串 `"alpha_hive_bot.push"`；`.diff` 四处全是
+pandas `Series.diff()`。正对照：同一套检索找得出上面四个活成员，检索本身有效。
+
+三个盲区逐个复查，均零命中：**方法名作字符串**（全跟踪文件类型含 .md/.json/.sh，
+`create_issue`/`list_branches` 仅命中本条 CHANGELOG 自己）、**仓库外调用者**
+（`~/.claude/scripts/` 12 个文件 + `mcp-servers/` 五个 submodule + LaunchAgents）、
+**动态派发**（`report_deployer` 与 `agent_toolbox` 零 `getattr`/`eval`；
+`alpha_hive_bot/bot.py:252` 的 `action == "push"` 是 Telegram 定时推简报，不 import 本模块）。
+
+**证据②（运行期，与 grep 独立）** —— 给 `GitHubTool` 每个成员挂调用记录器，在
+无远端的沙箱仓库里跑真实的 `report_deployer.auto_commit_and_notify`，**生产与
+测试两条分支都走**（含 gh-pages 分支）。实际被 dispatch 到的只有
+`run_git_cmd` / `status` / `commit`；被删的五个零调用。正对照 = 那三个活方法全部
+出现，证明探针真跑到了产线而不是在空转。删除后复跑，行为逐字不变。
+
+**`.push()` 不是「暂时没人用」，是被并行路径取代了**：`report_deployer` 推送走
+`run_git_cmd("git push origin main")`，绕开本方法。留着就是同一件事两种做法。
+
+**另两个还是坏的。** `list_branches` / `diff` 无条件读 `result["stdout"]`，而
+`run_git_cmd` 有**两种**失败形状：git 非零退出返回 `{"success":False,"stdout":…}`，
+subprocess 自己炸则返回 `{"success":False,"error":…}`——**没有 `stdout` 键**。
+实测后者 `KeyError: 'stdout'`；非仓库目录下则静默返回 `{"branches": []}` 冒充成功。
+即 CLAUDE.md「写守卫先问失败时是返回还是抛，两条路径各堵一次」，两条都没堵。
+零读者正是这两个 bug 从没被发现的原因。`create_issue` 另有一点：它直接
+`subprocess.run(["gh", …])`，是本模块里**唯一绕过自家子命令白名单**的出口。
+
+### Changed — `_ALLOWED_GIT_CMDS` 保持原样，并写明为什么
+
+**本任务最容易掉的坑**：删了 `push()`/`diff()` 顺手把白名单里的 `push`/`diff` 也收窄。
+不能。白名单约束的是 `run_git_cmd` 收到的**字符串**，而调用方直接下发整条命令——
+`report_deployer` 自己传 `"git push origin main"` / `"git branch -D …"` / `"git fetch origin"`。
+方法没了不等于子命令没人用了。已把这条理由写进白名单上方注释，省得下一个人再推一遍。
+
+`AgentHelper.summary()` 原文宣传 `push(branch) ✓` 与 `diff(branch1, branch2) ✓`，
+删完就成了假话，同步改为 `run_git_cmd` / `status` / `commit`。
+
+### 变异校验：一次**等价变异**，和一次**探针自己坏了**
+
+清 `__pycache__` → 基线 `4100 passed, 1 failed`（`TestCoverageHorizon` 按设计红）
+`, 1 skipped, 80 deselected, 2 xfailed`，收集数 4184 稳定。五个 def 行 anchor 各唯一；
+全仓无枚举 `GitHubTool` 成员的测试（删方法不会因「方法数变了」而红）。
+
+| 变异 | 测试红 | 真实生产读者 |
+|---|---|---|
+| 删 `run_git_cmd` | **3 红** | 9 |
+| 删 `commit` | **3 红** | 1 |
+| 删 **`status`** | **0 红** | **1（`report_deployer.py:389`）** |
+| 删 `push`/`create_issue`/`list_branches`/`diff`/`_parse_diff_stats` | 0 红 | 0 |
+
+⚠️ **五条全是等价变异，而这不构成删它们的理由。** 关键校准是 `status` 那行：
+它**在生产里被调用**，删掉照样零红——本仓测试根本没覆盖 `status`/`push`/`diff`。
+所以「零红」在这里对「死不死」**零信息量**，判死全靠上面两条证据。
+变异校验真正测出来的是另一件事：**这些方法从来没被测过**。
+
+**探针自己坏过一次，是正对照抓出来的。** 第一版批量变异脚本对 `run_git_cmd`
+（9 个读者）报「等价变异」——荒谬到一眼可见，才发现循环里变异根本没落地而输出被
+静默吞掉。若当初只变异那四个疑似死方法、不带活方法作正对照，七条「零红」会原样
+进结论。修法：变异后先断言 `def X(` 计数 1→0，不落地就作废本条并出声。
+即 CLAUDE.md「谁会红？」用在量具自己身上。
+
+删除后全套复跑与基线逐字一致（`4100 passed, 1 failed, 1 skipped, 80 deselected, 2 xfailed`）。
+`ruff check .` 46 errors，与基线持平；`ruff check --select F401 --isolated agent_toolbox.py`
+全绿（`pyproject` ignore 了 F401，查死 import 必须 `--isolated`），无残留死 import。
+
+### 顺带发现（**未在本版修**，已另开任务）
+
+`report_deployer` 测试模式分支下发的 `git checkout -b …` / `git checkout main` /
+`git reset --hard origin/main`，其子命令 `checkout`、`reset` **不在**
+`_ALLOWED_GIT_CMDS` 里，被静默拒绝——而紧随其后那句
+`_log.info("本地 main 已恢复至 origin/main（测试数据不污染生产）")` 是**无条件**打的。
+即失败没传导到下游：日志声称回滚完成，实际回滚从未执行。已实测确认。
+本版**不修**——修它要放宽安全边界（往白名单加 `checkout`/`reset`）或改控制流，
+属另一个改动面，不该混进一次死代码清理。已在白名单注释里标出，勿顺手加项。
+
 
 ## [0.45.203] — 2026-09-11 — 一条恒真断言守住的其实是**真实不变式的否定**
 
