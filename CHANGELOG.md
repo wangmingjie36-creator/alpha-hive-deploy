@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.205] — 2026-09-11 — 占位（进行中：options_analyzer 单边 unusual_signal 实测后**决定不改** —— 登记证据防下一个人把它「修」成回归）
+
+---
+
 ## [0.45.204] — 2026-09-11 — 占位（进行中：GitHubTool 方法粒度死代码判定 —— push/create_issue/list_branches/diff）
 
 ## [0.45.203] — 2026-09-11 — 占位（进行中：修 `test_both_directions_are_guarded` 里结构性恒真的重叠断言）
