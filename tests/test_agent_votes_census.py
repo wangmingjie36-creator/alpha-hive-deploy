@@ -465,3 +465,162 @@ def test_deep_report_producer_labels_its_own_caliber(tmp_path):
     src = json.load(open(out, encoding="utf-8")).get("agent_votes_source")
     assert src == "deep_report_ctx", f"深度路径口径标签为 {src!r}"
     assert src not in ("", "agent_details"), "深度口径与另外两种撞在了一起"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# v0.45.182：崩掉的蜂不是一张 5.0 中位票
+#
+# `make_error_result`（swarm_agents/utils.py:35）返回 `score=5.0, confidence=0.0,
+# error=<str>`——5.0 只是为了让调用方拿到一个数，不是一次表态。而
+# `queen_distiller` 的 `agent_details` 白名单（:919-927）只抄 6 个键、**丢掉
+# `error`** ⇒ `build_agent_votes` 拿到的 det 里只剩 `score=5.0`，与「这只蜂真的
+# 打了 5.0」逐字节同形，结构上分辨不了。
+#
+# 旧的板口径天然排除它：崩溃发生在 `self._publish()` **之前**，那只蜂从没上过板。
+# 所以这是 v0.45.164 改读 agent_details 时引入的新行为，不是历史遗留。
+#
+# 生产实测（782 份 / 6256 个蜂-份）：13 例（Scout 9 / Buzz 3 / Chronos 1），
+# 09-08 之后 0 例 ⇒ 潜伏，无已污染快照。
+#
+# ⚠️ 判据必须是**错误标记**，不能是取值。三条取值捷径都实测否掉了：
+#   · `score == 5.0`      —— 38 个**合法**结果恰好是 5.0（Bear 18 / Oracle 10 /
+#                            Scout 4 / Buzz 2 / Guard 3 / CodeExec 1），
+#                            而 error 只有 13 个 ⇒ 3:1 误伤。
+#   · `confidence == 0.0` —— 今天 13/13 命中、6256 条零误报，但没有任何代码
+#                            保证合法蜂不会返回 0.0：是巧合不是契约。
+#   · `dimension_status`  —— 只覆盖 `DIMENSION_WEIGHTS` 那 5 维；
+#                            Rival(ml_auxiliary) / Bear(contrarian) /
+#                            CodeExec(technical) 三只在表外 ⇒ 半修。
+# ══════════════════════════════════════════════════════════════════════════
+
+def _errored_det(score=5.0):
+    """完全照 `queen_distiller.py:919-927` 的白名单，从一条真 `make_error_result` 造。
+
+    不手搓字面量：手搓的 dict 会在白名单或 `make_error_result` 变形时继续全绿，
+    那正是「测 helper ≠ 测接线」。
+    """
+    from swarm_agents.utils import make_error_result
+    r = make_error_result("BuzzBeeWhisper", "sentiment", ValueError("boom"))
+    r["score"] = score
+    return {
+        "discovery": r.get("discovery", ""),
+        "score": r.get("score", 5.0),
+        "direction": r.get("direction", "neutral"),
+        "confidence": r.get("confidence", 0.5),
+        "dimension": r.get("dimension", ""),
+        "details": r.get("details") or {},
+        "error": r.get("error"),
+    }
+
+
+def test_errored_bee_is_not_counted_as_a_vote():
+    from alpha_hive_daily_report import build_agent_votes
+
+    det = {k: dict(v) for k, v in AGENT_DETAILS.items()}
+    det["BuzzBeeWhisper"] = _errored_det()
+    votes, _src = build_agent_votes(_swarm_row(det))
+    assert "BuzzBeeWhisper" not in votes, (
+        f"崩掉的蜂被记成 {votes.get('BuzzBeeWhisper')!r} —— "
+        "make_error_result 的 5.0 不是一次表态"
+    )
+    assert len(BEES & set(votes)) == len(BEES) - 1
+
+
+def test_legitimate_five_point_zero_is_still_counted():
+    """成对断言：**合法**打 5.0 的蜂必须照常计票。
+
+    没有这一条，把判据改成 `score == 5.0` 是一个全绿的变异 —— 而那个变异会
+    在生产上丢掉 **38** 张真票去抓 13 张假票。5.0 是这个量表的合法取值，
+    不是失败签名。
+    """
+    from alpha_hive_daily_report import build_agent_votes
+
+    det = {k: dict(v) for k, v in AGENT_DETAILS.items()}
+    det["BuzzBeeWhisper"] = {"score": 5.0, "direction": "neutral", "error": None}
+    votes, _src = build_agent_votes(_swarm_row(det))
+    assert votes.get("BuzzBeeWhisper") == 5.0, (
+        "合法的 5.0 被当成失败丢掉了 —— 判据错用了取值而不是 error 标记"
+    )
+    assert len(BEES & set(votes)) == len(BEES)
+
+
+def test_legitimate_zero_confidence_is_still_counted():
+    """成对断言之二：`confidence == 0.0` 不是失败签名。
+
+    它今天在生产上零误报，但那是 `build_confidence` 的 base 恰好都 > 0 造成的
+    巧合。把判据写成 `confidence == 0.0` 要靠这条变红。
+    """
+    from alpha_hive_daily_report import build_agent_votes
+
+    det = {k: dict(v) for k, v in AGENT_DETAILS.items()}
+    det["RivalBeeVanguard"] = {"score": 3.10, "confidence": 0.0, "error": None}
+    votes, _src = build_agent_votes(_swarm_row(det))
+    assert votes.get("RivalBeeVanguard") == 3.10
+
+
+@pytest.mark.parametrize("agent", ["RivalBeeVanguard", "BearBeeContrarian",
+                                   "CodeExecutorAgent"])
+def test_error_filter_covers_bees_outside_dimension_weights(agent):
+    """三只蜂的 dimension 不在 `DIMENSION_WEIGHTS` 里，`dimension_status` 够不到。
+
+    这条专门钉死「用 `dimension_status` 当判据」那个半修方案：
+    Rival=ml_auxiliary / Bear=contrarian / CodeExec=technical，
+    `_prepare_dimension_data` 只为 5 个加权维度写 status，这三只永远是 present-less
+    的空白 ⇒ 拿它当判据在这三只身上恒不触发。
+    """
+    from alpha_hive_daily_report import build_agent_votes
+
+    det = {k: dict(v) for k, v in AGENT_DETAILS.items()}
+    det[agent] = _errored_det(score=AGENT_DETAILS[agent]["score"])
+    votes, _src = build_agent_votes(_swarm_row(det))
+    assert agent not in votes, f"{agent} 崩了却被记了一票 {votes.get(agent)!r}"
+
+
+def test_distiller_carries_error_marker_into_agent_details():
+    """接线测试：`error` 必须真的穿过 `agent_details` 白名单到达下游。
+
+    上面几条都是直接喂 dict 给 `build_agent_votes` —— 它们证明不了白名单
+    没把 `error` 丢掉。这条走真 `QueenDistiller`，断言落到 `agent_details` 上。
+    """
+    from swarm_agents.queen_distiller import QueenDistiller
+    from swarm_agents.utils import make_error_result
+
+    prep = QueenDistiller(board=None)._prepare_dimension_data([
+        make_error_result("BuzzBeeWhisper", "sentiment", ValueError("boom")),
+        {"source": "OracleBeeEcho", "score": 8.2, "direction": "bullish",
+         "confidence": 0.7, "dimension": "odds", "discovery": "ok"},
+    ])
+    by_src = {r.get("source"): r for r in prep["all_results"]}
+    assert "BuzzBeeWhisper" in by_src, "error 结果在 clean_results_batch 就被丢了？"
+    assert by_src["BuzzBeeWhisper"].get("error"), "error 键在清洗阶段没了"
+
+    # 白名单本体走 AST，不按方法名 inspect —— 方法改个名这条就该继续有效，
+    # 而不是以 AttributeError 的形式「变红」（那是测试坏了，不是代码坏了）。
+    keys = _agent_details_whitelist_keys()
+    assert "error" in keys, (
+        f"agent_details 白名单只有 {sorted(keys)} —— 没有 error，"
+        "build_agent_votes 结构上看不见失败"
+    )
+
+
+def _agent_details_whitelist_keys() -> set:
+    """AST 取 `agent_details[src] = {...}` 那个字面量的键集合。"""
+    import ast
+    from pathlib import Path as _P
+    import swarm_agents.queen_distiller as _qd
+    tree = ast.parse(_P(_qd.__file__).read_text(encoding="utf-8"))
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Dict):
+            continue
+        for tgt in node.targets:
+            if (isinstance(tgt, ast.Subscript)
+                    and isinstance(tgt.value, ast.Name)
+                    and tgt.value.id == "agent_details"):
+                found.append({k.value for k in node.value.keys
+                              if isinstance(k, ast.Constant)})
+    assert len(found) == 1, (
+        f"queen_distiller 里 `agent_details[...] = {{...}}` 的字面量有 {len(found)} 处，"
+        "本断言假设唯一 —— 多于一处时它只验到其中一处，等于没验"
+    )
+    return found[0]

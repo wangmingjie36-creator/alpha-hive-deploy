@@ -450,3 +450,51 @@ class TestPriceCacheKey:
     def test_fwd_days_still_separates(self):
         tk, d = ["AAPL"], ["2026-07-01", "2026-07-08"]
         assert self._key(tk, d, 7) != self._key(tk, d, 30)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# v0.45.182：口径变了的信号必须改名，不能沿用旧名
+#
+# v0.45.163 把 GuardBee 的 risk_adj 改走普查读法，`guard.consistency` 与
+# `guard.top_signals_count` 两条归档序列在 2026-09-08 **换了定义**（逐扫描日
+# 实测：count 3.43~4.33 → 恒 6.00；consistency 0.50~0.72 → 0.47~0.49），
+# 而当时只在 analysis JSON 里加了 `census_source` —— `signal_archive` 根本不抽
+# 那个字段（实测归档里 0 行），`analyze()` 也既不按日期、也不按 `_COHORT_HISTORY`
+# 切片，`load_panel` 直接把整张表拉进来 ⇒ 两段定义被池化。
+#
+# ⚠️ 判据：**名字变了，还是「量」变了？**
+#   · 同一个量换名字（`stocktwits_volume` → `social_volume`）⇒ 合并读，
+#     见 `_crowding_comp` 的 `_legacy` 映射。
+#   · 同一个名字换量（本条）⇒ **必须拆成两条序列**。
+#
+# 为什么改名而不是加一列口径标记：
+#   ① `value` 列是 REAL，存不下字符串标签，得先编码成数字 —— 又是一件要记住的事；
+#   ② 加列等于要求每个消费方**记得**去 join，忘了就退回同一个静默 bug。
+#      改名之后「忘了」在结构上不可能发生：两条序列不同名，自然不会被池化。
+#   ③ `experiments/signal_ic_sweep_report.md:47` 已经把 `guard.consistency`
+#      的 IC(+0.134 / t +2.12) 发表在**旧定义**上；同名延续会让下一个人拿两个量比。
+# ══════════════════════════════════════════════════════════════════════════
+
+#: 口径已变、**不得再被写入**的旧信号名。旧行留在库里（历史数据不改写），
+#: 但新数据必须走新名字。这是**黑名单**语义：我怕的是它变回去。
+RETIRED_SIGNAL_NAMES = {
+    "guard.consistency",        # v0.45.163 起分母由「窗口条数 ≤5」变为「本轮蜂数」
+    "guard.top_signals_count",  # v0.45.163 起恒为蜂数，已非信号；改挂分布不变式
+}
+
+
+def test_retired_signal_names_are_not_reused():
+    from signal_archive import SIGNAL_EXTRACTORS
+    clash = RETIRED_SIGNAL_NAMES & set(SIGNAL_EXTRACTORS)
+    assert not clash, (
+        f"{sorted(clash)} 的口径在 2026-09-08 变过，沿用旧名会让 analyze() "
+        "把两段定义池化 —— 换个名字，别加判别列"
+    )
+
+
+def test_renamed_consistency_signal_is_present():
+    """成对断言：退役不等于删掉——新口径必须有自己的序列，否则是悄悄丢了一个信号。"""
+    from signal_archive import SIGNAL_EXTRACTORS
+    assert "guard.consistency_census" in SIGNAL_EXTRACTORS, (
+        "只退役了旧名却没建新序列 —— GuardBee 的一致性从此不再被归档"
+    )

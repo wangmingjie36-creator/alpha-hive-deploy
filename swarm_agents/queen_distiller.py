@@ -926,6 +926,13 @@ class QueenDistiller:
                 "confidence": r.get("confidence", 0.5),
                 "dimension": r.get("dimension", ""),
                 "details": r.get("details") or {},
+                # v0.45.182：把失败标记透出来。本白名单此前只抄 6 个键，
+                # `error` 被丢在外面 ⇒ 下游看到的只有 `make_error_result` 的
+                # `score=5.0`，与「这只蜂真的打了 5.0」**逐字节同形**。
+                # 生产里合法打 5.0 的有 38 例、崩掉的有 13 例，靠取值分不开。
+                # 旧快照没有这个键，`.get("error")` 取到 None ⇒ 按「没失败」读，
+                # 与历史语义一致。
+                "error": r.get("error"),
             }
             if src == "BearBeeContrarian":
                 agent_details[src]["llm_thesis"] = r.get("llm_thesis", "")
