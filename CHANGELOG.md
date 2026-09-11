@@ -98,6 +98,23 @@ marker 别写 skip」。
 
 **为什么是 09-08 开始、且再也好不了（棘轮）**：merge 每天成功时分支追平 main，次日差距 = 一天的提交量（5~30，远在窗口内）。09-05 那天没跑（`cloud_snapshots/` 从 09-04 直接跳到 09-08），而**光 09-05 一天 main 就有 59 个提交**。差距一旦越过 125，merge 就失败 → 分支不再追平 → 差距每天继续拉大 → **结构上不可能自行回到窗口内**。
 
+### 修复验证（实测复现 + 实测修复，不是断言）
+
+在本机用 `--depth=1` 克隆 `cloud-snapshots` + `--depth=1` 取 `main` 复现出**同一条 fatal**，
+再原样应用修复：
+
+| | 解除浅克隆前 | 后 |
+|---|---|---|
+| `git rev-parse --is-shallow-repository` | `true` | `false` |
+| 可见提交（分支 / main） | 1 / 1 | 941 / 927 |
+| `rev-list --max-parents=0` | **2 个「根提交」** | **1 个** |
+| `git merge-base` | **空** | `ea97c50` |
+| `git merge origin/main` | **`fatal: refusing to merge unrelated histories`**（退出码 128） | **成功**（退出码 0） |
+
+而这两支**证明是相关的**——`a9db22f` 的第二个父提交就是 main 的 `ea97c50`。
+⚠️ `git fetch --unshallow` 实测 **50 秒**、`.git` 涨到约 40MB，**不是秒级**；
+提示词里已写明，免得下次有人当它卡住。（初稿我写的是「秒级」，是没量就写的数字，已更正。）
+
 ### 判断：fail fast 该放在哪一层
 
 原提议是「merge 失败即 fail fast」。**直接照做会用一个可恢复的问题换一个不可恢复的问题**：快照是当日 CBOE 期权链，跳过一天就永久没有了——而 09-05 缺的那一天正是本次故障的触发条件。且事后核实，那三天 merge 失败**实际零损失**（`cloud_snapshot_fetch.py` 与 main 逐字节相同）。所以 fail fast 放在 `--unshallow` 与两父兜底**都失败之后**：走到那一步说明仓库拓扑异常，此时停下才是对的。
