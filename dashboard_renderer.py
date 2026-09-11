@@ -8,7 +8,7 @@ Alpha Hive Dashboard Renderer
 import json
 import logging
 import math
-from typing import Dict, List
+from typing import Dict, List, Optional
 import html as _html
 import re as _re
 
@@ -16,6 +16,47 @@ _log = logging.getLogger("alpha_hive.dashboard_renderer")
 
 from pathlib import Path as _Path_mod
 from jinja2 import Environment
+
+
+# ── 报告文件名 → 日期：iCloud 重名副本闸（v0.45.192） ──
+def _report_stem_date(stem: str) -> Optional[str]:
+    """把 `alpha-hive-daily-<X>.json` 去前缀后的 `<X>` 当日期校验，不是日期返回 None。
+
+    **这道闸不是洁癖，是为 iCloud 重名副本加的。** `~/Desktop` 开着「桌面与文稿同步」
+    会产出 `alpha-hive-daily-2026-09-09 2.json`，于是
+    `Path(...).stem.replace("alpha-hive-daily-", "")` 得到 `"2026-09-09 2"` ——
+    一个**不是日期**的字符串，此前被当成一个独立日期一路用了下去。
+
+    ⚠️ **紧邻的 `filename_is_nontrading_day()` 拦不住它，别以为有它就够了。**
+    那个函数用 `re.search`（子串搜索）而非 fullmatch，会从 `"2026-09-09 2"` 里
+    **找到** `2026-09-09`，判定其为交易日，于是返回 False（「不是非交易日」）。
+    它连自己那条 `fail-safe：解析失败时不跳过` 的分支都没进 —— 幽灵直接通过。
+    它的 fail-safe 语义对它自己是对的（宁可漏滤也不误滤合法报告）且有 5 个调用者，
+    **不要去改它**；缺的是这一道独立的「这串到底是不是日期」判断。
+
+    2026-09-09 实测后果（gh-pages 上取证）：历史列表多出一张幽灵卡片且链接全死、
+    趋势序列多一个 `{"date": "2026-09-09 2"}` 数据点、
+    **「与 X 对比」的基准日变成了幽灵**（即分数变化卡片是拿副本当基准算的）。
+
+    ⚠️ 用 `date.fromisoformat` 而非只比正则：`"2026-13-45"` 形状合法但不是日期。
+    ⚠️ 拒绝时**必须留 warning**——这正是 CLAUDE.md「这个失败，下游怎么知道？」
+    要治的形状：静默 `continue` 会把「读到一个坏文件」重新渲染成「没发生过」。
+    """
+    from datetime import date as _date_chk
+    s = (stem or "").strip()
+    if _re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        try:
+            _date_chk.fromisoformat(s)
+            return s
+        except ValueError:
+            pass
+    _log.warning(
+        "报告文件名解析出的不是日期：%r —— 已跳过该文件。"
+        "最常见成因是 iCloud「桌面与文稿同步」产生的重名副本"
+        "（如 `alpha-hive-daily-2026-09-09 2.json`）。"
+        "处置是清掉那个副本，不要放宽本闸。", stem,
+    )
+    return None
 
 
 # ── 模板文件路径 ──
@@ -1207,7 +1248,10 @@ def _load_historical_data(report_dir, date_str: str,
             reverse=True  # 最新在前
         )
         for _hf in _hist_files:
-            _hdate = _Path_mod(_hf).stem.replace("alpha-hive-daily-", "")
+            _hdate = _report_stem_date(
+                _Path_mod(_hf).stem.replace("alpha-hive-daily-", ""))
+            if _hdate is None:
+                continue  # 不是日期（多半是 iCloud 重名副本），helper 已 warning
             if _hdate == date_str:
                 continue  # 今天已在主面板展示
             # 跳过非交易日（周末/假日）幽灵：时区漂移曾把周五/周六 scan 标到周末，
@@ -2391,7 +2435,10 @@ def render_dashboard_html(report: Dict, date_str: str,
         )
         _prev_scores = {}
         for _pjf in _prev_jsons:
-            _pdate = _Path(_pjf).stem.replace("alpha-hive-daily-", "")
+            _pdate = _report_stem_date(
+                _Path(_pjf).stem.replace("alpha-hive-daily-", ""))
+            if _pdate is None:
+                continue  # 同站点 A：幽灵不能当「对比基准日」
             if _pdate == date_str:
                 continue  # 跳过今天
             # 跳过非交易日幽灵，与历史/趋势序列基准日保持一致（fail-safe）
