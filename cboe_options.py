@@ -445,6 +445,94 @@ def _select_expiries(by_expiry: Dict[str, dict], today: datetime, max_expiries: 
     return chosen, list(near_set)
 
 
+# ── Dealer GEX 专用视图（v0.45.197）──────────────────────────────────────
+# 为什么不共用主链：那条链的过滤器是为 IV / skew / 期限结构设计的（近月 theta
+# 扭曲，剔掉是对的），而 GEX 的需求相反 —— gamma ∝ 1/(S·σ·√T)，峰值就在近月。
+#
+# ⚠️ **但「加上近月」并不够，这是 2026-09-11 实测推翻的一个前提。**
+# 净 GEX 是带符号求和，任何对到期日集合的截断都可能翻转符号，不只是丢近月那一种。
+# 26 只标的实测「取最近 K 个到期日捕获的 net GEX 占全链百分比」：
+#     K= 4 → 中位 63.9%、**最低 −73.3%**（22/26 只 <90%）
+#     K= 8 → 中位 73.6%、最低 −29.8%
+#     K=12 → 中位 96.3%、最低  20.6%
+#     K=16 → 中位 100.0%、最低 72.3%
+#     K=24 → 中位 100.0%、最低 99.4%（0 只 <90%）
+# 负百分比 = 部分和与全链**符号相反**。⇒ `total_gex` 只有在全链上才是良定义的量，
+# 「近月窗口」是另一个指标（pin gamma），不是这个。下游
+# `RegimeWeightAdjuster` 消费的语义也是「做市商整体净 gamma 多还是空」，本就是全书概念。
+#
+# 24 与 `fetch_cboe_full_chain_oi` 的 `max_expirations` 同值（实测当日全链到期日数
+# 中位 18 / 最大 25）；被上限砍掉的到期日数**记进计数**，别让上限的够不够变成假设。
+_GEX_MAX_EXPIRIES = 24
+
+# GEX 视图可得性计数（v0.45.197）。`unavailable` 是这次改动**唯一的代价**：
+# 旧实现在 CBOE 不可用时降级 yfinance，而那条 yfinance 路径有同样的截断
+# （`options_analyzer.py` 里 `datetime.now()` 的差一天）⇒ 拿到的是构造上就不对的数。
+# 照 v0.45.188 `_calc_max_pain` 的先例：**取不到就返回不可得，不回退旧口径** ——
+# 回退等于把「没数据」悄悄换成「错数据」。代价可见，才谈得上评估。
+_gex_view_stats = {"ok": 0, "unavailable": 0, "capped_expiries": 0}
+
+
+def gex_view_stats() -> dict:
+    with _cache_lock:
+        return dict(_gex_view_stats)
+
+
+def reset_gex_view_stats() -> None:
+    with _cache_lock:
+        for k in _gex_view_stats:
+            _gex_view_stats[k] = 0
+
+
+def _select_expiries_for_gex(by_expiry: Dict[str, dict], today: datetime,
+                             max_expiries: int = _GEX_MAX_EXPIRIES):
+    """GEX 视图的到期日选择：**日历口径**、未到期的全要、按日期升序、上限 max_expiries。
+
+    与 `_select_expiries` 的三处区别，每一处都有理由：
+      1. **日历 DTE**（`.date()` 差）—— 主链那套带时分秒的算法恒少一天（见
+         `_select_expiries` docstring 的实测）。这里不复制那个 bug。
+      2. **不设 DTE 下限** —— 只排除已到期的（DTE<0）。gamma 峰值在近月，
+         排除近月正是要修的事。⚠️ 扫描在收盘后跑（编排器时间闸 1330 PT），
+         当天到期（DTE=0）的合约已结算，CBOE 通常已从 feed 里撤下；若还在，
+         其 OI 会被算进去 —— 这是已知且有意的，因为「今天是否已结算」不该由
+         本函数猜（判据在 `_select_expiries` 那条差一天的教训里：别用时刻去推日期）。
+      3. **上限 24 而非 4** —— 见上方实测表。
+
+    返回 `(chosen, [])`：第二个值是 `near_expiry_set`，GEX 视图里没有「被排除的
+    近月」这个概念，故为空。下游 `_calc_total_oi` 见空集会退化为全量求和（正确）。
+    """
+    pairs = []
+    for e in sorted(by_expiry.keys()):
+        try:
+            dte = (datetime.strptime(e, "%Y-%m-%d").date() - today.date()).days
+        except ValueError:
+            continue
+        if dte >= 0:
+            pairs.append((e, dte))
+    chosen = [e for e, _ in pairs[:max_expiries]]
+    dropped = len(pairs) - len(chosen)
+    if dropped:
+        with _cache_lock:
+            _gex_view_stats["capped_expiries"] += dropped
+    return chosen, []
+
+
+def fetch_cboe_chain_for_gex(ticker: str, stock_price: float = 0.0,
+                             *, timeout: int = 15) -> Optional[Dict]:
+    """Dealer GEX 专用期权链：同一份 CBOE payload，全到期日视图。失败返回 None。
+
+    ⚠️ `stock_price` 默认 0 —— 与旧调用方一致，让 ATM 过滤用 CBOE 自己的现价
+    （与链同源）。**本次改动只动到期日选择这一件事**，ATM 区间 / 每边 40 strike /
+    gamma 取数（CBOE 优先、BS 兜底）全部沿用，免得口径变更掺进多个自变量。
+    """
+    chain = fetch_cboe_chain(ticker, stock_price, timeout=timeout,
+                             max_expiries=_GEX_MAX_EXPIRIES,
+                             expiry_selector=_select_expiries_for_gex)
+    with _cache_lock:
+        _gex_view_stats["ok" if chain else "unavailable"] += 1
+    return chain
+
+
 def _fetch_cboe_payload(ticker: str, timeout: int, *, retries: int = 3,
                         on_stale: str = "none") -> Optional[dict]:
     """拉取 CBOE 延迟报价 JSON，返回 data 段（含 options / current_price / close）；失败返回 None。
@@ -615,8 +703,23 @@ def fetch_cboe_chain(
     *,
     timeout: int = 15,
     max_expiries: int = 4,
+    expiry_selector=None,
 ) -> Optional[Dict]:
-    """拉取并解析 CBOE 期权链 → options_analyzer 兼容 result dict；任何失败返回 None。"""
+    """拉取并解析 CBOE 期权链 → options_analyzer 兼容 result dict；任何失败返回 None。
+
+    `expiry_selector`（v0.45.197）：到期日选择器，签名同 `_select_expiries`
+    （`(by_expiry, today, max_expiries) -> (chosen, near_set)`）。**默认 None ⇒
+    走 `_select_expiries`，行为逐字节不变。** 存在的理由是同一份 payload 要给
+    口径需求相反的两类消费者各出一个视图：
+
+      · IV rank / 25Δ skew / 期限结构 —— 近月 theta 扭曲，**该剔近月**（默认选择器）
+      · Dealer GEX —— gamma ∝ 1/√T 且净 GEX 只在全链上良定义，**该全要**
+        （`fetch_cboe_chain_for_gex`）
+
+    先例是 v0.45.188 的 `oracle_bee._calc_max_pain` 改走 `full_chain_oi`：
+    **同一份 payload 的第二个视图，零额外网络调用**（`_fetch_cboe_payload`
+    有 4h 进程缓存，Step 2 约 30–55 分钟 ⇒ 同标的第二次取链必然命中）。
+    """
     if _SNAPSHOT_PROVIDER is not None:
         return (_snapshot(ticker) or {}).get("chain")
 
@@ -663,7 +766,8 @@ def fetch_cboe_chain(
         return None
 
     today = _pdt_now()
-    expirations, near_expiry_set = _select_expiries(by_expiry, today, max_expiries)
+    _select = expiry_selector or _select_expiries
+    expirations, near_expiry_set = _select(by_expiry, today, max_expiries)
     if not expirations:
         return None
 

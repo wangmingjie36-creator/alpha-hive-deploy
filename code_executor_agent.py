@@ -184,18 +184,30 @@ class CodeExecutorAgent(BeeAgent):
                 except json.JSONDecodeError as _jde:
                     _log.warning("代码执行分析结果解析失败: %s", _jde)
 
-            # 6. 如果分析失败，返回原始数据结果
+            # 6. 技术分析不可用 → 只报「取到了什么数据」，**不报方向**
+            #
+            # ⚠️ v0.45.191：这条兜底原本是
+            #     if price and market_cap: score = 6.0; direction = "bullish"
+            # 「价格与市值都拿到了」⇒「看多」是**范畴错误** —— 数据可用性不含
+            # 任何方向信息。`agent_memory` 台账实测（2026-04-06~09-10）：
+            # `code_executor_data` 共 870 条，**870 条（100%）是 `6.0/bullish`**，
+            # 下面那条 else 五个月一次没走过 ⇒ 它是一张恒定的看多票，不是观测。
+            #
+            # v0.43.10（2026-08-12）修的是**上游**（技术分析脚本撞 yfinance
+            # MultiIndex 崩溃，使本兜底被 100% 走到），台账确认那次修复属实
+            # （恒定占比 100% → 3.1%）；**兜底本身的错原样留到了这里**。
+            #
+            # 现在：拿没拿到数据只决定**说辞**，方向一律 neutral、分数落量表中性点。
             price = data.get("current_price")
             market_cap = data.get("market_cap")
 
             if price and market_cap:
-                score = 6.0
-                direction = "bullish"
-                discovery = f"📊 价格数据可用: ${price:.2f}，市值: ${market_cap:,.0f}"
+                discovery = (f"📊 技术分析不可用，仅取到价格 ${price:.2f}"
+                             f"、市值 ${market_cap:,.0f}")
             else:
-                score = 5.0
-                direction = "neutral"
-                discovery = f"📊 获取到部分市场数据"
+                discovery = "📊 技术分析不可用，仅取到部分市场数据"
+            score = 5.0
+            direction = "neutral"
 
             self._publish(ticker, discovery, "code_executor_data", score, direction)
 
@@ -205,6 +217,11 @@ class CodeExecutorAgent(BeeAgent):
                 "discovery": discovery,
                 "source": "CodeExecutorAgent",
                 "dimension": _DIMENSION,   # BUG FIX
+                # 机读标记：没有它，「兜底的中性」与「真的中性」完全同形 ——
+                # 即 v0.45.151「缺失哨兵选中众数」的形状。
+                # 值必须落在 `QueenDistiller.PROXY_SOURCES`（"fallback" 在内），
+                # 否则 DQ 汇总按 0 质量计，等于把「降级」悄悄升格成「数据全废」。
+                "data_quality": {"technical": "fallback"},
                 "details": data
             }
 
@@ -222,131 +239,19 @@ class CodeExecutorAgent(BeeAgent):
                 "discovery": discovery,
             }
 
-    def generate_data_fetch_code(self, source: str, params: Dict) -> str:
-        """
-        生成数据爬取代码
-
-        Args:
-            source: 数据源
-            params: 参数
-
-        Returns:
-            Python 代码
-        """
-        return CodeGenerator.generate_data_fetch(source, params)
-
-    def generate_analysis_code(self, analysis_type: str, params: Dict) -> str:
-        """生成分析代码"""
-        return CodeGenerator.generate_analysis(analysis_type, params)
-
-    def generate_visualization_code(self, chart_type: str, params: Dict) -> str:
-        """生成可视化代码"""
-        return CodeGenerator.generate_visualization(chart_type, params)
-
-    def execute_and_analyze(self, code: str, ticker: str = "UNKNOWN") -> Dict[str, Any]:
-        """
-        执行代码并分析结果
-
-        Args:
-            code: Python 代码
-            ticker: 关联的股票代码
-
-        Returns:
-            {
-                "success": bool,
-                "result": Dict,
-                "analysis": str,
-                "discovery": str
-            }
-        """
-        # 代码验证
-        is_valid, warnings = self.debugger.validate_code(code)
-
-        if not is_valid:
-            return {
-                "success": False,
-                "error": warnings[0],
-                "discovery": f"❌ 代码验证失败: {warnings[0]}"
-            }
-
-        # 执行代码
-        result = self.executor.execute_python(code)
-
-        if result["success"]:
-            discovery = f"✅ 代码执行成功（{result['execution_time']:.2f}s）"
-            self._publish(ticker, discovery, "code_executor_success", 8.0, "bullish")
-
-            return {
-                "success": True,
-                "result": result,
-                "analysis": "代码执行成功",
-                "discovery": discovery
-            }
-        else:
-            # 自动修复
-            retry_result = self.debugger.auto_retry(code, self.executor, max_attempts=2)
-
-            if retry_result["success"]:
-                discovery = f"✅ 修复后执行成功（{retry_result['attempts']} 次尝试）"
-                self._publish(ticker, discovery, "code_executor_fixed", 7.0, "bullish")
-
-                return {
-                    "success": True,
-                    "result": retry_result["result"],
-                    "analysis": f"经过 {retry_result['attempts']} 次修复后成功",
-                    "discovery": discovery,
-                    "modifications": retry_result["modifications"]
-                }
-            else:
-                # 分析错误
-                error = self.debugger.parse_error(result["stderr"])
-                discovery = f"❌ 执行失败: {error['error_type']} - {error['suggestion']}"
-                self._publish(ticker, discovery, "code_executor_error", 2.0, "bearish")
-
-                return {
-                    "success": False,
-                    "error": error,
-                    "analysis": error["suggestion"],
-                    "discovery": discovery,
-                    "attempts": retry_result["attempts"]
-                }
-
-    def auto_debug(self, code: str) -> Dict[str, Any]:
-        """
-        自动调试代码
-
-        Args:
-            code: Python 代码
-
-        Returns:
-            调试结果
-        """
-        # 代码验证
-        is_valid, warnings = self.debugger.validate_code(code)
-
-        if warnings:
-            _log.warning("代码警告: %s", "; ".join(warnings))
-
-        # 执行代码
-        result = self.executor.execute_python(code)
-
-        if result["success"]:
-            return {
-                "success": True,
-                "message": "代码执行成功，无错误",
-                "result": result
-            }
-
-        # 解析错误
-        error = self.debugger.parse_error(result["stderr"])
-
-        # 生成修复建议
-        suggested_code = self.debugger.suggest_fix(error, code)
-
-        return {
-            "success": False,
-            "error": error,
-            "suggested_fix": suggested_code,
-            "warnings": warnings,
-            "original_result": result
-        }
+    # ── v0.45.191：此处删掉五个零调用点的方法 ───────────────────────────
+    # `generate_data_fetch_code` / `generate_analysis_code` /
+    # `generate_visualization_code` / `execute_and_analyze` / `auto_debug`。
+    #
+    # 判据两条独立、各带正对照：
+    # ① 静态：AST 全仓零调用点（同类 `analyze` 有 17 个生产调用点，证明扫描器
+    #    有效）；字符串引用 / 仓库外调用者 / 动态派发三个盲区均已查空。
+    # ② 运行时：`pheromone.db::agent_memory` 台账（2026-04-06~09-10，18,120 行）
+    #    里 `execute_and_analyze` 独有的三个 source —— `code_executor_success` /
+    #    `_fixed` / `_error` —— **各 0 行**；而同表同 agent 的 `analyze` 三个
+    #    source 共 3,884 行，证明台账记得住这只蜂。五个月零执行。
+    #
+    # 顺带记：它们内含 `成功→8.0/bullish`、`修好→7.0/bullish`、
+    # `报错→2.0/bearish` —— 与上面那条兜底是**同一个范畴错误**（「跑通了 ⇒ 看多」）。
+    # 先修兜底、后删它们，就是为了不把线索一起丢掉。
+    # 设计存档见 `PHASE3_P1_CODE_EXECUTION_PLAN.md`。
