@@ -5,7 +5,108 @@
 
 ---
 
-## [0.45.216] — 2026-09-13 — 占位（进行中：CHANGELOG 完整性测试挂成 git hook——pre-commit + pre-push，后者兜住不触发 pre-commit 的 rebase --continue）
+## [0.45.216] — 2026-09-13 — CHANGELOG 完整性测试挂成 git hook：pre-commit 管不到出事的那条路径，兜底的是 pre-push
+
+用户要求。起因是 v0.45.211 收尾：rebase 解 CHANGELOG 冲突，解冲突脚本的自检被散文误伤、
+正确地失败了，但后面的 `git add` / `rebase --continue` 接在 `;` 上照跑 ⇒ **带冲突标记的
+CHANGELOG 被提交了**，是推之前手动跑 `test_changelog_entry_integrity.py` 才抓到（`4b5e4d9`
+是同一形状、真被推上 main 的那次）。测试一直在全套里，但全套只在 CI 跑、CI 在推上 main
+**之后**才跑 ⇒ 「记得手动跑」不是护栏。
+
+### 先量：pre-commit 到底在哪些路径上触发（临时仓库，本机 git）
+
+| 操作 | pre-commit |
+|---|---|
+| `git commit` / `commit -a` / `commit -- <路径>` | 触发 |
+| merge 冲突解完后 `git commit` | 触发 |
+| `git cherry-pick --continue` | 触发 |
+| linked worktree 里提交 | 触发（钩子环境带 `GIT_DIR`） |
+| **`git rebase --continue`** | **不触发**（只有 post-rewrite） |
+
+v0.45.211 走的恰恰是最后一行 ⇒ **只装用户说的 pre-commit，接不住触发这次请求的那个事故。**
+所以同时装 pre-push：它与提交怎么造出来的无关（rebase、`--no-verify` 都绕不过）。
+
+### Added
+
+- **`changelog_guard.py`**（被跟踪，逻辑唯一真相）+ `--install-hook` 生成的两个薄调用
+  `.git/hooks/pre-commit`、`pre-push`（不被跟踪）。**已装进本机共享 hooks 目录**。
+  - **pre-commit**：本次提交**动了** CHANGELOG.md 才跑测试；不动（每日日报白名单提交）直接放行。
+  - **pre-push**：只看推往远端 `refs/heads/main`、且**被推区间动了** CHANGELOG.md 的更新。
+    推别的分支 / gh-pages / 日报都不跑。远端提交本地不认识时，区间起点退回上次 fetch 的
+    `<remote>/main`；连它也没有才按「动了」处理（为什么不直接按「动了」，见下一节）。
+  - **测试读工作区、要守的是提交 / 推送里的那份** ⇒ 暂存版本≠工作区、被推提交≠工作区时**直接拒**。
+    最危险的正是「那份坏、工作区好」——不拒就测好的、放坏的。
+  - 跑 pytest 前清掉 git 注入的定位变量（`GIT_INDEX_FILE` 每次 pre-commit 都有，worktree 里还有
+    `GIT_DIR`），否则测试对临时仓库的 git 命令会打到真仓库索引上。
+  - 薄调用找不到脚本（checkout 停在本版之前）**只提醒不拦**：本仓 `.git/hooks` 是主 / 生产
+    checkout 与所有 worktree **共用**的，拦了会误伤并发 session 与每日日报。会造出冲突标记的
+    merge / rebase 都发生在合入 main 之后，那时脚本已在工作区。与 memory 库那个钩子
+    「缺脚本就拦」刻意相反——那边不共用。解释器不可用则一律拦。
+  - 安装幂等；已存在且非本守卫生成的钩子**不覆盖**。
+- **`tests/test_changelog_guard_hook.py`**（14 条，真 git 仓库 + 真 `--install-hook` + 本地 bare 远端；
+  完整性测试换成会记录「跑没跑、看见哪些 git 变量」的桩）。每条拦截用例都断言**具体原因**并断言
+  桩跑没跑——「被拦」有内容坏 / 与工作区不一致 / 解释器不在 / 脚本不在几种成因，只断言「拦了」
+  等于把几件事说成一件（memory 库钩子那次夹具就这样三次归错因）。含 v0.45.211 的
+  rebase `--continue` 复刻：断言那一步**确实**带着标记提交成功（前提若变了会红着说明），推送被拦、远端不变。
+- `CLAUDE.md`「并发开工必须先占号」下加指针：pre-commit 管不到 rebase `--continue`；
+  `.git/hooks` 不被跟踪，重新 clone 要重装。
+
+### 与 v0.45.214 生产推送的配合（开工中途它落地，改的正是生产 checkout 怎么推）
+
+`production_sync.push_main`：fetch → 对象层合并（**不动工作区**，工作区停在扫描开始时）→
+推 `<合并提交>:refs/heads/main`；被拒且 origin/main 又动过才重试。本守卫第一版在「远端 sha
+本地不认识」时按「动了」处理——而 fetch 与 push 之间别的 session 抢推 main 正是这种情况：
+拿**旧工作区**比对合并提交里**较新**的 CHANGELOG ⇒ 报「与工作区不同」拒推，抢在远端之前
+报了一个误导性的原因。改为退回 tracking ref 当区间起点后，该区间不含 CHANGELOG ⇒ 放行 ⇒
+由远端按非快进拒绝。**用真 `push_main` + 真钩子 + 注入抢推实测**（改动前后两版脚本各跑一次）：
+
+| | 正常合并推送 | 抢推竞态第 1 次推送 | 重试 |
+|---|---|---|---|
+| 改动前 | 成功 | **钩子误报「与工作区不同」** | 成功（origin 又动过） |
+| 本版 | 成功，钩子静默 | 远端按非快进拒绝（真实原因） | 成功 |
+
+旧版因重试能恢复、没造成部署失败，但三轮用完时告警里会是错的原因。
+退路不许变成漏洞：远端 sha 不认识、区间确实动了 CHANGELOG 时照样检查（单独一条用例）。
+
+### 验证
+
+**变异 14 个，全部真跑**（独立克隆，先断言锚点唯一且落地、`git diff` 可见，`--maxfail=200`），
+每个都红在预期那条上：pre-commit 总跑测试 / 不查部分暂存 / 不清 git 变量 / pre-push 查所有分支 /
+不看区间 / 不比工作区 / 忽略测试结果；pre-commit 忽略测试结果；缺脚本就拦 / 缺脚本不出声 /
+覆盖别人的钩子 / 解释器缺失放行；去掉 tracking 回退 / 远端 sha 不认识就跳过。基线 14 passed。
+核对脚本自己作废过两条，没有静默算成通过：一条锚点被新插入的函数改了上下文（计数 0），
+一条是「在锚点后追加」型变异——落地判据写成「旧文本不再出现」，而新文本包含旧文本，
+把确实落地的变异判成没落地。改判「新文本恰好出现一次且文件变了」后两条均变红。
+
+**真仓库、真完整性测试端到端**（克隆 + 真 `--install-hook` + bare 远端）：
+
+| 场景 | 结果 | 耗时 |
+|---|---|---|
+| 带冲突标记的提交 | 拦（真测试报「未解决的合并冲突标记」），HEAD 不变 | 1.70s |
+| 干净的 CHANGELOG 提交 / 推送 | 放行（19 passed） | 1.57s / 1.89s |
+| 日报式提交 / 推送（不动 CHANGELOG） | 放行，不跑测试、无输出 | 0.11s / 0.15s |
+| 复刻 rebase `--continue` 留标记 | `--continue` 成功（pre-commit 未触发），**推送被拦、远端不变** | 1.76s |
+
+装进本机共享 hooks 后，在本 worktree 暂存一份带标记的 CHANGELOG 提交：被拦、HEAD 不变，已复原。
+本版自己的提交与推送就走了这两个钩子。
+
+**全套**（独立克隆、`env -i`、`--maxfail=200`，rebase 到 v0.45.215 之后重跑）：基线 `09f5974`
+`1 failed, 4239 passed`；本版 `1 failed, 4253 passed`（+14 = 新增 14 条），唯一的红两边都是按设计的
+`TestCoverageHorizon`。（基线克隆第一次签错了提交：克隆里的 `origin/main` 是源仓库的**本地** main，
+`checkout origin/main || checkout <sha>` 成功签到旧提交、`||` 从未触发；改签显式 SHA 并核对父子关系后重跑。）
+`ruff check .` 全绿。
+
+测试耗时的一个坑：每例新装钩子时单条 ~1.5s，而 Python 启动只要 0.02s。实测是 macOS
+**首次执行新写入的可执行文件**的开销（新文件 1.54s / 硬链接同一 inode 0.12s / 复制 0.59s）⇒
+改为模块级真装一次、各例硬链接，安装行为由单独一条在新文件上验。
+
+### 已知边界（写明，不假装没有）
+
+- `git commit --amend` 若这次没再动 CHANGELOG，pre-commit 不跑（被修改的那个提交里的 CHANGELOG
+  由 pre-push 兜）。
+- `--no-verify` 能绕过两者。
+- 重新 clone / 清过 `.git/hooks` 后钩子就没了且没人会知道——CI 与 worktree 里没有 `.git/hooks`
+  可查，写成测试就是「只在一台机器上存在的 X」，所以只写进 CLAUDE.md 与 memory，不写 skip 守卫。
 
 ---
 
