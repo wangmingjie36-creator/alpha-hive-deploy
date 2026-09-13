@@ -33,9 +33,19 @@ docstring 写着「没有这一组，本文件的全绿证明不了任何事」�
 ⚠️ 这条守卫自己也必须有牙 —— 见 `TestDetectorHasTeeth`：正反两个方向各喂一次
 （该抓的抓到、不该抓的不抓）。只验一个方向的检测器，证明不了它在工作
 （CLAUDE.md：探针/检测器两个方向都要自证）。
+
+第二物种：「只在一台机器上」来自**路径**而不是来自**文件**（v0.45.219）
+--------------------------------------------------------------------
+上面的名单按「文件被 git 忽略」定口径。它漏掉了另一条通往同一结局的路：
+`test_thesis_break_schema.py` 用 `"/Users/igg/Desktop/Alpha Hive/thesis_breaks_config.json"`
+读一个**被跟踪**的配置 —— 文件处处都在，这个**路径**只在一台机器上。
+名单补不上它（token 校验那条会正确地拒收被跟踪文件），理由也不含「生产库」。
+而且它比恒 skip 更糟：在 worktree 里它是**绿的**，校验的却是主 checkout 那份，
+改动中的文件从未被检查。所以第二个检测器按**路径形状**判，不管有没有 skip。
 """
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -152,6 +162,128 @@ def invisible_prod_skips(source: str, filename: str = "<test>") -> list[str]:
                     "干净检出与 CI 上它恒 skip，断言从未被求值"
                 )
     return hits
+
+
+# 家目录下的绝对路径 —— 只在一台机器、且只在那台机器的**一个检出**里成立。
+# 刻意不管 `expanduser("~/...")`：那是按用户定位**仓库外**的东西（编排器、plist），
+# 位置本来就随人走，要不要标 marker 是另一个问题，不是锚点错了。
+_HOME_ABS = re.compile(r"^/(?:Users|home)(?:/|$)")
+
+
+def home_absolute_paths(source: str, filename: str = "<test>") -> list[str]:
+    """返回「未标 integration 的作用域里出现家目录绝对路径字面量」的位置列表。
+
+    与 `invisible_prod_skips` 不同，**不看有没有 skip**：没有 skip 时它在别的机器上
+    红得很可见，但在 worktree 里绿得很安静 —— 读的是主 checkout，不是改动中的文件。
+    豁免只有一种：字面量位于标了 `integration` 的函数 / 类里，或模块级
+    `pytestmark` 含 integration（测的就是这台机器上的生产状态）。
+    模块级常量不豁免 —— 要用就挪进标了 marker 的类里。
+    """
+    tree = ast.parse(source, filename=filename)
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "pytestmark"
+                        for t in node.targets)
+                and "integration" in (ast.get_source_segment(source, node) or "")):
+            return []
+    hits: list[str] = []
+
+    def visit(node, where: str) -> None:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if _has_integration_mark(node.decorator_list):
+                return          # 条件性写在 marker 上 —— 正确形状
+            where = f"{where}{node.name}::"
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and _HOME_ABS.match(node.value)):
+            hits.append(
+                f"{filename}:{node.lineno} {where.rstrip(':') or '<module>'} "
+                f"写死了家目录绝对路径 {node.value!r} —— 换台机器恒缺、在 worktree 里"
+                "读的是主 checkout。随代码发布的文件锚 `Path(__file__)`；"
+                "真要测本机生产状态就标 @pytest.mark.integration；"
+                "合成路径改用 tmp_path 或 /nonexistent/ 前缀"
+            )
+        for child in ast.iter_child_nodes(node):
+            visit(child, where)
+
+    visit(tree, "")
+    return hits
+
+
+class TestNoHomeAbsolutePaths:
+    def test_no_test_module_hardcodes_a_home_directory_path(self):
+        offenders: list[str] = []
+        scanned = 0
+        # 含 conftest.py / _repo_files.py：写在那里的路径连坐全套
+        for f in sorted(TESTS_DIR.glob("*.py")):
+            if f.name == SELF:
+                continue
+            scanned += 1
+            offenders += home_absolute_paths(
+                f.read_text(encoding="utf-8"), f.name)
+        assert scanned > 50, f"只扫到 {scanned} 个模块 —— glob 可能写错了"
+        assert not offenders, "\n  ".join(["以下测试写死了家目录绝对路径："] + offenders)
+
+
+class TestHomePathDetectorHasTeeth:
+    """正反各喂一次。BAD_SKIP 就是 v0.45.219 修掉的那段原文的形状。"""
+
+    BAD_SKIP = (
+        "import os, pytest\n"
+        "def test_real_config():\n"
+        "    p = os.path.join('/Users/igg/Desktop/Alpha Hive', 'cfg.json')\n"
+        "    if not os.path.exists(p):\n"
+        "        pytest.skip('生产配置不可得')\n"
+        "    assert p\n"
+    )
+    BAD_NO_SKIP = (
+        "def test_reads_main_checkout():\n"
+        "    assert open('/Users/igg/Desktop/Alpha Hive/cfg.json').read()\n"
+    )
+    BAD_MODULE_CONST = (
+        "import pytest\n"
+        "ROOT = '/home/ci/alpha-hive'\n"
+        "@pytest.mark.integration\n"
+        "class TestX:\n"
+        "    def test_a(self):\n"
+        "        assert ROOT\n"
+    )
+    GOOD_INTEGRATION_CLASS = (
+        "import pytest\n"
+        "@pytest.mark.integration\n"
+        "class TestLive:\n"
+        "    def test_a(self):\n"
+        "        proj = '/Users/igg/Desktop/Alpha Hive'\n"
+        "        assert proj\n"
+    )
+    GOOD_INTEGRATION_MODULE = (
+        "import pytest\n"
+        "pytestmark = pytest.mark.integration\n"
+        "def test_a():\n"
+        "    assert '/Users/igg/Desktop/Alpha Hive'\n"
+    )
+    GOOD_NOT_HOME = (
+        "import os\n"
+        "from pathlib import Path\n"
+        "CFG = Path(__file__).resolve().parent.parent / 'cfg.json'\n"
+        "ORCH = os.path.expanduser('~/.claude/scripts/x.sh')\n"
+        "def test_a():\n"
+        "    '''docstring 里提到 /Users/igg/Desktop/Alpha Hive 不算。'''\n"
+        "    assert os.path.basename('/nonexistent/Users/x.json') == 'x.json'\n"
+    )
+
+    @pytest.mark.parametrize("src", ["BAD_SKIP", "BAD_NO_SKIP", "BAD_MODULE_CONST"])
+    def test_catches(self, src):
+        assert home_absolute_paths(getattr(self, src), "bad.py"), src
+
+    @pytest.mark.parametrize("src", ["GOOD_INTEGRATION_CLASS",
+                                     "GOOD_INTEGRATION_MODULE", "GOOD_NOT_HOME"])
+    def test_does_not_flag(self, src):
+        assert home_absolute_paths(getattr(self, src), "good.py") == [], src
+
+    def test_old_invisible_skip_detector_really_missed_it(self):
+        """钉住「为什么需要第二个检测器」：第一物种的检测器对这段原文确实不响。
+        哪天它响了，说明两个检测器口径重叠了，该回头看是否还需要两个。"""
+        assert invisible_prod_skips(self.BAD_SKIP, "bad.py") == []
 
 
 class TestNoInvisibleProdDataSkips:

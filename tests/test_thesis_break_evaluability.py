@@ -19,10 +19,15 @@
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
 import market_intelligence as mi
+
+# 随代码发布、git 跟踪 ⇒ 用 __file__。原先是 cwd 相对的 open("thesis_breaks_config.json")：
+# 从别处起 pytest 就校验别处那份（v0.45.219 实测：同一份坏配置，换个 cwd 就转绿）。
+CONFIG = Path(__file__).resolve().parent.parent / "thesis_breaks_config.json"
 
 
 def _call(ticker="NVDA", **over):
@@ -118,7 +123,7 @@ class TestMigratedConfigActuallyFires:
     def test_no_price_conditions_in_config(self):
         """价格止损刻意不写进配置：绝对价位会随股价漂移衰减，
         有意义的止损应锚定建仓价，而求值器拿不到 entry price。"""
-        cfg = json.load(open("thesis_breaks_config.json"))
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
         for tk, node in cfg.items():
             if tk.startswith("_") or not isinstance(node, dict):
                 continue

@@ -19,6 +19,18 @@ ORCH = os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh")
 PLIST = os.path.expanduser("~/Library/LaunchAgents/com.alpha.hive.daily.plist")
 
 
+def _orch_project_dir(orch_text):
+    """编排器 `PROJECT_DIR="..."` 的字面值；取不到或不止一处 ⇒ None。
+
+    幂等闸找 marker 的目录**归编排器说了算**，测试不另抄一份（v0.45.219）：
+    抄的那份在项目搬家后会继续指旧目录，marker 放错地方，闸拦不住 ⇒ 真跑全量扫描。
+    也**不能**锚到 `__file__`：worktree 里 marker 会落在编排器根本不看的地方。
+    只认纯字面值 —— 改成 `$HOME/...` 之类要展开的写法时返回 None 让守卫红，不去猜。
+    """
+    found = re.findall(r'^PROJECT_DIR="([^"$`]+)"', orch_text, flags=re.M)
+    return found[0] if len(found) == 1 else None
+
+
 @pytest.fixture(scope="module")
 def orch_text():
     if not os.path.isfile(ORCH):
@@ -52,6 +64,13 @@ class TestCatchupGate:
                         orch_text.index("STEP1_START")]
         assert "exit 0" in seg
         assert "exit 1" not in seg
+
+    def test_marker_dir_readable_from_orchestrator(self, orch_text):
+        """`TestGateBranchesLive` 靠这个值决定 marker 放哪 —— 读不出来要在默认套件里先红，
+        而不是等到有人 `-m integration` 时把 marker 放错、真跑一轮全量扫描。"""
+        proj = _orch_project_dir(orch_text)
+        assert proj and os.path.isabs(proj), (
+            "读不出编排器唯一的字面 PROJECT_DIR —— 写法变了，更新 _orch_project_dir")
 
     def test_syntax_valid(self, orch_text):
         # 取 orch_text 只为借它「不在本机就 skip」那一步：同 class 其他用例都有
@@ -109,9 +128,10 @@ class TestGateBranchesLive:
     def test_idempotent_when_today_already_scanned(self, tmp_path):
         """今日已有 .swarm_results → 必须跳过。
         否则 RunAtLoad 会让每次登录都重跑一次全量扫描。"""
-        proj = "/Users/igg/Desktop/Alpha Hive"
-        if not os.path.isdir(proj):
-            pytest.skip("项目目录不在本机")
+        with open(ORCH, encoding="utf-8") as f:
+            proj = _orch_project_dir(f.read())
+        # 编排器在（skipif 已过）却读不出 / 指向不存在的目录 ⇒ 真故障，不是「不在本机」
+        assert proj and os.path.isdir(proj), f"编排器 PROJECT_DIR 不可用：{proj!r}"
         import datetime
         today = datetime.date.today().isoformat()
         marker = os.path.join(proj, f".swarm_results_{today}.json")

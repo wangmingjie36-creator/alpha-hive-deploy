@@ -5,7 +5,59 @@
 
 ---
 
-## [0.45.219] — 2026-09-13 — 占位（进行中：test_real_config_fully_formattable 硬编码主 checkout 路径 + 恒 skip，改为代码锚定）
+## [0.45.219] — 2026-09-13 — 失效条件配置的两条测试校验的不是改动中的那份：一条写死主 checkout 绝对路径（外加恒 skip），一条跟着 cwd 走；元守卫补第二物种
+
+`tests/test_thesis_break_schema.py::test_real_config_fully_formattable` 读
+`"/Users/igg/Desktop/Alpha Hive/thesis_breaks_config.json"`，不存在就 skip。
+正是 CLAUDE.md「`skip` 守卫要问『X 在哪些环境里存在？』」要治的形状，而且**比恒 skip 更糟**：
+配置被 git 跟踪、处处都在，但这个**路径**只在一台机器的一个检出里 ——
+**在 worktree 里它是绿的，校验的却是主 checkout 那份**，改动中的文件从未被检查。
+
+### Fixed
+
+1. **`test_thesis_break_schema.py`**：锚点改 `Path(__file__).resolve().parent.parent`
+   （随代码发布 ⇒ 代码锚点，见 CLAUDE.md「指向代码还是数据」），skip 改为断言存在。
+   - 修前实测：往 **worktree** 配置的 NVDA/L1 注入一条第三种 schema 条件 ⇒ 旧测试 **1 passed**。
+   - 修后同一变异 ⇒ 红（`1 条无法识别 —— 配置里出现了第三种 schema`）；
+     把配置挪走 ⇒ 红（`随代码发布的配置不见了：<worktree 路径>`），不再 skip。
+2. **`test_thesis_break_evaluability.py::test_no_price_conditions_in_config`**（普查时顺带发现的同族轻症）：
+   `open("thesis_breaks_config.json")` 跟着 cwd 走。实测：worktree 配置注入一条 `_machine` 价格条件，
+   从仓库根跑 ⇒ 红；**从另一个放着干净副本的 cwd 跑 ⇒ 绿**。改同一代码锚点后两个 cwd 都红，还原后绿。
+   ⚠️ 只在一个 cwd 下验会把这个 bug 验成「没问题」—— 旧写法从仓库根跑本来就是红的。
+
+### Changed
+
+3. **`test_scan_catchup.py:112`（唯一另一处 `"/Users/igg/Desktop/Alpha Hive"` 字面量）——判定：指向正当，写法不当。**
+   - **正当**：它是 `alpha-hive-orchestrator.sh:43` 的 `PROJECT_DIR`，即编排器幂等闸找 marker 的目录，
+     是被测系统读的**数据位置**，不是改动中的文件；所在类标了 `integration`，条件性写在 marker 上。
+     **绝不能锚 `__file__`**：worktree 里 marker 会落在编排器不看的地方 ⇒ 闸不拦 ⇒ 13:30 后真跑全量扫描。
+   - **不当**：值是**抄**来的。项目搬出 iCloud 桌面（CLAUDE.md 给的根治方案）后它会继续指旧目录。
+     改为 `_orch_project_dir()` 从编排器文本读唯一的纯字面 `PROJECT_DIR`；`$HOME/...` 等需展开的写法或多处赋值 ⇒ None。
+   - 新增默认套件观测点 `TestCatchupGate::test_marker_dir_readable_from_orchestrator`：
+     把 `ORCH` 指向改成 `$HOME/...` 形式的副本 ⇒ 红；指向 `PROJECT_DIR` 重复两行的副本 ⇒ 红。
+   - integration 测试本身**未执行**（会真跑编排器、往生产目录写 marker、覆盖 `~/.claude/reports/status.json`），只核对了可收集。
+
+### Added
+
+4. **元守卫 `test_no_invisible_prod_data_skips.py` 第二检测器 `home_absolute_paths()`**。
+   **旧检测器为什么没抓到**：它的物种按**文件**定口径 —— token 名单须经 `git check-ignore` 校验为被忽略，
+   `thesis_breaks_config.json` 被跟踪、名单会正确拒收；理由文本「生产配置不可得」也不含「生产库」/「生产 pheromone」。
+   这是口径盲区不是漏一条名单：**「只在一台机器上」也可以来自路径**。
+   - 按**路径形状**判：`tests/*.py`（含 conftest）里以 `/Users` 或 `/home` 开头的字符串字面量，
+     **不看有无 skip**（没 skip 时在 worktree 里同样安静地读错文件）；豁免只有 integration 作用域
+     （函数 / 类装饰器或模块级 `pytestmark`）；模块级常量不豁免。刻意不管 `expanduser("~/...")`（仓库外文件，位置本就随人）。
+   - 把修前的两个文件放回 `tests/` 跑新守卫 ⇒ 恰好 1 个 offender（thesis :85），scan_catchup :112 因 integration 豁免不报；旧检测器对同一文件仍绿。
+   - 检测器 4 种变异各被对应自证抓到：去 integration 作用域豁免 / 正则漏 `/home` / 去模块级 pytestmark 豁免 / 退化成「有 skip 才报」。
+   - 未覆盖：cwd 相对的 `open("x.json")`（第 2 条那种）—— 裸相对文件名的合法用法（`tmp_path / "..."`）太多，不做检测器。
+
+### 验证
+
+- 全套（`--maxfail=1000`）：**4264 passed / 1 failed / 1 skipped / 80 deselected / 2 xfailed**（290s）。
+  唯一的红是 `test_economic_calendar.py::TestCoverageHorizon`（CPI 剩 88 天、NFP 剩 82 天 < 90 天阈值，
+  设计内定期变红，开工前已红，与本次无关）；唯一 skip 为 `test_scheduler.py`（`schedule` 库不可用，既有）。
+- 改动的 4 个文件单跑全绿、`ruff check` 全绿；元守卫文件 11 → 19 条。所有变异事后已还原（配置 `git diff` 为空、主 checkout 配置未被触碰）。
+
+---
 
 ## [0.45.218] — 2026-09-13 — 二次检查 v0.45.208 索引行守卫：三处「失败被渲染成成功」，外加 CLAUDE.md 那条命令根本跑不起来
 

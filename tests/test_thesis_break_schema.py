@@ -22,12 +22,15 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from alpha_hive_daily_report import _format_break_condition as fmt  # noqa: E402
+
+CONFIG = Path(__file__).resolve().parent.parent / "thesis_breaks_config.json"   # 随代码发布、git 跟踪 ⇒ 用 __file__
 
 HUMAN = {"id": "eps_miss", "metric": "EPS 大幅低于预期", "trigger": "实际 < 预期 20%+"}
 MACHINE = {"field": "score", "op": "<", "value": 4.0, "_machine": True,
@@ -81,11 +84,16 @@ def test_one_bad_condition_does_not_kill_the_rest():
 
 
 def test_real_config_fully_formattable():
-    """真配置 330 条必须 0 条无法识别 —— 有新 schema 混进来时这条会先红。"""
-    p = os.path.join("/Users/igg/Desktop/Alpha Hive", "thesis_breaks_config.json")
-    if not os.path.exists(p):
-        pytest.skip("生产配置不可得")
-    cfg = json.load(open(p))
+    """真配置 330 条必须 0 条无法识别 —— 有新 schema 混进来时这条会先红。
+
+    v0.45.219：原先读 `/Users/igg/Desktop/Alpha Hive/thesis_breaks_config.json`
+    并在不存在时 skip。两处都错：① 在 worktree 里校验的是**主 checkout** 的配置，
+    改动中的那份从未被检查（实测：往 worktree 配置注入第三种 schema，旧写法照绿）；
+    ② 换一台机器恒 skip。配置被 git 跟踪、随代码发布，任何检出里都在 ⇒
+    缺失是真故障，断言而不是 skip。
+    """
+    assert CONFIG.is_file(), f"随代码发布的配置不见了：{CONFIG}"
+    cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     ok = bad = 0
     for v in cfg.values():
         if not isinstance(v, dict):
