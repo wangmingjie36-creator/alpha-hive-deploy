@@ -5,7 +5,96 @@
 
 ---
 
-## [0.45.212] — 2026-09-13 — 占位（进行中：BearBee/GuardBee 退出方向投票 —— 实测无技能的常数看空票 + 复述票；代码在分支上，待用户拍板再合并）
+## [0.45.212] — 2026-09-13 — BearBee 与 GuardBee 退出方向计票：一张无技能的常数看空票，和一张抵消它的复述票
+
+v0.45.209 发现 Guard 的方向票 100% 复述同伴。用户问要不要摘，用真实代码逐位重放后发现：
+它**起决定作用**的历史行里，带着它判出的看多扣 SPY 仍命中 64.1%（13 周 p≈0.01），
+摘掉会翻成命中 28.6% 的看空 —— 而这些行里 **96% 是 BearBee 以置信度 0.97 投看空**。
+Guard 的复述票在意外地抵消 BearBee。用户决定：**先修它在补的那个洞，再考虑摘它。**
+
+### 洞：BearBeeContrarian 在计票里是什么
+
+| | 实测 |
+|---|---|
+| 方向 | 623 条有 T+7 超额收益的记录里 **90.5% 看空** |
+| 技能 | 看空单扣 SPY 命中 **50.5%**（19 个不重叠周，p=0.63）；2026-08-12 起 40.0%（仅 3 周） |
+| 置信度 | `0.3 + 0.1×看空信号数 + 0.1×读到的 real 源数` —— 后一项是**数据可得性**（同 v0.45.191）；451 条 conf≥0.95 的看空命中 49.9%，这些股票平均反而跑赢 SPY +1.41% |
+| 票重缩放 | `_effective_conf` 乘 `ml_adjustments.get(维度, 1.0)`，核心五维均值 0.50–0.60；`contrarian` 不在表里 ⇒ 默认 **1.0**，相对放大约一倍 |
+
+它的本职是反方陈述（bear_cap、contrarian 视角、简报里的反对观点），不是陪审员。
+
+### 预注册比较（看结果前写死变体、语料、指标）
+
+用 origin/main 快照的真实 `_compute_direction_vote` 重放，逐行方向超额收益（看多 +xs、看空 −xs、中性 0），
+两个语料：**历史原样**（548 行，代码逐位复现记录方向+票重）与**现行规则重演**
+（同一批行，Oracle 走 v0.45.201 判据、CodeExec 兜底改中性、Guard 取六只多数）。
+
+| 比较 | 历史原样 | 现行规则重演 |
+|---|---|---|
+| 只摘 Guard | **有害**（方向对错指标 p=0.003） | 零效应（p 0.36–0.94） |
+| **摘 BearBee**（修洞） | 零效应（p 0.39–0.59） | 略正、不显著（p 0.12–0.42） |
+| **修洞后再摘 Guard** | 零效应（p 0.47–0.99） | 零效应（p 0.38–0.99） |
+
+⚠️ **结果证据是零效应，不是改善。** 本版的理由是结构性的：一张无技能、近乎常数、票重被可得性抬满
+的票，和一张复述票，都不该进计票。另外两点：
+- 预注册的「按周聚类」指标在历史语料里被**只有 1–11 行的稀疏周**主导（W28 一行 −19% 与 115 行的
+  W35 同权），池化均值与周聚类均值符号相反；截尾 ±10% 与方向对错两个敏感性指标（事后加的）结论一致。
+- 「只摘 Guard 有害」只在历史原样里成立，现行规则下消失 —— 当年 Oracle 的关键词票近乎恒看多，
+  抬高了「计数多数看多、票重多数看空」这类行的比例。
+
+### Changed — `swarm_agents/queen_distiller.py`
+
+- 新增 `QueenDistiller.NON_VOTING_AGENTS = {BearBeeContrarian, GuardBeeSentinel}`，
+  门槛、票重、单票上限、S4.5 仲裁、S5 冲突再投票与折扣一律只看投票蜂。
+- **不动**：`agent_breakdown`（报告里渲染成「Agent 投票：看多N vs 看空M」，改口径会让历史对比失真）、
+  逐蜂方向、data_quality 汇总、BullVeto 读 BearBee 分数、bear_cap、Guard 的风险关门与宏观政体。
+- 新增 `voting_counts` / `vote_excluded_agents`（后者进 distill 输出落盘），让「这个方向是哪种计票规则
+  产出的」可机读。
+- `config.CONFLICT_ARBITRATION_CONFIG.dissent_agents` 置空（两名原成员都不再投票，列着是死配置），
+  代码兜底默认值同步；票差仲裁本身照旧。
+
+### 影响面（逐位重放 793 份 JSON）
+
+新代码 ≡ 旧代码摘掉两者（方向/票重/冲突级别/分数/仲裁**五项全等 793/793**）。
+方向改变 **30.3%**（摘 BearBee 32.8%，再摘 Guard 相对前者又改 9.3%）。
+方向分布 看多 383→**507**、看空 236→**134**、中性 174→152 —— **整体明显偏多**。
+
+### Added — `tests/test_non_voting_agents.py`（19 条，含参数化展开）
+
+判据本体是不变式：固定观测蜂，BearBee / Guard 投什么、多高置信，**方向与 rule_score 都不变**。
+正对照：观测蜂单票仍能过看空门槛；BullVeto 仍读得到 BearBee；Guard 分数仍触发风险关门。
+`TestDissentAgentsMustVote`：异议蜂必须是投票蜂，且兜底默认值与 config 一致。
+变异：BearBee 部分 **9/9**（含 5 个半截修复：只改计数、仲裁/冲突再投票/冲突折扣分母/单票上限仍含它），
+Guard 部分 **5/5**。
+
+初稿里的两个假绿，都是「先看它红不红」揪出来的：
+- 全中性那一格用 conf=0.6 时 BearBee 只占 24.4% 票重，恰在 25% 看空门槛下，**旧代码也不翻** —— 改成 0.5。
+- 「冲突折扣分母」与「单票上限」两个半截修复起初漏网：不变式只比方向不比分数、没有让上限咬住的用例。
+
+### Changed — 约定副本（先 grep 再改）
+
+- `test_single_bearish_agent_can_push_direction`：那一只从 BearBee 换成观测蜂（被测的是看空门槛）。
+- `test_direction_vote_conflict`：冲突计数只数投票蜂，第二张看空票改由 RivalBee 投。
+- `test_arbitration_flip_direction`：异议蜂改用 monkeypatch 指定。⚠️ **必须先实例化 QueenDistiller 再 patch**
+  —— `__init__` 会 `importlib.reload(config)`，反过来 patch 打在旧 dict 上、静默失效（本版实测踩中）。
+- `test_guard_is_registered_as_dissent_agent` → `test_guard_is_no_longer_a_voter_or_dissent_agent`。
+
+### Fixed — v0.45.209 的两处错
+
+`tests/test_guard_derived_and_crowding_dq.py` 模块 docstring 与 v0.45.209 条目写着「方向票是 Guard 对
+`final_score` 唯一活着的通道」「它不是看多偏斜」—— 都错：还有风险关门、宏观政体、共振维度三条通道；
+且因门槛不对称，它起决定作用时 126/126 都在保住看多。docstring 已更正（历史条目不改写，以本条为准）。
+
+### 未动、但要知道
+
+Queen 共振检测里 Guard 复述多数时仍给同向方**多算一个维度**（另一条复述通道：近期 48 份里改分数 32 份、
+改决策档位 6 份），对收益的影响没测，本版不动，以 `test_resonance_still_counts_guard_dimension` 登记现状。
+
+### Added — 世代边界第 14 条（2026-09-13，新开分区）
+
+09-11 那 30 条预测是旧计票产出的 ⇒ **作废 30 条**（其中已到期 0 条）。
+
+全套 **4162 passed**，唯一的红是既有设计意图的 BLS `TestCoverageHorizon`。
 
 ---
 
