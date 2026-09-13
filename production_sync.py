@@ -100,7 +100,8 @@ def push_main(git, merge_label: str, max_attempts: int = 3) -> Dict:
     """把本地 main 推上 origin/main；本地落后时先在对象层合并再推。
 
     返回 `results["git_push"]` 的形状——v0.45.210 的四个键不变，另加：
-      integration   "fast_forward" | "merged" | "conflict" | "error" | "unchecked"
+      integration   "fast_forward" | "merged" | "nothing_to_push" | "conflict" | "error" | "unchecked"
+                    （nothing_to_push = 本地 main 已被 origin/main 包含，不推送，算成功）
       behind        本地 main 落后 origin/main 的提交数（取不到为 None）
       merge_commit  造出来的合并提交（仅 merged，推送失败也保留，便于排查）
       conflicts     冲突路径（仅 conflict；此时**不推送**）
@@ -139,6 +140,15 @@ def push_main(git, merge_label: str, max_attempts: int = 3) -> Dict:
             target, res["integration"], res["behind"] = head, "fast_forward", 0
         else:
             res["behind"] = _count(git, f"{head}..{origin}")
+            # 本地没有 origin 缺的提交（这轮没造出日报提交、别人又推过）⇒ 无可推。
+            # 只判上面那一个方向时，这里会造一个树与 origin/main 完全相同的空合并推上去（复核实测）。
+            inside = _is_ancestor(git, head, origin)
+            if inside is None:
+                return _push_fail(res, "error",
+                                  f"merge-base --is-ancestor 出错（{head[:7]} → {origin[:7]}）")
+            if inside:
+                res.update(success=True, integration="nothing_to_push")
+                return res
             mt = git.run_git_cmd(f"git merge-tree --write-tree --name-only {origin} {head}")
             rc, lines = mt.get("returncode"), (mt.get("stdout") or "").splitlines()
             if rc == 1:

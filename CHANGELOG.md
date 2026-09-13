@@ -305,10 +305,33 @@ gap=21 结论不变。测 +10pp 真实差异约需 161 个 ISO 周（≈3 年，
   每次部署都会进「跳过 N 个非日报文件」的噪音 ⇒ 补 `.gitignore` 一行 + 守卫
   `test_result_file_is_gitignored_in_the_checkout`（0/1/128 三态分开）。测试共 23 条。
 
+### 跨 session 复核后的修正（用户逐项批准）
+
+另一 session 在 origin/main 隔离副本上复核：点名的两处（重试条件、告警写入者与读者形状）通过，
+另加 9 条变异 8 条变红；报出 4 条发现，本 session 逐条复现后处置：
+
+1. **空合并提交（已修）**：本地 main 已被 origin/main 包含（这轮没造出日报提交、别人又推过）时，
+   `push_main` 只判了「origin 是否为本地祖先」一个方向，于是推上去一个树与 origin/main 完全相同的
+   双父合并并报成功（沙箱复现）。现在另判反方向，三态：`nothing_to_push`（不推，算成功）/ 出错。
+   新增 `test_nothing_to_push_makes_no_empty_merge`（对已落地版本实测红）。
+   ⚠️ **我自己的闭环测试 `test_next_scan_fast_forwards_after_a_merged_deploy` 当时正是靠这个 bug 才绿**：
+   它写的日报内容恰好等于夹具初值 ⇒ 根本没有日报提交 ⇒ 「merged」来自空合并。修 bug 后它变红才暴露，已改。
+   另补 `test_fetch_failing_after_a_rejection_reports_that_rejection`：复核里唯一 0 红的变异
+   （删掉「被拒后 fetch 又失败就 break」）所在分支此前没有测试，现在该变异会被抓到。
+2. **「同一轮只跑一个代码版本」不严格成立（已修一半）**：编排器第 80 行在同步**之前**已用旧代码读
+   `config.WATCHLIST`，交易日判断也在同步之前。现在同步后按新代码重读名单（同一合法性校验，
+   读不出来保留原值并 WARN；抽出编排器原文在 bash 夹具里跑过「新名单 / import 失败 / 非法形状」三种）；
+   交易日/补跑闸**不重跑**（只在当天日历改动恰好翻转「今天跑不跑」时有差别），注释改为如实说明。
+3. **编排器改动没有持久备份（已补）**：原版此前只在 session scratchpad；现存
+   `~/.claude/scripts/alpha-hive-orchestrator.sh.bak-20260913_pre-v0.45.214`（与改动前逐字节相同）。
+4. 措辞：「refspec 一律 `{sha}:refs/heads/main`」不成立——fetch 失败兜底推的是 `main`（不带 force，功能无碍）。
+
+修正后全套：**4256 passed / 1 failed（仅 `TestCoverageHorizon`）/ 2 xfailed**；`ruff check .` 通过。
+
 ### 待办 / 未做
 
-- v0.45.209 世代边界的 30 条样本是否要移到首个真跑 209 的扫描日——用户决定（分数是否受影响待验证）。
-  v0.45.212 的边界日期 2026-09-13：生产已在周一扫描前同步，不会重演。
+- v0.45.209 世代边界的 30 条样本：另一 session 已核 09-11 crowding 降级 0 次 ⇒ 零受影响（见 auto-memory
+  `alpha-hive-ic-rerun-gate`），边界无需挪。v0.45.212 的边界日期 2026-09-13：生产已在周一扫描前同步，不会重演。
 - 跨 session 实测（本版吸收）：`merge --ff-only` 对「相对 HEAD 脏、内容却与 origin 一致」的文件照样拒绝
   ⇒ 报告提交必须留在本地；main 上 CI 近 30 次 15 失败 + 15 取消（`TestCoverageHorizon` 按设计红）⇒ 当不了晋升闸门。
 

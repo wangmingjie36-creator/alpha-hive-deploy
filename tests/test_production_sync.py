@@ -134,6 +134,42 @@ class TestPushLandsWhenBehind:
         assert push["merge_commit"] is None and push["behind"] == 0
         assert world.origin_rev() == world.head()
 
+    def test_nothing_to_push_makes_no_empty_merge(self, world):
+        """这轮没造出日报提交、别人又推过：本地 main 已被 origin/main 包含 ⇒ 什么都不推。
+
+        v0.45.214 初版只判了「origin 是不是本地的祖先」，这里会推上去一个树与 origin/main
+        完全相同的双父空合并（跨 session 复核在真沙箱里实测）。"""
+        w = world
+        session = w.session_push("code.py", "v2", "session: 改代码")
+        push = rd.auto_commit_and_notify(w.reporter, PRODUCTION)["git_push"]   # 工作区干净，无日报提交
+        assert push["success"] is True, push
+        assert push["integration"] == "nothing_to_push" and push["merge_commit"] is None
+        assert w.origin_rev() == session, "造了空合并推上去"
+
+    def test_fetch_failing_after_a_rejection_reports_that_rejection(self, world):
+        """被拒一轮后 fetch 又失败：报上一轮的拒绝原因，不再退回直推（初版这条分支没有测试）。"""
+        w = world
+        hook = w.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho '本仓库冻结中' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        real = w.tool.run_git_cmd
+        calls = {"fetch": 0, "push": 0}
+
+        def flaky(cmd):
+            if cmd.startswith("git fetch"):
+                calls["fetch"] += 1
+                if calls["fetch"] > 1:
+                    return {"success": False, "stdout": "", "stderr": "ssh: timeout", "returncode": 128}
+            if cmd.startswith("git push"):
+                calls["push"] += 1
+            return real(cmd)
+
+        w.tool.run_git_cmd = flaky
+        push = _deploy(w)
+        assert push["success"] is False and "本仓库冻结中" in push["output"]
+        assert push["integration"] == "fast_forward" and push["attempts"] == 1
+        assert calls["push"] == 1, "fetch 失败后又退回直推了一次"
+
     def test_conflict_is_not_pushed_and_names_the_paths(self, world, caplog):
         """别的 session 重渲染了同一份已发布产物（09-11 真发生过）⇒ 冲突：不推，列出路径。"""
         w = world
@@ -274,14 +310,16 @@ class TestDeployThenNextScanLoop:
         """09-11 → 09-14：落后时部署（合并推送）→ 周末 session 又推 → 周一扫描前快进。"""
         w = world
         w.session_push("code.py", "v2", "session: 09-11 13:37 的修复")
-        assert _deploy(w, "report-0911")["integration"] == "merged"
+        # ⚠️ 内容必须与夹具初值不同：v0.45.214 初版这里写的正是初值 ⇒ 没有日报提交 ⇒
+        # 本条靠「空合并」bug 才绿（复核发现该 bug 后修复，本条随之变红才暴露出来）
+        assert _deploy(w, "report-0911 14:47")["integration"] == "merged"
         w.session_push("code.py", "v3", "session: 周末的修复")
 
         res = ps.sync_before_scan(w.tool, today="2026-09-14")
         assert res["outcome"] == "fast_forwarded", res
         assert w.head() == w.origin_rev()
         assert (w.prod / "code.py").read_text() == "v3"
-        assert (w.prod / "index.html").read_text() == "report-0911"
+        assert (w.prod / "index.html").read_text() == "report-0911 14:47"
 
     def test_without_the_object_merge_the_next_sync_is_stuck(self, world):
         """反例（为什么 B 离不开 A）：沿用 v0.45.210 的直推，被拒后报告提交滞留本地 ⇒
