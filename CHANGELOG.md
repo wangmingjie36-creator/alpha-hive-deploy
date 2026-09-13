@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.219] — 2026-09-13 — 占位（进行中：test_real_config_fully_formattable 硬编码主 checkout 路径 + 恒 skip，改为代码锚定）
+
 ## [0.45.218] — 2026-09-13 — 二次检查 v0.45.208 索引行守卫：三处「失败被渲染成成功」，外加 CLAUDE.md 那条命令根本跑不起来
 
 对 v0.45.208 的守卫做二次检查。守卫本体（memory 仓 `check_index_line_length.py`）
