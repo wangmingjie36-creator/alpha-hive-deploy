@@ -14,6 +14,7 @@
     "CodeExecutorAgent": 6.5,
     "ChronosBeeHorizon": 6.0200000000000005
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -23,18 +24,11 @@
   },
   "low_conviction": false,
   "low_conviction_reason": "",
-  "cs_rank": {
-    "final": 0.966,
-    "signal": 0.069,
-    "catalyst": 1.0,
-    "sentiment": 1.0,
-    "odds": 0.621,
-    "risk_adj": 0.862
-  },
+  "cs_rank": null,
   "actual_prices": {
-    "t1": null,
+    "t1": 230.36,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-09-03T14:53:22.247697"
+  "created_at": "2026-09-11T14:46:52.223970"
 }
