@@ -56,6 +56,14 @@
 **撞上了怎么办**：沿用既定原则 —— **先提交（进 git 历史）的占号**，
 后者改号。若双方都只在工作区，则**批次大的保留、单条的让**（改号成本低者先动）。
 
+### CHANGELOG 完整性 hook（2026-09-13 起）
+
+`changelog_guard.py` 挂在 pre-commit + pre-push 上跑 `tests/test_changelog_entry_integrity.py`
+（冲突标记 / 重号 / 空标题），只挡**动了 CHANGELOG** 的提交与推往 main 的推送。设计与实测全在该文件 docstring。
+
+- ⚠️ **pre-commit 管不到 `git rebase --continue`**（实测只触发 post-rewrite）——解 CHANGELOG 冲突后兜底的是 pre-push，别以为提交成功就代表检查过。
+- `.git/hooks` 不被跟踪：重新 clone 或清过之后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。
+
 ## 历史改动查询指针
 
 历史改动**不在本文件维护**（v0.40.3 清理了此前 ~75 行 v0.10-0.19 时代的实现细节清单）：

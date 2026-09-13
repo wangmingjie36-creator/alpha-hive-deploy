@@ -5,11 +5,199 @@
 
 ---
 
-## [0.45.216] — 2026-09-13 — 占位（进行中：CHANGELOG 完整性测试挂成 git hook——pre-commit + pre-push，后者兜住不触发 pre-commit 的 rebase --continue）
+## [0.45.217] — 2026-09-13 — 占位（进行中：thesis_breaks_config 的 _all_tickers 漏 17 个标的块，覆盖率统计静默少算）
+
+## [0.45.216] — 2026-09-13 — CHANGELOG 完整性测试挂成 git hook：pre-commit 管不到出事的那条路径，兜底的是 pre-push
+
+用户要求。起因是 v0.45.211 收尾：rebase 解 CHANGELOG 冲突，解冲突脚本的自检被散文误伤、
+正确地失败了，但后面的 `git add` / `rebase --continue` 接在 `;` 上照跑 ⇒ **带冲突标记的
+CHANGELOG 被提交了**，是推之前手动跑 `test_changelog_entry_integrity.py` 才抓到（`4b5e4d9`
+是同一形状、真被推上 main 的那次）。测试一直在全套里，但全套只在 CI 跑、CI 在推上 main
+**之后**才跑 ⇒ 「记得手动跑」不是护栏。
+
+### 先量：pre-commit 到底在哪些路径上触发（临时仓库，本机 git）
+
+| 操作 | pre-commit |
+|---|---|
+| `git commit` / `commit -a` / `commit -- <路径>` | 触发 |
+| merge 冲突解完后 `git commit` | 触发 |
+| `git cherry-pick --continue` | 触发 |
+| linked worktree 里提交 | 触发（钩子环境带 `GIT_DIR`） |
+| **`git rebase --continue`** | **不触发**（只有 post-rewrite） |
+
+v0.45.211 走的恰恰是最后一行 ⇒ **只装用户说的 pre-commit，接不住触发这次请求的那个事故。**
+所以同时装 pre-push：它与提交怎么造出来的无关（rebase、`--no-verify` 都绕不过）。
+
+### Added
+
+- **`changelog_guard.py`**（被跟踪，逻辑唯一真相）+ `--install-hook` 生成的两个薄调用
+  `.git/hooks/pre-commit`、`pre-push`（不被跟踪）。**已装进本机共享 hooks 目录**。
+  - **pre-commit**：本次提交**动了** CHANGELOG.md 才跑测试；不动（每日日报白名单提交）直接放行。
+  - **pre-push**：只看推往远端 `refs/heads/main`、且**被推区间动了** CHANGELOG.md 的更新。
+    推别的分支 / gh-pages / 日报都不跑。远端提交本地不认识时，区间起点退回上次 fetch 的
+    `<remote>/main`；连它也没有才按「动了」处理（为什么不直接按「动了」，见下一节）。
+  - **测试读工作区、要守的是提交 / 推送里的那份** ⇒ 暂存版本≠工作区、被推提交≠工作区时**直接拒**。
+    最危险的正是「那份坏、工作区好」——不拒就测好的、放坏的。
+  - 跑 pytest 前清掉 git 注入的定位变量（`GIT_INDEX_FILE` 每次 pre-commit 都有，worktree 里还有
+    `GIT_DIR`），否则测试对临时仓库的 git 命令会打到真仓库索引上。
+  - 薄调用找不到脚本（checkout 停在本版之前）**只提醒不拦**：本仓 `.git/hooks` 是主 / 生产
+    checkout 与所有 worktree **共用**的，拦了会误伤并发 session 与每日日报。会造出冲突标记的
+    merge / rebase 都发生在合入 main 之后，那时脚本已在工作区。与 memory 库那个钩子
+    「缺脚本就拦」刻意相反——那边不共用。解释器不可用则一律拦。
+  - 安装幂等；已存在且非本守卫生成的钩子**不覆盖**。
+- **`tests/test_changelog_guard_hook.py`**（14 条，真 git 仓库 + 真 `--install-hook` + 本地 bare 远端；
+  完整性测试换成会记录「跑没跑、看见哪些 git 变量」的桩）。每条拦截用例都断言**具体原因**并断言
+  桩跑没跑——「被拦」有内容坏 / 与工作区不一致 / 解释器不在 / 脚本不在几种成因，只断言「拦了」
+  等于把几件事说成一件（memory 库钩子那次夹具就这样三次归错因）。含 v0.45.211 的
+  rebase `--continue` 复刻：断言那一步**确实**带着标记提交成功（前提若变了会红着说明），推送被拦、远端不变。
+- `CLAUDE.md`「并发开工必须先占号」下加指针：pre-commit 管不到 rebase `--continue`；
+  `.git/hooks` 不被跟踪，重新 clone 要重装。
+
+### 与 v0.45.214 生产推送的配合（开工中途它落地，改的正是生产 checkout 怎么推）
+
+`production_sync.push_main`：fetch → 对象层合并（**不动工作区**，工作区停在扫描开始时）→
+推 `<合并提交>:refs/heads/main`；被拒且 origin/main 又动过才重试。本守卫第一版在「远端 sha
+本地不认识」时按「动了」处理——而 fetch 与 push 之间别的 session 抢推 main 正是这种情况：
+拿**旧工作区**比对合并提交里**较新**的 CHANGELOG ⇒ 报「与工作区不同」拒推，抢在远端之前
+报了一个误导性的原因。改为退回 tracking ref 当区间起点后，该区间不含 CHANGELOG ⇒ 放行 ⇒
+由远端按非快进拒绝。**用真 `push_main` + 真钩子 + 注入抢推实测**（改动前后两版脚本各跑一次）：
+
+| | 正常合并推送 | 抢推竞态第 1 次推送 | 重试 |
+|---|---|---|---|
+| 改动前 | 成功 | **钩子误报「与工作区不同」** | 成功（origin 又动过） |
+| 本版 | 成功，钩子静默 | 远端按非快进拒绝（真实原因） | 成功 |
+
+旧版因重试能恢复、没造成部署失败，但三轮用完时告警里会是错的原因。
+退路不许变成漏洞：远端 sha 不认识、区间确实动了 CHANGELOG 时照样检查（单独一条用例）。
+
+### 验证
+
+**变异 14 个，全部真跑**（独立克隆，先断言锚点唯一且落地、`git diff` 可见，`--maxfail=200`），
+每个都红在预期那条上：pre-commit 总跑测试 / 不查部分暂存 / 不清 git 变量 / pre-push 查所有分支 /
+不看区间 / 不比工作区 / 忽略测试结果；pre-commit 忽略测试结果；缺脚本就拦 / 缺脚本不出声 /
+覆盖别人的钩子 / 解释器缺失放行；去掉 tracking 回退 / 远端 sha 不认识就跳过。基线 14 passed。
+核对脚本自己作废过两条，没有静默算成通过：一条锚点被新插入的函数改了上下文（计数 0），
+一条是「在锚点后追加」型变异——落地判据写成「旧文本不再出现」，而新文本包含旧文本，
+把确实落地的变异判成没落地。改判「新文本恰好出现一次且文件变了」后两条均变红。
+
+**真仓库、真完整性测试端到端**（克隆 + 真 `--install-hook` + bare 远端）：
+
+| 场景 | 结果 | 耗时 |
+|---|---|---|
+| 带冲突标记的提交 | 拦（真测试报「未解决的合并冲突标记」），HEAD 不变 | 1.70s |
+| 干净的 CHANGELOG 提交 / 推送 | 放行（19 passed） | 1.57s / 1.89s |
+| 日报式提交 / 推送（不动 CHANGELOG） | 放行，不跑测试、无输出 | 0.11s / 0.15s |
+| 复刻 rebase `--continue` 留标记 | `--continue` 成功（pre-commit 未触发），**推送被拦、远端不变** | 1.76s |
+
+装进本机共享 hooks 后，在本 worktree 暂存一份带标记的 CHANGELOG 提交：被拦、HEAD 不变，已复原。
+本版自己的提交与推送就走了这两个钩子。
+
+**全套**（独立克隆、`env -i`、`--maxfail=200`，rebase 到 v0.45.215 之后重跑）：基线 `09f5974`
+`1 failed, 4239 passed`；本版 `1 failed, 4253 passed`（+14 = 新增 14 条），唯一的红两边都是按设计的
+`TestCoverageHorizon`。（基线克隆第一次签错了提交：克隆里的 `origin/main` 是源仓库的**本地** main，
+`checkout origin/main || checkout <sha>` 成功签到旧提交、`||` 从未触发；改签显式 SHA 并核对父子关系后重跑。）
+`ruff check .` 全绿。
+
+测试耗时的一个坑：每例新装钩子时单条 ~1.5s，而 Python 启动只要 0.02s。实测是 macOS
+**首次执行新写入的可执行文件**的开销（新文件 1.54s / 硬链接同一 inode 0.12s / 复制 0.59s）⇒
+改为模块级真装一次、各例硬链接，安装行为由单独一条在新文件上验。
+
+### 已知边界（写明，不假装没有）
+
+- `git commit --amend` 若这次没再动 CHANGELOG，pre-commit 不跑（被修改的那个提交里的 CHANGELOG
+  由 pre-push 兜）。
+- `--no-verify` 能绕过两者。
+- 重新 clone / 清过 `.git/hooks` 后钩子就没了且没人会知道——CI 与 worktree 里没有 `.git/hooks`
+  可查，写成测试就是「只在一台机器上存在的 X」，所以只写进 CLAUDE.md 与 memory，不写 skip 守卫。
 
 ---
 
-## [0.45.215] — 2026-09-13 — 占位（进行中：撤掉误判模式预警整条链路——仓库外非幂等写入者 + 无预测力证据；检验固化为实验脚本）
+## [0.45.215] — 2026-09-13 — 误判模式预警（P2-⑧）整条撤掉：写入者在仓库外、非幂等；修到最优形态也拿不出增量预测力
+
+起因：生产 checkout 里 `thesis_breaks_config.json` 挂着 16k 行未提交 diff（mtime 09-11 08:31，不是扫描时刻），
+形状是重复追加——`hits` 4→6、`recent_drawdowns` 多出两份一模一样的记录。而 v0.45.112/115 断言过
+「生产只读、唯一写入函数 `register_misjudgment_pattern` 零调用点」。
+
+### 取证 1：谁在写——「本仓零调用点」只证明本仓
+
+写入者是 **Cowork 定时任务 `alpha-hive-weekly-optimizer`**（与 `~/.claude/scheduled-tasks/` 下同 ID 的
+Claude Code 任务是**两份不同定义**，`list_scheduled_tasks` 只看得见后者）→ 每周日 ~02:08 跑
+`~/Desktop/深度分析报告/规则/weekly_analyzer.py`（**另一个 git 仓库**）→ `classify_misjudgments` 对
+**全部历史**误判逐条调 `register_misjudgment_pattern` → `hits += 1` + `append`，无去重。
+不是测试写穿：两处读真路径的测试都只 `json.load`。
+
+| 时刻（PDT） | 事件（Cowork `audit.jsonl` 工具调用 + git reflog 取证） | 对文件 |
+|---|---|---|
+| 08-24/25 | 调试会话跑了 6 次 | 膨胀后**被 v0.45.50 提交进 HEAD** |
+| 08-30 02:08 | 跑 1 次 | 09-04 被 `reset --hard` 清掉（v0.45.112 所谓「不可恢复」其实只是一轮重复重放） |
+| 09-06 02:13 + 02:18 | 首跑 432 行 INFO 日志溢出工具结果、溢出文件沙箱读不到 ⇒ agent「重跑确认退出码」 | **当前脏 diff**：总 hits +856 = 2×428；逐模式 280/335 恰为单跑 2 倍 |
+| 09-11 08:31:15 | 另一 session 在生产 checkout `pull --rebase` + `rebase.autoStash`（HEAD reflog 同一秒） | 只刷 mtime，内容不变 |
+| 09-13 02:08–03:17 | 四次均 API ECONNRESET | 未写 |
+
+判别器：`_meta.auto_patterns_updated_at` 是每次写入必盖的戳（脏文件 = `09-06T02:19:31`），**比 mtime 可信**。
+
+### 取证 2：它本身值不值得修
+
+**读者**：唯一读者是 `generate_deep_v2` 的预警横幅——未排程、最近一次 07-29；两个目录全部 html 里横幅
+**一次都没渲染过**。服务端只造 9 个硬编码期权信号，训练端造 19 个分位数信号，而模式只取**字母序前 3 键**
+（蜂群原生键排前面）⇒ 按服务端词表回放 638 条只触发 10 次。训练端还用路径依赖、被钳位的
+`correct_t7`/`return_t7`，没用仓库已有的 `dir_correct_t7`（v0.45.17）。
+
+**最优形态的概念检验**（干净标签 + 两端同词表 + 全量重建按不同误判日计数 + 无前视：
+库只用 ≤t−14 日误判、阈值只用 <t 数据）。新脚本 `experiments/misjudgment_pattern_walkforward.py`，默认参数：
+
+| 指标 | 点估计 [95% CI，ISO 周整簇 bootstrap] |
+|---|---|
+| 误判率 预警 vs 未预警（638 条 / 20 周，预警 62 条） | 53.2% vs 46.0%，Δ +7.2pp [−13.7, +26.0] |
+| **Δresid = 扣掉「标的×方向历史误判率」基线（闸门）** | **−3.6pp [−24.5, +14.7] ⇒ 退出码 3** |
+| 基线自身：历史误判率高于中位 | +1.9pp [−13.7, +14.9]（与 `ticker_winrate_persistence.py` 08-25 结论一致） |
+| 方向调整收益（辅助） | −3.64% [−7.22, −0.04]：只在默认种子下不跨 0；换种子/缩尾跨 0，按标的去均值减半且跨 0；62 条里 84% 来自 BILI/VKTX/NVDA |
+
+gap=21 结论不变。测 +10pp 真实差异约需 161 个 ISO 周（≈3 年，粗估）。
+⇒ **未证实（功效不足），不是证伪**；而模式库是 pheromone.db 的纯函数，删掉持久化**零信息损失**。
+
+### 为什么撤而不修
+
+- **在 register 里去重**挡不住逐周改键：信号阈值是随数据增长重算的分位数，同一笔误判会换 key
+  （NVDA 03-16 已挂在 3 个 key 下；09-06 新增 97 个 key 里 62 个只含旧误判）。修完数字好看，是在修一个死字段。
+- **全量重建**工程上对，但要为无证据信号长期维护跨仓写入，并继续把派生数据混进手写配置
+  （这份文件已为此出过三次事：reset 丢改动、autoStash 改写、部署白名单）。
+
+### Removed
+
+- `feedback_loop.register_misjudgment_pattern` / `check_misjudgment_warnings` 及只服务它们的
+  `_os`/`_json`/`_dt` 导入；原位留墓碑注释（**勿接回**）。
+- `generate_deep_v2` 误判模式预警横幅的构建块与模板占位 `{misjudgment_banner_html}`。
+- `thesis_breaks_config.json` 的 `auto_misjudgment_patterns` 整节与 `_meta`（只装它的时间戳）：
+  diff **0 增 / 12226 删**，43 个人工顶层块逐块哈希核对不变（文件 ~300KB → 96.7KB）。
+- 仓库外 `深度分析报告/规则/weekly_analyzer.py` 的回写块（该仓 `24d7e05`，本地提交）。
+  哨兵模块核对：改前版本访问 `register_misjudgment_pattern`，改后 0 次；报告第④节
+  误判 518 条 / 原因 7 类与改前逐项相同。
+
+### Added
+
+- `experiments/misjudgment_pattern_walkforward.py` + `_report.md`：预注册单一闸门，退出码与
+  `vol_regime_filter` 同义（0 有效 / 1 显著反向 / 3 无法区分或样本不足）；结论由闸门生成不写死；
+  默认库走 `PATHS.db` **调用时**求值，报告只在显式 `--report` 时写。
+  **对账**：与撤掉前的生产代码（真 `classify_misjudgments` + AST 原样抽取的 `check_misjudgment_warnings`
+  + 与 `pheromone_source` 1261/1261 一致的信号复刻）逐行比对，gap=14/21 各 638 行 **0 处不一致**；
+  正对照变异 `OVERLAP_MIN=0.30` → 43 处、`ACTIVE_MIN_DISTINCT=2` → 77 处。
+- `tests/test_thesis_breaks_config_authored_only.py`（7 条）：按**形状**守（顶层键须是 ticker 形状的失效条件块
+  或已登记 `_` 键），换个名字的派生节同样红；另 AST 守被撤函数/键不复活，带扫描器正对照。
+- `tests/test_misjudgment_pattern_walkforward.py`（20 条）：gap 边界、阈值只看过去、不同误判日计数、
+  方向/交集规则、闸门、`PATHS` 调用时解析、只读打开。
+
+**变异实跑 14 条全红**（落地断言 + 还原后 sha 核对）。过程中揪出 3 条**等价变异**并改了测试：
+阈值测试只混一条未来值（`[1,2,3,4,100]` 的 p75 仍是 4）；URI 转义只测空格（sqlite 容忍裸空格，改用 `#`）；
+「只读」用读后字节不变判（普通模式读也不改字节，改判「不存在的路径不许被凭空建库」）。
+另：交集阈值 0.34 是等价变异——模式至多 3 键，交集比只取 0/⅓/½/⅔/1。
+
+### 顺带发现（未处理）
+
+- `_all_tickers` 只有 24 个，配置里有 41 个标的块 ⇒ `ThesisBreakConfig.get_coverage_info` 覆盖统计漏算 17 只。
+- 我自己在删除时差点留下半截函数体：`ast.parse` 接受「类体里的 `return`」（那是 compile 阶段才报的错），
+  改用 `compile()` 核对并以正对照证明它能抓到。
+- Cowork 周任务提示词用裸 `python3`（CLAUDE.md 硬规则要求 `/usr/local/bin/python3`）——用户配置，未改。
 
 ---
 
