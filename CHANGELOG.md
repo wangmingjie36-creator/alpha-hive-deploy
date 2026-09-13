@@ -473,6 +473,9 @@ gap=21 结论不变。测 +10pp 真实差异约需 161 个 ISO 周（≈3 年，
    交易日/补跑闸**不重跑**（只在当天日历改动恰好翻转「今天跑不跑」时有差别），注释改为如实说明。
 3. **编排器改动没有持久备份（已补）**：原版此前只在 session scratchpad；现存
    `~/.claude/scripts/alpha-hive-orchestrator.sh.bak-20260913_pre-v0.45.214`（与改动前逐字节相同）。
+   来历（不是事后删插入段还原的）：起草 diff 时 `cp` 现行文件 → 应用前 `cmp` 确认现行文件未变 →
+   `cp -p` 成备份 → 再覆盖现行文件；持久副本是该备份的 `cp -p` + `cmp`。mtime 保留为 09-08 23:34。
+   复核另注：反方向 `is-ancestor` 出错的防御分支（`inside is None`）无测试——同一对 SHA 刚成功比较过，几乎不可达，不补。
 4. 措辞：「refspec 一律 `{sha}:refs/heads/main`」不成立——fetch 失败兜底推的是 `main`（不带 force，功能无碍）。
 
 修正后全套：**4256 passed / 1 failed（仅 `TestCoverageHorizon`）/ 2 xfailed**；`ruff check .` 通过。
