@@ -9,7 +9,100 @@
 
 ---
 
-## [0.45.214] — 2026-09-13 — 占位（进行中：生产 checkout 的 `git push origin main` 六次 non-fast-forward——诊断完成，修法待用户拍板）
+## [0.45.214] — 2026-09-13 — 生产推送六次被拒，网站其实没事；真正的代价是「生产跑哪版代码」成了随机数
+
+生产 checkout 的 `git push origin main` 在 2026-09-01/03/04/09/10/11 六次
+`! [rejected] (non-fast-forward)`，最后一次成功是 09-08。本版先只读取证、再由用户拍板（A + B），
+最后落地：部署时对象层合并推送（A）+ 扫描前只快进（B）+ 两者的结果第一次真能走到告警。
+
+### 取证（全部只读；机制 8/8 对上）
+
+各 worktree 共享 `refs/remotes/origin/main`，它的 reflog 带时间戳记下了每个 session 的推送；
+与生产 main 的 reflog 对齐到每次报告提交的时刻：
+
+| 扫描 | 生产 main 落后 | 其中 14:00 开跑前推的 | 扫描期间推的 | 推送 |
+|---|---|---|---|---|
+| 09-01 | 2 | 2 | 0 | 被拒 |
+| 09-02（00:03 补跑） | 0 | – | – | ✅ |
+| 09-03 | 11 | 9 | **2** | 被拒 |
+| 09-04 | 1 | 1 | 0 | 被拒 |
+| 09-08（09-09 00:25 补跑） | 0 | – | – | ✅ |
+| 09-09 | 2 | 2 | 0 | 被拒 |
+| 09-10 | 6 | 6 | 0 | 被拒 |
+| 09-11 | 15 | 15 | 0 | 被拒 |
+
+每次 ahead=0：生产自己没有未推的东西。「扫描期间推的」一列说明**只做扫描前同步不够**（09-03）。
+
+- **网站不受影响**：gh-pages 走 plumbing + `--force`，与 main 无关；六天在编排器日志、
+  `.gh_pages_deploy_log.jsonl`、`origin/gh-pages` 历史、CDN 验证四处一致为成功。
+- **日报与账本落到 origin/main 全靠碰巧**：09-04 `08e728d`、09-10 `698e556` 原样落地；
+  09-01/03/09 是某个 session 在生产 checkout 里 `pull --rebase` 后以改写副本落地
+  （`1c8f8fb`/`05950df`/`387b1c3`，`git cherry` 核过补丁等价）；**09-11 `1826d3e` 滞留本地**，
+  其中 `hedge_state/` `options_paper_state/` `paper_portfolio_state/` `probability_scorecard_state/`
+  `ml_model_history/` `vrp_state/` 的 09-11 更新**没有任何异地副本**。
+- **生产代码版本随机**：生产 main 被 session 手工移动（快进 / rebase / 直接提交）每天 2~34 次。
+  世代边界按 `date >= boundary` 过滤、默认「代码落地当天就在跑」——实测反例
+  **v0.45.209**：边界 2026-09-11，修复 13:37 落地，生产 13:10 同步过，14:00 扫描没带上它
+  ⇒ **当前世代全部 30 条样本（date ≥ 09-11）出自 209 之前的代码**。分数是否真受影响取决于
+  当天 crowding 有没有降级——**待验证**，本版未改 `_COHORT_HISTORY`（留给用户决定）。
+  （v0.45.191 同样显示未跑，但它的修复 09-11 08:03 才存在，是边界回填，不是同步滞后，不计。）
+- **没有任何东西会红**：`alert_manager` 的「GitHub Deployment Failed」读 `status['deploy_status']`，
+  **全仓零写入者**，结构上不可能触发；六天告警只有「性能异常」「评分偏低」，`status=success`。
+
+### 一次性处置（用户批准）
+
+`1826d3e` 以对象层合并 `3af17bb` 推上 origin/main（`merge-tree --write-tree` + `commit-tree`，
+第一父 = origin/main，非 force）。合并前核对：双方自 `5b6276c` 起零重叠路径；合并树相对 origin/main
+恰好只差 1826d3e 自己的路径集、相对 1826d3e 恰好只差 origin 那侧的路径集；1826d3e 的每个 blob 原样保留；
+生产的 2 个脏文件不在快进路径内。**生产工作区与本地 main 未动**，本地 main 现可快进到 origin/main。
+
+### Added
+
+- **`production_sync.py`**（新）：
+  - `push_main(git, merge_label)`（A）：fetch → origin/main 是本地 main 的祖先就直接推；
+    否则 `merge-tree --write-tree` + `commit-tree -p origin -p main` 在对象层合并，推 `<合并>:refs/heads/main`。
+    **不动工作区、不动本地 ref**（部署之后编排器还要跑约 8 个 Python 步骤，部署时 pull 会让一轮混两个版本）。
+    冲突 ⇒ 不推、列出路径；`merge-tree` 退出码 0/1/其他三态分开；两个 ref 先解析成 SHA
+    （tracking ref 被所有 worktree 共享，随时会动）；推送被拒后**只有 origin/main 真动过才重试**；
+    fetch 失败退回直推并带上 fetch 原因。
+  - `sync_before_scan(git)`（B）：只 `pull --ff-only --no-rebase`。结局
+    `up_to_date / fast_forwarded`（OK）与 `ff_refused / local_ahead / diverged / not_on_main /
+    fetch_failed / error`（要红）；做不到就沿用现有代码，绝不 stash / reset / merge。
+  - CLI（编排器 Step 1 前调）：结果写 `PATHS.production_sync`（`logs/production_sync.json`），退出码 0/1。
+- `hive_logger.PATHS.production_sync`；`scan_timing.production_sync_result()` 与 `git_push_summary()`：
+  两者都随 `scan_timing.json` 并进 `status.json`（同 `code_version` 的走法，无需改编排器的合并逻辑）。
+- `tests/test_production_sync.py`（22 条，全部真 git 沙箱：bare origin + 生产 checkout + 另一 session 的 clone）。
+
+### Changed
+
+- `report_deployer.auto_commit_and_notify`：推送改走 `production_sync.push_main`；日志带合并方式与落后数。
+- `GitHubTool._ALLOWED_GIT_CMDS` 加 `rev-list` / `merge-base` / `merge-tree` / `commit-tree`
+  （只读或只写对象，不动工作区与 ref）。**不加** checkout / reset / merge / rebase。
+- `alpha_hive_daily_report.main`：推送结果进 `scan_timing.extra.git_push`；三端同步抛异常也记成失败。
+- `alert_manager`：删掉读零写入者 `deploy_status` 的规则，改读真有写入者的两个字段——
+  推送失败 ⇒ P1；扫描前同步结局非 OK ⇒ P1；同步结果缺失 ⇒ P2；无推送记录 ⇒ 记 `checks_skipped`。
+
+### 守卫与验证
+
+- **对改动前的真文件红**：`git archive HEAD` 导出旧树、只补新叶子模块，
+  `test_behind_origin_lands_via_object_merge…` 以 git 真实的 `failed to push some refs` 失败；
+  告警四条对旧 `alert_manager` 全红。
+- **变异真跑**：冲突与出错揉成一类 / 删掉「origin 没动不重试」/ 合并父提交对调，各被对应的一条抓到。
+- `test_git_failures_are_visible.py`：扫描器正对照改指 `production_sync.py`（**实测抓到过一次空扫描**：
+  新文件未 `git add` 时 `own_python_files` 看不到它，白名单检查对它恒真）；破坏性子命令集合补
+  merge / cherry-pick / revert / am；新增「生产 `pull` 只许 `--ff-only`」AST 守卫（白名单只看子命令，
+  `pull --rebase` 能被放行——另一 session 实测）；原「落后被拒」用例改为远端 `pre-receive` 钩子真拒绝
+  （落后现在会合并推上去，不再是失败），并断言 origin 没动时不重试。
+- 全套 `pytest --maxfail=200`：**4211 passed / 1 failed / 1 skipped / 2 xfailed**。唯一失败是
+  `TestCoverageHorizon`（硬编码 CPI/NFP 日历剩余天数低于 90 天阈值，按设计会红）——
+  在改动前的导出树上同样失败，本版未碰日历文件。`ruff check .`：All checks passed。
+
+### 待办 / 未做
+
+- 编排器接线与生产首次快进：见本条末（需用户批准，编排器在仓库外、未纳入版本控制）。
+- v0.45.209 世代边界的 30 条样本是否要移到首个真跑 209 的扫描日——用户决定。
+- 跨 session 实测（本版吸收）：`merge --ff-only` 对「相对 HEAD 脏、内容却与 origin 一致」的文件照样拒绝
+  ⇒ 报告提交必须留在本地；main 上 CI 近 30 次 15 失败 + 15 取消（`TestCoverageHorizon` 按设计红）⇒ 当不了晋升闸门。
 
 ---
 

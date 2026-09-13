@@ -79,6 +79,15 @@ class _HivePaths:
     def sandbox_dir(self) -> Path:
         return Path(os.environ.get("ALPHA_HIVE_SANDBOX_DIR", "/tmp/alpha_hive_sandbox"))
 
+    @property
+    def production_sync(self) -> Path:
+        """扫描前生产 checkout 快进结果（v0.45.214，`production_sync.write_result`）。
+
+        `scan_timing.snapshot` 按日期读它并入 `scan_timing.json` ⇒ 编排器 `write_status`
+        并进 `status.json` ⇒ `alert_manager` 据此告警。
+        """
+        return self.logs_dir / "production_sync.json"
+
     # ── ML 模型产物（v0.45.149）─────────────────────────────────────────
     # 三个文件名此前散落在 `ml_predictor` 的六个函数签名默认值、
     # `generate_ml_report` 的一个**类属性**、以及三处字面量里。收进这里的

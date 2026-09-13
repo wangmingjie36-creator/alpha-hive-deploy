@@ -77,9 +77,17 @@ class GitHubTool:
     # `reset --hard`，而这个仓库的工作区里常驻着未提交、丢了无法回溯重取的账本
     # （`hedge_state/` 等，2026-09-04 就被一次 `reset --hard` 清掉过）。
     # 守卫：`tests/test_git_failures_are_visible.py`（调用点必须全在表内 + 表内不许出现破坏性子命令）。
+    #
+    # v0.45.214 加了四项，全部**不动工作区、不移动任何 ref**（`production_sync`
+    # 在对象层合并后推送，治生产推送六次 non-fast-forward）：
+    #   `rev-list` / `merge-base` 只读；`merge-tree --write-tree` 与 `commit-tree`
+    #   只往对象库写树与提交对象，引用照旧只由 `push` 改动远端。
+    # ⚠️ `pull` 本来就在表里，而白名单只看子命令 ⇒ `pull --rebase` 也会被放行。
+    # 生产调用点只许 `pull --ff-only`，由守卫的 AST 扫描单独核对。
     _ALLOWED_GIT_CMDS = {
         "status", "log", "diff", "branch", "add", "commit", "push",
         "pull", "fetch", "remote", "show", "tag", "stash", "rev-parse",
+        "rev-list", "merge-base", "merge-tree", "commit-tree",
     }
 
     def run_git_cmd(self, cmd: str) -> Dict[str, Any]:

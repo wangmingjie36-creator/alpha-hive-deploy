@@ -8,6 +8,7 @@ report_deployer - 报告部署与通知模块
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from hive_logger import get_logger
+import production_sync
 
 _log = get_logger("report_deployer")
 
@@ -473,20 +474,24 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
         _log.info("无需提交（工作目录干净）")
 
     # 2. Git 推送 origin main
+    # v0.45.214：本地 main 落后 origin/main（各 session 从 worktree 直推）时，
+    # 在对象层合并后再推，不动工作区——部署之后编排器还要跑别的 Python 步骤。
+    # 此前直推 `git push origin main`，2026-09-01~11 六次 non-fast-forward 被拒。
     _log.info("Git push → [🧠 生产] (LLM=%s, Swarm=%s)", _using_llm, _is_swarm)
-    r = git.run_git_cmd("git push origin main")
-    # `run_git_cmd` 有两种失败形状：git 非零退出带 stdout/stderr；白名单拒绝或
-    # subprocess 自己炸只有 `error`。只读 stderr 会把后一种的原因丢成空串。
-    push_result = {"success": r["success"], "remote": "origin",
-                   "output": r.get("stdout", "") or r.get("stderr", ""),
-                   "error": r.get("error")}
+    push_result = production_sync.push_main(git, merge_label=today_commit_msg)
     results["git_push"] = push_result
     results["deploy_env"] = "production"
     if push_result["success"]:
-        _log.info("Git push 成功 → %s", push_result.get("remote"))
+        _log.info("Git push 成功 → %s（%s%s）", push_result.get("remote"),
+                  push_result.get("integration"),
+                  f"，合并 {push_result['merge_commit'][:7]}，本地 main 落后 {push_result.get('behind')}"
+                  if push_result.get("merge_commit") else "")
     else:
-        _log.warning("Git push 失败：%s", push_result.get("error")
-                     or push_result.get("output") or "（git 无输出）")
+        # `error` 与 `output` 对应 run_git_cmd 的两种失败形状，只读一个会把另一种的原因丢成空串
+        _log.warning("Git push 失败（%s）：%s%s", push_result.get("integration"),
+                     push_result.get("error") or push_result.get("output") or "（git 无输出）",
+                     f"\n  （推送前 fetch 也失败：{push_result['fetch_error']}）"
+                     if push_result.get("fetch_error") else "")
 
     # gh-pages 与 main 同步（生产模式 = LLM 或蜂群）
     try:

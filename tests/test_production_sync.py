@@ -1,0 +1,379 @@
+"""
+生产 checkout 与 origin/main 的同步（v0.45.214）
+
+固化 2026-09-01~11 六次 `git push origin main` 被拒（non-fast-forward）：各 session 从 worktree
+直推 origin/main，生产 checkout 从不 pull。取证全文见 `production_sync` 模块 docstring。
+
+四组，全部在**真 git 沙箱**里跑（bare origin + 生产 checkout + 另一个 session 的 clone）：
+  1. 部署时本地落后 ⇒ 对象层合并后推上去；不动工作区、不动本地 main；冲突不推并列出路径；
+     推送竞态只因 origin/main 真动过才重试；`merge-tree` 三个退出码不许揉成两个
+  2. 扫描前只快进；做不到就保持现有代码并给出结局，绝不动工作区里的未提交改动
+  3. A + B 的闭环：合并推送之后，下一轮扫描前的快进必须能成功（反例：直推被拒 ⇒ 分叉卡死）
+  4. 结果真能走到告警：写入者（production_sync / scan_timing）与读者（alert_manager）用同一个形状
+
+第 1 组对 v0.45.210 的代码是红的：那时本地落后时推送直接被拒。
+"""
+
+import json
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+
+import production_sync as ps  # noqa: E402
+import report_deployer as rd  # noqa: E402
+import scan_timing as st  # noqa: E402
+from agent_toolbox import GitHubTool  # noqa: E402
+
+PRODUCTION = {"system_status": "✅ 蜂群协作完成", "swarm_metadata": {"tickers_analyzed": 1}}
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    # 若 pytest 从 git hook 里被拉起，继承的 GIT_DIR 会让下面每条 git 命令打到真仓库上
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
+        monkeypatch.delenv(var, raising=False)
+    origin, prod, other = tmp_path / "origin.git", tmp_path / "prod", tmp_path / "other"
+
+    def git(*a, cwd=prod, check=True):
+        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True, check=check)
+
+    git("init", "-q", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+    git("init", "-q", "-b", "main", str(prod), cwd=tmp_path)
+    for name, text in (("index.html", "report-0911"), ("code.py", "v1"), ("notes.json", "n")):
+        (prod / name).write_text(text)
+    git("config", "user.email", "prod@t")
+    git("config", "user.name", "prod")
+    git("add", "-A")
+    git("commit", "-qm", "init")
+    git("remote", "add", "origin", str(origin))
+    git("push", "-q", "origin", "main")
+    git("clone", "-q", str(origin), str(other), cwd=tmp_path)
+    git("config", "user.email", "session@t", cwd=other)
+    git("config", "user.name", "session", cwd=other)
+
+    def session_push(name, text, msg):
+        """另一个 session：同步、改一个文件、推 origin/main。返回它推上去的提交。"""
+        git("pull", "-q", "--ff-only", "origin", "main", cwd=other)
+        (other / name).write_text(text)
+        git("commit", "-qam", msg, cwd=other)
+        git("push", "-q", "origin", "main", cwd=other)
+        return git("rev-parse", "HEAD", cwd=other).stdout.strip()
+
+    def origin_rev(ref="main"):
+        return git("--git-dir", str(origin), "rev-parse", ref).stdout.strip()
+
+    def origin_show(path):
+        return git("--git-dir", str(origin), "show", f"main:{path}").stdout
+
+    def head():
+        return git("rev-parse", "HEAD").stdout.strip()
+
+    def is_ancestor(a, b):
+        return git("merge-base", "--is-ancestor", a, b, check=False).returncode == 0
+
+    monkeypatch.setattr(rd, "deploy_static_to_ghpages", lambda reporter: None)
+    tool = GitHubTool(repo_path=str(prod))
+    reporter = SimpleNamespace(agent_helper=SimpleNamespace(git=tool), date_str="2026-09-14")
+    return SimpleNamespace(origin=origin, prod=prod, other=other, git=git, tool=tool,
+                           reporter=reporter, session_push=session_push, origin_rev=origin_rev,
+                           origin_show=origin_show, head=head, is_ancestor=is_ancestor)
+
+
+def _deploy(w, report_text="report-0914"):
+    (w.prod / "index.html").write_text(report_text)
+    return rd.auto_commit_and_notify(w.reporter, PRODUCTION)["git_push"]
+
+
+def _warnings(caplog, logger):
+    return [r.getMessage() for r in caplog.records
+            if r.name == logger and r.levelno >= logging.WARNING]
+
+
+# ═════════════════════════════ 1. 部署时：落后也要推上去 ═════════════════════════════
+
+class TestPushLandsWhenBehind:
+
+    def test_behind_origin_lands_via_object_merge_without_touching_worktree(self, world):
+        """复刻 09-11：生产 main 落后 origin/main（别的 session 推了代码），扫描出日报。
+
+        v0.45.210：`! [rejected] main -> main (non-fast-forward)`，日报与账本滞留本地。"""
+        w = world
+        session = w.session_push("code.py", "v2", "session: 改代码")
+        (w.prod / "notes.json").write_text("生产里没提交的改动")    # 同 NVDA_raw.json：非日报产物
+
+        push = _deploy(w)
+        report_commit = w.head()
+
+        assert push["success"] is True, push
+        assert push["integration"] == "merged" and push["behind"] == 1
+        merge = push["merge_commit"]
+        assert w.origin_rev() == merge
+        parents = w.git("rev-list", "--parents", "-n", "1", merge).stdout.split()[1:]
+        assert parents == [session, report_commit], "第一父必须是 origin/main，main 的 first-parent 史才连续"
+        assert w.origin_show("index.html") == "report-0914"
+        assert w.origin_show("code.py") == "v2"
+        # 不动工作区、不动本地 main：部署之后编排器还要跑别的 Python 步骤
+        assert (w.prod / "code.py").read_text() == "v1", "部署时换了代码 ⇒ 一轮混两个版本"
+        assert (w.prod / "notes.json").read_text() == "生产里没提交的改动"
+        assert w.git("rev-parse", "main").stdout.strip() == report_commit
+        # 本地 main 仍是 origin/main 的祖先 ⇒ 下一轮扫描前可以快进（第 3 组验真快进）
+        assert w.is_ancestor(report_commit, w.origin_rev())
+
+    def test_up_to_date_production_still_fast_forwards(self, world):
+        """正对照：不落后时就是普通快进推送，不造合并提交。"""
+        push = _deploy(world)
+        assert push["success"] and push["integration"] == "fast_forward"
+        assert push["merge_commit"] is None and push["behind"] == 0
+        assert world.origin_rev() == world.head()
+
+    def test_conflict_is_not_pushed_and_names_the_paths(self, world, caplog):
+        """别的 session 重渲染了同一份已发布产物（09-11 真发生过）⇒ 冲突：不推，列出路径。"""
+        w = world
+        session = w.session_push("index.html", "session 重渲染", "session: 重渲染")
+        with caplog.at_level(logging.WARNING):
+            push = _deploy(w, "report-0914")
+        assert push["success"] is False
+        assert push["integration"] == "conflict" and push["conflicts"] == ["index.html"]
+        assert w.origin_rev() == session, "有冲突还推了"
+        assert any("index.html" in m for m in _warnings(caplog, "alpha_hive.report_deployer"))
+        assert (w.prod / "index.html").read_text() == "report-0914", "冲突处理动了工作区"
+
+    def test_push_race_retries_because_origin_moved(self, world):
+        """fetch 与 push 之间别的 session 又推了一次：origin/main 真动过 ⇒ 值得重来一轮。"""
+        w = world
+        real = w.tool.run_git_cmd
+        raced = []
+
+        def racing(cmd):
+            if cmd.startswith("git push origin") and not raced:
+                raced.append(w.session_push("code.py", "v2", "session: 抢先一步"))
+            return real(cmd)
+
+        w.tool.run_git_cmd = racing
+        push = _deploy(w)
+        assert push["success"] is True, push
+        assert push["attempts"] == 2 and push["integration"] == "merged"
+        assert w.is_ancestor(raced[0], w.origin_rev()) and w.is_ancestor(w.head(), w.origin_rev())
+
+    def test_merge_tree_error_exit_is_neither_conflict_nor_clean(self, world):
+        """`merge-tree --write-tree` 退出码 ≥2 是真出错：既不能当干净合并推上去，也不能报成冲突。"""
+        w = world
+        session = w.session_push("code.py", "v2", "session: 改代码")
+        real = w.tool.run_git_cmd
+
+        def broken(cmd):
+            if cmd.startswith("git merge-tree"):
+                return {"success": False, "stdout": "", "stderr": "fatal: bad object", "returncode": 128}
+            return real(cmd)
+
+        w.tool.run_git_cmd = broken
+        push = _deploy(w)
+        assert push["success"] is False and push["integration"] == "error"
+        assert push["conflicts"] is None
+        assert "128" in push["error"] and "bad object" in push["error"]
+        assert w.origin_rev() == session, "出错了还推了"
+
+    def test_fetch_failure_keeps_the_push_reason_and_says_fetch_failed(self, world, caplog):
+        """看不到 origin 就判断不了落没落后：退回直推，由 git 自己拒；两个原因都要进 warning。"""
+        w = world
+        w.session_push("code.py", "v2", "session: 改代码")
+        real = w.tool.run_git_cmd
+
+        def no_fetch(cmd):
+            if cmd.startswith("git fetch"):
+                return {"success": False, "stdout": "", "stderr": "ssh: Could not resolve host",
+                        "returncode": 128}
+            return real(cmd)
+
+        w.tool.run_git_cmd = no_fetch
+        with caplog.at_level(logging.WARNING):
+            push = _deploy(w)
+        assert push["success"] is False and push["integration"] == "unchecked"
+        assert "rejected" in push["output"] and "Could not resolve host" in push["fetch_error"]
+        warns = _warnings(caplog, "alpha_hive.report_deployer")
+        assert any("rejected" in m and "Could not resolve host" in m for m in warns), warns
+
+
+# ═════════════════════════════ 2. 扫描前：只快进 ═════════════════════════════
+
+class TestSyncBeforeScan:
+
+    def test_up_to_date(self, world):
+        res = ps.sync_before_scan(world.tool, today="2026-09-14")
+        assert res["outcome"] == "up_to_date" and res["behind"] == 0
+
+    def test_behind_fast_forwards_and_keeps_unrelated_local_edits(self, world):
+        w = world
+        before = w.head()
+        session = w.session_push("code.py", "v2", "session: 改代码")
+        (w.prod / "notes.json").write_text("生产里没提交的改动")
+        res = ps.sync_before_scan(w.tool, today="2026-09-14")
+        assert res["outcome"] == "fast_forwarded", res
+        assert (res["before"], res["after"], res["behind"]) == (before, session, 1)
+        assert (w.prod / "code.py").read_text() == "v2"
+        assert (w.prod / "notes.json").read_text() == "生产里没提交的改动"
+
+    def test_dirty_overlap_is_refused_and_local_edit_survives(self, world):
+        """工作区里有未提交改动、恰好被 origin 改过：git 拒绝快进。不许 stash / reset 来硬过。"""
+        w = world
+        before = w.head()
+        w.session_push("code.py", "v2", "session: 改代码")
+        (w.prod / "code.py").write_text("生产里手改的")
+        res = ps.sync_before_scan(w.tool, today="2026-09-14")
+        assert res["outcome"] == "ff_refused" and res["detail"]
+        assert w.head() == before
+        assert (w.prod / "code.py").read_text() == "生产里手改的"
+        assert w.git("stash", "list").stdout == "", "拿 stash 硬过了（stash 栈是所有 worktree 共享的）"
+
+    def test_local_ahead_is_not_ok(self, world):
+        """本地 main 有没推上去的提交 ⇒ 生产跑的不是 main，要红。"""
+        w = world
+        (w.prod / "code.py").write_text("生产里直接提交的")
+        w.git("commit", "-qam", "直接在生产 checkout 提交")
+        res = ps.sync_before_scan(w.tool, today="2026-09-14")
+        assert res["outcome"] == "local_ahead" and res["ahead"] == 1
+        assert res["outcome"] not in ps.OK_OUTCOMES
+
+    def test_diverged_leaves_head_alone(self, world):
+        w = world
+        (w.prod / "notes.json").write_text("生产里直接提交的")
+        w.git("commit", "-qam", "直接在生产 checkout 提交")
+        before = w.head()
+        w.session_push("code.py", "v2", "session: 改代码")
+        res = ps.sync_before_scan(w.tool, today="2026-09-14")
+        assert res["outcome"] == "diverged" and (res["ahead"], res["behind"]) == (1, 1)
+        assert w.head() == before and (w.prod / "code.py").read_text() == "v1"
+
+    def test_not_on_main_is_left_alone(self, world):
+        w = world
+        w.git("switch", "-q", "-c", "experiment")
+        w.session_push("code.py", "v2", "session: 改代码")
+        res = ps.sync_before_scan(w.tool, today="2026-09-14")
+        assert res["outcome"] == "not_on_main"
+        assert (w.prod / "code.py").read_text() == "v1"
+
+    def test_fetch_failure(self, world, tmp_path):
+        world.git("remote", "set-url", "origin", str(tmp_path / "gone.git"))
+        res = ps.sync_before_scan(world.tool, today="2026-09-14")
+        assert res["outcome"] == "fetch_failed" and res["detail"]
+
+
+# ═════════════════════════════ 3. A + B 闭环 ═════════════════════════════
+
+class TestDeployThenNextScanLoop:
+
+    def test_next_scan_fast_forwards_after_a_merged_deploy(self, world):
+        """09-11 → 09-14：落后时部署（合并推送）→ 周末 session 又推 → 周一扫描前快进。"""
+        w = world
+        w.session_push("code.py", "v2", "session: 09-11 13:37 的修复")
+        assert _deploy(w, "report-0911")["integration"] == "merged"
+        w.session_push("code.py", "v3", "session: 周末的修复")
+
+        res = ps.sync_before_scan(w.tool, today="2026-09-14")
+        assert res["outcome"] == "fast_forwarded", res
+        assert w.head() == w.origin_rev()
+        assert (w.prod / "code.py").read_text() == "v3"
+        assert (w.prod / "index.html").read_text() == "report-0911"
+
+    def test_without_the_object_merge_the_next_sync_is_stuck(self, world):
+        """反例（为什么 B 离不开 A）：沿用 v0.45.210 的直推，被拒后报告提交滞留本地 ⇒
+        本地 main 与 origin/main 分叉 ⇒ 下一轮快进做不到，要等人来修。"""
+        w = world
+        w.session_push("code.py", "v2", "session: 改代码")
+        (w.prod / "index.html").write_text("report-0911 14:47")
+        w.git("commit", "-qam", "Alpha Hive 蜂群日报 2026-09-11 14:47")
+        assert w.git("push", "origin", "main", check=False).returncode != 0, "正对照：直推应被拒"
+        assert ps.sync_before_scan(w.tool, today="2026-09-14")["outcome"] == "diverged"
+
+
+# ═════════════════════════════ 4. 结果走到告警 ═════════════════════════════
+
+class TestResultReachesAlerts:
+
+    def test_result_file_lives_under_isolated_logs_dir(self, tmp_path):
+        """默认位置走 PATHS（调用时求值）⇒ 被 conftest 的 ALPHA_HIVE_LOGS_DIR 隔离住。"""
+        target = ps.write_result({"date": "2026-09-14", "outcome": "up_to_date"})
+        assert target is not None
+        assert target.parent == Path(os.environ["ALPHA_HIVE_LOGS_DIR"])
+        assert str(target).startswith(str(tmp_path))
+
+    def test_load_only_returns_this_rounds_result(self, tmp_path):
+        p = tmp_path / "ps.json"
+        assert ps.load_for_date("2026-09-14", p) is None                      # 没有
+        p.write_text("{坏的")
+        assert ps.load_for_date("2026-09-14", p) is None                      # 坏的
+        ps.write_result({"date": "2026-09-11", "outcome": "up_to_date"}, p)
+        assert ps.load_for_date("2026-09-14", p) is None, "上一轮的结果不能冒充这一轮"
+        ps.write_result({"date": "2026-09-14", "outcome": "ff_refused"}, p)
+        assert ps.load_for_date("2026-09-14", p)["outcome"] == "ff_refused"
+
+    def test_cli_exit_code_and_result_file(self, world, monkeypatch):
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(world.prod))   # GitHubTool() 默认仓库
+        assert ps.main(["--date", "2026-09-14"]) == 0
+        assert ps.load_for_date("2026-09-14")["outcome"] == "up_to_date"
+        world.git("switch", "-q", "-c", "experiment")
+        assert ps.main(["--date", "2026-09-14"]) == 1
+        assert ps.load_for_date("2026-09-14")["outcome"] == "not_on_main"
+
+    @staticmethod
+    def _alerts(tmp_path, snap):
+        from alert_manager import AlertAnalyzer
+        status = {"status": "success", "total_duration_seconds": 1,
+                  "steps_result": {"step2_swarm_analysis": {"status": "success"}},
+                  "scan_timing": snap}
+        p = tmp_path / "status.json"
+        p.write_text(json.dumps(status, ensure_ascii=False))
+        a = AlertAnalyzer(report_dir=tmp_path)
+        return a, [x.message for x in a.analyze(p)]
+
+    def test_real_failures_reach_alert_manager(self, world, tmp_path):
+        """写入者与读者用同一个形状：真沙箱里的冲突 + 真快进拒绝 → 真 snapshot → 真告警。
+
+        v0.45.214 前那条规则读 `deploy_status`（零写入者），这里任何一边改了形状都会红。"""
+        w = world
+        w.session_push("index.html", "session 重渲染", "session: 重渲染")
+        push = _deploy(w, "report-0914")
+        assert push["integration"] == "conflict"
+        (w.prod / "index.html").write_text("生产里手改的")   # 让快进也被拒
+        sync = ps.sync_before_scan(w.tool, today="2026-09-14")
+        assert sync["outcome"] not in ps.OK_OUTCOMES
+        ps.write_result(sync)
+
+        snap = st.snapshot("2026-09-14", extra={"git_push": st.git_push_summary(push)})
+        assert snap["production_sync"]["outcome"] == sync["outcome"]
+        _, msgs = self._alerts(tmp_path, snap)
+        assert any("main 推送失败" in m for m in msgs), msgs
+        assert any("生产代码未同步" in m for m in msgs), msgs
+
+    def test_healthy_round_raises_neither_alert(self, world, tmp_path):
+        """正对照：不是「什么都报」。"""
+        w = world
+        w.session_push("code.py", "v2", "session: 改代码")
+        push = _deploy(w)
+        assert push["success"]
+        ps.write_result(ps.sync_before_scan(w.tool, today="2026-09-14"))
+        snap = st.snapshot("2026-09-14", extra={"git_push": st.git_push_summary(push)})
+        a, msgs = self._alerts(tmp_path, snap)
+        assert not any("推送失败" in m or "代码未同步" in m or "同步未执行" in m for m in msgs), msgs
+        assert not any("推送" in s for s in a.checks_skipped)
+
+    def test_missing_sync_result_is_not_silence(self, tmp_path):
+        """编排器没调 production_sync.py（或日期对不上）⇒ 不知道跑的是哪版，要出声。"""
+        snap = st.snapshot("2026-09-14", extra={"git_push": {"success": True}})
+        assert snap["production_sync"] is None
+        _, msgs = self._alerts(tmp_path, snap)
+        assert any("同步未执行" in m for m in msgs), msgs
+
+    def test_missing_push_record_is_skipped_not_green(self, tmp_path):
+        snap = st.snapshot("2026-09-14")
+        a, msgs = self._alerts(tmp_path, snap)
+        assert not any("推送失败" in m for m in msgs)
+        assert any("main 推送检查" in s for s in a.checks_skipped)

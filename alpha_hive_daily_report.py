@@ -2850,9 +2850,13 @@ def main():
 
     # 三端同步：GitHub 提交推送 + Hive App + Slack
     print("\n📡 同步三端：GitHub / Hive App / Slack...")
+    # v0.45.214：推送结果进 scan_timing → status.json → alert_manager。此前只打 WARNING 进日志，
+    # 2026-09-01~11 六次被拒无人发现（告警那条规则读的 deploy_status 从来没人写）。
+    _git_push = None
     try:
         with _timing.timed("deploy"):
             sync_results = reporter.auto_commit_and_notify(report)
+        _git_push = sync_results.get("git_push")
         git_ok = sync_results.get("git_push", {}).get("success", False)
         deploy_env = sync_results.get("deploy_env", "production")
         remote_label = sync_results.get("git_push", {}).get("remote", "origin")
@@ -2871,9 +2875,11 @@ def main():
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         _log.warning("三端同步部分失败: %s", e)
         print(f"   ⚠️  三端同步出错：{e}")
+        if _git_push is None:   # 推送之前就抛了：记成失败，不能让「没记录」看起来像「没问题」
+            _git_push = {"success": False, "error": f"三端同步抛异常：{type(e).__name__}: {e}"}
 
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
-    _timing.write(reporter.date_str)
+    _timing.write(reporter.date_str, extra={"git_push": _timing.git_push_summary(_git_push)})
     return report
 
 

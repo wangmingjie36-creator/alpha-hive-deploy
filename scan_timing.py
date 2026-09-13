@@ -122,11 +122,43 @@ def code_version() -> Optional[dict]:
         return None
 
 
+def production_sync_result(date_str: str) -> Optional[dict]:
+    """本轮扫描前的生产代码同步结果（v0.45.214，编排器在 Step 1 前调 `production_sync.py`）。
+
+    与 `code_version` 同一条路：挂在这里就随 `scan_timing.json` 并进 `status.json`，
+    `alert_manager` 据此告警。没跑、写失败、或是别的日期的 ⇒ None（「没测到」）。
+    """
+    try:
+        import production_sync as _ps
+        return _ps.load_for_date(date_str)
+    except Exception as e:  # noqa: BLE001 - 观测代码不得影响主流程
+        _log.warning("production_sync 结果不可得（status.json 将缺该字段）: %s", e)
+        return None
+
+
+_GIT_PUSH_KEYS = ("success", "integration", "behind", "merge_commit", "conflicts",
+                  "attempts", "error", "skipped", "fetch_error")
+
+
+def git_push_summary(git_push: Optional[dict]) -> Optional[dict]:
+    """`results["git_push"]` 进 status.json 的精简版（v0.45.214）。
+
+    git 的 `output` 带整段 hint，截到 500 字符；None 原样返回（「没记录」≠「成功」）。
+    """
+    if not isinstance(git_push, dict):
+        return None
+    out = {k: git_push[k] for k in _GIT_PUSH_KEYS if k in git_push}
+    if git_push.get("output"):
+        out["output"] = str(git_push["output"])[:500]
+    return out
+
+
 def snapshot(date_str: str, extra: Optional[dict] = None) -> dict:
     snap = {
         "date": date_str,
         "written_at": datetime.now().isoformat(timespec="seconds"),
         "code_version": code_version(),
+        "production_sync": production_sync_result(date_str),
         "phases": phases(),
         "counters": counters(),
     }

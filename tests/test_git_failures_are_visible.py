@@ -86,6 +86,21 @@ def _git_subcommand(arg):
     return parts[1]
 
 
+def _pull_call_texts(source: str):
+    """`run_git_cmd` 首参为 `git pull …` 的调用：[(行号, 字面量文本)]（f-string 取常量段拼接）。"""
+    out = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call) and _callee_name(node) == "run_git_cmd" and node.args):
+            continue
+        if _git_subcommand(node.args[0]) != "pull":
+            continue
+        arg = node.args[0]
+        text = arg.value if isinstance(arg, ast.Constant) else "".join(
+            v.value for v in arg.values if isinstance(v, ast.Constant))
+        out.append((node.lineno, text))
+    return out
+
+
 def _run_git_cmd_sites(source: str):
     """[(行号, 子命令或 None)]"""
     return [
@@ -117,7 +132,9 @@ class TestRunGitCmdCallSitesAreWhitelisted:
         缺了这条，上一条的「零违规」可能只是一个空扫描。"""
         hits = {(rel, sub) for rel, src in _production_sources()
                 for _, sub in _run_git_cmd_sites(src)}
-        assert ("report_deployer.py", "push") in hits      # 字面量
+        assert ("production_sync.py", "fetch") in hits     # 字面量（v0.45.214 起推送链路在这里）
+        assert ("production_sync.py", "push") in hits      # f"git push origin {target}:…"
+        assert ("production_sync.py", "merge-tree") in hits
         assert ("agent_toolbox.py", "add") in hits         # f"git add -- {…}"
         assert ("agent_toolbox.py", "commit") in hits      # f"git commit -m {…}"
 
@@ -141,12 +158,35 @@ class TestRunGitCmdCallSitesAreWhitelisted:
         就放行了 `checkout -- <path>`。而生产工作区里常驻未提交的账本
         （hedge_state/ 等，丢了无法回溯重取，2026-09-04 被一次 reset --hard 清掉过）。
         """
-        destructive = {"checkout", "reset", "restore", "clean", "switch", "rebase", "update-ref"}
+        destructive = {"checkout", "reset", "restore", "clean", "switch", "rebase", "update-ref",
+                       "merge", "cherry-pick", "revert", "am"}
         assert not (GitHubTool._ALLOWED_GIT_CMDS & destructive), (
             "白名单里出现了会丢弃工作区/改写当前分支的子命令："
             f"{sorted(GitHubTool._ALLOWED_GIT_CMDS & destructive)}。"
             "v0.45.210 已判定不这样修，理由见 report_deployer.auto_commit_and_notify docstring。"
         )
+
+    def test_production_pull_is_fast_forward_only(self):
+        """白名单只看子命令，`pull` 在表里 ⇒ `pull --rebase` / 默认合并式 pull 也会被放行
+        （另一 session 实测：打桩 subprocess 后两者都原样下发）。上一条管不到这个马甲。
+
+        冲突时仓库会停在 rebase/merge 进行中而无人在场，账本还在工作区里。
+        生产调用点只许 `--ff-only`（v0.45.214 `production_sync.sync_before_scan`）。"""
+        bad = [f"{rel}:{line} → {text!r}"
+               for rel, src in _production_sources()
+               for line, text in _pull_call_texts(src)
+               if "--ff-only" not in text.split() or "--rebase" in text.split()]
+        assert not bad, "这些 pull 不是只快进：\n  " + "\n  ".join(bad)
+
+    def test_pull_scanner_sees_the_live_call_and_has_teeth(self):
+        live = [(rel, t) for rel, src in _production_sources() for _, t in _pull_call_texts(src)]
+        assert any(rel == "production_sync.py" for rel, _ in live), f"正对照没扫到：{live}"
+        src = ("git.run_git_cmd('git pull --rebase origin main')\n"
+               "git.run_git_cmd('git pull origin main')\n"
+               "git.run_git_cmd('git pull --ff-only --no-rebase origin main')\n")
+        assert [t for _, t in _pull_call_texts(src)] == [
+            "git pull --rebase origin main", "git pull origin main",
+            "git pull --ff-only --no-rebase origin main"]
 
 
 # ═════════════════════════════ 2. run_git_cmd 必须出声 ═════════════════════════════
@@ -361,21 +401,25 @@ class TestProductionFailuresCarryTheirReason:
         assert res["git_commit"]["success"] and res["git_push"]["success"], res
         assert len(sandbox.origin_log()) == 2 and sandbox.ghpages == [1]
 
-    def test_rejected_push_reason_reaches_warning(self, sandbox, tmp_path, caplog):
-        """形状一（git 非零退出，原因在 stderr）。复刻 2026-08~09 六次真实失败：
-        本地 main 落后 origin/main ⇒ non-fast-forward。"""
-        other = tmp_path / "other"
-        sandbox.git("clone", "-q", str(sandbox.origin), str(other), cwd=tmp_path)
-        sandbox.git("-c", "user.email=t@t", "-c", "user.name=t",
-                    "commit", "-q", "--allow-empty", "-m", "别的 session 先推了", cwd=other)
-        sandbox.git("push", "-q", "origin", "main", cwd=other)
+    def test_rejected_push_reason_reaches_warning(self, sandbox, caplog):
+        """形状一（git 非零退出，原因在 stderr）。
+
+        v0.45.210 时本条用「别的 session 先推了 ⇒ non-fast-forward」复刻 2026-09-01~11
+        六次真实失败。v0.45.214 起那种落后会在对象层合并后推上去（`tests/test_production_sync.py`），
+        不再是失败 ⇒ 这里改用远端 `pre-receive` 钩子**真拒绝**：原因仍须传到 results 与 warning，
+        且 origin/main 没动过就不许重试（同样的推送只会同样被拒）。"""
+        hook = sandbox.origin / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho '本仓库冻结中' >&2\nexit 1\n")
+        hook.chmod(0o755)
 
         (sandbox.repo / "index.html").write_text("prod-2")
         with caplog.at_level(logging.WARNING):
             res = rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
         assert res["git_push"]["success"] is False
-        assert "rejected" in res["git_push"]["output"]
+        assert "rejected" in res["git_push"]["output"] and "本仓库冻结中" in res["git_push"]["output"]
         assert any("rejected" in m for m in _warnings(caplog))
+        assert res["git_push"]["attempts"] == 1
+        assert sandbox.origin_log() == ["init"]
 
     def test_error_shaped_push_failure_keeps_its_reason(self, sandbox, monkeypatch, caplog):
         """形状二（白名单拒绝 / subprocess 抛异常 ⇒ 只有 error 键）。
