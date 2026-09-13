@@ -101,7 +101,8 @@
   （pre-commit）。**动了 `MEMORY.md` 才拦，没动只吵** —— 例行拦无关提交会把人
   养成 `--no-verify` 的习惯。**只检测，绝不自动裁**：裁哪里是语义判断，
   自动裁剪器正是上一条要防的东西。接手 / 重装（幂等，钩子不进 git、clone 之后就没了
-  且无人知晓）：`/usr/local/bin/python3 check_index_line_length.py --install-hook`
+  且无人知晓；**必须写全路径**，从本仓 worktree 执行相对路径是 exit 2）：
+  `/usr/local/bin/python3 ~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/check_index_line_length.py --install-hook`
 
 ### memory 目录已纳入 git，**每次 session 收尾必须提交**（2026-09-11 起）
 
