@@ -37,9 +37,10 @@ v0.45.204 续做**方法粒度**：`GitHubTool` 是活类，但类里的方法�
 零读者恰恰是这两个 bug 从没被发现的原因。
 
 ⚠️ **别把「删了测试不红」当成删它们的理由。** 实测：删**活的** `status`
-（`report_deployer.py:389` 在用）同样零红——本仓测试根本没覆盖 `status`/`push`/`diff`。
+（当时 `report_deployer.py:389` 在用）同样零红——本仓测试根本没覆盖 `status`/`push`/`diff`。
 能变红的正对照是 `run_git_cmd` 与 `commit`（各 3 红）。判死靠的是上面两条证据，
-不是测试。
+不是测试。（v0.45.211 起 `status` 有了 `tests/test_github_tool_status.py`，删它现在会红；
+上面这句是 v0.45.204 当时的实测，留作「零红对死活零信息量」的校准记录。）
 
 要加 MCP 工具 → `alpha_hive_mcp.py`；要发 Slack → `slack_report_notifier.py`。
 """
@@ -115,12 +116,63 @@ class GitHubTool:
             return {"success": False, "error": str(e)}
 
     def status(self) -> Dict[str, Any]:
-        """Git 状态"""
-        result = self.run_git_cmd("git status --porcelain")
-        if result["success"]:
-            files = [line.split()[-1] for line in result["stdout"].split("\n") if line.strip()]
-            return {"modified_files": files, "status": "✅ Clean" if not files else "⚠️ Dirty"}
-        return {"error": result.get("stderr")}
+        """工作区改动清单（`git status --porcelain -z`）
+
+        返回契约 —— 调用方靠 `"modified_files" in r` 区分「失败」与「干净」
+        （`report_deployer._git_modified_files`）：
+
+          成功 `{"success": True,  "modified_files": [路径…], "status": …}`，空列表才是「干净」
+          失败 `{"success": False, "error": 非空说明}`，**没有** `modified_files` 键
+
+        **不抛异常**：`run_git_cmd` 的两种失败形状、以及下面第 3 条的解码失败，一律走返回值。
+
+        v0.45.211 修了三处，均实测复现（守卫 `tests/test_github_tool_status.py`）：
+
+        1. 失败时原先返回 `{"error": result.get("stderr")}`。`run_git_cmd` 的第二种失败形状
+           （子进程自己炸）只有 `error` 键 ⇒ 得到 `{"error": None}`，失败原因整个丢了。
+        2. 原先用 `line.split()[-1]` 解析无 `-z` 的输出。git 会给含空格 / 非 ASCII / 引号的
+           路径加引号并八进制转义：`?? "report 2.json"` → `2.json"`，`日报.md` →
+           `"\\346\\227\\245…"`。本机 ~/Desktop 在 iCloud 下持续造「xxx 2.json」式副本，
+           不是理论情形；解析出的名字进警告与 `results`，曾把**实际已被白名单提交**的
+           副本报成「跳过」。`-z` 下 git 不加引号、不转义，且与 `core.quotepath` 无关。
+        3. `-z` 的代价：路径以原始字节输出，`run_git_cmd` 是 text 模式严格解码，索引里有
+           非 UTF-8 路径时抛 `UnicodeDecodeError`（APFS 建不出这种文件，但别的系统提交进
+           索引的条目可以）。旧写法输出纯 ASCII 不会抛 —— 这条抛出路径是换 `-z` 新引入的，
+           在此收成失败返回，不让它越过调用方的「失败 / 干净」判断。
+        """
+        try:
+            result = self.run_git_cmd("git status --porcelain -z")
+            if result["success"]:
+                files = self._parse_porcelain_z(result["stdout"])
+                return {"success": True, "modified_files": files,
+                        "status": "✅ Clean" if not files else "⚠️ Dirty"}
+        except ValueError as e:  # 含 UnicodeDecodeError；解析器遇到不认识的条目也抛它
+            _log.warning("git status 输出无法解析：%s: %s", type(e).__name__, e)
+            return {"success": False,
+                    "error": f"git status 输出无法解析：{type(e).__name__}: {e}"}
+        reason = (result.get("stderr") or result.get("error") or "").strip()
+        return {"success": False,
+                "error": reason or f"git status 失败（returncode={result.get('returncode')}，无错误输出）"}
+
+    @staticmethod
+    def _parse_porcelain_z(out: str) -> List[str]:
+        """`git status --porcelain -z`（v1）→ 路径列表。
+
+        每条是 `XY 路径\\0`。改名 / 复制条目后面**另跟一段**原路径：`R  新\\0旧\\0`
+        （与无 `-z` 时的 `旧 -> 新` 顺序相反）。只收新路径；漏了跳过原路径这一步，
+        原路径会被当成一条以它自己前两个字符为状态码的独立条目。
+        """
+        files: List[str] = []
+        fields = iter(out.split("\0"))
+        for entry in fields:
+            if not entry:
+                continue  # 末尾 NUL 之后的空段
+            if len(entry) < 4 or entry[2] != " ":
+                raise ValueError(f"不认识的 porcelain 条目：{entry!r}")
+            files.append(entry[3:])
+            if "R" in entry[:2] or "C" in entry[:2]:
+                next(fields, None)
+        return files
 
     def commit(self, message: str,
                paths: Optional[List[str]] = None) -> Dict[str, Any]:

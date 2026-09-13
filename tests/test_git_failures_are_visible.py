@@ -357,14 +357,33 @@ class TestProductionFailuresCarryTheirReason:
         assert any("timed out" in m for m in _warnings(caplog)), _warnings(caplog)
 
     def test_status_failure_is_not_reported_as_clean(self, sandbox, monkeypatch, caplog):
-        """`git status` 挂了 ≠ 工作目录干净。"""
+        """`git status` 挂了 ≠ 工作目录干净。
+
+        假值按 `GitHubTool.status()` 的失败契约写（v0.45.211：`success`+非空 `error`，
+        无 `modified_files`）。假值会和真实形状各走各的，所以下一条用真失败再验一遍。"""
         monkeypatch.setattr(sandbox.reporter.agent_helper.git, "status",
-                            lambda: {"error": "fatal: not a git repository"})
+                            lambda: {"success": False, "error": "fatal: not a git repository"})
         with caplog.at_level(logging.INFO):
             res = rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
         assert not any("工作目录干净" in r.getMessage() for r in caplog.records)
         assert any("git status 失败" in m and "not a git repository" in m
                    for m in _warnings(caplog))
+        assert res["git_commit"]["success"] is False
+
+    def test_real_status_failure_is_not_reported_as_clean(self, sandbox, caplog):
+        """同上，但不打桩：真 `GitHubTool.status()` 在真仓库里失败（索引损坏）。
+
+        上一条的假值只证明「调用方认得那个假形状」；本条证明它认得 `status()`
+        **真实**返回的形状 —— 两边任一侧改了失败形状，只有这条会红。"""
+        (sandbox.repo / ".git" / "index").write_bytes(b"garbage")
+        raw = sandbox.git("status", "--porcelain", check=False)
+        assert raw.returncode != 0, f"正对照：索引损坏后 git status 应当失败：{raw}"
+
+        with caplog.at_level(logging.INFO):
+            res = rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
+        assert not any("工作目录干净" in r.getMessage() for r in caplog.records)
+        assert any("git status 失败" in m and "index" in m for m in _warnings(caplog)), \
+            _warnings(caplog)
         assert res["git_commit"]["success"] is False
 
 

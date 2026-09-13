@@ -17,7 +17,103 @@
 
 ---
 
-## [0.45.211] — 2026-09-13 — 占位（进行中：GitHubTool.status() 失败被报成「干净」+ porcelain 解析错，补测试）
+## [0.45.211] — 2026-09-13 — `GitHubTool.status()`：失败原因会整个丢掉，路径会被解析坏，而测试从没碰过它
+
+`status()` 是在产方法（`report_deployer._git_modified_files` 读它），v0.45.204 实测删掉整个
+`def status` 全套零红。开工时 v0.45.210 还是占位、改的是同一个调用方函数，按约定先只做
+`agent_toolbox` 一侧；开工中途它落地（`8f83bcd`），**调用方「失败被报成干净」已由它修掉**
+（`"modified_files" not in status` ⇒ warning + `git_commit.success=False`），本版不重复修，
+只让 `status()` 自身的契约配得上那个判断，并补上两边之间缺的那条真实用例。
+
+### 复核（均在临时仓库实测，不是转述）
+
+| 形状 | 旧实现实测输出 |
+|---|---|
+| 非仓库目录（git 非零退出，原因在 stderr） | `{'error': 'fatal: not a git repository …'}` —— 无 `success` 键 |
+| **cwd 不存在（子进程自己炸，`run_git_cmd` 只给 `error` 键）** | **`{'error': None}`** —— 失败原因整个丢了（任务卡没列，复核时新发现） |
+| `?? "report 2.json"` | `2.json"` |
+| `?? 日报.md` | `"\346\227\245\346\212\245.md"`（字面八进制串带引号） |
+| ` M "tracked name.md"` / `?? "quo\"te.txt"` | `name.md"` / `"quo\"te.txt"` |
+| `R  old.txt -> new.txt` | `new.txt`（这一种旧写法恰好对） |
+
+**影响面（修正任务卡的判断）**：解析结果不影响「提交与否」的闸门（非空输出每行必出一个
+token，列表空不空不变），也不影响提交集合（`commit(paths=REPORT_ARTIFACT_PATHS)` 走白名单）。
+它进的是：生产分支「跳过 N 个非日报产物」warning + `results["skipped_non_artifacts"]`；
+以及 v0.45.210 新增的非生产分支残留产物清单 + `results["uncommitted_report_artifacts"]`。
+严重度仍低，但**不止「名字难看」**：实测 iCloud 副本 `alpha-hive-daily-2026-09-11 2.json`
+被解析成 `2.json"` ⇒ 判为非产物 ⇒ warning 说「跳过、不会被自动提交」，而白名单 glob
+`alpha-hive-daily-*.json` **实际把它提交了** —— 日志说的与发生的正相反。
+
+### 失败时是返回还是抛？
+
+- **返回**：`run_git_cmd` 两种失败形状（git 非零退出带 stderr；subprocess 异常 / 白名单拒绝只有 `error`）。
+  旧实现只读 stderr，第二种丢原因。
+- **抛**：旧实现**不会**抛（无 `-z` 的输出是纯 ASCII）。**换 `-z` 会新引入一条**：`-z` 按原始字节
+  输出路径，`run_git_cmd` 是 `text=True` 严格解码，索引里有非 UTF-8 路径时抛 `UnicodeDecodeError`。
+  实测：APFS 拒建这种文件（`Errno 92 Illegal byte sequence`），但 `git update-index --cacheinfo`
+  造的索引条目（= 别的系统提交进来的路径）能让它当场抛出。它是 `ValueError` 子类，会被
+  `alpha_hive_daily_report` 部署外层 `except (OSError, ValueError, …)` 接住 ⇒ 当天 push 与
+  gh-pages 一起跳过。**在 `status()` 里收成失败返回**，不让它越过调用方的「失败 / 干净」判断。
+- 本机 `locale.getpreferredencoding()` 在 `env -i`（≈ launchd）下也是 `utf-8` 且 UTF-8 mode 开启，
+  中文路径走 `-z` 解码无碍（实测）。
+
+### Fixed — `agent_toolbox.GitHubTool.status()`
+
+- 命令换成 `git status --porcelain -z`，新增 `_parse_porcelain_z`：不加引号、不转义、与
+  `core.quotepath` 无关；改名 / 复制条目跳过其后单独一段的原路径；不认识的条目抛 `ValueError`。
+- 返回契约写进 docstring：成功 `{"success": True, "modified_files": [...], "status": …}`（空列表才是干净）；
+  失败 `{"success": False, "error": 非空}`，**没有** `modified_files` 键（与 v0.45.210 调用方的判法对齐）。
+  `ValueError`（含 `UnicodeDecodeError`）收成失败返回并打 warning。**不抛异常。**
+- 模块 docstring 里「删 `status` 零红」一句标注为 v0.45.204 当时的实测（现在会红）。
+
+### Added — 测试
+
+- **`tests/test_github_tool_status.py`**（9 条，全部真 git 仓库、不打桩），每组先用正对照断言夹具
+  确实走到了想测的分支：解析（空格 / 中文 / 引号 / 带空格目录 / 改名 / warning 与白名单提交一致 /
+  不认识的条目）、失败 ≠ 干净（非仓库 / 索引损坏 / cwd 不存在）、非 UTF-8 索引条目不抛。
+- `tests/test_git_failures_are_visible.py`：v0.45.210 的假 `status` 按新契约补 `success: False`；
+  **新增 `test_real_status_failure_is_not_reported_as_clean`**——真 `status()` 在索引损坏的真仓库里
+  失败，走完整 `auto_commit_and_notify`。假值只证明调用方认得那个假形状，两边任一侧改失败形状
+  只有这条会红。
+
+### 变异核对（独立克隆里真跑，先断言变异落地：锚点计数 1→0 且 `git diff` 可见）
+
+跑 `test_github_tool_status.py` + `test_git_failures_are_visible.py` + `test_report_deployer_whitelist.py`，
+基线 `67 passed, 1 xfailed`（xfail 是 v0.45.210 预设的 strict 残留）。
+
+| 变异 | 红 |
+|---|---|
+| 删整个 `def status` | **19**（v0.45.204 时全套 0） |
+| 解析退回 `split()[-1]`（去 `-z`） | 3：引号路径 / warning 与提交一致 / 非 UTF-8 |
+| `-z` 但不跳过改名原路径 | 1：改名 |
+| `status()` 失败时返回 `success: True, modified_files: []`（失败当干净） | 4：三种真实失败 + 调用方真失败用例 |
+| 调用方 `_git_modified_files` 把失败当干净 | 2：v0.45.210 假值用例（改夹具后仍会红）+ 新增真失败用例 |
+| 失败原因退回 `result.get("stderr")` | 1：cwd 不存在 |
+| 去掉 `except ValueError` | 1：非 UTF-8 索引条目 |
+| **整份换回改动前的 `agent_toolbox.py`** | 8 |
+
+**量具自己坏过两次，都是变异抓出来的：**
+
+1. `test_skip_warning_agrees_with_what_the_whitelist_commits` 第一版断言
+   `said_skipped == set(changed) - committed`——**两边都出自被测解析器**。旧解析的 `2.json"`
+   永远不在 committed 里 ⇒ 两边恒等 ⇒ 解析退回 `split()[-1]` 时照样绿。为这个 bug 写的用例
+   对这个 bug 恒绿。改为用测试自己造的文件名当真值后，该变异下变红。
+2. `pyproject` addopts 会在首个失败处停，第一轮每个变异都只显示「1 failed」——看不出每条用例
+   各自接住了哪个变异。变异核对必须带 `--maxfail=200`。
+
+**全套**（独立克隆、`env -i`、`--maxfail=200`）：基线 `8f83bcd` `1 failed, 4141 passed, 1 skipped,
+80 deselected, 3 xfailed`；本版 `1 failed, 4151 passed`（+10 = 新增 10 条），其余逐项相同。
+唯一的红两边都是按设计会红的 `TestCoverageHorizon`。`ruff check .` 全绿，与基线持平。
+
+### 顺带发现（未修）
+
+- **v0.45.204 数读者的口径 `git ls-files | xargs grep` 会静默跳过非 ASCII 文件名**：`ls-files`
+  默认也按 `core.quotepath` 输出引号 + 八进制，xargs 拿到的是不存在的路径，grep 报
+  `No such file` 后继续（本仓 3118 个跟踪文件里 11 个）。与本版解析 bug 同一形状。
+  复核：跟踪的 `.py` 里非 ASCII 名 0 个，被跳过的 11 个文件里 v0.45.204 删掉的方法名 0 命中
+  ⇒ **它的结论不受影响**。正确口径是 `git ls-files -z | xargs -0 grep`（`tests/_repo_files.py` 已是 `-z`）。
+- 白名单 glob 会把「名字形如 `alpha-hive-daily-… 2.json`」的 iCloud 副本一并提交——与解析无关、
+  早已如此。现在 main / gh-pages 上这种文件 0 个（`ls-tree -z` 实测），未动。
 
 ## [0.45.210] — 2026-09-13 — 测试推送分支没「回滚失败」那么轻：它把规则引擎数据推进了生产。撤掉它，白名单一项不加
 
