@@ -1321,7 +1321,10 @@ SENTIMENT_MOMENTUM_CONFIG = {
 CONFLICT_ARBITRATION_CONFIG = {
     "close_vote_threshold": 0.15,   # margin 低于此值触发仲裁
     "dissent_boost": 1.5,           # GuardBee/BearBee 异议权重倍数
-    "dissent_agents": ["GuardBeeSentinel", "BearBeeContrarian"],
+    # v0.45.212：BearBeeContrarian 已退出方向计票（QueenDistiller.NON_VOTING_AGENTS），
+    # 仲裁只在投票蜂里找异议方 ⇒ 列着它是一条永远不生效的配置，已删。
+    # 守卫 tests/test_non_voting_agents.py::TestDissentAgentsMustVote
+    "dissent_agents": ["GuardBeeSentinel"],
 }
 
 # ==================== 置信度校准配置 (QueenDistiller Enhancement B) ====================

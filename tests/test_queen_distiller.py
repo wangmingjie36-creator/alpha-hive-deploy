@@ -376,7 +376,13 @@ class TestBearishPipelineIntegration:
         assert "contrarian" in res["resonant_dimensions"]
 
     def test_single_bearish_agent_can_push_direction(self, board):
-        """单个高置信 BearBee 可推动最终方向为 bearish（≥1 Agent + ≥25% 权重）"""
+        """单个高置信**观测蜂**看空可推动最终方向为 bearish（≥1 Agent + ≥25% 权重）
+
+        v0.45.212 前这里用的是 BearBeeContrarian。它自此不进计票（理由见
+        `QueenDistiller.NON_VOTING_AGENTS`），所以换成一只观测蜂 —— 被测的是
+        看空门槛本身，不是「哪只蜂」。BearBee 单票不得推动方向的反面断言在
+        `tests/test_non_voting_agents.py`。
+        """
         queen_local = QueenDistiller(board)
 
         results = [
@@ -385,13 +391,7 @@ class TestBearishPipelineIntegration:
             _make_result("sentiment", 5.0, direction="neutral", confidence=0.5, source="BuzzBeeWhisper"),
             _make_result("odds", 5.0, direction="neutral", confidence=0.5, source="OracleBeeEcho"),
             _make_result("risk_adj", 5.0, direction="neutral", confidence=0.5, source="GuardBeeSentinel"),
-            {
-                "score": 2.5, "direction": "bearish", "confidence": 0.85,
-                "discovery": "Strong bearish case", "source": "BearBeeContrarian",
-                "dimension": "contrarian",
-                "data_quality": {"insider": "real"},
-                "details": {"bear_score": 7.5, "signal_count": 3},
-            },
+            _make_result("ml_auxiliary", 2.5, direction="bearish", confidence=0.85, source="RivalBeeVanguard"),
         ]
 
         out = queen_local.distill("PUSH_TEST", results)
@@ -515,7 +515,11 @@ class TestQueenHelpers:
         assert dv["bearish_count"] == 3
 
     def test_direction_vote_conflict(self, queen):
-        """3 bull + 3 bear → conflict_level="heavy" """
+        """3 bull + 2 bear（计票口径）→ conflict_level="heavy"
+
+        v0.45.212 前 BearBee 算第 3 张看空票、断言 `bearish_agents == 3`。
+        它自此不进计票，冲突计数只数投票蜂（≥2 对 ≥2 仍是重度冲突）。
+        """
         results = [
             _make_result("signal", 8.0, direction="bullish", confidence=0.7, source="ScoutBeeNova"),
             _make_result("catalyst", 7.0, direction="bullish", confidence=0.7, source="ChronosBeeHorizon"),
@@ -529,7 +533,9 @@ class TestQueenHelpers:
         dv = queen._compute_direction_vote("TEST", results, results, 7.0)
         assert dv["conflict_level"] == "heavy"
         assert dv["conflict_info"]["bullish_agents"] == 3
-        assert dv["conflict_info"]["bearish_agents"] == 3
+        assert dv["conflict_info"]["bearish_agents"] == 2
+        assert dv["vote_excluded_agents"] == ["BearBeeContrarian"]
+        assert dv["bearish_count"] == 3, "展示口径（agent_breakdown）仍是全体"
 
 
 # ==================== Enhancement A: 冲突仲裁 ====================
