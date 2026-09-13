@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.217] — 2026-09-13 — 占位（进行中：thesis_breaks_config 的 _all_tickers 漏 17 个标的块，覆盖率统计静默少算）
+
 ## [0.45.216] — 2026-09-13 — CHANGELOG 完整性测试挂成 git hook：pre-commit 管不到出事的那条路径，兜底的是 pre-push
 
 用户要求。起因是 v0.45.211 收尾：rebase 解 CHANGELOG 冲突，解冲突脚本的自检被散文误伤、
