@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.218] — 2026-09-13 — 占位（进行中：二次检查 v0.45.208 索引行守卫：git 失败时静默放行 / install-hook 无视 core.hooksPath / 自证探针名不副实 / CLAUDE.md 命令相对路径）
+
+---
+
 ## [0.45.217] — 2026-09-13 — 占位（进行中：thesis_breaks_config 的 _all_tickers 漏 17 个标的块，覆盖率统计静默少算）
 
 ## [0.45.216] — 2026-09-13 — CHANGELOG 完整性测试挂成 git hook：pre-commit 管不到出事的那条路径，兜底的是 pre-push
