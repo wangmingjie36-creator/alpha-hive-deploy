@@ -49,6 +49,10 @@ import shlex
 import subprocess
 from typing import Dict, List, Optional, Any
 
+from hive_logger import get_logger
+
+_log = get_logger("agent_toolbox")
+
 # ==================== GitHub 工具 ====================
 
 class GitHubTool:
@@ -65,10 +69,13 @@ class GitHubTool:
     # v0.45.204 删掉 `push()`/`diff()` 这两个同名方法时，`push`/`diff` 两项**照旧保留**——
     # 方法没了不等于子命令没人用了，跟着删会打断现役 gh-pages / main 部署链路。
     #
-    # ⚠️ 已知缺口（v0.45.204 实测，未在本版修）：`report_deployer` 测试模式分支下发的
-    # `git checkout` 与 `git reset` **不在**表里，会被静默拒绝，而其后那句
-    # 「本地 main 已恢复至 origin/main」是无条件 log 的 —— 失败没传导到下游。
-    # 这属另一个改动面，已另开任务，勿在此顺手加项（加了会放宽安全边界且无人验证）。
+    # ⚠️ **不要加 `checkout` / `reset` / `restore` / `clean`。** v0.45.210 处置过一次：
+    # `report_deployer` 旧测试推送分支下发 `checkout` 与 `reset --hard`，自 2026-03-01
+    # 本表引入起就被拒绝（本表漏列了三天前已存在的调用方，不是有意排除）。修法是
+    # **撤掉那条分支**，不是加项——白名单只按子命令判，放行 `reset` 就放行了
+    # `reset --hard`，而这个仓库的工作区里常驻着未提交、丢了无法回溯重取的账本
+    # （`hedge_state/` 等，2026-09-04 就被一次 `reset --hard` 清掉过）。
+    # 守卫：`tests/test_git_failures_are_visible.py`（调用点必须全在表内 + 表内不许出现破坏性子命令）。
     _ALLOWED_GIT_CMDS = {
         "status", "log", "diff", "branch", "add", "commit", "push",
         "pull", "fetch", "remote", "show", "tag", "stash", "rev-parse",
@@ -79,9 +86,14 @@ class GitHubTool:
         try:
             parts = shlex.split(cmd)
             if not parts or parts[0] != "git":
+                _log.error("run_git_cmd 拒绝非 git 命令：%r", cmd)
                 return {"success": False, "error": "Only git commands allowed"}
             subcmd = parts[1] if len(parts) > 1 else ""
             if subcmd not in self._ALLOWED_GIT_CMDS:
+                # 调用方传的都是写死的字符串 ⇒ 被拒绝一定是代码写错了，不是运行期偶发。
+                # v0.45.210 前这里只 return、调用方又不看返回值 ⇒ 拒绝等于没发生过：
+                # 旧测试推送分支的 checkout/reset 被拒了半年，日志里一个字都没有。
+                _log.error("run_git_cmd 拒绝白名单外的子命令 %r（命令未执行）：%s", subcmd, cmd)
                 return {"success": False, "error": f"Git subcommand not allowed: {subcmd}"}
 
             result = subprocess.run(
@@ -98,6 +110,8 @@ class GitHubTool:
                 "returncode": result.returncode
             }
         except (subprocess.SubprocessError, OSError) as e:
+            # 第二种失败形状：没有 stdout/stderr 键，只有 error。调用方若只读 stderr 会拿到空串。
+            _log.warning("run_git_cmd 执行失败：%s（%s: %s）", cmd, type(e).__name__, e)
             return {"success": False, "error": str(e)}
 
     def status(self) -> Dict[str, Any]:

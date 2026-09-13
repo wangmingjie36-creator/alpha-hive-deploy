@@ -74,7 +74,7 @@
 ## GitHub Pages 部署规则（永久设置）
 
 - **GitHub Pages 从 `gh-pages` 分支部署**，不是 `main`
-- `report_deployer.py`：`_deploy_ghpages = _deploy_production`（生产模式 = LLM 或蜂群，均同步 gh-pages）
+- `report_deployer.auto_commit_and_notify`：生产模式（LLM 或蜂群）提交 + 推 main + 同步 gh-pages；非生产扫描**不提交不推送**（v0.45.210 撤掉了坏了半年的 test remote 推送分支，**勿往 `GitHubTool` 白名单加 `checkout`/`reset` 恢复它**，理由在该函数 docstring）
 - `generate_ml_report.py`：末尾调用 `_sync_ghpages()`，每次生成 ML 报告后自动同步 gh-pages
 - **禁止**只推 main 不推 gh-pages，否则网站不更新
 

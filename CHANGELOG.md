@@ -5,7 +5,164 @@
 
 ---
 
-## [0.45.210] — 2026-09-13 — 占位（进行中：report_deployer 测试推送分支的回滚被 GitHubTool 白名单静默拒绝，判定修法并补观测点）
+## [0.45.210] — 2026-09-13 — 测试推送分支没「回滚失败」那么轻：它把规则引擎数据推进了生产。撤掉它，白名单一项不加
+
+v0.45.204 顺带发现：`report_deployer.auto_commit_and_notify` 测试模式分支下发的
+`git checkout` / `git reset` 不在 `GitHubTool._ALLOWED_GIT_CMDS` 里，被静默拒绝，
+其后无条件 log「本地 main 已恢复至 origin/main（测试数据不污染生产）」。
+本版先判「甲 加白名单 / 乙 改控制流 / 丙 分支是死的」哪条对，结论是**丙的变体**：
+分支活着（能触发）、坏着、且触发时有害 ⇒ **撤掉**；甲、乙都达不成原意图。
+
+### 取证：它触发过吗？（两条独立证据，各带正对照）
+
+触发条件：`_deploy_production = _using_llm or _is_swarm` 为假 ⇒ 只有**不带 `--swarm`**
+跑 `alpha_hive_daily_report.py`（`run_daily_scan`，报告无 `swarm_metadata`）才会进。
+编排器恒传 `--swarm`，GUI 走 `run_swarm_scan`，`run_daily_scan.py` 也走蜂群。
+`test` remote 在生产机上**配着**（`_remote_check` 不短路）。
+
+| 证据 | 结果 | 正对照 |
+|---|---|---|
+| `alpha-hive-test` 仓库 `pushed_at`（`gh api`） | **2026-03-01T03:47Z**，白名单提交 `2019ad4`（03-01T08:13Z）前 4.5 小时；此后零推送 | `alpha-hive-deploy` `pushed_at` = 今天 13:49Z |
+| `pheromone.db::reasoning_sessions.run_mode`（`bak-20260812` 备份，历史最长的一份） | `daily_scan` **7 条，2026-03-04 ~ 03-13**，此后五个月 0 条 | 同窗口 `swarm` 172 条；两条路径过同一道 `memory_store and _session_id` 闸 |
+| 日志（`logs/alpha_hive.log*` 08-16~09-11；编排器日志 08-14~09-13） | `🔧 测试` 0 行 | `🧠 生产` 54 行 / 12 行 |
+
+⚠️ 现行 `pheromone.db` 只剩 `swarm` 126 条（最早 03-16）——被 09-10/09-11 的
+restore/merge 截掉了早期记录。**只看现行库会得出「从未触发」**，要去翻备份。
+
+### 危害不是理论：白名单之后的 7 次触发，全部进了 origin/main
+
+白名单之后 7 次触发，与 origin/main 上**恰好 7 个**「日报 json 无 `swarm_metadata`、
+`system_status: "✅ 完成"`」的提交一一对应（03-04 14:05/14:18，03-06 14:20/14:39/14:41/14:57，
+03-13 17:38）。机制：回滚被拒 ⇒ 规则引擎提交留在本地 main ⇒ 下一次蜂群扫描的
+`git push origin main` 把它一起送上去（`rev-list --ancestry-path` 核过，每个都是
+随后一个生产提交的直系祖先）。
+
+**2026-03-13 至今未恢复**：当天 14:03 的蜂群日报被 17:38 的规则引擎版本覆盖，
+之后再没有 03-13 的生产扫描 ⇒ **main 与 gh-pages 上的
+`alpha-hive-daily-2026-03-13.json` 至今是规则引擎版**（蜂群版在 `85b7780`）。
+本版**未动**这份历史数据（恢复它 = 改线上网站，由用户决定）。
+
+沙箱用**未修改**的真实函数复现了整条链：checkout 被拒（**零日志**）→ 推 test 报
+`src refspec _test_snapshot does not match any` → 「已恢复」INFO 打在失败 WARNING **之前**
+→ 本地 main 留着提交 → 下一次生产推送后 origin/main 带上规则引擎版 03-13 json。
+
+### 为什么不是甲，也不是乙
+
+- **白名单的来历**：`2019ad4`「6 项高优先级安全加固 — shell 注入防护」，
+  `shell=True → shlex.split + 子命令白名单`。测试分支是三天前 `8941206` 写的——
+  **白名单漏列了已存在的调用方，不是有意排除 checkout/reset**。
+- **但甲照样不对。** 原设计「本地 main 不被污染」**只能靠 `reset --hard origin/main` 实现**，
+  而它会连带清掉：① v0.43.4 白名单提交**故意留在工作区**的进行中代码；
+  ② 刚被这次提交带进本地提交的账本（`hedge_state/` 等，`REPORT_ARTIFACT_PATHS`
+  注释写着「丢了无法回溯重取」，2026-09-04 就被一次 `reset --hard` 清掉过）；
+  ③ 本地 main 上未推送的合法提交（**生产 checkout 此刻就是 `ahead 1`**，见文末）。
+  且白名单只按子命令判，放行 `reset` 即放行 `reset --hard`。
+  变异 M10 实测：甲方案下 `test_does_not_touch_the_working_tree` 红（账本被删）。
+- **乙达不成原意图。** 旧实现**先提交再分流**，提交已经落在本地 main 上；
+  不 `reset`/`checkout` 就撤不掉。白名单内唯一撤法是
+  `git fetch --update-head-ok . <sha>:refs/heads/main`——那是穿着 `fetch` 马甲绕过白名单，不采用。
+- **前提也过时了**：「`--no-llm` 规则引擎 = 测试」是 2026-02 的划分；现行规则是
+  生产本来就跑 `--no-llm`（Cowork 本地推理），`_deploy_production` 早已把
+  蜂群 `--no-llm` 判为生产。
+
+### Removed
+
+- `report_deployer.auto_commit_and_notify` 的测试推送分支（`_test_snapshot` 临时分支 →
+  `git push test` → `checkout main` → `reset --hard origin/main`）及其「已恢复」日志。
+- 恒真的 `_deploy_ghpages` 变量与其不可达的「跳过 gh-pages」else 支。
+
+### Changed
+
+- **`auto_commit_and_notify`：模式判定挪到提交之前**；非生产扫描**不提交、不推送、不碰工作区**，
+  返回 `deploy_env="none"`、`git_push={"success":False,"skipped":"non_production","remote":None}`，
+  并把 `save_report` 已写进工作区的日报产物列进 warning 与
+  `results["uncommitted_report_artifacts"]`。生产分支行为不变（参数化正对照：蜂群 / LLM / 逐标的 LLM 三种判定）。
+- `alpha_hive_daily_report.main`：`deploy_env=="none"` 时打印「未提交、未推送」及残留产物，
+  不再指向 `alpha-hive-test` 网址。
+- `CLAUDE.md`「GitHub Pages 部署规则」一行改为指向新行为（原文引用的 `_deploy_ghpages` 已删）。
+- `agent_toolbox._ALLOWED_GIT_CMDS` **一项未改**；上方注释从「已知缺口」改为处置结论与「勿加 checkout/reset」。
+
+### Fixed — 补观测点（「谁会红？」）
+
+- `GitHubTool.run_git_cmd`：白名单拒绝 / 非 git 命令打 **ERROR**，subprocess 异常打 WARNING。
+  此前三种失败都只 return，而调用方不看返回值 ⇒ 拒绝等于没发生过。
+- `auto_commit_and_notify`：`git status` 失败**不再报成「无需提交（工作目录干净）」**
+  （`GitHubTool.status()` 失败返回 `{"error":…}`，旧判断 `status.get("modified_files")` 把它当空）。
+- `push_result` 带上 `error` 键：`run_git_cmd` 第二种失败形状（拒绝 / 超时 / OSError）只有
+  `error` 没有 `stderr`，旧代码 warning 打出来是「Git push 失败：」加空串。
+- `gui/interactions.py`：读返回值再说「✅ GitHub 推送完成」。此前推送被拒（如 non-fast-forward）也报成功。
+
+### Added — `tests/test_git_failures_are_visible.py`（21 passed + 1 xfailed）
+
+1. **调用点 × 白名单**（AST，经 `tests/_repo_files.own_python_files`，排除 tests/）：
+   生产代码每个 `run_git_cmd("git <子命令>…")`（含 f-string）必须在白名单内，非字面量也算违规；
+   正对照 = 扫得到 `report_deployer` 的 `push` 与 `agent_toolbox` 的 f-string `add`/`commit`；
+   有牙 = 旧句 `f"git checkout -b {_tmp}"` / `"git reset --hard …"` 被抓。
+   另一条「怕它变大」：白名单与 `{checkout, reset, restore, clean, switch, rebase, update-ref}` 交集必须为空。
+2. **`run_git_cmd` 出声**：拒绝→ERROR、非 git→ERROR、subprocess 抛→WARNING；正对照 = 合法 `git status` 零 WARNING。
+3. **真 git 沙箱**（本地 bare origin + **配了 test remote**，否则旧代码走短路、本组恒绿）：
+   非生产扫描后 HEAD 不动、test remote 为空、origin 只有 init、无「已恢复」日志；
+   复刻 03-13 链：规则引擎 → 生产推送后 origin 只多一个提交；工作区（账本 / 进行中改动）原样。
+4. **生产失败带原因**：non-fast-forward（复刻 08~09 月六次真实失败）原因进 warning；
+   `error` 形状原因进 warning；`git status` 失败不报「干净」。
+   调用方 AST：`auto_commit_and_notify(...)` 不许作裸语句（正对照：CLI、GUI 都扫到；有牙：GUI 旧句被抓）。
+
+### ⚠️ 已知残留（未修，strict xfail 盯着）
+
+`save_report` 在部署**之前**已把产物写进生产工作区。非生产扫描现在不提交了，但文件仍在；
+下一次生产扫描的白名单提交会把**没被覆盖**的那部分一并提交——03-13 那种「规则引擎在
+当天蜂群之后跑」的情形仍会发生，只是晚一个提交，且现在会在 warning 与 `git status` 里可见。
+**本函数管不到**：不碰工作区就撤不掉，碰工作区就是 `reset --hard`。根治在上游：让非生产扫描
+不往生产工作区写产物（`--samples-only` 已有同款处置，理由原文就是「被下次 daily-scan 的
+auto_commit_and_notify 误 commit 污染生产网站」）。
+`test_next_production_push_carries_no_non_production_content` 标 `xfail(strict=True)`：
+修好后 XPASS ⇒ 变红，提醒删 xfail（M11 实测有牙）。
+
+### 变异校验
+
+清 `__pycache__` → 定向三文件基线 `111 passed, 1 xfailed` → anchor 全部断言唯一且落地 →
+逐条跑 → 还原后四个文件 sha256 逐字一致、复跑 `111 passed, 1 xfailed`。
+
+| 变异 | 红 |
+|---|---|
+| **M0 三文件整体回退到修复前（正对照：真 bug）** | **10** |
+| M1 删白名单拒绝的 ERROR | 1（`test_whitelist_rejection_logs_error`） |
+| M2 删非 git 命令的 ERROR | 1 |
+| M3 删 subprocess 异常 WARNING | 1 |
+| M4 白名单加 `reset` | 1（`test_whitelist_holds_no_destructive_subcommand`） |
+| M5 非生产分支重新下发 `git checkout` | 1（调用点 × 白名单） |
+| M6 非生产分支先提交再返回 | 2（HEAD 不动 / 03-13 链） |
+| M7 `push_result` 丢 `error` 键 | 1 |
+| M8 `git status` 失败回到「当成干净」 | 1 |
+| M9 GUI 重新丢弃返回值 | 1 |
+| **M10 甲方案（旧 deployer + 白名单加 checkout/reset）** | **8**，含 `test_does_not_touch_the_working_tree`；strict xfail 也 XPASS 变红——甲**确实**达成原意图，靠的是删文件 |
+| M11 非生产分支删掉残留产物（验 xfail 有牙） | 2（XPASS strict + 工作区被动） |
+| **M12 CLI 打印判断改回 `== "test"`** | **0 —— 无测试覆盖，不是等价变异**（改的是用户可见输出；`main()` 这段没有测试） |
+
+`test_does_not_touch_the_working_tree` 对 M0（旧代码）是**等价**的——旧代码的 reset 被拒了，
+工作区本来就没被动；它防的是按甲修回去（M10 红）。docstring 已写明。
+
+### 顺带发现（未修，均属用户决定）
+
+- **生产推送正在失败**：编排器日志 08-14~09-13 共 12 次推送，失败 6 次**全是 non-fast-forward**
+  ——09-01/03/04/09/10/11，最近一次成功是 09-08（生产 checkout 的本地 main 落后于各 session
+  推上去的 origin/main）。gh-pages 走 plumbing 单独推，网站未必受影响，未核。此刻生产 checkout
+  `main...origin/main [ahead 1, behind 15]`，`1826d3e 蜂群日报 2026-09-11 14:47` **只在本地**。
+  （本 worktree 分支已改基于 origin/main，未携带该提交。）
+- `test`（`alpha-hive-test`）与 `preview`（`alpha-hive-preview`）两个 remote 与 GitHub 仓库
+  自 2026-03-01 起停更；本版未删 remote 配置、未动远端仓库。
+- `origin/main` 与 gh-pages 上 `alpha-hive-daily-2026-03-13.json` 仍是规则引擎版，见上。
+
+### 验证
+
+- 全套（清 `__pycache__`，`--maxfail=200`）：开工基线（干净 HEAD 的独立 worktree）
+  `1 failed / 4120 passed / 1 skipped / 80 deselected / 2 xfailed` →
+  改后 `1 failed / 4141 passed / 1 skipped / 80 deselected / 3 xfailed`。
+  差值恰为新文件的 21 passed + 1 xfailed；唯一红仍是 `TestCoverageHorizon`（按设计）。
+  跑前跑后 `git status --porcelain` 逐字相同（沙箱没往仓库写东西）。
+- `ruff check .`：**0**（简报写的「基线 46」已过时——v0.45.206 已清零），改后仍 0；
+  `ruff check --select F401 --isolated`：`agent_toolbox.py` 0→0、`report_deployer.py` 0→0、
+  `gui/interactions.py` 1→1（既有 `PixelBee`，非本版）、新测试文件 0。
 
 ## [0.45.209] — 2026-09-11 — GuardBee 的方向是其余六只的复述：100%，零例外
 

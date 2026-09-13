@@ -3102,8 +3102,13 @@ def main():
         git_ok = sync_results.get("git_push", {}).get("success", False)
         deploy_env = sync_results.get("deploy_env", "production")
         remote_label = sync_results.get("git_push", {}).get("remote", "origin")
-        if deploy_env == "test":
-            print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败'} → 🔧 测试环境 https://wangmingjie36-creator.github.io/alpha-hive-test/")
+        if deploy_env == "none":
+            # v0.45.210：非蜂群扫描不再有「测试环境」——那条推送自 2026-03-01 起就是坏的
+            _left = sync_results.get("uncommitted_report_artifacts") or []
+            print("   GitHub push : ⏭️  非生产扫描（非蜂群），未提交、未推送")
+            if _left:
+                print(f"   ⚠️  {len(_left)} 个日报产物已写进工作区，下一次生产扫描会把没被覆盖的一并提交："
+                      f"{', '.join(_left[:5])}" + (" …" if len(_left) > 5 else ""))
         else:
             print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败'} → 🧠 生产环境 https://wangmingjie36-creator.github.io/alpha-hive-deploy/")
         print(f"   Hive App    : ✅ .swarm_results 已落盘，下次启动自动加载")

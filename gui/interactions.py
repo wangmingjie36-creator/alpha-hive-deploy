@@ -382,8 +382,13 @@ class InteractionManager:
             self._enqueue(self._log, "System", f"报告保存失败：{str(e)[:60]}", "alert")
 
         try:
-            reporter.auto_commit_and_notify(report)
-            self._enqueue(self._log, "System", "✅ GitHub 推送完成，网站已同步", "system")
+            _push = reporter.auto_commit_and_notify(report).get("git_push") or {}
+            if _push.get("success"):
+                self._enqueue(self._log, "System", "✅ GitHub 推送完成，网站已同步", "system")
+            else:
+                # 不读返回值时推送被拒（如 non-fast-forward）也会报「✅ 推送完成」
+                _why = _push.get("error") or _push.get("output") or _push.get("skipped") or "见日志"
+                self._enqueue(self._log, "System", f"GitHub 推送失败：{str(_why)[:60]}", "alert")
         except Exception as e:
             self._enqueue(self._log, "System", f"GitHub 推送失败：{str(e)[:60]}", "alert")
 
