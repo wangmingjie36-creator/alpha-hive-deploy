@@ -393,11 +393,14 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
     丢了无法回溯重取的账本（见 `REPORT_ARTIFACT_PATHS` 注释）。
     为什么不是 `git push test HEAD:main`：提交已经落在本地 main 上，不 reset 撤不掉。
 
-    ⚠️ 已知残留（本函数管不到）：`save_report` 在本函数**之前**已把产物写进工作区。
-    非生产扫描不提交，但那些文件仍在；下一次生产扫描的白名单提交会把其中
+    本函数管不到的残留：`save_report` 在本函数**之前**已把产物写进工作区。
+    非生产报告不提交，但那些文件仍在；下一次生产扫描的白名单提交会把其中
     没被覆盖的一并提交。本函数把它们列进 warning 与
-    `results["uncommitted_report_artifacts"]`，让它可见；根治在上游（让非生产扫描
-    不往生产工作区写产物，同 `--samples-only` 的处置）。
+    `results["uncommitted_report_artifacts"]`，让它可见。
+    **上游已于 v0.45.213 根治**：非蜂群扫描整条退役，`alpha_hive_daily_report.main()`
+    不带 `--swarm` 在构造 reporter 之前就退出（它在扫描中途还会写概率账本，
+    在 save_report 之前短路管不到，见该处注释）。CLI 与 GUI 此后都只递蜂群报告进来，
+    非生产分支留作纵深防御——走到它说明有调用方递了一份不认得的报告，要出声。
     """
     _log.info("Auto-commit & Notify 启动")
 

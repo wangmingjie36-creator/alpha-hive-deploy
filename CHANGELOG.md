@@ -5,6 +5,156 @@
 
 ---
 
+## [0.45.214] — 2026-09-13 — 占位（进行中：生产 checkout 的 `git push origin main` 六次 non-fast-forward——诊断完成，修法待用户拍板）
+
+---
+
+## [0.45.213] — 2026-09-13 — 非蜂群扫描整条退役：它在 save_report **之前**就写生产账本，「照 --samples-only 短路」堵不住
+
+v0.45.210 留下的已知残留：非生产扫描（不带 `--swarm` → `run_daily_scan`）不再提交，
+但 `main()` 先 `save_report` 再部署，规则引擎产物照样落进生产工作区，被下一次生产扫描的
+白名单提交带走（2026-03-13 就是这么被顶掉的）。本版在三条路里选：
+甲 照 `--samples-only` 在 save_report 前短路 / 乙 输出重定向到仓库外 / 丙 整条退役。
+**选丙**，决定性的是取证 2——甲、乙都只看见了 save_report 那一层。
+
+### 取证 1：还有人跑它吗？（翻全部备份，不只看现行库）
+
+`pheromone.db::reasoning_sessions`，`immutable=1` 只读打开（不造 `-shm/-wal`）：
+
+| 库 | `daily_scan` | `swarm`（正对照，同一道 `memory_store and _session_id` 闸） |
+|---|---|---|
+| 9 份备份（05-28 ~ 08-12，含 `bak-20260812`） | **7 条，均为 2026-03-04 ~ 03-13** | 119 ~ 172 条，最晚 08-11 |
+| `bak_before_restore115_20260910` | 1 条（03-13；此库本身从 03-13 起） | 125 条 |
+| 两份 09-11 备份 + 现行库（WAL 连同复制后读） | 0 条 | 125 / 126 条，**最早 03-16**（被截断） |
+| `backup_corrupted_20260406` | 读不了（malformed） | — |
+
+⇒ 所有能读的库一致：最后一次 `daily_scan` 是 **2026-03-13**，此后六个月 0 条。
+
+调用方普查（均为「不带 `--swarm` 会不会被打断」）：编排器 `alpha-hive-orchestrator.sh:532`
+恒传 `--swarm`，launchd `com.alpha.hive.daily` 只调编排器；scheduled-tasks 两个 SKILL.md 都带 `--swarm`；
+GUI 走 `run_swarm_scan`；`run_daily_scan.py`（同名脚本）走 `run_swarm_scan` 且从不 `save_report`。
+唯一不带 `--swarm` 的调用者是仓库外的 `~/.claude/scripts/alpha-hive-daily.sh`（2026-02-24），
+它指向不存在的 `~/.claude/reports/alpha_hive_daily_report.py`，也没有任何 plist 加载它——死脚本。
+（另一 session 独立做了只读普查，结论一致。）
+
+origin/main 现存 106 份日报 json，缺 `swarm_metadata` 的只剩 `alpha-hive-daily-2026-03-13.json`
+（v0.45.210 数到的另外 6 次落在 03-04 / 03-06 两天，这两天现存文件已是蜂群版；何时被覆盖未逐一考古）。
+
+### 取证 2（新发现）：它在扫描**过程中**就写生产账本
+
+`_analyze_ticker_safe → generate_ml_enhanced_report(ticker, realtime_metrics)`（**不带**蜂群方向）
+→ `probability_scorecard.record_published(direction=None)` → `probability_scorecard_state/published.jsonl`
+——白名单目录，注释写着「丢了无法回溯重取」。而 `record_published` 按 `(date, ticker)`
+**先写者占位**（「补跑扫描不会污染账本」的幂等设计）。
+
+沙箱实测（真 `run_daily_scan` + 真 `record_published`，数据源打桩，账本重定向到 tmp）：
+
+```
+非生产扫描后账本：[('2026-09-14','TSLA',None), ('2026-09-14','NVDA',None)]
+同日蜂群扫描写 NVDA（direction='bullish'）→ accepted? False
+账本里留下的 NVDA：direction=None, basis='probe'
+```
+
+规则引擎只要比当天蜂群扫描早跑，那天真正印出去的概率就**永远记不进去**，且不报错。
+这一层发生在 save_report 之前 ⇒ **甲堵不住**；账本锚在 `probability_scorecard.__file__`、
+不在 `report_dir` ⇒ **乙也重定向不到**。账本写入是 v0.45.134（2026-09-06）才接进这条路的，
+晚于最后一次 `daily_scan` ⇒ 潜伏，未实际发生。
+
+### 为什么是退役，以及退役成什么样
+
+- 零使用、有害两层、前提已过时（「规则引擎 = 测试」v0.45.210 已判过时）⇒ 撤，同 CrewAI（v0.45.74）先例。
+- 闸放在 `main()` 解析完参数**立刻**，早于交易日护栏、LLM 选择、构造 reporter——reporter 一构造就有副作用。
+- **不把 `--swarm` 改成默认开**：那会把「随手裸跑一下」升级成提交 + 推 origin + 推 gh-pages。
+  报错信息里写明「蜂群扫描是生产扫描」，免得有人为了过闸盲加 `--swarm`。
+- `--check-earnings` 不扫描，放行（正对照测试盯着）。
+- `report_deployer` 的非生产分支**保留**作纵深防御（CLI 与 GUI 现在都只递蜂群报告）。
+
+### 顺带更正：v0.45.210 的 strict xfail 永远 XPASS 不了
+
+`test_next_production_push_carries_no_non_production_content` 自己往工作区种 `LEFTOVER`，
+再直调 `auto_commit_and_notify` ——上游 `main()` / `save_report` 根本不在路径上。
+**实测：退役落地后它照旧 XFAIL**，会一直挂着（形状同「flaky 修成恒 skip」）。
+v0.45.210 的 M11 证明的是「部署函数自己删残留」那种修法，与同条目「根治在上游」对不上。
+已改为从 CLI 入口 `main()` 进的链路测试，不再 xfail。
+
+### Removed
+
+- `AlphaHiveDailyReporter.run_daily_scan` 及只服务于它的整条链：`_analyze_ticker_safe`、
+  `_parse_ml_report_to_opportunity`、`_build_report`、`_generate_markdown_report`、
+  `_generate_twitter_threads`、`self.observations`；`report_formatters.generate_markdown_report` /
+  `generate_twitter_threads`（蜂群走 `generate_swarm_*`）。逐成员 `git grep -w` 全文件类型核过零读者。
+- `main()` 的 `else: run_daily_scan` 分支；epilog 里「传统 ML 模式（默认）」示例；无用的 `typing.Tuple`。
+
+### Changed
+
+- `alpha_hive_daily_report.main()`：不带 `--swarm`（且非 `--check-earnings`）→ `parser.error` exit 2，
+  在构造 reporter 之前；`--swarm` help 与 epilog 写明必需且是生产扫描。
+- `main()` 里 `deploy_env == "none"` 的打印：CLI 只跑蜂群后走到这里是回归（报告没被认出来），
+  文案改为「部署判定为非生产报告（蜂群报告缺 swarm_metadata？）」。
+- `report_deployer.auto_commit_and_notify` docstring：「已知残留」改为指向本版根治。
+- `CLAUDE.md`「GitHub Pages 部署规则」加一行：非蜂群扫描已退役、勿重建。
+- 注释 / docstring 里指向已删方法的指针（`advanced_analyzer.py`、两个测试文件）加注退役。
+
+### Added — `tests/test_non_swarm_scan_retired.py`（14 条）
+
+1. **CLI 闸在扫描之前**：6 种不带 `--swarm` 的参数组合 → exit 2 且 reporter **一次都没构造**；
+   负例一律带 `--force`（否则周末跑时旧代码被交易日护栏挡掉，对旧 bug 只在交易日红）。
+   正对照：`--swarm` 真构造并调 `run_swarm_scan`；`--check-earnings` 不被误伤。
+   另：部署判定回 `none` 时 CLI 不许报「生产环境」——补上 v0.45.210 变异 M12 的 0 红缺口。
+2. **不带方向的账本写入者**（AST，全仓经 `own_python_files`）：每个 `generate_ml_enhanced_report(...)`
+   必须带 `swarm_direction`。不点名 `run_daily_scan`，换名重建照样红。正对照扫到两个真实调用点；
+   有牙 = 退役前 `_analyze_ticker_safe` 原句被抓。局限写进 docstring：看不见 `swarm_direction=None`。
+3. 名字：`run_daily_scan` / `_analyze_ticker_safe` 不许回到 `AlphaHiveDailyReporter` 上。
+
+`tests/test_git_failures_are_visible.py`：xfail 那条换成 CLI 入口链路测试（带「生产推送确实送上了提交」的正对照）。
+
+### 退役造成的自然红（逐条核过，不是改测试掩盖）
+
+代码改完、测试未动时定向跑，恰好 2 红，均为锚点自证类：
+- `test_backfill_date_anchoring::TestDailyReportSitesAnchored[_analyze_ticker_safe]` → 删该行（方法已删）。
+- `test_ml_catalyst_quality_source::test_call_site_count_is_known[alpha_hive_daily_report.py-2]` → 改 1，注明少的是退役路径。
+
+### 变异校验
+
+清 `__pycache__` → 合并 origin/main 后全套 `1 failed / 4166 passed / 2 xfailed` → 9 条变异，
+**每条跑全套**、锚点全部断言唯一、每个变异体 `ast.parse` 通过且非空改 → 逐条还原并核 sha256 →
+复跑全套逐字一致、`git status --porcelain` 与跑前相同。下表不含每轮都红的 `TestCoverageHorizon`。
+
+| 变异 | 红 |
+|---|---|
+| **M0 生产两文件整体回退到修复前（正对照：真 bug）** | **11** |
+| M1 删掉 CLI 闸（裸跑直接变成 `run_swarm_scan` = 生产部署） | 7（6 负例 + 链路测试） |
+| M2 闸过宽 `if not args.swarm` | 1（`--check-earnings` 被误伤） |
+| M3 闸挪到构造 reporter 之后 | 6 |
+| **M4 被否决的甲：留着 `run_daily_scan`，照 `--samples-only` 在 save_report 前短路** | **10 —— 但链路测试是绿的** |
+| M5 别的文件新增一个不带 `swarm_direction` 的调用 | 2（全仓守卫 + 调用点计数） |
+| M6 加回一个名为 `run_daily_scan` 的空方法 | 1 |
+| M7 CLI 打印判断改回 `== "test"`（v0.45.210 的 M12，当时 0 红） | 1 |
+| M8 闸改成 `return`（退出码 0，拒绝被改写成成功） | 6 |
+
+M4 那行是本版最要紧的一格：**只看工作区/推送内容的测试分不出甲和丙**（甲确实堵住了 save_report 那层），
+把甲拦下来的是账本写入者守卫与「reporter 没被构造」——即取证 2 那一层。
+
+### 顺带发现（未修，均属用户决定）
+
+- `origin/main` 与 gh-pages 上 `alpha-hive-daily-2026-03-13.json` 仍是规则引擎版（蜂群版在 `85b7780`）。**未恢复**——改线上网站。
+- `~/.claude/scripts/alpha-hive-daily.sh`：仓库外死脚本（见取证 1），未删。
+- 生产 checkout 出现两个未跟踪边车 `pheromone.db.backup_corrupted_20260406-shm/-wal`（09-13 06:57，
+  有人不带 `immutable` 打开了那份坏备份）。不是本 session 造的（本版读库一律 `immutable=1` 或读副本），未动。
+- `~/.claude/scheduled-tasks/alpha-hive-daily-scan/SKILL.md` 第 21 行用裸 `python3`（另一 session 指出；该任务是否仍启用未核）。
+
+### 验证
+
+- 开工基线（干净 detached worktree @ `578f295`）：`1 failed / 4141 passed / 1 skipped / 80 deselected / 3 xfailed`。
+- 合并基线（同一 worktree 切到 origin/main @ `d5ba6bd`，含 v0.45.211）：`1 failed / 4151 passed / 1 skipped / 80 deselected / 3 xfailed`。
+- 改后（已合并 v0.45.211）：`1 failed / 4166 passed / 1 skipped / 80 deselected / 2 xfailed`；唯一红为 `TestCoverageHorizon`（按设计）。
+  差值 +15 passed / −1 xfailed 逐项对得上：新文件 +14；xfail 转链路测试 +1（xfailed −1）；
+  `TestDailyReportSitesAnchored` 删一行 −1；`test_docstring_is_first_statement` 自动把新类
+  `SpyReporter` 参数化进来 +1（collect-only 逐 ID diff 核出，不是估的）。
+- `ruff check .`：0。
+
+---
+
 ## [0.45.212] — 2026-09-13 — BearBee 与 GuardBee 退出方向计票：一张无技能的常数看空票，和一张抵消它的复述票
 
 v0.45.209 发现 Guard 的方向票 100% 复述同伴。用户问要不要摘，用真实代码逐位重放后发现：
@@ -41,6 +191,21 @@ Guard 的复述票在意外地抵消 BearBee。用户决定：**先修它在补�
   W35 同权），池化均值与周聚类均值符号相反；截尾 ±10% 与方向对错两个敏感性指标（事后加的）结论一致。
 - 「只摘 Guard 有害」只在历史原样里成立，现行规则下消失 —— 当年 Oracle 的关键词票近乎恒看多，
   抬高了「计数多数看多、票重多数看空」这类行的比例。
+
+### 为什么两部分一起合、为什么现在合（用户授权「按长期价值选」）
+
+实现先落在分支、两部分分开提交，因为零效应证据加 30% 的方向改变不该由我单方面推上 main。
+用户的判据是长期价值，据此两部分一起合：
+
+1. **等待换不来信息。** 重放对两套规则都逐位复现（793/793），且 JSON 照旧落盘 BearBee/Guard 的
+   方向、置信度与 data_quality ⇒ 无论线上跑哪套，未来的 `close_t7` 都能给两套规则**同时**打分。
+   「先不合、等结果」学到的东西，合了之后离线重放一样学得到。
+2. **世代边界只会越来越贵。** 现在作废 30 条、0 条到期；每多一个扫描日，下次再切就多作废一批已攒的样本。
+   只合 BearBee 部分，将来摘 Guard 还得再付一次。
+3. **后续分析的混杂项少两个。** 调门槛、评估各蜂技能、重跑 IC，都不必再隔着「常数看空票 vs 抵消它的复述票」看。
+
+⚠️ 代价写在明处：方向分布明显偏多（看多 383→507）。若当前口径到期结果显示偏多有害，
+该做的是在干净口径上重校门槛，而不是把这两张票接回去。
 
 ### Changed — `swarm_agents/queen_distiller.py`
 
@@ -95,10 +260,105 @@ Queen 共振检测里 Guard 复述多数时仍给同向方**多算一个维度**
 09-11 那 30 条预测是旧计票产出的 ⇒ **作废 30 条**（其中已到期 0 条）。
 
 全套 **4162 passed**，唯一的红是既有设计意图的 BLS `TestCoverageHorizon`。
-
 ---
 
-## [0.45.211] — 2026-09-13 — 占位（进行中：GitHubTool.status() 失败被报成「干净」+ porcelain 解析错，补测试）
+## [0.45.211] — 2026-09-13 — `GitHubTool.status()`：失败原因会整个丢掉，路径会被解析坏，而测试从没碰过它
+
+`status()` 是在产方法（`report_deployer._git_modified_files` 读它），v0.45.204 实测删掉整个
+`def status` 全套零红。开工时 v0.45.210 还是占位、改的是同一个调用方函数，按约定先只做
+`agent_toolbox` 一侧；开工中途它落地（`8f83bcd`），**调用方「失败被报成干净」已由它修掉**
+（`"modified_files" not in status` ⇒ warning + `git_commit.success=False`），本版不重复修，
+只让 `status()` 自身的契约配得上那个判断，并补上两边之间缺的那条真实用例。
+
+### 复核（均在临时仓库实测，不是转述）
+
+| 形状 | 旧实现实测输出 |
+|---|---|
+| 非仓库目录（git 非零退出，原因在 stderr） | `{'error': 'fatal: not a git repository …'}` —— 无 `success` 键 |
+| **cwd 不存在（子进程自己炸，`run_git_cmd` 只给 `error` 键）** | **`{'error': None}`** —— 失败原因整个丢了（任务卡没列，复核时新发现） |
+| `?? "report 2.json"` | `2.json"` |
+| `?? 日报.md` | `"\346\227\245\346\212\245.md"`（字面八进制串带引号） |
+| ` M "tracked name.md"` / `?? "quo\"te.txt"` | `name.md"` / `"quo\"te.txt"` |
+| `R  old.txt -> new.txt` | `new.txt`（这一种旧写法恰好对） |
+
+**影响面（修正任务卡的判断）**：解析结果不影响「提交与否」的闸门（非空输出每行必出一个
+token，列表空不空不变），也不影响提交集合（`commit(paths=REPORT_ARTIFACT_PATHS)` 走白名单）。
+它进的是：生产分支「跳过 N 个非日报产物」warning + `results["skipped_non_artifacts"]`；
+以及 v0.45.210 新增的非生产分支残留产物清单 + `results["uncommitted_report_artifacts"]`。
+严重度仍低，但**不止「名字难看」**：实测 iCloud 副本 `alpha-hive-daily-2026-09-11 2.json`
+被解析成 `2.json"` ⇒ 判为非产物 ⇒ warning 说「跳过、不会被自动提交」，而白名单 glob
+`alpha-hive-daily-*.json` **实际把它提交了** —— 日志说的与发生的正相反。
+
+### 失败时是返回还是抛？
+
+- **返回**：`run_git_cmd` 两种失败形状（git 非零退出带 stderr；subprocess 异常 / 白名单拒绝只有 `error`）。
+  旧实现只读 stderr，第二种丢原因。
+- **抛**：旧实现**不会**抛（无 `-z` 的输出是纯 ASCII）。**换 `-z` 会新引入一条**：`-z` 按原始字节
+  输出路径，`run_git_cmd` 是 `text=True` 严格解码，索引里有非 UTF-8 路径时抛 `UnicodeDecodeError`。
+  实测：APFS 拒建这种文件（`Errno 92 Illegal byte sequence`），但 `git update-index --cacheinfo`
+  造的索引条目（= 别的系统提交进来的路径）能让它当场抛出。它是 `ValueError` 子类，会被
+  `alpha_hive_daily_report` 部署外层 `except (OSError, ValueError, …)` 接住 ⇒ 当天 push 与
+  gh-pages 一起跳过。**在 `status()` 里收成失败返回**，不让它越过调用方的「失败 / 干净」判断。
+- 本机 `locale.getpreferredencoding()` 在 `env -i`（≈ launchd）下也是 `utf-8` 且 UTF-8 mode 开启，
+  中文路径走 `-z` 解码无碍（实测）。
+
+### Fixed — `agent_toolbox.GitHubTool.status()`
+
+- 命令换成 `git status --porcelain -z`，新增 `_parse_porcelain_z`：不加引号、不转义、与
+  `core.quotepath` 无关；改名 / 复制条目跳过其后单独一段的原路径；不认识的条目抛 `ValueError`。
+- 返回契约写进 docstring：成功 `{"success": True, "modified_files": [...], "status": …}`（空列表才是干净）；
+  失败 `{"success": False, "error": 非空}`，**没有** `modified_files` 键（与 v0.45.210 调用方的判法对齐）。
+  `ValueError`（含 `UnicodeDecodeError`）收成失败返回并打 warning。**不抛异常。**
+- 模块 docstring 里「删 `status` 零红」一句标注为 v0.45.204 当时的实测（现在会红）。
+
+### Added — 测试
+
+- **`tests/test_github_tool_status.py`**（9 条，全部真 git 仓库、不打桩），每组先用正对照断言夹具
+  确实走到了想测的分支：解析（空格 / 中文 / 引号 / 带空格目录 / 改名 / warning 与白名单提交一致 /
+  不认识的条目）、失败 ≠ 干净（非仓库 / 索引损坏 / cwd 不存在）、非 UTF-8 索引条目不抛。
+- `tests/test_git_failures_are_visible.py`：v0.45.210 的假 `status` 按新契约补 `success: False`；
+  **新增 `test_real_status_failure_is_not_reported_as_clean`**——真 `status()` 在索引损坏的真仓库里
+  失败，走完整 `auto_commit_and_notify`。假值只证明调用方认得那个假形状，两边任一侧改失败形状
+  只有这条会红。
+
+### 变异核对（独立克隆里真跑，先断言变异落地：锚点计数 1→0 且 `git diff` 可见）
+
+跑 `test_github_tool_status.py` + `test_git_failures_are_visible.py` + `test_report_deployer_whitelist.py`，
+基线 `67 passed, 1 xfailed`（xfail 是 v0.45.210 预设的 strict 残留）。
+
+| 变异 | 红 |
+|---|---|
+| 删整个 `def status` | **19**（v0.45.204 时全套 0） |
+| 解析退回 `split()[-1]`（去 `-z`） | 3：引号路径 / warning 与提交一致 / 非 UTF-8 |
+| `-z` 但不跳过改名原路径 | 1：改名 |
+| `status()` 失败时返回 `success: True, modified_files: []`（失败当干净） | 4：三种真实失败 + 调用方真失败用例 |
+| 调用方 `_git_modified_files` 把失败当干净 | 2：v0.45.210 假值用例（改夹具后仍会红）+ 新增真失败用例 |
+| 失败原因退回 `result.get("stderr")` | 1：cwd 不存在 |
+| 去掉 `except ValueError` | 1：非 UTF-8 索引条目 |
+| **整份换回改动前的 `agent_toolbox.py`** | 8 |
+
+**量具自己坏过两次，都是变异抓出来的：**
+
+1. `test_skip_warning_agrees_with_what_the_whitelist_commits` 第一版断言
+   `said_skipped == set(changed) - committed`——**两边都出自被测解析器**。旧解析的 `2.json"`
+   永远不在 committed 里 ⇒ 两边恒等 ⇒ 解析退回 `split()[-1]` 时照样绿。为这个 bug 写的用例
+   对这个 bug 恒绿。改为用测试自己造的文件名当真值后，该变异下变红。
+2. `pyproject` addopts 会在首个失败处停，第一轮每个变异都只显示「1 failed」——看不出每条用例
+   各自接住了哪个变异。变异核对必须带 `--maxfail=200`。
+
+**全套**（独立克隆、`env -i`、`--maxfail=200`）：基线 `8f83bcd` `1 failed, 4141 passed, 1 skipped,
+80 deselected, 3 xfailed`；本版 `1 failed, 4151 passed`（+10 = 新增 10 条），其余逐项相同。
+唯一的红两边都是按设计会红的 `TestCoverageHorizon`。`ruff check .` 全绿，与基线持平。
+
+### 顺带发现（未修）
+
+- **v0.45.204 数读者的口径 `git ls-files | xargs grep` 会静默跳过非 ASCII 文件名**：`ls-files`
+  默认也按 `core.quotepath` 输出引号 + 八进制，xargs 拿到的是不存在的路径，grep 报
+  `No such file` 后继续（本仓 3118 个跟踪文件里 11 个）。与本版解析 bug 同一形状。
+  复核：跟踪的 `.py` 里非 ASCII 名 0 个，被跳过的 11 个文件里 v0.45.204 删掉的方法名 0 命中
+  ⇒ **它的结论不受影响**。正确口径是 `git ls-files -z | xargs -0 grep`（`tests/_repo_files.py` 已是 `-z`）。
+- 白名单 glob 会把「名字形如 `alpha-hive-daily-… 2.json`」的 iCloud 副本一并提交——与解析无关、
+  早已如此。现在 main / gh-pages 上这种文件 0 个（`ls-tree -z` 实测），未动。
 
 ## [0.45.210] — 2026-09-13 — 测试推送分支没「回滚失败」那么轻：它把规则引擎数据推进了生产。撤掉它，白名单一项不加
 
