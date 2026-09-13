@@ -305,6 +305,17 @@ class TestResultReachesAlerts:
         assert target.parent == Path(os.environ["ALPHA_HIVE_LOGS_DIR"])
         assert str(target).startswith(str(tmp_path))
 
+    def test_result_file_is_gitignored_in_the_checkout(self):
+        """生产 checkout 里它每轮都写：不忽略就成了未跟踪文件，每次部署都进「跳过 N 个非日报文件」的噪音。
+
+        v0.45.214 首次在生产真跑 CLI 时实测漏了这一条。`git check-ignore` 三个退出码分开处理：
+        0=忽略 / 1=未忽略（红）/ 128=这里不是 git 仓库（导出树等，条件为真的是全集减人造特例，skip 正当）。"""
+        r = subprocess.run(["git", "check-ignore", "-q", "logs/production_sync.json"],
+                           cwd=_ROOT, capture_output=True, text=True)
+        if r.returncode == 128:
+            pytest.skip(f"不在 git 仓库里：{r.stderr.strip()}")
+        assert r.returncode == 0, f"logs/production_sync.json 没被 .gitignore 忽略（exit={r.returncode}）"
+
     def test_load_only_returns_this_rounds_result(self, tmp_path):
         p = tmp_path / "ps.json"
         assert ps.load_for_date("2026-09-14", p) is None                      # 没有

@@ -75,7 +75,7 @@
   - CLI（编排器 Step 1 前调）：结果写 `PATHS.production_sync`（`logs/production_sync.json`），退出码 0/1。
 - `hive_logger.PATHS.production_sync`；`scan_timing.production_sync_result()` 与 `git_push_summary()`：
   两者都随 `scan_timing.json` 并进 `status.json`（同 `code_version` 的走法，无需改编排器的合并逻辑）。
-- `tests/test_production_sync.py`（22 条，全部真 git 沙箱：bare origin + 生产 checkout + 另一 session 的 clone）。
+- `tests/test_production_sync.py`（23 条，除 gitignore 一条外全部真 git 沙箱：bare origin + 生产 checkout + 另一 session 的 clone）。
 
 ### Changed
 
@@ -101,10 +101,26 @@
   `TestCoverageHorizon`（硬编码 CPI/NFP 日历剩余天数低于 90 天阈值，按设计会红）——
   在改动前的导出树上同样失败，本版未碰日历文件。`ruff check .`：All checks passed。
 
+### 接线与进生产（用户逐项批准）
+
+- **编排器**（`~/.claude/scripts/alpha-hive-orchestrator.sh`，仓库外、不受版本控制）：在「今日尚无产出…执行扫描」
+  之后、任何 Python 步骤之前插入 14 行：`[ -f production_sync.py ]` 才调
+  `$PYTHON3 production_sync.py --date "$DATE_STR"`，非零退出只打 WARN、扫描照跑。`bash -n` 通过。
+  **这一行被删掉时谁会红**：它只存在于生产机，静态测试只能在本机跑（skip 守卫反模式）；
+  真正的观测点是告警侧——结果缺失 ⇒ P2「扫描前生产代码同步未执行」，每轮都在生产机上判。
+- **生产首次快进**：生产 main 在 12:59:31 已被**另一个 session** 手工快进 `1826d3e → 2c96e56`
+  （34 个提交），本 session 13:01:51 按批准再快进一个 CHANGELOG 提交到 `146d7b5`。快进前复核：
+  在 main、ahead 0、无扫描在跑、脏文件与未跟踪文件均不与入站路径重叠；`1826d3e` 仍在历史里。
+  ——这次「碰巧有 session 先同步了」本身就是本版要取代的那个形状。
+- **真仓库实测**：`env -i` 模拟 launchd 的 PATH 跑 CLI，ssh fetch 成功，`up_to_date`，结果落
+  `logs/production_sync.json`。随即发现该文件**未被 .gitignore 忽略**（`git check-ignore` 退出 1）⇒
+  每次部署都会进「跳过 N 个非日报文件」的噪音 ⇒ 补 `.gitignore` 一行 + 守卫
+  `test_result_file_is_gitignored_in_the_checkout`（0/1/128 三态分开）。测试共 23 条。
+
 ### 待办 / 未做
 
-- 编排器接线与生产首次快进：见本条末（需用户批准，编排器在仓库外、未纳入版本控制）。
-- v0.45.209 世代边界的 30 条样本是否要移到首个真跑 209 的扫描日——用户决定。
+- v0.45.209 世代边界的 30 条样本是否要移到首个真跑 209 的扫描日——用户决定（分数是否受影响待验证）。
+  v0.45.212 的边界日期 2026-09-13：生产已在周一扫描前同步，不会重演。
 - 跨 session 实测（本版吸收）：`merge --ff-only` 对「相对 HEAD 脏、内容却与 origin 一致」的文件照样拒绝
   ⇒ 报告提交必须留在本地；main 上 CI 近 30 次 15 失败 + 15 取消（`TestCoverageHorizon` 按设计红）⇒ 当不了晋升闸门。
 
