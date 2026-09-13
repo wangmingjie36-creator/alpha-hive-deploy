@@ -5016,50 +5016,7 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
         print(f"  ⚠️ adversarial_bear card 跳过: {_e}")
         adversarial_bear_html = ""
 
-    # P2-⑧ 误判模式预警横幅（事前警告）
-    misjudgment_banner_html = ""
-    try:
-        from feedback_loop import check_misjudgment_warnings
-        _raw = ctx.get("_raw_data", {}) or {}
-        _opts = _raw.get("options_analysis", {}) or {}
-        # 信号定义必须与 compare_engine_v2.archive_today_prediction (lines 380-392) 保持一致
-        # call_dominant 在那边定义为 call_pct >= 65（call vol / total vol）
-        # 等价 pc_ratio <= 0.538（put_vol/call_vol = 35/65）；put_dominant 同理
-        _pc = float(_opts.get('put_call_ratio', 1.0) or 1.0)
-        _ivr = float(_opts.get('iv_rank', 0) or 0)
-        _score = float(ctx.get('final_score', 0) or 0)
-        _signals = {
-            'call_dominant':  _pc <= 0.54,    # 对应 call_pct >= 65
-            'put_dominant':   _pc >= 1.86,    # 对应 call_pct <= 35
-            'pc_bullish':     _pc <= 0.7,
-            'pc_bearish':     _pc >= 1.2,
-            'iv_elevated':    _ivr >= 60,
-            'iv_suppressed':  _ivr <= 30,
-            'score_high':     _score >= 6.5,
-            'score_low':      _score <= 3.5,
-            'resonance_active': bool((ctx.get('resonance') or {}).get('triggered')),
-        }
-        warns = check_misjudgment_warnings(
-            ticker, ctx.get("direction_zh") or ctx.get("direction") or "中性", _signals
-        )
-        if warns:
-            items = []
-            for w in warns[:3]:
-                items.append(
-                    f"<li><b>⚠️ {w['severity']}</b> · {w['reason']}（同模式历史命中 {w['hits']} 次，平均回撤 {w['avg_drawdown']:+.2f}%，最近：{w['last_hit_date']}）</li>"
-                )
-            misjudgment_banner_html = (
-                '<div class="section" style="border:2px solid var(--red2,#f85149);background:rgba(248,81,73,.06);'
-                'padding:16px 22px;border-radius:10px;margin-bottom:16px">'
-                '<div style="font-size:13px;font-weight:700;color:var(--red2,#f85149);margin-bottom:8px">'
-                '🚨 误判模式预警（P2-⑧）· 当前条件命中历史误判模板</div>'
-                f'<ul style="font-size:12px;line-height:1.7;padding-left:20px">{"".join(items)}</ul>'
-                '<div style="font-size:11px;color:var(--muted);margin-top:6px">'
-                '由 thesis_breaks_config 自动维护：误判达 3 次后激活预警；命中 5 次升级为 HIGH 严重度。</div>'
-                '</div>'
-            )
-    except Exception as _e:
-        print(f"  ⚠️ misjudgment_banner 跳过: {_e}")
+    # P2-⑧ 误判模式预警横幅 v0.45.215 已撤（见 feedback_loop.py 同名墓碑注释）
 
     # ── v0.18.0 · CH4 期权策略建议卡片 ────────────────────────────────────────
     try:
@@ -6647,7 +6604,6 @@ def generate_html(ctx: dict, reasoning: dict, accuracy_html: str = "",
   </div>
 
   {portfolio_card_html}
-  {misjudgment_banner_html}
 
   {exec_summary_html}
   {dod_delta_html}
