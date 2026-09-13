@@ -11,6 +11,7 @@
     "BuzzBeeWhisper": 7.22,
     "CodeExecutorAgent": 6.5
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -20,18 +21,11 @@
   },
   "low_conviction": false,
   "low_conviction_reason": "",
-  "cs_rank": {
-    "final": 0.448,
-    "signal": 0.172,
-    "catalyst": 0.966,
-    "sentiment": 1.0,
-    "odds": 0.448,
-    "risk_adj": 0.172
-  },
+  "cs_rank": null,
   "actual_prices": {
-    "t1": null,
+    "t1": 1000.26,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-09-04T14:59:34.789817"
+  "created_at": "2026-09-11T14:46:33.118426"
 }

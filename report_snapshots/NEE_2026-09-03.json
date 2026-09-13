@@ -11,6 +11,7 @@
     "CodeExecutorAgent": 6.5,
     "RivalBeeVanguard": 6.15
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -20,18 +21,11 @@
   },
   "low_conviction": false,
   "low_conviction_reason": "",
-  "cs_rank": {
-    "final": 0.414,
-    "signal": 0.759,
-    "catalyst": 0.724,
-    "sentiment": 0.621,
-    "odds": 0.379,
-    "risk_adj": 0.207
-  },
+  "cs_rank": null,
   "actual_prices": {
-    "t1": null,
+    "t1": 83.28,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-09-03T14:53:22.254469"
+  "created_at": "2026-09-11T14:46:38.521039"
 }
