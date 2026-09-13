@@ -78,8 +78,13 @@ class QueenDistiller:
     #   且 `contrarian` 不在 ml_adjustments 表里 ⇒ 豁免了核心维度那 0.5–0.6 的票重缩放。
     #   GuardBee 的复述票（v0.45.209）起决定作用的行里 96% 正是在抵消它。
     # ⚠️ 结果证据是零效应不是改善（预注册两语料三指标 p 0.12–0.59），理由是结构性的。
+    #
+    # GuardBeeSentinel：方向是其余六只多数的复述（v0.45.209：普查口径后 90/90、打乱对照
+    #   38.9%），在这里被当第 7 张独立票再数一遍。它此前「有用」只是在抵消 BearBee；
+    #   BearBee 退出后再摘它，预注册比较两语料三指标 p 0.38–0.99 —— 零效应。
+    #   它的**分数**通道（风险关门）、宏观政体、共振维度（另一条复述通道，未测未动）都不在此列。
     # 守卫：tests/test_non_voting_agents.py
-    NON_VOTING_AGENTS = frozenset({"BearBeeContrarian"})
+    NON_VOTING_AGENTS = frozenset({"BearBeeContrarian", "GuardBeeSentinel"})
 
     def __init__(self, board: PheromoneBoard, weight_manager=None, adapted_weights: Dict = None,
                  enable_llm: bool = True, ml_model=None):
@@ -665,7 +670,7 @@ class QueenDistiller:
             _CAC = {}
         _close_vote_thresh = _CAC.get("close_vote_threshold", 0.15)
         _dissent_boost = _CAC.get("dissent_boost", 1.5)
-        _dissent_agents = set(_CAC.get("dissent_agents", ["GuardBeeSentinel"]))
+        _dissent_agents = set(_CAC.get("dissent_agents", []))
 
         _pre_arb_margin = abs(bullish_w - bearish_w) / total_w if total_w > 0 else 0.0
         _arb_triggered = False

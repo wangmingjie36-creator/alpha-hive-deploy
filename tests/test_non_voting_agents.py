@@ -134,7 +134,11 @@ class TestBearBeeDoesNotVote:
         assert dv2["vote_excluded_agents"] == [], "没出场的蜂不该出现在排除名单里"
 
     def test_bull_veto_still_reads_bear(self, queen, monkeypatch):
-        """BearBee 的独立通道保留：BullVeto 打开时照旧读它的分数（它本身停用中）。"""
+        """BearBee 的独立通道保留：BullVeto 打开时照旧读它的分数（它本身停用中）。
+
+        ⚠️ `queen` fixture 已先实例化 —— QueenDistiller.__init__ 会 reload(config)，
+        在实例化之前 patch 会静默失效（改写 test_arbitration_flip_direction 时实测踩中）。
+        """
         import config
         monkeypatch.setitem(config.BEAR_SCORING_CONFIG, "bull_veto_enabled", True)
         monkeypatch.setitem(config.BEAR_SCORING_CONFIG, "bull_veto_bear_score", 7.0)
@@ -143,6 +147,59 @@ class TestBearBeeDoesNotVote:
         dv = _vote(queen, base + [_r(BEAR, "bearish", 0.9, score=8.0)])
         assert dv["rule_direction"] == "neutral", "BullVeto 读不到 BearBee 了 —— 排除范围过宽"
 
+
+class TestGuardBeeDoesNotVote:
+    """GuardBeeSentinel 的方向票是其余六只多数的复述（v0.45.209：普查口径后 90/90），
+    被 `_compute_direction_vote` 当第 7 张独立票再数一遍。
+
+    它此前「有用」只是因为在抵消 BearBee（见模块 docstring）；BearBee 退出计票后，
+    预注册比较里再摘 Guard 两语料三指标 p 全在 0.38–0.99 —— **零效应**。
+    理由同样是结构性的：一张复述票不是证据。
+    """
+
+    @pytest.mark.parametrize("obs", [
+        dict(bull=3, bear=1, neutral=1),
+        dict(bull=2, bear=1, neutral=2, conf=0.5),
+        dict(bull=2, bear=2, neutral=1),
+    ])
+    def test_guard_cannot_change_direction_or_score(self, queen, obs):
+        base = _observers(**obs)
+        seen = {}
+        for d in ("bullish", "bearish", "neutral"):
+            v = _vote(queen, base + [_r(GUARD, d, 0.7)])
+            seen[d] = (v["rule_direction"], v["rule_score"])
+        v0 = _vote(queen, base)
+        assert set(seen.values()) == {(v0["rule_direction"], v0["rule_score"])}, (
+            f"GuardBee 的票改变了方向或分数：不含它={(v0['rule_direction'], v0['rule_score'])}，含它={seen}"
+        )
+
+    def test_guard_is_still_reported(self, queen):
+        dv = _vote(queen, _observers() + [_r(GUARD, "bullish", 0.7)])
+        assert dv["per_agent_directions"][GUARD] == "bullish"
+        assert GUARD in dv["vote_excluded_agents"]
+
+    def test_guard_score_gate_is_untouched(self, queen):
+        """Guard 的**分数**通道（`_apply_triple_penalty` 风险关门）不属于计票，本版不动。
+
+        拿真实的关门跑一遍，而不是 grep 源码：关门是按 `dimension == "risk_adj"` 找 Guard 的，
+        不按蜂名 —— 初稿按蜂名 grep，在代码没动的情况下就红了。
+        """
+        res = [_r(GUARD, "bullish", 0.7, score=2.0, dim="risk_adj")]
+        tp = queen._apply_triple_penalty("NVT", 7.0, res)
+        assert tp["guard_penalty_applied"] is True, "Guard 分数 2.0 应触发风险关门"
+
+    def test_resonance_still_counts_guard_dimension(self, board):
+        """登记现状：Guard 复述多数时，Queen 的共振检测**仍**给同向方多算一个维度。
+
+        这是另一条复述通道（近期 48 份里改分数 32 份、改决策档位 6 份），
+        本版**没有**动它 —— 它对收益的影响还没测。这条变红说明有人动了共振，回来重测。
+        """
+        from pheromone_board import PheromoneEntry
+        for agent in ["OracleBeeEcho", "RivalBeeVanguard", GUARD]:
+            board.publish(PheromoneEntry(agent_id=agent, ticker="RSG", discovery="x",
+                                         source="test", self_score=6.0, direction="bullish"))
+        res = board.detect_resonance("RSG")
+        assert "risk_adj" in res["resonant_dimensions"]
 
 class TestDissentAgentsMustVote:
     """异议蜂必须是投票蜂：S4.5 仲裁只遍历计票名单，不投票的异议蜂是一条死配置。"""
@@ -172,3 +229,4 @@ class TestCohortBoundary:
         hits = [r for d, v, r in _COHORT_HISTORY if v == "v0.45.212"]
         assert len(hits) == 1
         assert "BearBeeContrarian" in hits[0]
+        assert "GuardBeeSentinel" in hits[0]

@@ -22,16 +22,20 @@ bull/bear 多数三分支、以及一条 LLM 分支（项目禁用 LLM，台账�
 ------------------------
 `risk_adj` 权重自 v0.45.172 归零，且 v0.45.176 断开旁路后**生产实测确实是 0**
 （2026-09-10 起 12/12 份 JSON 的 `swarm.dimension_weights.risk_adj == 0.0000`）
-⇒ Guard 的**分数**对加权维度分毫无贡献，它对 `final_score` 唯一活着的通道
-就是那张方向票 —— 而那张票是其余六只多数方向的复述，
+⇒ Guard 的**分数**对加权维度分毫无贡献。方向票是其余六只多数方向的复述，
 `_compute_direction_vote` 把它当第 7 张独立票再数一遍。
 
-去掉 Guard 那一票，782 份 JSON 里看多票 >=3 的 628 行中有 **110 行（17.5%）**
-跌破 `BULLISH_GATE_CONFIG(min_agents=3)`（对比：v0.45.201 修 Oracle 是 7.4%）。
+⚠️ **v0.45.212 更正本段原文的两处错：**
+① 原文说方向票是它对 `final_score`「唯一活着的通道」—— 错。还有风险关门
+   （`guard_score < 4.0` 扣至多 0.8，按 `dimension == "risk_adj"` 找它）、
+   宏观政体（喂 `RegimeWeightAdjuster`）、以及 Queen 共振检测里它复述多数时
+   多算的 `risk_adj` 维度（另一条复述通道）。
+② 原文说「17.5% 跌破计数闸」、「它不是看多偏斜」—— 跌破计数闸不等于方向改变，
+   用真实代码逐位重放后方向改变率是 18.8%，且因为看多/看空门槛不对称，
+   它起决定作用时 **100% 是在保住看多**（126/126）。
 
-⚠️ **本版不动这张票。** 它不是看多偏斜（修复后 41 多 / 37 空 / 12 中性，
-它放大的是「多数」而非「看多」），但它让共识看起来比证据更强。
-要不要让派生蜂投票是设计决定，留给用户。
+v0.45.212 起 Guard 已退出方向计票（`QueenDistiller.NON_VOTING_AGENTS`），
+理由与证据见 `tests/test_non_voting_agents.py` 模块 docstring。
 
 三、本版真正改掉的那一条
 ------------------------
@@ -136,15 +140,16 @@ class TestGuardHasNoIndependentDirection:
             "回来重测 Guard 的派生性结论"
         )
 
-    def test_guard_is_registered_as_dissent_agent(self):
-        """现状锚点：Guard 被列为异议蜂、异议时权重 ×1.5。
+    def test_guard_is_no_longer_a_voter_or_dissent_agent(self):
+        """现状锚点（v0.45.212 改写）：Guard 不进计票，也就不再是异议蜂。
 
-        实测它对**自己读的那六只**的多数**零异议**（0/90），
-        所以这条加成对 Guard 而言基本是空的（BearBee 才是真异议方：异议率 66.6%）。
+        原断言是「Guard 被列为异议蜂」。实测它对自己读的六只零异议（0/90），
+        那条 ×1.5 加成对它本来就是空的；它退出计票后列着它更是死配置。
         """
         from config import CONFLICT_ARBITRATION_CONFIG as cfg
-        assert "GuardBeeSentinel" in cfg["dissent_agents"]
-        assert cfg["dissent_boost"] > 1.0
+        from swarm_agents import QueenDistiller
+        assert "GuardBeeSentinel" in QueenDistiller.NON_VOTING_AGENTS
+        assert "GuardBeeSentinel" not in cfg["dissent_agents"]
 
 
 class TestCohortBoundary:

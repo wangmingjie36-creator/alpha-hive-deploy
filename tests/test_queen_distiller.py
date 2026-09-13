@@ -517,15 +517,16 @@ class TestQueenHelpers:
     def test_direction_vote_conflict(self, queen):
         """3 bull + 2 bear（计票口径）→ conflict_level="heavy"
 
-        v0.45.212 前 BearBee 算第 3 张看空票、断言 `bearish_agents == 3`。
-        它自此不进计票，冲突计数只数投票蜂（≥2 对 ≥2 仍是重度冲突）。
+        v0.45.212 前 GuardBee 与 BearBee 各算一张看空票、断言 `bearish_agents == 3`。
+        两者自此不进计票，冲突计数只数投票蜂；第二张看空票改由观测蜂 RivalBee 投
+        （≥2 对 ≥2 仍是重度冲突 —— 被测的是冲突判定，不是哪只蜂）。
         """
         results = [
             _make_result("signal", 8.0, direction="bullish", confidence=0.7, source="ScoutBeeNova"),
             _make_result("catalyst", 7.0, direction="bullish", confidence=0.7, source="ChronosBeeHorizon"),
             _make_result("sentiment", 7.0, direction="bullish", confidence=0.7, source="BuzzBeeWhisper"),
             _make_result("odds", 4.0, direction="bearish", confidence=0.7, source="OracleBeeEcho"),
-            _make_result("risk_adj", 3.0, direction="bearish", confidence=0.7, source="GuardBeeSentinel"),
+            _make_result("ml_auxiliary", 3.0, direction="bearish", confidence=0.7, source="RivalBeeVanguard"),
             {"score": 3.0, "direction": "bearish", "confidence": 0.7,
              "dimension": "contrarian", "source": "BearBeeContrarian",
              "data_quality": {"bear": "real"}},
@@ -570,25 +571,34 @@ class TestConflictArbitration:
         assert dv["arbitration_triggered"] is True
         assert dv["pre_arbitration_margin"] < 0.15
 
-    def test_arbitration_flip_direction(self, board):
-        """仲裁导致方向翻转：GuardBee 看空的 1.5x boost 足以翻转 bullish→bearish"""
+    def test_arbitration_flip_direction(self, board, monkeypatch):
+        """仲裁导致方向翻转：异议蜂看空的 1.5x boost 足以翻转 bullish→bearish
+
+        v0.45.212 前这里的异议蜂是 GuardBee。它与 BearBee 自此都不进计票，
+        默认 `dissent_agents` 为空；机制本身仍在，所以用 monkeypatch 指定一只
+        投票蜂当异议方来测机制 —— 被测的是仲裁加成，不是哪只蜂。
+        """
+        import config
+        # ⚠️ 顺序不能反：QueenDistiller.__init__ 会 importlib.reload(config)（让长驻进程拿到最新权重），
+        # 先 patch 再实例化，patch 打在旧 dict 上、函数读的是 reload 出来的新 dict —— 静默失效。
         queen_local = QueenDistiller(board)
-        # 3 bullish (低 conf) vs 2 bearish (高 conf, 含 GuardBee)
+        monkeypatch.setitem(config.CONFLICT_ARBITRATION_CONFIG, "dissent_agents", ["RivalBeeVanguard"])
+        # 3 bullish (低 conf) vs 2 bearish (高 conf, 含异议蜂 RivalBee)
         # 初始 bull_w=1.14 vs bear_w=1.07 → margin≈0.032 < 0.15 → 触发仲裁
-        # 仲裁后 GuardBee bear 0.52→0.78 → bear_w=1.33 > bull_w=1.14 → 翻转
+        # 仲裁后 RivalBee bear 0.52→0.78 → bear_w=1.33 > bull_w=1.14 → 翻转
         results = [
             _make_result("signal", 7.0, direction="bullish", confidence=0.40, source="ScoutBeeNova"),
             _make_result("catalyst", 6.0, direction="bullish", confidence=0.38, source="ChronosBeeHorizon"),
             _make_result("sentiment", 6.5, direction="bullish", confidence=0.36, source="BuzzBeeWhisper"),
             _make_result("odds", 4.0, direction="bearish", confidence=0.55, source="OracleBeeEcho"),
-            # GuardBee 看空 — 仲裁时 dissent_boost 1.5x: 0.52→0.78
-            _make_result("risk_adj", 3.0, direction="bearish", confidence=0.52, source="GuardBeeSentinel"),
+            # 异议蜂看空 — 仲裁时 dissent_boost 1.5x: 0.52→0.78
+            _make_result("ml_auxiliary", 3.0, direction="bearish", confidence=0.52, source="RivalBeeVanguard"),
         ]
         dv = queen_local._compute_direction_vote("TEST", results, results, 6.0)
         assert dv["arbitration_triggered"] is True, \
             f"接近的票差应触发仲裁 (margin={dv['pre_arbitration_margin']:.4f})"
         assert dv["arbitration_flipped"] is True, \
-            "GuardBee dissent boost 应导致方向从 bullish 翻转为 bearish"
+            "异议蜂 dissent boost 应导致方向从 bullish 翻转为 bearish"
 
     @pytest.mark.xfail(
         reason="过时测试（task_a971f14c）：v0.21.0 (4325fb2 去除 look-ahead bias) 起 "
