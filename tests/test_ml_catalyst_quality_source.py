@@ -263,9 +263,13 @@ class TestProductionWiring:
         return [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                 and getattr(n.func, "attr", "") == self.CALL]
 
+    # v0.45.213：alpha_hive_daily_report 2 → 1。少掉的是 `_analyze_ticker_safe`
+    # （非蜂群 `run_daily_scan` 路径，整条退役删除），不是蜂群路径丢了接线。
+    # 此后「调用点不带蜂群方向」本身即违规——全仓守卫见
+    # tests/test_non_swarm_scan_retired.py::TestNoDirectionlessLedgerWriter。
     @pytest.mark.parametrize("rel,total", [
         ("generate_ml_report.py", 1),
-        ("alpha_hive_daily_report.py", 2),
+        ("alpha_hive_daily_report.py", 1),
     ])
     def test_call_site_count_is_known(self, rel, total):
         """锚点自证：调用点数变了要先来改这条，别让守卫在空集上恒真。"""

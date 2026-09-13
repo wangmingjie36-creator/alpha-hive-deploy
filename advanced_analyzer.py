@@ -950,8 +950,8 @@ class AdvancedAnalyzer:
         #
         # v0.45.134 删除：`crowding_pct` 及其两条来源。
         #   · `realtime_metrics["crowding_input"]` 在**当前流水线里从不存在**——
-        #     两个入口（alpha_hive_daily_report._analyze_ticker_safe、
-        #     generate_ml_report.__main__）构造的 dict 只有 ticker 与
+        #     两个入口（alpha_hive_daily_report._analyze_ticker_safe——v0.45.213 随
+        #     非蜂群扫描退役删除、generate_ml_report.__main__）构造的 dict 只有 ticker 与
         #     sources.yahoo_finance；唯一生产该键的 data_fetcher.collect_all_metrics()
         #     全仓没有生产调用点。于是 crowding_score 恒为 0。
         #   · 那条「> 1000 → NVDA 63.5 / VKTX 44.1 / 其他 63.8」的魔数分支因此

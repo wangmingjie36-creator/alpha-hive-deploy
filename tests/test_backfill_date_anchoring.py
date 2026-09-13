@@ -11,7 +11,7 @@ v0.41.6 已建好历史通道：`fetch_stock_data(t, as_of_date=...)` →
 |---|---|
 | `swarm_agents/base.py` `_get_stock_data` | prefetch 落空分支不传 date |
 | `alpha_hive_daily_report._generate_ml_reports` | `_fsd(ticker)` 不传 as_of_date |
-| `alpha_hive_daily_report._analyze_ticker_safe` | `_dr_fetch_stock(ticker)` 不传 date |
+| `alpha_hive_daily_report._analyze_ticker_safe` | `_dr_fetch_stock(ticker)` 不传 date（v0.45.213 随 `run_daily_scan` 退役删除） |
 
 危险在于**静默**：同一份报告里，prefetch 命中的标的是历史价、落空的是实时价，
 两种口径混在一起，没有任何报错。
@@ -85,9 +85,10 @@ class TestMissBranchPassesDate:
 
 
 class TestDailyReportSitesAnchored:
+    # v0.45.213：`_analyze_ticker_safe` 一行随非蜂群扫描退役删除（防重建见
+    # tests/test_non_swarm_scan_retired.py），不是改名后漏补。
     @pytest.mark.parametrize("method,needle", [
         ("_generate_ml_reports", "as_of_date=self.date_str"),
-        ("_analyze_ticker_safe", "_dr_fetch_stock(ticker, self.date_str)"),
     ])
     def test_site_passes_report_date(self, method, needle):
         from alpha_hive_daily_report import AlphaHiveDailyReporter

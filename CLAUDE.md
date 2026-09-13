@@ -75,6 +75,7 @@
 
 - **GitHub Pages 从 `gh-pages` 分支部署**，不是 `main`
 - `report_deployer.auto_commit_and_notify`：生产模式（LLM 或蜂群）提交 + 推 main + 同步 gh-pages；非生产扫描**不提交不推送**（v0.45.210 撤掉了坏了半年的 test remote 推送分支，**勿往 `GitHubTool` 白名单加 `checkout`/`reset` 恢复它**，理由在该函数 docstring）
+- **非蜂群扫描已退役（v0.45.213）**：`alpha_hive_daily_report.py` 不带 `--swarm` 直接 exit 2，**勿重建 `run_daily_scan`**——它在扫描中途就写概率账本（先写者占位），在 save_report 前短路管不到；理由在 `main()` 该闸注释，守卫 `tests/test_non_swarm_scan_retired.py`
 - `generate_ml_report.py`：末尾调用 `_sync_ghpages()`，每次生成 ML 报告后自动同步 gh-pages
 - **禁止**只推 main 不推 gh-pages，否则网站不更新
 

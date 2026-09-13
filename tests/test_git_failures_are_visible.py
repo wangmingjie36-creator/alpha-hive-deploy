@@ -16,6 +16,7 @@ origin/main 上恰好 7 个无 `swarm_metadata` 的日报提交（取证全文�
      + 白名单里不许出现破坏性子命令（防有人按「加两项」修回去）
   2. 白名单拒绝 / subprocess 自己炸，`run_git_cmd` 必须出声
   3. 真 git 沙箱：非生产扫描不许在本地 main 造提交、不许推任何远端
+     （v0.45.213：「下一次推送不带非生产内容」改从 CLI 入口进，不再 xfail）
   4. 生产分支两种失败形状的原因都要传到 results 与 warning；调用方不许丢弃返回值
 
 ⚠️ 沙箱里**必须**配 `test` remote：生产机上真配着。不配的话旧代码走
@@ -261,7 +262,11 @@ class TestNonProductionScanIsNotDeployed:
             "又出现了「已恢复」式的无条件成功日志"
 
     def test_leftover_artifacts_are_named_not_hidden(self, sandbox, caplog):
-        """管不到的残留（save_report 已写进工作区）要列出来，而不是装作不存在。"""
+        """管不到的残留（save_report 已写进工作区）要列出来，而不是装作不存在。
+
+        v0.45.213 起 CLI 不再跑非蜂群扫描、造不出这种残留；本条守的是部署函数
+        自身的契约（纵深防御：哪天有调用方把非生产报告递进来，它仍然出声）。
+        """
         (sandbox.repo / LEFTOVER).write_text("{}")
         (sandbox.repo / "backtester.py").write_text("# 半成品代码，不算日报产物")
         with caplog.at_level(logging.WARNING):
@@ -293,16 +298,50 @@ class TestNonProductionScanIsNotDeployed:
         assert len(sandbox.origin_log()) == 2, (
             f"origin/main 上多出了非生产扫描造的提交：{sandbox.origin_log()}")
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "已知残留（v0.45.210 未修）：save_report 在部署之前已把非生产产物写进生产工作区，"
-        "下一次生产扫描的白名单提交会带上没被覆盖的那部分。根治在上游——让非生产扫描"
-        "不往生产工作区写产物（同 --samples-only 的处置）。修好后本条 XPASS ⇒ strict 变红，"
-        "届时删掉 xfail。"))
-    def test_next_production_push_carries_no_non_production_content(self, sandbox):
-        (sandbox.repo / LEFTOVER).write_text('{"system_status": "✅ 完成"}')
-        rd.auto_commit_and_notify(sandbox.reporter, NON_PRODUCTION)
+    def test_next_production_push_carries_no_non_production_content(self, sandbox, monkeypatch):
+        """2026-03-13 事故链的**内容**层：非蜂群 CLI 扫描 → 下一次蜂群扫描推送。
+
+        v0.45.210 时本条是 `xfail(strict=True)`，写法是「测试自己往工作区种残留，
+        再直调部署函数」。那个形状**上游修好了也永远 XPASS 不了**——残留是测试种的，
+        不是扫描写的（v0.45.213 实测：退役落地后它照旧 XFAIL）。所以改从 CLI 入口进：
+        残留只能由被测的 `main()` 路由写出来。
+
+        `RuleEngineReporter` 复刻退役前那一串：`run_daily_scan` → `save_report`
+        （往工作区写日报 json）→ `auto_commit_and_notify`（非生产，不提交）。
+        退役后 `main()` 在构造它之前就退出，于是工作区里没有东西可被带走。
+        """
+        import alpha_hive_daily_report as adr
+        import yf_gate
+
+        class RuleEngineReporter:
+            def __init__(self, date_override=None):
+                pass
+
+            def run_daily_scan(self, focus_tickers=None):
+                return dict(NON_PRODUCTION)
+
+            def save_report(self, report):
+                (sandbox.repo / LEFTOVER).write_text('{"system_status": "✅ 完成"}')
+                return str(sandbox.repo / LEFTOVER)
+
+            def auto_commit_and_notify(self, report):
+                return rd.auto_commit_and_notify(sandbox.reporter, report)
+
+        monkeypatch.setattr(adr, "AlphaHiveDailyReporter", RuleEngineReporter)
+        monkeypatch.setattr(yf_gate, "install", lambda: False)
+        monkeypatch.setattr(adr._timing, "write", lambda *a, **k: None)
+        # --force：不然周末跑测试时交易日护栏先把旧代码挡掉，本条对旧 bug 只在交易日红
+        monkeypatch.setattr(sys, "argv", ["alpha_hive_daily_report.py", "--no-llm", "--force"])
+        try:
+            adr.main()
+        except SystemExit:
+            pass   # 退役后的正确行为；退出码与「未构造 reporter」见 test_non_swarm_scan_retired
+
         sandbox.reporter.date_str = "2026-03-16"
-        rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
+        (sandbox.repo / "index.html").write_text("prod-2026-03-16")
+        res = rd.auto_commit_and_notify(sandbox.reporter, PRODUCTION)
+        assert res["git_push"]["success"] and len(sandbox.origin_log()) == 2, (
+            f"正对照没立住：生产推送本身没把提交送上 origin，下面的断言会空转变绿：{res}")
         shown = sandbox.git("--git-dir", str(sandbox.origin), "show", f"main:{LEFTOVER}", check=False)
         assert shown.returncode != 0, f"origin/main 带上了非生产产物：{shown.stdout}"
 
