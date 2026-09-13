@@ -5985,7 +5985,89 @@ v0.45.222 与本版第一轮都「从空目录跑全套」证明 cwd 无关，**
 
 ---
 
-## [0.45.217] — 2026-09-13 — 占位（进行中：thesis_breaks_config 的 _all_tickers 漏 17 个标的块，覆盖率统计静默少算）
+## [0.45.217] — 2026-09-13 — 失效条件覆盖率的分母是一份过期名单：网站上 17 只不进统计，不在网站上的 11 只算「已覆盖」
+
+起因：v0.45.215「顺带发现」记了一条「`_all_tickers` 24 个 vs 41 个标的块 ⇒ 漏算 17 只」。
+**那条的口径本身是错的**——用户纠正「网站只有 30 个标的」。实测三个集合：
+
+| 集合 | 数量 | 实为 |
+|---|---|---|
+| `config.WATCHLIST` | 30 | 网站 / 每日扫描池（名单唯一真相，v0.45.6） |
+| 配置里的标的块 | 41 | 30 只 WATCHLIST + 11 只候补池（AMD/AMGN/BIIB/COIN/ICLN/MSTR/PLUG/REGN/RUN/SQ/UPST，均在 `WATCHLIST_EXTENDED`） |
+| `_all_tickers` | 24 | 13 只现役 + 同样那 11 只 = **2026-08-25 之前 `config.WATCHLIST` 的原样快照**（v0.45.6 收掉了编排器那份副本，漏了这一份） |
+
+`get_coverage_info()` 报 24/24=100%：网站上 17 只（ABBV/AMC/BRK-B/COST/CRM/CVX/DE/DELL/MU/NFLX/SNOW/T/TMO/TMUS/VZ/WMT/XOM）
+不在分母里，不在网站上的 11 只反倒算「已覆盖」。
+照 v0.45.215 那条说法「以块为准」去派生，会把一种错换成另一种：**块的键当分母 ⇒ covered 恒等于 total**，
+覆盖率恒 100%，唯一该报的「谁缺失效条件」永远报不出来。分母必须来自独立于块的来源。
+
+### 读者普查
+
+`git ls-files -z | xargs -0 grep`，另查仓库外 `~/Desktop/深度分析报告`、`~/.claude/scripts`、`~/.claude/scheduled-tasks`、`~/Library/LaunchAgents`：
+
+- `_all_tickers`：唯一读者 `thesis_breaks.get_coverage_info`。
+- `get_coverage_info`：**生产零调用点，仓库外零**，只有 `tests/test_thesis_breaks.py` 3 条。扫描期真正的覆盖观测点是
+  `alpha_hive_daily_report._attach_thesis_breaks`（按实际扫描的标的计数，全灭时 error）与日报 7.5 节
+  「无失效条件配置」清单——那条路径一直是对的，那 17 只也**都有块**。
+- ⇒ 坏的只是配置侧静态统计与一条测试的遍历范围，**线上扫描与报告不受影响**。
+
+### Fixed
+
+- `thesis_breaks.ThesisBreakConfig.get_coverage_info`：分母改为**调用时**读 `config.WATCHLIST`（函数内 import，不冻在模块级）；
+  去掉 `data.get("_all_tickers", [])` 的空列表兜底。docstring 写明为何不能用块的键，以及零生产读者、真实观测点在哪。
+- `tests/test_thesis_breaks.py::test_all_configured_tickers_have_valid_structure`：原来遍历 `covered_tickers`（即 `_all_tickers`）
+  ⇒ **网站上那 17 只的块从没被这条查过**，查的反倒是 11 只候补池；改为逐块遍历全部标的块。
+
+### Removed
+
+- `thesis_breaks_config.json` 的 `_all_tickers`（26 行，按原文本精确删除，不重排文件；其余 41 个块 +
+  `_machine_conditions_note` 逐块哈希核对不变、键序不变）。
+
+### Changed
+
+- `tests/test_thesis_breaks_config_authored_only.py`：`ALLOWED_META_KEYS` 去掉 `_all_tickers`——手抄名单回到配置里就红；
+  合成用例改用 `_machine_conditions_note`；新增 `test_hand_copied_ticker_list_is_flagged`。
+
+### Added
+
+- `tests/test_thesis_breaks_coverage_universe.py`（5 条，无 skip）：分母 = WATCHLIST；分母随 WATCHLIST 而动
+  （monkeypatch 合成名单 + 含非名单块的合成配置，一条同时排除「快照」「块的键」「import 期冻结」三种错法）；
+  无孤儿块（不属于 `WATCHLIST ∪ WATCHLIST_EXTENDED`）；正对照。
+  **「WATCHLIST 每只都有块」这个方向刻意不在这里**：`test_thesis_break_rendering.py::test_real_config_renders_for_every_watchlist_ticker`
+  早就走真实渲染路径守着（M0），重复一份只会让下一个人数错守卫数。
+
+### 变异实跑
+
+落地断言 + 每轮清 `__pycache__` + 还原后 sha 核对；`--maxfail=1000` 覆盖 addopts 里的 `-x`。
+
+| # | 变异 | 红的测试 |
+|---|---|---|
+| M0 | 对照：改动前代码+配置+测试，删 XOM 块 | 渲染测试（旧套件对这个方向本来就有牙） |
+| M1 | 删 XOM 块 | 渲染测试 |
+| M2 | WATCHLIST 加 PLTR 不写块 | 渲染测试 + `test_watchlist_single_source` 3 条 |
+| M3 | 加两个池子都没有的 ZZZZ 块 | **仅**孤儿守卫 |
+| M4 | BRK-B 块改名 BRKB | 渲染测试 + 孤儿守卫（形状守卫放行 BRKB） |
+| M5 | 代码+配置整体退回改动前 | 形状守卫 + 分母 2 条 |
+| M5b | 仅代码退回（配置已无该键） | 分母 2 条 + `test_thesis_breaks` 3 条（ZeroDivisionError，响亮失败） |
+| M6 | 分母写死成今天的 30 只 | **仅**分母随动那条 |
+| M7 | 分母从块的键派生 | 分母 2 条 |
+| M8 | 模块顶部 `from config import WATCHLIST` | **仅**分母随动那条 |
+| M9 | 仅把 `_all_tickers` 加回配置 | **仅**形状守卫 |
+| M11 | 孤儿守卫漏传候补池 | 孤儿守卫 |
+| M12 | 对照：删 XOM 块 + 屏蔽渲染测试 | **零红** ⇒ 新文件确实没重复那个方向 |
+| M13 | `ALLOWED_META_KEYS` 加回 `_all_tickers` | `test_hand_copied_ticker_list_is_flagged` |
+
+量具自己出过两次问题：① 首轮每条变异都只报 1 红——`pyproject` addopts 带 `-x`，红的列表被截断，补 `--maxfail=1000` 重跑；
+② 我起初写了一条「WATCHLIST 每只都有块」测试，与渲染测试 M1/M2/M4 同红、完全重复，删掉；M12 又揪出正对照里
+残留的一条同向断言（`WATCHLIST ⊆ 块`），也删掉。
+
+全套：4260 passed / 1 failed —— `test_economic_calendar.py::TestCoverageHorizon`，在未改动的 `146d7b5` 临时 worktree 上同样红
+（日历覆盖期到期，设计意图，与本次无关）。
+
+### 顺带发现（未处理，已开任务芯片）
+
+- `tests/test_thesis_break_schema.py::test_real_config_fully_formattable` 读主 checkout 的**绝对路径**、不存在就 skip：
+  在 worktree 里校验的是主 checkout 那份文件而不是被改的这份，换台机器恒 skip；元守卫 `test_no_invisible_prod_data_skips.py` 没抓到它。
 
 ## [0.45.216] — 2026-09-13 — CHANGELOG 完整性测试挂成 git hook：pre-commit 管不到出事的那条路径，兜底的是 pre-push
 

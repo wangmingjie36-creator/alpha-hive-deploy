@@ -32,10 +32,15 @@ class TestThesisBreakConfig:
         assert info["total"] == len(info["covered_tickers"]) + len(info["missing_tickers"])
 
     def test_all_configured_tickers_have_valid_structure(self):
-        """Every ticker returned by get_breaks_config should have both levels
-        with 'conditions' lists."""
-        info = ThesisBreakConfig.get_coverage_info()
-        for ticker in info["covered_tickers"]:
+        """Every ticker block in the config should have both levels
+        with 'conditions' lists.
+
+        v0.45.217: iterates every block key, not ``covered_tickers``. The latter
+        was drawn from the stale hand list ``_all_tickers``, so the 17 blocks for
+        tickers actually on the site were never checked here."""
+        blocks = [k for k in ThesisBreakConfig._load() if not k.startswith("_")]
+        assert len(blocks) >= len(ThesisBreakConfig.get_coverage_info()["covered_tickers"])
+        for ticker in blocks:
             config = ThesisBreakConfig.get_breaks_config(ticker)
             assert "level_1_warning" in config, f"{ticker} missing level_1_warning"
             assert "level_2_stop_loss" in config, f"{ticker} missing level_2_stop_loss"

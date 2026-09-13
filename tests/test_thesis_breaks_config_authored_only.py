@@ -20,6 +20,10 @@ v0.45.112/115 断言「生产只读」—— 实际调用者在**另一个仓库
 ⚠️ `_` 元数据键用**子集**语义：我只怕它变大（新的派生时间戳 / 缓存），
 不怕它变小（删掉 `_machine_conditions_note` 无害）。
 
+v0.45.217：`_all_tickers` 移出白名单。它是手抄的 `config.WATCHLIST` 旧快照
+（24 只 vs 网站 30 只，重合 13），手抄名单本身就是会过期的派生量；覆盖率分母
+已改为调用时读 `config.WATCHLIST`，见 `tests/test_thesis_breaks_coverage_universe.py`。
+
 ⚠️ 本文件不用任何 skip：配置被 git 跟踪、其余全是合成数据，任何机器都跑得到。
 每条断言旁注明了能让它变红的变异。
 """
@@ -36,7 +40,7 @@ from tests._repo_files import own_python_files
 REPO_ROOT = Path(__file__).resolve().parent.parent   # 配置随代码发布、只读 ⇒ 用 __file__
 CONFIG = REPO_ROOT / "thesis_breaks_config.json"
 
-ALLOWED_META_KEYS = {"_all_tickers", "_machine_conditions_note"}
+ALLOWED_META_KEYS = {"_machine_conditions_note"}
 _TICKER = re.compile(r"[A-Z]{1,5}(-[A-Z])?")
 _LEVELS = {"level_1_warning", "level_2_stop_loss"}
 
@@ -108,7 +112,12 @@ class TestGuardsHaveTeeth:
 
     def test_legitimate_new_ticker_block_passes(self):
         # 守卫不能挡正常编写：新增标的块、带连字符的 ticker 都应放行
-        assert config_violations({"PLTR": self._BLOCK, "BRK-B": self._BLOCK, "_all_tickers": []}) == []
+        assert config_violations({"PLTR": self._BLOCK, "BRK-B": self._BLOCK,
+                                  "_machine_conditions_note": {}}) == []
+
+    def test_hand_copied_ticker_list_is_flagged(self):
+        # v0.45.217：手抄名单回来就红——它会跟 config.WATCHLIST 漂开（上次漂成 24 vs 30）
+        assert config_violations({"NVDA": self._BLOCK, "_all_tickers": ["NVDA"]}) == ["_all_tickers"]
 
     def test_ticker_shaped_key_without_condition_levels_is_flagged(self):
         assert config_violations({"CACHE": {"NVDA": {}}}) == ["CACHE"]
