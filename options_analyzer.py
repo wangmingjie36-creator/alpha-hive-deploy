@@ -10,8 +10,9 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import statistics
+import threading
 
-from hive_logger import PATHS, get_logger, atomic_json_write, pdt_today
+from hive_logger import PATHS, get_logger, atomic_json_write
 
 _log = get_logger("options")
 
@@ -1430,6 +1431,106 @@ class OptionsAnalyzer:
 _RE_SNAP_DATE = _re_mod.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+# ── 期权快照槽位按「数据所属的交易会话」分（v0.45.238）────────────────────
+# 此前槽位是 `pdt_today()`（太平洋墙钟日期），命中校验是 `_snapshot_timestamp`
+# 以该日期开头。两者说的是同一个墙钟，于是跨午夜的扫描**自证通过**：
+# 09-02 14:00 起跑的扫描拖到 09-03 00:07，午夜后的 analyze() 写出
+# `options_snapshot_{T}_2026-09-03.json`（内容是 09-02 盘后的 CBOE 数据，时间戳
+# 也以 09-03 开头）⇒ 09-03 14:00 的正式扫描 42 次命中、只写 6 次，当天
+# IV/P/C/GEX/OI/Max Pain/异动全是上一交易日的。09-09 同形（45 次命中）。
+# 普查（v0.45.238 CHANGELOG）：2026-06-10 起 11 个槽位日、171 份快照装的是前一会话。
+#
+# 修法：槽位与命中校验都用 ET 交易会话日期（09:30 ET 前算上一交易日），与
+# `cboe_options._expected_vintage_date` 同一判据 ⇒ 午夜既不是会话边界，也就不再
+# 能把数据挪到下一天的名下。收盘后跑的生产扫描里，会话日期 == 太平洋日期，文件名不变。
+_ET_ZONE = None
+_snap_stats_lock = threading.Lock()
+# 观测计数：供 scan_timing 落进 status.json。
+#   hits / writes            命中 / 写入次数（分母）
+#   session_mismatch         槽位里的快照属于别的会话、被弃用重算（旧代码留下的跨午夜文件会走这里）
+#   hits_before_close        命中了一份**收盘前**冻结的快照，而此刻该会话已收盘——
+#                            本可以拿到完整会话数据却用了盘中的（只观测，不拒收，见 analyze 内注释）
+#   writes_before_close      收盘前写入的快照数（盘中跑批 / 手工跑）
+#   calendar_fallback        交易日历不可用、会话日期退回「只看周一至周五」规则的次数
+_SNAP_STATS_KEYS = ("hits", "writes", "session_mismatch", "hits_before_close",
+                    "writes_before_close", "calendar_fallback")
+_snap_stats = {k: 0 for k in _SNAP_STATS_KEYS}
+
+
+def snapshot_slot_stats() -> Dict:
+    with _snap_stats_lock:
+        return dict(_snap_stats)
+
+
+def reset_snapshot_slot_stats() -> None:
+    with _snap_stats_lock:
+        for k in _SNAP_STATS_KEYS:
+            _snap_stats[k] = 0
+
+
+def _snap_count(key: str) -> None:
+    with _snap_stats_lock:
+        _snap_stats[key] += 1
+
+
+def _snapshot_now() -> datetime:
+    """带时区的「此刻」。单独成函数只为让测试钉住时钟。"""
+    return datetime.now().astimezone()
+
+
+def _et_zone():
+    global _ET_ZONE
+    if _ET_ZONE is None:
+        from zoneinfo import ZoneInfo
+        _ET_ZONE = ZoneInfo("America/New_York")
+    return _ET_ZONE
+
+
+def _snapshot_session(ts: datetime) -> Tuple[str, bool]:
+    """`(ts 时数据所属的 ET 会话日期, 是否来自交易日历)`。
+
+    日历不可用时**不**退回太平洋日期（那正是本 bug），退回「周一至周五、09:30 ET
+    翻页」——跨午夜依旧归对，只会把假日误当交易日。退回时第二项为 False，由调用方计数。
+    """
+    try:
+        from cboe_options import session_date_at
+        s = session_date_at(ts)
+    except Exception:  # noqa: BLE001 - 退回下方规则，并由调用方计入 calendar_fallback
+        s = None
+    if s:
+        return s, True
+    et = ts.astimezone(_et_zone())
+    d = et.date()
+    if d.weekday() < 5 and (et.hour, et.minute) >= (9, 30):
+        return d.isoformat(), False
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.isoformat(), False
+
+
+def _session_close(session: str) -> datetime:
+    """会话收盘时刻（ET）。提前收盘日 13:00，走 v0.45.234 的 `is_trading_day.session_close_et`；
+    该函数不可得时退回 16:00——半日市里 13:00–16:00 写的快照会被多记成「收盘前」，只会偏多不会偏少。"""
+    d = datetime.strptime(session, "%Y-%m-%d")
+    try:
+        from is_trading_day import session_close_et
+        t = session_close_et(d.date())
+        return d.replace(hour=t.hour, minute=t.minute, tzinfo=_et_zone())
+    except Exception:  # noqa: BLE001 - 观测用，退回 16:00 的方向是保守的
+        return d.replace(hour=16, tzinfo=_et_zone())
+
+
+def _parse_snapshot_ts(raw) -> Optional[datetime]:
+    """`_snapshot_timestamp` → 带时区 datetime。naive 值按本机时区解释（写入端就是 naive 本地时）。"""
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        return datetime.fromisoformat(raw.strip()).astimezone()
+    except ValueError:
+        return None
+
+
 def _qs_unavailable(error: str, *, source: str = "cboe") -> Dict:
     """quote_set 不可用时的统一形状（v0.45.104）。
 
@@ -1840,7 +1941,15 @@ class OptionsAgent:
         """
         # ===== Snapshot cache 入口 =====
         _snap_disabled = os.environ.get("OPTIONS_SNAPSHOT_DISABLE", "").lower() in ("1", "true", "yes")
-        _snap_today = pdt_today()  # v0.28.0: 美股交易日，避免跨午夜文件命名偏移
+        # v0.45.238：槽位 = 此刻数据所属的 ET 交易会话，**不是**太平洋墙钟日期。
+        # 原 `pdt_today()` 让跨午夜扫描把前一会话的数据写进次日槽位，次日正式扫描
+        # 一进门命中、从不取自己的链（09-03 / 09-09 实测）。判据见模块级 `_snapshot_session`。
+        _snap_now = _snapshot_now()
+        _snap_session, _snap_from_calendar = _snapshot_session(_snap_now)
+        if not _snap_from_calendar:
+            _snap_count("calendar_fallback")
+            _log.warning("[%s] 交易日历不可用，期权快照会话日期按周一至周五规则取 %s"
+                         "（假日会被误当交易日）", ticker, _snap_session)
 
         # v0.45.16：补跑（`--date` 指定的目标日 ≠ 今天）必须用**独立槽位**。
         #
@@ -1868,21 +1977,30 @@ class OptionsAgent:
             _log.warning("ALPHA_HIVE_TARGET_DATE=%r 格式非法（应为 YYYY-MM-DD），已忽略",
                          _snap_target[:40])
             _snap_target = ""
-        _snap_target = _snap_target or _snap_today
-        _is_backfill = _snap_target != _snap_today
-        _snap_date = _snap_today  # 快照内容的**实际获取日**，始终是今天
+        # v0.45.238：「是不是补跑」也按会话比。收盘后在 D 日补跑 D 日自己 ⇒ 不是补跑；
+        # 周一盘前补跑上周五 ⇒ 此刻数据本就属于上周五会话，同样不是补跑、直接用正常槽位。
+        _snap_target = _snap_target or _snap_session
+        _is_backfill = _snap_target != _snap_session
         if _is_backfill:
-            _snap_name = f"options_snapshot_{ticker}_{_snap_target}_backfilled-{_snap_today}.json"
+            _snap_name = f"options_snapshot_{ticker}_{_snap_target}_backfilled-{_snap_session}.json"
         else:
-            _snap_name = f"options_snapshot_{ticker}_{_snap_today}.json"
+            _snap_name = f"options_snapshot_{ticker}_{_snap_session}.json"
         _snap_path = os.path.join(self.fetcher.cache_dir, _snap_name)
         if not _snap_disabled and not force_refresh and os.path.exists(_snap_path):
             try:
                 with open(_snap_path, "r") as _f:
                     _cached = json.load(_f)
-                # 校验快照日期仍是今天，防止跨午夜脏数据
+                # v0.45.238：校验快照**所属会话**与槽位一致。原判据
+                # `_snapshot_timestamp.startswith(pdt_today())` 与槽位名用的是同一个墙钟，
+                # 跨午夜写入的前一会话数据会自证通过。新快照带 `_snapshot_session`
+                # （取数前算的，比写入时刻更贴近取数时刻）；旧快照没有，从时间戳推。
                 _cached_ts = _cached.get("_snapshot_timestamp", "")
-                if _cached_ts.startswith(_snap_date):
+                _cached_at = _parse_snapshot_ts(_cached_ts)
+                _cached_session = _cached.get("_snapshot_session")
+                if not (isinstance(_cached_session, str) and _RE_SNAP_DATE.match(_cached_session)):
+                    _cached_session = _snapshot_session(_cached_at)[0] if _cached_at else None
+                if _cached_session == _snap_session:
+                    _snap_count("hits")
                     _log.info("[%s] 期权快照命中: %s (冻结于 %s)",
                               ticker, os.path.basename(_snap_path), _cached_ts[:19])
                     # v0.45.43：快照里**混着两类数据**，只有一类该被冻结。
@@ -1899,10 +2017,24 @@ class OptionsAgent:
                     # v0.45.104：同理，空的 quote_set 也不该被冻一整天。
                     # **已捕获的不动**——见 _refill_empty_quote_set 的 docstring。
                     self._refill_empty_quote_set(_cached, ticker, _snap_path)
+                    # 观测点：命中的是收盘前冻结的快照，而此刻该会话已经收盘。
+                    # **只观测不拒收**：同一轮扫描若跨过收盘，拒收会让先后调用方拿到
+                    # 两份不同的链（v0.15.2 快照要防的正是这种分裂）；盘中价的处理另见
+                    # v0.45.234。这里只保证「用了不完整会话」这件事有人看得见。
+                    _complete = _cached.get("_snapshot_session_complete")
+                    if _complete is None:
+                        _complete = bool(_cached_at and _cached_at >= _session_close(_snap_session))
+                    if not _complete and _snap_now >= _session_close(_snap_session):
+                        _snap_count("hits_before_close")
+                        _log.warning("[%s] 期权快照命中但冻结于 %s 会话收盘前（%s），"
+                                     "此刻已收盘——本轮期权指标用的是盘中数据",
+                                     ticker, _snap_session, _cached_ts[:19])
                     return _cached
                 else:
-                    _log.warning("[%s] 期权快照日期不匹配 (%s vs %s)，忽略",
-                                 ticker, _cached_ts[:10], _snap_date)
+                    _snap_count("session_mismatch")
+                    _log.warning("[%s] 期权快照会话不匹配：%s 冻结于 %s，属于 %s 会话、槽位是 %s，"
+                                 "弃用重算", ticker, os.path.basename(_snap_path),
+                                 _cached_ts[:19] or "?", _cached_session or "未知", _snap_session)
             except (json.JSONDecodeError, OSError) as _e:
                 _log.warning("[%s] 期权快照读取失败，重新计算: %s", ticker, _e)
         # 期权分析
@@ -2040,7 +2172,7 @@ class OptionsAgent:
         if _iv_raw_observed is not None:
             try:
                 from iv_history import append_observation
-                append_observation(ticker, self.fetcher.cache_dir, _snap_date, _iv_raw_observed)
+                append_observation(ticker, self.fetcher.cache_dir, _snap_session, _iv_raw_observed)
             except Exception as _e_idx:  # noqa: BLE001 - 记账失败绝不影响评分
                 _log.debug("[%s] IV 索引写入跳过: %s", ticker, _e_idx)
 
@@ -2365,14 +2497,21 @@ class OptionsAgent:
                 result["_snapshot_timestamp"] = datetime.now().isoformat()
                 result["_snapshot_ticker"] = ticker
                 result["_snapshot_stock_price"] = stock_price
+                # v0.45.238：数据所属会话 + 取数时该会话是否已收盘（命中校验与观测点读这两个）
+                _complete_at_fetch = _snap_now >= _session_close(_snap_session)
+                result["_snapshot_session"] = _snap_session
+                result["_snapshot_session_complete"] = _complete_at_fetch
                 # v0.45.16：补跑时显式标注"期权是运行时实时拉的，不是目标日的"。
                 # CBOE/yfinance 无历史期权接口，这一点没法假装，只能让下游看得见。
                 if _is_backfill:
                     result["_options_as_of_mismatch"] = True
                     result["_options_target_date"] = _snap_target
-                    result["_options_fetched_on"] = _snap_today
+                    result["_options_fetched_on"] = _snap_session
                 with open(_snap_path, "w") as _f:
                     json.dump(result, _f, default=str, indent=2)
+                _snap_count("writes")
+                if not _complete_at_fetch:
+                    _snap_count("writes_before_close")
                 _log.info("[%s] 期权快照写入: %s", ticker, os.path.basename(_snap_path))
             except OSError as _e:
                 _log.warning("[%s] 期权快照写入失败: %s", ticker, _e)
