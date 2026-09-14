@@ -32,11 +32,202 @@ v0.45.238 的观测点按**调用**计。一只标的一轮扫描要调 3~4 次 
 
 ## [0.45.247] — 2026-09-14 — 占位（进行中：Queen 读蜂 details 的键契约守卫 + 删 F&G 政体调整死分支 + signal_archive 补 Buzz 缺失通道）
 
-## [0.45.246] — 2026-09-14 — 占位（进行中：v0.45.239 conftest `_hive_log_handler_escapes` 的 resolve() 相对路径补全成 cwd——合入 v0.45.240 后被 cwd 守卫抓到；修 + 变异自证 + 落地 v0.45.239/244）
+## [0.45.246] — 2026-09-14 — 落地 v0.45.239 / v0.45.244：合并后 v0.45.240 的 cwd 守卫抓到 v0.45.239 日志隔离 ① 的真洞——相对落点经 `resolve()` 补全成 cwd，恒「在沙箱里」
 
-## [0.45.245] — 2026-09-14 — 占位（进行中：二次检查 v0.45.240 的改动）
+两条分支各自全绿、合在一起红：v0.45.239（81153eda）的 conftest `_hive_log_handler_escapes` 两处 `.resolve()`，
+被同日并行写成的 v0.45.240 `TestConftestGuardsDoNotAnchorOnCwd` 判为隐式读 cwd。**判定：不是误报，是 v0.45.240 同形。**
 
-## [0.45.244] — 2026-09-14 — 占位（进行中：import 冻结路径扫描器盲区——模块级调用同模块函数、函数体求值 PATHS./__file__ 的形态看不见，补扫描 + KNOWN 白名单）
+**机制**：① 在 setup 核对 handler 落点 ∈ 本条 `tmp_path`。autouse fixture 按名字字母序 setup，
+`_isolate_cwd_and_sys_path` 排在 `_isolate_hive_logger_files` 前 ⇒ ① 跑时 cwd 已是 `tmp_path/_cwd` ⇒
+`Path(相对).resolve()` 恒落在沙箱里。**修前实测**：`_isolate_env` 把 `ALPHA_HIVE_LOGS_DIR` 改成 `"logs"`、
+或 `current_target` 改回 `Path("logs") / leaf`，任选一条测试均 **1 passed**；阳性对照（绝对的沙箱外路径）红——
+证明 ① 确实在跑，只是对相对路径失明。
+
+**比 v0.45.240 那处更该堵**：`LogsDirRotatingFileHandler.emit` **每条记录** `abspath` 一次。相对落点不只是
+「跟着起进程的目录走」，进程中途谁 chdir 一次，日志就搬一次家；v0.45.239 之前的裸 handler 只在构造时 abspath 一次。
+（生产现状核对：仓库、编排器脚本、LaunchAgents 里无人设 `ALPHA_HIVE_LOGS_DIR`/`ALPHA_HIVE_HOME`，默认值锚在 `__file__`——当前无活 bug，洞在守卫。）
+
+### Fixed — `tests/conftest.py`
+- `_hive_log_handler_escapes`：沙箱先断言绝对；落点**相对即原样报出** `(类名, 相对路径)`，不补全；绝对的才 `resolve()` 判包含。
+  - `resolve()` **不能为了让守卫闭嘴而删**：macOS `$TMPDIR`=`/var/…`、`tmp_path`=`/private/var/…`，词法比较会误报；
+    「字面在沙箱里、经 symlink 指出去」词法比较会漏报。
+  - ① 的报错补一句相对路径的诊断。
+- ③ 收集前快照从模块级 `_hive_log_watch_paths(_REPO_ROOT_FOR_GUARD, os.getcwd())` 挪进 ⓪ `pytest_configure`，
+  调用目录改取 `invocation_params.dir`（与 ② 同源）；快照取不到即红（原写法下 ③ 不存在「没取到」这种失败，挪进钩子后才有，故补上）。
+  - 实测次序：conftest import → `pytest_configure`(trylast) → 收集；此刻 `hive_logger` 未被 import ⇒ 仍早于事故窗口。
+  - **为什么顺手改**：v0.45.245 的守卫扩展会把模块级读 cwd 也纳入——写本版时它还是 worktree 里的未提交版，
+    只读取来跑，对原写法实测报 `<module>:1016`。该处意图是「调用目录」、读的是「此刻 cwd」，本来就该用 `invocation_params`；
+    改后那版守卫在本 conftest 上为空，不需要为模块级另开豁免。
+
+### Changed
+- `test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd.ALLOWED` 加 `_hive_log_handler_escapes`（照 v0.45.240
+  `_assert_default_path_in_sandbox` 的先例：按函数名放行 + 运行时自证）。只动这一行——v0.45.245 在同一类上有未提交改动。
+- `test_hive_logger_not_frozen.py::TestSetupCheckHasTeeth` 加三条运行时自证（ALLOWED 按名放行，删掉 is_absolute 闸静态守卫不红，靠这里红）：
+  相对落点（resolver 与 `baseFilename` 两条分支）在 cwd ⊂ tmp 时被报出；相对沙箱被拒；symlink 三向
+  （落点经链/沙箱写真身、反之、字面在内经链指出）。
+
+### 变异（真改文件、跑、逐字节还原）
+
+| 变异 | 红在 |
+|---|---|
+| 修前 M1 `_isolate_env` LOGS_DIR=`"logs"` / M2 `current_target`=`Path("logs")/leaf` | **无（1 passed）** ← 洞 |
+| 修前 M3 LOGS_DIR=绝对的沙箱外（阳性对照） | ① |
+| 修后 M1 / M2 / M3 | ①（前两条报相对路径） |
+| R1 删 is_absolute 闸 | 仅 `test_relative_target_is_reported_while_cwd_is_inside_sandbox` |
+| R2 落点不 resolve / R3 沙箱不 resolve | 仅 `test_symlinks_compare_by_real_location` |
+| R4 删沙箱绝对断言 | 仅 `test_relative_sandbox_is_refused` |
+| G1 撤 ALLOWED 那一行 | 仅 `test_no_cwd_derived_watch_in_conftest`（报 `_hive_log_handler_escapes` 两处） |
+| M5 从 scratch 目录起 pytest、收集期往调用目录 `logs/alpha_hive.log` 追加 | ③（基线同条件 1 passed） |
+| M6 删 ③ 快照那一行 | ③ 的「快照没取到」 |
+
+### 落地
+- 以 **merge** 合入 v0.45.244 分支（其中已 merge v0.45.239），81153eda / 261d5863 原 SHA 进 main，未 rebase ——
+  两个 worktree 的分支自动成为 main 的祖先，不产生重复提交。落地前核对：两分支均未推任何远端，`git log --all` 无同题异 SHA。
+  v0.45.239 作者 session 已确认此洞并停推。
+- 就地订正 v0.45.239（① 判据、③ 快照时刻）与 v0.45.244（该条红的结论、「未推 main」）各两处，标〔v0.45.246〕。
+
+### 验证
+- 相关三文件 126 passed；`ruff check` 通过。
+- 全套（worktree 根，合入最新 origin/main 后，`--maxfail=100000`）：**1 failed / 4560 passed / 1 skipped / 2 xfailed**，
+  唯一红 `TestCoverageHorizon`（设计即红）。worktree 与主 checkout 的 `logs/alpha_hive.log`、`alpha_hive_structured.jsonl`
+  跑前跑后 `(size, mtime)` 逐字相同。
+- 推送前 v0.45.245 先落了 main：再合一次（自动合并无冲突），本版三文件 + `test_changelog_entry_integrity.py` **145 passed**——
+  即 v0.45.245 的**真实**模块级守卫在本 conftest 上为绿（上面「未提交版实测为空」得到正式版印证）。
+  这次合并只带进 `test_reads_own_checkout.py` 与 CHANGELOG，未重跑全套。
+
+### 交接
+- **v0.45.233**（`claude/objective-hypatia-742440` 的 WIP da566685）：你的 `_log_files_outside_checkout` 里
+  `os.path.realpath(h.baseFilename)` 在现行守卫下会被判隐式读 cwd；且 conftest 里现在有 v0.45.239 的 ⓪①②③ 与之重叠，合并时要取舍。
+
+## [0.45.245] — 2026-09-14 — 二次检查 v0.45.240：它自己的结构守卫也曾经是「看着在查、其实没查到」——只扫函数体，漏了模块级/class 体顶层；另外它的「事故会静默重演」说重了，有条独立的旧测试早就兜着
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。**
+
+### Fixed（`tests/test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`）
+
+1. **检测器只看函数体，模块级 / class 体顶层的调用从没被访问过。** 第一版外层先
+   `ast.walk(tree)` 找出所有 `FunctionDef`/`AsyncFunctionDef`，再对每个逐个 `ast.walk(fn)`——
+   不在任何函数里的语句压根不在这两层遍历的范围内，**不管锚没锚**。实测：把
+   `X = os.getcwd()` 放在模块顶层喂给它，返回 `[]`；class 体顶层 `ROOT = pathlib.Path.cwd()`
+   同样 `[]`。本仓当前唯一的模块级读 cwd 调用（`_REPO_ROOT_FOR_GUARD` 那行）锚在 `__file__`
+   上、现在没有活 bug——但「看不见你」和「看见了、判定你锚了」必须分开证明，不能拿前者
+   顶替后者。**顺带**：同一版还发现嵌套函数会被双重遍历覆盖，报错位置挂到外层函数名上
+   （`outer:4` 而不是真正所在的 `inner:4`），定位会指错地方。
+   改：不再「先找函数、再进函数体」两层遍历，一次性走全树、给每个节点建父指针表，
+   命中时回溯最近外层函数名（查不到就是模块级），`ALLOWED` 只装函数名，模块级永远过不了。
+   变异：新增四条用例（模块级、class 体顶层、锚定的模块级、嵌套函数）——旧实现全部漏报或错报，
+   新实现四条都对。
+
+### Corrected（v0.45.240 条目 2 的后果说重了）
+
+2. **「只有防线①能发现，而恰恰是它失效」不成立。** `tests/test_ml_model_path_isolation.py::
+   TestModelPathIsolation::test_default_path_is_absolute_and_not_cwd_relative` 自 v0.45.149
+   起就存在，直接断言 `Path(default_model_path()).is_absolute()`——**不调 `.resolve()`，
+   不依赖 cwd**。实测：checkout 出 v0.45.240 之前的 conftest.py（防线①还是旧版
+   `resolve().is_relative_to(tmp_path)`），把 `default_model_path()` 改回相对字面量，
+   单独跑这条**v0.45.149 时代就有的**测试——**红**，报的正是「不是绝对路径」，与
+   v0.45.240 新写的 `_assert_default_path_in_sandbox` 无关。也就是说，即便防线①的
+   bug 从未被修，全套测试也不会静默放过这次事故重演——会在别的地方红。
+   防线①的修复本身仍然成立、仍然该留着（它是 `_isolate_ml_model_file` 自己的正面核对，
+   两条守卫查同一件事、其中一条锚错了 cwd 本来就该修），只是 v0.45.240 描述的「后果」夸大了：
+   真实情况是**双重覆盖里的一重失效**，不是「唯一防线失效」。
+
+### 核过、成立的（v0.45.240）
+
+- claim 1（`_isolate_ml_model_file` 的指纹侧 cwd 臂改看 `invocation_params.dir`）：独立重跑。
+  用探针测试直接往 `request.config.invocation_params.dir` 写一份 `ml_model.json`，
+  从临时调用目录起跑——现状（`invocation_params.dir` 臂）teardown 红；
+  改回 `Path.cwd()` 臂——teardown 绿（漏判，与 v0.45.240 描述一致）。此处**没有**类似
+  claim 2 的冗余守卫：`test_train_model_writes_into_sandbox_not_repo_root` 只比对
+  `REPO_ROOT`，不比对「pytest 从哪启动」，两者在从仓库根启动时刚好重合，在别处
+  启动就不重合，所以 claim 1 的修复是真正**唯一**罩住这类场景的防线。
+- `invocation_params` 由 pytest 在 `Config` 构造时一次性捕获（`_pytest/config/__init__.py`），
+  早于任何 fixture、任何 chdir，全会话不变——用它做「调用目录」锚点没有 234/237 那类
+  「顺序看着定其实不定」的风险。
+- `import subprocess as _sp`（`test_paths_not_frozen_at_import.py:363`）只伪造
+  `git ls-files`：复读一遍源码确认，结论不变。
+- 无测试调 `monkeypatch.undo()`：复查仍是空。
+
+### 验证
+
+- `tests/test_reads_own_checkout.py` + `tests/test_ml_model_path_isolation.py` +
+  `tests/test_cwd_and_sys_path_hygiene.py`：63 passed。
+- 全套从仓库根：1 failed（`TestCoverageHorizon`，设计如此）/ 4438 passed / 1 skipped / 2 xfailed。
+
+### v0.45.240 条目里需要补的（已就地标注）
+
+- 「防线①…只有防线①能发现，而恰恰是它失效」：不成立，见上 2；`test_default_path_is_absolute_and_not_cwd_relative`（v0.45.149）独立兜底。
+
+---
+
+## [0.45.244] — 2026-09-14 — import 冻结路径扫描器补盲区：模块级调用本模块函数/类、被调方体内求值 `PATHS`/`__file__`——白名单按「路由」登记，放行 hive_logger 的良性形态而不对它的事故原形失明
+
+**盲区**（v0.45.239 条目「为什么结构守卫没抓到」）：`TestSpeciesDoesNotSpread._scan()` 只看模块级
+`Assign`/`AnnAssign` 右侧字面含不含 `PATHS`（`__file__` 族同一扫描器），`logger = _setup_logger()` 右侧只有一个函数调用。
+
+**普查实测（本版扫描器，含 v0.45.239 合并后的树）**：`PATHS` 3 处、`__file__` 0 处。
+- ⭐ **修后普查前提变了**：v0.45.239 之后 `_setup_logger` 体里**已经没有 `PATHS`**——读挪进了
+  `LogsDirRotatingFileHandler.current_target`。只跟函数的扫描器看不见它（修前能看见，via `_setup_logger`）；
+  跟到类构造器、再跟 `self.current_target()` 才看见。三种扫描变体在修前/修后树上的命中已逐一跑过。
+- `scheduler.py:26` 不在本类管辖：它没调本模块函数（`basicConfig(handlers=[FileHandler(<_PROJECT_ROOT>/…)])`），
+  冻结输入 `_PROJECT_ROOT` 早已在 `TestFileDerivedSpeciesDoesNotSpread.KNOWN`。
+- 模块级裸表达式**直接**含标记：`PATHS` 0 处；`__file__` 5 处，全是 `sys.path.insert`（代码锚点，正确）。未加扫描。
+- **订正 v0.45.239 一处**：「`paper_portfolio.py:85-86` 已被内容指纹 fixture 罩住」只对 `STATE_DIR` 成立；
+  `SNAPSHOT_DIR` 没被 `_isolate_paper_portfolio_state` 重绑。它只有两处 glob 读、无写入 ⇒ 后果是测试读到真实快照，不是写穿。
+
+### Added（`tests/test_paths_not_frozen_at_import.py::TestFrozenViaModuleLevelCall`）
+- 跟随规则（限本模块、全结构性）：`f()` → 模块级 def（传递）；`C()` → `__new__`/`__init__`/`__post_init__`，其中
+  `self.m()`/`cls.m()` → 本类 `m`；不进嵌套 def/class/lambda；跳 `if __name__ == "__main__"` 体（`else` 照进）；
+  def 的默认参数与装饰器、class 的基类与装饰器算 import 期。标记判 `ast.Name`/`ast.Attribute` 节点，不判
+  `ast.unparse` 子串——本仓 docstring 满是 `PATHS.x`/`__file__`。
+- ⭐ **键是 `(文件, 绑定名, via)`，`via` = 标记真正出现的函数。** 按上面两类的 `(文件, 名)` 登记，
+  `hive_logger.logger` 修前修后键**完全相同**（实测）⇒ 把良性的修后形态放进白名单，就对退回事故原形永久失明。
+  带 `via` 后退回会换出新键。
+- `KNOWN`（子集语义，逐条理由）：`paper_portfolio` `STATE_DIR`（冻结，conftest 重绑 + 指纹）、`SNAPSHOT_DIR`
+  （冻结，只读）、`hive_logger.logger via LogsDirRotatingFileHandler.current_target`（**不冻结**：emit 时重指，
+  行为由 `test_hive_logger_not_frozen.py` 守）。
+- **`hive_logger._setup_logger` 不进白名单，也不许进**：它的体里已无 `PATHS`，登记它会立刻成过期项；它再出现就是事故原形。
+  `test_hive_logger_regression_is_not_allowlistable` 同时断言它不在 KNOWN、不在扫描结果里。
+- `test_scanner_has_teeth`：合成夹具**精确相等**，每条跟随规则各配一行正/反例（对照表在 docstring）。
+- `test_no_new_route` / `test_known_has_no_stale_entries`（按标记参数化）。**与上面两类不同，过期项会红**——
+  存量只有 3 条，修好删一行比留一张靠人对账的表便宜；它同时是真实仓库上的「扫描器有牙」。两条红时互相提示「多半是改名」。
+
+### Changed
+- `TestSpeciesDoesNotSpread._scan` 加 `_visit` 参数：新扫描器复用它的文件集、排除规则与解码/语法记账，不另写一份文件循环。
+  不传时行为不变（原 72 条用例全绿）。
+
+### 变异（真改文件、跑本类、逐字节还原；`git status` 还原后为空）
+
+| 变异 | 红 |
+|---|---|
+| 无变异基线（含 `--noconftest` 版） | 无（6 passed） |
+| P1 `paper_portfolio.py` 加 `_MUTANT_DIR = _base_dir() / "mutant"` | `test_no_new_route[PATHS]` |
+| P1b `scheduler.py` 加 `def _here(): return dirname(__file__)` + `_HERE = _here()` | `test_no_new_route[__file__]` |
+| P2 删掉白名单站点（`SNAPSHOT_DIR = None`） | `test_known_has_no_stale_entries[PATHS]` |
+| P3 `hive_logger.py` 换回修前版本 | 默认 conftest 下 6 个 **setup error**（v0.45.239 的 ① 先接住）⇒ 本类没轮到跑；`--noconftest` + env 指 scratch：新路由、过期、回退三条红 |
+| P4 = P3 + 把 `_setup_logger` 路由登进 KNOWN | 只 `test_hive_logger_regression_is_not_allowlistable` |
+| S1 不跳 main 守卫 | 有牙 + 真实仓库新路由（两个标记） |
+| S2 不传递 / S3 不跟构造器 / S3b 不跟 `self.m()` | 有牙 + 真实仓库过期（hive_logger 路由消失） |
+| S3c 构造时跟全部方法 | 有牙 + 真实仓库 `__file__` 新路由 |
+| S4 子串判法 / S5 进 lambda 与嵌套 def / S6 不下钻复合语句 / S7 不看默认参数 | 有牙 |
+| S8 标记写死 `PATHS` | 有牙 + `__file__` 新路由 |
+| S9 `_scan` 忽略 `_visit` | 有牙 + 真实仓库三条 |
+
+P3 那一行的教训：**变异被上游守卫先接住，证明不了本守卫有牙**——要把上游关掉单独看，并先用同样的 flag 跑无变异基线。
+
+### 验证
+- 本文件：78 passed；`ruff check` 通过。
+- 全套（worktree 根，`--maxfail` 覆盖 addopts 的 `-x`）：**2 failed / 4437 passed / 1 skipped / 2 xfailed**。
+  worktree 与主 checkout 的 `logs/alpha_hive.log`、`alpha_hive_structured.jsonl` 跑前跑后 `(size, mtime)` 逐字相同。
+  - `TestCoverageHorizon`：设计即红。
+  - ⚠️ `test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd::test_no_cwd_derived_watch_in_conftest`：
+    **与本版无关，是 v0.45.239 × v0.45.240 的语义冲突**。本分支合并了尚未进 main 的 v0.45.239（81153eda，
+    本版依赖它的修后 `hive_logger`）；它的 conftest `_hive_log_handler_escapes:1044,1050` 两处 `.resolve()`
+    被 v0.45.240 的结构守卫判为「隐式读 cwd」。实测（临时 detached worktree）：origin/main（b0b0e081）该类 3 passed；
+    只含合并、不含本版改动的 2179e6ee 即 1 failed。本版提交不碰 conftest 与该守卫。**v0.45.239 落 main 时要一并处理。**
+    **〔v0.45.246〕** 已处理：不是误报，是 v0.45.240 同形的真洞，修法与变异见 v0.45.246。
+- ~~**未推 main**~~ **〔v0.45.246〕** 与 v0.45.239 一并经 v0.45.246 合入 main（原 SHA 81153eda / 261d5863 原样保留，未 rebase）。
+  原因：本版依赖 v0.45.239（修前 `hive_logger` 上本类 `KNOWN` 的 hive_logger 路由即过期、`_setup_logger` 路由即新增）。
 
 ## [0.45.243] — 2026-09-14 — CBOE 盘中价的两个漏网消费者：补跑兜底照单全收云端快照的中午价；close_correction 把盘中实时价当上一场收盘去印证
 
@@ -305,11 +496,14 @@ CBOE CDN 其实都有，且云端够得到 `cdn.cboe.com`（同日 30 只期权�
    `resolve()` 按 **cwd** 补全相对路径，而 cwd 就在 tmp 里。**这一处不调 `cwd()`，1 的结构守卫第一版也漏了它。**
    实测把 `default_model_path()` 改回 `"ml_model.json"`（v0.45.149 事故的原形）：现状 **1 passed**；再撤掉两处 chdir ⇒ 红。
    测试里这条相对路径只写进空目录、看着无害，**伤的是生产**（编排器从仓库根跑）—— 所以只有防线①能发现，而恰恰是它失效。
+   **（v0.45.245 订正：「只有防线①能发现」不成立——`test_ml_model_path_isolation.py::test_default_path_is_absolute_and_not_cwd_relative`
+   自 v0.45.149 起就独立兜底，不依赖 cwd，实测在防线①的 bug 从未修的树上同一变异照样红；防线①本身仍值得修，后果被说重了）**
    改：抽成 `_assert_default_path_in_sandbox`，**先断言 `is_absolute()` 再判包含**；同一变异 ⇒ 红（报「不是绝对路径」），不变异 ⇒ 绿。
 3. **结构守卫** `test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`：conftest 函数里显式读 cwd（`cwd`/`getcwd`）一律红；
    隐式读 cwd（`resolve`/`absolute`/`abspath`/`realpath`）主语里不带 `__file__` / `invocation_params` / `tmp_path*` 即红。
    放行 `pytest_collection_finish` 与上面的 helper（后者由运行时自证 `test_sandbox_check_rejects_relative_default` 守着：
    **本测试 cwd 就在 tmp 里**时喂相对路径必须红）。变异：删 helper 的 `is_absolute` 断言 ⇒ 运行时自证红；把防线①改回内联 `resolve` ⇒ AST 守卫红。
+   **（v0.45.245 订正：这个 AST 检测器自己只扫函数体，模块级/class 体顶层的调用从没被访问过——不管锚没锚，已修）**
 
 ### 核过、成立的（v0.45.237）
 
@@ -337,7 +531,96 @@ CBOE CDN 其实都有，且云端够得到 `cdn.cboe.com`（同日 30 只期权�
 
 ---
 
-## [0.45.239] — 2026-09-14 — 占位（进行中：hive_logger 在 import 时把文件 handler 绑到真实 logs/，测试日志写穿生产日志——修 + conftest 指纹守卫）
+## [0.45.239] — 2026-09-14 — 测试日志写穿 checkout 的真实日志：hive_logger 的文件 handler 在 import 时存死路径——改为每条记录按 `PATHS` 求值 + conftest 三道观测
+
+**机制**（auto-memory `alpha-hive-test-writes-production.md` v0.45.230 节末记为「未修、同物种」）：
+`hive_logger` 模块级 `logger = _setup_logger()`，裸 `RotatingFileHandler` 在 `__init__` 里把
+`baseFilename` 存死。pytest 收集期 import 早于 `conftest._isolate_env` 的 setenv ⇒
+全套测试日志冻进 `hive_logger.py` 所在 checkout 的 `logs/alpha_hive.log` 与
+`alpha_hive_structured.jsonl`；在主 checkout 起 pytest 就混进生产日志。
+
+**实测**（修前，本 worktree）：
+- `tests/test_zero_weight_invariant.py` 32 条 ⇒ `logs/alpha_hive.log` 0 → 1525 B，结构化 jsonl 0 → 2076 B，
+  尾部是合成标的 `[AAA] 政体层保零违反` ERROR 与一条**假的**「权重不变式违反」ERROR——
+  拿这两句 grep 生产日志排查的人会被误导。
+- 本 session 占号提交时，**pre-commit 钩子**（`changelog_guard.py` 跑一个 CHANGELOG 测试文件）
+  07:24:12 触发、07:24:14 在全新 worktree 里建出两个空日志文件：任何一次 pytest 调用都中招，不止全套。
+- `--collect-only` 全套：写入 0 B（logger 级别 INFO，收集期无 INFO+ 日志）⇒ 写入发生在测试体里，不在 import 本身。
+- v0.45.237 独立旁证：adoring-sanderson worktree 全套后 `logs/alpha_hive.log` 2.5 MB、mtime 落在跑测窗口内。
+
+**为什么结构守卫没抓到**：`PATHS.logs_dir` 本身是调用时求值的；冻住它的是**持有路径的对象**。
+`test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread` 只扫模块级 `Assign` 右侧含 `PATHS.`，
+而这里模块级只有一个函数调用。一次性普查「模块级调用同模块函数、函数体含 `PATHS.`/`__file__`/FileHandler」：
+4 处——本处；`paper_portfolio.py:85-86` `STATE_DIR = _base_dir() / …`（同一盲区，但已被
+`_isolate_paper_portfolio_state` 的内容指纹罩住）；`scheduler.py:26` 在 import 时 `basicConfig` 挂根
+`FileHandler`（pytest 下 root 已有 pytest 的 handler ⇒ `basicConfig` 空操作，两个 checkout 均无 `scheduler.log`）。
+
+### Fixed
+- `hive_logger.py`：新增 `LogsDirRotatingFileHandler`——文件名固定，目录在 `emit` 时经
+  `PATHS.logs_dir_unmade()` 求值，变了就关旧流、重指 `baseFilename`（旋转随之发生在新目录）；
+  `_open` 时才建目录；构造强制 `delay=True`。`Handler.handle` 持锁调 `emit` ⇒ 重指不与其他线程交错。
+  - **生产语义不变**：扫描进程 env 不中途变，落点恒为 `<ALPHA_HIVE_HOME 缺省=本 checkout>/logs/<leaf>`，从不重指。
+    读这两个文件的只有人工排查与审计脚本（`scan_coverage_gate` 读的是 `~/.claude/logs/orchestrator-*.log`，
+    即控制台 stderr，不受影响）。唯一可见差异：import 不再建 `logs/` 与空日志文件，第一条记录时才建
+    （`logs/` 有被跟踪的文件，任何 checkout 里本就存在）。
+  - 原先两段 `try/except OSError → debug` 删掉：延迟打开后构造不碰文件系统，它们不可达；
+    打不开文件改在 `emit` 里经 `Handler.handleError` 打到 stderr（编排器日志看得见），不再在 import 时被吞。
+- `_HivePaths.logs_dir_unmade()`：`logs_dir` 的解析逻辑抽出来（不建目录），`logs_dir` 改为调它再 mkdir——解析只写一份。
+
+### Added
+- `tests/conftest.py`「hive_logger 文件日志隔离」节，四层，**缺一层就有一种失败没人红**：
+  - ⓪ `pytest_configure`（trylast）：会话级 `ALPHA_HIVE_LOGS_DIR` 缺省指向 basetemp 下 `hive_logs_outside_tests`，
+    接住测试**之外**的日志（teardown 后才落的后台线程、module/session fixture、atexit）。刻意不在结束时还原：
+    atexit 在 `pytest_unconfigure` 之后跑。
+  - ① 每条测试 setup **正面核对** handler 此刻落点（优先 `current_target()`，没有就按 `baseFilename`）在本条
+    `tmp_path` 内；另断言文件 handler 非空、文件名 ⊆ 被盯清单（生产加/改名日志文件时清单不许静默过期）。
+    **〔v0.45.246 订正〕** 原判据先 `resolve()` 再判包含，对**相对落点恒绿**（① 跑时 cwd 已在本条 tmp 里）；
+    现先判 `is_absolute`，相对落点直接报出。
+    **⚠️ 这一道是 ⓪ 的代价**：⓪ 会把一个冻住的 handler 也接住（冻在会话目录），②③ 于是恒绿——
+    ⓪ 在、生产修复被改回时，只有 ① 红。
+  - ② 每条测试 teardown 比对真身 `(size, mtime_ns)`（复用 `_artifact_signature`）：盯
+    `{仓库根, hive_logger.__file__ 所在目录, 调用目录}/logs/` 下两个文件名，兜 ① 管不到的绕过（测试自己 delenv、
+    subprocess 现造 env），红在具体那条测试上。
+  - ③ 会话级：快照在 **conftest import 时**取（早于收集），会话结束比对，兜测试之间的写入。
+    **〔v0.45.246 改〕** 快照挪进 ⓪ 的 `pytest_configure`（仍早于收集），调用目录取 `invocation_params.dir` 而非模块级 `os.getcwd()`。
+  - 只盯两个文件名、不盯整个 `logs/`：同目录别有写入者，全目录默认拒绝属数据根迁移阶段 0.3（v0.45.233）。
+- `tests/test_hive_logger_not_frozen.py`（8 条）：进程内落点进本条沙箱；重指后旋转发生在新目录；
+  **新解释器**里「先 import 后改 env」两次重指各落各处、import 本身零文件写入、无 env 时落点仍是本 checkout 的 `logs/`
+  （不经 conftest 任何隔离——⓪ 接住了问题这里照样红）；① 判据验牙（冻住的 handler 被报出、`baseFilename` 过期但
+  resolver 在沙箱内不误报、真实 handler 为空集）。
+
+### 自证
+
+**修后同一批 32 条**（`test_zero_weight_invariant.py` + 新文件 8 条）：40 passed，worktree 两个日志 `(size, mtime)` 前后逐字相同。
+
+**全套**（均无 env 覆盖，前后记 worktree 与主 checkout 两份日志的 size/mtime）：
+- 仓库根起跑：1 failed（`TestCoverageHorizon`，设计即红）/ 4393 passed / 1 skipped / 2 xfailed，7m36s；
+  两个 checkout 的两份日志均未变；⓪ 的会话目录跑完为空（本轮无测试之外的日志，⓪ 目前是纯防御）。
+- 空目录起跑：同上 1 failed（设计即红）/ 4393 passed / 1 skipped / 2 xfailed，6m37s；四份日志与空目录自身均未变（空目录跑完仍为空），⓪ 会话目录为空。
+
+**变异矩阵**（每条真跑，跑后 sha 核对三文件逐字还原）：
+
+| 变异 | ① setup 核对 | ② 逐条指纹 | ③ 会话指纹 | checkout 日志 |
+|---|---|---|---|---|
+| M1 生产修复改回（`git show HEAD:hive_logger.py`） | **红 40/40**，落点 = `hive_logs_outside_tests` | 走不到 | 走不到 | 未变（⓪ 接住） |
+| M1b 同上 + 关 ① | 关 | 绿 | 绿 | 未变；**新测试文件 7/8 红**（唯一绿的是不依赖修复的验牙条） |
+| M2 同上 + 去 ⓪（= 原 bug 只剩指纹闸） | 关 | **红：恰是打日志的 7 条** | **红** | +1525 B |
+| M3 修复在，测试自己 delenv 后打日志 | 绿 | **红在那一条** | 红 | +78 B |
+| M4a 修复在，module fixture 打日志 | 绿 | 绿 | 绿 | 未变（⓪ 接住） |
+| M4b 同上 + 去 ⓪ | 绿 | 绿 | **红** | +75 B |
+
+每一层恰好接住它负责的那类失败；M1 与 M4a 两行说明了为什么 ⓪ 必须配 ①。
+
+**顺带实测：生产日志已被污染**（主 checkout，只读统计）：`logs/alpha_hive.log` 含 `[AAA]` 256 行、
+`政体层保零违反` 16 条、`权重不变式违反` 10 条；后者 10 条逐条看邻行**全部**紧挨 `[AAA]`/`CCC 仅` 夹具输出
+（夹具复用了 09-09 生产真实权重 0.2059/0.1982，单看数字分不开）；`.1` 另有 `[AAA]` 38 行。
+日志行只有 `HH:MM:SS` 无日期 ⇒ **v0.45.239 之前这份日志不能用来 grep 不变式告警**；
+v0.45.176 观测点有没有在生产响过，看按日期分文件的 `~/.claude/logs/orchestrator-<date>.log`。未清理（生产日志，由用户决定）。
+
+**开销**：每条记录 +约 26 µs（全套并发时测）；生产日志约 2.8k 行/天 ⇒ 每天 <0.2 s。
+
+**未做 / 留给后续**：结构守卫（AST 扫描）仍看不见「模块级调用、函数体里求值 `PATHS`」这一族——已提后续任务，
+本版靠行为测试 + ①②③ 兜。
 
 ## [0.45.238] — 2026-09-14 — 期权快照槽位改按数据所属的 ET 交易会话分：跨午夜扫描曾把前一交易日的链写进次日槽位，次日正式扫描整天用上一会话的期权数据
 
