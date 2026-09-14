@@ -11,7 +11,54 @@
 
 ## [0.45.241] — 2026-09-14 — 占位（进行中：cboe_fetcher 的 P/C、SKEW、VVIX 改走 CBOE CDN——云端够不到 yfinance，三项 12/12 天兜底）
 
-## [0.45.240] — 2026-09-14 — 占位（进行中：二次检查 v0.45.237 的改动）
+## [0.45.240] — 2026-09-14 — 二次检查 v0.45.237：挪 cwd 之后没问「谁在读 cwd」——`_isolate_ml_model_file` 两道闸自 v0.45.224 起一个瞎、一个恒真
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。** 这次问的不是「v0.45.237 自己的测试对不对」，而是
+**「它挪了进程级的 cwd，谁在读 cwd？」** —— autouse 按名字字母序 setup，`_isolate_cwd_and_sys_path`（`_isolate_c…`）
+排在一串守卫前面，它们 setup 时看到的 cwd 已经不是调用目录。两处都在同一个 fixture 里，第二处是本轮写 CHANGELOG 时复核措辞才撞见的。
+
+### Fixed（`tests/conftest.py::_isolate_ml_model_file`）
+
+1. **指纹侧的 cwd 臂守的是本测试的空目录。** 它用 `Path.cwd()` 定位「pytest 的 cwd 里的模型文件」，
+   本意是防「从主 checkout 起 pytest 时写穿主 checkout 的模型」。v0.45.224 起它 setup 时 cwd 已在 `tmp/_cwd`。
+   实测（临时调用目录，不碰任何 checkout）：路径在收集期冻结到调用目录（`os.path.abspath("ml_model.json")`）、测试往里写 ——
+   ① 现状 **1 passed、守卫不响**；② 该臂改看 `invocation_params.dir` ⇒ 红；③ 撤掉逐测试 chdir（v0.45.224 之前）⇒ 红。
+   改：看 `request.config.invocation_params.dir`。
+2. **防线①「默认落盘位置在 tmp 里」对相对路径恒真。** 它判 `Path(default_model_path()).resolve().is_relative_to(tmp_path)` ——
+   `resolve()` 按 **cwd** 补全相对路径，而 cwd 就在 tmp 里。**这一处不调 `cwd()`，1 的结构守卫第一版也漏了它。**
+   实测把 `default_model_path()` 改回 `"ml_model.json"`（v0.45.149 事故的原形）：现状 **1 passed**；再撤掉两处 chdir ⇒ 红。
+   测试里这条相对路径只写进空目录、看着无害，**伤的是生产**（编排器从仓库根跑）—— 所以只有防线①能发现，而恰恰是它失效。
+   改：抽成 `_assert_default_path_in_sandbox`，**先断言 `is_absolute()` 再判包含**；同一变异 ⇒ 红（报「不是绝对路径」），不变异 ⇒ 绿。
+3. **结构守卫** `test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`：conftest 函数里显式读 cwd（`cwd`/`getcwd`）一律红；
+   隐式读 cwd（`resolve`/`absolute`/`abspath`/`realpath`）主语里不带 `__file__` / `invocation_params` / `tmp_path*` 即红。
+   放行 `pytest_collection_finish` 与上面的 helper（后者由运行时自证 `test_sandbox_check_rejects_relative_default` 守着：
+   **本测试 cwd 就在 tmp 里**时喂相对路径必须红）。变异：删 helper 的 `is_absolute` 断言 ⇒ 运行时自证红；把防线①改回内联 `resolve` ⇒ AST 守卫红。
+
+### 核过、成立的（v0.45.237）
+
+- `_guard_production_artifacts`（session 级、同样排在 `_empty_cwd_between_tests` 之后）锚的是 `__file__` 推出的 `_REPO_ROOT_FOR_GUARD`，**没瞎**。
+  测试文件里其余 cwd 用法无一拿来定位真身：`test_deep_analysis_prefetch_injection.py` 是 import 隔离的存还原，
+  `test_cwd_and_sys_path_hygiene.py` 两处在子进程源码字符串里；各测试文件的「在沙箱里」判定都对**未 resolve** 的路径做
+  （`Path("ml_model.json").is_relative_to(tmp)` 为假），不受 2 的影响。
+- 无测试调 `monkeypatch.undo()`（否则测试后半段会落进会话共享目录）。
+- 子进程：v0.45.237 的静态扫描只认 `subprocess.*` 名字，漏看 `test_paths_not_frozen_at_import.py:363` 的 `import subprocess as _sp` ——
+  那处只伪造 `git ls-files`，结论不变。
+- 写入普查（全套从仓库根，`--basetemp` 指定）：worktree 里跑测期间被改的文件只有 `logs/alpha_hive.log` 与 `logs/alpha_hive_structured.jsonl` —— `hive_logger` 收集期把 handler 绑到真实 `logs/`，已知、另有任务（v0.45.237 已记）
+- 会话级测试间目录跑完的内容：空（目录存在，`ls -la` 只有 `.` `..`）
+
+### 验证
+
+- 全套从仓库根（上面 2 修之前、合并 origin/main 之前）：1 failed（`TestCoverageHorizon`，设计如此）/ 4387 passed / 1 skipped / 2 xfailed
+- 全套从空目录（同上）：同上 4387 passed；空调用目录跑完无残留
+- 合并 origin/main 后、含 2 的最终树：1 failed（`TestCoverageHorizon`）/ 4422 passed / 1 skipped / 2 xfailed
+
+### v0.45.237 条目里需要补的（已就地标注）
+
+- 「改：新增会话级 autouse `_empty_cwd_between_tests`…」：没查挪 cwd 之后 conftest 里谁还在读 cwd，见上 1、2（盲区是 v0.45.224 引入的，v0.45.237 沿用）。
+- 「autouse fixture 按名字字母序 setup」：实测于 pytest 9.0.2；pytest 文档未承诺同 scope autouse 的相对顺序，别当成跨版本不变式。
+- 「测试里的 `subprocess` 调用无一跑…」：扫描漏看别名 import，见上。
+
+---
 
 ## [0.45.239] — 2026-09-14 — 占位（进行中：hive_logger 在 import 时把文件 handler 绑到真实 logs/，测试日志写穿生产日志——修 + conftest 指纹守卫）
 
@@ -73,10 +120,10 @@
 
 1. **module / class / session 级 fixture 仍在调用目录（平常就是仓库根）里 setup。** v0.45.224 称「逐测试空目录让这类问题在任何一次普通运行里就红」——
    它只在函数级 fixture 里 chdir，每条测试结束又 chdir 回**调用目录**。实测：module 级 fixture 读 `Path("config.py")` ⇒ `exists()=True`、cwd=调用目录。
-   **结束时还原到调用目录，恰好把盲区造回来了。** 改：新增会话级 autouse `_empty_cwd_between_tests`，测试之间 cwd 停在会话级空目录，会话结束才回调用目录。
+   **结束时还原到调用目录，恰好把盲区造回来了。** 改：新增会话级 autouse `_empty_cwd_between_tests`，测试之间 cwd 停在会话级空目录，会话结束才回调用目录。**（v0.45.240 订正：没查挪 cwd 后 conftest 里谁还读 cwd：`_isolate_ml_model_file` 的调用目录臂自 v0.45.224 起守的是 tmp，防线①的 `resolve()` 对相对默认值恒真）**
    复测同一个 module 级 fixture ⇒ `exists()=False`、cwd=会话级空目录。
 2. **测试自己 `monkeypatch.chdir` 时，teardown 后 cwd 停在该测试的 `_cwd`。** v0.45.224 的理由是「monkeypatch 的还原顺序不定」—— **错，是确定地输**：
-   `--setup-plan` 实测 autouse fixture 按**名字字母序** setup（`_block_llm_api` 排第一、先实例化 monkeypatch），不是定义顺序，
+   `--setup-plan` 实测 autouse fixture 按**名字字母序** setup**（v0.45.240 订正：pytest 9.0.2 实测，非文档承诺）**（`_block_llm_api` 排第一、先实例化 monkeypatch），不是定义顺序，
    monkeypatch 因此最后 teardown，覆盖掉手工 `os.chdir`。本轮第一版「把 fixture 挪到文件最前面」也照输（自证当场红）。
    改：chdir 走 `monkeypatch.chdir` —— 撤销时回到本测试第一次经它 chdir 之前的目录，与谁先 teardown 无关，裸 `os.chdir` 的泄漏一并撤销。
 
@@ -98,7 +145,7 @@
 
 ### 核过、成立的
 
-- v0.45.224「文件访问只有 import 期一次 `scandir`」：审计钩子只看得见**本进程**。补查子进程：测试里的 `subprocess` 调用无一跑写死主 checkout 的模块
+- v0.45.224「文件访问只有 import 期一次 `scandir`」：审计钩子只看得见**本进程**。补查子进程：测试里的 `subprocess` 调用无一跑写死主 checkout 的模块**（v0.45.240 订正：扫描漏看 `import subprocess as _sp` 一处，它只伪造 git，结论不变）**
   （`weekly_optimizer` / `self_analyst` / `generate_deep_v2` / `collect_data` / `alpha_hive_mcp` / `deep_analysis`），唯一的 `-c` 子进程 import 的是
   `alpha_hive_daily_report`，生产代码无顶层 import 上述模块（静态核对，不是运行时量的）。
 - 其余 v0.45.224 声称（收集期 chdir、sys.path 120/141、4 failed / 6 passed 复现、9 条 cwd 依赖、canary）为当轮实测输出，本轮未发现反例。
