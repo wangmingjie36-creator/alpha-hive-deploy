@@ -11,6 +11,15 @@ from typing import List, Dict
 from enum import Enum
 
 from hive_logger import PATHS, get_logger
+from production_sync import OK_OUTCOMES
+
+#: 扫描前同步非 OK 结局 → 这一轮实际跑的是什么（v0.45.223）
+_SYNC_MEANING = {
+    "ff_refused": "快进被拒，本轮跑的是 origin/main 之前的旧代码",
+    "local_ahead": "生产在跑 main 上没有的提交（本地未推送），不是旧代码",
+    "diverged": "既缺 main 的新提交、又含 main 没有的提交",
+    "not_on_main": "生产 checkout 不在 main 分支上，跑的是那个分支的代码",
+}
 
 _log = get_logger("alerts")
 
@@ -221,22 +230,97 @@ class AlertAnalyzer:
             _log.warning("日报 JSON 解析失败，**低分与数据质量检查未执行**：%s: %s",
                          type(e).__name__, e)
 
-        # 6. 检测 P1/P2: GitHub 部署失败
-        if status.get('deploy_status') == 'failed':
-            deploy_msg = status.get('deploy_message', 'Unknown error')
-            alert_level = AlertLevel.HIGH if 'Authentication' in deploy_msg else AlertLevel.MEDIUM
+        # 6. 检测 P1: main 推送失败 / 生产代码没同步到 origin/main（v0.45.214）
+        self._check_deploy_and_code_sync(status)
+
+        return self.alerts
+
+    def _check_deploy_and_code_sync(self, status: Dict) -> None:
+        """读 `status.scan_timing` 里两个**真有写入者**的字段。
+
+        v0.45.214 前这里读 `status['deploy_status']` —— 全仓零写入者，规则结构上不可能触发；
+        2026-09-01~11 生产 `git push origin main` 六次 non-fast-forward 被拒，零告警。
+          - `scan_timing.extra.git_push`：`alpha_hive_daily_report.main` 写（部署结果精简版）
+          - `scan_timing.production_sync`：编排器 Step 1 前跑 `production_sync.py` 写
+        """
+        st = status.get("scan_timing")
+        if not isinstance(st, dict):
+            self.checks_skipped.append("推送/生产代码同步检查（status.json 缺 scan_timing）")
+            _log.warning("status.json 无 scan_timing —— **推送与代码同步检查未执行**")
+            return
+
+        commit = (st.get("extra") or {}).get("git_commit")
+        # v0.45.223：`pending_artifacts == 0` 的失败只是「没东西可提交」；其余（含 None = git status 就失败）
+        # 都是产物留在工作区没进 git。此时推送照样可能报成功（本地落后时 nothing_to_push）。
+        # v0.45.227：提交**成功**也可能漏产物（别的进程短暂占着索引锁，只挂一条 add）⇒ 另看提交后的
+        # `left_artifacts`。键存在而值为 None = 提交后那次 git status 失败，记为未执行的检查，不渲染成「全进了」。
+        if isinstance(commit, dict):
+            left = commit.get("left_artifacts")
+            commit_failed = commit.get("success") is not True
+            if (commit_failed and commit.get("pending_artifacts") != 0) or left:
+                details = {
+                    "待提交产物数": commit.get("pending_artifacts"),
+                    "原因": commit.get("reason") or "（无输出）",
+                    "建议": "查生产 checkout 是否残留 .git/index.lock、是否有别的进程在里面跑 git；"
+                            "推送结果不代表日报已提交",
+                }
+                if left:
+                    details["提交后仍未进 git"] = (f"{left} 个：" + ", ".join(commit.get("left_sample") or []))
+                self.alerts.append(Alert(
+                    AlertLevel.HIGH,
+                    "⚠️ 【P1 高】日报提交失败（产物留在工作区，未进 git）" if commit_failed
+                    else "⚠️ 【P1 高】日报提交报成功，但有产物没进 git",
+                    details,
+                    ["deployment", "git_commit"]
+                ))
+            elif "left_artifacts" in commit and left is None:
+                self.checks_skipped.append("日报产物是否全部进 git（提交后 git status 失败）")
+
+        push = (st.get("extra") or {}).get("git_push")
+        if push is None:
+            # 空扫描护栏等早退路径不部署，这是正常的；但「没记录」不能渲染成「推送成功」
+            self.checks_skipped.append("main 推送检查（scan_timing 无 git_push 记录）")
+        elif push.get("success") is not True:
             self.alerts.append(Alert(
-                alert_level,
-                "GitHub Deployment Failed",
+                AlertLevel.HIGH,
+                "⚠️ 【P1 高】main 推送失败（日报与账本未进 origin/main）",
                 {
-                    "status": "FAILED",
-                    "error": deploy_msg,
-                    "recommendation": "Check GitHub token and repository access"
+                    "方式": push.get("integration") or push.get("skipped") or "未知",
+                    "原因": push.get("error") or push.get("output") or "（无输出）",
+                    "冲突路径": push.get("conflicts"),
+                    "本地落后": push.get("behind"),
+                    "建议": "网站走 gh-pages 不受影响；账本的异地副本缺这一天。"
+                            "冲突需在生产 checkout 人工合并，勿 reset",
                 },
                 ["deployment", "github"]
             ))
 
-        return self.alerts
+        sync = st.get("production_sync")
+        if sync is None:
+            self.alerts.append(Alert(
+                AlertLevel.MEDIUM,
+                "📊 【P2 中】扫描前生产代码同步未执行",
+                {
+                    "含义": "不知道本轮跑的代码是不是 origin/main（编排器没调 production_sync.py，"
+                            "或结果日期对不上）",
+                    "代码版本": (st.get("code_version") or {}).get("sha"),
+                },
+                ["code_sync"]
+            ))
+        elif sync.get("outcome") not in OK_OUTCOMES:
+            outcome = sync.get("outcome")
+            self.alerts.append(Alert(
+                AlertLevel.HIGH,
+                f"⚠️ 【P1 高】生产代码 ≠ origin/main（{outcome}）",
+                {
+                    # v0.45.223：按结局说清「跑的是什么」——local_ahead 不是「旧代码」，是 main 上没有的提交
+                    "含义": _SYNC_MEANING.get(outcome, "本轮沿用同步前的代码（可能是旧代码）"),
+                    "详情": sync.get("detail"),
+                    "落后/领先": f"{sync.get('behind')} / {sync.get('ahead')}",
+                    "影响": "世代边界按日期划分，默认代码落地当天就在跑；本轮样本可能被记进错误世代",
+                },
+                ["code_sync"]
+            ))
 
     def get_critical_alerts(self) -> List[Alert]:
         """获取 P0 级别告警"""

@@ -14,7 +14,7 @@ import math
 import os
 import time
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -349,7 +349,6 @@ class AlphaHiveDailyReporter:
 
         # 结果存储
         self.opportunities: List[OpportunityItem] = []
-        self.observations: List[Dict] = []
         self.risks: List[Dict] = []
 
         # 线程安全锁（用于并行执行时保护共享数据）
@@ -444,112 +443,6 @@ class AlphaHiveDailyReporter:
         future = self._bg_executor.submit(fn, *args, **kwargs)
         self._bg_futures.append(future)
 
-    def _analyze_ticker_safe(self, ticker: str, index: int, total: int) -> Tuple[str, OpportunityItem, str]:
-        """
-        分析单个标的（线程安全，可在并行上下文中调用）
-
-        Args:
-            ticker: 股票代码
-            index: 当前索引（用于显示进度）
-            total: 总数（用于显示进度）
-
-        Returns:
-            (ticker, opportunity_item_or_none, error_message_or_none)
-        """
-        try:
-            # 构建实时数据结构（真实多源降级链：yfinance → Alpha Vantage → Finnhub → 安全默认值，
-            # 与 swarm 路径共用 _fetch_stock_data，避免虚假 current_price=100.0 污染下游报告/仪表板）
-            from swarm_agents.cache import _fetch_stock_data as _dr_fetch_stock
-            # v0.43.28: 同上，透传报告日期
-            _stock_data = _dr_fetch_stock(ticker, self.date_str)
-            realtime_metrics = {
-                "ticker": ticker,
-                "sources": {
-                    "yahoo_finance": {
-                        "current_price": _stock_data.get("price", 0.0),
-                        # v0.45.2: 原 `.get("momentum_5d", 0.0)`——键存在且值为 None 时
-                        # 默认值不生效，返回的仍是 None；而写 0.0 又是伪造"持平"。
-                        # 保持 None 透传（realtime_metrics.change_pct 无下游算术消费点）。
-                        "change_pct": _stock_data.get("momentum_5d")
-                    }
-                }
-            }
-
-            # 生成 ML 增强报告
-            ml_report = self.ml_generator.generate_ml_enhanced_report(
-                ticker, realtime_metrics
-            )
-
-            # 解析为 OpportunityItem
-            opportunity = self._parse_ml_report_to_opportunity(ticker, ml_report)
-
-            # 线程安全地添加到结果列表
-            with self._results_lock:
-                self.opportunities.append(opportunity)
-
-            return ticker, opportunity, None
-
-        except (ValueError, KeyError, TypeError, AttributeError, OSError) as e:
-            _log.error("Ticker analysis failed for %s: %s", ticker, e, exc_info=True)
-            error_msg = str(e)
-            # 线程安全地添加观察项
-            with self._results_lock:
-                self.observations.append({
-                    "ticker": ticker,
-                    "status": "error",
-                    "error": error_msg
-                })
-            return ticker, None, error_msg
-
-    def run_daily_scan(self, focus_tickers: List[str] = None) -> Dict:
-        """
-        执行每日扫描（并行版本）
-
-        Args:
-            focus_tickers: 重点关注标的（如为None则扫描全部watchlist）
-
-        Returns:
-            完整的日报数据结构
-        """
-        _log.info("Alpha Hive 日报 %s", self.date_str)
-
-        targets = focus_tickers or list(WATCHLIST.keys())[:10]
-        _log.info("标的：%s", " ".join(targets))
-
-        start_parallel = time.time()
-
-        with ThreadPoolExecutor(max_workers=min(len(targets), 6)) as executor:
-            futures = [
-                executor.submit(self._analyze_ticker_safe, ticker, i + 1, len(targets))
-                for i, ticker in enumerate(targets)
-            ]
-
-            for i, future in enumerate(futures, 1):
-                ticker, opportunity, error = future.result()
-                if error:
-                    _log.warning("[%d/%d] %s 分析失败: %s", i, len(targets), ticker, error[:60])
-                else:
-                    _log.info("[%d/%d] %s: %.1f/10", i, len(targets), ticker, opportunity.opportunity_score)
-
-        elapsed_parallel = time.time() - start_parallel
-        _log.info("分析耗时：%.1fs", elapsed_parallel)
-
-        # 排序机会
-        self.opportunities.sort(key=lambda x: x.opportunity_score, reverse=True)
-
-        # 构建报告
-        report = self._build_report()
-
-        # Phase 2: 异步保存会话（使用共享线程池，退出时等待完成）
-        if self.memory_store and self._session_id:
-            self._submit_bg(
-                self.memory_store.save_session,
-                self._session_id, self.date_str, "daily_scan",
-                targets, {}, [], elapsed_parallel
-            )
-
-        return report
-
     # ── D4: 部署后 CDN 验证 ──
     _DEPLOY_BASE_URL = "https://wangmingjie36-creator.github.io/alpha-hive-deploy"
 
@@ -576,7 +469,8 @@ class AlphaHiveDailyReporter:
         # 故整体 try 住；解析结果同时进 scan_timing 快照（→ status.json）。
         try:
             import code_version as _cv
-            _cv.log_startup()
+            # v0.45.223：启动时的解析结果交给快照；快照在扫描末尾才落盘，那时本地已有日报提交
+            _timing.note_code_version(_cv.log_startup())
         except Exception as _cv_err:  # noqa: BLE001
             _log.warning("代码版本记录失败（不影响扫描）: %s", _cv_err)
         try:
@@ -2067,158 +1961,6 @@ class AlphaHiveDailyReporter:
         from report_formatters import generate_swarm_twitter_threads
         return generate_swarm_twitter_threads(self, *args, **kwargs)
 
-    def _parse_ml_report_to_opportunity(self, ticker: str, ml_report: Dict) -> OpportunityItem:
-        """将 ML 报告解析为 OpportunityItem"""
-
-        adv = ml_report.get("advanced_analysis", {})
-        opts = adv.get("options_analysis")
-        ml_pred = ml_report.get("ml_prediction", {})
-
-        # ── 提取各维度评分（假设已标准化为 0-10）──
-        # v0.45.50：五个 5.0 兜底会让 opp_score 恰好等于 **5.00**，
-        # 而 5.0 在 CLAUDE.md 的决策阈值里是一个明确档位（<6.0 = 不行动、仅归档），
-        # 与「五个维度都实测出中等水平」完全同形，且没有任何字段说明它来自缺键。
-        # 仍然出这条机会（保持行为不变），但把补齐了哪几维记下来。
-        _dim_src = {
-            "signal": adv.get("signal_strength"),
-            "catalyst": adv.get("catalyst_score"),
-            "sentiment": adv.get("sentiment_score"),
-            "odds": adv.get("odds_score"),
-            "risk_adj": adv.get("risk_adjusted_score"),
-        }
-        _dims_missing = [k for k, v in _dim_src.items()
-                         if not isinstance(v, (int, float)) or isinstance(v, bool)]
-        if _dims_missing:
-            _log.warning("[%s] ML 路径：%d/5 个维度不可得（%s），已补 5.0——"
-                         "本条 opp_score 不是五维实测结果",
-                         ticker, len(_dims_missing), ", ".join(_dims_missing))
-
-        signal_score = adv.get("signal_strength", 5.0)
-        catalyst_score = adv.get("catalyst_score", 5.0)
-        sentiment_score = adv.get("sentiment_score", 5.0)
-        odds_score = adv.get("odds_score", 5.0)
-        risk_score = adv.get("risk_adjusted_score", 5.0)
-
-        # 安全提取期权分数
-        if opts and isinstance(opts, dict):
-            options_score = float(opts.get("options_score", 5.0))
-            options_signal = opts.get("signal_summary", "信号平衡")
-        else:
-            options_score = 5.0
-            options_signal = "期权数据不可用"
-
-        # 计算综合 Opportunity Score（与 CLAUDE.md 5 维公式一致）
-        # options_score 合并入 odds 维度（取平均）
-        odds_combined = (odds_score + options_score) / 2.0
-        # 方案10: 从 config 统一读取权重，消除硬编码 drift
-        _fallback_w = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.15, "risk_adj": 0.15}
-        try:
-            from config import EVALUATION_WEIGHTS as _EW
-            _w = {k: _EW.get(k, _fallback_w[k]) for k in _fallback_w}
-        except (ImportError, AttributeError):
-            _w = _fallback_w
-        opp_score = (
-            _w["signal"] * signal_score +
-            _w["catalyst"] * catalyst_score +
-            _w["sentiment"] * sentiment_score +
-            _w["odds"] * odds_combined +
-            _w["risk_adj"] * risk_score
-        )
-
-        # 方案15: ML 路径简化版 bear_cap — 用 risk_score + ML 预测作为 BearBee 代理
-        # 正常蜂群路径有 BearBeeContrarian 对冲，ML 路径需要等效保护
-        _combined_rec = ml_report.get("combined_recommendation", {})
-        _ml_prob = _combined_rec.get("ml_probability", 50.0)
-        _rating = _combined_rec.get("rating", "HOLD")
-
-        # bear_strength 估算: risk_score 越低 → 风险越大 → 看空越强
-        # 补充: ML 预测概率低也是看空信号
-        _bear_proxy = (10.0 - risk_score)  # risk_score=2 → bear_proxy=8
-        if _ml_prob < 40:
-            _bear_proxy += 1.0  # ML 也看空时加强
-        if _rating == "AVOID":
-            _bear_proxy += 1.0  # 综合评级也看空时加强
-
-        try:
-            from config import BEAR_SCORING_CONFIG as _BSC
-        except ImportError:
-            _BSC = {}
-        _bear_cap_thresh = _BSC.get("bear_cap_trigger_threshold", 5.0)
-        _bear_cap_slope = _BSC.get("bear_cap_slope", 0.5)
-
-        if _bear_proxy > _bear_cap_thresh:
-            _bear_cap = max(3.0, 10.0 - (_bear_proxy - _bear_cap_thresh) * _bear_cap_slope)  # 下限 3.0 防极端
-            if opp_score > _bear_cap:
-                _log.info("ML bear_cap: %s bear_proxy=%.1f cap=%.2f（原 %.2f）",
-                          ticker, _bear_proxy, _bear_cap, opp_score)
-                opp_score = _bear_cap
-
-        # 判断方向
-        if opp_score >= 7.5:
-            direction = "看多" if signal_score > 5.0 else "看空"
-            confidence = min(95, opp_score * 10)
-        elif opp_score >= 6.0:
-            direction = "中性"
-            confidence = 60
-        else:
-            direction = "中性"
-            confidence = 30
-
-        return OpportunityItem(
-            ticker=ticker,
-            direction=direction,
-            signal_score=signal_score,
-            catalyst_score=catalyst_score,
-            sentiment_score=sentiment_score,
-            odds_score=odds_score,
-            risk_score=risk_score,
-            options_score=options_score,
-            opportunity_score=opp_score,
-            confidence=confidence,
-            key_catalysts=adv.get("upcoming_catalysts", [])[:3] if adv.get("upcoming_catalysts") else [],
-            options_signal=options_signal,
-            risks=adv.get("key_risks", [])[:2] if adv.get("key_risks") else [],
-            thesis_break=adv.get("thesis_break_conditions", "未定义")
-        )
-
-    def _build_report(self) -> Dict:
-        """构建完整报告"""
-
-        report = {
-            "date": self.date_str,
-            "timestamp": self.timestamp.isoformat(),
-            "system_status": "✅ 完成",
-            "phase_completed": "1-6 (完整蜂群流程)",
-            "markdown_report": self._generate_markdown_report(),
-            "twitter_threads": self._generate_twitter_threads(),
-            "opportunities": [
-                {
-                    "rank": i + 1,
-                    "ticker": opp.ticker,
-                    "direction": opp.direction,
-                    "opp_score": round(opp.opportunity_score, 1),
-                    "confidence": f"{opp.confidence:.0f}%",
-                    "options_signal": opp.options_signal,
-                    "key_catalyst": opp.key_catalysts[0] if opp.key_catalysts else "N/A",
-                    "thesis_break": opp.thesis_break
-                }
-                for i, opp in enumerate(self.opportunities)
-            ],
-            "observation_list": self.observations
-        }
-
-        return report
-
-    def _generate_markdown_report(self, *args, **kwargs):
-        """生成中文 Markdown 报告（委托 report_formatters）"""
-        from report_formatters import generate_markdown_report
-        return generate_markdown_report(self, *args, **kwargs)
-
-    def _generate_twitter_threads(self, *args, **kwargs):
-        """生成 X 线程版本（委托 report_formatters）"""
-        from report_formatters import generate_twitter_threads
-        return generate_twitter_threads(self, *args, **kwargs)
-
     def auto_commit_and_notify(self, *args, **kwargs):
         """自动提交报告 + 通知（委托 report_deployer）"""
         from report_deployer import auto_commit_and_notify
@@ -2827,15 +2569,13 @@ def main():
         description="Alpha Hive 每日投资简报生成器",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-示例用法：
-  # 传统 ML 模式（默认）
-  python3 alpha_hive_daily_report.py
-  python3 alpha_hive_daily_report.py --tickers NVDA TSLA VKTX
-  python3 alpha_hive_daily_report.py --all-watchlist
-
-  # 蜂群协作模式（7 个自治工蜂：6 核心 + BearBeeContrarian）
+示例用法（--swarm 必需：非蜂群扫描已于 v0.45.213 退役）：
+  # ⚠️ 蜂群扫描是**生产扫描**：提交日报产物并推送 origin main + gh-pages
   python3 alpha_hive_daily_report.py --swarm --tickers NVDA TSLA VKTX
   python3 alpha_hive_daily_report.py --swarm --all-watchlist
+
+  # 只查财报、不扫描（不需要 --swarm）
+  python3 alpha_hive_daily_report.py --check-earnings
         """
     )
     parser.add_argument(
@@ -2885,7 +2625,8 @@ def main():
     parser.add_argument(
         '--swarm',
         action='store_true',
-        help='启用蜂群协作模式（7 个自治工蜂：6 核心并行 + BearBeeContrarian 看空对冲）'
+        help=('蜂群协作模式（7 个自治工蜂：6 核心并行 + BearBeeContrarian 看空对冲）。'
+              '扫描必需——非蜂群扫描已于 v0.45.213 退役')
     )
     parser.add_argument(
         '--check-earnings',
@@ -2930,6 +2671,23 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # v0.45.213：非蜂群扫描（原 `run_daily_scan` 规则引擎路径）已退役。
+    # 闸放在**任何取数、任何落盘之前**——不是照 --samples-only 那样跑完再在
+    # save_report 之前短路，因为那条路在扫描**过程中**就写生产状态：
+    #   · `generate_ml_enhanced_report` → `probability_scorecard.record_published`
+    #     按 (date, ticker) 先写者占位。规则引擎先跑，当天蜂群扫描真正印出去的
+    #     那个数就被拒收，账本里留下 direction=None 的一行（实测）。
+    #   · save_report 写进工作区的日报产物被下一次生产扫描的白名单提交带走——
+    #     2026-03-13 的蜂群日报至今被规则引擎版顶着（main 与 gh-pages）。
+    # 取证（台账翻备份、调用方普查）见 CHANGELOG v0.45.213。
+    # ⚠️ 不把 --swarm 改成默认开：那会把「随手裸跑一下」升级成提交 + 推 origin + 推 gh-pages。
+    # --check-earnings 不扫描，不走本闸。
+    if not (args.swarm or args.check_earnings):
+        parser.error(
+            "非蜂群扫描已于 v0.45.213 退役（它在扫描中途写生产账本，且把规则引擎日报留在"
+            "生产工作区、被下一次部署带上线）。请加 --swarm —— 注意蜂群扫描是生产扫描，"
+            "会提交日报产物并推送 origin main + gh-pages。")
 
     # v0.45.38: --date 补跑时默认消费云端快照（见下方 _snapshot_ctx）
     if getattr(args, "no_snapshot", False) and not args.date:
@@ -3029,10 +2787,7 @@ def main():
     # 不接快照的补跑会拿到**今天**的期权链再贴上补跑日的日期——一直如此，
     # 只是从来没人看见。下面这个上下文要么用上快照，要么把这件事说出来。
     with _snapshot_ctx(args):
-        if args.swarm:
-            report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
-        else:
-            report = reporter.run_daily_scan(focus_tickers=focus_tickers)
+        report = reporter.run_swarm_scan(focus_tickers=focus_tickers)
 
     # v0.23.2 修复 #2：--samples-only 必须在 save_report 之前短路
     # 否则 _save_output_files 会生成 MD/HTML/PWA/X线程/rss.xml 到 repo 根，
@@ -3096,23 +2851,39 @@ def main():
 
     # 三端同步：GitHub 提交推送 + Hive App + Slack
     print("\n📡 同步三端：GitHub / Hive App / Slack...")
+    # v0.45.214：推送结果进 scan_timing → status.json → alert_manager。此前只打 WARNING 进日志，
+    # 2026-09-01~11 六次被拒无人发现（告警那条规则读的 deploy_status 从来没人写）。
+    _git_push = None
+    _git_commit = None
     try:
         with _timing.timed("deploy"):
             sync_results = reporter.auto_commit_and_notify(report)
+        _git_push = sync_results.get("git_push")
+        _git_commit = sync_results.get("git_commit")
         git_ok = sync_results.get("git_push", {}).get("success", False)
         deploy_env = sync_results.get("deploy_env", "production")
         remote_label = sync_results.get("git_push", {}).get("remote", "origin")
-        if deploy_env == "test":
-            print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败'} → 🔧 测试环境 https://wangmingjie36-creator.github.io/alpha-hive-test/")
+        if deploy_env == "none":
+            # v0.45.210：非蜂群扫描不再有「测试环境」——那条推送自 2026-03-01 起就是坏的。
+            # v0.45.213：CLI 已只跑蜂群，走到这里说明部署判定没认出这份蜂群报告
+            # （缺 swarm_metadata？）——是回归，不是正常分支，所以要打出来。
+            _left = sync_results.get("uncommitted_report_artifacts") or []
+            print("   GitHub push : ⚠️  部署判定为非生产报告（蜂群报告缺 swarm_metadata？），未提交、未推送")
+            if _left:
+                print(f"   ⚠️  {len(_left)} 个日报产物已写进工作区，下一次生产扫描会把没被覆盖的一并提交："
+                      f"{', '.join(_left[:5])}" + (" …" if len(_left) > 5 else ""))
         else:
             print(f"   GitHub push : {'✅' if git_ok else '⚠️  失败'} → 🧠 生产环境 https://wangmingjie36-creator.github.io/alpha-hive-deploy/")
         print(f"   Hive App    : ✅ .swarm_results 已落盘，下次启动自动加载")
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         _log.warning("三端同步部分失败: %s", e)
         print(f"   ⚠️  三端同步出错：{e}")
+        if _git_push is None:   # 推送之前就抛了：记成失败，不能让「没记录」看起来像「没问题」
+            _git_push = {"success": False, "error": f"三端同步抛异常：{type(e).__name__}: {e}"}
 
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
-    _timing.write(reporter.date_str)
+    _timing.write(reporter.date_str, extra={"git_push": _timing.git_push_summary(_git_push),
+                                            "git_commit": _timing.git_commit_summary(_git_commit)})
     return report
 
 

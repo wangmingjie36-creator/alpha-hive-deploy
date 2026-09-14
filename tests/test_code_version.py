@@ -386,6 +386,48 @@ class TestActuallyWired:
             f"code_version={cvv!r} —— 接上了但没解析出真值")
         assert cvv.get("changelog_version")
 
+    def test_snapshot_keeps_the_scan_start_version_not_a_later_one(self, monkeypatch):
+        """v0.45.223：快照在扫描**末尾**落盘，那时部署已在本地造了日报提交。
+
+        此前 `scan_timing.code_version()` 在落盘时现解析 ⇒ status.json 里的 sha 是日报提交
+        （09-11 实测：快照 `1826d3e`，启动日志 `5b6276c`）。这里让「HEAD」在启动与落盘之间变掉。
+        变异：快照改回现解析 ⇒ sha 变成后来那个 ⇒ 红。"""
+        import code_version as cv
+        import scan_timing as st
+
+        st.reset()
+        shas = iter(["5b6276c", "1826d3e"])
+        monkeypatch.setattr(cv, "resolve", lambda: {"sha": next(shas), "changelog_version": "0.45.205"})
+        try:
+            st.note_code_version(cv.log_startup())
+            snap = st.snapshot("2026-09-11")
+        finally:
+            st.reset()
+        assert snap["code_version"]["sha"] == "5b6276c", snap["code_version"]
+        assert snap["code_version"]["resolved_at"] == "scan_start"
+
+    def test_snapshot_says_so_when_there_was_no_startup_record(self, monkeypatch):
+        """没有启动记录（没走扫描启动路径）⇒ 退回现解析，且**如实标注**时点。"""
+        import code_version as cv
+        import scan_timing as st
+
+        st.reset()
+        monkeypatch.setattr(cv, "resolve", lambda: {"sha": "abc1234"})
+        assert st.snapshot("2026-09-11")["code_version"] == {"sha": "abc1234", "resolved_at": "snapshot"}
+
+    def test_scan_startup_hands_its_resolution_to_the_snapshot(self):
+        """`_init_scan_context` 必须把 `log_startup()` 的返回值交给 `scan_timing.note_code_version`。
+        变异：只调 `log_startup()` 丢掉返回值（v0.45.182~222 的写法）⇒ 红。"""
+        src = (_ROOT / "alpha_hive_daily_report.py").read_text(encoding="utf-8")
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_init_scan_context")
+        handed = [n for n in ast.walk(fn)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                  and n.func.attr == "note_code_version" and n.args
+                  and isinstance(n.args[0], ast.Call) and isinstance(n.args[0].func, ast.Attribute)
+                  and n.args[0].func.attr == "log_startup"]
+        assert handed, "扫描启动处没有把 log_startup() 的结果交给 scan_timing.note_code_version"
+
     @pytest.mark.integration  # 编排器在仓库外（~/.claude/scripts），干净检出与 CI 上不存在
     def test_orchestrator_merges_timing_into_status(self):
         """本模块挂在 `scan_timing` 上，前提是编排器确实把它并进 `status.json`。

@@ -77,6 +77,7 @@
      `generate_ml_enhanced_report`，但它在**非 `--swarm`** 的
      `run_daily_scan` 分支上，编排器恒传 `--swarm`（orchestrator.sh:527），
      且其产物进 `self.opportunities`，不进 `save_predictions`。
+     （v0.45.213：`run_daily_scan` / `_analyze_ticker_safe` 已整条退役删除。）
 ⇒ 不往 `ic_rerun_readiness._COHORT_HISTORY` 追加（追加会白白作废几个月样本）。
 
 **但 `probability_scorecard.blend_scan` 受影响**：它 `load_ml_probabilities()`

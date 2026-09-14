@@ -62,7 +62,7 @@ class TestCounters:
         real_import = builtins.__import__
 
         def _imp(name, *a, **k):
-            if name in ("yf_gate", "twelve_data", "cboe_options"):
+            if name in ("yf_gate", "twelve_data", "cboe_options", "options_analyzer"):
                 raise ImportError(name)
             return real_import(name, *a, **k)
 
@@ -70,7 +70,8 @@ class TestCounters:
         c = st.counters()
         assert c == {"yfinance": None, "twelve_data": None, "cboe": None,
                      "cboe_chain": None,   # v0.45.190 链构造观测
-                     "gex_view": None}     # v0.45.197 GEX 全链视图可得性
+                     "gex_view": None,     # v0.45.197 GEX 全链视图可得性
+                     "options_snapshot": None}  # v0.45.238 期权快照槽位
         line = st.summary_line({"phases": {}, "counters": c})
         assert "—" in line and "0次" not in line
 
@@ -82,7 +83,8 @@ class TestCounters:
     def test_counters_pick_up_real_stats_dicts(self):
         c = st.counters()
         assert set(c["twelve_data"]) >= {"hits", "misses", "fetches"}
-        assert set(c["cboe"]) == {"hits", "fetches", "stale", "failed", "evicted"}
+        assert set(c["cboe"]) == {"hits", "fetches", "stale", "failed", "evicted",
+                                  "price_stale_intraday", "price_unverifiable"}
         # v0.45.190：链构造观测是独立一项，不掺进 payload 计数（两者语义不同：
         # 前者数「构出来的链挡掉了多少近月」，后者数「发了几次 HTTP」）。
         assert set(c["cboe_chain"]) == {"chains", "min_cal_dte_max", "near_excluded",
@@ -118,7 +120,8 @@ class TestCboePayloadStats:
                             self._fake_urlopen({"options": [{"option": "X"}], "current_price": 1.0}))
         assert cb._fetch_cboe_payload("ZZZ", 5) is not None
         assert cb._fetch_cboe_payload("ZZZ", 5) is not None   # TTL 内 → 命中
-        assert cb.payload_stats() == {"hits": 1, "fetches": 1, "stale": 0, "failed": 0, "evicted": 0}
+        assert cb.payload_stats() == {"hits": 1, "fetches": 1, "stale": 0, "failed": 0, "evicted": 0,
+                                      "price_stale_intraday": 0, "price_unverifiable": 0}
 
     def test_empty_chain_counts_failed(self, cb, monkeypatch):
         monkeypatch.setattr(cb.urllib.request, "urlopen",
@@ -158,7 +161,7 @@ class TestWrite:
         assert d["date"] == "2026-09-05"
         assert d["phases"]["prefetch"] == 12.3
         assert set(d["counters"]) == {"yfinance", "twelve_data", "cboe",
-                                      "cboe_chain", "gex_view"}
+                                      "cboe_chain", "gex_view", "options_snapshot"}
         assert d["extra"] == {"note": "x"}
         assert not (tmp_path / "t.json.tmp").exists(), "临时文件必须被 os.replace 掉"
 

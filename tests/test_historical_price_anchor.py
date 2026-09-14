@@ -148,7 +148,10 @@ class TestRefusesToSubstituteNeighbouringTradingDay:
     """
 
     def test_stale_last_bar_is_refused_not_substituted(self, monkeypatch):
+        # v0.45.243：兜底入口改为 load_official_close（它会再问其后快照 → 真 git ls-tree），
+        # 只桩 load_ticker 挡不住那次 subprocess。
         monkeypatch.setattr("cloud_snapshot_loader.load_ticker", lambda *a, **k: None)
+        monkeypatch.setattr("cloud_snapshot_loader.available_dates", lambda *a, **k: [])
         stale = (date.fromisoformat(AS_OF) - timedelta(days=4)).isoformat()
         hist = _fake_history([100.0] * 25 + [207.29], last_date=stale)
 

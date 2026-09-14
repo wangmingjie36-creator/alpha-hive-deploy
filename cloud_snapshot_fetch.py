@@ -156,7 +156,10 @@ def _fetch_one_ticker(ticker: str, business_date: str) -> dict:
         "schema_version": SCHEMA_VERSION,
         "fetched_at_utc": datetime.now(ZoneInfo("UTC")).isoformat(),
         "price_at_fetch": price,
-        "price_source": _price_src,   # cboe_close / cboe_intraday / unavailable
+        # cboe_close / cboe_intraday / cboe_stale_intraday（v0.45.234）/ unavailable。
+        # ⚠️ v0.45.234 之前产出的快照即使盘中陈旧也标 cboe_close —— 消费端判「是不是
+        # 官方收盘」一律用 last_trade_time_et（cloud_snapshot_loader.load_official_close），不看这个标签。
+        "price_source": _price_src,
         # vintage 三件套随数据同行：消费端不必回头查 manifest 就能判新鲜度
         "last_trade_time_et": last_trade_raw,
         "vintage_date": vintage_date,
@@ -180,6 +183,7 @@ def main() -> int:
     args = ap.parse_args()
 
     from config import WATCHLIST
+    from cboe_options import STALE_INTRADAY_SOURCE
     tickers = ([t.strip().upper() for t in args.tickers.split(",") if t.strip()]
                or sorted(WATCHLIST.keys()))
 
@@ -190,6 +194,11 @@ def main() -> int:
     t0 = time.time()
     ok, failed = [], {}
     stale, unverifiable = [], []
+    # v0.45.243：落盘了、但 price_at_fetch 不是官方收盘（CDN 盘中生成的文件）。
+    # **照写不拒**：链 / IV 期限结构 / 全链 OI 仍是当天的真数据（快照是当日期权链，
+    # 跳过一天永久没有），prev_day_close 也不受影响；只是 price_at_fetch 不能当收盘用。
+    # 列进 manifest 是为了让「这天有几只价不可用」机器可查，不必逐个打开标的文件。
+    stale_intraday = []
     stale_streak = 0
     abort_reason = None
 
@@ -207,6 +216,9 @@ def main() -> int:
             if data.get("vintage_status") != "ok":
                 unverifiable.append(t)
                 mark = "  ⚠️ vintage 无法核实"
+            if data.get("price_source") == STALE_INTRADAY_SOURCE:
+                stale_intraday.append(t)
+                mark += f"  ⚠️ 盘中生成（last_trade={data.get('last_trade_time_et')}），价不是收盘"
             print(f"  [{i:2d}/{len(tickers)}] {t} ✓  (${data['price_at_fetch']:.2f}){mark}")
         except StaleVintageError as e:
             failed[t] = f"StaleVintageError: {e}"
@@ -276,6 +288,8 @@ def main() -> int:
             recovered.append(t)
             if data.get("vintage_status") != "ok":
                 unverifiable.append(t)
+            if data.get("price_source") == STALE_INTRADAY_SOURCE:
+                stale_intraday.append(t)
             print(f"  ✓ {t} 补抓成功 (${data['price_at_fetch']:.2f})")
         if recovered:
             ok.sort()
@@ -307,6 +321,8 @@ def main() -> int:
         "vintage_stale": sorted(stale),
         "vintage_unverifiable_all": unverifiable_all,
         "abort_reason": abort_reason,
+        # v0.45.243：price_at_fetch 是盘中成交价、不是官方收盘的标的（照常落盘，见上）
+        "price_stale_intraday": sorted(stale_intraday),
     }
     with open(os.path.join(day_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)
@@ -322,6 +338,8 @@ def main() -> int:
         print(f"   ⚠️ vintage 无法核实：{', '.join(sorted(unverifiable))}")
     if stale:
         print(f"   ⛔ vintage 陈旧（已拒绝落盘）：{', '.join(sorted(stale))}")
+    if stale_intraday:
+        print(f"   ⚠️ 价为盘中成交价、非官方收盘（链照常落盘）：{', '.join(sorted(stale_intraday))}")
     if unverifiable_all:
         print("   ⚠️ vintage 校验全员失效（疑似 CBOE 字段变更）——消费前人工确认")
     if abort_reason:

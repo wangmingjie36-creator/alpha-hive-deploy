@@ -57,15 +57,34 @@ class _HivePaths:
 
     @property
     def logs_dir(self) -> Path:
-        p = Path(os.environ.get("ALPHA_HIVE_LOGS_DIR", str(self.home / "logs")))
+        p = self.logs_dir_unmade()
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+    def logs_dir_unmade(self) -> Path:
+        """同 `logs_dir`，但**不建目录**（v0.45.239）。
+
+        给文件日志 handler 每条记录求值用：它只需要知道「现在该写到哪」，
+        目录由它真要打开文件时再建。`logs_dir` 的解析逻辑只在这里写一份。
+        """
+        return Path(os.environ.get("ALPHA_HIVE_LOGS_DIR", str(self.home / "logs")))
 
     @property
     def cache_dir(self) -> Path:
         p = Path(os.environ.get("ALPHA_HIVE_CACHE_DIR", str(self.home / "cache")))
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+    @property
+    def cboe_daily_cache(self) -> Path:
+        """`CBOEDailyFetcher()` 无参构造时的缓存目录（v0.45.230）。
+
+        此前默认值是 cwd 相对的 `"cache/cboe_daily"`：不读 `ALPHA_HIVE_CACHE_DIR`，
+        在哪起 pytest 就建进哪个 checkout（v0.45.224 空目录普查实测）。
+        生产从仓库根跑、无 env 覆盖时与原位置相同。`cboe_daily/` 本身由构造器建
+        （父目录照 `cache_dir` 的惯例在取值时建）。
+        """
+        return self.cache_dir / "cboe_daily"
 
     @property
     def db(self) -> str:
@@ -78,6 +97,15 @@ class _HivePaths:
     @property
     def sandbox_dir(self) -> Path:
         return Path(os.environ.get("ALPHA_HIVE_SANDBOX_DIR", "/tmp/alpha_hive_sandbox"))
+
+    @property
+    def production_sync(self) -> Path:
+        """扫描前生产 checkout 快进结果（v0.45.214，`production_sync.write_result`）。
+
+        `scan_timing.snapshot` 按日期读它并入 `scan_timing.json` ⇒ 编排器 `write_status`
+        并进 `status.json` ⇒ `alert_manager` 据此告警。
+        """
+        return self.logs_dir / "production_sync.json"
 
     # ── ML 模型产物（v0.45.149）─────────────────────────────────────────
     # 三个文件名此前散落在 `ml_predictor` 的六个函数签名默认值、
@@ -147,6 +175,53 @@ class JSONFormatter(logging.Formatter):
 
 # ==================== 日志配置 ====================
 
+class LogsDirRotatingFileHandler(RotatingFileHandler):
+    """文件名固定、**目录每条记录按 `PATHS` 求值**的旋转 handler（v0.45.239）。
+
+    为什么不用裸 `RotatingFileHandler`：它在 `__init__` 里把 `baseFilename`
+    存死，而 `logger = _setup_logger()` 在 import 时执行 ⇒ 路径冻在 import 那一刻。
+    pytest **收集期**就 import 本模块，早于 `conftest._isolate_env` 的 setenv ⇒
+    全套测试日志（含夹具造的 ERROR）写进本 checkout 的 `logs/alpha_hive.log`；
+    在主 checkout 起 pytest 就混进生产日志（2026-09-14 实测：32 条测试写入 1.5 KB，
+    含合成标的 `[AAA] 政体层保零违反` 与一条假的「权重不变式违反」ERROR）。
+    `PATHS.logs_dir` 本身是调用时求值的——冻住它的是**持有路径的对象**，
+    所以 `test_paths_not_frozen_at_import` 的 AST 扫描看不见（模块级只有一个函数调用）。
+
+    生产语义不变：扫描进程里 env 不会中途变，目标恒等于 `<ALPHA_HIVE_HOME>/logs/<leaf>`，
+    从不重指。唯一可见差异：import 不再建 `logs/` 与空日志文件（第一条记录时才建）。
+
+    打不开文件（目录不可写等）不再在 import 时被 `except OSError` 吞成 debug——
+    落到 emit 里，由 `Handler.handleError` 打到 stderr（编排器日志里看得见）。
+    """
+
+    def __init__(self, leaf: str, **kwargs):
+        self._leaf = leaf
+        kwargs["delay"] = True
+        super().__init__(str(self.current_target()), **kwargs)
+
+    def current_target(self) -> Path:
+        """此刻这条 handler 该写的文件（不建目录、无副作用）。"""
+        return PATHS.logs_dir_unmade() / self._leaf
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # `Handler.handle` 已持锁调用 emit ⇒ 重指与写入不会与其他线程交错。
+        try:
+            target = os.path.abspath(self.current_target())
+            if target != self.baseFilename:
+                if self.stream is not None:
+                    self.stream.close()
+                    self.stream = None
+                self.baseFilename = target
+        except Exception:
+            self.handleError(record)
+            return
+        super().emit(record)
+
+    def _open(self):
+        os.makedirs(os.path.dirname(self.baseFilename), exist_ok=True)
+        return super()._open()
+
+
 def _setup_logger() -> logging.Logger:
     """配置全局 logger：控制台（人类可读） + 文件旋转（人类可读） + JSON 文件（机器可读）"""
     log = logging.getLogger("alpha_hive")
@@ -171,30 +246,23 @@ def _setup_logger() -> logging.Logger:
     log.addHandler(console)
 
     # 文件输出（旋转，5MB x 3，人类可读）
-    try:
-        log_file = PATHS.logs_dir / "alpha_hive.log"
-        fh = RotatingFileHandler(
-            str(log_file), maxBytes=5 * 1024 * 1024, backupCount=3,
-            encoding="utf-8"
-        )
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(fmt)
-        log.addHandler(fh)
-    except OSError as _fh_err:
-        logging.getLogger(__name__).debug("Cannot create rotating file handler: %s", _fh_err)
+    # 路径在 emit 时求值、延迟打开 ⇒ 构造不碰文件系统，原先包着的 `except OSError` 已不可达。
+    fh = LogsDirRotatingFileHandler(
+        "alpha_hive.log", maxBytes=5 * 1024 * 1024, backupCount=3,
+        encoding="utf-8"
+    )
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(fmt)
+    log.addHandler(fh)
 
     # JSON Lines 文件输出（结构化，2MB x 5，机器可读）
-    try:
-        json_file = PATHS.logs_dir / "alpha_hive_structured.jsonl"
-        jh = RotatingFileHandler(
-            str(json_file), maxBytes=2 * 1024 * 1024, backupCount=5,
-            encoding="utf-8"
-        )
-        jh.setLevel(logging.DEBUG)
-        jh.setFormatter(JSONFormatter())
-        log.addHandler(jh)
-    except OSError as _jh_err:
-        logging.getLogger(__name__).debug("Cannot create JSON file handler: %s", _jh_err)
+    jh = LogsDirRotatingFileHandler(
+        "alpha_hive_structured.jsonl", maxBytes=2 * 1024 * 1024, backupCount=5,
+        encoding="utf-8"
+    )
+    jh.setLevel(logging.DEBUG)
+    jh.setFormatter(JSONFormatter())
+    log.addHandler(jh)
 
     return log
 

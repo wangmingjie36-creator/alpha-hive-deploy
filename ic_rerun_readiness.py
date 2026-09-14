@@ -309,6 +309,79 @@ _COHORT_HISTORY = [
      "本代样本改动前后逐位相同，**作废 0 条**。 "
      "⚠️ 同版**未动** GuardBee 的方向票（实测它 100% 复述其余六只的多数，"
      "去掉它会让 17.5% 的过门格子跌破 min_agents=3）—— 那是设计决定，留给用户。"),
+    ("2026-09-13", "v0.45.212",
+     "BearBeeContrarian 与 GuardBeeSentinel 退出 QueenDistiller 的方向**计票**（`NON_VOTING_AGENTS`）。"
+     "它的方向经门槛、票重、S4.5 仲裁、S5 冲突再投票决定 `rule_direction`，"
+     "S5 冲突折扣与 GEX 政体调整又随方向改 `final_score` ⇒ 两者口径都变。"
+     "理由是结构性的：623 条有 T+7 超额收益的记录里它 90.5% 看空、命中 50.5%（19 周 p=0.63），"
+     "confidence 含「读到几个 real 源」这一可得性项、conf≥0.95 的看空命中 49.9%，"
+     "且 `contrarian` 不在 ml_adjustments 表里而豁免了核心维度 0.5–0.6 的票重缩放。"
+     "⚠️ **结果证据是零效应不是改善**：预注册比较（历史原样 / 现行规则重演 × 三种指标）p 全在 0.12–0.59。"
+     "Guard 的方向票是其余六只多数的复述（v0.45.209：90/90），此前的「用处」只是抵消 BearBee；"
+     "BearBee 退出后再摘它，预注册比较 p 0.38–0.99。原 `dissent_agents` 两名成员都不再投票 ⇒ 置空。"
+     "逐位重放 793 份 JSON：新代码 ≡ 旧代码摘掉两者（方向/票重/冲突级别/分数/仲裁五项全等），"
+     "方向改变 **30.3%**（摘 BearBee 32.8%，再摘 Guard 相对前者又改 9.3%）；"
+     "方向分布看多 383→507、看空 236→134、中性 174→152 —— **整体明显偏多**。 "
+     "**新开分区、不与 09-11 同日扩展**：09-11 那 30 条预测是旧计票产出的，"
+     "与新口径不可比 ⇒ **作废 30 条**（其中已到期 0 条）。"
+     "BearBee 的其它通道（bear_cap、BullVeto、contrarian 视角、报告展示）未动；"
+     "Guard 的风险关门、宏观政体、共振维度（另一条复述通道，未测未动）未动；"
+     "`agent_breakdown` 展示口径仍是全体，计票口径另见 `voting_counts` / `vote_excluded_agents`。"),
+    ("2026-09-13", "v0.45.228",
+     "投票里没有 ML 乘数的蜂（RivalBee 的 `ml_auxiliary` 不在 `ml_adjustments` 表里、CodeExec 没有维度）"
+     "由乘 1.0 改为乘**当期所有乘数的均值**。乘数被下限 0.5 主导（793 份 JSON 中位 0.500，"
+     "odds 82.8%/catalyst 75.2%/signal 67.2% 的时候恰为 0.5），「1.0 = 平均」不成立 ⇒ 两只豁免蜂"
+     "拿到 1.5–2.0 倍相对票重；它们恰是 85.9%/85.3% 看多、扣 SPY 命中 48.2%/52.0% 的蜂。"
+     "方向与 S5 冲突折扣、GEX 政体调整随之变 ⇒ `rule_direction` 与 `final_score` 口径都变。"
+     "维度权重那个消费者乘完归一化、水平不起作用，未动。"
+     "逐位重放 793 份 JSON：新代码 ≡ 评估变体（历史原样 / 现行规则重演两语料 793/793），"
+     "方向改变 28.6% / 13.4%，几乎全是看多→中性（看多 507→299 / 264→191）。"
+     "⚠️ **结果证据零效应、点估计略微不利于本修复**：预注册三指标 p 0.45–0.87、池化均值全为负；"
+     "被拿掉的看多跑赢 SPY 55.2%/60.9%，同日全池基准 53.7%/54.5%，匹配抽样 p≈0.13（事后加的对照）。 "
+     "**与 v0.45.212 共用 2026-09-13 标签、不新开分区**：该边界之后到本版落地 predictions 0 条、"
+     "无扫描进程 ⇒ **作废 0 条**。"),
+    ("2026-09-13", "v0.45.235",
+     "GuardBeeSentinel 退出 `PheromoneBoard.detect_resonance`（`RESONANCE_EXCLUDED_AGENTS`）。"
+     "共振要「多源独立印证」，Guard 的方向是其余六只多数的复述，复述时给同向方凭空多一个 `risk_adj` 维度"
+     "并抬高 consistency ⇒ Queen 的 `confidence_boost` → `rule_score` → 惩罚 → 冲突折扣 → `final_score` 口径变。"
+     "方向不变（共振不进计票）。逐位重放 681 份 JSON：新代码 ≡ 评估变体（两语料 681/681），"
+     "分数改变 36.4% / 11.3%（中位 −0.32 / −0.30）；final_score 逐日 IC 变化 p 0.89 / 0.77，"
+     "现行规则下纸面组合入场 0 变化 ⇒ **对收益无可测影响，只是在抬分数**。"
+     "Guard 读同伴的普查视图 `get_live_signals` 未动；BearBee 在看空共振里的计入未动（另一个设计决定）。 "
+     "**与 v0.45.212 / v0.45.228 共用 2026-09-13 标签**：该边界之后到本版落地 predictions 0 条、无扫描进程 ⇒ **作废 0 条**。"),
+    ("2026-09-14", "v0.45.234",
+     "CBOE CDN 收盘后发来**当天盘中生成**的 payload 时，`close` 是那一刻的成交价而非官方收盘，"
+     "旧 vintage 校验只比日期、official_price 只看本机钟，两道都放行 ⇒ 被当官方收盘进入数据管道。"
+     "现改为 `last_trade_time` 离该场收盘 >60s 即标 `cboe_stale_intraday`，数据管道拒收、改取后续源"
+     "（yfinance 日线收盘）。受影响标的的 `price`（ScoutBee 等）与 OracleBee 传给 OptionsAgent 的 "
+     "`stock_price`（GEX / 异动 / ATM IV 窗口 → options_score）随之变 ⇒ `final_score` 输入口径变。"
+     "量级：08-27~09-11 下午快照 185 份里 33 份偏离官方收盘 >0.05%、12 份 >0.5%（最大 1.25%），"
+     "即每天约 3~8/30 只、偏差多在 1% 内。`price_at_predict` 同源，旧行 T+7 收益起点带同样偏差（未改写历史）。"
+     "边界时点 2026-09-14 那天 predictions 0 条 ⇒ 若本版在当日扫描前进生产，**作废 0 条**；"
+     "否则 09-14 那 30 条是旧口径，应顺延本条日期。"),
+    ("2026-09-14", "v0.45.238",
+     "期权快照槽位由太平洋墙钟日期 `pdt_today()` 改为**数据所属的 ET 交易会话**（09:30 ET 前算上一交易日），"
+     "命中校验同步改为比会话、不再 `_snapshot_timestamp.startswith(pdt_today())`。"
+     "旧判据与槽位名是同一个墙钟 ⇒ 跨午夜（或盘前）写入的前一会话数据自证通过，次日正式扫描一进门命中、"
+     "从不取自己的链 ⇒ OracleBee 的 IV/P/C/GEX/OI/Max Pain/异动 → `options_score` → `final_score` 整体晚一个会话。"
+     "普查 cache/ 1309 份常规快照：**171 份（11 个槽位日）装的是前一会话**；日志实证 09-03 命中 42 次、"
+     "09-09 命中 45 次（`_snapshot_stock_price` 分别 24/30、26/30 等于上一交易日官方收盘）。"
+     "坏槽位还有盘前（08-14 02:13）与午夜后起跑（07-23/24）两种来源，故按会话而非「扫描开始时钉日期」修。"
+     "**历史快照与台账未改写**。 "
+     "收盘后跑的生产扫描里会话日期 == 太平洋日期，文件名与评分输入不变（快照多两个键），只有跨午夜/盘前的日子会不同。 "
+     "**与 v0.45.234 共用 2026-09-14 标签、不新开分区**：2026-09-13 起到本版落地 predictions 0 条（只读核对），若本版在 09-14 定时扫描前进生产 ⇒ **作废 0 条**；否则同 v0.45.234 顺延。"),
+    ("2026-09-14", "v0.45.243",
+     "补跑（`--date`）的 yfinance 缺目标日收盘时，兜底由「直接取云端快照 `price_at_fetch`」改为 "
+     "`cloud_snapshot_loader.load_official_close`：按 `last_trade_time_et` + 抓取时刻判是不是官方收盘"
+     "（与 v0.45.234 同一判据），不是则取其后第一份快照的 `prev_day_close`（归属自证），再不行标不可用。"
+     "受影响标的的 `price` 与传给 OptionsAgent 的 `stock_price` 变 ⇒ `final_score` 输入口径变。"
+     "量级（云端 290 份全量重放，对 yfinance 官方收盘）：旧兜底 64 份错价（>0.05%）；新兜底 278 份对、0 份错、"
+     "12 份标不可用。实例：08-28 DE 入库 624.85 → 630.33。 "
+     "**与 v0.45.234 共用 2026-09-14 标签、作废 0 条**：只影响**补跑**且只在 yfinance 缺该日收盘时触发；"
+     "补跑本世代日期（≥09-14）的行此前一条都没有（09-14 predictions 0 条），"
+     "补跑更早日期落进的是已被本表排除的旧世代 ⇒ 不存在新旧口径混算。"
+     "同版 `close_correction` 的 CBOE 交叉印证改按 last_trade 归属——只动 `price_at_predict` 校正的"
+     "拒改/印证判定，且须人工 `--apply`，不是评分输入，不另立边界。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）
@@ -508,6 +581,30 @@ def cohort_boundary_evidence(home: Path) -> dict:
     return {"marker_first_seen": first, "boundary": boundary, "verdict": verdict}
 
 
+def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) -> Dict:
+    """顺带承载「共振加成前瞻检验」（v0.45.242）的进度。
+
+    为什么挂在这里：它和本工具是同一种事 —— 到期条件是**数据条件**（攒够合格周），
+    不是日期；而本工具已经每周被只读诊断任务调用、摘要行会被原样写进周报。
+    另起一个定时任务 = 多一处没人记得的配置。
+
+    ⚠️ 失败**不改变本工具的判定与退出码**，但必须出现在摘要里（「谁会红？」）：
+    任何异常都渲染成一行「无法判定」，而不是吞掉。
+    `home` 与 `cohort_boundary_evidence` 同理必传 —— 归档是数据，跟着 `--db` 走。
+    """
+    try:
+        import importlib.util
+        path = ALPHAHIVE_DIR / "experiments" / "resonance_boost_forward_test.py"  # 代码锚点
+        spec = importlib.util.spec_from_file_location("resonance_boost_forward_test", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fres = mod.run(home=home, db_path=str(db), today=today)
+        return {"status": fres.get("status"), "line": mod.status_line(fres)}
+    except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
+        return {"status": "cannot_judge",
+                "line": f"⚠️ 共振加成前瞻检验无法判定：{type(e).__name__}: {e}"}
+
+
 _BOUNDARY_VERDICT_TEXT = {
     "matches": "✅ 与归档印记一致",
     "boundary_too_early": "🚨 边界写早了 —— 边界至印记之间的样本是旧口径，会被混算，请追加一条更正",
@@ -540,6 +637,8 @@ def main() -> int:
         return 3
 
     res = assess(db_path=db, target_ic=args.target_ic, today=args.today)
+    fwd = resonance_forward_status(db.parent, db, today=args.today)
+    res["resonance_forward_test"] = fwd
 
     if args.out:
         try:
@@ -553,7 +652,8 @@ def main() -> int:
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0 if res["ready"] else 1
     if args.quiet:
-        print(summary_line(res))
+        # 同一行：周度任务的约定是「把那一行摘要原样写进周报」，另起一行可能被漏抄
+        print(summary_line(res) + "｜" + fwd["line"])
         return 0 if res["ready"] else 1
 
     c = res["cohort"]
@@ -588,6 +688,7 @@ def main() -> int:
         print()
     print("━" * 72)
     print(summary_line(res))
+    print(fwd["line"])
     if res["ready"]:
         print()
         print("  该跑:")

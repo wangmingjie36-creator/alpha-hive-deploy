@@ -56,6 +56,14 @@
 **撞上了怎么办**：沿用既定原则 —— **先提交（进 git 历史）的占号**，
 后者改号。若双方都只在工作区，则**批次大的保留、单条的让**（改号成本低者先动）。
 
+### CHANGELOG 完整性 hook（2026-09-13 起）
+
+`changelog_guard.py` 挂在 pre-commit + pre-push 上跑 `tests/test_changelog_entry_integrity.py`
+（冲突标记 / 重号 / 空标题），只挡**动了 CHANGELOG** 的提交与推往 main 的推送。设计与实测全在该文件 docstring。
+
+- ⚠️ **pre-commit 管不到 `git rebase --continue`**（实测只触发 post-rewrite）——解 CHANGELOG 冲突后兜底的是 pre-push，别以为提交成功就代表检查过。
+- `.git/hooks` 不被跟踪：重新 clone 或清过之后要重装 `/usr/local/bin/python3 changelog_guard.py --install-hook`，**否则没人会知道它没了**。
+
 ## 历史改动查询指针
 
 历史改动**不在本文件维护**（v0.40.3 清理了此前 ~75 行 v0.10-0.19 时代的实现细节清单）：
@@ -74,7 +82,8 @@
 ## GitHub Pages 部署规则（永久设置）
 
 - **GitHub Pages 从 `gh-pages` 分支部署**，不是 `main`
-- `report_deployer.py`：`_deploy_ghpages = _deploy_production`（生产模式 = LLM 或蜂群，均同步 gh-pages）
+- `report_deployer.auto_commit_and_notify`：生产模式（LLM 或蜂群）提交 + 推 main + 同步 gh-pages；非生产扫描**不提交不推送**（v0.45.210 撤掉了坏了半年的 test remote 推送分支，**勿往 `GitHubTool` 白名单加 `checkout`/`reset` 恢复它**，理由在该函数 docstring）
+- **非蜂群扫描已退役（v0.45.213）**：`alpha_hive_daily_report.py` 不带 `--swarm` 直接 exit 2，**勿重建 `run_daily_scan`**——它在扫描中途就写概率账本（先写者占位），在 save_report 前短路管不到；理由在 `main()` 该闸注释，守卫 `tests/test_non_swarm_scan_retired.py`
 - `generate_ml_report.py`：末尾调用 `_sync_ghpages()`，每次生成 ML 报告后自动同步 gh-pages
 - **禁止**只推 main 不推 gh-pages，否则网站不更新
 
@@ -92,7 +101,8 @@
   （pre-commit）。**动了 `MEMORY.md` 才拦，没动只吵** —— 例行拦无关提交会把人
   养成 `--no-verify` 的习惯。**只检测，绝不自动裁**：裁哪里是语义判断，
   自动裁剪器正是上一条要防的东西。接手 / 重装（幂等，钩子不进 git、clone 之后就没了
-  且无人知晓）：`/usr/local/bin/python3 check_index_line_length.py --install-hook`
+  且无人知晓；**必须写全路径**，从本仓 worktree 执行相对路径是 exit 2）：
+  `/usr/local/bin/python3 ~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory/check_index_line_length.py --install-hook`
 
 ### memory 目录已纳入 git，**每次 session 收尾必须提交**（2026-09-11 起）
 

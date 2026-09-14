@@ -361,3 +361,26 @@ def test_e2e_manifest_does_not_lie_about_stale(_real_payload_path, monkeypatch, 
     mf = json.load(open(tmp_path / "2026-08-26" / "manifest.json"))
     assert mf["vintage_stale"] == ["BILI"], "陈旧标的必须出现在审计字段里"
     assert "StaleVintageError" in mf["failed"]["BILI"]
+
+
+# ══════════════════════════════════════════════════════════════════
+# 盘中生成的文件（v0.45.243）—— 照写不拒，但 manifest 必须点名
+# ══════════════════════════════════════════════════════════════════
+
+def test_stale_intraday_price_listed_in_manifest_not_refused(monkeypatch, tmp_path):
+    """链 / IV / OI 仍是当天真数据（跳过一天永久没有），只是 price_at_fetch 不是收盘。
+
+    B 的 last_trade 12:10（2026-09-11 T 那种 CDN 卡在中午的文件）；A、C 贴收盘。
+    ⚠️ `_payload` 默认 last_trade 是 15:26:31 —— 本身就是盘中陈旧形状，这里显式传新鲜值。
+    """
+    import cboe_options as co
+    monkeypatch.setattr(co, "_et_now", lambda: co.datetime(2026, 8, 26, 17, 2))
+
+    def payload(t, to, **k):
+        return _payload(last_trade="2026-08-26T12:10:00" if t == "B" else "2026-08-26T15:59:59")
+
+    rc, mf, day = _run_main(monkeypatch, tmp_path, payload, tickers="A,B,C")
+    assert mf["tickers_ok"] == 3, "盘中文件不许被拒绝落盘"
+    assert mf["price_stale_intraday"] == ["B"]
+    assert json.load(open(day / "B.json"))["price_source"] == "cboe_stale_intraday"
+    assert rc == 0, "不是失败，不许改退出码（routine 会据非零码拒绝或误报）"

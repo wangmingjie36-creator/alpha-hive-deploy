@@ -132,6 +132,12 @@ class StockData:
     momentum_source: str = "none"
     fetch_timestamp: float = 0.0
     is_market_hours: bool = False
+    # v0.45.234：price 取的是哪个字段（目前只有 CBOE 源填，见 cboe_options.official_price）。
+    # 进 to_dict —— 「这个入场价是不是官方收盘」得让下游看得见，不能只在日志里。
+    price_source: str = ""
+    # v0.45.234：此源拿到了数，但**不该优先采用**（CBOE 盘中陈旧价）。
+    # MultiSourceFetcher 先试后面的源，全失败才退回用它。不进 to_dict（内部调度用）。
+    defer: bool = False
 
     def to_dict(self) -> Dict:
         return {
@@ -145,6 +151,7 @@ class StockData:
             "momentum_source": self.momentum_source,
             "fetch_timestamp": self.fetch_timestamp,
             "is_market_hours": self.is_market_hours,
+            "price_source": self.price_source,
         }
 
 
@@ -294,29 +301,29 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         _last_date = (_last_dt.tz_localize(None) if getattr(_last_dt, "tzinfo", None) else _last_dt).date()
         if _last_date != as_of:
             # v0.45.70：yfinance 拿不到目标日收盘时，改问云端快照。
-            # 快照是**目标日收盘后**（约 17:00 ET）从 CBOE 抓的，正是该日的价；
-            # `load_ticker` 内部已校验 `vintage_date == date`，vintage 不符返回 None，
-            # 所以这里不需要再造一道日期闸 —— 造了就是两个口径并存。
-            _snap_px = None
+            # v0.45.243：**不再直接取 `price_at_fetch`**。那是抓取那一刻 official_price
+            # 的取值，CDN 发盘中生成的文件时它是中午的成交价、且 v0.45.234 之前的快照
+            # 照样标 cboe_close（08-28 DE 624.85 vs 官方 630.33 就是这么进的库）。
+            # 判不判得出「官方收盘」全在 `load_official_close` 里，这里只认它的结论。
+            _snap_px, _snap_src = None, "snapshot_not_consulted"
             try:
                 import cloud_snapshot_loader as _csl
-                _snap = _csl.load_ticker(as_of_date, ticker)
-                if _snap:
-                    _v = _snap.get("price_at_fetch")
-                    if isinstance(_v, (int, float)) and math.isfinite(_v) and _v > 0:
-                        _snap_px = float(_v)
-                        _snap_src = str(_snap.get("price_source") or "cloud_snapshot")
+                _snap_px, _snap_src = _csl.load_official_close(as_of_date, ticker)
             except Exception as _e_snap:  # noqa: BLE001 —— 兜底失败不得掩盖主诊断
-                _log.debug("[历史补跑] %s @ %s 云端快照取价跳过: %s", ticker, as_of_date, _e_snap)
+                _snap_src = f"snapshot_error:{type(_e_snap).__name__}"
+                _log.warning("[历史补跑] %s @ %s 云端快照取价失败: %s", ticker, as_of_date, _e_snap)
 
             if _snap_px is None:
+                # 谁会红？—— 「快照有、但不是官方收盘」与「快照没有」分开报：前者是
+                # v0.45.243 主动拒收的（`_reason` 带判决），不能读成「兜底坏了」。
                 _log.warning(
                     "[历史补跑] %s @ %s：yfinance 无该日有效收盘价（最近有效行是 %s），"
-                    "云端快照也无 —— **不以前一交易日冒充**，标记不可用",
-                    ticker, as_of_date, _last_date)
+                    "云端快照也给不出官方收盘（%s）—— **不以前一交易日 / 盘中价冒充**，标记不可用",
+                    ticker, as_of_date, _last_date, _snap_src)
                 fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
                 fb["_data_unavailable"] = True
                 fb["_reason"] = f"no_close_on_{as_of_date}"
+                fb["_snapshot_verdict"] = _snap_src
                 return fb
 
             _log.info("[历史补跑] %s @ %s：yfinance 无该日收盘（末行 %s），"
@@ -327,6 +334,7 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
                 data_source=DataQuality.REAL,
                 source_name=f"cloud_snapshot:{_snap_src}",
                 fetch_timestamp=time.time(),
+                price_source=_snap_src,
             )
             # 动量用快照价当最新一档、yfinance 历史当基准 —— 两端都是收盘价，
             # 口径可比；但要标明它是拼出来的，别当成单一来源的读数。
@@ -520,16 +528,35 @@ class CBOESource:
             # v0.45.46：按交易时段选字段。旧写法 `current_price or close` 在
             # 收盘后拿到的是**盘后价**——全部定时扫描都在 17:00 ET 跑。
             # 实测 CRM 2026-08-26（财报日）盘后 232.32 vs 官方收盘 205.62。
-            from cboe_options import official_price
+            from cboe_options import official_price, STALE_INTRADAY_SOURCE
             price, _px_src = official_price(payload)
             if price <= 0:
                 self.breaker.record_failure("zero_price")
                 return None
 
+            # v0.45.234：收盘后拿到的是盘中生成的 payload（CDN 没刷新）——
+            # close 是那一刻的成交价，当入场价会错 ~1%（T 09-11 +0.63%、TMUS 09-10 −1.12%）。
+            # 交给后面的源取官方收盘；全失败时 MultiSourceFetcher 才退回用它。
+            # ⚠️ **不记熔断失败**：CBOE 应答正常，只是这只票的文件旧。记了的话
+            # 一天 3~8 只里连撞 3 只就会熔断，把其余健康标的一起推去挤 yfinance 限流。
+            # 也**不拉**历史K线：多半用不上，白耗一次 yfinance 配额。
+            if _px_src == STALE_INTRADAY_SOURCE:
+                self.breaker.record_success()
+                return StockData(
+                    price=price,
+                    data_source=DataQuality.DEGRADED,
+                    source_name=self.name,
+                    price_source=_px_src,
+                    momentum_source="unavailable",
+                    fetch_timestamp=time.time(),
+                    defer=True,
+                )
+
             data = StockData(
                 price=price,
                 data_source=DataQuality.REAL,
                 source_name=self.name,
+                price_source=_px_src,
                 fetch_timestamp=time.time(),
             )
             # P0-2: 历史指标独立获取；失败时 momentum 置 None（不再 1 日近似）
@@ -588,6 +615,7 @@ class YFinanceSource:
                 fetch_timestamp=time.time(),
             )
             data.price = float(hist["Close"].iloc[-1])
+            data.price_source = "yfinance_daily_close"
 
             if len(hist) >= 5:
                 data.momentum_5d = (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100
@@ -783,8 +811,12 @@ class MultiSourceFetcher:
                 return cached.to_dict()
 
         # 2. 尝试降级链
+        deferred: Optional[StockData] = None
         for source in self._sources:
             data = source.fetch(ticker)
+            if data and data.price > 0 and data.defer:
+                deferred = deferred or data
+                continue
             if data and data.price > 0:
                 self._set_cache(ticker, data)
                 with self._lock:
@@ -808,6 +840,18 @@ class MultiSourceFetcher:
                     ticker, stale_age, cached.source_name
                 )
                 return cached.to_dict()
+
+        # 3.5 (v0.45.234) 被推迟的数（CBOE 盘中陈旧价）：比 price=0 让整只标的跳过强，
+        # 但必须带着 degraded + price_source 标签出去，不能冒充官方收盘。
+        if deferred is not None:
+            self._set_cache(ticker, deferred)
+            with self._lock:
+                self._fetch_stats[deferred.data_source] += 1
+            _log.warning(
+                "[DataPipeline] %s 其余源全部失败，退用 %s 的 %s 价 %.4f（非官方收盘）",
+                ticker, deferred.source_name, deferred.price_source, deferred.price
+            )
+            return deferred.to_dict()
 
         # 4. 最后防线：安全默认值（明确标记为 fallback）
         with self._lock:

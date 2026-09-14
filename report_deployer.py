@@ -8,6 +8,7 @@ report_deployer - 报告部署与通知模块
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from hive_logger import get_logger
+import production_sync
 
 _log = get_logger("report_deployer")
 
@@ -354,24 +355,61 @@ def _is_report_artifact(path: str) -> bool:
     return any(fnmatch.fnmatch(p, g) for g in _ARTIFACT_GLOBS)
 
 
+def _git_modified_files(git) -> Tuple[Optional[List[str]], Optional[str]]:
+    """`(工作区改动清单, None)`；`git status` 失败时 `(None, 原因)` 并打 warning。
+
+    ⚠️ 必须把「失败」与「干净」分开。v0.45.210 前调用方写的是
+    `if status.get("modified_files"): … else: log("工作目录干净")`，而
+    `GitHubTool.status()` 失败时返回的是 `{"error": …}` —— 于是
+    `git status` 挂了会被报成「无需提交（工作目录干净）」。
+    v0.45.225 起原因一并返回：此前它只进 warning 日志，`results["git_commit"]`
+    （⇒ status.json ⇒「日报提交失败」告警的原因栏）里只有一句 "git status failed"。
+    """
+    status = git.status()
+    if "modified_files" not in status:
+        reason = status.get("error") or "（无错误输出）"
+        _log.warning("git status 失败，无法判断工作区改动：%s", reason)
+        return None, reason
+    return status["modified_files"], None
+
+
 def auto_commit_and_notify(reporter, report: Dict) -> Dict:
     """
-    自动提交报告到 Git + Slack 通知（Agent Toolbox 演示）
+    日报产物提交 + 推送 origin main + 同步 gh-pages —— **只对生产扫描生效**。
 
-    新功能：使用 AgentHelper 自动执行 Git 提交和通知
+    生产 = 蜂群扫描，或实际用了 LLM 蒸馏。非生产扫描（`run_daily_scan`
+    规则引擎路径，即不带 `--swarm` 跑 `alpha_hive_daily_report.py`）
+    **不提交、不推送**，返回 `deploy_env="none"`。
+
+    v0.45.210 撤掉了原先的「测试推送分支」（本地提交 → 临时分支推 test remote →
+    `checkout main` → `reset --hard origin/main`）。取证：
+      - 自 2026-03-01 `GitHubTool` 白名单引入起，`checkout`/`reset` 就被静默拒绝：
+        临时分支建不出来、推送必失败、回滚从未执行，却无条件 log「本地 main 已恢复」。
+        test remote 最后一次收到推送是 2026-03-01T03:47Z，白名单提交前 4.5 小时。
+      - 回滚不执行 ⇒ 测试提交留在本地 main ⇒ 下一次生产推送把它一起送上 origin/main。
+        白名单之后这条分支共触发 7 次（`reasoning_sessions.run_mode='daily_scan'`
+        2026-03-04~03-13），origin/main 上恰好 7 个无 `swarm_metadata` 的日报提交；
+        2026-03-13 的蜂群日报至今仍被规则引擎版本顶着（main 与 gh-pages 都是）。
+      - 03-13 之后零触发（台账同窗口蜂群会话 172 条作正对照）。
+    为什么不是往白名单加 `checkout`/`reset`：原设计的「本地 main 不被污染」
+    **只能靠 `reset --hard` 实现**，而它会连带清掉工作区里未提交的代码与
+    丢了无法回溯重取的账本（见 `REPORT_ARTIFACT_PATHS` 注释）。
+    为什么不是 `git push test HEAD:main`：提交已经落在本地 main 上，不 reset 撤不掉。
+
+    本函数管不到的残留：`save_report` 在本函数**之前**已把产物写进工作区。
+    非生产报告不提交，但那些文件仍在；下一次生产扫描的白名单提交会把其中
+    没被覆盖的一并提交。本函数把它们列进 warning 与
+    `results["uncommitted_report_artifacts"]`，让它可见。
+    **上游已于 v0.45.213 根治**：非蜂群扫描整条退役，`alpha_hive_daily_report.main()`
+    不带 `--swarm` 在构造 reporter 之前就退出（它在扫描中途还会写概率账本，
+    在 save_report 之前短路管不到，见该处注释）。CLI 与 GUI 此后都只递蜂群报告进来，
+    非生产分支留作纵深防御——走到它说明有调用方递了一份不认得的报告，要出声。
     """
     _log.info("Auto-commit & Notify 启动")
 
     results = {}
+    git = reporter.agent_helper.git
 
-    # 1. Git 提交报告（始终新 commit，不 amend，避免 GitHub Pages 部署冲突）
-    #
-    # ⚠️ 架构说明：
-    #   - LLM 模式：commit 所有变更 → git push origin main → 生产页面更新
-    #   - 测试模式：commit 所有变更 → 仅推 test remote（临时分支）→ git reset --hard origin/main
-    #              local main 完全回滚，origin/main 不受任何影响
-    #   - 禁止在测试模式外手动 `git add index.html && git push origin main`，
-    #     生成物（index.html / md / json / ML html）只能通过 LLM 扫描进入 origin
     from datetime import datetime as _dt2
     # 生产模式判定（修复 #3）：只看"实际是否使用 LLM"（distill_mode==llm_enhanced）
     # 或是否是蜂群扫描。不再用 `api_key is_available()` 这种"key 存在即生产"反模式
@@ -384,16 +422,38 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
         )
     )
     _deploy_production = _using_llm or _is_swarm
-    _deploy_ghpages = _deploy_production  # 与 main 保持一致，始终同步
+
+    if not _deploy_production:
+        # 判定必须在提交**之前**：旧实现先提交再分流，非生产数据就此落在本地 main 上。
+        modified, _ = _git_modified_files(git)
+        left = [f for f in (modified or []) if _is_report_artifact(f)]
+        _log.warning(
+            "非生产扫描（非蜂群、未用 LLM）：不提交、不推送。"
+            "save_report 已写入工作区的日报产物 %s 个（不会被回滚，下一次生产扫描会把"
+            "没被覆盖的一并提交）：%s",
+            "未知（git status 失败）" if modified is None else len(left),
+            ", ".join(left[:10]) + (" …" if len(left) > 10 else ""),
+        )
+        results["git_commit"] = {"success": False, "skipped": "non_production"}
+        results["git_push"] = {"success": False, "skipped": "non_production", "remote": None}
+        results["deploy_env"] = "none"
+        results["uncommitted_report_artifacts"] = left
+        results["slack_notification"] = {"skipped": "handled_by_claude_mcp"}
+        _log.info("Auto-commit & Notify 完成（非生产扫描，未部署）")
+        return results
+
+    # 1. Git 提交报告（始终新 commit，不 amend，避免 GitHub Pages 部署冲突）
     timestamp = _dt2.now().strftime("%H:%M")
     today_commit_msg = f"Alpha Hive 蜂群日报 {reporter.date_str} {timestamp}"
     _log.info("Git commit... (mode: new)")
-    status = reporter.agent_helper.git.status()
-    if status.get("modified_files"):
+    modified, status_error = _git_modified_files(git)
+    if modified is None:
+        results["git_commit"] = {"success": False, "error": f"git status 失败：{status_error}"}
+    elif modified:
         # v0.43.4：白名单提交。此前走 `git add -A` 全量，会把工作区里
         # 任何进行中的代码改动一并卷进"日报"提交（2026-07-30 实际发生：
         # 10 个版本的代码改动混进 commit 68aad61）。详见 AgentHelper.commit 注释。
-        _skipped = [f for f in status["modified_files"]
+        _skipped = [f for f in modified
                     if not _is_report_artifact(f)]
         if _skipped:
             _log.warning(
@@ -404,8 +464,24 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
                   f"{', '.join(_skipped[:5])}"
                   + (" …" if len(_skipped) > 5 else ""))
 
-        commit_result = reporter.agent_helper.git.commit(
+        commit_result = git.commit(
             today_commit_msg, paths=REPORT_ARTIFACT_PATHS)
+        # v0.45.223：提交前工作区里有几个日报产物待提交。`commit()` 对「没东西可提交」也回
+        # success=False，靠它区分「无害」与「产物留在工作区没进 git」（如残留 .git/index.lock
+        # 让 add 全部失败）。后者此前不可见；v0.45.214 起本地落后时推送还会报 nothing_to_push 成功。
+        commit_result["pending_artifacts"] = len(modified) - len(_skipped)
+        # v0.45.227：提交完再看一次工作区。「提交成功」≠「日报产物全进了 git」——别的进程短暂占着
+        # 索引锁时只挂一条 add，提交照样成功（当天 index.html 没进 git、零告警）。判结果而不是列举原因：
+        # 哪种原因漏的都会留在这里。None = 这次 git status 失败，不知道（告警侧记为未执行的检查）。
+        after, _ = _git_modified_files(git)
+        if after is None:
+            commit_result["left_artifacts"] = None
+        else:
+            left = [f for f in after if _is_report_artifact(f)]
+            commit_result["left_artifacts"] = len(left)
+            if left:
+                commit_result["left_sample"] = left[:5]
+                _log.warning("提交后仍有 %d 个日报产物没进 git：%s", len(left), ", ".join(left[:10]))
         results["git_commit"] = commit_result
         results["skipped_non_artifacts"] = _skipped
         if commit_result["success"]:
@@ -415,52 +491,31 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
     else:
         _log.info("无需提交（工作目录干净）")
 
-    # 2. Git 推送：LLM 模式 → 生产（origin main），规则模式 → 测试（test remote）
-    #    规则模式使用临时分支，不污染本地 main，推完即删除
-    env_label = "🧠 生产" if _deploy_production else "🔧 测试（规则引擎）"
-    _log.info("Git push → [%s] (LLM=%s, Swarm=%s)", env_label, _using_llm, _is_swarm)
-
-    if _deploy_production:
-        # 生产模式：推送 origin main
-        r = reporter.agent_helper.git.run_git_cmd("git push origin main")
-        push_result = {"success": r["success"], "remote": "origin",
-                       "output": r.get("stdout", "") or r.get("stderr", "")}
-        # gh-pages 仅在 LLM 模式下更新（避免 --no-llm 测试覆盖生产数据）
-        if _deploy_ghpages:
-            try:
-                deploy_static_to_ghpages(reporter)
-            except Exception as e:
-                _log.warning("gh-pages 部署失败: %s", e)
-        else:
-            _log.info("跳过 gh-pages（非 LLM 模式）")
-    else:
-        # 测试模式：临时分支 → test remote → 删除临时分支 → 本地 main 回滚到 origin/main
-        _remote_check = reporter.agent_helper.git.run_git_cmd("git remote")
-        if "test" not in _remote_check.get("stdout", ""):
-            _log.warning("test remote 不存在，跳过推送")
-            push_result = {"success": False, "error": "test remote not configured"}
-        else:
-            _tmp = "_test_snapshot"
-            # 从当前 HEAD 创建临时分支并推送到 test:main
-            reporter.agent_helper.git.run_git_cmd(f"git branch -D {_tmp}")
-            reporter.agent_helper.git.run_git_cmd(f"git checkout -b {_tmp}")
-            r = reporter.agent_helper.git.run_git_cmd(f"git push test {_tmp}:main --force")
-            push_result = {"success": r["success"], "remote": "test",
-                           "output": r.get("stdout", "") or r.get("stderr", "")}
-            # 回到 main 并删除临时分支，本地 main 恢复干净状态
-            reporter.agent_helper.git.run_git_cmd("git checkout main")
-            reporter.agent_helper.git.run_git_cmd(f"git branch -D {_tmp}")
-            # 重置本地 main 到 origin/main，撤销测试数据对本地 main 的污染
-            reporter.agent_helper.git.run_git_cmd("git fetch origin")
-            reporter.agent_helper.git.run_git_cmd("git reset --hard origin/main")
-            _log.info("本地 main 已恢复至 origin/main（测试数据不污染生产）")
-
+    # 2. Git 推送 origin main
+    # v0.45.214：本地 main 落后 origin/main（各 session 从 worktree 直推）时，
+    # 在对象层合并后再推，不动工作区——部署之后编排器还要跑别的 Python 步骤。
+    # 此前直推 `git push origin main`，2026-09-01~11 六次 non-fast-forward 被拒。
+    _log.info("Git push → [🧠 生产] (LLM=%s, Swarm=%s)", _using_llm, _is_swarm)
+    push_result = production_sync.push_main(git, merge_label=today_commit_msg)
     results["git_push"] = push_result
-    results["deploy_env"] = "production" if _deploy_production else "test"
+    results["deploy_env"] = "production"
     if push_result["success"]:
-        _log.info("Git push 成功 → %s", push_result.get("remote"))
+        _log.info("Git push 成功 → %s（%s%s）", push_result.get("remote"),
+                  push_result.get("integration"),
+                  f"，合并 {push_result['merge_commit'][:7]}，本地 main 落后 {push_result.get('behind')}"
+                  if push_result.get("merge_commit") else "")
     else:
-        _log.warning("Git push 失败：%s", push_result.get("error") or push_result.get("output", ""))
+        # `error` 与 `output` 对应 run_git_cmd 的两种失败形状，只读一个会把另一种的原因丢成空串
+        _log.warning("Git push 失败（%s）：%s%s", push_result.get("integration"),
+                     push_result.get("error") or push_result.get("output") or "（git 无输出）",
+                     f"\n  （推送前 fetch 也失败：{push_result['fetch_error']}）"
+                     if push_result.get("fetch_error") else "")
+
+    # gh-pages 与 main 同步（生产模式 = LLM 或蜂群）
+    try:
+        deploy_static_to_ghpages(reporter)
+    except Exception as e:
+        _log.warning("gh-pages 部署失败: %s", e)
 
     # 3. Slack 通知（由 Claude Code MCP 工具推送，不用 webhook bot）
     _log.info("Slack 推送由 Claude Code 负责（用户账号）")

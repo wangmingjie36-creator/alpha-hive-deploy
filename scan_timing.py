@@ -42,6 +42,7 @@ FILENAME = "scan_timing.json"
 
 _lock = threading.Lock()
 _phases: Dict[str, float] = {}
+_code_version_at_start: Optional[dict] = None
 
 
 # ───────────────────────────────────────────── 计时
@@ -67,8 +68,10 @@ def phases() -> Dict[str, float]:
 
 
 def reset() -> None:
+    global _code_version_at_start
     with _lock:
         _phases.clear()
+        _code_version_at_start = None
 
 
 # ───────────────────────────────────────────── 计数器
@@ -86,7 +89,7 @@ def counters() -> Dict[str, Optional[dict]]:
     """
     out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None,
                                       "cboe": None, "cboe_chain": None,
-                                      "gex_view": None}
+                                      "gex_view": None, "options_snapshot": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -104,22 +107,105 @@ def counters() -> Dict[str, Optional[dict]]:
         out["gex_view"] = cboe_options.gex_view_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("cboe stats 不可得: %s", e)
+    # v0.45.238：期权快照槽位。`session_mismatch` 非零 = 槽位里躺着别的会话的数据
+    # （被弃用重算）；`hits_before_close` 非零 = 本轮期权指标用了盘中冻结的快照。
+    # 这两项自 v0.45.249 起按**份数**计（同一份快照一个进程只计一次），hits/writes 仍按调用次数。
+    try:
+        import options_analyzer
+        out["options_snapshot"] = options_analyzer.snapshot_slot_stats()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("options_snapshot stats 不可得: %s", e)
     return out
 
 
 # ───────────────────────────────────────────── 快照与落盘
+def note_code_version(info: Optional[dict]) -> None:
+    """扫描启动时把 `code_version.log_startup()` 的结果交给快照（v0.45.223）。"""
+    global _code_version_at_start
+    with _lock:
+        _code_version_at_start = dict(info) if isinstance(info, dict) else None
+
+
 def code_version() -> Optional[dict]:
     """这一轮跑的是哪一版代码。取不到返回 None（不写 {}——空 dict 会被读成「测过、没版本」）。
 
     v0.45.182。编排器 `write_status()` 已用 jq 把本文件并进 `status.json`，
     所以挂在这里即可让版本随每轮扫描落进 status.json，**无需改编排器**。
+
+    ⚠️ v0.45.223：优先用**扫描启动时**记下的那份（`note_code_version`）。此前这里在
+    快照落盘时（扫描末尾）现解析，而那时部署已经在本地造了日报提交 ⇒ `sha` 是日报提交，
+    不是扫描所用的代码（09-11 实测：快照 `1826d3e`，启动日志 `5b6276c`）；扫描中途有人
+    手工快进生产，还会记成另一份代码。`resolved_at` 标明取自哪个时点，没有启动记录时
+    退回现解析并如实标 `"snapshot"`。
     """
+    with _lock:
+        start = _code_version_at_start
+    if start is not None:
+        return {**start, "resolved_at": "scan_start"}
     try:
         import code_version as _cv
-        return _cv.resolve()
+        info = _cv.resolve()
+        return {**info, "resolved_at": "snapshot"} if isinstance(info, dict) else info
     except Exception as e:  # noqa: BLE001 - 观测代码不得影响主流程
         _log.warning("code_version 不可得（status.json 将缺版本字段）: %s", e)
         return None
+
+
+def production_sync_result(date_str: str) -> Optional[dict]:
+    """本轮扫描前的生产代码同步结果（v0.45.214，编排器在 Step 1 前调 `production_sync.py`）。
+
+    与 `code_version` 同一条路：挂在这里就随 `scan_timing.json` 并进 `status.json`，
+    `alert_manager` 据此告警。没跑、写失败、或是别的日期的 ⇒ None（「没测到」）。
+    """
+    try:
+        import production_sync as _ps
+        return _ps.load_for_date(date_str)
+    except Exception as e:  # noqa: BLE001 - 观测代码不得影响主流程
+        _log.warning("production_sync 结果不可得（status.json 将缺该字段）: %s", e)
+        return None
+
+
+_GIT_PUSH_KEYS = ("success", "integration", "behind", "merge_commit", "conflicts",
+                  "attempts", "error", "skipped", "fetch_error")
+
+
+def git_push_summary(git_push: Optional[dict]) -> Optional[dict]:
+    """`results["git_push"]` 进 status.json 的精简版（v0.45.214）。
+
+    git 的 `output` 带整段 hint，截到 500 字符；None 原样返回（「没记录」≠「成功」）。
+    """
+    if not isinstance(git_push, dict):
+        return None
+    out = {k: git_push[k] for k in _GIT_PUSH_KEYS if k in git_push}
+    if git_push.get("output"):
+        out["output"] = str(git_push["output"])[:500]
+    return out
+
+
+def git_commit_summary(git_commit: Optional[dict]) -> Optional[dict]:
+    """`results["git_commit"]` 进 status.json 的精简版（v0.45.223）。
+
+    `pending_artifacts` 是提交前待提交的日报产物数：0 ⇒ 失败只是「没东西可提交」；
+    None（git status 就失败了）⇒ 不知道，按失败看。None 入参原样返回（工作区干净，未尝试提交）。
+
+    v0.45.227：`left_artifacts`（提交后仍没进 git 的日报产物数；None = 提交后那次 git status 失败）
+    与 `left_sample` 有才抄——没有这个键 = 旧代码或没走到提交，告警侧据此区分「没核」与「核不了」。
+    原因优先 `error`，其次 `add_errors`：提交成功但有 add 重试后仍失败时，`message` 只是提交成功的输出。
+    """
+    if not isinstance(git_commit, dict):
+        return None
+    out = {"success": git_commit.get("success"),
+           "pending_artifacts": git_commit.get("pending_artifacts")}
+    for key in ("left_artifacts", "left_sample"):
+        if key in git_commit:
+            out[key] = git_commit[key]
+    add_errors = git_commit.get("add_errors")
+    reason = (git_commit.get("error")
+              or ("git add 失败：" + "；".join(add_errors) if add_errors else None)
+              or git_commit.get("message"))
+    if reason:
+        out["reason"] = str(reason)[:300]
+    return out
 
 
 def snapshot(date_str: str, extra: Optional[dict] = None) -> dict:
@@ -127,6 +213,7 @@ def snapshot(date_str: str, extra: Optional[dict] = None) -> dict:
         "date": date_str,
         "written_at": datetime.now().isoformat(timespec="seconds"),
         "code_version": code_version(),
+        "production_sync": production_sync_result(date_str),
         "phases": phases(),
         "counters": counters(),
     }
@@ -183,5 +270,9 @@ def summary_line(snap: dict) -> str:
     yf_s = "—" if yf is None else f"{yf.get('calls', '?')}次(429×{yf.get('rate_limited', '?')})"
     td_s = "—" if td is None else f"请求{td.get('fetches', '?')}/命中{td.get('hits', '?')}"
     cb_s = "—" if cb is None else f"抓取{cb.get('fetches', '?')}/命中{cb.get('hits', '?')}"
+    os_ = c.get("options_snapshot")
+    os_s = "—" if os_ is None else (
+        f"写入{os_.get('writes', '?')}/命中{os_.get('hits', '?')}"
+        f"/会话不符弃用{os_.get('session_mismatch', '?')}份/盘中快照命中{os_.get('hits_before_close', '?')}份")
     return ("耗时 " + " | ".join(parts) +
-            f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s}")
+            f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}")

@@ -1321,7 +1321,12 @@ SENTIMENT_MOMENTUM_CONFIG = {
 CONFLICT_ARBITRATION_CONFIG = {
     "close_vote_threshold": 0.15,   # margin 低于此值触发仲裁
     "dissent_boost": 1.5,           # GuardBee/BearBee 异议权重倍数
-    "dissent_agents": ["GuardBeeSentinel", "BearBeeContrarian"],
+    # v0.45.212：原两名成员 GuardBeeSentinel / BearBeeContrarian 都已退出方向计票
+    # （QueenDistiller.NON_VOTING_AGENTS），仲裁只在投票蜂里找异议方 ⇒ 默认**无成员**，
+    # 异议加成不生效；票差仲裁本身（放宽看多门槛的再投票）照旧。
+    # 实测 Guard 对自己读的六只零异议（0/90），Bear 90.5% 恒看空 —— 两者都不是真异议方。
+    # 守卫 tests/test_non_voting_agents.py::TestDissentAgentsMustVote
+    "dissent_agents": [],
 }
 
 # ==================== 置信度校准配置 (QueenDistiller Enhancement B) ====================

@@ -69,6 +69,23 @@ class QueenDistiller:
         "fallback", "fallback_momentum", "default", "missing",  # 降级回退仍有参考价值
     }
 
+    # 不进方向**计票**的蜂（v0.45.212）。只拿掉计票里那一票：报告的 agent_breakdown、
+    # 逐蜂方向、data_quality 汇总、BullVeto 读 BearBee 分数、bear_cap —— 照旧看全体。
+    #
+    # BearBeeContrarian：本职是反方陈述，不是陪审员。实测（623 条有 T+7 超额收益的记录）
+    #   90.5% 看空、看空命中 50.5%（19 周 p=0.63）；confidence = 0.3 + 0.1×信号数
+    #   + 0.1×**读到的 real 源数**（可得性当置信度），451 条 conf≥0.95 的看空命中 49.9%；
+    #   且 `contrarian` 不在 ml_adjustments 表里 ⇒ 豁免了核心维度那 0.5–0.6 的票重缩放。
+    #   GuardBee 的复述票（v0.45.209）起决定作用的行里 96% 正是在抵消它。
+    # ⚠️ 结果证据是零效应不是改善（预注册两语料三指标 p 0.12–0.59），理由是结构性的。
+    #
+    # GuardBeeSentinel：方向是其余六只多数的复述（v0.45.209：普查口径后 90/90、打乱对照
+    #   38.9%），在这里被当第 7 张独立票再数一遍。它此前「有用」只是在抵消 BearBee；
+    #   BearBee 退出后再摘它，预注册比较两语料三指标 p 0.38–0.99 —— 零效应。
+    #   它的**分数**通道（风险关门）、宏观政体、共振维度（另一条复述通道，未测未动）都不在此列。
+    # 守卫：tests/test_non_voting_agents.py
+    NON_VOTING_AGENTS = frozenset({"BearBeeContrarian", "GuardBeeSentinel"})
+
     def __init__(self, board: PheromoneBoard, weight_manager=None, adapted_weights: Dict = None,
                  enable_llm: bool = True, ml_model=None):
         self.board = board
@@ -373,6 +390,10 @@ class QueenDistiller:
 
         adjusted_score = base_score + ml_adjustment
 
+        # ⚠️ 共振加成正在做预注册前瞻检验（v0.45.242，`experiments/resonance_boost_forward_test.py`）：
+        # 样本内它是评分链里唯一测得出损失排序信息的一步，但证据是事后分析，用户定的是
+        # 「前瞻确认后再删」。**结论出来之前勿删改、勿改成分方向**——那会让检验的自证失败
+        # （B0 重放复现不了生产），样本内理由与数字见 experiments/resonance_boost_insample_report.md。
         resonance = self.board.detect_resonance(ticker)
         if resonance["resonance_detected"]:
             boost_pct = _safe_score(resonance.get("confidence_boost"), 0.0, -50, 50, "resonance_boost")
@@ -564,12 +585,15 @@ class QueenDistiller:
                                 fg_value: int = None) -> Dict:
         """S4 反博弈 + S5 冲突再投票 + data_quality 汇总。返回 dict。"""
         _fg_value = fg_value  # 升级 4 使用
-        directions = [r.get("direction", "neutral") for r in valid_results]
+        # 计票口径（v0.45.212）：本函数里凡是门槛、票重、仲裁、冲突再投票，一律只看 _voters。
+        _voters = [r for r in valid_results if r.get("source") not in self.NON_VOTING_AGENTS]
+        _vote_excluded = sorted({r.get("source") for r in valid_results} & self.NON_VOTING_AGENTS)
+        directions = [r.get("direction", "neutral") for r in _voters]
         bullish_count = directions.count("bullish")
         bearish_count = directions.count("bearish")
         neutral_count = directions.count("neutral")
 
-        _all_conf = [r.get("confidence", 0.5) for r in valid_results]
+        _all_conf = [r.get("confidence", 0.5) for r in _voters]
         _total_w_raw = sum(_all_conf) or 1.0
         _weight_cap = _total_w_raw * 0.4
 
@@ -584,18 +608,26 @@ class QueenDistiller:
             and self.ml_adjustments
         )
 
+        # 没有 ML 乘数的投票蜂取「当期平均乘数」，不取 1.0（v0.45.228）。
+        # 乘数被下限 0.5 主导（793 份 JSON 中位 0.500），「1.0 = 平均」这个隐含假设不成立 ——
+        # RivalBee（ml_auxiliary 不在表里）与 CodeExec（没有维度）曾因此拿到 1.5–2.0 倍相对票重。
+        # 取均值 ⇒ 只保留乘数之间的相对信息；全部压在下限时 ≡ 不缩放。
+        # 维度权重那个消费者乘完会归一化，水平本来就不起作用，所以只改这里。
+        # 守卫：tests/test_ml_vote_scaling_default.py
+        _ml_neutral = (sum(self.ml_adjustments.values()) / len(self.ml_adjustments)
+                       if self.ml_adjustments else 1.0)
+
         def _effective_conf(r):
             conf = min(r.get("confidence", 0.5), _weight_cap)
             if _ml_vote_boost_enabled:
                 from pheromone_board import PheromoneBoard as _PB
                 _agent_dim = _PB.AGENT_DIMENSIONS.get(r.get("source", ""))
-                if _agent_dim:
-                    conf *= self.ml_adjustments.get(_agent_dim, 1.0)
+                conf *= self.ml_adjustments.get(_agent_dim, _ml_neutral)
             return conf
 
-        bullish_w = sum(_effective_conf(r) for r in valid_results if r.get("direction") == "bullish")
-        bearish_w = sum(_effective_conf(r) for r in valid_results if r.get("direction") == "bearish")
-        neutral_w = sum(_effective_conf(r) for r in valid_results if r.get("direction") == "neutral")
+        bullish_w = sum(_effective_conf(r) for r in _voters if r.get("direction") == "bullish")
+        bearish_w = sum(_effective_conf(r) for r in _voters if r.get("direction") == "bearish")
+        neutral_w = sum(_effective_conf(r) for r in _voters if r.get("direction") == "neutral")
         total_w = bullish_w + bearish_w + neutral_w or 1.0
 
         try:
@@ -650,7 +682,7 @@ class QueenDistiller:
             _CAC = {}
         _close_vote_thresh = _CAC.get("close_vote_threshold", 0.15)
         _dissent_boost = _CAC.get("dissent_boost", 1.5)
-        _dissent_agents = set(_CAC.get("dissent_agents", ["GuardBeeSentinel", "BearBeeContrarian"]))
+        _dissent_agents = set(_CAC.get("dissent_agents", []))
 
         _pre_arb_margin = abs(bullish_w - bearish_w) / total_w if total_w > 0 else 0.0
         _arb_triggered = False
@@ -663,7 +695,7 @@ class QueenDistiller:
             _arb_bull_w = 0.0
             _arb_bear_w = 0.0
             _arb_neut_w = 0.0
-            for r in valid_results:
+            for r in _voters:
                 _dir = r.get("direction", "neutral")
                 _conf = _effective_conf(r)  # 使用 ML 提升后的置信度作为基础
                 _src = r.get("source", "")
@@ -714,7 +746,7 @@ class QueenDistiller:
             conflict_level = "heavy"
             dq_bull_w = 0.0
             dq_bear_w = 0.0
-            for r in valid_results:
+            for r in _voters:
                 _dir = r.get("direction", "neutral")
                 if _dir not in ("bullish", "bearish"):
                     continue
@@ -735,7 +767,7 @@ class QueenDistiller:
             elif dq_bear_w / dq_total >= _conflict_resolve:
                 rule_direction = "bearish"
 
-            _conflict_ratio = (bullish_count + bearish_count) / max(1, len(valid_results))
+            _conflict_ratio = (bullish_count + bearish_count) / max(1, len(_voters))
             conflict_discount = round(_conflict_factor * min(1.0, _conflict_ratio), 2)
             rule_score = round(max(1.0, rule_score - conflict_discount), 2)
 
@@ -814,12 +846,18 @@ class QueenDistiller:
                                 _qs += 0.7
             dim_data_quality[_dim] = round(_qs / _tf * 100, 1) if _tf > 0 else None
 
+        # agent_breakdown 的展示口径保持「全体」（报告里渲染成「Agent 投票：看多N vs 看空M」，
+        # 改口径会让历史对比失真）；真正参与计票的在 voting_counts 与 vote_excluded_agents。
+        _all_dirs = [r.get("direction", "neutral") for r in valid_results]
         return {
             "rule_direction": rule_direction,
             "rule_score": rule_score,
-            "bullish_count": bullish_count,
-            "bearish_count": bearish_count,
-            "neutral_count": neutral_count,
+            "bullish_count": _all_dirs.count("bullish"),
+            "bearish_count": _all_dirs.count("bearish"),
+            "neutral_count": _all_dirs.count("neutral"),
+            "voting_counts": {"bullish": bullish_count, "bearish": bearish_count,
+                              "neutral": neutral_count},
+            "vote_excluded_agents": _vote_excluded,
             "direction_vote_weights": {
                 "bullish": round(bullish_w, 3),
                 "bearish": round(bearish_w, 3),
@@ -1264,6 +1302,7 @@ class QueenDistiller:
             "arbitration_triggered": dv["arbitration_triggered"],
             "arbitration_flipped": dv["arbitration_flipped"],
             "pre_arbitration_margin": dv["pre_arbitration_margin"],
+            "vote_excluded_agents": dv["vote_excluded_agents"],
             # Enhancement B: 置信度校准
             "confidence_calibration": confidence_calibration,
             # Enhancement C: ML 反馈权重
