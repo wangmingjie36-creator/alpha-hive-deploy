@@ -984,9 +984,10 @@ R0 下 `final_score` 对 T+7 超额收益的逐日横截面 IC **−0.11**（周
   - T4 三周没开机（日备份全超过 7 天）⇒ 成功后仍留 7 份。T5 WAL 无 sidecar ⇒ 走 immutable，源目录不长 sidecar。
 - 变异 5/5 红：M0 **原版块**（T3 下 12 个旧文件删到剩 2 个，含人工 `pre_*`）/ M1 失败也清理 / M2 去保留下限 / M3 不走 immutable / M4 轮转模式吞 `pre_*`。
   首版 M4 `pheromone_(.*)\.db` 存活——`fromisoformat` 恰好挡住了它，是等价变异；换成真正有害的 `pheromone_.*?(\d{4}-\d{2}-\d{2})\.db` 后红。
-- ⚠️ **launchd 上下文未实测**：以上都从 Claude Code 的进程树跑，TCC 判定与 launchd 不同。**待 2026-09-14（周一）14:00 扫描确认**：
-  `grep "数据库已备份（sqlite 在线备份）\|数据库备份失败" ~/.claude/logs/orchestrator-2026-09-14.log` 与 `status.json` 的 `steps_result.db_backup`。
-  今天成功后日备份只有 2 份（< 7），轮转不会删任何东西。
+- ✅ **launchd 上下文已实测（2026-09-14 14:00 定时扫描）**：日志 `14:00:35 💾 数据库已备份（sqlite 在线备份）→ db_backups/pheromone_2026-09-14.db 42061824 bytes 9 tables 121150 rows open=ro 0.5s`、
+  `轮转：保留 2 份日备份；清理 无`——09-08 之后第一次在 launchd 下备份成功（此前 09-09/10/11 三连败于 TCC）。
+  独立复核该文件：`integrity_check=ok`、`journal_mode=delete`、无 sidecar、9 表 121150 行；`pheromone_2026-09-08.db` 与人工 `pre_v0.45.173` 均保留。
+  （上面 T1–T5 是在 Claude Code 进程树里跑的，TCC 判定与 launchd 不同，所以这一条单列。）
 
 ### 0.3 测试「仓库根默认拒绝」总闸
 
