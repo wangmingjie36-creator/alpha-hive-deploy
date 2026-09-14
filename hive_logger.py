@@ -68,6 +68,17 @@ class _HivePaths:
         return p
 
     @property
+    def cboe_daily_cache(self) -> Path:
+        """`CBOEDailyFetcher()` 无参构造时的缓存目录（v0.45.230）。
+
+        此前默认值是 cwd 相对的 `"cache/cboe_daily"`：不读 `ALPHA_HIVE_CACHE_DIR`，
+        在哪起 pytest 就建进哪个 checkout（v0.45.224 空目录普查实测）。
+        生产从仓库根跑、无 env 覆盖时与原位置相同。`cboe_daily/` 本身由构造器建
+        （父目录照 `cache_dir` 的惯例在取值时建）。
+        """
+        return self.cache_dir / "cboe_daily"
+
+    @property
     def db(self) -> str:
         return os.environ.get("ALPHA_HIVE_DB_PATH", str(self.home / "pheromone.db"))
 

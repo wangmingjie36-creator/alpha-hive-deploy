@@ -22,9 +22,10 @@ from typing import Dict, List, Optional
 
 _log = logging.getLogger("alpha_hive.deep_analysis")
 
-# ── 切换到脚本所在目录 ─────────────────────────────────────
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ".")
+# 「切到脚本目录 + `sys.path.insert(0, ".")`」在 `main()` 里做，**不在 import 期**（v0.45.230）。
+# 原先写在这里 ⇒ 任何 import 本模块的人（pytest 收集期的测试模块即是）整个进程的 cwd 被挪到
+# 仓库根、sys.path 多一个 cwd 相对的 "."：v0.45.224 实测从空目录跑全套与从仓库根跑一模一样，
+# 9 条依赖 cwd 的测试被掩盖。守卫：tests/test_cwd_and_sys_path_hygiene.py。
 
 # ── ANSI 颜色 ─────────────────────────────────────────────
 R = "\033[0m"; B = "\033[1m"; G = "\033[92m"; Y = "\033[93m"
@@ -949,6 +950,11 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-seri
 # ═══════════════════════════════════════════════════════════
 
 def main():
+    # ── 切换到脚本所在目录 ─────────────────────────────────────
+    # CLI 语义不变：`--json` 的相对路径按脚本目录解析、报告写进脚本目录、蜂群的相对读写同理。
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, ".")
+
     args = sys.argv[1:]
 
     # ── 模式1：从 JSON 文件直接渲染 HTML ──────────────────
