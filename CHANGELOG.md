@@ -5,7 +5,51 @@
 
 ---
 
-## [0.45.223] — 2026-09-14 — 占位（进行中：二次检查 v0.45.214——status 快照的 code_version 是日报提交而非扫描所用代码 + 日报提交失败不可见 + 告警措辞）
+## [0.45.223] — 2026-09-14 — 二次检查 v0.45.214：status.json 记的「代码版本」其实是日报提交；日报提交失败没人会红
+
+用户要求二次检查 v0.45.214。核心逻辑（对象层合并推送、扫描前只快进、三态退出码、重试条件）复核无 bug；
+另核了几处**与并行落地的改动交互**的地方，均无问题：v0.45.216 的 git 钩子在 launchd 下固定用
+`/usr/local/bin/python3`，pre-push 的区间判定已覆盖 `push_main`（唯一的窄竞态会先报一个误导性拒绝、
+随后 origin 已动触发重试自愈）；编排器与 plist 没有导出任何 `ALPHA_HIVE_*`，同步与扫描用同一仓库与日志目录；
+`alert_manager` 的 `checks_skipped` 只打日志不改退出码。查出三处，用户逐项批准修：
+
+### Fixed
+
+1. **`status.json.scan_timing.code_version.sha` 是日报提交，不是扫描所用代码。** `scan_timing.snapshot()`
+   在扫描**末尾**落盘时现解析，而那时部署已在本地造了日报提交。09-11 生产实测：快照 `1826d3e`，
+   启动日志 `5b6276c`。`code_version.log_startup()` 的 docstring 写着「返回解析结果供写进快照」，
+   但返回值一直被丢弃（v0.45.182 起）。扫描中途有人手工快进生产时，快照还会记成另一份代码。
+   - `scan_timing.note_code_version()`：`_init_scan_context` 把 `log_startup()` 的结果交给快照；
+     `code_version()` 优先用它，标 `resolved_at: "scan_start"`；没有启动记录才现解析并如实标 `"snapshot"`。
+   - 状态放在 `scan_timing`（`reset()` 会清）而非 `code_version` 模块：`tests/test_code_version.py`
+     拿假 dict 调 `log_startup()`，缓存放那边会把假值泄漏进后续快照测试（顺序相关）。
+   - ⚠️ **此前所有 status.json 里的 `code_version.sha` 都是日报提交**（代码内容通常等价，扫描中途无人快进时）。
+2. **日报提交失败不可见，v0.45.214 还让其中一种情形变得更隐蔽。** `results["git_commit"]` 从不进
+   status.json；本地落后时提交失败，`push_main` 会报 `nothing_to_push` 成功（改动前至少会被非快进拒绝）。
+   触发例：生产 checkout 残留 `.git/index.lock`（session 也在生产 checkout 里干活）⇒ `git add` 全失败。
+   - `report_deployer` 记 `pending_artifacts`（提交前待提交的日报产物数）；`scan_timing.git_commit_summary()`
+     进 `scan_timing.extra.git_commit`；`alert_manager` 在 success 非 True 且 `pending_artifacts != 0` 时报
+     P1「日报提交失败」。`pending_artifacts == 0` 的失败只是「没东西可提交」（`commit()` 对它也回 False），不报。
+3. **同步告警措辞**：「本轮跑的是旧代码」对 `local_ahead`（生产跑的是 main **加**未推送的提交）不成立。
+   标题改为「生产代码 ≠ origin/main（结局）」，`含义` 按结局给（`_SYNC_MEANING`）。
+
+### 测试
+
+- 新增 6 条 + 1 条参数化（`main()` 蜂群路径真跑，核对推送与提交结果真的交给了 `_timing.write`，
+  返回 / 抛异常两种形状）：真 git 沙箱里残留 `index.lock` ⇒ 提交失败告警、推送不误报；
+  「只改了非日报产物」⇒ 不报；`local_ahead` 措辞；快照在「HEAD」变动后仍给启动时的 sha；
+  无启动记录时如实标 `snapshot`；AST 核 `_init_scan_context` 把 `log_startup()` 返回值交出去。
+- 对改动前的导出树：7 条红（抛异常那条旧代码本来就对，照绿）。
+- 变异真跑 6 处（去掉 `pending_artifacts != 0` / 拿掉提交告警 / `pending_artifacts` 把非产物也算上 /
+  快照忽略启动记录 / 删 `local_ahead` 含义 / `main()` 不传 `git_commit`），各被对应一条抓到。
+- 全套 `pytest --maxfail=200`：**4274 passed / 1 failed（仅 `TestCoverageHorizon`，按设计红）/ 2 xfailed**；
+  `ruff check .`：All checks passed。
+
+### 未修（只记录）
+
+- `GitHubTool.run_git_cmd` 固定 30 秒超时：积压极大时 `git pull` 可能在 checkout 中途被杀、留下 `index.lock`。
+  概率低（fetch 已先完成，pull 只剩本地 checkout）；真发生时第 2 条的提交失败告警会让后果可见。
+- 扫描后核对已约在 2026-09-14 15:27 PDT（session 内一次性任务）。
 
 ---
 

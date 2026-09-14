@@ -400,7 +400,7 @@ class TestResultReachesAlerts:
         assert snap["production_sync"]["outcome"] == sync["outcome"]
         _, msgs = self._alerts(tmp_path, snap)
         assert any("main 推送失败" in m for m in msgs), msgs
-        assert any("生产代码未同步" in m for m in msgs), msgs
+        assert any("生产代码 ≠ origin/main" in m for m in msgs), msgs
 
     def test_healthy_round_raises_neither_alert(self, world, tmp_path):
         """正对照：不是「什么都报」。"""
@@ -411,8 +411,96 @@ class TestResultReachesAlerts:
         ps.write_result(ps.sync_before_scan(w.tool, today="2026-09-14"))
         snap = st.snapshot("2026-09-14", extra={"git_push": st.git_push_summary(push)})
         a, msgs = self._alerts(tmp_path, snap)
-        assert not any("推送失败" in m or "代码未同步" in m or "同步未执行" in m for m in msgs), msgs
+        assert not any("推送失败" in m or "origin/main（" in m or "同步未执行" in m or "提交失败" in m
+                       for m in msgs), msgs
         assert not any("推送" in s for s in a.checks_skipped)
+
+    @pytest.mark.parametrize("deploy", ["returns", "raises"])
+    def test_main_writes_the_push_result_into_the_timing_snapshot(self, monkeypatch, deploy):
+        """上面几条自己拼 snapshot；这条走**真 `main()` 的蜂群路径**，核对 `_timing.write` 真收到了推送结果。
+
+        `alpha_hive_daily_report.main` 里捕获 `_git_push` 那两行一旦被改坏，只有这条会红。"""
+        import alpha_hive_daily_report as adr
+        import yf_gate
+
+        failed = {"success": False, "integration": "conflict", "conflicts": ["index.html"],
+                  "output": "x" * 800}
+
+        class SwarmReporter:
+            date_str = "2026-09-14"
+
+            def __init__(self, date_override=None):
+                pass
+
+            def run_swarm_scan(self, focus_tickers=None):
+                return {"system_status": "✅ 蜂群协作完成", "swarm_metadata": {"tickers_analyzed": 1},
+                        "opportunities": [{"ticker": "NVDA"}]}
+
+            def save_report(self, report):
+                return "/dev/null"
+
+            def auto_commit_and_notify(self, report):
+                if deploy == "raises":
+                    raise OSError("Too many open files")
+                return {"git_push": failed, "deploy_env": "production",
+                        "git_commit": {"success": False, "pending_artifacts": 3, "error": "index.lock"}}
+
+        written = []
+        monkeypatch.setattr(adr, "AlphaHiveDailyReporter", SwarmReporter)
+        monkeypatch.setattr(yf_gate, "install", lambda: False)
+        monkeypatch.setattr(adr._timing, "write", lambda d, extra=None, **k: written.append((d, extra)))
+        monkeypatch.setattr(sys, "argv", ["alpha_hive_daily_report.py", "--swarm", "--no-llm", "--force"])
+        adr.main()
+
+        assert len(written) == 1, written
+        push = written[0][1]["git_push"]
+        assert push["success"] is False
+        if deploy == "returns":
+            assert push["integration"] == "conflict" and push["conflicts"] == ["index.html"]
+            assert len(push["output"]) == 500
+            assert written[0][1]["git_commit"] == {"success": False, "pending_artifacts": 3,
+                                                   "reason": "index.lock"}
+        else:
+            assert "Too many open files" in push["error"], "部署抛异常被记成了「没记录」"
+
+    # ── v0.45.223：日报提交失败要可见；同步结局按「实际跑的是什么」措辞 ──
+
+    def test_failed_report_commit_alerts_even_when_push_says_success(self, world, tmp_path):
+        """复刻：生产 checkout 残留 `.git/index.lock` ⇒ `git add` 全失败 ⇒ 日报没提交；
+        同时别人推过 ⇒ `push_main` 报 `nothing_to_push` 成功。推送侧看不出任何问题。"""
+        w = world
+        w.session_push("code.py", "v2", "session: 改代码")
+        (w.prod / ".git" / "index.lock").write_text("")
+        (w.prod / "index.html").write_text("report-0914")
+        res = rd.auto_commit_and_notify(w.reporter, PRODUCTION)
+        assert res["git_push"]["success"] is True and res["git_push"]["integration"] == "nothing_to_push"
+        assert res["git_commit"]["success"] is False and res["git_commit"]["pending_artifacts"] == 1
+
+        snap = st.snapshot("2026-09-14", extra={"git_push": st.git_push_summary(res["git_push"]),
+                                                "git_commit": st.git_commit_summary(res["git_commit"])})
+        _, msgs = self._alerts(tmp_path, snap)
+        assert any("日报提交失败" in m for m in msgs), msgs
+        assert not any("推送失败" in m for m in msgs), "推送确实没失败，别报错地方"
+
+    def test_nothing_to_commit_is_not_a_commit_failure(self, world, tmp_path):
+        """正对照：只有非日报产物有改动 ⇒ `commit()` 回 success=False（nothing to commit），但不是故障。"""
+        w = world
+        (w.prod / "notes.json").write_text("生产里没提交的改动")
+        res = rd.auto_commit_and_notify(w.reporter, PRODUCTION)
+        assert res["git_commit"]["success"] is False, "正对照没立住：commit() 对「没东西可提交」应回 False"
+        assert res["git_commit"]["pending_artifacts"] == 0
+        snap = st.snapshot("2026-09-14", extra={"git_commit": st.git_commit_summary(res["git_commit"]),
+                                                "git_push": st.git_push_summary(res["git_push"])})
+        _, msgs = self._alerts(tmp_path, snap)
+        assert not any("提交失败" in m for m in msgs), msgs
+
+    def test_local_ahead_alert_does_not_call_it_old_code(self, tmp_path):
+        snap = st.snapshot("2026-09-14", extra={"git_push": {"success": True}})
+        snap["production_sync"] = {"date": "2026-09-14", "outcome": "local_ahead", "ahead": 1, "behind": 0}
+        a, _ = self._alerts(tmp_path, snap)
+        hit = [x for x in a.alerts if "origin/main（local_ahead）" in x.message]
+        assert hit, [x.message for x in a.alerts]
+        assert "旧代码" not in hit[0].message and "不是旧代码" in hit[0].details["含义"]
 
     def test_missing_sync_result_is_not_silence(self, tmp_path):
         """编排器没调 production_sync.py（或日期对不上）⇒ 不知道跑的是哪版，要出声。"""
