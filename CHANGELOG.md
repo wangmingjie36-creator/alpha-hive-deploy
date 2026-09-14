@@ -5,7 +5,69 @@
 
 ---
 
-## [0.45.232] — 2026-09-14 — 占位（进行中：宏观条改自动横向滚动，移植 defi-hero worktree 的未提交 WIP）
+## [0.45.232] — 2026-09-14 — 宏观条改自动横向滚动：移植 08-30 的未提交 WIP，并修掉它在宽屏上右侧露白
+
+v0.45.226 对账时在 worktree `defi-hero-section-design-ca009b` 里发现一份 08-30 的未提交改动：
+把首页宏观条（VIX / 10Y / 收益率曲线 / 黄金 / 恐惧贪婪）改成无限横向滚动。用户确认要这个效果，本版移植进 main。
+
+### Added — 沿用 WIP 的设计
+
+- 条目放进 `.ah-macro-viewport`（`overflow:hidden`，左右 32px 渐隐遮罩）里的 `.ah-macro-track`，
+  `translateX(0 → -50%)` 线性无限循环；鼠标悬停暂停。
+- 副本 `aria-hidden="true"`，另加一个 `.sr-only` 列表给屏幕阅读器朗读一遍。
+- `prefers-reduced-motion`：隐藏全部副本，恢复手动横滑、去掉遮罩。全局 F15 规则只把动画缩到 0.01ms，
+  不隐藏副本的话用户会看到重复的指标。
+- 去掉 `.ah-macro` 的 `overflow-x:auto` 与 `.ah-macro-inner` 的 `min-width:560px`（滚动已由视口自己承担）。
+- WIP 里给预览加的 `.claude/launch.json` 配置**没有**移植。
+
+### Fixed — WIP 原样合入会出的两个问题
+
+**① 宽屏右侧露白（WIP 的缺陷）。** WIP 放 2 份条目、走 -50%。无缝的前提是**半程宽度 ≥ 可视区宽度**，
+WIP 在桌面上不满足。1440px 下用 `getBoundingClientRect` 实测：
+
+| | 可视区 | 一份条目 | 半程 | 滚动末尾右侧空白 |
+|---|---|---|---|---|
+| WIP（共 2 份，每半程 1 份） | 1215px | 506px | 506px | **最多 709px**，开头就空 203px；截图可见右半条是空的 |
+| 本版（每半程 4 份） | 1215px | 506px | 2025px | 0 |
+
+`.ah-macro-inner` 限宽 1360px，可视区最宽约 1215px，所以这个缺陷只在桌面出现，手机上看不出来。
+份数选 4 而不是刚好够的 3：五个值全是「—」时一份只有 429px，3 份只富余 73px，删一个指标就破。
+时长 36s → 80s，速度保持约 25px/s。
+
+**② 两份手抄副本会漂移。** WIP 在模板里把五个条目逐字写了两遍。v0.45.231 刚改过恐惧贪婪那一格
+（`fg_color` → `fg_cls`），照搬就得改两处。本版用 Jinja 宏 `macro_items(dup)` 只写一份，循环生成 8 份。
+
+⚠️ 宏的第一版带了个 `{{ extra_cls }}` 参数，全套里 `test_dashboard_contract::test_template_placeholders_have_render_kwargs`
+当场变红：它把模板里所有双花括号变量当成 renderer 必须传入的参数（防「未定义变量静默渲染为空」）。
+守卫是对的，没有改它；改成宏参数只在 `{% if %}` 里用——副本的 class 与 `aria-hidden` 本来就同进同出，
+合成一个 `dup` 开关。改后宏观条渲染结果与浏览器实测过的版本逐字节一致。
+
+### 验证
+
+真实渲染：同 v0.45.231 的离线预览法（2026-09-11 真实日报 JSON，零写入代码目录），在浏览器里实测：
+
+- **填满**：1920 / 1440 / 1024 / 768 / 375 五个宽度下半程均 ≥ 可视区；数值全替换成「—」、
+  字体换成系统等宽回退，两种情况也都覆盖。
+- **无缝**：动画 79.999s 时第 5 份的位置与 0s 时第 1 份相差 0.03px。
+- **悬停暂停**：不悬停时 1 秒内 `currentTime` 前进 1000ms，悬停时前进 0ms。
+  ⚠️ 测这个不能先用脚本调 `animation.pause()/play()`：按 Web Animations 规范，脚本接管播放控制后
+  CSS 的 `animation-play-state` 会被忽略，第一次就是这样测出了假的「悬停不暂停」。
+- **手机 + 深色主题**（375px，`html.dark`）：页面 `scrollWidth` = 375，无横向溢出；截图正常。
+- **减弱动效**（浏览器工具不能模拟该系统设置，改为把真实 CSS 里 `prefers-reduced-motion` 的规则体
+  无条件注入作代理）：可见 1 份、`overflow-x:auto` 可手动横滑、无遮罩、`transform:none`、末项无右边框。
+- **读屏**：sr-only 列表 5 项，与条目逐一对应；轨道内可聚焦元素 0 个。
+
+新增 `tests/test_dashboard_renderer.py` 两条：
+- `test_macro_marquee_structure`：份数偶数且每半程 ≥ 4、只有第一份不 `aria-hidden`、各份条目一致、朗读列表对得上；
+- `test_macro_marquee_reduced_motion_hides_copies`：降级规则里必须隐藏副本、恢复横滑。
+
+变异校验（改完即恢复，恢复后逐字节核对一致），6 个全部变红：
+每半程 1 份（原 WIP）/ 每半程 3 份 / 第二份不藏读屏 / 朗读列表漏一项 / 首份多出一个指标 / 降级时不藏副本。
+
+全套（含 v0.45.231，`--maxfail=1000`）：**4314 passed / 1 failed / 1 skipped / 82 deselected / 2 xfailed**（402s），
+唯一失败是按设计红的 `TestCoverageHorizon`。
+
+`index.html` 未手改：下一次日报扫描从模板重新生成并部署到 gh-pages 后，线上才会看到滚动效果。
 
 ## [0.45.231] — 2026-09-14 — 合入 v0.45.76 / v0.45.79：首页方向圆点终于看得见，宏观条颜色终于生效
 
@@ -50,7 +112,7 @@ v0.45.226 对账发现这两版 08-30 就写好了、从未并入 main，两个 
   - 收益率曲线「正常」、黄金「+0.6%」：`rgb(26, 18, 8)`（`--tp`）→ `rgb(29, 107, 58)`（`--bull`）。
   - 恐惧贪婪：内联 `#ffc107` → `fg-mid`，`rgb(146, 96, 26)`。
 - `ruff check dashboard_renderer.py` 通过；`test_dashboard_renderer` / `test_dashboard_dim_dq_missing` /
-  `test_phantom_date_guard` 57 passed。全套结果见 v0.45.232（两版一起跑）。
+  `test_phantom_date_guard` 57 passed。全套与 v0.45.232 一起跑：4314 passed，唯一失败是按设计红的 `TestCoverageHorizon`。
 - `index.html` 未手改：它由下一次日报扫描从模板重新生成并部署。
 
 ## [0.45.230] — 2026-09-14 — 占位（进行中：修 v0.45.224 找到的三处生产根因——weekly_optimizer 往 sys.path 插主 checkout / deep_analysis 导入期 chdir / cboe_fetcher 缓存默认相对路径）
@@ -100,7 +162,8 @@ v0.45.226 对账发现这两版 08-30 就写好了、从未并入 main，两个 
 
 ⚠️ 标「仅本地」的两条只存在于这台 Mac 的 `.git` 里，删分支就没了。
 
-> 后续（2026-09-14）：两个「仅本地」分支已推到 origin 备份；0.45.76 / 0.45.79 已由 v0.45.231 合入 main。
+> 后续（2026-09-14）：两个「仅本地」分支已推到 origin 备份；0.45.76 / 0.45.79 已由 v0.45.231 合入 main；
+> 下文「未提交的一处」（宏观条自动滚动）已由 v0.45.232 移植进 main。
 
 **main 上的实况**（本版逐项核验）。静态部分看 `origin/main`；渲染部分把 `index.html`
 （`1826d3e` 日报产物）用本地 http.server 打开，拿 `getComputedStyle` 实测：

@@ -100,10 +100,12 @@
 </div>
 
 <!-- ── MACRO BAR ── -->
-<div class="ah-macro">
-  <div class="ah-macro-inner">
-    <span class="ah-macro-lbl">MACRO</span>
-    <div class="ah-macro-items">
+{#- 宏观条条目只在这里写一份。自动滚动需要两份首尾相接，两份都从这个宏生成，
+    改指标时只改这里，不会出现「第一份改了、副本忘了」。 -#}
+{#- 宏参数只在 {% %} 里用、不写成双花括号输出：tests/test_dashboard_contract.py 会把模板里所有
+    双花括号变量当成必须由 renderer 传入的参数。副本的 class 与 aria-hidden 本来就同进同出，合成一个 dup。 -#}
+{%- macro macro_items(dup=False) -%}
+    <div class="ah-macro-items{% if dup %} ah-macro-items--dup{% endif %}"{% if dup %} aria-hidden="true"{% endif %}>
       <div class="ah-macro-item">
         <div class="ah-macro-name">VIX</div>
         <div style="display:flex;align-items:baseline;">
@@ -128,13 +130,37 @@
           <span class="ah-macro-val {{ macro_gld_cls }}">{{ macro_gld }}</span>
         </div>
       </div>
-      <div class="ah-macro-item" style="border-right:none;margin-right:0;padding-right:0;">
+      <div class="ah-macro-item">
         <div class="ah-macro-name">恐惧贪婪</div>
         <div style="display:flex;align-items:baseline;gap:4px;">
           <span class="ah-macro-val {{ fg_cls }}">{{ fg_str }}</span>
         </div>
       </div>
     </div>
+{%- endmacro %}
+<div class="ah-macro">
+  <div class="ah-macro-inner">
+    <span class="ah-macro-lbl">MACRO</span>
+    <div class="ah-macro-viewport">
+      {#- 8 份 = 两个「半程」× 每半程 4 份。动画走 translateX(-50%) 即一个半程，
+          无缝的前提是**半程宽度 ≥ 可视区宽度**，否则滚到后段右侧会露出空白。
+          .ah-macro-inner 限宽 1360px ⇒ 可视区最宽约 1215px。v0.45.232 实测一份条目：
+          正常数值 506px，五个值全是「—」时 429px。原 WIP 共 2 份（每半程 1 份），在 1440px 下右侧最多空 709px；
+          3 份在全「—」时只富余 73px，删一个指标就破，故取 4 份。改份数要同步改 CSS 的动画时长。
+          副本屏幕阅读器不读，靠下面的 sr-only 列表朗读。 -#}
+      <div class="ah-macro-track">
+        {%- for i in range(8) %}
+        {{ macro_items(dup=(i > 0)) }}
+        {%- endfor %}
+      </div>
+    </div>
+    <ul class="sr-only ah-macro-sr-list">
+      <li>VIX {{ macro_vix }}</li>
+      <li>10Y 利率 {{ macro_10y }}</li>
+      <li>收益率曲线 {{ macro_yc }}</li>
+      <li>黄金 {{ macro_gld }}</li>
+      <li>恐惧贪婪指数 {{ fg_str }}</li>
+    </ul>
   </div>
   {{ macro_sector_html }}
 </div>

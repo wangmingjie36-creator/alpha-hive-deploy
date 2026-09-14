@@ -669,22 +669,39 @@ html:not(.dark) .hm-tk{background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.06)}
 /* Google Fonts loaded in <head> */
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500&display=swap');
 
-/* Macro bar */
-.ah-macro{border-bottom:0.5px solid var(--border);overflow-x:auto}
+/* Macro bar — 无限横向滚动：.ah-macro-track 内 8 份 .ah-macro-items 首尾相接（模板里用宏生成），
+   translateX(-50%) 走完半程（4 份）即无缝回到起点。半程必须 ≥ 可视区宽度，份数的理由见 dashboard.html。
+   速度：半程约 2025px / 80s ≈ 25px/s；改份数要同步改时长 */
+.ah-macro{border-bottom:0.5px solid var(--border)}
 .ah-macro-inner{max-width:1360px;margin:0 auto;padding:0 40px;
-  display:flex;align-items:center;min-width:560px}
+  display:flex;align-items:center}
 .ah-macro-lbl{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--border);
   letter-spacing:2px;margin-right:28px;flex-shrink:0}
-.ah-macro-items{display:flex;align-items:center;gap:0;flex:1}
+.ah-macro-viewport{flex:1;min-width:0;overflow:hidden;
+  -webkit-mask-image:linear-gradient(90deg,transparent,#000 32px,#000 calc(100% - 32px),transparent);
+  mask-image:linear-gradient(90deg,transparent,#000 32px,#000 calc(100% - 32px),transparent)}
+.ah-macro-track{display:flex;width:max-content;animation:ah-macro-scroll 80s linear infinite}
+.ah-macro:hover .ah-macro-track{animation-play-state:paused}
+@keyframes ah-macro-scroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.ah-macro-items{display:flex;align-items:center;flex-shrink:0}
 .ah-macro-item{padding:14px 28px 14px 0;border-right:0.5px solid var(--border);
   margin-right:28px;flex-shrink:0}
-.ah-macro-item:last-child{border-right:none;margin-right:0;padding-right:0}
 .ah-macro-name{font-size:9px;color:var(--tm);margin-bottom:3px}
 .ah-macro-val{font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;
   color:var(--tp);line-height:1}
 .ah-macro-delta{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--tm);margin-left:6px}
 .ah-macro-delta.up{color:var(--bull)}.ah-macro-delta.dn{color:var(--bear)}
 .ah-macro-note{font-size:9px;color:var(--tm);margin-left:4px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* 动效降级：与全局 F15 规则叠加——这里额外恢复手动横滑 + 隐藏副本，
+   保证减弱动效的用户看到的还是「一份完整数据、可滑动」，而不是卡在循环中间的半份内容 */
+@media(prefers-reduced-motion:reduce){
+  .ah-macro-viewport{overflow-x:auto;-webkit-mask-image:none;mask-image:none}
+  .ah-macro-items--dup{display:none}
+  .ah-macro-items:not(.ah-macro-items--dup) .ah-macro-item:last-child{
+    border-right:none;margin-right:0;padding-right:0}
+}
 
 /* Section header */
 .ah-sec-hdr{display:flex;align-items:baseline;gap:16px;margin-bottom:8px}
