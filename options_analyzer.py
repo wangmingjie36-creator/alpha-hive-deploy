@@ -1510,10 +1510,15 @@ def _snapshot_session(ts: datetime) -> Tuple[str, bool]:
 
 
 def _session_close(session: str) -> datetime:
-    """会话收盘时刻（16:00 ET）。⚠️ 不认半日市：13:00 收盘的日子里 13:00–16:00
-    写的快照会被误记为「收盘前」——观测计数可能偏多，不会偏少。"""
+    """会话收盘时刻（ET）。提前收盘日 13:00，走 v0.45.234 的 `is_trading_day.session_close_et`；
+    该函数不可得时退回 16:00——半日市里 13:00–16:00 写的快照会被多记成「收盘前」，只会偏多不会偏少。"""
     d = datetime.strptime(session, "%Y-%m-%d")
-    return d.replace(hour=16, tzinfo=_et_zone())
+    try:
+        from is_trading_day import session_close_et
+        t = session_close_et(d.date())
+        return d.replace(hour=t.hour, minute=t.minute, tzinfo=_et_zone())
+    except Exception:  # noqa: BLE001 - 观测用，退回 16:00 的方向是保守的
+        return d.replace(hour=16, tzinfo=_et_zone())
 
 
 def _parse_snapshot_ts(raw) -> Optional[datetime]:

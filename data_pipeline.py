@@ -132,6 +132,12 @@ class StockData:
     momentum_source: str = "none"
     fetch_timestamp: float = 0.0
     is_market_hours: bool = False
+    # v0.45.234：price 取的是哪个字段（目前只有 CBOE 源填，见 cboe_options.official_price）。
+    # 进 to_dict —— 「这个入场价是不是官方收盘」得让下游看得见，不能只在日志里。
+    price_source: str = ""
+    # v0.45.234：此源拿到了数，但**不该优先采用**（CBOE 盘中陈旧价）。
+    # MultiSourceFetcher 先试后面的源，全失败才退回用它。不进 to_dict（内部调度用）。
+    defer: bool = False
 
     def to_dict(self) -> Dict:
         return {
@@ -145,6 +151,7 @@ class StockData:
             "momentum_source": self.momentum_source,
             "fetch_timestamp": self.fetch_timestamp,
             "is_market_hours": self.is_market_hours,
+            "price_source": self.price_source,
         }
 
 
@@ -520,16 +527,35 @@ class CBOESource:
             # v0.45.46：按交易时段选字段。旧写法 `current_price or close` 在
             # 收盘后拿到的是**盘后价**——全部定时扫描都在 17:00 ET 跑。
             # 实测 CRM 2026-08-26（财报日）盘后 232.32 vs 官方收盘 205.62。
-            from cboe_options import official_price
+            from cboe_options import official_price, STALE_INTRADAY_SOURCE
             price, _px_src = official_price(payload)
             if price <= 0:
                 self.breaker.record_failure("zero_price")
                 return None
 
+            # v0.45.234：收盘后拿到的是盘中生成的 payload（CDN 没刷新）——
+            # close 是那一刻的成交价，当入场价会错 ~1%（T 09-11 +0.63%、TMUS 09-10 −1.12%）。
+            # 交给后面的源取官方收盘；全失败时 MultiSourceFetcher 才退回用它。
+            # ⚠️ **不记熔断失败**：CBOE 应答正常，只是这只票的文件旧。记了的话
+            # 一天 3~8 只里连撞 3 只就会熔断，把其余健康标的一起推去挤 yfinance 限流。
+            # 也**不拉**历史K线：多半用不上，白耗一次 yfinance 配额。
+            if _px_src == STALE_INTRADAY_SOURCE:
+                self.breaker.record_success()
+                return StockData(
+                    price=price,
+                    data_source=DataQuality.DEGRADED,
+                    source_name=self.name,
+                    price_source=_px_src,
+                    momentum_source="unavailable",
+                    fetch_timestamp=time.time(),
+                    defer=True,
+                )
+
             data = StockData(
                 price=price,
                 data_source=DataQuality.REAL,
                 source_name=self.name,
+                price_source=_px_src,
                 fetch_timestamp=time.time(),
             )
             # P0-2: 历史指标独立获取；失败时 momentum 置 None（不再 1 日近似）
@@ -588,6 +614,7 @@ class YFinanceSource:
                 fetch_timestamp=time.time(),
             )
             data.price = float(hist["Close"].iloc[-1])
+            data.price_source = "yfinance_daily_close"
 
             if len(hist) >= 5:
                 data.momentum_5d = (hist["Close"].iloc[-1] / hist["Close"].iloc[-5] - 1) * 100
@@ -783,8 +810,12 @@ class MultiSourceFetcher:
                 return cached.to_dict()
 
         # 2. 尝试降级链
+        deferred: Optional[StockData] = None
         for source in self._sources:
             data = source.fetch(ticker)
+            if data and data.price > 0 and data.defer:
+                deferred = deferred or data
+                continue
             if data and data.price > 0:
                 self._set_cache(ticker, data)
                 with self._lock:
@@ -808,6 +839,18 @@ class MultiSourceFetcher:
                     ticker, stale_age, cached.source_name
                 )
                 return cached.to_dict()
+
+        # 3.5 (v0.45.234) 被推迟的数（CBOE 盘中陈旧价）：比 price=0 让整只标的跳过强，
+        # 但必须带着 degraded + price_source 标签出去，不能冒充官方收盘。
+        if deferred is not None:
+            self._set_cache(ticker, deferred)
+            with self._lock:
+                self._fetch_stats[deferred.data_source] += 1
+            _log.warning(
+                "[DataPipeline] %s 其余源全部失败，退用 %s 的 %s 价 %.4f（非官方收盘）",
+                ticker, deferred.source_name, deferred.price_source, deferred.price
+            )
+            return deferred.to_dict()
 
         # 4. 最后防线：安全默认值（明确标记为 fallback）
         with self._lock:

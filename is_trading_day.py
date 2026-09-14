@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 
 
 def _easter(year: int) -> date:
@@ -112,6 +112,31 @@ def us_market_holidays(year: int) -> dict[date, str]:
     holidays[_observed(date(year, 12, 25))] = "圣诞节 Christmas"
 
     return holidays
+
+
+def session_close_et(d: date) -> time:
+    """该交易日的常规时段收盘时刻（美东，朴素 `time`）：平日 16:00，提前收盘日 13:00。
+
+    v0.45.234 为 `cboe_options.official_price` 判「这份 payload 是不是在收盘前生成的」
+    而加 —— 判据是 `last_trade_time` 离收盘多远，那就必须知道收盘是几点。
+    不知道提前收盘日的后果：那天每份新鲜 payload 都会被判成盘中陈旧，价格退到
+    yfinance（值仍是对的，只是来源白白降一级 + 标签撒谎）。
+
+    NYSE 提前收盘（13:00 ET）是**按规则**而非按表（与上面 `us_market_holidays` 同法，
+    不会像硬编码日历那样过期）：
+      · 感恩节次日（11 月第 4 个周四 + 1）
+      · 12/24，当它是交易日时（落周五那年是圣诞节的 observed 休市日，不是交易日）
+      · 7/3，当 7/4 落周二~周五时（7/4 落周六则 7/3 本身休市；落周日/周一不提前收）
+    非交易日也返回 16:00 —— 本函数只回答「几点收」，不回答「开不开」。
+    """
+    early = time(13, 0)
+    if d == _nth_weekday(d.year, 11, 3, 4) + timedelta(days=1):
+        return early
+    if d.month == 12 and d.day == 24 and is_trading_day(d)[0]:
+        return early
+    if d.month == 7 and d.day == 3 and date(d.year, 7, 4).weekday() in (1, 2, 3, 4):
+        return early
+    return time(16, 0)
 
 
 def is_trading_day(d: date | None = None) -> tuple[bool, str]:

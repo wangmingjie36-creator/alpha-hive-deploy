@@ -83,7 +83,8 @@ class TestCounters:
     def test_counters_pick_up_real_stats_dicts(self):
         c = st.counters()
         assert set(c["twelve_data"]) >= {"hits", "misses", "fetches"}
-        assert set(c["cboe"]) == {"hits", "fetches", "stale", "failed", "evicted"}
+        assert set(c["cboe"]) == {"hits", "fetches", "stale", "failed", "evicted",
+                                  "price_stale_intraday", "price_unverifiable"}
         # v0.45.190：链构造观测是独立一项，不掺进 payload 计数（两者语义不同：
         # 前者数「构出来的链挡掉了多少近月」，后者数「发了几次 HTTP」）。
         assert set(c["cboe_chain"]) == {"chains", "min_cal_dte_max", "near_excluded",
@@ -119,7 +120,8 @@ class TestCboePayloadStats:
                             self._fake_urlopen({"options": [{"option": "X"}], "current_price": 1.0}))
         assert cb._fetch_cboe_payload("ZZZ", 5) is not None
         assert cb._fetch_cboe_payload("ZZZ", 5) is not None   # TTL 内 → 命中
-        assert cb.payload_stats() == {"hits": 1, "fetches": 1, "stale": 0, "failed": 0, "evicted": 0}
+        assert cb.payload_stats() == {"hits": 1, "fetches": 1, "stale": 0, "failed": 0, "evicted": 0,
+                                      "price_stale_intraday": 0, "price_unverifiable": 0}
 
     def test_empty_chain_counts_failed(self, cb, monkeypatch):
         monkeypatch.setattr(cb.urllib.request, "urlopen",

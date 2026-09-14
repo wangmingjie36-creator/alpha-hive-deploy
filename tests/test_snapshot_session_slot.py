@@ -190,6 +190,11 @@ class TestFrozenBeforeCloseIsVisible:
         assert _hit(agent)
         assert oa.snapshot_slot_stats()["hits_before_close"] == 1
 
+    def test_early_close_day_uses_13_00(self):
+        """感恩节次日 13:00 ET 收盘：13:30 ET 冻结的快照是完整会话，不该被记成盘中。"""
+        assert oa._session_close("2026-11-27") == datetime(2026, 11, 27, 13, 0, tzinfo=ET)
+        assert oa._session_close("2026-09-03") == datetime(2026, 9, 3, 16, 0, tzinfo=ET)
+
     def test_intraday_hit_while_still_intraday_is_not_counted(self, agent, monkeypatch, tmp_path):
         """此刻也在盘中 ⇒ 没有更完整的数据可拿，不算事故。"""
         _write(tmp_path, "NVDA", "2026-09-03",
