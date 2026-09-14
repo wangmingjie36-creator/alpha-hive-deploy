@@ -5,7 +5,93 @@
 
 ---
 
-## [0.45.239] — 2026-09-14 — 占位（进行中：hive_logger 在 import 时把文件 handler 绑到真实 logs/，测试日志写穿生产日志——修 + conftest 指纹守卫）
+## [0.45.239] — 2026-09-14 — 测试日志写穿 checkout 的真实日志：hive_logger 的文件 handler 在 import 时存死路径——改为每条记录按 `PATHS` 求值 + conftest 三道观测
+
+**机制**（auto-memory `alpha-hive-test-writes-production.md` v0.45.230 节末记为「未修、同物种」）：
+`hive_logger` 模块级 `logger = _setup_logger()`，裸 `RotatingFileHandler` 在 `__init__` 里把
+`baseFilename` 存死。pytest 收集期 import 早于 `conftest._isolate_env` 的 setenv ⇒
+全套测试日志冻进 `hive_logger.py` 所在 checkout 的 `logs/alpha_hive.log` 与
+`alpha_hive_structured.jsonl`；在主 checkout 起 pytest 就混进生产日志。
+
+**实测**（修前，本 worktree）：
+- `tests/test_zero_weight_invariant.py` 32 条 ⇒ `logs/alpha_hive.log` 0 → 1525 B，结构化 jsonl 0 → 2076 B，
+  尾部是合成标的 `[AAA] 政体层保零违反` ERROR 与一条**假的**「权重不变式违反」ERROR——
+  拿这两句 grep 生产日志排查的人会被误导。
+- 本 session 占号提交时，**pre-commit 钩子**（`changelog_guard.py` 跑一个 CHANGELOG 测试文件）
+  07:24:12 触发、07:24:14 在全新 worktree 里建出两个空日志文件：任何一次 pytest 调用都中招，不止全套。
+- `--collect-only` 全套：写入 0 B（logger 级别 INFO，收集期无 INFO+ 日志）⇒ 写入发生在测试体里，不在 import 本身。
+- v0.45.237 独立旁证：adoring-sanderson worktree 全套后 `logs/alpha_hive.log` 2.5 MB、mtime 落在跑测窗口内。
+
+**为什么结构守卫没抓到**：`PATHS.logs_dir` 本身是调用时求值的；冻住它的是**持有路径的对象**。
+`test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread` 只扫模块级 `Assign` 右侧含 `PATHS.`，
+而这里模块级只有一个函数调用。一次性普查「模块级调用同模块函数、函数体含 `PATHS.`/`__file__`/FileHandler」：
+4 处——本处；`paper_portfolio.py:85-86` `STATE_DIR = _base_dir() / …`（同一盲区，但已被
+`_isolate_paper_portfolio_state` 的内容指纹罩住）；`scheduler.py:26` 在 import 时 `basicConfig` 挂根
+`FileHandler`（pytest 下 root 已有 pytest 的 handler ⇒ `basicConfig` 空操作，两个 checkout 均无 `scheduler.log`）。
+
+### Fixed
+- `hive_logger.py`：新增 `LogsDirRotatingFileHandler`——文件名固定，目录在 `emit` 时经
+  `PATHS.logs_dir_unmade()` 求值，变了就关旧流、重指 `baseFilename`（旋转随之发生在新目录）；
+  `_open` 时才建目录；构造强制 `delay=True`。`Handler.handle` 持锁调 `emit` ⇒ 重指不与其他线程交错。
+  - **生产语义不变**：扫描进程 env 不中途变，落点恒为 `<ALPHA_HIVE_HOME 缺省=本 checkout>/logs/<leaf>`，从不重指。
+    读这两个文件的只有人工排查与审计脚本（`scan_coverage_gate` 读的是 `~/.claude/logs/orchestrator-*.log`，
+    即控制台 stderr，不受影响）。唯一可见差异：import 不再建 `logs/` 与空日志文件，第一条记录时才建
+    （`logs/` 有被跟踪的文件，任何 checkout 里本就存在）。
+  - 原先两段 `try/except OSError → debug` 删掉：延迟打开后构造不碰文件系统，它们不可达；
+    打不开文件改在 `emit` 里经 `Handler.handleError` 打到 stderr（编排器日志看得见），不再在 import 时被吞。
+- `_HivePaths.logs_dir_unmade()`：`logs_dir` 的解析逻辑抽出来（不建目录），`logs_dir` 改为调它再 mkdir——解析只写一份。
+
+### Added
+- `tests/conftest.py`「hive_logger 文件日志隔离」节，四层，**缺一层就有一种失败没人红**：
+  - ⓪ `pytest_configure`（trylast）：会话级 `ALPHA_HIVE_LOGS_DIR` 缺省指向 basetemp 下 `hive_logs_outside_tests`，
+    接住测试**之外**的日志（teardown 后才落的后台线程、module/session fixture、atexit）。刻意不在结束时还原：
+    atexit 在 `pytest_unconfigure` 之后跑。
+  - ① 每条测试 setup **正面核对** handler 此刻落点（优先 `current_target()`，没有就按 `baseFilename`）在本条
+    `tmp_path` 内；另断言文件 handler 非空、文件名 ⊆ 被盯清单（生产加/改名日志文件时清单不许静默过期）。
+    **⚠️ 这一道是 ⓪ 的代价**：⓪ 会把一个冻住的 handler 也接住（冻在会话目录），②③ 于是恒绿——
+    ⓪ 在、生产修复被改回时，只有 ① 红。
+  - ② 每条测试 teardown 比对真身 `(size, mtime_ns)`（复用 `_artifact_signature`）：盯
+    `{仓库根, hive_logger.__file__ 所在目录, 调用目录}/logs/` 下两个文件名，兜 ① 管不到的绕过（测试自己 delenv、
+    subprocess 现造 env），红在具体那条测试上。
+  - ③ 会话级：快照在 **conftest import 时**取（早于收集），会话结束比对，兜测试之间的写入。
+  - 只盯两个文件名、不盯整个 `logs/`：同目录别有写入者，全目录默认拒绝属数据根迁移阶段 0.3（v0.45.233）。
+- `tests/test_hive_logger_not_frozen.py`（8 条）：进程内落点进本条沙箱；重指后旋转发生在新目录；
+  **新解释器**里「先 import 后改 env」两次重指各落各处、import 本身零文件写入、无 env 时落点仍是本 checkout 的 `logs/`
+  （不经 conftest 任何隔离——⓪ 接住了问题这里照样红）；① 判据验牙（冻住的 handler 被报出、`baseFilename` 过期但
+  resolver 在沙箱内不误报、真实 handler 为空集）。
+
+### 自证
+
+**修后同一批 32 条**（`test_zero_weight_invariant.py` + 新文件 8 条）：40 passed，worktree 两个日志 `(size, mtime)` 前后逐字相同。
+
+**全套**（均无 env 覆盖，前后记 worktree 与主 checkout 两份日志的 size/mtime）：
+- 仓库根起跑：1 failed（`TestCoverageHorizon`，设计即红）/ 4393 passed / 1 skipped / 2 xfailed，7m36s；
+  两个 checkout 的两份日志均未变；⓪ 的会话目录跑完为空（本轮无测试之外的日志，⓪ 目前是纯防御）。
+- 空目录起跑：同上 1 failed（设计即红）/ 4393 passed / 1 skipped / 2 xfailed，6m37s；四份日志与空目录自身均未变（空目录跑完仍为空），⓪ 会话目录为空。
+
+**变异矩阵**（每条真跑，跑后 sha 核对三文件逐字还原）：
+
+| 变异 | ① setup 核对 | ② 逐条指纹 | ③ 会话指纹 | checkout 日志 |
+|---|---|---|---|---|
+| M1 生产修复改回（`git show HEAD:hive_logger.py`） | **红 40/40**，落点 = `hive_logs_outside_tests` | 走不到 | 走不到 | 未变（⓪ 接住） |
+| M1b 同上 + 关 ① | 关 | 绿 | 绿 | 未变；**新测试文件 7/8 红**（唯一绿的是不依赖修复的验牙条） |
+| M2 同上 + 去 ⓪（= 原 bug 只剩指纹闸） | 关 | **红：恰是打日志的 7 条** | **红** | +1525 B |
+| M3 修复在，测试自己 delenv 后打日志 | 绿 | **红在那一条** | 红 | +78 B |
+| M4a 修复在，module fixture 打日志 | 绿 | 绿 | 绿 | 未变（⓪ 接住） |
+| M4b 同上 + 去 ⓪ | 绿 | 绿 | **红** | +75 B |
+
+每一层恰好接住它负责的那类失败；M1 与 M4a 两行说明了为什么 ⓪ 必须配 ①。
+
+**顺带实测：生产日志已被污染**（主 checkout，只读统计）：`logs/alpha_hive.log` 含 `[AAA]` 256 行、
+`政体层保零违反` 16 条、`权重不变式违反` 10 条；后者 10 条逐条看邻行**全部**紧挨 `[AAA]`/`CCC 仅` 夹具输出
+（夹具复用了 09-09 生产真实权重 0.2059/0.1982，单看数字分不开）；`.1` 另有 `[AAA]` 38 行。
+日志行只有 `HH:MM:SS` 无日期 ⇒ **v0.45.239 之前这份日志不能用来 grep 不变式告警**；
+v0.45.176 观测点有没有在生产响过，看按日期分文件的 `~/.claude/logs/orchestrator-<date>.log`。未清理（生产日志，由用户决定）。
+
+**开销**：每条记录 +约 26 µs（全套并发时测）；生产日志约 2.8k 行/天 ⇒ 每天 <0.2 s。
+
+**未做 / 留给后续**：结构守卫（AST 扫描）仍看不见「模块级调用、函数体里求值 `PATHS`」这一族——已提后续任务，
+本版靠行为测试 + ①②③ 兜。
 
 ## [0.45.238] — 2026-09-14 — 占位（进行中：期权快照槽按 PDT 墙钟日期分，跨午夜扫描把前一交易日数据写进次日槽——改按会话日期 + 观测点 + 历史普查）
 
