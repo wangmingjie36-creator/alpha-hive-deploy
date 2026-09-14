@@ -340,6 +340,15 @@ _COHORT_HISTORY = [
      "被拿掉的看多跑赢 SPY 55.2%/60.9%，同日全池基准 53.7%/54.5%，匹配抽样 p≈0.13（事后加的对照）。 "
      "**与 v0.45.212 共用 2026-09-13 标签、不新开分区**：该边界之后到本版落地 predictions 0 条、"
      "无扫描进程 ⇒ **作废 0 条**。"),
+    ("2026-09-13", "v0.45.235",
+     "GuardBeeSentinel 退出 `PheromoneBoard.detect_resonance`（`RESONANCE_EXCLUDED_AGENTS`）。"
+     "共振要「多源独立印证」，Guard 的方向是其余六只多数的复述，复述时给同向方凭空多一个 `risk_adj` 维度"
+     "并抬高 consistency ⇒ Queen 的 `confidence_boost` → `rule_score` → 惩罚 → 冲突折扣 → `final_score` 口径变。"
+     "方向不变（共振不进计票）。逐位重放 681 份 JSON：新代码 ≡ 评估变体（两语料 681/681），"
+     "分数改变 36.4% / 11.3%（中位 −0.32 / −0.30）；final_score 逐日 IC 变化 p 0.89 / 0.77，"
+     "现行规则下纸面组合入场 0 变化 ⇒ **对收益无可测影响，只是在抬分数**。"
+     "Guard 读同伴的普查视图 `get_live_signals` 未动；BearBee 在看空共振里的计入未动（另一个设计决定）。 "
+     "**与 v0.45.212 / v0.45.228 共用 2026-09-13 标签**：该边界之后到本版落地 predictions 0 条、无扫描进程 ⇒ **作废 0 条**。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）

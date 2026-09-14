@@ -163,7 +163,9 @@ def test_resonance_does_not_fabricate_unanimity(board):
     _flood(board)
     res = board.detect_resonance("TEST")
     assert res["consistency"] < 1.0, "板上只剩同向条目就报「完全一致」＝伪造一致"
-    assert res["consistency"] == pytest.approx(5 / 8, abs=0.001)
+    # v0.45.235 前是 5/8：ROUND 里的 GuardBeeSentinel（看多）曾计入分母。它自此不进共振
+    # （复述票不是独立来源，见 PheromoneBoard.RESONANCE_EXCLUDED_AGENTS），8 只里剩 7 只。
+    assert res["consistency"] == pytest.approx(5 / 7, abs=0.001)
 
 
 def test_resonance_identical_under_any_max_entries(monkeypatch, board):
