@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.241] — 2026-09-14 — 占位（进行中：cboe_fetcher 的 P/C、SKEW、VVIX 改走 CBOE CDN——云端够不到 yfinance，三项 12/12 天兜底）
+
 ## [0.45.240] — 2026-09-14 — 占位（进行中：二次检查 v0.45.237 的改动）
 
 ## [0.45.239] — 2026-09-14 — 占位（进行中：hive_logger 在 import 时把文件 handler 绑到真实 logs/，测试日志写穿生产日志——修 + conftest 指纹守卫）
@@ -109,6 +111,19 @@ worktree 的 index.lock，零次出现 ⇒ 当下没有会与 1s 重试相位对
   那是它迟早要推的东西、不会以「日报」的名义混进提交，危害比本条小；没量过发生频率。
 - 别的 session 暂存的是**白名单内**的产物（如手改 index.html）时，仍会随日报提交——那本来就是日报产物。
 
+### 落地后二次检查（用户要求，未改代码）
+
+- 落地代码与测过的逐字节相同；生产已于 07:22 被别的 session 快进到含本版的提交。
+- **提交名单按 pathspec 解释**（glob / `:` 魔法）的顾虑：生产 3180 个跟踪 + 未跟踪文件名里含 `[ * ? ^ ! \\` 或以 `:` 开头的
+  **0 个**（`ls-files -z` 真字节；先前不带 `-z` 的一次把中文名的八进制转义误当成反斜杠，已作废）⇒ 仅理论风险，未加 `:(literal)`。
+- 参数长度：生产历史上最大的日报提交 161 个文件（约 8KB 名字），`ARG_MAX` 1MB。
+- **顺带堵上的一处（真 git 实测）**：别的 session 在生产里解决了合并冲突、还没提交（`MERGE_HEAD` 在）时部署——
+  旧的裸 `git commit` **替它把合并提交成了「日报」**（两个父提交、`MERGE_HEAD` 被消费）；本版 `commit -- <名字>` 报
+  `fatal: cannot do a partial commit during a merge.`、合并状态原样保留、原因进 `git_commit.reason` ⇒ P1 告警原因栏如实。
+- 已知小瑕疵（v0.45.227 的规则，非本版引入，未修）：我们 add 之后、提交之前若恰有别的 session 跑裸 `git commit`，
+  日报产物会进它的提交；我们这边「nothing to commit」+ `pending_artifacts>0` ⇒ 告警标题说「产物留在工作区，未进 git」，
+  而实际 `left_artifacts=0`（它们在 git 里，只是挂在别人的提交上）。窗口是几十毫秒。
+
 ## [0.45.235] — 2026-09-14 — 共振只数独立来源：GuardBee 复述多数时凭空多出的那个维度，对收益无可测影响，只是在抬分数
 
 v0.45.212 让 Guard 退出方向计票时登记了另一条复述通道「未测未动」：Queen 的 `detect_resonance`
@@ -177,7 +192,43 @@ R0 下 `final_score` 对 T+7 超额收益的逐日横截面 IC **−0.11**（周
 该边界之后到本版落地 predictions 0 条、无扫描进程 ⇒ 作废 **0** 条。
 ---
 
-## [0.45.234] — 2026-09-14 — 占位（进行中：期权快照 _snapshot_stock_price 与官方收盘价不符——溯源调用方 + 频率普查 + 观测点）
+## [0.45.234] — 2026-09-14 — 收盘后拿到「盘中生成」的 CBOE 文件：`close` 是中午的成交价，被当官方收盘写进快照与入场价
+
+**起因**：v0.45.229（Max Pain 预测力检验）发现 `_snapshot_stock_price` 在 v0.45.46 修掉盘后价之后，每天仍有 2~3/30 只 ≠ 官方收盘，且 `quote_set.underlying_price_source` 标着 `cboe_close`。
+
+**溯源**：快照价 ← OracleBee `_get_stock_data` ← `data_pipeline.CBOESource` ← `cboe_options.official_price(payload)`。同一快照里 `quote_set` 自己调 `official_price` 拿到的也是同一个数，说明**17:31 ET 时 CBOE payload 的 `close` 字段本身就是 26.225**。用 yfinance 1m K 线定位这些价最后一次成交的时刻：
+
+| 标的 | 日期 | 快照价 | 官方收盘 | 该价最后成交 |
+|---|---|---|---|---|
+| T | 09-11 | 26.225 | 26.06 | **12:10 ET** |
+| TMUS | 09-10 | 175.18 | 177.16 | **12:07 ET** |
+| ABBV | 09-10 | 252.45 | 255.00 | 14:00 ET |
+| VKTX | 09-11 | 32.3441 | 31.98 | 14:36 ET |
+| DE / CVX | 09-10 | 676.31 / 213.18 | 677.94 / 212.76 | 15:31 / 15:50 ET |
+
+⇒ CDN 对这些符号发的是**当天盘中生成**、之后没刷新的文件（09-14 实拉时 VKTX/TMUS 的顶层 `timestamp` 也落后近 2 小时），盘中文件的 `close` 就是那一刻的成交价（四位小数 = 盘中 sub-penny 成交）。先后排除了「收盘前最后一笔」与「盘后成交」两个假设（15:55–16:00 与 16:00–20:00 的 1m K 线里都没有这些价）。
+两道旧防线粒度都差一级：v0.45.39 vintage 只比**日期**，v0.45.46 只看**本机钟**判收盘 ⇒ 同日盘中陈旧文件两道全放行。
+
+**频率**（下午 14:xx 快照，对照 yfinance 日线收盘）：08-27~09-11 共 185 份，149 份逐分相符，**33 份偏离 >0.05%、12 份 >0.5%**（最大 1.25%），集中在 ABBV/TMUS/T/TMO/BILI/CVX/DE。`pheromone.db.price_at_predict` 同源同值（T 09-11 = 26.225、TMUS 09-10 = 175.18），这些行的 T+7 收益起点带同样偏差。
+
+### Fixed
+- `cboe_options.official_price`：该场已收盘而 payload 的 `last_trade_time` 离收盘 >60s ⇒ 返回 `(close, "cboe_stale_intraday")`。价格照返回（链内 ATM 选择 / 报价集要的是与**同一份链**同一时刻的价），标签如实。判据来自 09-14 盘前实拉 30/30 只：已收盘场次的 `last_trade_time` 全在 15:59:56~16:00:00。`last_trade_time` 缺失判不了 → 仍 `cboe_close`（fail-open，同 vintage）但计数。
+- `data_pipeline.CBOESource`：认 `cboe_stale_intraday` 拒收 → `StockData(defer=True)`，`MultiSourceFetcher` 先试后续源（yfinance 日线收盘），全失败才退用它并带 `degraded` + 标签出去。**不记熔断失败**（一天 3~8 只连撞 3 只就会熔断，把健康标的一起推去挤 yfinance），**不拉**历史K线（白耗配额）。
+
+### Added
+- `is_trading_day.session_close_et(d)`：按规则判提前收盘日（感恩节次日 / 交易日的 12-24 / 7-4 落周二~五时的 7-3 → 13:00），否则 16:00。不认得半日市的后果是那天每份新鲜 payload 都被误判陈旧。
+- 观测点：`payload_stats()` 新增 `price_stale_intraday` / `price_unverifiable`（按标的去重），经 `scan_timing` 进 `status.json`；首次检出打 WARNING。`StockData.to_dict()` 新增 `price_source`（`cboe_close` / `cboe_intraday` / `cboe_stale_intraday` / `yfinance_daily_close` / 空），入场价是不是官方收盘下游看得见。
+- `tests/test_cboe_stale_intraday_price.py`（33 条）：实测四例、30/30 新鲜边界、tz-aware、次日盘前、半日市、按标的去重计数、管道推迟 / 全失败退用仍带标签 / 不熔断不拉历史。三处变异（关判据 / 关推迟 / 改记熔断失败）各自变红。
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 2026-09-14 / v0.45.234：受影响标的的 `price` 与 OracleBee 传给 OptionsAgent 的 `stock_price`（GEX / 异动 / ATM IV 窗口 → options_score）口径变 ⇒ `final_score` 输入变。
+
+### Changed
+- `tests/test_scan_timing.py`：`payload_stats()` 键集合断言补两个新键。
+
+### 未做 / 待定
+- **未改写历史**快照与 `price_at_predict`（可用 `close_correction.py` dry-run 先看影响面，落笔需用户点头）。
+- 编排器 Step 12 没传 `--check-prices`，`scan_coverage_gate.check_prices`（≥1% 列警告）在生产里从未跑过；是否接上待用户决定（编排器在仓库外）。
+- **另一个根因，未在本版修**：09-02 / 09-08 两轮扫描跑过午夜，00:0x 写出的快照占了次日槽位，次日 14:00 扫描整轮命中（09-03 命中 42 次、09-09 命中 45 次）⇒ 那两天的期权数据整份是前一交易日的，快照价与**前一日**收盘 24/30、26/30 相符。已另开任务（占号 v0.45.238）。
+- 线上验证：本地实拉时恰好跨过 09:30 开盘，全部走盘中分支，**新判据未被真实 payload 触发过**——以今天 17:00 ET 扫描后 `status.json` 的 `price_stale_intraday` 为准（待验证）。
 
 ## [0.45.233] — 2026-09-14 — 占位（进行中：数据根迁移阶段 0——DB 一致性快照 / 修编排器每日备份 / 测试「默认拒绝」总闸）
 
@@ -362,8 +413,15 @@ v0.45.224 在**测试侧**把损害关住了（conftest `_isolate_cwd_and_sys_pa
 
 ### 未查（与本版无关，待验证）
 
-- 生产 `cache/cboe_daily/*.json` 最后写入是 **2026-08-26**（mtime），此后没再被刷新。是 `generate_deep_v2` 那一路生产上不再走到、
-  还是抓取一直失败走了兜底，没查。
+- ~~生产 `cache/cboe_daily/*.json` 最后写入是 2026-08-26，此后没再被刷新，原因没查~~ —— **已查（同日追记）：不是故障，是没有生产调用者。**
+  本仓 `CBOEDailyFetcher` 只有两个调用点：手动 CLI `generate_deep_v2.main()`（编排器 / launchd / 定时任务零引用；
+  最后一份 `deep-*.html` 是 07-29；留存的编排器日志里从未出现它那句「📊 CBOE 市场指标」），与云端 routine 的
+  `cloud_snapshot_fetch`（写云端沙箱自己的缓存）。08-26 那四个文件是**开发 session 手跑**留下的：pcce/skew/vvix 写于 02:23，
+  距 v0.45.27 提交 `76b20fe4`（02:26）3 分钟；vix_term 写于 06:26、带 v0.45.29 才引入的 `source: vx_futures`，距 `7bbac3d9`（06:28）
+  2 分钟；当天编排器 11:35 才启动。缓存只在 TTL（≤4h）内读、没有陈旧兜底路径 ⇒ 这四个文件对任何输出无影响。
+  顺带量了云端：`cloud-snapshots` 分支 12 份 market.json（08-26 ~ 09-11）里 pcce / skew / vvix **12/12 天全是 `default_fallback`**，
+  只有 vix_term 是真值 —— 已按设计列进 `degraded_sections`，`cloud_snapshot_loader.load_market` 剔除、`fred_macro` 只读 vix_term，
+  下游不吃兜底值。
 - `hive_logger` 模块级 `logger = _setup_logger()` 在收集期把文件 handler 绑到 `PATHS.logs_dir`（早于 `_isolate_env`）⇒
   全套测试日志（含 simulated error）写进 **`hive_logger.py` 所在 checkout** 的 `logs/alpha_hive.log`（`PATHS.home` 缺省即该目录；本版在 worktree 跑全套时实测该文件在涨）；
   在主 checkout 跑 pytest 就混进生产日志。与本版三处同物种，没修。

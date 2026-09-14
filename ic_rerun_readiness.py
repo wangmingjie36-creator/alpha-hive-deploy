@@ -349,6 +349,16 @@ _COHORT_HISTORY = [
      "现行规则下纸面组合入场 0 变化 ⇒ **对收益无可测影响，只是在抬分数**。"
      "Guard 读同伴的普查视图 `get_live_signals` 未动；BearBee 在看空共振里的计入未动（另一个设计决定）。 "
      "**与 v0.45.212 / v0.45.228 共用 2026-09-13 标签**：该边界之后到本版落地 predictions 0 条、无扫描进程 ⇒ **作废 0 条**。"),
+    ("2026-09-14", "v0.45.234",
+     "CBOE CDN 收盘后发来**当天盘中生成**的 payload 时，`close` 是那一刻的成交价而非官方收盘，"
+     "旧 vintage 校验只比日期、official_price 只看本机钟，两道都放行 ⇒ 被当官方收盘进入数据管道。"
+     "现改为 `last_trade_time` 离该场收盘 >60s 即标 `cboe_stale_intraday`，数据管道拒收、改取后续源"
+     "（yfinance 日线收盘）。受影响标的的 `price`（ScoutBee 等）与 OracleBee 传给 OptionsAgent 的 "
+     "`stock_price`（GEX / 异动 / ATM IV 窗口 → options_score）随之变 ⇒ `final_score` 输入口径变。"
+     "量级：08-27~09-11 下午快照 185 份里 33 份偏离官方收盘 >0.05%、12 份 >0.5%（最大 1.25%），"
+     "即每天约 3~8/30 只、偏差多在 1% 内。`price_at_predict` 同源，旧行 T+7 收益起点带同样偏差（未改写历史）。"
+     "边界时点 2026-09-14 那天 predictions 0 条 ⇒ 若本版在当日扫描前进生产，**作废 0 条**；"
+     "否则 09-14 那 30 条是旧口径，应顺延本条日期。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）

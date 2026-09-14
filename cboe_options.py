@@ -110,14 +110,23 @@ _payload_stats = {"hits": 0, "fetches": 0, "stale": 0, "failed": 0, "evicted": 0
 
 
 def payload_stats() -> dict:
+    """v0.45.234 起多两个键（**标的数**，非次数；定义见 `official_price` 上方注释）：
+      price_stale_intraday  收盘后拿到盘中生成的 payload，close 不是官方收盘
+      price_unverifiable    payload 无 last_trade_time，上面那条判不了
+    """
     with _cache_lock:
-        return dict(_payload_stats)
+        out = dict(_payload_stats)
+        out["price_stale_intraday"] = len(_price_vintage_seen["stale_intraday"])
+        out["price_unverifiable"] = len(_price_vintage_seen["unverifiable"])
+        return out
 
 
 def reset_payload_stats() -> None:
     with _cache_lock:
         for k in _payload_stats:
             _payload_stats[k] = 0
+        for s in _price_vintage_seen.values():
+            s.clear()
 
 
 # 链构造观测（v0.45.190）：供 scan_timing 落进 status.json。
@@ -665,15 +674,79 @@ def is_market_open(now_et: "Optional[datetime]" = None) -> bool:
     return et.weekday() < 5 and _ET_OPEN <= et.time() < _ET_CLOSE
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# 同日盘中陈旧 payload（v0.45.234）
+# ────────────────────────────────────────────────────────────────────────────
+# 上面两道防线的粒度都差一级：v0.45.39 的 vintage 只比**日期**，official_price
+# 只看**本机钟**判收没收盘。CDN 发一份「今天 12:10 ET 生成」的文件，到 17:00 ET
+# 扫描时两道都放行 —— 日期是今天、钟说已收盘 —— 于是 `close` 被当官方收盘取走。
+# 但盘中生成的 payload 里 `close` 就是**那一刻的最新成交**，不是收盘价。
+#
+# 2026-09-10/11 实测（快照价 vs 官方收盘，再用 yfinance 1m K 线找该价最后成交时刻）：
+#   T     09-11  26.225   vs 26.06   最后一次成交在 12:10 ET
+#   TMUS  09-10  175.18   vs 177.16  12:07 ET
+#   ABBV  09-10  252.45   vs 255.00  14:00 ET
+#   VKTX  09-11  32.3441  vs 31.98   14:36 ET（四位小数 = 盘中 sub-penny 成交）
+# 08-27~09-11 下午快照 185 份里 33 份偏离 >0.05%、12 份 >0.5%，
+# 且 `quote_set.underlying_price_source` 全标着 "cboe_close"。
+#
+# 判据：**该交易日已收盘 ⇒ payload 的 last_trade_time 必须贴着收盘**。
+# 2026-09-14 盘前实拉 30/30 只（上一场已收完）：last_trade_time 全在 15:59:56~16:00:00。
+# 容差 60 秒 —— 最冷的票也留了 56 秒余量；而 CBOE 延迟报价本身滞后约 15 分钟，
+# 16:05 生成的文件 last_trade 在 15:50，那份的 close 就是 15:50 的价，同样该拦。
+_STALE_INTRADAY_TOL = timedelta(seconds=60)
+STALE_INTRADAY_SOURCE = "cboe_stale_intraday"
+# 观测（进 payload_stats → scan_timing → status.json）。按 symbol 去重：
+# official_price 对同一份 payload 会被链 / 报价集 / 数据管道各调一次，计次会虚高。
+_price_vintage_seen = {"stale_intraday": set(), "unverifiable": set()}
+
+
+def _payload_last_trade_et(payload: dict) -> "Optional[datetime]":
+    """payload 的 last_trade_time → 美东**朴素** datetime；缺失或解析不了返回 None。"""
+    raw = (payload or {}).get("last_trade_time")
+    if not raw or not isinstance(raw, str):
+        return None
+    try:
+        dt_ = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+    if dt_.tzinfo is not None:
+        dt_ = dt_.astimezone(_ET_TZ).replace(tzinfo=None)
+    return dt_
+
+
+def _generated_mid_session(last_trade: datetime, now_et: "Optional[datetime]") -> bool:
+    """last_trade 所在那场**已收盘**，而 payload 的最后成交离收盘超过容差 ⇒ True。
+
+    那场还没收（盘中）⇒ False：盘中数据本来就滞后，不归本函数管。
+    """
+    try:
+        from is_trading_day import session_close_et
+        close_t = session_close_et(last_trade.date())
+    except Exception:  # noqa: BLE001 - 日历不可用退回平日收盘，与 is_market_open 同口径
+        close_t = _ET_CLOSE
+    now = now_et or _et_now()
+    if now.tzinfo is not None:
+        now = now.astimezone(_ET_TZ).replace(tzinfo=None)
+    session_end = datetime.combine(last_trade.date(), close_t)
+    return now >= session_end and last_trade < session_end - _STALE_INTRADAY_TOL
+
+
 def official_price(payload: dict, now_et: "Optional[datetime]" = None) -> Tuple[float, str]:
     """从 CBOE payload 取「该用的」股价。
 
     Returns
     -------
-    (price, source)  source ∈ {"cboe_intraday", "cboe_close", "unavailable"}
+    (price, source)  source ∈ {"cboe_intraday", "cboe_close", "cboe_stale_intraday", "unavailable"}
         盘中   → current_price（实时成交价才是此刻的真实价格）
         收盘后 → close（官方收盘价）；**不回退到 current_price**，
                  那是盘后价，回退等于把这个 bug 原样放回来。
+        收盘后但 payload 是盘中生成的（v0.45.234）→ close 照返回，标签改为
+                 "cboe_stale_intraday"：这个价与**同一份**期权链是同一时刻的，
+                 链内计算（ATM 选择 / 报价集）要的正是它；要「官方收盘价」的调用方
+                 （data_pipeline 入场价）必须认这个标签自己拒收。
+                 last_trade_time 缺失判不了 → 仍标 "cboe_close"（fail-open，同 vintage），
+                 但记进 `payload_stats()["price_unverifiable"]`，不是无声放过。
     取不到返回 (0.0, "unavailable") —— 由调用方决定怎么处理，不猜。
     """
     if not isinstance(payload, dict):
@@ -694,7 +767,24 @@ def official_price(payload: dict, now_et: "Optional[datetime]" = None) -> Tuple[
         return (px, "cboe_intraday") if px else (0.0, "unavailable")
 
     px = _num(payload.get("close"))
-    return (px, "cboe_close") if px else (0.0, "unavailable")
+    if not px:
+        return 0.0, "unavailable"
+    sym = str(payload.get("symbol") or "?")
+    last_trade = _payload_last_trade_et(payload)
+    if last_trade is None:
+        with _cache_lock:
+            _price_vintage_seen["unverifiable"].add(sym)
+        return px, "cboe_close"
+    if _generated_mid_session(last_trade, now_et):
+        with _cache_lock:
+            first = sym not in _price_vintage_seen["stale_intraday"]
+            _price_vintage_seen["stale_intraday"].add(sym)
+        if first:
+            _log.warning("CBOE %s payload 是盘中生成的（last_trade=%s）但该场已收盘 —— "
+                         "close=%.4f 是那一刻的成交价，不是官方收盘价",
+                         sym, last_trade.isoformat(), px)
+        return px, STALE_INTRADAY_SOURCE
+    return px, "cboe_close"
 
 
 def fetch_cboe_chain(
