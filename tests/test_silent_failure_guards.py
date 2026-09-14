@@ -598,7 +598,7 @@ class TestDeployWhitelistAcceptsClassShares:
         import pathlib
         pats = []
         for name in ("report_deployer.py", "generate_ml_report.py"):
-            src = pathlib.Path(name).read_text(encoding="utf-8")
+            src = (pathlib.Path(__file__).resolve().parent.parent / name).read_text(encoding="utf-8")
             m = re.search(r'r"(\^alpha-hive-.+?-ml-enhanced-.+?\$)"', src)
             assert m, f"{name}: 找不到 ML 白名单正则"
             pats.append((name, re.compile(m.group(1))))
