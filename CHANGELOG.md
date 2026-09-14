@@ -375,8 +375,15 @@ v0.45.224 在**测试侧**把损害关住了（conftest `_isolate_cwd_and_sys_pa
 
 ### 未查（与本版无关，待验证）
 
-- 生产 `cache/cboe_daily/*.json` 最后写入是 **2026-08-26**（mtime），此后没再被刷新。是 `generate_deep_v2` 那一路生产上不再走到、
-  还是抓取一直失败走了兜底，没查。
+- ~~生产 `cache/cboe_daily/*.json` 最后写入是 2026-08-26，此后没再被刷新，原因没查~~ —— **已查（同日追记）：不是故障，是没有生产调用者。**
+  本仓 `CBOEDailyFetcher` 只有两个调用点：手动 CLI `generate_deep_v2.main()`（编排器 / launchd / 定时任务零引用；
+  最后一份 `deep-*.html` 是 07-29；留存的编排器日志里从未出现它那句「📊 CBOE 市场指标」），与云端 routine 的
+  `cloud_snapshot_fetch`（写云端沙箱自己的缓存）。08-26 那四个文件是**开发 session 手跑**留下的：pcce/skew/vvix 写于 02:23，
+  距 v0.45.27 提交 `76b20fe4`（02:26）3 分钟；vix_term 写于 06:26、带 v0.45.29 才引入的 `source: vx_futures`，距 `7bbac3d9`（06:28）
+  2 分钟；当天编排器 11:35 才启动。缓存只在 TTL（≤4h）内读、没有陈旧兜底路径 ⇒ 这四个文件对任何输出无影响。
+  顺带量了云端：`cloud-snapshots` 分支 12 份 market.json（08-26 ~ 09-11）里 pcce / skew / vvix **12/12 天全是 `default_fallback`**，
+  只有 vix_term 是真值 —— 已按设计列进 `degraded_sections`，`cloud_snapshot_loader.load_market` 剔除、`fred_macro` 只读 vix_term，
+  下游不吃兜底值。
 - `hive_logger` 模块级 `logger = _setup_logger()` 在收集期把文件 handler 绑到 `PATHS.logs_dir`（早于 `_isolate_env`）⇒
   全套测试日志（含 simulated error）写进 **`hive_logger.py` 所在 checkout** 的 `logs/alpha_hive.log`（`PATHS.home` 缺省即该目录；本版在 worktree 跑全套时实测该文件在涨）；
   在主 checkout 跑 pytest 就混进生产日志。与本版三处同物种，没修。
