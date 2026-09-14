@@ -390,6 +390,10 @@ class QueenDistiller:
 
         adjusted_score = base_score + ml_adjustment
 
+        # ⚠️ 共振加成正在做预注册前瞻检验（v0.45.242，`experiments/resonance_boost_forward_test.py`）：
+        # 样本内它是评分链里唯一测得出损失排序信息的一步，但证据是事后分析，用户定的是
+        # 「前瞻确认后再删」。**结论出来之前勿删改、勿改成分方向**——那会让检验的自证失败
+        # （B0 重放复现不了生产），样本内理由与数字见 experiments/resonance_boost_insample_report.md。
         resonance = self.board.detect_resonance(ticker)
         if resonance["resonance_detected"]:
             boost_pct = _safe_score(resonance.get("confidence_boost"), 0.0, -50, 50, "resonance_boost")

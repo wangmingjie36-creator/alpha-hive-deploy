@@ -24,7 +24,7 @@ import statistics
 import threading
 import time
 import urllib.request
-from datetime import datetime, time as _dtime, timedelta
+from datetime import date, datetime, time as _dtime, timedelta
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -247,9 +247,20 @@ def _expected_vintage_date() -> Optional[str]:
     宁可放过陈旧数据，也不能因为日历挂了把 30 只全打成陈旧、连锁压到
     yfinance 上 —— 7/23 那次限流雪崩就是这么来的。
     """
+    return session_date_at(datetime.now(_ET_TZ))
+
+
+def session_date_at(ts: "datetime") -> Optional[str]:
+    """时刻 `ts` 时「数据所属的交易会话」的 ET 日期；日历不可用返回 None。
+
+    与 `_expected_vintage_date` 同一判据（v0.45.238 抽出来供期权快照槽位复用）：
+    交易日 09:30 ET 之后是当天，之前（含凌晨、周末、假日）是上一交易日。
+    `ts` 必须带时区——naive 值按**本机时区**解释（`datetime.astimezone()` 的语义），
+    生产机是太平洋时间，`_snapshot_timestamp` 正是这样写的。
+    """
     try:
         from is_trading_day import is_trading_day
-        now = datetime.now(_ET_TZ)
+        now = ts.astimezone(_ET_TZ)
         today = now.date()
         if is_trading_day(today)[0] and now.time() >= _ET_OPEN:
             return today.isoformat()
@@ -730,6 +741,83 @@ def _generated_mid_session(last_trade: datetime, now_et: "Optional[datetime]") -
         now = now.astimezone(_ET_TZ).replace(tzinfo=None)
     session_end = datetime.combine(last_trade.date(), close_t)
     return now >= session_end and last_trade < session_end - _STALE_INTRADAY_TOL
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 「这个价是哪一场的官方收盘」—— 给不经 official_price 的消费者（v0.45.243）
+# ────────────────────────────────────────────────────────────────────────────
+# official_price 回答「此刻该取哪个字段」，要的是**此刻**的价。另有两类消费者
+# 要的是**某一场的官方收盘**、且拿到的 payload 不是此刻抓的：
+#   - 补跑兜底读云端快照的 price_at_fetch（data_pipeline._fetch_historical_stock_data）
+#   - close_correction 的 CBOE 交叉印证
+# 它们各自推断归属时栽过（前者不看、后者按 CDN timestamp 推，盘中文件被归到上一场）。
+# 判据只在这里写一份，复用上面的 _generated_mid_session，不另起一条规则。
+#
+#   CLOSE_OFFICIAL        close = last_trade 那一场的官方收盘
+#   CLOSE_SESSION_OPEN    那一场还没收（盘中文件）⇒ close 就是实时成交价（2026-09-14 10:55 ET
+#                         实拉：T close 26.2299 = current_price；NVDA close 210.47 ≠ 09-11 收盘 218.29）
+#   CLOSE_STALE_INTRADAY  那一场已收，但文件是盘中生成的
+#   CLOSE_UNVERIFIABLE    无 last_trade_time，判不了
+CLOSE_OFFICIAL = "official"
+CLOSE_SESSION_OPEN = "session_open"
+CLOSE_STALE_INTRADAY = "stale_intraday"
+CLOSE_UNVERIFIABLE = "unverifiable"
+
+
+def close_verdict(payload: dict, now_et: "Optional[datetime]" = None) -> "Tuple[str, Optional[date]]":
+    """payload 的 `close` 是不是官方收盘、属于哪一场 → `(verdict, 场次日期 | None)`。
+
+    `now_et` 是「这份 payload 是什么时候拿到的」——云端快照传 `fetched_at_utc`，
+    不传就是本机此刻。只有 CLOSE_OFFICIAL 带日期。
+    """
+    last_trade = _payload_last_trade_et(payload)
+    if last_trade is None:
+        return CLOSE_UNVERIFIABLE, None
+    if _generated_mid_session(last_trade, now_et):
+        return CLOSE_STALE_INTRADAY, None
+    # 没被判陈旧只有两种可能：已收盘且贴着收盘，或那一场还没收。
+    # 用「贴着收盘」来分——比再算一遍 now 与收盘时刻少一条口径。
+    try:
+        from is_trading_day import session_close_et
+        close_t = session_close_et(last_trade.date())
+    except Exception:  # noqa: BLE001 - 与 _generated_mid_session 同口径退回平日收盘
+        close_t = _ET_CLOSE
+    session_end = datetime.combine(last_trade.date(), close_t)
+    now = now_et or _et_now()
+    if now.tzinfo is not None:
+        now = now.astimezone(_ET_TZ).replace(tzinfo=None)
+    if now < session_end:
+        return CLOSE_SESSION_OPEN, None
+    return CLOSE_OFFICIAL, last_trade.date()
+
+
+def prev_close_session(payload: dict) -> "Optional[Tuple[date, float]]":
+    """payload 的 `prev_day_close` → `(它所属的交易日, 价)`；判不了返回 None。
+
+    归属 = `last_trade_time` 那一场的**前一个交易日**。与 `close` 不同，这个字段
+    **不随盘中文件陈旧而错**：云端快照 290 份（2026-08-28~09-11，含 71 份盘中陈旧）
+    对 yfinance 官方收盘 289 份 ≤0.01%、1 份 <0.05%（BILI 16.76 vs 16.765，舍入）。
+    盘中实拉（2026-09-14 10:55 ET）同样成立：T 26.06、NVDA 218.29 = 09-11 收盘。
+    """
+    last_trade = _payload_last_trade_et(payload)
+    if last_trade is None:
+        return None
+    try:
+        px = float((payload or {}).get("prev_day_close"))
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(px) and px > 0):
+        return None
+    try:
+        from is_trading_day import is_trading_day
+        d = last_trade.date() - timedelta(days=1)
+        for _ in range(10):          # 长假最多跨约 5 天
+            if is_trading_day(d)[0]:
+                return d, px
+            d -= timedelta(days=1)
+    except Exception:  # noqa: BLE001 - 日历不可用 ⇒ 归属推不出，不猜
+        _log.debug("交易日历不可用，prev_day_close 归属判不了", exc_info=True)
+    return None
 
 
 def official_price(payload: dict, now_et: "Optional[datetime]" = None) -> Tuple[float, str]:

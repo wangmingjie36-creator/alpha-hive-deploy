@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.248] — 2026-09-14 — 占位（进行中：commit -- <名字> 会拆开别的 session 已暂存、跨出白名单目录的 rename——补 rename 探测）
+
+## [0.45.247] — 2026-09-14 — 占位（进行中：Queen 读蜂 details 的键契约守卫 + 删 F&G 政体调整死分支 + signal_archive 补 Buzz 缺失通道）
+
 ## [0.45.246] — 2026-09-14 — 占位（进行中：v0.45.239 conftest `_hive_log_handler_escapes` 的 resolve() 相对路径补全成 cwd——合入 v0.45.240 后被 cwd 守卫抓到；修 + 变异自证 + 落地 v0.45.239/244）
 
 ## [0.45.245] — 2026-09-14 — 占位（进行中：二次检查 v0.45.240 的改动）
@@ -77,9 +81,185 @@ P3 那一行的教训：**变异被上游守卫先接住，证明不了本守卫
 - **未推 main**：本版依赖 v0.45.239（修前 `hive_logger` 上本类 `KNOWN` 的 hive_logger 路由即过期、`_setup_logger` 路由即新增），
   而 v0.45.239 尚未进 main、合并后又有上面那条红。
 
-## [0.45.243] — 2026-09-14 — 占位（进行中：CBOE 盘中陈旧价的两个未覆盖消费者——回填兜底读云快照 price_at_fetch 不判陈旧 + close_correction 盘中/陈旧文件把现价归到上一会话）
+## [0.45.243] — 2026-09-14 — CBOE 盘中价的两个漏网消费者：补跑兜底照单全收云端快照的中午价；close_correction 把盘中实时价当上一场收盘去印证
 
-## [0.45.242] — 2026-09-14 — 占位（进行中：共振加成前瞻检验预注册 + 更正 final_score IC −0.11 过时 / R2 基准写错）
+v0.45.234 让 `official_price` 认出「收盘后拿到盘中生成的 payload」，数据管道据此拒收。但另有两处**不经 `official_price`**、
+自己推断「这是哪一场的收盘」：
+
+1. **补跑兜底** `data_pipeline._fetch_historical_stock_data`：yfinance 缺目标日收盘时直接取 `cloud_snapshot_loader.load_ticker()["price_at_fetch"]`，
+   不看 `price_source` 也不看 `last_trade_time_et`。pheromone.db 2026-08-28 的四行就是这么进的库：
+
+   | 标的 | 入库价 | 官方收盘 | 快照 last_trade | 快照标签 |
+   |---|---|---|---|---|
+   | DE | 624.85 | 630.33 | 14:55:46 | `cboe_close` |
+   | TMO | 626.325 | 622.18 | 09:45:27 | `cboe_close` |
+   | CVX | 201.44 | 201.86 | 14:58:31 | `cboe_close` |
+   | VZ | 49.985 | 50.10 | 15:31:50 | `cboe_close` |
+
+   v0.45.234 之前产出的快照**陈旧也标 `cboe_close`** ⇒ 必须按 `last_trade_time_et` 判，不能看标签。
+2. **`close_correction.cboe_official_closes` / `_session_of_close`**：按 CDN 顶层 `timestamp` 推「最近一个已收盘交易日」，假设 `close` 就是那天的收盘。
+   盘中 `close == current_price`（2026-09-14 10:55 ET 实拉：T close 26.2299 = current_price、prev_day_close 26.06；NVDA close 210.47、prev_day_close 218.29）
+   ⇒ 盘中跑本工具，实时价被当成上一场收盘去印证。收盘后拿到的盘中文件同理被归到当天。
+   原测试里那条「盘中 → 前一交易日」参数是**推断**，从未实拉验证过（同一组参数里另两条盘前/盘后是实拉的）。
+
+**验证语料**：`origin/cloud-snapshots` 290 份（08-28~09-11，17:02 ET 抓），对 yfinance 官方收盘（2026-09-14 批量下载）。
+- 60s 判据复现：64 份判陈旧且价错、7 份判陈旧但价在 0.05% 内、219 份判新鲜且价对、**判新鲜而价错 0 份**。
+- ⭐ **`prev_day_close` 不随文件陈旧而错**：按「`last_trade_time` 那一场的前一交易日」归属，289/290 份 ≤0.01%、1 份 <0.05%
+  （BILI 16.76 vs 16.765，舍入），**含全部 71 份陈旧文件**、含跨劳动节（09-08 DE 的 prev_day_close 693.53 = 09-04 收盘）。
+  盘中实拉也成立（T 26.06、NVDA 218.29 = 09-11 收盘）。这是本版两个修复的共同支点。
+
+### Added — `cboe_options.py`（判据只写一份）
+- `close_verdict(payload, now_et)` → `(official | session_open | stale_intraday | unverifiable, 场次日期)`：
+  复用 `_generated_mid_session`（v0.45.234 的 60s 判据），只补一条「那场还没收」。`now_et` 传「这份 payload 是什么时候拿到的」。
+  用例钉住它与 `official_price` 对全部真实快照的陈旧判断逐份一致（防长出第二条规则）。
+- `prev_close_session(payload)` → `(所属交易日, prev_day_close)`；无 last_trade / 价非有限正数 / 日历不可用 → None。
+
+### Fixed — 补跑兜底（消费者 1）
+- 新增 `cloud_snapshot_loader.load_official_close(date, ticker)` → `(价 | None, 判决)`，`data_pipeline` 只认它的结论：
+  1. 当日快照 `close_verdict`（now = 快照 `fetched_at_utc`）为 official 且场次 == date → `price_at_fetch`（`cloud_snapshot_close`）
+  2. 否则（含当日无快照）→ **其后第一份快照的 `prev_day_close`**，其自述归属必须恰为 date（`cloud_snapshot_next_prev_day_close`）。
+     隔了交易日（如 09-05 没跑）就对不上 → None，不需要另算日历。
+  3. 都不行 → 不可用，`_reason` 仍是 `no_close_on_<date>`，新增 `_snapshot_verdict`（`snapshot_stale_intraday` / `snapshot_session_open` /
+     `snapshot_no_snapshot` / `snapshot_error:<异常类>`…）+ WARNING——「快照是盘中价」与「没快照 / 兜底坏了」分得开。
+     旧代码取价异常只打 debug，现改 WARNING。
+- **陈旧时选「标不可用」而不是「照用 + 降级标签」**：这个价的终点是 `price_at_predict`（T+7 入场价），而 predictions 表**没有价格来源列**
+  （`price_source` 只活在 StockData dict 里）⇒ 降级标签到不了账本，在库里与官方收盘无从分辨。实时管道（v0.45.234）退用陈旧价是在与
+  「price=0 整只跳过」权衡；补跑缺一行是少一个样本，错一个入场价是污染一个样本。何况第 2 步能拿到真官方收盘。
+- 恢复路径的 StockData 带 `price_source`（v0.45.234 加的字段，此前这条路径留空）。
+- **全量重放**（真 git 读 `origin/cloud-snapshots`，290 份逐只调 `load_official_close` 对官方收盘）：旧兜底 64 份错价；
+  新兜底 219 份取自身价、59 份取次日 prev_day_close，**0 份错**，12 份标不可用（09-11 没有后续快照 + 次日缺该标的，如 08-28 TMO）。
+  08-28 DE/CVX/VZ 分别还原为 630.33 / 201.86 / 50.10。
+
+### Fixed — `close_correction`（消费者 2）
+- 删 `_session_of_close` 与仅它使用的 `_trading_day_before`。`cboe_official_closes` 改返回 `{ticker: {所属交易日: 价}}`，每只最多两条：
+  `close` 仅当 `close_verdict == official`；`prev_day_close` 按 `prev_close_session`。纯函数部分抽成 `cboe_closes_from_payload`（可离线测）。
+  ⇒ **盘中跑时印证照样做得成**，用的是 prev_day_close 而不是实时价。
+- 删掉 `_payload_is_stale` 跳过：归属由 last_trade 自述，盘中 CDN 还没刷新的文件（last_trade 是上一场 15:59:59）其 close 恰是要印证那天的
+  官方收盘，那道闸只会丢掉对得上的数据。
+- 观测：`stats["cboe_verdicts"]` 逐标的计 close 判决（含 `fetch_failed`），日志与 CLI 汇总各打一行——「印证了 0 条」分得清是没抓到、盘中跑还是文件陈旧。
+- **生产库副本实跑 dry-run**（2026-09-14 12:18 ET 盘中，`--since 2026-09-11`，未 `--apply`）：
+  - 旧代码：`两源分歧拒改 2`（T：CBOE=26.38 即当时实时价 vs yfinance 26.06；TMUS：183.31 vs 182.33），印证 0 条
+  - 新代码：`两源分歧拒改 0`，需校正 2（VKTX 32.34→31.98、TMUS 182.82→182.33）且**都经 CBOE 印证**；close 判决 session_open=26 / official=3（BILI/DE/TMO 文件还停在 09-11 收盘）/ fetch_failed=1
+  - ⚠️ 两次跑 yfinance 批量下载各自部分失败（旧缺 NVDA/VKTX/BRK-B，新缺 NVDA/DELL/VZ/T），T 在新跑里无来源，可直接对照的是 TMUS。
+
+### Changed — `cloud_snapshot_fetch.py`（写入端：标记，不拒收）
+- manifest 新增 `price_stale_intraday`（标的列表），控制台打一行。**不拒收**：链 / IV 期限结构 / 全链 OI 仍是当天真数据
+  （快照是当日期权链，跳过一天永久没有，见 v0.45.183），`prev_day_close` 不受影响；消费端已按 last_trade 判，不依赖标签。
+  退出码不变（不是失败）。`price_source` 自 v0.45.234 合进 cloud-snapshots 分支起就会如实标 `cboe_stale_intraday`，注释补上旧快照不可信这一句。
+
+### Added — 测试
+- `tests/test_stale_intraday_consumers.py`（48 条）：全部用真实快照原值（08-28 DE/TMO/CVX/VZ、08-31、09-01 TMO、09-04→09-08 DE 跨劳动节、09-10/11 T）
+  与 09-14 盘中实拉值（⚠️ 盘中两份的 last_trade 按 15 分钟延迟**重建**，close/prev_day_close 为实拉）。含两条旧 bug 的 `correct()` 端到端重演、
+  「真分歧仍拒改」防过度修复、次日快照隔了交易日不许错归属、标签不可信（双向）。
+- `tests/test_cloud_snapshot_vintage.py`：manifest 点名盘中文件、照常落盘、退出码 0。
+- 变异自证（逐个改回、跑 5 个相关文件）：去掉 session_open 分支 / close 不看判决 / 兜底照用 price_at_fetch / 次日 prev_day_close 不验归属 /
+  判据用本机钟代替抓取时刻 / prev_day_close 归属差一天 / 补跑绕过 loader / manifest 列表置空 —— **8 处各自变红**。
+
+### Changed — 测试适配
+- `tests/test_cloud_snapshot_price.py`：假模块（只有 `load_ticker`）改为桩真模块的 `load_ticker` + `available_dates`，快照补 last_trade / fetched_at；
+  非法价格用例加 `True`（`isinstance(True, int)` 为真）。
+- `tests/test_close_correction.py`：`cboe=` 夹具改新形状；删两条 `_session_of_close` 用例（说明见文件内注释）。
+- `tests/test_historical_price_anchor.py`：补桩 `available_dates`——新兜底会再问后续快照，只桩 `load_ticker` 挡不住那次 `git ls-tree`。
+
+### Added — `ic_rerun_readiness._COHORT_HISTORY`
+- 追加 2026-09-14 / v0.45.243：补跑兜底改变 `price` / `stock_price` ⇒ `final_score` 输入口径变。**与 v0.45.234 共用标签、作废 0 条**——
+  只在补跑且 yfinance 缺该日收盘时触发；本世代（≥09-14）此前没有任何补跑产出的行（09-14 predictions 0 条），补跑更早日期落进的是已被排除的旧世代。
+  `close_correction` 只动 `price_at_predict` 的校正判定、须人工 `--apply`，不是评分输入，不另立边界。
+
+### 未做 / 待定
+- **未改写历史**：08-28 DE/TMO/CVX/VZ 与 v0.45.234 dry-run 列出的 40 行仍是原值。现在可以放心带 CBOE 印证跑 `close_correction.py` dry-run
+  （不必再 `--no-cboe`）；落笔 `--apply` + `backfill_dir_accuracy.py --all` 需用户点头。
+- **未补跑** 08-28：修复只管以后的补跑。
+- 全量 pytest（合入 v0.45.238 之后）：4505 passed，唯一失败 `test_economic_calendar.py::TestCoverageHorizon`（NFP/CPI 表剩 81 天 < 90 天阈值，按日期必然变红的设计告警，与本版无关，未动）。
+- 顺带发现未修：`official_price` 的盘中分支用 `is_market_open`（固定 16:00），半日市 13:00 后到 16:00 之间会把盘后 `current_price` 当盘中价取。
+  定时扫描在 17:00 ET 跑，不受影响；`close_verdict` 已按 `session_close_et` 判，也不受影响。
+
+## [0.45.242] — 2026-09-14 — 共振加成「前瞻确认后再删」：样本内它是评分链里唯一损失排序信息的一步，但证据是事后的——预注册前瞻检验挂上周度承载物；更正 v0.45.235 两处过时/写错的数
+
+v0.45.235 登记了「共振加成不分方向：看空共振也把分数往上抬」。用户先问：**这个改动对吗，是不是在回退？**
+
+- **不是回退。** git 考古逐版列出加成的每个写法：02-24 首版 `avg + boost×avg×0.3` → 02-25 `adjusted×(1+b)`
+  → 02-28 包 `_safe_score` → 03-09 搬进 `queen_distiller.py` 至今，**从未分过方向**。
+- **「分方向」这条路本身没价值。** 分数轴在仓里两种读法并存（纸面组合 / IC 按看多度读，
+  `report_formatters` 摘要与 GUI 档位不分方向读），但更要紧的是**共振的方向不带信息**：带符号共振 IC
+  +0.002 / −0.066；看空镜像方案 ΔIC +0.001 / +0.004，却会让看空过闸比例从 ~11% 涨到 ~57%。
+  四个分方向的方案（镜像 / 不加成 / 镜像+重校闸门 / 统一分数轴）用户全部否掉。
+
+### 量到了什么（性质：**事后**，未校正，14 周）
+
+逐级 IC 归因时发现：重放用的基础加权分是报告里**记录的**值 —— 按的是旧权重（signal / risk_adj 仍有 ~0.2，
+v0.45.176 于 09-10 才归零）。按现行权重重算（自证：用记录权重复现记录基础分 673/681）后：
+
+| | 语料 a / b |
+|---|---|
+| 基础加权分 IC | **+0.074 / +0.074** |
+| 共振加成这一步 | **−0.054（p=0.039）/ −0.034（p=0.042）** |
+| 惩罚 / 投票 / GEX 各步 | 均在 ±0.013 内 |
+| 删加成（B3）− 现状 | **+0.049 / +0.029**；03~05 月与 06~09 月 4/4 同号 |
+| 安慰剂（同日打乱加成归属）| 真实加成落在安慰剂分布第 15 / 第 7 百分位 |
+
+仪器：前瞻脚本的重放在现行代码的真 `QueenDistiller.distill()` 上（离线、屏蔽网络、隔离数据目录）
+**B0 263/263、B3（生产把加成置零）263/263** 逐行复现。完整数字、匹配对照、局限见
+`experiments/resonance_boost_insample_report.md`。
+
+### 决定（用户）：前瞻确认后再删
+
+理由：证据是在否掉四个方案之后才去量的；两个语料是同一批报告；而且要推翻一条定档
+（auto-memory「删 queen 层共振加成：不要删」—— 其依据 t=+1.24 不显著，且测于 v0.45.156 / 176 / 235
+三处修复之前）。**本版评分不变，不追加世代边界。**
+
+### Added
+
+- `experiments/resonance_boost_forward_test.py` —— 预注册前瞻检验（docstring 写死，早于任何前瞻样本）：
+  - 样本 = 2026-09-15 起的报告；变体 B0 = 生产重放、B3 = 同链不乘加成；链路全部调真实代码。
+  - **自证是前提**：B0 重放复现记录的 (final_score, direction) < 95% 即「无法判定」exit 3
+    —— 有人提前删改加成、或评分链变了，这里先红，不会静默算出一个没意义的数。
+  - 逐日横截面 IC 差 → ISO 周均 → 单侧 t；**成组序贯两次检视**：前 10 个合格周 p<0.01、前 20 周 p<0.045
+    （合计单侧 α≈0.05），按**时间顺序最先攒到的**前 N 周算，与哪天运行无关。
+  - **盲化在数据结构上**：未到检视点时返回值里没有任何效应量键，`--json` 也漏不出来。
+  - 「永远说还没样本」防线：目录里一份报告都没有 ⇒ 无法判定（路径错了）；登记后 21 天仍无前瞻样本 ⇒ ⚠️。
+  - `--insample` 在生成假设的那批数据上复核报告数字（结果与探索分析一致：14 周、周均 ΔIC +0.0493、
+    单侧 p=0.0415、按行数 +0.0651）。
+- `experiments/resonance_boost_insample_report.md` —— 样本内证据、时间线（为什么是事后）、参数来历。
+- `tests/test_resonance_boost_forward_test.py`（35 条）：预注册常量钉住 / Spearman 与单侧 t 对 scipy /
+  检视取前 N 周、中期未过界不出数、终期可确认可结案 / 自证门槛（分数、方向、异常都计数）/
+  **重放 ≡ 真 distill**（看多共振 / 看空共振 / 无共振 × 有无负 GEX，含 B3）/ 前瞻窗口起点、缺字段计数、
+  空目录与长期无样本 / 入场价取 raw 优先 / 承载物同一行、失败可见、退出码不变。
+
+### Changed
+
+- `ic_rerun_readiness.py`：新增 `resonance_forward_status()`，`--quiet` 摘要行**同一行**后缀带上前瞻检验进度
+  （周度任务约定「把那一行原样写进周报」，另起一行可能被漏抄）；完整模式另印一行；`--json` / `--out`
+  多 `resonance_forward_test` 键。检验出任何异常都渲染成「无法判定」一行，**不改本工具的判定与退出码**。
+  挂在这里而不另起定时任务：它和本工具是同一种事（数据条件到期），多一个任务就多一处没人记得的配置。
+- `swarm_agents/queen_distiller.py`：共振加成处加注释「检验结论出来前勿删改、勿改成分方向」（仅注释，行为不变）。
+
+### Fixed（记录）
+
+- v0.45.235 的 R2「方向对 70%，同日基准 58.3%」：58.3% 是**跑赢** SPY 的比例，看空单该比**跑输**比例 **40.7%**。
+  仍只有 2 周、p=0.42。原条目行内已加更正指针。
+- v0.45.235 的「final_score 逐日 IC −0.11」：旧权重口径，已过时（现行权重下 final +0.009 / +0.032）。原条目行内已加指针。
+
+### 没做 / 注意
+
+- 周度任务的 `~/.claude/scheduled-tasks/alpha-hive-weekly-optimizer/SKILL.md` **未改**（在仓库外，属持久配置）；
+  进度已在它原样抄的那一行里。
+- 生产 F&G 调整从未生效（Buzz 只把 `fear_greed_value` 发到信息素板、没放进 `AgentResult.details`，672/672 份为 None），
+  已另开任务，本版不动。若日后接线，本检验的自证会先红 —— 那是预期行为。
+- 变异自证的一个陷阱：首轮收尾时同尺寸变异（`0.01`→`0.05`）与还原落在同一秒，pyc 缓存按「mtime 秒 + 大小」
+  判定未过期，还原后的套件跑的仍是变异字节码 ⇒ 假红。改为 `PYTHONDONTWRITEBYTECODE=1` + 每轮清 `__pycache__` 重跑。
+
+### 核验
+
+- 新测试 35 passed；**变异 15/15 红**（检视取后 N 周 / 未就绪带效应量 / 去自证门槛 / B3 不删加成 / 重放漏 GEX /
+  承载物吞异常 / 去长期无样本告警 / 入场价优先级反 / 横截面下限失效 / 不核方向 / 异常不计数 /
+  摘要拆两行 / 前瞻起点开区间 / 去空目录防线 / 中期阈值放宽），关字节码缓存重跑一遍结果相同。
+- 相关套件（readiness / 共振 ×2 / queen / 非投票蜂）144 passed, 1 xfailed；ruff 全绿。
+- 全套：**4454 passed, 1 skipped, 2 xfailed**；唯一的红是按设计定期变红的 BLS `TestCoverageHorizon`。
+  ⚠️ `pyproject.toml` 的 `addopts` 自带 `-x`：那条设计内的红会把「全套」截断在 877 条（793 passed），
+  看起来像跑完了。要看全套必须加 `--maxfail=1000`。
+- 生产只读跑承载物：`⏳ IC 重跑未就绪：0/25 …｜⏳ 共振加成前瞻检验：0/10 个合格周（前瞻报告 0 份）…`，exit 1；
+  `--today 2026-10-20` 时变 ⚠️。生产 checkout 状态前后一致。
 
 ## [0.45.241] — 2026-09-14 — cboe_fetcher 的 P/C、SKEW、VVIX 改走 CBOE CDN：云端够不到 yfinance，三项 12/12 天兜底
 
@@ -288,7 +468,56 @@ v0.45.176 观测点有没有在生产响过，看按日期分文件的 `~/.claud
 **未做 / 留给后续**：结构守卫（AST 扫描）仍看不见「模块级调用、函数体里求值 `PATHS`」这一族——已提后续任务，
 本版靠行为测试 + ①②③ 兜。
 
-## [0.45.238] — 2026-09-14 — 占位（进行中：期权快照槽按 PDT 墙钟日期分，跨午夜扫描把前一交易日数据写进次日槽——改按会话日期 + 观测点 + 历史普查）
+## [0.45.238] — 2026-09-14 — 期权快照槽位改按数据所属的 ET 交易会话分：跨午夜扫描曾把前一交易日的链写进次日槽位，次日正式扫描整天用上一会话的期权数据
+
+**事故**（v0.45.234 排查 `_snapshot_stock_price` 时发现）：`OptionsAgent.analyze()` 的快照槽位是 `pdt_today()`，
+命中校验是 `_snapshot_timestamp.startswith(pdt_today())` —— **两边是同一个墙钟，跨午夜写入会自证通过**。
+09-02 14:00 起跑的扫描拖到 09-03 00:07，午夜后的调用写出 `options_snapshot_{T}_2026-09-03.json`（内容是 09-02 盘后的链）；
+09-03 14:00 的正式扫描命中 42 次、只写 6 次，`_snapshot_stock_price` 24/30 等于 09-02 官方收盘（09-03 的只有 4/30）。
+09-08 那轮 03:30 起跑、跨过午夜，09-09 同形（命中 45 次、写 1 次，26/30 vs 1/30）。
+⇒ 两天报告的 IV / P/C / GEX / OI / Max Pain / 异动（OracleBee → `options_score` → `final_score`）整体晚一个会话。
+
+### Fixed
+- **`options_analyzer.py`**：槽位与命中校验都改用 **ET 交易会话日期**（交易日 09:30 ET 前算上一交易日，与
+  `cboe_options._expected_vintage_date` 同一判据）。午夜不再是边界 ⇒ 跨午夜的调用落回前一会话的槽位；
+  旧代码留下的跨午夜文件（naive 时间戳、无会话字段）在次日按时间戳推出属于前一会话 ⇒ **拒收重算**。
+  新快照写 `_snapshot_session`（取数前算的，优先于写入时间戳）与 `_snapshot_session_complete`。
+  收盘后跑的生产扫描（编排器 13:30 PT 后才开跑）里会话日期 == 太平洋日期，**文件名与评分输入不变**；
+  快照及嵌了快照字段的 `analysis-*-ml-*.json` 会多出 `_snapshot_session` / `_snapshot_session_complete` 两个键。
+  - 交易日历不可用时**不**退回太平洋日期（那就是本 bug），退回「周一至周五、09:30 ET 翻页」规则，计数 + WARNING。
+  - 补跑（v0.45.16）判定也按会话比：`--date` 等于此刻数据所属会话时走正常槽位（例：周一盘前补跑上周五，可直接复用真快照）；
+    补跑槽位后缀 `_backfilled-{会话日}`，收盘后与原 `pdt_today()` 相同；`_options_fetched_on` 同步。
+  - `iv_history.append_observation` 的日期同步改为会话日期（原来跨午夜那几次会把前一会话的 IV 记到次日名下）。
+- `cboe_options.py`：判据抽成 `session_date_at(ts)`，`_expected_vintage_date()` 委托给它（行为不变，原测试全绿）。
+
+### Added
+- **观测点（「这个失败，下游怎么知道？」）**：`options_analyzer.snapshot_slot_stats()` 经 `scan_timing.counters().options_snapshot`
+  进 `status.json`，并进日志摘要行：`hits` / `writes` / `session_mismatch`（槽位里是别的会话的数据、已弃用）/
+  `hits_before_close`（**命中收盘前冻结的快照，而此刻会话已收盘**）/ `writes_before_close` / `calendar_fallback`。
+  `hits_before_close` **只观测不拒收**：同一轮扫描跨过收盘时拒收会让前后调用方拿到两份不同的链（v0.15.2 快照要防的分裂）；
+  盘中价的处置属 v0.45.234。收盘时刻走 v0.45.234 的 `is_trading_day.session_close_et`（认提前收盘日）。
+- `tests/test_snapshot_session_slot.py`（21 条，离线）：会话判据六个时点（含劳工节）、日历故障退回、跨午夜复用前一会话槽位、
+  **09-03 事故形状逐字复现**（naive `2026-09-03T00:07:11` 必须被拒）、同会话收盘后仍命中、存储会话字段优先、
+  观测点计数与 WARNING、此刻盘中不计、补跑交互两条、计数真进 `scan_timing`。
+  **变异实测**：槽位改回太平洋日期 / 校验改回 `startswith` / 删掉观测点计数，各自有测试变红。
+
+### 普查（`cache/` 1309 份常规快照，未改写任何历史文件）
+| 类别 | 份数 |
+|---|---|
+| 收盘后冻结、槽位正确 | 868 |
+| **前一会话数据占着槽位（本 bug）** | **171**（11 个槽位日：06-10、07-08、07-15、07-17、07-22、07-23、07-24、08-11、08-14、09-03、09-09） |
+| 槽位日不是交易日（周末强制跑） | 200 |
+| 同会话但收盘前冻结 | 13（07-09 ×10、08-12、08-14、08-26 各 1；08-26 那份是 ABBV 12:16 PDT，当日日志命中它 2 次） |
+| 时间戳晚于槽位日一天 | 57（05-27 ~ 07-06，成因**未查、待验证**，不是本 bug 的形状） |
+
+**普查为什么决定了修法**：坏槽位不只来自「跨午夜」。08-14 那批冻结于 02:13 PDT、07-23/07-24 那批来自午夜后才起跑的扫描——它们起跑时太平洋日期已是新的一天，「扫描开始时钉住日期」拦不住；按 ET 会话分槽位才全覆盖。09-03 / 09-09 有日志实证（逐文件数：24 份被命中 41 次、29 份被命中 45 次），其余日子日志已不存在。历史快照与台账**未改写**（需用户决定）。
+
+### Changed
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 v0.45.238（排在同日 v0.45.234 之后），**与 v0.45.234 共用 2026-09-14 标签**：
+  2026-09-13 起 predictions 0 条（只读核对 pheromone.db）⇒ 在 09-14 定时扫描前进生产则 **作废 0 条**。
+- 测试钉时钟：`tests/test_backfill_snapshot_isolation.py`、`tests/test_quote_set.py` 原用 `pdt_today()` 造「今天的快照」，
+  新判据下周末/盘前跑会找错槽位，改为钉住 `options_analyzer._snapshot_now`；`tests/test_scan_timing.py` 计数器键集合加 `options_snapshot`。
+- `options_analyzer.py` 不再 import `pdt_today`（唯一的外部借用者是 `tests/test_quote_set.py`，已改）。
 
 ## [0.45.237] — 2026-09-14 — 二次检查 v0.45.224：cwd 隔离只罩住测试函数本体——高于函数级的 fixture 仍在仓库根里跑，「teardown 还原」的自证是空的，还原理由写反了
 
@@ -441,7 +670,8 @@ Guard 自己在 guard_bee.py:27 调共振时还没发布，看不到自己。
 ### 测过、但本版**没做**的两件事（留给用户）
 
 1. **R2：BearBee 也不数进看空共振。** 现行规则下共振判定变 72 行、分数中位 −1.02、新获 10 笔看空入场
-   （方向对 70%，同日基准 58.3%，n=10）、决策档位变 59 行。BearBee 同样不是独立来源（数据全经信息素板中转、
+   （方向对 70%，同日基准 58.3%，n=10）【v0.45.242 更正：58.3% 是**跑赢** SPY 的比例，看空单该比**跑输**比例
+   **40.7%**；仍只有 2 周、p=0.42】、决策档位变 59 行。BearBee 同样不是独立来源（数据全经信息素板中转、
    90.5% 恒看空），但现有设计**明确**把 contrarian 计入看空共振，改它是另一个设计决定。
 2. **共振加成不分方向。** `rule_score = adjusted × (1 + boost)` —— **看空共振也把分数往上抬**，推离看空入场闸。
    R2 那 10 笔「新获看空入场」主要就是拿掉了这种反向加成。这看起来是个独立缺陷，未修。
@@ -451,6 +681,9 @@ Guard 自己在 guard_bee.py:27 调共振时还没发布，看不到自己。
 R0 下 `final_score` 对 T+7 超额收益的逐日横截面 IC **−0.11**（周聚类 p=0.037 / 0.026，14 周里 9 周为负），
 两语料一致。**事后看到的、未做多重比较校正、只有 14 周、且是现行代码在历史输入上的重演**。
 不据此改任何东西；记为待验证。
+【v0.45.242 更正：**此数已过时。** 重演用的基础分是报告里**记录的**值，按的是旧权重（signal / risk_adj
+仍有 ~0.2，09-10 才归零）。按现行权重重算：基础分 IC **+0.074**、final **+0.009 / +0.032**。
+见 `experiments/resonance_boost_insample_report.md` 3.1。】
 
 ### 核验
 

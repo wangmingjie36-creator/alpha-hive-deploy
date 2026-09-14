@@ -12,6 +12,21 @@ import pytest
 
 import data_pipeline as dp
 
+# v0.45.243：兜底改走 `load_official_close`，快照必须带 last_trade_time_et / fetched_at_utc
+# 才判得出「官方收盘」。这里的 NVDA 08-28 是**新鲜**形状（贴收盘、收盘后抓）；
+# 盘中陈旧的真实样本见 tests/test_stale_intraday_consumers.py。
+_FRESH = {"price_at_fetch": 217.55, "price_source": "cboe_close",
+          "last_trade_time_et": "2026-08-28T15:59:59",
+          "fetched_at_utc": "2026-08-28T21:02:00+00:00", "vintage_date": "2026-08-28"}
+
+
+def _snaps(monkeypatch, by_date):
+    """桩掉 cloud_snapshot_loader 的 git 读取：`{date: {ticker: snap}}`。"""
+    import cloud_snapshot_loader as csl
+    monkeypatch.setattr(csl, "load_ticker",
+                        lambda d, t, **k: (by_date.get(d) or {}).get(t))
+    monkeypatch.setattr(csl, "available_dates", lambda *a, **k: sorted(by_date))
+
 
 def _hist(rows):
     idx = pd.to_datetime([d for d, _, _ in rows])
@@ -59,10 +74,7 @@ def test_uses_cloud_snapshot_when_target_day_close_is_nan(_yf, monkeypatch):
     _yf["hist"] = _hist([("2026-08-26", 209.66, 1.7e8),
                          ("2026-08-27", 227.98, 2.9e8),
                          ("2026-08-28", float("nan"), 1.9e8)])
-    monkeypatch.setitem(
-        __import__("sys").modules, "cloud_snapshot_loader",
-        type("M", (), {"load_ticker": staticmethod(
-            lambda d, t, **k: {"price_at_fetch": 217.55, "price_source": "cboe_close"})}))
+    _snaps(monkeypatch, {"2026-08-28": {"NVDA": _FRESH}})
 
     r = dp._fetch_historical_stock_data("NVDA", "2026-08-28")
     assert r["price"] == pytest.approx(217.55)
@@ -76,9 +88,7 @@ def test_no_snapshot_means_unavailable_not_previous_day(_yf, monkeypatch):
     """快照也没有时必须标不可用，**不许拿前一日冒充**。"""
     _yf["hist"] = _hist([("2026-08-27", 227.98, 2.9e8),
                          ("2026-08-28", float("nan"), 1.9e8)])
-    monkeypatch.setitem(
-        __import__("sys").modules, "cloud_snapshot_loader",
-        type("M", (), {"load_ticker": staticmethod(lambda d, t, **k: None)}))
+    _snaps(monkeypatch, {})
 
     r = dp._fetch_historical_stock_data("NVDA", "2026-08-28")
     assert r.get("_data_unavailable") is True
@@ -91,10 +101,9 @@ def test_normal_day_unaffected(_yf, monkeypatch):
     _yf["hist"] = _hist([("2026-08-26", 209.66, 1.7e8),
                          ("2026-08-27", 227.98, 2.9e8)])
     called = []
-    monkeypatch.setitem(
-        __import__("sys").modules, "cloud_snapshot_loader",
-        type("M", (), {"load_ticker": staticmethod(
-            lambda d, t, **k: called.append(1) or {"price_at_fetch": 1.0})}))
+    import cloud_snapshot_loader as csl
+    monkeypatch.setattr(csl, "load_official_close",
+                        lambda d, t, **k: called.append(1) or (1.0, "x"))
 
     r = dp._fetch_historical_stock_data("NVDA", "2026-08-27")
     assert r["price"] == pytest.approx(227.98)
@@ -106,11 +115,8 @@ def test_snapshot_price_must_be_finite_and_positive(_yf, monkeypatch):
     """快照里的价格本身也要校验，不能照单全收。"""
     _yf["hist"] = _hist([("2026-08-27", 227.98, 2.9e8),
                          ("2026-08-28", float("nan"), 1.9e8)])
-    for bad in (float("nan"), 0, -5, "217.55", None):
-        monkeypatch.setitem(
-            __import__("sys").modules, "cloud_snapshot_loader",
-            type("M", (), {"load_ticker": staticmethod(
-                lambda d, t, _b=bad, **k: {"price_at_fetch": _b})}))
+    for bad in (float("nan"), 0, -5, "217.55", None, True):
+        _snaps(monkeypatch, {"2026-08-28": {"NVDA": dict(_FRESH, price_at_fetch=bad)}})
         r = dp._fetch_historical_stock_data("NVDA", "2026-08-28")
         assert r.get("_data_unavailable") is True, f"快照价 {bad!r} 被当成了有效价"
 
@@ -122,10 +128,7 @@ def test_volume_ratio_withheld_on_snapshot_path(_yf, monkeypatch):
     """
     _yf["hist"] = _hist([("2026-08-2%d" % d, 200.0 + d, 1e8) for d in range(1, 8)]
                         + [("2026-08-28", float("nan"), 1.9e8)])
-    monkeypatch.setitem(
-        __import__("sys").modules, "cloud_snapshot_loader",
-        type("M", (), {"load_ticker": staticmethod(
-            lambda d, t, **k: {"price_at_fetch": 217.55, "price_source": "cboe_close"})}))
+    _snaps(monkeypatch, {"2026-08-28": {"NVDA": _FRESH}})
 
     r = dp._fetch_historical_stock_data("NVDA", "2026-08-28")
     assert r.get("volume_ratio") is None
