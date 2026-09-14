@@ -38,9 +38,10 @@ CBOE payload 的 `current_price` **跟着盘后交易走**，而 `last_trade_tim
 - **yfinance 官方收盘**：批量下载，30 只一次请求。与逐标的调用是两回事，
   不会触发限流雪崩（2026-08-26 扫描逐标的调用触发 487 次限流，
   同一天批量下载全程正常）。
-- **CBOE `prev_day_close`**：仅 T+1 可得。实测与官方收盘分毫不差
-  （CRM 205.69 = yfinance 8/25 收盘）。取用前**必须过 vintage 校验** ——
-  CDN 卡死的符号（实测 TMO 卡 44.5 小时）其 `prev_day_close` 指的是更早的日子。
+- **CBOE `close` / `prev_day_close`**：实测与官方收盘分毫不差
+  （CRM 205.69 = yfinance 8/25 收盘）。**归属必须由 payload 自己的 `last_trade_time`
+  推**（v0.45.243，见 `cboe_official_closes`）—— CDN 卡死的符号（实测 TMO 卡 44.5 小时）
+  指的是更早的日子；盘中文件的 `close` 是实时价、根本不是收盘。
 
 两源都在且分歧 > `DISPUTE_TOL` → **不修**，记入 disputed 待查。
 只有一个 → 修，但 source 标明单源。一个都没有 → 不动。
@@ -72,7 +73,6 @@ import os
 import sqlite3
 import sys
 from typing import Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -221,59 +221,59 @@ def _resolve_close(closes: Dict, avail: List[str], date: str, ticker: str):
     return None, None
 
 
-def _trading_day_before(d: str) -> Optional[str]:
-    """`d` 之前最近的一个交易日。判不了返回 None。"""
-    try:
-        import datetime as _dt
-        from is_trading_day import is_trading_day
-        x = _dt.date.fromisoformat(d) - _dt.timedelta(days=1)
-        for _ in range(10):
-            if is_trading_day(x)[0]:
-                return x.isoformat()
-            x -= _dt.timedelta(days=1)
-    except Exception:  # noqa: BLE001
-        pass
-    return None
+# CBOE 交叉印证逐标的判决计数的键（进 stats["cboe_verdicts"]，main 里打出来）
+_CBOE_FETCH_FAILED = "fetch_failed"
 
 
-def _session_of_close(cdn_ts_utc: str) -> Optional[str]:
-    """CBOE payload 的 `close` 属于哪个交易日 —— 由 CDN 生成时刻决定。
+def cboe_closes_from_payload(data: dict, now_et=None,
+                             tally: Optional[Dict[str, int]] = None) -> Dict[str, float]:
+    """一份 CBOE payload（`data` 段）→ `{所属交易日: 官方收盘}`。纯函数，判据全在 cboe_options。
 
-    规则（2026-08-27 实拉四只标的验证，见 tests）：
-    **`close` = 文件生成时刻「最近一个已经收盘的交易日」的官方收盘价。**
-
-        NVDA 文件 08-27 08:31 ET（盘前） → close=209.66 = **8/26** 收盘
-        TMO  文件 08-26 21:18 ET（盘后） → close=633.71 = **8/26** 收盘
-
-    刻意**不用** `last_trade_time` 定这个日期：盘前它仍停在上一场的最后成交，
-    无法区分「8/27 盘前的新文件」与「8/26 的旧文件」——初版就栽在这。
-    也刻意**不用** `prev_day_close`：它是再往前一天，归属同样要靠本函数推，
-    多绕一层没有收益（v0.45.47 两次修错都源于此）。
+    `close` 仅当 `close_verdict == official`；`prev_day_close` 按 `prev_close_session` 归属。
+    两者同日时（不会发生：前者是 last_trade 那天、后者是它的前一交易日）以 close 为准。
     """
-    try:
-        import datetime as _dt
-        from is_trading_day import is_trading_day
-        ts = _dt.datetime.strptime(cdn_ts_utc, "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=_dt.timezone.utc)
-        et = ts.astimezone(ZoneInfo("America/New_York"))
-        d = et.date()
-        if is_trading_day(d)[0] and et.time() >= _dt.time(16, 0):
-            return d.isoformat()
-        return _trading_day_before(d.isoformat())
-    except Exception:  # noqa: BLE001 - 推不出就不做交叉印证，不猜
-        return None
+    import math
+    import cboe_options as co
+    got: Dict[str, float] = {}
+    verdict, session = co.close_verdict(data, now_et)
+    if tally is not None:
+        tally[verdict] = tally.get(verdict, 0) + 1
+    if verdict == co.CLOSE_OFFICIAL and session is not None:
+        try:
+            px = float(data.get("close"))
+        except (TypeError, ValueError):
+            px = float("nan")
+        if math.isfinite(px) and px > 0:
+            got[session.isoformat()] = px
+    pc = co.prev_close_session(data)
+    if pc:
+        got.setdefault(pc[0].isoformat(), pc[1])
+    return got
 
 
-def cboe_official_closes(tickers: List[str]) -> Dict[str, Tuple[str, float]]:
-    """CBOE `close` → `{ticker: (该收盘价所属交易日, close)}`。
+def cboe_official_closes(tickers: List[str],
+                         verdicts: Optional[Dict[str, int]] = None) -> Dict[str, Dict[str, float]]:
+    """CBOE → `{ticker: {该价所属交易日: 官方收盘}}`，一只最多两条（`close` 与 `prev_day_close`）。
 
-    与 yfinance 官方收盘互为独立来源，用于交叉印证。日期由 payload 的 CDN
-    生成时刻自述（`_session_of_close`），**不假设它就是「今天的前一交易日」**：
-    CDN 对不同符号刷新进度不同（2026-08-26 实测 TMO 落后一整个 session）。
+    与 yfinance 官方收盘互为独立来源，用于交叉印证。**归属由 payload 的 `last_trade_time`
+    自述**（`cboe_options.close_verdict` / `prev_close_session`，与数据管道同一份判据）。
 
-    走 `_fetch_cboe_payload`，因此继承 v0.45.39 的 vintage 校验。
+    v0.45.243 之前按 CDN 顶层 `timestamp` 推「最近一个已收盘交易日」，并假设 `close`
+    就是那天的收盘。两处不成立：
+      - **盘中** `close` 就是实时成交价（2026-09-14 10:55 ET 实拉：T close 26.2299 =
+        current_price；NVDA close 210.47，而 09-11 收盘 218.29）。旧规则把它归到上一交易日
+        ⇒ 盘中跑本工具，每只待校正行都会拿实时价去印证、报出一片假的「两源分歧拒改」。
+      - **收盘后拿到盘中生成的文件**（v0.45.234）：`close` 是中午的价，timestamp 却在收盘后。
+    改为：`close` 只在 close_verdict == official 时采用；`prev_day_close` 归前一交易日——
+    云端 290 份实测 289 份 ≤0.01%（含 71 份陈旧文件），盘中实拉 T 26.06 / NVDA 218.29 也对。
+    所以盘中跑时印证照样做得成，用的是 prev_day_close 而不是实时价。
+
+    `verdicts` 传入 dict 则逐标的累计 close 的判决（official / session_open /
+    stale_intraday / unverifiable / fetch_failed）——「印证了 0 只」得分得清是
+    「没抓到」还是「抓到了但 close 不是收盘」。
     """
-    out: Dict[str, Tuple[str, float]] = {}
+    out: Dict[str, Dict[str, float]] = {}
+    tally = verdicts if verdicts is not None else {}
     try:
         import cboe_options as co
         import urllib.request as _u
@@ -281,26 +281,24 @@ def cboe_official_closes(tickers: List[str]) -> Dict[str, Tuple[str, float]]:
     except ImportError:
         return out
     for t in sorted(set(tickers)):
-        # 只发一次请求：顶层 `timestamp` 定 session，`data` 过 v0.45.39 的
-        # vintage 闸。走 co._fetch_cboe_payload 会丢掉顶层字段且要再发一次。
+        # 自己发请求而不走 co._fetch_cboe_payload：后者在「vintage 不等于此刻应有日期」时
+        # 返回 None。归属现在由 last_trade_time 自述——盘中跑时 CDN 还没刷新的文件
+        # （last_trade 是上一场 15:59:59），其 close 恰是要印证的那天的官方收盘，
+        # 那道闸只会丢掉对得上的数据。旧代码的 `_payload_is_stale` 跳过同理已删。
         try:
             raw = _u.urlopen(_u.Request(
                 f"https://cdn.cboe.com/api/global/delayed_quotes/options/"
                 f"{co._cboe_symbol(t.upper())}.json",  # noqa: SLF001
                 headers={"User-Agent": "Mozilla/5.0"}), timeout=15).read()
-            j = _j.loads(raw)
+            data = _j.loads(raw).get("data") or {}
         except Exception:  # noqa: BLE001
+            data = {}
+        if not data:
+            tally[_CBOE_FETCH_FAILED] = tally.get(_CBOE_FETCH_FAILED, 0) + 1
             continue
-        data = j.get("data") or {}
-        try:
-            if co._payload_is_stale(t, data):  # noqa: SLF001 - 复用既有闸，不自写
-                continue
-        except Exception:  # noqa: BLE001
-            pass
-        px = data.get("close")
-        sess = _session_of_close(j.get("timestamp") or "")
-        if px and sess:
-            out[t] = (sess, float(px))
+        got = cboe_closes_from_payload(data, tally=tally)
+        if got:
+            out[t] = got
     return out
 
 
@@ -331,10 +329,13 @@ def correct(conn: sqlite3.Connection, *, since: Optional[str] = None,
     # 而不是全部 52 只（全抓会串行拉 52 次大 JSON，白等 5 分钟）
     prev_td = _prev_trading_day()
     _pt = sorted({r["ticker"] for r in rows if r["date"] == prev_td}) if prev_td else []
-    cboe = cboe_official_closes(_pt) if (use_cboe and _pt) else {}
+    cboe_verdicts: Dict[str, int] = {}
+    cboe = cboe_official_closes(_pt, verdicts=cboe_verdicts) if (use_cboe and _pt) else {}
     if _pt and use_cboe:
-        _log.info("CBOE 交叉印证：%s 有 %d 只样本，已取回 %d 只的官方收盘（CBOE close）",
-                  prev_td, len(_pt), len(cboe))
+        _n_hit = sum(1 for v in cboe.values() if prev_td in v)
+        _log.info("CBOE 交叉印证：%s 有 %d 只样本，取回其中 %d 只该日官方收盘"
+                  "（close 判决 %s）", prev_td, len(_pt), _n_hit,
+                  ", ".join(f"{k}={v}" for k, v in sorted(cboe_verdicts.items())) or "无")
     elif _pt:
         # --no-cboe 时别打「已取回 0 只」——那看起来像试过且失败了
         _log.info("CBOE 交叉印证：已按 --no-cboe 跳过（%s 有 %d 只样本可印证）",
@@ -343,7 +344,8 @@ def correct(conn: sqlite3.Connection, *, since: Optional[str] = None,
     avail = sorted({d for d, _ in closes})
     stats = {"rows": len(rows), "corrected": 0, "already_ok": 0,
              "no_source": 0, "disputed": 0, "skipped_done": 0,
-             "cross_checked": 0, "prior_close_used": 0, "worst": []}
+             "cross_checked": 0, "prior_close_used": 0, "worst": [],
+             "cboe_verdicts": cboe_verdicts}
     cur = conn.cursor()
     import datetime as dt
     now = dt.datetime.now().isoformat(timespec="seconds")
@@ -374,9 +376,8 @@ def correct(conn: sqlite3.Connection, *, since: Optional[str] = None,
             continue
 
         # 交叉印证：只在 CBOE 那个价**确实属于本行日期**时才做（见 cboe_official_closes）
-        _c = cboe.get(r["ticker"])
-        if _c and _c[0] == r["date"]:
-            other = _c[1]
+        other = (cboe.get(r["ticker"]) or {}).get(r["date"])
+        if other is not None:
             if abs(other / truth - 1) > DISPUTE_TOL:
                 stats["disputed"] += 1
                 _log.warning("两源分歧，拒绝校正 %s %s：yfinance=%.4f CBOE=%.4f",
@@ -450,6 +451,11 @@ def main() -> int:
               st["skipped_done"], st["no_source"], st["disputed"])
     _log.info("  其中经 CBOE 交叉印证：%d 条 | 非交易日取前一交易日收盘：%d 条",
               st["cross_checked"], st.get("prior_close_used", 0))
+    _cv = st.get("cboe_verdicts") or {}
+    if _cv:
+        # 谁会红？—— 「印证 0 条」要分得清是没抓到、盘中跑（close 是实时价）还是文件陈旧
+        _log.info("  CBOE close 判决：%s（非 official 的只用 prev_day_close 印证）",
+                  ", ".join(f"{k}={v}" for k, v in sorted(_cv.items())))
     _cov = st.get("close_coverage")
     if _cov and _cov[0] < _cov[1]:
         _log.info("  ⚠️ 官方收盘覆盖 %d/%d 只标的 —— 「无来源」受此影响，可稍后重跑",

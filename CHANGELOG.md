@@ -13,7 +13,98 @@
 
 ## [0.45.244] — 2026-09-14 — 占位（进行中：import 冻结路径扫描器盲区——模块级调用同模块函数、函数体求值 PATHS./__file__ 的形态看不见，补扫描 + KNOWN 白名单）
 
-## [0.45.243] — 2026-09-14 — 占位（进行中：CBOE 盘中陈旧价的两个未覆盖消费者——回填兜底读云快照 price_at_fetch 不判陈旧 + close_correction 盘中/陈旧文件把现价归到上一会话）
+## [0.45.243] — 2026-09-14 — CBOE 盘中价的两个漏网消费者：补跑兜底照单全收云端快照的中午价；close_correction 把盘中实时价当上一场收盘去印证
+
+v0.45.234 让 `official_price` 认出「收盘后拿到盘中生成的 payload」，数据管道据此拒收。但另有两处**不经 `official_price`**、
+自己推断「这是哪一场的收盘」：
+
+1. **补跑兜底** `data_pipeline._fetch_historical_stock_data`：yfinance 缺目标日收盘时直接取 `cloud_snapshot_loader.load_ticker()["price_at_fetch"]`，
+   不看 `price_source` 也不看 `last_trade_time_et`。pheromone.db 2026-08-28 的四行就是这么进的库：
+
+   | 标的 | 入库价 | 官方收盘 | 快照 last_trade | 快照标签 |
+   |---|---|---|---|---|
+   | DE | 624.85 | 630.33 | 14:55:46 | `cboe_close` |
+   | TMO | 626.325 | 622.18 | 09:45:27 | `cboe_close` |
+   | CVX | 201.44 | 201.86 | 14:58:31 | `cboe_close` |
+   | VZ | 49.985 | 50.10 | 15:31:50 | `cboe_close` |
+
+   v0.45.234 之前产出的快照**陈旧也标 `cboe_close`** ⇒ 必须按 `last_trade_time_et` 判，不能看标签。
+2. **`close_correction.cboe_official_closes` / `_session_of_close`**：按 CDN 顶层 `timestamp` 推「最近一个已收盘交易日」，假设 `close` 就是那天的收盘。
+   盘中 `close == current_price`（2026-09-14 10:55 ET 实拉：T close 26.2299 = current_price、prev_day_close 26.06；NVDA close 210.47、prev_day_close 218.29）
+   ⇒ 盘中跑本工具，实时价被当成上一场收盘去印证。收盘后拿到的盘中文件同理被归到当天。
+   原测试里那条「盘中 → 前一交易日」参数是**推断**，从未实拉验证过（同一组参数里另两条盘前/盘后是实拉的）。
+
+**验证语料**：`origin/cloud-snapshots` 290 份（08-28~09-11，17:02 ET 抓），对 yfinance 官方收盘（2026-09-14 批量下载）。
+- 60s 判据复现：64 份判陈旧且价错、7 份判陈旧但价在 0.05% 内、219 份判新鲜且价对、**判新鲜而价错 0 份**。
+- ⭐ **`prev_day_close` 不随文件陈旧而错**：按「`last_trade_time` 那一场的前一交易日」归属，289/290 份 ≤0.01%、1 份 <0.05%
+  （BILI 16.76 vs 16.765，舍入），**含全部 71 份陈旧文件**、含跨劳动节（09-08 DE 的 prev_day_close 693.53 = 09-04 收盘）。
+  盘中实拉也成立（T 26.06、NVDA 218.29 = 09-11 收盘）。这是本版两个修复的共同支点。
+
+### Added — `cboe_options.py`（判据只写一份）
+- `close_verdict(payload, now_et)` → `(official | session_open | stale_intraday | unverifiable, 场次日期)`：
+  复用 `_generated_mid_session`（v0.45.234 的 60s 判据），只补一条「那场还没收」。`now_et` 传「这份 payload 是什么时候拿到的」。
+  用例钉住它与 `official_price` 对全部真实快照的陈旧判断逐份一致（防长出第二条规则）。
+- `prev_close_session(payload)` → `(所属交易日, prev_day_close)`；无 last_trade / 价非有限正数 / 日历不可用 → None。
+
+### Fixed — 补跑兜底（消费者 1）
+- 新增 `cloud_snapshot_loader.load_official_close(date, ticker)` → `(价 | None, 判决)`，`data_pipeline` 只认它的结论：
+  1. 当日快照 `close_verdict`（now = 快照 `fetched_at_utc`）为 official 且场次 == date → `price_at_fetch`（`cloud_snapshot_close`）
+  2. 否则（含当日无快照）→ **其后第一份快照的 `prev_day_close`**，其自述归属必须恰为 date（`cloud_snapshot_next_prev_day_close`）。
+     隔了交易日（如 09-05 没跑）就对不上 → None，不需要另算日历。
+  3. 都不行 → 不可用，`_reason` 仍是 `no_close_on_<date>`，新增 `_snapshot_verdict`（`snapshot_stale_intraday` / `snapshot_session_open` /
+     `snapshot_no_snapshot` / `snapshot_error:<异常类>`…）+ WARNING——「快照是盘中价」与「没快照 / 兜底坏了」分得开。
+     旧代码取价异常只打 debug，现改 WARNING。
+- **陈旧时选「标不可用」而不是「照用 + 降级标签」**：这个价的终点是 `price_at_predict`（T+7 入场价），而 predictions 表**没有价格来源列**
+  （`price_source` 只活在 StockData dict 里）⇒ 降级标签到不了账本，在库里与官方收盘无从分辨。实时管道（v0.45.234）退用陈旧价是在与
+  「price=0 整只跳过」权衡；补跑缺一行是少一个样本，错一个入场价是污染一个样本。何况第 2 步能拿到真官方收盘。
+- 恢复路径的 StockData 带 `price_source`（v0.45.234 加的字段，此前这条路径留空）。
+- **全量重放**（真 git 读 `origin/cloud-snapshots`，290 份逐只调 `load_official_close` 对官方收盘）：旧兜底 64 份错价；
+  新兜底 219 份取自身价、59 份取次日 prev_day_close，**0 份错**，12 份标不可用（09-11 没有后续快照 + 次日缺该标的，如 08-28 TMO）。
+  08-28 DE/CVX/VZ 分别还原为 630.33 / 201.86 / 50.10。
+
+### Fixed — `close_correction`（消费者 2）
+- 删 `_session_of_close` 与仅它使用的 `_trading_day_before`。`cboe_official_closes` 改返回 `{ticker: {所属交易日: 价}}`，每只最多两条：
+  `close` 仅当 `close_verdict == official`；`prev_day_close` 按 `prev_close_session`。纯函数部分抽成 `cboe_closes_from_payload`（可离线测）。
+  ⇒ **盘中跑时印证照样做得成**，用的是 prev_day_close 而不是实时价。
+- 删掉 `_payload_is_stale` 跳过：归属由 last_trade 自述，盘中 CDN 还没刷新的文件（last_trade 是上一场 15:59:59）其 close 恰是要印证那天的
+  官方收盘，那道闸只会丢掉对得上的数据。
+- 观测：`stats["cboe_verdicts"]` 逐标的计 close 判决（含 `fetch_failed`），日志与 CLI 汇总各打一行——「印证了 0 条」分得清是没抓到、盘中跑还是文件陈旧。
+- **生产库副本实跑 dry-run**（2026-09-14 12:18 ET 盘中，`--since 2026-09-11`，未 `--apply`）：
+  - 旧代码：`两源分歧拒改 2`（T：CBOE=26.38 即当时实时价 vs yfinance 26.06；TMUS：183.31 vs 182.33），印证 0 条
+  - 新代码：`两源分歧拒改 0`，需校正 2（VKTX 32.34→31.98、TMUS 182.82→182.33）且**都经 CBOE 印证**；close 判决 session_open=26 / official=3（BILI/DE/TMO 文件还停在 09-11 收盘）/ fetch_failed=1
+  - ⚠️ 两次跑 yfinance 批量下载各自部分失败（旧缺 NVDA/VKTX/BRK-B，新缺 NVDA/DELL/VZ/T），T 在新跑里无来源，可直接对照的是 TMUS。
+
+### Changed — `cloud_snapshot_fetch.py`（写入端：标记，不拒收）
+- manifest 新增 `price_stale_intraday`（标的列表），控制台打一行。**不拒收**：链 / IV 期限结构 / 全链 OI 仍是当天真数据
+  （快照是当日期权链，跳过一天永久没有，见 v0.45.183），`prev_day_close` 不受影响；消费端已按 last_trade 判，不依赖标签。
+  退出码不变（不是失败）。`price_source` 自 v0.45.234 合进 cloud-snapshots 分支起就会如实标 `cboe_stale_intraday`，注释补上旧快照不可信这一句。
+
+### Added — 测试
+- `tests/test_stale_intraday_consumers.py`（48 条）：全部用真实快照原值（08-28 DE/TMO/CVX/VZ、08-31、09-01 TMO、09-04→09-08 DE 跨劳动节、09-10/11 T）
+  与 09-14 盘中实拉值（⚠️ 盘中两份的 last_trade 按 15 分钟延迟**重建**，close/prev_day_close 为实拉）。含两条旧 bug 的 `correct()` 端到端重演、
+  「真分歧仍拒改」防过度修复、次日快照隔了交易日不许错归属、标签不可信（双向）。
+- `tests/test_cloud_snapshot_vintage.py`：manifest 点名盘中文件、照常落盘、退出码 0。
+- 变异自证（逐个改回、跑 5 个相关文件）：去掉 session_open 分支 / close 不看判决 / 兜底照用 price_at_fetch / 次日 prev_day_close 不验归属 /
+  判据用本机钟代替抓取时刻 / prev_day_close 归属差一天 / 补跑绕过 loader / manifest 列表置空 —— **8 处各自变红**。
+
+### Changed — 测试适配
+- `tests/test_cloud_snapshot_price.py`：假模块（只有 `load_ticker`）改为桩真模块的 `load_ticker` + `available_dates`，快照补 last_trade / fetched_at；
+  非法价格用例加 `True`（`isinstance(True, int)` 为真）。
+- `tests/test_close_correction.py`：`cboe=` 夹具改新形状；删两条 `_session_of_close` 用例（说明见文件内注释）。
+- `tests/test_historical_price_anchor.py`：补桩 `available_dates`——新兜底会再问后续快照，只桩 `load_ticker` 挡不住那次 `git ls-tree`。
+
+### Added — `ic_rerun_readiness._COHORT_HISTORY`
+- 追加 2026-09-14 / v0.45.243：补跑兜底改变 `price` / `stock_price` ⇒ `final_score` 输入口径变。**与 v0.45.234 共用标签、作废 0 条**——
+  只在补跑且 yfinance 缺该日收盘时触发；本世代（≥09-14）此前没有任何补跑产出的行（09-14 predictions 0 条），补跑更早日期落进的是已被排除的旧世代。
+  `close_correction` 只动 `price_at_predict` 的校正判定、须人工 `--apply`，不是评分输入，不另立边界。
+
+### 未做 / 待定
+- **未改写历史**：08-28 DE/TMO/CVX/VZ 与 v0.45.234 dry-run 列出的 40 行仍是原值。现在可以放心带 CBOE 印证跑 `close_correction.py` dry-run
+  （不必再 `--no-cboe`）；落笔 `--apply` + `backfill_dir_accuracy.py --all` 需用户点头。
+- **未补跑** 08-28：修复只管以后的补跑。
+- 全量 pytest（合入 v0.45.238 之后）：4505 passed，唯一失败 `test_economic_calendar.py::TestCoverageHorizon`（NFP/CPI 表剩 81 天 < 90 天阈值，按日期必然变红的设计告警，与本版无关，未动）。
+- 顺带发现未修：`official_price` 的盘中分支用 `is_market_open`（固定 16:00），半日市 13:00 后到 16:00 之间会把盘后 `current_price` 当盘中价取。
+  定时扫描在 17:00 ET 跑，不受影响；`close_verdict` 已按 `session_close_et` 判，也不受影响。
 
 ## [0.45.242] — 2026-09-14 — 占位（进行中：共振加成前瞻检验预注册 + 更正 final_score IC −0.11 过时 / R2 基准写错）
 
