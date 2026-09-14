@@ -558,6 +558,30 @@ def cohort_boundary_evidence(home: Path) -> dict:
     return {"marker_first_seen": first, "boundary": boundary, "verdict": verdict}
 
 
+def resonance_forward_status(home: Path, db: Path, today: Optional[str] = None) -> Dict:
+    """顺带承载「共振加成前瞻检验」（v0.45.242）的进度。
+
+    为什么挂在这里：它和本工具是同一种事 —— 到期条件是**数据条件**（攒够合格周），
+    不是日期；而本工具已经每周被只读诊断任务调用、摘要行会被原样写进周报。
+    另起一个定时任务 = 多一处没人记得的配置。
+
+    ⚠️ 失败**不改变本工具的判定与退出码**，但必须出现在摘要里（「谁会红？」）：
+    任何异常都渲染成一行「无法判定」，而不是吞掉。
+    `home` 与 `cohort_boundary_evidence` 同理必传 —— 归档是数据，跟着 `--db` 走。
+    """
+    try:
+        import importlib.util
+        path = ALPHAHIVE_DIR / "experiments" / "resonance_boost_forward_test.py"  # 代码锚点
+        spec = importlib.util.spec_from_file_location("resonance_boost_forward_test", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fres = mod.run(home=home, db_path=str(db), today=today)
+        return {"status": fres.get("status"), "line": mod.status_line(fres)}
+    except Exception as e:  # noqa: BLE001 —— 渲染成可见的一行，不吞
+        return {"status": "cannot_judge",
+                "line": f"⚠️ 共振加成前瞻检验无法判定：{type(e).__name__}: {e}"}
+
+
 _BOUNDARY_VERDICT_TEXT = {
     "matches": "✅ 与归档印记一致",
     "boundary_too_early": "🚨 边界写早了 —— 边界至印记之间的样本是旧口径，会被混算，请追加一条更正",
@@ -590,6 +614,8 @@ def main() -> int:
         return 3
 
     res = assess(db_path=db, target_ic=args.target_ic, today=args.today)
+    fwd = resonance_forward_status(db.parent, db, today=args.today)
+    res["resonance_forward_test"] = fwd
 
     if args.out:
         try:
@@ -603,7 +629,8 @@ def main() -> int:
         print(json.dumps(res, indent=2, ensure_ascii=False))
         return 0 if res["ready"] else 1
     if args.quiet:
-        print(summary_line(res))
+        # 同一行：周度任务的约定是「把那一行摘要原样写进周报」，另起一行可能被漏抄
+        print(summary_line(res) + "｜" + fwd["line"])
         return 0 if res["ready"] else 1
 
     c = res["cohort"]
@@ -638,6 +665,7 @@ def main() -> int:
         print()
     print("━" * 72)
     print(summary_line(res))
+    print(fwd["line"])
     if res["ready"]:
         print()
         print("  该跑:")
