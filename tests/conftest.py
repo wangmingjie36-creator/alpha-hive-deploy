@@ -11,7 +11,6 @@ import tempfile
 # 确保项目根目录在 sys.path 中
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
 # ==================== 环境隔离 ====================
 
 # ==================== cwd / sys.path 隔离 ====================
@@ -979,6 +978,59 @@ def _guard_production_artifacts():
         "再在函数体里解析。结构守卫见 "
         "`tests/test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread`。")
 
+
+# ==================== 仓库根「默认拒绝」总闸（v0.45.233） ====================
+#
+# 上面那道只盯 6 个点名的产物；本闸盯仓库根下**除代码以外的一切**，不维护清单。
+# 两道都留：上面那道是纵深防御，且 `_GUARDED_PRODUCTION_ARTIFACTS` 必须是本闸
+# 覆盖面的子集——`tests/test_root_data_guard.py` 断言这一点，谁把其中一项划进
+# 「代码」谁红。「代码」怎么界定、为什么这么界定，全在 `tests/_root_data_guard.py`
+# 的 docstring，这里不抄（抄一份就是快照）。
+#
+# 为什么「之前」的指纹取在 `pytest_sessionstart` 而不是 session fixture 的 setup：
+# fixture 最早也要等**收集结束**才跑，而冻结路径那一族正是在收集期 import 时
+# 落盘的（v0.45.150 实测收集结束时 `ALPHA_HIVE_HOME` 仍是 `<UNSET>`）。在 fixture
+# 里取「之前」，收集期写进仓库根的东西会被算进基线、永远不红。
+# 「之后」放在 session fixture 的 teardown 里比对，这样失败是一条正常的 ERROR，
+# 而不是 sessionfinish 里一行容易被忽略的输出。
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _root_data_guard  # noqa: E402
+
+_ROOT_FP_BEFORE = pytest.StashKey[dict]()
+
+
+def pytest_sessionstart(session):
+    session.config.stash[_ROOT_FP_BEFORE] = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_repo_root_default_deny(request):
+    """整个 session（含收集期）跑完，仓库根下的非代码内容必须一个字节都没变。
+
+    ⚠️ 与上面那道一样是 session 级的：红在整轮末尾，不指出是哪条测试写的。
+    定位：对红出来的路径 patch `builtins.open` / `os.makedirs` / `sqlite3.connect`
+    记 `nodeid` 与调用栈；或二分跑测试文件。
+    ⚠️ 在**生产 checkout** 里跑时，每日扫描、别的 session 往生产目录写的东西都会让它红——
+    那是真实存在的「测试与生产写同一批文件」的时间窗，不是假警报（数据根迁移阶段 5 之后才会消失）。
+    """
+    before = request.config.stash.get(_ROOT_FP_BEFORE, None)
+    late = before is None
+    if late:   # sessionstart 没调到本 conftest（非 initial conftest）：退回 setup 时取，并在报错里注明
+        before = _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD)
+
+    yield
+
+    changes = _root_data_guard.diff(before, _root_data_guard.fingerprint(_REPO_ROOT_FOR_GUARD))
+    assert not changes, (
+        f"测试往**仓库根**写了非代码内容（checkout 根目录 = {_REPO_ROOT_FOR_GUARD}）：\n"
+        f"{_root_data_guard.format_diff(changes)}\n\n"
+        + ("⚠️ 基线取自 session fixture setup（sessionstart 未生效），收集期写入不在本次比对范围内。\n"
+           if late else "")
+        + "被测代码的写入路径绕过了 `ALPHA_HIVE_HOME` 隔离：多半是 `Path(__file__).parent / 数据名`、"
+        "cwd 相对路径，或把 `PATHS.*` 求值成了模块级常量 / 类属性 / 默认参数。"
+        "改成调用时读 `PATHS.*`。\n"
+        "**不要**往 `tests/_root_data_guard.py` 的豁免里加数据路径——那里只放人写的代码。")
 
 # ==================== hive_logger 文件日志隔离（v0.45.239） ====================
 #

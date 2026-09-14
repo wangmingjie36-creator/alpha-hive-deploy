@@ -17,11 +17,10 @@ from typing import Dict, List, Optional
 try:
     from hive_logger import PATHS, get_logger
     _log = get_logger("pead")
-    _CACHE_DIR = str(PATHS.cache_dir)
 except ImportError:
     import logging
+    PATHS = None
     _log = logging.getLogger("pead")
-    _CACHE_DIR = os.path.join(os.path.dirname(__file__), ".cache")
 
 try:
     import yfinance as yf
@@ -34,9 +33,22 @@ _CACHE_TTL_DAYS = 7   # PEAD 结果缓存 7 天（财报历史不频繁变化）
 # 缓存 I/O
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _cache_dir() -> str:
+    """缓存目录，**调用时**求值（v0.45.233）。
+
+    原先是模块级 `_CACHE_DIR = str(PATHS.cache_dir)`（藏在 try 里，v0.45.150 普查时窄版 AST 漏掉的那处）：
+    pytest 收集期 import 本模块时 `_isolate_env` 还没设 `ALPHA_HIVE_CACHE_DIR` ⇒ 冻成 checkout 根的 `cache/`，
+    整轮测试的 `pead_<T>.json` 都写进仓库（v0.45.233 仓库根默认拒绝总闸的基线实测抓到 ABBV / NVDA 两份）。
+    """
+    if PATHS is not None:
+        return str(PATHS.cache_dir)
+    return os.path.join(os.path.dirname(__file__), ".cache")
+
+
 def _cache_path(ticker: str) -> str:
-    os.makedirs(_CACHE_DIR, exist_ok=True)
-    return os.path.join(_CACHE_DIR, f"pead_{ticker.upper()}.json")
+    cache_dir = _cache_dir()
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, f"pead_{ticker.upper()}.json")
 
 
 def _load_cache(ticker: str) -> Optional[Dict]:
