@@ -109,6 +109,7 @@ def counters() -> Dict[str, Optional[dict]]:
         _log.debug("cboe stats 不可得: %s", e)
     # v0.45.238：期权快照槽位。`session_mismatch` 非零 = 槽位里躺着别的会话的数据
     # （被弃用重算）；`hits_before_close` 非零 = 本轮期权指标用了盘中冻结的快照。
+    # 这两项自 v0.45.249 起按**份数**计（同一份快照一个进程只计一次），hits/writes 仍按调用次数。
     try:
         import options_analyzer
         out["options_snapshot"] = options_analyzer.snapshot_slot_stats()
@@ -272,6 +273,6 @@ def summary_line(snap: dict) -> str:
     os_ = c.get("options_snapshot")
     os_s = "—" if os_ is None else (
         f"写入{os_.get('writes', '?')}/命中{os_.get('hits', '?')}"
-        f"/会话不符弃用{os_.get('session_mismatch', '?')}/盘中快照命中{os_.get('hits_before_close', '?')}")
+        f"/会话不符弃用{os_.get('session_mismatch', '?')}份/盘中快照命中{os_.get('hits_before_close', '?')}份")
     return ("耗时 " + " | ".join(parts) +
             f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}")

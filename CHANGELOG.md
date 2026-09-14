@@ -5,7 +5,28 @@
 
 ---
 
-## [0.45.249] — 2026-09-14 — 占位（进行中：期权快照观测点按快照份数去重——同一份快照一轮扫描只警告/计数一次）
+## [0.45.249] — 2026-09-14 — 期权快照观测点按份数去重：同一份盘中/错会话快照一轮扫描只警告、只计数一次
+
+v0.45.238 的观测点按**调用**计。一只标的一轮扫描要调 3~4 次 `analyze()`（OracleBee / BearBee / advanced_analyzer / 日报收尾），
+一份盘中冻结的快照会报 3~4 遍 WARNING，一天可达上百条；`hits_before_close` 也读不出「几份快照有问题」。
+`session_mismatch` 同形：弃用后重取若失败、文件没被重写，后续每次调用都再读到同一份。
+
+### Changed
+- `options_analyzer.py`：新增 `_snap_count_once(key, ident)`，同一进程内同一 `(事件, 快照)` 只计一次。
+  首次打 WARNING，之后降为 DEBUG（`_log.log(级别, …)`，排查时开 DEBUG 仍能看到每次命中）。
+  - `hits_before_close` / `session_mismatch`：去重键 = `(快照路径, _snapshot_timestamp)`。**带时间戳**是为了
+    同一路径被重写成另一份快照后再出事照样会报，不被旧记录吞掉。
+  - `calendar_fallback`：键 = 会话日期，日历不可用时每个会话日只报一次（原来每次调用都警告）。
+  - `hits` / `writes` / `writes_before_close` 不变，仍按次数（前两者是分母；写入本身不重复）。
+  - `reset_snapshot_slot_stats()` 同时清空去重表。
+- `scan_timing.py`：日志摘要行这两项改标「份」，注释写明口径。
+- **评分输入不变**（只动日志级别与计数口径）⇒ 不需要世代边界。
+
+### Added
+- `tests/test_snapshot_session_slot.py::TestReportedOncePerSnapshot`（6 条）：同一份盘中快照调 4 次 ⇒ `hits=4`、
+  `hits_before_close=1`、WARNING 1 条；重取一直失败的错会话快照调 4 次 ⇒ 计 1、警告 1；两只标的交替 ⇒ 各记一次；
+  同路径重写成新快照 ⇒ 再记一次；日历退回每会话日一次；reset 后可重新报。
+  **变异实测**：去掉去重 ⇒ 4 条红；去重键去掉时间戳 ⇒「重写后再报」红；reset 不清表 ⇒ 2 条红。
 
 ## [0.45.248] — 2026-09-14 — 占位（进行中：commit -- <名字> 会拆开别的 session 已暂存、跨出白名单目录的 rename——补 rename 探测）
 
