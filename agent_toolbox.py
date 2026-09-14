@@ -48,6 +48,7 @@ v0.45.204 续做**方法粒度**：`GitHubTool` 是活类，但类里的方法�
 import os
 import shlex
 import subprocess
+import time
 from typing import Dict, List, Optional, Any
 
 from hive_logger import get_logger
@@ -215,24 +216,44 @@ class GitHubTool:
         失败都当成「该产物本次未生成」容忍，一条没暂存上就回「白名单未匹配到任何文件」——
         残留 `.git/index.lock` 时也是这句（git 先拿锁再匹配 pathspec，锁在时每条都是锁错误）。
         现在只容忍 pathspec 未匹配；别的失败的原因原样回给调用方（进 status.json 与告警）。
-        ⚠️ 仍不管的一种：部分 add 失败、部分成功时照常提交成功的那部分，失败的产物留在工作区，
-        无告警（实测想不出生产里只坏一部分的触发条件，锁是整库级的）。
+
+        **部分失败**（v0.45.227）：别的进程只是**短暂**占着索引锁（刷新索引的 `git status`，
+        生产克隆上实测持锁 55–72ms）时，只挂撞上的那一条，其余照常暂存、提交照样成功。
+        v0.45.225 这里写着「实测想不出触发条件，锁是整库级的」——那是推理不是实测，且把
+        「锁一直在」（全挂、提交也挂、会告警）和「锁占一下」（只挂一条、报成功、零告警）混成了一件事。
+        现在：失败的条目等 `_ADD_RETRY_DELAY_S` 后统一重试一次；重试后仍失败的，提交照做，
+        原因放进 `add_errors`（去重后的首行列表）。「提交成功但产物没全进 git」这件事本身由
+        `report_deployer` 提交后再看一次工作区来判，不靠这里列举失败原因。
         """
+        add_reasons: List[str] = []
         if paths:
             # 逐条暂存：pathspec 无匹配是预期失败（该产物本次未生成），容忍；别的失败要带原因回去
             staged_any = False
-            add_errors: List[str] = []
+            failed: Dict[str, str] = {}
             for p in paths:
-                r = self.run_git_cmd(f"git add -- {shlex.quote(p)}")
-                if r["success"]:
-                    staged_any = True
-                elif "did not match any files" not in (r.get("stderr") or ""):
-                    add_errors.append(self._failure_reason(r))
+                staged, reason = self._add_pathspec(p)
+                staged_any |= staged
+                if reason:
+                    failed[p] = reason
+            if failed:
+                _log.warning("白名单 git add 失败 %d 条，%.1fs 后重试一次：%s", len(failed),
+                             self._ADD_RETRY_DELAY_S, "；".join(dict.fromkeys(failed.values())))
+                time.sleep(self._ADD_RETRY_DELAY_S)
+                for p in list(failed):
+                    staged, reason = self._add_pathspec(p)
+                    staged_any |= staged
+                    if reason:
+                        failed[p] = reason
+                    else:
+                        del failed[p]
+                if failed:
+                    _log.warning("白名单 git add 重试后仍失败 %d 条（不会进本次提交）：%s",
+                                 len(failed), ", ".join(failed))
+            # 同一把锁对每条 pathspec 报同一行，去重后才放得进 status.json 的 300 字
+            add_reasons = list(dict.fromkeys(failed.values()))
             if not staged_any:
-                if add_errors:
-                    # 同一把锁对每条 pathspec 报同一行，去重后才放得进 status.json 的 300 字
-                    return {"success": False,
-                            "error": "git add 失败：" + "；".join(dict.fromkeys(add_errors))}
+                if add_reasons:
+                    return {"success": False, "error": "git add 失败：" + "；".join(add_reasons)}
                 return {"success": False, "error": "白名单未匹配到任何文件"}
         else:
             stage = self.run_git_cmd("git add -A")
@@ -240,11 +261,28 @@ class GitHubTool:
                 return {"success": False, "error": f"git add 失败：{self._failure_reason(stage)}"}
 
         commit = self.run_git_cmd(f"git commit -m {shlex.quote(message)}")
-        return {
+        result = {
             "success": commit["success"],
             "message": commit.get("stdout") or commit.get("stderr"),
             "details": commit
         }
+        if add_reasons:
+            result["add_errors"] = add_reasons
+        return result
+
+    # 白名单 add 失败（pathspec 未匹配除外）后等多久重试。要长过别的进程占锁的时长：
+    # 普通 `git status` 只在写回刷新后的索引时持锁：生产 checkout 的 APFS 克隆上实测 55–72ms
+    # （即使所有文件 mtime 都变了、status 本身跑 0.7–1.5s，持锁也不超过 72ms）。
+    _ADD_RETRY_DELAY_S = 1.0
+
+    def _add_pathspec(self, pathspec: str):
+        """`git add -- <pathspec>` → `(暂存成功?, 失败原因)`；pathspec 未匹配是 `(False, None)`。"""
+        r = self.run_git_cmd(f"git add -- {shlex.quote(pathspec)}")
+        if r["success"]:
+            return True, None
+        if "did not match any files" in (r.get("stderr") or ""):
+            return False, None
+        return False, self._failure_reason(r)
 
 
 # ==================== Agent 助手 ====================

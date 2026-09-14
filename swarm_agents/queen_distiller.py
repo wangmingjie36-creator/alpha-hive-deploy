@@ -604,13 +604,21 @@ class QueenDistiller:
             and self.ml_adjustments
         )
 
+        # 没有 ML 乘数的投票蜂取「当期平均乘数」，不取 1.0（v0.45.228）。
+        # 乘数被下限 0.5 主导（793 份 JSON 中位 0.500），「1.0 = 平均」这个隐含假设不成立 ——
+        # RivalBee（ml_auxiliary 不在表里）与 CodeExec（没有维度）曾因此拿到 1.5–2.0 倍相对票重。
+        # 取均值 ⇒ 只保留乘数之间的相对信息；全部压在下限时 ≡ 不缩放。
+        # 维度权重那个消费者乘完会归一化，水平本来就不起作用，所以只改这里。
+        # 守卫：tests/test_ml_vote_scaling_default.py
+        _ml_neutral = (sum(self.ml_adjustments.values()) / len(self.ml_adjustments)
+                       if self.ml_adjustments else 1.0)
+
         def _effective_conf(r):
             conf = min(r.get("confidence", 0.5), _weight_cap)
             if _ml_vote_boost_enabled:
                 from pheromone_board import PheromoneBoard as _PB
                 _agent_dim = _PB.AGENT_DIMENSIONS.get(r.get("source", ""))
-                if _agent_dim:
-                    conf *= self.ml_adjustments.get(_agent_dim, 1.0)
+                conf *= self.ml_adjustments.get(_agent_dim, _ml_neutral)
             return conf
 
         bullish_w = sum(_effective_conf(r) for r in _voters if r.get("direction") == "bullish")
