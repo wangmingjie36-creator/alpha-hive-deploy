@@ -1,0 +1,44 @@
+{
+  "ticker": "BRK-B",
+  "date": "2026-09-14",
+  "composite_score": 5.0,
+  "direction": "bearish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 514.95,
+  "agent_votes": {
+    "BuzzBeeWhisper": 3.94,
+    "CodeExecutorAgent": 3.0,
+    "ChronosBeeHorizon": 5.5,
+    "OracleBeeEcho": 4.16,
+    "ScoutBeeNova": 5.03,
+    "RivalBeeVanguard": 5.56,
+    "GuardBeeSentinel": 4.05,
+    "BearBeeContrarian": 2.7,
+    "QueenDistiller": 5.0
+  },
+  "agent_votes_source": "agent_details",
+  "weights_used": {
+    "signal": 0.0,
+    "catalyst": 0.332,
+    "sentiment": 0.325,
+    "odds": 0.343,
+    "risk_adj": 0.0
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.103,
+    "signal": 0.379,
+    "catalyst": 0.31,
+    "sentiment": 0.103,
+    "odds": 0.034,
+    "risk_adj": 0.069
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-14T14:44:31.193832"
+}
