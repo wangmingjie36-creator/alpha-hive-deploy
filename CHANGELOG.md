@@ -5,7 +5,50 @@
 
 ---
 
-## [0.45.236] — 2026-09-14 — 占位（进行中：日报提交会把别的 session 在生产索引里已暂存的代码一起提交并推上 main——只提交白名单路径）
+## [0.45.236] — 2026-09-14 — 日报提交会把别的 session 在生产索引里已暂存的代码一起提交、推上 main：改为只提交白名单内的确切文件名
+
+用户要求再二次检查 v0.45.227。v0.45.227 本身没查出新 bug（落地代码与测过的逐字节相同；90 秒只 stat 监视生产与本
+worktree 的 index.lock，零次出现 ⇒ 当下没有会与 1s 重试相位对齐的周期性占锁进程；iCloud「优化存储」开着但 3180 个跟踪文件
+零个被逐出，逐出导致 status 失败时走的是已测的 `left_artifacts=None` 分支）。查出一处**早于它**的漏洞，用户批准现在修：
+
+### Fixed
+
+1. **白名单只管「我们暂存什么」，`git commit -m` 提交的却是整个索引。** 生产 checkout 被多个 session 共用
+   （2026-09-14 05:20–05:56 别的 session 在里面 `pull --rebase` 两次、提交两次、快进两次）。谁在里面 `git add`
+   了代码还没提交，部署就把它当成「Alpha Hive 蜂群日报」提交、随即推上 main：`success=True`、`left_artifacts=0`、
+   零告警，`skipped_non_artifacts` 与 warning 还说它被「跳过」了。2026-07-30 事故同形（那次是 `add -A`，这次是共享索引）。
+   白名单里一个产物都没改时更糟：旧代码照样跑裸 `git commit`，把别人的暂存整个提交掉。v0.43.4 起就有。
+   - `GitHubTool.commit(paths=…)`：add 之后用 `git diff --cached --no-renames --name-only -z -- <白名单>` 列出白名单内
+     已暂存的**确切文件名**，`git commit -m … -- <名字>`（--only 语义：别人的暂存原样留在索引里）。名字为空时**不跑**
+     `git commit`（回 success=False + nothing to commit）；列不出来时不提交、回原因。
+   - 三处设计都先实测再定：① 用确切名字不用 pathspec——`git add -- vrp_state/`（只含被忽略文件）回 0，
+     `git commit -- vrp_state/` 却报 did not match any file(s) known to git、整个提交失败；② `--no-renames`——
+     默认改名检测让 `--name-only` 只列新名字，内容相近的前后两天快照会被配成改名，删除一侧留在索引里；
+     ③ pre-commit 钩子在 --only 提交里看到的是只含这些名字的临时索引（`changelog_guard.py` 本就保留 `GIT_INDEX_FILE`）。
+   - 顺带：别的 session 暂存了一份坏 CHANGELOG 时，旧代码的日报提交会被 pre-commit 钩子整个拦下；现在不受影响。
+
+### 测试
+
+- `tests/test_github_tool_commit.py::TestOnlyTheWhitelistIsCommitted`（5 条，真 git）：别人暂存的代码与 CHANGELOG
+  不进日报提交且仍暂存；白名单内无改动时不提交；会被配成改名的快照整对提交；只含被忽略文件的目录 pathspec 不拖垮提交；
+  列暂存失败时不提交并回原因。
+- `tests/test_production_sync.py`：真 `auto_commit_and_notify` 双参数（有 / 无日报改动），别人暂存的 code.py 不上 origin、
+  仍暂存。
+- 改动前的代码上：5 条红（改名、目录两条是设计选择的守卫，旧代码裸提交整个索引本来就过——由变异证明它们有牙）。
+- 顺带被既有守卫抓到一次：把提交命令写成 `f"…" + "…"` 拼接时，`test_git_failures_are_visible` 的白名单 AST 核对读不出
+  子命令而红；改成单个 f-string。
+- 变异真跑 6 处**全部被抓到**（退回裸提交 / 去 `--no-renames` / 用 pathspec 提交 / 无暂存照样提交 / 列暂存失败当空 / 去 `-z`）。
+- **生产 APFS 克隆端到端**（拆远端、推送与 gh-pages 打桩，用生产真实的 pre-commit 钩子）：先让另一个「session」暂存
+  `production_sync.py` 与一份带冲突标记的 CHANGELOG；正对照——同一钩子对整个索引 rc=1「修好 CHANGELOG.md 再提交」。
+  部署：日报提交成功、恰好 5 个产物、两份外来暂存不在提交里且仍暂存、`left_artifacts=0`、零告警。生产 checkout 未动。
+- 全套 `pytest --maxfail=200`：**4347 passed / 1 failed（仅 `TestCoverageHorizon`，按设计红）/ 1 skipped / 2 xfailed**；
+  `ruff check .`：All checks passed。
+
+### 未修（只记录）
+
+- 别的 session 在生产里**已提交未推送**的提交，仍会被部署的 `push_main` 一并推上 main（推的是本地 main）。
+  那是它迟早要推的东西、不会以「日报」的名义混进提交，危害比本条小；没量过发生频率。
+- 别的 session 暂存的是**白名单内**的产物（如手改 index.html）时，仍会随日报提交——那本来就是日报产物。
 
 ## [0.45.235] — 2026-09-14 — 占位（进行中：GuardBee 复述多数时在 Queen 共振检测里多算一个维度 —— 先量它对收益的影响再修）
 

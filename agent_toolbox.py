@@ -224,6 +224,14 @@ class GitHubTool:
         现在：失败的条目等 `_ADD_RETRY_DELAY_S` 后统一重试一次；重试后仍失败的，提交照做，
         原因放进 `add_errors`（去重后的首行列表）。「提交成功但产物没全进 git」这件事本身由
         `report_deployer` 提交后再看一次工作区来判，不靠这里列举失败原因。
+
+        **只提交白名单**（v0.45.236）：上面的白名单只管「我们暂存什么」，而裸 `git commit -m` 提交的是
+        **整个索引**。生产 checkout 被多个 session 共用，别人 `git add` 了还没提交的代码会被当成日报提交、
+        推上 main（2026-07-30 事故同形，换了条路；那时 `left_artifacts=0`、零告警，
+        `skipped_non_artifacts` 还说它被「跳过」了）。现在按 `_staged_names` 列出的确切文件名
+        `git commit -- <名字>`（--only 语义：别人的暂存原样留在索引里；pre-commit 钩子看到的是只含
+        这些名字的临时索引）。白名单内没有已暂存的改动时**不跑** `git commit`——退回裸提交正是那条漏洞。
+        不传 `paths` 的 `add -A` 分支本来就是全量，不受影响。
         """
         add_reasons: List[str] = []
         if paths:
@@ -255,12 +263,26 @@ class GitHubTool:
                 if add_reasons:
                     return {"success": False, "error": "git add 失败：" + "；".join(add_reasons)}
                 return {"success": False, "error": "白名单未匹配到任何文件"}
+            # v0.45.236：只提交白名单内已暂存的确切文件名。裸 `git commit -m` 提交的是整个索引——
+            # 生产 checkout 是多个 session 共用的，别人 `git add` 了没提交的代码会被当成日报推上 main。
+            names, list_error = self._staged_names(paths)
+            if names is None:
+                return {"success": False, "error": f"列白名单内已暂存文件失败（未提交）：{list_error}",
+                        **({"add_errors": add_reasons} if add_reasons else {})}
+            if not names:
+                # 不许退回裸 `git commit`：那正是会把别人的暂存提交掉的那条路
+                result = {"success": False, "message": "nothing to commit（白名单内没有已暂存的改动）"}
+                if add_reasons:
+                    result["add_errors"] = add_reasons
+                return result
+            # 整条命令写成一个 f-string：拼接式（`+`）会让 test_git_failures_are_visible 的白名单 AST 核对读不出子命令
+            name_args = " ".join(shlex.quote(n) for n in names)
+            commit = self.run_git_cmd(f"git commit -m {shlex.quote(message)} -- {name_args}")
         else:
             stage = self.run_git_cmd("git add -A")
             if not stage["success"]:
                 return {"success": False, "error": f"git add 失败：{self._failure_reason(stage)}"}
-
-        commit = self.run_git_cmd(f"git commit -m {shlex.quote(message)}")
+            commit = self.run_git_cmd(f"git commit -m {shlex.quote(message)}")
         result = {
             "success": commit["success"],
             "message": commit.get("stdout") or commit.get("stderr"),
@@ -274,6 +296,22 @@ class GitHubTool:
     # 普通 `git status` 只在写回刷新后的索引时持锁：生产 checkout 的 APFS 克隆上实测 55–72ms
     # （即使所有文件 mtime 都变了、status 本身跑 0.7–1.5s，持锁也不超过 72ms）。
     _ADD_RETRY_DELAY_S = 1.0
+
+    def _staged_names(self, paths: List[str]):
+        """白名单 pathspec 内、相对 HEAD 已暂存的**确切文件名** → `(名字列表, None)`；失败 `(None, 原因)`。
+
+        三处都实测过（`tests/test_github_tool_commit.py::TestOnlyTheWhitelistIsCommitted`）：
+        - 用确切名字而不是 pathspec 去提交：`git add -- vrp_state/`（目录里只有被忽略的文件）回 0，
+          `git commit -- vrp_state/` 却报「did not match any file(s) known to git」、整个提交失败。
+        - `--no-renames`：默认的改名检测让 `--name-only` 只列新名字，内容相近的前后两天快照会被配成改名
+          ⇒ 旧文件的删除留在索引里没提交。
+        - `-z`：iCloud 副本名带空格，不加引号、不转义。
+        """
+        spec = " ".join(shlex.quote(p) for p in paths)
+        r = self.run_git_cmd(f"git diff --cached --no-renames --name-only -z -- {spec}")
+        if not r["success"]:
+            return None, self._failure_reason(r)
+        return [n for n in r["stdout"].split("\0") if n], None
 
     def _add_pathspec(self, pathspec: str):
         """`git add -- <pathspec>` → `(暂存成功?, 失败原因)`；pathspec 未匹配是 `(False, None)`。"""
