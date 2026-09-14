@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.230] — 2026-09-14 — 占位（进行中：修 v0.45.224 找到的三处生产根因——weekly_optimizer 往 sys.path 插主 checkout / deep_analysis 导入期 chdir / cboe_fetcher 缓存默认相对路径）
+
 ## [0.45.229] — 2026-09-14 — 占位（进行中：Max Pain 磁吸位预测力检验 + CBOE 持仓量日期核实，纯实验不改生产）
 
 ## [0.45.228] — 2026-09-14 — 占位（进行中：RivalBee/CodeExec 豁免 ML 票重缩放 —— `ml_adjustments.get(维度, 1.0)` 缺键默认 1.0，先量再修）
