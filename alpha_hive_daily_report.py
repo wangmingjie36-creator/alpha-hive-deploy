@@ -469,7 +469,8 @@ class AlphaHiveDailyReporter:
         # 故整体 try 住；解析结果同时进 scan_timing 快照（→ status.json）。
         try:
             import code_version as _cv
-            _cv.log_startup()
+            # v0.45.223：启动时的解析结果交给快照；快照在扫描末尾才落盘，那时本地已有日报提交
+            _timing.note_code_version(_cv.log_startup())
         except Exception as _cv_err:  # noqa: BLE001
             _log.warning("代码版本记录失败（不影响扫描）: %s", _cv_err)
         try:
@@ -2853,10 +2854,12 @@ def main():
     # v0.45.214：推送结果进 scan_timing → status.json → alert_manager。此前只打 WARNING 进日志，
     # 2026-09-01~11 六次被拒无人发现（告警那条规则读的 deploy_status 从来没人写）。
     _git_push = None
+    _git_commit = None
     try:
         with _timing.timed("deploy"):
             sync_results = reporter.auto_commit_and_notify(report)
         _git_push = sync_results.get("git_push")
+        _git_commit = sync_results.get("git_commit")
         git_ok = sync_results.get("git_push", {}).get("success", False)
         deploy_env = sync_results.get("deploy_env", "production")
         remote_label = sync_results.get("git_push", {}).get("remote", "origin")
@@ -2879,7 +2882,8 @@ def main():
             _git_push = {"success": False, "error": f"三端同步抛异常：{type(e).__name__}: {e}"}
 
     # v0.45.118：五阶段耗时 + 三个取数计数器落盘，编排器并进 status.json
-    _timing.write(reporter.date_str, extra={"git_push": _timing.git_push_summary(_git_push)})
+    _timing.write(reporter.date_str, extra={"git_push": _timing.git_push_summary(_git_push),
+                                            "git_commit": _timing.git_commit_summary(_git_commit)})
     return report
 
 

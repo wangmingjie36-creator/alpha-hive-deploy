@@ -464,6 +464,10 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
 
         commit_result = git.commit(
             today_commit_msg, paths=REPORT_ARTIFACT_PATHS)
+        # v0.45.223：提交前工作区里有几个日报产物待提交。`commit()` 对「没东西可提交」也回
+        # success=False，靠它区分「无害」与「产物留在工作区没进 git」（如残留 .git/index.lock
+        # 让 add 全部失败）。后者此前不可见；v0.45.214 起本地落后时推送还会报 nothing_to_push 成功。
+        commit_result["pending_artifacts"] = len(modified) - len(_skipped)
         results["git_commit"] = commit_result
         results["skipped_non_artifacts"] = _skipped
         if commit_result["success"]:

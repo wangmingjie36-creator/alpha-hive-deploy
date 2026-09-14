@@ -13,6 +13,14 @@ from enum import Enum
 from hive_logger import PATHS, get_logger
 from production_sync import OK_OUTCOMES
 
+#: 扫描前同步非 OK 结局 → 这一轮实际跑的是什么（v0.45.223）
+_SYNC_MEANING = {
+    "ff_refused": "快进被拒，本轮跑的是 origin/main 之前的旧代码",
+    "local_ahead": "生产在跑 main 上没有的提交（本地未推送），不是旧代码",
+    "diverged": "既缺 main 的新提交、又含 main 没有的提交",
+    "not_on_main": "生产 checkout 不在 main 分支上，跑的是那个分支的代码",
+}
+
 _log = get_logger("alerts")
 
 
@@ -241,6 +249,22 @@ class AlertAnalyzer:
             _log.warning("status.json 无 scan_timing —— **推送与代码同步检查未执行**")
             return
 
+        commit = (st.get("extra") or {}).get("git_commit")
+        # v0.45.223：`pending_artifacts == 0` 的失败只是「没东西可提交」；其余（含 None = git status 就失败）
+        # 都是产物留在工作区没进 git。此时推送照样可能报成功（本地落后时 nothing_to_push）。
+        if isinstance(commit, dict) and commit.get("success") is not True \
+                and commit.get("pending_artifacts") != 0:
+            self.alerts.append(Alert(
+                AlertLevel.HIGH,
+                "⚠️ 【P1 高】日报提交失败（产物留在工作区，未进 git）",
+                {
+                    "待提交产物数": commit.get("pending_artifacts"),
+                    "原因": commit.get("reason") or "（无输出）",
+                    "建议": "先查生产 checkout 是否残留 .git/index.lock；推送结果不代表日报已提交",
+                },
+                ["deployment", "git_commit"]
+            ))
+
         push = (st.get("extra") or {}).get("git_push")
         if push is None:
             # 空扫描护栏等早退路径不部署，这是正常的；但「没记录」不能渲染成「推送成功」
@@ -273,11 +297,13 @@ class AlertAnalyzer:
                 ["code_sync"]
             ))
         elif sync.get("outcome") not in OK_OUTCOMES:
+            outcome = sync.get("outcome")
             self.alerts.append(Alert(
                 AlertLevel.HIGH,
-                "⚠️ 【P1 高】生产代码未同步到 origin/main（本轮跑的是旧代码）",
+                f"⚠️ 【P1 高】生产代码 ≠ origin/main（{outcome}）",
                 {
-                    "结局": sync.get("outcome"),
+                    # v0.45.223：按结局说清「跑的是什么」——local_ahead 不是「旧代码」，是 main 上没有的提交
+                    "含义": _SYNC_MEANING.get(outcome, "本轮沿用同步前的代码（可能是旧代码）"),
                     "详情": sync.get("detail"),
                     "落后/领先": f"{sync.get('behind')} / {sync.get('ahead')}",
                     "影响": "世代边界按日期划分，默认代码落地当天就在跑；本轮样本可能被记进错误世代",

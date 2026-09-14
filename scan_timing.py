@@ -42,6 +42,7 @@ FILENAME = "scan_timing.json"
 
 _lock = threading.Lock()
 _phases: Dict[str, float] = {}
+_code_version_at_start: Optional[dict] = None
 
 
 # ───────────────────────────────────────────── 计时
@@ -67,8 +68,10 @@ def phases() -> Dict[str, float]:
 
 
 def reset() -> None:
+    global _code_version_at_start
     with _lock:
         _phases.clear()
+        _code_version_at_start = None
 
 
 # ───────────────────────────────────────────── 计数器
@@ -108,15 +111,33 @@ def counters() -> Dict[str, Optional[dict]]:
 
 
 # ───────────────────────────────────────────── 快照与落盘
+def note_code_version(info: Optional[dict]) -> None:
+    """扫描启动时把 `code_version.log_startup()` 的结果交给快照（v0.45.223）。"""
+    global _code_version_at_start
+    with _lock:
+        _code_version_at_start = dict(info) if isinstance(info, dict) else None
+
+
 def code_version() -> Optional[dict]:
     """这一轮跑的是哪一版代码。取不到返回 None（不写 {}——空 dict 会被读成「测过、没版本」）。
 
     v0.45.182。编排器 `write_status()` 已用 jq 把本文件并进 `status.json`，
     所以挂在这里即可让版本随每轮扫描落进 status.json，**无需改编排器**。
+
+    ⚠️ v0.45.223：优先用**扫描启动时**记下的那份（`note_code_version`）。此前这里在
+    快照落盘时（扫描末尾）现解析，而那时部署已经在本地造了日报提交 ⇒ `sha` 是日报提交，
+    不是扫描所用的代码（09-11 实测：快照 `1826d3e`，启动日志 `5b6276c`）；扫描中途有人
+    手工快进生产，还会记成另一份代码。`resolved_at` 标明取自哪个时点，没有启动记录时
+    退回现解析并如实标 `"snapshot"`。
     """
+    with _lock:
+        start = _code_version_at_start
+    if start is not None:
+        return {**start, "resolved_at": "scan_start"}
     try:
         import code_version as _cv
-        return _cv.resolve()
+        info = _cv.resolve()
+        return {**info, "resolved_at": "snapshot"} if isinstance(info, dict) else info
     except Exception as e:  # noqa: BLE001 - 观测代码不得影响主流程
         _log.warning("code_version 不可得（status.json 将缺版本字段）: %s", e)
         return None
@@ -150,6 +171,22 @@ def git_push_summary(git_push: Optional[dict]) -> Optional[dict]:
     out = {k: git_push[k] for k in _GIT_PUSH_KEYS if k in git_push}
     if git_push.get("output"):
         out["output"] = str(git_push["output"])[:500]
+    return out
+
+
+def git_commit_summary(git_commit: Optional[dict]) -> Optional[dict]:
+    """`results["git_commit"]` 进 status.json 的精简版（v0.45.223）。
+
+    `pending_artifacts` 是提交前待提交的日报产物数：0 ⇒ 失败只是「没东西可提交」；
+    None（git status 就失败了）⇒ 不知道，按失败看。None 入参原样返回（工作区干净，未尝试提交）。
+    """
+    if not isinstance(git_commit, dict):
+        return None
+    out = {"success": git_commit.get("success"),
+           "pending_artifacts": git_commit.get("pending_artifacts")}
+    reason = git_commit.get("error") or git_commit.get("message")
+    if reason:
+        out["reason"] = str(reason)[:300]
     return out
 
 
