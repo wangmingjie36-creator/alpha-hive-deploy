@@ -112,6 +112,10 @@ html.dark .hstat{border-right-color:var(--border)}
 .sdir-bull{background:rgba(34,197,94,.13);color:var(--bull)}
 .sdir-bear{background:rgba(239,68,68,.13);color:var(--bear)}
 .sdir-neut{background:rgba(245,158,11,.13);color:var(--neut)}
+.dot-bull,.dot-bear,.dot-neut{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:3px}
+.dot-bull{background:var(--bull)}
+.dot-bear{background:var(--bear)}
+.dot-neut{background:var(--neut)}
 .scard-body{padding:0 16px 16px}
 .sticker{font-size:1.4em;font-weight:900;color:var(--tp)}
 .sname{font-size:.75em;color:var(--ts);margin-top:1px}
@@ -523,12 +527,18 @@ transition-duration:.01ms!important;scroll-behavior:auto!important}
 /* ── 升级 G: 维度数值标签 ── */
 .dim-val{font-size:.62em;font-weight:700;line-height:1;margin-bottom:1px}
 .dim-b-item{cursor:help}
-/* ── 第七轮: 宏观指标 ── */
-.yc-ok{color:#28a745}
-.yc-warn{color:#ffc107}
-.yc-bad{color:#dc3545;font-weight:700}
-.gld-up{color:#ffd700;font-weight:700}
-.gld-dn{color:#999}
+/* ── 第七轮: 宏观指标 ──
+   复合选择器（而非单类选择器）：这些类总是与 .ah-macro-val 同时出现，
+   而 .ah-macro-val{color:var(--tp)} 定义在本文件更后面，同特异度下按源码顺序
+   会覆盖单类选择器——之前这里就是单类写法，实测颜色从未真正生效过。 */
+.ah-macro-val.yc-ok{color:var(--bull)}
+.ah-macro-val.yc-warn{color:var(--neut)}
+.ah-macro-val.yc-bad{color:var(--bear);font-weight:700}
+.ah-macro-val.gld-up{color:var(--bull);font-weight:700}
+.ah-macro-val.gld-dn{color:var(--ts)}  /* 不用 --tm：17px 数值上浅色主题对比度仅 2.37:1（--ts 5.81:1） */
+.ah-macro-val.fg-low{color:var(--bear)}
+.ah-macro-val.fg-mid{color:var(--neut)}
+.ah-macro-val.fg-high{color:var(--bull)}
 .macro-sectors{text-align:center;padding:6px 16px;font-size:.82em;color:var(--neut);
   display:flex;flex-wrap:wrap;gap:6px;justify-content:center;align-items:center}
 .sec-label{font-weight:600;opacity:.7;margin-right:2px}
@@ -659,22 +669,39 @@ html:not(.dark) .hm-tk{background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.06)}
 /* Google Fonts loaded in <head> */
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500&display=swap');
 
-/* Macro bar */
-.ah-macro{border-bottom:0.5px solid var(--border);overflow-x:auto}
+/* Macro bar — 无限横向滚动：.ah-macro-track 内 8 份 .ah-macro-items 首尾相接（模板里用宏生成），
+   translateX(-50%) 走完半程（4 份）即无缝回到起点。半程必须 ≥ 可视区宽度，份数的理由见 dashboard.html。
+   速度：半程约 2025px / 80s ≈ 25px/s；改份数要同步改时长 */
+.ah-macro{border-bottom:0.5px solid var(--border)}
 .ah-macro-inner{max-width:1360px;margin:0 auto;padding:0 40px;
-  display:flex;align-items:center;min-width:560px}
+  display:flex;align-items:center}
 .ah-macro-lbl{font-family:'JetBrains Mono',monospace;font-size:9px;color:var(--border);
   letter-spacing:2px;margin-right:28px;flex-shrink:0}
-.ah-macro-items{display:flex;align-items:center;gap:0;flex:1}
+.ah-macro-viewport{flex:1;min-width:0;overflow:hidden;
+  -webkit-mask-image:linear-gradient(90deg,transparent,#000 32px,#000 calc(100% - 32px),transparent);
+  mask-image:linear-gradient(90deg,transparent,#000 32px,#000 calc(100% - 32px),transparent)}
+.ah-macro-track{display:flex;width:max-content;animation:ah-macro-scroll 80s linear infinite}
+.ah-macro:hover .ah-macro-track{animation-play-state:paused}
+@keyframes ah-macro-scroll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+.ah-macro-items{display:flex;align-items:center;flex-shrink:0}
 .ah-macro-item{padding:14px 28px 14px 0;border-right:0.5px solid var(--border);
   margin-right:28px;flex-shrink:0}
-.ah-macro-item:last-child{border-right:none;margin-right:0;padding-right:0}
 .ah-macro-name{font-size:9px;color:var(--tm);margin-bottom:3px}
 .ah-macro-val{font-family:'JetBrains Mono',monospace;font-size:17px;font-weight:600;
   color:var(--tp);line-height:1}
 .ah-macro-delta{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--tm);margin-left:6px}
 .ah-macro-delta.up{color:var(--bull)}.ah-macro-delta.dn{color:var(--bear)}
 .ah-macro-note{font-size:9px;color:var(--tm);margin-left:4px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* 动效降级：与全局 F15 规则叠加——这里额外恢复手动横滑 + 隐藏副本，
+   保证减弱动效的用户看到的还是「一份完整数据、可滑动」，而不是卡在循环中间的半份内容 */
+@media(prefers-reduced-motion:reduce){
+  .ah-macro-viewport{overflow-x:auto;-webkit-mask-image:none;mask-image:none}
+  .ah-macro-items--dup{display:none}
+  .ah-macro-items:not(.ah-macro-items--dup) .ah-macro-item:last-child{
+    border-right:none;margin-right:0;padding-right:0}
+}
 
 /* Section header */
 .ah-sec-hdr{display:flex;align-items:baseline;gap:16px;margin-bottom:8px}

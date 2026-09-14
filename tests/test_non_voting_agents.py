@@ -188,18 +188,18 @@ class TestGuardBeeDoesNotVote:
         tp = queen._apply_triple_penalty("NVT", 7.0, res)
         assert tp["guard_penalty_applied"] is True, "Guard 分数 2.0 应触发风险关门"
 
-    def test_resonance_still_counts_guard_dimension(self, board):
-        """登记现状：Guard 复述多数时，Queen 的共振检测**仍**给同向方多算一个维度。
+    def test_resonance_no_longer_counts_guard_dimension(self, board):
+        """v0.45.235 改写：Guard 复述多数时**不再**给共振多算一个维度。
 
-        这是另一条复述通道（近期 48 份里改分数 32 份、改决策档位 6 份），
-        本版**没有**动它 —— 它对收益的影响还没测。这条变红说明有人动了共振，回来重测。
+        v0.45.212 登记的是「仍多算、未测未动」。v0.45.235 测完（对收益无可测影响、只抬分数）
+        并修掉，完整判据在 tests/test_resonance_independent_sources.py。
         """
         from pheromone_board import PheromoneEntry
         for agent in ["OracleBeeEcho", "RivalBeeVanguard", GUARD]:
             board.publish(PheromoneEntry(agent_id=agent, ticker="RSG", discovery="x",
                                          source="test", self_score=6.0, direction="bullish"))
         res = board.detect_resonance("RSG")
-        assert "risk_adj" in res["resonant_dimensions"]
+        assert "risk_adj" not in res["resonant_dimensions"]
 
 class TestDissentAgentsMustVote:
     """异议蜂必须是投票蜂：S4.5 仲裁只遍历计票名单，不投票的异议蜂是一条死配置。"""
