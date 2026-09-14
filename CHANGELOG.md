@@ -5,7 +5,43 @@
 
 ---
 
-## [0.45.234] — 2026-09-14 — 占位（进行中：期权快照 _snapshot_stock_price 与官方收盘价不符——溯源调用方 + 频率普查 + 观测点）
+## [0.45.234] — 2026-09-14 — 收盘后拿到「盘中生成」的 CBOE 文件：`close` 是中午的成交价，被当官方收盘写进快照与入场价
+
+**起因**：v0.45.229（Max Pain 预测力检验）发现 `_snapshot_stock_price` 在 v0.45.46 修掉盘后价之后，每天仍有 2~3/30 只 ≠ 官方收盘，且 `quote_set.underlying_price_source` 标着 `cboe_close`。
+
+**溯源**：快照价 ← OracleBee `_get_stock_data` ← `data_pipeline.CBOESource` ← `cboe_options.official_price(payload)`。同一快照里 `quote_set` 自己调 `official_price` 拿到的也是同一个数，说明**17:31 ET 时 CBOE payload 的 `close` 字段本身就是 26.225**。用 yfinance 1m K 线定位这些价最后一次成交的时刻：
+
+| 标的 | 日期 | 快照价 | 官方收盘 | 该价最后成交 |
+|---|---|---|---|---|
+| T | 09-11 | 26.225 | 26.06 | **12:10 ET** |
+| TMUS | 09-10 | 175.18 | 177.16 | **12:07 ET** |
+| ABBV | 09-10 | 252.45 | 255.00 | 14:00 ET |
+| VKTX | 09-11 | 32.3441 | 31.98 | 14:36 ET |
+| DE / CVX | 09-10 | 676.31 / 213.18 | 677.94 / 212.76 | 15:31 / 15:50 ET |
+
+⇒ CDN 对这些符号发的是**当天盘中生成**、之后没刷新的文件（09-14 实拉时 VKTX/TMUS 的顶层 `timestamp` 也落后近 2 小时），盘中文件的 `close` 就是那一刻的成交价（四位小数 = 盘中 sub-penny 成交）。先后排除了「收盘前最后一笔」与「盘后成交」两个假设（15:55–16:00 与 16:00–20:00 的 1m K 线里都没有这些价）。
+两道旧防线粒度都差一级：v0.45.39 vintage 只比**日期**，v0.45.46 只看**本机钟**判收盘 ⇒ 同日盘中陈旧文件两道全放行。
+
+**频率**（下午 14:xx 快照，对照 yfinance 日线收盘）：08-27~09-11 共 185 份，149 份逐分相符，**33 份偏离 >0.05%、12 份 >0.5%**（最大 1.25%），集中在 ABBV/TMUS/T/TMO/BILI/CVX/DE。`pheromone.db.price_at_predict` 同源同值（T 09-11 = 26.225、TMUS 09-10 = 175.18），这些行的 T+7 收益起点带同样偏差。
+
+### Fixed
+- `cboe_options.official_price`：该场已收盘而 payload 的 `last_trade_time` 离收盘 >60s ⇒ 返回 `(close, "cboe_stale_intraday")`。价格照返回（链内 ATM 选择 / 报价集要的是与**同一份链**同一时刻的价），标签如实。判据来自 09-14 盘前实拉 30/30 只：已收盘场次的 `last_trade_time` 全在 15:59:56~16:00:00。`last_trade_time` 缺失判不了 → 仍 `cboe_close`（fail-open，同 vintage）但计数。
+- `data_pipeline.CBOESource`：认 `cboe_stale_intraday` 拒收 → `StockData(defer=True)`，`MultiSourceFetcher` 先试后续源（yfinance 日线收盘），全失败才退用它并带 `degraded` + 标签出去。**不记熔断失败**（一天 3~8 只连撞 3 只就会熔断，把健康标的一起推去挤 yfinance），**不拉**历史K线（白耗配额）。
+
+### Added
+- `is_trading_day.session_close_et(d)`：按规则判提前收盘日（感恩节次日 / 交易日的 12-24 / 7-4 落周二~五时的 7-3 → 13:00），否则 16:00。不认得半日市的后果是那天每份新鲜 payload 都被误判陈旧。
+- 观测点：`payload_stats()` 新增 `price_stale_intraday` / `price_unverifiable`（按标的去重），经 `scan_timing` 进 `status.json`；首次检出打 WARNING。`StockData.to_dict()` 新增 `price_source`（`cboe_close` / `cboe_intraday` / `cboe_stale_intraday` / `yfinance_daily_close` / 空），入场价是不是官方收盘下游看得见。
+- `tests/test_cboe_stale_intraday_price.py`（33 条）：实测四例、30/30 新鲜边界、tz-aware、次日盘前、半日市、按标的去重计数、管道推迟 / 全失败退用仍带标签 / 不熔断不拉历史。三处变异（关判据 / 关推迟 / 改记熔断失败）各自变红。
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 2026-09-14 / v0.45.234：受影响标的的 `price` 与 OracleBee 传给 OptionsAgent 的 `stock_price`（GEX / 异动 / ATM IV 窗口 → options_score）口径变 ⇒ `final_score` 输入变。
+
+### Changed
+- `tests/test_scan_timing.py`：`payload_stats()` 键集合断言补两个新键。
+
+### 未做 / 待定
+- **未改写历史**快照与 `price_at_predict`（可用 `close_correction.py` dry-run 先看影响面，落笔需用户点头）。
+- 编排器 Step 12 没传 `--check-prices`，`scan_coverage_gate.check_prices`（≥1% 列警告）在生产里从未跑过；是否接上待用户决定（编排器在仓库外）。
+- **另一个根因，未在本版修**：09-02 / 09-08 两轮扫描跑过午夜，00:0x 写出的快照占了次日槽位，次日 14:00 扫描整轮命中（09-03 命中 42 次、09-09 命中 45 次）⇒ 那两天的期权数据整份是前一交易日的，快照价与**前一日**收盘 24/30、26/30 相符。已另开任务。
+- 线上验证：本地实拉时恰好跨过 09:30 开盘，全部走盘中分支，**新判据未被真实 payload 触发过**——以今天 17:00 ET 扫描后 `status.json` 的 `price_stale_intraday` 为准（待验证）。
 
 ## [0.45.233] — 2026-09-14 — 占位（进行中：数据根迁移阶段 0——DB 一致性快照 / 修编排器每日备份 / 测试「默认拒绝」总闸）
 
