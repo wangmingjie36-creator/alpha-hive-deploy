@@ -17,6 +17,8 @@ import subprocess
 import sys
 import uuid
 
+import pytest
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
@@ -155,3 +157,59 @@ class TestSetupCheckHasTeeth:
 
     def test_real_handlers_are_inside(self, tmp_path, hive_log_handler_escapes):
         assert hive_log_handler_escapes(tmp_path) == []
+
+    def test_relative_target_is_reported_while_cwd_is_inside_sandbox(
+            self, tmp_path, monkeypatch, hive_log_handler_escapes):
+        """v0.45.246：相对落点按 cwd 补全就「在沙箱里」——而 ① 跑的时候 cwd 正是本条的 tmp。
+
+        这条是 `test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd.ALLOWED` 放行
+        `_hive_log_handler_escapes` 的运行时自证：静态守卫按函数名放行，删掉 is_absolute 那一行它不红，这里红。
+        """
+        from hive_logger import LogsDirRotatingFileHandler
+
+        assert pathlib.Path.cwd().resolve().is_relative_to(tmp_path.resolve()), "前提不成立：本测试的 cwd 不在 tmp 里"
+
+        via_resolver = LogsDirRotatingFileHandler("alpha_hive.log")
+        via_basefilename = logging.FileHandler(str(tmp_path / "frozen.log"), delay=True)
+        via_basefilename.baseFilename = "frozen.log"  # FileHandler 自己会 abspath；存死相对值的子类照样可能
+        try:
+            monkeypatch.setenv("ALPHA_HIVE_LOGS_DIR", "logs")
+            assert hive_log_handler_escapes(tmp_path, handlers=[via_resolver, via_basefilename]) == [
+                ("LogsDirRotatingFileHandler", os.path.join("logs", "alpha_hive.log")),
+                ("FileHandler", "frozen.log"),
+            ]
+            monkeypatch.setenv("ALPHA_HIVE_LOGS_DIR", str(tmp_path / "logs"))
+            assert hive_log_handler_escapes(tmp_path, handlers=[via_resolver]) == []
+        finally:
+            via_resolver.close()
+            via_basefilename.close()
+
+    def test_relative_sandbox_is_refused(self, hive_log_handler_escapes):
+        with pytest.raises(AssertionError, match="沙箱不是绝对路径"):
+            hive_log_handler_escapes("sandbox", handlers=[])
+
+    def test_symlinks_compare_by_real_location(self, tmp_path, monkeypatch, hive_log_handler_escapes):
+        """is_absolute 之后仍要 resolve 两边：macOS `$TMPDIR`=`/var/…` 而 `tmp_path`=`/private/var/…` 是同一种关系。
+
+        (a)(b) 同一目录经 symlink 两种写法——词法比较会误报；(c) 字面在沙箱里、经 symlink 指出去——词法比较会漏报。
+        """
+        from hive_logger import LogsDirRotatingFileHandler
+
+        real, outside = tmp_path / "real", tmp_path / "outside"
+        real.mkdir()
+        outside.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        (real / "trap").symlink_to(outside, target_is_directory=True)
+
+        h = LogsDirRotatingFileHandler("alpha_hive.log")
+        try:
+            monkeypatch.setenv("ALPHA_HIVE_LOGS_DIR", str(link / "logs"))
+            assert hive_log_handler_escapes(real, handlers=[h]) == [], "(a) 落点经 symlink、沙箱写真身"
+            monkeypatch.setenv("ALPHA_HIVE_LOGS_DIR", str(real / "logs"))
+            assert hive_log_handler_escapes(link, handlers=[h]) == [], "(b) 落点写真身、沙箱经 symlink"
+            monkeypatch.setenv("ALPHA_HIVE_LOGS_DIR", str(real / "trap" / "logs"))
+            assert hive_log_handler_escapes(real, handlers=[h]) == [
+                ("LogsDirRotatingFileHandler", str(outside.resolve() / "logs" / "alpha_hive.log"))], "(c)"
+        finally:
+            h.close()

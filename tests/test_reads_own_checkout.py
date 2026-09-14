@@ -454,6 +454,7 @@ class TestConftestGuardsDoNotAnchorOnCwd:
     ALLOWED = {
         "pytest_collection_finish",          # 它记的就是「收集结束那一刻的 cwd」
         "_assert_default_path_in_sandbox",   # 先断言 is_absolute 再 resolve；由下面的运行时自证守着
+        "_hive_log_handler_escapes",         # 同形（v0.45.246）；自证在 test_hive_logger_not_frozen.py::TestSetupCheckHasTeeth
     }
 
     @classmethod

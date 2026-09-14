@@ -996,7 +996,7 @@ def _guard_production_artifacts():
 #      说的「正面核对防线真的生效，而不是再盖一层把问题盖住」。
 #   ② 每条测试 teardown 比对 checkout 真身指纹：兜住 ① 管不到的绕过——测试自己 delenv、
 #      subprocess 用现造的 env（launchd 只给 PATH）跑 CLI。红在具体那条测试上。
-#   ③ 会话级比对（快照在**本文件 import 时**取，早于收集）：兜住测试之间的写入。
+#   ③ 会话级比对（快照在 ⓪ 的 `pytest_configure` 里取，早于收集）：兜住测试之间的写入。
 #
 # 被盯的是**两个文件名**而非整个 `logs/`：同目录的 `scan_timing.json` /
 # `production_sync.json` 等别有写入者，不归本闸（全目录默认拒绝属数据根迁移阶段 0.3）。
@@ -1011,20 +1011,23 @@ def _hive_log_watch_paths(*roots):
                    for r in roots if r for n in _HIVE_LOG_FILES})
 
 
-# ③ 的「之前」必须早于收集——收集期 import 就是事故窗口，session fixture 的 setup 已经太晚。
-# 这里只能用 `__file__` 与 cwd：此时 import `hive_logger` 本身就会改变被测的时序。
-_HIVE_LOGS_WATCHED_AT_IMPORT = _hive_log_watch_paths(_REPO_ROOT_FOR_GUARD, os.getcwd())
-_HIVE_LOGS_BEFORE_COLLECTION = {p: _artifact_signature(p) for p in _HIVE_LOGS_WATCHED_AT_IMPORT}
-
-
 @pytest.hookimpl(trylast=True)  # 晚于 tmpdir 插件的 pytest_configure（它才建 _tmp_path_factory）
 def pytest_configure(config):
-    """⓪：会话级 `ALPHA_HIVE_LOGS_DIR` 缺省（逐条测试由 `_isolate_env` 覆盖）。
+    """⓪：会话级 `ALPHA_HIVE_LOGS_DIR` 缺省（逐条测试由 `_isolate_env` 覆盖）；顺带取 ③ 的「之前」快照。
 
     **刻意不在会话结束时还原**：atexit 钩子（`PheromoneBoard._shutdown` 失败时打 warning）
     跑在 `pytest_unconfigure` 之后，还原了它们就回落到 checkout。本进程随即退出，
     不还原没有下游；`pytest.main()` 进程内调用者之后的日志会落到这个临时目录——代价可接受。
+
+    ③ 的「之前」必须早于收集——收集期 import 就是事故窗口，session fixture 的 setup 已经太晚。
+    本钩子满足（实测次序：conftest import → 本钩子 → 收集；此刻 `hive_logger` 尚未被 import）。
+    v0.45.246 前快照在模块级用 `os.getcwd()` 取：意图是调用目录，读的是「此刻的 cwd」，两者只在更早有谁
+    chdir 过时不同。改用 `invocation_params.dir`（与 ② 同源），conftest 里便没有模块级读 cwd——
+    `test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd` 若扩到模块级，这里不必另开豁免。
+    此处不 import `hive_logger`：会改变被测的时序。
     """
+    watched = _hive_log_watch_paths(_REPO_ROOT_FOR_GUARD, config.invocation_params.dir)
+    config._alpha_hive_logs_before_collection = {p: _artifact_signature(p) for p in watched}
     d = config._tmp_path_factory.mktemp("hive_logs_outside_tests", numbered=False)
     os.environ["ALPHA_HIVE_LOGS_DIR"] = str(d)
 
@@ -1036,18 +1039,34 @@ def _hive_log_handler_escapes(sandbox, handlers=None):
     （挂上去的那一瞬间，前面测试残留的后台线程就可能经它写盘）。
     落点优先问 handler 自己（`current_target()`，emit 时用的同一个解析）；没有这个方法的
     就是 import 时存死 `baseFilename` 的那一族，按 `baseFilename` 算。
+
+    **先判绝对、再 resolve 判包含**（v0.45.246，与 `_assert_default_path_in_sandbox` 同形）：
+    `Path(相对).resolve()` 按 **cwd** 补全，而 ① 跑的时候 cwd 已是本条的 `tmp_path/_cwd`
+    （`_isolate_cwd_and_sys_path` 字母序排在 `_isolate_hive_logger_files` 前）⇒ 相对落点恒「在沙箱里」，
+    ① 不响（实测：`_isolate_env` 把 `ALPHA_HIVE_LOGS_DIR` 改成 `"logs"`、或 `current_target` 改回
+    `Path("logs") / leaf`，修前均 1 passed）。相对落点**本身就是逃逸**：`emit` 每条记录 `abspath` 一次，
+    进程中途有谁 chdir，日志就跟着搬家——比 import 时 abspath 一次的裸 handler 更糟。
+    故相对落点原样报出（`(类名, 相对路径)`），不补全。
+    resolve 不能省：macOS `$TMPDIR` 是 `/var/…`、pytest 的 `tmp_path` 是 `/private/var/…`；
+    词法包含会误报前者、漏报「字面在沙箱里、经 symlink 指出去」。
     """
     import logging
     import hive_logger  # noqa: F401 — 确保 _setup_logger() 已跑过
     if handlers is None:
         handlers = logging.getLogger("alpha_hive").handlers
-    sandbox = pathlib.Path(sandbox).resolve()
+    sandbox = pathlib.Path(sandbox)
+    assert sandbox.is_absolute(), f"沙箱不是绝对路径：{str(sandbox)!r}——按 cwd 补全后判包含，等于判「在不在 cwd 里」"
+    sandbox = sandbox.resolve()
     out = []
     for h in handlers:
         if not isinstance(h, logging.FileHandler):
             continue
         resolver = getattr(h, "current_target", None)
-        target = pathlib.Path(resolver() if callable(resolver) else h.baseFilename).resolve()
+        raw = pathlib.Path(resolver() if callable(resolver) else h.baseFilename)
+        if not raw.is_absolute():
+            out.append((type(h).__name__, str(raw)))
+            continue
+        target = raw.resolve()
         if not target.is_relative_to(sandbox):
             out.append((type(h).__name__, str(target)))
     return out
@@ -1080,7 +1099,10 @@ def _isolate_hive_logger_files(_isolate_env, tmp_path, request):
         f"hive_logger 文件日志的落点逃出了本条测试的沙箱 {tmp_path}：{escapes}\n"
         "落点若是会话临时目录 `hive_logs_outside_tests`，说明 handler 又在 import 时存死了路径"
         "（被 conftest 的会话缺省接住，所以 checkout 没被写——但逐条隔离已失效）；"
-        "若是 checkout 的 `logs/`，就是事故原样复发。改法见 `hive_logger.LogsDirRotatingFileHandler`。")
+        "若是 checkout 的 `logs/`，就是事故原样复发；"
+        "若是**相对路径**，落点跟着 cwd 走（测试里 cwd 在 tmp 所以看着无害，生产换个目录起进程、"
+        "或中途有谁 chdir 就写到别处）——`ALPHA_HIVE_LOGS_DIR`/`ALPHA_HIVE_HOME` 或 `current_target` "
+        "被改成相对的了？改法见 `hive_logger.LogsDirRotatingFileHandler`。")
 
     watched = _hive_log_watch_paths(_REPO_ROOT_FOR_GUARD,
                                     os.path.dirname(os.path.abspath(hive_logger.__file__)),
@@ -1100,14 +1122,16 @@ def _isolate_hive_logger_files(_isolate_env, tmp_path, request):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _guard_hive_log_files_session():
-    """③：从本文件 import（早于收集）到会话结束，checkout 真实日志不许变。"""
+def _guard_hive_log_files_session(request):
+    """③：从 `pytest_configure`（早于收集）到会话结束，checkout 真实日志不许变。"""
+    before = getattr(request.config, "_alpha_hive_logs_before_collection", None)
+    # 取不到 / 空 ⇒ ③ 恒真（⓪ 被改名、没注册、或提前 return）。
+    assert before, "③ 的收集前快照没取到：`pytest_configure` 没跑到取快照那一步，会话级比对恒真"
     yield
     import logging
     for h in logging.getLogger("alpha_hive").handlers:
         h.flush()
-    touched = sorted(p for p in _HIVE_LOGS_WATCHED_AT_IMPORT
-                     if _artifact_signature(p) != _HIVE_LOGS_BEFORE_COLLECTION[p])
+    touched = sorted(p for p in before if _artifact_signature(p) != before[p])
     assert not touched, (
         f"本轮 pytest 写了 checkout 的真实日志：{touched}\n"
         "逐条测试的 ② 没红 ⇒ 写入发生在测试之外（收集期 import、module/session 级 fixture、"
