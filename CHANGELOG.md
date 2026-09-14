@@ -5,6 +5,16 @@
 
 ---
 
+## [0.45.247] — 2026-09-14 — 占位（进行中：Queen 读蜂 details 的键契约守卫 + 删 F&G 政体调整死分支 + signal_archive 补 Buzz 缺失通道）
+
+## [0.45.246] — 2026-09-14 — 占位（进行中：v0.45.239 conftest `_hive_log_handler_escapes` 的 resolve() 相对路径补全成 cwd——合入 v0.45.240 后被 cwd 守卫抓到；修 + 变异自证 + 落地 v0.45.239/244）
+
+## [0.45.245] — 2026-09-14 — 占位（进行中：二次检查 v0.45.240 的改动）
+
+## [0.45.244] — 2026-09-14 — 占位（进行中：import 冻结路径扫描器盲区——模块级调用同模块函数、函数体求值 PATHS./__file__ 的形态看不见，补扫描 + KNOWN 白名单）
+
+## [0.45.243] — 2026-09-14 — 占位（进行中：CBOE 盘中陈旧价的两个未覆盖消费者——回填兜底读云快照 price_at_fetch 不判陈旧 + close_correction 盘中/陈旧文件把现价归到上一会话）
+
 ## [0.45.242] — 2026-09-14 — 共振加成「前瞻确认后再删」：样本内它是评分链里唯一损失排序信息的一步，但证据是事后的——预注册前瞻检验挂上周度承载物；更正 v0.45.235 两处过时/写错的数
 
 v0.45.235 登记了「共振加成不分方向：看空共振也把分数往上抬」。用户先问：**这个改动对吗，是不是在回退？**
@@ -92,9 +102,124 @@ v0.45.176 于 09-10 才归零）。按现行权重重算（自证：用记录权
 - 生产只读跑承载物：`⏳ IC 重跑未就绪：0/25 …｜⏳ 共振加成前瞻检验：0/10 个合格周（前瞻报告 0 份）…`，exit 1；
   `--today 2026-10-20` 时变 ⚠️。生产 checkout 状态前后一致。
 
-## [0.45.241] — 2026-09-14 — 占位（进行中：cboe_fetcher 的 P/C、SKEW、VVIX 改走 CBOE CDN——云端够不到 yfinance，三项 12/12 天兜底）
+## [0.45.241] — 2026-09-14 — cboe_fetcher 的 P/C、SKEW、VVIX 改走 CBOE CDN：云端够不到 yfinance，三项 12/12 天兜底
 
-## [0.45.240] — 2026-09-14 — 占位（进行中：二次检查 v0.45.237 的改动）
+用户问生产 `cache/cboe_daily` 为什么 08-26 之后没刷新（查明：本机无生产调用者，见 v0.45.230 追记），顺带量出云端
+`cloud-snapshots` 分支 **08-26 ~ 09-11 共 12 份 market.json 里 pcce / skew / vvix 12/12 天全是 `default_fallback`**。
+用户判断是「云端 CBOE 数据源爬不到」—— 按代码核实，更准确的说法是：**这三项在代码里根本不问 CBOE，只走 yfinance**
+（P/C = yf 的 SPY/QQQ/IWM 期权链合成、SKEW/VVIX = `yf.download('^SKEW'/'^VVIX')`），而云端沙箱够不到 yfinance；
+CBOE CDN 其实都有，且云端够得到 `cdn.cboe.com`（同日 30 只期权快照 27 只走的就是 `delayed_quotes`）。
+09-11 兜底 SKEW 120 / VVIX 85，CBOE 当日真值 **154.49 / 91.28**（SKEW 实际处在 >150 的高尾部风险档，兜底把它抹平成 normal）。
+用户批准改源。
+
+### Changed — `cboe_fetcher.py`
+
+- **SKEW / VVIX**：先读 `cdn.cboe.com/api/global/us_indices/daily_prices/{SKEW,VVIX}_History.csv` 最新一行
+  （`source='cboe_cdn'`），拿不到才 yfinance（`'yfinance'`，打 warning），再不行兜底（`'default_fallback'`，契约不变）。
+  两个方法原本是逐行复制的双胞胎，收成 `_fetch_index_level`；分档阈值抽成 `_classify_skew` / `_classify_vvix`，数值未改。
+  - `date` 对 CBOE 行写**观测日**（CSV 那一行的日期），不再是抓取日 —— 收盘后不久跑时 CSV 可能还是上一交易日，要看得出来。
+  - 弃用 CBOE 的三种情形：表头变了（值列名不再是指数符号）/ 没有合理区间内的行（SKEW 80–250、VVIX 40–300，防格式漂移，不是行情判断）/
+    最新一行比 ET 今天早 **>7 个日历日**（疑似停更）。**不要求必须是今天**：CSV 当日何时更新**未实测**
+    （09-14 看 `Last-Modified` 是周日重生成、内容仍是周五），要求当日会让云端快照天天又落回兜底。
+- **P/C**：先用 CBOE 延迟报价期权链合成（`source='synthetic_cboe_options'`），经 `cboe_options._fetch_cboe_payload`
+  —— 串行化、3 次重试、进程缓存、陈旧 CDN 文件拒收全部复用，不另写取数。口径与 yfinance 版一致：每只取**最近 3 个到期日**
+  （到期日早于成交日的不计；零成交的到期日也占名额，否则第 4 个会被悄悄顶进来）。CBOE **一只都拿不到**才退回 yfinance 同口径
+  （`'synthetic_yf_options'`）；**不逐标的拼两个源**（两家「此刻成交量」不是同一快照）。全链零成交（开盘前）不算观测，往下降级。
+  `date` 写期权链成交日（ET）。
+- `_download_cboe_index_csv` 与全部 CBOE 请求共用 `cboe_options._CBOE_SEM`（同 `cboe_vix`）。
+- 模块 docstring 的「数据源：yfinance（优先）」改成现状。
+
+未改：VIX 期限结构（vixcentral，v0.45.29）、宏观评分权重与分档、`cloud_snapshot_fetch._degradation_check`
+（判 `source=='default_fallback'` + 已知常量等值，新标签不会误报，已加用例钉住）。
+
+### 测试 — `tests/test_cboe_fetcher_source.py`（11 → 26）
+
+- 模块级 autouse 把两个 CBOE 源钉成「取不到」（`_download_cboe_index_csv` → None、conftest `stub_cboe_payload`），
+  既有的 yfinance / 兜底用例照旧确定、离线。
+- 新增 `TestSkewVvixFromCboe`（8）、`TestPutCallFromCboe`（6）、`TestDegradationCheckAcceptsCboeSources`（1）。
+  「CBOE 拿到时不许碰 yfinance」用记账替身断言调用次数为 0 —— 只断言 `source` 不够：回归成 yfinance 先走时，
+  替身抛的异常会被 `except Exception` 吞成兜底，红是会红，但说不出是「顺序反了」。停更天数钉 `_today_et()`，边界 7/8 两侧各一条。
+- **变异**（从 scratch 修后副本还原并逐字节核对）：
+  | 变异 | 结果 |
+  |---|---|
+  | M1 SKEW/VVIX 先走 yfinance | 5 红 + 2 error |
+  | M2 零成交到期日不占名额 | 恰 1 红 |
+  | M3 去掉停更判定 | 恰 1 红（边界 8 天那条） |
+  | M4 `>` 改 `>=` | 恰 1 红（边界 7 天那条） |
+  | M5 不滤已到期合约 | 1 红 |
+  | M6 不截近 3 个到期日 | 2 红 |
+  | M7 CBOE 行 `date` 写抓取日 | 3 红 |
+  | M8 P/C 先走 yfinance | 3 红 + 1 error |
+  | M9 CBOE 部分成功时再拿 yfinance 补 | 2 红 + 1 error |
+
+  error 全是 conftest `_offline_transport` 在 teardown 抓到变异后的代码真去打 `query1.finance.yahoo.com`（已逐条看过 M8 那条）——第二道观测点。
+
+### 验证（真网，零费用）
+
+- 本机模拟云端（`yf = None`）跑 `fetch_all()`：P/C 1.173（CBOE，SPY/QQQ/IWM 全到）、SKEW 154.49、VVIX 91.28（观测日 09-11）、
+  VIX 期限结构照常；`_degradation_check` 结果为空。耗时 78s，其中 P/C 约 56–63s（三份期权链 JSON 共约 13MB，经本机代理）。
+- 同一时刻两源对照 P/C：CBOE **1.169** vs yfinance **1.173**，call/put 成交量相差约 1%（两次拉取相隔几十秒、盘中在涨）；
+  yfinance 的前 3 个到期日同样含当日（09-14），与 CBOE 版「到期日 ≥ 成交日」一致。
+- 全套（仓库根）：**4434 passed / 1 failed / 1 skipped / 2 xfailed**（371s），唯一红 `TestCoverageHorizon`（设计如此）。
+- `ruff check` 两个文件：通过。
+
+### 生效与待验证
+
+- 云端 routine 每次先把 `origin/main` 并进 `cloud-snapshots`（v0.45.183），推上 main 后**当天 21:05 UTC 那次**即用新代码。
+- **待验证**：① 下一份 market.json 里三项 `source` 是否为 `cboe_cdn` / `synthetic_cboe_options`、`degraded_sections` 是否为空 ——
+  本版只在本机验过，**`us_indices` CSV 路径从云端是否可达没有实测**（同主机的 `delayed_quotes` 可达）；
+  ② 云端跑 17:05 ET 时 SKEW/VVIX CSV 是否已含当日（看 `skew.date` 是否等于业务日）；
+  ③ 云端单次耗时会多约一分钟（09-11 为 151s），routine 若有时限需留意。
+- 顺带看到未改：`generate_deep_v2.py` 打印 CBOE 摘要时读的是不存在的键（`put_call_ratio` / `value`），终端那行恒为 `N/A`，只影响手动 CLI 的一行输出。
+
+## [0.45.240] — 2026-09-14 — 二次检查 v0.45.237：挪 cwd 之后没问「谁在读 cwd」——`_isolate_ml_model_file` 两道闸自 v0.45.224 起一个瞎、一个恒真
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。** 这次问的不是「v0.45.237 自己的测试对不对」，而是
+**「它挪了进程级的 cwd，谁在读 cwd？」** —— autouse 按名字字母序 setup，`_isolate_cwd_and_sys_path`（`_isolate_c…`）
+排在一串守卫前面，它们 setup 时看到的 cwd 已经不是调用目录。两处都在同一个 fixture 里，第二处是本轮写 CHANGELOG 时复核措辞才撞见的。
+
+### Fixed（`tests/conftest.py::_isolate_ml_model_file`）
+
+1. **指纹侧的 cwd 臂守的是本测试的空目录。** 它用 `Path.cwd()` 定位「pytest 的 cwd 里的模型文件」，
+   本意是防「从主 checkout 起 pytest 时写穿主 checkout 的模型」。v0.45.224 起它 setup 时 cwd 已在 `tmp/_cwd`。
+   实测（临时调用目录，不碰任何 checkout）：路径在收集期冻结到调用目录（`os.path.abspath("ml_model.json")`）、测试往里写 ——
+   ① 现状 **1 passed、守卫不响**；② 该臂改看 `invocation_params.dir` ⇒ 红；③ 撤掉逐测试 chdir（v0.45.224 之前）⇒ 红。
+   改：看 `request.config.invocation_params.dir`。
+2. **防线①「默认落盘位置在 tmp 里」对相对路径恒真。** 它判 `Path(default_model_path()).resolve().is_relative_to(tmp_path)` ——
+   `resolve()` 按 **cwd** 补全相对路径，而 cwd 就在 tmp 里。**这一处不调 `cwd()`，1 的结构守卫第一版也漏了它。**
+   实测把 `default_model_path()` 改回 `"ml_model.json"`（v0.45.149 事故的原形）：现状 **1 passed**；再撤掉两处 chdir ⇒ 红。
+   测试里这条相对路径只写进空目录、看着无害，**伤的是生产**（编排器从仓库根跑）—— 所以只有防线①能发现，而恰恰是它失效。
+   改：抽成 `_assert_default_path_in_sandbox`，**先断言 `is_absolute()` 再判包含**；同一变异 ⇒ 红（报「不是绝对路径」），不变异 ⇒ 绿。
+3. **结构守卫** `test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`：conftest 函数里显式读 cwd（`cwd`/`getcwd`）一律红；
+   隐式读 cwd（`resolve`/`absolute`/`abspath`/`realpath`）主语里不带 `__file__` / `invocation_params` / `tmp_path*` 即红。
+   放行 `pytest_collection_finish` 与上面的 helper（后者由运行时自证 `test_sandbox_check_rejects_relative_default` 守着：
+   **本测试 cwd 就在 tmp 里**时喂相对路径必须红）。变异：删 helper 的 `is_absolute` 断言 ⇒ 运行时自证红；把防线①改回内联 `resolve` ⇒ AST 守卫红。
+
+### 核过、成立的（v0.45.237）
+
+- `_guard_production_artifacts`（session 级、同样排在 `_empty_cwd_between_tests` 之后）锚的是 `__file__` 推出的 `_REPO_ROOT_FOR_GUARD`，**没瞎**。
+  测试文件里其余 cwd 用法无一拿来定位真身：`test_deep_analysis_prefetch_injection.py` 是 import 隔离的存还原，
+  `test_cwd_and_sys_path_hygiene.py` 两处在子进程源码字符串里；各测试文件的「在沙箱里」判定都对**未 resolve** 的路径做
+  （`Path("ml_model.json").is_relative_to(tmp)` 为假），不受 2 的影响。
+- 无测试调 `monkeypatch.undo()`（否则测试后半段会落进会话共享目录）。
+- 子进程：v0.45.237 的静态扫描只认 `subprocess.*` 名字，漏看 `test_paths_not_frozen_at_import.py:363` 的 `import subprocess as _sp` ——
+  那处只伪造 `git ls-files`，结论不变。
+- 写入普查（全套从仓库根，`--basetemp` 指定）：worktree 里跑测期间被改的文件只有 `logs/alpha_hive.log` 与 `logs/alpha_hive_structured.jsonl` —— `hive_logger` 收集期把 handler 绑到真实 `logs/`，已知、另有任务（v0.45.237 已记）
+- 会话级测试间目录跑完的内容：空（目录存在，`ls -la` 只有 `.` `..`）
+
+### 验证
+
+- 全套从仓库根（上面 2 修之前、合并 origin/main 之前）：1 failed（`TestCoverageHorizon`，设计如此）/ 4387 passed / 1 skipped / 2 xfailed
+- 全套从空目录（同上）：同上 4387 passed；空调用目录跑完无残留
+- 合并 origin/main 后、含 2 的最终树：1 failed（`TestCoverageHorizon`）/ 4422 passed / 1 skipped / 2 xfailed
+
+### v0.45.237 条目里需要补的（已就地标注）
+
+- 「改：新增会话级 autouse `_empty_cwd_between_tests`…」：没查挪 cwd 之后 conftest 里谁还在读 cwd，见上 1、2（盲区是 v0.45.224 引入的，v0.45.237 沿用）。
+- 「autouse fixture 按名字字母序 setup」：实测于 pytest 9.0.2；pytest 文档未承诺同 scope autouse 的相对顺序，别当成跨版本不变式。
+- 「测试里的 `subprocess` 调用无一跑…」：扫描漏看别名 import，见上。
+
+---
 
 ## [0.45.239] — 2026-09-14 — 占位（进行中：hive_logger 在 import 时把文件 handler 绑到真实 logs/，测试日志写穿生产日志——修 + conftest 指纹守卫）
 
@@ -108,10 +233,10 @@ v0.45.176 于 09-10 才归零）。按现行权重重算（自证：用记录权
 
 1. **module / class / session 级 fixture 仍在调用目录（平常就是仓库根）里 setup。** v0.45.224 称「逐测试空目录让这类问题在任何一次普通运行里就红」——
    它只在函数级 fixture 里 chdir，每条测试结束又 chdir 回**调用目录**。实测：module 级 fixture 读 `Path("config.py")` ⇒ `exists()=True`、cwd=调用目录。
-   **结束时还原到调用目录，恰好把盲区造回来了。** 改：新增会话级 autouse `_empty_cwd_between_tests`，测试之间 cwd 停在会话级空目录，会话结束才回调用目录。
+   **结束时还原到调用目录，恰好把盲区造回来了。** 改：新增会话级 autouse `_empty_cwd_between_tests`，测试之间 cwd 停在会话级空目录，会话结束才回调用目录。**（v0.45.240 订正：没查挪 cwd 后 conftest 里谁还读 cwd：`_isolate_ml_model_file` 的调用目录臂自 v0.45.224 起守的是 tmp，防线①的 `resolve()` 对相对默认值恒真）**
    复测同一个 module 级 fixture ⇒ `exists()=False`、cwd=会话级空目录。
 2. **测试自己 `monkeypatch.chdir` 时，teardown 后 cwd 停在该测试的 `_cwd`。** v0.45.224 的理由是「monkeypatch 的还原顺序不定」—— **错，是确定地输**：
-   `--setup-plan` 实测 autouse fixture 按**名字字母序** setup（`_block_llm_api` 排第一、先实例化 monkeypatch），不是定义顺序，
+   `--setup-plan` 实测 autouse fixture 按**名字字母序** setup**（v0.45.240 订正：pytest 9.0.2 实测，非文档承诺）**（`_block_llm_api` 排第一、先实例化 monkeypatch），不是定义顺序，
    monkeypatch 因此最后 teardown，覆盖掉手工 `os.chdir`。本轮第一版「把 fixture 挪到文件最前面」也照输（自证当场红）。
    改：chdir 走 `monkeypatch.chdir` —— 撤销时回到本测试第一次经它 chdir 之前的目录，与谁先 teardown 无关，裸 `os.chdir` 的泄漏一并撤销。
 
@@ -133,7 +258,7 @@ v0.45.176 于 09-10 才归零）。按现行权重重算（自证：用记录权
 
 ### 核过、成立的
 
-- v0.45.224「文件访问只有 import 期一次 `scandir`」：审计钩子只看得见**本进程**。补查子进程：测试里的 `subprocess` 调用无一跑写死主 checkout 的模块
+- v0.45.224「文件访问只有 import 期一次 `scandir`」：审计钩子只看得见**本进程**。补查子进程：测试里的 `subprocess` 调用无一跑写死主 checkout 的模块**（v0.45.240 订正：扫描漏看 `import subprocess as _sp` 一处，它只伪造 git，结论不变）**
   （`weekly_optimizer` / `self_analyst` / `generate_deep_v2` / `collect_data` / `alpha_hive_mcp` / `deep_analysis`），唯一的 `-c` 子进程 import 的是
   `alpha_hive_daily_report`，生产代码无顶层 import 上述模块（静态核对，不是运行时量的）。
 - 其余 v0.45.224 声称（收集期 chdir、sys.path 120/141、4 failed / 6 passed 复现、9 条 cwd 依赖、canary）为当轮实测输出，本轮未发现反例。

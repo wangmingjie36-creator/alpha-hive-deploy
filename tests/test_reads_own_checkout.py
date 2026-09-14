@@ -432,3 +432,77 @@ class TestRuntimeLeaksAreUndone:
         cwd, _ = cwd_between_tests
         assert Path(cwd).resolve() != Path(request.config.invocation_params.dir).resolve(), (
             "class 级 fixture 在调用目录里 setup —— 高于函数级的 cwd 相对读取又看不见了")
+
+
+class TestConftestGuardsDoNotAnchorOnCwd:
+    """conftest 里除了收集期记录，谁都不许用 cwd 决定「看哪儿」（v0.45.240）。
+
+    v0.45.224 起 cwd 在测试期间被挪进空目录，任何在 fixture 里用 cwd 推出「要守的真身在哪」
+    或「这个路径在不在沙箱里」的守卫都会**安静地改守 tmp**。实测两处：
+
+    - `_isolate_ml_model_file` 的 cwd 臂用 `Path.cwd()`：路径在收集期冻结到调用目录、测试往里写模型，它不响。
+    - 同一 fixture 的防线①用 `Path(default_model_path()).resolve()` 判「在 tmp 里」：默认值改回相对路径时
+      resolve 按 cwd（= tmp）补全，恒真。**这一种不调 `cwd()`** —— 本类第一版只认 `cwd`/`getcwd`，漏了它。
+
+    所以读 cwd 分两类：显式（`cwd`/`getcwd`）一律报；隐式（`resolve`/`absolute`/`abspath`/`realpath`）
+    主语里带锚点（`__file__` / `invocation_params` / `tmp_path*`）才放行。
+    """
+
+    EXPLICIT = {"cwd", "getcwd"}
+    IMPLICIT = {"resolve", "absolute", "abspath", "realpath"}
+    ANCHORS = {"__file__", "invocation_params", "tmp_path", "tmp_path_factory"}
+    ALLOWED = {
+        "pytest_collection_finish",          # 它记的就是「收集结束那一刻的 cwd」
+        "_assert_default_path_in_sandbox",   # 先断言 is_absolute 再 resolve；由下面的运行时自证守着
+    }
+
+    @classmethod
+    def cwd_readers_outside(cls, source, allowed):
+        tree = ast.parse(source)
+        hits = []
+        for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            if fn.name in allowed:
+                continue
+            for n in ast.walk(fn):
+                if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)):
+                    continue
+                attr = n.func.attr
+                if attr in cls.EXPLICIT:
+                    hits.append(f"{fn.name}:{n.lineno}")
+                elif attr in cls.IMPLICIT:
+                    # `x.resolve()` 的主语是 x；`os.path.abspath(x)` 的主语是 x
+                    subject = n.args[0] if attr in {"abspath", "realpath"} and n.args else n.func.value
+                    names = {s.id for s in ast.walk(subject) if isinstance(s, ast.Name)}
+                    names |= {s.attr for s in ast.walk(subject) if isinstance(s, ast.Attribute)}
+                    if not names & cls.ANCHORS:
+                        hits.append(f"{fn.name}:{n.lineno}")
+        return hits
+
+    def test_no_cwd_derived_watch_in_conftest(self):
+        src = (TESTS_DIR / "conftest.py").read_text(encoding="utf-8")
+        hits = self.cwd_readers_outside(src, self.ALLOWED)
+        assert not hits, (
+            f"conftest 在 fixture 里读 cwd：{hits}。测试期间 cwd 是空目录（v0.45.224/237），"
+            "拿它定位真身、或拿它补全相对路径再判「在不在 tmp 里」，都等于守 tmp；"
+            "调用目录用 `request.config.invocation_params.dir`，仓库根用 `__file__`，判沙箱先断言 `is_absolute()`。")
+
+    def test_detector_has_teeth(self):
+        cases = {
+            "import pathlib\ndef _guard(tmp_path):\n    watched = pathlib.Path.cwd() / 'x'\n": ["_guard:3"],
+            "import pathlib\ndef _guard(tmp_path, mp):\n    r = pathlib.Path(mp.default_model_path()).resolve()\n": ["_guard:3"],
+            "import os\ndef _guard(p):\n    r = os.path.abspath(p)\n": ["_guard:3"],
+            "import os\ndef pytest_collection_finish(session):\n    x = os.getcwd()\n": [],
+            "import pathlib\ndef _guard(tmp_path, mp):\n    a = pathlib.Path(mp.__file__).resolve()\n    b = tmp_path.resolve()\n": [],
+            "import pathlib\ndef _guard(request):\n    d = pathlib.Path(request.config.invocation_params.dir).resolve()\n": [],
+        }
+        for src, want in cases.items():
+            assert self.cwd_readers_outside(src, self.ALLOWED) == want, src
+
+    def test_sandbox_check_rejects_relative_default(self, tmp_path, default_path_sandbox_check):
+        """运行时自证：cwd 就在 tmp 里（本测试正处在这种环境）时，相对默认值也必须红。"""
+        assert Path.cwd().resolve().is_relative_to(tmp_path.resolve()), "前提不成立：本测试的 cwd 不在 tmp 里"
+        with pytest.raises(AssertionError, match="不是绝对路径"):
+            default_path_sandbox_check("ml_model.json", tmp_path)
+        with pytest.raises(AssertionError, match="逃出了测试沙箱"):
+            default_path_sandbox_check(str(TESTS_DIR.parent / "ml_model.json"), tmp_path)
+        default_path_sandbox_check(str(tmp_path / "ml_model.json"), tmp_path)

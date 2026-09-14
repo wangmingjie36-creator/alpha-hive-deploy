@@ -797,8 +797,26 @@ def _ml_model_digest(path):
         return "MISSING"
 
 
+def _assert_default_path_in_sandbox(raw, tmp_path):
+    """`_isolate_ml_model_file` 防线①：默认落盘位置是**绝对路径**且在 tmp 沙箱里。
+
+    先断言绝对、再判包含（v0.45.240）：`Path(相对).resolve()` 按 **cwd** 补全，而 v0.45.224 起测试期间
+    cwd 就在本测试的 tmp 里 ⇒ `default_model_path()` 被改回 `"ml_model.json"` 时 resolve 出
+    `tmp/_cwd/ml_model.json`，包含判定恒真、本闸不响（实测）。测试里这条相对路径只写进空目录，
+    **伤的是生产**：编排器从仓库根跑，写穿的正是 v0.45.149 那次事故的模型文件。
+    """
+    p = pathlib.Path(raw)
+    assert p.is_absolute(), (
+        f"ML 模型默认落盘位置不是绝对路径：{raw!r}。测试期间 cwd 在 tmp 里所以这里看着无害，"
+        "生产从仓库根跑就会写穿仓库根的模型文件 —— save_model/load_model 的默认值又被改回相对路径了？")
+    resolved = p.resolve()
+    assert resolved.is_relative_to(tmp_path.resolve()), (
+        f"ML 模型默认落盘位置逃出了测试沙箱：{resolved}（沙箱应为 {tmp_path}）。"
+        "多半是 default_model_path() 被写成了模块级常量（import 时求值 = 冻住旧值）。")
+
+
 @pytest.fixture(autouse=True)
-def _isolate_ml_model_file(tmp_path, monkeypatch):
+def _isolate_ml_model_file(request, tmp_path, monkeypatch):
     """核对测试没把 ML 模型写进仓库根（或 pytest 的 cwd）。
 
     v0.45.149。事故：`ml_predictor` 的三对 `save_model/load_model` 默认值是
@@ -838,15 +856,14 @@ def _isolate_ml_model_file(tmp_path, monkeypatch):
     # 指向 tmp 了，拿它找真身等于什么都没查（恒真的守卫）。
     repo_root = pathlib.Path(_mp.__file__).resolve().parent
     watched = {repo_root / n for n in _ML_MODEL_FILES}
-    watched |= {pathlib.Path.cwd().resolve() / n for n in _ML_MODEL_FILES}
+    # 「pytest 的 cwd」指**调用目录**，不能用 `Path.cwd()`（v0.45.240）：v0.45.224 起本 fixture setup 时
+    # cwd 已被 `_isolate_cwd_and_sys_path`（按名字排在前面）挪进本测试的空目录，这一臂从那时起
+    # 看的是 tmp —— 实测路径在收集期冻结到调用目录、测试往里写 ml_model.json，本闸不响。
+    watched |= {pathlib.Path(request.config.invocation_params.dir).resolve() / n for n in _ML_MODEL_FILES}
     before = {p: _ml_model_digest(p) for p in watched}
 
     # 防线①的正面核对：默认落盘位置必须落在 tmp 沙箱里。
-    resolved = pathlib.Path(_mp.default_model_path()).resolve()
-    assert resolved.is_relative_to(tmp_path.resolve()), (
-        f"ML 模型默认落盘位置逃出了测试沙箱：{resolved}（沙箱应为 {tmp_path}）。"
-        "多半是 save_model/load_model 的默认值又被改回相对路径，"
-        "或 default_model_path() 被写成了模块级常量（import 时求值 = 冻住旧值）。")
+    _assert_default_path_in_sandbox(_mp.default_model_path(), tmp_path)
 
     yield
 
@@ -910,6 +927,12 @@ def artifact_signature():
     判据**——两份实现早晚漂移，而漂移的那一刻两边都还是绿的。
     """
     return _artifact_signature
+
+
+@pytest.fixture
+def default_path_sandbox_check():
+    """把 `_assert_default_path_in_sandbox` 暴露给它的自证测试（同上：`conftest` 不可直接 import）。"""
+    return _assert_default_path_in_sandbox
 
 
 @pytest.fixture(scope="session", autouse=True)
