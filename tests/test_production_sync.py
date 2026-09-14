@@ -478,9 +478,13 @@ class TestResultReachesAlerts:
 
         snap = st.snapshot("2026-09-14", extra={"git_push": st.git_push_summary(res["git_push"]),
                                                 "git_commit": st.git_commit_summary(res["git_commit"])})
-        _, msgs = self._alerts(tmp_path, snap)
-        assert any("日报提交失败" in m for m in msgs), msgs
+        a, msgs = self._alerts(tmp_path, snap)
+        hit = [x for x in a.alerts if "日报提交失败" in x.message]
+        assert hit, msgs
         assert not any("推送失败" in m for m in msgs), "推送确实没失败，别报错地方"
+        # v0.45.225：原因一栏必须是真实原因。v0.45.223 这里写的是「白名单未匹配到任何文件」，
+        # 与同一条告警「建议：查 index.lock」自相矛盾（`GitHubTool.commit` 吞了 git add 的报错）
+        assert "index.lock" in hit[0].details["原因"], hit[0].details
 
     def test_nothing_to_commit_is_not_a_commit_failure(self, world, tmp_path):
         """正对照：只有非日报产物有改动 ⇒ `commit()` 回 success=False（nothing to commit），但不是故障。"""

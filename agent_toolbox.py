@@ -163,6 +163,17 @@ class GitHubTool:
                 "error": reason or f"git status 失败（returncode={result.get('returncode')}，无错误输出）"}
 
     @staticmethod
+    def _failure_reason(result: Dict[str, Any]) -> str:
+        """`run_git_cmd` 的失败结果 → 一行原因，两种失败形状都认（`stderr` / 只有 `error`）。
+
+        只取首个非空行：锁错误后面跟五行通用建议，带路径与「File exists」的是首行。
+        """
+        text = (result.get("stderr") or result.get("error") or "").strip()
+        if not text:
+            return f"returncode={result.get('returncode')}，无错误输出"
+        return text.splitlines()[0].strip()
+
+    @staticmethod
     def _parse_porcelain_z(out: str) -> List[str]:
         """`git status --porcelain -z`（v1）→ 路径列表。
 
@@ -199,20 +210,34 @@ class GitHubTool:
 
         自动化边界应按**白名单**定义而非黑名单：失败模式从"多提交了不该提交的"
         （不可发现）变成"漏提交了该提交的"（下次运行即可见）。
+
+        失败返回 `{"success": False, "error": 原因}`。v0.45.225 前白名单分支把**所有** add
+        失败都当成「该产物本次未生成」容忍，一条没暂存上就回「白名单未匹配到任何文件」——
+        残留 `.git/index.lock` 时也是这句（git 先拿锁再匹配 pathspec，锁在时每条都是锁错误）。
+        现在只容忍 pathspec 未匹配；别的失败的原因原样回给调用方（进 status.json 与告警）。
+        ⚠️ 仍不管的一种：部分 add 失败、部分成功时照常提交成功的那部分，失败的产物留在工作区，
+        无告警（实测想不出生产里只坏一部分的触发条件，锁是整库级的）。
         """
         if paths:
-            # 逐条暂存：某个 pathspec 无匹配时 git 会报错，此处容忍（该产物本次未生成）
+            # 逐条暂存：pathspec 无匹配是预期失败（该产物本次未生成），容忍；别的失败要带原因回去
             staged_any = False
+            add_errors: List[str] = []
             for p in paths:
                 r = self.run_git_cmd(f"git add -- {shlex.quote(p)}")
                 if r["success"]:
                     staged_any = True
+                elif "did not match any files" not in (r.get("stderr") or ""):
+                    add_errors.append(self._failure_reason(r))
             if not staged_any:
+                if add_errors:
+                    # 同一把锁对每条 pathspec 报同一行，去重后才放得进 status.json 的 300 字
+                    return {"success": False,
+                            "error": "git add 失败：" + "；".join(dict.fromkeys(add_errors))}
                 return {"success": False, "error": "白名单未匹配到任何文件"}
         else:
             stage = self.run_git_cmd("git add -A")
             if not stage["success"]:
-                return {"error": f"Failed to stage: {stage['stderr']}"}
+                return {"success": False, "error": f"git add 失败：{self._failure_reason(stage)}"}
 
         commit = self.run_git_cmd(f"git commit -m {shlex.quote(message)}")
         return {

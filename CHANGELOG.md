@@ -5,6 +5,162 @@
 
 ---
 
+## [0.45.233] — 2026-09-14 — 占位（进行中：数据根迁移阶段 0——DB 一致性快照 / 修编排器每日备份 / 测试「默认拒绝」总闸）
+
+## [0.45.232] — 2026-09-14 — 占位（进行中：宏观条改自动横向滚动，移植 defi-hero worktree 的未提交 WIP）
+
+## [0.45.231] — 2026-09-14 — 占位（进行中：合入 v0.45.76 方向圆点样式 + v0.45.79 宏观指标颜色规则）
+
+## [0.45.230] — 2026-09-14 — 占位（进行中：修 v0.45.224 找到的三处生产根因——weekly_optimizer 往 sys.path 插主 checkout / deep_analysis 导入期 chdir / cboe_fetcher 缓存默认相对路径）
+
+## [0.45.229] — 2026-09-14 — 占位（进行中：Max Pain 磁吸位预测力检验 + CBOE 持仓量日期核实，纯实验不改生产）
+
+## [0.45.228] — 2026-09-14 — 占位（进行中：RivalBee/CodeExec 豁免 ML 票重缩放 —— `ml_adjustments.get(维度, 1.0)` 缺键默认 1.0，先量再修）
+
+---
+
+## [0.45.227] — 2026-09-14 — 占位（进行中：索引锁被别的进程短暂占用时日报产物漏提交且提交报成功——提交后核对 + add 重试）
+
+## [0.45.226] — 2026-09-14 — CHANGELOG 对账：六处 session 改动从未并入 main，一处并入了却没记
+
+用户问「很多 session 同时在跑，CHANGELOG 上没有丢失 session 的改动吧」。
+查下来**有**，全部出在 08-27 ~ 09-05；09-06 之后的改动全部对得上。
+
+本条照 v0.45.116 先例，只负责让 CHANGELOG 不再说谎：**不合并任何分支、不改任何代码**。
+各分支要不要合，是单独的决定。
+
+### 方法：三道对账，缺一道就漏
+
+| 道 | 做法 | 本次只有它抓得到的 |
+|---|---|---|
+| 号级 | `git log --all -p -U0 -- CHANGELOG.md` 抽出**曾经加过**的 `+## [x]`，减去 `origin/main` 现有的号 | 0.45.76–79 |
+| 标题级 | 曾出现过的标题与 main 现有标题做模糊匹配 | 原 0.45.118（同号换了内容，号级看不见） |
+| 提交级 | main 上改了代码、没碰 CHANGELOG、subject 也不带版本号的提交 | `78e88b7` |
+
+另查全部 worktree 的 `status --porcelain`：未提交的改动连分支都没有，前三道都看不见。
+
+两个会让结论出错的坑：
+- **悬挂占位 grep 抓不到这类丢失。** 0.45.76–79 在分支上直接写了正式条目，这四个号在 main 上
+  **一次都没出现过**，`grep -c "占位（进行中"` 恒为 0。main 从 0.45.75 直接跳到 0.45.80。
+- **`git cherry` 在本仓几乎失效。** 每个提交都改 CHANGELOG 顶部，rebase 解冲突后 patch-id 就变了，
+  会冒出大量「未合并」假阳性。判合并改用 `merge-base --is-ancestor`，再 grep 本版独有的标识。
+
+### Notes — 从未并入 main 的六处
+
+| 号 | 意图 | 工作所在（原正文在该提交里） | 分支落后 main |
+|---|---|---|---|
+| 0.45.76 | 方向小圆点 `.dot-bull/bear/neut` 补样式 | `1646db7`，`claude/distracted-heyrovsky-b7ebed`（本地 + origin） | 446 |
+| 0.45.77 | 网站去 AI 味收尾：公司卡改扁平网格、渲染器硬编码色换令牌 | `3581d8d`，`claude/happy-cannon-bc377f`（本地 + origin） | 446 |
+| 0.45.78 | 宏观条补涨跌幅；评分分布图去 Chart.js 默认圆角/饱和色 | `6024fbf`，同上 | 446 |
+| 0.45.79 | 宏观指标颜色令牌化，修从未生效的 `.yc-*` / `.gld-*` | `366fa14`，`claude/interesting-khayyam-a141ec`（**仅本地**） | 446 |
+| 原 0.45.118 | 事后补跑云端快照工具 `backfill_cloud_snapshot.py`，业务日作参数 | `de4dcb8`，`origin/claude/backfill-cloud-snapshot` | 367 |
+| （无号） | `var(--mt)` / `var(--t)` 未定义，9 处换成 `--tm` / `--tp` | `e8bac95`，`claude/nostalgic-cray-1fed0e`（**仅本地**） | 446 |
+
+⚠️ 标「仅本地」的两条只存在于这台 Mac 的 `.git` 里，删分支就没了。
+
+**main 上的实况**（本版逐项核验）。静态部分看 `origin/main`；渲染部分把 `index.html`
+（`1826d3e` 日报产物）用本地 http.server 打开，拿 `getComputedStyle` 实测：
+
+- **0.45.76 的 bug 仍在线上。** CSS 与 `index.html` 里 `.dot-*` 的定义 0 处；页面上 643 个圆点
+  宽度全为 0、背景透明，**一个都看不见**。
+- **0.45.79 的 bug 仍在线上。** `dashboard.css:527–531` 的 `.yc-ok` 等是单类选择器，
+  被 `:673` 同特异度、更靠后的 `.ah-macro-val{color:var(--tp)}` 覆盖。实测带 `yc-ok`、`gld-up`
+  的两格颜色都等于 `--tp`（`rgb(26, 18, 8)`）。恐惧贪婪那格走内联 `style`，不受影响。
+- **0.45.77 / 0.45.78 未落地。** 77 独有的 `_dcls_map3`、`_TICKER_INFO_D` 在 main 上出现 0 次，
+  它要删掉的 `_dir_hdr3` 仍在；78 独有的 `_macro_vix_delta_html`、`_prev_macro`（宏观日环比）也是 0 次。
+- **`e8bac95` 指出的问题仍在，但它对后果的描述是错的。** 提交信息说文字「恒黑」；实测引用这两个
+  变量的 266 个元素 **0 个是黑色，266 个全部等于父元素颜色**。按 CSS 规范，`color` 引用未定义变量
+  会退化为继承。真实后果是「弱化色 / 主色的区分丢了」，例如「今日 Actionable」标题本应是弱化色，
+  现在跟着父元素渲染成主色。另外它只改了 `dashboard_renderer.py` 的 9 处，
+  `templates/dashboard.js` 里还有 8 处同样的引用没动。
+- **原 0.45.118。** `backfill_cloud_snapshot.py` 不在 main 上；它要绕开的阻碍也还在：
+  `cloud_snapshot_fetch._business_date()`（`:63`）照旧取墙上时钟，主脚本没有 `--date` 入口。
+
+**编号处理**：0.45.76–79 已写进远端分支的 git 历史，不可回收。本条在 0.45.80 与 0.45.75 之间补写
+四条「未并入 main」标题，只放指针，**不照搬原正文**：照搬等于宣称从未上线的改动已经交付
+（v0.45.116 的判据）。原 0.45.118 的号已被另一条合法使用，不能再加标题（重号守卫会红），
+改在该条顶部加一行指针。
+
+**给之后决定合并的人**：
+- v0.45.80 说它与 76 / 79「三方 diff 互不相交」，那句话只覆盖 76 和 79。
+- **0.45.77 与 `e8bac95` 改的是同几行 `var(--mt)`，目标令牌还不一样**（77 改成 `--ts`，
+  `e8bac95` 改成 `--tm`），两个不能都照原样合。
+- 自这些分支的基点 `273e5a4` 以来，main 上又有 10 个提交改过 `dashboard.css` / `dashboard.html` /
+  `dashboard.js` / `dashboard_renderer.py`。
+
+### Notes — 并入了却没记的一处
+
+`78e88b7`（2026-08-27，「二次检查 v0.45.42~46」）修了两处前一个提交自己引入的边界：
+- `cboe_options.official_price` 的 `_num()` 只判 `f > 0`，`inf > 0` 为真，无穷大会被当成合法收盘价。
+  改为 `math.isfinite(f) and f > 0`。
+- `OptionsAgent._refresh_price_derived`（v0.45.43）传入列表或字符串时 `.get` 直接 `AttributeError`。
+  加 `isinstance` 守卫。
+
+两处代码都已在 main（`cboe_options.py:690`；`options_analyzer.py` 两处 `isinstance(cached, dict)`），
+此前 CHANGELOG 零记录。已在 v0.45.46 条目顶部补一行指针，按提交信息查版本的人能找过来。
+
+### Notes — 未提交的一处
+
+worktree `defi-hero-section-design-ca009b` 里有 08-30 03:27 的未提交改动：
+`templates/dashboard.html`（宏观条外面套了一层 viewport / track）、`templates/dashboard.css`、
+`.claude/launch.json`，共 +99 / −33。所在分支停在 `273e5a4`，**没有任何提交**，清理这个 worktree 就没了。
+
+### 核过、不算丢失的
+
+- 0.45.5：改号为 0.45.11（已记）
+- 0.45.112：两个 session 撞号，「期权三本账不在自动提交白名单」让到 0.45.115，内容完整
+- 0.45.88：v0.45.116 已标注为占号未兑现；0.45.94：v0.45.117 已兑现
+
+### 验证
+
+- 三道对账首轮在 `origin/main` @ `ecd4fd0` 上跑，本条落笔前在 @ `f3cd2ea` 上重跑，结论一致：
+  其间新增的 0.45.210–0.45.225 没有新的丢失。
+- pre-commit / pre-push 的 CHANGELOG 完整性守卫通过（补写的四条标题下都有正文、号不重复）。
+
+## [0.45.225] — 2026-09-14 — 二次检查 v0.45.223：「日报提交失败」告警在它瞄准的那个场景里原因栏是假的
+
+用户要求再二次检查 v0.45.223。复核无问题的：生产代码零处调 `scan_timing.reset()`（启动版本不会在快照前被清）；
+`_init_scan_context` 是 `run_swarm_scan` 第一行、早退都在其后；提交告警的产物判定与白名单同源（已有守卫，
+删除与 iCloud「… 2.json」副本两边一致）；`test_code_version` 的假值进不了 `scan_timing`；部署抛异常时
+推送记失败、提交记「无记录」而不是成功。查出一处，用户批准修：
+
+### Fixed
+
+1. **残留 `.git/index.lock` 时，P1「日报提交失败」的原因栏写「白名单未匹配到任何文件」**——而同一条告警的
+   「建议」栏叫人去查 index.lock，两栏自相矛盾，照原因栏会去查白名单配置。真实原因是
+   `fatal: Unable to create '…/index.lock': File exists.`。
+   - 机制：`GitHubTool.commit(paths=…)` 逐条 `git add`，**任何**失败都被当成「该产物本次未生成」容忍，
+     一条没暂存上就回那句话。实测 **git 先拿索引锁再匹配 pathspec** ⇒ 锁在时连不存在的 pathspec
+     报的也是锁错误，一条「did not match any files」都没有。这是 v0.43.4 起就有的，v0.45.223 的告警把它摆上了台面。
+   - 修：只容忍 pathspec 未匹配；别的失败取 git 报错首行、去重后回 `{"success": False, "error": "git add 失败：…"}`
+     （锁错误后跟五行通用建议，首行才带路径；每条 pathspec 报同一行，去重才放得进 status.json 的 300 字截断）。
+   - Apple git 2.50.1 在 `LANG=zh_CN.UTF-8` 下仍输出英文，判别用子串可行；若某天 git 被本地化，
+     退化是「无产物时原因栏显示 git 原文而非固定说法」，且那种情形 `pending_artifacts == 0` 不告警。
+2. **`git status` 失败时 `results["git_commit"]` 只有一句 `"git status failed"`**，真实原因只进了前一行 warning 日志。
+   `report_deployer._git_modified_files` 改为返回 `(清单, 原因)`，原因进 `error`（⇒ status.json ⇒ 告警原因栏）。
+3. **`commit()` 不传 `paths` 的 `git add -A` 分支**（生产无调用方）失败时回 `{"error": …}`、**没有 `success` 键**，
+   且子进程异常形状只有 `error` 键时读 `stage['stderr']` 是 KeyError。改为与白名单分支同一契约。
+
+### 测试
+
+- 新文件 `tests/test_github_tool_commit.py`（4 条，真 git 仓库，除子进程异常形状外不打桩）：残留锁 ⇒ 原因含
+  index.lock、不含「白名单未匹配」、只出现一次、单行（正对照先断言锁在时不存在的 pathspec 也报锁错误）；
+  什么都没匹配 ⇒ 说法不变（正对照，防判别器写反）；`-A` 分支两种失败形状。
+- 扩展两条既有测试：`test_production_sync` 的 index.lock 链路测试断言告警**原因栏**含 index.lock；
+  `test_git_failures_are_visible` 的真索引损坏测试断言 git 报错首行进了 `results["git_commit"]["error"]`。
+- 改动前的代码上：5 条红（「什么都没匹配」是正对照，旧代码本来就对）。
+- 变异真跑 8 处（pathspec 未匹配也当错误 / 退回全容忍 / 不去重 / 不取首行 / 不认 error 形状 / `-A` 丢 success /
+  status 原因退回固定串 / `git_commit_summary` 不读 error），全部被抓到。
+- 全套 `pytest --maxfail=200`：**4312 passed / 1 failed（仅 `TestCoverageHorizon`，按设计红）/ 1 skipped
+  （收集期 `test_scheduler.py`：`schedule` 库未装，与本次无关）/ 2 xfailed**；`ruff check .`：All checks passed。
+
+### 未修（只记录）
+
+- **部分 add 失败、部分成功**：成功的那部分照常提交、`success=True`，失败的产物留在工作区，无告警。
+  锁是整库级的，想不出生产里只坏一部分的触发条件，故只写进 `commit()` docstring，没加没人读的字段。
+
+---
+
 ## [0.45.224] — 2026-09-14 — 二次检查 v0.45.222：普查仪器本身被污染——收集期 import 把 cwd 挪到仓库根、weekly_optimizer 把主 checkout 塞进 sys.path；真普查再出 9 条 cwd 依赖
 
 方法同 v0.45.218/222：**不重读汇报，把每条声称写成探针真跑。** 这次的教训在探针自己身上 ——
@@ -9913,6 +10069,10 @@ GitHub runner 上 Python 在 `/opt/hostedtoolcache/Python/3.11.16/x64/bin/python
 
 ## [0.45.118] — 2026-09-05 — 扫描耗时可见化：Step 2 八天涨 4.5×、被杀两次，没有一行日志说离预算还剩多少
 
+> ⚠️ v0.45.226 补注：**同号另有一条从未并入 main 的工作。** `de4dcb8`（分支
+> `origin/claude/backfill-cloud-snapshot`，提交信息标 v0.45.118）是「事后补跑云端快照工具」，
+> 不是本条。两个 session 撞号，本条先进了 main。那条工作的实况见 v0.45.226。
+
 用户问「规则模式的定时任务为什么跑完这么慢，是不是代码沉重」。先量再答：
 
 | 日期 | Step 2 | |
@@ -12805,6 +12965,30 @@ JS `querySelector` 挂钩——class 本就不承担样式职责，不是 bug。
 动的是第七轮宏观指标那一段），三方 diff 互不相交，理论上能自动合并，
 但仍需人工确认最终合并顺序与结果。
 
+## [0.45.79] — 2026-08-30 — 未并入 main：宏观指标颜色令牌化（工作在本地分支 `claude/interesting-khayyam-a141ec`）
+
+> 标题由 v0.45.226 对账补写。本号在 main 上此前从未出现过（没有占位，也没有正文）。
+> 改动与原正文在 `366fa14`，**未合并**；该分支只在本地、没有推到 origin。
+> 它要修的 `.yc-*` / `.gld-*` 颜色不生效，在 main 上实测仍存在，详见 v0.45.226。
+
+## [0.45.78] — 2026-08-30 — 未并入 main：宏观条补涨跌幅 + 评分分布图改色（工作在 `claude/happy-cannon-bc377f`）
+
+> 标题由 v0.45.226 对账补写。本号在 main 上此前从未出现过。
+> 改动与原正文在 `6024fbf`（本地 + origin 均有该分支），**未合并**。详见 v0.45.226。
+
+## [0.45.77] — 2026-08-30 — 未并入 main：网站去 AI 味收尾，公司卡改扁平网格（工作在 `claude/happy-cannon-bc377f`）
+
+> 标题由 v0.45.226 对账补写。本号在 main 上此前从未出现过。
+> 改动与原正文在 `3581d8d`，**未合并**。⚠️ 它与未合并的 `e8bac95` 改同几行 `var(--mt)`、
+> 目标令牌不同，不能都照原样合。详见 v0.45.226。
+
+## [0.45.76] — 2026-08-30 — 未并入 main：方向小圆点 `.dot-*` 补样式（工作在 `claude/distracted-heyrovsky-b7ebed`）
+
+> 标题由 v0.45.226 对账补写。本号在 main 上此前从未出现过。
+> 改动与原正文在 `1646db7`（本地 + origin 均有该分支），**未合并**。
+> v0.45.80 提到的「`elastic-spence` 的 v0.45.76」就是它。圆点在 main 上实测仍然一个都看不见，
+> 详见 v0.45.226。
+
 ## [0.45.75] — 2026-08-29 — 一个已被自己证伪的归因，还在 7 个文件里当理由用
 
 2026-08-25 的重测已经证伪了「本机 OpenSSL 1.1.1q 扛不住并发 HTTPS」这个归因，
@@ -15362,6 +15546,10 @@ yfinance 批量下载会**部分失败**（同一天两次运行：一次全覆�
 回退验证：把三处修复回退后 5 条转红，覆盖全部三个文件。
 
 ## [0.45.46] — 2026-08-27 — 收盘后取的一直是盘后价
+
+> v0.45.226 补注：本条之后的 `78e88b7`（「二次检查 v0.45.42~46」）另修了两处边界：
+> `official_price` 放行 `inf`，以及 `_refresh_price_derived`（v0.45.43）遇到非 dict 输入会崩。
+> 代码已在 main，此前 CHANGELOG 没有记录，详见 v0.45.226。
 
 用户指出「232.32 是 CRM 盘后价」，并要求「检查所有价格都取收盘价格，
 不要取到盘后价格」。查下去发现这不是 CRM 一只的问题，是**整条取价链的系统性偏差**。
