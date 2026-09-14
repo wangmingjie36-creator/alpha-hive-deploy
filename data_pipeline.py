@@ -301,29 +301,29 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
         _last_date = (_last_dt.tz_localize(None) if getattr(_last_dt, "tzinfo", None) else _last_dt).date()
         if _last_date != as_of:
             # v0.45.70：yfinance 拿不到目标日收盘时，改问云端快照。
-            # 快照是**目标日收盘后**（约 17:00 ET）从 CBOE 抓的，正是该日的价；
-            # `load_ticker` 内部已校验 `vintage_date == date`，vintage 不符返回 None，
-            # 所以这里不需要再造一道日期闸 —— 造了就是两个口径并存。
-            _snap_px = None
+            # v0.45.243：**不再直接取 `price_at_fetch`**。那是抓取那一刻 official_price
+            # 的取值，CDN 发盘中生成的文件时它是中午的成交价、且 v0.45.234 之前的快照
+            # 照样标 cboe_close（08-28 DE 624.85 vs 官方 630.33 就是这么进的库）。
+            # 判不判得出「官方收盘」全在 `load_official_close` 里，这里只认它的结论。
+            _snap_px, _snap_src = None, "snapshot_not_consulted"
             try:
                 import cloud_snapshot_loader as _csl
-                _snap = _csl.load_ticker(as_of_date, ticker)
-                if _snap:
-                    _v = _snap.get("price_at_fetch")
-                    if isinstance(_v, (int, float)) and math.isfinite(_v) and _v > 0:
-                        _snap_px = float(_v)
-                        _snap_src = str(_snap.get("price_source") or "cloud_snapshot")
+                _snap_px, _snap_src = _csl.load_official_close(as_of_date, ticker)
             except Exception as _e_snap:  # noqa: BLE001 —— 兜底失败不得掩盖主诊断
-                _log.debug("[历史补跑] %s @ %s 云端快照取价跳过: %s", ticker, as_of_date, _e_snap)
+                _snap_src = f"snapshot_error:{type(_e_snap).__name__}"
+                _log.warning("[历史补跑] %s @ %s 云端快照取价失败: %s", ticker, as_of_date, _e_snap)
 
             if _snap_px is None:
+                # 谁会红？—— 「快照有、但不是官方收盘」与「快照没有」分开报：前者是
+                # v0.45.243 主动拒收的（`_reason` 带判决），不能读成「兜底坏了」。
                 _log.warning(
                     "[历史补跑] %s @ %s：yfinance 无该日有效收盘价（最近有效行是 %s），"
-                    "云端快照也无 —— **不以前一交易日冒充**，标记不可用",
-                    ticker, as_of_date, _last_date)
+                    "云端快照也给不出官方收盘（%s）—— **不以前一交易日 / 盘中价冒充**，标记不可用",
+                    ticker, as_of_date, _last_date, _snap_src)
                 fb = StockData(data_source=DataQuality.FALLBACK).to_dict()
                 fb["_data_unavailable"] = True
                 fb["_reason"] = f"no_close_on_{as_of_date}"
+                fb["_snapshot_verdict"] = _snap_src
                 return fb
 
             _log.info("[历史补跑] %s @ %s：yfinance 无该日收盘（末行 %s），"
@@ -334,6 +334,7 @@ def _fetch_historical_stock_data(ticker: str, as_of_date: str) -> Dict:
                 data_source=DataQuality.REAL,
                 source_name=f"cloud_snapshot:{_snap_src}",
                 fetch_timestamp=time.time(),
+                price_source=_snap_src,
             )
             # 动量用快照价当最新一档、yfinance 历史当基准 —— 两端都是收盘价，
             # 口径可比；但要标明它是拼出来的，别当成单一来源的读数。

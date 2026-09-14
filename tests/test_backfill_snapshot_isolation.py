@@ -17,8 +17,14 @@
 """
 
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
+
+# 钉住的「此刻」：2026-08-25（周二）17:30 ET，收盘后 ⇒ 所属会话就是 2026-08-25。
+_NOW = datetime(2026, 8, 25, 17, 30, tzinfo=ZoneInfo("America/New_York"))
+_SESSION = "2026-08-25"
 
 
 @pytest.fixture
@@ -31,9 +37,12 @@ def agent(tmp_path, monkeypatch):
     快照"而通过——**测试通过但什么也没守住**。cache_dir 已指向 tmp_path，
     重新启用不会污染生产目录。
     """
+    import options_analyzer as oa
     from options_analyzer import OptionsAgent
 
     monkeypatch.delenv("OPTIONS_SNAPSHOT_DISABLE", raising=False)
+    # v0.45.238：槽位按 ET 交易会话分。钉住时钟，否则周末/盘前跑本文件会找错槽位。
+    monkeypatch.setattr(oa, "_snapshot_now", lambda: _NOW)
     a = OptionsAgent()
     monkeypatch.setattr(a.fetcher, "cache_dir", str(tmp_path))
     return a
@@ -69,15 +78,13 @@ def _snap_path_for(agent, ticker, monkeypatch, target=None):
 class TestBackfillUsesSeparateSlot:
     def test_today_run_uses_plain_key(self, agent, monkeypatch, tmp_path):
         """未设目标日（=正常当日扫描）时，文件名保持原样，向后兼容。"""
-        from hive_logger import pdt_today
-
         _snap_path_for(agent, "NVDA", monkeypatch, target=None)
-        expected = tmp_path / f"options_snapshot_NVDA_{pdt_today()}.json"
+        expected = tmp_path / f"options_snapshot_NVDA_{_SESSION}.json"
         # 未命中缓存不会创建文件，改为断言"该路径形状"由实现产生
         import options_analyzer as oa
         import inspect
         src = inspect.getsource(oa.OptionsAgent.analyze)
-        assert 'f"options_snapshot_{ticker}_{_snap_today}.json"' in src
+        assert 'f"options_snapshot_{ticker}_{_snap_session}.json"' in src
         assert expected.name.startswith("options_snapshot_NVDA_")
 
     def test_backfill_key_differs_from_today(self):
@@ -96,13 +103,11 @@ class TestBackfillUsesSeparateSlot:
         """补跑不得命中当日快照——这是往前污染的直接闸门。"""
         import json
 
-        from hive_logger import pdt_today
-
-        today = pdt_today()
+        today = _SESSION
         # 预置一份"当日快照"，内容可识别
         poison = tmp_path / f"options_snapshot_NVDA_{today}.json"
         poison.write_text(json.dumps({
-            "_snapshot_timestamp": f"{today}T06:33:00", "iv_rank": 999.0,
+            "_snapshot_timestamp": f"{today}T14:33:00-07:00", "iv_rank": 999.0,
         }))
 
         monkeypatch.setenv("ALPHA_HIVE_TARGET_DATE", "2026-01-02")
@@ -120,11 +125,9 @@ class TestBackfillUsesSeparateSlot:
         """别把闸门写成"永远不命中"——正常当日扫描仍须复用快照。"""
         import json
 
-        from hive_logger import pdt_today
-
-        today = pdt_today()
+        today = _SESSION
         (tmp_path / f"options_snapshot_NVDA_{today}.json").write_text(json.dumps({
-            "_snapshot_timestamp": f"{today}T06:33:00", "iv_rank": 42.0,
+            "_snapshot_timestamp": f"{today}T14:33:00-07:00", "iv_rank": 42.0,
         }))
         monkeypatch.delenv("ALPHA_HIVE_TARGET_DATE", raising=False)
         monkeypatch.setattr(agent.fetcher, "fetch_options_chain",
@@ -187,8 +190,6 @@ class TestTargetDateIsValidated:
     def test_malformed_target_falls_back_to_today_slot(self, agent, monkeypatch, tmp_path):
         """格式非法时退回当日口径，且路径不得逃出 cache 目录。"""
 
-        from hive_logger import pdt_today
-
         monkeypatch.setenv("ALPHA_HIVE_TARGET_DATE", "../../../tmp/evil")
 
         class _Boom(RuntimeError):
@@ -201,7 +202,7 @@ class TestTargetDateIsValidated:
 
         # 非法值被忽略 ⇒ 不该产生任何逃出 tmp_path 的路径
         escaped = os.path.normpath(os.path.join(str(tmp_path), "..", "tmp"))
-        assert not os.path.exists(os.path.join(escaped, "evil_backfilled-%s.json" % pdt_today()))
+        assert not os.path.exists(os.path.join(escaped, "evil_backfilled-%s.json" % _SESSION))
 
 
 class TestBackfillSnapshotsStayOutOfPriceHistory:

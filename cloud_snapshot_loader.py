@@ -43,10 +43,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import subprocess
 from contextlib import contextmanager
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # ⚠️ 下面这些常量必须**晚绑定**使用：函数签名一律 `ref: Optional[str] = None`，
 # 再在体内 `ref = ref or SNAPSHOT_REF`。写成 `ref: str = SNAPSHOT_REF` 会在
@@ -147,6 +148,81 @@ def load_ticker(date: str, ticker: str, *, ref: Optional[str] = None,
 
     d["full_chain_oi"] = _restore_numeric_keys(d.get("full_chain_oi"))
     return d
+
+
+# load_official_close 的判决标签（进 StockData.price_source / 补跑结果的 _reason）
+SNAP_CLOSE = "cloud_snapshot_close"
+SNAP_NEXT_PREV_CLOSE = "cloud_snapshot_next_prev_day_close"
+
+
+def _fetched_at(snap: dict):
+    """快照 `fetched_at_utc` → aware datetime（close_verdict 自己转 ET）；缺失/解析不了/无时区返回 None。"""
+    from datetime import datetime
+    raw = snap.get("fetched_at_utc")
+    if not isinstance(raw, str):
+        return None
+    try:
+        dt_ = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+    return dt_ if dt_.tzinfo is not None else None
+
+
+def load_official_close(date: str, ticker: str, *, ref: Optional[str] = None,
+                        repo: Optional[str] = None) -> Tuple[Optional[float], str]:
+    """某日某标的的**官方收盘价**，取自云端快照 → `(价 | None, 判决)`（v0.45.243）。
+
+    `price_at_fetch` 不能直接当收盘用：它是 `official_price` 在抓取那一刻的取值，
+    CDN 发盘中生成的文件时它是中午的成交价，而 v0.45.234 之前的快照照样标
+    `price_source="cboe_close"`。云端 290 份（08-28~09-11）里 71 份如此，
+    08-28 的 DE（624.85 vs 官方 630.33，last_trade 14:55:46）、TMO（626.325 vs 622.18，
+    09:45:27）、CVX、VZ 就是经补跑兜底这么进的库。**所以按 `last_trade_time_et` 判，
+    不看标签**（判据是 `cboe_options.close_verdict`，与数据管道同一份）。
+
+    取价顺序：
+      1. 当日快照 close_verdict == official 且场次 == date → `price_at_fetch`（SNAP_CLOSE）
+      2. 当日快照不是官方收盘 ⇒ **其后第一份快照的 `prev_day_close`**，且它自述的归属
+         （`prev_close_session`）必须恰为 date（SNAP_NEXT_PREV_CLOSE）。这不是凑数：
+         290 份实测 289 份 ≤0.01%、含全部 71 份陈旧文件；08-31 快照的 prev_day_close
+         恰还原 08-28 的 DE 630.33 / CVX 201.86 / VZ 50.10。归属自证，下一份若隔了
+         交易日（如 09-05 没跑）就对不上而返回 None，不需要另算日历。
+         当日快照根本不存在时同样问这一步。
+      3. 都不行 → `(None, "snapshot_<判决>")`，判决说明当日快照卡在哪一步
+         （no_snapshot / stale_intraday / session_open / unverifiable / …）——调用方据此标不可用。
+
+    ⚠️ 为什么不「照用 + 降级标签」：这个价的终点是 `price_at_predict`（T+7 收益的
+    入场价），而 predictions 表**没有**价格来源列 —— 标签到不了库里，降级在账本上
+    与官方收盘无从分辨。实时管道（v0.45.234）退用陈旧价是因为那里还有 price=0
+    整只跳过的代价要权衡；补跑缺一行只是少一个样本，错一个入场价是污染一个样本。
+    """
+    import cboe_options as co
+
+    verdict = "no_snapshot"
+    snap = load_ticker(date, ticker, ref=ref, repo=repo)
+    if snap:
+        # now = 抓取时刻：判的是「抓的时候这一场收了没有」，不是补跑此刻
+        # （fetched_at 缺失时退回本机此刻——补跑必在那场之后，只剩 last_trade 一条判据，仍成立）
+        verdict, session = co.close_verdict(
+            {"last_trade_time": snap.get("last_trade_time_et")}, _fetched_at(snap))
+        px = snap.get("price_at_fetch")
+        if verdict == co.CLOSE_OFFICIAL and (session is None or session.isoformat() != date):
+            verdict = "session_mismatch"
+        elif verdict == co.CLOSE_OFFICIAL:
+            if (isinstance(px, (int, float)) and not isinstance(px, bool)
+                    and math.isfinite(px) and px > 0):
+                return float(px), SNAP_CLOSE
+            verdict = "price_invalid"
+
+    # 当日快照没有 / 不是官方收盘 ⇒ 问其后第一份快照的 prev_day_close（归属自证）
+    later = [d for d in available_dates(ref, repo) if d > date]
+    if later:
+        nxt = load_ticker(later[0], ticker, ref=ref, repo=repo)
+        if nxt:
+            pc = co.prev_close_session({"last_trade_time": nxt.get("last_trade_time_et"),
+                                        "prev_day_close": nxt.get("prev_day_close")})
+            if pc and pc[0].isoformat() == date:
+                return pc[1], SNAP_NEXT_PREV_CLOSE
+    return None, f"snapshot_{verdict}"
 
 
 def load_market(date: str, *, ref: Optional[str] = None,

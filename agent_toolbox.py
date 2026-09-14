@@ -300,18 +300,59 @@ class GitHubTool:
     def _staged_names(self, paths: List[str]):
         """白名单 pathspec 内、相对 HEAD 已暂存的**确切文件名** → `(名字列表, None)`；失败 `(None, 原因)`。
 
-        三处都实测过（`tests/test_github_tool_commit.py::TestOnlyTheWhitelistIsCommitted`）：
+        四处都实测过（`tests/test_github_tool_commit.py::TestOnlyTheWhitelistIsCommitted`）：
         - 用确切名字而不是 pathspec 去提交：`git add -- vrp_state/`（目录里只有被忽略的文件）回 0，
           `git commit -- vrp_state/` 却报「did not match any file(s) known to git」、整个提交失败。
         - `--no-renames`：默认的改名检测让 `--name-only` 只列新名字，内容相近的前后两天快照会被配成改名
           ⇒ 旧文件的删除留在索引里没提交。
         - `-z`：iCloud 副本名带空格，不加引号、不转义。
+        - **排除「跨出白名单」的 rename 源**（v0.45.248）：上面的 `--no-renames` + pathspec 过滤有个副作用——
+          别的 session 已暂存一个 rename、旧路径在白名单目录内、新路径不在（如数据根迁移把 `hedge_state/x.json`
+          挪到 `data_root/x.json`）时，pathspec 只放行旧路径（一条孤立的 `D`），看不到新路径。若照单全收，
+          我们会把这半个 rename 当成「日报」提交掉——旧路径的删除进了跟对方毫无关系的提交，新路径仍留着孤零零
+          地暂存着，对方的原子操作被我们拦腰斩断。方向反过来（旧路径不在白名单、新路径在）无害：我们会把新路径
+          当成一次全新的 add 提交，不牵扯旧路径那半，对方的暂存原样留着。
         """
         spec = " ".join(shlex.quote(p) for p in paths)
         r = self.run_git_cmd(f"git diff --cached --no-renames --name-only -z -- {spec}")
         if not r["success"]:
             return None, self._failure_reason(r)
-        return [n for n in r["stdout"].split("\0") if n], None
+        names = [n for n in r["stdout"].split("\0") if n]
+        if not names:
+            return names, None
+
+        rr = self.run_git_cmd("git diff --cached --name-status -z")
+        if not rr["success"]:
+            return None, self._failure_reason(rr)
+        foreign = self._rename_sources_pointing_outside(rr["stdout"], set(names))
+        if foreign:
+            names = [n for n in names if n not in foreign]
+        return names, None
+
+    @staticmethod
+    def _rename_sources_pointing_outside(name_status_z: str, in_scope: set) -> set:
+        """解析 `git diff --cached --name-status -z`（默认改名检测），找出「旧路径在 `in_scope`
+        里、新路径不在」的 rename——这些旧路径要从我们的提交里剔除，见 `_staged_names` 的说明。
+
+        `-z` 下每条记录是 NUL 分隔：普通改动 `<状态><NUL><路径><NUL>`，改名是
+        `<R加分数><NUL><旧路径><NUL><新路径><NUL>`——区分靠状态字母，不靠数固定字段数。
+        ⚠️ **只认 `R`，不认 `C`（复制）**：实测过——不带 `-C` 时 git 从不报 `C`；带 `-C` 时，
+        复制源若在索引里未改动（最常见的复制形状），同样不出现在这份 diff 里（它压根不是「改动」），
+        没有旧路径可供剔除。带 `C` 判断会是永远走不到的死分支，故不写——真加 `-C` 探测复制前，
+        先想清楚“源未改动的复制”这条主路径要怎么处理，而不是先加个测不到的分支装作已经处理了。
+        """
+        fields = iter(name_status_z.split("\0"))
+        out = set()
+        for status in fields:
+            if not status:
+                continue
+            if status[0] == "R":
+                old, new = next(fields, None), next(fields, None)
+                if old in in_scope and new not in in_scope:
+                    out.add(old)
+            else:
+                next(fields, None)  # 普通改动：跳过它的路径字段
+        return out
 
     def _add_pathspec(self, pathspec: str):
         """`git add -- <pathspec>` → `(暂存成功?, 失败原因)`；pathspec 未匹配是 `(False, None)`。"""
