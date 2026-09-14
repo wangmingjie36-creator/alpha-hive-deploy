@@ -11,6 +11,7 @@
     "QueenDistiller": 6.97,
     "ChronosBeeHorizon": 5.995
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -23,8 +24,8 @@
   "cs_rank": null,
   "actual_prices": {
     "t1": 939.96,
-    "t7": null,
+    "t7": 902.38,
     "t30": null
   },
-  "created_at": "2026-09-04T15:02:33.594346"
+  "created_at": "2026-09-14T14:45:26.417747"
 }

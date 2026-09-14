@@ -16,6 +16,7 @@
     "BuzzBeeWhisper": 4.66,
     "GuardBeeSentinel": 4.3
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -29,7 +30,7 @@
   "actual_prices": {
     "t1": 18.700000762939453,
     "t7": 18.989999771118164,
-    "t30": null
+    "t30": 15.470000267028809
   },
-  "created_at": "2026-08-11T06:07:44.877530"
+  "created_at": "2026-09-14T14:45:19.348074"
 }
