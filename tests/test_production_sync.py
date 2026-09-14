@@ -31,6 +31,7 @@ import production_sync as ps  # noqa: E402
 import report_deployer as rd  # noqa: E402
 import scan_timing as st  # noqa: E402
 from agent_toolbox import GitHubTool  # noqa: E402
+from tests.test_github_tool_commit import hold_lock_during_add  # noqa: E402
 
 PRODUCTION = {"system_status": "✅ 蜂群协作完成", "swarm_metadata": {"tickers_analyzed": 1}}
 
@@ -80,6 +81,8 @@ def world(tmp_path, monkeypatch):
         return git("merge-base", "--is-ancestor", a, b, check=False).returncode == 0
 
     monkeypatch.setattr(rd, "deploy_static_to_ghpages", lambda reporter: None)
+    # 残留锁的用例会等一次 add 重试（v0.45.227）；默认间隔在 test_github_tool_commit 单独核
+    monkeypatch.setattr(GitHubTool, "_ADD_RETRY_DELAY_S", 0, raising=False)
     tool = GitHubTool(repo_path=str(prod))
     reporter = SimpleNamespace(agent_helper=SimpleNamespace(git=tool), date_str="2026-09-14")
     return SimpleNamespace(origin=origin, prod=prod, other=other, git=git, tool=tool,
@@ -493,10 +496,71 @@ class TestResultReachesAlerts:
         res = rd.auto_commit_and_notify(w.reporter, PRODUCTION)
         assert res["git_commit"]["success"] is False, "正对照没立住：commit() 对「没东西可提交」应回 False"
         assert res["git_commit"]["pending_artifacts"] == 0
+        assert res["git_commit"]["left_artifacts"] == 0
         snap = st.snapshot("2026-09-14", extra={"git_commit": st.git_commit_summary(res["git_commit"]),
                                                 "git_push": st.git_push_summary(res["git_push"])})
         _, msgs = self._alerts(tmp_path, snap)
         assert not any("提交失败" in m for m in msgs), msgs
+
+    # ── v0.45.227：「提交成功」≠「日报产物全进了 git」 ──
+
+    def _commit_snapshot(self, tmp_path, res):
+        snap = st.snapshot("2026-09-14", extra={"git_push": st.git_push_summary(res["git_push"]),
+                                                "git_commit": st.git_commit_summary(res["git_commit"])})
+        return self._alerts(tmp_path, snap)
+
+    def test_artifact_a_lock_kept_out_alerts_although_commit_succeeded(self, world, tmp_path, monkeypatch):
+        """别的进程在 add index.html 那一刻、连重试那一刻都拿着索引锁 ⇒ rss.xml 进了提交、index.html 没有，
+        `commit()` 回 success=True。v0.45.225 及以前：零告警，当天网站首页没进 git。"""
+        w = world
+        (w.prod / "index.html").write_text("report-0914")
+        (w.prod / "rss.xml").write_text("<rss/>")
+        hold_lock_during_add(monkeypatch, w.tool, w.prod, "index.html", times=2)
+
+        res = rd.auto_commit_and_notify(w.reporter, PRODUCTION)
+        gc = res["git_commit"]
+        assert gc["success"] is True and gc["pending_artifacts"] == 2, f"正对照：提交确实报成功 {gc}"
+        assert w.git("show", "--name-only", "--format=", "HEAD").stdout.split() == ["rss.xml"]
+        assert gc["left_artifacts"] == 1 and gc["left_sample"] == ["index.html"], gc
+
+        a, msgs = self._commit_snapshot(tmp_path, res)
+        hit = [x for x in a.alerts if "没进 git" in x.message]
+        assert hit, msgs
+        assert "提交失败" not in hit[0].message, "提交确实成功了，别报成提交失败"
+        assert "index.html" in hit[0].details["提交后仍未进 git"], hit[0].details
+        assert "index.lock" in hit[0].details["原因"], f"原因栏要是 add 的真实报错，不是提交成功的输出：{hit[0].details}"
+
+    def test_brief_lock_is_absorbed_and_raises_nothing(self, world, tmp_path, monkeypatch):
+        """正对照：锁只占一下 ⇒ 重试接住 ⇒ 全进 git、不报。"""
+        w = world
+        (w.prod / "index.html").write_text("report-0914")
+        (w.prod / "rss.xml").write_text("<rss/>")
+        hold_lock_during_add(monkeypatch, w.tool, w.prod, "index.html", times=1)
+
+        res = rd.auto_commit_and_notify(w.reporter, PRODUCTION)
+        assert res["git_commit"]["success"] is True and res["git_commit"]["left_artifacts"] == 0, res["git_commit"]
+        a, msgs = self._commit_snapshot(tmp_path, res)
+        assert not any("没进 git" in m or "提交失败" in m for m in msgs), msgs
+        assert not any("进 git" in s for s in a.checks_skipped), a.checks_skipped
+
+    def test_unknown_after_commit_state_is_a_skipped_check_not_silence(self, world, tmp_path, monkeypatch):
+        """提交后那次 `git status` 失败（真索引损坏）⇒ 不知道产物进没进 git，不许渲染成「全进了」。"""
+        w = world
+        (w.prod / "index.html").write_text("report-0914")
+        real_commit = w.tool.commit
+
+        def commit_then_index_breaks(*a, **k):
+            out = real_commit(*a, **k)
+            (w.prod / ".git" / "index").write_bytes(b"garbage")
+            return out
+
+        monkeypatch.setattr(w.tool, "commit", commit_then_index_breaks)
+        res = rd.auto_commit_and_notify(w.reporter, PRODUCTION)
+        gc = res["git_commit"]
+        assert gc["success"] is True and gc["left_artifacts"] is None, gc
+        a, msgs = self._commit_snapshot(tmp_path, res)
+        assert not any("没进 git" in m or "提交失败" in m for m in msgs), msgs
+        assert any("进 git" in s for s in a.checks_skipped), a.checks_skipped
 
     def test_local_ahead_alert_does_not_call_it_old_code(self, tmp_path):
         snap = st.snapshot("2026-09-14", extra={"git_push": {"success": True}})
