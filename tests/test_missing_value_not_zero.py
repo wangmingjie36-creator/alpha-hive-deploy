@@ -334,7 +334,7 @@ class TestSPYFetchGuarded:
 
     def test_dashboard_js_does_not_coerce_null_spy_to_zero(self):
         from pathlib import Path
-        js = Path("templates/dashboard.js").read_text()
+        js = (Path(__file__).resolve().parent.parent / "templates" / "dashboard.js").read_text()
         assert "Number(real.spy_return_pct)||0" not in js, \
             "`Number(null)||0` 会把『取数失败』渲染成『大盘 0%』"
         assert "Number(real.alpha_vs_spy)||0" not in js, \
@@ -451,7 +451,7 @@ class TestEquityCurveSurvivesNullSpy:
         变异：把 `真实策略回测本次不可用` 改回渲染 ts.final_cap_* ⇒ 红。
         """
         from pathlib import Path
-        js = Path("templates/dashboard.js").read_text()
+        js = (Path(__file__).resolve().parent.parent / "templates" / "dashboard.js").read_text()
         assert "真实策略回测本次不可用" in js, "回测不可用时必须显式说不可用"
         # 旧分支的标志物一个都不许回来。
         # ⚠️ 这里**只用代码级标识符**，不用中文文案当标志物：
@@ -471,6 +471,6 @@ class TestEquityCurveSurvivesNullSpy:
         """
         import re
         from pathlib import Path
-        js = Path("templates/dashboard.js").read_text()
+        js = (Path(__file__).resolve().parent.parent / "templates" / "dashboard.js").read_text()
         bad = re.findall(r"ts\.(exit_\w+|avg_cost|net_win_rate|max_dd_\w+)\s*\|\|\s*0", js)
         assert not bad, f"这些字段用 ||0 把 null 变成了 0：{sorted(set(bad))}"
