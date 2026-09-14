@@ -355,20 +355,22 @@ def _is_report_artifact(path: str) -> bool:
     return any(fnmatch.fnmatch(p, g) for g in _ARTIFACT_GLOBS)
 
 
-def _git_modified_files(git) -> Optional[List[str]]:
-    """工作区改动清单；`git status` 失败时返回 None 并打 warning。
+def _git_modified_files(git) -> Tuple[Optional[List[str]], Optional[str]]:
+    """`(工作区改动清单, None)`；`git status` 失败时 `(None, 原因)` 并打 warning。
 
     ⚠️ 必须把「失败」与「干净」分开。v0.45.210 前调用方写的是
     `if status.get("modified_files"): … else: log("工作目录干净")`，而
     `GitHubTool.status()` 失败时返回的是 `{"error": …}` —— 于是
     `git status` 挂了会被报成「无需提交（工作目录干净）」。
+    v0.45.225 起原因一并返回：此前它只进 warning 日志，`results["git_commit"]`
+    （⇒ status.json ⇒「日报提交失败」告警的原因栏）里只有一句 "git status failed"。
     """
     status = git.status()
     if "modified_files" not in status:
-        _log.warning("git status 失败，无法判断工作区改动：%s",
-                     status.get("error") or "（无错误输出）")
-        return None
-    return status["modified_files"]
+        reason = status.get("error") or "（无错误输出）"
+        _log.warning("git status 失败，无法判断工作区改动：%s", reason)
+        return None, reason
+    return status["modified_files"], None
 
 
 def auto_commit_and_notify(reporter, report: Dict) -> Dict:
@@ -423,7 +425,7 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
 
     if not _deploy_production:
         # 判定必须在提交**之前**：旧实现先提交再分流，非生产数据就此落在本地 main 上。
-        modified = _git_modified_files(git)
+        modified, _ = _git_modified_files(git)
         left = [f for f in (modified or []) if _is_report_artifact(f)]
         _log.warning(
             "非生产扫描（非蜂群、未用 LLM）：不提交、不推送。"
@@ -444,9 +446,9 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
     timestamp = _dt2.now().strftime("%H:%M")
     today_commit_msg = f"Alpha Hive 蜂群日报 {reporter.date_str} {timestamp}"
     _log.info("Git commit... (mode: new)")
-    modified = _git_modified_files(git)
+    modified, status_error = _git_modified_files(git)
     if modified is None:
-        results["git_commit"] = {"success": False, "error": "git status failed"}
+        results["git_commit"] = {"success": False, "error": f"git status 失败：{status_error}"}
     elif modified:
         # v0.43.4：白名单提交。此前走 `git add -A` 全量，会把工作区里
         # 任何进行中的代码改动一并卷进"日报"提交（2026-07-30 实际发生：
