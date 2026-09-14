@@ -238,9 +238,20 @@ def _expected_vintage_date() -> Optional[str]:
     宁可放过陈旧数据，也不能因为日历挂了把 30 只全打成陈旧、连锁压到
     yfinance 上 —— 7/23 那次限流雪崩就是这么来的。
     """
+    return session_date_at(datetime.now(_ET_TZ))
+
+
+def session_date_at(ts: "datetime") -> Optional[str]:
+    """时刻 `ts` 时「数据所属的交易会话」的 ET 日期；日历不可用返回 None。
+
+    与 `_expected_vintage_date` 同一判据（v0.45.238 抽出来供期权快照槽位复用）：
+    交易日 09:30 ET 之后是当天，之前（含凌晨、周末、假日）是上一交易日。
+    `ts` 必须带时区——naive 值按**本机时区**解释（`datetime.astimezone()` 的语义），
+    生产机是太平洋时间，`_snapshot_timestamp` 正是这样写的。
+    """
     try:
         from is_trading_day import is_trading_day
-        now = datetime.now(_ET_TZ)
+        now = ts.astimezone(_ET_TZ)
         today = now.date()
         if is_trading_day(today)[0] and now.time() >= _ET_OPEN:
             return today.isoformat()

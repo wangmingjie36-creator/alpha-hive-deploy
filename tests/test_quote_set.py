@@ -637,17 +637,21 @@ class TestRefillEmptyQuoteSet:
     def _snap_agent(self, monkeypatch, tmp_path, quote_set):
         """写一份"今天"的快照，返回 (agent, ticker, 快照路径)。"""
         import json as _json
-        from options_analyzer import pdt_today
+        from zoneinfo import ZoneInfo
         monkeypatch.delenv("OPTIONS_SNAPSHOT_DISABLE", raising=False)
         monkeypatch.delenv("ALPHA_HIVE_TARGET_DATE", raising=False)
-        today = pdt_today()
+        # v0.45.238：槽位按 ET 交易会话分，钉住时钟（周四 17:30 ET，收盘后）——
+        # 用墙钟的话周末/盘前跑本测试会找错槽位。快照时间戳写成带时区的同日 17:00 ET。
+        today = "2026-09-03"
+        monkeypatch.setattr(options_analyzer, "_snapshot_now", lambda: datetime(
+            2026, 9, 3, 17, 30, tzinfo=ZoneInfo("America/New_York")))
         agent = OptionsAgent()
         monkeypatch.setattr(agent.fetcher, "cache_dir", str(tmp_path))
         monkeypatch.setattr(agent.fetcher, "fetch_options_chain",
                             lambda t: pytest.fail("快照命中就不该再拉链"))
         snap = tmp_path / f"options_snapshot_ZZZ_{today}.json"
         snap.write_text(_json.dumps({
-            "ticker": "ZZZ", "_snapshot_timestamp": f"{today}T14:00:00",
+            "ticker": "ZZZ", "_snapshot_timestamp": f"{today}T17:00:00-04:00",
             "rv_30d": 1.0, "iv_rank": 50.0, "iv_rank_source": "real_iv_90d",
             "quote_set": quote_set}))
         return agent, str(snap)

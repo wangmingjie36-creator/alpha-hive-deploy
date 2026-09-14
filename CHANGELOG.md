@@ -5,7 +5,59 @@
 
 ---
 
-## [0.45.238] — 2026-09-14 — 占位（进行中：期权快照槽按 PDT 墙钟日期分，跨午夜扫描把前一交易日数据写进次日槽——改按会话日期 + 观测点 + 历史普查）
+## [0.45.238] — 2026-09-14 — 期权快照槽位改按数据所属的 ET 交易会话分：跨午夜扫描曾把前一交易日的链写进次日槽位，次日正式扫描整天用上一会话的期权数据
+
+**事故**（v0.45.234 排查 `_snapshot_stock_price` 时发现）：`OptionsAgent.analyze()` 的快照槽位是 `pdt_today()`，
+命中校验是 `_snapshot_timestamp.startswith(pdt_today())` —— **两边是同一个墙钟，跨午夜写入会自证通过**。
+09-02 14:00 起跑的扫描拖到 09-03 00:07，午夜后的调用写出 `options_snapshot_{T}_2026-09-03.json`（内容是 09-02 盘后的链）；
+09-03 14:00 的正式扫描命中 42 次、只写 6 次，`_snapshot_stock_price` 24/30 等于 09-02 官方收盘（09-03 的只有 4/30）。
+09-08 那轮 03:30 起跑、跨过午夜，09-09 同形（命中 45 次、写 1 次，26/30 vs 1/30）。
+⇒ 两天报告的 IV / P/C / GEX / OI / Max Pain / 异动（OracleBee → `options_score` → `final_score`）整体晚一个会话。
+
+### Fixed
+- **`options_analyzer.py`**：槽位与命中校验都改用 **ET 交易会话日期**（交易日 09:30 ET 前算上一交易日，与
+  `cboe_options._expected_vintage_date` 同一判据）。午夜不再是边界 ⇒ 跨午夜的调用落回前一会话的槽位；
+  旧代码留下的跨午夜文件（naive 时间戳、无会话字段）在次日按时间戳推出属于前一会话 ⇒ **拒收重算**。
+  新快照写 `_snapshot_session`（取数前算的，优先于写入时间戳）与 `_snapshot_session_complete`。
+  收盘后跑的生产扫描里会话日期 == 太平洋日期，**文件名与输出逐位不变**。
+  - 交易日历不可用时**不**退回太平洋日期（那就是本 bug），退回「周一至周五、09:30 ET 翻页」规则，计数 + WARNING。
+  - 补跑（v0.45.16）判定也按会话比：`--date` 等于此刻数据所属会话时走正常槽位（例：周一盘前补跑上周五，可直接复用真快照）；
+    补跑槽位后缀 `_backfilled-{会话日}`，收盘后与原 `pdt_today()` 相同；`_options_fetched_on` 同步。
+  - `iv_history.append_observation` 的日期同步改为会话日期（原来跨午夜那几次会把前一会话的 IV 记到次日名下）。
+- `cboe_options.py`：判据抽成 `session_date_at(ts)`，`_expected_vintage_date()` 委托给它（行为不变，原测试全绿）。
+
+### Added
+- **观测点（「这个失败，下游怎么知道？」）**：`options_analyzer.snapshot_slot_stats()` 经 `scan_timing.counters().options_snapshot`
+  进 `status.json`，并进日志摘要行：`hits` / `writes` / `session_mismatch`（槽位里是别的会话的数据、已弃用）/
+  `hits_before_close`（**命中收盘前冻结的快照，而此刻会话已收盘**）/ `writes_before_close` / `calendar_fallback`。
+  `hits_before_close` **只观测不拒收**：同一轮扫描跨过收盘时拒收会让前后调用方拿到两份不同的链（v0.15.2 快照要防的分裂）；
+  盘中价的处置属 v0.45.234。半日市不认 ⇒ 该计数可能偏多、不会偏少。
+- `tests/test_snapshot_session_slot.py`（20 条，离线）：会话判据六个时点（含劳工节）、日历故障退回、跨午夜复用前一会话槽位、
+  **09-03 事故形状逐字复现**（naive `2026-09-03T00:07:11` 必须被拒）、同会话收盘后仍命中、存储会话字段优先、
+  观测点计数与 WARNING、此刻盘中不计、补跑交互两条、计数真进 `scan_timing`。
+  **变异实测**：槽位改回太平洋日期 / 校验改回 `startswith` / 删掉观测点计数，各自有测试变红。
+- `experiments/snapshot_session_census.py`：只读普查，可重跑。
+
+### 普查（`cache/` 1309 份常规快照，未改写任何历史文件）
+| 类别 | 份数 |
+|---|---|
+| 收盘后冻结、槽位正确 | 868 |
+| **前一会话数据占着槽位（本 bug）** | **171**（11 个槽位日：06-10、07-08、07-15、07-17、07-22、07-23、07-24、08-11、08-14、09-03、09-09） |
+| 槽位日不是交易日（周末强制跑） | 200 |
+| 同会话但收盘前冻结 | 13（07-09 ×10、08-12、08-14、08-26 各 1；08-26 那份是 ABBV 12:16 PDT，当日日志命中它 2 次） |
+| 时间戳晚于槽位日一天 | 57（05-27 ~ 07-06，成因**未查、待验证**，不是本 bug 的形状） |
+
+坏槽位只有被 D 日扫描吃进去才造成污染。按 `predictions.created_at`（UTC）与快照时间戳比对**推断**：
+07-22、08-14 是当日晚些时候的正式扫描命中（日志已不存在）；09-03、09-09 有日志实证（逐文件数：09-03 那 24 份被命中 41 次、09-09 那 29 份被命中 45 次）；07-23、07-24 是午夜后起跑、标成新日期的扫描本身；
+07-08 仅 1 只。06-10、07-15、07-17、08-11 当日无 predictions ⇒ 未被消费。合计约 **119 行** predictions 用了前一会话的期权数据，
+**全部早于当前世代边界（2026-09-13）**，但全历史口径的分析仍会读到。台账与快照**未改写**（需用户决定）。
+
+### Changed
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 v0.45.238，**与 v0.45.212/228/235 共用 2026-09-13 标签**：
+  该边界之后 predictions 0 条（只读核对 pheromone.db）⇒ **作废 0 条**。
+- 测试钉时钟：`tests/test_backfill_snapshot_isolation.py`、`tests/test_quote_set.py` 原用 `pdt_today()` 造「今天的快照」，
+  新判据下周末/盘前跑会找错槽位，改为钉住 `options_analyzer._snapshot_now`；`tests/test_scan_timing.py` 计数器键集合加 `options_snapshot`。
+- `options_analyzer.py` 不再 import `pdt_today`（唯一的外部借用者是 `tests/test_quote_set.py`，已改）。
 
 ## [0.45.237] — 2026-09-14 — 二次检查 v0.45.224：cwd 隔离只罩住测试函数本体——高于函数级的 fixture 仍在仓库根里跑，「teardown 还原」的自证是空的，还原理由写反了
 

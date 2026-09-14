@@ -89,7 +89,7 @@ def counters() -> Dict[str, Optional[dict]]:
     """
     out: Dict[str, Optional[dict]] = {"yfinance": None, "twelve_data": None,
                                       "cboe": None, "cboe_chain": None,
-                                      "gex_view": None}
+                                      "gex_view": None, "options_snapshot": None}
     try:
         import yf_gate
         out["yfinance"] = yf_gate.stats() if yf_gate.is_installed() else None
@@ -107,6 +107,13 @@ def counters() -> Dict[str, Optional[dict]]:
         out["gex_view"] = cboe_options.gex_view_stats()
     except Exception as e:  # noqa: BLE001
         _log.debug("cboe stats 不可得: %s", e)
+    # v0.45.238：期权快照槽位。`session_mismatch` 非零 = 槽位里躺着别的会话的数据
+    # （被弃用重算）；`hits_before_close` 非零 = 本轮期权指标用了盘中冻结的快照。
+    try:
+        import options_analyzer
+        out["options_snapshot"] = options_analyzer.snapshot_slot_stats()
+    except Exception as e:  # noqa: BLE001
+        _log.debug("options_snapshot stats 不可得: %s", e)
     return out
 
 
@@ -262,5 +269,9 @@ def summary_line(snap: dict) -> str:
     yf_s = "—" if yf is None else f"{yf.get('calls', '?')}次(429×{yf.get('rate_limited', '?')})"
     td_s = "—" if td is None else f"请求{td.get('fetches', '?')}/命中{td.get('hits', '?')}"
     cb_s = "—" if cb is None else f"抓取{cb.get('fetches', '?')}/命中{cb.get('hits', '?')}"
+    os_ = c.get("options_snapshot")
+    os_s = "—" if os_ is None else (
+        f"写入{os_.get('writes', '?')}/命中{os_.get('hits', '?')}"
+        f"/会话不符弃用{os_.get('session_mismatch', '?')}/盘中快照命中{os_.get('hits_before_close', '?')}")
     return ("耗时 " + " | ".join(parts) +
-            f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s}")
+            f" ‖ yfinance {yf_s} | TwelveData {td_s} | CBOE {cb_s} | 期权快照 {os_s}")
