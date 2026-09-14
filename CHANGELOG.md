@@ -76,7 +76,8 @@
   `cboe_options._expected_vintage_date` 同一判据）。午夜不再是边界 ⇒ 跨午夜的调用落回前一会话的槽位；
   旧代码留下的跨午夜文件（naive 时间戳、无会话字段）在次日按时间戳推出属于前一会话 ⇒ **拒收重算**。
   新快照写 `_snapshot_session`（取数前算的，优先于写入时间戳）与 `_snapshot_session_complete`。
-  收盘后跑的生产扫描里会话日期 == 太平洋日期，**文件名与输出逐位不变**。
+  收盘后跑的生产扫描（编排器 13:30 PT 后才开跑）里会话日期 == 太平洋日期，**文件名与评分输入不变**；
+  快照及嵌了快照字段的 `analysis-*-ml-*.json` 会多出 `_snapshot_session` / `_snapshot_session_complete` 两个键。
   - 交易日历不可用时**不**退回太平洋日期（那就是本 bug），退回「周一至周五、09:30 ET 翻页」规则，计数 + WARNING。
   - 补跑（v0.45.16）判定也按会话比：`--date` 等于此刻数据所属会话时走正常槽位（例：周一盘前补跑上周五，可直接复用真快照）；
     补跑槽位后缀 `_backfilled-{会话日}`，收盘后与原 `pdt_today()` 相同；`_options_fetched_on` 同步。
