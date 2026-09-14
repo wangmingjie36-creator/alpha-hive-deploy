@@ -298,3 +298,104 @@ class TestOnlyTheWhitelistIsCommitted:
         r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
         assert r["success"] is False and "timed out" in r.get("error", ""), r
         assert _head(repo) == before, "列不出白名单内暂存了什么，就不许提交（否则只能退回提交整个索引）"
+
+
+class TestForeignRenamesAcrossTheWhitelistBoundaryAreNotSplit:
+    """v0.45.248：`_staged_names` 的 `--no-renames` + 白名单 pathspec 过滤有个副作用——别的 session
+    已暂存一个 rename、旧路径在白名单目录内、新路径不在时，pathspec 只放行旧路径（孤立的 `D`）。
+    照单全收会把这半个 rename 当「日报」提交掉：旧路径的删除进了跟对方无关的提交，新路径仍留着
+    孤零零地暂存着——对方的原子操作被拦腰斩断。"""
+
+    @pytest.fixture
+    def foreign_rename_out(self, repo):
+        (repo / "hedge_state").mkdir()
+        (repo / "hedge_state" / "positions.json").write_text('{"v": 1}')
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "hedge state")
+        (repo / "data_root").mkdir()
+        _git(repo, "mv", "hedge_state/positions.json", "data_root/hedge_positions.json")
+        return repo
+
+    def test_rename_out_of_whitelist_is_left_alone(self, foreign_rename_out):
+        repo = foreign_rename_out
+        before = _head(repo)
+        (repo / "index.html").write_text("report-0914")
+
+        r = GitHubTool(repo_path=str(repo)).commit("Alpha Hive 蜂群日报", paths=rd.REPORT_ARTIFACT_PATHS)
+
+        assert r["success"] is True
+        assert _committed(repo) == {"index.html"}, "别人 rename 的删除半边被当成日报提交掉了"
+        assert _head(repo) != before
+        staged = _git(repo, "diff", "--cached", "--name-status").stdout
+        assert "hedge_state/positions.json" in staged and "data_root/hedge_positions.json" in staged, (
+            f"对方的 rename 被拆开了，只剩一半还暂存着：{staged!r}")
+        # 正对照：真的是同一个 rename，不是两条独立记录（--find-renames 默认视角应配对成 R）
+        paired = _git(repo, "diff", "--cached", "--name-status").stdout
+        assert paired.split()[0].startswith("R"), f"正对照没立住，git 没把它俩配成 rename：{paired!r}"
+
+    def test_report_change_alone_in_that_scenario_is_not_swallowed_as_nothing_to_commit(self, foreign_rename_out):
+        """排除了 rename 源之后，我们自己确实改了 index.html ⇒ 不该落进「白名单内无改动」的分支。"""
+        repo = foreign_rename_out
+        (repo / "index.html").write_text("report-0914")
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is True and _committed(repo) == {"index.html"}
+
+    def test_only_the_foreign_rename_staged_commits_nothing(self, foreign_rename_out):
+        """本次日报没有任何产物改动，工作区里唯一的白名单内暂存就是那个孤立的 rename 源 ⇒
+        排除后 names 为空 ⇒ 必须走「nothing to commit」，不许退回裸提交。"""
+        repo = foreign_rename_out
+        before = _head(repo)
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is False and _head(repo) == before
+        staged = _git(repo, "diff", "--cached", "--name-status").stdout
+        assert "R" in staged.split()[0], f"对方的 rename 应当原样留着：{staged!r}"
+
+    def test_rename_fully_inside_the_whitelist_is_still_committed_whole(self, repo):
+        """正对照：新旧路径都在白名单内时（既有场景），不该被本条新逻辑误伤。"""
+        (repo / "hedge_state").mkdir()
+        (repo / "hedge_state" / "a.json").write_text('{"v": 1}')
+        _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "init2")
+        _git(repo, "mv", "hedge_state/a.json", "hedge_state/b.json")
+        (repo / "index.html").write_text("report-0914")
+
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is True
+        # `git show --name-only`（默认改名检测）把配对完整的 rename 折叠成一行新路径，不是两条
+        assert _committed(repo) == {"index.html", "hedge_state/b.json"}
+        assert _staged(repo) == set()
+
+    def test_rename_into_the_whitelist_commits_the_addition_only(self, repo):
+        """反方向：旧路径不在白名单、新路径在——无害，提交新路径当作一次新增即可，不牵扯旧路径。"""
+        (repo / "scratch").mkdir()
+        (repo / "scratch" / "a.json").write_text('{"v": 1}')
+        _git(repo, "add", "-A"); _git(repo, "commit", "-qm", "init3")
+        (repo / "hedge_state").mkdir()
+        _git(repo, "mv", "scratch/a.json", "hedge_state/a.json")
+        (repo / "index.html").write_text("report-0914")
+
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is True
+        assert _committed(repo) == {"index.html", "hedge_state/a.json"}, "旧路径不该被牵扯进我们的提交"
+        staged = _git(repo, "diff", "--cached", "--name-status").stdout
+        assert "scratch/a.json" in staged, f"旧路径的删除是对方的暂存，我们没动它就该原样留着：{staged!r}"
+
+
+class TestRenameScanFailureIsReportedNotSwallowed:
+    """v0.45.248：`_staged_names` 现在下发两条 `git diff` 命令——列白名单内暂存的名字，
+    再列全量 name-status 找跨界 rename。第二条失败时不许假装『没有要排除的』就往下提交。"""
+
+    def test_second_diff_call_failing_blocks_the_commit(self, repo, monkeypatch):
+        (repo / "index.html").write_text("report-0914")
+        g = GitHubTool(repo_path=str(repo))
+        real = g.run_git_cmd
+
+        def fail_second_diff(cmd):
+            if cmd == "git diff --cached --name-status -z":
+                return {"success": False, "error": "git diff timed out after 30 seconds"}
+            return real(cmd)
+
+        monkeypatch.setattr(g, "run_git_cmd", fail_second_diff)
+        before = _head(repo)
+        r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is False and "timed out" in r.get("error", ""), r
+        assert _head(repo) == before, "列不出有没有跨界 rename 要排除，就不许提交"

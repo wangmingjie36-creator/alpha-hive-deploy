@@ -5,7 +5,47 @@
 
 ---
 
-## [0.45.248] — 2026-09-14 — 占位（进行中：commit -- <名字> 会拆开别的 session 已暂存、跨出白名单目录的 rename——补 rename 探测）
+## [0.45.248] — 2026-09-14 — v0.45.236 自己引入的一个回归：commit -- <名字> 会拆开别的 session 已暂存、跨出白名单目录的 rename
+
+用户要求再二次检查 v0.45.236。查出一处该版本自己带来的新问题（不是它修复目标本身的缺陷，是修复手法的副作用），用户批准现在修：
+
+### Fixed
+
+1. **`_staged_names` 用 `--no-renames` + 白名单 pathspec 过滤列名字，有个副作用：别的 session 已暂存一个
+   rename、旧路径在白名单目录内、新路径不在时（如数据根迁移把 `hedge_state/x.json` 挪到 `data_root/x.json`），
+   pathspec 过滤只放行旧路径——一条孤立的 `D`，看不到新路径的 `A`。照单全收会把这半个 rename 当「日报」提交掉：
+   旧路径的删除进了跟对方无关的提交，新路径仍留着孤零零地暂存，对方的原子操作被拦腰斩断。
+   方向反过来（旧路径不在白名单、新路径在）无害——新路径当一次全新 add 提交，不牵扯旧路径那半。
+   - v0.45.236 修复的问题本身没有这层：它防的是「别人暂存了什么，我们的提交就该完全不碰」；这里第一次出现
+     「我们的提交主动把别人一个原子操作拆成两半」——性质更重，虽然触发面更窄（要求 rename 恰好一头在白名单内）。
+   - `_staged_names` 现在额外跑一次 `git diff --cached --name-status -z`（默认改名检测，不加 pathspec），
+     解析出「旧路径在白名单结果里、新路径不在」的 rename 源，从要提交的名单里剔除。
+   - **只认 `R`，不认 `C`（复制）**：实测过——不带 `-C` 时 git 从不报 `C`；带 `-C` 时，复制源若在索引里
+     未改动（最常见的复制形状）同样不出现在这份 diff 里，没有旧路径可剔除。带上 `C` 判断会是测不到的死分支，
+     没写——变异测试也证实了这点（见下）。
+
+### 测试
+
+- `tests/test_github_tool_commit.py::TestForeignRenamesAcrossTheWhitelistBoundaryAreNotSplit`（5 条，真 git）：
+  跨出白名单的 rename 原样留着不被碰；那种场景下我们自己的日报改动仍正常提交；跨出白名单的 rename 是当次
+  唯一白名单内暂存时正确走「nothing to commit」而非退回裸提交；正对照——rename 双端都在白名单内、
+  以及反方向（旧路径在外、新路径在内）两种场景均不受本条新逻辑影响。
+- `TestRenameScanFailureIsReportedNotSwallowed`（1 条）：新增的第二条 `git diff` 调用失败时不许假装
+  「没有要排除的」继续提交。
+- 改动前的代码上：4 条红（两条正对照旧代码本来就过）。
+- 变异真跑 6 处：4 处一次命中；`C` 状态判断先天不可达（无 `-C` 时 git 从不产出，实测见上），
+  已删掉该死分支而不是留着装作处理过；状态字母判断的等价变异（`"R" in status` vs `status[0] == "R"`）
+  不代表真实缺口——git 的 name-status 码从不在非 0 位含 `R`，两种写法对任何真实 git 输出行为相同。
+- **生产 APFS 克隆端到端**（真实文件名、拆远端、推送与 gh-pages 打桩）：用生产真实的 `hedge_state/*.json`
+  构造一次「数据根迁移式」rename（挪到 `data_root_migration/`），部署后该 rename 逐字节原样保留、仍暂存，
+  日报提交只含 5 个报告产物、`left_artifacts=0`、零告警。生产 checkout 本身未动。
+- 全套 `pytest --maxfail=200`：**4549 passed / 1 failed（仅 `TestCoverageHorizon`，按设计红）/ 1 skipped / 2 xfailed**；
+  `ruff check .`：All checks passed。
+
+### 未修（只记录）
+
+- `report_deployer`/`config.py` 没有任何「数据根迁移」代码落地——CHANGELOG 里那条占位（v0.45.233）本身
+  还没填正文，本条只是防御性补丁，不代表迁移已经在动这些目录。
 
 ## [0.45.247] — 2026-09-14 — 占位（进行中：Queen 读蜂 details 的键契约守卫 + 删 F&G 政体调整死分支 + signal_archive 补 Buzz 缺失通道）
 
