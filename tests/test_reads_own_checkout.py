@@ -17,7 +17,11 @@ v0.45.219：`test_thesis_break_schema.py` 用
    `~/…` 与 `Path.home() / …` 两种写法（v0.45.222 补：本仓生产代码就是这么写主 checkout 的，
    `alpha_hive_mcp.py` 的 `Path.home() / "Desktop" / "Alpha Hive"`、
    `self_analyst.py` 等的 `expanduser("~/Desktop/Alpha Hive")`，测试照抄就漏）。
-   放行家目录下**按用户存放应用状态**的地方：点目录（`~/.claude`）与 `~/Library` —— 仓库不住那里。
+   放行家目录下**按用户存放应用状态**的地方：点目录（`~/.claude`）与 `~/Library`，
+   但 **`~/Library/Mobile Documents` 与 `~/Library/CloudStorage` 除外**（v0.45.224）——
+   v0.45.222 写的是「`~/Library` 仓库不住那里」，本机实测
+   `~/Library/Mobile Documents/com~apple~CloudDocs/Desktop` 就是指向 `~/Desktop` 的符号链接，
+   `samefile` 判定它**就是**主 checkout（项目在 iCloud 桌面上）。`Path.home() / …` 按整条链判，不只看第一段。
    豁免：标了 `integration` 的函数 / 类 / 模块（测的就是这台机器上的生产状态）。
 2. `cwd_relative_reads`：`open("x")` / `Path("x")` 的第一个参数是相对路径字面量。
    v0.45.219 说「裸相对文件名合法用法太多，不做检测器」—— **那句没量过**。v0.45.222 实测
@@ -28,14 +32,20 @@ v0.45.219：`test_thesis_break_schema.py` 用
 ------------------------
 - `os.path.join("/", "Users", …)` 把前缀拆开写、`os.path.join(os.path.expanduser("~"), "Desktop")`
   —— 全仓（含生产代码）零处。
-- 测试 import 生产模块里写死主 checkout 的常量（如 `generate_deep_v2.ALPHAHIVE_DIR`）——
-  字面量扫描看不见；现有用到它的测试都 monkeypatch 了。
+- 测试 import 生产模块里写死主 checkout 的常量（如 `weekly_optimizer.ALPHAHIVE_DIR`）——
+  字面量扫描看不见。v0.45.222 写「现有用到它的测试都 monkeypatch 了」，只 grep 了常量名。
+  v0.45.224 用审计钩子按**后果**量：进程内读写主 checkout 的只有 import 期一次 `scandir`；
+  但 `weekly_optimizer` 把主 checkout **插进了 `sys.path`**（全套 40 次、从不拿掉），
+  此后函数体内 import 的模块会从主 checkout 加载 —— 由 conftest `_isolate_cwd_and_sys_path` 挡住。
+- 变量持有家目录再拼（`h = Path.home(); h / "Desktop"`）、`Path.home().joinpath(…)` —— 全仓零处。
 
 ⚠️ 检测器自己也必须有牙：正反两个方向各喂一次；变异见 v0.45.222 CHANGELOG。
 """
 
 import ast
+import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -45,12 +55,22 @@ from tests.test_no_invisible_prod_data_skips import _has_integration_mark, invis
 TESTS_DIR = Path(__file__).resolve().parent
 
 _HOME_ABS = re.compile(r"^/(?:Users|home)(?:/|$)")
-_HOME_TILDE = re.compile(r"^~/([^/]*)")
+_HOME_TILDE = re.compile(r"^~/(.*)$")
+# `~/Library` 下挂着网盘根：iCloud Drive（含「桌面与文稿」同步）与 File Provider 网盘（Dropbox 等）。
+_SYNC_ROOTS_UNDER_LIBRARY = {"Mobile Documents", "CloudStorage"}
 
 
-def _per_user_state(first_segment) -> bool:
-    """家目录下按用户存放应用状态的地方：点目录与 macOS 的 `~/Library`。"""
-    return first_segment.startswith(".") or first_segment == "Library"
+def _per_user_state(segments) -> bool:
+    """家目录下按用户存放应用状态的地方：点目录，与 `~/Library` 里**不是网盘根**的部分。"""
+    if not segments:
+        return True
+    if segments[0].startswith("."):
+        return True
+    return segments[0] == "Library" and (len(segments) < 2 or segments[1] not in _SYNC_ROOTS_UNDER_LIBRARY)
+
+
+def _segments(text):
+    return [seg for seg in text.split("/") if seg]
 
 
 def _is_home_call(node) -> bool:
@@ -59,21 +79,38 @@ def _is_home_call(node) -> bool:
             and isinstance(node.func, ast.Attribute) and node.func.attr == "home")
 
 
+def _home_div_segments(node):
+    """`Path.home() / "a" / "b/c" / name` → `["a", "b", "c"]`（取到第一个非字面量为止）；不是这种链 ⇒ None。"""
+    rights = []
+    while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        rights.append(node.right)
+        node = node.left
+    if not (rights and _is_home_call(node)):
+        return None
+    segs = []
+    for r in reversed(rights):
+        if not (isinstance(r, ast.Constant) and isinstance(r.value, str)):
+            break
+        segs += _segments(r.value)
+    return segs
+
+
 def _home_path(node):
-    """节点若是指向家目录（非应用状态区）的路径，返回用于报错的文本，否则 None。"""
+    """节点若是指向家目录（非应用状态区）的路径，返回用于报错的文本，否则 None。
+
+    `/` 链只在**最外层**那个 BinOp 上判（由 `visit` 保证）：v0.45.222 逐个 BinOp 看第一段，
+    `Path.home() / "Library" / "Mobile Documents"` 的内层只看得到 `"Library"`，放行。
+    """
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         v = node.value
         if _HOME_ABS.match(v):
             return repr(v)
         m = _HOME_TILDE.match(v)
-        if m and m.group(1) and not _per_user_state(m.group(1)):
+        if m and _segments(m.group(1)) and not _per_user_state(_segments(m.group(1))):
             return repr(v)
-    if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
-            and _is_home_call(node.left)
-            and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str)):
-        first = node.right.value.split("/")[0]
-        if first and not _per_user_state(first):
-            return f"Path.home() / {node.right.value!r}"
+    segs = _home_div_segments(node)
+    if segs and not _per_user_state(segs):
+        return "Path.home() / " + repr("/".join(segs))
     return None
 
 
@@ -82,7 +119,7 @@ def _module_marked_integration(tree) -> bool:
 
     v0.45.219 版判的是「源码片段里出现 integration 这个词」—— 于是
     `pytestmark = skipif(..., reason="integration 机才有")` 把整个模块豁免掉（实测）。
-    与 CHANGELOG 里六次「冲突标记子串自检」同一个坑：子串分不清「是它」和「提到它」。
+    与 CHANGELOG 里多次记过的「冲突标记子串自检」同一个坑：子串分不清「是它」和「提到它」。
     """
     for node in tree.body:
         if (isinstance(node, ast.Assign)
@@ -104,12 +141,13 @@ def home_absolute_paths(source: str, filename: str = "<test>") -> list[str]:
         return []
     hits: list[str] = []
 
-    def visit(node, where: str) -> None:
+    def visit(node, where: str, inner_of_div_chain: bool = False) -> None:
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             if _has_integration_mark(node.decorator_list):
                 return          # 条件性写在 marker 上 —— 正确形状
             where = f"{where}{node.name}::"
-        shown = _home_path(node)
+        is_div = isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)
+        shown = None if (is_div and inner_of_div_chain) else _home_path(node)
         if shown:
             hits.append(
                 f"{filename}:{node.lineno} {where.rstrip(':') or '<module>'} "
@@ -118,7 +156,7 @@ def home_absolute_paths(source: str, filename: str = "<test>") -> list[str]:
                 "@pytest.mark.integration；合成路径改用 tmp_path 或 /nonexistent/ 前缀"
             )
         for child in ast.iter_child_nodes(node):
-            visit(child, where)
+            visit(child, where, inner_of_div_chain=is_div and child is node.left)
 
     visit(tree, "")
     return hits
@@ -216,6 +254,23 @@ class TestHomePathDetectorHasTeeth:
             "def test_a():\n"
             "    assert open('/Users/igg/Desktop/Alpha Hive/cfg.json')\n"
         ),
+        # v0.45.224：本机 ~/Library/Mobile Documents/com~apple~CloudDocs/Desktop 就是 ~/Desktop
+        "tilde_icloud_v0.45.224": (
+            "import os\n"
+            "def test_a():\n"
+            "    assert os.path.exists(os.path.expanduser("
+            "'~/Library/Mobile Documents/com~apple~CloudDocs/Desktop/Alpha Hive/cfg.json'))\n"
+        ),
+        "path_home_chain_icloud_v0.45.224": (
+            "from pathlib import Path\n"
+            "def test_a():\n"
+            "    assert (Path.home() / 'Library' / 'Mobile Documents' / 'com~apple~CloudDocs').exists()\n"
+        ),
+        "path_home_then_variable": (
+            "from pathlib import Path\n"
+            "def test_a(name):\n"
+            "    assert (Path.home() / 'Desktop' / name).exists()\n"
+        ),
     }
     GOOD = {
         "integration_class": (
@@ -238,6 +293,8 @@ class TestHomePathDetectorHasTeeth:
             "PLIST = os.path.expanduser('~/Library/LaunchAgents/x.plist')\n"
             "A = Path.home() / '.claude' / 'scripts'\n"
             "B = pathlib.Path.home() / '.claude/scripts/x.sh'\n"
+            "C = Path.home() / 'Library' / 'LaunchAgents' / 'x.plist'\n"
+            "D = os.path.expanduser('~/Library/Application Support/x')\n"
             "def test_a(today):\n"
             "    assert os.path.expanduser(f'~/.claude/logs/orchestrator-{today}.log')\n"
         ),
@@ -258,6 +315,10 @@ class TestHomePathDetectorHasTeeth:
     @pytest.mark.parametrize("name", sorted(GOOD))
     def test_does_not_flag(self, name):
         assert home_absolute_paths(self.GOOD[name], "good.py") == [], name
+
+    def test_div_chain_reported_once(self):
+        """整条链只报一次 —— 内层 BinOp 不许重复报。"""
+        assert len(home_absolute_paths(self.BAD["path_home_v0.45.222"], "bad.py")) == 1
 
     def test_skip_detector_really_misses_it(self):
         """钉住「为什么要另一个检测器」：按 git 忽略定口径的那个，对这段原文确实不响。"""
@@ -295,3 +356,53 @@ class TestCwdDetectorHasTeeth:
     @pytest.mark.parametrize("name", sorted(GOOD))
     def test_does_not_flag(self, name):
         assert cwd_relative_reads(self.GOOD[name], "good.py") == [], name
+
+
+_LEAK = {"planted": False}
+_SENTINEL = "/nonexistent/v0.45.224-sys-path-sentinel"
+
+
+class TestProcessStateStaysPut:
+    """收集期不许把进程的 cwd / sys.path 挪走（v0.45.224）。
+
+    实测 `test_deep_analysis_prefetch_injection.py` 收集期 `import deep_analysis` ⇒ cwd 从调用目录
+    变成仓库根、sys.path 多一个 `"."`。此后全套都在仓库根跑：cwd 相对的 bug 一律被掩盖，
+    「从空目录跑全套」的普查（v0.45.224 自己第一轮就是这么做的）结果与仓库根一模一样 —— 量的是假的。
+    只在**收集到会挪它的模块**时有区分力（全套即是）；单跑本文件恒绿是口径，不是漏洞。
+    ⚠️ cwd 那条从**仓库根**起 pytest 时是瞎的（chdir 到仓库根 = 没挪），实测撤掉隔离只有
+    sys.path 那条红；从别的目录起两条都红。两条缺一不可。
+    """
+
+    def test_collection_did_not_move_cwd(self, request):
+        after = getattr(request.config, "_alpha_hive_cwd_after_collection", None)
+        assert after is not None, "conftest 的 pytest_collection_finish 没接上 —— 本守卫空转"
+        assert after == str(request.config.invocation_params.dir), (
+            f"收集期 cwd 被挪走：{request.config.invocation_params.dir} → {after}。"
+            "有测试模块在 import 时 chdir（多半是 import 了 CLI 脚本）；在 import 点前后存还原 cwd。")
+
+    def test_collection_left_no_relative_sys_path(self, request):
+        rel = getattr(request.config, "_alpha_hive_relative_sys_path", None)
+        assert rel is not None, "conftest 的 pytest_collection_finish 没接上 —— 本守卫空转"
+        assert rel == [], (
+            f"收集期 sys.path 多了 cwd 相对项 {rel}：之后谁 chdir，import 就跟着换目录解析。")
+
+
+class TestRuntimeLeaksAreUndone:
+    """conftest `_isolate_cwd_and_sys_path` 的牙：每条测试从自己的空目录起跑；前一条故意泄漏，后一条必须看不到。"""
+
+    def test_0_runs_in_its_own_empty_dir(self, request, tmp_path):
+        here = Path(os.getcwd()).resolve()
+        assert here != Path(request.config.invocation_params.dir).resolve(), "测试没被挪进自己的空目录"
+        assert here.is_relative_to(tmp_path.resolve()) and not any(here.iterdir()), (
+            f"测试 cwd 不是本测试 tmp 下的空目录：{here}")
+
+    def test_1_leak_on_purpose(self, tmp_path):
+        os.chdir(tmp_path)                      # 故意不经 monkeypatch
+        sys.path.insert(0, _SENTINEL)
+        _LEAK.update(planted=True, cwd=os.getcwd())
+
+    def test_2_leak_was_undone(self):
+        if not _LEAK["planted"]:
+            pytest.skip("只在与 test_1_leak_on_purpose 同跑时有意义")
+        assert os.getcwd() != _LEAK["cwd"], "上一条测试 chdir 之后没被还原"
+        assert _SENTINEL not in sys.path, "上一条测试塞进 sys.path 的项没被拿掉"

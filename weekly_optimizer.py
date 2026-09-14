@@ -109,6 +109,22 @@ SNAPSHOTS_DIR  = _candidate_snapshots
 HISTORY_FILE   = ALPHAHIVE_DIR / "weight_history.jsonl"
 PHEROMONE_DB_PATH = ALPHAHIVE_DIR / "pheromone.db"
 
+# ── import 根：锚本文件，**不是** ALPHAHIVE_DIR（v0.45.230）───────────────────
+# `sys.path.insert` 要的是「代码在哪」，ALPHAHIVE_DIR 答的是「生产数据在哪」——
+# 它写死 `~/Desktop/Alpha Hive`，只在生产上两者恰好重合。从 worktree 跑时它就是
+# **主 checkout**：此前 6 处函数体内 `sys.path.insert(0, str(ALPHAHIVE_DIR))`、从不拿掉，
+# 之后任何还没 import 过的模块都从主 checkout 加载（v0.45.224 实测：141 个顶层模块
+# 120 个如此；worktree 里改坏 `economic_calendar_watch` 单跑 4 failed，先跑一条本模块
+# 测试 ⇒ 6 passed）。CLAUDE.md「这个路径指向代码还是数据」表。
+_CODE_DIR = Path(__file__).resolve().parent
+
+
+def _ensure_code_dir_importable() -> None:
+    """保证 `from feedback_loop import …` 解析到**本 checkout**。已排在最前就不再插。"""
+    code_dir = str(_CODE_DIR)
+    if not sys.path or sys.path[0] != code_dir:
+        sys.path.insert(0, code_dir)
+
 # ── 优化阈值 ──────────────────────────────────────────────────────────────────
 MIN_SAMPLES    = 10    # 少于此样本数不调整权重
 # v0.23.6 (2026-04-26 周日复盘) — 解除 4-19 设的临时 gate
@@ -158,7 +174,7 @@ def _load_close_t7_map() -> "tuple[dict, str]":
     status 取值见 feedback_loop._load_close_t7_map 的 docstring：
     "ok" / "empty" / "missing" / "error"。
     """
-    sys.path.insert(0, str(ALPHAHIVE_DIR))
+    _ensure_code_dir_importable()
     from feedback_loop import _load_close_t7_map as _fl_load_close_t7_map
     return _fl_load_close_t7_map(PHEROMONE_DB_PATH)
 
@@ -192,7 +208,7 @@ def _apply_clean_t7_prices(analyzer):
     直接改用 `BacktestAnalyzer(clean_t7=True)`）是为了不改动任何既有调用
     点/测试的调用形态，把这次改动的影响面限制在"实现挪家"本身。
     """
-    sys.path.insert(0, str(ALPHAHIVE_DIR))
+    _ensure_code_dir_importable()
     from feedback_loop import _apply_clean_t7_prices as _fl_apply_clean_t7_prices
     _fl_apply_clean_t7_prices(getattr(analyzer, "snapshots", None) or [],
                               db_path=PHEROMONE_DB_PATH)
@@ -382,7 +398,7 @@ def compute_new_weights(snapshots_dir: Path) -> Optional[dict]:
     就会产出权重建议，能在极少样本（比如 3 条）下静默产出"建议"。
     """
     try:
-        sys.path.insert(0, str(ALPHAHIVE_DIR))
+        _ensure_code_dir_importable()
         from feedback_loop import BacktestAnalyzer
     except ImportError as e:
         print(f"❌ 无法导入 feedback_loop: {e}")
@@ -492,7 +508,7 @@ def compute_new_weights_wls(snapshots_dir: Path) -> Optional[dict]:
     3. 共线性检测：高相关 Agent 不同时提升
     """
     try:
-        sys.path.insert(0, str(ALPHAHIVE_DIR))
+        _ensure_code_dir_importable()
         from feedback_loop import BacktestAnalyzer
     except ImportError as e:
         print(f"❌ 无法导入 feedback_loop: {e}")
@@ -555,7 +571,7 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
         }
     """
     try:
-        sys.path.insert(0, str(ALPHAHIVE_DIR))
+        _ensure_code_dir_importable()
         from feedback_loop import BacktestAnalyzer
     except ImportError:
         return {"stable": False, "error": "无法导入 feedback_loop"}
@@ -881,7 +897,7 @@ def check_ticker_pool_consistency(snapshots_dir: Path,
         {ok, unrepresented_ratio, recent_pool, sample_pool, missing, reason}
     """
     try:
-        sys.path.insert(0, str(ALPHAHIVE_DIR))
+        _ensure_code_dir_importable()
         from feedback_loop import BacktestAnalyzer
     except ImportError as e:
         # 拿不到就**不放行**——闸的默认态是关，不是开

@@ -312,12 +312,14 @@ class TestOutFileCompleteness:
 
     @staticmethod
     def _run(tmp_path, results, extra=()):
+        import pathlib
         import subprocess
         import sys
         p = tmp_path / "s.json"; p.write_text(json.dumps(results))
         out = tmp_path / "o.json"
         rc = subprocess.run(
-            [sys.executable, "scan_coverage_gate.py", "--date", "2026-08-26",
+            [sys.executable, str(pathlib.Path(__file__).resolve().parent.parent / "scan_coverage_gate.py"),
+             "--date", "2026-08-26",
              "--file", str(p), "--quiet", "--out", str(out), *extra],
             capture_output=True).returncode
         data = json.loads(out.read_text()) if out.exists() else None
@@ -360,11 +362,13 @@ class TestOutFileCompleteness:
         assert d["label_honesty"]["healthy"] is False
 
     def test_undeterminable_exits_three(self, tmp_path):
+        import pathlib
         import subprocess
         import sys
         out = tmp_path / "o.json"
         rc = subprocess.run(
-            [sys.executable, "scan_coverage_gate.py", "--date", "2026-01-01",
+            [sys.executable, str(pathlib.Path(__file__).resolve().parent.parent / "scan_coverage_gate.py"),
+             "--date", "2026-01-01",
              "--file", str(tmp_path / "nope.json"), "--quiet", "--out", str(out)],
             capture_output=True).returncode
         assert rc == 3

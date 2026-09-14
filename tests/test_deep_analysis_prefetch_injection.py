@@ -27,12 +27,20 @@
 """
 
 import ast
+import os
 import sys
 import types
 
 import pytest
 
-import deep_analysis
+# deep_analysis 是 CLI 脚本，import 时就 `os.chdir(脚本目录)` + `sys.path.insert(0, ".")`。
+# 本文件在**收集期** import 它 ⇒ 整个 pytest 进程的 cwd 被挪到仓库根、sys.path 多一个
+# cwd 相对的 "."，此后每条测试都在仓库根跑：cwd 相对的 bug 全套里一律被掩盖，
+# 「从空目录跑全套」的普查也跟着失真（v0.45.224 实测）。守卫：test_reads_own_checkout.py。
+_cwd, _sys_path = os.getcwd(), list(sys.path)
+import deep_analysis  # noqa: E402
+os.chdir(_cwd)
+sys.path[:] = _sys_path
 
 
 class _StubAgent:

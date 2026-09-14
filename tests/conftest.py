@@ -486,6 +486,50 @@ def _block_slack(monkeypatch):
         "get_session。去那条测试里补 patch，不要在这里放行。")
 
 
+# ==================== cwd / sys.path 不许跨测试泄漏 ====================
+
+def pytest_collection_finish(session):
+    """记下收集结束时的 cwd 与相对 sys.path 项（v0.45.224）。
+
+    收集期被 import 的模块若在 import 时 chdir，下面的逐测试还原管不到（它从第一条测试才开始记）。
+    断言在 `test_reads_own_checkout.py::TestProcessStateStaysPut`。
+    """
+    session.config._alpha_hive_cwd_after_collection = os.getcwd()
+    session.config._alpha_hive_relative_sys_path = [p for p in sys.path if not os.path.isabs(p)]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd_and_sys_path(request, tmp_path):
+    """每条测试在**自己的空目录**里跑；结束后 cwd 回到调用目录、`sys.path` 还原（v0.45.224）。
+
+    **为什么是空目录，不只是「结束时还原」**：cwd 相对的读取有一半写法静态扫描看不见 ——
+    参数化变量 `Path(path)`、循环变量 `Path(name)`、`subprocess.run([…, "x.py"])` 不给 cwd。
+    v0.45.224 从空目录跑全套（先修好下面那条收集期 chdir 之后）实测出 9 条，
+    还有生产代码 `CBOEDailyFetcher()` 的相对默认值 `cache/cboe_daily` 在 cwd 里建目录
+    （它不读 `ALPHA_HIVE_CACHE_DIR`；在主 checkout 起 pytest 就建进主 checkout）。
+    让每条测试都从空目录起跑，这类问题**在任何机器、任何一次普通运行里**都会红，
+    相对路径的写入也只会落进 tmp。
+
+    **为什么还原 `sys.path`**：`weekly_optimizer.py` 在函数体里
+    `sys.path.insert(0, str(ALPHAHIVE_DIR))`，ALPHAHIVE_DIR 写死 `~/Desktop/Alpha Hive`
+    （worktree 里就是主 checkout），从不拿掉（全套插了 40 次）。此后任何函数体内 `import X`、
+    只要 X 还没 import 过，拿的就是主 checkout 的 X：141 个顶层模块里 120 个会这样解析。
+    实测把 worktree 的 `economic_calendar_watch._release_date_to_quarter` 改坏：单跑它的测试
+    4 failed，先跑一条 weekly_optimizer 测试再跑 ⇒ **6 passed**。根治在生产代码
+    （insert 该锚 `__file__`，见 CLAUDE.md「指向代码还是数据」表）；这里只挡跨测试。
+
+    cwd 还原到**调用目录**而不是 setup 时的 cwd：测试自己 `monkeypatch.chdir` 的还原顺序
+    与本 fixture 不定，按快照还原会让 cwd 在测试之间漂移。
+    """
+    path = list(sys.path)
+    run_dir = tmp_path / "_cwd"
+    run_dir.mkdir()
+    os.chdir(run_dir)
+    yield
+    os.chdir(request.config.invocation_params.dir)
+    sys.path[:] = path
+
+
 # ==================== weekly_optimizer 生产库隔离 ====================
 
 @pytest.fixture(autouse=True)

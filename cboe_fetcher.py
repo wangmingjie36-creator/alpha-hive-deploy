@@ -74,13 +74,18 @@ class CBOEDailyFetcher:
     - VVIX（波动率的波动率）
     """
 
-    def __init__(self, cache_dir: str = "cache/cboe_daily"):
+    def __init__(self, cache_dir: Optional[str] = None):
         """
         初始化抓取器
 
         Args:
-            cache_dir: 缓存目录路径
+            cache_dir: 缓存目录路径；None ⇒ 调用时解析 `PATHS.cboe_daily_cache`（v0.45.230）。
+                原默认值是 cwd 相对的 "cache/cboe_daily"，不读 `ALPHA_HIVE_CACHE_DIR`、
+                在哪跑就建进哪（CLAUDE.md「新产物的默认路径不许是相对路径」）。
         """
+        if cache_dir is None:
+            from hive_logger import PATHS
+            cache_dir = str(PATHS.cboe_daily_cache)
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
