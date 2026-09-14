@@ -388,7 +388,17 @@ class TestProcessStateStaysPut:
 
 
 class TestRuntimeLeaksAreUndone:
-    """conftest `_isolate_cwd_and_sys_path` 的牙：每条测试从自己的空目录起跑；前一条故意泄漏，后一条必须看不到。"""
+    """conftest cwd / sys.path 隔离的牙（v0.45.224 起，v0.45.237 重写）。
+
+    v0.45.224 版的 test_2 只断言「本测试 cwd ≠ 上一条泄漏的 cwd」—— 每条测试 setup 本来就会 chdir，
+    **删掉 teardown 的还原照样全绿**（实测）。要看「测试之间」的 cwd，只能让一个 **class 级 fixture**
+    在两条测试之间 setup，由它记下当时的 cwd。
+    """
+
+    @pytest.fixture(scope="class")
+    def cwd_between_tests(self):
+        here = os.getcwd()
+        return here, sorted(os.listdir(here))
 
     def test_0_runs_in_its_own_empty_dir(self, request, tmp_path):
         here = Path(os.getcwd()).resolve()
@@ -401,8 +411,24 @@ class TestRuntimeLeaksAreUndone:
         sys.path.insert(0, _SENTINEL)
         _LEAK.update(planted=True, cwd=os.getcwd())
 
-    def test_2_leak_was_undone(self):
-        if not _LEAK["planted"]:
-            pytest.skip("只在与 test_1_leak_on_purpose 同跑时有意义")
-        assert os.getcwd() != _LEAK["cwd"], "上一条测试 chdir 之后没被还原"
-        assert _SENTINEL not in sys.path, "上一条测试塞进 sys.path 的项没被拿掉"
+    def test_1b_monkeypatch_chdir(self, monkeypatch, tmp_path):
+        """monkeypatch 的撤销若排在 conftest 还原之后，cwd 会停在本测试的 `_cwd` —— test_2 看得见。"""
+        monkeypatch.chdir(tmp_path)
+        _LEAK["monkeypatched"] = True
+
+    def test_2_between_tests_cwd_is_the_session_empty_dir(self, request, cwd_between_tests):
+        if not (_LEAK["planted"] and _LEAK.get("monkeypatched")):
+            pytest.skip("只在与 test_1 / test_1b 同跑时有意义")
+        cwd, listing = cwd_between_tests
+        between = request.config._alpha_hive_between_tests_cwd
+        assert Path(cwd).resolve() == Path(between).resolve(), (
+            f"测试之间 cwd 应停在会话级空目录 {between}，实际 {cwd}"
+            f"（test_1 故意 chdir 到 {_LEAK['cwd']}；也可能是 monkeypatch 撤销排到了还原之后）")
+        assert listing == [], f"会话级空目录不空：{listing[:5]} —— 有 fixture 往 cwd 写了相对路径"
+        assert _SENTINEL not in sys.path, "test_1 塞进 sys.path 的项没被拿掉"
+
+    def test_3_higher_scoped_fixture_is_not_in_invocation_dir(self, request, cwd_between_tests):
+        """v0.45.224 实测：module 级 fixture 在调用目录（仓库根）里 setup，相对读取照绿。"""
+        cwd, _ = cwd_between_tests
+        assert Path(cwd).resolve() != Path(request.config.invocation_params.dir).resolve(), (
+            "class 级 fixture 在调用目录里 setup —— 高于函数级的 cwd 相对读取又看不见了")

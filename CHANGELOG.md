@@ -5,7 +5,58 @@
 
 ---
 
-## [0.45.237] — 2026-09-14 — 占位（进行中：二次检查 v0.45.224 的改动）
+## [0.45.237] — 2026-09-14 — 二次检查 v0.45.224：cwd 隔离只罩住测试函数本体——高于函数级的 fixture 仍在仓库根里跑，「teardown 还原」的自证是空的，还原理由写反了
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。** v0.45.224 的四条声称里三条不成立，都在它自己新加的 conftest 隔离上。
+
+### Fixed（`tests/conftest.py`）
+
+1. **module / class / session 级 fixture 仍在调用目录（平常就是仓库根）里 setup。** v0.45.224 称「逐测试空目录让这类问题在任何一次普通运行里就红」——
+   它只在函数级 fixture 里 chdir，每条测试结束又 chdir 回**调用目录**。实测：module 级 fixture 读 `Path("config.py")` ⇒ `exists()=True`、cwd=调用目录。
+   **结束时还原到调用目录，恰好把盲区造回来了。** 改：新增会话级 autouse `_empty_cwd_between_tests`，测试之间 cwd 停在会话级空目录，会话结束才回调用目录。
+   复测同一个 module 级 fixture ⇒ `exists()=False`、cwd=会话级空目录。
+2. **测试自己 `monkeypatch.chdir` 时，teardown 后 cwd 停在该测试的 `_cwd`。** v0.45.224 的理由是「monkeypatch 的还原顺序不定」—— **错，是确定地输**：
+   `--setup-plan` 实测 autouse fixture 按**名字字母序** setup（`_block_llm_api` 排第一、先实例化 monkeypatch），不是定义顺序，
+   monkeypatch 因此最后 teardown，覆盖掉手工 `os.chdir`。本轮第一版「把 fixture 挪到文件最前面」也照输（自证当场红）。
+   改：chdir 走 `monkeypatch.chdir` —— 撤销时回到本测试第一次经它 chdir 之前的目录，与谁先 teardown 无关，裸 `os.chdir` 的泄漏一并撤销。
+
+### Fixed（`tests/test_reads_own_checkout.py::TestRuntimeLeaksAreUndone`）
+
+3. **v0.45.224 的 test_2 对 cwd 还原是空的**：只断言「本测试 cwd ≠ 上一条泄漏的 cwd」，而每条测试 setup 本来就 chdir ——
+   删掉 teardown 的还原，相关 32 条**全绿**（实测）。也没有任何测试用过 `monkeypatch.chdir`（grep 只命中自己的 docstring），
+   那条「按快照会漂移」的理由所说的场景在本仓并不存在。改：用一个 **class 级 fixture 在两条测试之间 setup** 记下 cwd；
+   序列 test_1（裸 chdir + 往 sys.path 塞哨兵）→ test_1b（`monkeypatch.chdir`）→ test_2（测试之间 cwd == 会话级空目录且为空、哨兵已拿掉）
+   → test_3（高于函数级的 fixture 不在调用目录）。
+
+### 验证
+
+- 变异（每次按字节还原并核对），各被自证抓到：裸 chdir 不还原 / 裸 chdir + teardown 回会话空目录（本轮第一版）/ v0.45.224 原样三处一起回退 /
+  会话 fixture 不 chdir（test_2、test_3 都红）/ 去 sys.path 还原。
+- 直接观测（临时探针文件，跑完即删）：module 级 fixture 相对读取 `False`；`monkeypatch.chdir` 那条之后 cwd=会话级空目录；`sessionfinish` 时 cwd 回调用目录。
+- 全套从仓库根：**4341 passed / 1 failed / 1 skipped / 2 xfailed**（唯一红 `TestCoverageHorizon`，唯一 skip `test_scheduler.py`）。
+- 全套从空目录：同上 **4341 passed / 1 failed**；收集后 cwd 未动、无相对 sys.path 项，跑完空目录无残留。
+
+### 核过、成立的
+
+- v0.45.224「文件访问只有 import 期一次 `scandir`」：审计钩子只看得见**本进程**。补查子进程：测试里的 `subprocess` 调用无一跑写死主 checkout 的模块
+  （`weekly_optimizer` / `self_analyst` / `generate_deep_v2` / `collect_data` / `alpha_hive_mcp` / `deep_analysis`），唯一的 `-c` 子进程 import 的是
+  `alpha_hive_daily_report`，生产代码无顶层 import 上述模块（静态核对，不是运行时量的）。
+- 其余 v0.45.224 声称（收集期 chdir、sys.path 120/141、4 failed / 6 passed 复现、9 条 cwd 依赖、canary）为当轮实测输出，本轮未发现反例。
+
+### 顺带确认（未修，另开任务）
+
+- 并发 session（v0.45.230）报：`hive_logger` 模块级 `_setup_logger()` 在收集期把文件 handler 绑到真实 `logs/`。本轮复核：
+  全套跑完本 worktree `logs/alpha_hive.log`（2.5 MB）mtime 落在跑测时段、末行是夹具标的 `[AAA]` 的告警 ⇒ 成立。
+  auto-memory 已有记录（未修）；已提给用户作独立任务。
+
+### v0.45.224 条目里不成立的记录（已就地订正并标注）
+
+- 「逐测试空目录让这类问题**在任何一次普通运行里**就红」：只罩函数本体，见上 1。
+- 「结束 cwd 回调用目录」「cwd 还原到 `invocation_params.dir`…还原顺序不定，按快照会漂移」：顺序是确定的字母序，且回调用目录正是盲区来源，见上 1、2。
+- 「`TestRuntimeLeaksAreUndone`（…上一条故意泄漏的 cwd/sys.path 被还原）」：cwd 那半是空的，见上 3。
+- 「按后果量，文件访问确实只有 import 期一次 `scandir`」：限本进程；子进程为静态核对。
+
+---
 
 ## [0.45.236] — 2026-09-14 — 占位（进行中：日报提交会把别的 session 在生产索引里已暂存的代码一起提交并推上 main——只提交白名单路径）
 
@@ -338,17 +389,17 @@ v0.45.222 与本版第一轮都「从空目录跑全套」证明 cwd 无关，**
    `ALPHAHIVE_DIR = expanduser("~/Desktop/Alpha Hive")`。审计钩子（`sys.addaudithook`）全套实测：插了 40 次；
    之后 141 个顶层模块里 **120 个**尚未 import 的会从主 checkout 解析（对照组 0）。**真实复现**：worktree 里把
    `economic_calendar_watch._release_date_to_quarter` 改坏 —— 单跑它的测试 4 failed；先跑一条 weekly_optimizer 测试再跑 ⇒ **6 passed**。
-   v0.45.222 称「用到这些常量的测试都 monkeypatch 了」只 grep 了常量名；按后果量，文件访问确实只有 import 期一次 `scandir`，
+   v0.45.222 称「用到这些常量的测试都 monkeypatch 了」只 grep 了常量名；按后果量，文件访问确实只有 import 期一次 `scandir`**（v0.45.237 订正：限本进程；子进程为静态核对）**，
    **泄漏走的是 sys.path 不是文件**。
-3. **conftest `_isolate_cwd_and_sys_path`（autouse）：每条测试从自己 tmp 下的空目录起跑，结束 cwd 回调用目录、sys.path 还原。**
+3. **conftest `_isolate_cwd_and_sys_path`（autouse）：每条测试从自己 tmp 下的空目录起跑，结束 cwd 回调用目录、sys.path 还原。****（v0.45.237 订正：回调用目录让高于函数级的 fixture 仍在仓库根里跑；现为会话级空目录）**
    不只「结束时还原」：修好 1 后**真普查**（空目录全套）再出 **9 条** cwd 依赖，静态检测器一条都看不见 ——
    参数化变量 `Path(path)`（`test_official_close_price.py` ×3）、循环变量 `pathlib.Path(name)`（`test_silent_failure_guards.py` ×2）、
    `subprocess.run([…, "scan_coverage_gate.py"])` 不给 cwd（`test_scan_coverage_gate.py` ×4）—— 已全部改锚 `Path(__file__)`；
    还有生产 `CBOEDailyFetcher()` 的相对默认值 `cache/cboe_daily` 在 cwd 里建目录（不读 `ALPHA_HIVE_CACHE_DIR`）。
-   逐测试空目录让这类问题**在任何一次普通运行里**就红，相对写入也只落进 tmp。
-   cwd 还原到 `invocation_params.dir` 而非 setup 快照：测试自己 `monkeypatch.chdir` 的还原顺序不定，按快照会漂移。
+   逐测试空目录让这类问题**在任何一次普通运行里**就红，相对写入也只落进 tmp。**（v0.45.237 订正：只罩测试函数本体；module/class/session 级 fixture 实测照绿）**
+   cwd 还原到 `invocation_params.dir` 而非 setup 快照：测试自己 `monkeypatch.chdir` 的还原顺序不定，按快照会漂移。**（v0.45.237 订正：顺序是确定的：autouse 按名字字母序，monkeypatch 最后 teardown、确定地覆盖手工还原；本仓也没有测试用 monkeypatch.chdir）**
 4. **守卫** `test_reads_own_checkout.py`：`TestProcessStateStaysPut`（收集结束 cwd == 调用目录、无相对 sys.path 项；
-   由 conftest `pytest_collection_finish` 记录）与 `TestRuntimeLeaksAreUndone`（本测试在自己的空目录、上一条故意泄漏的 cwd/sys.path 被还原）。
+   由 conftest `pytest_collection_finish` 记录）与 `TestRuntimeLeaksAreUndone`（本测试在自己的空目录、上一条故意泄漏的 cwd/sys.path 被还原）**（v0.45.237 订正：cwd 那半是空的：删掉 teardown 还原照样全绿）**。
    ⚠️ cwd 那条从**仓库根**起跑时是瞎的（chdir 到原地），实测撤掉 1 的隔离只有 sys.path 那条红；从空目录起跑两条都红。
 
 ### Fixed（v0.45.222 检测器）
