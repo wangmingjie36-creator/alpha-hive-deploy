@@ -8,18 +8,29 @@ CBOE 日度统计数据抓取器 — Alpha Hive 宏观分析层增强
 4. 获取 VVIX（波动率之波动率）
 5. 提供宏观评分组合
 
-数据源：yfinance（优先），FRED API 备选，本地缓存 30 分钟（盘中）或 4 小时（盘后）
+数据源（v0.45.241 起）：**CBOE CDN 优先，yfinance 备选**，都拿不到才落 `source='default_fallback'`。
+本地缓存 30 分钟（盘中）或 4 小时（盘后）。
+  - SKEW / VVIX：`cdn.cboe.com/api/global/us_indices/daily_prices/{SKEW,VVIX}_History.csv` 最新一行
+  - P/C：`cdn.cboe.com/api/global/delayed_quotes/options/{SPY,QQQ,IWM}.json` 近 3 个到期日成交量合成
+    （经 `cboe_options._fetch_cboe_payload`：串行化、重试、进程缓存、陈旧 CDN 文件拒收，全部复用）
+  - VIX 期限结构：vixcentral VX 期货（v0.45.29，未变）
+为什么换：此前三项**只走 yfinance**，云端快照沙箱够不到 yfinance ⇒ 08-26 ~ 09-11 共 12 份
+market.json 里 pcce / skew / vvix **12/12 天全是兜底常量**（09-11 兜底 SKEW 120 / VVIX 85，
+CBOE 当日真值 154.49 / 91.28）。云端够得到 cdn.cboe.com（同日期权快照 27/30 走的就是它）。
 
 2026-04-22 变更：因 Yahoo Finance 下架 ^PCCE / ^CPCE / ^CPC 等 CBOE 官方 P/C 比率符号，
-fetch_equity_putcall_ratio() 改为从 SPY/QQQ/IWM 期权链 volume 合成。未来 Yahoo 若再
-下架 ETF 期权数据，只需修改 _SYNTHETIC_PC_TICKERS 常量即可。
+fetch_equity_putcall_ratio() 改为从 SPY/QQQ/IWM 期权链 volume 合成。
 """
 
+import csv
+import io
 import os
 import json
 import time
+import urllib.request
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 import warnings
 
 try:
@@ -61,6 +72,108 @@ except ImportError:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
 logger = get_logger(__name__)
+
+
+# ── CBOE 指数日线 CSV（v0.45.241）────────────────────────────────────────────
+_CBOE_INDEX_CSV_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices/{}_History.csv"
+_CBOE_NET_TIMEOUT = 15
+_CBOE_RETRIES = 3
+# 解析合理区间（防格式漂移把别的列读成指数值），不是行情判断。
+# 实测史上 SKEW ≈ 100–170、VVIX ≈ 60–210，区间放宽一倍余量。
+_INDEX_VALID_RANGE = {"SKEW": (80.0, 250.0), "VVIX": (40.0, 300.0)}
+# 最新一行比 ET 今天早**超过**这么多日历日 ⇒ 当作 CDN 文件停更，弃用本源。
+# CSV 当天何时更新**未实测**（09-14 看 Last-Modified 是周日重生成、内容仍是周五），
+# 所以不要求「必须是今天」—— 那会让收盘后不久跑的云端快照天天落回兜底。
+# 放行的那一行把**观测日**如实写进 `date`，由读的人判新鲜度。
+_INDEX_MAX_STALE_DAYS = 7
+_ET = ZoneInfo("America/New_York")
+
+
+def _today_et():
+    """ET 今天（date）。单独成函数：测试钉死它，停更天数的边界才不随跑的时刻漂。"""
+    return datetime.now(_ET).date()
+
+
+def _download_cboe_index_csv(symbol: str) -> Optional[str]:
+    """拉取 CBOE 指数日线 CSV 原文；失败返回 None（不抛，调用方据此降级）。"""
+    try:
+        from cboe_options import _CBOE_SEM  # 与全部 CBOE 请求共用一把锁，同 cboe_vix
+    except Exception:  # pragma: no cover
+        import threading
+        _CBOE_SEM = threading.Semaphore(1)
+    url = _CBOE_INDEX_CSV_URL.format(symbol)
+    last_err = None
+    for attempt in range(_CBOE_RETRIES):
+        try:
+            with _CBOE_SEM:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                raw = urllib.request.urlopen(req, timeout=_CBOE_NET_TIMEOUT).read()
+            return raw.decode("utf-8", errors="replace")
+        except Exception as e:  # noqa: BLE001 - 网络层什么都可能抛
+            last_err = e
+            if attempt < _CBOE_RETRIES - 1:
+                time.sleep(0.7 * (attempt + 1))
+    logger.warning(f"CBOE {symbol} CSV 下载失败（重试 {_CBOE_RETRIES} 次耗尽）: {last_err}")
+    return None
+
+
+def _latest_cboe_index_value(symbol: str) -> Optional[Tuple[float, str]]:
+    """CBOE 指数 CSV 最新一行 → `(值, ISO 观测日)`。
+
+    拿不到 / 格式变了 / 最新一行停更超过 `_INDEX_MAX_STALE_DAYS` ⇒ None，**不返回猜测值**。
+    CSV 形如 `DATE,SKEW` + `MM/DD/YYYY,147.02`；值列名就是指数符号。坏行跳过。
+    """
+    text = _download_cboe_index_csv(symbol)
+    if not text:
+        return None
+    lo, hi = _INDEX_VALID_RANGE[symbol]
+    rows: List[Tuple[str, float]] = []
+    try:
+        reader = csv.DictReader(io.StringIO(text))
+        if symbol not in (reader.fieldnames or []):
+            logger.warning(f"CBOE {symbol} CSV 表头变了（{reader.fieldnames}），弃用本源")
+            return None
+        for row in reader:
+            d, v = (row.get("DATE") or "").strip(), (row.get(symbol) or "").strip()
+            try:
+                iso = datetime.strptime(d, "%m/%d/%Y").strftime("%Y-%m-%d")
+                val = float(v)
+            except (ValueError, TypeError):
+                continue
+            if lo <= val <= hi:
+                rows.append((iso, val))
+    except csv.Error as e:
+        logger.warning(f"CBOE {symbol} CSV 解析失败: {e}")
+        return None
+    if not rows:
+        logger.warning(f"CBOE {symbol} CSV 没有任何可用行，弃用本源")
+        return None
+    iso, val = max(rows)
+    lag = (_today_et() - datetime.strptime(iso, "%Y-%m-%d").date()).days
+    if lag > _INDEX_MAX_STALE_DAYS:
+        logger.warning(f"CBOE {symbol} CSV 最新一行是 {iso}（{lag} 天前），疑似停更，弃用本源")
+        return None
+    return round(val, 2), iso
+
+
+def _classify_skew(v: float) -> str:
+    if v > 150:
+        return 'extreme_tail_risk'
+    if v > 130:
+        return 'elevated'
+    if v > 115:
+        return 'normal'
+    return 'complacent'
+
+
+def _classify_vvix(v: float) -> str:
+    if v > 130:
+        return 'vol_explosion_risk'
+    if v > 100:
+        return 'elevated'
+    if v > 80:
+        return 'normal'
+    return 'compressed'
 
 
 class CBOEDailyFetcher:
@@ -164,9 +277,10 @@ class CBOEDailyFetcher:
         """
         获取合成股票 Put/Call 比率（替代已下架的 CBOE ^PCCE）
 
-        策略：因 Yahoo 2026-04 下架 ^PCCE / ^CPCE / ^CPC 等 CBOE 官方 P/C 比率符号，
-        改为聚合 SPY / QQQ / IWM 期权链的成交量合成 P/C Ratio，100% 基于 Yahoo 数据，
-        未来 Yahoo 若再下架个别 ETF 的期权数据，只需修改 _SYNTHETIC_PC_TICKERS 常量。
+        口径：SPY / QQQ / IWM 各取**最近 3 个到期日**的全部 put / call 成交量，汇总后 put_vol / call_vol。
+        v0.45.241 起数据源 = CBOE 延迟报价期权链（`source='synthetic_cboe_options'`），
+        CBOE 一只都拿不到才退回 yfinance 同口径（`'synthetic_yf_options'`），再不行落兜底。
+        不在两个源之间逐标的拼接：两家的「当前时刻成交量」不是同一个快照，拼出来的比值两边都不代表。
 
         注意：ETF 合成 P/C Ratio 的水位通常比 CBOE 官方 PCCE 高 0.2-0.3（因 SPY 等
         ETF 承担大量机构对冲盘），阈值已相应上调。
@@ -176,9 +290,9 @@ class CBOEDailyFetcher:
                 'total_pc_ratio': float,      # 合成 P/C 比率（put_vol / call_vol）
                 'call_volume': int,           # 汇总 call 成交量
                 'put_volume': int,            # 汇总 put 成交量
-                'date': str,                  # ISO 日期
+                'date': str,                  # ISO 日期：CBOE = 期权链成交日（ET）；其余 = 抓取日
                 'signal': str,                # 情绪信号
-                'source': str,                # 数据源标识
+                'source': str,                # 'synthetic_cboe_options' | 'synthetic_yf_options' | 'default_fallback'
                 'tickers_used': list[str],    # 实际纳入合成的标的
                 'error': str (optional)
             }
@@ -195,104 +309,174 @@ class CBOEDailyFetcher:
             'put_volume': 0,
             'date': datetime.now().isoformat()[:10],
             'signal': 'unknown',
-            'source': 'synthetic_yf_options',
+            'source': 'synthetic_cboe_options',
             'tickers_used': [],
         }
 
-        try:
-            if yf is None:
-                raise ImportError("yfinance 未安装")
+        got = self._synthetic_pc_from_cboe()
+        if got is None:
+            try:
+                got = self._synthetic_pc_from_yfinance()
+                if got is not None:
+                    result['source'] = 'synthetic_yf_options'
+                    self.logger.warning("CBOE 期权链合成 P/C 不可用，退回 yfinance")
+            except NETWORK_ERRORS as ne:
+                self.logger.warning(f"合成 P/C Ratio 网络错误: {ne}")
+            except Exception as e:
+                self.logger.error(f"合成 P/C Ratio 异常: {e}")
+                result['error'] = str(e)
 
-            total_call_vol = 0.0
-            total_put_vol = 0.0
-            tickers_used = []
+        if got is not None:
+            total_call_vol, total_put_vol, tickers_used, obs_date = got
+            pc_ratio = total_put_vol / total_call_vol
+            result['total_pc_ratio'] = round(pc_ratio, 3)
+            result['call_volume'] = int(total_call_vol)
+            result['put_volume'] = int(total_put_vol)
+            result['tickers_used'] = tickers_used
+            if obs_date:
+                result['date'] = obs_date
 
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-
-                for symbol in self._SYNTHETIC_PC_TICKERS:
-                    try:
-                        tk = yf.Ticker(symbol)
-                        expirations = list(tk.options or [])
-                        if not expirations:
-                            self.logger.debug(f"{symbol} 无期权到期日，跳过")
-                            continue
-
-                        sym_call_vol = 0.0
-                        sym_put_vol = 0.0
-                        for expiry in expirations[: self._SYNTHETIC_PC_EXPIRIES]:
-                            try:
-                                chain = tk.option_chain(expiry)
-                                # volume 列可能存在 NaN
-                                sym_call_vol += float(chain.calls["volume"].fillna(0).sum())
-                                sym_put_vol += float(chain.puts["volume"].fillna(0).sum())
-                            except Exception as e:
-                                self.logger.debug(f"{symbol}@{expiry} 期权链失败: {e}")
-                                continue
-
-                        if sym_call_vol > 0 or sym_put_vol > 0:
-                            total_call_vol += sym_call_vol
-                            total_put_vol += sym_put_vol
-                            tickers_used.append(symbol)
-                            self.logger.debug(
-                                f"{symbol}: calls={sym_call_vol:.0f}, puts={sym_put_vol:.0f}, "
-                                f"pc={sym_put_vol / max(sym_call_vol, 1):.3f}"
-                            )
-                    except NETWORK_ERRORS as ne:
-                        self.logger.debug(f"{symbol} 网络错误: {ne}")
-                        continue
-                    except Exception as e:
-                        self.logger.debug(f"{symbol} 合成失败: {e}")
-                        continue
-
-            if tickers_used and total_call_vol > 0:
-                pc_ratio = total_put_vol / total_call_vol
-                result['total_pc_ratio'] = round(pc_ratio, 3)
-                result['call_volume'] = int(total_call_vol)
-                result['put_volume'] = int(total_put_vol)
-                result['tickers_used'] = tickers_used
-
-                # 阈值上调（ETF 合成比 CBOE PCCE 系统性偏高 0.2-0.3）
-                if pc_ratio > 1.3:
-                    result['signal'] = 'extreme_fear'
-                elif pc_ratio > 1.0:
-                    result['signal'] = 'fear'
-                elif pc_ratio > 0.8:
-                    result['signal'] = 'neutral'
-                elif pc_ratio > 0.6:
-                    result['signal'] = 'greed'
-                else:
-                    result['signal'] = 'extreme_greed'
-
-                self.logger.info(
-                    f"合成 P/C Ratio: {pc_ratio:.3f} "
-                    f"(calls={int(total_call_vol):,}, puts={int(total_put_vol):,}, "
-                    f"来源={tickers_used}, 信号={result['signal']})"
-                )
-            else:
-                # 所有 ETF 都失败，降级中性默认值
-                self.logger.warning("合成 P/C Ratio 所有 ETF 获取失败，使用历史中位数")
-                result['total_pc_ratio'] = 0.95  # ETF 合成历史中位数（比 PCCE 的 0.75 高）
-                result['call_volume'] = 0
-                result['put_volume'] = 0
+            # 阈值上调（ETF 合成比 CBOE PCCE 系统性偏高 0.2-0.3）
+            if pc_ratio > 1.3:
+                result['signal'] = 'extreme_fear'
+            elif pc_ratio > 1.0:
+                result['signal'] = 'fear'
+            elif pc_ratio > 0.8:
                 result['signal'] = 'neutral'
-                result['source'] = 'default_fallback'
+            elif pc_ratio > 0.6:
+                result['signal'] = 'greed'
+            else:
+                result['signal'] = 'extreme_greed'
 
-        except NETWORK_ERRORS as ne:
-            self.logger.warning(f"合成 P/C Ratio 网络错误: {ne}")
-            result['total_pc_ratio'] = 0.95
+            self.logger.info(
+                f"合成 P/C Ratio: {pc_ratio:.3f} "
+                f"(calls={int(total_call_vol):,}, puts={int(total_put_vol):,}, "
+                f"来源={result['source']} {tickers_used}, 信号={result['signal']})"
+            )
+        else:
+            # 两个源的所有 ETF 都失败，降级中性默认值
+            self.logger.warning("合成 P/C Ratio：CBOE 与 yfinance 均失败，使用历史中位数")
+            result['total_pc_ratio'] = 0.95  # ETF 合成历史中位数（比 PCCE 的 0.75 高）
+            result['call_volume'] = 0
+            result['put_volume'] = 0
             result['signal'] = 'neutral'
-            result['source'] = 'default_fallback'
-        except Exception as e:
-            self.logger.error(f"合成 P/C Ratio 异常: {e}")
-            result['error'] = str(e)
-            result['signal'] = 'neutral'
-            result['total_pc_ratio'] = 0.95
             result['source'] = 'default_fallback'
 
         # 写入缓存
         self._write_cache('pcce', result)
         return result
+
+    def _synthetic_pc_from_cboe(self) -> Optional[Tuple[float, float, List[str], Optional[str]]]:
+        """CBOE 延迟报价期权链合成 → `(call_vol, put_vol, tickers_used, 成交日)`；拿不到返回 None。
+
+        取数经 `cboe_options._fetch_cboe_payload`：陈旧 CDN 文件（成交日早于此刻应有日期）在那里就
+        返回 None，这里不再判。到期日早于成交日的合约（已到期仍挂在文件里的）不计。
+        """
+        try:
+            from cboe_options import _fetch_cboe_payload, _parse_occ, _payload_vintage_date
+        except ImportError as e:  # pragma: no cover
+            self.logger.warning(f"cboe_options 不可用，跳过 CBOE 合成 P/C: {e}")
+            return None
+
+        total_call_vol = 0.0
+        total_put_vol = 0.0
+        tickers_used: List[str] = []
+        dates: List[str] = []
+        for symbol in self._SYNTHETIC_PC_TICKERS:
+            try:
+                data = _fetch_cboe_payload(symbol, _CBOE_NET_TIMEOUT)
+            except Exception as e:  # noqa: BLE001 - 契约是返回 None，防御性兜一层
+                self.logger.debug(f"CBOE {symbol} 期权链失败: {e}")
+                continue
+            options = (data or {}).get("options") or []
+            if not options:
+                continue
+            vintage = _payload_vintage_date(data)
+            by_expiry: Dict[str, List[float]] = {}
+            for o in options:
+                parsed = _parse_occ(o.get("option", ""))
+                if not parsed:
+                    continue
+                expiry, cp, _strike = parsed
+                if vintage and expiry < vintage:
+                    continue
+                # 先登记到期日再看成交量：整个到期日零成交也占「最近 3 个」的一个名额，
+                # 否则第 4 个到期日会被悄悄顶进来，口径随成交稀疏度漂移。
+                pair = by_expiry.setdefault(expiry, [0.0, 0.0])
+                try:
+                    vol = float(o.get("volume") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if vol > 0:              # 也挡 NaN
+                    pair[0 if cp == "C" else 1] += vol
+            nearest = sorted(by_expiry)[: self._SYNTHETIC_PC_EXPIRIES]
+            sym_call_vol = sum(by_expiry[e][0] for e in nearest)
+            sym_put_vol = sum(by_expiry[e][1] for e in nearest)
+            if sym_call_vol > 0 or sym_put_vol > 0:
+                total_call_vol += sym_call_vol
+                total_put_vol += sym_put_vol
+                tickers_used.append(symbol)
+                if vintage:
+                    dates.append(vintage)
+                self.logger.debug(
+                    f"{symbol}(CBOE {nearest}): calls={sym_call_vol:.0f}, puts={sym_put_vol:.0f}, "
+                    f"pc={sym_put_vol / max(sym_call_vol, 1):.3f}"
+                )
+
+        if not tickers_used or total_call_vol <= 0:
+            return None
+        return total_call_vol, total_put_vol, tickers_used, (min(dates) if dates else None)
+
+    def _synthetic_pc_from_yfinance(self) -> Optional[Tuple[float, float, List[str], Optional[str]]]:
+        """yfinance 期权链合成（与 CBOE 同口径）→ 同形元组；全部失败返回 None。yfinance 缺失则抛 ImportError。"""
+        if yf is None:
+            raise ImportError("yfinance 未安装")
+
+        total_call_vol = 0.0
+        total_put_vol = 0.0
+        tickers_used: List[str] = []
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+
+            for symbol in self._SYNTHETIC_PC_TICKERS:
+                try:
+                    tk = yf.Ticker(symbol)
+                    expirations = list(tk.options or [])
+                    if not expirations:
+                        self.logger.debug(f"{symbol} 无期权到期日，跳过")
+                        continue
+
+                    sym_call_vol = 0.0
+                    sym_put_vol = 0.0
+                    for expiry in expirations[: self._SYNTHETIC_PC_EXPIRIES]:
+                        try:
+                            chain = tk.option_chain(expiry)
+                            # volume 列可能存在 NaN
+                            sym_call_vol += float(chain.calls["volume"].fillna(0).sum())
+                            sym_put_vol += float(chain.puts["volume"].fillna(0).sum())
+                        except Exception as e:
+                            self.logger.debug(f"{symbol}@{expiry} 期权链失败: {e}")
+                            continue
+
+                    if sym_call_vol > 0 or sym_put_vol > 0:
+                        total_call_vol += sym_call_vol
+                        total_put_vol += sym_put_vol
+                        tickers_used.append(symbol)
+                        self.logger.debug(
+                            f"{symbol}: calls={sym_call_vol:.0f}, puts={sym_put_vol:.0f}, "
+                            f"pc={sym_put_vol / max(sym_call_vol, 1):.3f}"
+                        )
+                except NETWORK_ERRORS as ne:
+                    self.logger.debug(f"{symbol} 网络错误: {ne}")
+                    continue
+                except Exception as e:
+                    self.logger.debug(f"{symbol} 合成失败: {e}")
+                    continue
+
+        if not tickers_used or total_call_vol <= 0:
+            return None
+        return total_call_vol, total_put_vol, tickers_used, None
 
     def fetch_vix_term_structure(self) -> Dict[str, Any]:
         """
@@ -387,66 +571,12 @@ class CBOEDailyFetcher:
             {
                 'skew_value': float,          # SKEW 指数值
                 'signal': str,                # 'extreme_tail_risk' / 'elevated' / 'normal' / 'complacent'
-                'date': str,                  # ISO 日期
+                'date': str,                  # ISO 日期：cboe_cdn = 观测日；其余 = 抓取日
+                'source': str,                # 'cboe_cdn' | 'yfinance' | 'default_fallback'
                 'error': str (optional)
             }
         """
-        cached = self._read_cache('skew')
-        if cached and cached.get('source'):
-            self.logger.debug("使用缓存 SKEW 数据")
-            return cached
-        # 无 source 键 = v0.45.29 之前的旧缓存，忽略重抓
-
-        result = {
-            'skew_value': 0.0,
-            'signal': 'unknown',
-            'date': datetime.now().isoformat()[:10],
-            'source': 'default_fallback',
-        }
-
-        try:
-            if yf is None:
-                raise ImportError("yfinance 未安装")
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-
-                skew_data = yf.download('^SKEW', period='1d', progress=False)
-                if not skew_data.empty:
-                    result['skew_value'] = _last_close(skew_data)
-                    result['source'] = 'yfinance'
-
-                    # 根据阈值分类
-                    if result['skew_value'] > 150:
-                        result['signal'] = 'extreme_tail_risk'
-                    elif result['skew_value'] > 130:
-                        result['signal'] = 'elevated'
-                    elif result['skew_value'] > 115:
-                        result['signal'] = 'normal'
-                    else:
-                        result['signal'] = 'complacent'
-
-                    self.logger.info(f"SKEW 数据获取: value={result['skew_value']:.1f}, signal={result['signal']}")
-                else:
-                    result['signal'] = 'normal'
-                    result['skew_value'] = 120.0
-                    result['source'] = 'default_fallback'
-                    self.logger.warning("SKEW 数据下载为空，使用默认值")
-
-        except NETWORK_ERRORS as ne:
-            self.logger.warning(f"网络错误获取 SKEW: {ne}")
-            result['signal'] = 'normal'
-            result['skew_value'] = 120.0
-            result['source'] = 'default_fallback'
-        except Exception as e:
-            self.logger.error(f"SKEW 抓取异常: {e}")
-            result['error'] = str(e)
-            result['signal'] = 'normal'
-            result['skew_value'] = 120.0
-            result['source'] = 'default_fallback'
-
-        self._write_cache('skew', result)
-        return result
+        return self._fetch_index_level('skew', 'SKEW', 'skew_value', 120.0, _classify_skew)
 
     def fetch_vvix(self) -> Dict[str, Any]:
         """
@@ -456,22 +586,43 @@ class CBOEDailyFetcher:
             {
                 'vvix_value': float,          # VVIX 指数值
                 'signal': str,                # 'vol_explosion_risk' / 'elevated' / 'normal' / 'compressed'
-                'date': str,                  # ISO 日期
+                'date': str,                  # ISO 日期：cboe_cdn = 观测日；其余 = 抓取日
+                'source': str,                # 'cboe_cdn' | 'yfinance' | 'default_fallback'
                 'error': str (optional)
             }
         """
-        cached = self._read_cache('vvix')
+        return self._fetch_index_level('vvix', 'VVIX', 'vvix_value', 85.0, _classify_vvix)
+
+    def _fetch_index_level(self, key: str, symbol: str, value_key: str,
+                           fallback_value: float, classify) -> Dict[str, Any]:
+        """SKEW / VVIX 共用：CBOE CSV → yfinance `^SYMBOL` → 兜底常量（v0.45.241）。
+
+        兜底一律标 `source='default_fallback'`（v0.45.29 契约，`cloud_snapshot_fetch._degradation_check`
+        据此剔除）。CBOE 拿不到而 yfinance 拿到时打 warning —— 云端 yfinance 本就不通，
+        那条路走得通说明是在本机、且 CBOE 出了事，要看得见。
+        """
+        cached = self._read_cache(key)
         if cached and cached.get('source'):
-            self.logger.debug("使用缓存 VVIX 数据")
+            self.logger.debug(f"使用缓存 {symbol} 数据")
             return cached
         # 无 source 键 = v0.45.29 之前的旧缓存，忽略重抓
 
         result = {
-            'vvix_value': 0.0,
+            value_key: 0.0,
             'signal': 'unknown',
             'date': datetime.now().isoformat()[:10],
             'source': 'default_fallback',
         }
+
+        got = _latest_cboe_index_value(symbol)
+        if got is not None:
+            value, obs_date = got
+            result.update({value_key: value, 'date': obs_date, 'source': 'cboe_cdn',
+                           'signal': classify(value)})
+            self.logger.info(f"{symbol} 数据获取(CBOE): value={value:.2f}, date={obs_date}, "
+                             f"signal={result['signal']}")
+            self._write_cache(key, result)
+            return result
 
         try:
             if yf is None:
@@ -480,41 +631,32 @@ class CBOEDailyFetcher:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
 
-                vvix_data = yf.download('^VVIX', period='1d', progress=False)
-                if not vvix_data.empty:
-                    result['vvix_value'] = _last_close(vvix_data)
+                data = yf.download(f'^{symbol}', period='1d', progress=False)
+                if not data.empty:
+                    result[value_key] = _last_close(data)
                     result['source'] = 'yfinance'
-
-                    # 根据阈值分类
-                    if result['vvix_value'] > 130:
-                        result['signal'] = 'vol_explosion_risk'
-                    elif result['vvix_value'] > 100:
-                        result['signal'] = 'elevated'
-                    elif result['vvix_value'] > 80:
-                        result['signal'] = 'normal'
-                    else:
-                        result['signal'] = 'compressed'
-
-                    self.logger.info(f"VVIX 数据获取: value={result['vvix_value']:.1f}, signal={result['signal']}")
+                    result['signal'] = classify(result[value_key])
+                    self.logger.warning(f"CBOE {symbol} 不可用，退回 yfinance: "
+                                        f"value={result[value_key]:.1f}, signal={result['signal']}")
                 else:
                     result['signal'] = 'normal'
-                    result['vvix_value'] = 85.0
+                    result[value_key] = fallback_value
                     result['source'] = 'default_fallback'
-                    self.logger.warning("VVIX 数据下载为空，使用默认值")
+                    self.logger.warning(f"{symbol} CBOE 与 yfinance 均无数据，使用默认值")
 
         except NETWORK_ERRORS as ne:
-            self.logger.warning(f"网络错误获取 VVIX: {ne}")
+            self.logger.warning(f"网络错误获取 {symbol}: {ne}")
             result['signal'] = 'normal'
-            result['vvix_value'] = 85.0
+            result[value_key] = fallback_value
             result['source'] = 'default_fallback'
         except Exception as e:
-            self.logger.error(f"VVIX 抓取异常: {e}")
+            self.logger.error(f"{symbol} 抓取异常: {e}")
             result['error'] = str(e)
             result['signal'] = 'normal'
-            result['vvix_value'] = 85.0
+            result[value_key] = fallback_value
             result['source'] = 'default_fallback'
 
-        self._write_cache('vvix', result)
+        self._write_cache(key, result)
         return result
 
     def fetch_all(self) -> Dict[str, Any]:

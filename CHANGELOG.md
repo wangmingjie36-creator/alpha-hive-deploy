@@ -5,11 +5,85 @@
 
 ---
 
+## [0.45.246] — 2026-09-14 — 占位（进行中：v0.45.239 conftest `_hive_log_handler_escapes` 的 resolve() 相对路径补全成 cwd——合入 v0.45.240 后被 cwd 守卫抓到；修 + 变异自证 + 落地 v0.45.239/244）
+
+## [0.45.245] — 2026-09-14 — 占位（进行中：二次检查 v0.45.240 的改动）
+
+## [0.45.244] — 2026-09-14 — 占位（进行中：import 冻结路径扫描器盲区——模块级调用同模块函数、函数体求值 PATHS./__file__ 的形态看不见，补扫描 + KNOWN 白名单）
+
 ## [0.45.243] — 2026-09-14 — 占位（进行中：CBOE 盘中陈旧价的两个未覆盖消费者——回填兜底读云快照 price_at_fetch 不判陈旧 + close_correction 盘中/陈旧文件把现价归到上一会话）
 
 ## [0.45.242] — 2026-09-14 — 占位（进行中：共振加成前瞻检验预注册 + 更正 final_score IC −0.11 过时 / R2 基准写错）
 
-## [0.45.241] — 2026-09-14 — 占位（进行中：cboe_fetcher 的 P/C、SKEW、VVIX 改走 CBOE CDN——云端够不到 yfinance，三项 12/12 天兜底）
+## [0.45.241] — 2026-09-14 — cboe_fetcher 的 P/C、SKEW、VVIX 改走 CBOE CDN：云端够不到 yfinance，三项 12/12 天兜底
+
+用户问生产 `cache/cboe_daily` 为什么 08-26 之后没刷新（查明：本机无生产调用者，见 v0.45.230 追记），顺带量出云端
+`cloud-snapshots` 分支 **08-26 ~ 09-11 共 12 份 market.json 里 pcce / skew / vvix 12/12 天全是 `default_fallback`**。
+用户判断是「云端 CBOE 数据源爬不到」—— 按代码核实，更准确的说法是：**这三项在代码里根本不问 CBOE，只走 yfinance**
+（P/C = yf 的 SPY/QQQ/IWM 期权链合成、SKEW/VVIX = `yf.download('^SKEW'/'^VVIX')`），而云端沙箱够不到 yfinance；
+CBOE CDN 其实都有，且云端够得到 `cdn.cboe.com`（同日 30 只期权快照 27 只走的就是 `delayed_quotes`）。
+09-11 兜底 SKEW 120 / VVIX 85，CBOE 当日真值 **154.49 / 91.28**（SKEW 实际处在 >150 的高尾部风险档，兜底把它抹平成 normal）。
+用户批准改源。
+
+### Changed — `cboe_fetcher.py`
+
+- **SKEW / VVIX**：先读 `cdn.cboe.com/api/global/us_indices/daily_prices/{SKEW,VVIX}_History.csv` 最新一行
+  （`source='cboe_cdn'`），拿不到才 yfinance（`'yfinance'`，打 warning），再不行兜底（`'default_fallback'`，契约不变）。
+  两个方法原本是逐行复制的双胞胎，收成 `_fetch_index_level`；分档阈值抽成 `_classify_skew` / `_classify_vvix`，数值未改。
+  - `date` 对 CBOE 行写**观测日**（CSV 那一行的日期），不再是抓取日 —— 收盘后不久跑时 CSV 可能还是上一交易日，要看得出来。
+  - 弃用 CBOE 的三种情形：表头变了（值列名不再是指数符号）/ 没有合理区间内的行（SKEW 80–250、VVIX 40–300，防格式漂移，不是行情判断）/
+    最新一行比 ET 今天早 **>7 个日历日**（疑似停更）。**不要求必须是今天**：CSV 当日何时更新**未实测**
+    （09-14 看 `Last-Modified` 是周日重生成、内容仍是周五），要求当日会让云端快照天天又落回兜底。
+- **P/C**：先用 CBOE 延迟报价期权链合成（`source='synthetic_cboe_options'`），经 `cboe_options._fetch_cboe_payload`
+  —— 串行化、3 次重试、进程缓存、陈旧 CDN 文件拒收全部复用，不另写取数。口径与 yfinance 版一致：每只取**最近 3 个到期日**
+  （到期日早于成交日的不计；零成交的到期日也占名额，否则第 4 个会被悄悄顶进来）。CBOE **一只都拿不到**才退回 yfinance 同口径
+  （`'synthetic_yf_options'`）；**不逐标的拼两个源**（两家「此刻成交量」不是同一快照）。全链零成交（开盘前）不算观测，往下降级。
+  `date` 写期权链成交日（ET）。
+- `_download_cboe_index_csv` 与全部 CBOE 请求共用 `cboe_options._CBOE_SEM`（同 `cboe_vix`）。
+- 模块 docstring 的「数据源：yfinance（优先）」改成现状。
+
+未改：VIX 期限结构（vixcentral，v0.45.29）、宏观评分权重与分档、`cloud_snapshot_fetch._degradation_check`
+（判 `source=='default_fallback'` + 已知常量等值，新标签不会误报，已加用例钉住）。
+
+### 测试 — `tests/test_cboe_fetcher_source.py`（11 → 26）
+
+- 模块级 autouse 把两个 CBOE 源钉成「取不到」（`_download_cboe_index_csv` → None、conftest `stub_cboe_payload`），
+  既有的 yfinance / 兜底用例照旧确定、离线。
+- 新增 `TestSkewVvixFromCboe`（8）、`TestPutCallFromCboe`（6）、`TestDegradationCheckAcceptsCboeSources`（1）。
+  「CBOE 拿到时不许碰 yfinance」用记账替身断言调用次数为 0 —— 只断言 `source` 不够：回归成 yfinance 先走时，
+  替身抛的异常会被 `except Exception` 吞成兜底，红是会红，但说不出是「顺序反了」。停更天数钉 `_today_et()`，边界 7/8 两侧各一条。
+- **变异**（从 scratch 修后副本还原并逐字节核对）：
+  | 变异 | 结果 |
+  |---|---|
+  | M1 SKEW/VVIX 先走 yfinance | 5 红 + 2 error |
+  | M2 零成交到期日不占名额 | 恰 1 红 |
+  | M3 去掉停更判定 | 恰 1 红（边界 8 天那条） |
+  | M4 `>` 改 `>=` | 恰 1 红（边界 7 天那条） |
+  | M5 不滤已到期合约 | 1 红 |
+  | M6 不截近 3 个到期日 | 2 红 |
+  | M7 CBOE 行 `date` 写抓取日 | 3 红 |
+  | M8 P/C 先走 yfinance | 3 红 + 1 error |
+  | M9 CBOE 部分成功时再拿 yfinance 补 | 2 红 + 1 error |
+
+  error 全是 conftest `_offline_transport` 在 teardown 抓到变异后的代码真去打 `query1.finance.yahoo.com`（已逐条看过 M8 那条）——第二道观测点。
+
+### 验证（真网，零费用）
+
+- 本机模拟云端（`yf = None`）跑 `fetch_all()`：P/C 1.173（CBOE，SPY/QQQ/IWM 全到）、SKEW 154.49、VVIX 91.28（观测日 09-11）、
+  VIX 期限结构照常；`_degradation_check` 结果为空。耗时 78s，其中 P/C 约 56–63s（三份期权链 JSON 共约 13MB，经本机代理）。
+- 同一时刻两源对照 P/C：CBOE **1.169** vs yfinance **1.173**，call/put 成交量相差约 1%（两次拉取相隔几十秒、盘中在涨）；
+  yfinance 的前 3 个到期日同样含当日（09-14），与 CBOE 版「到期日 ≥ 成交日」一致。
+- 全套（仓库根）：**4434 passed / 1 failed / 1 skipped / 2 xfailed**（371s），唯一红 `TestCoverageHorizon`（设计如此）。
+- `ruff check` 两个文件：通过。
+
+### 生效与待验证
+
+- 云端 routine 每次先把 `origin/main` 并进 `cloud-snapshots`（v0.45.183），推上 main 后**当天 21:05 UTC 那次**即用新代码。
+- **待验证**：① 下一份 market.json 里三项 `source` 是否为 `cboe_cdn` / `synthetic_cboe_options`、`degraded_sections` 是否为空 ——
+  本版只在本机验过，**`us_indices` CSV 路径从云端是否可达没有实测**（同主机的 `delayed_quotes` 可达）；
+  ② 云端跑 17:05 ET 时 SKEW/VVIX CSV 是否已含当日（看 `skew.date` 是否等于业务日）；
+  ③ 云端单次耗时会多约一分钟（09-11 为 151s），routine 若有时限需留意。
+- 顺带看到未改：`generate_deep_v2.py` 打印 CBOE 摘要时读的是不存在的键（`put_call_ratio` / `value`），终端那行恒为 `N/A`，只影响手动 CLI 的一行输出。
 
 ## [0.45.240] — 2026-09-14 — 二次检查 v0.45.237：挪 cwd 之后没问「谁在读 cwd」——`_isolate_ml_model_file` 两道闸自 v0.45.224 起一个瞎、一个恒真
 
