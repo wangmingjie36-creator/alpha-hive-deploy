@@ -5,7 +5,67 @@
 
 ---
 
-## [0.45.245] — 2026-09-14 — 占位（进行中：二次检查 v0.45.240 的改动）
+## [0.45.245] — 2026-09-14 — 二次检查 v0.45.240：它自己的结构守卫也曾经是「看着在查、其实没查到」——只扫函数体，漏了模块级/class 体顶层；另外它的「事故会静默重演」说重了，有条独立的旧测试早就兜着
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。**
+
+### Fixed（`tests/test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`）
+
+1. **检测器只看函数体，模块级 / class 体顶层的调用从没被访问过。** 第一版外层先
+   `ast.walk(tree)` 找出所有 `FunctionDef`/`AsyncFunctionDef`，再对每个逐个 `ast.walk(fn)`——
+   不在任何函数里的语句压根不在这两层遍历的范围内，**不管锚没锚**。实测：把
+   `X = os.getcwd()` 放在模块顶层喂给它，返回 `[]`；class 体顶层 `ROOT = pathlib.Path.cwd()`
+   同样 `[]`。本仓当前唯一的模块级读 cwd 调用（`_REPO_ROOT_FOR_GUARD` 那行）锚在 `__file__`
+   上、现在没有活 bug——但「看不见你」和「看见了、判定你锚了」必须分开证明，不能拿前者
+   顶替后者。**顺带**：同一版还发现嵌套函数会被双重遍历覆盖，报错位置挂到外层函数名上
+   （`outer:4` 而不是真正所在的 `inner:4`），定位会指错地方。
+   改：不再「先找函数、再进函数体」两层遍历，一次性走全树、给每个节点建父指针表，
+   命中时回溯最近外层函数名（查不到就是模块级），`ALLOWED` 只装函数名，模块级永远过不了。
+   变异：新增四条用例（模块级、class 体顶层、锚定的模块级、嵌套函数）——旧实现全部漏报或错报，
+   新实现四条都对。
+
+### Corrected（v0.45.240 条目 2 的后果说重了）
+
+2. **「只有防线①能发现，而恰恰是它失效」不成立。** `tests/test_ml_model_path_isolation.py::
+   TestModelPathIsolation::test_default_path_is_absolute_and_not_cwd_relative` 自 v0.45.149
+   起就存在，直接断言 `Path(default_model_path()).is_absolute()`——**不调 `.resolve()`，
+   不依赖 cwd**。实测：checkout 出 v0.45.240 之前的 conftest.py（防线①还是旧版
+   `resolve().is_relative_to(tmp_path)`），把 `default_model_path()` 改回相对字面量，
+   单独跑这条**v0.45.149 时代就有的**测试——**红**，报的正是「不是绝对路径」，与
+   v0.45.240 新写的 `_assert_default_path_in_sandbox` 无关。也就是说，即便防线①的
+   bug 从未被修，全套测试也不会静默放过这次事故重演——会在别的地方红。
+   防线①的修复本身仍然成立、仍然该留着（它是 `_isolate_ml_model_file` 自己的正面核对，
+   两条守卫查同一件事、其中一条锚错了 cwd 本来就该修），只是 v0.45.240 描述的「后果」夸大了：
+   真实情况是**双重覆盖里的一重失效**，不是「唯一防线失效」。
+
+### 核过、成立的（v0.45.240）
+
+- claim 1（`_isolate_ml_model_file` 的指纹侧 cwd 臂改看 `invocation_params.dir`）：独立重跑。
+  用探针测试直接往 `request.config.invocation_params.dir` 写一份 `ml_model.json`，
+  从临时调用目录起跑——现状（`invocation_params.dir` 臂）teardown 红；
+  改回 `Path.cwd()` 臂——teardown 绿（漏判，与 v0.45.240 描述一致）。此处**没有**类似
+  claim 2 的冗余守卫：`test_train_model_writes_into_sandbox_not_repo_root` 只比对
+  `REPO_ROOT`，不比对「pytest 从哪启动」，两者在从仓库根启动时刚好重合，在别处
+  启动就不重合，所以 claim 1 的修复是真正**唯一**罩住这类场景的防线。
+- `invocation_params` 由 pytest 在 `Config` 构造时一次性捕获（`_pytest/config/__init__.py`），
+  早于任何 fixture、任何 chdir，全会话不变——用它做「调用目录」锚点没有 234/237 那类
+  「顺序看着定其实不定」的风险。
+- `import subprocess as _sp`（`test_paths_not_frozen_at_import.py:363`）只伪造
+  `git ls-files`：复读一遍源码确认，结论不变。
+- 无测试调 `monkeypatch.undo()`：复查仍是空。
+
+### 验证
+
+- `tests/test_reads_own_checkout.py` + `tests/test_ml_model_path_isolation.py` +
+  `tests/test_cwd_and_sys_path_hygiene.py`：63 passed。
+- 全套从仓库根：1 failed（`TestCoverageHorizon`，设计如此）/ 4438 passed / 1 skipped / 2 xfailed。
+
+### v0.45.240 条目里需要补的（已就地标注）
+
+- 「防线①…只有防线①能发现，而恰恰是它失效」：不成立，见上 2；`test_default_path_is_absolute_and_not_cwd_relative`（v0.45.149）独立兜底。
+
+---
+
 
 ## [0.45.244] — 2026-09-14 — 占位（进行中：import 冻结路径扫描器盲区——模块级调用同模块函数、函数体求值 PATHS./__file__ 的形态看不见，补扫描 + KNOWN 白名单）
 
@@ -100,11 +160,14 @@ CBOE CDN 其实都有，且云端够得到 `cdn.cboe.com`（同日 30 只期权�
    `resolve()` 按 **cwd** 补全相对路径，而 cwd 就在 tmp 里。**这一处不调 `cwd()`，1 的结构守卫第一版也漏了它。**
    实测把 `default_model_path()` 改回 `"ml_model.json"`（v0.45.149 事故的原形）：现状 **1 passed**；再撤掉两处 chdir ⇒ 红。
    测试里这条相对路径只写进空目录、看着无害，**伤的是生产**（编排器从仓库根跑）—— 所以只有防线①能发现，而恰恰是它失效。
+   **（v0.45.245 订正：「只有防线①能发现」不成立——`test_ml_model_path_isolation.py::test_default_path_is_absolute_and_not_cwd_relative`
+   自 v0.45.149 起就独立兜底，不依赖 cwd，实测在防线①的 bug 从未修的树上同一变异照样红；防线①本身仍值得修，后果被说重了）**
    改：抽成 `_assert_default_path_in_sandbox`，**先断言 `is_absolute()` 再判包含**；同一变异 ⇒ 红（报「不是绝对路径」），不变异 ⇒ 绿。
 3. **结构守卫** `test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`：conftest 函数里显式读 cwd（`cwd`/`getcwd`）一律红；
    隐式读 cwd（`resolve`/`absolute`/`abspath`/`realpath`）主语里不带 `__file__` / `invocation_params` / `tmp_path*` 即红。
    放行 `pytest_collection_finish` 与上面的 helper（后者由运行时自证 `test_sandbox_check_rejects_relative_default` 守着：
    **本测试 cwd 就在 tmp 里**时喂相对路径必须红）。变异：删 helper 的 `is_absolute` 断言 ⇒ 运行时自证红；把防线①改回内联 `resolve` ⇒ AST 守卫红。
+   **（v0.45.245 订正：这个 AST 检测器自己只扫函数体，模块级/class 体顶层的调用从没被访问过——不管锚没锚，已修）**
 
 ### 核过、成立的（v0.45.237）
 

@@ -435,7 +435,7 @@ class TestRuntimeLeaksAreUndone:
 
 
 class TestConftestGuardsDoNotAnchorOnCwd:
-    """conftest 里除了收集期记录，谁都不许用 cwd 决定「看哪儿」（v0.45.240）。
+    """conftest 里除了收集期记录，谁都不许用 cwd 决定「看哪儿」（v0.45.240，结构盲区 v0.45.245 修）。
 
     v0.45.224 起 cwd 在测试期间被挪进空目录，任何在 fixture 里用 cwd 推出「要守的真身在哪」
     或「这个路径在不在沙箱里」的守卫都会**安静地改守 tmp**。实测两处：
@@ -446,6 +446,18 @@ class TestConftestGuardsDoNotAnchorOnCwd:
 
     所以读 cwd 分两类：显式（`cwd`/`getcwd`）一律报；隐式（`resolve`/`absolute`/`abspath`/`realpath`）
     主语里带锚点（`__file__` / `invocation_params` / `tmp_path*`）才放行。
+
+    ⚠️ **v0.45.245：本类自己也曾经是一个「看着在查、其实没查到」的守卫。** 第一版外层只
+    `ast.walk(tree)` 找 `FunctionDef`/`AsyncFunctionDef`，再对每个函数体 `ast.walk(fn)`——
+    **模块级（或 class 体顶层、不在任何函数里）的调用从未被访问过**，不管它锚没锚。
+    实测：把 `X = os.getcwd()` 放在模块顶层喂给旧版 `cwd_readers_outside`，返回 `[]`（漏报，
+    不是因为锚上了，是因为外层循环压根没找到它所在的「函数」）。本仓当前唯一的模块级读 cwd 的
+    调用是 `_REPO_ROOT_FOR_GUARD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))`，
+    锚在 `__file__` 上，现在没有活 bug——但守卫「不管你锚没锚都看不见你」和「看见了、判定你锚了」
+    是两件事，前者不该被当成后者的证据。改法：不再按「先找函数、再进函数体」两层遍历，
+    而是一次性 `ast.walk(tree)` 找出所有匹配的 `Call`，用父指针表逐个回溯它的**最近外层函数**
+    （查不到就是模块级/class 体顶层），是否放行只看这个结果，模块级永远不在 `ALLOWED` 里
+    （`ALLOWED` 只装函数名）。
     """
 
     EXPLICIT = {"cwd", "getcwd"}
@@ -459,23 +471,41 @@ class TestConftestGuardsDoNotAnchorOnCwd:
     @classmethod
     def cwd_readers_outside(cls, source, allowed):
         tree = ast.parse(source)
+
+        parent = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parent[child] = node
+
+        def enclosing_function_name(node):
+            n = parent.get(node)
+            while n is not None:
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    return n.name
+                n = parent.get(n)
+            return None  # 模块级，或 class 体顶层（不在任何函数里）
+
         hits = []
-        for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-            if fn.name in allowed:
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)):
                 continue
-            for n in ast.walk(fn):
-                if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)):
-                    continue
-                attr = n.func.attr
-                if attr in cls.EXPLICIT:
-                    hits.append(f"{fn.name}:{n.lineno}")
-                elif attr in cls.IMPLICIT:
-                    # `x.resolve()` 的主语是 x；`os.path.abspath(x)` 的主语是 x
-                    subject = n.args[0] if attr in {"abspath", "realpath"} and n.args else n.func.value
-                    names = {s.id for s in ast.walk(subject) if isinstance(s, ast.Name)}
-                    names |= {s.attr for s in ast.walk(subject) if isinstance(s, ast.Attribute)}
-                    if not names & cls.ANCHORS:
-                        hits.append(f"{fn.name}:{n.lineno}")
+            attr = n.func.attr
+            if attr in cls.EXPLICIT:
+                anchored = False
+            elif attr in cls.IMPLICIT:
+                # `x.resolve()` 的主语是 x；`os.path.abspath(x)` 的主语是 x
+                subject = n.args[0] if attr in {"abspath", "realpath"} and n.args else n.func.value
+                names = {s.id for s in ast.walk(subject) if isinstance(s, ast.Name)}
+                names |= {s.attr for s in ast.walk(subject) if isinstance(s, ast.Attribute)}
+                anchored = bool(names & cls.ANCHORS)
+            else:
+                continue
+            if anchored:
+                continue
+            fn_name = enclosing_function_name(n)
+            if fn_name in allowed:  # 模块级 fn_name 是 None，永远不在 allowed 里
+                continue
+            hits.append(f"{fn_name or '<module>'}:{n.lineno}")
         return hits
 
     def test_no_cwd_derived_watch_in_conftest(self):
@@ -494,6 +524,13 @@ class TestConftestGuardsDoNotAnchorOnCwd:
             "import os\ndef pytest_collection_finish(session):\n    x = os.getcwd()\n": [],
             "import pathlib\ndef _guard(tmp_path, mp):\n    a = pathlib.Path(mp.__file__).resolve()\n    b = tmp_path.resolve()\n": [],
             "import pathlib\ndef _guard(request):\n    d = pathlib.Path(request.config.invocation_params.dir).resolve()\n": [],
+            # v0.45.245：模块级（不在任何函数里）的调用，第一版遍历压根不访问，不管锚没锚。
+            "import os\nX = os.getcwd()\n": ["<module>:2"],
+            "import os\n__file__ = 'x'\nY = os.path.abspath(__file__)\n": [],
+            # class 体顶层同理不在任何 FunctionDef 里，同一盲区。
+            "import pathlib\nclass C:\n    ROOT = pathlib.Path.cwd()\n": ["<module>:3"],
+            # 嵌套函数：旧版会因为外层 ast.walk(fn) 覆盖内层，把同一处调用报两次；新版只报一次。
+            "import os\ndef outer():\n    def inner():\n        return os.getcwd()\n    return inner\n": ["inner:4"],
         }
         for src, want in cases.items():
             assert self.cwd_readers_outside(src, self.ALLOWED) == want, src
