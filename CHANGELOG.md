@@ -58,7 +58,50 @@
 
 ---
 
-## [0.45.236] — 2026-09-14 — 占位（进行中：日报提交会把别的 session 在生产索引里已暂存的代码一起提交并推上 main——只提交白名单路径）
+## [0.45.236] — 2026-09-14 — 日报提交会把别的 session 在生产索引里已暂存的代码一起提交、推上 main：改为只提交白名单内的确切文件名
+
+用户要求再二次检查 v0.45.227。v0.45.227 本身没查出新 bug（落地代码与测过的逐字节相同；90 秒只 stat 监视生产与本
+worktree 的 index.lock，零次出现 ⇒ 当下没有会与 1s 重试相位对齐的周期性占锁进程；iCloud「优化存储」开着但 3180 个跟踪文件
+零个被逐出，逐出导致 status 失败时走的是已测的 `left_artifacts=None` 分支）。查出一处**早于它**的漏洞，用户批准现在修：
+
+### Fixed
+
+1. **白名单只管「我们暂存什么」，`git commit -m` 提交的却是整个索引。** 生产 checkout 被多个 session 共用
+   （2026-09-14 05:20–05:56 别的 session 在里面 `pull --rebase` 两次、提交两次、快进两次）。谁在里面 `git add`
+   了代码还没提交，部署就把它当成「Alpha Hive 蜂群日报」提交、随即推上 main：`success=True`、`left_artifacts=0`、
+   零告警，`skipped_non_artifacts` 与 warning 还说它被「跳过」了。2026-07-30 事故同形（那次是 `add -A`，这次是共享索引）。
+   白名单里一个产物都没改时更糟：旧代码照样跑裸 `git commit`，把别人的暂存整个提交掉。v0.43.4 起就有。
+   - `GitHubTool.commit(paths=…)`：add 之后用 `git diff --cached --no-renames --name-only -z -- <白名单>` 列出白名单内
+     已暂存的**确切文件名**，`git commit -m … -- <名字>`（--only 语义：别人的暂存原样留在索引里）。名字为空时**不跑**
+     `git commit`（回 success=False + nothing to commit）；列不出来时不提交、回原因。
+   - 三处设计都先实测再定：① 用确切名字不用 pathspec——`git add -- vrp_state/`（只含被忽略文件）回 0，
+     `git commit -- vrp_state/` 却报 did not match any file(s) known to git、整个提交失败；② `--no-renames`——
+     默认改名检测让 `--name-only` 只列新名字，内容相近的前后两天快照会被配成改名，删除一侧留在索引里；
+     ③ pre-commit 钩子在 --only 提交里看到的是只含这些名字的临时索引（`changelog_guard.py` 本就保留 `GIT_INDEX_FILE`）。
+   - 顺带：别的 session 暂存了一份坏 CHANGELOG 时，旧代码的日报提交会被 pre-commit 钩子整个拦下；现在不受影响。
+
+### 测试
+
+- `tests/test_github_tool_commit.py::TestOnlyTheWhitelistIsCommitted`（5 条，真 git）：别人暂存的代码与 CHANGELOG
+  不进日报提交且仍暂存；白名单内无改动时不提交；会被配成改名的快照整对提交；只含被忽略文件的目录 pathspec 不拖垮提交；
+  列暂存失败时不提交并回原因。
+- `tests/test_production_sync.py`：真 `auto_commit_and_notify` 双参数（有 / 无日报改动），别人暂存的 code.py 不上 origin、
+  仍暂存。
+- 改动前的代码上：5 条红（改名、目录两条是设计选择的守卫，旧代码裸提交整个索引本来就过——由变异证明它们有牙）。
+- 顺带被既有守卫抓到一次：把提交命令写成 `f"…" + "…"` 拼接时，`test_git_failures_are_visible` 的白名单 AST 核对读不出
+  子命令而红；改成单个 f-string。
+- 变异真跑 6 处**全部被抓到**（退回裸提交 / 去 `--no-renames` / 用 pathspec 提交 / 无暂存照样提交 / 列暂存失败当空 / 去 `-z`）。
+- **生产 APFS 克隆端到端**（拆远端、推送与 gh-pages 打桩，用生产真实的 pre-commit 钩子）：先让另一个「session」暂存
+  `production_sync.py` 与一份带冲突标记的 CHANGELOG；正对照——同一钩子对整个索引 rc=1「修好 CHANGELOG.md 再提交」。
+  部署：日报提交成功、恰好 5 个产物、两份外来暂存不在提交里且仍暂存、`left_artifacts=0`、零告警。生产 checkout 未动。
+- 全套 `pytest --maxfail=200`：**4347 passed / 1 failed（仅 `TestCoverageHorizon`，按设计红）/ 1 skipped / 2 xfailed**；
+  `ruff check .`：All checks passed。
+
+### 未修（只记录）
+
+- 别的 session 在生产里**已提交未推送**的提交，仍会被部署的 `push_main` 一并推上 main（推的是本地 main）。
+  那是它迟早要推的东西、不会以「日报」的名义混进提交，危害比本条小；没量过发生频率。
+- 别的 session 暂存的是**白名单内**的产物（如手改 index.html）时，仍会随日报提交——那本来就是日报产物。
 
 ## [0.45.235] — 2026-09-14 — 占位（进行中：GuardBee 复述多数时在 Queen 共振检测里多算一个维度 —— 先量它对收益的影响再修）
 
@@ -72,7 +115,84 @@
 
 ## [0.45.231] — 2026-09-14 — 占位（进行中：合入 v0.45.76 方向圆点样式 + v0.45.79 宏观指标颜色规则）
 
-## [0.45.230] — 2026-09-14 — 占位（进行中：修 v0.45.224 找到的三处生产根因——weekly_optimizer 往 sys.path 插主 checkout / deep_analysis 导入期 chdir / cboe_fetcher 缓存默认相对路径）
+## [0.45.230] — 2026-09-14 — v0.45.224 交接的三处生产根因：weekly_optimizer 往 sys.path 插主 checkout / deep_analysis import 期 chdir / cboe_fetcher 缓存默认相对路径
+
+v0.45.224 在**测试侧**把损害关住了（conftest `_isolate_cwd_and_sys_path`、`import deep_analysis` 前后存还原、
+`TestProcessStateStaysPut` / `TestRuntimeLeaksAreUndone`），生产根因交接到本版。测试侧那几道**全部保留**作纵深防御：
+它们守「泄漏不跨测试」，本版守「生产代码本身不泄漏」—— 隔离一在，根因复发就再没有跨测试症状可红，所以另立守卫。
+
+⚠️ 开工时的交接说明写「v0.45.224 已落地」，实际那批改动当时还**未提交**在另一个 worktree；
+本版先在没有它的 main 上修与变异，328b7319 推上 main 后 rebase，全套两轮都跑在 rebase 之后。
+
+### Fixed
+
+1. **`weekly_optimizer`：import 根锚 `__file__`，不再插 `ALPHAHIVE_DIR`。** 新增 `_CODE_DIR = Path(__file__).resolve().parent`
+   与 `_ensure_code_dir_importable()`（`sys.path[0]` 已是它就不插），6 处函数体内 `sys.path.insert(0, str(ALPHAHIVE_DIR))` 全部改走它。
+   - **只动 import 根。** 数据路径（`CONFIG_PATH` / `HISTORY_FILE` / `PHEROMONE_DB_PATH` / `BACKUP_DIR` / 快照目录）照旧挂
+     `ALPHAHIVE_DIR`，迁 `PATHS` 是另一个决定；过期的 Cowork VM `_VM_PATH` 覆盖同样没动。
+   - 生产等价（改前核过）：`Path("/Users/igg/Desktop/Alpha Hive/weekly_optimizer.py").resolve().parent` 与 `ALPHAHIVE_DIR`
+     字符串相等，`~/Desktop` 不是符号链接，`/sessions` 不存在；定时任务从仓库根 `python3 weekly_optimizer.py` ⇒
+     `sys.path[0]` 本来就是该目录，helper 空操作，解析结果与改前相同。
+   - `_CODE_DIR` 登记进 `test_paths_not_frozen_at_import.py` 的 `KNOWN`（A 类）与 `MUST_STAY_FILE_ANCHORED`（后者顺带让
+     「值必须在仓库内」那条参数化自动覆盖它）。
+   - 全仓对照：其余 `sys.path.insert` 全锚 `__file__`（probability_scorecard / scan_continuity / ic_rerun_readiness /
+     chronos_bee / gui）。`generate_deep_v2` / `self_analyst` / `collect_data` 也写死 `~/Desktop/Alpha Hive`，但只作数据路径、
+     不进 sys.path —— weekly_optimizer 是唯一一处。⚠️ **同名 `ALPHAHIVE_DIR` 在仓里是两种东西**：前三个模块里是 `__file__`
+     派生的代码根，这四个模块里是写死的数据根。按定义判，不按名字判。
+2. **`deep_analysis`：`os.chdir(脚本目录)` + `sys.path.insert(0, ".")` 从 import 期挪进 `main()` 开头。** CLI 语义不变
+   （`--json` 相对路径按脚本目录解析、报告写进脚本目录）；import 它的人（pytest 收集期的测试模块）不再被挪 cwd。
+3. **`cboe_fetcher.CBOEDailyFetcher(cache_dir=None)` ⇒ 调用时解析新增的 `PATHS.cboe_daily_cache`**（= `PATHS.cache_dir / "cboe_daily"`，
+   property）。原默认 `"cache/cboe_daily"` 不读 `ALPHA_HIVE_CACHE_DIR`、在哪跑就建进哪 —— 本机 **9 个 worktree 各留着一个**
+   pytest 建出来的（被 .gitignore 挡着，没人看得见）。本 worktree 那个已删；其余 8 个属别的 session，未动。
+   - 生产等价：launchd `WorkingDirectory=/Users/igg/Desktop/Alpha Hive`、plist 与编排器都不设 `ALPHA_HIVE_*`；
+     worktree 根、去掉 env 实测新旧默认解析成同一个绝对路径。
+   - conftest 没加指纹闸：缓存目录按 v0.45.150 分级不入 `_GUARDED_PRODUCTION_ARTIFACTS`；逐测试空目录（v0.45.224）+ 本版守卫已覆盖。
+
+### Added
+
+- `tests/test_cwd_and_sys_path_hygiene.py`（11 条）。每条都按「**守卫在哪台机器上红？**」设计区分力：
+  - weekly_optimizer：主 checkout 里 `ALPHAHIVE_DIR` 恰好等于仓库根，改回去在那里无害 ⇒ 把它指向仓库外哨兵再测；
+    `sys.path[0]` 先垫一个假首项，否则「已在最前不插」会让本条空转。6 个调用点逐个参数化（空输入全部早返回，逐个实测过）
+    + AST 断言 sys.path 只在 helper 里改（挡**新增**的直插）。
+  - deep_analysis：cwd 那条从仓库根起跑是瞎的、且模块多半已在收集期 import 过（再 import 是空操作）⇒ **子进程从空目录 import**；
+    另一条截获 `os.chdir` 证明 `main()` 仍先切到脚本目录。子进程里 `main()` 抛的异常记下来进断言消息 ——
+    第一版没记，变异下只报「子进程失败 rc=1」，说不出是 CLI 没 chdir。
+  - cboe_fetcher：本条 chdir 进空目录、把 `ALPHA_HIVE_CACHE_DIR` 换成本条独有的值。**`import cboe_fetcher` 必须在模块级**：
+    默认值冻在 import 期那种复发，函数体内 import 会在 `_isolate_env` 之后才发生，照样全绿。
+
+### 验证
+
+- **真复现**（修前、本分支、当时还没有 v0.45.224 的 conftest）：改坏 `economic_calendar_watch._release_date_to_quarter`
+  （本版的改法 5 个参数全错，v0.45.224 那版 4 个）—— 单跑 5 failed；先跑 `test_compute_weights_neutral_not_systematically_penalized` ⇒ **6 passed**。
+  修后两种顺序都是 5 failed（先跑那条时 5 failed + 它自己 1 passed）；把 `weekly_optimizer.py` 换回 HEAD ⇒ 回到 6 passed。
+- **变异**（每次从 scratch 里的修后副本按字节还原并 `cmp` 核对；rebase 前全跑一遍，rebase 后 M1/M1c/M2/M3 复跑、红数不变）：
+  | 变异 | 结果 |
+  |---|---|
+  | M1 `weekly_optimizer.py` 换回 HEAD | 7 红（6 个调用点 + AST）；连同 `test_paths_not_frozen_at_import.py` 跑再 +2（HEAD 没有 `_CODE_DIR`） |
+  | M1b 只把 `bootstrap_validate` 一处改回 `ALPHAHIVE_DIR` | 恰 2 红（该参数 + AST，报出行号） |
+  | M1c helper 去掉去重（每次都插） | 6 红（「调 3 次增长了 3 项」） |
+  | M1e `_CODE_DIR = ALPHAHIVE_DIR` | 8 红（6 个调用点 + `MUST_STAY` 转换守卫 + 「值在仓库内」参数化） |
+  | M2 `deep_analysis.py` 换回 HEAD | 2 红（import 挪 cwd；`main()` 没 chdir、去 cwd 开 data.json 抛 FileNotFoundError） |
+  | M2b 修后版本但删掉 `main()` 里的 chdir | 恰 1 红（CLI 那条） |
+  | M3 `cboe_fetcher.py` 换回 HEAD | 1 红（「往 cwd 里建了东西」） |
+  | M3b 默认值冻成模块常量 `_FROZEN_DEFAULT = str(PATHS.cboe_daily_cache)` | 1 红（没跟 env 走）；且收集期真在 worktree 建出 `cache/cboe_daily`，已删 |
+- **CLI**（从空的 scratch 目录起跑、`ALPHA_HIVE_*` 指向 scratch）：HEAD 与修后各跑 `--json` 相对路径（json 放脚本目录）
+  与绝对路径两种 —— rc 全 0，报告都落在脚本目录，起跑目录全程为空，四份 HTML 按 ticker/时间戳归一后两两**逐字节相同**。
+  规则引擎模式（打 yfinance）未跑。
+- `ruff check` 改动的 6 个文件：通过。
+- 全套从仓库根：**4354 passed / 1 failed / 1 skipped / 2 xfailed**（317s）。唯一红 `TestCoverageHorizon`（设计如此），唯一 skip `test_scheduler.py`（无 `schedule` 库）。
+- 全套从空目录（`--rootdir` / `-c` 指向 worktree）：同上 **4354 passed / 1 failed / 1 skipped / 2 xfailed**（324s），跑完起跑目录无残留；
+  两轮之后 worktree 里也没再长出 `cache/cboe_daily`（开工时这个 worktree 里就有一个 09-13 pytest 建的空目录，已删后复核）。
+
+### 未查（与本版无关，待验证）
+
+- 生产 `cache/cboe_daily/*.json` 最后写入是 **2026-08-26**（mtime），此后没再被刷新。是 `generate_deep_v2` 那一路生产上不再走到、
+  还是抓取一直失败走了兜底，没查。
+- `hive_logger` 模块级 `logger = _setup_logger()` 在收集期把文件 handler 绑到 `PATHS.logs_dir`（早于 `_isolate_env`）⇒
+  全套测试日志（含 simulated error）写进 **`hive_logger.py` 所在 checkout** 的 `logs/alpha_hive.log`（`PATHS.home` 缺省即该目录；本版在 worktree 跑全套时实测该文件在涨）；
+  在主 checkout 跑 pytest 就混进生产日志。与本版三处同物种，没修。
+
+---
 
 ## [0.45.229] — 2026-09-14 — Max Pain「磁吸目标价」预测力检验：未发现可靠预测力 + CBOE 持仓量日期实测
 

@@ -484,7 +484,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
     与 `TestSpeciesDoesNotSpread` 一样是**子集**语义：清掉存量不会变红，新增必红。
     """
 
-    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**）。清掉一处就从这里删一行。
+    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`）。清掉一处就从这里删一行。
     # ⚠️ 子集语义的副作用：**清干净了也不会变红**，过期项会悄悄留下。
     #    定期对账：`KNOWN - _scan(marker="__file__")` 非空即是过期项
     #    （本版就这么揪出 2 条已清却还挂着的）。
@@ -496,6 +496,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("probability_scorecard.py", "ALPHAHIVE_DIR"),  # sys.path.insert
         ("scan_continuity.py", "ALPHAHIVE_DIR"),        # sys.path.insert
         ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),     # sys.path.insert
+        ("weekly_optimizer.py", "_CODE_DIR"),           # sys.path.insert（v0.45.230，原先插的是写死的主 checkout）
         ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
         ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
@@ -681,6 +682,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("probability_scorecard.py", "ALPHAHIVE_DIR"),
         ("scan_continuity.py", "ALPHAHIVE_DIR"),
         ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),
+        ("weekly_optimizer.py", "_CODE_DIR"),
         ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
         ("collect_data.py", "_SCRIPT_DIR"),           # 运行环境探测
@@ -691,7 +693,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
     }
 
     def test_code_anchored_paths_were_not_wrongly_converted(self):
-        """这 11 处必须**仍然**是 `__file__` 派生 —— 防「一刀切清理」。
+        """这 12 处必须**仍然**是 `__file__` 派生 —— 防「一刀切清理」。
 
         ⚠️ 这条断言的方向和 `test_no_new_file_derived_paths` **相反**。
         只有子集守卫时，「把模板路径改成 `PATHS.home`」会静默通过，
@@ -730,7 +732,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         mod = importlib.import_module(modname)
         raw = getattr(mod, attr)
         # 取值可能是 list，只查其中落在仓库内的那些。
-        # ⚠️ v0.45.198：本条参数化自 `MUST_STAY_FILE_ANCHORED`，而那 11 项**取值全是标量**
+        # ⚠️ v0.45.198：本条参数化自 `MUST_STAY_FILE_ANCHORED`，而那 11 项（v0.45.230 起 12 项）**取值全是标量**
         #    ⇒ 下面这个 list 分支目前**一次也没被执行过**，是防御性的。
         #    （原注释举的例子 `agent_toolbox.ALLOWED_ROOTS` 在 `KNOWN` 里、从不在本条参数里，
         #     所以那个例子对本条从一开始就不成立；该符号已随 `FilesystemTool` 一并删除。）
