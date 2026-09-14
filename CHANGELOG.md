@@ -63,7 +63,68 @@
 
 ---
 
-## [0.45.221] — 2026-09-14 — 占位（进行中：test_idempotent_when_today_already_scanned 跑真编排器写穿生产 status.json / 标记文件 / 日志）
+## [0.45.221] — 2026-09-14 — 幂等闸 integration 测试关进沙箱：它写穿生产五处，而且在 pytest 里其实从没走到过闸
+
+`tests/test_scan_catchup.py::TestGateBranchesLive` 原样 `bash ~/.claude/scripts/alpha-hive-orchestrator.sh`。
+**编排器文件本版未改**（仓库外，改动须用户点头）；全部处置在测试侧。
+
+### Fixed
+
+1. **写穿生产五处**（读编排器 1–406 行 + 实测，任务原列三处，后两处是读代码补出来的）：
+   ① 测试在生产目录造 `.swarm_results_<今天>.json` = `{}`，存在期间触发的真扫描被闸当成已扫过；
+   ② 闸分支覆盖 `~/.claude/reports/status.json`；③ 往当天生产日志追加「已有扫描产出」假记录；
+   ④ 抢 `/tmp/alpha_hive_orchestrator.lock`，同刻真扫描以「另一个实例在跑」退出；
+   ⑤ **全局看门狗 `( sleep 90000; …; kill -TERM $$; kill -9 $$ ) &` 在闸上提前 exit 时不被收**
+   （只有跑到末尾才 kill 它）。launchd 回收 job 的整个进程组，生产无事；pytest / 终端 / Bash 工具拉起时它活满 25h，
+   往那天生产日志写假 ERROR「全局超时」，再 `kill -9` 一个早已退出、可能被复用的 PID。
+   **实证**：v0.45.34 那天 08-26 11:35:26 / 11:35:52×2 / 11:38:16 / 11:40:49 / 11:43:19 / 11:43:54 七次验闸，
+   08-27 生产日志恰在 +90000s **逐秒对应**留下 7 条「全局超时」。那些 PID 当时是否已被复用：待验证，已无从查。
+2. **旧测试在 pytest 里走不到闸的 `exit 0`。** Python 按 PEP 538 往子进程环境塞 `LC_CTYPE=C.UTF-8`，
+   bash 3.2 在 UTF-8 下把 `$DATE_STR）` 全角括号的首字节 `\357` 吃进变量名，`set -u` 在第 376 行 exit 1
+   （`env -i LC_ALL=C` 正常、`LC_ALL=en_US.UTF-8` 复现）。旧版能绿只可能来自它顺带读的生产日志尾巴里已有当天那句
+   （推断，旧版会写生产，未复跑）。launchd 的 plist 只给 `PATH` ⇒ C locale ⇒ 定时/开机触发不受影响，
+   `launchd-orchestrator.err.log` 里 `unbound variable` 0 条。
+
+### Changed
+
+3. **沙箱方案**：`_sandbox_orchestrator` 把闸前决定「写到哪 / 放不放行」的五个赋值
+   （`LOCKDIR` `PROJECT_DIR` `LOGDIR` `REPORTDIR` `CATCHUP_AFTER_HHMM`→`2400`）改绑后写成副本，闸逻辑逐字节不动
+   （对真编排器 diff 恰 5 行）；改绑不上、或 `STEP1_START` 前非注释行还有字面 `/Users|/tmp|/private|/Volumes` ⇒ **真跑前**拒绝。
+   子进程环境照 launchd 现造（只给 PATH，HOME 指沙箱，`ALPHA_HIVE_PROXY=none`），不继承 pytest 的
+   （顺带堵 `_isolate_env` 泄漏进子进程）；`start_new_session=True` + 退出后 `killpg` 收看门狗。
+   阈值拉到 2400 让「marker 没被读到」落进「早于收盘」分支断言红，而不是过 13:30 真跑全量扫描。
+   **没选**：给编排器加 env 覆盖（launchd 的真扫描也读这些变量，泄漏一个监控就瞎；锁/看门狗/阈值还得另开旋钮）；
+   备份恢复 status.json（marker/锁/日志/看门狗全没管，且恢复本身在并发真写入时就是覆盖）。
+4. `_orch_project_dir` → **`_orch_literal(text, name)`**：整行注释之外数**全部**写入（缩进 / `then NAME=` / export / `NAME+=` /
+   `${NAME:=}` / `${NAME=}`，`\b` 防后缀同名），恰一处且纯字面才返回值。计数规则采纳 v0.45.222 session 交接的探针用例。
+5. 用例：幂等分支 + **对照**（不放 marker 必须落进时间闸，否则上一条的绿证明不了闸读的是沙箱 marker）+
+   `xfail(strict=True, raises=AssertionError)` 钉住 UTF-8 下闸崩（编排器修好后 XPASS 变红 ⇒ 删 xfail）。
+   生产侧检查按**内容**找本次 tmp 路径而非 `(size, mtime)`——真扫描 14:00 起连写日志一个多小时，指纹比对那段恒红；
+   检测器先在沙箱自己的两份产物上自证认得出。默认套件新增 `TestOrchLiteral`（纯字符串，不依赖本机编排器）与
+   `test_sandbox_rebind_applies`（替换 `test_marker_dir_readable_from_orchestrator`）。
+
+### 本版自己踩的
+
+6. **`killpg(pgid, 0)` 在 macOS 上偶发 EPERM 而非 ESRCH**（组员退出途中，推测是待回收僵尸）。
+   首轮变异回归里它让 M6 的 xfail 用例报 FAILED（`raises=AssertionError` 接不住 `PermissionError`），复跑时又顶掉了 M5 本该报的断言。
+   「M6 红了两条」一度像是变异打到了不相干的用例——**实际是被测守卫自己的 flaky**。改为 EPERM 当「还在收」、每轮重发 SIGKILL；复跑 20 次稳定。
+7. 变异 M1（去掉 `start_new_session`）按设计会**真漏看门狗**：两轮各漏 3 个，均按命令行核对 PID 后先杀父 subshell、再杀 `sleep`
+   （顺序反了 subshell 会立刻走到 `kill -TERM $$`）。
+
+### 验证
+
+- 生产四项（status.json / 当天日志 / 生产 marker / /tmp 锁）`(size, mtime_ns, sha256)` 在 session 内所有真跑前后**逐字节相同**；
+  status.json 始终是 09-13 06:37 那份。每次真跑后 `sleep 90000` 残留 0。
+- integration 连跑 20 次：`2 passed, 1 xfailed` ×20。本文件 + `test_reads_own_checkout` + 两个 skip/marker 元守卫 477 passed；ruff 通过。
+- 变异 9 种全红（锚点唯一性断言）：M1 去新会话 / M2 痕迹检测器失明 / M3 退回只数顶格（恰 6 条计数用例红）/ M4 去闸前路径扫描 /
+  M5 marker 写错日期 / M6 对照放 marker / M7 漏改绑 PROJECT_DIR（真跑前即拒绝，未触生产）/ M8 继承 pytest 环境 / M9 UTF-8 用例不设 locale（XPASS 红）。
+- 已知边界：阈值 2400 这张安全网只在 13:30 后才有行为差别，本 session 在 02 点跑、变异测不出，只由 `test_sandbox_rebind_applies` 静态钉住；
+  `for NAME in` / `read NAME` 形式的写入 `_orch_literal` 数不到。
+
+### 未改、待用户决定（编排器在仓库外）
+
+- 15 处 `$VAR` 紧跟全角标点（`$DATE_STR）` `$PROXY_URL（` `$STEP2_RC）` …）⇒ UTF-8 locale 下手工跑会在第一个撞到的地方 `set -u` 退出；修法 `${VAR}`。
+- 看门狗在起它（101 行）之后的 6 条显式提前 `exit`（287/293/318/349/385/403）以及任何 `set -u` 中止上都不被收；修法是把 `kill "$_GLOBAL_WATCHDOG_PID"` 并进已有的 `trap … EXIT`。修后 `r.lingered` 断言会红，按其提示删。
 
 ## [0.45.220] — 2026-09-13 — 索引行守卫：端到端才抓得到的两处搬进自证；「把夹具提交进仓」否决
 
