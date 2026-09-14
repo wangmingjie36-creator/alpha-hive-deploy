@@ -252,18 +252,29 @@ class AlertAnalyzer:
         commit = (st.get("extra") or {}).get("git_commit")
         # v0.45.223：`pending_artifacts == 0` 的失败只是「没东西可提交」；其余（含 None = git status 就失败）
         # 都是产物留在工作区没进 git。此时推送照样可能报成功（本地落后时 nothing_to_push）。
-        if isinstance(commit, dict) and commit.get("success") is not True \
-                and commit.get("pending_artifacts") != 0:
-            self.alerts.append(Alert(
-                AlertLevel.HIGH,
-                "⚠️ 【P1 高】日报提交失败（产物留在工作区，未进 git）",
-                {
+        # v0.45.227：提交**成功**也可能漏产物（别的进程短暂占着索引锁，只挂一条 add）⇒ 另看提交后的
+        # `left_artifacts`。键存在而值为 None = 提交后那次 git status 失败，记为未执行的检查，不渲染成「全进了」。
+        if isinstance(commit, dict):
+            left = commit.get("left_artifacts")
+            commit_failed = commit.get("success") is not True
+            if (commit_failed and commit.get("pending_artifacts") != 0) or left:
+                details = {
                     "待提交产物数": commit.get("pending_artifacts"),
                     "原因": commit.get("reason") or "（无输出）",
-                    "建议": "先查生产 checkout 是否残留 .git/index.lock；推送结果不代表日报已提交",
-                },
-                ["deployment", "git_commit"]
-            ))
+                    "建议": "查生产 checkout 是否残留 .git/index.lock、是否有别的进程在里面跑 git；"
+                            "推送结果不代表日报已提交",
+                }
+                if left:
+                    details["提交后仍未进 git"] = (f"{left} 个：" + ", ".join(commit.get("left_sample") or []))
+                self.alerts.append(Alert(
+                    AlertLevel.HIGH,
+                    "⚠️ 【P1 高】日报提交失败（产物留在工作区，未进 git）" if commit_failed
+                    else "⚠️ 【P1 高】日报提交报成功，但有产物没进 git",
+                    details,
+                    ["deployment", "git_commit"]
+                ))
+            elif "left_artifacts" in commit and left is None:
+                self.checks_skipped.append("日报产物是否全部进 git（提交后 git status 失败）")
 
         push = (st.get("extra") or {}).get("git_push")
         if push is None:

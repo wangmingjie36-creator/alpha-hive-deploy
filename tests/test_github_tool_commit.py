@@ -14,18 +14,29 @@ v0.45.223 给「日报提交失败」加了 P1 告警，「原因」一栏读的
 
 全部在真 git 仓库里造，不打桩。调用方一侧（原因传进 status.json 与告警）的守卫在
 `tests/test_production_sync.py::TestResultReachesAlerts::test_failed_report_commit_alerts_even_when_push_says_success`。
+
+v0.45.227 追加 `TestBriefLockDuringOneAdd`：v0.45.225 在 docstring 里断言「部分 add 失败」生产里
+触发不了（「锁是整库级的」）——**推理，没测**。锁**一直在**时确实全挂、提交也挂、告警会响；
+锁只被别的进程**占一下**（普通 `git status` 写回索引时持锁，生产克隆实测 55–72ms；当时就有一个 Claude
+session 的 cwd 在生产 checkout）时只挂那一条，提交照样成功 ⇒ 当天 `index.html` 没进 git，零告警。
+那组测试里锁文件是真的、git 的失败是真的，只有「别的进程恰好在那一刻拿着锁」这个时机是造的。
 """
 
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import agent_toolbox  # noqa: E402
 import report_deployer as rd  # noqa: E402
 from agent_toolbox import GitHubTool  # noqa: E402
+
+# 收集期取一次：下面的 autouse 夹具会把它改成 0，默认值要在改之前拿到
+_DEFAULT_RETRY_DELAY = getattr(GitHubTool, "_ADD_RETRY_DELAY_S", None)
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +44,12 @@ def _no_inherited_git_dir(monkeypatch):
     # 若 pytest 从 git hook 里被拉起，继承的 GIT_DIR 会让每条 git 命令打到真仓库上
     for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"):
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_wait(monkeypatch):
+    # 残留锁的用例每条都会等一次重试；默认间隔由 test_retry_waits_long_enough_* 单独核
+    monkeypatch.setattr(GitHubTool, "_ADD_RETRY_DELAY_S", 0, raising=False)
 
 
 def _git(repo, *args, check=True):
@@ -104,3 +121,95 @@ class TestCommitFailureKeepsGitsReason:
                             lambda cmd: {"success": False, "error": "git add timed out after 30 seconds"})
         r = g.commit("全量")
         assert r == {"success": False, "error": "git add 失败：git add timed out after 30 seconds"}
+
+
+def hold_lock_during_add(monkeypatch, tool, repo, pathspec, times):
+    """别的 git 进程在我们 `git add -- <pathspec>` 的那一刻正拿着索引锁，随后释放。
+
+    锁文件是真的、git 的失败是真的；造的只是时机。`times` = 连续几次 add 这条 pathspec 时锁都在
+    （1 = 重试时已释放；2 = 连重试也撞上）。返回一个计数器，记这条 pathspec 被 add 了几次。"""
+    real = tool.run_git_cmd
+    lock = repo / ".git" / "index.lock"
+    seen = {"adds": 0}
+
+    def run(cmd):
+        if cmd != f"git add -- {pathspec}":
+            return real(cmd)
+        seen["adds"] += 1
+        if seen["adds"] > times:
+            return real(cmd)
+        lock.write_text("")
+        try:
+            return real(cmd)
+        finally:
+            lock.unlink()
+
+    monkeypatch.setattr(tool, "run_git_cmd", run)
+    return seen
+
+
+@pytest.fixture
+def three_artifacts(repo):
+    for name in ("rss.xml", "dashboard-data.json"):
+        (repo / name).write_text("base")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "more artifacts")
+    for name in ("index.html", "rss.xml", "dashboard-data.json"):
+        (repo / name).write_text("report-0914")
+    return repo
+
+
+def _committed(repo):
+    return set(_git(repo, "show", "--name-only", "--format=", "HEAD").stdout.split())
+
+
+class TestBriefLockDuringOneAdd:
+
+    def test_retry_lands_the_artifact_a_brief_lock_blocked(self, three_artifacts, monkeypatch, caplog):
+        repo = three_artifacts
+        g = GitHubTool(repo_path=str(repo))
+        seen = hold_lock_during_add(monkeypatch, g, repo, "index.html", times=1)
+
+        with caplog.at_level("WARNING"):
+            r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+
+        assert seen["adds"] == 2, f"正对照：index.html 应当先被锁挡一次、再重试一次（实际 {seen['adds']} 次）"
+        assert r["success"] is True
+        assert _committed(repo) == {"index.html", "rss.xml", "dashboard-data.json"}, (
+            "锁只被占了一下，index.html 却没进提交 —— v0.45.225 及以前就是这样，且报成功")
+        assert "add_errors" not in r, r
+        assert any("重试" in m.getMessage() and "index.lock" in m.getMessage() for m in caplog.records), \
+            "重试成功也要留痕：锁争用发生过这件事本身要看得见"
+
+    def test_lock_that_outlasts_the_retry_is_reported_not_swallowed(self, three_artifacts, monkeypatch):
+        repo = three_artifacts
+        g = GitHubTool(repo_path=str(repo))
+        hold_lock_during_add(monkeypatch, g, repo, "index.html", times=2)
+
+        r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+
+        assert r["success"] is True and _committed(repo) == {"rss.xml", "dashboard-data.json"}, \
+            "正对照：其余产物照常提交（部分失败不该拖垮整次提交）"
+        assert len(r.get("add_errors") or []) == 1 and "index.lock" in r["add_errors"][0], r
+
+    def test_healthy_commit_does_not_wait(self, three_artifacts, monkeypatch):
+        slept = []
+        # 只换 agent_toolbox 手里的 time：全局 time.sleep 会被 subprocess 等子进程时调用
+        monkeypatch.setattr(agent_toolbox, "time", SimpleNamespace(sleep=slept.append), raising=False)
+        r = GitHubTool(repo_path=str(three_artifacts)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is True and slept == [], "只有 pathspec 未匹配时不许等（每天都有产物本次没生成）"
+
+    def test_retry_waits_long_enough_for_a_git_status_to_finish(self, three_artifacts, monkeypatch):
+        """默认间隔要长过别的进程占锁的时长：普通 `git status` 在生产克隆上实测持锁 55–72ms。"""
+        assert _DEFAULT_RETRY_DELAY is not None and _DEFAULT_RETRY_DELAY >= 0.5, _DEFAULT_RETRY_DELAY
+        monkeypatch.setattr(GitHubTool, "_ADD_RETRY_DELAY_S", _DEFAULT_RETRY_DELAY)
+        slept = []
+        # 只换 agent_toolbox 手里的 time：全局 time.sleep 会被 subprocess 等子进程时调用
+        monkeypatch.setattr(agent_toolbox, "time", SimpleNamespace(sleep=slept.append), raising=False)
+        g = GitHubTool(repo_path=str(three_artifacts))
+        # 两条都撞锁：只挂一条时「每条等一次」与「共用一次」长得一样
+        hold_lock_during_add(monkeypatch, g, three_artifacts, "index.html", times=1)
+        hold_lock_during_add(monkeypatch, g, three_artifacts, "rss.xml", times=1)
+        r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is True and "add_errors" not in r, f"正对照：两条都该被重试接住 {r}"
+        assert slept == [_DEFAULT_RETRY_DELAY], "所有失败条目共用一次等待，不是每条等一次"

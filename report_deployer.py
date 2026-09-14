@@ -470,6 +470,18 @@ def auto_commit_and_notify(reporter, report: Dict) -> Dict:
         # success=False，靠它区分「无害」与「产物留在工作区没进 git」（如残留 .git/index.lock
         # 让 add 全部失败）。后者此前不可见；v0.45.214 起本地落后时推送还会报 nothing_to_push 成功。
         commit_result["pending_artifacts"] = len(modified) - len(_skipped)
+        # v0.45.227：提交完再看一次工作区。「提交成功」≠「日报产物全进了 git」——别的进程短暂占着
+        # 索引锁时只挂一条 add，提交照样成功（当天 index.html 没进 git、零告警）。判结果而不是列举原因：
+        # 哪种原因漏的都会留在这里。None = 这次 git status 失败，不知道（告警侧记为未执行的检查）。
+        after, _ = _git_modified_files(git)
+        if after is None:
+            commit_result["left_artifacts"] = None
+        else:
+            left = [f for f in after if _is_report_artifact(f)]
+            commit_result["left_artifacts"] = len(left)
+            if left:
+                commit_result["left_sample"] = left[:5]
+                _log.warning("提交后仍有 %d 个日报产物没进 git：%s", len(left), ", ".join(left[:10]))
         results["git_commit"] = commit_result
         results["skipped_non_artifacts"] = _skipped
         if commit_result["success"]:

@@ -179,12 +179,22 @@ def git_commit_summary(git_commit: Optional[dict]) -> Optional[dict]:
 
     `pending_artifacts` 是提交前待提交的日报产物数：0 ⇒ 失败只是「没东西可提交」；
     None（git status 就失败了）⇒ 不知道，按失败看。None 入参原样返回（工作区干净，未尝试提交）。
+
+    v0.45.227：`left_artifacts`（提交后仍没进 git 的日报产物数；None = 提交后那次 git status 失败）
+    与 `left_sample` 有才抄——没有这个键 = 旧代码或没走到提交，告警侧据此区分「没核」与「核不了」。
+    原因优先 `error`，其次 `add_errors`：提交成功但有 add 重试后仍失败时，`message` 只是提交成功的输出。
     """
     if not isinstance(git_commit, dict):
         return None
     out = {"success": git_commit.get("success"),
            "pending_artifacts": git_commit.get("pending_artifacts")}
-    reason = git_commit.get("error") or git_commit.get("message")
+    for key in ("left_artifacts", "left_sample"):
+        if key in git_commit:
+            out[key] = git_commit[key]
+    add_errors = git_commit.get("add_errors")
+    reason = (git_commit.get("error")
+              or ("git add 失败：" + "；".join(add_errors) if add_errors else None)
+              or git_commit.get("message"))
     if reason:
         out["reason"] = str(reason)[:300]
     return out

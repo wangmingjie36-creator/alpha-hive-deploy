@@ -5,7 +5,65 @@
 
 ---
 
-## [0.45.227] — 2026-09-14 — 占位（进行中：索引锁被别的进程短暂占用时日报产物漏提交且提交报成功——提交后核对 + add 重试）
+## [0.45.227] — 2026-09-14 — 二次检查 v0.45.225：它说「部分 add 失败触发不了」是推理没测——索引锁被别的进程占一下，当天首页漏提交且报成功
+
+用户要求再二次检查 v0.45.225。复核无问题的：v0.45.225 推送后无人再动这些文件；`_git_modified_files` 改签名
+仓库外零调用者；生产 checkout 里 18 条白名单 pathspec 只读逐条核过——`analysis-*-ml-*.json` 命中的 851 个
+文件全被忽略，git 报的是普通 pathspec 未匹配，照旧容忍（「显式点名被忽略的文件」会被判成真实错误，
+生产没有这种条目）；生产 git 配置无会往报错前插 warning 的项；锁在 add 途中出现并一直在 ⇒ 提交也挂、
+告警会响、原因含 index.lock；v0.45.225 只改原因文字，没改告警触发条件。查出一处，用户批准「核对 + 重试」：
+
+### Fixed
+
+1. **`GitHubTool.commit` docstring 与 v0.45.225 条目写「部分 add 失败生产里触发不了，锁是整库级的」——
+   推理，不是实测，且结论错。** 锁**一直在**：每条 add 挂、提交也挂、告警会响（v0.45.225 测的是这个）。
+   锁只被别的进程**占一下**：只挂撞上的那一条，其余照常暂存，提交**成功**。真 git 走真
+   `auto_commit_and_notify` 复现：add `index.html` 那一刻锁在 ⇒ 提交只含 `rss.xml`、`dashboard-data.json`，
+   `success=True`、`pending_artifacts=3`，**零告警**，当天网站首页没进 git。
+   - 触发条件现实存在：普通 `git status` 写回索引时持有 index.lock——在生产 checkout 的 APFS 克隆上轮询锁文件实测
+     持锁 55–72ms（所有文件 mtime 都变、status 本身跑 0.7–1.5s 时也不超过 72ms），重试间隔 1.0s 是它的 14 倍以上；
+     核查当时就有一个 Claude desktop session（02:08 启动）cwd 在生产 checkout。Claude Code / desktop 自己的
+     git 轮询是否带 `--no-optional-locks`：**待验证**。手工快进生产的 session 也会撞。
+   - **重试**：`commit(paths=…)` 对 pathspec 未匹配以外的失败，统一等 `_ADD_RETRY_DELAY_S`（1.0s）重试一次；
+     重试接住也打 warning（锁争用发生过要看得见）。重试后仍失败的照常提交其余产物，原因进 `add_errors`。
+   - **提交后核对**（判结果，不列举原因）：`report_deployer` 提交完再跑一次 `git status`，
+     `left_artifacts` = 仍未进 git 的日报产物数（None = 这次 status 失败），`left_sample` = 前 5 个名字。
+     `scan_timing.git_commit_summary` 有才抄这两个键（没有 = 旧代码 / 没走到提交），原因优先 `error`、其次
+     `add_errors`（提交成功时 `message` 只是成功输出）。
+   - `alert_manager`：`left_artifacts > 0` ⇒ P1「日报提交报成功，但有产物没进 git」（提交本身失败仍是原标题），
+     详情列「提交后仍未进 git」；键在而值为 None ⇒ 记进 `checks_skipped`，不渲染成「全进了」。
+
+### 测试
+
+- `tests/test_github_tool_commit.py` 新增 `TestBriefLockDuringOneAdd`（4 条）：锁文件与 git 失败是真的，只造
+  「别的进程恰好在那一刻拿着锁」的时机。锁占一下 ⇒ 重试后全进提交且留 warning；连重试都撞上 ⇒ 其余照常提交、
+  `add_errors` 含 index.lock；健康提交不等待（正对照，每天都有 pathspec 未匹配）；默认间隔 ≥0.5s 且两条同时撞锁只等一次。
+- `tests/test_production_sync.py` 新增 3 条（真 `auto_commit_and_notify` → 真快照 → 真告警）：提交成功但漏
+  `index.html` ⇒ 新 P1、标题不说「提交失败」、原因栏含 index.lock；锁占一下 ⇒ 不报（正对照）；提交后索引真损坏 ⇒
+  `left_artifacts is None` 且进 `checks_skipped`。扩展「只改非产物」那条断言 `left_artifacts == 0`。
+- 改动前的代码上：7 条红（「健康提交不等待」是正对照，旧代码本来就对）。
+- 变异真跑 15 处，**全部被抓到**（不重试 / 重试前不等 / 每条各等一次 / `add_errors` 不回传 / 重试后仍失败当成功 /
+  默认间隔 0.05s / pathspec 未匹配也算失败 / 提交后不核 / 核不了当 0 / left 把非产物算上 / summary 不抄 left 键 /
+  summary 不读 `add_errors` / 告警不看 left / 核不了不记 checks_skipped / 成功漏交报成「提交失败」）。各变异红的测试集合互不相同 ⇒ 基线本身是绿的。
+- 全套 `pytest --maxfail=200`：**4319 passed / 1 failed（仅 `TestCoverageHorizon`，按设计红）/ 1 skipped / 2 xfailed**；
+  `ruff check .`：All checks passed。
+
+### 落地前二次检查（用户要求，未推送时做的）
+
+- **生产真实文件名上无误报源**：生产 checkout 3182 个文件名（跟踪 + 未跟踪未忽略）逐个比对，「判定为产物」与
+  「pathspec 盖得住」两个方向**各 0 个不一致**（正对照：`index.html`、`report_snapshots/` 两边都认得）。只用 `git ls-files`。
+- **在生产的 APFS 克隆上端到端真跑**（拆远端、推送与 gh-pages 打桩；模拟今天的 index.html / 两份日报 / 新快照）：
+  提交 5 个产物（含生产里本来就待提交的 `weight_history.jsonl`）、`left_artifacts == 0`、零告警零 checks_skipped，
+  生产的 pre-commit 钩子放行。生产 checkout 本身未动。
+- **持锁时长**：此前各处写的「`git status` 实测 0.09s」是 `--no-optional-locks` 那次的墙钟——**那次根本不拿锁**。
+  改为在克隆上轮询锁文件实测：55–72ms（见上）。结论方向不变，间隔余量比原先写的更大；docstring / 测试 / 本条已改正。
+- 后台线程排查：扫描进程里唯一的守护线程 `twelvedata-warmer` 只写内存缓存，`.factor_cache/` 由 `factor_attribution`
+  同步写 ⇒ 提交后核对不会被部署之后仍在写的线程误报。
+
+### 未修（只记录）
+
+- **`git commit` 这一步撞上短暂的锁不重试**（用户批准的范围是 add 重试）：提交失败、告警会响、产物留在工作区待人工处理。
+- `run_git_cmd` 30 秒超时杀掉的 git 进程留下的锁不会自己消失（v0.45.223 已记）；本版重试对它无效，告警会响。
 
 ## [0.45.226] — 2026-09-14 — CHANGELOG 对账：六处 session 改动从未并入 main，一处并入了却没记
 
