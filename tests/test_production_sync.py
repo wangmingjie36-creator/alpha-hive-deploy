@@ -562,6 +562,30 @@ class TestResultReachesAlerts:
         assert not any("没进 git" in m or "提交失败" in m for m in msgs), msgs
         assert any("进 git" in s for s in a.checks_skipped), a.checks_skipped
 
+    # ── v0.45.236：共享索引里别的 session 已暂存的代码，不许被当成日报推上 main ──
+
+    @pytest.mark.parametrize("with_report", [True, False], ids=["with-report", "no-report-change"])
+    def test_code_another_session_staged_in_production_is_not_deployed(self, world, with_report):
+        """复刻：别的 session 在生产 checkout 里 `git add code.py` 还没提交，此刻扫描部署。
+        旧代码：`git commit -m` 提交整个索引 ⇒ code.py 进「日报」提交、推上 origin/main，
+        `left_artifacts=0` 零告警；且 `skipped_non_artifacts` 还说它被「跳过」了。"""
+        w = world
+        (w.prod / "code.py").write_text("v2 另一个 session 的半成品")
+        w.git("add", "code.py")
+        if with_report:
+            (w.prod / "index.html").write_text("report-0914")
+
+        res = rd.auto_commit_and_notify(w.reporter, PRODUCTION)
+
+        assert w.origin_show("code.py") == "v1", "别的 session 暂存的代码被当成日报推上了 main"
+        assert w.git("diff", "--cached", "--name-only").stdout.split() == ["code.py"], "别人的暂存不许被动"
+        assert "code.py" in res["skipped_non_artifacts"]
+        if with_report:
+            assert w.origin_show("index.html") == "report-0914" and res["git_commit"]["success"] is True
+            assert res["git_commit"]["left_artifacts"] == 0
+        else:
+            assert res["git_commit"]["success"] is False and res["git_commit"]["pending_artifacts"] == 0
+
     def test_local_ahead_alert_does_not_call_it_old_code(self, tmp_path):
         snap = st.snapshot("2026-09-14", extra={"git_push": {"success": True}})
         snap["production_sync"] = {"date": "2026-09-14", "outcome": "local_ahead", "ahead": 1, "behind": 0}

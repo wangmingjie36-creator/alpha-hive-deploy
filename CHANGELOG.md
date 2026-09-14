@@ -7,10 +7,117 @@
 
 ## [0.45.237] — 2026-09-14 — 占位（进行中：二次检查 v0.45.224 的改动）
 
-## [0.45.236] — 2026-09-14 — 占位（进行中：日报提交会把别的 session 在生产索引里已暂存的代码一起提交并推上 main——只提交白名单路径）
+## [0.45.236] — 2026-09-14 — 日报提交会把别的 session 在生产索引里已暂存的代码一起提交、推上 main：改为只提交白名单内的确切文件名
 
-## [0.45.235] — 2026-09-14 — 占位（进行中：GuardBee 复述多数时在 Queen 共振检测里多算一个维度 —— 先量它对收益的影响再修）
+用户要求再二次检查 v0.45.227。v0.45.227 本身没查出新 bug（落地代码与测过的逐字节相同；90 秒只 stat 监视生产与本
+worktree 的 index.lock，零次出现 ⇒ 当下没有会与 1s 重试相位对齐的周期性占锁进程；iCloud「优化存储」开着但 3180 个跟踪文件
+零个被逐出，逐出导致 status 失败时走的是已测的 `left_artifacts=None` 分支）。查出一处**早于它**的漏洞，用户批准现在修：
 
+### Fixed
+
+1. **白名单只管「我们暂存什么」，`git commit -m` 提交的却是整个索引。** 生产 checkout 被多个 session 共用
+   （2026-09-14 05:20–05:56 别的 session 在里面 `pull --rebase` 两次、提交两次、快进两次）。谁在里面 `git add`
+   了代码还没提交，部署就把它当成「Alpha Hive 蜂群日报」提交、随即推上 main：`success=True`、`left_artifacts=0`、
+   零告警，`skipped_non_artifacts` 与 warning 还说它被「跳过」了。2026-07-30 事故同形（那次是 `add -A`，这次是共享索引）。
+   白名单里一个产物都没改时更糟：旧代码照样跑裸 `git commit`，把别人的暂存整个提交掉。v0.43.4 起就有。
+   - `GitHubTool.commit(paths=…)`：add 之后用 `git diff --cached --no-renames --name-only -z -- <白名单>` 列出白名单内
+     已暂存的**确切文件名**，`git commit -m … -- <名字>`（--only 语义：别人的暂存原样留在索引里）。名字为空时**不跑**
+     `git commit`（回 success=False + nothing to commit）；列不出来时不提交、回原因。
+   - 三处设计都先实测再定：① 用确切名字不用 pathspec——`git add -- vrp_state/`（只含被忽略文件）回 0，
+     `git commit -- vrp_state/` 却报 did not match any file(s) known to git、整个提交失败；② `--no-renames`——
+     默认改名检测让 `--name-only` 只列新名字，内容相近的前后两天快照会被配成改名，删除一侧留在索引里；
+     ③ pre-commit 钩子在 --only 提交里看到的是只含这些名字的临时索引（`changelog_guard.py` 本就保留 `GIT_INDEX_FILE`）。
+   - 顺带：别的 session 暂存了一份坏 CHANGELOG 时，旧代码的日报提交会被 pre-commit 钩子整个拦下；现在不受影响。
+
+### 测试
+
+- `tests/test_github_tool_commit.py::TestOnlyTheWhitelistIsCommitted`（5 条，真 git）：别人暂存的代码与 CHANGELOG
+  不进日报提交且仍暂存；白名单内无改动时不提交；会被配成改名的快照整对提交；只含被忽略文件的目录 pathspec 不拖垮提交；
+  列暂存失败时不提交并回原因。
+- `tests/test_production_sync.py`：真 `auto_commit_and_notify` 双参数（有 / 无日报改动），别人暂存的 code.py 不上 origin、
+  仍暂存。
+- 改动前的代码上：5 条红（改名、目录两条是设计选择的守卫，旧代码裸提交整个索引本来就过——由变异证明它们有牙）。
+- 顺带被既有守卫抓到一次：把提交命令写成 `f"…" + "…"` 拼接时，`test_git_failures_are_visible` 的白名单 AST 核对读不出
+  子命令而红；改成单个 f-string。
+- 变异真跑 6 处**全部被抓到**（退回裸提交 / 去 `--no-renames` / 用 pathspec 提交 / 无暂存照样提交 / 列暂存失败当空 / 去 `-z`）。
+- **生产 APFS 克隆端到端**（拆远端、推送与 gh-pages 打桩，用生产真实的 pre-commit 钩子）：先让另一个「session」暂存
+  `production_sync.py` 与一份带冲突标记的 CHANGELOG；正对照——同一钩子对整个索引 rc=1「修好 CHANGELOG.md 再提交」。
+  部署：日报提交成功、恰好 5 个产物、两份外来暂存不在提交里且仍暂存、`left_artifacts=0`、零告警。生产 checkout 未动。
+- 全套 `pytest --maxfail=200`：**4347 passed / 1 failed（仅 `TestCoverageHorizon`，按设计红）/ 1 skipped / 2 xfailed**；
+  `ruff check .`：All checks passed。
+
+### 未修（只记录）
+
+- 别的 session 在生产里**已提交未推送**的提交，仍会被部署的 `push_main` 一并推上 main（推的是本地 main）。
+  那是它迟早要推的东西、不会以「日报」的名义混进提交，危害比本条小；没量过发生频率。
+- 别的 session 暂存的是**白名单内**的产物（如手改 index.html）时，仍会随日报提交——那本来就是日报产物。
+
+## [0.45.235] — 2026-09-14 — 共振只数独立来源：GuardBee 复述多数时凭空多出的那个维度，对收益无可测影响，只是在抬分数
+
+v0.45.212 让 Guard 退出方向计票时登记了另一条复述通道「未测未动」：Queen 的 `detect_resonance`
+里，Guard 的板条目带维度 `risk_adj`，复述多数时给同向方**多出一个维度**、还抬高 consistency。
+用户让我先量它对收益的影响再修。
+
+### 先确认它流到哪
+
+共振**只进分数不进方向**：`confidence_boost` 乘到 `rule_score` 上（`QueenDistiller._compute_weighted_score`），
+计票不读共振。下游读 `resonance` 的模块全是展示与指标；真正影响交易的是 `final_score` 过纸面组合
+入场闸（看多 ≥6.5 / 看空 ≤4.85）与决策档位（7.5 / 6.0）。
+Guard 自己在 guard_bee.py:27 调共振时还没发布，看不到自己。
+
+### 量：先自证仪器，再预注册
+
+- **仪器自证**：共振 → `_apply_triple_penalty` → 投票（冲突折扣）→ GEX → F&G 全调真实代码；
+  用 09-08~09-11 当时的代码复现 48 份记录的 `final_score` 与方向 **48/48**。
+- **预注册**：R0 = 现行代码、R1 = 共振里不数 Guard（主）、R2 = Guard 与 BearBee 都不数（次，另一个设计决定）；
+  主指标 = `final_score` 对 T+7 超额收益的逐日横截面 rank-IC（R1−R0，按行加权与周聚类都报）；
+  次指标 = 纸面组合入场资格变化行的方向超额 vs 同日基准；决策档位变化计数。
+
+| R1−R0（681 行，有 T+7 的 560） | 历史原样 | 现行规则重演 |
+|---|---|---|
+| 分数改变 | 36.4%，中位 −0.32 | 11.3%，中位 −0.30 |
+| 方向改变 | 0 | 0 |
+| 逐日 IC 变化 | −0.003（周聚类 p=0.89） | −0.001（p=0.77） |
+| 纸面组合入场变化 | 失去 5 行（方向只对 20%） | **0** |
+| 决策档位变化 | 54 | 12 |
+
+⇒ **对收益没有可测影响，只是在抬分数。** 理由是结构性的：`detect_resonance` 的 docstring 原话是
+「真正的多源独立印证」，旧逻辑被替换的理由正是「虚假放大」—— 复述票不是独立来源。
+
+### Changed — `pheromone_board.py`
+
+新增 `PheromoneBoard.RESONANCE_EXCLUDED_AGENTS = {GuardBeeSentinel}`，`detect_resonance` 取存活视图后
+先剔除（分子、分母、维度、支持数一并生效）。**只作用于共振**：Guard 读同伴的普查视图 `get_live_signals` 不动。
+
+### 测过、但本版**没做**的两件事（留给用户）
+
+1. **R2：BearBee 也不数进看空共振。** 现行规则下共振判定变 72 行、分数中位 −1.02、新获 10 笔看空入场
+   （方向对 70%，同日基准 58.3%，n=10）、决策档位变 59 行。BearBee 同样不是独立来源（数据全经信息素板中转、
+   90.5% 恒看空），但现有设计**明确**把 contrarian 计入看空共振，改它是另一个设计决定。
+2. **共振加成不分方向。** `rule_score = adjusted × (1 + boost)` —— **看空共振也把分数往上抬**，推离看空入场闸。
+   R2 那 10 笔「新获看空入场」主要就是拿掉了这种反向加成。这看起来是个独立缺陷，未修。
+
+### ⚠️ 顺带量到、未处理：`final_score` 在现行规则下逐日 IC 为负
+
+R0 下 `final_score` 对 T+7 超额收益的逐日横截面 IC **−0.11**（周聚类 p=0.037 / 0.026，14 周里 9 周为负），
+两语料一致。**事后看到的、未做多重比较校正、只有 14 周、且是现行代码在历史输入上的重演**。
+不据此改任何东西；记为待验证。
+
+### 核验
+
+- 逐位重放：新代码（板上有 Guard）≡ R1，**两语料 681/681**（分数/方向/共振判定/加成/维度五字段）。
+- `tests/test_resonance_independent_sources.py`（18 条含参数化）：Guard 投任何方向共振七个字段都不变
+  （4 组同伴 × 3 个方向，全部在旧代码上红——连中性的 Guard 都会改 consistency 分母）、旧行为反例、
+  三只观测蜂仍共振（正对照）、BearBee 仍计入看空共振（登记现状）、普查视图不受影响。
+- 变异 **5/5**：清空名单、只剔维度（一致性分母仍含 Guard）、只剔维度计数、过宽（连 BearBee）、过滤放进存活视图。
+- 约定副本（先跑再改）：`test_split_vote_no_resonance` 的中性第 7 只由 Guard 换成 CodeExec（保住 3/7 场景）；
+  `test_resonance_does_not_fabricate_unanimity` 期望值 5/8 → 5/7（ROUND 里的 Guard 曾计入分母）；
+  `test_non_voting_agents.py` 的「仍多算」登记改写为「不再多算」。
+- 全套 **4346 passed**，ruff 0；唯一的红是既有设计意图的 BLS `TestCoverageHorizon`。
+
+### Added — 世代边界第 16 条（2026-09-13，与 v0.45.212 / v0.45.228 共用标签）
+
+该边界之后到本版落地 predictions 0 条、无扫描进程 ⇒ 作废 **0** 条。
 ---
 
 ## [0.45.234] — 2026-09-14 — 占位（进行中：期权快照 _snapshot_stock_price 与官方收盘价不符——溯源调用方 + 频率普查 + 观测点）

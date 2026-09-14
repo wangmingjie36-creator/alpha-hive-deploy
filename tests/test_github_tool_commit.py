@@ -213,3 +213,88 @@ class TestBriefLockDuringOneAdd:
         r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
         assert r["success"] is True and "add_errors" not in r, f"正对照：两条都该被重试接住 {r}"
         assert slept == [_DEFAULT_RETRY_DELAY], "所有失败条目共用一次等待，不是每条等一次"
+
+
+def _staged(repo):
+    return set(_git(repo, "diff", "--cached", "--name-only").stdout.split())
+
+
+class TestOnlyTheWhitelistIsCommitted:
+    """v0.45.236：白名单只管「我们暂存什么」，而 `git commit -m` 提交的是**整个索引**。
+
+    生产 checkout 是多个 session 共用的（2026-09-14 05:20–05:56 别的 session 在里面 pull / commit 了 6 次）：
+    谁在里面 `git add` 了代码还没提交，日报部署就把它当成「日报」提交、推上 main，`left_artifacts=0`、零告警
+    ——2026-07-30 事故同形（当时是 `add -A`，这次是共享索引）。修法：只提交白名单内已暂存的**确切文件名**。
+    """
+
+    @pytest.fixture
+    def foreign_staged(self, repo):
+        (repo / "code.py").write_text("v1")
+        (repo / "CHANGELOG.md").write_text("# log")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "code")
+        (repo / "code.py").write_text("v2 另一个 session 的半成品")
+        (repo / "CHANGELOG.md").write_text("# 另一个 session 在改")
+        _git(repo, "add", "code.py", "CHANGELOG.md")
+        return repo
+
+    def test_code_another_session_staged_stays_out_of_the_report_commit(self, foreign_staged):
+        repo = foreign_staged
+        (repo / "index.html").write_text("report-0914")
+        r = GitHubTool(repo_path=str(repo)).commit("Alpha Hive 蜂群日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is True
+        assert _committed(repo) == {"index.html"}, "别的 session 暂存的代码被卷进了日报提交"
+        assert _staged(repo) == {"code.py", "CHANGELOG.md"}, "别人的暂存不许被动：留给它自己提交"
+
+    def test_no_report_change_commits_nothing_even_if_the_index_is_not_empty(self, foreign_staged):
+        """白名单内没有改动 ⇒ 不许跑裸 `git commit`：旧代码此时把别人暂存的代码提交成「日报」且回 success=True。"""
+        repo = foreign_staged
+        before = _head(repo)
+        r = GitHubTool(repo_path=str(repo)).commit("Alpha Hive 蜂群日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is False and _head(repo) == before, r
+        assert _staged(repo) == {"code.py", "CHANGELOG.md"}
+
+    def test_a_snapshot_git_would_pair_as_a_rename_is_committed_whole(self, repo):
+        """`--name-only` 默认做改名检测，只列新名字 ⇒ 旧文件的删除留在索引里没提交。内容相近的快照
+        （同一标的前后两天）正是会被配成改名的形状。"""
+        snap = repo / "report_snapshots"
+        snap.mkdir()
+        (snap / "XOM_2026-09-10.json").write_text('{"t": "XOM", "v": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]}\n')
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "snap")
+        (snap / "XOM_2026-09-10.json").rename(snap / "XOM_2026-09-11.json")
+        # 正对照：git 真的会把这对配成改名
+        _git(repo, "add", "--", "report_snapshots/")
+        assert _git(repo, "diff", "--cached", "--name-only", "--", "report_snapshots/").stdout.split() == \
+            ["report_snapshots/XOM_2026-09-11.json"]
+
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is True
+        assert _staged(repo) == set(), f"改名的删除一侧没进提交，还留在索引里：{_staged(repo)}"
+        assert _git(repo, "status", "--porcelain").stdout == ""
+
+    def test_directory_pathspec_that_matches_nothing_git_knows_does_not_break_the_commit(self, repo):
+        """`git add -- vrp_state/`（目录里只有被忽略的文件）回 0，但 `git commit -- vrp_state/` 报
+        「did not match any file(s) known to git」整个提交失败 ⇒ 提交用的必须是确切文件名，不是 pathspec。"""
+        (repo / ".gitignore").write_text("vrp_state/*.tmp\n")
+        _git(repo, "add", ".gitignore")
+        _git(repo, "commit", "-qm", "ignore")
+        (repo / "vrp_state").mkdir()
+        (repo / "vrp_state" / "x.tmp").write_text("t")
+        assert _git(repo, "add", "--", "vrp_state/").returncode == 0, "正对照：这条 add 确实回 0"
+        (repo / "index.html").write_text("report-0914")
+
+        r = GitHubTool(repo_path=str(repo)).commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is True and _committed(repo) == {"index.html"}, r
+
+    def test_staged_listing_failure_is_reported_not_committed_around(self, repo, monkeypatch):
+        (repo / "index.html").write_text("report-0914")
+        g = GitHubTool(repo_path=str(repo))
+        real = g.run_git_cmd
+        monkeypatch.setattr(g, "run_git_cmd", lambda cmd: (
+            {"success": False, "error": "git diff timed out after 30 seconds"}
+            if cmd.startswith("git diff --cached") else real(cmd)))
+        before = _head(repo)
+        r = g.commit("日报", paths=rd.REPORT_ARTIFACT_PATHS)
+        assert r["success"] is False and "timed out" in r.get("error", ""), r
+        assert _head(repo) == before, "列不出白名单内暂存了什么，就不许提交（否则只能退回提交整个索引）"

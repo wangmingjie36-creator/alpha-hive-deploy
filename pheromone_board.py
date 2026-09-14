@@ -98,6 +98,15 @@ class PheromoneBoard:
         "BearBeeContrarian": "contrarian",   # 看空对冲（仅在看空共振中参与维度计数）
     }
 
+    # 不进 `detect_resonance` 的蜂（v0.45.235）。共振要的是「多源独立印证」，
+    # GuardBeeSentinel 的方向是其余六只多数的复述（v0.45.209：90/90），复述多数时会给同向方
+    # 凭空多出 `risk_adj` 一个维度、并抬高 consistency。实测对收益无可测影响（逐日 IC 变化
+    # p 0.77–0.89、现行规则下纸面组合入场 0 变化），只是在抬分数。
+    # ⚠️ 只作用于共振；`get_live_signals`（Guard 读同伴的普查视图）不受影响。
+    # BearBeeContrarian 在看空共振里的计入是另一个设计决定，本版未动。
+    # 守卫：tests/test_resonance_independent_sources.py
+    RESONANCE_EXCLUDED_AGENTS = frozenset({"GuardBeeSentinel"})
+
     _BATCH_SIZE = 20  # 每 20 条刷新一次 DB（63 条 ≈ 4 次 commit，原来 63 次）
 
     def __init__(self, memory_store=None, session_id=None):
@@ -423,7 +432,8 @@ class PheromoneBoard:
             共振检测结果字典，新增 cross_dim_count / resonant_dimensions 字段
         """
         with self._lock:
-            ticker_entries = self._live_agent_entries(ticker)
+            ticker_entries = [e for e in self._live_agent_entries(ticker)
+                              if e.agent_id not in self.RESONANCE_EXCLUDED_AGENTS]
             bullish = [e for e in ticker_entries if e.direction == "bullish"]
             bearish = [e for e in ticker_entries if e.direction == "bearish"]
 
