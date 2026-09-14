@@ -5,7 +5,47 @@
 
 ---
 
-## [0.45.225] — 2026-09-14 — 占位（进行中：日报提交失败告警的「原因」是假的——GitHubTool.commit 吞了 git add 的真实报错）
+## [0.45.225] — 2026-09-14 — 二次检查 v0.45.223：「日报提交失败」告警在它瞄准的那个场景里原因栏是假的
+
+用户要求再二次检查 v0.45.223。复核无问题的：生产代码零处调 `scan_timing.reset()`（启动版本不会在快照前被清）；
+`_init_scan_context` 是 `run_swarm_scan` 第一行、早退都在其后；提交告警的产物判定与白名单同源（已有守卫，
+删除与 iCloud「… 2.json」副本两边一致）；`test_code_version` 的假值进不了 `scan_timing`；部署抛异常时
+推送记失败、提交记「无记录」而不是成功。查出一处，用户批准修：
+
+### Fixed
+
+1. **残留 `.git/index.lock` 时，P1「日报提交失败」的原因栏写「白名单未匹配到任何文件」**——而同一条告警的
+   「建议」栏叫人去查 index.lock，两栏自相矛盾，照原因栏会去查白名单配置。真实原因是
+   `fatal: Unable to create '…/index.lock': File exists.`。
+   - 机制：`GitHubTool.commit(paths=…)` 逐条 `git add`，**任何**失败都被当成「该产物本次未生成」容忍，
+     一条没暂存上就回那句话。实测 **git 先拿索引锁再匹配 pathspec** ⇒ 锁在时连不存在的 pathspec
+     报的也是锁错误，一条「did not match any files」都没有。这是 v0.43.4 起就有的，v0.45.223 的告警把它摆上了台面。
+   - 修：只容忍 pathspec 未匹配；别的失败取 git 报错首行、去重后回 `{"success": False, "error": "git add 失败：…"}`
+     （锁错误后跟五行通用建议，首行才带路径；每条 pathspec 报同一行，去重才放得进 status.json 的 300 字截断）。
+   - Apple git 2.50.1 在 `LANG=zh_CN.UTF-8` 下仍输出英文，判别用子串可行；若某天 git 被本地化，
+     退化是「无产物时原因栏显示 git 原文而非固定说法」，且那种情形 `pending_artifacts == 0` 不告警。
+2. **`git status` 失败时 `results["git_commit"]` 只有一句 `"git status failed"`**，真实原因只进了前一行 warning 日志。
+   `report_deployer._git_modified_files` 改为返回 `(清单, 原因)`，原因进 `error`（⇒ status.json ⇒ 告警原因栏）。
+3. **`commit()` 不传 `paths` 的 `git add -A` 分支**（生产无调用方）失败时回 `{"error": …}`、**没有 `success` 键**，
+   且子进程异常形状只有 `error` 键时读 `stage['stderr']` 是 KeyError。改为与白名单分支同一契约。
+
+### 测试
+
+- 新文件 `tests/test_github_tool_commit.py`（4 条，真 git 仓库，除子进程异常形状外不打桩）：残留锁 ⇒ 原因含
+  index.lock、不含「白名单未匹配」、只出现一次、单行（正对照先断言锁在时不存在的 pathspec 也报锁错误）；
+  什么都没匹配 ⇒ 说法不变（正对照，防判别器写反）；`-A` 分支两种失败形状。
+- 扩展两条既有测试：`test_production_sync` 的 index.lock 链路测试断言告警**原因栏**含 index.lock；
+  `test_git_failures_are_visible` 的真索引损坏测试断言 git 报错首行进了 `results["git_commit"]["error"]`。
+- 改动前的代码上：5 条红（「什么都没匹配」是正对照，旧代码本来就对）。
+- 变异真跑 8 处（pathspec 未匹配也当错误 / 退回全容忍 / 不去重 / 不取首行 / 不认 error 形状 / `-A` 丢 success /
+  status 原因退回固定串 / `git_commit_summary` 不读 error），全部被抓到。
+- 全套 `pytest --maxfail=200`：**4312 passed / 1 failed（仅 `TestCoverageHorizon`，按设计红）/ 1 skipped
+  （收集期 `test_scheduler.py`：`schedule` 库未装，与本次无关）/ 2 xfailed**；`ruff check .`：All checks passed。
+
+### 未修（只记录）
+
+- **部分 add 失败、部分成功**：成功的那部分照常提交、`success=True`，失败的产物留在工作区，无告警。
+  锁是整库级的，想不出生产里只坏一部分的触发条件，故只写进 `commit()` docstring，没加没人读的字段。
 
 ## [0.45.224] — 2026-09-14 — 占位（进行中：二次检查 v0.45.222 的改动）
 

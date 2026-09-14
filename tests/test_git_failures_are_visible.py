@@ -468,6 +468,10 @@ class TestProductionFailuresCarryTheirReason:
         assert any("git status 失败" in m and "index" in m for m in _warnings(caplog)), \
             _warnings(caplog)
         assert res["git_commit"]["success"] is False
+        # v0.45.225：原因要进 results（⇒ status.json ⇒ 「日报提交失败」告警的原因栏），
+        # 不能只活在 warning 日志里。此前 results 里只有一句 "git status failed"。
+        reason = raw.stderr.strip().splitlines()[0]
+        assert reason in res["git_commit"]["error"], (reason, res["git_commit"])
 
 
 # ═════════════════════════════ 调用方不许丢弃返回值 ═════════════════════════════
