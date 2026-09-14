@@ -200,12 +200,16 @@ class TestSpeciesDoesNotSpread:
         return own_python_files(REPO_ROOT)
 
     @staticmethod
-    def _scan(_stats=None, marker="PATHS"):
+    def _scan(_stats=None, marker="PATHS", _visit=None):
         """列出所有「import 期求值的 PATHS 派生赋值」。
 
         会下钻到 Try/If/With/For 体内——那些同样在 import 期执行。
         窄版（只看 tree.body 与 ClassDef.body）会漏掉 `pead_analyzer.py:20`，
         它就藏在一个 try 里。
+
+        `_visit(tree, rel) -> iterable`：换掉逐文件的判定、沿用本函数的文件集与
+        解码/语法记账（v0.45.244，`TestFrozenViaModuleLevelCall` 用）。
+        不另写一份文件循环，理由同 `_repo_files.py`：两份口径早晚漂移。
         """
         import ast
         compound = (ast.Try, ast.If, ast.With, ast.For, ast.While)
@@ -247,9 +251,13 @@ class TestSpeciesDoesNotSpread:
             except OSError:
                 undecodable.append(str(r)); continue
             try:
-                walk(ast.parse(src).body, str(r))
+                tree = ast.parse(src)
             except SyntaxError:
                 unparsable.append(str(r)); continue
+            if _visit is None:
+                walk(tree.body, str(r))
+            else:
+                found.update(_visit(tree, str(r)))
         if _stats is not None:
             _stats.update(mode=mode, n_files=len(files),
                           undecodable=undecodable, unparsable=unparsable)
@@ -769,6 +777,288 @@ class TestFileDerivedSpeciesDoesNotSpread:
         regressed = TestSpeciesDoesNotSpread._scan(marker="__file__") & cleaned
         assert not regressed, (
             f"v0.45.160 清掉的又被写回成 `__file__` 派生常量：{sorted(regressed)}")
+
+
+class TestFrozenViaModuleLevelCall:
+    """模块级语句**调用**本模块的函数/类，被调方体内求值 `PATHS` / `__file__`（v0.45.244）。
+
+    上面两类只看模块级 `Assign`/`AnnAssign` 右侧**字面上**有没有标记。v0.45.239 的
+    `hive_logger` 就漏在这里：模块级只有 `logger = _setup_logger()`，`PATHS.logs_dir`
+    在函数体里，冻住它的是 import 期构造、把路径存进 `baseFilename` 的 handler。
+
+    跟随规则（限本模块，全部结构性）：
+      · `f(...)`，`f` 是模块级 def ⇒ 进 `f` 体；体内再调模块级 def 接着跟（传递）
+      · `C(...)`，`C` 是模块级 class ⇒ 进 `__new__`/`__init__`/`__post_init__`，
+        其中 `self.m(...)` / `cls.m(...)` 跟到本类的 `m`
+      · 嵌套 def / class / lambda 不进——调用时才跑
+      · `if __name__ == "__main__":` 体不进（import 不执行），`else` 照进
+      · def 的默认参数与装饰器、class 的基类与装饰器算 import 期
+    标记判 `ast.Name`/`ast.Attribute` 节点，不判 `ast.unparse` 子串：本仓 docstring
+    大量写着 `PATHS.x` / `__file__`，子串判法会把「只在文档里提到」的函数报出来。
+
+    键是 `(文件, 绑定名, via)`，`via` = 标记**真正出现**的那个函数/方法。
+    ⚠️ `via` 是本类有牙的前提，不是装饰。只按 `(文件, 绑定名)` 登记时，把
+    `hive_logger.logger` 这种「已修好、静态上仍可达 PATHS」的点放进白名单，就对它
+    **退回事故原形**（`RotatingFileHandler(PATHS.logs_dir / …)` 写回 `_setup_logger`）
+    永久失明——键不变、恒绿。带上 `via`，退回会换出一个新键 ⇒ 红。
+
+    与上面两类不同：**过期项会红**（`test_known_has_no_stale_entries`）。存量只有三处，
+    修好一处删一行的成本很低；让它红，胜过留一张靠人记得对账的表。
+
+    静态扫描分不出「冻住」与「每次重新求值」——那由逐条理由和行为测试承担。
+
+    不在管辖内（记账，不是漏看）：
+      · `scheduler.py:26` 模块级 `basicConfig(handlers=[FileHandler(<_PROJECT_ROOT>/…)])`：
+        没调本模块函数；它的冻结输入 `_PROJECT_ROOT` 已在
+        `TestFileDerivedSpeciesDoesNotSpread.KNOWN`。pytest 下 root 已有 handler，空操作。
+      · 模块级裸表达式**直接**含标记：v0.45.244 实测 `PATHS` 0 处；`__file__` 5 处，
+        全是 `sys.path.insert`（代码锚点，正确）。未加扫描。
+      · 别的模块的函数、`Cls.static()`、继承来的构造器、`import PATHS as 别名`：不跟。
+    """
+
+    KNOWN = {
+        "PATHS": {
+            # 冻结，运行时已罩住：conftest `_isolate_paper_portfolio_state` 把它与四个状态文件
+            # 重绑到 tmp，teardown 比对真身内容指纹。
+            ("paper_portfolio.py", "STATE_DIR", "_base_dir"),
+            # 冻结，**没有**重绑：只有两处 glob 读（`_load_snapshots_for_date` /
+            # `_all_snapshot_dates`），无写入 ⇒ 后果是测试读到 checkout 的真实快照，不是写穿。
+            ("paper_portfolio.py", "SNAPSHOT_DIR", "_base_dir"),
+            # **不冻结**：v0.45.239 的 handler 在 `__init__` 求值一次给 `baseFilename` 占位，
+            # 每条记录 `emit` 时再按 `current_target()` 重指。静态上与冻结同形，
+            # 行为由 `tests/test_hive_logger_not_frozen.py` 守。
+            # `_setup_logger` 自己**不登记、也不能登记**：它的体里已没有 PATHS，再出现就是
+            # 事故原形回来了（见 `test_hive_logger_regression_is_not_allowlistable`）。
+            ("hive_logger.py", "logger", "LogsDirRotatingFileHandler.current_target"),
+        },
+        "__file__": set(),   # v0.45.244 实测 0 处
+    }
+
+    _CTORS = ("__new__", "__init__", "__post_init__")
+
+    @staticmethod
+    def _routes(tree, rel, marker):
+        import ast
+        compound = (ast.Try, ast.If, ast.With, ast.For, ast.While)
+        deferred = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+        fn_types = (ast.FunctionDef, ast.AsyncFunctionDef)
+        defs, classes, out = {}, {}, set()
+
+        def blocks(s):
+            for f in ("body", "orelse", "finalbody"):
+                yield getattr(s, f, None) or []
+            for h in getattr(s, "handlers", None) or []:
+                yield h.body
+
+        def index(body):
+            for s in body:
+                if isinstance(s, fn_types):
+                    defs.setdefault(s.name, s)
+                elif isinstance(s, ast.ClassDef):
+                    classes.setdefault(s.name, s)
+                elif isinstance(s, compound):
+                    for b in blocks(s):
+                        index(b)
+
+        def eager(node):
+            """`node` 求值当下就会跑到的节点（不进嵌套 def/class/lambda）。迭代写法防深表达式爆栈。"""
+            stack = [node]
+            while stack:
+                n = stack.pop()
+                if not isinstance(n, deferred):
+                    yield n
+                    stack.extend(ast.iter_child_nodes(n))
+
+        def hits_marker(n):
+            return ((isinstance(n, ast.Name) and n.id == marker)
+                    or (isinstance(n, ast.Attribute) and n.attr == marker))
+
+        def callees(call, owner):
+            f = call.func
+            if isinstance(f, ast.Name) and f.id in defs:
+                return [(f.id, defs[f.id], None)]
+            if isinstance(f, ast.Name) and f.id in classes:
+                c = classes[f.id]
+                return [(f"{c.name}.{m.name}", m, c) for m in c.body
+                        if isinstance(m, fn_types) and m.name in TestFrozenViaModuleLevelCall._CTORS]
+            if (owner is not None and isinstance(f, ast.Attribute)
+                    and isinstance(f.value, ast.Name) and f.value.id in ("self", "cls")):
+                return [(f"{owner.name}.{m.name}", m, owner) for m in owner.body
+                        if isinstance(m, fn_types) and m.name == f.attr]
+            return []
+
+        def vias(nodes, owner, seen):
+            for call in (n for n in nodes if isinstance(n, ast.Call)):
+                for name, fn, cls in callees(call, owner):
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    body = [n for st in fn.body for n in eager(st)]
+                    if any(hits_marker(n) for n in body):
+                        yield name
+                    yield from vias(body, cls, seen)
+
+        def import_time_exprs(s):
+            if isinstance(s, fn_types):
+                return [*s.decorator_list, *s.args.defaults, *filter(None, s.args.kw_defaults)]
+            if isinstance(s, ast.ClassDef):
+                return [*s.decorator_list, *s.bases, *(k.value for k in s.keywords)]
+            if isinstance(s, (ast.If, ast.While)):
+                return [s.test]
+            if isinstance(s, ast.For):
+                return [s.iter]
+            if isinstance(s, ast.With):
+                return [i.context_expr for i in s.items]
+            if isinstance(s, ast.Try):
+                return []
+            return [s]
+
+        def labels(s):
+            if isinstance(s, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                tgts = s.targets if isinstance(s, ast.Assign) else [s.target]
+                names = [n.id for t in tgts for n in ast.walk(t)
+                         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)]
+                return names or ["<assign>"]
+            if isinstance(s, fn_types):
+                return [f"def {s.name}"]
+            if isinstance(s, ast.ClassDef):
+                return [f"class {s.name}"]
+            return [f"<{type(s).__name__.lower()}>"]
+
+        def is_main_guard(s):
+            t = s.test if isinstance(s, ast.If) else None
+            return (isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.ops[0], ast.Eq)
+                    and {ast.unparse(t.left), ast.unparse(t.comparators[0])} == {"__name__", "'__main__'"})
+
+        def walk(body, depth=0):
+            for s in body:
+                if is_main_guard(s):
+                    walk(s.orelse, depth + 1)
+                    continue
+                nodes = [n for e in import_time_exprs(s) for n in eager(e)]
+                for via in set(vias(nodes, None, set())):
+                    out.update((rel, lab, via) for lab in labels(s))
+                if isinstance(s, ast.ClassDef):
+                    walk(s.body, depth + 1)
+                elif isinstance(s, compound) and depth < 6:
+                    for b in blocks(s):
+                        walk(b, depth + 1)
+
+        index(tree.body)
+        walk(tree.body)
+        return out
+
+    @classmethod
+    def _scan_routes(cls, marker, _stats=None):
+        """走 `TestSpeciesDoesNotSpread._scan` 的文件集与记账，只换逐文件判定。"""
+        return TestSpeciesDoesNotSpread._scan(
+            _stats, _visit=lambda tree, rel: cls._routes(tree, rel, marker))
+
+    def test_scanner_has_teeth(self, tmp_path, monkeypatch):
+        """正向 + 反向对照，**精确相等**：每条跟随规则各有一行会在它失效时多出或少掉。
+
+        | 夹具 | 失效时 |
+        |---|---|
+        | DIRECT / `<expr>` / `def uses_default` | 不跟 def 调用 / 不看裸表达式 / 不看默认参数 ⇒ 少 |
+        | TRANSITIVE（via `_inner`） | 不做传递 ⇒ 少 |
+        | HELD（via `Holder._where`，不含 `Holder.emit`） | 不跟构造器或 `self.m()` ⇒ 少；跟了全部方法 ⇒ 多 |
+        | NESTED（在 try 里） | 不下钻复合语句 ⇒ 少 |
+        | DOC_ONLY | 改成 unparse 子串判法 ⇒ 多（docstring 里写着标记） |
+        | LAZY / FACTORY | 进了 lambda / 嵌套 def ⇒ 多 |
+        | `if __name__ == "__main__": main()` | 不跳 main 守卫 ⇒ 多 |
+        | CODE_ROOT | `__file__` 族判不出 ⇒ 少；标记混用 ⇒ 在 PATHS 族里多 |
+        """
+        import sys
+        (tmp_path / "offenders.py").write_text(
+            "from pathlib import Path\n"
+            "from hive_logger import PATHS\n"
+            "def _resolve():\n    return PATHS.home\n"
+            "def _outer():\n    return _inner()\n"
+            "def _inner():\n    return PATHS.cache_dir\n"
+            "class Holder:\n"
+            "    def __init__(self):\n        self.p = self._where()\n"
+            "    def _where(self):\n        return PATHS.logs_dir\n"
+            "    def emit(self):\n        return PATHS.db\n"
+            "def _code_root():\n    return Path(__file__).parent\n"
+            "def _doc_only():\n"
+            '    """只在文档里提到 PATHS.home 与 __file__。"""\n    return 1\n'
+            "def _factory():\n"
+            "    def inner():\n        return PATHS.home\n    return inner\n"
+            "def main():\n    return PATHS.home\n"
+            "DIRECT = _resolve() / 'x'\n"
+            "TRANSITIVE = _outer()\n"
+            "HELD = Holder()\n"
+            "_resolve()\n"
+            "try:\n    NESTED = _resolve()\nexcept Exception:\n    NESTED = None\n"
+            "def uses_default(p=_resolve()):\n    return p\n"
+            "CODE_ROOT = _code_root()\n"
+            "DOC_ONLY = _doc_only()\n"
+            "LAZY = lambda: _resolve()\n"
+            "FACTORY = _factory()\n"
+            "if __name__ == '__main__':\n    main()\n",
+            encoding="utf-8")
+        monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+        o = "offenders.py"
+        expected = {
+            "PATHS": {(o, "DIRECT", "_resolve"), (o, "TRANSITIVE", "_inner"),
+                      (o, "HELD", "Holder._where"), (o, "<expr>", "_resolve"),
+                      (o, "NESTED", "_resolve"), (o, "def uses_default", "_resolve")},
+            "__file__": {(o, "CODE_ROOT", "_code_root")},
+        }
+        for marker, want in expected.items():
+            got = self._scan_routes(marker)
+            assert got == want, (
+                f"[{marker}] 扫描器对合成夹具的判定不对（规则对照见本条 docstring 表）\n"
+                f"  少了：{sorted(want - got)}\n  多了：{sorted(got - want)}")
+
+    @staticmethod
+    def _diff(marker):
+        found = TestFrozenViaModuleLevelCall._scan_routes(marker)
+        known = TestFrozenViaModuleLevelCall.KNOWN[marker]
+        return found - known, known - found
+
+    @staticmethod
+    def _fmt(keys):
+        return "\n".join(f"  - {f}:{name}  via {via}" for f, name, via in sorted(keys))
+
+    @pytest.mark.parametrize("marker", ["PATHS", "__file__"])
+    def test_no_new_route(self, marker):
+        new, stale = self._diff(marker)
+        assert not new, (
+            f"新增了「模块级调用 → 本模块函数体求值 `{marker}`」的点：\n" + self._fmt(new)
+            + "\n\n被调方在 import 期就求值，结果若被存进常量或对象（handler、连接、实例属性），"
+              "pytest 收集期 import ⇒ 冻在 checkout 的真实路径，conftest 的 env 隔离对它无效。\n"
+              "改法：让持有路径的东西在**使用时**求值（property / 函数 / emit 时重指）。\n"
+              "确属不冻结或已另有运行时隔离：加进本类 KNOWN，写明理由与守它的测试。"
+            + ("\n\n同时 KNOWN 有过期项——多半是同一处改名或换了路由，把旧键换成新键：\n"
+               + self._fmt(stale) if stale else ""))
+
+    @pytest.mark.parametrize("marker", ["PATHS", "__file__"])
+    def test_known_has_no_stale_entries(self, marker):
+        """`KNOWN - _scan()` 必须为空：修好了就删行。
+
+        这一条同时是真实仓库上的「扫描器有牙」——KNOWN 非空而扫描器坏成返回空集，它必红。
+        """
+        new, stale = self._diff(marker)
+        assert not stale, (
+            f"KNOWN 里这些 `{marker}` 路由已经扫不到了：\n" + self._fmt(stale)
+            + "\n\n修好了就从 KNOWN 删掉这一行。若没修却扫不到，是扫描器坏了。"
+            + ("\n同时出现了新路由（多半是改名）：\n" + self._fmt(new) if new else ""))
+
+    def test_hive_logger_regression_is_not_allowlistable(self):
+        """v0.45.239 事故原形不许回来，也不许靠登记白名单回来。
+
+        `_setup_logger` 体里重新出现 `PATHS`（即 `RotatingFileHandler(PATHS.logs_dir / …)`
+        写回去）⇒ 本条与 `test_no_new_route` 同时红。有人把它补进 KNOWN 想让后者转绿，本条照红。
+        """
+        bad = ("hive_logger.py", "logger", "_setup_logger")
+        assert bad not in self.KNOWN["PATHS"], (
+            "`_setup_logger` 路由被登记进了白名单。它的体里求值 PATHS 就是 v0.45.239 的事故形态"
+            "（handler 在 import 时存死路径），不是可以放行的存量。")
+        assert bad not in self._scan_routes("PATHS"), (
+            "`hive_logger._setup_logger` 的函数体又开始求值 PATHS——import 期构造的文件 handler "
+            "会把 checkout 的 logs/ 存死，测试日志写穿生产日志。用 `LogsDirRotatingFileHandler`。")
 
 
 def _discover_path_resolvers():

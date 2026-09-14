@@ -204,6 +204,81 @@ class TestFrozenBeforeCloseIsVisible:
         assert oa.snapshot_slot_stats()["hits_before_close"] == 0
 
 
+# ────────────────────────── v0.45.249：按份去重 ──────────────────────────
+
+def _warnings(caplog, needle):
+    return [r for r in caplog.records if r.levelno >= logging.WARNING and needle in r.getMessage()]
+
+
+class TestReportedOncePerSnapshot:
+    """一只标的一轮扫描调 3~4 次 analyze()。v0.45.238 按调用计，一份盘中快照报 3~4 遍。"""
+
+    CALLS = 4
+
+    def test_intraday_hit_warns_and_counts_once(self, agent, monkeypatch, tmp_path, caplog):
+        _write(tmp_path, "NVDA", "2026-09-03", _snapshot_timestamp="2026-09-03T10:05:00-07:00")
+        _at(monkeypatch, datetime(2026, 9, 3, 14, 0, tzinfo=PT))
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(self.CALLS):
+                assert _hit(agent)
+        st = oa.snapshot_slot_stats()
+        assert st["hits"] == self.CALLS, "hits 仍是调用数（分母）"
+        assert st["hits_before_close"] == 1, "按份计：同一份快照只计一次"
+        assert len(_warnings(caplog, "收盘前")) == 1, "只警告一次，其余降为 DEBUG"
+
+    def test_mismatch_warns_and_counts_once_when_refetch_keeps_failing(
+            self, agent, monkeypatch, tmp_path, caplog):
+        """重取失败 ⇒ 毒文件没被重写 ⇒ 每次调用都再读到它。"""
+        _write(tmp_path, "TSLA", "2026-09-03", _snapshot_timestamp="2026-09-03T00:07:11-07:00")
+        _at(monkeypatch, datetime(2026, 9, 3, 14, 11, tzinfo=PT))
+        with caplog.at_level(logging.DEBUG):
+            for _ in range(self.CALLS):
+                assert not _hit(agent, "TSLA")
+        assert oa.snapshot_slot_stats()["session_mismatch"] == 1
+        assert len(_warnings(caplog, "会话不匹配")) == 1
+
+    def test_distinct_snapshots_each_count(self, agent, monkeypatch, tmp_path, caplog):
+        """去重键是「这份快照」，不是「这个事件类型」——两只标的各记一次。"""
+        for t in ("NVDA", "TSLA"):
+            _write(tmp_path, t, "2026-09-03", _snapshot_timestamp="2026-09-03T10:05:00-07:00")
+        _at(monkeypatch, datetime(2026, 9, 3, 14, 0, tzinfo=PT))
+        with caplog.at_level(logging.WARNING):
+            for t in ("NVDA", "TSLA", "NVDA", "TSLA"):
+                assert _hit(agent, t)
+        assert oa.snapshot_slot_stats()["hits_before_close"] == 2
+        assert len(_warnings(caplog, "收盘前")) == 2
+
+    def test_rewritten_snapshot_is_reported_again(self, agent, monkeypatch, tmp_path, caplog):
+        """同一路径被重写成另一份快照（时间戳变了）后再出事，不能被旧记录吞掉。"""
+        _write(tmp_path, "NVDA", "2026-09-03", _snapshot_timestamp="2026-09-03T10:05:00-07:00")
+        _at(monkeypatch, datetime(2026, 9, 3, 14, 0, tzinfo=PT))
+        with caplog.at_level(logging.WARNING):
+            assert _hit(agent)
+            _write(tmp_path, "NVDA", "2026-09-03", _snapshot_timestamp="2026-09-03T11:30:00-07:00")
+            assert _hit(agent)
+        assert oa.snapshot_slot_stats()["hits_before_close"] == 2
+        assert len(_warnings(caplog, "收盘前")) == 2
+
+    def test_calendar_fallback_warns_once_per_session(self, agent, monkeypatch, tmp_path, caplog):
+        import cboe_options
+        monkeypatch.setattr(cboe_options, "session_date_at", lambda ts: None)
+        _at(monkeypatch, datetime(2026, 9, 3, 14, 0, tzinfo=PT))
+        with caplog.at_level(logging.WARNING):
+            for _ in range(self.CALLS):
+                _hit(agent)
+        assert oa.snapshot_slot_stats()["calendar_fallback"] == 1
+        assert len(_warnings(caplog, "交易日历不可用")) == 1
+
+    def test_reset_clears_dedup_memory(self, agent, monkeypatch, tmp_path):
+        """reset 之后同一份快照应重新可报——否则测试之间会互相吞掉事件。"""
+        _write(tmp_path, "NVDA", "2026-09-03", _snapshot_timestamp="2026-09-03T10:05:00-07:00")
+        _at(monkeypatch, datetime(2026, 9, 3, 14, 0, tzinfo=PT))
+        _hit(agent)
+        oa.reset_snapshot_slot_stats()
+        _hit(agent)
+        assert oa.snapshot_slot_stats()["hits_before_close"] == 1
+
+
 # ────────────────────────── 与补跑槽位（v0.45.16）的交互 ──────────────────────────
 
 class TestBackfillInteraction:

@@ -4,6 +4,7 @@
 """
 
 import json
+import logging
 import math as _math
 import re as _re_mod
 import os
@@ -1446,15 +1447,21 @@ _RE_SNAP_DATE = _re_mod.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ET_ZONE = None
 _snap_stats_lock = threading.Lock()
 # 观测计数：供 scan_timing 落进 status.json。
-#   hits / writes            命中 / 写入次数（分母）
-#   session_mismatch         槽位里的快照属于别的会话、被弃用重算（旧代码留下的跨午夜文件会走这里）
-#   hits_before_close        命中了一份**收盘前**冻结的快照，而此刻该会话已收盘——
+#   hits / writes            命中 / 写入**次数**（分母，按调用数）
+#   ── 以下三项按**份数**计（v0.45.249）：同一进程内同一事件只计一次、只警告一次 ──
+#   session_mismatch         槽位里有几份快照属于别的会话、被弃用重算（旧代码留下的跨午夜文件会走这里）
+#   hits_before_close        命中了几份**收盘前**冻结的快照，而此刻该会话已收盘——
 #                            本可以拿到完整会话数据却用了盘中的（只观测，不拒收，见 analyze 内注释）
-#   writes_before_close      收盘前写入的快照数（盘中跑批 / 手工跑）
-#   calendar_fallback        交易日历不可用、会话日期退回「只看周一至周五」规则的次数
+#   calendar_fallback        交易日历不可用、会话日期退回「只看周一至周五」规则（每个会话日记一次）
+#   writes_before_close      收盘前写入的快照数（写入本身不重复，按次即按份）
+#
+# 为什么要去重：一只标的一轮扫描要调 3~4 次 analyze()（OracleBee / BearBee / advanced_analyzer /
+# 日报收尾），v0.45.238 按调用计时，一份盘中快照会被报 3~4 遍、一天可达上百条 WARNING，
+# 计数也读不出「几份快照有问题」。去重键带冻结时间戳：同一路径被重写成新快照后再出事，照样会报。
 _SNAP_STATS_KEYS = ("hits", "writes", "session_mismatch", "hits_before_close",
                     "writes_before_close", "calendar_fallback")
 _snap_stats = {k: 0 for k in _SNAP_STATS_KEYS}
+_snap_reported: set = set()
 
 
 def snapshot_slot_stats() -> Dict:
@@ -1466,11 +1473,22 @@ def reset_snapshot_slot_stats() -> None:
     with _snap_stats_lock:
         for k in _SNAP_STATS_KEYS:
             _snap_stats[k] = 0
+        _snap_reported.clear()
 
 
 def _snap_count(key: str) -> None:
     with _snap_stats_lock:
         _snap_stats[key] += 1
+
+
+def _snap_count_once(key: str, ident) -> bool:
+    """同一 `(key, ident)` 在本进程内只计一次。返回 True = 首次（调用方据此决定打 WARNING 还是 DEBUG）。"""
+    with _snap_stats_lock:
+        if (key, ident) in _snap_reported:
+            return False
+        _snap_reported.add((key, ident))
+        _snap_stats[key] += 1
+        return True
 
 
 def _snapshot_now() -> datetime:
@@ -1947,9 +1965,9 @@ class OptionsAgent:
         _snap_now = _snapshot_now()
         _snap_session, _snap_from_calendar = _snapshot_session(_snap_now)
         if not _snap_from_calendar:
-            _snap_count("calendar_fallback")
-            _log.warning("[%s] 交易日历不可用，期权快照会话日期按周一至周五规则取 %s"
-                         "（假日会被误当交易日）", ticker, _snap_session)
+            if _snap_count_once("calendar_fallback", _snap_session):
+                _log.warning("[%s] 交易日历不可用，期权快照会话日期按周一至周五规则取 %s"
+                             "（假日会被误当交易日；本进程同一会话日只报这一次）", ticker, _snap_session)
 
         # v0.45.16：补跑（`--date` 指定的目标日 ≠ 今天）必须用**独立槽位**。
         #
@@ -2025,16 +2043,22 @@ class OptionsAgent:
                     if _complete is None:
                         _complete = bool(_cached_at and _cached_at >= _session_close(_snap_session))
                     if not _complete and _snap_now >= _session_close(_snap_session):
-                        _snap_count("hits_before_close")
-                        _log.warning("[%s] 期权快照命中但冻结于 %s 会话收盘前（%s），"
-                                     "此刻已收盘——本轮期权指标用的是盘中数据",
-                                     ticker, _snap_session, _cached_ts[:19])
+                        # v0.45.249：按份去重——同一份快照后续 2~3 次调用降为 DEBUG
+                        _lvl = (logging.WARNING
+                                if _snap_count_once("hits_before_close", (_snap_path, _cached_ts))
+                                else logging.DEBUG)
+                        _log.log(_lvl, "[%s] 期权快照命中但冻结于 %s 会话收盘前（%s），"
+                                 "此刻已收盘——本轮期权指标用的是盘中数据",
+                                 ticker, _snap_session, _cached_ts[:19])
                     return _cached
                 else:
-                    _snap_count("session_mismatch")
-                    _log.warning("[%s] 期权快照会话不匹配：%s 冻结于 %s，属于 %s 会话、槽位是 %s，"
-                                 "弃用重算", ticker, os.path.basename(_snap_path),
-                                 _cached_ts[:19] or "?", _cached_session or "未知", _snap_session)
+                    # v0.45.249：按份去重——弃用后重取若失败没重写文件，后续调用会再读到同一份
+                    _lvl = (logging.WARNING
+                            if _snap_count_once("session_mismatch", (_snap_path, _cached_ts))
+                            else logging.DEBUG)
+                    _log.log(_lvl, "[%s] 期权快照会话不匹配：%s 冻结于 %s，属于 %s 会话、槽位是 %s，"
+                             "弃用重算", ticker, os.path.basename(_snap_path),
+                             _cached_ts[:19] or "?", _cached_session or "未知", _snap_session)
             except (json.JSONDecodeError, OSError) as _e:
                 _log.warning("[%s] 期权快照读取失败，重新计算: %s", ticker, _e)
         # 期权分析
