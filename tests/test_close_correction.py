@@ -48,7 +48,7 @@ def db(tmp_path):
 
 def _patch_sources(monkeypatch, closes, cboe=None, prev_td=None):
     monkeypatch.setattr(cc, "official_closes", lambda t, lo, hi: closes)
-    monkeypatch.setattr(cc, "cboe_official_closes", lambda t: cboe or {})
+    monkeypatch.setattr(cc, "cboe_official_closes", lambda t, **k: cboe or {})
     monkeypatch.setattr(cc, "_prev_trading_day", lambda: prev_td)
 
 
@@ -89,7 +89,7 @@ def test_two_source_dispute_refuses(db, monkeypatch):
     """两源分歧 → 不猜哪个对，拒改并记账。"""
     p = db([(DATE, "X", 100.0)])
     _patch_sources(monkeypatch, {(DATE, "X"): 105.0},
-                   cboe={"X": (DATE, 120.0)}, prev_td=DATE)
+                   cboe={"X": {DATE: 120.0}}, prev_td=DATE)
     con = sqlite3.connect(p)
     st = cc.correct(con, apply=True)
     val = con.execute("SELECT price_at_predict FROM predictions").fetchone()[0]
@@ -101,7 +101,7 @@ def test_two_source_dispute_refuses(db, monkeypatch):
 def test_two_sources_agree_marks_cross_checked(db, monkeypatch):
     p = db([(DATE, "X", 100.0)])
     _patch_sources(monkeypatch, {(DATE, "X"): 105.0},
-                   cboe={"X": (DATE, 105.02)}, prev_td=DATE)
+                   cboe={"X": {DATE: 105.02}}, prev_td=DATE)
     con = sqlite3.connect(p)
     st = cc.correct(con, apply=True)
     src = con.execute("SELECT close_correction_source FROM predictions").fetchone()[0]
@@ -252,7 +252,7 @@ def test_cboe_price_from_another_date_is_not_used(db, monkeypatch):
     """
     p = db([(DATE, "X", 100.0)])
     _patch_sources(monkeypatch, {(DATE, "X"): 105.0},
-                   cboe={"X": ("2026-08-25", 126.0)}, prev_td=DATE)
+                   cboe={"X": {"2026-08-25": 126.0}}, prev_td=DATE)
     con = sqlite3.connect(p)
     st = cc.correct(con, apply=True)
     val, src = con.execute("SELECT price_at_predict, close_correction_source "
@@ -265,37 +265,12 @@ def test_cboe_price_from_another_date_is_not_used(db, monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════════════
-# `close` 归属哪个交易日 —— 用 2026-08-27 实拉的真实 payload 钉死
+# `close` 归属哪个交易日
 # ══════════════════════════════════════════════════════════════════
-
-@pytest.mark.parametrize("cdn_ts_utc,expect_session,note", [
-    # NVDA：08-27 08:31 ET（**盘前**）→ close=209.66 应属 8/26
-    ("2026-08-27 12:31:00", "2026-08-26", "盘前的新文件"),
-    # TMO：08-26 21:18 ET（**盘后**）→ close=633.71 应属 8/26
-    ("2026-08-27 01:18:00", "2026-08-26", "盘后的当场文件"),
-    # 盘中生成 → 当日尚未收盘，close 只能属前一交易日
-    ("2026-08-27 17:00:00", "2026-08-26", "盘中"),
-    # 周日生成 → 上个交易日是周五
-    ("2026-08-30 12:00:00", "2026-08-28", "周日"),
-])
-def test_session_of_close_pinned_by_real_payloads(cdn_ts_utc, expect_session, note):
-    """`close` = 文件生成时刻「最近一个已收盘交易日」的官方收盘价。
-
-    2026-08-27 实拉四只标的验证：
-
-        NVDA 文件 08-27 08:31 ET（盘前）close=209.66 = 8/26 收盘 ✓
-        TMO  文件 08-26 21:18 ET（盘后）close=633.71 = 8/26 收盘 ✓
-
-    ⚠️ 刻意不用 `last_trade_time` 定这个日期 —— 盘前它仍停在上一场的最后成交，
-    分不清「8/27 盘前的新文件」和「8/26 的旧文件」。本条守的就是这个区分。
-    """
-    assert cc._session_of_close(cdn_ts_utc) == expect_session, note
-
-
-def test_session_of_close_unparseable_returns_none():
-    """推不出就不做交叉印证 —— 不猜。"""
-    for bad in ("", "not-a-timestamp", "2026-13-99 00:00:00"):
-        assert cc._session_of_close(bad) is None
+# v0.45.243 删掉了 `_session_of_close`（按 CDN timestamp 推）：它把盘中文件的 `close`
+# （= 实时价）归到上一交易日。原先那条「盘中 → 前一交易日」的参数是**推断**，
+# 从未实拉验证过；2026-09-14 10:55 ET 实拉证伪。归属判据现由 last_trade_time 自述，
+# 真实值用例见 tests/test_stale_intraday_consumers.py。
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -341,7 +316,7 @@ def test_dispute_not_reported_when_nothing_to_correct(db, monkeypatch):
     """
     p = db([(DATE, "X", 105.0)])              # 已等于官方收盘
     _patch_sources(monkeypatch, {(DATE, "X"): 105.0},
-                   cboe={"X": (DATE, 130.0)}, prev_td=DATE)
+                   cboe={"X": {DATE: 130.0}}, prev_td=DATE)
     con = sqlite3.connect(p)
     st = cc.correct(con, apply=True)
     con.close()
