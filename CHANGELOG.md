@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.248] — 2026-09-14 — 占位（进行中：commit -- <名字> 会拆开别的 session 已暂存、跨出白名单目录的 rename——补 rename 探测）
+
 ## [0.45.247] — 2026-09-14 — 占位（进行中：Queen 读蜂 details 的键契约守卫 + 删 F&G 政体调整死分支 + signal_archive 补 Buzz 缺失通道）
 
 ## [0.45.246] — 2026-09-14 — 占位（进行中：v0.45.239 conftest `_hive_log_handler_escapes` 的 resolve() 相对路径补全成 cwd——合入 v0.45.240 后被 cwd 守卫抓到；修 + 变异自证 + 落地 v0.45.239/244）
