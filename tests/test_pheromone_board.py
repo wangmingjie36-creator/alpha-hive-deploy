@@ -159,8 +159,9 @@ class TestResonance:
         # 3 个不同维度看空
         for agent in ["ChronosBeeHorizon", "RivalBeeVanguard", "BearBeeContrarian"]:
             board.publish(_entry(agent=agent, direction="bearish", score=3.0))
-        # 1 个中性
-        board.publish(_entry(agent="GuardBeeSentinel", direction="neutral", score=5.0))
+        # 1 个中性（v0.45.235 前用的是 GuardBeeSentinel；它自此不进共振，换成同样中性、
+        # 同样计入分母的 CodeExecutorAgent，保住「3/7 ≈ 43%」这个被测场景）
+        board.publish(_entry(agent="CodeExecutorAgent", direction="neutral", score=5.0))
         res = board.detect_resonance("NVDA")
         assert not res["resonance_detected"], "3/7 一致性 < 50%，不应触发共振"
         assert res["consistency"] < 0.5

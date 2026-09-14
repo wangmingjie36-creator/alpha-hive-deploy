@@ -98,7 +98,7 @@ class TestCallSitesWired:
     ])
     def test_no_raw_current_price_fallback(self, path):
         from pathlib import Path
-        src = Path(path).read_text()
+        src = (Path(__file__).resolve().parent.parent / path).read_text()
         bad = 'get("current_price") or payload.get("close")'
         bad2 = 'data.get("current_price") or data.get("close")'
         assert bad not in src and bad2 not in src, \

@@ -5,6 +5,176 @@
 
 ---
 
+## [0.45.239] — 2026-09-14 — 占位（进行中：hive_logger 在 import 时把文件 handler 绑到真实 logs/，测试日志写穿生产日志——修 + conftest 指纹守卫）
+
+## [0.45.238] — 2026-09-14 — 占位（进行中：期权快照槽按 PDT 墙钟日期分，跨午夜扫描把前一交易日数据写进次日槽——改按会话日期 + 观测点 + 历史普查）
+
+## [0.45.237] — 2026-09-14 — 二次检查 v0.45.224：cwd 隔离只罩住测试函数本体——高于函数级的 fixture 仍在仓库根里跑，「teardown 还原」的自证是空的，还原理由写反了
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。** v0.45.224 的四条声称里三条不成立，都在它自己新加的 conftest 隔离上。
+
+### Fixed（`tests/conftest.py`）
+
+1. **module / class / session 级 fixture 仍在调用目录（平常就是仓库根）里 setup。** v0.45.224 称「逐测试空目录让这类问题在任何一次普通运行里就红」——
+   它只在函数级 fixture 里 chdir，每条测试结束又 chdir 回**调用目录**。实测：module 级 fixture 读 `Path("config.py")` ⇒ `exists()=True`、cwd=调用目录。
+   **结束时还原到调用目录，恰好把盲区造回来了。** 改：新增会话级 autouse `_empty_cwd_between_tests`，测试之间 cwd 停在会话级空目录，会话结束才回调用目录。
+   复测同一个 module 级 fixture ⇒ `exists()=False`、cwd=会话级空目录。
+2. **测试自己 `monkeypatch.chdir` 时，teardown 后 cwd 停在该测试的 `_cwd`。** v0.45.224 的理由是「monkeypatch 的还原顺序不定」—— **错，是确定地输**：
+   `--setup-plan` 实测 autouse fixture 按**名字字母序** setup（`_block_llm_api` 排第一、先实例化 monkeypatch），不是定义顺序，
+   monkeypatch 因此最后 teardown，覆盖掉手工 `os.chdir`。本轮第一版「把 fixture 挪到文件最前面」也照输（自证当场红）。
+   改：chdir 走 `monkeypatch.chdir` —— 撤销时回到本测试第一次经它 chdir 之前的目录，与谁先 teardown 无关，裸 `os.chdir` 的泄漏一并撤销。
+
+### Fixed（`tests/test_reads_own_checkout.py::TestRuntimeLeaksAreUndone`）
+
+3. **v0.45.224 的 test_2 对 cwd 还原是空的**：只断言「本测试 cwd ≠ 上一条泄漏的 cwd」，而每条测试 setup 本来就 chdir ——
+   删掉 teardown 的还原，相关 32 条**全绿**（实测）。也没有任何测试用过 `monkeypatch.chdir`（grep 只命中自己的 docstring），
+   那条「按快照会漂移」的理由所说的场景在本仓并不存在。改：用一个 **class 级 fixture 在两条测试之间 setup** 记下 cwd；
+   序列 test_1（裸 chdir + 往 sys.path 塞哨兵）→ test_1b（`monkeypatch.chdir`）→ test_2（测试之间 cwd == 会话级空目录且为空、哨兵已拿掉）
+   → test_3（高于函数级的 fixture 不在调用目录）。
+
+### 验证
+
+- 变异（每次按字节还原并核对），各被自证抓到：裸 chdir 不还原 / 裸 chdir + teardown 回会话空目录（本轮第一版）/ v0.45.224 原样三处一起回退 /
+  会话 fixture 不 chdir（test_2、test_3 都红）/ 去 sys.path 还原。
+- 直接观测（临时探针文件，跑完即删）：module 级 fixture 相对读取 `False`；`monkeypatch.chdir` 那条之后 cwd=会话级空目录；`sessionfinish` 时 cwd 回调用目录。
+- 全套从仓库根：**4341 passed / 1 failed / 1 skipped / 2 xfailed**（唯一红 `TestCoverageHorizon`，唯一 skip `test_scheduler.py`）。
+- 全套从空目录：同上 **4341 passed / 1 failed**；收集后 cwd 未动、无相对 sys.path 项，跑完空目录无残留。
+
+### 核过、成立的
+
+- v0.45.224「文件访问只有 import 期一次 `scandir`」：审计钩子只看得见**本进程**。补查子进程：测试里的 `subprocess` 调用无一跑写死主 checkout 的模块
+  （`weekly_optimizer` / `self_analyst` / `generate_deep_v2` / `collect_data` / `alpha_hive_mcp` / `deep_analysis`），唯一的 `-c` 子进程 import 的是
+  `alpha_hive_daily_report`，生产代码无顶层 import 上述模块（静态核对，不是运行时量的）。
+- 其余 v0.45.224 声称（收集期 chdir、sys.path 120/141、4 failed / 6 passed 复现、9 条 cwd 依赖、canary）为当轮实测输出，本轮未发现反例。
+
+### 顺带确认（未修，另开任务）
+
+- 并发 session（v0.45.230）报：`hive_logger` 模块级 `_setup_logger()` 在收集期把文件 handler 绑到真实 `logs/`。本轮复核：
+  全套跑完本 worktree `logs/alpha_hive.log`（2.5 MB）mtime 落在跑测时段、末行是夹具标的 `[AAA]` 的告警 ⇒ 成立。
+  auto-memory 已有记录（未修）；已提给用户作独立任务。
+
+### v0.45.224 条目里不成立的记录（已就地订正并标注）
+
+- 「逐测试空目录让这类问题**在任何一次普通运行里**就红」：只罩函数本体，见上 1。
+- 「结束 cwd 回调用目录」「cwd 还原到 `invocation_params.dir`…还原顺序不定，按快照会漂移」：顺序是确定的字母序，且回调用目录正是盲区来源，见上 1、2。
+- 「`TestRuntimeLeaksAreUndone`（…上一条故意泄漏的 cwd/sys.path 被还原）」：cwd 那半是空的，见上 3。
+- 「按后果量，文件访问确实只有 import 期一次 `scandir`」：限本进程；子进程为静态核对。
+
+---
+
+## [0.45.236] — 2026-09-14 — 日报提交会把别的 session 在生产索引里已暂存的代码一起提交、推上 main：改为只提交白名单内的确切文件名
+
+用户要求再二次检查 v0.45.227。v0.45.227 本身没查出新 bug（落地代码与测过的逐字节相同；90 秒只 stat 监视生产与本
+worktree 的 index.lock，零次出现 ⇒ 当下没有会与 1s 重试相位对齐的周期性占锁进程；iCloud「优化存储」开着但 3180 个跟踪文件
+零个被逐出，逐出导致 status 失败时走的是已测的 `left_artifacts=None` 分支）。查出一处**早于它**的漏洞，用户批准现在修：
+
+### Fixed
+
+1. **白名单只管「我们暂存什么」，`git commit -m` 提交的却是整个索引。** 生产 checkout 被多个 session 共用
+   （2026-09-14 05:20–05:56 别的 session 在里面 `pull --rebase` 两次、提交两次、快进两次）。谁在里面 `git add`
+   了代码还没提交，部署就把它当成「Alpha Hive 蜂群日报」提交、随即推上 main：`success=True`、`left_artifacts=0`、
+   零告警，`skipped_non_artifacts` 与 warning 还说它被「跳过」了。2026-07-30 事故同形（那次是 `add -A`，这次是共享索引）。
+   白名单里一个产物都没改时更糟：旧代码照样跑裸 `git commit`，把别人的暂存整个提交掉。v0.43.4 起就有。
+   - `GitHubTool.commit(paths=…)`：add 之后用 `git diff --cached --no-renames --name-only -z -- <白名单>` 列出白名单内
+     已暂存的**确切文件名**，`git commit -m … -- <名字>`（--only 语义：别人的暂存原样留在索引里）。名字为空时**不跑**
+     `git commit`（回 success=False + nothing to commit）；列不出来时不提交、回原因。
+   - 三处设计都先实测再定：① 用确切名字不用 pathspec——`git add -- vrp_state/`（只含被忽略文件）回 0，
+     `git commit -- vrp_state/` 却报 did not match any file(s) known to git、整个提交失败；② `--no-renames`——
+     默认改名检测让 `--name-only` 只列新名字，内容相近的前后两天快照会被配成改名，删除一侧留在索引里；
+     ③ pre-commit 钩子在 --only 提交里看到的是只含这些名字的临时索引（`changelog_guard.py` 本就保留 `GIT_INDEX_FILE`）。
+   - 顺带：别的 session 暂存了一份坏 CHANGELOG 时，旧代码的日报提交会被 pre-commit 钩子整个拦下；现在不受影响。
+
+### 测试
+
+- `tests/test_github_tool_commit.py::TestOnlyTheWhitelistIsCommitted`（5 条，真 git）：别人暂存的代码与 CHANGELOG
+  不进日报提交且仍暂存；白名单内无改动时不提交；会被配成改名的快照整对提交；只含被忽略文件的目录 pathspec 不拖垮提交；
+  列暂存失败时不提交并回原因。
+- `tests/test_production_sync.py`：真 `auto_commit_and_notify` 双参数（有 / 无日报改动），别人暂存的 code.py 不上 origin、
+  仍暂存。
+- 改动前的代码上：5 条红（改名、目录两条是设计选择的守卫，旧代码裸提交整个索引本来就过——由变异证明它们有牙）。
+- 顺带被既有守卫抓到一次：把提交命令写成 `f"…" + "…"` 拼接时，`test_git_failures_are_visible` 的白名单 AST 核对读不出
+  子命令而红；改成单个 f-string。
+- 变异真跑 6 处**全部被抓到**（退回裸提交 / 去 `--no-renames` / 用 pathspec 提交 / 无暂存照样提交 / 列暂存失败当空 / 去 `-z`）。
+- **生产 APFS 克隆端到端**（拆远端、推送与 gh-pages 打桩，用生产真实的 pre-commit 钩子）：先让另一个「session」暂存
+  `production_sync.py` 与一份带冲突标记的 CHANGELOG；正对照——同一钩子对整个索引 rc=1「修好 CHANGELOG.md 再提交」。
+  部署：日报提交成功、恰好 5 个产物、两份外来暂存不在提交里且仍暂存、`left_artifacts=0`、零告警。生产 checkout 未动。
+- 全套 `pytest --maxfail=200`：**4347 passed / 1 failed（仅 `TestCoverageHorizon`，按设计红）/ 1 skipped / 2 xfailed**；
+  `ruff check .`：All checks passed。
+
+### 未修（只记录）
+
+- 别的 session 在生产里**已提交未推送**的提交，仍会被部署的 `push_main` 一并推上 main（推的是本地 main）。
+  那是它迟早要推的东西、不会以「日报」的名义混进提交，危害比本条小；没量过发生频率。
+- 别的 session 暂存的是**白名单内**的产物（如手改 index.html）时，仍会随日报提交——那本来就是日报产物。
+
+## [0.45.235] — 2026-09-14 — 共振只数独立来源：GuardBee 复述多数时凭空多出的那个维度，对收益无可测影响，只是在抬分数
+
+v0.45.212 让 Guard 退出方向计票时登记了另一条复述通道「未测未动」：Queen 的 `detect_resonance`
+里，Guard 的板条目带维度 `risk_adj`，复述多数时给同向方**多出一个维度**、还抬高 consistency。
+用户让我先量它对收益的影响再修。
+
+### 先确认它流到哪
+
+共振**只进分数不进方向**：`confidence_boost` 乘到 `rule_score` 上（`QueenDistiller._compute_weighted_score`），
+计票不读共振。下游读 `resonance` 的模块全是展示与指标；真正影响交易的是 `final_score` 过纸面组合
+入场闸（看多 ≥6.5 / 看空 ≤4.85）与决策档位（7.5 / 6.0）。
+Guard 自己在 guard_bee.py:27 调共振时还没发布，看不到自己。
+
+### 量：先自证仪器，再预注册
+
+- **仪器自证**：共振 → `_apply_triple_penalty` → 投票（冲突折扣）→ GEX → F&G 全调真实代码；
+  用 09-08~09-11 当时的代码复现 48 份记录的 `final_score` 与方向 **48/48**。
+- **预注册**：R0 = 现行代码、R1 = 共振里不数 Guard（主）、R2 = Guard 与 BearBee 都不数（次，另一个设计决定）；
+  主指标 = `final_score` 对 T+7 超额收益的逐日横截面 rank-IC（R1−R0，按行加权与周聚类都报）；
+  次指标 = 纸面组合入场资格变化行的方向超额 vs 同日基准；决策档位变化计数。
+
+| R1−R0（681 行，有 T+7 的 560） | 历史原样 | 现行规则重演 |
+|---|---|---|
+| 分数改变 | 36.4%，中位 −0.32 | 11.3%，中位 −0.30 |
+| 方向改变 | 0 | 0 |
+| 逐日 IC 变化 | −0.003（周聚类 p=0.89） | −0.001（p=0.77） |
+| 纸面组合入场变化 | 失去 5 行（方向只对 20%） | **0** |
+| 决策档位变化 | 54 | 12 |
+
+⇒ **对收益没有可测影响，只是在抬分数。** 理由是结构性的：`detect_resonance` 的 docstring 原话是
+「真正的多源独立印证」，旧逻辑被替换的理由正是「虚假放大」—— 复述票不是独立来源。
+
+### Changed — `pheromone_board.py`
+
+新增 `PheromoneBoard.RESONANCE_EXCLUDED_AGENTS = {GuardBeeSentinel}`，`detect_resonance` 取存活视图后
+先剔除（分子、分母、维度、支持数一并生效）。**只作用于共振**：Guard 读同伴的普查视图 `get_live_signals` 不动。
+
+### 测过、但本版**没做**的两件事（留给用户）
+
+1. **R2：BearBee 也不数进看空共振。** 现行规则下共振判定变 72 行、分数中位 −1.02、新获 10 笔看空入场
+   （方向对 70%，同日基准 58.3%，n=10）、决策档位变 59 行。BearBee 同样不是独立来源（数据全经信息素板中转、
+   90.5% 恒看空），但现有设计**明确**把 contrarian 计入看空共振，改它是另一个设计决定。
+2. **共振加成不分方向。** `rule_score = adjusted × (1 + boost)` —— **看空共振也把分数往上抬**，推离看空入场闸。
+   R2 那 10 笔「新获看空入场」主要就是拿掉了这种反向加成。这看起来是个独立缺陷，未修。
+
+### ⚠️ 顺带量到、未处理：`final_score` 在现行规则下逐日 IC 为负
+
+R0 下 `final_score` 对 T+7 超额收益的逐日横截面 IC **−0.11**（周聚类 p=0.037 / 0.026，14 周里 9 周为负），
+两语料一致。**事后看到的、未做多重比较校正、只有 14 周、且是现行代码在历史输入上的重演**。
+不据此改任何东西；记为待验证。
+
+### 核验
+
+- 逐位重放：新代码（板上有 Guard）≡ R1，**两语料 681/681**（分数/方向/共振判定/加成/维度五字段）。
+- `tests/test_resonance_independent_sources.py`（18 条含参数化）：Guard 投任何方向共振七个字段都不变
+  （4 组同伴 × 3 个方向，全部在旧代码上红——连中性的 Guard 都会改 consistency 分母）、旧行为反例、
+  三只观测蜂仍共振（正对照）、BearBee 仍计入看空共振（登记现状）、普查视图不受影响。
+- 变异 **5/5**：清空名单、只剔维度（一致性分母仍含 Guard）、只剔维度计数、过宽（连 BearBee）、过滤放进存活视图。
+- 约定副本（先跑再改）：`test_split_vote_no_resonance` 的中性第 7 只由 Guard 换成 CodeExec（保住 3/7 场景）；
+  `test_resonance_does_not_fabricate_unanimity` 期望值 5/8 → 5/7（ROUND 里的 Guard 曾计入分母）；
+  `test_non_voting_agents.py` 的「仍多算」登记改写为「不再多算」。
+- 全套 **4346 passed**，ruff 0；唯一的红是既有设计意图的 BLS `TestCoverageHorizon`。
+
+### Added — 世代边界第 16 条（2026-09-13，与 v0.45.212 / v0.45.228 共用标签）
+
+该边界之后到本版落地 predictions 0 条、无扫描进程 ⇒ 作废 **0** 条。
+---
+
 ## [0.45.234] — 2026-09-14 — 收盘后拿到「盘中生成」的 CBOE 文件：`close` 是中午的成交价，被当官方收盘写进快照与入场价
 
 **起因**：v0.45.229（Max Pain 预测力检验）发现 `_snapshot_stock_price` 在 v0.45.46 修掉盘后价之后，每天仍有 2~3/30 只 ≠ 官方收盘，且 `quote_set.underlying_price_source` 标着 `cboe_close`。
@@ -40,16 +210,199 @@
 ### 未做 / 待定
 - **未改写历史**快照与 `price_at_predict`（可用 `close_correction.py` dry-run 先看影响面，落笔需用户点头）。
 - 编排器 Step 12 没传 `--check-prices`，`scan_coverage_gate.check_prices`（≥1% 列警告）在生产里从未跑过；是否接上待用户决定（编排器在仓库外）。
-- **另一个根因，未在本版修**：09-02 / 09-08 两轮扫描跑过午夜，00:0x 写出的快照占了次日槽位，次日 14:00 扫描整轮命中（09-03 命中 42 次、09-09 命中 45 次）⇒ 那两天的期权数据整份是前一交易日的，快照价与**前一日**收盘 24/30、26/30 相符。已另开任务。
+- **另一个根因，未在本版修**：09-02 / 09-08 两轮扫描跑过午夜，00:0x 写出的快照占了次日槽位，次日 14:00 扫描整轮命中（09-03 命中 42 次、09-09 命中 45 次）⇒ 那两天的期权数据整份是前一交易日的，快照价与**前一日**收盘 24/30、26/30 相符。已另开任务（占号 v0.45.238）。
 - 线上验证：本地实拉时恰好跨过 09:30 开盘，全部走盘中分支，**新判据未被真实 payload 触发过**——以今天 17:00 ET 扫描后 `status.json` 的 `price_stale_intraday` 为准（待验证）。
 
 ## [0.45.233] — 2026-09-14 — 占位（进行中：数据根迁移阶段 0——DB 一致性快照 / 修编排器每日备份 / 测试「默认拒绝」总闸）
 
-## [0.45.232] — 2026-09-14 — 占位（进行中：宏观条改自动横向滚动，移植 defi-hero worktree 的未提交 WIP）
+## [0.45.232] — 2026-09-14 — 宏观条改自动横向滚动：移植 08-30 的未提交 WIP，并修掉它在宽屏上右侧露白
 
-## [0.45.231] — 2026-09-14 — 占位（进行中：合入 v0.45.76 方向圆点样式 + v0.45.79 宏观指标颜色规则）
+v0.45.226 对账时在 worktree `defi-hero-section-design-ca009b` 里发现一份 08-30 的未提交改动：
+把首页宏观条（VIX / 10Y / 收益率曲线 / 黄金 / 恐惧贪婪）改成无限横向滚动。用户确认要这个效果，本版移植进 main。
 
-## [0.45.230] — 2026-09-14 — 占位（进行中：修 v0.45.224 找到的三处生产根因——weekly_optimizer 往 sys.path 插主 checkout / deep_analysis 导入期 chdir / cboe_fetcher 缓存默认相对路径）
+### Added — 沿用 WIP 的设计
+
+- 条目放进 `.ah-macro-viewport`（`overflow:hidden`，左右 32px 渐隐遮罩）里的 `.ah-macro-track`，
+  `translateX(0 → -50%)` 线性无限循环；鼠标悬停暂停。
+- 副本 `aria-hidden="true"`，另加一个 `.sr-only` 列表给屏幕阅读器朗读一遍。
+- `prefers-reduced-motion`：隐藏全部副本，恢复手动横滑、去掉遮罩。全局 F15 规则只把动画缩到 0.01ms，
+  不隐藏副本的话用户会看到重复的指标。
+- 去掉 `.ah-macro` 的 `overflow-x:auto` 与 `.ah-macro-inner` 的 `min-width:560px`（滚动已由视口自己承担）。
+- WIP 里给预览加的 `.claude/launch.json` 配置**没有**移植。
+
+### Fixed — WIP 原样合入会出的两个问题
+
+**① 宽屏右侧露白（WIP 的缺陷）。** WIP 放 2 份条目、走 -50%。无缝的前提是**半程宽度 ≥ 可视区宽度**，
+WIP 在桌面上不满足。1440px 下用 `getBoundingClientRect` 实测：
+
+| | 可视区 | 一份条目 | 半程 | 滚动末尾右侧空白 |
+|---|---|---|---|---|
+| WIP（共 2 份，每半程 1 份） | 1215px | 506px | 506px | **最多 709px**，开头就空 203px；截图可见右半条是空的 |
+| 本版（每半程 4 份） | 1215px | 506px | 2025px | 0 |
+
+`.ah-macro-inner` 限宽 1360px，可视区最宽约 1215px，所以这个缺陷只在桌面出现，手机上看不出来。
+份数选 4 而不是刚好够的 3：五个值全是「—」时一份只有 429px，3 份只富余 73px，删一个指标就破。
+时长 36s → 80s，速度保持约 25px/s。
+
+**② 两份手抄副本会漂移。** WIP 在模板里把五个条目逐字写了两遍。v0.45.231 刚改过恐惧贪婪那一格
+（`fg_color` → `fg_cls`），照搬就得改两处。本版用 Jinja 宏 `macro_items(dup)` 只写一份，循环生成 8 份。
+
+⚠️ 宏的第一版带了个 `{{ extra_cls }}` 参数，全套里 `test_dashboard_contract::test_template_placeholders_have_render_kwargs`
+当场变红：它把模板里所有双花括号变量当成 renderer 必须传入的参数（防「未定义变量静默渲染为空」）。
+守卫是对的，没有改它；改成宏参数只在 `{% if %}` 里用——副本的 class 与 `aria-hidden` 本来就同进同出，
+合成一个 `dup` 开关。改后宏观条渲染结果与浏览器实测过的版本逐字节一致。
+
+### 验证
+
+真实渲染：同 v0.45.231 的离线预览法（2026-09-11 真实日报 JSON，零写入代码目录），在浏览器里实测：
+
+- **填满**：1920 / 1440 / 1024 / 768 / 375 五个宽度下半程均 ≥ 可视区；数值全替换成「—」、
+  字体换成系统等宽回退，两种情况也都覆盖。
+- **无缝**：动画 79.999s 时第 5 份的位置与 0s 时第 1 份相差 0.03px。
+- **悬停暂停**：不悬停时 1 秒内 `currentTime` 前进 1000ms，悬停时前进 0ms。
+  ⚠️ 测这个不能先用脚本调 `animation.pause()/play()`：按 Web Animations 规范，脚本接管播放控制后
+  CSS 的 `animation-play-state` 会被忽略，第一次就是这样测出了假的「悬停不暂停」。
+- **手机 + 深色主题**（375px，`html.dark`）：页面 `scrollWidth` = 375，无横向溢出；截图正常。
+- **减弱动效**（浏览器工具不能模拟该系统设置，改为把真实 CSS 里 `prefers-reduced-motion` 的规则体
+  无条件注入作代理）：可见 1 份、`overflow-x:auto` 可手动横滑、无遮罩、`transform:none`、末项无右边框。
+- **读屏**：sr-only 列表 5 项，与条目逐一对应；轨道内可聚焦元素 0 个。
+
+新增 `tests/test_dashboard_renderer.py` 两条：
+- `test_macro_marquee_structure`：份数偶数且每半程 ≥ 4、只有第一份不 `aria-hidden`、各份条目一致、朗读列表对得上；
+- `test_macro_marquee_reduced_motion_hides_copies`：降级规则里必须隐藏副本、恢复横滑。
+
+变异校验（改完即恢复，恢复后逐字节核对一致），6 个全部变红：
+每半程 1 份（原 WIP）/ 每半程 3 份 / 第二份不藏读屏 / 朗读列表漏一项 / 首份多出一个指标 / 降级时不藏副本。
+
+全套（含 v0.45.231，`--maxfail=1000`）：**4314 passed / 1 failed / 1 skipped / 82 deselected / 2 xfailed**（402s），
+唯一失败是按设计红的 `TestCoverageHorizon`。
+
+`index.html` 未手改：下一次日报扫描从模板重新生成并部署到 gh-pages 后，线上才会看到滚动效果。
+
+## [0.45.231] — 2026-09-14 — 合入 v0.45.76 / v0.45.79：首页方向圆点终于看得见，宏观条颜色终于生效
+
+v0.45.226 对账发现这两版 08-30 就写好了、从未并入 main，两个 bug 一直在线上。用户决定先合这两版。
+76、79 两个号已写进 git 历史，合入的工作记在本号下，原号条目改为「已由 v0.45.231 合入」。
+
+### Fixed
+
+- **方向圆点（原 v0.45.76，`1646db7` 原样合入）**：`templates/dashboard.css` 补 `.dot-bull/.dot-bear/.dot-neut`
+  四行样式（7px 实心圆，走 `--bull/--bear/--neut`）。renderer 一直在输出这三个 class，CSS 从来没定义，
+  圆点宽度为 0、背景透明。
+- **宏观条颜色（原 v0.45.79，`366fa14`）**：
+  - `.yc-*` / `.gld-*` 改成 `.ah-macro-val.yc-ok` 这类复合选择器。原来的单类选择器被后面同特异度的
+    `.ah-macro-val{color:var(--tp)}` 覆盖，颜色从来没生效过。
+  - 恐惧贪婪从内联 `style="color:<hex>"` 改成 `fg-low/fg-mid/fg-high` 三个 class（`_fg_color` → `_fg_cls`）。
+  - 硬编码十六进制改走令牌。
+
+### Changed — 合入时改了原 79 的一处
+
+`.ah-macro-val.gld-dn` 从 `var(--tm)` 改为 `var(--ts)`。按 WCAG 对比度（浅色主题，底色 `--bg #FAF7F2`）：
+
+| 颜色 | 对比度 | |
+|---|---|---|
+| `--tm`（原 79 的选择） | **2.37:1** | 17px 数值、非粗体，达不到正文 4.5:1 |
+| `--ts`（改后） | 5.81:1 | 仍是「弱化」的意图 |
+
+79 生效后其余颜色都比旧值更易读，这里一并记下，免得以后有人「改回原色」：
+
+| 用途 | 旧值（浅色底对比度） | 现令牌（浅色底对比度） |
+|---|---|---|
+| 恐惧贪婪中间值 | `#ffc107`（1.53:1） | `--neut`（5.03:1） |
+| 黄金上涨 | `#ffd700`（1.31:1） | `--bull`（6.11:1） |
+| 收益率曲线正常 | `#28a745`（2.93:1） | `--bull`（6.11:1） |
+| 恐惧 / 倒挂 | `#dc3545`（4.24:1） | `--bear`（7.04:1） |
+
+### 验证
+
+- **真实渲染 + `getComputedStyle`**：用 2026-09-11 的真实日报 JSON 离线渲染首页（yfinance 换成会抛异常的桩，
+  宏观数据取日报里的 `macro_context`，`ALPHA_HIVE_HOME` 与报告目录都指向 scratch，代码目录零写入），
+  合入前后各渲染一份对比：
+  - 圆点：49 个，可见区里 **0 → 16 个**；其余 33 个在折叠的面板里（`offsetParent` 为空），计算宽度同样是 7px。
+  - 收益率曲线「正常」、黄金「+0.6%」：`rgb(26, 18, 8)`（`--tp`）→ `rgb(29, 107, 58)`（`--bull`）。
+  - 恐惧贪婪：内联 `#ffc107` → `fg-mid`，`rgb(146, 96, 26)`。
+- `ruff check dashboard_renderer.py` 通过；`test_dashboard_renderer` / `test_dashboard_dim_dq_missing` /
+  `test_phantom_date_guard` 57 passed。全套与 v0.45.232 一起跑：4314 passed，唯一失败是按设计红的 `TestCoverageHorizon`。
+- `index.html` 未手改：它由下一次日报扫描从模板重新生成并部署。
+
+## [0.45.230] — 2026-09-14 — v0.45.224 交接的三处生产根因：weekly_optimizer 往 sys.path 插主 checkout / deep_analysis import 期 chdir / cboe_fetcher 缓存默认相对路径
+
+v0.45.224 在**测试侧**把损害关住了（conftest `_isolate_cwd_and_sys_path`、`import deep_analysis` 前后存还原、
+`TestProcessStateStaysPut` / `TestRuntimeLeaksAreUndone`），生产根因交接到本版。测试侧那几道**全部保留**作纵深防御：
+它们守「泄漏不跨测试」，本版守「生产代码本身不泄漏」—— 隔离一在，根因复发就再没有跨测试症状可红，所以另立守卫。
+
+⚠️ 开工时的交接说明写「v0.45.224 已落地」，实际那批改动当时还**未提交**在另一个 worktree；
+本版先在没有它的 main 上修与变异，328b7319 推上 main 后 rebase，全套两轮都跑在 rebase 之后。
+
+### Fixed
+
+1. **`weekly_optimizer`：import 根锚 `__file__`，不再插 `ALPHAHIVE_DIR`。** 新增 `_CODE_DIR = Path(__file__).resolve().parent`
+   与 `_ensure_code_dir_importable()`（`sys.path[0]` 已是它就不插），6 处函数体内 `sys.path.insert(0, str(ALPHAHIVE_DIR))` 全部改走它。
+   - **只动 import 根。** 数据路径（`CONFIG_PATH` / `HISTORY_FILE` / `PHEROMONE_DB_PATH` / `BACKUP_DIR` / 快照目录）照旧挂
+     `ALPHAHIVE_DIR`，迁 `PATHS` 是另一个决定；过期的 Cowork VM `_VM_PATH` 覆盖同样没动。
+   - 生产等价（改前核过）：`Path("/Users/igg/Desktop/Alpha Hive/weekly_optimizer.py").resolve().parent` 与 `ALPHAHIVE_DIR`
+     字符串相等，`~/Desktop` 不是符号链接，`/sessions` 不存在；定时任务从仓库根 `python3 weekly_optimizer.py` ⇒
+     `sys.path[0]` 本来就是该目录，helper 空操作，解析结果与改前相同。
+   - `_CODE_DIR` 登记进 `test_paths_not_frozen_at_import.py` 的 `KNOWN`（A 类）与 `MUST_STAY_FILE_ANCHORED`（后者顺带让
+     「值必须在仓库内」那条参数化自动覆盖它）。
+   - 全仓对照：其余 `sys.path.insert` 全锚 `__file__`（probability_scorecard / scan_continuity / ic_rerun_readiness /
+     chronos_bee / gui）。`generate_deep_v2` / `self_analyst` / `collect_data` 也写死 `~/Desktop/Alpha Hive`，但只作数据路径、
+     不进 sys.path —— weekly_optimizer 是唯一一处。⚠️ **同名 `ALPHAHIVE_DIR` 在仓里是两种东西**：前三个模块里是 `__file__`
+     派生的代码根，这四个模块里是写死的数据根。按定义判，不按名字判。
+2. **`deep_analysis`：`os.chdir(脚本目录)` + `sys.path.insert(0, ".")` 从 import 期挪进 `main()` 开头。** CLI 语义不变
+   （`--json` 相对路径按脚本目录解析、报告写进脚本目录）；import 它的人（pytest 收集期的测试模块）不再被挪 cwd。
+3. **`cboe_fetcher.CBOEDailyFetcher(cache_dir=None)` ⇒ 调用时解析新增的 `PATHS.cboe_daily_cache`**（= `PATHS.cache_dir / "cboe_daily"`，
+   property）。原默认 `"cache/cboe_daily"` 不读 `ALPHA_HIVE_CACHE_DIR`、在哪跑就建进哪 —— 本机 **9 个 worktree 各留着一个**
+   pytest 建出来的（被 .gitignore 挡着，没人看得见）。本 worktree 那个已删；其余 8 个属别的 session，未动。
+   - 生产等价：launchd `WorkingDirectory=/Users/igg/Desktop/Alpha Hive`、plist 与编排器都不设 `ALPHA_HIVE_*`；
+     worktree 根、去掉 env 实测新旧默认解析成同一个绝对路径。
+   - conftest 没加指纹闸：缓存目录按 v0.45.150 分级不入 `_GUARDED_PRODUCTION_ARTIFACTS`；逐测试空目录（v0.45.224）+ 本版守卫已覆盖。
+
+### Added
+
+- `tests/test_cwd_and_sys_path_hygiene.py`（11 条）。每条都按「**守卫在哪台机器上红？**」设计区分力：
+  - weekly_optimizer：主 checkout 里 `ALPHAHIVE_DIR` 恰好等于仓库根，改回去在那里无害 ⇒ 把它指向仓库外哨兵再测；
+    `sys.path[0]` 先垫一个假首项，否则「已在最前不插」会让本条空转。6 个调用点逐个参数化（空输入全部早返回，逐个实测过）
+    + AST 断言 sys.path 只在 helper 里改（挡**新增**的直插）。
+  - deep_analysis：cwd 那条从仓库根起跑是瞎的、且模块多半已在收集期 import 过（再 import 是空操作）⇒ **子进程从空目录 import**；
+    另一条截获 `os.chdir` 证明 `main()` 仍先切到脚本目录。子进程里 `main()` 抛的异常记下来进断言消息 ——
+    第一版没记，变异下只报「子进程失败 rc=1」，说不出是 CLI 没 chdir。
+  - cboe_fetcher：本条 chdir 进空目录、把 `ALPHA_HIVE_CACHE_DIR` 换成本条独有的值。**`import cboe_fetcher` 必须在模块级**：
+    默认值冻在 import 期那种复发，函数体内 import 会在 `_isolate_env` 之后才发生，照样全绿。
+
+### 验证
+
+- **真复现**（修前、本分支、当时还没有 v0.45.224 的 conftest）：改坏 `economic_calendar_watch._release_date_to_quarter`
+  （本版的改法 5 个参数全错，v0.45.224 那版 4 个）—— 单跑 5 failed；先跑 `test_compute_weights_neutral_not_systematically_penalized` ⇒ **6 passed**。
+  修后两种顺序都是 5 failed（先跑那条时 5 failed + 它自己 1 passed）；把 `weekly_optimizer.py` 换回 HEAD ⇒ 回到 6 passed。
+- **变异**（每次从 scratch 里的修后副本按字节还原并 `cmp` 核对；rebase 前全跑一遍，rebase 后 M1/M1c/M2/M3 复跑、红数不变）：
+  | 变异 | 结果 |
+  |---|---|
+  | M1 `weekly_optimizer.py` 换回 HEAD | 7 红（6 个调用点 + AST）；连同 `test_paths_not_frozen_at_import.py` 跑再 +2（HEAD 没有 `_CODE_DIR`） |
+  | M1b 只把 `bootstrap_validate` 一处改回 `ALPHAHIVE_DIR` | 恰 2 红（该参数 + AST，报出行号） |
+  | M1c helper 去掉去重（每次都插） | 6 红（「调 3 次增长了 3 项」） |
+  | M1e `_CODE_DIR = ALPHAHIVE_DIR` | 8 红（6 个调用点 + `MUST_STAY` 转换守卫 + 「值在仓库内」参数化） |
+  | M2 `deep_analysis.py` 换回 HEAD | 2 红（import 挪 cwd；`main()` 没 chdir、去 cwd 开 data.json 抛 FileNotFoundError） |
+  | M2b 修后版本但删掉 `main()` 里的 chdir | 恰 1 红（CLI 那条） |
+  | M3 `cboe_fetcher.py` 换回 HEAD | 1 红（「往 cwd 里建了东西」） |
+  | M3b 默认值冻成模块常量 `_FROZEN_DEFAULT = str(PATHS.cboe_daily_cache)` | 1 红（没跟 env 走）；且收集期真在 worktree 建出 `cache/cboe_daily`，已删 |
+- **CLI**（从空的 scratch 目录起跑、`ALPHA_HIVE_*` 指向 scratch）：HEAD 与修后各跑 `--json` 相对路径（json 放脚本目录）
+  与绝对路径两种 —— rc 全 0，报告都落在脚本目录，起跑目录全程为空，四份 HTML 按 ticker/时间戳归一后两两**逐字节相同**。
+  规则引擎模式（打 yfinance）未跑。
+- `ruff check` 改动的 6 个文件：通过。
+- 全套从仓库根：**4354 passed / 1 failed / 1 skipped / 2 xfailed**（317s）。唯一红 `TestCoverageHorizon`（设计如此），唯一 skip `test_scheduler.py`（无 `schedule` 库）。
+- 全套从空目录（`--rootdir` / `-c` 指向 worktree）：同上 **4354 passed / 1 failed / 1 skipped / 2 xfailed**（324s），跑完起跑目录无残留；
+  两轮之后 worktree 里也没再长出 `cache/cboe_daily`（开工时这个 worktree 里就有一个 09-13 pytest 建的空目录，已删后复核）。
+
+### 未查（与本版无关，待验证）
+
+- 生产 `cache/cboe_daily/*.json` 最后写入是 **2026-08-26**（mtime），此后没再被刷新。是 `generate_deep_v2` 那一路生产上不再走到、
+  还是抓取一直失败走了兜底，没查。
+- `hive_logger` 模块级 `logger = _setup_logger()` 在收集期把文件 handler 绑到 `PATHS.logs_dir`（早于 `_isolate_env`）⇒
+  全套测试日志（含 simulated error）写进 **`hive_logger.py` 所在 checkout** 的 `logs/alpha_hive.log`（`PATHS.home` 缺省即该目录；本版在 worktree 跑全套时实测该文件在涨）；
+  在主 checkout 跑 pytest 就混进生产日志。与本版三处同物种，没修。
+
+---
 
 ## [0.45.229] — 2026-09-14 — Max Pain「磁吸目标价」预测力检验：未发现可靠预测力 + CBOE 持仓量日期实测
 
@@ -248,6 +601,9 @@ U0 = 现行 origin/main、U1 = 本修复；两语料（历史原样 / 现行规�
 
 ⚠️ 标「仅本地」的两条只存在于这台 Mac 的 `.git` 里，删分支就没了。
 
+> 后续（2026-09-14）：两个「仅本地」分支已推到 origin 备份；0.45.76 / 0.45.79 已由 v0.45.231 合入 main；
+> 下文「未提交的一处」（宏观条自动滚动）已由 v0.45.232 移植进 main。
+
 **main 上的实况**（本版逐项核验）。静态部分看 `origin/main`；渲染部分把 `index.html`
 （`1826d3e` 日报产物）用本地 http.server 打开，拿 `getComputedStyle` 实测：
 
@@ -349,7 +705,68 @@ worktree `defi-hero-section-design-ca009b` 里有 08-30 03:27 的未提交改动
 - **部分 add 失败、部分成功**：成功的那部分照常提交、`success=True`，失败的产物留在工作区，无告警。
   锁是整库级的，想不出生产里只坏一部分的触发条件，故只写进 `commit()` docstring，没加没人读的字段。
 
-## [0.45.224] — 2026-09-14 — 占位（进行中：二次检查 v0.45.222 的改动）
+---
+
+## [0.45.224] — 2026-09-14 — 二次检查 v0.45.222：普查仪器本身被污染——收集期 import 把 cwd 挪到仓库根、weekly_optimizer 把主 checkout 塞进 sys.path；真普查再出 9 条 cwd 依赖
+
+方法同 v0.45.218/222：**不重读汇报，把每条声称写成探针真跑。** 这次的教训在探针自己身上 ——
+v0.45.222 与本版第一轮都「从空目录跑全套」证明 cwd 无关，**那个空目录在收集期就被挪走了**。
+
+### Fixed（进程级状态泄漏：worktree 里的测试测到主 checkout / 仓库根）
+
+1. **收集期 cwd 被挪走。** `test_deep_analysis_prefetch_injection.py` 模块级 `import deep_analysis`，而后者在 import 时
+   `os.chdir(脚本目录)` + `sys.path.insert(0, ".")`。实测插件在 `pytest_collection_finish` 打印：从空目录起跑，
+   收集一结束 cwd 就是 worktree 根、sys.path 多一个 `"."`。于是「空目录全套」与仓库根结果**一模一样**（4308 passed）——
+   被一条单跑就红、全套却绿的测试（`scan_coverage_gate` 子进程）戳穿。改：import 点前后存还原 cwd 与 sys.path。
+2. **`weekly_optimizer` 把主 checkout 插进 `sys.path`，从不拿掉。** 函数体里 `sys.path.insert(0, str(ALPHAHIVE_DIR))` ×6，
+   `ALPHAHIVE_DIR = expanduser("~/Desktop/Alpha Hive")`。审计钩子（`sys.addaudithook`）全套实测：插了 40 次；
+   之后 141 个顶层模块里 **120 个**尚未 import 的会从主 checkout 解析（对照组 0）。**真实复现**：worktree 里把
+   `economic_calendar_watch._release_date_to_quarter` 改坏 —— 单跑它的测试 4 failed；先跑一条 weekly_optimizer 测试再跑 ⇒ **6 passed**。
+   v0.45.222 称「用到这些常量的测试都 monkeypatch 了」只 grep 了常量名；按后果量，文件访问确实只有 import 期一次 `scandir`**（v0.45.237 订正：限本进程；子进程为静态核对）**，
+   **泄漏走的是 sys.path 不是文件**。
+3. **conftest `_isolate_cwd_and_sys_path`（autouse）：每条测试从自己 tmp 下的空目录起跑，结束 cwd 回调用目录、sys.path 还原。****（v0.45.237 订正：回调用目录让高于函数级的 fixture 仍在仓库根里跑；现为会话级空目录）**
+   不只「结束时还原」：修好 1 后**真普查**（空目录全套）再出 **9 条** cwd 依赖，静态检测器一条都看不见 ——
+   参数化变量 `Path(path)`（`test_official_close_price.py` ×3）、循环变量 `pathlib.Path(name)`（`test_silent_failure_guards.py` ×2）、
+   `subprocess.run([…, "scan_coverage_gate.py"])` 不给 cwd（`test_scan_coverage_gate.py` ×4）—— 已全部改锚 `Path(__file__)`；
+   还有生产 `CBOEDailyFetcher()` 的相对默认值 `cache/cboe_daily` 在 cwd 里建目录（不读 `ALPHA_HIVE_CACHE_DIR`）。
+   逐测试空目录让这类问题**在任何一次普通运行里**就红，相对写入也只落进 tmp。**（v0.45.237 订正：只罩测试函数本体；module/class/session 级 fixture 实测照绿）**
+   cwd 还原到 `invocation_params.dir` 而非 setup 快照：测试自己 `monkeypatch.chdir` 的还原顺序不定，按快照会漂移。**（v0.45.237 订正：顺序是确定的：autouse 按名字字母序，monkeypatch 最后 teardown、确定地覆盖手工还原；本仓也没有测试用 monkeypatch.chdir）**
+4. **守卫** `test_reads_own_checkout.py`：`TestProcessStateStaysPut`（收集结束 cwd == 调用目录、无相对 sys.path 项；
+   由 conftest `pytest_collection_finish` 记录）与 `TestRuntimeLeaksAreUndone`（本测试在自己的空目录、上一条故意泄漏的 cwd/sys.path 被还原）**（v0.45.237 订正：cwd 那半是空的：删掉 teardown 还原照样全绿）**。
+   ⚠️ cwd 那条从**仓库根**起跑时是瞎的（chdir 到原地），实测撤掉 1 的隔离只有 sys.path 那条红；从空目录起跑两条都红。
+
+### Fixed（v0.45.222 检测器）
+
+5. **`~/Library` 放行口径错。** v0.45.222 写「`~/Library` 仓库不住那里」—— 本机 `~/Library/Mobile Documents/com~apple~CloudDocs/Desktop`
+   是指向 `~/Desktop` 的符号链接，`samefile` 判定它**就是**主 checkout。改为 `~/Library/Mobile Documents` 与 `~/Library/CloudStorage` 不放行。
+6. **`Path.home() / …` 逐个 BinOp 只看第一段** ⇒ `Path.home() / "Library" / "Mobile Documents"` 内层只见 `"Library"` 放行。改为最外层按整条链判，
+   链中遇非字面量取到它为止（`Path.home() / "Desktop" / name` 照报），内层不重复报。
+
+### Handed off
+
+- 生产代码根因（`weekly_optimizer` 的 insert 锚点、`deep_analysis` import 期副作用、`cboe_fetcher` 相对默认值）另开任务；
+  生产调用方式已核：定时任务 `cd /Users/igg/Desktop/Alpha Hive/ && python3 weekly_optimizer.py` ⇒ 改锚 `__file__` 生产等价。
+
+### 验证
+
+- 探针自证：审计插件先喂 canary（故意读主 checkout + 插 sys.path + import）—— **第一版就漏判 sys.path 里的主 checkout 根**
+  （无尾斜杠，`startswith(MAIN + "/")` 恒假），修后三类信号全出。
+- 真复现：上面 2 的 4 failed / 6 passed；修后先污染再跑 ⇒ 4 failed；把 conftest 还原改空转 ⇒ 回到 6 passed。
+- 变异（每次按字节还原并核对）：撤 1 的隔离（仓库根：sys.path 那条红；空目录：两条都红，对照组全绿）/ 删 collection 记录（两条红）/
+  去逐测试 chdir（本测试空目录那条红）/ 去 sys.path 还原（哨兵那条红）/ 三个站点换回修前、从仓库根**正常跑恰 9 红** /
+  网盘根集合清空、链退回只看首段、内层不抑制、链遇非字面量整条放弃 —— 各被对应自证抓到。
+- 全套从仓库根：**4319 passed / 1 failed / 1 skipped / 2 xfailed**（唯一红 `TestCoverageHorizon`，唯一 skip `test_scheduler.py`）。
+- 全套从空目录（收集后 cwd 未动、无相对 sys.path 项）：同上 **4319 passed / 1 failed**，跑完空目录无残留（修前同一普查留下 `cache/cboe_daily`）。
+- 耗时：两轮全套 396s / 347s，早前约 200s。A/B（三个最慢文件、逐测试 chdir 开关交替各两轮）48.5 / 48.9 / 48.3 / 48.6s 无差 ⇒ 系并发负载（load avg 18–20），非本 fixture。
+
+### v0.45.222 条目里不成立的记录（已就地订正并标注）
+
+- 「`Desktop` 12 处居首」：AST 重数 **13**（`weekly_optimizer.py` 三处当时的正则没数到），仍居首。
+- 「只放行点目录与 `~/Library`（…仓库不住的地方）」：本机 `~/Library/Mobile Documents/…/Desktop` 就是主 checkout，见上 5。
+- 「前七次都往『假红、停下』错」：`alpha-hive-environment-facts.md` 第 4 条（v0.45.192 `caplog` 断言变异下全绿）早就往放行错过。
+- 「失败集合与 AST 普查逐条对上，即没有普查看不见的 cwd 依赖」：只对那三个文件成立；全套真普查另有 9 条 AST 看不见，见上 3。
+
+---
 
 ## [0.45.223] — 2026-09-14 — 二次检查 v0.45.214：status.json 记的「代码版本」其实是日报提交；日报提交失败没人会红
 
@@ -408,17 +825,17 @@ worktree `defi-hero-section-design-ca009b` 里有 08-30 03:27 的未提交改动
 1. **家目录检测器漏 `~/…` 与 `Path.home() / …`。** v0.45.219 称「刻意不管 `expanduser("~/...")`（仓库外文件）」——
    本仓**生产代码**就这么写主 checkout：`alpha_hive_mcp.py:53` 的 `Path.home() / "Desktop" / "Alpha Hive"`，
    `collect_data.py` / `generate_deep_v2.py` / `self_analyst.py` 的 `expanduser("~/Desktop/Alpha Hive")`；
-   全仓家目录路径首段 `Desktop` 12 处居首，而测试侧的 `~` 用法全是 `.claude` / `Library`。
+   全仓家目录路径首段 `Desktop` 12 处居首**（v0.45.224 订正：AST 重数 13，仍居首）**，而测试侧的 `~` 用法全是 `.claude` / `Library`。
    实测：把 thesis 测试的 `CONFIG` 改成这两种写法，**被测测试照绿（读主 checkout）、守卫不响**。
-   改为只放行点目录与 `~/Library`（按用户存放应用状态、仓库不住的地方）。
+   改为只放行点目录与 `~/Library`（按用户存放应用状态、仓库不住的地方）**（v0.45.224 订正：本机 `~/Library/Mobile Documents/com~apple~CloudDocs/Desktop` 就是主 checkout）**。
 2. **模块级 `pytestmark` 豁免是子串判定**：`"integration" in 源码片段` ⇒
    `pytestmark = skipif(..., reason="integration 机才有")` 把整个模块豁免（实测）。改看 AST `Attribute.attr == "integration"`。
-   与已记七次的「冲突标记子串自检」同形，**但前七次都往「假红、停下」错，这次往「假绿、放行」错**。
+   与已记七次的「冲突标记子串自检」同形，**但前七次都往「假红、停下」错，这次往「假绿、放行」错****（v0.45.224 订正：不成立：v0.45.192 的 caplog 断言变异下全绿，早往放行错过）**。
 3. **v0.45.219 称「cwd 相对读取合法用法太多，不做检测器」——没量过。** 全 tests/ `open/Path(<相对字面量>)` 共 8 处：
    **6 处真 bug**，2 处是 `led.open("a")` 的模式参数（方法调用，根本不是路径）。修 6 处 → `Path(__file__).resolve().parent.parent / …`：
    `test_equity_curve_single_source.py` ×2、`test_missing_value_not_zero.py` ×3、`test_pipeline.py` ×1。
    空目录作 cwd 跑这三个文件：修前 **7 failed**（`_js()` 一处供两条）、修后 81 passed；失败集合与 AST 普查逐条对上，
-   即没有普查看不见的 cwd 依赖。新增检测器 `cwd_relative_reads`。
+   即没有普查看不见的 cwd 依赖**（v0.45.224 订正：只对这三个文件成立；全套真普查另有 9 条 AST 看不见，且当时的全套空目录普查被收集期 chdir 污染）**。新增检测器 `cwd_relative_reads`。
 4. **`_orch_project_dir` 只数顶格赋值**：`if` 块里缩进覆盖 / `export PROJECT_DIR=` / `${PROJECT_DIR:=}` 都照返回生产值（实测）。
    给编排器加沙箱覆盖正是自然的下一步 —— 那时 marker 放生产目录、编排器读沙箱 ⇒ 闸不拦。
    **本版未改该文件**：并发的 v0.45.221 正在整体替换它（`_orch_literal`，数全部非注释赋值、失败即 None），
@@ -13094,11 +13511,11 @@ JS `querySelector` 挂钩——class 本就不承担样式职责，不是 bug。
 动的是第七轮宏观指标那一段），三方 diff 互不相交，理论上能自动合并，
 但仍需人工确认最终合并顺序与结果。
 
-## [0.45.79] — 2026-08-30 — 未并入 main：宏观指标颜色令牌化（工作在本地分支 `claude/interesting-khayyam-a141ec`）
+## [0.45.79] — 2026-08-30 — 宏观指标颜色令牌化（当时未并入 main，已由 v0.45.231 合入）
 
 > 标题由 v0.45.226 对账补写。本号在 main 上此前从未出现过（没有占位，也没有正文）。
-> 改动与原正文在 `366fa14`，**未合并**；该分支只在本地、没有推到 origin。
-> 它要修的 `.yc-*` / `.gld-*` 颜色不生效，在 main 上实测仍存在，详见 v0.45.226。
+> 改动与原正文在 `366fa14`（分支 `claude/interesting-khayyam-a141ec`，2026-09-14 已推到 origin 备份）。
+> ✅ **2026-09-14 由 v0.45.231 合入 main**，`gld-dn` 的令牌在合入时改了一处，见 v0.45.231。
 
 ## [0.45.78] — 2026-08-30 — 未并入 main：宏观条补涨跌幅 + 评分分布图改色（工作在 `claude/happy-cannon-bc377f`）
 
@@ -13111,12 +13528,12 @@ JS `querySelector` 挂钩——class 本就不承担样式职责，不是 bug。
 > 改动与原正文在 `3581d8d`，**未合并**。⚠️ 它与未合并的 `e8bac95` 改同几行 `var(--mt)`、
 > 目标令牌不同，不能都照原样合。详见 v0.45.226。
 
-## [0.45.76] — 2026-08-30 — 未并入 main：方向小圆点 `.dot-*` 补样式（工作在 `claude/distracted-heyrovsky-b7ebed`）
+## [0.45.76] — 2026-08-30 — 方向小圆点 `.dot-*` 补样式（当时未并入 main，已由 v0.45.231 合入）
 
 > 标题由 v0.45.226 对账补写。本号在 main 上此前从未出现过。
-> 改动与原正文在 `1646db7`（本地 + origin 均有该分支），**未合并**。
-> v0.45.80 提到的「`elastic-spence` 的 v0.45.76」就是它。圆点在 main 上实测仍然一个都看不见，
-> 详见 v0.45.226。
+> 改动与原正文在 `1646db7`（分支 `claude/distracted-heyrovsky-b7ebed`，本地 + origin 均有）。
+> v0.45.80 提到的「`elastic-spence` 的 v0.45.76」就是它。
+> ✅ **2026-09-14 由 v0.45.231 原样合入 main**。
 
 ## [0.45.75] — 2026-08-29 — 一个已被自己证伪的归因，还在 7 个文件里当理由用
 

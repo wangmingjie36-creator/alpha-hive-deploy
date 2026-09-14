@@ -149,6 +149,56 @@ class TestRenderDashboard:
         )
         assert "background: red" in html
 
+    def test_macro_marquee_structure(self, minimal_report, report_dir):
+        """宏观条自动滚动（v0.45.232）的结构不变式。
+
+        宽度是否填满只能在浏览器里量（见 dashboard.html 里份数的注释），这里锁住量过之后的结构：
+        - 份数为偶数、每半程 ≥ 4 份：少于 4 份时，数值全缺的情况下宽屏会在滚动后段露出空白；
+        - 只有第一份给屏幕阅读器读，其余全部 aria-hidden，否则同一组数被朗读 8 遍；
+        - 每份条目完全一致，否则 translateX(-50%) 回到起点时画面会跳；
+        - sr-only 朗读列表与条目一一对应，改指标时漏改它会让读屏用户读到旧指标。
+        """
+        import re
+        from dashboard_renderer import render_dashboard_html
+        html = render_dashboard_html(
+            report=minimal_report, date_str="2026-03-06",
+            report_dir=report_dir, opportunities=minimal_report["opportunities"],
+        )
+        track = html.split('<div class="ah-macro-track">', 1)[1].split('<ul class="sr-only ah-macro-sr-list">', 1)
+        assert len(track) == 2, "找不到宏观条的滚动轨道或 sr-only 朗读列表"
+        track_html, sr_html = track[0], track[1].split("</ul>", 1)[0]
+
+        copies = re.findall(r'<div class="ah-macro-items([^"]*)"([^>]*)>(.*?)\n    </div>', track_html, re.S)
+        n = len(copies)
+        assert n % 2 == 0 and n // 2 >= 4, (
+            f"宏观条共 {n} 份，要求偶数且每半程 ≥ 4 份（理由见 templates/dashboard.html 的份数注释）")
+
+        hidden = ['aria-hidden="true"' in attrs for _, attrs, _ in copies]
+        assert hidden == [False] + [True] * (n - 1), "只能第一份给屏幕阅读器读，其余必须 aria-hidden"
+        assert all("ah-macro-items--dup" in cls for cls, _, _ in copies[1:]), \
+            "副本必须带 ah-macro-items--dup，减弱动效时靠它隐藏"
+
+        names = [re.findall(r'<div class="ah-macro-name">([^<]+)</div>', body) for _, _, body in copies]
+        assert names[0], "第一份里没有解析到任何指标名"
+        assert all(nm == names[0] for nm in names), f"各份条目不一致：{names}"
+
+        sr_items = re.findall(r"<li>([^<]*)</li>", sr_html)
+        assert len(sr_items) == len(names[0]) and all(
+            li.startswith(nm) for li, nm in zip(sr_items, names[0])), \
+            f"sr-only 朗读列表 {sr_items} 与条目 {names[0]} 对不上"
+
+    def test_macro_marquee_reduced_motion_hides_copies(self):
+        """减弱动效时必须只剩一份、可手动横滑：F15 全局规则只把动画缩到 0.01ms，
+        不隐藏副本的话用户会看到 8 份重复的指标。"""
+        import re
+        from dashboard_renderer import _TPL_DIR
+        css = (_TPL_DIR / "dashboard.css").read_text(encoding="utf-8")
+        blocks = re.findall(r"@media\(prefers-reduced-motion:reduce\)\{(.*?)\n\}", css, re.S)
+        marquee = [b for b in blocks if "ah-macro" in b]
+        assert marquee, "找不到宏观条的 prefers-reduced-motion 降级规则"
+        assert re.search(r"\.ah-macro-items--dup\{display:none\}", marquee[0])
+        assert re.search(r"\.ah-macro-viewport\{overflow-x:auto", marquee[0])
+
 
 
 # ==================== 模板文件检查 ====================

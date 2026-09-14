@@ -14,6 +14,55 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ==================== 环境隔离 ====================
 
+# ==================== cwd / sys.path 隔离 ====================
+
+@pytest.fixture(autouse=True, scope="session")
+def _empty_cwd_between_tests(request, tmp_path_factory):
+    """测试之间（含 module / class / session 级 fixture 的 setup 与 teardown）cwd 停在一个会话级空目录（v0.45.237）。
+
+    v0.45.224 在每条测试结束后把 cwd 还原到**调用目录** —— 于是高于函数级的 fixture 都在调用目录
+    （平常就是仓库根）里 setup，里面的 cwd 相对读取照绿。实测：module 级 fixture 读 `Path("config.py")`
+    ⇒ `exists()=True`、cwd=调用目录。会话结束才回调用目录。
+    """
+    d = tmp_path_factory.mktemp("cwd_between_tests")
+    request.config._alpha_hive_between_tests_cwd = str(d)
+    os.chdir(d)
+    yield d
+    os.chdir(request.config.invocation_params.dir)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cwd_and_sys_path(_empty_cwd_between_tests, tmp_path, monkeypatch):
+    """每条测试在**自己的空目录**里跑；结束后 cwd 回会话级空目录、`sys.path` 还原（v0.45.224 起）。
+
+    **为什么是空目录，不只是「结束时还原」**：cwd 相对的读取有一半写法静态扫描看不见 ——
+    参数化变量 `Path(path)`、循环变量 `Path(name)`、`subprocess.run([…, "x.py"])` 不给 cwd。
+    v0.45.224 从空目录跑全套（先修好收集期 chdir 之后）实测出 9 条，
+    还有生产代码 `CBOEDailyFetcher()` 的相对默认值 `cache/cboe_daily` 在 cwd 里建目录
+    （它不读 `ALPHA_HIVE_CACHE_DIR`；在主 checkout 起 pytest 就建进主 checkout）。
+
+    **为什么还原 `sys.path`**：`weekly_optimizer.py` 在函数体里
+    `sys.path.insert(0, str(ALPHAHIVE_DIR))`，ALPHAHIVE_DIR 写死 `~/Desktop/Alpha Hive`
+    （worktree 里就是主 checkout），从不拿掉（全套插了 40 次）。此后任何函数体内 `import X`、
+    只要 X 还没 import 过，拿的就是主 checkout 的 X：141 个顶层模块里 120 个会这样解析。
+    实测把 worktree 的 `economic_calendar_watch._release_date_to_quarter` 改坏：单跑它的测试
+    4 failed，先跑一条 weekly_optimizer 测试再跑 ⇒ **6 passed**。根治在生产代码。
+
+    **为什么 chdir 走 monkeypatch**：autouse fixture 的 setup 顺序是**按名字字母序**，不是定义顺序
+    （`--setup-plan` 实测：`_block_llm_api` 排第一、先实例化 monkeypatch ⇒ monkeypatch 最后 teardown）。
+    v0.45.224 在 teardown 里手工 `os.chdir(调用目录)`，测试若自己 `monkeypatch.chdir`，撤销排在后面，
+    cwd 停在该测试的 `_cwd`（实测；v0.45.224 docstring 说顺序「不定」—— 错，是确定地输）。
+    `monkeypatch.chdir` 撤销时回到**本测试第一次经它 chdir 之前**的目录（即会话级空目录），
+    与谁先 teardown 无关；测试里裸 `os.chdir` 的泄漏也一并被它撤销。
+    """
+    path = list(sys.path)
+    run_dir = tmp_path / "_cwd"
+    run_dir.mkdir()
+    monkeypatch.chdir(run_dir)
+    yield
+    sys.path[:] = path
+
+
 @pytest.fixture(autouse=True)
 def _isolate_env(tmp_path, monkeypatch):
     """所有测试自动使用临时目录，防止污染生产数据库"""
@@ -484,6 +533,18 @@ def _block_slack(monkeypatch):
         "①② 两道闸本该让 enabled 恒为 False、在发送前就短路——"
         "走到这里说明有测试把 enabled 又弄成了 True 而没有自己 patch "
         "get_session。去那条测试里补 patch，不要在这里放行。")
+
+
+# ==================== cwd / sys.path 不许跨测试泄漏 ====================
+
+def pytest_collection_finish(session):
+    """记下收集结束时的 cwd 与相对 sys.path 项（v0.45.224）。
+
+    收集期被 import 的模块若在 import 时 chdir，下面的逐测试还原管不到（它从第一条测试才开始记）。
+    断言在 `test_reads_own_checkout.py::TestProcessStateStaysPut`。
+    """
+    session.config._alpha_hive_cwd_after_collection = os.getcwd()
+    session.config._alpha_hive_relative_sys_path = [p for p in sys.path if not os.path.isabs(p)]
 
 
 # ==================== weekly_optimizer 生产库隔离 ====================
