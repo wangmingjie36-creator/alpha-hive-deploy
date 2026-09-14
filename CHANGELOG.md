@@ -5,7 +5,73 @@
 
 ---
 
-## [0.45.244] — 2026-09-14 — 占位（进行中：import 冻结路径扫描器盲区——模块级调用同模块函数、函数体求值 PATHS./__file__ 的形态看不见，补扫描 + KNOWN 白名单）
+## [0.45.244] — 2026-09-14 — import 冻结路径扫描器补盲区：模块级调用本模块函数/类、被调方体内求值 `PATHS`/`__file__`——白名单按「路由」登记，放行 hive_logger 的良性形态而不对它的事故原形失明
+
+**盲区**（v0.45.239 条目「为什么结构守卫没抓到」）：`TestSpeciesDoesNotSpread._scan()` 只看模块级
+`Assign`/`AnnAssign` 右侧字面含不含 `PATHS`（`__file__` 族同一扫描器），`logger = _setup_logger()` 右侧只有一个函数调用。
+
+**普查实测（本版扫描器，含 v0.45.239 合并后的树）**：`PATHS` 3 处、`__file__` 0 处。
+- ⭐ **修后普查前提变了**：v0.45.239 之后 `_setup_logger` 体里**已经没有 `PATHS`**——读挪进了
+  `LogsDirRotatingFileHandler.current_target`。只跟函数的扫描器看不见它（修前能看见，via `_setup_logger`）；
+  跟到类构造器、再跟 `self.current_target()` 才看见。三种扫描变体在修前/修后树上的命中已逐一跑过。
+- `scheduler.py:26` 不在本类管辖：它没调本模块函数（`basicConfig(handlers=[FileHandler(<_PROJECT_ROOT>/…)])`），
+  冻结输入 `_PROJECT_ROOT` 早已在 `TestFileDerivedSpeciesDoesNotSpread.KNOWN`。
+- 模块级裸表达式**直接**含标记：`PATHS` 0 处；`__file__` 5 处，全是 `sys.path.insert`（代码锚点，正确）。未加扫描。
+- **订正 v0.45.239 一处**：「`paper_portfolio.py:85-86` 已被内容指纹 fixture 罩住」只对 `STATE_DIR` 成立；
+  `SNAPSHOT_DIR` 没被 `_isolate_paper_portfolio_state` 重绑。它只有两处 glob 读、无写入 ⇒ 后果是测试读到真实快照，不是写穿。
+
+### Added（`tests/test_paths_not_frozen_at_import.py::TestFrozenViaModuleLevelCall`）
+- 跟随规则（限本模块、全结构性）：`f()` → 模块级 def（传递）；`C()` → `__new__`/`__init__`/`__post_init__`，其中
+  `self.m()`/`cls.m()` → 本类 `m`；不进嵌套 def/class/lambda；跳 `if __name__ == "__main__"` 体（`else` 照进）；
+  def 的默认参数与装饰器、class 的基类与装饰器算 import 期。标记判 `ast.Name`/`ast.Attribute` 节点，不判
+  `ast.unparse` 子串——本仓 docstring 满是 `PATHS.x`/`__file__`。
+- ⭐ **键是 `(文件, 绑定名, via)`，`via` = 标记真正出现的函数。** 按上面两类的 `(文件, 名)` 登记，
+  `hive_logger.logger` 修前修后键**完全相同**（实测）⇒ 把良性的修后形态放进白名单，就对退回事故原形永久失明。
+  带 `via` 后退回会换出新键。
+- `KNOWN`（子集语义，逐条理由）：`paper_portfolio` `STATE_DIR`（冻结，conftest 重绑 + 指纹）、`SNAPSHOT_DIR`
+  （冻结，只读）、`hive_logger.logger via LogsDirRotatingFileHandler.current_target`（**不冻结**：emit 时重指，
+  行为由 `test_hive_logger_not_frozen.py` 守）。
+- **`hive_logger._setup_logger` 不进白名单，也不许进**：它的体里已无 `PATHS`，登记它会立刻成过期项；它再出现就是事故原形。
+  `test_hive_logger_regression_is_not_allowlistable` 同时断言它不在 KNOWN、不在扫描结果里。
+- `test_scanner_has_teeth`：合成夹具**精确相等**，每条跟随规则各配一行正/反例（对照表在 docstring）。
+- `test_no_new_route` / `test_known_has_no_stale_entries`（按标记参数化）。**与上面两类不同，过期项会红**——
+  存量只有 3 条，修好删一行比留一张靠人对账的表便宜；它同时是真实仓库上的「扫描器有牙」。两条红时互相提示「多半是改名」。
+
+### Changed
+- `TestSpeciesDoesNotSpread._scan` 加 `_visit` 参数：新扫描器复用它的文件集、排除规则与解码/语法记账，不另写一份文件循环。
+  不传时行为不变（原 72 条用例全绿）。
+
+### 变异（真改文件、跑本类、逐字节还原；`git status` 还原后为空）
+
+| 变异 | 红 |
+|---|---|
+| 无变异基线（含 `--noconftest` 版） | 无（6 passed） |
+| P1 `paper_portfolio.py` 加 `_MUTANT_DIR = _base_dir() / "mutant"` | `test_no_new_route[PATHS]` |
+| P1b `scheduler.py` 加 `def _here(): return dirname(__file__)` + `_HERE = _here()` | `test_no_new_route[__file__]` |
+| P2 删掉白名单站点（`SNAPSHOT_DIR = None`） | `test_known_has_no_stale_entries[PATHS]` |
+| P3 `hive_logger.py` 换回修前版本 | 默认 conftest 下 6 个 **setup error**（v0.45.239 的 ① 先接住）⇒ 本类没轮到跑；`--noconftest` + env 指 scratch：新路由、过期、回退三条红 |
+| P4 = P3 + 把 `_setup_logger` 路由登进 KNOWN | 只 `test_hive_logger_regression_is_not_allowlistable` |
+| S1 不跳 main 守卫 | 有牙 + 真实仓库新路由（两个标记） |
+| S2 不传递 / S3 不跟构造器 / S3b 不跟 `self.m()` | 有牙 + 真实仓库过期（hive_logger 路由消失） |
+| S3c 构造时跟全部方法 | 有牙 + 真实仓库 `__file__` 新路由 |
+| S4 子串判法 / S5 进 lambda 与嵌套 def / S6 不下钻复合语句 / S7 不看默认参数 | 有牙 |
+| S8 标记写死 `PATHS` | 有牙 + `__file__` 新路由 |
+| S9 `_scan` 忽略 `_visit` | 有牙 + 真实仓库三条 |
+
+P3 那一行的教训：**变异被上游守卫先接住，证明不了本守卫有牙**——要把上游关掉单独看，并先用同样的 flag 跑无变异基线。
+
+### 验证
+- 本文件：78 passed；`ruff check` 通过。
+- 全套（worktree 根，`--maxfail` 覆盖 addopts 的 `-x`）：**2 failed / 4437 passed / 1 skipped / 2 xfailed**。
+  worktree 与主 checkout 的 `logs/alpha_hive.log`、`alpha_hive_structured.jsonl` 跑前跑后 `(size, mtime)` 逐字相同。
+  - `TestCoverageHorizon`：设计即红。
+  - ⚠️ `test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd::test_no_cwd_derived_watch_in_conftest`：
+    **与本版无关，是 v0.45.239 × v0.45.240 的语义冲突**。本分支合并了尚未进 main 的 v0.45.239（81153eda，
+    本版依赖它的修后 `hive_logger`）；它的 conftest `_hive_log_handler_escapes:1044,1050` 两处 `.resolve()`
+    被 v0.45.240 的结构守卫判为「隐式读 cwd」。实测（临时 detached worktree）：origin/main（b0b0e081）该类 3 passed；
+    只含合并、不含本版改动的 2179e6ee 即 1 failed。本版提交不碰 conftest 与该守卫。**v0.45.239 落 main 时要一并处理。**
+- **未推 main**：本版依赖 v0.45.239（修前 `hive_logger` 上本类 `KNOWN` 的 hive_logger 路由即过期、`_setup_logger` 路由即新增），
+  而 v0.45.239 尚未进 main、合并后又有上面那条红。
 
 ## [0.45.243] — 2026-09-14 — 占位（进行中：CBOE 盘中陈旧价的两个未覆盖消费者——回填兜底读云快照 price_at_fetch 不判陈旧 + close_correction 盘中/陈旧文件把现价归到上一会话）
 
