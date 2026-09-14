@@ -711,7 +711,8 @@ class TestFeedbackLoopImport:
     def test_no_output_dir_reference_in_source(self):
         """源码中不应有 self._output_dir 引用（已修复为 self.report_dir）"""
         import pathlib
-        src = pathlib.Path("alpha_hive_daily_report.py").read_text(encoding="utf-8")
+        src = (pathlib.Path(__file__).resolve().parent.parent
+               / "alpha_hive_daily_report.py").read_text(encoding="utf-8")
         assert "self._output_dir" not in src, \
             "alpha_hive_daily_report.py 仍包含 self._output_dir（应为 self.report_dir）"
 

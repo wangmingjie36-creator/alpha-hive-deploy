@@ -53,7 +53,59 @@
 
 ---
 
-## [0.45.222] — 2026-09-14 — 占位（进行中：二次检查 v0.45.219 的改动）
+## [0.45.222] — 2026-09-14 — 二次检查 v0.45.219：两条「刻意不管」的理由都没量过、豁免判定是子串、解析器只数顶格；同族 cwd 相对读取还有 6 处
+
+方法同 v0.45.218：**不重读汇报，把每条声称与检测器边界写成探针真跑。**
+
+### Fixed
+
+1. **家目录检测器漏 `~/…` 与 `Path.home() / …`。** v0.45.219 称「刻意不管 `expanduser("~/...")`（仓库外文件）」——
+   本仓**生产代码**就这么写主 checkout：`alpha_hive_mcp.py:53` 的 `Path.home() / "Desktop" / "Alpha Hive"`，
+   `collect_data.py` / `generate_deep_v2.py` / `self_analyst.py` 的 `expanduser("~/Desktop/Alpha Hive")`；
+   全仓家目录路径首段 `Desktop` 12 处居首，而测试侧的 `~` 用法全是 `.claude` / `Library`。
+   实测：把 thesis 测试的 `CONFIG` 改成这两种写法，**被测测试照绿（读主 checkout）、守卫不响**。
+   改为只放行点目录与 `~/Library`（按用户存放应用状态、仓库不住的地方）。
+2. **模块级 `pytestmark` 豁免是子串判定**：`"integration" in 源码片段` ⇒
+   `pytestmark = skipif(..., reason="integration 机才有")` 把整个模块豁免（实测）。改看 AST `Attribute.attr == "integration"`。
+   与已记七次的「冲突标记子串自检」同形，**但前七次都往「假红、停下」错，这次往「假绿、放行」错**。
+3. **v0.45.219 称「cwd 相对读取合法用法太多，不做检测器」——没量过。** 全 tests/ `open/Path(<相对字面量>)` 共 8 处：
+   **6 处真 bug**，2 处是 `led.open("a")` 的模式参数（方法调用，根本不是路径）。修 6 处 → `Path(__file__).resolve().parent.parent / …`：
+   `test_equity_curve_single_source.py` ×2、`test_missing_value_not_zero.py` ×3、`test_pipeline.py` ×1。
+   空目录作 cwd 跑这三个文件：修前 **7 failed**（`_js()` 一处供两条）、修后 81 passed；失败集合与 AST 普查逐条对上，
+   即没有普查看不见的 cwd 依赖。新增检测器 `cwd_relative_reads`。
+4. **`_orch_project_dir` 只数顶格赋值**：`if` 块里缩进覆盖 / `export PROJECT_DIR=` / `${PROJECT_DIR:=}` 都照返回生产值（实测）。
+   给编排器加沙箱覆盖正是自然的下一步 —— 那时 marker 放生产目录、编排器读沙箱 ⇒ 闸不拦。
+   **本版未改该文件**：并发的 v0.45.221 正在整体替换它（`_orch_literal`，数全部非注释赋值、失败即 None），
+   已发消息交接 10 个探针用例、「退回只数顶格 ⇒ 恰 3 条红」的变异结果，并建议配一条**不依赖编排器在不在本机**的纯字符串测试。
+   本版一度改过该 helper 并验证，收到对方消息后已整文件还原。
+
+### Changed
+
+5. 两个检测器迁出 `test_no_invisible_prod_data_skips.py`，新文件 **`tests/test_reads_own_checkout.py`** ——
+   它们与 skip 无关，按「测试读到的是不是**本检出**那份」归类；原文件 docstring 留指针。
+6. 扫描范围含检测器文件自身。v0.45.219 排除了 SELF；实测自扫 0 命中，排除只制造盲区。
+
+### 验证
+
+- 探针 7 例：修前 4 MISS，修后只剩 `os.path.join("/", "Users", …)` 拆开写 —— 全仓（含生产代码）零处，写进 docstring 作已知边界。
+- 真文件变异：R1 三个 cwd 站点放回修前原文 ⇒ 恰 6 个 offender；R2 两个 thesis 测试放回 v0.45.219 修前原文 ⇒
+  家目录（:85）与 cwd（:121）各红；R3 thesis 锚点改成 `Path.home()` / `expanduser("~/Desktop/…")` ⇒ 守卫红，
+  **被测测试自己 12 passed** —— 正是静默读主 checkout 的那个形状。
+- 检测器变异 7 种各被对应自证抓到：豁免退回子串 / 去 `~/` 分支 / 去 `Path.home()` 分支 / 应用状态区不放行 /
+  cwd 把方法调用也算（真扫描也跟着红：`led.open("a")`）/ 去 `pathlib.`·`io.` 分支 / 只认 `open` 不认 `Path`。每次按字节还原并核对。
+- v0.45.219 两条 thesis 修复与新守卫从空目录 cwd 跑：56 passed。
+- 全套（`--maxfail=1000`，本版全部改动之上）：**4281 passed / 1 failed / 1 skipped / 2 xfailed**（4284 selected）。
+  唯一的红仍是 `TestCoverageHorizon`（设计内），唯一 skip 仍是 `test_scheduler.py`。
+
+### v0.45.219 条目里不成立的记录（已就地订正并标注）
+
+- 「刻意不管 `expanduser("~/...")`」「未覆盖：cwd 相对…合法用法太多，不做检测器」：都没量过，见上 1、3。
+- 「豁免只有 integration 作用域（…模块级 `pytestmark`）」：实现是子串，见上 2。
+- 「…或多处赋值 ⇒ None」：只数顶格，见上 4。
+- 「普查时顺带发现的同族轻症」：那次只 grep 了配置文件名，同族另有 6 处。
+- 「全套 4264 passed…」：跑在合并 v0.45.220 **之前**的 `7ff936f` 上，合并后只跑了子集；本版全套见上。
+
+---
 
 ## [0.45.221] — 2026-09-14 — 占位（进行中：test_idempotent_when_today_already_scanned 跑真编排器写穿生产 status.json / 标记文件 / 日志）
 
@@ -111,7 +163,7 @@
    - 修前实测：往 **worktree** 配置的 NVDA/L1 注入一条第三种 schema 条件 ⇒ 旧测试 **1 passed**。
    - 修后同一变异 ⇒ 红（`1 条无法识别 —— 配置里出现了第三种 schema`）；
      把配置挪走 ⇒ 红（`随代码发布的配置不见了：<worktree 路径>`），不再 skip。
-2. **`test_thesis_break_evaluability.py::test_no_price_conditions_in_config`**（普查时顺带发现的同族轻症）：
+2. **`test_thesis_break_evaluability.py::test_no_price_conditions_in_config`**（普查时顺带发现的同族轻症）**（v0.45.222 订正：那次只 grep 了配置文件名，同族另有 6 处）**：
    `open("thesis_breaks_config.json")` 跟着 cwd 走。实测：worktree 配置注入一条 `_machine` 价格条件，
    从仓库根跑 ⇒ 红；**从另一个放着干净副本的 cwd 跑 ⇒ 绿**。改同一代码锚点后两个 cwd 都红，还原后绿。
    ⚠️ 只在一个 cwd 下验会把这个 bug 验成「没问题」—— 旧写法从仓库根跑本来就是红的。
@@ -123,7 +175,7 @@
      是被测系统读的**数据位置**，不是改动中的文件；所在类标了 `integration`，条件性写在 marker 上。
      **绝不能锚 `__file__`**：worktree 里 marker 会落在编排器不看的地方 ⇒ 闸不拦 ⇒ 13:30 后真跑全量扫描。
    - **不当**：值是**抄**来的。项目搬出 iCloud 桌面（CLAUDE.md 给的根治方案）后它会继续指旧目录。
-     改为 `_orch_project_dir()` 从编排器文本读唯一的纯字面 `PROJECT_DIR`；`$HOME/...` 等需展开的写法或多处赋值 ⇒ None。
+     改为 `_orch_project_dir()` 从编排器文本读唯一的纯字面 `PROJECT_DIR`；`$HOME/...` 等需展开的写法或多处赋值 ⇒ None。**（v0.45.222 订正：只数顶格，缩进 / export / `${:=}` 覆盖照返回生产值）**
    - 新增默认套件观测点 `TestCatchupGate::test_marker_dir_readable_from_orchestrator`：
      把 `ORCH` 指向改成 `$HOME/...` 形式的副本 ⇒ 红；指向 `PROJECT_DIR` 重复两行的副本 ⇒ 红。
    - integration 测试本身**未执行**（会真跑编排器、往生产目录写 marker、覆盖 `~/.claude/reports/status.json`），只核对了可收集。
@@ -136,14 +188,14 @@
    这是口径盲区不是漏一条名单：**「只在一台机器上」也可以来自路径**。
    - 按**路径形状**判：`tests/*.py`（含 conftest）里以 `/Users` 或 `/home` 开头的字符串字面量，
      **不看有无 skip**（没 skip 时在 worktree 里同样安静地读错文件）；豁免只有 integration 作用域
-     （函数 / 类装饰器或模块级 `pytestmark`）；模块级常量不豁免。刻意不管 `expanduser("~/...")`（仓库外文件，位置本就随人）。
+     （函数 / 类装饰器或模块级 `pytestmark`）**（v0.45.222 订正：pytestmark 判定是子串，reason 里有 integration 字样即整模块豁免）**；模块级常量不豁免。刻意不管 `expanduser("~/...")`（仓库外文件，位置本就随人）**（v0.45.222 订正：没量过：本仓生产代码就用 `~/Desktop/Alpha Hive` 与 `Path.home() / "Desktop"` 写主 checkout）**。
    - 把修前的两个文件放回 `tests/` 跑新守卫 ⇒ 恰好 1 个 offender（thesis :85），scan_catchup :112 因 integration 豁免不报；旧检测器对同一文件仍绿。
    - 检测器 4 种变异各被对应自证抓到：去 integration 作用域豁免 / 正则漏 `/home` / 去模块级 pytestmark 豁免 / 退化成「有 skip 才报」。
-   - 未覆盖：cwd 相对的 `open("x.json")`（第 2 条那种）—— 裸相对文件名的合法用法（`tmp_path / "..."`）太多，不做检测器。
+   - 未覆盖：cwd 相对的 `open("x.json")`（第 2 条那种）—— 裸相对文件名的合法用法（`tmp_path / "..."`）太多，不做检测器。**（v0.45.222 订正：没量过：全 tests/ 共 8 处，6 处真 bug，2 处是模式参数）**
 
 ### 验证
 
-- 全套（`--maxfail=1000`）：**4264 passed / 1 failed / 1 skipped / 80 deselected / 2 xfailed**（290s）。
+- 全套（`--maxfail=1000`）：**4264 passed / 1 failed / 1 skipped / 80 deselected / 2 xfailed**（290s）。**（v0.45.222 订正：跑在合并 v0.45.220 之前的 `7ff936f` 上，合并后只跑了子集）**
   唯一的红是 `test_economic_calendar.py::TestCoverageHorizon`（CPI 剩 88 天、NFP 剩 82 天 < 90 天阈值，
   设计内定期变红，开工前已红，与本次无关）；唯一 skip 为 `test_scheduler.py`（`schedule` 库不可用，既有）。
 - 改动的 4 个文件单跑全绿、`ruff check` 全绿；元守卫文件 11 → 19 条。所有变异事后已还原（配置 `git diff` 为空、主 checkout 配置未被触碰）。

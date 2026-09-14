@@ -215,7 +215,8 @@ class TestNoSilentModelSwap:
         import ast
         import pathlib
 
-        src = pathlib.Path("dashboard_renderer.py").read_text(encoding="utf-8")
+        src = (pathlib.Path(__file__).resolve().parent.parent
+               / "dashboard_renderer.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
         found = None
         for node in ast.walk(tree):
@@ -294,7 +295,8 @@ class TestUnavailableStateIsActuallyReachable:
 
     def _js(self):
         from pathlib import Path
-        return Path("templates/dashboard.js").read_text(encoding="utf-8")
+        return (Path(__file__).resolve().parent.parent
+                / "templates" / "dashboard.js").read_text(encoding="utf-8")
 
     def _js_code_only(self):
         """去掉整行 `//` 注释后的 JS。
