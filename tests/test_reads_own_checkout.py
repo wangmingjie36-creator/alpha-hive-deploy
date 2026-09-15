@@ -466,6 +466,19 @@ class TestConftestGuardsDoNotAnchorOnCwd:
     喂给 v0.45.245 版返回 `[]`。本仓当前无此写法——量过，不是假设。改：先扫一遍
     `ImportFrom(module in {os, os.path, posixpath, ntpath})`，把本地名字（含 `as` 别名）登记成
     「等价于哪个 `.attr()` 检测」，主循环里 `Call(func=Name)` 命中登记表就按同样规则判。
+
+    ⚠️ **v0.45.254 二次检查再补一处：`enclosing_function_name` 把装饰器参数/默认参数值也算进
+    「函数体内」，会被 `ALLOWED` 误放行。** 这两处在 AST 里确实是 `FunctionDef` 的子节点
+    （`decorator_list` / `args.defaults` / `args.kw_defaults` / `returns` 注解），但**语义上是在
+    定义那一刻、于外层作用域求值**——不是函数体、不会在每次调用时跑。实测：
+    `@deco(os.getcwd())\ndef pytest_collection_finish(...): ...` 与
+    `def pytest_collection_finish(session, x=os.getcwd()): ...` 两者的 `os.getcwd()` 都被父指针表
+    直接归到 `pytest_collection_finish`（它在 `ALLOWED` 里）——于是被误放行为 `[]`。
+    本仓当前三个 `ALLOWED` 函数都没有这种写法——量过，不是假设；`_hive_log_handler_escapes` 的
+    `handlers=None` 恰好是个无害常量，纯属巧合没撞上，不是这处逻辑本来就对。
+    改：走到 `FunctionDef` 时先判来路——若正是从它的 `decorator_list` 某项、`args`（涵盖
+    defaults/kw_defaults/注解）或 `returns` 走上来的，不算「进了这个函数」，继续往外走；
+    只有从 `body` 走上来的才归给它。
     """
 
     EXPLICIT = {"cwd", "getcwd"}
@@ -488,12 +501,17 @@ class TestConftestGuardsDoNotAnchorOnCwd:
                 parent[child] = node
 
         def enclosing_function_name(node):
-            n = parent.get(node)
-            while n is not None:
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    return n.name
-                n = parent.get(n)
-            return None  # 模块级，或 class 体顶层（不在任何函数里）
+            cur = node
+            while True:
+                par = parent.get(cur)
+                if par is None:
+                    return None  # 模块级，或 class 体顶层（不在任何函数里）
+                if isinstance(par, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # decorator_list / args（含 defaults、kw_defaults、注解）/ returns 注解
+                    # 在**定义时、外层作用域**求值，不算「进了这个函数」——只有 body 才是（v0.45.254）。
+                    if cur not in par.decorator_list and cur is not par.args and cur is not par.returns:
+                        return par.name
+                cur = par
 
         # `from os import getcwd as gc` 之类：本地名字 -> 等价于哪个 .attr() 检测（v0.45.251）。
         bare_names = {}
@@ -569,6 +587,22 @@ class TestConftestGuardsDoNotAnchorOnCwd:
             "from os.path import abspath\nX = abspath('x')\n": ["<module>:2"],  # 同样受模块级检查约束
             # 反面对照：不是 os/os.path/posixpath/ntpath 来源的同名函数不该被误判成裸名 cwd 读取。
             "from my_module import getcwd\ndef _guard():\n    x = getcwd()\n": [],
+            # v0.45.254：decorator_list / args（defaults/注解）/ returns 在定义时于外层作用域求值，
+            # 不算「进了这个函数」——即便这个函数名恰好在 ALLOWED 里，也不该被那顶帽子连带放行。
+            # 用真实的 ALLOWED 名字（pytest_collection_finish）做探针，才测得出「会不会被误放行」。
+            # 这处装饰器表达式本身在**模块级**求值（`pytest_collection_finish` 本就定义在模块顶层，
+            # 装饰器不属于任何外层函数）——正确归属是 `<module>`，不是被装饰的那个函数名；
+            # 修前会误报成 `pytest_collection_finish`（在 ALLOWED 里）从而被放行成 `[]`，两种错法都不对。
+            "import os\ndef deco(x):\n    return lambda f: f\n"
+            "@deco(os.getcwd())\ndef pytest_collection_finish(session):\n    pass\n": ["<module>:4"],
+            # 同理：默认值与返回注解在 def 语句**执行时**（模块级函数即 import 时，在模块作用域）求值。
+            "import os\ndef pytest_collection_finish(session, x=os.getcwd()):\n    pass\n": ["<module>:2"],
+            "import os\ndef pytest_collection_finish() -> os.getcwd():\n    pass\n": ["<module>:2"],
+            # 反面对照：body 内部真的调用 ALLOWED 函数名必须继续放行（上面的修法不能矫枉过正）——
+            # 与第 4 条用例（`pytest_collection_finish` body 内 `os.getcwd()` → `[]`）是同一条断言，不重复列。
+            # 嵌套：外层函数的 body 里定义了一个不相干的内层函数，装饰器/默认值该归给外层还是模块级
+            # （视外层是否也是函数而定），不能被内层函数名顶替。
+            "import os\ndef outer():\n    def inner(x=os.getcwd()):\n        pass\n    return inner\n": ["outer:3"],
         }
         for src, want in cases.items():
             assert self.cwd_readers_outside(src, self.ALLOWED) == want, src

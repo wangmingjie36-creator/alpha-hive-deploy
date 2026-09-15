@@ -2362,11 +2362,35 @@ class OptionsAgent:
             _log.debug("IV-RV Spread 计算失败 %s: %s", ticker, _e_ivr)
 
         # ⑤ Gamma 到期日历（按到期日拆分 OI 集中度 + Pin Risk + Charm 方向）
+        # v0.45.258 修复：此前直接复用 calls_df/puts_df——那是 fetch_options_chain()
+        # 默认选择器（cboe_options._select_expiries）产出的 IV-rank 口径视图，
+        # **按设计排除 DTE<7**（且日历 DTE 口径少算一天，near_expiry_set 里的到期日
+        # 通常一个都进不了 chosen 列表，见该函数 docstring）。Pin Risk 恰恰相反——
+        # 它要找的就是「最近、OI 最集中」的到期日，本月/本周到期日一旦落进这个
+        # DTE<7 窗口就从这里的 calls_df/puts_df 里完全消失，日历只能矮子里拔将军，
+        # 从剩下的次要到期日里选出一个 OI 规模小得多、行权价离现价远得多的“Pin”
+        # （NVDA 2026-09-14 实测：真正 OI 最大的 09-18 到期日被排除，日历改选
+        # 09-25 一个 $270 冷门行权价，而 09-18 现价附近的 OI 是它的数十倍）。
+        # 修法与 advanced_analyzer 的 dealer GEX 同源同因（v0.45.197 docstring 已
+        # 指明「同一份 payload 要给口径需求相反的两类消费者各出一个视图」）：
+        # 换用 fetch_cboe_chain_for_gex 的全到期日、日历口径 DTE 视图。它命中同一份
+        # _fetch_cboe_payload 缓存，不产生新网络请求；失败（含非 CBOE 数据源）时
+        # 退回旧的 calls_df/puts_df，不比修复前更差。
         gamma_calendar: Dict = {}
         try:
             from market_intelligence import calculate_gamma_expiry_calendar
+            _gc_calls, _gc_puts = calls_df, puts_df
+            try:
+                from cboe_options import fetch_cboe_chain_for_gex
+                _gc_full = fetch_cboe_chain_for_gex(ticker, stock_price or atm_price)
+                if _gc_full and (_gc_full.get("calls") or _gc_full.get("puts")):
+                    _gc_calls = _gc_full.get("calls", [])
+                    _gc_puts = _gc_full.get("puts", [])
+            except Exception as _e_gcfull:
+                _log.debug("[%s] Gamma 日历全到期日视图获取失败，退回近月截断链: %s",
+                           ticker, _e_gcfull)
             gamma_calendar = calculate_gamma_expiry_calendar(
-                calls_df, puts_df, stock_price or atm_price
+                _gc_calls, _gc_puts, stock_price or atm_price
             )
         except Exception as _e_gc:
             _log.debug("Gamma 到期日历计算失败 %s: %s", ticker, _e_gc)

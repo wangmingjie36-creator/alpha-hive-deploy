@@ -259,10 +259,14 @@ ARCHIVE_STATICALLY_UNPROVABLE = {
 }
 
 #: 生产者不走 AgentResult（返回裸 dict），静态扫描器够不到。
-#: ⚠️ 2026-09-14 实测这两条**基本已死**：CodeExecutorAgent 自 2026-08 起把 market_cap /
-#: pe_ratio 挪进 `details.fetch_data`（9 月 106/108 份嵌套），归档仍读顶层。另立任务修复；
-#: 修完请从这里移除。
-ARCHIVE_NO_STATIC_PRODUCER = {("CodeExecutorAgent", "market_cap"), ("CodeExecutorAgent", "pe_ratio")}
+#: v0.45.250：原先列着 `(CodeExecutorAgent, market_cap/pe_ratio)`（2026-09-14 实测基本已死：
+#: 成功路径的 details 把它们放在 `fetch_data` 下，归档只读顶层）。已修为按形状分派的
+#: `signal_archive._code_exec_fetch`，其路径常量 `agent_details.CodeExecutorAgent.details`
+#: 不带 `.details.<键>` 尾巴 ⇒ 本扫描器不再看到 CE 路径，清单清空。
+#: CE 返回的是裸 dict，静态层本来就证明不了；现在由运行期测试兜底：
+#: `tests/test_signal_archive_code_executor_shapes.py`（驱动真实 `analyze()` 的两条路径）。
+#: 保留空集与双向断言：以后再有新的无静态生产者路径会红。
+ARCHIVE_NO_STATIC_PRODUCER: set = set()
 
 
 def _archive_paths() -> set:

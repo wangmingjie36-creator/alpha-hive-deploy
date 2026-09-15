@@ -5,6 +5,45 @@
 
 ---
 
+## [0.45.258] — 2026-09-15 — 修复 Gamma 到期日历 Pin Risk 用错到期日选择器，NVDA 现价 $211 却报 $270
+
+### Fixed（`options_analyzer.py`、`market_intelligence.py`）
+
+用户报告网站 ML 深度报告里 NVDA「下一主要到期日」的 Pin Risk 行权价报 $270（现价 $211，偏离 28%）。
+排查确认两层根因，均已修复：
+
+1. **上游取数被结构性截断**：`OptionsAgent.analyze()` 里 `gamma_calendar` 此前直接复用
+   `calls_df`/`puts_df`——这是 `fetch_options_chain()` 默认到期日选择器
+   （`cboe_options._select_expiries`）产出的视图，按设计排除 DTE<7（且日历口径
+   少算一天，真正最近到期日通常一个都进不了）。这本是为 IV Rank/25Δ Skew 等
+   theta 敏感指标设计的过滤（近月 theta 扭曲），但 Pin Risk 恰恰相反——它要看的
+   就是最近、OI 最集中的到期日。NVDA 实测：真正 3 天后到期、总 OI 226 万的
+   2026-09-18 被整个排除，日历矮子里拔将军选到 11 天后到期、总 OI 只有 30 万的
+   2026-09-25，其中一个孤立的冷门行权价 $270 恰好以微弱优势胜出。
+   改法：换用 `cboe_options.fetch_cboe_chain_for_gex`（advanced_analyzer 的 dealer
+   GEX 已用的同一个全到期日、日历口径 DTE 视图），命中同一份 `_fetch_cboe_payload`
+   缓存、不产生新网络请求；该视图不可用时退回旧的截断链，不比修复前更差。
+2. **候选池本身还有第二层坑**：标准 1 月到期挂牌以来累积时间最长，总 OI 常年
+   滚雪球式超过任何近月到期日（NVDA 实测 2027-01-15 总 OI 246.7 万，反而略高于
+   3 天后到期的 2026-09-18 的 226.2 万）。补第一层后若不设窗口，"按 OI 降序取
+   第一名"会把 122 天外的 LEAPS 认成"下一主要到期日"——Pin Risk/Charm 是随
+   到期临近才增强的做市商对冲效应，那天的行权价今天根本不构成 Pin Risk。
+   新增 `market_intelligence._PIN_RISK_MAX_DTE = 45`（覆盖本月+下月两个标准
+   月度到期），候选池为空（链本身稀疏、近月无挂牌）时退回全量，不误判为
+   "日历不可用"。
+
+NVDA 实测修复后：Pin Risk 到期日 2026-09-18（3 天后），行权价 $210（现价 $211，偏离 0.5%）。
+复查 WATCHLIST 全部 30 只标的：修复后统一正确落在最近到期日（多数为 2026-09-18），
+不再出现被结构性排除的情况；其中 SNOW/MU/RKLB/CRM/VKTX/NEE 等 OI 分布本身较分散
+的标的，最高 OI 行权价只以个位数百分点优势险胜第二、三名（如 SNOW 前 5 个行权价
+OI 占比均在 4.3%~4.8% 之间），这是这些标的期权链本身流动性/集中度的真实特征，
+不是本次改动引入的问题——供后续视情况考虑加"集中度置信度"指标参考。
+BILI 的 CBOE 全链视图取数失败（该 ADR 覆盖问题，与本次改动无关，生产走 yfinance 兜底）。
+
+新增回归测试 `tests/test_gamma_expiry_calendar.py`（近月窗口过滤 + 稀疏链兜底 + 与
+`expiry_oi[0]` 一致性）与 `tests/test_options_analyzer.py::TestGammaCalendarUsesFullExpiryView`
+（wiring：优先全到期日视图 + 视图不可用时退回旧链）。
+
 ## [0.45.257] — 2026-09-15 — close_correction.official_closes 加 Twelve Data 兜底：yfinance 批量下载今日 52/52 只全员 429，独立配额补上
 
 **起因**：v0.45.243 验证后请用户在自己终端跑 `close_correction.py --apply`（39 条待校正）。跑出：
@@ -60,11 +99,318 @@ CBOE 那种"只有当下 1-2 场"的实时快照——结构上能覆盖任意�
 
 ## [0.45.256] — 2026-09-15 — 占位（进行中：signal_archive 的 guard.consistency_census 抽取器不按 census_source 分段，全量 backfill 会把 v0.45.163 前旧口径写进新名字）
 
-## [0.45.254] — 2026-09-15 — 占位（进行中：二次检查 v0.45.251 的改动）
+## [0.45.254] — 2026-09-15 — 二次检查 v0.45.251：父指针表把装饰器参数/默认参数值/返回注解也算进「函数体内」，会被 `ALLOWED` 连带误放行；其余声称独立复核，全部成立
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。**
+
+### Fixed（`tests/test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`）
+
+1. **`enclosing_function_name` 把 `decorator_list` / `args`（含 defaults、kw_defaults、参数与返回注解）
+   也算作「这个函数的一部分」，语义上却是定义那一刻、于外层作用域求值的。** 这三处（装饰器参数、
+   默认参数值、返回注解）在 AST 里确实是 `FunctionDef` 的子节点，父指针表因此把它们归给了被装饰/
+   带默认值的那个函数——若那个函数名恰好在 `ALLOWED` 里，未锚定的 cwd 读取就被连带放行。
+   实测：`@deco(os.getcwd())` 装饰 `pytest_collection_finish`、`def pytest_collection_finish(session,
+   x=os.getcwd())`、`def pytest_collection_finish() -> os.getcwd()` 三种写法，v0.45.251 版全部返回
+   `[]`（应报 `<module>:N`——这三个函数定义本身就在模块级，装饰器/默认值/注解在模块 import 时于
+   模块作用域求值，与函数体无关）。本仓当前三个 `ALLOWED` 函数都没有这种写法——量过，不是假设；
+   `_hive_log_handler_escapes(sandbox, handlers=None)` 恰好是个无害常量默认值，没撞上纯属巧合，
+   不是这处逻辑本来就对。
+   改：走到 `FunctionDef`/`AsyncFunctionDef` 时先判「一步之下的那个节点」是不是它的
+   `decorator_list` 某项、`args`（涵盖 defaults/kw_defaults/各参数与 vararg/kwarg 注解，全部
+   通过同一个 `arguments` 子节点归拢）、或 `returns` 注解——是就不算「进了这个函数」，继续往外走；
+   只有从 `body` 走上来的才归给它。
+   变异：新增 6 条用例（装饰器/默认值/返回注解各一，均用 `ALLOWED` 里的真名字 `pytest_collection_finish`
+   做探针——只有真名字才测得出「会不会被那顶帽子连带放行」；一条 body 内真调用同名函数的反面对照；
+   一条嵌套函数默认值该归给外层函数而非内层的用例）——v0.45.251 版前三条全部误判成 `[]`，新实现
+   六条全对。**过程中 ruff 抓到一处真失误**：第一版给反面对照用例写了和第 4 条完全重复的 dict key，
+   Python 字典对重复 key 静默取最后一个值——不影响断言正确性（两处期望值都是 `[]`），但暴露了
+   「新加用例前没检查是否已有同款」，已删除重复项、改成引用第 4 条的注释。
+
+### 核过、成立的（v0.45.251）
+
+- claim 1（裸名 import 绕过 `.attr()` 形态）的修法本身：复读 `bare_names` 预扫与主循环合流逻辑，
+  与描述一致；用当前真实 `conftest.py` 跑 `test_no_cwd_derived_watch_in_conftest`，绿——新逻辑
+  没有引入误报。
+- `invocation_params` 捕获时机：pytest 版本未变，结论不变。
+- `import subprocess as _sp`（`test_paths_not_frozen_at_import.py:372`）只伪造 `git ls-files`：
+  复读确认，结论不变。
+- 无测试调 `monkeypatch.undo()`：复查仍是空。
+
+### 验证
+
+- `tests/test_reads_own_checkout.py` + `tests/test_ml_model_path_isolation.py` +
+  `tests/test_hive_logger_not_frozen.py` + `tests/test_cwd_and_sys_path_hygiene.py`：74 passed。
+- 全套从仓库根（合并 origin/main 之前）：1 failed（`TestCoverageHorizon`，设计如此）/
+  4648 passed / 1 skipped / 2 xfailed。
+
+---
 
 ## [0.45.253] — 2026-09-15 — 占位（进行中：二次检查 v0.45.233——config 缓存目录取值未规范化 / 总闸把 watchlist_override.yaml 当代码 / 三处推断写成了实测）
 
-## [0.45.252] — 2026-09-15 — 占位（进行中：数据根迁移阶段 1 只读盘点——沙箱扫描指纹比对 + 52 文件分类表 + 读写者普查含仓库外 + 阶段 0 交接线索核实）
+## [0.45.252] — 2026-09-15 — 数据根迁移阶段 1 只读盘点：沙箱扫描零绕过写入、52 文件分类（4/6 组，如实留缺口）、读写者普查含仓库外、阶段 0 交接线索核实
+
+本阶段全程只读，未改代码、未改数据、未改仓库外任何配置。前情：上一次尝试（同一 v0.45.252 号）因
+API 连接中断（ECONNRESET）在「确认版本号」这一步就中断，本版从头重跑四项任务。方法与证据详列如下，
+不只写结论（沿用阶段 0 的记录标准）。
+
+### 任务 1：沙箱扫描 —— 结果：零绕过写入仓库目录
+
+**方法**：`ALPHA_HIVE_HOME=$(mktemp -d) /usr/local/bin/python3 alpha_hive_daily_report.py --swarm --no-llm --samples-only --tickers AAPL MSFT`，
+在本 worktree 内跑一次真实（非 `--force` 伪造）小名单扫描。安全性先用只读代码追踪核实（见下），
+确认后才执行：
+- `--samples-only` 在 `save_report`/`auto_commit_and_notify`（git 提交推送 origin main + gh-pages + 富文本 Slack 推送）
+  之前短路返回（`alpha_hive_daily_report.py:2795-2813`，早于 `:2837`/`:2852`），且自身即可跳过交易日护栏
+  （`:2718`），不需要 `--force`。
+- `--no-llm` 使 `llm_service._disabled = True`，全部 7 个 Agent + QueenDistiller 的 LLM 调用入口在网络请求之前短路
+  ——**零 Claude API 调用**（唯一另有的直接 `anthropic` 依赖是完全独立的 `generate_deep_v2.py`，未被 `--swarm` 链路
+  import）。
+- 本次调用路径上没有任何 git push / gh-pages 部署 / 真实 Slack 消息发送；唯一的网络副作用是
+  `SlackReportNotifier.__init__` 对 webhook 做的一次连通性探测（HEAD 请求，不携带消息内容，且只在
+  `~/.alpha_hive_slack_webhook` 存在时触发）。
+
+**指纹比对**（复用 `tests/_root_data_guard.py` 的 `fingerprint`/`diff`，对本 worktree 仓库根扫描前后各取一次快照）：
+
+```
+before: 2869 条受闸条目
+after:  同一份，diff = {}（added/removed/changed 全为空）
+```
+
+**结论：本次沙箱扫描零绕过写入仓库目录。** 扫描本身是真实全链路（CBOE 期权链 2 只标的均拉到真实数据、
+7-Agent 蜂群评分 2/2 产出、纸面组合/期权纸面腿/VRP/组合 Greeks 均执行），40+ 个产物文件（`pheromone.db`、
+`report_snapshots/*.json`、`cache/`、`hedge_state/`、`options_paper_state/`、`.samples-only-2026-09-15.json` 等）
+全部落在 `ALPHA_HIVE_HOME` 指向的沙箱临时目录内，一个字节都没有写回仓库目录——说明这条主扫描链路的
+`PATHS.*` 收口（历次修复：v0.45.104/135/149 等）在当前代码状态下有效。
+
+**已知但本次未触发的绕过路径**（只读代码走查发现，非本次扫描实测命中；记下来供阶段 2 处理，本阶段不修）：
+
+1. `pheromone_board.py:611` `_save_fallback_batch`：`Path(__file__).parent / "pheromone_fallback.jsonl"`——
+   仅当写 `pheromone.db` 的异步任务抛异常或线程池已关闭时触发的错误兜底路径，不经 `ALPHA_HIVE_HOME`。
+   分类：**不可重取数据**（本该和 `pheromone.db` 同级受管；grep 确认全仓库从未被读回——丢了就是唯一副本丢了）。
+2. `hive_logger.py:99` `PATHS.sandbox_dir` 默认硬编码 `/tmp/alpha_hive_sandbox`（无 `ALPHA_HIVE_SANDBOX_DIR` 时），
+   不随 `ALPHA_HIVE_HOME` 走，虽不落在仓库目录，但同样不符合「数据路径调用时求值到统一数据根」的规范。
+3. `weekly_optimizer.py:67` `ALPHAHIVE_DIR` 硬编码 `~/Desktop/Alpha Hive`——已用 grep 确认零处被 `--swarm` import，
+   沙箱扫描测不到；仍是独立的阶段 2 收口目标（详见任务 4）。
+4. `cloud_snapshot_loader.py:58` `REPO_DIR = os.path.dirname(os.path.abspath(__file__))`——只作为只读 `git show`
+   的 `cwd`（找「代码/仓库在哪」不是数据），按 CLAUDE.md 判据属**代码资源**、用法合规，只是本次补跑路径
+   （需要 `--date`）未覆盖到，标注供后续确认。
+5. `cloud_snapshot_fetch.py` / `changelog_guard.py`：独立入口脚本，不在 `--swarm` 主链路 import 图内，未触发。
+
+**验收自证**：沙箱里被写的每个文件——本次结果是空集，「清单里每一条都能解释」这一验收条件平凡成立；
+上面 5 条是主动代码走查补充的「未触发但存在」的已知绕过点，按任务要求记录、不在本阶段修复。
+
+### 任务 2：52 文件逐处判定 —— 部分完成（4/6 组），如实留缺口
+
+**方法**：候选集由子任务独立重建（阶段 0 未留存原始 grep 命令），排除纯 `sys.path.insert` / 已修复注释后
+得到 68 个候选生产文件（含 `experiments/`），按字母序切成 6 组、每组 ~11-12 个文件，逐文件逐处核对
+`__file__` 派生路径是否与数据字面量组合，按 CLAUDE.md「代码还是数据」表分类：不可重取数据 / 可重建缓存 /
+发布产物 / 日志 / 代码资源。
+
+**执行中出现故障**：6 组子任务里，组 3 与组 5 未能返回任何结果——协调层确认收不到这两组的
+task-notification，`ListAgents` 里也查不到对应进程，判断是执行环境问题（超时/丢失），不是「跑完了没找到东西」。
+**按「不编数据」原则，本条目不假装 52 文件已全部核实**：以下只收录组 1/2/4/6 实际返回、逐条核对过 file:line
+的结果；组 3、组 5 覆盖的具体文件范围因未记录切分方案、无法从其余 4 组反推，留空作为已知缺口，交给阶段 2
+开工前补跑（可整批重跑 6 组，或专门补组 3/5）。
+
+**组 1**（`agent_toolbox.py` ~ `collect_data.py` 字母序区间）：
+
+| 文件 | 行号 | 字面量/表达式 | 分类 | 依据 |
+|---|---|---|---|---|
+| `agent_toolbox.py` | 64 | `os.path.dirname(os.path.abspath(__file__))`（`self.repo_path` 兜底） | 代码资源 | 只用作白名单 git 子进程的 `cwd=`，从未与数据文件名拼接 |
+| `bootstrap_ci.py` | 59 | `Path(__file__).parent / "pheromone.db"` | 不可重取数据 | 打开生产预测库，锚在代码 checkout，绕开 `ALPHA_HIVE_HOME`/`PATHS.db` |
+| `catalyst_exit_planner.py` | 155 | `Path(__file__).parent / catalysts_file`（默认 `catalysts.json`） | **已核实：死路径**（见下方「待验证项复核」） | docstring 自述 v0.45.32 已删 `catalysts.json`，函数恒返回 `[]`；活路径（`chronos_bee`）不经过它 |
+| `close_correction.py` | 77 | `sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))` | 代码资源 | 标准 import 路径设置 |
+| `cloud_snapshot_fetch.py` | 48 | 同上模式 | 代码资源 | 同上 |
+| `cloud_snapshot_loader.py` | 58 | `REPO_DIR = os.path.dirname(os.path.abspath(__file__))` | 代码资源 | 只用作 `git show`/`git ls-tree` 的 `cwd=` |
+| `code_version.py` | 56 | `_repo_dir(): return Path(__file__).resolve().parent` | 代码资源 | 刻意锚代码 checkout，调用时求值，非冻结 |
+| `code_version.py` | 121 | `_repo_dir() / "CHANGELOG.md"` | 代码资源 | 已跟踪、人写的源文档，非生成产物 |
+| `collect_data.py` | 30 | `_SCRIPT_DIR = Path(__file__).resolve().parent` | 代码资源（base） | 仅在检测到 Cowork-VM 会话路径模式时才变成数据根 |
+| `collect_data.py` | 40/45/54/78/322/374 | `ALPHAHIVE_DIR / "analysis-{ticker}-ml-*.json"` 等 6 处 | 发布产物 | 同一条件性 `__file__` 根下的各类日报/分析产物 |
+
+零数据占用（核实为纯代码资源或已修复旧模式）：`alpha_hive_daily_report.py`、`backfill_dir_accuracy.py`、
+`cboe_vix.py`、`congress_trades_scraper.py`。
+
+**组 2**（`dashboard_renderer.py` ~ `experiments/resonance_boost_forward_test.py` 区间）：
+
+| 文件 | 行号 | 字面量/表达式 | 分类 | 依据 |
+|---|---|---|---|---|
+| `dashboard_renderer.py` | 63 | `_TPL_DIR = Path(__file__).parent / "templates"` | 代码资源 | 模板目录随代码发布，锚 `__file__` 正确 |
+| `deep_analysis.py` | 955 | `os.chdir(os.path.dirname(os.path.abspath(__file__)))` | 发布产物 | 把相对 I/O 锚到脚本目录；生成的 `deep-*.html` 落进脚本目录而非数据根 |
+| `dynamic_exit_backtest.py` | 53 | `Path(__file__).parent / "pheromone.db"` | 不可重取数据 | 锚定代码目录打开生产账本库，绕开 PATHS |
+| `economic_calendar_watch.py` | 66 | 仅注释，无实际代码 | — | 实际代码已走 `PATHS.cache_dir` |
+| `experiments/final_score_dilution.py` | 51/59 | `ROOT=Path(__file__)...`；`DB=ROOT/"pheromone.db"` | 代码资源/不可重取数据 | ROOT 是 import 锚点；DB 绕开 PATHS |
+| `experiments/ic_power_analysis.py` | 61/73 | 同构 `ALPHAHIVE_DIR`/`DB_PATH` | 代码资源/不可重取数据 | 同上模式 |
+| `experiments/max_pain_predictive_test.py` | 63 | 纯 `sys.path.insert` | 代码资源 | 无其它 `__file__` 数据占用 |
+| `experiments/misjudgment_pattern_walkforward.py` | 75 | `ROOT` 仅喂 `sys.path.insert` | 代码资源 | 全文件 425 行无其它引用 |
+| `experiments/ml_expected_return_replay.py` | 44/47 | 同构 `ALPHAHIVE_DIR`/`DB_PATH` | 代码资源/不可重取数据 | 同上 |
+| `experiments/neutral_band_replay.py` | 28/31/32 | `ROOT`(代码资源) / `SNAP_DIR=ROOT/"report_snapshots"`(发布产物) / `OUT`(发布产物) | 三类混合 | 读历史快照+写 replay 报告，均锚 `__file__` |
+| `experiments/penalty_replay.py` | 31/34/35/56 | `ROOT`(代码资源) / `SNAP_DIR`(发布产物) / `OUT`(发布产物) / `ROOT.glob(".swarm_results_*.json")`(**待验证**) | 见备注 | 最后一条见下方「待验证项复核」——组内自评在「不可重取历史状态」与「诊断快照」间存疑，本轮未强行下结论 |
+| `experiments/portfolio_capacity_replay.py` | 25/30 | `ROOT`（纯 import 锚，代码资源）/ `OUT`（发布产物） | 两类 | 无 `report_snapshots`/`pheromone.db` 引用 |
+| `experiments/resonance_boost_forward_test.py` | 77 | 纯 `sys.path.insert` | 代码资源 | 文件内其它 `Path()` 调用锚的是 `PATHS.home`，非 `__file__` |
+
+**组 4**（`ic_rerun_readiness.py` ~ `pre_scan_notify.py` 区间）：
+
+| 文件 | 行号 | 字面量/表达式 | 分类 | 依据 |
+|---|---|---|---|---|
+| `ic_rerun_readiness.py` | 58/59/61/597 | `ALPHAHIVE_DIR`(代码资源)/`sys.path`(代码资源)/`DB_PATH=ALPHAHIVE_DIR/"pheromone.db"`(不可重取数据)/加载 `.py` 模块(代码资源) | 混合 | `DB_PATH` 是 import 期冻结默认值，供函数与 CLI 默认参数用 |
+| `market_intelligence.py` | 32/676 | `_BASE`(代码资源)/`_BASE/"thesis_breaks_config.json"`(代码资源) | 代码资源 | 全文件零写入；已被 `test_thesis_breaks_config_authored_only.py` 与 `test_paths_not_frozen_at_import.py` 的 `MUST_STAY_FILE_ANCHORED` 白名单双重确认为「生产只读」 |
+| `migrate_ambiguous_backfill.py` | 27/37/38/132/134 | `sys.path`(代码资源)/`here`(代码资源)/`cand=DB兜底`(不可重取数据)/`bdir=备份目录`(不可重取数据)/`dst=迁移快照文件`(不可重取数据) | 混合 | 一次性迁移脚本，仅当 `--db` 省略时才用 `__file__` 兜底 |
+| `pead_analyzer.py` | 45 | `os.path.join(os.path.dirname(__file__), ".cache")` | 可重建缓存 | 仅当 `hive_logger.PATHS` import 失败时的兜底分支（except 分支残留，阶段 0 已修主路径） |
+| `pheromone_board.py` | 611 | `Path(__file__).parent / "pheromone_fallback.jsonl"` | 不可重取数据 | 与任务 1 的「已知未触发绕过」第 1 条同一发现，两个任务独立核实 |
+| `portfolio_backtest.py` | 90-92 | `base`(代码资源)/定位 `pheromone.db` 与 `hive_predictions.db`(不可重取数据) | 混合 | backtest 预测加载器直接定位生产账本 |
+| `portfolio_factor_attribution.py` | 66 | `Path(__file__).parent/"pheromone.db"` | 不可重取数据 | 同构生产库绕过 |
+
+零数据占用：`ic_diagnostics.py`、`paper_portfolio.py`、`param_optimizer.py`（均为注释提及的已修复旧模式，
+实际代码已走 `PATHS` 调用时求值）、`pre_scan_notify.py`（两处纯 `sys.path.insert`）。
+
+**组 6**（`scheduler.py` ~ `weekly_optimizer.py` 区间）：
+
+| 文件 | 行号 | 字面量/表达式 | 分类 | 依据 |
+|---|---|---|---|---|
+| `scheduler.py` | 23/30/265 | `_PROJECT_ROOT`(**已核实，见下**)/`scheduler.log`(日志)/`report_snapshots`(发布产物) | 见备注 | 详见「待验证项复核」 |
+| `signal_archive.py` | 541/616/782 | 纯 `sys.path.insert` ×3 | 代码资源 | 全部无数据拼接 |
+| `swarm_agents/chronos_bee.py` | 243/268 | 两处 `dirname(dirname(__file__))`，均只喂 `sys.path.insert` | 代码资源 | 无数据拼接 |
+| `swarm_agents/queen_distiller.py` | 1190/1191/1202 | `_project_root_ta`(代码资源)/`report_snapshots`(发布产物)/`pheromone.db`(不可重取数据) | 混合，**未修** | 代码自己的注释承认「必须与 `feedback_loop.py` 同样 `__file__` 派生的默认值巧合一致」——两个独立冻结的默认值互相依赖，脆弱耦合，建议阶段 2 优先收口 |
+| `swarm_agents/scout_bee.py` | 181 | 纯 `sys.path.insert` | 代码资源 | 无数据拼接 |
+| `thesis_breaks.py` | 17 | `.../"thesis_breaks_config.json"` | 代码资源 | 只读、人工维护，本模块从不写它 |
+| `vix_term_structure.py` / `vol_forecast.py` / `yahoo_trending.py` | 各一处（仅注释） | 代码资源 | 均已修复，实际代码走 `PATHS` 调用时求值 |
+| `walk_forward_validator.py` | 92-93 | `base`(代码资源)/`base/"pheromone.db"`(不可重取数据) | **未修** | 与 `signal_archive.py`/`vol_forecast.py` 等已迁移文件同款反模式，这处还没跟上，建议阶段 2 一并处理 |
+| `watchlist_events.py` | 38-39 | `.../"watchlist_events.md"` | 代码资源 | 只读、人工维护 markdown |
+| `weekly_optimizer.py` | 119 | `_CODE_DIR = Path(__file__).resolve().parent` | 代码资源 | v0.45.230 注释明确：只喂 `sys.path.insert`，与真正的数据根 `ALPHAHIVE_DIR`（硬编码，非 `__file__` 派生）刻意区分 |
+
+**待验证项复核**（本轮直接读源码核实，未替组内自评强行改判的除外）：
+
+1. **`catalyst_exit_planner.py:155` → 判定为死路径，不需要迁移分类。** 直接读取该函数：docstring 明确写
+   「v0.45.32：`catalysts.json` 已删除……本函数现在恒返回 `[]`。活路径不受影响——`chronos_bee` 调 `plan_exit`
+   时直接传 `catalysts_found`，不走本函数；只有回测脚本 `dynamic_exit_backtest.py` 用它，而那份数据早在
+   删除前就已全部过期」。结论：无需归类为需要阶段 2 处理的数据路径，是历史残留的死函数体，建议阶段 6
+   代码仓库去数据化时顺手清理（不在本阶段动）。
+2. **`experiments/penalty_replay.py:56` → 维持组内的「存疑」判定，不强行下结论。** 已核实精确代码：`ROOT =
+   Path(__file__).parent.parent`（:31），`load_swarm_rows()` 里 `for f in sorted(ROOT.glob(".swarm_results_*.json"))`
+   （:56）。`.swarm_results_<date>.json` 是主扫描按日产出、又被同一进程读回判定标的完整性的产物——对
+   已经跑过的历史日期，它是「不可重取」的（除非重新回放当天的第三方数据）；但对着眼点在于「诊断脚本
+   自己只读、不写」的角度，也可以归入发布产物的只读消费。两种读法都成立，如实保留分歧，不替它拍板。
+3. **`scheduler.py:23` → 确认是「env 优先、`__file__` 兜底」的混合模式，且有新发现的 import 期副作用。**
+   `_PROJECT_ROOT = os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__)))`——逻辑上
+   与 `hive_logger.PATHS.home` 的实现几乎一样，但是**独立重复实现**而非调用 `PATHS.home`，且赋值给**模块级
+   常量**（:23，import 时求值一次，非调用时）。**新发现**：紧接着的 `logging.basicConfig(handlers=[
+   logging.FileHandler(os.path.join(_PROJECT_ROOT, 'scheduler.log')), ...])`（:26-32）同样在模块顶层、
+   无条件执行——**导入 `scheduler.py` 就会在 `_PROJECT_ROOT` 打开/创建 `scheduler.log`**，属于 CLAUDE.md
+   「新产物默认路径不许是相对路径」一节点名的「函数默认值写 `None` 在函数体内解析」反模式的模块级变体。
+   已用 grep 核实 `scheduler.py` **零处**被 `orchestrator.sh`（唯一 cron 入口）引用，判断是被 launchd +
+   orchestrator.sh 取代的旧自动化机制，当前无生产读者——不影响本阶段沙箱扫描结论，但阶段 2/6 决定
+   「删除还是收口」时需要这条信息。
+
+**新发现的两处「未修」反模式**（组 6 自评点出，已用 grep 交叉确认无第三处遗漏）：
+`walk_forward_validator.py:92-93` 与 `swarm_agents/queen_distiller.py:1190-1202` 都是与已迁移文件
+（`signal_archive.py`、`vol_forecast.py` 等）同款的 `Path(__file__).parent/"pheromone.db"` 反模式，
+但这两处还没跟上迁移，建议阶段 2 优先处理（后者还带着「两个独立冻结默认值必须巧合一致」的脆弱耦合）。
+
+**覆盖缺口（如实记录，不等同于「已排除风险」）**：组 3、组 5 对应的候选文件范围因执行故障丢失、且切分
+方案未留存，无法从其余 4 组反推具体文件名。已核实的 4 组共覆盖约 40 处 `__file__`+数据字面量occurrence；
+阶段 0 基线的「52 文件」上界与本轮独立重建的「68 候选文件」口径不同（本轮方法论更宽——同时纳入了
+`experiments/` 目录），两个数字不可直接比较。**阶段 2 开工前必须先补跑组 3/5（或整批 6 组重跑），
+不能假设「大部分文件已经查过、剩下的大概率也没问题」。**
+
+### 任务 3：读写者普查（含仓库外）
+
+**A. 仓库外**（编排器 + 定时任务；已逐项直接读取源文件核实）：
+
+| 组件 | 路径/变量 | 读/写 | 是否走 PATHS | 备注 |
+|---|---|---|---|---|
+| `~/.claude/scripts/alpha-hive-orchestrator.sh`（launchd cron 唯一入口，`PROJECT_DIR` 硬编码 `/Users/igg/Desktop/Alpha Hive`） | `$LOGDIR=~/.claude/logs/orchestrator-<date>.log` | 写 | 否（仓库外自有路径） | 与 `PATHS.logs_dir`（仓库内 `logs/`）是两套完全不同的日志目的地，命名相近易混淆 |
+| 同上 | `$REPORTDIR=~/.claude/reports/status.json` | 写 | 否 | 编排器自有状态文件，仓库外 |
+| 同上 | `$PROJECT_DIR/pheromone.db`（读）+ `$PROJECT_DIR/db_backups/pheromone_<date>.db`（写，sqlite 在线备份） | 读+写 | 否（硬编码 `$PROJECT_DIR`，不经 `ALPHA_HIVE_HOME`） | v0.45.233 已改在线备份；`db_backups/` 本身是仓库根下数据目录，非 PATHS 管辖 |
+| 同上 | `$PROJECT_DIR/.swarm_results_<date>.json`（读，补跑闸/标的完整性判定） | 读 | 否 | 硬编码仓库根 |
+| 同上 | 依次 spawn 15 个子脚本（`production_sync.py`/`data_fetcher.py`/`alpha_hive_daily_report.py --swarm`/`pre_scan_notify.py`/`generate_ml_report.py`/`update_dashboard.py`（已不存在，见任务 3B 备注）/`auto_deploy.py`/`alert_manager.py`/`push_report_to_slack.py`/`metrics_collector.py`/`pheromone_recorder.py`/`scan_continuity.py`/`ic_rerun_readiness.py`/`scan_coverage_gate.py`/`economic_calendar_watch.py`） | 触发 | 各自决定 | 编排器本身只是壳；核心扫描脚本已在任务 1 验证零绕过 |
+| 同上 | `LLM_DONE_FILE=/tmp/alpha_hive_llm_done_<date>`、`LOCKDIR=/tmp/alpha_hive_orchestrator.lock` | 写 | 否（`/tmp`，与数据根无关） | 进程级防重复标记，非生产数据，不在迁移范围 |
+| `~/.claude/scheduled-tasks/alpha-hive-weekly-optimizer/SKILL.md`（Claude 定时任务，非 launchd） | 触发 `weekly_optimizer.py`（cwd=生产根） | 触发 | — | 内部 `ALPHAHIVE_DIR` 硬编码（任务 4 已核实零 import 于 `--swarm` 主链路），只读诊断但仍 append `weight_history.jsonl` |
+| 同上 | 顺带跑 `scan_continuity.py --days 30`、`ic_rerun_readiness.py --quiet`（cwd=仓库根，只读） | 读 | 视各脚本而定 | 只读诊断 |
+| `~/.claude/scheduled-tasks/alpha-hive-monthly-self-analysis/SKILL.md`（Claude 定时任务） | 触发 `self_analyst.py` → 写 `self_analysis_briefs/YYYY-MM.md` | 写 | 否（`self_analyst.py` 内部 `ALPHAHIVE_DIR` 硬编码，与 `weekly_optimizer.py` 同构，见任务 4 新发现） | 完成后用 Slack MCP 推送摘要，无额外仓库外文件写入 |
+
+（已停用/未参与常规调度的 scheduled-tasks：`alpha-hive-daily-scan`「已禁用，真正每日扫描是 launchd 编排器」、
+`alpha-hive-sample-accumulator`「已退役」、`alpha-hive-health-check`「已禁用改按需」——按 memory
+`alpha-hive-locked-tasks.md` 口径不计入活跃读写者。）
+
+**B. 仓库内**（`alpha_hive_mcp.py` / Slack 推送脚本 / GUI-dashboard / 发布链；委托子任务逐文件通读产出，
+本条目直接转录其表格，file:line 已交叉核对）：
+
+Read in full: `alpha_hive_mcp.py`、`push_report_to_slack.py`、`slack_report_notifier.py`、`slack_notifier.py`、
+`pre_scan_notify.py`、`gui/interactions.py`、`gui/views.py`、`report_deployer.py`；针对性读取
+`dashboard_renderer.py`（3044 行）与 `generate_ml_report.py`（3065 行）的路径相关段落。`update_dashboard.py`
+在本 checkout 中**已不存在**——`git log --diff-filter=D` 显示已在「Major repo cleanup」提交 `8b9ac331` 中删除，
+功能被 `dashboard_renderer.py`/`report_web_assets.py` 吸收（编排器脚本里仍引用旧文件名，属于阶段 0/1 未点名
+的额外发现，阶段 2 应清理编排器里这个死引用）。
+
+| 模块 | 路径/变量 | 读/写 | 是否走 PATHS | 备注 |
+|---|---|---|---|---|
+| `alpha_hive_mcp.py:53` | `_HIVE_DIR = Path.home() / "Desktop" / "Alpha Hive"` | 读 | **否，bypass** | 硬编码字面量，不读 `ALPHA_HIVE_HOME`；是 `_load_json`/`_latest_date`/`alphahive_list_reports`（L58-218）实际扫描 `analysis-*-ml-*.json` 的目录——数据根搬迁后会**静默读到空目录**而非报错，是本次普查里最隐蔽的一类失效 |
+| `alpha_hive_mcp.py:54` | `_DEEP_DIR = Path.home() / "Desktop" / "深度分析报告" / "深度"` | 无 | 不适用 | 赋值后全文件再无引用，死代码 |
+| `alpha_hive_mcp.py`（全文件） | `pheromone.db`/`.db-shm` | 无 | 不适用 | 全文件 grep 零命中 `pheromone`/`sqlite`/`.db`——memory 提到的「~10 个常驻实例顶 `pheromone.db-shm` mtime」不是这份文件里的显式代码路径导致的，需要另查来源（可能是其它同名机制或引用有误），本次普查未能复现 |
+| `push_report_to_slack.py:37` | `PROJECT_DIR = Path(__file__).parent` | — | **否，bypass** | 模块级常量，向下游传染 3 处数据路径 |
+| `push_report_to_slack.py:71` | `PROJECT_DIR / f"alpha-hive-daily-{date}.json"` | 读 | 否 | 日报 JSON |
+| `push_report_to_slack.py:77-79` | `PROJECT_DIR / "cache"`、`"data_cache"`、`"finviz_cache"` | 读 | 否 | `PATHS.cache_dir` 已存在却未复用 |
+| `slack_report_notifier.py:397,422-424,436,408,439-460` | `project_dir`（由调用方 `report_json_path` 反推）拼出的 `analysis-*.json`/`{ticker}_raw.json`/`fear_greed.json`/`metrics_*.json`/`social_*.json`/`short_*.json` | 读 | 否（继承上游 bypass） | 本身不新增字面量，承接 `push_report_to_slack.py` 的 bypass |
+| `slack_report_notifier.py:95-105,120-125`、`slack_notifier.py:45-49,120,170-189`、`pre_scan_notify.py:55-62,116-119,242-253` | `~/.alpha_hive_slack_bot_token`/`_user_token`/`_webhook`、`~/.alpha_hive_llm_mode`、`/tmp/alpha_hive_use_llm_<date>` | 读（部分写） | 否，但**非数据根范畴** | 凭证/临时 IPC dotfile，与 `PATHS.google_credentials` 同一「home 目录放密钥、不进 `ALPHA_HIVE_HOME`」既有模式，不属本次迁移目标 |
+| `gui/interactions.py`、`gui/views.py`（全文件） | — | 无 | 不适用 | 未发现路径字面量或文件 I/O，只消费内存数据结构 |
+| `gui/app.py:24`（附带发现，未在原始范围内） | `_PROJECT_ROOT = os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))` | — | **半正确，模块级常量 bypass** | 语义等价于重新手搓一份 `PATHS.home`，但写成模块级常量（import 期冻结），与 `hive_logger.py` 反复强调的「数据路径不许模块级冻结」规则相悖；`gui/app.py:280-290` 的 `.swarm_results_*.json` 读取继承此风险 |
+| `dashboard_renderer.py:63` | `_TPL_DIR = Path(__file__).parent / "templates"` | 读 | **是（正确）** | 代码资源，`__file__` 锚定合规 |
+| `dashboard_renderer.py:1257,2133-2223,2449,2468`、`2999-3003`、`834-885` | `report_dir`（形参）拼出的日报/快照/ML 分析 JSON、`dashboard-data.json`（写）、经 `PredictionStore().db_path` 读 `pheromone.db` | 读/写 | **是，间接** | `report_dir` 生产链路上确认经 `alpha_hive_daily_report.py:319` 的 `self.report_dir = PATHS.home` 注入；本文件自身不 bypass |
+| `report_deployer.py:62`（`verify_cdn_deployment`） | `os.path.join(repo, "dashboard-data.json")` | 读 | **否，bypass** | `repo = reporter.agent_helper.git.repo_path`（来自 git 工具的仓库根），不是 `PATHS.home`，今日两者恰好同目录掩盖了这条 bypass |
+| `report_deployer.py:134-171`（`deploy_static_to_ghpages`） | `os.listdir(repo)` 枚举 `alpha-hive-daily-*`/`*-ml-enhanced-*.html`/`index.html`/`dashboard-data.json` | 读 | **否，bypass** | 数据根迁移计划阶段 4 已预先点名「gh-pages 从 PATHS 读报告，不再 `os.listdir(仓库)`」——本次普查坐实了具体函数与行号 |
+| `report_deployer.py:250-265` | `os.path.join(repo, ".gh_pages_deploy_log.jsonl")` | **写**（追加） | **否，bypass** | 部署台账落在 `repo` 而非 `PATHS.logs_dir`，同一 `repo` 变量问题 |
+| `generate_ml_report.py:223-226` | `_model_file` property → `PATHS.ml_model_cache` | 读写 | **是（正确）** | 已按 `PATHS` property 惯例实现 |
+| `generate_ml_report.py:2725-2755` | `report_dir = PATHS.home`；`realtime_metrics.json`/`.swarm_results_*.json`/`.checkpoint_*.json` | 读 | **是（正确）** | — |
+| `generate_ml_report.py:2814-2829` | `os.path.dirname(os.path.abspath(__file__)) + f"/{ticker}_raw.json"` | 读 | **否，bypass** | yfinance 限流降级读磁盘缓存价格的分支，应改用 `PATHS.home`——CLAUDE.md 表格明确划为「数据」却锚在「代码」锚点的反模式 |
+| `generate_ml_report.py:2907-2959` | `report_dir`（=`PATHS.home`）拼出的 HTML/JSON 写入 + `ml_model_guard.enforce_day` | 读写 | **是，间接** | — |
+| `generate_ml_report.py:2982-3061`（`_sync_ghpages`） | `repo = str(Path(__file__).parent)`；`os.listdir(repo)`；`.git/gh-pages-index` | 读+删除 | **否，bypass** | **与 `report_deployer.deploy_static_to_ghpages` 完全同构的第二份 gh-pages 部署实现**，用 `__file__` 而非 git 工具的 `repo_path`，两处逻辑几乎重复且都不经 PATHS——阶段 4 收口时需要同时处理这两处，不能只改一个 |
+
+**归纳（供阶段 2/4 直接使用）**：
+1. `alpha_hive_mcp.py` 的 `_HIVE_DIR` 硬编码是**最隐蔽**的一类失效——数据根搬迁后 3 个 MCP 工具会静默返回
+   「无报告」而非报错。
+2. `push_report_to_slack.py:37` 的 `PROJECT_DIR` 是一处根性 bypass，向下游 `slack_report_notifier.py` 多个
+   读取点传染。
+3. gh-pages 部署有**两套几乎重复**的实现，都不走 PATHS，且做法不同（git 工具 repo_path vs `__file__`）——
+   已定位到 `report_deployer.py:134-171` 与 `generate_ml_report.py:2982-3061` 两个具体函数。
+4. `dashboard_renderer.py`/`generate_ml_report.py` 主体路径处理规范，例外仅 `generate_ml_report.py:2818` 的
+   降级读取分支。
+5. 真正的 GUI 数据入口在原始范围之外的 `gui/app.py:24`，与 `scheduler.py:23`（任务 2）同款「手搓 PATHS.home
+   等价逻辑但冻成模块级常量」反模式——阶段 2 收口 `PATHS` 时应把这两处也纳入，不要只看原始清单点名的文件。
+
+### 任务 4：阶段 0 交接线索核实
+
+1. **`weekly_optimizer.py` 的 `CONFIG_PATH`/`BACKUP_DIR` 仍锚 `~/Desktop/Alpha Hive`**：已用 grep 核实
+   `ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))`（:67）是硬编码字面量，`CONFIG_PATH`
+   （:107）、`BACKUP_DIR`（:729）由它派生；全仓 `grep -rn "import weekly_optimizer\|from weekly_optimizer"`
+   **零命中**——不在 `--swarm` 主扫描 import 图里，只由独立的 `alpha-hive-weekly-optimizer` 定时任务调用。
+   **结论：不影响本阶段沙箱扫描的指纹判定**，但是一条独立于沙箱扫描之外确实存在的硬编码数据路径，
+   阶段 2 必须单独处理。
+   **新发现（原交接清单未点名）**：`self_analyst.py:33-40` 有完全同构的问题（含 Cowork VM 场景的 glob
+   动态覆盖），派生出 `BRIEFS_DIR`（:70），同样零依赖 `--swarm` 扫描（grep 确认零 import），只由独立的
+   月度自诊断定时任务调用。阶段 2 应与 `weekly_optimizer.py` 一并处理，不要只改前者漏了 `self_analyst.py`。
+2. **`db_backups/` 孤儿 `-wal`/`-shm`、根目录 `.fuse_hidden*` 现状计数**（生产 checkout 实测，2026-09-15）：
+   - `db_backups/`：3 个 `.db`、4 个孤儿 `-wal`、3 个孤儿 `-shm`（`pheromone_2026-03-23.db-*`、
+     `pheromone_pre_P0_tolerance_fix_2026-08-25.db-wal`、`pheromone_pre_close_correction_20260826_1456.db-*`、
+     `pheromone_pre_price_restore_20260827_002008.db-*`）——比基线记录的「08-25/26/27 三份」多了一个更早的
+     `2026-03-23` 孤儿。**新发现**：该目录下还混进一个 `.fuse_hidden0000000900000001`（32KB）——基线只统计
+     了仓库根目录的 `.fuse_hidden*`，未提到子目录里也有。
+   - 仓库根 `.fuse_hidden*`：**184** 个（基线 2026-09-07 记录「200+」，量级一致，iCloud 同步持续产出中）。
+   - **分类判定（只记录不清理）**：均属**可重建缓存/文件系统噪声**——`.fuse_hidden*` 已被
+     `_root_data_guard.py` 的 `NOISE_FILE_PREFIXES` 豁免；孤儿 `-shm`/`-wal` 仍受闸但不影响判定。归入阶段
+     5/6 的顺手清理项，本阶段（只读盘点）不处理。
+
+### 验收
+
+- 沙箱扫描：验收条件（「沙箱里被写的每个文件清单都能解释」）平凡成立（清单为空）；5 处已知未触发绕过
+  已记录供阶段 2 处理。
+- 52 文件分类：**未达 100% 覆盖**，如实记录 4/6 组结果与缺口，不写「已完成」。
+- 读写者普查：仓库外（编排器 + 2 个活跃定时任务）与仓库内（`alpha_hive_mcp.py`/Slack 推送/GUI/发布链）
+  均已覆盖，含 4 条归纳供阶段 2/4 直接使用。
+- 阶段 0 交接线索：2 条均已核实，含 1 条新发现（`self_analyst.py` 同构 bug）+ 2 条新发现（`db_backups/` 内
+  `.fuse_hidden*`、更早的孤儿 sidecar）。
+
+方法与证据来源：本 session 直接执行的沙箱扫描与 grep/读源码核实（任务 1、任务 4、任务 3A）；
+两个独立只读子任务的产出经本 session 交叉核对后转录（任务 2 的 4 组结果、任务 3B 的仓库内普查表）。
+
 
 ## [0.45.255] — 2026-09-15 — 占位（进行中：scan_timing 整段丢失时 alert_manager 一律静默跳过——区分「早退未写」与「扫描跑完了却丢数据」，后者升级成 P1）
 
@@ -115,7 +461,67 @@ CBOE 那种"只有当下 1-2 场"的实时快照——结构上能覆盖任意�
 
 ---
 
-## [0.45.250] — 2026-09-15 — 占位（进行中：signal_archive 的 fund.pe_ratio/market_cap 读不到 CodeExecutor 8 月后的嵌套 details，静默停档）
+## [0.45.250] — 2026-09-15 — 上游修好一个崩溃，下游一个读者因此静默断供：`fund.market_cap` / `fund.pe_ratio` 自 8 月中起每天 30 只只剩 0–4 只入档
+
+`CodeExecutorAgent.analyze()` 取数成功后有两条返回路径，装的是**同一个** `data`，只是放的位置不同：技术分析跑通时是
+`details.fetch_data.*`（嵌套），技术分析失败走兜底时是 `details.*`（顶层）。**两种形状自 2026-02-25（c0392ce0）起就同时存在**，
+代码从没改过。`signal_archive` 的 fund.* 在 2026-07-30（a93d0d48）写成只读顶层，当时是对的：技术分析脚本撞上 yfinance
+MultiIndex 每次必崩，生产上 100% 走兜底。v0.43.10（2026-08-12，1dbbfb34）修好了那个崩溃，成功路径变成主路径，
+于是 `.swarm_results_*.json` 从 8/13 起每天 26–30 只是嵌套形状，只有 0–4 只是顶层 ⇒ fund.* 每天只剩走兜底的那几只入档。
+`_dig` 取不到就返回 None，这一行被跳过，**近一个月没有任何东西报警**。
+
+生产库里 market_cap 入档数与 `composite.final_score` 之比：4–5 月约 1.0，8 月 0.11，9 月 0.01。
+
+**判据：合并读，不改名分段**（v0.45.182 `guard.consistency_census` 的判据是「名字变了，还是量变了」）。这里是同一个量换了位置：
+代码上两条路径装的是同一个对象，取数脚本的 `marketCap` / `trailingPE` 自 2026-02-25 未改；数据上同一只票跨形状数值连续
+（NVDA 市值 8/10 顶层 5.27e12 → 8/13 嵌套 5.46e12；TSLA PE 323 → 303），并且在 1,214 份非空 details 里两种形状**互斥**
+（没有一份同时出现）⇒ 不切世代。
+
+### Fixed
+- `signal_archive.py`：新增 `_code_exec_fetch(key)`，按「details 里有没有 `fetch_data`」分派到嵌套或顶层；fund.* 改用它。
+  **不写成**「嵌套取不到就回头读顶层」：成功路径的顶层放的是技术分析的字段（`price` / `sma_20`），
+  以后顶层如果多出一个同名键，就会被静默混读（有测试专门钉住这一点）。
+  另外，取数失败的三条错误路径 details 是空 `{}`（历史 1,551 份 CodeExecutor details 里有 337 份），它们照旧诚实缺失；`"N/A"` 也照旧省略。
+
+### Added
+- `tests/test_signal_archive_code_executor_shapes.py`（8 条）：驱动**真实** `CodeExecutorAgent.analyze()`（假 executor 回放 stdout），
+  分别走成功 / 兜底 / 取数失败三条路径，再经**真实** `QueenDistiller.distill()` 投影成 `agent_details`，最后喂 `extract()`。
+  现有 `test_signal_archive.py` 全部用手写的 `_tr()`，没有一条把真实蜂的输出接到读者上（v0.45.247 契约守卫点名的同一个盲区）。
+  - 前提自证 ×2：两条参数确实走到两种不同的形状。否则生产者哪天把两种形状统一了，参数化测试会退化成「同一形状测两遍」而照样全绿。
+  - **修复前的文件实测**：嵌套路径红；「顶层同名键被混读」红。**反向变异**（改成只读嵌套）：兜底路径红。
+- `tests/test_distribution_invariants.py`：`fund_archive_coverage` / `fund_coverage_offender` 谓词 + `TestFundCoverageGuardHasTeeth`（4 条）
+  + `TestFundSignalsStillArchived`（integration，读近 12 份生产 `.swarm_results_*.json`）。**这就是这次事故「谁会红」的答案。**
+  口径**与形状无关**：分母是 CodeExecutor 本轮确实带回数据（details 非空）的标的数，分子是抽取器取到值的数。
+  所以生产者再换第三种形状时覆盖率同样会塌、同样会红；整天取数失败不进分母，也不会误红。
+  - 生产实测（近 12 个扫描日，08-27~09-14）：修复后 360/360；**把抽取器换回修复前的写法** 6/360 ⇒ 判红。全部 1,214 份历史数据修复后取到 1,202 份（其余 12 份是 `"N/A"`）。
+  - 有牙测试里有一条直接复刻事故：把抽取器换回修复前、喂事故期的形状比例（29 嵌套 + 1 顶层），必须红。
+- `signal_archive.backfill(only=, dry_run=)` 与 CLI `--only a,b --dry-run`。
+  **不带 `--only` 的全量回填不能直接用来补 fund.***：生产库副本上 dry-run 实测，它还会新增 1,484 行 `guard.consistency_census`，
+  其中 1,394 行是 v0.45.163 之前的旧口径（`census_source` 为空），正是 v0.45.182 改名要防的「两段定义被池化」。
+  - `archive()` 与 dry-run 共用 `_rows_for()`，保证 dry-run 报的数就是真跑写的数；隔离名单在两条路径上都生效；
+    `only` 里有未知信号名直接抛 ValueError（拼错一个会静默「回填 0 行」，看起来和「本来就不缺」一样）；dry-run 不建库。
+  - `tests/test_signal_archive.py::TestBackfillOnlyAndDryRun`（6 条，先红后绿）。
+  - 在库副本上用真实 CLI 演练：dry-run 预测 新增 848（market_cap 450 / pe 398）/ 改值 5 / 不变 1,296；真写 2,149 行，与预测一致；
+    再 dry-run 为 0/0；`guard.consistency_census` 没被碰。9 月覆盖从 4/270 恢复到 270/270。改值的 5 行都在 08-26/27，
+    偏差 −0.4%~+1.6%：库里那几行是当天较早一次运行留下的，JSON 是后来重跑覆盖的；按 REPLACE 与同日其他信号对齐。
+
+### 生产回填
+- **待用户批准**（写生产库前先备份）。
+
+### Changed
+- `tests/test_bee_details_contract.py::ARCHIVE_NO_STATIC_PRODUCER` → 空集（v0.45.247 的注释写着「修完请从这里移除」）。
+  新读法的路径常量 `agent_details.CodeExecutorAgent.details` 不匹配它 `.details.<键>` 的正则，扫描器看不到 CE 路径了，
+  所以不清空的话它会报「清单过期：{(CodeExecutorAgent, market_cap), (CodeExecutorAgent, pe_ratio)}」（rebase 到含 v0.45.247 的 main 后实测）。
+  CE 返回的是裸 dict，静态层本来就证明不了；注释里指向运行期的真实输出测试。**双向断言保留**：以后再有新的无静态生产者路径照样会红。
+  `_code_exec_fetch` 特意放在 `_iv_rank_is_real` 之后，避开 v0.45.247 在 `_buzz_comp` 后插的 `_fear_greed_is_cnn`
+  （`git merge-tree` 实测：放在原位置 `signal_archive.py` 冲突，挪开后无冲突）。
+
+### 未修（只记录）
+- 全量 `--backfill` 污染 `guard.consistency_census` 这件事本身：`backfill()` docstring 和 `--only` 的 help 里已写警告，
+  修复已由 v0.45.256（占位，进行中）接手（抽取器按 `census_source == "live_agent_view"` 分段）。
+- 回填后依赖 fund.* 的**历史快照数字**会变：`experiments/signal_ic_sweep_report.md` 里 `fund.market_cap` 的 IC（n=18 天），
+  以及 `ic_diagnostics.py:462` 注释里拿 `fund.pe_ratio` 算噪音地板的例子（64 天 / 日均宽 10.4）。二者都是当时的快照，本次不改。
+  fund.* 在生产中**没有决策消费者**（只有 `analyze()` 与 experiments）⇒ 不需要世代边界。
 
 ## [0.45.249] — 2026-09-14 — 期权快照观测点按份数去重：同一份盘中/错会话快照一轮扫描只警告、只计数一次
 

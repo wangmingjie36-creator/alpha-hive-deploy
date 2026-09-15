@@ -203,6 +203,75 @@ class TestOptionsAgent:
         assert result["data_quality"] == "unavailable"
 
 
+class TestGammaCalendarUsesFullExpiryView:
+    """v0.45.258 wiring 测试。
+
+    背景：`analyze()` 里 gamma_calendar 此前直接复用 `calls_df`/`puts_df`——
+    那是 `fetch_options_chain()` 默认到期日选择器（按设计排除 DTE<7）产出的
+    近月截断链。真正最近、OI 最大的到期日一旦落进这个窗口就整个消失，Pin
+    Risk 会矮子里拔将军选到一个不具代表性的次要到期日（NVDA 实测：现价 $211
+    报出 Pin $270）。修法是换用 `cboe_options.fetch_cboe_chain_for_gex` 的
+    全到期日视图，失败时退回旧的近月截断链。这里钉的就是这条切换 + 兜底。
+    """
+
+    def _base_mocks(self, agent, monkeypatch, narrow_calls, narrow_puts):
+        monkeypatch.setattr(
+            agent.fetcher, "fetch_options_chain",
+            lambda ticker: {"calls": narrow_calls, "puts": narrow_puts,
+                             "expirations": [], "source": "real"}
+        )
+        monkeypatch.setattr(agent.fetcher, "fetch_historical_hv",
+                             lambda ticker: [0.25 + i * 0.02 for i in range(20)])
+        monkeypatch.setattr(agent.fetcher, "_save_last_valid_iv", lambda ticker, iv: None)
+        monkeypatch.setattr(agent.fetcher, "_read_last_valid_iv", lambda ticker: None)
+
+    def test_prefers_full_expiry_view_over_narrow_chain(self, monkeypatch):
+        import cboe_options
+
+        # 近月截断链：唯一候选到期日是远月，OI 集中在明显不合理的 $999。
+        narrow_calls = [{"strike": 999.0, "openInterest": 500, "impliedVolatility": 0.3,
+                          "gamma": 0.02, "expiry": "2026-12-18"}]
+        narrow_puts = [{"strike": 999.0, "openInterest": 400, "impliedVolatility": 0.3,
+                         "gamma": 0.02, "expiry": "2026-12-18"}]
+        # 全到期日视图：真正最近到期日（3 天后）OI 集中在贴近现价的 $150。
+        full_calls = [{"strike": 150.0, "openInterest": 5000, "impliedVolatility": 0.3,
+                        "gamma": 0.05, "expiry": "2026-09-18"}]
+        full_puts = [{"strike": 150.0, "openInterest": 4000, "impliedVolatility": 0.3,
+                       "gamma": 0.05, "expiry": "2026-09-18"}]
+
+        agent = OptionsAgent()
+        self._base_mocks(agent, monkeypatch, narrow_calls, narrow_puts)
+        monkeypatch.setattr(
+            cboe_options, "fetch_cboe_chain_for_gex",
+            lambda ticker, price: {"calls": full_calls, "puts": full_puts}
+        )
+
+        result = agent.analyze("TEST", stock_price=150.0)
+        gc = result.get("gamma_calendar") or {}
+        assert gc.get("pin_expiry") == "2026-09-18"
+        assert gc.get("pin_strike") == 150.0
+
+    def test_falls_back_to_narrow_chain_when_full_view_unavailable(self, monkeypatch):
+        import cboe_options
+
+        narrow_calls = [{"strike": 150.0, "openInterest": 500, "impliedVolatility": 0.3,
+                          "gamma": 0.02, "expiry": "2026-09-18"}]
+        narrow_puts = [{"strike": 150.0, "openInterest": 400, "impliedVolatility": 0.3,
+                         "gamma": 0.02, "expiry": "2026-09-18"}]
+
+        agent = OptionsAgent()
+        self._base_mocks(agent, monkeypatch, narrow_calls, narrow_puts)
+        monkeypatch.setattr(
+            cboe_options, "fetch_cboe_chain_for_gex",
+            lambda ticker, price: None,
+        )
+
+        result = agent.analyze("TEST", stock_price=150.0)
+        gc = result.get("gamma_calendar") or {}
+        assert gc.get("pin_expiry") == "2026-09-18"
+        assert gc.get("pin_strike") == 150.0
+
+
 # ==================== OptionsDataFetcher 缓存测试 ====================
 
 class TestOptionsDataFetcher:
