@@ -5,7 +5,58 @@
 
 ---
 
-## [0.45.257] — 2026-09-15 — 占位（进行中：close_correction.official_closes 加 Twelve Data 兜底——yfinance 批量下载今日全员 429，独立配额补上）
+## [0.45.257] — 2026-09-15 — close_correction.official_closes 加 Twelve Data 兜底：yfinance 批量下载今日 52/52 只全员 429，独立配额补上
+
+**起因**：v0.45.243 验证后请用户在自己终端跑 `close_correction.py --apply`（39 条待校正）。跑出：
+
+```
+52 Failed downloads: [...]: YFRateLimitError('Too Many Requests. Rate limited. Try after a while.')
+拿不到任何官方收盘 —— 不做任何改动
+⛔ 中止：no_official_closes
+```
+
+批量下载本身被限（比逐只调用触发限流更罕见，本工具的注释原以为批量能避开），`official_closes()`
+返回空表，`correct()` 按设计直接中止、**未写入任何数据**（已用生产库确认 `close_corrected_at` 计数
+未变）。用户问能不能改用 CBOE 或 Twelve Data。
+
+**CBOE 排除**：结构上不行。`cboe_official_closes` 的实时端点只暴露 `close`（此刻这一场）+
+`prev_day_close`（前一场），最多回溯 2 个交易日；而待校正的 39 条横跨 08-26~09-14 近 3 周，
+CBOE 答不出"08-28 DE 的官方收盘"这种问题。
+
+**Twelve Data 可行**：`twelve_data.py`（v0.45.61）本就是本仓"yfinance 打光额度时的独立配额"的
+既有答案（免费档 800/天、7/分，token 桶与 `resilience.yfinance_limiter` 完全分开，日报流水线的
+rv_30d/iv_rank 已经在用它兜同一类问题），且给的是**带日期的历史日线**（`fetch_bars`），不是
+CBOE 那种"只有当下 1-2 场"的实时快照——结构上能覆盖任意历史窗口。用户已配置 key。
+
+### Added
+- `close_correction._twelve_data_closes(tickers, lo, hi)`：逐只调 `twelve_data.fetch_bars`，
+  裁到 `[lo, hi]` 窗口，未配置 key 时安静返回空表（不阻断，与该模块其余消费方一致）。
+  逐只请求（52 只 ≈ 7~8 分钟），只用于补 yfinance 缺覆盖的标的，不是常规主源。
+
+### Changed
+- `official_closes`：yfinance 批量下载失败/缺覆盖时不再直接 `return {}`——改为记录哪些标的
+  没拿到覆盖（`_missing = tickers - 已覆盖`），只对这部分调用 `_twelve_data_closes` 补。
+  yfinance 全覆盖时完全不碰 Twelve Data（省配额）；两个源都拿不到时仍返回空表，
+  `correct()` 走原有的 `no_official_closes` 中止路径，行为不变。
+
+### Added — 测试（`tests/test_close_correction.py`，新增 9 条，本文件累计 26 条）
+- `_twelve_data_closes`：未配置跳过且不发请求、窗口裁剪、坏值（None/0）过滤、`fetch_bars`
+  返回 None 不崩、`days`/`end_date` 正确传参。
+- `official_closes`：yfinance 整体异常时被 Twelve Data 救回、只对缺覆盖标的补（不重复问已覆盖的）、
+  全覆盖时**不调用** Twelve Data、两源都失败仍返回空表。
+- `correct()` 端到端：yfinance 429 时不再一律中止。
+- 5 处变异（去掉兜底调用 / 不分标的照单全问 / 去窗口过滤 / 去配置检查 / 恢复 yfinance 异常早退）
+  各自变红；`tests/conftest.py::_block_same_day_macro`（autouse，已把 `twelve_data.api_key`
+  恒置空）确认覆盖本次新增路径，测试不会打真外网。
+- 生产 key 实测：`_twelve_data_closes(['NVDA'], '2026-09-08', '2026-09-14')` 拿到 5 个交易日
+  真实收盘（210.96~225.73），其中 09-11 = 218.28999，与 v0.45.243 语料里 yfinance 的
+  NVDA 09-11 收盘 218.2899932861328 一致（差 3.3e-6）。
+
+### 未做 / 待定
+- 39 条待校正仍未 `--apply`——本版只是把数据源打通，写入仍需用户在自己终端跑
+  `close_correction.py --apply`（然后 `backfill_dir_accuracy.py --all`）。
+- yfinance 与 Twelve Data 逐标的重叠去重逻辑未合并进任何统一取数层（`official_closes` 与
+  `scan_coverage_gate.check_prices` 仍各有一份 yfinance 实现，v0.45.41 就记过这笔技术债，未处理）。
 
 ## [0.45.256] — 2026-09-15 — 占位（进行中：signal_archive 的 guard.consistency_census 抽取器不按 census_source 分段，全量 backfill 会把 v0.45.163 前旧口径写进新名字）
 

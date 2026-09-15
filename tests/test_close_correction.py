@@ -342,3 +342,130 @@ def test_download_range_padded_for_non_trading_start(monkeypatch):
     monkeypatch.setitem(sys.modules, "yfinance", types.SimpleNamespace(download=_dl))
     cc.official_closes(["X"], "2026-03-01", "2026-03-02")
     assert seen["start"] < "2026-03-01", f"起点未前垫：{seen['start']}"
+
+
+# ══════════════════════════════════════════════════════════════════
+# Twelve Data 兜底（v0.45.257）—— yfinance 缺覆盖时的独立配额补源
+# ══════════════════════════════════════════════════════════════════
+# 触发实况：2026-09-15 yfinance 批量下载 52/52 只全 YFRateLimitError（429），
+# `correct()` 因 `official_closes` 返回空表而以 no_official_closes 中止。
+# 这里守的是「缺覆盖时该不该补、补的范围对不对、配置不了时会不会安静跳过」。
+
+class TestTwelveDataFallback:
+    def test_totally_absent_when_not_configured(self, monkeypatch):
+        """未配置 key（`is_configured()` False）→ 安静返回空表，不调 fetch_bars。
+
+        这也是测试环境里的默认状态：conftest 的 `_block_same_day_macro`
+        （autouse）把 `twelve_data.api_key` 恒置空，本条同时验证了那道闸接得上。
+        """
+        import twelve_data as td
+        calls = []
+        monkeypatch.setattr(td, "fetch_bars", lambda *a, **k: calls.append(1))
+        assert cc._twelve_data_closes(["X"], "2026-08-26", "2026-08-28") == {}
+        assert not calls, "未配置时不该发出任何请求"
+
+    def test_fetches_and_windows_correctly(self, monkeypatch):
+        """裁到 [lo, hi]；窗口外的行、坏值行都不进表。"""
+        import twelve_data as td
+        monkeypatch.setattr(td, "api_key", lambda: "k")
+        rows = [
+            {"date": "2026-08-24", "close": 999.0, "vol": 1},   # 窗口外（早）
+            {"date": "2026-08-26", "close": 100.0, "vol": 1},
+            {"date": "2026-08-27", "close": None, "vol": 1},    # 坏值：None
+            {"date": "2026-08-28", "close": 0.0, "vol": 1},     # 坏值：0
+            {"date": "2026-08-29", "close": 102.0, "vol": 1},   # 窗口外（晚，hi=08-28）
+        ]
+        monkeypatch.setattr(td, "fetch_bars", lambda t, days, end_date: rows)
+        got = cc._twelve_data_closes(["X"], "2026-08-26", "2026-08-28")
+        assert got == {("2026-08-26", "X"): 100.0}
+
+    def test_fetch_bars_returns_none_is_skipped_not_crashed(self, monkeypatch):
+        import twelve_data as td
+        monkeypatch.setattr(td, "api_key", lambda: "k")
+        monkeypatch.setattr(td, "fetch_bars", lambda *a, **k: None)
+        assert cc._twelve_data_closes(["X", "Y"], "2026-08-26", "2026-08-28") == {}
+
+    def test_end_date_and_window_size_passed_through(self, monkeypatch):
+        """`days` 必须够宽覆盖 [lo, hi]（含缓冲），`end_date` 必须是 hi。"""
+        import twelve_data as td
+        monkeypatch.setattr(td, "api_key", lambda: "k")
+        seen = {}
+
+        def _fb(t, days, end_date):
+            seen["days"], seen["end_date"] = days, end_date
+            return []
+        monkeypatch.setattr(td, "fetch_bars", _fb)
+        cc._twelve_data_closes(["X"], "2026-08-01", "2026-08-31")
+        assert seen["end_date"] == "2026-08-31"
+        assert seen["days"] >= 30, "跨度 30 天的窗口，days 不能比跨度还窄"
+
+
+class TestOfficialClosesUsesTwelveDataFallback:
+    def test_yfinance_total_failure_recovered_by_twelve_data(self, monkeypatch):
+        """2026-09-15 实况：批量下载整体抛异常（429）→ 全部标的改走 Twelve Data。"""
+        import types
+        def _dl(*a, **k):
+            raise RuntimeError("YFRateLimitError: Too Many Requests")
+        monkeypatch.setitem(sys.modules, "yfinance", types.SimpleNamespace(download=_dl))
+        monkeypatch.setattr(cc, "_twelve_data_closes",
+                            lambda tickers, lo, hi: {(hi, t): 42.0 for t in tickers})
+        got = cc.official_closes(["A", "B"], "2026-08-26", "2026-08-28")
+        assert got == {("2026-08-28", "A"): 42.0, ("2026-08-28", "B"): 42.0}
+
+    def test_partial_yfinance_coverage_only_backfills_missing_tickers(self, monkeypatch):
+        """A 有数据、B 没有 → Twelve Data 只被问 B，不重复问 A（省配额）。"""
+        import types
+        import pandas as pd
+        idx = pd.to_datetime(["2026-08-26"])
+        fake = pd.DataFrame({"A": [100.0]}, index=idx)   # 只有 A，B 缺席
+        monkeypatch.setitem(sys.modules, "yfinance",
+                            types.SimpleNamespace(download=lambda *a, **k: {"Close": fake}))
+        seen = {}
+
+        def _td_fallback(tickers, lo, hi):
+            seen["tickers"] = list(tickers)
+            return {("2026-08-26", "B"): 200.0}
+        monkeypatch.setattr(cc, "_twelve_data_closes", _td_fallback)
+        got = cc.official_closes(["A", "B"], "2026-08-26", "2026-08-26")
+        assert seen["tickers"] == ["B"], "A 已有覆盖，不该再问 Twelve Data"
+        assert got == {("2026-08-26", "A"): 100.0, ("2026-08-26", "B"): 200.0}
+
+    def test_full_yfinance_coverage_skips_twelve_data_entirely(self, monkeypatch):
+        """yfinance 全覆盖时**不调用** Twelve Data——没有缺口就不该多花配额。"""
+        import types
+        import pandas as pd
+        idx = pd.to_datetime(["2026-08-26"])
+        fake = pd.DataFrame({"A": [100.0], "B": [200.0]}, index=idx)
+        monkeypatch.setitem(sys.modules, "yfinance",
+                            types.SimpleNamespace(download=lambda *a, **k: {"Close": fake}))
+        called = []
+        monkeypatch.setattr(cc, "_twelve_data_closes", lambda *a, **k: called.append(1) or {})
+        cc.official_closes(["A", "B"], "2026-08-26", "2026-08-26")
+        assert not called
+
+    def test_both_sources_fail_still_returns_empty_not_crash(self, monkeypatch):
+        """yfinance 抛异常 + Twelve Data 也拿不到 → 空表，`correct()` 据此走 no_official_closes。"""
+        import types
+        monkeypatch.setitem(sys.modules, "yfinance",
+                            types.SimpleNamespace(download=lambda *a, **k: (_ for _ in ()).throw(
+                                RuntimeError("429"))))
+        monkeypatch.setattr(cc, "_twelve_data_closes", lambda *a, **k: {})
+        assert cc.official_closes(["A"], "2026-08-26", "2026-08-26") == {}
+
+
+def test_correct_recovers_when_yfinance_down_but_twelve_data_up(db, monkeypatch):
+    """端到端：yfinance 整体 429 时不再一律 no_official_closes——Twelve Data 能救回来。"""
+    import types
+    p = db([(DATE, "CRM", 232.93)])
+    monkeypatch.setitem(sys.modules, "yfinance",
+                        types.SimpleNamespace(download=lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("YFRateLimitError"))))
+    monkeypatch.setattr(cc, "_twelve_data_closes", lambda tickers, lo, hi: {(DATE, "CRM"): 205.62})
+    monkeypatch.setattr(cc, "cboe_official_closes", lambda t, **k: {})
+    monkeypatch.setattr(cc, "_prev_trading_day", lambda: None)
+    con = sqlite3.connect(p)
+    st = cc.correct(con, apply=True)
+    val, = con.execute("SELECT price_at_predict FROM predictions").fetchone()
+    con.close()
+    assert st.get("aborted") is None
+    assert st["corrected"] == 1 and val == pytest.approx(205.62)
