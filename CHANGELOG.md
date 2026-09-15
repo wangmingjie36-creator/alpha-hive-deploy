@@ -9,7 +9,41 @@
 
 ## [0.45.262] — 2026-09-15 — 占位（进行中：F&G 组合层敞口控制门——预置读取管道 + 默认关闭的 CONFIG 开关 + 预注册前瞻检验基础设施）
 
-## [0.45.261] — 2026-09-15 — 占位（进行中：修 param_optimizer.py CONFIG "恢复" 用硬编码旧值的 bug）
+## [0.45.261] — 2026-09-15 — Fixed：param_optimizer.py 网格搜索收尾用硬编码旧值"恢复" paper_portfolio.CONFIG，改成 deepcopy 快照
+
+评审 paper_portfolio.py F&G 组合层敞口控制设计时顺带发现：`run_grid()`
+（一次性参数网格搜索工具）跑完全部 combo 后，用 5 行硬编码字面量给
+`paper_portfolio.CONFIG` "恢复"：`sl_pct=7.0` / `tp_pct=10.0` /
+`max_deployed_pct=30.0` / `ticker_whitelist=["NVDA"]` / `live_start_date=
+"2026-04-16"`——这些是 v0.39.0 之前的旧默认值。当前生产 CONFIG 早已是
+`tp_pct=15.0`（v0.39.0）、`max_deployed_pct=80.0`（v0.39.0）、
+`ticker_whitelist=[]`（v0.38.0），5 键里 3 个已不符。这个 sweep 脚本平时
+不跑，但一旦重新跑起来（改 SL/TP/部署上限网格搜索后照例跑一次），会把生产
+参数静默改错，而不是真正恢复——`paper_portfolio.run_replay()` 已经踩过
+同一个坑并留下教训（其 docstring 与 1221-1223 行注释）：CONFIG 里有二层
+嵌套字典（`vol_target.conf_multiplier`），浅拷贝挡不住内层覆盖泄漏，必须
+`copy.deepcopy` + `try/finally`，`param_optimizer.py` 却各建了一套自己的
+（且这套是硬编码字面量，不是拷贝）。
+
+修复：`run_grid()` 进 combo 循环前先 `copy.deepcopy(paper_portfolio.CONFIG)`
+留作运行前真实状态快照，循环体挪进 `try`，`finally` 里 `CONFIG.clear()` +
+`CONFIG.update(快照)` 换掉 5 行硬编码字面量——照抄 `run_replay()` 已验证的
+模式。顺带把 `_restore_state()`（数据文件备份恢复）也移进同一个 `finally`，
+语义更强：即使循环体未来出现逃逸出内层 `except Exception` 的异常（如
+`KeyboardInterrupt`），CONFIG 也不会卡在某个 combo 的中间状态。
+
+通读全文件确认：这是 param_optimizer.py 里唯一一处硬编码"恢复值"模式；
+`_backup_state()`/`_restore_state()`/`_clear_state()` 操作的是真实文件拷贝
+（`shutil.copytree`/`rmtree`），不受影响。
+
+新增 `tests/test_param_optimizer_config_restore.py`：stub 掉需要完整历史
+快照数据的 `_run_one_combo`，只保留它对 CONFIG 的读写副作用；运行前把
+CONFIG 设成哨兵值（不等于新旧任何一版硬编码字面量），跑完断言逐键精确
+还原——用改动前的代码验证过该测试确实会失败（`tp_pct` 被打回硬编码的
+10.0），不是摆设。
+
+文件：`param_optimizer.py`（`run_grid()`），新增
+`tests/test_param_optimizer_config_restore.py`。
 
 ## [0.45.260] — 2026-09-15 — 数据根迁移阶段 2 路径收口：28 文件把 `__file__` 派生数据路径改成调用时求值的 `PATHS.*`，仓库内代码，数据一字节未动；生产环境变量（2.3）按记录要求跳过待批准
 
