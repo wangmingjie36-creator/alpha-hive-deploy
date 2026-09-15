@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.258] — 2026-09-15 — 占位（进行中：修复 Gamma 到期日历 Pin Risk 用错到期日选择器，NVDA 现价 $211 却报 $270）
+
 ## [0.45.257] — 2026-09-15 — 占位（进行中：close_correction.official_closes 加 Twelve Data 兜底——yfinance 批量下载今日全员 429，独立配额补上）
 
 ## [0.45.256] — 2026-09-15 — 占位（进行中：signal_archive 的 guard.consistency_census 抽取器不按 census_source 分段，全量 backfill 会把 v0.45.163 前旧口径写进新名字）
