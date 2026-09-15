@@ -210,7 +210,19 @@ v0.45.238 的观测点按**调用**计。一只标的一轮扫描要调 3~4 次 
 - `deep_analysis` / `generate_ml_report` 其余 details 读取不是声明式的，本守卫够不到（这次只修了 F&G 这三处并用真实 Buzz 输出钉住）。
 - 另立任务：CodeExecutorAgent 自 2026-08 把 `market_cap` / `pe_ratio` 挪进 `details.fetch_data`（9 月 106/108 份嵌套），
   `fund.market_cap` / `fund.pe_ratio` 基本已停止入档。
-- Buzz 情绪合成里的 F&G 活通道（`buzz_weights.fear_greed=0.10`，当天全池常数、只做水平平移）与加密备用源，本版未动（需先量、改了要世代边界）。
+- ~~Buzz 情绪合成里的 F&G 活通道（`buzz_weights.fear_greed=0.10`，当天全池常数、只做水平平移）与加密备用源，本版未动
+  （需先量、改了要世代边界）。~~ —— **已查（同日追记，2026-09-15）**：
+  - **活通道已量化，证据不足，不改。** `buzz_weights.fear_greed` 与方向阈值自 03-09 起未变，公式线性可分离，
+    换成中性 50 时其余六通道原样抵消，不需要重建历史 reddit/news/yahoo 真实取值。793 份历史结果：确定翻转 51（6.4%）+
+    模糊 52（6.6%）；效应顺周期（恐惧推更 bearish、贪婪推更 bullish），与已删除的 Queen 层逆周期调整方向相反，
+    两层从未同时生效；横截面 IC（复用 `ic_diagnostics.spearman`）real +0.087 vs cf（去掉 F&G）+0.111，
+    差值 p=0.15（15 周，本仓功效标准要 ~25 周），负对照（同法换 volatility_signal）零翻转，确认效应真实但**未过检验**。
+    维持现状，不动生产代码——若要真答案，仿 `resonance_boost_forward_test.py` 搭预注册前瞻检验，不再挖历史。
+  - **加密备用源标签问题已被本版顺带解决。** `fear_greed._default_result()` 本就正确返回 `is_real_data: False`，
+    原判断「兜底会被喂成假 50」是误报；真正的缺口「加密源标 True 但下游分不清它和 CNN」已被本版
+    `details.fear_greed.source` 与 `market.fear_greed_is_cnn` 解决。剩下「加密 F&G 该不该降权」二次核实生产日志仍是
+    **0 次真实触发**（固定值×165/57 行逐位对应 `test_fear_greed.py` 夹具），零样本不改代码。
+  - 完整数字、方向验证、脚本见 auto-memory `alpha-hive-fear-greed-dead-wire.md`（本次未新增代码，脚本留在 scratchpad 未入库）。
 
 ### 验证
 
