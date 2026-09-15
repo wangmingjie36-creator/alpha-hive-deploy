@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.250] — 2026-09-15 — 占位（进行中：signal_archive 的 fund.pe_ratio/market_cap 读不到 CodeExecutor 8 月后的嵌套 details，静默停档）
+
 ## [0.45.249] — 2026-09-14 — 期权快照观测点按份数去重：同一份盘中/错会话快照一轮扫描只警告、只计数一次
 
 v0.45.238 的观测点按**调用**计。一只标的一轮扫描要调 3~4 次 `analyze()`（OracleBee / BearBee / advanced_analyzer / 日报收尾），
