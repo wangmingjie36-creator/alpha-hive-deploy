@@ -1183,21 +1183,32 @@ class QueenDistiller:
             _TAF = {"enabled": False, "min_samples": 5, "discount_threshold": 0.50, "min_reliability": 0.5}
         if _TAF.get("enabled", False):
             try:
-                from pathlib import Path as _Path_ta
                 from feedback_loop import BacktestAnalyzer as _BA_ta
-                _project_root_ta = _Path_ta(__file__).resolve().parent.parent
-                _snap_dir = str(_project_root_ta / "report_snapshots")
+                from hive_logger import PATHS as _PATHS_ta
+                # v0.45.98 原版：这里独立算一份 `_project_root_ta =
+                # Path(__file__).resolve().parent.parent`，同时喂给 _snap_dir
+                # 与 close_t7_db_path——理由是怕两者落到 feedback_loop.py 自己
+                # 的 `__file__` 相对缺省值会不一致（那时 feedback_loop 的默认
+                # 值确实是 `Path(__file__).parent`）。
+                # v0.45.260（数据根迁移阶段 2）：那份顾虑已不成立——
+                # feedback_loop._db_path() 早在 v0.45.160/171 就改成读
+                # `PATHS.db`，不再是 `__file__` 派生。继续在这里独立冻结
+                # `_project_root_ta` 只是把「两份独立冻结的默认值必须巧合
+                # 一致」这个脆弱耦合原样保留（且换成了 `PATHS.home`/`PATHS.db`
+                # 也是各自独立解析）。现在**不传** `close_t7_db_path`，让
+                # `BacktestAnalyzer` 走它自己对 `feedback_loop._db_path()` 的
+                # 默认解析；`_snap_dir` 也改用 `PATHS.home`——两处现在结构性地
+                # 读同一个真相源（`PATHS.home`/`PATHS.db` 共享同一个
+                # `ALPHA_HIVE_HOME`），不再需要"必须巧合一致"。
+                # 生产今天不设 `ALPHA_HIVE_HOME` 时，`PATHS.home` 与旧的
+                # `Path(__file__).resolve().parent.parent`（本文件在
+                # `swarm_agents/` 下，上跳两级）落在同一个仓库根，行为不变。
+                _snap_dir = str(_PATHS_ta.home / "report_snapshots")
                 # 缓存 BacktestAnalyzer 实例（避免每标的都重新扫描文件系统）
                 # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
                 # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
-                # v0.45.98：显式传 close_t7_db_path，与上一行 _snap_dir 用
-                # 同一个基准目录（_project_root_ta），不用 feedback_loop.py
-                # 的 __file__ 相对缺省值——否则 snapshots 和 close_t7 库
-                # 可能来自两个不同目录，worktree 场景下已实测会不一致。
                 if not hasattr(self, "_ba_cache"):
-                    self._ba_cache = _BA_ta(
-                        directory=_snap_dir, clean_t7=True,
-                        close_t7_db_path=_project_root_ta / "pheromone.db")
+                    self._ba_cache = _BA_ta(directory=_snap_dir, clean_t7=True)
                 _snaps = self._ba_cache.get_snapshots_by_ticker(ticker)
                 _t7 = [s for s in (_snaps or []) if s.actual_price_t7 is not None and s.entry_price]
                 if len(_t7) >= _TAF.get("min_samples", 5):

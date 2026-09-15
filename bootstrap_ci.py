@@ -56,7 +56,11 @@ T7_PERIODS_PER_YEAR = 36   # 修复 #8: 252 交易日 / 7 交易日采样 = 36
 
 def _load_all_trades() -> List[float]:
     """从 pheromone.db 读所有 net_return_t7（已扣成本的净收益 %）"""
-    db = Path(__file__).parent / "pheromone.db"
+    # v0.45.260（数据根迁移阶段 2）：此前是 `Path(__file__).parent /
+    # "pheromone.db"`——不读 `ALPHA_HIVE_HOME`。改读 `PATHS.db`；本脚本零
+    # import 者、零测试覆盖，是只读诊断，但仍照统一模式收口。
+    from hive_logger import PATHS
+    db = Path(PATHS.db)
     with sqlite3.connect(str(db)) as conn:
         rows = conn.execute("""
             SELECT net_return_t7 FROM predictions

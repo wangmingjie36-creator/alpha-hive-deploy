@@ -275,10 +275,12 @@ def _load_fresh_ml_prob(ticker: str, date_str: str | None = None) -> float | Non
     import json as _json
     import glob as _glob
     from datetime import datetime as _dt
-    from pathlib import Path as _Path
     try:
         today = date_str or _dt.now().strftime("%Y-%m-%d")
-        base = _Path(__file__).parent
+        # v0.45.260（数据根迁移阶段 2）：此前 `base = Path(__file__).parent`——
+        # 不读 `ALPHA_HIVE_HOME`。改读 `PATHS.home`。
+        from hive_logger import PATHS
+        base = PATHS.home
         pattern = str(base / f"analysis-{ticker}-ml-{today}.json")
         files = _glob.glob(pattern)
         if not files:
@@ -804,8 +806,10 @@ def _build_data_quality_section(sorted_results) -> List[str]:
     # 纸面组合新鲜度（落后 >2 天提示）
     try:
         import json as _json
-        from pathlib import Path as _Path
-        _meta_p = _Path(__file__).parent / "paper_portfolio_state" / "meta.json"
+        # v0.45.260（数据根迁移阶段 2）：此前 `Path(__file__).parent`——
+        # 不读 `ALPHA_HIVE_HOME`。改读 `PATHS.home`。
+        from hive_logger import PATHS
+        _meta_p = PATHS.home / "paper_portfolio_state" / "meta.json"
         if _meta_p.exists():
             _meta = _json.loads(_meta_p.read_text())
             _last = _meta.get("last_run_date", "")

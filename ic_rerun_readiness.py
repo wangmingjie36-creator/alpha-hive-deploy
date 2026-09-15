@@ -58,7 +58,19 @@ from typing import Dict, Optional, Set
 ALPHAHIVE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ALPHAHIVE_DIR))
 
-DB_PATH = ALPHAHIVE_DIR / "pheromone.db"
+# v0.45.260（数据根迁移阶段 2）：DB_PATH 此前是从 ALPHAHIVE_DIR（`__file__`
+# 派生）算出的模块级常量——完全不读 `ALPHA_HIVE_HOME`。改为覆盖钩子 +
+# 调用时求值，与 `signal_archive.py` 等模块同一模式；`ALPHAHIVE_DIR` 本身
+# 保留 —— 它只喂上面的 `sys.path.insert`，用途合规。
+DB_PATH = None
+
+
+def _db_path() -> Path:
+    """`pheromone.db` 路径，**调用时求值**。"""
+    if DB_PATH is not None:
+        return Path(DB_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.db)
 
 # ── 样本世代边界 ────────────────────────────────────────────────────────────
 # 每条 = (首个受影响的业务日, 版本, 改了什么)。**只追加，不改写**（审计轨迹）。
@@ -417,10 +429,15 @@ def _iso_weeks(dates) -> Set:
     return out
 
 
-def assess(db_path: Path = DB_PATH, target_ic: float = DEFAULT_TARGET_IC,
+def assess(db_path: Optional[Path] = None, target_ic: float = DEFAULT_TARGET_IC,
            max_pool_drift: float = MAX_POOL_DRIFT,
            today: Optional[str] = None) -> Dict:
-    """就绪度判定。纯函数，便于测试。"""
+    """就绪度判定。纯函数，便于测试。
+
+    ⚠️ `db_path` 默认写 `None`，调用时才解析——不要改回 `= DB_PATH`，
+    那等于把冻结换个地方（同型 v0.45.160）。
+    """
+    db_path = Path(db_path) if db_path is not None else _db_path()
     cohort = cohort_start()
     boundary = cohort["date"]
     required = _WEEKS_REQUIRED.get(
@@ -615,7 +632,7 @@ _BOUNDARY_VERDICT_TEXT = {
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="IC 重跑就绪度")
-    ap.add_argument("--db", default=str(DB_PATH))
+    ap.add_argument("--db", default=None, help="pheromone.db 路径（默认走 PATHS.db）")
     ap.add_argument("--target-ic", type=float, default=DEFAULT_TARGET_IC,
                     choices=sorted(_WEEKS_REQUIRED),
                     help=f"要检出的真实 |IC|（默认 {DEFAULT_TARGET_IC}=系统综合分实测）")
@@ -631,7 +648,7 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="只输出一行摘要")
     args = ap.parse_args()
 
-    db = Path(args.db)
+    db = Path(args.db) if args.db else _db_path()
     if not db.exists():
         print(f"❌ 找不到 {db} —— 无法判定", file=sys.stderr)
         return 3

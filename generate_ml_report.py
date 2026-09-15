@@ -2817,8 +2817,23 @@ def main():
                         try:
                             import json as _json
                             import os as _os
+                            # v0.45.260（数据根迁移阶段 2）：此前是
+                            # `os.path.dirname(os.path.abspath(__file__))`——
+                            # 不读 `ALPHA_HIVE_HOME`。改读 `PATHS.home`。
+                            # ⚠️ 已知新发现、本次不改：写这份 `{ticker}_raw.json`
+                            # 的 `collect_data.py`（手动运行）目前锚在**硬编码**
+                            # `~/Desktop/Alpha Hive`（非 `__file__` 派生、也不读
+                            # `ALPHA_HIVE_HOME`，只在检测到 Cowork VM 路径时才
+                            # 改指别处），不在本次任务列出的文件范围内。今天两者
+                            # 都落在同一个仓库根，行为不变；但 `ALPHA_HIVE_HOME`
+                            # 一旦被设置（如阶段 5 后），读写两端会分叉——
+                            # 需要单独排期收口 `collect_data.py`。
+                            # （`PATHS` 已在本文件顶部模块级导入，此处直接复用——
+                            # 若在函数内重新 `import`，会因同名局部绑定，让本函数
+                            # 更早处 `report_dir = PATHS.home` 的引用变成
+                            # "referenced before assignment"，ruff F823 会抓到。）
                             _raw_path = _os.path.join(
-                                _os.path.dirname(_os.path.abspath(__file__)),
+                                str(PATHS.home),
                                 "%s_raw.json" % ticker,
                             )
                             if _os.path.exists(_raw_path):
@@ -2983,13 +2998,27 @@ def main():
 
 
 def _sync_ghpages(tickers: list, successful_count: int) -> None:
-    """将当日 ML 增强报告同步到 gh-pages 分支并推送。"""
+    """将当日 ML 增强报告同步到 gh-pages 分支并推送。
+
+    ⚠️ 数据根迁移阶段 2 备注：与 `report_deployer.deploy_static_to_ghpages`
+    完全同构的第二份实现（两处都做 git plumbing + `os.listdir` 找待部署
+    文件）。`repo` 在这里同时身兼**git 仓库根**（`hash-object`/`write-tree`/
+    `commit-tree`/`push` 必须在这里，需要 `.git/`）与**数据根**（`os.listdir`
+    找报告文件）两个概念——这个"一个变量两种身份"的架构问题与
+    `report_deployer.py` 同源，统一收口属于数据根迁移计划的**阶段 4**
+    （"两处一起处理，不能只改一个"），本阶段不做结构性拆分。
+    本阶段只做 Phase 2 该做的事：`repo` 此前是 `Path(__file__).parent`——
+    压根不读 `ALPHA_HIVE_HOME`（不同于 `report_deployer.py` 那份用的
+    `agent_helper.git.repo_path`，那个已经是 env 优先的写法）。改读
+    `PATHS.home`；零测试覆盖本函数，生产今天不设 `ALPHA_HIVE_HOME` 时
+    两者兜底到同一个仓库根，行为不变。
+    """
     import subprocess
     import os
     import re as _re
     if successful_count == 0:
         return
-    repo = str(Path(__file__).parent)
+    repo = str(PATHS.home)  # `PATHS` 已在本文件顶部模块级导入
     date_str = pdt_today()
     _ml_pat = _re.compile(r"^alpha-hive-[\w.-]+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$")
     _CORE = {"index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml", ".nojekyll", "chart.umd.min.js"}  # v0.41.0

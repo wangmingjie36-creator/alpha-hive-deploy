@@ -31,7 +31,18 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-SNAP_DIR = ROOT / "report_snapshots"
+from hive_logger import PATHS  # noqa: E402
+
+# v0.45.260（数据根迁移阶段 2）：SNAP_DIR 与下面 `ROOT.glob(".swarm_results_*.json")`
+# 此前锚在 `ROOT`（`__file__` 派生）。改读 `PATHS.home`——本脚本是一次性/历史
+# 诊断，不被 pytest import、不参与生产扫描主链路，但仍应读到真实数据根。
+# `.swarm_results_*.json` 是主扫描按日产出、又被同一进程读回判定标的完整性
+# 的产物，对已经跑过的历史日期是"不可重取"的——v0.45.259 复核时如实记过
+# 这一处存疑（"诊断脚本自己只读不写"也是一种合理读法），但不管归类如何，
+# 它都是**数据**不是代码，理应跟 `PATHS.home` 走。
+# OUT 不变：报告 markdown 随代码提交（`git ls-files` 已跟踪），
+# 与 CHANGELOG.md 同类——代码同址资源，`__file__` 锚定正确。
+SNAP_DIR = PATHS.home / "report_snapshots"
 OUT = Path(__file__).parent / "penalty_replay_report.md"
 
 
@@ -53,7 +64,7 @@ def t7_map():
 def load_swarm_rows():
     rets = t7_map()
     rows = []
-    for f in sorted(ROOT.glob(".swarm_results_*.json")):
+    for f in sorted(PATHS.home.glob(".swarm_results_*.json")):
         date = f.name.replace(".swarm_results_", "").replace(".json", "")
         try:
             d = json.loads(f.read_text())

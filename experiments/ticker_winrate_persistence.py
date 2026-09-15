@@ -66,11 +66,20 @@ from collections import defaultdict
 
 
 def find_db():
+    """三级 fallback：`ALPHA_HIVE_PHEROMONE_DB`（本脚本专属 env，优先）→
+    `PATHS.db` → Cowork VM 挂载点探测。
+
+    v0.45.260（数据根迁移阶段 2）：中间那级此前是 `os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))) / "pheromone.db"`——完全
+    绕开 `ALPHA_HIVE_HOME`/`ALPHA_HIVE_DB_PATH`。改读 `hive_logger.PATHS.db`；
+    第一级的专属 env 与第三级的 Cowork VM 探测不变——这两级不是本次迁移
+    的目标，改它们会改变本脚本既有的行为约定（优先级顺序、glob 兜底）。
+    """
     env = os.environ.get("ALPHA_HIVE_PHEROMONE_DB")
     if env and os.path.exists(env):
         return env
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    local = os.path.join(here, "pheromone.db")
+    from hive_logger import PATHS
+    local = PATHS.db
     if os.path.exists(local):
         return local
     hits = glob.glob("/sessions/*/mnt/Alpha Hive/pheromone.db")

@@ -86,10 +86,16 @@ class BacktestConfig:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _find_db() -> Path:
-    """定位 pheromone.db"""
-    base = Path(__file__).parent
-    for name in ["pheromone.db", "hive_predictions.db"]:
-        p = base / name
+    """定位 pheromone.db（或历史遗留的 hive_predictions.db）。
+
+    v0.45.260（数据根迁移阶段 2）：此前 `base = Path(__file__).parent`——
+    不读 `ALPHA_HIVE_HOME`。改读 `PATHS.home`；`pheromone.db` 本身优先经
+    `PATHS.db`（可被 `ALPHA_HIVE_DB_PATH` 单独覆盖），`hive_predictions.db`
+    仍锚在 `PATHS.home` 下（历史遗留库，无独立覆盖钩子）。
+    """
+    from hive_logger import PATHS
+    candidates = [Path(PATHS.db), PATHS.home / "hive_predictions.db"]
+    for p in candidates:
         if p.exists():
             return p
     raise FileNotFoundError("找不到 pheromone.db")

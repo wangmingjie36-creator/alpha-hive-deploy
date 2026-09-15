@@ -5,7 +5,328 @@
 
 ---
 
-## [0.45.260] — 2026-09-15 — 占位（进行中：数据根迁移阶段 2 路径收口——PATHS 补齐 + 逐文件迁移 __file__ 派生数据路径，仓库内代码，不碰数据）
+## [0.45.260] — 2026-09-15 — 数据根迁移阶段 2 路径收口：28 文件把 `__file__` 派生数据路径改成调用时求值的 `PATHS.*`，仓库内代码，数据一字节未动；生产环境变量（2.3）按记录要求跳过待批准
+
+本阶段只改仓库内代码，不碰数据文件本身，不碰仓库外任何东西（编排器脚本、plist、
+launchd）。方法：每处改动先确认「改之前的行为 / 改之后的行为 / 为什么不会破坏
+现状」，逐文件改完就跑相关测试，全部改完再跑全套 + ruff + 沙箱扫描验收。
+
+### 前情与判据
+
+沿用 v0.45.252/259 阶段 1 盘点表与 CLAUDE.md「这个路径指向代码还是数据」判据：
+`sys.path.insert`/`git -C <仓库>`/模板/只读配置 → `__file__` 正确，不动；
+数据库/账本/状态/缓存/发布产物 → 必须改经 `hive_logger.PATHS.*` 调用时求值。
+覆盖模式统一沿用仓内既有惯例（`signal_archive.py`/`feedback_loop.py`/
+`paper_portfolio.py` 等已迁移文件的写法）：`XXX_PATH = None`（覆盖钩子，保留
+名字供 `tests/` 的 `monkeypatch.setattr` 用）+ `_xxx_path()` 函数在调用时读
+`XXX_PATH is not None` 否则解析 `PATHS.*`；函数默认参数一律写 `None` 再在体内
+解析，不写 `= XXX_PATH`（那等于把冻结换个地方）。
+
+### Fixed — 优先级最高的 6 处（按 v0.45.259 记录的紧迫度排序）
+
+1. **`scan_continuity.py:65,70,71`**（编排器 Step 10 每日活跃，`--days 30 --quiet`
+   无 `--db`/`--snapshots`）——`DB_PATH`/`SNAPSHOTS_DIR` 此前是
+   `ALPHAHIVE_DIR / "pheromone.db"`/`"report_snapshots"`（`ALPHAHIVE_DIR` 是
+   `__file__` 派生），改前：改哪个环境变量都无效，恒读代码 checkout 位置；
+   改后：`DB_PATH`/`SNAPSHOTS_DIR` 改成覆盖钩子（默认 `None`），新增
+   `_db_path()`/`_snapshots_dir()` 在调用时经 `hive_logger.PATHS` 解析；
+   `assess()` 与 `main()` 的 `--db`/`--snapshots` 默认值同步改 `None`、体内按
+   `args.db or _db_path()` 解析。`ALPHAHIVE_DIR` 本身保留 `__file__`——它只喂
+   `sys.path.insert`，用途合规。为何不破坏现状：生产今天不设
+   `ALPHA_HIVE_HOME` 时，`PATHS.db`/`PATHS.home` 与旧的 `ALPHAHIVE_DIR` 派生值
+   落在同一个仓库根，逐字节相同；`tests/test_scan_continuity.py` 全部用例都
+   显式传 `db_path`/`snap_dir`，不依赖模块常量，未受影响。
+2. **`scan_coverage_gate.py:50`**（编排器 Step 12 每日活跃，`--quiet --out`
+   不传 `--file`）——`ROOT` 此前是 `Path(__file__).parent`，改成覆盖钩子
+   `ROOT = None` + `_root()` 解析器，`check()`/`check_label_honesty()` 的
+   `results_path or (ROOT / ...)` 改为 `results_path or (_root() / ...)`。
+   顺手发现同文件 `check_prices(db_path: str = "pheromone.db")`——不是
+   `__file__` 派生，是**相对 CWD** 的字面量默认值，同一物种的另一变体，唯一
+   生产调用点 `main()` 未传该参数；一并改成 `None` + 调用时经 `PATHS.db`
+   解析（该函数仅在显式 `--check-prices` 时才被调用，编排器默认不传，
+   风险面很小）。为何不破坏现状：两处默认值今天都落在仓库根；
+   `tests/test_scan_coverage_gate.py` 全部显式传 `results_path`/`db`，
+   未受影响。
+3. **`probability_scorecard.py:64,67,68`**——`STATE_DIR`/`LEDGER_PATH` 此前
+   是 `ALPHAHIVE_DIR` 派生的模块级常量，正是 memory 基线点名过的「概率账本
+   写入且不在总闸」（`conftest._GUARDED_PRODUCTION_ARTIFACTS` 不含
+   `probability_scorecard_state`）那个模块本体。改成覆盖钩子 + `_state_dir()`/
+   `_ledger_path()` 解析器；`record_published`/`load_ledger` 的
+   `ledger_path or LEDGER_PATH` 改为 `ledger_path or _ledger_path()`；
+   `load_ml_probabilities` 的 `reports_dir` 缺省从 `ALPHAHIVE_DIR` 改读
+   `PATHS.home`（`--reports-dir` 帮助文案同步更正，此前写"默认模块目录"）。
+   `load_outcomes()` 本身此前已经是正确写法（v0.45.171 已接 `feedback_loop.
+   _db_path()`），本次未动。为何不破坏现状：`tests/test_probability_
+   scorecard.py` 全部用例显式传 `ledger_path`/`reports_dir`/`db_path`，
+   全 43 条通过。
+4. **`walk_forward_validator.py:92-93`**——`_load_all_verified()` 内
+   `base = Path(__file__).parent; db = base / "pheromone.db"` 改为直接
+   `Path(PATHS.db)`。零测试覆盖、零 import 者（只读诊断/回测消费者），
+   风险最低的一处。
+5. **`swarm_agents/queen_distiller.py:1190-1202`**（脆弱耦合，与
+   `feedback_loop.py` 独立冻结的默认值曾经"必须巧合一致"）——此前独立算
+   `_project_root_ta = Path(__file__).resolve().parent.parent`，同时喂
+   `_snap_dir`（report_snapshots）与显式传入的 `close_t7_db_path`。
+   `feedback_loop._db_path()` 早在 v0.45.160/171 就已经改成读 `PATHS.db`，
+   不再是 `__file__` 派生，这份顾虑已经过期。改法：`_snap_dir` 直接读
+   `hive_logger.PATHS.home`；**不再传** `close_t7_db_path`，让
+   `BacktestAnalyzer(clean_t7=True)` 走它自己对 `feedback_loop._db_path()`
+   的默认解析——两处现在结构性地共享同一个 `ALPHA_HIVE_HOME`，不再是
+   "两份独立冻结默认值必须巧合一致"。同步改写
+   `tests/test_close_t7_production_wiring.py::TestQueenDistillerClosePathWiring
+   ::test_uses_own_project_root_for_close_t7`：原测试靠伪造
+   `qd_module.__file__` 驱动隔离，改为 `monkeypatch.setenv("ALPHA_HIVE_HOME",
+   ...)`；另需显式 `monkeypatch.setattr(feedback_loop, "PHEROMONE_DB_PATH",
+   tmp_path / "pheromone.db")`——autouse 夹具
+   `_isolate_feedback_loop_close_t7_db` 无条件把该钩子指向不存在路径（防止
+   测试误开生产库），不看 `ALPHA_HIVE_HOME`，需按该夹具文档自带的用法显式
+   覆盖。断言与场景（"两者必须指向同一目录"）不变，只是隔离机制换了。
+   为何不破坏现状：生产今天两者也落在同一个仓库根（本文件在
+   `swarm_agents/` 下，`.parent.parent` 上跳两级 = 仓库根，与 `PATHS.home`
+   的兜底值相同）。
+6. **`run_daily_scan.py:176`**（当前无自动生产读者——已用 grep 核实 launchd
+   plist 直接指向 `alpha-hive-orchestrator.sh`，不经本脚本——但一旦被手动
+   执行会直接对生产 `pheromone.db` 做 `DELETE`+`VACUUM`，风险不因"没人调用"
+   而降低）——`_cleanup_stale_data(project_dir: Path)` 原为必填参数、唯一
+   调用点传 `Path(__file__).parent`；改成 `project_dir: Optional[Path] = None`，
+   `None` 时经 `PATHS.home` 解析，调用点相应改为不传参。顺手一并处理同文件
+   `_write_status()` 的 `log_dir = Path(__file__).parent / "logs"`（第 222
+   行，同一物种）——改用 `PATHS.logs_dir`（已按调用时求值 + 自动建目录实现）。
+   `_run_dry_run()` 里 `project_dir = Path(__file__).parent`（第 86 行）
+   **保留不动**——只用于校验 `templates/dashboard.html` 等随代码发布的模板
+   文件是否存在，是合规的代码同址锚点。零测试覆盖，全部靠 sandbox 扫描 +
+   手动调用验证（见下方「验收」）。
+
+### Fixed — 阶段 1 盘点表里其余"不可重取数据"/"发布产物"类文件（22 处 file:line）
+
+- **`bootstrap_ci.py`**、**`dynamic_exit_backtest.py`**、**`portfolio_
+  factor_attribution.py:66`**：三处同构 `db = Path(__file__).parent /
+  "pheromone.db"`（各自的取数函数体内），均改为 `Path(PATHS.db)`。三者均零
+  import 者、零测试覆盖，是只读诊断脚本。
+- **`portfolio_backtest.py:88-95`**（`_find_db()`）：此前 `base =
+  Path(__file__).parent` 后依次探测 `pheromone.db`/`hive_predictions.db`
+  两个候选文件名；改为 `[Path(PATHS.db), PATHS.home / "hive_predictions.db"]`——
+  `pheromone.db` 走独立覆盖钩子（可被 `ALPHA_HIVE_DB_PATH` 单独覆盖），
+  `hive_predictions.db` 仍锚 `PATHS.home`（历史遗留库，无独立钩子）。
+  `tests/test_missing_value_not_zero.py`/`tests/test_equity_curve_single_
+  source.py` 均用 `monkeypatch.setattr(pb, "_find_db", lambda: db)` 整体替换
+  该函数，不受内部实现改动影响，全部通过。
+- **`ic_rerun_readiness.py:61`**：`DB_PATH` 同款改成覆盖钩子 + `_db_path()`；
+  `assess()`/`main()` 的 `--db` 默认值同步改 `None`。`ALPHAHIVE_DIR` 保留
+  `__file__`（只喂 `sys.path.insert`）。`tests/test_ic_rerun_readiness.py`
+  30 条全部显式传 `db_path`/`--db`，未受影响。
+- **`migrate_ambiguous_backfill.py`**（`_resolve_db()`）：兜底从
+  `os.path.dirname(os.path.abspath(__file__))` 改读 `hive_logger.PATHS.db`。
+  本脚本是一次性迁移（P0 已于 2026-08-25 落地），幂等设计允许安全重跑；
+  `bdir`/`dst`（备份目录/快照）本就跟着 `os.path.dirname(db)` 走，不用单独改。
+- **`pheromone_board.py:611`**（`_save_fallback_batch`，异步写入失败/线程池
+  已关闭时的错误兜底路径）：`fb_path = Path(__file__).parent /
+  "pheromone_fallback.jsonl"` 改为 `PATHS.home / "pheromone_fallback.jsonl"`。
+  这条路径本该和 `pheromone.db` 同级受管——全仓 grep 确认从未被读回，丢了
+  就是唯一副本丢了（"不可重取数据"）。零测试覆盖。
+- **`push_report_to_slack.py`**：模块级 `PROJECT_DIR = Path(__file__).parent`
+  同时喂 `sys.path.insert`（代码资源）与报告 JSON / 三个缓存目录（数据）两个
+  用途。拆开：`sys.path.insert` 改内联 `Path(__file__).parent`（不再赋值给
+  具名变量）；`report_path` 改读 `PATHS.home`；`cache_dir` 改读
+  `PATHS.cache_dir`（此前是自己拼的 `PROJECT_DIR/"cache"`，与既有属性重复）；
+  `data_cache_dir`/`finviz_cache_dir` 改读 `PATHS.home / "data_cache"`/
+  `"finviz_cache"`（这两个目录名 `PATHS` 尚无专属属性，直接挂 `PATHS.home`
+  下）。下游 `slack_report_notifier.py:397` 的 `project_dir =
+  os.path.dirname(os.path.abspath(report_json_path))` **未改**——它本就是
+  从调用方传入的 `report_json_path` 反推，不是独立 `__file__` 派生，
+  本次修好上游调用点后它自动跟着走向正确目录，已用 grep 核实全仓唯一
+  调用点就是 `push_report_to_slack.py`。为何不破坏现状：本脚本默认（无
+  `--force`）在推送前就直接 `exit(2)`（orchestrator Step 7 的既有约定，
+  频道推送已改由 Slack MCP 负责），日常生产从不会执行到这些路径；
+  `--force` 手动调试时才会命中，故一并收口。零测试覆盖这部分内部路径
+  （`tests/test_paths_not_frozen_at_import.py` 只在白名单里登记过
+  `PROJECT_DIR`，已随变量删除一并摘除，见下方「扫描器规则」）。
+- **`generate_ml_report.py:2814-2829`**（yfinance 限流降级读磁盘缓存价格的
+  分支）：`_os.path.dirname(_os.path.abspath(__file__))` 改读
+  `PATHS.home`（本文件顶部已模块级 `from hive_logger import PATHS`，直接复用，
+  不在函数体内重新 `import`——重新 `import` 会因 Python 的函数作用域规则，
+  让本函数里**更早**处的 `report_dir = PATHS.home`（既有代码，早已用
+  `PATHS.home` 实现）变成 `UnboundLocalError`，ruff `F823` 当场抓到，已改正）。
+  ⚠️ **新发现、本次不改**：写这份 `{ticker}_raw.json` 的 `collect_data.py`
+  （手动运行工具）目前锚定的是**硬编码字面量** `~/Desktop/Alpha Hive`
+  （`ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))`，
+  非 `__file__` 派生也不读 `ALPHA_HIVE_HOME`，只在检测到 Cowork VM 路径模式
+  时才改指别处）——不在本次任务列出的文件范围内，未改。今天两端都落在
+  同一个仓库根，行为不变；但 `ALPHA_HIVE_HOME` 一旦被设置（如阶段 5 迁移
+  后），这一读一写会分叉，`collect_data.py` 仍写向旧仓库根、
+  `generate_ml_report.py` 已经读新数据根——需要单独排期收口
+  `collect_data.py`（已用 `spawn_task` 记录，见下方「未尽事项」）。
+- **`generate_ml_report.py:2982-3061`（`_sync_ghpages`）+ `report_deployer.py`
+  两处 bypass**：与 `report_deployer.deploy_static_to_ghpages` 完全同构的
+  第二份 gh-pages 部署实现，两处都做 git plumbing（`hash-object`/
+  `write-tree`/`commit-tree`/`push`，必须在 `.git/` 所在目录）+
+  `os.listdir()` 找待部署报告文件（理应走数据根）。**这是本次唯一一处
+  刻意只做部分收口、把架构性拆分推迟到阶段 4 的地方**，原因：
+  - `report_deployer.py` 的 `repo = reporter.agent_helper.git.repo_path`
+    本身**不是** `__file__` 派生的反模式——`agent_toolbox.GitHubTool.
+    __init__` 已经是"`ALPHA_HIVE_HOME` 优先、`__file__` 兜底"的正确写法。
+    真正的问题是这个已经"正确"的变量被同时用于 git 仓库根（需要 `.git/`）
+    与数据文件列举根（应该是 `PATHS.home`）两个不同概念，今天两者恰好
+    同目录掩盖了分歧。拆分它意味着改**消费链的读取目标**（`os.listdir`
+    从 git 仓库根换成数据根），且现有测试
+    `tests/test_pipeline.py::TestDeployStaticToGhPages::
+    test_deploys_static_files_only` 显式把测试文件放在
+    `agent_helper.git.repo_path`（= 测试用的 `tmp_path`）下，断言
+    `deploy_static_to_ghpages` 能从那里发现它们——动这处需要同时重新定义
+    这条测试的预期，且数据根迁移计划本身把"gh-pages 从 PATHS 读报告，
+    不再 `os.listdir(仓库)`"明确列为**阶段 4**，不是阶段 2。
+  - `generate_ml_report._sync_ghpages` 的 `repo` **确实是** `Path(__file__).
+    parent`（真正的阶段 2 目标），已改读 `PATHS.home`——零测试覆盖，
+    今天与 `Path(__file__).parent` 落在同一个仓库根，行为不变；但架构上
+    仍与 `report_deployer.py` 同样"一个变量两个身份"，留给阶段 4 一并
+    重构（该文件 docstring 已加注说明，供阶段 4 session 直接引用）。
+  - 两处唯一安全拆分掉的：`.gh_pages_deploy_log.jsonl`（部署审计日志，
+    `.gitignore` 已忽略、从不参与 git 提交、零测试断言其具体位置）——
+    从 `os.path.join(repo, ...)` 改落 `PATHS.logs_dir / ".gh_pages_deploy_
+    log.jsonl"`，与 git plumbing 无关，可以安全单独拆开。
+- **`report_formatters.py:281,808`**：`_load_fresh_ml_prob()` 的
+  `base = Path(__file__).parent`、纸面组合新鲜度提示块的 `_meta_p =
+  Path(__file__).parent / "paper_portfolio_state" / "meta.json"`，均改读
+  `PATHS.home`。`tests/test_site_missing_fields.py::
+  test_ml_prob_reads_report_date_not_today` 原本靠
+  `monkeypatch.setattr(rf, "__file__", ...)` 驱动隔离，改为
+  `monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path))`——同一测试意图，
+  换隔离机制。
+- **`health_check.py`**（9 处，定时任务已禁用改按需，仍按记录要求收口）：
+  模块级 `PROJECT = Path(__file__).parent.resolve()` 只保留给两处
+  `git -C str(PROJECT)`（`git log`/`git ls-files`，代码资源，已在
+  `MUST_STAY_FILE_ANCHORED` 登记，未改）；其余 7 处数据路径
+  （`.swarm_results_{d}.json`、`weight_history.jsonl`、`pheromone.db`、
+  `self_analysis_briefs/`、三处 `logs/`）逐一改读 `PATHS.home`/`PATHS.db`/
+  `PATHS.logs_dir`/`PATHS.logs_dir_unmade()`。⚠️ 其中 `check_health_check_
+  self()` 的 `logs_dir` 特意用 `logs_dir_unmade()` 而非 `PATHS.logs_dir`——
+  后者调用时会自动 `mkdir`，若用它，"logs/ 不存在"这条真实观测点会被
+  访问该属性这个动作本身悄悄抹掉（永远读到"目录存在"）；`save_log()`/
+  `push_slack()` 两处需要写文件，用回自动建目录的 `PATHS.logs_dir` 并去掉
+  多余的手动 `.mkdir()`。零测试覆盖，全部靠 sandbox + 手动调用验证。
+- **`experiments/` 目录 8 个一次性诊断脚本**（`final_score_dilution.py`、
+  `ic_power_analysis.py`、`ml_expected_return_replay.py`、
+  `signal_ic_sweep.py`、`ticker_winrate_persistence.py`、
+  `vol_regime_filter.py`、`neutral_band_replay.py`、`penalty_replay.py`）：
+  逐一把 `DB`/`DB_PATH`/`SNAP_DIR`（`pheromone.db`/`report_snapshots`/
+  `.swarm_results_*.json`）从 `ROOT`/`ALPHAHIVE_DIR`（`__file__` 派生）或
+  裸 `Path(__file__)...` 改读 `hive_logger.PATHS.db`/`PATHS.home`；
+  `ROOT`/`ALPHAHIVE_DIR` 本身在需要 `sys.path.insert` 的文件里保留不动。
+  `ticker_winrate_persistence.py::find_db()` 的三级 fallback（专属 env
+  `ALPHA_HIVE_PHEROMONE_DB` 优先 → 中间层 → Cowork VM glob 兜底）只改中间层，
+  首尾两级不动——那是本脚本既有的、独立于本次迁移的行为约定。
+  **各脚本 `OUT`（报告 markdown，如 `neutral_band_replay_report.md`）保持
+  `__file__` 锚定不变**——用 `git ls-files experiments/` 核实这些 `*_report.md`
+  文件本身就是**跟随代码提交的历史记录**（与 `CHANGELOG.md` 同类：随代码
+  发布、由人/agent 编写、活文档），不是数据根应该接管的运行时产物；
+  订正阶段 1 记录里把 `OUT` 归为"发布产物"的判断——按"是否随代码提交"这一
+  更准确的判据，`OUT` 应归入代码同址资源，理由已写进各脚本注释。
+  **`experiments/portfolio_capacity_replay.py` 判定为无需改动**：核实其
+  `ROOT` 仅用于 `sys.path.insert`，数据完全经 `import paper_portfolio as pp`
+  的既有 `PATHS`-based 实现读取（`pp._all_snapshot_dates()` 等），本身不含
+  任何 `__file__`+数据字面量组合，维持阶段 1 组 2 的原判定。
+  以上 8 个文件本身被 `tests/test_paths_not_frozen_at_import.py` 的
+  `_own_python_files()`/`_scan()` 显式排除在扫描范围之外（`experiments`
+  在跳过目录列表里），故本组改动不影响任何扫描器判定，也未新增/移除任何
+  `KNOWN` 条目。
+
+### 未尽事项（如实记录，不写"已完成"）
+
+1. **2.3 生产环境变量——按记录要求跳过，待用户批准**：计划要求生产显式设
+   `ALPHA_HIVE_HOME=<现仓库根>`（行为不变，只是把"隐式兜底"换成"显式声明"）。
+   这需要改仓库外的 `~/.claude/scripts/alpha-hive-orchestrator.sh`
+   （或对应 launchd plist），属于"改仓库外编排器与 plist"，用户的项目记录
+   （CLAUDE.md）明确要求这类改动执行时必须当场确认——本 session 未接触
+   仓库外任何文件。具体建议：在 `alpha-hive-orchestrator.sh` 里
+   `PROJECT_DIR="/Users/igg/Desktop/Alpha Hive"` 那一行（当前脚本用它
+   `cd`/拼路径）之后，为它 spawn 的各 Python 子进程环境追加一行
+   `export ALPHA_HIVE_HOME="$PROJECT_DIR"`；不设置的后果：`PATHS.home` 的
+   `__file__` 兜底分支继续隐式生效，与设置后的值完全相同——**这正是为什么
+   这一步可以安全推迟**，不设它不会破坏本次改动的任何一处，只是少了一层
+   "显式优于隐式"的清晰度，且是阶段 5（数据根真正搬迁）真正需要它生效的
+   前置条件之一，届时必须一并做。
+2. **`collect_data.py` 的 `ALPHAHIVE_DIR` 硬编码 `~/Desktop/Alpha Hive`**：
+   本次任务列出的文件范围不含它，只在处理 `generate_ml_report.py:2814` 时
+   顺带发现（它写的 `{ticker}_raw.json` 正是后者的读取对象）。已用
+   `spawn_task` 记录为独立收尾任务，避免遗忘。
+3. **`report_deployer.py`/`generate_ml_report._sync_ghpages` 的"一个变量
+   两个身份"架构问题**：详见上文，明确留给阶段 4（发布链改指向）处理，
+   本阶段只字面消除了 `__file__` 反模式（`_sync_ghpages` 一处），未做
+   概念拆分。
+4. 本阶段未给此前零测试覆盖的函数（`bootstrap_ci.py`/`dynamic_exit_
+   backtest.py`/`portfolio_factor_attribution.py`/`walk_forward_
+   validator.py`/`migrate_ambiguous_backfill.py`/`health_check.py`/
+   `pheromone_board._save_fallback_batch`/`experiments/` 各脚本）新增单元
+   测试——这些函数改动前后都没有测试盯着，本次验收改用「resolver 手动调用 +
+   sandbox 扫描」的方式核实行为正确（见下方「验收证据」），未额外扩大
+   测试面；若要长期防回归，仍需要专门的 session 补测试。
+
+### 扫描器规则（`tests/test_paths_not_frozen_at_import.py::
+TestFileDerivedSpeciesDoesNotSpread`）
+
+摘除 2 条已随本次收口不再成立的 `KNOWN` 条目（**不是因为它们变红**——子集
+语义下清干净不会红，是主动核实后摘除，按本类 docstring 的对账法）：
+
+- `("push_report_to_slack.py", "PROJECT_DIR")`——该变量已整个移除
+  （`sys.path.insert` 改内联 `Path(__file__).parent`，未登记的必要）。
+- `("scan_coverage_gate.py", "ROOT")`——改成覆盖钩子 `ROOT = None` + 调用时
+  求值的 `_root()`，不再是 `__file__` 派生的模块级常量字面量。
+
+`MUST_STAY_FILE_ANCHORED`（超集语义，防错清）**未改**——本次收口的文件里，
+凡是继续保留 `__file__` 的（`probability_scorecard.py`/`scan_continuity.py`/
+`ic_rerun_readiness.py` 的 `ALPHAHIVE_DIR`、`health_check.py` 的
+`PROJECT`），用途（`sys.path.insert`/`git -C`）与登记时完全一致，未发生
+"该保留却被清掉"的情况，故无需新增条目；已逐条核对现有登记仍然准确。
+
+`experiments/` 目录本就被扫描器排除在外（`_own_python_files()`/`_scan()`
+的跳过目录列表含 `"experiments"`），该目录内 8 个脚本的改动不影响任何
+`KNOWN`/`MUST_STAY_FILE_ANCHORED` 条目。
+
+### 验收证据
+
+- **全套测试**（`/usr/local/bin/python3 -m pytest -m "not integration and
+  not network" --maxfail=200`）：`4729 passed / 1 failed / 1 skipped / 2
+  xfailed`，唯一红 `TestCoverageHorizon`（设计如此，与本次改动无关，
+  经济日历覆盖窗口到期告警）。
+- **ruff**：`/usr/local/bin/python3 -m ruff check <29 个改动文件>` → `All
+  checks passed!`（过程中真的抓到一处真问题：`generate_ml_report.py` 函数内
+  重复 `import PATHS` 导致 `F823 referenced before assignment`，已修正，
+  见上文 `generate_ml_report.py:2814` 条目）。
+- **沙箱扫描**（阶段 1 同一命令）：`ALPHA_HIVE_HOME=$(mktemp -d)
+  /usr/local/bin/python3 alpha_hive_daily_report.py --swarm --no-llm
+  --samples-only --tickers AAPL MSFT`，复用 `tests/_root_data_guard.py`
+  的 `fingerprint`/`diff` 对本 worktree 仓库根扫描前后取指纹：**diff 为空
+  集，代码目录零写入**（与阶段 1 结论一致）。
+- **"确认经手修改的路径依然正确工作"**（非同义反复的验收重点）：复用
+  上面沙箱扫描产出的临时目录（含真实 `pheromone.db`/`.swarm_results_
+  2026-09-15.json`），对本次收口的 CLI 工具逐一用同一个 `ALPHA_HIVE_HOME`
+  手动调用，确认真的读到了沙箱数据而不是仓库真实生产数据：
+  - `scan_continuity.py --days 5 --end 2026-09-15 --quiet --json`（不传
+    `--db`/`--snapshots`）→ 输出 `"per_day_tickers": {"2026-09-15": 2}`，
+    与沙箱扫描的 2 个标的吻合。
+  - `scan_coverage_gate.py --date 2026-09-15 --quiet`（不传 `--file`）→
+    正确读到沙箱的 `.swarm_results_2026-09-15.json` 并判定
+    `iv_rank` 降级（与沙箱扫描日志里的"样本数据"提示一致）。
+  - `probability_scorecard._ledger_path()`/`_state_dir()`/
+    `ic_rerun_readiness._db_path()`/`scan_continuity._db_path()`/
+    `_snapshots_dir()`/`scan_coverage_gate._root()`：逐个直接调用，返回值
+    均落在沙箱目录内。
+  - `health_check.check_sample_accumulator()`：正确读到沙箱 `pheromone.db`
+    （判定"0 笔"失败，因为沙箱周日样本本就是 0，判定逻辑本身工作正常）。
+  - `run_daily_scan._cleanup_stale_data()`（无参调用）+ `_write_status(...)`：
+    对沙箱执行、`logs/last_run_status.json` 确认写入沙箱 `logs/` 目录。
+  - `report_deployer.py`/`pheromone_board.py`/`bootstrap_ci.py`/
+    `dynamic_exit_backtest.py`/`portfolio_backtest._find_db()`/
+    `portfolio_factor_attribution.py`/`walk_forward_validator.py`/
+    `migrate_ambiguous_backfill._resolve_db(None)`/`push_report_to_slack.py`
+    的路径解析：逐一验证返回值落在沙箱目录，非仓库根。
+  - 以上全部操作结束后**再次**取仓库根指纹比对：diff 仍为空集。
+
+### 未做 / 待定
+
+见上方「未尽事项」1-4 条。
+
+
 
 ## [0.45.259] — 2026-09-15 — 数据根迁移阶段 1 补跑：差集法补齐 52 文件分类组 3/5 缺口，新发现 2 处生产每日活跃的未修 `__file__` bypass
 

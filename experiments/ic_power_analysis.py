@@ -70,7 +70,11 @@ from ic_diagnostics import (  # noqa: E402  - 必须在 sys.path 注入后导入
     subsample_non_overlapping,
 )
 
-DB_PATH = ALPHAHIVE_DIR / "pheromone.db"
+# v0.45.260（数据根迁移阶段 2）：此前是 `ALPHAHIVE_DIR / "pheromone.db"`
+# （`ALPHAHIVE_DIR` 是 `__file__` 派生）——不读 `ALPHA_HIVE_HOME`。改读
+# `PATHS.db`；`ALPHAHIVE_DIR` 本身保留，只喂上面的 `sys.path.insert`。
+from hive_logger import PATHS as _PATHS  # noqa: E402
+DB_PATH = Path(_PATHS.db)
 
 # 两个标的池（唯一真相 = alpha_hive_daily_report.py --tickers 的 default）
 POOL_10 = ["NVDA", "TSLA", "MSFT", "QCOM", "VKTX", "META", "BILI", "AMZN", "RKLB", "CRCL"]

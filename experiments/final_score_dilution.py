@@ -56,7 +56,11 @@ from ic_diagnostics import (  # noqa: E402  - 必须在 sys.path 注入后导入
     subsample_non_overlapping,
 )
 
-DB = ROOT / "pheromone.db"
+# v0.45.260（数据根迁移阶段 2）：此前是 `ROOT / "pheromone.db"`（`ROOT` 是
+# `__file__` 派生）——不读 `ALPHA_HIVE_HOME`。改读 `PATHS.db`；`ROOT` 本身保留，
+# 只喂上面的 `sys.path.insert`，用途合规。
+from hive_logger import PATHS as _PATHS  # noqa: E402
+DB = Path(_PATHS.db)
 DIMS = ["signal", "catalyst", "sentiment", "odds", "risk_adj"]
 MIN_WIDTH = 5
 

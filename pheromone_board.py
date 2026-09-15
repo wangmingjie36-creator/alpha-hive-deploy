@@ -605,10 +605,16 @@ class PheromoneBoard:
         self._save_fallback_batch([entry_dict])
 
     def _save_fallback_batch(self, entries: list) -> None:
-        """批量 fallback 写入"""
-        from pathlib import Path
+        """批量 fallback 写入。
+
+        v0.45.260（数据根迁移阶段 2）：此前落盘位置是 `Path(__file__).parent /
+        "pheromone_fallback.jsonl"`——不读 `ALPHA_HIVE_HOME`。这条路径本该和
+        `pheromone.db` 同级受管：全仓 grep 确认从未被读回，丢了就是唯一副本丢了
+        （"不可重取数据"）。改读 `PATHS.home`。
+        """
+        from hive_logger import PATHS
         try:
-            fb_path = Path(__file__).parent / "pheromone_fallback.jsonl"
+            fb_path = PATHS.home / "pheromone_fallback.jsonl"
             with open(fb_path, "a", encoding="utf-8") as f:
                 for entry_dict in entries:
                     f.write(_json.dumps(entry_dict, ensure_ascii=False, default=str) + "\n")

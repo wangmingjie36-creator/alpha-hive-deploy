@@ -47,7 +47,20 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-ROOT = Path(__file__).parent
+# v0.45.260（数据根迁移阶段 2）：`ROOT` 此前是 `Path(__file__).parent`（模块级
+# 常量），完全不读 `ALPHA_HIVE_HOME`——本模块是编排器 Step 12 每日活跃调用的
+# 覆盖率闸（`alpha-hive-orchestrator.sh:1240-1241`，只传 `--quiet --out`，
+# **不传** `--file`，走的正是这条默认分支）。改为覆盖钩子 + 调用时求值。
+# 生产今天不设 `ALPHA_HIVE_HOME` 时兜底到同一个仓库根，行为不变。
+ROOT = None
+
+
+def _root() -> Path:
+    """`.swarm_results_<date>.json` 所在目录，**调用时求值**。"""
+    if ROOT is not None:
+        return Path(ROOT)
+    from hive_logger import PATHS
+    return PATHS.home
 
 # ── 受监视字段 ──────────────────────────────────────────────────────
 # min_coverage：低于该比例即判降级。
@@ -94,7 +107,7 @@ def _present(v: Any) -> bool:
 
 
 def check(date: str, results_path: Optional[Path] = None) -> Dict[str, Any]:
-    path = results_path or (ROOT / f".swarm_results_{date}.json")
+    path = results_path or (_root() / f".swarm_results_{date}.json")
     if not path.exists():
         return {"date": date, "determinable": False,
                 "reason": f"结果文件不存在：{path.name}"}
@@ -147,13 +160,24 @@ _PRICE_DEV_WARN_PCT = 1.0    # 单只偏差超过即列出
 _PRICE_DEV_BAD_PCT = 5.0     # 超过即判定为坏读数（几乎不可能是正常时点差）
 
 
-def check_prices(date: str, db_path: str = "pheromone.db") -> Dict[str, Any]:
+def check_prices(date: str, db_path: Optional[str] = None) -> Dict[str, Any]:
     """把 predictions.price_at_predict 与该日真实收盘对照。
 
     需要网络。取不到收盘价时返回 determinable=False —— 不猜。
+
+    v0.45.260（数据根迁移阶段 2 顺手发现）：`db_path` 原默认值是裸字符串
+    `"pheromone.db"`——不是 `__file__` 派生，是**相对 CWD** 的路径字面量，
+    同一物种的另一个变体（假设「在哪跑就在仓库根」）。本函数只在显式
+    `--check-prices`（需网络，编排器默认不传）时才被调用，唯一生产调用点
+    `main()` 未传 `db_path`，一直隐式依赖「从仓库根启动」。改为 `None` +
+    调用时经 `PATHS.db` 解析；生产今天不设 `ALPHA_HIVE_HOME` 时两者兜底到
+    同一个仓库根，行为不变。
     """
     import os
     import sqlite3
+    if db_path is None:
+        from hive_logger import PATHS
+        db_path = PATHS.db
     if not os.path.exists(db_path):
         return {"determinable": False, "reason": f"{db_path} 不存在"}
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -237,7 +261,7 @@ _LABEL_GOVERNS = [
 
 def check_label_honesty(date: str, results_path: Optional[Path] = None) -> Dict[str, Any]:
     """核对来源标签与它管辖的值是否自洽。纯离线，读扫描结果即可。"""
-    path = results_path or (ROOT / f".swarm_results_{date}.json")
+    path = results_path or (_root() / f".swarm_results_{date}.json")
     if not path.exists():
         return {"determinable": False, "reason": f"结果文件不存在：{path.name}"}
     try:

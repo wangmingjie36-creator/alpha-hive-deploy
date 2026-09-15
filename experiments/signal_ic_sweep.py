@@ -47,7 +47,11 @@ from collections import defaultdict
 from pathlib import Path
 from statistics import mean, stdev
 
-DB = Path(__file__).resolve().parent.parent / "pheromone.db"
+# v0.45.260（数据根迁移阶段 2）：此前是 `Path(__file__).resolve().parent.parent
+# / "pheromone.db"`——不读 `ALPHA_HIVE_HOME`。改读 `PATHS.db`；本脚本是一次性
+# 诊断，不被 pytest import、不参与生产扫描主链路，但仍应读到真实数据根。
+from hive_logger import PATHS as _PATHS  # noqa: E402
+DB = Path(_PATHS.db)
 MIN_WIDTH = 5        # 单周横截面最少标的数
 MIN_WEEKS = 8        # 少于此周数不下结论
 DROP_EXTREME = 3     # 稳健性检验剔除的极端周数

@@ -28,7 +28,15 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-SNAP_DIR = ROOT / "report_snapshots"
+from hive_logger import PATHS  # noqa: E402
+
+# v0.45.260（数据根迁移阶段 2）：SNAP_DIR 此前是 `ROOT / "report_snapshots"`
+# （`ROOT` 是 `__file__` 派生），改读 `PATHS.home`——本脚本是一次性/历史诊断，
+# 不被 pytest import、不参与生产扫描主链路，但仍应读到真实数据根而非
+# 冻结在代码 checkout 位置（数据根迁移完成后两者会分开）。
+# OUT 不变：报告 markdown 是随代码提交的历史记录（`git ls-files` 已跟踪），
+# 与 CHANGELOG.md 同类——代码同址资源，`__file__` 锚定正确。
+SNAP_DIR = PATHS.home / "report_snapshots"
 OUT = Path(__file__).parent / "neutral_band_replay_report.md"
 
 
