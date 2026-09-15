@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.262] — 2026-09-15 — 占位（进行中：F&G 组合层敞口控制门——预置读取管道 + 默认关闭的 CONFIG 开关 + 预注册前瞻检验基础设施）
+
 ## [0.45.261] — 2026-09-15 — Fixed：param_optimizer.py 网格搜索收尾用硬编码旧值"恢复" paper_portfolio.CONFIG，改成 deepcopy 快照
 
 评审 paper_portfolio.py F&G 组合层敞口控制设计时顺带发现：`run_grid()`
