@@ -25,6 +25,10 @@ conftest 的 session 总闸与 `tests/test_root_data_guard.py` 共用这一份
 1. **源代码扩展名**（`CODE_EXTS`）。已核实生产代码不产出这些扩展名的文件——
    唯一例外 `weekly_optimizer` 写 `config.py` / `weight_backups/config_*.py`，
    它的测试自己 patch 了路径；新目录 `weight_backups/` 本身仍会被目录项抓到。
+   ⚠️ 判据是「生产既不**写**、也不在运行时**读**它当输入」，只查写者不够（v0.45.253）：
+   `.yml`/`.yaml` 曾在此列，而 `config.py` 在运行时从仓库根读 `watchlist_override.yaml` 热加载
+   WATCHLIST——测试写它就是改生产扫描的标的，旁边的 `.json` 版受闸、它却不受。
+   现已移出（仓库里的 yaml 只剩 `_config.yml` 与 `.github/` 下的，后者由第 2 条豁免）。
 2. **代码资源目录**（`CODE_TOP_DIRS`，仅顶层）：`templates/` `prompts/`（CLAUDE.md
    那张表点名的「`__file__` 才对」的例子）与 `.github/`。
 3. **仓库元文件**（`CODE_ROOT_FILES`，仅根目录）：每个 session 都会改的
@@ -54,9 +58,10 @@ conftest 的 session 总闸与 `tests/test_root_data_guard.py` 共用这一份
 - **目录也记一项（只记存在）**：测试 `os.makedirs` 一个冻结路径、一个字节都没写，
   也是写穿（仓库根那个无主的空 `backups/` 就是这么来的形状）。不记目录 mtime——
   它会随被跳过的 `__pycache__` / `.DS_Store` 变。
-- **SQLite 共享内存文件 `*-shm` 只记存在与大小**：WAL 库的**纯读者**也会往 -shm 写读标记、
-  顶它的 mtime（2026-09-14 实测：生产 `pheromone.db-shm` 在无人写库时 mtime 仍在变，
-  来自常驻的只读 MCP 进程）。-shm/-wal 的**出现或消失**照样会红——那才是 v0.45.150
+- **SQLite 共享内存文件 `*-shm` 只记存在与大小**：WAL 库的**纯读者**也会往 -shm 写读标记
+  （scratch 库实测：`mode=ro` 读一遍后 -shm 内容变、主文件与 -wal 逐字节不变）；生产 `pheromone.db-shm`
+  在无人写库时 mtime 也在变（2026-09-14 实测）——**是谁读的没核实**，常驻的只读 MCP 进程只是推断
+  （v0.45.253 订正：v0.45.233 把推断写成了实测）。-shm/-wal 的**出现或消失**照样会红——那才是 v0.45.150
   「测试以读写模式打开了生产库」的证据。
 """
 from __future__ import annotations
@@ -74,7 +79,7 @@ NOISE_FILE_PREFIXES = (".fuse_hidden",)
 CODE_EXTS = frozenset({
     ".py", ".pyi", ".pyc", ".sh",
     ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".css",
-    ".toml", ".cfg", ".ini", ".yml", ".yaml",
+    ".toml", ".cfg", ".ini",
 })
 CODE_TOP_DIRS = frozenset({"templates", "prompts", ".github"})
 CODE_ROOT_FILES = frozenset({

@@ -145,7 +145,48 @@ CBOE 那种"只有当下 1-2 场"的实时快照——结构上能覆盖任意�
 
 ---
 
-## [0.45.253] — 2026-09-15 — 占位（进行中：二次检查 v0.45.233——config 缓存目录取值未规范化 / 总闸把 watchlist_override.yaml 当代码 / 三处推断写成了实测）
+## [0.45.253] — 2026-09-15 — 二次检查 v0.45.233：config 缓存目录取值没照 getter 规范化 / 总闸把生产运行时读的 `watchlist_override.yaml` 当代码豁免 / 三处推断写成了实测
+
+方法：不重读汇报，把 v0.45.233 的每条声称写成探针真跑（生产 `status.json`、pre-push 路径、`pytest_sessionstart` 接线、非规范 env 取值、yaml 读者、coverage 误报、sidecar 边角）。
+
+### Fixed
+
+1. **`config.CACHE_CONFIG["cache_dir"]` 取值没照 getter 规范化。** v0.45.233 用 env 原串替掉了 `str(PATHS.cache_dir)`，而 getter 返回 `Path`、会规范化 ⇒
+   `ALPHA_HIVE_CACHE_DIR` 为尾斜杠 / `//` / `./` 时值变了（新进程实测三种均与 getter 不等）。改为 `str(Path(...))`。
+   生产不设该变量，线上值未受影响。`test_config_cache_dir_value_matches_paths_getter` 补这三种输入——v0.45.233 那版只喂了规范值，「逐字相等」恒真；
+   把 config 改回 v0.45.233 写法，恰好这三条红。
+2. **总闸 `CODE_EXTS` 移出 `.yml` / `.yaml`。** v0.45.233 按扩展名豁免代码时只核了「生产不写」，没核「生产不读」：`config.py` 运行时从仓库根读
+   `watchlist_override.yaml` 热加载 WATCHLIST——测试写它就是改生产扫描的标的，旁边的 `.json` 版受闸、它却不受。现在 `_config.yml` 进入指纹，
+   `.github/` 下的仍由代码目录豁免；判据表加两份覆盖文件，放回 `.yaml` 即红。**潜在盲区、非现存事故**：`test_thread_safety.py` 目前自己把两份覆盖路径 patch 到 tmp。
+
+### 订正（v0.45.233 条目、`tests/_root_data_guard.py` docstring 与 memory 均已就地标注）
+
+3. 「生产 `pheromone.db-shm` 的 mtime 由常驻只读 MCP 进程顶」——WAL 纯读者会写 `-shm` 是 scratch 实测，生产里**是谁在读没核实**，改标推断。
+4. 「`db_backups/` 里 08-25/26/27 三份 `pre_*` 被每日清理删掉」——M0 变异证明该模式**会**删，但历史删除无记录，改标推断（与 09-08 23:41 那次手工运行时三份均已超过 7 天吻合）。
+5. 「`CACHE_CONFIG` 与 getter 逐字相等 / 值不变」——见 1。
+
+### 复核成立的声称（真跑，不是重读）
+
+- 生产 `~/.claude/reports/status.json`（2026-09-14T21:48Z）`steps_result.db_backup.status = success`，detail 与编排器日志一致；
+  编排器 `STEPS_RESULT='{}'` 的初始化（第 447 行）在备份段（第 499 行起）之前，后续各步只追加，不会冲掉它。
+- pre-push 钩子只在被推区间动了 CHANGELOG 时才跑 pytest；生产日报推送是对象层合并 origin/main 后再推，区间不含 CHANGELOG ⇒
+  总闸不会在生产推送时跑，不会因为扫描期间的写入挡住生产推送。
+- `pytest_sessionstart` 取的确是**收集期之前**的快照：临时测试模块在 import 时往仓库根写文件，「无路径参数（走 testpaths）+ `-k` 选中」与
+  「从别的 cwd 传绝对文件路径」两种调用都红，且都没有「sessionstart 未生效」的退化提示。
+- `earnings_watcher` 去掉 import 期 mkdir 后，其余 `earnings_cache` 读写者无回归：`earnings_history._resolve_cache_dir` 自带 mkdir，`earnings_vol_signal` 经它读写。
+- `pytest --cov`（本机装了 pytest-cov）不误报：`.coverage` 在总闸 teardown 之后才写；仓库与 CI 都不用 `--cov`，**不加豁免**。
+- 仓库根下没有符号链接（`os.walk` 不跟链接这一盲区目前不存在）。
+
+### 已知边角（不改）
+
+- WAL 库 `-wal` 在而 `-shm` 不在（崩溃后才会出现）时，快照脚本与编排器备份的 `mode=ro` 会**新建** `-shm`（scratch 实测，WAL 里的行照常读到）。
+  改用 `immutable=1` 会漏读 WAL，更糟；新建的正是下一个写者也会建的那份共享内存索引。v0.45.233 与编排器注释里「不在生产目录留下新 sidecar」在这一情形下不成立。
+- 仓库外编排器注释里「08-25/26/27 三份只剩孤儿」沿用 v0.45.233 的措辞（含因果暗示）；改生产脚本需要当场确认，只动注释不值得，未改。
+
+### 验证
+
+- 全套（worktree，`--maxfail=200`）：`4653 passed / 1 failed / 1 skipped / 2 xfailed`，唯一红 `TestCoverageHorizon`（按设计会红）；跑完无残留。
+- 变异 2/2 红（Fixed 1、2 各一条，按字节还原并核 sha256）；ruff：改动文件全部 `All checks passed`。
 
 ## [0.45.252] — 2026-09-15 — 数据根迁移阶段 1 只读盘点：沙箱扫描零绕过写入、52 文件分类（4/6 组，如实留缺口）、读写者普查含仓库外、阶段 0 交接线索核实
 
@@ -412,7 +453,72 @@ Read in full: `alpha_hive_mcp.py`、`push_report_to_slack.py`、`slack_report_no
 两个独立只读子任务的产出经本 session 交叉核对后转录（任务 2 的 4 组结果、任务 3B 的仓库内普查表）。
 
 
-## [0.45.255] — 2026-09-15 — 占位（进行中：scan_timing 整段丢失时 alert_manager 一律静默跳过——区分「早退未写」与「扫描跑完了却丢数据」，后者升级成 P1）
+## [0.45.255] — 2026-09-15 — scan_timing 整段丢失时告警管线原地失明：区分「早退未写」与「扫描真跑完了却丢数据」，后者升级成 P1
+
+用户要求进一步排查 2026-09-14 14:48「status.json 无 scan_timing」根因（前一轮只读核查发现的异常），
+并明确要「长期价值高」而不是「成本低」的方案。
+
+### 根因排查（用尽了能想到的假设，仍未坐实）
+
+对比 09-10 / 09-11 两天的编排器日志（09-13 那天实际没跑起来，不能当对照组），逐一证伪：
+
+- TCC 权限拒绝——`log show` 查了失败那一秒前后的系统 TCC 日志：只有 `python3` 的访问请求
+  （authValue=2，全部允许），从未出现 `jq` 的访问记录，也没有任何拒绝
+- 编排器脚本被改动——脚本最后修改于当天 06:15，早于 14:00 扫描开始
+- 写入时序竞争——`scan_timing.json` 写完到 `write_status()` 运行，09-10/09-11/09-14 三天间隔
+  **都是精确 10 秒**（卡在同一个「两个线程卡死强退」的固定宽限期后面）
+- 两个线程卡死强退（`pheromone_db_0`/`hive_bg_0`）——这个模式**每天都发生**，09-10、09-11 都
+  强退过，那两天合并照样成功，不是差异点
+- 手动原样重放 `write_status()` 里那条 `jq --slurpfile` 合并命令，此刻（以及事后任何时候）都能成功
+
+真正触发条件**仍不明**——`write_status()` 把 jq 的实际报错用 `2>/dev/null` 吞掉了，失败那一刻
+第一手证据从未被记录。用户否决了"先加诊断日志、低成本"的方案，要求长期价值高的路径。
+
+### Fixed（长期价值：不追瞬时原因，把这一类失败本身变成可观测的）
+
+**核心判断**：`scan_timing` 整段缺失以前**一律**当「早退未部署，本来就没写」处理——静默
+`checks_skipped` + 一行 WARNING，不进 `alerts.json`。但 2026-09-14 是真实反例：蜂群扫描真跑完了
+（`step2_hive_analysis` 成功、日报已提交推送、耗时 2889s），`logs/scan_timing.json` 本身数据完整，
+唯独没并进 `status.json`。这与"早退不部署"是完全不同的两回事，此前被一刀切成了同一个静默分支——
+即使编排器脚本的具体 bug 永远查不出来，这一类失败也不该继续被渲染成"无异常"。
+
+- `alert_manager.AlertAnalyzer._swarm_scan_actually_ran(status)`：判别「真扫描是否跑完」，
+  只看 `steps_result.step2_hive_analysis.status == "success"`——它是 `scan_timing.write()`
+  所在的扫描路径唯一的先决条件，空扫描护栏 / `--no-swarm` 早退等路径到不了这一步，不会被误伤。
+- `_check_deploy_and_code_sync`：`scan_timing` 缺失时，除了原有的 `checks_skipped` + WARNING，
+  再判一次 `_swarm_scan_actually_ran`——为真则追加一条新 P1：
+  「扫描已完成，但 status.json 缺整段 scan_timing——推送/提交/生产同步全部失去可观测性」。
+  这个告警比任何一条已知的推送/提交失败都更该重视：它意味着"不知道自己不知道"。
+
+⚠️ **实现过程中的一处自查**：判别器最初照抄了 `test_production_sync.py::_alerts` 测试夹具里的
+`"step2_swarm_analysis"` 键名，写完对着**真实**生产 `status.json` 验证时才发现——真正的编排器
+写的是 `step2_hive_analysis`（`~/.claude/scripts/alpha-hive-orchestrator.sh:703` 起），`swarm`
+那个名字全仓 Python 侧从未真正读过、纯粹是某次测试夹具自己发明的拼写，从没跟真实产出核对过。
+按原键名会让这条新告警在生产里**永远不触发**，包括它要防的 2026-09-14 那个真实场景本身。
+已改成真实键名，并对着当天原始 `status.json`（未改动过）重新验证：新 P1 确实触发。
+顺带把 `test_production_sync.py::_alerts` 那份用了近一周的夹具键名也改成了真的（全仓只有这一处，
+改动前没有任何生产代码消费它，属零风险更正）。
+
+### 测试
+
+- 新文件 `tests/test_scan_timing_missing_alert.py`（9 条）：真扫描跑完+`scan_timing`缺失⇒新 P1
+  触发、级别 HIGH、原有 `checks_skipped` 不受影响；早退路径（`step2` 未成功 / `steps_result` 整个
+  缺失）⇒维持静默，不报警（正对照，防判别器写反）；`scan_timing` 正常存在⇒新逻辑完全不触发；
+  判别器本身 5 组参数化单元测试。
+- **对着真实数据验证**：直接读 2026-09-14 当天原始（未改动）的 `~/.claude/reports/status.json`
+  跑一遍改动后的 `AlertAnalyzer.analyze()`，确认新 P1 确实触发，消息与细节符合预期。
+- 改动前的代码上：6 条红（`AttributeError`，判别器方法还不存在）。
+- 变异真跑 5 处，全部被抓到：不判别一律报警（早退路径被误伤）/ 不判别一律不报警（退回旧行为）/
+  判别条件反了 / 判别读错字段 / 告警级别被弱化成 P2。
+- 全套 `pytest --maxfail=200`：**4658 passed / 1 failed（仅 `TestCoverageHorizon`，按设计红）/
+  1 skipped / 2 xfailed**；`ruff check .`：All checks passed。
+
+### 未修（只记录）
+
+- `write_status()` 那条 `jq --slurpfile` 合并命令仍然把真实失败原因用 `2>/dev/null` 吞掉——
+  下次再犯，本版能保证有人看得到"出事了"，但看不到"为什么"。这是有意的取舍：编排器脚本在仓库外、
+  不受版本控制，本版选择在仓库内把后果做成可观测，而不是给一个可能测不到、也可能再也不会用到的
+  瞬时原因单独修一次脚本。
 
 ## [0.45.251] — 2026-09-15 — 二次检查 v0.45.245：它自己的检测器只认 `x.attr()` 形态，`from os import getcwd` 裸名调用完全绕过；其余声称独立复核，全部成立（含合并后 v0.45.246 真咬中同形 bug 的验证）
 
@@ -1587,7 +1693,7 @@ R0 下 `final_score` 对 T+7 超额收益的逐日横截面 IC **−0.11**（周
 旧写法三处毛病（2026-09-14 实测）：
 1. launchd 下 bash `cp` 被 TCC 拒（`Operation not permitted`）：09-09/10/11 三连败，最近成功 09-08 23:41（手工运行）。
 2. WAL 库只拷主文件漏 `-wal`（见 0.1）。
-3. `find -name "pheromone_*.db" -mtime +7 -delete` 不看成败；**模式还吞掉人工留存的 `pheromone_pre_*.db`**——`db_backups/` 里 08-25/26/27 三份只剩孤儿 `-wal/-shm`；
+3. `find -name "pheromone_*.db" -mtime +7 -delete` 不看成败；**模式还吞掉人工留存的 `pheromone_pre_*.db`**（变异 M0 实测会删）——`db_backups/` 里 08-25/26/27 三份只剩孤儿 `-wal/-shm`，**推断**是被这条清理删的（09-08 23:41 那次手工运行时三份都已超过 7 天，与之吻合；删除动作本身没有记录；v0.45.253 订正）；
    而 launchd 下 bash 枚举不了这个目录，这条清理实际只在**手工运行**时生效——手工跑一次就可能清掉仅存的好备份。
 
 #### Changed
@@ -1619,13 +1725,13 @@ R0 下 `final_score` 对 T+7 超额收益的逐日横截面 IC **−0.11**（周
 - `tests/_root_data_guard.py`：判据唯一实现。仓库根下**除代码外一切**受闸、不列数据清单；「代码」只取不会误伤数据的三条
   （源代码扩展名 / 顶层 `templates` `prompts` `.github` / 根目录 `CHANGELOG.md` 等元文件），跳过 `.git` `.claude` 与工具链缓存
   （应用缓存 `cache/` `.factor_cache/` 等**不**跳过——v0.41.3 事故就在 `cache/`）与 `.DS_Store` / `.fuse_hidden*`。
-  口径 `(size, mtime_ns)`；目录记存在（`os.makedirs` 一个冻结路径也算写穿）；`*-shm` 只记存在与大小（常驻只读 MCP 进程会顶它的 mtime）。理由全在 docstring。
+  口径 `(size, mtime_ns)`；目录记存在（`os.makedirs` 一个冻结路径也算写穿）；`*-shm` 只记存在与大小（WAL 纯读者会写 -shm；生产里是谁在读**没核实**，MCP 进程只是推断——v0.45.253 订正）。理由全在 docstring。
 - `tests/conftest.py`：`pytest_sessionstart`（**收集期之前**）取指纹，session autouse `_guard_repo_root_default_deny` 在 teardown 比对；
   旧 `_GUARDED_PRODUCTION_ARTIFACTS` 6 项保留作纵深防御。
 - `tests/test_root_data_guard.py`（66 条）：判据表（取自真实仓库里出现过的形状，含旧 6 项是新闸覆盖面子集）/ 合成树逐种写入形状 /
   **子进程里用原样拷贝的 conftest 真跑 pytest**：红组（收集期写文件 + 往账本追加一字节 + 改未列出的数据文件 + 新建目录）逐行核对运行时 diff，
   对照组（改代码、改模板、产生工具缓存）必须绿。
-- `tests/test_import_creates_no_data_dirs.py`：新进程里 import `config` / `earnings_watcher` 后数据根必须为空，`CACHE_CONFIG["cache_dir"]` 与 `PATHS.cache_dir` 逐字相等。
+- `tests/test_import_creates_no_data_dirs.py`：新进程里 import `config` / `earnings_watcher` 后数据根必须为空，`CACHE_CONFIG["cache_dir"]` 与 `PATHS.cache_dir` 逐字相等（⚠️ 本版只测了「不设」与规范绝对路径两种；尾斜杠 / `//` / `./` 下其实**不等**，v0.45.253 修）。
 
 #### Fixed（总闸实测抓到的**现存**写穿；一处豁免都没加）
 
@@ -1642,7 +1748,7 @@ R0 下 `final_score` 对 T+7 超额收益的逐日横截面 IC **−0.11**（周
    测试日志临时目录不删的话一天攒了 114 个。v0.45.239 的 ③ 只盯两个日志文件名，与本版总闸重叠但更窄，保留（属该版）。
 3. `cboe_fetcher` 相对默认值 `cache/cboe_daily`：v0.45.230 已修（本版未动），合并后复核不再出现。
 4. `config.CACHE_CONFIG["cache_dir"]` 在 import 期调了会 mkdir 的 `PATHS.cache_dir` getter ⇒ 任何 checkout 里 import 一次就建 `cache/`。
-   改为同规则的 `os.environ.get("ALPHA_HIVE_CACHE_DIR", str(PATHS.home / "cache"))`：值不变、不 mkdir（唯一读者 `init_cache()` 本来就显式建目录）。
+   改为同规则的 `os.environ.get("ALPHA_HIVE_CACHE_DIR", str(PATHS.home / "cache"))`：不 mkdir（唯一读者 `init_cache()` 本来就显式建目录）；「值不变」**只在 env 未设或为规范绝对路径时成立**——getter 返回 `Path` 会规范掉尾斜杠 / `//` / `./`，本版漏了这层（v0.45.253 订正并修）。
 5. `earnings_watcher` 模块级 `CACHE_DIR.mkdir()` → 两处写缓存前 `_ensure_cache_dir()`。⚠️ 两处都得加：`atomic_json_write` 不建父目录，缺目录的 `FileNotFoundError`
    会被调用处 `except OSError` 吞成 debug、缓存静默失效；该测试文件的 autouse fixture 预建目录会盖住这个形状，新增 `test_cache_dir_is_created_on_first_write` 指向不存在的目录。
 

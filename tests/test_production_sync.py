@@ -379,7 +379,7 @@ class TestResultReachesAlerts:
     def _alerts(tmp_path, snap):
         from alert_manager import AlertAnalyzer
         status = {"status": "success", "total_duration_seconds": 1,
-                  "steps_result": {"step2_swarm_analysis": {"status": "success"}},
+                  "steps_result": {"step2_hive_analysis": {"status": "success"}},
                   "scan_timing": snap}
         p = tmp_path / "status.json"
         p.write_text(json.dumps(status, ensure_ascii=False))

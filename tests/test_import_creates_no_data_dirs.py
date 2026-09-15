@@ -53,10 +53,18 @@ def test_import_leaves_data_root_empty(tmp_path, module):
     assert got["listing"] == [], f"import {module} 在数据根下建了：{got['listing']}"
 
 
-@pytest.mark.parametrize("cache_env", [None, "elsewhere_cache"])
+@pytest.mark.parametrize("cache_env", [
+    None,                        # 不设：落在 home/cache
+    "{tmp}/elsewhere_cache",     # 规范的绝对路径
+    # v0.45.253：下面三种是 v0.45.233 漏测的形状——getter 返回 Path 会把它们规范掉，
+    # 直接用 env 原串就与 getter 不等（二次检查实测三种都 DIFFERENT）。
+    "{tmp}/elsewhere_cache/",    # 尾斜杠
+    "{tmp}//elsewhere_cache",    # 双斜杠
+    "./rel_cache",               # 相对路径（相对子进程 cwd = tmp_path，不落进仓库）
+])
 def test_config_cache_dir_value_matches_paths_getter(tmp_path, cache_env):
-    """去掉 mkdir 不许改值：与 `PATHS.cache_dir` 的取值规则逐字相同（含 `ALPHA_HIVE_CACHE_DIR` 覆盖）。"""
-    extra = {"ALPHA_HIVE_CACHE_DIR": str(tmp_path / cache_env)} if cache_env else None
+    """去掉 mkdir 不许改值：与 `PATHS.cache_dir` 的取值逐字相同（含 `ALPHA_HIVE_CACHE_DIR` 覆盖）。"""
+    extra = {"ALPHA_HIVE_CACHE_DIR": cache_env.format(tmp=tmp_path)} if cache_env else None
     got = _fresh_import(tmp_path, (
         "import json, os, config\n"
         "frozen = config.CACHE_CONFIG['cache_dir']\n"
@@ -66,8 +74,8 @@ def test_config_cache_dir_value_matches_paths_getter(tmp_path, cache_env):
         extra)
     assert got["frozen"] == got["getter"]
     assert got["existed_after_import"] is False
-    expected = str(tmp_path / cache_env) if cache_env else str(Path(got["home"]) / "cache")
-    assert got["frozen"] == expected
+    if cache_env is None:
+        assert got["frozen"] == str(Path(got["home"]) / "cache")
 
 
 def test_earnings_cache_dir_still_under_home(tmp_path):
