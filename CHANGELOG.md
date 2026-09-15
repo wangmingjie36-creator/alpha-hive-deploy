@@ -529,7 +529,108 @@ CBOE 那种"只有当下 1-2 场"的实时快照——结构上能覆盖任意�
 - yfinance 与 Twelve Data 逐标的重叠去重逻辑未合并进任何统一取数层（`official_closes` 与
   `scan_coverage_gate.check_prices` 仍各有一份 yfinance 实现，v0.45.41 就记过这笔技术债，未处理）。
 
-## [0.45.256] — 2026-09-15 — 占位（进行中：signal_archive 的 guard.consistency_census 抽取器不按 census_source 分段，全量 backfill 会把 v0.45.163 前旧口径写进新名字）
+## [0.45.256] — 2026-09-15 — 改名只拆开了未来，没拆开回填：`guard.consistency_census` 全量回填会写回 1,394 行旧口径
+
+v0.45.250 修 `fund.*` 时在生产库副本上 dry-run 发现（当时未修）。
+
+v0.45.182 把 `guard.consistency` 改名为 `guard.consistency_census`，理由是 v0.45.163 起
+GuardBee 走普查读法、分母换了（排行榜窗口条数 → 本轮发布过的蜂数），同名延续会被
+`analyze()` 池化。**但抽取器只改了名字**，仍是无条件的 `_path(...details.consistency)`。
+新扫描写入的都是新口径，所以日常看不出来；而 `backfill()` 用**当前**抽取器重写**全部**历史
+`.swarm_results_*.json` ⇒ 一次全量回填就把旧口径写进新名字，改名拆开的两段又并回去。
+
+### 量测（生产 105 份 `.swarm_results_*.json`，只读；库用副本）
+
+- Guard 行 1,551：`census_source` 缺失 1,401（2026-03-10 ~ 09-04）、`live_agent_view` 150
+  （09-08/09/10/11/14 各 30）；`top_signals_fallback` / `unavailable` **生产里 0 行**。
+  缺失那 1,401 行里 7 行 `consistency` 本身取不到 ⇒ **1,394 行**可被写进新名字，与 v0.45.250 报的数逐条对上。
+- 修前 `--backfill --dry-run --only guard.consistency_census`：新增 **1,484**（1,394 旧 + 90 新）/ 不变 60。
+- 修后同一命令：新增 **90** / 不变 60。
+- 修后**不带 `--only`** 的全量 dry-run（63 个信号）：新增 938 / 改值 5 / 不变 91,043，
+  非零的只有 `fund.market_cap`、`fund.pe_ratio`（v0.45.250 本意）与 `guard.consistency_census` 的 90 行。
+  ⇒ 以「当前抽取器 vs 当时归档」这个口径看，**不存在第三个**会被全量回填改写的信号。
+- 分支代码与 scratchpad 三方合成版（v0.45.250 + 本版）的全量 dry-run 输出逐行一致；前后生产库 sha 未变。
+
+### Fixed
+
+- `signal_archive.py`：新增 `_guard_census_consistency`，**只认 `census_source == "live_agent_view"`**。
+  白名单不是「非空即可」：缺失 = v0.45.163 前的旧口径；`top_signals_fallback` = 窗口 24 的排行榜，
+  第三种口径；`unavailable` = 板读取失败，`consistency` 是兜底写的 0 而不是观测值。
+  判别照 `tests/test_distribution_invariants.py::census_coverage_offenders` 的先例。
+- `backfill()` docstring 与 `--only` help（v0.45.250 写的警告）：把「会写回 1,394 行」改成已修的实例，
+  保留通用警告——**全量回填会把任何「名字延续、但没按口径取值」的抽取器写回旧口径**。
+- `ic_rerun_readiness._COHORT_HISTORY` v0.45.163 条追加「v0.45.256 再更正」一句（改名只管住新写入），
+  指向代码 docstring，不抄数字。未新增世代边界：本版不改评分来源，也不改 `predictions`。
+
+### 第 3 步评估：还有没有同类信号
+
+| 信号 | v0.45.163 是否换量 | 处置 |
+|---|---|---|
+| `guard.adj_factor` | **未发现换量证据**。输入确实变了（`bullish_agents` 进 `consensus_strength`，权重 0.2941），但同一 30 只标的池 08-24~09-04（n=300）vs 09-08~09-14（n=150）：1.2 档 76.7%→78.7%、0.95 档 21.7%→21.3%、0.70 档 1.0%→0。七月前 1.2 档占比低是标的池 10→30 只所致，与普查无关 | 不门控，钉成断言 |
+| `guard.macro_adj` | 不走读板路径（`_calc_macro_adjustment`）；六月前字段不存在 ⇒ 靠「字段在不在」天然分段 | 不门控，钉成断言 |
+| `agent.GuardBeeSentinel.score/direction`、`composite.final_score` | **换了**（v0.45.163 自己量过 risk_adj Δ 均值 −0.485、方向 26.2% 不一致；权重另在 v0.45.172/176 改过） | **本版不处理**：这是「生产者换了口径、抽取器与归档一致」，全量 dry-run 看不见，也不是抽取器能分段的——各蜂输出分每改一次逻辑就换一次量，逐次改名不可行。正解在 `analyze()` 按 `_COHORT_HISTORY` 切片，属另一件事 |
+
+### 另一半：退役旧名自己也是池化的
+
+对账 `guard.consistency`（旧名）库内 1,485 行 vs JSON：1,394 行旧口径 + **90 行新口径**
+（09-08/09/10 各 30，值与 JSON 逐条相等）+ 1 行 `2026-08-16 NVDA`（JSON 里无此文件）。
+成因是时间差：v0.45.163 在 09-08 生效，v0.45.182 到 09-11 才改名，中间三天日常扫描照旧名写。
+v0.45.182 定的是「历史行不改写」，这 90 行就一直留在旧名下；
+`experiments/misjudgment_pattern_walkforward.py:86` 仍在读旧名，读到的是混合序列（新口径占 6.1%）。
+
+### 生产库：90 行「搬家」（用户 2026-09-15 批准，**有意偏离** v0.45.182「历史行不改写」）
+
+只补新名字的话旧名继续混着新口径，所以做的是搬家：新名补 90 行、旧名删同样 90 行。
+
+- **备份**（`sqlite3` 在线备份 API，不用 cp；放仓库外，不进 `db_backups/` 轮转）：
+  `~/alpha-hive-data/_manual_backups/pheromone.db.bak_v0.45.256_census_move_20260915_102010`
+  （integrity ok，只读；signal_archive 94,085 行）。
+- **执行**：一次性脚本（未入库），单个 `BEGIN IMMEDIATE` 事务，任一断言不成立即 ROLLBACK。
+  待写行由本版代码 `_rows_for(..., only={guard.consistency_census})` 生成（与 `archive()` 共用、含隔离名单），
+  **只读 09-08/09/10 三份文件**，不碰 09-11/14 已有的 60 行（免得 REPLACE 白刷它们的 id/created_at）。
+  事务内断言：新名这三天原有 0 行；三份 JSON 的 `census_source` 全为 `live_agent_view`；
+  待写 90 行与旧名 90 行的 (date, ticker) 集合相等、值逐条相等；删除行数恰为 90；
+  事后旧名最大日期 < 09-08 ≤ 新名最小日期。先在 scratchpad 可写副本上演练了回滚、提交、
+  重复执行（被「已有 90 行」断言拦下）三条路径。
+- **结果**：新名 60 → **150 行，全部 `live_agent_view`**；旧名 1,485 → **1,395 行 = 1,394 旧口径 + 08-16 那 1 行**；
+  integrity ok；分支代码对生产库 `--backfill --dry-run --only guard.consistency_census` ⇒ 新增 0 / 不变 150。
+
+⚠️ **并发写入，这份备份不能整库还原。** 提交时刻 10:21:58 PDT；**20 秒后** v0.45.250 的 session 在
+同一个库上跑了 `fund.*` 回填（`created_at` 17:22:18–20 UTC，REPLACE 2,149 行、净增 848 ⇒ 总行 94,933）。
+它自己的备份 `db_backups/pheromone_pre_v0.45.250_fund_backfill_20260915_101954.db` 与本版备份**都早于两次写入**
+⇒ 整库还原任何一份都会同时抹掉两边的操作。回滚本版只做反向 SQL：
+
+```sql
+ATTACH '~/alpha-hive-data/_manual_backups/pheromone.db.bak_v0.45.256_census_move_20260915_102010' AS b;  -- 路径请展开 ~
+BEGIN IMMEDIATE;
+DELETE FROM signal_archive WHERE signal='guard.consistency_census'
+  AND date IN ('2026-09-08','2026-09-09','2026-09-10');
+INSERT INTO signal_archive (date,ticker,signal,value)
+  SELECT date,ticker,signal,value FROM b.signal_archive WHERE signal='guard.consistency'
+  AND date IN ('2026-09-08','2026-09-09','2026-09-10');
+COMMIT;
+```
+
+### Added
+
+- `tests/test_signal_archive.py::TestConsistencyCensusIsCaliberGated`（8 项）：旧口径不产出 /
+  `live_agent_view` 产出（成对）/ fallback、unavailable、None、空串不产出（白名单）/
+  兄弟信号 `adj_factor`、`macro_adj` 不许被一起门控 / 回填症状本身（含「旧文件确实被读到了」的前提自证）。
+- `tests/test_guard_census_eviction.py` +2：驱动真实 `GuardBeeSentinel.analyze()` → 真实
+  `QueenDistiller.distill()` 投影 → `extract()`，普查路径归档、回退路径不归档。口径标记是生产者与读者
+  之间的字符串契约，`_read_census` 改名会让本信号静默停档（v0.45.250 `fund.*` 同形）——手写夹具证明不了。
+
+### 核对
+
+- 改前：新增 10 项里 7 项红（该红的全红），3 项正向断言本就绿（防「删掉信号也全绿」的那一半）。
+- mutation **6/6 被杀**（每轮清 `__pycache__`、锚点唯一、还原后逐字节比对）：
+  回退成无条件 `_path`（7 红）/ 白名单改「非空即可」（3 红）/ 改 `is None`（4 红）/
+  恒返回 None（3 红）/ 兄弟信号一起门控（3 红）/ 生产者改标记名（2 红，含已有的 `test_guard_records_census_source`）。
+- 与 v0.45.250 三方合并 0 冲突（helper 刻意放在 `_swarm_agreement` 后，避开它插入 `_code_exec_fetch` 的位置）；
+  rebase 到含 v0.45.250 / v0.45.260 的 main 后受影响 4 个文件 95 绿。
+- 全套 **4,743 passed / 1 failed**：唯一红的是 `test_economic_calendar.py::TestCoverageHorizon`
+  （BLS 日程只覆盖到 2026-12-04，剩 80 天 < 阈值 90 天），按日期设计会定期变红，与本版无关，未动。
+- ruff 0.13.3 对改动文件 All checks passed。
 
 ## [0.45.254] — 2026-09-15 — 二次检查 v0.45.251：父指针表把装饰器参数/默认参数值/返回注解也算进「函数体内」，会被 `ALLOWED` 连带误放行；其余声称独立复核，全部成立
 

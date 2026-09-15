@@ -486,3 +486,69 @@ def test_guard_passes_true_bull_count_to_crowding(guard, board, monkeypatch):
     assert seen["bullish_agents"] == 2, (
         f"传给拥挤度的看多蜂数 {seen['bullish_agents']} != 真值 2（Scout+Oracle）"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 主张 N（v0.45.256）：归档读者认得 GuardBee **真实输出**的口径标记
+#
+# `signal_archive` 只在 `census_source == "live_agent_view"` 时归档
+# `guard.consistency_census`。这是生产者与读者之间的一条**字符串契约**：
+# 哪天 `_read_census` 把标记改个名，读者就会静默停档（与 v0.45.250 `fund.*`
+# 同一形状：`_dig` 取不到 ⇒ 行被跳过 ⇒ 没有任何东西会红）。
+# 手写 `_tr()` 夹具证明不了这条契约，所以这里驱动真实 `analyze()` 与真实
+# `QueenDistiller.distill()` 投影（`agent_details` 在那里逐键白名单拷贝）。
+# ══════════════════════════════════════════════════════════════════════════
+
+class _CensuslessBoard:
+    """只暴露旧 API 的板替身 ⇒ GuardBee 走 `top_signals_fallback`。"""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def get_top_signals(self, ticker, n=5):
+        return self._inner.get_top_signals(ticker, n=n)
+
+    def detect_resonance(self, ticker):
+        return self._inner.detect_resonance(ticker)
+
+    def publish(self, entry):
+        return self._inner.publish(entry)
+
+    def snapshot(self):
+        return self._inner.snapshot()
+
+
+def _archived(guard_result):
+    import signal_archive as sa
+    from swarm_agents.queen_distiller import QueenDistiller
+    tr = QueenDistiller(PheromoneBoard(), enable_llm=False).distill("TEST", [guard_result])
+    det = ((tr.get("agent_details") or {}).get("GuardBeeSentinel") or {}).get("details") or {}
+    return det, sa.extract(tr)
+
+
+def test_archive_reads_real_census_output(guard, board):
+    _publish_pre_guard(board)
+    r, _ = _guard_details(guard)
+    det, out = _archived(r)
+    assert det.get("census_source") == "live_agent_view", (
+        f"distill 投影后的口径标记是 {det.get('census_source')!r} —— "
+        "要么 `_read_census` 改了标记名，要么 Queen 白名单没拷 details"
+    )
+    assert out.get("guard.consistency_census") == pytest.approx(TRUE_CONSISTENCY), (
+        "GuardBee 真实普查输出没有被归档 —— 生产者与 signal_archive 的口径标记对不上，"
+        "`guard.consistency_census` 会静默停档"
+    )
+
+
+def test_archive_skips_real_fallback_output(board, stock_stub):
+    """成对断言，走真实回退路径：值在、口径不对 ⇒ 不归档。"""
+    from swarm_agents import GuardBeeSentinel
+    _publish_pre_guard(board)
+    r = GuardBeeSentinel(_CensuslessBoard(board)).analyze("TEST")
+    assert "error" not in r, f"回退路径崩了: {r.get('error')}"
+    det, out = _archived(r)
+    # 前提自证：consistency 确实被投影出来了，缺席是被门控拦下的，不是被白名单丢掉的
+    assert det.get("census_source") == "top_signals_fallback"
+    assert isinstance(det.get("consistency"), (int, float)), det
+    assert "guard.consistency_census" not in out
+    assert "guard.adj_factor" in out, "兄弟信号不该被一起门控掉"
