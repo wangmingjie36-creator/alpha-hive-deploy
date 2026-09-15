@@ -268,8 +268,10 @@ def _render_details(name: str, result: Dict) -> str:
             rows.append(("Reddit 排名", f"#{reddit.get('rank', '—')}"))
             rows.append(("Reddit 提及", f"{reddit.get('mentions', 0)} 次"))
             rows.append(("Reddit 情绪", str(reddit.get("buzz", "—"))))
-        fg = details.get("components", {}).get("fear_greed_signal")
-        if fg is not None: rows.append(("恐惧贪婪", f"{fg:.1f}"))
+        # v0.45.247：原读 components.fear_greed_signal——BuzzBee 从未产出过这个键（恒不渲染）。
+        # 现读真实观测值；兜底时 value 为 None，不渲染（不许把中性 50 当读数）。
+        fg = (details.get("fear_greed") or {}).get("value")
+        if fg is not None: rows.append(("恐惧贪婪", f"{fg:.0f}"))
 
     elif name == "rival":
         pred = details.get("predicted_30d") or details.get("expected_30d")
@@ -423,8 +425,9 @@ def _phase1_block(key: str, r: Dict) -> str:
         if vol is not None: raw_lines.append(f"成交量比 {vol:.2f}x")
         rd = details.get("reddit",{})
         if rd: raw_lines.append(f"Reddit #{rd.get('rank','—')}  提及 {rd.get('mentions',0)} 次  情绪 {rd.get('buzz','—')}")
-        fg = (details.get("components") or {}).get("fear_greed_signal")
-        if fg: raw_lines.append(f"恐惧贪婪指数 {fg:.0f}")
+        # v0.45.247：同 _render_details——原读的键从未被产出。`is not None` 而非真值判断：F&G=0 是合法读数。
+        fg = (details.get("fear_greed") or {}).get("value")
+        if fg is not None: raw_lines.append(f"恐惧贪婪指数 {fg:.0f}")
 
     elif key == "rival":
         p30 = details.get("predicted_30d") or details.get("expected_30d")

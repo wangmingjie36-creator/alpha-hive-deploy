@@ -1629,7 +1629,10 @@ class MLEnhancedReportGenerator:
         momentum = det.get("momentum_5d")
         vol_ratio = det.get("volume_ratio")
         reddit = det.get("reddit", {})
-        fear_greed = det.get("fear_greed_index", det.get("components", {}).get("fear_greed", None))
+        # v0.45.247：原读 `fear_greed_index` / `components.fear_greed`——BuzzBee 两个键都从未产出，
+        # 这张卡片的恐贪指数格子从来没显示过。现读真实观测值；兜底时为 None，不渲染。
+        _fg = det.get("fear_greed")
+        fear_greed = _fg.get("value") if isinstance(_fg, dict) else None
         sent_color = ("var(--tm)" if sentiment_pct is None
                       else ("var(--bull)" if sentiment_pct > 60
                             else ("var(--bear)" if sentiment_pct < 40 else "var(--neut)")))
