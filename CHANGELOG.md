@@ -5,7 +5,52 @@
 
 ---
 
-## [0.45.254] — 2026-09-15 — 占位（进行中：二次检查 v0.45.251 的改动）
+## [0.45.254] — 2026-09-15 — 二次检查 v0.45.251：父指针表把装饰器参数/默认参数值/返回注解也算进「函数体内」，会被 `ALLOWED` 连带误放行；其余声称独立复核，全部成立
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。**
+
+### Fixed（`tests/test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`）
+
+1. **`enclosing_function_name` 把 `decorator_list` / `args`（含 defaults、kw_defaults、参数与返回注解）
+   也算作「这个函数的一部分」，语义上却是定义那一刻、于外层作用域求值的。** 这三处（装饰器参数、
+   默认参数值、返回注解）在 AST 里确实是 `FunctionDef` 的子节点，父指针表因此把它们归给了被装饰/
+   带默认值的那个函数——若那个函数名恰好在 `ALLOWED` 里，未锚定的 cwd 读取就被连带放行。
+   实测：`@deco(os.getcwd())` 装饰 `pytest_collection_finish`、`def pytest_collection_finish(session,
+   x=os.getcwd())`、`def pytest_collection_finish() -> os.getcwd()` 三种写法，v0.45.251 版全部返回
+   `[]`（应报 `<module>:N`——这三个函数定义本身就在模块级，装饰器/默认值/注解在模块 import 时于
+   模块作用域求值，与函数体无关）。本仓当前三个 `ALLOWED` 函数都没有这种写法——量过，不是假设；
+   `_hive_log_handler_escapes(sandbox, handlers=None)` 恰好是个无害常量默认值，没撞上纯属巧合，
+   不是这处逻辑本来就对。
+   改：走到 `FunctionDef`/`AsyncFunctionDef` 时先判「一步之下的那个节点」是不是它的
+   `decorator_list` 某项、`args`（涵盖 defaults/kw_defaults/各参数与 vararg/kwarg 注解，全部
+   通过同一个 `arguments` 子节点归拢）、或 `returns` 注解——是就不算「进了这个函数」，继续往外走；
+   只有从 `body` 走上来的才归给它。
+   变异：新增 6 条用例（装饰器/默认值/返回注解各一，均用 `ALLOWED` 里的真名字 `pytest_collection_finish`
+   做探针——只有真名字才测得出「会不会被那顶帽子连带放行」；一条 body 内真调用同名函数的反面对照；
+   一条嵌套函数默认值该归给外层函数而非内层的用例）——v0.45.251 版前三条全部误判成 `[]`，新实现
+   六条全对。**过程中 ruff 抓到一处真失误**：第一版给反面对照用例写了和第 4 条完全重复的 dict key，
+   Python 字典对重复 key 静默取最后一个值——不影响断言正确性（两处期望值都是 `[]`），但暴露了
+   「新加用例前没检查是否已有同款」，已删除重复项、改成引用第 4 条的注释。
+
+### 核过、成立的（v0.45.251）
+
+- claim 1（裸名 import 绕过 `.attr()` 形态）的修法本身：复读 `bare_names` 预扫与主循环合流逻辑，
+  与描述一致；用当前真实 `conftest.py` 跑 `test_no_cwd_derived_watch_in_conftest`，绿——新逻辑
+  没有引入误报。
+- `invocation_params` 捕获时机：pytest 版本未变，结论不变。
+- `import subprocess as _sp`（`test_paths_not_frozen_at_import.py:372`）只伪造 `git ls-files`：
+  复读确认，结论不变。
+- 无测试调 `monkeypatch.undo()`：复查仍是空。
+
+### 验证
+
+- `tests/test_reads_own_checkout.py` + `tests/test_ml_model_path_isolation.py` +
+  `tests/test_hive_logger_not_frozen.py` + `tests/test_cwd_and_sys_path_hygiene.py`：74 passed。
+- 全套从仓库根（合并 origin/main 之前）：1 failed（`TestCoverageHorizon`，设计如此）/
+  4648 passed / 1 skipped / 2 xfailed。
+
+---
+
 
 ## [0.45.253] — 2026-09-15 — 占位（进行中：二次检查 v0.45.233——config 缓存目录取值未规范化 / 总闸把 watchlist_override.yaml 当代码 / 三处推断写成了实测）
 
