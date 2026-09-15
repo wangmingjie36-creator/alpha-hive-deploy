@@ -131,7 +131,112 @@ v0.45.238 的观测点按**调用**计。一只标的一轮扫描要调 3~4 次 
 - `report_deployer`/`config.py` 没有任何「数据根迁移」代码落地——CHANGELOG 里那条占位（v0.45.233）本身
   还没填正文，本条只是防御性补丁，不代表迁移已经在动这些目录。
 
-## [0.45.247] — 2026-09-14 — 占位（进行中：Queen 读蜂 details 的键契约守卫 + 删 F&G 政体调整死分支 + signal_archive 补 Buzz 缺失通道）
+## [0.45.247] — 2026-09-14 — 蜂 details 读取契约守卫；删除从未执行过的 F&G 政体调整；signal_archive 补 Buzz 缺的三个通道
+
+另一个 session 核查共振加成时顺带发现，本 session 核实：`QueenDistiller` 自 2026-03-30（caa432d2）起读 BuzzBee
+`details["fear_greed_value"]` 驱动「步骤 4.6 F&G 政体分数调整」与「F&G>75 时看多门槛 50%→60%」，但 BuzzBee 只把它放进
+发信息素板的 `_pub_details`，`AgentResult.details` 里从来没有 ⇒ 仓库根 851 份 JSON 的 `swarm_results.fear_greed_value`
+**无一有值**，两段逻辑一次都没执行过。按同一形状（**有读者、没写者**）继续查出：Queen 读 Oracle `details["gex"]`
+（794/794 份非 error 结果不存在，同样只在 `_pub_details`，且那边是 `gamma_exposure` 标量）与 Guard `market_regime.dealer_gex`
+（`detect_market_regime` 从不产出，794/794 为空）也是死的——生产 GEX 一直落在第三条兜底（distill 内现场 `DealerGEXAnalyzer`）；
+`deep_analysis` 两处读 `components.fear_greed_signal`、`generate_ml_report._ch3_buzz` 读 `fear_greed_index` / `components.fear_greed`，
+三个键也从未产出，这两处恐贪指数格子从来没显示过。
+
+是否接线的评估（影响面重放、负对照、CNN/加密源逐日核对）已报告用户，用户选择：**不接线，先做守卫 + 删死代码 + 补归档**。
+全部取证见 MEMORY `alpha-hive-fear-greed-dead-wire`。
+
+### Added — 读取契约（`swarm_agents/queen_distiller.py`）
+
+- `QueenDistiller.DETAIL_READS`：本类从各蜂 details 读的键的**唯一登记处**（Guard `macro_regime`、Oracle `iv_rank`、
+  Scout `price`、Buzz `sentiment_momentum` / `sentiment_divergence`）。
+- `_read_bee_detail(results, source, key, misses, default)`：语义同 `details.get(key, default)`，但把「**键不存在**」记账；
+  蜂不在结果里 / 报了 `error` / 键在值为 None 三种情形不算断裂。只记账不抛（调用点在 `try/except Exception` 里，抛会被吞成 debug）。
+- 输出新增 `details_contract_misses`（正常为 `[]`），非空时在所有 try 之外打 error。
+  **在 794 份历史输入上重放**：2026-09 为 0；3 月 61 条 Guard 缺 `macro_regime`（早期 Guard 尚无此键）；5/8 月 3 条 Scout 缺 `price`
+  全是**旧快照假阳性**（Scout 当时崩了、`discovery` 以 `Error:` 开头，但 v0.45.182 前 `agent_details` 不抄 `error`）——现行生产结果带 `error`，不会报。
+
+### Removed
+
+- `queen_distiller.py`：步骤 0.5 F&G 提取、步骤 4.6 F&G 政体调整、`_compute_direction_vote` 的 `fg_value` 参数与 F&G>75 门槛分支、
+  输出字段 `fear_greed_value`（恒 None）；步骤 0 里 Guard `dealer_gex` 与 Oracle `gex` 两条死 GEX 来源。
+- `config.py`：`FEAR_GREED_SCORING` 整块；`BULLISH_GATE_CONFIG` 的 `extreme_greed_threshold` / `extreme_greed_weight_pct`。
+- `buzz_bee.py`：`_pub_details["fear_greed_value"]`（板上零读者）。
+
+### Changed
+
+- `buzz_bee.py` `AgentResult.details`：`components` 补 `news_signal` / `yahoo_signal` / `fear_greed_signal`（七通道进合成时的实际取值，
+  此前只有四个）；新增 `fear_greed = {value, classification, source, is_real_data, fetched_at}`。
+  **`value` 只在 `is_real_data` 时非 None**——`fear_greed._default_result()` 是 value=50/is_real_data=False，照值抄会造出假 50。
+  `source="alternative_me"` 是**加密**市场 F&G（2026-03-10~13 记录值 13/15 即是，CNN 当日 17–22）。
+- `signal_archive.py` 新增 5 个信号：`buzz.comp.news_signal` / `yahoo_signal` / `fear_greed_signal`、`market.fear_greed`（仅真实观测）、
+  `market.fear_greed_is_cnn`（1=CNN 股票 / 0=加密备用；读 F&G 前先按它切开，同 `options.iv_rank_is_real`）。
+  F&G 当天全池同值 ⇒ `analyze()` 按全并列日跳过，不产出 IC；存它是为了离线重放聚合层规则。
+- `deep_analysis.py` 两处、`generate_ml_report._ch3_buzz`：改读 `details.fear_greed.value`（兜底时不渲染）。
+- `experiments/resonance_boost_forward_test.py`（v0.45.242 预注册）：合并 origin/main 后它的
+  `TestReplayMatchesRealDistill` **按设计先红**（`_compute_direction_vote(..., fg_value=)` TypeError）。
+  同步重放：去掉 `fg_value=` 与已不存在的步骤 4.6 对应的 `_fg_adjustment`。**不触及预注册**：常量未动；
+  生产全部 JSON 的 `fear_greed_value` 恒为 None，原 `_fg_adjustment` 恒返回 0 ⇒ 重放输出逐字节不变；
+  改动早于 `FORWARD_START`（2026-09-15），没有前瞻数据被看过。
+
+### 世代边界：**不需要**
+
+实测而非推断：用 origin/main 旧代码与本版代码在 794 份历史 `agent_details` 上各跑一次真实 `distill()`
+（`DealerGEXAnalyzer.analyze` 两边同钉成 `{}` 保证确定、不出网），输出除删/增的两个字段外**逐字段 0 差异**。
+归档只**新增**信号，既有信号的抽取未改。
+
+### 测试 — `tests/test_bee_details_contract.py`（新，24 条）
+
+- **静态层**（任何环境都跑，不依赖生产数据）：AST 抽各蜂 `AgentResult(details={...})` 字面量键树当生产者真相——由当前代码算出，
+  不是快照夹具。① Queen 里绕过读取器的 details 访问必须为零（整份 details 抄进 `agent_details` 的那处放行）；
+  ② 调用点字面量 ↔ `DETAIL_READS` 双向一致；③ 每条登记的读取能在生产者键树里找到；④ `signal_archive` 全部
+  `agent_details.<蜂>.details.<路径>` 同样核对（`_buzz_comp` / `_crowding_comp` 的前缀从函数体里读，不抄第二份）。
+  `**展开` / 变量值导致的**静态不可证**路径列成显式清单并**双向**断言（Oracle 7 条、Rival 3 条、Scout `components.*` 5 条、
+  Queen 的 Oracle `iv_rank`；CodeExecutor 2 条「无静态生产者」）。扫描器先自证：已知键判 ok、编造键判 missing、原缺陷键判 missing。
+- **运行期层**：缺键记账 / None 值不算 / error 结果不算 / `fear_greed_value` 字段已删。
+- **集成层**：离线跑**真实** `BuzzBeeWhisper.analyze()`（五个外部源钉在源头，用各模块自己的不可得契约函数），输出分别喂 Queen、
+  `signal_archive.extract`、`deep_analysis` 两个渲染函数、`_ch3_buzz`；CNN / 兜底 / 加密源三种 F&G 各覆盖。
+- 先红后绿：未改代码时 16 红（首条精确点出 queen_distiller.py 1028/1037/1051/1085/895 五处裸读）。
+- **变异**（真跑、逐个还原）：
+  | 变异 | 结果 |
+  |---|---|
+  | M1 Queen 裸读 F&G（原缺陷形状） | 红 |
+  | M2 登记并读取生产者不产出的键 | 红 |
+  | M2b 登记了但无调用点 | 红 |
+  | M3 Buzz F&G 不按 is_real_data 把关 | 4 红 |
+  | M4 Buzz 不产出 news_signal | 3 红 |
+  | M5 读取器缺键不记账 | 红 |
+  | M6 读取器把 None 值当缺键 | 红 |
+  | M7 读取器把 error 结果当缺键 | 红 |
+  | M8 `market.fear_greed_is_cnn` 不看 source | 红 |
+  | M9 deep_analysis 改回读旧键 | 红（只有兜底用例能分开：真实 CNN 值下通道值 = 观测值） |
+  | M10 ML 报告改回读旧键 | 红 |
+
+### 已知未覆盖
+
+- 运行期记账只覆盖 Queen；`signal_archive` 读静态不可证路径（Oracle/Rival 展开、Scout components）时缺键仍静默不入档。
+- `deep_analysis` / `generate_ml_report` 其余 details 读取不是声明式的，本守卫够不到（这次只修了 F&G 这三处并用真实 Buzz 输出钉住）。
+- 另立任务：CodeExecutorAgent 自 2026-08 把 `market_cap` / `pe_ratio` 挪进 `details.fetch_data`（9 月 106/108 份嵌套），
+  `fund.market_cap` / `fund.pe_ratio` 基本已停止入档。
+- ~~Buzz 情绪合成里的 F&G 活通道（`buzz_weights.fear_greed=0.10`，当天全池常数、只做水平平移）与加密备用源，本版未动
+  （需先量、改了要世代边界）。~~ —— **已查（同日追记，2026-09-15）**：
+  - **活通道已量化，证据不足，不改。** `buzz_weights.fear_greed` 与方向阈值自 03-09 起未变，公式线性可分离，
+    换成中性 50 时其余六通道原样抵消，不需要重建历史 reddit/news/yahoo 真实取值。793 份历史结果：确定翻转 51（6.4%）+
+    模糊 52（6.6%）；效应顺周期（恐惧推更 bearish、贪婪推更 bullish），与已删除的 Queen 层逆周期调整方向相反，
+    两层从未同时生效；横截面 IC（复用 `ic_diagnostics.spearman`）real +0.087 vs cf（去掉 F&G）+0.111，
+    差值 p=0.15（15 周，本仓功效标准要 ~25 周），负对照（同法换 volatility_signal）零翻转，确认效应真实但**未过检验**。
+    维持现状，不动生产代码——若要真答案，仿 `resonance_boost_forward_test.py` 搭预注册前瞻检验，不再挖历史。
+  - **加密备用源标签问题已被本版顺带解决。** `fear_greed._default_result()` 本就正确返回 `is_real_data: False`，
+    原判断「兜底会被喂成假 50」是误报；真正的缺口「加密源标 True 但下游分不清它和 CNN」已被本版
+    `details.fear_greed.source` 与 `market.fear_greed_is_cnn` 解决。剩下「加密 F&G 该不该降权」二次核实生产日志仍是
+    **0 次真实触发**（固定值×165/57 行逐位对应 `test_fear_greed.py` 夹具），零样本不改代码。
+  - 完整数字、方向验证、脚本见 auto-memory `alpha-hive-fear-greed-dead-wire.md`（本次未新增代码，脚本留在 scratchpad 未入库）。
+
+### 验证
+
+- 全套（`-m "not integration and not network"`，合并 origin/main 之后）：**4598 passed / 1 failed / 1 skipped / 2 xfailed**（302s），唯一红
+  `TestCoverageHorizon`（日历剩 81 天低于 90 天阈值；在 origin/main 临时 worktree 上单跑同样红，与本版无关）。
+- `ruff check` 改动的 8 个文件：通过。
+
 
 ## [0.45.246] — 2026-09-14 — 落地 v0.45.239 / v0.45.244：合并后 v0.45.240 的 cwd 守卫抓到 v0.45.239 日志隔离 ① 的真洞——相对落点经 `resolve()` 补全成 cwd，恒「在沙箱里」
 

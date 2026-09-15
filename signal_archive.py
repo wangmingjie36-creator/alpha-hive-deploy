@@ -186,6 +186,19 @@ def _buzz_comp(key: str) -> Callable:
     return _f
 
 
+def _fear_greed_is_cnn(tr: Dict) -> Optional[float]:
+    """1.0 = CNN **股票**市场 F&G；0.0 = Alternative.me **加密**市场 F&G（备用源）。
+
+    两者不是一个量（2026-03-10~13 实测记录值 13/15 是加密 F&G，CNN 当日 17–22）。
+    读 `market.fear_greed` 的任何分析都必须先按这一列切开，同 `options.iv_rank_is_real`。
+    值不是真实观测（兜底）时返回 None —— 那一行 `market.fear_greed` 本来也不入档。
+    """
+    fg = _dig(tr, "agent_details.BuzzBeeWhisper.details.fear_greed")
+    if not isinstance(fg, dict) or not fg.get("is_real_data") or fg.get("value") is None:
+        return None
+    return {"cnn": 1.0, "alternative_me": 0.0}.get(fg.get("source"))
+
+
 # ⚠️ v0.45.35 修：权重表**从 ChronosBee 读**，不再复制第二份。
 # 初版手抄了一份，漏了 6 个类型（split/dividend/dividendDate/analyst_day/
 # conference/exDividendDate）且默认值写成 0.8（蜂内是 0.7）。后果不是小偏差：
@@ -324,6 +337,14 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     "buzz.comp.volume_signal":     _buzz_comp("volume_signal"),
     "buzz.comp.volatility_signal": _buzz_comp("volatility_signal"),
     "buzz.comp.reddit_signal":     _buzz_comp("reddit_signal"),
+    # v0.45.247：Buzz 合成的另外三个通道此前不在 details 里，sentiment 维度重放不了。
+    "buzz.comp.news_signal":       _buzz_comp("news_signal"),
+    "buzz.comp.yahoo_signal":      _buzz_comp("yahoo_signal"),
+    "buzz.comp.fear_greed_signal": _buzz_comp("fear_greed_signal"),
+    # 市场级常量：当天所有标的同值 ⇒ 横截面 IC 恒不可算（analyze 按全并列日跳过），
+    # 存它是为了离线重放「F&G 政体调整」这类聚合层规则。先看 is_cnn 再用。
+    "market.fear_greed":        _path("agent_details.BuzzBeeWhisper.details.fear_greed.value"),
+    "market.fear_greed_is_cnn": _fear_greed_is_cnn,
     "options.iv_rank":         _path("agent_details.OracleBeeEcho.details.iv_rank"),
     "options.iv_percentile":   _path("agent_details.OracleBeeEcho.details.iv_percentile"),
     "options.iv_rank_is_real": _iv_rank_is_real,
