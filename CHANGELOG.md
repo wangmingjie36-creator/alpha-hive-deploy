@@ -7,7 +7,52 @@
 
 ## [0.45.252] — 2026-09-15 — 占位（进行中：scan_timing 整段丢失时 alert_manager 一律静默跳过——区分「早退未写」与「扫描跑完了却丢数据」，后者升级成 P1）
 
-## [0.45.251] — 2026-09-15 — 占位（进行中：二次检查 v0.45.245 的改动）
+## [0.45.251] — 2026-09-15 — 二次检查 v0.45.245：它自己的检测器只认 `x.attr()` 形态，`from os import getcwd` 裸名调用完全绕过；其余声称独立复核，全部成立（含合并后 v0.45.246 真咬中同形 bug 的验证）
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。**
+
+### Fixed（`tests/test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`）
+
+1. **只判 `isinstance(n.func, ast.Attribute)`，裸名调用完全不在扫描范围内。**
+   `cwd`/`resolve`/`absolute` 天然只能是方法调用，没有这个问题；但 `getcwd`/`abspath`/`realpath`
+   可以 `from os[.path] import` 出来当自由函数用，之后 `n.func` 是 `ast.Name` 不是 `ast.Attribute`——
+   v0.45.240、v0.45.245 两版检测逻辑都只判后者。实测：
+   `from os import getcwd\ndef _guard():\n    x = getcwd()\n` 喂给 v0.45.245 版，返回 `[]`。
+   本仓当前没有这种写法——量过（`grep -n "^from os import\|^from os.path import" tests/conftest.py`
+   零命中），不是假设的攻击面。
+   改：先扫一遍模块里的 `ImportFrom(module in {os, os.path, posixpath, ntpath})`，把本地名字
+   （含 `as` 别名）登记成「等价于哪个 `.attr()` 检测」；主循环里 `Call(func=Name)` 命中登记表就按
+   同一套显式/隐式 + 锚点规则判，拿不到隐式调用的主语（无参数）就跳过、不装作查过。
+   变异：新增 6 条用例（裸名、别名裸名、`abspath` 裸名、裸名但锚了、裸名在模块级、
+   来自无关模块的同名函数不该误判）——v0.45.245 版前 3 条全部漏报（`[]` vs 应报），
+   新实现 6 条全对；反面对照（`from my_module import getcwd`）新旧两版都不误报，确认改动
+   没有把「同名任意函数」也当成 `os.getcwd` 抓。
+
+### 核过、成立的（v0.45.245）
+
+- claim 1（模块级/class 体顶层盲区）的修法本身：复读现有 `enclosing_function_name` 实现与父指针表构造，
+  逻辑与描述一致；用当前（已含 v0.45.246/248/249/250 合并内容的）真实 `conftest.py` 跑
+  `test_no_cwd_derived_watch_in_conftest`，绿——说明父指针改写没有引入新的误报。
+- claim 2（「只有防线①能发现」不成立、`test_default_path_is_absolute_and_not_cwd_relative` 独立兜底）：
+  复读该测试当前仍存在、仍是 `assert pathlib.Path(p).is_absolute()`，不依赖 cwd，结论未变。
+- **验证有效性的验证**：v0.45.245 称「合并后这道结构守卫会独立发现真实 bug」——**查实了**：
+  `976c4e11`（v0.45.246）commit message 原文「合入 v0.45.240 后 `TestConftestGuardsDoNotAnchorOnCwd`
+  抓到 `_hive_log_handler_escapes` 两处 `resolve()`」，其 diff 把该函数加进了 `ALLOWED` 并单独修了
+  同形 bug（先断言 `is_absolute()` 再 `resolve()` 判包含，与 `_assert_default_path_in_sandbox` 同形）。
+  这不是我自己造的变异，是它在下一个 session 的真实代码改动里咬中的第一个活口。
+- `invocation_params` 的捕获时机（`Config` 构造时一次性、早于任何 fixture）：pytest 版本未变，结论不变。
+- `import subprocess as _sp`（现在在 `test_paths_not_frozen_at_import.py:372`，行号因中间提交漂了一行，
+  内容不变）只伪造 `git ls-files`：复读确认，结论不变。
+- 无测试调 `monkeypatch.undo()`：复查仍是空。
+
+### 验证
+
+- `tests/test_reads_own_checkout.py` + `tests/test_ml_model_path_isolation.py` +
+  `tests/test_hive_logger_not_frozen.py` + `tests/test_cwd_and_sys_path_hygiene.py`：74 passed。
+- 全套从仓库根（合并 origin/main 之前）：1 failed（`TestCoverageHorizon`，设计如此）/
+  4648 passed / 1 skipped / 2 xfailed。
+
+---
 
 ## [0.45.250] — 2026-09-15 — 占位（进行中：signal_archive 的 fund.pe_ratio/market_cap 读不到 CodeExecutor 8 月后的嵌套 details，静默停档）
 
