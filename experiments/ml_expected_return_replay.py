@@ -44,7 +44,11 @@ from typing import Dict, List, Tuple
 ALPHAHIVE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ALPHAHIVE_DIR))
 
-DB_PATH = ALPHAHIVE_DIR / "pheromone.db"
+# v0.45.260（数据根迁移阶段 2）：此前是 `ALPHAHIVE_DIR / "pheromone.db"`
+# （`ALPHAHIVE_DIR` 是 `__file__` 派生）——不读 `ALPHA_HIVE_HOME`。改读
+# `PATHS.db`；`ALPHAHIVE_DIR` 本身保留，只喂上面的 `sys.path.insert`。
+from hive_logger import PATHS as _PATHS  # noqa: E402
+DB_PATH = Path(_PATHS.db)
 
 
 def load_pairs(db_path: Path) -> List[Tuple[str, str, float, float, float]]:

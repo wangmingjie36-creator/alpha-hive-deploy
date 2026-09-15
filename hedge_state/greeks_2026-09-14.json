@@ -1,0 +1,597 @@
+{
+ "aggregate": {
+  "band": {
+   "band_pct": 15.0,
+   "lower_pct": -15.0,
+   "target_pct": 0.0,
+   "upper_pct": 15.0
+  },
+  "band_status": "inside",
+  "by_kind": {
+   "hedge": 1,
+   "option": 4,
+   "stock": 8
+  },
+  "coverage": {
+   "beta_coverage": 1.0,
+   "n_beta_dd_incomplete": 0,
+   "n_beta_missing": 0,
+   "n_price_missing": 0,
+   "n_quote_missing": 0,
+   "n_rows": 13
+  },
+  "gamma_alert": false,
+  "nav": 150610.51,
+  "partial": false,
+  "pct_nav": {
+   "beta_dollar_delta": -3.1482,
+   "dollar_delta": 0.8447,
+   "gamma_dollar_per_1pct": -0.0689,
+   "theta_dollar_per_day": 0.1284,
+   "vega_dollar_per_pt": -0.2318
+  },
+  "sums": {
+   "beta_dollar_delta": -4741.47,
+   "dollar_delta": 1272.18,
+   "gamma_dollar_per_1pct": -103.72,
+   "theta_dollar_per_day": 193.4,
+   "vega_dollar_per_pt": -349.11
+  },
+  "vega_alert": false
+ },
+ "aggregate_after": {
+  "band": {
+   "band_pct": 15.0,
+   "lower_pct": -15.0,
+   "target_pct": 0.0,
+   "upper_pct": 15.0
+  },
+  "band_status": "inside",
+  "by_kind": {
+   "hedge": 1,
+   "option": 4,
+   "stock": 8
+  },
+  "coverage": {
+   "beta_coverage": 1.0,
+   "n_beta_dd_incomplete": 0,
+   "n_beta_missing": 0,
+   "n_price_missing": 0,
+   "n_quote_missing": 0,
+   "n_rows": 13
+  },
+  "gamma_alert": false,
+  "nav": 150610.51,
+  "partial": false,
+  "pct_nav": {
+   "beta_dollar_delta": -3.1482,
+   "dollar_delta": 0.8447,
+   "gamma_dollar_per_1pct": -0.0689,
+   "theta_dollar_per_day": 0.1284,
+   "vega_dollar_per_pt": -0.2318
+  },
+  "sums": {
+   "beta_dollar_delta": -4741.47,
+   "dollar_delta": 1272.18,
+   "gamma_dollar_per_1pct": -103.72,
+   "theta_dollar_per_day": 193.4,
+   "vega_dollar_per_pt": -349.11
+  },
+  "vega_alert": false
+ },
+ "as_of": "2026-09-14",
+ "equity_snapshot": {
+  "band_status": "inside",
+  "cash": 10817.17,
+  "date": "2026-09-14",
+  "market_value": -10700.06,
+  "nav": 117.11,
+  "spy_price": 764.28998,
+  "spy_shares": -14.0,
+  "trades_today": 0
+ },
+ "executed": false,
+ "executed_trade": null,
+ "nav": {
+  "components": {
+   "hedge_overlay": 117.11003999999957,
+   "stock_book": 50460.9,
+   "straddle_leg": 100032.5
+  },
+  "missing": [],
+  "nav": 150610.51,
+  "not_started": [],
+  "spy_price": 764.28998
+ },
+ "recommendation": {
+  "action": "hold",
+  "band_status": "inside",
+  "beta_dd_pct": -3.1482,
+  "beta_dd_usd": -4741.47,
+  "excess_usd": null,
+  "reason": "β·Δ -3.15% NAV inside band [-15%, +15%]",
+  "rebalance_to": "edge",
+  "spy_price": 764.28998,
+  "spy_shares": 0,
+  "target_usd": null
+ },
+ "rows": [
+  {
+   "beta": -0.8445,
+   "beta_dollar_delta": -1081.98,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "direction": "bullish",
+   "dollar_delta": 1281.21,
+   "entry_date": "2026-09-01",
+   "gamma_dollar_per_1pct": 0.0,
+   "kind": "stock",
+   "price": 165.99001,
+   "price_missing": false,
+   "qty": 7.7186,
+   "quote_missing": false,
+   "theta_dollar_per_day": 0.0,
+   "ticker": "XOM",
+   "vega_dollar_per_pt": 0.0
+  },
+  {
+   "beta": 0.4482,
+   "beta_dollar_delta": 1137.93,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "direction": "bullish",
+   "dollar_delta": 2538.89,
+   "entry_date": "2026-09-01",
+   "gamma_dollar_per_1pct": 0.0,
+   "kind": "stock",
+   "price": 675.73999,
+   "price_missing": false,
+   "qty": 3.7572,
+   "quote_missing": false,
+   "theta_dollar_per_day": 0.0,
+   "ticker": "DE",
+   "vega_dollar_per_pt": 0.0
+  },
+  {
+   "beta": -0.6594,
+   "beta_dollar_delta": -1640.34,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "direction": "bullish",
+   "dollar_delta": 2487.63,
+   "entry_date": "2026-09-01",
+   "gamma_dollar_per_1pct": 0.0,
+   "kind": "stock",
+   "price": 265.57999,
+   "price_missing": false,
+   "qty": 9.3668,
+   "quote_missing": false,
+   "theta_dollar_per_day": 0.0,
+   "ticker": "JNJ",
+   "vega_dollar_per_pt": 0.0
+  },
+  {
+   "beta": -0.8006,
+   "beta_dollar_delta": -2055.56,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "direction": "bullish",
+   "dollar_delta": 2567.52,
+   "entry_date": "2026-09-02",
+   "gamma_dollar_per_1pct": 0.0,
+   "kind": "stock",
+   "price": 214.059998,
+   "price_missing": false,
+   "qty": 11.9944,
+   "quote_missing": false,
+   "theta_dollar_per_day": 0.0,
+   "ticker": "CVX",
+   "vega_dollar_per_pt": 0.0
+  },
+  {
+   "beta": 3.0132,
+   "beta_dollar_delta": 8439.28,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "direction": "bullish",
+   "dollar_delta": 2800.77,
+   "entry_date": "2026-09-03",
+   "gamma_dollar_per_1pct": 0.0,
+   "kind": "stock",
+   "price": 567.28998,
+   "price_missing": false,
+   "qty": 4.9371,
+   "quote_missing": false,
+   "theta_dollar_per_day": 0.0,
+   "ticker": "DELL",
+   "vega_dollar_per_pt": 0.0
+  },
+  {
+   "beta": 1.1437,
+   "beta_dollar_delta": 685.85,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "direction": "bullish",
+   "dollar_delta": 599.68,
+   "entry_date": "2026-09-08",
+   "gamma_dollar_per_1pct": 0.0,
+   "kind": "stock",
+   "price": 328.98999,
+   "price_missing": false,
+   "qty": 1.8228,
+   "quote_missing": false,
+   "theta_dollar_per_day": 0.0,
+   "ticker": "SNOW",
+   "vega_dollar_per_pt": 0.0
+  },
+  {
+   "beta": 1.1211,
+   "beta_dollar_delta": 1645.61,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "direction": "bullish",
+   "dollar_delta": 1467.85,
+   "entry_date": "2026-09-14",
+   "gamma_dollar_per_1pct": 0.0,
+   "kind": "stock",
+   "price": 648.030029,
+   "price_missing": false,
+   "qty": 2.2651,
+   "quote_missing": false,
+   "theta_dollar_per_day": 0.0,
+   "ticker": "META",
+   "vega_dollar_per_pt": 0.0
+  },
+  {
+   "beta": -0.4507,
+   "beta_dollar_delta": -893.1,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "direction": "bullish",
+   "dollar_delta": 1981.58,
+   "entry_date": "2026-09-14",
+   "gamma_dollar_per_1pct": 0.0,
+   "kind": "stock",
+   "price": 26.059999,
+   "price_missing": false,
+   "qty": 76.0392,
+   "quote_missing": false,
+   "theta_dollar_per_day": 0.0,
+   "ticker": "T",
+   "vega_dollar_per_pt": 0.0
+  },
+  {
+   "beta": -0.3768,
+   "beta_dollar_delta": 18972.05,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "cp": "call",
+   "delta": 0.5565,
+   "dollar_delta": -50350.45,
+   "dte": 18,
+   "expiry": "2026-10-02",
+   "gamma": 0.0074,
+   "gamma_dollar_per_1pct": -30.29,
+   "iv": 0.2605,
+   "kind": "option",
+   "mid": 24.275,
+   "price": 904.77002,
+   "price_missing": false,
+   "qty": -100.0,
+   "quote_missing": false,
+   "side": "short",
+   "strike": 915.0,
+   "symbol": "COST261002C00915000",
+   "theta": -0.5823,
+   "theta_dollar_per_day": 58.23,
+   "ticker": "COST",
+   "vega": 0.8067,
+   "vega_dollar_per_pt": -80.67
+  },
+  {
+   "beta": -0.3768,
+   "beta_dollar_delta": -15300.37,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "cp": "put",
+   "delta": -0.4488,
+   "dollar_delta": 40606.08,
+   "dte": 18,
+   "expiry": "2026-10-02",
+   "gamma": 0.0076,
+   "gamma_dollar_per_1pct": -31.11,
+   "iv": 0.2576,
+   "kind": "option",
+   "mid": 18.175,
+   "price": 904.77002,
+   "price_missing": false,
+   "qty": -100.0,
+   "quote_missing": false,
+   "side": "short",
+   "strike": 915.0,
+   "symbol": "COST261002P00915000",
+   "theta": -0.5921,
+   "theta_dollar_per_day": 59.21,
+   "ticker": "COST",
+   "vega": 0.8067,
+   "vega_dollar_per_pt": -80.67
+  },
+  {
+   "beta": -0.6594,
+   "beta_dollar_delta": 24550.56,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "cp": "call",
+   "delta": 0.4673,
+   "dollar_delta": -37231.66,
+   "dte": 32,
+   "expiry": "2026-10-16",
+   "gamma": 0.0197,
+   "gamma_dollar_per_1pct": -20.84,
+   "iv": 0.2527,
+   "kind": "option",
+   "mid": 6.825,
+   "price": 265.57999,
+   "price_missing": false,
+   "qty": -300.0,
+   "quote_missing": false,
+   "side": "short",
+   "strike": 270.0,
+   "symbol": "JNJ261016C00270000",
+   "theta": -0.1249,
+   "theta_dollar_per_day": 37.47,
+   "ticker": "JNJ",
+   "vega": 0.3139,
+   "vega_dollar_per_pt": -94.17
+  },
+  {
+   "beta": -0.6594,
+   "beta_dollar_delta": -28501.34,
+   "beta_missing": false,
+   "beta_source": "ols60",
+   "cp": "put",
+   "delta": -0.5425,
+   "dollar_delta": 43223.14,
+   "dte": 32,
+   "expiry": "2026-10-16",
+   "gamma": 0.0203,
+   "gamma_dollar_per_1pct": -21.48,
+   "iv": 0.2452,
+   "kind": "option",
+   "mid": 9.45,
+   "price": 265.57999,
+   "price_missing": false,
+   "qty": -300.0,
+   "quote_missing": false,
+   "side": "short",
+   "strike": 270.0,
+   "symbol": "JNJ261016P00270000",
+   "theta": -0.1283,
+   "theta_dollar_per_day": 38.49,
+   "ticker": "JNJ",
+   "vega": 0.312,
+   "vega_dollar_per_pt": -93.6
+  },
+  {
+   "avg_price": 772.655,
+   "beta": 1.0,
+   "beta_dollar_delta": -10700.06,
+   "beta_missing": false,
+   "beta_source": "benchmark",
+   "dollar_delta": -10700.06,
+   "gamma_dollar_per_1pct": 0.0,
+   "kind": "hedge",
+   "price": 764.28998,
+   "price_missing": false,
+   "qty": -14.0,
+   "quote_missing": false,
+   "theta_dollar_per_day": 0.0,
+   "ticker": "SPY",
+   "vega_dollar_per_pt": 0.0
+  }
+ ],
+ "spy_price": 764.28998,
+ "stress": {
+  "bs_vs_mid_gap": [
+   {
+    "T_days": 18,
+    "bs": 17.1262,
+    "gap": -7.1488,
+    "mid": 24.275,
+    "symbol": "COST261002C00915000"
+   },
+   {
+    "T_days": 18,
+    "bs": 25.0973,
+    "gap": 6.9223,
+    "mid": 18.175,
+    "symbol": "COST261002P00915000"
+   },
+   {
+    "T_days": 32,
+    "bs": 6.4094,
+    "gap": -0.4156,
+    "mid": 6.825,
+    "symbol": "JNJ261016C00270000"
+   },
+   {
+    "T_days": 32,
+    "bs": 9.5331,
+    "gap": 0.0831,
+    "mid": 9.45,
+    "symbol": "JNJ261016P00270000"
+   }
+  ],
+  "cells": [
+   {
+    "iv_clamped": false,
+    "iv_pts": -10,
+    "partial": false,
+    "pnl": 1498.23,
+    "spot_pct": -10
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 0,
+    "partial": false,
+    "pnl": -1169.78,
+    "spot_pct": -10
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 10,
+    "partial": false,
+    "pnl": -4319.99,
+    "spot_pct": -10
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 20,
+    "partial": false,
+    "pnl": -7655.77,
+    "spot_pct": -10
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": -10,
+    "partial": false,
+    "pnl": 3515.82,
+    "spot_pct": -5
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 0,
+    "partial": false,
+    "pnl": 116.54,
+    "spot_pct": -5
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 10,
+    "partial": false,
+    "pnl": -3365.57,
+    "spot_pct": -5
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 20,
+    "partial": false,
+    "pnl": -6874.4,
+    "spot_pct": -5
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": -10,
+    "partial": false,
+    "pnl": 3548.31,
+    "spot_pct": 0
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 0,
+    "partial": false,
+    "pnl": 122.39,
+    "spot_pct": 0
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 10,
+    "partial": false,
+    "pnl": -3345.57,
+    "spot_pct": 0
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 20,
+    "partial": false,
+    "pnl": -6826.24,
+    "spot_pct": 0
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": -10,
+    "partial": false,
+    "pnl": 1441.19,
+    "spot_pct": 5
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 0,
+    "partial": false,
+    "pnl": -1223.76,
+    "spot_pct": 5
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 10,
+    "partial": false,
+    "pnl": -4306.27,
+    "spot_pct": 5
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 20,
+    "partial": false,
+    "pnl": -7545.64,
+    "spot_pct": 5
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": -10,
+    "partial": false,
+    "pnl": -2161.07,
+    "spot_pct": 10
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 0,
+    "partial": false,
+    "pnl": -3779.65,
+    "spot_pct": 10
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 10,
+    "partial": false,
+    "pnl": -6211.99,
+    "spot_pct": 10
+   },
+   {
+    "iv_clamped": false,
+    "iv_pts": 20,
+    "partial": false,
+    "pnl": -9028.22,
+    "spot_pct": 10
+   }
+  ],
+  "excluded": [],
+  "excluded_dd_unknown": 0,
+  "excluded_dollar_delta": 0.0,
+  "iv_pts": [
+   -10,
+   0,
+   10,
+   20
+  ],
+  "n_iv_clamped_cells": 0,
+  "n_used": 13,
+  "partial": false,
+  "pnl_at_zero": 122.39,
+  "spot_pct": [
+   -10,
+   -5,
+   0,
+   5,
+   10
+  ],
+  "worst_cell": {
+   "iv_clamped": false,
+   "iv_pts": 20,
+   "partial": false,
+   "pnl": -9028.22,
+   "spot_pct": 10
+  }
+ },
+ "today_trade": null,
+ "version": "0.45.103"
+}

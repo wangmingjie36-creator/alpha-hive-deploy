@@ -150,6 +150,22 @@ class TestGetEarningsDate:
         assert second["cached"] is True
         assert second["earnings_date"] == "2026-05-01"
 
+    def test_cache_dir_is_created_on_first_write(self, monkeypatch, tmp_path):
+        """v0.45.233：import 期不再建 CACHE_DIR，改在写缓存时建。
+
+        本文件 autouse fixture 会**预先** mkdir，正好盖住「目录不存在」这一形状——
+        而 `atomic_json_write` 不建父目录、失败被 `except OSError` 吞成 debug 日志，
+        漏了 `_ensure_cache_dir()` 时缓存只是静默失效：第二次调用照样 cached=False，不会有异常。
+        """
+        missing = tmp_path / "not_yet" / "earnings_cache"
+        monkeypatch.setattr(ew, "CACHE_DIR", missing)
+        _make_fake_yf(monkeypatch, calendar_data={"Earnings Date": [datetime(2026, 5, 1)]})
+
+        watcher = EarningsWatcher()
+        assert watcher.get_earnings_date("AAPL")["cached"] is False
+        assert (missing / "AAPL_date.json").is_file(), "缓存目录不存在时写缓存失败了（被静默吞掉）"
+        assert watcher.get_earnings_date("AAPL")["cached"] is True
+
     def test_yf_none_returns_none(self, monkeypatch):
         """When yfinance is not installed (yf is None), returns None gracefully."""
         monkeypatch.setattr(ew, "yf", None)

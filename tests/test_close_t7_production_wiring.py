@@ -93,9 +93,18 @@ class TestGenerateDeepV2ClosePathWiring:
 
 
 class TestQueenDistillerClosePathWiring:
-    """queen_distiller.py 的历史胜率折扣块：close_t7_db_path 必须与同一行
-    _snap_dir 用同一个基准目录（_project_root_ta，即 queen_distiller.py 自己
-    __file__ 的 project root），不能落到 feedback_loop.py 的隐式缺省值。
+    """queen_distiller.py 的历史胜率折扣块：`_snap_dir` 与 close_t7 库
+    必须落到**同一个** `ALPHA_HIVE_HOME`（v0.45.260 起经 `hive_logger.PATHS`
+    解析），不能各自独立冻结、靠"巧合一致"对齐。
+
+    v0.45.260（数据根迁移阶段 2）以前，这里各自独立算 `_project_root_ta =
+    Path(__file__).resolve().parent.parent` 喂给 `_snap_dir` 与
+    `close_t7_db_path` 两处，本条测试当时验的正是"两者用了同一个
+    `__file__` 基准"（靠伪造 `qd_module.__file__` 驱动）。现在两处都改读
+    `PATHS.home`/`feedback_loop._db_path()`（= `PATHS.db`）——同一个
+    `ALPHA_HIVE_HOME` 环境变量，结构上不可能再分叉，所以改为驱动
+    `ALPHA_HIVE_HOME` 而不是伪造 `__file__`；场景与断言（"两者必须指向
+    同一目录"）不变。
 
     该功能默认关闭（config.TICKER_ACCURACY_FEEDBACK["enabled"]=False），
     这里显式打开来验证接线，不代表建议在生产启用它。
@@ -111,17 +120,24 @@ class TestQueenDistillerClosePathWiring:
 
     def test_uses_own_project_root_for_close_t7(self, queen, tmp_path, monkeypatch):
         import config
-        import swarm_agents.queen_distiller as qd_module
+        import feedback_loop
         from feedback_loop import ReportSnapshot
 
         monkeypatch.setattr(config, "TICKER_ACCURACY_FEEDBACK", {
             "enabled": True, "min_samples": 1,
             "discount_threshold": 0.99, "min_reliability": 0.5,
         })
-        # 伪造 queen_distiller.py 自己的 __file__，让它的
-        # Path(__file__).resolve().parent.parent 落在 tmp_path 下
-        fake_file = tmp_path / "swarm_agents" / "queen_distiller.py"
-        monkeypatch.setattr(qd_module, "__file__", str(fake_file))
+        # v0.45.260 起 `_snap_dir` 与 close_t7 库都经 `hive_logger.PATHS`
+        # 解析同一个 `ALPHA_HIVE_HOME`——不再需要伪造 `__file__`。
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path))
+        monkeypatch.delenv("ALPHA_HIVE_DB_PATH", raising=False)
+        # autouse fixture `_isolate_feedback_loop_close_t7_db` 无条件把
+        # `feedback_loop.PHEROMONE_DB_PATH` 指向一个不存在的临时路径（防止
+        # 别的测试意外打开生产库）——它不看 `ALPHA_HIVE_HOME`，所以本条要验的
+        # "queen_distiller 不传 close_t7_db_path、让 feedback_loop 走自己的
+        # 默认解析" 会被这个隔离钩子挡住。按该 fixture 文档自己写的做法：
+        # 显式指回本测试真正要用的库，覆盖/绕开它。
+        monkeypatch.setattr(feedback_loop, "PHEROMONE_DB_PATH", tmp_path / "pheromone.db")
 
         snap_dir = tmp_path / "report_snapshots"
         snap_dir.mkdir(parents=True)

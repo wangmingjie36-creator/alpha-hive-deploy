@@ -50,7 +50,11 @@ T7_PERIODS_PER_YEAR = 36
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _load_predictions(limit: Optional[int] = None) -> List[Dict]:
-    db = Path(__file__).parent / "pheromone.db"
+    # v0.45.260（数据根迁移阶段 2）：此前是 `Path(__file__).parent /
+    # "pheromone.db"`——不读 `ALPHA_HIVE_HOME`。改读 `PATHS.db`；本脚本零
+    # import 者、零测试覆盖，是只读诊断，但仍照统一模式收口。
+    from hive_logger import PATHS
+    db = Path(PATHS.db)
     with sqlite3.connect(str(db)) as conn:
         conn.row_factory = sqlite3.Row
         q = """SELECT id, date, ticker, direction, final_score, price_at_predict,

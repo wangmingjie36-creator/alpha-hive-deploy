@@ -89,8 +89,11 @@ class FoldResult:
 
 def _load_all_verified() -> List[Dict]:
     """加载全部 checked_t7=1 且 net_return_t7 非空 的预测，按 date 升序"""
-    base = Path(__file__).parent
-    db = base / "pheromone.db"
+    # v0.45.260（数据根迁移阶段 2）：此前是 `Path(__file__).parent / "pheromone.db"`
+    # ——完全不读 `ALPHA_HIVE_HOME`。本文件是只读诊断/回测消费者，零生产读者
+    # （零 import 于 `--swarm` 主链路，也无测试覆盖），但仍照统一模式收口。
+    from hive_logger import PATHS
+    db = Path(PATHS.db)
     if not db.exists():
         raise FileNotFoundError("pheromone.db not found")
     with sqlite3.connect(str(db)) as conn:

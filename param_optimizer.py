@@ -202,31 +202,39 @@ def run_grid(quick: bool = False) -> List[RunResult]:
     # 备份当前状态
     _backup_state()
 
-    results: List[RunResult] = []
-    for i, (sl, tp, dp) in enumerate(combos, 1):
-        label = f"SL-{sl:.0f}% TP+{tp:.0f}% Deploy{dp:.0f}%"
-        t0 = time.time()
-        try:
-            r = _run_one_combo(sl, tp, dp)
-            elapsed = time.time() - t0
-            print(f"  [{i:2d}/{len(combos)}] {label:30s}  "
-                  f"NAV=${r.nav:,.2f} ({r.total_return_pct:+.2f}%)  "
-                  f"α={r.alpha_pct:+.2f}%  S={r.sharpe:.2f}  "
-                  f"WR={r.win_rate_pct:.0f}% ({r.trades_wins}/{r.trades_total})  "
-                  f"PF={r.profit_factor:.2f}  MDD={r.mdd_pct:.1f}%  "
-                  f"[{elapsed:.1f}s]")
-            results.append(r)
-        except Exception as e:
-            print(f"  [{i:2d}/{len(combos)}] {label:30s}  ❌ {e}")
-
-    # 恢复原始状态（数据文件 + CONFIG）
-    _restore_state()
     import paper_portfolio as _pp
-    _pp.CONFIG["sl_pct"] = 7.0
-    _pp.CONFIG["tp_pct"] = 10.0
-    _pp.CONFIG["max_deployed_pct"] = 30.0
-    _pp.CONFIG["ticker_whitelist"] = ["NVDA"]
-    _pp.CONFIG["live_start_date"] = "2026-04-16"
+    # ⚠️ 不要用硬编码字面量"恢复" CONFIG——那是 v0.39.0 前的旧默认值
+    # （tp_pct=10/max_deployed_pct=30/ticker_whitelist=["NVDA"]），早已跟不上
+    # 生产 CONFIG（v0.39.0 起 tp_pct=15、max_deployed_pct=80；v0.38.0 起
+    # ticker_whitelist=[]，理由见 paper_portfolio.CONFIG 顶部长注释）。这个
+    # sweep 脚本一旦被重新跑起来，会把生产参数静默改错而不是真正恢复
+    # （v0.45.261 修复）。跑前先深拷贝整份（同 paper_portfolio.run_replay 的
+    # 教训：CONFIG 含嵌套字典如 vol_target.conf_multiplier，浅拷贝挡不住
+    # 内层覆盖泄漏），跑完原样传回。
+    _orig_config = copy.deepcopy(_pp.CONFIG)
+
+    results: List[RunResult] = []
+    try:
+        for i, (sl, tp, dp) in enumerate(combos, 1):
+            label = f"SL-{sl:.0f}% TP+{tp:.0f}% Deploy{dp:.0f}%"
+            t0 = time.time()
+            try:
+                r = _run_one_combo(sl, tp, dp)
+                elapsed = time.time() - t0
+                print(f"  [{i:2d}/{len(combos)}] {label:30s}  "
+                      f"NAV=${r.nav:,.2f} ({r.total_return_pct:+.2f}%)  "
+                      f"α={r.alpha_pct:+.2f}%  S={r.sharpe:.2f}  "
+                      f"WR={r.win_rate_pct:.0f}% ({r.trades_wins}/{r.trades_total})  "
+                      f"PF={r.profit_factor:.2f}  MDD={r.mdd_pct:.1f}%  "
+                      f"[{elapsed:.1f}s]")
+                results.append(r)
+            except Exception as e:
+                print(f"  [{i:2d}/{len(combos)}] {label:30s}  ❌ {e}")
+    finally:
+        # 恢复原始状态（数据文件 + CONFIG）
+        _restore_state()
+        _pp.CONFIG.clear()
+        _pp.CONFIG.update(_orig_config)
 
     # 保存结果
     payload = {

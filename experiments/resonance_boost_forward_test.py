@@ -24,7 +24,10 @@
       price_at_predict_raw，缺则 price_at_predict。未到期（close_t7 / spy_return_t7 为空）不进 IC。
       不用 return_t7（方向单是钳位收益，见 auto-memory return-t7-clamp）。
 变体  B0 = 生产现状（重放）；B3 = 同一条链，唯一差别是加权分不乘共振加成。
-      链路全部调真实代码：共振检测 → 三重惩罚 → 方向投票 → GEX 政体调整 → F&G 调整。
+      链路全部调真实代码：共振检测 → 三重惩罚 → 方向投票 → GEX 政体调整。
+      （v0.45.247 起评分链里没有 F&G 调整了——它从未执行过、已删；本脚本随之去掉那一步。
+       生产全部 JSON 的 `fear_greed_value` 恒为 None，所以重放输出**逐字节不变**，
+       且改动早于 FORWARD_START，没有任何前瞻数据被看过 —— 不触及预注册。）
 自证  （前提，不满足即「无法判定」exit 3）B0 重放的 (final_score, direction) 与记录值一致
       （分数容差 0.011）的行占比 >= 95%；不一致的行两个变体一并剔除并计数。
       ⇒ 生产若改了评分链（包括有人**提前删了加成**），这里会红，而不是静默算出一个没意义的数。
@@ -155,21 +158,6 @@ def _gex_input(sr: Dict) -> Dict:
     return d
 
 
-def _fg_adjustment(fg_value, direction: str) -> float:
-    """与 `QueenDistiller.distill` 步骤 4.6 同口径（那段是内联代码，无方法可调；分歧由自证兜住）。"""
-    if fg_value is None:
-        return 0.0
-    import config
-    c = getattr(config, "FEAR_GREED_SCORING", {})
-    if fg_value < c.get("extreme_fear", 25):
-        return (c.get("fear_bearish_boost", 0.3) if direction == "bearish"
-                else -c.get("fear_bullish_penalty", 0.4) if direction == "bullish" else 0.0)
-    if fg_value > c.get("extreme_greed", 75):
-        return (-c.get("greed_bullish_penalty", 0.3) if direction == "bullish"
-                else c.get("greed_bearish_boost", 0.2) if direction == "bearish" else 0.0)
-    return 0.0
-
-
 def _resonance(ticker: str, results: List[Dict]) -> Dict:
     from pheromone_board import PheromoneBoard
     board = PheromoneBoard.__new__(PheromoneBoard)
@@ -180,7 +168,7 @@ def _resonance(ticker: str, results: List[Dict]) -> Dict:
 
 
 def replay(sr: Dict, drop_boost: bool, base: Optional[float] = None) -> Dict:
-    """共振 → 三重惩罚 → 投票 → GEX → F&G。`drop_boost=True` 即 B3。抛异常由调用方计数。"""
+    """共振 → 三重惩罚 → 投票 → GEX。`drop_boost=True` 即 B3。抛异常由调用方计数。"""
     from gex_regime import GexRegimeModifier
     from swarm_agents.queen_distiller import QueenDistiller
 
@@ -197,15 +185,11 @@ def replay(sr: Dict, drop_boost: bool, base: Optional[float] = None) -> Dict:
     q.ml_adjustments = sr.get("ml_weight_adjustments") or {}
     q.board = types.SimpleNamespace(_entries=[])
     tp = q._apply_triple_penalty(ticker, pre, results)
-    vote = q._compute_direction_vote(ticker, results, results, tp["rule_score"],
-                                     fg_value=sr.get("fear_greed_value"))
+    vote = q._compute_direction_vote(ticker, results, results, tp["rule_score"])
     score, direction = vote["rule_score"], vote["rule_direction"]
     g = GexRegimeModifier().compute(_gex_input(sr), direction=direction)["gex_adjustment"]
     if abs(g) > 0.01:
         score = round(max(0.0, min(10.0, score + g)), 2)
-    fa = _fg_adjustment(sr.get("fear_greed_value"), direction)
-    if abs(fa) > 0.01:
-        score = round(max(0.0, min(10.0, score + fa)), 2)
     return {"final": score, "direction": direction, "resonance": bool(z["resonance_detected"]),
             "resonance_direction": z["direction"], "boost": boost}
 

@@ -36,3 +36,17 @@ def test_drift_computation_survives_multiindex_columns(monkeypatch):
 
     assert records, "MultiIndex 列名下不应返回空列表（此前的静默失败模式）"
     assert records[0].get("t5") is not None
+
+
+def test_cache_path_follows_env_at_call_time(tmp_path):
+    """v0.45.233：缓存目录调用时求值。
+
+    原先模块级 `_CACHE_DIR = str(PATHS.cache_dir)` 在收集期 import 时冻成 checkout 根的 cache/，
+    整轮测试的 `pead_<T>.json` 都写进仓库。本文件在模块级 import 了 pead_analyzer（收集期），
+    而 `_isolate_env` 此刻已把 `ALPHA_HIVE_CACHE_DIR` 指向 tmp_path —— 冻住的实现会在这里红。
+    """
+    import os
+    import pead_analyzer
+
+    assert os.environ["ALPHA_HIVE_CACHE_DIR"] == str(tmp_path / "cache"), "_isolate_env 没生效，本条作废"
+    assert pead_analyzer._cache_path("nvda") == str(tmp_path / "cache" / "pead_NVDA.json")

@@ -16,7 +16,6 @@
 """
 
 import json
-import os
 import sys
 import glob
 import argparse
@@ -25,24 +24,45 @@ from datetime import datetime, date
 from pathlib import Path
 
 # ── 路径 ─────────────────────────────────────────────────────────────────────
-ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
-# 自动检测 Cowork VM session 路径
+# 数据根迁移阶段 2 收口遗留项：`ALPHAHIVE_DIR` 现在是**覆盖钩子**，默认 `None`
+# ⇒ 调用时经 `_alphahive_dir()` 解析 `PATHS.home`。此前是硬编码字面量
+# `~/Desktop/Alpha Hive`——既不是 `__file__` 派生，也完全不读 `ALPHA_HIVE_HOME`；
+# 本文件写的 `{ticker}_raw.json` 由 `generate_ml_report.py`（已改读 `PATHS.home`）
+# 读回，读写两端此前只在 `ALPHA_HIVE_HOME` 未设时碰巧同址，一旦设置就会分叉。
+ALPHAHIVE_DIR = None
+
+# 自动检测 Cowork VM session 路径（代码同址环境探测：探测的是脚本自身运行
+# 位置，与 `ALPHA_HIVE_HOME` 无关；已在 tests/test_paths_not_frozen_at_import.py
+# 的 `__file__` 白名单登记为 ("collect_data.py", "_SCRIPT_DIR")，本次不改）
 _SCRIPT_DIR = Path(__file__).resolve().parent
-if _SCRIPT_DIR.name == "Alpha Hive" and str(_SCRIPT_DIR).startswith("/sessions/"):
-    ALPHAHIVE_DIR = _SCRIPT_DIR
-else:
-    _VM_PATH = Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
+_VM_PATH = Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
+
+
+def _alphahive_dir() -> Path:
+    """数据根路径，**调用时求值**。
+
+    ⚠️ 不要把返回值缓存进模块级变量（如 `ALPHAHIVE_DIR = _alphahive_dir()`）——
+    那等于把冻结换个地方，会被
+    `tests/test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread`
+    判定为「PATHS 派生值在 import 期冻成常量」而变红。
+    """
+    if ALPHAHIVE_DIR is not None:
+        return Path(ALPHAHIVE_DIR)
+    if _SCRIPT_DIR.name == "Alpha Hive" and str(_SCRIPT_DIR).startswith("/sessions/"):
+        return _SCRIPT_DIR
     if _VM_PATH.exists():
-        ALPHAHIVE_DIR = _VM_PATH
+        return _VM_PATH
+    from hive_logger import PATHS
+    return PATHS.home
 
 
 def find_json(ticker: str, date_str: str = None) -> Path:
-    pattern = str(ALPHAHIVE_DIR / f"analysis-{ticker}-ml-*.json")
+    pattern = str(_alphahive_dir() / f"analysis-{ticker}-ml-*.json")
     files = sorted(glob.glob(pattern))
     if not files:
         raise FileNotFoundError(f"找不到 {ticker} 的分析文件: {pattern}")
     if date_str:
-        target = ALPHAHIVE_DIR / f"analysis-{ticker}-ml-{date_str}.json"
+        target = _alphahive_dir() / f"analysis-{ticker}-ml-{date_str}.json"
         if target.exists():
             return target
         print(f"⚠️  {date_str} 不存在，使用最新: {Path(files[-1]).name}")
@@ -51,7 +71,7 @@ def find_json(ticker: str, date_str: str = None) -> Path:
 
 def find_daily_json(date_str: str) -> dict:
     """读取当日宏观总报（可选）"""
-    path = ALPHAHIVE_DIR / f"alpha-hive-daily-{date_str}.json"
+    path = _alphahive_dir() / f"alpha-hive-daily-{date_str}.json"
     if path.exists():
         with open(path) as f:
             d = json.load(f)
@@ -75,7 +95,7 @@ def find_swarm_results(ticker: str, report_date: str = None):
     选取规则：取日期 <= report_date 且包含该 ticker 的最新一份；
     若无符合则退回到包含该 ticker 的最新一份。
     （修复 2026-06 stale snapshot 事故：collect_data 误读空 swarm → 全 0.0）"""
-    pattern = str(ALPHAHIVE_DIR / ".swarm_results_*.json")
+    pattern = str(_alphahive_dir() / ".swarm_results_*.json")
     candidates = []
     for f in glob.glob(pattern):
         m = re.search(r"\.swarm_results_(\d{4}-\d{2}-\d{2})\.json$", f)
@@ -319,7 +339,7 @@ def main():
 
     # 列出所有可用日期
     if args.all:
-        pattern = str(ALPHAHIVE_DIR / f"analysis-{ticker}-ml-*.json")
+        pattern = str(_alphahive_dir() / f"analysis-{ticker}-ml-*.json")
         files = sorted(glob.glob(pattern))
         if not files:
             print(f"❌ 没有找到 {ticker} 的数据文件")
@@ -371,7 +391,7 @@ def main():
         raw["macro"]["daily_macro_summary"] = daily_data["macro_summary"][:200]
 
     # 保存到文件
-    out_path = ALPHAHIVE_DIR / f"{ticker}_raw.json"
+    out_path = _alphahive_dir() / f"{ticker}_raw.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(raw, f, ensure_ascii=False, indent=2)
 

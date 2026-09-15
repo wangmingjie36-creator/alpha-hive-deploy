@@ -236,11 +236,9 @@ class BuzzBeeWhisper(BeeAgent):
             _pub_details = {"sentiment_score": bullish_pct}
             if reddit_data:
                 _pub_details["reddit_momentum"] = reddit_data.get("momentum", 0)
-            # 升级 3: 导出 F&G 原始值供 QueenDistiller 评分层使用
-            try:
-                _pub_details["fear_greed_value"] = int(fg.get("value", 0)) if fg else None
-            except Exception:
-                _pub_details["fear_greed_value"] = None
+            # v0.45.247 删：`_pub_details["fear_greed_value"]`。它只进了信息素板，而读它的
+            # QueenDistiller 读的是 AgentResult.details ⇒ 板上这份零读者、Queen 那边恒 None。
+            # F&G 现在放在下方 AgentResult.details["fear_greed"]（带 source）。
             self._publish(ticker, discovery, "market_sentiment+reddit", round(score, 2), direction, details=_pub_details)
 
             # confidence = 基础 0.5（yfinance）+ Reddit + Finviz + Yahoo + F&G + LLM
@@ -293,11 +291,28 @@ class BuzzBeeWhisper(BeeAgent):
                         "buzz": reddit_data.get("reddit_buzz", "quiet") if reddit_data else "unknown",
                         "score": reddit_data.get("sentiment_score", 5.0) if reddit_data else 5.0,
                     },
+                    # 七个通道进合成时的实际取值（不可得时就是合成里用的中性 50）。
+                    # v0.45.247 补齐 news / yahoo / fear_greed 三个：此前只有四个，
+                    # signal_archive 因此重放不了 sentiment 维度的计算层。
                     "components": {
                         "momentum_signal": round(momentum_sentiment, 1),
                         "volume_signal": volume_signal,
                         "volatility_signal": vol_sentiment,
                         "reddit_signal": round(reddit_signal, 1),
+                        "news_signal": round(news_signal, 1),
+                        "yahoo_signal": round(yahoo_signal, 1),
+                        "fear_greed_signal": round(fg_signal, 1),
+                    },
+                    # v0.45.247：F&G 观测值。**只有 is_real_data 时 value 才非 None** ——
+                    # `fear_greed._default_result()` 是 value=50/is_real_data=False，
+                    # 照值抄会把兜底写成一个看起来真实的 50。
+                    # ⚠️ source="alternative_me" 是**加密**市场 F&G（备用源），与 CNN 股票 F&G 不是一个量。
+                    "fear_greed": {
+                        "value": fg.get("value") if fg.get("is_real_data") else None,
+                        "classification": fg.get("classification") if fg.get("is_real_data") else None,
+                        "source": fg.get("source"),
+                        "is_real_data": bool(fg.get("is_real_data")),
+                        "fetched_at": fg.get("timestamp"),
                     },
                     "sentiment_momentum": sent_momentum,
                     "sentiment_divergence": sent_divergence,

@@ -86,6 +86,47 @@ class QueenDistiller:
     # 守卫：tests/test_non_voting_agents.py
     NON_VOTING_AGENTS = frozenset({"BearBeeContrarian", "GuardBeeSentinel"})
 
+    # 本类从各蜂 `details` 读的键 —— **唯一登记处**（v0.45.247）。读一律走 `_read_bee_detail`。
+    #
+    # 为什么要登记：裸 `(r.get("details") or {}).get(k)` 把「键不存在」（接口断了）与
+    # 「值为 None」（数据暂时拿不到）渲染成同一个 None。2026-03-30 起这里读 BuzzBee 的
+    # `fear_greed_value`、Oracle 的 `gex`、Guard 的 `market_regime.dealer_gex`，三个键
+    # 生产者**从未产出过**（前者与 Oracle 那个只进了发信息素板的 `_pub_details`），
+    # F&G 政体调整与 F&G>75 看多门槛因此半年里一次都没执行，没有任何东西变红。
+    # 守卫：tests/test_bee_details_contract.py（登记表 ↔ 调用点 ↔ 生产者 AST 键树三方核对）。
+    DETAIL_READS = frozenset({
+        ("GuardBeeSentinel", "macro_regime"),
+        ("OracleBeeEcho", "iv_rank"),
+        ("ScoutBeeNova", "price"),
+        ("BuzzBeeWhisper", "sentiment_momentum"),
+        ("BuzzBeeWhisper", "sentiment_divergence"),
+    })
+
+    def _read_bee_detail(self, results: List[Dict], source: str, key: str,
+                         misses: List[str], default: Any = None) -> Any:
+        """读 `source` 这只蜂的 `details[key]`，语义同 `details.get(key, default)`，
+        但把「键不存在」记进 `misses`（进 `swarm_results.details_contract_misses`）。
+
+        不算契约断裂、只返回 `default` 的三种情形：这只蜂不在结果里；它报了 `error`
+        （details 为空是已声明的失败）；键在但值为 None（照常返回 None）。
+
+        ⚠️ 只记账不抛：调用点多在 `try/except Exception` 里，抛了会被吞成 debug 日志。
+        记账后由 `distill` 在 try 之外统一打 error。
+        """
+        if (source, key) not in self.DETAIL_READS:
+            misses.append(f"undeclared:{source}.{key}")
+        for r in results:
+            if r.get("source") != source:
+                continue
+            if r.get("error"):
+                return default
+            det = r.get("details")
+            if not isinstance(det, dict) or key not in det:
+                misses.append(f"{source}.{key}")
+                return default
+            return det[key]
+        return default
+
     def __init__(self, board: PheromoneBoard, weight_manager=None, adapted_weights: Dict = None,
                  enable_llm: bool = True, ml_model=None):
         self.board = board
@@ -581,10 +622,8 @@ class QueenDistiller:
 
     def _compute_direction_vote(self, ticker: str, valid_results: List[Dict],
                                 all_results: List[Dict],
-                                rule_score: float,
-                                fg_value: int = None) -> Dict:
+                                rule_score: float) -> Dict:
         """S4 反博弈 + S5 冲突再投票 + data_quality 汇总。返回 dict。"""
-        _fg_value = fg_value  # 升级 4 使用
         # 计票口径（v0.45.212）：本函数里凡是门槛、票重、仲裁、冲突再投票，一律只看 _voters。
         _voters = [r for r in valid_results if r.get("source") not in self.NON_VOTING_AGENTS]
         _vote_excluded = sorted({r.get("source") for r in valid_results} & self.NON_VOTING_AGENTS)
@@ -641,13 +680,11 @@ class QueenDistiller:
         try:
             from config import BULLISH_GATE_CONFIG as _BGC
         except (ImportError, AttributeError):
-            _BGC = {"min_weight_pct": 0.50, "min_agents": 3,
-                     "extreme_greed_threshold": 75, "extreme_greed_weight_pct": 0.60}
+            _BGC = {"min_weight_pct": 0.50, "min_agents": 3}
         _bull_min_wpct = _BGC.get("min_weight_pct", 0.50)
         _bull_min_agents = _BGC.get("min_agents", 3)
-        # F&G 极度贪婪时进一步抬高看多门槛
-        if _fg_value is not None and _fg_value > _BGC.get("extreme_greed_threshold", 75):
-            _bull_min_wpct = _BGC.get("extreme_greed_weight_pct", 0.60)
+        # v0.45.247 删：「F&G>75 时看多门槛抬到 60%」。fg_value 恒为 None，从未触发
+        # （且 2026-02-20 起 CNN F&G 最高 71，即便接上历史上也是 0 次）。
 
         # 升级 6: 方向惯性平滑（窄边际时倾向维持昨日方向）
         try:
@@ -878,7 +915,8 @@ class QueenDistiller:
                         all_results: List[Dict], dim_scores: Dict,
                         resonance: Dict, rule_score: float,
                         rule_direction: str, contrarian_result: Any,
-                        conflict_level: str, conflict_info: Dict) -> Dict:
+                        conflict_level: str, conflict_info: Dict,
+                        detail_misses: Optional[List[str]] = None) -> Dict:
         """LLM 调用 + 分数混合 + 叙事生成 + agent_details 收集。返回 dict。"""
         llm_result = None
         reasoning = ""
@@ -893,14 +931,12 @@ class QueenDistiller:
             try:
                 import llm_service
                 if llm_service.is_available():
-                    _buzz_details = {}
-                    for _r in valid_results:
-                        if _r.get("source") == "BuzzBeeWhisper":
-                            _buzz_details = (_r.get("details") or {})
-                            break
+                    _misses = detail_misses if detail_misses is not None else []
                     _sent_ctx = None
-                    _sm = _buzz_details.get("sentiment_momentum")
-                    _sd = _buzz_details.get("sentiment_divergence")
+                    _sm = self._read_bee_detail(
+                        valid_results, "BuzzBeeWhisper", "sentiment_momentum", _misses)
+                    _sd = self._read_bee_detail(
+                        valid_results, "BuzzBeeWhisper", "sentiment_divergence", _misses)
                     if _sm or _sd or conflict_level != "none":
                         _sent_ctx = {
                             "momentum_3d": (_sm or {}).get("delta_3d"),
@@ -1010,6 +1046,9 @@ class QueenDistiller:
         # 不影响维度覆盖度 / 评分（None 本就不是任何蜂结果）。
         agent_results = [_r for _r in agent_results if _r is not None]
 
+        # 各蜂 details 的读取契约账本（见 DETAIL_READS）。本次蒸馏内的所有读取往这里记。
+        _detail_misses: List[str] = []
+
         # ===== 0. GEX 政体 + 政体权重预计算 =====
         _gex_data = {}
         _gex_mod_result = {"gex_adjustment": 0.0, "gex_regime": "unknown",
@@ -1026,34 +1065,20 @@ class QueenDistiller:
             # 优先使用传入的 dealer_gex 参数
             _gex_data = dealer_gex or {}
 
-            # 从 GuardBee 提取宏观政体
-            for _r in agent_results:
-                if _r.get("source") == "GuardBeeSentinel":
-                    _guard_det = _r.get("details") or {}
-                    _macro_regime = _guard_det.get("macro_regime", "neutral")
-                    if not _gex_data:
-                        _gex_data = _guard_det.get("market_regime", {}).get("dealer_gex", {})
-                    break
+            _macro_regime = self._read_bee_detail(
+                agent_results, "GuardBeeSentinel", "macro_regime", _detail_misses, default="neutral")
+            _iv_rank_val = self._read_bee_detail(
+                agent_results, "OracleBeeEcho", "iv_rank", _detail_misses)
 
-            # 从 Oracle 提取 IV Rank + GEX
-            for _r in agent_results:
-                if _r.get("source") == "OracleBeeEcho":
-                    _oracle_det = _r.get("details") or {}
-                    _iv_rank_val = _oracle_det.get("iv_rank")
-                    if not _gex_data:
-                        _gex_data = _oracle_det.get("gex", {})
-                    break
-
-            # 如果仍无 GEX 数据，尝试按需计算
+            # v0.45.247 删：这里原先还依次试 Guard `market_regime.dealer_gex` 与 Oracle `gex`。
+            # 两者生产者都**从不产出**（794/794 份非 error 结果为空；Oracle 的 gex 只在
+            # `_pub_details`，且是 gamma_exposure 标量而非本函数要的 dict）⇒ 生产 GEX 一直
+            # 落在下面的按需计算。删掉不改任何行为，只是不再假装有前两条来源。
             if not _gex_data:
                 try:
                     from advanced_analyzer import DealerGEXAnalyzer
-                    # 从 Scout 获取股价
-                    _scout_price = None
-                    for _r in agent_results:
-                        if _r.get("source") == "ScoutBeeNova":
-                            _scout_price = (_r.get("details") or {}).get("price")
-                            break
+                    _scout_price = self._read_bee_detail(
+                        agent_results, "ScoutBeeNova", "price", _detail_misses)
                     if _scout_price and float(_scout_price) > 0:
                         _gex_analyzer = DealerGEXAnalyzer()
                         _gex_data = _gex_analyzer.analyze(ticker, float(_scout_price))
@@ -1081,13 +1106,6 @@ class QueenDistiller:
         # 放在外面还能同时覆盖降级路径（异常时 _regime_weights_used 退回
         # dict(self.DIMENSION_WEIGHTS)，那条路也必须保零）。
         self._assert_regime_preserved_zeros(ticker, _regime_weights_used)
-
-        # ===== 0.5 提取 F&G 值（供步骤 4 门槛 + 步骤 4.6 评分调整使用）=====
-        _fg_value = None
-        for _r in agent_results:
-            if _r.get("source") == "BuzzBeeWhisper":
-                _fg_value = (_r.get("details") or {}).get("fear_greed_value")
-                break
 
         # ===== 1. 维度数据准备 =====
         prep = self._prepare_dimension_data(agent_results)
@@ -1118,7 +1136,7 @@ class QueenDistiller:
 
         # ===== 4. 方向投票 + 冲突 =====
         dv = self._compute_direction_vote(
-            ticker, valid_results, all_results, rule_score, fg_value=_fg_value)
+            ticker, valid_results, all_results, rule_score)
         rule_direction = dv["rule_direction"]
         rule_score = dv["rule_score"]
 
@@ -1137,39 +1155,19 @@ class QueenDistiller:
         except Exception as _e_gex:
             _log.debug("GEX 政体调整失败 (%s): %s", ticker, _e_gex)
 
-        # ===== 4.6 Fear & Greed 政体调整（_fg_value 在步骤 0.5 已提取）=====
-        try:
-            if _fg_value is not None:
-                try:
-                    from config import FEAR_GREED_SCORING as _FG_CFG
-                except (ImportError, AttributeError):
-                    _FG_CFG = {"extreme_fear": 25, "extreme_greed": 75,
-                               "fear_bearish_boost": 0.3, "fear_bullish_penalty": 0.4,
-                               "greed_bullish_penalty": 0.3, "greed_bearish_boost": 0.2}
-                _fg_adj = 0.0
-                if _fg_value < _FG_CFG.get("extreme_fear", 25):
-                    if rule_direction == "bearish":
-                        _fg_adj = _FG_CFG.get("fear_bearish_boost", 0.3)
-                    elif rule_direction == "bullish":
-                        _fg_adj = -_FG_CFG.get("fear_bullish_penalty", 0.4)
-                elif _fg_value > _FG_CFG.get("extreme_greed", 75):
-                    if rule_direction == "bullish":
-                        _fg_adj = -_FG_CFG.get("greed_bullish_penalty", 0.3)
-                    elif rule_direction == "bearish":
-                        _fg_adj = _FG_CFG.get("greed_bearish_boost", 0.2)
-                if abs(_fg_adj) > 0.01:
-                    _pre_fg = rule_score
-                    rule_score = round(max(0.0, min(10.0, rule_score + _fg_adj)), 2)
-                    _log.info("[%s] F&G政体调整: F&G=%d, dir=%s, adj=%+.2f (%.2f→%.2f)",
-                              ticker, _fg_value, rule_direction, _fg_adj, _pre_fg, rule_score)
-        except Exception as _e_fg:
-            _log.debug("F&G 政体调整失败 (%s): %s", ticker, _e_fg)
+        # v0.45.247 删：步骤 4.6「Fear & Greed 政体调整」（极度恐惧+看空 +0.3 / +看多 −0.4 等）。
+        # 它读的 BuzzBee `fear_greed_value` 从未出现在 AgentResult.details 里 ⇒ 自 2026-03-30
+        # 引入起**一次都没执行过**，删除不改任何生产分数。未接线的理由（按看多度轴读，看空 +0.3
+        # 是把空单推离空头闸；配对重放 + 负对照显示 IC「改善」是压缩负 IC 分差的机械效应）
+        # 见 MEMORY `alpha-hive-fear-greed-dead-wire`。**要重建先读那篇**；它是聚合层函数，
+        # 可用 signal_archive 的 `market.fear_greed` 离线重放，不必上线实验。
 
         # ===== 5. LLM 引擎 =====
         llm = self._run_llm_engine(
             ticker, valid_results, all_results, dim_scores,
             resonance, rule_score, rule_direction,
-            contrarian_result, dv["conflict_level"], dv["conflict_info"])
+            contrarian_result, dv["conflict_level"], dv["conflict_info"],
+            detail_misses=_detail_misses)
 
         final_score = llm["final_score"]
         final_direction = llm["final_direction"]
@@ -1185,21 +1183,32 @@ class QueenDistiller:
             _TAF = {"enabled": False, "min_samples": 5, "discount_threshold": 0.50, "min_reliability": 0.5}
         if _TAF.get("enabled", False):
             try:
-                from pathlib import Path as _Path_ta
                 from feedback_loop import BacktestAnalyzer as _BA_ta
-                _project_root_ta = _Path_ta(__file__).resolve().parent.parent
-                _snap_dir = str(_project_root_ta / "report_snapshots")
+                from hive_logger import PATHS as _PATHS_ta
+                # v0.45.98 原版：这里独立算一份 `_project_root_ta =
+                # Path(__file__).resolve().parent.parent`，同时喂给 _snap_dir
+                # 与 close_t7_db_path——理由是怕两者落到 feedback_loop.py 自己
+                # 的 `__file__` 相对缺省值会不一致（那时 feedback_loop 的默认
+                # 值确实是 `Path(__file__).parent`）。
+                # v0.45.260（数据根迁移阶段 2）：那份顾虑已不成立——
+                # feedback_loop._db_path() 早在 v0.45.160/171 就改成读
+                # `PATHS.db`，不再是 `__file__` 派生。继续在这里独立冻结
+                # `_project_root_ta` 只是把「两份独立冻结的默认值必须巧合
+                # 一致」这个脆弱耦合原样保留（且换成了 `PATHS.home`/`PATHS.db`
+                # 也是各自独立解析）。现在**不传** `close_t7_db_path`，让
+                # `BacktestAnalyzer` 走它自己对 `feedback_loop._db_path()` 的
+                # 默认解析；`_snap_dir` 也改用 `PATHS.home`——两处现在结构性地
+                # 读同一个真相源（`PATHS.home`/`PATHS.db` 共享同一个
+                # `ALPHA_HIVE_HOME`），不再需要"必须巧合一致"。
+                # 生产今天不设 `ALPHA_HIVE_HOME` 时，`PATHS.home` 与旧的
+                # `Path(__file__).resolve().parent.parent`（本文件在
+                # `swarm_agents/` 下，上跳两级）落在同一个仓库根，行为不变。
+                _snap_dir = str(_PATHS_ta.home / "report_snapshots")
                 # 缓存 BacktestAnalyzer 实例（避免每标的都重新扫描文件系统）
                 # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
                 # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
-                # v0.45.98：显式传 close_t7_db_path，与上一行 _snap_dir 用
-                # 同一个基准目录（_project_root_ta），不用 feedback_loop.py
-                # 的 __file__ 相对缺省值——否则 snapshots 和 close_t7 库
-                # 可能来自两个不同目录，worktree 场景下已实测会不一致。
                 if not hasattr(self, "_ba_cache"):
-                    self._ba_cache = _BA_ta(
-                        directory=_snap_dir, clean_t7=True,
-                        close_t7_db_path=_project_root_ta / "pheromone.db")
+                    self._ba_cache = _BA_ta(directory=_snap_dir, clean_t7=True)
                 _snaps = self._ba_cache.get_snapshots_by_ticker(ticker)
                 _t7 = [s for s in (_snaps or []) if s.actual_price_t7 is not None and s.entry_price]
                 if len(_t7) >= _TAF.get("min_samples", 5):
@@ -1315,9 +1324,16 @@ class QueenDistiller:
             "macro_regime": _macro_regime,
             # 升级 5: 历史胜率折扣
             "ticker_accuracy_discount": _ticker_acc_discount,
-            # 升级 3: F&G 原始值
-            "fear_greed_value": _fg_value,
+            # v0.45.247：原有 `fear_greed_value`（恒为 None，已删）。F&G 原值现在在
+            # agent_details.BuzzBeeWhisper.details.fear_greed（带 source）。
+            # 读各蜂 details 时「键不存在」的记账；正常为空列表，非空即接口断了。
+            "details_contract_misses": sorted(set(_detail_misses)),
         }
+
+        # 刻意放在所有 try/except 之外（同 _assert_regime_preserved_zeros 的理由）。
+        if _detail_misses:
+            _log.error("[%s] 蜂 details 读取契约断裂（生产者没产出这些键，读到的是默认值）：%s",
+                       ticker, sorted(set(_detail_misses)))
 
         # 升级 6: 发布 Queen 方向到信息素板（供下次运行的惯性计算）
         try:

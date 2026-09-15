@@ -37,7 +37,10 @@ CBOE payload 的 `current_price` **跟着盘后交易走**，而 `last_trade_tim
 -----------------------------
 - **yfinance 官方收盘**：批量下载，30 只一次请求。与逐标的调用是两回事，
   不会触发限流雪崩（2026-08-26 扫描逐标的调用触发 487 次限流，
-  同一天批量下载全程正常）。
+  同一天批量下载全程正常）。⚠️ 但批量请求本身也会被限（2026-09-15 实测
+  52/52 只一次性 `YFRateLimitError`）——这种情况下改用 **Twelve Data**
+  （`_twelve_data_closes`，v0.45.257）逐只补，独立配额（7/分），不与 yfinance
+  共用桶。只补 yfinance 缺覆盖的标的，不是常规主源（逐只请求慢得多）。
 - **CBOE `close` / `prev_day_close`**：实测与官方收盘分毫不差
   （CRM 205.69 = yfinance 8/25 收盘）。**归属必须由 payload 自己的 `last_trade_time`
   推**（v0.45.243，见 `cboe_official_closes`）—— CDN 卡死的符号（实测 TMO 卡 44.5 小时）
@@ -131,44 +134,99 @@ def load_rows(conn: sqlite3.Connection, since: Optional[str] = None) -> List[dic
     return [dict(r) for r in conn.execute(sql, args)]
 
 
-def official_closes(tickers: List[str], lo: str, hi: str) -> Dict[Tuple[str, str], float]:
-    """yfinance 批量官方收盘 → {(date, ticker): close}。失败返回空表（诚实缺失）。
+def _twelve_data_closes(tickers: List[str], lo: str, hi: str) -> Dict[Tuple[str, str], float]:
+    """Twelve Data 逐只日线 → {(date, ticker): close}，裁到 [lo, hi] 窗口内（v0.45.257）。
 
-    刻意用 `yf.download` 批量而非逐标的 `Ticker.history`：一次请求覆盖全部标的，
-    这正是它在扫描被限流的同一天仍然可用的原因。
+    只在 `official_closes` 判定 yfinance **缺覆盖**（整批限流 / 部分标的失败 / 未装库）
+    的标的上调用——不是常规路径。理由：`twelve_data.py`（v0.45.61）已经是本仓
+    "yfinance 打光额度时的独立配额" 的既有答案（免费档 800/天、7/分，token 桶与
+    `resilience.yfinance_limiter` 完全分开），日报流水线的 rv_30d/iv_rank 早就在用它
+    兜同一个问题——这里复用，不再造第二套。
+
+    ⚠️ 不能当**主**源：本函数逐只请求（7/分 ≈ 每只 8.6 秒），52 只要 7~8 分钟，
+    比 yfinance 一次批量请求慢得多；只在批量源缺覆盖时才值得付这个代价。
+
+    未配置 key 时安静跳过（`twelve_data.is_configured()` 为 False，与该模块其余
+    消费方一致，不报错不阻断）；测试环境里 `tests/conftest.py::_block_same_day_macro`
+    把 `twelve_data.api_key` 恒置空——本函数因此天然不会在测试里打真外网。
+    """
+    out: Dict[Tuple[str, str], float] = {}
+    try:
+        import twelve_data as td
+    except ImportError:
+        return out
+    if not td.is_configured():
+        return out
+    import datetime as dt
+    import math
+    # `days` 是"要多少根"，不是日历跨度——多要不多花配额（同一次请求的 outputsize），
+    # 往前多垫 15 天买保险，比 yfinance 那条 +10 天的道理一样：省得因为窗口卡在
+    # 非交易日边界又漏一段。
+    days = (dt.date.fromisoformat(hi) - dt.date.fromisoformat(lo)).days + 15
+    _log.info("yfinance 缺覆盖 %d 只标的，改用 Twelve Data 逐只补（独立配额，7/分，预计 ~%.0fs）：%s",
+             len(tickers), len(tickers) / (7 / 60), ", ".join(tickers))
+    for t in tickers:
+        rows = td.fetch_bars(t, days=days, end_date=hi)
+        if not rows:
+            continue
+        for r in rows:
+            d = r.get("date")
+            if not d or not (lo <= d <= hi):
+                continue
+            c = r.get("close")
+            if (isinstance(c, (int, float)) and not isinstance(c, bool)
+                    and math.isfinite(c) and c > 0):
+                out[(d, t)] = float(c)
+    return out
+
+
+def official_closes(tickers: List[str], lo: str, hi: str) -> Dict[Tuple[str, str], float]:
+    """官方收盘 → {(date, ticker): close}。yfinance 批量下载是主源（一次请求覆盖全部
+    标的，这正是它在扫描被限流的同一天仍然可用的原因）；对它**缺覆盖**的标的
+    （整批下载失败 / 部分标的无数据 / 未装库），改用 Twelve Data 逐只补
+    （`_twelve_data_closes`，v0.45.257）——独立配额，不与 yfinance 抢同一个桶。
+
+    2026-09-15 实测触发：yfinance 批量下载 52/52 只全部 `YFRateLimitError`
+    （429，且是批量请求本身被限，比逐只调用更罕见的重度限流），`correct()` 因此
+    直接以 `no_official_closes` 中止、不做任何改动——这就是本函数要补的缺口。
     """
     import datetime as dt
+    out: Dict[Tuple[str, str], float] = {}
+
     try:
         import yfinance as yf
         import pandas as pd
     except ImportError as e:
         _log.error("yfinance/pandas 不可得：%s", e)
-        return {}
-    # ⚠️ 起点**往前垫 10 个自然日**：非交易日样本要回退到「该日之前最近的
-    # 交易日」，若下载区间恰好从那个非交易日开始，前一交易日就不在数据里 ——
-    # 该行会被静默记成「无来源」而不是被校正。实测触发条件：
-    # `--since 2026-03-01`（周日）。全量跑靠「最早预测日 2/27 早于最早周日 3/01」
-    # 侥幸安全，不能依赖。
-    start = (dt.date.fromisoformat(lo) - dt.timedelta(days=10)).isoformat()
-    end = (dt.date.fromisoformat(hi) + dt.timedelta(days=1)).isoformat()
-    try:
-        h = yf.download(sorted(set(tickers)), start=start, end=end,
-                        progress=False, auto_adjust=False)["Close"]
-    except Exception as e:  # noqa: BLE001 - 拿不到就空表，调用方据此不动数据
-        _log.error("yfinance 批量下载失败：%s: %s", type(e).__name__, e)
-        return {}
-    if hasattr(h, "to_frame") and not hasattr(h, "columns"):
-        h = h.to_frame(name=sorted(set(tickers))[0])
-    out: Dict[Tuple[str, str], float] = {}
-    for d, row in h.iterrows():
-        ds = d.strftime("%Y-%m-%d")
-        for t in h.columns:
-            v = row[t]
-            # ⚠️ 必须 `> 0`：0 不是「零元」，是**没有这个价**。
-            # 它会一路当成合法收盘价流到 `base / truth` 造成 ZeroDivisionError
-            # （构造检验确认）。与 v0.45.42「缺失值不许冒充 0」同一条原则。
-            if v is not None and not pd.isna(v) and float(v) > 0:
-                out[(ds, t)] = float(v)
+    else:
+        # ⚠️ 起点**往前垫 10 个自然日**：非交易日样本要回退到「该日之前最近的
+        # 交易日」，若下载区间恰好从那个非交易日开始，前一交易日就不在数据里 ——
+        # 该行会被静默记成「无来源」而不是被校正。实测触发条件：
+        # `--since 2026-03-01`（周日）。全量跑靠「最早预测日 2/27 早于最早周日 3/01」
+        # 侥幸安全，不能依赖。
+        start = (dt.date.fromisoformat(lo) - dt.timedelta(days=10)).isoformat()
+        end = (dt.date.fromisoformat(hi) + dt.timedelta(days=1)).isoformat()
+        try:
+            h = yf.download(sorted(set(tickers)), start=start, end=end,
+                            progress=False, auto_adjust=False)["Close"]
+        except Exception as e:  # noqa: BLE001 - 拿不到就交给下面 Twelve Data 补，不在这里 return
+            _log.error("yfinance 批量下载失败：%s: %s", type(e).__name__, e)
+        else:
+            if hasattr(h, "to_frame") and not hasattr(h, "columns"):
+                h = h.to_frame(name=sorted(set(tickers))[0])
+            for d, row in h.iterrows():
+                ds = d.strftime("%Y-%m-%d")
+                for t in h.columns:
+                    v = row[t]
+                    # ⚠️ 必须 `> 0`：0 不是「零元」，是**没有这个价**。
+                    # 它会一路当成合法收盘价流到 `base / truth` 造成 ZeroDivisionError
+                    # （构造检验确认）。与 v0.45.42「缺失值不许冒充 0」同一条原则。
+                    if v is not None and not pd.isna(v) and float(v) > 0:
+                        out[(ds, t)] = float(v)
+
+    _missing = sorted(set(tickers) - {t for _, t in out})
+    if _missing:
+        out.update(_twelve_data_closes(_missing, lo, hi))
     return out
 
 

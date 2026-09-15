@@ -150,7 +150,10 @@ def test_ml_prob_reads_report_date_not_today(tmp_path, monkeypatch):
     import json
     import report_formatters as rf
 
-    monkeypatch.setattr(rf, "__file__", str(tmp_path / "report_formatters.py"))
+    # v0.45.260 起 `_load_fresh_ml_prob` 经 `hive_logger.PATHS.home` 解析
+    # （不再是 `Path(__file__).parent`），故驱动 `ALPHA_HIVE_HOME` 而不是
+    # 伪造 `__file__`——两者在这条测试里等价，只是隔离机制换了。
+    monkeypatch.setenv("ALPHA_HIVE_HOME", str(tmp_path))
     (tmp_path / "analysis-NVDA-ml-2026-08-26.json").write_text(json.dumps(
         {"ml_prediction": {"prediction": {"probability": 0.6218}}}))
 

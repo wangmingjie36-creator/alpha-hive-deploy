@@ -167,7 +167,8 @@ class TestSpeciesDoesNotSpread:
         ("polymarket_client.py", "CACHE_DIR"),
         ("newsapi_client.py", "_CACHE_DIR"),
         ("edgar_rss.py", "_CACHE_PATH"),
-        ("pead_analyzer.py", "_CACHE_DIR"),
+        # v0.45.233: ("pead_analyzer.py", "_CACHE_DIR") 已摘除——改为调用时的 `_cache_dir()`。
+        # 摘它不是因为这里变红（子集语义清干净不红），是仓库根默认拒绝总闸实测它往 cache/ 写。
         # 中高危：这四个 BASE_DIR 派生出 vrp_state/ options_paper_state/ hedge_state/
         # ——是**账本**不是缓存（见 MEMORY.md v0.45.111）。
         ("vrp_signal.py", "BASE_DIR"),
@@ -520,9 +521,17 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("gui/app.py", "_PROJECT_ROOT"),              # sys.path
         ("scheduler.py", "_PROJECT_ROOT"),            # scheduler.log
         # ── D. 未清，已登记（读多写少 / 牵动面大）──
-        ("pead_analyzer.py", "_CACHE_DIR"),           # try 分支已走 PATHS，这是 except 兜底
-        ("push_report_to_slack.py", "PROJECT_DIR"),   # 读报告 json（CLI 脚本）
-        ("scan_coverage_gate.py", "ROOT"),            # 读 .swarm_results_*.json
+        # v0.45.233: ("pead_analyzer.py", "_CACHE_DIR") 已摘除——except 兜底挪进调用时的 `_cache_dir()`。
+        # v0.45.260（数据根迁移阶段 2）已摘除两条——**不是因为这里变红**（子集语义
+        # 清干净不会红），是按本类 docstring 的对账法主动核实后摘除：
+        #   - ("push_report_to_slack.py", "PROJECT_DIR")：该变量已整个移除，
+        #     `sys.path.insert` 改成内联 `Path(__file__).parent`（代码锚点，未登记
+        #     的必要），读报告 JSON / 三个缓存目录改经 `PATHS.home`/`PATHS.cache_dir`
+        #     调用时求值。
+        #   - ("scan_coverage_gate.py", "ROOT")：改成覆盖钩子 `ROOT = None` +
+        #     调用时求值的 `_root()`（读 `PATHS.home`），不再是 `__file__` 派生的
+        #     模块级常量，这条本就该属于 `TestSpeciesDoesNotSpread`（marker="PATHS"）
+        #     的管辖，但因为是函数内局部变量不是模块级 Assign，两边扫描器都不再命中。
     }
 
     def test_scanner_has_teeth(self):

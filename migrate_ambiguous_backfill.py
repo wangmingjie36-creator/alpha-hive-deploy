@@ -32,10 +32,17 @@ TABLE = "predictions"
 
 
 def _resolve_db(explicit=None):
+    """`--db` 未显式指定时的兜底解析。
+
+    v0.45.260（数据根迁移阶段 2）：此前兜底是 `os.path.dirname(
+    os.path.abspath(__file__))`——不读 `ALPHA_HIVE_HOME`。改读
+    `hive_logger.PATHS.db`；本脚本是一次性迁移（P0 已于 2026-08-25 落地，
+    幂等设计允许安全重跑），生产今天不设 `ALPHA_HIVE_HOME` 时行为不变。
+    """
     if explicit:
         return explicit
-    here = os.path.dirname(os.path.abspath(__file__))
-    cand = os.path.join(here, "pheromone.db")
+    from hive_logger import PATHS
+    cand = PATHS.db
     if os.path.exists(cand):
         return cand
     raise FileNotFoundError("找不到 pheromone.db，请用 --db 指定")

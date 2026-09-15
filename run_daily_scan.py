@@ -17,6 +17,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 _log = _logging.getLogger("alpha_hive.run_daily_scan")
 
@@ -107,9 +108,23 @@ def _run_dry_run(tickers: list[str]) -> bool:
     return ok
 
 
-def _cleanup_stale_data(project_dir: Path, max_cache_days: int = 7,
+def _cleanup_stale_data(project_dir: Optional[Path] = None, max_cache_days: int = 7,
                         max_swarm_days: int = 14, max_db_days: int = 30) -> None:
-    """启动时清理过期缓存/结果文件/数据库条目"""
+    """启动时清理过期缓存/结果文件/数据库条目。
+
+    ⚠️ 会对 `pheromone.db` 执行 `DELETE` + `VACUUM`——是**写**不是只读。
+
+    v0.45.260（数据根迁移阶段 2）：`project_dir` 此前唯一的调用点传的是
+    `Path(__file__).parent`，完全不读 `ALPHA_HIVE_HOME`。已用 grep 核实
+    launchd plist 直接指向 `alpha-hive-orchestrator.sh`，不经本脚本
+    ——当前无自动生产读者，但本函数一旦被手动执行就会直接对生产库做
+    删除+VACUUM，风险不因"没人调用"而降低，故照统一模式一并收口：
+    默认值改 `None`，调用时经 `PATHS.home` 解析（唯一调用点相应改为不传参）。
+    生产今天不设 `ALPHA_HIVE_HOME` 时两者兜底到同一个仓库根，行为不变。
+    """
+    if project_dir is None:
+        from hive_logger import PATHS
+        project_dir = PATHS.home
     import sqlite3
     now = time.time()
     cleaned = 0
@@ -173,7 +188,7 @@ def _run_scan(tickers: list[str]) -> None:
     print(f"\nAlpha Hive 蜂群启动 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     # 启动前清理过期数据
-    _cleanup_stale_data(Path(__file__).parent)
+    _cleanup_stale_data()
 
     reporter = AlphaHiveDailyReporter()
     notifier = SlackReportNotifier()
@@ -219,8 +234,10 @@ def _write_status(
     error: str | None = None,
 ) -> None:
     """写入 logs/last_run_status.json（Sprint 1.4）"""
-    log_dir = Path(__file__).parent / "logs"
-    log_dir.mkdir(exist_ok=True)
+    # v0.45.260（数据根迁移阶段 2）：此前是 `Path(__file__).parent / "logs"`，
+    # 改用 `PATHS.logs_dir`（已按调用时求值 + 建目录实现，见 hive_logger.py）。
+    from hive_logger import PATHS
+    log_dir = PATHS.logs_dir
     status_file = log_dir / "last_run_status.json"
 
     data = {

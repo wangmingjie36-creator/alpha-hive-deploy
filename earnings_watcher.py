@@ -42,7 +42,16 @@ except ImportError:
     _requests = None
 
 CACHE_DIR = PATHS.home / "earnings_cache"
-CACHE_DIR.mkdir(exist_ok=True)
+# v0.45.233：不在 import 期 mkdir。pytest 收集期 / conftest 早于 `_isolate_env` 的 autouse fixture
+# import 本模块时 `ALPHA_HIVE_HOME` 未设 ⇒ 每个 checkout 根目录都被建出空的 earnings_cache/
+# （仓库根默认拒绝总闸实测）。目录改在写缓存那一刻建——`atomic_json_write` 不建父目录，
+# 缺目录时它抛的 FileNotFoundError 会被调用处的 `except OSError` 吞成 debug 日志、缓存静默失效，
+# 所以两处写入前都必须 `_ensure_cache_dir()`。（`CACHE_DIR` 本身仍冻在 import 期，登记在
+# `test_paths_not_frozen_at_import.py` 的 KNOWN 里，数据根迁移阶段 2 收口。）
+
+
+def _ensure_cache_dir() -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 try:
     from config import CACHE_CONFIG as _CC
@@ -127,6 +136,7 @@ class EarningsWatcher:
             }
 
             try:
+                _ensure_cache_dir()
                 atomic_json_write(cache_path, result)
             except (OSError, TypeError) as exc:
                 _log.debug("earnings date cache write failed: %s", exc)
@@ -348,6 +358,7 @@ class EarningsWatcher:
 
         if result:
             try:
+                _ensure_cache_dir()
                 atomic_json_write(cache_path, result)
             except (OSError, TypeError) as exc:
                 _log.debug("earnings results cache write failed: %s", exc)

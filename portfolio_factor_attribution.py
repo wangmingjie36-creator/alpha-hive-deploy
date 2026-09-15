@@ -63,7 +63,10 @@ TRADING_DAYS = 252
 
 def _load_trades(source: str = "all_trades") -> List[Dict]:
     """加载交易记录"""
-    db = Path(__file__).parent / "pheromone.db"
+    # v0.45.260（数据根迁移阶段 2）：此前是 `Path(__file__).parent /
+    # "pheromone.db"`——不读 `ALPHA_HIVE_HOME`。改读 `PATHS.db`。
+    from hive_logger import PATHS
+    db = Path(PATHS.db)
     with sqlite3.connect(str(db)) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""

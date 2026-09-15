@@ -457,11 +457,33 @@ class TestConftestGuardsDoNotAnchorOnCwd:
     是两件事，前者不该被当成后者的证据。改法：不再按「先找函数、再进函数体」两层遍历，
     而是一次性 `ast.walk(tree)` 找出所有匹配的 `Call`，用父指针表逐个回溯它的**最近外层函数**
     （查不到就是模块级/class 体顶层），是否放行只看这个结果，模块级永远不在 `ALLOWED` 里
-    （`ALLOWED` 只装函数名）。
+    （`ALLOWED` 只装函数名）。合并后独立咬中了 `_hive_log_handler_escapes` 的同形 bug（v0.45.246）。
+
+    ⚠️ **v0.45.251 二次检查再补一处：只认 `x.attr()` 形态，`from os import getcwd` 之后裸名调用
+    `getcwd()` 完全绕过**（`n.func` 是 `Name` 不是 `Attribute`，上面两版都只判 `isinstance(n.func, ast.Attribute)`）。
+    `cwd`/`resolve`/`absolute` 只能是方法调用、天然无此形态；`getcwd`/`abspath`/`realpath` 可以
+    `from os[.path] import` 出来当自由函数用。实测：`from os import getcwd\ndef _guard():\n    x = getcwd()\n`
+    喂给 v0.45.245 版返回 `[]`。本仓当前无此写法——量过，不是假设。改：先扫一遍
+    `ImportFrom(module in {os, os.path, posixpath, ntpath})`，把本地名字（含 `as` 别名）登记成
+    「等价于哪个 `.attr()` 检测」，主循环里 `Call(func=Name)` 命中登记表就按同样规则判。
+
+    ⚠️ **v0.45.254 二次检查再补一处：`enclosing_function_name` 把装饰器参数/默认参数值也算进
+    「函数体内」，会被 `ALLOWED` 误放行。** 这两处在 AST 里确实是 `FunctionDef` 的子节点
+    （`decorator_list` / `args.defaults` / `args.kw_defaults` / `returns` 注解），但**语义上是在
+    定义那一刻、于外层作用域求值**——不是函数体、不会在每次调用时跑。实测：
+    `@deco(os.getcwd())\ndef pytest_collection_finish(...): ...` 与
+    `def pytest_collection_finish(session, x=os.getcwd()): ...` 两者的 `os.getcwd()` 都被父指针表
+    直接归到 `pytest_collection_finish`（它在 `ALLOWED` 里）——于是被误放行为 `[]`。
+    本仓当前三个 `ALLOWED` 函数都没有这种写法——量过，不是假设；`_hive_log_handler_escapes` 的
+    `handlers=None` 恰好是个无害常量，纯属巧合没撞上，不是这处逻辑本来就对。
+    改：走到 `FunctionDef` 时先判来路——若正是从它的 `decorator_list` 某项、`args`（涵盖
+    defaults/kw_defaults/注解）或 `returns` 走上来的，不算「进了这个函数」，继续往外走；
+    只有从 `body` 走上来的才归给它。
     """
 
     EXPLICIT = {"cwd", "getcwd"}
     IMPLICIT = {"resolve", "absolute", "abspath", "realpath"}
+    _FREE_FUNC_MODULES = {"os", "os.path", "posixpath", "ntpath"}  # 只有这些函数能被裸名 import：cwd/resolve/absolute 天然只能是方法
     ANCHORS = {"__file__", "invocation_params", "tmp_path", "tmp_path_factory"}
     ALLOWED = {
         "pytest_collection_finish",          # 它记的就是「收集结束那一刻的 cwd」
@@ -479,25 +501,49 @@ class TestConftestGuardsDoNotAnchorOnCwd:
                 parent[child] = node
 
         def enclosing_function_name(node):
-            n = parent.get(node)
-            while n is not None:
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    return n.name
-                n = parent.get(n)
-            return None  # 模块级，或 class 体顶层（不在任何函数里）
+            cur = node
+            while True:
+                par = parent.get(cur)
+                if par is None:
+                    return None  # 模块级，或 class 体顶层（不在任何函数里）
+                if isinstance(par, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # decorator_list / args（含 defaults、kw_defaults、注解）/ returns 注解
+                    # 在**定义时、外层作用域**求值，不算「进了这个函数」——只有 body 才是（v0.45.254）。
+                    if cur not in par.decorator_list and cur is not par.args and cur is not par.returns:
+                        return par.name
+                cur = par
+
+        # `from os import getcwd as gc` 之类：本地名字 -> 等价于哪个 .attr() 检测（v0.45.251）。
+        bare_names = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in cls._FREE_FUNC_MODULES:
+                for alias in node.names:
+                    if alias.name in cls.EXPLICIT or alias.name in cls.IMPLICIT:
+                        bare_names[alias.asname or alias.name] = alias.name
 
         hits = []
         for n in ast.walk(tree):
-            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)):
+            if not isinstance(n, ast.Call):
                 continue
-            attr = n.func.attr
-            if attr in cls.EXPLICIT:
+            if isinstance(n.func, ast.Attribute):
+                key = n.func.attr
+                subject_for_implicit = n.args[0] if key in {"abspath", "realpath"} and n.args else n.func.value
+            elif isinstance(n.func, ast.Name) and n.func.id in bare_names:
+                key = bare_names[n.func.id]
+                if key in {"abspath", "realpath"}:
+                    if not n.args:
+                        continue  # 拿不到主语就不判——不装作查过
+                    subject_for_implicit = n.args[0]
+                else:
+                    subject_for_implicit = None
+            else:
+                continue
+
+            if key in cls.EXPLICIT:
                 anchored = False
-            elif attr in cls.IMPLICIT:
-                # `x.resolve()` 的主语是 x；`os.path.abspath(x)` 的主语是 x
-                subject = n.args[0] if attr in {"abspath", "realpath"} and n.args else n.func.value
-                names = {s.id for s in ast.walk(subject) if isinstance(s, ast.Name)}
-                names |= {s.attr for s in ast.walk(subject) if isinstance(s, ast.Attribute)}
+            elif key in cls.IMPLICIT:
+                names = {s.id for s in ast.walk(subject_for_implicit) if isinstance(s, ast.Name)}
+                names |= {s.attr for s in ast.walk(subject_for_implicit) if isinstance(s, ast.Attribute)}
                 anchored = bool(names & cls.ANCHORS)
             else:
                 continue
@@ -532,6 +578,31 @@ class TestConftestGuardsDoNotAnchorOnCwd:
             "import pathlib\nclass C:\n    ROOT = pathlib.Path.cwd()\n": ["<module>:3"],
             # 嵌套函数：旧版会因为外层 ast.walk(fn) 覆盖内层，把同一处调用报两次；新版只报一次。
             "import os\ndef outer():\n    def inner():\n        return os.getcwd()\n    return inner\n": ["inner:4"],
+            # v0.45.251：裸名 import 绕过 `.attr()` 形态——`cwd()`/`resolve()`/`absolute()` 没有这个问题
+            # （天然只能是方法），`getcwd`/`abspath`/`realpath` 可以被 `from os[.path] import` 出来当自由函数用。
+            "from os import getcwd\ndef _guard():\n    x = getcwd()\n": ["_guard:3"],
+            "from os import getcwd as gc\ndef _guard():\n    x = gc()\n": ["_guard:3"],
+            "from os.path import abspath\ndef _guard(p):\n    x = abspath(p)\n": ["_guard:3"],
+            "from os.path import abspath\ndef _guard(mp):\n    x = abspath(mp.__file__)\n": [],  # 锚了，不该报
+            "from os.path import abspath\nX = abspath('x')\n": ["<module>:2"],  # 同样受模块级检查约束
+            # 反面对照：不是 os/os.path/posixpath/ntpath 来源的同名函数不该被误判成裸名 cwd 读取。
+            "from my_module import getcwd\ndef _guard():\n    x = getcwd()\n": [],
+            # v0.45.254：decorator_list / args（defaults/注解）/ returns 在定义时于外层作用域求值，
+            # 不算「进了这个函数」——即便这个函数名恰好在 ALLOWED 里，也不该被那顶帽子连带放行。
+            # 用真实的 ALLOWED 名字（pytest_collection_finish）做探针，才测得出「会不会被误放行」。
+            # 这处装饰器表达式本身在**模块级**求值（`pytest_collection_finish` 本就定义在模块顶层，
+            # 装饰器不属于任何外层函数）——正确归属是 `<module>`，不是被装饰的那个函数名；
+            # 修前会误报成 `pytest_collection_finish`（在 ALLOWED 里）从而被放行成 `[]`，两种错法都不对。
+            "import os\ndef deco(x):\n    return lambda f: f\n"
+            "@deco(os.getcwd())\ndef pytest_collection_finish(session):\n    pass\n": ["<module>:4"],
+            # 同理：默认值与返回注解在 def 语句**执行时**（模块级函数即 import 时，在模块作用域）求值。
+            "import os\ndef pytest_collection_finish(session, x=os.getcwd()):\n    pass\n": ["<module>:2"],
+            "import os\ndef pytest_collection_finish() -> os.getcwd():\n    pass\n": ["<module>:2"],
+            # 反面对照：body 内部真的调用 ALLOWED 函数名必须继续放行（上面的修法不能矫枉过正）——
+            # 与第 4 条用例（`pytest_collection_finish` body 内 `os.getcwd()` → `[]`）是同一条断言，不重复列。
+            # 嵌套：外层函数的 body 里定义了一个不相干的内层函数，装饰器/默认值该归给外层还是模块级
+            # （视外层是否也是函数而定），不能被内层函数名顶替。
+            "import os\ndef outer():\n    def inner(x=os.getcwd()):\n        pass\n    return inner\n": ["outer:3"],
         }
         for src, want in cases.items():
             assert self.cwd_readers_outside(src, self.ALLOWED) == want, src

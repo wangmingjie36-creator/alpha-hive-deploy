@@ -235,6 +235,17 @@ class AlertAnalyzer:
 
         return self.alerts
 
+    @staticmethod
+    def _swarm_scan_actually_ran(status: Dict) -> bool:
+        """区分「早退不部署，`scan_timing` 本来就不该有」与「扫描真跑完了，它却丢了」（v0.45.255）。
+
+        只看 `step2_hive_analysis` 是否成功——它是 `scan_timing.write()` 所在的那条扫描路径
+        唯一的先决条件：空扫描护栏 / `--no-swarm` 早退等路径到不了这一步，`scan_timing` 缺失
+        对它们是设计内的正常状态，不该被下面新加的 P1 误伤。
+        """
+        step2 = (status.get("steps_result") or {}).get("step2_hive_analysis") or {}
+        return step2.get("status") == "success"
+
     def _check_deploy_and_code_sync(self, status: Dict) -> None:
         """读 `status.scan_timing` 里两个**真有写入者**的字段。
 
@@ -242,11 +253,35 @@ class AlertAnalyzer:
         2026-09-01~11 生产 `git push origin main` 六次 non-fast-forward 被拒，零告警。
           - `scan_timing.extra.git_push`：`alpha_hive_daily_report.main` 写（部署结果精简版）
           - `scan_timing.production_sync`：编排器 Step 1 前跑 `production_sync.py` 写
+
+        v0.45.255：`scan_timing` 整段缺失以前**一律**当「早退未部署，本来就没写」处理——静默
+        `checks_skipped` + 一行 WARNING。2026-09-14 14:48 实测反例：蜂群扫描真跑完了（`step2` 成功、
+        日报已提交推送、耗时 2889s），`logs/scan_timing.json` 本身数据完整，唯独编排器 `write_status()`
+        把它并进 `status.json` 那一步没生效——根因排查了 TCC 权限 / 脚本改动 / 写入时序 / 线程卡死强退
+        四个假设，**逐一用 09-10/09-11 两天的日志证伪**（同样的条件那两天都有，合并却都成功），
+        真正触发条件仍不明。**不追那个可能永远抓不住的瞬时原因，把这一类失败本身变成可观测的**：
+        真扫描跑完了、`scan_timing` 却整段没进 `status.json`，本身就是「不知道自己不知道」——
+        比任何一条已知的推送/提交失败都更危险，因为它连「有没有出事」都看不出来。
+        判别用 `steps_result.step2_hive_analysis.status == "success"`——它是 `scan_timing.write()`
+        所在的那条扫描路径唯一的先决条件，早退路径（空扫描护栏等）到不了这一步，不会被误伤。
         """
         st = status.get("scan_timing")
         if not isinstance(st, dict):
             self.checks_skipped.append("推送/生产代码同步检查（status.json 缺 scan_timing）")
             _log.warning("status.json 无 scan_timing —— **推送与代码同步检查未执行**")
+            if self._swarm_scan_actually_ran(status):
+                self.alerts.append(Alert(
+                    AlertLevel.HIGH,
+                    "⚠️ 【P1 高】扫描已完成，但 status.json 缺整段 scan_timing——推送/提交/生产同步全部失去可观测性",
+                    {
+                        "现象": "本轮 step2 蜂群分析已成功，scan_timing 却整段没进 status.json",
+                        "影响": "本轮 production_sync / git_push / git_commit 是否成功完全未知，"
+                                "不是「检查了没问题」，是「没检查」",
+                        "建议": "查 logs/scan_timing.json 是否存在且日期匹配当天；"
+                                "核对编排器日志 write_status() 附近有无异常（2026-09-14 一例未查明根因）",
+                    },
+                    ["deployment", "observability"]
+                ))
             return
 
         commit = (st.get("extra") or {}).get("git_commit")

@@ -58,7 +58,19 @@ from typing import Dict, Optional, Set
 ALPHAHIVE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ALPHAHIVE_DIR))
 
-DB_PATH = ALPHAHIVE_DIR / "pheromone.db"
+# v0.45.260（数据根迁移阶段 2）：DB_PATH 此前是从 ALPHAHIVE_DIR（`__file__`
+# 派生）算出的模块级常量——完全不读 `ALPHA_HIVE_HOME`。改为覆盖钩子 +
+# 调用时求值，与 `signal_archive.py` 等模块同一模式；`ALPHAHIVE_DIR` 本身
+# 保留 —— 它只喂上面的 `sys.path.insert`，用途合规。
+DB_PATH = None
+
+
+def _db_path() -> Path:
+    """`pheromone.db` 路径，**调用时求值**。"""
+    if DB_PATH is not None:
+        return Path(DB_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.db)
 
 # ── 样本世代边界 ────────────────────────────────────────────────────────────
 # 每条 = (首个受影响的业务日, 版本, 改了什么)。**只追加，不改写**（审计轨迹）。
@@ -66,6 +78,10 @@ DB_PATH = ALPHAHIVE_DIR / "pheromone.db"
 #
 # ⚠️ 再次改动 expected_returns / predict_probability / RivalBee 特征来源时
 # **必须追加一条**。漏了会让新旧口径样本被混算，而混算是静默的。
+#
+# ⚠️ v0.45.265：追加时**同步**在 `signal_archive.COHORT_SIGNAL_SCOPE` 声明这条边界
+# **直接**改了哪些归档信号（只动 final_score 就写空元组；下游由依赖边自动推出）。
+# `signal_archive.analyze()` 靠它给每个信号切世代 —— 漏了测试红，运行时按全部信号切。
 _COHORT_HISTORY = [
     ("2026-08-17", "v0.44.1~0.44.3",
      "expected_returns 去偏 + probability 居中 + RivalBee 三特征接真实数据"),
@@ -172,6 +188,10 @@ _COHORT_HISTORY = [
      "v0.45.182 改为**改名**：`guard.consistency` → `guard.consistency_census`，"
      "`guard.top_signals_count` 摘除并改挂分布不变式。判据：判别器要放在做聚合的那一层，"
      "不是产生数据的那一层。"
+     "⚠️ **v0.45.256 再更正**：改名只管住了**新写入**。`signal_archive.backfill()` 用当前抽取器"
+     "重写全部历史，而新名字的抽取器当时仍无条件取 `consistency` ⇒ 一次全量回填就把旧口径"
+     "写回新名字（生产库副本 dry-run：1,394 行）。现已按 `census_source == \"live_agent_view\"` 取值，"
+     "见 `signal_archive._guard_census_consistency`。"
      "**MAX_ENTRIES 的值仍未动**；`get_top_signals` 的排行榜语义未动（另 3 个调用方各自待测）；"
      "`snapshot` / `compact_snapshot` 仍受截断——其中 `alpha_hive_daily_report.py:1171` 的 "
      "`agent_votes` 实测当前世代 300 份**只有 1 份**凑齐 8 只蜂（中位 3 只，BearBee 缺席 97.3%），"
@@ -417,10 +437,15 @@ def _iso_weeks(dates) -> Set:
     return out
 
 
-def assess(db_path: Path = DB_PATH, target_ic: float = DEFAULT_TARGET_IC,
+def assess(db_path: Optional[Path] = None, target_ic: float = DEFAULT_TARGET_IC,
            max_pool_drift: float = MAX_POOL_DRIFT,
            today: Optional[str] = None) -> Dict:
-    """就绪度判定。纯函数，便于测试。"""
+    """就绪度判定。纯函数，便于测试。
+
+    ⚠️ `db_path` 默认写 `None`，调用时才解析——不要改回 `= DB_PATH`，
+    那等于把冻结换个地方（同型 v0.45.160）。
+    """
+    db_path = Path(db_path) if db_path is not None else _db_path()
     cohort = cohort_start()
     boundary = cohort["date"]
     required = _WEEKS_REQUIRED.get(
@@ -615,7 +640,7 @@ _BOUNDARY_VERDICT_TEXT = {
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="IC 重跑就绪度")
-    ap.add_argument("--db", default=str(DB_PATH))
+    ap.add_argument("--db", default=None, help="pheromone.db 路径（默认走 PATHS.db）")
     ap.add_argument("--target-ic", type=float, default=DEFAULT_TARGET_IC,
                     choices=sorted(_WEEKS_REQUIRED),
                     help=f"要检出的真实 |IC|（默认 {DEFAULT_TARGET_IC}=系统综合分实测）")
@@ -631,7 +656,7 @@ def main() -> int:
     ap.add_argument("--quiet", action="store_true", help="只输出一行摘要")
     args = ap.parse_args()
 
-    db = Path(args.db)
+    db = Path(args.db) if args.db else _db_path()
     if not db.exists():
         print(f"❌ 找不到 {db} —— 无法判定", file=sys.stderr)
         return 3

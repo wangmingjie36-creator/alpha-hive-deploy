@@ -40,6 +40,15 @@ from typing import List, Optional
 _log = logging.getLogger("alpha_hive.health_check")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+# `PROJECT` 只用作 `git -C <仓库>` 的锚点（下面两处 `git log`/`git ls-files`），
+# 这是「代码在哪」不是数据，`__file__` 锚定正确（已在
+# tests/test_paths_not_frozen_at_import.py 的 MUST_STAY_FILE_ANCHORED 登记）。
+# v0.45.260（数据根迁移阶段 2）：本文件其余 9 处数据路径（.swarm_results_*.json /
+# weight_history.jsonl / pheromone.db / self_analysis_briefs / logs 等）此前
+# 都复用了这同一个 `PROJECT`——那些改读 `hive_logger.PATHS.*`，与 `PROJECT`
+# 的 git 锚点用途分离。本工具是「已禁用改按需」的定时任务（见
+# alpha-hive-locked-tasks.md），无自动生产读者，但手动执行时仍应读到真实
+# 数据根，故照统一模式收口。
 PROJECT = Path(__file__).parent.resolve()
 
 
@@ -67,6 +76,7 @@ def _file_age_days(path: Path) -> float:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_daily_scan() -> List[CheckResult]:
+    from hive_logger import PATHS
     results = []
     # 1a. 上次 commit ≤ 24h 内（只看交易日：跳过周末 / 假日）
     is_weekend = _now().weekday() >= 5
@@ -109,7 +119,7 @@ def check_daily_scan() -> List[CheckResult]:
     candidate = None
     for offset in range(5):
         d = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
-        p = PROJECT / f".swarm_results_{d}.json"
+        p = PATHS.home / f".swarm_results_{d}.json"
         if p.exists() and p.stat().st_size > 50_000:
             candidate = p
             candidate_age_days = offset
@@ -140,8 +150,9 @@ def check_daily_scan() -> List[CheckResult]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_weekly_optimizer() -> List[CheckResult]:
+    from hive_logger import PATHS
     results = []
-    history_file = PROJECT / "weight_history.jsonl"
+    history_file = PATHS.home / "weight_history.jsonl"
     if not history_file.exists():
         results.append(CheckResult(
             "weekly-optimizer: weight_history.jsonl",
@@ -235,8 +246,9 @@ def check_weekly_optimizer() -> List[CheckResult]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_sample_accumulator() -> List[CheckResult]:
+    from hive_logger import PATHS
     results = []
-    db_path = PROJECT / "pheromone.db"
+    db_path = Path(PATHS.db)
     if not db_path.exists():
         results.append(CheckResult(
             "sample-accumulator: pheromone.db",
@@ -331,8 +343,9 @@ def check_monthly_self_analysis() -> List[CheckResult]:
     """v0.24.6 修复：self_analyst 实际命名是 `self_analysis_YYYY-MM.md`
     且 1 号生成的 brief 用当月 tag（分析最近 3 个月数据），不是上月 tag
     """
+    from hive_logger import PATHS
     results = []
-    brief_dir = PROJECT / "self_analysis_briefs"
+    brief_dir = PATHS.home / "self_analysis_briefs"
     if not brief_dir.exists():
         results.append(CheckResult(
             "monthly-self-analysis: brief 目录",
@@ -396,8 +409,11 @@ def check_health_check_self() -> List[CheckResult]:
     通常意味着 Claude Code session 权限批准未授予 → Bash 工具被阻塞。
     这个检查在新一次 health_check 跑时（已通过权限）才能发出告警。
     """
+    from hive_logger import PATHS
     results = []
-    logs_dir = PROJECT / "logs"
+    # `logs_dir_unmade()`：只想知道路径、不想把「logs/ 不存在」这个真实
+    # 观测点提前建没了（`PATHS.logs_dir` 调用时会自动 mkdir）。
+    logs_dir = PATHS.logs_dir_unmade()
     if not logs_dir.exists():
         results.append(CheckResult(
             "health-check: logs 目录",
@@ -477,8 +493,8 @@ def print_console(report: dict) -> None:
 
 
 def save_log(report: dict) -> Path:
-    logs_dir = PROJECT / "logs"
-    logs_dir.mkdir(exist_ok=True)
+    from hive_logger import PATHS
+    logs_dir = PATHS.logs_dir  # 调用时求值 + 自动建目录
     fn = logs_dir / f"health_{_now().strftime('%Y-%m-%d')}.json"
     fn.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return fn
@@ -497,7 +513,8 @@ def push_slack(report: dict) -> None:
                 ic = "⚠️" if c["severity"] == "warn" else "🔴"
                 msg_lines.append(f"{ic} `{c['task_id']}` — {c['name']}: {c['message']}")
         # 写到 logs 目录供调度任务抓取
-        slack_log = PROJECT / "logs" / f"health_slack_payload_{_now().strftime('%Y-%m-%d')}.txt"
+        from hive_logger import PATHS
+        slack_log = PATHS.logs_dir / f"health_slack_payload_{_now().strftime('%Y-%m-%d')}.txt"
         slack_log.write_text("\n".join(msg_lines), encoding="utf-8")
         _log.info("Slack payload prepared at %s (调度任务的 Claude 用 MCP 推送)", slack_log)
     except (OSError, IOError) as e:

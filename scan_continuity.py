@@ -67,8 +67,30 @@ sys.path.insert(0, str(ALPHAHIVE_DIR))
 
 from is_trading_day import is_trading_day  # noqa: E402
 
-DB_PATH = ALPHAHIVE_DIR / "pheromone.db"
-SNAPSHOTS_DIR = ALPHAHIVE_DIR / "report_snapshots"
+# v0.45.260（数据根迁移阶段 2）：DB_PATH / SNAPSHOTS_DIR 此前是从 ALPHAHIVE_DIR
+# （`__file__` 派生）算出的模块级常量——本模块是编排器 Step 10 每日活跃调用的
+# 那个（`alpha-hive-orchestrator.sh:1127`），完全不读 `ALPHA_HIVE_HOME`。
+# 改为覆盖钩子 + 调用时求值，与 `signal_archive.py` 等模块同一模式；
+# `ALPHAHIVE_DIR` 本身保留 —— 它只喂上面的 `sys.path.insert`，用途合规。
+# 生产今天不设 `ALPHA_HIVE_HOME` 时两者兜底到同一个仓库根，行为不变。
+DB_PATH = None
+SNAPSHOTS_DIR = None
+
+
+def _db_path() -> Path:
+    """`pheromone.db` 路径，**调用时求值**。"""
+    if DB_PATH is not None:
+        return Path(DB_PATH)
+    from hive_logger import PATHS
+    return Path(PATHS.db)
+
+
+def _snapshots_dir() -> Path:
+    """`report_snapshots/` 目录，**调用时求值**。"""
+    if SNAPSHOTS_DIR is not None:
+        return Path(SNAPSHOTS_DIR)
+    from hive_logger import PATHS
+    return PATHS.home / "report_snapshots"
 
 # 默认门槛。覆盖率 0.80 = 5 个交易日至少 4 天有扫描；空档 3 = 连续 3 个交易日
 # 无扫描即降级（对 T+7 周度取样而言，连续 3 天已经威胁到当周的观测）。
@@ -185,12 +207,18 @@ def week_coverage(expected: List[dt.date], scanned: Set[str]) -> Dict:
     }
 
 
-def assess(db_path: Path = DB_PATH, snap_dir: Path = SNAPSHOTS_DIR,
+def assess(db_path: Optional[Path] = None, snap_dir: Optional[Path] = None,
            days: int = DEFAULT_DAYS, since: Optional[str] = None,
            end: Optional[str] = None,
            min_coverage: float = DEFAULT_MIN_COVERAGE,
            max_gap: int = DEFAULT_MAX_GAP) -> Dict:
-    """连续性判定。纯函数，便于测试。"""
+    """连续性判定。纯函数，便于测试。
+
+    ⚠️ `db_path`/`snap_dir` 默认写 `None`，调用时才解析——不要改回
+    `= DB_PATH`/`= SNAPSHOTS_DIR`，那等于把冻结换个地方（同型 v0.45.160）。
+    """
+    db_path = Path(db_path) if db_path is not None else _db_path()
+    snap_dir = Path(snap_dir) if snap_dir is not None else _snapshots_dir()
     end_date = dt.date.fromisoformat(end) if end else dt.date.today()
     if since:
         expected = trading_days_between(dt.date.fromisoformat(since), end_date)
@@ -259,8 +287,9 @@ def alert_line(res: Dict) -> Optional[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="扫描连续性体检")
-    ap.add_argument("--db", default=str(DB_PATH))
-    ap.add_argument("--snapshots", default=str(SNAPSHOTS_DIR))
+    ap.add_argument("--db", default=None, help="pheromone.db 路径（默认走 PATHS.db）")
+    ap.add_argument("--snapshots", default=None,
+                    help="report_snapshots/ 目录（默认走 PATHS.home）")
     ap.add_argument("--days", type=int, default=DEFAULT_DAYS,
                     help=f"回看多少个交易日（默认 {DEFAULT_DAYS}）")
     ap.add_argument("--since", help="改为从该日期起算（YYYY-MM-DD）")
@@ -280,13 +309,14 @@ def main() -> int:
                     help="（未实现）推送聚合告警。对外动作需先确认，故留占位")
     args = ap.parse_args()
 
-    db_path = Path(args.db)
+    db_path = Path(args.db) if args.db else _db_path()
     if not db_path.exists():
         print(f"❌ 找不到 {db_path} —— 无法判定连续性", file=sys.stderr)
         return 3  # 3 而非 2：编排器把 2 保留给"脚本不存在"，见模块 docstring
 
+    snap_dir = Path(args.snapshots) if args.snapshots else _snapshots_dir()
     res = assess(
-        db_path=db_path, snap_dir=Path(args.snapshots),
+        db_path=db_path, snap_dir=snap_dir,
         days=args.days, since=args.since, end=args.end,
         min_coverage=args.min_coverage, max_gap=args.max_gap,
     )

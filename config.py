@@ -8,6 +8,7 @@
 
 import os
 import threading
+from pathlib import Path
 
 from hive_logger import PATHS, get_logger
 
@@ -158,7 +159,13 @@ def get_secret(name: str) -> str:
 # ==================== 缓存配置 ====================
 CACHE_CONFIG = {
     "enabled": True,
-    "cache_dir": str(PATHS.cache_dir),
+    # v0.45.233：不在 import 期调 `PATHS.cache_dir`——那个 getter 会顺手 mkdir，而本模块几乎被所有模块
+    # 在 import 期导入（pytest 收集期、conftest 里排在 `_isolate_env` 前面的 autouse fixture）⇒ 每个 checkout
+    # 根都被建出空的 cache/（仓库根默认拒绝总闸实测）。取值规则与 getter 相同（`tests/test_import_creates_no_data_dirs.py`
+    # 钉住两者相等），目录由 `init_cache()` 显式建。值本身仍冻在 import 期（KNOWN 登记，数据根迁移阶段 2 收口）。
+    # v0.45.253：外面那层 `str(Path(...))` 不能省——getter 返回的是 `Path`，会把 env 里的尾斜杠、`//`、`./` 规范掉；
+    # v0.45.233 直接用 env 原串，这三种写法下与 getter 不等（二次检查实测）。
+    "cache_dir": str(Path(os.environ.get("ALPHA_HIVE_CACHE_DIR", str(PATHS.home / "cache")))),
     "ttl": {  # 缓存过期时间（秒）— 所有模块从此处读取，避免硬编码
         # 高频数据源（5~15 分钟）
         # v0.40.0: "finviz"/"stocktwits" ttl 已随模块删除移除
@@ -1164,22 +1171,15 @@ CONFIDENCE_WEIGHTING = {
     "floor": 0.3,      # 最低有效权重（防止完全忽略某维度）
 }
 
-# 升级 3: Fear & Greed 政体评分调整
-FEAR_GREED_SCORING = {
-    "extreme_fear": 25,          # F&G 值低于此 = 极度恐惧
-    "extreme_greed": 75,         # F&G 值高于此 = 极度贪婪
-    "fear_bearish_boost": 0.3,   # 恐惧 + 看空 → 加分
-    "fear_bullish_penalty": 0.4, # 恐惧 + 看多 → 惩罚（别抄底）
-    "greed_bullish_penalty": 0.3,# 贪婪 + 看多 → 惩罚（别追高）
-    "greed_bearish_boost": 0.2,  # 贪婪 + 看空 → 加分（逆向机会）
-}
+# 升级 3「Fear & Greed 政体评分调整」FEAR_GREED_SCORING —— v0.45.247 删除。
+# 它驱动的 QueenDistiller 步骤 4.6 自 2026-03-30 引入起从未执行（读的键生产者不产出），
+# 删除不改任何分数。重建前先读 MEMORY `alpha-hive-fear-greed-dead-wire`。
 
 # 升级 4: 看多不对称门槛（看多需要更强共识，因历史看多胜率仅 46.8%）
+# v0.45.247 删 extreme_greed_threshold / extreme_greed_weight_pct（同上，从未触发）。
 BULLISH_GATE_CONFIG = {
     "min_weight_pct": 0.50,          # 加权投票占比（原 0.40）
     "min_agents": 3,                  # 最少 Agent 数（原 2）
-    "extreme_greed_threshold": 75,    # F&G > 75 时进一步加严
-    "extreme_greed_weight_pct": 0.60, # 极度贪婪时看多需要 60% 票
 }
 
 # 升级 5: 历史胜率反馈折扣（低胜率标的分数压缩向中性）

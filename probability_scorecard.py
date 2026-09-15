@@ -64,8 +64,32 @@ _log = _logging.getLogger("alpha_hive.probability_scorecard")
 ALPHAHIVE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ALPHAHIVE_DIR))
 
-STATE_DIR = ALPHAHIVE_DIR / "probability_scorecard_state"
-LEDGER_PATH = STATE_DIR / "published.jsonl"
+# v0.45.260（数据根迁移阶段 2）：STATE_DIR / LEDGER_PATH 此前是从 ALPHAHIVE_DIR
+# （`__file__` 派生）算出的**模块级常量**——概率账本因此完全不读
+# `ALPHA_HIVE_HOME`，是数据根迁移 memory 基线点名过的「概率账本写入且不在
+# 总闸」那个模块本体（`conftest._GUARDED_PRODUCTION_ARTIFACTS` 不含
+# `probability_scorecard_state`），v0.45.259 补跑坐实了具体行号。
+# 改为覆盖钩子 + 调用时求值，与 `signal_archive.py` 等模块同一模式；
+# `ALPHAHIVE_DIR` 本身保留 —— 它只喂上面的 `sys.path.insert`，这个用途合规。
+# 生产今天不设 `ALPHA_HIVE_HOME` 时，`PATHS.home` 兜底到 `hive_logger.__file__`
+# 所在目录，与本文件的 `ALPHAHIVE_DIR` 是同一个仓库根，行为不变。
+STATE_DIR = None
+LEDGER_PATH = None
+
+
+def _state_dir() -> Path:
+    """`probability_scorecard_state/` 目录，**调用时求值**。"""
+    if STATE_DIR is not None:
+        return Path(STATE_DIR)
+    from hive_logger import PATHS
+    return PATHS.home / "probability_scorecard_state"
+
+
+def _ledger_path() -> Path:
+    """前向账本 `published.jsonl` 路径，**调用时求值**。"""
+    if LEDGER_PATH is not None:
+        return Path(LEDGER_PATH)
+    return _state_dir() / "published.jsonl"
 
 #: 时点隔离：T+7 = 7 个交易日，最长约 11 个自然日；14 天是安全余量。
 #: **不要为了多凑样本调小它**——泄漏会让记分卡变好看，那是最难发现的错。
@@ -243,7 +267,7 @@ def record_published(
     两个数为 None 也要记 —— 「这天没印出概率」本身是需要被记住的事实，
     不记就没法回答「覆盖率是多少」，而覆盖率正是换源的主要代价。
     """
-    path = Path(ledger_path) if ledger_path else LEDGER_PATH
+    path = Path(ledger_path) if ledger_path else _ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     key = (str(report_date), str(ticker))
     if path.exists():
@@ -274,7 +298,7 @@ def record_published(
 
 def load_ledger(ledger_path: Optional[Path] = None) -> Tuple[List[Dict], str]:
     """读账本；返回 (rows, status)。status ∈ {ok, missing, error}"""
-    path = Path(ledger_path) if ledger_path else LEDGER_PATH
+    path = Path(ledger_path) if ledger_path else _ledger_path()
     if not path.exists():
         return [], "missing"
     rows: List[Dict] = []
@@ -357,7 +381,11 @@ def load_ml_probabilities(
     次日重跑会晚一天——2026-09-06 核对 110 份重跑，间隔恒为 1 天、同模型，无泄漏。
     v0.45.139 起账本也记 `ml_probability_pct`，日后可改读账本；历史只有 JSON 里有。
     """
-    d = Path(reports_dir) if reports_dir else ALPHAHIVE_DIR
+    if reports_dir is not None:
+        d = Path(reports_dir)
+    else:
+        from hive_logger import PATHS
+        d = PATHS.home
     files = sorted(d.glob("analysis-*-ml-*.json"))
     if not files:
         return {}, "no_reports"
@@ -741,7 +769,7 @@ def main(argv=None) -> int:
     ap.add_argument("--blend-scan", action="store_true",
                     help="扫融合权重 w∈[0,1]（时点隔离），判 PRODUCTION_BLEND_W 是否被打过")
     ap.add_argument("--reports-dir", default=None,
-                    help="analysis-*-ml-*.json 所在目录（默认模块目录）")
+                    help="analysis-*-ml-*.json 所在目录（默认 PATHS.home）")
     ap.add_argument("--generation", default="all",
                     help="只记分某一代 ML 估计量：latest / <版本标签> / all（默认）。"
                          "跨代池化出的最优 w 对任何一代都不成立，见 --blend-scan 输出的 ⚠️")

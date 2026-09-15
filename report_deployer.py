@@ -52,6 +52,24 @@ def verify_cdn_deployment(reporter, repo: str,
     """Push 成功后轮询 CDN，验证 dashboard-data.json 已更新。
 
     纯 advisory — 超时只记 WARNING，不回滚/阻塞。
+
+    ⚠️ 数据根迁移阶段 2 备注（未改，如实记录）：这里读 `dashboard-data.json`
+    走的是调用方传入的 `repo`（= `reporter.agent_helper.git.repo_path`，
+    `agent_toolbox.GitHubTool.__init__` 已经是「`ALPHA_HIVE_HOME` 优先、
+    `__file__` 兜底」的正确写法，本身不是本次迁移要收口的 `__file__` 反模式）。
+    真正的问题是 `repo` 同时承担**两个概念**：git 仓库根（`deploy_static_to_
+    ghpages` 里 `git hash-object`/`commit-tree` 等 plumbing 必须用它，
+    因为那需要 `.git/`）与**报告数据所在目录**（这里读 `dashboard-data.json`、
+    下面 `os.listdir(repo)` 找待部署文件，理应走 `PATHS.home`）。今天两者
+    恰好同目录（`ALPHA_HIVE_HOME` 未设，且 `GitHubTool.repo_path` 与
+    `PATHS.home` 用同一个 `__file__` 兜底），掩盖了这个分歧。
+    数据根迁移计划把这处拆分明确列为**阶段 4**（"gh-pages 从 PATHS 读报告，
+    不再 `os.listdir(仓库)`"）而非阶段 2——因为拆分它意味着改消费链的读取
+    目标（`os.listdir` 的对象从 git 仓库根换成数据根），且现有测试
+    `tests/test_pipeline.py::TestDeployStaticToGhPages` 显式断言
+    "文件放在 `agent_helper.git.repo_path` 下就能被部署找到"，动这里
+    需要同时改测试对生产行为做实质性再定义，超出"改锚点、行为不变"
+    的阶段 2 范围。本阶段只字面记录、不修。
     """
     import json as _json_v
     import time as _time_v
@@ -120,7 +138,21 @@ def verify_cdn_deployment(reporter, repo: str,
 
 
 def deploy_static_to_ghpages(reporter):
-    """用 git plumbing 构建仅含静态文件的 gh-pages 提交并推送。"""
+    """用 git plumbing 构建仅含静态文件的 gh-pages 提交并推送。
+
+    ⚠️ 数据根迁移阶段 2 备注：下面的 `repo`（= `reporter.agent_helper.git.
+    repo_path`）在本函数里身兼两职——git plumbing 的仓库根（`hash-object`/
+    `write-tree`/`commit-tree`/`push` 都必须在这里，因为需要 `.git/`）与
+    `os.listdir(repo)` 找待部署报告文件的数据根。这两个概念的分离属于
+    数据根迁移计划的**阶段 4**（"gh-pages 从 PATHS 读报告，不再
+    `os.listdir(仓库)`"），本阶段（2）只收口独立冻结的 `__file__` 派生
+    路径——`repo` 本身并非如此（`agent_toolbox.GitHubTool.repo_path` 已经
+    是 env 优先、调用时求值的写法），且 `tests/test_pipeline.py::
+    TestDeployStaticToGhPages` 显式绑定了「文件放在 repo 下即可被发现」
+    这一行为，动它需要同时重新定义测试预期，超出本阶段范围，故不改。
+    仅 `.gh_pages_deploy_log.jsonl` 这一处纯本地审计日志（`.gitignore`
+    已忽略、零测试断言具体位置）改落 `PATHS.logs_dir`，理由见下方。
+    """
     import subprocess
     import os
     import resource as _resource
@@ -247,7 +279,13 @@ def deploy_static_to_ghpages(reporter):
         os.remove(idx)
     # 修复 Bug #21：gh-pages push 成功/失败都记录到持久化 queue，
     # 防止"连续网络差时中间几天的 dashboard 永久丢失"
-    _ghp_queue = os.path.join(repo, ".gh_pages_deploy_log.jsonl")
+    # v0.45.260（数据根迁移阶段 2）：此前落在 `repo`（git 仓库根），
+    # 而它是纯本地审计日志（`.gitignore` 已忽略，从不参与 git 提交）——
+    # 与 git plumbing 无关，理应跟 `PATHS.logs_dir` 走。与上面 `repo` 的
+    # git-plumbing/数据双重身份问题是同一根因，但这一处可以安全单独拆开：
+    # 零测试断言它的具体位置，且不影响任何 git 操作。
+    from hive_logger import PATHS as _PATHS_ghp
+    _ghp_queue = str(_PATHS_ghp.logs_dir / ".gh_pages_deploy_log.jsonl")
     try:
         import json as _json_q
         import datetime as _dt_q

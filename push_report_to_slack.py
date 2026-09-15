@@ -27,14 +27,19 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# 确保项目根目录在 sys.path
+# 确保项目根目录在 sys.path（代码锚点，正确用法）
 sys.path.insert(0, str(Path(__file__).parent))
 
-from hive_logger import get_logger, pdt_today
+from hive_logger import get_logger, pdt_today, PATHS
 
 _log = get_logger("push_report_to_slack")
 
-PROJECT_DIR = Path(__file__).parent
+# v0.45.260（数据根迁移阶段 2）：此前有模块级 `PROJECT_DIR = Path(__file__).parent`，
+# 同时喂 sys.path.insert（代码资源，正确，见上一行）与下面的报告 JSON / 三个
+# 缓存目录（数据，错误——不读 `ALPHA_HIVE_HOME`）。拆开两个用途：sys.path 仍用
+# `__file__`；数据路径改在 `main()` 内调用时经 `PATHS.home`/`PATHS.cache_dir`
+# 解析。本脚本默认（无 `--force`）在推送前就直接 `exit(2)`（见下方 main()），
+# 日常生产不会走到这些路径；`--force` 手动调试时才会命中，故一并收口。
 
 
 def main():
@@ -68,15 +73,15 @@ def main():
     date_str = args.date
 
     # ── 定位报告 JSON ──
-    report_path = PROJECT_DIR / f"alpha-hive-daily-{date_str}.json"
+    report_path = PATHS.home / f"alpha-hive-daily-{date_str}.json"
     if not report_path.exists():
         _log.warning("报告文件不存在，跳过推送: %s", report_path)
         sys.exit(2)
 
     # ── 缓存目录 ──
-    cache_dir = str(PROJECT_DIR / "cache")
-    data_cache_dir = str(PROJECT_DIR / "data_cache")
-    finviz_cache_dir = str(PROJECT_DIR / "finviz_cache")
+    cache_dir = str(PATHS.cache_dir)
+    data_cache_dir = str(PATHS.home / "data_cache")
+    finviz_cache_dir = str(PATHS.home / "finviz_cache")
 
     # ── 检测 LLM 模式 ──
     # 优先使用命令行参数；否则从报告 JSON 中读取
