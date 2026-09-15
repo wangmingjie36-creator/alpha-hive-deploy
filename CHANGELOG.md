@@ -5,13 +5,94 @@
 
 ---
 
-## [0.45.258] — 2026-09-15 — 占位（进行中：修复 Gamma 到期日历 Pin Risk 用错到期日选择器，NVDA 现价 $211 却报 $270）
+## [0.45.258] — 2026-09-15 — 修复 Gamma 到期日历 Pin Risk 用错到期日选择器，NVDA 现价 $211 却报 $270
+
+### Fixed（`options_analyzer.py`、`market_intelligence.py`）
+
+用户报告网站 ML 深度报告里 NVDA「下一主要到期日」的 Pin Risk 行权价报 $270（现价 $211，偏离 28%）。
+排查确认两层根因，均已修复：
+
+1. **上游取数被结构性截断**：`OptionsAgent.analyze()` 里 `gamma_calendar` 此前直接复用
+   `calls_df`/`puts_df`——这是 `fetch_options_chain()` 默认到期日选择器
+   （`cboe_options._select_expiries`）产出的视图，按设计排除 DTE<7（且日历口径
+   少算一天，真正最近到期日通常一个都进不了）。这本是为 IV Rank/25Δ Skew 等
+   theta 敏感指标设计的过滤（近月 theta 扭曲），但 Pin Risk 恰恰相反——它要看的
+   就是最近、OI 最集中的到期日。NVDA 实测：真正 3 天后到期、总 OI 226 万的
+   2026-09-18 被整个排除，日历矮子里拔将军选到 11 天后到期、总 OI 只有 30 万的
+   2026-09-25，其中一个孤立的冷门行权价 $270 恰好以微弱优势胜出。
+   改法：换用 `cboe_options.fetch_cboe_chain_for_gex`（advanced_analyzer 的 dealer
+   GEX 已用的同一个全到期日、日历口径 DTE 视图），命中同一份 `_fetch_cboe_payload`
+   缓存、不产生新网络请求；该视图不可用时退回旧的截断链，不比修复前更差。
+2. **候选池本身还有第二层坑**：标准 1 月到期挂牌以来累积时间最长，总 OI 常年
+   滚雪球式超过任何近月到期日（NVDA 实测 2027-01-15 总 OI 246.7 万，反而略高于
+   3 天后到期的 2026-09-18 的 226.2 万）。补第一层后若不设窗口，"按 OI 降序取
+   第一名"会把 122 天外的 LEAPS 认成"下一主要到期日"——Pin Risk/Charm 是随
+   到期临近才增强的做市商对冲效应，那天的行权价今天根本不构成 Pin Risk。
+   新增 `market_intelligence._PIN_RISK_MAX_DTE = 45`（覆盖本月+下月两个标准
+   月度到期），候选池为空（链本身稀疏、近月无挂牌）时退回全量，不误判为
+   "日历不可用"。
+
+NVDA 实测修复后：Pin Risk 到期日 2026-09-18（3 天后），行权价 $210（现价 $211，偏离 0.5%）。
+复查 WATCHLIST 全部 30 只标的：修复后统一正确落在最近到期日（多数为 2026-09-18），
+不再出现被结构性排除的情况；其中 SNOW/MU/RKLB/CRM/VKTX/NEE 等 OI 分布本身较分散
+的标的，最高 OI 行权价只以个位数百分点优势险胜第二、三名（如 SNOW 前 5 个行权价
+OI 占比均在 4.3%~4.8% 之间），这是这些标的期权链本身流动性/集中度的真实特征，
+不是本次改动引入的问题——供后续视情况考虑加"集中度置信度"指标参考。
+BILI 的 CBOE 全链视图取数失败（该 ADR 覆盖问题，与本次改动无关，生产走 yfinance 兜底）。
+
+新增回归测试 `tests/test_gamma_expiry_calendar.py`（近月窗口过滤 + 稀疏链兜底 + 与
+`expiry_oi[0]` 一致性）与 `tests/test_options_analyzer.py::TestGammaCalendarUsesFullExpiryView`
+（wiring：优先全到期日视图 + 视图不可用时退回旧链）。
 
 ## [0.45.257] — 2026-09-15 — 占位（进行中：close_correction.official_closes 加 Twelve Data 兜底——yfinance 批量下载今日全员 429，独立配额补上）
 
 ## [0.45.256] — 2026-09-15 — 占位（进行中：signal_archive 的 guard.consistency_census 抽取器不按 census_source 分段，全量 backfill 会把 v0.45.163 前旧口径写进新名字）
 
-## [0.45.254] — 2026-09-15 — 占位（进行中：二次检查 v0.45.251 的改动）
+## [0.45.254] — 2026-09-15 — 二次检查 v0.45.251：父指针表把装饰器参数/默认参数值/返回注解也算进「函数体内」，会被 `ALLOWED` 连带误放行；其余声称独立复核，全部成立
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。**
+
+### Fixed（`tests/test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`）
+
+1. **`enclosing_function_name` 把 `decorator_list` / `args`（含 defaults、kw_defaults、参数与返回注解）
+   也算作「这个函数的一部分」，语义上却是定义那一刻、于外层作用域求值的。** 这三处（装饰器参数、
+   默认参数值、返回注解）在 AST 里确实是 `FunctionDef` 的子节点，父指针表因此把它们归给了被装饰/
+   带默认值的那个函数——若那个函数名恰好在 `ALLOWED` 里，未锚定的 cwd 读取就被连带放行。
+   实测：`@deco(os.getcwd())` 装饰 `pytest_collection_finish`、`def pytest_collection_finish(session,
+   x=os.getcwd())`、`def pytest_collection_finish() -> os.getcwd()` 三种写法，v0.45.251 版全部返回
+   `[]`（应报 `<module>:N`——这三个函数定义本身就在模块级，装饰器/默认值/注解在模块 import 时于
+   模块作用域求值，与函数体无关）。本仓当前三个 `ALLOWED` 函数都没有这种写法——量过，不是假设；
+   `_hive_log_handler_escapes(sandbox, handlers=None)` 恰好是个无害常量默认值，没撞上纯属巧合，
+   不是这处逻辑本来就对。
+   改：走到 `FunctionDef`/`AsyncFunctionDef` 时先判「一步之下的那个节点」是不是它的
+   `decorator_list` 某项、`args`（涵盖 defaults/kw_defaults/各参数与 vararg/kwarg 注解，全部
+   通过同一个 `arguments` 子节点归拢）、或 `returns` 注解——是就不算「进了这个函数」，继续往外走；
+   只有从 `body` 走上来的才归给它。
+   变异：新增 6 条用例（装饰器/默认值/返回注解各一，均用 `ALLOWED` 里的真名字 `pytest_collection_finish`
+   做探针——只有真名字才测得出「会不会被那顶帽子连带放行」；一条 body 内真调用同名函数的反面对照；
+   一条嵌套函数默认值该归给外层函数而非内层的用例）——v0.45.251 版前三条全部误判成 `[]`，新实现
+   六条全对。**过程中 ruff 抓到一处真失误**：第一版给反面对照用例写了和第 4 条完全重复的 dict key，
+   Python 字典对重复 key 静默取最后一个值——不影响断言正确性（两处期望值都是 `[]`），但暴露了
+   「新加用例前没检查是否已有同款」，已删除重复项、改成引用第 4 条的注释。
+
+### 核过、成立的（v0.45.251）
+
+- claim 1（裸名 import 绕过 `.attr()` 形态）的修法本身：复读 `bare_names` 预扫与主循环合流逻辑，
+  与描述一致；用当前真实 `conftest.py` 跑 `test_no_cwd_derived_watch_in_conftest`，绿——新逻辑
+  没有引入误报。
+- `invocation_params` 捕获时机：pytest 版本未变，结论不变。
+- `import subprocess as _sp`（`test_paths_not_frozen_at_import.py:372`）只伪造 `git ls-files`：
+  复读确认，结论不变。
+- 无测试调 `monkeypatch.undo()`：复查仍是空。
+
+### 验证
+
+- `tests/test_reads_own_checkout.py` + `tests/test_ml_model_path_isolation.py` +
+  `tests/test_hive_logger_not_frozen.py` + `tests/test_cwd_and_sys_path_hygiene.py`：74 passed。
+- 全套从仓库根（合并 origin/main 之前）：1 failed（`TestCoverageHorizon`，设计如此）/
+  4648 passed / 1 skipped / 2 xfailed。
+
+---
 
 ## [0.45.253] — 2026-09-15 — 占位（进行中：二次检查 v0.45.233——config 缓存目录取值未规范化 / 总闸把 watchlist_override.yaml 当代码 / 三处推断写成了实测）
 
