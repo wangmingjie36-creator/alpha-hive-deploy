@@ -5,7 +5,87 @@
 
 ---
 
-## [0.45.265] — 2026-09-15 — 占位（进行中：signal_archive.analyze() 按世代边界切片，系统输出类信号不再跨世代池化）
+## [0.45.265] — 2026-09-15 — `signal_archive.analyze()` 按世代切片：系统输出只算当前世代，原始观测保留全史
+
+v0.45.256「第 3 步评估」留下的那一类：**生产者换了口径、抽取器与归档一致**。v0.45.163 让
+`agent.GuardBeeSentinel.score/direction` 换了量（risk_adj Δ 均值 −0.485、方向 26.2% 不一致），抽取器还是
+那一行 `_agent_score`，全量 `--backfill --dry-run`「改值 0」—— 抽取层看不见，归档也没写错；错在 `analyze()` /
+`load_panel()` 直接拉整张表，把边界前后两个量当成一条序列算 IC。各蜂输出分每改一次逻辑就换一次量，
+v0.45.182 的「改名」不可行 ⇒ 判别放在做聚合的 `analyze()`。
+
+### 量测（生产库副本：sqlite3 在线备份 API，integrity ok，生产库 sha 前后一致；只读）
+
+- `predictions` 已成熟 T+7 样本 1,163 条、**最晚 2026-09-02**；而 19 条世代边界里 16 条在 09-05 之后 ⇒
+  **影响面划得准不准，直接决定哪些信号还剩样本**，不能一刀切。
+- 旧行为：63 个信号进表。`--pool-generations` 与**改动前的文件**实跑输出 **63/63 行逐字节一致**。
+- 新行为：**39 个进表，与旧行为逐行逐字节一致**（全表地板同为 0.065）；**24 个被切到本世代 0 条**，
+  全部在新增的「世代切片」小节点名（起点、经由哪条边界、切掉多少条）。
+- 旧行为下被判 🟢 候选、现被切掉的两个：`agent.ScoutBeeNova.direction`（IC −0.176，3/4）、
+  `crowding.adj_factor`（−0.111，3/4）—— 样本横跨 v0.45.30 / v0.45.50 两次拥挤度公式换代，那两个「候选」是池化出来的。
+
+### 第 2 步评估：哪些信号受哪些边界影响（逐条读边界原文 + 代码出边）
+
+| 信号 | 当前世代起点 | 经由 |
+|---|---|---|
+| `composite.final_score` | 09-14（v0.45.243） | 结构性：全部边界（`_COHORT_HISTORY` 本就是它的世代表，与 `assess()` 同一条） |
+| `agent.OracleBeeEcho.score` / `bear.overval_bear` | 09-05（v0.45.128） | 直接：IV 换源 / P/E 复活 |
+| `agent.OracleBeeEcho.direction` | 09-11（v0.45.201） | 直接：去掉关键词投票 |
+| Scout / Rival / Guard / Bear 的 `agent.*`、`ml.*`、`crowding.score/signal/adj_factor/comp.consensus_strength`、`guard.adj_factor`、`guard.consistency_census`、`bear.score`、`composite.swarm_agreement` | 09-11（v0.45.201） | **依赖边**：Oracle 方向被 Guard 普查、Rival 的拥挤度特征、Scout 拥挤度读板（`consensus_strength` = 读板时同伴看多数）读到 |
+| `guard.consistency` / `guard.top_signals_count`（退役名） | 09-14 | 不认识的信号 ⇒ 受全部边界约束 |
+| 其余 40 个（库里现有 65 个信号，程序枚举）：`options.*` 7、`insider.*` 7、`price.*` 3、`catalyst.*` 3、`fund.*` 2、`buzz.comp.*` 4、`crowding.comp` 4、Bear 三项子分、Buzz / Chronos 两蜂 4、`congress.score`、`sentiment.pct`、`guard.macro_adj` | 全史 | 不读系统输出，也没有边界直接点名（`market.*` 与 3 个新 `buzz.comp.*` 已归类为叶子，库里尚无数据） |
+
+逐条核过、**不列**的（容易误判的几处）：
+- **`options.gamma_exposure` 不受 v0.45.197 影响**：它是 OptionsAgent 在主链上的 `calculate_gamma_exposure`，
+  换视图的是 `advanced_analyzer` 的 dealer GEX（不入档）。
+- v0.45.50 ③ 的 0DTE `or 30` 在 `OptionsDataFetcher` 的 BS gamma 回填里，主链 `_select_expiries` 只取 DTE≥7 ⇒ 走不到。
+- v0.45.163 对 `guard.adj_factor`：输入确实变了，但 v0.45.256 实测同池三档占比几乎不动 ⇒ **照证据不列**（最终仍经 v0.45.201 依赖边在 09-11 换代）。
+- v0.45.234 / 238 / 243：修的是原始输入的**测量误差**（陈旧盘中价 / 快照槽位错会话 / 补跑收盘兜底），不是换定义 ⇒ 不给原始观测切代；已知坏日子该走 `QUARANTINE`。
+- v0.45.172 / 176 / 197 / 209 / 212 / 228 / 235：只在 Queen 层，各蜂自身输出不变 ⇒ 只约束 `composite.final_score`。
+
+### Added
+
+- `signal_archive.py`「世代切片」段：
+  - `COHORT_SIGNAL_SCOPE`：边界 version → 它**直接**改了哪些归档信号（fnmatch 模式；空元组＝只动 final_score）；
+  - `SIGNAL_UPSTREAM`：哪些信号读别的系统输出，**运行时求传递闭包** —— 追加边界的人只写直接目标，不必自己推「Bear 读 Guard、Rival 读拥挤度」；
+  - `SIGNAL_LEAVES`（**逐个列名不用通配**，否则新增的 `options.xxx` 若由系统输出算出会被静默归成叶子）、`ALWAYS_SLICED`、`UNARCHIVED_NODES`（CodeExecutor 不入档但被读）；
+  - `generation_boundaries()`：取**列表顺序上最后一条**适用边界（与 `assess()`「判据取最后一条」同语义，不按日期大小）。
+    两条保守规则：未声明影响面的边界 ⇒ 影响全部信号；不认识的信号 ⇒ 受全部边界约束。
+- `analyze(pool_generations=False)`：每行新增 `gen_start` / `gen_version` / `n_excluded` / `noise_floor`；
+  IC、固定效应分解、训练/测试分段**三处跨日聚合都只看本世代**。
+  **被切过的信号在自己的骨架上重算噪音地板** —— 地板对天数高度敏感，沿用全史骨架会系统性偏低 ⇒ 假阳性
+  （合成面板实测 20 天 0.146 vs 60 天 0.104）。未被切的沿用全表地板，既有行为不变。
+- `print_report` 世代切片小节 + CLI `--pool-generations`（跨世代混算只作对照，报告头部标警告）。
+- `tests/test_signal_archive_generations.py`（52 项）：行为 11 项（系统输出只看本世代 / **原始观测保留全史（成对）** /
+  池化前提自证 / final_score 恒切 / 下游连带与**不连坐（成对）** / 退役名保守 / 未声明边界点名 / 被切光的信号必须露面 /
+  地板重算 / 报告两项）+ 真实表对账 41 项（每条边界必须声明 / 无过期声明 / 模式无拼错 / 每个抽取器必须归类 /
+  final_score 起点 ≡ `assess()` / 25 个原始观测不切 / 10 个 CHANGELOG 实测换量的系统输出必切）。
+
+### Changed
+
+- `analyze()` 返回值 `(rows, floor)` → `(rows, floor, generations)`（全仓唯一调用方 `main()` 已同步）。
+- `load_panel()` docstring 标明「返回整张表、不切世代」；`guard.consistency_census` 注释补一句「改名仍必要 —— 直接读表的消费方不经过 `analyze()`」。
+- `ic_rerun_readiness._COHORT_HISTORY` **表头注释**加指针：追加边界时同步声明影响面。**未改任何条目、未新增边界**（本版不改评分来源，也不改 `predictions`）。
+
+### 核对
+
+- 改前：41 红 + 10 error，唯一绿的是前提自证 `test_boundary_versions_are_unique`。
+- mutation **20/20 被杀**（每轮清 `__pycache__`、锚点唯一、还原后 sha 比对）：不切片 / 一律切 / final_score 不恒切 /
+  未知信号不保守 / 不传递闭包 / 地板沿用全表 / 未声明边界当空 / `>=` 改 `>` / 分解用全史 / 分段用全史 /
+  报告不列被切光的 / 删一条声明 / 叶子漏登记 / 原始观测被声明 / 不报未声明边界 / 去掉混算警告 / 删 Bear 依赖边 /
+  n_samples 用全史 / v0.45.201 声明置空 / 拼错模式。
+- 受影响 9 个既有测试文件 262 passed；ruff 0.13.3 对改动文件 All checks passed。
+- 全套 **4,796 passed / 1 failed** / 1 skipped / 2 xfailed：唯一红的是 `test_economic_calendar.py::TestCoverageHorizon`
+  （BLS 日程覆盖天数低于阈值，按日期设计定期变红，v0.45.256 记录过同一条），与本版无关，未动。
+
+### 不做 / 留给用户的判断
+
+1. **`consensus_strength` 竞态边**：Phase-1 并行，Scout 读板读到哪些同伴取决于竞态。按「读的是同伴方向」保守建了边，
+   于是 Scout / 拥挤度 / ml 在 09-11 而不是 08-27 换代。**今天零实际差别**（两种起点下成熟样本都不足 10 天），
+   只影响往后约两周样本。去掉这条边就删 `SIGNAL_UPSTREAM` 里 `crowding.comp.consensus_strength` 一行。
+2. **已知盲区：`_COHORT_HISTORY` 始于 2026-08-17**，之前的系统逻辑改动从未登记 ⇒ 无边界约束的系统输出
+   （`agent.BuzzBeeWhisper.*` / `agent.ChronosBeeHorizon.*`）的「全史」仍可能跨未登记的改动池化。本版只照登记表切，不替历史补登。
+3. v0.45.238 普查出的 171 份「装着前一会话」的期权快照（11 个槽位日），是 `options.*` 的 `QUARANTINE` 候选，未做。
+4. `experiments/misjudgment_pattern_walkforward.py` 等直接读表的脚本不经过 `analyze()`，未改。
 
 ## [0.45.264] — 2026-09-15 — 数据根迁移阶段 3 备份上线（本地部分）：新增 `data_backup/` 导出/密钥扫描/恢复/编排原型，本地裸仓库全链路演练通过（含 3 处变异真跑）；建远端私有仓库、首次推送到 GitHub、接入编排器——按任务边界本次不做，留 3.5 设计待批准
 

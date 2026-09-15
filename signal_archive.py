@@ -27,9 +27,10 @@
     # 从历史 .swarm_results_*.json 回填（一次性）
     /usr/local/bin/python3 signal_archive.py --backfill
 
-    # 分析：每个信号的四口径 IC + 噪音地板对照
+    # 分析：每个信号的四口径 IC + 噪音地板对照（系统输出只算当前世代，见「世代切片」）
     /usr/local/bin/python3 signal_archive.py --analyze
     /usr/local/bin/python3 signal_archive.py --analyze --min-samples 100
+    /usr/local/bin/python3 signal_archive.py --analyze --pool-generations   # 跨世代混算（仅作对照）
 
     # 查看已归档的信号清单与覆盖度
     /usr/local/bin/python3 signal_archive.py --list
@@ -51,9 +52,10 @@ import re
 import sqlite3
 import sys
 from collections import defaultdict
+from fnmatch import fnmatchcase
 from pathlib import Path
 from statistics import mean
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 # v0.45.160：`DB_PATH` 现在是**覆盖钩子**，默认 `None` ⇒ 运行时解析 `PATHS.db`。
 # 保留这个名字是因为 `tests/` 有多处 `monkeypatch.setattr(<mod>, "DB_PATH", ...)`
@@ -416,6 +418,9 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     # ⚠️ v0.45.256：改名只管得住**新写入**。`backfill()` 用当前抽取器重写全部历史，
     # 所以新名字必须**按口径取值**，否则一次全量回填就把旧口径写回来 —— 见
     # `_guard_census_consistency`。`adj_factor` / `macro_adj` 实测未换量，不门控。
+    #
+    # v0.45.265：`analyze()` 已按世代切片（见 `COHORT_SIGNAL_SCOPE`），但**改名仍必要**——
+    # 直接读表的消费方（如 `experiments/misjudgment_pattern_walkforward.py`）不经过 `analyze()`。
     "guard.consistency_census": _guard_census_consistency,
     "guard.adj_factor": _path("agent_details.GuardBeeSentinel.details.adjustment_factor"),
     "guard.macro_adj": _path("agent_details.GuardBeeSentinel.details.macro_adj"),
@@ -859,6 +864,205 @@ def _forward_realized_vol(tickers: List[str], dates: List[str],
         return {}
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# 世代切片（v0.45.265）
+# ────────────────────────────────────────────────────────────────────────────
+#
+# 抽取器处理不了的一类问题：**生产者换了口径、抽取器与归档一致**。v0.45.163 让
+# `agent.GuardBeeSentinel.score` 换了量（risk_adj Δ 均值 −0.485、方向 26.2% 不一致），
+# 抽取器还是那一行 `_agent_score`，全量 `--backfill --dry-run`「改值 0」—— 抽取层看不见，
+# 归档也没写错。错在 `analyze()` 把边界前后两个量当成一条序列算 IC。
+# 各蜂输出分每改一次逻辑就换一次量，逐次改名（v0.45.182 的解法）不可行
+# ⇒ 判别放在做聚合的这一层：每个信号只用它**当前世代**的样本。
+#
+# 分工（边界日期只在 `ic_rerun_readiness._COHORT_HISTORY` 维护，这里不抄）：
+#   · `COHORT_SIGNAL_SCOPE`：每条边界**直接**改了哪些归档信号；
+#   · `SIGNAL_UPSTREAM`：哪些信号读别的系统输出 —— 上游换代，下游同一天换代（传递闭包）。
+#     追加边界的人只写直接目标，不必自己推「Bear 读 Guard、Rival 读拥挤度……」；
+#   · `SIGNAL_LEAVES`：不读任何系统输出的信号，只在边界**直接**点名时换代；
+#   · `ALWAYS_SLICED`：`composite.final_score` 受全部边界约束 —— `_COHORT_HISTORY`
+#     本来就是它的世代表，与 `ic_rerun_readiness.assess()` 用同一条边界。
+#
+# ⚠️ 判据：这条边界改的是**产生该值的函数**（算法 / 来源 / 哨兵语义 / 读的系统输出），
+#   还是只修了**原始输入的测量误差**？前者换代；后者（v0.45.234 陈旧盘中价、v0.45.238
+#   快照槽位错会话、v0.45.243 补跑收盘兜底）不换代，已知坏日子走 `QUARANTINE`。
+#   有实测说某量没换（v0.45.256 对 `guard.adj_factor` 的核对）⇒ 照证据不列；
+#   没测过 ⇒ 按代码出边保守列。宁可丢样本（报告里点名），不静默池化。
+#
+# ⚠️ 已知盲区：`_COHORT_HISTORY` 始于 2026-08-17，此前的系统逻辑改动从未登记 ⇒
+#   无边界约束的系统输出（如 `agent.ChronosBeeHorizon.*`）的「全史」仍可能跨未登记的
+#   改动池化。本机制只照登记表切，不替历史补登。
+
+#: 被入档信号读取、自身不入档的系统输出 —— 只为让边界与依赖边能指向它。
+UNARCHIVED_NODES = frozenset({"agent.CodeExecutorAgent.score",
+                              "agent.CodeExecutorAgent.direction"})
+
+# Phase-1 并行发布的蜂（`alpha_hive_daily_report._init_scan_context`）；其后顺序是 Rival → Guard → Bear
+_PHASE1 = ("ScoutBeeNova", "OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon", "CodeExecutorAgent")
+_PHASE1_DIRS = tuple(f"agent.{a}.direction" for a in _PHASE1)
+
+#: 下游信号模式 → 它读的**系统输出**（上游模式）。只登记「读系统输出」的边；
+#: 读原始市场数据（期权链 / SEC / 行情）不是边 —— 那些量不随系统逻辑换代。
+SIGNAL_UPSTREAM: Dict[str, Tuple[str, ...]] = {
+    # Scout 拥挤度的 consensus_strength = 读板那一刻已发布同伴的看多数
+    # （`real_data_sources.get_bullish_agents_count`）。Phase-1 并行 ⇒ 读到谁取决于竞态，
+    # 但读到的是同伴**方向**：生产库 03~09 月取值 0~5 只看多，不是常数。
+    "crowding.comp.consensus_strength": tuple(d for d in _PHASE1_DIRS if "ScoutBeeNova" not in d),
+    "crowding.score": ("crowding.comp.*",),
+    "crowding.signal": ("crowding.score",),
+    "crowding.adj_factor": ("crowding.score",),
+    "agent.ScoutBeeNova.*": ("crowding.score", "crowding.adj_factor"),    # 方向按拥挤度阈值定
+    # Rival（Phase-1.4）：自算一份拥挤度当 ML 特征（此时 Phase-1 已全部发布），读 Chronos 的 self_score。
+    # Rival / Guard 自算的拥挤度不入档，与 Scout 同一个 CrowdingDetector 公式 ⇒ 以
+    # `crowding.score` 代表「公式换代」（下面 guard.adj_factor 同理）
+    "ml.*": ("crowding.score", "agent.ChronosBeeHorizon.score") + _PHASE1_DIRS,
+    "agent.RivalBeeVanguard.*": ("ml.*",),
+    # Guard：avg_score / consistency 读 Phase-1 + Rival 的分与方向；自算一份拥挤度（看多数取自同一份普查）
+    "guard.consistency_census": _PHASE1_DIRS + ("agent.RivalBeeVanguard.direction",),
+    "guard.adj_factor": ("crowding.score",) + _PHASE1_DIRS + ("agent.RivalBeeVanguard.direction",),
+    "agent.GuardBeeSentinel.*": tuple(f"agent.{a}.*" for a in _PHASE1) + (
+        "agent.RivalBeeVanguard.*", "guard.consistency_census", "guard.adj_factor"),
+    # Bear 读 Rival 的 ml_probability / expected_7d、Guard 的 consistency / conflict_type
+    "bear.score": ("ml.*", "agent.GuardBeeSentinel.*", "guard.consistency_census",
+                   "bear.insider_bear", "bear.overval_bear", "bear.options_bear", "bear.short_int_bear"),
+    "agent.BearBeeContrarian.*": ("bear.score",),
+    # 多数派占比：遍历 agent_details 里**全部**蜂的方向（含 CodeExecutor / Guard / Bear）
+    "composite.swarm_agreement": ("agent.*.direction",),
+}
+
+#: 受**全部**边界约束的信号（见上方分工）。
+ALWAYS_SLICED = frozenset({"composite.final_score"})
+
+#: 不读任何系统输出的现役信号。**逐个列名，不用通配**：新增 `options.xxx` 若由系统输出
+#: 算出，通配会把它静默归成叶子。新增抽取器必须二选一 —— 进本集合，或在 `SIGNAL_UPSTREAM`
+#: 登记它读什么（`tests/test_signal_archive_generations.py` 会红）。
+SIGNAL_LEAVES = frozenset({
+    "insider.sentiment", "insider.score", "insider.filings", "insider.dollar_bought",
+    "insider.dollar_sold", "insider.distinct_buyers", "insider.officer_buys", "congress.score",
+    "price.momentum_5d", "price.volatility_20d", "price.volume_ratio",
+    "options.iv_current", "options.put_call_ratio", "options.gamma_exposure", "options.total_oi",
+    "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real",
+    "sentiment.pct",
+    "bear.insider_bear", "bear.overval_bear", "bear.options_bear", "bear.short_int_bear",
+    "crowding.comp.social_volume", "crowding.comp.google_trends",
+    "crowding.comp.seeking_alpha_views", "crowding.comp.short_squeeze_risk",
+    "catalyst.count", "catalyst.nearest_days", "catalyst.max_weight",
+    "buzz.comp.momentum_signal", "buzz.comp.volume_signal", "buzz.comp.volatility_signal",
+    "buzz.comp.reddit_signal", "buzz.comp.news_signal", "buzz.comp.yahoo_signal",
+    "buzz.comp.fear_greed_signal",
+    "market.fear_greed", "market.fear_greed_is_cnn",
+    "guard.macro_adj",                       # `_calc_macro_adjustment`，不走读板路径
+    "fund.pe_ratio", "fund.market_cap",
+    # 这三只蜂不读板：输入全是原始数据
+    "agent.OracleBeeEcho.score", "agent.OracleBeeEcho.direction",
+    "agent.BuzzBeeWhisper.score", "agent.BuzzBeeWhisper.direction",
+    "agent.ChronosBeeHorizon.score", "agent.ChronosBeeHorizon.direction",
+})
+
+#: `_COHORT_HISTORY` 的 version → 该边界**直接**改了哪些归档信号（fnmatch 模式）。
+#: 下游由 `SIGNAL_UPSTREAM` 自动推出；`composite.final_score` 恒在内，不必写。
+#: 追加边界时必须同步在这里声明（空元组＝只动了 final_score）—— 漏了测试红，
+#: 运行时则按「影响全部信号」处理并在报告里点名。
+COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
+    # 08-17：expected_returns 去偏 + probability 居中 + RivalBee 三特征接真实数据
+    "v0.44.1~0.44.3": ("ml.*",),
+    # 08-26：拥挤度公式删 polymarket_volatility、缺失分量改在现存分量间重归一化。
+    # Scout 与 Guard 各算一份、同走 CrowdingDetector ⇒ 两份都换代（Rival 那份经依赖边）。
+    # 分量本身未变（stocktwits_volume → social_volume 是同一个量改名，见 `_crowding_comp`）
+    "v0.45.30": ("crowding.score", "guard.adj_factor"),
+    # 08-27：① 拥挤度全分量不可得返回 None（旧：20.59 →「低拥挤」→ 1.2 加分）；
+    # ② 训练集剔除维度缺失样本 ⇒ ml.*；⑥ 信息素坏值 1.0 → 0.5 ⇒ 板排序 ⇒ Guard 的 n=5 窗口。
+    # ③ 0DTE `or 30` 在 `OptionsDataFetcher` 的 BS gamma 回填里，而主链 `_select_expiries`
+    # 只取 DTE≥7 ⇒ `options.gamma_exposure` 走不到，不列
+    "v0.45.50": ("crowding.score", "guard.adj_factor", "ml.*", "agent.GuardBeeSentinel.*"),
+    # 09-05：① Oracle 期限结构 / 25Δ skew 的 IV 换 CBOE ⇒ options_score（`options.iv_current`
+    # 本就取自 OptionsAgent，不变）；② Bear 估值项 P/E 复活
+    "v0.45.128": ("agent.OracleBeeEcho.*", "bear.overval_bear"),
+    # 09-07：Rival 读 Chronos 的 catalyst_quality 修复。probability 在当前 HGB 上 0/173 变，
+    # 但那是模型性质不是定义性质（该条原文「定义变了就登记」）⇒ ml.* 整体列
+    "v0.45.151": ("ml.*",),
+    # 09-07：detect_resonance 改读定点视图 ⇒ Guard 自身的共振判定（risk_adj 维分）
+    "v0.45.156": ("agent.GuardBeeSentinel.*",),
+    # 09-07：Guard 改走普查。`guard.adj_factor` 的输入也跟着变（看多数改取普查），但 v0.45.256
+    # 实测同一 30 只池 08-24~09-04 vs 09-08~09-14 三档占比几乎不动 ⇒ 照证据不列
+    "v0.45.163": ("agent.GuardBeeSentinel.*", "guard.consistency_census"),
+    # 09-09 / 09-10：权重（config 改写、adapt_weights 旁路断开）—— 纯聚合层
+    "v0.45.172": (),
+    "v0.45.176": (),
+    # 09-10：CodeExecutor 兜底分支不再恒投 6.0/看多（未入档，经依赖边传给读它的信号）
+    "v0.45.191": ("agent.CodeExecutorAgent.*",),
+    # 09-11：Dealer GEX 换全到期日视图，只经政体调整进 final_score。
+    # ⚠️ `options.gamma_exposure` 是 OptionsAgent 在主链上的 `calculate_gamma_exposure`，
+    # 不是 advanced_analyzer 的 dealer GEX，本边界没碰它
+    "v0.45.197": (),
+    # 09-11：Oracle 方向去掉「数中文摘要关键词」那层投票（分数不变）
+    "v0.45.201": ("agent.OracleBeeEcho.direction",),
+    # 09-11 / 09-13：Guard 的 data_quality 上报、Bear/Guard 退出计票、豁免蜂 ML 乘数、
+    # Guard 退出共振 —— 都只在 Queen 层，各蜂自身输出不变
+    "v0.45.209": (),
+    "v0.45.212": (),
+    "v0.45.228": (),
+    "v0.45.235": (),
+    # 09-14：原始输入的测量误差修正，不是换定义（见上方判据）
+    "v0.45.234": (),
+    "v0.45.238": (),
+    "v0.45.243": (),
+}
+
+
+def _cohort_history() -> list:
+    """边界表**调用时**读 —— 不在 import 期抄一份（日后追加、测试替换都要生效）。"""
+    import ic_rerun_readiness
+    return ic_rerun_readiness._COHORT_HISTORY
+
+
+def _matching(names: Iterable[str], patterns: Iterable[str]) -> Set[str]:
+    pats = tuple(patterns)
+    return {n for n in names if any(fnmatchcase(n, p) for p in pats)}
+
+
+def _scope_closure(direct: Iterable[str], universe: Set[str]) -> Set[str]:
+    """直接目标 + 沿 `SIGNAL_UPSTREAM` 往下游传递，直到不再扩张。"""
+    hit = _matching(universe, direct)
+    grew = True
+    while grew:
+        grew = False
+        for down, ups in SIGNAL_UPSTREAM.items():
+            if not _matching(hit, ups):
+                continue
+            new = _matching(universe, (down,)) - hit
+            if new:
+                hit |= new
+                grew = True
+    return hit
+
+
+def generation_boundaries(signals: Iterable[str],
+                          history: Optional[list] = None) -> Dict[str, Dict]:
+    """每个信号**当前世代**的起点：`{signal: {"date", "version", "undeclared"}}`。
+
+    没有任何边界约束的信号**不在**结果里（＝全史可用）。取「最后一条适用的边界」，
+    按 `_COHORT_HISTORY` 的列表顺序而非日期大小 —— 与 `assess()` 的「判据取最后一条」同一语义。
+
+    保守规则（两条都会在 `analyze()` 的世代报告里露面）：
+      · 边界没在 `COHORT_SIGNAL_SCOPE` 声明 ⇒ 影响全部信号；
+      · 信号不认识（退役名如 `guard.consistency`，或库里有、抽取器没有）⇒ 受全部边界约束。
+    """
+    history = _cohort_history() if history is None else history
+    signals = set(signals)
+    known = set(SIGNAL_EXTRACTORS) | UNARCHIVED_NODES
+    universe = known | signals
+    unknown = signals - known
+    out: Dict[str, Dict] = {}
+    for date, version, _reason in history:
+        declared = version in COHORT_SIGNAL_SCOPE
+        hit = (_scope_closure(COHORT_SIGNAL_SCOPE[version], universe) if declared
+               else set(universe))
+        for s in (hit | ALWAYS_SLICED | unknown) & signals:
+            out[s] = {"date": date, "version": version, "undeclared": not declared}
+    return out
+
+
 def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
                min_width: int = 5,
                with_ticker: bool = False,
@@ -868,6 +1072,9 @@ def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
     前瞻收益用**纯价格变动**（price_{h} / price_at_predict），而非 return_t7 列
     ——后者是 `_simulate_trade_path` 的路径依赖收益，42.5% 的行被 SL/TP 档位截断，
     会制造大量并列值破坏 rank-IC 的尾部排序（详见 ic_diagnostics 模块注释）。
+
+    ⚠️ 返回的是**整张表**，不按世代切 —— 切片在做聚合的 `analyze()` 里（v0.45.265）。
+    自己拿这个面板算跨日统计量的，先过一遍 `generation_boundaries()`。
     """
     db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     price_col, checked_col = f"price_{horizon}", f"checked_{horizon}"
@@ -913,13 +1120,25 @@ def load_panel(db_path: Optional[Path] = None, horizon: str = "t7",
 
 def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
             min_samples: int = 50, min_width: int = 5,
-            draws: int = 200, target_metric: str = "return") -> List[Dict]:
+            draws: int = 200, target_metric: str = "return",
+            pool_generations: bool = False):
     """对每个归档信号跑四口径 IC + 噪音地板对照。
+
+    v0.45.265：每个信号只用它**当前世代**的样本（`generation_boundaries`）。
+    不读系统输出、也没被边界直接点名的信号（options.* / insider 金额 / 行情 …）照旧用全史。
 
     Args:
         target_metric: "return" = 预测方向收益（现状）；
             "vol" = 预测未来已实现波动。后者的可学性高一个数量级
             （实测同宇宙同特征 IC 0.710 vs 0.012），见 `_forward_realized_vol` 注释。
+        pool_generations: True = 旧行为（跨世代混算），只作对照；报告会标出。
+
+    Returns:
+        面板为空时 `[]`；否则 `(rows, floor, generations)`。
+        `generations = {"pooled", "undeclared_versions",
+                        "signals": {信号: {gen_start, gen_version, n_total, n_in_generation, n_excluded}}}`
+        —— 覆盖面板里**全部**信号，含被切到样本不足、没进 `rows` 的那些
+        （否则「被切光」与「从来没有数据」长得一样）。
     """
     db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     sys.path.insert(0, str(Path(__file__).parent))
@@ -935,21 +1154,44 @@ def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
     lag, period = (7, "周") if horizon == "t7" else (30, "月")
     # 显式指定地板基准：`composite.final_score` 覆盖最全（每个标的每天都有）。
     # 不能依赖默认 fallback —— 地板对基准的日期覆盖高度敏感（实测 0.076 vs 0.116）。
+    # 用**未切**的面板：地板只用骨架（日期 / 宽度 / 收益），随机化掉了信号取值，与世代无关。
     floor = icd.noise_floor(panel, lag, period, draws=draws,
                             base_key="composite.final_score")
-    thr = floor.get("ic_p95", float("nan"))
+    thr_full = floor.get("ic_p95", float("nan"))
+
+    history = _cohort_history()
+    gens = {} if pool_generations else generation_boundaries(panel, history)
+    report: Dict[str, Any] = {
+        "pooled": pool_generations,
+        "undeclared_versions": ([] if pool_generations else
+                                [v for _d, v, _r in history if v not in COHORT_SIGNAL_SCOPE]),
+        "signals": {},
+    }
 
     out = []
-    for sig, by_day in sorted(panel.items()):
-        n = sum(len(v) for v in by_day.values())
+    for sig, by_day_all in sorted(panel_t.items()):
+        g = gens.get(sig)
+        by_day_t = ({d: v for d, v in by_day_all.items() if d >= g["date"]} if g
+                    else by_day_all)
+        n_total = sum(len(v) for v in by_day_all.values())
+        n = sum(len(v) for v in by_day_t.values())
+        report["signals"][sig] = {
+            "gen_start": g["date"] if g else None, "gen_version": g["version"] if g else None,
+            "n_total": n_total, "n_in_generation": n, "n_excluded": n_total - n}
         if n < min_samples:
             continue
+        by_day = panel[sig] if n == n_total else {d: panel[sig][d] for d in by_day_t}
         s = icd._ic_series_from_pairs(by_day)
         if len(s) < 10:
             continue
         r = icd.diagnose(s, lag, period)
         if not r:
             continue
+        # 被切过 ⇒ 骨架（天数）变了，地板必须在本世代骨架上重算：天数少 ⇒ 地板高，
+        # 沿用全史骨架的地板会系统性偏低 ⇒ 假阳性。未被切的沿用全表地板（既有行为）。
+        thr = (thr_full if n == n_total else
+               icd.noise_floor({sig: by_day}, lag, period, draws=draws,
+                               base_key=sig).get("ic_p95", float("nan")))
         # 覆盖度：非并列值的比例——稀疏事件型信号（如 cluster buying）
         # 大量并列会让 rank-IC 失真，必须显式暴露
         vals = [a for v in by_day.values() for a, _ in v]
@@ -957,25 +1199,31 @@ def analyze(db_path: Optional[Path] = None, horizon: str = "t7",
         r.update({
             "signal": sig, "n_samples": n, "n_days": len(by_day),
             "distinct_ratio": distinct_ratio,
+            "noise_floor": thr,
             "beats_noise": bool(math.isfinite(thr) and abs(r["daily_ic"]) > thr),
+            **{k: report["signals"][sig][k] for k in ("gen_start", "gen_version", "n_excluded")},
         })
         # 固定效应 vs 时变分解 —— 区分「选股标签」与「择时信号」
-        r.update(decompose_fixed_vs_timevarying(panel_t[sig]) or
+        r.update(decompose_fixed_vs_timevarying(by_day_t) or
                  {"nature": "?", "ic_fixed": float("nan"), "ic_within": float("nan")})
         # 训练/测试分段 —— 检测全样本 IC 是否只是异号平均
         r.update(split_stability(by_day, thr if math.isfinite(thr) else 0.077))
         out.append(r)
     out.sort(key=lambda x: -abs(x["daily_ic"]))
-    return out, floor
+    return out, floor, report
 
 
 def print_report(rows: List[Dict], floor: Dict, horizon: str,
-                 target_metric: str = "return") -> None:
+                 target_metric: str = "return",
+                 generations: Optional[Dict] = None) -> None:
     tgt = {"return": "方向收益", "vol": "已实现波动"}.get(target_metric, target_metric)
     print("=" * 112)
     print(f"【单信号 IC 档案】horizon={horizon}  目标={tgt}   "
           f"共 {len(rows)} 个信号达到最小样本量")
     print("=" * 112)
+    if generations and generations.get("pooled"):
+        print("  ⚠️ --pool-generations：跨世代混算。系统输出在世代边界上换过量，")
+        print("     下表的 IC 是几个不同量的混合，不描述任何一个世代 —— 只作对照，勿据此下结论")
     if floor:
         print(f"  🎯 噪音地板（随机 ×{floor['n_draws']}）：|日度IC| 95分位 = "
               f"{floor['ic_p95']:.3f} ｜ 通过口径数 95分位 = {floor['passed_p95']:.0f}/4")
@@ -995,13 +1243,17 @@ def print_report(rows: List[Dict], floor: Dict, horizon: str,
         real = r["beats_noise"] and r["passed_methods"] >= 3
         mark = "🟢 候选" if real else ("🟡 口径不足" if r["beats_noise"] else "⚪ 噪音带内")
         warn = " ⚠️稀疏" if r["distinct_ratio"] < 0.25 else ""
+        gen = (f" ｜世代自 {r['gen_start']}，地板 {r['noise_floor']:.3f}"
+               if r.get("gen_start") and r.get("n_excluded") else "")
         print(f"{r['signal']:<32}{r['n_samples']:>6}"
               f"{r['daily_ic']:>+9.4f}{r['daily_t']:>+7.2f}{r['passed_methods']:>4}/4"
               f"{_f(r.get('ic_train')):>9}{_f(r.get('ic_test')):>9}"
               f"{STAB_MARK.get(r.get('stability','?'),'?'):>9}"
               f"{_f(r.get('ic_fixed')):>9}{_f(r.get('ic_within')):>9}"
-              f"{r.get('nature','?'):>8}  {mark}{warn}")
+              f"{r.get('nature','?'):>8}  {mark}{warn}{gen}")
     print()
+    if generations and not generations.get("pooled"):
+        _print_generations(rows, generations)
     print("  ⚠️稀疏 = 取值离散度 <25%，多为事件型信号（大量并列），rank-IC 会失真，")
     print("     应改用事件研究（对比有/无事件两组的超额收益）而非 IC。")
     print()
@@ -1021,6 +1273,28 @@ def print_report(rows: List[Dict], floor: Dict, horizon: str,
     print("             那个 −0.09 的全样本 IC 是假象 —— 勿据此下任何结论")
 
 
+def _print_generations(rows: List[Dict], generations: Dict) -> None:
+    """世代切片小节：谁被切了、切到哪天、切掉多少 —— 尤其是被切到样本不足、没进上表的。"""
+    sigs = generations.get("signals", {})
+    sliced = sorted((s, e) for s, e in sigs.items() if e["n_excluded"])
+    shown = {r["signal"] for r in rows}
+    print("  【世代切片】系统输出只算当前世代 —— 边界 ic_rerun_readiness._COHORT_HISTORY，"
+          "影响面 signal_archive.COHORT_SIGNAL_SCOPE")
+    print(f"    被切 {len(sliced)} 个信号；其余 {len(sigs) - len(sliced)} 个不读系统输出"
+          f"或无边界约束，用全史")
+    hidden = [(s, e) for s, e in sliced if s not in shown]
+    if hidden:
+        print(f"    其中本世代样本不足、未进上表的 {len(hidden)} 个：")
+        for s, e in hidden:
+            print(f"      {s:<34} 自 {e['gen_start']}（{e['gen_version']}）起 "
+                  f"{e['n_in_generation']:>5} 条 ｜ 切掉旧世代 {e['n_excluded']} 条")
+    if generations.get("undeclared_versions"):
+        print(f"    ⚠️ 未声明影响面的边界（已按全部信号切，原始观测在白丢样本）："
+              f"{', '.join(generations['undeclared_versions'])} —— "
+              f"去 signal_archive.COHORT_SIGNAL_SCOPE 补声明")
+    print()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Alpha Hive 单信号 IC 档案")
     ap.add_argument("--backfill", action="store_true", help="从历史 .swarm_results 回填")
@@ -1038,6 +1312,9 @@ def main() -> int:
     ap.add_argument("--target", choices=TARGET_METRICS, default="return",
                     help="预测目标：return=方向收益（现状）；vol=未来已实现波动"
                          "（实测可学性高一个数量级，需联网取行情）")
+    ap.add_argument("--pool-generations", action="store_true",
+                    help="与 --analyze 连用：不按世代切片（v0.45.265 前的行为），"
+                         "系统输出跨世代混算，只作对照")
     # v0.45.160：default 不能是 str(DB_PATH)——argparse 的 default 在 import 期求值
     ap.add_argument("--db", type=str, default=None)
     args = ap.parse_args()
@@ -1047,6 +1324,8 @@ def main() -> int:
         ap.error("--dry-run 只能与 --backfill 连用")
     if args.only and not args.backfill:
         ap.error("--only 只能与 --backfill 连用")
+    if args.pool_generations and not args.analyze:
+        ap.error("--pool-generations 只能与 --analyze 连用")
     if args.backfill:
         only = [s.strip() for s in args.only.split(",") if s.strip()] if args.only else None
         st = backfill(db_path=db, only=only, dry_run=args.dry_run)
@@ -1073,12 +1352,13 @@ def main() -> int:
 
     if args.analyze:
         res = analyze(db, args.horizon, args.min_samples, args.min_width,
-                      args.draws, target_metric=args.target)
+                      args.draws, target_metric=args.target,
+                      pool_generations=args.pool_generations)
         if not res:
             print("⏭  无足够数据，请先 --backfill")
             return 1
-        rows, floor = res
-        print_report(rows, floor, args.horizon, args.target)
+        rows, floor, gens = res
+        print_report(rows, floor, args.horizon, args.target, generations=gens)
 
     if not (args.backfill or args.analyze or args.list):
         ap.print_help()
