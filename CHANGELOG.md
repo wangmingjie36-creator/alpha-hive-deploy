@@ -66,7 +66,67 @@
 
 ---
 
-## [0.45.250] — 2026-09-15 — 占位（进行中：signal_archive 的 fund.pe_ratio/market_cap 读不到 CodeExecutor 8 月后的嵌套 details，静默停档）
+## [0.45.250] — 2026-09-15 — 上游修好一个崩溃，下游一个读者因此静默断供：`fund.market_cap` / `fund.pe_ratio` 自 8 月中起每天 30 只只剩 0–4 只入档
+
+`CodeExecutorAgent.analyze()` 取数成功后有两条返回路径，装的是**同一个** `data`，只是放的位置不同：技术分析跑通时是
+`details.fetch_data.*`（嵌套），技术分析失败走兜底时是 `details.*`（顶层）。**两种形状自 2026-02-25（c0392ce0）起就同时存在**，
+代码从没改过。`signal_archive` 的 fund.* 在 2026-07-30（a93d0d48）写成只读顶层，当时是对的：技术分析脚本撞上 yfinance
+MultiIndex 每次必崩，生产上 100% 走兜底。v0.43.10（2026-08-12，1dbbfb34）修好了那个崩溃，成功路径变成主路径，
+于是 `.swarm_results_*.json` 从 8/13 起每天 26–30 只是嵌套形状，只有 0–4 只是顶层 ⇒ fund.* 每天只剩走兜底的那几只入档。
+`_dig` 取不到就返回 None，这一行被跳过，**近一个月没有任何东西报警**。
+
+生产库里 market_cap 入档数与 `composite.final_score` 之比：4–5 月约 1.0，8 月 0.11，9 月 0.01。
+
+**判据：合并读，不改名分段**（v0.45.182 `guard.consistency_census` 的判据是「名字变了，还是量变了」）。这里是同一个量换了位置：
+代码上两条路径装的是同一个对象，取数脚本的 `marketCap` / `trailingPE` 自 2026-02-25 未改；数据上同一只票跨形状数值连续
+（NVDA 市值 8/10 顶层 5.27e12 → 8/13 嵌套 5.46e12；TSLA PE 323 → 303），并且在 1,214 份非空 details 里两种形状**互斥**
+（没有一份同时出现）⇒ 不切世代。
+
+### Fixed
+- `signal_archive.py`：新增 `_code_exec_fetch(key)`，按「details 里有没有 `fetch_data`」分派到嵌套或顶层；fund.* 改用它。
+  **不写成**「嵌套取不到就回头读顶层」：成功路径的顶层放的是技术分析的字段（`price` / `sma_20`），
+  以后顶层如果多出一个同名键，就会被静默混读（有测试专门钉住这一点）。
+  另外，取数失败的三条错误路径 details 是空 `{}`（历史 1,551 份 CodeExecutor details 里有 337 份），它们照旧诚实缺失；`"N/A"` 也照旧省略。
+
+### Added
+- `tests/test_signal_archive_code_executor_shapes.py`（8 条）：驱动**真实** `CodeExecutorAgent.analyze()`（假 executor 回放 stdout），
+  分别走成功 / 兜底 / 取数失败三条路径，再经**真实** `QueenDistiller.distill()` 投影成 `agent_details`，最后喂 `extract()`。
+  现有 `test_signal_archive.py` 全部用手写的 `_tr()`，没有一条把真实蜂的输出接到读者上（v0.45.247 契约守卫点名的同一个盲区）。
+  - 前提自证 ×2：两条参数确实走到两种不同的形状。否则生产者哪天把两种形状统一了，参数化测试会退化成「同一形状测两遍」而照样全绿。
+  - **修复前的文件实测**：嵌套路径红；「顶层同名键被混读」红。**反向变异**（改成只读嵌套）：兜底路径红。
+- `tests/test_distribution_invariants.py`：`fund_archive_coverage` / `fund_coverage_offender` 谓词 + `TestFundCoverageGuardHasTeeth`（4 条）
+  + `TestFundSignalsStillArchived`（integration，读近 12 份生产 `.swarm_results_*.json`）。**这就是这次事故「谁会红」的答案。**
+  口径**与形状无关**：分母是 CodeExecutor 本轮确实带回数据（details 非空）的标的数，分子是抽取器取到值的数。
+  所以生产者再换第三种形状时覆盖率同样会塌、同样会红；整天取数失败不进分母，也不会误红。
+  - 生产实测（近 12 个扫描日，08-27~09-14）：修复后 360/360；**把抽取器换回修复前的写法** 6/360 ⇒ 判红。全部 1,214 份历史数据修复后取到 1,202 份（其余 12 份是 `"N/A"`）。
+  - 有牙测试里有一条直接复刻事故：把抽取器换回修复前、喂事故期的形状比例（29 嵌套 + 1 顶层），必须红。
+- `signal_archive.backfill(only=, dry_run=)` 与 CLI `--only a,b --dry-run`。
+  **不带 `--only` 的全量回填不能直接用来补 fund.***：生产库副本上 dry-run 实测，它还会新增 1,484 行 `guard.consistency_census`，
+  其中 1,394 行是 v0.45.163 之前的旧口径（`census_source` 为空），正是 v0.45.182 改名要防的「两段定义被池化」。
+  - `archive()` 与 dry-run 共用 `_rows_for()`，保证 dry-run 报的数就是真跑写的数；隔离名单在两条路径上都生效；
+    `only` 里有未知信号名直接抛 ValueError（拼错一个会静默「回填 0 行」，看起来和「本来就不缺」一样）；dry-run 不建库。
+  - `tests/test_signal_archive.py::TestBackfillOnlyAndDryRun`（6 条，先红后绿）。
+  - 在库副本上用真实 CLI 演练：dry-run 预测 新增 848（market_cap 450 / pe 398）/ 改值 5 / 不变 1,296；真写 2,149 行，与预测一致；
+    再 dry-run 为 0/0；`guard.consistency_census` 没被碰。9 月覆盖从 4/270 恢复到 270/270。改值的 5 行都在 08-26/27，
+    偏差 −0.4%~+1.6%：库里那几行是当天较早一次运行留下的，JSON 是后来重跑覆盖的；按 REPLACE 与同日其他信号对齐。
+
+### 生产回填
+- **待用户批准**（写生产库前先备份）。
+
+### Changed
+- `tests/test_bee_details_contract.py::ARCHIVE_NO_STATIC_PRODUCER` → 空集（v0.45.247 的注释写着「修完请从这里移除」）。
+  新读法的路径常量 `agent_details.CodeExecutorAgent.details` 不匹配它 `.details.<键>` 的正则，扫描器看不到 CE 路径了，
+  所以不清空的话它会报「清单过期：{(CodeExecutorAgent, market_cap), (CodeExecutorAgent, pe_ratio)}」（rebase 到含 v0.45.247 的 main 后实测）。
+  CE 返回的是裸 dict，静态层本来就证明不了；注释里指向运行期的真实输出测试。**双向断言保留**：以后再有新的无静态生产者路径照样会红。
+  `_code_exec_fetch` 特意放在 `_iv_rank_is_real` 之后，避开 v0.45.247 在 `_buzz_comp` 后插的 `_fear_greed_is_cnn`
+  （`git merge-tree` 实测：放在原位置 `signal_archive.py` 冲突，挪开后无冲突）。
+
+### 未修（只记录）
+- 全量 `--backfill` 污染 `guard.consistency_census` 这件事本身：`backfill()` docstring 和 `--only` 的 help 里已写警告，
+  修复已由 v0.45.256（占位，进行中）接手（抽取器按 `census_source == "live_agent_view"` 分段）。
+- 回填后依赖 fund.* 的**历史快照数字**会变：`experiments/signal_ic_sweep_report.md` 里 `fund.market_cap` 的 IC（n=18 天），
+  以及 `ic_diagnostics.py:462` 注释里拿 `fund.pe_ratio` 算噪音地板的例子（64 天 / 日均宽 10.4）。二者都是当时的快照，本次不改。
+  fund.* 在生产中**没有决策消费者**（只有 `analyze()` 与 experiments）⇒ 不需要世代边界。
 
 ## [0.45.249] — 2026-09-14 — 期权快照观测点按份数去重：同一份盘中/错会话快照一轮扫描只警告、只计数一次
 
