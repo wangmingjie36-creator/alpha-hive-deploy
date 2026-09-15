@@ -5,7 +5,110 @@
 
 ---
 
-## [0.45.259] — 2026-09-15 — 占位（进行中：数据根迁移阶段 1 补跑——52 文件分类补齐组 3/5 缺口）
+## [0.45.259] — 2026-09-15 — 数据根迁移阶段 1 补跑：差集法补齐 52 文件分类组 3/5 缺口，新发现 2 处生产每日活跃的未修 `__file__` bypass
+
+本次是对 v0.45.252 的续篇补跑，不是独立新阶段。全程只读盘点，未改代码、未改数据、未改仓库外任何配置。
+背景：v0.45.252 的 52 文件 `__file__`+数据字面量分类因执行故障只完成 4/6 组（组 1/2/4/6，约 40 处
+occurrence），组 3、组 5 结果丢失且原始切分方案未留存，无法直接"补跑组 3/5"。改用差集法：不猜切分
+方案，独立重建完整候选清单，减去已核实的 4 组，直接得到缺口。
+
+### 方法：差集重建
+
+1. 全仓库 grep `__file__`（排除 `tests/`），得到 **71 个候选生产文件**（含 `experiments/`）——
+   `grep -rlE '__file__' --include='*.py' . | grep -v '^tests/'`
+2. 逐文件读取每处 `__file__` 出现的上下文，区分：纯 `sys.path.insert`／仅注释提及"已修复旧模式"
+   （override hook 已改 `None`、运行时经 `PATHS.*` 解析）／真实 `__file__`+数据字面量组合
+3. 从 v0.45.252 全文转录组 1/2/4/6 已覆盖文件名单（表格行 + "零数据占用"行），共 **48 个文件**
+4. 差集 = 71 − 48 = **23 个文件**；其中 `gui/app.py` 已被 v0.45.252 任务 3 明确标注"附带发现，未在
+   原始范围内"（不属于原始 68 候选，只是我的宽口径 grep 把它也扫了进来），排除后剩 **22 个文件**
+   是本次真正要分类的组 3/5 缺口
+
+**先核实"组的切分不是严格连续字母序"**（任务要求，不假设）：`congress_trades_scraper.py` 字母序在
+`collect_data.py`之后，却被归入组 1（区间标注"agent_toolbox.py ~ collect_data.py"）——证实区间标签
+只是"该组结果的首尾"，不是切分依据本身。这正是差集法（不依赖范围猜测，只靠集合运算）优于"猜区间"的
+原因。
+
+### 与「68」对不上：如实记录，不凑数
+
+独立重建给出 71，比 v0.45.252 记录的"68"多 3；`48(已覆盖) + 22(本次差集) + 1(gui/app.py，已排除)
+= 71`。v0.45.252 自己承认原始 grep 命令未留存，我**无法确定**原方法具体排除了这 71 个里的哪 3 个。
+排除"仅注释提及已修复模式"的猜测站不住——组 1 的"零数据占用"名单里恰好也是这类文件（如
+`alpha_hive_daily_report.py`、`cboe_vix.py`），说明这类文件被原方法保留而非排除，本次遇到的同类文件
+（见下表零数据占用项）也一并保留。**如实标注：3 文件差异待验证，不强行拟合**。以「68−48=20」的预期
+口径看，本次差集给出 22——多 2-3 个，同样列为待验证，但不影响下面的分类结论：不管精确缺口是 20 还是
+22，被列出的每个文件都已逐处判定；多分类几个文件不构成风险，只有"该分类的没分类"才是风险。
+
+### 组 3/5 缺口分类表（22 文件，格式对齐已有 4 组）
+
+| 文件 | 行号 | 字面量/表达式 | 分类 | 依据 |
+|---|---|---|---|---|
+| `experiments/signal_ic_sweep.py` | 50 | `DB = Path(__file__).resolve().parent.parent / "pheromone.db"` | 不可重取数据 | 与同目录 `final_score_dilution.py`/`ic_power_analysis.py`（已在组 2 核实）同构诊断脚本，直接绕过 `PATHS` 打开生产账本库（只读分析，仍是 bypass） |
+| `experiments/ticker_winrate_persistence.py` | 72-76 | `here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))`；`local = here/"pheromone.db"` | 不可重取数据 | `find_db()` 三级 fallback：`ALPHA_HIVE_PHEROMONE_DB` 环境变量优先 → `__file__` 兜底 → Cowork VM `glob` 兜底；中间那级绕过 `PATHS` |
+| `experiments/vol_regime_filter.py` | 74 | `DB = Path(__file__).resolve().parent.parent / "pheromone.db"` | 不可重取数据 | 同 `signal_ic_sweep.py` 同构 |
+| `factor_attribution.py` | 38 | 仅注释（`_CACHE_DIR = None` 覆盖钩子已生效） | 零数据占用（已修复旧模式） | v0.45.160 已改运行时经 `PATHS` 解析，注释只是历史说明 |
+| `fear_greed.py` | 37 | 同上模式，`_CACHE_PATH = None` | 零数据占用 | 同上 |
+| `feedback_loop.py` | 27/67 | 仅注释（`PHEROMONE_DB_PATH = None` 覆盖钩子） | 零数据占用 | 同上；:67 是 docstring 提及历史默认值，非实际代码 |
+| `generate_deep_v2.py` | 291 | `_script_dir = Path(__file__).parent`，拼出 `.alpha_hive_finnhub_key`/`.alpha_hive_av_key` | 凭据类，非本次数据路径迁移范畴 | 优先读 `~/.alpha_hive_*_key`，`_script_dir` 只是 Cowork VM 场景的次选兜底；与任务 3 对 Slack token dotfile 的判定同属"home 目录放密钥"既有模式，但确实是又一处 `__file__` bypass，供阶段 2 参考 |
+| `generate_ml_report.py` | 2821 / 2992 | `_os.path.dirname(_os.path.abspath(__file__))` 拼 `{ticker}_raw.json`；`repo = str(Path(__file__).parent)` | 不可重取数据（读，yfinance 限流降级缓存）/ 发布产物（gh-pages 部署，读+删） | 已在 v0.45.252 任务 3 定位；本条只是补上任务 2 的 CLAUDE.md 五分类标签，不重复调查 |
+| `gui/app.py` | 24 | `_PROJECT_ROOT = os.environ.get("ALPHA_HIVE_HOME", ...__file__...)` | **不计入本次缺口** | v0.45.252 任务 3 已标注"附带发现，未在原始范围内"；本次宽口径 grep 把它也扫了进来，转录避免遗漏，不代表它是组 3/5 该覆盖的对象 |
+| `health_check.py` | 43，另 75/112/144/239/301/335/400/480/500 | `PROJECT = Path(__file__).parent.resolve()`，拼出 `.swarm_results_*.json`/`weight_history.jsonl`/`pheromone.db`/`self_analysis_briefs/`/`logs/` 等 9 处 | 混合：不可重取数据×3 + 发布产物 + 日志×3，git cwd 两处为代码资源 | 全部绕过 `PATHS`，零环境变量兜底；但 `alpha-hive-health-check` 定时任务按 memory `alpha-hive-locked-tasks.md` 口径"已禁用改按需"，当前无自动生产读者，按需手动跑时才会命中 |
+| `hive_logger.py` | 56 | `Path(os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__))))` | 代码资源（这是 `PATHS.home` 本身的实现，唯一正确基准，不是违规） | env 优先、`__file__` 兜底、`@property` 调用时求值——全仓其余"正确"写法都是在照抄这个模式 |
+| `ibkr_sync.py` | 44-45 | 仅注释（`BASE = Path(__file__).resolve().parent / "paper_account"` 已改） | 零数据占用 | 已修复旧模式，注释保留供说明 |
+| `probability_scorecard.py` | 64/67/68 | `ALPHAHIVE_DIR = Path(__file__).resolve().parent`；`STATE_DIR = ALPHAHIVE_DIR/"probability_scorecard_state"`；`LEDGER_PATH = STATE_DIR/"published.jsonl"` | **不可重取数据，未修** | 见下方「新发现的未修反模式」第 1 条 |
+| `prompt_loader.py` | 15 | `_PROMPTS_DIR = _Path(__file__).parent / "prompts"` | 代码资源 | docstring 自述：随代码发布的 Markdown persona 文件，非运行时产物，`__file__` 锚定合规 |
+| `push_report_to_slack.py` | 31/37/71/77-79 | `PROJECT_DIR = Path(__file__).parent`，拼出日报 JSON、`cache`/`data_cache`/`finviz_cache` | 发布产物（读日报）/ 可重建缓存（三个 cache 目录，`PATHS.cache_dir` 已存在却未复用） | 与 v0.45.252 任务 3 同一发现，本条补上 CLAUDE.md 五分类标签 |
+| `real_data_sources.py` | 33 | 仅注释（`CACHE_DIR = None` 覆盖钩子） | 零数据占用 | 同 `factor_attribution.py` 模式 |
+| `reddit_sentiment.py` | 32 | 仅注释（`CACHE_DIR = None`） | 零数据占用 | 同上 |
+| `replay_scoring.py` | 54 | 仅注释（`DB_PATH = None`） | 零数据占用 | 同上 |
+| `report_formatters.py` | 281 / 808 | `base = _Path(__file__).parent` 拼 `analysis-{ticker}-ml-{today}.json`；`_meta_p = _Path(__file__).parent/"paper_portfolio_state"/"meta.json"` | 发布产物（读 ML 分析）/ **不可重取数据（读纸面组合状态，未修）** | 两处都在 `try/except` 静默降级块里（读不到就返回 `None`／跳过新鲜度提示）——数据根搬迁后会静默判定"无数据"而非报错，是「失败没传导到下游」同款形状 |
+| `risk_engine.py` | 81/94 | 仅注释（`_SNAPSHOTS_DIR = None`/`_CACHE_DIR = None`） | 零数据占用 | 同 `factor_attribution.py` 模式 |
+| `run_daily_scan.py` | 86/176/222 | `project_dir = Path(__file__).parent`（读 `templates/`，代码资源）；`_cleanup_stale_data(...)` 内 146 行 `db_path = project_dir/"pheromone.db"`（**删除**旧行+`VACUUM`）+ 删 `.swarm_results_*.json`/cache 目录；`log_dir = Path(__file__).parent/"logs"` | 混合：代码资源 / **不可重取数据+可重建缓存（写=删除，未修）**/ 日志 | 见下方「新发现的未修反模式」第 4 条 |
+| `scan_continuity.py` | 65/70/71 | `ALPHAHIVE_DIR = Path(__file__).resolve().parent`；`DB_PATH`；`SNAPSHOTS_DIR` | **不可重取数据，未修，当前生产每日活跃读取** | 见下方「新发现的未修反模式」第 2 条 |
+| `scan_coverage_gate.py` | 50 | `ROOT = Path(__file__).parent`，拼 `.swarm_results_{date}.json` | **不可重取数据，未修，当前生产每日活跃读写** | 见下方「新发现的未修反模式」第 3 条 |
+
+### 新发现的未修反模式（超越已知的 2 个先例，含 2 处比先例更紧迫）
+
+v0.45.252 记录的已知先例——`walk_forward_validator.py:92-93`、`swarm_agents/queen_distiller.py:1190-1202`
+——都是只读诊断/回测消费者，不在日常生产主链路里。本次补跑发现 **4 处**同款「未修」反模式（模块级
+冻结常量、零 `ALPHA_HIVE_HOME`/`PATHS` 覆盖路径），其中 **2 处是当前每日/每周生产链路的活跃读取者**，
+优先级高于已知两处：
+
+1. **`probability_scorecard.py:64,67,68`** — 模块级冻结 `LEDGER_PATH`，是 `record_published`/
+   `load_published` 的默认参数来源（:246,:277）。全文件 grep `PATHS`/`ALPHA_HIVE_HOME` **零命中**——
+   没有任何 env 覆盖路径。这正是数据根迁移 memory 基线点名过的"概率账本写入且不在总闸"
+   （`conftest _GUARDED_PRODUCTION_ARTIFACTS` 不含 `probability_scorecard_state`）那个模块本体，
+   现在坐实了具体行号。
+2. **`scan_continuity.py:65,70,71`** — 同款模块级冻结，`DB_PATH`/`SNAPSHOTS_DIR` 零 env 覆盖。
+   **当前活跃**：`alpha-hive-orchestrator.sh:1127` 每日 Step 10 直接 `"$PROJECT_DIR/scan_continuity.py"
+   --days 30 --quiet` 调用（已用 grep 核实），weekly-optimizer 定时任务也顺带跑它。今天
+   `ALPHA_HIVE_HOME` 恰好等于仓库根，症状不可见；阶段 5 搬迁后会读到旧仓库根的陈旧库/快照而非新数据根，
+   且不会报错——静默读错数据。
+3. **`scan_coverage_gate.py:50`** — 同款，`ROOT` 拼 `.swarm_results_{date}.json`，零 env 覆盖；CLI 虽有
+   `--file` 可显式指定路径，但 `alpha-hive-orchestrator.sh:1240-1241` 的实际调用只传
+   `--quiet --out "$COVERAGE_JSON"`（已用 grep 核实），**没有**传 `--file`，走的正是 `__file__` 默认
+   分支。**当前活跃**，且是"字段覆盖率健康 + 来源标签自洽"这道日常质量闸的输入源。
+4. **`run_daily_scan.py:176`**（经 `_cleanup_stale_data`，:145-156）—— **写=删除**：直接对
+   `Path(__file__).parent/"pheromone.db"` 执行 `DELETE FROM pheromone_signals WHERE timestamp < ?` +
+   `VACUUM`，外加清理 `.swarm_results_*.json` 和多个 cache 目录。已核实 launchd plist
+   `com.alpha.hive.daily.plist` 的 `ProgramArguments` 直接指向 `alpha-hive-orchestrator.sh`，不经
+   `run_alpha_hive_daily.sh`/`run_daily_scan.py`——**当前无自动生产读者**（与 v0.45.252 判定
+   `scheduler.py` 同款"被取代的旧自动化"结论一致），但脚本文件本身 09-13 仍被改动过，一旦被人手动
+   执行会直接对生产库做删除+`VACUUM`，风险不低于另外三处的"只读"。
+
+以上 4 处 + 已知 2 处，阶段 2 需要收口的"未修" `__file__`+数据 组合共 **6 处**；其中 `scan_continuity.py`
+与 `scan_coverage_gate.py` 建议列为最高优先级——它们不是诊断脚本，是每日生产主链路的一部分。
+
+### 验收
+
+- 差集法本身已执行完毕：22 个文件（不含已排除的 `gui/app.py`）逐处判定，格式对齐已有 4 组
+- 「68」与本次独立重建的「71」有 3 文件差异，如实标注为待验证，未强行拟合数字
+- 4 处新发现的未修反模式已记录具体 file:line，其中 2 处（`scan_continuity.py`/`scan_coverage_gate.py`）
+  标注为当前生产每日活跃读取，优先级高于已知两处先例
+- 未改代码、未改数据、未改仓库外任何配置——全程只读盘点
+- **覆盖判定**：本次候选重建方法是穷举式（全仓库 grep `__file__`，非抽样），逻辑上是任何有效"68 候选"
+  子集的超集——48（已核实）+ 22（本次分类）+ 1（`gui/app.py`，已在任务 3 处理）= 71，覆盖了当前代码库
+  里全部含 `__file__` 的非测试生产文件。「68 vs 71」的 3 文件计数差异仅是与 v0.45.252 历史记录对不上账，
+  不代表还有文件未被分类——阶段 2 开工前不再需要"重跑 6 组"，本条目已是完整分类结果。
 
 ## [0.45.258] — 2026-09-15 — 修复 Gamma 到期日历 Pin Risk 用错到期日选择器，NVDA 现价 $211 却报 $270
 
