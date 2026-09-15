@@ -78,6 +78,10 @@ def _db_path() -> Path:
 #
 # ⚠️ 再次改动 expected_returns / predict_probability / RivalBee 特征来源时
 # **必须追加一条**。漏了会让新旧口径样本被混算，而混算是静默的。
+#
+# ⚠️ v0.45.265：追加时**同步**在 `signal_archive.COHORT_SIGNAL_SCOPE` 声明这条边界
+# **直接**改了哪些归档信号（只动 final_score 就写空元组；下游由依赖边自动推出）。
+# `signal_archive.analyze()` 靠它给每个信号切世代 —— 漏了测试红，运行时按全部信号切。
 _COHORT_HISTORY = [
     ("2026-08-17", "v0.44.1~0.44.3",
      "expected_returns 去偏 + probability 居中 + RivalBee 三特征接真实数据"),
@@ -184,6 +188,10 @@ _COHORT_HISTORY = [
      "v0.45.182 改为**改名**：`guard.consistency` → `guard.consistency_census`，"
      "`guard.top_signals_count` 摘除并改挂分布不变式。判据：判别器要放在做聚合的那一层，"
      "不是产生数据的那一层。"
+     "⚠️ **v0.45.256 再更正**：改名只管住了**新写入**。`signal_archive.backfill()` 用当前抽取器"
+     "重写全部历史，而新名字的抽取器当时仍无条件取 `consistency` ⇒ 一次全量回填就把旧口径"
+     "写回新名字（生产库副本 dry-run：1,394 行）。现已按 `census_source == \"live_agent_view\"` 取值，"
+     "见 `signal_archive._guard_census_consistency`。"
      "**MAX_ENTRIES 的值仍未动**；`get_top_signals` 的排行榜语义未动（另 3 个调用方各自待测）；"
      "`snapshot` / `compact_snapshot` 仍受截断——其中 `alpha_hive_daily_report.py:1171` 的 "
      "`agent_votes` 实测当前世代 300 份**只有 1 份**凑齐 8 只蜂（中位 3 只，BearBee 缺席 97.3%），"

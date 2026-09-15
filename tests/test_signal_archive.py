@@ -570,3 +570,84 @@ def test_renamed_consistency_signal_is_present():
     assert "guard.consistency_census" in SIGNAL_EXTRACTORS, (
         "只退役了旧名却没建新序列 —— GuardBee 的一致性从此不再被归档"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# v0.45.256：改名只拆开了「新数据」，没拆开「回填」
+#
+# v0.45.182 把名字换成 `guard.consistency_census`，但抽取器仍是无条件的
+# `_path("...GuardBeeSentinel.details.consistency")`。`backfill()` 用**当前**抽取器
+# 重写全部历史 `.swarm_results_*.json` ⇒ 一次全量回填就把 v0.45.163 之前的旧口径
+# 写进新名字，v0.45.182 拆开的两段定义被重新池化。
+# 生产库副本 dry-run 实测：会新增 1,484 行，其中 **1,394 行 `census_source` 缺失**
+# （2026-03 ~ 09-04 各月都有），90 行 `live_agent_view`。
+#
+# 口径判别照 `tests/test_distribution_invariants.py::census_coverage_offenders`：
+# 只认 `census_source == "live_agent_view"`（**白名单**，不是「非空即可」）。
+# ══════════════════════════════════════════════════════════════════════════
+
+def _guard_tr(census_source="__absent__", consistency=0.5):
+    det = {"consistency": consistency, "adjustment_factor": 1.2, "macro_adj": -0.5}
+    if census_source != "__absent__":
+        det["census_source"] = census_source
+    return {"final_score": 6.0,
+            "agent_details": {"GuardBeeSentinel": {
+                "score": 5.5, "direction": "neutral", "details": det}}}
+
+
+class TestConsistencyCensusIsCaliberGated:
+
+    def test_old_caliber_is_not_archived_under_new_name(self):
+        """v0.45.163 之前的行没有 `census_source` —— 分母是排行榜窗口条数，不是蜂数。"""
+        out = sa.extract(_guard_tr())
+        assert "guard.consistency_census" not in out, (
+            "旧口径（无 census_source）的 consistency 被写进了新名字 —— "
+            "全量 --backfill 会把 v0.45.182 拆开的两段定义重新池化"
+        )
+
+    def test_live_agent_view_is_archived(self):
+        """成对断言：没有这条，「干脆删掉这个信号」也能让上一条全绿。"""
+        out = sa.extract(_guard_tr("live_agent_view", consistency=4 / 6))
+        assert out.get("guard.consistency_census") == pytest.approx(4 / 6)
+
+    @pytest.mark.parametrize("src", ["top_signals_fallback", "unavailable", None, ""])
+    def test_other_calibers_are_not_archived(self, src):
+        """白名单不是黑名单：把判据写成「census_source 非空」时，前两条照样全绿。
+
+        · `top_signals_fallback`：窗口 24 的排行榜，既不是旧口径也不是普查；
+        · `unavailable`：板读取失败，`consistency` 是**兜底写的 0**，不是观测值。
+        """
+        assert "guard.consistency_census" not in sa.extract(_guard_tr(src))
+
+    def test_sibling_guard_signals_are_not_gated(self):
+        """不许顺手把整个 `guard.*` 都按口径门控。
+
+        `adj_factor` 与 `macro_adj` 在 v0.45.163 没有换量（生产实测：同一 30 只标的池，
+        08-24~09-04 vs 09-08~09-14，1.2 档 76.7%→78.7%、0.95 档 21.7%→21.3%；
+        `macro_adj` 不走读板路径）。门控它们 = 白白丢掉 1,394 行同口径历史。
+        """
+        out = sa.extract(_guard_tr())
+        assert out.get("guard.adj_factor") == 1.2
+        assert out.get("guard.macro_adj") == -0.5
+
+    def test_backfill_does_not_repool_old_caliber(self, tmp_path):
+        """症状本身：全量回填后，新名字下只能有新口径日期。"""
+        (tmp_path / ".swarm_results_2026-09-04.json").write_text(
+            json.dumps({"NVDA": _guard_tr(consistency=0.72)}), encoding="utf-8")
+        (tmp_path / ".swarm_results_2026-09-08.json").write_text(
+            json.dumps({"NVDA": _guard_tr("live_agent_view", consistency=0.47)}),
+            encoding="utf-8")
+        db = tmp_path / "p.db"
+        st = sa.backfill(".swarm_results_*.json", db)
+        assert st["files"] == 2
+        with sqlite3.connect(db) as c:
+            census = c.execute(
+                f"SELECT date, value FROM {sa.TABLE} "
+                "WHERE signal='guard.consistency_census' ORDER BY date").fetchall()
+            old_day = {s for (s,) in c.execute(
+                f"SELECT signal FROM {sa.TABLE} WHERE date='2026-09-04'")}
+        assert census == [("2026-09-08", pytest.approx(0.47))], census
+        # 前提自证：旧日期那份文件确实被读进来了，只是这一条被拦下 ——
+        # 否则「旧文件整份没读到」也会让上面那条断言成立。
+        assert "guard.adj_factor" in old_day, old_day
+        assert not old_day & RETIRED_SIGNAL_NAMES, "退役名不许借回填复活"

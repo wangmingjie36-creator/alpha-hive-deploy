@@ -27,18 +27,11 @@
   },
   "low_conviction": true,
   "low_conviction_reason": "score_high_guard: 高分 7.3 但情绪 3.5<6 未确认（signal 5.7）→ 仓位减半",
-  "cs_rank": {
-    "final": 0.966,
-    "signal": 0.483,
-    "catalyst": 0.345,
-    "sentiment": 0.138,
-    "odds": 1.0,
-    "risk_adj": 0.517
-  },
+  "cs_rank": null,
   "actual_prices": {
-    "t1": null,
+    "t1": 265.58,
     "t7": null,
     "t30": null
   },
-  "created_at": "2026-09-10T14:42:14.005512"
+  "created_at": "2026-09-15T14:51:53.410116"
 }
