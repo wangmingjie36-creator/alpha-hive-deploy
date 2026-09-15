@@ -167,7 +167,8 @@ class TestSpeciesDoesNotSpread:
         ("polymarket_client.py", "CACHE_DIR"),
         ("newsapi_client.py", "_CACHE_DIR"),
         ("edgar_rss.py", "_CACHE_PATH"),
-        ("pead_analyzer.py", "_CACHE_DIR"),
+        # v0.45.233: ("pead_analyzer.py", "_CACHE_DIR") 已摘除——改为调用时的 `_cache_dir()`。
+        # 摘它不是因为这里变红（子集语义清干净不红），是仓库根默认拒绝总闸实测它往 cache/ 写。
         # 中高危：这四个 BASE_DIR 派生出 vrp_state/ options_paper_state/ hedge_state/
         # ——是**账本**不是缓存（见 MEMORY.md v0.45.111）。
         ("vrp_signal.py", "BASE_DIR"),
@@ -520,7 +521,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("gui/app.py", "_PROJECT_ROOT"),              # sys.path
         ("scheduler.py", "_PROJECT_ROOT"),            # scheduler.log
         # ── D. 未清，已登记（读多写少 / 牵动面大）──
-        ("pead_analyzer.py", "_CACHE_DIR"),           # try 分支已走 PATHS，这是 except 兜底
+        # v0.45.233: ("pead_analyzer.py", "_CACHE_DIR") 已摘除——except 兜底挪进调用时的 `_cache_dir()`。
         ("push_report_to_slack.py", "PROJECT_DIR"),   # 读报告 json（CLI 脚本）
         ("scan_coverage_gate.py", "ROOT"),            # 读 .swarm_results_*.json
     }

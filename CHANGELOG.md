@@ -5,6 +5,60 @@
 
 ---
 
+## [0.45.253] — 2026-09-15 — 占位（进行中：二次检查 v0.45.233——config 缓存目录取值未规范化 / 总闸把 watchlist_override.yaml 当代码 / 三处推断写成了实测）
+
+## [0.45.252] — 2026-09-15 — 占位（进行中：数据根迁移阶段 1 只读盘点——沙箱扫描指纹比对 + 52 文件分类表 + 读写者普查含仓库外 + 阶段 0 交接线索核实）
+
+## [0.45.251] — 2026-09-15 — 二次检查 v0.45.245：它自己的检测器只认 `x.attr()` 形态，`from os import getcwd` 裸名调用完全绕过；其余声称独立复核，全部成立（含合并后 v0.45.246 真咬中同形 bug 的验证）
+
+方法同前：**不重读汇报，把每条声称写成探针真跑。**
+
+### Fixed（`tests/test_reads_own_checkout.py::TestConftestGuardsDoNotAnchorOnCwd`）
+
+1. **只判 `isinstance(n.func, ast.Attribute)`，裸名调用完全不在扫描范围内。**
+   `cwd`/`resolve`/`absolute` 天然只能是方法调用，没有这个问题；但 `getcwd`/`abspath`/`realpath`
+   可以 `from os[.path] import` 出来当自由函数用，之后 `n.func` 是 `ast.Name` 不是 `ast.Attribute`——
+   v0.45.240、v0.45.245 两版检测逻辑都只判后者。实测：
+   `from os import getcwd\ndef _guard():\n    x = getcwd()\n` 喂给 v0.45.245 版，返回 `[]`。
+   本仓当前没有这种写法——量过（`grep -n "^from os import\|^from os.path import" tests/conftest.py`
+   零命中），不是假设的攻击面。
+   改：先扫一遍模块里的 `ImportFrom(module in {os, os.path, posixpath, ntpath})`，把本地名字
+   （含 `as` 别名）登记成「等价于哪个 `.attr()` 检测」；主循环里 `Call(func=Name)` 命中登记表就按
+   同一套显式/隐式 + 锚点规则判，拿不到隐式调用的主语（无参数）就跳过、不装作查过。
+   变异：新增 6 条用例（裸名、别名裸名、`abspath` 裸名、裸名但锚了、裸名在模块级、
+   来自无关模块的同名函数不该误判）——v0.45.245 版前 3 条全部漏报（`[]` vs 应报），
+   新实现 6 条全对；反面对照（`from my_module import getcwd`）新旧两版都不误报，确认改动
+   没有把「同名任意函数」也当成 `os.getcwd` 抓。
+
+### 核过、成立的（v0.45.245）
+
+- claim 1（模块级/class 体顶层盲区）的修法本身：复读现有 `enclosing_function_name` 实现与父指针表构造，
+  逻辑与描述一致；用当前（已含 v0.45.246/248/249/250 合并内容的）真实 `conftest.py` 跑
+  `test_no_cwd_derived_watch_in_conftest`，绿——说明父指针改写没有引入新的误报。
+- claim 2（「只有防线①能发现」不成立、`test_default_path_is_absolute_and_not_cwd_relative` 独立兜底）：
+  复读该测试当前仍存在、仍是 `assert pathlib.Path(p).is_absolute()`，不依赖 cwd，结论未变。
+- **验证有效性的验证**：v0.45.245 称「合并后这道结构守卫会独立发现真实 bug」——**查实了**：
+  `976c4e11`（v0.45.246）commit message 原文「合入 v0.45.240 后 `TestConftestGuardsDoNotAnchorOnCwd`
+  抓到 `_hive_log_handler_escapes` 两处 `resolve()`」，其 diff 把该函数加进了 `ALLOWED` 并单独修了
+  同形 bug（先断言 `is_absolute()` 再 `resolve()` 判包含，与 `_assert_default_path_in_sandbox` 同形）。
+  这不是我自己造的变异，是它在下一个 session 的真实代码改动里咬中的第一个活口。
+- `invocation_params` 的捕获时机（`Config` 构造时一次性、早于任何 fixture）：pytest 版本未变，结论不变。
+- `import subprocess as _sp`（现在在 `test_paths_not_frozen_at_import.py:372`，行号因中间提交漂了一行，
+  内容不变）只伪造 `git ls-files`：复读确认，结论不变。
+- 无测试调 `monkeypatch.undo()`：复查仍是空。
+
+### 验证
+
+- `tests/test_reads_own_checkout.py` + `tests/test_ml_model_path_isolation.py` +
+  `tests/test_hive_logger_not_frozen.py` + `tests/test_cwd_and_sys_path_hygiene.py`：74 passed。
+- 全套从仓库根（合并 origin/main 之前）：1 failed（`TestCoverageHorizon`，设计如此）/
+  4648 passed / 1 skipped / 2 xfailed。
+
+---
+
+
+## [0.45.250] — 2026-09-15 — 占位（进行中：signal_archive 的 fund.pe_ratio/market_cap 读不到 CodeExecutor 8 月后的嵌套 details，静默停档）
+
 ## [0.45.249] — 2026-09-14 — 期权快照观测点按份数去重：同一份盘中/错会话快照一轮扫描只警告、只计数一次
 
 v0.45.238 的观测点按**调用**计。一只标的一轮扫描要调 3~4 次 `analyze()`（OracleBee / BearBee / advanced_analyzer / 日报收尾），
@@ -1027,7 +1081,126 @@ R0 下 `final_score` 对 T+7 超额收益的逐日横截面 IC **−0.11**（周
 - **另一个根因，未在本版修**：09-02 / 09-08 两轮扫描跑过午夜，00:0x 写出的快照占了次日槽位，次日 14:00 扫描整轮命中（09-03 命中 42 次、09-09 命中 45 次）⇒ 那两天的期权数据整份是前一交易日的，快照价与**前一日**收盘 24/30、26/30 相符。已另开任务（占号 v0.45.238）。
 - 线上验证：本地实拉时恰好跨过 09:30 开盘，全部走盘中分支，**新判据未被真实 payload 触发过**——以今天 17:00 ET 扫描后 `status.json` 的 `price_stale_intraday` 为准（待验证）。
 
-## [0.45.233] — 2026-09-14 — 占位（进行中：数据根迁移阶段 0——DB 一致性快照 / 修编排器每日备份 / 测试「默认拒绝」总闸）
+## [0.45.233] — 2026-09-14 — 数据根迁移阶段 0：DB 一致性快照 / 每日备份改在线备份且失败不清理 / 测试「仓库根默认拒绝」总闸——首跑抓出 5 处现存写穿
+
+项目记录见 auto-memory `alpha-hive-data-root-migration.md`（阶段 0）。不动数据布局、不动 launchd / plist；阶段 1 及以后未做。
+
+### 0.1 应急一致性快照（仓库外，本机副本）
+
+- `~/alpha-hive-data/_pre_migration_snapshots/20260914_055601/`：1021 个文件 + 5 个库，303.9 MB，3.6 s，全部只读。
+  随附 `MANIFEST.json`（各库打开方式、逐表行数、完整性、排除项与理由）、`SHA256SUMS`（可直接 `shasum -a 256 -c`）、生成脚本、`ERRATA.md`。
+- 库一律走 `sqlite3` 在线备份 API，源库只读打开，**按库的现状选打开方式**（先在 scratch 库上复现过三种情形）：
+
+  | 源库状态 | 打开 | 为什么 |
+  |---|---|---|
+  | WAL 且 `-wal` 存在（`pheromone.db`） | `mode=ro` | 读得到 WAL；只有 `-shm` 的读者标记会变（WAL 读者固有） |
+  | WAL 但**没有** sidecar（`metrics.db`） | `mode=ro&immutable=1` | 光 `mode=ro` 会在生产目录**新建** `-wal/-shm`，且只读连接关闭后删不掉 |
+  | rollback（`sentiment_baseline` / `hive_predictions` / `chroma.sqlite3`） | `mode=ro` | 持 SHARED 锁挡住写者，不建任何文件 |
+
+  快照库转 `journal_mode=DELETE`（单文件自洽，日后谁打开都不长 sidecar）。
+- 验证：5 库 `integrity_check=ok`；逐表行数与**同一读事务**里的源库一致（`pheromone.db` 9 表 121150 行）；另开独立连接逐表**内容**哈希，快照 == 生产；
+  sha256 1021/1021 OK；生产 `pheromone.db` / `-wal` 前后 sha256 不变、生产 sidecar 集合不变；开拷前与拷完后都查过编排器锁不存在、无扫描进程、`lsof` 无写模式持有者。
+- ⚠️ **cp 主文件确实丢数据**：生产 `-wal` 有 4.1 MB 未回写；只拷 `pheromone.db` 主文件得到的 `agent_memory` 与真库**内容不同、行数相同**——只比行数看不出来。
+- 对照基线补进清单（全部未跟踪、只在本机）：`sentiment_baseline.db`（活跃）、`hive_predictions.db`、`pheromone_fallback.jsonl`、`.swarm_results_*.json`（62 MB）、
+  `analysis-*-ml-*.json`（88 MB）、`db_snapshots/`、两个 `paper_portfolio_state` 备份目录、`db_backups/` 里仅存的两份好库（09-08 日备份、`pre_v0.45.173`——都在下文 bug 的删除倒计时上）。
+  刻意不拷：根目录 13 份 `pheromone.db.bak*`（历史备份，阶段 5 原样随迁）、可重取缓存、`logs/`、已跟踪并推送的报告、凭据文件、`mcp-servers/` 等代码资源。
+- 边界：**本机副本**（防 iCloud 同步传播损坏、防误操作），**不是异地备份**——异地在阶段 3。
+
+### 0.2 编排器每日 DB 备份（仓库外 `~/.claude/scripts/alpha-hive-orchestrator.sh`，经用户确认后安装）
+
+旧写法三处毛病（2026-09-14 实测）：
+1. launchd 下 bash `cp` 被 TCC 拒（`Operation not permitted`）：09-09/10/11 三连败，最近成功 09-08 23:41（手工运行）。
+2. WAL 库只拷主文件漏 `-wal`（见 0.1）。
+3. `find -name "pheromone_*.db" -mtime +7 -delete` 不看成败；**模式还吞掉人工留存的 `pheromone_pre_*.db`**——`db_backups/` 里 08-25/26/27 三份只剩孤儿 `-wal/-shm`；
+   而 launchd 下 bash 枚举不了这个目录，这条清理实际只在**手工运行**时生效——手工跑一次就可能清掉仅存的好备份。
+
+#### Changed
+
+- 备份段改为 `$PYTHON3` heredoc + 在线备份（打开策略同 0.1）→ 写 `.partial` → `integrity_check=ok` 且逐表行数一致才改名 → 转 `journal_mode=DELETE`。
+- 清理**只在当日备份成功后**执行、只动 `pheromone_YYYY-MM-DD.db`（不碰 `pheromone_pre_*`）、删超过 7 天的，但**无论多旧都保留最新 7 份**。
+- 结局写日志 + `status.json` 的 `steps_result.db_backup`（带失败原因）；不升级 `OVERALL_STATUS`、不触发 Slack（CLAUDE.md 通知精简规则）。整段不用 bash 碰项目目录（连 `[ -f ]` 都交给 Python）。
+- 不用 `"$(… <<'EOF' …)"`：`/bin/bash` 是 3.2.57，命令替换里的 heredoc 遇括号/引号会解析错；改为重定向到临时文件。段首尾加 `DB_BACKUP_BEGIN/END` 标记供抽取实跑。
+- 安装：`cp -p` 备份为 `alpha-hive-orchestrator.sh.bak-20260914_pre-v0.45.233`；覆盖前 `cmp` 核现行文件 == 测试时的基线，覆盖后 `cmp` == 新版、`bash -n` 通过。
+
+#### 验证
+
+- 在 `env -i PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`（plist 那组）下从**已安装的文件**按标记抽出本段实跑（harness 在 session scratchpad，未入库）：
+  - T1 生产真库 → 临时目录：成功 0.3 s；备份与真库逐表内容一致；生产 sidecar 集合与 `pheromone.db` / `-wal` 的 sha256 不变。
+  - T2 成功后轮转：只删「最新 7 份之外且超过 7 天」的日备份，`pre_*` 与孤儿 sidecar 不碰。
+  - T3 / T3b 源库读不了（`chmod 000` 模拟 TCC）/ 不是 SQLite / 不存在 ⇒ 12 个旧备份原封不动，原因进日志与 `steps_result`。
+  - T4 三周没开机（日备份全超过 7 天）⇒ 成功后仍留 7 份。T5 WAL 无 sidecar ⇒ 走 immutable，源目录不长 sidecar。
+- 变异 5/5 红：M0 **原版块**（T3 下 12 个旧文件删到剩 2 个，含人工 `pre_*`）/ M1 失败也清理 / M2 去保留下限 / M3 不走 immutable / M4 轮转模式吞 `pre_*`。
+  首版 M4 `pheromone_(.*)\.db` 存活——`fromisoformat` 恰好挡住了它，是等价变异；换成真正有害的 `pheromone_.*?(\d{4}-\d{2}-\d{2})\.db` 后红。
+- ✅ **launchd 上下文已实测（2026-09-14 14:00 定时扫描）**：日志 `14:00:35 💾 数据库已备份（sqlite 在线备份）→ db_backups/pheromone_2026-09-14.db 42061824 bytes 9 tables 121150 rows open=ro 0.5s`、
+  `轮转：保留 2 份日备份；清理 无`——09-08 之后第一次在 launchd 下备份成功（此前 09-09/10/11 三连败于 TCC）。
+  独立复核该文件：`integrity_check=ok`、`journal_mode=delete`、无 sidecar、9 表 121150 行；`pheromone_2026-09-08.db` 与人工 `pre_v0.45.173` 均保留。
+  （上面 T1–T5 是在 Claude Code 进程树里跑的，TCC 判定与 launchd 不同，所以这一条单列。）
+
+### 0.3 测试「仓库根默认拒绝」总闸
+
+#### Added
+
+- `tests/_root_data_guard.py`：判据唯一实现。仓库根下**除代码外一切**受闸、不列数据清单；「代码」只取不会误伤数据的三条
+  （源代码扩展名 / 顶层 `templates` `prompts` `.github` / 根目录 `CHANGELOG.md` 等元文件），跳过 `.git` `.claude` 与工具链缓存
+  （应用缓存 `cache/` `.factor_cache/` 等**不**跳过——v0.41.3 事故就在 `cache/`）与 `.DS_Store` / `.fuse_hidden*`。
+  口径 `(size, mtime_ns)`；目录记存在（`os.makedirs` 一个冻结路径也算写穿）；`*-shm` 只记存在与大小（常驻只读 MCP 进程会顶它的 mtime）。理由全在 docstring。
+- `tests/conftest.py`：`pytest_sessionstart`（**收集期之前**）取指纹，session autouse `_guard_repo_root_default_deny` 在 teardown 比对；
+  旧 `_GUARDED_PRODUCTION_ARTIFACTS` 6 项保留作纵深防御。
+- `tests/test_root_data_guard.py`（66 条）：判据表（取自真实仓库里出现过的形状，含旧 6 项是新闸覆盖面子集）/ 合成树逐种写入形状 /
+  **子进程里用原样拷贝的 conftest 真跑 pytest**：红组（收集期写文件 + 往账本追加一字节 + 改未列出的数据文件 + 新建目录）逐行核对运行时 diff，
+  对照组（改代码、改模板、产生工具缓存）必须绿。
+- `tests/test_import_creates_no_data_dirs.py`：新进程里 import `config` / `earnings_watcher` 后数据根必须为空，`CACHE_CONFIG["cache_dir"]` 与 `PATHS.cache_dir` 逐字相等。
+
+#### Fixed（总闸实测抓到的**现存**写穿；一处豁免都没加）
+
+先把新判据当外部探针，对**未改动**的全套前后比对仓库根：新建 `cache/cboe_daily/`、`cache/pead_ABBV.json`、`cache/pead_NVDA.json`，写入 `logs/alpha_hive.log`、`logs/alpha_hive_structured.jsonl`。
+清掉 worktree 里被 gitignore 挡住的历史残留再跑，又现出 `cache/`、`earnings_cache/` 两个空目录——此前被本 worktree 09-13 首轮测试留下的同名残留**盖住**了（残留进了「之前」的指纹）。
+
+1. `pead_analyzer` 模块级 `_CACHE_DIR = str(PATHS.cache_dir)`（藏在 try 里，v0.45.150 窄版 AST 漏掉的那处）→ 调用时 `_cache_dir()`；从 `test_paths_not_frozen_at_import.py` 两份 `KNOWN` 摘除。
+2. `hive_logger` 文件句柄 import 期绑到 `PATHS.logs_dir`，整轮测试日志追加进 checkout 的 `logs/`。**最终由 v0.45.239（经 v0.45.246 落地）修**，本版不带相关改动。
+   过程记录：本版先在测试侧修过（conftest 顶层把 `ALPHA_HIVE_LOGS_DIR` 指到 `mkdtemp` + `pytest_unconfigure` 删目录 + 一道「句柄不在 checkout 内」核对），
+   并与 v0.45.239 协调由本版先推；但 v0.45.239 带着生产侧修复（句柄每条记录按 `PATHS` 解析）与 conftest ⓪①②③ 先进了 main。
+   合并时**整段撤掉本版的日志改动**：生产根因已治，两套会话重定向并存只添乱；本版的核对比它的 ① 弱（它断言落点在**本条** `tmp_path` 内），
+   且 `os.path.realpath` 被 v0.45.240 的 `TestConftestGuardsDoNotAnchorOnCwd` 判为隐式读 cwd（合并后全套实测红）。
+   顺带留下两条经验（见 memory）：顶层副作用必须进程内幂等——`test_paper_portfolio_vol_sizing.py` 按路径再执行 conftest，第一版因此每轮漏一个空目录、会话中途 env 被改指；
+   测试日志临时目录不删的话一天攒了 114 个。v0.45.239 的 ③ 只盯两个日志文件名，与本版总闸重叠但更窄，保留（属该版）。
+3. `cboe_fetcher` 相对默认值 `cache/cboe_daily`：v0.45.230 已修（本版未动），合并后复核不再出现。
+4. `config.CACHE_CONFIG["cache_dir"]` 在 import 期调了会 mkdir 的 `PATHS.cache_dir` getter ⇒ 任何 checkout 里 import 一次就建 `cache/`。
+   改为同规则的 `os.environ.get("ALPHA_HIVE_CACHE_DIR", str(PATHS.home / "cache"))`：值不变、不 mkdir（唯一读者 `init_cache()` 本来就显式建目录）。
+5. `earnings_watcher` 模块级 `CACHE_DIR.mkdir()` → 两处写缓存前 `_ensure_cache_dir()`。⚠️ 两处都得加：`atomic_json_write` 不建父目录，缺目录的 `FileNotFoundError`
+   会被调用处 `except OSError` 吞成 debug、缓存静默失效；该测试文件的 autouse fixture 预建目录会盖住这个形状，新增 `test_cache_dir_is_created_on_first_write` 指向不存在的目录。
+
+⚠️ 4、5 为什么在有 `_isolate_env` 的情况下仍会发生：conftest 的 autouse fixture **按名字字母序** setup，`_block_same_day_macro`（import `fred_macro` → `config`）与
+`_fast_yfinance_limiter`（import `earnings_watcher`）排在 `_isolate_env` 前，那一刻 `ALPHA_HIVE_HOME` 还没设；全套里收集期 import 更早。
+没有改 fixture 顺序（治不了收集期），也没有在 conftest 顶层设 `ALPHA_HIVE_HOME`（会翻转收集期的 `skipif` 条件，CLAUDE.md skip 守卫一节）——修的是生产侧 import 期副作用。
+
+#### 验收
+
+- **真实 worktree 变异**（临时探针测试不入库，每次还原）：往 ① `probability_scorecard_state/published.jsonl` ② `report_snapshots/AAPL_2026-04-26.json`（不在旧清单）各追加一字节、
+  ③ 根目录新建目录并写一字节——三次各自 `1 passed, 1 error`（退出码 1），diff 精确到那一项；旧 6 项闸三次都没响；无写入对照 `1 passed`（退出码 0）。合并 v0.45.239 后在最终代码上重跑一遍，结果相同。
+- **总闸变异 9/9 红**（合并 v0.45.239 后在最终代码上重跑）：`.jsonl` 划成代码 / `report_snapshots` 划成代码目录 / 不记目录 / `-shm` 按 mtime / 不跳过 `.claude` / 元文件豁免不限根 / 「之前」挪到 fixture setup /
+  断言架空 / 应用缓存划成工具缓存。**修复变异 4/4 红**（config 回 getter / earnings 回 import 期 mkdir / 写前不建目录 / pead 回冻结常量）。每次按字节还原并核 sha256。
+- **最终复核（提交 fe2607fe，已合并 v0.45.239/246 等 origin/main）**：worktree 全套（`--maxfail=200`）`4633 passed / 1 failed / 1 skipped / 2 xfailed`；
+  **干净克隆**跑 CI 原命令 `pytest -m "not integration and not network" --maxfail=0`：`4630 passed / 1 failed / 85 deselected`。
+  两处唯一的红都是 `TestCoverageHorizon`（按设计会红）；跑完 `git status --ignored` 无残留。
+  （合并前 3d606871 上同样两处各只红它：`4492` / `4489 passed`。）
+- ruff：本版改动的 `.py` 全部 `All checks passed`。
+
+#### 耗时
+
+- 未改动代码的基线（本 session 开头，合并前）：`4312 passed / 1 failed` 332.0 s（约 77.0 ms/条）。
+- 合并 origin/main 后、带总闸（多了 v0.45.228–237 的测试）：3485ffa8 为 349.5 s（`4491 passed`）；只多了 conftest 幂等几行的
+  3d606871 为 211.7 s（`4492 passed`）；干净克隆对应 374.2 s / 210.7 s。
+- 总闸本身：仓库根指纹一次 25 ms（worktree 2821 项；生产 checkout 6853 项 0.26 s），每轮两次；新增的两个测试文件合计约 14 s，主要是 7 个子进程。
+  近乎相同的代码两轮差 138 s，是机器负载（同日 5 分钟负载 3–52 波动）——所以没做开关总闸的 A/B，它量不出比噪声小两个量级的开销。
+
+#### 交接（阶段 1 盘点用，本版未修）
+
+- `weekly_optimizer` 的 `CONFIG_PATH` / `BACKUP_DIR` 等数据路径仍写死 `~/Desktop/Alpha Hive`（v0.45.230 只改了 import 根）：worktree 里的测试若走到写路径，写的是**生产** checkout，按本 checkout 定根的总闸看不见（测试目前自己 patch 了）。
+- 根目录 7 份 2026-04~06 的整库备份（`pheromone.db.bak*` 6 份 + `backup_corrupted_20260406`）**被 git 跟踪、在公开仓库历史里**——清不清是阶段 6 的用户决定。
+- 生产 `logs/alpha_hive.log` 已混入历史测试日志（v0.45.239 session 实测：256 行 `[AAA]`、16 条假「政体层保零违反」、10 条假「权重不变式违反」；行内只有 HH:MM:SS，按日期切不开），读日志判生产问题前注意。
+- 在**生产 checkout** 里跑本闸会被别的写入者弄红：常驻 `alpha_hive_mcp.py`（只读，`-shm` 已特例化）、别的 session 往生产 `logs/` 写（09-14 05:42 实测）、每日扫描——阶段 5 之后才消失。
+- `db_backups/` 的孤儿 `-wal/-shm`、根目录 200+ 个 `.fuse_hidden*` 未清（不属本阶段）。
 
 ## [0.45.232] — 2026-09-14 — 宏观条改自动横向滚动：移植 08-30 的未提交 WIP，并修掉它在宽屏上右侧露白
 
