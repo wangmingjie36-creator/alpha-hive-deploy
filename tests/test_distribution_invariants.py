@@ -634,3 +634,120 @@ class TestGuardCensusCoverage:
         assert not bad, (
             f"{len(bad)}/{len(checked)} 份普查数不对（文件, 实得, 应得）：{bad[:8]}"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# v0.45.250：`fund.*` 归档覆盖度——读者跟丢生产者的形状时，谁会红
+#
+# 事故：CodeExecutorAgent 的 details 有两种形状（成功路径嵌套 `fetch_data`、兜底路径
+# 在顶层），`signal_archive` 只认顶层。v0.43.10 修好上游崩溃后成功路径成了主路径，
+# `fund.market_cap` 从每天 ~30 只掉到 0–4 只，**近一个月无任何东西报警**。
+#
+# 口径**与形状无关**，这是刻意的：分母 = CodeExecutor 本轮确实带回了数据
+# （details 非空），分子 = 抽取器实际取到了值。下次生产者再换第三种形状，
+# 覆盖率同样会塌 ⇒ 同样会红；而只枚举「已知两种形状」的检查对第三种是瞎的。
+# 取数失败（网络故障，details 为 `{}`）不进分母 ⇒ 不会因故障日误红。
+#
+# 只看 market_cap 不看 pe_ratio：后者对 ETF / 亏损股合法为 "N/A"
+# （生产 1,214 份里 267 份），覆盖率天然 ~0.7，地板得压到失去判别力。
+# 两者走同一个抽取器，market_cap 红了 pe_ratio 必然同病。
+# ══════════════════════════════════════════════════════════════════════════
+
+#: 修复后生产实测 ≈0.97（嵌套里 12/466 份 market_cap 为 "N/A"）；
+#: 事故期 8 月 0.11、9 月 0.01。0.8 两边都留足余量。
+FUND_MIN_COVERAGE = 0.8
+
+
+def fund_archive_coverage(rows) -> tuple:
+    """rows: [swarm_results dict（`{ticker: ticker_result}`）]。
+    返回 (CodeExecutor 带回了数据的标的数, 其中 `fund.market_cap` 被抽取器取到的数)。"""
+    import signal_archive as sa
+    extractor = sa.SIGNAL_EXTRACTORS["fund.market_cap"]
+    have = got = 0
+    for sr in rows:
+        for tr in (sr or {}).values():
+            if not isinstance(tr, dict):
+                continue
+            ce = (tr.get("agent_details") or {}).get("CodeExecutorAgent")
+            if not isinstance(ce, dict) or not ce.get("details"):
+                continue                  # 没跑 / 取数失败 ⇒ 本就没值，不进分母
+            have += 1
+            if extractor(tr) is not None:
+                got += 1
+    return have, got
+
+
+def fund_coverage_offender(rows, floor=FUND_MIN_COVERAGE, min_records=MIN_RECORDS):
+    """覆盖率低于 floor 时返回说明文字，否则 None。样本不足不判。"""
+    have, got = fund_archive_coverage(rows)
+    if have < min_records:
+        return None
+    ratio = got / have
+    if ratio < floor:
+        return (f"fund.market_cap 覆盖率 {ratio:.2f}（{got}/{have}，地板 {floor}）—— "
+                "CodeExecutor 带回了数据，signal_archive 却没取到：多半是 details 形状又变了，"
+                "去对 `code_executor_agent.py` 的返回与 `signal_archive._code_exec_fetch`")
+    return None
+
+
+class TestFundCoverageGuardHasTeeth:
+    """喂合成数据确认谓词会触发（同本文件 `TestGuardsHaveTeeth` 的理由）。"""
+
+    _DATA = {"market_cap": 1e9, "pe_ratio": 20.0}
+
+    @classmethod
+    def _rows(cls, details_by_ticker, n_days=3):
+        day = {f"T{i}": {"agent_details": {"CodeExecutorAgent": {"details": d}}}
+               for i, d in enumerate(details_by_ticker)}
+        return [day] * n_days
+
+    def test_both_known_shapes_pass(self):
+        nested = [{"price": 1.0, "fetch_data": dict(self._DATA)}] * 29
+        top = [dict(self._DATA)]
+        assert fund_coverage_offender(self._rows(nested + top)) is None
+
+    def test_incident_shape_is_caught_on_the_pre_fix_reader(self, monkeypatch):
+        """**复刻事故本身**：把抽取器换回修复前的「只读顶层」，喂事故期的形状比例
+        （29 嵌套 + 1 顶层）⇒ 必须红。证明这条守卫当时若在，会抓住那一个月。"""
+        import signal_archive as sa
+        monkeypatch.setitem(sa.SIGNAL_EXTRACTORS, "fund.market_cap",
+                            sa._path("agent_details.CodeExecutorAgent.details.market_cap"))
+        rows = self._rows([{"price": 1.0, "fetch_data": dict(self._DATA)}] * 29
+                          + [dict(self._DATA)])
+        assert fund_coverage_offender(rows)
+
+    def test_unknown_third_shape_is_caught(self):
+        """口径与形状无关的意义：一种谁都没见过的形状也会红。"""
+        rows = self._rows([{"quote": dict(self._DATA)}] * 30)
+        assert fund_coverage_offender(rows)
+
+    def test_fetch_outage_is_not_a_false_red(self):
+        """整天取数失败（2026-07-28/30 生产实测整批 `{}`）不进分母，不许误红。"""
+        rows = self._rows([{}] * 30, n_days=12)
+        assert fund_archive_coverage(rows) == (0, 0)
+        assert fund_coverage_offender(rows) is None
+
+
+@pytest.mark.integration   # 读生产 .swarm_results_*.json —— 条件性写在 marker 上，不写进 skip
+class TestFundSignalsStillArchived:
+    def test_recent_production_outputs_are_extractable(self):
+        import json
+        files = sorted(PROJECT_ROOT.glob(".swarm_results_*.json"))[-RECENT_SCAN_DAYS:]
+        assert files, (
+            f"{PROJECT_ROOT} 下没有 .swarm_results_*.json —— 本条核对的是生产数据本身，"
+            "只在生产机上有意义，已标 @pytest.mark.integration（默认排除）。"
+            "你显式选中了它却没有那批文件：判红，不跳过。"
+        )
+        rows = []
+        for f in files:
+            try:
+                rows.append(json.loads(f.read_text(encoding="utf-8")))
+            except (ValueError, OSError):
+                continue
+        have, _ = fund_archive_coverage(rows)
+        assert have >= MIN_RECORDS, (
+            f"近 {len(files)} 份扫描里 CodeExecutor 只有 {have} 次带回数据（地板 {MIN_RECORDS}）"
+            "—— 它本身基本没在产出，覆盖率无从判断，这件事本身就要有人知道"
+        )
+        bad = fund_coverage_offender(rows)
+        assert bad is None, bad

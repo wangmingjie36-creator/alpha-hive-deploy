@@ -263,6 +263,32 @@ def _iv_rank_is_real(tr: Dict) -> Optional[float]:
     return 0.0 if src == "hv_proxy" else 1.0
 
 
+def _code_exec_fetch(key: str) -> Callable:
+    """CodeExecutorAgent 取数脚本（`CodeGenerator._generate_yfinance`）的输出字段。
+
+    v0.45.250：同一个 `data` 在 `analyze()` 里有**两个位置**，按路径分派：
+      · 技术分析跑通 ⇒ `details = {price, sma_20, rsi_signal, fetch_data: data, ...}`
+      · 技术分析失败（兜底）⇒ `details = data`
+
+    两种形状自 2026-02-25 就并存。本信号 2026-07-30 写成只读顶层时是对的——
+    那时技术分析脚本撞 yfinance MultiIndex 每次必崩，100% 走兜底。v0.43.10
+    （2026-08-12）修好它之后成功路径成了主路径，`fund.*` 每天 30 只只剩 0–4 只入档，
+    静默断供近一个月。**同一个量换了位置 ⇒ 合并读**（同 `_crowding_comp` 的 `_legacy`，
+    判据见下方 `guard.consistency_census` 注释；值跨形状连续、两形状互斥均已实测）。
+
+    ⚠️ 按「有没有 `fetch_data`」分派，**不要**改成「嵌套取不到就回头读顶层」：
+    成功路径的顶层是技术分析的命名空间，日后多出一个同名键就会被静默混读。
+    守卫：`tests/test_signal_archive_code_executor_shapes.py`（驱动真实 `analyze()`）。
+    """
+    def _f(tr: Dict) -> Optional[float]:
+        det = _dig(tr, "agent_details.CodeExecutorAgent.details")
+        if not isinstance(det, dict):
+            return None
+        src = det.get("fetch_data") if "fetch_data" in det else det
+        return _num(src.get(key)) if isinstance(src, dict) else None
+    return _f
+
+
 def _agent_score(agent: str) -> Callable:
     return lambda tr: _num(_dig(tr, f"agent_details.{agent}.score"))
 
@@ -380,8 +406,9 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     "ml.expected_30d": _path("agent_details.RivalBeeVanguard.details.expected_30d"),
 
     # ── 基本面快照 ─────────────────────────────────────────────
-    "fund.pe_ratio": _path("agent_details.CodeExecutorAgent.details.pe_ratio"),
-    "fund.market_cap": _path("agent_details.CodeExecutorAgent.details.market_cap"),
+    # v0.45.250：原为 `_path("...CodeExecutorAgent.details.<键>")`，只认兜底路径的形状。
+    "fund.pe_ratio": _code_exec_fetch("pe_ratio"),
+    "fund.market_cap": _code_exec_fetch("market_cap"),
 
     # ── 各蜂原始分与方向 ───────────────────────────────────────
     **{f"agent.{a}.score": _agent_score(a) for a in (
@@ -471,11 +498,43 @@ def extract(ticker_result: Dict) -> Dict[str, float]:
     return out
 
 
-def archive(swarm_results: Dict, date: str, db_path: Optional[Path] = None) -> int:
+def _check_only(only) -> Optional[frozenset]:
+    """`only` 里的名字必须都是现役信号。拼错一个 ⇒ 静默「回填 0 行」，
+    看起来与「本来就不缺」同形，故直接抛。"""
+    if only is None:
+        return None
+    only = frozenset(only)
+    unknown = sorted(only - set(SIGNAL_EXTRACTORS))
+    if unknown:
+        raise ValueError(f"未知信号名：{unknown}（现役信号见 SIGNAL_EXTRACTORS / --list）")
+    return only
+
+
+def _rows_for(swarm_results: Dict, date: str, only: Optional[frozenset] = None) -> List[tuple]:
+    """一次扫描会写入的 (date, ticker, signal, value) 行。`archive` 与 dry-run 共用，
+    保证 dry-run 报的数就是真跑会写的数。"""
+    rows = []
+    for ticker, tr in (swarm_results or {}).items():
+        if not isinstance(tr, dict):
+            continue
+        for sig, val in extract(tr).items():
+            if only is not None and sig not in only:
+                continue
+            # v0.45.26：隔离名单在**入库口**拦截，而不是在分析时过滤——
+            # 后者会让每个下游都得记得过滤一次，漏一个就前功尽弃。
+            if is_quarantined(date, sig):
+                continue
+            rows.append((date, ticker, sig, val))
+    return rows
+
+
+def archive(swarm_results: Dict, date: str, db_path: Optional[Path] = None,
+            only=None) -> int:
     """把一次扫描的全部原始信号写入档案。
 
     Args:
         date: **业务日期**（YYYY-MM-DD）。与 predictions 表同键，供联表。
+        only: 只写这些信号名（None = 全部）。v0.45.250，供定向回填。
 
     Returns:
         写入的 (ticker, signal) 行数
@@ -483,17 +542,9 @@ def archive(swarm_results: Dict, date: str, db_path: Optional[Path] = None) -> i
     db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
     if not swarm_results:
         return 0
+    only = _check_only(only)
     ensure_schema(db_path)
-    rows = []
-    for ticker, tr in swarm_results.items():
-        if not isinstance(tr, dict):
-            continue
-        for sig, val in extract(tr).items():
-            # v0.45.26：隔离名单在**入库口**拦截，而不是在分析时过滤——
-            # 后者会让每个下游都得记得过滤一次，漏一个就前功尽弃。
-            if is_quarantined(date, sig):
-                continue
-            rows.append((date, ticker, sig, val))
+    rows = _rows_for(swarm_results, date, only)
     if not rows:
         return 0
     with sqlite3.connect(db_path) as conn:
@@ -505,12 +556,39 @@ def archive(swarm_results: Dict, date: str, db_path: Optional[Path] = None) -> i
 
 
 def backfill(pattern: str = ".swarm_results_*.json",
-             db_path: Optional[Path] = None) -> Dict[str, int]:
-    """从历史 .swarm_results_*.json 回填。幂等（UNIQUE + REPLACE）。"""
+             db_path: Optional[Path] = None, only=None,
+             dry_run: bool = False) -> Dict[str, Any]:
+    """从历史 .swarm_results_*.json 回填。幂等（UNIQUE + REPLACE）。
+
+    ⚠️ 不带 `only` 时用**当前**抽取器重写**全部**历史文件。实测（2026-09-15，生产库副本）
+    会新增 1,394 行旧口径（v0.45.163 之前）的 `guard.consistency_census`，把 v0.45.182
+    改名拆开的两段定义重新池化。补某几个信号时务必 `only=` 限定，并先 `dry_run=True`。
+
+    Args:
+        only: 只回填这些信号名（v0.45.250）。未知名字抛 ValueError。
+        dry_run: 不写库（库不存在也不建），在 stats 里给出
+            `new` / `changed` / `same` 与逐信号的 `by_signal`。
+    """
     db_path = Path(db_path) if db_path else _db_path()   # v0.45.160：调用时求值
+    only = _check_only(only)
     base = Path(db_path).parent
     files = sorted(glob.glob(str(base / pattern)))
-    stats = {"files": 0, "rows": 0, "skipped": 0}
+    stats: Dict[str, Any] = {"files": 0, "rows": 0, "skipped": 0}
+    existing: Dict[tuple, Optional[float]] = {}
+    if dry_run:
+        stats.update(new=0, changed=0, same=0, by_signal={})
+        if Path(db_path).exists():
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                has_table = con.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (TABLE,)).fetchone()
+                if has_table:
+                    q = f"SELECT date, ticker, signal, value FROM {TABLE}"
+                    existing = {(d, t, s): v for d, t, s, v in con.execute(q)
+                                if only is None or s in only}
+            finally:
+                con.close()
     for f in files:
         m = re.search(r"(\d{4}-\d{2}-\d{2})", os.path.basename(f))
         if not m:
@@ -522,9 +600,19 @@ def backfill(pattern: str = ".swarm_results_*.json",
         except (OSError, json.JSONDecodeError):
             stats["skipped"] += 1
             continue
-        n = archive(data, m.group(1), db_path)
         stats["files"] += 1
-        stats["rows"] += n
+        if not dry_run:
+            stats["rows"] += archive(data, m.group(1), db_path, only=only)
+            continue
+        for d, t, s, v in _rows_for(data, m.group(1), only):
+            k = (d, t, s)
+            kind = ("new" if k not in existing
+                    else "same" if existing[k] is not None and math.isclose(
+                        existing[k], v, rel_tol=1e-9, abs_tol=1e-12)
+                    else "changed")
+            stats[kind] += 1
+            per = stats["by_signal"].setdefault(s, {"new": 0, "changed": 0, "same": 0})
+            per[kind] += 1
     return stats
 
 
@@ -902,6 +990,11 @@ def print_report(rows: List[Dict], floor: Dict, horizon: str,
 def main() -> int:
     ap = argparse.ArgumentParser(description="Alpha Hive 单信号 IC 档案")
     ap.add_argument("--backfill", action="store_true", help="从历史 .swarm_results 回填")
+    ap.add_argument("--only", type=str, default=None,
+                    help="仅回填这些信号（逗号分隔）。⚠️ 不带时会重写全部信号，"
+                         "含把旧口径写进 guard.consistency_census，见 backfill() docstring")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="与 --backfill 连用：只报新增/改值/不变行数，不写库")
     ap.add_argument("--analyze", action="store_true", help="分析每个信号的 IC")
     ap.add_argument("--list", action="store_true", help="列出已归档信号与覆盖度")
     ap.add_argument("--horizon", choices=["t7", "t30"], default="t7")
@@ -916,10 +1009,21 @@ def main() -> int:
     args = ap.parse_args()
     db = Path(args.db) if args.db else _db_path()
 
+    if args.dry_run and not args.backfill:
+        ap.error("--dry-run 只能与 --backfill 连用")
+    if args.only and not args.backfill:
+        ap.error("--only 只能与 --backfill 连用")
     if args.backfill:
-        st = backfill(db_path=db)
-        print(f"✅ 回填完成：{st['files']} 个文件 → {st['rows']} 行"
-              f"（跳过 {st['skipped']}）")
+        only = [s.strip() for s in args.only.split(",") if s.strip()] if args.only else None
+        st = backfill(db_path=db, only=only, dry_run=args.dry_run)
+        if args.dry_run:
+            print(f"🔍 dry-run（未写库）：{st['files']} 个文件（跳过 {st['skipped']}）"
+                  f" → 新增 {st['new']} / 改值 {st['changed']} / 不变 {st['same']}")
+            for s, c in sorted(st["by_signal"].items()):
+                print(f"   {s:<34} 新增 {c['new']:>6}  改值 {c['changed']:>5}  不变 {c['same']:>6}")
+        else:
+            print(f"✅ 回填完成：{st['files']} 个文件 → {st['rows']} 行"
+                  f"（跳过 {st['skipped']}）")
 
     if args.list:
         ensure_schema(db)
