@@ -55,6 +55,8 @@ GUARDED = [
     "QUICK_START.md",                                # 陈年文档不豁免：测试期间变了就该红
     "tests/some_output.json",                        # tests/ 下的非代码产物
     "weight_backups", "config.py.weights.bak", ".alpha_hive_av_key", "brand_new_dir/f.bin",
+    # v0.45.253：生产运行时从仓库根读的热加载覆盖文件——不管谁写的，测试写它就是改生产 WATCHLIST
+    "watchlist_override.yaml", "watchlist_override.json",
 ]
 EXCLUDED = [
     "alpha_hive_daily_report.py", "swarm_agents/cache.py", "tests/conftest.py", "run_alpha_hive_daily.sh",

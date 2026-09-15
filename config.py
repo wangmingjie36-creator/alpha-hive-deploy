@@ -8,6 +8,7 @@
 
 import os
 import threading
+from pathlib import Path
 
 from hive_logger import PATHS, get_logger
 
@@ -162,7 +163,9 @@ CACHE_CONFIG = {
     # 在 import 期导入（pytest 收集期、conftest 里排在 `_isolate_env` 前面的 autouse fixture）⇒ 每个 checkout
     # 根都被建出空的 cache/（仓库根默认拒绝总闸实测）。取值规则与 getter 相同（`tests/test_import_creates_no_data_dirs.py`
     # 钉住两者相等），目录由 `init_cache()` 显式建。值本身仍冻在 import 期（KNOWN 登记，数据根迁移阶段 2 收口）。
-    "cache_dir": os.environ.get("ALPHA_HIVE_CACHE_DIR", str(PATHS.home / "cache")),
+    # v0.45.253：外面那层 `str(Path(...))` 不能省——getter 返回的是 `Path`，会把 env 里的尾斜杠、`//`、`./` 规范掉；
+    # v0.45.233 直接用 env 原串，这三种写法下与 getter 不等（二次检查实测）。
+    "cache_dir": str(Path(os.environ.get("ALPHA_HIVE_CACHE_DIR", str(PATHS.home / "cache")))),
     "ttl": {  # 缓存过期时间（秒）— 所有模块从此处读取，避免硬编码
         # 高频数据源（5~15 分钟）
         # v0.40.0: "finviz"/"stocktwits" ttl 已随模块删除移除
