@@ -5,7 +5,260 @@
 
 ---
 
-## [0.45.264] — 2026-09-15 — 占位（进行中：数据根迁移阶段 3 备份上线——本地导出/密钥扫描/裸仓库演练）
+## [0.45.264] — 2026-09-15 — 数据根迁移阶段 3 备份上线（本地部分）：新增 `data_backup/` 导出/密钥扫描/恢复/编排原型，本地裸仓库全链路演练通过（含 3 处变异真跑）；建远端私有仓库、首次推送到 GitHub、接入编排器——按任务边界本次不做，留 3.5 设计待批准
+
+本阶段严格遵守边界：**不执行** `gh repo create`、**不添加**任何指向 GitHub 的
+git remote、**不修改** `~/.claude/scripts/alpha-hive-orchestrator.sh` 或任何
+launchd plist。本仓库自身 `origin`（`alpha-hive-deploy`）的例行占号/提交/推送
+不在此边界内——那是本仓库一直在用的既有协议（见本文件与项目 CLAUDE.md
+「并发开工必须先占号」一节），跟"新建 `alpha-hive-data` 远端并推真实数据"是
+两回事，不混用同一条禁令。
+
+### Added — 新代码（进 `alpha-hive-deploy`，不进数据仓库；判据见 CLAUDE.md
+"这个路径指向代码还是数据"：导出/恢复脚本本身是代码，只是操作对象是
+`~/alpha-hive-data`）
+
+- `data_backup/sqlite_readonly.py`：源库只读打开策略，**照抄**阶段 0
+  `~/alpha-hive-data/_pre_migration_snapshots/20260914_055601/
+  make_pre_migration_snapshot.py` 的 `db_open_uri()`，未重新发明——
+  WAL+有 `-wal` → `mode=ro`；WAL 无 `-wal` → `mode=ro&immutable=1`；
+  rollback → `mode=ro`；hot journal 直接拒绝（`HotJournalError`）。
+- `data_backup/export.py`：按表把 SQLite 导成自洽 SQL 文本
+  （`dump_table_sql()`：`CREATE TABLE`原样 + 按 `rowid` 排序的 `INSERT`，
+  索引/触发器/视图另落 `_schema_extra.sql`），加读时事务前后行数与源文件
+  sha256 双重核对（`export_db()`，检测导出期间的并发写者）；
+  `copy_state_dir()`/`copy_root_files()` 原样拷贝状态目录与根文件的文本产物
+  （保持仓库相对路径）。范围清单（`DBS`/`STATE_DIRS`/`ROOT_FILE_GLOBS`/
+  `EXCLUDED_FROM_THIS_PASS`）是本文件里的唯一真相，见下方"导出范围"。
+- `data_backup/scan_secrets.py`：导出后、提交前的密钥字面量扫描
+  （`load_known_secrets()` 读 11 个真实凭据文件——单值 token 文件取整文件
+  +逐行、JSON 凭据文件递归取字符串叶子值 ≥12 字符；`scan_directory()`
+  只报「命中文件 + 凭据来源文件名」，永不落密钥值）。
+- `data_backup/restore.py`：`restore_db()` 从表级 SQL 文本重建一个新库
+  （`sqlite_sequence` 特殊处理，见下方 Fixed）；`restore_state()` 按
+  `MANIFEST.json` 记录的实际清单（不读 `export.py` 当前常量——恢复的是
+  "那次备份实际包含的东西"）把状态目录/根文件拷回目标根。
+- `data_backup/run_backup.py`：编排 导出→密钥扫描→提交→推送，落
+  `status.json`（`stage` ∈ export/secret_scan/commit/push/done，`ok` 布尔，
+  推送失败保留本地提交、下一轮带着重试）——这是 3.5 编排器集成设计的
+  可运行原型，**本次只手动调用，未接入编排器**。
+- `run_data_backup.py`：仓库根的瘦入口，转发到
+  `data_backup.run_backup.main()`——`~/.claude/scripts/
+  alpha-hive-orchestrator.sh` 的 `run_step()`（脚本第 151 行）只接受
+  **脚本文件路径**（`[ -f "$script" ]` + `"$PYTHON3" "$script" "$@"`），
+  不支持 `python3 -m 包.模块` 调用形式，所以需要这层包装才能被
+  `run_step --timeout N "$PROJECT_DIR/run_data_backup.py" ...` 调用
+  （3.5 设计里用得到，见下方）。
+- `tests/test_data_backup.py`：10 条回归测试，只用合成数据（临时 sqlite 库 +
+  假凭据文件），不含任何真实密钥字面量——覆盖三只读打开分支、
+  表级导出→恢复往返（数据+索引都要对上）、导出期间行数被改必须报红、
+  密钥扫描的干净/命中两路径（含 JSON 叶子值那路）、扫描结果绝不回吐密钥值、
+  一个真实凭据文件都读不到时不能悄悄放行。全绿（10 passed），ruff 全过。
+
+### 导出范围（本次落地口径，非最终定论）
+
+- DB（按表导出 SQL 文本，不提交二进制原库）：`pheromone.db`、`metrics.db`、
+  `sentiment_baseline.db`、`hive_predictions.db`——阶段 0 现量补充点名的
+  "不可重取、有生产读者"库。**显式排除** `chroma_db/chroma.sqlite3`：
+  语义向量索引、可从 `agent_memory` 重建，BLOB 转十六进制文本会显著放大体积，
+  本次不计入。
+- 状态目录（原样拷贝文本文件，保持相对路径）：`hedge_state/`
+  `paper_portfolio_state/` `options_paper_state/` `vrp_state/`
+  `probability_scorecard_state/` `ml_model_history/` `self_analysis_briefs/`
+  `db_snapshots/` + 根目录 `weight_history.jsonl`
+  `pheromone_fallback.jsonl` `ml_model*.json`。
+- **本次范围排除、留待用户确认是否要收**：`.swarm_results_*.json`
+  （105 个，64 MB）与 `analysis-*-ml-*.json`（863 个，90 MB）——两者均是
+  阶段 0"基线漏列的不可重取数据"，但体量大、不属于字面的 `*_state/` 目录，
+  纳入会让本地裸仓库演练失焦。**已验证排除的代价可控**：
+  `ic_rerun_readiness.py` 唯一依赖它们的"共振加成前瞻检验"一节，在恢复库上
+  临时补回这些文件后输出与生产**逐字节一致**（见下方核对结果）。
+  `report_snapshots/` 与根目录已跟踪报告 html/json 本身已被
+  `alpha-hive-deploy` 代码仓库 git 跟踪并推送，不重复收。
+
+### Fixed — 真跑演练中揪出的 3 处 bug（都是"写完就跑一遍"抓到的，不是靠读代码看出来的）
+
+1. **`sqlite_sequence` 保留字冲突**（`export.py:dump_table_sql`）：初版对
+   `sqlite_sequence` 走通用路径，把 `sqlite_master.sql` 里它自己的
+   `CREATE TABLE sqlite_sequence(...)` 原样落成 SQL 文本；恢复时
+   `executescript` 报 `object name reserved for internal use:
+   sqlite_sequence`（SQLite 保留该表名，只能靠建 `AUTOINCREMENT` 列的表
+   自动带出来，不能手写建表）。改法照官方 `.dump` 的做法：
+   `sqlite_sequence` 只落 `DELETE FROM sqlite_sequence;` +
+   `INSERT INTO sqlite_sequence (name, seq) VALUES (...)`，并在
+   `restore.py:restore_db` 里保证它在其余表都建完之后**最后执行**
+   （靠文件名显式排除+最后 `executescript`，不依赖字母序凑巧排在后面）。
+2. **恢复演练漏还原状态文件**（`restore.py:main`）：`restore_state()`
+   函数写了但 CLI 忘记调用——第一次跑 `probability_scorecard.py --published`
+   对比时，恢复库返回 `"status": "ledger_missing"` 而生产返回
+   `"status": "no_matured_rows"`，查出来是 `--ledger` 指向的
+   `probability_scorecard_state/published.jsonl` 根本没被拷到恢复目录
+   （`_state_restored` 那一步在恢复流程里被跳过了）。改法：`main()` 读
+   `MANIFEST.json` 的 `state_dirs`/`root_files` 字段（不读 `export.py`
+   当前常量），补调 `restore_state()`。修完两边输出逐字节一致（见下方）。
+3. **密钥扫描的扩展名白名单漏了 `SHA256SUMS`**（`scan_secrets.py`）：
+   首次扫描 92 个文件里只扫了 73 个，`SHA256SUMS`（无扩展名）被
+   `TEXT_SUFFIXES` 白名单挡在外面——校验和文件本身虽不含密钥，但这个判据
+   一般化后会漏扫任何将来加的无扩展名文本文件。改法：去掉扩展名白名单，
+   改成"每个非 `.git` 文件都尝试当 UTF-8 读，读不出来才跳过并计入
+   `files_skipped_unreadable`"——判据从"扩展名猜不猜得中"换成"读不读得进
+   来"，对本范围导出（只产生文本/校验和，不产生二进制）更完整。
+
+### 基础设施（本机，非 GitHub）
+
+- `~/alpha-hive-data-remote-simulation.git`：`git init --bare`，本地裸仓库，
+  模拟未来的私有 GitHub 仓库 `alpha-hive-data`；纯本地文件系统路径，
+  从未联网、从未被赋予任何远端 URL。
+- `~/alpha-hive-data/_git_backup/`：git 工作区（`git init -b main` +
+  `remote add origin` 指到上面的裸仓库），`data_backup.export`/
+  `run_backup` 的落地目录，导出产物按仓库相对路径存放
+  （`db_exports/<db>/<table>.sql` 是例外——SQL 文本本身没有"原路径"，
+  其余状态目录/根文件都保持与生产仓库一致的相对路径）。
+- `~/alpha-hive-data/{chroma_db,hedge_state,paper_portfolio_state,
+  options_paper_state,vrp_state,probability_scorecard_state,
+  ml_model_history,self_analysis_briefs,db_snapshots,report_snapshots,
+  db_backups,logs,cache}/`：阶段 5 目标数据根的目录骨架，**本次只建空目录，
+  一字节数据未搬**（"保持现有相对布局原样搬，只改 `ALPHA_HIVE_HOME`"的
+  骨架先行）；`README_PHASE5_SKELETON.md` 说明用途与阶段边界。
+
+⚠️ **发现阶段 0 遗留之外还有一个 `_manual_backups/` 目录**（此前 memory
+未点名过）：`pheromone.db.bak_v0.45.256_census_move_20260915_102010`
+（+ 对应 `-wal`/`-shm`），推断是另一个 session 在 v0.45.256
+（`guard.consistency_census` 生产库迁移）前后手工留的库快照。本次**原样
+未动**，只是如实记录——它和 `_pre_migration_snapshots/`（阶段 0 应急快照）、
+`_git_backup/`（本阶段的异地备份工作区）是三个不同来源、互不覆盖的东西，
+协调 session 可能需要补一条 memory 说明避免将来误删。
+
+### 恢复演练（3.4，全链路真跑，用本地裸仓库代替真实远端）
+
+步骤：导出（读生产 `/Users/igg/Desktop/Alpha Hive`）→ 密钥扫描 → 提交进
+`_git_backup` → `git push origin main` 到本地裸仓库 → `git clone` 裸仓库到
+`/private/tmp/.../scratchpad/restore_drill/clone_final`（模拟异地恢复，
+全程不碰生产仓库、不碰 `~/alpha-hive-data` 本机内容）→
+`data_backup.restore` 重建 4 个库 + 还原 48 个状态/根文件到独立临时目录。
+
+核对结果（`/usr/local/bin/python3 -m data_backup.restore --export-dir
+.../clone_final --dest-root .../restored_final`）：
+
+| 库 | 表数 | 行数（导出时=当前生产，read-only 双查一致） | integrity_check |
+|---|---|---|---|
+| pheromone | 9 | 124164（agent_memory 18720、signal_archive 94933、lost_and_found 8776、predictions 1383、reasoning_sessions 125、adapted_weights 156、agent_weights 8、barrier_outcomes 57、sqlite_sequence 6） | ok |
+| metrics | 4 | 2931（ticker_metrics 2482、scan_metrics 227、slo_violations 219、sqlite_sequence 3） | ok |
+| sentiment_baseline | 1 | 669 | ok |
+| hive_predictions | 2 | 1（predictions 0、sqlite_sequence 1） | ok |
+
+导出产物总体积 45 MB（最大单文件 `agent_memory.sql` 19.2 MB、
+`signal_archive.sql` 17.2 MB，均远小于 GitHub 100 MB 单文件硬上限，印证
+"按表拆分"的必要性——整库导出会是一个≥40 MB 的单文件，逼近上限且对
+git diff 不友好）。
+
+下游工具核对（`--db`/`--ledger` 分别指向生产与恢复库）：
+
+- `ic_rerun_readiness.py --json`：**除"共振加成前瞻检验"一节外逐字节一致**；
+  该节差异（生产 `not_ready`/0 份样本 vs 恢复库 `cannot_judge`/目录下无
+  `analysis-*-ml-*.json`）**完全可归因于本次范围排除**——临时把 863 个
+  `analysis-*-ml-*.json` 文件补进恢复目录后重跑，两边输出**逐字节相同**
+  （验证完即删除，未进入任何已提交产物）。
+- `probability_scorecard.py --published --json`：**逐字节一致**
+  （均 `status=no_matured_rows, ledger_rows=60, with_probability=59,
+  coverage_pct=98.3, matured=0`，退出码均为 3）。
+
+### 密钥扫描变异（3.3，用本机 11 个真实凭据文件，真跑不是推演）
+
+- **正常情况**：对真实导出产物（74 个文本文件）扫描，`hit_count=0`，
+  顺利提交（`run_backup.py` 全链路跑通，commit sha `1f0102d3…`）。
+- **变异**：在导出产物的**临时副本**（不是真正会被提交的那份）里注入
+  `~/.alpha_hive_av_key` 的真实内容（16 字符，值本身未出现在任何工具输出/
+  日志/本文件中），扫描立即命中——`hits=[{"file":
+  "db_exports/pheromone/_INJECTED_SECRET_TEST.sql", "credential_source":
+  ".alpha_hive_av_key"}]`，退出码 1；对照的干净副本同时扫描退出码 0。
+  验证完毕后临时副本已整体删除（`rm -rf`），真实密钥值全程不落盘到任何
+  会被提交/推送的位置。
+
+### 推送失败场景（3.4 验收，模拟远端不可写）
+
+`chmod -R a-w ~/alpha-hive-data-remote-simulation.git` 后跑
+`run_backup.py`：导出、密钥扫描、本地提交均成功（commit `cb6231c0…`，
+数据不丢），`git push` 失败（`unable to create temporary object
+directory`），`status.json` 记 `stage=push, ok=false`，退出码 2——失败对
+下游可见（对应硬检查项"这个失败，下游怎么知道？"）。`chmod -R u+w` 恢复
+权限后 `git -C ~/alpha-hive-data-remote-simulation.git fsck --full` 确认
+裸仓库未损坏（无输出），重跑 `run_backup.py` 成功（commit `874777f1…`），
+两次提交（含推送失败时那次）都完整进了远端历史——证明"提交先于推送"的
+顺序设计在推送失败时不丢数据，且失败自愈无需人工修复仓库。
+
+### 3.5 编排器集成设计（只设计，未落地——需要用户批准后才能改
+`~/.claude/scripts/alpha-hive-orchestrator.sh`）
+
+改动点：在现有 Step 13（脚本第 1278 行"上游宏观日程发布监视"）之后、
+最终写 `status.json`（脚本第 1345~1357 行附近）之前，插入 **Step 14：
+数据备份上线**，调用刚验证过的 `run_data_backup.py`（`run_step()` 只接受
+脚本路径，见上文 Added 一节）：
+
+```bash
+# ================================================================
+# Step 14：数据备份上线（阶段 3 设计，v0.45.264 起脚本就绪；未接入）
+# ----------------------------------------------------------------
+# 刻意不动 OVERALL_STATUS（同 Step 10/12 的先例）：备份状态不是"今天
+# 的扫描"本身，纳入会把备份的偶发抖动误报成扫描失败。
+# 刻意不发 Slack：按项目 CLAUDE.md「Slack 通知精简规则」，扫描失败/
+# 数据质量类事件本就不发 DM，本模块同理，失败只写 status.json。
+#
+# ⚠️ 接入前必须先把 alpha-hive-data 建成真实私有 GitHub 仓库，并把
+# ~/alpha-hive-data/_git_backup 的 origin 从本地裸仓库改指过去——
+# 这一步是"建远端仓库+首次推送"，属于本次任务边界内的对外动作，
+# 必须用户当场确认，不能借着接入这一步顺带做掉。
+# ================================================================
+log "INFO" ""
+log "INFO" "【Step 14】数据备份上线 - 启动"
+
+BACKUP_STATUS_JSON="$HOME/alpha-hive-data/logs/backup_status.json"
+run_step --timeout 300 "$PROJECT_DIR/run_data_backup.py" \
+         --src "$PROJECT_DIR" \
+         --backup-dir "$HOME/alpha-hive-data/_git_backup" \
+         --remote origin --branch main \
+         --status-file "$BACKUP_STATUS_JSON" >> "$LOGFILE" 2>&1
+STEP14_RC=$?
+
+if [ $STEP14_RC -eq 0 ]; then
+    log "INFO" "✅ Step 14：数据备份已推送"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step14_data_backup\": {\"status\": \"ok\", \"detail_json\": \"$BACKUP_STATUS_JSON\"}}")
+elif [ $STEP14_RC -eq 1 ]; then
+    log "ERROR" "🚨 Step 14：密钥扫描命中，已拒绝提交——见 $BACKUP_STATUS_JSON（不含密钥值）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step14_data_backup\": {\"status\": \"secret_scan_blocked\", \"detail_json\": \"$BACKUP_STATUS_JSON\"}}")
+elif [ $STEP14_RC -eq 2 ]; then
+    log "WARN" "⚠️ Step 14：已提交但推送失败，下一轮会带着未推送的提交重试——见 $BACKUP_STATUS_JSON"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step14_data_backup\": {\"status\": \"push_failed\", \"detail_json\": \"$BACKUP_STATUS_JSON\"}}")
+elif [ $STEP14_RC -eq 124 ]; then
+    log "ERROR" "⏰ Step 14 超时（>300s）"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step14_data_backup\": {\"status\": \"timeout\"}}")
+else
+    log "WARN" "⚠️ Step 14 失败（rc=$STEP14_RC），继续进行"
+    STEPS_RESULT=$(echo "$STEPS_RESULT" | jq ". + {\"step14_data_backup\": {\"status\": \"error\", \"rc\": $STEP14_RC}}")
+fi
+```
+
+`status.json` 落地形态：沿用 Step 10/12 先例的 `STEPS_RESULT` 累加机制，
+`step14_data_backup.status` ∈ `ok`/`secret_scan_blocked`/`push_failed`/
+`timeout`/`error`，`detail_json` 指向 `run_backup.py` 自己写的更细的
+`backup_status.json`（含 commit sha、各库行数、耗时——不含密钥值）。
+
+**已知设计缺口，留给用户决定要不要在批准接入时一并做**：`push_failed`
+不阻断、不发 Slack，意味着连续多天推送失败只能靠人主动翻
+`backup_status.json` 才发现——这正是"每日 DB 备份被 TCC 拒、09-09/10/11
+三次失败无人发现"那个旧教训的同构复现风险。建议参照 Step 10
+（`scan_continuity.py`）的模式做一个"备份连续 N 天未成功推送"的独立检查
+（本次未做，只是指出这个缺口，不是隐藏它）。
+
+**批准接入前还需要用户拍板的三件事**（都不是本 session 能替用户决定的）：
+1. 建 GitHub 私有仓库 `alpha-hive-data`（`gh repo create` 或网页操作）。
+2. `~/alpha-hive-data/_git_backup` 的 `git remote set-url origin` 从本地
+   裸仓库路径改成该私有仓库的真实地址，做一次真实首推。
+3. 把上面的 Step 14 代码块实际插进
+   `~/.claude/scripts/alpha-hive-orchestrator.sh`（连带 crontab/launchd
+   不需要改，编排器脚本本身已经是被调度的那个入口）。
+
+
 
 ## [0.45.263] — 2026-09-15 — Fixed：`collect_data.py` 的 `ALPHAHIVE_DIR` 改读 `PATHS.home`（数据根迁移阶段 2 收口遗留项）
 
