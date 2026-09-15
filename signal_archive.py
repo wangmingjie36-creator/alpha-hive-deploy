@@ -308,6 +308,29 @@ def _swarm_agreement(tr: Dict) -> Optional[float]:
     return c.most_common(1)[0][1] / len(dirs)
 
 
+def _guard_census_consistency(tr: Dict) -> Optional[float]:
+    """GuardBee 普查口径的一致性。**只认 `census_source == "live_agent_view"`。**
+
+    v0.45.256：v0.45.182 把名字改成 `guard.consistency_census`，抽取器却仍是无条件
+    的 `_path(...consistency)`。新扫描不受影响（写入的都是新口径），但 `backfill()`
+    用**当前**抽取器重写**全部**历史文件 ⇒ 全量回填把 v0.45.163 之前的旧口径写进新名字，
+    改名拆开的两段定义被重新池化（生产库副本实测：1,394 行旧口径 vs 90 行新口径）。
+    **改名只拆开了未来，没拆开回填。**
+
+    白名单，不是「非空即可」：
+      · 缺失 ⇒ v0.45.163 之前，分母是排行榜窗口条数；
+      · `top_signals_fallback` ⇒ 窗口 24 的排行榜，第三种口径；
+      · `unavailable` ⇒ 板读取失败，`consistency` 是兜底写的 0，不是观测值。
+    判别照 `tests/test_distribution_invariants.py::census_coverage_offenders` 的先例。
+    标记是与 `guard_bee._read_census` 的字符串契约，改名会让本信号静默停档 ——
+    守卫：`tests/test_guard_census_eviction.py::test_archive_reads_real_census_output`。
+    """
+    det = _dig(tr, "agent_details.GuardBeeSentinel.details")
+    if not isinstance(det, dict) or det.get("census_source") != "live_agent_view":
+        return None
+    return _num(det.get("consistency"))
+
+
 #: 信号名 → 提取函数。命名约定 `来源.字段`，便于按前缀筛选。
 SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     # ── 聚合层（对照基准）────────────────────────────────────────
@@ -389,7 +412,11 @@ SIGNAL_EXTRACTORS: Dict[str, Callable[[Dict], Optional[float]]] = {
     # 为什么不加一列口径标记：`value` 是 REAL 存不下字符串标签；且加列等于要求
     # 每个消费方**记得**去 join，忘了就退回同一个静默 bug。改名之后「忘了」
     # 在结构上不可能发生。退役名单钉在 `tests/test_signal_archive.py::RETIRED_SIGNAL_NAMES`。
-    "guard.consistency_census": _path("agent_details.GuardBeeSentinel.details.consistency"),
+    #
+    # ⚠️ v0.45.256：改名只管得住**新写入**。`backfill()` 用当前抽取器重写全部历史，
+    # 所以新名字必须**按口径取值**，否则一次全量回填就把旧口径写回来 —— 见
+    # `_guard_census_consistency`。`adj_factor` / `macro_adj` 实测未换量，不门控。
+    "guard.consistency_census": _guard_census_consistency,
     "guard.adj_factor": _path("agent_details.GuardBeeSentinel.details.adjustment_factor"),
     "guard.macro_adj": _path("agent_details.GuardBeeSentinel.details.macro_adj"),
     # v0.45.182：`guard.top_signals_count` 已摘除。v0.45.163 之后它恒等于「本轮
@@ -560,9 +587,16 @@ def backfill(pattern: str = ".swarm_results_*.json",
              dry_run: bool = False) -> Dict[str, Any]:
     """从历史 .swarm_results_*.json 回填。幂等（UNIQUE + REPLACE）。
 
-    ⚠️ 不带 `only` 时用**当前**抽取器重写**全部**历史文件。实测（2026-09-15，生产库副本）
-    会新增 1,394 行旧口径（v0.45.163 之前）的 `guard.consistency_census`，把 v0.45.182
-    改名拆开的两段定义重新池化。补某几个信号时务必 `only=` 限定，并先 `dry_run=True`。
+    ⚠️ 不带 `only` 时用**当前**抽取器重写**全部**历史文件 ⇒ 任何一个「名字延续、
+    但没按口径取值」的抽取器，都会借回填把旧口径写回来。补某几个信号时务必 `only=`
+    限定，并先 `dry_run=True` 看 `by_signal`。
+
+    实例（v0.45.250 发现、v0.45.256 已修）：`guard.consistency_census` 原先无条件取值，
+    全量回填会新增 1,394 行 v0.45.163 之前的旧口径，把 v0.45.182 改名拆开的两段定义
+    重新池化；现只认 `census_source == "live_agent_view"`（见 `_guard_census_consistency`）。
+    修后生产库副本全量 dry-run（2026-09-15，63 个信号）：只有 `fund.*`（v0.45.250 本意）
+    与 `guard.consistency_census` 的 90 行新口径会新增，改值 5 行全在 `fund.*`。
+    ⇒ **改名不等于拆分**：新增或改名一个抽取器时，先问历史文件里这个字段有几种口径。
 
     Args:
         only: 只回填这些信号名（v0.45.250）。未知名字抛 ValueError。
@@ -991,8 +1025,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Alpha Hive 单信号 IC 档案")
     ap.add_argument("--backfill", action="store_true", help="从历史 .swarm_results 回填")
     ap.add_argument("--only", type=str, default=None,
-                    help="仅回填这些信号（逗号分隔）。⚠️ 不带时会重写全部信号，"
-                         "含把旧口径写进 guard.consistency_census，见 backfill() docstring")
+                    help="仅回填这些信号（逗号分隔）。⚠️ 不带时用当前抽取器重写全部信号，"
+                         "没按口径取值的抽取器会把旧口径写回来——先 --dry-run，见 backfill() docstring")
     ap.add_argument("--dry-run", action="store_true",
                     help="与 --backfill 连用：只报新增/改值/不变行数，不写库")
     ap.add_argument("--analyze", action="store_true", help="分析每个信号的 IC")
