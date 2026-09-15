@@ -304,6 +304,17 @@ def detect_market_regime(ticker: str = "NVDA") -> Dict[str, Any]:
 # ⑤ Gamma 到期日历 — calculate_gamma_expiry_calendar()
 # ─────────────────────────────────────────────────────────────────────────────
 
+# v0.45.258：Pin Risk / Charm 是「随本次到期临近而增强」的做市商对冲效应，
+# 本质是近月现象。标准 1 月到期因挂牌以来累积时间最长，总 OI 常年滚雪球式
+# 高于任何近月到期日（NVDA 2026-09-14 实测：2027-01-15 总 OI 2,467,284 vs
+# 3 天后到期的 2026-09-18 总 OI 2,262,026，前者反而更高），若candidate 池不
+# 设窗口，"按 OI 降序取第一名" 会把 122 天外的 LEAPS 认成"下一主要到期日"——
+# 那天的行权价今天根本不构成 Pin Risk。45 天覆盖「本月 + 下月」两个标准月度
+# 到期，足够看到近月 Gamma 动态；仅当近月一个挂牌到期日都没有（链本身稀疏）
+# 时才退回全量，避免把「没有近月数据」误判成「日历不可用」。
+_PIN_RISK_MAX_DTE = 45
+
+
 def calculate_gamma_expiry_calendar(
     calls: List[Dict], puts: List[Dict], stock_price: float
 ) -> Dict[str, Any]:
@@ -389,10 +400,15 @@ def calculate_gamma_expiry_calendar(
                 "_c_by_strike": dict(d["call_oi_by_strike"]),
                 "_p_by_strike": dict(d["put_oi_by_strike"]),
             })
-        rows.sort(key=lambda x: x["total_oi"], reverse=True)
 
         if not rows:
             return _empty
+
+        # 近月窗口过滤（见模块级 _PIN_RISK_MAX_DTE 注释）；候选集为空（近月无
+        # 挂牌到期日）时退回全量，不让稀疏链把日历判成不可用。
+        _near_rows = [r for r in rows if r["days_to"] <= _PIN_RISK_MAX_DTE]
+        rows = _near_rows or rows
+        rows.sort(key=lambda x: x["total_oi"], reverse=True)
 
         # Pin Risk 到期日 = OI 最大的未来到期日
         pin_row = rows[0]
