@@ -5,7 +5,39 @@
 
 ---
 
-## [0.45.263] — 2026-09-15 — 占位（进行中：collect_data.py ALPHAHIVE_DIR 改读 PATHS.home，数据根迁移阶段 2 收口遗留项）
+## [0.45.263] — 2026-09-15 — Fixed：`collect_data.py` 的 `ALPHAHIVE_DIR` 改读 `PATHS.home`（数据根迁移阶段 2 收口遗留项）
+
+v0.45.260 收口 `generate_ml_report.py:2814` 的 yfinance 限流降级读取分支
+（读磁盘缓存 `{ticker}_raw.json`）时，该处 docstring 明确记录了一个已知但
+不在当次任务范围内的问题：写这份文件的 `collect_data.py`（仓库根，手动
+运行工具）里的 `ALPHAHIVE_DIR` 既不是 `__file__` 派生、也完全不读
+`ALPHA_HIVE_HOME`，是硬编码字面量 `~/Desktop/Alpha Hive`——本次单独排期收口。
+
+### Fixed
+
+- **`collect_data.py:27-56`**：`ALPHAHIVE_DIR` 改成**覆盖钩子**（默认 `None`），
+  新增 `_alphahive_dir()` 在调用时求值：无覆盖时解析 `PATHS.home`。
+  Cowork VM session 的两层覆盖检测（`_SCRIPT_DIR` 运行环境探测 + 已知
+  VM 挂载点 `_VM_PATH` 存在性检测）保持不变——这两层探测的是脚本自身运行
+  位置，是代码锚点，与 `ALPHA_HIVE_HOME` 无关，且已在
+  `tests/test_paths_not_frozen_at_import.py` 的 `__file__` 白名单登记为
+  `("collect_data.py", "_SCRIPT_DIR")`，未改动。
+  改法沿用仓内既有惯例（`signal_archive.py`/`feedback_loop.py`/
+  `paper_portfolio.py`）：没有直接写 `ALPHAHIVE_DIR = PATHS.home`，因为那会被
+  `tests/test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread`
+  判定为「PATHS 派生值在 import 期冻成模块级常量」而变红——`_alphahive_dir()`
+  的 6 处调用点（`find_json` ×2、`find_daily_json`、`find_swarm_results`、
+  `main()` ×2）改成调用时求值。
+  同时移除因此变成未使用的 `import os`（原来仅用于
+  `os.path.expanduser`）。
+
+  验收：生产今天不设 `ALPHA_HIVE_HOME` 时，`PATHS.home` 与硬编码
+  `~/Desktop/Alpha Hive` 在主 checkout 上逐字节相同（已实测确认，worktree
+  内因 `hive_logger.py` 所在目录不同而自然不同，属预期）；
+  `generate_ml_report.py:2814` 与本次修改后的 `collect_data.py` 两端现在
+  读写同一个 `PATHS.home`。`tests/test_paths_not_frozen_at_import.py`
+  与 `tests/test_silent_failure_guards.py`（收录 collect_data 相关用例）
+  共 137 项全绿，`ruff check collect_data.py` 全过。
 
 ## [0.45.262] — 2026-09-15 — 占位（进行中：F&G 组合层敞口控制门——预置读取管道 + 默认关闭的 CONFIG 开关 + 预注册前瞻检验基础设施）
 

@@ -2820,14 +2820,11 @@ def main():
                             # v0.45.260（数据根迁移阶段 2）：此前是
                             # `os.path.dirname(os.path.abspath(__file__))`——
                             # 不读 `ALPHA_HIVE_HOME`。改读 `PATHS.home`。
-                            # ⚠️ 已知新发现、本次不改：写这份 `{ticker}_raw.json`
-                            # 的 `collect_data.py`（手动运行）目前锚在**硬编码**
-                            # `~/Desktop/Alpha Hive`（非 `__file__` 派生、也不读
-                            # `ALPHA_HIVE_HOME`，只在检测到 Cowork VM 路径时才
-                            # 改指别处），不在本次任务列出的文件范围内。今天两者
-                            # 都落在同一个仓库根，行为不变；但 `ALPHA_HIVE_HOME`
-                            # 一旦被设置（如阶段 5 后），读写两端会分叉——
-                            # 需要单独排期收口 `collect_data.py`。
+                            # 写这份 `{ticker}_raw.json` 的 `collect_data.py`
+                            # 此前锚在硬编码 `~/Desktop/Alpha Hive`，v0.45.263
+                            # 已单独排期改读同一个 `PATHS.home`（Cowork VM 覆盖
+                            # 检测保持不变）——读写两端现在同源，`ALPHA_HIVE_HOME`
+                            # 被设置后也不会分叉。
                             # （`PATHS` 已在本文件顶部模块级导入，此处直接复用——
                             # 若在函数内重新 `import`，会因同名局部绑定，让本函数
                             # 更早处 `report_dir = PATHS.home` 的引用变成
