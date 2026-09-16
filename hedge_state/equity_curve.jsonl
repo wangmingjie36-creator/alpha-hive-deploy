@@ -5,3 +5,4 @@
 {"date": "2026-09-11", "spy_shares": -14.0, "spy_price": 757.83002, "cash": 10817.17, "market_value": -10609.62, "nav": 207.55, "trades_today": 0, "band_status": "inside"}
 {"date": "2026-09-14", "spy_shares": -14.0, "spy_price": 764.28998, "cash": 10817.17, "market_value": -10700.06, "nav": 117.11, "trades_today": 0, "band_status": "inside"}
 {"date": "2026-09-15", "spy_shares": -14.0, "spy_price": 760.88, "cash": 10817.17, "market_value": -10652.32, "nav": 164.85, "trades_today": 0, "band_status": "unknown"}
+{"date": "2026-09-16", "spy_shares": -14.0, "spy_price": 757.39001, "cash": 10817.17, "market_value": -10603.46, "nav": 213.71, "trades_today": 0, "band_status": "unknown"}
