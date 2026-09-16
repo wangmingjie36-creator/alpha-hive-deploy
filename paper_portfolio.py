@@ -172,6 +172,31 @@ CONFIG = {
     #    candidate_sort_center。改这里之前先读那段注释。
     "entry_score_bear": 4.85,
 
+    # ── F&G 组合层敞口控制门（v0.45.262，实验中，默认关闭）─────────────────────
+    # 背景：`BuzzBeeWhisper` 情绪合成里把 F&G 当逐标的信号用（当天全池同一个常数
+    # 加进连续分数，再过类别阈值）已实测证据不支持——顺周期（生产现状）明显是
+    # "顺周期/去掉/逆周期"三种处理里最差的，但去掉与逆周期几乎没有差距、且全部
+    # 差距远未过检验（15 周，本仓功效标准要 ~25 周）；更根本的问题是"当天全池
+    # 同一常数加进逐标的连续分数不改变排序，唯一效应是往类别阈值里注入噪音"，
+    # 与顺/逆周期无关。CNN 官方把 F&G 设计成大盘/组合择时工具，不是选股信号——
+    # 用错了层次。完整推导见 auto-memory alpha-hive-fear-greed-dead-wire.md。
+    #
+    # 这里改成组合层的仓位敞口控制：极度贪婪日新开多头减仓（别追涨）、极度恐惧日
+    # 新开空头减仓（别追跌）——只收紧顺势方向，不给逆势方向加仓（加仓是凭空多引入
+    # 一个未经验证的正向假设，未经验证前不做）。
+    #
+    # ⚠️ `enabled` 在预注册前瞻检验（`experiments/fg_exposure_gate_forward_test.py`）
+    # 给出 confirmed 结论、且用户决定采纳之前，必须保持 False。落地当次的验证方式
+    # 是全历史 `run_replay({})` 逐字节比对（见 tests/test_paper_portfolio_fg_exposure_gate.py），
+    # 不是靠"有 if 挡着"假设零行为差异。
+    "fg_exposure_gate": {
+        "enabled": False,
+        "extreme_fear": 25,    # 同 fear_greed.py 的分类阈值，不另定义第二套数字
+        "extreme_greed": 75,
+        "long_size_mult": 0.5,   # 极度贪婪日，新开多头仓位打这个折扣
+        "short_size_mult": 0.5,  # 极度恐惧日，新开空头仓位打这个折扣
+    },
+
     # ── 候选排序中心（v0.45.109）────────────────────────────────────────────
     # None = 从两闸中点导出 (entry_score_bull + entry_score_bear) / 2。
     # 给数字 = 强制该中心（仅供 run_replay 做 A/B 重放旧口径；生产别写死）。
@@ -685,8 +710,101 @@ def _lookup_vol_ann(ticker: str, as_of: str,
     return val
 
 
+# v0.45.262：(as_of, db_path) → F&G 读数或 None。市场级常量，不按 ticker 分——
+# 一次扫描内 BuzzBee 各标的读到不一致值的窗口极窄（同一份 1 小时缓存），
+# 任取一条即可，不强求跨标的核对一致性（那不是本函数的职责）。
+_FG_LOOKUP_CACHE: Dict[Tuple[str, str], Optional[Dict]] = {}
+
+_FG_SIGNAL = "market.fear_greed"
+_FG_IS_CNN_SIGNAL = "market.fear_greed_is_cnn"
+
+
+def _lookup_market_fear_greed(as_of: str, db_path: Optional[Path] = None) -> Optional[Dict]:
+    """读 signal_archive 里 as_of **当天**的 F&G 读数（`market.fear_greed`/`market.fear_greed_is_cnn`，
+    v0.45.247 起由 signal_archive 归档）。
+
+    只取 `date == as_of` 精确匹配——F&G 是逐日读数，不像波动率那样做"最近 N 天"窗口：
+    拿前一天的值顶替会悄悄延续一个已经过时的极端读数，且用户完全看不出来。
+    缺表 / 缺该日期的行 / 值非真实观测（`market.fear_greed_is_cnn` 缺失，即 v0.45.247
+    归档时 `is_real_data` 为假）—— 一律返回 None，由调用方显式当作"今天没有 F&G 读数"处理，
+    不给默认值。
+
+    Returns:
+        {"value": float, "is_cnn": bool} 或 None。
+    """
+    import sqlite3
+
+    db = Path(db_path) if db_path is not None else _pheromone_db_path()
+    key = (as_of, str(db))
+    if key in _FG_LOOKUP_CACHE:
+        return _FG_LOOKUP_CACHE[key]
+
+    val: Optional[Dict] = None
+    if db.exists():
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            fg_row = con.execute(
+                "SELECT value FROM signal_archive WHERE signal = ? AND date = ? LIMIT 1",
+                (_FG_SIGNAL, as_of),
+            ).fetchone()
+            cnn_row = con.execute(
+                "SELECT value FROM signal_archive WHERE signal = ? AND date = ? LIMIT 1",
+                (_FG_IS_CNN_SIGNAL, as_of),
+            ).fetchone()
+        except sqlite3.OperationalError as e:
+            # 同 _lookup_vol_ann：只吞"表不存在"，"库被锁"是瞬时可重试状态必须往上抛。
+            if "no such table" not in str(e):
+                raise
+            fg_row = cnn_row = None
+        finally:
+            con.close()
+        # market.fear_greed_is_cnn 缺失 = 归档时 is_real_data 为假（v0.45.247 的
+        # _fear_greed_is_cnn 提取器对非真实观测显式返回 None，不入档）——没有这一行
+        # 就不能信任 fg_row 的值，两者必须同时存在才算"当天有真实 F&G 读数"。
+        if fg_row is not None and fg_row[0] is not None and cnn_row is not None and cnn_row[0] is not None:
+            try:
+                v = float(fg_row[0])
+                is_cnn = bool(float(cnn_row[0]))
+            except (TypeError, ValueError):
+                v = float("nan")
+                is_cnn = False
+            if math.isfinite(v):
+                val = {"value": v, "is_cnn": is_cnn}
+
+    _FG_LOOKUP_CACHE[key] = val
+    return val
+
+
 def _tier_size_pct(conf: str) -> float:
     return float(CONFIG["size_pct_by_tier"].get(conf, 0.0))
+
+
+def _fg_exposure_multiplier(direction: str, market_fear_greed: Optional[Dict]) -> Tuple[float, str]:
+    """v0.45.262：`fg_exposure_gate` 的仓位乘数。返回 (乘数, sizing_note 追加片段)。
+
+    `enabled=False`（默认）、没有当天 F&G 读数、或读数不在极端区间、或方向与极端区间不匹配
+    —— 一律 `(1.0, "")`，即不调整、`sizing_note` 不留痕迹。这个函数是
+    `_compute_position_size` 之外的独立乘数（不塞进那个函数的签名）：`_compute_position_size`
+    只管"这个置信度该给多大仓位"，不知道方向；方向相关的调整放在调用方。
+
+    只收紧顺势方向：极度贪婪日的新多头、极度恐惧日的新空头——不给逆势方向加仓
+    （加仓是在现有基础上多引入一个未经验证的正向假设，未经验证前不做，见 CONFIG 里
+    `fg_exposure_gate` 上方的完整推导）。
+    """
+    gate = CONFIG.get("fg_exposure_gate") or {}
+    if not gate.get("enabled", False) or not market_fear_greed:
+        return 1.0, ""
+    value = market_fear_greed.get("value")
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return 1.0, ""
+    is_bull = "bull" in direction
+    if is_bull and value > gate.get("extreme_greed", 75):
+        mult = float(gate.get("long_size_mult", 1.0))
+        return mult, f",fg_extreme_greed×{mult:.2f}"
+    if not is_bull and value < gate.get("extreme_fear", 25):
+        mult = float(gate.get("short_size_mult", 1.0))
+        return mult, f",fg_extreme_fear×{mult:.2f}"
+    return 1.0, ""
 
 
 def _compute_position_size(
@@ -755,6 +873,7 @@ def _open_position(
     as_of: str,
     ticker_ohlc: Dict[str, Dict],
     closed: List[Dict],
+    market_fear_greed: Optional[Dict] = None,
 ) -> Optional[Position]:
     """用 as_of 日的 Close 作为入场价（成本模型里的滑点会再扣一次）"""
     ticker = snapshot["ticker"]
@@ -788,6 +907,14 @@ def _open_position(
 
     size_usd, sizing_note = _compute_position_size(
         nav, conf, ticker, closed, low_conviction=low_conv, as_of=as_of)
+    # v0.45.262：F&G 组合层敞口门——`enabled=False`（默认）时 fg_mult 恒为 1.0、
+    # fg_note 恒为空串，size_usd/sizing_note 逐字节不变。乘数应用在校验**之前**，
+    # 与下面 low_conviction 已经在 _compute_position_size 内部生效的顺序一致——
+    # 校验的应当是"所有调整叠加后的最终仓位"，不是叠加前的中间值。
+    fg_mult, fg_note = _fg_exposure_multiplier(direction, market_fear_greed)
+    if fg_mult != 1.0:
+        size_usd *= fg_mult
+        sizing_note += fg_note
     # v0.45.97：`size_usd <= 1` 挡不住 NaN（NaN 的任何比较都返回 False），
     # 于是 NaN 会一路走到 `shares = size_usd / entry_price` 变成 NaN 仓位。
     if not isinstance(size_usd, (int, float)) or not math.isfinite(size_usd) or size_usd <= 1:
@@ -1038,12 +1165,19 @@ def _all_snapshot_dates() -> List[str]:
     return sorted(dates)
 
 
-def run_for_date(as_of: str, verbose: bool = False) -> Dict:
+def run_for_date(as_of: str, verbose: bool = False,
+                 market_fear_greed: Optional[Dict] = None) -> Dict:
     """
     执行指定日期的 paper portfolio 操作：
     1. 扫描现有仓位 → 检查 SL/TP/TIME 触发 → 平仓
     2. 读取当日符合条件的报告 → 开新仓
     3. 更新 equity curve
+
+    Args:
+        market_fear_greed: v0.45.262。`{"value": float, "is_cnn": bool}` 或 `None`——
+            当天的 F&G 读数，供 `fg_exposure_gate` 用（默认关闭，见 CONFIG）。
+            显式传入供测试/`experiments/fg_exposure_gate_forward_test.py` 的确定性重放使用；
+            不传（`None`）则按 `as_of` 是不是今天，走实时读数或历史归档查询——见下方解析逻辑。
     """
     # v0.45.104：模式名打错必须**当天**就炸，不能等到"今天恰好有候选要开仓"。
     # _compute_position_size 里的 ValueError 只在 _open_position 路径上抛，
@@ -1052,6 +1186,25 @@ def run_for_date(as_of: str, verbose: bool = False) -> Dict:
     if _mode not in _SIZING_MODES:
         raise ValueError(f"CONFIG['sizing_mode']={_mode!r} 未知，"
                          f"只认 {' / '.join(repr(m) for m in _SIZING_MODES)}")
+
+    # v0.45.262：F&G 是当天全池同一个常数，一天只解析一次，不逐标的重复查询。
+    # 今天 → 实时读数（复用 BuzzBee 已经在用的 fear_greed.get_fear_greed()，走它自己的
+    # 1 小时缓存，不新增网络路径）；过去日期（bootstrap/run_replay）→ 查 signal_archive
+    # 历史归档。任何一步失败都按"今天没有 F&G 读数"处理，不是本函数的关键路径。
+    # ⚠️ `run_replay` 内部调用本函数不传这个参数——如果传给它的 `dates` 恰好含"今天"
+    # （正常用法只回放过去日期，不会踩到），那一天会读到**当次调用时刻**的实时值，
+    # 不是确定性的历史快照。已知边界，不在本次范围内加保护。
+    if market_fear_greed is None:
+        try:
+            if as_of == pdt_today():
+                from fear_greed import get_fear_greed
+                _fg = get_fear_greed()
+                if _fg.get("is_real_data"):
+                    market_fear_greed = {"value": _fg["value"], "is_cnn": _fg.get("source") == "cnn"}
+            else:
+                market_fear_greed = _lookup_market_fear_greed(as_of)
+        except Exception as _e_fg:
+            _log.warning("[PaperPortfolio] %s F&G 读取失败，按当天无读数处理：%s", as_of, _e_fg)
 
     meta = _load_meta()
     positions = [Position(**p) for p in _load_jsonl(POSITIONS_FILE)]
@@ -1111,7 +1264,8 @@ def run_for_date(as_of: str, verbose: bool = False) -> Dict:
         ticker = snap["ticker"]
         ohlc = _fetch_ohlc(ticker, as_of,
                            (datetime.strptime(as_of, "%Y-%m-%d") + timedelta(days=3)).strftime("%Y-%m-%d"))
-        new_pos = _open_position(snap, nav_for_sizing, as_of, ohlc, closed)
+        new_pos = _open_position(snap, nav_for_sizing, as_of, ohlc, closed,
+                                 market_fear_greed=market_fear_greed)
         if new_pos is None:
             continue
         if new_pos.size_usd > cash:
@@ -1227,6 +1381,13 @@ def run_replay(config_overrides: Dict, state_dir: Path,
     # 这么跑的）会互相串味：上一轮 vol_source_max_age_days 下查出的 None
     # 原样回给下一轮。进出各清一次，沙盒之间彻底隔开。
     _VOL_ANN_CACHE.clear()
+    # v0.45.262：F&G 历史查询缓存同款风险——`experiments/fg_exposure_gate_forward_test.py`
+    # 会在同一进程里连续跑"关闭门"/"开启门"两个沙盒 replay，键只有 (as_of, db)，
+    # 不含 config_overrides，两次跑用的又是同一个 db_path，若不清就会把第一轮缓存的
+    # 结果（其实与门开不开无关，纯粹是同一份数据）复用给第二轮——虽然值本身相同、
+    # 不影响正确性，但会掩盖"F&G 查询确实被绕过缓存重新执行了"这件事，与
+    # _VOL_ANN_CACHE 同一形状，一并清。
+    _FG_LOOKUP_CACHE.clear()
     try:
         POSITIONS_FILE = state_dir / "positions.jsonl"
         CLOSED_FILE = state_dir / "closed_trades.jsonl"
@@ -1252,6 +1413,7 @@ def run_replay(config_overrides: Dict, state_dir: Path,
         CONFIG.clear()
         CONFIG.update(_orig_config)
         _VOL_ANN_CACHE.clear()   # 沙盒里攒的 σ 不得漏进生产 run_for_date
+        _FG_LOOKUP_CACHE.clear()
         _REPLAY_MODE = False
 
 

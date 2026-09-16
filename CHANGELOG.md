@@ -374,7 +374,108 @@ v0.45.260 收口 `generate_ml_report.py:2814` 的 yfinance 限流降级读取分
   与 `tests/test_silent_failure_guards.py`（收录 collect_data 相关用例）
   共 137 项全绿，`ruff check collect_data.py` 全过。
 
-## [0.45.262] — 2026-09-15 — 占位（进行中：F&G 组合层敞口控制门——预置读取管道 + 默认关闭的 CONFIG 开关 + 预注册前瞻检验基础设施）
+## [0.45.262] — 2026-09-15 — F&G 组合层敞口控制门：读取管道 + 默认关闭的 CONFIG 开关 + 预注册前瞻检验基础设施
+
+同日早些时候（v0.45.247 追记）量出：`BuzzBeeWhisper` 把 F&G 当逐标的情绪信号用（当天全池同一常数
+加进逐标的连续分数，再过类别阈值判方向）证据不支持——顺周期（生产现状）明显是"顺周期/去掉/逆周期"
+三种处理里最差的，且结构上"市场常数塞进逐标的阈值分类"本身就是噪音，与顺/逆周期无关。用户追问
+"分析加密该不该降权、重建要哪种哲学"，据此设计升级方案：把 F&G 挪到它真正适用的层次——组合层的
+仓位敞口控制，且不经过前瞻验证不允许生效。完整推导见 auto-memory `alpha-hive-fear-greed-dead-wire.md`。
+
+### Added — `paper_portfolio.py`
+
+- `CONFIG["fg_exposure_gate"]`（默认 `enabled: False`）：极度贪婪日新开多头减仓、极度恐惧日新开
+  空头减仓（`long_size_mult`/`short_size_mult` 默认各 0.5）——只收紧顺势方向，不给逆势方向加仓
+  （加仓是凭空多引入一个未经验证的正向假设，未经验证前不做）。
+- `_lookup_market_fear_greed(as_of, db_path=None)`：逐字节照抄 `_lookup_vol_ann` 的骨架（`db.exists()`
+  判断 / "表不存在"容忍但"库被锁"必须抛出 / 缓存 / 失败返回 `None`），但**精确匹配** `date == as_of`
+  ——不像波动率那样做"最近 N 天"窗口，F&G 是逐日读数，拿前一天的值顶替会悄悄延续过时的极端读数。
+  读 v0.45.247 新增的 `market.fear_greed`/`market.fear_greed_is_cnn`（两者都存在才信任，任一缺失
+  按"当天没有真实读数"处理）。
+- `_fg_exposure_multiplier(direction, market_fear_greed)`：纯函数，`_compute_position_size` 之外的
+  独立乘数——那个函数只管"这个置信度该给多大仓位"，不知道方向，方向相关的调整放在调用方
+  （`_open_position` 里 `size_usd` 算出后、`size_usd<=1` 校验**之前**应用，校验的应是"所有调整叠加后
+  的最终仓位"）。
+- `run_for_date(as_of, verbose=False, market_fear_greed=None)`：新增可选参数（可注入，供测试/前瞻
+  检验的确定性重放使用）；不传时按 `as_of` 是不是今天走实时读数（`fear_greed.get_fear_greed()`，
+  复用 Buzz 已经在用的同一函数与 1 小时缓存，只在 `is_real_data` 真时采信）或历史归档查询。
+- `run_replay` 新增 `_FG_LOOKUP_CACHE.clear()`（进出各一次，同 `_VOL_ANN_CACHE` 那条 v0.45.104 教训——
+  同一进程连跑多个沙盒不能互相串味；本次前瞻检验脚本正是这么用的）。
+
+### Added — `experiments/fg_exposure_gate_forward_test.py` + `tests/test_fg_exposure_gate_forward_test.py`（34 条）
+
+仿 `experiments/resonance_boost_forward_test.py`（v0.45.242）的纪律（预注册常量、自证、盲化、成组
+序贯检视、`--insample`、承载物），但统计对象不同——敞口门改的是仓位大小不改排序，横截面 IC 在这里
+没有意义，换成**组合层**指标：真实 `paper_portfolio.run_replay` 各自独立沙盒重放 baseline
+（`{}`，即生产默认）与 treatment（`FG_GATE_TEST_CONFIG`，`enabled=True` + 落地时写的默认参数），
+两条 `equity_curve` 按 ISO 周取"本周首个交易日 NAV"算周收益率，ΔNAV% = treatment − baseline，
+单侧 t 检验（复用 `ic_diagnostics.basic_stats`/`normal_two_sided_p`，只补一层单侧转换，不再手搓
+第二份 spearman/t 检验）。自证前提相应改成：baseline 重放出的"窗口内新开仓位"必须与生产**实际记录**
+的 `paper_portfolio_state/`（`closed_trades.jsonl` ∪ 仍在场的 `positions.jsonl`）重合 ≥95%。
+
+- 预注册：`FORWARD_START="2026-09-16"`、`LOOKS=((15,0.02,"中期"),(30,0.045,"终期"))`——**N 高于共振
+  加成那次（10/20）是明确写出的估计不是算出来的**：极度恐惧/贪婪日历史约占 15% 交易日，比共振加成
+  "天天都有效应"稀疏得多，多数周 delta=0 会拉长检出所需周数，没做严格功效分析，如实记录不假装精确。
+- 承载物：`ic_rerun_readiness.py` 新增 `fg_exposure_gate_forward_status()`，逐字节仿
+  `resonance_forward_status()`（`importlib.util` 动态加载、失败渲染成一行、不改自己的退出码），
+  挂进 `main()` 的 `--quiet`/`--json`/完整输出——两个前瞻检验共用同一条每周巡检节奏。
+- 机制验证（真实执行，非推断）：种一份带真实历史 F&G 形状的临时库 + 合成随机游走 OHLC，跑通全链路——
+  真 `run_replay` 两个变体、真实仓位大小差异（TSLA 型场景 1500→750）、84 笔已平仓交易产生真实
+  PnL 差异、周度 delta 非零、单侧 t 检验正确计算。空/无信号场景下（当前生产 `signal_archive` 还没有
+  `market.fear_greed` 的历史回填行）机制正确地什么都不调整，不是 bug，是"没有数据就不调整"的
+  设计意图。
+
+### 已知未做 / 待定
+
+- **`signal_archive` 里 `market.fear_greed`/`market.fear_greed_is_cnn` 尚无历史回填**——v0.45.247 的
+  提取器只对"这之后新扫描的日子"生效，`signal_archive.py --backfill` 没有对历史 `analysis-*.json`
+  跑过。不影响前瞻检验本身（`FORWARD_START` 之后的日子会自然产生这些行），但意味着 `--insample`
+  在真实历史数据上暂时看不出效应（试过，确认是数据缺口不是代码问题）——回填是否值得做、
+  以及会不会因此新造一批需要走"事后"流程的历史样本，留给用户决定，未在本次执行。
+- 生产启用（`fg_exposure_gate.enabled` 改 `True`）完全依赖前瞻检验的"confirmed"结论，本版不做、
+  也不应做——落地的默认值就是 `False`。
+- 加密源该不该降权、Buzz 层符号翻转——已在同日更早的分析里给出结论（证据不足/不比"不做"更好），
+  本版不重做，见 `alpha-hive-fear-greed-dead-wire.md`。
+
+### 世代边界：**不需要**
+
+`paper_portfolio.py` 只读 `predictions.final_score`/`direction`，从不改写——不满足 `_COHORT_HISTORY`
+"是否改变 final_score/dimension_scores"的判据（`ic_rerun_readiness.py` 自己的声明）。且落地默认值
+`enabled=False`，行为不变是**实测**而非推断：用改动前（origin/main）代码与本版代码，在真实 98 个历史
+`report_snapshots/*.json`（`bootstrap_date` 起）上各跑一次 `run_replay`（`_fetch_ohlc` 两边同钉成
+`{}`，隔离出纯粹的开仓决策，exits 完全没被本次改动碰过），逐日累积持仓（ticker/entry_date/direction/
+size_usd 四元组）**0 差异**，直到 `max_positions=15` 上限（15/15 逐笔相同）。另跑 `enabled=True`
+读真实历史 F&G 值作对照，确认闸门确实会触发（7 笔仓位被打折，在 15 仓上限前后一致，未失控发散）。
+
+### 测试
+
+- `tests/test_paper_portfolio_fg_exposure_gate.py`（新，26 条）：`_fg_exposure_multiplier` 纯函数
+  穷举方向×区间；`_open_position` 接线（含"打折应用在 size_usd<=1 校验之前"——用打折前/后分别落在
+  守卫两侧的数字构造，而不是随便挑一个都过关的数）；`_lookup_market_fear_greed` 边界（无表/无当天
+  行/is_cnn 缺失/日期必须精确匹配，含"当天与前一天都有完整读数时不能被就近匹配换掉"）；
+  `run_for_date` 的 F&G 解析顺序（显式传入 > 今天实时 > 历史归档）与兜底值/异常不得影响当天运行；
+  `run_replay` 两个沙盒间的缓存隔离。
+  **变异**（真跑，逐个改回还原）：方向判定写反 / 阈值含等号 / 打折顺序颠倒 / is_cnn 缺失时默认信任
+  / 日期精确匹配放宽成 `<=` / today 分支不检查 is_real_data / enabled 检查漏掉——**7/7 全部变红**；
+  过程中两次因为选的数字凑巧让新旧顺序算出同一个结果而"没牙"，改用能分开两种顺序的数字后才见红——
+  记录在案，不是一次就对。
+- `tests/test_fg_exposure_gate_forward_test.py`（新，34 条）：预注册常量钉死；单侧检验对齐
+  `ic_diagnostics`（含全 0/全同值两种退化情形显式判定，不让 nan 漏出去）；周度净值差（只取每周首个
+  交易日、跳过 None、只配对两个变体都有的周）；成组序贯判定（盲化在数据结构上、序列化后仍查不到
+  效应量键、中期只看前 15 周不被后面的极端值污染）；建仓四元组对 `Position`（有 `size_usd`）与
+  `ClosedTrade`（无此字段，需 `shares×entry_price` 反推）两种形状；真实 `run_replay` 集成（机制自检、
+  端到端仓位打折、生产从未跑过时的 `not_ready`、生产记录对不上时的 `cannot_judge`）；`run()` 的
+  空快照/无前瞻样本/21 天静默告警防线；`ic_rerun_readiness` 承载物接线。
+  **变异**：盲化泄漏效应量 / 自证阈值判定去掉 / entry_key 不兼容 ClosedTrade 形状——3/4 变红；
+  中期阈值 `<` 改 `<=` 的精确浮点边界未构造出有效变异，如实记录为已知覆盖缺口（不影响判定，
+  这条边界在真实 p 值上被精确命中的概率可忽略）。
+
+### 验证
+
+- 全套 `-m "not integration and not network"`（合并 origin/main 之后）：**4864 passed / 1 failed /
+  1 skipped / 2 xfailed**（318s），唯一红 `TestCoverageHorizon`（日历覆盖率设计内告警，与本版无关）。
+- `ruff check` 改动/新增的 5 个文件：通过。
+
 
 ## [0.45.261] — 2026-09-15 — Fixed：param_optimizer.py 网格搜索收尾用硬编码旧值"恢复" paper_portfolio.CONFIG，改成 deepcopy 快照
 
