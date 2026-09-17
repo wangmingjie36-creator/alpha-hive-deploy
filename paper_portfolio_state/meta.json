@@ -2,8 +2,8 @@
   "version": "0.19.0",
   "starting_capital": 50000.0,
   "starting_date": "2026-03-09",
-  "cash": 34147.18586278001,
-  "last_run_date": "2026-09-15",
+  "cash": 30116.703460840006,
+  "last_run_date": "2026-09-16",
   "config_snapshot": {
     "starting_capital": 50000.0,
     "bootstrap_date": "2026-03-09",
@@ -37,6 +37,13 @@
     "entry_conf_min": "mid",
     "entry_score_bull": 6.5,
     "entry_score_bear": 4.85,
+    "fg_exposure_gate": {
+      "enabled": false,
+      "extreme_fear": 25,
+      "extreme_greed": 75,
+      "long_size_mult": 0.5,
+      "short_size_mult": 0.5
+    },
     "candidate_sort_center": null,
     "min_samples_for_win_rate": 5,
     "live_start_date": "2026-04-16",

@@ -11,6 +11,7 @@
     "ScoutBeeNova": 6.375174499999999,
     "GuardBeeSentinel": 6.13
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -23,8 +24,8 @@
   "cs_rank": null,
   "actual_prices": {
     "t1": 82.93,
-    "t7": null,
+    "t7": 82.54,
     "t30": null
   },
-  "created_at": "2026-09-04T15:02:42.297783"
+  "created_at": "2026-09-16T14:44:37.573951"
 }
