@@ -15,6 +15,7 @@
     "BuzzBeeWhisper": 4.45,
     "ChronosBeeHorizon": 4.0
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -28,7 +29,7 @@
   "actual_prices": {
     "t1": 80.04000091552734,
     "t7": 80.04000091552734,
-    "t30": null
+    "t30": 61.96
   },
-  "created_at": "2026-08-12T11:06:28.226113"
+  "created_at": "2026-09-17T14:53:05.836557"
 }

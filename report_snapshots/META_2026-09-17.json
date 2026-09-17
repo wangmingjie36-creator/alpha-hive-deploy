@@ -1,0 +1,44 @@
+{
+  "ticker": "META",
+  "date": "2026-09-17",
+  "composite_score": 6.34,
+  "direction": "neutral",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 682.3099975585938,
+  "agent_votes": {
+    "BuzzBeeWhisper": 4.67,
+    "CodeExecutorAgent": 3.0,
+    "ChronosBeeHorizon": 5.9,
+    "OracleBeeEcho": 9.22,
+    "ScoutBeeNova": 5.95,
+    "RivalBeeVanguard": 5.86,
+    "GuardBeeSentinel": 4.44,
+    "BearBeeContrarian": 2.19,
+    "QueenDistiller": 6.34
+  },
+  "agent_votes_source": "agent_details",
+  "weights_used": {
+    "signal": 0.0,
+    "catalyst": 0.332,
+    "sentiment": 0.325,
+    "odds": 0.343,
+    "risk_adj": 0.0
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.724,
+    "signal": 0.793,
+    "catalyst": 0.897,
+    "sentiment": 0.448,
+    "odds": 0.931,
+    "risk_adj": 0.655
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-17T14:50:59.107644"
+}
