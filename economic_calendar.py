@@ -53,7 +53,7 @@ _FOMC = [
 ]
 
 # ── CPI 数据发布（BLS Consumer Price Index，08:30 ET）──
-# 核对时间：2026-08-29，逐条对照 bls.gov/schedule/news_release/cpi.htm
+# 核对时间：2026-09-18（二次核对，结论不变），逐条对照 bls.gov/schedule/news_release/cpi.htm
 _CPI = [
     # 2025：⚠️ 未与官方逐条核对（BLS 当前页只回溯到 2025-11 参考月）。
     # 全部是过去日期，get_upcoming_events 不会返回，仅留档；
@@ -70,7 +70,7 @@ _CPI = [
 ]
 
 # ── 非农就业 NFP（BLS Employment Situation，08:30 ET）──
-# 核对时间：2026-08-29，逐条对照 bls.gov/schedule/news_release/empsit.htm
+# 核对时间：2026-09-18（二次核对，结论不变），逐条对照 bls.gov/schedule/news_release/empsit.htm
 _NFP = [
     # 2025：⚠️ 同 CPI，未与官方逐条核对，全部为过去日期，仅留档。
     "2025-01-10", "2025-02-07", "2025-03-07", "2025-04-04",

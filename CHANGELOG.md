@@ -7,6 +7,60 @@
 
 ## [0.45.287] — 2026-09-18 — 占位（进行中：编排器 18 处 `$VAR` 紧跟全角标点，UTF-8 locale 下 `set -u` 整体退出——统一加花括号）
 
+## [0.45.286] — 2026-09-18 — Fixed：CI 缺 `mcp`/`pydantic` 依赖导致 `TestEveryResolverFollowsEnv[alpha_hive_mcp._hive_dir]` 报 ModuleNotFoundError；经济日历告警二次核对
+
+v0.45.285 推送到 `main` 后 CI（`tests.yml`）红了，两个失败与该次改动**无关**——
+上一个无关提交（v0.45.279 ScoutBee 修复）的 CI 跑出的是一模一样的两条：
+
+1. `test_economic_calendar.py::TestCoverageHorizon`（按设计定期变红，见下）。
+2. `test_paths_not_frozen_at_import.py::TestEveryResolverFollowsEnv::test_resolver_follows_env[alpha_hive_mcp._hive_dir]`
+   —— `ModuleNotFoundError: No module named 'pydantic'`（`alpha_hive_mcp.py:45`）。
+
+### Fixed
+
+- **`requirements.txt`**：新增 `mcp>=1.26.0,<2` 与 `pydantic>=2.12.0,<3`（新增
+  「Alpha Hive MCP Server」一节，沿用同文件 Alpha Hive Bot 一节的先例：
+  主扫描进程不依赖，但仓内另一组件需要）。
+  **根因**：`_discover_path_resolvers()` 是纯 AST 枚举、不 import，
+  `alpha_hive_mcp._hive_dir` 因引用 `PATHS.` 被自动纳入参数化；真正 `import_module`
+  发生在测试体内。`alpha_hive_mcp.py` 模块级 `from pydantic import ...` /
+  `from mcp.server.fastmcp import FastMCP`，而这两个包**从未进过 `requirements.txt`**
+  （模块 docstring 只写了手动 `pip install mcp yfinance httpx pydantic`）。
+  用户 Mac 上手动装过 ⇒ 本地全套一直绿；CI 只装 `requirements.txt` ⇒ 红。
+  是「X 在哪些环境里存在？」那类问题：答案是「只有装过的机器」。
+  **没有**改成给该用例加 skip——那会让它在 CI 里恒不运行，且与「该模块的
+  路径解析行为应被验证」的初衷相反；补依赖让它在 CI 里真跑。
+
+  验证：临时 venv 按 CI 同样的命令（`pip install -r requirements.txt pytest
+  pytest-timeout ruff`）装一遍 ⇒ `TestEveryResolverFollowsEnv` 33 项全过；
+  同一 venv 卸掉 `mcp pydantic` 后重跑 ⇒ 精确复现 CI 的
+  `ModuleNotFoundError: No module named 'pydantic'`（`alpha_hive_mcp.py:45`），
+  证明该 venv 是 CI 环境的忠实复现、且修复确为因果所在。
+
+### 经济日历告警（`TestCoverageHorizon`）：二次核对，**代码无需改动**
+
+用户提示该告警可能只是「BLS 还没发布 2027 日程」，要求二次核对。浏览器直接打开
+BLS 官方页面（2026-09-18）：
+
+- `bls.gov/schedule/news_release/cpi.htm`：最后一行 `November 2026 → Dec. 10, 2026`，
+  与 `economic_calendar._CPI` 末条 `2026-12-10` 一致，**无 2027 条目**；
+- `bls.gov/schedule/news_release/empsit.htm`：最后一行 `November 2026 → Dec. 04, 2026`，
+  与 `_NFP` 末条 `2026-12-04` 一致，**无 2027 条目**。
+
+结论：告警如实反映现状（CPI 剩 83 天 / NFP 剩 77 天，阈值 90 天），不是数据过期，
+也没有可补的官方日期；**禁止推算填空**（v0.45.65 前车之鉴）。等 BLS 发布 2027 日程后
+逐条抄入并上移 `verified_through` 即可。本次只把 `_CPI`/`_NFP` 上方的「核对时间」
+注释从 2026-08-29 更新为 2026-09-18（标注二次核对、结论不变），未动任何日期数据。
+
+### 验收
+
+- 本地 `tests/test_economic_calendar.py`：31 passed, 1 failed（唯一失败即上述按设计的
+  `TestCoverageHorizon`）；`ruff check economic_calendar.py` 全过。
+- CI 上 `TestEveryResolverFollowsEnv[alpha_hive_mcp._hive_dir]` 是否转绿，待推送后
+  看 `tests.yml` 该次运行（本条在推送前写就，**未**含 CI 结果）。
+
+---
+
 ## [0.45.285] — 2026-09-18 — Fixed：`generate_deep_v2.py` 的 `ALPHAHIVE_DIR` 硬编码字面量收口（数据根迁移阶段 4 遗留项第三例）
 
 数据根迁移阶段 4（gh-pages 发布链改指向）普查仓库外/独立进程消费方时，
