@@ -5,7 +5,71 @@
 
 ---
 
-## [0.45.270] — 2026-09-18 — 占位（进行中：09-17 网站数据部分降级根因排查 + momentum/volume 回落链修复）
+## [0.45.270] — 2026-09-18 — Fixed：09-17 网站「数据部分降级」根因——CBOE 熔断跳闸时 momentum/volume 独立回落链连尝试机会都没有
+
+### 根因（09-17 14:11:50~14:14:21，用日志行号定位，不按日期 grep——`alpha_hive.log`
+### 只有 `HH:MM:SS`，混着历史轮转内容，见 memory `alpha-hive-log-no-date.md`）
+
+扫描开局约 2 分钟本机网络中断：CBOE 因连续 `no_data` 熔断跳闸、yfinance
+同时报 `'NoneType' object is not subscriptable`（网络异常导致其内部解析崩溃）、
+Finnhub/AlphaVantage 均 SSL 握手失败——四条降级链**同时**打不通，30/30 标的在
+`MultiSourceFetcher.fetch()` 走到最后防线，记「所有数据源不可用」返回 FALLBACK。
+
+价格确实拿不到，这部分该降级；但 `momentum_5d`/`volume_ratio` 各自另有一条
+**独立**于 CBOE/yfinance 主价源的回落链（自攒价格索引 + Twelve Data，见
+`_fill_momentum_from_index` / `_fill_volume_from_twelvedata`，本就是为「yfinance
+限流时怎么办」而建的）——此前只挂在 `CboeSource.fetch()` 内部：CBOE 熔断器一
+跳闸，`self.breaker.allow_request()` 直接 `return None`，连调用
+`_fetch_history_metrics`（唯一触达那条回落链的入口）都没机会。而本地价格索引
+不经网络、Twelve Data 是与 CBOE/yfinance 都无关的独立账号配额，两者当时大概率
+仍然健康——网络在 14:20 前后已恢复（options 快照从 14:20:45 起正常写入），
+但 `_prefetched_stock` 是扫描开局一次性注入、全程复用的内存快照，没有「网络
+恢复后重试」的机制，这个 ~2 分钟的窗口被冻进了当天全部 30 只标的的报告。
+
+落到网站上：ML 报告数据质量横幅「数据部分降级：momentum 通道 30/30 标的降级；
+volume 通道 30/30 标的降级；analyst_targets 通道 30/30 标的降级」（第三项
+`ChronosBeeHorizon.analyst_targets` 同源但机制略有不同，走的是
+`prefetch_market_bundle` 的并发个票 `analyst_price_targets` 抓取——**未修**，
+见下方遗留）。BuzzBeeWhisper/ChronosBeeHorizon 均不检查 `_data_unavailable`
+标记（这两只蜂本就设计成部分降级而非整体跳过），所以两只蜂仍然正常出分，
+只是动量/量比/目标价三个子信号被迫置 None。
+
+### Fixed
+
+- `data_pipeline.py::MultiSourceFetcher.fetch()`：四源全灭、即将返回最终
+  FALLBACK 字典前，补一次 `_fill_momentum_from_index` + `_fill_volume_from_twelvedata`
+  ——两条回落各自独立尝试，互不污染，任一/两者都拿不到时保持诚实 `None`
+  （不编默认值）；回落链自身异常也不得让 `fetch()` 整体崩溃（`except Exception`
+  + debug 日志，不掩盖主诊断）。价格与 `_data_unavailable` 标记不变。
+
+### Tests
+
+- `tests/test_multi_source_fallback_momentum.py`（6 条，全部**变异真跑**验证
+  过——回退本次改动，其中 3 条按预期转红）：四源全灭+双回落成功／双回落也失败
+  保持诚实 None／单条回落成功不拖累另一条／回落链自身抛异常不炸 `fetch()`／
+  有源正常成功时完全不触碰新增分支（用会抛错的假回落函数守住）。
+
+### 遗留（诊断已确认，无需/无法修）
+
+- **`analyst_targets` 通道同一天也 30/30 降级，根因已查清，但不是同一类 bug**：
+  `prefetch_market_bundle` 当时日志「日线 11/35 只 | info 29 | calendar 30 |
+  analyst_targets 30」——bundle 认为 30/30 都拿到了非 None 值，但
+  `ChronosBeeHorizon` 读出来全是 `{}`。追到 yfinance 库本身
+  （`yfinance/scrapers/analysis.py::analyst_price_targets`）：`YfConfig.debug.
+  hide_exceptions` **默认 `True`**，取数抛 `TypeError`/`KeyError` 时不外抛，
+  直接返回 `{}`——即请求失败与"该票本来就没有分析师覆盖"在 yfinance 自己的
+  返回值里**无法区分**，`prefetch_market_bundle` 的 `getattr(...) is not None`
+  判定对这个字段因而必然失真（已确认，非推断）。但下游 `ChronosBeeHorizon`
+  的 `if _mean > 0` 早已把这种空结构正确判成 `"unavailable"`（本条与
+  momentum/volume 的区别：**没有独立于 yfinance 的第二数据源可回落**，无东西
+  可接，属于诊断而非缺口）。唯一的不完美是 `prefetch_market_bundle` 自己的
+  统计行把两种情况都计入「成功」，误导了本次排查前半段——若要根治属于
+  单纯的可观测性改进（区分`{}` 与"真无覆盖"），不影响任何实际产出，未做。
+- 未对 2026-09-17 已发布的报告做补算/重新部署——影响的是 BuzzBee 的
+  `momentum`/`volume` 子信号与 ChronosBee 的目标价卡片，**间接影响
+  `final_score`**（momentum/volume 是 BuzzBee 7 通道加权里的两个分量），
+  比此前 09-10 的磁吸价格修正（纯显示字段）更深；是否补算是决定要不要
+  改一天已发布的分数，留给用户定。
 
 ## [0.45.269] — 2026-09-18 — Fixed：Step 14 数据备份 exit code 2 误判——export/commit 失败曾被编排器误报成"已提交但推送失败"
 
