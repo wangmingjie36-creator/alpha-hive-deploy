@@ -708,7 +708,130 @@ v0.45.272 占位提到的「潜在写穿生产 report_snapshots/paper_portfolio_
 若指的是 `paper_portfolio.py:54-56` 注释里「留待后续」的 `SNAPSHOT_DIR`/`STATE_DIR` 懒求值重构
 （涉及全模块几十个使用点），那仍是更大范围的独立工作，两个号都没覆盖。
 
-## [0.45.271] — 2026-09-18 — 占位（进行中：09-17 momentum/volume 补算 + 重新部署——评估是否触及 predictions 表）
+## [0.45.271] — 2026-09-18 — 09-17 完整蜂群顺序重放补算：final_score/direction 内部一致重算，predictions 表随之更新
+
+延续 v0.45.270（momentum/volume 独立回落链）——用户要求"按同样思路补算并重新部署"。
+先算 BuzzBee 单独修正后发现：momentum/volume 直接进 7 通道加权公式，
+**BearBeeContrarian 自己的估值/动量衰减两项也直接读 `stock["momentum_5d"]`**，
+两只蜂改了分，Guard 的共振/一致性、Bear 读 Guard 的信号一致性子项都会跟着变——
+要让 final_score 内部一致，需要把 GuardBeeSentinel→BearBeeContrarian→QueenDistiller
+那天的真实调用顺序重跑一遍，不能只改 BuzzBee 一处分数往上顶。
+
+### 做法：钉死当天外部依赖，让核心业务逻辑真跑
+
+不是手算 final_score，是构造当天的 PheromoneBoard、注入修复后的 BuzzBee 结果，
+**真的调用** `GuardBeeSentinel.analyze()` / `BearBeeContrarian.analyze()` /
+`QueenDistiller.distill()`，把每一处会碰到"今天"而非"09-17"的外部依赖钉死在
+当天存档值上：
+- Guard 的宏观/周期/市场政体判定（`fred_macro`/`market_intelligence` 无日期参数，
+  直接调只能拿到 09-18 的数）：逐字段从 Guard 当天存档的 `macro_adj`/`cycle_context`/
+  `market_regime` 重建，monkeypatch 对应函数返回这份存档值。
+- Guard 的拥挤度 `adjustment_factor`：直接复用存档数值（内部 Reddit/空头仓位子计算
+  依赖 09-18 实时行情，但 `adjustment_factor` 只是离散三档 0.70/0.95/1.20，
+  重新算的收益远小于再钉一层依赖的成本，选择直接复用并标注为已知近似）。
+- GEX 政体：该 09-17 全天 30/30 标的 `gex_regime="unknown"`（已实测），故
+  `dealer_gex` 全量传 `{}`、`DealerGEXAnalyzer.analyze` monkeypatch 成空，
+  不是近似，是精确复现那天"数据不可用"的真实状态。
+- ML 权重反馈 `ml_adjustments`：**同一份值命中全部 30 只标的**（QueenDistiller
+  实例级，不是逐票算的），直接从存档取值事后赋给 `queen.ml_adjustments`——
+  但 `__init__` 只在传了 `ml_model=` 时才做"乘 ml_adjustments 再归一化"那步
+  （见 `queen_distiller.py:161-178`），必须把那段逻辑在赋值后手动重放一遍，
+  否则喂进 `RegimeWeightAdjuster` 的基准权重就是错的。
+- LLM 引擎：09-17 全 30 只标的 `distill_mode` 均为 `rule_engine`（已核实），
+  `enable_llm=False`，回放天然确定性、不产生任何 API 费用。
+- BearBee 板读险情：其 9 个子判断各自先读信息素板上游蜂条目、读不到才退化到各自的
+  API 兜底（SEC/期权/newsapi）——29/30 实测那天**部分子项已经走了兜底**
+  （板条目在 Bear 读取前已被淘汰/未及时发布，与 momentum/volume 无关），
+  按 `data_sources` 存档标签逐子项判定"那天到底读到了没有"：insider/options/
+  catalyst/ml 两条路径都与本次修复无关，原样复用存档数值与文案；news/guard
+  只在存档标着"real"（那天真读到了）时才用修复后的输入重算；valuation/momentum
+  从不经过板子，直接读 `stock` dict，永远重算。
+- `bearish_signals` 文案：按 `bear_bee.py` 全部 `.append(f"...")` 调用点的固定
+  前缀逐条归类复用/丢弃重算，而不是拼"[插桩]"占位文本——**首版漏了兜底路径
+  独有的"内幕人净卖出"变体**，30 只全量控制组核对时被抓出（ABBV 悄悄从 7.0 错到
+  2.0，score 却没报任何错误）。加了一道自证：存档里每一条 `bearish_signal`
+  必须能被前缀表分类，分类不出直接抛异常，把"漏项→分数静默错误"改成
+  "漏项→当场崩溃"。
+
+### 自证：先复现存档，再信任修正结果
+
+对照组（control）喂**未修复**的 momentum/volume 跑同一套回放，检验能不能复现
+30/30 标的的存档 `final_score`/`direction`/`dimension_weights`——这是相信"修复
+后"那次跑出来的数的前提。全量迭代过程中连续抓到并修正 5 类系统性偏差（逐条都是
+"跑出脏分数不报错"）：`AgentResult.to_dict()` 的 `error=None` 时不落这个 key
+而存档 JSON 永远显式写 `null`，导致重构的 `agent_results` 全部被
+`_prepare_dimension_data` 判定"带 error"而在只剩 1/5 维度上打偏；`__init__`
+的 ML 权重乘算时序漏做；`distill()` 自己会读板子做共振检测，而 `BearBeeContrarian`
+在生产里也会 `_publish()` 自己——漏发布让共振少算一个跨维度支持者，两只标的
+（CRCL/T）的 `resonance_detected` 因此从真变假，直接吃掉近 1 分；Bear 那天真实
+读到的 `stock["price"]` 是 FALLBACK 的 `0.0`（不是后来补写进 `predictions.
+price_at_predict` 的修正价），`_compute_bear_score` 的空信号分支按 `price>0`
+判负，两个变量搞混让 XOM/AMC 各错 1 分；上面那条前缀表漏项。
+
+最终：30/30 方向不受随机噪声干扰（control 组零方向误判、零权重误判）、
+`dimension_weights` 30/30 逐字节相等；仅剩约 0.01~0.08 的极小残差
+（Guard/Bear 各别标的），已排查过 dim_scores/权重/置信度/ML 调整/共振全部
+逐字节吻合、仍未定位到根因，判定为可接受的复现噪声（未影响任何方向判定或
+权重结果）。
+
+### 实测结果（30 只全量，用真实回放 + 存档 `ml_weight_adjustments`/GEX/宏观值）
+
+最大 `|Δfinal_score|` 1.29（DELL 5.06→6.35）、均值 0.24；**5 只最终方向翻转**：
+DELL neutral→bullish、ENPH bullish→neutral、NFLX neutral→bearish、
+TMUS bullish→neutral、VZ bullish→neutral；3 只标的 `resonance_detected`
+翻转（DELL/NFLX/TMO：false→true）。数据质量通道健康度 82%→89%
+（686/837→746/837，BuzzBee.momentum/volume 与 BearBeeContrarian.valuation
+三个通道各 30 标的脱离降级；`ScoutBeeNova.momentum`——另一条独立、未受本次
+修复影响的降级路径——与 `ChronosBeeHorizon.analyst_targets` 仍各 30 标的降级，
+如实保留，不是漏改）。
+
+### 落盘范围（Fixed）
+
+- `pheromone.db` 的 `predictions` 表（09-17，30 行）：`final_score`/`direction`/
+  `dimension_scores`/`agent_directions` 更新为重算值；`price_at_predict` 不碰
+  （那是独立于本次故障的口径，backtest 要比对的是"当天预测的方向对没对"）。
+  写入前逐行核对当前值等于补丁前存档值，`checked_t1`/`checked_t7` 全 0（T+7
+  回测还没跑到这批，此时改不会跟已写的 return/correct 字段打架）——两条都不
+  满足直接中止、不写任何行。备份：`pheromone.db.backup_before_0917_patch`。
+- `.swarm_results_2026-09-17.json`（未跟踪，本地）：30 只标的 `agent_details.
+  {BuzzBeeWhisper,GuardBeeSentinel,BearBeeContrarian}` 与 `distill()` 返回的
+  全部顶层字段（`final_score`/`direction`/`dimension_scores`/`dimension_weights`/
+  `resonance`/`conflict_info`/`arbitration_*`/`confidence_calibration`/…）整体
+  替换；额外重算 `cs_rank`（横截面排名，逐字复刻
+  `alpha_hive_daily_report._post_scan_enrichment`）与 `thesis_break_evaluations`
+  （逐字复刻 `_evaluate_thesis_breaks`，不改 `thesis_break_l1`/`l2` 判定文本，
+  只刷新求值明细）。
+- `alpha-hive-daily-2026-09-17.md` / `.json` 的 `markdown_report`：**调用真实的
+  `report_formatters.generate_swarm_markdown_report`** 用补丁后的 swarm_results
+  重新生成整份 8 版块报告，不是手改字符串；`📌 关注事项`（人工维护·不参与评分）
+  段落发现会被 `watchlist_events.format_for_report` 的 `datetime.now()`
+  （今天=09-18）污染"距今天数"，整段替换回原文，不在这次范围内顺手"修好"
+  这个另一处 bug。`opportunities`（30 条）与 `twitter_threads`（1 条）同样
+  调用真实的 `_build_opportunity_items`/`generate_swarm_twitter_threads` 重算。
+- `index.html`：调用真实的 `dashboard_renderer.render_dashboard_html` 用补丁后
+  的 `report`/`opportunities` 重新生成——不是逐张卡片手改。Top-6/Top-12 展示
+  会随新排名重排；ML 详情按钮/链接靠 `Path.exists()` 检查真实存在的
+  `alpha-hive-{ticker}-ml-enhanced-2026-09-17.html`（不是靠排名硬编码），
+  DELL/NFLX/TMO（新进前 12、当天没生成深度报告）正确显示"-"/"ML 报告生成中"
+  而不是死链，CRCL/BILI/NVDA（跌出前 12、报告仍在）正确保留可点链接——两边
+  都不需要我另外处理。`dashboard-data.json` 随该函数的既有副作用一并刷新。
+
+### 遗留（超出本次范围，未做）
+
+- **12 份已存在的 `alpha-hive-{ticker}-ml-enhanced-2026-09-17.html` 深度报告
+  未改**：读了一份样本（QCOM），确认是叙事体裁的分析文本（"蜂群实际输出的
+  final_score（含置信度加权，第1章展示的数字）= 6.18，..."），score 与推理
+  文字交织在一起——不是"改一个数字"能安全完成的，改数字不改周边论证文字
+  会制造逻辑不自洽的报告；真要改，正确做法是走 `generate_ml_report.py` 的
+  真实生成管线重新产出，那条路本身要不要用 LLM、要不要过一遍费用确认，
+  没有查清楚，故本次不碰。受影响 12 只中 QCOM/NVDA/META/MSFT/AMC/XOM/CRCL/
+  BILI/SNOW/VKTX/RKLB/CRM——分数已在 index.html/daily.md 层面更新，
+  但点进各自深度报告仍会看到旧数字与旧叙事。
+- **DELL/NFLX/TMO 未生成新的深度报告，CRCL/BILI/NVDA 的旧深度报告未删除**：
+  重算后的 Top-12（按 `final_score` 选深度报告的名单）与当天实际产出的
+  Top-12 不是同一批标的；index.html 已经能正确处理这种"排名和已生成文件对
+  不上"的状态（见上），故未强行补齐/清理文件本身。
+- Guard/Bear 各别标的约 0.01~0.08 的残差未定位到根因（见上）。
 
 ## [0.45.270] — 2026-09-18 — Fixed：09-17 网站「数据部分降级」根因——CBOE 熔断跳闸时 momentum/volume 独立回落链连尝试机会都没有
 
