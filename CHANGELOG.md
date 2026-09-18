@@ -5,6 +5,26 @@
 
 ---
 
+## [0.45.277] — 2026-09-18 — Docs：memory 仓已加远端并首推，CLAUDE.md 收尾流程补 push 步骤
+
+用户在对话里先后批准两步：① 新建私有仓库 `wangmingjie36-creator/alpha-hive-memory`
+并把本地 memory 仓（`~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory`）
+`origin` 指过去、完成首推（事前扫过当前内容+全部 git 历史，零命中密钥形状字符串）；
+② 明确要求「以后每次收尾都自动推」，把 push 从「每次都问」变成默认行为。
+
+### Changed
+
+- `CLAUDE.md`「memory 目录已纳入 git」一节：去掉已过期的「无远端」表述，收尾命令
+  从单纯 `add && commit` 补上 `&& push origin main`；补一句「推送已获批准为默认
+  行为，不必每次重新问」，并区分清楚「加远端」（一次性、已问过）与「日常 push」
+  （现在是默认动作）两件事，避免以后有 session 把两者混为一谈又去重新问一遍。
+- memory 仓自己的 `alpha-hive-user-preferences.md` 同步记了这两步决策的时间戳
+  与理由（不在 CLAUDE.md 重复，按本仓既有的「文档分工原则」）。
+
+本次只改 `CLAUDE.md` + 本文件，不涉及生产代码，无需测试。
+
+---
+
 ## [0.45.276] — 2026-09-18 — 补 v0.45.274：SNAPSHOT_DIR 隔离缺口的专用回归测试 + 一个死参数清理
 
 `v0.45.272` 占号后二次检查 v0.45.256 时独立发现了这个 bug，但在实现修复期间被另一 session
