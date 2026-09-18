@@ -5,7 +5,71 @@
 
 ---
 
-## [0.45.267] — 2026-09-18 — 占位（进行中：signal_archive 回填历史 F&G，CNN 官方历史端点，2026-03-10~09-14）
+## [0.45.267] — 2026-09-18 — `signal_archive` 回填历史 F&G：真值来自 discovery 文本，不用 CNN 官方历史序列
+
+`market.fear_greed`/`market.fear_greed_is_cnn` 是 v0.45.247 才加的抽取器，读的是
+`agent_details.BuzzBeeWhisper.details.fear_greed.value`——这个结构化字段在此之前的
+`.swarm_results_*.json` 里从不存在，`signal_archive.backfill()` 现有的抽取器重跑一遍
+历史文件抽不出任何东西（不是口径变了，是以前压根没写过）。
+
+### 真值来源的选择：discovery 文本，不是 CNN 官方历史序列
+
+一开始的默认想法是拿 CNN 官方历史接口（`production.dataviz.cnn.io/index/fearandgreed/
+graphdata/<起始日>`，免费、一次请求拿回起始日至今全部逐日读数）回填。真实验证后放弃：
+
+- 老版本 Buzz 把 F&G 值写进了人类可读的 `discovery` 文本（"... F&G 21(Extreme Fear) ..."），
+  是当天扫描**真实用过**的值。拿它和 CNN 历史序列逐日比对（104 个待回填交易日）：
+  只有 32 天完全一致，**65 天不一致**（多数相差 1~10 点，intraday 快照 vs CNN 官方历史点
+  口径不同）；CNN 历史序列自己还有一天的真实缺口（2026-03-12，接口当天无数据点，
+  但 discovery 里有真实记录）。
+- 若拿 CNN 历史序列回填，会让同一个 `market.fear_greed` 信号列前半段（回填）和后半段
+  （v0.45.247 起的实时抓取）用两种不同口径喂同一个槽位——`alpha-hive-train-serve-skew.md`
+  记过的那类"同一特征槽两端喂两个量"。改用 discovery 文本后口径统一：全程都是"当天
+  扫描时刻 Buzz 实际用过的值"，且天然覆盖 CNN 历史接口本身的缺口。
+
+### 来源标签（`is_cnn`）留白是有意的
+
+`_fear_greed_is_cnn` 的 docstring 已经证实 2026-03-10~13 那几天 discovery 记的其实是
+Alternative.me 加密 F&G（CNN 当日 17-22，记录值却是 13/15/18/15）——沿用这个已核实的
+结论标 `is_cnn=0.0`。除此之外的 102 天里 98 天，老代码没留 source 字段，无法可靠判定
+当天走的是 CNN 还是加密备用源；不编数据，这 98 天的 `market.fear_greed_is_cnn` 一行
+不写，不用"数值接近就当 CNN"这类猜测。
+
+⚠️ **下游影响**：`paper_portfolio._lookup_market_fear_greed`（v0.45.262）要求
+`market.fear_greed_is_cnn` 存在才认为"当天有真实读数"——这 98 天的回填值虽然真实，
+但**不会**被 `fg_exposure_gate` 前瞻检验的历史重放捡到（`is_cnn` 缺失 ⇒ 视为无读数）。
+这是有意的保守选择：既然确认不了来源，就不该喂给会影响真实仓位大小判断的路径。
+本次回填的实际用途是给 `signal_archive.analyze()` 之类的历史统计分析补样本
+（例如重新量化 Buzz 情绪层 F&G 通道的 IC，此前只有 v0.45.247 之后 3 天的真实数据可用，
+现在有 105 天）——不是为了扩大 exposure gate 前瞻检验的回放窗口。
+
+### 生成边界：不需要新增
+
+`market.fear_greed`/`market.fear_greed_is_cnn` 已登记在 `SIGNAL_LEAVES`（不读任何系统
+输出的原始信号），既不在 `ALWAYS_SLICED`、也不被任何一条 `COHORT_SIGNAL_SCOPE` 边界
+点名——`signal_archive.analyze()` 对它们本就用全史，回填不需要补一条新的世代边界声明。
+
+### 落地
+
+- 新增 `backfill_fear_greed_legacy.py`（一次性脚本，不进 `SIGNAL_EXTRACTORS`——避免
+  这里的判断被将来的全历史 `--backfill` 重跑悄悄当成"现役口径"的一部分）+
+  `tests/test_backfill_fear_greed_legacy.py`（16 个测试，覆盖文本解析、目标日期筛选、
+  已有数据不覆盖、幂等重跑、已知加密窗口标 is_cnn、其余日期 is_cnn 留空）。
+- 生产库 `pheromone.db` 实跑 `--apply` 前先手动 `cp` 备份
+  （`pheromone.db.pre-fg-backfill-v0.45.267.bak`），写入前后 `PRAGMA integrity_check` 均
+  为 `ok`。写入 1541 行 `market.fear_greed`（102 天 × 各天实际扫描的 ticker 数，早期
+  8~10 只、近期 30 只）+ 40 行 `market.fear_greed_is_cnn`（2026-03-10~13 共 4 天 ×
+  10 只）。`market.fear_greed` 覆盖从 3 天（2026-09-15~17）扩到 105 天
+  （2026-03-10~09-17），v0.45.247 之后已有的实时记录逐字节未动
+  （09-15/16/17 仍是 29/26/29）。
+- 全套 `pytest -o addopts="" -m "not integration and not network"`（关掉仓库默认 `-x`
+  看全量结果）：**4880 passed / 1 failed（已知设计内：`TestCoverageHorizon`）/ 1 skipped /
+  2 xfailed / 8 errors**（386.8s）。8 个 error 全部与本次改动无关——都发生在
+  `TestCarriedByReadiness` 类（跨 `test_fg_exposure_gate_forward_test.py` /
+  `test_resonance_boost_forward_test.py` / `test_ic_rerun_readiness.py` 三个文件）的
+  teardown 阶段，是这三个文件共享某个 fixture/状态的既有隔离泄漏（单独跑各文件均绿，
+  且与 `ic_rerun_readiness.py`/`paper_portfolio.py`/forward test 模块毫无 import 关系的
+  本次新增两个文件无关，去掉它们问题依旧复现）——用户已启动一个子任务定位修复。
 
 ## [0.45.266] — 2026-09-18 — 占位（进行中：v0.45.238 期权快照陈旧数据隔离——11 个坏槽位日进 signal_archive.QUARANTINE）
 
