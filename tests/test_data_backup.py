@@ -279,6 +279,92 @@ class TestRunBackupStageReporting:
         assert status["ok"] is False
         assert status["commit"]["made"] is True
 
+    def test_git_init_failure_reports_init_stage(self, tmp_path, monkeypatch):
+        """git init 失败必须立刻中止——不能带着未初始化的仓库继续往下走 add/diff/
+        commit：`git diff --cached --quiet` 在非 git 仓库里返回 128（不是"无变化"
+        的 0），旧代码会把 128 误判成"有变化"进而尝试 commit，commit 失败后把
+        "仓库根本没初始化成功"误标成 stage="commit"（v0.45.278 修）。"""
+        real_run_git = run_backup._run_git
+
+        def fake_run_git(args, cwd):
+            if args and args[0] == "init":
+                return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="模拟 git init 失败")
+            return real_run_git(args, cwd)
+
+        monkeypatch.setattr(run_backup, "_run_git", fake_run_git)
+
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "init"
+        assert status["ok"] is False
+        # 中止必须发生在 init 就地——不能继续跑到 export，manifest_summary 不该出现
+        assert "manifest_summary" not in status
+
+    def test_git_exception_during_commit_phase_reports_git_error_stage(self, tmp_path, monkeypatch):
+        """add/diff/commit 阶段任一次 git 调用抛异常（如 `_run_git` 的 timeout=60
+        触发 `subprocess.TimeoutExpired`）必须映射到专门的 stage="git_error"，
+        不能让异常一路不捕获地把 Python 进程以默认退出码 1 崩溃退出——退出码 1
+        是专门留给 secret_scan 的，会被编排器 Step 14 误报成"密钥扫描命中"
+        （v0.45.278 修）。"""
+        real_run_git = run_backup._run_git
+
+        def fake_run_git(args, cwd):
+            if args and args[0] == "add":
+                raise subprocess.TimeoutExpired(cmd=["git", "add", "-A"], timeout=60)
+            return real_run_git(args, cwd)
+
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+        monkeypatch.setattr(run_backup, "_run_git", fake_run_git)
+
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2  # 不能是 1——1 是 secret_scan 专属
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "git_error"
+        assert status["ok"] is False
+
+    def test_git_exception_during_push_reports_git_error_stage(self, tmp_path, monkeypatch):
+        """push 阶段抛异常（超时）同样要落进 stage="git_error"，且要能看出
+        commit 其实已经真实成功——跟 stage="push"（返回码非 0，不是异常）
+        不是一回事，下游据此决定"下一轮直接重推还是要人工排查"。"""
+        real_run_git = run_backup._run_git
+
+        def fake_run_git(args, cwd):
+            if args and args[0] == "push":
+                raise subprocess.TimeoutExpired(cmd=["git", "push", "origin", "main"], timeout=60)
+            return real_run_git(args, cwd)
+
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+        monkeypatch.setattr(run_backup, "_run_git", fake_run_git)
+
+        backup_dir = tmp_path / "backup"
+        self._init_backup_git_repo(backup_dir)
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "git_error"
+        assert status["ok"] is False
+        assert status["commit"]["made"] is True  # 提交已经真实成功，只是 push 抛了异常
+
     def test_full_success_reports_done_stage(self, tmp_path, monkeypatch):
         """真实本地裸仓库模拟远端，走完整 export→scan→commit→push 全流程。"""
         monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
@@ -353,7 +439,9 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
         return logs, steps_result
 
     @pytest.mark.parametrize("stage, expect_level, expect_log_substr, expect_status", [
+        ("init", "ERROR", "git 仓库初始化失败", "init_failed"),
         ("export", "ERROR", "数据导出失败", "export_failed"),
+        ("git_error", "ERROR", "git 调用异常", "git_error_failed"),
         ("commit", "ERROR", "git commit 失败", "commit_failed"),
         ("push", "WARN", "已提交但推送失败", "push_failed"),
     ])

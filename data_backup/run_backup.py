@@ -4,22 +4,37 @@ v0.45.264 起已接入生产编排器 `alpha-hive-orchestrator.sh` Step 14
 （转发调用见 `main()`）。
 
 失败路径设计（对应硬检查项「这个失败，下游怎么知道？」）：
-- 密钥扫描命中 → 不提交，`status.json` 记 `stage: "secret_scan"`, `ok: false`，
-  命中文件数与凭据来源文件名（不含值），退出码 1。
+- git 仓库初始化失败（`backup_dir` 无 `.git` 时的 `git init` 返回非 0，或调用
+  本身抛异常如超时）→ 未导出、未提交，`status.json` 记 `stage: "init"`,
+  `ok: false`, 退出码 2；**必须在这里就中止**，不能带着未初始化的仓库继续往
+  下走——`git diff --cached --quiet` 在非 git 仓库里返回 128（不是"无变化"的
+  0），旧代码会把 128 误判成"有变化"进而尝试 commit，commit 失败后把"仓库
+  根本没初始化成功"误标成 `stage: "commit"`（v0.45.278 修）。
 - 导出失败（如并发写检测命中、源库不存在）→ 未提交，`status.json` 记
   `stage: "export"`, `ok: false`, 退出码 2。
-- git commit 失败 → `status.json` 记 `stage: "commit"`, `ok: false`, 退出码 2。
-- 推送失败（网络/权限/远端不可写）→ 已经提交到本地工作区（数据没丢），
-  但 `status.json` 记 `stage: "push"`, `ok: false`, 退出码 2；
+- 密钥扫描命中 → 不提交，`status.json` 记 `stage: "secret_scan"`, `ok: false`，
+  命中文件数与凭据来源文件名（不含值），退出码 1。
+- git 调用异常（`add`/`diff`/`commit`/`rev-parse`/`push` 任一步抛出 Python 异常，
+  典型是 `subprocess.TimeoutExpired`——`_run_git` 传了 `timeout=60`，网络抖动
+  或别的进程占着 `index.lock` 都会撞上）→ `status.json` 记 `stage: "git_error"`,
+  `ok: false`, 退出码 2。**这条是 v0.45.278 新补的**：这些调用此前完全没有异常
+  保护，未捕获异常会让 Python 以默认退出码 1 崩溃退出，而退出码 1 是专门留给
+  `stage == "secret_scan"` 的——编排器 Step 14 会把纯粹的网络超时误报成"密钥
+  扫描命中，已拒绝提交"，且这次崩溃根本没来得及写 `status.json`。
+- git commit 失败（返回码非 0，不是异常）→ `status.json` 记 `stage: "commit"`,
+  `ok: false`, 退出码 2。
+- 推送失败（返回码非 0，不是异常；网络/权限/远端不可写）→ 已经提交到本地工作区
+  （数据没丢），但 `status.json` 记 `stage: "push"`, `ok: false`, 退出码 2；
   下一轮跑仍会带着未推送的提交重试。
 - 全部成功 → `status.json` 记 `ok: true`，含 commit sha、各库行数、耗时。
 
-⚠️ 退出码 2 是 export/commit/push 三种失败共用的（`main()` 里只把
-`stage == "secret_scan"` 单独映射成退出码 1，其余一律 2）——下游要分辨
+⚠️ 退出码 2 是 init/export/git_error/commit/push 五种失败共用的（`main()` 里
+只把 `stage == "secret_scan"` 单独映射成退出码 1，其余一律 2）——下游要分辨
 具体是哪一种，必须读 `status.json` 的 `stage` 字段，不能只看退出码。
 v0.45.269 之前编排器 Step 14 曾把 rc==2 硬解读为「已提交但推送失败」，
 导致 export/commit 失败（根本没提交成功）也被日志误报成「已提交」；
-Step 14 的分支现改为读 `stage` 字段而非只猜 rc。
+Step 14 的分支现改为读 `stage` 字段而非只猜 rc；v0.45.278 起 `case` 语句
+再加 `init` / `git_error` 两支，否则会落进未识别分支只报 WARN。
 
 ⚠️ 光读 `stage` 仍不够：`run_step()`（编排器里 Step 14 的启动函数）自己
 也把 rc=2 当"脚本不存在，跳过"的哨兵值，跟本模块的 rc=2 撞车——若脚本
@@ -57,8 +72,17 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
                      "src": str(src), "backup_dir": str(backup_dir), "remote": remote, "branch": branch}
 
     if not (backup_dir / ".git").is_dir():
-        init = _run_git(["init", "-b", branch], backup_dir)
+        try:
+            init = _run_git(["init", "-b", branch], backup_dir)
+        except Exception as e:  # noqa: BLE001 —— git init 异常（如超时）同样必须中止，不能带着未初始化的仓库往下走
+            status.update(stage="init", ok=False, error=f"git init 异常：{e}")
+            _write_status(status_file, status)
+            return status
         status["git_init"] = init.returncode == 0
+        if init.returncode != 0:
+            status.update(stage="init", ok=False, error=init.stderr[-2000:])
+            _write_status(status_file, status)
+            return status
 
     # ── 1. 导出 ──────────────────────────────────────────────────────
     try:
@@ -89,22 +113,32 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
         return status
 
     # ── 3. 提交 ──────────────────────────────────────────────────────
-    _run_git(["add", "-A"], backup_dir)
-    diff = _run_git(["diff", "--cached", "--quiet"], backup_dir)
-    if diff.returncode == 0:
-        status["commit"] = {"made": False, "reason": "无变化"}
-    else:
-        msg = commit_message or f"data backup {t0.strftime('%Y-%m-%d %H:%M:%S')}"
-        commit = _run_git(["commit", "-m", msg], backup_dir)
-        if commit.returncode != 0:
-            status.update(stage="commit", ok=False, error=commit.stderr[-2000:])
-            _write_status(status_file, status)
-            return status
-        sha = _run_git(["rev-parse", "HEAD"], backup_dir).stdout.strip()
-        status["commit"] = {"made": True, "sha": sha, "message": msg}
+    try:
+        _run_git(["add", "-A"], backup_dir)
+        diff = _run_git(["diff", "--cached", "--quiet"], backup_dir)
+        if diff.returncode == 0:
+            status["commit"] = {"made": False, "reason": "无变化"}
+        else:
+            msg = commit_message or f"data backup {t0.strftime('%Y-%m-%d %H:%M:%S')}"
+            commit = _run_git(["commit", "-m", msg], backup_dir)
+            if commit.returncode != 0:
+                status.update(stage="commit", ok=False, error=commit.stderr[-2000:])
+                _write_status(status_file, status)
+                return status
+            sha = _run_git(["rev-parse", "HEAD"], backup_dir).stdout.strip()
+            status["commit"] = {"made": True, "sha": sha, "message": msg}
+    except Exception as e:  # noqa: BLE001 —— add/diff/commit/rev-parse 异常（如超时）不能撞上 secret_scan 的退出码 1
+        status.update(stage="git_error", ok=False, error=f"add/diff/commit 阶段异常：{e}")
+        _write_status(status_file, status)
+        return status
 
     # ── 4. 推送（本地裸仓库路径——不是 GitHub）───────────────────────
-    push = _run_git(["push", remote, branch], backup_dir)
+    try:
+        push = _run_git(["push", remote, branch], backup_dir)
+    except Exception as e:  # noqa: BLE001 —— push 异常（如超时）同上
+        status.update(stage="git_error", ok=False, error=f"push 阶段异常：{e}")
+        _write_status(status_file, status)
+        return status
     if push.returncode != 0:
         status.update(stage="push", ok=False, error=push.stderr[-2000:])
         _write_status(status_file, status)

@@ -38,7 +38,52 @@ argument but 2 were given`，级联炸穿 `TestScoutBeeNova`/`TestBuzzBeeWhisper
 
 ## [0.45.279] — 2026-09-18 — 占位（进行中：ScoutBee consensus_strength 排行榜淘汰偏差修复，P2）
 
-## [0.45.278] — 2026-09-18 — 占位（进行中：`run_backup.py` 补 git init 失败 / git 调用异常两个失败分类缺口）
+## [0.45.278] — 2026-09-18 — Fix：`run_backup.py` 补 git init 失败 / git 调用异常两个失败分类缺口
+
+v0.45.269/273 两轮修复 `data_backup/run_backup.py` 的失败分类后，多角度代码复检
+（review 面板发现 #4、#5，此前标记 skipped）找出两个仍未处理的缺口，本次单独处理。
+
+### Fixed
+
+- **缺口 1**：`run()` 里 export 之后的所有 `_run_git()` 调用（add/diff/commit/
+  rev-parse/push）此前完全没有异常保护。`_run_git` 给 `subprocess.run` 传了
+  `timeout=60`，任何一次 git 调用卡住超过 60 秒（网络抖动、或别的进程占着
+  `index.lock`）都会抛 `subprocess.TimeoutExpired`，一路不捕获地传出 `run()`/
+  `main()`，Python 默认以退出码 1 崩溃退出——正好撞上 `main()` 专门留给
+  `stage == "secret_scan"` 的退出码 1，且这次崩溃根本没来得及写 `status.json`
+  （陈旧文件会被上一轮内容顶着）。编排器 Step 14 因此会把纯粹的网络超时误报成
+  "密钥扫描命中，已拒绝提交"。现给 add/diff/commit/rev-parse 一段包一层
+  try/except，push 单独一段，映射到新增的 `stage: "git_error"`。
+- **缺口 2**：`git init` 失败此前只把 `status["git_init"]` 记成 `False`，不中止
+  执行。后续 `git add -A` 返回码被丢弃，`git diff --cached --quiet` 在非 git
+  仓库里返回 128（不是"无变化"的 0），旧代码把非 0 一律当"有变化"走 commit，
+  commit 因仓库没初始化好而失败，最终 `stage` 被误标成 `"commit"`——把"仓库根本
+  没初始化成功"误诊成"提交失败"，误导编排器日志的排查方向。现 `git init` 失败
+  （返回码非 0 或调用本身抛异常）直接判定为专门的 `stage: "init"` 并立即中止，
+  不再继续往下走 export/add/diff/commit。
+- `data_backup/run_backup.py` 模块 docstring 的失败路径设计清单补上这两条新分类
+  （`init` / `git_error`），退出码仍统一是 2（`main()` 只把 `secret_scan` 单独
+  映射成 1）。
+- `~/.claude/scripts/alpha-hive-orchestrator.sh` Step 14 的 `case "$BACKUP_STAGE"`
+  语句加 `init` / `git_error` 两支专门的日志分支——否则这两个新 stage 会落进
+  `*)` 未识别分支，只报一句笼统的 WARN。该脚本不受本仓版本控制，改动只在生产
+  主机上生效，无独立提交记录。
+
+### Added
+
+- `tests/test_data_backup.py::TestRunBackupStageReporting` 新增三条：
+  `test_git_init_failure_reports_init_stage`（git init 失败必须立刻中止，
+  且 `manifest_summary` 不该出现——验证没有继续跑到 export）、
+  `test_git_exception_during_commit_phase_reports_git_error_stage`（monkeypatch
+  `_run_git` 在 `add` 调用时抛 `TimeoutExpired`，验证退出码是 2 不是 1）、
+  `test_git_exception_during_push_reports_git_error_stage`（push 抛异常时
+  `status["commit"]["made"]` 仍必须是 `True`，证明提交已经真实成功，跟
+  `stage="push"` 的"提交成功但推送返回非 0"是不同场景但需要同样可辨认）。
+- `TestOrchestratorStep14StageDispatch::test_known_fresh_stage_dispatches_correct_message`
+  参数化列表加 `init`/`git_error` 两组，锁定新分支的日志级别与 `STEPS_RESULT`
+  状态值。
+
+跑测试：`/usr/local/bin/python3 -m pytest tests/test_data_backup.py`（26 项全过）。
 
 ---
 
