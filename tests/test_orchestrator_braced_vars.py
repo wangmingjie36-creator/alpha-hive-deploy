@@ -5,9 +5,16 @@
 `~/.claude/scripts/alpha-hive-orchestrator.sh`（仓库外、不受版本控制）在 v0.45.287 之前有
 18 处形如 `"…（exit=$STEP10_RC），不影响主流程"` 的写法：裸变量后面紧跟全角标点，中间没有 ASCII 边界。
 macOS `/bin/bash`（3.2.57）在 UTF-8 的 LC_CTYPE 下，把 UTF-8 **首字节**当成变量名的一部分
-（实测：只有 `isalpha()` 认得的首字节才会被吃——`）` `「` `—` emoji 全中，希伯来文 `א` 因首字节
-0xD7=`×` 不是字母而幸免），于是变量名成了 `STEP10_RC\\357`，`set -u` 报 unbound variable，
-**整个 shell 当场退出**（rc=127，后面的命令一条都不跑）——不是「只挂一条 log」。
+（实测：UTF-8 的 51 个首字节 0xC2–0xF4 里，被吃 ⇔ macOS 单字节 `isalpha()` 为真，0 处不一致，
+唯一例外 0xD7=`×`（希伯来文 `א` 因此幸免）；`）` `「` `—` emoji 全中），于是变量名成了
+`STEP10_RC\\357`，`set -u` 报 unbound variable。**后果取决于裸变量出现在哪：**
+
+- **命令参数里**（那 18 处，全是 `log "…"`）：**整个 shell 当场退出**（rc=127，后面的命令一条都不跑）
+  ——不是「只挂一条 log」；
+- **未加引号的 heredoc 正文里**（编排器有 5 处 `cat > …status.json << EOFJ`）：shell **不退出**，
+  但目标文件被清成 **0 字节**（`set -u` 开，那条 `cat` 的 rc=127 没人查）；`set -u` 关则写出
+  丢了值、带坏字节的内容。这比退出**更隐蔽**——所以扫描时 heredoc 正文里以 `#` 开头的行也不跳过
+  （bash 照样展开它们）。
 
 只在 UTF-8 locale 下发作：launchd 的 plist 只给 `PATH` ⇒ C locale ⇒ 定时/开机触发一直不受影响；
 中招的是从 UTF-8 终端手工跑，或由 Python 拉起（PEP 538 会往子进程环境塞 `LC_CTYPE=C.UTF-8`）。
@@ -29,6 +36,7 @@ macOS `/bin/bash`（3.2.57）在 UTF-8 的 LC_CTYPE 下，把 UTF-8 **首字节*
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -43,14 +51,35 @@ ORCH = Path(os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh"))
 _BARE_BEFORE_NON_ASCII = re.compile(r"(?<!\\)\$([A-Za-z_][A-Za-z0-9_]*)(?=[^\x00-\x7f])")
 
 
+# `<<DELIM` / `<<-DELIM` / `<<'DELIM'` / `<<"DELIM"` / `<<\DELIM`。`(?<!<)…(?!<)` 排除 `<<<` here-string。
+_HEREDOC_OPEN = re.compile(r"(?<!<)<<(?!<)(-?)\s*(?:'([^']+)'|\"([^\"]+)\"|\\?([A-Za-z_][A-Za-z0-9_]*))")
+
+
 def find_unbraced(text: str) -> list[tuple[int, str, str]]:
-    """返回 `(行号, 变量名, 该行)`。整行注释不展开，跳过；行内注释保守地照报（加花括号无害）。"""
-    hits = []
-    for no, line in enumerate(text.split("\n"), 1):
-        if line.lstrip().startswith("#"):
+    """返回 `(行号, 变量名, 该行)`。
+
+    整行注释 bash 不展开，跳过；**heredoc 正文里除外**——未加引号的 heredoc 里以 `#` 开头的行照样被展开，
+    所以正文内不跳过注释行。这条规则出错只会退回「不跳」（多报，安全方向），不会多吞：
+    找不到终止行的 `<<` 不当 heredoc（免得一次误判让后面全文的注释规则失灵）。
+    加了引号的 heredoc（`<<'X'`，bash 不展开）也一并当正文扫——保守地多报，实际 0 例。行内注释照报。
+    """
+    lines = text.split("\n")
+    hits: list[tuple[int, str, str]] = []
+    end = None                                   # 正处于 heredoc 正文时：(终止行, 是否 `<<-` 剥制表符)
+    for no, line in enumerate(lines, 1):
+        if end is not None:
+            delim, strip = end
+            if (line.lstrip("\t") if strip else line) == delim:
+                end = None
+                continue
+        elif line.lstrip().startswith("#"):
             continue
-        for m in _BARE_BEFORE_NON_ASCII.finditer(line):
-            hits.append((no, m.group(1), line))
+        hits += [(no, m.group(1), line) for m in _BARE_BEFORE_NON_ASCII.finditer(line)]
+        opener = _HEREDOC_OPEN.search(line) if end is None else None
+        if opener:
+            delim, strip = opener.group(2) or opener.group(3) or opener.group(4), bool(opener.group(1))
+            if any((rest.lstrip("\t") if strip else rest) == delim for rest in lines[no:]):
+                end = (delim, strip)
     return hits
 
 
@@ -86,6 +115,22 @@ class TestDetectorHasTeeth:
     def test_reports_line_numbers_and_multiple_hits_per_line(self):
         text = 'a\nlog "x $A（ $B）"\n# $C）\nlog "ok ${D}）"\nlog "y $E，"\n'
         assert [(no, n) for no, n, _ in find_unbraced(text)] == [(2, "A"), (2, "B"), (5, "E")]
+
+    def test_hash_line_inside_unquoted_heredoc_is_expanded_so_it_is_flagged(self):
+        text = 'cat > f << EOF\n# 看着像注释，heredoc 正文里 bash 照样展开 $FOO）\nEOF\n'
+        assert [(no, n) for no, n, _ in find_unbraced(text)] == [(2, "FOO")]
+
+    def test_comment_skip_resumes_after_the_heredoc_terminator(self):
+        text = 'cat > f <<-EOF\n\tbody\n\tEOF\n# $FOO）\n'            # `<<-` 允许制表符缩进的终止行
+        assert find_unbraced(text) == []
+
+    @pytest.mark.parametrize("opener", [
+        'read -ra A <<< EOFX',        # here-string；没有 `(?<!<)` 会把它当成以 EOFX 收尾的 heredoc
+        'n=$((1<<3))',                # 算术左移
+        'cat << NEVER_TERMINATED',    # 没有终止行 ⇒ 不当 heredoc，免得误判把后文的注释规则全改掉
+    ])
+    def test_lookalikes_do_not_switch_off_the_comment_skip(self, opener):
+        assert find_unbraced(f'{opener}\n# $FOO）\nEOFX\n') == []
 
 
 @pytest.fixture(scope="module")
@@ -135,3 +180,13 @@ class TestMacBashMisparsesBareVar:
     def test_c_locale_is_unaffected_which_is_why_launchd_never_hit_it(self):
         r = self._run('echo "exit=$FOO），x"\necho after-ran', LC_ALL="C")
         assert r.returncode == 0 and r.stdout == "exit=99），x\nafter-ran\n".encode()
+
+    def test_bare_var_in_heredoc_body_empties_the_file_but_shell_continues(self, tmp_path):
+        """heredoc 正文里是另一种、更隐蔽的失败形状：不退出，目标文件被清成 0 字节
+        （编排器的 `cat > …status.json << EOFJ` 就是这个形状）。这条钉住「为什么扫描要连 heredoc 正文一起扫」。"""
+        out = tmp_path / "status.json"
+        script = f'cat > {shlex.quote(str(out))} << EOFJ\n{{"v": "$FOO）"}}\nEOFJ\necho "cat-rc=$? shell-continued"\n'
+        r = self._run(script, LC_CTYPE="C.UTF-8")
+        assert (r.stdout, out.read_bytes()) == (b"cat-rc=127 shell-continued\n", b""), (r.stdout, r.stderr)
+        r = self._run(script.replace("$FOO）", "${FOO}）"), LC_CTYPE="C.UTF-8")
+        assert (r.stdout, out.read_bytes()) == (b"cat-rc=0 shell-continued\n", '{"v": "99）"}\n'.encode())

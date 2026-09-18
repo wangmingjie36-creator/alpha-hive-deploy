@@ -107,8 +107,8 @@ def _reap_group(pgid):
 
     ⚠️ macOS 上组员退出途中 killpg 偶发 EPERM 而不是 ESRCH（v0.45.221 变异回归里
     撞到 2 次，推测是待回收的僵尸组员）—— 只认 ESRCH 为「清空」，EPERM 当「还在收」，
-    每轮重发 SIGKILL。当异常抛出去会被 xfail(raises=AssertionError) 判成 FAILED，
-    也会顶掉用例本该报的断言。
+    每轮重发 SIGKILL。当异常抛出去会顶掉用例本该报的断言（v0.45.221 当时那条
+    `xfail(raises=AssertionError)` 的 UTF-8 闸用例因此报 FAILED；v0.45.287 起它已转成普通回归用例）。
     """
     lingered = None
     deadline = time.monotonic() + 10
