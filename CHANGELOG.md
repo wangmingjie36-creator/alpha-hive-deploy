@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.284] — 2026-09-18 — 占位（进行中：Step 14 数据备份补"连续 N 天未识别/陈旧"检测，参照 Step 10 scan_continuity.py 模式）
+
+---
+
 ## [0.45.283] — 2026-09-18 — Fixed：`_init_backup_git_repo` 未隔离全局 `commit.gpgsign` / `core.hooksPath`
 
 `tests/test_data_backup.py::TestRunBackupStageReporting._init_backup_git_repo`（v0.45.269 新加，
