@@ -209,11 +209,20 @@ class TestRunBackupStageReporting:
         return src
 
     def _init_backup_git_repo(self, backup_dir, branch="main"):
+        """本地 config 必须显式覆盖可能存在的全局 `commit.gpgsign` / `core.hooksPath`——
+        否则在全局开着提交签名（无可用密钥）或挂了会失败的全局 hook 的机器上，
+        这里的真实 `git commit` 会因环境而失败，把 stage 误判成 "commit"，
+        看起来像是被测代码的逻辑问题，实际与之无关（本机核实过当前不触发，
+        但这是可移植性缺口，非假设性场景）。"""
         backup_dir.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init", "-b", branch], cwd=str(backup_dir), check=True, capture_output=True)
         subprocess.run(["git", "config", "user.email", "test@example.com"],
                         cwd=str(backup_dir), check=True, capture_output=True)
         subprocess.run(["git", "config", "user.name", "Test"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "commit.gpgsign", "false"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "core.hooksPath", os.devnull],
                         cwd=str(backup_dir), check=True, capture_output=True)
 
     def test_export_failure_reports_export_stage(self, tmp_path, monkeypatch):

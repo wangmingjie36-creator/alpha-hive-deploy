@@ -5,6 +5,31 @@
 
 ---
 
+## [0.45.283] — 2026-09-18 — Fixed：`_init_backup_git_repo` 未隔离全局 `commit.gpgsign` / `core.hooksPath`
+
+`tests/test_data_backup.py::TestRunBackupStageReporting._init_backup_git_repo`（v0.45.269 新加，
+给 `test_push_failure_reports_push_stage`/`test_git_exception_during_push_reports_git_error_stage`/
+`test_full_success_reports_done_stage` 起真实临时 git 仓库）只设了本地 `user.email`/`user.name`，
+未覆盖可能存在的全局 `commit.gpgsign`（全局开签名但无可用密钥）或 `core.hooksPath`（全局 hook 会失败）——
+这两项一旦在某台机器上全局生效，helper 里真实的 `git commit` 会因环境失败，
+把 `stage` 误判成 `"commit"`，看起来像被测代码逻辑错误，实际与之无关。
+本机核实过当前不触发（`git config --global --list` 无这两项），但这是一个真实的可移植性缺口。
+
+### Fixed
+
+- `_init_backup_git_repo` 追加两行本地 config：`commit.gpgsign false` 与 `core.hooksPath /dev/null`，
+  覆盖掉可能存在的全局设置。
+
+### 验证
+
+- 手动在本机全局 git 配置里临时装一个会失败的 `pre-commit` hook（`core.hooksPath` 指向假目录）+
+  `commit.gpgsign true`（无真实密钥），复现修复前 `test_push_failure_reports_push_stage` 等三条
+  用例真实报错、`stage` 被误判成 `"commit"`；打上本条修复后同一份全局配置下三条全部转绿；
+  验证完已将本机全局配置恢复到验证前的状态（原为未设置）。
+- `/usr/local/bin/python3 -m pytest tests/test_data_backup.py`：26 项全绿（正常环境下）。
+
+---
+
 ## [0.45.282] — 2026-09-18 — Fixed：`tests/test_data_backup.py::_synthetic_src` 硬编码库元组改用 `export_mod.DBS`
 
 `_synthetic_src` 自己抄了一份 `("pheromone.db", "metrics.db", "sentiment_baseline.db",
