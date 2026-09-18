@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.270] — 2026-09-18 — 占位（进行中：09-17 网站数据部分降级根因排查 + momentum/volume 回落链修复）
+
 ## [0.45.269] — 2026-09-18 — Fixed：Step 14 数据备份 exit code 2 误判——export/commit 失败曾被编排器误报成"已提交但推送失败"
 
 `data_backup/run_backup.py::main()` 的退出码只把 `stage == "secret_scan"` 单独
