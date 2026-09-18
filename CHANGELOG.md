@@ -5,7 +5,39 @@
 
 ---
 
-## [0.45.269] — 2026-09-18 — 占位（进行中：Step 14 数据备份 exit code 2 误判——export/commit 失败被编排器误报成"已提交但推送失败"）
+## [0.45.269] — 2026-09-18 — Fixed：Step 14 数据备份 exit code 2 误判——export/commit 失败曾被编排器误报成"已提交但推送失败"
+
+`data_backup/run_backup.py::main()` 的退出码只把 `stage == "secret_scan"` 单独
+映射成 1，export/commit/push 三种失败全部合并成 2——`run()` 内部一直忠实
+记录了完整的 `stage` 字段，问题不在这里。而 `~/.claude/scripts/
+alpha-hive-orchestrator.sh`（Step 14 于 v0.45.264 设计，2026-09-18 用户批准
+接入生产；该脚本不受版本控制）的 `elif [ $STEP14_RC -eq 2 ]` 分支把 rc==2
+硬解读成「已提交但推送失败」——export 失败（未提交）、commit 失败（同样
+未提交）命中同一分支时，日志与 `STEPS_RESULT.step14_data_backup.status`
+都会谎称"已提交"，误导排查方向。对应项目 CLAUDE.md 硬检查项「这个失败，
+下游怎么知道？」：不是没有观测点，是观测点的粒度被 rc 这一个整数吃掉了。
+
+### Fixed
+
+- `data_backup/run_backup.py`：docstring 补全 export/commit 两条此前没写清楚
+  的失败路径（原文只写了 secret_scan 与 push），并显式标注"退出码 2 是三种
+  失败共用的，下游必须读 `stage` 字段"。`main()` 本身的退出码逻辑没有改——
+  一直是对的，bug 只在下游的读法上。
+- `~/.claude/scripts/alpha-hive-orchestrator.sh` Step 14：`elif $STEP14_RC -eq 2`
+  分支改成 `jq -r '.stage // "unknown"' "$BACKUP_STATUS_JSON"` 读真实阶段，
+  按 export/commit/push 分别给出准确日志与 `STEPS_RESULT.step14_data_backup.status`
+  （`<stage>_failed`）；rc 仅用于判断"是不是这一大类失败"，不再充当阶段判据。
+  文件不受版本控制，diff 不出现在本仓库历史里，改动记录只存在于本条
+  CHANGELOG 与 memory `alpha-hive-data-root-migration.md`。
+
+### Tests
+
+- `tests/test_data_backup.py` 新增 `TestRunBackupStageReporting`（4 条——此前
+  `run_backup.py` 的 `run()`/`main()` 零测试覆盖）：export/commit/push 三条
+  失败路径各自锁定 `status.json.stage`，另加一条真实本地裸仓库全链路成功
+  用例（`stage == "done"`）。push 失败与成功路径用真实 git（未配 remote /
+  本地裸仓库当 remote），只在需要精确定位某一步失败时才 monkeypatch
+  `_run_git`——保证"提交真的成功了"这类断言不是自己模拟出来的假象。
 
 ## [0.45.268] — 2026-09-18 — 占位（进行中：数据根迁移阶段 4——gh-pages 发布链改读 PATHS + 顺修 force-push 父提交陷阱）
 

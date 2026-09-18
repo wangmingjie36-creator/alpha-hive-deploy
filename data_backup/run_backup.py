@@ -1,16 +1,25 @@
-"""阶段 3.5 的可运行原型：编排导出 → 密钥扫描 → 提交 → 推送，落地 `status.json`。
+"""阶段 3.5 原型：编排导出 → 密钥扫描 → 提交 → 推送，落地 `status.json`。
 
-**本次只手动调用它跑通"本地裸仓库模拟远端"的演练，没有接入
-`alpha-hive-orchestrator.sh`**——接入编排器属于对外/生产动作，按任务边界
-本 session 不做，设计写在 CHANGELOG 与 memory 里等用户批准。
+v0.45.264 起已接入生产编排器 `alpha-hive-orchestrator.sh` Step 14
+（转发调用见 `main()`）。
 
 失败路径设计（对应硬检查项「这个失败，下游怎么知道？」）：
 - 密钥扫描命中 → 不提交，`status.json` 记 `stage: "secret_scan"`, `ok: false`，
   命中文件数与凭据来源文件名（不含值），退出码 1。
+- 导出失败（如并发写检测命中、源库不存在）→ 未提交，`status.json` 记
+  `stage: "export"`, `ok: false`, 退出码 2。
+- git commit 失败 → `status.json` 记 `stage: "commit"`, `ok: false`, 退出码 2。
 - 推送失败（网络/权限/远端不可写）→ 已经提交到本地工作区（数据没丢），
   但 `status.json` 记 `stage: "push"`, `ok: false`, 退出码 2；
   下一轮跑仍会带着未推送的提交重试。
 - 全部成功 → `status.json` 记 `ok: true`，含 commit sha、各库行数、耗时。
+
+⚠️ 退出码 2 是 export/commit/push 三种失败共用的（`main()` 里只把
+`stage == "secret_scan"` 单独映射成退出码 1，其余一律 2）——下游要分辨
+具体是哪一种，必须读 `status.json` 的 `stage` 字段，不能只看退出码。
+v0.45.269 之前编排器 Step 14 曾把 rc==2 硬解读为「已提交但推送失败」，
+导致 export/commit 失败（根本没提交成功）也被日志误报成「已提交」；
+Step 14 的分支现改为读 `stage` 字段而非只猜 rc。
 
 Slack 通知：按项目 CLAUDE.md「Slack 通知精简规则」，扫描失败/权重更新/数据质量
 类事件本就禁止发 DM——本模块同理，失败只写 `status.json`，不发通知
