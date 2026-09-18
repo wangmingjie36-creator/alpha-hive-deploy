@@ -47,29 +47,139 @@ def ghpages_tree_delta(repo: str, tree: str, parent: Optional[str]) -> Tuple[boo
         return True, -1
 
 
-def verify_cdn_deployment(reporter, repo: str,
+def resolve_gh_pages_parent(repo: str) -> Tuple[Optional[str], bool]:
+    """gh-pages 新提交该接在谁后面。
+
+    ⚠️ 2026-09-11 实测过的 bug（见 auto-memory `alpha-hive-ops-info.md`）：
+    旧实现用**本地** `gh-pages` ref 当父提交（`git rev-parse gh-pages`），
+    再 `--force` 推。本地 ref 不会因为别的 session/进程推过 gh-pages 而
+    自动更新——用它当父提交、再强推，等于把远端在这期间新增的提交从
+    "有 ref 指着"变成"没有任何 ref 指着"，一次 force-push 就静默把它们
+    挤成不可达对象（早晚被 gc），且没有任何东西会红。
+
+    修法：**先 fetch，用 fetch 到的 `origin/gh-pages` 当父**，不用本地 ref。
+    这样新提交的第一父永远是 push 前一刻的远端真头，force-push（本函数配
+    `commit_and_push_gh_pages` 之后其实改用了**非** force 推送，见那里）
+    不会再把远端历史挤成孤儿。
+
+    返回 `(parent_sha, verified)`：
+      verified=True   fetch 成功。`parent_sha` 是此刻 `origin/gh-pages` 的真头；
+                       远端还没有这个分支时为 `None`（真·首次部署，非"取不到"）。
+      verified=False  fetch 失败（网络/权限）。`parent_sha` 退回本地 `gh-pages`
+                       ref 尽力而为——**不可信**，调用方必须把这次「未经校验」
+                       喊出来，不能悄悄当成正常路径处理。
+    """
+    import subprocess
+    fetch = subprocess.run(["git", "fetch", "origin", "gh-pages"],
+                            cwd=repo, capture_output=True, text=True)
+    if fetch.returncode == 0:
+        try:
+            remote = subprocess.check_output(
+                ["git", "rev-parse", "origin/gh-pages"],
+                cwd=repo, stderr=subprocess.DEVNULL,
+            ).decode().strip()
+            return remote, True
+        except subprocess.CalledProcessError:
+            return None, True   # fetch 成功，但远端还没有 gh-pages 分支：真·首次部署
+    try:
+        local = subprocess.check_output(
+            ["git", "rev-parse", "gh-pages"], cwd=repo, stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return local, False
+    except subprocess.CalledProcessError:
+        return None, False
+
+
+def commit_and_push_gh_pages(repo: str, tree: str, message_fn, max_attempts: int = 4) -> Dict:
+    """把 `tree` 提交到 gh-pages 并推送——每次重试都重新 fetch 校验父提交。
+
+    与旧实现（"建一次 commit、force-push 重试 3 次"）的关键差异：
+      1. 父提交**每次重试都重新解析**（`resolve_gh_pages_parent`），不是只在
+         最开始取一次——重试之间远端可能又被推过。
+      2. **不用 `--force`**：既然父提交就是 push 前一刻的远端真头，普通推送
+         天然是快进；如果 push 与 fetch 之间又有人推了（竞态窗口缩小到毫秒级），
+         git 自己会因为非快进拒绝——这正是我们想要的"冲突探测"，不需要
+         自己实现 diff/合并逻辑去判断"冲突"（gh-pages 树本来就是每次从
+         数据根整棵重建，不存在逐文件合并这回事，真正要防的只是"别把
+         没同步到的远端提交挤成不可达对象"）。git 拒绝后重试循环会重新
+         fetch、拿到最新父提交、重新 commit-tree、再推——不是重复同一次
+         必然还会被拒的推送。
+      3. tree 与刚 fetch 到的父提交的 tree 完全相同 ⇒ 远端已经是我们要发布
+         的状态，直接判成功、不新建提交也不推送（比"仍然尝试推一次"更准确，
+         也避免了对一个不存在实际变化的 ref 做推送）。
+
+    返回 dict：{success, commit, parent, parent_verified, tree_unchanged,
+                n_changed, attempts, last_error}。
+    """
+    import subprocess
+    import time as _t
+    result: Dict = {
+        "success": False, "commit": None, "parent": None, "parent_verified": None,
+        "tree_unchanged": None, "n_changed": None, "attempts": 0, "last_error": None,
+    }
+    for attempt in range(1, max_attempts + 1):
+        result["attempts"] = attempt
+        parent, verified = resolve_gh_pages_parent(repo)
+        result["parent"], result["parent_verified"] = parent, verified
+        if not verified:
+            _log.error(
+                "🚨 gh-pages fetch 失败（attempt %d/%d），父提交退回本地 ref（未经校验）："
+                "若远端此刻领先本地，本次仍可能把对方的提交挤成不可达对象",
+                attempt, max_attempts,
+            )
+        has_change, n_changed = ghpages_tree_delta(repo, tree, parent)
+        result["tree_unchanged"], result["n_changed"] = not has_change, n_changed
+        if not has_change:
+            # tree 与此刻的远端真头完全一致：远端已经是我们要发布的状态。
+            result["success"] = True
+            result["commit"] = parent
+            return result
+        parent_args = ["-p", parent] if parent else []
+        try:
+            commit = subprocess.check_output(
+                ["git", "commit-tree", tree] + parent_args + ["-m", message_fn(n_changed)],
+                cwd=repo,
+            ).decode().strip()
+        except subprocess.CalledProcessError as e:
+            result["last_error"] = f"commit-tree 失败: {e}"
+            return result
+        subprocess.run(["git", "update-ref", "refs/heads/gh-pages", commit],
+                        cwd=repo, check=True)
+        result["commit"] = commit
+        # 非 force：父提交就是 push 前一刻的远端真头，正常情况下天然快进；
+        # 竞态时 git 自己会因非快进拒绝，落入下面的重试分支重新 fetch。
+        r = subprocess.run(
+            ["git", "push", "origin", f"{commit}:refs/heads/gh-pages"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            result["success"] = True
+            return result
+        result["last_error"] = (r.stderr or "").strip()[:300]
+        if attempt < max_attempts:
+            delay = min(2.0 * (2 ** (attempt - 1)), 16.0)
+            _log.warning(
+                "gh-pages push 被拒 (attempt %d/%d)：%s —— %.0fs 后重新 fetch + 提交 + 推送",
+                attempt, max_attempts, result["last_error"], delay,
+            )
+            _t.sleep(delay)
+    return result
+
+
+def verify_cdn_deployment(reporter, data_root: str,
                            max_wait: int = 180, poll_interval: int = 15) -> bool:
     """Push 成功后轮询 CDN，验证 dashboard-data.json 已更新。
 
     纯 advisory — 超时只记 WARNING，不回滚/阻塞。
 
-    ⚠️ 数据根迁移阶段 2 备注（未改，如实记录）：这里读 `dashboard-data.json`
-    走的是调用方传入的 `repo`（= `reporter.agent_helper.git.repo_path`，
-    `agent_toolbox.GitHubTool.__init__` 已经是「`ALPHA_HIVE_HOME` 优先、
-    `__file__` 兜底」的正确写法，本身不是本次迁移要收口的 `__file__` 反模式）。
-    真正的问题是 `repo` 同时承担**两个概念**：git 仓库根（`deploy_static_to_
-    ghpages` 里 `git hash-object`/`commit-tree` 等 plumbing 必须用它，
-    因为那需要 `.git/`）与**报告数据所在目录**（这里读 `dashboard-data.json`、
-    下面 `os.listdir(repo)` 找待部署文件，理应走 `PATHS.home`）。今天两者
-    恰好同目录（`ALPHA_HIVE_HOME` 未设，且 `GitHubTool.repo_path` 与
-    `PATHS.home` 用同一个 `__file__` 兜底），掩盖了这个分歧。
-    数据根迁移计划把这处拆分明确列为**阶段 4**（"gh-pages 从 PATHS 读报告，
-    不再 `os.listdir(仓库)`"）而非阶段 2——因为拆分它意味着改消费链的读取
-    目标（`os.listdir` 的对象从 git 仓库根换成数据根），且现有测试
-    `tests/test_pipeline.py::TestDeployStaticToGhPages` 显式断言
-    "文件放在 `agent_helper.git.repo_path` 下就能被部署找到"，动这里
-    需要同时改测试对生产行为做实质性再定义，超出"改锚点、行为不变"
-    的阶段 2 范围。本阶段只字面记录、不修。
+    数据根迁移阶段 4：`data_root` 现在是**数据根**（`PATHS.home`），不再是
+    git 仓库根。此前这里读 `dashboard-data.json` 走的是 `reporter.agent_helper.
+    git.repo_path`（git 仓库根）——它与数据根今天恰好同目录（`ALPHA_HIVE_HOME`
+    未设，`GitHubTool.repo_path` 与 `PATHS.home` 兜底到同一个 `__file__`），
+    掩盖了"报告数据所在目录"和"git plumbing 的仓库根"是两个不同概念这件事。
+    阶段 5 把 `ALPHA_HIVE_HOME` 改指 `~/alpha-hive-data` 后两者会分叉——
+    `dashboard-data.json` 跟数据走，读它必须走 `PATHS.home`，不能再读
+    git 仓库根（那里阶段 5 之后不会再有这份文件）。
     """
     import json as _json_v
     import time as _time_v
@@ -77,7 +187,7 @@ def verify_cdn_deployment(reporter, repo: str,
 
     try:
         import os as _os_v
-        dj_path = _os_v.path.join(repo, "dashboard-data.json")
+        dj_path = _os_v.path.join(data_root, "dashboard-data.json")
         with open(dj_path, encoding="utf-8") as _f:
             expected_ts = _json_v.load(_f).get("_generated_at", "")
         if not expected_ts:
@@ -140,22 +250,21 @@ def verify_cdn_deployment(reporter, repo: str,
 def deploy_static_to_ghpages(reporter):
     """用 git plumbing 构建仅含静态文件的 gh-pages 提交并推送。
 
-    ⚠️ 数据根迁移阶段 2 备注：下面的 `repo`（= `reporter.agent_helper.git.
-    repo_path`）在本函数里身兼两职——git plumbing 的仓库根（`hash-object`/
-    `write-tree`/`commit-tree`/`push` 都必须在这里，因为需要 `.git/`）与
-    `os.listdir(repo)` 找待部署报告文件的数据根。这两个概念的分离属于
-    数据根迁移计划的**阶段 4**（"gh-pages 从 PATHS 读报告，不再
-    `os.listdir(仓库)`"），本阶段（2）只收口独立冻结的 `__file__` 派生
-    路径——`repo` 本身并非如此（`agent_toolbox.GitHubTool.repo_path` 已经
-    是 env 优先、调用时求值的写法），且 `tests/test_pipeline.py::
-    TestDeployStaticToGhPages` 显式绑定了「文件放在 repo 下即可被发现」
-    这一行为，动它需要同时重新定义测试预期，超出本阶段范围，故不改。
-    仅 `.gh_pages_deploy_log.jsonl` 这一处纯本地审计日志（`.gitignore`
-    已忽略、零测试断言具体位置）改落 `PATHS.logs_dir`，理由见下方。
+    数据根迁移阶段 4：`repo`（git 仓库根，= `reporter.agent_helper.git.
+    repo_path`，经 `agent_toolbox.GitHubTool` 已改读 `PATHS.git_repo_root`）
+    与 `data_root`（数据根，`PATHS.home`，找待部署报告文件）自本版起是**两个
+    独立变量**。今天两者仍可能同目录（`ALPHA_HIVE_HOME`/`ALPHA_HIVE_GIT_REPO`
+    都未设时，两者各自兜底到 `__file__` 派生的同一个仓库根），阶段 5 之后
+    `data_root` 会搬到 `~/alpha-hive-data`、`repo` 留在原检出位置——git
+    plumbing（`hash-object`/`write-tree`/`commit-tree`/`push`）全部在 `repo`
+    执行（需要 `.git/`），但 `os.listdir` 找文件、`hash-object` 读文件内容
+    都改用 `data_root`（`git hash-object -w <绝对路径>` 不要求文件在仓库
+    工作区内，只是读字节写 blob，`cwd=repo` 只决定写进哪个仓库的对象库）。
     """
     import subprocess
     import os
     import resource as _resource
+    from hive_logger import PATHS as _PATHS_ghp
     # 预防 Too many open files：确保 fd 上限至少 2048
     try:
         _soft, _hard = _resource.getrlimit(_resource.RLIMIT_NOFILE)
@@ -164,6 +273,7 @@ def deploy_static_to_ghpages(reporter):
     except (ValueError, OSError):
         pass
     repo = reporter.agent_helper.git.repo_path or "."
+    data_root = str(_PATHS_ghp.home)
     idx = os.path.join(repo, ".git", "gh-pages-index")
     if os.path.exists(idx):
         os.remove(idx)
@@ -189,7 +299,7 @@ def deploy_static_to_ghpages(reporter):
         def _fnt_dep(_n):
             return False  # fail-safe：导入失败则不过滤，不误删
     files = []
-    for f in os.listdir(repo):
+    for f in os.listdir(data_root):
         # 非交易日（周末/假日）幽灵报告不部署（_CORE 文件无日期，永不被过滤）
         if f not in _CORE_FILES and _fnt_dep(f):
             continue
@@ -204,12 +314,15 @@ def deploy_static_to_ghpages(reporter):
     if not files:
         _log.warning("无静态文件可部署")
         return
-    # 批量写入 blob + index（逐个 hash-object，但用 stdin 批量 update-index）
+    # 批量写入 blob + index（逐个 hash-object，但用 stdin 批量 update-index）。
+    # hash-object 读的是 data_root 下的绝对路径（内容可能不在 repo 工作区内），
+    # 写进树里的路径名（index-info 第三列）仍是裸文件名 f——发布出去的
+    # gh-pages 树结构不变，只是内容的物理来源换了。
     cache_entries = []
     for f in sorted(files):
         try:
             blob = subprocess.check_output(
-                ["git", "hash-object", "-w", f], cwd=repo
+                ["git", "hash-object", "-w", os.path.join(data_root, f)], cwd=repo
             ).decode().strip()
             cache_entries.append(f"100644 {blob}\t{f}")
         except (subprocess.CalledProcessError, OSError) as _e_blob:
@@ -224,67 +337,24 @@ def deploy_static_to_ghpages(reporter):
     tree = subprocess.check_output(
         ["git", "write-tree"], env=env, cwd=repo
     ).decode().strip()
-    # 获取 gh-pages 父提交（若存在）
-    parent_args = []
-    parent = None
-    try:
-        parent = subprocess.check_output(
-            ["git", "rev-parse", "gh-pages"], cwd=repo, stderr=subprocess.DEVNULL
-        ).decode().strip()
-        parent_args = ["-p", parent]
-    except subprocess.CalledProcessError:
-        pass
-    # v0.45.2: 空提交闸。tree 与父提交相同就不再造 commit，
-    # 否则 gh-pages 会积累一串「message 声称 N 份报告、实际 0 文件」的假记录。
-    _has_change, _n_changed = ghpages_tree_delta(repo, tree, parent)
-    if not _has_change:
-        _log.error(
-            "🚨 gh-pages 无变更：新 tree 与父提交 %s 完全相同，跳过 commit"
-            "（本次待部署 %d 个文件）。若本应有新报告，说明报告文件根本没重新生成。",
-            (parent or "")[:7], len(files),
-        )
-    else:
+
+    def _msg_fn(n_changed: int) -> str:
         _msg = f"Deploy: Alpha Hive static {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        if _n_changed >= 0:
-            _msg += f" [{_n_changed} files changed]"
-        commit = subprocess.check_output(
-            ["git", "commit-tree", tree] + parent_args + ["-m", _msg],
-            cwd=repo
-        ).decode().strip()
-        subprocess.run(
-            ["git", "update-ref", "refs/heads/gh-pages", commit],
-            cwd=repo, check=True
-        )
-    # ── D3: Push 重试（指数退避，最多 3 次重试） ──
-    import time as _time_push
-    _PUSH_MAX_RETRIES = 3
-    _push_ok = False
-    for _push_attempt in range(_PUSH_MAX_RETRIES + 1):
-        r = subprocess.run(
-            ["git", "push", "origin", "gh-pages", "--force"],
-            cwd=repo, capture_output=True, text=True
-        )
-        if r.returncode == 0:
-            _push_ok = True
-            break
-        if _push_attempt < _PUSH_MAX_RETRIES:
-            _delay = min(2.0 * (2 ** _push_attempt), 16.0)
-            _log.warning(
-                "gh-pages push attempt %d/%d failed (%s), retrying in %.0fs",
-                _push_attempt + 1, _PUSH_MAX_RETRIES + 1,
-                r.stderr.strip()[:120], _delay,
-            )
-            _time_push.sleep(_delay)
+        if n_changed >= 0:
+            _msg += f" [{n_changed} files changed]"
+        return _msg
+
+    # v0.45.268：父提交/推送改经 `commit_and_push_gh_pages`——每次重试都重新
+    # fetch `origin/gh-pages` 当父提交、非 force 推送，取代旧的
+    # 「本地 ref 当父 + --force」（见该函数 docstring 的实测 bug 记录）。
+    _push = commit_and_push_gh_pages(repo, tree, _msg_fn)
     if os.path.exists(idx):
         os.remove(idx)
     # 修复 Bug #21：gh-pages push 成功/失败都记录到持久化 queue，
     # 防止"连续网络差时中间几天的 dashboard 永久丢失"
     # v0.45.260（数据根迁移阶段 2）：此前落在 `repo`（git 仓库根），
     # 而它是纯本地审计日志（`.gitignore` 已忽略，从不参与 git 提交）——
-    # 与 git plumbing 无关，理应跟 `PATHS.logs_dir` 走。与上面 `repo` 的
-    # git-plumbing/数据双重身份问题是同一根因，但这一处可以安全单独拆开：
-    # 零测试断言它的具体位置，且不影响任何 git 操作。
-    from hive_logger import PATHS as _PATHS_ghp
+    # 与 git plumbing 无关，理应跟 `PATHS.logs_dir` 走。
     _ghp_queue = str(_PATHS_ghp.logs_dir / ".gh_pages_deploy_log.jsonl")
     try:
         import json as _json_q
@@ -293,30 +363,31 @@ def deploy_static_to_ghpages(reporter):
             "timestamp": _dt_q.datetime.utcnow().isoformat() + "Z",
             "date_str": reporter.date_str,
             "file_count": len(files),
-            "changed_files": _n_changed,   # v0.45.2: 实测值（-1=无法判定）
-            "tree_unchanged": not _has_change,
-            "status": "success" if _push_ok else "failed",
-            "attempts": _push_attempt + 1,
-            "last_error": (r.stderr or "")[:300] if not _push_ok else "",
+            "changed_files": _push["n_changed"],   # v0.45.2: 实测值（-1=无法判定）
+            "tree_unchanged": _push["tree_unchanged"],
+            "status": "success" if _push["success"] else "failed",
+            "attempts": _push["attempts"],
+            "parent_verified": _push["parent_verified"],  # v0.45.268: fetch 校验过父提交与否
+            "last_error": _push["last_error"] or "",
         }
         with open(_ghp_queue, "a", encoding="utf-8") as _qf:
             _qf.write(_json_q.dumps(_status, ensure_ascii=False) + "\n")
     except Exception as _qe:
         _log.debug("gh-pages deploy log write failed: %s", _qe)
 
-    if _push_ok:
+    if _push["success"]:
         _log.info(
-            "gh-pages 部署成功 (%d 静态文件, attempt %d/%d)",
-            len(files), _push_attempt + 1, _PUSH_MAX_RETRIES + 1,
+            "gh-pages 部署成功 (%d 静态文件, attempt %d, commit %s)",
+            len(files), _push["attempts"], (_push["commit"] or "")[:7],
         )
         # ── D4: 部署后 CDN 验证 ──
-        verify_cdn_deployment(reporter, repo)
+        verify_cdn_deployment(reporter, data_root)
     else:
         _log.error(
             "gh-pages push 失败 (所有 %d 次尝试用尽): %s\n"
-            "→ 失败已记录到 %s，下次扫描会自动覆盖为新 commit（因为 gh-pages 是 --force push）\n"
+            "→ 失败已记录到 %s，下次扫描会重新 fetch 最新远端头再提交（不再是无脑 --force）\n"
             "→ 如需紧急修复：检查 %s 确认 pending 日，必要时手动重跑扫描",
-            _PUSH_MAX_RETRIES + 1, r.stderr, _ghp_queue, _ghp_queue,
+            _push["attempts"], _push["last_error"], _ghp_queue, _ghp_queue,
         )
 
 

@@ -2997,25 +2997,22 @@ def main():
 def _sync_ghpages(tickers: list, successful_count: int) -> None:
     """将当日 ML 增强报告同步到 gh-pages 分支并推送。
 
-    ⚠️ 数据根迁移阶段 2 备注：与 `report_deployer.deploy_static_to_ghpages`
-    完全同构的第二份实现（两处都做 git plumbing + `os.listdir` 找待部署
-    文件）。`repo` 在这里同时身兼**git 仓库根**（`hash-object`/`write-tree`/
-    `commit-tree`/`push` 必须在这里，需要 `.git/`）与**数据根**（`os.listdir`
-    找报告文件）两个概念——这个"一个变量两种身份"的架构问题与
-    `report_deployer.py` 同源，统一收口属于数据根迁移计划的**阶段 4**
-    （"两处一起处理，不能只改一个"），本阶段不做结构性拆分。
-    本阶段只做 Phase 2 该做的事：`repo` 此前是 `Path(__file__).parent`——
-    压根不读 `ALPHA_HIVE_HOME`（不同于 `report_deployer.py` 那份用的
-    `agent_helper.git.repo_path`，那个已经是 env 优先的写法）。改读
-    `PATHS.home`；零测试覆盖本函数，生产今天不设 `ALPHA_HIVE_HOME` 时
-    两者兜底到同一个仓库根，行为不变。
+    数据根迁移阶段 4：与 `report_deployer.deploy_static_to_ghpages` 共用同一套
+    git plumbing 助手（`resolve_gh_pages_parent`/`commit_and_push_gh_pages`/
+    `ghpages_tree_delta`），不再各写各的父提交解析与 push 重试。`repo`
+    （git 仓库根，`PATHS.git_repo_root`）与 `data_root`（数据根，`PATHS.home`，
+    `os.listdir` 找报告文件）自本版起是两个独立变量——今天仍可能同目录
+    （两者都未被 env 覆盖时兜底到同一个 `__file__` 派生仓库根），阶段 5
+    之后 `data_root` 搬到 `~/alpha-hive-data`、`repo` 留在原检出位置。
     """
     import subprocess
     import os
     import re as _re
     if successful_count == 0:
         return
-    repo = str(PATHS.home)  # `PATHS` 已在本文件顶部模块级导入
+    # `PATHS` 已在本文件顶部模块级导入
+    data_root = str(PATHS.home)
+    repo = str(PATHS.git_repo_root)
     date_str = pdt_today()
     _ml_pat = _re.compile(r"^alpha-hive-[\w.-]+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$")
     _CORE = {"index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml", ".nojekyll", "chart.umd.min.js"}  # v0.41.0
@@ -3024,7 +3021,7 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     except Exception:
         def _fnt_dep(_n):
             return False  # fail-safe：导入失败则不过滤，不误删
-    files = [f for f in os.listdir(repo)
+    files = [f for f in os.listdir(data_root)
              if (f in _CORE or _ml_pat.match(f)
                  or (f.startswith("alpha-hive-daily-") and f.endswith((".json", ".md"))))
              and not _fnt_dep(f)]  # 非交易日幽灵报告（周末/假日）不部署
@@ -3038,51 +3035,35 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     env = os.environ.copy()
     env["GIT_INDEX_FILE"] = idx
     try:
+        # hash-object 读 data_root 下的绝对路径（内容可能不在 repo 工作区内），
+        # index 里登记的路径名仍是裸文件名 f（发布出去的 gh-pages 树结构不变）。
         for f in sorted(files):
-            blob = subprocess.check_output(["git", "hash-object", "-w", f],
-                                           cwd=repo).decode().strip()
+            blob = subprocess.check_output(
+                ["git", "hash-object", "-w", os.path.join(data_root, f)], cwd=repo
+            ).decode().strip()
             subprocess.run(["git", "update-index", "--add", "--cacheinfo",
                             "100644", blob, f], env=env, cwd=repo, check=True)
         tree = subprocess.check_output(["git", "write-tree"], env=env, cwd=repo).decode().strip()
-        parent_args = []
-        parent = None
-        try:
-            parent = subprocess.check_output(
-                ["git", "rev-parse", "gh-pages"], cwd=repo, stderr=subprocess.DEVNULL
-            ).decode().strip()
-            parent_args = ["-p", parent]
-        except subprocess.CalledProcessError:
-            pass
-        # v0.45.2: 空提交闸。`git commit-tree` 是管道命令，不做 `git commit` 的
-        # 「无变更则拒绝」检查——tree 与父提交相同也照样生成 commit。实测
-        # 2026-08-15 的 8b16977 / 06d99cc / 0c00454 三条 commit message 都声称
-        # "(12 tickers)"，`git show --name-only` 却是 0 个文件。message 里的
-        # successful_count 是**声称值**，与 tree 实际变更无关，必须并排写出实测值。
-        from report_deployer import ghpages_tree_delta
-        _has_change, _n_changed = ghpages_tree_delta(repo, tree, parent)
-        if not _has_change:
-            _log.error(
-                "🚨 gh-pages 无变更：新 tree 与父提交 %s 完全相同，跳过 commit。"
-                "本次声称 %d 份 ML 报告成功——若非重复运行，说明报告文件根本没重新生成。",
-                (parent or "")[:7], successful_count,
+
+        def _msg_fn(n_changed: int) -> str:
+            _msg = f"Deploy: ML reports {date_str} ({successful_count} tickers"
+            _msg += f", {n_changed} files changed)" if n_changed >= 0 else ")"
+            return _msg
+
+        # v0.45.268：父提交/推送改经 `commit_and_push_gh_pages`——每次重试都
+        # 重新 fetch `origin/gh-pages` 当父提交、非 force 推送（取代旧的
+        # 「本地 ref 当父 + --force」，见该函数 docstring 的实测 bug 记录）。
+        from report_deployer import commit_and_push_gh_pages
+        _push = commit_and_push_gh_pages(repo, tree, _msg_fn)
+        if _push["success"]:
+            _log.info(
+                "gh-pages 同步成功 (%d 文件，实测变更 %s，attempt %d)",
+                len(files),
+                _push["n_changed"] if _push["n_changed"] >= 0 else "未知",
+                _push["attempts"],
             )
         else:
-            _msg = f"Deploy: ML reports {date_str} ({successful_count} tickers"
-            _msg += f", {_n_changed} files changed)" if _n_changed >= 0 else ")"
-            commit = subprocess.check_output(
-                ["git", "commit-tree", tree] + parent_args + ["-m", _msg],
-                cwd=repo
-            ).decode().strip()
-            subprocess.run(["git", "update-ref", "refs/heads/gh-pages", commit],
-                           cwd=repo, check=True)
-        # 无变更时仍尝试 push：相当于重试上一次可能失败的推送
-        r = subprocess.run(["git", "push", "origin", "gh-pages", "--force"],
-                           cwd=repo, capture_output=True, text=True)
-        if r.returncode == 0:
-            _log.info("gh-pages 同步成功 (%d 文件，实测变更 %s)",
-                      len(files), _n_changed if _n_changed >= 0 else "未知")
-        else:
-            _log.warning("gh-pages push 失败: %s", r.stderr.strip()[:200])
+            _log.warning("gh-pages push 失败: %s", _push["last_error"])
     except Exception as e:
         _log.warning("gh-pages 同步异常: %s", e)
     finally:

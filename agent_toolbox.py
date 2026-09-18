@@ -51,7 +51,7 @@ import subprocess
 import time
 from typing import Dict, List, Optional, Any
 
-from hive_logger import get_logger
+from hive_logger import PATHS, get_logger
 
 _log = get_logger("agent_toolbox")
 
@@ -61,7 +61,13 @@ class GitHubTool:
     """GitHub 操作（替代 GitHub MCP）"""
 
     def __init__(self, repo_path: str = None):
-        self.repo_path = repo_path or os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__)))
+        # 数据根迁移阶段 4：此前默认值读 `ALPHA_HIVE_HOME`（数据根变量），
+        # 与 `PATHS.home` 撞在一起——阶段 5 把 `ALPHA_HIVE_HOME` 改指
+        # `~/alpha-hive-data` 后，git plumbing 会跟着跑到一个没有 `.git`
+        # 的数据目录，main 提交/推送与 gh-pages 部署一起失效。改读
+        # `PATHS.git_repo_root`（专用 `ALPHA_HIVE_GIT_REPO`，生产从不设，
+        # 兜底 `__file__`）——代码仓库的位置不随数据搬迁改变。
+        self.repo_path = repo_path or str(PATHS.git_repo_root)
 
     # 允许的 git 子命令白名单。
     #

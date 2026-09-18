@@ -56,6 +56,25 @@ class _HivePaths:
         return Path(os.environ.get("ALPHA_HIVE_HOME", os.path.dirname(os.path.abspath(__file__))))
 
     @property
+    def git_repo_root(self) -> Path:
+        """`alpha-hive-deploy` 代码仓库根——git plumbing（gh-pages / main 提交推送）必须在这里跑。
+
+        数据根迁移阶段 4：与 `home`（数据根）是**两个不同概念**，此前
+        `agent_toolbox.GitHubTool.__init__` 把两者叠成同一个变量（`ALPHA_HIVE_HOME`
+        优先、`__file__` 兜底）——今天两者恰好同目录，掩盖了分歧。阶段 5 把
+        `ALPHA_HIVE_HOME` 改指 `~/alpha-hive-data` 后，代码仓库**并不搬家**，
+        仍待在原检出位置；若 git plumbing 继续跟 `ALPHA_HIVE_HOME` 走，
+        `git commit`/`push`/gh-pages 的全部 git 命令都会在一个没有 `.git` 的
+        数据目录里执行，报告提交、main 推送、gh-pages 部署会一起失效。
+
+        因此这里**故意不读 `ALPHA_HIVE_HOME`**，改读专用的 `ALPHA_HIVE_GIT_REPO`
+        （仅测试用于把 git plumbing 指向沙箱假仓库，生产从不设它）。兜底
+        `__file__` 派生（本文件所在目录）在阶段 5 前后都是对的：代码仓库
+        的位置从未改变，改变的只是数据去哪儿找。
+        """
+        return Path(os.environ.get("ALPHA_HIVE_GIT_REPO", os.path.dirname(os.path.abspath(__file__))))
+
+    @property
     def logs_dir(self) -> Path:
         p = self.logs_dir_unmade()
         p.mkdir(parents=True, exist_ok=True)

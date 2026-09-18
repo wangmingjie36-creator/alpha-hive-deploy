@@ -368,7 +368,10 @@ class TestResultReachesAlerts:
         assert ps.load_for_date("2026-09-14", p)["outcome"] == "ff_refused"
 
     def test_cli_exit_code_and_result_file(self, world, monkeypatch):
-        monkeypatch.setenv("ALPHA_HIVE_HOME", str(world.prod))   # GitHubTool() 默认仓库
+        # 数据根迁移阶段 4：`GitHubTool()` 默认仓库改读专用的 `ALPHA_HIVE_GIT_REPO`
+        # （不再是数据根变量 `ALPHA_HIVE_HOME`）——两者阶段 5 之后会指向不同目录，
+        # 这里的沙箱仓库必须挂在新变量上，否则本条测试还在验证一个已被改掉的行为。
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(world.prod))
         assert ps.main(["--date", "2026-09-14"]) == 0
         assert ps.load_for_date("2026-09-14")["outcome"] == "up_to_date"
         world.git("switch", "-q", "-c", "experiment")

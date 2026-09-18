@@ -107,7 +107,147 @@ alpha-hive-orchestrator.sh`（Step 14 于 v0.45.264 设计，2026-09-18 用户�
   本地裸仓库当 remote），只在需要精确定位某一步失败时才 monkeypatch
   `_run_git`——保证"提交真的成功了"这类断言不是自己模拟出来的假象。
 
-## [0.45.268] — 2026-09-18 — 占位（进行中：数据根迁移阶段 4——gh-pages 发布链改读 PATHS + 顺修 force-push 父提交陷阱）
+## [0.45.268] — 2026-09-18 — 数据根迁移阶段 4：gh-pages 发布链改指向 + 顺修 force-push 父提交陷阱
+
+### 为什么
+
+阶段 2 收口时刻意留下的架构缺口：`report_deployer.deploy_static_to_ghpages` 与
+`generate_ml_report._sync_ghpages` 里，"git 仓库根"（git plumbing 必须在这里跑）
+与"数据根"（`os.listdir` 找待部署报告文件）由**同一个变量**表达——`repo`。
+今天两者恰好同目录（`ALPHA_HIVE_HOME` 未设时都兜底到 `__file__` 派生的仓库根），
+阶段 5 把 `ALPHA_HIVE_HOME` 改指 `~/alpha-hive-data` 后两者会分叉：报告文件搬到
+新数据根，但 gh-pages 部署若继续 `os.listdir(repo)`（git 仓库根），会在**旧位置**
+找文件——找不到就是「无静态文件可部署」，网站从此停更，且没有任何东西会红。
+
+普查过程中顺带发现一个范围更大的同源 bug：`agent_toolbox.GitHubTool.__init__`
+的默认 `repo_path` 也读 `ALPHA_HIVE_HOME`（与 `PATHS.home` 是同一个变量）——
+这不只影响 gh-pages，`production_sync.push_main`/`sync_before_scan`、
+`report_deployer.auto_commit_and_notify` 的 `git.commit()` 全部经它做 git 操作。
+阶段 5 一旦生效，main 分支的提交/推送会全部在 `~/alpha-hive-data`（没有 `.git`）
+里执行而失效——比 gh-pages 单独失效严重得多，且是任务描述里明确点名要处理的
+那个变量（`report_deployer.py` 的 `repo` 目前来自 `agent_toolbox.GitHubTool.
+repo_path`）。
+
+另一处独立实测过的 bug（见 auto-memory `alpha-hive-ops-info.md` 「⚠️ gh-pages
+部署是 force push，且父提交取自本地 ref」一节）：gh-pages 部署的两份实现都用
+**本地** `gh-pages` ref 当父提交（`git rev-parse gh-pages`），再 `--force` 推——
+本地 ref 不会因为别的 session/进程推过 gh-pages 而自动更新，一旦发生就会把远端
+在这期间新增的提交静默挤成不可达对象，2026-09-11 已实测撞到一次（那次内容
+恰好无损，逐项核对过；若对方推的是本地没有的内容，就会被真正挤掉）。
+
+### Changed
+
+- `hive_logger.py`：新增 `PATHS.git_repo_root`——git 仓库根的**唯一真相**，
+  专读 `ALPHA_HIVE_GIT_REPO`（仅测试用于把 git plumbing 指向沙箱假仓库，
+  生产从不设），兜底 `__file__` 派生（代码检出位置，阶段 5 前后都不变）。
+  与 `PATHS.home`（数据根，跟 `ALPHA_HIVE_HOME` 走）是两个独立变量、独立
+  env 覆盖钩子。
+- `agent_toolbox.GitHubTool.__init__`：默认 `repo_path` 改读 `PATHS.git_repo_root`，
+  不再读 `ALPHA_HIVE_HOME`——阶段 5 之后 main 分支的提交/推送不会跟着数据根搬家。
+  唯一依赖旧行为的测试 `tests/test_production_sync.py::TestResultReachesAlerts::
+  test_cli_exit_code_and_result_file` 改设 `ALPHA_HIVE_GIT_REPO`（其余全部
+  GitHubTool 测试本就显式传 `repo_path=`，不受影响）。
+- `report_deployer.deploy_static_to_ghpages`：`repo`（git 仓库根，来自
+  `agent_helper.git.repo_path`）与 `data_root`（`PATHS.home`）拆成两个变量；
+  `os.listdir`、`hash-object` 的文件内容来源都改用 `data_root`（`git hash-object
+  -w <绝对路径>` 不要求文件在仓库工作区内，只读字节写 blob，`cwd=repo` 只决定
+  写进哪个仓库的对象库），git plumbing（write-tree/commit-tree/update-ref/push）
+  继续在 `repo` 执行。`verify_cdn_deployment` 读 `dashboard-data.json` 同样改用
+  `data_root`（形参从 `repo` 改名 `data_root`）。
+- `generate_ml_report._sync_ghpages`：同上拆分（此前 `repo = str(PATHS.home)`
+  身兼两职），改与 `report_deployer` 共用同一套 git plumbing 助手，不再各写
+  各的父提交解析与 push 重试逻辑。
+- `alpha_hive_mcp.py`：`_HIVE_DIR`（读 `analysis-*-ml-*.json` 的目录）从硬编码
+  `~/Desktop/Alpha Hive` 改成调用时求值的 `_hive_dir()`（返回 `PATHS.home`），
+  4 处引用点同步改调用。`_DEEP_DIR`（独立仓库 `alpha-hive-deep-reports`）与
+  本项目数据根迁移无关，原样保留。
+
+### Fixed
+
+- **force-push 父提交陷阱**：`report_deployer.py` 新增 `resolve_gh_pages_parent`/
+  `commit_and_push_gh_pages`（两处 gh-pages 实现共用后者）：
+  - 父提交改用**每次重试都重新 fetch 到的 `origin/gh-pages`**，不用本地 ref；
+  - 推送改**非 force**——父提交就是 push 前一刻的远端真头，正常情况下天然
+    快进；竞态时 git 自己会因非快进拒绝，落入重试循环重新 fetch/提交/推送，
+    不需要自己实现"冲突检测"逻辑；
+  - tree 与刚 fetch 到的父提交的 tree 完全相同时直接判成功、不新建提交
+    也不推送（原「无变更时仍尝试推一次」的语义在新设计下不再必要——父提交
+    已确认是远端真头，树相同即远端已是目标状态）；
+  - `.gh_pages_deploy_log.jsonl` 新增 `parent_verified` 字段：fetch 失败、
+    退回本地 ref 尽力而为时，这次"未经校验"现在可见（此前完全无观测点）。
+
+### Added
+
+- `tests/test_ghpages_data_root_migration.py`（5 项，全部用真实 git 仓库/裸
+  仓库，**不 mock subprocess**——唯一例外是 `verify_cdn_deployment`，它会打
+  真实网络请求，与本文件要验证的东西无关，显式 patch 掉）：
+  - 数据根与 git 仓库根彻底分离时，部署仍正确从数据根读文件、发布内容与
+    `git_repo` 工作区完全无关（2 项，含跨两轮部署验证历史正常快进、旧提交
+    仍是新提交的祖先）；
+  - **force-push 父提交陷阱正向验证**：另一 session 已推的 gh-pages 提交在
+    我方本地完全看不到时（连本地 `gh-pages` ref 都不存在——旧 bug 的必要
+    条件），部署完之后对方的提交仍必须可达（`merge-base --is-ancestor` 为真）；
+  - **反向对照**：手工复现旧实现（本地 ref 当父 + `--force`）确实会把对方
+    的提交挤成不可达对象——没有这条，正向测试证明不了它测的是一个真问题；
+  - **真实竞态**：fetch 之后、push 之前另一个 session 抢先推送，验证第一次
+    push 被 git 自身拒绝（非快进）、`attempts >= 2`，重试循环重新 fetch 后
+    正确把抢跑的提交接上父提交链，不静默丢失。
+
+### 验收
+
+- 上述 5 项新测试全部通过（真实 git 操作，无 mock，独立跑与全套跑一致）。
+- 全套 `pytest --maxfail=0`（`--deselect` 掉 by-design 常年红的
+  `TestCoverageHorizon`）：**4903 passed, 1 skipped, 84 deselected,
+  2 xfailed, 8 errors**（耗时 446s）；`ruff check .` 全过。改动涉及的
+  gh-pages/GitHubTool/PATHS 冻结相关测试单独核对（`test_ghpages_data_root_
+  migration.py` + `test_pipeline.py` + `test_production_sync.py` +
+  `test_github_tool_commit.py` + `test_github_tool_status.py` +
+  `test_git_failures_are_visible.py` + `test_report_deployer_whitelist.py` +
+  `test_paths_not_frozen_at_import.py` + `test_hive_logger_not_frozen.py`，
+  合计 265 项）全绿。
+  ⚠️ **8 个 error 全部与本次改动无关**（已用独立 `git worktree` 核对：
+  在合并本次改动之前的 base commit 上原样复现，证明与本次 gh-pages 改动
+  无因果关系；零 `FAILED`，全部是 `ERROR`，即测试断言本身通过、只在
+  teardown 阶段触发）——`test_fg_exposure_gate_forward_test.py`（2 条）、
+  `test_ic_rerun_readiness.py`（3 条）、`test_resonance_boost_forward_test.py`
+  （3 条）在全套跑（而非单独跑）时会被 `conftest.py::_offline_transport`
+  拦到"伸手取外网了 query1.finance.yahoo.com"，是一个跨测试文件的网络
+  隔离泄漏，源头是 F&G 敞口门（v0.45.262）/共振加成前瞻检验（v0.45.242）
+  等近期合入的功能，与本阶段的 gh-pages/PATHS 改动无关；协调者的并行队列
+  里已经各有独立任务在跟这两类问题，未重复 flag。
+- `tests/test_paths_not_frozen_at_import.py` 全绿——`PATHS.git_repo_root`
+  是调用时求值的 `@property`，`GitHubTool.__init__`/`alpha_hive_mcp._hive_dir()`
+  均为函数体内/实例方法内解析，未产生新的模块级冻结路径，`KNOWN`/
+  `MUST_STAY_FILE_ANCHORED` 两张白名单均无需改动。
+
+### 仓库外消费方普查（沿用阶段 1 方法）
+
+- 复核阶段 1 已列出的仓库外/独立进程消费方清单：`push_report_to_slack.py`
+  （已在阶段 2 修）、GUI `gui/app.py`（`_PROJECT_ROOT` 本就 env 优先，
+  已在阶段 1/2 归类为可接受写法，未改）、`alpha_hive_mcp.py`（本版修，见上）。
+- Telegram bot（`alpha_hive_bot/`，Railway 部署）通过 HTTP 读取 GitHub Pages
+  线上地址，不直接读文件系统，不受数据根搬迁影响，未改。
+
+### 刻意不做 / 留给协调者判断
+
+- **`claude_desktop_config.json`（Claude Desktop 的 MCP server 配置，仓库外）
+  未修改**：`alpha_hive_mcp.py` 由 Claude Desktop 作为独立子进程启动，其
+  环境变量不受编排器 plist 的 `ALPHA_HIVE_HOME` 设置影响。本次只解决了
+  "代码是否遵循 PATHS"；阶段 5 实际搬迁后，要让这个进程读到新数据根，
+  还需要在该配置文件里给 `alpha_hive` server 单独加一条
+  `"env": {"ALPHA_HIVE_HOME": "~/alpha-hive-data"}`——这是仓库外配置，
+  按任务硬边界不在本次改动范围内，如实记录。
+- **`weekly_optimizer.py`/`self_analyst.py`/`generate_deep_v2.py` 的
+  `ALPHAHIVE_DIR` 仍硬编码 `~/Desktop/Alpha Hive`**（不读任何环境变量，
+  比 `__file__` 派生更彻底地锁死）：前两处是阶段 1（v0.45.259）已经点名
+  的独立遗留 bug，`generate_deep_v2.py` 是本次普查确认的**第三处同构
+  实例**（此前未被记录，用它读 `analysis-*-ml-*.json` 与 `pheromone.db`）。
+  三者都不是"发布链"消费方（分别是权重优化器配置路径、月度诊断输出目录、
+  深度报告读取生产库路径），不属于本阶段范围；已用 `spawn_task` 记一条
+  独立后续任务。
+- 未对真实 GitHub `alpha-hive-deploy` 仓库的 `gh-pages` 分支做任何推送/
+  强推；全部验证在本地裸仓库完成，未创建新的 GitHub 仓库，未修改
+  `~/.claude/scripts/alpha-hive-orchestrator.sh` 或任何 launchd plist。
 
 ## [0.45.267] — 2026-09-18 — `signal_archive` 回填历史 F&G：真值来自 discovery 文本，不用 CNN 官方历史序列
 
