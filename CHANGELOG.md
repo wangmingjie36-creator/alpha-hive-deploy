@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.294] — 2026-09-18 — 占位（进行中：experiments 三个脚本缺 `sys.path` 注入——`vol_regime_filter.py` 顶层 import、`ticker_winrate_persistence.py` / `bear_read_miss_audit.py` 惰性 import，按文档运行即 ModuleNotFoundError；补注入 + 静态守卫 + 真子进程测试）
+
 ## [0.45.293] — 2026-09-18 — Removed：退役仓库外死脚本 `alpha-hive-daily.sh`（移入 `retired/`、去掉执行位）；`setup_cron.py` 白名单同步摘掉它
 
 用户 2026-09-18 决定「退役或删除」，选**退役**（可恢复）而不是 `rm`：该文件不在 git 里，删了无处可找回，
