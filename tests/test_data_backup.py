@@ -200,11 +200,11 @@ class TestRunBackupStageReporting:
     """
 
     def _synthetic_src(self, tmp_path):
-        """4 个库是 export_mod.DBS 的硬编码范围，缺一个 export_db() 就会
+        """库范围直接取 export_mod.DBS，缺一个 export_db() 就会
         FileNotFoundError——测 commit/push 阶段前必须先让 export 真实跑通。"""
         src = tmp_path / "src"
         src.mkdir()
-        for db_name in ("pheromone.db", "metrics.db", "sentiment_baseline.db", "hive_predictions.db"):
+        for db_name in export_mod.DBS.values():
             _make_synthetic_db(src / db_name)
         return src
 

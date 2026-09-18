@@ -5,7 +5,21 @@
 
 ---
 
-## [0.45.282] — 2026-09-18 — 占位（进行中：`_synthetic_src` 硬编码库元组改用 `export_mod.DBS`）
+## [0.45.282] — 2026-09-18 — Fixed：`tests/test_data_backup.py::_synthetic_src` 硬编码库元组改用 `export_mod.DBS`
+
+`_synthetic_src` 自己抄了一份 `("pheromone.db", "metrics.db", "sentiment_baseline.db",
+"hive_predictions.db")`，与 `data_backup/export.py` 的唯一真相 `DBS` 内容恰好一致但各自维护。
+`export_mod` 本已在文件顶部 import，未被复用。
+
+### Fixed
+
+- `tests/test_data_backup.py::TestRunBackupStageReporting._synthetic_src`：硬编码元组改为
+  遍历 `export_mod.DBS.values()`，消除重复——`DBS` 未来新增/改名库时，测试范围自动跟随，
+  不再需要手动同步两处。
+
+### 验证
+
+- `/usr/local/bin/python3 -m pytest tests/test_data_backup.py -q`：26 passed。
 
 ---
 
