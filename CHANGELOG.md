@@ -23,7 +23,35 @@
 
 ---
 
-## [0.45.281] — 2026-09-18 — 占位（进行中：orchestrator Step 14 jq 命令拼接注入修复）
+## [0.45.281] — 2026-09-18 — Fixed：`alpha-hive-orchestrator.sh` Step 14 读 `$BACKUP_STAGE` 直接拼进 jq 程序文本，存在语法注入风险
+
+`~/.claude/scripts/alpha-hive-orchestrator.sh`（不受版本控制）Step 14 的 rc==2
+分支从 `backup_status.json` 读出 `$BACKUP_STAGE` 后，用
+`\"${BACKUP_STAGE}_failed\"` 直接拼进双引号包裹的 jq 程序文本，未转义、未走
+`--arg` 安全传参——是全文件里唯一一处"外部文件读出的值被拼进 jq 程序文本"的
+写法，与文件其余位置（如 `.date == $d` 校验）规规矩矩用 `--arg` 的风格不一致。
+
+当前 `data_backup/run_backup.py` 只把 `stage` 写成固定安全字面量
+（`export`/`commit`/`push`/`secret_scan`/`done`，加 v0.45.273 新鲜度校验兜底的
+`stale_or_missing`/`unknown`），眼下不可触发；但文件全局 `set -uo pipefail`、
+未开 `set -e`，一旦触发，这条 jq 编译失败不会被任何地方检查——`$STEPS_RESULT`
+（当天全部 14 个 Step 累积的唯一 JSON 对象）会静默塌缩，污染不止 Step 14 这一条
+记录。
+
+### Fixed
+
+- 第 1419 行（修复前行号）`STEPS_RESULT=$(... | jq ". + {...\"${BACKUP_STAGE}_failed\"...}")`
+  改为 `jq --arg stage "$BACKUP_STAGE" --arg detail "$BACKUP_STATUS_JSON" '. + {"step14_data_backup": {"status": ($stage + "_failed"), "detail_json": $detail}}'`，
+  `$BACKUP_STAGE` 与 `$BACKUP_STATUS_JSON` 均改走 `--arg`，彻底消除拼接注入面。
+- 只改这一行相关的 jq 调用写法，未涉及其余 13 个 Step 或 Step 14 的其它逻辑分支。
+
+### 验证
+
+- `bash -n ~/.claude/scripts/alpha-hive-orchestrator.sh`：语法检查通过。
+- 用修复前后两种写法分别喂同一组边界值（含双引号+jq 语法片段、反引号、
+  反斜杠、空字符串、换行）做对照：旧写法在含双引号的恶意值上以 `rc=3`
+  jq 编译失败复现了本条要修的问题；新写法全部边界值 `rc=0`，恶意内容原样
+  落成 JSON 字符串字面量，未被当作 jq 语法解释。
 
 ---
 
