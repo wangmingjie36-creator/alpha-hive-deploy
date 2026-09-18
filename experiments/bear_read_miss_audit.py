@@ -23,9 +23,16 @@ import glob
 import json
 import os
 import re
+import sys
 from collections import defaultdict
 
-FIX_DATE = "2026-09-18"   # v0.45.288 首个可能生效的扫描日（09-18 14:00 PDT 扫描前上线）
+# v0.45.294：按 `python3 experiments/bear_read_miss_audit.py` 跑时 sys.path[0] 是 experiments/ 而
+# 不是仓库根。v0.45.288 新写本脚本时在 `main()` 里惰性 `from hive_logger import PATHS`，没有本行；
+# `--help` 与文档示例（显式给 `--root`）都正常，只有缺省 root 才 ModuleNotFoundError。
+# （代码位置，`__file__` 正确。）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+FIX_DATE ="2026-09-18"   # v0.45.288 首个可能生效的扫描日（09-18 14:00 PDT 扫描前上线）
 KEYS = (("options", "OracleBeeEcho"), ("ml", "RivalBeeVanguard"),
         ("guard", "GuardBeeSentinel"), ("catalyst", "ChronosBeeHorizon"))
 

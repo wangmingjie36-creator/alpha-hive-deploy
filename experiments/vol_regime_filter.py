@@ -67,9 +67,15 @@ from __future__ import annotations
 import math
 import sqlite3
 import statistics as st
+import sys
 import datetime as dt
 from collections import defaultdict
 from pathlib import Path
+
+# v0.45.294：按 `python3 experiments/vol_regime_filter.py` 跑时 sys.path[0] 是 experiments/ 而
+# 不是仓库根。v0.45.260 加下面这行 `from hive_logger import` 时漏了本行，脚本因此从 09-15 起
+# 一直 ModuleNotFoundError——零测试、零调用方，三天没人知道。（代码位置，`__file__` 正确。）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # v0.45.260（数据根迁移阶段 2）：此前是 `Path(__file__).resolve().parent.parent
 # / "pheromone.db"`——不读 `ALPHA_HIVE_HOME`。改读 `PATHS.db`；本脚本是一次性

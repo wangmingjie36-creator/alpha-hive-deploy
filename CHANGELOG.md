@@ -5,7 +5,70 @@
 
 ---
 
-## [0.45.294] — 2026-09-18 — 占位（进行中：experiments 三个脚本缺 `sys.path` 注入——`vol_regime_filter.py` 顶层 import、`ticker_winrate_persistence.py` / `bear_read_miss_audit.py` 惰性 import，按文档运行即 ModuleNotFoundError；补注入 + 静态守卫 + 真子进程测试）
+## [0.45.294] — 2026-09-18 — Fixed：experiments 三个脚本缺 `sys.path` 注入，按文档运行即 `ModuleNotFoundError`；Added：静态守卫 + 真子进程测试
+
+`python3 experiments/xxx.py` 运行时 `sys.path[0]` 是 `experiments/`，不是仓库根。v0.45.290 修了 `signal_ic_sweep.py`；
+同一目录里**还有三个**同样坏着。起初只知道 `vol_regime_filter.py` 一个，先写守卫、让它扫全目录之后才发现是三个：
+
+| 脚本 | import 形态 | 什么时候炸 | 引入 |
+|---|---|---|---|
+| `vol_regime_filter.py` | 顶层 | 任何运行方式，连 `--help` 也炸——它没有 argparse，`--help` 不被识别，直接开库跑全量 | v0.45.260 |
+| `ticker_winrate_persistence.py` | `find_db()` 内惰性 | 文档用法（无参运行） | v0.45.260 |
+| `bear_read_miss_audit.py` | `main()` 内惰性，仅 `--root` 缺省时 | 缺省 root；`--help` 与文档示例（显式给 `--root`）都正常 | **v0.45.288**（新写的脚本，不是迁移遗留） |
+
+没有任何测试执行它们，编排器 / launchd / crontab 也不调用它们，所以三天没有任何东西会红。但有引用：
+`ic_rerun_readiness.py` 的说明把 `bear_read_miss_audit.py` 指为验证 v0.45.288 修复的那把尺子——照着去跑缺省路径的人会直接撞上这个错。
+
+### Fixed
+
+- `experiments/vol_regime_filter.py`（补 `import sys`）、`experiments/ticker_winrate_persistence.py`、
+  `experiments/bear_read_miss_audit.py`（补 `import sys`）：在首个仓库根 import 之前加模块层
+  `sys.path.insert(0, <仓库根>)`。内联表达式、不赋给模块级路径常量——`__file__` 用于「代码位置」，用法正确，
+  也不会被 `test_paths_not_frozen_at_import` 当成新增冻结路径。vol 沿用 sweep 的 `Path(__file__).resolve()` 写法，
+  另两个沿用各自文件已有的 `os.path` 惯用法（`realpath`，语义同为跟随符号链接）。
+
+### Added
+
+- `tests/test_experiments_script_bootstrap.py`（19 项）：
+  - **静态守卫**：AST 扫 `experiments/*.py`，凡 import 仓库根模块的脚本（根目录 `*.py` + 含 `__init__.py` 的包，
+    现算、剔除与标准库同名者），必须在**首个**此类 import **之前**、**模块层**（不在函数体内）有
+    `sys.path.insert/append/extend`。惰性 import、「注入晚于 import」「注入只在函数体内」都算违规。
+  - **反向自证**：12 个合成样本（6 违规 + 6 合规）；对每个「现在合规」的**真实**脚本，用 AST 删掉它的注入后守卫必须变红；
+    根模块枚举的正对照（清单为空会让扫描恒绿）。
+  - **真子进程**（cwd 与仓库根无关、清 `PYTHONPATH` 与脚本专属的 `ALPHA_HIVE_PHEROMONE_DB`、`ALPHA_HIVE_*` 全钉到临时目录）：
+    三个脚本各走到自己 import 所在的缺省路径。vol 用合成库 + **样本计数指纹**（96 条有效 + 3 条应被过滤的哨兵行，
+    输出必须是「样本 96 条」），既证明读的是夹具库又证明三道过滤生效；另两个靠回显的 `root=<夹具目录>` /
+    「找不到 pheromone.db」证明 `PATHS.*` 落在夹具而非真库。
+  - **canary**：一个无注入的脚本在同一套子进程环境里必须 `ModuleNotFoundError`——防 `.pth` / `PYTHONPATH` 泄漏
+    让上面三条永远假绿。
+
+### 验证
+
+- **先红后绿**：修复前 4 红 + 15 绿——4 红是静态扫描与三条真子进程；静态扫描恰好点名这三个脚本（第 77 / 81 / 86 行），
+  三条子进程红在 `ModuleNotFoundError: No module named 'hive_logger'`（不是夹具或断言写错）。修复后 19 项全绿。
+- 同一 harness 前后对照：`ticker_winrate_persistence`（无参）与 `bear_read_miss_audit`（无 `--root`）由
+  `ModuleNotFoundError` 变为各自设计内的输出（「找不到 pheromone.db」/ `root=<临时目录> … 无可用行`，退出码 1 / 3）；
+  `bear_read_miss_audit --help` 修前修后都是退出码 0。
+- 相邻守卫 `test_paths_not_frozen_at_import` + `test_experiments_pooled_guard` + `test_changelog_entry_integrity`
+  共 113 项全绿；`ruff` 通过。
+- 全套（在 git worktree 里跑）：**5076 passed**、1 failed、1 skipped、83 deselected、2 xfailed；唯一的红是
+  `TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`（nfp 覆盖剩 77 天、阈值 90 天，日期驱动，
+  干净 main 上就是红的，与本条无关，未动）。本条使收集数恰好 +19（5060 → 5079）。
+
+### 教训 / 没做 / 边界
+
+- **「批量改路径后真跑每个被动过的脚本 `--help`」这条旧教训本身有洞**：vol 没有 argparse、`--help` 不被识别；
+  另两个是惰性 import，argparse 在走到它之前就退出了。探针必须走到 import 所在的**代码路径**。
+  同理**退出码不能当判据**：崩溃和 `ticker_winrate_persistence` 设计内的「找不到」都是 1。
+- 第三个脚本是**新写的**代码在迁移三天后把同一个错重犯——只修存量不够，所以要守卫。
+- 守卫**不校验注入的是不是仓库根**，只校验「存在、模块层、在 import 之前」。一次性脚本
+  `patch_swarm_results_20260917.py` / `replay_swarm_sequence_20260917.py` 硬编码了主 checkout 路径，
+  开发机上有效、别处无效，守卫放行；「注入得对不对」靠真子进程测试，目前只覆盖上面三个。
+- 只认 `sys.path.insert/append/extend` 三种调用；别的写法会红（有意：宁可误报也不放过未识别的形式）。
+- 任务简报的范围是 `vol_regime_filter.py` 一个；另外两个是同根因、同一行修法，且守卫的验收条件（「修复后变绿」）
+  要求一并修掉，故合并在本条。experiments 脚本不进评分，**不需要世代边界**。
+
+---
 
 ## [0.45.293] — 2026-09-18 — Removed：退役仓库外死脚本 `alpha-hive-daily.sh`（移入 `retired/`、去掉执行位）；`setup_cron.py` 白名单同步摘掉它
 
