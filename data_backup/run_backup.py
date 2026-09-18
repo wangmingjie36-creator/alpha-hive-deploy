@@ -21,6 +21,13 @@ v0.45.269 之前编排器 Step 14 曾把 rc==2 硬解读为「已提交但推送
 导致 export/commit 失败（根本没提交成功）也被日志误报成「已提交」；
 Step 14 的分支现改为读 `stage` 字段而非只猜 rc。
 
+⚠️ 光读 `stage` 仍不够：`run_step()`（编排器里 Step 14 的启动函数）自己
+也把 rc=2 当"脚本不存在，跳过"的哨兵值，跟本模块的 rc=2 撞车——若脚本
+本轮根本没被调用，`status.json` 会是上一轮遗留的陈旧文件，`stage` 就是
+上一轮的答案而非这一轮的。`status` 字典因此带一个 `date`（`YYYY-MM-DD`，
+照抄 `scan_timing.json` 的既有约定），下游必须先核对它等于当天日期，
+再信这份文件的 `stage`——v0.45.273 起编排器 Step 14 就是这么做的。
+
 Slack 通知：按项目 CLAUDE.md「Slack 通知精简规则」，扫描失败/权重更新/数据质量
 类事件本就禁止发 DM——本模块同理，失败只写 `status.json`，不发通知
 （3.5 设计里写清楚了为什么）。
@@ -46,8 +53,8 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
     src = Path(src)
     backup_dir = Path(backup_dir)
     t0 = dt.datetime.now()
-    status: dict = {"started_at": t0.isoformat(timespec="seconds"), "src": str(src),
-                     "backup_dir": str(backup_dir), "remote": remote, "branch": branch}
+    status: dict = {"date": t0.strftime("%Y-%m-%d"), "started_at": t0.isoformat(timespec="seconds"),
+                     "src": str(src), "backup_dir": str(backup_dir), "remote": remote, "branch": branch}
 
     if not (backup_dir / ".git").is_dir():
         init = _run_git(["init", "-b", branch], backup_dir)

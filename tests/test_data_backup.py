@@ -6,8 +6,11 @@
 （那样等于把「密钥去哪扫」的清单和一次真实凭据样本焊进了 git 历史）。
 """
 import json
+import os
+import shlex
 import sqlite3
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -299,3 +302,96 @@ class TestRunBackupStageReporting:
         status = json.loads(status_file.read_text())
         assert status["stage"] == "done"
         assert status["ok"] is True
+        assert status["date"] == status["started_at"][:10]  # 编排器新鲜度校验读的就是这个字段
+
+
+_ORCH = os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh")
+_STEP14_RC2_START = "elif [ $STEP14_RC -eq 2 ]; then"
+_STEP14_RC2_END = "elif [ $STEP14_RC -eq 124 ]; then"
+
+
+class TestOrchestratorStep14StageDispatch:
+    """编排器 Step 14 的 rc==2 分支不受版本控制、pytest import 不到——抽出这段
+    真实脚本片段，接进一个最小 bash 沙箱（假 `log()` 收日志、真 `jq` 判断）跑，
+    锁定 stage 分发 + 新鲜度校验的行为。
+
+    动机：二次检查这次修复时发现，v0.45.269 加的 stage 分发和 v0.45.273 加的
+    新鲜度校验（`backup_status.json` 必须是"今天"写的才可信——`run_step()`
+    自己也把 rc=2 当"脚本不存在，跳过"的哨兵值，跟这里的 rc=2 同一个数字、
+    不同含义；陈旧文件会被误当成本轮结果）此前只有 CHANGELOG/memory 里的文字
+    记录，没有任何可执行测试盯着——两处都可能被静默改回旧行为而没有测试报红。
+    """
+
+    def _extract_block(self):
+        if not os.path.isfile(_ORCH):
+            pytest.skip("编排器不在本机（仓库外文件）")
+        text = Path(_ORCH).read_text(encoding="utf-8")
+        start = text.index(_STEP14_RC2_START) + len(_STEP14_RC2_START)
+        end = text.index(_STEP14_RC2_END, start)
+        return text[start:end]
+
+    def _run(self, tmp_path, *, status_json, date_str="2026-01-01"):
+        block = self._extract_block()
+        status_file = tmp_path / "backup_status.json"
+        if status_json is not None:
+            status_file.write_text(json.dumps(status_json), encoding="utf-8")
+        script = f'''
+set -uo pipefail
+log() {{ printf 'LOG\\t%s\\t%s\\n' "$1" "$2"; }}
+BACKUP_STATUS_JSON={shlex.quote(str(status_file))}
+DATE_STR={shlex.quote(date_str)}
+STEP14_RC=2
+STEPS_RESULT='{{}}'
+{block}
+printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
+'''
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, f"bash 片段本身跑挂了：{result.stderr}"
+        logs = [tuple(ln.split("\t", 2)[1:]) for ln in result.stdout.splitlines() if ln.startswith("LOG\t")]
+        steps_line = next(ln for ln in result.stdout.splitlines() if ln.startswith("STEPS_RESULT_JSON\t"))
+        steps_result = json.loads(steps_line.split("\t", 1)[1])
+        return logs, steps_result
+
+    @pytest.mark.parametrize("stage, expect_level, expect_log_substr, expect_status", [
+        ("export", "ERROR", "数据导出失败", "export_failed"),
+        ("commit", "ERROR", "git commit 失败", "commit_failed"),
+        ("push", "WARN", "已提交但推送失败", "push_failed"),
+    ])
+    def test_known_fresh_stage_dispatches_correct_message(
+        self, tmp_path, stage, expect_level, expect_log_substr, expect_status
+    ):
+        logs, steps_result = self._run(
+            tmp_path, status_json={"date": "2026-01-01", "stage": stage})
+        assert any(lvl == expect_level and expect_log_substr in msg for lvl, msg in logs), logs
+        assert steps_result["step14_data_backup"]["status"] == expect_status
+
+    def test_unrecognized_but_fresh_stage_falls_to_default_branch(self, tmp_path):
+        logs, steps_result = self._run(
+            tmp_path, status_json={"date": "2026-01-01", "stage": "some_future_stage"})
+        assert any("未识别" in msg for _, msg in logs), logs
+        assert steps_result["step14_data_backup"]["status"] == "some_future_stage_failed"
+
+    def test_missing_status_file_does_not_claim_a_specific_stage(self, tmp_path):
+        """status.json 整个不存在（比如脚本本轮从没被 run_step 真正调用过）——
+        不能落进 export/commit/push 任何一支，必须显式标"陈旧/缺失"。"""
+        logs, steps_result = self._run(tmp_path, status_json=None)
+        assert any("缺失或不是今天写的" in msg for _, msg in logs), logs
+        assert steps_result["step14_data_backup"]["status"] == "stale_or_missing_failed"
+
+    def test_stale_status_file_from_a_previous_day_is_not_trusted(self, tmp_path):
+        """回归测试的核心：昨天的 status.json 恰好是 stage="push"——修复前，
+        这种陈旧文件会被原样当成"已提交但推送失败"汇报（run_step 把脚本
+        不存在的 rc=2 跟这里的 rc=2 混同的那个场景），这正是二次检查揪出、
+        v0.45.273 补的新鲜度校验缺口。"""
+        logs, steps_result = self._run(
+            tmp_path, status_json={"date": "2025-12-31", "stage": "push"}, date_str="2026-01-01")
+        assert not any("已提交但推送失败" in msg for _, msg in logs), (
+            f"陈旧的 stage=push 被当成本轮结果汇报了——新鲜度校验没生效：{logs}")
+        assert any("缺失或不是今天写的" in msg for _, msg in logs), logs
+        assert steps_result["step14_data_backup"]["status"] == "stale_or_missing_failed"
+
+    def test_status_file_without_date_field_is_treated_as_stale(self, tmp_path):
+        """老格式的 status.json（v0.45.269 之前写的，没有 date 字段）也不能被信——
+        `.date == $d` 对缺失字段该判 false，不能因为 jq 的 null 处理意外放行。"""
+        logs, steps_result = self._run(tmp_path, status_json={"stage": "push"})
+        assert steps_result["step14_data_backup"]["status"] == "stale_or_missing_failed"

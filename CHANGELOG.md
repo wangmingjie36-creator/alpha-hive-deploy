@@ -5,7 +5,50 @@
 
 ---
 
-## [0.45.273] — 2026-09-18 — 占位（进行中：v0.45.269 二次检查——backup_status.json 新鲜度校验 + Step 14 bash 分支回归测试）
+## [0.45.273] — 2026-09-18 — Fixed：v0.45.269 二次检查——backup_status.json 缺新鲜度校验、bash 修复本身零测试覆盖
+
+对 v0.45.269（Step 14 exit code 2 误判修复）做多角度代码复检，发现该次修复
+本身留了两个缺口，均已实测验证是可触发的，本次一并补上。
+
+### Fixed
+
+- `~/.claude/scripts/alpha-hive-orchestrator.sh` Step 14：v0.45.269 加的
+  `jq -r '.stage'` 读取**没有新鲜度校验**——而 `run_step()` 自己也把 rc=2
+  当"脚本不存在，跳过"的哨兵值（跟 `run_backup.py` 的 rc=2 同一个数字、
+  不同含义）。若脚本本轮根本没被 `run_step` 调用（比如生产 checkout 落后、
+  文件暂时不可达），`backup_status.json` 会是上一轮遗留的陈旧文件——旧代码
+  会原样把陈旧的 `stage` 当成本轮结果汇报，若恰好是 `stage: "push"` 就会
+  重演 v0.45.269 本要修的那个误报（"已提交但推送失败"）。本文件里
+  `write_status()` 对 `scan_timing.json` 早有现成的 `.date == $d` 新鲜度校验
+  模式（"只认本轮日期的文件——昨天那份不能冒充今天的"），这次对齐同一套
+  约定：新增 `stage_or_missing` 分支，`backup_status.json` 的 `date` 字段
+  不等于今天就不信它的 `stage`。
+- `data_backup/run_backup.py`：`status` 字典新增 `date`（`YYYY-MM-DD`，
+  与既有 `started_at` 同源但格式对齐 `scan_timing.json` 约定），供编排器
+  新鲜度校验读取；docstring 补充说明该字段的用途与 `run_step()` 的 rc=2
+  哨兵值撞车问题。
+- `run_data_backup.py`：docstring 仍写着"v0.45.264 尚未接入"，与 v0.45.269
+  更新过的 `data_backup/run_backup.py` docstring（"已接入"）直接矛盾——
+  漏改了兄弟文件，本次订正。
+
+### Tests
+
+- `tests/test_data_backup.py` 新增 `TestOrchestratorStep14StageDispatch`
+  （7 条）：v0.45.269 的 bash `case` 分支此前**零测试覆盖**——4 条新测试
+  当时只测了 Python 侧的 `run_backup.main()`，即使把 Step 14 那段 bash 逻辑
+  整段改回修复前的样子也照样全绿，给不出任何回归信号。新增测试直接从
+  `alpha-hive-orchestrator.sh`（不受版本控制，pytest import 不到）里抽出
+  Step 14 的 rc==2 分支原文，接进一个最小 bash 沙箱（假 `log()` 收日志、
+  真 `jq` 判断）跑，覆盖 export/commit/push 三种已知 stage、未识别 stage、
+  status.json 缺失、陈旧 status.json（关键回归用例：昨天的文件恰好是
+  `stage: "push"`，必须不被当成本轮结果）、无 `date` 字段的旧格式文件
+  共 7 种场景。**变异验证**：把新鲜度校验从脚本里拿掉（用隔离的临时副本，
+  不改动生产脚本本身），`test_stale_status_file_from_a_previous_day_is_not_trusted`
+  按预期真的报红，确认这条测试有牙齿而非重言式。
+- `TestRunBackupStageReporting::test_full_success_reports_done_stage`
+  追加一条断言，锁定新增的 `date` 字段与 `started_at` 的日期前缀一致。
+
+全套 `tests/test_data_backup.py` 21 passed；`bash -n` 语法检查通过。
 
 ## [0.45.272] — 2026-09-18 — 占位（进行中：paper_portfolio.py 的 SNAPSHOT_DIR/STATE_DIR 模块级路径冻结——二次检查 v0.45.256 时在全套测试里发现，导致测试套件真实联网 + 潜在写穿生产 report_snapshots/paper_portfolio_state）
 
