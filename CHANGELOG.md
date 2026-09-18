@@ -310,12 +310,23 @@ UTF-8 下手工跑会在 1495 退出——按代码结构，其后的 `kill "$_G
 4. **机制从推断升为实测**：`ctypes` 51 个首字节逐个核对（见「问题」）。顺带更新了 `test_scan_catchup.py`
    里一条指向已被删掉的 xfail 的过时注释。
 
-**同类写法还有一处，未改（待用户决定）**：`~/.claude/scripts/alpha-hive-daily.sh:36`，
+**同类写法还有一处，评估后不改（用户于 2026-09-18 决定）**：`~/.claude/scripts/alpha-hive-daily.sh:36`，
 `log "预计 spawn Agent 数：$SPAWN_COUNT（每个标的 5 个Agent）"`。它没有 `set -u`，所以 UTF-8 下**不退出、
-静默吃掉数值并写出坏字节**（实测 `exit=99），x` 变成 `exit=` + 残留的两个孤立续字节）。2026-02-24 后未改动，
-本机 LaunchAgents / crontab 均无引用（只有 `setup_cron.py` 与 CHANGELOG 提到它），影响面≈0；
-不在本条范围，没动。同批扫过的另两份 shell 脚本（`~/.claude/scripts/alpha-hive-with-whatsapp.sh`、
-仓库里唯一被 git 跟踪的 `run_alpha_hive_daily.sh`）0 命中。
+静默吃掉数值并写出坏字节**（实测 `exit=99），x` 变成 `exit=` + 残留的两个孤立续字节）。**不改的理由**：
+① `SPAWN_COUNT` 只在这一行被用到，影响面 = 一行日志的文字；② 该脚本是 v0.45.213 已记录的仓库外死脚本
+（2026-02-24 后未改动，本机 LaunchAgents / crontab 均无引用，`setup_cron.py` 里唯一的引用是第 37 行的
+crontab 内容白名单，并不安装它）；③ 它的核心步骤本来就跑不通——第 45 行的
+`~/.claude/reports/alpha_hive_daily_report.py` 不存在，即便指到仓库里的同名文件，不带 `--swarm` 也会被
+v0.45.213 的退役闸拒绝（exit 2），且用的是裸 `python3`；④ 只加花括号不会让它可用，反而留下「仍在维护」的错觉。
+同批扫过的另两份 shell 脚本（`~/.claude/scripts/alpha-hive-with-whatsapp.sh`、仓库里唯一被 git 跟踪的
+`run_alpha_hive_daily.sh`）0 命中。
+
+**顺带记下的已知隐患（未处理，未新增决定）**：手动跑这个脚本时，python 步失败后会进「备用简报」分支
+（第 61–93 行），写出 `~/.claude/reports/alpha-hive-daily-<日期>.md` 固定模板——标题是字面的 `YYYY-MM-DD`，
+写着「系统状态：✅ 已完成 Phase 1-6」而实际什么都没跑；`send-to-telegram.py` 不带参数时取该目录里最新的
+`alpha-hive-daily-*.md`，即这份假简报。目前无自动调用方，检查时该目录里这类文件 0 份，所以只是潜在风险。
+这与 v0.45.213「顺带发现」里挂着的「仓库外死脚本，未删」是**同一个待决事项**——要处理应当退役/删除该脚本，
+而不是给某一行加花括号；本次不重新提议、不处理。
 
 ---
 
