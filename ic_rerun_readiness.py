@@ -83,13 +83,73 @@ def _db_path() -> Path:
 # **直接**改了哪些归档信号（只动 final_score 就写空元组；下游由依赖边自动推出）。
 # `signal_archive.analyze()` 靠它给每个信号切世代 —— 漏了测试红，运行时按全部信号切。
 _COHORT_HISTORY = [
+    # v0.45.275（P1 补登）：以下两条真实发生在**表的第一条之前**——本表 2026-08-17
+    # 才开张，此前的系统逻辑改动从未登记（见本文件与 signal_archive.py 顶部的
+    # 「已知盲区」说明）。补登不是替历史挑错，是把当时已经真实发生、
+    # 且按本表判据（哨兵语义/来源/算法改变）本就该记的两条边界找出来、按实际
+    # 部署日期插入。两条都只影响各自单一信号，未在任何下游依赖边里出现，
+    # 插入不改变任何已注册边界的 `cohort_start()`（取列表最后一条不变）。
+    ("2026-08-15", "v0.43.24",
+     "GuardBeeSentinel 的 VIX 取数改走 CBOE 优先（脱离 yfinance 限流）。Step 1"
+     "（同版更早提交）把「宏观数据整体降级」时的 vix/yield_curve/gold_trend 一律"
+     "改判 None，不冒充观测值——**该步验证过不改评分**（base 常量 20.0/\"unknown\"/"
+     "\"stable\" 本就不触发任何 regime_vote 分支，故不登记）。Step 2 才动了口径："
+     "新增 `vix_source` 逐字段判定，宏观整体降级但 CBOE 仍供得上真实 VIX 的那些天，"
+     "VIX 由「跟着整体一起丢弃」变成「按真实值参与 regime_votes」，直接改变"
+     "`_calc_macro_adjustment` 的 `score_adj` → `guard.macro_adj` → GuardBee 分。"
+     "`guard.macro_adj` 是叶子信号（不读系统输出），此前从未被 `COHORT_SIGNAL_SCOPE`"
+     "点名，全史里悄悄跨这条边界池化。未重放验证具体翻转率，按代码出边保守登记。"),
+    ("2026-08-15", "v0.43.25",
+     "ScoutBeeNova 的 `momentum_5d` 缺失哨兵由 `float(stock[\"momentum_5d\"] or 0.0)`"
+     "（伪造「持平」）改为诚实 `None`。原提交实测：该伪造值让 `sentiment.py` 的情绪"
+     "背离检测在近 28 个扫描日的 395 次判定里**全部** severity=0——0.0 永远够不到"
+     "阈值，背离检测结构性失灵。`price.momentum_5d` 直接抓 "
+     "`agent_details.ScoutBeeNova.details.momentum_5d`，是叶子信号，此前从未被"
+     "`COHORT_SIGNAL_SCOPE` 点名，全史里悄悄跨这条边界池化。"),
     ("2026-08-17", "v0.44.1~0.44.3",
      "expected_returns 去偏 + probability 居中 + RivalBee 三特征接真实数据"),
+    ("2026-08-26", "v0.45.2~0.45.15",
+     "v0.45.275（P1 补登）：同一批「静默降级六处」修复里两处真正改了评分输入的"
+     "（其余如 ticker 正则、gh-pages、标的丢失重试、ML 特征插补属报告/管道层，"
+     "不动本条）。① BuzzBeeWhisper 的情绪-价格背离检测：此前 momentum 为 None 时"
+     "仍传 `0.0` 给检测器（注释写「跳过」，代码却当「持平」），检测器里"
+     "`divergence_type=\"unavailable\"` 那条分支因此永远不可达；改为直传 None 让"
+     "它生效。② 同版 `data_pipeline.py` 把 `volatility_20d` 的缺失伪造默认值由 "
+     "`0.0` 改为 `None`（原判据：σ=0 在风险引擎里等于「零风险」，比崩溃更危险），"
+     "BuzzBeeWhisper 的波动率信号分支同步改为 None→中性 50、不再被 0.0 误判"
+     "「低波动/稳定」。两项均改变 `agent.BuzzBeeWhisper.score`（背离分与波动率信号"
+     "都是 sentiment_composite 的加项），`price.volatility_20d` 是 Buzz details 对"
+     "该量的直接透传，随源头改哨兵语义。均为叶子信号，此前从未被 "
+     "`COHORT_SIGNAL_SCOPE` 点名。⚠️ `price.volume_ratio` 同批也改了 dataclass "
+     "默认值，但排查发现至少一条取值路径（`CBOESource`）当时仍硬编码 `or 1.0`"
+     "未清，是否可达未验证，本条不认领——留在 `NEVER_SLICED_TODAY`。"),
     ("2026-08-26", "v0.45.30",
      "拥挤度口径变更：删除 polymarket_volatility（原 15% 权重，实测 76% 为常数 20、"
      "其余变化来自 |momentum_5d|*0.8 的动量伪装，属常数稀释+暗中双计），"
      "其余五项按原比例重归一化；缺失分量改为在现存分量间重归一化而非按 0 计。"
      "拥挤度 → ScoutBee signal 维度 → final_score，故为世代边界"),
+    ("2026-08-26", "v0.45.31",
+     "v0.45.275（P1 补登）：ChronosBeeHorizon 的催化剂来源抓取失败时，此前 except "
+     "只打 warning 就继续，「抓取失败」与「确实没催化剂」产出同形（都是 "
+     "score=4.0/discovery=\"无近期催化剂\"）。原提交实测 90 个扫描日里 9 天（10%）"
+     "出现该值 >75% 标的集体塌缩、最重单日 26/27 只。改为来源全不可得时返回 "
+     "`make_error_result`，走 `queen_distiller` 的缺失维度通道（动态填充 + 覆盖度"
+     "压缩），不再冒充「查过、确实没有」。`_cat_count` 等三个抽取器的代码注释里"
+     "已经点名过这次改动（\"自 v0.45.31 起 ChronosBee 返回 error\"），但当时没人把"
+     "这份认知写进 `COHORT_SIGNAL_SCOPE`——`agent.ChronosBeeHorizon.*` 与 "
+     "`catalyst.*` 三个抽取器全是叶子信号，全史里悄悄跨这条边界池化。"),
+    ("2026-08-26", "v0.45.32",
+     "v0.45.275（P1 补登）：紧接上一条同日——移除 ChronosBeeHorizon 两条人工维护的"
+     "前瞻催化剂来源（`catalysts.json` 与硬编码 `create_nvda/vktx_catalysts`），"
+     "催化剂来源自此只剩自动可核实的 yfinance 财报日历。原提交实测两条旧来源均已"
+     "腐烂或有错（`catalysts.json` 实测仅 6/30 只标的、窗口内 0 事件；VKTX 硬编码"
+     "曾有两条内容错误的 critical 级条目，把二期试验当三期、把 2027 年指引写成 "
+     "2026-08-15）。这直接改变 `catalysts_found` 这个列表本身（不只是失败时的"
+     "语义），进而改变 `agent.ChronosBeeHorizon.score/direction` 与 "
+     "`catalyst.count/nearest_days/max_weight` 四个下游抽取器的取值——与上一条"
+     "（v0.45.31，改的是「抓取失败时怎么办」）是两次独立的定义变更，各自登记。"
+     "取「最后一条适用的边界」语义下，这四个信号的当前世代实际起点由本条决定"
+     "（在列表里晚于 v0.45.31）。"),
     ("2026-08-27", "v0.45.50",
      "Phase 1 静默降级批量修复（**一次性合并**，避免分批各消耗一次世代边界）："
      "① 拥挤度全分量不可得时返回 None 而非 0.0 —— 旧行为 score=20.59 →「低拥挤」"

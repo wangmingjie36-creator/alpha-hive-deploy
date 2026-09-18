@@ -199,8 +199,12 @@ NEVER_SLICED_TODAY = (
     "options.total_oi", "options.iv_rank", "options.iv_percentile", "options.iv_rank_is_real",
     "insider.filings", "insider.dollar_bought", "insider.dollar_sold",
     "insider.distinct_buyers", "insider.officer_buys",
-    "price.momentum_5d", "price.volatility_20d", "price.volume_ratio",
-    "catalyst.count", "catalyst.nearest_days", "catalyst.max_weight",
+    # v0.45.275: price.momentum_5d / price.volatility_20d 移出本表——各自在
+    # 2026-08-15（scout_bee v0.43.25）/ 2026-08-26（data_pipeline v0.45.3）改过
+    # 哨兵语义（缺失伪造 0.0 → 诚实 None），见 DOCUMENTED_REDEFINITIONS。
+    # price.volume_ratio 留在本表：dataclass 默认值同批改了，但至少一条取值路径
+    # （CBOESource）当时仍硬编码 `or 1.0` 未清，是否可达未查清，不认领。
+    "price.volume_ratio",
     "fund.pe_ratio", "fund.market_cap", "market.fear_greed", "market.fear_greed_is_cnn",
     "sentiment.pct", "crowding.comp.social_volume", "crowding.comp.google_trends",
 )
@@ -217,6 +221,18 @@ DOCUMENTED_REDEFINITIONS = {
     "ml.expected_30d": "2026-09-07",
     "composite.swarm_agreement": "2026-09-11",         # 读全部蜂方向，含 Oracle
     "composite.final_score": "2026-09-09",             # v0.45.172 权重
+    # v0.45.275：补登（P1 审计）—— 均在 `_COHORT_HISTORY` 第一条（08-17）前后
+    # 真实发生、但从未进过 COHORT_SIGNAL_SCOPE 的哨兵语义 / 来源变更。
+    "price.momentum_5d": "2026-08-15",                 # v0.43.25 scout_bee 缺失伪造 0.0→None
+    "guard.macro_adj": "2026-08-15",                   # v0.43.24 Step2 VIX 改走 CBOE，降级日不再一刀切丢弃
+    "agent.BuzzBeeWhisper.score": "2026-08-26",        # v0.45.2/3 volatility_20d/背离检测 None 语义
+    "agent.BuzzBeeWhisper.direction": "2026-08-26",
+    "price.volatility_20d": "2026-08-26",              # v0.45.3 data_pipeline 缺失伪造 0.0→None
+    "agent.ChronosBeeHorizon.score": "2026-08-26",     # v0.45.31 抓取失败改 error（不再冒充 4.0）
+    "agent.ChronosBeeHorizon.direction": "2026-08-26",
+    "catalyst.count": "2026-08-26",                    # v0.45.31/32 同源：来源集合与失败语义都变了
+    "catalyst.nearest_days": "2026-08-26",
+    "catalyst.max_weight": "2026-08-26",
 }
 
 

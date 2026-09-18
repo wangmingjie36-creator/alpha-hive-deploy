@@ -329,8 +329,15 @@ class TestCohortBoundary:
         )
 
     def test_history_is_append_only(self):
-        """既有条目不得被改写 —— 审计轨迹。"""
+        """既有条目不得被改写 —— 审计轨迹。
+
+        v0.45.275：原断言钉的是**位置**（`h[0]`）。P1 补登两条真实早于当时
+        「第一条」的历史边界（2026-08-15，见 CHANGELOG）后，`v0.44.1~0.44.3`
+        被挤到 `h[2]`——但审计轨迹没有被改写，只是变长了，这条不该红。
+        真正要守的是「已知条目还在」，不是「还在同一个位置」，与
+        `test_ic_rerun_readiness.py::TestCohortBoundary.test_no_known_cohort_has_vanished`
+        同一判据、同一理由。"""
         h = self._history()
         assert len(h) >= 11, f"世代历史条数倒退到 {len(h)}"
-        assert h[0][1] == "v0.44.1~0.44.3", "第一条被改写了"
+        assert ("2026-08-17", "v0.44.1~0.44.3") in {(d, v) for d, v, _ in h}, "已知条目消失了"
         assert [d for d, _, _ in h] == sorted(d for d, _, _ in h), "日期不是单调的"

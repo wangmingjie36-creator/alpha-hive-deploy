@@ -1054,9 +1054,14 @@ def _forward_realized_vol(tickers: List[str], dates: List[str],
 #   有实测说某量没换（v0.45.256 对 `guard.adj_factor` 的核对）⇒ 照证据不列；
 #   没测过 ⇒ 按代码出边保守列。宁可丢样本（报告里点名），不静默池化。
 #
-# ⚠️ 已知盲区：`_COHORT_HISTORY` 始于 2026-08-17，此前的系统逻辑改动从未登记 ⇒
-#   无边界约束的系统输出（如 `agent.ChronosBeeHorizon.*`）的「全史」仍可能跨未登记的
-#   改动池化。本机制只照登记表切，不替历史补登。
+# ⚠️ 已知盲区（v0.45.275 更新）：`_COHORT_HISTORY` 原以为「始于 2026-08-17，此前
+#   一律未登记」，P1 审计（2026-07-25~08-28 提交窗口、覆盖全部 7 只蜂）发现这话
+#   不够准——`agent.ChronosBeeHorizon.*` / `agent.BuzzBeeWhisper.*` / `guard.macro_adj` /
+#   `price.momentum_5d` / `price.volatility_20d` 五组信号在 2026-08-15/08-26
+#   真实换过定义，只是当时没人登记，现已补（见 `_COHORT_HISTORY` 同版新增的 5 条）。
+#   **仍然已知的盲区**：这次只查了 07-25~08-28 这段；7 只蜂在此之前（最早到
+#   2026-02-23）还有 49 次未查的改动，`signal_archive` 归档最早回填到 2026-03-10，
+#   理论上也可能藏着同类问题。本机制只照登记表切，不会主动替未查的历史补登。
 
 #: 被入档信号读取、自身不入档的系统输出 —— 只为让边界与依赖边能指向它。
 UNARCHIVED_NODES = frozenset({"agent.CodeExecutorAgent.score",
@@ -1129,12 +1134,30 @@ SIGNAL_LEAVES = frozenset({
 #: 追加边界时必须同步在这里声明（空元组＝只动了 final_score）—— 漏了测试红，
 #: 运行时则按「影响全部信号」处理并在报告里点名。
 COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
+    # v0.45.275（P1 补登，两条真实早于表的第一条 08-17，按实际部署日期插入）：
+    # 08-15 Step2：GuardBee VIX 改走 CBOE，宏观整体降级但 CBOE 仍供得上真实 VIX 的
+    # 日子里，VIX 从「跟着一起丢弃」变成「参与 regime_votes」⇒ macro_adj 改口径。
+    "v0.43.24": ("guard.macro_adj",),
+    # 08-15：ScoutBee momentum_5d 缺失哨兵 0.0（伪造持平）→ None（诚实缺失）。
+    "v0.43.25": ("price.momentum_5d",),
     # 08-17：expected_returns 去偏 + probability 居中 + RivalBee 三特征接真实数据
     "v0.44.1~0.44.3": ("ml.*",),
+    # v0.45.275（P1 补登）08-26（早于同日 v0.45.30，按部署时间序插入）：
+    # BuzzBee 背离检测 None 语义修复 + volatility_20d 缺失哨兵 0.0→None（同批
+    # data_pipeline 改动，Buzz details 是直接透传）。
+    "v0.45.2~0.45.15": ("agent.BuzzBeeWhisper.*", "price.volatility_20d"),
     # 08-26：拥挤度公式删 polymarket_volatility、缺失分量改在现存分量间重归一化。
     # Scout 与 Guard 各算一份、同走 CrowdingDetector ⇒ 两份都换代（Rival 那份经依赖边）。
     # 分量本身未变（stocktwits_volume → social_volume 是同一个量改名，见 `_crowding_comp`）
     "v0.45.30": ("crowding.score", "guard.adj_factor"),
+    # v0.45.275（P1 补登）08-26（晚于同日 v0.45.30，按部署时间序插入）：ChronosBee
+    # 催化剂抓取全失败时不再冒充 4.0/「无近期催化剂」，改返回 error。
+    "v0.45.31": ("agent.ChronosBeeHorizon.*", "catalyst.count",
+                 "catalyst.nearest_days", "catalyst.max_weight"),
+    # v0.45.275（P1 补登）08-26：移除 catalysts.json / 硬编码 NVDA-VKTX 两条人工来源，
+    # 催化剂来源集合本身改变（与上一条「失败语义」是两次独立变更）。
+    "v0.45.32": ("agent.ChronosBeeHorizon.*", "catalyst.count",
+                 "catalyst.nearest_days", "catalyst.max_weight"),
     # 08-27：① 拥挤度全分量不可得返回 None（旧：20.59 →「低拥挤」→ 1.2 加分）；
     # ② 训练集剔除维度缺失样本 ⇒ ml.*；⑥ 信息素坏值 1.0 → 0.5 ⇒ 板排序 ⇒ Guard 的 n=5 窗口。
     # ③ 0DTE `or 30` 在 `OptionsDataFetcher` 的 BS gamma 回填里，而主链 `_select_expiries`

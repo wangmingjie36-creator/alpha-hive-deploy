@@ -5,7 +5,129 @@
 
 ---
 
-## [0.45.275] — 2026-09-18 — 占位（进行中：补登 5 个 2026-08-15/08-26 未登记的世代边界，signal_archive 生成式退位窗口审计 P1）
+## [0.45.275] — 2026-09-18 — 补登 5 个未登记的世代边界（2026-08-15/08-26，P1 审计）
+
+v0.45.265 给 `signal_archive.analyze()` 加了按世代切片的机制，但当时留了两句
+未验证的话：「`_COHORT_HISTORY` 始于 2026-08-17，此前一律未登记」「Buzz / Chronos
+这类只读原始数据的蜂，全史可能跨未登记改动池化」。这次把这两句从猜测变成审计——
+逐个过了 07-25~08-28 提交窗口内全部 7 只蜂的改动，用项目自己的判据
+（算法 / 来源 / 哨兵语义改变 ⇒ 换代；只是某天测量出错 ⇒ 走 QUARANTINE 不换代）
+筛出 4 个真正符合条件、但从未进过 `COHORT_SIGNAL_SCOPE` 的定义变更，涉及 5 条
+`_COHORT_HISTORY` 记录（两条同日两个真实版本的算作两条）。
+
+排除的（同样查过，证据显示不算数，不重复列入）：Oracle v0.45.30 Polymarket 关闭
+（commit 自己写了"odds 评分口径不变"）、Guard VIX Step1（commit 验证过"base 常量
+不触发任何 regime_vote 分支"）、Chronos v0.45.122 预取重构（换取数路径不换值）、
+Bear v0.45.54（`valuation` 标签诚实化，不改数值）、Buzz v0.45.247（794 份历史
+重放验证逐字段 0 差异）。这五个能排除，是因为当时的 commit message 里就做了
+实测；4 个真正漏掉的，恰恰是当时没有做这一步。
+
+### 为什么按实际部署日期回填，而不是记今天的日期
+
+`_COHORT_HISTORY` 的判据是"世代边界看的是数据不是发现时间"（v0.45.176 已有先例）：
+这些改动是 2026-08-15/08-26 真实生效的，任何跨过那天的池化从那天起就已经在发生，
+记今天的日期只会让"发现之前"这段时间继续被静默池化。两条 08-15 的记录因此排在
+`_COHORT_HISTORY` 现有第一条（08-17）**之前**——这是本次唯一的结构性风险点，
+见下方"核对"。
+
+### 量测
+
+7 只蜂在 07-25~08-28 窗口内触及评分逻辑的改动共 12 个提交（含 07-30 chronos_bee
+入库那次日报提交不计），6 个判定为已有边界覆盖或经证据排除（见上），5 个提交
+（对应 4 处逻辑改动——Guard 的 Step1/Step2 算一处调查、拆成两条记录）是本次要
+补的缺口。受影响信号在生产库 `signal_archive` 里的现有样本分布
+（`date < 边界` / `date >= 边界`）：
+
+| 信号 | 边界日期 | 边界前 | 边界后 | 边界前占比 |
+|---|---|---:|---:|---:|
+| `price.momentum_5d` | 2026-08-15 | 1057 | 509 | 67.5% |
+| `guard.macro_adj` | 2026-08-15 | 1054 | 541 | 66.1% |
+| `agent.BuzzBeeWhisper.score/direction` | 2026-08-26 | 1162 | 480 | 70.8% |
+| `price.volatility_20d` | 2026-08-26 | 1151 | 416 | 73.5% |
+| `agent.ChronosBeeHorizon.score` | 2026-08-26 | 1162 | 480 | 70.8% |
+| `agent.ChronosBeeHorizon.direction` | 2026-08-26 | 1153 | 480 | 70.6% |
+| `catalyst.count` | 2026-08-26 | 1161 | 480 | 70.7% |
+| `catalyst.nearest_days` / `max_weight` | 2026-08-26 | 875 | 465 | 65.3% |
+
+每个字段目前 65%~74% 的样本落在旧口径一侧——不是边角料，是全库大半，此前
+`analyze()` 的"全史"模式对这些信号一直在跨口径求 IC / 分布，数字照出但没意义。
+
+### Added
+
+- `ic_rerun_readiness._COHORT_HISTORY` 新增 5 条：
+  - `2026-08-15 v0.43.24`：GuardBeeSentinel VIX 改走 CBOE 优先（Step 2）。宏观
+    整体降级但 CBOE 仍供得上真实 VIX 的日子，VIX 由"跟着一起丢弃"变成"参与
+    regime_votes"，直接改 `guard.macro_adj`（同版 Step 1 验证过不改评分，不登记）。
+  - `2026-08-15 v0.43.25`：ScoutBeeNova `momentum_5d` 缺失哨兵 `0.0`（伪造持平）
+    → `None`（诚实缺失）。原提交实测：该伪造值让情绪背离检测近 28 个扫描日
+    395 次判定**全部** severity=0，结构性失灵。
+  - `2026-08-26 v0.45.2~0.45.15`：BuzzBeeWhisper 情绪-价格背离检测 None 语义
+    修复（此前 momentum 为 None 时仍传 0.0，检测器"unavailable"分支永远不可达）+
+    同批 `data_pipeline.py` 把 `volatility_20d` 缺失伪造默认值 `0.0` 改 `None`。
+  - `2026-08-26 v0.45.31`：ChronosBeeHorizon 催化剂抓取全失败时不再冒充
+    `4.0`/"无近期催化剂"，改返回 error（走 `queen_distiller` 缺失维度通道）。
+  - `2026-08-26 v0.45.32`：移除 `catalysts.json` + 硬编码 NVDA/VKTX 两条人工
+    催化剂来源（VKTX 曾有两条内容错误的 critical 级条目），来源只剩 yfinance
+    财报日历——与上一条是两次独立的定义变更，各自登记。
+- `signal_archive.COHORT_SIGNAL_SCOPE` 同步新增上述 5 个 key 的影响面声明：
+  `v0.43.24 → guard.macro_adj`；`v0.43.25 → price.momentum_5d`；
+  `v0.45.2~0.45.15 → agent.BuzzBeeWhisper.*, price.volatility_20d`；
+  `v0.45.31`/`v0.45.32 → agent.ChronosBeeHorizon.*, catalyst.count,
+  catalyst.nearest_days, catalyst.max_weight`。
+- `tests/test_signal_archive_generations.py::DOCUMENTED_REDEFINITIONS` 补齐
+  这 10 个信号名 → not_before 日期的断言（复用既有参数化测试，未新开测试类）。
+
+### Removed
+
+- `tests/test_signal_archive_generations.py::NEVER_SLICED_TODAY` 移除
+  `price.momentum_5d`、`price.volatility_20d`、`catalyst.count`、
+  `catalyst.nearest_days`、`catalyst.max_weight`（它们不再"从未被切"，按表头
+  自己的话"把它从这里移除，并在 CHANGELOG 写明依据"办理，本条即依据）。
+
+### 核对
+
+- 新增/修改测试全绿：`test_signal_archive_generations.py` 57 项、
+  `test_ic_rerun_readiness.py` 30 项、`test_oracle_direction_keyword_vote.py`
+  34 项、`test_signal_quarantine.py` 10 项，先跑红（10 个新断言对着改动前的代码
+  确认失败）再改代码转绿。
+- ⚠️ **实现时踩了一次自己的坑**：插入两条 08-15 记录时，第一版 `Edit` 把原有
+  `("2026-08-17", "v0.44.1~0.44.3", ...)` 那一条整段替换掉了（old_string/new_string
+  没对齐），是 `test_no_stale_scope_entries` 当场抓到的（"影响面表里有
+  `_COHORT_HISTORY` 不存在的版本"）——审计轨迹被误删而不是误改写，補回后复测绿。
+- ⚠️ 补登两条 08-15 记录后，`_COHORT_HISTORY` 的"第一条"从 `v0.44.1~0.44.3`
+  变成 `v0.43.24`，撞了 `tests/test_oracle_direction_keyword_vote.py` 里一条独立
+  写的回归测试——它把"审计轨迹不得被改写"实现成了`h[0][1] == "v0.44.1~0.44.3"`
+  （钉位置而不是钉内容），这次一起改成按 `(date, version)` 成员判定（与
+  `test_ic_rerun_readiness.py::TestCohortBoundary.test_no_known_cohort_has_vanished`
+  同一判据）。
+- `cohort_start()` 与 `ic_rerun_readiness.assess()` 的当前世代不受影响
+  （取 `_COHORT_HISTORY[-1]`，插入更早的记录不改变列表末尾）；用
+  `generation_boundaries()` 逐一核对过 `agent.GuardBeeSentinel.*` / `ml.*` /
+  `crowding.*` / `composite.*` 等已有边界覆盖的下游信号，`_scope_closure` 的
+  传递闭包会把新记录的影响面沿依赖边传给它们，但因为它们各自已有更晚的边界
+  覆盖，"取最后一条适用的边界"语义下这次是无副作用的（已用真实签名逐一验证，
+  不是理论推断）。
+- 全量套件（剔除 `TestCoverageHorizon` 那条日历阈值告警——与本次无关，设计上
+  会定期变红，见其自身注释）跑通：**4921 passed, 1 skipped, 2 xfailed, 0 failed**，
+  过程中唯一发现的红是上面第二条（`test_oracle_direction_keyword_vote.py`
+  钉位置的回归测试），已修并复测绿；这次未复现此前 session 记录过的、
+  由本机并发多个 session 抢 CPU 导致的 8 个 teardown ERROR 噪音
+  （本次跑的时段没有其它并发全套测试在跑）。
+
+### 不做
+
+- `price.volume_ratio` 同批 `data_pipeline.py` 也改了 dataclass 默认值
+  （`1.0` → `None`），但排查发现至少一条取值路径（`CBOESource`）当时仍硬编码
+  `.get("volume_ratio", 1.0)` 未清，是否真的可达没有查清，不认领登记，留在
+  `NEVER_SLICED_TODAY`。
+- 本次只审计了 2026-07-25~08-28 这一个提交窗口。7 只蜂在此之前（最早到
+  2026-02-23）还有 49 次未查的改动（scout 12、chronos 10、rival 8、oracle 7、
+  buzz/guard/bear 各 4），`signal_archive` 归档最早回填到 2026-03-10，理论上
+  也可能藏着同类问题——这次没有查，`signal_archive.py` 顶部的已知盲区注释已
+  同步更新为"仍已知的盲区"而不是当作已解决。
+- P1 分析里原提议的"先加 nondecreasing 安全测试再插入"这一步实际发现已存在
+  （`test_ic_rerun_readiness.py::TestCohortBoundary.test_history_is_append_only_and_ordered`），
+  未重复造轮子。
 
 ## [0.45.273] — 2026-09-18 — Fixed：v0.45.269 二次检查——backup_status.json 缺新鲜度校验、bash 修复本身零测试覆盖
 
