@@ -282,8 +282,7 @@ def _snapshot_dates_in_window(since: str, before: str) -> List[str]:
                   if pp.CONFIG["bootstrap_date"] <= d and since <= d < before)
 
 
-def run(sandbox_root: Optional[Path] = None, insample: bool = False,
-       today: Optional[str] = None) -> Dict:
+def run(insample: bool = False, today: Optional[str] = None) -> Dict:
     import paper_portfolio as pp
 
     if not any(pp.SNAPSHOT_DIR.glob("analysis-*-ml-*.json")) and not any(pp.SNAPSHOT_DIR.glob("*_*.json")):

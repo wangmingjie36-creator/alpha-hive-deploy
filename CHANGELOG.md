@@ -5,6 +5,38 @@
 
 ---
 
+## [0.45.276] — 2026-09-18 — 补 v0.45.274：SNAPSHOT_DIR 隔离缺口的专用回归测试 + 一个死参数清理
+
+`v0.45.272` 占号后二次检查 v0.45.256 时独立发现了这个 bug，但在实现修复期间被另一 session
+用 `v0.45.274` 抢先独立修好（诊断与修法在核心机制上一致，见 v0.45.272 占位关闭说明）。
+本版只补 v0.45.274 没覆盖的两处。
+
+### Added
+
+- `tests/test_paths_not_frozen_at_import.py::TestResolvedAtCallTime::
+  test_paper_portfolio_snapshot_dir_is_sandboxed`：v0.45.274 的验证方式是跑一次
+  6~7 分钟的全套测试看 8 个 ERROR 消不消失，往后但凡这条隔离退化，同样要重新跑一遍
+  全套才能发现。本条把它收敛成一条秒级单测：模块级 `import paper_portfolio`（本文件
+  既有的「刻意复现收集期就被 import」约定），断言 `paper_portfolio.SNAPSHOT_DIR` 落在
+  `tmp_path` 之下。
+  - ⚠️ 第一版把 `import paper_portfolio` 写在函数体内，测试因为「这是本次 pytest
+    进程第一次 import 该模块，此时 `_isolate_env` 早已跑过」而意外通过——对 bug 没有
+    判别力，被自己的变异测试打脸后才发现要挪到模块级（同本文件顶部注释警告的坑）。
+  - 变异测试：删掉 `_isolate_paper_portfolio_state` 里重绑 `SNAPSHOT_DIR` 的那一行，
+    本条测试可靠地红，恢复后绿。
+
+### Removed
+
+- `experiments/fg_exposure_gate_forward_test.py::run()` 的 `sandbox_root` 参数：
+  从未被函数体使用（内部永远用 `tempfile.TemporaryDirectory()` 新建的临时目录，
+  与传入的 `sandbox_root` 无关），连它自己的 `main()` 都不传——死参数，容易让后来者
+  误以为已经支持外部注入路径。`evaluate()` 自己的同名参数是真在用的，未动。
+
+### 核对
+
+- 全套测试：4,917 passed / 1 failed（已知的经济日历 flaky）/ 0 errors。
+- ruff 0.13.3 对改动文件 All checks passed。
+
 ## [0.45.275] — 2026-09-18 — 补登 5 个未登记的世代边界（2026-08-15/08-26，P1 审计）
 
 v0.45.265 给 `signal_archive.analyze()` 加了按世代切片的机制，但当时留了两句
@@ -229,7 +261,20 @@ v0.45.272 占位提到的「潜在写穿生产 report_snapshots/paper_portfolio_
 注释里明确写着"留待后续"的那处重构，涉及全模块几十个使用点），那仍是未完成、
 更大范围的独立工作，本条不覆盖，占位不撤。
 
-## [0.45.272] — 2026-09-18 — 占位（进行中：paper_portfolio.py 的 SNAPSHOT_DIR/STATE_DIR 模块级路径冻结——二次检查 v0.45.256 时在全套测试里发现，导致测试套件真实联网 + 潜在写穿生产 report_snapshots/paper_portfolio_state）
+## [0.45.272] — 2026-09-18 — 占位关闭：核心修复已由 v0.45.274 抢先完成，本号号不撤但不再补真内容
+
+本号占号后（04:25 推送）在本 session 自己实现修复期间，另一 session 04:25 之后 fetch 仍只见占位、
+独立复现同一个 bug、取号 v0.45.274 完成并推送（05:04 提交）。两份诊断与修法在核心机制上一致
+（`SNAPSHOT_DIR` 从没被 `_isolate_paper_portfolio_state` 重绑 → 全套跑时冻死成真实目录 → 读到真实
+快照后经 `fg_exposure_gate_forward_status()` 级联出真实联网），且都独立踩中并修好了同一个沙箱名
+撞车坑（`tmp_path / "report_snapshots"` 撞 `test_outcomes_fetcher.py` 等文件自己的同名目录）。
+
+按既定原则「先提交（进 git 历史）的占号，后者改号」：v0.45.274 已推上 origin/main，本号占位到此
+关闭，不再补一份重复的核心修复。本 session 遗留的两处不在 v0.45.274 范围内的增量见 v0.45.276。
+
+`STATE_DIR` 早已被同一个 fixture 保护，本号占位提到的「潜在写穿」经 v0.45.274 核实无写入证据；
+若指的是 `paper_portfolio.py:54-56` 注释里「留待后续」的 `SNAPSHOT_DIR`/`STATE_DIR` 懒求值重构
+（涉及全模块几十个使用点），那仍是更大范围的独立工作，两个号都没覆盖。
 
 ## [0.45.271] — 2026-09-18 — 占位（进行中：09-17 momentum/volume 补算 + 重新部署——评估是否触及 predictions 表）
 

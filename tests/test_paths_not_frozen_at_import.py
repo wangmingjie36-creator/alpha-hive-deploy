@@ -30,6 +30,7 @@ import pytest
 import backtester
 import memory_store
 import vector_memory
+import paper_portfolio
 from hive_logger import PATHS
 
 
@@ -77,6 +78,27 @@ class TestResolvedAtCallTime:
         vm = vector_memory.VectorMemory()
         assert str(tmp_path) in str(vm.db_path), (
             f"VectorMemory() 指向 {vm.db_path}，Chroma 会在那里持久化 collection")
+
+    def test_paper_portfolio_snapshot_dir_is_sandboxed(self, tmp_path):
+        """v0.45.274 修的那个洞的专用回归探针（该版验证靠一次全套跑，没有留下这条）。
+
+        `paper_portfolio.SNAPSHOT_DIR` 曾被 `KNOWN` 放行，理由是「只两处 glob 读、
+        无写入 ⇒ 后果有限」——那句本身没错，但漏算了**读到真实历史快照会级联出
+        更多真实计算**：`ic_rerun_readiness.main()` 无条件调用的
+        `fg_exposure_gate_forward_status()` 靠它判断「有没有真实前瞻样本」，读到本
+        checkout 真实的历史快照后，会经 `paper_portfolio.run_replay()` 重放真实历史
+        日期，触发对真实标的的真实网络请求——被 `tests/conftest.py::_offline_transport`
+        逮到，`TestCarriedByReadiness`（三个文件里都有）在**全套跑**（不是单文件跑）
+        时从 PASS 变成 teardown ERROR（v0.45.274）。
+
+        ⚠️ import 必须留在**模块级**（本类顶部）：写进函数体会在 `_isolate_env` 之后
+        才 import，那样本次 pytest 进程里它是「第一次」被 import，会意外撞上已经
+        生效的沙箱化而通过——对 bug 没有判别力（本条第一版就是这么写错的）。
+        """
+        assert str(tmp_path) in str(paper_portfolio.SNAPSHOT_DIR), (
+            f"paper_portfolio.SNAPSHOT_DIR 仍是 {paper_portfolio.SNAPSHOT_DIR} —— "
+            "_isolate_paper_portfolio_state 没有重绑它，全套跑时会读到本 checkout 真实的 "
+            "report_snapshots/，进而可能级联出真实网络请求（v0.45.274 案）")
 
 
 class TestExplicitPathStillWins:
