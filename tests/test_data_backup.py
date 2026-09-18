@@ -10,6 +10,7 @@ import os
 import shlex
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -400,6 +401,124 @@ class TestRunBackupStageReporting:
         assert status["date"] == status["started_at"][:10]  # 编排器新鲜度校验读的就是这个字段
 
 
+class TestRunBackupHistoryAppend:
+    """`run()` 每条退出路径都要追加一行到 `history_file`（v0.45.284）——
+    这是 `backup_continuity.py` 判"连续 N 天未识别/陈旧"唯一能读到的历史，
+    `status.json` 本身每次调用整份覆盖，没有这份 JSONL 就无从判定连续性。
+    """
+
+    def _synthetic_src(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        return src
+
+    def test_failure_appends_ok_false_record(self, tmp_path, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError("模拟并发写检测命中")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        history_file = tmp_path / "history.jsonl"
+        run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(tmp_path / "status.json"),
+            "--history-file", str(history_file),
+        ])
+        lines = history_file.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        rec = json.loads(lines[0])
+        assert rec["stage"] == "export"
+        assert rec["ok"] is False
+        assert rec["date"]
+
+    def test_success_appends_ok_true_record(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+        bare_remote = tmp_path / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare_remote)],
+                        check=True, capture_output=True)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "commit.gpgsign", "false"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "core.hooksPath", os.devnull],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", str(bare_remote)],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+
+        history_file = tmp_path / "history.jsonl"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(tmp_path / "status.json"),
+            "--history-file", str(history_file),
+        ])
+        assert rc == 0
+        lines = history_file.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        rec = json.loads(lines[0])
+        assert rec == {"date": rec["date"], "stage": "done", "ok": True}
+
+    def test_repeated_calls_append_not_overwrite(self, tmp_path, monkeypatch):
+        """同一个 history_file 跨多次调用（跨天）必须累积成多行，
+        不能像 status.json 那样被后一次覆盖——否则判连续性又回到只看"最近一次"。"""
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        history_file = tmp_path / "history.jsonl"
+        src = self._synthetic_src(tmp_path)
+        for _ in range(3):
+            run_backup.main([
+                "--src", str(src),
+                "--backup-dir", str(backup_dir),
+                "--status-file", str(tmp_path / "status.json"),
+                "--history-file", str(history_file),
+            ])
+        lines = history_file.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3
+
+    def test_history_file_none_is_noop(self, tmp_path, monkeypatch):
+        """`history_file` 不传（老调用方）不能报错——同 `status_file=None` 的既有行为。"""
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        status = run_backup.run(self._synthetic_src(tmp_path), backup_dir,
+                                 status_file=tmp_path / "status.json")
+        assert status["stage"] == "export"
+
+    def test_history_write_failure_does_not_change_status(self, tmp_path, monkeypatch):
+        """历史日志写不进去（比如父目录其实是个文件）不能影响本次判定结果——
+        判定在写盘之前就已经完成，同 `_write_status` 已有的这条纪律。"""
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        blocked_parent = tmp_path / "not_a_dir"
+        blocked_parent.write_text("occupied")  # 让 mkdir(parents=True) 必然失败
+        history_file = blocked_parent / "history.jsonl"
+        status = run_backup.run(self._synthetic_src(tmp_path), backup_dir,
+                                 status_file=tmp_path / "status.json",
+                                 history_file=history_file)
+        assert status["stage"] == "export"
+        assert status["ok"] is False
+
+
 _ORCH = os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh")
 _STEP14_RC2_START = "elif [ $STEP14_RC -eq 2 ]; then"
 _STEP14_RC2_END = "elif [ $STEP14_RC -eq 124 ]; then"
@@ -492,3 +611,87 @@ printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
         `.date == $d` 对缺失字段该判 false，不能因为 jq 的 null 处理意外放行。"""
         logs, steps_result = self._run(tmp_path, status_json={"stage": "push"})
         assert steps_result["step14_data_backup"]["status"] == "stale_or_missing_failed"
+
+
+_STEP15_START = "if [ $STEP15_RC -eq 0 ]; then"
+_STEP15_END = 'log "INFO" "【Final】写入系统状态"'
+
+
+class TestOrchestratorStep15Dispatch:
+    """编排器 Step 15（数据备份连续性体检，v0.45.284）的 rc 分发同样不受版本
+    控制、pytest import 不到——同 `TestOrchestratorStep14StageDispatch` 的做法，
+    抽出真实脚本片段接进最小 bash 沙箱跑，锁定 exit code → 日志级别/文案 →
+    `STEPS_RESULT` 状态字符串的映射，不然这条新加的分发逻辑可能被静默改坏
+    而没有测试报红。
+    """
+
+    def _extract_block(self):
+        if not os.path.isfile(_ORCH):
+            pytest.skip("编排器不在本机（仓库外文件）")
+        text = Path(_ORCH).read_text(encoding="utf-8")
+        start = text.index(_STEP15_START)
+        end = text.index(_STEP15_END, start)
+        return text[start:end]
+
+    def _run(self, tmp_path, *, step15_rc, continuity_json=None):
+        block = self._extract_block()
+        json_file = tmp_path / "backup_continuity.json"
+        if continuity_json is not None:
+            json_file.write_text(json.dumps(continuity_json), encoding="utf-8")
+        script = f'''
+set -uo pipefail
+log() {{ printf 'LOG\\t%s\\t%s\\n' "$1" "$2"; }}
+PYTHON3={shlex.quote(sys.executable)}
+BACKUP_CONTINUITY_JSON={shlex.quote(str(json_file))}
+STEP15_RC={step15_rc}
+STEP15_DURATION=1
+STEPS_RESULT='{{}}'
+{block}
+printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
+'''
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, f"bash 片段本身跑挂了：{result.stderr}"
+        logs = [tuple(ln.split("\t", 2)[1:]) for ln in result.stdout.splitlines() if ln.startswith("LOG\t")]
+        steps_line = next(ln for ln in result.stdout.splitlines() if ln.startswith("STEPS_RESULT_JSON\t"))
+        steps_result = json.loads(steps_line.split("\t", 1)[1])
+        return logs, steps_result
+
+    def test_healthy_rc0_dispatches_info(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=0)
+        assert any(lvl == "INFO" and "连续性健康" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "healthy"
+
+    def test_degraded_rc1_dispatches_warn_with_summary(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=1, continuity_json={
+            "window": {"trading_days": 10}, "backed_up_days": 6, "coverage": 0.6,
+            "longest_gap": 4, "weeks_missed": ["2026-W10"],
+        })
+        assert any(lvl == "WARN" and "连续性降级" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "degraded"
+
+    def test_undetermined_rc3_dispatches_warn(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=3)
+        assert any(lvl == "WARN" and "无法判定" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "undetermined"
+
+    def test_skipped_rc2_dispatches_warn(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=2)
+        assert any(lvl == "WARN" and "跳过" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "skipped"
+
+    def test_timeout_rc124_dispatches_error(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=124)
+        assert any(lvl == "ERROR" and "超时" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "timeout"
+
+    def test_unexpected_rc_dispatches_warn_error_status(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=99)
+        assert any(lvl == "WARN" and "异常" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "error"
+        assert steps_result["step15_backup_continuity"]["rc"] == 99
+
+    def test_degraded_summary_survives_unparseable_json(self, tmp_path):
+        """连 continuity JSON 都读不出来（比如脚本半途被杀）不能让整段 Step 15
+        崩掉——python 摘要脚本要能优雅报"无法解析"而不是让 bash 片段整体失败。"""
+        logs, steps_result = self._run(tmp_path, step15_rc=1, continuity_json=None)
+        assert steps_result["step15_backup_continuity"]["status"] == "degraded"

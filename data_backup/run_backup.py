@@ -46,6 +46,13 @@ Step 14 的分支现改为读 `stage` 字段而非只猜 rc；v0.45.278 起 `cas
 Slack 通知：按项目 CLAUDE.md「Slack 通知精简规则」，扫描失败/权重更新/数据质量
 类事件本就禁止发 DM——本模块同理，失败只写 `status.json`，不发通知
 （3.5 设计里写清楚了为什么）。
+
+连续失败检测（v0.45.284）：`status.json` 每次调用整份覆盖，只反映"最近一次"，
+单看它发现不了"连续多天卡在同一种失败/陈旧状态"。`run()` 因此在每条退出路径上
+都额外追加一行到 `history_file`（JSONL，默认 `~/alpha-hive-data/logs/
+backup_status_history.jsonl`），供 `backup_continuity.py`（照抄 `scan_continuity.py`
+判 Step 10 连续性的模式）判定 Step 14 的连续性——同 `write_status`，不发 Slack、
+不动 `OVERALL_STATUS`，只做本地聚合判定。
 """
 from __future__ import annotations
 
@@ -64,7 +71,8 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
 
 
 def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main",
-        status_file: Path | None = None, commit_message: str | None = None) -> dict:
+        status_file: Path | None = None, commit_message: str | None = None,
+        history_file: Path | None = None) -> dict:
     src = Path(src)
     backup_dir = Path(backup_dir)
     t0 = dt.datetime.now()
@@ -76,13 +84,11 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
             init = _run_git(["init", "-b", branch], backup_dir)
         except Exception as e:  # noqa: BLE001 —— git init 异常（如超时）同样必须中止，不能带着未初始化的仓库往下走
             status.update(stage="init", ok=False, error=f"git init 异常：{e}")
-            _write_status(status_file, status)
-            return status
+            return _finish(status_file, history_file, status)
         status["git_init"] = init.returncode == 0
         if init.returncode != 0:
             status.update(stage="init", ok=False, error=init.stderr[-2000:])
-            _write_status(status_file, status)
-            return status
+            return _finish(status_file, history_file, status)
 
     # ── 1. 导出 ──────────────────────────────────────────────────────
     try:
@@ -90,8 +96,7 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
         export_mod.write_manifest_and_sums(backup_dir, manifest)
     except Exception as e:  # noqa: BLE001 —— 导出失败必须可见，不吞
         status.update(stage="export", ok=False, error=str(e))
-        _write_status(status_file, status)
-        return status
+        return _finish(status_file, history_file, status)
     status["manifest_summary"] = {
         db: {"tables": len(info["tables"]), "rows": sum(info["row_counts"].values())}
         for db, info in manifest["databases"].items()
@@ -109,8 +114,7 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
     if scan["hits"]:
         status.update(stage="secret_scan", ok=False,
                        error=f"命中 {len(scan['hits'])} 处，已拒绝提交")
-        _write_status(status_file, status)
-        return status
+        return _finish(status_file, history_file, status)
 
     # ── 3. 提交 ──────────────────────────────────────────────────────
     try:
@@ -123,31 +127,26 @@ def run(src: Path, backup_dir: Path, remote: str = "origin", branch: str = "main
             commit = _run_git(["commit", "-m", msg], backup_dir)
             if commit.returncode != 0:
                 status.update(stage="commit", ok=False, error=commit.stderr[-2000:])
-                _write_status(status_file, status)
-                return status
+                return _finish(status_file, history_file, status)
             sha = _run_git(["rev-parse", "HEAD"], backup_dir).stdout.strip()
             status["commit"] = {"made": True, "sha": sha, "message": msg}
     except Exception as e:  # noqa: BLE001 —— add/diff/commit/rev-parse 异常（如超时）不能撞上 secret_scan 的退出码 1
         status.update(stage="git_error", ok=False, error=f"add/diff/commit 阶段异常：{e}")
-        _write_status(status_file, status)
-        return status
+        return _finish(status_file, history_file, status)
 
     # ── 4. 推送（本地裸仓库路径——不是 GitHub）───────────────────────
     try:
         push = _run_git(["push", remote, branch], backup_dir)
     except Exception as e:  # noqa: BLE001 —— push 异常（如超时）同上
         status.update(stage="git_error", ok=False, error=f"push 阶段异常：{e}")
-        _write_status(status_file, status)
-        return status
+        return _finish(status_file, history_file, status)
     if push.returncode != 0:
         status.update(stage="push", ok=False, error=push.stderr[-2000:])
-        _write_status(status_file, status)
-        return status
+        return _finish(status_file, history_file, status)
 
     status.update(stage="done", ok=True,
                    duration_seconds=round((dt.datetime.now() - t0).total_seconds(), 1))
-    _write_status(status_file, status)
-    return status
+    return _finish(status_file, history_file, status)
 
 
 def _write_status(status_file: Path | None, status: dict) -> None:
@@ -158,6 +157,32 @@ def _write_status(status_file: Path | None, status: dict) -> None:
     status_file.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _append_history(history_file: Path | None, status: dict) -> None:
+    """把本次结果追加一行到 JSONL 历史日志（v0.45.284）。
+
+    `status_file` 每次调用整份覆盖，只反映"最近一次"——`backup_continuity.py`
+    判定"连续 N 天未识别/陈旧"需要跨天累积的记录，同 `weekly_optimizer.py` 的
+    `weight_history.jsonl` 审计日志同一模式：只追加，不覆盖，写不进去不影响
+    本次结果（判定早已完成）。
+    """
+    if history_file is None:
+        return
+    record = {"date": status.get("date"), "stage": status.get("stage"), "ok": bool(status.get("ok"))}
+    history_file = Path(history_file)
+    try:
+        history_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(history_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass  # 追加失败不改变本次结果——判定在写盘之前就已完成
+
+
+def _finish(status_file: Path | None, history_file: Path | None, status: dict) -> dict:
+    _write_status(status_file, status)
+    _append_history(history_file, status)
+    return status
+
+
 def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description="阶段 3.5 原型：导出→扫描→提交→推送")
@@ -166,11 +191,13 @@ def main(argv=None) -> int:
     ap.add_argument("--remote", default="origin")
     ap.add_argument("--branch", default="main")
     ap.add_argument("--status-file", default=str(Path.home() / "alpha-hive-data" / "logs" / "backup_status.json"))
+    ap.add_argument("--history-file",
+                    default=str(Path.home() / "alpha-hive-data" / "logs" / "backup_status_history.jsonl"))
     ap.add_argument("--message", default=None)
     args = ap.parse_args(argv)
 
     status = run(Path(args.src), Path(args.backup_dir), args.remote, args.branch,
-                 Path(args.status_file), args.message)
+                 Path(args.status_file), args.message, Path(args.history_file))
     print(json.dumps(status, ensure_ascii=False, indent=2))
     return 0 if status.get("ok") else (1 if status.get("stage") == "secret_scan" else 2)
 

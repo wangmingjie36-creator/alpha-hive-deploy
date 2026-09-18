@@ -95,7 +95,71 @@ ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
 
 ---
 
-## [0.45.284] — 2026-09-18 — 占位（进行中：Step 14 数据备份补"连续 N 天未识别/陈旧"检测，参照 Step 10 scan_continuity.py 模式）
+## [0.45.284] — 2026-09-18 — Added：Step 14 数据备份补"连续 N 天未识别/陈旧"检测（照抄 Step 10 scan_continuity.py 模式）
+
+`~/.claude/scripts/alpha-hive-orchestrator.sh`（不受版本控制）Step 14 自己的注释里留了一条
+已知设计缺口："push_failed 不阻断、不发 Slack，连续多天推送失败目前只能靠人翻
+`backup_status.json` 才发现——与'每日 DB 备份被 TCC 拒、09-09~11 三次失败无人发现'同构，
+建议参照 Step 10（scan_continuity.py）的模式后续补一个连续失败检查"。本次把这条 TODO 单独立项处理。
+
+`backup_status.json` 每次调用整份覆盖，只反映"最近一次"——单看它发现不了"连续多天卡在
+同一种失败/陈旧状态"。判定连续性需要跨天累积的历史，`scan_continuity.py` 能判 Step 10
+是因为 `pheromone.db.predictions` 本身是业务表、天然按业务日累积；备份没有这样的表，
+所以先补上历史来源，再补判定逻辑。
+
+### Added
+
+- `data_backup/run_backup.py::run()` 新增 `history_file` 参数，在**每条退出路径**（init/export/
+  secret_scan/commit/git_error/push/done 全部七条）都追加一行到 JSONL 历史日志（默认
+  `~/alpha-hive-data/logs/backup_status_history.jsonl`，同 `weekly_optimizer.py` 的
+  `weight_history.jsonl` 审计日志同一模式：只追加不覆盖，写不进去不改变本次判定结果——
+  抽出公共 `_finish()`/`_append_history()` 收敛七处重复的"写 status 再 return"）。
+  `main()` 新增 `--history-file` CLI 参数，默认值与 `--status-file` 同一约定（硬编码绝对路径，
+  不走 `hive_logger.PATHS`——阶段 5 `ALPHA_HIVE_HOME=~/alpha-hive-data` 尚未执行，`PATHS.home`
+  今天兜底到代码仓库根，与 Step 14 实际写入的新数据根是两个不同目录；备份子系统从阶段 3
+  起就有意早于全局迁移直接指向新数据根，这里跟随的是既有约定，不是引入新写法）。
+- 新增 `backup_continuity.py`（仓库根，同 `scan_continuity.py` 同级）：读这份 JSONL 历史，
+  判定"过去 N 个交易日备份是否每天都真的成功了"。交易日枚举、空档切分、ISO 周覆盖三个
+  纯函数直接从 `scan_continuity` **导入复用**，不重新发明（两者是同一形状："过去 N 个交易日
+  是否每天都发生了某件事"）；退出码同样是 0=健康/1=降级/3=无法判定（2 保留给编排器
+  `run_step()` 的"脚本不存在"哨兵值，同 `scan_continuity.py` 的既有约定）。判定单位是
+  "当天最终是否 ok"（同一天多次调用、最终成功即算健康），不是"当天第一次调用是否成功"，
+  与 `status.json` 本身"只反映最近一次"的既有语义一致。
+- 编排器新增 Step 15（数据备份连续性体检）：Step 14 之后立即跑 `backup_continuity.py --days
+  30 --quiet --out`，同 Step 10 一样刻意不动 `OVERALL_STATUS`、不发 Slack（单次失败是噪音，
+  连续失败才是聚合信号）；Step 14 现在额外传 `--history-file`。Step 14 的调用改成显式传
+  `--history-file "$BACKUP_HISTORY_JSONL"`。
+- Step 14 顶部注释更新："已知设计缺口"改成"已处理（v0.45.284）"，指向 Step 15。
+
+### Fixed（顺带发现，与本条同一次会话）
+
+- 编排器 Step 15 自己新写的 `else` 兜底分支里，`$STEP15_RC）` 这个写法（bare 变量引用紧跟着
+  全角右括号，无 ASCII 边界）在本机 `/bin/bash` + `LC_CTYPE=C.UTF-8` 下会被误解析——bash 把
+  全角括号 UTF-8 编码的首字节当成了变量名的一部分，`set -u` 下报 "unbound variable"（该条
+  log 静默失败，因为文件未开 `set -e`，不影响后续步骤）。复现：
+  `bash -c 'set -u; FOO=99; echo "x=$FOO），y"'` → `bash: line 1: FOO\xef: unbound variable`；
+  改成 `${FOO}`（花括号）后 rc=0、输出正确。已把自己新写的这一处改成 `${STEP15_RC}`。
+  **同一形状的写法在 Step 1~14 的既有代码里还有 17 处**（`$STEP10_RC）`/`$OVERALL_STATUS）`
+  等），均为本次改动之前就存在、且从未被本次改动触碰——是否需要一并修复已用 `spawn_task`
+  记录为独立任务，不在本条范围内处理。
+
+### 验证
+
+- 新增 `tests/test_backup_continuity.py`（20 项）：历史日志解析（含格式错误行跳过、同日
+  多次调用取最终结果、空文件/缺失文件不崩）、端到端判定（满覆盖健康/低覆盖降级/仅空档也
+  降级——两个门槛是 AND 不是 OR）、退出码（0/1/3，`--json`/`--out`/`--slack` 占位行为同
+  `scan_continuity.py`）。
+- `tests/test_data_backup.py` 新增 `TestRunBackupHistoryAppend`（6 项：成功/失败各追加一行、
+  跨多次调用累积不覆盖、`history_file=None` 不报错、历史写入失败不改变 `status.json` 判定结果）
+  + `TestOrchestratorStep15Dispatch`（7 项，同 `TestOrchestratorStep14StageDispatch` 的 bash
+  沙箱抽取跑法：0/1/3/2/124/未知 rc 六种分支的日志级别、文案、`STEPS_RESULT` 状态字符串，
+  含"连续性 JSON 解析失败不让整段崩溃"一项）——过程中正是这组新测试跑出了上面那条
+  `$STEP15_RC）` 的 bash 解析 bug。
+- `bash -n ~/.claude/scripts/alpha-hive-orchestrator.sh`：语法检查通过。
+- `/usr/local/bin/python3 -m pytest tests/test_data_backup.py tests/test_backup_continuity.py
+  tests/test_scan_continuity.py tests/test_changelog_entry_integrity.py`：104 项全绿。
+- `ruff check` 覆盖到的新增/改动文件（`backup_continuity.py`/`data_backup/run_backup.py`/
+  两个测试文件）全过。
 
 ---
 
