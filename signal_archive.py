@@ -1195,6 +1195,13 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     "v0.45.234": (),
     "v0.45.238": (),
     "v0.45.243": (),
+    # 09-18：ScoutBee bullish_agents 计数改用普查读法 + 身份过滤 + 诚实 None
+    # （v0.45.151/156/163 那个「排行榜当普查用」缺陷的第 4 个未迁地点）。
+    # 直接点名 consensus_strength，经 _scope_closure 传给 crowding.score/
+    # ml.*/agent.ScoutBeeNova.*/guard.*/bear.* 等全部下游——但它们各自已有更晚
+    # 的边界覆盖，这条不会改变它们当前的世代起点，只对此前从未被点名过的
+    # consensus_strength 本身生效
+    "v0.45.279": ("crowding.comp.consensus_strength",),
 }
 
 

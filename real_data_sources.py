@@ -257,27 +257,71 @@ def get_short_interest(ticker: str) -> Dict:
 
 # ==================== 动态 Bullish Agents 计数 ====================
 
-def get_bullish_agents_count(ticker: str, board) -> int:
+#: Phase-1 同伴（不含 ScoutBeeNova 自己）——与
+#: `alpha_hive_daily_report.py::_init_scan_context` 的 `phase1_agents` 列表
+#: 及 `signal_archive._PHASE1` 同源，三处各自维护、含义必须一致。
+#: `parallel_agent_runner.PHASE_1_AGENTS`（含 RivalBeeVanguard）是未接入生产
+#: 主链的旧模块，口径不同，不能拿来对齐。
+_PHASE1_PEERS = frozenset({
+    "OracleBeeEcho", "BuzzBeeWhisper", "ChronosBeeHorizon", "CodeExecutorAgent",
+})
+
+
+def get_bullish_agents_detail(ticker: str, board) -> Optional[Dict]:
     """
-    从信息素板动态计算看涨 Agent 数量
+    读板一次，同时给出「谁在场」与「谁看多」——口径标记（caliber marker），
+    不只是一个数字。
+
+    v0.45.279 新增。不是为了替代 `signal_archive.SIGNAL_UPSTREAM` 里
+    `crowding.comp.consensus_strength` 依赖 phase1 方向的那条边（那条边结构上
+    是对的：这个数字的含义确实会随同伴的方向定义改变而改变）——是为了让
+    「当时到底数到了谁」变成可核查的观测量，类似 `guard_bee` 的
+    `top_signals_count`/`census_source`，以后不用再翻代码猜。
+
+    Returns:
+        `{"peers_live": [...], "peers_bullish": [...]}`，两个列表都已排序、
+        只含 `_PHASE1_PEERS` 里的 agent_id；`board` 缺失或读取异常时返回 `None`。
+    """
+    if board is None:
+        return None
+    try:
+        live = [s for s in board.get_live_signals(ticker) if s.agent_id in _PHASE1_PEERS]
+        return {
+            "peers_live": sorted(s.agent_id for s in live),
+            "peers_bullish": sorted(s.agent_id for s in live if s.direction == "bullish"),
+        }
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        _log.debug("get_bullish_agents_detail 读板失败 (%s): %s", ticker, exc)
+        return None
+
+
+def get_bullish_agents_count(ticker: str, board) -> Optional[int]:
+    """
+    从信息素板动态计算「看涨的 Phase-1 同伴数」（0-4）。
+
+    v0.45.279：此前用 `board.get_top_signals(ticker, n=10)`（排行榜、且不按
+    身份过滤）——与 v0.45.151/156/163 修过的三处是同一个「排行榜当普查用」
+    缺陷：`_entries` 满时按 `nlargest(MAX_ENTRIES, key=self_score)` 全局淘汰，
+    先扔分最低的，缺失与被测量的量反相关；且未按身份过滤时，board 上任何
+    非 Phase-1 同伴的高分条目都会被误计入。改用不受淘汰影响的 `get_live_signals`
+    （普查视图），并按 `_PHASE1_PEERS` 精确过滤——与 `get_bullish_agents_detail`
+    读同一份数据，只是只要计数时不必再算一次 detail。
+    量测局限：这是 race-condition 依赖的读取，没有历史快照能重建 Scout 读板
+    那一刻的真实板面（`pheromone_compact` 拍得太晚），故本次只证明机制、
+    不给生产翻转率——那个数字不存在，不编（详见
+    `tests/test_bullish_agents_census_eviction.py` 模块 docstring）。
 
     Args:
         ticker: 股票代码
         board: PheromoneBoard 实例
 
     Returns:
-        当前看涨的 Agent 数量 (0-6)
+        看涨的 Phase-1 同伴数（0-4）；`board` 缺失或读取异常时返回 `None`
+        （诚实缺失，交给 `crowding_detector` 的缺失分量重归一化通路处理，
+        不得编一个看似合理的数字——旧的硬编码 `3` 正是这个反面教材）。
     """
-    if board is None:
-        return 3  # 无信息素板时返回中性默认值
-
-    try:
-        signals = board.get_top_signals(ticker, n=10)
-        bullish = sum(1 for s in signals if s.direction == "bullish")
-        return bullish
-    except (ValueError, KeyError, TypeError, AttributeError) as exc:
-        _log.debug("get_bullish_agents_count 降级为默认值 (%s): %s", ticker, exc)
-        return 3
+    detail = get_bullish_agents_detail(ticker, board)
+    return None if detail is None else len(detail["peers_bullish"])
 
 
 # ==================== 统一拥挤度指标获取 ====================
@@ -309,7 +353,8 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
     short_data = get_short_interest(ticker)
 
     # 3. 动态 bullish_agents（真实信息素板）
-    bullish = get_bullish_agents_count(ticker, board)
+    census = get_bullish_agents_detail(ticker, board)
+    bullish = None if census is None else len(census["peers_bullish"])
 
     # 4. Google Trends — 暂不接入 pytrends（高频使用会被封 IP），
     #    改用成交量异动百分位作为"关注度"代理指标
@@ -337,6 +382,8 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
         "social_messages_per_day": st_data["messages_per_day"],
         "google_trends_percentile": round(google_proxy, 1),
         "bullish_agents": bullish,
+        # v0.45.279：口径标记（谁在场、谁看多），见 `get_bullish_agents_detail`。
+        "consensus_census": census,
         "seeking_alpha_page_views": sa_proxy,
         "short_float_ratio": short_data["short_pct_float"],
         # v0.45.44：动量取不到时给 None，不再兜底 0.0（读作「5 日横盘」）
@@ -344,14 +391,16 @@ def get_real_crowding_metrics(ticker: str, stock_data: Dict, board=None) -> Dict
         "data_quality": {
             "social_buzz": st_data["data_quality"],         # Reddit ApeWisdom 真实数据
             "google_trends": "proxy_volume",                # 成交量代理指标
-            "bullish_agents": "real" if board else "default",
+            # v0.45.279：原为 `"real" if board else "default"`——只看 board 是否
+            # 传了，不看真读出来的值是不是 None（board 传了但读取异常时，标签
+            # 仍会自称 real）。改按 bullish 本身是否为 None 推导，与旁边的
+            # momentum 同一写法——那条的注释早就点名过这个反例。
+            "bullish_agents": "real" if bullish is not None else "unavailable",
             "seeking_alpha": "proxy_social",                # 社交热度代理指标
             "short_interest": short_data["data_quality"],   # yfinance 真实数据
             # v0.45.44：这里原是**硬编码字符串** "real" —— 质量标签不是从数据
             # 推导出来的，是写死的。取数失败时 price_momentum_5d 兜底成 0.0，
             # 而标签仍自称 real，下游无法与「真的横盘」区分。
-            # 同一个 dict 里 bullish_agents 是 `"real" if board else "default"`，
-            # 说明正确写法本来就在眼前。
             "momentum": "real" if _mom_for_proxy is not None else "unavailable",
         }
     }

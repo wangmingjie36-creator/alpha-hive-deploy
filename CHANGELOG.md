@@ -115,7 +115,104 @@ argument but 2 were given`，级联炸穿 `TestScoutBeeNova`/`TestBuzzBeeWhisper
 
 ---
 
-## [0.45.279] — 2026-09-18 — 占位（进行中：ScoutBee consensus_strength 排行榜淘汰偏差修复，P2）
+## [0.45.279] — 2026-09-18 — Fixed：ScoutBee consensus_strength 排行榜淘汰偏差修复（P2）
+
+原始问题是"要不要留 `SIGNAL_UPSTREAM` 里 `crowding.comp.consensus_strength` 依赖
+Phase-1 方向的那条边"（Oracle 换方向定义会把它的世代起点从 08-27 拖到 09-11，
+成本约两周样本）。查下去发现真正该管的不是这条边，而是产生这个数字的函数
+`real_data_sources.get_bullish_agents_count` 还在用 `board.get_top_signals(ticker,
+n=10)`——v0.45.151（Rival）、v0.45.156（共振）、v0.45.163（Guard）三次分别修过的
+同一个"排行榜当普查用"缺陷（`_entries` 满时按 `nlargest(MAX_ENTRIES=80,
+key=self_score)` 全局淘汰，先扔分最低的），且 v0.45.163 当时就点名过这个未迁
+地点（"各自有独立的量测，不搭本版的车"），一直没人接手。
+
+### 为什么这次真的会触发（不是理论担忧）
+
+确认了并发架构：`alpha_hive_daily_report.py::_run_pool` 一次并发跑 **4 只标的**
+（`max_workers=4`），每只标的内部 Phase-1 又并发 **5 只蜂**——共享的
+`PheromoneBoard` 在任意时刻可能有 4×9≈36 条不同标的的条目在写，`MAX_ENTRIES=80`
+的全局淘汰是持续在发生的。
+
+### Fixed
+
+- `real_data_sources.get_bullish_agents_count`：改用不受淘汰影响的
+  `board.get_live_signals(ticker)`（普查视图），并按身份精确过滤到 4 个真正的
+  Phase-1 同伴（`OracleBeeEcho`/`BuzzBeeWhisper`/`ChronosBeeHorizon`/
+  `CodeExecutorAgent`，排除 Scout 自己——与 `signal_archive._PHASE1_DIRS` 同口径）
+  ——此前不按身份过滤，board 上任何非同伴的高分条目都会被误计入。
+- 哨兵语义：`board is None` 或读取异常时此前硬编码返回 `3`（"6 个里 3 个看多"，
+  从不产生 `None`），改为诚实 `None`。`crowding_detector` 早在 v0.45.50 就建好的
+  "缺失分量给 None、不参与合成"通路，对这个分量从来没生效过——它的输入永远是
+  个合法数字。
+- `get_real_crowding_metrics` 的 `data_quality["bullish_agents"]` 标签：此前是
+  `"real" if board else "default"`，只看 board 是否传了、不看真读出来的值是不是
+  `None`（board 传了但读取异常时标签仍自称 real）。改按 `bullish is not None`
+  推导，与旁边 `momentum` 字段同一写法——那条的注释本就点名过这个反例。
+
+### Added
+
+- `real_data_sources.get_bullish_agents_detail(ticker, board)`：新函数，一次读板
+  同时给出"谁在场"（`peers_live`）与"谁看多"（`peers_bullish`），`get_bullish_
+  agents_count` 现在是它的薄包装。`get_real_crowding_metrics` 新增
+  `consensus_census` 键透传这份 detail。
+- `ScoutBeeNova.details.consensus_census`：口径标记（caliber marker），记录读板
+  那一刻实际数到的同伴 agent_id 列表。不是为了替代 `SIGNAL_UPSTREAM` 里那条
+  依赖边——那条边结构上是对的（这个数字的含义确实会随同伴的方向定义改变而
+  改变，与 `ml.*` 依赖同一组方向同理），只是让"当时到底数到了谁"变成以后可
+  核查的观测量，不用再翻代码猜。
+- `tests/test_bullish_agents_census_eviction.py`：14 项，合成板复现三个缺陷
+  （溢出淘汰腰斩计数、无身份过滤误计非同伴条目、哨兵值编造成 3），先跑红
+  （对着改动前代码）再改代码转绿。
+
+### 世代边界
+
+`ic_rerun_readiness._COHORT_HISTORY` 新增 `2026-09-18 v0.45.279`，
+`signal_archive.COHORT_SIGNAL_SCOPE` 直接点名 `crowding.comp.consensus_strength`，
+经 `_scope_closure` 传递闭包自动传给 `crowding.score`/`agent.ScoutBeeNova.*`/
+`ml.*`/`guard.*`/`bear.*` 等全部下游——已用 `generation_boundaries()` 逐一核对，
+这些下游各自已有更晚的既有边界覆盖，本条不改变它们当前的世代起点，只对此前
+从未被任何边界点名过的 `consensus_strength` 本身生效。
+
+⚠️ **边界代价，如实记录**：`composite.final_score` 是 `ALWAYS_SLICED`——任何新
+追加的 `_COHORT_HISTORY` 条目，无论 `COHORT_SIGNAL_SCOPE` 怎么写范围，都会
+无条件把 `cohort_start()` 拖到今天。当前世代（09-14 起）已积累 **120 条**真实
+样本（4 个扫描日 × 30 只，`predictions` 实测），本次全部作废。这是本表近期
+（v0.45.191~243）唯一一条真实作废非零样本的记录——那一串都是"0 条"（相邻边界
+间没有新扫描）或历史回填（P1 的 5 条）。120/25 周所需的 175 天 ≈ 2.3%，量级与
+v0.45.172（30 条）/v0.45.212（30 条）相当，**用户在动手前已看过这个数字并明确
+选择接受**（"直接付这 120 条成本，全部做完"），不是我自行决定的。
+
+同时如实记录**当前实际影响面**：`config.EVALUATION_WEIGHTS` 里 `signal`/
+`risk_adj` 两维现为 0（v0.45.172/176），ScoutBee 这条线对 `final_score` **现在**
+没有可测影响——真正受益的是 `crowding.score`/`ml.expected_7d`/`30d`（RivalBee
+特征，走独立于 final_score 的消费路径）的数据质量，以及这两维未来被重新启用
+时的可信度。不是"改了却没用"，是"现在的收益在别处，成本记在这本账上"。
+
+### 核对
+
+- 新测试 14 项：先跑红（对着改动前代码）再改代码转绿。
+- `tests/test_signal_archive_generations.py`（57 项）/ `test_ic_rerun_readiness.py`
+  （30 项）/ `test_real_data_sources.py` / `test_crowding_detector.py` /
+  `test_guard_derived_and_crowding_dq.py` / `test_ml_input_crowding_agreement.py`
+  / `test_pheromone_board.py` / `test_noise_filter.py` /
+  `test_degraded_input_harness.py` / `test_queen_distiller.py` /
+  `test_bee_details_contract.py` / `test_rival_bee_peer_features.py` /
+  `test_rival_bee_catalyst_missing.py` / `test_guard_census_eviction.py` 全绿——
+  Guard/Rival 复用同一个 `get_real_crowding_metrics`，本次修复对它们各自内部的
+  拥挤度计算也生效（它们不单独归档 `crowding.comp.consensus_strength`，不需要
+  额外的世代边界处理）。
+- 量测局限如实记录：这是 race-condition 依赖的读取，`pheromone_compact` 拍得
+  太晚（Queen distill 时的全局终态，晚于 Scout 读板那一刻），没有任何历史快照
+  能重建生产实际发生过的翻转率。本次测试只证明机制存在（合成板：洪水后排行榜
+  漏计、普查不受影响），不假装测过生产历史。
+
+### 不做
+
+- `crowding.comp.consensus_strength` 依赖 Phase-1 方向的那条 `SIGNAL_UPSTREAM`
+  边不动——结构上正确，不是这次的问题所在。
+- `bear_bee.py:39/512` 另有两处 `get_top_signals(ticker, n=20)` 未迁，各自独立，
+  不搭本版的车，留待单独处理。
+- 未尝试量化生产历史翻转率（见上"量测局限"），不编不存在的数字。
 
 ## [0.45.278] — 2026-09-18 — Fix：`run_backup.py` 补 git init 失败 / git 调用异常两个失败分类缺口
 
