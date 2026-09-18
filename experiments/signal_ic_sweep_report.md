@@ -1,5 +1,12 @@
 # 全信号 IC 普查（干净口径）— 哪个信号可交易
 
+> ⚠️ **2026-09-18 补注（v0.45.290）——引用本报告的结论前请先读这条**
+> - 本报告是**跨世代混算**口径：整张 `signal_archive` / `predictions`，未按 `ic_rerun_readiness._COHORT_HISTORY` 切。按世代切的是 `signal_archive.py --analyze`（v0.45.265 起）；脚本现默认拒绝运行，须 `--pool-generations`。
+> - p 值是**正态近似**（周度 IC 均值应服从 t(n−1)）。用 09-18 的库重跑同一脚本（26 周）：`dim.sentiment` t=+3.54，Bonferroni(N=69) 由 0.028 变成按 t 分布的 0.110，**唯一的「幸存者」不再过**。
+> - `dim.sentiment` 的 26 周里 **24 周在 08-26 的世代边界之前，当前口径下只有 2 周**：既不能证实，也不能证伪。
+> - sentiment 的周度 t 对「每周取哪一天」极脆弱：同一批日度 IC，取每周第一个可用日（脚本现行）t=+3.54，固定周一 +3.97、固定周四 **−0.54**——这个任意选择对 p 的影响远大于 z→t。详见 memory `alpha-hive-t-vs-normal-p`。
+> - 取舍与测量口径见 CHANGELOG v0.45.290。
+
 **日期**：2026-08-25 · **脚本**：`experiments/signal_ic_sweep.py` · **样本**：927 条 / N_eff ≈ 21–23 周
 
 ---

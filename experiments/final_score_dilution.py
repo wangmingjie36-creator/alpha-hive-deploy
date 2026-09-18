@@ -2,6 +2,12 @@
 """
 🐝 Alpha Hive — final_score 为什么把信号聚合没了 (v0.45.18)
 ==========================================================
+⚠️ v0.45.290：本脚本**跨世代混算**（整张 `predictions`，不按 `ic_rerun_readiness.
+_COHORT_HISTORY` 切），且拿**当前** `config.EVALUATION_WEIGHTS`（signal/risk_adj 现为 0）
+去配混算的历史 IC——下面「抵消」叙事已不描述现状。默认拒绝运行，须显式
+`--pool-generations`；当前世代请用 `signal_archive.py --analyze`。p 值同样是正态近似。
+为什么只加护栏、不接边界：CHANGELOG v0.45.290。
+
 回答一个具体问题：**5 个维度里 sentiment 有 IC，为什么加权合成后 final_score 归零？**
 
 背景
@@ -40,6 +46,7 @@
 """
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import sqlite3
@@ -63,6 +70,27 @@ from hive_logger import PATHS as _PATHS  # noqa: E402
 DB = Path(_PATHS.db)
 DIMS = ["signal", "catalyst", "sentiment", "odds", "risk_adj"]
 MIN_WIDTH = 5
+
+_REFUSAL = (
+    "✗ final_score_dilution.py 默认不运行：它跨世代混算（整张 predictions，不按\n"
+    "  ic_rerun_readiness._COHORT_HISTORY 切），系统输出在世代边界上换过量，其 IC 是几个不同量\n"
+    "  的混合，不描述任何一个世代。\n"
+    "  当前世代请用：/usr/local/bin/python3 signal_archive.py --analyze\n"
+    "  确需看混算（只作对照、勿据此下结论）：加 --pool-generations"
+)
+_BANNER = (
+    "⚠️ --pool-generations：跨世代混算，只作对照，勿据此下结论。\n"
+    "   · 系统输出在世代边界（ic_rerun_readiness._COHORT_HISTORY）上换过量，下表的 IC 是几个\n"
+    "     不同量的混合，不描述任何一个世代。\n"
+    "   · 本脚本拿**当前** config.EVALUATION_WEIGHTS（signal / risk_adj 现为 0）去配混算的历史\n"
+    "     IC——「抵消」叙事已不描述现状。\n"
+    "   · p 值用正态近似 erfc(|t|/√2)；周度 IC 均值应服从 t(n−1)：n=26、t≈3.5 时低估约 4 倍，\n"
+    "     n=8~16 时低估 3~80 倍。\n"
+    "   · 周度 IC 取「每 ISO 周第一个可用交易日」：同一批 dim.sentiment 日度 IC，换成固定周一\n"
+    "     t=+3.97、固定周四 t=−0.54（现行 +3.54）——这个任意选择对 p 的影响远大于 z→t。\n"
+    "     见 memory alpha-hive-t-vs-normal-p。\n"
+    "   · 当前世代请用：/usr/local/bin/python3 signal_archive.py --analyze\n"
+)
 
 
 def load_rows(db_path: Path):
@@ -119,6 +147,15 @@ def stat(ics):
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description="final_score 稀释分解（跨世代混算，默认拒绝）")
+    ap.add_argument("--pool-generations", action="store_true",
+                    help="显式放行跨世代混算（只作对照，勿据此下结论）")
+    args = ap.parse_args()
+    if not args.pool_generations:
+        print(_REFUSAL, file=sys.stderr)
+        return 2
+    print(_BANNER)
+
     import config
     W = dict(config.EVALUATION_WEIGHTS)
     by_day = load_rows(DB)

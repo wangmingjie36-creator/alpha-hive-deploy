@@ -1,5 +1,11 @@
 # final_score 为什么把信号聚合没了
 
+> ⚠️ **2026-09-18 补注（v0.45.290）——引用本报告的结论前请先读这条**
+> - 本报告是**跨世代混算**口径（整张 `predictions`，未按世代边界切）；脚本现默认拒绝运行，须 `--pool-generations`。当前世代请用 `signal_archive.py --analyze`。
+> - 报告里的 p 值是**正态近似**（周度 IC 均值应服从 t(n−1)）：n≈23~26 周、t≈3~3.5 时低估约 2~4 倍。
+> - 报告用的是**当时的** `EVALUATION_WEIGHTS`；现行 `signal` / `risk_adj` 权重为 0（v0.45.172 / v0.45.176），「抵消」叙事已不描述现状。
+> - 维度分取自 `predictions.dimension_scores`，与 `signal_archive` 里的同义信号在 10 个日期上不一致（影响未隔离）；sentiment 的周度 t 对「每周取哪一天」极脆弱（同一批日度 IC，第一个可用日 t=+3.54、固定周一 +3.97、固定周四 −0.54），见 `signal_ic_sweep_report.md` 顶部补注。
+
 **日期**：2026-08-25 · **脚本**：`experiments/final_score_dilution.py` · **口径**：`close_t7`（干净）· **N_eff ≈ 23 周**
 
 ---

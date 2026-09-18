@@ -54,7 +54,120 @@
 
 ---
 
-## [0.45.290] — 2026-09-18 — 占位（进行中：experiments 里两个跨世代混算脚本 signal_ic_sweep / final_score_dilution 加默认拒绝护栏 + 报告补注）
+## [0.45.290] — 2026-09-18 — Added：experiments 里两个跨世代混算脚本默认拒绝运行（P3，收窄版）；顺带发现 signal_ic_sweep 自 09-15 起跑不起来
+
+原始四点分析里的 P3 是"下游脚本未接入 `generation_boundaries()`"。我最初的建议是
+"只修 `signal_ic_sweep.py`、工作量很小、抄现成切片"，并在用户选定 A+B（接边界 + 护栏，
+分母固定）之后，被要求先自审这个改动值不值。自审用实测推翻了 A，留下 B，见下。
+
+### 复核结果（全部只读，生产库 + `.swarm_results`）
+
+- **sweep 只留下过一次运行产物**（08-25 的报告），git 里只有创建（08-26）与 09-15 的批量路径
+  收口；就绪度闸放行后的 `next_step` 是 `ml_expected_return_replay.py && signal_archive.py
+  --analyze`，不含 sweep；`analyze()` 用的 `diagnose()` 已含同类方法（不重叠周 t、剔极端的
+  jackknife、regime 分段——sweep 剔极端**周**、`diagnose()` 剔极端**日**，同类不等同），
+  且已按边界切。sweep 独有的只剩全信号 Bonferroni 与三分位价差。
+- **6 个合成信号不在归档宇宙里**：sweep 自造 `predictions.final_score` 与 5 个 `dim.*`
+  （维度分从没进过归档）。`generation_boundaries()` 对不认识的名字按保守规则"受全部边界
+  约束"，起点 09-18，全部切光——要接就得显式映射（`dim.X` → `agent.<Bee>.score`，代码上
+  `dim_scores[dim]` 就是该维度对应蜂的 `score`）。
+- **且它们在归档里各有同义名**（同一个假设被数了两遍，检验集合 N=69 里占 6 个），两个数据源
+  还不一致：`predictions` 与 `signal_archive` 在 **10 个日期**上对不上（03-16、06-22、06-26、
+  06-29、07-06、07-08、07-09、07-22、07-23，以及 09-17——后者是 v0.45.271 重放补算更新了
+  `predictions`、归档没跟；前几个早期日期原因**未查明**）。
+  ⚠️ **我起初把"剔除这 10 天后结论变了"读成对数据源分歧的敏感性，这个归因站不住**：剔除后
+  `dim.sentiment` +0.183（t=3.54）→ +0.115（t=2.06）、`dim.odds` +0.072 → +0.041、
+  `dim.risk_adj` −0.148 → −0.186、`dim.signal` −0.119 → −0.138，方向不一；但剔除日期会同时
+  改变多个周的**"代表日"**（sweep 取每 ISO 周第一个可用交易日），而下一条显示 sentiment 的周度 t
+  对代表日极脆弱——两个效应分不开。两源不一致本身是事实，它对结论的影响**未隔离**。
+- **比 z→t 更大的不稳定源：「每周取哪一天」**（另一 session 的 memory
+  `alpha-hive-t-vs-normal-p.md` 独立得到同一组数字，我复现了）。同一批 `dim.sentiment` 日度
+  IC，只改每周取哪一天：第一个可用日（现行）n=26、IC +0.183、t=+3.54；固定周一 n=18、+0.228、
+  t=+3.97；周二 +0.118（t=1.83）；周三 +0.068（t=1.08）；**周四 −0.041（t=−0.54）**；周五 n=16、
+  +0.152（t=+2.23）；最后一个可用日 t=+0.65；日度 IC 全体均值 +0.107（91 个交易日，重叠，
+  仅参照）。同一个信号，p 在 0.002 与 0.6 之间摆动，摆幅远大于 z→t 的 4 倍。**没验证**这是
+  周一真效应还是"5 个星期里挑最好的那个"，n 太小分不开。
+- **干跑（假如今天就接边界）**：可检验信号 69 → 27，6 个合成信号全部"不可检验(<8 周)"。
+  `dim.sentiment` 的 26 周里 **24 周在 08-26 边界之前、当前口径下只有 2 周**——既不能证实也不能证伪；
+  攒够 8 周约 10 月底（sentiment/catalyst）～ 11 月中（final_score/signal/risk_adj）。
+- **p 值口径**：sweep 与 `final_score_dilution` 用正态近似 `erfc(|t|/√2)`，周度 IC 均值该用
+  t(n−1)。`dim.sentiment`（n=26、t=+3.54）：正态 p=0.0004、t 分布 0.0016，Bonferroni(N=69)
+  0.028 → **0.110，sweep 唯一的"幸存者"消失（1 → 0）**（另一 session 独立复核得到同一数字：
+  0.0277 → 0.1105）。小样本倍数（t 分布 p ÷ 正态 p）：
+  n=26 时 t=3 为 2.2×、t=4 为 7.8×；n=16 时 t=3 为 3.3×；n=8 时 t=3 为 7.4×、t=4 为 82×。
+  同一个近似也在 `ic_diagnostics.normal_two_sided_p`（`analyze()` 的 `sub_p_bonferroni`，且只乘
+  5 个维度）——本版**没动**，见"发现未处理"。
+- **隔离**：生产库里 `QUARANTINE` 12 条对应的行残留 **0**（写入端生效 + 已清理）；读取端
+  `load_panel`/`analyze`/sweep 都不问 `is_quarantined`，目前无影响。
+- 其余 experiments 对归档的读取：`vol_regime_filter`（只读 `options.iv_current`，无边界）、
+  `ml_expected_return_replay`（自带"历史重放，勿据此描述现状"）、`ic_power_analysis`（只用
+  骨架估功效，仅看了入口）、`misjudgment_pattern_walkforward`（功能已撤）——都不动。
+
+### 为什么收窄：A（接边界）不做，"分母固定"也不在本版
+
+- A 要维护第二条 IC 流水线，服务一个使用次数为 1 的脚本；近期产出全是"不可检验"。
+- **"分母固定"调的是错的旋钮**：切世代让 Bonferroni 分母从 69 变 27，只宽松 2.6 倍；而小样本下
+  正态近似把 p 低估 3～82 倍；更大的旋钮是"每周取哪一天"（p 在 0.002～0.6 之间摆动）。
+  在这个 p 上加更保守的分母，得到的是"看起来更严谨、实际更不可信"的工具。统计有效性要在
+  `ic_diagnostics` 一处修，不是在 sweep 里。
+- 设计结论留作记录：将来若在 `analyze()` 上加全信号校正列，分母取**被检视信号总数**
+  （不是过 8 周门槛的数），且必须先把 p 值改成 t 分布。
+
+### Added
+
+- `experiments/signal_ic_sweep.py`、`experiments/final_score_dilution.py`：新增
+  `--pool-generations`；**默认拒绝运行**（退出码 2，信息走 stderr，指向
+  `signal_archive.py --analyze`），且护栏在开库之前；放行时先打横幅（跨世代混算 + p 值正态近似的
+  量级），横幅在结果之前。`final_score_dilution.py` 此前根本没有 argparse（连 `--help`
+  都没有，直接读默认库），一并补上；横幅里另外注明它拿**当前** `EVALUATION_WEIGHTS`
+  （signal/risk_adj 现为 0）配混算历史 IC，"抵消"叙事已不描述现状。
+- `experiments/signal_ic_sweep_report.md`、`experiments/final_score_dilution_report.md` 顶部
+  补注（产物的读者也需要护栏）：混算口径、p 值口径、`dim.sentiment` 24/26 周在边界前、
+  sentiment 周度 t 对"每周取哪一天"的脆弱性（+3.97 ↔ −0.54）。运行时横幅同样带这一条。
+- `tests/test_experiments_pooled_guard.py`（8 条，真子进程跑 CLI）：默认拒绝且先于开库；
+  **有数据时默认也拒绝**（反向自证，防"没库所以拒绝"造成的假绿）；放行能跑完并横幅在结果前；
+  两份报告顶部补注在。
+
+### Fixed
+
+- `experiments/signal_ic_sweep.py`：补 `sys.path.insert`。v0.45.260（数据根迁移阶段 2，
+  09-15）加 `from hive_logger import PATHS` 时漏了它，按文档方式
+  （`python3 experiments/signal_ic_sweep.py`）跑会 `ModuleNotFoundError`——零测试、零调用方，
+  坏了三天没人知道。
+
+### 世代边界
+
+**无。** 这两个脚本是离线诊断，不进评分、不进 `signal_archive`，`_COHORT_HISTORY` 不动，
+样本代价 0，也没有 09-18 14:00 扫描的时间压力。
+
+### 核对
+
+- `tests/test_experiments_pooled_guard.py` 8 passed（修复前 8 红：sweep 导入失败 exit 1、
+  dilution 有数据时不拒绝且无横幅、两份报告无补注）。**第一版测试栽在环境上**：`PATHS.db` 先读
+  `ALPHA_HIVE_DB_PATH`，而 conftest 的 `_isolate_env` 把它设成别处，子进程照单全收，只设
+  `ALPHA_HIVE_HOME` 会让脚本去开一个不存在的库——现在把 DB/日志/缓存/chroma 全部显式钉进临时目录。
+- **变异检验**：只删掉 `sys.path.insert` 一行，3 条 sweep 测试变红；恢复后全绿。
+- 生产库只读实跑：默认拒绝（exit 2）；`--pool-generations` 下 sweep 仍是 69 个可检验信号、
+  `dim.sentiment` +0.183 / t=+3.54 / 26 周，与改动前的干跑数字一致（计算没被改动）。
+- `ruff --select F821` 全绿；`test_paths_not_frozen_at_import` / CHANGELOG 完整性通过。
+- 全量套件（代码与测试改完之后）：**5052 passed、1 failed**——仅 `TestCoverageHorizon`（经济日历，
+  日期驱动；v0.45.288 已在干净 `origin/main` 上核实它同样红）。此后只改了文案（横幅 / 补注 /
+  CHANGELOG 订正），护栏测试 + CHANGELOG 完整性重跑 27 passed、ruff 全绿。并入的
+  origin/main 两个新提交（v0.45.291 CI `-rs`、v0.45.287 收口）只动 `CHANGELOG.md` 与
+  `.github/workflows/tests.yml`，与本版文件无交集。
+
+### 发现未处理（留给用户决定）
+
+- **`experiments/vol_regime_filter.py` 同一根因也坏了**（`ModuleNotFoundError: hive_logger`，
+  同为 v0.45.260 收口漏 `sys.path`）。不在本版收窄范围。建议单独处理，并加一条静态守卫：
+  experiments 脚本 import 仓库根模块必须带 `sys.path` 注入——同一次批量改动弄坏两个脚本、
+  三天没人发现，正是"谁会红"答不上来的形状。
+- **p 值有效性审计已由另一 session 同时段完成**（memory `alpha-hive-t-vs-normal-p.md`：同一近似
+  在仓库里被各自手搓 ≥7 处、逐路径换 t 后变不变、待决 4 项含预注册的 F&G 前瞻检验）。我原本把它
+  列为待立项的建议，现在是重复劳动——**本版不改任何 p 值口径**，那份审计的待决项仍待用户。
+- `predictions` 与 `signal_archive` 在 10 个日期不一致的原因（09-17 已明，其余 9 个早期日期未查明）。
+- sweep 放行路径上，`n_tests == 0`（空库 / 全部不足 8 周）会 `ZeroDivisionError`
+  （`0.05/n_tests`）；生产数据不会触发，未改。
 
 ## [0.45.289] — 2026-09-18 — Fixed：`backup_continuity.py:ALPHAHIVE_DIR` 漏登记进 `__file__` 派生白名单，CI 上 `test_no_new_file_derived_paths` 变红
 
