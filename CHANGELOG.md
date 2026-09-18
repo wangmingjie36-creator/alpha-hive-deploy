@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.278] — 2026-09-18 — 占位（进行中：`run_backup.py` 补 git init 失败 / git 调用异常两个失败分类缺口）
+
+---
+
 ## [0.45.277] — 2026-09-18 — Docs：memory 仓已加远端并首推，CLAUDE.md 收尾流程补 push 步骤
 
 用户在对话里先后批准两步：① 新建私有仓库 `wangmingjie36-creator/alpha-hive-memory`
