@@ -298,7 +298,7 @@ class TestGateBranchesLive:
         ⚠️ 环境照 launchd 现造（plist 只给 PATH），**不继承 pytest 的**：
         ① conftest `_isolate_env` 的变量会泄漏进子进程；② Python 按 PEP 538 自己往
         环境里塞 `LC_CTYPE=C.UTF-8`，bash 3.2 在 UTF-8 下把 `$DATE_STR）` 里全角括号的
-        首字节吃进变量名，`set -u` 在闸上 exit 1（v0.45.221 实测，见
+        首字节吃进变量名，`set -u` 在闸上 exit 1（v0.45.221 实测，v0.45.287 已修编排器，见
         `test_gate_branch_under_utf8_locale`）。⇒ 旧写法 `env=dict(os.environ)` 在没显式设
         C locale 的环境里走不到闸的 `exit 0`（崩在写 status.json 之前，marker/日志/锁/看门狗照吃），
         能绿只可能来自它顺带读的生产日志尾巴里已有当天的「已有扫描产出」。
@@ -369,11 +369,14 @@ class TestGateBranchesLive:
         self._assert_stayed_in_sandbox(r, tmp_path)
 
     @pytest.mark.timeout(300)
-    @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-        "编排器（仓库外）多处 `$VAR` 紧跟全角标点，bash 3.2 在 UTF-8 LC_CTYPE 下把首字节吃进"
-        "变量名，set -u 当场 exit 1。launchd 只给 PATH ⇒ C locale ⇒ 定时/开机触发不受影响；"
-        "从 UTF-8 终端手工跑、或由 Python 拉起（PEP 538）会中招。修法是改成 `${VAR}`；"
-        "修好后本条 XPASS 变红 ⇒ 删掉 xfail"))
     def test_gate_branch_under_utf8_locale(self, orch_text, tmp_path):
+        """UTF-8 LC_CTYPE 下闸的 `exit 0` 分支必须走得通（v0.45.287 起是回归守卫）。
+
+        此前是 `xfail(strict=True)`：编排器（仓库外）有 18 处 `$VAR` 紧跟全角标点，bash 3.2
+        在 UTF-8 LC_CTYPE 下把首字节吃进变量名，`set -u` 当场退出**整个 shell**（不是只挂一条命令）。
+        v0.45.287 统一改成 `${VAR}`，本条按 xfail 自己的约定 XPASS 变红后转成普通断言。
+        launchd 只给 PATH ⇒ C locale ⇒ 定时/开机触发一直不受影响；中招的是从 UTF-8 终端手工跑、
+        或由 Python 拉起（PEP 538）。静态侧的守卫见 `tests/test_orchestrator_braced_vars.py`。
+        """
         r = self._gate_run(orch_text, tmp_path, with_marker=True, lc_ctype="C.UTF-8")
         assert "已有扫描产出" in r.out and r.rc == 0, r.out[-500:]

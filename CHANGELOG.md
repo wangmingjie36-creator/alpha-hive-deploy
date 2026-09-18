@@ -7,7 +7,83 @@
 
 ## [0.45.288] — 2026-09-18 — 占位（进行中：BearBee 读板改走不受 MAX_ENTRIES 淘汰影响的定点索引，bear_bee.py:39/512）
 
-## [0.45.287] — 2026-09-18 — 占位（进行中：编排器 18 处 `$VAR` 紧跟全角标点，UTF-8 locale 下 `set -u` 整体退出——统一加花括号）
+## [0.45.287] — 2026-09-18 — Fixed：编排器 18 处 `$VAR` 紧跟全角标点，UTF-8 locale 下 `set -u` 让**整个 shell 退出**——统一加花括号
+
+`~/.claude/scripts/alpha-hive-orchestrator.sh`（不受版本控制）里有 18 处（17 行）
+`"…（exit=$STEP10_RC），不影响主流程"` 这类写法：裸变量后面紧跟全角标点，中间没有 ASCII 边界。
+关闭 v0.45.221「未改、待用户决定」里挂了四天的那一条（当时数的是 15 处），也是 v0.45.284
+顺带发现、`spawn_task` 记为独立任务的同一件事（该条只改了自己新写的 Step 15 那一处）。
+
+### 问题
+
+macOS `/bin/bash`（3.2.57）在 UTF-8 的 LC_CTYPE 下，把紧跟在裸变量名后面的 UTF-8 **首字节**
+当成变量名的一部分：`$STEP10_RC）` 被读成变量 `STEP10_RC\357`，`set -u` 报
+`unbound variable`。实测边界（`LC_CTYPE=C.UTF-8`，`set -u`）：
+
+- 中招：`）` `「` `—` `🎉` `é` `×`（首字节 0xEF/0xE3/0xE2/0xF0/0xC3）；幸免：希伯来文 `א`
+  （首字节 0xD7 = Latin-1 的 `×`，不是字母）。与「macOS 的单字节 `isalpha()` 把首字节当 Latin-1
+  码点判定」吻合——**这是推断，没看 bash 源码**。`$1` `$?` `$#` 这类特殊参数不吞字节。
+- 只在 UTF-8 locale 发作：`LC_ALL=C` / `LC_CTYPE=C` 正常；`C.UTF-8` / `en_US.UTF-8` / `UTF-8` /
+  `zh_CN.UTF-8` 全部复现。launchd 的 plist `EnvironmentVariables` 只有 `PATH` ⇒ C locale ⇒
+  定时/开机触发一直不受影响（`launchd-orchestrator.{err,out}.log` 共约 1.7 万行 `unbound variable`
+  0 条，当天 `orchestrator-*.log` 0 个文件）。中招的是从 UTF-8 终端手工跑、或 Python 拉起
+  （PEP 538 往子进程环境塞 `LC_CTYPE=C.UTF-8`）。
+
+⚠️ **勘误：后果是整个 shell 退出，不是「只挂一条 log」。** v0.45.284 该段写「该条 log 静默失败，
+因为文件未开 `set -e`，不影响后续步骤」，实测不成立：`set -u` 下非交互 bash 展开出错即退出，
+`bash -c 'set -u; FOO=99; echo "a=$FOO），x"; echo after'` → rc=127、`after` 不打印；把它包进
+`log()` 函数里调用结果相同（参数在主 shell 里展开）。真编排器上的实证：沙箱跑幂等闸，
+`orch.sh: line 376: DATE_STR�: unbound variable`，走不到 `已有扫描产出` 与 `exit 0`。
+「没在生产里出过事」的原因是 locale，不是后果轻。
+
+**也不只是冷门兜底分支。** 18 处里有无条件路径：第 1495 行「状态已保存」（`write_status` 之后
+每轮走到末尾必经）、第 376 行幂等闸、第 267 行代理探活通过路径、第 775 行 LLM 防重复标记。
+UTF-8 下手工跑会在 1495 退出——按代码结构，其后的 `kill "$_GLOBAL_WATCHDOG_PID"`（1529）与
+`exit` 都不执行（退出码 127 而不是 0/1；看门狗泄漏是 v0.45.221 已记录的那一族——**此为推断，
+未实跑整个编排器**）。潜伏风险：谁给 plist 加一行 `LANG=…UTF-8`，编排器就会每轮末尾退出。
+
+### Fixed
+
+- 18 处统一 `$VAR` → `${VAR}`（修前行号）：141 `_new` · 267 `PROXY_URL` · 326 `PROJECT_DIR` ·
+  352 `TRADING_DAY_RC` · 376 `DATE_STR` · 775 `LLM_DONE_FILE` + `STEP2_RC` · 846 `DATE_STR` ·
+  906/939 `STEP2_RC` · 1165/1219/1272/1343 `STEP10~13_RC` · 1378 `BACKUP_STATUS_JSON` ·
+  1428 `STEP14_RC` · 1495/1517 `OVERALL_STATUS`。**只加花括号**，行数不变、模式 0755 不变。
+- 写入方式：脚本不在 git 里且他人共用，所以先备份 `alpha-hive-orchestrator.sh.bak-20260918_pre-v0.45.287`
+  （沿用该目录既有的 `.bak-<日期>_pre-<版本>` 约定），再原子替换（同目录临时文件 + `os.replace`；
+  写前核对 sha256 与备份一致、断言恰好 18 处未转义命中才落盘）。
+- 新增 `tests/test_orchestrator_braced_vars.py`（21 项）：**静态**扫编排器全文，命中即红并给出行号
+  与修法；覆盖沙箱走不到的位置（Step 2 之后与收尾段）。含合成文本的检测器自证（该抓/不该抓
+  两个方向，任何机器都跑）与 macOS bash 行为钉子（裸写 → 退出、花括号 → 正常、C locale → 正常，
+  即「生产为什么没事」）。条件性挂在类/用例上，不用模块级 `pytestmark`（会连坐把自证一起跳掉）。
+- `tests/test_scan_catchup.py::test_gate_branch_under_utf8_locale`：去掉 `xfail(strict=True)`。
+  它自己的约定就是「修好后 XPASS 变红 ⇒ 删掉 xfail」，修完确实变红了；现在是真回归守卫。
+  同步更新 `_gate_run` docstring 里那句现在时的描述。
+
+### 验证
+
+- `bash -n` rc=0；重扫「裸变量 + 非 ASCII」0 处；与备份 diff 恰 17 行，且每行把 `${NAME}` 折回
+  `$NAME` 后与原行逐字相同（脚本里断言过，不是目测）。
+- **逐行真实复现**（脚本在 scratchpad，未入库）：从脚本里取出每个命中行**自己的** `log …` 命令，
+  放进 `set -uo pipefail` + 桩 `log` + 定义好所引用变量的沙箱：原行 `LC_CTYPE=C.UTF-8` 下
+  **17/17 rc=127**；修后行在 `C.UTF-8` 与 `en_US.UTF-8` 下 **17/17 rc=0，且输出字节 == 原行在
+  `LC_ALL=C` 下的输出**（比「不报错」更强：证明没有改变日志内容）。
+- **端到端**：`test_gate_branch_under_utf8_locale` 修前 XFAIL → 修后 `[XPASS(strict)]` 红（正是设计的
+  翻转）→ 去 xfail 后绿；把**未修的原脚本**放进临时 `HOME` 重跑同一条 ⇒ 红，
+  `line 376: DATE_STR…: unbound variable`。
+- **静态守卫的牙**（同样用临时 `HOME`）：只把第 1495 行还原成裸变量 ⇒ 红且指名 1495；还原整份
+  原脚本 ⇒ 列出全部 18 处；空文件 ⇒ 「不像编排器」断言先红，不会空转成绿。
+- 读编排器的 9 个测试文件（含 `integration`）**236 passed**；`ruff` 通过。
+
+### 没做 / 边界
+
+- **没有实跑整个编排器**（真扫描/部署/Slack 有副作用）；只跑了逐行沙箱与既有的沙箱闸测试。
+- 检测器故意保守：任何非 ASCII 都报（多报一个 `א` 无害）；整行注释跳过、行内注释照报；
+  不识别单引号里不展开的 `$VAR`（当前 0 例，出现会误报——届时该改写法而不是放宽检测器）。
+- 看门狗在起它之后 6 条显式提前 `exit` 上不被收（v0.45.221 记录）**仍未处理**；本条只消除了其中
+  「`$VAR` 吞字节」这一种 `set -u` 中止来源。
+- v0.45.284 那段「静默失败、不影响后续步骤」的原文未改（历史条目不回改），以本条勘误为准。
+
+---
 
 ## [0.45.286] — 2026-09-18 — Fixed：CI 缺 `mcp`/`pydantic` 依赖导致 `TestEveryResolverFollowsEnv[alpha_hive_mcp._hive_dir]` 报 ModuleNotFoundError；经济日历告警二次核对
 
