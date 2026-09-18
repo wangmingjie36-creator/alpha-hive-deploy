@@ -5,7 +5,55 @@
 
 ---
 
-## [0.45.293] — 2026-09-18 — 占位（进行中：退役仓库外死脚本 `alpha-hive-daily.sh`——移入 `retired/`、去掉执行位，消除「手动跑会写出假简报」的陷阱）
+## [0.45.293] — 2026-09-18 — Removed：退役仓库外死脚本 `alpha-hive-daily.sh`（移入 `retired/`、去掉执行位）；`setup_cron.py` 白名单同步摘掉它
+
+用户 2026-09-18 决定「退役或删除」，选**退役**（可恢复）而不是 `rm`：该文件不在 git 里，删了无处可找回，
+而退役已经足以消除下面的陷阱。关闭 v0.45.213「顺带发现」里挂着的「仓库外死脚本，未删」，也接上 v0.45.287
+二次检查记下的「假简报」隐患。（v0.45.287 记的「评估后不改」指的是**不给那一行加花括号**，与本条不矛盾——
+这次是整体退役。）
+
+### 为什么
+
+- **它是死的**：本机 LaunchAgents / crontab 均无引用；第 45 行的 `~/.claude/reports/alpha_hive_daily_report.py`
+  不存在，就算指到仓库里的同名文件，不带 `--swarm` 也会被 v0.45.213 的退役闸拒绝（exit 2），且用裸 `python3`；
+  2026-02-24 后未改动。
+- **它有陷阱**：python 步失败后照样「继续进行」，进「备用简报」分支写出
+  `~/.claude/reports/alpha-hive-daily-<日期>.md` 固定模板——标题是字面的 `YYYY-MM-DD`、写着
+  「系统状态：✅ 已完成 Phase 1-6」而什么都没跑；`send-to-telegram.py` 不带参数时取该目录里最新的
+  `alpha-hive-daily-*.md`。无自动调用方，所以只是潜在风险，但留着就是留着一个会说谎的入口。
+
+### Removed / Changed
+
+- `~/.claude/scripts/alpha-hive-daily.sh` → `~/.claude/scripts/retired/alpha-hive-daily.sh.retired-20260918`：
+  `mv -n`（不覆盖）、`chmod a-x`，mtime 保留。**恢复**：`mv` 回原路径 + `chmod +x`。想彻底删，`rm` 那份即可。
+- `setup_cron.py`：`set_crontab` 的 `ALLOWED_SCRIPTS` 摘掉该路径（留一行注释说明）。它此前会**放行并安装**一条
+  指向该路径的手写 crontab 行，之后每次触发都找不到脚本；现在安装时就被拦下（`Blocked crontab entry`）。
+  `setup_cron.py` 自己生成的 cron 选项从不使用这个脚本（全是 `run_alpha_hive_daily.sh`），无其他调用点。
+- 新增 `tests/test_setup_cron_allowlist.py`（2 项）：AST 读白名单字面量、**不执行 `set_crontab`**——放行分支会真跑
+  `crontab -` 覆盖用户 crontab，靠 mock 拦它，一旦有人把 `Popen` 换成 `run` 打桩就落空、测试改写真 crontab。
+  含对照：真白名单里仍有 `run_alpha_hive_daily.sh`，证明解析器找到的不是空集合。
+
+### 验证
+
+- 搬前搬后 sha256 相同（`e81435fb379f0765`）；旧路径现在 `No such file or directory`（rc=127，什么都不会跑）；
+  `~/.claude/reports` 里 `alpha-hive-daily-*.md` 0 份；编排器 sha256 不变（`27c33586…`），
+  launchd 任务 `com.alpha.hive.daily` 仍在 `launchctl list` 里。
+- `set_crontab` 行为前后对照（`Popen` 打桩，真 crontab 未碰，跑完仍 0 条 alpha-hive）：
+  退役脚本 **ACCEPTED → blocked**；活脚本 ACCEPTED 不变；未知脚本（`/tmp/evil.sh`）blocked 不变。
+- 变异 2 种，各红对应的一条：把退役路径加回白名单 → `test_retired_script_is_not_allowed` 红；
+  删掉活脚本那行 → `test_live_script_still_allowed` 红。
+- 元守卫替我抓了一次：初版对照断言写死了 `/Users/igg/...`，`test_reads_own_checkout.py::test_no_home_directory_paths`
+  红；改成按文件名后缀认后，元守卫 + 本文件 + 完整性 + 路径守卫共 157 项全绿，`ruff` 通过。
+- 全套 `pytest --maxfail=0`：**5160 passed**、1 skipped、83 deselected、2 xfailed；唯一的 1 红是
+  `TestCoverageHorizon`（经济日历覆盖告警，按设计定期变红，与本条无关，未动）。
+
+### 没做 / 边界
+
+- `~/.claude/config/crontab-setup.txt`（仓库外用户级文档，全是注释）仍写着安装该脚本的步骤，已失效；**未改**。
+- 该脚本里 `$SPAWN_COUNT（` 那行随之成为历史，v0.45.287 的「不改」决定不变；文件原样在 `retired/`，没修。
+- v0.45.213 那段「未删」原文未改（历史条目不回改），以本条为准。
+
+---
 
 ## [0.45.291] — 2026-09-18 — Changed：CI 的 pytest 加 `-rs`，摘要里列出每条 skip 的原因；⚠️ 顺带发现 `test_data_backup.py` 把伪造记录写进了真实 `~/alpha-hive-data`（**未处理**）
 

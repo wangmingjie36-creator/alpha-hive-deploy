@@ -34,7 +34,8 @@ def set_crontab(crontab_content):
     import os
     ALLOWED_SCRIPTS = {
         "/Users/igg/.claude/reports/run_alpha_hive_daily.sh",
-        "/Users/igg/.claude/scripts/alpha-hive-daily.sh",
+        # alpha-hive-daily.sh 已于 v0.45.293 退役（移入 ~/.claude/scripts/retired/），不再放行：
+        # 手写进 crontab 的话，让它在安装时被拦下，而不是安装成功后每次都找不到脚本。
     }
     for line in crontab_content.splitlines():
         stripped = line.strip()
