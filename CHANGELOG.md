@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.288] — 2026-09-18 — 占位（进行中：BearBee 读板改走不受 MAX_ENTRIES 淘汰影响的定点索引，bear_bee.py:39/512）
+
 ## [0.45.287] — 2026-09-18 — 占位（进行中：编排器 18 处 `$VAR` 紧跟全角标点，UTF-8 locale 下 `set -u` 整体退出——统一加花括号）
 
 ## [0.45.286] — 2026-09-18 — Fixed：CI 缺 `mcp`/`pydantic` 依赖导致 `TestEveryResolverFollowsEnv[alpha_hive_mcp._hive_dir]` 报 ModuleNotFoundError；经济日历告警二次核对
