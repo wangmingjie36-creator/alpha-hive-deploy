@@ -830,8 +830,13 @@ class TestFrozenViaModuleLevelCall:
             # 冻结，运行时已罩住：conftest `_isolate_paper_portfolio_state` 把它与四个状态文件
             # 重绑到 tmp，teardown 比对真身内容指纹。
             ("paper_portfolio.py", "STATE_DIR", "_base_dir"),
-            # 冻结，**没有**重绑：只有两处 glob 读（`_load_snapshots_for_date` /
-            # `_all_snapshot_dates`），无写入 ⇒ 后果是测试读到 checkout 的真实快照，不是写穿。
+            # 冻结，运行时已罩住（v0.45.274 起）：`_isolate_paper_portfolio_state` 同一个
+            # fixture 一并重绑到 tmp。此前的结论「只有两处 glob 读，无写入 ⇒ 后果是测试
+            # 读到 checkout 的真实快照，不是写穿」本身没错，但漏算了下游会把"读到真实快照"
+            # 当信号去重放，重放会打真网络——`test_fg_exposure_gate_forward_test.py` /
+            # `test_resonance_boost_forward_test.py` / `test_ic_rerun_readiness.py` 三个
+            # 文件的 `TestCarriedByReadiness` 在全套测试里曾因此伸手摸生产目录、
+            # 被 `_offline_transport` 挡下并判红（8 个 teardown ERROR）。
             ("paper_portfolio.py", "SNAPSHOT_DIR", "_base_dir"),
             # **不冻结**：v0.45.239 的 handler 在 `__init__` 求值一次给 `baseFilename` 占位，
             # 每条记录 `emit` 时再按 `current_target()` 重指。静态上与冻结同形，

@@ -50,6 +50,61 @@
 
 全套 `tests/test_data_backup.py` 21 passed；`bash -n` 语法检查通过。
 
+## [0.45.274] — 2026-09-18 — Fixed：全套测试（非单文件跑）时 `paper_portfolio.SNAPSHOT_DIR` 隔离缺口导致真实联网，8 个 teardown ERROR
+
+### 根因
+`paper_portfolio.SNAPSHOT_DIR`（连同 `STATE_DIR`）是模块级常量，求值于 import 期
+（`paper_portfolio.py:85`；模块内注释早已承认这点）。多个测试文件在文件顶部
+`import paper_portfolio as pp`——pytest **收集阶段**就会执行这行，此时
+`_isolate_env` 的 `monkeypatch.setenv("ALPHA_HIVE_HOME", ...)` 还没跑（fixture
+只在**执行期**生效，收集期不生效）。全套跑时只要任意一个文件顶层 import 了它，
+`SNAPSHOT_DIR` 就会冻结成**真实生产** `report_snapshots/` 目录，且这个冻结对
+本次 pytest 进程里之后所有测试永久生效——单独跑某一个测试文件不会触发（该
+文件若不在收集阶段更早 import 到 `paper_portfolio`，冻结会发生在测试执行期，
+此时 `_isolate_env` 已生效，`SNAPSHOT_DIR` 会被正确沙盒化），这正是「单跑绿、
+全套跑红」的成因。
+
+`STATE_DIR` 早被 `tests/conftest.py::_isolate_paper_portfolio_state` 重绑到 tmp，
+`SNAPSHOT_DIR` 没有——`tests/test_paths_not_frozen_at_import.py::KNOWN` 的旧结论是
+「只有两处 glob 读，无写入 ⇒ 后果是测试读到 checkout 的真实快照，不是写穿」，
+这结论本身没错，但漏算了下游：`experiments/fg_exposure_gate_forward_test.py::run()`
+把「能 glob 到真实快照」当成「有真实前瞻样本」的信号，读到就用
+`paper_portfolio.run_replay()` **重放**那些真实历史日期；重放需要真实 OHLC，
+`_PRICE_CACHE` 里没有就会真的去打 yfinance——"只读"的后果链一路淌到网络层。
+`ic_rerun_readiness.main()` 不分场景地调用 `fg_exposure_gate_forward_status()`
+（不接受调用方传路径，只能走这个模块级常量），于是任何跑到 `rr.main()` 又没
+自己 monkeypatch 这条链的测试，在全套里都会被 `tests/conftest.py::_offline_transport`
+的离线闸挡下并判红——8 个 teardown ERROR，横跨 `test_fg_exposure_gate_forward_test.py`
+/ `test_ic_rerun_readiness.py` / `test_resonance_boost_forward_test.py` 三个文件的
+`TestCarriedByReadiness`。
+
+### 修复
+`tests/conftest.py::_isolate_paper_portfolio_state` 一并把 `SNAPSHOT_DIR` 重绑到
+`sandbox / "_snapshot_sandbox"`（嵌套在已有的 `paper_portfolio_state` 沙盒下，
+不直接用 `tmp_path / "report_snapshots"`——那个字面量会跟 `test_outcomes_fetcher.py`
+自己声明的同名 fixture 撞名，撞上时后者 `d.mkdir()`（不带 `exist_ok`）会因目录
+已存在而 `FileExistsError`，实测换名字前撞红 19/20 条）。不需要 mkdir：
+`SNAPSHOT_DIR` 只被 `.glob()` 读，`Path.glob()` 对不存在的目录直接返回空迭代器。
+
+`tests/test_paths_not_frozen_at_import.py::KNOWN` 里 `SNAPSHOT_DIR` 那条的注释
+同步更新，说明它现在也被运行时罩住了（静态扫描登记不变，这条不受影响）。
+
+验证：`/usr/local/bin/python3 -m pytest -o addopts="" -v --tb=short --timeout=60
+-m "not integration and not network"` 从「1 failed, 4892 passed, 1 skipped,
+86 deselected, 2 xfailed, 8 errors」变为「1 failed, 4892 passed, 1 skipped,
+86 deselected, 2 xfailed」——唯一的 failed 是设计内的
+`test_economic_calendar.py::TestCoverageHorizon`，与本次改动无关。
+
+### 与 v0.45.272 占位的关系
+本条只修**测试侧**症状（全套跑真联网），**不改动** `paper_portfolio.py` 生产代码。
+v0.45.272 占位提到的「潜在写穿生产 report_snapshots/paper_portfolio_state」——
+`STATE_DIR` 早已被同一个 fixture 保护（四个状态文件 + teardown 指纹比对），
+`SNAPSHOT_DIR` 全仓搜索只有两处 `.glob()` 读、零写入点，没找到写穿证据；若那个
+占位实际指向的是把 `SNAPSHOT_DIR`/`STATE_DIR` 从模块级常量改成像
+`_base_dir()`/`_pheromone_db_path()` 那样的懒求值（`paper_portfolio.py:54-56`
+注释里明确写着"留待后续"的那处重构，涉及全模块几十个使用点），那仍是未完成、
+更大范围的独立工作，本条不覆盖，占位不撤。
+
 ## [0.45.272] — 2026-09-18 — 占位（进行中：paper_portfolio.py 的 SNAPSHOT_DIR/STATE_DIR 模块级路径冻结——二次检查 v0.45.256 时在全套测试里发现，导致测试套件真实联网 + 潜在写穿生产 report_snapshots/paper_portfolio_state）
 
 ## [0.45.271] — 2026-09-18 — 占位（进行中：09-17 momentum/volume 补算 + 重新部署——评估是否触及 predictions 表）
