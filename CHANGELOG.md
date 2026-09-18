@@ -55,6 +55,71 @@
 
 ---
 
+## [0.45.292] — 2026-09-18 — Fixed：`test_data_backup.py` 把伪造记录写进真实 `~/alpha-hive-data`（v0.45.291 记录的泄漏）——整个文件套沙箱 `$HOME`
+
+v0.45.291 记了一个未处理的发现，本条修它的**测试隔离**部分。**真实文件的清理未做**（见末尾）。
+
+### 根因（已在 v0.45.291 写明，这里只补新增事实）
+
+`run_backup.main()` 的 `--backup-dir` / `--status-file` / `--history-file` 默认值都是
+`Path.home() / "alpha-hive-data" / ...`，而 `tests/conftest.py::_isolate_env` 只隔离
+`ALPHA_HIVE_*`、**不隔离 `$HOME`**。v0.45.284 给 `run()` 新增「追加历史」副作用后，
+它自己的新测试（`TestRunBackupHistoryAppend`）都显式传了 tmp 的 `--history-file`，
+但 `TestRunBackupStageReporting` 里 7 个**更早写的**测试没跟着改——新增副作用 +
+老调用点未更新，是同一个形状（对应泄漏的 7 行：export / commit / push / init /
+git_error ×2 / done）。
+
+新证据：真实历史文件在 v0.45.291 检查（112 行）之后又涨到 **119 行（17 × 7）**——
+那之后本 session 的测试都改用了假 `HOME`，所以这 7 行来自这台 Mac 上别处的一次
+`test_data_backup.py` 运行（具体是谁**未查**）。污染在持续发生，不是一次性事件。
+
+### Fixed
+
+- `tests/test_data_backup.py`：新增 `_sandbox_home` fixture（`tmp_path_factory` 造目录、
+  `monkeypatch.setenv("HOME", ...)`），并用模块级
+  `pytestmark = pytest.mark.usefixtures("_sandbox_home")` 套在**整个文件**上。
+  选整个文件而不是只修 7 个调用点，是因为泄漏的成因正是「新增副作用、老调用点没跟上」，
+  只补 7 处参数下一个新测试还会漏；沙箱 `HOME` 让这一类**按构造**不可能再写真实目录
+  （`--backup-dir` / `--status-file` 的默认值一并被兜住）。
+  **没有**改成全套 autouse 设 `HOME`：`_ORCH`（编排器路径）是 import 期
+  `os.path.expanduser` 算的、且整个仓库有 30 余条测试靠真实 `HOME` 找仓库外的编排器，
+  全局改 `HOME` 会让它们全部静默变成 skip；另外用户级 site-packages 也在 `~` 下
+  （本机实测：`HOME` 指到空目录后解释器直接报 `No module named pytest`，
+  起子进程的测试能否幸免**未逐个核实**）。本文件里没有任何 `HOME` / `environ` / `env=`
+  依赖，已核对。
+- 新增 `TestHomeSandboxHasTeeth`（2 项）让沙箱本身有牙：
+  ① `Path.home()` 不得等于**真实**家目录（取自用户库 `pwd.getpwuid`，不读 `$HOME`，
+  不会被 monkeypatch 骗到），且 `_sandbox_home` 必须在 `request.fixturenames` 里
+  （证明模块级 mark 生效）；② 不传 status/history 参数跑一次 `run_backup.main`，
+  默认落点必须在沙箱 `HOME` 下（证明「默认值跟着 `$HOME` 走」这个前提成立）。
+
+### 验证
+
+- **真实 `HOME` 下**跑 `tests/test_data_backup.py`：40 passed、**0 skipped**（读编排器的
+  16 条没有因沙箱变成 skip），真实历史文件行数 **119 → 119（增量 0）**；连同
+  `test_backup_continuity` / `test_orchestrator_braced_vars` / `test_changelog_entry_integrity`
+  共 106 passed，真实文件增量仍为 0。`ruff check` 全过。
+- **假 `HOME`（模拟 CI，编排器不存在）**下跑该文件：24 passed、16 skipped，假 `HOME`
+  里**没有** `alpha-hive-data` 目录生成。
+- **反向变异**（在假 `HOME` 下做，不再污染真实文件，随即还原）：删掉 `pytestmark` ⇒
+  假 `HOME` 里写进了同样的 7 行伪造记录（泄漏原样复现），且
+  `test_module_mark_is_in_effect_and_home_is_not_the_real_one` 变红。
+
+### ⚠️ 未处理 / 需要用户决定
+
+- **真实文件仍是污染的**：`~/alpha-hive-data/logs/backup_status_history.jsonl`
+  的 119 行全是测试伪造（17 个整块全匹配伪造模式，无一真实记录）。测试隔离修好只是
+  **止住新增**，存量仍在，且 `backup_continuity.read_history` 是「同一天任一条 `ok:true`
+  即判当天健康」，所以**今天**这一天目前会被判成健康。清理它是写生产数据，
+  需要用户确认；建议先备份原文件再去掉伪造行。
+- **别的 checkout / worktree 里的旧测试仍会泄漏**：本修复只在合入 `main` 后才对其它 session
+  生效；在此之前任何还没 rebase 的 worktree 跑该测试文件都会继续往真实文件追加。
+- **没有加数据根指纹守卫**（v0.45.291 曾提议）：那要在真实 `~/alpha-hive-data` 上打指纹，
+  而生产的备份/扫描任务也会合法写那里，测试恰好与之并发时会误红；本次用「按构造不可能」
+  的沙箱 + 两条有牙的测试代替，未引入这类不确定性。
+
+---
+
 ## [0.45.291] — 2026-09-18 — Changed：CI 的 pytest 加 `-rs`，摘要里列出每条 skip 的原因；⚠️ 顺带发现 `test_data_backup.py` 把伪造记录写进了真实 `~/alpha-hive-data`（**未处理**）
 
 ### Changed

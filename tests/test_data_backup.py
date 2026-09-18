@@ -7,6 +7,7 @@
 """
 import json
 import os
+import pwd
 import shlex
 import sqlite3
 import subprocess
@@ -20,6 +21,24 @@ from data_backup import restore as restore_mod
 from data_backup import run_backup
 from data_backup.scan_secrets import load_known_secrets, scan_directory
 from data_backup.sqlite_readonly import HotJournalError, db_open_uri
+
+
+@pytest.fixture
+def _sandbox_home(tmp_path_factory, monkeypatch):
+    """`run_backup.main()` 的 `--backup-dir/--status-file/--history-file` 默认值都是
+    `Path.home() / "alpha-hive-data" / ...`——真实数据根。`_isolate_env` 只隔离
+    `ALPHA_HIVE_*`、不隔离 `$HOME`，所以没显式传路径的测试会把伪造记录写进真实
+    `backup_status_history.jsonl`（v0.45.284 给 `run()` 加追加历史后，
+    `TestRunBackupStageReporting` 的 7 个老测试没跟着传 `--history-file`）。
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+# 整个文件套沙箱 HOME：新增的测试即使忘了传路径也不会写真实目录。
+# `_ORCH` 在 import 时已算好、bash 沙箱不读 HOME，所以读编排器的那批不受影响。
+pytestmark = pytest.mark.usefixtures("_sandbox_home")
 
 
 def _make_synthetic_db(path, wal=False):
@@ -517,6 +536,38 @@ class TestRunBackupHistoryAppend:
                                  history_file=history_file)
         assert status["stage"] == "export"
         assert status["ok"] is False
+
+
+class TestHomeSandboxHasTeeth:
+    """上面那层 `pytestmark` 沙箱本身要有牙：没有这两条，有人删掉它，全套照绿，
+    而真实 `~/alpha-hive-data` 又开始被伪造记录污染（v0.45.291 实测那份文件里全是伪造、无一真实）。
+    """
+
+    def test_module_mark_is_in_effect_and_home_is_not_the_real_one(self, request):
+        # 真实家目录取自用户库、不读 $HOME，所以不会被 monkeypatch 骗到。
+        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        assert "_sandbox_home" in request.fixturenames, "模块级 pytestmark 没生效"
+        assert Path.home() != real_home, (
+            f"Path.home() 仍是真实家目录 {real_home}——本文件里不传路径参数的 run_backup 调用"
+            "会把伪造记录写进真实 ~/alpha-hive-data/logs/backup_status_history.jsonl")
+
+    def test_run_backup_defaults_follow_home(self, tmp_path, monkeypatch, _sandbox_home):
+        """沙箱靠「默认路径跟着 $HOME 走」这个前提成立；若 run_backup 哪天把默认值
+        改成不看 HOME 的写法，这条会红，提醒沙箱已失效。"""
+        def boom(*a, **kw):
+            raise RuntimeError("模拟导出失败")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        src = tmp_path / "src"
+        src.mkdir()
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        rc = run_backup.main(["--src", str(src), "--backup-dir", str(backup_dir)])  # 不传 status/history
+        assert rc == 2
+        logs = _sandbox_home / "alpha-hive-data" / "logs"
+        rows = [json.loads(x) for x in (logs / "backup_status_history.jsonl").read_text().splitlines()]
+        assert [(r["stage"], r["ok"]) for r in rows] == [("export", False)]
+        assert (logs / "backup_status.json").is_file()
 
 
 _ORCH = os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh")
