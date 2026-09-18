@@ -495,6 +495,36 @@ _COHORT_HISTORY = [
      "留一个可核查的观测量。"
      "已知不做：`bear_bee.py:39/512` 另有两处 `get_top_signals(n=20)` 未迁，"
      "各自独立，不搭本版的车。"),
+    ("2026-09-18", "v0.45.288",
+     "BearBee 读同伴条目的方式由 `_read_board_entry`（`board.get_top_signals(ticker, "
+     "n=20)` + 前缀匹配）改为 `BeeAgent._read_peer`（v0.45.151 为 Rival 修的、不受 "
+     "`MAX_ENTRIES` 溢出淘汰影响的定点索引，六个读点各传精确 agent_id），LLM 论点里的"
+     "看多信号列表改用 `board.get_live_signals`。这是 v0.45.151/156/163/279 同一个"
+     "「排行榜当普查/按身份取用」缺陷的第 5、6 处——上一条（v0.45.279）就把它记成"
+     "「已知不做」。"
+     "生产实测（`.swarm_results_*.json`）：全期（03-10 起 1634 行）Bear 读板 miss 在"
+     "满名单（≥25 只）日子 options 19% / ml 24% / guard 30% / catalyst 45%，9~16 只标的的"
+     "日子仅 0.7~3.1%，是容量效应而非上游没发布；限定到 08-24 起满名单日 18 天共 540 行"
+     "（以下数字的口径）则是 21.7% / 18.0% / 32.6% / 38.0%。偏向因蜂而异：Oracle/Guard 反相关"
+     "（方向 bearish 的 Oracle 有 65%（34/52）必然没被读到，且回落路径不看 iv_skew/gex/"
+     "Oracle 方向、只能少算——读丢行读板值更高 63 例、更低 0 例，均差 +5.67），Catalyst "
+     "反向无害（读丢的是本就贡献 0 的「无催化剂」），ML 无偏。汇总 22.4% 的行 "
+     "`bear_score` 被低估（均值 +0.27、最大 +3.50），现行阈值下方向翻转 14/540（2.6%）"
+     "且全部翻向看空。重放 baseline 与记录的 `rule_bear_score` 吻合 99.4%。"
+     "与 v0.45.279 不同，这处**可量**：Bear 自记录了 `details.data_sources`，修复后按"
+     "当日标的数分层的 miss 率应降到 ≈0（`experiments/bear_read_miss_audit.py`）。"
+     "直接点名 `bear.score` / `bear.options_bear` / `bear.insider_bear`，下游"
+     "（`agent.BearBeeContrarian.*`、`composite.swarm_agreement` 等）由 "
+     "`_scope_closure` 带出。Bear 不计票、不进 `final_score`（无 5 维映射），所以对 "
+     "`composite.final_score` **无直接影响**——但它是 `ALWAYS_SLICED`，任何新条目"
+     "都无条件牵动它，无法只切窄。"
+     "边界代价：**0 条**——v0.45.279 是当天（09-18）才立的，当前世代 `predictions` "
+     "样本数实测为 0（`assess()` 的 `n_all_samples=0`），本条与之同日。"
+     "⚠️ 前提是赶在 09-18 14:00（PDT）launchd 扫描开始前推到 `origin/main`"
+     "（扫描前的 `production_sync` 会快进）；否则当天样本会混两种口径，要么把边界改到 "
+     "09-19、作废约 30 条。"
+     "已知不做：不改 `MAX_ENTRIES` / 淘汰逻辑；不加新口径字段（`data_sources` 已是"
+     "自记录标记）；Scout/Buzz 按设计的回落（Scout 无内幕金额时本来就走 SEC）不动。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）

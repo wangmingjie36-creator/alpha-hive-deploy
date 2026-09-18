@@ -1202,6 +1202,10 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # 的边界覆盖，这条不会改变它们当前的世代起点，只对此前从未被点名过的
     # consensus_strength 本身生效
     "v0.45.279": ("crowding.comp.consensus_strength",),
+    # 09-18：BearBee 读同伴条目改走定点索引（同一个「排行榜当普查用」缺陷的第 5、6 处）。
+    # overval_bear / short_int_bear 不读板、没变——且它们是 bear.score 的上游，不在下游闭包里。
+    # Bear 不进 final_score，final_score 的切分靠 ALWAYS_SLICED，与这里的范围无关
+    "v0.45.288": ("bear.score", "bear.options_bear", "bear.insider_bear"),
 }
 
 

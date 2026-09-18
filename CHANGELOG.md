@@ -56,7 +56,108 @@ FAILED tests/test_paths_not_frozen_at_import.py::TestFileDerivedSpeciesDoesNotSp
 
 ---
 
-## [0.45.288] — 2026-09-18 — 占位（进行中：BearBee 读板改走不受 MAX_ENTRIES 淘汰影响的定点索引，bear_bee.py:39/512）
+## [0.45.288] — 2026-09-18 — Fixed：BearBee 读板改走定点索引，不再被 MAX_ENTRIES 淘汰吃掉低分同伴
+
+v0.45.279 收尾时把 `bear_bee.py:39/512` 两处 `get_top_signals(n=20)` 记成"已知不做"，
+用户随后要求"看"。量过之后确认是实质问题：`BeeAgent._read_peer` 早在 v0.45.151
+就为"读同一轮里另一只蜂的条目"修好了定点索引，`BearBeeContrarian` 就继承自
+`BeeAgent`，却一直用着自己的 `_read_board_entry`（`get_top_signals(ticker, n=20)`
++ 前缀匹配）——v0.45.151/156/163/279 同一个"排行榜当普查/按身份取用"缺陷的
+第 5、6 处，同日修掉。
+
+### 生产实测（这处**可量**：Bear 自记录了 `details.data_sources`）
+
+口径：`.swarm_results_*.json`；`ml`/`guard`/`catalyst` 三键读到才写（缺席 = 没读到），
+`options` 读到写 `real`、走回落写 `options_api`；只统计上游确实发布过的行。
+（`insider`/`news` 按设计也会回落——Scout 没有内幕金额时本来就走 SEC——回落 ≠ 读丢，
+不进 miss 表，只给下界。）
+
+- **是容量效应，不是上游没发布**：全期（03-10 起 1634 行）9~16 只标的的日子 miss
+  0.7%~3.1%（749 行）；满名单（≥25 只）日子 options 19.2% / ml 23.8% / guard 30.1% /
+  catalyst 45.2%（854 行）。
+- **偏向方向因蜂而异**（低分先被挤掉，而各蜂"低分"的含义不同）。以下为 08-24 起满名单日
+  18 天共 540 行，也是 `experiments/bear_read_miss_audit.py` 的默认口径：
+
+  | 上游 | miss | "若读到会触发"：读丢组 vs 读到组 | 结论 |
+  |---|---|---|---|
+  | Oracle | 21.7% | 53.8% vs 43.3%；方向 bearish 的有 65.4%（34/52）必然没读到 | 偏，且回落路径只能少算 |
+  | Guard | 32.6% | 30.7% vs 15.9% | 偏 |
+  | Catalyst | 38.0% | 2.4% vs 22.7% | 反向：读丢的是本就贡献 0 的"无催化剂"，无害 |
+  | ML | 18.0% | 10.3% vs 11.1% | 无偏 |
+  | Scout / Buzz | — | 下界 0% / 4.7% | 无实质证据 |
+
+  Oracle 的回落路径（`OptionsAgent.analyze`）只看 `pc_ratio`/`iv_rank`，不看 `iv_skew`/
+  `gex`/Oracle 方向：读丢行读板值更高 63 例、更低 **0** 例，均差 +5.67 分。
+- **影响面**：22.4% 的行 `bear_score` 被低估（均值 +0.27、最大 +3.50）；现行阈值下方向
+  翻转 14/540（2.6%），**全部翻向看空**（neutral→bearish 11、bullish→bearish 2、
+  bullish→neutral 1）。Bear 不计票、不进 `final_score`，波及 `bear.*` 归档信号、报告
+  "看空对冲"版块与 dashboard。
+- **副作用**：读丢时 Bear 重新去拉 `OptionsAgent`/SEC/newsapi（Oracle 回落占满名单日
+  21.7% 的行）——正是它"读板以避免重复调用"的设计要躲的限流压力。
+- **重放方法与自校验**：真方法 `_compute_bear_score` + 现行阈值，baseline 与记录的
+  `rule_bear_score` 吻合 537/540（99.4%）；Oracle 读板路径复刻在读到的行上 423/423。
+  ⚠️ 第一版重放只有 87.8%——原因是**重放自己**把催化剂维度的键写成 `"catalyst"`，
+  而 `analyze()` 的 `dim_scores` 里是 `"chronos"`（被 `_weights` 静默过滤）。先校验重放
+  再信数字。同一趟里我还把 Oracle/Buzz 的下界阈值先写成 5.5（读板路径的方向规则只在
+  `<5.0` 时才抬到 5.5），纠正后 Buzz 从 14.1% 降到 4.7%，Oracle 的 65.4% 不变。
+
+### Fixed
+
+- `swarm_agents/bear_bee.py`：删掉自带的 `_read_board_entry`，六个读点
+  （Scout/Oracle/Buzz/Chronos/Rival/Guard）改走 `BeeAgent._read_peer(ticker, 精确
+  agent_id)`——不受 `MAX_ENTRIES` 溢出淘汰影响，保留 3600s 墙钟过期（与
+  `get_agent_entry`/`get_live_signals` 同口径）。`_generate_llm_bear_thesis` 的看多信号
+  列表改用 `board.get_live_signals(ticker)`（只在 LLM 模式生效，`--no-llm` 下零影响）。
+  顺带删掉随 helper 失去用途的 `Optional`/`PheromoneEntry` import。
+
+### Added
+
+- `tests/test_bear_bee_census_eviction.py`（25 条）：六个读点 × 洪水参数化（修复前红）+
+  无洪水对照（期望值是读板路径真值，修复前后都绿）+ 整轮"灌没灌满结果必须一致" +
+  夹具反向自证（洪水确实把同伴挤出排行榜、普查仍在）+ 合法回落保留（同伴从没发布 ⇒
+  三条网络回落各触发一次，证明桩接得上）+ 陈货拒收（2 小时前的条目不被读）+ LLM
+  看多列表 + AST 守卫（`bear_bee.py` 里不许再有 `get_top_signals`）。三条网络回落
+  全部换成记录桩，全程离线、零 API 费用。
+- `experiments/bear_read_miss_audit.py`：只读复量尺，按当日标的数过滤、以 09-18 为界
+  并列修复前/后的 miss 率。
+
+### 世代边界
+
+`ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-09-18", "v0.45.288")`，
+`signal_archive.COHORT_SIGNAL_SCOPE["v0.45.288"] = ("bear.score", "bear.options_bear",
+"bear.insider_bear")`。`generation_boundaries()` 实测：这三条 +
+`agent.BearBeeContrarian.score/direction` + `composite.swarm_agreement` +
+`composite.final_score`（`ALWAYS_SLICED`）→ 09-18 / v0.45.288；`bear.overval_bear`
+仍是 09-05 / v0.45.128（不读板、没变，且是 `bear.score` 的上游）；Guard/ML/crowding/
+Rival/Scout 仍是 v0.45.279，Oracle 仍是 v0.45.128——Bear 是它们的下游，闭包只往下游走，
+没有被误拖。
+
+**边界代价：0 条。** 当前世代样本数实测 `n_all_samples = 0`（v0.45.279 当天才立，09-18
+的扫描 14:00 PDT 才跑），本条与之同日。⚠️ 前提是赶在 09-18 14:00 扫描前推到
+`origin/main`（扫描前 `production_sync` 会快进）；否则当天样本混两种口径，要么把边界改到
+09-19、作废约 30 条。`composite.final_score` **无直接影响**（Bear 不进 final_score），
+但 `ALWAYS_SLICED` 使任何新条目都无条件牵动它、无法只切窄——这次恰好赶在世代为空的窗口，
+不必付这笔账。
+
+### 核对
+
+- `tests/test_bear_bee_census_eviction.py` 25 passed（修复前 10 红 15 绿：红的是六个读点、
+  整轮等价、陈货拒收、LLM 列表、AST 守卫；绿的是夹具自证 + 对照 + 保留的合法回落）。
+- `ruff --select F821` 全绿。
+- 全量套件（并入最新 `origin/main` 前）：5013 passed、2 failed，**均非本次改动引起**——
+  `test_no_new_file_derived_paths` 是别的 session 的 v0.45.284 `backup_continuity.py:
+  ALPHAHIVE_DIR` 未登记白名单，已被 v0.45.289 修复（并入后转绿）；`TestCoverageHorizon`
+  （经济日历 CPI/NFP 覆盖余量 83/77 天 < 90 天阈值）在**干净 `origin/main`** 上同样红，
+  日期驱动、设计性变红，不是回归。（并入后的重跑结果见下一行。）
+- `experiments/bear_read_miss_audit.py` 对生产快照复现手工数字（options 117/540、
+  Oracle bearish 下界 34/52）。
+
+### 不做
+
+- 不改 `MAX_ENTRIES`/淘汰逻辑；不新增口径字段（`data_sources` 已是自记录标记，修复后
+  缺席 = 上游没发布）。
+- Scout/Buzz 按设计的回落不动（Scout 无内幕金额时本来就走 SEC；Buzz 实测下界仅 4.7%）。
+- **待复量**：首个满名单扫描日落盘后跑 `bear_read_miss_audit.py`，"修复后"一栏应 ≈ 0。
 
 ## [0.45.287] — 2026-09-18 — Fixed：编排器 18 处 `$VAR` 紧跟全角标点，UTF-8 locale 下 `set -u` 让**整个 shell 退出**——统一加花括号
 
