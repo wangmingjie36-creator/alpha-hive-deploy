@@ -1,7 +1,6 @@
 """BearBeeContrarian - 看空对冲蜂 (contrarian 维度)"""
 
-from typing import Any, Dict, List, Optional
-from pheromone_board import PheromoneEntry
+from typing import Any, Dict, List
 from swarm_agents._config import (
     _log, _AS,
     _RE_INSIDER_SELL, _RE_INSIDER_BUY,
@@ -30,17 +29,10 @@ class BearBeeContrarian(BeeAgent):
     3. 期权看跌信号（从 OracleBeeEcho 信息素板读取，回退期权模块）
     4. 动量衰减（使用预取 yfinance 数据）
     5. 新闻看空信号（从 BuzzBeeWhisper 信息素板读取，回退 Finviz）
-    """
 
-    def _read_board_entry(self, ticker: str, agent_id_prefix: str) -> Optional[PheromoneEntry]:
-        """从信息素板读取指定 Agent 对指定 ticker 的最新条目"""
-        if not self.board:
-            return None
-        entries = self.board.get_top_signals(ticker=ticker, n=20)
-        for e in entries:
-            if e.agent_id.startswith(agent_id_prefix):
-                return e
-        return None
+    读板一律走 `_read_peer`（定点索引）；改回 `get_top_signals` 会被 MAX_ENTRIES 溢出淘汰
+    吃掉低分同伴，见 tests/test_bear_bee_census_eviction.py。
+    """
 
     # ---------- signal assessment helpers ----------
 
@@ -52,7 +44,7 @@ class BearBeeContrarian(BeeAgent):
         insider_bear = 0.0
         insider_data = None
 
-        scout_entry = self._read_board_entry(ticker, "ScoutBee")
+        scout_entry = self._read_peer(ticker, "ScoutBeeNova")
         if scout_entry and scout_entry.discovery:
             disc = scout_entry.discovery
             data_sources["insider"] = "real"
@@ -115,7 +107,7 @@ class BearBeeContrarian(BeeAgent):
         options_bear = 0.0
         options_data = None
 
-        oracle_entry = self._read_board_entry(ticker, "OracleBee")
+        oracle_entry = self._read_peer(ticker, "OracleBeeEcho")
         if oracle_entry and oracle_entry.discovery:
             disc = oracle_entry.discovery
             data_sources["options"] = "real"
@@ -198,7 +190,7 @@ class BearBeeContrarian(BeeAgent):
         """评估新闻看空信号。返回 (news_bear, buzz_entry)。"""
         news_bear = 0.0
 
-        buzz_entry = self._read_board_entry(ticker, "BuzzBee")
+        buzz_entry = self._read_peer(ticker, "BuzzBeeWhisper")
         if buzz_entry and buzz_entry.discovery:
             disc = buzz_entry.discovery
             data_sources["news"] = "real"
@@ -352,7 +344,7 @@ class BearBeeContrarian(BeeAgent):
                               data_sources: Dict[str, str]) -> float:
         """评估催化剂风险。返回 chronos_bear。"""
         chronos_bear = 0.0
-        chronos_entry = self._read_board_entry(ticker, "Chronos")
+        chronos_entry = self._read_peer(ticker, "ChronosBeeHorizon")
         if chronos_entry and chronos_entry.discovery:
             data_sources["catalyst"] = "real"
             _cd = getattr(chronos_entry, 'details', {}) or {}
@@ -371,7 +363,7 @@ class BearBeeContrarian(BeeAgent):
                               data_sources: Dict[str, str]) -> float:
         """评估 ML 预测看空信号。返回 ml_bear。"""
         ml_bear = 0.0
-        rival_entry = self._read_board_entry(ticker, "RivalBee")
+        rival_entry = self._read_peer(ticker, "RivalBeeVanguard")
         if rival_entry and rival_entry.discovery:
             data_sources["ml"] = "real"
             _rd = getattr(rival_entry, 'details', {}) or {}
@@ -391,7 +383,7 @@ class BearBeeContrarian(BeeAgent):
                                    data_sources: Dict[str, str]) -> float:
         """评估信号一致性风险。返回 guard_bear。"""
         guard_bear = 0.0
-        guard_entry = self._read_board_entry(ticker, "GuardBee")
+        guard_entry = self._read_peer(ticker, "GuardBeeSentinel")
         if guard_entry and guard_entry.discovery:
             data_sources["guard"] = "real"
             _gd = getattr(guard_entry, 'details', {}) or {}
@@ -509,7 +501,7 @@ class BearBeeContrarian(BeeAgent):
             if llm_service.is_available():
                 bull_signals = []
                 if self.board:
-                    for e in self.board.get_top_signals(ticker=ticker, n=20):
+                    for e in self.board.get_live_signals(ticker):
                         if e.direction == "bullish" and not e.agent_id.startswith("BearBee"):
                             bull_signals.append({
                                 "agent": e.agent_id,

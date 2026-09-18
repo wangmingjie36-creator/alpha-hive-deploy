@@ -12,6 +12,7 @@
     "CodeExecutorAgent": 7.0,
     "QueenDistiller": 6.55
   },
+  "agent_votes_source": "",
   "weights_used": {
     "signal": 0.2094,
     "catalyst": 0.1878,
@@ -21,18 +22,11 @@
   },
   "low_conviction": true,
   "low_conviction_reason": "score_high_guard: 高分 6.5 但情绪 4.5<6 未确认（signal 5.5）→ 仓位减半",
-  "cs_rank": {
-    "final": 0.759,
-    "signal": 0.586,
-    "catalyst": 0.207,
-    "sentiment": 0.345,
-    "odds": 0.69,
-    "risk_adj": 1.0
-  },
+  "cs_rank": null,
   "actual_prices": {
-    "t1": null,
-    "t7": null,
+    "t1": 65.87,
+    "t7": 63.7,
     "t30": null
   },
-  "created_at": "2026-09-04T14:59:34.783261"
+  "created_at": "2026-09-17T14:53:12.430740"
 }

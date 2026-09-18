@@ -57,16 +57,41 @@ except ImportError:
         return fallback
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
-ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
-# 支持 VM 路径（Cowork 模式）—— 自动检测当前会话
+# 数据根迁移阶段 4 遗留项（v0.45.268 CHANGELOG 记录，本次单独排期修复）：
+# `ALPHAHIVE_DIR` 此前是硬编码字面量 `Path(os.path.expanduser("~/Desktop/Alpha Hive"))`
+# ——既不是 `__file__` 派生、也完全不读 `ALPHA_HIVE_HOME`，是本仓这类 bug 里锁得
+# 最死的一种，且此前从未被记录（`weekly_optimizer.py`/`self_analyst.py` 的同构
+# 遗留项已在 v0.45.259 点名，仍待各自修复，不在本次范围内）。
+# 现在改成**覆盖钩子**，默认 `None`，调用方一律经 `_alphahive_dir()` 在调用时
+# 求值：无覆盖时按 VM 挂载点探测 → 兜底 `hive_logger.PATHS.home`。
+# 改法沿用仓内已验证过的惯例（`collect_data.py`，v0.45.263）：不写
+# `ALPHAHIVE_DIR = PATHS.home`——那只是把冻结换个地方，会被
+# `tests/test_paths_not_frozen_at_import.py::TestSpeciesDoesNotSpread` 判红；
+# 也不在模块级调用 `_alphahive_dir()`——那会被同文件的
+# `TestFrozenViaModuleLevelCall` 判红（现有测试用
+# `monkeypatch.setattr(g, "ALPHAHIVE_DIR", ...)` 驱动，故保留同名可覆盖属性）。
+ALPHAHIVE_DIR = None
+
+# 支持 VM 路径（Cowork 模式）—— 自动检测当前会话（代码运行环境探测，与
+# `ALPHA_HIVE_HOME` 无关，本次不改）
 import glob as _glob_mod
 _VM_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/Alpha Hive"), reverse=True)
 _VM_PATH = Path(_VM_SESSIONS[0]) if _VM_SESSIONS else Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
-try:
-    if _VM_PATH.exists():
-        ALPHAHIVE_DIR = _VM_PATH
-except PermissionError:
-    pass
+
+
+def _alphahive_dir() -> Path:
+    """数据根路径，**调用时求值**（不得缓存进模块级变量，理由见上）。"""
+    if ALPHAHIVE_DIR is not None:
+        return Path(ALPHAHIVE_DIR)
+    try:
+        if _VM_PATH.exists():
+            return _VM_PATH
+    except PermissionError:
+        pass
+    from hive_logger import PATHS
+    return PATHS.home
+
+
 # 默认输出到用户真实桌面的深度报告文件夹（VM 模式优先）
 _VM_DEEP_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/深度分析报告/深度"), reverse=True)
 _VM_DEEP_DIR = Path(_VM_DEEP_SESSIONS[0]) if _VM_DEEP_SESSIONS else Path("/sessions/keen-magical-wright/mnt/深度分析报告/深度")
@@ -77,26 +102,17 @@ try:
         OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
 except PermissionError:
     OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
-API_KEY_FILE = Path("~/.anthropic_api_key").expanduser()
-# 在 VM 中，home 可能映射到不同路径
-_VM_API_KEY = Path(str(ALPHAHIVE_DIR / ".anthropic_api_key"))
-# Mac 上直接放在项目文件夹里也可以
-_MAC_API_KEY = Path("~/Desktop/Alpha Hive/.anthropic_api_key").expanduser()
-if not API_KEY_FILE.exists() and _VM_API_KEY.exists():
-    API_KEY_FILE = _VM_API_KEY
-elif not API_KEY_FILE.exists() and _MAC_API_KEY.exists():
-    API_KEY_FILE = _MAC_API_KEY
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
 
 def find_latest_json(ticker: str, date_str: str | None = None) -> Path:
     """找到最新的 analysis JSON 文件"""
-    pattern = str(ALPHAHIVE_DIR / f"analysis-{ticker}-ml-*.json")
+    pattern = str(_alphahive_dir() / f"analysis-{ticker}-ml-*.json")
     files = sorted(glob.glob(pattern))
     if not files:
         raise FileNotFoundError(f"找不到 {ticker} 的分析 JSON: {pattern}")
     if date_str:
-        target = str(ALPHAHIVE_DIR / f"analysis-{ticker}-ml-{date_str}.json")
+        target = str(_alphahive_dir() / f"analysis-{ticker}-ml-{date_str}.json")
         if os.path.exists(target):
             return Path(target)
         print(f"⚠️  指定日期 {date_str} 文件不存在，使用最新: {files[-1]}")
@@ -105,7 +121,7 @@ def find_latest_json(ticker: str, date_str: str | None = None) -> Path:
 
 def find_prev_json(ticker: str, current_path: Path, days_back: int = 1) -> Path | None:
     """找到当前文件之前第 N 个交易日的 JSON"""
-    pattern = str(ALPHAHIVE_DIR / f"analysis-{ticker}-ml-*.json")
+    pattern = str(_alphahive_dir() / f"analysis-{ticker}-ml-*.json")
     files = sorted(glob.glob(pattern))
     try:
         idx = files.index(str(current_path))
@@ -264,8 +280,20 @@ def load_json(path: Path) -> dict:
 
 
 def get_api_key() -> str | None:
-    if API_KEY_FILE.exists():
-        key = API_KEY_FILE.read_text().strip()
+    # 此前 API_KEY_FILE/_VM_API_KEY/_MAC_API_KEY 是导入期算好的模块级常量
+    # （依赖已改为调用时求值的 ALPHAHIVE_DIR）；改成调用时在本函数体内解析，
+    # 避免把 ALPHAHIVE_DIR 的冻结换个地方重新引入。
+    key_file = Path("~/.anthropic_api_key").expanduser()
+    if not key_file.exists():
+        vm_key_file = _alphahive_dir() / ".anthropic_api_key"
+        if vm_key_file.exists():
+            key_file = vm_key_file
+        else:
+            mac_key_file = Path("~/Desktop/Alpha Hive/.anthropic_api_key").expanduser()
+            if mac_key_file.exists():
+                key_file = mac_key_file
+    if key_file.exists():
+        key = key_file.read_text().strip()
         return key if key.startswith("sk-") else None
     return os.environ.get("ANTHROPIC_API_KEY")
 
@@ -6951,13 +6979,13 @@ def _load_ticker_accuracy(ticker: str, out_dir: Path) -> dict:
         snap_dir = str(out_dir / "report_snapshots")
         # v0.45.87：接入 close_t7 干净口径（此前用只有约1/3 可信的
         # actual_prices.t7），与 weekly_optimizer.py 共用同一份实现。
-        # v0.45.98：显式传 close_t7_db_path=ALPHAHIVE_DIR（本文件自己的
+        # v0.45.98：显式传 close_t7_db_path=_alphahive_dir()（本文件自己的
         # VM 挂载点探测逻辑），不用 feedback_loop.py 的 __file__ 相对缺省值
         # ——后者只反映"这份 feedback_loop.py 副本在哪"，worktree/多 checkout
         # 场景下与真实 pheromone.db 所在目录不是恒等的（已在复查中实测验证：
         # worktree 本地空库 vs. ~/Desktop/Alpha Hive 下的真实生产库）。
         analyzer = BacktestAnalyzer(directory=snap_dir, clean_t7=True,
-                                    close_t7_db_path=ALPHAHIVE_DIR / "pheromone.db")
+                                    close_t7_db_path=_alphahive_dir() / "pheromone.db")
         snaps = analyzer.get_snapshots_by_ticker(ticker)
         if not snaps:
             return {}

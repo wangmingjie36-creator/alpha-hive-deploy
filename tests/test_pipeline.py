@@ -420,8 +420,10 @@ class TestDeployStaticToGhPages:
             reporter._deploy_static_to_ghpages()
 
         # 验证 hash-object 只对白名单文件调用
+        # v0.45.268（数据根迁移阶段 4）：hash-object 现在读的是 data_root 下的
+        # 绝对路径（内容物理来源与 repo 分离），比较文件名要先取 basename。
         hash_cmds = [c for c in commands if "hash-object" in c]
-        hashed_files = [c[-1] for c in hash_cmds]
+        hashed_files = [os.path.basename(c[-1]) for c in hash_cmds]
         # 核心文件应包含
         assert ".nojekyll" in hashed_files
         assert "index.html" in hashed_files
@@ -448,7 +450,7 @@ class TestDeployStaticToGhPages:
 
         def fake_check_output(cmd, **kw):
             if "hash-object" in cmd:
-                deployed_files.append(cmd[-1])
+                deployed_files.append(os.path.basename(cmd[-1]))  # v0.45.268: 绝对路径取 basename
                 return b"abc123\n"
             elif "write-tree" in cmd:
                 return b"tree456\n"
@@ -489,7 +491,7 @@ class TestDeployStaticToGhPages:
 
         def fake_check_output(cmd, **kw):
             if "hash-object" in cmd:
-                deployed.append(cmd[-1])
+                deployed.append(os.path.basename(cmd[-1]))  # v0.45.268: 绝对路径取 basename
                 return b"abc123\n"
             elif "write-tree" in cmd:
                 return b"tree456\n"

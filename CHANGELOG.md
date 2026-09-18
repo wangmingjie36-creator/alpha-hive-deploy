@@ -5,6 +5,1950 @@
 
 ---
 
+## [0.45.294] — 2026-09-18 — Fixed：experiments 三个脚本缺 `sys.path` 注入，按文档运行即 `ModuleNotFoundError`；Added：静态守卫 + 真子进程测试
+
+`python3 experiments/xxx.py` 运行时 `sys.path[0]` 是 `experiments/`，不是仓库根。v0.45.290 修了 `signal_ic_sweep.py`；
+同一目录里**还有三个**同样坏着。起初只知道 `vol_regime_filter.py` 一个，先写守卫、让它扫全目录之后才发现是三个：
+
+| 脚本 | import 形态 | 什么时候炸 | 引入 |
+|---|---|---|---|
+| `vol_regime_filter.py` | 顶层 | 任何运行方式，连 `--help` 也炸——它没有 argparse，`--help` 不被识别，直接开库跑全量 | v0.45.260 |
+| `ticker_winrate_persistence.py` | `find_db()` 内惰性 | 文档用法（无参运行） | v0.45.260 |
+| `bear_read_miss_audit.py` | `main()` 内惰性，仅 `--root` 缺省时 | 缺省 root；`--help` 与文档示例（显式给 `--root`）都正常 | **v0.45.288**（新写的脚本，不是迁移遗留） |
+
+没有任何测试执行它们，编排器 / launchd / crontab 也不调用它们，所以三天没有任何东西会红。但有引用：
+`ic_rerun_readiness.py` 的说明把 `bear_read_miss_audit.py` 指为验证 v0.45.288 修复的那把尺子——照着去跑缺省路径的人会直接撞上这个错。
+
+### Fixed
+
+- `experiments/vol_regime_filter.py`（补 `import sys`）、`experiments/ticker_winrate_persistence.py`、
+  `experiments/bear_read_miss_audit.py`（补 `import sys`）：在首个仓库根 import 之前加模块层
+  `sys.path.insert(0, <仓库根>)`。内联表达式，`__file__` 用于「代码位置」，用法正确。vol 沿用 sweep 的
+  `Path(__file__).resolve()` 写法；另两个文件本来就用 `os.path`、且都没 import `Path`，故用 `os.path.realpath`——
+  与 `.resolve()` 一样跟随符号链接（旧代码里只在 ticker 的 docstring 里出现过 `abspath`，它不跟随，也不是现行写法）。
+- ⚠️ 更正：任务简报给的理由是「不赋给模块级常量，否则会被 `test_paths_not_frozen_at_import` 当成新增冻结路径」——
+  **这个理由对 `experiments/` 不成立**：该守卫的扫描循环显式跳过 `experiments` 与 `tests` 目录（相邻 8 个脚本已有
+  模块级 `ROOT = Path(__file__)…` 且都没登记）。「无需在 `KNOWN` 登记」这个结论仍然正确，错的是理由；内联写法只是沿用 sweep。
+
+### Added
+
+- `tests/test_experiments_script_bootstrap.py`（29 项）：
+  - **静态守卫**：AST 扫 `experiments/*.py`，凡 import 仓库根模块的脚本（根目录 `*.py` + 含 `__init__.py` 的包，
+    现算、剔除与标准库同名者），必须在**首个**此类 import **之前**、**模块层**（不在函数体内）有
+    `sys.path.insert/append/extend`（独立的表达式语句）。位置按（行, 列）比较；import 侧除 `import` / `from … import`
+    外，也认常量字符串实参的 `__import__("x")` / `importlib.import_module("x")`。惰性 import、「注入晚于 import」
+    「注入只在函数体内」都算违规。
+  - **反向自证**：19 个合成样本（9 违规 + 10 合规）；对每个「现在合规」的**真实**脚本，用 AST 把它的注入换成 `pass`
+    后守卫必须变红；变异器对「注入是 if/try/with 块里唯一语句」另有 3 项样本钉住（整行删会留下空块 ⇒ SyntaxError）；
+    根模块枚举的正对照（清单为空会让扫描恒绿）。
+  - **真子进程**（cwd 与仓库根无关、清 `PYTHONPATH` 与脚本专属的 `ALPHA_HIVE_PHEROMONE_DB`、`ALPHA_HIVE_*` 全钉到临时目录、
+    两端钉 UTF-8 不随宿主 locale 变）：三个脚本各走到自己 import 所在的缺省路径。vol 用合成库 + **样本计数指纹**
+    （96 条有效 + 3 条应被过滤的哨兵行，输出必须是「样本 96 条」），既证明读的是夹具库又证明三道过滤生效；
+    bear 靠回显的 `root=<夹具目录>`；ticker 用**带表结构的零行库**，靠回显的 `DB: <夹具>/pheromone.db` 证明
+    `PATHS.db` 落在夹具——库必须**存在**，这样 `find_db()` 在 `PATHS.db` 一级就返回，走不到第三级的
+    `/sessions/*/mnt/…` glob（Cowork VM 挂载点），测试不随「这台机器上有没有那个挂载点」而变。
+  - **canary**：一个无注入的脚本在同一套子进程环境里必须 `ModuleNotFoundError`——防 `.pth` / `PYTHONPATH` 泄漏
+    让上面三条永远假绿。
+
+### 验证
+
+- **先红后绿**：修复前 4 红 + 15 绿——4 红是静态扫描与三条真子进程；静态扫描恰好点名这三个脚本（第 77 / 81 / 86 行），
+  三条子进程红在 `ModuleNotFoundError: No module named 'hive_logger'`（不是夹具或断言写错）。一审提交时 19 项全绿。
+- 同一 harness 前后对照：`ticker_winrate_persistence`（无参）与 `bear_read_miss_audit`（无 `--root`）由
+  `ModuleNotFoundError` 变为各自设计内的输出（「找不到 pheromone.db」/ `root=<临时目录> … 无可用行`，退出码 1 / 3）；
+  `bear_read_miss_audit --help` 修前修后都是退出码 0。
+- **先红后绿（二审）**：新增 10 项测试里 6 项在改实现之前是红的（同行注入 1、动态 import 2、变异器空块 3），改完全绿；
+  其余 4 项是新增的合规样本，本来就绿——它们防的是**误报**而不是漏报。
+- 两个经验性论断实测：`LC_ALL=en_US.ISO8859-1` 下 4 项子进程相关测试通过；模拟 Cowork 挂载命中（在子进程里把 `glob.glob`
+  打桩成返回一个假路径）时，旧夹具（无库）会去开那个假路径、`sqlite3.OperationalError`、退出码 1，新夹具（有库）不受影响、
+  输出 `DB: <夹具路径>`、退出码 0。
+- 相邻守卫（`test_paths_not_frozen_at_import` / `test_experiments_pooled_guard` / `test_reads_own_checkout`）与
+  `ruff check .`（全仓，同 CI）通过。
+- 全套（在 git worktree 里跑）：**5086 passed**、1 failed、1 skipped、83 deselected、2 xfailed（369 秒）；唯一的红是
+  `TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`（nfp 覆盖剩 77 天、阈值 90 天，日期驱动，
+  干净 main 上就是红的，与本条无关，未动）。收集数 5060 → 5089，恰好 +29（本文件的 29 项）。
+- **逐条对账**：`-rA` 里 PASSED/FAILED/XFAIL 的节点 ID 与 `--collect-only` 的节点 ID 是同一个集合（各 5089 个，0 缺 0 多）。
+  一审时记的「运行结果合计 5080 比收集数 5079 多 1」由此得到解释：那 1 个 skipped 是 `tests/test_scheduler.py` 的
+  **模块级 skip**（`schedule` 库不可用），它不是被收集的条目，所以是 5089 个条目 + 1 个模块级 skip = 5090 个「结果」。
+
+### 二次检查（`/code-review` high：4 个并行 finder，10 条上报，逐条实测验证）
+
+一审提交（`c1a26f37`）之后又审了一遍。10 条里 9 条已修、1 条评估后未采纳：
+
+- **我自己改坏的一处**：`experiments/bear_read_miss_audit.py` 第 35 行 `FIX_DATE = "…"` 被我改成了 `FIX_DATE ="…"`——用 Edit
+  工具时 new_string 末尾的空格丢了。无运行时影响、ruff 不报，但不该出现在这个提交里；3 个 finder 独立发现，
+  已逐字恢复（与修前该行 `repr` 相同）。
+- **两处不实表述**（「Fixed」一节已更正）：「内联是为了躲 `test_paths_not_frozen_at_import`」（该守卫不扫 `experiments/`）、
+  「沿用各自文件已有的 `realpath` 惯用法」（修前根本没有）。前者原样抄自任务简报，我没有对着扫描代码核。
+- **ticker 测试随环境变**：原断言「找不到 pheromone.db」依赖 `/sessions/*/mnt/…` 不存在；改用零行带表库（见「Added」），实测见「验证」。
+- **变异器**：整行删除在「注入是块里唯一语句」时留下空块 ⇒ SyntaxError，改为换成 `pass`；与别的语句同行的情形显式抛错而不是
+  悄悄改坏——这条保险**在真实文件上响过一次**：`fg_exposure_gate_forward_test.py` 等 3 个文件的注入带行尾注释，判据先误伤了注释，
+  放宽到「行尾允许注释」。检查器与变异器现共用一个 `_module_level_injections`，不再各自定义「什么算注入」。
+- **检查器**：只比行号 ⇒ 同行 `from hive_logger import PATHS; sys.path.insert(…)` 被放过，改比（行, 列）；动态 import 不识别，
+  补认常量字符串实参的 `__import__` / `importlib.import_module`。
+- **子进程输出解码随宿主 locale 变**（Latin-1 下子进程 `UnicodeEncodeError`，被误报成「脚本崩溃」）：两端钉 UTF-8。
+- **夹具**：`N_VALID` 与循环界各写一份、`d0/day` 有死赋值——抽成 `WEEKS, TICKERS`。
+- **数字对不上账**（5080 vs 5079）：逐条对账后得到解释（见「验证」）。
+
+**未采纳**：`_run` 与 `tests/test_experiments_pooled_guard.py` 里的 `_run` 近乎逐字复制——抽共享 helper 要改动另一个无关且通过的
+测试文件；被模仿的那份也有同样的 locale 弱点，本次未动。另有几条低价值候选未列入上报：`sys.stdlib_module_names` 要 Python ≥ 3.10
+（`pyproject.toml` 写 `requires-python >= 3.9`，但 CI 与生产解释器都是 3.11，且仓库已声明 3.9 会因 PEP604 直接崩）；
+「`experiments/_bootstrap.py` 共享注入」（守卫得再学会认它，收益不抵复杂度）；`_root_modules()` 多次 glob（总计毫秒级）。
+
+### 教训 / 没做 / 边界
+
+- **「批量改路径后真跑每个被动过的脚本 `--help`」这条旧教训本身有洞**：vol 没有 argparse、`--help` 不被识别；
+  另两个是惰性 import，argparse 在走到它之前就退出了。探针必须走到 import 所在的**代码路径**。
+  同理**退出码不能当判据**：崩溃和 `ticker_winrate_persistence` 设计内的「找不到」都是 1。
+- 第三个脚本是**新写的**代码在迁移三天后把同一个错重犯——只修存量不够，所以要守卫。
+- 守卫**不校验注入的是不是仓库根**，只校验「存在、模块层、在 import 之前」。一次性脚本
+  `patch_swarm_results_20260917.py` / `replay_swarm_sequence_20260917.py` 硬编码了主 checkout 路径，
+  开发机上有效、别处无效，守卫放行；「注入得对不对」靠真子进程测试，目前只覆盖上面三个。
+- 注入只认 `sys.path.insert/append/extend` 三种调用且须是独立表达式语句，别的写法会红（有意：宁可误报也不放过未识别的形式）；
+  import 侧只认常量字符串实参的动态导入，变量/拼接出来的模块名认不出（这一侧是漏报方向）。
+- 任务简报的范围是 `vol_regime_filter.py` 一个；另外两个是同根因、同一行修法，且守卫的验收条件（「修复后变绿」）
+  要求一并修掉，故合并在本条。experiments 脚本不进评分，**不需要世代边界**。
+
+---
+
+## [0.45.293] — 2026-09-18 — Removed：退役仓库外死脚本 `alpha-hive-daily.sh`（移入 `retired/`、去掉执行位）；`setup_cron.py` 白名单同步摘掉它
+
+用户 2026-09-18 决定「退役或删除」，选**退役**（可恢复）而不是 `rm`：该文件不在 git 里，删了无处可找回，
+而退役已经足以消除下面的陷阱。关闭 v0.45.213「顺带发现」里挂着的「仓库外死脚本，未删」，也接上 v0.45.287
+二次检查记下的「假简报」隐患。（v0.45.287 记的「评估后不改」指的是**不给那一行加花括号**，与本条不矛盾——
+这次是整体退役。）
+
+### 为什么
+
+- **它是死的**：本机 LaunchAgents / crontab 均无引用；第 45 行的 `~/.claude/reports/alpha_hive_daily_report.py`
+  不存在，就算指到仓库里的同名文件，不带 `--swarm` 也会被 v0.45.213 的退役闸拒绝（exit 2），且用裸 `python3`；
+  2026-02-24 后未改动。
+- **它有陷阱**：python 步失败后照样「继续进行」，进「备用简报」分支写出
+  `~/.claude/reports/alpha-hive-daily-<日期>.md` 固定模板——标题是字面的 `YYYY-MM-DD`、写着
+  「系统状态：✅ 已完成 Phase 1-6」而什么都没跑；`send-to-telegram.py` 不带参数时取该目录里最新的
+  `alpha-hive-daily-*.md`。无自动调用方，所以只是潜在风险，但留着就是留着一个会说谎的入口。
+
+### Removed / Changed
+
+- `~/.claude/scripts/alpha-hive-daily.sh` → `~/.claude/scripts/retired/alpha-hive-daily.sh.retired-20260918`：
+  `mv -n`（不覆盖）、`chmod a-x`，mtime 保留。**恢复**：`mv` 回原路径 + `chmod +x`。想彻底删，`rm` 那份即可。
+- `setup_cron.py`：`set_crontab` 的 `ALLOWED_SCRIPTS` 摘掉该路径（留一行注释说明）。它此前会**放行并安装**一条
+  指向该路径的手写 crontab 行，之后每次触发都找不到脚本；现在安装时就被拦下（`Blocked crontab entry`）。
+  `setup_cron.py` 自己生成的 cron 选项从不使用这个脚本（全是 `run_alpha_hive_daily.sh`），无其他调用点。
+- 新增 `tests/test_setup_cron_allowlist.py`（2 项）：AST 读白名单字面量、**不执行 `set_crontab`**——放行分支会真跑
+  `crontab -` 覆盖用户 crontab，靠 mock 拦它，一旦有人把 `Popen` 换成 `run` 打桩就落空、测试改写真 crontab。
+  含对照：真白名单里仍有 `run_alpha_hive_daily.sh`，证明解析器找到的不是空集合。
+
+### 验证
+
+- 搬前搬后 sha256 相同（`e81435fb379f0765`）；旧路径现在 `No such file or directory`（rc=127，什么都不会跑）；
+  `~/.claude/reports` 里 `alpha-hive-daily-*.md` 0 份；编排器 sha256 不变（`27c33586…`），
+  launchd 任务 `com.alpha.hive.daily` 仍在 `launchctl list` 里。
+- `set_crontab` 行为前后对照（`Popen` 打桩，真 crontab 未碰，跑完仍 0 条 alpha-hive）：
+  退役脚本 **ACCEPTED → blocked**；活脚本 ACCEPTED 不变；未知脚本（`/tmp/evil.sh`）blocked 不变。
+- 变异 2 种，各红对应的一条：把退役路径加回白名单 → `test_retired_script_is_not_allowed` 红；
+  删掉活脚本那行 → `test_live_script_still_allowed` 红。
+- 元守卫替我抓了一次：初版对照断言写死了 `/Users/igg/...`，`test_reads_own_checkout.py::test_no_home_directory_paths`
+  红；改成按文件名后缀认后，元守卫 + 本文件 + 完整性 + 路径守卫共 157 项全绿，`ruff` 通过。
+- 全套 `pytest --maxfail=0`：**5160 passed**、1 skipped、83 deselected、2 xfailed；唯一的 1 红是
+  `TestCoverageHorizon`（经济日历覆盖告警，按设计定期变红，与本条无关，未动）。
+
+### 没做 / 边界
+
+- `~/.claude/config/crontab-setup.txt`（仓库外用户级文档，全是注释）仍写着安装该脚本的步骤，已失效；**未改**。
+- 该脚本里 `$SPAWN_COUNT（` 那行随之成为历史，v0.45.287 的「不改」决定不变；文件原样在 `retired/`，没修。
+- v0.45.213 那段「未删」原文未改（历史条目不回改），以本条为准。
+
+---
+
+## [0.45.292] — 2026-09-18 — Fixed：`test_data_backup.py` 把伪造记录写进真实 `~/alpha-hive-data`（v0.45.291 记录的泄漏）——整个文件套沙箱 `$HOME`
+
+v0.45.291 记了一个未处理的发现，本条修它的**测试隔离**部分。**真实文件的清理未做**（见末尾）。
+
+### 根因（已在 v0.45.291 写明，这里只补新增事实）
+
+`run_backup.main()` 的 `--backup-dir` / `--status-file` / `--history-file` 默认值都是
+`Path.home() / "alpha-hive-data" / ...`，而 `tests/conftest.py::_isolate_env` 只隔离
+`ALPHA_HIVE_*`、**不隔离 `$HOME`**。v0.45.284 给 `run()` 新增「追加历史」副作用后，
+它自己的新测试（`TestRunBackupHistoryAppend`）都显式传了 tmp 的 `--history-file`，
+但 `TestRunBackupStageReporting` 里 7 个**更早写的**测试没跟着改——新增副作用 +
+老调用点未更新，是同一个形状（对应泄漏的 7 行：export / commit / push / init /
+git_error ×2 / done）。
+
+新证据：真实历史文件在 v0.45.291 检查（112 行）之后又涨到 **119 行（17 × 7）**——
+那之后本 session 的测试都改用了假 `HOME`，所以这 7 行来自这台 Mac 上别处的一次
+`test_data_backup.py` 运行（具体是谁**未查**）。污染在持续发生，不是一次性事件。
+
+### Fixed
+
+- `tests/test_data_backup.py`：新增 `_sandbox_home` fixture（`tmp_path_factory` 造目录、
+  `monkeypatch.setenv("HOME", ...)`），并用模块级
+  `pytestmark = pytest.mark.usefixtures("_sandbox_home")` 套在**整个文件**上。
+  选整个文件而不是只修 7 个调用点，是因为泄漏的成因正是「新增副作用、老调用点没跟上」，
+  只补 7 处参数下一个新测试还会漏；沙箱 `HOME` 让这一类**按构造**不可能再写真实目录
+  （`--backup-dir` / `--status-file` 的默认值一并被兜住）。
+  **没有**改成全套 autouse 设 `HOME`：`_ORCH`（编排器路径）是 import 期
+  `os.path.expanduser` 算的、且整个仓库有 30 余条测试靠真实 `HOME` 找仓库外的编排器，
+  全局改 `HOME` 会让它们全部静默变成 skip；另外用户级 site-packages 也在 `~` 下
+  （本机实测：`HOME` 指到空目录后解释器直接报 `No module named pytest`，
+  起子进程的测试能否幸免**未逐个核实**）。本文件里没有任何 `HOME` / `environ` / `env=`
+  依赖，已核对。
+- 新增 `TestHomeSandboxHasTeeth`（2 项）让沙箱本身有牙：
+  ① `Path.home()` 不得等于**真实**家目录（取自用户库 `pwd.getpwuid`，不读 `$HOME`，
+  不会被 monkeypatch 骗到），且 `_sandbox_home` 必须在 `request.fixturenames` 里
+  （证明模块级 mark 生效）；② 不传 status/history 参数跑一次 `run_backup.main`，
+  默认落点必须在沙箱 `HOME` 下（证明「默认值跟着 `$HOME` 走」这个前提成立）。
+
+### 验证
+
+- **真实 `HOME` 下**跑 `tests/test_data_backup.py`：40 passed、**0 skipped**（读编排器的
+  16 条没有因沙箱变成 skip），真实历史文件行数 **119 → 119（增量 0）**；连同
+  `test_backup_continuity` / `test_orchestrator_braced_vars` / `test_changelog_entry_integrity`
+  共 106 passed，真实文件增量仍为 0。`ruff check` 全过。
+- **假 `HOME`（模拟 CI，编排器不存在）**下跑该文件：24 passed、16 skipped，假 `HOME`
+  里**没有** `alpha-hive-data` 目录生成。
+- **反向变异**（在假 `HOME` 下做，不再污染真实文件，随即还原）：删掉 `pytestmark` ⇒
+  假 `HOME` 里写进了同样的 7 行伪造记录（泄漏原样复现），且
+  `test_module_mark_is_in_effect_and_home_is_not_the_real_one` 变红。
+
+### ⚠️ 未处理 / 需要用户决定
+
+- **真实文件仍是污染的**：`~/alpha-hive-data/logs/backup_status_history.jsonl`
+  的 119 行全是测试伪造（17 个整块全匹配伪造模式，无一真实记录）。测试隔离修好只是
+  **止住新增**，存量仍在，且 `backup_continuity.read_history` 是「同一天任一条 `ok:true`
+  即判当天健康」，所以**今天**这一天目前会被判成健康。清理它是写生产数据，
+  需要用户确认；建议先备份原文件再去掉伪造行。
+- **别的 checkout / worktree 里的旧测试仍会泄漏**：本修复只在合入 `main` 后才对其它 session
+  生效；在此之前任何还没 rebase 的 worktree 跑该测试文件都会继续往真实文件追加。
+- **没有加数据根指纹守卫**（v0.45.291 曾提议）：那要在真实 `~/alpha-hive-data` 上打指纹，
+  而生产的备份/扫描任务也会合法写那里，测试恰好与之并发时会误红；本次用「按构造不可能」
+  的沙箱 + 两条有牙的测试代替，未引入这类不确定性。
+
+---
+
+## [0.45.291] — 2026-09-18 — Changed：CI 的 pytest 加 `-rs`，摘要里列出每条 skip 的原因；⚠️ 顺带发现 `test_data_backup.py` 把伪造记录写进了真实 `~/alpha-hive-data`（**未处理**）
+
+### Changed
+
+- `.github/workflows/tests.yml`：`pytest -m "not integration and not network" --maxfail=0`
+  末尾加 `-rs`，并在命令上方注释里写明理由。
+  **动机**：`pyproject.toml` 的 `addopts` 只有 `-v`，CI 日志里一条 skip 只显示
+  「SKIPPED」一个词、看不到原因。今天几次 CI 的跳过数从 24 涨到 35，要查原因只能
+  在本机复现。依赖仓库外文件（编排器脚本、launchd plist）的那批测试在 CI 里恒 skip，
+  不靠 `-rs` 没人知道它们为什么没跑。
+  **没有**改 `pyproject.toml` 的 `addopts`：那会改变所有人本地的输出，本次只要 CI 可见。
+  **没有**建「编排器 skip 登记表」（曾评估，结论是不做：它只登记不验证、当前无违规可抓、
+  会让每个新编排器测试都触发红灯并多一个跨 session 的撞车点）。
+
+  验证：YAML 解析通过，实际执行的命令为 `pytest -m "not integration and not network"
+  --maxfail=0 -rs`；用空 `HOME` 模拟 CI（编排器/plist 不存在）跑 6 个相关测试文件，
+  摘要里逐条出现 `SKIPPED [n] tests/test_data_backup.py:541: 编排器不在本机（仓库外文件）`
+  这种带文件行号与原因的行。
+
+### ⚠️ 顺带发现，**本条未处理**（需要用户决定）
+
+`tests/test_data_backup.py` 里跑 `run_backup` 的那批测试**会写真实的 `$HOME`**：
+
+- 机制：`data_backup/run_backup.py:195` 的 `--history` 默认值是
+  `Path.home() / "alpha-hive-data" / "logs" / "backup_status_history.jsonl"`，
+  这些测试没有覆盖它；`tests/conftest.py::_isolate_env` 隔离的是 `ALPHA_HIVE_HOME` 等，
+  **不隔离 `HOME`**，`Path.home()` 因此指向真实目录。
+- 实证一（假 `HOME`）：把 `HOME` 指到空目录只跑该文件 ⇒ 产生
+  `alpha-hive-data/logs/backup_status_history.jsonl`，内容是测试造的 7 行
+  （`export/commit/push/init/git_error/git_error` 均 `ok:false`，末行 `done ok:true`）；
+  其余 6 个相关测试文件均无此副作用。
+- 实证二（真实文件，只读检查）：`~/alpha-hive-data/logs/backup_status_history.jsonl`
+  共 112 行、**全部日期为 2026-09-18**，112 = 16 × 7，16 个整块**全部**匹配上述伪造模式，
+  **没有一条真实记录**——每次在本机跑 `test_data_backup.py` 就多追加 7 行
+  （含本 session 自己的多次本地测试）。
+- 后果：这个文件正是 v0.45.284 `backup_continuity.py`「连续 N 天失败/陈旧」检测读的输入。
+  `read_history` 的规则是**同一天任一条 `ok:true` 即判当天健康**（源码 102 行注释：
+  人工重跑会有多条，「成功取任一条」），而测试每次都会写一条 `done ok:true` ⇒
+  **凡是在这台 Mac 上跑过 `test_data_backup.py` 的日子，真实备份失败都会被伪造的成功
+  掩盖**，即本仓头号故障形状「把失败改写成没发生过」。任何现有守卫都没抓到它：仓库根总闸只对
+  仓库根下的内容打指纹，不看数据根 `~/alpha-hive-data`。
+- **本条没有改任何代码、也没有动那个真实文件。** 清理真实文件（先备份再去掉伪造行）
+  与修测试隔离（给这批测试显式传 tmp 的 `--history`，并补一道数据根的指纹守卫）
+  都需要用户确认。
+
+---
+
+## [0.45.290] — 2026-09-18 — Added：experiments 里两个跨世代混算脚本默认拒绝运行（P3，收窄版）；顺带发现 signal_ic_sweep 自 09-15 起跑不起来
+
+原始四点分析里的 P3 是"下游脚本未接入 `generation_boundaries()`"。我最初的建议是
+"只修 `signal_ic_sweep.py`、工作量很小、抄现成切片"，并在用户选定 A+B（接边界 + 护栏，
+分母固定）之后，被要求先自审这个改动值不值。自审用实测推翻了 A，留下 B，见下。
+
+### 复核结果（全部只读，生产库 + `.swarm_results`）
+
+- **sweep 只留下过一次运行产物**（08-25 的报告），git 里只有创建（08-26）与 09-15 的批量路径
+  收口；就绪度闸放行后的 `next_step` 是 `ml_expected_return_replay.py && signal_archive.py
+  --analyze`，不含 sweep；`analyze()` 用的 `diagnose()` 已含同类方法（不重叠周 t、剔极端的
+  jackknife、regime 分段——sweep 剔极端**周**、`diagnose()` 剔极端**日**，同类不等同），
+  且已按边界切。sweep 独有的只剩全信号 Bonferroni 与三分位价差。
+- **6 个合成信号不在归档宇宙里**：sweep 自造 `predictions.final_score` 与 5 个 `dim.*`
+  （维度分从没进过归档）。`generation_boundaries()` 对不认识的名字按保守规则"受全部边界
+  约束"，起点 09-18，全部切光——要接就得显式映射（`dim.X` → `agent.<Bee>.score`，代码上
+  `dim_scores[dim]` 就是该维度对应蜂的 `score`）。
+- **且它们在归档里各有同义名**（同一个假设被数了两遍，检验集合 N=69 里占 6 个），两个数据源
+  还不一致：`predictions` 与 `signal_archive` 在 **10 个日期**上对不上（03-16、06-22、06-26、
+  06-29、07-06、07-08、07-09、07-22、07-23，以及 09-17——后者是 v0.45.271 重放补算更新了
+  `predictions`、归档没跟；前几个早期日期原因**未查明**）。
+  ⚠️ **我起初把"剔除这 10 天后结论变了"读成对数据源分歧的敏感性，这个归因站不住**：剔除后
+  `dim.sentiment` +0.183（t=3.54）→ +0.115（t=2.06）、`dim.odds` +0.072 → +0.041、
+  `dim.risk_adj` −0.148 → −0.186、`dim.signal` −0.119 → −0.138，方向不一；但剔除日期会同时
+  改变多个周的**"代表日"**（sweep 取每 ISO 周第一个可用交易日），而下一条显示 sentiment 的周度 t
+  对代表日极脆弱——两个效应分不开。两源不一致本身是事实，它对结论的影响**未隔离**。
+- **比 z→t 更大的不稳定源：「每周取哪一天」**（另一 session 的 memory
+  `alpha-hive-t-vs-normal-p.md` 独立得到同一组数字，我复现了）。同一批 `dim.sentiment` 日度
+  IC，只改每周取哪一天：第一个可用日（现行）n=26、IC +0.183、t=+3.54；固定周一 n=18、+0.228、
+  t=+3.97；周二 +0.118（t=1.83）；周三 +0.068（t=1.08）；**周四 −0.041（t=−0.54）**；周五 n=16、
+  +0.152（t=+2.23）；最后一个可用日 t=+0.65；日度 IC 全体均值 +0.107（91 个交易日，重叠，
+  仅参照）。同一个信号，p 在 0.002 与 0.6 之间摆动，摆幅远大于 z→t 的 4 倍。**没验证**这是
+  周一真效应还是"5 个星期里挑最好的那个"，n 太小分不开。
+- **干跑（假如今天就接边界）**：可检验信号 69 → 27，6 个合成信号全部"不可检验(<8 周)"。
+  `dim.sentiment` 的 26 周里 **24 周在 08-26 边界之前、当前口径下只有 2 周**——既不能证实也不能证伪；
+  攒够 8 周约 10 月底（sentiment/catalyst）～ 11 月中（final_score/signal/risk_adj）。
+- **p 值口径**：sweep 与 `final_score_dilution` 用正态近似 `erfc(|t|/√2)`，周度 IC 均值该用
+  t(n−1)。`dim.sentiment`（n=26、t=+3.54）：正态 p=0.0004、t 分布 0.0016，Bonferroni(N=69)
+  0.028 → **0.110，sweep 唯一的"幸存者"消失（1 → 0）**（另一 session 独立复核得到同一数字：
+  0.0277 → 0.1105）。小样本倍数（t 分布 p ÷ 正态 p）：
+  n=26 时 t=3 为 2.2×、t=4 为 7.8×；n=16 时 t=3 为 3.3×；n=8 时 t=3 为 7.4×、t=4 为 82×。
+  同一个近似也在 `ic_diagnostics.normal_two_sided_p`（`analyze()` 的 `sub_p_bonferroni`，且只乘
+  5 个维度）——本版**没动**，见"发现未处理"。
+- **隔离**：生产库里 `QUARANTINE` 12 条对应的行残留 **0**（写入端生效 + 已清理）；读取端
+  `load_panel`/`analyze`/sweep 都不问 `is_quarantined`，目前无影响。
+- 其余 experiments 对归档的读取：`vol_regime_filter`（只读 `options.iv_current`，无边界）、
+  `ml_expected_return_replay`（自带"历史重放，勿据此描述现状"）、`ic_power_analysis`（只用
+  骨架估功效，仅看了入口）、`misjudgment_pattern_walkforward`（功能已撤）——都不动。
+
+### 为什么收窄：A（接边界）不做，"分母固定"也不在本版
+
+- A 要维护第二条 IC 流水线，服务一个使用次数为 1 的脚本；近期产出全是"不可检验"。
+- **"分母固定"调的是错的旋钮**：切世代让 Bonferroni 分母从 69 变 27，只宽松 2.6 倍；而小样本下
+  正态近似把 p 低估 3～82 倍；更大的旋钮是"每周取哪一天"（p 在 0.002～0.6 之间摆动）。
+  在这个 p 上加更保守的分母，得到的是"看起来更严谨、实际更不可信"的工具。统计有效性要在
+  `ic_diagnostics` 一处修，不是在 sweep 里。
+- 设计结论留作记录：将来若在 `analyze()` 上加全信号校正列，分母取**被检视信号总数**
+  （不是过 8 周门槛的数），且必须先把 p 值改成 t 分布。
+
+### Added
+
+- `experiments/signal_ic_sweep.py`、`experiments/final_score_dilution.py`：新增
+  `--pool-generations`；**默认拒绝运行**（退出码 2，信息走 stderr，指向
+  `signal_archive.py --analyze`），且护栏在开库之前；放行时先打横幅（跨世代混算 + p 值正态近似的
+  量级），横幅在结果之前。`final_score_dilution.py` 此前根本没有 argparse（连 `--help`
+  都没有，直接读默认库），一并补上；横幅里另外注明它拿**当前** `EVALUATION_WEIGHTS`
+  （signal/risk_adj 现为 0）配混算历史 IC，"抵消"叙事已不描述现状。
+- `experiments/signal_ic_sweep_report.md`、`experiments/final_score_dilution_report.md` 顶部
+  补注（产物的读者也需要护栏）：混算口径、p 值口径、`dim.sentiment` 24/26 周在边界前、
+  sentiment 周度 t 对"每周取哪一天"的脆弱性（+3.97 ↔ −0.54）。运行时横幅同样带这一条。
+- `tests/test_experiments_pooled_guard.py`（8 条，真子进程跑 CLI）：默认拒绝且先于开库；
+  **有数据时默认也拒绝**（反向自证，防"没库所以拒绝"造成的假绿）；放行能跑完并横幅在结果前；
+  两份报告顶部补注在。
+
+### Fixed
+
+- `experiments/signal_ic_sweep.py`：补 `sys.path.insert`。v0.45.260（数据根迁移阶段 2，
+  09-15）加 `from hive_logger import PATHS` 时漏了它，按文档方式
+  （`python3 experiments/signal_ic_sweep.py`）跑会 `ModuleNotFoundError`——零测试、零调用方，
+  坏了三天没人知道。
+
+### 世代边界
+
+**无。** 这两个脚本是离线诊断，不进评分、不进 `signal_archive`，`_COHORT_HISTORY` 不动，
+样本代价 0，也没有 09-18 14:00 扫描的时间压力。
+
+### 核对
+
+- `tests/test_experiments_pooled_guard.py` 8 passed（修复前 8 红：sweep 导入失败 exit 1、
+  dilution 有数据时不拒绝且无横幅、两份报告无补注）。**第一版测试栽在环境上**：`PATHS.db` 先读
+  `ALPHA_HIVE_DB_PATH`，而 conftest 的 `_isolate_env` 把它设成别处，子进程照单全收，只设
+  `ALPHA_HIVE_HOME` 会让脚本去开一个不存在的库——现在把 DB/日志/缓存/chroma 全部显式钉进临时目录。
+- **变异检验**：只删掉 `sys.path.insert` 一行，3 条 sweep 测试变红；恢复后全绿。
+- 生产库只读实跑：默认拒绝（exit 2）；`--pool-generations` 下 sweep 仍是 69 个可检验信号、
+  `dim.sentiment` +0.183 / t=+3.54 / 26 周，与改动前的干跑数字一致（计算没被改动）。
+- `ruff --select F821` 全绿；`test_paths_not_frozen_at_import` / CHANGELOG 完整性通过。
+- 全量套件（代码与测试改完之后）：**5052 passed、1 failed**——仅 `TestCoverageHorizon`（经济日历，
+  日期驱动；v0.45.288 已在干净 `origin/main` 上核实它同样红）。此后只改了文案（横幅 / 补注 /
+  CHANGELOG 订正），护栏测试 + CHANGELOG 完整性重跑 27 passed、ruff 全绿。并入的
+  origin/main 两个新提交（v0.45.291 CI `-rs`、v0.45.287 收口）只动 `CHANGELOG.md` 与
+  `.github/workflows/tests.yml`，与本版文件无交集。
+
+### 发现未处理（留给用户决定）
+
+- **`experiments/vol_regime_filter.py` 同一根因也坏了**（`ModuleNotFoundError: hive_logger`，
+  同为 v0.45.260 收口漏 `sys.path`）。不在本版收窄范围。建议单独处理，并加一条静态守卫：
+  experiments 脚本 import 仓库根模块必须带 `sys.path` 注入——同一次批量改动弄坏两个脚本、
+  三天没人发现，正是"谁会红"答不上来的形状。
+- **p 值有效性审计已由另一 session 同时段完成**（memory `alpha-hive-t-vs-normal-p.md`：同一近似
+  在仓库里被各自手搓 ≥7 处、逐路径换 t 后变不变、待决 4 项含预注册的 F&G 前瞻检验）。我原本把它
+  列为待立项的建议，现在是重复劳动——**本版不改任何 p 值口径**，那份审计的待决项仍待用户。
+- `predictions` 与 `signal_archive` 在 10 个日期不一致的原因（09-17 已明，其余 9 个早期日期未查明）。
+- sweep 放行路径上，`n_tests == 0`（空库 / 全部不足 8 周）会 `ZeroDivisionError`
+  （`0.05/n_tests`）；生产数据不会触发，未改。
+
+## [0.45.289] — 2026-09-18 — Fixed：`backup_continuity.py:ALPHAHIVE_DIR` 漏登记进 `__file__` 派生白名单，CI 上 `test_no_new_file_derived_paths` 变红
+
+v0.45.286 推送后取到一次真实跑完的 CI（run `35360798518`）：`alpha_hive_mcp` 的
+`ModuleNotFoundError` 已消失，但多出一条**新**失败，与 v0.45.286 无关：
+
+```
+FAILED tests/test_paths_not_frozen_at_import.py::TestFileDerivedSpeciesDoesNotSpread::test_no_new_file_derived_paths
+    - backup_continuity.py:ALPHAHIVE_DIR
+```
+
+### 根因
+
+`backup_continuity.py` 是 v0.45.284（另一 session，Step 14 连续失败检测）新增的文件，
+66–67 行 `ALPHAHIVE_DIR = Path(__file__).resolve().parent` + `sys.path.insert(0, ...)`，
+**照抄 `scan_continuity.py` 的写法**——但没有像后者那样登记进
+`tests/test_paths_not_frozen_at_import.py` 的白名单，于是被子集守卫当成「新增了
+`__file__` 派生路径」。全文件只有这一处用 `ALPHAHIVE_DIR`（仅 `sys.path.insert`，
+即「代码在哪」），按该守卫自己的判据是**合规的代码锚点**，不是路径 bug——
+不需要改 `backup_continuity.py`，也不该改成 `PATHS.home`（那会在测试把
+`ALPHA_HIVE_HOME` 指向 tmp 后 import 不到同目录模块）。
+
+### Fixed
+
+- `tests/test_paths_not_frozen_at_import.py`：把 `("backup_continuity.py", "ALPHAHIVE_DIR")`
+  同时登记进 `TestFileDerivedSpeciesDoesNotSpread.KNOWN`（A 类，`sys.path.insert`）
+  与 `MUST_STAY_FILE_ANCHORED`（防日后被「一刀切」清成 `PATHS.home`）两张表——
+  两张表必须同进同出（`test_both_directions_are_guarded` 要求 `MUST_STAY ⊆ KNOWN`）。
+  顺带把三处随之过期的计数注释更新（「这 12 处」→ 13；`KNOWN` 表头追加
+  「v0.45.289 +1」；`resolve_inside_the_repo` 处「12 项」后补「13 项」）。
+
+### 验证
+
+- `tests/test_paths_not_frozen_at_import.py`：**86 passed**（此前 85，多出的 1 项是
+  `test_code_anchored_paths_resolve_inside_the_repo[backup_continuity-ALPHAHIVE_DIR]`
+  ——它同时核对该锚点真实存在且落在仓库内）；`ruff check` 全过。
+- 反向变异（只改本 worktree、随即 `git checkout` 还原、未提交）：把
+  `backup_continuity.py:66` 临时改成 `ALPHAHIVE_DIR = PATHS.home` ⇒
+  `test_code_anchored_paths_were_not_wrongly_converted` 与
+  `resolve_inside_the_repo[backup_continuity-ALPHAHIVE_DIR]` **两条同时变红**，
+  证明新登记的这一项在「错误清理」方向上有牙，不只是让红灯闭嘴。
+
+### 未处理 / 如实记录
+
+- 本条只处理 CI 上的这一条**新**红灯。`TestCoverageHorizon`（经济日历，等 BLS 发布
+  2027 日程）仍红，见 v0.45.286，未动。
+- 「新增 `__file__` 派生文件却漏登记白名单」这一类，本次没有加任何预防措施——
+  守卫本身已经把它抓出来了（CI 红），漏的是**作者本地没跑到这条测试**。
+  是否要在写新文件的流程里加提醒，留给用户判断。
+
+---
+
+## [0.45.288] — 2026-09-18 — Fixed：BearBee 读板改走定点索引，不再被 MAX_ENTRIES 淘汰吃掉低分同伴
+
+v0.45.279 收尾时把 `bear_bee.py:39/512` 两处 `get_top_signals(n=20)` 记成"已知不做"，
+用户随后要求"看"。量过之后确认是实质问题：`BeeAgent._read_peer` 早在 v0.45.151
+就为"读同一轮里另一只蜂的条目"修好了定点索引，`BearBeeContrarian` 就继承自
+`BeeAgent`，却一直用着自己的 `_read_board_entry`（`get_top_signals(ticker, n=20)`
++ 前缀匹配）——v0.45.151/156/163/279 同一个"排行榜当普查/按身份取用"缺陷的
+第 5、6 处，同日修掉。
+
+### 生产实测（这处**可量**：Bear 自记录了 `details.data_sources`）
+
+口径：`.swarm_results_*.json`；`ml`/`guard`/`catalyst` 三键读到才写（缺席 = 没读到），
+`options` 读到写 `real`、走回落写 `options_api`；只统计上游确实发布过的行。
+（`insider`/`news` 按设计也会回落——Scout 没有内幕金额时本来就走 SEC——回落 ≠ 读丢，
+不进 miss 表，只给下界。）
+
+- **是容量效应，不是上游没发布**：全期（03-10 起 1634 行）9~16 只标的的日子 miss
+  0.7%~3.1%（749 行）；满名单（≥25 只）日子 options 19.2% / ml 23.8% / guard 30.1% /
+  catalyst 45.2%（854 行）。
+- **偏向方向因蜂而异**（低分先被挤掉，而各蜂"低分"的含义不同）。以下为 08-24 起满名单日
+  18 天共 540 行，也是 `experiments/bear_read_miss_audit.py` 的默认口径：
+
+  | 上游 | miss | "若读到会触发"：读丢组 vs 读到组 | 结论 |
+  |---|---|---|---|
+  | Oracle | 21.7% | 53.8% vs 43.3%；方向 bearish 的有 65.4%（34/52）必然没读到 | 偏，且回落路径只能少算 |
+  | Guard | 32.6% | 30.7% vs 15.9% | 偏 |
+  | Catalyst | 38.0% | 2.4% vs 22.7% | 反向：读丢的是本就贡献 0 的"无催化剂"，无害 |
+  | ML | 18.0% | 10.3% vs 11.1% | 无偏 |
+  | Scout / Buzz | — | 下界 0% / 4.7% | 无实质证据 |
+
+  Oracle 的回落路径（`OptionsAgent.analyze`）只看 `pc_ratio`/`iv_rank`，不看 `iv_skew`/
+  `gex`/Oracle 方向：读丢行读板值更高 63 例、更低 **0** 例，均差 +5.67 分。
+- **影响面**：22.4% 的行 `bear_score` 被低估（均值 +0.27、最大 +3.50）；现行阈值下方向
+  翻转 14/540（2.6%），**全部翻向看空**（neutral→bearish 11、bullish→bearish 2、
+  bullish→neutral 1）。Bear 不计票、不进 `final_score`，波及 `bear.*` 归档信号、报告
+  "看空对冲"版块与 dashboard。
+- **副作用**：读丢时 Bear 重新去拉 `OptionsAgent`/SEC/newsapi（Oracle 回落占满名单日
+  21.7% 的行）——正是它"读板以避免重复调用"的设计要躲的限流压力。
+- **重放方法与自校验**：真方法 `_compute_bear_score` + 现行阈值，baseline 与记录的
+  `rule_bear_score` 吻合 537/540（99.4%）；Oracle 读板路径复刻在读到的行上 423/423。
+  ⚠️ 第一版重放只有 87.8%——原因是**重放自己**把催化剂维度的键写成 `"catalyst"`，
+  而 `analyze()` 的 `dim_scores` 里是 `"chronos"`（被 `_weights` 静默过滤）。先校验重放
+  再信数字。同一趟里我还把 Oracle/Buzz 的下界阈值先写成 5.5（读板路径的方向规则只在
+  `<5.0` 时才抬到 5.5），纠正后 Buzz 从 14.1% 降到 4.7%，Oracle 的 65.4% 不变。
+
+### Fixed
+
+- `swarm_agents/bear_bee.py`：删掉自带的 `_read_board_entry`，六个读点
+  （Scout/Oracle/Buzz/Chronos/Rival/Guard）改走 `BeeAgent._read_peer(ticker, 精确
+  agent_id)`——不受 `MAX_ENTRIES` 溢出淘汰影响，保留 3600s 墙钟过期（与
+  `get_agent_entry`/`get_live_signals` 同口径）。`_generate_llm_bear_thesis` 的看多信号
+  列表改用 `board.get_live_signals(ticker)`（只在 LLM 模式生效，`--no-llm` 下零影响）。
+  顺带删掉随 helper 失去用途的 `Optional`/`PheromoneEntry` import。
+
+### Added
+
+- `tests/test_bear_bee_census_eviction.py`（25 条）：六个读点 × 洪水参数化（修复前红）+
+  无洪水对照（期望值是读板路径真值，修复前后都绿）+ 整轮"灌没灌满结果必须一致" +
+  夹具反向自证（洪水确实把同伴挤出排行榜、普查仍在）+ 合法回落保留（同伴从没发布 ⇒
+  三条网络回落各触发一次，证明桩接得上）+ 陈货拒收（2 小时前的条目不被读）+ LLM
+  看多列表 + AST 守卫（`bear_bee.py` 里不许再有 `get_top_signals`）。三条网络回落
+  全部换成记录桩，全程离线、零 API 费用。
+- `experiments/bear_read_miss_audit.py`：只读复量尺，按当日标的数过滤、以 09-18 为界
+  并列修复前/后的 miss 率。
+
+### 世代边界
+
+`ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-09-18", "v0.45.288")`，
+`signal_archive.COHORT_SIGNAL_SCOPE["v0.45.288"] = ("bear.score", "bear.options_bear",
+"bear.insider_bear")`。`generation_boundaries()` 实测：这三条 +
+`agent.BearBeeContrarian.score/direction` + `composite.swarm_agreement` +
+`composite.final_score`（`ALWAYS_SLICED`）→ 09-18 / v0.45.288；`bear.overval_bear`
+仍是 09-05 / v0.45.128（不读板、没变，且是 `bear.score` 的上游）；Guard/ML/crowding/
+Rival/Scout 仍是 v0.45.279，Oracle 仍是 v0.45.128——Bear 是它们的下游，闭包只往下游走，
+没有被误拖。
+
+**边界代价：0 条。** 当前世代样本数实测 `n_all_samples = 0`（v0.45.279 当天才立，09-18
+的扫描 14:00 PDT 才跑），本条与之同日。⚠️ 前提是赶在 09-18 14:00 扫描前推到
+`origin/main`（扫描前 `production_sync` 会快进）；否则当天样本混两种口径，要么把边界改到
+09-19、作废约 30 条。`composite.final_score` **无直接影响**（Bear 不进 final_score），
+但 `ALWAYS_SLICED` 使任何新条目都无条件牵动它、无法只切窄——这次恰好赶在世代为空的窗口，
+不必付这笔账。
+
+### 核对
+
+- `tests/test_bear_bee_census_eviction.py` 25 passed（修复前 10 红 15 绿：红的是六个读点、
+  整轮等价、陈货拒收、LLM 列表、AST 守卫；绿的是夹具自证 + 对照 + 保留的合法回落）。
+- `ruff --select F821` 全绿。
+- 全量套件（并入最新 `origin/main` 前）：5013 passed、2 failed，**均非本次改动引起**——
+  `test_no_new_file_derived_paths` 是别的 session 的 v0.45.284 `backup_continuity.py:
+  ALPHAHIVE_DIR` 未登记白名单，已被 v0.45.289 修复（并入后转绿）；`TestCoverageHorizon`
+  （经济日历 CPI/NFP 覆盖余量 83/77 天 < 90 天阈值）在**干净 `origin/main`** 上同样红，
+  日期驱动、设计性变红，不是回归。
+- 全量套件（并入 `origin/main` `ef85b662` 后重跑）：**5038 passed、1 failed**（仅上述
+  `TestCoverageHorizon`；另 1 skipped、83 deselected、2 xfailed）。`test_no_new_file_derived_paths` 已转绿。
+- `experiments/bear_read_miss_audit.py` 对生产快照复现手工数字（options 117/540、
+  Oracle bearish 下界 34/52）。
+
+### 不做
+
+- 不改 `MAX_ENTRIES`/淘汰逻辑；不新增口径字段（`data_sources` 已是自记录标记，修复后
+  缺席 = 上游没发布）。
+- Scout/Buzz 按设计的回落不动（Scout 无内幕金额时本来就走 SEC；Buzz 实测下界仅 4.7%）。
+- **待复量**：首个满名单扫描日落盘后跑 `bear_read_miss_audit.py`，"修复后"一栏应 ≈ 0。
+
+## [0.45.287] — 2026-09-18 — Fixed：编排器 18 处 `$VAR` 紧跟全角标点，UTF-8 locale 下 `set -u` 让**整个 shell 退出**——统一加花括号
+
+`~/.claude/scripts/alpha-hive-orchestrator.sh`（不受版本控制）里有 18 处（17 行）
+`"…（exit=$STEP10_RC），不影响主流程"` 这类写法：裸变量后面紧跟全角标点，中间没有 ASCII 边界。
+关闭 v0.45.221「未改、待用户决定」里挂了四天的那一条（当时数的是 15 处），也是 v0.45.284
+顺带发现、`spawn_task` 记为独立任务的同一件事（该条只改了自己新写的 Step 15 那一处）。
+
+### 问题
+
+macOS `/bin/bash`（3.2.57）在 UTF-8 的 LC_CTYPE 下，把紧跟在裸变量名后面的 UTF-8 **首字节**
+当成变量名的一部分：`$STEP10_RC）` 被读成变量 `STEP10_RC\357`，`set -u` 报
+`unbound variable`。实测边界（`LC_CTYPE=C.UTF-8`，`set -u`）：
+
+- 中招：`）` `「` `—` `🎉` `é` `×`（首字节 0xEF/0xE3/0xE2/0xF0/0xC3）；幸免：希伯来文 `א`
+  （首字节 0xD7 = Latin-1 的 `×`，不是字母）。**二次检查用 `ctypes` 对全部 51 个 UTF-8 首字节
+  （0xC2–0xF4）逐个核对：bash 吞字节 ⇔ macOS 单字节 `isalpha()` 为真，0 处不一致，唯一例外 0xD7**；
+  C locale 下 `isalpha(0xEF)` 为假，正好解释 locale 门控。（没看 bash 源码，但这是逐字节实测出的
+  对应关系，不再只是推断。）`$1` `$?` `$#` 这类特殊参数不吞字节。
+- 只在 UTF-8 locale 发作：`LC_ALL=C` / `LC_CTYPE=C` 正常；`C.UTF-8` / `en_US.UTF-8` / `UTF-8` /
+  `zh_CN.UTF-8` 全部复现。launchd 的 plist `EnvironmentVariables` 只有 `PATH` ⇒ C locale ⇒
+  定时/开机触发一直不受影响（`launchd-orchestrator.{err,out}.log` 共约 1.7 万行 `unbound variable`
+  0 条；现存 20 份 `orchestrator-*.log`（08-24 ~ 09-17）含它的 0 份——二次检查先确认了这 20 份
+  确实存在，不是 glob 落空的空转 0）。中招的是从 UTF-8 终端手工跑、或 Python 拉起
+  （PEP 538 往子进程环境塞 `LC_CTYPE=C.UTF-8`）。
+
+⚠️ **勘误：这 18 处（都在命令参数里）的后果是整个 shell 退出，不是「只挂一条 log」。** v0.45.284 该段写「该条 log 静默失败，
+因为文件未开 `set -e`，不影响后续步骤」，实测不成立：`set -u` 下非交互 bash 展开出错即退出，
+`bash -c 'set -u; FOO=99; echo "a=$FOO），x"; echo after'` → rc=127、`after` 不打印；把它包进
+`log()` 函数里调用结果相同（参数在主 shell 里展开）。真编排器上的实证：沙箱跑幂等闸，
+`orch.sh: line 376: DATE_STR�: unbound variable`，走不到 `已有扫描产出` 与 `exit 0`。
+「没在生产里出过事」的原因是 locale，不是后果轻。
+
+**位置不同，失败形状不同（二次检查补测）：** 裸变量若落在**未加引号的 heredoc 正文**里，shell **不退出**——
+`set -u` 开时目标文件被清成 **0 字节**、那条 `cat` rc=127（没人查），脚本照跑；`set -u` 关时写出丢了值、
+带坏字节的内容（`{"v": "99）"}` 变成 `{"v": "\xbc\x89"}`）。C locale 下两者都正常。编排器有 5 处未加引号的
+`cat > …status.json << EOFJ` / `<<STATUSEOF` 正是这个位置：**今天 0 处命中**，但一旦有人在里面写出
+`"$VAR）"`，得到的不是退出而是一份空的 status.json，比退出更难发现。这也是检测器要连 heredoc 正文一起扫的原因。
+
+**也不只是冷门兜底分支。** 第 1495 行「状态已保存」是**每轮走到末尾必经**的无条件路径
+（`write_status` 之后）；第 376 行（幂等闸）、第 267 行（代理探活通过）、第 775 行（`--use-llm`）
+是常走的**条件**分支，不是只在异常时才走的兜底。
+UTF-8 下手工跑会在 1495 退出——按代码结构，其后的 `kill "$_GLOBAL_WATCHDOG_PID"`（1529）与
+`exit` 都不执行（退出码 127 而不是 0/1；看门狗泄漏是 v0.45.221 已记录的那一族——**此为推断，
+未实跑整个编排器**）。潜伏风险：谁给 plist 加一行 `LANG=…UTF-8`，编排器就会每轮末尾退出。
+
+### Fixed
+
+- 18 处统一 `$VAR` → `${VAR}`（修前行号）：141 `_new` · 267 `PROXY_URL` · 326 `PROJECT_DIR` ·
+  352 `TRADING_DAY_RC` · 376 `DATE_STR` · 775 `LLM_DONE_FILE` + `STEP2_RC` · 846 `DATE_STR` ·
+  906/939 `STEP2_RC` · 1165/1219/1272/1343 `STEP10~13_RC` · 1378 `BACKUP_STATUS_JSON` ·
+  1428 `STEP14_RC` · 1495/1517 `OVERALL_STATUS`。**只加花括号**，行数不变、模式 0755 不变。
+- 写入方式：脚本不在 git 里且他人共用，所以先备份 `alpha-hive-orchestrator.sh.bak-20260918_pre-v0.45.287`
+  （沿用该目录既有的 `.bak-<日期>_pre-<版本>` 约定），再原子替换（同目录临时文件 + `os.replace`；
+  写前核对 sha256 与备份一致、断言恰好 18 处未转义命中才落盘）。
+- 新增 `tests/test_orchestrator_braced_vars.py`（27 项：初版 21 项 + 二次检查补 6 项，见下）：**静态**扫编排器全文，命中即红并给出行号
+  与修法；覆盖沙箱走不到的位置（Step 2 之后与收尾段）。含合成文本的检测器自证（该抓/不该抓
+  两个方向，任何机器都跑）与 macOS bash 行为钉子（裸写 → 退出、花括号 → 正常、C locale → 正常，
+  即「生产为什么没事」）。条件性挂在类/用例上，不用模块级 `pytestmark`（会连坐把自证一起跳掉）。
+- `tests/test_scan_catchup.py::test_gate_branch_under_utf8_locale`：去掉 `xfail(strict=True)`。
+  它自己的约定就是「修好后 XPASS 变红 ⇒ 删掉 xfail」，修完确实变红了；现在是真回归守卫。
+  同步更新 `_gate_run` docstring 里那句现在时的描述。
+
+### 验证
+
+- `bash -n` rc=0；重扫「裸变量 + 非 ASCII」0 处；与备份 diff 恰 17 行，且每行把 `${NAME}` 折回
+  `$NAME` 后与原行逐字相同（脚本里断言过，不是目测）。
+- **逐行真实复现**（脚本在 scratchpad，未入库）：从脚本里取出每个命中行**自己的** `log …` 命令，
+  放进 `set -uo pipefail` + 桩 `log` + 定义好所引用变量的沙箱：原行 `LC_CTYPE=C.UTF-8` 下
+  **17/17 rc=127**；修后行在 `C.UTF-8` 与 `en_US.UTF-8` 下 **17/17 rc=0，且输出字节 == 原行在
+  `LC_ALL=C` 下的输出**（比「不报错」更强：证明没有改变日志内容）。
+- **端到端**：`test_gate_branch_under_utf8_locale` 修前 XFAIL → 修后 `[XPASS(strict)]` 红（正是设计的
+  翻转）→ 去 xfail 后绿；把**未修的原脚本**放进临时 `HOME` 重跑同一条 ⇒ 红，
+  `line 376: DATE_STR…: unbound variable`。
+- **静态守卫的牙**（同样用临时 `HOME`）：只把第 1495 行还原成裸变量 ⇒ 红且指名 1495；还原整份
+  原脚本 ⇒ 列出全部 18 处；空文件 ⇒ 「不像编排器」断言先红，不会空转成绿。
+- 读编排器的 9 个测试文件（含 `integration`）**236 passed**；`ruff` 通过。
+
+### 没做 / 边界
+
+- **没有实跑整个编排器**（真扫描/部署/Slack 有副作用）；只跑了逐行沙箱与既有的沙箱闸测试。
+- 检测器故意保守：任何非 ASCII 都报（多报一个 `א` 无害）；整行注释跳过（**heredoc 正文内除外**，见二次检查）、
+  行内注释照报；不识别单引号里不展开的 `$VAR`（当前 0 例，出现会误报——届时该改写法而不是放宽检测器）。
+- 看门狗在起它之后 6 条显式提前 `exit` 上不被收（v0.45.221 记录）**仍未处理**；本条只消除了其中
+  「`$VAR` 吞字节」这一种 `set -u` 中止来源。
+- v0.45.284 那段「静默失败、不影响后续步骤」的原文未改（历史条目不回改），以本条勘误为准。
+
+### 二次检查（同日，v0.45.287 推送后自己复核）
+
+1. **检测器盲区（已修）**：初版无条件跳过 `#` 开头的整行，但未加引号的 heredoc 正文里这类行 bash
+   照样展开——实测 `cat <<EOF` 正文里的 `# 看着像注释 $FOO）` 报 unbound variable，而初版检测器返回 `[]`。
+   改成识别 heredoc 起止、正文内不跳注释行；`<<<` here-string、算术 `<<`、找不到终止行的 `<<` 都不当 heredoc
+   （追踪出错只会多报、不会多吞）。新增 6 项（检测器 5 项 + macOS 行为钉子 1 项，钉「heredoc 正文里目标文件被清成
+   0 字节而 shell 继续」）。变异 4 种，各自只红对应的那一条：不追踪 heredoc / heredoc 永不结束 / 去掉 `(?<!<)` /
+   去掉终止行校验。活脚本重扫仍 0 命中（6 个 heredoc 正文里都没有）。
+2. **失败形状说过头（已更正，见上「位置不同」）**：初版只写「整个 shell 退出」，只对命令参数里的 18 处成立。
+3. **两处 CHANGELOG 措辞不准（已改）**：「当天 `orchestrator-*.log` 0 个文件」实为全部 20 份现存日志；
+   「18 处里有无条件路径」实际只有 1495 是无条件的。
+4. **机制从推断升为实测**：`ctypes` 51 个首字节逐个核对（见「问题」）。顺带更新了 `test_scan_catchup.py`
+   里一条指向已被删掉的 xfail 的过时注释。
+
+**同类写法还有一处，评估后不改（用户于 2026-09-18 决定）**：`~/.claude/scripts/alpha-hive-daily.sh:36`，
+`log "预计 spawn Agent 数：$SPAWN_COUNT（每个标的 5 个Agent）"`。它没有 `set -u`，所以 UTF-8 下**不退出、
+静默吃掉数值并写出坏字节**（实测 `exit=99），x` 变成 `exit=` + 残留的两个孤立续字节）。**不改的理由**：
+① `SPAWN_COUNT` 只在这一行被用到，影响面 = 一行日志的文字；② 该脚本是 v0.45.213 已记录的仓库外死脚本
+（2026-02-24 后未改动，本机 LaunchAgents / crontab 均无引用，`setup_cron.py` 里唯一的引用是第 37 行的
+crontab 内容白名单，并不安装它）；③ 它的核心步骤本来就跑不通——第 45 行的
+`~/.claude/reports/alpha_hive_daily_report.py` 不存在，即便指到仓库里的同名文件，不带 `--swarm` 也会被
+v0.45.213 的退役闸拒绝（exit 2），且用的是裸 `python3`；④ 只加花括号不会让它可用，反而留下「仍在维护」的错觉。
+同批扫过的另两份 shell 脚本（`~/.claude/scripts/alpha-hive-with-whatsapp.sh`、仓库里唯一被 git 跟踪的
+`run_alpha_hive_daily.sh`）0 命中。
+
+**顺带记下的已知隐患（未处理，未新增决定）**：手动跑这个脚本时，python 步失败后会进「备用简报」分支
+（第 61–93 行），写出 `~/.claude/reports/alpha-hive-daily-<日期>.md` 固定模板——标题是字面的 `YYYY-MM-DD`，
+写着「系统状态：✅ 已完成 Phase 1-6」而实际什么都没跑；`send-to-telegram.py` 不带参数时取该目录里最新的
+`alpha-hive-daily-*.md`，即这份假简报。目前无自动调用方，检查时该目录里这类文件 0 份，所以只是潜在风险。
+这与 v0.45.213「顺带发现」里挂着的「仓库外死脚本，未删」是**同一个待决事项**——要处理应当退役/删除该脚本，
+而不是给某一行加花括号；本次不重新提议、不处理。
+
+---
+
+## [0.45.286] — 2026-09-18 — Fixed：CI 缺 `mcp`/`pydantic` 依赖导致 `TestEveryResolverFollowsEnv[alpha_hive_mcp._hive_dir]` 报 ModuleNotFoundError；经济日历告警二次核对
+
+v0.45.285 推送到 `main` 后 CI（`tests.yml`）红了，两个失败与该次改动**无关**——
+上一个无关提交（v0.45.279 ScoutBee 修复）的 CI 跑出的是一模一样的两条：
+
+1. `test_economic_calendar.py::TestCoverageHorizon`（按设计定期变红，见下）。
+2. `test_paths_not_frozen_at_import.py::TestEveryResolverFollowsEnv::test_resolver_follows_env[alpha_hive_mcp._hive_dir]`
+   —— `ModuleNotFoundError: No module named 'pydantic'`（`alpha_hive_mcp.py:45`）。
+
+### Fixed
+
+- **`requirements.txt`**：新增 `mcp>=1.26.0,<2` 与 `pydantic>=2.12.0,<3`（新增
+  「Alpha Hive MCP Server」一节，沿用同文件 Alpha Hive Bot 一节的先例：
+  主扫描进程不依赖，但仓内另一组件需要）。
+  **根因**：`_discover_path_resolvers()` 是纯 AST 枚举、不 import，
+  `alpha_hive_mcp._hive_dir` 因引用 `PATHS.` 被自动纳入参数化；真正 `import_module`
+  发生在测试体内。`alpha_hive_mcp.py` 模块级 `from pydantic import ...` /
+  `from mcp.server.fastmcp import FastMCP`，而这两个包**从未进过 `requirements.txt`**
+  （模块 docstring 只写了手动 `pip install mcp yfinance httpx pydantic`）。
+  用户 Mac 上手动装过 ⇒ 本地全套一直绿；CI 只装 `requirements.txt` ⇒ 红。
+  是「X 在哪些环境里存在？」那类问题：答案是「只有装过的机器」。
+  **没有**改成给该用例加 skip——那会让它在 CI 里恒不运行，且与「该模块的
+  路径解析行为应被验证」的初衷相反；补依赖让它在 CI 里真跑。
+
+  验证：临时 venv 按 CI 同样的命令（`pip install -r requirements.txt pytest
+  pytest-timeout ruff`）装一遍 ⇒ `TestEveryResolverFollowsEnv` 33 项全过；
+  同一 venv 卸掉 `mcp pydantic` 后重跑 ⇒ 精确复现 CI 的
+  `ModuleNotFoundError: No module named 'pydantic'`（`alpha_hive_mcp.py:45`），
+  证明该 venv 是 CI 环境的忠实复现、且修复确为因果所在。
+
+### 经济日历告警（`TestCoverageHorizon`）：二次核对，**代码无需改动**
+
+用户提示该告警可能只是「BLS 还没发布 2027 日程」，要求二次核对。浏览器直接打开
+BLS 官方页面（2026-09-18）：
+
+- `bls.gov/schedule/news_release/cpi.htm`：最后一行 `November 2026 → Dec. 10, 2026`，
+  与 `economic_calendar._CPI` 末条 `2026-12-10` 一致，**无 2027 条目**；
+- `bls.gov/schedule/news_release/empsit.htm`：最后一行 `November 2026 → Dec. 04, 2026`，
+  与 `_NFP` 末条 `2026-12-04` 一致，**无 2027 条目**。
+
+结论：告警如实反映现状（CPI 剩 83 天 / NFP 剩 77 天，阈值 90 天），不是数据过期，
+也没有可补的官方日期；**禁止推算填空**（v0.45.65 前车之鉴）。等 BLS 发布 2027 日程后
+逐条抄入并上移 `verified_through` 即可。本次只把 `_CPI`/`_NFP` 上方的「核对时间」
+注释从 2026-08-29 更新为 2026-09-18（标注二次核对、结论不变），未动任何日期数据。
+
+### 验收
+
+- 本地 `tests/test_economic_calendar.py`：31 passed, 1 failed（唯一失败即上述按设计的
+  `TestCoverageHorizon`）；`ruff check economic_calendar.py` 全过。
+- CI 上 `TestEveryResolverFollowsEnv[alpha_hive_mcp._hive_dir]` 是否转绿，待推送后
+  看 `tests.yml` 该次运行（本条在推送前写就，**未**含 CI 结果）。
+
+---
+
+## [0.45.285] — 2026-09-18 — Fixed：`generate_deep_v2.py` 的 `ALPHAHIVE_DIR` 硬编码字面量收口（数据根迁移阶段 4 遗留项第三例）
+
+数据根迁移阶段 4（gh-pages 发布链改指向）普查仓库外/独立进程消费方时，
+在 v0.45.268 记录了三处同构遗留 bug：`weekly_optimizer.py`/`self_analyst.py`
+的 `ALPHAHIVE_DIR`（阶段 1 · v0.45.259 已点名，仍未修）与 `generate_deep_v2.py`
+的同名变量（本次普查新发现，此前未被记录）。三者按任务边界当时都排除在阶段 4
+之外，`generate_deep_v2.py` 这一处已用 `spawn_task` 记为独立后续任务，本次单独
+处理；另两处（`weekly_optimizer.py`/`self_analyst.py`）现状不变，不在本次范围。
+
+⚠️ 占号撞车说明：本条最初以 `v0.45.279` 提交在独立 worktree 分支上，此仓库当时
+有多个并行 session 高频提交，push 前反复 `fetch`+rebase 期间连续撞号六轮
+（`v0.45.279`~`v0.45.284` 先后被其他 session 占用/占位/完工），按既定原则
+「先提交（进 git 历史）的占号，后者改号」逐次改号，最终定为 `v0.45.285`。
+其中一轮 rebase 因故未能正确保留上游祖先链，已放弃该次 rebase 结果、
+改为直接基于 `origin/main` 当时的真实 tip 重新提交，避免带着损坏的提交图推送。
+
+### 问题
+
+`generate_deep_v2.py:60`（修复前）：
+
+```python
+ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
+```
+
+模块级字面量，完全不读 `ALPHA_HIVE_HOME`，也不是 `__file__` 派生——是本仓这类
+路径 bug 里锁得最死的一种，两条既有守卫（`tests/test_paths_not_frozen_at_import.py`
+的 `TestSpeciesDoesNotSpread` 只认 `PATHS` 标记、`TestFileDerivedSpeciesDoesNotSpread`
+只认 `__file__` 标记）都不命中它，此前从未被任何自动化检测发现。三处消费点：
+读 `analysis-{ticker}-ml-*.json`（`find_latest_json`/`find_prev_json`）、
+读/写 `.anthropic_api_key`、以及 `_load_ticker_accuracy` 里的
+`close_t7_db_path=ALPHAHIVE_DIR / "pheromone.db"`（生产核心数据库）。
+数据根迁移阶段 5 把生产数据搬到 `~/alpha-hive-data` 后，这三处会继续读旧位置
+的陈旧或缺失数据，且不会有任何报错。
+
+### Fixed
+
+- **`generate_deep_v2.py:60-92`**：`ALPHAHIVE_DIR` 改成**覆盖钩子**（默认
+  `None`），新增 `_alphahive_dir()` 在调用时求值：无覆盖时按 VM 挂载点探测
+  （`_VM_PATH.exists()`，逻辑不变，只是从导入期赋值改成调用时判断）→ 兜底
+  `hive_logger.PATHS.home`。`find_latest_json`/`find_prev_json`/
+  `_load_ticker_accuracy` 三处调用点改读 `_alphahive_dir()`。
+  改法沿用仓内已验证过的惯例（`collect_data.py`，v0.45.263）：不写
+  `ALPHAHIVE_DIR = PATHS.home`（那只是把冻结换个地方，会被
+  `TestSpeciesDoesNotSpread` 判红），也不在模块级调用 `_alphahive_dir()`
+  （会被 `TestFrozenViaModuleLevelCall` 判红）——保留 `ALPHAHIVE_DIR` 这个
+  同名可覆盖属性，也是因为 `tests/test_close_t7_production_wiring.py` 与
+  `tests/test_ticker_accuracy_direction.py` 已有
+  `monkeypatch.setattr(g, "ALPHAHIVE_DIR", ...)` 的现成用法，改成别的名字
+  会连带改测试。
+- **`get_api_key()`**：此前 `API_KEY_FILE`/`_VM_API_KEY`/`_MAC_API_KEY` 是导入期
+  算好的模块级常量（依赖旧的 `ALPHAHIVE_DIR` 字面量），改成在本函数体内于
+  调用时解析，避免把冻结换个地方重新引入（模块级 `if` 语句的 test 表达式
+  调用 `_alphahive_dir()` 会被 `TestFrozenViaModuleLevelCall` 判定为「经模块级
+  调用间接冻结」，已用真实跑该测试类验证过不再触发）。
+- **`OUTPUT_DIR`（深度报告输出目录）不在本次范围**：与 `ALPHAHIVE_DIR`
+  是两个独立变量，本身已经是导入期判断 VM 挂载点是否存在（不依赖
+  `ALPHA_HIVE_HOME`），未改动。
+
+### Added
+
+- `tests/test_generate_deep_v2_alphahive_dir.py`（10 项）：覆盖
+  `_alphahive_dir()` 的默认值/环境变量跟随/显式覆盖/调用时求值四态，以及
+  `find_latest_json`/`find_prev_json`/`get_api_key()` 三个此前无测试覆盖的
+  调用点是否真的跟着 `ALPHAHIVE_DIR` 走（而非绕回旧的硬编码 Desktop 路径）。
+  `_load_ticker_accuracy` 的路径接线已由
+  `tests/test_close_t7_production_wiring.py`/`tests/test_ticker_accuracy_direction.py`
+  覆盖，本次未重复。
+
+  变异验证：临时还原修复前的 `generate_deep_v2.py`（`git stash` 隔离，仅本文件），
+  新增测试里的 `test_default_override_is_none_not_hardcoded_literal` 立即失败
+  （`ALPHAHIVE_DIR` 实际是 `PosixPath('/Users/igg/Desktop/Alpha Hive')` 而非
+  `None`），证明测试对本次要修的问题有判别力；恢复修复后全部 10 项转绿。
+
+### 验收
+
+- 新增 10 项 + `tests/test_close_t7_production_wiring.py`（3）+
+  `tests/test_ticker_accuracy_direction.py`（7）+
+  `tests/test_paths_not_frozen_at_import.py`（85）共 105 项全绿。
+- `ruff check generate_deep_v2.py tests/test_generate_deep_v2_alphahive_dir.py`
+  全过。
+- 全套 `pytest -q --maxfail=0`：改动完成时 4932 passed；rebase 到当时的
+  `origin/main` 后重跑一遍确认无回归：4937 passed, 1 skipped, 83 deselected,
+  2 xfailed, 1 failed（唯一失败是 `tests/test_economic_calendar.py::TestCoverageHorizon`，
+  按设计定期变红的经济日历覆盖告警，与本次改动无关，本次未触碰相关代码）。
+  后续因占号连续撞车六轮而多次重新提交，改动内容本身未变（每次仅 CHANGELOG
+  编号/上下文变化），故未在每一轮都重跑全套；`tests/test_changelog_entry_integrity.py`
+  与本文件的针对性测试在每轮之后均已重新确认通过。
+
+---
+
+## [0.45.284] — 2026-09-18 — Added：Step 14 数据备份补"连续 N 天未识别/陈旧"检测（照抄 Step 10 scan_continuity.py 模式）
+
+`~/.claude/scripts/alpha-hive-orchestrator.sh`（不受版本控制）Step 14 自己的注释里留了一条
+已知设计缺口："push_failed 不阻断、不发 Slack，连续多天推送失败目前只能靠人翻
+`backup_status.json` 才发现——与'每日 DB 备份被 TCC 拒、09-09~11 三次失败无人发现'同构，
+建议参照 Step 10（scan_continuity.py）的模式后续补一个连续失败检查"。本次把这条 TODO 单独立项处理。
+
+`backup_status.json` 每次调用整份覆盖，只反映"最近一次"——单看它发现不了"连续多天卡在
+同一种失败/陈旧状态"。判定连续性需要跨天累积的历史，`scan_continuity.py` 能判 Step 10
+是因为 `pheromone.db.predictions` 本身是业务表、天然按业务日累积；备份没有这样的表，
+所以先补上历史来源，再补判定逻辑。
+
+### Added
+
+- `data_backup/run_backup.py::run()` 新增 `history_file` 参数，在**每条退出路径**（init/export/
+  secret_scan/commit/git_error/push/done 全部七条）都追加一行到 JSONL 历史日志（默认
+  `~/alpha-hive-data/logs/backup_status_history.jsonl`，同 `weekly_optimizer.py` 的
+  `weight_history.jsonl` 审计日志同一模式：只追加不覆盖，写不进去不改变本次判定结果——
+  抽出公共 `_finish()`/`_append_history()` 收敛七处重复的"写 status 再 return"）。
+  `main()` 新增 `--history-file` CLI 参数，默认值与 `--status-file` 同一约定（硬编码绝对路径，
+  不走 `hive_logger.PATHS`——阶段 5 `ALPHA_HIVE_HOME=~/alpha-hive-data` 尚未执行，`PATHS.home`
+  今天兜底到代码仓库根，与 Step 14 实际写入的新数据根是两个不同目录；备份子系统从阶段 3
+  起就有意早于全局迁移直接指向新数据根，这里跟随的是既有约定，不是引入新写法）。
+- 新增 `backup_continuity.py`（仓库根，同 `scan_continuity.py` 同级）：读这份 JSONL 历史，
+  判定"过去 N 个交易日备份是否每天都真的成功了"。交易日枚举、空档切分、ISO 周覆盖三个
+  纯函数直接从 `scan_continuity` **导入复用**，不重新发明（两者是同一形状："过去 N 个交易日
+  是否每天都发生了某件事"）；退出码同样是 0=健康/1=降级/3=无法判定（2 保留给编排器
+  `run_step()` 的"脚本不存在"哨兵值，同 `scan_continuity.py` 的既有约定）。判定单位是
+  "当天最终是否 ok"（同一天多次调用、最终成功即算健康），不是"当天第一次调用是否成功"，
+  与 `status.json` 本身"只反映最近一次"的既有语义一致。
+- 编排器新增 Step 15（数据备份连续性体检）：Step 14 之后立即跑 `backup_continuity.py --days
+  30 --quiet --out`，同 Step 10 一样刻意不动 `OVERALL_STATUS`、不发 Slack（单次失败是噪音，
+  连续失败才是聚合信号）；Step 14 现在额外传 `--history-file`。Step 14 的调用改成显式传
+  `--history-file "$BACKUP_HISTORY_JSONL"`。
+- Step 14 顶部注释更新："已知设计缺口"改成"已处理（v0.45.284）"，指向 Step 15。
+
+### Fixed（顺带发现，与本条同一次会话）
+
+- 编排器 Step 15 自己新写的 `else` 兜底分支里，`$STEP15_RC）` 这个写法（bare 变量引用紧跟着
+  全角右括号，无 ASCII 边界）在本机 `/bin/bash` + `LC_CTYPE=C.UTF-8` 下会被误解析——bash 把
+  全角括号 UTF-8 编码的首字节当成了变量名的一部分，`set -u` 下报 "unbound variable"（该条
+  log 静默失败，因为文件未开 `set -e`，不影响后续步骤）。复现：
+  `bash -c 'set -u; FOO=99; echo "x=$FOO），y"'` → `bash: line 1: FOO\xef: unbound variable`；
+  改成 `${FOO}`（花括号）后 rc=0、输出正确。已把自己新写的这一处改成 `${STEP15_RC}`。
+  **同一形状的写法在 Step 1~14 的既有代码里还有 17 处**（`$STEP10_RC）`/`$OVERALL_STATUS）`
+  等），均为本次改动之前就存在、且从未被本次改动触碰——是否需要一并修复已用 `spawn_task`
+  记录为独立任务，不在本条范围内处理。
+
+### 验证
+
+- 新增 `tests/test_backup_continuity.py`（20 项）：历史日志解析（含格式错误行跳过、同日
+  多次调用取最终结果、空文件/缺失文件不崩）、端到端判定（满覆盖健康/低覆盖降级/仅空档也
+  降级——两个门槛是 AND 不是 OR）、退出码（0/1/3，`--json`/`--out`/`--slack` 占位行为同
+  `scan_continuity.py`）。
+- `tests/test_data_backup.py` 新增 `TestRunBackupHistoryAppend`（6 项：成功/失败各追加一行、
+  跨多次调用累积不覆盖、`history_file=None` 不报错、历史写入失败不改变 `status.json` 判定结果）
+  + `TestOrchestratorStep15Dispatch`（7 项，同 `TestOrchestratorStep14StageDispatch` 的 bash
+  沙箱抽取跑法：0/1/3/2/124/未知 rc 六种分支的日志级别、文案、`STEPS_RESULT` 状态字符串，
+  含"连续性 JSON 解析失败不让整段崩溃"一项）——过程中正是这组新测试跑出了上面那条
+  `$STEP15_RC）` 的 bash 解析 bug。
+- `bash -n ~/.claude/scripts/alpha-hive-orchestrator.sh`：语法检查通过。
+- `/usr/local/bin/python3 -m pytest tests/test_data_backup.py tests/test_backup_continuity.py
+  tests/test_scan_continuity.py tests/test_changelog_entry_integrity.py`：104 项全绿。
+- `ruff check` 覆盖到的新增/改动文件（`backup_continuity.py`/`data_backup/run_backup.py`/
+  两个测试文件）全过。
+
+---
+
+## [0.45.283] — 2026-09-18 — Fixed：`_init_backup_git_repo` 未隔离全局 `commit.gpgsign` / `core.hooksPath`
+
+`tests/test_data_backup.py::TestRunBackupStageReporting._init_backup_git_repo`（v0.45.269 新加，
+给 `test_push_failure_reports_push_stage`/`test_git_exception_during_push_reports_git_error_stage`/
+`test_full_success_reports_done_stage` 起真实临时 git 仓库）只设了本地 `user.email`/`user.name`，
+未覆盖可能存在的全局 `commit.gpgsign`（全局开签名但无可用密钥）或 `core.hooksPath`（全局 hook 会失败）——
+这两项一旦在某台机器上全局生效，helper 里真实的 `git commit` 会因环境失败，
+把 `stage` 误判成 `"commit"`，看起来像被测代码逻辑错误，实际与之无关。
+本机核实过当前不触发（`git config --global --list` 无这两项），但这是一个真实的可移植性缺口。
+
+### Fixed
+
+- `_init_backup_git_repo` 追加两行本地 config：`commit.gpgsign false` 与 `core.hooksPath /dev/null`，
+  覆盖掉可能存在的全局设置。
+
+### 验证
+
+- 手动在本机全局 git 配置里临时装一个会失败的 `pre-commit` hook（`core.hooksPath` 指向假目录）+
+  `commit.gpgsign true`（无真实密钥），复现修复前 `test_push_failure_reports_push_stage` 等三条
+  用例真实报错、`stage` 被误判成 `"commit"`；打上本条修复后同一份全局配置下三条全部转绿；
+  验证完已将本机全局配置恢复到验证前的状态（原为未设置）。
+- `/usr/local/bin/python3 -m pytest tests/test_data_backup.py`：26 项全绿（正常环境下）。
+
+---
+
+## [0.45.282] — 2026-09-18 — Fixed：`tests/test_data_backup.py::_synthetic_src` 硬编码库元组改用 `export_mod.DBS`
+
+`_synthetic_src` 自己抄了一份 `("pheromone.db", "metrics.db", "sentiment_baseline.db",
+"hive_predictions.db")`，与 `data_backup/export.py` 的唯一真相 `DBS` 内容恰好一致但各自维护。
+`export_mod` 本已在文件顶部 import，未被复用。
+
+### Fixed
+
+- `tests/test_data_backup.py::TestRunBackupStageReporting._synthetic_src`：硬编码元组改为
+  遍历 `export_mod.DBS.values()`，消除重复——`DBS` 未来新增/改名库时，测试范围自动跟随，
+  不再需要手动同步两处。
+
+### 验证
+
+- `/usr/local/bin/python3 -m pytest tests/test_data_backup.py -q`：26 passed。
+
+---
+
+## [0.45.281] — 2026-09-18 — Fixed：`alpha-hive-orchestrator.sh` Step 14 读 `$BACKUP_STAGE` 直接拼进 jq 程序文本，存在语法注入风险
+
+`~/.claude/scripts/alpha-hive-orchestrator.sh`（不受版本控制）Step 14 的 rc==2
+分支从 `backup_status.json` 读出 `$BACKUP_STAGE` 后，用
+`\"${BACKUP_STAGE}_failed\"` 直接拼进双引号包裹的 jq 程序文本，未转义、未走
+`--arg` 安全传参——是全文件里唯一一处"外部文件读出的值被拼进 jq 程序文本"的
+写法，与文件其余位置（如 `.date == $d` 校验）规规矩矩用 `--arg` 的风格不一致。
+
+当前 `data_backup/run_backup.py` 只把 `stage` 写成固定安全字面量
+（`export`/`commit`/`push`/`secret_scan`/`done`，加 v0.45.273 新鲜度校验兜底的
+`stale_or_missing`/`unknown`），眼下不可触发；但文件全局 `set -uo pipefail`、
+未开 `set -e`，一旦触发，这条 jq 编译失败不会被任何地方检查——`$STEPS_RESULT`
+（当天全部 14 个 Step 累积的唯一 JSON 对象）会静默塌缩，污染不止 Step 14 这一条
+记录。
+
+### Fixed
+
+- 第 1419 行（修复前行号）`STEPS_RESULT=$(... | jq ". + {...\"${BACKUP_STAGE}_failed\"...}")`
+  改为 `jq --arg stage "$BACKUP_STAGE" --arg detail "$BACKUP_STATUS_JSON" '. + {"step14_data_backup": {"status": ($stage + "_failed"), "detail_json": $detail}}'`，
+  `$BACKUP_STAGE` 与 `$BACKUP_STATUS_JSON` 均改走 `--arg`，彻底消除拼接注入面。
+- 只改这一行相关的 jq 调用写法，未涉及其余 13 个 Step 或 Step 14 的其它逻辑分支。
+
+### 验证
+
+- `bash -n ~/.claude/scripts/alpha-hive-orchestrator.sh`：语法检查通过。
+- 用修复前后两种写法分别喂同一组边界值（含双引号+jq 语法片段、反引号、
+  反斜杠、空字符串、换行）做对照：旧写法在含双引号的恶意值上以 `rc=3`
+  jq 编译失败复现了本条要修的问题；新写法全部边界值 `rc=0`，恶意内容原样
+  落成 JSON 字符串字面量，未被当作 jq 语法解释。
+
+---
+
+## [0.45.280] — 2026-09-18 — Fixed：`mock_stock_data` fixture 签名落后于 `_fetch_stock_data` 真实签名，TypeError 级联炸穿 test_agents.py
+
+`swarm_agents/base.py` 的 `_get_stock_data()` 早就改成
+`_cache._fetch_stock_data(ticker, getattr(self, "_target_date", None))`
+（两个位置参数），但 `tests/conftest.py` 的共享 fixture `mock_stock_data`
+里 `_mock_fetch(ticker)` 只收一个——调用即 `TypeError: takes 1 positional
+argument but 2 were given`，级联炸穿 `TestScoutBeeNova`/`TestBuzzBeeWhisper`/
+`TestGuardBeeSentinel` 等多条依赖该 fixture 的用例。
+
+### Fixed
+
+- `tests/conftest.py::mock_stock_data`：`_mock_fetch(ticker)` 改成
+  `_mock_fetch(ticker, target_date=None)`，与真实签名对齐。
+
+### 验证
+
+- 回退该行单独复现：`TestGuardBeeSentinel::test_guard_reads_pheromone_board`
+  精确重放用户报的 `TypeError`（`ScoutBeeNova`/`BuzzBeeWhisper`/`GuardBeeSentinel`
+  三处级联），确认因果关系。
+- 修复后同一条 + `TestScoutBeeNova::test_publishes_to_board` 单独跑通过，
+  `TypeError` 不再出现；文件其余用例受限于本沙箱出网（`curl: (28) Operation
+  timed out`，yfinance/CBOE/pead_analyzer 等真实网络调用）未能跑全套——
+  该文件整体标 `pytest.mark.integration`（需要真实外部 API，CI 默认排除），
+  这部分留给有正常网络的环境验证。
+- 核对过仓库内其余 `_fetch_stock_data` monkeypatch（`test_bee_details_contract.py`
+  / `test_backfill_date_anchoring.py` / `test_twelve_data_single_fetch.py`
+  / `test_guard_census_eviction.py` 自己的 `stock_stub`），均已是双参数签名，
+  只有这一处共享 fixture 落后。
+
+---
+
+## [0.45.279] — 2026-09-18 — Fixed：ScoutBee consensus_strength 排行榜淘汰偏差修复（P2）
+
+原始问题是"要不要留 `SIGNAL_UPSTREAM` 里 `crowding.comp.consensus_strength` 依赖
+Phase-1 方向的那条边"（Oracle 换方向定义会把它的世代起点从 08-27 拖到 09-11，
+成本约两周样本）。查下去发现真正该管的不是这条边，而是产生这个数字的函数
+`real_data_sources.get_bullish_agents_count` 还在用 `board.get_top_signals(ticker,
+n=10)`——v0.45.151（Rival）、v0.45.156（共振）、v0.45.163（Guard）三次分别修过的
+同一个"排行榜当普查用"缺陷（`_entries` 满时按 `nlargest(MAX_ENTRIES=80,
+key=self_score)` 全局淘汰，先扔分最低的），且 v0.45.163 当时就点名过这个未迁
+地点（"各自有独立的量测，不搭本版的车"），一直没人接手。
+
+### 为什么这次真的会触发（不是理论担忧）
+
+确认了并发架构：`alpha_hive_daily_report.py::_run_pool` 一次并发跑 **4 只标的**
+（`max_workers=4`），每只标的内部 Phase-1 又并发 **5 只蜂**——共享的
+`PheromoneBoard` 在任意时刻可能有 4×9≈36 条不同标的的条目在写，`MAX_ENTRIES=80`
+的全局淘汰是持续在发生的。
+
+### Fixed
+
+- `real_data_sources.get_bullish_agents_count`：改用不受淘汰影响的
+  `board.get_live_signals(ticker)`（普查视图），并按身份精确过滤到 4 个真正的
+  Phase-1 同伴（`OracleBeeEcho`/`BuzzBeeWhisper`/`ChronosBeeHorizon`/
+  `CodeExecutorAgent`，排除 Scout 自己——与 `signal_archive._PHASE1_DIRS` 同口径）
+  ——此前不按身份过滤，board 上任何非同伴的高分条目都会被误计入。
+- 哨兵语义：`board is None` 或读取异常时此前硬编码返回 `3`（"6 个里 3 个看多"，
+  从不产生 `None`），改为诚实 `None`。`crowding_detector` 早在 v0.45.50 就建好的
+  "缺失分量给 None、不参与合成"通路，对这个分量从来没生效过——它的输入永远是
+  个合法数字。
+- `get_real_crowding_metrics` 的 `data_quality["bullish_agents"]` 标签：此前是
+  `"real" if board else "default"`，只看 board 是否传了、不看真读出来的值是不是
+  `None`（board 传了但读取异常时标签仍自称 real）。改按 `bullish is not None`
+  推导，与旁边 `momentum` 字段同一写法——那条的注释本就点名过这个反例。
+
+### Added
+
+- `real_data_sources.get_bullish_agents_detail(ticker, board)`：新函数，一次读板
+  同时给出"谁在场"（`peers_live`）与"谁看多"（`peers_bullish`），`get_bullish_
+  agents_count` 现在是它的薄包装。`get_real_crowding_metrics` 新增
+  `consensus_census` 键透传这份 detail。
+- `ScoutBeeNova.details.consensus_census`：口径标记（caliber marker），记录读板
+  那一刻实际数到的同伴 agent_id 列表。不是为了替代 `SIGNAL_UPSTREAM` 里那条
+  依赖边——那条边结构上是对的（这个数字的含义确实会随同伴的方向定义改变而
+  改变，与 `ml.*` 依赖同一组方向同理），只是让"当时到底数到了谁"变成以后可
+  核查的观测量，不用再翻代码猜。
+- `tests/test_bullish_agents_census_eviction.py`：14 项，合成板复现三个缺陷
+  （溢出淘汰腰斩计数、无身份过滤误计非同伴条目、哨兵值编造成 3），先跑红
+  （对着改动前代码）再改代码转绿。
+
+### 世代边界
+
+`ic_rerun_readiness._COHORT_HISTORY` 新增 `2026-09-18 v0.45.279`，
+`signal_archive.COHORT_SIGNAL_SCOPE` 直接点名 `crowding.comp.consensus_strength`，
+经 `_scope_closure` 传递闭包自动传给 `crowding.score`/`agent.ScoutBeeNova.*`/
+`ml.*`/`guard.*`/`bear.*` 等全部下游——已用 `generation_boundaries()` 逐一核对，
+这些下游各自已有更晚的既有边界覆盖，本条不改变它们当前的世代起点，只对此前
+从未被任何边界点名过的 `consensus_strength` 本身生效。
+
+⚠️ **边界代价，如实记录**：`composite.final_score` 是 `ALWAYS_SLICED`——任何新
+追加的 `_COHORT_HISTORY` 条目，无论 `COHORT_SIGNAL_SCOPE` 怎么写范围，都会
+无条件把 `cohort_start()` 拖到今天。当前世代（09-14 起）已积累 **120 条**真实
+样本（4 个扫描日 × 30 只，`predictions` 实测），本次全部作废。这是本表近期
+（v0.45.191~243）唯一一条真实作废非零样本的记录——那一串都是"0 条"（相邻边界
+间没有新扫描）或历史回填（P1 的 5 条）。120/25 周所需的 175 天 ≈ 2.3%，量级与
+v0.45.172（30 条）/v0.45.212（30 条）相当，**用户在动手前已看过这个数字并明确
+选择接受**（"直接付这 120 条成本，全部做完"），不是我自行决定的。
+
+同时如实记录**当前实际影响面**：`config.EVALUATION_WEIGHTS` 里 `signal`/
+`risk_adj` 两维现为 0（v0.45.172/176），ScoutBee 这条线对 `final_score` **现在**
+没有可测影响——真正受益的是 `crowding.score`/`ml.expected_7d`/`30d`（RivalBee
+特征，走独立于 final_score 的消费路径）的数据质量，以及这两维未来被重新启用
+时的可信度。不是"改了却没用"，是"现在的收益在别处，成本记在这本账上"。
+
+### 核对
+
+- 新测试 14 项：先跑红（对着改动前代码）再改代码转绿。
+- `tests/test_signal_archive_generations.py`（57 项）/ `test_ic_rerun_readiness.py`
+  （30 项）/ `test_real_data_sources.py` / `test_crowding_detector.py` /
+  `test_guard_derived_and_crowding_dq.py` / `test_ml_input_crowding_agreement.py`
+  / `test_pheromone_board.py` / `test_noise_filter.py` /
+  `test_degraded_input_harness.py` / `test_queen_distiller.py` /
+  `test_bee_details_contract.py` / `test_rival_bee_peer_features.py` /
+  `test_rival_bee_catalyst_missing.py` / `test_guard_census_eviction.py` 全绿——
+  Guard/Rival 复用同一个 `get_real_crowding_metrics`，本次修复对它们各自内部的
+  拥挤度计算也生效（它们不单独归档 `crowding.comp.consensus_strength`，不需要
+  额外的世代边界处理）。
+- 量测局限如实记录：这是 race-condition 依赖的读取，`pheromone_compact` 拍得
+  太晚（Queen distill 时的全局终态，晚于 Scout 读板那一刻），没有任何历史快照
+  能重建生产实际发生过的翻转率。本次测试只证明机制存在（合成板：洪水后排行榜
+  漏计、普查不受影响），不假装测过生产历史。
+
+### 不做
+
+- `crowding.comp.consensus_strength` 依赖 Phase-1 方向的那条 `SIGNAL_UPSTREAM`
+  边不动——结构上正确，不是这次的问题所在。
+- `bear_bee.py:39/512` 另有两处 `get_top_signals(ticker, n=20)` 未迁，各自独立，
+  不搭本版的车，留待单独处理。
+- 未尝试量化生产历史翻转率（见上"量测局限"），不编不存在的数字。
+
+## [0.45.278] — 2026-09-18 — Fix：`run_backup.py` 补 git init 失败 / git 调用异常两个失败分类缺口
+
+v0.45.269/273 两轮修复 `data_backup/run_backup.py` 的失败分类后，多角度代码复检
+（review 面板发现 #4、#5，此前标记 skipped）找出两个仍未处理的缺口，本次单独处理。
+
+### Fixed
+
+- **缺口 1**：`run()` 里 export 之后的所有 `_run_git()` 调用（add/diff/commit/
+  rev-parse/push）此前完全没有异常保护。`_run_git` 给 `subprocess.run` 传了
+  `timeout=60`，任何一次 git 调用卡住超过 60 秒（网络抖动、或别的进程占着
+  `index.lock`）都会抛 `subprocess.TimeoutExpired`，一路不捕获地传出 `run()`/
+  `main()`，Python 默认以退出码 1 崩溃退出——正好撞上 `main()` 专门留给
+  `stage == "secret_scan"` 的退出码 1，且这次崩溃根本没来得及写 `status.json`
+  （陈旧文件会被上一轮内容顶着）。编排器 Step 14 因此会把纯粹的网络超时误报成
+  "密钥扫描命中，已拒绝提交"。现给 add/diff/commit/rev-parse 一段包一层
+  try/except，push 单独一段，映射到新增的 `stage: "git_error"`。
+- **缺口 2**：`git init` 失败此前只把 `status["git_init"]` 记成 `False`，不中止
+  执行。后续 `git add -A` 返回码被丢弃，`git diff --cached --quiet` 在非 git
+  仓库里返回 128（不是"无变化"的 0），旧代码把非 0 一律当"有变化"走 commit，
+  commit 因仓库没初始化好而失败，最终 `stage` 被误标成 `"commit"`——把"仓库根本
+  没初始化成功"误诊成"提交失败"，误导编排器日志的排查方向。现 `git init` 失败
+  （返回码非 0 或调用本身抛异常）直接判定为专门的 `stage: "init"` 并立即中止，
+  不再继续往下走 export/add/diff/commit。
+- `data_backup/run_backup.py` 模块 docstring 的失败路径设计清单补上这两条新分类
+  （`init` / `git_error`），退出码仍统一是 2（`main()` 只把 `secret_scan` 单独
+  映射成 1）。
+- `~/.claude/scripts/alpha-hive-orchestrator.sh` Step 14 的 `case "$BACKUP_STAGE"`
+  语句加 `init` / `git_error` 两支专门的日志分支——否则这两个新 stage 会落进
+  `*)` 未识别分支，只报一句笼统的 WARN。该脚本不受本仓版本控制，改动只在生产
+  主机上生效，无独立提交记录。
+
+### Added
+
+- `tests/test_data_backup.py::TestRunBackupStageReporting` 新增三条：
+  `test_git_init_failure_reports_init_stage`（git init 失败必须立刻中止，
+  且 `manifest_summary` 不该出现——验证没有继续跑到 export）、
+  `test_git_exception_during_commit_phase_reports_git_error_stage`（monkeypatch
+  `_run_git` 在 `add` 调用时抛 `TimeoutExpired`，验证退出码是 2 不是 1）、
+  `test_git_exception_during_push_reports_git_error_stage`（push 抛异常时
+  `status["commit"]["made"]` 仍必须是 `True`，证明提交已经真实成功，跟
+  `stage="push"` 的"提交成功但推送返回非 0"是不同场景但需要同样可辨认）。
+- `TestOrchestratorStep14StageDispatch::test_known_fresh_stage_dispatches_correct_message`
+  参数化列表加 `init`/`git_error` 两组，锁定新分支的日志级别与 `STEPS_RESULT`
+  状态值。
+
+跑测试：`/usr/local/bin/python3 -m pytest tests/test_data_backup.py`（26 项全过）。
+
+---
+
+## [0.45.277] — 2026-09-18 — Docs：memory 仓已加远端并首推，CLAUDE.md 收尾流程补 push 步骤
+
+用户在对话里先后批准两步：① 新建私有仓库 `wangmingjie36-creator/alpha-hive-memory`
+并把本地 memory 仓（`~/.claude/projects/-Users-igg-Desktop-Alpha-Hive/memory`）
+`origin` 指过去、完成首推（事前扫过当前内容+全部 git 历史，零命中密钥形状字符串）；
+② 明确要求「以后每次收尾都自动推」，把 push 从「每次都问」变成默认行为。
+
+### Changed
+
+- `CLAUDE.md`「memory 目录已纳入 git」一节：去掉已过期的「无远端」表述，收尾命令
+  从单纯 `add && commit` 补上 `&& push origin main`；补一句「推送已获批准为默认
+  行为，不必每次重新问」，并区分清楚「加远端」（一次性、已问过）与「日常 push」
+  （现在是默认动作）两件事，避免以后有 session 把两者混为一谈又去重新问一遍。
+- memory 仓自己的 `alpha-hive-user-preferences.md` 同步记了这两步决策的时间戳
+  与理由（不在 CLAUDE.md 重复，按本仓既有的「文档分工原则」）。
+
+本次只改 `CLAUDE.md` + 本文件，不涉及生产代码，无需测试。
+
+---
+
+## [0.45.276] — 2026-09-18 — 补 v0.45.274：SNAPSHOT_DIR 隔离缺口的专用回归测试 + 一个死参数清理
+
+`v0.45.272` 占号后二次检查 v0.45.256 时独立发现了这个 bug，但在实现修复期间被另一 session
+用 `v0.45.274` 抢先独立修好（诊断与修法在核心机制上一致，见 v0.45.272 占位关闭说明）。
+本版只补 v0.45.274 没覆盖的两处。
+
+### Added
+
+- `tests/test_paths_not_frozen_at_import.py::TestResolvedAtCallTime::
+  test_paper_portfolio_snapshot_dir_is_sandboxed`：v0.45.274 的验证方式是跑一次
+  6~7 分钟的全套测试看 8 个 ERROR 消不消失，往后但凡这条隔离退化，同样要重新跑一遍
+  全套才能发现。本条把它收敛成一条秒级单测：模块级 `import paper_portfolio`（本文件
+  既有的「刻意复现收集期就被 import」约定），断言 `paper_portfolio.SNAPSHOT_DIR` 落在
+  `tmp_path` 之下。
+  - ⚠️ 第一版把 `import paper_portfolio` 写在函数体内，测试因为「这是本次 pytest
+    进程第一次 import 该模块，此时 `_isolate_env` 早已跑过」而意外通过——对 bug 没有
+    判别力，被自己的变异测试打脸后才发现要挪到模块级（同本文件顶部注释警告的坑）。
+  - 变异测试：删掉 `_isolate_paper_portfolio_state` 里重绑 `SNAPSHOT_DIR` 的那一行，
+    本条测试可靠地红，恢复后绿。
+
+### Removed
+
+- `experiments/fg_exposure_gate_forward_test.py::run()` 的 `sandbox_root` 参数：
+  从未被函数体使用（内部永远用 `tempfile.TemporaryDirectory()` 新建的临时目录，
+  与传入的 `sandbox_root` 无关），连它自己的 `main()` 都不传——死参数，容易让后来者
+  误以为已经支持外部注入路径。`evaluate()` 自己的同名参数是真在用的，未动。
+
+### 核对
+
+- 全套测试：4,917 passed / 1 failed（已知的经济日历 flaky）/ 0 errors。
+- ruff 0.13.3 对改动文件 All checks passed。
+
+## [0.45.275] — 2026-09-18 — 补登 5 个未登记的世代边界（2026-08-15/08-26，P1 审计）
+
+v0.45.265 给 `signal_archive.analyze()` 加了按世代切片的机制，但当时留了两句
+未验证的话：「`_COHORT_HISTORY` 始于 2026-08-17，此前一律未登记」「Buzz / Chronos
+这类只读原始数据的蜂，全史可能跨未登记改动池化」。这次把这两句从猜测变成审计——
+逐个过了 07-25~08-28 提交窗口内全部 7 只蜂的改动，用项目自己的判据
+（算法 / 来源 / 哨兵语义改变 ⇒ 换代；只是某天测量出错 ⇒ 走 QUARANTINE 不换代）
+筛出 4 个真正符合条件、但从未进过 `COHORT_SIGNAL_SCOPE` 的定义变更，涉及 5 条
+`_COHORT_HISTORY` 记录（两条同日两个真实版本的算作两条）。
+
+排除的（同样查过，证据显示不算数，不重复列入）：Oracle v0.45.30 Polymarket 关闭
+（commit 自己写了"odds 评分口径不变"）、Guard VIX Step1（commit 验证过"base 常量
+不触发任何 regime_vote 分支"）、Chronos v0.45.122 预取重构（换取数路径不换值）、
+Bear v0.45.54（`valuation` 标签诚实化，不改数值）、Buzz v0.45.247（794 份历史
+重放验证逐字段 0 差异）。这五个能排除，是因为当时的 commit message 里就做了
+实测；4 个真正漏掉的，恰恰是当时没有做这一步。
+
+### 为什么按实际部署日期回填，而不是记今天的日期
+
+`_COHORT_HISTORY` 的判据是"世代边界看的是数据不是发现时间"（v0.45.176 已有先例）：
+这些改动是 2026-08-15/08-26 真实生效的，任何跨过那天的池化从那天起就已经在发生，
+记今天的日期只会让"发现之前"这段时间继续被静默池化。两条 08-15 的记录因此排在
+`_COHORT_HISTORY` 现有第一条（08-17）**之前**——这是本次唯一的结构性风险点，
+见下方"核对"。
+
+### 量测
+
+7 只蜂在 07-25~08-28 窗口内触及评分逻辑的改动共 12 个提交（含 07-30 chronos_bee
+入库那次日报提交不计），6 个判定为已有边界覆盖或经证据排除（见上），5 个提交
+（对应 4 处逻辑改动——Guard 的 Step1/Step2 算一处调查、拆成两条记录）是本次要
+补的缺口。受影响信号在生产库 `signal_archive` 里的现有样本分布
+（`date < 边界` / `date >= 边界`）：
+
+| 信号 | 边界日期 | 边界前 | 边界后 | 边界前占比 |
+|---|---|---:|---:|---:|
+| `price.momentum_5d` | 2026-08-15 | 1057 | 509 | 67.5% |
+| `guard.macro_adj` | 2026-08-15 | 1054 | 541 | 66.1% |
+| `agent.BuzzBeeWhisper.score/direction` | 2026-08-26 | 1162 | 480 | 70.8% |
+| `price.volatility_20d` | 2026-08-26 | 1151 | 416 | 73.5% |
+| `agent.ChronosBeeHorizon.score` | 2026-08-26 | 1162 | 480 | 70.8% |
+| `agent.ChronosBeeHorizon.direction` | 2026-08-26 | 1153 | 480 | 70.6% |
+| `catalyst.count` | 2026-08-26 | 1161 | 480 | 70.7% |
+| `catalyst.nearest_days` / `max_weight` | 2026-08-26 | 875 | 465 | 65.3% |
+
+每个字段目前 65%~74% 的样本落在旧口径一侧——不是边角料，是全库大半，此前
+`analyze()` 的"全史"模式对这些信号一直在跨口径求 IC / 分布，数字照出但没意义。
+
+### Added
+
+- `ic_rerun_readiness._COHORT_HISTORY` 新增 5 条：
+  - `2026-08-15 v0.43.24`：GuardBeeSentinel VIX 改走 CBOE 优先（Step 2）。宏观
+    整体降级但 CBOE 仍供得上真实 VIX 的日子，VIX 由"跟着一起丢弃"变成"参与
+    regime_votes"，直接改 `guard.macro_adj`（同版 Step 1 验证过不改评分，不登记）。
+  - `2026-08-15 v0.43.25`：ScoutBeeNova `momentum_5d` 缺失哨兵 `0.0`（伪造持平）
+    → `None`（诚实缺失）。原提交实测：该伪造值让情绪背离检测近 28 个扫描日
+    395 次判定**全部** severity=0，结构性失灵。
+  - `2026-08-26 v0.45.2~0.45.15`：BuzzBeeWhisper 情绪-价格背离检测 None 语义
+    修复（此前 momentum 为 None 时仍传 0.0，检测器"unavailable"分支永远不可达）+
+    同批 `data_pipeline.py` 把 `volatility_20d` 缺失伪造默认值 `0.0` 改 `None`。
+  - `2026-08-26 v0.45.31`：ChronosBeeHorizon 催化剂抓取全失败时不再冒充
+    `4.0`/"无近期催化剂"，改返回 error（走 `queen_distiller` 缺失维度通道）。
+  - `2026-08-26 v0.45.32`：移除 `catalysts.json` + 硬编码 NVDA/VKTX 两条人工
+    催化剂来源（VKTX 曾有两条内容错误的 critical 级条目），来源只剩 yfinance
+    财报日历——与上一条是两次独立的定义变更，各自登记。
+- `signal_archive.COHORT_SIGNAL_SCOPE` 同步新增上述 5 个 key 的影响面声明：
+  `v0.43.24 → guard.macro_adj`；`v0.43.25 → price.momentum_5d`；
+  `v0.45.2~0.45.15 → agent.BuzzBeeWhisper.*, price.volatility_20d`；
+  `v0.45.31`/`v0.45.32 → agent.ChronosBeeHorizon.*, catalyst.count,
+  catalyst.nearest_days, catalyst.max_weight`。
+- `tests/test_signal_archive_generations.py::DOCUMENTED_REDEFINITIONS` 补齐
+  这 10 个信号名 → not_before 日期的断言（复用既有参数化测试，未新开测试类）。
+
+### Removed
+
+- `tests/test_signal_archive_generations.py::NEVER_SLICED_TODAY` 移除
+  `price.momentum_5d`、`price.volatility_20d`、`catalyst.count`、
+  `catalyst.nearest_days`、`catalyst.max_weight`（它们不再"从未被切"，按表头
+  自己的话"把它从这里移除，并在 CHANGELOG 写明依据"办理，本条即依据）。
+
+### 核对
+
+- 新增/修改测试全绿：`test_signal_archive_generations.py` 57 项、
+  `test_ic_rerun_readiness.py` 30 项、`test_oracle_direction_keyword_vote.py`
+  34 项、`test_signal_quarantine.py` 10 项，先跑红（10 个新断言对着改动前的代码
+  确认失败）再改代码转绿。
+- ⚠️ **实现时踩了一次自己的坑**：插入两条 08-15 记录时，第一版 `Edit` 把原有
+  `("2026-08-17", "v0.44.1~0.44.3", ...)` 那一条整段替换掉了（old_string/new_string
+  没对齐），是 `test_no_stale_scope_entries` 当场抓到的（"影响面表里有
+  `_COHORT_HISTORY` 不存在的版本"）——审计轨迹被误删而不是误改写，補回后复测绿。
+- ⚠️ 补登两条 08-15 记录后，`_COHORT_HISTORY` 的"第一条"从 `v0.44.1~0.44.3`
+  变成 `v0.43.24`，撞了 `tests/test_oracle_direction_keyword_vote.py` 里一条独立
+  写的回归测试——它把"审计轨迹不得被改写"实现成了`h[0][1] == "v0.44.1~0.44.3"`
+  （钉位置而不是钉内容），这次一起改成按 `(date, version)` 成员判定（与
+  `test_ic_rerun_readiness.py::TestCohortBoundary.test_no_known_cohort_has_vanished`
+  同一判据）。
+- `cohort_start()` 与 `ic_rerun_readiness.assess()` 的当前世代不受影响
+  （取 `_COHORT_HISTORY[-1]`，插入更早的记录不改变列表末尾）；用
+  `generation_boundaries()` 逐一核对过 `agent.GuardBeeSentinel.*` / `ml.*` /
+  `crowding.*` / `composite.*` 等已有边界覆盖的下游信号，`_scope_closure` 的
+  传递闭包会把新记录的影响面沿依赖边传给它们，但因为它们各自已有更晚的边界
+  覆盖，"取最后一条适用的边界"语义下这次是无副作用的（已用真实签名逐一验证，
+  不是理论推断）。
+- 全量套件（剔除 `TestCoverageHorizon` 那条日历阈值告警——与本次无关，设计上
+  会定期变红，见其自身注释）跑通：**4921 passed, 1 skipped, 2 xfailed, 0 failed**，
+  过程中唯一发现的红是上面第二条（`test_oracle_direction_keyword_vote.py`
+  钉位置的回归测试），已修并复测绿；这次未复现此前 session 记录过的、
+  由本机并发多个 session 抢 CPU 导致的 8 个 teardown ERROR 噪音
+  （本次跑的时段没有其它并发全套测试在跑）。
+
+### 不做
+
+- `price.volume_ratio` 同批 `data_pipeline.py` 也改了 dataclass 默认值
+  （`1.0` → `None`），但排查发现至少一条取值路径（`CBOESource`）当时仍硬编码
+  `.get("volume_ratio", 1.0)` 未清，是否真的可达没有查清，不认领登记，留在
+  `NEVER_SLICED_TODAY`。
+- 本次只审计了 2026-07-25~08-28 这一个提交窗口。7 只蜂在此之前（最早到
+  2026-02-23）还有 49 次未查的改动（scout 12、chronos 10、rival 8、oracle 7、
+  buzz/guard/bear 各 4），`signal_archive` 归档最早回填到 2026-03-10，理论上
+  也可能藏着同类问题——这次没有查，`signal_archive.py` 顶部的已知盲区注释已
+  同步更新为"仍已知的盲区"而不是当作已解决。
+- P1 分析里原提议的"先加 nondecreasing 安全测试再插入"这一步实际发现已存在
+  （`test_ic_rerun_readiness.py::TestCohortBoundary.test_history_is_append_only_and_ordered`），
+  未重复造轮子。
+
+## [0.45.273] — 2026-09-18 — Fixed：v0.45.269 二次检查——backup_status.json 缺新鲜度校验、bash 修复本身零测试覆盖
+
+对 v0.45.269（Step 14 exit code 2 误判修复）做多角度代码复检，发现该次修复
+本身留了两个缺口，均已实测验证是可触发的，本次一并补上。
+
+### Fixed
+
+- `~/.claude/scripts/alpha-hive-orchestrator.sh` Step 14：v0.45.269 加的
+  `jq -r '.stage'` 读取**没有新鲜度校验**——而 `run_step()` 自己也把 rc=2
+  当"脚本不存在，跳过"的哨兵值（跟 `run_backup.py` 的 rc=2 同一个数字、
+  不同含义）。若脚本本轮根本没被 `run_step` 调用（比如生产 checkout 落后、
+  文件暂时不可达），`backup_status.json` 会是上一轮遗留的陈旧文件——旧代码
+  会原样把陈旧的 `stage` 当成本轮结果汇报，若恰好是 `stage: "push"` 就会
+  重演 v0.45.269 本要修的那个误报（"已提交但推送失败"）。本文件里
+  `write_status()` 对 `scan_timing.json` 早有现成的 `.date == $d` 新鲜度校验
+  模式（"只认本轮日期的文件——昨天那份不能冒充今天的"），这次对齐同一套
+  约定：新增 `stage_or_missing` 分支，`backup_status.json` 的 `date` 字段
+  不等于今天就不信它的 `stage`。
+- `data_backup/run_backup.py`：`status` 字典新增 `date`（`YYYY-MM-DD`，
+  与既有 `started_at` 同源但格式对齐 `scan_timing.json` 约定），供编排器
+  新鲜度校验读取；docstring 补充说明该字段的用途与 `run_step()` 的 rc=2
+  哨兵值撞车问题。
+- `run_data_backup.py`：docstring 仍写着"v0.45.264 尚未接入"，与 v0.45.269
+  更新过的 `data_backup/run_backup.py` docstring（"已接入"）直接矛盾——
+  漏改了兄弟文件，本次订正。
+
+### Tests
+
+- `tests/test_data_backup.py` 新增 `TestOrchestratorStep14StageDispatch`
+  （7 条）：v0.45.269 的 bash `case` 分支此前**零测试覆盖**——4 条新测试
+  当时只测了 Python 侧的 `run_backup.main()`，即使把 Step 14 那段 bash 逻辑
+  整段改回修复前的样子也照样全绿，给不出任何回归信号。新增测试直接从
+  `alpha-hive-orchestrator.sh`（不受版本控制，pytest import 不到）里抽出
+  Step 14 的 rc==2 分支原文，接进一个最小 bash 沙箱（假 `log()` 收日志、
+  真 `jq` 判断）跑，覆盖 export/commit/push 三种已知 stage、未识别 stage、
+  status.json 缺失、陈旧 status.json（关键回归用例：昨天的文件恰好是
+  `stage: "push"`，必须不被当成本轮结果）、无 `date` 字段的旧格式文件
+  共 7 种场景。**变异验证**：把新鲜度校验从脚本里拿掉（用隔离的临时副本，
+  不改动生产脚本本身），`test_stale_status_file_from_a_previous_day_is_not_trusted`
+  按预期真的报红，确认这条测试有牙齿而非重言式。
+- `TestRunBackupStageReporting::test_full_success_reports_done_stage`
+  追加一条断言，锁定新增的 `date` 字段与 `started_at` 的日期前缀一致。
+
+全套 `tests/test_data_backup.py` 21 passed；`bash -n` 语法检查通过。
+
+## [0.45.274] — 2026-09-18 — Fixed：全套测试（非单文件跑）时 `paper_portfolio.SNAPSHOT_DIR` 隔离缺口导致真实联网，8 个 teardown ERROR
+
+### 根因
+`paper_portfolio.SNAPSHOT_DIR`（连同 `STATE_DIR`）是模块级常量，求值于 import 期
+（`paper_portfolio.py:85`；模块内注释早已承认这点）。多个测试文件在文件顶部
+`import paper_portfolio as pp`——pytest **收集阶段**就会执行这行，此时
+`_isolate_env` 的 `monkeypatch.setenv("ALPHA_HIVE_HOME", ...)` 还没跑（fixture
+只在**执行期**生效，收集期不生效）。全套跑时只要任意一个文件顶层 import 了它，
+`SNAPSHOT_DIR` 就会冻结成**真实生产** `report_snapshots/` 目录，且这个冻结对
+本次 pytest 进程里之后所有测试永久生效——单独跑某一个测试文件不会触发（该
+文件若不在收集阶段更早 import 到 `paper_portfolio`，冻结会发生在测试执行期，
+此时 `_isolate_env` 已生效，`SNAPSHOT_DIR` 会被正确沙盒化），这正是「单跑绿、
+全套跑红」的成因。
+
+`STATE_DIR` 早被 `tests/conftest.py::_isolate_paper_portfolio_state` 重绑到 tmp，
+`SNAPSHOT_DIR` 没有——`tests/test_paths_not_frozen_at_import.py::KNOWN` 的旧结论是
+「只有两处 glob 读，无写入 ⇒ 后果是测试读到 checkout 的真实快照，不是写穿」，
+这结论本身没错，但漏算了下游：`experiments/fg_exposure_gate_forward_test.py::run()`
+把「能 glob 到真实快照」当成「有真实前瞻样本」的信号，读到就用
+`paper_portfolio.run_replay()` **重放**那些真实历史日期；重放需要真实 OHLC，
+`_PRICE_CACHE` 里没有就会真的去打 yfinance——"只读"的后果链一路淌到网络层。
+`ic_rerun_readiness.main()` 不分场景地调用 `fg_exposure_gate_forward_status()`
+（不接受调用方传路径，只能走这个模块级常量），于是任何跑到 `rr.main()` 又没
+自己 monkeypatch 这条链的测试，在全套里都会被 `tests/conftest.py::_offline_transport`
+的离线闸挡下并判红——8 个 teardown ERROR，横跨 `test_fg_exposure_gate_forward_test.py`
+/ `test_ic_rerun_readiness.py` / `test_resonance_boost_forward_test.py` 三个文件的
+`TestCarriedByReadiness`。
+
+### 修复
+`tests/conftest.py::_isolate_paper_portfolio_state` 一并把 `SNAPSHOT_DIR` 重绑到
+`sandbox / "_snapshot_sandbox"`（嵌套在已有的 `paper_portfolio_state` 沙盒下，
+不直接用 `tmp_path / "report_snapshots"`——那个字面量会跟 `test_outcomes_fetcher.py`
+自己声明的同名 fixture 撞名，撞上时后者 `d.mkdir()`（不带 `exist_ok`）会因目录
+已存在而 `FileExistsError`，实测换名字前撞红 19/20 条）。不需要 mkdir：
+`SNAPSHOT_DIR` 只被 `.glob()` 读，`Path.glob()` 对不存在的目录直接返回空迭代器。
+
+`tests/test_paths_not_frozen_at_import.py::KNOWN` 里 `SNAPSHOT_DIR` 那条的注释
+同步更新，说明它现在也被运行时罩住了（静态扫描登记不变，这条不受影响）。
+
+验证：`/usr/local/bin/python3 -m pytest -o addopts="" -v --tb=short --timeout=60
+-m "not integration and not network"` 从「1 failed, 4892 passed, 1 skipped,
+86 deselected, 2 xfailed, 8 errors」变为「1 failed, 4892 passed, 1 skipped,
+86 deselected, 2 xfailed」——唯一的 failed 是设计内的
+`test_economic_calendar.py::TestCoverageHorizon`，与本次改动无关。
+
+### 与 v0.45.272 占位的关系
+本条只修**测试侧**症状（全套跑真联网），**不改动** `paper_portfolio.py` 生产代码。
+v0.45.272 占位提到的「潜在写穿生产 report_snapshots/paper_portfolio_state」——
+`STATE_DIR` 早已被同一个 fixture 保护（四个状态文件 + teardown 指纹比对），
+`SNAPSHOT_DIR` 全仓搜索只有两处 `.glob()` 读、零写入点，没找到写穿证据；若那个
+占位实际指向的是把 `SNAPSHOT_DIR`/`STATE_DIR` 从模块级常量改成像
+`_base_dir()`/`_pheromone_db_path()` 那样的懒求值（`paper_portfolio.py:54-56`
+注释里明确写着"留待后续"的那处重构，涉及全模块几十个使用点），那仍是未完成、
+更大范围的独立工作，本条不覆盖，占位不撤。
+
+## [0.45.272] — 2026-09-18 — 占位关闭：核心修复已由 v0.45.274 抢先完成，本号号不撤但不再补真内容
+
+本号占号后（04:25 推送）在本 session 自己实现修复期间，另一 session 04:25 之后 fetch 仍只见占位、
+独立复现同一个 bug、取号 v0.45.274 完成并推送（05:04 提交）。两份诊断与修法在核心机制上一致
+（`SNAPSHOT_DIR` 从没被 `_isolate_paper_portfolio_state` 重绑 → 全套跑时冻死成真实目录 → 读到真实
+快照后经 `fg_exposure_gate_forward_status()` 级联出真实联网），且都独立踩中并修好了同一个沙箱名
+撞车坑（`tmp_path / "report_snapshots"` 撞 `test_outcomes_fetcher.py` 等文件自己的同名目录）。
+
+按既定原则「先提交（进 git 历史）的占号，后者改号」：v0.45.274 已推上 origin/main，本号占位到此
+关闭，不再补一份重复的核心修复。本 session 遗留的两处不在 v0.45.274 范围内的增量见 v0.45.276。
+
+`STATE_DIR` 早已被同一个 fixture 保护，本号占位提到的「潜在写穿」经 v0.45.274 核实无写入证据；
+若指的是 `paper_portfolio.py:54-56` 注释里「留待后续」的 `SNAPSHOT_DIR`/`STATE_DIR` 懒求值重构
+（涉及全模块几十个使用点），那仍是更大范围的独立工作，两个号都没覆盖。
+
+## [0.45.271] — 2026-09-18 — 09-17 完整蜂群顺序重放补算：final_score/direction 内部一致重算，predictions 表随之更新
+
+延续 v0.45.270（momentum/volume 独立回落链）——用户要求"按同样思路补算并重新部署"。
+先算 BuzzBee 单独修正后发现：momentum/volume 直接进 7 通道加权公式，
+**BearBeeContrarian 自己的估值/动量衰减两项也直接读 `stock["momentum_5d"]`**，
+两只蜂改了分，Guard 的共振/一致性、Bear 读 Guard 的信号一致性子项都会跟着变——
+要让 final_score 内部一致，需要把 GuardBeeSentinel→BearBeeContrarian→QueenDistiller
+那天的真实调用顺序重跑一遍，不能只改 BuzzBee 一处分数往上顶。
+
+### 做法：钉死当天外部依赖，让核心业务逻辑真跑
+
+不是手算 final_score，是构造当天的 PheromoneBoard、注入修复后的 BuzzBee 结果，
+**真的调用** `GuardBeeSentinel.analyze()` / `BearBeeContrarian.analyze()` /
+`QueenDistiller.distill()`，把每一处会碰到"今天"而非"09-17"的外部依赖钉死在
+当天存档值上：
+- Guard 的宏观/周期/市场政体判定（`fred_macro`/`market_intelligence` 无日期参数，
+  直接调只能拿到 09-18 的数）：逐字段从 Guard 当天存档的 `macro_adj`/`cycle_context`/
+  `market_regime` 重建，monkeypatch 对应函数返回这份存档值。
+- Guard 的拥挤度 `adjustment_factor`：直接复用存档数值（内部 Reddit/空头仓位子计算
+  依赖 09-18 实时行情，但 `adjustment_factor` 只是离散三档 0.70/0.95/1.20，
+  重新算的收益远小于再钉一层依赖的成本，选择直接复用并标注为已知近似）。
+- GEX 政体：该 09-17 全天 30/30 标的 `gex_regime="unknown"`（已实测），故
+  `dealer_gex` 全量传 `{}`、`DealerGEXAnalyzer.analyze` monkeypatch 成空，
+  不是近似，是精确复现那天"数据不可用"的真实状态。
+- ML 权重反馈 `ml_adjustments`：**同一份值命中全部 30 只标的**（QueenDistiller
+  实例级，不是逐票算的），直接从存档取值事后赋给 `queen.ml_adjustments`——
+  但 `__init__` 只在传了 `ml_model=` 时才做"乘 ml_adjustments 再归一化"那步
+  （见 `queen_distiller.py:161-178`），必须把那段逻辑在赋值后手动重放一遍，
+  否则喂进 `RegimeWeightAdjuster` 的基准权重就是错的。
+- LLM 引擎：09-17 全 30 只标的 `distill_mode` 均为 `rule_engine`（已核实），
+  `enable_llm=False`，回放天然确定性、不产生任何 API 费用。
+- BearBee 板读险情：其 9 个子判断各自先读信息素板上游蜂条目、读不到才退化到各自的
+  API 兜底（SEC/期权/newsapi）——29/30 实测那天**部分子项已经走了兜底**
+  （板条目在 Bear 读取前已被淘汰/未及时发布，与 momentum/volume 无关），
+  按 `data_sources` 存档标签逐子项判定"那天到底读到了没有"：insider/options/
+  catalyst/ml 两条路径都与本次修复无关，原样复用存档数值与文案；news/guard
+  只在存档标着"real"（那天真读到了）时才用修复后的输入重算；valuation/momentum
+  从不经过板子，直接读 `stock` dict，永远重算。
+- `bearish_signals` 文案：按 `bear_bee.py` 全部 `.append(f"...")` 调用点的固定
+  前缀逐条归类复用/丢弃重算，而不是拼"[插桩]"占位文本——**首版漏了兜底路径
+  独有的"内幕人净卖出"变体**，30 只全量控制组核对时被抓出（ABBV 悄悄从 7.0 错到
+  2.0，score 却没报任何错误）。加了一道自证：存档里每一条 `bearish_signal`
+  必须能被前缀表分类，分类不出直接抛异常，把"漏项→分数静默错误"改成
+  "漏项→当场崩溃"。
+
+### 自证：先复现存档，再信任修正结果
+
+对照组（control）喂**未修复**的 momentum/volume 跑同一套回放，检验能不能复现
+30/30 标的的存档 `final_score`/`direction`/`dimension_weights`——这是相信"修复
+后"那次跑出来的数的前提。全量迭代过程中连续抓到并修正 5 类系统性偏差（逐条都是
+"跑出脏分数不报错"）：`AgentResult.to_dict()` 的 `error=None` 时不落这个 key
+而存档 JSON 永远显式写 `null`，导致重构的 `agent_results` 全部被
+`_prepare_dimension_data` 判定"带 error"而在只剩 1/5 维度上打偏；`__init__`
+的 ML 权重乘算时序漏做；`distill()` 自己会读板子做共振检测，而 `BearBeeContrarian`
+在生产里也会 `_publish()` 自己——漏发布让共振少算一个跨维度支持者，两只标的
+（CRCL/T）的 `resonance_detected` 因此从真变假，直接吃掉近 1 分；Bear 那天真实
+读到的 `stock["price"]` 是 FALLBACK 的 `0.0`（不是后来补写进 `predictions.
+price_at_predict` 的修正价），`_compute_bear_score` 的空信号分支按 `price>0`
+判负，两个变量搞混让 XOM/AMC 各错 1 分；上面那条前缀表漏项。
+
+最终：30/30 方向不受随机噪声干扰（control 组零方向误判、零权重误判）、
+`dimension_weights` 30/30 逐字节相等；仅剩约 0.01~0.08 的极小残差
+（Guard/Bear 各别标的），已排查过 dim_scores/权重/置信度/ML 调整/共振全部
+逐字节吻合、仍未定位到根因，判定为可接受的复现噪声（未影响任何方向判定或
+权重结果）。
+
+### 实测结果（30 只全量，用真实回放 + 存档 `ml_weight_adjustments`/GEX/宏观值）
+
+最大 `|Δfinal_score|` 1.29（DELL 5.06→6.35）、均值 0.24；**5 只最终方向翻转**：
+DELL neutral→bullish、ENPH bullish→neutral、NFLX neutral→bearish、
+TMUS bullish→neutral、VZ bullish→neutral；3 只标的 `resonance_detected`
+翻转（DELL/NFLX/TMO：false→true）。数据质量通道健康度 82%→89%
+（686/837→746/837，BuzzBee.momentum/volume 与 BearBeeContrarian.valuation
+三个通道各 30 标的脱离降级；`ScoutBeeNova.momentum`——另一条独立、未受本次
+修复影响的降级路径——与 `ChronosBeeHorizon.analyst_targets` 仍各 30 标的降级，
+如实保留，不是漏改）。
+
+### 落盘范围（Fixed）
+
+- `pheromone.db` 的 `predictions` 表（09-17，30 行）：`final_score`/`direction`/
+  `dimension_scores`/`agent_directions` 更新为重算值；`price_at_predict` 不碰
+  （那是独立于本次故障的口径，backtest 要比对的是"当天预测的方向对没对"）。
+  写入前逐行核对当前值等于补丁前存档值，`checked_t1`/`checked_t7` 全 0（T+7
+  回测还没跑到这批，此时改不会跟已写的 return/correct 字段打架）——两条都不
+  满足直接中止、不写任何行。备份：`pheromone.db.backup_before_0917_patch`。
+- `.swarm_results_2026-09-17.json`（未跟踪，本地）：30 只标的 `agent_details.
+  {BuzzBeeWhisper,GuardBeeSentinel,BearBeeContrarian}` 与 `distill()` 返回的
+  全部顶层字段（`final_score`/`direction`/`dimension_scores`/`dimension_weights`/
+  `resonance`/`conflict_info`/`arbitration_*`/`confidence_calibration`/…）整体
+  替换；额外重算 `cs_rank`（横截面排名，逐字复刻
+  `alpha_hive_daily_report._post_scan_enrichment`）与 `thesis_break_evaluations`
+  （逐字复刻 `_evaluate_thesis_breaks`，不改 `thesis_break_l1`/`l2` 判定文本，
+  只刷新求值明细）。
+- `alpha-hive-daily-2026-09-17.md` / `.json` 的 `markdown_report`：**调用真实的
+  `report_formatters.generate_swarm_markdown_report`** 用补丁后的 swarm_results
+  重新生成整份 8 版块报告，不是手改字符串；`📌 关注事项`（人工维护·不参与评分）
+  段落发现会被 `watchlist_events.format_for_report` 的 `datetime.now()`
+  （今天=09-18）污染"距今天数"，整段替换回原文，不在这次范围内顺手"修好"
+  这个另一处 bug。`opportunities`（30 条）与 `twitter_threads`（1 条）同样
+  调用真实的 `_build_opportunity_items`/`generate_swarm_twitter_threads` 重算。
+- `index.html`：调用真实的 `dashboard_renderer.render_dashboard_html` 用补丁后
+  的 `report`/`opportunities` 重新生成——不是逐张卡片手改。Top-6/Top-12 展示
+  会随新排名重排；ML 详情按钮/链接靠 `Path.exists()` 检查真实存在的
+  `alpha-hive-{ticker}-ml-enhanced-2026-09-17.html`（不是靠排名硬编码），
+  DELL/NFLX/TMO（新进前 12、当天没生成深度报告）正确显示"-"/"ML 报告生成中"
+  而不是死链，CRCL/BILI/NVDA（跌出前 12、报告仍在）正确保留可点链接——两边
+  都不需要我另外处理。`dashboard-data.json` 随该函数的既有副作用一并刷新。
+
+### 遗留（超出本次范围，未做）
+
+- **12 份已存在的 `alpha-hive-{ticker}-ml-enhanced-2026-09-17.html` 深度报告
+  未改**：读了一份样本（QCOM），确认是叙事体裁的分析文本（"蜂群实际输出的
+  final_score（含置信度加权，第1章展示的数字）= 6.18，..."），score 与推理
+  文字交织在一起——不是"改一个数字"能安全完成的，改数字不改周边论证文字
+  会制造逻辑不自洽的报告；真要改，正确做法是走 `generate_ml_report.py` 的
+  真实生成管线重新产出，那条路本身要不要用 LLM、要不要过一遍费用确认，
+  没有查清楚，故本次不碰。受影响 12 只中 QCOM/NVDA/META/MSFT/AMC/XOM/CRCL/
+  BILI/SNOW/VKTX/RKLB/CRM——分数已在 index.html/daily.md 层面更新，
+  但点进各自深度报告仍会看到旧数字与旧叙事。
+- **DELL/NFLX/TMO 未生成新的深度报告，CRCL/BILI/NVDA 的旧深度报告未删除**：
+  重算后的 Top-12（按 `final_score` 选深度报告的名单）与当天实际产出的
+  Top-12 不是同一批标的；index.html 已经能正确处理这种"排名和已生成文件对
+  不上"的状态（见上），故未强行补齐/清理文件本身。
+- Guard/Bear 各别标的约 0.01~0.08 的残差未定位到根因（见上）。
+
+## [0.45.270] — 2026-09-18 — Fixed：09-17 网站「数据部分降级」根因——CBOE 熔断跳闸时 momentum/volume 独立回落链连尝试机会都没有
+
+### 根因（09-17 14:11:50~14:14:21，用日志行号定位，不按日期 grep——`alpha_hive.log`
+### 只有 `HH:MM:SS`，混着历史轮转内容，见 memory `alpha-hive-log-no-date.md`）
+
+扫描开局约 2 分钟本机网络中断：CBOE 因连续 `no_data` 熔断跳闸、yfinance
+同时报 `'NoneType' object is not subscriptable`（网络异常导致其内部解析崩溃）、
+Finnhub/AlphaVantage 均 SSL 握手失败——四条降级链**同时**打不通，30/30 标的在
+`MultiSourceFetcher.fetch()` 走到最后防线，记「所有数据源不可用」返回 FALLBACK。
+
+价格确实拿不到，这部分该降级；但 `momentum_5d`/`volume_ratio` 各自另有一条
+**独立**于 CBOE/yfinance 主价源的回落链（自攒价格索引 + Twelve Data，见
+`_fill_momentum_from_index` / `_fill_volume_from_twelvedata`，本就是为「yfinance
+限流时怎么办」而建的）——此前只挂在 `CboeSource.fetch()` 内部：CBOE 熔断器一
+跳闸，`self.breaker.allow_request()` 直接 `return None`，连调用
+`_fetch_history_metrics`（唯一触达那条回落链的入口）都没机会。而本地价格索引
+不经网络、Twelve Data 是与 CBOE/yfinance 都无关的独立账号配额，两者当时大概率
+仍然健康——网络在 14:20 前后已恢复（options 快照从 14:20:45 起正常写入），
+但 `_prefetched_stock` 是扫描开局一次性注入、全程复用的内存快照，没有「网络
+恢复后重试」的机制，这个 ~2 分钟的窗口被冻进了当天全部 30 只标的的报告。
+
+落到网站上：ML 报告数据质量横幅「数据部分降级：momentum 通道 30/30 标的降级；
+volume 通道 30/30 标的降级；analyst_targets 通道 30/30 标的降级」（第三项
+`ChronosBeeHorizon.analyst_targets` 同源但机制略有不同，走的是
+`prefetch_market_bundle` 的并发个票 `analyst_price_targets` 抓取——**未修**，
+见下方遗留）。BuzzBeeWhisper/ChronosBeeHorizon 均不检查 `_data_unavailable`
+标记（这两只蜂本就设计成部分降级而非整体跳过），所以两只蜂仍然正常出分，
+只是动量/量比/目标价三个子信号被迫置 None。
+
+### Fixed
+
+- `data_pipeline.py::MultiSourceFetcher.fetch()`：四源全灭、即将返回最终
+  FALLBACK 字典前，补一次 `_fill_momentum_from_index` + `_fill_volume_from_twelvedata`
+  ——两条回落各自独立尝试，互不污染，任一/两者都拿不到时保持诚实 `None`
+  （不编默认值）；回落链自身异常也不得让 `fetch()` 整体崩溃（`except Exception`
+  + debug 日志，不掩盖主诊断）。价格与 `_data_unavailable` 标记不变。
+
+### Tests
+
+- `tests/test_multi_source_fallback_momentum.py`（6 条，全部**变异真跑**验证
+  过——回退本次改动，其中 3 条按预期转红）：四源全灭+双回落成功／双回落也失败
+  保持诚实 None／单条回落成功不拖累另一条／回落链自身抛异常不炸 `fetch()`／
+  有源正常成功时完全不触碰新增分支（用会抛错的假回落函数守住）。
+
+### 遗留（诊断已确认，无需/无法修）
+
+- **`analyst_targets` 通道同一天也 30/30 降级，根因已查清，但不是同一类 bug**：
+  `prefetch_market_bundle` 当时日志「日线 11/35 只 | info 29 | calendar 30 |
+  analyst_targets 30」——bundle 认为 30/30 都拿到了非 None 值，但
+  `ChronosBeeHorizon` 读出来全是 `{}`。追到 yfinance 库本身
+  （`yfinance/scrapers/analysis.py::analyst_price_targets`）：`YfConfig.debug.
+  hide_exceptions` **默认 `True`**，取数抛 `TypeError`/`KeyError` 时不外抛，
+  直接返回 `{}`——即请求失败与"该票本来就没有分析师覆盖"在 yfinance 自己的
+  返回值里**无法区分**，`prefetch_market_bundle` 的 `getattr(...) is not None`
+  判定对这个字段因而必然失真（已确认，非推断）。但下游 `ChronosBeeHorizon`
+  的 `if _mean > 0` 早已把这种空结构正确判成 `"unavailable"`（本条与
+  momentum/volume 的区别：**没有独立于 yfinance 的第二数据源可回落**，无东西
+  可接，属于诊断而非缺口）。唯一的不完美是 `prefetch_market_bundle` 自己的
+  统计行把两种情况都计入「成功」，误导了本次排查前半段——若要根治属于
+  单纯的可观测性改进（区分`{}` 与"真无覆盖"），不影响任何实际产出，未做。
+- 未对 2026-09-17 已发布的报告做补算/重新部署——影响的是 BuzzBee 的
+  `momentum`/`volume` 子信号与 ChronosBee 的目标价卡片，**间接影响
+  `final_score`**（momentum/volume 是 BuzzBee 7 通道加权里的两个分量），
+  比此前 09-10 的磁吸价格修正（纯显示字段）更深；是否补算是决定要不要
+  改一天已发布的分数，留给用户定。
+
+## [0.45.269] — 2026-09-18 — Fixed：Step 14 数据备份 exit code 2 误判——export/commit 失败曾被编排器误报成"已提交但推送失败"
+
+`data_backup/run_backup.py::main()` 的退出码只把 `stage == "secret_scan"` 单独
+映射成 1，export/commit/push 三种失败全部合并成 2——`run()` 内部一直忠实
+记录了完整的 `stage` 字段，问题不在这里。而 `~/.claude/scripts/
+alpha-hive-orchestrator.sh`（Step 14 于 v0.45.264 设计，2026-09-18 用户批准
+接入生产；该脚本不受版本控制）的 `elif [ $STEP14_RC -eq 2 ]` 分支把 rc==2
+硬解读成「已提交但推送失败」——export 失败（未提交）、commit 失败（同样
+未提交）命中同一分支时，日志与 `STEPS_RESULT.step14_data_backup.status`
+都会谎称"已提交"，误导排查方向。对应项目 CLAUDE.md 硬检查项「这个失败，
+下游怎么知道？」：不是没有观测点，是观测点的粒度被 rc 这一个整数吃掉了。
+
+### Fixed
+
+- `data_backup/run_backup.py`：docstring 补全 export/commit 两条此前没写清楚
+  的失败路径（原文只写了 secret_scan 与 push），并显式标注"退出码 2 是三种
+  失败共用的，下游必须读 `stage` 字段"。`main()` 本身的退出码逻辑没有改——
+  一直是对的，bug 只在下游的读法上。
+- `~/.claude/scripts/alpha-hive-orchestrator.sh` Step 14：`elif $STEP14_RC -eq 2`
+  分支改成 `jq -r '.stage // "unknown"' "$BACKUP_STATUS_JSON"` 读真实阶段，
+  按 export/commit/push 分别给出准确日志与 `STEPS_RESULT.step14_data_backup.status`
+  （`<stage>_failed`）；rc 仅用于判断"是不是这一大类失败"，不再充当阶段判据。
+  文件不受版本控制，diff 不出现在本仓库历史里，改动记录只存在于本条
+  CHANGELOG 与 memory `alpha-hive-data-root-migration.md`。
+
+### Tests
+
+- `tests/test_data_backup.py` 新增 `TestRunBackupStageReporting`（4 条——此前
+  `run_backup.py` 的 `run()`/`main()` 零测试覆盖）：export/commit/push 三条
+  失败路径各自锁定 `status.json.stage`，另加一条真实本地裸仓库全链路成功
+  用例（`stage == "done"`）。push 失败与成功路径用真实 git（未配 remote /
+  本地裸仓库当 remote），只在需要精确定位某一步失败时才 monkeypatch
+  `_run_git`——保证"提交真的成功了"这类断言不是自己模拟出来的假象。
+
+## [0.45.268] — 2026-09-18 — 数据根迁移阶段 4：gh-pages 发布链改指向 + 顺修 force-push 父提交陷阱
+
+### 为什么
+
+阶段 2 收口时刻意留下的架构缺口：`report_deployer.deploy_static_to_ghpages` 与
+`generate_ml_report._sync_ghpages` 里，"git 仓库根"（git plumbing 必须在这里跑）
+与"数据根"（`os.listdir` 找待部署报告文件）由**同一个变量**表达——`repo`。
+今天两者恰好同目录（`ALPHA_HIVE_HOME` 未设时都兜底到 `__file__` 派生的仓库根），
+阶段 5 把 `ALPHA_HIVE_HOME` 改指 `~/alpha-hive-data` 后两者会分叉：报告文件搬到
+新数据根，但 gh-pages 部署若继续 `os.listdir(repo)`（git 仓库根），会在**旧位置**
+找文件——找不到就是「无静态文件可部署」，网站从此停更，且没有任何东西会红。
+
+普查过程中顺带发现一个范围更大的同源 bug：`agent_toolbox.GitHubTool.__init__`
+的默认 `repo_path` 也读 `ALPHA_HIVE_HOME`（与 `PATHS.home` 是同一个变量）——
+这不只影响 gh-pages，`production_sync.push_main`/`sync_before_scan`、
+`report_deployer.auto_commit_and_notify` 的 `git.commit()` 全部经它做 git 操作。
+阶段 5 一旦生效，main 分支的提交/推送会全部在 `~/alpha-hive-data`（没有 `.git`）
+里执行而失效——比 gh-pages 单独失效严重得多，且是任务描述里明确点名要处理的
+那个变量（`report_deployer.py` 的 `repo` 目前来自 `agent_toolbox.GitHubTool.
+repo_path`）。
+
+另一处独立实测过的 bug（见 auto-memory `alpha-hive-ops-info.md` 「⚠️ gh-pages
+部署是 force push，且父提交取自本地 ref」一节）：gh-pages 部署的两份实现都用
+**本地** `gh-pages` ref 当父提交（`git rev-parse gh-pages`），再 `--force` 推——
+本地 ref 不会因为别的 session/进程推过 gh-pages 而自动更新，一旦发生就会把远端
+在这期间新增的提交静默挤成不可达对象，2026-09-11 已实测撞到一次（那次内容
+恰好无损，逐项核对过；若对方推的是本地没有的内容，就会被真正挤掉）。
+
+### Changed
+
+- `hive_logger.py`：新增 `PATHS.git_repo_root`——git 仓库根的**唯一真相**，
+  专读 `ALPHA_HIVE_GIT_REPO`（仅测试用于把 git plumbing 指向沙箱假仓库，
+  生产从不设），兜底 `__file__` 派生（代码检出位置，阶段 5 前后都不变）。
+  与 `PATHS.home`（数据根，跟 `ALPHA_HIVE_HOME` 走）是两个独立变量、独立
+  env 覆盖钩子。
+- `agent_toolbox.GitHubTool.__init__`：默认 `repo_path` 改读 `PATHS.git_repo_root`，
+  不再读 `ALPHA_HIVE_HOME`——阶段 5 之后 main 分支的提交/推送不会跟着数据根搬家。
+  唯一依赖旧行为的测试 `tests/test_production_sync.py::TestResultReachesAlerts::
+  test_cli_exit_code_and_result_file` 改设 `ALPHA_HIVE_GIT_REPO`（其余全部
+  GitHubTool 测试本就显式传 `repo_path=`，不受影响）。
+- `report_deployer.deploy_static_to_ghpages`：`repo`（git 仓库根，来自
+  `agent_helper.git.repo_path`）与 `data_root`（`PATHS.home`）拆成两个变量；
+  `os.listdir`、`hash-object` 的文件内容来源都改用 `data_root`（`git hash-object
+  -w <绝对路径>` 不要求文件在仓库工作区内，只读字节写 blob，`cwd=repo` 只决定
+  写进哪个仓库的对象库），git plumbing（write-tree/commit-tree/update-ref/push）
+  继续在 `repo` 执行。`verify_cdn_deployment` 读 `dashboard-data.json` 同样改用
+  `data_root`（形参从 `repo` 改名 `data_root`）。
+- `generate_ml_report._sync_ghpages`：同上拆分（此前 `repo = str(PATHS.home)`
+  身兼两职），改与 `report_deployer` 共用同一套 git plumbing 助手，不再各写
+  各的父提交解析与 push 重试逻辑。
+- `alpha_hive_mcp.py`：`_HIVE_DIR`（读 `analysis-*-ml-*.json` 的目录）从硬编码
+  `~/Desktop/Alpha Hive` 改成调用时求值的 `_hive_dir()`（返回 `PATHS.home`），
+  4 处引用点同步改调用。`_DEEP_DIR`（独立仓库 `alpha-hive-deep-reports`）与
+  本项目数据根迁移无关，原样保留。
+
+### Fixed
+
+- **force-push 父提交陷阱**：`report_deployer.py` 新增 `resolve_gh_pages_parent`/
+  `commit_and_push_gh_pages`（两处 gh-pages 实现共用后者）：
+  - 父提交改用**每次重试都重新 fetch 到的 `origin/gh-pages`**，不用本地 ref；
+  - 推送改**非 force**——父提交就是 push 前一刻的远端真头，正常情况下天然
+    快进；竞态时 git 自己会因非快进拒绝，落入重试循环重新 fetch/提交/推送，
+    不需要自己实现"冲突检测"逻辑；
+  - tree 与刚 fetch 到的父提交的 tree 完全相同时直接判成功、不新建提交
+    也不推送（原「无变更时仍尝试推一次」的语义在新设计下不再必要——父提交
+    已确认是远端真头，树相同即远端已是目标状态）；
+  - `.gh_pages_deploy_log.jsonl` 新增 `parent_verified` 字段：fetch 失败、
+    退回本地 ref 尽力而为时，这次"未经校验"现在可见（此前完全无观测点）。
+
+### Added
+
+- `tests/test_ghpages_data_root_migration.py`（5 项，全部用真实 git 仓库/裸
+  仓库，**不 mock subprocess**——唯一例外是 `verify_cdn_deployment`，它会打
+  真实网络请求，与本文件要验证的东西无关，显式 patch 掉）：
+  - 数据根与 git 仓库根彻底分离时，部署仍正确从数据根读文件、发布内容与
+    `git_repo` 工作区完全无关（2 项，含跨两轮部署验证历史正常快进、旧提交
+    仍是新提交的祖先）；
+  - **force-push 父提交陷阱正向验证**：另一 session 已推的 gh-pages 提交在
+    我方本地完全看不到时（连本地 `gh-pages` ref 都不存在——旧 bug 的必要
+    条件），部署完之后对方的提交仍必须可达（`merge-base --is-ancestor` 为真）；
+  - **反向对照**：手工复现旧实现（本地 ref 当父 + `--force`）确实会把对方
+    的提交挤成不可达对象——没有这条，正向测试证明不了它测的是一个真问题；
+  - **真实竞态**：fetch 之后、push 之前另一个 session 抢先推送，验证第一次
+    push 被 git 自身拒绝（非快进）、`attempts >= 2`，重试循环重新 fetch 后
+    正确把抢跑的提交接上父提交链，不静默丢失。
+
+### 验收
+
+- 上述 5 项新测试全部通过（真实 git 操作，无 mock，独立跑与全套跑一致）。
+- 全套 `pytest --maxfail=0`（`--deselect` 掉 by-design 常年红的
+  `TestCoverageHorizon`）：**4903 passed, 1 skipped, 84 deselected,
+  2 xfailed, 8 errors**（耗时 446s）；`ruff check .` 全过。改动涉及的
+  gh-pages/GitHubTool/PATHS 冻结相关测试单独核对（`test_ghpages_data_root_
+  migration.py` + `test_pipeline.py` + `test_production_sync.py` +
+  `test_github_tool_commit.py` + `test_github_tool_status.py` +
+  `test_git_failures_are_visible.py` + `test_report_deployer_whitelist.py` +
+  `test_paths_not_frozen_at_import.py` + `test_hive_logger_not_frozen.py`，
+  合计 265 项）全绿。
+  ⚠️ **8 个 error 全部与本次改动无关**（已用独立 `git worktree` 核对：
+  在合并本次改动之前的 base commit 上原样复现，证明与本次 gh-pages 改动
+  无因果关系；零 `FAILED`，全部是 `ERROR`，即测试断言本身通过、只在
+  teardown 阶段触发）——`test_fg_exposure_gate_forward_test.py`（2 条）、
+  `test_ic_rerun_readiness.py`（3 条）、`test_resonance_boost_forward_test.py`
+  （3 条）在全套跑（而非单独跑）时会被 `conftest.py::_offline_transport`
+  拦到"伸手取外网了 query1.finance.yahoo.com"，是一个跨测试文件的网络
+  隔离泄漏，源头是 F&G 敞口门（v0.45.262）/共振加成前瞻检验（v0.45.242）
+  等近期合入的功能，与本阶段的 gh-pages/PATHS 改动无关；协调者的并行队列
+  里已经各有独立任务在跟这两类问题，未重复 flag。
+- `tests/test_paths_not_frozen_at_import.py` 全绿——`PATHS.git_repo_root`
+  是调用时求值的 `@property`，`GitHubTool.__init__`/`alpha_hive_mcp._hive_dir()`
+  均为函数体内/实例方法内解析，未产生新的模块级冻结路径，`KNOWN`/
+  `MUST_STAY_FILE_ANCHORED` 两张白名单均无需改动。
+
+### 仓库外消费方普查（沿用阶段 1 方法）
+
+- 复核阶段 1 已列出的仓库外/独立进程消费方清单：`push_report_to_slack.py`
+  （已在阶段 2 修）、GUI `gui/app.py`（`_PROJECT_ROOT` 本就 env 优先，
+  已在阶段 1/2 归类为可接受写法，未改）、`alpha_hive_mcp.py`（本版修，见上）。
+- Telegram bot（`alpha_hive_bot/`，Railway 部署）通过 HTTP 读取 GitHub Pages
+  线上地址，不直接读文件系统，不受数据根搬迁影响，未改。
+
+### 刻意不做 / 留给协调者判断
+
+- **`claude_desktop_config.json`（Claude Desktop 的 MCP server 配置，仓库外）
+  未修改**：`alpha_hive_mcp.py` 由 Claude Desktop 作为独立子进程启动，其
+  环境变量不受编排器 plist 的 `ALPHA_HIVE_HOME` 设置影响。本次只解决了
+  "代码是否遵循 PATHS"；阶段 5 实际搬迁后，要让这个进程读到新数据根，
+  还需要在该配置文件里给 `alpha_hive` server 单独加一条
+  `"env": {"ALPHA_HIVE_HOME": "~/alpha-hive-data"}`——这是仓库外配置，
+  按任务硬边界不在本次改动范围内，如实记录。
+- **`weekly_optimizer.py`/`self_analyst.py`/`generate_deep_v2.py` 的
+  `ALPHAHIVE_DIR` 仍硬编码 `~/Desktop/Alpha Hive`**（不读任何环境变量，
+  比 `__file__` 派生更彻底地锁死）：前两处是阶段 1（v0.45.259）已经点名
+  的独立遗留 bug，`generate_deep_v2.py` 是本次普查确认的**第三处同构
+  实例**（此前未被记录，用它读 `analysis-*-ml-*.json` 与 `pheromone.db`）。
+  三者都不是"发布链"消费方（分别是权重优化器配置路径、月度诊断输出目录、
+  深度报告读取生产库路径），不属于本阶段范围；已用 `spawn_task` 记一条
+  独立后续任务。
+- 未对真实 GitHub `alpha-hive-deploy` 仓库的 `gh-pages` 分支做任何推送/
+  强推；全部验证在本地裸仓库完成，未创建新的 GitHub 仓库，未修改
+  `~/.claude/scripts/alpha-hive-orchestrator.sh` 或任何 launchd plist。
+
+## [0.45.267] — 2026-09-18 — `signal_archive` 回填历史 F&G：真值来自 discovery 文本，不用 CNN 官方历史序列
+
+`market.fear_greed`/`market.fear_greed_is_cnn` 是 v0.45.247 才加的抽取器，读的是
+`agent_details.BuzzBeeWhisper.details.fear_greed.value`——这个结构化字段在此之前的
+`.swarm_results_*.json` 里从不存在，`signal_archive.backfill()` 现有的抽取器重跑一遍
+历史文件抽不出任何东西（不是口径变了，是以前压根没写过）。
+
+### 真值来源的选择：discovery 文本，不是 CNN 官方历史序列
+
+一开始的默认想法是拿 CNN 官方历史接口（`production.dataviz.cnn.io/index/fearandgreed/
+graphdata/<起始日>`，免费、一次请求拿回起始日至今全部逐日读数）回填。真实验证后放弃：
+
+- 老版本 Buzz 把 F&G 值写进了人类可读的 `discovery` 文本（"... F&G 21(Extreme Fear) ..."），
+  是当天扫描**真实用过**的值。拿它和 CNN 历史序列逐日比对（104 个待回填交易日）：
+  只有 32 天完全一致，**65 天不一致**（多数相差 1~10 点，intraday 快照 vs CNN 官方历史点
+  口径不同）；CNN 历史序列自己还有一天的真实缺口（2026-03-12，接口当天无数据点，
+  但 discovery 里有真实记录）。
+- 若拿 CNN 历史序列回填，会让同一个 `market.fear_greed` 信号列前半段（回填）和后半段
+  （v0.45.247 起的实时抓取）用两种不同口径喂同一个槽位——`alpha-hive-train-serve-skew.md`
+  记过的那类"同一特征槽两端喂两个量"。改用 discovery 文本后口径统一：全程都是"当天
+  扫描时刻 Buzz 实际用过的值"，且天然覆盖 CNN 历史接口本身的缺口。
+
+### 来源标签（`is_cnn`）留白是有意的
+
+`_fear_greed_is_cnn` 的 docstring 已经证实 2026-03-10~13 那几天 discovery 记的其实是
+Alternative.me 加密 F&G（CNN 当日 17-22，记录值却是 13/15/18/15）——沿用这个已核实的
+结论标 `is_cnn=0.0`。除此之外的 102 天里 98 天，老代码没留 source 字段，无法可靠判定
+当天走的是 CNN 还是加密备用源；不编数据，这 98 天的 `market.fear_greed_is_cnn` 一行
+不写，不用"数值接近就当 CNN"这类猜测。
+
+⚠️ **下游影响**：`paper_portfolio._lookup_market_fear_greed`（v0.45.262）要求
+`market.fear_greed_is_cnn` 存在才认为"当天有真实读数"——这 98 天的回填值虽然真实，
+但**不会**被 `fg_exposure_gate` 前瞻检验的历史重放捡到（`is_cnn` 缺失 ⇒ 视为无读数）。
+这是有意的保守选择：既然确认不了来源，就不该喂给会影响真实仓位大小判断的路径。
+本次回填的实际用途是给 `signal_archive.analyze()` 之类的历史统计分析补样本
+（例如重新量化 Buzz 情绪层 F&G 通道的 IC，此前只有 v0.45.247 之后 3 天的真实数据可用，
+现在有 105 天）——不是为了扩大 exposure gate 前瞻检验的回放窗口。
+
+### 生成边界：不需要新增
+
+`market.fear_greed`/`market.fear_greed_is_cnn` 已登记在 `SIGNAL_LEAVES`（不读任何系统
+输出的原始信号），既不在 `ALWAYS_SLICED`、也不被任何一条 `COHORT_SIGNAL_SCOPE` 边界
+点名——`signal_archive.analyze()` 对它们本就用全史，回填不需要补一条新的世代边界声明。
+
+### 落地
+
+- 新增 `backfill_fear_greed_legacy.py`（一次性脚本，不进 `SIGNAL_EXTRACTORS`——避免
+  这里的判断被将来的全历史 `--backfill` 重跑悄悄当成"现役口径"的一部分）+
+  `tests/test_backfill_fear_greed_legacy.py`（16 个测试，覆盖文本解析、目标日期筛选、
+  已有数据不覆盖、幂等重跑、已知加密窗口标 is_cnn、其余日期 is_cnn 留空）。
+- 生产库 `pheromone.db` 实跑 `--apply` 前先手动 `cp` 备份
+  （`pheromone.db.pre-fg-backfill-v0.45.267.bak`），写入前后 `PRAGMA integrity_check` 均
+  为 `ok`。写入 1541 行 `market.fear_greed`（102 天 × 各天实际扫描的 ticker 数，早期
+  8~10 只、近期 30 只）+ 40 行 `market.fear_greed_is_cnn`（2026-03-10~13 共 4 天 ×
+  10 只）。`market.fear_greed` 覆盖从 3 天（2026-09-15~17）扩到 105 天
+  （2026-03-10~09-17），v0.45.247 之后已有的实时记录逐字节未动
+  （09-15/16/17 仍是 29/26/29）。
+- 全套 `pytest -o addopts="" -m "not integration and not network"`（关掉仓库默认 `-x`
+  看全量结果）：**4880 passed / 1 failed（已知设计内：`TestCoverageHorizon`）/ 1 skipped /
+  2 xfailed / 8 errors**（386.8s）。8 个 error 全部与本次改动无关——都发生在
+  `TestCarriedByReadiness` 类（跨 `test_fg_exposure_gate_forward_test.py` /
+  `test_resonance_boost_forward_test.py` / `test_ic_rerun_readiness.py` 三个文件）的
+  teardown 阶段，是这三个文件共享某个 fixture/状态的既有隔离泄漏（单独跑各文件均绿，
+  且与 `ic_rerun_readiness.py`/`paper_portfolio.py`/forward test 模块毫无 import 关系的
+  本次新增两个文件无关，去掉它们问题依旧复现）——用户已启动一个子任务定位修复。
+
+## [0.45.266] — 2026-09-18 — v0.45.238 期权快照陈旧数据隔离：`QUARANTINE` 支持按标的精确点名，11 个坏槽位日入表，生产库清掉 630 行
+
+上一 session「四点长期价值分析」的 P0：v0.45.238 普查出的 171 份「装着前一交易会话」的期权快照，
+一直只是「候选」，本次实际写进 `signal_archive.QUARANTINE` 并清库。
+
+### 为什么不能照抄 2026-08-24 那条
+
+08-24 那次是**全体标的**同一天一起中招（`pdt_today()` vs `--date` 目标日错位，30/30 只）。
+但 v0.45.238 的普查显示这批**同一天有的标的坏、有的没坏**——跨午夜/盘前起跑的扫描只碰到了
+当时还没收盘的那几只，其余标的当天照常拿到自己的会话。若照 08-24 的写法整天隔离，
+会连累好数据（例：2026-09-03 只有 24/30 只是坏的）。
+
+### 量测（`cache/` 逐份重判，不是照抄 CHANGELOG 的日份摘要去猜标的）
+
+复用 v0.45.238 已经定好的判据——`cboe_options.session_date_at(_snapshot_timestamp)` 推出的
+ET 交易会话，与快照文件名日期不同即陈旧——对 11 个坏槽位日的全部快照重新逐份判定：
+
+| 日期 | 快照总数 | 陈旧 | 正常（不隔离） |
+|---|---|---|---|
+| 2026-06-10 | 11 | 11 | 0 |
+| 2026-07-08 | 10 | 1（NVDA） | 9 |
+| 2026-07-15 | 10 | 10 | 0 |
+| 2026-07-17 | 10 | 10 | 0 |
+| 2026-07-22 | 10 | 10 | 0 |
+| 2026-07-23 | 10 | 10 | 0 |
+| 2026-07-24 | 10 | 10 | 0 |
+| 2026-08-11 | 29 | 29 | 0 |
+| 2026-08-14 | 29 | 27 | 2（MU/QCOM） |
+| 2026-09-03 | 30 | 24 | 6（ENPH/NEE/SNOW/TMO/TMUS/WMT） |
+| 2026-09-09 | 30 | 29 | 1（MSFT） |
+
+**171 份陈旧，与 CHANGELOG v0.45.238 报的总数逐位吻合**；09-03/09-09 两天另有当日日志佐证
+（命中 42/45 次），其余 9 天日志已不存在，靠这次重判才第一次拿到标的级别的清单。
+
+### Added
+
+- `signal_archive.is_quarantined(date, ticker, signal)`：新增 `ticker` 参数（原为 `(date, signal)`
+  两元）。`QUARANTINE` 条目新增可选 `tickers` 白名单键——缺省仍是 08-24 那条的全天语义，
+  给了就只挡白名单内的标的。`_rows_for()` 同步传入 `ticker`（唯一调用点）。
+- `QUARANTINE` 新增 11 条（每坏槽位日一条），信号范围沿用 08-24 那条的五个
+  （`options.iv_current` / `put_call_ratio` / `gamma_exposure` / `total_oi` / `bear.options_bear`）——
+  **不含** `iv_rank`/`iv_percentile`/`iv_rank_is_real`，这两者是否同等受损未验证，
+  不在此处扩大隔离面，留待日后需要时再评估。
+- `tests/test_signal_quarantine.py` +6：按标的精确隔离（成对：陈旧标的挡住 / 同日干净标的不受影响）、
+  端到端 `archive()` 只误伤陈旧标的、Agent 评分照常入库（划界原则不变）、11 天条目一天不许漏。
+  原有 4 条改为显式断言「用的是无 `tickers` 键的全天隔离条目」，防止条目顺序变化后误测错对象。
+
+### Changed
+
+- `signal_archive.is_quarantined` 签名从 `(date, signal)` 改为 `(date, ticker, signal)`——仓库内唯一调用点
+  （`_rows_for`）与全部测试已同步，无第三方调用者。
+
+### Removed — 生产库清掉 630 行陈旧期权观测
+
+`is_quarantined()` 命中的 (date, ticker, signal) 精确匹配，逐行 DELETE（不是按日期整批删）：
+
+```
+options.iv_current / put_call_ratio / gamma_exposure / total_oi / bear.options_bear
+各 126 行 × 5 类信号 = 630 行
+按日：07-08(1) 07-22(10) 07-23(10) 08-11(27) 08-14(25) 09-03(24) 09-09(29)
+06-10/07-15/07-17/07-24 这 4 天普查里全员陈旧，但当时压根没被归档（早于相关信号入档窗口
+或标的不在当日扫描范围），故删除数为 0——条目仍然保留，为的是挡住未来任何回填把这 4 天带回来。
+```
+
+- **备份**（`sqlite3` 在线备份 API，不用 cp）：
+  `db_backups/pheromone_pre_v0.45.266_snapshot_quarantine_20260918_025745.db`（integrity ok，
+  删除前 signal_archive 102,494 行）。
+- **执行**：单个 `BEGIN IMMEDIATE` 事务，`is_quarantined()` 在事务内现读现判（不依赖任何早前的
+  快照结果），断言命中数落在 [600,700] 预期区间内才删、删除行数与目标行数相等、删除后这些 id
+  零残留，全部通过才 `COMMIT`。integrity 前后均 ok；`signal_archive` 102,494 → 101,864。
+- ⚠️ **并发写入者**：本仓另一 session 同一时段在做 F&G 数据回填（`pheromone.db.pre-fg-backfill-v0.45.267.bak`，
+  02:50 落盘，早于本次删除操作 7 分钟），事后核对其 `market.fear_greed*` 1,761 行未受影响。
+  本次事务只精确匹配已识别的 630 个 id，不做范围/整表操作，与并发写入不冲突。
+- **期权接口只有实时快照、无历史 ⇒ 这些标的当天的真实期权观测永久丢失**，不可补，只能缺失
+  （同 08-24 先例）。
+
+### 核对
+
+- `tests/test_signal_quarantine.py` 10/10；`tests/test_signal_archive*.py`/`test_guard_census_eviction.py`
+  等 9 个相关文件 143/143；mutation 6/6 被杀（每轮清 `__pycache__`、锚点唯一、还原后 sha 比对：
+  忽略 ticker 白名单两个方向 / `_rows_for` 漏传 ticker / 07-08 条目 tickers 清空 / signals 清空 /
+  整条 09-03 移除）。ruff 对改动文件 All checks passed。
+- ⚠️ **全套跑了三次，`test_ic_rerun_readiness.py`/`test_fg_exposure_gate_forward_test.py`/
+  `test_resonance_boost_forward_test.py` 里同 8 项每次都 ERROR，但单独跑（含把这三个文件放一起跑）
+  100% 绿（99/99）**。`ps aux` 实证：三次全套运行期间，这台机器上同时有另外 2~3 个并发 session 各自在跑
+  自己的全套测试（含 `~/Desktop/Alpha Hive` 主目录与另一 worktree），`--timeout=180`/默认 60s 超时在
+  CPU 抢占下被触发——这 8 项与本次改动的文件（`signal_archive.py`/`test_signal_quarantine.py`）无关，
+  也不在本次改动范围内。判据是「单独跑干净 + 改动前也会中」，不是「全套绿了就不用管」；
+  未去追这条并发噪音，因为它不是本次引入的。
+
+### 不做
+
+- `iv_rank`/`iv_percentile`/`iv_rank_is_real` 是否同等受损未验证，未扩大隔离面（见上）。
+- 06-10/07-15/07-17/07-24 四天没有可清的行，但条目已入表，防未来回填复活。
+
 ## [0.45.265] — 2026-09-15 — `signal_archive.analyze()` 按世代切片：系统输出只算当前世代，原始观测保留全史
 
 v0.45.256「第 3 步评估」留下的那一类：**生产者换了口径、抽取器与归档一致**。v0.45.163 让

@@ -312,6 +312,11 @@ class ScoutBeeNova(BeeAgent):
                     "crowding_signal": round(crowding_signal, 2),
                     "components": component_scores,
                     "adjustment_factor": adj_factor,
+                    # v0.45.279：口径标记——读板那一刻实际数到的 Phase-1 同伴
+                    # （不只是 consensus_strength 那个百分比数字）。不是为了替代
+                    # signal_archive.SIGNAL_UPSTREAM 里那条依赖边，是让以后重估
+                    # 这条边的成本收益时有真实观测可查，不用翻代码猜。
+                    "consensus_census": metrics.get("consensus_census"),
                     # v0.43.25: 原为 `float(stock["momentum_5d"] or 0.0)`。
                     # BuzzBee 拿同一份 stock 却诚实写 None，Scout 这里用 or 0.0
                     # 伪造"持平"——0.0 永远够不到 sentiment.py 的背离阈值，

@@ -64,6 +64,12 @@ import argparse
 import statistics as st
 from collections import defaultdict
 
+# v0.45.294：按 `python3 experiments/ticker_winrate_persistence.py` 跑时 sys.path[0] 是 experiments/
+# 而不是仓库根。v0.45.260 在 `find_db()` 里加 `from hive_logger import PATHS` 时漏了本行；因为那是
+# **函数内惰性 import**，`--help` 一切正常，只有走到 `find_db()`（即文档用法：无参运行）才
+# ModuleNotFoundError，所以三天没人发现。（代码位置，`__file__` 正确。）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
 
 def find_db():
     """三级 fallback：`ALPHA_HIVE_PHEROMONE_DB`（本脚本专属 env，优先）→

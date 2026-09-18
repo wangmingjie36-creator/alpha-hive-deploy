@@ -868,6 +868,33 @@ class MultiSourceFetcher:
         ).to_dict()
         # 标记数据不可用，下游 Agent 应跳过分析
         fallback["_data_unavailable"] = True
+
+        # v0.45.270：momentum_5d / volume_ratio 各有一条独立于 CBOE/yfinance
+        # 主价源的回落链（自攒价格索引 + Twelve Data，见
+        # `_fill_momentum_from_index` / `_fill_volume_from_twelvedata`），
+        # 但此前只挂在 CBOESource.fetch() 内部——一旦 CBOE 熔断器先跳闸
+        # （2026-09-17 实测：CBOE「no_data」熔断 + yfinance 同时因本机网络
+        # 中断报 `'NoneType' object is not subscriptable`，两者失败在前，
+        # 连 CBOESource 内部都没跑到调 `_fetch_history_metrics` 那一步），
+        # 这条回落链**连尝试的机会都没有**——尽管它是两个独立数据源（本地
+        # 索引 + Twelve Data 各自的账号配额），当时大概率仍然健康。
+        # 走到这里意味着 4 个源全灭、主价确实拿不到（下游仍会看
+        # `_data_unavailable` 跳过完整分析），但不该因为价格拿不到就连带
+        # 牺牲这两项本可独立恢复的字段——BuzzBee/ChronosBee 读 momentum_5d/
+        # volume_ratio 时并不检查 `_data_unavailable`（这两只蜂本就设计成
+        # 部分降级，而不是整体跳过）。
+        try:
+            _hf = _fill_momentum_from_index(ticker, None)
+            _hf = _fill_volume_from_twelvedata(ticker, _hf)
+        except Exception as e:  # noqa: BLE001 — 这条回落本身失败不得掩盖主诊断
+            _log.debug("[%s] FALLBACK 末端 momentum/volume 回落失败: %s", ticker, e)
+            _hf = None
+        if _hf:
+            fallback["momentum_5d"] = _hf.get("momentum_5d")
+            fallback["momentum_source"] = _hf.get("momentum_source", fallback["momentum_source"])
+            fallback["volume_ratio"] = _hf.get("volume_ratio")
+            fallback["avg_volume"] = _hf.get("avg_volume")
+            fallback["volume_source"] = _hf.get("volume_source")
         return fallback
 
     def _get_cache(self, ticker: str) -> Optional[StockData]:

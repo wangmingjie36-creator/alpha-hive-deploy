@@ -2,6 +2,12 @@
 """
 🐝 Alpha Hive — 全信号 IC 普查（干净口径） (v0.45.19)
 ====================================================
+⚠️ v0.45.290：本脚本**跨世代混算**（整张 `signal_archive` / `predictions`，不按
+`ic_rerun_readiness._COHORT_HISTORY` 切），默认拒绝运行，须显式 `--pool-generations`；
+当前世代请用 `signal_archive.py --analyze`。且 p 值用正态近似（周度 IC 均值该用 t(n−1)），
+见运行时横幅。为什么只加护栏、不接边界：CHANGELOG v0.45.290 与
+`tests/test_experiments_pooled_guard.py` 模块 docstring。
+
 回答一个具体问题：**`signal_archive` 里 49 个信号，哪些真的能预测前瞻收益？**
 
 为什么要重扫一遍
@@ -43,9 +49,15 @@ import datetime as dt
 import json
 import math
 import sqlite3
+import sys
 from collections import defaultdict
 from pathlib import Path
 from statistics import mean, stdev
+
+# v0.45.290：按 `python3 experiments/signal_ic_sweep.py` 跑时 sys.path[0] 是 experiments/ 而
+# 不是仓库根。v0.45.260 加下面这行 `from hive_logger import` 时漏了本行，脚本因此从 09-15 起
+# 一直 ModuleNotFoundError——零测试、零调用方，三天没人知道。（代码位置，`__file__` 正确。）
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # v0.45.260（数据根迁移阶段 2）：此前是 `Path(__file__).resolve().parent.parent
 # / "pheromone.db"`——不读 `ALPHA_HIVE_HOME`。改读 `PATHS.db`；本脚本是一次性
@@ -57,6 +69,26 @@ MIN_WEEKS = 8        # 少于此周数不下结论
 DROP_EXTREME = 3     # 稳健性检验剔除的极端周数
 UP_MONTHS = {"2026-04", "2026-05", "2026-06"}
 DOWN_MONTHS = {"2026-02", "2026-03", "2026-07"}
+
+_REFUSAL = (
+    "✗ signal_ic_sweep.py 默认不运行：它跨世代混算（整张 signal_archive / predictions，不按\n"
+    "  ic_rerun_readiness._COHORT_HISTORY 切），系统输出在世代边界上换过量，其 IC 是几个不同量\n"
+    "  的混合，不描述任何一个世代。\n"
+    "  当前世代请用：/usr/local/bin/python3 signal_archive.py --analyze\n"
+    "  确需看混算（只作对照、勿据此下结论）：加 --pool-generations"
+)
+_BANNER = (
+    "⚠️ --pool-generations：跨世代混算，只作对照，勿据此下结论。\n"
+    "   · 系统输出在世代边界（ic_rerun_readiness._COHORT_HISTORY）上换过量，下表的 IC 是几个\n"
+    "     不同量的混合，不描述任何一个世代。\n"
+    "   · p 值用正态近似 erfc(|t|/√2)；周度 IC 均值应服从 t(n−1)：n=26、t≈3.5 时低估约 4 倍，\n"
+    "     n=8~16 时低估 3~80 倍。Bonferroni 幸存者在 t 分布下会消失（2026-09-18 复核：\n"
+    "     dim.sentiment 校正后 0.028 → 0.110，唯一的「幸存者」不再过）。\n"
+    "   · 周度 IC 取「每 ISO 周第一个可用交易日」：同一批 dim.sentiment 日度 IC，换成固定周一\n"
+    "     t=+3.97、固定周四 t=−0.54（现行 +3.54）——这个任意选择对 p 的影响远大于 z→t。\n"
+    "     见 memory alpha-hive-t-vs-normal-p。\n"
+    "   · 当前世代请用：/usr/local/bin/python3 signal_archive.py --analyze\n"
+)
 
 
 def spearman(xs, ys):
@@ -176,7 +208,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default=str(DB))
     ap.add_argument("--top", type=int, default=18)
+    ap.add_argument("--pool-generations", action="store_true",
+                    help="显式放行跨世代混算（只作对照，勿据此下结论）")
     args = ap.parse_args()
+    if not args.pool_generations:
+        print(_REFUSAL, file=sys.stderr)
+        return 2
+    print(_BANNER)
 
     data, weeks_month = load(Path(args.db))
     results = {}

@@ -587,7 +587,7 @@ def _pp_state_digest(path):
 
 @pytest.fixture(autouse=True)
 def _isolate_paper_portfolio_state(tmp_path, monkeypatch):
-    """把 paper_portfolio 的四个状态文件全局重绑到 tmp，并核对真身没被动过。
+    """把 paper_portfolio 的四个状态文件 + SNAPSHOT_DIR 全局重绑到 tmp，并核对状态文件真身没被动过。
 
     v0.45.104。事故：一个只想验「run_for_date 入口会拒绝错模式」的测试，
     monkeypatch 了 `_load_meta` / `_append_jsonl` / `_save_meta` 却漏了路径本身，
@@ -602,6 +602,19 @@ def _isolate_paper_portfolio_state(tmp_path, monkeypatch):
          subprocess 调 CLI 等）。没有②的话，将来有人加一条新写入路径，
          ①会静默失效而没人知道。
     需要读真实状态的测试自己 monkeypatch 回去即可覆盖①（②仍会看着它）。
+
+    v0.45.274：`SNAPSHOT_DIR` 一并重绑（此前只读不写，见 `paper_portfolio.py` 该常量
+    上方注释与 `test_paths_not_frozen_at_import.py::KNOWN` 里的旧结论「无写入 ⇒ 后果
+    是测试读到 checkout 的真实快照，不是写穿」——那句话本身没错，但漏算了一层：
+    `experiments/fg_exposure_gate_forward_test.py::run()` 把「能读到真实快照」当成
+    「有真实前瞻样本」的信号，读到就会用 `paper_portfolio.run_replay()` **重放**那些
+    真实历史日期，重放需要真实 OHLC，`_PRICE_CACHE` 里没有就会真的去打 yfinance——
+    "只读"的后果链会一路淌到网络层。`ic_rerun_readiness.main()`
+    （`TestCarriedByReadiness` 系列测试在跑）不分场景地调用
+    `fg_exposure_gate_forward_status()`，而后者不接受调用方传路径、只能走这个模块级
+    常量，所以漏绑它 = 这些测试在全套里必然伸手摸生产快照目录。
+    没有 SNAPSHOT_DIR 的测试自己按需要 `monkeypatch.setattr(_pp, "SNAPSHOT_DIR", ...)`
+    覆盖即可（`test_fg_exposure_gate_forward_test.py` 已经这么做）。
     """
     try:
         import paper_portfolio as _pp
@@ -613,6 +626,14 @@ def _isolate_paper_portfolio_state(tmp_path, monkeypatch):
 
     sandbox = tmp_path / "paper_portfolio_state"
     sandbox.mkdir(exist_ok=True)
+    # 嵌套在 `sandbox` 下面，不直接用 `tmp_path / "report_snapshots"`——那个字面量
+    # 会跟测试自己声明的同名 fixture（如 `test_outcomes_fetcher.py::snap_dir`）撞名，
+    # 撞上时后者 `d.mkdir()`（不带 exist_ok）会因为目录已存在而 FileExistsError
+    # （v0.45.274 实测：换这个名字前，19/20 条 `test_outcomes_fetcher.py` 测试撞红）。
+    # 不需要 mkdir：`SNAPSHOT_DIR` 只被 `.glob()` 读，从不写；`Path.glob()` 对不存在的
+    # 目录直接返回空迭代器，不会抛异常——这正是我们想要的"没有真实快照"效果。
+    sandbox_snapshots = sandbox / "_snapshot_sandbox"
+    monkeypatch.setattr(_pp, "SNAPSHOT_DIR", sandbox_snapshots, raising=False)
     monkeypatch.setattr(_pp, "STATE_DIR", sandbox, raising=False)
     monkeypatch.setattr(_pp, "POSITIONS_FILE", sandbox / "positions.jsonl")
     monkeypatch.setattr(_pp, "CLOSED_FILE", sandbox / "closed_trades.jsonl")
@@ -682,7 +703,7 @@ MOCK_STOCK_DATA = {
 @pytest.fixture
 def mock_stock_data(monkeypatch):
     """Mock yfinance 数据，避免测试中调用外部 API"""
-    def _mock_fetch(ticker):
+    def _mock_fetch(ticker, target_date=None):
         return MOCK_STOCK_DATA.get(ticker, MOCK_STOCK_DATA["NVDA"])
 
     from swarm_agents import cache as _swarm_cache

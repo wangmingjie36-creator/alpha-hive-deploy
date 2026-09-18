@@ -83,13 +83,73 @@ def _db_path() -> Path:
 # **直接**改了哪些归档信号（只动 final_score 就写空元组；下游由依赖边自动推出）。
 # `signal_archive.analyze()` 靠它给每个信号切世代 —— 漏了测试红，运行时按全部信号切。
 _COHORT_HISTORY = [
+    # v0.45.275（P1 补登）：以下两条真实发生在**表的第一条之前**——本表 2026-08-17
+    # 才开张，此前的系统逻辑改动从未登记（见本文件与 signal_archive.py 顶部的
+    # 「已知盲区」说明）。补登不是替历史挑错，是把当时已经真实发生、
+    # 且按本表判据（哨兵语义/来源/算法改变）本就该记的两条边界找出来、按实际
+    # 部署日期插入。两条都只影响各自单一信号，未在任何下游依赖边里出现，
+    # 插入不改变任何已注册边界的 `cohort_start()`（取列表最后一条不变）。
+    ("2026-08-15", "v0.43.24",
+     "GuardBeeSentinel 的 VIX 取数改走 CBOE 优先（脱离 yfinance 限流）。Step 1"
+     "（同版更早提交）把「宏观数据整体降级」时的 vix/yield_curve/gold_trend 一律"
+     "改判 None，不冒充观测值——**该步验证过不改评分**（base 常量 20.0/\"unknown\"/"
+     "\"stable\" 本就不触发任何 regime_vote 分支，故不登记）。Step 2 才动了口径："
+     "新增 `vix_source` 逐字段判定，宏观整体降级但 CBOE 仍供得上真实 VIX 的那些天，"
+     "VIX 由「跟着整体一起丢弃」变成「按真实值参与 regime_votes」，直接改变"
+     "`_calc_macro_adjustment` 的 `score_adj` → `guard.macro_adj` → GuardBee 分。"
+     "`guard.macro_adj` 是叶子信号（不读系统输出），此前从未被 `COHORT_SIGNAL_SCOPE`"
+     "点名，全史里悄悄跨这条边界池化。未重放验证具体翻转率，按代码出边保守登记。"),
+    ("2026-08-15", "v0.43.25",
+     "ScoutBeeNova 的 `momentum_5d` 缺失哨兵由 `float(stock[\"momentum_5d\"] or 0.0)`"
+     "（伪造「持平」）改为诚实 `None`。原提交实测：该伪造值让 `sentiment.py` 的情绪"
+     "背离检测在近 28 个扫描日的 395 次判定里**全部** severity=0——0.0 永远够不到"
+     "阈值，背离检测结构性失灵。`price.momentum_5d` 直接抓 "
+     "`agent_details.ScoutBeeNova.details.momentum_5d`，是叶子信号，此前从未被"
+     "`COHORT_SIGNAL_SCOPE` 点名，全史里悄悄跨这条边界池化。"),
     ("2026-08-17", "v0.44.1~0.44.3",
      "expected_returns 去偏 + probability 居中 + RivalBee 三特征接真实数据"),
+    ("2026-08-26", "v0.45.2~0.45.15",
+     "v0.45.275（P1 补登）：同一批「静默降级六处」修复里两处真正改了评分输入的"
+     "（其余如 ticker 正则、gh-pages、标的丢失重试、ML 特征插补属报告/管道层，"
+     "不动本条）。① BuzzBeeWhisper 的情绪-价格背离检测：此前 momentum 为 None 时"
+     "仍传 `0.0` 给检测器（注释写「跳过」，代码却当「持平」），检测器里"
+     "`divergence_type=\"unavailable\"` 那条分支因此永远不可达；改为直传 None 让"
+     "它生效。② 同版 `data_pipeline.py` 把 `volatility_20d` 的缺失伪造默认值由 "
+     "`0.0` 改为 `None`（原判据：σ=0 在风险引擎里等于「零风险」，比崩溃更危险），"
+     "BuzzBeeWhisper 的波动率信号分支同步改为 None→中性 50、不再被 0.0 误判"
+     "「低波动/稳定」。两项均改变 `agent.BuzzBeeWhisper.score`（背离分与波动率信号"
+     "都是 sentiment_composite 的加项），`price.volatility_20d` 是 Buzz details 对"
+     "该量的直接透传，随源头改哨兵语义。均为叶子信号，此前从未被 "
+     "`COHORT_SIGNAL_SCOPE` 点名。⚠️ `price.volume_ratio` 同批也改了 dataclass "
+     "默认值，但排查发现至少一条取值路径（`CBOESource`）当时仍硬编码 `or 1.0`"
+     "未清，是否可达未验证，本条不认领——留在 `NEVER_SLICED_TODAY`。"),
     ("2026-08-26", "v0.45.30",
      "拥挤度口径变更：删除 polymarket_volatility（原 15% 权重，实测 76% 为常数 20、"
      "其余变化来自 |momentum_5d|*0.8 的动量伪装，属常数稀释+暗中双计），"
      "其余五项按原比例重归一化；缺失分量改为在现存分量间重归一化而非按 0 计。"
      "拥挤度 → ScoutBee signal 维度 → final_score，故为世代边界"),
+    ("2026-08-26", "v0.45.31",
+     "v0.45.275（P1 补登）：ChronosBeeHorizon 的催化剂来源抓取失败时，此前 except "
+     "只打 warning 就继续，「抓取失败」与「确实没催化剂」产出同形（都是 "
+     "score=4.0/discovery=\"无近期催化剂\"）。原提交实测 90 个扫描日里 9 天（10%）"
+     "出现该值 >75% 标的集体塌缩、最重单日 26/27 只。改为来源全不可得时返回 "
+     "`make_error_result`，走 `queen_distiller` 的缺失维度通道（动态填充 + 覆盖度"
+     "压缩），不再冒充「查过、确实没有」。`_cat_count` 等三个抽取器的代码注释里"
+     "已经点名过这次改动（\"自 v0.45.31 起 ChronosBee 返回 error\"），但当时没人把"
+     "这份认知写进 `COHORT_SIGNAL_SCOPE`——`agent.ChronosBeeHorizon.*` 与 "
+     "`catalyst.*` 三个抽取器全是叶子信号，全史里悄悄跨这条边界池化。"),
+    ("2026-08-26", "v0.45.32",
+     "v0.45.275（P1 补登）：紧接上一条同日——移除 ChronosBeeHorizon 两条人工维护的"
+     "前瞻催化剂来源（`catalysts.json` 与硬编码 `create_nvda/vktx_catalysts`），"
+     "催化剂来源自此只剩自动可核实的 yfinance 财报日历。原提交实测两条旧来源均已"
+     "腐烂或有错（`catalysts.json` 实测仅 6/30 只标的、窗口内 0 事件；VKTX 硬编码"
+     "曾有两条内容错误的 critical 级条目，把二期试验当三期、把 2027 年指引写成 "
+     "2026-08-15）。这直接改变 `catalysts_found` 这个列表本身（不只是失败时的"
+     "语义），进而改变 `agent.ChronosBeeHorizon.score/direction` 与 "
+     "`catalyst.count/nearest_days/max_weight` 四个下游抽取器的取值——与上一条"
+     "（v0.45.31，改的是「抓取失败时怎么办」）是两次独立的定义变更，各自登记。"
+     "取「最后一条适用的边界」语义下，这四个信号的当前世代实际起点由本条决定"
+     "（在列表里晚于 v0.45.31）。"),
     ("2026-08-27", "v0.45.50",
      "Phase 1 静默降级批量修复（**一次性合并**，避免分批各消耗一次世代边界）："
      "① 拥挤度全分量不可得时返回 None 而非 0.0 —— 旧行为 score=20.59 →「低拥挤」"
@@ -402,6 +462,69 @@ _COHORT_HISTORY = [
      "补跑更早日期落进的是已被本表排除的旧世代 ⇒ 不存在新旧口径混算。"
      "同版 `close_correction` 的 CBOE 交叉印证改按 last_trade 归属——只动 `price_at_predict` 校正的"
      "拒改/印证判定，且须人工 `--apply`，不是评分输入，不另立边界。"),
+    ("2026-09-18", "v0.45.279",
+     "ScoutBee `crowding.comp.consensus_strength` 的数据来源 "
+     "`real_data_sources.get_bullish_agents_count` 改用不受 `MAX_ENTRIES` 溢出淘汰"
+     "影响的 `board.get_live_signals`（此前用 `get_top_signals(ticker, n=10)`——"
+     "v0.45.151/156/163 三次分别为 Rival/共振/Guard 修过的同一个「排行榜当普查用」"
+     "缺陷，v0.45.163 就点名过这处未迁，一直没人接手），并按身份精确过滤到 4 个"
+     "真正的 Phase-1 同伴（Oracle/Buzz/Chronos/CodeExecutor，排除 Scout 自己）。"
+     "同时把 `board is None` / 读取异常的哨兵值由硬编码 `3`（「6 个里 3 个看多」，"
+     "从不产生 None）改为诚实 `None`，交给 `crowding_detector` 早在 v0.45.50 就"
+     "建好、但对这个分量从未生效过的缺失分量重归一化通路处理。"
+     "算法/来源/哨兵语义三者都变了，按本表判据是世代边界。"
+     "量测局限：这是 race-condition 依赖的读取，没有历史快照能重建 Scout 读板"
+     "那一刻的真实板面（`pheromone_compact` 拍得太晚），故本次只能证明机制存在"
+     "（合成板复现：洪水后排行榜漏计、普查不受影响），不给生产翻转率——那个数字"
+     "不存在，不编，见 `tests/test_bullish_agents_census_eviction.py` 模块 docstring。"
+     "⚠️ 边界代价：作废当前世代（09-14 起）已积累的 **120 条**样本"
+     "（4 个扫描日 × 30 只，`predictions` 实测）——`composite.final_score` 是 "
+     "`ALWAYS_SLICED`，任何新条目无论 `COHORT_SIGNAL_SCOPE` 怎么写范围都会"
+     "无条件牵动它，无法只切窄。这是本表近期唯一一条真实作废非零样本的记录"
+     "（相邻几条都是「0 条」或历史回填）；120/25 周所需的 175 天 ≈ 2.3%，"
+     "量级与 v0.45.172（30 条）/v0.45.212（30 条）相当，用户已知情并主动接受。"
+     "同时如实记录：`config.EVALUATION_WEIGHTS` 里 `signal`/`risk_adj` 两维现为"
+     "0，本次修复对 `final_score` **当前**无可测影响——受益的是 `crowding.score`/"
+     "`ml.expected_7d`/`30d`（RivalBee 特征，走独立于 final_score 的消费路径）"
+     "的数据质量，以及这两维未来被重新启用时的可信度。"
+     "⚠️ `SIGNAL_UPSTREAM` 里 `crowding.comp.consensus_strength` 依赖 phase1 方向"
+     "的那条边**未动**——结构上是对的（这个数字的含义确实随同伴的方向定义改变"
+     "而改变，与 `ml.*` 依赖同一组方向同理），原问题「要不要留」不是这次的重点。"
+     "同批加了口径标记（`ScoutBeeNova.details.consensus_census`：读板那一刻实际"
+     "数到的同伴 agent_id 列表），不是替代这条依赖边，是给以后重估它的成本收益"
+     "留一个可核查的观测量。"
+     "已知不做：`bear_bee.py:39/512` 另有两处 `get_top_signals(n=20)` 未迁，"
+     "各自独立，不搭本版的车。"),
+    ("2026-09-18", "v0.45.288",
+     "BearBee 读同伴条目的方式由 `_read_board_entry`（`board.get_top_signals(ticker, "
+     "n=20)` + 前缀匹配）改为 `BeeAgent._read_peer`（v0.45.151 为 Rival 修的、不受 "
+     "`MAX_ENTRIES` 溢出淘汰影响的定点索引，六个读点各传精确 agent_id），LLM 论点里的"
+     "看多信号列表改用 `board.get_live_signals`。这是 v0.45.151/156/163/279 同一个"
+     "「排行榜当普查/按身份取用」缺陷的第 5、6 处——上一条（v0.45.279）就把它记成"
+     "「已知不做」。"
+     "生产实测（`.swarm_results_*.json`）：全期（03-10 起 1634 行）Bear 读板 miss 在"
+     "满名单（≥25 只）日子 options 19% / ml 24% / guard 30% / catalyst 45%，9~16 只标的的"
+     "日子仅 0.7~3.1%，是容量效应而非上游没发布；限定到 08-24 起满名单日 18 天共 540 行"
+     "（以下数字的口径）则是 21.7% / 18.0% / 32.6% / 38.0%。偏向因蜂而异：Oracle/Guard 反相关"
+     "（方向 bearish 的 Oracle 有 65%（34/52）必然没被读到，且回落路径不看 iv_skew/gex/"
+     "Oracle 方向、只能少算——读丢行读板值更高 63 例、更低 0 例，均差 +5.67），Catalyst "
+     "反向无害（读丢的是本就贡献 0 的「无催化剂」），ML 无偏。汇总 22.4% 的行 "
+     "`bear_score` 被低估（均值 +0.27、最大 +3.50），现行阈值下方向翻转 14/540（2.6%）"
+     "且全部翻向看空。重放 baseline 与记录的 `rule_bear_score` 吻合 99.4%。"
+     "与 v0.45.279 不同，这处**可量**：Bear 自记录了 `details.data_sources`，修复后按"
+     "当日标的数分层的 miss 率应降到 ≈0（`experiments/bear_read_miss_audit.py`）。"
+     "直接点名 `bear.score` / `bear.options_bear` / `bear.insider_bear`，下游"
+     "（`agent.BearBeeContrarian.*`、`composite.swarm_agreement` 等）由 "
+     "`_scope_closure` 带出。Bear 不计票、不进 `final_score`（无 5 维映射），所以对 "
+     "`composite.final_score` **无直接影响**——但它是 `ALWAYS_SLICED`，任何新条目"
+     "都无条件牵动它，无法只切窄。"
+     "边界代价：**0 条**——v0.45.279 是当天（09-18）才立的，当前世代 `predictions` "
+     "样本数实测为 0（`assess()` 的 `n_all_samples=0`），本条与之同日。"
+     "⚠️ 前提是赶在 09-18 14:00（PDT）launchd 扫描开始前推到 `origin/main`"
+     "（扫描前的 `production_sync` 会快进）；否则当天样本会混两种口径，要么把边界改到 "
+     "09-19、作废约 30 条。"
+     "已知不做：不改 `MAX_ENTRIES` / 淘汰逻辑；不加新口径字段（`data_sources` 已是"
+     "自记录标记）；Scout/Buzz 按设计的回落（Scout 无内幕金额时本来就走 SEC）不动。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）

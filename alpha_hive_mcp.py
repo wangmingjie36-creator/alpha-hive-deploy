@@ -45,19 +45,42 @@ import yfinance as yf
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 from mcp.server.fastmcp import FastMCP
 
+from hive_logger import PATHS
+
 # ─── Server ───────────────────────────────────────────────────────────────────
 mcp = FastMCP("alpha_hive_mcp")
 
 # ─── Directory Constants ──────────────────────────────────────────────────────
-# Adjust these if your folders live elsewhere
-_HIVE_DIR = Path.home() / "Desktop" / "Alpha Hive"
+# 数据根迁移阶段 4：`_HIVE_DIR` 此前硬编码 `~/Desktop/Alpha Hive`，不读任何
+# 环境变量——阶段 5 把生产数据搬到 `~/alpha-hive-data` 后，这个进程会继续读
+# 旧位置的陈旧/缺失文件，且不会有任何报错（`_load_json` 找不到文件时按
+# 现有契约返回错误 dict，不会崩，所以"读到旧数据"这件事本身也不会被发现）。
+# 改读 `PATHS.home`（调用时求值，跟 `ALPHA_HIVE_HOME` 走）；今天两者兜底到
+# 同一个仓库根，行为不变。
+#
+# ⚠️ 这个进程由 Claude Desktop 作为独立子进程启动（`claude_desktop_config.json`
+# 里的 `mcpServers.alpha_hive`），不经过编排器/launchd，其环境变量不受
+# 编排器 plist 的 `ALPHA_HIVE_HOME` 设置影响——本次改动只解决了"代码是否
+# 遵循 PATHS"，阶段 5 实际搬迁后，若要让这个进程也读到新数据根，还需要在
+# `claude_desktop_config.json` 里给这个 server 单独加一条
+# `"env": {"ALPHA_HIVE_HOME": "~/alpha-hive-data"}`——这是仓库外配置文件，
+# 按硬边界不在本次改动范围内，如实记录留给协调者判断。
+def _hive_dir() -> Path:
+    """调用时求值——不写成模块级常量：`PATHS.home` 读 `ALPHA_HIVE_HOME`，
+    冻成常量会在 import 那一刻锁死当时的值，之后 env 再变也追不上
+    （与 `hive_logger._HivePaths` 全体 `@property` 是同一条纪律）。"""
+    return PATHS.home
+
+
+# `_DEEP_DIR` 指向另一个独立仓库 `alpha-hive-deep-reports`（深度分析报告），
+# 与本项目的数据根迁移无关，不属于本次改动范围，原样保留。
 _DEEP_DIR = Path.home() / "Desktop" / "深度分析报告" / "深度"
 
 # ─── Shared Utilities ─────────────────────────────────────────────────────────
 
 def _load_json(ticker: str, date_str: str) -> dict:
-    """Load analysis-{TICKER}-ml-{DATE}.json from _HIVE_DIR."""
-    path = _HIVE_DIR / f"analysis-{ticker.upper()}-ml-{date_str}.json"
+    """Load analysis-{TICKER}-ml-{DATE}.json from the hive data dir."""
+    path = _hive_dir() / f"analysis-{ticker.upper()}-ml-{date_str}.json"
     if not path.exists():
         raise FileNotFoundError(
             f"Report not found: {path.name}  "
@@ -70,7 +93,7 @@ def _load_json(ticker: str, date_str: str) -> dict:
 def _latest_date(ticker: str) -> Optional[str]:
     """Return the date string of the most-recently-modified JSON for ticker."""
     files = sorted(
-        _HIVE_DIR.glob(f"analysis-{ticker.upper()}-ml-*.json"),
+        _hive_dir().glob(f"analysis-{ticker.upper()}-ml-*.json"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -193,7 +216,7 @@ async def alphahive_list_reports() -> str:
             - reports (list): each entry has ticker, date, file, size_kb
     """
     try:
-        files = sorted(_HIVE_DIR.glob("analysis-*-ml-*.json"))
+        files = sorted(_hive_dir().glob("analysis-*-ml-*.json"))
         reports = []
         for f in files:
             parts = f.stem.split("-ml-")
@@ -211,7 +234,7 @@ async def alphahive_list_reports() -> str:
         if not reports:
             return _ok({
                 "message": "No analysis reports found.",
-                "path": str(_HIVE_DIR),
+                "path": str(_hive_dir()),
             })
         return _ok({"total": len(reports), "reports": reports})
     except Exception as e:

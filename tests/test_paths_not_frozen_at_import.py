@@ -30,6 +30,7 @@ import pytest
 import backtester
 import memory_store
 import vector_memory
+import paper_portfolio
 from hive_logger import PATHS
 
 
@@ -77,6 +78,27 @@ class TestResolvedAtCallTime:
         vm = vector_memory.VectorMemory()
         assert str(tmp_path) in str(vm.db_path), (
             f"VectorMemory() 指向 {vm.db_path}，Chroma 会在那里持久化 collection")
+
+    def test_paper_portfolio_snapshot_dir_is_sandboxed(self, tmp_path):
+        """v0.45.274 修的那个洞的专用回归探针（该版验证靠一次全套跑，没有留下这条）。
+
+        `paper_portfolio.SNAPSHOT_DIR` 曾被 `KNOWN` 放行，理由是「只两处 glob 读、
+        无写入 ⇒ 后果有限」——那句本身没错，但漏算了**读到真实历史快照会级联出
+        更多真实计算**：`ic_rerun_readiness.main()` 无条件调用的
+        `fg_exposure_gate_forward_status()` 靠它判断「有没有真实前瞻样本」，读到本
+        checkout 真实的历史快照后，会经 `paper_portfolio.run_replay()` 重放真实历史
+        日期，触发对真实标的的真实网络请求——被 `tests/conftest.py::_offline_transport`
+        逮到，`TestCarriedByReadiness`（三个文件里都有）在**全套跑**（不是单文件跑）
+        时从 PASS 变成 teardown ERROR（v0.45.274）。
+
+        ⚠️ import 必须留在**模块级**（本类顶部）：写进函数体会在 `_isolate_env` 之后
+        才 import，那样本次 pytest 进程里它是「第一次」被 import，会意外撞上已经
+        生效的沙箱化而通过——对 bug 没有判别力（本条第一版就是这么写错的）。
+        """
+        assert str(tmp_path) in str(paper_portfolio.SNAPSHOT_DIR), (
+            f"paper_portfolio.SNAPSHOT_DIR 仍是 {paper_portfolio.SNAPSHOT_DIR} —— "
+            "_isolate_paper_portfolio_state 没有重绑它，全套跑时会读到本 checkout 真实的 "
+            "report_snapshots/，进而可能级联出真实网络请求（v0.45.274 案）")
 
 
 class TestExplicitPathStillWins:
@@ -493,7 +515,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
     与 `TestSpeciesDoesNotSpread` 一样是**子集**语义：清掉存量不会变红，新增必红。
     """
 
-    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`）。清掉一处就从这里删一行。
+    # 存量白名单（v0.45.198 清理 `agent_toolbox.ALLOWED_ROOTS` 后实测 **16 处**；v0.45.230 +1 `weekly_optimizer._CODE_DIR`；v0.45.289 +1 `backup_continuity.ALPHAHIVE_DIR`）。清掉一处就从这里删一行。
     # ⚠️ 子集语义的副作用：**清干净了也不会变红**，过期项会悄悄留下。
     #    定期对账：`KNOWN - _scan(marker="__file__")` 非空即是过期项
     #    （本版就这么揪出 2 条已清却还挂着的）。
@@ -505,6 +527,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("probability_scorecard.py", "ALPHAHIVE_DIR"),  # sys.path.insert
         ("scan_continuity.py", "ALPHAHIVE_DIR"),        # sys.path.insert
         ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),     # sys.path.insert
+        ("backup_continuity.py", "ALPHAHIVE_DIR"),      # sys.path.insert（v0.45.284 新增文件、照抄 scan_continuity 的写法，当时漏登记，v0.45.289 补）
         ("weekly_optimizer.py", "_CODE_DIR"),           # sys.path.insert（v0.45.230，原先插的是写死的主 checkout）
         ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
@@ -699,6 +722,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         ("probability_scorecard.py", "ALPHAHIVE_DIR"),
         ("scan_continuity.py", "ALPHAHIVE_DIR"),
         ("ic_rerun_readiness.py", "ALPHAHIVE_DIR"),
+        ("backup_continuity.py", "ALPHAHIVE_DIR"),
         ("weekly_optimizer.py", "_CODE_DIR"),
         ("health_check.py", "PROJECT"),               # git -C <仓库>
         ("cloud_snapshot_loader.py", "REPO_DIR"),     # git cwd
@@ -710,7 +734,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
     }
 
     def test_code_anchored_paths_were_not_wrongly_converted(self):
-        """这 12 处必须**仍然**是 `__file__` 派生 —— 防「一刀切清理」。
+        """这 13 处必须**仍然**是 `__file__` 派生 —— 防「一刀切清理」。
 
         ⚠️ 这条断言的方向和 `test_no_new_file_derived_paths` **相反**。
         只有子集守卫时，「把模板路径改成 `PATHS.home`」会静默通过，
@@ -749,7 +773,7 @@ class TestFileDerivedSpeciesDoesNotSpread:
         mod = importlib.import_module(modname)
         raw = getattr(mod, attr)
         # 取值可能是 list，只查其中落在仓库内的那些。
-        # ⚠️ v0.45.198：本条参数化自 `MUST_STAY_FILE_ANCHORED`，而那 11 项（v0.45.230 起 12 项）**取值全是标量**
+        # ⚠️ v0.45.198：本条参数化自 `MUST_STAY_FILE_ANCHORED`，而那 11 项（v0.45.230 起 12 项，v0.45.289 起 13 项）**取值全是标量**
         #    ⇒ 下面这个 list 分支目前**一次也没被执行过**，是防御性的。
         #    （原注释举的例子 `agent_toolbox.ALLOWED_ROOTS` 在 `KNOWN` 里、从不在本条参数里，
         #     所以那个例子对本条从一开始就不成立；该符号已随 `FilesystemTool` 一并删除。）
@@ -830,8 +854,13 @@ class TestFrozenViaModuleLevelCall:
             # 冻结，运行时已罩住：conftest `_isolate_paper_portfolio_state` 把它与四个状态文件
             # 重绑到 tmp，teardown 比对真身内容指纹。
             ("paper_portfolio.py", "STATE_DIR", "_base_dir"),
-            # 冻结，**没有**重绑：只有两处 glob 读（`_load_snapshots_for_date` /
-            # `_all_snapshot_dates`），无写入 ⇒ 后果是测试读到 checkout 的真实快照，不是写穿。
+            # 冻结，运行时已罩住（v0.45.274 起）：`_isolate_paper_portfolio_state` 同一个
+            # fixture 一并重绑到 tmp。此前的结论「只有两处 glob 读，无写入 ⇒ 后果是测试
+            # 读到 checkout 的真实快照，不是写穿」本身没错，但漏算了下游会把"读到真实快照"
+            # 当信号去重放，重放会打真网络——`test_fg_exposure_gate_forward_test.py` /
+            # `test_resonance_boost_forward_test.py` / `test_ic_rerun_readiness.py` 三个
+            # 文件的 `TestCarriedByReadiness` 在全套测试里曾因此伸手摸生产目录、
+            # 被 `_offline_transport` 挡下并判红（8 个 teardown ERROR）。
             ("paper_portfolio.py", "SNAPSHOT_DIR", "_base_dir"),
             # **不冻结**：v0.45.239 的 handler 在 `__init__` 求值一次给 `baseFilename` 占位，
             # 每条记录 `emit` 时再按 `current_target()` 重指。静态上与冻结同形，

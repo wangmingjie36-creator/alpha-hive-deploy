@@ -6,14 +6,39 @@
 （那样等于把「密钥去哪扫」的清单和一次真实凭据样本焊进了 git 历史）。
 """
 import json
+import os
+import pwd
+import shlex
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from data_backup import export as export_mod
 from data_backup import restore as restore_mod
+from data_backup import run_backup
 from data_backup.scan_secrets import load_known_secrets, scan_directory
 from data_backup.sqlite_readonly import HotJournalError, db_open_uri
+
+
+@pytest.fixture
+def _sandbox_home(tmp_path_factory, monkeypatch):
+    """`run_backup.main()` 的 `--backup-dir/--status-file/--history-file` 默认值都是
+    `Path.home() / "alpha-hive-data" / ...`——真实数据根。`_isolate_env` 只隔离
+    `ALPHA_HIVE_*`、不隔离 `$HOME`，所以没显式传路径的测试会把伪造记录写进真实
+    `backup_status_history.jsonl`（v0.45.284 给 `run()` 加追加历史后，
+    `TestRunBackupStageReporting` 的 7 个老测试没跟着传 `--history-file`）。
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+# 整个文件套沙箱 HOME：新增的测试即使忘了传路径也不会写真实目录。
+# `_ORCH` 在 import 时已算好、bash 沙箱不读 HOME，所以读编排器的那批不受影响。
+pytestmark = pytest.mark.usefixtures("_sandbox_home")
 
 
 def _make_synthetic_db(path, wal=False):
@@ -177,3 +202,547 @@ class TestSecretScan:
         monkeypatch.setattr(scan_mod, "REAL_KEY_FILES", [str(tmp_path / "does_not_exist")])
         rc = scan_mod.main(["--dir", str(tmp_path)])
         assert rc == 2
+
+
+class TestRunBackupStageReporting:
+    """退出码 2 是 export/commit/push 三种失败共用的（`run_backup.main()` 只把
+    `stage == "secret_scan"` 单独映射成退出码 1，其余一律 2）——这组测试锁定
+    `status.json` 的 `stage` 字段在每条失败路径下都准确，不会被下游（编排器
+    Step 14）误读成另一种失败。对应项目 CLAUDE.md 硬检查项「这个失败，下游
+    怎么知道？」，修复见 CHANGELOG v0.45.269：编排器此前把 rc==2 硬解读成
+    「已提交但推送失败」，导致 export/commit 失败（根本没提交成功）也被误报
+    成已提交。
+
+    不 mock `load_known_secrets` 之外的任何东西时用真实 git（`_init_backup_git_repo`
+    起一个真实的本地仓库/裸仓库），只在需要精确注入某一步失败时才 monkeypatch
+    `_run_git`——这样"提交成功"、"推送失败"这些断言测的是真实 git 行为，不是
+    自己模拟出来的假象。
+    """
+
+    def _synthetic_src(self, tmp_path):
+        """库范围直接取 export_mod.DBS，缺一个 export_db() 就会
+        FileNotFoundError——测 commit/push 阶段前必须先让 export 真实跑通。"""
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        return src
+
+    def _init_backup_git_repo(self, backup_dir, branch="main"):
+        """本地 config 必须显式覆盖可能存在的全局 `commit.gpgsign` / `core.hooksPath`——
+        否则在全局开着提交签名（无可用密钥）或挂了会失败的全局 hook 的机器上，
+        这里的真实 `git commit` 会因环境而失败，把 stage 误判成 "commit"，
+        看起来像是被测代码的逻辑问题，实际与之无关（本机核实过当前不触发，
+        但这是可移植性缺口，非假设性场景）。"""
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-b", branch], cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "commit.gpgsign", "false"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "core.hooksPath", os.devnull],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+
+    def test_export_failure_reports_export_stage(self, tmp_path, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError("模拟并发写检测命中")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()  # run() 里的 git init 假定 backup_dir 已存在，不会自己创建
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "export"
+        assert status["ok"] is False
+
+    def test_commit_failure_reports_commit_stage(self, tmp_path, monkeypatch):
+        real_run_git = run_backup._run_git
+
+        def fake_run_git(args, cwd):
+            if args and args[0] == "commit":
+                return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="模拟 commit 失败")
+            return real_run_git(args, cwd)
+
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+        monkeypatch.setattr(run_backup, "_run_git", fake_run_git)
+
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()  # run() 里的 git init 假定 backup_dir 已存在，不会自己创建
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "commit"
+        assert status["ok"] is False
+
+    def test_push_failure_reports_push_stage(self, tmp_path, monkeypatch):
+        """不 mock git——真实起一个没配 remote 的仓库，`git push origin main`
+        会真实失败，验证 run() 把这类失败真的分类成 stage="push"，且提交
+        必须已经真实成功（跟 export/commit 失败不是一回事）。"""
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+
+        backup_dir = tmp_path / "backup"
+        self._init_backup_git_repo(backup_dir)
+
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "push"
+        assert status["ok"] is False
+        assert status["commit"]["made"] is True
+
+    def test_git_init_failure_reports_init_stage(self, tmp_path, monkeypatch):
+        """git init 失败必须立刻中止——不能带着未初始化的仓库继续往下走 add/diff/
+        commit：`git diff --cached --quiet` 在非 git 仓库里返回 128（不是"无变化"
+        的 0），旧代码会把 128 误判成"有变化"进而尝试 commit，commit 失败后把
+        "仓库根本没初始化成功"误标成 stage="commit"（v0.45.278 修）。"""
+        real_run_git = run_backup._run_git
+
+        def fake_run_git(args, cwd):
+            if args and args[0] == "init":
+                return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="模拟 git init 失败")
+            return real_run_git(args, cwd)
+
+        monkeypatch.setattr(run_backup, "_run_git", fake_run_git)
+
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "init"
+        assert status["ok"] is False
+        # 中止必须发生在 init 就地——不能继续跑到 export，manifest_summary 不该出现
+        assert "manifest_summary" not in status
+
+    def test_git_exception_during_commit_phase_reports_git_error_stage(self, tmp_path, monkeypatch):
+        """add/diff/commit 阶段任一次 git 调用抛异常（如 `_run_git` 的 timeout=60
+        触发 `subprocess.TimeoutExpired`）必须映射到专门的 stage="git_error"，
+        不能让异常一路不捕获地把 Python 进程以默认退出码 1 崩溃退出——退出码 1
+        是专门留给 secret_scan 的，会被编排器 Step 14 误报成"密钥扫描命中"
+        （v0.45.278 修）。"""
+        real_run_git = run_backup._run_git
+
+        def fake_run_git(args, cwd):
+            if args and args[0] == "add":
+                raise subprocess.TimeoutExpired(cmd=["git", "add", "-A"], timeout=60)
+            return real_run_git(args, cwd)
+
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+        monkeypatch.setattr(run_backup, "_run_git", fake_run_git)
+
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2  # 不能是 1——1 是 secret_scan 专属
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "git_error"
+        assert status["ok"] is False
+
+    def test_git_exception_during_push_reports_git_error_stage(self, tmp_path, monkeypatch):
+        """push 阶段抛异常（超时）同样要落进 stage="git_error"，且要能看出
+        commit 其实已经真实成功——跟 stage="push"（返回码非 0，不是异常）
+        不是一回事，下游据此决定"下一轮直接重推还是要人工排查"。"""
+        real_run_git = run_backup._run_git
+
+        def fake_run_git(args, cwd):
+            if args and args[0] == "push":
+                raise subprocess.TimeoutExpired(cmd=["git", "push", "origin", "main"], timeout=60)
+            return real_run_git(args, cwd)
+
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+        monkeypatch.setattr(run_backup, "_run_git", fake_run_git)
+
+        backup_dir = tmp_path / "backup"
+        self._init_backup_git_repo(backup_dir)
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "git_error"
+        assert status["ok"] is False
+        assert status["commit"]["made"] is True  # 提交已经真实成功，只是 push 抛了异常
+
+    def test_full_success_reports_done_stage(self, tmp_path, monkeypatch):
+        """真实本地裸仓库模拟远端，走完整 export→scan→commit→push 全流程。"""
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+
+        bare_remote = tmp_path / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare_remote)],
+                        check=True, capture_output=True)
+
+        backup_dir = tmp_path / "backup"
+        self._init_backup_git_repo(backup_dir)
+        subprocess.run(["git", "remote", "add", "origin", str(bare_remote)],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 0
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "done"
+        assert status["ok"] is True
+        assert status["date"] == status["started_at"][:10]  # 编排器新鲜度校验读的就是这个字段
+
+
+class TestRunBackupHistoryAppend:
+    """`run()` 每条退出路径都要追加一行到 `history_file`（v0.45.284）——
+    这是 `backup_continuity.py` 判"连续 N 天未识别/陈旧"唯一能读到的历史，
+    `status.json` 本身每次调用整份覆盖，没有这份 JSONL 就无从判定连续性。
+    """
+
+    def _synthetic_src(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in export_mod.DBS.values():
+            _make_synthetic_db(src / db_name)
+        return src
+
+    def test_failure_appends_ok_false_record(self, tmp_path, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError("模拟并发写检测命中")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        history_file = tmp_path / "history.jsonl"
+        run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(tmp_path / "status.json"),
+            "--history-file", str(history_file),
+        ])
+        lines = history_file.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        rec = json.loads(lines[0])
+        assert rec["stage"] == "export"
+        assert rec["ok"] is False
+        assert rec["date"]
+
+    def test_success_appends_ok_true_record(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+        bare_remote = tmp_path / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare_remote)],
+                        check=True, capture_output=True)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "commit.gpgsign", "false"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "core.hooksPath", os.devnull],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "remote", "add", "origin", str(bare_remote)],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+
+        history_file = tmp_path / "history.jsonl"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(tmp_path / "status.json"),
+            "--history-file", str(history_file),
+        ])
+        assert rc == 0
+        lines = history_file.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 1
+        rec = json.loads(lines[0])
+        assert rec == {"date": rec["date"], "stage": "done", "ok": True}
+
+    def test_repeated_calls_append_not_overwrite(self, tmp_path, monkeypatch):
+        """同一个 history_file 跨多次调用（跨天）必须累积成多行，
+        不能像 status.json 那样被后一次覆盖——否则判连续性又回到只看"最近一次"。"""
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        history_file = tmp_path / "history.jsonl"
+        src = self._synthetic_src(tmp_path)
+        for _ in range(3):
+            run_backup.main([
+                "--src", str(src),
+                "--backup-dir", str(backup_dir),
+                "--status-file", str(tmp_path / "status.json"),
+                "--history-file", str(history_file),
+            ])
+        lines = history_file.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3
+
+    def test_history_file_none_is_noop(self, tmp_path, monkeypatch):
+        """`history_file` 不传（老调用方）不能报错——同 `status_file=None` 的既有行为。"""
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        status = run_backup.run(self._synthetic_src(tmp_path), backup_dir,
+                                 status_file=tmp_path / "status.json")
+        assert status["stage"] == "export"
+
+    def test_history_write_failure_does_not_change_status(self, tmp_path, monkeypatch):
+        """历史日志写不进去（比如父目录其实是个文件）不能影响本次判定结果——
+        判定在写盘之前就已经完成，同 `_write_status` 已有的这条纪律。"""
+        def boom(*a, **kw):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        blocked_parent = tmp_path / "not_a_dir"
+        blocked_parent.write_text("occupied")  # 让 mkdir(parents=True) 必然失败
+        history_file = blocked_parent / "history.jsonl"
+        status = run_backup.run(self._synthetic_src(tmp_path), backup_dir,
+                                 status_file=tmp_path / "status.json",
+                                 history_file=history_file)
+        assert status["stage"] == "export"
+        assert status["ok"] is False
+
+
+class TestHomeSandboxHasTeeth:
+    """上面那层 `pytestmark` 沙箱本身要有牙：没有这两条，有人删掉它，全套照绿，
+    而真实 `~/alpha-hive-data` 又开始被伪造记录污染（v0.45.291 实测那份文件里全是伪造、无一真实）。
+    """
+
+    def test_module_mark_is_in_effect_and_home_is_not_the_real_one(self, request):
+        # 真实家目录取自用户库、不读 $HOME，所以不会被 monkeypatch 骗到。
+        real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        assert "_sandbox_home" in request.fixturenames, "模块级 pytestmark 没生效"
+        assert Path.home() != real_home, (
+            f"Path.home() 仍是真实家目录 {real_home}——本文件里不传路径参数的 run_backup 调用"
+            "会把伪造记录写进真实 ~/alpha-hive-data/logs/backup_status_history.jsonl")
+
+    def test_run_backup_defaults_follow_home(self, tmp_path, monkeypatch, _sandbox_home):
+        """沙箱靠「默认路径跟着 $HOME 走」这个前提成立；若 run_backup 哪天把默认值
+        改成不看 HOME 的写法，这条会红，提醒沙箱已失效。"""
+        def boom(*a, **kw):
+            raise RuntimeError("模拟导出失败")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        src = tmp_path / "src"
+        src.mkdir()
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()
+        rc = run_backup.main(["--src", str(src), "--backup-dir", str(backup_dir)])  # 不传 status/history
+        assert rc == 2
+        logs = _sandbox_home / "alpha-hive-data" / "logs"
+        rows = [json.loads(x) for x in (logs / "backup_status_history.jsonl").read_text().splitlines()]
+        assert [(r["stage"], r["ok"]) for r in rows] == [("export", False)]
+        assert (logs / "backup_status.json").is_file()
+
+
+_ORCH = os.path.expanduser("~/.claude/scripts/alpha-hive-orchestrator.sh")
+_STEP14_RC2_START = "elif [ $STEP14_RC -eq 2 ]; then"
+_STEP14_RC2_END = "elif [ $STEP14_RC -eq 124 ]; then"
+
+
+class TestOrchestratorStep14StageDispatch:
+    """编排器 Step 14 的 rc==2 分支不受版本控制、pytest import 不到——抽出这段
+    真实脚本片段，接进一个最小 bash 沙箱（假 `log()` 收日志、真 `jq` 判断）跑，
+    锁定 stage 分发 + 新鲜度校验的行为。
+
+    动机：二次检查这次修复时发现，v0.45.269 加的 stage 分发和 v0.45.273 加的
+    新鲜度校验（`backup_status.json` 必须是"今天"写的才可信——`run_step()`
+    自己也把 rc=2 当"脚本不存在，跳过"的哨兵值，跟这里的 rc=2 同一个数字、
+    不同含义；陈旧文件会被误当成本轮结果）此前只有 CHANGELOG/memory 里的文字
+    记录，没有任何可执行测试盯着——两处都可能被静默改回旧行为而没有测试报红。
+    """
+
+    def _extract_block(self):
+        if not os.path.isfile(_ORCH):
+            pytest.skip("编排器不在本机（仓库外文件）")
+        text = Path(_ORCH).read_text(encoding="utf-8")
+        start = text.index(_STEP14_RC2_START) + len(_STEP14_RC2_START)
+        end = text.index(_STEP14_RC2_END, start)
+        return text[start:end]
+
+    def _run(self, tmp_path, *, status_json, date_str="2026-01-01"):
+        block = self._extract_block()
+        status_file = tmp_path / "backup_status.json"
+        if status_json is not None:
+            status_file.write_text(json.dumps(status_json), encoding="utf-8")
+        script = f'''
+set -uo pipefail
+log() {{ printf 'LOG\\t%s\\t%s\\n' "$1" "$2"; }}
+BACKUP_STATUS_JSON={shlex.quote(str(status_file))}
+DATE_STR={shlex.quote(date_str)}
+STEP14_RC=2
+STEPS_RESULT='{{}}'
+{block}
+printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
+'''
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, f"bash 片段本身跑挂了：{result.stderr}"
+        logs = [tuple(ln.split("\t", 2)[1:]) for ln in result.stdout.splitlines() if ln.startswith("LOG\t")]
+        steps_line = next(ln for ln in result.stdout.splitlines() if ln.startswith("STEPS_RESULT_JSON\t"))
+        steps_result = json.loads(steps_line.split("\t", 1)[1])
+        return logs, steps_result
+
+    @pytest.mark.parametrize("stage, expect_level, expect_log_substr, expect_status", [
+        ("init", "ERROR", "git 仓库初始化失败", "init_failed"),
+        ("export", "ERROR", "数据导出失败", "export_failed"),
+        ("git_error", "ERROR", "git 调用异常", "git_error_failed"),
+        ("commit", "ERROR", "git commit 失败", "commit_failed"),
+        ("push", "WARN", "已提交但推送失败", "push_failed"),
+    ])
+    def test_known_fresh_stage_dispatches_correct_message(
+        self, tmp_path, stage, expect_level, expect_log_substr, expect_status
+    ):
+        logs, steps_result = self._run(
+            tmp_path, status_json={"date": "2026-01-01", "stage": stage})
+        assert any(lvl == expect_level and expect_log_substr in msg for lvl, msg in logs), logs
+        assert steps_result["step14_data_backup"]["status"] == expect_status
+
+    def test_unrecognized_but_fresh_stage_falls_to_default_branch(self, tmp_path):
+        logs, steps_result = self._run(
+            tmp_path, status_json={"date": "2026-01-01", "stage": "some_future_stage"})
+        assert any("未识别" in msg for _, msg in logs), logs
+        assert steps_result["step14_data_backup"]["status"] == "some_future_stage_failed"
+
+    def test_missing_status_file_does_not_claim_a_specific_stage(self, tmp_path):
+        """status.json 整个不存在（比如脚本本轮从没被 run_step 真正调用过）——
+        不能落进 export/commit/push 任何一支，必须显式标"陈旧/缺失"。"""
+        logs, steps_result = self._run(tmp_path, status_json=None)
+        assert any("缺失或不是今天写的" in msg for _, msg in logs), logs
+        assert steps_result["step14_data_backup"]["status"] == "stale_or_missing_failed"
+
+    def test_stale_status_file_from_a_previous_day_is_not_trusted(self, tmp_path):
+        """回归测试的核心：昨天的 status.json 恰好是 stage="push"——修复前，
+        这种陈旧文件会被原样当成"已提交但推送失败"汇报（run_step 把脚本
+        不存在的 rc=2 跟这里的 rc=2 混同的那个场景），这正是二次检查揪出、
+        v0.45.273 补的新鲜度校验缺口。"""
+        logs, steps_result = self._run(
+            tmp_path, status_json={"date": "2025-12-31", "stage": "push"}, date_str="2026-01-01")
+        assert not any("已提交但推送失败" in msg for _, msg in logs), (
+            f"陈旧的 stage=push 被当成本轮结果汇报了——新鲜度校验没生效：{logs}")
+        assert any("缺失或不是今天写的" in msg for _, msg in logs), logs
+        assert steps_result["step14_data_backup"]["status"] == "stale_or_missing_failed"
+
+    def test_status_file_without_date_field_is_treated_as_stale(self, tmp_path):
+        """老格式的 status.json（v0.45.269 之前写的，没有 date 字段）也不能被信——
+        `.date == $d` 对缺失字段该判 false，不能因为 jq 的 null 处理意外放行。"""
+        logs, steps_result = self._run(tmp_path, status_json={"stage": "push"})
+        assert steps_result["step14_data_backup"]["status"] == "stale_or_missing_failed"
+
+
+_STEP15_START = "if [ $STEP15_RC -eq 0 ]; then"
+_STEP15_END = 'log "INFO" "【Final】写入系统状态"'
+
+
+class TestOrchestratorStep15Dispatch:
+    """编排器 Step 15（数据备份连续性体检，v0.45.284）的 rc 分发同样不受版本
+    控制、pytest import 不到——同 `TestOrchestratorStep14StageDispatch` 的做法，
+    抽出真实脚本片段接进最小 bash 沙箱跑，锁定 exit code → 日志级别/文案 →
+    `STEPS_RESULT` 状态字符串的映射，不然这条新加的分发逻辑可能被静默改坏
+    而没有测试报红。
+    """
+
+    def _extract_block(self):
+        if not os.path.isfile(_ORCH):
+            pytest.skip("编排器不在本机（仓库外文件）")
+        text = Path(_ORCH).read_text(encoding="utf-8")
+        start = text.index(_STEP15_START)
+        end = text.index(_STEP15_END, start)
+        return text[start:end]
+
+    def _run(self, tmp_path, *, step15_rc, continuity_json=None):
+        block = self._extract_block()
+        json_file = tmp_path / "backup_continuity.json"
+        if continuity_json is not None:
+            json_file.write_text(json.dumps(continuity_json), encoding="utf-8")
+        script = f'''
+set -uo pipefail
+log() {{ printf 'LOG\\t%s\\t%s\\n' "$1" "$2"; }}
+PYTHON3={shlex.quote(sys.executable)}
+BACKUP_CONTINUITY_JSON={shlex.quote(str(json_file))}
+STEP15_RC={step15_rc}
+STEP15_DURATION=1
+STEPS_RESULT='{{}}'
+{block}
+printf 'STEPS_RESULT_JSON\\t%s\\n' "$(echo "$STEPS_RESULT" | jq -c .)"
+'''
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, f"bash 片段本身跑挂了：{result.stderr}"
+        logs = [tuple(ln.split("\t", 2)[1:]) for ln in result.stdout.splitlines() if ln.startswith("LOG\t")]
+        steps_line = next(ln for ln in result.stdout.splitlines() if ln.startswith("STEPS_RESULT_JSON\t"))
+        steps_result = json.loads(steps_line.split("\t", 1)[1])
+        return logs, steps_result
+
+    def test_healthy_rc0_dispatches_info(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=0)
+        assert any(lvl == "INFO" and "连续性健康" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "healthy"
+
+    def test_degraded_rc1_dispatches_warn_with_summary(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=1, continuity_json={
+            "window": {"trading_days": 10}, "backed_up_days": 6, "coverage": 0.6,
+            "longest_gap": 4, "weeks_missed": ["2026-W10"],
+        })
+        assert any(lvl == "WARN" and "连续性降级" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "degraded"
+
+    def test_undetermined_rc3_dispatches_warn(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=3)
+        assert any(lvl == "WARN" and "无法判定" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "undetermined"
+
+    def test_skipped_rc2_dispatches_warn(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=2)
+        assert any(lvl == "WARN" and "跳过" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "skipped"
+
+    def test_timeout_rc124_dispatches_error(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=124)
+        assert any(lvl == "ERROR" and "超时" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "timeout"
+
+    def test_unexpected_rc_dispatches_warn_error_status(self, tmp_path):
+        logs, steps_result = self._run(tmp_path, step15_rc=99)
+        assert any(lvl == "WARN" and "异常" in msg for lvl, msg in logs), logs
+        assert steps_result["step15_backup_continuity"]["status"] == "error"
+        assert steps_result["step15_backup_continuity"]["rc"] == 99
+
+    def test_degraded_summary_survives_unparseable_json(self, tmp_path):
+        """连 continuity JSON 都读不出来（比如脚本半途被杀）不能让整段 Step 15
+        崩掉——python 摘要脚本要能优雅报"无法解析"而不是让 bash 片段整体失败。"""
+        logs, steps_result = self._run(tmp_path, step15_rc=1, continuity_json=None)
+        assert steps_result["step15_backup_continuity"]["status"] == "degraded"

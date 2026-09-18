@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""薄入口：给编排器 `run_step` 用（阶段 3.5 设计，v0.45.264 尚未接入）。
+"""薄入口：给编排器 `run_step` 用。v0.45.264 起已接入生产编排器 Step 14。
 
 `~/.claude/scripts/alpha-hive-orchestrator.sh` 的 `run_step` 只接受**脚本文件路径**
 （内部 `[ -f "$script" ]` + `"$PYTHON3" "$script" "$@"`），不支持 `python3 -m
