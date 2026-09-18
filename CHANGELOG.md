@@ -5,6 +5,86 @@
 
 ---
 
+## [0.45.279] — 2026-09-18 — Fixed：`generate_deep_v2.py` 的 `ALPHAHIVE_DIR` 硬编码字面量收口（数据根迁移阶段 4 遗留项第三例）
+
+数据根迁移阶段 4（gh-pages 发布链改指向）普查仓库外/独立进程消费方时，
+在 v0.45.268 记录了三处同构遗留 bug：`weekly_optimizer.py`/`self_analyst.py`
+的 `ALPHAHIVE_DIR`（阶段 1 · v0.45.259 已点名，仍未修）与 `generate_deep_v2.py`
+的同名变量（本次普查新发现，此前未被记录）。三者按任务边界当时都排除在阶段 4
+之外，`generate_deep_v2.py` 这一处已用 `spawn_task` 记为独立后续任务，本次单独
+处理；另两处（`weekly_optimizer.py`/`self_analyst.py`）现状不变，不在本次范围。
+
+### 问题
+
+`generate_deep_v2.py:60`（修复前）：
+
+```python
+ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
+```
+
+模块级字面量，完全不读 `ALPHA_HIVE_HOME`，也不是 `__file__` 派生——是本仓这类
+路径 bug 里锁得最死的一种，两条既有守卫（`tests/test_paths_not_frozen_at_import.py`
+的 `TestSpeciesDoesNotSpread` 只认 `PATHS` 标记、`TestFileDerivedSpeciesDoesNotSpread`
+只认 `__file__` 标记）都不命中它，此前从未被任何自动化检测发现。三处消费点：
+读 `analysis-{ticker}-ml-*.json`（`find_latest_json`/`find_prev_json`）、
+读/写 `.anthropic_api_key`、以及 `_load_ticker_accuracy` 里的
+`close_t7_db_path=ALPHAHIVE_DIR / "pheromone.db"`（生产核心数据库）。
+数据根迁移阶段 5 把生产数据搬到 `~/alpha-hive-data` 后，这三处会继续读旧位置
+的陈旧或缺失数据，且不会有任何报错。
+
+### Fixed
+
+- **`generate_deep_v2.py:60-92`**：`ALPHAHIVE_DIR` 改成**覆盖钩子**（默认
+  `None`），新增 `_alphahive_dir()` 在调用时求值：无覆盖时按 VM 挂载点探测
+  （`_VM_PATH.exists()`，逻辑不变，只是从导入期赋值改成调用时判断）→ 兜底
+  `hive_logger.PATHS.home`。`find_latest_json`/`find_prev_json`/
+  `_load_ticker_accuracy` 三处调用点改读 `_alphahive_dir()`。
+  改法沿用仓内已验证过的惯例（`collect_data.py`，v0.45.263）：不写
+  `ALPHAHIVE_DIR = PATHS.home`（那只是把冻结换个地方，会被
+  `TestSpeciesDoesNotSpread` 判红），也不在模块级调用 `_alphahive_dir()`
+  （会被 `TestFrozenViaModuleLevelCall` 判红）——保留 `ALPHAHIVE_DIR` 这个
+  同名可覆盖属性，也是因为 `tests/test_close_t7_production_wiring.py` 与
+  `tests/test_ticker_accuracy_direction.py` 已有
+  `monkeypatch.setattr(g, "ALPHAHIVE_DIR", ...)` 的现成用法，改成别的名字
+  会连带改测试。
+- **`get_api_key()`**：此前 `API_KEY_FILE`/`_VM_API_KEY`/`_MAC_API_KEY` 是导入期
+  算好的模块级常量（依赖旧的 `ALPHAHIVE_DIR` 字面量），改成在本函数体内于
+  调用时解析，避免把冻结换个地方重新引入（模块级 `if` 语句的 test 表达式
+  调用 `_alphahive_dir()` 会被 `TestFrozenViaModuleLevelCall` 判定为「经模块级
+  调用间接冻结」，已用真实跑该测试类验证过不再触发）。
+- **`OUTPUT_DIR`（深度报告输出目录）不在本次范围**：与 `ALPHAHIVE_DIR`
+  是两个独立变量，本身已经是导入期判断 VM 挂载点是否存在（不依赖
+  `ALPHA_HIVE_HOME`），未改动。
+
+### Added
+
+- `tests/test_generate_deep_v2_alphahive_dir.py`（10 项）：覆盖
+  `_alphahive_dir()` 的默认值/环境变量跟随/显式覆盖/调用时求值四态，以及
+  `find_latest_json`/`find_prev_json`/`get_api_key()` 三个此前无测试覆盖的
+  调用点是否真的跟着 `ALPHAHIVE_DIR` 走（而非绕回旧的硬编码 Desktop 路径）。
+  `_load_ticker_accuracy` 的路径接线已由
+  `tests/test_close_t7_production_wiring.py`/`tests/test_ticker_accuracy_direction.py`
+  覆盖，本次未重复。
+
+  变异验证：临时还原修复前的 `generate_deep_v2.py`（`git stash` 隔离，仅本文件），
+  新增测试里的 `test_default_override_is_none_not_hardcoded_literal` 立即失败
+  （`ALPHAHIVE_DIR` 实际是 `PosixPath('/Users/igg/Desktop/Alpha Hive')` 而非
+  `None`），证明测试对本次要修的问题有判别力；恢复修复后全部 10 项转绿。
+
+### 验收
+
+- 新增 10 项 + `tests/test_close_t7_production_wiring.py`（3）+
+  `tests/test_ticker_accuracy_direction.py`（7）+
+  `tests/test_paths_not_frozen_at_import.py`（85）共 105 项全绿。
+- `ruff check generate_deep_v2.py tests/test_generate_deep_v2_alphahive_dir.py`
+  全过。
+- 全套 `pytest -q --maxfail=0`：**4932 passed, 1 skipped, 83 deselected,
+  2 xfailed, 1 failed**（耗时 407s）。唯一失败是
+  `tests/test_economic_calendar.py::TestCoverageHorizon`——与本次改动无关，
+  是 BLS 经济日历覆盖天数低于 90 天阈值的**按设计**告警（见
+  `tests/test_hardcoded_calendar.py` docstring 与 `alpha-hive-hardcoded-calendar`
+  memory：「定期变红是设计意图，不是要调阈值」），本次未触碰经济日历相关代码。
+
 ## [0.45.276] — 2026-09-18 — 补 v0.45.274：SNAPSHOT_DIR 隔离缺口的专用回归测试 + 一个死参数清理
 
 `v0.45.272` 占号后二次检查 v0.45.256 时独立发现了这个 bug，但在实现修复期间被另一 session
