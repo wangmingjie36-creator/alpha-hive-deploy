@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.293] — 2026-09-18 — 占位（进行中：退役仓库外死脚本 `alpha-hive-daily.sh`——移入 `retired/`、去掉执行位，消除「手动跑会写出假简报」的陷阱）
+
 ## [0.45.291] — 2026-09-18 — Changed：CI 的 pytest 加 `-rs`，摘要里列出每条 skip 的原因；⚠️ 顺带发现 `test_data_backup.py` 把伪造记录写进了真实 `~/alpha-hive-data`（**未处理**）
 
 ### Changed
