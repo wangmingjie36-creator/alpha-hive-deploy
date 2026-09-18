@@ -148,7 +148,9 @@ Rival/Scout 仍是 v0.45.279，Oracle 仍是 v0.45.128——Bear 是它们的下
   `test_no_new_file_derived_paths` 是别的 session 的 v0.45.284 `backup_continuity.py:
   ALPHAHIVE_DIR` 未登记白名单，已被 v0.45.289 修复（并入后转绿）；`TestCoverageHorizon`
   （经济日历 CPI/NFP 覆盖余量 83/77 天 < 90 天阈值）在**干净 `origin/main`** 上同样红，
-  日期驱动、设计性变红，不是回归。（并入后的重跑结果见下一行。）
+  日期驱动、设计性变红，不是回归。
+- 全量套件（并入 `origin/main` `ef85b662` 后重跑）：**5038 passed、1 failed**（仅上述
+  `TestCoverageHorizon`；另 1 skipped、83 deselected、2 xfailed）。`test_no_new_file_derived_paths` 已转绿。
 - `experiments/bear_read_miss_audit.py` 对生产快照复现手工数字（options 117/540、
   Oracle bearish 下界 34/52）。
 
