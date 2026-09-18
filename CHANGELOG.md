@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.273] — 2026-09-18 — 占位（进行中：v0.45.269 二次检查——backup_status.json 新鲜度校验 + Step 14 bash 分支回归测试）
+
 ## [0.45.272] — 2026-09-18 — 占位（进行中：paper_portfolio.py 的 SNAPSHOT_DIR/STATE_DIR 模块级路径冻结——二次检查 v0.45.256 时在全套测试里发现，导致测试套件真实联网 + 潜在写穿生产 report_snapshots/paper_portfolio_state）
 
 ## [0.45.271] — 2026-09-18 — 占位（进行中：09-17 momentum/volume 补算 + 重新部署——评估是否触及 predictions 表）
