@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.281] — 2026-09-18 — 占位（进行中：orchestrator Step 14 jq 命令拼接注入修复）
+
+---
+
 ## [0.45.280] — 2026-09-18 — Fixed：`mock_stock_data` fixture 签名落后于 `_fetch_stock_data` 真实签名，TypeError 级联炸穿 test_agents.py
 
 `swarm_agents/base.py` 的 `_get_stock_data()` 早就改成
