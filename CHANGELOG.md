@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.290] — 2026-09-18 — 占位（进行中：experiments 里两个跨世代混算脚本 signal_ic_sweep / final_score_dilution 加默认拒绝护栏 + 报告补注）
+
 ## [0.45.289] — 2026-09-18 — Fixed：`backup_continuity.py:ALPHAHIVE_DIR` 漏登记进 `__file__` 派生白名单，CI 上 `test_no_new_file_derived_paths` 变红
 
 v0.45.286 推送后取到一次真实跑完的 CI（run `35360798518`）：`alpha_hive_mcp` 的
