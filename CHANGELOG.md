@@ -177,7 +177,100 @@ Alternative.me 加密 F&G（CNN 当日 17-22，记录值却是 13/15/18/15）—
   且与 `ic_rerun_readiness.py`/`paper_portfolio.py`/forward test 模块毫无 import 关系的
   本次新增两个文件无关，去掉它们问题依旧复现）——用户已启动一个子任务定位修复。
 
-## [0.45.266] — 2026-09-18 — 占位（进行中：v0.45.238 期权快照陈旧数据隔离——11 个坏槽位日进 signal_archive.QUARANTINE）
+## [0.45.266] — 2026-09-18 — v0.45.238 期权快照陈旧数据隔离：`QUARANTINE` 支持按标的精确点名，11 个坏槽位日入表，生产库清掉 630 行
+
+上一 session「四点长期价值分析」的 P0：v0.45.238 普查出的 171 份「装着前一交易会话」的期权快照，
+一直只是「候选」，本次实际写进 `signal_archive.QUARANTINE` 并清库。
+
+### 为什么不能照抄 2026-08-24 那条
+
+08-24 那次是**全体标的**同一天一起中招（`pdt_today()` vs `--date` 目标日错位，30/30 只）。
+但 v0.45.238 的普查显示这批**同一天有的标的坏、有的没坏**——跨午夜/盘前起跑的扫描只碰到了
+当时还没收盘的那几只，其余标的当天照常拿到自己的会话。若照 08-24 的写法整天隔离，
+会连累好数据（例：2026-09-03 只有 24/30 只是坏的）。
+
+### 量测（`cache/` 逐份重判，不是照抄 CHANGELOG 的日份摘要去猜标的）
+
+复用 v0.45.238 已经定好的判据——`cboe_options.session_date_at(_snapshot_timestamp)` 推出的
+ET 交易会话，与快照文件名日期不同即陈旧——对 11 个坏槽位日的全部快照重新逐份判定：
+
+| 日期 | 快照总数 | 陈旧 | 正常（不隔离） |
+|---|---|---|---|
+| 2026-06-10 | 11 | 11 | 0 |
+| 2026-07-08 | 10 | 1（NVDA） | 9 |
+| 2026-07-15 | 10 | 10 | 0 |
+| 2026-07-17 | 10 | 10 | 0 |
+| 2026-07-22 | 10 | 10 | 0 |
+| 2026-07-23 | 10 | 10 | 0 |
+| 2026-07-24 | 10 | 10 | 0 |
+| 2026-08-11 | 29 | 29 | 0 |
+| 2026-08-14 | 29 | 27 | 2（MU/QCOM） |
+| 2026-09-03 | 30 | 24 | 6（ENPH/NEE/SNOW/TMO/TMUS/WMT） |
+| 2026-09-09 | 30 | 29 | 1（MSFT） |
+
+**171 份陈旧，与 CHANGELOG v0.45.238 报的总数逐位吻合**；09-03/09-09 两天另有当日日志佐证
+（命中 42/45 次），其余 9 天日志已不存在，靠这次重判才第一次拿到标的级别的清单。
+
+### Added
+
+- `signal_archive.is_quarantined(date, ticker, signal)`：新增 `ticker` 参数（原为 `(date, signal)`
+  两元）。`QUARANTINE` 条目新增可选 `tickers` 白名单键——缺省仍是 08-24 那条的全天语义，
+  给了就只挡白名单内的标的。`_rows_for()` 同步传入 `ticker`（唯一调用点）。
+- `QUARANTINE` 新增 11 条（每坏槽位日一条），信号范围沿用 08-24 那条的五个
+  （`options.iv_current` / `put_call_ratio` / `gamma_exposure` / `total_oi` / `bear.options_bear`）——
+  **不含** `iv_rank`/`iv_percentile`/`iv_rank_is_real`，这两者是否同等受损未验证，
+  不在此处扩大隔离面，留待日后需要时再评估。
+- `tests/test_signal_quarantine.py` +6：按标的精确隔离（成对：陈旧标的挡住 / 同日干净标的不受影响）、
+  端到端 `archive()` 只误伤陈旧标的、Agent 评分照常入库（划界原则不变）、11 天条目一天不许漏。
+  原有 4 条改为显式断言「用的是无 `tickers` 键的全天隔离条目」，防止条目顺序变化后误测错对象。
+
+### Changed
+
+- `signal_archive.is_quarantined` 签名从 `(date, signal)` 改为 `(date, ticker, signal)`——仓库内唯一调用点
+  （`_rows_for`）与全部测试已同步，无第三方调用者。
+
+### Removed — 生产库清掉 630 行陈旧期权观测
+
+`is_quarantined()` 命中的 (date, ticker, signal) 精确匹配，逐行 DELETE（不是按日期整批删）：
+
+```
+options.iv_current / put_call_ratio / gamma_exposure / total_oi / bear.options_bear
+各 126 行 × 5 类信号 = 630 行
+按日：07-08(1) 07-22(10) 07-23(10) 08-11(27) 08-14(25) 09-03(24) 09-09(29)
+06-10/07-15/07-17/07-24 这 4 天普查里全员陈旧，但当时压根没被归档（早于相关信号入档窗口
+或标的不在当日扫描范围），故删除数为 0——条目仍然保留，为的是挡住未来任何回填把这 4 天带回来。
+```
+
+- **备份**（`sqlite3` 在线备份 API，不用 cp）：
+  `db_backups/pheromone_pre_v0.45.266_snapshot_quarantine_20260918_025745.db`（integrity ok，
+  删除前 signal_archive 102,494 行）。
+- **执行**：单个 `BEGIN IMMEDIATE` 事务，`is_quarantined()` 在事务内现读现判（不依赖任何早前的
+  快照结果），断言命中数落在 [600,700] 预期区间内才删、删除行数与目标行数相等、删除后这些 id
+  零残留，全部通过才 `COMMIT`。integrity 前后均 ok；`signal_archive` 102,494 → 101,864。
+- ⚠️ **并发写入者**：本仓另一 session 同一时段在做 F&G 数据回填（`pheromone.db.pre-fg-backfill-v0.45.267.bak`，
+  02:50 落盘，早于本次删除操作 7 分钟），事后核对其 `market.fear_greed*` 1,761 行未受影响。
+  本次事务只精确匹配已识别的 630 个 id，不做范围/整表操作，与并发写入不冲突。
+- **期权接口只有实时快照、无历史 ⇒ 这些标的当天的真实期权观测永久丢失**，不可补，只能缺失
+  （同 08-24 先例）。
+
+### 核对
+
+- `tests/test_signal_quarantine.py` 10/10；`tests/test_signal_archive*.py`/`test_guard_census_eviction.py`
+  等 9 个相关文件 143/143；mutation 6/6 被杀（每轮清 `__pycache__`、锚点唯一、还原后 sha 比对：
+  忽略 ticker 白名单两个方向 / `_rows_for` 漏传 ticker / 07-08 条目 tickers 清空 / signals 清空 /
+  整条 09-03 移除）。ruff 对改动文件 All checks passed。
+- ⚠️ **全套跑了三次，`test_ic_rerun_readiness.py`/`test_fg_exposure_gate_forward_test.py`/
+  `test_resonance_boost_forward_test.py` 里同 8 项每次都 ERROR，但单独跑（含把这三个文件放一起跑）
+  100% 绿（99/99）**。`ps aux` 实证：三次全套运行期间，这台机器上同时有另外 2~3 个并发 session 各自在跑
+  自己的全套测试（含 `~/Desktop/Alpha Hive` 主目录与另一 worktree），`--timeout=180`/默认 60s 超时在
+  CPU 抢占下被触发——这 8 项与本次改动的文件（`signal_archive.py`/`test_signal_quarantine.py`）无关，
+  也不在本次改动范围内。判据是「单独跑干净 + 改动前也会中」，不是「全套绿了就不用管」；
+  未去追这条并发噪音，因为它不是本次引入的。
+
+### 不做
+
+- `iv_rank`/`iv_percentile`/`iv_rank_is_real` 是否同等受损未验证，未扩大隔离面（见上）。
+- 06-10/07-15/07-17/07-24 四天没有可清的行，但条目已入表，防未来回填复活。
 
 ## [0.45.265] — 2026-09-15 — `signal_archive.analyze()` 按世代切片：系统输出只算当前世代，原始观测保留全史
 
