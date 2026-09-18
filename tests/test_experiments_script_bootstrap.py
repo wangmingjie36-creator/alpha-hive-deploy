@@ -30,8 +30,12 @@
   · 只检查「注入存在且在 import 之前」，**不校验注入的是不是仓库根**。一次性脚本
     patch_swarm_results_20260917.py / replay_swarm_sequence_20260917.py 硬编码了主 checkout 路径，
     开发机上有效、别处无效，本守卫放行。「注入得对不对」靠第二道逐脚本钉。
-  · 只认 sys.path.insert / append / extend 三种调用；别的写法（`sys.path[0] = …`、`sys.path = …`）
-    会红——有意为之：宁可误报、要人改成标准写法，也不放过没识别的形式。
+  · 注入只认 sys.path.insert / append / extend 三种调用，且必须是**独立的表达式语句**；别的写法
+    （`sys.path[0] = …`、`sys.path = …`、`x = sys.path.insert(…)`）会红——有意为之：宁可误报、
+    要人改成标准写法，也不放过没识别的形式。
+  · import 侧除 `import` / `from … import` 外，只认**常量字符串**实参的 `__import__("x")` /
+    `importlib.import_module("x")`；实参是变量/拼接出来的模块名认不出（这一侧是漏报方向）。
+  · 位置按 (行, 列) 比较，所以同一行里 `import x; sys.path.insert(…)` 也会被判为「注入太晚」。
 """
 
 import ast
@@ -79,42 +83,75 @@ def _walk(node, in_func=False):
             child, in_func or isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)))
 
 
+def _dynamic_import_target(node: ast.Call):
+    """`__import__("x")` / `importlib.import_module("x")` / `import_module("x")`（常量字符串实参）→ 顶层模块名，
+    否则 None。这是「惰性 import」的另一种写法，一样要先有 sys.path 注入。"""
+    f = node.func
+    name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
+    if (name in {"__import__", "import_module"} and node.args
+            and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+        return node.args[0].value.split(".")[0]
+    return None
+
+
+def _module_level_injections(tree) -> list:
+    """模块层的 sys.path 注入**语句**（`Expr(Call)`）。检查器与变异器共用这一份口径——
+    此前各自实现「什么算注入」，口径一旦分叉就会出现「守卫认、变异器删不掉」。"""
+    return [n for n, in_func in _walk(tree)
+            if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+            and not in_func and _is_sys_path_call(n.value)]
+
+
 def _analyse(source: str):
-    """→ (所有 import 的 [(行号, 顶层模块名)]，模块层 sys.path 注入的 Call 节点列表)。
-    import 取**任意嵌套层级**——函数体里的惰性 import 一样会炸，只是要走到那条路径才炸。"""
-    imports, injections = [], []
-    for node, in_func in _walk(ast.parse(source)):
+    """→ (所有 import 的 [((行, 列), 顶层模块名)]，模块层 sys.path 注入语句的 [(行, 列)])。
+    位置带列号：同一行里 `import x; sys.path.insert(...)` 与 `sys.path.insert(...); import x` 顺序相反，
+    只比行号分不出来。import 取**任意嵌套层级**——函数体里的惰性 import 一样会炸，只是要走到那条路径才炸。"""
+    tree = ast.parse(source)
+    imports = []
+    for node, _ in _walk(tree):
+        pos = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
         if isinstance(node, ast.Import):
-            imports += [(node.lineno, a.name.split(".")[0]) for a in node.names]
+            imports += [(pos, a.name.split(".")[0]) for a in node.names]
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            imports.append((node.lineno, node.module.split(".")[0]))
-        elif isinstance(node, ast.Call) and not in_func and _is_sys_path_call(node):
-            injections.append(node)
+            imports.append((pos, node.module.split(".")[0]))
+        elif isinstance(node, ast.Call) and (mod := _dynamic_import_target(node)):
+            imports.append((pos, mod))
+    injections = [(s.lineno, s.col_offset) for s in _module_level_injections(tree)]
     return imports, injections
 
 
 def find_bootstrap_violations(source: str, roots) -> list:
     imports, injections = _analyse(source)
-    root_imports = sorted((ln, m) for ln, m in imports if m in roots)
+    root_imports = sorted((pos, m) for pos, m in imports if m in roots)
     if not root_imports:
         return []
-    first_ln, first_mod = root_imports[0]
+    first_pos, first_mod = root_imports[0]
     if not injections:
-        return [f"第 {first_ln} 行 import 了仓库根模块 `{first_mod}`，但脚本没有模块层 sys.path 注入"]
-    first_inj = min(c.lineno for c in injections)
-    if first_inj > first_ln:
-        return [f"sys.path 注入在第 {first_inj} 行，晚于第 {first_ln} 行对仓库根模块 `{first_mod}` 的 import"]
+        return [f"第 {first_pos[0]} 行 import 了仓库根模块 `{first_mod}`，但脚本没有模块层 sys.path 注入"]
+    first_inj = min(injections)
+    if first_inj > first_pos:
+        return [f"sys.path 注入在第 {first_inj[0]} 行，晚于第 {first_pos[0]} 行对仓库根模块 `{first_mod}` 的 import"]
     return []
 
 
 def _strip_injections(source: str) -> str:
-    """删掉全部模块层 sys.path 注入语句（按 AST 行区间删，不靠正则），用于对真实文件做变异。"""
-    kill = set()
-    for node, in_func in _walk(ast.parse(source)):
-        if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
-                and not in_func and _is_sys_path_call(node.value)):
-            kill.update(range(node.lineno, node.end_lineno + 1))
-    return "".join(ln for i, ln in enumerate(source.splitlines(keepends=True), 1) if i not in kill)
+    """把全部模块层 sys.path 注入语句换成 `pass`（保留缩进与行号，按 AST 定位，不靠正则），用于对真实文件做变异。
+    不能整行删：注入若是 if/try/with 块里**唯一**的语句，删掉会留下空块 ⇒ SyntaxError；换成 pass 块仍合法。
+    只支持「注入语句独占其行（行尾注释除外）」——与别的语句同行时整行替换会连带改掉那些语句，
+    所以显式抛错而不是悄悄改坏。"""
+    lines = source.splitlines(keepends=True)
+    for stmt in _module_level_injections(ast.parse(source)):
+        first, last = stmt.lineno - 1, stmt.end_lineno - 1
+        before = lines[first].encode("utf-8")[:stmt.col_offset]          # col_offset 是 UTF-8 字节偏移
+        after = lines[last].encode("utf-8")[stmt.end_col_offset:]
+        tail = after.strip()
+        assert not before.strip() and (not tail or tail.startswith(b"#")), (      # 行尾注释可以丢
+            f"第 {stmt.lineno} 行的 sys.path 注入与别的语句同行，变异器无法只替换它")
+        indent = before.decode("utf-8")
+        lines[first] = f"{indent}pass\n"
+        for i in range(first + 1, last + 1):
+            lines[i] = "\n"
+    return "".join(lines)
 
 
 def _src(text: str) -> str:
@@ -154,6 +191,19 @@ _VIOLATING = {
     "`import 根模块.子模块` 形式": """
         import hive_logger.sub
     """,
+    "同一行：import 之后才注入（只比行号会放过）": """
+        import sys
+        from hive_logger import PATHS; sys.path.insert(0, "x")
+    """,
+    "动态 import：importlib.import_module（惰性 import 的另一种写法）": """
+        import importlib
+        def main():
+            return importlib.import_module("hive_logger")
+    """,
+    "动态 import：__import__": """
+        def main():
+            return __import__("hive_logger")
+    """,
 }
 
 _CLEAN = {
@@ -183,6 +233,26 @@ _CLEAN = {
     "相对 import 不算": """
         from . import helper
     """,
+    "同一行：注入在 import 之前": """
+        import sys; sys.path.insert(0, "x"); from hive_logger import PATHS
+    """,
+    "动态 import，但模块层注入在前": """
+        import sys, importlib
+        sys.path.insert(0, "x")
+        def main():
+            return importlib.import_module("hive_logger")
+    """,
+    "动态 import 标准库不算": """
+        import importlib
+        def main():
+            return importlib.import_module("json")
+    """,
+    "注入在模块层的 if 块里也算（类体/if/try 都在定义时执行）": """
+        import sys
+        if True:
+            sys.path.insert(0, "x")
+        from hive_logger import PATHS
+    """,
 }
 
 
@@ -196,6 +266,43 @@ def test_guard_flags_violating_samples(label):
 def test_guard_accepts_clean_samples(label):
     assert find_bootstrap_violations(_src(_CLEAN[label]), _TEST_ROOTS) == [], (
         f"守卫误报了合规样本「{label}」")
+
+
+# 变异器（_strip_injections）的健壮性：注入是块里**唯一**的语句时，整行删掉会留下空块 ⇒ SyntaxError。
+# 真实文件里目前都是顶层语句，所以这是「有人换个写法就会炸」的潜伏缺陷，靠合成样本提前钉住。
+_SOLE_STATEMENT_IN_BLOCK = {
+    "if 块里唯一的语句": """
+        import sys
+        if True:
+            sys.path.insert(0, "x")
+        import hive_logger
+    """,
+    "try 块里唯一的语句": """
+        import sys
+        try:
+            sys.path.insert(0, "x")
+        except Exception:
+            pass
+        import hive_logger
+    """,
+    "with 块里唯一的语句": """
+        import sys, contextlib
+        with contextlib.suppress(Exception):
+            sys.path.insert(0, "x")
+        import hive_logger
+    """,
+}
+
+
+@pytest.mark.parametrize("label", list(_SOLE_STATEMENT_IN_BLOCK))
+def test_strip_injections_keeps_the_source_parseable(label):
+    src = _src(_SOLE_STATEMENT_IN_BLOCK[label])
+    assert find_bootstrap_violations(src, _TEST_ROOTS) == [], "前提：变异前样本本身是合规的"
+
+    stripped = _strip_injections(src)
+
+    ast.parse(stripped)                                   # 不许抛 SyntaxError
+    assert find_bootstrap_violations(stripped, _TEST_ROOTS), "删掉注入后守卫必须变红"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -228,7 +335,8 @@ def test_every_experiments_script_bootstraps_before_importing_repo_modules():
         "`--help` 看不出来）：\n  " + "\n  ".join(bad)
         + "\n修法：在所有 import 之前加 "
         "`sys.path.insert(0, str(Path(__file__).resolve().parent.parent))`（内联表达式，"
-        "不要赋给模块级路径常量——那会被 test_paths_not_frozen_at_import 当成新增 `__file__` 冻结路径）")
+        "沿用 signal_ic_sweep.py 的写法；experiments/ 不在 test_paths_not_frozen_at_import 的扫描范围内，"
+        "无需在 KNOWN 登记）")
 
 
 def test_stripping_the_injection_turns_every_real_file_red():
@@ -268,8 +376,11 @@ def _run(script: Path, args, home: Path, cwd: Path):
     env["ALPHA_HIVE_LOGS_DIR"] = str(home / "logs")
     env["ALPHA_HIVE_CACHE_DIR"] = str(home / "cache")
     env["ALPHA_HIVE_CHROMA_PATH"] = str(home / "chroma_db")
-    return subprocess.run([sys.executable, str(script), *args],
-                          cwd=str(cwd), env=env, capture_output=True, text=True, timeout=180)
+    # 被测脚本会打印中文与 emoji。locale 非 UTF-8 时子进程会 UnicodeEncodeError，被误报成「脚本崩溃」
+    # （实测：LC_ALL=en_US.ISO8859-1）——所以两端都显式钉 UTF-8，不随宿主 locale 变。
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run([sys.executable, str(script), *args], cwd=str(cwd), env=env,
+                          capture_output=True, encoding="utf-8", errors="replace", timeout=180)
 
 
 def _assert_bootstrapped(r, script):
@@ -294,12 +405,14 @@ def test_harness_canary_a_script_without_injection_really_fails(tmp_path):
         f"returncode={r.returncode} stderr={r.stderr[-300:]!r}")
 
 
-N_VALID = 12 * 8
+WEEKS, TICKERS = 12, 8               # 夹具的形状只在这里定义一次；下面的计数指纹由它们推出
+N_VALID = WEEKS * TICKERS
 
 
 def _make_vol_db(path: Path) -> None:
-    """合成库：12 个 ISO 周 × 8 只标的，每只标的中性/方向各 6 条（过 section_controls 的 ≥5 门槛），
-    每周 4 中性 + 4 方向（过 section_power 的门槛）。另加三条应被 load_records 滤掉的行——
+    """合成库：WEEKS(12) 个 ISO 周 × TICKERS(8) 只标的，每只标的中性/方向各 6 条（过 section_controls 的
+    ≥5 门槛），每周 4 中性 + 4 方向（过 section_power 的门槛）——这两个「各半」靠 `(w + k) % 2` 与
+    WEEKS/TICKERS 都是偶数保证，改形状时要留意。另加三条应被 load_records 滤掉的行——
     样本计数指纹要靠它们证明：读到的是这份库，且三道过滤都生效。"""
     rng = random.Random(20260918)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -314,10 +427,9 @@ def _make_vol_db(path: Path) -> None:
         con.execute("INSERT INTO signal_archive VALUES (?,?,?,?)", (day, tk, "options.iv_current", iv))
 
     d0 = date(2026, 3, 2)                                     # 周一
-    day = d0.isoformat()
-    for w in range(12):
+    for w in range(WEEKS):
         day = (d0 + timedelta(weeks=w)).isoformat()
-        for k in range(8):
+        for k in range(TICKERS):
             add(day, f"T{k}", "neutral" if (w + k) % 2 == 0 else "bullish",
                 100.0 * (1 + rng.gauss(0, 0.05)), 1, 40.0 + 5 * k)
     add(day, "X0", "bullish", 105.0, 1, 0.0)                  # IV=0 是缺失哨兵
@@ -340,17 +452,31 @@ def test_vol_regime_filter_runs_from_a_foreign_cwd(tmp_path):
     assert "就绪度" in r.stdout, "没有一路跑到最后一节（section_power）"
 
 
+def _make_ticker_db(path: Path) -> None:
+    """带表结构、**零行**的库。要点是它**存在**：`find_db()` 在 `PATHS.db` 一级 `os.path.exists` 就返回，
+    走不到第三级的 `glob("/sessions/*/mnt/Alpha Hive/pheromone.db")`（Cowork VM 挂载点）——测试因此不随
+    「这台机器上有没有那个挂载点」而变。（第一版故意不放库、断言「找不到 pheromone.db」，那会在存在
+    该挂载点的环境里读到真库而变红。）零行也能跑完：`report()` 对空组打印「无样本」。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(path)
+    con.execute("""CREATE TABLE predictions (date TEXT, ticker TEXT, direction TEXT, final_score REAL,
+                   return_t7 REAL, correct_t7 INTEGER, checked_t7 INTEGER, ambiguous_t7 INTEGER)""")
+    con.commit()
+    con.close()
+
+
 def test_ticker_winrate_persistence_default_path_reaches_paths(tmp_path):
     home = tmp_path / "home"
-    home.mkdir()                                               # 故意没有 pheromone.db
+    _make_ticker_db(home / "pheromone.db")
 
     r = _run(EXPERIMENTS / "ticker_winrate_persistence.py", [], home, tmp_path)
 
     _assert_bootstrapped(r, "ticker_winrate_persistence.py")
-    # 走过 find_db() 里的惰性 import，且 PATHS.db 落在夹具（不存在）而不是真库——若指向真库这里会是
-    # 「DB: …」。（Cowork VM 的 /sessions/*/mnt 探测在开发机与 CI 上都不存在。）
-    assert "找不到 pheromone.db" in r.stdout, f"stdout 头部：\n{r.stdout[:300]}"
-    assert r.returncode == 1
+    # 走过 find_db() 里的惰性 import，且 `PATHS.db` 解析到了夹具库：脚本会回显它用的库路径——
+    # 若 PATHS 没吃 ALPHA_HIVE_DB_PATH 而指向真库，这里就对不上。
+    assert f"DB: {home / 'pheromone.db'}" in r.stdout, f"stdout 头部：\n{r.stdout[:300]}"
+    assert "方向样本 0" in r.stdout, "夹具是零行库，样本数应为 0"
+    assert r.returncode == 0
 
 
 def test_bear_read_miss_audit_default_root_reaches_paths(tmp_path):

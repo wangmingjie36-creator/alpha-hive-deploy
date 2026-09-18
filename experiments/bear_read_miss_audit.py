@@ -32,7 +32,7 @@ from collections import defaultdict
 # （代码位置，`__file__` 正确。）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-FIX_DATE ="2026-09-18"   # v0.45.288 首个可能生效的扫描日（09-18 14:00 PDT 扫描前上线）
+FIX_DATE = "2026-09-18"   # v0.45.288 首个可能生效的扫描日（09-18 14:00 PDT 扫描前上线）
 KEYS = (("options", "OracleBeeEcho"), ("ml", "RivalBeeVanguard"),
         ("guard", "GuardBeeSentinel"), ("catalyst", "ChronosBeeHorizon"))
 

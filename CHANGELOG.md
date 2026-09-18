@@ -23,37 +23,77 @@
 
 - `experiments/vol_regime_filter.py`（补 `import sys`）、`experiments/ticker_winrate_persistence.py`、
   `experiments/bear_read_miss_audit.py`（补 `import sys`）：在首个仓库根 import 之前加模块层
-  `sys.path.insert(0, <仓库根>)`。内联表达式、不赋给模块级路径常量——`__file__` 用于「代码位置」，用法正确，
-  也不会被 `test_paths_not_frozen_at_import` 当成新增冻结路径。vol 沿用 sweep 的 `Path(__file__).resolve()` 写法，
-  另两个沿用各自文件已有的 `os.path` 惯用法（`realpath`，语义同为跟随符号链接）。
+  `sys.path.insert(0, <仓库根>)`。内联表达式，`__file__` 用于「代码位置」，用法正确。vol 沿用 sweep 的
+  `Path(__file__).resolve()` 写法；另两个文件本来就用 `os.path`、且都没 import `Path`，故用 `os.path.realpath`——
+  与 `.resolve()` 一样跟随符号链接（旧代码里只在 ticker 的 docstring 里出现过 `abspath`，它不跟随，也不是现行写法）。
+- ⚠️ 更正：任务简报给的理由是「不赋给模块级常量，否则会被 `test_paths_not_frozen_at_import` 当成新增冻结路径」——
+  **这个理由对 `experiments/` 不成立**：该守卫的扫描循环显式跳过 `experiments` 与 `tests` 目录（相邻 8 个脚本已有
+  模块级 `ROOT = Path(__file__)…` 且都没登记）。「无需在 `KNOWN` 登记」这个结论仍然正确，错的是理由；内联写法只是沿用 sweep。
 
 ### Added
 
-- `tests/test_experiments_script_bootstrap.py`（19 项）：
+- `tests/test_experiments_script_bootstrap.py`（29 项）：
   - **静态守卫**：AST 扫 `experiments/*.py`，凡 import 仓库根模块的脚本（根目录 `*.py` + 含 `__init__.py` 的包，
     现算、剔除与标准库同名者），必须在**首个**此类 import **之前**、**模块层**（不在函数体内）有
-    `sys.path.insert/append/extend`。惰性 import、「注入晚于 import」「注入只在函数体内」都算违规。
-  - **反向自证**：12 个合成样本（6 违规 + 6 合规）；对每个「现在合规」的**真实**脚本，用 AST 删掉它的注入后守卫必须变红；
+    `sys.path.insert/append/extend`（独立的表达式语句）。位置按（行, 列）比较；import 侧除 `import` / `from … import`
+    外，也认常量字符串实参的 `__import__("x")` / `importlib.import_module("x")`。惰性 import、「注入晚于 import」
+    「注入只在函数体内」都算违规。
+  - **反向自证**：19 个合成样本（9 违规 + 10 合规）；对每个「现在合规」的**真实**脚本，用 AST 把它的注入换成 `pass`
+    后守卫必须变红；变异器对「注入是 if/try/with 块里唯一语句」另有 3 项样本钉住（整行删会留下空块 ⇒ SyntaxError）；
     根模块枚举的正对照（清单为空会让扫描恒绿）。
-  - **真子进程**（cwd 与仓库根无关、清 `PYTHONPATH` 与脚本专属的 `ALPHA_HIVE_PHEROMONE_DB`、`ALPHA_HIVE_*` 全钉到临时目录）：
-    三个脚本各走到自己 import 所在的缺省路径。vol 用合成库 + **样本计数指纹**（96 条有效 + 3 条应被过滤的哨兵行，
-    输出必须是「样本 96 条」），既证明读的是夹具库又证明三道过滤生效；另两个靠回显的 `root=<夹具目录>` /
-    「找不到 pheromone.db」证明 `PATHS.*` 落在夹具而非真库。
+  - **真子进程**（cwd 与仓库根无关、清 `PYTHONPATH` 与脚本专属的 `ALPHA_HIVE_PHEROMONE_DB`、`ALPHA_HIVE_*` 全钉到临时目录、
+    两端钉 UTF-8 不随宿主 locale 变）：三个脚本各走到自己 import 所在的缺省路径。vol 用合成库 + **样本计数指纹**
+    （96 条有效 + 3 条应被过滤的哨兵行，输出必须是「样本 96 条」），既证明读的是夹具库又证明三道过滤生效；
+    bear 靠回显的 `root=<夹具目录>`；ticker 用**带表结构的零行库**，靠回显的 `DB: <夹具>/pheromone.db` 证明
+    `PATHS.db` 落在夹具——库必须**存在**，这样 `find_db()` 在 `PATHS.db` 一级就返回，走不到第三级的
+    `/sessions/*/mnt/…` glob（Cowork VM 挂载点），测试不随「这台机器上有没有那个挂载点」而变。
   - **canary**：一个无注入的脚本在同一套子进程环境里必须 `ModuleNotFoundError`——防 `.pth` / `PYTHONPATH` 泄漏
     让上面三条永远假绿。
 
 ### 验证
 
 - **先红后绿**：修复前 4 红 + 15 绿——4 红是静态扫描与三条真子进程；静态扫描恰好点名这三个脚本（第 77 / 81 / 86 行），
-  三条子进程红在 `ModuleNotFoundError: No module named 'hive_logger'`（不是夹具或断言写错）。修复后 19 项全绿。
+  三条子进程红在 `ModuleNotFoundError: No module named 'hive_logger'`（不是夹具或断言写错）。一审提交时 19 项全绿。
 - 同一 harness 前后对照：`ticker_winrate_persistence`（无参）与 `bear_read_miss_audit`（无 `--root`）由
   `ModuleNotFoundError` 变为各自设计内的输出（「找不到 pheromone.db」/ `root=<临时目录> … 无可用行`，退出码 1 / 3）；
   `bear_read_miss_audit --help` 修前修后都是退出码 0。
-- 相邻守卫 `test_paths_not_frozen_at_import` + `test_experiments_pooled_guard` + `test_changelog_entry_integrity`
-  共 113 项全绿；`ruff` 通过。
-- 全套（在 git worktree 里跑）：**5076 passed**、1 failed、1 skipped、83 deselected、2 xfailed；唯一的红是
+- **先红后绿（二审）**：新增 10 项测试里 6 项在改实现之前是红的（同行注入 1、动态 import 2、变异器空块 3），改完全绿；
+  其余 4 项是新增的合规样本，本来就绿——它们防的是**误报**而不是漏报。
+- 两个经验性论断实测：`LC_ALL=en_US.ISO8859-1` 下 4 项子进程相关测试通过；模拟 Cowork 挂载命中（在子进程里把 `glob.glob`
+  打桩成返回一个假路径）时，旧夹具（无库）会去开那个假路径、`sqlite3.OperationalError`、退出码 1，新夹具（有库）不受影响、
+  输出 `DB: <夹具路径>`、退出码 0。
+- 相邻守卫（`test_paths_not_frozen_at_import` / `test_experiments_pooled_guard` / `test_reads_own_checkout`）与
+  `ruff check .`（全仓，同 CI）通过。
+- 全套（在 git worktree 里跑）：**5086 passed**、1 failed、1 skipped、83 deselected、2 xfailed（369 秒）；唯一的红是
   `TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`（nfp 覆盖剩 77 天、阈值 90 天，日期驱动，
-  干净 main 上就是红的，与本条无关，未动）。本条使收集数恰好 +19（5060 → 5079）。
+  干净 main 上就是红的，与本条无关，未动）。收集数 5060 → 5089，恰好 +29（本文件的 29 项）。
+- **逐条对账**：`-rA` 里 PASSED/FAILED/XFAIL 的节点 ID 与 `--collect-only` 的节点 ID 是同一个集合（各 5089 个，0 缺 0 多）。
+  一审时记的「运行结果合计 5080 比收集数 5079 多 1」由此得到解释：那 1 个 skipped 是 `tests/test_scheduler.py` 的
+  **模块级 skip**（`schedule` 库不可用），它不是被收集的条目，所以是 5089 个条目 + 1 个模块级 skip = 5090 个「结果」。
+
+### 二次检查（`/code-review` high：4 个并行 finder，10 条上报，逐条实测验证）
+
+一审提交（`c1a26f37`）之后又审了一遍。10 条里 9 条已修、1 条评估后未采纳：
+
+- **我自己改坏的一处**：`experiments/bear_read_miss_audit.py` 第 35 行 `FIX_DATE = "…"` 被我改成了 `FIX_DATE ="…"`——用 Edit
+  工具时 new_string 末尾的空格丢了。无运行时影响、ruff 不报，但不该出现在这个提交里；3 个 finder 独立发现，
+  已逐字恢复（与修前该行 `repr` 相同）。
+- **两处不实表述**（「Fixed」一节已更正）：「内联是为了躲 `test_paths_not_frozen_at_import`」（该守卫不扫 `experiments/`）、
+  「沿用各自文件已有的 `realpath` 惯用法」（修前根本没有）。前者原样抄自任务简报，我没有对着扫描代码核。
+- **ticker 测试随环境变**：原断言「找不到 pheromone.db」依赖 `/sessions/*/mnt/…` 不存在；改用零行带表库（见「Added」），实测见「验证」。
+- **变异器**：整行删除在「注入是块里唯一语句」时留下空块 ⇒ SyntaxError，改为换成 `pass`；与别的语句同行的情形显式抛错而不是
+  悄悄改坏——这条保险**在真实文件上响过一次**：`fg_exposure_gate_forward_test.py` 等 3 个文件的注入带行尾注释，判据先误伤了注释，
+  放宽到「行尾允许注释」。检查器与变异器现共用一个 `_module_level_injections`，不再各自定义「什么算注入」。
+- **检查器**：只比行号 ⇒ 同行 `from hive_logger import PATHS; sys.path.insert(…)` 被放过，改比（行, 列）；动态 import 不识别，
+  补认常量字符串实参的 `__import__` / `importlib.import_module`。
+- **子进程输出解码随宿主 locale 变**（Latin-1 下子进程 `UnicodeEncodeError`，被误报成「脚本崩溃」）：两端钉 UTF-8。
+- **夹具**：`N_VALID` 与循环界各写一份、`d0/day` 有死赋值——抽成 `WEEKS, TICKERS`。
+- **数字对不上账**（5080 vs 5079）：逐条对账后得到解释（见「验证」）。
+
+**未采纳**：`_run` 与 `tests/test_experiments_pooled_guard.py` 里的 `_run` 近乎逐字复制——抽共享 helper 要改动另一个无关且通过的
+测试文件；被模仿的那份也有同样的 locale 弱点，本次未动。另有几条低价值候选未列入上报：`sys.stdlib_module_names` 要 Python ≥ 3.10
+（`pyproject.toml` 写 `requires-python >= 3.9`，但 CI 与生产解释器都是 3.11，且仓库已声明 3.9 会因 PEP604 直接崩）；
+「`experiments/_bootstrap.py` 共享注入」（守卫得再学会认它，收益不抵复杂度）；`_root_modules()` 多次 glob（总计毫秒级）。
 
 ### 教训 / 没做 / 边界
 
@@ -64,7 +104,8 @@
 - 守卫**不校验注入的是不是仓库根**，只校验「存在、模块层、在 import 之前」。一次性脚本
   `patch_swarm_results_20260917.py` / `replay_swarm_sequence_20260917.py` 硬编码了主 checkout 路径，
   开发机上有效、别处无效，守卫放行；「注入得对不对」靠真子进程测试，目前只覆盖上面三个。
-- 只认 `sys.path.insert/append/extend` 三种调用；别的写法会红（有意：宁可误报也不放过未识别的形式）。
+- 注入只认 `sys.path.insert/append/extend` 三种调用且须是独立表达式语句，别的写法会红（有意：宁可误报也不放过未识别的形式）；
+  import 侧只认常量字符串实参的动态导入，变量/拼接出来的模块名认不出（这一侧是漏报方向）。
 - 任务简报的范围是 `vol_regime_filter.py` 一个；另外两个是同根因、同一行修法，且守卫的验收条件（「修复后变绿」）
   要求一并修掉，故合并在本条。experiments 脚本不进评分，**不需要世代边界**。
 
