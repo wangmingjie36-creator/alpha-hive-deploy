@@ -5,6 +5,37 @@
 
 ---
 
+## [0.45.280] — 2026-09-18 — Fixed：`mock_stock_data` fixture 签名落后于 `_fetch_stock_data` 真实签名，TypeError 级联炸穿 test_agents.py
+
+`swarm_agents/base.py` 的 `_get_stock_data()` 早就改成
+`_cache._fetch_stock_data(ticker, getattr(self, "_target_date", None))`
+（两个位置参数），但 `tests/conftest.py` 的共享 fixture `mock_stock_data`
+里 `_mock_fetch(ticker)` 只收一个——调用即 `TypeError: takes 1 positional
+argument but 2 were given`，级联炸穿 `TestScoutBeeNova`/`TestBuzzBeeWhisper`/
+`TestGuardBeeSentinel` 等多条依赖该 fixture 的用例。
+
+### Fixed
+
+- `tests/conftest.py::mock_stock_data`：`_mock_fetch(ticker)` 改成
+  `_mock_fetch(ticker, target_date=None)`，与真实签名对齐。
+
+### 验证
+
+- 回退该行单独复现：`TestGuardBeeSentinel::test_guard_reads_pheromone_board`
+  精确重放用户报的 `TypeError`（`ScoutBeeNova`/`BuzzBeeWhisper`/`GuardBeeSentinel`
+  三处级联），确认因果关系。
+- 修复后同一条 + `TestScoutBeeNova::test_publishes_to_board` 单独跑通过，
+  `TypeError` 不再出现；文件其余用例受限于本沙箱出网（`curl: (28) Operation
+  timed out`，yfinance/CBOE/pead_analyzer 等真实网络调用）未能跑全套——
+  该文件整体标 `pytest.mark.integration`（需要真实外部 API，CI 默认排除），
+  这部分留给有正常网络的环境验证。
+- 核对过仓库内其余 `_fetch_stock_data` monkeypatch（`test_bee_details_contract.py`
+  / `test_backfill_date_anchoring.py` / `test_twelve_data_single_fetch.py`
+  / `test_guard_census_eviction.py` 自己的 `stock_stub`），均已是双参数签名，
+  只有这一处共享 fixture 落后。
+
+---
+
 ## [0.45.279] — 2026-09-18 — 占位（进行中：ScoutBee consensus_strength 排行榜淘汰偏差修复，P2）
 
 ## [0.45.278] — 2026-09-18 — 占位（进行中：`run_backup.py` 补 git init 失败 / git 调用异常两个失败分类缺口）

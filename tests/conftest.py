@@ -703,7 +703,7 @@ MOCK_STOCK_DATA = {
 @pytest.fixture
 def mock_stock_data(monkeypatch):
     """Mock yfinance 数据，避免测试中调用外部 API"""
-    def _mock_fetch(ticker):
+    def _mock_fetch(ticker, target_date=None):
         return MOCK_STOCK_DATA.get(ticker, MOCK_STOCK_DATA["NVDA"])
 
     from swarm_agents import cache as _swarm_cache
