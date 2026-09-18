@@ -75,4 +75,7 @@ jobs:
           # --maxfail=0 覆盖 pyproject addopts 里的 `-x`：CI 要一次看全所有失败，
           # 而不是撞到第一个就停（本地开发才需要 `-x` 的快速反馈）。
           # -m 同样覆盖 addopts 里的 "not integration"，在其上追加 not network。
-          pytest -m "not integration and not network" --maxfail=0
+          # -rs 在摘要里列出每条 skip 及**原因**：addopts 只有 `-v`，日志里 skip 只有
+          # 「SKIPPED」一个词、看不到为什么。依赖仓库外文件（编排器脚本、launchd plist）
+          # 的那批测试在 CI 里恒 skip，不靠 -rs 就没人知道它们为什么没跑、跑了多少。
+          pytest -m "not integration and not network" --maxfail=0 -rs

@@ -5,6 +5,53 @@
 
 ---
 
+## [0.45.291] — 2026-09-18 — Changed：CI 的 pytest 加 `-rs`，摘要里列出每条 skip 的原因；⚠️ 顺带发现 `test_data_backup.py` 把伪造记录写进了真实 `~/alpha-hive-data`（**未处理**）
+
+### Changed
+
+- `.github/workflows/tests.yml`：`pytest -m "not integration and not network" --maxfail=0`
+  末尾加 `-rs`，并在命令上方注释里写明理由。
+  **动机**：`pyproject.toml` 的 `addopts` 只有 `-v`，CI 日志里一条 skip 只显示
+  「SKIPPED」一个词、看不到原因。今天几次 CI 的跳过数从 24 涨到 35，要查原因只能
+  在本机复现。依赖仓库外文件（编排器脚本、launchd plist）的那批测试在 CI 里恒 skip，
+  不靠 `-rs` 没人知道它们为什么没跑。
+  **没有**改 `pyproject.toml` 的 `addopts`：那会改变所有人本地的输出，本次只要 CI 可见。
+  **没有**建「编排器 skip 登记表」（曾评估，结论是不做：它只登记不验证、当前无违规可抓、
+  会让每个新编排器测试都触发红灯并多一个跨 session 的撞车点）。
+
+  验证：YAML 解析通过，实际执行的命令为 `pytest -m "not integration and not network"
+  --maxfail=0 -rs`；用空 `HOME` 模拟 CI（编排器/plist 不存在）跑 6 个相关测试文件，
+  摘要里逐条出现 `SKIPPED [n] tests/test_data_backup.py:541: 编排器不在本机（仓库外文件）`
+  这种带文件行号与原因的行。
+
+### ⚠️ 顺带发现，**本条未处理**（需要用户决定）
+
+`tests/test_data_backup.py` 里跑 `run_backup` 的那批测试**会写真实的 `$HOME`**：
+
+- 机制：`data_backup/run_backup.py:195` 的 `--history` 默认值是
+  `Path.home() / "alpha-hive-data" / "logs" / "backup_status_history.jsonl"`，
+  这些测试没有覆盖它；`tests/conftest.py::_isolate_env` 隔离的是 `ALPHA_HIVE_HOME` 等，
+  **不隔离 `HOME`**，`Path.home()` 因此指向真实目录。
+- 实证一（假 `HOME`）：把 `HOME` 指到空目录只跑该文件 ⇒ 产生
+  `alpha-hive-data/logs/backup_status_history.jsonl`，内容是测试造的 7 行
+  （`export/commit/push/init/git_error/git_error` 均 `ok:false`，末行 `done ok:true`）；
+  其余 6 个相关测试文件均无此副作用。
+- 实证二（真实文件，只读检查）：`~/alpha-hive-data/logs/backup_status_history.jsonl`
+  共 112 行、**全部日期为 2026-09-18**，112 = 16 × 7，16 个整块**全部**匹配上述伪造模式，
+  **没有一条真实记录**——每次在本机跑 `test_data_backup.py` 就多追加 7 行
+  （含本 session 自己的多次本地测试）。
+- 后果：这个文件正是 v0.45.284 `backup_continuity.py`「连续 N 天失败/陈旧」检测读的输入。
+  `read_history` 的规则是**同一天任一条 `ok:true` 即判当天健康**（源码 102 行注释：
+  人工重跑会有多条，「成功取任一条」），而测试每次都会写一条 `done ok:true` ⇒
+  **凡是在这台 Mac 上跑过 `test_data_backup.py` 的日子，真实备份失败都会被伪造的成功
+  掩盖**，即本仓头号故障形状「把失败改写成没发生过」。任何现有守卫都没抓到它：仓库根总闸只对
+  仓库根下的内容打指纹，不看数据根 `~/alpha-hive-data`。
+- **本条没有改任何代码、也没有动那个真实文件。** 清理真实文件（先备份再去掉伪造行）
+  与修测试隔离（给这批测试显式传 tmp 的 `--history`，并补一道数据根的指纹守卫）
+  都需要用户确认。
+
+---
+
 ## [0.45.290] — 2026-09-18 — 占位（进行中：experiments 里两个跨世代混算脚本 signal_ic_sweep / final_score_dilution 加默认拒绝护栏 + 报告补注）
 
 ## [0.45.289] — 2026-09-18 — Fixed：`backup_continuity.py:ALPHAHIVE_DIR` 漏登记进 `__file__` 派生白名单，CI 上 `test_no_new_file_derived_paths` 变红
