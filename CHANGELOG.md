@@ -5,6 +5,57 @@
 
 ---
 
+## [0.45.289] — 2026-09-18 — Fixed：`backup_continuity.py:ALPHAHIVE_DIR` 漏登记进 `__file__` 派生白名单，CI 上 `test_no_new_file_derived_paths` 变红
+
+v0.45.286 推送后取到一次真实跑完的 CI（run `35360798518`）：`alpha_hive_mcp` 的
+`ModuleNotFoundError` 已消失，但多出一条**新**失败，与 v0.45.286 无关：
+
+```
+FAILED tests/test_paths_not_frozen_at_import.py::TestFileDerivedSpeciesDoesNotSpread::test_no_new_file_derived_paths
+    - backup_continuity.py:ALPHAHIVE_DIR
+```
+
+### 根因
+
+`backup_continuity.py` 是 v0.45.284（另一 session，Step 14 连续失败检测）新增的文件，
+66–67 行 `ALPHAHIVE_DIR = Path(__file__).resolve().parent` + `sys.path.insert(0, ...)`，
+**照抄 `scan_continuity.py` 的写法**——但没有像后者那样登记进
+`tests/test_paths_not_frozen_at_import.py` 的白名单，于是被子集守卫当成「新增了
+`__file__` 派生路径」。全文件只有这一处用 `ALPHAHIVE_DIR`（仅 `sys.path.insert`，
+即「代码在哪」），按该守卫自己的判据是**合规的代码锚点**，不是路径 bug——
+不需要改 `backup_continuity.py`，也不该改成 `PATHS.home`（那会在测试把
+`ALPHA_HIVE_HOME` 指向 tmp 后 import 不到同目录模块）。
+
+### Fixed
+
+- `tests/test_paths_not_frozen_at_import.py`：把 `("backup_continuity.py", "ALPHAHIVE_DIR")`
+  同时登记进 `TestFileDerivedSpeciesDoesNotSpread.KNOWN`（A 类，`sys.path.insert`）
+  与 `MUST_STAY_FILE_ANCHORED`（防日后被「一刀切」清成 `PATHS.home`）两张表——
+  两张表必须同进同出（`test_both_directions_are_guarded` 要求 `MUST_STAY ⊆ KNOWN`）。
+  顺带把三处随之过期的计数注释更新（「这 12 处」→ 13；`KNOWN` 表头追加
+  「v0.45.289 +1」；`resolve_inside_the_repo` 处「12 项」后补「13 项」）。
+
+### 验证
+
+- `tests/test_paths_not_frozen_at_import.py`：**86 passed**（此前 85，多出的 1 项是
+  `test_code_anchored_paths_resolve_inside_the_repo[backup_continuity-ALPHAHIVE_DIR]`
+  ——它同时核对该锚点真实存在且落在仓库内）；`ruff check` 全过。
+- 反向变异（只改本 worktree、随即 `git checkout` 还原、未提交）：把
+  `backup_continuity.py:66` 临时改成 `ALPHAHIVE_DIR = PATHS.home` ⇒
+  `test_code_anchored_paths_were_not_wrongly_converted` 与
+  `resolve_inside_the_repo[backup_continuity-ALPHAHIVE_DIR]` **两条同时变红**，
+  证明新登记的这一项在「错误清理」方向上有牙，不只是让红灯闭嘴。
+
+### 未处理 / 如实记录
+
+- 本条只处理 CI 上的这一条**新**红灯。`TestCoverageHorizon`（经济日历，等 BLS 发布
+  2027 日程）仍红，见 v0.45.286，未动。
+- 「新增 `__file__` 派生文件却漏登记白名单」这一类，本次没有加任何预防措施——
+  守卫本身已经把它抓出来了（CI 红），漏的是**作者本地没跑到这条测试**。
+  是否要在写新文件的流程里加提醒，留给用户判断。
+
+---
+
 ## [0.45.288] — 2026-09-18 — 占位（进行中：BearBee 读板改走不受 MAX_ENTRIES 淘汰影响的定点索引，bear_bee.py:39/512）
 
 ## [0.45.287] — 2026-09-18 — Fixed：编排器 18 处 `$VAR` 紧跟全角标点，UTF-8 locale 下 `set -u` 让**整个 shell 退出**——统一加花括号
