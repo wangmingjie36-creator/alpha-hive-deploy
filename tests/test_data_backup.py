@@ -7,11 +7,13 @@
 """
 import json
 import sqlite3
+import subprocess
 
 import pytest
 
 from data_backup import export as export_mod
 from data_backup import restore as restore_mod
+from data_backup import run_backup
 from data_backup.scan_secrets import load_known_secrets, scan_directory
 from data_backup.sqlite_readonly import HotJournalError, db_open_uri
 
@@ -177,3 +179,123 @@ class TestSecretScan:
         monkeypatch.setattr(scan_mod, "REAL_KEY_FILES", [str(tmp_path / "does_not_exist")])
         rc = scan_mod.main(["--dir", str(tmp_path)])
         assert rc == 2
+
+
+class TestRunBackupStageReporting:
+    """退出码 2 是 export/commit/push 三种失败共用的（`run_backup.main()` 只把
+    `stage == "secret_scan"` 单独映射成退出码 1，其余一律 2）——这组测试锁定
+    `status.json` 的 `stage` 字段在每条失败路径下都准确，不会被下游（编排器
+    Step 14）误读成另一种失败。对应项目 CLAUDE.md 硬检查项「这个失败，下游
+    怎么知道？」，修复见 CHANGELOG v0.45.269：编排器此前把 rc==2 硬解读成
+    「已提交但推送失败」，导致 export/commit 失败（根本没提交成功）也被误报
+    成已提交。
+
+    不 mock `load_known_secrets` 之外的任何东西时用真实 git（`_init_backup_git_repo`
+    起一个真实的本地仓库/裸仓库），只在需要精确注入某一步失败时才 monkeypatch
+    `_run_git`——这样"提交成功"、"推送失败"这些断言测的是真实 git 行为，不是
+    自己模拟出来的假象。
+    """
+
+    def _synthetic_src(self, tmp_path):
+        """4 个库是 export_mod.DBS 的硬编码范围，缺一个 export_db() 就会
+        FileNotFoundError——测 commit/push 阶段前必须先让 export 真实跑通。"""
+        src = tmp_path / "src"
+        src.mkdir()
+        for db_name in ("pheromone.db", "metrics.db", "sentiment_baseline.db", "hive_predictions.db"):
+            _make_synthetic_db(src / db_name)
+        return src
+
+    def _init_backup_git_repo(self, backup_dir, branch="main"):
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-b", branch], cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+
+    def test_export_failure_reports_export_stage(self, tmp_path, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError("模拟并发写检测命中")
+
+        monkeypatch.setattr(export_mod, "run_export", boom)
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()  # run() 里的 git init 假定 backup_dir 已存在，不会自己创建
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "export"
+        assert status["ok"] is False
+
+    def test_commit_failure_reports_commit_stage(self, tmp_path, monkeypatch):
+        real_run_git = run_backup._run_git
+
+        def fake_run_git(args, cwd):
+            if args and args[0] == "commit":
+                return subprocess.CompletedProcess(args, returncode=1, stdout="", stderr="模拟 commit 失败")
+            return real_run_git(args, cwd)
+
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+        monkeypatch.setattr(run_backup, "_run_git", fake_run_git)
+
+        backup_dir = tmp_path / "backup"
+        backup_dir.mkdir()  # run() 里的 git init 假定 backup_dir 已存在，不会自己创建
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "commit"
+        assert status["ok"] is False
+
+    def test_push_failure_reports_push_stage(self, tmp_path, monkeypatch):
+        """不 mock git——真实起一个没配 remote 的仓库，`git push origin main`
+        会真实失败，验证 run() 把这类失败真的分类成 stage="push"，且提交
+        必须已经真实成功（跟 export/commit 失败不是一回事）。"""
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+
+        backup_dir = tmp_path / "backup"
+        self._init_backup_git_repo(backup_dir)
+
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 2
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "push"
+        assert status["ok"] is False
+        assert status["commit"]["made"] is True
+
+    def test_full_success_reports_done_stage(self, tmp_path, monkeypatch):
+        """真实本地裸仓库模拟远端，走完整 export→scan→commit→push 全流程。"""
+        monkeypatch.setattr(run_backup, "load_known_secrets", lambda *a, **kw: [])
+
+        bare_remote = tmp_path / "remote.git"
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(bare_remote)],
+                        check=True, capture_output=True)
+
+        backup_dir = tmp_path / "backup"
+        self._init_backup_git_repo(backup_dir)
+        subprocess.run(["git", "remote", "add", "origin", str(bare_remote)],
+                        cwd=str(backup_dir), check=True, capture_output=True)
+
+        status_file = tmp_path / "status.json"
+        rc = run_backup.main([
+            "--src", str(self._synthetic_src(tmp_path)),
+            "--backup-dir", str(backup_dir),
+            "--status-file", str(status_file),
+        ])
+        assert rc == 0
+        status = json.loads(status_file.read_text())
+        assert status["stage"] == "done"
+        assert status["ok"] is True
