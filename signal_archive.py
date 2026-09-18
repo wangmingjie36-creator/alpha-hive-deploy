@@ -485,13 +485,178 @@ QUARANTINE: List[Dict] = [
         ),
         "evidence": ("logs/backfill_2026-08-24.log", "logs/rerun_brkb.log"),
     },
+    # ────────────────────────────────────────────────────────────────────────
+    # v0.45.266：v0.45.238 期权快照会话错位普查（11 个坏槽位日，171 份）
+    #
+    # 与 08-24 那条不同：这批**同一天里有的标的坏、有的标的没坏**（跨午夜/盘前
+    # 起跑的扫描只碰到了当时还没收盘的那几只，其余标的当天照常拿到自己的会话），
+    # 故每条都用 `tickers` 精确点名，不做整天隔离，免得连累好数据。
+    #
+    # 判据与 CHANGELOG v0.45.238 一致：`_snapshot_timestamp` 推出的 ET 交易会话
+    # （`cboe_options.session_date_at`）与槽位文件名日期不同，即该份快照装的是
+    # **前一交易会话**的期权链。2026-09-15 用同一判据对 `cache/` 里这 11 天的
+    # 快照重新逐份判定（不是凭 CHANGELOG 的日份摘要去猜标的），171 份全部复现，
+    # 与 CHANGELOG 报的总数一致；09-03/09-09 两天另有当日日志佐证（24/29 只命中）。
+    # 五类信号沿用 08-24 那条的范围（不含 iv_rank/iv_percentile/iv_rank_is_real——
+    # 这两者是否同等受损**未验证**，留待日后需要时再评估，不在此处扩大隔离面）。
+    #
+    # ⚠️ 同 08-24：期权接口只有实时快照、无历史 ⇒ 这些标的当天的真实期权观测
+    # **永久丢失**，不可补，只能缺失。
+    {
+        "date": "2026-06-10",
+        "tickers": ("AMZN", "BILI", "CRCL", "META", "MSFT", "NVDA", "QCOM",
+                    "RKLB", "TEST", "TSLA", "VKTX"),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "v0.45.238 期权快照会话错位：跨午夜/盘前起跑的扫描把前一交易会话的"
+            "期权链写进了当日槽位。11/11 份快照复核为陈旧（当日无一只正常）。"
+        ),
+        "evidence": ("CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
+    {
+        "date": "2026-07-08",
+        "tickers": ("NVDA",),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "同上机制。10 份快照里仅 NVDA 一只陈旧（其余 9 只当日照常拿到自己的会话），"
+            "故只隔离 NVDA。"
+        ),
+        "evidence": ("CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
+    {
+        "date": "2026-07-15",
+        "tickers": ("AMZN", "BILI", "CRCL", "META", "MSFT", "NVDA", "QCOM",
+                    "RKLB", "TSLA", "VKTX"),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "v0.45.238 期权快照会话错位：跨午夜/盘前起跑的扫描把前一交易会话的期权链"
+            "写进了当日槽位。10/10 份快照复核为陈旧（当日无一只正常）。"
+        ),
+        "evidence": ("CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
+    {
+        "date": "2026-07-17",
+        "tickers": ("AMZN", "BILI", "CRCL", "META", "MSFT", "NVDA", "QCOM",
+                    "RKLB", "TSLA", "VKTX"),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "v0.45.238 期权快照会话错位：跨午夜/盘前起跑的扫描把前一交易会话的期权链"
+            "写进了当日槽位。10/10 份快照复核为陈旧（当日无一只正常）。"
+        ),
+        "evidence": ("CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
+    {
+        "date": "2026-07-22",
+        "tickers": ("AMZN", "BILI", "CRCL", "META", "MSFT", "NVDA", "QCOM",
+                    "RKLB", "TSLA", "VKTX"),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "v0.45.238 期权快照会话错位：跨午夜/盘前起跑的扫描把前一交易会话的期权链"
+            "写进了当日槽位。10/10 份快照复核为陈旧（当日无一只正常）。"
+        ),
+        "evidence": ("CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
+    {
+        "date": "2026-07-23",
+        "tickers": ("AMZN", "BILI", "CRCL", "META", "MSFT", "NVDA", "QCOM",
+                    "RKLB", "TSLA", "VKTX"),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "v0.45.238 期权快照会话错位：跨午夜/盘前起跑的扫描把前一交易会话的期权链"
+            "写进了当日槽位。10/10 份快照复核为陈旧（当日无一只正常）。"
+        ),
+        "evidence": ("CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
+    {
+        "date": "2026-07-24",
+        "tickers": ("AMZN", "BILI", "CRCL", "META", "MSFT", "NVDA", "QCOM",
+                    "RKLB", "TSLA", "VKTX"),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "v0.45.238 期权快照会话错位：跨午夜/盘前起跑的扫描把前一交易会话的期权链"
+            "写进了当日槽位。10/10 份快照复核为陈旧（当日无一只正常）。"
+        ),
+        "evidence": ("CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
+    {
+        "date": "2026-08-11",
+        "tickers": ("ABBV", "AMC", "AMZN", "BILI", "COST", "CRCL", "CRM", "CVX",
+                    "DE", "DELL", "ENPH", "JNJ", "META", "MSFT", "MU", "NEE",
+                    "NFLX", "NVDA", "QCOM", "RKLB", "SNOW", "T", "TMO", "TMUS",
+                    "TSLA", "VKTX", "VZ", "WMT", "XOM"),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "v0.45.238 期权快照会话错位：跨午夜/盘前起跑的扫描把前一交易会话的期权链"
+            "写进了当日槽位。29/29 份快照复核为陈旧（当日无一只正常）。"
+        ),
+        "evidence": ("CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
+    {
+        "date": "2026-08-14",
+        "tickers": ("ABBV", "AMC", "AMZN", "BILI", "COST", "CRCL", "CRM", "CVX",
+                    "DE", "DELL", "ENPH", "JNJ", "META", "MSFT", "NEE", "NFLX",
+                    "NVDA", "RKLB", "SNOW", "T", "TMO", "TMUS", "TSLA", "VKTX",
+                    "VZ", "WMT", "XOM"),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "v0.45.238 期权快照会话错位：跨午夜/盘前起跑的扫描把前一交易会话的期权链"
+            "写进了当日槽位。27/29 份快照复核为陈旧，MU/QCOM 当日正常，不隔离。"
+        ),
+        "evidence": ("CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
+    {
+        "date": "2026-09-03",
+        "tickers": ("ABBV", "AMC", "AMZN", "BILI", "BRK-B", "COST", "CRCL",
+                    "CRM", "CVX", "DE", "DELL", "JNJ", "META", "MSFT", "MU",
+                    "NFLX", "NVDA", "QCOM", "RKLB", "T", "TSLA", "VKTX", "VZ", "XOM"),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "同上机制，本条另有当日日志佐证（CHANGELOG v0.45.238：命中 42 次 / "
+            "写入 6 次）。24/30 份快照复核为陈旧，ENPH/NEE/SNOW/TMO/TMUS/WMT "
+            "当日正常，不隔离。"
+        ),
+        "evidence": ("logs/2026-09-03.log", "CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
+    {
+        "date": "2026-09-09",
+        "tickers": ("ABBV", "AMC", "AMZN", "BILI", "BRK-B", "COST", "CRCL",
+                    "CRM", "CVX", "DE", "DELL", "ENPH", "JNJ", "META", "MU",
+                    "NEE", "NFLX", "NVDA", "QCOM", "RKLB", "SNOW", "T", "TMO",
+                    "TMUS", "TSLA", "VKTX", "VZ", "WMT", "XOM"),
+        "signals": ("options.iv_current", "options.put_call_ratio",
+                    "options.gamma_exposure", "options.total_oi", "bear.options_bear"),
+        "reason": (
+            "同上机制，本条另有当日日志佐证（CHANGELOG v0.45.238：命中 45 次 / "
+            "写入 1 次）。29/30 份快照复核为陈旧，MSFT 当日正常，不隔离。"
+        ),
+        "evidence": ("logs/2026-09-09.log", "CHANGELOG.md#v0.45.238", "CHANGELOG.md#v0.45.266"),
+    },
 ]
 
 
-def is_quarantined(date: str, signal: str) -> bool:
-    """该 (日期, 信号) 是否在隔离名单内。入库与分析都应先问这一句。"""
+def is_quarantined(date: str, ticker: str, signal: str) -> bool:
+    """该 (日期, 标的, 信号) 是否在隔离名单内。入库与分析都应先问这一句。
+
+    v0.45.266：加 `ticker` 参数——2026-08-24 那次污染是全体标的一起中招，
+    但 v0.45.238 的期权快照会话错位普查显示同一天可能只有部分标的陈旧
+    （例：2026-09-03 只有 24/30 只）。条目缺 `tickers` 键 ⇒ 对当天全部标的
+    生效（08-24 那条的既有语义，未改）；给了 `tickers` 就只挡白名单内的标的。
+    """
     for q in QUARANTINE:
-        if q["date"] == date and signal in q["signals"]:
+        if q["date"] != date or signal not in q["signals"]:
+            continue
+        tickers = q.get("tickers")
+        if tickers is None or ticker in tickers:
             return True
     return False
 
@@ -554,7 +719,7 @@ def _rows_for(swarm_results: Dict, date: str, only: Optional[frozenset] = None) 
                 continue
             # v0.45.26：隔离名单在**入库口**拦截，而不是在分析时过滤——
             # 后者会让每个下游都得记得过滤一次，漏一个就前功尽弃。
-            if is_quarantined(date, sig):
+            if is_quarantined(date, ticker, sig):
                 continue
             rows.append((date, ticker, sig, val))
     return rows
