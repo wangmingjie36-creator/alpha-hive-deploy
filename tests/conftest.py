@@ -584,8 +584,49 @@ def _pp_state_digest(path):
         return "MISSING"
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _real_paper_portfolio_state_dir():
+    """生产 `paper_portfolio_state/` 的真身——在**任何 function 级隔离动手之前**求值一次（v0.45.303）。
+
+    事故：`_isolate_paper_portfolio_state` 原先用 `_pp.STATE_DIR` 当「真身」，可 `STATE_DIR` 是
+    `paper_portfolio` 的 **import 期常量**（`_base_dir()` 读 `PATHS.home` ⇒ `ALPHA_HIVE_HOME`）。
+    若本进程里它的**首次导入**恰好发生在那个 function 级夹具内——此刻 `_isolate_env` 已把
+    `ALPHA_HIVE_HOME` 指向 tmp——`STATE_DIR` 就被绑成沙箱，「真身」与新建的沙箱成了同一个目录：
+    ① 测试往沙箱写任何状态文件都被误报「写到了生产」；② 更糟的是守卫**名义上在、实际盯的是沙箱自己**，
+    真写穿生产它也看不见。整套/整文件跑不触发（约 10 个模块顶层就导入 `paper_portfolio`，收集期
+    环境还是真的），只在「单条/子集 + 夹具内首次导入」时露出——**依赖导入顺序**。
+
+    修法：真身不再从 `paper_portfolio` 读，而在**会话开始时**由生产自己的解析器 `PATHS.home` 求一次。
+    为什么放在会话级夹具而不是别处：
+      · 不能放 conftest 顶层 / `pytest_configure`——那里 import `hive_logger` 会改变 v0.45.239
+        日志隔离守卫所依赖的时序（见 `pytest_configure` docstring 末句）；
+      · pytest 保证**高 scope 夹具先于低 scope 夹具实例化**，故它早于 function 级 `_isolate_env`
+        改环境变量——这靠的是 scope 语义，不是夹具名字母序的实现巧合。
+    为什么用 `PATHS.home` 而不是「仓库根」（`__file__` 锚点）：状态目录是**数据**，跟 `ALPHA_HIVE_HOME`
+    走（数据根迁移阶段 5 后指向 `~/alpha-hive-data`）；拿代码锚点推它，迁移后守卫会静默盯着旧路径。
+    `PATHS.home` 是纯读（不建目录），此处不会给生产目录增加任何写入。
+
+    **一致性自检**：若收集期已有人导入了 `paper_portfolio`（此刻没有任何测试动过它，
+    `STATE_DIR` 还是收集期真环境下的 import 期值），它必须与这里求得的一致——否则「本夹具对真身的推导」
+    与「`paper_portfolio` 自己的推导」漂移了（例如有人把状态目录改名/迁走），守卫在盯过期路径。
+    漂移就在这里红，而不是让守卫悄悄失明。未被收集期导入时无从比较（不假装比较过），
+    该情形由 `tests/test_paper_portfolio_guard_identity.py` 在子进程里正面核对。
+    """
+    from hive_logger import PATHS
+    real = pathlib.Path(PATHS.home) / "paper_portfolio_state"
+    imported = sys.modules.get("paper_portfolio")
+    if imported is not None:
+        assert imported.STATE_DIR == real, (
+            f"守卫对「生产状态目录」的推导与 paper_portfolio 自己的推导不一致：\n"
+            f"  本夹具（PATHS.home / 'paper_portfolio_state'）= {real}\n"
+            f"  paper_portfolio.STATE_DIR（收集期 import 期值）  = {imported.STATE_DIR}\n"
+            "守卫盯的是过期路径 ⇒ 真写穿生产它也看不见。改 `_real_paper_portfolio_state_dir` "
+            "使之与 `paper_portfolio.STATE_DIR` 的定义同步（或反之），不要在这里放行。")
+    return real
+
+
 @pytest.fixture(autouse=True)
-def _isolate_paper_portfolio_state(tmp_path, monkeypatch):
+def _isolate_paper_portfolio_state(tmp_path, monkeypatch, _real_paper_portfolio_state_dir):
     """把 paper_portfolio 的四个状态文件 + SNAPSHOT_DIR 全局重绑到 tmp，并核对状态文件真身没被动过。
 
     v0.45.104。事故：一个只想验「run_for_date 入口会拒绝错模式」的测试，
@@ -614,13 +655,19 @@ def _isolate_paper_portfolio_state(tmp_path, monkeypatch):
     常量，所以漏绑它 = 这些测试在全套里必然伸手摸生产快照目录。
     没有 SNAPSHOT_DIR 的测试自己按需要 `monkeypatch.setattr(_pp, "SNAPSHOT_DIR", ...)`
     覆盖即可（`test_fg_exposure_gate_forward_test.py` 已经这么做）。
+
+    v0.45.303：「真身」**不再读 `_pp.STATE_DIR`**，改吃会话级夹具 `_real_paper_portfolio_state_dir`。
+    `STATE_DIR` 是 import 期常量，`paper_portfolio` 若首次导入就发生在本夹具内（`_isolate_env` 已把
+    `ALPHA_HIVE_HOME` 指向 tmp），它会被冻成沙箱路径，`real` 与下面的 `sandbox` 成了同一个目录——
+    守卫盯着沙箱自己，单条测试写沙箱被误报为写穿生产，真写穿生产反而看不见。
+    ⚠️ 别改回 `_pp.STATE_DIR`：回归测试 `tests/test_paper_portfolio_guard_identity.py` 会红。
     """
     try:
         import paper_portfolio as _pp
     except Exception:  # pragma: no cover - 模块不可得时无需隔离
         return
 
-    real = {n: _pp.STATE_DIR / n for n in _PP_STATE_FILES}
+    real = {n: _real_paper_portfolio_state_dir / n for n in _PP_STATE_FILES}
     before = {n: _pp_state_digest(p) for n, p in real.items()}
 
     sandbox = tmp_path / "paper_portfolio_state"
