@@ -36,16 +36,32 @@ class ThesisBreakConfig:
 
     @classmethod
     def get_coverage_info(cls) -> Dict:
-        """返回失效条件覆盖统计"""
-        data = cls._load()
-        all_tickers = data.get("_all_tickers", [])
-        covered = [t for t in all_tickers if cls.get_breaks_config(t)]
+        """返回失效条件覆盖统计。分母 = `config.WATCHLIST`（网站 / 每日扫描池），调用时读。
+
+        v0.45.217：分母原本是配置文件里手抄的 `_all_tickers`（24 只）——实为
+        2026-08-25 之前 `config.WATCHLIST` 的旧快照（13 只现役 + AMD/AMGN/BIIB/REGN/
+        PLUG/RUN/ICLN/SQ/COIN/MSTR/UPST 11 只早已降级候补池）。网站 30 只里 17 只
+        永远不进统计，不在网站上的 11 只反倒算「已覆盖」，报 24/24=100%，无人变红。
+
+        ⚠️ 分母**不能**从配置里标的块的键派生：块 = WATCHLIST 全部 + 部分候补池
+        （v0.45.217 时 41 = 30 + 11；候补池的块 `--extended-pool` 时在用，别删）。拿块的键当分母 ⇒ covered 恒等于
+        total，覆盖率成了恒 100% 的恒真式，唯一该报的「谁缺失效条件」永远报不出来。
+        分母必须来自独立于块的来源。
+
+        读者（v0.45.217 普查）：**生产零调用点**，仓库外亦零。扫描期的覆盖观测点是
+        `alpha_hive_daily_report._attach_thesis_breaks`（按实际扫描的标的计数）与
+        日报 7.5 节的「无失效条件配置」清单；本函数是配置侧的静态视图。
+        守卫：`tests/test_thesis_breaks_coverage_universe.py`。
+        """
+        from config import WATCHLIST    # 名单唯一真相；函数内 import，不在模块级冻一份
+        universe = list(WATCHLIST)
+        covered = [t for t in universe if cls.get_breaks_config(t)]
         return {
-            "total": len(all_tickers),
+            "total": len(universe),
             "covered": len(covered),
-            "coverage_pct": round(len(covered) / len(all_tickers) * 100),
+            "coverage_pct": round(len(covered) / len(universe) * 100),
             "covered_tickers": covered,
-            "missing_tickers": [t for t in all_tickers if t not in covered],
+            "missing_tickers": [t for t in universe if t not in covered],
         }
 
     # 向后兼容: 允许测试重置缓存

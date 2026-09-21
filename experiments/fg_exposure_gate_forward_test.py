@@ -74,6 +74,15 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
       未确认 → 保持默认关闭，登记结案，勿再拿这轮样本内证据提议打开。
 附带  （不参与判定）敞口门实际调整过的仓位笔数与调整方向分布、这些笔已平仓部分的
       已实现盈亏对比（仅描述，非统计检验）。
+      【事后修订 v0.45.300，2026-09-21 —— 让实现对齐上面「盲化」一条，不改任何规则】
+      这条附带统计原先在 `evaluate()` 里于 `decide()` **之前**就写进了返回字典，未出结论时也会随
+      `--json` 或直接调用 `run()` 带出（`decide()` 的 docstring 早写明「盲化在数据结构上，不在打印上」，
+      `evaluate()` 自己没守）。它不是无害的描述：平仓盈亏 = `size_usd × net_pct` 与仓位严格成正比，
+      门只缩仓、不动方向和出场，所以 B 在每笔被调整单上的盈亏恒为 A 的一半，`pnl_sum_b − pnl_sum_a`
+      就是这部分效应的方向与大小——正是「盲化」要藏的东西。现在只在出结论（confirmed / not_confirmed）
+      时才放进返回字典；样本内（`--insample`，本就不盲化）不变。信息只减不增，不影响任何判定。
+      修订时窗口内 F&G 读数为 26/29/29（都在 25~75 之间），门从未触发、B ≡ A，该字段此前必然是
+      0 笔 / 0.00——没有效应量经这个出口泄漏过。
 
 样本内复核：`--insample` 在 `FORWARD_START` 之前的历史窗口上跑同一套 A/B 重放
 （此时 A 的自证对象是"整个历史"而非"前瞻窗口"）。**它就是生成假设的那份数据，
@@ -482,7 +491,10 @@ def decide(weeks: List[Dict], looks=LOOKS) -> Dict:
 # ── 编排 ──────────────────────────────────────────────────────────────────────
 def _adjusted_trades_summary(a_closed: List[Dict], b_closed: List[Dict],
                              since: str, before: str) -> Dict:
-    """附带统计（不参与判定）：哪些笔的仓位大小被敞口门改了，改完已平仓的那部分盈亏对比。"""
+    """附带统计（不参与判定）：哪些笔的仓位大小被敞口门改了，改完已平仓的那部分盈亏对比。
+
+    ⚠️ 这是效应量（B 的盈亏恒为 A 的一半 ⇒ 两者之差即效应的方向与大小），`evaluate()` 只许在
+    **出结论之后**（或样本内）把它放进返回字典，见文件头「事后修订 v0.45.300」。"""
     a_by_key = {(t["ticker"], t["entry_date"]): t for t in a_closed if since <= t["entry_date"] < before}
     b_by_key = {(t["ticker"], t["entry_date"]): t for t in b_closed if since <= t["entry_date"] < before}
     # "被调整"的判据：同一笔（ticker, entry_date）的建仓市值（shares × entry_price）在
@@ -544,15 +556,20 @@ def evaluate(dates: List[str], since: str, before: str, sandbox_root: Path,
 
     weeks = weekly_deltas(a["equity"], b["equity"])
     out["weeks_available"] = len(weeks)
-    out["adjusted_trades"] = _adjusted_trades_summary(a["closed"], b["closed"], since, before)
 
     if insample:  # 样本内不盲化、不走检视：它是生成假设/自检机制的数据
         return {**out, "status": "insample",
+                "adjusted_trades": _adjusted_trades_summary(a["closed"], b["closed"], since, before),
                 "stats_all_weeks": one_sided_greater_than_zero([w["delta"] for w in weeks]) if weeks else None,
                 "weekly_deltas": weeks}
 
     verdict = decide(weeks)
     out.update(verdict)
+    # 盲化在数据结构上（v0.45.300）：附带的「被调整并已平仓的已实现盈亏对比」是效应量，只在出结论时
+    # 才放进返回字典。此前它在 `decide()` 之前就写进 `out`，未到检视点也会随 `--json` / 直接调用
+    # `run()` 带出——与 `decide()` 自己「未到结论时返回值里不含任何效应量」的约定矛盾。
+    if verdict["status"] in ("confirmed", "not_confirmed"):
+        out["adjusted_trades"] = _adjusted_trades_summary(a["closed"], b["closed"], since, before)
     return out
 
 
