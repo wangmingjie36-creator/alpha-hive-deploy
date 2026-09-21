@@ -894,13 +894,17 @@ class TestRetiredDimensions:
         """把事故机制钉成算术，防止将来有人只修其中一个就当修好了。
 
         ① 下限：锚点 0 时旧合并盒是空区间；② 上限：三个活维度的上限之和 < 1。
-        若这条红了，说明 WEIGHT_CLAMPS 被改过——先确认冻结逻辑还需不需要，别直接改断言。
+        **用事故当时的字面量，不读 wo.WEIGHT_CLAMPS**：将来有人为三维时代重设上限（v0.45.295
+        的 CHANGELOG 就建议过），这条不该因此变红——它记的是「当时为什么不可行」，
+        「现在还需不需要冻结」由 test_clamp_shifts_survives_production_shaped_anchor 与变异测试负责。
         """
-        shift = wo.MAX_SHIFT_PP / 100.0
-        lo_c, hi_c = wo.WEIGHT_CLAMPS["signal"]
-        legacy = (max(lo_c, 0.0 - shift), min(hi_c, 0.0 + shift))
-        assert legacy[0] > legacy[1], f"旧公式在锚点 0 上应给出空区间，实为 {legacy}"
-        assert sum(wo.WEIGHT_CLAMPS[k][1] for k in _LIVE3) < 1.0, \
+        legacy_clamps = {"signal": (0.15, 0.40), "catalyst": (0.10, 0.25), "sentiment": (0.10, 0.30),
+                         "odds": (0.08, 0.25), "risk_adj": (0.10, 0.25)}
+        shift = 0.10   # MAX_SHIFT_PP=10.0
+        lo_c, hi_c = legacy_clamps["signal"]
+        legacy_box = (max(lo_c, 0.0 - shift), min(hi_c, 0.0 + shift))
+        assert legacy_box[0] > legacy_box[1], f"旧公式在锚点 0 上应给出空区间，实为 {legacy_box}"
+        assert sum(legacy_clamps[k][1] for k in _LIVE3) < 1.0, \
             "三个活维度的旧上限之和应 < 1（即便下限修好也凑不到 sum=1）"
 
     def test_merge_bounds_freezes_retired_and_frees_live_caps(self):
@@ -1118,18 +1122,18 @@ class TestWritePreservesInlineComments:
         assert "# OracleBeeEcho" in text, "现有块里找不到该维度那行时，才退回通用文案"
         assert abs(wo.read_current_weights()["odds"] - _W["odds"]) < 1e-4
 
-    def test_real_config_zero_weight_comments_survive_apply(self, sandbox):
-        """对**真实 config.py 的副本**：归零形状下 `--apply` 的写入不许抹掉逐维注释。
+    def test_real_config_comments_survive_apply(self, sandbox):
+        """对**真实 config.py 的副本**：`--apply` 的写入不许抹掉逐维注释（含归零决策的理由）。
 
-        动态取「写入前每个维度数值之后的内容」再与写入后比，不写死注释文字——
-        config 里的措辞将来可以改，不该让这条测试变成定时炸弹。
+        动态取「写入前每个维度数值之后的内容」再与写入后比，不写死注释文字，
+        **也不要求 config 此刻恰好有归零维度**——config 里的措辞与权重将来都可以合理地改，
+        不该让这条测试变成定时炸弹（归零形状的写入已由 stub 版 main() 测试覆盖）。
         """
         import re
         import config
         real = open(config.__file__, encoding="utf-8").read()
         wo.CONFIG_PATH.write_text(real, encoding="utf-8")
         anchor = wo.read_current_weights()
-        assert wo.retired_dims(anchor), "夹具自证：真实 config 应带有归零维度"
         new = wo.clamp_shifts(anchor, {"signal": .2, "catalyst": .1, "sentiment": .4,
                                        "odds": .2, "risk_adj": .1})
         assert any(abs(new[k] - anchor[k]) > 0.01 for k in new), "夹具自证：必须真的有数值变化"
