@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.301] — 2026-09-21 — 占位（进行中：删掉 test_paths_not_frozen_at_import 里一行 F401 盲区下的死 import subprocess）
+
 ## [0.45.300] — 2026-09-21 — 占位（进行中：收紧 `fg_exposure_gate_forward_test.py` 前瞻结果里的 `adjusted_trades` 盲化泄漏——未出结论时不再把 A/B 已实现盈亏对比放进返回字典）
 
 ## [0.45.299] — 2026-09-21 — Fixed：v0.45.295/298 独立审查后续——`read_current_weights` 静默回退会让归零维度被 `--apply` 写回非零；`health_check` 对被阻断的周诊断仍报 ok；单维度退役时过度解除上限；`--force` 测试的「未写入」断言是空的；Added：闸 2 结果入审计（`pool_ok`）
