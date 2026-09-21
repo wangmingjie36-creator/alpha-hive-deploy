@@ -5,7 +5,55 @@
 
 ---
 
-## [0.45.295] — 2026-09-20 — 占位（进行中：weekly_optimizer 的 WEIGHT_CLAMPS 与归零维度结构矛盾，每周诊断死在两道闸之前）
+## [0.45.295] — 2026-09-20 — Fixed：`weekly_optimizer` 的 `WEIGHT_CLAMPS` 与归零维度结构矛盾，每周诊断死在两道闸之前（连续两周）；修完盒子后闸 1 会换个理由恒红，一并修；Added：对真实 config 的可行性观测点 + `main()` 不可行路径端到端测试
+
+**现象**：v0.45.172 把 signal / risk_adj 归零之后，定时任务（09-14、09-20 两次）每次都在 `clamp_shifts` 抛
+`InfeasibleBoundsError("维度 signal=0.100000 越界 [0.150000, 0.100000]")`。`main()` 的 except 分支在闸 1/闸 2 **之前**
+`return`，退出码 0 ⇒ 只读诊断整份丢失，没有任何东西变红。审计记录还是错的：只读运行被记成
+`action:"optimize", dry_run:false`（`dry_run=args.dry_run`，而默认只读运行并不传 `--dry-run`）。
+
+**根因（两个互相独立的结构矛盾，光修一个仍然凑不到 sum=1）**：
+1. 下限：`WEIGHT_CLAMPS` 里 signal ≥ 0.15、risk_adj ≥ 0.10 够不着 0。`merge_bounds` 以 config 的 0.0 为锚点，
+   signal 的盒变成 `[max(0.15,−0.10), min(0.40,+0.10)] = [0.15, 0.10]`——空区间。
+2. 上限：三个活维度的旧上限之和 0.25+0.30+0.25 = **0.80 < 1**。
+   聚合预检 `Σlo=0.95 ≤ 1 ≤ Σhi=1.00` 恰好压线放行，只被事后的 `assert_feasible` 抓到、报一句读不出原因的「越界」。
+
+**为什么三次出事（v0.43.3 `_log` 未定义、审计标签、这次）都没有测试红**：`TestProjectionInvariants` 的锚点全是
+0.10~0.25 之间的合成值，生产锚点 `[0,.332,.325,.343,0]` 在夹具里不可达；`test_infeasible_handler_can_log` 是**手抄**
+except 分支来测的，从没真的走过 `main()` 那一支。
+
+**改动**（`weekly_optimizer.py`）：
+- `retired_dims(anchor)`（新）：config 权重为 0 的维度 = 已被显式退役。清单从 config 派生、不另存一份（另存即第二份真相）。
+- `merge_bounds`：退役维度冻结为 `(0,0)`（优化器只能冻结、不能复活——`acc/Σacc` 本就表达不了零）；只要有维度退役，
+  活维度的**绝对上限不再适用**，单次 ±`MAX_SHIFT_PP` 仍是运行时护栏、下限照旧。**没有退役维度时与此前逐位相同**（随机 200 组锁住）。
+- `project_to_feasible`：前置检查先点名单维空区间（`lo > hi`），不再靠事后 `assert_feasible`。
+- `bootstrap_validate(…, anchor=None)`：**有退役维度时**每次重采样也过同一道 `clamp_shifts`，CI 才是同一个估计量的抽样分布
+  （v0.45.144 定下的原则）。修盒子之后实测闸 1 对**五维全部 🛑**：提议（活维度 ≈0.33、退役维度 0）去比不带约束的 CI
+  （各在 ≈0.2 附近）永远出界；同一份数据把未投影的原始目标送进去 `stable=True` ⇒ 与数据无关，是又一个恒红。
+- `main()`：不可行分支**不再 return**——闸照跑（此时验原始 WLS 目标）；不可行时绝不写入，`--apply --force` 也覆盖不了；
+  审计 `action/dry_run` 走正常路径；不可行时不打「系统稳定」（那是与事实相反的话）。
+
+**实测**（真实快照 + 真实 `pheromone.db`，1110 个 T+7 样本，`HISTORY_FILE` 指向临时文件不污染生产审计）：
+修前 `infeasible_bounds` 死在闸前 → 修后闸 1 ✅（5 个随机种子全过）、闸 2 ✅；提议 catalyst −0.5pp / sentiment +1.0pp /
+odds −0.4pp，均 < `MIN_CHANGE_PP`。审计记录 `action:diagnose, dry_run:true, bootstrap_stable:true`。
+
+**验证**：新增 13 条测试（`test_weekly_optimizer.py` 11 条 + `test_weekly_optimizer_bootstrap_decay.py` 2 条）。
+含**观测点** `test_real_config_is_feasible_for_the_optimizer`——直接读真实 `config.EVALUATION_WEIGHTS`，config 被改成优化器
+投影不了的形状时立刻红，不必等周日 cron。**9 个变异真跑全部被抓住**（冻结判据恒空 / 只冻结不解上限 / 去掉空区间检查 /
+闸 1 不逐次投影 / 不可行分支复原 return / `--force` 可写 / 审计 dry_run 误用 / 闸 1 恒放行 / 不可行时打「系统稳定」），
+文件哈希还原核对一致；`--force` 那条另做了单独变异。相关 315 条 + ruff 全绿。
+全量套件 **5097 passed**；另有 2 类失败**均与本次无关**（已逐条核实，未改动）：
+`test_economic_calendar::TestCoverageHorizon`（CPI/NFP 日历只覆盖到 12 月、剩 81/75 天 < 90 天阈值——设计上就该定期变红，
+需去 BLS 抄新日程）；`test_options_analyzer::TestGammaCalendarUsesFullExpiryView` 2 条（写死 `expiry="2026-09-18"` 当「3 天后」，
+被测代码读真实今天，09-19 起必红——定时炸弹测试）。
+
+**⚠️ 需要知道的一个取舍**：活维度的绝对上限（catalyst 0.25 / sentiment 0.30 / odds 0.25，五维时代的「份额预算」）在有维度退役后
+**不再适用**——它们三个加起来就 < 1，与「三维凑 sum=1」互斥，而 config 自己（0.332/0.343）本来就在上限之上。
+若想为三维时代重设上限，应在 `WEIGHT_CLAMPS` 里显式重写，并同步 `merge_bounds` 的冻结分支。
+
+**没做**：① 退出码仍为 0（不可行现在有审计 `skip_reason` + stdout + 观测点测试三处可见，未改退出语义）；② 定时任务
+`~/.claude/scheduled-tasks/alpha-hive-weekly-optimizer/SKILL.md` 在仓库外，未动（它仍写「skip_reason 里会有 bootstrap_unstable…」，
+只读运行里 `skip_reason` 恒为 `read_only_default`，闸状态应看 `bootstrap_stable` 字段与 stdout）。
 
 ## [0.45.294] — 2026-09-18 — Fixed：experiments 三个脚本缺 `sys.path` 注入，按文档运行即 `ModuleNotFoundError`；Added：静态守卫 + 真子进程测试
 

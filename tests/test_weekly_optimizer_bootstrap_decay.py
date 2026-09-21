@@ -229,3 +229,62 @@ def test_mutation_removing_bootstrap_decay_breaks_centring(wired, monkeypatch):
         "说明中心性断言没有判别力，先修测试再谈修代码"
     )
     assert bs["stable"] is False, "口径不一致时闸门本应报不稳健"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# C. 退役维度下的闸 1（v0.45.295）
+# ══════════════════════════════════════════════════════════════════════
+#
+# 事故形状：盒子修好之后，闸 1 对五个维度**全部**出界，与数据无关——
+# 提议是「活维度 ≈0.33、退役维度 0」，拿去比不带约束的估计量的 CI（五维各在
+# ≈0.2 附近）。同一份数据把**未投影**的原始目标送进去 `stable=True`。
+# 闸恒红，比「死在闸前」只好一点点：仍然没有信息量。
+# 修法与 v0.45.144 同一原则：CI 必须是**同一个估计量**的抽样分布——
+# 有退役维度时，每次重采样也过同一道 clamp_shifts。
+
+_RETIRED_ANCHOR = {"signal": 0.0, "catalyst": 0.332, "sentiment": 0.325,
+                   "odds": 0.343, "risk_adj": 0.0}
+
+
+def test_retired_regime_gate_uses_projected_bootstrap(wired):
+    point = _point_estimate(wired["snaps"], wired["now"])
+    proposal = wo.clamp_shifts(_RETIRED_ANCHOR, point)
+    assert proposal["signal"] == 0.0 and proposal["risk_adj"] == 0.0   # 夹具自证：真的是退役形状
+
+    # (1) 带 anchor：同一估计量 ⇒ 稳定；退役维度的 CI 退化为 [0, 0]
+    ok = wo.bootstrap_validate(wired["dir"], proposal, n_iterations=200,
+                               anchor=_RETIRED_ANCHOR)
+    assert "error" not in ok, ok.get("error")
+    assert ok["stable"] is True
+    for dim in ("signal", "risk_adj"):
+        assert ok["confidence_95"][dim]["lo_95"] == 0.0
+        assert ok["confidence_95"][dim]["hi_95"] == 0.0
+    # 活维度的 CI 不能也是退化区间，否则「稳定」什么都没证明
+    assert any(ok["confidence_95"][d]["range_pp"] > 0.5 for d in ("catalyst", "sentiment", "odds"))
+
+    # (2) 不带 anchor（旧行为）：同一提议被判不稳 —— 这就是事故，锁住它才知道 (1) 修的是什么
+    legacy = wo.bootstrap_validate(wired["dir"], proposal, n_iterations=200)
+    assert legacy["stable"] is False
+    for dim in ("signal", "risk_adj"):
+        assert legacy["confidence_95"][dim]["lo_95"] > 0.05, "无约束 CI 应远离 0"
+
+
+def test_retired_regime_gate_still_has_teeth(wired):
+    """负对照：带 anchor 时闸依然会红。没有这一条，(1) 可能只是在一个恒真条件上全绿。"""
+    point = _point_estimate(wired["snaps"], wired["now"])
+    proposal = wo.clamp_shifts(_RETIRED_ANCHOR, point)
+
+    pushed = dict(proposal)              # 和不变，只把质量从 odds 搬到 catalyst
+    pushed["catalyst"] += 0.08
+    pushed["odds"] -= 0.08
+    bad = wo.bootstrap_validate(wired["dir"], pushed, n_iterations=200,
+                                anchor=_RETIRED_ANCHOR)
+    assert "error" not in bad, bad.get("error")
+    assert bad["stable"] is False, "被人为推离重采样中心的提议必须被拦下"
+
+    resurrected = dict(proposal)         # 把退役维度复活成 5pp，同样必须红
+    resurrected["signal"] = 0.05
+    resurrected["catalyst"] -= 0.05
+    bad2 = wo.bootstrap_validate(wired["dir"], resurrected, n_iterations=200,
+                                 anchor=_RETIRED_ANCHOR)
+    assert bad2["stable"] is False, "复活退役维度的提议不该被闸 1 放行"

@@ -858,3 +858,225 @@ class TestSampleThresholdAlignment:
         res = wo.compute_new_weights(tmp_path)
         assert res is not None
         assert "new_weights" in res
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# v0.45.295：退役（归零）维度与 WEIGHT_CLAMPS 的结构矛盾
+#
+# 起因：v0.45.172 把 signal / risk_adj 归零之后，`clamp_shifts` 每周必抛
+# InfeasibleBoundsError（2026-09-14、09-20），`main()` 在两道闸**之前** return、
+# 退出码 0，周诊断整份丢失而没有任何东西变红。
+#
+# 为什么上面 TestProjectionInvariants 一条都没红：它的锚点全是 0.10~0.25 之间的
+# 合成值，生产锚点 [0, .332, .325, .343, 0] 在夹具里根本不可达。下面每一组都用
+# **生产形状**的锚点，并且有一条直接读真实 config.EVALUATION_WEIGHTS 的观测点。
+# ════════════════════════════════════════════════════════════════════════════
+
+_DIMS5 = ["signal", "catalyst", "sentiment", "odds", "risk_adj"]
+_LIVE3 = ["catalyst", "sentiment", "odds"]
+# config.EVALUATION_WEIGHTS 自 v0.45.172 起的形状
+_RETIRED_ANCHOR = {"signal": 0.0, "catalyst": 0.332, "sentiment": 0.325,
+                   "odds": 0.343, "risk_adj": 0.0}
+# `w = acc/Σacc` 的典型输出：它表达不了零，五维永远 ≈0.2
+_FLAT_TARGET = {k: 0.2 for k in _DIMS5}
+
+
+class TestRetiredDimensions:
+
+    def test_retired_dims_is_derived_from_anchor(self):
+        assert wo.retired_dims(_RETIRED_ANCHOR) == {"signal", "risk_adj"}
+        assert wo.retired_dims({k: 0.2 for k in _DIMS5}) == set()
+        # 容差：浮点噪声级别的 0 也算退役；0.001 是真权重，不算
+        assert "odds" in wo.retired_dims({**_RETIRED_ANCHOR, "odds": 1e-12})
+        assert "odds" not in wo.retired_dims({**_RETIRED_ANCHOR, "odds": 0.001})
+
+    def test_incident_mechanism_is_two_independent_contradictions(self):
+        """把事故机制钉成算术，防止将来有人只修其中一个就当修好了。
+
+        ① 下限：锚点 0 时旧合并盒是空区间；② 上限：三个活维度的上限之和 < 1。
+        若这条红了，说明 WEIGHT_CLAMPS 被改过——先确认冻结逻辑还需不需要，别直接改断言。
+        """
+        shift = wo.MAX_SHIFT_PP / 100.0
+        lo_c, hi_c = wo.WEIGHT_CLAMPS["signal"]
+        legacy = (max(lo_c, 0.0 - shift), min(hi_c, 0.0 + shift))
+        assert legacy[0] > legacy[1], f"旧公式在锚点 0 上应给出空区间，实为 {legacy}"
+        assert sum(wo.WEIGHT_CLAMPS[k][1] for k in _LIVE3) < 1.0, \
+            "三个活维度的旧上限之和应 < 1（即便下限修好也凑不到 sum=1）"
+
+    def test_merge_bounds_freezes_retired_and_frees_live_caps(self):
+        b = wo.merge_bounds(_RETIRED_ANCHOR)
+        assert b["signal"] == (0.0, 0.0)
+        assert b["risk_adj"] == (0.0, 0.0)
+        for k in _LIVE3:
+            lo, hi = b[k]
+            assert lo <= _RETIRED_ANCHOR[k] <= hi, f"{k}：现行配置本身必须落在盒内"
+            # 五维时代的 0.25/0.30 上限不再适用；±MAX_SHIFT 仍是运行时护栏
+            assert hi == pytest.approx(min(1.0, _RETIRED_ANCHOR[k] + wo.MAX_SHIFT_PP / 100.0))
+            assert lo >= wo.WEIGHT_CLAMPS[k][0], "下限照旧生效"
+        assert all(lo <= hi for lo, hi in b.values()), "不许再出现空区间"
+        assert sum(lo for lo, _ in b.values()) <= 1.0 <= sum(hi for _, hi in b.values())
+
+    def test_no_retired_dims_box_is_bitwise_legacy(self):
+        """没有退役维度时与改动前的公式逐位相同——爆炸半径守卫。"""
+        rng = random.Random(295)
+        for _ in range(200):
+            raw = {k: rng.uniform(0.05, 0.4) for k in _DIMS5}
+            s = sum(raw.values())
+            anchor = {k: v / s for k, v in raw.items()}
+            shift_pp = rng.choice([1.0, 5.0, 10.0])
+            got = wo.merge_bounds(anchor, shift_pp)
+            for k in _DIMS5:
+                lo_c, hi_c = wo.WEIGHT_CLAMPS[k]
+                assert got[k] == (max(lo_c, anchor[k] - shift_pp / 100.0),
+                                  min(hi_c, anchor[k] + shift_pp / 100.0))
+
+    def test_clamp_shifts_survives_production_shaped_anchor(self):
+        """事故复现：修复前这里抛 `维度 signal=0.100000 越界 [0.150000, 0.100000]`。"""
+        new = wo.clamp_shifts(_RETIRED_ANCHOR, _FLAT_TARGET)
+        assert new["signal"] == 0.0 and new["risk_adj"] == 0.0, "退役维度只能冻结，不能被复活"
+        assert abs(sum(new.values()) - 1.0) < 1e-9
+        for k in _LIVE3:
+            assert abs(new[k] - _RETIRED_ANCHOR[k]) <= wo.MAX_SHIFT_PP / 100.0 + 1e-6
+
+    def test_retired_dims_stay_zero_under_adversarial_targets(self):
+        """目标把质量全押在退役维度上，也复活不了它们。"""
+        rng = random.Random(295)
+        for i in range(300):
+            target = {k: rng.uniform(0.0, 1.0) for k in _DIMS5}
+            if i % 3 == 0:                                   # 最恶劣：全押在两个退役维度
+                target = {"signal": 0.5, "risk_adj": 0.5, "catalyst": 0.0,
+                          "sentiment": 0.0, "odds": 0.0}
+            new = wo.clamp_shifts(_RETIRED_ANCHOR, target)
+            assert new["signal"] == 0.0 and new["risk_adj"] == 0.0
+            assert abs(sum(new.values()) - 1.0) < 1e-9
+            for k in _LIVE3:
+                assert abs(new[k] - _RETIRED_ANCHOR[k]) <= wo.MAX_SHIFT_PP / 100.0 + 1e-6
+
+    def test_project_to_feasible_names_inverted_interval(self):
+        """单维空区间要在前置检查里点名，不能靠事后 assert_feasible 报一句「越界」。
+
+        这组盒 Σlo=0.55 ≤ 1 ≤ Σhi=1.00，聚合检查照样放行——正是 2026-09-20 的形状。
+        """
+        bounds = {"a": (0.15, 0.10), "b": (0.40, 0.90)}
+        with pytest.raises(wo.InfeasibleBoundsError, match="空区间"):
+            wo.project_to_feasible({"a": 0.5, "b": 0.5}, bounds)
+
+    def test_real_config_is_feasible_for_the_optimizer(self):
+        """**观测点**：config.EVALUATION_WEIGHTS 一旦被改成优化器投影不了的形状，这里立刻红，
+        而不是等周日 cron 死一次。
+
+        此前所有投影测试都用合成锚点，生产已经不可行的那两周它们照样全绿——这条读的是
+        真实 config（直接 import，不走 wo.CONFIG_PATH 的 ~ 路径，CI 与 worktree 里也成立）。
+        """
+        import config
+        anchor = dict(config.EVALUATION_WEIGHTS)
+        assert set(anchor) == set(_DIMS5), f"config 权重维度变了：{sorted(anchor)}"
+        rng = random.Random(295)
+        targets = [_FLAT_TARGET] + [{k: rng.uniform(0, 1) for k in _DIMS5} for _ in range(50)]
+        for target in targets:
+            new = wo.clamp_shifts(anchor, target)      # 不抛就是通过
+            assert abs(sum(new.values()) - 1.0) < 1e-9
+            for k in wo.retired_dims(anchor):
+                assert new[k] == 0.0, f"config 里归零的 {k} 被优化器复活了"
+
+
+class TestInfeasiblePathRunsGates:
+    """`main()` 的不可行分支：曾经在两道闸之前 return。用 main() 端到端跑——
+    上面 TestModuleLoggerDefined.test_infeasible_handler_can_log 是**手抄**了一份
+    except 分支来测的，从来没真的走过 main() 的这一支，所以三次出事三次没红。
+    """
+
+    @pytest.fixture
+    def pipeline(self, monkeypatch, sandbox):
+        monkeypatch.setattr(wo, "SNAPSHOTS_DIR", sandbox)
+        monkeypatch.setattr(wo, "count_t7_samples", lambda d: 667)
+        raw = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20,
+               "odds": 0.20, "risk_adj": 0.10}
+        monkeypatch.setattr(wo, "compute_new_weights_wls",
+                            lambda d: {"new_weights": dict(raw), "method": "wls_time_decay"})
+        calls = {"bootstrap": [], "pool": 0}
+
+        def _bootstrap(snap_dir, weights, *a, **kw):
+            calls["bootstrap"].append((dict(weights), kw))
+            return {"stable": True}
+
+        def _pool(*a, **kw):
+            calls["pool"] += 1
+            return {"ok": True, "n_recent_pool": 30, "unrepresented_ratio": 0.0}
+
+        monkeypatch.setattr(wo, "bootstrap_validate", _bootstrap)
+        monkeypatch.setattr(wo, "check_ticker_pool_consistency", _pool)
+        return {"raw": raw, "calls": calls}
+
+    @staticmethod
+    def _make_infeasible(monkeypatch):
+        # 真实的不可行（不是 mock 掉 clamp_shifts）：每维下限 0.30 ⇒ Σlo=1.5>1
+        monkeypatch.setattr(wo, "WEIGHT_CLAMPS", {k: (0.30, 0.40) for k in _DIMS5})
+
+    @staticmethod
+    def _run(monkeypatch, argv):
+        monkeypatch.setattr(sys, "argv", ["weekly_optimizer.py", *argv])
+        wo.main()
+
+    def test_read_only_run_still_reaches_both_gates_and_labels_correctly(
+            self, monkeypatch, pipeline, capsys):
+        self._make_infeasible(monkeypatch)
+        before = wo.CONFIG_PATH.read_text(encoding="utf-8")
+        self._run(monkeypatch, [])
+
+        assert len(pipeline["calls"]["bootstrap"]) == 1, "闸 1 必须仍然运行"
+        assert pipeline["calls"]["pool"] == 1, "闸 2 必须仍然运行"
+        # 没有可行的投影结果可验 ⇒ 验原始 WLS 目标，且不带 anchor（不做逐次投影）
+        weights_arg, kwargs = pipeline["calls"]["bootstrap"][0]
+        assert weights_arg == pipeline["raw"]
+        assert not kwargs.get("anchor")
+
+        rec = _read_history(wo.HISTORY_FILE)[-1]
+        assert rec["skip_reason"] == "infeasible_bounds"
+        assert rec["applied"] is False
+        # 只读运行必须记成 diagnose / dry_run=True。修复前这里是 optimize / False
+        # （因为 dry_run=args.dry_run，而默认只读运行并不传 --dry-run）。
+        assert rec["action"] == "diagnose"
+        assert rec["dry_run"] is True
+        assert rec["bootstrap_stable"] is True, "闸 1 的结果必须进审计记录"
+        assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
+
+        out = capsys.readouterr().out
+        assert "闸 1/2" in out and "闸 2/2" in out
+        assert "无可行解" in out
+        assert "系统稳定" not in out, "没有提议时不许说『权重保持不变（系统稳定）』"
+
+    def test_apply_force_cannot_write_when_infeasible(self, monkeypatch, pipeline):
+        """没有可行权重就没有东西可写——`--force` 覆盖的是闸门，不是数学。"""
+        self._make_infeasible(monkeypatch)
+        before = wo.CONFIG_PATH.read_text(encoding="utf-8")
+        self._run(monkeypatch, ["--apply", "--force"])
+
+        assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
+        rec = _read_history(wo.HISTORY_FILE)[-1]
+        assert rec["applied"] is False
+        assert rec["skip_reason"] == "infeasible_bounds"
+        assert rec["action"] == "optimize"      # 请求了写入，如实记成 optimize
+
+    def test_retired_regime_is_not_infeasible_and_gate1_gets_anchor(self, monkeypatch, pipeline):
+        """事故本身：config 里有归零维度 ⇒ 不再不可行，且闸 1 拿到 anchor 做逐次投影。"""
+        wo.CONFIG_PATH.write_text(
+            _CONFIG_STUB.replace('"signal":    0.3000', '"signal":    0.0000')
+                        .replace('"catalyst":  0.2000', '"catalyst":  0.3320')
+                        .replace('"sentiment": 0.2000', '"sentiment": 0.3250')
+                        .replace('"odds":      0.1500', '"odds":      0.3430')
+                        .replace('"risk_adj":  0.1500', '"risk_adj":  0.0000'),
+            encoding="utf-8")
+        assert wo.read_current_weights() == _RETIRED_ANCHOR       # 夹具自证：真的读成生产形状
+        self._run(monkeypatch, [])
+
+        rec = _read_history(wo.HISTORY_FILE)[-1]
+        assert rec["skip_reason"] != "infeasible_bounds"
+        assert rec["skip_reason"] == "read_only_default"
+        assert rec["action"] == "diagnose"
+        assert rec["new_weights"]["signal"] == 0.0 and rec["new_weights"]["risk_adj"] == 0.0
+        assert abs(sum(rec["new_weights"].values()) - 1.0) < 1e-6
+
+        assert len(pipeline["calls"]["bootstrap"]) == 1
+        _, kwargs = pipeline["calls"]["bootstrap"][0]
+        assert kwargs.get("anchor") == _RETIRED_ANCHOR, "闸 1 必须拿到 anchor，否则恒红"
