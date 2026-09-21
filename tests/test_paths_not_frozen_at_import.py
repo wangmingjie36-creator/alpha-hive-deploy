@@ -1116,7 +1116,6 @@ def _discover_path_resolvers():
       · 函数体 ≤ 14 条语句（排除顺手引用了 PATHS 的业务函数）
     """
     import ast
-    import subprocess
     files, _mode = TestSpeciesDoesNotSpread._own_python_files()
     found = []
     for p in sorted(files):

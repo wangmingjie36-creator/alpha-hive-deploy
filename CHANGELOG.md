@@ -5,7 +5,44 @@
 
 ---
 
-## [0.45.301] — 2026-09-21 — 占位（进行中：删掉 test_paths_not_frozen_at_import 里一行 F401 盲区下的死 import subprocess）
+## [0.45.301] — 2026-09-21 — Removed：一行生来就死的 `import subprocess`（F401 被全局忽略，v0.45.206 全量 ruff 清零后它照样活着）
+
+### Removed
+
+- `tests/test_paths_not_frozen_at_import.py::_discover_path_resolvers()` 体内的 `import subprocess`。
+  **生来就死**：v0.45.160（c0a8cfaf，2026-09-07）写这个函数时就带着它，AST 核对诞生版本
+  体内零引用；大概是从当时的 `_own_python_files`（那里确实调 `subprocess.run`）抄过来的。
+  函数改走 `_own_python_files()` 取文件清单，从来不需要自己起子进程。
+
+### 为什么十四天没人看见
+
+`pyproject.toml` 的 ruff 配置 **全局 ignore 了 F401**。v0.45.206 把全量 `ruff check .`
+从 46 个错清到零，这行照样活了下来 —— 「ruff 全绿」对被 ignore 的规则**恒真**
+（MEMORY `alpha-hive-static-guard` 已记过这条判据，这是一个具体实例）。
+v0.45.186 收尾时顺手发现并留档，本版删掉。
+
+### 验证
+
+- 该文件 `ruff --select F401`：**1 → 0**（改动前命中即正对照：检测器确实看得见它）；
+  `--select F821` 零命中（没删成未定义名）；全量 `ruff check .` 前后都是 All checks passed。
+- `pytest tests/test_paths_not_frozen_at_import.py`：`collected 86` → `collected 86`，86 passed → 86 passed。
+- 只跑单文件是有依据的：`_discover_path_resolvers` 只在本文件内被调用；
+  子串搜索有 11 个文件「提到」这个测试模块，**AST 核对后真正 import 它的是零个**（全是注释/文档）。
+- 排除了动态引用：函数体内无 `eval` / `exec` / `locals` / `getattr` / `importlib`。
+
+### 顺带核实：v0.45.186 留档的另一项已不存在
+
+v0.45.186 同时留档了四个文件（`earnings_pc_history.py` / `ff6_cycle_history.py` /
+`iv_crush_analysis.py` / `oi_wall.py`）docstring 里的 `\ ` 无效转义警告。
+**v0.45.206 已顺带修掉**（那次 ruff 清零的 46 个错里就有这四处 W605）。
+核法带正对照：`5068252`（v0.45.186 基线）版 `oi_wall.py` 经 `ast.parse` 报 1 个警告，
+`origin/main` 版四个文件均为 0 —— 探针没坏，是真的修了。写在这里，免得下一个人再查一遍。
+
+### 未做（留档）
+
+全仓 `ruff --select F401` 当前命中 **254 条 / 123 个文件**（其中 `tests/` 下 74 条）。
+这很可能就是当初全局 ignore 的原因；其中有多少是 `__init__.py` 式的**有意再导出**没有区分。
+重新打开 F401 是一次独立的清理，本版不碰。
 
 ## [0.45.300] — 2026-09-21 — 占位（进行中：收紧 `fg_exposure_gate_forward_test.py` 前瞻结果里的 `adjusted_trades` 盲化泄漏——未出结论时不再把 A/B 已实现盈亏对比放进返回字典）
 
