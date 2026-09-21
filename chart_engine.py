@@ -18,7 +18,6 @@ chart_engine.py  —  Alpha Hive 图表引擎
 from __future__ import annotations
 import base64
 import io
-import math
 from typing import Optional
 
 # ─── 懒加载 matplotlib（避免 import 时崩溃）────────────────────────────────────

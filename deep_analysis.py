@@ -18,7 +18,7 @@ import time
 import logging
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 _log = logging.getLogger("alpha_hive.deep_analysis")
 

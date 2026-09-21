@@ -6,7 +6,6 @@ BeeMessage, ResonanceLine, PixelBee, HoneycombBackground
 import math
 import random
 
-import tkinter as tk
 
 
 # ==================== 蜂群消息（Agent 间通信） ====================

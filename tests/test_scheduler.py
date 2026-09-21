@@ -2,11 +2,9 @@
 
 import json
 import os
-import subprocess
 import tempfile
 import threading
 import time
-from datetime import datetime
 from unittest.mock import patch, MagicMock
 import pytest
 
@@ -138,7 +136,6 @@ class TestBackfillPrices:
     def test_backfill_with_mock_yfinance(self):
         """验证回填逻辑：创建一个旧快照，mock yfinance，确认价格被回填"""
         from scheduler import ReportScheduler
-        import importlib
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # 创建快照目录和文件

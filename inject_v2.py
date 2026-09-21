@@ -9,7 +9,6 @@ inject_v2.py — Claude 推理注入器
 
 import re
 import sys
-import glob
 from pathlib import Path
 from datetime import date
 

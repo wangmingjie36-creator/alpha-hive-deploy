@@ -28,11 +28,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional

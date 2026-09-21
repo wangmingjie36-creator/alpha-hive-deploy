@@ -19,7 +19,7 @@ import time
 import logging
 from typing import Dict, List, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed, Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 _log = logging.getLogger("alpha_hive.parallel_runner")
 

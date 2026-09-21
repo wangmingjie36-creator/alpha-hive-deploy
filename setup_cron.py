@@ -31,7 +31,6 @@ def get_crontab():
 def set_crontab(crontab_content):
     """设置 crontab（含内容安全验证）"""
     # 验证 crontab 内容：仅允许指向已知 Alpha Hive 脚本
-    import os
     ALLOWED_SCRIPTS = {
         "/Users/igg/.claude/reports/run_alpha_hive_daily.sh",
         # alpha-hive-daily.sh 已于 v0.45.293 退役（移入 ~/.claude/scripts/retired/），不再放行：

@@ -2,11 +2,9 @@
 
 from typing import Any, Dict, List
 from swarm_agents._config import (
-    _log, _AS,
-    _RE_INSIDER_SELL, _RE_INSIDER_BUY,
+    _log, _RE_INSIDER_SELL, _RE_INSIDER_BUY,
     _RE_PC_RATIO, _RE_PC_SHORT, _RE_IV_RANK, _RE_SENTIMENT,
 )
-from swarm_agents.cache import _safe_score
 from swarm_agents.base import BeeAgent
 from resilience import NETWORK_ERRORS
 from models import AgentResult

@@ -575,7 +575,7 @@ def _detail(ticker: str, swarm_detail: dict) -> dict:
     full_pc = fco.get("full_pc_ratio")
     max_pain = fco.get("max_pain")
     # v0.26.2 近端 OI 墙（≤30 天）—— 从 call_exp_oi/put_exp_oi 现场重算
-    from datetime import datetime as _dt_oi, timedelta as _td_oi
+    from datetime import datetime as _dt_oi
     _now_oi = _dt_oi.now()
     _NEAR_WINDOW_DAYS = 30
 
@@ -1383,7 +1383,6 @@ def _build_actionable_top_html(all_tickers_sorted, opp_by_ticker, swarm_detail) 
     无候选时显示"今日无强信号，建议观望"
     """
     import math as _math
-    import json as _json_act
     candidates = []
     for tk in all_tickers_sorted:
         sd = swarm_detail.get(tk, {})

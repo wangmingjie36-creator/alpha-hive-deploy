@@ -4,7 +4,6 @@ tests/test_data_fetcher.py — CacheManager + DataFetcher 单元测试
 覆盖：缓存保存/加载、TTL 过期、损坏 JSON、DataFetcher 初始化
 """
 
-import json
 import os
 import time
 import pytest

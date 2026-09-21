@@ -1,9 +1,8 @@
 """ChronosBeeHorizon - 催化剂追踪蜂 (Catalyst 维度, 权重 0.20)"""
 
 import os
-from typing import Any, Dict, List, Optional
-from swarm_agents._config import _log, _AS
-from swarm_agents.cache import _safe_score
+from typing import Dict
+from swarm_agents._config import _log
 from swarm_agents.base import BeeAgent
 from resilience import NETWORK_ERRORS
 from models import AgentResult

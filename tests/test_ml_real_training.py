@@ -3,10 +3,9 @@ Tests for ML 真实数据训练 - build_training_data_from_db + train_model 改�
 """
 
 import json
-import os
 import sqlite3
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from ml_predictor import build_training_data_from_db, MLPredictionService, TrainingData
 

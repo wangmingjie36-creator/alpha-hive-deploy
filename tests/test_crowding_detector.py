@@ -2,7 +2,6 @@
 Tests for CrowdingDetector - 拥挤度检测系统
 """
 
-import pytest
 from crowding_detector import CrowdingDetector
 
 

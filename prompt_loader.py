@@ -10,7 +10,6 @@ frontmatter），任何错误静默回退到调用方提供的 fallback——保
 """
 
 from pathlib import Path as _Path
-from typing import Optional
 
 _PROMPTS_DIR = _Path(__file__).parent / "prompts"
 

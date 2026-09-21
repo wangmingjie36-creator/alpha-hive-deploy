@@ -1650,7 +1650,6 @@ class AlphaHiveDailyReporter:
         cross_ticker_analysis = {}
         try:
             from config import WATCHLIST
-            import llm_service as _llm_ct
             # 合规修复 (#2): 只在 swarm 结果已显式采用 LLM 时才调用 cross-ticker LLM
             # 避免"key 存在就自动调"的反模式
             use_llm_flag = any(

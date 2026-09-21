@@ -28,7 +28,6 @@ ruff 的 F821 正是为此设计，且本仓库早已装好并配置了 ruff —
 所以把它接进 pytest：跟着现有工作流走，不需要新习惯。
 """
 
-import shutil
 import subprocess
 import sys
 from pathlib import Path

@@ -23,8 +23,6 @@
 
 import json
 import math
-import os
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from collections import defaultdict
@@ -38,14 +36,14 @@ HAS_FINRL = False
 HAS_SB3 = False
 
 try:
-    import finrl
+    import finrl  # noqa: F401 — 可用性探测：只为设 HAS_FINRL，导入失败即走纯 Python Q-learning
     HAS_FINRL = True
     _log.info("FinRL 已加载")
 except ImportError:
     _log.debug("FinRL 不可用，将使用纯 Python Q-learning")
 
 try:
-    from stable_baselines3 import DQN, PPO
+    from stable_baselines3 import DQN, PPO  # noqa: F401 — 可用性探测：只为设 HAS_SB3
     HAS_SB3 = True
     _log.info("Stable Baselines3 已加载")
 except ImportError:

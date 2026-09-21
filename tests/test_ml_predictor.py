@@ -938,7 +938,6 @@ class TestIncrementalTrainingLoop:
 
     def test_agent_agreement_calculation(self):
         """agent_directions JSON → 共识比例计算正确"""
-        import json as _json
 
         # 全部一致
         ad_all = {"A": "bullish", "B": "bullish", "C": "bullish"}
@@ -1058,7 +1057,6 @@ class TestScalerSerializationBug:
     def test_scaler_n_samples_seen_is_numpy_after_load(self):
         """加载后 scaler.n_samples_seen_ 应为 numpy 类型（有 .shape 属性）"""
         import tempfile
-        import numpy as np
         from ml_predictor import SGDMLModel, MLPredictionService
 
         # v0.33.0: 工厂默认 HGB（无 _scaler/不支持 partial_fit）；这些是 SGD fallback 序列化回归测试，显式注入 SGD

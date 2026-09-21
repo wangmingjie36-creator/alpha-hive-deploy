@@ -22,9 +22,8 @@ import time
 import urllib.request
 import zipfile
 import io
-from datetime import datetime, timedelta, date
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import threading
 
@@ -667,7 +666,6 @@ def format_attribution_html(result: Dict) -> str:
 
 def _cli():
     import argparse
-    import sys
 
     logging.basicConfig(
         level=logging.INFO,

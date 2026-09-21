@@ -9,7 +9,6 @@ SEC EDGAR 内幕交易（Form 4）数据采集模块
 限制：10 req/s，必须设置 User-Agent
 """
 
-import json
 import threading
 import time
 import xml.etree.ElementTree as ET

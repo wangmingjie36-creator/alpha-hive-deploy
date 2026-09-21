@@ -12,7 +12,7 @@ from queue import Queue, Empty
 
 import tkinter as tk
 
-from gui.animations import BeeMessage, ResonanceLine, PixelBee
+from gui.animations import BeeMessage, ResonanceLine
 from gui.monitor import LiveMonitor
 from gui.views import ChatLog
 

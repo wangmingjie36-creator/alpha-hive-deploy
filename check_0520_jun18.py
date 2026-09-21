@@ -5,7 +5,7 @@ NVDA 6/18 期权全链深度分析（更新版）
 import yfinance as yf
 import numpy as np
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime
 
 ticker = yf.Ticker("NVDA")
 spot = ticker.fast_info.last_price

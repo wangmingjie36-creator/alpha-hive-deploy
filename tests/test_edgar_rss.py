@@ -3,7 +3,6 @@ Tests for edgar_rss module -- SEC EDGAR Form 4 Atom RSS real-time alerts
 """
 
 import types
-import time
 import json
 import pytest
 

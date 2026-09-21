@@ -17,9 +17,7 @@ import argparse
 import json
 import logging
 import sqlite3
-import sys
 import time
-from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 _log = logging.getLogger("backfill")
@@ -28,7 +26,6 @@ _log = logging.getLogger("backfill")
 def run(apply_changes: bool = False, limit: int = None, force: bool = False):
     from backtester import Backtester, PredictionStore
     from trading_costs import apply_costs
-    from hive_logger import SafeJSONEncoder
 
     store = PredictionStore()
     bt = Backtester(store.db_path)

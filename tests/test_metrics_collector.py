@@ -1,7 +1,6 @@
 """MetricsCollector 测试 - 指标收集 + SLO 检查"""
 
 import pytest
-import time
 
 
 @pytest.fixture

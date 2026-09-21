@@ -35,10 +35,9 @@ import json
 import logging
 import sqlite3
 import sys
-from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 _log = logging.getLogger("alpha_hive.walk_forward")
 logging.basicConfig(

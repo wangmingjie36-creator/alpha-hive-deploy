@@ -3,11 +3,8 @@ Tests for newsapi_client module -- Yahoo Finance + Alpha Vantage news fetching
 with sentiment labeling, caching, deduplication, and DataQualityChecker.
 """
 
-import json
-import math
 import types
 import pytest
-from unittest.mock import MagicMock
 
 
 # ==================== Sample API responses ====================

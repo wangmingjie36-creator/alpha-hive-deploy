@@ -767,16 +767,22 @@ class TestCloseT7StatusDistinction:
         db_path = _make_pheromone_db(tmp_path, [("AAA", "2026-08-14", 123.45)])
         monkeypatch.setattr(wo, "PHEROMONE_DB_PATH", db_path)
 
-        real_connect = wo.sqlite3.connect
+        # v0.45.302：此前写的是 `sqlite3.connect` —— 借 weekly_optimizer 模块的属性
+        # 去够全局 sqlite3。但 weekly_optimizer 自己从不调用 sqlite3（那行 import
+        # 是死的、已随 F401 清理删掉），真正连库的是它下游的模块。两种写法拿到的是
+        # **同一个模块对象**，补丁效果完全相同；下面 status1 == "error" 那条断言
+        # 同时证明补丁确实拦到了实际的 connect（没拦到会是 "ok"）。
+        import sqlite3
+        real_connect = sqlite3.connect
         calls = {"n": 0}
 
         def _flaky_connect(*a, **kw):
             calls["n"] += 1
             if calls["n"] == 1:
-                raise wo.sqlite3.OperationalError("database is locked")
+                raise sqlite3.OperationalError("database is locked")
             return real_connect(*a, **kw)
 
-        monkeypatch.setattr(wo.sqlite3, "connect", _flaky_connect)
+        monkeypatch.setattr(sqlite3, "connect", _flaky_connect)
 
         result1, status1 = wo._load_close_t7_map()
         assert status1 == "error"

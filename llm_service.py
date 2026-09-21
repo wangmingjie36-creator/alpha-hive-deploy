@@ -100,7 +100,6 @@ def _load_api_key() -> Optional[str]:
     for f in key_files:
         try:
             # 检查文件权限：API key 文件应仅限 owner 读写（0600）
-            import stat
             st = os.stat(f)
             mode = st.st_mode & 0o777
             if mode & 0o077:

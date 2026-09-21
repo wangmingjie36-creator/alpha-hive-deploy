@@ -16,8 +16,7 @@ market_intelligence.py — Alpha Hive 市场智能扩展模块
 from __future__ import annotations
 import json
 import math
-import os
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 

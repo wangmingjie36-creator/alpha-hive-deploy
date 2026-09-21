@@ -309,7 +309,6 @@ class TestSnapshotModeProbesLoadability:
 
     def _seed(self, tmp_path, *, vintage):
         import json as _j
-        import os as _os
         d = tmp_path / "cloud_snapshots" / "2026-08-27"
         d.mkdir(parents=True)
         (d / "manifest.json").write_text(_j.dumps(

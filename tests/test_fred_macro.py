@@ -5,7 +5,6 @@ Tests for fred_macro module — 宏观经济数据 + 收益率曲线 + 板块轮
 import pytest
 from unittest.mock import patch, MagicMock
 import pandas as pd
-import numpy as np
 
 
 @pytest.fixture(autouse=True)

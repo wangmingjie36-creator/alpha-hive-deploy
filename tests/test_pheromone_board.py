@@ -1,6 +1,5 @@
 """PheromoneBoard 单元测试"""
 
-import pytest
 from pheromone_board import PheromoneBoard, PheromoneEntry
 
 

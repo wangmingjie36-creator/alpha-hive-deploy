@@ -21,7 +21,6 @@ import warnings
 from datetime import datetime, timedelta
 import pandas as pd
 import yfinance as yf
-import numpy as np
 
 warnings.filterwarnings("ignore")
 

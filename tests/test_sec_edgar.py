@@ -5,7 +5,6 @@ Uses monkeypatch for all mocking; no real HTTP requests.
 """
 
 import types
-import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -300,7 +299,6 @@ class TestSecEdgarFilings:
 
     def test_filings_cached(self, _mock_sec_client, monkeypatch, tmp_path):
         """Second call uses cache -- _request_get called only once."""
-        import sec_edgar
 
         sub_data = _submissions_json(
             forms=["4"],

@@ -1,8 +1,7 @@
 """GuardBeeSentinel - 交叉验证与风险评估蜂 (RiskAdj 维度, 权重 0.15)"""
 
-from typing import Any, Dict, List, Optional
-from swarm_agents._config import _log, _AS
-from swarm_agents.cache import _safe_score
+from typing import Dict
+from swarm_agents._config import _log
 from swarm_agents.base import BeeAgent
 from models import AgentResult
 from swarm_agents.utils import (

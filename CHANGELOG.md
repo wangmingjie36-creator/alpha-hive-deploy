@@ -5,7 +5,97 @@
 
 ---
 
-## [0.45.302] — 2026-09-21 — 占位（进行中：清理全仓 254 条 F401 未使用导入——逐条分类，再导出/副作用/可用性探测保留并标注，其余删除）
+## [0.45.302] — 2026-09-21 — Removed：清理全仓 F401 未使用导入（254 条里删 236、有意保留 18），并在 ruff 里启用 F401
+
+### 先回答「这 254 条都没用吗」—— 不是
+
+ruff 的 F401 只看**单个文件**里有没有用到这个名字，看不见三类「故意导入、本文件确实不用」：
+
+| 类别 | 条数 | 处置 |
+|---|---|---|
+| **包再导出**（`swarm_agents/__init__.py`，docstring 自称「向后兼容 re-export 层」） | 45 | 逐名数消费者：**15 个有人**从包顶层取 → 保留并写进 `__all__`；**30 个零消费者** → 删 |
+| **可用性探测**（`finrl_bridge.py`：`import finrl` / `from stable_baselines3 import DQN, PPO`，只为设 `HAS_FINRL`/`HAS_SB3`） | 3 | 保留，`# noqa: F401 — 原因` |
+| 其余 | 206 | 删 |
+
+合计删 **236**、留 **18**。另有 **1 处**是删除直接引出的：`alpha_hive_bot/push_job.py` 的
+`if TYPE_CHECKING: from telegram import Bot` 删空后 ruff 塞了个 `pass`，连同随之无用的
+`TYPE_CHECKING` 导入一起删掉（`Bot` 只在注释和另一处独立的延迟导入里出现）。
+
+删除分布：生产代码模块级 116 / 函数内 14 / 包再导出 30，测试 74（模块级 65、函数内 9），实验脚本 2。
+改动 124 个文件，全部是删 import 行或改写多名字 import，外加下面几处 Changed。
+
+### 怎么判定「没用」—— 不信 ruff 的 safe
+
+ruff 给 204 条标了 safe fix，但它的 safe 只对单文件成立。逐条过四道检查：
+
+1. **可用性探测**：import 是否在 `try` 里且 handler 接 `ImportError` / `Exception` / 裸 except。
+   命中 7 条，人工逐条看：3 条是真探测（留），4 条是标准库（`urllib` ×2、`datetime`）或
+   冗余闸门（`alpha_hive_daily_report.py:1653` 的 `import llm_service as _llm_ct`，块内第 10 行
+   另有真正在用的 `import llm_service`；删后返回值在所有分支都是 `{}`，唯一差别是
+   **默认 `--no-llm` 扫描不再白白加载 LLM 模块**、以及 llm_service 装不上时少一行 debug 日志）。
+2. **跨文件消费**：别处 `from M import name`、`M.name`、字符串补丁目标。
+3. **副作用**：被导入的本仓模块顶层有没有可执行语句；第三方已知「导入即干活」的库。
+4. **pytest fixture 注入**：测试里要删的名字有没有被当作参数名 / `usefixtures` 字符串（74 条中 0）。
+
+**仓库外消费者**：编排器 `~/.claude/scripts/`、定时任务提示词、`mcp-servers/` 下 5 个第三方
+MCP、生产目录未跟踪文件、LaunchAgent，共 156 个文件 —— 对 148 条模块级删除项**零命中**。
+正对照：同一扫描逻辑找已知存在的 `from config import WATCHLIST`，在编排器里命中 8 处。
+（Alpha Hive 自己的 MCP 服务器 `alpha_hive_mcp.py` 已被 git 跟踪，在仓内扫描范围。）
+
+### ⚠️ 中途漏了一条，被全套测试抓到
+
+第 2 道检查只认 `weekly_optimizer.sqlite3` 这种**全名**写法，而
+`tests/test_weekly_optimizer.py` 写的是 `import weekly_optimizer as wo` 后 `wo.sqlite3.connect`
+—— **别名**。于是删掉了 `weekly_optimizer.py` 里的 `import sqlite3`（该模块自己确实一次都没用过），
+那条测试报 `AttributeError: module 'weekly_optimizer' has no attribute 'sqlite3'`。
+
+这条被测试抓住了，但同一盲区在**测试覆盖不到的生产路径**上会变成运行时 `AttributeError`，
+外面若恰好包着 `except` 就是静默失效。所以没有只修这一条：把检测器补成「模块以任何别名被
+引用后的属性访问 + `getattr/hasattr/setattr/monkeypatch.setattr/patch.object(别名, "名字")`」，
+**对全部 236 条重查**，并以这条已知漏网为正对照 —— 结果**只命中它一条**。
+另补一道：字符串补丁目标改成前缀匹配（`"模块.名字.属性"` 这种更深层的也算），
+命中 2 处均为缓存**文件名**（`"fear_greed.json"`、`"yahoo_trending.json"`），不是补丁目标。
+
+**修法是改测试不是恢复 import**：`wo.sqlite3` 与直接 `import sqlite3` 是**同一个模块对象**，
+补丁效果完全相同；为了测试的方便在生产代码里留一行死 import 不对。变异验证：把补丁改成空操作，
+该测试以 `assert 'ok' == 'error'` 变红 —— 它确实在检查补丁拦到了实际的 connect。
+
+### Changed
+
+- **`pyproject.toml`：F401 从 ruff 全局 ignore 移除。** CI 自 v0.45.206 起跑 `ruff check .` 且会拦，
+  不打开的话清完还会慢慢长回来。正对照：临时加一行 `import zipfile`，`ruff check .` 退出码 1；还原后全绿。
+- `swarm_agents/__init__.py`：只保留 15 个有消费者的再导出 + `__all__`；docstring 说明删了什么、
+  以后新增顶层导入要同时加进 import 和 `__all__`。
+- `tests/test_weekly_optimizer.py`：`wo.sqlite3` → `sqlite3`（见上），附注释说明为什么。
+
+### 验证
+
+- **删的恰好是计划那 236 条**：改前改后按「文件 | 绑定名」数全仓 import 绑定（5926 → 5690），
+  多删 0、少删 0、新增 0。
+- **导入图不变**：73 个被改的非测试模块，在隔离子进程（`ALPHA_HIVE_HOME` 指向沙箱）里各 import
+  一次、记下 `sys.modules` 全集，改前改后对比：import 成败**零变化**，**零新增加载**；
+  不再加载的 37 个全是标准库或 numpy/scipy（后者仅 `ff6_cycle_history.py`），**没有任何本仓模块** ——
+  `yf_gate` 这类有副作用的都不在其中。
+- **函数内导入**（导入图覆盖不到，要等函数运行才执行）：生产代码 14 条，其中 3 条是本仓模块，
+  逐条审过：`llm_service`（见上）、`hive_logger`（上一行 `backtester` 已加载它）、
+  `catalyst_exit_planner`（同文件另两个函数各自导入，这一处确实没用，也不在 try 里）。
+- ruff：该规则 **254 → 0**；启用 F401 后全量 `ruff check .` 全绿；F821 零命中。
+- 全套测试：`5190 passed, 2 failed` → 修 `wo.sqlite3` 后 `test_weekly_optimizer.py` 96 条全过；
+  剩下唯一失败是 `test_economic_calendar.py::TestCoverageHorizon`（设计如此、定期变红，
+  本次未碰 `economic_calendar.py` 与该测试文件）。
+
+### 分类器自己踩的两个坑（留给下一个写 import 检查的人）
+
+- **ruff 对 `import x as y` 报的位置是别名 `y`**，不是 `x`；按「起点列号相等」定位会漏掉全部 18 条带别名的。
+  改成「落在 alias 节点范围内」后归零。
+- **文件名字符串会冒充模块属性**：`"fear_greed.json"` 与「模块 `fear_greed` 的属性 `json`」字面相同。
+  同一物种已记过多次（「文本探针把『在讨论 X』误判成『是 X』」），这次是往**保守**方向错（多查一条），无害。
+
+### 未做（留档）
+
+- `check_0520_jun18.py` **import 时就联网**拉 2026-06-18 到期的期权链，该到期日早已过去，import 即报
+  `ValueError`。它是一次性脚本、改前改后一样失败，与本次无关；但「顶层代码不加 `__main__` 守卫」
+  会让任何枚举 import 的工具都去打一次网络。
 
 ## [0.45.301] — 2026-09-21 — Removed：一行生来就死的 `import subprocess`（F401 被全局忽略，v0.45.206 全量 ruff 清零后它照样活着）
 

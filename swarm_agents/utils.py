@@ -11,7 +11,7 @@
 
 from typing import Dict, Optional
 
-from swarm_agents._config import _log, _AS
+from swarm_agents._config import _AS
 from swarm_agents.cache import _safe_score
 
 # ── 标准异常元组（所有 Agent 外层 try/except 统一引用）──
