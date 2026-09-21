@@ -5987,6 +5987,10 @@ v0.45.222 与本版第一轮都「从空目录跑全套」证明 cwd 无关，**
 
 ## [0.45.217] — 2026-09-13 — 失效条件覆盖率的分母是一份过期名单：网站上 17 只不进统计，不在网站上的 11 只算「已覆盖」
 
+（09-13 占号并写完；**09-21 用户批准后 rebase 到 v0.45.301 才落地**——占位在 `main` 上悬挂了 8 天，
+期间 `_all_tickers` 仍在配置里。rebase 前核对：`WATCHLIST` 30 / `WATCHLIST_EXTENDED` 71 键集与顺序未变，
+`thesis_breaks*` 相关文件仅被 v0.45.219 动过测试、与本条零冲突。）
+
 起因：v0.45.215「顺带发现」记了一条「`_all_tickers` 24 个 vs 41 个标的块 ⇒ 漏算 17 只」。
 **那条的口径本身是错的**——用户纠正「网站只有 30 个标的」。实测三个集合：
 
@@ -6061,13 +6065,23 @@ v0.45.222 与本版第一轮都「从空目录跑全套」证明 cwd 无关，**
 ② 我起初写了一条「WATCHLIST 每只都有块」测试，与渲染测试 M1/M2/M4 同红、完全重复，删掉；M12 又揪出正对照里
 残留的一条同向断言（`WATCHLIST ⊆ 块`），也删掉。
 
-全套：4260 passed / 1 failed —— `test_economic_calendar.py::TestCoverageHorizon`，在未改动的 `146d7b5` 临时 worktree 上同样红
+全套（09-13，`146d7b5` 上）：4260 passed / 1 failed —— `test_economic_calendar.py::TestCoverageHorizon`，在未改动的 `146d7b5` 临时 worktree 上同样红
 （日历覆盖期到期，设计意图，与本次无关）。
 
-### 顺带发现（未处理，已开任务芯片）
+**09-21 rebase 到 `9d3e9a3d`（v0.45.301）后重跑**（`--maxfail=1000 -m "not integration"`）：
+**5198 passed / 1 failed / 1 skipped / 83 deselected / 2 xfailed**（266s）。唯一的红仍是 `TestCoverageHorizon`
+（CPI 剩 80 天、NFP 剩 74 天 < 90 天阈值），在**未改动的 origin/main 上同样红**；唯一 skip 是 `test_scheduler.py`（`schedule` 库不可用，既有）。
+关键变异（M3/M5/M5b/M6/M7/M8/M9/M11/M13）在新基线上与 09-13 逐条一致（原 14 条里只重跑这 9 条：
+它们是新测试独占、或证明被删的旧路径确实被拦的那几条）。**没重跑的 5 条**（M0/M1/M2/M4/M12）测的是「WATCHLIST 每只都有块」
+那个方向，归既有渲染测试守：该测试、`thesis_breaks.py`、配置文件自 09-13 起未变；`config.py` 有改动（缓存路径、删死配置），
+但 `WATCHLIST` / `WATCHLIST_EXTENDED` 的键集与顺序逐项核对未变（30 / 71）。这是推断、不是重跑——M2 改的正是 `config.py`。
+此后 `origin/main` 又进 2 个提交（只动 CHANGELOG 别条与两个测试文件各一行 import），再 rebase 一次后**只重跑了相关子集**、没有重跑全套。
+
+### 顺带发现（已开任务芯片，**已由 v0.45.219 处理**）
 
 - `tests/test_thesis_break_schema.py::test_real_config_fully_formattable` 读主 checkout 的**绝对路径**、不存在就 skip：
   在 worktree 里校验的是主 checkout 那份文件而不是被改的这份，换台机器恒 skip；元守卫 `test_no_invisible_prod_data_skips.py` 没抓到它。
+  → v0.45.219：改代码锚点、skip 改断言，元守卫补「路径型」第二物种（本条 09-13 只发现、没动它）。
 
 ## [0.45.216] — 2026-09-13 — CHANGELOG 完整性测试挂成 git hook：pre-commit 管不到出事的那条路径，兜底的是 pre-push
 
@@ -6257,6 +6271,8 @@ gap=21 结论不变。测 +10pp 真实差异约需 161 个 ISO 周（≈3 年，
 ### 顺带发现（未处理）
 
 - `_all_tickers` 只有 24 个，配置里有 41 个标的块 ⇒ `ThesisBreakConfig.get_coverage_info` 覆盖统计漏算 17 只。
+  **（v0.45.217 订正：这条的口径错了。基准应是网站 30 只 `config.WATCHLIST`，不是 41 个块；`_all_tickers` 是 WATCHLIST 08-25 前的旧快照，
+  已删、分母改调用时读 WATCHLIST。若按本条说法「以块为准」去派生，覆盖率会恒为 100%。）**
 - 我自己在删除时差点留下半截函数体：`ast.parse` 接受「类体里的 `return`」（那是 compile 阶段才报的错），
   改用 `compile()` 核对并以正对照证明它能抓到。
 - Cowork 周任务提示词用裸 `python3`（CLAUDE.md 硬规则要求 `/usr/local/bin/python3`）——用户配置，未改。
