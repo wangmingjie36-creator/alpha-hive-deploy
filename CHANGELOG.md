@@ -223,12 +223,12 @@ A 还多开了 SNOW / VKTX——生产早持有（09-08 / 09-15），空沙箱�
 **改动**（仅 `tests/`，均在测试体内调用、不提成模块级/类属性常量——那会在收集期就地冻死）：
 - `test_options_analyzer.py`：`_expiry_in(days)` = `date.today() + timedelta`；近月 +3 天（原「3 天后」）、远月诱饵 +94 天
   （原 `2026-12-18` 同样会在 12-18 后过期，使「误用窄链」这个变异退化成 `None`、看不出是哪条接线坏了）。
-- `test_iv_structure_guards.py`：`CALLS` 类属性 → `_calls()`，DTE 取写下时的原值 17 / 143（2026-08-25 写下），OI 500:900 不变。
+- `test_iv_structure_guards.py`：`CALLS` 类属性 → `_calls()`，DTE 取 17 / 143（按 git 提交日期 2026-08-25 推算的原值，不是作者自述），OI 500:900 不变。
 - `test_memory_store.py`：生成前后各取一次今天，断言日期段 ∈ {前, 后}（跨午夜也不误报，不把任何年份写进断言）。
 
 **验证**：
 - **拨钟**（自制 `clockshift_harness`，替换 `datetime.date/datetime` 并同步拨 pandas 的钟；**不入本仓**，
-  存于 auto-memory 目录，配方与五个踩坑见 `alpha-hive-time-bomb-audit.md`）。三个改动文件 85 条在 −10 / 0 / 30 / 101 / 102 / 115 / 116 / 117 / 120 / 400 / 1000 / 3650 天
+  存于 auto-memory 目录，配方与六个踩坑见 `alpha-hive-time-bomb-audit.md`）。三个改动文件 85 条在 −10 / 0 / 30 / 101 / 102 / 115 / 116 / 117 / 120 / 400 / 1000 / 3650 天
   各全过——含 2026-12-31、2027-01-01、2027-01-14/15/16 这几个恰好卡在边界上的日子。
 - **全套件（CI 同款命令 `-m "not integration and not network"`）**：
 
@@ -253,16 +253,38 @@ A 还多开了 SNOW / VKTX——生产早持有（09-08 / 09-15），空沙箱�
 1. 只拨了 `datetime` 系与 pandas 的钟，**`time.time()`/`monotonic()` 没拨**。根目录 29 个模块共 96 处 `time.time()` 调用（ast 计，含别名、仅代码、
    不含子目录）；grep 核过没有一处与日期解析写在同一行，**未逐条审读**。
    `tests/` 里唯一的 epoch 字面量是 `test_newsapi_client.py` 的 2024 年时间戳。
-2. 整日偏移，星期只覆盖了 周一/二/三/六/日；未覆盖节假日、时区（本机 PDT）。
+2. 整日偏移，星期只覆盖了 周一/二/三/六/日；未覆盖节假日、时区（本机 PDT）。偏移是给「当前时刻」加 timedelta、不重算夏令时，
+   跨过切换点时带时区的墙钟会差 1 小时（没有测试因此红过，但没专门验）。
 3. `-m` 排除的 86 条（network/integration）：**测试体内 0 处未来日期字面量**（用 ast 对照过），`test_options_analyzer.py` 里的
    `"expirations": ["2026-09-18"]` 仅被透传（`options_analyzer.py:2513` 的 `[:3]`），不与时钟比较，**未动**。
 4. 这是快照：新测试天天进（本 session 内别的 session 又合了几条）。能一直保鲜的只有定期重跑，
    例如 CI 加一个 `CLOCK_SHIFT_DAYS=45` 的 job——**未做**，留给用户决定。
-5. 全仓静态守卫**未做**：census 出 134 处「未来日期字面量 / 20 个文件」，绝大多数是注入了时钟的（`today=`、`monkeypatch _pdt_now`），
-   误报率会高到没人看（同 `alpha-hive-known-issues` 的既有结论）。**字面量个数不是炸弹个数**——拨钟跑才是。
+5. 全仓静态守卫**未做**。「未来日期字面量」census 我用**修前**版本实测过：它会列出 3 个文件里的 2 个，但 gamma 那个列的是诱饵
+   `2026-12-18`（真炸的 `2026-09-18` 是过去日期，census 直接忽略），memory_store 的裸年份 `"2026"` 根本不在其中；gamma 修完后测得
+   134 处 / 20 个文件，其中真炸的只有 1 个。其余文件在 +1000 天的全套件里都不红（抽查了 6 个，确是注入了时钟：`today=`、
+   `monkeypatch _pdt_now`；其余未逐个审读）。所以 census 是「该去读哪些文件」的清单、不是炸弹清单，误报率高到没人看
+   （同 `alpha-hive-known-issues` 的既有结论）。**字面量个数不是炸弹个数**——拨钟跑才是。
 
 **过程中踩的两个 shell 坑**（都差点让我拿假证据下结论）：zsh 里 `rm -f 通配符` 无匹配会直接中断 `&&` 链，而链后另起一行的
-`echo "started"` 照常执行——**「已启动」是 echo 的、不是进程的，要用 `pgrep` 核**；未加引号的 heredoc 里的反引号会被当命令替换执行。
+`echo "started"` 照常执行——**「已启动」是 echo 的、不是进程的，要核进程**；未加引号的 heredoc 里的反引号会被当命令替换执行。
+（二次检查补：核进程别用 `pgrep -f`——它会匹配到**执行它的那条 shell 命令行本身**，恒报「还在跑」，我自己就中招过；
+用 `ps -axo command | grep '[p]ytest'`，括号技巧让 grep 不匹配自己。）
+
+**二次检查（同日，复核本条自己）**：
+- **变基后重跑**：并入 0.45.297–299 之后，全套件在真实钟 / +120 天 / +400 天各 **1 红 / 5126 过**，三次都只有 `TestCoverageHorizon`；
+  选中数 5129 与 `--collect-only` 闸一致（此前的 5100 → 5129 是别的 session 新增的 29 条，不是 harness 的问题）。别人新合的测试至 +400 天没有新炸弹。
+- **CI 独立核对**（GitHub Actions，Linux / UTC / Python 3.11.16，对本提交 `6b7dca02` 的那次）：5104 PASSED / 36 SKIPPED / 1 FAILED / 2 XFAIL，
+  唯一的 FAILED 是 `TestCoverageHorizon`；本条改的三处共 13 条全 PASSED。
+- ⚠️ **观察（未处理，留给用户）**：`main` 最近 100 次 CI（2026-09-15 起）**0 次成功**（67 红 / 32 取消 / 1 进行中）。设计红常驻，
+  CI 状态灯已经无法提示「新回归」——得点进去读失败清单才知道红的是不是那一条。
+- **更正了三处不实 / 过头的表述**：census 的说法（见「审计的边界」5，改成修前实测）；DTE 17 / 143 是按提交日期推算而非作者自述（测试 docstring 同步改了）；
+  核进程别用 `pgrep -f`（见上）。
+- **harness 缺陷**（不在本仓，只改了 auto-memory）：cwd 不对时 ast 扫描**静默扫空**——从 `/tmp` 跑只 pre-import 了 7 个包、退出码 0，
+  「先 import 第三方栈再换类」的安全网无声消失。加了两道会响的守卫（cwd 下无 `tests/`、扫不到 numpy/pandas ⇒ `RuntimeError`，两道都实测会响），
+  扫描从「根目录 + tests/」扩到整仓（原来漏掉只在子包里 import 的 `telegram`）。换类逻辑没变；用新版重跑：三个改动文件在 +120 / +400 天各 85 过，
+  `test_prefetch_market_bundle`（pandas 钟的 canary）在 +30 / +400 天各 30 过。
+- **没有查出问题的部分**：三处测试的逻辑本身（CI 的 UTC 时区、不同星期都成立；跨午夜按逻辑推演成立——日期取自两次 `today()` 之间——但**没有实测跨午夜**）；
+  `CALLS` 改名无外部引用；`test_pytestmark_placement` 这类会遍历测试文件的守卫在 CI 上对改过的文件全过。
 
 ## [0.45.295] — 2026-09-20 — Fixed：`weekly_optimizer` 的 `WEIGHT_CLAMPS` 与归零维度结构矛盾，每周诊断死在两道闸之前（连续两周）；修完盒子后闸 1 会换个理由恒红，一并修；Added：对真实 config 的可行性观测点 + `main()` 不可行路径端到端测试
 
