@@ -1,7 +1,24 @@
 """OptionsAnalyzer + OptionsAgent 单元测试"""
 
+from datetime import date, timedelta
+
 import pytest
 from options_analyzer import OptionsAnalyzer, OptionsAgent, OptionsDataFetcher
+
+
+def _expiry_in(days: int) -> str:
+    """相对**今天**的到期日（YYYY-MM-DD）。
+
+    `calculate_gamma_expiry_calendar` 用 `date.today()` 丢掉已过期的到期日，而
+    `OptionsAgent.analyze` 读的是真实墙钟（`options_analyzer.py` 全文件 20 处
+    `datetime.now()`，`analyze()` 函数体内就有 5 处，没有单一接缝可冻）。
+    所以夹具里写死的绝对日期只在它仍在未来时才成立：
+    v0.45.258 写死了 2026-09-18，09-19 起两条测试恒红——与任何代码改动无关。
+
+    夹具日期必须和被测代码读同一个钟：从同一个 `date.today()` 派生，并且在
+    **测试体内调用**（不要提成模块级/类属性常量——那会在收集期就地冻死）。
+    """
+    return (date.today() + timedelta(days=days)).isoformat()
 
 
 @pytest.fixture(autouse=True)
@@ -228,16 +245,21 @@ class TestGammaCalendarUsesFullExpiryView:
     def test_prefers_full_expiry_view_over_narrow_chain(self, monkeypatch):
         import cboe_options
 
+        # 到期日全部相对今天（见 _expiry_in）：近月 3 天后落在 DTE<7 窗口里
+        # （正是被截断链排除的那个），远月 94 天后超出 _PIN_RISK_MAX_DTE=45。
+        near_expiry = _expiry_in(3)
+        far_expiry = _expiry_in(94)
+
         # 近月截断链：唯一候选到期日是远月，OI 集中在明显不合理的 $999。
         narrow_calls = [{"strike": 999.0, "openInterest": 500, "impliedVolatility": 0.3,
-                          "gamma": 0.02, "expiry": "2026-12-18"}]
+                          "gamma": 0.02, "expiry": far_expiry}]
         narrow_puts = [{"strike": 999.0, "openInterest": 400, "impliedVolatility": 0.3,
-                         "gamma": 0.02, "expiry": "2026-12-18"}]
+                         "gamma": 0.02, "expiry": far_expiry}]
         # 全到期日视图：真正最近到期日（3 天后）OI 集中在贴近现价的 $150。
         full_calls = [{"strike": 150.0, "openInterest": 5000, "impliedVolatility": 0.3,
-                        "gamma": 0.05, "expiry": "2026-09-18"}]
+                        "gamma": 0.05, "expiry": near_expiry}]
         full_puts = [{"strike": 150.0, "openInterest": 4000, "impliedVolatility": 0.3,
-                       "gamma": 0.05, "expiry": "2026-09-18"}]
+                       "gamma": 0.05, "expiry": near_expiry}]
 
         agent = OptionsAgent()
         self._base_mocks(agent, monkeypatch, narrow_calls, narrow_puts)
@@ -248,16 +270,17 @@ class TestGammaCalendarUsesFullExpiryView:
 
         result = agent.analyze("TEST", stock_price=150.0)
         gc = result.get("gamma_calendar") or {}
-        assert gc.get("pin_expiry") == "2026-09-18"
+        assert gc.get("pin_expiry") == near_expiry
         assert gc.get("pin_strike") == 150.0
 
     def test_falls_back_to_narrow_chain_when_full_view_unavailable(self, monkeypatch):
         import cboe_options
 
+        near_expiry = _expiry_in(3)
         narrow_calls = [{"strike": 150.0, "openInterest": 500, "impliedVolatility": 0.3,
-                          "gamma": 0.02, "expiry": "2026-09-18"}]
+                          "gamma": 0.02, "expiry": near_expiry}]
         narrow_puts = [{"strike": 150.0, "openInterest": 400, "impliedVolatility": 0.3,
-                         "gamma": 0.02, "expiry": "2026-09-18"}]
+                         "gamma": 0.02, "expiry": near_expiry}]
 
         agent = OptionsAgent()
         self._base_mocks(agent, monkeypatch, narrow_calls, narrow_puts)
@@ -268,7 +291,7 @@ class TestGammaCalendarUsesFullExpiryView:
 
         result = agent.analyze("TEST", stock_price=150.0)
         gc = result.get("gamma_calendar") or {}
-        assert gc.get("pin_expiry") == "2026-09-18"
+        assert gc.get("pin_expiry") == near_expiry
         assert gc.get("pin_strike") == 150.0
 
 
