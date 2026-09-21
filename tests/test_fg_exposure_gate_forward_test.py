@@ -1,7 +1,7 @@
 """F&G 组合层敞口控制门前瞻检验（v0.45.242 共振加成那次的预注册模式，本次移植到组合层）的守卫。
 
 `experiments/fg_exposure_gate_forward_test.py` 是一份**预注册**：价值全在"看结果之前写死"。
-这里守的不是"算得对不对"这一件事，而是四件（同 `tests/test_resonance_boost_forward_test.py`
+这里守的不是"算得对不对"这一件事，而是五件（同 `tests/test_resonance_boost_forward_test.py`
 的立场）：
 
 1. 预注册常量没被悄悄改掉。
@@ -11,12 +11,20 @@
 4. 统计对象与共振加成那次**不同**——这次改的是仓位大小不是排序，横截面 IC 不适用，
    用的是两个变体（`paper_portfolio.run_replay` 真实重放）净值曲线的周度收益率差，
    一并守住"这套改法真的接的是真实 `paper_portfolio` 代码，不是重新写一遍"。
+5. 自证的**起点**（v0.45.297 事后修订）：A/B 必须从生产在窗口起点的状态起跑，否则仓位基数
+   （= 本金 + 累计已实现盈亏）对不上，自证在真实数据上必红——而这个缺陷在首次拿到真实前瞻样本
+   之前从未暴露过（旧测试用手写的「生产记录」，从没见过一份真实状态）。第 10~14 节守这一条。
 """
 from __future__ import annotations
 
 import datetime
+import hashlib
 import importlib.util
+import json
+import os
+import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -296,7 +304,7 @@ class TestRealRunReplayIntegration:
         dates = ["2026-09-16"]
         for d in dates:
             _write_snapshot(snap_dir, "NVDA", d, 7.5, "bullish")
-        res = fwd.evaluate(dates, "2026-09-16", "2026-09-17", tmp_path / "sandbox", insample=False)
+        res = fwd.evaluate(dates, "2026-09-16", "2026-09-17", tmp_path / "sandbox", insample=False, seed={})
         assert res["status"] == "not_ready"
         assert res["selfproof_rate"] is None
 
@@ -315,7 +323,7 @@ class TestRealRunReplayIntegration:
             "holding_days": 1, "shares": 9999.0, "gross_return_pct": 0.0, "net_return_pct": 0.0,
             "cost_pct": 0.0, "pnl_usd": 0.0, "exit_reason": "TIME", "confidence": "high", "score": 7.5,
         })
-        res = fwd.evaluate(dates, "2026-09-16", "2026-09-17", tmp_path / "sandbox", insample=False)
+        res = fwd.evaluate(dates, "2026-09-16", "2026-09-17", tmp_path / "sandbox", insample=False, seed={})
         assert res["status"] == "cannot_judge"
         assert res["selfproof"]["reproduced"] == 0
 
@@ -414,3 +422,601 @@ class TestStatusLine:
     def test_confirmed_line_points_to_the_script(self):
         line = fwd.status_line({"status": "confirmed", "look": "中期"})
         assert "fg_exposure_gate_forward_test.py" in line
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 10~14：窗口起点种子（v0.45.297 事后修订）
+#
+# 真因：A/B 沙箱从空状态起跑，而生产在窗口首日已带着累计已实现盈亏。仓位基数
+# `nav = cash + Σ size_usd` 是**状态**，空沙箱只能复现「开哪只、什么方向」（决策层），
+# 复现不了「买多少」（金额层）——首次拿到真实前瞻样本就报「精确 0/8、决策层 8/8」。
+# ══════════════════════════════════════════════════════════════════════════════
+
+_SEED_DIR = _ROOT / "experiments" / "fg_gate_forward_seed"
+
+
+def _pos_row(ticker, entry_date, size_usd, entry_price=100.0, direction="bullish"):
+    return {"ticker": ticker, "direction": direction, "entry_date": entry_date,
+            "entry_price": entry_price, "sl_price": round(entry_price * 0.93, 4),
+            "tp_price": round(entry_price * 1.15, 4), "shares": round(size_usd / entry_price, 4),
+            "size_usd": size_usd, "time_stop_date": "2026-09-24", "confidence": "high",
+            "score": 7.5, "rationale": "seed", "sizing": "tier"}
+
+
+def _closed_row(ticker, pnl, entry_date="2026-08-20", exit_date="2026-08-27"):
+    return {"ticker": ticker, "direction": "bullish", "entry_date": entry_date, "entry_price": 100.0,
+            "exit_date": exit_date, "exit_price": 100.0 + pnl / 10, "holding_days": 7, "shares": 10.0,
+            "gross_return_pct": 0.0, "net_return_pct": 0.0, "cost_pct": 0.0, "pnl_usd": pnl,
+            "exit_reason": "TP", "confidence": "high", "score": 7.5}
+
+
+def _jsonl(rows):
+    return "".join(json.dumps(r) + "\n" for r in rows).encode()
+
+
+def _make_seed(*, cash=46000.0, positions=(), closed=(), last_run_date="2026-09-15"):
+    meta = {"version": "test", "starting_capital": 50000.0, "starting_date": "2026-03-09",
+            "cash": cash, "last_run_date": last_run_date, "config_snapshot": {}}
+    return {"meta.json": json.dumps(meta).encode(), "positions.jsonl": _jsonl(positions),
+            "closed_trades.jsonl": _jsonl(closed)}
+
+
+def _write_seed_dir(d, files, *, window_start="2026-09-16", manifest_overrides=None):
+    """校验和按**传入内容**现算——内容坏但校验和对，才能单独考验内容校验那一层。"""
+    d.mkdir(parents=True, exist_ok=True)
+    for n, b in files.items():
+        (d / n).write_bytes(b)
+    manifest = {"schema": 1, "window_start": window_start,
+                "seed_last_run_date": json.loads(files["meta.json"]).get("last_run_date"),
+                "files": {n: {"sha256": hashlib.sha256(b).hexdigest(), "bytes": len(b)}
+                          for n, b in files.items()}}
+    manifest.update(manifest_overrides or {})
+    (d / "SEED_SOURCE.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+# ── 10. 仓库里冻结的那份真种子（环境无关：文件随仓库发布 ⇒ 是断言，不是 skip）───────
+
+class TestFrozenSeedIsThePreregisteredOne:
+    def test_manifest_is_bound_to_the_preregistered_window(self):
+        m = json.loads((_SEED_DIR / "SEED_SOURCE.json").read_text(encoding="utf-8"))
+        assert m["window_start"] == fwd.FORWARD_START == "2026-09-16"
+        assert m["seed_last_run_date"] == "2026-09-15"  # 窗口首日前一交易日收盘
+        commit = m["source"]["commit"]
+        assert len(commit) == 40 and set(commit) <= set("0123456789abcdef")
+        assert set(m["files"]) == set(fwd.SEED_STATE_FILES)
+
+    def test_load_seed_accepts_the_shipped_seed(self):
+        seed = fwd.load_seed()
+        assert set(seed) == set(fwd.SEED_STATE_FILES)
+        assert all(isinstance(b, bytes) and b for b in seed.values())
+
+    def test_the_seed_deliberately_has_no_equity_curve(self):
+        """`equity_curve.jsonl` 只写不读；播进去会让窗口前的周也进统计量。"""
+        assert not (_SEED_DIR / "equity_curve.jsonl").exists()
+
+    def test_seed_files_are_tracked_by_git(self):
+        """种子若只躺在工作区没进 git，本机全绿、别处 `run()` 永远 cannot_judge——
+        这一步只隔着一个未被跟踪的文件。128 = 这里不是 git 仓库（导出的源码包），
+        「被不被跟踪」无从谈起，skip 正当；其余环境（检出/worktree/CI）都是 git 仓库。"""
+        rels = [f"experiments/{fwd.SEED_DIRNAME}/{n}" for n in (*fwd.SEED_STATE_FILES, fwd.SEED_MANIFEST_NAME)]
+        r = subprocess.run(["git", "-C", str(_ROOT), "ls-files", "--error-unmatch", "--", *rels],
+                           capture_output=True, text=True)
+        if r.returncode == 128:
+            pytest.skip("不在 git 仓库里（导出的源码包）")
+        assert r.returncode == 0, f"种子文件未被 git 跟踪：{r.stderr.strip()}"
+
+
+# ── 11. `load_seed` / `_validate_seed_state`：坏种子一律 SeedError，不静默 ───────────
+
+class TestLoadSeedRejectsBadSeeds:
+    def _good(self, tmp_path):
+        d = tmp_path / "seed_ok"
+        files = _make_seed(positions=[_pos_row("OLD", "2026-09-10", 5000.0)],
+                           closed=[_closed_row("OLD", -50.0)])
+        _write_seed_dir(d, files)
+        return d, files
+
+    def test_a_valid_seed_loads_byte_for_byte(self, tmp_path):
+        d, files = self._good(tmp_path)
+        assert fwd.load_seed(d) == files
+
+    def test_tampered_file_fails_the_checksum(self, tmp_path):
+        d, _ = self._good(tmp_path)
+        (d / "positions.jsonl").write_bytes(b"")
+        with pytest.raises(fwd.SeedError, match="sha256"):
+            fwd.load_seed(d)
+
+    def test_missing_manifest_is_a_seed_error(self, tmp_path):
+        d, _ = self._good(tmp_path)
+        (d / fwd.SEED_MANIFEST_NAME).unlink()
+        with pytest.raises(fwd.SeedError, match="清单"):
+            fwd.load_seed(d)
+
+    def test_missing_state_file_is_a_seed_error(self, tmp_path):
+        d, _ = self._good(tmp_path)
+        (d / "closed_trades.jsonl").unlink()
+        with pytest.raises(fwd.SeedError, match="closed_trades"):
+            fwd.load_seed(d)
+
+    def test_seed_for_a_different_window_start_is_refused(self, tmp_path):
+        """改了 FORWARD_START 没重建种子 ⇒ 红，不是拿旧起点悄悄算。"""
+        d = tmp_path / "seed_other"
+        _write_seed_dir(d, _make_seed(), window_start="2026-09-23")
+        with pytest.raises(fwd.SeedError, match="FORWARD_START"):
+            fwd.load_seed(d)
+
+    def test_manifest_last_run_date_must_match_meta(self, tmp_path):
+        d = tmp_path / "seed_lrd"
+        _write_seed_dir(d, _make_seed(), manifest_overrides={"seed_last_run_date": "2026-09-14"})
+        with pytest.raises(fwd.SeedError, match="不一致"):
+            fwd.load_seed(d)
+
+    @pytest.mark.parametrize("label, kwargs, match", [
+        ("cash 非有限（v0.45.97 NaN 事故形状）", {"cash": float("nan")}, "非有限"),
+        ("cash 是 inf", {"cash": float("inf")}, "非有限"),
+        ("起点不早于窗口首日", {"last_run_date": "2026-09-16"}, "不早于"),
+        ("起点晚于窗口首日", {"last_run_date": "2026-09-20"}, "不早于"),
+        ("last_run_date 不是日期", {"last_run_date": "yesterday"}, "YYYY-MM-DD"),
+        ("持仓 entry_date 晚于种子日期", {"positions": [_pos_row("X", "2026-09-16", 100.0)]}, "晚于"),
+        ("持仓 size_usd 非有限", {"positions": [_pos_row("X", "2026-09-10", float("nan"))]}, "非有限"),
+        ("平仓 pnl_usd 非有限", {"closed": [_closed_row("X", float("nan"))]}, "pnl_usd"),
+    ])
+    def test_bad_content_is_refused_even_with_a_matching_checksum(self, tmp_path, label, kwargs, match):
+        d = tmp_path / "seed_bad"
+        _write_seed_dir(d, _make_seed(**kwargs))
+        with pytest.raises(fwd.SeedError, match=match):
+            fwd.load_seed(d)
+
+    def test_position_row_that_cannot_build_a_Position_is_refused(self, tmp_path):
+        bad = _pos_row("X", "2026-09-10", 100.0)
+        del bad["tp_price"]
+        d = tmp_path / "seed_badpos"
+        _write_seed_dir(d, _make_seed(positions=[bad]))
+        with pytest.raises(fwd.SeedError, match="Position"):
+            fwd.load_seed(d)
+
+
+# ── 12. `_apply_seed` / `evaluate` 对种子的契约 ─────────────────────────────────────
+
+class TestApplySeedAndEvaluateContract:
+    def test_apply_seed_writes_exactly_the_seed_files_verbatim(self, tmp_path):
+        seed = _make_seed(positions=[_pos_row("OLD", "2026-09-10", 5000.0)])
+        fwd._apply_seed(tmp_path / "sb", seed)
+        assert {p.name for p in (tmp_path / "sb").iterdir()} == set(fwd.SEED_STATE_FILES)
+        for n, b in seed.items():
+            assert (tmp_path / "sb" / n).read_bytes() == b
+
+    def test_apply_seed_refuses_a_sandbox_that_already_has_state(self, tmp_path):
+        """`run_replay` 对已存在的 state_dir 是「续跑」语义，往里再播种会与之混在一起。"""
+        sb = tmp_path / "sb"
+        sb.mkdir()
+        (sb / "positions.jsonl").write_text("")
+        with pytest.raises(FileExistsError):
+            fwd._apply_seed(sb, _make_seed())
+
+    def test_apply_seed_refuses_to_seed_the_equity_curve(self, tmp_path):
+        with pytest.raises(ValueError, match="equity_curve"):
+            fwd._apply_seed(tmp_path / "sb", {**_make_seed(), "equity_curve.jsonl": b""})
+
+    def test_forward_without_a_seed_is_an_error_not_an_empty_sandbox(self, pp, tmp_path):
+        """前瞻模式不带种子 = v0.45.297 之前的设计缺陷。让它在 API 层就不可能。"""
+        with pytest.raises(ValueError, match="seed"):
+            fwd.evaluate(["2026-09-16"], "2026-09-16", "2026-09-17", tmp_path / "sb", insample=False)
+
+    def test_insample_with_a_seed_is_an_error(self, pp, tmp_path):
+        with pytest.raises(ValueError, match="样本内"):
+            fwd.evaluate(["2026-09-01"], "2026-09-01", "2026-09-02", tmp_path / "sb",
+                         insample=True, seed=_make_seed())
+
+
+# ── 13. 回归：离线复现真因 ───────────────────────────────────────────────────────────
+
+_W_DATES = ["2026-09-16", "2026-09-17"]
+_W_SINCE, _W_BEFORE = "2026-09-16", "2026-09-18"
+
+
+def _world(pp_fx, tmp_path, *, closed=None):
+    """合成的生产世界：窗口起点前生产已持有 OLD（5000）、cash 46000 ⇒ 成本价 NAV 基数 51000，
+    而空沙箱是 50000。窗口内 NVDA/AMD 是新候选；OLD 也在候选里，但生产已持有所以不会重开
+    ——与真实数据里 SNOW/VKTX 被空沙箱「多开」同一形状。
+
+    「生产实际发生的事」= 从这份种子起跑的 `run_replay`，落到 conftest 隔离出来的生产状态文件。
+    返回种子字节。
+
+    ⚠️ 「生产」的起点文件**必须直接写盘，不许走被测的 `fwd._apply_seed`**：否则播种漏写某个文件时
+    「生产」与 A 一起漏、两边错得一致，复现率照样 100%（实测：漏播 meta.json〔现金〕时全部集成测试
+    仍绿，只有一条单元测试红——自证拿被测对象去证明被测对象）。"""
+    _pp, snap_dir, _fg_db = pp_fx
+    for d in _W_DATES:
+        for t in ("NVDA", "AMD", "OLD"):
+            _write_snapshot(snap_dir, t, d, 7.5, "bullish")
+    seed = _make_seed(positions=[_pos_row("OLD", "2026-09-10", 5000.0)],
+                      closed=closed if closed is not None else [_closed_row("OLD", -50.0)])
+    prod = tmp_path / "prod_run"
+    prod.mkdir()
+    for name, blob in seed.items():
+        (prod / name).write_bytes(blob)
+    _pp.run_replay({}, prod, dates=_W_DATES)
+    _pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(prod / "closed_trades.jsonl", _pp.CLOSED_FILE)
+    shutil.copy(prod / "positions.jsonl", _pp.POSITIONS_FILE)
+    return seed
+
+
+class TestSeededReplayReproducesProduction:
+    def test_empty_sandbox_reproduces_decisions_but_not_amounts(self, pp, tmp_path):
+        """**这就是 09-16~09-18 那次「0/8」的离线复现**：决策层 100%、金额层 0%。"""
+        _world(pp, tmp_path)
+        res = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb_empty", insample=False, seed={})
+        assert res["status"] == "cannot_judge"
+        sp = res["selfproof"]
+        assert sp["reproduced"] == 0
+        assert sp["decision_reproduced"] == sp["real_entries"] == 2
+        # 文案要把原因指对层：决策层复现了 ⇒ 别怀疑评分链，去查金额（起点状态等）
+        assert "决策层" in res["reason"] and "仓位金额" in res["reason"]
+        assert "评分链" not in res["reason"]
+
+    def test_seeded_sandbox_reproduces_production_to_the_cent(self, pp, tmp_path):
+        seed = _world(pp, tmp_path)
+        res = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb", insample=False, seed=seed)
+        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2}
+        assert res["selfproof_rate"] == 1.0
+        assert res["status"] == "not_ready"  # 自证过了，进入统计阶段（周数不够，如实说继续攒）
+        assert res["seed_last_run_date"] == "2026-09-15"
+
+    def test_seeded_cash_and_positions_set_the_sizing_base(self, pp, tmp_path):
+        """机制本身，不依赖任何「生产」：新仓位 ∝ nav 基数 = cash + Σ size_usd。
+        种子里 cash 46000 + OLD 5000 = 51000，空沙箱是 50000 ⇒ 同一只票的仓位差恰为 51000/50000。"""
+        _pp = pp[0]
+        seed = _world(pp, tmp_path)
+
+        def nvda_size(label, s):
+            d = tmp_path / label
+            res = fwd._replay_variant({}, d, _W_DATES, seed=s)
+            return next(p["size_usd"] for p in res["open_positions"] if p["ticker"] == "NVDA")
+        assert nvda_size("seeded", seed) / nvda_size("empty", {}) == pytest.approx(51000.0 / 50000.0, rel=1e-3)
+
+    def test_both_variants_start_from_the_same_seeded_book(self, pp, tmp_path):
+        """B 若不播种，「治疗组 vs 对照组」就不再是同一个起点上的比较。"""
+        _pp = pp[0]
+        seed = _world(pp, tmp_path)
+        sb = tmp_path / "sb"
+        fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, sb, insample=False, seed=seed)
+        for variant in ("A_baseline", "B_treatment"):
+            assert "OLD" in {p["ticker"] for p in _pp._load_jsonl(sb / variant / "positions.jsonl")}
+            hist = _pp._load_jsonl(sb / variant / "closed_trades.jsonl")
+            assert any(t["ticker"] == "OLD" and t["pnl_usd"] == -50.0 for t in hist)
+
+    def test_seeded_equity_curve_covers_the_window_only(self, pp, tmp_path):
+        """统计量的周度收益率只该来自窗口内的净值——种子里若带着窗口前的净值行，会让窗口前的周
+        也进检验（合格周数被虚增，α 花在没有效应可测的周上）。"""
+        _pp = pp[0]
+        seed = _world(pp, tmp_path)
+        sb = tmp_path / "sb"
+        fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, sb, insample=False, seed=seed)
+        for variant in ("A_baseline", "B_treatment"):
+            rows = _pp._load_jsonl(sb / variant / "equity_curve.jsonl")
+            assert [r["date"] for r in rows] == _W_DATES
+
+    def test_closed_history_reaches_the_position_sizer(self, pp, tmp_path, monkeypatch):
+        """`closed_trades.jsonl` 是**潜伏依赖**：仓位乘数按标的历史胜率算，现行 CONFIG 三档都是 1.0
+        所以不播它也复现得了——直到有人改了 `win_rate_multiplier`。用非 1.0 的乘数把它咬出来。"""
+        _pp = pp[0]
+        monkeypatch.setitem(_pp.CONFIG, "min_samples_for_win_rate", 1)
+        monkeypatch.setitem(_pp.CONFIG, "win_rate_multiplier", {"strong": 1.0, "normal": 1.0, "weak": 0.5})
+        seed = _world(pp, tmp_path, closed=[_closed_row("OLD", -50.0), _closed_row("NVDA", -80.0),
+                                            _closed_row("AMD", -80.0)])
+        ok = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb_ok", insample=False, seed=seed)
+        assert ok["selfproof"]["reproduced"] == 2
+        no_hist = {k: v for k, v in seed.items() if k != "closed_trades.jsonl"}
+        bad = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb_bad", insample=False, seed=no_hist)
+        assert bad["selfproof"]["reproduced"] == 0          # 金额差一倍
+        assert bad["selfproof"]["decision_reproduced"] == 2  # 决策层仍对——正是这类差异的形状
+
+    def test_selfproof_still_goes_red_when_the_scoring_or_config_drifts(self, pp, tmp_path, monkeypatch):
+        """播种不许把自证变成恒绿：A 的配置在期间被改动，必须仍然红（且文案指向评分链/配置）。"""
+        _pp = pp[0]
+        seed = _world(pp, tmp_path)
+        monkeypatch.setitem(_pp.CONFIG, "entry_score_bull", 9.0)  # 生产当时是 6.5：A 一笔都不开
+        res = fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, tmp_path / "sb", insample=False, seed=seed)
+        assert res["status"] == "cannot_judge"
+        assert res["selfproof"]["decision_reproduced"] == 0
+        assert "评分链" in res["reason"]
+
+
+class TestSelfproofReasonNamesTheLayer:
+    K = ("NVDA", "2026-09-16", "bullish")
+
+    def test_stats_separate_the_two_layers(self):
+        sp = fwd._selfproof_stats({(*self.K, 100.0), ("AMD", "2026-09-16", "bullish", 50.0)},
+                                  {(*self.K, 101.0), ("AMD", "2026-09-16", "bullish", 50.0)})
+        assert (sp["total"], sp["exact"], sp["decision"]) == (2, 1, 2)
+        assert sp["rate"] == 0.5 and sp["decision_rate"] == 1.0
+
+    def test_amounts_wrong_decisions_right(self):
+        sp = fwd._selfproof_stats({(*self.K, 100.0)}, {(*self.K, 101.0)})
+        r = fwd._selfproof_failure_reason(sp)
+        assert "0/1" in r and "决策层" in r and "1/1" in r and "仓位金额" in r
+        assert "评分链" not in r
+
+    def test_decisions_wrong_too(self):
+        sp = fwd._selfproof_stats({(*self.K, 100.0)}, {("AMD", "2026-09-16", "bullish", 100.0)})
+        r = fwd._selfproof_failure_reason(sp)
+        assert "评分链" in r and "0/1" in r
+        assert "仓位金额" not in r
+
+
+# ── 14. `run()` 接线：种子不可用 ⇒ 无法判定，绝不退回空沙箱 ──────────────────────────
+
+class TestRunSeedWiring:
+    def _forward_setup(self, pp):
+        _pp, snap_dir, _ = pp
+        _write_snapshot(snap_dir, "NVDA", "2026-09-16", 7.5, "bullish")
+
+    def test_unusable_seed_is_cannot_judge_and_never_falls_back_to_empty(self, pp, monkeypatch):
+        self._forward_setup(pp)
+
+        def _boom(*a, **k):
+            raise fwd.SeedError("测试：种子坏了")
+        monkeypatch.setattr(fwd, "load_seed", _boom)
+        monkeypatch.setattr(fwd, "evaluate", lambda *a, **k: pytest.fail("不许在没有种子时仍去重放"))
+        res = fwd.run(today="2026-09-17")
+        assert res["status"] == "cannot_judge"
+        assert "种子" in res["reason"] and "测试：种子坏了" in res["reason"]
+
+    def test_the_loaded_seed_is_handed_to_evaluate(self, pp, monkeypatch):
+        self._forward_setup(pp)
+        sentinel = _make_seed()
+        seen = {}
+        monkeypatch.setattr(fwd, "load_seed", lambda *a, **k: sentinel)
+
+        def _fake_eval(dates, since, before, root, *, insample=False, seed=None):
+            seen.update(insample=insample, seed=seed)
+            return {"status": "not_ready"}
+        monkeypatch.setattr(fwd, "evaluate", _fake_eval)
+        fwd.run(today="2026-09-17")
+        assert seen == {"insample": False, "seed": sentinel}
+
+    def test_insample_never_touches_the_seed(self, pp, monkeypatch):
+        """样本内从 `bootstrap_date` 起，生产当时是空状态——加载种子在这里是错的。"""
+        self._forward_setup(pp)
+        monkeypatch.setattr(fwd, "load_seed", lambda *a, **k: pytest.fail("样本内不该加载种子"))
+        seen = {}
+
+        def _fake_eval(dates, since, before, root, *, insample=False, seed=None):
+            seen.update(insample=insample, seed=seed)
+            return {"status": "insample"}
+        monkeypatch.setattr(fwd, "evaluate", _fake_eval)
+        fwd.run(insample=True, today="2026-09-17")
+        assert seen == {"insample": True, "seed": None}
+
+    def test_no_forward_dates_is_not_ready_even_if_the_seed_is_broken(self, pp, monkeypatch):
+        """「还没有前瞻样本」与「种子坏了」是两种失败，不许互相掩盖：没样本时先说没样本。"""
+        _pp, snap_dir, _ = pp
+        _write_snapshot(snap_dir, "NVDA", "2026-03-09", 7.0, "bullish")  # 早于 FORWARD_START
+        monkeypatch.setattr(fwd, "load_seed", lambda *a, **k: pytest.fail("没样本时不该去加载种子"))
+        assert fwd.run(today="2026-09-17")["status"] == "not_ready"
+
+
+# ── 15. `build_seed_from_git`：定位规则（合成 git 仓库，环境自造 ⇒ 无需 skip）──────────
+
+_GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.invalid"}
+
+
+def _state_at(lrd, cash, positions=(), closed=()):
+    seed = _make_seed(cash=cash, positions=positions, closed=closed, last_run_date=lrd)
+    return {f"paper_portfolio_state/{n}": b for n, b in seed.items()}
+
+
+def _git_repo(tmp_path, commits, name="repo"):
+    """commits：按顺序的 {相对路径: 字节 | None(删除)}。返回 (repo, [各提交 sha])。"""
+    repo = tmp_path / name
+    repo.mkdir()
+
+    def git(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True,
+                              env={**os.environ, **_GIT_ENV})
+    git("init", "-q")
+    shas = []
+    for i, files in enumerate(commits):
+        for rel, blob in files.items():
+            p = repo / rel
+            if blob is None:
+                p.unlink(missing_ok=True)
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(blob)
+        git("add", "-A")
+        git("-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", f"c{i}")
+        shas.append(git("rev-parse", "HEAD").stdout.decode().strip())
+    return repo, shas
+
+
+def _cash_of(files):
+    return json.loads(files["meta.json"])["cash"]
+
+
+class TestBuildSeedFromGit:
+    def test_picks_the_state_right_before_the_first_commit_that_reaches_the_window(self, tmp_path):
+        repo, shas = _git_repo(tmp_path, [
+            _state_at("2026-09-11", 1000.0), _state_at("2026-09-14", 2000.0),
+            _state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0), _state_at("2026-09-17", 5000.0)])
+        files, manifest = fwd.build_seed_from_git("2026-09-16", repo)
+        assert _cash_of(files) == 3000.0
+        assert manifest["source"]["commit"] == shas[2]
+        assert manifest["window_start"] == "2026-09-16" and manifest["seed_last_run_date"] == "2026-09-15"
+        assert manifest["files"]["meta.json"]["sha256"] == hashlib.sha256(files["meta.json"]).hexdigest()
+
+    def test_same_day_reruns_take_the_last_state_before_the_window(self, tmp_path):
+        repo, shas = _git_repo(tmp_path, [
+            _state_at("2026-09-14", 2000.0), _state_at("2026-09-15", 3000.0),
+            _state_at("2026-09-15", 3100.0), _state_at("2026-09-16", 4000.0)])
+        files, manifest = fwd.build_seed_from_git("2026-09-16", repo)
+        assert _cash_of(files) == 3100.0 and manifest["source"]["commit"] == shas[2]
+
+    def test_a_rollback_after_the_window_does_not_hijack_the_seed(self, tmp_path):
+        """窗口之后有人把状态还原到更早日期（备份恢复）——「last_run_date < since 的**最新**提交」
+        会被它带偏；按「第一个跨过窗口首日的提交」定位则不受影响。"""
+        repo, shas = _git_repo(tmp_path, [
+            _state_at("2026-09-14", 2000.0), _state_at("2026-09-15", 3000.0),
+            _state_at("2026-09-16", 4000.0), _state_at("2026-09-02", 999.0)])
+        files, manifest = fwd.build_seed_from_git("2026-09-16", repo)
+        assert _cash_of(files) == 3000.0 and manifest["source"]["commit"] == shas[1]
+
+    def test_a_deleted_then_readded_state_dir_is_not_a_crash(self, tmp_path):
+        """数据根迁移阶段 5 会 `git rm --cached`：删除提交上 `git show` 会失败，必须被排除。"""
+        gone = {k: None for k in _state_at("2026-09-14", 1.0)}
+        repo, shas = _git_repo(tmp_path, [
+            _state_at("2026-09-14", 2000.0), gone, _state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)])
+        files, manifest = fwd.build_seed_from_git("2026-09-16", repo)
+        assert _cash_of(files) == 3000.0 and manifest["source"]["commit"] == shas[2]
+
+    def test_shallow_clone_is_refused_not_misread_as_no_state(self, tmp_path):
+        repo, _ = _git_repo(tmp_path, [_state_at("2026-09-14", 2000.0), _state_at("2026-09-15", 3000.0),
+                                       _state_at("2026-09-16", 4000.0)])
+        shallow = tmp_path / "shallow"
+        subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{repo}", str(shallow)],
+                       check=True, capture_output=True, env={**os.environ, **_GIT_ENV})
+        with pytest.raises(fwd.SeedError, match="浅克隆"):
+            fwd.build_seed_from_git("2026-09-16", shallow)
+
+    def test_window_before_any_production_state_is_refused(self, tmp_path):
+        repo, _ = _git_repo(tmp_path, [_state_at("2026-09-11", 1000.0), _state_at("2026-09-14", 2000.0)])
+        with pytest.raises(fwd.SeedError, match="之前生产没有任何状态"):
+            fwd.build_seed_from_git("2026-09-01", repo)
+
+    def test_window_production_never_reached_is_refused(self, tmp_path):
+        repo, _ = _git_repo(tmp_path, [_state_at("2026-09-11", 1000.0), _state_at("2026-09-14", 2000.0)])
+        with pytest.raises(fwd.SeedError, match="尚未运行"):
+            fwd.build_seed_from_git("2026-09-30", repo)
+
+    def test_a_non_finite_seed_state_is_refused(self, tmp_path):
+        repo, _ = _git_repo(tmp_path, [_state_at("2026-09-15", float("nan")), _state_at("2026-09-16", 4000.0)])
+        with pytest.raises(fwd.SeedError, match="非有限"):
+            fwd.build_seed_from_git("2026-09-16", repo)
+
+    def test_not_a_git_repo_is_a_seed_error_not_a_crash(self, tmp_path):
+        (tmp_path / "plain").mkdir()
+        with pytest.raises(fwd.SeedError):
+            fwd.build_seed_from_git("2026-09-16", tmp_path / "plain")
+
+    def test_default_repo_root_follows_paths_git_repo_root(self, tmp_path, monkeypatch):
+        """git 仓库根走 `PATHS.git_repo_root`（v0.45.268 专为 git plumbing 与数据根解耦而设）。"""
+        repo, _ = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)])
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(repo))
+        files, _ = fwd.build_seed_from_git("2026-09-16")
+        assert _cash_of(files) == 3000.0
+
+    def test_written_seed_round_trips_through_load_seed(self, tmp_path):
+        repo, _ = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)])
+        files, manifest = fwd.build_seed_from_git("2026-09-16", repo)
+        out = tmp_path / "frozen"
+        fwd.write_seed_dir(out, files, manifest)
+        assert fwd.load_seed(out, forward_start="2026-09-16") == files
+
+    def test_write_seed_dir_refuses_to_overwrite_a_frozen_seed(self, tmp_path):
+        repo, _ = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)])
+        files, manifest = fwd.build_seed_from_git("2026-09-16", repo)
+        out = tmp_path / "frozen"
+        fwd.write_seed_dir(out, files, manifest)
+        before = (out / "meta.json").read_bytes()
+        with pytest.raises(FileExistsError):
+            fwd.write_seed_dir(out, {**files, "meta.json": b"{}"}, manifest)
+        assert (out / "meta.json").read_bytes() == before
+
+
+# ── 16. `--rehearse`：只重放 A，不出统计量 ────────────────────────────────────────────
+
+class TestRehearse:
+    def _synthetic_repo(self, tmp_path, seed):
+        """窗口起点前一状态（= 种子）+ 一个跨过窗口首日的提交（内容无关，只当定位锚点）。"""
+        before = {f"paper_portfolio_state/{n}": b for n, b in seed.items()}
+        return _git_repo(tmp_path, [before, _state_at("2026-09-16", 1.0)], name="rehearse_repo")[0]
+
+    def test_green_when_a_reproduces_production(self, pp, tmp_path):
+        seed = _world(pp, tmp_path)
+        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=self._synthetic_repo(tmp_path, seed))
+        assert res["status"] == "rehearsal_ok"
+        assert res["selfproof"] == {"real_entries": 2, "reproduced": 2, "decision_reproduced": 2}
+        assert res["seed_last_run_date"] == "2026-09-15"
+
+    def test_never_runs_variant_b_and_leaks_no_effect_size(self, pp, tmp_path, monkeypatch):
+        """演练只回答「A 还能不能复现生产」——跑了 B 或带出统计量，就等于提前偷看效应。"""
+        seed = _world(pp, tmp_path)
+        repo = self._synthetic_repo(tmp_path, seed)
+        configs = []
+        orig = fwd._replay_variant
+
+        def spy(cfg, *a, **k):
+            configs.append(cfg)
+            return orig(cfg, *a, **k)
+        monkeypatch.setattr(fwd, "_replay_variant", spy)
+        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
+        assert configs == [{}]  # 只有 A（默认配置）
+        assert not (_EFFECT_KEYS & set(_all_keys(res)))
+
+    def test_red_when_the_config_drifted(self, pp, tmp_path, monkeypatch):
+        _pp = pp[0]
+        seed = _world(pp, tmp_path)
+        repo = self._synthetic_repo(tmp_path, seed)
+        monkeypatch.setitem(_pp.CONFIG, "entry_score_bull", 9.0)
+        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
+        assert res["status"] == "cannot_judge" and "评分链" in res["reason"]
+
+    def test_unobtainable_start_state_is_cannot_judge(self, pp, tmp_path):
+        (tmp_path / "plain").mkdir()
+        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=tmp_path / "plain")
+        assert res["status"] == "cannot_judge" and "无法取窗口起点状态" in res["reason"]
+
+    def test_nothing_to_compare_is_not_ready(self, pp, tmp_path):
+        """窗口内生产没有开仓记录 ⇒ 没有可比对的东西，不是「通过」。"""
+        repo, _ = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)],
+                            name="empty_win_repo")
+        _write_snapshot(pp[1], "NVDA", "2026-09-16", 7.5, "bullish")
+        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
+        assert res["status"] == "not_ready"
+
+
+# ── 17. CLI ───────────────────────────────────────────────────────────────────────────
+
+class TestCli:
+    def test_build_seed_writes_once_and_refuses_to_overwrite(self, tmp_path, monkeypatch, capsys):
+        out = tmp_path / "frozen"
+        files = _make_seed()
+        manifest = {"schema": 1, "window_start": fwd.FORWARD_START, "seed_last_run_date": "2026-09-15",
+                    "source": {"commit": "a" * 40}, "files": {}}
+        monkeypatch.setattr(fwd, "_seed_dir", lambda *a, **k: out)
+        monkeypatch.setattr(fwd, "build_seed_from_git", lambda since, *a, **k: (files, manifest))
+        assert fwd.main(["--build-seed"]) == 0
+        assert (out / "meta.json").read_bytes() == files["meta.json"]
+        marker = (out / "meta.json").read_bytes()
+        monkeypatch.setattr(fwd, "build_seed_from_git", lambda since, *a, **k: ({**files, "meta.json": b"{}"}, manifest))
+        assert fwd.main(["--build-seed"]) == 3
+        assert (out / "meta.json").read_bytes() == marker
+        assert "拒绝覆盖" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("status, code", [("rehearsal_ok", 0), ("not_ready", 1), ("cannot_judge", 3)])
+    def test_rehearse_exit_codes(self, monkeypatch, status, code):
+        monkeypatch.setattr(fwd, "rehearse", lambda since, before, **k: {"status": status, "mode": "rehearse"})
+        assert fwd.main(["--rehearse", "2026-09-09", "2026-09-16"]) == code
+
+    def test_rehearse_passes_its_two_dates_through(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(fwd, "rehearse", lambda since, before, **k: seen.append((since, before)) or {"status": "rehearsal_ok"})
+        fwd.main(["--rehearse", "2026-09-09", "2026-09-16"])
+        assert seen == [("2026-09-09", "2026-09-16")]
+
+    def test_modes_are_mutually_exclusive(self):
+        with pytest.raises(SystemExit) as e:
+            fwd.main(["--insample", "--build-seed"])
+        assert e.value.code == 2
+
+    def test_rehearse_output_reports_both_layers(self, capsys):
+        fwd._print_human({"mode": "rehearse", "status": "cannot_judge", "since": "2026-09-09",
+                          "before": "2026-09-16", "seed_commit": "abcdef1234", "seed_last_run_date": "2026-09-08",
+                          "n_dates": 5, "reason": "x",
+                          "selfproof": {"real_entries": 5, "reproduced": 0, "decision_reproduced": 5}})
+        out = capsys.readouterr().out
+        assert "精确复现 0/5" in out and "决策层复现 5/5" in out

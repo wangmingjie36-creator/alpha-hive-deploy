@@ -1,0 +1,45 @@
+{
+  "version": "0.19.0",
+  "starting_capital": 50000.0,
+  "starting_date": "2026-03-09",
+  "cash": 34147.18586278001,
+  "last_run_date": "2026-09-15",
+  "config_snapshot": {
+    "starting_capital": 50000.0,
+    "bootstrap_date": "2026-03-09",
+    "max_positions": 15,
+    "max_deployed_pct": 80.0,
+    "size_pct_by_tier": {
+      "high": 5.0,
+      "mid": 3.0,
+      "low": 0.0
+    },
+    "sizing_mode": "vol_target",
+    "vol_target": {
+      "target_position_vol_pct": 1.75,
+      "size_pct_min": 1.5,
+      "size_pct_max": 8.0,
+      "conf_multiplier": {
+        "high": 1.0,
+        "mid": 0.6,
+        "low": 0.0
+      },
+      "vol_source_max_age_days": 5
+    },
+    "win_rate_multiplier": {
+      "strong": 1.0,
+      "normal": 1.0,
+      "weak": 1.0
+    },
+    "sl_pct": 7.0,
+    "tp_pct": 15.0,
+    "time_stop_days": 10,
+    "entry_conf_min": "mid",
+    "entry_score_bull": 6.5,
+    "entry_score_bear": 4.85,
+    "candidate_sort_center": null,
+    "min_samples_for_win_rate": 5,
+    "live_start_date": "2026-04-16",
+    "ticker_whitelist": []
+  }
+}

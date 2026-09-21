@@ -1,0 +1,27 @@
+{
+  "files": {
+    "closed_trades.jsonl": {
+      "bytes": 20207,
+      "sha256": "e07369c088c52163fb223c194df81b54742cb000b921cb4d945bd34fd33c3306"
+    },
+    "meta.json": {
+      "bytes": 1057,
+      "sha256": "e6a3d9ae9d5c10343c1641bd01f8f130a2f1e5a01f2515f75b4706926b740cfe"
+    },
+    "positions.jsonl": {
+      "bytes": 2784,
+      "sha256": "f27e5710fecec2cefab2bb5d9d129486dc81214dafe25da3599c897f04a9e958"
+    }
+  },
+  "purpose": "F&G 敞口门前瞻检验（预注册）的窗口起点状态种子；v0.45.297 事后修订引入，见脚本文件头「自证」段",
+  "schema": 1,
+  "seed_last_run_date": "2026-09-15",
+  "source": {
+    "commit": "cb4a8b9e5249dae8f75e60cdeebe6276dc21e849",
+    "commit_iso": "2026-09-15T14:52:31-07:00",
+    "git_path": "paper_portfolio_state",
+    "subject": "Alpha Hive 蜂群日报 2026-09-15 14:52"
+  },
+  "verify": "git show cb4a8b9e5249dae8f75e60cdeebe6276dc21e849:paper_portfolio_state/<文件> | shasum -a 256",
+  "window_start": "2026-09-16"
+}
