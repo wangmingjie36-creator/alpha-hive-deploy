@@ -201,6 +201,18 @@ def check_weekly_optimizer() -> List[CheckResult]:
         sev = "fail"
         suffix = " (异常 > 30 天无更新)"
 
+    # v0.45.299：本周诊断被阻断（约束无可行解 / 读不出 config 权重）——诊断没产出建议权重，
+    # 而且**每周都会同样地被阻断**（2026-09-14、09-20 连续两周，期间这里一直显示 ok ✓，
+    # 因为上面只按记录年龄评级）。「跑了、有记录」不等于「跑出了东西」：升级为 fail。
+    _BLOCKED = {
+        "infeasible_bounds": "投影无可行解（WEIGHT_CLAMPS 与 config 权重矛盾）",
+        "config_unparseable": "读不出 config.py 的 EVALUATION_WEIGHTS",
+    }
+    _sr = last.get("skip_reason")
+    if _sr in _BLOCKED:
+        sev = "fail"
+        suffix = f" 🛑 上次运行被阻断 skip_reason={_sr}：{_BLOCKED[_sr]}——周诊断未产出建议权重，见 weight_history.jsonl"
+
     # v0.42.2：schema_version < 2 的记录里 applied 字段不可信 —— 旧
     # write_weights_to_config 的 dry-run 分支 return True，导致 dry_run=true 的
     # 运行被记成 applied=true（weight_history.jsonl 2026-05-10 那条即是）。

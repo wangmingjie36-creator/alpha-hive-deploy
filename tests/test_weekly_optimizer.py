@@ -1043,6 +1043,7 @@ class TestInfeasiblePathRunsGates:
         assert rec["action"] == "diagnose"
         assert rec["dry_run"] is True
         assert rec["bootstrap_stable"] is True, "闸 1 的结果必须进审计记录"
+        assert rec["pool_ok"] is True, "闸 2 的结果也必须进审计记录（此前只在 stdout，周任务读不到）"
         assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
 
         out = capsys.readouterr().out
@@ -1051,11 +1052,22 @@ class TestInfeasiblePathRunsGates:
         assert "系统稳定" not in out, "没有提议时不许说『权重保持不变（系统稳定）』"
 
     def test_apply_force_cannot_write_when_infeasible(self, monkeypatch, pipeline):
-        """没有可行权重就没有东西可写——`--force` 覆盖的是闸门，不是数学。"""
+        """没有可行权重就没有东西可写——`--force` 覆盖的是闸门，不是数学。
+
+        ⚠️ 只断言「config 没变」是空的（v0.45.299 独立审查）：不可行时 `new_weights = old_weights`，
+        `significant` 恒假，就算把 `if blocked` 分支整个删掉，写入决策链也会走到 `below_min_change`
+        而不写。所以：① 强制「显著变化」为真，让只有 blocked 分支能挡住写入；
+        ② 直接 spy `write_weights_to_config`，断言它**根本没被调用**。
+        """
         self._make_infeasible(monkeypatch)
+        monkeypatch.setattr(wo, "has_significant_change", lambda *a, **k: True)
+        writes = []
+        monkeypatch.setattr(wo, "write_weights_to_config",
+                            lambda *a, **k: writes.append((a, k)) or False)
         before = wo.CONFIG_PATH.read_text(encoding="utf-8")
         self._run(monkeypatch, ["--apply", "--force"])
 
+        assert writes == [], "不可行时 write_weights_to_config 不许被调用（哪怕是 dry_run 预览也不该有）"
         assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
         rec = _read_history(wo.HISTORY_FILE)[-1]
         assert rec["applied"] is False
@@ -1152,3 +1164,140 @@ class TestWritePreservesInlineComments:
         assert after_text.replace(re.search(r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}', after_text, re.DOTALL).group(0), "") == \
             real.replace(re.search(r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}', real, re.DOTALL).group(0), ""), \
             "块之外的内容必须逐字节不变"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# v0.45.299：独立审查后续
+#   ① 现行权重读不出必须明说并阻断，不许静默兜底（否则归零维度会被悄悄换成默认值再被 --apply 写回）
+#   ② 「上限解除」只在活维度上限之和 < 1 时发生（此前只要有维度退役就一律解除）
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestParseCurrentWeights:
+    """`parse_current_weights` 用 AST 读 config，读不出返回 None，绝不兜底。"""
+
+    def _write(self, text):
+        wo.CONFIG_PATH.write_text(text, encoding="utf-8")
+
+    def test_real_config_parses_to_the_imported_module_values(self, sandbox):
+        """**输入路径的观测点**：优化器自己读到的锚点必须 == 被 import 的 config 模块的值。
+
+        此前观测点只读 `config.EVALUATION_WEIGHTS`（模块），而 `main()` 用的是另一条路径
+        （对文件文本的解析）——两条路径从没被对拍过，解析层无声出错时冻结逻辑照样全绿。
+        """
+        import config
+        self._write(open(config.__file__, encoding="utf-8").read())
+        got = wo.parse_current_weights()
+        assert got is not None
+        assert got == pytest.approx(dict(config.EVALUATION_WEIGHTS))
+
+    def test_the_three_silent_failures_of_the_regex_version(self, sandbox):
+        # ① 注释里出现 `{…}`：旧正则 `[^}]+` 提前截断 ⇒ 静默回退默认值
+        self._write(_CONFIG_STUB.replace("# a", "# 见 {SEC} 披露"))
+        assert wo.parse_current_weights() == pytest.approx(
+            {"signal": .30, "catalyst": .20, "sentiment": .20, "odds": .15, "risk_adj": .15})
+        # ② 科学计数法：旧 `[0-9.]+` 把 2.0e-1 读成 2.0（差 10 倍且无声）
+        self._write(_CONFIG_STUB.replace('"catalyst":  0.2000', '"catalyst":  2.0e-1'))
+        assert wo.parse_current_weights()["catalyst"] == 0.2
+        # ③ 归零值必须读成 0.0（退役判据的输入）
+        self._write(_CONFIG_STUB.replace('"signal":    0.3000', '"signal":    0.0000'))
+        assert wo.parse_current_weights()["signal"] == 0.0
+        assert "signal" in wo.retired_dims(wo.parse_current_weights())
+
+    @pytest.mark.parametrize("label,mutate", [
+        ("多一个键", lambda t: t.replace("    # ml_auxiliary: 不在此处\n", '    "ml_auxiliary": 0.0500,\n')),
+        ("少一个键", lambda t: t.replace('    "odds":      0.1500,   # d\n', "")),
+        ("值是字符串", lambda t: t.replace('"odds":      0.1500', '"odds":      "x"')),
+        ("值为负", lambda t: t.replace('"odds":      0.1500', '"odds":      -0.1500')),
+        ("值是非字面量表达式", lambda t: t.replace('"odds":      0.1500', '"odds":      float("nan")')),
+        ("值为 inf（1e999 是合法字面量，只能靠 isfinite 拦）", lambda t: t.replace('"odds":      0.1500', '"odds":      1e999')),
+        ("语法错误", lambda t: t + "\ndef (((\n"),
+        ("没有该赋值", lambda t: t.replace("EVALUATION_WEIGHTS = {", "OTHER_WEIGHTS = {")),
+    ])
+    def test_unreadable_returns_none_never_a_default(self, sandbox, label, mutate):
+        self._write(mutate(_CONFIG_STUB))
+        assert wo.parse_current_weights() is None, label
+
+    def test_read_current_weights_fallback_is_loud(self, sandbox, capsys):
+        self._write(_CONFIG_STUB.replace("    # ml_auxiliary: 不在此处\n", '    "ml_auxiliary": 0.05,\n'))
+        got = wo.read_current_weights()
+        assert got == wo.DEFAULT_WEIGHTS
+        out = capsys.readouterr().out
+        assert "⚠️" in out and "不是现行权重" in out, "旧版对无匹配/键数不对是静默兜底"
+
+
+class TestConfigUnparseablePath:
+    """`main()` 读不出现行权重：不许拿默认值当锚点提议，更不许写入；闸照跑；审计如实记。"""
+
+    @pytest.fixture
+    def pipeline(self, monkeypatch, sandbox):
+        monkeypatch.setattr(wo, "SNAPSHOTS_DIR", sandbox)
+        monkeypatch.setattr(wo, "count_t7_samples", lambda d: 667)
+        raw = {"signal": 0.30, "catalyst": 0.20, "sentiment": 0.20, "odds": 0.20, "risk_adj": 0.10}
+        monkeypatch.setattr(wo, "compute_new_weights_wls",
+                            lambda d: {"new_weights": dict(raw), "method": "wls_time_decay"})
+        calls = {"bootstrap": [], "pool": 0}
+        monkeypatch.setattr(wo, "bootstrap_validate",
+                            lambda d, w, *a, **k: calls["bootstrap"].append((dict(w), k)) or {"stable": True})
+        monkeypatch.setattr(wo, "check_ticker_pool_consistency",
+                            lambda *a, **k: calls.__setitem__("pool", calls["pool"] + 1)
+                            or {"ok": True, "n_recent_pool": 30, "unrepresented_ratio": 0.0})
+        # 配置块多一个键 ⇒ 读不出（旧版：静默回退默认值）
+        wo.CONFIG_PATH.write_text(
+            _CONFIG_STUB.replace("    # ml_auxiliary: 不在此处\n", '    "ml_auxiliary": 0.0500,\n'),
+            encoding="utf-8")
+        return {"raw": raw, "calls": calls}
+
+    def _run(self, monkeypatch, argv):
+        monkeypatch.setattr(sys, "argv", ["weekly_optimizer.py", *argv])
+        wo.main()
+
+    def test_read_only_run_is_blocked_but_gates_still_run(self, monkeypatch, pipeline, capsys):
+        before = wo.CONFIG_PATH.read_text(encoding="utf-8")
+        self._run(monkeypatch, [])
+        assert len(pipeline["calls"]["bootstrap"]) == 1 and pipeline["calls"]["pool"] == 1
+        weights_arg, kwargs = pipeline["calls"]["bootstrap"][0]
+        assert weights_arg == pipeline["raw"] and not kwargs.get("anchor"), "没有锚点，不许逐次投影"
+        rec = _read_history(wo.HISTORY_FILE)[-1]
+        assert rec["skip_reason"] == "config_unparseable"
+        assert rec["action"] == "diagnose" and rec["dry_run"] is True and rec["applied"] is False
+        assert rec["pool_ok"] is True and rec["bootstrap_stable"] is True
+        assert wo.CONFIG_PATH.read_text(encoding="utf-8") == before
+        out = capsys.readouterr().out
+        assert "读不出" in out and "系统稳定" not in out
+        assert "--apply 也无法写入" in out, "被阻断时不许再说『写入需 --apply』"
+
+    def test_apply_force_never_calls_the_writer(self, monkeypatch, pipeline):
+        monkeypatch.setattr(wo, "has_significant_change", lambda *a, **k: True)
+        writes = []
+        monkeypatch.setattr(wo, "write_weights_to_config",
+                            lambda *a, **k: writes.append(1) or False)
+        self._run(monkeypatch, ["--apply", "--force"])
+        assert writes == []
+        rec = _read_history(wo.HISTORY_FILE)[-1]
+        assert rec["skip_reason"] == "config_unparseable" and rec["applied"] is False
+        assert rec["action"] == "optimize"
+
+
+class TestCapsLiftedOnlyWhenStructurallyNeeded:
+    """v0.45.299：解除活维度旧上限的条件是「上限之和 < 1」，不是「只要有维度退役」。"""
+
+    def test_single_retired_dim_keeps_the_absolute_caps(self):
+        anchor = {"signal": 0.0, "catalyst": 0.25, "sentiment": 0.25, "odds": 0.25, "risk_adj": 0.25}
+        b = wo.merge_bounds(anchor)
+        assert b["signal"] == (0.0, 0.0)
+        # 其余四维上限之和 1.05 ≥ 1，撑得起 sum=1 ⇒ 上限照旧（一律解除会让 catalyst 一次能到 0.35）
+        assert b["catalyst"][1] == pytest.approx(0.25)
+        assert b["odds"][1] == pytest.approx(0.25)
+        assert b["risk_adj"][1] == pytest.approx(0.25)
+        assert b["sentiment"][1] == pytest.approx(0.30)
+        new = wo.clamp_shifts(anchor, {"signal": 0.4, "catalyst": 0.6, "sentiment": 0.0,
+                                       "odds": 0.0, "risk_adj": 0.0})
+        assert new["signal"] == 0.0 and new["catalyst"] <= 0.25 + 1e-9
+
+    def test_caps_are_lifted_when_live_caps_cannot_reach_one(self):
+        # 生产形状：三个活维度上限之和 0.80 < 1
+        assert wo.merge_bounds(_RETIRED_ANCHOR)["catalyst"][1] > wo.WEIGHT_CLAMPS["catalyst"][1]
+        # 只剩一个活维度：上限 0.25 < 1，必须解除，否则连 sum=1 都凑不成
+        anchor = {"signal": 0.0, "catalyst": 1.0, "sentiment": 0.0, "odds": 0.0, "risk_adj": 0.0}
+        new = wo.clamp_shifts(anchor, {k: 0.2 for k in _DIMS5})
+        assert new["catalyst"] == pytest.approx(1.0) and sum(new.values()) == pytest.approx(1.0)

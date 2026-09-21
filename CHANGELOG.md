@@ -5,7 +5,56 @@
 
 ---
 
-## [0.45.299] — 2026-09-21 — 占位（进行中：v0.45.295/298 独立审查后续——`read_current_weights` 静默回退会让归零维度被复活；`health_check` 对 `infeasible_bounds` 仍报 ok；单维度退役时过度解除上限；`--force` 测试的「未写入」断言是空的）
+## [0.45.299] — 2026-09-21 — Fixed：v0.45.295/298 独立审查后续——`read_current_weights` 静默回退会让归零维度被 `--apply` 写回非零；`health_check` 对被阻断的周诊断仍报 ok；单维度退役时过度解除上限；`--force` 测试的「未写入」断言是空的；Added：闸 2 结果入审计（`pool_ok`）
+
+v0.45.298 之后又派了一个**独立**审查 agent 重读 v0.45.295 的提交（它读的是被我改动中的文件，自己也提示了这一点，所以下面每一条我都对着代码/实测核实过，
+没有照单全收）。它列出 7 条，核实后 **6 条成立并已修**，1 条（闸 1 近似恒真）成立但属设计层面、按下文处理：
+
+**1. `read_current_weights` 的静默回退能让冻结逻辑失效（`weekly_optimizer.py`，Low-Medium → 实测后我认为更重）**
+旧的正则版有三个无声失败，我逐个实测复现：块里多一个键（如加了 `ml_auxiliary`）或注释里出现 `{…}` ⇒ **静默回退 `DEFAULT_WEIGHTS`**，`retired_dims` 变空集，
+config 里被归零的 signal/risk_adj 在锚点里变回 0.30/0.15，之后 `--apply` 会把它们**写回非零**——正好击穿 v0.45.295 宣称的「优化器只能冻结、不能复活」；
+`3.32e-1` 被读成 `3.32`（`[0-9.]+` 在 `e` 处停下），差 10 倍且无声。
+修法：新增 `parse_current_weights()`（AST，读不出返回 `None`、**绝不兜底**）；`read_current_weights()` 保留给回滚/回读校验，兜底时**大声说**；
+`main()` 改用前者，读不出 ⇒ 与「投影不可行」合并成同一个 `blocked` 通道：不提议、不写入（`--force` 也不行）、闸照跑、审计 `skip_reason="config_unparseable"`。
+输入路径此前从没被对拍过（观测点读的是 import 的 `config` 模块，`main()` 用的是对文件文本的解析），现在有 `test_real_config_parses_to_the_imported_module_values`。
+
+**2. `health_check` 对被阻断的周诊断仍报 ok（Medium）——「谁会红？」缺口**
+`health_check.check_weekly_optimizer` 只按最后一条记录的**年龄**评级，`skip_reason` 只是塞进 details。于是 09-14、09-20 连续两周 `infeasible_bounds`，它一直显示 ok ✓。
+v0.45.295 CHANGELOG 里写的「审计 + stdout + 观测点测试三处可见」并不等于有东西变红。现 `skip_reason ∈ {infeasible_bounds, config_unparseable}` ⇒ `fail`。
+**副作用（预期内）**：它对真实的 09-20 那条记录现在会报 `fail`——这是真阳性（上一次真实运行确实被阻断了），会一直显示到下一次定时运行（周日 09-27）写入正常记录为止。
+另：闸 2 的结果此前**不在任何审计字段里**（周任务读 `weight_history.jsonl` 看不到），现新增 `pool_ok`。此前 `health_check` 没有任何测试，新增 `tests/test_health_check_weekly_optimizer.py`（7 条）。
+
+**3. 单维度退役时过度解除上限（`merge_bounds`，Low）**
+v0.45.295 的「只要有维度退役就解除活维度的绝对上限」比理由（它们加起来 < 1）宽。只退役一个维度时其余四维上限之和 1.05 ≥ 1，本来撑得起；
+例：锚点 `{signal 0, catalyst .25, sentiment .25, odds .25, risk_adj .25}`，一律解除会让 catalyst 一次能到 0.35。现改为**仅当活维度上限之和 < 1** 才解除
+（判据只取决于「哪些维度退役」，不取决于锚点数值，锚点空间里没有断点）。生产形状（两维退役，Σ=0.80）行为不变。这就是 v0.45.298 CHANGELOG「已知未改 ②」，现已改。
+**取舍（穷尽核实过，并更正 v0.45.298 里一句说粗了的话）**：6000 组随机锚点 × 随机目标的 `clamp_shifts` 模糊测试 **0 次违反不变式**（退役维度不复活 / 活维度不超 ±10pp / sum=1 / 上限仍该生效时无人突破）。抛 `InfeasibleBoundsError` 的 1407 组我这次**逐个分类**：1357 组是某活维度的锚点超出绝对上下限 >10pp 造成的单维空区间；**另 50 组不是**——没有单维空区间，而是几维各超出旧上限一点、合计 `Σhi < 1`。v0.45.298 写的「全是锚点自身违反绝对上下限超过 10pp」只对前一类成立，准确说法是「锚点自身与绝对上下限的偏离大到 ±10pp 补不回来」。后果：单维退役、且其余维度锚点已在旧上限之外较远时，现在会**阻断并让 `health_check` 报 fail**（要求人重设 `WEIGHT_CLAMPS`），而不是像「一律解除」那样悄悄放行——与非退役形状下锚点远离上下限时的旧语义一致（配置与 WEIGHT_CLAMPS 矛盾就该响）。审查建议的另一种做法是「先试带上限的盒，不可行才解除」：永不因上限而阻断，但盒会随锚点数值在两种形态间跳变（数据/配置的微小变动可能让提议突变），这里选了前者；生产形状（两维退役，Σ=0.80）两种做法结果相同。
+
+**4. `--force` 测试的「未写入」断言是空的（Low-Medium）**
+`new_weights = old_weights` 使 `significant` 恒假——就算把 `if blocked` 分支整个删掉，写入决策链也会走到 `below_min_change` 而不写，
+所以「config 没变 / applied 为 False / action」三条断言在该变异下全都成立，只有 `skip_reason` 能区分。我在 v0.45.295 自己的变异表里其实见过这个现象
+（M6 是被 `skip_reason` 而不是「有没有写」抓到的），当时把它当成「两层独立保护」放过去了。现改为：强制「显著变化」为真 + spy `write_weights_to_config` 断言**根本没被调用**。
+
+**5. 闸 1 在退役形状下近似恒真（设计层面，不改设计，改说法与对照）**
+提议与 CI 是同一个确定性映射作用在点估计 / 重采样上，提议必然落在 CI 中；被推到 ±10pp 盒边的维度 CI 退化成一个点、也算「稳定」。
+所以 v0.45.295 / 298 里「闸 1 ✅（5/6/8 个种子全过）」**不是**「这次变动在统计上是真的」的证据，只是「估计量自洽、没有管线不一致」——
+它**回答不了**「一个 ≥3pp 的变动是不是噪声」（v0.45.144 起这道闸就不再捕捉世代漂移，本条只是把这个事实在退役形状下再说一遍）。
+另外，本节的负对照最初都落在**可行盒之外**（catalyst +8pp、复活 signal），是 `clamp_shifts` 永远产不出的值；主对照现改为**盒内**的偏离提议并断言它确在盒内。
+若将来真想要一道有信息量的闸，应检验「(提议 − 锚点) 的 CI 是否排除 0」并配纯噪声负对照。
+
+**6. 杂项**：`if infeasible:` 依赖 `str(e)` 的真值（空消息会走可行链）→ 统一为 `blocked is not None`；被阻断时不再打「写入需 --apply」、闸 1 通过文案区分「无提议」；
+`clamp_shifts` 文档补退役维度说明；闸 1 注释里「原始 WLS 目标」实为已过绝对上下限钳制的 WLS 输出，已更正。
+
+**验证**：新增 22 条测试（`test_weekly_optimizer.py` 81→96：AST 解析 11 个用例（含 8 个参数化的「读不出」情形）、`config_unparseable` 通道 2、上限判据 2；`test_health_check_weekly_optimizer.py` 7 条），
+改写 2 条（`--force`、闸 1 负对照）。**10 个变异真跑全部被抓住**（读不出仍用默认值 / 不校验键集合 / 兜底不出声 / 退回一律解除 / 从不解除 / 不拦 inf / 不拦负值 /
+blocked 分支失效 / 审计不记 pool_ok / health_check 不报 fail），这次用 `--maxfail=100` 看清每个变异被哪几条抓住（`pyproject` 的 `maxfail=1` 会让第二个及之后的失败被掩盖），哈希还原一致。
+真实数据端到端不变（闸 1 ✅ / 闸 2 ✅ / 提议 catalyst −0.5pp、sentiment +1.0pp、odds −0.4pp / `pool_ok:true` 入档）。相关 352 条 + ruff 全绿。
+
+**没做**：① 仓外 `~/.claude/scheduled-tasks/alpha-hive-weekly-optimizer/SKILL.md` 仍写「闸状态看 `skip_reason`」，只读运行里 `skip_reason` 恒为 `read_only_default`，
+应改为「看 `bootstrap_stable` 与 `pool_ok` 两个字段」——那是你的持久配置，未擅自改；② 退出码仍为 0；③ `health_check` 读 `PATHS.home/weight_history.jsonl`，
+而 `weekly_optimizer` 写 `ALPHAHIVE_DIR/weight_history.jsonl`——数据根迁移完成后两者若分叉，`health_check` 会报「文件不存在」（当前重合，未动）；
+④ 非退役形状下闸 1 的提议与 CI 不同管线（v0.45.144 起如此）仍未动。
+
 
 ## [0.45.298] — 2026-09-21 — Fixed：v0.45.295 二次检查——闸 1 逐次重采样漏了 `_apply_weight_clamps` 一步（提议与 CI 不同管线）；`--apply` 会抹掉 config 里写在数值旁的归零决策注释；Changed：闸 1 测试改走真实管线
 

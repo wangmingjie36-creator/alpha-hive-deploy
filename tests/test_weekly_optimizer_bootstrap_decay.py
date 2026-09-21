@@ -311,16 +311,26 @@ def test_retired_regime_gate_uses_projected_bootstrap(wired):
 
 
 def test_retired_regime_gate_still_has_teeth(wired):
-    """负对照：带 anchor 时闸依然会红。没有这一条，(1) 可能只是在一个恒真条件上全绿。"""
+    """负对照：带 anchor 时闸依然会红。没有这一条，(1) 可能只是在一个恒真条件上全绿。
+
+    ⚠️ v0.45.299 独立审查指出：本节最初的负对照（catalyst +8pp、复活 signal）都落在**可行盒之外**，
+    是 `clamp_shifts` 永远产不出的值——闸拦下一个管线本来就不会给的东西，证明不了它对「管线真能给出、
+    但不在重采样中心」的提议有牙。主对照因此改为**盒内**的偏离提议（并断言它确实在盒内）。
+    """
     proposal = _production_proposal(wired)
+    bounds = wo.merge_bounds(_RETIRED_ANCHOR)
 
-    pushed = dict(proposal)              # 和不变，只把质量从 odds 搬到 catalyst
-    pushed["catalyst"] += 0.08
-    pushed["odds"] -= 0.08
-    assert not any(_stable_over_seeds(wired, pushed, anchor=_RETIRED_ANCHOR)), \
-        "被人为推离重采样中心的提议必须被拦下"
+    off_center = dict(proposal)          # 和不变，盒内，只把质量从 catalyst 搬到 sentiment
+    off_center["catalyst"] -= 0.06
+    off_center["sentiment"] += 0.06
+    for k in ("catalyst", "sentiment"):
+        assert bounds[k][0] - 1e-9 <= off_center[k] <= bounds[k][1] + 1e-9, \
+            f"对照必须是管线真能产出的值（{k} 落在盒外）"
+    assert not any(_stable_over_seeds(wired, off_center, anchor=_RETIRED_ANCHOR)), \
+        "盒内但偏离重采样中心的提议必须被拦下"
 
-    resurrected = dict(proposal)         # 把退役维度复活成 5pp，同样必须红
+    # 纵深防御：即便投影被绕过（人为 --force 之类），复活退役维度的提议也不该被闸 1 放行
+    resurrected = dict(proposal)
     resurrected["signal"] = 0.05
     resurrected["catalyst"] -= 0.05
     assert not any(_stable_over_seeds(wired, resurrected, anchor=_RETIRED_ANCHOR)), \
