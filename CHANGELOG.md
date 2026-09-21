@@ -5,7 +5,70 @@
 
 ---
 
-## [0.45.303] — 2026-09-21 — 占位（进行中：`tests/conftest.py::_isolate_paper_portfolio_state` 的「生产真身」判定依赖导入顺序——`paper_portfolio` 若在夹具内首次导入，STATE_DIR 被冻成沙箱路径，单条/子集跑会误报「写穿生产」，且守卫盯的其实是沙箱自己）
+## [0.45.303] — 2026-09-21 — Fixed：`tests/conftest.py::_isolate_paper_portfolio_state` 对「生产真身」的判定依赖导入顺序——单条/子集跑会误报「写穿生产」，而那种进程里守卫盯的是沙箱自己（真写穿生产它也看不见）；Added：2×2 子进程回归矩阵
+
+**现象**（配对对照实测，不是推理）：全新进程单独跑一条会写 `CLOSED_FILE` 的既有老测试
+（`test_fg_exposure_gate_forward_test.py::TestRealRunReplayIntegration::test_self_proof_fails_when_reproduction_rate_too_low`）
+⇒ `1 passed, 1 error`，teardown 报「测试写到了**生产** paper_portfolio_state/：['closed_trades.jsonl']」；
+同一条测试、同进程里让别的模块先在收集期导入 `paper_portfolio` ⇒ `2 passed`。整套/整文件跑不触发（约 10 个模块顶层就导入它，收集期环境还是真的）。
+
+**根因**：夹具原先 `real = {n: _pp.STATE_DIR / n …}` 记「生产状态文件」指纹。`paper_portfolio.STATE_DIR` 是 **import 期常量**
+（`_base_dir()` → `PATHS.home` → `ALPHA_HIVE_HOME`）。若 `paper_portfolio` 在本进程的**首次导入**恰好发生在这个 function 级夹具里
+——此刻 `_isolate_env` 已把 HOME 指向 tmp——`STATE_DIR` 就被冻成沙箱路径，「真身」与随后新建的 `sandbox` 成了**同一个目录**。后果两条：
+① 单条测试写沙箱被误报为写穿生产（v0.45.300 迭代新测试时被它骗了几分钟）；
+② **更隐蔽**：那种进程里守卫名义上在、实际盯的是沙箱自己，测试真写穿生产它也看不见——「守卫自己失效」那一族。
+
+**改动**（仅 `tests/`，生产代码零改动）：
+- `tests/conftest.py`：新增会话级 autouse 夹具 `_real_paper_portfolio_state_dir`，在**任何 function 级隔离动手之前**用生产自己的 `PATHS.home`
+  求一次真身（纯读、不建目录）；`_isolate_paper_portfolio_state` 改吃它，不再读 `_pp.STATE_DIR`。
+  收集期已有人导入 `paper_portfolio` 时，会话开始处断言其 `STATE_DIR` 与本夹具的推导一致——漂移就在这里红，不让守卫悄悄失明。
+- `tests/test_paper_portfolio_guard_identity.py`（新，5 条，约 5s）：假 checkout + 原样拷贝的 conftest + 探针，子进程真跑一轮 pytest
+  （沿用 `test_root_data_guard.py` 的接线测试约定：进程内造不出「夹具内首次导入」，测 helper 也证明不了 conftest 真用了它）。
+
+**没走的路（下次别再评估）**：
+
+| 方案 | 为什么不 |
+|---|---|
+| conftest 顶层 / `pytest_configure` 里取真身 | 得 import `hive_logger`，改变 v0.45.239 日志隔离守卫依赖的时序（见 `pytest_configure` docstring 末句） |
+| 以仓库根（`__file__`）为锚点推导 | 状态目录是**数据**，跟 `ALPHA_HIVE_HOME` 走；数据根迁移阶段 5 后指向 `~/alpha-hive-data`，代码锚点会让守卫静默盯着旧路径 |
+| 夹具里临时还原环境变量再 import；或 conftest 提前 import `paper_portfolio` | 单条测试也会触发 import 期 `STATE_DIR.mkdir`，在真仓库根建目录——给生产目录新增写入 |
+| 夹具里临时改 `os.environ` 后读 `PATHS.home` | 有个微小窗口，后台线程此刻会读到真 HOME；会话级夹具零窗口 |
+
+「会话夹具先于 function 级 `_isolate_env`」靠的是 pytest 的 scope 语义（`--setup-plan` 实测），不是夹具名字母序的实现巧合。
+
+**验证**：
+1. 两条配对复现：修前 `1 passed, 1 error` / `2 passed` → 修后 `1 passed` / `2 passed`。
+   ⚠️ 但「转绿」证明不了修对了——旧缺陷的一个形态就是「守卫失明」，失明的守卫同样是绿。所以有第 2 条：
+2. **2×2 矩阵**（回归测试）——{首次导入在夹具内 / 收集期} × {测试写沙箱（合法）/ 测试写真身（违法）}，红组必须红、对照组必须绿。
+   **用改动前的真实文件**（`git show HEAD:tests/conftest.py`）跑：夹具内×写沙箱 **红**（误报）、夹具内×写真身 **红**（子进程 `1 passed` ⇒ 守卫失明、照绿）、
+   收集期两格绿、进程内签名测试 ERROR（旧文件没有该夹具）——与缺陷描述逐格吻合。
+3. **前提自证**：探针在夹具**收尾之后**读 `paper_portfolio` 的 import 期 `STATE_DIR`（夹具活着时读到的是沙箱值，v0.45.300 量错过一次）：
+   夹具内首次导入 ⇒ 必须落在沙箱且不在真身下；收集期导入 ⇒ 必须等于哨兵真身。前提不成立就红，而不是让整列测试悄悄变成恒绿。
+4. **变异**（真跑，`PYTHONDONTWRITEBYTECODE=1`；每轮还原后核对 sha256；**每个变异的红都用报错文案核对过是预期的那条断言**）：
+
+   | 变异 | 结果 |
+   |---|---|
+   | M0 改动前的真实文件 | 2 红 + 1 ERROR / 2 绿（见上） |
+   | M1 只把「真身」改回 `_pp.STATE_DIR`（一行） | 夹具内两格红（误报 / 失明）；收集期两格绿；单条复现回到 `1 passed, 1 error` |
+   | M2 会话夹具目录名写错（自检开） | 4 红：收集期自检在会话开始就炸 + 写真身两格 + 进程内 name 断言 |
+   | M2b 同 M2 且**关掉**自检 | 3 红：靠「写真身」两格照样抓到，自检不是唯一防线 |
+   | M3 守卫削弱（`touched` 恒空） | 恰好「写真身」两格红，合法写入两格绿 |
+   | M5 conftest 顶层提前 import `paper_portfolio` | 夹具内两格红，报「回归场景不再成立」 |
+   | M6 去掉四个状态文件的重绑 | 收集期×写沙箱格红（「夹具没把 CLOSED_FILE 重绑进沙箱」） |
+5. 整套（`--maxfail=1000 -rfEs`，370s）：**1 failed / 5203 passed / 1 skipped / 83 deselected / 2 xfailed**——唯一红是已知的
+   `TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`；唯一 skip 是 `test_scheduler.py` 的 `importorskip("schedule")`
+   （本机 `/usr/local/bin/python3` 没装 `schedule`，与本改动无关，该文件最近一次提交是 2026-03-06）。ruff 通过。
+
+**顺带发现（已实测，未修）**：`test_paper_portfolio_vol_sizing.py::TestProductionStateIsIsolated::test_state_paths_point_outside_the_repo`（防线①自检）**恒真**——
+`pp.BASE_DIR` 自 v0.45.160 起默认 `None`，`None not in f.parents` 恒成立。M6 把四个状态文件的重绑整个删掉后它仍 `2 passed`。
+本版新增的「收集期×写沙箱」格能抓到这个变异，但该自检本身应换成对真路径的断言——另开任务。
+
+**边界（如实记）**：
+- 会话夹具的前提是「会话开始时 `ALPHA_HIVE_HOME` 还是调用者给的值」。当前没有测试模块在**收集期**改它（grep `^os.environ…ALPHA_HIVE_HOME`，零命中），但没有观测点。
+  一致性自检只在收集期已导入 `paper_portfolio` 时才有得比；未被导入的进程靠子进程那组矩阵覆盖。
+- 单条测试的进程里，`hive_logger` 的首次 import 从 function 夹具挪到了会话夹具（此时 `pytest_configure` 的 `ALPHA_HIVE_LOGS_DIR` 缺省已设），
+  与整套的行为一致；日志隔离守卫在整套里全绿。
+- 「首次导入发生在夹具内」的进程里，`paper_portfolio` 其余 import 期常量（`SNAPSHOT_DIR` 等）仍冻成第一条测试的沙箱路径——无害（每条测试都被夹具重绑），本版不处理。
 
 ## [0.45.302] — 2026-09-21 — 占位（进行中：清理全仓 254 条 F401 未使用导入——逐条分类，再导出/副作用/可用性探测保留并标注，其余删除）
 
