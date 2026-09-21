@@ -1020,3 +1020,107 @@ class TestCli:
                           "selfproof": {"real_entries": 5, "reproduced": 0, "decision_reproduced": 5}})
         out = capsys.readouterr().out
         assert "精确复现 0/5" in out and "决策层复现 5/5" in out
+
+
+# ── 18. 盲化：出结论之前，前瞻结果里不许有任何效应量（v0.45.300）───────────────────────
+#
+# `decide()` 的 docstring 早就写明「盲化在数据结构上，不在打印上」，但 `evaluate()` 在调用
+# `decide()` **之前**就把 `adjusted_trades`（A/B 已实现盈亏之和）塞进了返回字典——`--json`
+# 或任何直接调用 `run()` 的人（最可能是某个为「看看状态」顺手打印整个结果的 agent 会话）
+# 会在检视点之前拿到它。而它泄漏的是实质内容：平仓盈亏 = size_usd × net_pct 与仓位严格成
+# 正比，门只把新仓乘以 0.5、不动方向和出场，所以 B 在每笔被调整单上的盈亏恒为 A 的一半，
+# `pnl_sum_b − pnl_sum_a` 就是 −½·A 的已平仓盈亏——这部分效应的方向与大小。
+
+_G_DATES = ["2026-09-01", "2026-09-16"]
+_G_SINCE, _G_BEFORE = "2026-09-01", "2026-09-17"
+
+
+def _gate_world(pp_fx, tmp_path):
+    """「门真的触发了、且被调整的单已经平仓」的合成世界。
+
+    不造这个场景，盲化测试就是空的：门不触发时 B ≡ A，`adjusted_trades` 恒为 0 笔 / 0.00，
+    泄不泄漏都断言得过（09-16~09-18 的真实窗口正是这样：F&G=26/29/29，都在 25~75 之间）。
+
+    极度贪婪日（F&G=90）开的多头在 B 里被减半；恒定价格下只会触发 TIME 止损（开仓 +14 自然日），
+    所以 09-01 开的 NVDA 在 09-16 那次重放里平仓 ⇒ 窗口内恰有 1 笔「被调整并已平仓」；
+    09-16 开的 AMD 仍在场（也被减半，但没平仓，不进 `adjusted_trades`）。
+    「生产」= 门关闭的同一段重放，起点文件直接写盘，落到 conftest 隔离出来的生产状态文件。"""
+    _pp, snap_dir, fg_db = pp_fx
+    _seed_fg_db(fg_db, [(d, "NVDA", sig, v) for d in _G_DATES
+                        for sig, v in (("market.fear_greed", 90.0), ("market.fear_greed_is_cnn", 1.0))])
+    _write_snapshot(snap_dir, "NVDA", "2026-09-01", 7.5, "bullish")
+    _write_snapshot(snap_dir, "AMD", "2026-09-16", 7.5, "bullish")
+    prod = tmp_path / "prod_gate"
+    prod.mkdir()
+    _pp.run_replay({}, prod, dates=_G_DATES)
+    _pp.CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(prod / "closed_trades.jsonl", _pp.CLOSED_FILE)
+    shutil.copy(prod / "positions.jsonl", _pp.POSITIONS_FILE)
+
+
+def _eval_gate_world(sandbox, **kw):
+    kw.setdefault("seed", {})  # 显式的「生产当时也是空状态」——合成世界的生产就是从空起跑的
+    return fwd.evaluate(_G_DATES, _G_SINCE, _G_BEFORE, sandbox, **kw)
+
+
+class TestBlindingBeforeTheLook:
+    def test_the_fixture_really_has_a_closed_adjusted_trade_and_it_is_informative(self, pp, tmp_path):
+        """夹具自证（不做这条，下面全部是空断言）：门确实触发、确实有 1 笔被调整并已平仓，
+        且 B 的盈亏恰为 A 的一半——这就是「`adjusted_trades` 是实质泄漏」的定量依据。"""
+        _pp = pp[0]
+        _gate_world(pp, tmp_path)
+        sb = tmp_path / "sb"
+        _eval_gate_world(sb)
+        summary = fwd._adjusted_trades_summary(
+            _pp._load_jsonl(sb / "A_baseline" / "closed_trades.jsonl"),
+            _pp._load_jsonl(sb / "B_treatment" / "closed_trades.jsonl"), _G_SINCE, _G_BEFORE)
+        assert summary["adjusted_closed_trades"] == 1
+        assert summary["pnl_sum_a"] != 0
+        assert summary["pnl_sum_b"] == pytest.approx(summary["pnl_sum_a"] / 2, abs=0.02)
+
+    def test_not_ready_result_carries_no_effect_even_though_the_gate_fired(self, pp, tmp_path):
+        _gate_world(pp, tmp_path)
+        res = _eval_gate_world(tmp_path / "sb")
+        assert res["status"] == "not_ready"
+        assert "adjusted_trades" not in res, f"未出结论就带出了 adjusted_trades：{res['adjusted_trades']}"
+        assert not (_EFFECT_KEYS & set(_all_keys(res)))
+        assert not (_EFFECT_KEYS & set(_all_keys(json.loads(json.dumps(res)))))
+
+    def test_cannot_judge_result_carries_no_effect(self, pp, tmp_path, monkeypatch):
+        """自证不过的结果本来就在算周度差之前返回；钉住它，免得以后调整顺序时把这条路径漏成新出口。"""
+        _pp = pp[0]
+        _gate_world(pp, tmp_path)
+        monkeypatch.setitem(_pp.CONFIG, "entry_score_bull", 9.0)  # 生产当时是 6.5：A 一笔都不开
+        res = _eval_gate_world(tmp_path / "sb")
+        assert res["status"] == "cannot_judge"
+        assert not (_EFFECT_KEYS & set(_all_keys(res)))
+
+    def test_json_cli_output_has_no_effect_keys_before_the_look(self, pp, tmp_path, monkeypatch, capsys):
+        """泄漏的现实出口就是 `--json`：把真实 `evaluate()` 的结果经 `main(["--json"])` 打出来再查。"""
+        _gate_world(pp, tmp_path)
+        res = _eval_gate_world(tmp_path / "sb")
+        monkeypatch.setattr(fwd, "run", lambda **k: res)
+        assert fwd.main(["--json"]) == 1  # not_ready
+        payload = json.loads(capsys.readouterr().out)
+        assert not (_EFFECT_KEYS & set(_all_keys(payload)))
+
+    @pytest.mark.parametrize("status", ["confirmed", "not_confirmed"])
+    def test_verdict_results_still_carry_adjusted_trades_and_still_print(
+            self, pp, tmp_path, monkeypatch, capsys, status):
+        """收紧不能把出结论之后的描述性附带统计也弄丢：`_print_human` 的出结论分支要读它。"""
+        _gate_world(pp, tmp_path)
+        verdict = {"status": status, "look": "中期", "alpha": 0.02, "weeks_used": ["2026-W01"],
+                   "stats": {"n": 15, "mean": 0.1, "t": 2.0, "p": 0.01}}
+        monkeypatch.setattr(fwd, "decide", lambda weeks, *a, **k: verdict)
+        res = _eval_gate_world(tmp_path / "sb")
+        assert res["status"] == status
+        assert res["adjusted_trades"]["adjusted_closed_trades"] == 1
+        fwd._print_human(res)
+        assert "被调整并已平仓的笔数 1" in capsys.readouterr().out
+
+    def test_insample_result_keeps_adjusted_trades(self, pp, tmp_path):
+        """样本内本来就不盲化（它是生成假设/自检机制的数据）——收紧只针对前瞻，不能连它一起拿掉。"""
+        _gate_world(pp, tmp_path)
+        res = _eval_gate_world(tmp_path / "sb", insample=True, seed=None)
+        assert res["status"] == "insample"
+        assert res["adjusted_trades"]["adjusted_closed_trades"] == 1

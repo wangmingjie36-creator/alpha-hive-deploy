@@ -48,7 +48,42 @@ v0.45.186 同时留档了四个文件（`earnings_pc_history.py` / `ff6_cycle_hi
 这很可能就是当初全局 ignore 的原因；其中有多少是 `__init__.py` 式的**有意再导出**没有区分。
 重新打开 F401 是一次独立的清理，本版不碰。
 
-## [0.45.300] — 2026-09-21 — 占位（进行中：收紧 `fg_exposure_gate_forward_test.py` 前瞻结果里的 `adjusted_trades` 盲化泄漏——未出结论时不再把 A/B 已实现盈亏对比放进返回字典）
+## [0.45.300] — 2026-09-21 — Fixed（**事后，收紧盲化**）：F&G 敞口门前瞻检验的前瞻结果在未出结论时也带出 `adjusted_trades`（A/B 已实现盈亏之和 = 已平仓部分的效应方向与大小）；现只在出结论（confirmed / not_confirmed）时才放进返回字典
+
+**来源**：v0.45.297 收尾时记为「已知、未改 ①」并留给用户决定；用户看了分析后拍板做。
+
+**问题**：`evaluate()` 在调用 `decide()` **之前**就把 `_adjusted_trades_summary(...)` 写进返回字典，于是 `not_ready` 时也随 `--json` 或直接调用 `run()` 带出。
+`decide()` 的 docstring 早写明「未到结论时返回值里不含任何效应量（盲化在数据结构上，不在打印上）」——`evaluate()` 自己没守，盲化测试又只查了 `decide()` 的返回值。
+
+**为什么是实质泄漏**：平仓盈亏 = `size_usd × net_pct`，与仓位严格成正比；门只把新仓乘以 0.5、不动方向和出场，所以 B 在每笔**被调整并已平仓**的单上的盈亏恒为 A 的一半，
+`pnl_sum_b − pnl_sum_a = −½·A 的已实现盈亏`——这部分效应的方向与大小，正是「盲化」要藏的东西（夹具里实测 `pnl_sum_b ≈ pnl_sum_a/2`，容差 2 分）。
+
+**为什么此前没有实际泄漏**：窗口 09-16~09-18 的 F&G 读数是 26 / 29 / 29（公开指数），都在 25~75 之间，门从未触发、B ≡ A，该字段必然是 0 笔 / 0.00；
+每周只读诊断（`ic_rerun_readiness`）只取 `status` / `status_line`；人读输出只在出结论后才打印它。出口只有 `--json` 与直接调用 `run()`——现实里最可能的读者是某个为「看看状态」顺手打印整个结果字典的 agent 会话。
+一旦第一笔被调整的单平仓，之后任何一次打印都收不回来，所以趁现在（零泄漏）补。
+
+**修法**：`evaluate()` 只在 `verdict["status"] ∈ {confirmed, not_confirmed}` 时才写 `adjusted_trades`；样本内（`--insample`，本就不盲化）照旧带着它；文件头就地标「事后修订 v0.45.300」。
+**未动**：窗口、变体 A/B、统计量、检视点（15/30 周）、α、`SELFPROOF_MIN_RATE`、四元组键、盲化条款本身——这是让实现对齐已有条款，信息只减不增，不影响任何判定。
+真实前瞻运行核对（只打印键名）：返回字典的键 `['looks_passed_without_verdict', 'mode', 'n_dates', 'next_look_at', 'seed_last_run_date', 'selfproof', …, 'weeks', 'weeks_available']`，
+`adjusted_trades` 已不在（此前在），与效应量键集合的交集为空；`status_line` 不变（`0/15 个合格周，自证 100%`）。
+
+**验证**：测试 96 → **103**。新增 7 条，**关键是先造出「门真触发、且被调整的单已平仓」的合成世界**——不造它，测试就是空的（门不触发时 B ≡ A，泄不泄漏都断言得过；真实窗口现在就是这种空场景）：
+夹具自证（确有 1 笔被调整并已平仓、且 B 盈亏为 A 的一半）、`not_ready` 无效应量键（含 JSON 往返）、`cannot_judge` 无效应量键、`main(["--json"])` 输出无效应量键、
+出结论（confirmed / not_confirmed 各一）仍带 `adjusted_trades` 且 `_print_human` 仍能打印、样本内仍带。
+**先在旧代码上看它红，并核对红的原因**：`not_ready` 与 `--json` 两条在旧实现上红，断言里的键交集正是 `adjusted_trades`；其余 5 条本来就绿（钉的是收紧不能误伤的东西）。
+**变异 9/9 真跑全杀，且杀伤集精确**（不带 `-x`，逐个还原并核对 sha256）：无条件写入 / 多放行 `not_ready` → 无效应量那两条；只放行其一 → 对应的那条参数化用例；出结论也不写 / 判定键写错 → 出结论两条；
+样本内误拿掉 → 样本内那条；摘要函数不算 B 盈亏 → 夹具信息量断言；`cannot_judge` 路径也带出 → 专门的钉子测试（它没被前 8 个变异杀到，所以单独造了第 9 个证明它有牙）。
+整套 5312 通过、1 失败（`TestCoverageHorizon`，BLS 日程，此前已在干净 origin/main 上验证本来就红）、ruff 通过。
+
+**顺带发现（未修，已转交）**：`tests/conftest.py::_isolate_paper_portfolio_state` 的「写穿生产」守卫**依赖导入顺序**——`real` 取自夹具运行时的 `_pp.STATE_DIR`，若 `paper_portfolio` 在本进程里的**首次导入**恰好发生在这个夹具内
+（此时 `_isolate_env` 已把 HOME 指向 tmp），`STATE_DIR` 就绑成沙箱，「真身」与沙箱成了同一个目录，任何会写状态文件的测试都在 teardown 被误报「写到了生产」。
+配对对照实验证实：v0.45.262 的老测试 `test_self_proof_fails_when_reproduction_rate_too_low` 在全新进程里**单独跑** → `1 passed, 1 error`；同进程里让别的模块先在收集期导入 `paper_portfolio` → `2 passed`。
+整套 / 整文件跑不受影响（约 10 个模块在顶层导入），所以本仓迄今没人撞上；**单条 / `-k` 子集跑本文件的会写状态的测试会得到误报**，请整文件跑。已用 spawn_task 转交（task_b1eba924）。
+
+**已知、未改**：① `looks_passed_without_verdict`（中期未过线）仍随 `not_ready` 返回——协议明文允许（「只报『未过中期界，继续』」）。
+② 已审计 `not_ready` 返回的全部键，没有其它效应量出口；`selfproof*` / `weeks*` / `next_look_at` 均为进度。
+③ auto-memory 里此前写的「读真实前瞻结果时只打印白名单字段」在检视点之前已由数据结构保证，不再依赖自觉（出结论之后的结果本就带效应量，那是设计）。
+④ 占号 0.45.300 的占位提交 `764490bf` 已先于代码推到 main。
 
 ## [0.45.299] — 2026-09-21 — Fixed：v0.45.295/298 独立审查后续——`read_current_weights` 静默回退会让归零维度被 `--apply` 写回非零；`health_check` 对被阻断的周诊断仍报 ok；单维度退役时过度解除上限；`--force` 测试的「未写入」断言是空的；Added：闸 2 结果入审计（`pool_ok`）
 
