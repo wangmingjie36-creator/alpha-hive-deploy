@@ -1,6 +1,5 @@
 """tests/test_fear_greed.py — Fear & Greed Index 模块测试"""
 
-import json
 import types
 import pytest
 

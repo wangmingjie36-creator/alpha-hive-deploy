@@ -21,7 +21,6 @@
 全文件不读库、不出网：直接喂 expected_returns 字典。
 """
 
-import math
 import os
 import sys
 

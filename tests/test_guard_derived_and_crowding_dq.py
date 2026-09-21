@@ -56,7 +56,6 @@ v0.45.212 起 Guard 已退出方向计票（`QueenDistiller.NON_VOTING_AGENTS`�
 import os
 import sys
 
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

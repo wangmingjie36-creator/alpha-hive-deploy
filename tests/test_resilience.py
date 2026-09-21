@@ -2,7 +2,6 @@
 
 import time
 import threading
-import pytest
 
 
 class TestRateLimiter:

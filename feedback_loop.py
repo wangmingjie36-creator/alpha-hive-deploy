@@ -10,7 +10,6 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
-from statistics import mean, stdev
 from hive_logger import SafeJSONEncoder, atomic_json_write
 
 _log = _logging.getLogger("alpha_hive.feedback_loop")

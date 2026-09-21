@@ -7,7 +7,6 @@ import sys
 import os
 from datetime import datetime, timedelta
 
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

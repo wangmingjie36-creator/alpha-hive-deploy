@@ -12,9 +12,7 @@ Yahoo Finance 热搜榜情绪模块（完全免费，无需注册）
 - 注意：高关注≠方向，需结合其他指标判断
 """
 
-import json
 import logging as _logging
-import time
 import threading
 from datetime import datetime
 from pathlib import Path

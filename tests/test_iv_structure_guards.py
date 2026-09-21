@@ -17,6 +17,7 @@ IV 期限结构 / IV-RV 价差的"零值伪装"回归闸（v0.45.4）
 """
 
 import re
+from datetime import date, timedelta
 
 import pytest
 
@@ -236,16 +237,31 @@ class TestCallFlowVoteAbstains:
     失败，却各自贡献了一张"中性"，既参与多数投票又抬高 confidence 分母。
     """
 
-    CALLS = [
-        {"strike": 100, "openInterest": 500, "expiration": "2026-09-11"},
-        {"strike": 105, "openInterest": 900, "expiration": "2027-01-15"},
-    ]
+    @staticmethod
+    def _calls():
+        """到期日相对今天：近端 DTE 17、远端 DTE 143（OI 500 : 900 → 长端占 64%）。
+
+        原写死 `2026-09-11` / `2027-01-15`（按提交日期 2026-08-25 推算，DTE 即 17 / 143；
+        该日期是 git 记录、不是作者写下时的自述）。
+        A 票按 DTE 分桶（`dte>60` 长端、`0<dte<=30` 近端）——**已过期的到期日两个桶都
+        不进**。夹具老化后 A 票弃权，「取数失败」与「真实 contango」都输出
+        ('mixed', 1.0)，核心断言恒红，而且**红的理由是错的**：夹具悄悄停止了对 A 票
+        的检验。此夹具 09-11 那条在 09-21 就已越过近端桶，只是长端单独凑巧仍投 hedge。
+        必须在调用时求值——不要提成类属性（收集期就地冻死）。
+        """
+        today = date.today()
+        return [
+            {"strike": 100, "openInterest": 500,
+             "expiration": (today + timedelta(days=17)).isoformat()},
+            {"strike": 105, "openInterest": 900,
+             "expiration": (today + timedelta(days=143)).isoformat()},
+        ]
 
     def _classify(self, term_data):
         from options_analyzer import OptionsAnalyzer
 
         return OptionsAnalyzer().classify_call_flow(
-            self.CALLS, [], 102.0, skew_data={"skew_ratio": 1.0}, term_data=term_data)
+            self._calls(), [], 102.0, skew_data={"skew_ratio": 1.0}, term_data=term_data)
 
     @pytest.mark.parametrize("term_data", [
         {"shape": "unknown", "data_available": False},

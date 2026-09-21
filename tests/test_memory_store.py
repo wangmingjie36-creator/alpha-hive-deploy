@@ -1,6 +1,7 @@
 """MemoryStore 持久化测试"""
 
-import pytest
+from datetime import date
+
 
 
 class TestSchemaSetup:
@@ -78,9 +79,14 @@ class TestSession:
         assert ok
 
     def test_session_id_format(self, memory_store):
+        # 会话 ID = {date}_{mode}_{ts_ms}，日期段取自当前墙钟。原来写死 `"2026" in sid`，
+        # 到 2027-01-01 恒红（2026-02-25 写下，与任何代码改动无关）。
+        # 生成前后各取一次今天：跨午夜也不误报，且不把任何年份写进断言。
+        before = date.today().isoformat()
         sid = memory_store.generate_session_id("swarm")
+        after = date.today().isoformat()
         assert "swarm" in sid
-        assert "2026" in sid
+        assert sid.split("_")[0] in {before, after}
 
 
 class TestOutcome:

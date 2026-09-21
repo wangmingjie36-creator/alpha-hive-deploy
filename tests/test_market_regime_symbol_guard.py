@@ -19,12 +19,10 @@
 由调用方走「数据不可用」。**诚实缺失好过安静地用别人的数据。**
 """
 
-import math
 import os
 import sys
 import types
 
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

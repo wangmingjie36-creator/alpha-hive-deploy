@@ -20,10 +20,10 @@ import os
 import math
 import logging
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
-from statistics import mean, stdev, median
+from statistics import mean, stdev
 
 try:
     from hive_logger import PATHS, get_logger, atomic_json_write

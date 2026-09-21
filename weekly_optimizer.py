@@ -47,13 +47,13 @@ config.py 两次（2026-04-26 与更早）。当前 config 里那五个数是 n=
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import math
 import os
 import random
 import re
-import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -247,6 +247,23 @@ class InfeasibleBoundsError(ValueError):
     """盒约束与单纯形（sum=1）无交集 —— 配置本身矛盾，必须拒绝写入而非静默降级。"""
 
 
+# 「归零」的判据容差：config 里写的是 0.0000，浮点比较不该指望恰好相等。
+_RETIRED_EPS = 1e-9
+
+
+def retired_dims(anchor: dict) -> set:
+    """anchor（= config.EVALUATION_WEIGHTS）里权重为 0 的维度 = 已被显式退役的维度。
+
+    v0.45.172 起 signal / risk_adj 被用户**决定**归零（v0.45.176 断开
+    `adapt_weights` 旁路后才真正生效）。归零是一个决定，不是一次学习结果；
+    而 `w = acc/Σacc` 在形式上表达不了零，所以优化器每周都想把它们拽回 ≈0.2。
+    因此检测到归零就把该维度**冻结**在 0，而不是给优化器机会复活它。
+
+    退役清单直接从 config 派生、不另存一份——另存就是第二份真相，会漂。
+    """
+    return {k for k, v in anchor.items() if float(v) <= _RETIRED_EPS}
+
+
 def merge_bounds(anchor: dict, max_shift_pp: float = None,
                  clamps: dict = None) -> dict:
     """
@@ -262,16 +279,47 @@ def merge_bounds(anchor: dict, max_shift_pp: float = None,
     且 catalyst 曾落到 0.3316（> clamp 上限 0.25）。
 
     合并成一个盒之后，单次投影即可同时满足三个约束，不存在互相破坏的顺序问题。
+
+    退役维度（v0.45.295）
+    ---------------------
+    `WEIGHT_CLAMPS` 是五维都活着时代的**份额预算**，与「维度被归零」有两处结构性矛盾：
+
+    1. 下限：signal ≥ 0.15、risk_adj ≥ 0.10，够不着 0。锚点为 0 时合并盒是
+       `[max(0.15, −0.10), min(0.40, +0.10)] = [0.15, 0.10]`——空区间，
+       `clamp_shifts` 每周必抛 `InfeasibleBoundsError`（2026-09-14、09-20 两次实测）。
+    2. 上限：剩下三个活维度的上限之和 0.25+0.30+0.25 = **0.80 < 1**，
+       即便只修下限，三维也凑不到 sum=1。
+
+    所以：退役维度冻结为 `(0, 0)`；**当活维度的绝对上限之和 < 1**（结构上撑不起 sum=1，
+    与锚点无关）时，这些上限不再适用——单次 ±MAX_SHIFT_PP 仍是唯一的运行时护栏，下限也照旧。
+    这与 config 现状一致：用户 v0.45.172 自己就把 catalyst / odds 放在 0.332 / 0.343，
+    本来就在旧上限之上。没有退役维度时，行为与此前逐位相同。
+
+    v0.45.299：解除条件从「只要有维度退役」收窄为「上限之和 < 1」（独立审查指出的过度放宽）。
+    只退役一个维度时其余四维上限之和 ≥ 1.05，本来就撑得起，这时上限照旧生效——
+    例：锚点 `{signal 0, catalyst .25, sentiment .25, odds .25, risk_adj .25}`，
+    旧的「一律解除」会让 catalyst 一次能到 0.35，而它此前的合并盒把 catalyst 压在 0.25。
+    判据只取决于「哪些维度退役」这个离散集合，不取决于锚点数值，所以锚点空间里没有断点。
     """
     if max_shift_pp is None:
         max_shift_pp = MAX_SHIFT_PP
     if clamps is None:
         clamps = WEIGHT_CLAMPS
     shift = max_shift_pp / 100.0
+    retired = retired_dims(anchor)
+    keys = set(list(anchor.keys()) + list(clamps.keys()))
+    # 活维度的绝对上限撑不起 sum=1 ⇒ 它们是五维时代的份额预算，不再适用
+    live_caps = sum(clamps.get(k, (0.0, 1.0))[1] for k in keys if k not in retired)
+    lift_caps = bool(retired) and live_caps < 1.0 - 1e-9
     bounds = {}
-    for k in set(list(anchor.keys()) + list(clamps.keys())):
+    for k in keys:
+        if k in retired:
+            bounds[k] = (0.0, 0.0)
+            continue
         a = float(anchor.get(k, DEFAULT_WEIGHTS.get(k, 0.2)))
         lo_c, hi_c = clamps.get(k, (0.0, 1.0))
+        if lift_caps:
+            hi_c = 1.0
         bounds[k] = (max(lo_c, a - shift), min(hi_c, a + shift))
     return bounds
 
@@ -298,6 +346,15 @@ def project_to_feasible(target: dict, bounds: dict = None,
     """
     if bounds is None:
         bounds = WEIGHT_CLAMPS
+
+    # 单维空区间（lo > hi）必须**先**于加总检查拦下。它会让 Σlo/Σhi 检查照样通过
+    # ——2026-09-20 实测 Σlo=0.95 ≤ 1 ≤ Σhi=1.00 压线放行——最后只被事后的
+    # assert_feasible 抓到，报出一句「signal=0.100000 越界 [0.150000, 0.100000]」，
+    # 读不出是盒本身反了。
+    inverted = {k: b for k, b in bounds.items() if b[0] > b[1] + 1e-12}
+    if inverted:
+        detail = ", ".join(f"{k}=[{lo:.4f}, {hi:.4f}]" for k, (lo, hi) in sorted(inverted.items()))
+        raise InfeasibleBoundsError(f"盒约束有空区间（lo > hi）：{detail}")
 
     # 可行性前置检查：盒 ∩ 单纯形非空 ⟺ Σlo ≤ 1 ≤ Σhi
     sum_lo = sum(b[0] for b in bounds.values())
@@ -559,9 +616,21 @@ def compute_new_weights_wls(snapshots_dir: Path) -> Optional[dict]:
 
 
 def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
-                       n_iterations: int = 500) -> dict:
+                       n_iterations: int = 500, anchor: Optional[dict] = None) -> dict:
     """
     Bootstrap 验证：重采样历史准确率 N 次，检验权重变动的稳健性
+
+    anchor（v0.45.295）：现行 config 权重。**仅当其中有维度退役（权重为 0）时才生效**——
+    此时每次重采样的结果也走与「提议权重」**同一条**管线
+    `_apply_weight_clamps → clamp_shifts(anchor, ·)`（compute_new_weights_wls 先钳制、
+    main() 再投影；v0.45.298 起两步都要，少一步就是两个估计量），
+    CI 才是**同一个估计量**的抽样分布（v0.45.144 定下的原则）。不传 / 无退役维度时
+    与此前逐位相同。
+
+    为什么必须：`acc/Σacc` 的五维估计量各在 ≈0.2 附近（CI 约 0.17~0.23），而退役后
+    提议是「活维度 ≈0.33、退役维度 0」——拿它去比未投影的 CI，五维全部出界，
+    与数据无关（2026-09-20 实测 5/5 🛑；同一份数据把**未投影**的原始目标送进来
+    `stable=True`）。闸因此恒红，比「死在闸前」只好一点点：仍然没有信息量。
 
     Returns:
         {
@@ -602,6 +671,7 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
         weight_samples = {dim: [] for dim in DEFAULT_WEIGHTS}
         n = len(valid_snaps)
         indices = range(n)
+        project_each = bool(anchor) and bool(retired_dims(anchor))
 
         for _ in range(n_iterations):
             # 有放回抽样：命中率与它的时间权重必须**成对**被抽中，
@@ -611,6 +681,14 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
                 [acc_rows[i] for i in picked],
                 [time_weights[i] for i in picked],
             )
+            if project_each:
+                # 必须与「提议」走**完全同一条**管线：compute_new_weights_wls 先对点估计做
+                # _apply_weight_clamps（绝对上下限），main() 再 clamp_shifts。这里若只做后一步，
+                # 在绝对上下限会生效的数据上（某维原始份额 > 0.25）CI 与提议就是两个估计量——
+                # v0.45.298 二次检查实测：提议 catalyst 0.3916 落在 CI [0.3994, 0.4320] 之外，
+                # 8 个种子里 7 个判 🛑；补上这一步后 8/8 稳定、被推离 5pp 的提议仍 0/8。
+                # （真实数据各维份额 ≈0.2、钳制是空操作，所以此前没暴露。）
+                w = clamp_shifts(anchor, _apply_weight_clamps(w))
             for dim in DEFAULT_WEIGHTS:
                 weight_samples[dim].append(w[dim])
 
@@ -659,6 +737,7 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
 def clamp_shifts(old_weights: dict, new_weights: dict) -> dict:
     """
     把 new_weights 投影到「WEIGHT_CLAMPS ∩ 距 old_weights 不超过 ±MAX_SHIFT_PP ∩ sum=1」
+    （old_weights 里为 0 的维度已退役，冻结为 0；必要时活维度的旧上限被解除——见 `merge_bounds`）
 
     v0.42.6 重写。旧实现是「逐维钳幅 → 重新归一化」，两步互相破坏：
     归一化是乘性缩放，必然把已钳到 ±MAX_SHIFT_PP 边界的值再推出去。
@@ -699,31 +778,59 @@ def has_significant_change(old: dict, new: dict, threshold_pp: float) -> bool:
     return False
 
 
-def read_current_weights() -> dict:
-    """从 config.py 读取当前 EVALUATION_WEIGHTS"""
+def parse_current_weights() -> Optional[dict]:
+    """从 config.py 读现行 EVALUATION_WEIGHTS；**读不出返回 None，绝不兜底**。
+
+    v0.45.299：用 AST 而不是正则。旧的正则版有三个无声失败（独立审查 + 实测）：
+      · 块里多一个键（如加了 ml_auxiliary）或注释里出现 `{…}` ⇒ 静默回退到 DEFAULT_WEIGHTS，
+        `retired_dims` 变空集，config 里被归零的 signal/risk_adj 在锚点里变回 0.30/0.15，
+        之后 `--apply` 会把它们**写回非零**——正好击穿「优化器只能冻结、不能复活」；
+      · `3.32e-1` 被读成 `3.32`（`[0-9.]+` 在 `e` 处停下），差 10 倍且无声。
+    None 的情形：读文件失败 / config.py 有语法错误 / 找不到字面量赋值 / 键集合不是这 5 个维度 /
+    有非数值、非有限、为负的值。调用方（`main()`）据此**拒绝提议与写入**，而不是拿默认值当锚点。
+    """
     try:
-        text = CONFIG_PATH.read_text(encoding="utf-8")
-        # 匹配整个 EVALUATION_WEIGHTS = { ... } 块（多行）
-        m = re.search(
-            r'EVALUATION_WEIGHTS\s*=\s*\{([^}]+)\}',
-            text, re.DOTALL
-        )
-        if not m:
-            return dict(DEFAULT_WEIGHTS)
-        block = m.group(1)
-        weights = {}
-        for line in block.splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            # 匹配 "signal": 0.30, 或 "signal": 0.30
-            km = re.match(r'"(\w+)"\s*:\s*([0-9.]+)', line)
-            if km:
-                weights[km.group(1)] = float(km.group(2))
-        return weights if len(weights) == 5 else dict(DEFAULT_WEIGHTS)
-    except Exception as e:
-        print(f"⚠️  读取 config.py 失败，使用默认权重: {e}")
+        tree = ast.parse(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return None
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        if "EVALUATION_WEIGHTS" not in names or node.value is None:
+            continue
+        try:
+            raw = ast.literal_eval(node.value)
+        except (ValueError, SyntaxError, TypeError):
+            return None
+        if not isinstance(raw, dict) or set(raw) != set(DEFAULT_WEIGHTS):
+            return None
+        out = {}
+        for k, v in raw.items():
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+                return None
+            out[k] = float(v)
+        return out
+    return None
+
+
+def read_current_weights() -> dict:
+    """现行权重；读不出时退回 DEFAULT_WEIGHTS **并大声说**（回滚/回读校验等旧调用点沿用）。
+
+    ⚠️ 这个兜底值不是现行权重。**要把它当锚点的地方（`main()`）必须用 `parse_current_weights`**——
+    v0.45.299 之前这里对「无匹配 / 键数不对」是静默兜底，只有抛异常才打印。
+    """
+    w = parse_current_weights()
+    if w is None:
+        msg = (f"读不出 {CONFIG_PATH} 里的 EVALUATION_WEIGHTS（读文件失败 / 语法错 / 键集合不是 5 维 / 值非法），"
+               "退回 DEFAULT_WEIGHTS——这不是现行权重")
+        print(f"⚠️  {msg}")
+        _log.error(msg)
         return dict(DEFAULT_WEIGHTS)
+    return w
 
 
 BACKUP_DIR      = ALPHAHIVE_DIR / "weight_backups"
@@ -783,6 +890,12 @@ def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
 
     v0.42.2 增加三道安全网：语法预检 → 备份 → 回读校验（失败自动还原）。
     dry_run=True 时返回 False（预览不等于写入，见函数内注释）。
+
+    v0.45.298：docstring 一直说「保留所有注释」，实现却整块按下面的通用文案重写。
+    此前这条路径在生产形状下不可达（归零后 clamp_shifts 恒不可行），v0.45.295 让它首次可达，
+    丢失才变成真的：`--apply` 会抹掉写在数值旁的决策理由（如 `—— IC -0.088，归零（见上）`、
+    `三维中唯一方向显著（未校正）`）——那是 config 里唯一贴着数值的「为什么」。
+    现在原样保留每个维度数值之后的内容（逗号、空格、注释），只有现有块里找不到该行时才退回通用文案。
     """
     try:
         text = CONFIG_PATH.read_text(encoding="utf-8")
@@ -795,19 +908,28 @@ def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
             "odds":      "# OracleBeeEcho: 期权 IV(55%) + Polymarket(35%) + 异动(10%)",
             "risk_adj":  "# GuardBeeSentinel: 交叉验证 + 风险调整",
         }
+        m_old = re.search(r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}', text, re.DOTALL)
+        old_block = m_old.group(0) if m_old else ""
+
+        def _tail(k: str) -> str:
+            """现有块里该维度那一行、数值**之后**的原样内容（`,` + 空格 + 注释）。"""
+            mm = re.search(rf'^[ \t]*"{re.escape(k)}"\s*:\s*[0-9.]+(,[^\n]*)$',
+                           old_block, re.MULTILINE)
+            return mm.group(1) if mm else f",   {dim_comments.get(k, '')}"
+
         lines = ["EVALUATION_WEIGHTS = {"]
         for k in ["signal", "catalyst", "sentiment", "odds", "risk_adj"]:
             v = new_weights.get(k, DEFAULT_WEIGHTS[k])
-            comment = dim_comments.get(k, "")
-            lines.append(f'    "{k}":    {v:.4f},   {comment}')
+            lines.append(f'    "{k}":    {v:.4f}{_tail(k)}')
         lines.append("    # ml_auxiliary: 不在此处（RivalBeeVanguard 作为 ±0.5 独立调整项）")
         lines.append("}")
         new_block = "\n".join(lines)
 
-        # 替换原有块（贪婪匹配到第一个独立 }）
+        # 替换原有块（贪婪匹配到第一个独立 }）。
+        # 用 lambda 给替换串：现在块里带的是用户自己写的注释，反斜杠不该被当成转义处理。
         new_text = re.sub(
             r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}',
-            new_block,
+            lambda _m: new_block,
             text,
             flags=re.DOTALL
         )
@@ -957,7 +1079,8 @@ def append_history(old_weights: dict, new_weights: dict,
                    bootstrap_stable: Optional[bool] = None,
                    applied: Optional[bool] = None,
                    skip_reason: Optional[str] = None,
-                   action: str = "optimize") -> None:
+                   action: str = "optimize",
+                   pool_ok: Optional[bool] = None) -> None:
     """追加一条记录到 weight_history.jsonl
 
     v0.23.7：增加 method / clamped / bootstrap_stable / applied 字段
@@ -981,6 +1104,7 @@ def append_history(old_weights: dict, new_weights: dict,
         "method":     method,                        # "wls_time_decay" 或 "standard"
         "clamped":    clamped,                       # _apply_weight_clamps 是否调整了值
         "bootstrap_stable": bootstrap_stable,         # Bootstrap CI 是否覆盖新权重
+        "pool_ok":    pool_ok,                       # 闸 2（标的池世代一致性）；v0.45.299 起入档，此前只在 stdout
         "n_samples":  n_samples,
         "old_weights": old_weights,
         "new_weights": new_weights,
@@ -1200,22 +1324,43 @@ def main() -> None:
         return
 
     # 4. 读取现有权重
-    old_weights = read_current_weights()
     raw_new     = result["new_weights"]
+    old_weights = parse_current_weights()
 
-    # 5. 投影到「WEIGHT_CLAMPS ∩ ±MAX_SHIFT_PP ∩ sum=1」（v0.42.6 合并盒单次投影）
-    try:
-        new_weights = clamp_shifts(old_weights, raw_new)
-    except InfeasibleBoundsError as e:
-        # 约束无解 = 配置矛盾。拒绝写入并留审计，绝不静默降级写越界权重。
-        print(f"\n🛑 权重约束无可行解，拒绝写入：{e}")
-        _log.error("clamp_shifts 不可行，跳过本次写入: %s", e)
-        append_history(
-            old_weights, old_weights, n_samples,
-            dry_run=args.dry_run, method=result.get("method"),
-            applied=False, skip_reason="infeasible_bounds",
-        )
-        return
+    # blocked：本周没有可写的「建议权重」。它有两个来源，都**不许 return**、都**绝不写入**
+    # （下面的写入决策里 `--force` 也覆盖不了）：
+    #   · config_unparseable —— 读不出现行权重，就不知道锚点是什么、哪些维度已被归零。
+    #     v0.45.299 之前这里是静默回退 DEFAULT_WEIGHTS，config 里的零会被悄悄换成
+    #     0.30/0.15，之后 `--apply` 会把它们写回非零。
+    #   · infeasible_bounds —— 盒约束与 sum=1 无交集，配置本身矛盾。
+    #     v0.45.295 之前这里 `return` 在两道闸**之前**：v0.45.172 归零 signal/risk_adj
+    #     之后本分支每周必进（2026-09-14、09-20），闸 1/闸 2 永远跑不到、退出码仍是 0，
+    #     周诊断的全部价值丢光而没有任何东西变红。这条路径已是第三次出事
+    #     （v0.43.3 `_log` 未定义、审计标签写错、这次），每次都因为没有任何测试
+    #     真的跑过 main() 的这一支。
+    blocked: Optional[str] = None
+    blocked_code: Optional[str] = None
+    if old_weights is None:
+        blocked_code = "config_unparseable"
+        blocked = (f"读不出 {CONFIG_PATH} 里的 EVALUATION_WEIGHTS（读文件失败 / 语法错 / 键集合不是 5 维 / "
+                   "值非法）——不知道现行权重，拒绝提议与写入")
+        print(f"\n🛑 {blocked}")
+        _log.error("config_unparseable: %s", blocked)
+        old_weights = dict(DEFAULT_WEIGHTS)   # 仅作审计占位，绝不当锚点用
+        new_weights = old_weights
+    else:
+        # 5. 投影到「WEIGHT_CLAMPS ∩ ±MAX_SHIFT_PP ∩ sum=1」（v0.42.6 合并盒单次投影；
+        #    v0.45.295 起对已退役的零权重维度冻结、必要时解除活维度的旧上限，见 merge_bounds）
+        try:
+            new_weights = clamp_shifts(old_weights, raw_new)
+        except InfeasibleBoundsError as e:
+            blocked_code = "infeasible_bounds"
+            blocked = str(e)
+            print(f"\n🛑 权重约束无可行解，拒绝写入：{e}")
+            _log.error("clamp_shifts 不可行，跳过本次写入: %s", e)
+            new_weights = old_weights   # 审计记录里「没有提议」= 与现行相同
+    if blocked is not None:
+        print("   （闸 1/闸 2 照常运行；本周没有『建议权重』可报，--apply 也无法写入。）")
 
     # 6. 闸 1：Bootstrap 稳健性
     #
@@ -1225,10 +1370,16 @@ def main() -> None:
     # 而 risk_adj −4.13pp 已越过 MIN_CHANGE_PP，若不是人工中断就会写进 config.py。
     # "限幅已保护"是个安慰性说法：限幅只保证**幅度**不失控，不保证**方向**对。
     print("🔍 闸 1/2：Bootstrap 稳健性验证...")
-    bootstrap = bootstrap_validate(SNAPSHOTS_DIR, new_weights)
+    if blocked is not None:
+        # 没有可行的投影结果可验：退而验 WLS 输出（compute_new_weights_wls 已做绝对上下限钳制）
+        # 本身的重采样稳定性（不带 anchor ⇒ 不做逐次投影，与 v0.45.144 的口径一致）。
+        bootstrap = bootstrap_validate(SNAPSHOTS_DIR, raw_new)
+    else:
+        bootstrap = bootstrap_validate(SNAPSHOTS_DIR, new_weights, anchor=old_weights)
     gate_bootstrap_ok = bool(bootstrap.get("stable"))
     if gate_bootstrap_ok:
-        print("   ✅ 通过：权重变动在 95% 置信区间内")
+        print("   ✅ 通过：权重变动在 95% 置信区间内" if blocked is None
+              else "   ✅ 通过：WLS 输出在其重采样区间内（本周无可行提议，验的只是估计量自洽）")
     else:
         print(f"   🛑 未通过：{bootstrap.get('error', '权重可能不稳健')}")
 
@@ -1257,7 +1408,12 @@ def main() -> None:
     # 9. 写入决策。优先级：只读默认 > 闸门 > 显著性
     applied = False
     skip_reason = None
-    if not write_requested:
+    if blocked is not None:
+        # 最高优先级：没有可行权重就没有东西可写，`--force` 也不行。
+        skip_reason = blocked_code
+        if write_requested:
+            print(f"\n🛑 --apply 已请求写入，但本周被阻断（{blocked_code}，见上），拒绝写入；--force 也无法覆盖。")
+    elif not write_requested:
         # 默认路径：只读诊断。仍然预览新权重块（write_weights_to_config 的
         # dry_run 分支只打印不落盘），并留审计轨迹。
         write_weights_to_config(new_weights, dry_run=True)
@@ -1289,20 +1445,34 @@ def main() -> None:
         applied=applied,
         skip_reason=skip_reason,
         action="optimize" if write_requested else "diagnose",
+        pool_ok=gate_pool_ok,
     )
 
     # 10. 打印摘要
-    print_summary(old_weights, new_weights, n_samples, applied,
-                  dry_run=not write_requested)
+    if blocked is not None:
+        # 不打「新旧权重对照表」：new_weights 在此只是审计占位（= 旧权重），
+        # 打出来是一排 → 加一句「系统稳定」，与事实（本周根本没有提议）相反。
+        print(f"\n{'━'*52}")
+        print(f"🐝 Alpha Hive · 周度权重诊断  🛑 被阻断：{blocked_code}（无建议权重）")
+        print(f"{'━'*52}")
+        print(f"  原因: {blocked}")
+        print(f"  样本数（T+7已回填）: {n_samples}")
+        print(f"{'━'*52}\n")
+    else:
+        print_summary(old_weights, new_weights, n_samples, applied,
+                      dry_run=not write_requested)
 
     print("  闸门: "
           f"bootstrap {'✅' if gate_bootstrap_ok else '🛑'}  "
           f"标的池世代 {'✅' if gate_pool_ok else '🛑'}")
     if not write_requested:
-        print("  模式: 只读诊断 — config.py 未被修改（写入需 --apply）")
+        print("  模式: 只读诊断 — config.py 未被修改"
+              + ("（--apply 也无法写入，见上）" if blocked is not None else "（写入需 --apply）"))
     print()
 
-    if significant and not write_requested:
+    if blocked is not None:
+        pass  # 上面已明说；这里绝不能落进「系统稳定」那一支
+    elif significant and not write_requested:
         print(f"ℹ️  有维度变化 ≥ {args.min_change}pp，但当前为只读模式，未写入。")
         if not gates_ok:
             print("   （即便加 --apply 也会被闸门拦下）")

@@ -18,7 +18,6 @@
 `tests/test_close_t7_production_wiring.py` / `tests/test_ticker_accuracy_direction.py`
 覆盖，此处不重复。
 """
-from pathlib import Path
 
 import pytest
 

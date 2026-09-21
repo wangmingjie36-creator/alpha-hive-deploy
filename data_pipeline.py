@@ -27,7 +27,7 @@ import time
 import math
 import logging
 import threading
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List
 from collections import deque
 
 
@@ -40,7 +40,7 @@ def _get_secret(name: str) -> str:
     except Exception:  # noqa: BLE001
         import os as _os
         return _os.environ.get(name, "")
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, time as _dt_time
 
 _log = logging.getLogger("alpha_hive.data_pipeline")
@@ -660,7 +660,6 @@ class AlphaVantageSource:
         if not self.api_key or not self.breaker.allow_request():
             return None
         try:
-            import urllib.request
             import json
 
             url = (
@@ -715,7 +714,6 @@ class FinnhubSource:
         if not self.api_key or not self.breaker.allow_request():
             return None
         try:
-            import urllib.request
             import json
 
             url = f"https://finnhub.io/api/v1/quote?symbol={ticker}&token={self.api_key}"

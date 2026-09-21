@@ -39,10 +39,9 @@ import math
 import random
 import sqlite3
 import statistics
-import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 _log = logging.getLogger("alpha_hive.bootstrap")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

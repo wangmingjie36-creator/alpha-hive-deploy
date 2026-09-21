@@ -1,30 +1,4 @@
 {
-  "_all_tickers": [
-    "NVDA",
-    "TSLA",
-    "MSFT",
-    "AMD",
-    "QCOM",
-    "META",
-    "BILI",
-    "AMZN",
-    "VKTX",
-    "AMGN",
-    "BIIB",
-    "JNJ",
-    "REGN",
-    "PLUG",
-    "RUN",
-    "NEE",
-    "ICLN",
-    "ENPH",
-    "SQ",
-    "COIN",
-    "MSTR",
-    "CRCL",
-    "UPST",
-    "RKLB"
-  ],
   "NVDA": {
     "level_1_warning": {
       "name": "预警级别",

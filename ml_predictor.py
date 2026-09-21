@@ -1093,7 +1093,6 @@ class SGDMLModel:
     # ---- 序列化（JSON，无 pickle）----
     def save_model(self, filename: Optional[str] = None):
         """保存模型到 JSON"""
-        import numpy as np
 
         # v0.45.149: 默认落盘位置来自 `default_model_path()`，不再是 cwd 相对路径
         if filename is None:

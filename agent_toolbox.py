@@ -45,7 +45,6 @@ v0.45.204 续做**方法粒度**：`GitHubTool` 是活类，但类里的方法�
 要加 MCP 工具 → `alpha_hive_mcp.py`；要发 Slack → `slack_report_notifier.py`。
 """
 
-import os
 import shlex
 import subprocess
 import time

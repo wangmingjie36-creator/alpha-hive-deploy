@@ -1,9 +1,8 @@
 """RivalBeeVanguard - 竞争分析与 ML 预测蜂 (ML 辅助维度)"""
 
-from typing import Any, Dict, List, Optional
+from typing import Dict
 from hive_logger import pdt_today  # v0.28.0: 美股交易日工具
 from swarm_agents._config import _log, _AS
-from swarm_agents.cache import _safe_score
 from swarm_agents.base import BeeAgent
 from models import AgentResult
 from swarm_agents.utils import (
@@ -28,7 +27,6 @@ class RivalBeeVanguard(BeeAgent):
             tech = {"tech_score_adj": 0.0, "tech_direction": "neutral", "summary": ""}
             try:
                 from ml_predictor_extended import MLPredictionService, TrainingData
-                from datetime import datetime
                 service = MLPredictionService()
 
                 stock = self._get_stock_data(ticker)

@@ -13,14 +13,12 @@ NVDA 完整 OI 墙（Max Pain 图）
 
 import warnings
 import os
-import json
 from datetime import datetime
 import yfinance as yf
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
 
 warnings.filterwarnings("ignore")

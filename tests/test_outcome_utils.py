@@ -7,7 +7,6 @@ v0.45.9 P0 更新：方向判定由「单边亏损豁免」改为「双边模糊
 本文件相应改写了所有落在容差带内的断言，并新增 triplet 测试。
 """
 
-import pytest
 from outcome_utils import (
     determine_correctness,
     determine_correctness_bool,

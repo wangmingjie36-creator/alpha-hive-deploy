@@ -1,11 +1,11 @@
 """BeeAgent 基类 + prefetch_shared_data + inject_prefetched"""
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 from hive_logger import pdt_today  # v0.28.0: 美股交易日工具
 from pheromone_board import PheromoneBoard, PheromoneEntry
 from resilience import NETWORK_ERRORS
-from swarm_agents._config import _log, _RE_TICKER, _AS
+from swarm_agents._config import _log, _RE_TICKER
 from swarm_agents import cache as _cache  # Module reference for monkeypatch compatibility!
 
 

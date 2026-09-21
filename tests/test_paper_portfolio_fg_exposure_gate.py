@@ -16,7 +16,6 @@ CNN 官方把 F&G 设计成大盘/组合择时工具，本版把它挪到组合�
    0 天——F&G 是逐日读数，不是慢变量）。
 """
 
-import math
 import sqlite3
 
 import pytest

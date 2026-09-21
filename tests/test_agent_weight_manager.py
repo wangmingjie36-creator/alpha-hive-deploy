@@ -2,8 +2,6 @@
 Tests for AgentWeightManager - 动态权重管理器
 """
 
-import pytest
-from unittest.mock import MagicMock, patch
 from agent_weight_manager import AgentWeightManager
 
 

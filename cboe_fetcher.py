@@ -28,7 +28,7 @@ import os
 import json
 import time
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 import warnings
@@ -893,7 +893,6 @@ def format_cboe_for_macro_card(cboe_data: Dict[str, Any]) -> str:
 
 if __name__ == "__main__":
     # 测试脚本
-    import sys
 
     print("[CBOE Fetcher 测试]")
     print("=" * 60)

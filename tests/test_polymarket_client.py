@@ -4,7 +4,6 @@ Tests for polymarket_client module — Polymarket 预测市场客户端
 覆盖: API 请求、市场搜索、赔率计算、缓存行为、单例/限流/熔断、降级
 """
 
-import json
 import types
 import pytest
 

@@ -18,7 +18,7 @@ CBOE payload 同时给两个字段，含义完全不同：
 用盘后价当入场价 = 假设能在财报公布后以盘后价成交，收益全错。
 """
 
-from datetime import datetime, time as dtime
+from datetime import datetime
 
 import pytest
 

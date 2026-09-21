@@ -1,7 +1,6 @@
 """Swarm agent 共享配置：logger、正则、评分配置"""
 
 from hive_logger import get_logger
-import math
 import re as _re
 
 _log = get_logger("swarm")

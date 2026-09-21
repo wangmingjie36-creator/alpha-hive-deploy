@@ -10,11 +10,7 @@ Mock 所有外部 API，验证 7 Agent + QueenDistiller + Feedback 全流程。
 """
 
 import json
-import types
 import pytest
-from unittest.mock import patch, MagicMock, PropertyMock
-from datetime import datetime
-from pathlib import Path
 
 from pheromone_board import PheromoneBoard, PheromoneEntry
 from swarm_agents.queen_distiller import QueenDistiller
@@ -274,7 +270,6 @@ class TestBearCapIntegration:
 
     def test_bear_cap_limits_score_unit(self):
         """bear_cap 独立单元测试（绕过 DQ 惩罚验证纯 bear_cap 逻辑）"""
-        from swarm_agents.queen_distiller import QueenDistiller
         # 直接验证 bear_cap 公式: score=1.0 → strength=9.0 → cap=10-(9-5)*0.5=8.0
         bear_strength = 10.0 - 1.0  # score=1.0 的 bear_strength
         cap_thresh = 5.0

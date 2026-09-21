@@ -4,7 +4,6 @@ tests/test_llm_service.py — llm_service 模块单元测试
 Mock 策略：mock llm_service.call() — 所有高层函数都走它，一层拦截全部。
 """
 
-import json
 import pytest
 
 import llm_service

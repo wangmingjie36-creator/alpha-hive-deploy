@@ -15,15 +15,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import httpx
 
 from .config import BotConfig, DISCLAIMER, pdt_today
 from .subscriber_db import SubscriberDB
-
-if TYPE_CHECKING:
-    from telegram import Bot
 
 
 log = logging.getLogger("alpha_hive_bot.push")

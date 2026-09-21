@@ -9,7 +9,6 @@ Tests for economic_calendar_watch —— 上游宏观日程发布监视器（v0.
 import json
 import pytest
 from datetime import date
-from pathlib import Path
 
 
 # ── 最小页面样本（结构照抄真实页面，内容裁剪）──

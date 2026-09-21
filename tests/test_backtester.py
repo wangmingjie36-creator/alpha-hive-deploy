@@ -823,7 +823,7 @@ class TestLoadAdaptedWeights:
 
     def test_save_then_load_roundtrip(self, tmp_path):
         """保存权重后应能正确加载"""
-        from backtester import Backtester, PredictionStore
+        from backtester import Backtester
         db = str(tmp_path / "test.db")
         bt = Backtester(db_path=db)
 

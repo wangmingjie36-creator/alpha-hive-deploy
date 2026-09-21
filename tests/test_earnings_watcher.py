@@ -12,11 +12,8 @@ Covers:
 - Singleton: get_watcher / auto_check_earnings
 """
 
-import json
 import types
-import threading
 from datetime import datetime, date, timedelta
-from pathlib import Path
 
 import pytest
 

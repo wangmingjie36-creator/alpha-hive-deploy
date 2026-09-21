@@ -10,7 +10,6 @@ import os
 import time
 import hashlib
 import requests
-from pathlib import Path
 from resilience import get_session
 from collections import deque
 from typing import Any, Dict, List, Optional

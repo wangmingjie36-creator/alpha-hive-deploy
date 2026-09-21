@@ -5,7 +5,6 @@ LiveMonitor
 
 import random
 import logging as _logging
-from datetime import datetime
 from threading import Thread
 
 _log = _logging.getLogger("alpha_hive.app")

@@ -3173,7 +3173,6 @@ def _build_valuation_card(ctx: dict) -> str:
 
 def _build_scenario_narrative(ctx: dict) -> str:
     """CH6: 五情景推演 + 期望值 + If-Then 决策树（本地 fallback）"""
-    import math as _math
 
     score    = float(ctx["final_score"])
     direction = ctx["direction"]
@@ -7154,7 +7153,7 @@ def main():
         sys.exit(1)
 
     # 1b. 数据新鲜度保护：JSON 超过 1 个交易日则拒绝生成，防止覆盖已有的好报告
-    from datetime import datetime as _dt_freshness, timedelta as _td_freshness
+    from datetime import datetime as _dt_freshness
     try:
         _json_date_str = json_path.stem.split("-ml-")[1]  # e.g. "2026-03-20"
         _json_date = _dt_freshness.strptime(_json_date_str, "%Y-%m-%d").date()

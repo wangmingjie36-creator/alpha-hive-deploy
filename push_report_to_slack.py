@@ -22,9 +22,7 @@ orchestrator 日志会显示"Step 7 跳过（Slack 推送由 Claude Code MCP 手
 """
 
 import argparse
-import os
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # 确保项目根目录在 sys.path（代码锚点，正确用法）

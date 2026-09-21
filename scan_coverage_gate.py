@@ -45,7 +45,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # v0.45.260（数据根迁移阶段 2）：`ROOT` 此前是 `Path(__file__).parent`（模块级
 # 常量），完全不读 `ALPHA_HIVE_HOME`——本模块是编排器 Step 12 每日活跃调用的

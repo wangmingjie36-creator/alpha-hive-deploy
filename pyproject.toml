@@ -52,7 +52,8 @@ select = ["E", "F", "W"]
 ignore = [
     "E501",   # line too long
     "E402",   # module-level import not at top
-    "F401",   # unused import
+    # F401（unused import）v0.45.302 起不再忽略：全仓 254 条已逐条分类清理，
+    # 故意保留的用 `# noqa: F401 — 原因` 或 `__all__` 标注。
     "F541",   # f-string without placeholders
     "F841",   # unused variable (many in except blocks)
     "E701",   # multiple statements on one line (colon)

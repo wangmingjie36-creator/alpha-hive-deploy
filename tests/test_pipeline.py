@@ -7,7 +7,7 @@ tests/test_pipeline.py — AlphaHiveDailyReporter 主流程单元测试
 import os
 import subprocess
 import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta
 
 

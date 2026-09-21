@@ -1,9 +1,7 @@
 """feedback_loop 模块测试 - ReportSnapshot + BacktestAnalyzer"""
 
-import json
 import os
 import tempfile
-import pytest
 
 
 class TestReportSnapshot:
@@ -214,7 +212,7 @@ class TestBacktestAnalyzer:
         assert analyzer.snapshots == []
 
     def test_load_and_accuracy(self):
-        from feedback_loop import BacktestAnalyzer, ReportSnapshot
+        from feedback_loop import BacktestAnalyzer
         with tempfile.TemporaryDirectory() as tmpdir:
             # 创建 3 个快照：2 个正确，1 个错误
             s1 = self._make_snapshot("AAPL", "2026-01-01", "Long", 100.0, 110.0)

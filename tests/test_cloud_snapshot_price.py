@@ -6,7 +6,6 @@
   · 只 dropna   → 末行退回 8/27，**用前一交易日冒充目标日**（差 4.8%）
   · 本版        → 拿云端快照的 price_at_fetch（目标日收盘后从 CBOE 抓的）
 """
-import datetime as dt
 import pandas as pd
 import pytest
 

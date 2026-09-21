@@ -15,9 +15,7 @@ Fear & Greed Index 模块
   76-100: Extreme Greed（极度贪婪）
 """
 
-import json
 import logging as _logging
-import time
 import threading
 from datetime import datetime
 from pathlib import Path

@@ -24,7 +24,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from .config import BotConfig, DISCLAIMER, HELP, WELCOME_ACTIVE, WELCOME_NEW, pdt_today
+from .config import BotConfig, HELP, WELCOME_ACTIVE, WELCOME_NEW, pdt_today
 from .push_job import run_daily_push
 from .subscriber_db import SubscriberDB
 

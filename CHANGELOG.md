@@ -5,6 +5,529 @@
 
 ---
 
+## [0.45.303] — 2026-09-21 — Fixed：`tests/conftest.py::_isolate_paper_portfolio_state` 对「生产真身」的判定依赖导入顺序——单条/子集跑会误报「写穿生产」，而那种进程里守卫盯的是沙箱自己（真写穿生产它也看不见）；Added：2×2 子进程回归矩阵
+
+**现象**（配对对照实测，不是推理）：全新进程单独跑一条会写 `CLOSED_FILE` 的既有老测试
+（`test_fg_exposure_gate_forward_test.py::TestRealRunReplayIntegration::test_self_proof_fails_when_reproduction_rate_too_low`）
+⇒ `1 passed, 1 error`，teardown 报「测试写到了**生产** paper_portfolio_state/：['closed_trades.jsonl']」；
+同一条测试、同进程里让别的模块先在收集期导入 `paper_portfolio` ⇒ `2 passed`。整套/整文件跑不触发（约 10 个模块顶层就导入它，收集期环境还是真的）。
+
+**根因**：夹具原先 `real = {n: _pp.STATE_DIR / n …}` 记「生产状态文件」指纹。`paper_portfolio.STATE_DIR` 是 **import 期常量**
+（`_base_dir()` → `PATHS.home` → `ALPHA_HIVE_HOME`）。若 `paper_portfolio` 在本进程的**首次导入**恰好发生在这个 function 级夹具里
+——此刻 `_isolate_env` 已把 HOME 指向 tmp——`STATE_DIR` 就被冻成沙箱路径，「真身」与随后新建的 `sandbox` 成了**同一个目录**。后果两条：
+① 单条测试写沙箱被误报为写穿生产（v0.45.300 迭代新测试时被它骗了几分钟）；
+② **更隐蔽**：那种进程里守卫名义上在、实际盯的是沙箱自己，测试真写穿生产它也看不见——「守卫自己失效」那一族。
+
+**改动**（仅 `tests/`，生产代码零改动）：
+- `tests/conftest.py`：新增会话级 autouse 夹具 `_real_paper_portfolio_state_dir`，在**任何 function 级隔离动手之前**用生产自己的 `PATHS.home`
+  求一次真身（纯读、不建目录）；`_isolate_paper_portfolio_state` 改吃它，不再读 `_pp.STATE_DIR`。
+  收集期已有人导入 `paper_portfolio` 时，会话开始处断言其 `STATE_DIR` 与本夹具的推导一致——漂移就在这里红，不让守卫悄悄失明。
+- `tests/test_paper_portfolio_guard_identity.py`（新，5 条，约 5s）：假 checkout + 原样拷贝的 conftest + 探针，子进程真跑一轮 pytest
+  （沿用 `test_root_data_guard.py` 的接线测试约定：进程内造不出「夹具内首次导入」，测 helper 也证明不了 conftest 真用了它）。
+
+**没走的路（下次别再评估）**：
+
+| 方案 | 为什么不 |
+|---|---|
+| conftest 顶层 / `pytest_configure` 里取真身 | 得 import `hive_logger`，改变 v0.45.239 日志隔离守卫依赖的时序（见 `pytest_configure` docstring 末句） |
+| 以仓库根（`__file__`）为锚点推导 | 状态目录是**数据**，跟 `ALPHA_HIVE_HOME` 走；数据根迁移阶段 5 后指向 `~/alpha-hive-data`，代码锚点会让守卫静默盯着旧路径 |
+| 夹具里临时还原环境变量再 import；或 conftest 提前 import `paper_portfolio` | 单条测试也会触发 import 期 `STATE_DIR.mkdir`，在真仓库根建目录——给生产目录新增写入 |
+| 夹具里临时改 `os.environ` 后读 `PATHS.home` | 有个微小窗口，后台线程此刻会读到真 HOME；会话级夹具零窗口 |
+
+「会话夹具先于 function 级 `_isolate_env`」靠的是 pytest 的 scope 语义（`--setup-plan` 实测），不是夹具名字母序的实现巧合。
+
+**验证**：
+1. 两条配对复现：修前 `1 passed, 1 error` / `2 passed` → 修后 `1 passed` / `2 passed`。
+   ⚠️ 但「转绿」证明不了修对了——旧缺陷的一个形态就是「守卫失明」，失明的守卫同样是绿。所以有第 2 条：
+2. **2×2 矩阵**（回归测试）——{首次导入在夹具内 / 收集期} × {测试写沙箱（合法）/ 测试写真身（违法）}，红组必须红、对照组必须绿。
+   **用改动前的真实文件**（`git show HEAD:tests/conftest.py`）跑：夹具内×写沙箱 **红**（误报）、夹具内×写真身 **红**（子进程 `1 passed` ⇒ 守卫失明、照绿）、
+   收集期两格绿、进程内签名测试 ERROR（旧文件没有该夹具）——与缺陷描述逐格吻合。
+3. **前提自证**：探针在夹具**收尾之后**读 `paper_portfolio` 的 import 期 `STATE_DIR`（夹具活着时读到的是沙箱值，v0.45.300 量错过一次）：
+   夹具内首次导入 ⇒ 必须落在沙箱且不在真身下；收集期导入 ⇒ 必须等于哨兵真身。前提不成立就红，而不是让整列测试悄悄变成恒绿。
+4. **变异**（真跑，`PYTHONDONTWRITEBYTECODE=1`；每轮还原后核对 sha256；**每个变异的红都用报错文案核对过是预期的那条断言**）：
+
+   | 变异 | 结果 |
+   |---|---|
+   | M0 改动前的真实文件 | 2 红 + 1 ERROR / 2 绿（见上） |
+   | M1 只把「真身」改回 `_pp.STATE_DIR`（一行） | 夹具内两格红（误报 / 失明）；收集期两格绿；单条复现回到 `1 passed, 1 error` |
+   | M2 会话夹具目录名写错（自检开） | 4 红：收集期自检在会话开始就炸 + 写真身两格 + 进程内 name 断言 |
+   | M2b 同 M2 且**关掉**自检 | 3 红：靠「写真身」两格照样抓到，自检不是唯一防线 |
+   | M3 守卫削弱（`touched` 恒空） | 恰好「写真身」两格红，合法写入两格绿 |
+   | M5 conftest 顶层提前 import `paper_portfolio` | 夹具内两格红，报「回归场景不再成立」 |
+   | M6 去掉四个状态文件的重绑 | 收集期×写沙箱格红（「夹具没把 CLOSED_FILE 重绑进沙箱」） |
+5. 整套（`--maxfail=1000 -rfEs`，370s）：**1 failed / 5203 passed / 1 skipped / 83 deselected / 2 xfailed**——唯一红是已知的
+   `TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`；唯一 skip 是 `test_scheduler.py` 的 `importorskip("schedule")`
+   （本机 `/usr/local/bin/python3` 没装 `schedule`，与本改动无关，该文件最近一次提交是 2026-03-06）。ruff 通过。
+
+**顺带发现（已实测，未修）**：`test_paper_portfolio_vol_sizing.py::TestProductionStateIsIsolated::test_state_paths_point_outside_the_repo`（防线①自检）**恒真**——
+`pp.BASE_DIR` 自 v0.45.160 起默认 `None`，`None not in f.parents` 恒成立。M6 把四个状态文件的重绑整个删掉后它仍 `2 passed`。
+本版新增的「收集期×写沙箱」格能抓到这个变异，但该自检本身应换成对真路径的断言——另开任务。
+
+**边界（如实记）**：
+- 会话夹具的前提是「会话开始时 `ALPHA_HIVE_HOME` 还是调用者给的值」。当前没有测试模块在**收集期**改它（grep `^os.environ…ALPHA_HIVE_HOME`，零命中），但没有观测点。
+  一致性自检只在收集期已导入 `paper_portfolio` 时才有得比；未被导入的进程靠子进程那组矩阵覆盖。
+- 单条测试的进程里，`hive_logger` 的首次 import 从 function 夹具挪到了会话夹具（此时 `pytest_configure` 的 `ALPHA_HIVE_LOGS_DIR` 缺省已设），
+  与整套的行为一致；日志隔离守卫在整套里全绿。
+- 「首次导入发生在夹具内」的进程里，`paper_portfolio` 其余 import 期常量（`SNAPSHOT_DIR` 等）仍冻成第一条测试的沙箱路径——无害（每条测试都被夹具重绑），本版不处理。
+
+## [0.45.302] — 2026-09-21 — Removed：清理全仓 F401 未使用导入（254 条里删 236、有意保留 18），并在 ruff 里启用 F401
+
+### 先回答「这 254 条都没用吗」—— 不是
+
+ruff 的 F401 只看**单个文件**里有没有用到这个名字，看不见三类「故意导入、本文件确实不用」：
+
+| 类别 | 条数 | 处置 |
+|---|---|---|
+| **包再导出**（`swarm_agents/__init__.py`，docstring 自称「向后兼容 re-export 层」） | 45 | 逐名数消费者：**15 个有人**从包顶层取 → 保留并写进 `__all__`；**30 个零消费者** → 删 |
+| **可用性探测**（`finrl_bridge.py`：`import finrl` / `from stable_baselines3 import DQN, PPO`，只为设 `HAS_FINRL`/`HAS_SB3`） | 3 | 保留，`# noqa: F401 — 原因` |
+| 其余 | 206 | 删 |
+
+合计删 **236**、留 **18**。另有 **1 处**是删除直接引出的：`alpha_hive_bot/push_job.py` 的
+`if TYPE_CHECKING: from telegram import Bot` 删空后 ruff 塞了个 `pass`，连同随之无用的
+`TYPE_CHECKING` 导入一起删掉（`Bot` 只在注释和另一处独立的延迟导入里出现）。
+
+删除分布：生产代码模块级 116 / 函数内 14 / 包再导出 30，测试 74（模块级 65、函数内 9），实验脚本 2。
+改动 124 个文件，全部是删 import 行或改写多名字 import，外加下面几处 Changed。
+
+### 怎么判定「没用」—— 不信 ruff 的 safe
+
+ruff 给 204 条标了 safe fix，但它的 safe 只对单文件成立。逐条过四道检查：
+
+1. **可用性探测**：import 是否在 `try` 里且 handler 接 `ImportError` / `Exception` / 裸 except。
+   命中 7 条，人工逐条看：3 条是真探测（留），4 条是标准库（`urllib` ×2、`datetime`）或
+   冗余闸门（`alpha_hive_daily_report.py:1653` 的 `import llm_service as _llm_ct`，块内第 10 行
+   另有真正在用的 `import llm_service`；删后返回值在所有分支都是 `{}`，唯一差别是
+   **默认 `--no-llm` 扫描不再白白加载 LLM 模块**、以及 llm_service 装不上时少一行 debug 日志）。
+2. **跨文件消费**：别处 `from M import name`、`M.name`、字符串补丁目标。
+3. **副作用**：被导入的本仓模块顶层有没有可执行语句；第三方已知「导入即干活」的库。
+4. **pytest fixture 注入**：测试里要删的名字有没有被当作参数名 / `usefixtures` 字符串（74 条中 0）。
+
+**仓库外消费者**：编排器 `~/.claude/scripts/`、定时任务提示词、`mcp-servers/` 下 5 个第三方
+MCP、生产目录未跟踪文件、LaunchAgent，共 156 个文件 —— 对 148 条模块级删除项**零命中**。
+正对照：同一扫描逻辑找已知存在的 `from config import WATCHLIST`，在编排器里命中 8 处。
+（Alpha Hive 自己的 MCP 服务器 `alpha_hive_mcp.py` 已被 git 跟踪，在仓内扫描范围。）
+
+### ⚠️ 中途漏了一条，被全套测试抓到
+
+第 2 道检查只认 `weekly_optimizer.sqlite3` 这种**全名**写法，而
+`tests/test_weekly_optimizer.py` 写的是 `import weekly_optimizer as wo` 后 `wo.sqlite3.connect`
+—— **别名**。于是删掉了 `weekly_optimizer.py` 里的 `import sqlite3`（该模块自己确实一次都没用过），
+那条测试报 `AttributeError: module 'weekly_optimizer' has no attribute 'sqlite3'`。
+
+这条被测试抓住了，但同一盲区在**测试覆盖不到的生产路径**上会变成运行时 `AttributeError`，
+外面若恰好包着 `except` 就是静默失效。所以没有只修这一条：把检测器补成「模块以任何别名被
+引用后的属性访问 + `getattr/hasattr/setattr/monkeypatch.setattr/patch.object(别名, "名字")`」，
+**对全部 236 条重查**，并以这条已知漏网为正对照 —— 结果**只命中它一条**。
+另补一道：字符串补丁目标改成前缀匹配（`"模块.名字.属性"` 这种更深层的也算），
+命中 2 处均为缓存**文件名**（`"fear_greed.json"`、`"yahoo_trending.json"`），不是补丁目标。
+
+**修法是改测试不是恢复 import**：`wo.sqlite3` 与直接 `import sqlite3` 是**同一个模块对象**，
+补丁效果完全相同；为了测试的方便在生产代码里留一行死 import 不对。变异验证：把补丁改成空操作，
+该测试以 `assert 'ok' == 'error'` 变红 —— 它确实在检查补丁拦到了实际的 connect。
+
+### Changed
+
+- **`pyproject.toml`：F401 从 ruff 全局 ignore 移除。** CI 自 v0.45.206 起跑 `ruff check .` 且会拦，
+  不打开的话清完还会慢慢长回来。正对照：临时加一行 `import zipfile`，`ruff check .` 退出码 1；还原后全绿。
+- `swarm_agents/__init__.py`：只保留 15 个有消费者的再导出 + `__all__`；docstring 说明删了什么、
+  以后新增顶层导入要同时加进 import 和 `__all__`。
+- `tests/test_weekly_optimizer.py`：`wo.sqlite3` → `sqlite3`（见上），附注释说明为什么。
+
+### 验证
+
+- **删的恰好是计划那 236 条**：改前改后按「文件 | 绑定名」数全仓 import 绑定（5926 → 5690），
+  多删 0、少删 0、新增 0。
+- **导入图不变**：73 个被改的非测试模块，在隔离子进程（`ALPHA_HIVE_HOME` 指向沙箱）里各 import
+  一次、记下 `sys.modules` 全集，改前改后对比：import 成败**零变化**，**零新增加载**；
+  不再加载的 37 个全是标准库或 numpy/scipy（后者仅 `ff6_cycle_history.py`），**没有任何本仓模块** ——
+  `yf_gate` 这类有副作用的都不在其中。
+- **函数内导入**（导入图覆盖不到，要等函数运行才执行）：生产代码 14 条，其中 3 条是本仓模块，
+  逐条审过：`llm_service`（见上）、`hive_logger`（上一行 `backtester` 已加载它）、
+  `catalyst_exit_planner`（同文件另两个函数各自导入，这一处确实没用，也不在 try 里）。
+- ruff：该规则 **254 → 0**；启用 F401 后全量 `ruff check .` 全绿；F821 零命中。
+- 全套测试：`5190 passed, 2 failed` → 修 `wo.sqlite3` 后 `test_weekly_optimizer.py` 96 条全过；
+  剩下唯一失败是 `test_economic_calendar.py::TestCoverageHorizon`（设计如此、定期变红，
+  本次未碰 `economic_calendar.py` 与该测试文件）。
+
+### 分类器自己踩的两个坑（留给下一个写 import 检查的人）
+
+- **ruff 对 `import x as y` 报的位置是别名 `y`**，不是 `x`；按「起点列号相等」定位会漏掉全部 18 条带别名的。
+  改成「落在 alias 节点范围内」后归零。
+- **文件名字符串会冒充模块属性**：`"fear_greed.json"` 与「模块 `fear_greed` 的属性 `json`」字面相同。
+  同一物种已记过多次（「文本探针把『在讨论 X』误判成『是 X』」），这次是往**保守**方向错（多查一条），无害。
+
+### 未做（留档）
+
+- `check_0520_jun18.py` **import 时就联网**拉 2026-06-18 到期的期权链，该到期日早已过去，import 即报
+  `ValueError`。它是一次性脚本、改前改后一样失败，与本次无关；但「顶层代码不加 `__main__` 守卫」
+  会让任何枚举 import 的工具都去打一次网络。
+
+## [0.45.301] — 2026-09-21 — Removed：一行生来就死的 `import subprocess`（F401 被全局忽略，v0.45.206 全量 ruff 清零后它照样活着）
+
+### Removed
+
+- `tests/test_paths_not_frozen_at_import.py::_discover_path_resolvers()` 体内的 `import subprocess`。
+  **生来就死**：v0.45.160（c0a8cfaf，2026-09-07）写这个函数时就带着它，AST 核对诞生版本
+  体内零引用；大概是从当时的 `_own_python_files`（那里确实调 `subprocess.run`）抄过来的。
+  函数改走 `_own_python_files()` 取文件清单，从来不需要自己起子进程。
+
+### 为什么十四天没人看见
+
+`pyproject.toml` 的 ruff 配置 **全局 ignore 了 F401**。v0.45.206 把全量 `ruff check .`
+从 46 个错清到零，这行照样活了下来 —— 「ruff 全绿」对被 ignore 的规则**恒真**
+（MEMORY `alpha-hive-static-guard` 已记过这条判据，这是一个具体实例）。
+v0.45.186 收尾时顺手发现并留档，本版删掉。
+
+### 验证
+
+- 该文件 `ruff --select F401`：**1 → 0**（改动前命中即正对照：检测器确实看得见它）；
+  `--select F821` 零命中（没删成未定义名）；全量 `ruff check .` 前后都是 All checks passed。
+- `pytest tests/test_paths_not_frozen_at_import.py`：`collected 86` → `collected 86`，86 passed → 86 passed。
+- 只跑单文件是有依据的：`_discover_path_resolvers` 只在本文件内被调用；
+  子串搜索有 11 个文件「提到」这个测试模块，**AST 核对后真正 import 它的是零个**（全是注释/文档）。
+- 排除了动态引用：函数体内无 `eval` / `exec` / `locals` / `getattr` / `importlib`。
+
+### 顺带核实：v0.45.186 留档的另一项已不存在
+
+v0.45.186 同时留档了四个文件（`earnings_pc_history.py` / `ff6_cycle_history.py` /
+`iv_crush_analysis.py` / `oi_wall.py`）docstring 里的 `\ ` 无效转义警告。
+**v0.45.206 已顺带修掉**（那次 ruff 清零的 46 个错里就有这四处 W605）。
+核法带正对照：`5068252`（v0.45.186 基线）版 `oi_wall.py` 经 `ast.parse` 报 1 个警告，
+`origin/main` 版四个文件均为 0 —— 探针没坏，是真的修了。写在这里，免得下一个人再查一遍。
+
+### 未做（留档）
+
+全仓 `ruff --select F401` 当前命中 **254 条 / 123 个文件**（其中 `tests/` 下 74 条）。
+这很可能就是当初全局 ignore 的原因；其中有多少是 `__init__.py` 式的**有意再导出**没有区分。
+重新打开 F401 是一次独立的清理，本版不碰。
+
+## [0.45.300] — 2026-09-21 — Fixed（**事后，收紧盲化**）：F&G 敞口门前瞻检验的前瞻结果在未出结论时也带出 `adjusted_trades`（A/B 已实现盈亏之和 = 已平仓部分的效应方向与大小）；现只在出结论（confirmed / not_confirmed）时才放进返回字典
+
+**来源**：v0.45.297 收尾时记为「已知、未改 ①」并留给用户决定；用户看了分析后拍板做。
+
+**问题**：`evaluate()` 在调用 `decide()` **之前**就把 `_adjusted_trades_summary(...)` 写进返回字典，于是 `not_ready` 时也随 `--json` 或直接调用 `run()` 带出。
+`decide()` 的 docstring 早写明「未到结论时返回值里不含任何效应量（盲化在数据结构上，不在打印上）」——`evaluate()` 自己没守，盲化测试又只查了 `decide()` 的返回值。
+
+**为什么是实质泄漏**：平仓盈亏 = `size_usd × net_pct`，与仓位严格成正比；门只把新仓乘以 0.5、不动方向和出场，所以 B 在每笔**被调整并已平仓**的单上的盈亏恒为 A 的一半，
+`pnl_sum_b − pnl_sum_a = −½·A 的已实现盈亏`——这部分效应的方向与大小，正是「盲化」要藏的东西（夹具里实测 `pnl_sum_b ≈ pnl_sum_a/2`，容差 2 分）。
+
+**为什么此前没有实际泄漏**：窗口 09-16~09-18 的 F&G 读数是 26 / 29 / 29（公开指数），都在 25~75 之间，门从未触发、B ≡ A，该字段必然是 0 笔 / 0.00；
+每周只读诊断（`ic_rerun_readiness`）只取 `status` / `status_line`；人读输出只在出结论后才打印它。出口只有 `--json` 与直接调用 `run()`——现实里最可能的读者是某个为「看看状态」顺手打印整个结果字典的 agent 会话。
+一旦第一笔被调整的单平仓，之后任何一次打印都收不回来，所以趁现在（零泄漏）补。
+
+**修法**：`evaluate()` 只在 `verdict["status"] ∈ {confirmed, not_confirmed}` 时才写 `adjusted_trades`；样本内（`--insample`，本就不盲化）照旧带着它；文件头就地标「事后修订 v0.45.300」。
+**未动**：窗口、变体 A/B、统计量、检视点（15/30 周）、α、`SELFPROOF_MIN_RATE`、四元组键、盲化条款本身——这是让实现对齐已有条款，信息只减不增，不影响任何判定。
+真实前瞻运行核对（只打印键名）：返回字典的键 `['looks_passed_without_verdict', 'mode', 'n_dates', 'next_look_at', 'seed_last_run_date', 'selfproof', …, 'weeks', 'weeks_available']`，
+`adjusted_trades` 已不在（此前在），与效应量键集合的交集为空；`status_line` 不变（`0/15 个合格周，自证 100%`）。
+
+**验证**：测试 96 → **103**。新增 7 条，**关键是先造出「门真触发、且被调整的单已平仓」的合成世界**——不造它，测试就是空的（门不触发时 B ≡ A，泄不泄漏都断言得过；真实窗口现在就是这种空场景）：
+夹具自证（确有 1 笔被调整并已平仓、且 B 盈亏为 A 的一半）、`not_ready` 无效应量键（含 JSON 往返）、`cannot_judge` 无效应量键、`main(["--json"])` 输出无效应量键、
+出结论（confirmed / not_confirmed 各一）仍带 `adjusted_trades` 且 `_print_human` 仍能打印、样本内仍带。
+**先在旧代码上看它红，并核对红的原因**：`not_ready` 与 `--json` 两条在旧实现上红，断言里的键交集正是 `adjusted_trades`；其余 5 条本来就绿（钉的是收紧不能误伤的东西）。
+**变异 9/9 真跑全杀，且杀伤集精确**（不带 `-x`，逐个还原并核对 sha256）：无条件写入 / 多放行 `not_ready` → 无效应量那两条；只放行其一 → 对应的那条参数化用例；出结论也不写 / 判定键写错 → 出结论两条；
+样本内误拿掉 → 样本内那条；摘要函数不算 B 盈亏 → 夹具信息量断言；`cannot_judge` 路径也带出 → 专门的钉子测试（它没被前 8 个变异杀到，所以单独造了第 9 个证明它有牙）。
+整套 5312 通过、1 失败（`TestCoverageHorizon`，BLS 日程，此前已在干净 origin/main 上验证本来就红）、ruff 通过。
+
+**顺带发现（未修，已转交）**：`tests/conftest.py::_isolate_paper_portfolio_state` 的「写穿生产」守卫**依赖导入顺序**——`real` 取自夹具运行时的 `_pp.STATE_DIR`，若 `paper_portfolio` 在本进程里的**首次导入**恰好发生在这个夹具内
+（此时 `_isolate_env` 已把 HOME 指向 tmp），`STATE_DIR` 就绑成沙箱，「真身」与沙箱成了同一个目录，任何会写状态文件的测试都在 teardown 被误报「写到了生产」。
+配对对照实验证实：v0.45.262 的老测试 `test_self_proof_fails_when_reproduction_rate_too_low` 在全新进程里**单独跑** → `1 passed, 1 error`；同进程里让别的模块先在收集期导入 `paper_portfolio` → `2 passed`。
+整套 / 整文件跑不受影响（约 10 个模块在顶层导入），所以本仓迄今没人撞上；**单条 / `-k` 子集跑本文件的会写状态的测试会得到误报**，请整文件跑。已用 spawn_task 转交（task_b1eba924）。
+
+**已知、未改**：① `looks_passed_without_verdict`（中期未过线）仍随 `not_ready` 返回——协议明文允许（「只报『未过中期界，继续』」）。
+② 已审计 `not_ready` 返回的全部键，没有其它效应量出口；`selfproof*` / `weeks*` / `next_look_at` 均为进度。
+③ auto-memory 里此前写的「读真实前瞻结果时只打印白名单字段」在检视点之前已由数据结构保证，不再依赖自觉（出结论之后的结果本就带效应量，那是设计）。
+④ 占号 0.45.300 的占位提交 `764490bf` 已先于代码推到 main。
+
+## [0.45.299] — 2026-09-21 — Fixed：v0.45.295/298 独立审查后续——`read_current_weights` 静默回退会让归零维度被 `--apply` 写回非零；`health_check` 对被阻断的周诊断仍报 ok；单维度退役时过度解除上限；`--force` 测试的「未写入」断言是空的；Added：闸 2 结果入审计（`pool_ok`）
+
+v0.45.298 之后又派了一个**独立**审查 agent 重读 v0.45.295 的提交（它读的是被我改动中的文件，自己也提示了这一点，所以下面每一条我都对着代码/实测核实过，
+没有照单全收）。它列出 7 条，核实后 **6 条成立并已修**，1 条（闸 1 近似恒真）成立但属设计层面、按下文处理：
+
+**1. `read_current_weights` 的静默回退能让冻结逻辑失效（`weekly_optimizer.py`，Low-Medium → 实测后我认为更重）**
+旧的正则版有三个无声失败，我逐个实测复现：块里多一个键（如加了 `ml_auxiliary`）或注释里出现 `{…}` ⇒ **静默回退 `DEFAULT_WEIGHTS`**，`retired_dims` 变空集，
+config 里被归零的 signal/risk_adj 在锚点里变回 0.30/0.15，之后 `--apply` 会把它们**写回非零**——正好击穿 v0.45.295 宣称的「优化器只能冻结、不能复活」；
+`3.32e-1` 被读成 `3.32`（`[0-9.]+` 在 `e` 处停下），差 10 倍且无声。
+修法：新增 `parse_current_weights()`（AST，读不出返回 `None`、**绝不兜底**）；`read_current_weights()` 保留给回滚/回读校验，兜底时**大声说**；
+`main()` 改用前者，读不出 ⇒ 与「投影不可行」合并成同一个 `blocked` 通道：不提议、不写入（`--force` 也不行）、闸照跑、审计 `skip_reason="config_unparseable"`。
+输入路径此前从没被对拍过（观测点读的是 import 的 `config` 模块，`main()` 用的是对文件文本的解析），现在有 `test_real_config_parses_to_the_imported_module_values`。
+
+**2. `health_check` 对被阻断的周诊断仍报 ok（Medium）——「谁会红？」缺口**
+`health_check.check_weekly_optimizer` 只按最后一条记录的**年龄**评级，`skip_reason` 只是塞进 details。于是 09-14、09-20 连续两周 `infeasible_bounds`，它一直显示 ok ✓。
+v0.45.295 CHANGELOG 里写的「审计 + stdout + 观测点测试三处可见」并不等于有东西变红。现 `skip_reason ∈ {infeasible_bounds, config_unparseable}` ⇒ `fail`。
+**副作用（预期内）**：它对真实的 09-20 那条记录现在会报 `fail`——这是真阳性（上一次真实运行确实被阻断了），会一直显示到下一次定时运行（周日 09-27）写入正常记录为止。
+另：闸 2 的结果此前**不在任何审计字段里**（周任务读 `weight_history.jsonl` 看不到），现新增 `pool_ok`。此前 `health_check` 没有任何测试，新增 `tests/test_health_check_weekly_optimizer.py`（7 条）。
+
+**3. 单维度退役时过度解除上限（`merge_bounds`，Low）**
+v0.45.295 的「只要有维度退役就解除活维度的绝对上限」比理由（它们加起来 < 1）宽。只退役一个维度时其余四维上限之和 1.05 ≥ 1，本来撑得起；
+例：锚点 `{signal 0, catalyst .25, sentiment .25, odds .25, risk_adj .25}`，一律解除会让 catalyst 一次能到 0.35。现改为**仅当活维度上限之和 < 1** 才解除
+（判据只取决于「哪些维度退役」，不取决于锚点数值，锚点空间里没有断点）。生产形状（两维退役，Σ=0.80）行为不变。这就是 v0.45.298 CHANGELOG「已知未改 ②」，现已改。
+**取舍（穷尽核实过，并更正 v0.45.298 里一句说粗了的话）**：6000 组随机锚点 × 随机目标的 `clamp_shifts` 模糊测试 **0 次违反不变式**（退役维度不复活 / 活维度不超 ±10pp / sum=1 / 上限仍该生效时无人突破）。抛 `InfeasibleBoundsError` 的 1407 组我这次**逐个分类**：1357 组是某活维度的锚点超出绝对上下限 >10pp 造成的单维空区间；**另 50 组不是**——没有单维空区间，而是几维各超出旧上限一点、合计 `Σhi < 1`。v0.45.298 写的「全是锚点自身违反绝对上下限超过 10pp」只对前一类成立，准确说法是「锚点自身与绝对上下限的偏离大到 ±10pp 补不回来」。后果：单维退役、且其余维度锚点已在旧上限之外较远时，现在会**阻断并让 `health_check` 报 fail**（要求人重设 `WEIGHT_CLAMPS`），而不是像「一律解除」那样悄悄放行——与非退役形状下锚点远离上下限时的旧语义一致（配置与 WEIGHT_CLAMPS 矛盾就该响）。审查建议的另一种做法是「先试带上限的盒，不可行才解除」：永不因上限而阻断，但盒会随锚点数值在两种形态间跳变（数据/配置的微小变动可能让提议突变），这里选了前者；生产形状（两维退役，Σ=0.80）两种做法结果相同。
+
+**4. `--force` 测试的「未写入」断言是空的（Low-Medium）**
+`new_weights = old_weights` 使 `significant` 恒假——就算把 `if blocked` 分支整个删掉，写入决策链也会走到 `below_min_change` 而不写，
+所以「config 没变 / applied 为 False / action」三条断言在该变异下全都成立，只有 `skip_reason` 能区分。我在 v0.45.295 自己的变异表里其实见过这个现象
+（M6 是被 `skip_reason` 而不是「有没有写」抓到的），当时把它当成「两层独立保护」放过去了。现改为：强制「显著变化」为真 + spy `write_weights_to_config` 断言**根本没被调用**。
+
+**5. 闸 1 在退役形状下近似恒真（设计层面，不改设计，改说法与对照）**
+提议与 CI 是同一个确定性映射作用在点估计 / 重采样上，提议必然落在 CI 中；被推到 ±10pp 盒边的维度 CI 退化成一个点、也算「稳定」。
+所以 v0.45.295 / 298 里「闸 1 ✅（5/6/8 个种子全过）」**不是**「这次变动在统计上是真的」的证据，只是「估计量自洽、没有管线不一致」——
+它**回答不了**「一个 ≥3pp 的变动是不是噪声」（v0.45.144 起这道闸就不再捕捉世代漂移，本条只是把这个事实在退役形状下再说一遍）。
+另外，本节的负对照最初都落在**可行盒之外**（catalyst +8pp、复活 signal），是 `clamp_shifts` 永远产不出的值；主对照现改为**盒内**的偏离提议并断言它确在盒内。
+若将来真想要一道有信息量的闸，应检验「(提议 − 锚点) 的 CI 是否排除 0」并配纯噪声负对照。
+
+**6. 杂项**：`if infeasible:` 依赖 `str(e)` 的真值（空消息会走可行链）→ 统一为 `blocked is not None`；被阻断时不再打「写入需 --apply」、闸 1 通过文案区分「无提议」；
+`clamp_shifts` 文档补退役维度说明；闸 1 注释里「原始 WLS 目标」实为已过绝对上下限钳制的 WLS 输出，已更正。
+
+**验证**：新增 22 条测试（`test_weekly_optimizer.py` 81→96：AST 解析 11 个用例（含 8 个参数化的「读不出」情形）、`config_unparseable` 通道 2、上限判据 2；`test_health_check_weekly_optimizer.py` 7 条），
+改写 2 条（`--force`、闸 1 负对照）。**10 个变异真跑全部被抓住**（读不出仍用默认值 / 不校验键集合 / 兜底不出声 / 退回一律解除 / 从不解除 / 不拦 inf / 不拦负值 /
+blocked 分支失效 / 审计不记 pool_ok / health_check 不报 fail），这次用 `--maxfail=100` 看清每个变异被哪几条抓住（`pyproject` 的 `maxfail=1` 会让第二个及之后的失败被掩盖），哈希还原一致。
+真实数据端到端不变（闸 1 ✅ / 闸 2 ✅ / 提议 catalyst −0.5pp、sentiment +1.0pp、odds −0.4pp / `pool_ok:true` 入档）。相关 352 条 + ruff 全绿。
+
+**没做**：① 仓外 `~/.claude/scheduled-tasks/alpha-hive-weekly-optimizer/SKILL.md` 仍写「闸状态看 `skip_reason`」，只读运行里 `skip_reason` 恒为 `read_only_default`，
+应改为「看 `bootstrap_stable` 与 `pool_ok` 两个字段」——那是你的持久配置，未擅自改；② 退出码仍为 0；③ `health_check` 读 `PATHS.home/weight_history.jsonl`，
+而 `weekly_optimizer` 写 `ALPHAHIVE_DIR/weight_history.jsonl`——数据根迁移完成后两者若分叉，`health_check` 会报「文件不存在」（当前重合，未动）；
+④ 非退役形状下闸 1 的提议与 CI 不同管线（v0.45.144 起如此）仍未动。
+
+
+## [0.45.298] — 2026-09-21 — Fixed：v0.45.295 二次检查——闸 1 逐次重采样漏了 `_apply_weight_clamps` 一步（提议与 CI 不同管线）；`--apply` 会抹掉 config 里写在数值旁的归零决策注释；Changed：闸 1 测试改走真实管线
+
+把 v0.45.295 当别人写的代码重审：独立审查 agent + 自己的运行时实测（模糊测试、`--apply` 演练、钳制生效场景）。
+查出两个真缺陷，**都不影响 09-20 那次的真实结论**（真实数据下各维份额 ≈0.2、钳制是空操作，闸 1 现状与修后都是 6/6 稳定），
+但都是潜伏的、且第一个恰好出在我自己上一版声称「已修」的地方。
+
+**1. 闸 1 的提议与 CI 不是同一条管线（`bootstrap_validate`）**
+`compute_new_weights_wls` 返回的 `new_weights` **已经过 `_apply_weight_clamps`**（绝对上下限），`main()` 再 `clamp_shifts`；
+而 v0.45.295 的逐次重采样只做了后一步。钳制会生效的数据上（某维原始份额 > 绝对上限；测试夹具里 catalyst 0.30 > 0.25）
+提议 catalyst 0.3916 落在 CI `[0.3994, 0.4320]` 之外——**8 个种子里 7 个判 🛑**，同一份数据。
+补上 `_apply_weight_clamps` 后 8/8 稳定，被推离 5pp 的提议仍 0/8（闸有牙）。
+⚠️ **更正**：v0.45.295 的 docstring / 本文件同名条目里「同一个估计量」一句，**从 v0.45.298 起才严格成立**。
+为什么测试没抓到：v0.45.295 的两条闸 1 测试用 `_point_estimate` 手搓提议，**跳过了钳制这一步**——夹具恰好让钳制生效，
+手搓出来的值生产永远产不出，于是测试 5/5 全绿、生产真实路径 1/8。与 v0.45.295 想治的是同一个病（夹具让生产值不可达），
+而且是修复者自己写的测试犯的。现改为 `compute_new_weights_wls → clamp_shifts` 真实管线出提议 + 6 个种子 + 夹具自证「钳制确实改变了投影结果」。
+
+**2. `--apply` 抹掉写在数值旁的决策理由（`write_weights_to_config`）**
+docstring 一直写「保留所有注释，只替换数值」，实现却整块按通用文案重写。这条路径在生产形状下原先不可达（归零后 `clamp_shifts` 恒不可行），
+v0.45.295 让它**首次可达**：一次 `--apply` 就会把 `—— IC -0.088，归零（见上）`、`三维中唯一方向显著（未校正）`
+换成通用文案——那是 config 里唯一贴着数值的「为什么」。现原样保留每个维度数值之后的内容，仅在现有块里找不到该行时才退回通用文案；
+`re.sub` 的替换串改 lambda（块里现在带的是用户自己的文本，反斜杠不该被当转义）。
+对真实 `config.py` 的副本演练：只有数值变，注释、块外内容逐字节不变。
+
+**验证**：新增 4 条测试（闸 1 夹具自证 1 条、注释保留 3 条，其中一条对**真实 config 副本**且动态取注释、不写死措辞）；
+改写 2 条闸 1 测试。4 个变异真跑全部被抓住（重采样不钳制 / 写入一律通用注释 / 替换串不用 lambda / 找不到行不退回通用文案），
+真实 config 那条另做了单独变异；文件哈希还原一致。相关 330 条 + ruff 全绿。
+另做 4000 组随机锚点（含 1~4 个退役维度）× 随机目标的 `clamp_shifts` 模糊测试：**0 次违反不变式**（退役维度不复活 / 活维度不超 ±10pp / sum=1）；
+420 组抛 `InfeasibleBoundsError` 全是锚点自身违反绝对上下限超过 10pp（改动前同样会抛，现在只是报错更清楚）。
+
+**追加（同日，审视自己新写的测试）**：又发现两处脆性并加固——`test_real_config_…` 曾断言「真实 config 必须带归零维度」，你将来合理恢复 signal 权重它就会莫名变红（已去掉该断言并改名 `test_real_config_comments_survive_apply`，它测的是注释是否保留，与是否归零无关；归零形状的写入仍由 stub 版 `main()` 测试覆盖，放宽后重打变异仍被抓住）；`test_incident_mechanism_…` 曾读当前 `WEIGHT_CLAMPS`，按上一版建议「为三维时代重设上限」时会变红（改用事故当时的字面量）。这两条都是我这一轮新写的、会在别人合理改动时误报的「配置/时间炸弹」——正是我刚让另一个后台任务去修的那一类。
+
+**已知、未改**：① 非退役形状下闸 1 的提议（钳制 + 投影）与 CI（原始重采样）同样不是同一条管线，v0.45.144 起如此，本次不动；
+② 只要有一个维度退役，活维度的绝对上限就整体解除（categorical 规则，不是「够用就行」的最小放宽）——
+仅一个维度退役时其余四维上限之和 1.05 ≥ 1、本来不必解除，这是 v0.45.295 已声明的取舍；
+③ 记忆里此前写「F&G 中期检视要到 12 月中」偏早约两周，准确是 W53 首个交易日 ≈ 2026-12-28。
+
+## [0.45.297] — 2026-09-21 — Fixed（**事后修订预注册的自证段**）：F&G 敞口门前瞻检验自证「A 重放复现生产 0/8」是设计缺陷、不是评分链变动——A/B 沙箱从空状态起跑而生产带着累计盈亏，`size_usd` 逐分对不上；改为两个沙箱都从**窗口起点的生产状态**起跑；Added：冻结种子 + `--rehearse` 自证演练 + 决策层/精确层分报
+
+**现象**：`experiments/fg_exposure_gate_forward_test.py` 首次拿到真实前瞻样本（窗口 09-16~09-18，3 个快照日）就报
+`cannot_judge：A（baseline）重放复现生产记录仅 0/8`，文案把原因指向「评分链/组合层配置被改动，或重放机制本身有问题」。**两个都不是。**
+
+**根因（对照实验逐字复现后确认）**：决策层 `(ticker, entry_date, direction)` **8/8 复现**；对不上的是四元组里精确到分的 `size_usd`。
+仓位基数 `nav_for_sizing = cash + Σ size_usd` 是**状态**（本金 + 累计已实现盈亏）。重放在空 tempdir 里从窗口首日起跑（基数 5 万），
+生产在 09-16 已带着 +$410.99 累计盈亏与 8 笔在场持仓：ABBV 重放 4000.00 = 0.08×50000，生产 4062.39 = 0.08×(50000+410.99−8.21+377.07)。
+A 还多开了 SNOW / VKTX——生产早持有（09-08 / 09-15），空沙箱没有；分母只数生产记录，多开不罚分，所以只表现为「金额全错」。
+**这个自证在真实数据上从来不可能通过**，而它在前瞻样本出现前**从没见过真实数据**：旧测试用手写的「生产记录」，`--insample` 的机制自检拿 A 对 A 比（恒真）。
+与 `alpha-hive-failure-propagation` 同族——没在真实数据上见过绿的检查，等于没有检查。
+
+**修法**：A/B 两个沙箱都从「生产在窗口首日前一交易日收盘」的状态起跑。
+- **冻结种子** `experiments/fg_gate_forward_seed/`：`meta.json` / `positions.jsonl` / `closed_trades.jsonl` 三个文件**逐字节**取自提交 `cb4a8b9e`（09-15 14:52，`last_run_date=2026-09-15`，共 24KB、无 NaN），
+  加 `SEED_SOURCE.json`（完整 commit sha、各文件 sha256、核验命令）。窗口起点是预注册常量，本就该冻结、可审计；
+  不在每次运行时现挖 git，是因为这个检验要跑约 7 个月，期间浅克隆 / 无 `.git` 的运行环境 / 数据根迁移阶段 5 的 `git rm --cached` 都可能发生——
+  运行时依赖 git 历史意味着中途又一次「事后」改动。核验：`git show <commit>:paper_portfolio_state/<文件> | shasum -a 256` 与落盘文件与清单三者一致（已独立核对）。
+- **`closed_trades.jsonl` 也要播**：仓位乘数 `_size_multiplier` 按该标的历史胜率算，现行 `win_rate_multiplier` 三档全是 1.0 所以**目前是潜伏依赖**——
+  不播它也复现得了，直到有人改配置；用非 1.0 乘数的测试专门咬住它。
+- **不播 `equity_curve.jsonl`**（`_apply_seed` 显式拒绝）：它只写不读，播进去会让窗口前的周也进统计量、虚增合格周数。
+- **`load_seed()` 校验链**（任何不符抛 `SeedError`，`run()` 转成 `cannot_judge`，**绝不退回空沙箱**）：清单在 → `window_start == FORWARD_START`（改了起点没重建种子会红）→
+  三文件齐全且 sha256 一致 → `last_run_date < 窗口首日` → `cash` 有限（v0.45.97 的 NaN 事故形状）→ 每条持仓能构造 `Position` 且 `entry_date ≤ 种子日` → 平仓 `pnl_usd` 有限。
+- **`evaluate(insample=False)` 必须带 `seed`**，缺省即 `ValueError`（`{}` 是显式的「生产当时也是空状态」，只给合成测试用）。前瞻模式不带种子就是这次的 bug，让它在 API 层就不可能。`--insample` 不动。
+- **决策层 / 精确层分报**：`selfproof` 新增 `decision_reproduced`（三元组），`cannot_judge` 文案同时报两层，并点明是哪层：决策层对而金额错 → 「先查种子/波动率来源/仓位参数」；决策层也错 → 「评分链/入场规则/组合层配置被改动」。**判定仍只看精确层 ≥ 95%**。
+- **`--rehearse SINCE BEFORE`**：对任一窗口从 git 现取「窗口首日前」的状态播种，**只重放 A**、报复现率。不跑 B、不算周度差、不出统计量，所以没有泄漏效应量的风险。
+  这是本检验预注册前缺失的那个「先见过绿」的动作。`--build-seed`：从 git 生成冻结种子（拒绝覆盖）。
+- **git 里定位种子的规则**：按时间顺序找**第一个** `last_run_date ≥ 窗口首日`的提交，取它的**前一个**——不是「`< 窗口首日` 的最新提交」（后者会被窗口之后的回滚/还原提交带偏）；
+  `--diff-filter=AM` 排除删除提交（阶段 5 会 `git rm --cached`）；浅克隆直接报错（把「历史被截断」误判成「窗口前没有状态」会给出假种子）。
+  git 仓库根走 `hive_logger.PATHS.git_repo_root`（v0.45.268 专为 git plumbing 与数据根解耦而设）。
+
+**证据（先在 scratchpad 原型里验证，再用交付代码路径复核；A 单独重放，没有跑 B）**：
+
+| 窗口 | 不播种（旧设计） | 播种后 |
+|---|---|---|
+| 前瞻 09-16~09-21（8 笔） | 精确 **0/8**、决策层 8/8、A 开 10 笔 | **8/8**、A 开 8 笔 |
+| 历史 09-09~09-16（5 笔） | **0/5**、决策层 5/5、A 开 10 笔 | **5/5** |
+| 历史 09-14~09-19（13 笔，含窗口内多日复利） | **0/13**、决策层 13/13 | **13/13** |
+
+历史窗口取 09-05 之后（`paper_portfolio.py` 决策路径自 v0.45.111/121 起稳定；此前生产用 `sizing_mode="tier"`、且 08-28~09-02 有 NaN 事故）。
+交付的 `--rehearse` CLI 三个窗口全部 exit 0；`run()` 真实前瞻路径由 `cannot_judge` 变为 `not_ready`（自证 8/8 = 100%，`0/15` 个合格周）。
+**负对照（播种后故意改 A 的配置，自证必须仍会红）**：`size_pct_max 8→7` 7/8、`target_position_vol_pct 1.75→1.5` 0/8、`entry_score_bull 6.5→7.5` 4/8、
+`sl_pct 7→3` 3/8（**决策层仍 8/8**——出场规则一变现金基数变、之后每笔仓位都变，只有精确层抓得到）、`sizing_mode→tier` 0/8，五个全红。
+这也是「不要只把键里的 `size_usd` 去掉」的实证：那样这一类改动会被悄悄放过。
+
+**「事后」声明**：本条修订预注册的**自证段**（起点状态），脚本文件头已就地标注。**未动**：窗口、变体 A/B、统计量、检视点（15/30 周）、α（0.02/0.045）、盲化、`SELFPROOF_MIN_RATE=0.95`、四元组键 `(ticker, entry_date, direction, round(size_usd,2))`。
+修订时前瞻样本仅 3 个快照日，且**全程未计算、未查看任何效应量**（原型只重放 A；交付路径的真实前瞻运行只打印白名单字段）——修订不受结果影响。
+副作用需知：A/B 起点由「空账户」变为「生产的真实账本」，两组共享同一批窗口前持仓；窗口内的 ΔNAV 仍只来自门对窗口内**新开仓**的调整（门只改新仓大小；B 的小仓位留出的现金会经 NAV 基数传导到之后的新仓，这层与旧设计一样存在），统计量定义不变。
+
+**验证**：测试文件 34 → **96 条**（全绿，无 skip）。新增：真种子（清单绑定预注册窗口 / 三文件 sha 校验 / **被 git 跟踪**——只隔着一个未跟踪文件就会本机绿别处红）、坏种子逐类拒绝、
+`_apply_seed` 契约、**离线复现真因的回归**（合成生产世界：空沙箱 → 精确 0%、决策层 100%；播种 → 100%；`nav` 基数 51000/50000 的机制断言；A/B 同起点；净值曲线只覆盖窗口）、
+文案分层、`run()` 接线（种子坏 → cannot_judge 且不去重放；加载的种子确实交给 `evaluate`；样本内不碰种子）、合成 git 仓库上的定位规则 12 条（含回滚、删除后重建、浅克隆、NaN 起点）、`--rehearse`（只跑 A、不带效应量键）、CLI。
+**30 个变异真跑，30/30 被杀**（改实现文件→跑测试→逐个还原并核对 sha256，仓库无残留）。
+⚠️ **变异暴露了我自己测试的一个洞**：「漏播 `meta.json`（现金）」起初**只被一条单元测试咬住、全部集成测试仍绿**——`_world()` 用被测的 `_apply_seed` 造「生产」，
+变异同时污染了「生产」与 A，两边错得一致，复现率照样 100%（自证拿被测对象去证明被测对象，正是本条要治的形状）。已改成「生产」起点文件直接写盘、不经被测函数，并新增不依赖任何「生产」的机制断言；
+之后漏播 positions / closed / meta 分别有 4 / 2 / 4 条集成或机制层测试咬住。
+相关 215 条（`ic_rerun_readiness` / 共振前瞻 / 敞口门 / `__file__` 登记 / 无声 skip 元守卫 / CHANGELOG 完整性等）+ experiments 两个守卫 37 条 + ruff 全绿。
+
+**已知、未改**：
+① **`--json` 的前瞻结果在 `not_ready` 时也带 `adjusted_trades`**（A/B 已实现盈亏之和），与「未到检视点不输出任何效应量」不符——`evaluate()` 在 `decide()` 之前就把它写进了返回字典，
+盲化测试只查了 `decide()` 的返回值。**既有行为，本次不动（盲化不在我的修订范围内）**；本次真实运行的展示全程避开了这个字段。建议单独决定要不要收紧（这是改协议的盲化，须「事后」标注）。
+② `--insample` 的机制自检仍是 A 对 A（`{}` vs `enabled=False`，恒真）：它测「默认配置等于显式关闭」，不测「复现生产」。不要「从 `bootstrap_date` 全史重放」去补——v0.45.100 前生产用 `sizing_mode="tier"`，全史按现行 `vol_target` 会算出另一条历史。
+③ 四元组键对已平仓笔用 `shares × entry_price` 反推 `size_usd`，而 `shares` 被取 4 位小数：实测 16 笔在场持仓里 10 笔与 `size_usd` 差 1~3 分。两边演化一致时无害；只在生产与 A 对某笔「是否已平仓」看法不一致时，
+才会让同一笔在分位上错开——真实分歧照样报红，只是形状是「金额差几分」而不是「状态不同」。键属预注册，不动。
+④ 在**没有 `pheromone.db` 的 worktree** 里跑本脚本，波动率查找全部退回 `tier_fallback`，得到「决策层对、金额层错」的假红；主 checkout 不受影响。新文案的两层报告让它一眼可辨，脚本文件头也写了。
+⑤ `--rehearse` / `--build-seed` 依赖完整 git 历史与迁移阶段 5 之前的 `paper_portfolio_state/` 仓库路径；冻结种子本身不依赖它们。
+⑥ 占号：0.45.296 让给了先提交的另一 session（`test_options_analyzer` 日历炸弹那条），本条改占 297。
+
+## [0.45.296] — 2026-09-21 — Fixed：三处测试夹具把日期写死、到点即红（一处 09-19 起已红，另两处是拨钟扫全套件挖出的）——`test_options_analyzer` gamma 日历两条、`test_iv_structure_guards` call 流夹具（2027-01-15）、`test_memory_store` 会话 ID 年份（2027-01-01）；夹具日期改为相对今天。生产代码零改动
+
+**现象**：v0.45.258 新增的 `TestGammaCalendarUsesFullExpiryView` 两条，自 2026-09-19 起恒红：
+`assert None == '2026-09-18'`——gamma 日历返回 `_empty`（「数据不足，Gamma 日历不可用」）。**与任何代码改动无关。**
+
+**根因（时间炸弹，不是回归）**：夹具把到期日写死成 `2026-09-18`（写下时是「3 天后」）。
+`market_intelligence.calculate_gamma_expiry_calendar` 用 `date.today()` 丢掉 `exp_date < today` 的到期日（`:388`），
+丢光即返回 `_empty`。被测代码读真实墙钟且**没有可注入的接缝**：该函数直接 `date.today()`；`options_analyzer.py`
+全文件 20 处 `datetime.now()`，`OptionsAgent.analyze` 函数体内就有 5 处——冻结单个接缝冻不全，所以用相对日期。
+**排除「代码回归」的证据**：未修的原测试在时钟拨回 2026-09-11 时通过、真实的 09-21 失败。
+同形于 v0.45.64（`alpha-hive-known-issues` 里那条，文字判据没拦住复发）。同版本的兄弟文件
+`test_gamma_expiry_calendar.py` 早就是 `date.today() + timedelta(days=3)` 的写法，这次照它对齐（近月同取 +3 天）。
+
+**又挖出两颗（拨钟跑全套件，见下）**：
+
+| 测试 | 写死了什么 | 何时红 | 备注 |
+|---|---|---|---|
+| `test_iv_structure_guards::TestCallFlowVoteAbstains::test_failure_and_genuine_contango_differ` | call 到期日 `2026-09-11` / `2027-01-15` | 2027-01-15 | ⚠️ **红的理由是错的**：A 票按 DTE 分桶（`dte>60` 长端、`0<dte<=30` 近端），已过期的到期日**两个桶都不进** ⇒ A 票弃权 ⇒「取数失败」与「真实 contango」都输出 `('mixed', 1.0)`。夹具悄悄停止了对 A 票的检验，不是守卫要抓的 bug 回来了。今天（09-21）它其实**已经半腐烂**：09-11 那条早已出近端桶，只靠长端单独凑巧仍投 hedge，所以还绿 |
+| `test_memory_store::TestSession::test_session_id_format` | `assert "2026" in sid` | 2027-01-01（2026-02-25 写下） | 会话 ID 日期段取自当前墙钟，年份一翻就红 |
+
+**改动**（仅 `tests/`，均在测试体内调用、不提成模块级/类属性常量——那会在收集期就地冻死）：
+- `test_options_analyzer.py`：`_expiry_in(days)` = `date.today() + timedelta`；近月 +3 天（原「3 天后」）、远月诱饵 +94 天
+  （原 `2026-12-18` 同样会在 12-18 后过期，使「误用窄链」这个变异退化成 `None`、看不出是哪条接线坏了）。
+- `test_iv_structure_guards.py`：`CALLS` 类属性 → `_calls()`，DTE 取 17 / 143（按 git 提交日期 2026-08-25 推算的原值，不是作者自述），OI 500:900 不变。
+- `test_memory_store.py`：生成前后各取一次今天，断言日期段 ∈ {前, 后}（跨午夜也不误报，不把任何年份写进断言）。
+
+**验证**：
+- **拨钟**（自制 `clockshift_harness`，替换 `datetime.date/datetime` 并同步拨 pandas 的钟；**不入本仓**，
+  存于 auto-memory 目录，配方与六个踩坑见 `alpha-hive-time-bomb-audit.md`）。三个改动文件 85 条在 −10 / 0 / 30 / 101 / 102 / 115 / 116 / 117 / 120 / 400 / 1000 / 3650 天
+  各全过——含 2026-12-31、2027-01-01、2027-01-14/15/16 这几个恰好卡在边界上的日子。
+- **全套件（CI 同款命令 `-m "not integration and not network"`）**：
+
+  | 时钟 | 修前 | 三处全修后 |
+  |---|---|---|
+  | 真实 2026-09-21（周一） | 3 红 / 5095 过 = 目标 2 条 + `TestCoverageHorizon`（树里没有任何修复） | **1 红 / 5097 过**（仅 `TestCoverageHorizon`） |
+  | +120 天（2027-01-19，周二） | 3 红 = 设计红 + 上表两颗（†） | 仅设计红 |
+  | +400 天（2027-10-26，周二） | 3 红 = 同上（†） | 仅设计红 |
+  | +1000 天（2029-06-17，周日） | 未跑 | 仅设计红——该类第二条 `test_next_event_actually_resolvable_today` 此时也红（日历走完，同一设计机制） |
+  | +30 天（2026-10-21，周三） | 仅设计红（†，此时另两颗要到 2027 年才到期） | 未重跑 |
+  | +5 天（周六 2026-09-26） | 未跑 | 仅设计红（该时钟下另两颗本就不触发，这行只用来排除「周末才红」的测试） |
+
+  † 这几次「修前」跑的时候树里**已经有 gamma 那处修复**（另两颗正是被这几次跑挖出来的），所以是 3 红而不是 5 红；没有做过「三处全未修」的拨钟全套件。
+  「设计红」= `TestCoverageHorizon`：它自称「唯一一组故意用真实 today 的测试」，是到期告警，**未动**。
+- **真变异**（对生产文件做恰一处匹配的替换、跑完必 `git checkout` 还原并校验）全部被杀，且失败值符合预期：
+  A 忽略全到期日视图 → `'2026-12-24' == '2026-09-24'`（选中了远月诱饵）；B 去掉窄链兜底、C 反转「仅未来到期日」过滤 → `None == …`；
+  D 撤销 v0.45.4 修复（未知期限结构又投 mixed）、E A 票永不投票 → 后者只在被变异时红，证明相对夹具**真的在检验 A 票**；
+  F 会话 ID 带错日期 → `'1999-01-01' in {'2027-01-19'}`。A–C 在 0/+400 天、D–F 在 0/+120/+400 天各跑一遍。
+- ruff 通过。
+
+**审计的边界（如实记，别把它读成「全仓无炸弹」）**：
+1. 只拨了 `datetime` 系与 pandas 的钟，**`time.time()`/`monotonic()` 没拨**。根目录 29 个模块共 96 处 `time.time()` 调用（ast 计，含别名、仅代码、
+   不含子目录）；grep 核过没有一处与日期解析写在同一行，**未逐条审读**。
+   `tests/` 里唯一的 epoch 字面量是 `test_newsapi_client.py` 的 2024 年时间戳。
+2. 整日偏移，星期只覆盖了 周一/二/三/六/日；未覆盖节假日、时区（本机 PDT）。偏移是给「当前时刻」加 timedelta、不重算夏令时，
+   跨过切换点时带时区的墙钟会差 1 小时（没有测试因此红过，但没专门验）。
+3. `-m` 排除的 86 条（network/integration）：**测试体内 0 处未来日期字面量**（用 ast 对照过），`test_options_analyzer.py` 里的
+   `"expirations": ["2026-09-18"]` 仅被透传（`options_analyzer.py:2513` 的 `[:3]`），不与时钟比较，**未动**。
+4. 这是快照：新测试天天进（本 session 内别的 session 又合了几条）。能一直保鲜的只有定期重跑，
+   例如 CI 加一个 `CLOCK_SHIFT_DAYS=45` 的 job——**未做**，留给用户决定。
+5. 全仓静态守卫**未做**。「未来日期字面量」census 我用**修前**版本实测过：它会列出 3 个文件里的 2 个，但 gamma 那个列的是诱饵
+   `2026-12-18`（真炸的 `2026-09-18` 是过去日期，census 直接忽略），memory_store 的裸年份 `"2026"` 根本不在其中；gamma 修完后测得
+   134 处 / 20 个文件，其中真炸的只有 1 个。其余文件在 +1000 天的全套件里都不红（抽查了 6 个，确是注入了时钟：`today=`、
+   `monkeypatch _pdt_now`；其余未逐个审读）。所以 census 是「该去读哪些文件」的清单、不是炸弹清单，误报率高到没人看
+   （同 `alpha-hive-known-issues` 的既有结论）。**字面量个数不是炸弹个数**——拨钟跑才是。
+
+**过程中踩的两个 shell 坑**（都差点让我拿假证据下结论）：zsh 里 `rm -f 通配符` 无匹配会直接中断 `&&` 链，而链后另起一行的
+`echo "started"` 照常执行——**「已启动」是 echo 的、不是进程的，要核进程**；未加引号的 heredoc 里的反引号会被当命令替换执行。
+（二次检查补：核进程别用 `pgrep -f`——它会匹配到**执行它的那条 shell 命令行本身**，恒报「还在跑」，我自己就中招过；
+用 `ps -axo command | grep '[p]ytest'`，括号技巧让 grep 不匹配自己。）
+
+**二次检查（同日，复核本条自己）**：
+- **变基后重跑**：并入 0.45.297–299 之后，全套件在真实钟 / +120 天 / +400 天各 **1 红 / 5126 过**，三次都只有 `TestCoverageHorizon`；
+  选中数 5129 与 `--collect-only` 闸一致（此前的 5100 → 5129 是别的 session 新增的 29 条，不是 harness 的问题）。别人新合的测试至 +400 天没有新炸弹。
+- **CI 独立核对**（GitHub Actions，Linux / UTC / Python 3.11.16，对本提交 `6b7dca02` 的那次）：5104 PASSED / 36 SKIPPED / 1 FAILED / 2 XFAIL，
+  唯一的 FAILED 是 `TestCoverageHorizon`；本条改的三处共 13 条全 PASSED。
+- ⚠️ **观察（未处理，留给用户）**：`main` 最近 100 次 CI（2026-09-15 起）**0 次成功**（67 红 / 32 取消 / 1 进行中）。设计红常驻，
+  CI 状态灯已经无法提示「新回归」——得点进去读失败清单才知道红的是不是那一条。
+- **更正了三处不实 / 过头的表述**：census 的说法（见「审计的边界」5，改成修前实测）；DTE 17 / 143 是按提交日期推算而非作者自述（测试 docstring 同步改了）；
+  核进程别用 `pgrep -f`（见上）。
+- **harness 缺陷**（不在本仓，只改了 auto-memory）：cwd 不对时 ast 扫描**静默扫空**——从 `/tmp` 跑只 pre-import 了 7 个包、退出码 0，
+  「先 import 第三方栈再换类」的安全网无声消失。加了两道会响的守卫（cwd 下无 `tests/`、扫不到 numpy/pandas ⇒ `RuntimeError`，两道都实测会响），
+  扫描从「根目录 + tests/」扩到整仓（原来漏掉只在子包里 import 的 `telegram`）。换类逻辑没变；用新版重跑：三个改动文件在 +120 / +400 天各 85 过，
+  `test_prefetch_market_bundle`（pandas 钟的 canary）在 +30 / +400 天各 30 过。
+- **没有查出问题的部分**：三处测试的逻辑本身（CI 的 UTC 时区、不同星期都成立；跨午夜按逻辑推演成立——日期取自两次 `today()` 之间——但**没有实测跨午夜**）；
+  `CALLS` 改名无外部引用；`test_pytestmark_placement` 这类会遍历测试文件的守卫在 CI 上对改过的文件全过。
+
+## [0.45.295] — 2026-09-20 — Fixed：`weekly_optimizer` 的 `WEIGHT_CLAMPS` 与归零维度结构矛盾，每周诊断死在两道闸之前（连续两周）；修完盒子后闸 1 会换个理由恒红，一并修；Added：对真实 config 的可行性观测点 + `main()` 不可行路径端到端测试
+
+**现象**：v0.45.172 把 signal / risk_adj 归零之后，定时任务（09-14、09-20 两次）每次都在 `clamp_shifts` 抛
+`InfeasibleBoundsError("维度 signal=0.100000 越界 [0.150000, 0.100000]")`。`main()` 的 except 分支在闸 1/闸 2 **之前**
+`return`，退出码 0 ⇒ 只读诊断整份丢失，没有任何东西变红。审计记录还是错的：只读运行被记成
+`action:"optimize", dry_run:false`（`dry_run=args.dry_run`，而默认只读运行并不传 `--dry-run`）。
+
+**根因（两个互相独立的结构矛盾，光修一个仍然凑不到 sum=1）**：
+1. 下限：`WEIGHT_CLAMPS` 里 signal ≥ 0.15、risk_adj ≥ 0.10 够不着 0。`merge_bounds` 以 config 的 0.0 为锚点，
+   signal 的盒变成 `[max(0.15,−0.10), min(0.40,+0.10)] = [0.15, 0.10]`——空区间。
+2. 上限：三个活维度的旧上限之和 0.25+0.30+0.25 = **0.80 < 1**。
+   聚合预检 `Σlo=0.95 ≤ 1 ≤ Σhi=1.00` 恰好压线放行，只被事后的 `assert_feasible` 抓到、报一句读不出原因的「越界」。
+
+**为什么三次出事（v0.43.3 `_log` 未定义、审计标签、这次）都没有测试红**：`TestProjectionInvariants` 的锚点全是
+0.10~0.25 之间的合成值，生产锚点 `[0,.332,.325,.343,0]` 在夹具里不可达；`test_infeasible_handler_can_log` 是**手抄**
+except 分支来测的，从没真的走过 `main()` 那一支。
+
+**改动**（`weekly_optimizer.py`）：
+- `retired_dims(anchor)`（新）：config 权重为 0 的维度 = 已被显式退役。清单从 config 派生、不另存一份（另存即第二份真相）。
+- `merge_bounds`：退役维度冻结为 `(0,0)`（优化器只能冻结、不能复活——`acc/Σacc` 本就表达不了零）；只要有维度退役，
+  活维度的**绝对上限不再适用**，单次 ±`MAX_SHIFT_PP` 仍是运行时护栏、下限照旧。**没有退役维度时与此前逐位相同**（随机 200 组锁住）。
+- `project_to_feasible`：前置检查先点名单维空区间（`lo > hi`），不再靠事后 `assert_feasible`。
+- `bootstrap_validate(…, anchor=None)`：**有退役维度时**每次重采样也过同一道 `clamp_shifts`，CI 才是同一个估计量的抽样分布
+  （v0.45.144 定下的原则）。修盒子之后实测闸 1 对**五维全部 🛑**：提议（活维度 ≈0.33、退役维度 0）去比不带约束的 CI
+  （各在 ≈0.2 附近）永远出界；同一份数据把未投影的原始目标送进去 `stable=True` ⇒ 与数据无关，是又一个恒红。
+- `main()`：不可行分支**不再 return**——闸照跑（此时验原始 WLS 目标）；不可行时绝不写入，`--apply --force` 也覆盖不了；
+  审计 `action/dry_run` 走正常路径；不可行时不打「系统稳定」（那是与事实相反的话）。
+
+**实测**（真实快照 + 真实 `pheromone.db`，1110 个 T+7 样本，`HISTORY_FILE` 指向临时文件不污染生产审计）：
+修前 `infeasible_bounds` 死在闸前 → 修后闸 1 ✅（5 个随机种子全过）、闸 2 ✅；提议 catalyst −0.5pp / sentiment +1.0pp /
+odds −0.4pp，均 < `MIN_CHANGE_PP`。审计记录 `action:diagnose, dry_run:true, bootstrap_stable:true`。
+
+**验证**：新增 13 条测试（`test_weekly_optimizer.py` 11 条 + `test_weekly_optimizer_bootstrap_decay.py` 2 条）。
+含**观测点** `test_real_config_is_feasible_for_the_optimizer`——直接读真实 `config.EVALUATION_WEIGHTS`，config 被改成优化器
+投影不了的形状时立刻红，不必等周日 cron。**9 个变异真跑全部被抓住**（冻结判据恒空 / 只冻结不解上限 / 去掉空区间检查 /
+闸 1 不逐次投影 / 不可行分支复原 return / `--force` 可写 / 审计 dry_run 误用 / 闸 1 恒放行 / 不可行时打「系统稳定」），
+文件哈希还原核对一致；`--force` 那条另做了单独变异。相关 315 条 + ruff 全绿。
+全量套件 **5097 passed**；另有 2 类失败**均与本次无关**（已逐条核实，未改动）：
+`test_economic_calendar::TestCoverageHorizon`（CPI/NFP 日历只覆盖到 12 月、剩 81/75 天 < 90 天阈值——设计上就该定期变红，
+需去 BLS 抄新日程）；`test_options_analyzer::TestGammaCalendarUsesFullExpiryView` 2 条（写死 `expiry="2026-09-18"` 当「3 天后」，
+被测代码读真实今天，09-19 起必红——定时炸弹测试）。
+
+**⚠️ 需要知道的一个取舍**：活维度的绝对上限（catalyst 0.25 / sentiment 0.30 / odds 0.25，五维时代的「份额预算」）在有维度退役后
+**不再适用**——它们三个加起来就 < 1，与「三维凑 sum=1」互斥，而 config 自己（0.332/0.343）本来就在上限之上。
+若想为三维时代重设上限，应在 `WEIGHT_CLAMPS` 里显式重写，并同步 `merge_bounds` 的冻结分支。
+
+**没做**：① 退出码仍为 0（不可行现在有审计 `skip_reason` + stdout + 观测点测试三处可见，未改退出语义）；② 定时任务
+`~/.claude/scheduled-tasks/alpha-hive-weekly-optimizer/SKILL.md` 在仓库外，未动（它仍写「skip_reason 里会有 bootstrap_unstable…」，
+只读运行里 `skip_reason` 恒为 `read_only_default`，闸状态应看 `bootstrap_stable` 字段与 stdout）。
+
 ## [0.45.294] — 2026-09-18 — Fixed：experiments 三个脚本缺 `sys.path` 注入，按文档运行即 `ModuleNotFoundError`；Added：静态守卫 + 真子进程测试
 
 `python3 experiments/xxx.py` 运行时 `sys.path[0]` 是 `experiments/`，不是仓库根。v0.45.290 修了 `signal_ic_sweep.py`；
@@ -5652,7 +6175,103 @@ v0.45.222 与本版第一轮都「从空目录跑全套」证明 cwd 无关，**
 
 ---
 
-## [0.45.217] — 2026-09-13 — 占位（进行中：thesis_breaks_config 的 _all_tickers 漏 17 个标的块，覆盖率统计静默少算）
+## [0.45.217] — 2026-09-13 — 失效条件覆盖率的分母是一份过期名单：网站上 17 只不进统计，不在网站上的 11 只算「已覆盖」
+
+（09-13 占号并写完；**09-21 用户批准后 rebase 到 v0.45.301 才落地**——占位在 `main` 上悬挂了 8 天，
+期间 `_all_tickers` 仍在配置里。rebase 前核对：`WATCHLIST` 30 / `WATCHLIST_EXTENDED` 71 键集与顺序未变，
+`thesis_breaks*` 相关文件仅被 v0.45.219 动过测试、与本条零冲突。）
+
+起因：v0.45.215「顺带发现」记了一条「`_all_tickers` 24 个 vs 41 个标的块 ⇒ 漏算 17 只」。
+**那条的口径本身是错的**——用户纠正「网站只有 30 个标的」。实测三个集合：
+
+| 集合 | 数量 | 实为 |
+|---|---|---|
+| `config.WATCHLIST` | 30 | 网站 / 每日扫描池（名单唯一真相，v0.45.6） |
+| 配置里的标的块 | 41 | 30 只 WATCHLIST + 11 只候补池（AMD/AMGN/BIIB/COIN/ICLN/MSTR/PLUG/REGN/RUN/SQ/UPST，均在 `WATCHLIST_EXTENDED`） |
+| `_all_tickers` | 24 | 13 只现役 + 同样那 11 只 = **2026-08-25 之前 `config.WATCHLIST` 的原样快照**（v0.45.6 收掉了编排器那份副本，漏了这一份） |
+
+`get_coverage_info()` 报 24/24=100%：网站上 17 只（ABBV/AMC/BRK-B/COST/CRM/CVX/DE/DELL/MU/NFLX/SNOW/T/TMO/TMUS/VZ/WMT/XOM）
+不在分母里，不在网站上的 11 只反倒算「已覆盖」。
+照 v0.45.215 那条说法「以块为准」去派生，会把一种错换成另一种：**块的键当分母 ⇒ covered 恒等于 total**，
+覆盖率恒 100%，唯一该报的「谁缺失效条件」永远报不出来。分母必须来自独立于块的来源。
+
+### 读者普查
+
+`git ls-files -z | xargs -0 grep`，另查仓库外 `~/Desktop/深度分析报告`、`~/.claude/scripts`、`~/.claude/scheduled-tasks`、`~/Library/LaunchAgents`：
+
+- `_all_tickers`：唯一读者 `thesis_breaks.get_coverage_info`。
+- `get_coverage_info`：**生产零调用点，仓库外零**，只有 `tests/test_thesis_breaks.py` 3 条。扫描期真正的覆盖观测点是
+  `alpha_hive_daily_report._attach_thesis_breaks`（按实际扫描的标的计数，全灭时 error）与日报 7.5 节
+  「无失效条件配置」清单——那条路径一直是对的，那 17 只也**都有块**。
+- ⇒ 坏的只是配置侧静态统计与一条测试的遍历范围，**线上扫描与报告不受影响**。
+
+### Fixed
+
+- `thesis_breaks.ThesisBreakConfig.get_coverage_info`：分母改为**调用时**读 `config.WATCHLIST`（函数内 import，不冻在模块级）；
+  去掉 `data.get("_all_tickers", [])` 的空列表兜底。docstring 写明为何不能用块的键，以及零生产读者、真实观测点在哪。
+- `tests/test_thesis_breaks.py::test_all_configured_tickers_have_valid_structure`：原来遍历 `covered_tickers`（即 `_all_tickers`）
+  ⇒ **网站上那 17 只的块从没被这条查过**，查的反倒是 11 只候补池；改为逐块遍历全部标的块。
+
+### Removed
+
+- `thesis_breaks_config.json` 的 `_all_tickers`（26 行，按原文本精确删除，不重排文件；其余 41 个块 +
+  `_machine_conditions_note` 逐块哈希核对不变、键序不变）。
+
+### Changed
+
+- `tests/test_thesis_breaks_config_authored_only.py`：`ALLOWED_META_KEYS` 去掉 `_all_tickers`——手抄名单回到配置里就红；
+  合成用例改用 `_machine_conditions_note`；新增 `test_hand_copied_ticker_list_is_flagged`。
+
+### Added
+
+- `tests/test_thesis_breaks_coverage_universe.py`（5 条，无 skip）：分母 = WATCHLIST；分母随 WATCHLIST 而动
+  （monkeypatch 合成名单 + 含非名单块的合成配置，一条同时排除「快照」「块的键」「import 期冻结」三种错法）；
+  无孤儿块（不属于 `WATCHLIST ∪ WATCHLIST_EXTENDED`）；正对照。
+  **「WATCHLIST 每只都有块」这个方向刻意不在这里**：`test_thesis_break_rendering.py::test_real_config_renders_for_every_watchlist_ticker`
+  早就走真实渲染路径守着（M0），重复一份只会让下一个人数错守卫数。
+
+### 变异实跑
+
+落地断言 + 每轮清 `__pycache__` + 还原后 sha 核对；`--maxfail=1000` 覆盖 addopts 里的 `-x`。
+
+| # | 变异 | 红的测试 |
+|---|---|---|
+| M0 | 对照：改动前代码+配置+测试，删 XOM 块 | 渲染测试（旧套件对这个方向本来就有牙） |
+| M1 | 删 XOM 块 | 渲染测试 |
+| M2 | WATCHLIST 加 PLTR 不写块 | 渲染测试 + `test_watchlist_single_source` 3 条 |
+| M3 | 加两个池子都没有的 ZZZZ 块 | **仅**孤儿守卫 |
+| M4 | BRK-B 块改名 BRKB | 渲染测试 + 孤儿守卫（形状守卫放行 BRKB） |
+| M5 | 代码+配置整体退回改动前 | 形状守卫 + 分母 2 条 |
+| M5b | 仅代码退回（配置已无该键） | 分母 2 条 + `test_thesis_breaks` 3 条（ZeroDivisionError，响亮失败） |
+| M6 | 分母写死成今天的 30 只 | **仅**分母随动那条 |
+| M7 | 分母从块的键派生 | 分母 2 条 |
+| M8 | 模块顶部 `from config import WATCHLIST` | **仅**分母随动那条 |
+| M9 | 仅把 `_all_tickers` 加回配置 | **仅**形状守卫 |
+| M11 | 孤儿守卫漏传候补池 | 孤儿守卫 |
+| M12 | 对照：删 XOM 块 + 屏蔽渲染测试 | **零红** ⇒ 新文件确实没重复那个方向 |
+| M13 | `ALLOWED_META_KEYS` 加回 `_all_tickers` | `test_hand_copied_ticker_list_is_flagged` |
+
+量具自己出过两次问题：① 首轮每条变异都只报 1 红——`pyproject` addopts 带 `-x`，红的列表被截断，补 `--maxfail=1000` 重跑；
+② 我起初写了一条「WATCHLIST 每只都有块」测试，与渲染测试 M1/M2/M4 同红、完全重复，删掉；M12 又揪出正对照里
+残留的一条同向断言（`WATCHLIST ⊆ 块`），也删掉。
+
+全套（09-13，`146d7b5` 上）：4260 passed / 1 failed —— `test_economic_calendar.py::TestCoverageHorizon`，在未改动的 `146d7b5` 临时 worktree 上同样红
+（日历覆盖期到期，设计意图，与本次无关）。
+
+**09-21 rebase 到 `9d3e9a3d`（v0.45.301）后重跑**（`--maxfail=1000 -m "not integration"`）：
+**5198 passed / 1 failed / 1 skipped / 83 deselected / 2 xfailed**（266s）。唯一的红仍是 `TestCoverageHorizon`
+（CPI 剩 80 天、NFP 剩 74 天 < 90 天阈值），在**未改动的 origin/main 上同样红**；唯一 skip 是 `test_scheduler.py`（`schedule` 库不可用，既有）。
+关键变异（M3/M5/M5b/M6/M7/M8/M9/M11/M13）在新基线上与 09-13 逐条一致（原 14 条里只重跑这 9 条：
+它们是新测试独占、或证明被删的旧路径确实被拦的那几条）。**没重跑的 5 条**（M0/M1/M2/M4/M12）测的是「WATCHLIST 每只都有块」
+那个方向，归既有渲染测试守：该测试、`thesis_breaks.py`、配置文件自 09-13 起未变；`config.py` 有改动（缓存路径、删死配置），
+但 `WATCHLIST` / `WATCHLIST_EXTENDED` 的键集与顺序逐项核对未变（30 / 71）。这是推断、不是重跑——M2 改的正是 `config.py`。
+此后 `origin/main` 又进 2 个提交（只动 CHANGELOG 别条与两个测试文件各一行 import），再 rebase 一次后**只重跑了相关子集**、没有重跑全套。
+
+### 顺带发现（已开任务芯片，**已由 v0.45.219 处理**）
+
+- `tests/test_thesis_break_schema.py::test_real_config_fully_formattable` 读主 checkout 的**绝对路径**、不存在就 skip：
+  在 worktree 里校验的是主 checkout 那份文件而不是被改的这份，换台机器恒 skip；元守卫 `test_no_invisible_prod_data_skips.py` 没抓到它。
+  → v0.45.219：改代码锚点、skip 改断言，元守卫补「路径型」第二物种（本条 09-13 只发现、没动它）。
 
 ## [0.45.216] — 2026-09-13 — CHANGELOG 完整性测试挂成 git hook：pre-commit 管不到出事的那条路径，兜底的是 pre-push
 
@@ -5842,6 +6461,8 @@ gap=21 结论不变。测 +10pp 真实差异约需 161 个 ISO 周（≈3 年，
 ### 顺带发现（未处理）
 
 - `_all_tickers` 只有 24 个，配置里有 41 个标的块 ⇒ `ThesisBreakConfig.get_coverage_info` 覆盖统计漏算 17 只。
+  **（v0.45.217 订正：这条的口径错了。基准应是网站 30 只 `config.WATCHLIST`，不是 41 个块；`_all_tickers` 是 WATCHLIST 08-25 前的旧快照，
+  已删、分母改调用时读 WATCHLIST。若按本条说法「以块为准」去派生，覆盖率会恒为 100%。）**
 - 我自己在删除时差点留下半截函数体：`ast.parse` 接受「类体里的 `return`」（那是 compile 阶段才报的错），
   改用 `compile()` 核对并以正对照证明它能抓到。
 - Cowork 周任务提示词用裸 `python3`（CLAUDE.md 硬规则要求 `/usr/local/bin/python3`）——用户配置，未改。

@@ -3,7 +3,6 @@
 全部离线：payload 手工合成、`now` 固定，不碰网络、不写 cache/。
 """
 
-import math
 import socket
 from datetime import datetime
 

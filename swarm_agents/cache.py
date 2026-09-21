@@ -7,8 +7,7 @@ from typing import Dict, Optional
 
 import math
 from resilience import yfinance_limiter, yfinance_breaker, NETWORK_ERRORS
-from models import DataQualityChecker as _DQChecker
-from swarm_agents._config import _log, _RE_TICKER, _AS
+from swarm_agents._config import _log, _AS
 
 
 def _safe_score(value, default: float = 5.0, lo: float = 0.0, hi: float = 100.0, label: str = "") -> float:

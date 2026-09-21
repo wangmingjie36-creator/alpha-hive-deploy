@@ -2,7 +2,6 @@
 
 from datetime import date
 
-import pytest
 
 from is_trading_day import (
     _easter,

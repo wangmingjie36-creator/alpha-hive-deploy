@@ -22,7 +22,6 @@ Brier **单调递减到完全收缩、无内部最优** ⇒ 分票那一层的�
 全文件只碰临时 sqlite，不出网。
 """
 
-import math
 import os
 import sqlite3
 import sys

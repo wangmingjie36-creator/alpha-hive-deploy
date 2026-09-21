@@ -5,7 +5,7 @@ Tests for OutcomesFetcher - T+1/T+7/T+30 实际价格回填
 import json
 import os
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta
 
 from outcomes_fetcher import OutcomesFetcher

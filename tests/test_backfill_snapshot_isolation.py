@@ -50,7 +50,6 @@ def agent(tmp_path, monkeypatch):
 
 def _snap_path_for(agent, ticker, monkeypatch, target=None):
     """只取快照路径，不发网络请求——把真实计算短路掉。"""
-    import options_analyzer as oa
 
     if target is None:
         monkeypatch.delenv("ALPHA_HIVE_TARGET_DATE", raising=False)

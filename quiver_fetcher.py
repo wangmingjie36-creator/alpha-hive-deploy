@@ -14,9 +14,9 @@ political alpha signals for Alpha Hive tickers.
 import json
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple, Any
+from typing import Optional, Dict, List, Any
 import hashlib
 
 import requests

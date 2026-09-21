@@ -34,11 +34,9 @@ import logging
 import math
 import sqlite3
 import statistics
-import sys
-from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 _log = logging.getLogger("alpha_hive.dynamic_exit")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -241,7 +239,6 @@ def compare_horizons() -> Dict:
 
     # (b) 固定 T+21：用 portfolio_backtest.load_verified_predictions(horizon=...) 风格
     #     但 horizon=21 不在数据库列里，改用 dynamic 模式但强制 default_hold=21，无催化剂用
-    from catalyst_exit_planner import plan_exit
     price_cache: Dict[str, Dict[str, float]] = {}
     nets_t21: List[float] = []
     for p in preds_t7:

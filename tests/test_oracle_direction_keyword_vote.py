@@ -40,7 +40,6 @@ Oracle 的方向是三级级联，分数带（唯一有中性区、唯一均衡�
 """
 
 import os
-import re
 import sys
 
 import pytest

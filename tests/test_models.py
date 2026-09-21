@@ -1,7 +1,5 @@
 """models 模块测试 - 数据模型 + 数据质量检测"""
 
-import math
-import pytest
 
 
 class TestCleanFunctions:

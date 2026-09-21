@@ -3,7 +3,6 @@
 from types import SimpleNamespace
 from datetime import datetime
 
-import pytest
 
 from report_formatters import (
     format_score_adjustments,

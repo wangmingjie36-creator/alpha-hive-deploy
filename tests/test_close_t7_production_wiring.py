@@ -17,10 +17,8 @@ swarm_agents/queen_distiller.py 接入 BacktestAnalyzer(clean_t7=True)，但三�
 传给 close_t7_db_path，属于同类型的机械改动。
 """
 
-import json
 import sqlite3
 
-import pytest
 
 
 def _make_pheromone_db(db_path, rows):

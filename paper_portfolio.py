@@ -26,7 +26,7 @@ try:
 except Exception:  # pragma: no cover - 独立运行时退化到标准库
     import logging as _logging
     _log = _logging.getLogger("alpha_hive.paper_portfolio")
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
