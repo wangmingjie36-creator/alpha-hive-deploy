@@ -611,7 +611,9 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
     Bootstrap 验证：重采样历史准确率 N 次，检验权重变动的稳健性
 
     anchor（v0.45.295）：现行 config 权重。**仅当其中有维度退役（权重为 0）时才生效**——
-    此时每次重采样的结果也过一遍与「提议权重」同一道投影 `clamp_shifts(anchor, ·)`，
+    此时每次重采样的结果也走与「提议权重」**同一条**管线
+    `_apply_weight_clamps → clamp_shifts(anchor, ·)`（compute_new_weights_wls 先钳制、
+    main() 再投影；v0.45.298 起两步都要，少一步就是两个估计量），
     CI 才是**同一个估计量**的抽样分布（v0.45.144 定下的原则）。不传 / 无退役维度时
     与此前逐位相同。
 
@@ -670,7 +672,13 @@ def bootstrap_validate(snapshots_dir: Path, new_weights: dict,
                 [time_weights[i] for i in picked],
             )
             if project_each:
-                w = clamp_shifts(anchor, w)
+                # 必须与「提议」走**完全同一条**管线：compute_new_weights_wls 先对点估计做
+                # _apply_weight_clamps（绝对上下限），main() 再 clamp_shifts。这里若只做后一步，
+                # 在绝对上下限会生效的数据上（某维原始份额 > 0.25）CI 与提议就是两个估计量——
+                # v0.45.298 二次检查实测：提议 catalyst 0.3916 落在 CI [0.3994, 0.4320] 之外，
+                # 8 个种子里 7 个判 🛑；补上这一步后 8/8 稳定、被推离 5pp 的提议仍 0/8。
+                # （真实数据各维份额 ≈0.2、钳制是空操作，所以此前没暴露。）
+                w = clamp_shifts(anchor, _apply_weight_clamps(w))
             for dim in DEFAULT_WEIGHTS:
                 weight_samples[dim].append(w[dim])
 
@@ -843,6 +851,12 @@ def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
 
     v0.42.2 增加三道安全网：语法预检 → 备份 → 回读校验（失败自动还原）。
     dry_run=True 时返回 False（预览不等于写入，见函数内注释）。
+
+    v0.45.298：docstring 一直说「保留所有注释」，实现却整块按下面的通用文案重写。
+    此前这条路径在生产形状下不可达（归零后 clamp_shifts 恒不可行），v0.45.295 让它首次可达，
+    丢失才变成真的：`--apply` 会抹掉写在数值旁的决策理由（如 `—— IC -0.088，归零（见上）`、
+    `三维中唯一方向显著（未校正）`）——那是 config 里唯一贴着数值的「为什么」。
+    现在原样保留每个维度数值之后的内容（逗号、空格、注释），只有现有块里找不到该行时才退回通用文案。
     """
     try:
         text = CONFIG_PATH.read_text(encoding="utf-8")
@@ -855,19 +869,28 @@ def write_weights_to_config(new_weights: dict, dry_run: bool = False) -> bool:
             "odds":      "# OracleBeeEcho: 期权 IV(55%) + Polymarket(35%) + 异动(10%)",
             "risk_adj":  "# GuardBeeSentinel: 交叉验证 + 风险调整",
         }
+        m_old = re.search(r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}', text, re.DOTALL)
+        old_block = m_old.group(0) if m_old else ""
+
+        def _tail(k: str) -> str:
+            """现有块里该维度那一行、数值**之后**的原样内容（`,` + 空格 + 注释）。"""
+            mm = re.search(rf'^[ \t]*"{re.escape(k)}"\s*:\s*[0-9.]+(,[^\n]*)$',
+                           old_block, re.MULTILINE)
+            return mm.group(1) if mm else f",   {dim_comments.get(k, '')}"
+
         lines = ["EVALUATION_WEIGHTS = {"]
         for k in ["signal", "catalyst", "sentiment", "odds", "risk_adj"]:
             v = new_weights.get(k, DEFAULT_WEIGHTS[k])
-            comment = dim_comments.get(k, "")
-            lines.append(f'    "{k}":    {v:.4f},   {comment}')
+            lines.append(f'    "{k}":    {v:.4f}{_tail(k)}')
         lines.append("    # ml_auxiliary: 不在此处（RivalBeeVanguard 作为 ±0.5 独立调整项）")
         lines.append("}")
         new_block = "\n".join(lines)
 
-        # 替换原有块（贪婪匹配到第一个独立 }）
+        # 替换原有块（贪婪匹配到第一个独立 }）。
+        # 用 lambda 给替换串：现在块里带的是用户自己写的注释，反斜杠不该被当成转义处理。
         new_text = re.sub(
             r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}',
-            new_block,
+            lambda _m: new_block,
             text,
             flags=re.DOTALL
         )

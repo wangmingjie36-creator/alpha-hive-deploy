@@ -1080,3 +1080,71 @@ class TestInfeasiblePathRunsGates:
         assert len(pipeline["calls"]["bootstrap"]) == 1
         _, kwargs = pipeline["calls"]["bootstrap"][0]
         assert kwargs.get("anchor") == _RETIRED_ANCHOR, "闸 1 必须拿到 anchor，否则恒红"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# v0.45.298：`--apply` 不许抹掉写在数值旁的注释
+#
+# `write_weights_to_config` 的 docstring 一直写着「保留所有注释，只替换数值」，实现却整块按
+# 通用文案重写。生产形状下这条路径原先不可达（归零后 clamp_shifts 恒不可行），v0.45.295 让它
+# 首次可达——`--apply` 会抹掉 `—— IC -0.088，归零（见上）` 这类 config 里唯一贴着数值的「为什么」。
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestWritePreservesInlineComments:
+
+    def test_comments_next_to_values_survive_a_write(self, sandbox):
+        # 注释里故意放反斜杠：块现在带的是用户自己的文本，不能被当成正则替换串里的转义
+        stub = (_CONFIG_STUB
+                .replace('"signal":    0.3000,   # a', r'"signal":    0.3000,   # a —— IC -0.088，归零（见上）\1\d')
+                .replace('"odds":      0.1500,   # d', '"odds":      0.1500,   # d 三维中唯一方向显著（未校正）'))
+        wo.CONFIG_PATH.write_text(stub, encoding="utf-8")
+
+        assert wo.write_weights_to_config(_W, dry_run=False) is True
+        text = wo.CONFIG_PATH.read_text(encoding="utf-8")
+        assert r"# a —— IC -0.088，归零（见上）\1\d" in text, "注释（含反斜杠）必须原样保留"
+        assert "# d 三维中唯一方向显著（未校正）" in text
+        assert "# b" in text and "# c" in text and "# e" in text
+        got = wo.read_current_weights()
+        for k, v in _W.items():
+            assert abs(got[k] - v) < 1e-4, "数值仍要更新"
+        compile(text, "config.py", "exec")
+        assert "OTHER_SETTING = 42" in text
+
+    def test_falls_back_to_generic_comment_when_line_is_absent(self, sandbox):
+        stub = _CONFIG_STUB.replace('    "odds":      0.1500,   # d\n', "")
+        wo.CONFIG_PATH.write_text(stub, encoding="utf-8")
+        assert wo.write_weights_to_config(_W, dry_run=False) is True
+        text = wo.CONFIG_PATH.read_text(encoding="utf-8")
+        assert "# OracleBeeEcho" in text, "现有块里找不到该维度那行时，才退回通用文案"
+        assert abs(wo.read_current_weights()["odds"] - _W["odds"]) < 1e-4
+
+    def test_real_config_zero_weight_comments_survive_apply(self, sandbox):
+        """对**真实 config.py 的副本**：归零形状下 `--apply` 的写入不许抹掉逐维注释。
+
+        动态取「写入前每个维度数值之后的内容」再与写入后比，不写死注释文字——
+        config 里的措辞将来可以改，不该让这条测试变成定时炸弹。
+        """
+        import re
+        import config
+        real = open(config.__file__, encoding="utf-8").read()
+        wo.CONFIG_PATH.write_text(real, encoding="utf-8")
+        anchor = wo.read_current_weights()
+        assert wo.retired_dims(anchor), "夹具自证：真实 config 应带有归零维度"
+        new = wo.clamp_shifts(anchor, {"signal": .2, "catalyst": .1, "sentiment": .4,
+                                       "odds": .2, "risk_adj": .1})
+        assert any(abs(new[k] - anchor[k]) > 0.01 for k in new), "夹具自证：必须真的有数值变化"
+
+        def tails(t):
+            blk = re.search(r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}', t, re.DOTALL).group(0)
+            return {k: re.search(rf'"{k}"\s*:\s*[0-9.]+(,[^\n]*)', blk).group(1) for k in new}
+
+        before = tails(real)
+        assert wo.write_weights_to_config(new, dry_run=False) is True
+        after_text = wo.CONFIG_PATH.read_text(encoding="utf-8")
+        assert tails(after_text) == before, "逐维数值之后的内容（注释）必须原样保留"
+        got = wo.read_current_weights()
+        for k in wo.retired_dims(anchor):
+            assert got[k] == 0.0, "退役维度写入后仍须为 0"
+        assert after_text.replace(re.search(r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}', after_text, re.DOTALL).group(0), "") == \
+            real.replace(re.search(r'EVALUATION_WEIGHTS\s*=\s*\{[^}]+\}', real, re.DOTALL).group(0), ""), \
+            "块之外的内容必须逐字节不变"

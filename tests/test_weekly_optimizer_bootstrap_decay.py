@@ -232,7 +232,7 @@ def test_mutation_removing_bootstrap_decay_breaks_centring(wired, monkeypatch):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# C. 退役维度下的闸 1（v0.45.295）
+# C. 退役维度下的闸 1（v0.45.295；v0.45.298 二次检查改为走真实管线）
 # ══════════════════════════════════════════════════════════════════════
 #
 # 事故形状：盒子修好之后，闸 1 对五个维度**全部**出界，与数据无关——
@@ -240,22 +240,62 @@ def test_mutation_removing_bootstrap_decay_breaks_centring(wired, monkeypatch):
 # ≈0.2 附近）。同一份数据把**未投影**的原始目标送进去 `stable=True`。
 # 闸恒红，比「死在闸前」只好一点点：仍然没有信息量。
 # 修法与 v0.45.144 同一原则：CI 必须是**同一个估计量**的抽样分布——
-# 有退役维度时，每次重采样也过同一道 clamp_shifts。
+# 有退役维度时，每次重采样也走与提议**同一条**管线。
+#
+# ⚠️ v0.45.298 二次检查揪出的坑：本节最初的测试用 `_point_estimate` 手搓提议，
+# 跳过了 compute_new_weights_wls 里的 _apply_weight_clamps。这个 fixture 恰好让
+# catalyst 的原始份额（0.30）超过绝对上限（0.25）——手搓出来的值**生产永远产不出**。
+# 结果测试 5/5 全绿，而生产真实路径的提议只有 1/8 判稳定（重采样漏了钳制一步）。
+# 与 v0.45.295 想治的是同一个病：夹具让生产值不可达。所以提议一律经
+# `_production_proposal` 走真实管线。
 
 _RETIRED_ANCHOR = {"signal": 0.0, "catalyst": 0.332, "sentiment": 0.325,
                    "odds": 0.343, "risk_adj": 0.0}
+_N_SEEDS = 6
+
+
+def _production_proposal(wired):
+    """main() 真实会产出的提议：compute_new_weights_wls（内含 _apply_weight_clamps）→ clamp_shifts。
+
+    注意 compute_new_weights_wls 用的是挂钟 now，而 wired 里快照日期锚在固定 now——
+    不会变成定时炸弹：时间衰减权重只取决于「近期 vs 远期」的**年龄差**（195 天，恒定），
+    加权平均对总量归一，所以两世代的份额之比不随日历前进而变。
+    """
+    res = wo.compute_new_weights_wls(wired["dir"])
+    assert res is not None, "compute_new_weights_wls 未产出（样本被过滤光了？）"
+    return wo.clamp_shifts(_RETIRED_ANCHOR, res["new_weights"])
+
+
+def _stable_over_seeds(wired, proposal, **kw):
+    out = []
+    for s in range(_N_SEEDS):
+        random.seed(s)
+        bs = wo.bootstrap_validate(wired["dir"], proposal, n_iterations=200, **kw)
+        assert "error" not in bs, bs.get("error")
+        out.append(bs["stable"])
+    return out
+
+
+def test_fixture_makes_the_absolute_clamp_bind(wired):
+    """夹具自证：钳制这一步必须**真的改变**提议，否则本节所有断言都测不到管线一致性。"""
+    raw = _point_estimate(wired["snaps"], wired["now"])
+    assert raw["catalyst"] > wo.WEIGHT_CLAMPS["catalyst"][1] + 0.02, (
+        f"夹具没让 catalyst 原始份额超过绝对上限：{raw['catalyst']:.3f}"
+    )
+    with_clamp = wo.clamp_shifts(_RETIRED_ANCHOR, wo._apply_weight_clamps(raw))
+    without = wo.clamp_shifts(_RETIRED_ANCHOR, raw)
+    assert abs(with_clamp["catalyst"] - without["catalyst"]) > 0.02, "钳制没有改变投影结果"
 
 
 def test_retired_regime_gate_uses_projected_bootstrap(wired):
-    point = _point_estimate(wired["snaps"], wired["now"])
-    proposal = wo.clamp_shifts(_RETIRED_ANCHOR, point)
+    proposal = _production_proposal(wired)
     assert proposal["signal"] == 0.0 and proposal["risk_adj"] == 0.0   # 夹具自证：真的是退役形状
 
-    # (1) 带 anchor：同一估计量 ⇒ 稳定；退役维度的 CI 退化为 [0, 0]
-    ok = wo.bootstrap_validate(wired["dir"], proposal, n_iterations=200,
-                               anchor=_RETIRED_ANCHOR)
-    assert "error" not in ok, ok.get("error")
-    assert ok["stable"] is True
+    # (1) 带 anchor：同一条管线 ⇒ 每个种子都稳定；退役维度的 CI 退化为 [0, 0]
+    assert all(_stable_over_seeds(wired, proposal, anchor=_RETIRED_ANCHOR)), \
+        "生产路径的提议在退役形状下必须被判稳定（同一估计量）"
+    random.seed(0)
+    ok = wo.bootstrap_validate(wired["dir"], proposal, n_iterations=200, anchor=_RETIRED_ANCHOR)
     for dim in ("signal", "risk_adj"):
         assert ok["confidence_95"][dim]["lo_95"] == 0.0
         assert ok["confidence_95"][dim]["hi_95"] == 0.0
@@ -263,28 +303,25 @@ def test_retired_regime_gate_uses_projected_bootstrap(wired):
     assert any(ok["confidence_95"][d]["range_pp"] > 0.5 for d in ("catalyst", "sentiment", "odds"))
 
     # (2) 不带 anchor（旧行为）：同一提议被判不稳 —— 这就是事故，锁住它才知道 (1) 修的是什么
+    assert not any(_stable_over_seeds(wired, proposal)), "无 anchor 时应恒判不稳"
+    random.seed(0)
     legacy = wo.bootstrap_validate(wired["dir"], proposal, n_iterations=200)
-    assert legacy["stable"] is False
     for dim in ("signal", "risk_adj"):
         assert legacy["confidence_95"][dim]["lo_95"] > 0.05, "无约束 CI 应远离 0"
 
 
 def test_retired_regime_gate_still_has_teeth(wired):
     """负对照：带 anchor 时闸依然会红。没有这一条，(1) 可能只是在一个恒真条件上全绿。"""
-    point = _point_estimate(wired["snaps"], wired["now"])
-    proposal = wo.clamp_shifts(_RETIRED_ANCHOR, point)
+    proposal = _production_proposal(wired)
 
     pushed = dict(proposal)              # 和不变，只把质量从 odds 搬到 catalyst
     pushed["catalyst"] += 0.08
     pushed["odds"] -= 0.08
-    bad = wo.bootstrap_validate(wired["dir"], pushed, n_iterations=200,
-                                anchor=_RETIRED_ANCHOR)
-    assert "error" not in bad, bad.get("error")
-    assert bad["stable"] is False, "被人为推离重采样中心的提议必须被拦下"
+    assert not any(_stable_over_seeds(wired, pushed, anchor=_RETIRED_ANCHOR)), \
+        "被人为推离重采样中心的提议必须被拦下"
 
     resurrected = dict(proposal)         # 把退役维度复活成 5pp，同样必须红
     resurrected["signal"] = 0.05
     resurrected["catalyst"] -= 0.05
-    bad2 = wo.bootstrap_validate(wired["dir"], resurrected, n_iterations=200,
-                                 anchor=_RETIRED_ANCHOR)
-    assert bad2["stable"] is False, "复活退役维度的提议不该被闸 1 放行"
+    assert not any(_stable_over_seeds(wired, resurrected, anchor=_RETIRED_ANCHOR)), \
+        "复活退役维度的提议不该被闸 1 放行"
