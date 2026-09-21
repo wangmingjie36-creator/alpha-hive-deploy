@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.295] — 2026-09-20 — 占位（进行中：weekly_optimizer 的 WEIGHT_CLAMPS 与归零维度结构矛盾，每周诊断死在两道闸之前）
+
 ## [0.45.294] — 2026-09-18 — Fixed：experiments 三个脚本缺 `sys.path` 注入，按文档运行即 `ModuleNotFoundError`；Added：静态守卫 + 真子进程测试
 
 `python3 experiments/xxx.py` 运行时 `sys.path[0]` 是 `experiments/`，不是仓库根。v0.45.290 修了 `signal_ic_sweep.py`；
