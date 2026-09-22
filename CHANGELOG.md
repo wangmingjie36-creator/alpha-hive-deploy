@@ -11,7 +11,63 @@
 
 ## [0.45.305] — 2026-09-22 — 占位（进行中：修 gh-pages 数据根迁移阶段 4 二次检查发现的两个缺陷——`.nojekyll`/`chart.umd.min.js` 只存在于仓库根会在阶段5后首次部署丢失；`resolve_gh_pages_parent` 依赖 fetch 顺带更新 origin/gh-pages，`--single-branch` 克隆下会静默永久失败）
 
-## [0.45.304] — 2026-09-22 — 占位（进行中：P2/v0.45.279 二次检查后续——补 `consensus_census` 接线测试 + `get_bullish_agents_detail` 异常路径测试，更正 Rival 数值语义 docstring）
+## [0.45.304] — 2026-09-22 — Added：`get_bullish_agents_detail` 异常路径测试 + `ScoutBeeNova.details.consensus_census` 接线测试；Changed：更正一处误判「数值语义不变」的 docstring
+
+上一 session（2026-09-21，「二次检查 P0–P3 有没有 bug」）对 v0.45.279 做变异检验时，9 个变异里 3 个存活——
+说明这三处此前**零测试**，本条补上；同一轮还发现一句 docstring 断言与实测矛盾，一并更正。详见
+auto-memory `alpha-hive-board-eviction.md`「后续（v0.45.304）」一节。
+
+### Added（`tests/test_bullish_agents_census_eviction.py`）
+
+- **`TestDetailExceptionPathReturnsNone`（5 条）**：`get_bullish_agents_detail` 的
+  `except (ValueError, KeyError, TypeError, AttributeError)` 分支此前没有任何测试真正让
+  `board.get_live_signals()` 抛异常——`TestHonestSentinel` 只测了 `board is None`。逐个钉住
+  白名单四种类型都接住返回 `None`、`get_bullish_agents_count` 随之为 `None`（不编数）、
+  **未列名的类型（`RuntimeError`）必须冒出去**——不是本次收窄，是与旧实现同一份异常元组，
+  防止以后「顺手」扩成裸 `except Exception` 悄悄吞掉编程错误。
+- **`TestScoutWiresConsensusCensusIntoDetails`（2 条）**：离线跑真实 `ScoutBeeNova.analyze()`，
+  只钉住重量级外部依赖（`sec_edgar`/`edgar_rss`/`congress_trades_scraper`/`market_intelligence`/
+  `_get_stock_data`/`_assess_sector_relative_strength`），其余走真代码，验证
+  `details["consensus_census"]` 与 `get_real_crowding_metrics` 返回值**逐字节相等**（含 `None`
+  原样透传，键不消失）——`test_bee_details_contract.py` 的静态 AST 契约测试只能证明
+  `details={...}` 字面量里有 `"consensus_census"` 这个键名，证明不了值取的是
+  `metrics.get("consensus_census")` 而不是打错的键（正是本次抓到的那个变异）。
+- **`TestRivalConsumptionSemanticsChanged`（1 条）**：把下面 Changed 一节的口头发现钉成断言——
+  同一批 5 个 Phase-1 条目（含 Scout 自己看多），`get_top_signals(ticker, n=10)`（旧口径，
+  无身份过滤）数到 3 票看多，`get_bullish_agents_count`（新口径，`_PHASE1_PEERS`）数到 2 票。
+
+### Changed
+
+- `TestCrowdingMetricsExposesConsensusCensus` 的 docstring 原写「不改变既有的 bullish_agents
+  数值语义」——这只对 **Scout 自己**成立。`_PHASE1_PEERS` 一直是按「Scout 不数自己」设计的
+  （`real_data_sources.py` 该常量上方注释本就写着），但 `get_real_crowding_metrics` 是
+  Scout/Guard/Rival **三蜂共用**的入口：Rival 在 Phase-1.4（此时 Scout 已发布）读取，旧口径
+  （无身份过滤）本可能把 Scout 自己的票数进去，新口径结构上不可能。对 Rival/Guard 这两个
+  「事后」读者，数字确实变了，不只是多透传了一个字段。量级：`consensus_strength` 权重
+  0.2941、1 票差 = 16.7 个百分点，最多影响 `crowding_score` 约 ±4.9 点，进而影响
+  `RivalBeeVanguard` 的 `ml.expected_7d/30d`（`crowding.score` 走独立于 `final_score` 的消费
+  路径，见 v0.45.279 CHANGELOG）。09-18 生产实测 Scout 仅 1/30 看多，实际影响很小（见
+  auto-memory 同节）。
+
+### 不做
+
+- **未改生产代码**——要不要把 Rival/Guard 的口径改成「排除调用者自己」而非固定排除 Scout，
+  是尚未做的设计决定，本条只补测试与更正文档。若要改，需追加世代边界（`crowding.comp.
+  consensus_strength` 的输入定义会再变一次）。
+
+### 核对
+
+- 新增 8 条先红后绿：还原为改动前的 `real_data_sources.py`/`swarm_agents/scout_bee.py` 后
+  `TestDetailExceptionPathReturnsNone`（白名单收窄/放宽两个变异）、
+  `TestScoutWiresConsensusCensusIntoDetails`（删键/错键两个变异）全部按预期变红；
+  `TestRivalConsumptionSemanticsChanged` 断言的是既有代码的既有行为，本身即为回归钉子。
+  5 个变异全被抓（每次跑前后清 `__pycache__`，还原后 sha 比对，吸取上一版的字节码教训）。
+- `tests/test_bullish_agents_census_eviction.py` 23/23；旁证套件（`test_real_data_sources.py`/
+  `test_crowding_detector.py`/`test_rival_bee_peer_features.py`/`test_guard_census_eviction.py`/
+  `test_bee_details_contract.py`/`test_offline_transport_gate.py`）144/144；ruff 对改动文件
+  All checks passed。全套 5222 passed / 1 failed（`TestCoverageHorizon`，日期驱动、与本条无关，
+  干净 main 上同样红）/ 1 skipped / 2 xfailed。
+- 无世代边界（未改生产代码，`crowding.comp.consensus_strength` 的取值口径本次未变），样本代价 0。
 
 ## [0.45.306] — 2026-09-22 — Fixed：`test_paper_portfolio_vol_sizing.py::TestProductionStateIsIsolated::test_state_paths_point_outside_the_repo`（conftest 防线①自检）恒真——`pp.BASE_DIR` 早已默认 `None`，判定从未真的比对过隔离夹具重绑的路径
 
