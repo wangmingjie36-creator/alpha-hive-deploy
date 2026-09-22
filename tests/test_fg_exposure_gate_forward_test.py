@@ -45,6 +45,22 @@ fwd = _load_module()
 _EFFECT_KEYS = {"stats", "mean", "t", "p", "delta", "weekly_deltas", "stats_all_weeks",
                "weeks_used", "adjusted_trades"}
 
+# 白名单，不是黑名单（v0.45.308 独立审查，I-2）：`_EFFECT_KEYS` 只堵得住"叫这几个名字"的效应量键，
+# 换个名字（比如把 `adjusted_trades` 换成 `adj_summary` 再无条件写进 `evaluate()` 的返回字典）
+# 照样能泄漏而不被抓到——15 个存活变异里就有这一个。这里反过来显式列出 `evaluate()`/`run()` 在
+# `not_ready`/`cannot_judge` 状态下**允许**出现的顶层键（逐个 early-return 分支核对得出），
+# 任何超出都判定为可疑效应量键，不管它叫什么名字。
+_NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS = {
+    "status", "mode", "n_dates", "seed_last_run_date", "selfproof", "selfproof_rate",
+    "selfproof_decision_rate", "weeks_available", "weeks", "next_look_at",
+    "looks_passed_without_verdict", "reason", "stale", "mechanism_selfcheck_ok",
+}
+
+
+def _assert_no_unexpected_top_level_keys(res):
+    extra = set(res) - _NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS
+    assert not extra, f"出现白名单外的顶层键（可能是新换了名字的效应量泄漏）：{extra}"
+
 
 def _all_keys(obj):
     if isinstance(obj, dict):
@@ -526,6 +542,19 @@ class TestLoadSeedRejectsBadSeeds:
         with pytest.raises(fwd.SeedError, match="sha256"):
             fwd.load_seed(d)
 
+    def test_manifest_missing_a_files_sha_entry_is_refused(self, tmp_path):
+        """M11（v0.45.308 独立审查）：`want = ((manifest.get("files") or {}).get(name) or {}).get("sha256")`
+        在清单没登记过某个文件时 `want=None`——`_sha256(blob) != None` 恒真所以现行代码正确拒绝，
+        但这只是巧合式安全（换成 `if want and _sha256(blob) != want:` 这种更「防御性」的写法就会
+        把 `want` 为假值读成「不比对」、静默放行）。这里删掉清单里 positions.jsonl 的整条记录，
+        实测钉住当前写法，也防着以后有人把它「优化」成那种更危险的形式。"""
+        d, _ = self._good(tmp_path)
+        manifest = json.loads((d / fwd.SEED_MANIFEST_NAME).read_text(encoding="utf-8"))
+        del manifest["files"]["positions.jsonl"]
+        (d / fwd.SEED_MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(fwd.SeedError, match="sha256"):
+            fwd.load_seed(d)
+
     def test_missing_manifest_is_a_seed_error(self, tmp_path):
         d, _ = self._good(tmp_path)
         (d / fwd.SEED_MANIFEST_NAME).unlink()
@@ -559,6 +588,9 @@ class TestLoadSeedRejectsBadSeeds:
         ("last_run_date 不是日期", {"last_run_date": "yesterday"}, "YYYY-MM-DD"),
         ("持仓 entry_date 晚于种子日期", {"positions": [_pos_row("X", "2026-09-16", 100.0)]}, "晚于"),
         ("持仓 size_usd 非有限", {"positions": [_pos_row("X", "2026-09-10", float("nan"))]}, "非有限"),
+        # M8（v0.45.308 独立审查）：上一条只测了 size_usd——若校验被悄悄narrow成只查 size_usd，
+        # entry_price/shares 非有限会被放过，size 一样能除出一个 NaN shares 落进 Position。
+        ("持仓 entry_price 非有限", {"positions": [_pos_row("X", "2026-09-10", 100.0, entry_price=float("nan"))]}, "非有限"),
         ("平仓 pnl_usd 非有限", {"closed": [_closed_row("X", float("nan"))]}, "pnl_usd"),
     ])
     def test_bad_content_is_refused_even_with_a_matching_checksum(self, tmp_path, label, kwargs, match):
@@ -573,6 +605,39 @@ class TestLoadSeedRejectsBadSeeds:
         d = tmp_path / "seed_badpos"
         _write_seed_dir(d, _make_seed(positions=[bad]))
         with pytest.raises(fwd.SeedError, match="Position"):
+            fwd.load_seed(d)
+
+    # v0.45.308 独立审查（F5）：畸形但「校验和对得上」的内容必须一律 `SeedError`，不许在异常
+    # 处理器自己的错误信息构造里（比如 `r.get('ticker')`）撞出别的异常类型逃出契约。
+    @pytest.mark.parametrize("label, files_override, match", [
+        ("positions 行是 JSON 列表", {"positions.jsonl": b"[1,2]\n"}, "对象"),
+        ("positions 行是 JSON null", {"positions.jsonl": b"null\n"}, "对象"),
+        ("positions 行非法 UTF-8", {"positions.jsonl": b"\xff\xfe\n"}, "UTF-8"),
+        ("closed 行是 JSON 列表", {"closed_trades.jsonl": b"[1]\n"}, "对象"),
+    ])
+    def test_malformed_jsonl_rows_are_seed_errors_not_other_exceptions(self, tmp_path, label, files_override, match):
+        d = tmp_path / "seed_malformed"
+        base = _make_seed(positions=[_pos_row("OLD", "2026-09-10", 5000.0)])
+        _write_seed_dir(d, {**base, **files_override})
+        with pytest.raises(fwd.SeedError, match=match):
+            fwd.load_seed(d)
+
+    def test_meta_json_with_a_bom_is_a_seed_error_not_a_silent_pass(self, tmp_path):
+        """带 UTF-8 BOM 的 `meta.json`：`json.loads(bytes)` 会自动剥掉 BOM 而放行，
+        但消费者 `paper_portfolio._load_meta` 用 `read_text` 再 `json.loads(str)`，BOM
+        留在字符串里会让它崩溃——「校验过了、重放崩」。校验器必须用同样的解码方式，
+        让这类种子在加载阶段就被拒，不是等到重放才炸。"""
+        d = tmp_path / "seed_bom"
+        base = _make_seed()
+        _write_seed_dir(d, {**base, "meta.json": b"\xef\xbb\xbf" + base["meta.json"]})
+        with pytest.raises(fwd.SeedError):
+            fwd.load_seed(d)
+
+    def test_manifest_that_is_a_json_list_is_a_seed_error(self, tmp_path):
+        d = tmp_path / "seed_badmanifest"
+        _write_seed_dir(d, _make_seed())
+        (d / fwd.SEED_MANIFEST_NAME).write_text("[1, 2]", encoding="utf-8")
+        with pytest.raises(fwd.SeedError, match="对象"):
             fwd.load_seed(d)
 
 
@@ -591,6 +656,16 @@ class TestApplySeedAndEvaluateContract:
         sb = tmp_path / "sb"
         sb.mkdir()
         (sb / "positions.jsonl").write_text("")
+        with pytest.raises(FileExistsError):
+            fwd._apply_seed(sb, _make_seed())
+
+    def test_apply_seed_refuses_a_sandbox_that_already_has_an_equity_curve(self, tmp_path):
+        """M12（v0.45.308 独立审查）：上一条用的是会播的三个文件之一；碰撞检查若只查
+        `SEED_STATE_FILES`（这三个），沙箱里已有的 `equity_curve.jsonl`（不在这三个里，
+        `run_replay` 续跑同样会读它）就会被漏检。"""
+        sb = tmp_path / "sb"
+        sb.mkdir()
+        (sb / "equity_curve.jsonl").write_text("")
         with pytest.raises(FileExistsError):
             fwd._apply_seed(sb, _make_seed())
 
@@ -643,6 +718,34 @@ def _world(pp_fx, tmp_path, *, closed=None):
     return seed
 
 
+class TestDefaultGateAssumptionIsChecked:
+    """F4（v0.45.308 独立审查）：A 定义为 `run_replay({}, ...)`——不覆盖任何键，隐含假设生产
+    默认 `fg_exposure_gate.enabled=False`。此前没有任何测试钉住这个假设：若它被打破（比如
+    已经有人把默认改成 True 却没退役本脚本），A 会悄悄变成跟 B 同一回事，ΔNAV≈0 会被误读成
+    「门没有效应」而不是「A/B 的定义已经重合」——是静默失效，不是显式失败。"""
+
+    def test_a_is_cannot_judge_if_production_default_silently_flipped_to_true(self, pp, tmp_path, monkeypatch):
+        _pp = pp[0]
+        # ⚠️ 不能写成 `monkeypatch.setitem(_pp.CONFIG["fg_exposure_gate"], "enabled", True)`：
+        # `run_replay` 的 finally 是 `CONFIG.clear(); CONFIG.update(_orig_config)`，会把
+        # `CONFIG["fg_exposure_gate"]` **整体替换**成另一个 dict 对象，不是原地改值——嵌套
+        # setitem 记的是旧对象的引用，teardown 时改的是那个已经被换掉、没人再引用的旧对象，
+        # 真正生效的 CONFIG 就永久卡在 True，污染这个文件里后面所有测试（实测踩过一次：
+        # 本类下一条"正对照"测试单独跑绿、跟在这条后面跑就红）。改在**顶层键**上
+        # setitem，顶层 `CONFIG` 对象本身从不被换引用，teardown 才真的复原。
+        monkeypatch.setitem(_pp.CONFIG, "fg_exposure_gate", {**_pp.CONFIG["fg_exposure_gate"], "enabled": True})
+        _write_snapshot(pp[1], "NVDA", "2026-09-16", 7.5, "bullish")
+        res = fwd.evaluate(["2026-09-16"], "2026-09-16", "2026-09-17", tmp_path / "sb", insample=False, seed={})
+        assert res["status"] == "cannot_judge"
+        assert "True" in res["reason"]
+
+    def test_default_disabled_does_not_trip_the_guard(self, pp, tmp_path):
+        """正对照：默认确实是 False 时，这道新守卫不该拦下正常场景。"""
+        _write_snapshot(pp[1], "NVDA", "2026-09-16", 7.5, "bullish")
+        res = fwd.evaluate(["2026-09-16"], "2026-09-16", "2026-09-17", tmp_path / "sb", insample=False, seed={})
+        assert res["status"] != "cannot_judge"
+
+
 class TestSeededReplayReproducesProduction:
     def test_empty_sandbox_reproduces_decisions_but_not_amounts(self, pp, tmp_path):
         """**这就是 09-16~09-18 那次「0/8」的离线复现**：决策层 100%、金额层 0%。"""
@@ -686,6 +789,19 @@ class TestSeededReplayReproducesProduction:
             assert "OLD" in {p["ticker"] for p in _pp._load_jsonl(sb / variant / "positions.jsonl")}
             hist = _pp._load_jsonl(sb / variant / "closed_trades.jsonl")
             assert any(t["ticker"] == "OLD" and t["pnl_usd"] == -50.0 for t in hist)
+
+    def test_seeded_variants_share_the_same_cash_basis(self, pp, tmp_path):
+        """M2（v0.45.308 独立审查）：上一条只核了 B 的 `positions.jsonl`/`closed_trades.jsonl`
+        带着 OLD，没核 `meta.json`（现金）——B 若漏播现金，会静默退回 `CONFIG["starting_capital"]`
+        （$50000）而不是种子的真实现金（$34147+OLD $16264≈$50411）。`_world` 不设 F&G，门从未
+        触发，所以 A/B 的仓位大小理应逐分相同；不同就说明 B 的现金基数没跟着种子走。"""
+        _pp = pp[0]
+        seed = _world(pp, tmp_path)
+        sb = tmp_path / "sb"
+        fwd.evaluate(_W_DATES, _W_SINCE, _W_BEFORE, sb, insample=False, seed=seed)
+        a_pos = {p["ticker"]: p["size_usd"] for p in _pp._load_jsonl(sb / "A_baseline" / "positions.jsonl")}
+        b_pos = {p["ticker"]: p["size_usd"] for p in _pp._load_jsonl(sb / "B_treatment" / "positions.jsonl")}
+        assert a_pos and a_pos == b_pos, f"门未触发时 A/B 仓位应逐分相同：A={a_pos} B={b_pos}"
 
     def test_seeded_equity_curve_covers_the_window_only(self, pp, tmp_path):
         """统计量的周度收益率只该来自窗口内的净值——种子里若带着窗口前的净值行，会让窗口前的周
@@ -744,6 +860,53 @@ class TestSelfproofReasonNamesTheLayer:
         r = fwd._selfproof_failure_reason(sp)
         assert "评分链" in r and "0/1" in r
         assert "仓位金额" not in r
+
+    def test_decision_layer_does_not_conflate_opposite_directions(self):
+        """M4（v0.45.308 独立审查）：决策层键是 (ticker, entry_date, direction) 三元组——
+        同一标的同一天但方向相反，必须记成决策层不吻合，不能被当成「只是金额差」。"""
+        real = {("NVDA", "2026-09-16", "bullish", 100.0)}
+        a = {("NVDA", "2026-09-16", "bearish", 100.0)}  # 标的/日期都对，方向翻了
+        sp = fwd._selfproof_stats(real, a)
+        assert sp["exact"] == 0
+        assert sp["decision"] == 0, "方向相反不该被判成「决策层复现」"
+
+    def test_decision_rate_exactly_at_threshold_is_treated_as_passing(self):
+        """M13b（v0.45.308 独立审查）：分层文案判「决策层够不够格」用 `>=`，不是 `>`——
+        恰好等于阈值时该走「金额差」分支，不该被当成「决策层也不够格」而错报评分链被改。"""
+        sp = {"total": 20, "exact": 10, "decision": 19, "rate": 0.5, "decision_rate": fwd.SELFPROOF_MIN_RATE}
+        r = fwd._selfproof_failure_reason(sp)
+        assert "仓位金额" in r and "评分链" not in r
+
+
+class TestSelfproofThresholdBoundary:
+    """M13a（v0.45.308 独立审查）：`SELFPROOF_MIN_RATE=0.95` 是「< 才判红」，即 `>=` 通过——
+    直接控制 `_selfproof_stats` 的返回值，绕开真实复现率难以精确命中 0.95 的问题。"""
+
+    def _run(self, pp, tmp_path, monkeypatch, rate):
+        monkeypatch.setattr(fwd, "_real_recorded_entries", lambda *a, **k: {("X", "2026-09-16", "bullish", 1.0)})
+        monkeypatch.setattr(fwd, "_selfproof_stats",
+                            lambda real, a: {"total": 1, "exact": 1, "decision": 1,
+                                             "rate": rate, "decision_rate": 1.0})
+        _write_snapshot(pp[1], "NVDA", "2026-09-16", 7.5, "bullish")
+        return fwd.evaluate(["2026-09-16"], "2026-09-16", "2026-09-17", tmp_path / "sb", insample=False, seed={})
+
+    def test_rate_exactly_at_threshold_is_not_cannot_judge(self, pp, tmp_path, monkeypatch):
+        res = self._run(pp, tmp_path, monkeypatch, fwd.SELFPROOF_MIN_RATE)
+        assert res["status"] != "cannot_judge"
+
+    def test_rate_just_below_threshold_is_cannot_judge(self, pp, tmp_path, monkeypatch):
+        res = self._run(pp, tmp_path, monkeypatch, fwd.SELFPROOF_MIN_RATE - 0.001)
+        assert res["status"] == "cannot_judge"
+
+
+class TestSnapshotWindowBoundary:
+    def test_snapshot_window_excludes_the_before_boundary(self, monkeypatch):
+        """M15（v0.45.308 独立审查）：窗口是左闭右开 [since, before)——`before` 当天的快照
+        不该被算进「窗口内」，否则窗口宽度会悄悄多算一天。"""
+        import paper_portfolio as _pp
+        monkeypatch.setattr(_pp, "_all_snapshot_dates", lambda: ["2026-09-15", "2026-09-16", "2026-09-17"])
+        got = fwd._snapshot_dates_in_window("2026-09-15", "2026-09-17")
+        assert got == ["2026-09-15", "2026-09-16"]
 
 
 # ── 14. `run()` 接线：种子不可用 ⇒ 无法判定，绝不退回空沙箱 ──────────────────────────
@@ -805,6 +968,19 @@ _GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.invalid"}
 
 
+def _synthetic_git_env():
+    """v0.45.308 独立审查（I-1）：若 pytest 从 git hook 里被拉起，继承的 `GIT_DIR` 等会让下面
+    每条对**合成仓库**跑的 git 命令打到**真仓库**上——本仓另外 4 个造合成 git 仓库的测试文件
+    （`test_github_tool_status.py`/`test_github_tool_commit.py`/`test_git_failures_are_visible.py`/
+    `test_production_sync.py`）都已防了这一点，本文件此前没有。配对对照实测：一次性克隆里带
+    `GIT_DIR` 跑本文件的 `TestBuildSeedFromGit`，克隆的提交数从 1284 涨到 1316（多出 32 个垃圾提交）；
+    不带 `GIT_DIR` 跑，克隆一个提交都不多。"""
+    env = {k: v for k, v in os.environ.items()
+          if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
+    env.update(_GIT_ENV)
+    return env
+
+
 def _state_at(lrd, cash, positions=(), closed=()):
     seed = _make_seed(cash=cash, positions=positions, closed=closed, last_run_date=lrd)
     return {f"paper_portfolio_state/{n}": b for n, b in seed.items()}
@@ -817,7 +993,7 @@ def _git_repo(tmp_path, commits, name="repo"):
 
     def git(*a):
         return subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True,
-                              env={**os.environ, **_GIT_ENV})
+                              env=_synthetic_git_env())
     git("init", "-q")
     shas = []
     for i, files in enumerate(commits):
@@ -878,7 +1054,7 @@ class TestBuildSeedFromGit:
                                        _state_at("2026-09-16", 4000.0)])
         shallow = tmp_path / "shallow"
         subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{repo}", str(shallow)],
-                       check=True, capture_output=True, env={**os.environ, **_GIT_ENV})
+                       check=True, capture_output=True, env=_synthetic_git_env())
         with pytest.raises(fwd.SeedError, match="浅克隆"):
             fwd.build_seed_from_git("2026-09-16", shallow)
 
@@ -902,6 +1078,37 @@ class TestBuildSeedFromGit:
         with pytest.raises(fwd.SeedError):
             fwd.build_seed_from_git("2026-09-16", tmp_path / "plain")
 
+    def test_git_helper_raises_on_nonzero_exit_code(self, monkeypatch, tmp_path):
+        """M3（v0.45.308 独立审查）：`_git()` 若不检查退出码，`git show` 在坏对象上失败时返回的
+        空 stdout 会被当成正常输出往下传——上游拿着这段空字节继续解析，得到的是一个更难查的
+        「文件为空/解析失败」，而不是「git 命令本身失败了」。"""
+        class _Fake:
+            returncode = 128
+            stdout = b""
+            stderr = b"fatal: bad object deadbeef"
+        monkeypatch.setattr(fwd.subprocess, "run", lambda *a, **k: _Fake())
+        with pytest.raises(fwd.SeedError, match="exit 128"):
+            fwd._git(tmp_path, "show", "deadbeef:foo")
+
+    def test_a_commit_with_non_string_last_run_date_is_skipped_not_crashed(self, tmp_path):
+        """M9（v0.45.308 独立审查）：中间提交的 `last_run_date` 不是字符串（手改成了数字，或
+        字段缺失变成 `None`）——不能让 `lrd >= since` 在 `None`/`int` 上做比较崩溃，必须
+        优雅跳过这个提交，继续找后面真正合格的那个。"""
+        malformed = {"paper_portfolio_state/meta.json": b'{"cash": 1.0, "last_run_date": 42}',
+                    "paper_portfolio_state/positions.jsonl": b"", "paper_portfolio_state/closed_trades.jsonl": b""}
+        repo, shas = _git_repo(tmp_path, [malformed, _state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)])
+        files, manifest = fwd.build_seed_from_git("2026-09-16", repo)
+        assert _cash_of(files) == 3000.0 and manifest["source"]["commit"] == shas[1]
+
+    def test_a_commit_with_unparseable_meta_is_skipped_not_crashed(self, tmp_path):
+        """M10（v0.45.308 独立审查）：中间提交的 `meta.json` 干脆不是合法 JSON——同样必须跳过，
+        不能让 `json.loads` 的 `ValueError` 逃出 `build_seed_from_git`。"""
+        broken = {"paper_portfolio_state/meta.json": b"{not json",
+                 "paper_portfolio_state/positions.jsonl": b"", "paper_portfolio_state/closed_trades.jsonl": b""}
+        repo, shas = _git_repo(tmp_path, [broken, _state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)])
+        files, manifest = fwd.build_seed_from_git("2026-09-16", repo)
+        assert _cash_of(files) == 3000.0 and manifest["source"]["commit"] == shas[1]
+
     def test_default_repo_root_follows_paths_git_repo_root(self, tmp_path, monkeypatch):
         """git 仓库根走 `PATHS.git_repo_root`（v0.45.268 专为 git plumbing 与数据根解耦而设）。"""
         repo, _ = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)])
@@ -915,6 +1122,30 @@ class TestBuildSeedFromGit:
         out = tmp_path / "frozen"
         fwd.write_seed_dir(out, files, manifest)
         assert fwd.load_seed(out, forward_start="2026-09-16") == files
+
+    def test_shipped_git_helper_strips_inherited_git_dir_vars(self, tmp_path, monkeypatch):
+        """v0.45.308 独立审查（I-1）：脚本自己的 `_git()` 此前直接继承 `os.environ`——若本进程
+        是从 pre-commit/pre-push 钩子或 `git rebase -x` 里拉起来的（继承了 `GIT_DIR` 等），
+        每条 `git -C <repo>` 命令的 `-C` 会被 `GIT_DIR` 盖过，实际打到那个钩子的真仓库上。
+        不跑昂贵的一次性克隆实验（那个只在本地手工核实过一次），这里 spy `subprocess.run`
+        的 `env=` 参数，核对四个变量确实被剥掉了——`fwd` 与本测试文件用的是同一个 `subprocess`
+        模块对象，这里顺带也核了 `_git_repo` 自己的调用。"""
+        monkeypatch.setenv("GIT_DIR", "/should/not/leak/.git")
+        monkeypatch.setenv("GIT_WORK_TREE", "/should/not/leak")
+        seen_envs = []
+        orig_run = fwd.subprocess.run
+
+        def spy(*a, **k):
+            if a and a[0] and a[0][0] == "git":
+                seen_envs.append(k.get("env"))
+            return orig_run(*a, **k)
+        monkeypatch.setattr(fwd.subprocess, "run", spy)
+        repo, _ = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)])
+        fwd.build_seed_from_git("2026-09-16", repo)
+        assert seen_envs, "没有观察到任何 git 调用——测试没测到东西"
+        for env in seen_envs:
+            assert env is not None
+            assert "GIT_DIR" not in env and "GIT_WORK_TREE" not in env
 
     def test_write_seed_dir_refuses_to_overwrite_a_frozen_seed(self, tmp_path):
         repo, _ = _git_repo(tmp_path, [_state_at("2026-09-15", 3000.0), _state_at("2026-09-16", 4000.0)])
@@ -965,6 +1196,22 @@ class TestRehearse:
         res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
         assert res["status"] == "cannot_judge" and "评分链" in res["reason"]
 
+    def test_judges_by_exact_rate_not_decision_rate(self, pp, tmp_path, monkeypatch):
+        """M1（v0.45.308 独立审查）：判定若误用决策层率，「决策层对、金额层错」的场景会被误判为
+        `rehearsal_ok`——正是本次真因「0/8」同一种形状，只是从 `evaluate()` 挪到了 `rehearse()`。
+        只改仓位大小、不改开哪只/哪个方向，制造「决策层对、精确层错」。"""
+        _pp = pp[0]
+        seed = _world(pp, tmp_path)
+        repo = self._synthetic_repo(tmp_path, seed)
+        # 顶层键 setitem，不是嵌套 setitem——`run_replay` 的 finally 整体替换
+        # `CONFIG["size_pct_by_tier"]`，嵌套 setitem 会在 teardown 时改到被换掉的旧对象上，
+        # 真正生效的 CONFIG 卡在 4.0 不还原（同 `TestDefaultGateAssumptionIsChecked` 那条注释）。
+        monkeypatch.setitem(_pp.CONFIG, "size_pct_by_tier", {**_pp.CONFIG["size_pct_by_tier"], "high": 4.0})
+        res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=repo)
+        assert res["selfproof_decision_rate"] == 1.0
+        assert res["selfproof_rate"] < 1.0
+        assert res["status"] == "cannot_judge"
+
     def test_unobtainable_start_state_is_cannot_judge(self, pp, tmp_path):
         (tmp_path / "plain").mkdir()
         res = fwd.rehearse(_W_SINCE, _W_BEFORE, repo_root=tmp_path / "plain")
@@ -1002,6 +1249,13 @@ class TestCli:
         monkeypatch.setattr(fwd, "rehearse", lambda since, before, **k: {"status": status, "mode": "rehearse"})
         assert fwd.main(["--rehearse", "2026-09-09", "2026-09-16"]) == code
 
+    def test_unexpected_crash_returns_3_not_1(self, monkeypatch, capsys):
+        """F6（v0.45.308 独立审查）：未捕获异常此前与「未就绪」共用退出码 1，两者无法区分——
+        崩溃必须报 3，绝不能悄悄读成「正常等待」。"""
+        monkeypatch.setattr(fwd, "run", lambda **k: (_ for _ in ()).throw(RuntimeError("模拟崩溃")))
+        assert fwd.main([]) == 3
+        assert "崩溃" in capsys.readouterr().err
+
     def test_rehearse_passes_its_two_dates_through(self, monkeypatch):
         seen = []
         monkeypatch.setattr(fwd, "rehearse", lambda since, before, **k: seen.append((since, before)) or {"status": "rehearsal_ok"})
@@ -1021,6 +1275,34 @@ class TestCli:
         out = capsys.readouterr().out
         assert "精确复现 0/5" in out and "决策层复现 5/5" in out
 
+    @pytest.mark.parametrize("status, must_contain, must_not_contain", [
+        ("rehearsal_ok", "✅ 自证通过", "❌"),
+        ("cannot_judge", "❌", "✅ 自证通过"),
+    ])
+    def test_rehearse_conclusion_line_matches_the_status(self, capsys, status, must_contain, must_not_contain):
+        """M5（v0.45.308 独立审查）：人读结论行若把判定逻辑反过来写，会对 `cannot_judge`
+        打印「✅ 自证通过」——把失败渲染成了成功，比不打印更危险。"""
+        fwd._print_human({"mode": "rehearse", "status": status, "since": "2026-09-09", "before": "2026-09-16",
+                          "seed_commit": "abcdef1234", "seed_last_run_date": "2026-09-08", "n_dates": 5,
+                          "reason": "x", "selfproof": {"real_entries": 5, "reproduced": 5, "decision_reproduced": 5}})
+        out = capsys.readouterr().out
+        assert must_contain in out
+        assert must_not_contain not in out
+
+    def test_build_seed_passes_the_registered_window_start(self, tmp_path, monkeypatch):
+        """M6（v0.45.308 独立审查）：`--build-seed` 是一次性且拒绝覆盖的——传错窗口起点会冻结出
+        一份错种子且无法重建，必须确认传给 `build_seed_from_git` 的就是 `FORWARD_START`，
+        不是随便一个位置参数。"""
+        seen = []
+        monkeypatch.setattr(fwd, "_seed_dir", lambda *a, **k: tmp_path / "frozen")
+        monkeypatch.setattr(fwd, "build_seed_from_git",
+                            lambda since, *a, **k: (seen.append(since) or _make_seed(),
+                                                    {"schema": 1, "window_start": since,
+                                                     "seed_last_run_date": "2026-09-15",
+                                                     "source": {"commit": "a" * 40}, "files": {}}))
+        fwd.main(["--build-seed"])
+        assert seen == [fwd.FORWARD_START]
+
 
 # ── 18. 盲化：出结论之前，前瞻结果里不许有任何效应量（v0.45.300）───────────────────────
 #
@@ -1028,8 +1310,11 @@ class TestCli:
 # `decide()` **之前**就把 `adjusted_trades`（A/B 已实现盈亏之和）塞进了返回字典——`--json`
 # 或任何直接调用 `run()` 的人（最可能是某个为「看看状态」顺手打印整个结果的 agent 会话）
 # 会在检视点之前拿到它。而它泄漏的是实质内容：平仓盈亏 = size_usd × net_pct 与仓位严格成
-# 正比，门只把新仓乘以 0.5、不动方向和出场，所以 B 在每笔被调整单上的盈亏恒为 A 的一半，
-# `pnl_sum_b − pnl_sum_a` 就是 −½·A 的已平仓盈亏——这部分效应的方向与大小。
+# 正比，门只把新仓乘以 0.5、不动方向和出场，所以门**直接**调整的那一笔上 B 盈亏约为 A 的一半，
+# `pnl_sum_b − pnl_sum_a` 就是这部分效应的方向与大小（v0.45.308 更正：不是「恒为一半」——
+# 一旦现金基数因更早一笔被调整过的仓位而分叉，之后「正常」仓位的盈亏也会有残余差异并被
+# `_adjusted_trades_summary` 一并计入，比值不再精确是 1:2；下面夹具只有 1 笔调整、无更早分叉，
+# 该场景下确实约为一半）。
 
 _G_DATES = ["2026-09-01", "2026-09-16"]
 _G_SINCE, _G_BEFORE = "2026-09-01", "2026-09-17"
@@ -1085,6 +1370,7 @@ class TestBlindingBeforeTheLook:
         assert "adjusted_trades" not in res, f"未出结论就带出了 adjusted_trades：{res['adjusted_trades']}"
         assert not (_EFFECT_KEYS & set(_all_keys(res)))
         assert not (_EFFECT_KEYS & set(_all_keys(json.loads(json.dumps(res)))))
+        _assert_no_unexpected_top_level_keys(res)
 
     def test_cannot_judge_result_carries_no_effect(self, pp, tmp_path, monkeypatch):
         """自证不过的结果本来就在算周度差之前返回；钉住它，免得以后调整顺序时把这条路径漏成新出口。"""
@@ -1094,6 +1380,7 @@ class TestBlindingBeforeTheLook:
         res = _eval_gate_world(tmp_path / "sb")
         assert res["status"] == "cannot_judge"
         assert not (_EFFECT_KEYS & set(_all_keys(res)))
+        _assert_no_unexpected_top_level_keys(res)
 
     def test_json_cli_output_has_no_effect_keys_before_the_look(self, pp, tmp_path, monkeypatch, capsys):
         """泄漏的现实出口就是 `--json`：把真实 `evaluate()` 的结果经 `main(["--json"])` 打出来再查。"""
@@ -1103,6 +1390,7 @@ class TestBlindingBeforeTheLook:
         assert fwd.main(["--json"]) == 1  # not_ready
         payload = json.loads(capsys.readouterr().out)
         assert not (_EFFECT_KEYS & set(_all_keys(payload)))
+        _assert_no_unexpected_top_level_keys(payload)
 
     @pytest.mark.parametrize("status", ["confirmed", "not_confirmed"])
     def test_verdict_results_still_carry_adjusted_trades_and_still_print(

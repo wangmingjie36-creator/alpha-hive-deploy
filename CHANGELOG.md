@@ -5,7 +5,39 @@
 
 ---
 
-## [0.45.308] — 2026-09-22 — 占位（进行中：独立审查 F&G 前瞻检验 v0.45.297/300——修 GIT_DIR 炸弹、SeedError 契约逃逸、崩溃退出码、默认门开关钉子、失败文案、CHANGELOG 三处不实描述；补 15 个存活变异的回归测试）
+## [0.45.308] — 2026-09-22 — Fixed：独立审查 F&G 前瞻检验 v0.45.297/300 后续——GIT_DIR 炸弹、`SeedError` 契约逃逸（含 BOM）、崩溃退出码、默认门开关无守卫、失败文案指错方向；Changed：盲化断言由键名黑名单改白名单
+
+**来源**：两个独立审查 agent（一个盯实现+种子，一个盯测试与文档事实断言）+ 我自己的运行时实测，把 v0.45.297/300 当别人写的代码重审。两个 agent 都没有 Bash，产出的是静态推演，我逐条用真实运行复现或推翻，只对**实测确认**的问题动手，本条只记这些。
+
+**GIT_DIR 炸弹（最重的一条，已实测复现又实测修复）**
+`_git_repo`（合成 git 仓库的测试夹具）与脚本自己的 `_git()` 此前都直接继承 `os.environ`——若从 pre-commit/pre-push 钩子或 `git rebase -x` 里被拉起（继承了 `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`/`GIT_COMMON_DIR`），每条 `git -C <repo>` 命令的 `-C` 会被这些变量盖过，实际打到那个钩子的真仓库上。本仓另外 4 个造合成 git 仓库的测试文件（`test_github_tool_status.py` 等）早防了这一点，本文件此前没有。
+**实测**：一次性 `git clone --local` 出一份副本，带 `GIT_DIR=<副本>/.git` 跑 `TestBuildSeedFromGit`——副本的提交数从 1284 涨到 **1316**（多出 32 个垃圾提交 `c0`/`c1`）；不带 `GIT_DIR` 跑，一个提交都不多。修法：新增 `_clean_git_env()`/`_synthetic_git_env()`，剥掉四个变量后再传给 `subprocess.run`。回归测试用 spy 直接核对 `env=` 参数不含这四个键（不重跑昂贵的真实克隆）。
+
+**`SeedError` 契约逃逸**：畸形但「校验和对得上」的种子内容会在异常处理器自己的错误信息构造里（比如 `r.get('ticker')`）撞出别的异常类型，逃出「任何不符抛 `SeedError`」的契约——实测 5 种输入全部逃逸：`positions.jsonl`/`closed_trades.jsonl` 行是 JSON 列表或 `null`（`AttributeError`）、非法 UTF-8（`UnicodeDecodeError`）、种子清单是 JSON 列表（`AttributeError`）。
+另实测一处更隐蔽的：带 UTF-8 BOM 的 `meta.json`——校验器 `json.loads(bytes)` 会自动探测并剥掉 BOM 而放行，但消费者 `paper_portfolio._load_meta` 用 `read_text` 再 `json.loads(str)`，BOM 留在字符串里会崩溃，「校验过了、重放崩」。
+修法：`_jsonl_rows` 统一做 UTF-8 解码+逐行 JSON 对象校验；`_validate_seed_state` 的 `meta.json` 解析改成与消费者一致的解码路径（`.decode("utf-8")` 再 `json.loads`）；`load_seed` 对清单加 `isinstance(dict)` 检查。7 条回归测试（参数化）。
+
+**崩溃退出码 = 1，与「未就绪（正常）」同码**：实测把库指向一个非法文件，`main()` 未捕获异常时退出码是 1，调用方无法区分「正常等待」与「崩了」。修法：`main()` 包一层 try/except，未预见的崩溃统一报 3 并打到 stderr。
+
+**默认门开关没有任何守卫**：A 定义为 `run_replay({}, ...)`——不覆盖任何键，隐含假设生产默认 `fg_exposure_gate.enabled=False`，此前没有测试钉住这个假设。若它被打破（比如已经有人把默认改成 True 却没退役本脚本），A 会悄悄变成跟 B 同一回事，ΔNAV≈0 会被误读成「门没有效应」而不是「A/B 的定义已经重合」——是静默失效。修法：`evaluate()` 核对 A 实际重放用到的 config 快照（`run_replay` 返回值自带），破了就报 `cannot_judge`，不静默算出一个没意义的数。
+
+**失败文案指错方向**：旧文案只列了「评分链/组合层配置被改动」，但重放读的是**冻结种子**，评分链变动本身影响不到 A 的重放——真正会让这里变红的原因更窄也更具体：种子是否对应窗口起点、历史 K 线是否被回溯修订（拆股/数据源修订）、`pheromone.db` 的 `signal_archive` 是否被回填/覆盖、成本模型（`trading_costs`）或组合层参数是否被改动；决策层也错时才轮到评分链/入场规则，外加「生产某个窗口内日期未被处理（漏跑）」。
+
+**盲化断言由键名黑名单改白名单**：`_EFFECT_KEYS` 只堵得住「叫这几个名字」的效应量键，换个名字（比如把 `adjusted_trades` 换成 `adj_summary` 再无条件写进返回字典）照样能泄漏而不被抓到——独立审查推演的 15 个变异里就有这一个，真跑确认存活。新增 `_NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS` 白名单，逐个 early-return 分支核对得出，任何超出的顶层键判定为可疑效应量，不管它叫什么名字。
+
+**「事后」范围声明**：以上均属实现/测试层面的缺陷修复与加固，**未动**预注册协议本身——窗口、变体 A/B、统计量、检视点（15/30）、α、`SELFPROOF_MIN_RATE=0.95`、四元组键逐字未变；失败文案与盲化白名单只让「该藏住效应量的地方更藏得住、该报错的地方更报得对」，不改变任何判定结论。文件头就地标注「二次检查 v0.45.308」并订正两处此前的不精确描述（见下）。
+
+**订正两处此前（v0.45.297/300）的不实描述**（独立审查逐条核对机制后发现，实测确认）：
+1. 「B 在每笔被调整单上的盈亏恒为 A 的一半」不精确：门直接调整的那一笔上确实约为一半（成本模型对名义本金的百分比与仓位无关，`pnl=size×net_pct` 严格成正比）；但一旦 A/B 因更早一笔被调整过的仓位而现金基数分叉，之后「正常」仓位的盈亏也会有残余差异并被 `_adjusted_trades_summary` 一并计入，比值不再精确是 1:2。方向与量级仍指向效应，只是不精确。
+2. 「`equity_curve.jsonl` 只写不读」不精确：`run_for_date` 会先读入已有行再去重追加重写（避免同日重跑产生重复行），只是**不参与任何开仓/出场决策**。不播种它的理由不变。
+
+**顺带发现并修复（自己写的测试自己踩了一次坑）**：给 F4（默认门开关守卫）和 M1（rehearse 判定层）两条新测试用 `monkeypatch.setitem(_pp.CONFIG["fg_exposure_gate"], "enabled", True)` 这种嵌套 setitem 时，`run_replay` 的 `finally` 是 `CONFIG.clear(); CONFIG.update(_orig_config)`——把 `CONFIG["fg_exposure_gate"]` **整体替换**成另一个 dict 对象，不是原地改值。嵌套 setitem 记的是旧对象的引用，teardown 时改的是那个已经被换掉、没人再引用的旧对象，真正生效的 CONFIG 永久卡在被改的值，污染这个文件里后面所有测试。实测：`test_default_disabled_does_not_trip_the_guard` 单独跑绿、跟在前一条后面跑就红（外加 12 条其它测试连带变红）。修法：改在**顶层键**上 setitem（`monkeypatch.setitem(_pp.CONFIG, "fg_exposure_gate", {**_pp.CONFIG["fg_exposure_gate"], "enabled": True})`），顶层 `CONFIG` 对象本身从不被换引用，teardown 才真的复原。两处已修。
+
+**验证**：测试 103 → **129**（26 条新增，覆盖独立审查静态推演的全部 15 个"存活"变异 + GIT_DIR 修复 + F5/F6/F4 四类实现缺陷）。
+- **15 个存活变异真跑全部转为杀死**（不带 `-x`，逐个还原并核对 sha256）：`rehearse` 误用决策层率判定、B 漏播现金、`_git` 不检查退出码、决策层不分方向、`rehearse` 结论行文字反转、`--build-seed` 窗口参数无校验、键名黑名单盲区、持仓校验只查 `size_usd`、`last_run_date` 非字符串时崩溃、提交 `meta.json` 不可解析时崩溃、清单缺 sha256 项时放行、播种碰撞检查漏 `equity_curve.jsonl`、自证阈值边界 `<`/`<=`、分层文案边界 `>=`/`>`、窗口日期上界。
+- **原有 30 + 8 个变异重跑仍 38/38 全杀**（回归确认未破坏 v0.45.297/300 已有的保护；连同本条新增的 15 个，累计 53/53）。
+- **真实前瞻窗口 09-16~09-21 重新核对**：`run()` 结果 `not_ready`，自证 8/8=100%，返回字典键与白名单精确匹配；三个真实历史窗口的 `--rehearse` 仍全部 `rehearsal_ok`（5/5、16/16、8/8）。
+- 整套 5352 通过、1 失败为已知的 `TestCoverageHorizon`（基线本来就红）；ruff 全绿。
 
 ## [0.45.307] — 2026-09-22 — 占位（进行中：data_backup/ 二次检查（2026-09-21）静默失败修复——git add 返回码未检查、密钥扫描缺失守卫、密钥扫描误报、异常误报为密钥命中、连续性体检无上线日下限、状态目录白名单跳过不记录）
 
