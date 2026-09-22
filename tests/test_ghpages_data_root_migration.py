@@ -415,6 +415,15 @@ class TestResolveGhPagesParentSingleBranchClone:
             ["git", "clone", "-q", "--single-branch", "--branch", "main", str(bare), str(clone)],
             check=True, capture_output=True,
         )
+        # `commit_and_push_gh_pages` 走 `git commit-tree`（plumbing 命令），同
+        # `_init_repo_with_origin` 里 `repo` 的既有约定一样，必须显式配置本地
+        # 身份——不能依赖 git 从系统用户名/主机名猜身份这条隐式回落路径：
+        # macOS 的 Apple Git 会静默猜出一个可用身份，但 CI（Ubuntu 跑者，GECOS
+        # 全名字段常年为空）猜出的姓名部分是空字符串，新版 git 对此硬拒绝
+        # （`fatal: empty ident name ... not allowed`），导致本条测试只在
+        # 本机能过、CI 上必现失败——这不是环境噪音，是测试自己漏配了身份。
+        _git("config", "user.email", "single-branch-clone@test.com", cwd=clone)
+        _git("config", "user.name", "single-branch-clone", cwd=clone)
         # 前置条件：这确实是个 single-branch 克隆——默认 fetch refspec 只认 main。
         refspec = _git("config", "--get", "remote.origin.fetch", cwd=clone)
         assert refspec == "+refs/heads/main:refs/remotes/origin/main", (
