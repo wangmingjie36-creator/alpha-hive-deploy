@@ -37,6 +37,14 @@ run()` 的 `status_file` 参数）每次调用**整份覆盖**，只反映"最�
 两者都是"过去 N 个交易日是否每天都发生了某件事"的同一形状，逻辑没有理由
 抄两份（项目 CLAUDE.md「先用装好的工具，再手搓」）。
 
+上线日下限（v0.45.307 修，二次检查发现）：`assess()` 默认窗口（不传 `--since`
+时）起点取 max(days 个交易日前, 历史日志里最早一条记录的日期)——本工具
+09-18 才首次接入生产，此前压根没有这套备份系统。不设这个下限，默认 30 个
+交易日的窗口会在上线后约一个月里，天天把"系统还不存在"的那些日子也算进
+覆盖率分母，警报疲劳且掩盖真正的降级（09-18 首跑当天的真实日志就报过
+"过去 30 个交易日只成功了 1 次（覆盖率 3%）"）。显式传 `--since` 时不做
+这个收紧——那是调用方主动选择的窗口起点。
+
 用法
 ----
     /usr/local/bin/python3 backup_continuity.py                 # 近 30 个交易日
@@ -140,12 +148,24 @@ def assess(history_path: Optional[Path] = None,
 
     history_path = Path(history_path) if history_path is not None else _history_file()
     end_date = dt.date.fromisoformat(end) if end else dt.date.today()
+    healthy_days, last_stage = read_history(history_path)
+
     if since:
         expected = trading_days_between(dt.date.fromisoformat(since), end_date)
     else:
         expected = recent_trading_days(days, end_date)
-
-    healthy_days, last_stage = read_history(history_path)
+        # 上线日下限（v0.45.307 修，二次检查发现）：默认窗口起点取
+        # max(days 个交易日前, 历史日志里最早一条记录的日期)——否则上线后
+        # 约一个月，默认 30 个交易日的窗口会把"系统还不存在"的那些日子也
+        # 算进覆盖率分母，天天误报"降级"（09-18 首跑当天的真实日志就报过
+        # "过去 30 个交易日只成功了 1 次（覆盖率 3%）…完全无成功备份的周
+        # W32–W37"——这些周根本没有备份系统，不是真的降级）。
+        # `since` 是调用方显式指定的窗口起点，尊重这个主动选择，不做下限收紧
+        # （比如人工想连上线前一起看，允许）。`last_stage` 覆盖历史里出现过
+        # 的**所有**日期（不论成功失败），取其最小值即"第一次真的跑过"的日子。
+        if last_stage:
+            launch_date = min(last_stage.keys())
+            expected = [d for d in expected if d.isoformat() >= launch_date]
 
     exp_iso = [d.isoformat() for d in expected]
     hit = [d for d in exp_iso if d in healthy_days]
