@@ -8,3 +8,4 @@
 {"date": "2026-09-16", "cash": 109160.0, "open_premium_at_risk": 9160.0, "unrealized": -87.5, "nav": 99912.5, "positions": 2, "stale_positions": 0, "closed_today": 0, "realized_pnl_today": 0, "opened_today": 0}
 {"date": "2026-09-17", "cash": 109160.0, "open_premium_at_risk": 9160.0, "unrealized": 472.5, "nav": 100472.5, "positions": 2, "stale_positions": 0, "closed_today": 0, "realized_pnl_today": 0, "opened_today": 0}
 {"date": "2026-09-18", "cash": 109160.0, "open_premium_at_risk": 9160.0, "unrealized": 430.0, "nav": 100430.0, "positions": 2, "stale_positions": 0, "closed_today": 0, "realized_pnl_today": 0, "opened_today": 0}
+{"date": "2026-09-22", "cash": 99220.0, "open_premium_at_risk": 19100.0, "unrealized": 712.5, "nav": 100712.5, "positions": 4, "stale_positions": 0, "closed_today": 0, "realized_pnl_today": 0, "opened_today": 2}

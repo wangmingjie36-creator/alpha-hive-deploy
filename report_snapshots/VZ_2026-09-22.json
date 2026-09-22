@@ -1,0 +1,44 @@
+{
+  "ticker": "VZ",
+  "date": "2026-09-22",
+  "composite_score": 6.34,
+  "direction": "bearish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 46.45,
+  "agent_votes": {
+    "BuzzBeeWhisper": 4.26,
+    "CodeExecutorAgent": 7.0,
+    "ChronosBeeHorizon": 6.12,
+    "OracleBeeEcho": 10.0,
+    "ScoutBeeNova": 4.89,
+    "RivalBeeVanguard": 5.99,
+    "GuardBeeSentinel": 6.32,
+    "BearBeeContrarian": 2.82,
+    "QueenDistiller": 6.34
+  },
+  "agent_votes_source": "agent_details",
+  "weights_used": {
+    "signal": 0.0,
+    "catalyst": 0.332,
+    "sentiment": 0.325,
+    "odds": 0.343,
+    "risk_adj": 0.0
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.483,
+    "signal": 0.241,
+    "catalyst": 0.897,
+    "sentiment": 0.276,
+    "odds": 0.931,
+    "risk_adj": 0.759
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-22T14:45:50.751956"
+}
