@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.304] — 2026-09-22 — 占位（进行中：P2/v0.45.279 二次检查后续——补 `consensus_census` 接线测试 + `get_bullish_agents_detail` 异常路径测试，更正 Rival 数值语义 docstring）
+
 ## [0.45.303] — 2026-09-21 — Fixed：`tests/conftest.py::_isolate_paper_portfolio_state` 对「生产真身」的判定依赖导入顺序——单条/子集跑会误报「写穿生产」，而那种进程里守卫盯的是沙箱自己（真写穿生产它也看不见）；Added：2×2 子进程回归矩阵
 
 **现象**（配对对照实测，不是推理）：全新进程单独跑一条会写 `CLOSED_FILE` 的既有老测试
