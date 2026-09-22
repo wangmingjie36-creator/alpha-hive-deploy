@@ -5,7 +5,32 @@
 
 ---
 
-## [0.45.312] — 2026-09-22 — 占位（进行中：PR #8 CI 修复——`test_ghpages_data_root_migration.py` 的 single-branch clone 测试缺显式 git 身份，本机隐式回落蒙混过关，CI（Ubuntu 跑者）必现失败）
+## [0.45.312] — 2026-09-22 — Fixed：PR #8 CI 失败——`test_ghpages_data_root_migration.py` 的 single-branch clone 测试缺显式 git 身份，本机（macOS）隐式回落蒙混过关，CI（Ubuntu 跑者）必现失败，main 自身最近 5 次 CI 已经因此全红
+
+`TestResolveGhPagesParentSingleBranchClone._make_single_branch_clone()` 建的 `clone`
+仓库没配 `user.email`/`user.name`。`report_deployer.commit_and_push_gh_pages()` 走
+`git commit-tree`（plumbing 命令，需要身份），无显式配置时 git 会尝试从系统用户名/
+主机名隐式猜一个——macOS 的 Apple Git（2.50.1）静默猜出一个可用身份，但 CI（Ubuntu
+跑者，2.55.0，GECOS 全名字段常年为空）猜出的姓名部分是空字符串，新版 git 对此硬
+拒绝（`fatal: empty ident name ... not allowed`），导致本条测试只在本机能过、CI
+上必现失败（`gh run list --branch main` 实测最近 5 次 CI 全部因此失败——**不是本
+PR 引入的，main 自身已经红了**，本 PR 的 CI 只是继承了这个既有问题）。
+
+同文件其余测试用的 `_init_repo_with_origin()` 一直显式配置身份（`user.email
+test@test.com` / `user.name test`），唯独 `_make_single_branch_clone()` 漏配——
+补齐同一套约定，给 `clone` 显式 `git config user.email/user.name`。
+
+**验证**：用 `git config user.useConfigOnly true` 强制禁用隐式猜测（本地无法直接
+复现 CI 的"猜出邮箱但姓名为空"这个具体形态，但足以验证同一因果链条）——未修复的
+`clone`（无显式身份）在此设置下确实以 `fatal: no email was given and
+auto-detection is disabled` 失败；补上显式身份后，同样设置下 `commit-tree` 成功。
+`tests/test_ghpages_data_root_migration.py` 全文件 15 passed。
+
+**未处理**：另两个失败与本 PR/本次修复均无关——① `TestCoverageHorizon::
+test_no_table_falls_below_its_horizon_threshold`（经济日历 CPI/NFP 覆盖不足，需要
+去 BLS 官网抄取真实已发布的 2027 日程写进 `economic_calendar.py`，不编数据，留给
+人工核对真实日期）；② Vercel 部署失败（`alpha-hive-web`，完全独立的 Next.js 前端
+项目，本 PR 未触碰该目录任何文件）。
 
 ## [0.45.311] — 2026-09-22 — Changed/Fixed：补齐 v0.45.310「未处理的发现」5 条——核心白名单/回落逻辑去重、`chart.umd.min.js` 全仓库单一真相源、`resolve_gh_pages_parent` 的 fetch/ls-remote 加超时、`_sync_ghpages` 逐文件容错
 
