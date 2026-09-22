@@ -57,9 +57,9 @@ docstring 自称要消灭的"两条路径各写一份、改一处漏一处"那�
 **验证**：`tests/test_ghpages_data_root_migration.py` 15 passed；ruff 全过；全套回归（`--deselect` 掉
 已知 flaky 的 `TestCoverageHorizon`）5264 passed / 0 failure。
 
-### 未处理的发现（8 项发现中的 6 项，记录在案）
+### 未处理的发现（10 项发现中的 5 项，记录在案）
 
-`/code-review high` 还报出 6 条 reuse/altitude/efficiency 类的清理型建议，均属真实但非阻断性，本次
+`/code-review high` 还报出 5 条 reuse/altitude/efficiency 类的清理型建议，均属真实但非阻断性，本次
 未动：① `_CORE_FILES`/`_CORE` 里那 5 个非 `CODE_SHIPPED_STATIC_ASSETS` 的核心文件名仍在两个文件里各写
 一份；② 随代码资源的回落应用块（append + 缺失告警）在两个调用点几乎逐字重复；③ `chart.umd.min.js` 仍
 独立硬编码在 `report_web_assets.py`/`index.html`/`templates/dashboard.html` 三处，`CODE_SHIPPED_STATIC_ASSETS`
