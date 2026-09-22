@@ -16,6 +16,10 @@ _log = get_logger("report_web_assets")
 def write_pwa_files(reporter):
     """生成 manifest.json + sw.js"""
     import json as _json2
+    # v0.45.311：Chart.js 自托管文件名改引用 `report_deployer.CHART_JS_FILENAME`
+    # ——此前这里独立硬编码一份字面量，与部署白名单/`templates/dashboard.html`
+    # 各写各的，见该常量定义处的注释。
+    from report_deployer import CHART_JS_FILENAME as _chart_js
 
     # ── manifest.json ──
     icon_svg = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpolygon points='50,5 93,28 93,72 50,95 7,72 7,28' fill='%23F4A532'/%3E%3Cg transform='translate(26,24) scale(3)'%3E%3Crect x='6' y='1' width='4' height='1' fill='%23333'/%3E%3Crect x='4' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='10' y='2' width='2' height='1' fill='%23333'/%3E%3Crect x='5' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='10' y='3' width='1' height='1' fill='%23333'/%3E%3Crect x='3' y='4' width='1' height='1' fill='%23805215'/%3E%3Crect x='12' y='4' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='4' width='8' height='1' fill='%23fff'/%3E%3Crect x='3' y='5' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='5' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='5' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='6' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='6' width='8' height='1' fill='%23fff'/%3E%3Crect x='12' y='6' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='7' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='7' width='8' height='1' fill='%23333'/%3E%3Crect x='12' y='7' width='1' height='1' fill='%23805215'/%3E%3Crect x='3' y='8' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='8' width='8' height='1' fill='%23fff'/%3E%3Crect x='12' y='8' width='1' height='1' fill='%23805215'/%3E%3Crect x='4' y='9' width='8' height='1' fill='%23333'/%3E%3Crect x='5' y='10' width='6' height='1' fill='%23fff'/%3E%3Crect x='6' y='11' width='4' height='1' fill='%23333'/%3E%3Crect x='1' y='5' width='2' height='1' fill='%23fff' opacity='.65'/%3E%3Crect x='0' y='6' width='3' height='1' fill='%23fff' opacity='.45'/%3E%3Crect x='1' y='7' width='2' height='1' fill='%23fff' opacity='.3'/%3E%3Crect x='13' y='5' width='2' height='1' fill='%23fff' opacity='.65'/%3E%3Crect x='13' y='6' width='3' height='1' fill='%23fff' opacity='.45'/%3E%3Crect x='13' y='7' width='2' height='1' fill='%23fff' opacity='.3'/%3E%3Crect x='6' y='12' width='1' height='2' fill='%23805215' opacity='.5'/%3E%3Crect x='9' y='12' width='1' height='2' fill='%23805215' opacity='.5'/%3E%3C/g%3E%3C/svg%3E"
@@ -41,7 +45,7 @@ def write_pwa_files(reporter):
     sw_content = f"""// Alpha Hive Service Worker - {_sw_ts}
 var CACHE_NAME='{cache_name}';
 var PRECACHE_URLS=['./', 'index.html', 'manifest.json',
-  'chart.umd.min.js'];  // v0.41.0: Chart.js 自托管（jsdelivr 大陆不可达）
+  {_chart_js!r}];  // v0.41.0: Chart.js 自托管（jsdelivr 大陆不可达）
 
 self.addEventListener('install', function(e){{
   self.skipWaiting();
