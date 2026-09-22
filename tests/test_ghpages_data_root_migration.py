@@ -559,3 +559,92 @@ class TestSyncGhpagesSharesAssetFallback:
         assert not (clone / ".nojekyll").exists(), (
             "还原旧行为后这条断言应该失败才对——说明修复其实不依赖 "
             "resolve_code_shipped_asset_sources，上面的正向测试没有对照价值")
+
+
+class TestEmptyDataRootDoesNotWipeGhPages:
+    """2026-09-22 code-review（对 v0.45.305 的高强度复检）发现的严重回归，
+    v0.45.310 已修：「无静态文件可部署」的守卫此前在随代码发布的静态资源
+    并入 `files` **之后**才判——`.nojekyll`/`chart.umd.min.js` 几乎总能在
+    git 仓库根找到（它们随仓库提交），data_root 整个空掉（配置错误/阶段 5
+    迁移中/上游扫描没写出任何东西）时 `files` 也不会是空的，guard 形同虚设，
+    会把 gh-pages 整棵重建成只剩这两个文件，等于清空线上网站。
+
+    两条独立部署路径（`deploy_static_to_ghpages`/`_sync_ghpages`）各验一次：
+    先正常部署一次建立"线上已有真实内容"的前置状态，再清空 data_root 重跑，
+    断言线上内容原样保留、没有被两个静态资源替换掉。
+    """
+
+    def test_deploy_static_to_ghpages_skips_when_data_root_empty(self, tmp_path, monkeypatch):
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_empty")
+        (repo / ".nojekyll").write_text("")
+        (repo / "chart.umd.min.js").write_text("console.log('chart');")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "ship static assets"], cwd=str(repo), check=True)
+
+        reporter = _make_reporter(monkeypatch, tmp_path, repo)
+
+        # 先部署一次正常内容，建立"线上已有真实网站"的前置状态。
+        (data_root / "index.html").write_text("<html>real site</html>")
+        (data_root / "dashboard-data.json").write_text('{"_generated_at": "t1"}')
+        with patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        clone_before = tmp_path / "verify_before"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_before)],
+                        check=True, capture_output=True)
+        assert (clone_before / "index.html").read_text() == "<html>real site</html>"
+
+        # data_root 整个清空（模拟配置错误/扫描失败）；仓库根仍有那两个静态资源。
+        for f in os.listdir(data_root):
+            os.remove(data_root / f)
+        assert list(os.listdir(data_root)) == [], "前置条件不成立：data_root 应该已被清空"
+
+        with patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        clone_after = tmp_path / "verify_after"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_after)],
+                        check=True, capture_output=True)
+        assert (clone_after / "index.html").read_text() == "<html>real site</html>", (
+            "data_root 清空后必须跳过部署、保留线上原内容——不能把 gh-pages 整棵"
+            "重建成只剩 .nojekyll/chart.umd.min.js 两个文件")
+        assert (clone_after / "dashboard-data.json").exists()
+
+    def test_sync_ghpages_skips_when_data_root_empty(self, tmp_path, monkeypatch):
+        import generate_ml_report as gmr
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_empty_sync")
+        (repo / ".nojekyll").write_text("")
+        (repo / "chart.umd.min.js").write_text("console.log('chart');")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "ship static assets"], cwd=str(repo), check=True)
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(repo))
+
+        (data_root / "index.html").write_text("<html>real ml site</html>")
+        gmr._sync_ghpages(["AAPL"], successful_count=1)
+
+        clone_before = tmp_path / "verify_before_sync"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_before)],
+                        check=True, capture_output=True)
+        assert (clone_before / "index.html").read_text() == "<html>real ml site</html>"
+
+        for f in os.listdir(data_root):
+            os.remove(data_root / f)
+        assert list(os.listdir(data_root)) == [], "前置条件不成立：data_root 应该已被清空"
+
+        gmr._sync_ghpages(["AAPL"], successful_count=1)
+
+        clone_after = tmp_path / "verify_after_sync"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_after)],
+                        check=True, capture_output=True)
+        assert (clone_after / "index.html").read_text() == "<html>real ml site</html>", (
+            "data_root 清空后必须跳过同步、保留线上原内容——不能把 gh-pages 整棵"
+            "重建成只剩 .nojekyll/chart.umd.min.js 两个文件")
