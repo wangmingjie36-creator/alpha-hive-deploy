@@ -3004,6 +3004,13 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     `os.listdir` 找报告文件）自本版起是两个独立变量——今天仍可能同目录
     （两者都未被 env 覆盖时兜底到同一个 `__file__` 派生仓库根），阶段 5
     之后 `data_root` 搬到 `~/alpha-hive-data`、`repo` 留在原检出位置。
+
+    随代码发布的静态资源（`.nojekyll`/`chart.umd.min.js`）与
+    `report_deployer.deploy_static_to_ghpages` 共用
+    `CODE_SHIPPED_STATIC_ASSETS`/`CORE_STATIC_FILES`/`apply_code_shipped_fallback`
+    ——data_root 里找不到时退回 `repo` 读（v0.45.305：此前这里独立维护一份
+    白名单、只看 data_root；v0.45.311：核心白名单与回落逻辑也收进
+    `report_deployer` 共用，不再各写各的，见那几个定义处的注释）。
     """
     import subprocess
     import os
@@ -3011,11 +3018,16 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     if successful_count == 0:
         return
     # `PATHS` 已在本文件顶部模块级导入
+    from report_deployer import (
+        CODE_SHIPPED_STATIC_ASSETS as _CODE_SHIPPED_ASSETS,
+        CORE_STATIC_FILES as _CORE_STATIC_FILES,
+        apply_code_shipped_fallback as _apply_code_shipped_fallback,
+    )
     data_root = str(PATHS.home)
     repo = str(PATHS.git_repo_root)
     date_str = pdt_today()
     _ml_pat = _re.compile(r"^alpha-hive-[\w.-]+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$")
-    _CORE = {"index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml", ".nojekyll", "chart.umd.min.js"}  # v0.41.0
+    _CORE = _CORE_STATIC_FILES | _CODE_SHIPPED_ASSETS
     try:
         from is_trading_day import filename_is_nontrading_day as _fnt_dep
     except Exception:
@@ -3024,25 +3036,57 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     files = [f for f in os.listdir(data_root)
              if (f in _CORE or _ml_pat.match(f)
                  or (f.startswith("alpha-hive-daily-") and f.endswith((".json", ".md"))))
-             and not _fnt_dep(f)]  # 非交易日幽灵报告（周末/假日）不部署
+             # 非交易日幽灵报告（周末/假日）不部署；_CORE 文件（含
+             # CODE_SHIPPED_STATIC_ASSETS）无日期，永不被过滤——v0.45.310
+             # 修复：此前这里对 _CORE 也无差别套用日期过滤，与
+             # report_deployer.deploy_static_to_ghpages 的显式豁免不一致
+             # （那边 `if f not in _CORE_FILES and _fnt_dep(f): continue`），
+             # 今天两个资源都不含日期子串所以尚未触发，但已是潜伏的
+             # 「改一处漏一处」。
+             and (f in _CORE or not _fnt_dep(f))]
+    file_source = {f: data_root for f in files}
+    # ⚠️ v0.45.310 修复：见 report_deployer.deploy_static_to_ghpages 同名守卫的
+    # 注释——必须在随代码发布的静态资源并入之前判「无文件可部署」，否则
+    # data_root 整个空掉时 `files` 也不会是空的（.nojekyll/chart.umd.min.js
+    # 几乎总能在 repo 找到），guard 形同虚设，会把 gh-pages 整棵重建成只剩
+    # 这两个文件。
     if not files:
-        _log.warning("gh-pages 同步：无静态文件")
+        _log.warning("gh-pages 同步：无静态文件（数据根 %s 未发现任何报告文件）", data_root)
         return
+    # 随代码发布的静态资源：data_root 里没找到的，退回 git 仓库根读。
+    _apply_code_shipped_fallback(files, file_source, data_root, repo, "同步")
 
     idx = os.path.join(repo, ".git", "gh-pages-index")
     if os.path.exists(idx):
         os.remove(idx)
     env = os.environ.copy()
     env["GIT_INDEX_FILE"] = idx
-    try:
-        # hash-object 读 data_root 下的绝对路径（内容可能不在 repo 工作区内），
-        # index 里登记的路径名仍是裸文件名 f（发布出去的 gh-pages 树结构不变）。
-        for f in sorted(files):
+    # v0.45.311 修复：hash-object 逐文件容错，不再让整段 hash-object/commit/push
+    # 包在同一个大 try/except 里——此前单个文件（含随代码发布静态资源的仓库根
+    # 回落文件）hash 失败会让整次同步全部放弃，不像 report_deployer.
+    # deploy_static_to_ghpages 早就是逐文件容错。hash-object 读 file_source[f]
+    # 下的绝对路径（内容可能不在 repo 工作区内），index 里登记的路径名仍是
+    # 裸文件名 f（发布出去的 gh-pages 树结构不变，只是内容的物理来源可能是
+    # data_root 也可能是 repo）。批量用 --index-info 建 index，代替原来逐文件
+    # 一次 subprocess 的 --cacheinfo 调用。
+    cache_entries = []
+    for f in sorted(files):
+        try:
             blob = subprocess.check_output(
-                ["git", "hash-object", "-w", os.path.join(data_root, f)], cwd=repo
+                ["git", "hash-object", "-w", os.path.join(file_source[f], f)], cwd=repo
             ).decode().strip()
-            subprocess.run(["git", "update-index", "--add", "--cacheinfo",
-                            "100644", blob, f], env=env, cwd=repo, check=True)
+            cache_entries.append(f"100644 {blob}\t{f}")
+        except (subprocess.CalledProcessError, OSError) as _e_blob:
+            _log.warning("hash-object 失败 (%s): %s", f, _e_blob)
+    if not cache_entries:
+        _log.warning("gh-pages 同步：全部 %d 个文件 hash-object 均失败，无内容可提交", len(files))
+        if os.path.exists(idx):
+            os.remove(idx)
+        return
+    try:
+        _idx_input = "\n".join(cache_entries) + "\n"
+        subprocess.run(["git", "update-index", "--add", "--index-info"],
+                        input=_idx_input, env=env, cwd=repo, check=True, text=True)
         tree = subprocess.check_output(["git", "write-tree"], env=env, cwd=repo).decode().strip()
 
         def _msg_fn(n_changed: int) -> str:

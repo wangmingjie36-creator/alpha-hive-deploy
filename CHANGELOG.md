@@ -5,6 +5,375 @@
 
 ---
 
+## [0.45.311] — 2026-09-22 — Changed/Fixed：补齐 v0.45.310「未处理的发现」5 条——核心白名单/回落逻辑去重、`chart.umd.min.js` 全仓库单一真相源、`resolve_gh_pages_parent` 的 fetch/ls-remote 加超时、`_sync_ghpages` 逐文件容错
+
+用户要求把 v0.45.310 CHANGELOG「未处理的发现」一节记录的 5 条清理型建议也一并修掉。全部先出方案
+再动手，每条都补了回归测试（含变异检验），逐步验证后合并跑一次全套。
+
+### ①②（Changed）核心白名单 + 随代码资源回落逻辑不再各写各的
+
+`report_deployer.py` 新增 `CORE_STATIC_FILES`（`{"index.html", "dashboard-data.json", "manifest.json",
+"sw.js", "rss.xml"}`）与 `apply_code_shipped_fallback(files, file_source, data_root, repo,
+action_label)`。此前 `deploy_static_to_ghpages`/`_sync_ghpages` 各写一份内容相同的核心文件名集合，
+以及"把 `CODE_SHIPPED_STATIC_ASSETS` 的回落结果并入 `files`/算缺了什么/打 error 日志"这段 ~10 行逻辑；
+两条部署路径现在都改共用这两个定义，`action_label` 只用于日志文案区分"部署"/"同步"。纯提取，行为不变。
+
+### ③（Fixed）`chart.umd.min.js` 从三处硬编码收成全仓库唯一字面量
+
+复检发现实际只有两处独立硬编码（不是三处——仓库根 `index.html` 只是每日渲染产物的快照，真正的源头是
+`templates/dashboard.html`，`dashboard_renderer.py:3008` 用 Jinja2 渲染它生成每日 `index.html`）：
+`templates/dashboard.html:30` 的 `<script src="chart.umd.min.js">` 与 `report_web_assets.py:44` 的
+Service Worker 预缓存清单。新增 `report_deployer.CHART_JS_FILENAME = "chart.umd.min.js"`，
+`CODE_SHIPPED_STATIC_ASSETS` 改引用它；`templates/dashboard.html` 改成 Jinja 占位符
+`{{ chart_js_filename }}`，`dashboard_renderer.render_dashboard_html()` 渲染时传入这个变量；
+`report_web_assets.write_pwa_files()` 的预缓存清单也改引用同一常量。全仓库现在只剩一处字面量——
+Chart.js 升级到带版本号的新文件名时，改一处即可，不会再复现"部署清单里有、模板/SW 引用的却是旧
+名字"的那类问题。
+
+新增 `tests/test_chart_js_single_source_of_truth.py`（4 项）：正向验证 sw.js/渲染出的 `index.html`
+都跟着常量走，各配一条变异检验（把常量改名成哨兵值，断言下游产物跟着变，不跟着变就说明还在用自己
+那份硬编码副本）。
+
+### ④（Fixed）`resolve_gh_pages_parent` 的 `git fetch`/`git ls-remote` 补超时
+
+此前两个真正触网的 git 调用都不设超时——网络真的挂起（不是报错，是没反应）时会无限期阻塞，而本函数
+被 `commit_and_push_gh_pages` 包在最多 4 次的重试循环里调用，一次挂起会被放大成整条部署流水线长时间
+卡死。新增 `_run_git_network()` 辅助函数，两处调用都加 `timeout=_GH_PAGES_NETWORK_TIMEOUT`（20 秒），
+超时按"这次探测失败"处理，走原有降级路径（fetch 超时 → 落到 ls-remote；ls-remote 也超时 → 退回本地
+ref、`verified=False`），不引入新的返回形状。
+
+用一个只 accept 连接、从不回应任何字节的裸 TCP 监听器（`git://` 协议客户端连上后会一直阻塞等服务端
+发第一行 ref 广播）真实复现"网络挂起但不报错"的故障，验证设了短超时后函数确实在超时时限内返回；
+附变异对照（还原成不设超时的旧实现，确认真的会一直卡住）。
+
+### ⑤（Fixed）`_sync_ghpages` 改成逐文件容错，不再一个坏文件拖垮整次同步
+
+此前 `generate_ml_report.py::_sync_ghpages` 把整段 hash-object/commit/push 包在一个大
+`try/except` 里，任何一个文件（含随代码发布静态资源的仓库根回落文件）hash-object 失败会让整次同步
+全部放弃、不建任何提交——不像 `report_deployer.deploy_static_to_ghpages` 早就是逐文件容错。改成同样
+的写法：hash-object 逐个 `try/except`，失败的单个文件跳过 + 记警告，用 `--index-info` 批量建 index
+（顺带把逐文件一次 `update-index --cacheinfo` 调用改成一次批量调用，减少 subprocess 数量）。
+
+真实复现：mock 单个文件的 `git hash-object` 抛错，在改动前的原始 v0.45.310 源码上跑新的正向测试
+（`git show HEAD:generate_ml_report.py` 换出），确认真的复现"整次同步异常、gh-pages 分支压根没建
+出来"；换回修复版确认其它文件照常部署、只跳过坏的那个文件。
+
+### 验证
+
+`tests/test_ghpages_data_root_migration.py`（15→19 项）+ `tests/test_chart_js_single_source_of_truth.py`
+（新增 4 项）+ `tests/test_dashboard_contract.py`/`tests/test_dashboard_renderer.py`（确认 Jinja
+占位符改动没有破坏模板契约）共 40 项全绿；ruff 全过；全套回归（`--deselect` 掉已知 flaky 的
+`TestCoverageHorizon`）5274 passed / 0 failure。
+
+## [0.45.310] — 2026-09-22 — Fixed：`/code-review high` 复检 v0.45.305 发现的严重回归——「无静态文件可部署」守卫在随代码发布静态资源并入之后才判，data_root 整个空掉时会把 gh-pages 整棵重建成只剩两个文件，清空线上网站；顺带修两处轻量伴生问题
+
+用户要求对 v0.45.305 做二次检查（`/code-review high`），8 个 finder 角度 + 逐条独立核实后报出 10 条发现，
+其中头两条是**已用真实执行复现**的严重回归——本条即修复它们，另附两条顺手修的伴生问题；其余 6 条
+（reuse/altitude/efficiency 类的清理型建议）记录在案未动，理由见文末「未处理的发现」。
+
+### Fixed ①（严重，已复现）：`deploy_static_to_ghpages`/`_sync_ghpages` 的"无静态文件可部署"守卫被随代码
+发布的静态资源 fallback 绕过
+
+v0.45.305 引入 `CODE_SHIPPED_STATIC_ASSETS` 的 data_root→git_repo_root 回落逻辑时，把回落合并
+（`_repo_fallback` 并入 `files`）写在了 `if not files: return` 守卫**之前**——`.nojekyll`/`chart.umd.min.js`
+随仓库提交、git_repo_root 里几乎总能找到，于是即便 `data_root` 整个是空的（配置错误、阶段 5 数据根迁移
+过程中、上游扫描崩溃在写出任何文件之前），`files` 也不会是空的，守卫形同虚设。gh-pages 每次都是整棵
+重建（不是逐文件合并），于是会把线上网站——`index.html`、`dashboard-data.json`、全部历史报告——替换成
+只剩这两个静态文件。
+
+**复现方式**（本地裸仓库，未碰真实 GitHub）：先正常部署一次建立"线上已有真实内容"的前置状态，再清空
+`data_root`（仓库根仍有 `.nojekyll`/`chart.umd.min.js`）重跑——`deploy_static_to_ghpages` 与
+`_sync_ghpages` 均实测把 gh-pages 替换成只剩两个静态文件，`index.html` 消失。
+
+**修法**：把守卫挪到 `os.listdir(data_root)` 主循环结束之后、`resolve_code_shipped_asset_sources` 回落
+合并**之前**——只有 data_root 确实产出了至少一个真实报告文件，才继续往下走随代码资源回落这一步；
+data_root 为空则直接跳过本次部署/同步，保留线上原内容。两条独立部署路径（`report_deployer.py`/
+`generate_ml_report.py`）分别修。
+
+### Fixed ②（低优先级伴生问题）：`_sync_ghpages` 对 CODE_SHIPPED_STATIC_ASSETS 无差别套用非交易日过滤
+
+`deploy_static_to_ghpages` 显式豁免 `_CORE_FILES`（含 `CODE_SHIPPED_STATIC_ASSETS`）不受非交易日过滤
+影响（`if f not in _CORE_FILES and _fnt_dep(f): continue`），`_sync_ghpages` 此前对所有候选文件一视同仁
+套用 `not _fnt_dep(f)`，没有同等豁免。今天两个静态资源都不含日期子串所以从未真正触发，但这正是 v0.45.305
+docstring 自称要消灭的"两条路径各写一份、改一处漏一处"那类问题的潜伏形态——未来若 `CODE_SHIPPED_STATIC_ASSETS`
+加入带日期/版本号的文件名，`_sync_ghpages` 会在每个周末/假日静默漏掉它而 `deploy_static_to_ghpages` 不会。
+已补齐豁免逻辑对齐两条路径。
+
+### Fixed ③（观测性）：随代码资源缺失时只有 `_log.warning`，没有任何会被看到的信号
+
+`verify_cdn_deployment` 只查 `dashboard-data.json` 的时间戳，不查静态资源是否存在；本仓 Slack 通知精简
+规则本就不推送 warning 级事件——两处都没有静态资源缺失时的"谁会红"观测点，违反 CLAUDE.md
+「硬检查项：这个失败，下游怎么知道？」一节。两处升级为 `_log.error` + 🚨 前缀（与本文件既有的同类
+"需要人注意但不阻断"场景用同一套约定）。顺带把 `CODE_SHIPPED_STATIC_ASSETS - set(file_source)` 改成
+`- file_source.keys()`，去掉一次不必要的 O(n) 拷贝（两处）。
+
+### Added（`tests/test_ghpages_data_root_migration.py`，13→15 项）
+
+- `TestEmptyDataRootDoesNotWipeGhPages`（2 条）：`deploy_static_to_ghpages`/`_sync_ghpages` 各一条，先建立
+  "线上已有真实内容"前置状态，清空 data_root 重跑，断言线上内容原样保留。**变异检验**：用 `git show
+  HEAD:<file>` 换出改动前的 v0.45.305 源码真跑这两条新测试，确认按预期失败（且失败方式正是"gh-pages 被
+  替换成只剩两个静态文件"），再换回修复版确认转绿。
+
+**验证**：`tests/test_ghpages_data_root_migration.py` 15 passed；ruff 全过；全套回归（`--deselect` 掉
+已知 flaky 的 `TestCoverageHorizon`）5264 passed / 0 failure。
+
+### 未处理的发现（10 项发现中的 5 项，记录在案）
+
+`/code-review high` 还报出 5 条 reuse/altitude/efficiency 类的清理型建议，均属真实但非阻断性，本次
+未动：① `_CORE_FILES`/`_CORE` 里那 5 个非 `CODE_SHIPPED_STATIC_ASSETS` 的核心文件名仍在两个文件里各写
+一份；② 随代码资源的回落应用块（append + 缺失告警）在两个调用点几乎逐字重复；③ `chart.umd.min.js` 仍
+独立硬编码在 `report_web_assets.py`/`index.html`/`templates/dashboard.html` 三处，`CODE_SHIPPED_STATIC_ASSETS`
+只统一了"从哪个目录读"，没有统一"有哪些文件"这个更深的问题；④ `resolve_gh_pages_parent` 的 fetch 失败
+回落路径新增了一次 `git ls-remote` 网络调用，未设 `timeout=`，在 4 次重试循环里会翻倍阻塞时长；⑤
+`_sync_ghpages` 仍用一个大 `try/except` 包住整段 hash-object/commit/push，任何一个文件（含新增的仓库根
+回落文件）hash 失败会让整次同步全部放弃，不像 `deploy_static_to_ghpages` 逐文件容错。理由：均为存量
+设计权衡或需要跨模板文件的更大改动，超出本次"修复已复现回归"的范围，留待下次改动前处理。
+
+## [0.45.309] — 2026-09-22 — Removed：3 个写死已过期到期日、再也跑不通的一次性 NVDA 期权脚本（第 4 个经核实仍可运行，保留）
+
+### Removed
+
+| 文件 | 写死的到期日 | 为什么判定为死 |
+|---|---|---|
+| `check_0520_jun18.py` | 2026-06-18 | 第 15 行 `option_chain(exp)` 在顶层、不在 `try` 里，也没有动态取到期日 |
+| `check_friday_postearnings.py` | 2026-05-22 | 第 21 行同上 |
+| `check_intraday.py` | 2026-05-22 | 第 41 行虽然 `opts = ticker.options` 动态取了，下一行立刻被 `exp = "2026-05-22"` 覆盖，第 43 行不在 `try` 里；且对比基准是写死的「5/20 今早」数据 |
+
+三者都是 5 月 NVDA 期权盘面的一次性分析，**都不是有意提交进库的** —— 全部经由「蜂群日报」自动提交带进 git
+（v0.45.236 之前的共享索引问题：日报提交会顺带提交工作区里别的文件）。
+
+删除前核对：仓内零引用（`git grep` 排除自身与 CHANGELOG；正对照：不排除自身时命中其 docstring 1 处）、
+仓库外（编排器 `~/.claude/scripts/`、定时任务）零引用、三者只 `print` 不写任何文件、
+仓内所有动态 import 均为固定清单（v0.45.302 核过），没有东西会 import 它们。
+
+### 保留：`check_short_positions.py`（订正此前的说法）
+
+v0.45.302 收尾时我说同族有「4 个写死已过期日期、加了守卫也跑不通」—— **对这一个不成立**。
+它的到期日取自 `ticker.options[:10]`（动态），三处 `option_chain` 全在 `try` 里；写死的 `2026-06-18`
+只是最后一段「近 ATM Put/Call OI 对比」里两项中的一项，失败时打印「获取失败」后继续跑完。
+**今天仍能正常运行**，只是最后一段少半张表。是否还要它由用户决定，本版不动。
+
+判据（留给下一个清脚本的人）：**grep 到写死的日期 ≠ 脚本死了。** 要看那个日期是否直接喂进会抛异常的调用、
+调用是否在 `try` 里、是否有动态兜底 —— 本次三个死的与一个活的，差别全在这三点上，字符串层面一模一样。
+
+### 验证
+
+- 全量 `ruff check .`：全绿。
+- 全套测试：5261 passed，唯一失败为设计如此的 `test_economic_calendar.py::TestCoverageHorizon`。
+
+## [0.45.308] — 2026-09-22 — Fixed：独立审查 F&G 前瞻检验 v0.45.297/300 后续——GIT_DIR 炸弹、`SeedError` 契约逃逸（含 BOM）、崩溃退出码、默认门开关无守卫、失败文案指错方向；Changed：盲化断言由键名黑名单改白名单
+
+**来源**：两个独立审查 agent（一个盯实现+种子，一个盯测试与文档事实断言）+ 我自己的运行时实测，把 v0.45.297/300 当别人写的代码重审。两个 agent 都没有 Bash，产出的是静态推演，我逐条用真实运行复现或推翻，只对**实测确认**的问题动手，本条只记这些。
+
+**GIT_DIR 炸弹（最重的一条，已实测复现又实测修复）**
+`_git_repo`（合成 git 仓库的测试夹具）与脚本自己的 `_git()` 此前都直接继承 `os.environ`——若从 pre-commit/pre-push 钩子或 `git rebase -x` 里被拉起（继承了 `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE`/`GIT_COMMON_DIR`），每条 `git -C <repo>` 命令的 `-C` 会被这些变量盖过，实际打到那个钩子的真仓库上。本仓另外 4 个造合成 git 仓库的测试文件（`test_github_tool_status.py` 等）早防了这一点，本文件此前没有。
+**实测**：一次性 `git clone --local` 出一份副本，带 `GIT_DIR=<副本>/.git` 跑 `TestBuildSeedFromGit`——副本的提交数从 1284 涨到 **1316**（多出 32 个垃圾提交 `c0`/`c1`）；不带 `GIT_DIR` 跑，一个提交都不多。修法：新增 `_clean_git_env()`/`_synthetic_git_env()`，剥掉四个变量后再传给 `subprocess.run`。回归测试用 spy 直接核对 `env=` 参数不含这四个键（不重跑昂贵的真实克隆）。
+
+**`SeedError` 契约逃逸**：畸形但「校验和对得上」的种子内容会在异常处理器自己的错误信息构造里（比如 `r.get('ticker')`）撞出别的异常类型，逃出「任何不符抛 `SeedError`」的契约——实测 5 种输入全部逃逸：`positions.jsonl`/`closed_trades.jsonl` 行是 JSON 列表或 `null`（`AttributeError`）、非法 UTF-8（`UnicodeDecodeError`）、种子清单是 JSON 列表（`AttributeError`）。
+另实测一处更隐蔽的：带 UTF-8 BOM 的 `meta.json`——校验器 `json.loads(bytes)` 会自动探测并剥掉 BOM 而放行，但消费者 `paper_portfolio._load_meta` 用 `read_text` 再 `json.loads(str)`，BOM 留在字符串里会崩溃，「校验过了、重放崩」。
+修法：`_jsonl_rows` 统一做 UTF-8 解码+逐行 JSON 对象校验；`_validate_seed_state` 的 `meta.json` 解析改成与消费者一致的解码路径（`.decode("utf-8")` 再 `json.loads`）；`load_seed` 对清单加 `isinstance(dict)` 检查。7 条回归测试（参数化）。
+
+**崩溃退出码 = 1，与「未就绪（正常）」同码**：实测把库指向一个非法文件，`main()` 未捕获异常时退出码是 1，调用方无法区分「正常等待」与「崩了」。修法：`main()` 包一层 try/except，未预见的崩溃统一报 3 并打到 stderr。
+
+**默认门开关没有任何守卫**：A 定义为 `run_replay({}, ...)`——不覆盖任何键，隐含假设生产默认 `fg_exposure_gate.enabled=False`，此前没有测试钉住这个假设。若它被打破（比如已经有人把默认改成 True 却没退役本脚本），A 会悄悄变成跟 B 同一回事，ΔNAV≈0 会被误读成「门没有效应」而不是「A/B 的定义已经重合」——是静默失效。修法：`evaluate()` 核对 A 实际重放用到的 config 快照（`run_replay` 返回值自带），破了就报 `cannot_judge`，不静默算出一个没意义的数。
+
+**失败文案指错方向**：旧文案只列了「评分链/组合层配置被改动」，但重放读的是**冻结种子**，评分链变动本身影响不到 A 的重放——真正会让这里变红的原因更窄也更具体：种子是否对应窗口起点、历史 K 线是否被回溯修订（拆股/数据源修订）、`pheromone.db` 的 `signal_archive` 是否被回填/覆盖、成本模型（`trading_costs`）或组合层参数是否被改动；决策层也错时才轮到评分链/入场规则，外加「生产某个窗口内日期未被处理（漏跑）」。
+
+**盲化断言由键名黑名单改白名单**：`_EFFECT_KEYS` 只堵得住「叫这几个名字」的效应量键，换个名字（比如把 `adjusted_trades` 换成 `adj_summary` 再无条件写进返回字典）照样能泄漏而不被抓到——独立审查推演的 15 个变异里就有这一个，真跑确认存活。新增 `_NOT_READY_OR_CANNOT_JUDGE_ALLOWED_KEYS` 白名单，逐个 early-return 分支核对得出，任何超出的顶层键判定为可疑效应量，不管它叫什么名字。
+
+**「事后」范围声明**：以上均属实现/测试层面的缺陷修复与加固，**未动**预注册协议本身——窗口、变体 A/B、统计量、检视点（15/30）、α、`SELFPROOF_MIN_RATE=0.95`、四元组键逐字未变；失败文案与盲化白名单只让「该藏住效应量的地方更藏得住、该报错的地方更报得对」，不改变任何判定结论。文件头就地标注「二次检查 v0.45.308」并订正两处此前的不精确描述（见下）。
+
+**订正两处此前（v0.45.297/300）的不实描述**（独立审查逐条核对机制后发现，实测确认）：
+1. 「B 在每笔被调整单上的盈亏恒为 A 的一半」不精确：门直接调整的那一笔上确实约为一半（成本模型对名义本金的百分比与仓位无关，`pnl=size×net_pct` 严格成正比）；但一旦 A/B 因更早一笔被调整过的仓位而现金基数分叉，之后「正常」仓位的盈亏也会有残余差异并被 `_adjusted_trades_summary` 一并计入，比值不再精确是 1:2。方向与量级仍指向效应，只是不精确。
+2. 「`equity_curve.jsonl` 只写不读」不精确：`run_for_date` 会先读入已有行再去重追加重写（避免同日重跑产生重复行），只是**不参与任何开仓/出场决策**。不播种它的理由不变。
+
+**顺带发现并修复（自己写的测试自己踩了一次坑）**：给 F4（默认门开关守卫）和 M1（rehearse 判定层）两条新测试用 `monkeypatch.setitem(_pp.CONFIG["fg_exposure_gate"], "enabled", True)` 这种嵌套 setitem 时，`run_replay` 的 `finally` 是 `CONFIG.clear(); CONFIG.update(_orig_config)`——把 `CONFIG["fg_exposure_gate"]` **整体替换**成另一个 dict 对象，不是原地改值。嵌套 setitem 记的是旧对象的引用，teardown 时改的是那个已经被换掉、没人再引用的旧对象，真正生效的 CONFIG 永久卡在被改的值，污染这个文件里后面所有测试。实测：`test_default_disabled_does_not_trip_the_guard` 单独跑绿、跟在前一条后面跑就红（外加 12 条其它测试连带变红）。修法：改在**顶层键**上 setitem（`monkeypatch.setitem(_pp.CONFIG, "fg_exposure_gate", {**_pp.CONFIG["fg_exposure_gate"], "enabled": True})`），顶层 `CONFIG` 对象本身从不被换引用，teardown 才真的复原。两处已修。
+
+**验证**：测试 103 → **129**（26 条新增，覆盖独立审查静态推演的全部 15 个"存活"变异 + GIT_DIR 修复 + F5/F6/F4 四类实现缺陷）。
+- **15 个存活变异真跑全部转为杀死**（不带 `-x`，逐个还原并核对 sha256）：`rehearse` 误用决策层率判定、B 漏播现金、`_git` 不检查退出码、决策层不分方向、`rehearse` 结论行文字反转、`--build-seed` 窗口参数无校验、键名黑名单盲区、持仓校验只查 `size_usd`、`last_run_date` 非字符串时崩溃、提交 `meta.json` 不可解析时崩溃、清单缺 sha256 项时放行、播种碰撞检查漏 `equity_curve.jsonl`、自证阈值边界 `<`/`<=`、分层文案边界 `>=`/`>`、窗口日期上界。
+- **原有 30 + 8 个变异重跑仍 38/38 全杀**（回归确认未破坏 v0.45.297/300 已有的保护；连同本条新增的 15 个，累计 53/53）。
+- **真实前瞻窗口 09-16~09-21 重新核对**：`run()` 结果 `not_ready`，自证 8/8=100%，返回字典键与白名单精确匹配；三个真实历史窗口的 `--rehearse` 仍全部 `rehearsal_ok`（5/5、16/16、8/8）。
+- 整套 5352 通过、1 失败为已知的 `TestCoverageHorizon`（基线本来就红）；ruff 全绿。
+
+## [0.45.307] — 2026-09-22 — 占位（进行中：data_backup/ 二次检查（2026-09-21）静默失败修复——git add 返回码未检查、密钥扫描缺失守卫、密钥扫描误报、异常误报为密钥命中、连续性体检无上线日下限、状态目录白名单跳过不记录）
+
+## [0.45.305] — 2026-09-22 — Fixed：gh-pages 数据根迁移阶段 4 二次检查发现的两个缺陷——随代码发布的静态资源只存在于仓库根、阶段 5 后首次部署会从线上丢失；`resolve_gh_pages_parent` 在 `--single-branch` 克隆下会把"远端已有 gh-pages"误判成"真·首次部署"，导致 4 次重试全部因非快进被拒、永久停更
+
+2026-09-21 二次检查（协调 session + 只读审计 agent 用本地裸仓库真实实验）在阶段 4（发布链改指向，
+v0.45.268）之外又抓出两个此前没实测过的缺陷，均已复现 → 修复 → 用**改动前的原始文件**真跑新测试
+确认转红 → 恢复修复后转绿。详见 auto-memory `alpha-hive-data-root-migration.md`「二次检查（2026-09-21）」
+「阶段 4（发布链）」两条。
+
+### Fixed ①：`.nojekyll` / `chart.umd.min.js` 只存在于 git 仓库根，`os.listdir(data_root)` 选文件的
+白名单会漏掉它们
+
+`deploy_static_to_ghpages`（`report_deployer.py`）与 `_sync_ghpages`（`generate_ml_report.py`）此前
+各自维护一份内容相同的"部署文件白名单"，都只看 `os.listdir(data_root)`。`.nojekyll`（GitHub Pages
+部署标记文件）与 `chart.umd.min.js`（v0.41.0 起自托管的 Chart.js，随版本升级由人工提交更新）是**随
+代码仓库提交、没有任何 Python 代码会写进 data_root** 的静态资源。今天 `data_root` 与 `git_repo_root`
+恰好同目录（`ALPHA_HIVE_HOME`/`ALPHA_HIVE_GIT_REPO` 都未设时两者兜底到同一个 `__file__` 派生仓库根），
+两个文件"碰巧"能被 `os.listdir(data_root)` 扫到，掩盖了问题；数据根迁移阶段 5 把 `ALPHA_HIVE_HOME`
+改指 `~/alpha-hive-data` 后两者分叉，gh-pages 每次整棵重建，第一次部署就会把它们从线上删掉：
+`index.html`/`dashboard.html` 引用的 Chart.js 脚本 404，`sw.js` 的 `cache.addAll` 因清单里的文件
+取不到而失败。
+
+**本地复现**（`/tmp` 裸仓库，未碰真实 GitHub）：data_root 只放运行时产物、`.nojekyll`/`chart.umd.min.js`
+只放仓库工作区，跑 `deploy_static_to_ghpages` 后 clone gh-pages 分支——两个文件均缺失，与线上会发生的
+情况完全一致。
+
+**修法**：新增 `report_deployer.CODE_SHIPPED_STATIC_ASSETS`（`{".nojekyll", "chart.umd.min.js"}`）与
+`resolve_code_shipped_asset_sources(data_root, repo, already_covered)` 这一份共享定义 + fallback 逻辑，
+两条部署路径改共用它，不再各写各的白名单（此前改一处漏一处的形状）。`deploy_static_to_ghpages`/
+`_sync_ghpages` 从 `os.listdir(data_root)` 扫文件之后，对 `CODE_SHIPPED_STATIC_ASSETS` 里还没覆盖到的
+文件退回 `git_repo_root` 找（`file_source: Dict[str, str]` 记录每个文件该从哪个目录 `hash-object`，
+不再假设所有文件都在 `data_root`）；两处都没有的才 warning 跳过，不 error（不想让一个还没升级的仓库
+挡住当天报告部署）。**没有走"阶段 5 手工把它们拷进数据根"这条路**——没有任何机制会让那份拷贝跟着
+`chart.umd.min.js` 的版本升级保持同步，升级发生在代码仓库而不是数据根。
+
+### Fixed ②：`resolve_gh_pages_parent` 在 `--single-branch` 克隆下把"远端已有 gh-pages"误判成
+"真·首次部署"
+
+`git fetch origin gh-pages`（不带显式目标 refspec）是否更新本地 `origin/gh-pages` ref，取决于这个
+checkout 的 `remote.origin.fetch` 配置是否覆盖 `gh-pages`。`--single-branch --branch main` 克隆
+（数据根迁移阶段 8"生产代码独立 clone"的默认形态）的默认 refspec 只有
+`+refs/heads/main:refs/remotes/origin/main`：`git fetch origin gh-pages` 照样以 exit 0 收场（内容
+只写进 `FETCH_HEAD`），但不创建/更新 `refs/remotes/origin/gh-pages`，随后 `rev-parse origin/gh-pages`
+必然失败。旧代码把"fetch 成功 + rev-parse 失败"直接读成"远端还没有这个分支：真·首次部署"——这个
+判断从一开始就不成立：一个真正不存在的远端分支会让 `git fetch origin <branch>` 本身以非零退出失败
+（"couldn't find remote ref"），走不到这个分支；这里触发的从来只是"我们的 fetch 没把它拉过来"，
+不是"它不存在"。放行的后果：首次部署被判已验证 → `commit-tree` 建出无父提交 → 非 force push 因非
+快进被拒 → 4 次重试全部失败 → gh-pages 永久停更，且 `parent_verified: true` 全程是假的。生产 checkout
+的 fetch refspec 正常（`+refs/heads/*:refs/remotes/origin/*`），今天不触发；阶段 8 若用
+`--single-branch` clone 生产代码就会踩上。
+
+**本地复现**（`/tmp` 裸仓库当 origin，预先建好 main + 非空 gh-pages，`git clone --single-branch
+--branch main` 模拟阶段 8）：`git fetch origin gh-pages` exit 0，`git rev-parse origin/gh-pages` 失败
+（128），与线上会发生的情况完全一致；跑一次完整 `commit_and_push_gh_pages` 会复现"4 次 attempt 全部
+non-fast-forward 被拒"。
+
+**修法**：① fetch 改显式点名目标 refspec `+refs/heads/gh-pages:refs/remotes/origin/gh-pages`——不管
+这个 checkout 默认 fetch 配置是什么，成功就必然更新了 `origin/gh-pages`；远端真没有这个分支时，
+`git fetch` 点名一个不存在的远端 ref 本身就会失败，不会再落进"成功但拿不到"的暧昧地带。② fetch 失败
+时改用只读的 `git ls-remote --heads origin gh-pages` 正面核实——只有它明确说远端没有这个分支（成功且
+输出为空）才判定"真·首次部署"；ls-remote 本身失败（网络/权限）或说分支其实存在，一律退回未经校验的
+本地 ref 兜底，不冒充已验证。
+
+### Added（`tests/test_ghpages_data_root_migration.py`，5→13 项）
+
+- `TestCodeShippedStaticAssetsSurviveDeploy`（2 条）：生产形态正向测试（data_root 只放运行时产物、
+  两个静态资源只放仓库根）+ 变异测试（退回旧行为必须复现丢失）。
+- `TestResolveGhPagesParentSingleBranchClone`（4 条）：`--single-branch` 克隆下"远端有 gh-pages"必须
+  校验到真头、"远端真没有"必须仍判已验证、端到端 `commit_and_push_gh_pages` 一次成功不需重试、变异
+  测试（退回裸分支名 fetch 必须复现误判）。
+- `TestSyncGhpagesSharesAssetFallback`（2 条）：`generate_ml_report._sync_ghpages` 是独立于
+  `deploy_static_to_ghpages` 的第二条部署路径，同一缺陷同一修法必须两处都验证到，不能只改一处。
+
+**变异检验方法**：新测试先在改动前的原始 `report_deployer.py`/`generate_ml_report.py`（`git show
+HEAD:<file>` 换出）上真跑一遍，确认全部按预期失败（含复现"4 次 attempt 全部 non-fast-forward"这个
+真实失败模式），再换回修复后的版本确认转绿——不是只靠测试内部 mock 自证。
+
+**验证**：`tests/test_ghpages_data_root_migration.py` 13 passed；`ruff check` 全过；全套回归
+`--deselect tests/test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`
+后 5221 passed / 1 skipped / 84 deselected / 2 xfailed，0 failure。
+
+## [0.45.304] — 2026-09-22 — Added：`get_bullish_agents_detail` 异常路径测试 + `ScoutBeeNova.details.consensus_census` 接线测试；Changed：更正一处误判「数值语义不变」的 docstring
+
+上一 session（2026-09-21，「二次检查 P0–P3 有没有 bug」）对 v0.45.279 做变异检验时，9 个变异里 3 个存活——
+说明这三处此前**零测试**，本条补上；同一轮还发现一句 docstring 断言与实测矛盾，一并更正。详见
+auto-memory `alpha-hive-board-eviction.md`「后续（v0.45.304）」一节。
+
+### Added（`tests/test_bullish_agents_census_eviction.py`）
+
+- **`TestDetailExceptionPathReturnsNone`（5 条）**：`get_bullish_agents_detail` 的
+  `except (ValueError, KeyError, TypeError, AttributeError)` 分支此前没有任何测试真正让
+  `board.get_live_signals()` 抛异常——`TestHonestSentinel` 只测了 `board is None`。逐个钉住
+  白名单四种类型都接住返回 `None`、`get_bullish_agents_count` 随之为 `None`（不编数）、
+  **未列名的类型（`RuntimeError`）必须冒出去**——不是本次收窄，是与旧实现同一份异常元组，
+  防止以后「顺手」扩成裸 `except Exception` 悄悄吞掉编程错误。
+- **`TestScoutWiresConsensusCensusIntoDetails`（2 条）**：离线跑真实 `ScoutBeeNova.analyze()`，
+  只钉住重量级外部依赖（`sec_edgar`/`edgar_rss`/`congress_trades_scraper`/`market_intelligence`/
+  `_get_stock_data`/`_assess_sector_relative_strength`），其余走真代码，验证
+  `details["consensus_census"]` 与 `get_real_crowding_metrics` 返回值**逐字节相等**（含 `None`
+  原样透传，键不消失）——`test_bee_details_contract.py` 的静态 AST 契约测试只能证明
+  `details={...}` 字面量里有 `"consensus_census"` 这个键名，证明不了值取的是
+  `metrics.get("consensus_census")` 而不是打错的键（正是本次抓到的那个变异）。
+- **`TestRivalConsumptionSemanticsChanged`（1 条）**：把下面 Changed 一节的口头发现钉成断言——
+  同一批 5 个 Phase-1 条目（含 Scout 自己看多），`get_top_signals(ticker, n=10)`（旧口径，
+  无身份过滤）数到 3 票看多，`get_bullish_agents_count`（新口径，`_PHASE1_PEERS`）数到 2 票。
+
+### Changed
+
+- `TestCrowdingMetricsExposesConsensusCensus` 的 docstring 原写「不改变既有的 bullish_agents
+  数值语义」——这只对 **Scout 自己**成立。`_PHASE1_PEERS` 一直是按「Scout 不数自己」设计的
+  （`real_data_sources.py` 该常量上方注释本就写着），但 `get_real_crowding_metrics` 是
+  Scout/Guard/Rival **三蜂共用**的入口：Rival 在 Phase-1.4（此时 Scout 已发布）读取，旧口径
+  （无身份过滤）本可能把 Scout 自己的票数进去，新口径结构上不可能。对 Rival/Guard 这两个
+  「事后」读者，数字确实变了，不只是多透传了一个字段。量级：`consensus_strength` 权重
+  0.2941、1 票差 = 16.7 个百分点，最多影响 `crowding_score` 约 ±4.9 点，进而影响
+  `RivalBeeVanguard` 的 `ml.expected_7d/30d`（`crowding.score` 走独立于 `final_score` 的消费
+  路径，见 v0.45.279 CHANGELOG）。09-18 生产实测 Scout 仅 1/30 看多，实际影响很小（见
+  auto-memory 同节）。
+
+### 不做
+
+- **未改生产代码**——要不要把 Rival/Guard 的口径改成「排除调用者自己」而非固定排除 Scout，
+  是尚未做的设计决定，本条只补测试与更正文档。若要改，需追加世代边界（`crowding.comp.
+  consensus_strength` 的输入定义会再变一次）。
+
+### 核对
+
+- 新增 8 条先红后绿：还原为改动前的 `real_data_sources.py`/`swarm_agents/scout_bee.py` 后
+  `TestDetailExceptionPathReturnsNone`（白名单收窄/放宽两个变异）、
+  `TestScoutWiresConsensusCensusIntoDetails`（删键/错键两个变异）全部按预期变红；
+  `TestRivalConsumptionSemanticsChanged` 断言的是既有代码的既有行为，本身即为回归钉子。
+  5 个变异全被抓（每次跑前后清 `__pycache__`，还原后 sha 比对，吸取上一版的字节码教训）。
+- `tests/test_bullish_agents_census_eviction.py` 23/23；旁证套件（`test_real_data_sources.py`/
+  `test_crowding_detector.py`/`test_rival_bee_peer_features.py`/`test_guard_census_eviction.py`/
+  `test_bee_details_contract.py`/`test_offline_transport_gate.py`）144/144；ruff 对改动文件
+  All checks passed。全套 5222 passed / 1 failed（`TestCoverageHorizon`，日期驱动、与本条无关，
+  干净 main 上同样红）/ 1 skipped / 2 xfailed。
+- 无世代边界（未改生产代码，`crowding.comp.consensus_strength` 的取值口径本次未变），样本代价 0。
+
+## [0.45.306] — 2026-09-22 — Fixed：`test_paper_portfolio_vol_sizing.py::TestProductionStateIsIsolated::test_state_paths_point_outside_the_repo`（conftest 防线①自检）恒真——`pp.BASE_DIR` 早已默认 `None`，判定从未真的比对过隔离夹具重绑的路径
+
+**现象**（已实测，非推理；v0.45.303 CHANGELOG「顺带发现」一节与 auto-memory
+`alpha-hive-test-writes-production.md` 已先记了，本条落地修复）：
+
+```python
+for f in (pp.POSITIONS_FILE, pp.CLOSED_FILE, pp.EQUITY_FILE, pp.META_FILE):
+    assert pp.BASE_DIR not in f.parents
+assert pp.BASE_DIR not in pp.STATE_DIR.parents
+```
+
+`paper_portfolio.BASE_DIR` 自 v0.45.160 起是**覆盖钩子**，默认 `None`（真正的根锚点在
+`_base_dir()` 里调用时才解析 `PATHS.home`，见该文件 v0.45.160 注释）。`None not in
+f.parents` 对任意 `f` 恒成立——不管 `f` 有没有真的被 `tests/conftest.py::
+_isolate_paper_portfolio_state` 重绑到 tmp。实测：把该夹具里四个状态文件的
+`monkeypatch.setattr(POSITIONS_FILE/CLOSED_FILE/EQUITY_FILE/META_FILE, …)` 整段删掉
+（只留 STATE_DIR/SNAPSHOT_DIR），这条测试仍 `2 passed`——防线①名义上在，实际什么都没判。
+
+**改动**（仅 `tests/test_paper_portfolio_vol_sizing.py`，未动 `tests/conftest.py`
+的隔离逻辑本身，未动 `paper_portfolio.py`）：改判**真路径**——测试自己请求 `tmp_path`
+（function 级，与 autouse 的 `_isolate_paper_portfolio_state` 在同一测试节点内拿到
+同一实例），断言四个状态文件 `resolve()` 后落在 `tmp_path / "paper_portfolio_state"`
+沙箱内、`STATE_DIR.resolve()` 精确等于该沙箱。`resolve()` 是必须的一步而不是保险：
+macOS 上 `/tmp` 是 `/private/tmp` 的符号链接，不 resolve 直接做前缀比较会把沙箱路径
+本身误判成"没有落在里面"（`is_relative_to` 对未 resolve 的两侧做字面量比较）。
+
+**验证**：
+1. 新断言在现行 `tests/conftest.py` 上 `2 passed`。
+2. **变异**（真跑，非推理）：临时删除 `_isolate_paper_portfolio_state` 里四个状态文件的
+   `monkeypatch.setattr`（只留 STATE_DIR/SNAPSHOT_DIR，即 v0.45.303 CHANGELOG 记录的
+   那次「删了仍 2 passed」的同一处改动）——新断言按预期变红，报错文案是
+   `未落在本测试沙箱 …… 内`，指向 `POSITIONS_FILE` 仍停在仓库内的真实路径，红的理由
+   与改动匹配。还原后 `sha256sum tests/conftest.py` 与改动前一致（`99ac0c0…`），确认
+   未留痕。
+3. 整套 `--maxfail=1000 -rfEs`（252.86s）：**1 failed / 5210 passed / 1 skipped /
+   83 deselected / 2 xfailed**——唯一红是已知的
+   `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`
+   （BLS 2027 日程未发布，与本改动无关）；唯一 skip 是 `test_scheduler.py` 的
+   `importorskip("schedule")`（本机未装该库）。ruff 通过。
+
 ## [0.45.303] — 2026-09-21 — Fixed：`tests/conftest.py::_isolate_paper_portfolio_state` 对「生产真身」的判定依赖导入顺序——单条/子集跑会误报「写穿生产」，而那种进程里守卫盯的是沙箱自己（真写穿生产它也看不见）；Added：2×2 子进程回归矩阵
 
 **现象**（配对对照实测，不是推理）：全新进程单独跑一条会写 `CLOSED_FILE` 的既有老测试
@@ -463,9 +832,10 @@ A 还多开了 SNOW / VKTX——生产早持有（09-08 / 09-15），空沙箱�
 用 `ps -axo command | grep '[p]ytest'`，括号技巧让 grep 不匹配自己。）
 
 **二次检查（同日，复核本条自己）**：
-- **变基后重跑**：并入 0.45.297–299 之后，全套件在真实钟 / +120 天 / +400 天各 **1 红 / 5126 过**，三次都只有 `TestCoverageHorizon`；
-  选中数 5129 与 `--collect-only` 闸一致（此前的 5100 → 5129 是别的 session 新增的 29 条，不是 harness 的问题）。别人新合的测试至 +400 天没有新炸弹。
-- **CI 独立核对**（GitHub Actions，Linux / UTC / Python 3.11.16，对本提交 `6b7dca02` 的那次）：5104 PASSED / 36 SKIPPED / 1 FAILED / 2 XFAIL，
+- **变基后重跑**：真实钟 / +120 天 / +400 天各 **1 红 / 5126 过**，三次都只有 `TestCoverageHorizon`；
+  选中数 5129 与 `--collect-only` 闸一致（此前的 5100 → 5129 是别的 session 新增的 29 条，不是 harness 的问题）。
+  ⚠️ 这里「并入 0.45.297–299 之后」的说法**不准**，见下方「三次复查」——0.45.297 的真实测试改动其实还没进这棵树。
+- **CI 独立核对**（GitHub Actions，Linux / Python 3.11.16，对本提交 `6b7dca02` 的那次）：5104 PASSED / 36 SKIPPED / 1 FAILED / 2 XFAIL，
   唯一的 FAILED 是 `TestCoverageHorizon`；本条改的三处共 13 条全 PASSED。
 - ⚠️ **观察（未处理，留给用户）**：`main` 最近 100 次 CI（2026-09-15 起）**0 次成功**（67 红 / 32 取消 / 1 进行中）。设计红常驻，
   CI 状态灯已经无法提示「新回归」——得点进去读失败清单才知道红的是不是那一条。
@@ -475,8 +845,29 @@ A 还多开了 SNOW / VKTX——生产早持有（09-08 / 09-15），空沙箱�
   「先 import 第三方栈再换类」的安全网无声消失。加了两道会响的守卫（cwd 下无 `tests/`、扫不到 numpy/pandas ⇒ `RuntimeError`，两道都实测会响），
   扫描从「根目录 + tests/」扩到整仓（原来漏掉只在子包里 import 的 `telegram`）。换类逻辑没变；用新版重跑：三个改动文件在 +120 / +400 天各 85 过，
   `test_prefetch_market_bundle`（pandas 钟的 canary）在 +30 / +400 天各 30 过。
-- **没有查出问题的部分**：三处测试的逻辑本身（CI 的 UTC 时区、不同星期都成立；跨午夜按逻辑推演成立——日期取自两次 `today()` 之间——但**没有实测跨午夜**）；
+- **没有查出问题的部分**：三处测试的逻辑本身（不同星期都成立；跨午夜按逻辑推演成立——日期取自两次 `today()` 之间——但**没有实测跨午夜**）；
   `CALLS` 改名无外部引用；`test_pytestmark_placement` 这类会遍历测试文件的守卫在 CI 上对改过的文件全过。
+
+**三次复查（同日，复核上一轮复查）**：
+- ⚠️ **上一轮「变基后重跑」这句话本身不实**：那次重跑用的树是 `6b7dca02`（我自己的提交），而 0.45.297 真正的测试改动
+  `556fe9a9`（`test_fg_exposure_gate_forward_test.py` +609 行）是在 `6b7dca02` **之后**才推上 `main` 的——「并入 297–299 之后重跑」
+  这句断言当时没有事实支持。这次在 `main` 尖端（含 297 的真实改动，以及后续 298–307）重新全量拨钟：真实钟 / +30 / +120 / +400 天
+  各 **1 红 / 5188 过**，仍只是 `TestCoverageHorizon`。297 新增的 609 行没有引入新炸弹（在这四个时钟范围内）。
+- ⚠️ **撤回「Linux / UTC」里的 UTC**：两次想独立验证 CI 跑在 UTC 都失败了——① 用测试内嵌的 `+00:00` parametrize id 当「本地钟」，
+  那是测试数据不是运行时钟；② 用 app 日志的 `HH:MM:SS` 行去比对 GH Actions 时间戳，但 app 日志是**失败时一次性回放**的捕获输出，
+  它的时间戳落后 GH 时间戳 1~4 分钟（测试跑了多久就落后多久），根本不是同一时刻的两个读数，比出来的「偏移」是噪音不是信号。
+  UTC 是 GitHub `ubuntu-latest` runner 的文档默认值，**这次没有从日志里独立坐实**，撤回「已核对」的说法。
+- **发现一个不相关的 CI 现象（未处理，仅记录）**：抽样 5 天各一次失败的 CI 跑（09-15/16/17/18/21）+ 我这次提交前一次（`adbd0b8e`），
+  09-16、09-17 那两次在设计红之外还各多 5 条：`test_ic_rerun_readiness.py` / `test_fg_exposure_gate_forward_test.py` /
+  `test_resonance_boost_forward_test.py` 里的几条撞上了 `_offline_transport` 的「伸手取外网了」（`api.alternative.me`、
+  `production.dataviz.cnn.io`、`fc.yahoo.com`）——是隔离偶发失灵，与本条改动无关（文件不同、机制不同，不是日期字面量）。
+  09-15/18/21（含我这条提交本身 `6b7dca02`）都只有设计红。**未处理，不在本条范围内。**
+- **harness 里一个真的、但很小的效率问题**（不是正确性 bug）：扫描用 `rglob()+事后过滤`，在本仓的 main checkout 里跑（而不是
+  worktree）会先把 16 个同级 worktree 目录全部遍历一遍再丢掉——24222 个 `.py` 文件走了 1.24s，只保留 804 个；改成
+  `os.walk()` 原地剪枝后同一目录降到 0.01s，且**结果集合逐字节相同**（两种实现在 worktree 与 main checkout 各测过一遍，集合相等）。
+  已修（只改 harness 实现，不改行为）；1.24s 相对 4~7 分钟的整套件可忽略，记录只为诚实。
+- **顺带**：`alpha-hive-time-bomb-audit.md` 的 frontmatter description 上一轮改了正文的「五个踩坑」→「六个」，
+  但漏了 description 字段自己，这次一并改掉。
 
 ## [0.45.295] — 2026-09-20 — Fixed：`weekly_optimizer` 的 `WEIGHT_CLAMPS` 与归零维度结构矛盾，每周诊断死在两道闸之前（连续两周）；修完盒子后闸 1 会换个理由恒红，一并修；Added：对真实 config 的可行性观测点 + `main()` 不可行路径端到端测试
 

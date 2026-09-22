@@ -83,6 +83,15 @@ F&G 挪到它真正适用的层次：组合层的仓位敞口控制——极度�
       时才放进返回字典；样本内（`--insample`，本就不盲化）不变。信息只减不增，不影响任何判定。
       修订时窗口内 F&G 读数为 26/29/29（都在 25~75 之间），门从未触发、B ≡ A，该字段此前必然是
       0 笔 / 0.00——没有效应量经这个出口泄漏过。
+      【二次检查 v0.45.308，2026-09-22 —— 上一版两处描述不精确，更正如下，机制结论不变】
+      ⚠️ 「B 在每笔被调整单上的盈亏恒为 A 的一半」不精确：门直接调整的那一笔上确实约为一半
+      （成本模型对名义本金的百分比与仓位无关，pnl=size×net_pct 严格成正比）；但 `_adjusted_trades`
+      判据是「同一笔的 shares×entry_price 在两变体不同」，一旦 A/B 因**更早**一笔被门调整过的仓位
+      而现金基数分叉，之后「正常」（未被门调整）的仓位大小也会因基数不同而产生残余差异，
+      同样被计入「被调整」——这些笔的盈亏比不是精确的 1:2。方向与量级仍指向效应，只是不精确。
+      ⚠️ 「`equity_curve.jsonl` 只写不读」不精确：`run_for_date` 会先读入已有行再去重追加重写
+      （避免同日重跑产生重复行），只是**不参与任何开仓/出场决策**。不播种它的理由不变：
+      带着窗口前的净值行会让窗口前的周也进入统计量。
 
 样本内复核：`--insample` 在 `FORWARD_START` 之前的历史窗口上跑同一套 A/B 重放
 （此时 A 的自证对象是"整个历史"而非"前瞻窗口"）。**它就是生成假设的那份数据，
@@ -121,6 +130,7 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 import tempfile
@@ -150,7 +160,7 @@ STALE_DAYS = 21  # 登记后这么多天仍无前瞻样本 ⇒ 不是"还在攒"
 # ── 窗口起点状态的种子（v0.45.297 事后修订，见文件头「自证」段）──────────────────
 SEED_DIRNAME = "fg_gate_forward_seed"
 SEED_MANIFEST_NAME = "SEED_SOURCE.json"
-# 只播这三个。`equity_curve.jsonl` 只写不读，播进去会让窗口前的周也进统计量。
+# 只播这三个。`equity_curve.jsonl` 不参与任何决策，但会被读入去重重写——播进去会让窗口前的周也进统计量。
 SEED_STATE_FILES: Tuple[str, ...] = ("meta.json", "positions.jsonl", "closed_trades.jsonl")
 SEED_GIT_STATE_DIR = "paper_portfolio_state"  # 状态文件在 git 里的仓库相对路径（数据根迁移阶段 5 之前）
 _SANDBOX_STATE_FILES: Tuple[str, ...] = SEED_STATE_FILES + ("equity_curve.jsonl",)
@@ -177,14 +187,25 @@ def _sha256(blob: bytes) -> str:
 
 
 def _jsonl_rows(blob: bytes, name: str) -> List[Dict]:
+    """按行解析 JSONL。**任何不符抛 `SeedError`**——非法 UTF-8、非法 JSON、行不是对象（list/null/
+    数字/字符串）都算，不能让后续消费者（`Position(**r)`、`r.get(...)`）自己去撞出别的异常类型
+    （v0.45.308 独立审查实测：list/null 行会在异常处理器自己的 `r.get('ticker')` 里撞出
+    `AttributeError`，逃出 `SeedError` 契约）。"""
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise SeedError(f"{name} 不是合法 UTF-8：{e}") from e
     rows = []
-    for i, line in enumerate(blob.decode("utf-8").splitlines(), 1):
+    for i, line in enumerate(text.splitlines(), 1):
         if not line.strip():
             continue
         try:
-            rows.append(json.loads(line))
+            row = json.loads(line)
         except ValueError as e:
             raise SeedError(f"{name} 第 {i} 行不是合法 JSON：{e}") from e
+        if not isinstance(row, dict):
+            raise SeedError(f"{name} 第 {i} 行不是 JSON 对象（是 {type(row).__name__}）")
+        rows.append(row)
     return rows
 
 
@@ -203,10 +224,17 @@ def _validate_seed_state(files: Dict[str, bytes], *, before: str) -> Dict:
     if missing:
         raise SeedError(f"种子缺文件：{missing}")
     try:
-        meta = json.loads(files["meta.json"])
+        # 解码方式与消费者 `paper_portfolio._load_meta`（`read_text("utf-8")` 再 `json.loads(str)`）
+        # 保持一致——v0.45.308 独立审查实测：`json.loads(bytes)` 会自动探测并剥掉 UTF-8 BOM，
+        # `json.loads(str)` 不会；两条路径解码方式不一致时，带 BOM 的 meta.json 能骗过这里的校验，
+        # 却在消费者那边 `JSONDecodeError` 崩溃——「校验过了、重放崩」。`UnicodeDecodeError` 是
+        # `ValueError` 子类，非法 UTF-8 同样落进下面这个 except。
+        meta = json.loads(files["meta.json"].decode("utf-8"))
     except ValueError as e:
-        raise SeedError(f"meta.json 不是合法 JSON：{e}") from e
-    lrd = meta.get("last_run_date") if isinstance(meta, dict) else None
+        raise SeedError(f"meta.json 不是合法 JSON（或不是合法 UTF-8）：{e}") from e
+    if not isinstance(meta, dict):
+        raise SeedError(f"meta.json 不是 JSON 对象（是 {type(meta).__name__}）")
+    lrd = meta.get("last_run_date")
     try:
         dt.date.fromisoformat(lrd)
     except (TypeError, ValueError):
@@ -249,7 +277,9 @@ def load_seed(seed_dir: Optional[Path] = None, *, forward_start: str = FORWARD_S
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except ValueError as e:
-        raise SeedError(f"种子清单不是合法 JSON：{e}") from e
+        raise SeedError(f"种子清单不是合法 JSON（或不是合法 UTF-8）：{e}") from e
+    if not isinstance(manifest, dict):
+        raise SeedError(f"种子清单不是 JSON 对象（是 {type(manifest).__name__}）")
     if manifest.get("window_start") != forward_start:
         raise SeedError(f"种子对应的窗口起点 {manifest.get('window_start')!r} ≠ FORWARD_START={forward_start!r}"
                         "——改了起点却没重建种子")
@@ -270,9 +300,22 @@ def load_seed(seed_dir: Optional[Path] = None, *, forward_start: str = FORWARD_S
     return files
 
 
+_GIT_DIR_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+def _clean_git_env() -> Dict[str, str]:
+    """去掉 git 钩子会注入的定位变量。v0.45.308 独立审查：若本函数（经 `--rehearse` /
+    `--build-seed` / `ic_rerun_readiness` 的每周只读诊断）从 pre-commit/pre-push 钩子或
+    `git rebase -x` 里被拉起，继承的 `GIT_DIR` 等会让下面每条 `git -C <repo>` 命令打到
+    **真仓库**而不是 `-C` 指向的那个（本仓 `changelog_guard.py` 与另外 4 个测试文件已记录
+    同一形状）。本模块此前没有这道防线，只在真被那种环境拉起时才会触发，实测未见过。"""
+    return {k: v for k, v in os.environ.items() if k not in _GIT_DIR_VARS}
+
+
 def _git(repo: Path, *args: str) -> bytes:
     try:
-        r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, timeout=120)
+        r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, timeout=120,
+                           env=_clean_git_env())
     except (OSError, subprocess.TimeoutExpired) as e:
         raise SeedError(f"git 不可用（{type(e).__name__}: {e}）") from e
     if r.returncode != 0:
@@ -357,7 +400,7 @@ def _apply_seed(state_dir: Path, seed: Dict[str, bytes]) -> None:
     unknown = [n for n in seed if n not in SEED_STATE_FILES]
     if unknown:
         raise ValueError(f"种子里有不许播的文件 {unknown}（只播 {list(SEED_STATE_FILES)}；"
-                         "equity_curve.jsonl 只写不读，播进去会让窗口前的周也进统计量）")
+                         "equity_curve.jsonl 不参与决策但会被读入重写，播进去会让窗口前的周也进统计量）")
     for name, blob in seed.items():
         (state_dir / name).write_bytes(blob)
 
@@ -421,13 +464,17 @@ def _selfproof_stats(real: set, a_entries: set) -> Dict:
 
 
 def _selfproof_failure_reason(sp: Dict) -> str:
+    """v0.45.308 独立审查：旧文案只列了「评分链/组合层配置被改动」，但重放读的是**冻结种子**，
+    评分链变动本身影响不到 A 的重放——真正会让这里变红的原因更窄也更具体，两层分别列全。"""
     head = f"A（baseline）重放复现生产记录仅 {sp['exact']}/{sp['total']}（< {SELFPROOF_MIN_RATE:.0%}）"
     if sp["decision_rate"] is not None and sp["decision_rate"] >= SELFPROOF_MIN_RATE:
         return (f"{head}，但决策层（标的/日期/方向）复现 {sp['decision']}/{sp['total']}——开哪只、开哪个方向"
-                "都对得上，对不上的是仓位金额。先查：种子是否对应窗口起点、波动率来源（pheromone.db）"
-                "是否与生产一致、组合层仓位/出场参数是否被改动")
+                "都对得上，对不上的是仓位金额。先查：种子是否对应窗口起点、历史 K 线是否被回溯修订"
+                "（拆股/数据源修订）、波动率来源（pheromone.db 的 signal_archive 是否被回填/覆盖）"
+                "是否与生产一致、成本模型（trading_costs）或组合层仓位/出场参数是否被改动")
     return (f"{head}，决策层（标的/日期/方向）也仅复现 {sp['decision']}/{sp['total']}——评分链/入场规则/"
-            "组合层配置已被改动，或重放机制本身有问题，本检验前提不成立")
+            "组合层配置已被改动、生产某个窗口内日期未被处理（漏跑），或重放机制本身有问题，"
+            "本检验前提不成立")
 
 
 def _weekly_nav_returns(equity: List[Dict]) -> Dict[Tuple[int, int], float]:
@@ -525,6 +572,17 @@ def evaluate(dates: List[str], since: str, before: str, sandbox_root: Path,
     out: Dict = {"mode": "insample" if insample else "forward", "n_dates": len(dates)}
     if seed and "meta.json" in seed:
         out["seed_last_run_date"] = json.loads(seed["meta.json"]).get("last_run_date")
+
+    # v0.45.308 独立审查：A 定义为「不覆盖任何键」，隐含假设生产默认 `enabled=False`——没有任何
+    # 测试钉住这个假设。若它被打破（比如已经有人把默认改成 True 却没退役本脚本），A 会悄悄变成
+    # 跟 B 同一回事，ΔNAV≈0 会被误读成「门没有效应」而不是「A/B 的定义已经重合」，是静默失效。
+    # 用 A 实际跑出来的 config 快照核对，破了就报 cannot_judge，不静默算出一个没意义的数。
+    a_gate_enabled = ((a.get("config") or {}).get("fg_exposure_gate") or {}).get("enabled")
+    if a_gate_enabled is not False:
+        return {**out, "status": "cannot_judge",
+                "reason": (f"A（baseline）实际用的 fg_exposure_gate.enabled={a_gate_enabled!r}，"
+                          "不是预期的 False——生产默认配置已经变了，A 不再代表「门关闭」，"
+                          "本检验前提不成立")}
 
     if insample:
         # 样本内没有"生产实际记录"可比——自证换成检查机制本身没写错：
@@ -686,11 +744,19 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"（last_run_date={manifest['seed_last_run_date']}）")
         return 0
 
-    res = rehearse(*args.rehearse) if args.rehearse else run(insample=args.insample, today=args.today)
-    if args.json:
-        print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
-    else:
-        _print_human(res)
+    # v0.45.308：崩溃（未捕获异常）与「未就绪」共用退出码 1，两者无法区分——`main()` 唯一没有
+    # try/except 的分支。`run`/`rehearse` 内部已经把 `SeedError` 之外能预见的失败都渲染成
+    # `cannot_judge`（exit 3），这里只兜底真正意外的崩溃（比如库文件损坏），同样报 3，
+    # 绝不让它悄悄读成「正常等待」。
+    try:
+        res = rehearse(*args.rehearse) if args.rehearse else run(insample=args.insample, today=args.today)
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
+        else:
+            _print_human(res)
+    except Exception as e:
+        print(f"❌ 崩溃（不是「未就绪」）：{type(e).__name__}: {e}", file=sys.stderr)
+        return 3
     return {"confirmed": 0, "not_confirmed": 0, "insample": 0, "rehearsal_ok": 0,
             "not_ready": 1}.get(res.get("status"), 3)
 

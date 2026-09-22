@@ -38,7 +38,7 @@ Scout 的读取）。本文件只能证明**机制存在、会产生错误结果
 import pytest
 
 from pheromone_board import PheromoneBoard, PheromoneEntry
-from real_data_sources import get_bullish_agents_count
+from real_data_sources import get_bullish_agents_count, _PHASE1_PEERS
 
 
 def _entry(agent, ticker="TEST", score=5.0, direction="neutral"):
@@ -212,9 +212,57 @@ class TestConsensusCensusDetail:
         assert len(d["peers_bullish"]) == get_bullish_agents_count("TEST", board)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# 二次检查（2026-09-22）补的测试缺口 ①：`get_bullish_agents_detail` 的
+# except 分支此前零测试——`TestHonestSentinel` 只测了 `board is None`，
+# 没有任何测试真正让 `board.get_live_signals(...)` 抛异常。
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestDetailExceptionPathReturnsNone:
+    """`except (ValueError, KeyError, TypeError, AttributeError)` 这条白名单本身
+    也要钉住——既不能收窄（该接住的没接住，board 抖一下就把整轮扫描炸了），
+    也不能悄悄放宽（吞掉不该吞的异常，把真正的编程错误变成「诚实缺失」）。"""
+
+    class _BoardRaises:
+        def __init__(self, exc):
+            self._exc = exc
+
+        def get_live_signals(self, ticker):
+            raise self._exc
+
+    @pytest.mark.parametrize("exc", [ValueError("x"), KeyError("x"),
+                                     TypeError("x"), AttributeError("x")])
+    def test_whitelisted_exception_yields_none(self, exc):
+        got = get_bullish_agents_detail("TEST", self._BoardRaises(exc))
+        assert got is None, f"{type(exc).__name__} 应被接住、诚实返回 None"
+
+    def test_whitelisted_exception_also_makes_count_none(self):
+        """`get_bullish_agents_count` 转调 `get_bullish_agents_detail`——
+        detail 是 None 时 count 不得编一个数字出来。"""
+        got = get_bullish_agents_count("TEST", self._BoardRaises(TypeError("x")))
+        assert got is None
+
+    def test_unlisted_exception_is_not_swallowed(self):
+        """白名单没写的类型必须冒出去——不是本次收窄，是与
+        `get_bullish_agents_count` 旧实现同一份异常元组，钉住防止以后
+        「顺手」扩成裸 `except Exception` 悄悄吞掉编程错误。"""
+        with pytest.raises(RuntimeError):
+            get_bullish_agents_detail("TEST", self._BoardRaises(RuntimeError("boom")))
+
+
 class TestCrowdingMetricsExposesConsensusCensus:
-    """`get_real_crowding_metrics` 是 Scout/Guard/Rival 共用的入口——本节只验证
-    它把 detail 透传出来，不改变既有的 bullish_agents 数值语义。"""
+    """`get_real_crowding_metrics` 是 Scout/Guard/Rival 共用的入口——本节验证
+    它把 detail 透传出来。
+
+    ⚠️ 2026-09-22 更正：本 docstring 原写「不改变既有的 bullish_agents 数值语义」，
+    这只对 **Scout 自己**成立。`_PHASE1_PEERS` 是按「Scout 不数自己」设计的
+    （见 `real_data_sources.py` 该常量上方注释），但 Rival（Phase-1.4，此时
+    Scout 已发布）与 Guard 共用同一入口——旧的 `get_top_signals(ticker, n=10)`
+    不按身份过滤，Scout 自己的条目若分数够高本可能被数进去；新口径按
+    `_PHASE1_PEERS` 精确过滤后**结构上不可能**再数到 Scout。对 Rival/Guard
+    的读者，这确实是数值语义的改变，不只是「透传一个新字段」。复现与量级见
+    `TestRivalConsumptionSemanticsChanged`。是否要让 Rival/Guard 的口径改成
+    「排除调用者自己」而非固定排除 Scout，是尚未做的设计决定，本次未改代码。"""
 
     def test_metrics_carries_consensus_census(self, board, monkeypatch):
         monkeypatch.setattr("real_data_sources.get_social_buzz",
@@ -243,3 +291,115 @@ class TestCrowdingMetricsExposesConsensusCensus:
         assert metrics["bullish_agents"] is None
         assert metrics["data_quality"]["bullish_agents"] == "unavailable", (
             "board 传了但读数是 None 时，质量标签不该继续自称 real")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 二次检查（2026-09-22）：更正上面 `TestCrowdingMetricsExposesConsensusCensus`
+# 旧 docstring「不改变既有的 bullish_agents 数值语义」——这句话只对 Scout 自己
+# 成立，对 Rival/Guard 这两个事后读者不成立，见下方复现。
+# ══════════════════════════════════════════════════════════════════════════
+
+class TestRivalConsumptionSemanticsChanged:
+    """Rival（Phase-1.4）与 Guard 读 `get_real_crowding_metrics` 时，Scout 早已
+    发布过自己的条目。旧口径（`get_top_signals(ticker, n=10)`，无身份过滤）
+    可能把 Scout 自己的票也数进去；新口径（`_PHASE1_PEERS`）结构上排除它。
+
+    这不是回归：`_PHASE1_PEERS` 一直是按「Scout 不该数自己」设计的
+    （`real_data_sources.py` 该常量上方注释）。但对 Rival/Guard 这两个
+    "事后"读者而言，同一份板面此前可能数进 Scout 的票、现在结构上不可能——
+    得到的数字确实变了，不只是「多透传一个字段」。要不要把 Rival/Guard 的
+    口径改成「排除调用者自己」而非固定排除 Scout，是尚未做的设计决定。
+    """
+
+    def test_scout_own_vote_no_longer_counted_by_a_downstream_reader(self, board):
+        assert "ScoutBeeNova" not in _PHASE1_PEERS, (
+            "_PHASE1_PEERS 排除 ScoutBeeNova 是本节其余断言的前提")
+        for agent, direction in (("ScoutBeeNova", "bullish"), ("OracleBeeEcho", "bullish"),
+                                  ("BuzzBeeWhisper", "bearish"), ("ChronosBeeHorizon", "neutral"),
+                                  ("CodeExecutorAgent", "bullish")):
+            board.publish(_entry(agent, direction=direction))
+        old_view = sum(1 for e in board.get_top_signals("TEST", n=10) if e.direction == "bullish")
+        new_view = get_bullish_agents_count("TEST", board)
+        assert old_view == 3, "旧口径（无身份过滤）应数到 Scout+Oracle+CodeExec 三票看多"
+        assert new_view == 2, "新口径（_PHASE1_PEERS）应只数到 Oracle+CodeExec——Scout 结构上被排除"
+        assert old_view != new_view, (
+            "Rival/Guard 读到的看多蜂数在这个场景下确实变了，"
+            "不是「行为不变、只是多了一个字段」那么简单")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 二次检查（2026-09-22）补的测试缺口 ②：`ScoutBeeNova.details.consensus_census`
+# 的接线此前零测试——静态契约测试（test_bee_details_contract.py）只能证明
+# `AgentResult(details={...})` 字面量里有这个键名，证明不了值取的是
+# `metrics.get("consensus_census")` 而不是别的东西（例如打错键名、被别的
+# 值覆盖）。真发生过：变异「读错键名」在改前全绿，是本次审计才发现的缺口。
+# ══════════════════════════════════════════════════════════════════════════
+
+from swarm_agents.scout_bee import ScoutBeeNova  # noqa: E402
+
+
+def _fake_crowding_metrics(consensus_census):
+    """`get_real_crowding_metrics` 的最小合法返回形状——够 `CrowdingDetector.
+    calculate_crowding_score` 跑完，不触发任何 None 分量。"""
+    return {
+        "social_messages_per_day": 100.0, "google_trends_percentile": 50.0,
+        "bullish_agents": 1, "consensus_census": consensus_census,
+        "seeking_alpha_page_views": 1000.0, "short_float_ratio": 0.05,
+        "price_momentum_5d": 1.0,
+        "data_quality": {"social_buzz": "real", "google_trends": "proxy_volume",
+                          "bullish_agents": "real", "seeking_alpha": "proxy_social",
+                          "short_interest": "real", "momentum": "real"},
+    }
+
+
+class TestScoutWiresConsensusCensusIntoDetails:
+    """离线跑真实 `ScoutBeeNova.analyze()`，只钉住重量级外部依赖（SEC/国会/供应链/
+    板块相对强弱），验证 `metrics.get("consensus_census")` 原样传到了
+    `AgentResult.details["consensus_census"]`——而不是只验证键名存在。"""
+
+    @pytest.fixture(autouse=True)
+    def _offline_sources(self, monkeypatch):
+        import sec_edgar
+        import edgar_rss
+        import congress_trades_scraper
+        import market_intelligence
+
+        class _StubSEC:
+            _cik_map: dict = {}
+
+        monkeypatch.setattr(sec_edgar, "get_insider_trades", lambda ticker, days=90: None)
+        monkeypatch.setattr(sec_edgar, "SECEdgarClient", _StubSEC)
+        monkeypatch.setattr(edgar_rss, "get_today_form4_alerts",
+                            lambda ticker, cik=None: {"has_fresh_filings": False})
+        monkeypatch.setattr(congress_trades_scraper, "get_congress_trades_for_ticker",
+                            lambda ticker, days_back=90: {})
+        monkeypatch.setattr(market_intelligence, "get_supply_chain_signals", lambda ticker: {})
+
+    def _bee(self, monkeypatch, metrics):
+        bee = ScoutBeeNova(PheromoneBoard())
+        monkeypatch.setattr(bee, "_validate_ticker", lambda t: None)
+        monkeypatch.setattr(bee, "_get_history_context", lambda t: "")
+        monkeypatch.setattr(bee, "_get_stock_data", lambda t: {
+            "price": 100.0, "momentum_5d": 1.0, "volume_ratio": 1.0, "volatility_20d": 20.0})
+        monkeypatch.setattr(bee, "_assess_sector_relative_strength", lambda t: {"rs_signal": "unknown"})
+        monkeypatch.setattr(bee, "_publish", lambda *a, **k: None)
+        monkeypatch.setattr("real_data_sources.get_real_crowding_metrics",
+                            lambda ticker, stock, board: metrics)
+        return bee
+
+    def test_consensus_census_reaches_details_unchanged(self, monkeypatch):
+        sentinel = {"peers_live": ["OracleBeeEcho"], "peers_bullish": ["OracleBeeEcho"],
+                    "_sentinel": "not-a-real-shape"}
+        bee = self._bee(monkeypatch, _fake_crowding_metrics(sentinel))
+        result = bee.analyze("TEST")
+        assert result["details"]["consensus_census"] == sentinel, (
+            "details.consensus_census 应原样等于 get_real_crowding_metrics 返回的值——"
+            "不是键名恰好存在就算数")
+
+    def test_none_census_reaches_details_as_none_not_dropped(self, monkeypatch):
+        """成对：board 缺失/读取异常时 `consensus_census` 是 None——键必须还在，
+        不是被悄悄丢掉（那会让 None 和"从未接线"混成同一种「读不到」）。"""
+        bee = self._bee(monkeypatch, _fake_crowding_metrics(None))
+        result = bee.analyze("TEST")
+        assert "consensus_census" in result["details"]
+        assert result["details"]["consensus_census"] is None

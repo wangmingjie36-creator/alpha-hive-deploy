@@ -455,11 +455,26 @@ class TestProductionStateIsIsolated:
     （equity 93 行→1、positions 13 行→0）。
     """
 
-    def test_state_paths_point_outside_the_repo(self):
-        """防线①：四个全局在测试期间必须已被重绑到 tmp。"""
+    def test_state_paths_point_outside_the_repo(self, tmp_path):
+        """防线①：四个全局 + STATE_DIR 在测试期间必须已被重绑到本测试的 tmp_path 沙箱。
+
+        v0.45.306：`pp.BASE_DIR not in f.parents` 是恒真断言——`BASE_DIR` 自 v0.45.160
+        起默认是覆盖钩子 `None`（真正的根锚点在 `_base_dir()` 里调用时才解析
+        `PATHS.home`），而 `None not in f.parents` 对任意 `f` 恒成立，不管 `f` 有没有
+        真的被 `_isolate_paper_portfolio_state` 重绑（实测：把该夹具里四个状态文件的
+        `monkeypatch.setattr` 整段删掉，这条测试仍然通过）。改判真路径：五个路径必须
+        落在**本测试自己的** `tmp_path` 沙箱内——`tmp_path` 是 function 级夹具，
+        本测试与 autouse 的 `_isolate_paper_portfolio_state` 在同一个测试节点里请求到
+        的是同一个实例，可以直接比较。`resolve()` 之后再判断：macOS 上 `/tmp` 是
+        `/private/tmp` 的符号链接，字面量前缀比较会把沙箱路径误判成"没有落在里面"。
+        """
+        sandbox = (tmp_path / "paper_portfolio_state").resolve()
         for f in (pp.POSITIONS_FILE, pp.CLOSED_FILE, pp.EQUITY_FILE, pp.META_FILE):
-            assert pp.BASE_DIR not in f.parents, f"{f} 仍指向仓库内"
-        assert pp.BASE_DIR not in pp.STATE_DIR.parents
+            assert f.resolve().is_relative_to(sandbox), (
+                f"{f} 未落在本测试沙箱 {sandbox} 内——四个状态文件应已被 "
+                "_isolate_paper_portfolio_state 重绑到 tmp_path")
+        assert pp.STATE_DIR.resolve() == sandbox, (
+            f"STATE_DIR={pp.STATE_DIR} 未指向本测试沙箱 {sandbox}")
 
     def test_digest_helper_actually_detects_changes(self, tmp_path):
         """防线②：指纹函数得真能看出改动，否则 teardown 的断言恒真。"""

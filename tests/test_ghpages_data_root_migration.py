@@ -13,6 +13,18 @@
      对象（2026-09-11 实测过的 force-push 父提交陷阱，见 auto-memory
      `alpha-hive-ops-info.md` 该节）。附一条反向对照，复现旧实现
      （本地 ref 当父 + `--force`）确实会丢，证明正向测试不是在测稻草人。
+
+2026-09-21 二次检查（v0.45.305）新增两组，覆盖两件此前漏掉的缺陷（均含
+"退回未修复代码真跑一次、确认转红"的变异检验，不止靠 mock 自证）：
+
+  ③ `CODE_SHIPPED_STATIC_ASSETS`（`.nojekyll`/`chart.umd.min.js`）只存在于
+     git 仓库根，从不出现在数据根——`TestCodeShippedStaticAssetsSurviveDeploy`。
+
+  ④ `resolve_gh_pages_parent` 在 `--single-branch` 克隆下不能再依赖"fetch
+     顺带更新 origin/gh-pages"——`TestResolveGhPagesParentSingleBranchClone`。
+
+  ⑤ `generate_ml_report._sync_ghpages`（gh-pages 的第二条独立部署路径，与
+     ①③同源）也接了同一套 fallback——`TestSyncGhpagesSharesAssetFallback`。
 """
 import os
 import subprocess
@@ -57,25 +69,32 @@ def _build_tree(repo, filename, content):
     return tree
 
 
+def _make_reporter(monkeypatch, tmp_path, repo_path):
+    """构造一个可跑 `_deploy_static_to_ghpages()` 的真实 reporter（重活的依赖全 stub 掉）。
+
+    模块级——供本文件多个测试类共用，避免各写一份。
+    """
+    import alpha_hive_daily_report as mod
+    for name, val in [
+        ("MemoryStore", None), ("CodeExecutorAgent", None),
+        ("CODE_EXECUTION_CONFIG", {"enabled": False}),
+        ("VectorMemory", None), ("VECTOR_MEMORY_CONFIG", {"enabled": False}),
+        ("MetricsCollector", None), ("EarningsWatcher", None),
+        ("SlackReportNotifier", None), ("Backtester", None),
+    ]:
+        monkeypatch.setattr(mod, name, val)
+    from alpha_hive_daily_report import AlphaHiveDailyReporter
+    reporter = AlphaHiveDailyReporter()
+    reporter.agent_helper = MagicMock()
+    reporter.agent_helper.git.repo_path = str(repo_path)
+    reporter.date_str = "2026-09-18"
+    return reporter
+
+
 class TestDataRootSplitFullChain:
     """验收标准①：沙箱数据根跑全链到本地 bare 仓库的 gh-pages。"""
 
-    def _make_reporter(self, monkeypatch, tmp_path, repo_path):
-        import alpha_hive_daily_report as mod
-        for name, val in [
-            ("MemoryStore", None), ("CodeExecutorAgent", None),
-            ("CODE_EXECUTION_CONFIG", {"enabled": False}),
-            ("VectorMemory", None), ("VECTOR_MEMORY_CONFIG", {"enabled": False}),
-            ("MetricsCollector", None), ("EarningsWatcher", None),
-            ("SlackReportNotifier", None), ("Backtester", None),
-        ]:
-            monkeypatch.setattr(mod, name, val)
-        from alpha_hive_daily_report import AlphaHiveDailyReporter
-        reporter = AlphaHiveDailyReporter()
-        reporter.agent_helper = MagicMock()
-        reporter.agent_helper.git.repo_path = str(repo_path)
-        reporter.date_str = "2026-09-18"
-        return reporter
+    _make_reporter = staticmethod(_make_reporter)
 
     def test_deploy_reads_data_root_writes_via_git_repo(self, tmp_path, monkeypatch):
         """报告文件只写进数据根；git 仓库根里一份都没有——部署仍必须成功，
@@ -278,3 +297,595 @@ class TestForcePushParentTrap:
              state["sneaky_sha"], result1["commit"]],
         )
         assert is_anc.returncode == 0, "竞态期间抢跑的提交被挤掉了"
+
+
+class TestCodeShippedStaticAssetsSurviveDeploy:
+    """2026-09-21 二次检查缺陷①：`.nojekyll`/`chart.umd.min.js` 只存在于
+    git 仓库根、不存在于数据根——`os.listdir(data_root)` 选文件的白名单会
+    漏掉它们，阶段 5 之后（data_root 真正搬去 `~/alpha-hive-data`）第一次
+    部署就会把线上这两个文件删掉。布局刻意做成生产形态：data_root 只放
+    运行时产物，两个静态资源只放仓库工作区，不用 `index.html`/
+    `dashboard-data.json` 这类合成文件掩盖问题（那正是原有 5 条测试漏掉
+    这个缺陷的原因）。
+    """
+
+    def test_repo_only_assets_reach_gh_pages(self, tmp_path, monkeypatch):
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_assets")
+        # 生产形态：这两个文件随代码仓库提交，从不出现在数据根。
+        (repo / ".nojekyll").write_text("")
+        (repo / "chart.umd.min.js").write_text("console.log('chart');")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "ship static assets"],
+                        cwd=str(repo), check=True)
+
+        reporter = _make_reporter(monkeypatch, tmp_path, repo)
+        # 数据根只有运行时产物，不含 .nojekyll / chart.umd.min.js。
+        (data_root / "index.html").write_text("<html>v1</html>")
+        (data_root / "dashboard-data.json").write_text('{"_generated_at": "t1"}')
+
+        with patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        clone = tmp_path / "verify_clone_assets"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone)],
+                        check=True, capture_output=True)
+        assert (clone / ".nojekyll").exists(), (
+            ".nojekyll 只存在于 git 仓库根、不在数据根，部署后必须仍出现在 gh-pages 上")
+        assert (clone / "chart.umd.min.js").read_text() == "console.log('chart');", (
+            "chart.umd.min.js 只存在于 git 仓库根，部署后内容必须原样出现在 gh-pages 上")
+        # 数据根里的运行时产物照常存在，证明修复没有破坏原有路径。
+        assert (clone / "index.html").read_text() == "<html>v1</html>"
+
+    def test_mutation_reverting_fallback_makes_assets_vanish(self, tmp_path, monkeypatch):
+        """变异测试：把 `deploy_static_to_ghpages` 退回"只读 data_root"的旧行为
+        （不经 `resolve_code_shipped_asset_sources` 退回仓库根），必须复现丢失——
+        证明上一条测试测的是真问题，不是巧合过绿。"""
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_assets_mut")
+        (repo / ".nojekyll").write_text("")
+        (repo / "chart.umd.min.js").write_text("console.log('chart');")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "ship static assets"],
+                        cwd=str(repo), check=True)
+
+        reporter = _make_reporter(monkeypatch, tmp_path, repo)
+        (data_root / "index.html").write_text("<html>v1</html>")
+
+        # 旧行为：白名单退回空集合 ⇒ CODE_SHIPPED_STATIC_ASSETS 永远"两处都没有"。
+        with patch("report_deployer.resolve_code_shipped_asset_sources", return_value={}), \
+             patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        clone = tmp_path / "verify_clone_assets_mut"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone)],
+                        check=True, capture_output=True)
+        assert not (clone / ".nojekyll").exists(), (
+            "还原旧行为后这条断言应该失败才对——如果它通过了，说明修复其实不依赖 "
+            "resolve_code_shipped_asset_sources，上面的正向测试没有对照价值")
+        assert not (clone / "chart.umd.min.js").exists()
+
+
+class TestResolveGhPagesParentSingleBranchClone:
+    """2026-09-21 二次检查缺陷②：`--single-branch` 克隆下，`git fetch origin
+    gh-pages`（不带显式目标 refspec）会以 exit 0 收场但不更新
+    `origin/gh-pages`——旧代码把这个状态误判成"远端还没有这个分支：真·首次
+    部署"，导致建无父提交、非 force push 因非快进被拒、4 次重试全部失败，
+    且 `parent_verified` 全程撒谎说"已校验"。用真实本地裸仓库当 origin，
+    不碰真实 GitHub。
+    """
+
+    def _make_single_branch_clone(self, tmp_path, name, *, seed_gh_pages: bool):
+        """建一个已有 main（+ 可选 gh-pages）的裸仓库，再用
+        `--single-branch --branch main` 克隆它——复现阶段 8"新 clone 生产代码"
+        的默认 git 行为。"""
+        bare = tmp_path / f"{name}_origin.git"
+        seed = tmp_path / f"{name}_seed"
+        subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+        subprocess.run(["git", "init", "-q", str(seed)], check=True)
+        _git("config", "user.email", "seed@test.com", cwd=seed)
+        _git("config", "user.name", "seed", cwd=seed)
+        _git("remote", "add", "origin", str(bare), cwd=seed)
+        (seed / "README.md").write_text("code")
+        _git("add", "-A", cwd=seed)
+        _git("commit", "-q", "-m", "init", cwd=seed)
+        _git("push", "-q", "origin", "HEAD:main", cwd=seed)
+
+        expected_head = None
+        if seed_gh_pages:
+            tree = _build_tree(seed, "site.html", "existing site")
+            commit = subprocess.run(
+                ["git", "commit-tree", tree, "-m", "existing gh-pages"],
+                cwd=str(seed), capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            subprocess.run(["git", "update-ref", "refs/heads/gh-pages", commit],
+                            cwd=str(seed), check=True)
+            subprocess.run(["git", "push", "-q", "origin", "gh-pages"],
+                            cwd=str(seed), check=True, capture_output=True)
+            expected_head = commit
+
+        clone = tmp_path / f"{name}_single_branch_clone"
+        subprocess.run(
+            ["git", "clone", "-q", "--single-branch", "--branch", "main", str(bare), str(clone)],
+            check=True, capture_output=True,
+        )
+        # 前置条件：这确实是个 single-branch 克隆——默认 fetch refspec 只认 main。
+        refspec = _git("config", "--get", "remote.origin.fetch", cwd=clone)
+        assert refspec == "+refs/heads/main:refs/remotes/origin/main", (
+            f"前置条件不成立，不是预期的 single-branch 克隆：{refspec!r}")
+        return clone, bare, expected_head
+
+    def test_remote_has_gh_pages_but_single_branch_clone_must_still_see_it(self, tmp_path):
+        """远端确实已经有 gh-pages（且非空）——`--single-branch` 克隆不该把这
+        误判成"首次部署"，必须拿到真实父提交并标记为已校验。"""
+        clone, bare, expected_head = self._make_single_branch_clone(
+            tmp_path, "has_ghpages", seed_gh_pages=True)
+
+        parent, verified = rd.resolve_gh_pages_parent(str(clone))
+
+        assert verified is True, "fetch 用显式 refspec 后应该能确认远端状态"
+        assert parent == expected_head, (
+            f"父提交必须是远端 gh-pages 的真实头 {expected_head}，不是 None/陈旧值，实得 {parent}")
+
+    def test_remote_truly_has_no_gh_pages_is_verified_first_deploy(self, tmp_path):
+        """远端确实还没有 gh-pages 分支——这才是唯一该判"真·首次部署"的情形，
+        `ls-remote` 正面核实之后必须仍然给 verified=True（不能因为改用显式
+        refspec 就退化成"网络失败"的未经校验分支）。"""
+        clone, bare, expected_head = self._make_single_branch_clone(
+            tmp_path, "no_ghpages", seed_gh_pages=False)
+        assert expected_head is None
+
+        parent, verified = rd.resolve_gh_pages_parent(str(clone))
+
+        assert verified is True, "ls-remote 应该能正面核实远端没有这个分支"
+        assert parent is None
+
+    def test_full_deploy_succeeds_on_single_branch_clone_with_existing_site(self, tmp_path):
+        """端到端：在 single-branch 克隆里跑一次完整的 `commit_and_push_gh_pages`，
+        必须成功、必须接在远端真实头后面——不能建出无父提交导致 push 被拒。
+        这是旧 bug 实际造成的后果（4 次重试全部因非快进失败，gh-pages 永久
+        停更）。"""
+        clone, bare, expected_head = self._make_single_branch_clone(
+            tmp_path, "e2e", seed_gh_pages=True)
+
+        tree = _build_tree(clone, "today.html", "from single-branch clone")
+        result = rd.commit_and_push_gh_pages(str(clone), tree, lambda n: "single-branch deploy")
+
+        assert result["success"], result
+        assert result["parent"] == expected_head
+        assert result["parent_verified"] is True
+        assert result["attempts"] == 1, "父提交本该一次校验成功，不需要任何重试"
+
+        # gh-pages 树本来就是每次整棵重建（不是逐文件合并），"接在旧头后面"
+        # 验证的是**提交历史**祖先关系，不是文件内容延续——`_build_tree` 只建了
+        # today.html 一个文件的 tree，site.html 不会出现在这次的树里，这是设计
+        # 使然，不是 bug。
+        is_ancestor = subprocess.run(
+            ["git", "--git-dir", str(bare), "merge-base", "--is-ancestor",
+             expected_head, "refs/heads/gh-pages"],
+        )
+        assert is_ancestor.returncode == 0, (
+            "远端已有的 gh-pages 头必须仍是新提交的祖先——如果不是，说明新提交是"
+            "无父孤儿提交，旧 bug 又回来了")
+
+        verify_clone = tmp_path / "e2e_verify"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(verify_clone)],
+                        check=True, capture_output=True)
+        assert (verify_clone / "today.html").read_text() == "from single-branch clone"
+
+    def test_mutation_bare_branch_name_fetch_misreads_as_first_deploy(self, tmp_path):
+        """变异测试：退回旧实现（`git fetch origin gh-pages`，不带显式目标
+        refspec），必须复现"远端明明有 gh-pages、却被误判成首次部署"——证明
+        上面几条测试测的是真问题，不是因为本来就会通过。"""
+        clone, bare, expected_head = self._make_single_branch_clone(
+            tmp_path, "mutation", seed_gh_pages=True)
+        assert expected_head is not None
+
+        old_fetch = subprocess.run(["git", "fetch", "origin", "gh-pages"],
+                                    cwd=str(clone), capture_output=True, text=True)
+        assert old_fetch.returncode == 0, "旧实现的 fetch 本身应该'成功'——这正是问题所在"
+        old_rev_parse = subprocess.run(["git", "rev-parse", "origin/gh-pages"],
+                                        cwd=str(clone), capture_output=True, text=True)
+        assert old_rev_parse.returncode != 0, (
+            "如果这条断言失败，说明旧实现在这个环境里没有复现 bug——"
+            "上面的正向测试就没有对照价值了")
+
+
+class TestSyncGhpagesSharesAssetFallback:
+    """`generate_ml_report._sync_ghpages` 是 gh-pages 的第二条独立部署路径
+    （与 `report_deployer.deploy_static_to_ghpages` 各自维护过一份内容相同的
+    白名单）——验收标准③的修复必须两条路径都接上，不能只改一处。"""
+
+    def test_repo_only_assets_reach_gh_pages_via_sync_ghpages(self, tmp_path, monkeypatch):
+        import generate_ml_report as gmr
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_sync")
+        (repo / ".nojekyll").write_text("")
+        (repo / "chart.umd.min.js").write_text("console.log('chart');")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "ship static assets"],
+                        cwd=str(repo), check=True)
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(repo))
+
+        (data_root / "index.html").write_text("<html>ml v1</html>")
+
+        gmr._sync_ghpages(["AAPL"], successful_count=1)
+
+        clone = tmp_path / "verify_clone_sync"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone)],
+                        check=True, capture_output=True)
+        assert (clone / ".nojekyll").exists(), (
+            "_sync_ghpages 走的是独立于 deploy_static_to_ghpages 的另一条部署路径，"
+            "必须同样把只存在于仓库根的静态资源带上")
+        assert (clone / "chart.umd.min.js").read_text() == "console.log('chart');"
+        assert (clone / "index.html").read_text() == "<html>ml v1</html>"
+
+    def test_mutation_reverting_fallback_makes_assets_vanish(self, tmp_path, monkeypatch):
+        """变异测试：`_sync_ghpages` 内部调的是
+        `report_deployer.resolve_code_shipped_asset_sources`——把它退回旧行为
+        （永远找不到任何 fallback），必须复现丢失。"""
+        import generate_ml_report as gmr
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_sync_mut")
+        (repo / ".nojekyll").write_text("")
+        (repo / "chart.umd.min.js").write_text("console.log('chart');")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "ship static assets"],
+                        cwd=str(repo), check=True)
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(repo))
+
+        (data_root / "index.html").write_text("<html>ml v1</html>")
+
+        with patch("report_deployer.resolve_code_shipped_asset_sources", return_value={}):
+            gmr._sync_ghpages(["AAPL"], successful_count=1)
+
+        clone = tmp_path / "verify_clone_sync_mut"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone)],
+                        check=True, capture_output=True)
+        assert not (clone / ".nojekyll").exists(), (
+            "还原旧行为后这条断言应该失败才对——说明修复其实不依赖 "
+            "resolve_code_shipped_asset_sources，上面的正向测试没有对照价值")
+
+
+class TestEmptyDataRootDoesNotWipeGhPages:
+    """2026-09-22 code-review（对 v0.45.305 的高强度复检）发现的严重回归，
+    v0.45.310 已修：「无静态文件可部署」的守卫此前在随代码发布的静态资源
+    并入 `files` **之后**才判——`.nojekyll`/`chart.umd.min.js` 几乎总能在
+    git 仓库根找到（它们随仓库提交），data_root 整个空掉（配置错误/阶段 5
+    迁移中/上游扫描没写出任何东西）时 `files` 也不会是空的，guard 形同虚设，
+    会把 gh-pages 整棵重建成只剩这两个文件，等于清空线上网站。
+
+    两条独立部署路径（`deploy_static_to_ghpages`/`_sync_ghpages`）各验一次：
+    先正常部署一次建立"线上已有真实内容"的前置状态，再清空 data_root 重跑，
+    断言线上内容原样保留、没有被两个静态资源替换掉。
+    """
+
+    def test_deploy_static_to_ghpages_skips_when_data_root_empty(self, tmp_path, monkeypatch):
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_empty")
+        (repo / ".nojekyll").write_text("")
+        (repo / "chart.umd.min.js").write_text("console.log('chart');")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "ship static assets"], cwd=str(repo), check=True)
+
+        reporter = _make_reporter(monkeypatch, tmp_path, repo)
+
+        # 先部署一次正常内容，建立"线上已有真实网站"的前置状态。
+        (data_root / "index.html").write_text("<html>real site</html>")
+        (data_root / "dashboard-data.json").write_text('{"_generated_at": "t1"}')
+        with patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        clone_before = tmp_path / "verify_before"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_before)],
+                        check=True, capture_output=True)
+        assert (clone_before / "index.html").read_text() == "<html>real site</html>"
+
+        # data_root 整个清空（模拟配置错误/扫描失败）；仓库根仍有那两个静态资源。
+        for f in os.listdir(data_root):
+            os.remove(data_root / f)
+        assert list(os.listdir(data_root)) == [], "前置条件不成立：data_root 应该已被清空"
+
+        with patch("report_deployer.verify_cdn_deployment", return_value=True):
+            reporter._deploy_static_to_ghpages()
+
+        clone_after = tmp_path / "verify_after"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_after)],
+                        check=True, capture_output=True)
+        assert (clone_after / "index.html").read_text() == "<html>real site</html>", (
+            "data_root 清空后必须跳过部署、保留线上原内容——不能把 gh-pages 整棵"
+            "重建成只剩 .nojekyll/chart.umd.min.js 两个文件")
+        assert (clone_after / "dashboard-data.json").exists()
+
+    def test_sync_ghpages_skips_when_data_root_empty(self, tmp_path, monkeypatch):
+        import generate_ml_report as gmr
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_empty_sync")
+        (repo / ".nojekyll").write_text("")
+        (repo / "chart.umd.min.js").write_text("console.log('chart');")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "ship static assets"], cwd=str(repo), check=True)
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(repo))
+
+        (data_root / "index.html").write_text("<html>real ml site</html>")
+        gmr._sync_ghpages(["AAPL"], successful_count=1)
+
+        clone_before = tmp_path / "verify_before_sync"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_before)],
+                        check=True, capture_output=True)
+        assert (clone_before / "index.html").read_text() == "<html>real ml site</html>"
+
+        for f in os.listdir(data_root):
+            os.remove(data_root / f)
+        assert list(os.listdir(data_root)) == [], "前置条件不成立：data_root 应该已被清空"
+
+        gmr._sync_ghpages(["AAPL"], successful_count=1)
+
+        clone_after = tmp_path / "verify_after_sync"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone_after)],
+                        check=True, capture_output=True)
+        assert (clone_after / "index.html").read_text() == "<html>real ml site</html>", (
+            "data_root 清空后必须跳过同步、保留线上原内容——不能把 gh-pages 整棵"
+            "重建成只剩 .nojekyll/chart.umd.min.js 两个文件")
+
+
+class TestResolveGhPagesParentNetworkTimeout:
+    """v0.45.311：`resolve_gh_pages_parent` 里真正触网的 `git fetch`/
+    `git ls-remote` 此前不设超时——网络真的挂起（不是报错，是没反应）时会
+    无限期阻塞，而本函数被包在 `commit_and_push_gh_pages` 最多 4 次的重试
+    循环里，一次挂起会被放大成整条部署流水线长时间卡死。
+
+    用一个只 accept 连接、从不回应任何字节的裸 TCP 监听器模拟"网络挂起但不
+    报错"的真实故障：`git://` 协议的客户端连上后会一直阻塞等服务端发送第一行
+    ref 广播，永远等不到——这正是"挂起"而非"报错"的真实形态，`--reject`/
+    连不上端口这类立即失败的场景不需要超时也能正常工作，不是本次要测的东西。
+    """
+
+    def test_hung_remote_times_out_instead_of_blocking_forever(self, tmp_path, monkeypatch):
+        import socket
+        import threading
+        import time
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        stop = threading.Event()
+
+        def _accept_and_hang():
+            srv.settimeout(1.0)
+            while not stop.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except socket.timeout:
+                    continue
+                # 接了连接就什么都不发、不关闭——让对端的 git 客户端一直
+                # 阻塞在等第一行响应上，直到我们主动收尾。
+                stop.wait(30)
+                conn.close()
+
+        t = threading.Thread(target=_accept_and_hang, daemon=True)
+        t.start()
+        try:
+            repo = tmp_path / "hung_repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            _git("config", "user.email", "t@t.com", cwd=repo)
+            _git("config", "user.name", "t", cwd=repo)
+            _git("remote", "add", "origin", f"git://127.0.0.1:{port}/nonexistent.git", cwd=repo)
+
+            monkeypatch.setattr(rd, "_GH_PAGES_NETWORK_TIMEOUT", 2)
+
+            start = time.monotonic()
+            parent, verified = rd.resolve_gh_pages_parent(str(repo))
+            elapsed = time.monotonic() - start
+
+            assert elapsed < 15, (
+                f"耗时 {elapsed:.1f}s——超时设置没有生效，函数被两次网络调用"
+                "（fetch 挂起后还要再等 ls-remote 挂起一次）的默认（无限期）"
+                "超时卡住了，不是设置的 2s×2 上限")
+            assert verified is False, "网络挂起应该判定为未经校验，不能冒充已验证"
+        finally:
+            stop.set()
+            srv.close()
+            t.join(timeout=5)
+
+    def test_mutation_without_timeout_hangs(self, tmp_path, monkeypatch):
+        """变异测试：把 `_run_git_network` 换回不设超时的裸 `subprocess.run`，
+        必须复现"明显更久（逼近或超过我们设的安全上限）"——证明上面那条测试
+        测的是真问题，不是因为 git 本身连接失败得很快。用一个短但可观测的
+        安全上限（5s）而非真的等到 git 默认超时（可能几分钟），避免这条
+        对照测试本身拖垮测试套件。"""
+        import socket
+        import subprocess as _sp
+        import threading
+        import time
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        stop = threading.Event()
+
+        def _accept_and_hang():
+            srv.settimeout(1.0)
+            while not stop.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except socket.timeout:
+                    continue
+                stop.wait(30)
+                conn.close()
+
+        t = threading.Thread(target=_accept_and_hang, daemon=True)
+        t.start()
+
+        def _no_timeout_run(args, repo):
+            # 旧实现：不传 timeout=
+            try:
+                return _sp.run(args, cwd=repo, capture_output=True, text=True)
+            except OSError:
+                return None
+
+        monkeypatch.setattr(rd, "_run_git_network", _no_timeout_run)
+        try:
+            repo = tmp_path / "hung_repo_mut"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            _git("config", "user.email", "t@t.com", cwd=repo)
+            _git("config", "user.name", "t", cwd=repo)
+            _git("remote", "add", "origin", f"git://127.0.0.1:{port}/nonexistent.git", cwd=repo)
+
+            def _call_with_own_timeout():
+                rd.resolve_gh_pages_parent(str(repo))
+
+            start = time.monotonic()
+            call_thread = threading.Thread(target=_call_with_own_timeout, daemon=True)
+            call_thread.start()
+            call_thread.join(timeout=5)
+            elapsed = time.monotonic() - start
+            assert call_thread.is_alive(), (
+                f"还原成不设超时的旧实现后，函数应该仍卡在网络调用上（{elapsed:.1f}s "
+                "还没返回）——如果它这时候已经返回了，说明这条对照测试没有测到"
+                "真问题，上面的正向测试就没有对照价值")
+        finally:
+            stop.set()
+            srv.close()
+            t.join(timeout=5)
+            # call_thread 是 daemon 线程，挂起的子进程会在进程退出时被清理；
+            # 这里不等它了（它本来就卡住，join 只会拖慢测试收尾）。
+
+
+class TestSyncGhpagesResilientToSingleFileFailure:
+    """v0.45.311：`_sync_ghpages`（`generate_ml_report.py`）此前把整段
+    hash-object/commit/push 包在一个大 `try/except` 里——任何一个文件 hash
+    失败会让整次同步全部放弃，不像 `report_deployer.deploy_static_to_ghpages`
+    早就是逐文件容错（单个文件失败只跳过该文件、记警告，其它文件照常部署）。
+    改成同样的逐文件容错后，本文件验证"一个坏文件不该拖垮整次同步"。
+    """
+
+    def test_one_bad_file_does_not_abort_the_whole_sync(self, tmp_path, monkeypatch):
+        import generate_ml_report as gmr
+        import subprocess as _sp
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_resilience")
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(repo))
+
+        (data_root / "index.html").write_text("<html>good</html>")
+        (data_root / "dashboard-data.json").write_text('{"_generated_at": "t1"}')
+
+        real_check_output = _sp.check_output
+
+        def _flaky_check_output(args, **kwargs):
+            if (args[:2] == ["git", "hash-object"]
+                    and str(args[-1]).endswith("dashboard-data.json")):
+                raise _sp.CalledProcessError(1, args, output=b"", stderr=b"simulated hash failure")
+            return real_check_output(args, **kwargs)
+
+        with patch("subprocess.check_output", side_effect=_flaky_check_output):
+            gmr._sync_ghpages(["AAPL"], successful_count=1)
+
+        clone = tmp_path / "verify_clone_resilience"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone)],
+                        check=True, capture_output=True)
+        assert (clone / "index.html").read_text() == "<html>good</html>", (
+            "一个文件 hash-object 失败不该让整次同步全部放弃——其它文件应该照常部署")
+        assert not (clone / "dashboard-data.json").exists(), (
+            "hash 失败的那个文件不该出现在部署结果里——它本身就没能生成 blob")
+
+    def test_mutation_reverting_per_file_resilience_aborts_whole_sync(self, tmp_path, monkeypatch):
+        """变异测试：把 hash-object 循环还原成"整段包一个大 try/except、单个
+        文件失败直接抛出"的旧写法，必须复现"一个坏文件拖垮整次同步"——证明
+        上面那条测试测的是真问题。"""
+        import generate_ml_report as gmr
+        import subprocess as _sp
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_resilience_mut")
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(repo))
+
+        (data_root / "index.html").write_text("<html>good</html>")
+        (data_root / "dashboard-data.json").write_text('{"_generated_at": "t1"}')
+
+        real_check_output = _sp.check_output
+
+        def _flaky_check_output(args, **kwargs):
+            if (args[:2] == ["git", "hash-object"]
+                    and str(args[-1]).endswith("dashboard-data.json")):
+                raise _sp.CalledProcessError(1, args, output=b"", stderr=b"simulated hash failure")
+            return real_check_output(args, **kwargs)
+
+        # 旧写法：把整段 hash-object 循环搬进外层 try/except 之内、不做逐文件
+        # 捕获——一个文件 hash 失败会直接从循环里抛出，被外层大 except 接住，
+        # 整次同步不建任何提交。
+        def _old_style_sync_ghpages(tickers, successful_count):
+            import os
+            from report_deployer import (
+                CODE_SHIPPED_STATIC_ASSETS as _assets,
+                CORE_STATIC_FILES as _core,
+                apply_code_shipped_fallback as _apply,
+            )
+            if successful_count == 0:
+                return
+            data_root_ = str(gmr.PATHS.home)
+            repo_ = str(gmr.PATHS.git_repo_root)
+            _CORE = _core | _assets
+            files = [f for f in os.listdir(data_root_) if f in _CORE]
+            file_source = {f: data_root_ for f in files}
+            if not files:
+                return
+            _apply(files, file_source, data_root_, repo_, "同步")
+            idx = os.path.join(repo_, ".git", "gh-pages-index")
+            if os.path.exists(idx):
+                os.remove(idx)
+            env = os.environ.copy()
+            env["GIT_INDEX_FILE"] = idx
+            try:
+                for f in sorted(files):
+                    blob = _sp.check_output(
+                        ["git", "hash-object", "-w", os.path.join(file_source[f], f)], cwd=repo_
+                    ).decode().strip()
+                    _sp.run(["git", "update-index", "--add", "--cacheinfo",
+                             "100644", blob, f], env=env, cwd=repo_, check=True)
+                tree = _sp.check_output(["git", "write-tree"], env=env, cwd=repo_).decode().strip()
+                from report_deployer import commit_and_push_gh_pages
+                commit_and_push_gh_pages(repo_, tree, lambda n: "old style")
+            except Exception:
+                pass
+            finally:
+                if os.path.exists(idx):
+                    os.remove(idx)
+
+        with patch("subprocess.check_output", side_effect=_flaky_check_output):
+            _old_style_sync_ghpages(["AAPL"], successful_count=1)
+
+        # 旧写法下 gh-pages 分支应该压根没建出来（首次部署、整段异常被吞掉）。
+        precheck = subprocess.run(["git", "ls-remote", "--heads", str(bare), "gh-pages"],
+                                   capture_output=True, text=True)
+        assert not precheck.stdout.strip(), (
+            "如果这条断言失败，说明旧写法在这个环境里没有复现'一个坏文件拖垮整次同步'——"
+            "上面的正向测试就没有对照价值了")
