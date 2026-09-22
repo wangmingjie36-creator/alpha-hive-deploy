@@ -1,0 +1,59 @@
+{
+ "schema_version": 1,
+ "date": "2026-09-22",
+ "generated_at_utc": "2026-09-22T21:10:15.599069+00:00",
+ "elapsed_sec": 32.2,
+ "tickers_requested": 30,
+ "tickers_ok": 28,
+ "ok": [
+  "ABBV",
+  "AMC",
+  "AMZN",
+  "BRK-B",
+  "COST",
+  "CRCL",
+  "CRM",
+  "CVX",
+  "DE",
+  "DELL",
+  "ENPH",
+  "JNJ",
+  "META",
+  "MSFT",
+  "MU",
+  "NEE",
+  "NFLX",
+  "NVDA",
+  "QCOM",
+  "RKLB",
+  "SNOW",
+  "T",
+  "TMUS",
+  "TSLA",
+  "VKTX",
+  "VZ",
+  "WMT",
+  "XOM"
+ ],
+ "failed": {
+  "BILI": "StaleVintageError: CBOE BILI 数据陈旧：last_trade=2026-09-21，应为 2026-09-22",
+  "TMO": "StaleVintageError: CBOE TMO 数据陈旧：last_trade=2026-09-21，应为 2026-09-22"
+ },
+ "market_cboe_ok": true,
+ "market_degraded_sections": [],
+ "fear_greed_ok": true,
+ "vintage_ok": 28,
+ "vintage_unverifiable": [],
+ "vintage_stale": [
+  "BILI",
+  "TMO"
+ ],
+ "vintage_unverifiable_all": false,
+ "abort_reason": null,
+ "price_stale_intraday": [
+  "ABBV",
+  "DE",
+  "SNOW",
+  "TMUS"
+ ]
+}
