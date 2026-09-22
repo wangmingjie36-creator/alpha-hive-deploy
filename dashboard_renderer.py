@@ -3006,10 +3006,15 @@ def render_dashboard_html(report: Dict, date_str: str,
 
     _env = Environment(autoescape=False)
     _tpl = _env.from_string(_load_tpl("dashboard.html"))
+    # v0.45.311：Chart.js 文件名改由 report_deployer.CHART_JS_FILENAME 传入，
+    # 模板里不再单独硬编码一份（此前 templates/dashboard.html、
+    # report_web_assets.py 各写各的文件名字面量）。
+    from report_deployer import CHART_JS_FILENAME as _chart_js_filename
 
     return _tpl.render(
         css=dashboard_css,
         js=_load_tpl("dashboard.js"),
+        chart_js_filename=_chart_js_filename,
         data_json=_json.dumps(_data_obj, ensure_ascii=False),
         n_tickers=n_tickers,
         now_str=now_str,

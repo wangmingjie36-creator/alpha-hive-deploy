@@ -27,7 +27,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500&display=swap" rel="stylesheet">
 <!-- v0.41.0: Chart.js 自托管——jsdelivr 在微信/大陆常不可达，加载失败时 canvas 撑宽页面 -->
-<script defer src="chart.umd.min.js"></script>
+<!-- v0.45.311: 文件名改由 report_deployer.CHART_JS_FILENAME 经渲染器传入，不再在这里单独硬编码一份 -->
+<script defer src="{{ chart_js_filename }}"></script>
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"WebPage","name":"Alpha Hive 投资仪表板","description":"去中心化蜂群智能投资研究平台 — {{ n_tickers }} 标的每日扫描","dateModified":"{{ now_str }}"}
 </script>

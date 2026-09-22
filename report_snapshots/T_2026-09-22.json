@@ -1,0 +1,44 @@
+{
+  "ticker": "T",
+  "date": "2026-09-22",
+  "composite_score": 5.56,
+  "direction": "bullish",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 25.1,
+  "agent_votes": {
+    "BuzzBeeWhisper": 4.56,
+    "CodeExecutorAgent": 4.5,
+    "ChronosBeeHorizon": 6.0,
+    "OracleBeeEcho": 7.46,
+    "ScoutBeeNova": 7.44,
+    "RivalBeeVanguard": 5.66,
+    "GuardBeeSentinel": 5.9,
+    "BearBeeContrarian": 4.2,
+    "QueenDistiller": 5.56
+  },
+  "agent_votes_source": "agent_details",
+  "weights_used": {
+    "signal": 0.0,
+    "catalyst": 0.332,
+    "sentiment": 0.325,
+    "odds": 0.343,
+    "risk_adj": 0.0
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.241,
+    "signal": 1.0,
+    "catalyst": 0.828,
+    "sentiment": 0.31,
+    "odds": 0.379,
+    "risk_adj": 0.552
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-22T14:45:50.754320"
+}

@@ -1,0 +1,44 @@
+{
+  "ticker": "JNJ",
+  "date": "2026-09-22",
+  "composite_score": 5.1,
+  "direction": "neutral",
+  "price_target": 0.0,
+  "stop_loss": 0.0,
+  "entry_price": 269.19,
+  "agent_votes": {
+    "BuzzBeeWhisper": 5.82,
+    "CodeExecutorAgent": 4.5,
+    "OracleBeeEcho": 3.61,
+    "ChronosBeeHorizon": 6.0,
+    "ScoutBeeNova": 5.65,
+    "RivalBeeVanguard": 5.78,
+    "GuardBeeSentinel": 5.72,
+    "BearBeeContrarian": 2.38,
+    "QueenDistiller": 5.1
+  },
+  "agent_votes_source": "agent_details",
+  "weights_used": {
+    "signal": 0.0,
+    "catalyst": 0.332,
+    "sentiment": 0.325,
+    "odds": 0.343,
+    "risk_adj": 0.0
+  },
+  "low_conviction": false,
+  "low_conviction_reason": "",
+  "cs_rank": {
+    "final": 0.138,
+    "signal": 0.586,
+    "catalyst": 0.759,
+    "sentiment": 0.724,
+    "odds": 0.034,
+    "risk_adj": 0.379
+  },
+  "actual_prices": {
+    "t1": null,
+    "t7": null,
+    "t30": null
+  },
+  "created_at": "2026-09-22T14:45:50.752305"
+}

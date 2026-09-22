@@ -3007,9 +3007,10 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
 
     随代码发布的静态资源（`.nojekyll`/`chart.umd.min.js`）与
     `report_deployer.deploy_static_to_ghpages` 共用
-    `CODE_SHIPPED_STATIC_ASSETS` + `resolve_code_shipped_asset_sources`——
-    data_root 里找不到时退回 `repo` 读（v0.45.305：此前这里独立维护一份
-    白名单、只看 data_root，见那两个定义处的注释）。
+    `CODE_SHIPPED_STATIC_ASSETS`/`CORE_STATIC_FILES`/`apply_code_shipped_fallback`
+    ——data_root 里找不到时退回 `repo` 读（v0.45.305：此前这里独立维护一份
+    白名单、只看 data_root；v0.45.311：核心白名单与回落逻辑也收进
+    `report_deployer` 共用，不再各写各的，见那几个定义处的注释）。
     """
     import subprocess
     import os
@@ -3019,14 +3020,14 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     # `PATHS` 已在本文件顶部模块级导入
     from report_deployer import (
         CODE_SHIPPED_STATIC_ASSETS as _CODE_SHIPPED_ASSETS,
-        resolve_code_shipped_asset_sources as _resolve_code_asset_sources,
+        CORE_STATIC_FILES as _CORE_STATIC_FILES,
+        apply_code_shipped_fallback as _apply_code_shipped_fallback,
     )
     data_root = str(PATHS.home)
     repo = str(PATHS.git_repo_root)
     date_str = pdt_today()
     _ml_pat = _re.compile(r"^alpha-hive-[\w.-]+-ml-enhanced-\d{4}-\d{2}-\d{2}\.html$")
-    _CORE = {"index.html", "dashboard-data.json", "manifest.json",
-             "sw.js", "rss.xml"} | _CODE_SHIPPED_ASSETS
+    _CORE = _CORE_STATIC_FILES | _CODE_SHIPPED_ASSETS
     try:
         from is_trading_day import filename_is_nontrading_day as _fnt_dep
     except Exception:
@@ -3053,36 +3054,39 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
         _log.warning("gh-pages 同步：无静态文件（数据根 %s 未发现任何报告文件）", data_root)
         return
     # 随代码发布的静态资源：data_root 里没找到的，退回 git 仓库根读。
-    _repo_fallback = _resolve_code_asset_sources(data_root, repo, file_source)
-    for _asset, _src in _repo_fallback.items():
-        files.append(_asset)
-        file_source[_asset] = _src
-    _missing_code_assets = _CODE_SHIPPED_ASSETS - file_source.keys()
-    if _missing_code_assets:
-        # v0.45.310：升级到 error + 🚨，理由同 report_deployer 同名分支的注释
-        # ——纯 warning 在这个仓库的 Slack 精简规则下不会触达任何人。
-        _log.error(
-            "🚨 随代码发布的静态资源缺失，本次同步不含 %s（data_root=%s 与 "
-            "git_repo_root=%s 都没有）——线上可能出现 Chart.js 脚本 404 / "
-            "Service Worker cache.addAll 失败",
-            sorted(_missing_code_assets), data_root, repo,
-        )
+    _apply_code_shipped_fallback(files, file_source, data_root, repo, "同步")
 
     idx = os.path.join(repo, ".git", "gh-pages-index")
     if os.path.exists(idx):
         os.remove(idx)
     env = os.environ.copy()
     env["GIT_INDEX_FILE"] = idx
-    try:
-        # hash-object 读 file_source[f] 下的绝对路径（内容可能不在 repo 工作区
-        # 内），index 里登记的路径名仍是裸文件名 f（发布出去的 gh-pages 树结构
-        # 不变，只是内容的物理来源可能是 data_root 也可能是 repo）。
-        for f in sorted(files):
+    # v0.45.311 修复：hash-object 逐文件容错，不再让整段 hash-object/commit/push
+    # 包在同一个大 try/except 里——此前单个文件（含随代码发布静态资源的仓库根
+    # 回落文件）hash 失败会让整次同步全部放弃，不像 report_deployer.
+    # deploy_static_to_ghpages 早就是逐文件容错。hash-object 读 file_source[f]
+    # 下的绝对路径（内容可能不在 repo 工作区内），index 里登记的路径名仍是
+    # 裸文件名 f（发布出去的 gh-pages 树结构不变，只是内容的物理来源可能是
+    # data_root 也可能是 repo）。批量用 --index-info 建 index，代替原来逐文件
+    # 一次 subprocess 的 --cacheinfo 调用。
+    cache_entries = []
+    for f in sorted(files):
+        try:
             blob = subprocess.check_output(
                 ["git", "hash-object", "-w", os.path.join(file_source[f], f)], cwd=repo
             ).decode().strip()
-            subprocess.run(["git", "update-index", "--add", "--cacheinfo",
-                            "100644", blob, f], env=env, cwd=repo, check=True)
+            cache_entries.append(f"100644 {blob}\t{f}")
+        except (subprocess.CalledProcessError, OSError) as _e_blob:
+            _log.warning("hash-object 失败 (%s): %s", f, _e_blob)
+    if not cache_entries:
+        _log.warning("gh-pages 同步：全部 %d 个文件 hash-object 均失败，无内容可提交", len(files))
+        if os.path.exists(idx):
+            os.remove(idx)
+        return
+    try:
+        _idx_input = "\n".join(cache_entries) + "\n"
+        subprocess.run(["git", "update-index", "--add", "--index-info"],
+                        input=_idx_input, env=env, cwd=repo, check=True, text=True)
         tree = subprocess.check_output(["git", "write-tree"], env=env, cwd=repo).decode().strip()
 
         def _msg_fn(n_changed: int) -> str:

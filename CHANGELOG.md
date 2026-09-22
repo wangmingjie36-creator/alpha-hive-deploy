@@ -5,6 +5,68 @@
 
 ---
 
+## [0.45.312] — 2026-09-22 — 占位（进行中：PR #8 CI 修复——`test_ghpages_data_root_migration.py` 的 single-branch clone 测试缺显式 git 身份，本机隐式回落蒙混过关，CI（Ubuntu 跑者）必现失败）
+
+## [0.45.311] — 2026-09-22 — Changed/Fixed：补齐 v0.45.310「未处理的发现」5 条——核心白名单/回落逻辑去重、`chart.umd.min.js` 全仓库单一真相源、`resolve_gh_pages_parent` 的 fetch/ls-remote 加超时、`_sync_ghpages` 逐文件容错
+
+用户要求把 v0.45.310 CHANGELOG「未处理的发现」一节记录的 5 条清理型建议也一并修掉。全部先出方案
+再动手，每条都补了回归测试（含变异检验），逐步验证后合并跑一次全套。
+
+### ①②（Changed）核心白名单 + 随代码资源回落逻辑不再各写各的
+
+`report_deployer.py` 新增 `CORE_STATIC_FILES`（`{"index.html", "dashboard-data.json", "manifest.json",
+"sw.js", "rss.xml"}`）与 `apply_code_shipped_fallback(files, file_source, data_root, repo,
+action_label)`。此前 `deploy_static_to_ghpages`/`_sync_ghpages` 各写一份内容相同的核心文件名集合，
+以及"把 `CODE_SHIPPED_STATIC_ASSETS` 的回落结果并入 `files`/算缺了什么/打 error 日志"这段 ~10 行逻辑；
+两条部署路径现在都改共用这两个定义，`action_label` 只用于日志文案区分"部署"/"同步"。纯提取，行为不变。
+
+### ③（Fixed）`chart.umd.min.js` 从三处硬编码收成全仓库唯一字面量
+
+复检发现实际只有两处独立硬编码（不是三处——仓库根 `index.html` 只是每日渲染产物的快照，真正的源头是
+`templates/dashboard.html`，`dashboard_renderer.py:3008` 用 Jinja2 渲染它生成每日 `index.html`）：
+`templates/dashboard.html:30` 的 `<script src="chart.umd.min.js">` 与 `report_web_assets.py:44` 的
+Service Worker 预缓存清单。新增 `report_deployer.CHART_JS_FILENAME = "chart.umd.min.js"`，
+`CODE_SHIPPED_STATIC_ASSETS` 改引用它；`templates/dashboard.html` 改成 Jinja 占位符
+`{{ chart_js_filename }}`，`dashboard_renderer.render_dashboard_html()` 渲染时传入这个变量；
+`report_web_assets.write_pwa_files()` 的预缓存清单也改引用同一常量。全仓库现在只剩一处字面量——
+Chart.js 升级到带版本号的新文件名时，改一处即可，不会再复现"部署清单里有、模板/SW 引用的却是旧
+名字"的那类问题。
+
+新增 `tests/test_chart_js_single_source_of_truth.py`（4 项）：正向验证 sw.js/渲染出的 `index.html`
+都跟着常量走，各配一条变异检验（把常量改名成哨兵值，断言下游产物跟着变，不跟着变就说明还在用自己
+那份硬编码副本）。
+
+### ④（Fixed）`resolve_gh_pages_parent` 的 `git fetch`/`git ls-remote` 补超时
+
+此前两个真正触网的 git 调用都不设超时——网络真的挂起（不是报错，是没反应）时会无限期阻塞，而本函数
+被 `commit_and_push_gh_pages` 包在最多 4 次的重试循环里调用，一次挂起会被放大成整条部署流水线长时间
+卡死。新增 `_run_git_network()` 辅助函数，两处调用都加 `timeout=_GH_PAGES_NETWORK_TIMEOUT`（20 秒），
+超时按"这次探测失败"处理，走原有降级路径（fetch 超时 → 落到 ls-remote；ls-remote 也超时 → 退回本地
+ref、`verified=False`），不引入新的返回形状。
+
+用一个只 accept 连接、从不回应任何字节的裸 TCP 监听器（`git://` 协议客户端连上后会一直阻塞等服务端
+发第一行 ref 广播）真实复现"网络挂起但不报错"的故障，验证设了短超时后函数确实在超时时限内返回；
+附变异对照（还原成不设超时的旧实现，确认真的会一直卡住）。
+
+### ⑤（Fixed）`_sync_ghpages` 改成逐文件容错，不再一个坏文件拖垮整次同步
+
+此前 `generate_ml_report.py::_sync_ghpages` 把整段 hash-object/commit/push 包在一个大
+`try/except` 里，任何一个文件（含随代码发布静态资源的仓库根回落文件）hash-object 失败会让整次同步
+全部放弃、不建任何提交——不像 `report_deployer.deploy_static_to_ghpages` 早就是逐文件容错。改成同样
+的写法：hash-object 逐个 `try/except`，失败的单个文件跳过 + 记警告，用 `--index-info` 批量建 index
+（顺带把逐文件一次 `update-index --cacheinfo` 调用改成一次批量调用，减少 subprocess 数量）。
+
+真实复现：mock 单个文件的 `git hash-object` 抛错，在改动前的原始 v0.45.310 源码上跑新的正向测试
+（`git show HEAD:generate_ml_report.py` 换出），确认真的复现"整次同步异常、gh-pages 分支压根没建
+出来"；换回修复版确认其它文件照常部署、只跳过坏的那个文件。
+
+### 验证
+
+`tests/test_ghpages_data_root_migration.py`（15→19 项）+ `tests/test_chart_js_single_source_of_truth.py`
+（新增 4 项）+ `tests/test_dashboard_contract.py`/`tests/test_dashboard_renderer.py`（确认 Jinja
+占位符改动没有破坏模板契约）共 40 项全绿；ruff 全过；全套回归（`--deselect` 掉已知 flaky 的
+`TestCoverageHorizon`）5274 passed / 0 failure。
+
 ## [0.45.310] — 2026-09-22 — Fixed：`/code-review high` 复检 v0.45.305 发现的严重回归——「无静态文件可部署」守卫在随代码发布静态资源并入之后才判，data_root 整个空掉时会把 gh-pages 整棵重建成只剩两个文件，清空线上网站；顺带修两处轻量伴生问题
 
 用户要求对 v0.45.305 做二次检查（`/code-review high`），8 个 finder 角度 + 逐条独立核实后报出 10 条发现，
@@ -57,9 +119,9 @@ docstring 自称要消灭的"两条路径各写一份、改一处漏一处"那�
 **验证**：`tests/test_ghpages_data_root_migration.py` 15 passed；ruff 全过；全套回归（`--deselect` 掉
 已知 flaky 的 `TestCoverageHorizon`）5264 passed / 0 failure。
 
-### 未处理的发现（8 项发现中的 6 项，记录在案）
+### 未处理的发现（10 项发现中的 5 项，记录在案）
 
-`/code-review high` 还报出 6 条 reuse/altitude/efficiency 类的清理型建议，均属真实但非阻断性，本次
+`/code-review high` 还报出 5 条 reuse/altitude/efficiency 类的清理型建议，均属真实但非阻断性，本次
 未动：① `_CORE_FILES`/`_CORE` 里那 5 个非 `CODE_SHIPPED_STATIC_ASSETS` 的核心文件名仍在两个文件里各写
 一份；② 随代码资源的回落应用块（append + 缺失告警）在两个调用点几乎逐字重复；③ `chart.umd.min.js` 仍
 独立硬编码在 `report_web_assets.py`/`index.html`/`templates/dashboard.html` 三处，`CODE_SHIPPED_STATIC_ASSETS`

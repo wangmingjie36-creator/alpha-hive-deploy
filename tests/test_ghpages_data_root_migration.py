@@ -657,3 +657,244 @@ class TestEmptyDataRootDoesNotWipeGhPages:
         assert (clone_after / "index.html").read_text() == "<html>real ml site</html>", (
             "data_root 清空后必须跳过同步、保留线上原内容——不能把 gh-pages 整棵"
             "重建成只剩 .nojekyll/chart.umd.min.js 两个文件")
+
+
+class TestResolveGhPagesParentNetworkTimeout:
+    """v0.45.311：`resolve_gh_pages_parent` 里真正触网的 `git fetch`/
+    `git ls-remote` 此前不设超时——网络真的挂起（不是报错，是没反应）时会
+    无限期阻塞，而本函数被包在 `commit_and_push_gh_pages` 最多 4 次的重试
+    循环里，一次挂起会被放大成整条部署流水线长时间卡死。
+
+    用一个只 accept 连接、从不回应任何字节的裸 TCP 监听器模拟"网络挂起但不
+    报错"的真实故障：`git://` 协议的客户端连上后会一直阻塞等服务端发送第一行
+    ref 广播，永远等不到——这正是"挂起"而非"报错"的真实形态，`--reject`/
+    连不上端口这类立即失败的场景不需要超时也能正常工作，不是本次要测的东西。
+    """
+
+    def test_hung_remote_times_out_instead_of_blocking_forever(self, tmp_path, monkeypatch):
+        import socket
+        import threading
+        import time
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        stop = threading.Event()
+
+        def _accept_and_hang():
+            srv.settimeout(1.0)
+            while not stop.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except socket.timeout:
+                    continue
+                # 接了连接就什么都不发、不关闭——让对端的 git 客户端一直
+                # 阻塞在等第一行响应上，直到我们主动收尾。
+                stop.wait(30)
+                conn.close()
+
+        t = threading.Thread(target=_accept_and_hang, daemon=True)
+        t.start()
+        try:
+            repo = tmp_path / "hung_repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            _git("config", "user.email", "t@t.com", cwd=repo)
+            _git("config", "user.name", "t", cwd=repo)
+            _git("remote", "add", "origin", f"git://127.0.0.1:{port}/nonexistent.git", cwd=repo)
+
+            monkeypatch.setattr(rd, "_GH_PAGES_NETWORK_TIMEOUT", 2)
+
+            start = time.monotonic()
+            parent, verified = rd.resolve_gh_pages_parent(str(repo))
+            elapsed = time.monotonic() - start
+
+            assert elapsed < 15, (
+                f"耗时 {elapsed:.1f}s——超时设置没有生效，函数被两次网络调用"
+                "（fetch 挂起后还要再等 ls-remote 挂起一次）的默认（无限期）"
+                "超时卡住了，不是设置的 2s×2 上限")
+            assert verified is False, "网络挂起应该判定为未经校验，不能冒充已验证"
+        finally:
+            stop.set()
+            srv.close()
+            t.join(timeout=5)
+
+    def test_mutation_without_timeout_hangs(self, tmp_path, monkeypatch):
+        """变异测试：把 `_run_git_network` 换回不设超时的裸 `subprocess.run`，
+        必须复现"明显更久（逼近或超过我们设的安全上限）"——证明上面那条测试
+        测的是真问题，不是因为 git 本身连接失败得很快。用一个短但可观测的
+        安全上限（5s）而非真的等到 git 默认超时（可能几分钟），避免这条
+        对照测试本身拖垮测试套件。"""
+        import socket
+        import subprocess as _sp
+        import threading
+        import time
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        stop = threading.Event()
+
+        def _accept_and_hang():
+            srv.settimeout(1.0)
+            while not stop.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except socket.timeout:
+                    continue
+                stop.wait(30)
+                conn.close()
+
+        t = threading.Thread(target=_accept_and_hang, daemon=True)
+        t.start()
+
+        def _no_timeout_run(args, repo):
+            # 旧实现：不传 timeout=
+            try:
+                return _sp.run(args, cwd=repo, capture_output=True, text=True)
+            except OSError:
+                return None
+
+        monkeypatch.setattr(rd, "_run_git_network", _no_timeout_run)
+        try:
+            repo = tmp_path / "hung_repo_mut"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            _git("config", "user.email", "t@t.com", cwd=repo)
+            _git("config", "user.name", "t", cwd=repo)
+            _git("remote", "add", "origin", f"git://127.0.0.1:{port}/nonexistent.git", cwd=repo)
+
+            def _call_with_own_timeout():
+                rd.resolve_gh_pages_parent(str(repo))
+
+            start = time.monotonic()
+            call_thread = threading.Thread(target=_call_with_own_timeout, daemon=True)
+            call_thread.start()
+            call_thread.join(timeout=5)
+            elapsed = time.monotonic() - start
+            assert call_thread.is_alive(), (
+                f"还原成不设超时的旧实现后，函数应该仍卡在网络调用上（{elapsed:.1f}s "
+                "还没返回）——如果它这时候已经返回了，说明这条对照测试没有测到"
+                "真问题，上面的正向测试就没有对照价值")
+        finally:
+            stop.set()
+            srv.close()
+            t.join(timeout=5)
+            # call_thread 是 daemon 线程，挂起的子进程会在进程退出时被清理；
+            # 这里不等它了（它本来就卡住，join 只会拖慢测试收尾）。
+
+
+class TestSyncGhpagesResilientToSingleFileFailure:
+    """v0.45.311：`_sync_ghpages`（`generate_ml_report.py`）此前把整段
+    hash-object/commit/push 包在一个大 `try/except` 里——任何一个文件 hash
+    失败会让整次同步全部放弃，不像 `report_deployer.deploy_static_to_ghpages`
+    早就是逐文件容错（单个文件失败只跳过该文件、记警告，其它文件照常部署）。
+    改成同样的逐文件容错后，本文件验证"一个坏文件不该拖垮整次同步"。
+    """
+
+    def test_one_bad_file_does_not_abort_the_whole_sync(self, tmp_path, monkeypatch):
+        import generate_ml_report as gmr
+        import subprocess as _sp
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_resilience")
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(repo))
+
+        (data_root / "index.html").write_text("<html>good</html>")
+        (data_root / "dashboard-data.json").write_text('{"_generated_at": "t1"}')
+
+        real_check_output = _sp.check_output
+
+        def _flaky_check_output(args, **kwargs):
+            if (args[:2] == ["git", "hash-object"]
+                    and str(args[-1]).endswith("dashboard-data.json")):
+                raise _sp.CalledProcessError(1, args, output=b"", stderr=b"simulated hash failure")
+            return real_check_output(args, **kwargs)
+
+        with patch("subprocess.check_output", side_effect=_flaky_check_output):
+            gmr._sync_ghpages(["AAPL"], successful_count=1)
+
+        clone = tmp_path / "verify_clone_resilience"
+        subprocess.run(["git", "clone", "-q", "--branch", "gh-pages", str(bare), str(clone)],
+                        check=True, capture_output=True)
+        assert (clone / "index.html").read_text() == "<html>good</html>", (
+            "一个文件 hash-object 失败不该让整次同步全部放弃——其它文件应该照常部署")
+        assert not (clone / "dashboard-data.json").exists(), (
+            "hash 失败的那个文件不该出现在部署结果里——它本身就没能生成 blob")
+
+    def test_mutation_reverting_per_file_resilience_aborts_whole_sync(self, tmp_path, monkeypatch):
+        """变异测试：把 hash-object 循环还原成"整段包一个大 try/except、单个
+        文件失败直接抛出"的旧写法，必须复现"一个坏文件拖垮整次同步"——证明
+        上面那条测试测的是真问题。"""
+        import generate_ml_report as gmr
+        import subprocess as _sp
+
+        data_root = tmp_path / "data_root"
+        data_root.mkdir()
+        monkeypatch.setenv("ALPHA_HIVE_HOME", str(data_root))
+        repo, bare = _init_repo_with_origin(tmp_path, "coderepo_resilience_mut")
+        monkeypatch.setenv("ALPHA_HIVE_GIT_REPO", str(repo))
+
+        (data_root / "index.html").write_text("<html>good</html>")
+        (data_root / "dashboard-data.json").write_text('{"_generated_at": "t1"}')
+
+        real_check_output = _sp.check_output
+
+        def _flaky_check_output(args, **kwargs):
+            if (args[:2] == ["git", "hash-object"]
+                    and str(args[-1]).endswith("dashboard-data.json")):
+                raise _sp.CalledProcessError(1, args, output=b"", stderr=b"simulated hash failure")
+            return real_check_output(args, **kwargs)
+
+        # 旧写法：把整段 hash-object 循环搬进外层 try/except 之内、不做逐文件
+        # 捕获——一个文件 hash 失败会直接从循环里抛出，被外层大 except 接住，
+        # 整次同步不建任何提交。
+        def _old_style_sync_ghpages(tickers, successful_count):
+            import os
+            from report_deployer import (
+                CODE_SHIPPED_STATIC_ASSETS as _assets,
+                CORE_STATIC_FILES as _core,
+                apply_code_shipped_fallback as _apply,
+            )
+            if successful_count == 0:
+                return
+            data_root_ = str(gmr.PATHS.home)
+            repo_ = str(gmr.PATHS.git_repo_root)
+            _CORE = _core | _assets
+            files = [f for f in os.listdir(data_root_) if f in _CORE]
+            file_source = {f: data_root_ for f in files}
+            if not files:
+                return
+            _apply(files, file_source, data_root_, repo_, "同步")
+            idx = os.path.join(repo_, ".git", "gh-pages-index")
+            if os.path.exists(idx):
+                os.remove(idx)
+            env = os.environ.copy()
+            env["GIT_INDEX_FILE"] = idx
+            try:
+                for f in sorted(files):
+                    blob = _sp.check_output(
+                        ["git", "hash-object", "-w", os.path.join(file_source[f], f)], cwd=repo_
+                    ).decode().strip()
+                    _sp.run(["git", "update-index", "--add", "--cacheinfo",
+                             "100644", blob, f], env=env, cwd=repo_, check=True)
+                tree = _sp.check_output(["git", "write-tree"], env=env, cwd=repo_).decode().strip()
+                from report_deployer import commit_and_push_gh_pages
+                commit_and_push_gh_pages(repo_, tree, lambda n: "old style")
+            except Exception:
+                pass
+            finally:
+                if os.path.exists(idx):
+                    os.remove(idx)
+
+        with patch("subprocess.check_output", side_effect=_flaky_check_output):
+            _old_style_sync_ghpages(["AAPL"], successful_count=1)
+
+        # 旧写法下 gh-pages 分支应该压根没建出来（首次部署、整段异常被吞掉）。
+        precheck = subprocess.run(["git", "ls-remote", "--heads", str(bare), "gh-pages"],
+                                   capture_output=True, text=True)
+        assert not precheck.stdout.strip(), (
+            "如果这条断言失败，说明旧写法在这个环境里没有复现'一个坏文件拖垮整次同步'——"
+            "上面的正向测试就没有对照价值了")

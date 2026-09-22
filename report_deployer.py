@@ -13,6 +13,24 @@ import production_sync
 _log = get_logger("report_deployer")
 
 
+#: Chart.js 自托管文件名（v0.41.0，jsdelivr 大陆不可达）——**全仓库唯一字面量**。
+#: v0.45.311 前，这个文件名独立硬编码在三个地方：`CODE_SHIPPED_STATIC_ASSETS`
+#: （本文件）、`report_web_assets.write_pwa_files` 的 Service Worker 预缓存清单、
+#: `templates/dashboard.html` 的 `<script src=...>`（`dashboard_renderer.py` 用
+#: Jinja2 渲染这个模板生成每日 `index.html`，仓库根那份 `index.html` 只是渲染
+#: 产物的快照，不是独立源头）。三处各写一份意味着 Chart.js 升级到带版本号/哈希
+#: 的新文件名时，漏改一处就会复现"部署清单里有、模板/SW 里引用的却是旧名字"
+#: 这一整类问题。现在 `report_web_assets`/`dashboard_renderer` 都改引用这个常量，
+#: 模板里的字面量换成 Jinja 占位符 `{{ chart_js_filename }}`。
+CHART_JS_FILENAME = "chart.umd.min.js"
+
+#: 与 `CODE_SHIPPED_STATIC_ASSETS` 对应的"运行时产物"核心文件——本身会在每次
+#: 扫描/报告生成时写进 `data_root`，不需要仓库根回落。v0.45.311 前这 5 个文件名
+#: 在 `deploy_static_to_ghpages`/`_sync_ghpages` 里各写了一份完全相同的字面量。
+CORE_STATIC_FILES = frozenset({
+    "index.html", "dashboard-data.json", "manifest.json", "sw.js", "rss.xml",
+})
+
 #: 随代码发布、不由任何 Python 代码写进 data_root 的静态资源——物理上只活在
 #: git 仓库工作区（`PATHS.git_repo_root`），跟着代码仓库走，不跟数据根走。
 #:
@@ -26,9 +44,9 @@ _log = get_logger("report_deployer")
 #: 就会把它们从线上删掉：Chart.js 脚本 404、Service Worker `cache.addAll`
 #: 因清单里的文件取不到而失败。
 #:
-#: 两条部署路径改共用这一份定义 + `resolve_code_shipped_asset_sources`，
-#: 不再各写各的白名单（此前改一处漏一处）。
-CODE_SHIPPED_STATIC_ASSETS = frozenset({".nojekyll", "chart.umd.min.js"})
+#: 两条部署路径改共用这一份定义 + `resolve_code_shipped_asset_sources`/
+#: `apply_code_shipped_fallback`，不再各写各的白名单（此前改一处漏一处）。
+CODE_SHIPPED_STATIC_ASSETS = frozenset({".nojekyll", CHART_JS_FILENAME})
 
 
 def resolve_code_shipped_asset_sources(data_root: str, repo: str,
@@ -49,6 +67,66 @@ def resolve_code_shipped_asset_sources(data_root: str, repo: str,
         if os.path.exists(os.path.join(repo, asset)):
             sources[asset] = repo
     return sources
+
+
+def apply_code_shipped_fallback(files: List[str], file_source: Dict[str, str],
+                                 data_root: str, repo: str, action_label: str) -> None:
+    """把 `resolve_code_shipped_asset_sources` 找到的回落文件并入 `files`/
+    `file_source`（原地修改），两处都没找到的打 error 日志。
+
+    v0.45.311 前，这段"回落合并 + 算缺了什么 + 打日志"的逻辑在
+    `deploy_static_to_ghpages`/`_sync_ghpages` 里逐字重复了一份——收成这一个
+    函数，两条部署路径共用；`action_label` 只用于日志文案区分"部署"/"同步"。
+
+    ⚠️ 调用方必须先判完"无文件可部署"的守卫、确认 `files` 里已经有至少一个
+    真实报告文件，再调用本函数——见 `deploy_static_to_ghpages`/`_sync_ghpages`
+    调用点前那段 v0.45.310 的注释（本函数的回落结果几乎总能命中，不能拿它
+    当"这次有没有东西可部署"的判据）。
+    """
+    _repo_fallback = resolve_code_shipped_asset_sources(data_root, repo, file_source)
+    for asset, src in _repo_fallback.items():
+        files.append(asset)
+        file_source[asset] = src
+    _missing_code_assets = CODE_SHIPPED_STATIC_ASSETS - file_source.keys()
+    if _missing_code_assets:
+        # error + 🚨——纯 warning 在这个仓库的 Slack 精简规则下不会触达任何人，
+        # `verify_cdn_deployment` 也只查 dashboard-data.json 的时间戳、不查
+        # 静态资源存不存在，等于没有任何「谁会红」的观测点。
+        _log.error(
+            "🚨 随代码发布的静态资源缺失，本次%s不含 %s（data_root=%s 与 "
+            "git_repo_root=%s 都没有）——线上可能出现 Chart.js 脚本 404 / "
+            "Service Worker cache.addAll 失败",
+            action_label, sorted(_missing_code_assets), data_root, repo,
+        )
+
+
+#: `resolve_gh_pages_parent` 里两次真正触网的 git 调用（`fetch`/`ls-remote`）
+#: 的超时上限（秒）。v0.45.311 前两者都不设超时——网络真的挂起时会无限期
+#: 阻塞，而本函数被包在 `commit_and_push_gh_pages` 最多 4 次的重试循环里，
+#: 一次挂起会被放大成整条部署流水线长时间卡死。20s 是"给一次正常但慢的
+#: fetch 留够余量，又不至于让一次真挂起拖垮太久"的折中值，不是精确测量出来的。
+_GH_PAGES_NETWORK_TIMEOUT = 20
+
+
+def _run_git_network(args: List[str], repo: str):
+    """跑一次可能触网的 git 命令，统一处理超时。
+
+    返回 `subprocess.CompletedProcess`，或 `None`（超时/`OSError`）——调用方
+    把 `None` 当成"这次探测失败"处理，和非零退出码走同一条降级路径，不需要
+    额外分支。
+    """
+    import subprocess
+    try:
+        return subprocess.run(
+            args, cwd=repo, capture_output=True, text=True,
+            timeout=_GH_PAGES_NETWORK_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        _log.error(
+            "🚨 git 网络调用超时/失败（>%ss）：%s —— %s",
+            _GH_PAGES_NETWORK_TIMEOUT, " ".join(args), e,
+        )
+        return None
 
 
 def ghpages_tree_delta(repo: str, tree: str, parent: Optional[str]) -> Tuple[bool, int]:
@@ -126,20 +204,27 @@ def resolve_gh_pages_parent(repo: str) -> Tuple[Optional[str], bool]:
     （网络/权限）或说分支其实存在，一律退回未经校验的本地 ref 兜底，不冒充
     已验证。
 
+    v0.45.311：`fetch`/`ls-remote` 都设了 `timeout=_GH_PAGES_NETWORK_TIMEOUT`——
+    此前两者都不设超时，网络真的挂起（不是报错，是没反应）时会一直卡住；
+    本函数被 `commit_and_push_gh_pages` 包在最多 4 次的重试循环里调用，
+    没有超时会让一次网络故障放大成整条流水线长时间卡死。超时按"这次探测
+    失败"处理，走原有的降级路径（fetch 超时 → 落到 ls-remote；ls-remote 也
+    超时 → 退回本地 ref、`verified=False`），不引入新的返回形状。
+
     返回 `(parent_sha, verified)`：
       verified=True   要么 fetch 成功拿到了 `origin/gh-pages` 的真头；要么
                        `ls-remote` 正面核实远端确实没有这个分支（真·首次部署，
                        `parent_sha=None`）。
-      verified=False  两者都做不到（网络/权限问题）。`parent_sha` 退回本地
-                       `gh-pages` ref 尽力而为——**不可信**，调用方必须把这次
-                       「未经校验」喊出来，不能悄悄当成正常路径处理。
+      verified=False  两者都做不到（网络/权限问题，含超时）。`parent_sha` 退回
+                       本地 `gh-pages` ref 尽力而为——**不可信**，调用方必须把
+                       这次「未经校验」喊出来，不能悄悄当成正常路径处理。
     """
     import subprocess
-    fetch = subprocess.run(
+    fetch = _run_git_network(
         ["git", "fetch", "origin", "+refs/heads/gh-pages:refs/remotes/origin/gh-pages"],
-        cwd=repo, capture_output=True, text=True,
+        repo,
     )
-    if fetch.returncode == 0:
+    if fetch is not None and fetch.returncode == 0:
         try:
             remote = subprocess.check_output(
                 ["git", "rev-parse", "origin/gh-pages"],
@@ -151,11 +236,8 @@ def resolve_gh_pages_parent(repo: str) -> Tuple[Optional[str], bool]:
             # （成功就必然更新了 origin/gh-pages）。万一真出现，别冒充"已校验"，
             # 落到下面的 ls-remote 核实分支。
             pass
-    ls = subprocess.run(
-        ["git", "ls-remote", "--heads", "origin", "gh-pages"],
-        cwd=repo, capture_output=True, text=True,
-    )
-    if ls.returncode == 0 and not ls.stdout.strip():
+    ls = _run_git_network(["git", "ls-remote", "--heads", "origin", "gh-pages"], repo)
+    if ls is not None and ls.returncode == 0 and not ls.stdout.strip():
         return None, True   # ls-remote 正面核实：远端确实没有 gh-pages 分支，真·首次部署
     try:
         local = subprocess.check_output(
@@ -359,10 +441,7 @@ def deploy_static_to_ghpages(reporter):
     env["GIT_INDEX_FILE"] = idx
     # ── D2: 部署文件白名单 ──
     import re as _re_deploy
-    _CORE_FILES = {
-        "index.html", "dashboard-data.json", "manifest.json",
-        "sw.js", "rss.xml",
-    } | CODE_SHIPPED_STATIC_ASSETS
+    _CORE_FILES = CORE_STATIC_FILES | CODE_SHIPPED_STATIC_ASSETS
     # v0.45.15: 原 `\w+` 不含连字符 ⇒ alpha-hive-BRK-B-ml-enhanced-*.html 永远
     # 匹配不上，报告生成了却从不部署，而 index.html 照常链接它 → 线上 404。
     # 与 v0.45.2（Agent 校验层）、v0.45.8（CBOE 取数层）是同一个类份额连字符问题。
@@ -404,22 +483,7 @@ def deploy_static_to_ghpages(reporter):
     # 随代码发布的静态资源：data_root 里没找到的，退回 git 仓库根读
     # （v0.45.305：此前这里只看 data_root，阶段 5 后 `.nojekyll`/
     # `chart.umd.min.js` 会从此在线上消失，见 CODE_SHIPPED_STATIC_ASSETS 注释）。
-    _repo_fallback = resolve_code_shipped_asset_sources(data_root, repo, file_source)
-    for asset, src in _repo_fallback.items():
-        files.append(asset)
-        file_source[asset] = src
-    _missing_code_assets = CODE_SHIPPED_STATIC_ASSETS - file_source.keys()
-    if _missing_code_assets:
-        # v0.45.310：升级到 error + 🚨——纯 warning 在这个仓库的 Slack 精简
-        # 规则下不会触达任何人，`verify_cdn_deployment` 也只查
-        # dashboard-data.json 的时间戳、不查静态资源存不存在，等于没有任何
-        # 「谁会红」的观测点（见 CLAUDE.md「这个失败，下游怎么知道？」一节）。
-        _log.error(
-            "🚨 随代码发布的静态资源缺失，本次部署不含 %s（data_root=%s 与 "
-            "git_repo_root=%s 都没有）——线上可能出现 Chart.js 脚本 404 / "
-            "Service Worker cache.addAll 失败",
-            sorted(_missing_code_assets), data_root, repo,
-        )
+    apply_code_shipped_fallback(files, file_source, data_root, repo, "部署")
     # 批量写入 blob + index（逐个 hash-object，但用 stdin 批量 update-index）。
     # hash-object 读的是 file_source[f] 下的绝对路径（内容可能不在 repo 工作区
     # 内），写进树里的路径名（index-info 第三列）仍是裸文件名 f——发布出去的
