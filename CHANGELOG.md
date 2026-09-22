@@ -473,9 +473,10 @@ A 还多开了 SNOW / VKTX——生产早持有（09-08 / 09-15），空沙箱�
 用 `ps -axo command | grep '[p]ytest'`，括号技巧让 grep 不匹配自己。）
 
 **二次检查（同日，复核本条自己）**：
-- **变基后重跑**：并入 0.45.297–299 之后，全套件在真实钟 / +120 天 / +400 天各 **1 红 / 5126 过**，三次都只有 `TestCoverageHorizon`；
-  选中数 5129 与 `--collect-only` 闸一致（此前的 5100 → 5129 是别的 session 新增的 29 条，不是 harness 的问题）。别人新合的测试至 +400 天没有新炸弹。
-- **CI 独立核对**（GitHub Actions，Linux / UTC / Python 3.11.16，对本提交 `6b7dca02` 的那次）：5104 PASSED / 36 SKIPPED / 1 FAILED / 2 XFAIL，
+- **变基后重跑**：真实钟 / +120 天 / +400 天各 **1 红 / 5126 过**，三次都只有 `TestCoverageHorizon`；
+  选中数 5129 与 `--collect-only` 闸一致（此前的 5100 → 5129 是别的 session 新增的 29 条，不是 harness 的问题）。
+  ⚠️ 这里「并入 0.45.297–299 之后」的说法**不准**，见下方「三次复查」——0.45.297 的真实测试改动其实还没进这棵树。
+- **CI 独立核对**（GitHub Actions，Linux / Python 3.11.16，对本提交 `6b7dca02` 的那次）：5104 PASSED / 36 SKIPPED / 1 FAILED / 2 XFAIL，
   唯一的 FAILED 是 `TestCoverageHorizon`；本条改的三处共 13 条全 PASSED。
 - ⚠️ **观察（未处理，留给用户）**：`main` 最近 100 次 CI（2026-09-15 起）**0 次成功**（67 红 / 32 取消 / 1 进行中）。设计红常驻，
   CI 状态灯已经无法提示「新回归」——得点进去读失败清单才知道红的是不是那一条。
@@ -485,8 +486,29 @@ A 还多开了 SNOW / VKTX——生产早持有（09-08 / 09-15），空沙箱�
   「先 import 第三方栈再换类」的安全网无声消失。加了两道会响的守卫（cwd 下无 `tests/`、扫不到 numpy/pandas ⇒ `RuntimeError`，两道都实测会响），
   扫描从「根目录 + tests/」扩到整仓（原来漏掉只在子包里 import 的 `telegram`）。换类逻辑没变；用新版重跑：三个改动文件在 +120 / +400 天各 85 过，
   `test_prefetch_market_bundle`（pandas 钟的 canary）在 +30 / +400 天各 30 过。
-- **没有查出问题的部分**：三处测试的逻辑本身（CI 的 UTC 时区、不同星期都成立；跨午夜按逻辑推演成立——日期取自两次 `today()` 之间——但**没有实测跨午夜**）；
+- **没有查出问题的部分**：三处测试的逻辑本身（不同星期都成立；跨午夜按逻辑推演成立——日期取自两次 `today()` 之间——但**没有实测跨午夜**）；
   `CALLS` 改名无外部引用；`test_pytestmark_placement` 这类会遍历测试文件的守卫在 CI 上对改过的文件全过。
+
+**三次复查（同日，复核上一轮复查）**：
+- ⚠️ **上一轮「变基后重跑」这句话本身不实**：那次重跑用的树是 `6b7dca02`（我自己的提交），而 0.45.297 真正的测试改动
+  `556fe9a9`（`test_fg_exposure_gate_forward_test.py` +609 行）是在 `6b7dca02` **之后**才推上 `main` 的——「并入 297–299 之后重跑」
+  这句断言当时没有事实支持。这次在 `main` 尖端（含 297 的真实改动，以及后续 298–307）重新全量拨钟：真实钟 / +30 / +120 / +400 天
+  各 **1 红 / 5188 过**，仍只是 `TestCoverageHorizon`。297 新增的 609 行没有引入新炸弹（在这四个时钟范围内）。
+- ⚠️ **撤回「Linux / UTC」里的 UTC**：两次想独立验证 CI 跑在 UTC 都失败了——① 用测试内嵌的 `+00:00` parametrize id 当「本地钟」，
+  那是测试数据不是运行时钟；② 用 app 日志的 `HH:MM:SS` 行去比对 GH Actions 时间戳，但 app 日志是**失败时一次性回放**的捕获输出，
+  它的时间戳落后 GH 时间戳 1~4 分钟（测试跑了多久就落后多久），根本不是同一时刻的两个读数，比出来的「偏移」是噪音不是信号。
+  UTC 是 GitHub `ubuntu-latest` runner 的文档默认值，**这次没有从日志里独立坐实**，撤回「已核对」的说法。
+- **发现一个不相关的 CI 现象（未处理，仅记录）**：抽样 5 天各一次失败的 CI 跑（09-15/16/17/18/21）+ 我这次提交前一次（`adbd0b8e`），
+  09-16、09-17 那两次在设计红之外还各多 5 条：`test_ic_rerun_readiness.py` / `test_fg_exposure_gate_forward_test.py` /
+  `test_resonance_boost_forward_test.py` 里的几条撞上了 `_offline_transport` 的「伸手取外网了」（`api.alternative.me`、
+  `production.dataviz.cnn.io`、`fc.yahoo.com`）——是隔离偶发失灵，与本条改动无关（文件不同、机制不同，不是日期字面量）。
+  09-15/18/21（含我这条提交本身 `6b7dca02`）都只有设计红。**未处理，不在本条范围内。**
+- **harness 里一个真的、但很小的效率问题**（不是正确性 bug）：扫描用 `rglob()+事后过滤`，在本仓的 main checkout 里跑（而不是
+  worktree）会先把 16 个同级 worktree 目录全部遍历一遍再丢掉——24222 个 `.py` 文件走了 1.24s，只保留 804 个；改成
+  `os.walk()` 原地剪枝后同一目录降到 0.01s，且**结果集合逐字节相同**（两种实现在 worktree 与 main checkout 各测过一遍，集合相等）。
+  已修（只改 harness 实现，不改行为）；1.24s 相对 4~7 分钟的整套件可忽略，记录只为诚实。
+- **顺带**：`alpha-hive-time-bomb-audit.md` 的 frontmatter description 上一轮改了正文的「五个踩坑」→「六个」，
+  但漏了 description 字段自己，这次一并改掉。
 
 ## [0.45.295] — 2026-09-20 — Fixed：`weekly_optimizer` 的 `WEIGHT_CLAMPS` 与归零维度结构矛盾，每周诊断死在两道闸之前（连续两周）；修完盒子后闸 1 会换个理由恒红，一并修；Added：对真实 config 的可行性观测点 + `main()` 不可行路径端到端测试
 
