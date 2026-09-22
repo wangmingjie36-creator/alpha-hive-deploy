@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.305] — 2026-09-22 — 占位（进行中：修 gh-pages 数据根迁移阶段 4 二次检查发现的两个缺陷——`.nojekyll`/`chart.umd.min.js` 只存在于仓库根会在阶段5后首次部署丢失；`resolve_gh_pages_parent` 依赖 fetch 顺带更新 origin/gh-pages，`--single-branch` 克隆下会静默永久失败）
+
 ## [0.45.304] — 2026-09-22 — 占位（进行中：P2/v0.45.279 二次检查后续——补 `consensus_census` 接线测试 + `get_bullish_agents_detail` 异常路径测试，更正 Rival 数值语义 docstring）
 
 ## [0.45.303] — 2026-09-21 — Fixed：`tests/conftest.py::_isolate_paper_portfolio_state` 对「生产真身」的判定依赖导入顺序——单条/子集跑会误报「写穿生产」，而那种进程里守卫盯的是沙箱自己（真写穿生产它也看不见）；Added：2×2 子进程回归矩阵
