@@ -5,7 +5,69 @@
 
 ---
 
-## [0.45.310] — 2026-09-22 — 占位（进行中：/code-review high 复检 v0.45.305 发现的严重回归——「无静态文件可部署」守卫在随代码发布静态资源并入之后才判，data_root 整个空掉时会把 gh-pages 整棵重建成只剩两个文件，清空线上网站；已实测复现+修复+补回归测试）
+## [0.45.310] — 2026-09-22 — Fixed：`/code-review high` 复检 v0.45.305 发现的严重回归——「无静态文件可部署」守卫在随代码发布静态资源并入之后才判，data_root 整个空掉时会把 gh-pages 整棵重建成只剩两个文件，清空线上网站；顺带修两处轻量伴生问题
+
+用户要求对 v0.45.305 做二次检查（`/code-review high`），8 个 finder 角度 + 逐条独立核实后报出 10 条发现，
+其中头两条是**已用真实执行复现**的严重回归——本条即修复它们，另附两条顺手修的伴生问题；其余 6 条
+（reuse/altitude/efficiency 类的清理型建议）记录在案未动，理由见文末「未处理的发现」。
+
+### Fixed ①（严重，已复现）：`deploy_static_to_ghpages`/`_sync_ghpages` 的"无静态文件可部署"守卫被随代码
+发布的静态资源 fallback 绕过
+
+v0.45.305 引入 `CODE_SHIPPED_STATIC_ASSETS` 的 data_root→git_repo_root 回落逻辑时，把回落合并
+（`_repo_fallback` 并入 `files`）写在了 `if not files: return` 守卫**之前**——`.nojekyll`/`chart.umd.min.js`
+随仓库提交、git_repo_root 里几乎总能找到，于是即便 `data_root` 整个是空的（配置错误、阶段 5 数据根迁移
+过程中、上游扫描崩溃在写出任何文件之前），`files` 也不会是空的，守卫形同虚设。gh-pages 每次都是整棵
+重建（不是逐文件合并），于是会把线上网站——`index.html`、`dashboard-data.json`、全部历史报告——替换成
+只剩这两个静态文件。
+
+**复现方式**（本地裸仓库，未碰真实 GitHub）：先正常部署一次建立"线上已有真实内容"的前置状态，再清空
+`data_root`（仓库根仍有 `.nojekyll`/`chart.umd.min.js`）重跑——`deploy_static_to_ghpages` 与
+`_sync_ghpages` 均实测把 gh-pages 替换成只剩两个静态文件，`index.html` 消失。
+
+**修法**：把守卫挪到 `os.listdir(data_root)` 主循环结束之后、`resolve_code_shipped_asset_sources` 回落
+合并**之前**——只有 data_root 确实产出了至少一个真实报告文件，才继续往下走随代码资源回落这一步；
+data_root 为空则直接跳过本次部署/同步，保留线上原内容。两条独立部署路径（`report_deployer.py`/
+`generate_ml_report.py`）分别修。
+
+### Fixed ②（低优先级伴生问题）：`_sync_ghpages` 对 CODE_SHIPPED_STATIC_ASSETS 无差别套用非交易日过滤
+
+`deploy_static_to_ghpages` 显式豁免 `_CORE_FILES`（含 `CODE_SHIPPED_STATIC_ASSETS`）不受非交易日过滤
+影响（`if f not in _CORE_FILES and _fnt_dep(f): continue`），`_sync_ghpages` 此前对所有候选文件一视同仁
+套用 `not _fnt_dep(f)`，没有同等豁免。今天两个静态资源都不含日期子串所以从未真正触发，但这正是 v0.45.305
+docstring 自称要消灭的"两条路径各写一份、改一处漏一处"那类问题的潜伏形态——未来若 `CODE_SHIPPED_STATIC_ASSETS`
+加入带日期/版本号的文件名，`_sync_ghpages` 会在每个周末/假日静默漏掉它而 `deploy_static_to_ghpages` 不会。
+已补齐豁免逻辑对齐两条路径。
+
+### Fixed ③（观测性）：随代码资源缺失时只有 `_log.warning`，没有任何会被看到的信号
+
+`verify_cdn_deployment` 只查 `dashboard-data.json` 的时间戳，不查静态资源是否存在；本仓 Slack 通知精简
+规则本就不推送 warning 级事件——两处都没有静态资源缺失时的"谁会红"观测点，违反 CLAUDE.md
+「硬检查项：这个失败，下游怎么知道？」一节。两处升级为 `_log.error` + 🚨 前缀（与本文件既有的同类
+"需要人注意但不阻断"场景用同一套约定）。顺带把 `CODE_SHIPPED_STATIC_ASSETS - set(file_source)` 改成
+`- file_source.keys()`，去掉一次不必要的 O(n) 拷贝（两处）。
+
+### Added（`tests/test_ghpages_data_root_migration.py`，13→15 项）
+
+- `TestEmptyDataRootDoesNotWipeGhPages`（2 条）：`deploy_static_to_ghpages`/`_sync_ghpages` 各一条，先建立
+  "线上已有真实内容"前置状态，清空 data_root 重跑，断言线上内容原样保留。**变异检验**：用 `git show
+  HEAD:<file>` 换出改动前的 v0.45.305 源码真跑这两条新测试，确认按预期失败（且失败方式正是"gh-pages 被
+  替换成只剩两个静态文件"），再换回修复版确认转绿。
+
+**验证**：`tests/test_ghpages_data_root_migration.py` 15 passed；ruff 全过；全套回归（`--deselect` 掉
+已知 flaky 的 `TestCoverageHorizon`）5264 passed / 0 failure。
+
+### 未处理的发现（8 项发现中的 6 项，记录在案）
+
+`/code-review high` 还报出 6 条 reuse/altitude/efficiency 类的清理型建议，均属真实但非阻断性，本次
+未动：① `_CORE_FILES`/`_CORE` 里那 5 个非 `CODE_SHIPPED_STATIC_ASSETS` 的核心文件名仍在两个文件里各写
+一份；② 随代码资源的回落应用块（append + 缺失告警）在两个调用点几乎逐字重复；③ `chart.umd.min.js` 仍
+独立硬编码在 `report_web_assets.py`/`index.html`/`templates/dashboard.html` 三处，`CODE_SHIPPED_STATIC_ASSETS`
+只统一了"从哪个目录读"，没有统一"有哪些文件"这个更深的问题；④ `resolve_gh_pages_parent` 的 fetch 失败
+回落路径新增了一次 `git ls-remote` 网络调用，未设 `timeout=`，在 4 次重试循环里会翻倍阻塞时长；⑤
+`_sync_ghpages` 仍用一个大 `try/except` 包住整段 hash-object/commit/push，任何一个文件（含新增的仓库根
+回落文件）hash 失败会让整次同步全部放弃，不像 `deploy_static_to_ghpages` 逐文件容错。理由：均为存量
+设计权衡或需要跨模板文件的更大改动，超出本次"修复已复现回归"的范围，留待下次改动前处理。
 
 ## [0.45.309] — 2026-09-22 — Removed：3 个写死已过期到期日、再也跑不通的一次性 NVDA 期权脚本（第 4 个经核实仍可运行，保留）
 

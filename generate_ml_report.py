@@ -3035,23 +3035,38 @@ def _sync_ghpages(tickers: list, successful_count: int) -> None:
     files = [f for f in os.listdir(data_root)
              if (f in _CORE or _ml_pat.match(f)
                  or (f.startswith("alpha-hive-daily-") and f.endswith((".json", ".md"))))
-             and not _fnt_dep(f)]  # 非交易日幽灵报告（周末/假日）不部署
+             # 非交易日幽灵报告（周末/假日）不部署；_CORE 文件（含
+             # CODE_SHIPPED_STATIC_ASSETS）无日期，永不被过滤——v0.45.310
+             # 修复：此前这里对 _CORE 也无差别套用日期过滤，与
+             # report_deployer.deploy_static_to_ghpages 的显式豁免不一致
+             # （那边 `if f not in _CORE_FILES and _fnt_dep(f): continue`），
+             # 今天两个资源都不含日期子串所以尚未触发，但已是潜伏的
+             # 「改一处漏一处」。
+             and (f in _CORE or not _fnt_dep(f))]
     file_source = {f: data_root for f in files}
+    # ⚠️ v0.45.310 修复：见 report_deployer.deploy_static_to_ghpages 同名守卫的
+    # 注释——必须在随代码发布的静态资源并入之前判「无文件可部署」，否则
+    # data_root 整个空掉时 `files` 也不会是空的（.nojekyll/chart.umd.min.js
+    # 几乎总能在 repo 找到），guard 形同虚设，会把 gh-pages 整棵重建成只剩
+    # 这两个文件。
+    if not files:
+        _log.warning("gh-pages 同步：无静态文件（数据根 %s 未发现任何报告文件）", data_root)
+        return
     # 随代码发布的静态资源：data_root 里没找到的，退回 git 仓库根读。
     _repo_fallback = _resolve_code_asset_sources(data_root, repo, file_source)
     for _asset, _src in _repo_fallback.items():
         files.append(_asset)
         file_source[_asset] = _src
-    _missing_code_assets = _CODE_SHIPPED_ASSETS - set(file_source)
+    _missing_code_assets = _CODE_SHIPPED_ASSETS - file_source.keys()
     if _missing_code_assets:
-        _log.warning(
-            "随代码发布的静态资源缺失，本次同步不含 %s（data_root=%s 与 "
-            "git_repo_root=%s 都没有）",
+        # v0.45.310：升级到 error + 🚨，理由同 report_deployer 同名分支的注释
+        # ——纯 warning 在这个仓库的 Slack 精简规则下不会触达任何人。
+        _log.error(
+            "🚨 随代码发布的静态资源缺失，本次同步不含 %s（data_root=%s 与 "
+            "git_repo_root=%s 都没有）——线上可能出现 Chart.js 脚本 404 / "
+            "Service Worker cache.addAll 失败",
             sorted(_missing_code_assets), data_root, repo,
         )
-    if not files:
-        _log.warning("gh-pages 同步：无静态文件")
-        return
 
     idx = os.path.join(repo, ".git", "gh-pages-index")
     if os.path.exists(idx):

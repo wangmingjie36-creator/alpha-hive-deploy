@@ -392,6 +392,15 @@ def deploy_static_to_ghpages(reporter):
             # 当日+历史 daily 报告（JSON + MD）
             files.append(f)
             file_source[f] = data_root
+    # ⚠️ v0.45.310 修复：「无静态文件可部署」的守卫必须在这里、在随代码发布的
+    # 静态资源并入之前判——`.nojekyll`/`chart.umd.min.js` 几乎总能在 `repo`
+    # 里找到（它们是随仓库提交的），若把守卫挪到并入之后，data_root 整个空掉
+    # （配置错误 / 阶段 5 迁移中 / 上游扫描没写出任何东西）时 `files` 也不会
+    # 是空的——guard 形同虚设，会把 gh-pages 整棵重建成只剩这两个文件，等于
+    # 清空线上网站（v0.45.305 review 实测复现：确认此前版本会造成这个后果）。
+    if not files:
+        _log.warning("无静态文件可部署（数据根 %s 未发现任何报告文件）", data_root)
+        return
     # 随代码发布的静态资源：data_root 里没找到的，退回 git 仓库根读
     # （v0.45.305：此前这里只看 data_root，阶段 5 后 `.nojekyll`/
     # `chart.umd.min.js` 会从此在线上消失，见 CODE_SHIPPED_STATIC_ASSETS 注释）。
@@ -399,16 +408,18 @@ def deploy_static_to_ghpages(reporter):
     for asset, src in _repo_fallback.items():
         files.append(asset)
         file_source[asset] = src
-    _missing_code_assets = CODE_SHIPPED_STATIC_ASSETS - set(file_source)
+    _missing_code_assets = CODE_SHIPPED_STATIC_ASSETS - file_source.keys()
     if _missing_code_assets:
-        _log.warning(
-            "随代码发布的静态资源缺失，本次部署不含 %s（data_root=%s 与 "
-            "git_repo_root=%s 都没有）",
+        # v0.45.310：升级到 error + 🚨——纯 warning 在这个仓库的 Slack 精简
+        # 规则下不会触达任何人，`verify_cdn_deployment` 也只查
+        # dashboard-data.json 的时间戳、不查静态资源存不存在，等于没有任何
+        # 「谁会红」的观测点（见 CLAUDE.md「这个失败，下游怎么知道？」一节）。
+        _log.error(
+            "🚨 随代码发布的静态资源缺失，本次部署不含 %s（data_root=%s 与 "
+            "git_repo_root=%s 都没有）——线上可能出现 Chart.js 脚本 404 / "
+            "Service Worker cache.addAll 失败",
             sorted(_missing_code_assets), data_root, repo,
         )
-    if not files:
-        _log.warning("无静态文件可部署")
-        return
     # 批量写入 blob + index（逐个 hash-object，但用 stdin 批量 update-index）。
     # hash-object 读的是 file_source[f] 下的绝对路径（内容可能不在 repo 工作区
     # 内），写进树里的路径名（index-info 第三列）仍是裸文件名 f——发布出去的
