@@ -9,7 +9,84 @@
 
 ## [0.45.307] — 2026-09-22 — 占位（进行中：data_backup/ 二次检查（2026-09-21）静默失败修复——git add 返回码未检查、密钥扫描缺失守卫、密钥扫描误报、异常误报为密钥命中、连续性体检无上线日下限、状态目录白名单跳过不记录）
 
-## [0.45.305] — 2026-09-22 — 占位（进行中：修 gh-pages 数据根迁移阶段 4 二次检查发现的两个缺陷——`.nojekyll`/`chart.umd.min.js` 只存在于仓库根会在阶段5后首次部署丢失；`resolve_gh_pages_parent` 依赖 fetch 顺带更新 origin/gh-pages，`--single-branch` 克隆下会静默永久失败）
+## [0.45.305] — 2026-09-22 — Fixed：gh-pages 数据根迁移阶段 4 二次检查发现的两个缺陷——随代码发布的静态资源只存在于仓库根、阶段 5 后首次部署会从线上丢失；`resolve_gh_pages_parent` 在 `--single-branch` 克隆下会把"远端已有 gh-pages"误判成"真·首次部署"，导致 4 次重试全部因非快进被拒、永久停更
+
+2026-09-21 二次检查（协调 session + 只读审计 agent 用本地裸仓库真实实验）在阶段 4（发布链改指向，
+v0.45.268）之外又抓出两个此前没实测过的缺陷，均已复现 → 修复 → 用**改动前的原始文件**真跑新测试
+确认转红 → 恢复修复后转绿。详见 auto-memory `alpha-hive-data-root-migration.md`「二次检查（2026-09-21）」
+「阶段 4（发布链）」两条。
+
+### Fixed ①：`.nojekyll` / `chart.umd.min.js` 只存在于 git 仓库根，`os.listdir(data_root)` 选文件的
+白名单会漏掉它们
+
+`deploy_static_to_ghpages`（`report_deployer.py`）与 `_sync_ghpages`（`generate_ml_report.py`）此前
+各自维护一份内容相同的"部署文件白名单"，都只看 `os.listdir(data_root)`。`.nojekyll`（GitHub Pages
+部署标记文件）与 `chart.umd.min.js`（v0.41.0 起自托管的 Chart.js，随版本升级由人工提交更新）是**随
+代码仓库提交、没有任何 Python 代码会写进 data_root** 的静态资源。今天 `data_root` 与 `git_repo_root`
+恰好同目录（`ALPHA_HIVE_HOME`/`ALPHA_HIVE_GIT_REPO` 都未设时两者兜底到同一个 `__file__` 派生仓库根），
+两个文件"碰巧"能被 `os.listdir(data_root)` 扫到，掩盖了问题；数据根迁移阶段 5 把 `ALPHA_HIVE_HOME`
+改指 `~/alpha-hive-data` 后两者分叉，gh-pages 每次整棵重建，第一次部署就会把它们从线上删掉：
+`index.html`/`dashboard.html` 引用的 Chart.js 脚本 404，`sw.js` 的 `cache.addAll` 因清单里的文件
+取不到而失败。
+
+**本地复现**（`/tmp` 裸仓库，未碰真实 GitHub）：data_root 只放运行时产物、`.nojekyll`/`chart.umd.min.js`
+只放仓库工作区，跑 `deploy_static_to_ghpages` 后 clone gh-pages 分支——两个文件均缺失，与线上会发生的
+情况完全一致。
+
+**修法**：新增 `report_deployer.CODE_SHIPPED_STATIC_ASSETS`（`{".nojekyll", "chart.umd.min.js"}`）与
+`resolve_code_shipped_asset_sources(data_root, repo, already_covered)` 这一份共享定义 + fallback 逻辑，
+两条部署路径改共用它，不再各写各的白名单（此前改一处漏一处的形状）。`deploy_static_to_ghpages`/
+`_sync_ghpages` 从 `os.listdir(data_root)` 扫文件之后，对 `CODE_SHIPPED_STATIC_ASSETS` 里还没覆盖到的
+文件退回 `git_repo_root` 找（`file_source: Dict[str, str]` 记录每个文件该从哪个目录 `hash-object`，
+不再假设所有文件都在 `data_root`）；两处都没有的才 warning 跳过，不 error（不想让一个还没升级的仓库
+挡住当天报告部署）。**没有走"阶段 5 手工把它们拷进数据根"这条路**——没有任何机制会让那份拷贝跟着
+`chart.umd.min.js` 的版本升级保持同步，升级发生在代码仓库而不是数据根。
+
+### Fixed ②：`resolve_gh_pages_parent` 在 `--single-branch` 克隆下把"远端已有 gh-pages"误判成
+"真·首次部署"
+
+`git fetch origin gh-pages`（不带显式目标 refspec）是否更新本地 `origin/gh-pages` ref，取决于这个
+checkout 的 `remote.origin.fetch` 配置是否覆盖 `gh-pages`。`--single-branch --branch main` 克隆
+（数据根迁移阶段 8"生产代码独立 clone"的默认形态）的默认 refspec 只有
+`+refs/heads/main:refs/remotes/origin/main`：`git fetch origin gh-pages` 照样以 exit 0 收场（内容
+只写进 `FETCH_HEAD`），但不创建/更新 `refs/remotes/origin/gh-pages`，随后 `rev-parse origin/gh-pages`
+必然失败。旧代码把"fetch 成功 + rev-parse 失败"直接读成"远端还没有这个分支：真·首次部署"——这个
+判断从一开始就不成立：一个真正不存在的远端分支会让 `git fetch origin <branch>` 本身以非零退出失败
+（"couldn't find remote ref"），走不到这个分支；这里触发的从来只是"我们的 fetch 没把它拉过来"，
+不是"它不存在"。放行的后果：首次部署被判已验证 → `commit-tree` 建出无父提交 → 非 force push 因非
+快进被拒 → 4 次重试全部失败 → gh-pages 永久停更，且 `parent_verified: true` 全程是假的。生产 checkout
+的 fetch refspec 正常（`+refs/heads/*:refs/remotes/origin/*`），今天不触发；阶段 8 若用
+`--single-branch` clone 生产代码就会踩上。
+
+**本地复现**（`/tmp` 裸仓库当 origin，预先建好 main + 非空 gh-pages，`git clone --single-branch
+--branch main` 模拟阶段 8）：`git fetch origin gh-pages` exit 0，`git rev-parse origin/gh-pages` 失败
+（128），与线上会发生的情况完全一致；跑一次完整 `commit_and_push_gh_pages` 会复现"4 次 attempt 全部
+non-fast-forward 被拒"。
+
+**修法**：① fetch 改显式点名目标 refspec `+refs/heads/gh-pages:refs/remotes/origin/gh-pages`——不管
+这个 checkout 默认 fetch 配置是什么，成功就必然更新了 `origin/gh-pages`；远端真没有这个分支时，
+`git fetch` 点名一个不存在的远端 ref 本身就会失败，不会再落进"成功但拿不到"的暧昧地带。② fetch 失败
+时改用只读的 `git ls-remote --heads origin gh-pages` 正面核实——只有它明确说远端没有这个分支（成功且
+输出为空）才判定"真·首次部署"；ls-remote 本身失败（网络/权限）或说分支其实存在，一律退回未经校验的
+本地 ref 兜底，不冒充已验证。
+
+### Added（`tests/test_ghpages_data_root_migration.py`，5→13 项）
+
+- `TestCodeShippedStaticAssetsSurviveDeploy`（2 条）：生产形态正向测试（data_root 只放运行时产物、
+  两个静态资源只放仓库根）+ 变异测试（退回旧行为必须复现丢失）。
+- `TestResolveGhPagesParentSingleBranchClone`（4 条）：`--single-branch` 克隆下"远端有 gh-pages"必须
+  校验到真头、"远端真没有"必须仍判已验证、端到端 `commit_and_push_gh_pages` 一次成功不需重试、变异
+  测试（退回裸分支名 fetch 必须复现误判）。
+- `TestSyncGhpagesSharesAssetFallback`（2 条）：`generate_ml_report._sync_ghpages` 是独立于
+  `deploy_static_to_ghpages` 的第二条部署路径，同一缺陷同一修法必须两处都验证到，不能只改一处。
+
+**变异检验方法**：新测试先在改动前的原始 `report_deployer.py`/`generate_ml_report.py`（`git show
+HEAD:<file>` 换出）上真跑一遍，确认全部按预期失败（含复现"4 次 attempt 全部 non-fast-forward"这个
+真实失败模式），再换回修复后的版本确认转绿——不是只靠测试内部 mock 自证。
+
+**验证**：`tests/test_ghpages_data_root_migration.py` 13 passed；`ruff check` 全过；全套回归
+`--deselect tests/test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`
+后 5221 passed / 1 skipped / 84 deselected / 2 xfailed，0 failure。
 
 ## [0.45.304] — 2026-09-22 — Added：`get_bullish_agents_detail` 异常路径测试 + `ScoutBeeNova.details.consensus_census` 接线测试；Changed：更正一处误判「数值语义不变」的 docstring
 

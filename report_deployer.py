@@ -13,6 +13,44 @@ import production_sync
 _log = get_logger("report_deployer")
 
 
+#: 随代码发布、不由任何 Python 代码写进 data_root 的静态资源——物理上只活在
+#: git 仓库工作区（`PATHS.git_repo_root`），跟着代码仓库走，不跟数据根走。
+#:
+#: 数据根迁移阶段 4 二次检查发现的缺陷（v0.45.305）：`deploy_static_to_ghpages`
+#: 与 `generate_ml_report._sync_ghpages` 此前各写了一份内容相同的"部署文件
+#: 白名单"，都用 `os.listdir(data_root)` 选文件——今天 data_root 与
+#: git_repo_root 恰好同目录，看不出问题；阶段 5 把 `ALPHA_HIVE_HOME` 改指
+#: `~/alpha-hive-data` 后，`.nojekyll`（仓库根的部署标记文件）与
+#: `chart.umd.min.js`（随 Chart.js 版本升级由人工提交更新，v0.41.0 起自托管）
+#: 永远不会出现在 data_root 里——gh-pages 每次都整棵重建，于是第一次部署
+#: 就会把它们从线上删掉：Chart.js 脚本 404、Service Worker `cache.addAll`
+#: 因清单里的文件取不到而失败。
+#:
+#: 两条部署路径改共用这一份定义 + `resolve_code_shipped_asset_sources`，
+#: 不再各写各的白名单（此前改一处漏一处）。
+CODE_SHIPPED_STATIC_ASSETS = frozenset({".nojekyll", "chart.umd.min.js"})
+
+
+def resolve_code_shipped_asset_sources(data_root: str, repo: str,
+                                        already_covered) -> Dict[str, str]:
+    """`CODE_SHIPPED_STATIC_ASSETS` 里还没被 `already_covered`（调用方已经从
+    `os.listdir(data_root)` 扫到、判定走 data_root 的文件名集合）覆盖的那些，
+    退回 `repo`（git 仓库根）找。
+
+    返回 `{文件名: 该从哪个目录读字节}`，**只含确实能找到的**——data_root 优先
+    （万一将来某天改成运行时生成，数据根有就不必读仓库），两处都没有的
+    不出现在返回值里，调用方据此判断该不该 warning。
+    """
+    import os
+    sources: Dict[str, str] = {}
+    for asset in CODE_SHIPPED_STATIC_ASSETS:
+        if asset in already_covered:
+            continue
+        if os.path.exists(os.path.join(repo, asset)):
+            sources[asset] = repo
+    return sources
+
+
 def ghpages_tree_delta(repo: str, tree: str, parent: Optional[str]) -> Tuple[bool, int]:
     """比较新 tree 与 parent 提交的 tree，返回 (是否有变更, 变更文件数)。
 
@@ -62,16 +100,45 @@ def resolve_gh_pages_parent(repo: str) -> Tuple[Optional[str], bool]:
     `commit_and_push_gh_pages` 之后其实改用了**非** force 推送，见那里）
     不会再把远端历史挤成孤儿。
 
+    ⚠️ 2026-09-21 二次检查发现的第二个 bug：`git fetch origin gh-pages`
+    **不带显式目标 refspec**——它是否会更新本地的 `origin/gh-pages` ref，
+    取决于这个 checkout 的 `remote.origin.fetch` 配置是否覆盖 `gh-pages`。
+    `--single-branch --branch main` 克隆（阶段 8 的新 clone 就是这样）的
+    默认 refspec 只有 `+refs/heads/main:refs/remotes/origin/main`：跑
+    `git fetch origin gh-pages` 照样以 exit 0 收场（内容写进了 `FETCH_HEAD`），
+    但**不会**创建/更新 `refs/remotes/origin/gh-pages`——随后的
+    `rev-parse origin/gh-pages` 必然失败。旧代码把「fetch 成功 + rev-parse
+    失败」直接读成"远端还没有这个分支：真·首次部署"，这个判断从一开始就
+    错了：一个真正不存在的远端分支会让 `git fetch origin <branch>` 本身
+    以非零退出失败（"couldn't find remote ref"），走不到这个分支——这里
+    实际触发的从来只是"我们的 fetch 没把它拉过来"，不是"它不存在"。放行
+    的后果是首次部署被判定为已验证，随后 `commit-tree` 建了个无父提交，
+    非 force push 必然因非快进被拒，4 次重试全部失败，gh-pages 永久停更，
+    且 `parent_verified: true` 全程是假的。
+
+    修法：① fetch 显式点名目标 refspec
+    `+refs/heads/gh-pages:refs/remotes/origin/gh-pages`——不管这个 checkout
+    的默认 fetch 配置是什么，成功就必然更新了 `origin/gh-pages`；远端真没有
+    这个分支时，`git fetch` 点名一个不存在的远端 ref 本身就会失败（非零退出），
+    不会再落进"成功但拿不到"的暧昧地带。② fetch 失败时用只读的
+    `git ls-remote --heads origin gh-pages` 正面核实——只有它明确说远端没有
+    这个分支（成功且输出为空）才判定"真·首次部署"；ls-remote 本身失败
+    （网络/权限）或说分支其实存在，一律退回未经校验的本地 ref 兜底，不冒充
+    已验证。
+
     返回 `(parent_sha, verified)`：
-      verified=True   fetch 成功。`parent_sha` 是此刻 `origin/gh-pages` 的真头；
-                       远端还没有这个分支时为 `None`（真·首次部署，非"取不到"）。
-      verified=False  fetch 失败（网络/权限）。`parent_sha` 退回本地 `gh-pages`
-                       ref 尽力而为——**不可信**，调用方必须把这次「未经校验」
-                       喊出来，不能悄悄当成正常路径处理。
+      verified=True   要么 fetch 成功拿到了 `origin/gh-pages` 的真头；要么
+                       `ls-remote` 正面核实远端确实没有这个分支（真·首次部署，
+                       `parent_sha=None`）。
+      verified=False  两者都做不到（网络/权限问题）。`parent_sha` 退回本地
+                       `gh-pages` ref 尽力而为——**不可信**，调用方必须把这次
+                       「未经校验」喊出来，不能悄悄当成正常路径处理。
     """
     import subprocess
-    fetch = subprocess.run(["git", "fetch", "origin", "gh-pages"],
-                            cwd=repo, capture_output=True, text=True)
+    fetch = subprocess.run(
+        ["git", "fetch", "origin", "+refs/heads/gh-pages:refs/remotes/origin/gh-pages"],
+        cwd=repo, capture_output=True, text=True,
+    )
     if fetch.returncode == 0:
         try:
             remote = subprocess.check_output(
@@ -80,7 +147,16 @@ def resolve_gh_pages_parent(repo: str) -> Tuple[Optional[str], bool]:
             ).decode().strip()
             return remote, True
         except subprocess.CalledProcessError:
-            return None, True   # fetch 成功，但远端还没有 gh-pages 分支：真·首次部署
+            # 显式目标 refspec 的 fetch 已经成功——理论上这里不会走到
+            # （成功就必然更新了 origin/gh-pages）。万一真出现，别冒充"已校验"，
+            # 落到下面的 ls-remote 核实分支。
+            pass
+    ls = subprocess.run(
+        ["git", "ls-remote", "--heads", "origin", "gh-pages"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if ls.returncode == 0 and not ls.stdout.strip():
+        return None, True   # ls-remote 正面核实：远端确实没有 gh-pages 分支，真·首次部署
     try:
         local = subprocess.check_output(
             ["git", "rev-parse", "gh-pages"], cwd=repo, stderr=subprocess.DEVNULL,
@@ -259,7 +335,9 @@ def deploy_static_to_ghpages(reporter):
     plumbing（`hash-object`/`write-tree`/`commit-tree`/`push`）全部在 `repo`
     执行（需要 `.git/`），但 `os.listdir` 找文件、`hash-object` 读文件内容
     都改用 `data_root`（`git hash-object -w <绝对路径>` 不要求文件在仓库
-    工作区内，只是读字节写 blob，`cwd=repo` 只决定写进哪个仓库的对象库）。
+    工作区内，只是读字节写 blob，`cwd=repo` 只决定写进哪个仓库的对象库）——
+    **例外**：`CODE_SHIPPED_STATIC_ASSETS` 里的文件本就不会出现在 `data_root`，
+    找不到时退回 `repo` 读（见该常量定义处的注释）。
     """
     import subprocess
     import os
@@ -283,9 +361,8 @@ def deploy_static_to_ghpages(reporter):
     import re as _re_deploy
     _CORE_FILES = {
         "index.html", "dashboard-data.json", "manifest.json",
-        "sw.js", "rss.xml", ".nojekyll",
-        "chart.umd.min.js",  # v0.41.0: Chart.js 自托管
-    }
+        "sw.js", "rss.xml",
+    } | CODE_SHIPPED_STATIC_ASSETS
     # v0.45.15: 原 `\w+` 不含连字符 ⇒ alpha-hive-BRK-B-ml-enhanced-*.html 永远
     # 匹配不上，报告生成了却从不部署，而 index.html 照常链接它 → 线上 404。
     # 与 v0.45.2（Agent 校验层）、v0.45.8（CBOE 取数层）是同一个类份额连字符问题。
@@ -299,30 +376,48 @@ def deploy_static_to_ghpages(reporter):
         def _fnt_dep(_n):
             return False  # fail-safe：导入失败则不过滤，不误删
     files = []
+    file_source: Dict[str, str] = {}
     for f in os.listdir(data_root):
         # 非交易日（周末/假日）幽灵报告不部署（_CORE 文件无日期，永不被过滤）
         if f not in _CORE_FILES and _fnt_dep(f):
             continue
         if f in _CORE_FILES:
             files.append(f)
+            file_source[f] = data_root
         elif _ml_pat.match(f):
             # 所有 ML 增强报告（不再限制天数，index.html 历史板块需要全部文件）
             files.append(f)
+            file_source[f] = data_root
         elif f.startswith("alpha-hive-daily-") and f.endswith((".json", ".md")):
             # 当日+历史 daily 报告（JSON + MD）
             files.append(f)
+            file_source[f] = data_root
+    # 随代码发布的静态资源：data_root 里没找到的，退回 git 仓库根读
+    # （v0.45.305：此前这里只看 data_root，阶段 5 后 `.nojekyll`/
+    # `chart.umd.min.js` 会从此在线上消失，见 CODE_SHIPPED_STATIC_ASSETS 注释）。
+    _repo_fallback = resolve_code_shipped_asset_sources(data_root, repo, file_source)
+    for asset, src in _repo_fallback.items():
+        files.append(asset)
+        file_source[asset] = src
+    _missing_code_assets = CODE_SHIPPED_STATIC_ASSETS - set(file_source)
+    if _missing_code_assets:
+        _log.warning(
+            "随代码发布的静态资源缺失，本次部署不含 %s（data_root=%s 与 "
+            "git_repo_root=%s 都没有）",
+            sorted(_missing_code_assets), data_root, repo,
+        )
     if not files:
         _log.warning("无静态文件可部署")
         return
     # 批量写入 blob + index（逐个 hash-object，但用 stdin 批量 update-index）。
-    # hash-object 读的是 data_root 下的绝对路径（内容可能不在 repo 工作区内），
-    # 写进树里的路径名（index-info 第三列）仍是裸文件名 f——发布出去的
+    # hash-object 读的是 file_source[f] 下的绝对路径（内容可能不在 repo 工作区
+    # 内），写进树里的路径名（index-info 第三列）仍是裸文件名 f——发布出去的
     # gh-pages 树结构不变，只是内容的物理来源换了。
     cache_entries = []
     for f in sorted(files):
         try:
             blob = subprocess.check_output(
-                ["git", "hash-object", "-w", os.path.join(data_root, f)], cwd=repo
+                ["git", "hash-object", "-w", os.path.join(file_source[f], f)], cwd=repo
             ).decode().strip()
             cache_entries.append(f"100644 {blob}\t{f}")
         except (subprocess.CalledProcessError, OSError) as _e_blob:
