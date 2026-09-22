@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.307] — 2026-09-22 — 占位（进行中：data_backup/ 二次检查（2026-09-21）静默失败修复——git add 返回码未检查、密钥扫描缺失守卫、密钥扫描误报、异常误报为密钥命中、连续性体检无上线日下限、状态目录白名单跳过不记录）
+
 ## [0.45.305] — 2026-09-22 — 占位（进行中：修 gh-pages 数据根迁移阶段 4 二次检查发现的两个缺陷——`.nojekyll`/`chart.umd.min.js` 只存在于仓库根会在阶段5后首次部署丢失；`resolve_gh_pages_parent` 依赖 fetch 顺带更新 origin/gh-pages，`--single-branch` 克隆下会静默永久失败）
 
 ## [0.45.304] — 2026-09-22 — 占位（进行中：P2/v0.45.279 二次检查后续——补 `consensus_census` 接线测试 + `get_bullish_agents_detail` 异常路径测试，更正 Rival 数值语义 docstring）
