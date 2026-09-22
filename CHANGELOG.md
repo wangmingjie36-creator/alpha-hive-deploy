@@ -13,7 +13,45 @@
 
 ## [0.45.304] — 2026-09-22 — 占位（进行中：P2/v0.45.279 二次检查后续——补 `consensus_census` 接线测试 + `get_bullish_agents_detail` 异常路径测试，更正 Rival 数值语义 docstring）
 
-## [0.45.306] — 2026-09-22 — 占位（进行中：`test_state_paths_point_outside_the_repo` 恒真断言改判真路径）
+## [0.45.306] — 2026-09-22 — Fixed：`test_paper_portfolio_vol_sizing.py::TestProductionStateIsIsolated::test_state_paths_point_outside_the_repo`（conftest 防线①自检）恒真——`pp.BASE_DIR` 早已默认 `None`，判定从未真的比对过隔离夹具重绑的路径
+
+**现象**（已实测，非推理；v0.45.303 CHANGELOG「顺带发现」一节与 auto-memory
+`alpha-hive-test-writes-production.md` 已先记了，本条落地修复）：
+
+```python
+for f in (pp.POSITIONS_FILE, pp.CLOSED_FILE, pp.EQUITY_FILE, pp.META_FILE):
+    assert pp.BASE_DIR not in f.parents
+assert pp.BASE_DIR not in pp.STATE_DIR.parents
+```
+
+`paper_portfolio.BASE_DIR` 自 v0.45.160 起是**覆盖钩子**，默认 `None`（真正的根锚点在
+`_base_dir()` 里调用时才解析 `PATHS.home`，见该文件 v0.45.160 注释）。`None not in
+f.parents` 对任意 `f` 恒成立——不管 `f` 有没有真的被 `tests/conftest.py::
+_isolate_paper_portfolio_state` 重绑到 tmp。实测：把该夹具里四个状态文件的
+`monkeypatch.setattr(POSITIONS_FILE/CLOSED_FILE/EQUITY_FILE/META_FILE, …)` 整段删掉
+（只留 STATE_DIR/SNAPSHOT_DIR），这条测试仍 `2 passed`——防线①名义上在，实际什么都没判。
+
+**改动**（仅 `tests/test_paper_portfolio_vol_sizing.py`，未动 `tests/conftest.py`
+的隔离逻辑本身，未动 `paper_portfolio.py`）：改判**真路径**——测试自己请求 `tmp_path`
+（function 级，与 autouse 的 `_isolate_paper_portfolio_state` 在同一测试节点内拿到
+同一实例），断言四个状态文件 `resolve()` 后落在 `tmp_path / "paper_portfolio_state"`
+沙箱内、`STATE_DIR.resolve()` 精确等于该沙箱。`resolve()` 是必须的一步而不是保险：
+macOS 上 `/tmp` 是 `/private/tmp` 的符号链接，不 resolve 直接做前缀比较会把沙箱路径
+本身误判成"没有落在里面"（`is_relative_to` 对未 resolve 的两侧做字面量比较）。
+
+**验证**：
+1. 新断言在现行 `tests/conftest.py` 上 `2 passed`。
+2. **变异**（真跑，非推理）：临时删除 `_isolate_paper_portfolio_state` 里四个状态文件的
+   `monkeypatch.setattr`（只留 STATE_DIR/SNAPSHOT_DIR，即 v0.45.303 CHANGELOG 记录的
+   那次「删了仍 2 passed」的同一处改动）——新断言按预期变红，报错文案是
+   `未落在本测试沙箱 …… 内`，指向 `POSITIONS_FILE` 仍停在仓库内的真实路径，红的理由
+   与改动匹配。还原后 `sha256sum tests/conftest.py` 与改动前一致（`99ac0c0…`），确认
+   未留痕。
+3. 整套 `--maxfail=1000 -rfEs`（252.86s）：**1 failed / 5210 passed / 1 skipped /
+   83 deselected / 2 xfailed**——唯一红是已知的
+   `test_economic_calendar.py::TestCoverageHorizon::test_no_table_falls_below_its_horizon_threshold`
+   （BLS 2027 日程未发布，与本改动无关）；唯一 skip 是 `test_scheduler.py` 的
+   `importorskip("schedule")`（本机未装该库）。ruff 通过。
 
 ## [0.45.303] — 2026-09-21 — Fixed：`tests/conftest.py::_isolate_paper_portfolio_state` 对「生产真身」的判定依赖导入顺序——单条/子集跑会误报「写穿生产」，而那种进程里守卫盯的是沙箱自己（真写穿生产它也看不见）；Added：2×2 子进程回归矩阵
 
