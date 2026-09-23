@@ -87,8 +87,8 @@ SKIP_EXACT = {
     "alpha-hive-web": "独立前端项目", "mcp-servers": "独立 MCP 项目",
     # 随代码发布的静态资源 / 配置（阶段 4 部署从 git_repo_root 回落取）
     ".nojekyll": "随代码发布的静态资源", "chart.umd.min.js": "随代码发布的静态资源",
-    "thesis_breaks_config.json": "代码配置（market_intelligence 按 __file__ 读）",
-    "watchlist_events.md": "人工维护配置（watchlist_events 按 __file__ 读）",
+    "thesis_breaks_config.json": "代码配置（market_intelligence 按代码目录读）",
+    "watchlist_events.md": "人工维护配置（watchlist_events 按代码目录读）",
     "DEEP_REPORT_CSS.txt": "代码资源", "alpha-hive-tutor.skill": "代码资源",
     "alpha-hive-landing.html": "静态页（不在 gh-pages 白名单）",
     "Dockerfile": "代码", "Makefile": "代码", "Procfile": "代码", ".gitignore": "代码",
