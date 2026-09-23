@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.329] — 2026-09-23 — 占位（进行中：ml_expected_return_replay 的动量/拥挤度 IC 改标准横截面周序列口径 + 判定改按显著性）
+
 ## [0.45.328] — 2026-09-23 — 占位（进行中：ic_diagnostics.build_benchmark_panel 前瞻收益改用 FORWARD_CLOSE_COL / 尊重 --target）
 
 ## [0.45.327] — 2026-09-23 — 占位（进行中：ic_power_analysis 前瞻收益改用 FORWARD_CLOSE_COL / close_t7，重算功效结论）
