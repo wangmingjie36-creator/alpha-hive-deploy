@@ -186,24 +186,44 @@ def export_db(src_root: Path, db_key: str, rel_path: str, out_dir: Path) -> dict
     return meta
 
 
-def copy_state_dir(src_root: Path, rel_dir: str, out_dir: Path) -> list[dict]:
+_STATE_DIR_TEXT_SUFFIXES = (".json", ".jsonl", ".md", ".txt", ".yaml", ".yml")
+
+
+def copy_state_dir(src_root: Path, rel_dir: str, out_dir: Path) -> tuple[list[dict], list[dict]]:
+    """把 `rel_dir` 下的文本状态文件原样拷进导出产物。
+
+    返回 `(copied, skipped)`：
+    - `copied`：实际拷贝的文件记录 `{"rel", "sha256", "size"}`（原有形状不变——
+      `write_manifest_and_sums` 靠它生成 `SHA256SUMS`，`restore.py` 不读这份
+      逐文件记录，只按目录名重新遍历导出产物）。
+    - `skipped`（v0.45.307 补，二次检查发现）：因后缀不在文本白名单里被跳过
+      的文件 `{"rel", "size"}`。旧代码这里完全静默——今天只漏了 `.gitkeep`
+      和一份旧 `.db` 快照，影响近零，但以后新增 `.csv`/`.pkl` 之类文件会在
+      MANIFEST 里连痕迹都没有，没人能从产物本身看出"这个文件本该被备份却
+      没有"（同项目 CLAUDE.md「这个失败，下游怎么知道？」）。只记相对路径+
+      大小，不读取/不拷贝内容——本来就该被排除在导出范围外，"记录"不等于
+      "纳入产物"。
+    """
     src = src_root / rel_dir
-    records = []
+    copied: list[dict] = []
+    skipped: list[dict] = []
     if not src.is_dir():
-        return records
+        return copied, skipped
     dst_dir = out_dir / rel_dir
     if dst_dir.exists():
         shutil.rmtree(dst_dir)
     for p in sorted(src.rglob("*")):
-        if p.is_file():
-            if p.suffix not in (".json", ".jsonl", ".md", ".txt", ".yaml", ".yml"):
-                continue  # 只拷文本状态文件，非文本（如遗留的 .db）不在本范围
-            rel = p.relative_to(src_root)
-            dst = out_dir / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(p, dst)
-            records.append({"rel": str(rel), "sha256": sha256_file(dst), "size": dst.stat().st_size})
-    return records
+        if not p.is_file():
+            continue
+        rel = p.relative_to(src_root)
+        if p.suffix not in _STATE_DIR_TEXT_SUFFIXES:
+            skipped.append({"rel": str(rel), "size": p.stat().st_size})
+            continue
+        dst = out_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(p, dst)
+        copied.append({"rel": str(rel), "sha256": sha256_file(dst), "size": dst.stat().st_size})
+    return copied, skipped
 
 
 def copy_root_files(src_root: Path, patterns: list[str], out_dir: Path) -> list[dict]:
@@ -231,7 +251,7 @@ def run_export(src_root: Path, out_dir: Path) -> dict:
         "created_at": t0.isoformat(timespec="seconds"),
         "source_root": str(src_root),
         "excluded_from_this_pass": EXCLUDED_FROM_THIS_PASS,
-        "databases": {}, "state_dirs": {}, "root_files": [],
+        "databases": {}, "state_dirs": {}, "state_dirs_skipped": {}, "root_files": [],
     }
     try:
         manifest["source_git_head"] = subprocess.run(
@@ -247,9 +267,11 @@ def run_export(src_root: Path, out_dir: Path) -> dict:
               f"{len(info['tables'])} 表, {sum(info['row_counts'].values())} 行")
 
     for d in STATE_DIRS:
-        recs = copy_state_dir(src_root, d, out_dir)
+        recs, skipped = copy_state_dir(src_root, d, out_dir)
         manifest["state_dirs"][d] = recs
-        print(f"DIR {d}: {len(recs)} 文件")
+        manifest["state_dirs_skipped"][d] = skipped
+        skip_note = f"（跳过 {len(skipped)} 个非文本文件，见 MANIFEST.json state_dirs_skipped.{d}）" if skipped else ""
+        print(f"DIR {d}: {len(recs)} 文件{skip_note}")
 
     manifest["root_files"] = copy_root_files(src_root, ROOT_FILE_GLOBS, out_dir)
     print(f"根文件: {len(manifest['root_files'])} 个")

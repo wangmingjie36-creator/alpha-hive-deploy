@@ -90,7 +90,32 @@ v0.45.311 同一个提交里，`apply_code_shipped_fallback` 的静态资源缺�
 理由：均为存量设计权衡或需要跨模块（`agent_toolbox.py`/`data_backup/`）的更大改动，超出本次"修复
 已复现回归"的范围，留待下次改动前处理。
 
-## [0.45.312] — 2026-09-22 — 占位（进行中：PR #8 CI 修复——`test_ghpages_data_root_migration.py` 的 single-branch clone 测试缺显式 git 身份，本机隐式回落蒙混过关，CI（Ubuntu 跑者）必现失败）
+## [0.45.312] — 2026-09-22 — Fixed：PR #8 CI 失败——`test_ghpages_data_root_migration.py` 的 single-branch clone 测试缺显式 git 身份，本机（macOS）隐式回落蒙混过关，CI（Ubuntu 跑者）必现失败，main 自身最近 5 次 CI 已经因此全红
+
+`TestResolveGhPagesParentSingleBranchClone._make_single_branch_clone()` 建的 `clone`
+仓库没配 `user.email`/`user.name`。`report_deployer.commit_and_push_gh_pages()` 走
+`git commit-tree`（plumbing 命令，需要身份），无显式配置时 git 会尝试从系统用户名/
+主机名隐式猜一个——macOS 的 Apple Git（2.50.1）静默猜出一个可用身份，但 CI（Ubuntu
+跑者，2.55.0，GECOS 全名字段常年为空）猜出的姓名部分是空字符串，新版 git 对此硬
+拒绝（`fatal: empty ident name ... not allowed`），导致本条测试只在本机能过、CI
+上必现失败（`gh run list --branch main` 实测最近 5 次 CI 全部因此失败——**不是本
+PR 引入的，main 自身已经红了**，本 PR 的 CI 只是继承了这个既有问题）。
+
+同文件其余测试用的 `_init_repo_with_origin()` 一直显式配置身份（`user.email
+test@test.com` / `user.name test`），唯独 `_make_single_branch_clone()` 漏配——
+补齐同一套约定，给 `clone` 显式 `git config user.email/user.name`。
+
+**验证**：用 `git config user.useConfigOnly true` 强制禁用隐式猜测（本地无法直接
+复现 CI 的"猜出邮箱但姓名为空"这个具体形态，但足以验证同一因果链条）——未修复的
+`clone`（无显式身份）在此设置下确实以 `fatal: no email was given and
+auto-detection is disabled` 失败；补上显式身份后，同样设置下 `commit-tree` 成功。
+`tests/test_ghpages_data_root_migration.py` 全文件 15 passed。
+
+**未处理**：另两个失败与本 PR/本次修复均无关——① `TestCoverageHorizon::
+test_no_table_falls_below_its_horizon_threshold`（经济日历 CPI/NFP 覆盖不足，需要
+去 BLS 官网抄取真实已发布的 2027 日程写进 `economic_calendar.py`，不编数据，留给
+人工核对真实日期）；② Vercel 部署失败（`alpha-hive-web`，完全独立的 Next.js 前端
+项目，本 PR 未触碰该目录任何文件）。
 
 ## [0.45.311] — 2026-09-22 — Changed/Fixed：补齐 v0.45.310「未处理的发现」5 条——核心白名单/回落逻辑去重、`chart.umd.min.js` 全仓库单一真相源、`resolve_gh_pages_parent` 的 fetch/ls-remote 加超时、`_sync_ghpages` 逐文件容错
 
@@ -282,7 +307,105 @@ v0.45.302 收尾时我说同族有「4 个写死已过期日期、加了守卫�
 - **真实前瞻窗口 09-16~09-21 重新核对**：`run()` 结果 `not_ready`，自证 8/8=100%，返回字典键与白名单精确匹配；三个真实历史窗口的 `--rehearse` 仍全部 `rehearsal_ok`（5/5、16/16、8/8）。
 - 整套 5352 通过、1 失败为已知的 `TestCoverageHorizon`（基线本来就红）；ruff 全绿。
 
-## [0.45.307] — 2026-09-22 — 占位（进行中：data_backup/ 二次检查（2026-09-21）静默失败修复——git add 返回码未检查、密钥扫描缺失守卫、密钥扫描误报、异常误报为密钥命中、连续性体检无上线日下限、状态目录白名单跳过不记录）
+## [0.45.307] — 2026-09-22 — Fixed：data_backup/ 二次检查（2026-09-21）六处静默失败——`git add -A` 返回码未检查导致"永久假成功"、密钥扫描缺失"扫了等于没扫"守卫、密钥扫描把公开 URL 误当密钥、未分类异常误报成密钥泄露、连续性体检无上线日下限、状态目录白名单跳过不留痕
+
+数据根迁移阶段 3 每日数据备份（`data_backup/`，2026-09-18 上线首跑成功）的二次检查，
+用 tmp 沙箱 + 合成数据逐条复现下面 6 处，均先在**改动前**的原始文件上复现转红，
+再修复、写回归测试确认转绿，随后逐条做**变异真跑**（回退修复，对应测试必须转红）+
+正对照（既有测试/新增测试确认正常路径不受影响）。全套（含此前 5292 条）ruff 全绿，
+仅基线本就红的 `TestCoverageHorizon` 一条不受影响。详见 auto-memory
+`alpha-hive-data-root-migration.md`「二次检查（2026-09-21）」。
+
+### Fixed ①：`git add -A` 返回码没人检查，`index.lock` 卡住后备份"永久成功"
+
+`data_backup/run_backup.py::run()` 的提交段不看 `add` 的返回码。复现：合成 src + 本地
+裸仓库当 origin，第一轮成功后改 src、在 `backup_dir/.git/index.lock` 留一个残留文件
+（模拟 git 进程被杀在 add 半路）——实测 `git add -A` 以 128 失败被忽略 → `git diff
+--cached --quiet` 因为空暂存区返回 0（"无变化"）→ `git push` 空转成功 →
+`status.json` 记 `ok: true, stage: "done"`，但工作树其实还有 4 个文件的改动没提交，
+远端 HEAD 没前进。修复：`add` 返回非 0 立即中止归 `stage: "git_error"`；另加提交后置
+条件——无论走"无变化"还是"已提交"分支，都用 `git status --porcelain` 核实工作树确实
+干净，防御"`add` 返回 0 但没真正生效"这类更隐蔽的情形。刻意不自动删 `index.lock`
+（可能有别的 git 进程真在用）。
+
+### Fixed ②：`run()` 缺"扫描等于没扫就拒绝"的守卫，坏 JSON 凭据文件静默跳过
+
+`scan_secrets.py::main()` CLI 入口本来就有"零密钥即失败"的守卫，但生产实际路径
+`run()` 直接调 `load_known_secrets()` + `scan_directory()`，完全没有这道守卫——HOME
+指向没有任何 `~/.alpha_hive_*` 文件的目录时，`run()` 照常提交推送
+（`known_secret_sources: [], hit_count: 0, ok: true`）。同源：`load_known_secrets`
+对坏 JSON/非 UTF-8 凭据文件静默 `continue`，来源清单缩水且外部不可见。
+新增 `load_known_secrets_with_diagnostics()`（`load_known_secrets` 降级为薄包装，
+签名/返回值不变，不破坏既有直接调用方），额外返回 `existing_files` /
+`files_unreadable` / `files_with_zero_secrets`（只含文件名，不含值）；`run()` 现在
+要求至少加载到 1 个密钥，且磁盘上存在的每个候选凭据文件都必须贡献 ≥1 个密钥，
+否则 `stage: "secret_scan"` 失败。
+
+### Fixed ③：密钥扫描把凭据 JSON 里的公开 URL 也当密钥，造成永久性误报
+
+`.alpha_hive_gmail_credentials.json` 这类标准 Google OAuth 文件里，`auth_uri`/
+`token_uri`/`auth_provider_x509_cert_url` 三个字段本身就是公开 URL，
+`redirect_uris[0]`（`http://localhost`，16 字符）同理——旧逻辑把凭据 JSON 里任何
+≥12 字符的字符串叶子都当密钥候选。实测：`http://localhost` 在 20 个毫不相关的
+合成会话记录文件里全部"命中"。导出数据（append-only 表）一旦出现过这些字符串，
+之后每天的备份都会被永久拦成"密钥扫描命中"——fail-closed 不危险，但等于备份
+停摆，且报警文案会让人误以为真的泄密。`_is_candidate_json_secret` 现在：
+① 无条件跳过 `http://`/`https://` 开头的叶子；② 键名含 `secret`/`token`/`key`/
+`password`/`private_key` 之一时用原低门槛（12 字符）；③ 其余叶子退回更高门槛
+（20 字符），压低短小通用字符串的误报面。
+
+### Fixed ④：未捕获异常被误报成"密钥扫描命中"
+
+`_write_status` 无异常保护；`main()` 之外任何未捕获异常的 Python 默认退出码都是 1，
+而编排器 Step 14 把 `rc==1` 无条件报成"🚨 密钥扫描命中，已拒绝提交"。复现：
+`--status-file /some/bogus/path` 让 `_write_status` 抛 `NotADirectoryError`，
+实测进程退出码 1，而数据其实已经提交推送到远端。修复：`_write_status` 加
+OSError 保护（写不进去不改变判定结果，同 `_append_history` 已有纪律）；
+`main()` 包一层顶层异常处理，把"崩溃"记成独立 `stage: "crash"`、退出码 3
+（不与 0/1/2/124 冲突，落进编排器 Step 14 现成的通用 `else` 分支）。
+另外（经用户在对话里明确确认后）修改仓库外编排器 `~/.claude/scripts/
+alpha-hive-orchestrator.sh`（改前已备份原文件）：Step 14 的 `rc==1` 分支现在
+也像 `rc==2` 分支一样先核对 `backup_status.json` 的 `.date` 是今天、
+`.stage == "secret_scan"`，不满足则报 `rc1_unverified_failed`（WARN）而非
+硬报"密钥扫描命中"（ERROR）。
+
+### Fixed ⑤：连续性体检没有上线日下限，上线后一个月内天天误报"降级"
+
+`backup_continuity.py` 本工具 09-18 才首次接入生产，此前压根没有这套备份系统；
+默认 30 个交易日的窗口会把上线前的日子也算进覆盖率分母。复现：上线以来每个
+交易日都真实成功，`assess(days=30)` 依旧判定"降级"（覆盖率 10%，长空档
+27 个交易日）。修复：默认窗口（不传 `--since`）起点取 max(days 个交易日前,
+历史 JSONL 里最早一条记录的日期)；显式传 `--since` 时不做这个收紧（调用方
+主动选择的窗口起点）。
+
+### Fixed ⑥：状态目录按后缀白名单静默排除且清单不记
+
+`data_backup/export.py::copy_state_dir` 只拷 `.json/.jsonl/.md/.txt/.yaml/.yml`，
+被过滤掉的文件此前完全静默——今天只漏 `.gitkeep` 和一份旧 `.db` 快照，影响近零，
+但以后新增 `.csv`/`.pkl` 之类文件会在 MANIFEST 里连痕迹都没有。
+`copy_state_dir` 改为返回 `(copied, skipped)`，`skipped` 只记相对路径+大小
+（不读取/不拷贝内容）；`run_export()` 的 manifest 新增 `state_dirs_skipped`
+（每个 STATE_DIRS 目录一个键，即使为空列表也在，结构一致）。
+
+### 测试与验证
+
+- `tests/test_data_backup.py`：新增 `TestSecretScanGuardInRun`（issue②，5 条）、
+  `TestWriteStatusOsErrorProtection`（issue④，3 条）、
+  `TestOrchestratorStep14Rc1Dispatch`（issue④编排器分支，4 条，接进最小 bash
+  沙箱跑真实脚本片段）、issue①②③⑥的若干新测试方法（`TestSecretScan`/
+  `TestExportRestoreRoundTrip`/`TestRunBackupStageReporting` 各若干条）；
+  既有 6 处 `monkeypatch.setattr(run_backup, "load_known_secrets", ...)`
+  改用新增的 `_bypass_secret_scan()` 辅助函数（签名换成
+  `load_known_secrets_with_diagnostics`，否则不再生效）。
+- `tests/test_backup_continuity.py`：新增 4 条上线日下限测试；`TestExitCodes`
+  里 5 条此前用"窗口末尾单条记录"表示稀疏覆盖的测试改用
+  `_degraded_history_records()`（窗口起点补一条失败记录），否则被新下限
+  判定成"刚上线、100% 健康"而不是原意的"稀疏覆盖=降级"。
+- 全部 8 处修复逐条变异真跑（回退单个修复 → 对应新测试转红 → 恢复 → 转绿），
+  含编排器 rc==1 分支的 bash 片段变异（还原成修复前的旧分支，`TestOrchestratorStep14Rc1Dispatch`
+  精确复现"stage=crash 被误报成密钥扫描命中"）。
+- 全仓测试（`--deselect` 基线本红的 `TestCoverageHorizon`）：5292 passed, 1 skipped,
+  2 xfailed，0 failed；ruff 全绿。
 
 ## [0.45.305] — 2026-09-22 — Fixed：gh-pages 数据根迁移阶段 4 二次检查发现的两个缺陷——随代码发布的静态资源只存在于仓库根、阶段 5 后首次部署会从线上丢失；`resolve_gh_pages_parent` 在 `--single-branch` 克隆下会把"远端已有 gh-pages"误判成"真·首次部署"，导致 4 次重试全部因非快进被拒、永久停更
 
