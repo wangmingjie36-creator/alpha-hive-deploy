@@ -28,6 +28,7 @@
 """
 import os
 import subprocess
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import report_deployer as rd
@@ -1006,3 +1007,81 @@ class TestAllHashObjectFailuresDoNotPushEmptyTree:
         assert tree == empty_tree_sha, (
             "如果这条断言失败，说明旧写法在这个环境里没有产出空树——"
             "上面的正向测试就没有对照价值了")
+
+
+class TestApplyCodeShippedFallbackPreconditionSurvivesOptimization:
+    """v0.45.312 把 `apply_code_shipped_fallback` 的"调用前 `files` 必须非空"
+    前提改成裸 `assert` 强制；v0.45.317 第三轮复检发现这就是新 bug——本仓
+    生产模块（非 tests/ 下）从无先例用 `assert` 做不变式强制，`probability_
+    scorecard.py` 586-591 行有明文理由：`python -O` 会把 assert 剥掉，一个
+    会被剥掉的不变式，正是"把失败改写成没发生过"。
+
+    真实执行验证（不是读代码猜）：用 `/usr/local/bin/python3 -O` 子进程
+    真跑同一次空 `files` 调用——`assert` 版本在 `-O` 下不抛任何异常、`files`
+    照常被回落结果撑满（v0.45.305/v0.45.310 那个"空 data_root 看起来像有
+    内容"的 bug 原样复活）；`raise ValueError` 版本与解释器优化开关无关，
+    `-O` 下依然抛出。
+    """
+
+    _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _PROBE = (
+        "import report_deployer as rd\n"
+        "files = []\n"
+        "try:\n"
+        "    rd.apply_code_shipped_fallback(files, {}, '/tmp/ah-nonexistent-data-root', '.', 't')\n"
+        "    print('GUARD_DID_NOT_FIRE:' + repr(files))\n"
+        "except (ValueError, AssertionError) as e:\n"
+        "    print('GUARD_FIRED:' + type(e).__name__)\n"
+    )
+
+    def _run_probe(self, extra_args):
+        return subprocess.run(
+            ["/usr/local/bin/python3", *extra_args, "-c", self._PROBE],
+            cwd=self._REPO_ROOT, capture_output=True, text=True,
+        )
+
+    def test_empty_files_raises_value_error_under_normal_python(self):
+        r = self._run_probe([])
+        assert "GUARD_FIRED:ValueError" in r.stdout, (
+            f"当前修复版应在普通解释器下也抛 ValueError；实际 stdout={r.stdout!r} "
+            f"stderr={r.stderr[-500:]!r}")
+
+    def test_empty_files_still_raises_under_python_dash_O(self):
+        """当前修复版（`raise ValueError`）必须在 `-O` 下依然拦得住——
+        这是本次修复真正要保证的东西，不是"正常模式下拦住"这件事本身
+        （那件事旧的 `assert` 版本也做得到）。"""
+        r = self._run_probe(["-O"])
+        assert "GUARD_FIRED:ValueError" in r.stdout, (
+            "python -O 下守卫失效——回到了 v0.45.312 assert 版本的原始 bug："
+            f"stdout={r.stdout!r} stderr={r.stderr[-500:]!r}")
+
+    def test_mutation_old_assert_guard_is_silently_stripped_under_dash_O(self):
+        """变异检验：换回 v0.45.312 的真实旧代码（`assert files, (...)`），
+        证明"-O 下守卫消失"不是臆测——用改动前的真实源码真跑确认转红。"""
+        old_source = subprocess.run(
+            ["git", "show", "HEAD:report_deployer.py"],
+            cwd=self._REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+        assert "assert files, (" in old_source, (
+            "本条变异测试假定 HEAD 上 report_deployer.py 还是 v0.45.312 的裸 "
+            "assert 版本——如果这条断言失败，说明修复已经提交、HEAD 已经是新代码，"
+            "该拿更早的 revision 复现，而不是让这条测试悄悄测不出任何东西")
+        with tempfile.TemporaryDirectory() as tmp:
+            shadow = os.path.join(tmp, "report_deployer.py")
+            with open(shadow, "w", encoding="utf-8") as f:
+                f.write(old_source)
+            env = os.environ.copy()
+            # tmp 排 PYTHONPATH 第一位，确保 `import report_deployer` 命中
+            # 影子（旧代码）版本，不是仓库里的真实文件；同时保留仓库根，
+            # 因为 report_deployer.py 自己还要 `import production_sync`/
+            # `hive_logger`，这两个模块不在影子目录里。
+            env["PYTHONPATH"] = (
+                tmp + os.pathsep + self._REPO_ROOT + os.pathsep + env.get("PYTHONPATH", "")
+            )
+            r = subprocess.run(
+                ["/usr/local/bin/python3", "-O", "-c", self._PROBE],
+                cwd=tmp, capture_output=True, text=True, env=env,
+            )
+        assert "GUARD_DID_NOT_FIRE:" in r.stdout, (
+            "如果这条断言失败，说明旧 assert 写法在这个环境的 -O 下没有被剥掉——"
+            f"上面两条正向测试就没有对照价值了。stdout={r.stdout!r} stderr={r.stderr[-500:]!r}")

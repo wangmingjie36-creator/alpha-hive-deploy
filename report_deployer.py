@@ -85,17 +85,23 @@ def apply_code_shipped_fallback(files: List[str], file_source: Dict[str, str],
 
     v0.45.312：这条前提此前只写在 docstring 里、代码不强制——`/code-review
     high` 复检指出，把它收进共享函数只是让两个现有调用点"恰好都按对了顺序"，
-    没有让这个前提本身变得不可能被违反。改成断言强制：谁在守卫之前调用本
-    函数，`files` 此刻必然是空的，直接在这里就地炸掉，而不是让 `files` 悄悄
-    被回落结果撑成"看起来有内容"、把 v0.45.305/v0.45.310 那个"data_root 空
-    却照常部署"的 bug 换个入口复活。
+    没有让这个前提本身变得不可能被违反。原改成 `assert` 强制，但 v0.45.317
+    第三轮复检发现这本身就是新 bug：`report_deployer.py` 由此成了全仓库
+    **唯一**在生产模块（非 tests/）写裸 `assert` 的文件（`probability_scorecard.py`
+    第 586-591 行早有明文先例："本仓生产模块无此先例……且 `python -O` 会把它
+    剥掉——一个会被剥掉的不变式，正是『把失败改写成没发生过』"）。真实执行
+    验证：`/usr/local/bin/python3 -O` 跑同样的空 `files` 调用，`assert` 被静默
+    剥掉，`files` 照常被回落结果撑满——这道守卫本该防的那个"空 data_root 换个
+    入口复活"的 bug，在 `-O` 下会原样复活，且没有任何东西会红。改用显式
+    `raise`：与解释器优化开关无关，永远生效。
     """
-    assert files, (
-        "apply_code_shipped_fallback 被调用时 files 是空的——调用方必须先判完"
-        "「无文件可部署」的守卫再调用本函数，否则回落几乎总能命中 "
-        "CODE_SHIPPED_STATIC_ASSETS，会让一个空 data_root 看起来像有内容可"
-        "部署（v0.45.305/v0.45.310 修过的那个 bug 的另一个入口）"
-    )
+    if not files:
+        raise ValueError(
+            "apply_code_shipped_fallback 被调用时 files 是空的——调用方必须先判完"
+            "「无文件可部署」的守卫再调用本函数，否则回落几乎总能命中 "
+            "CODE_SHIPPED_STATIC_ASSETS，会让一个空 data_root 看起来像有内容可"
+            "部署（v0.45.305/v0.45.310 修过的那个 bug 的另一个入口）"
+        )
     _repo_fallback = resolve_code_shipped_asset_sources(data_root, repo, file_source)
     for asset, src in _repo_fallback.items():
         files.append(asset)

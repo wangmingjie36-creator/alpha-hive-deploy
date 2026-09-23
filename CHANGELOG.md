@@ -5,7 +5,37 @@
 
 ---
 
-## [0.45.317] — 2026-09-23 — 占位（进行中：第三轮复检 v0.45.313——`apply_code_shipped_fallback` 新加的裸 assert 违反本仓生产模块零 assert 惯例）
+## [0.45.317] — 2026-09-23 — Fixed：第三轮复检 v0.45.313（v0.45.312 那次子修复）——`apply_code_shipped_fallback` 新加的裸 `assert` 让 `report_deployer.py` 成了全仓库唯一在生产模块用 assert 强制不变式的文件，`python -O` 会把它剥掉、让 v0.45.305/v0.45.310 修过的"空 data_root 照常部署"bug 换个入口复活
+
+用户要求「二次检查以上更新有没有bug」，对 v0.45.313 commit（fc3b7ef5）逐段复读时发现：
+`apply_code_shipped_fallback`（`report_deployer.py`）里"调用前 `files` 必须
+非空"这条前提，v0.45.312 从 docstring-only 改成了 `assert files, (...)`。
+问题不在逻辑本身，而在**用什么机制强制**——`probability_scorecard.py`
+586-591 行早有明文先例："本仓生产模块无此先例（147 个用 assert 的文件全在
+tests/ 下），且 `python -O` 会把它剥掉——一个会被剥掉的不变式，正是『把
+失败改写成没发生过』"。加了这条 assert 之后，`report_deployer.py` 变成
+**唯一**违反这条惯例的生产模块。
+
+真实执行验证：`/usr/local/bin/python3 -c "..."` 正常模式下空 `files` 调用
+`apply_code_shipped_fallback` 会抛 `AssertionError`；换成
+`/usr/local/bin/python3 -O -c "..."` 跑同一段代码，assert 被静默剥掉，
+函数正常返回，`files` 被 `CODE_SHIPPED_STATIC_ASSETS` 的回落结果撑满——
+这正是这条断言本该拦住的那个 bug（一个空 data_root 看起来像有内容可
+部署）在 `-O` 下原样复活，且没有任何日志/异常/退出码能让下游知道。
+
+修法：`assert files, (...)` 改成 `if not files: raise ValueError(...)`——
+与解释器优化开关无关，永远生效，报错信息不变。
+
+新增 `TestApplyCodeShippedFallbackPreconditionSurvivesOptimization`（3 条，
+`tests/test_ghpages_data_root_migration.py`）：① 正常模式下抛 `ValueError`；
+② `-O` 子进程下依然抛 `ValueError`（本次修复真正要保证的东西）；③ 变异
+检验——用 `git show HEAD:report_deployer.py` 取出 v0.45.312 的真实旧代码
+写入影子模块、在 `-O` 子进程里真跑，确认守卫确实消失（证明①②不是在测
+稻草人）。45 项相关测试全绿；ruff 全过；全套回归跑毕见下条确认。
+
+本轮未发现其余新问题——commit_and_push_gh_pages 的 push 超时改造、两处
+成功日志计数口径、`_sync_ghpages` 日志级别、`report_web_assets.py` 的
+`json.dumps()` 改造，逐段核对均与代码实际行为一致。
 
 ## [0.45.316] — 2026-09-23 — 占位（进行中：删除审计 A 类死代码——GUI、NVDA 一次性脚本、旧 cron 调度、parallel_agent_runner 等 + 编排器空步骤）
 
