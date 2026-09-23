@@ -38,6 +38,16 @@
 ⚠️ 已知精度限制：σ_IC² 只由约 20 个不重叠周估出，样本方差自身的相对标准误
    ≈ √(2/(n−1)) ≈ 32%。所以本工具的倍数结论应读作量级，不是三位有效数字。
 
+⚠️ 前瞻收益的终点价列（v0.45.327 更正）：第 2 步与第 3 步都由
+   `(终点价 − price_at_predict) / price_at_predict` 算前瞻收益，终点列**调用时**查
+   `ic_diagnostics.FORWARD_CLOSE_COL`（t7 → `close_t7`，t30 → `price_t30`，后者本来就是
+   收盘价）。v0.45.327 之前两步都读 `price_t7`——那是 `backtester._simulate_trade_path`
+   的 `exit_price`（SL/TP 离场价，2026-04-15 路径模拟起），与 `return_t7` 一样截断；
+   与 ic_diagnostics（v0.45.19）、signal_archive（v0.45.321）、ml_expected_return_replay
+   （v0.45.326）同一个误解。**两步必须读同一列**：σ_cs² 与 σ_IC² 若算在不同的收益序列上，
+   第 4 步的分解就没有意义（与下面「过滤条件逐字一致」是同一条约束）。
+   `ic_power_report.md` 的 2026-08-16 数字是截断口径，前后对照见该报告与 CHANGELOG v0.45.327。
+
 用法
 ----
     /usr/local/bin/python3 experiments/ic_power_analysis.py
@@ -69,6 +79,8 @@ from ic_diagnostics import (  # noqa: E402  - 必须在 sys.path 注入后导入
     spearman,
     subsample_non_overlapping,
 )
+
+import ic_diagnostics as _icd  # noqa: E402  前瞻终点列唯一真相 FORWARD_CLOSE_COL
 
 # v0.45.260（数据根迁移阶段 2）：此前是 `ALPHAHIVE_DIR / "pheromone.db"`
 # （`ALPHAHIVE_DIR` 是 `__file__` 派生）——不读 `ALPHA_HIVE_HOME`。改读
@@ -191,13 +203,28 @@ def compute_neff(start: str, end: str) -> Optional[Dict]:
 # 第 2~3 步：σ_IC 实测 + σ_cs² 置换实测
 # ────────────────────────────────────────────────────────────────────────────
 
+def forward_close_col(horizon: str) -> str:
+    """前瞻收益的终点价列。**调用时**查 `ic_diagnostics.FORWARD_CLOSE_COL`，
+    不在本文件写死、也不在模块层冻结（与 ml_expected_return_replay 同法）。
+
+    ⚠️ 不能按 `f"price_{horizon}"` 拼：`price_t7` 是 SL/TP 离场价，`price_t30` 才恰好是
+    收盘价——同一个前缀，两种语义。本函数之前本文件正是这么拼的（v0.45.327 修）。
+    """
+    return _icd.FORWARD_CLOSE_COL[horizon]
+
+
 def observed_weekly_var(db_path: Path, horizon: str = "t7",
                         min_width: int = 5) -> Dict[str, Dict]:
-    """各维度不重叠周度 IC 序列的样本方差（实测，无模型假设）。"""
+    """各维度不重叠周度 IC 序列的样本方差（实测，无模型假设）。
+
+    前瞻收益走 `load_daily_ic(target="close")`，终点列 = `forward_close_col(horizon)`
+    （t7 → close_t7）。v0.45.327 之前这里显式传 `target="price"`（读 price_t7 离场价）；
+    那个口径在 ic_diagnostics 里只为复现历史保留，不该用来出新结论。
+    """
     target_col, checked_col, _, period = HORIZONS[horizon]
     ic_by_dim, n_rows, widths = load_daily_ic(
         db_path, target_col, checked_col, min_width=min_width,
-        target="price", horizon=horizon,
+        target="close", horizon=horizon,
     )
     out: Dict[str, Dict] = {}
     for dim in DIMS:
@@ -226,20 +253,26 @@ def _load_day_pairs(db_path: Path, horizon: str, dim: str,
                     min_width: int = 5) -> Dict[str, List[Tuple[float, float]]]:
     """{date: [(维度分, 前瞻收益), ...]} —— 置换检验的骨架。
 
+    前瞻收益 = `(终点价 − price_at_predict) / price_at_predict × 100`，终点列 =
+    `forward_close_col(horizon)`——必须与 `observed_weekly_var` 那条路径
+    （`load_daily_ic(target="close")`）是**同一列**，σ_cs² 与 σ_IC² 才算在同一条收益
+    序列上。v0.45.327 之前这里拼 `f"price_{horizon}"`（t7 读到离场价），样本成员也跟着
+    `price_t7 IS NOT NULL` 走：生产快照有 8 行 price_t7 空、close_t7 有值，旧口径丢掉。
+
     自己读库而不复用 build_benchmark_panel：后者返回的是「因子名 → 面板」的
     全量字典（含 47 个 signal_archive 因子），这里只要一个维度，省一次全表扫。
     """
     import sqlite3
     from collections import defaultdict
 
-    price_col = f"price_{horizon}"
+    end_col = forward_close_col(horizon)
     _, checked_col, _, _ = HORIZONS[horizon]
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         rows = con.execute(
-            f"SELECT date, dimension_scores, price_at_predict, {price_col} AS p_end "
-            f"FROM predictions WHERE {checked_col}=1 AND {price_col} IS NOT NULL "
+            f"SELECT date, dimension_scores, price_at_predict, {end_col} AS p_end "
+            f"FROM predictions WHERE {checked_col}=1 AND {end_col} IS NOT NULL "
             f"  AND price_at_predict > 0 AND dimension_scores IS NOT NULL"
         ).fetchall()
     finally:
@@ -369,7 +402,8 @@ def main() -> int:
         print(f"❌ 找不到 {db_path}", file=sys.stderr)
         return 2
 
-    result: Dict = {"horizon": args.horizon, "alpha": ALPHA, "power": POWER}
+    result: Dict = {"horizon": args.horizon, "alpha": ALPHA, "power": POWER,
+                    "forward_close_col": forward_close_col(args.horizon)}
 
     # ── 第 1 步：N_eff ──────────────────────────────────────────────────
     if args.no_network:
@@ -484,6 +518,8 @@ def main() -> int:
     _draws_done = max((p.get("n_draws", 0) for p in perm_by_dim.values()), default=0)
     print(f"  horizon={args.horizon}  α={ALPHA}  power={POWER:.0%}  "
           f"置换次数={_draws_done}")
+    print(f"  前瞻收益终点列: {result['forward_close_col']}（未截断收盘价；price_t7 是 SL/TP "
+          f"离场价，见 ic_diagnostics.FORWARD_CLOSE_COL）")
     print()
 
     print("【第 1 步】N_eff —— 有效独立标的数")
