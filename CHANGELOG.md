@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.313] — 2026-09-22 — 占位（进行中：第二轮 `/code-review high` 复检 v0.45.311——真实执行发现 `deploy_static_to_ghpages` 早就缺"全部 hash-object 失败"守卫，会把 gh-pages 推成空树、日志却打印"成功"；顺带修 git push 无超时/日志计数失真/日志级别不一致/回落函数前提未强制/JS 字面量转义）
+
 ## [0.45.312] — 2026-09-22 — Fixed：PR #8 CI 失败——`test_ghpages_data_root_migration.py` 的 single-branch clone 测试缺显式 git 身份，本机（macOS）隐式回落蒙混过关，CI（Ubuntu 跑者）必现失败，main 自身最近 5 次 CI 已经因此全红
 
 `TestResolveGhPagesParentSingleBranchClone._make_single_branch_clone()` 建的 `clone`
