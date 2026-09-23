@@ -5,6 +5,8 @@
 
 ---
 
+## [0.45.317] — 2026-09-23 — 占位（进行中：第三轮复检 v0.45.313——`apply_code_shipped_fallback` 新加的裸 assert 违反本仓生产模块零 assert 惯例）
+
 ## [0.45.316] — 2026-09-23 — 占位（进行中：删除审计 A 类死代码——GUI、NVDA 一次性脚本、旧 cron 调度、parallel_agent_runner 等 + 编排器空步骤）
 
 ## [0.45.315] — 2026-09-23 — Removed：删除全部 Polymarket 代码（用户已停用）；OracleBee 融合分逐位不变，数据真实度去掉恒 0.7 的 Polymarket 通道（09-22 重算 96.7% → 97.6%）
