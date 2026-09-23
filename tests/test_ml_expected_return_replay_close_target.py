@@ -14,6 +14,7 @@ experiments/ml_expected_return_replay.py 的「真实 7 日收益」终点列（
 符号相反，回退即红——不是数值漂移。
 """
 
+import datetime as dt
 import importlib.util
 import json
 import random
@@ -36,8 +37,10 @@ def _load_module():
 
 rep = _load_module()
 
-DAYS = ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-08"]
-TICKERS = [f"T{i}" for i in range(8)]          # 6 × 8 = 48 ≥ 脚本的 30 条下限
+# v0.45.329：脚本的判定改为横截面周序列 t 检验（每 ISO 周取第一个可用交易日），
+# 原 6 天只跨 2 个 ISO 周 ⇒ 周数 < MIN_WEEKS、永远「无法判定」。改为 6 周 × 每周 2 天（周一、周二）。
+DAYS = [str(dt.date(2026, 6, 1) + dt.timedelta(days=7 * k + o)) for k in range(6) for o in (0, 1)]
+TICKERS = [f"T{i}" for i in range(8)]          # 12 × 8 = 96 ≥ 脚本的 30 条下限
 
 
 def _create_tables(con):
@@ -106,25 +109,29 @@ class TestFixtureDiscriminates:
 class TestHeadlineFollowsClose:
     """脚本的**结论**（动量 IC 判定、方向准确率）必须建立在 close_t7 上。
 
-    ⚠️ 本组只断言统计量本身、不碰 `forward_close_col` / JSON 新键——这样拿改动前的
-    脚本原样来跑，红的理由就是「结论对着离场价算」，而不是「新属性不存在」。
+    ⚠️ 本组只断言统计量本身、不碰 `forward_close_col`——v0.45.326 拿改动前的脚本原样来跑，
+    红的理由就是「结论对着离场价算」，而不是「新属性不存在」。v0.45.329 起动量 IC 的键
+    改为 `momentum_ic`（横截面周序列），旧键 `ic_momentum_vs_forward`（池化）已删；
+    横截面口径本身的守卫在 `test_ml_expected_return_replay_cross_sectional.py`。
     """
 
     def test_json_momentum_ic_and_accuracy_follow_close_t7(self, tmp_path, monkeypatch, capsys):
         db = _build_reversal_db(tmp_path)
         res = json.loads(_run_main(monkeypatch, capsys, "--db", str(db), "--json"))
         assert res["n_pairs"] == len(DAYS) * len(TICKERS)
-        assert res["ic_momentum_vs_forward"] > 0.5, (
-            f"ic_momentum_vs_forward={res['ic_momentum_vs_forward']:+.3f}：真实收益没用 close_t7"
+        wk = res["momentum_ic"]["weekly"]
+        assert wk is not None and wk["n_weeks"] == 6, res["momentum_ic"]
+        assert wk["mean"] > 0.5 and res["momentum_ic"]["verdict"] == "positive", (
+            f"动量周序列 IC={wk['mean']:+.3f}（{res['momentum_ic']['verdict']}）：真实收益没用 close_t7"
             f"（price_t7 是 SL/TP 离场价，见 ic_diagnostics.FORWARD_CLOSE_COL）")
         acc = res["new_accuracy"]
         assert acc["abstain"] == 0 and acc["accuracy"] > 0.9, (
             f"v0.44.2 方向准确率 {acc['accuracy']:.1%}：对着离场价算时这里接近 0%")
 
     def test_text_verdict_is_not_a_truncation_made_reversal(self, tmp_path, monkeypatch, capsys):
-        """文本结论层：close 口径是「✅ 正相关」；回退到离场价会印出「⚠️ 负相关 / 短期反转」。"""
+        """文本结论层：close 口径是「✅ 显著正相关」；回退到离场价会印出「⚠️ 显著负相关 / 短期反转」。"""
         out = _run_main(monkeypatch, capsys, "--db", str(_build_reversal_db(tmp_path)))
-        assert "✅ 正相关" in out
+        assert "✅ 显著正相关 —— sign(动量)" in out
         assert "短期反转" not in out, "动量 IC 判定是对着 SL/TP 离场价算出来的"
 
 

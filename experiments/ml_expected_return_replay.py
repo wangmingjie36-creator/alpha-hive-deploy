@@ -34,6 +34,20 @@ MEMORY 里的硬规则：「任何评分/权重改动上线前必须跑基准对
   **v0.45.326 之前本脚本的全部输出（含 `ml_expected_return_report.md` 的 697 条回放）
   都是对着截断收益算的。**
 
+· 信号强度与判定（v0.45.329 起）：标准横截面口径，照抄 `experiments/final_score_dilution.py`
+  的 `weekly_ic`——日度横截面 rank-IC（当日 ≥ `MIN_WIDTH` 只、信号至少 2 个不同取值）
+  → 每 ISO 周取第一个可用交易日 → 对周序列做 **t(n−1)** 检验（那边是正态近似，这里不抄）。
+  「v0.44.2 方向准确率 − 恒定看多」同样先在**同一天、同一批行**上配对相减，再走同一条周序列。
+  判定只看 p < `ALPHA`，不看 IC / 准确率差的绝对大小。
+
+  ⚠️ 此前（≤ v0.45.328）是**全样本池化**：跨全部日期与标的一次性 Spearman，再按写死的
+  IC ±0.02、准确率 ±1pp 印「负相关 / 短期反转」「优于 / 持平 / 差于」。池化 IC 主要在测
+  「哪天涨」而不是「同一天该挑哪只」（memory `alpha-hive-cross-sectional-pooling`，第三例）；
+  两个阈值都在噪音之下——v0.45.326 只换收益列，两条印出的判定就一起翻了，而前后都不显著。
+  池化 IC 仍输出（`pooled_across_dates`），只作对照、不参与判定。
+  **去池化要去到同一天**：周内几天合在一起算一个 IC 仍在测「哪天涨」（v0.45.326 复核时
+  实测造出过假 p=0.05）。
+
 用法
 ----
     /usr/local/bin/python3 experiments/ml_expected_return_replay.py
@@ -43,13 +57,17 @@ MEMORY 里的硬规则：「任何评分/权重改动上线前必须跑基准对
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import sqlite3
 import statistics
 import sys
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
+
+from scipy import stats as _scipy_stats  # t(n−1)，与 dim_ic_forward_test / resonance_boost_forward_test 同一实现
 
 ALPHAHIVE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ALPHAHIVE_DIR))
@@ -58,8 +76,16 @@ sys.path.insert(0, str(ALPHAHIVE_DIR))
 # （`ALPHAHIVE_DIR` 是 `__file__` 派生）——不读 `ALPHA_HIVE_HOME`。改读
 # `PATHS.db`；`ALPHAHIVE_DIR` 本身保留，只喂上面的 `sys.path.insert`。
 from hive_logger import PATHS as _PATHS  # noqa: E402
-import ic_diagnostics as _icd  # noqa: E402  前瞻终点列唯一真相 FORWARD_CLOSE_COL
+# 前瞻终点列唯一真相 FORWARD_CLOSE_COL；横截面口径的 spearman / subsample_non_overlapping
+import ic_diagnostics as _icd  # noqa: E402
 DB_PATH = Path(_PATHS.db)
+
+# ── 横截面周序列口径（v0.45.329）：数值照抄 final_score_dilution.py，改一处见 weekly_t_test ──
+MIN_WIDTH = 5     # = final_score_dilution.MIN_WIDTH：当日横截面不足 5 只不算
+MIN_WEEKS = 3     # = final_score_dilution.stat 的 `n < 3 → None`
+ALPHA = 0.05      # 两侧。本脚本两条 IC + 一条准确率差，均为探索性、不做族校正（输出里写明）
+IC_METHOD = ("日度横截面 rank-IC（当日 ≥ %d 只）→ 每 ISO 周第一个可用交易日 → 周序列 t(n−1) 检验"
+             % MIN_WIDTH)
 
 
 def forward_close_col() -> str:
@@ -166,7 +192,8 @@ def _accuracy(preds: List[float], rets: List[float]) -> Dict:
 
 
 def _spearman(x: List[float], y: List[float]) -> float:
-    """秩相关（并列取平均秩）。"""
+    """秩相关（并列取平均秩）。v0.45.329 起只用于**全样本池化对照**（`pooled_across_dates`）；
+    横截面口径用 `ic_diagnostics.spearman`，与 final_score_dilution 同源。"""
     def ranks(v):
         order = sorted(range(len(v)), key=lambda i: v[i])
         r = [0.0] * len(v)
@@ -202,6 +229,139 @@ def _dist(v: List[float]) -> Dict:
     }
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# 横截面周序列口径（v0.45.329）
+# ────────────────────────────────────────────────────────────────────────────
+
+#: 一条配对样本在 by_day 里的形状：(momentum_5d, crowding_score, 真实7日收益%)
+MOM, CRD, RET = 0, 1, 2
+
+
+def group_by_day(pairs: List[Tuple[str, str, float, float, float]]
+                 ) -> Dict[str, List[Tuple[float, float, float]]]:
+    by_day: Dict[str, List[Tuple[float, float, float]]] = defaultdict(list)
+    for d, _t, m, c, r in pairs:
+        by_day[d].append((m, c, r))
+    return dict(by_day)
+
+
+def daily_cross_sectional_ic(by_day: Dict[str, List[Tuple[float, float, float]]],
+                             col: int) -> Dict[str, float]:
+    """逐日横截面 rank-IC。日内过滤规则照抄 `final_score_dilution.weekly_ic`：
+    宽度 ≥ MIN_WIDTH、信号至少 2 个不同取值、spearman 可算。**只在同一天内排序**。"""
+    daily: Dict[str, float] = {}
+    for day, recs in by_day.items():
+        if len(recs) < MIN_WIDTH:
+            continue
+        xs = [rec[col] for rec in recs]
+        if len({round(x, 9) for x in xs}) < 2:
+            continue
+        ic = _icd.spearman(xs, [rec[RET] for rec in recs])
+        if ic is not None:
+            daily[day] = ic
+    return daily
+
+
+def weekly_t_test(series: List[float]) -> Optional[Dict]:
+    """对不重叠周序列做均值 = 0 的两侧 t 检验。
+
+    与 `final_score_dilution.stat` 唯一的不同：p 用 **t(n−1)**，不用 `erfc` 正态近似
+    （n≈20 周时正态低估 p 约 3×，见 memory `alpha-hive-t-vs-normal-p`）。
+    周数 < MIN_WEEKS 或周序列零方差 ⇒ None（判定为「无法判定」，不是「不显著」）。
+    """
+    n = len(series)
+    if n < MIN_WEEKS:
+        return None
+    sd = statistics.stdev(series)
+    if sd == 0:
+        return None
+    m = statistics.fmean(series)
+    t = m / (sd / math.sqrt(n))
+    return {"n_weeks": n, "mean": m, "t": t, "df": n - 1,
+            "p": float(2 * _scipy_stats.t.sf(abs(t), n - 1))}
+
+
+def significance_verdict(test: Optional[Dict]) -> str:
+    """insufficient / not_significant / positive / negative —— 只看 p，不看效应大小。"""
+    if test is None:
+        return "insufficient"
+    if not test["p"] < ALPHA:
+        return "not_significant"
+    return "positive" if test["mean"] > 0 else "negative"
+
+
+def weekly_series(daily: Dict[str, float]) -> List[float]:
+    """每 ISO 周取第一个可用交易日（`ic_diagnostics.subsample_non_overlapping`，同 final_score_dilution）。
+    **不要**把周内几天合成一个横截面、也不要用全部日子当样本：前者仍在测「哪天涨」，
+    后者前瞻窗口互相重叠、n 被虚增。"""
+    return _icd.subsample_non_overlapping(daily, "周")
+
+
+def _weekly_block(daily: Dict[str, float]) -> Dict:
+    test = weekly_t_test(weekly_series(daily))
+    return {
+        "n_days": len(daily),
+        # 全部有效日的均值：前瞻窗口互相重叠，**只作参照，不做检验**
+        "daily_mean_overlapping": statistics.fmean(daily.values()) if daily else float("nan"),
+        "weekly": test,
+        "verdict": significance_verdict(test),
+    }
+
+
+def cross_sectional_ic(by_day: Dict[str, List[Tuple[float, float, float]]], col: int) -> Dict:
+    """标准口径的 IC 块；池化值由调用方另挂 `pooled_across_dates`，不参与判定。"""
+    return _weekly_block(daily_cross_sectional_ic(by_day, col))
+
+
+def accuracy_edge_vs_always_bullish(by_day: Dict[str, List[Tuple[float, float, float]]],
+                                    pred_fn: Callable[[float, float], float]) -> Dict:
+    """「方向准确率 − 恒定看多准确率」的横截面周序列。
+
+    每行配对：`[模型命中] − [收益 > 0]`，与 `_accuracy` 同样剔除弃权（预测或收益恰为 0）；
+    当日有效行 ≥ MIN_WIDTH 才取当日均值。两个准确率在**同一天、同一批行**上相减，
+    「哪天大盘涨」对两边同时生效、在差里抵消——然后走与 IC 同一条周序列 t 检验。
+    """
+    daily: Dict[str, float] = {}
+    for day, recs in by_day.items():
+        diffs = []
+        for m, c, r in recs:
+            dp, dr = _direction(pred_fn(m, c)), _direction(r)
+            if dp == 0 or dr == 0:
+                continue
+            diffs.append(float(dp == dr) - float(dr > 0))
+        if len(diffs) >= MIN_WIDTH:
+            daily[day] = statistics.fmean(diffs)
+    return _weekly_block(daily)
+
+
+def _dim_ic_forward_start() -> str:
+    """维度 IC 预注册的窗口起点。唯一真相 `experiments/dim_ic_protocol.FORWARD_START`；
+    按文件加载（同 dim_ic_forward_test），该文件是代码资源，`__file__` 锚点正确。"""
+    spec = importlib.util.spec_from_file_location(
+        "dim_ic_protocol", Path(__file__).resolve().parent / "dim_ic_protocol.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.FORWARD_START
+
+_VERDICT_DEFAULT = {
+    "not_significant": ("➖ 未检出方向信息 —— 不能读成「反转」「正相关」或「接近 0」",),
+    "insufficient": (f"❔ 有效周 < {MIN_WEEKS} 或周序列零方差 —— 无法判定",),
+}
+
+
+def _print_ic(label: str, block: Dict, significant_lines: Dict[str, Tuple[str, ...]]) -> None:
+    wk = block["weekly"]
+    if wk:
+        print(f"  {label}：周序列 IC {wk['mean']:+.4f}（{wk['n_weeks']} 周，t={wk['t']:+.2f}，"
+              f"p={wk['p']:.3f}）   日度均值 {block['daily_mean_overlapping']:+.4f}"
+              f"（{block['n_days']} 天，窗口重叠，仅参照）")
+    else:
+        print(f"  {label}：周序列不可用（有效日 {block['n_days']} 天）")
+    lines = significant_lines.get(block["verdict"]) or _VERDICT_DEFAULT[block["verdict"]]
+    for ln in lines:
+        print(f"    {ln}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="ML 预期收益修复前后回放")
     ap.add_argument("--db", default=str(DB_PATH))
@@ -226,9 +386,28 @@ def main() -> int:
     tilt = [v442_tilt_expected(m, c) for m, c in zip(moms, crds)]
     new = [new_expected(m, c) for m, c in zip(moms, crds)]
 
+    by_day = group_by_day(pairs)
+    ic_mom = cross_sectional_ic(by_day, MOM)
+    ic_mom["pooled_across_dates"] = _spearman(moms, rets)   # 只作对照，不参与判定
+    ic_crd = cross_sectional_ic(by_day, CRD)
+    ic_crd["pooled_across_dates"] = _spearman(crds, rets)
+    dates = sorted(by_day)
+    forward_start = _dim_ic_forward_start()
+
     result = {
         "n_pairs": len(pairs),
+        "date_range": [dates[0], dates[-1]],
+        "n_pairs_on_or_after_dim_ic_forward_start": sum(
+            len(v) for d, v in by_day.items() if d >= forward_start),
+        "dim_ic_forward_start": forward_start,
         "forward_close_col": forward_close_col(),
+        "ic_method": IC_METHOD,
+        "alpha": ALPHA,
+        # v0.45.329：原 `ic_momentum_vs_forward` / `ic_crowding_vs_forward`（全样本池化）
+        # 改名拆分——键名变了是有意的：旧读者该报 KeyError，而不是静默读到另一个量。
+        "momentum_ic": ic_mom,
+        "crowding_ic": ic_crd,
+        "new_accuracy_edge_vs_always_bullish": accuracy_edge_vs_always_bullish(by_day, new_expected),
         "actual": _dist(rets),
         "old_pred": _dist(old),
         "v441_pred": _dist(v441),
@@ -240,8 +419,6 @@ def main() -> int:
         "new_accuracy": _accuracy(new, rets),
         "bias_rejected_tilt": statistics.fmean(t - r for t, r in zip(tilt, rets)),
         "mae_rejected_tilt": statistics.fmean(abs(t - r) for t, r in zip(tilt, rets)),
-        "ic_momentum_vs_forward": _spearman(moms, rets),
-        "ic_crowding_vs_forward": _spearman(crds, rets),
         "always_bullish_accuracy": sum(1 for r in rets if r > 0) / len(rets),
         "bias_old": statistics.fmean(o - r for o, r in zip(old, rets)),
         "bias_v441": statistics.fmean(v - r for v, r in zip(v441, rets)),
@@ -263,9 +440,14 @@ def main() -> int:
     print("━" * 78)
     print("🐝 ML 预期收益修复 · 真实数据前后回放")
     print("━" * 78)
-    print(f"  配对样本: {len(pairs)} 条（有 momentum_5d 且 T+7 已回填）")
+    print(f"  配对样本: {len(pairs)} 条（有 momentum_5d 且 T+7 已回填），"
+          f"{dates[0]} ~ {dates[-1]}，{len(dates)} 个日期")
     print(f"  真实收益终点列: {result['forward_close_col']}（T+7 收盘价；price_t7 是 SL/TP 离场价，"
           f"见 ic_diagnostics.FORWARD_CLOSE_COL）")
+    n_fwd = result["n_pairs_on_or_after_dim_ic_forward_start"]
+    if n_fwd:
+        print(f"  ⚠️ 含 {n_fwd} 条 ≥ {forward_start}（维度 IC 预注册窗口起点）的样本：本输出只作探索，"
+              f"不构成该协议的证据；检视点前别为「看趋势」反复跑（dim_ic_preregistration.md §8）")
     print()
     print("【分布对照】单位：百分点")
     print(row("真实 7 日收益", result["actual"]))
@@ -292,22 +474,24 @@ def main() -> int:
               f"弃权 {a['abstain']})")
     print(f"  对照 · 恒定看多: {result['always_bullish_accuracy']:.1%}"
           f"  ← 旧公式实质上就是这个")
+    print("  （以上准确率是全样本合计，只作描述；与恒定看多「谁更好」的判定见【结论】，按周序列检验）")
     print()
     print("【两个输入信号各自的强度】")
-    ic_c = result["ic_crowding_vs_forward"]
+    print(f"  口径：{IC_METHOD}；两侧 α={ALPHA}，未做族校正（探索性）")
+    print("  判定只看 p：不显著 = 正、负、零都不能排除，**不是**「接近 0」")
+    _print_ic("5 日动量", ic_mom, {
+        "negative": ("⚠️ 显著负相关 —— 有短期反转证据。sign(动量) 作方向会系统性地错，",
+                     "   新公式虽然无偏，但方向可能比恒定看多更差。见下方结论。"),
+        "positive": ("✅ 显著正相关 —— sign(动量) 作方向有正向信号",),
+    })
     # v0.45.326：此处原写死「MEMORY 记载 crowding.adj_factor = −0.112, 3/4」——那是
     # v0.45.321 之前 `signal_archive --analyze` 对着截断收益算的数，已整体作废。只留指针。
-    print(f"  拥挤度 vs 未来 7 日收益 的 rank-IC = {ic_c:+.4f}"
-          f"   （四口径判定以 signal_archive.py --analyze 的当期输出为准）")
-    ic = result["ic_momentum_vs_forward"]
-    print(f"  5 日动量 vs 未来 7 日收益 的 rank-IC = {ic:+.4f}")
-    if ic < -0.02:
-        print("  ⚠️  **负相关** —— 存在短期反转效应。sign(动量) 作方向会系统性地错，")
-        print("      新公式虽然无偏，但方向可能比恒定看多更差。见下方结论。")
-    elif ic > 0.02:
-        print("  ✅ 正相关 —— sign(动量) 作方向有正向信号")
-    else:
-        print("  ➖ 接近 0 —— 动量在此尺度上无方向信息，新方向≈随机（但无偏）")
+    _print_ic("拥挤度", ic_crd, {
+        "negative": ("⚠️ 显著负相关（四口径判定以 signal_archive.py --analyze 的当期输出为准）",),
+        "positive": ("✅ 显著正相关（四口径判定以 signal_archive.py --analyze 的当期输出为准）",),
+    })
+    print(f"  全样本池化 IC（跨日期混算，主要在测「哪天涨」；**只作对照、不参与判定**）："
+          f"动量 {ic_mom['pooled_across_dates']:+.4f} / 拥挤度 {ic_crd['pooled_across_dates']:+.4f}")
     print()
     print("━" * 78)
     print("【结论】")
@@ -315,15 +499,22 @@ def main() -> int:
           f" —— 幅度问题已修")
     if abs(result["bias_new"]) < abs(result["bias_old"]):
         print("  · ✅ 无偏性改善（这是本次修复的直接目标）")
-    if math.isfinite(result["new_accuracy"]["accuracy"]):
-        delta = result["new_accuracy"]["accuracy"] - result["always_bullish_accuracy"]
-        verdict = "优于" if delta > 0.01 else ("持平" if abs(delta) <= 0.01 else "**差于**")
-        print(f"  · 方向准确率 {verdict} 恒定看多基准（差 {delta:+.1%}）")
-        if delta < -0.01:
-            print("    ⚠️ 修复消除了偏斜，但**没有**带来方向上的改善。")
-            print("       诚实的读法：旧的高准确率来自样本期偏多，不是预测能力。")
+    edge = result["new_accuracy_edge_vs_always_bullish"]
+    wk = edge["weekly"]
+    stat_s = (f"周序列 {wk['mean']:+.1%}，{wk['n_weeks']} 周，t={wk['t']:+.2f}，p={wk['p']:.2f}"
+              if wk else f"有效周 < {MIN_WEEKS} 或零方差")
+    head = {"positive": "✅ 显著优于", "negative": "⚠️ 显著差于",
+            "not_significant": "➖ 未检出与", "insufficient": "❔ 无法判定是否不同于"}[edge["verdict"]]
+    tail = "有差异" if edge["verdict"] == "not_significant" else ""
+    print(f"  · v0.44.2 方向准确率 {head}恒定看多基准{tail}（同日配对差 → {stat_s}）")
+    if edge["verdict"] == "not_significant":
+        print("    不显著 ≠ 持平：优于、差于、相同都不能排除。")
+    if edge["verdict"] != "positive":
+        print("    ⚠️ 修复消除了偏斜，但**没有证据**表明带来了方向上的改善。")
+        print("       诚实的读法：旧的高准确率来自样本期偏多，不是预测能力。")
     print("━" * 78)
     return 0
+
 
 
 if __name__ == "__main__":
