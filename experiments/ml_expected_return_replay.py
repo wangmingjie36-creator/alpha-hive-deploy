@@ -21,8 +21,18 @@ MEMORY 里的硬规则：「任何评分/权重改动上线前必须跑基准对
    代入旧公式所得，已在 1057 个配对样本上零反例验证。⚠️ v0.44.3 起这四个特征
    已改读信息素板真实值——本脚本是历史重放，勿据此描述现状）
 · 新公式：`mag("B+")=1.0`、crowding=50 ⇒ tilt=0 ⇒ `expected_7d = 0.8 × momentum_5d`
-· 真实收益：由 `predictions.price_at_predict` 与 `price_t7` 直接算（不用
-  `return_t7`，后者是路径依赖的，42.5% 被 SL/TP 截断）
+· 真实收益：由 `predictions.price_at_predict` 与 T+7 **收盘价** `close_t7` 算；
+  终点列唯一真相 `ic_diagnostics.FORWARD_CLOSE_COL["t7"]`，调用时查表，不在本文件写死
+
+  ⚠️ v0.45.326 更正：此前这里读 `price_t7`，理由是「不用 `return_t7`，它路径依赖、
+  被 SL/TP 截断」——理由对，列选错了。`price_t7` 存的是
+  `backtester._simulate_trade_path` 的 `exit_price`（**离场价**，v16.0 / 2026-04-15 起），
+  与 `return_t7` 一样截断：2026-05 起 100% 等于 `exit_price`，SL/TP 行 87.6% 等于它。
+  另有 CRWD 两行 `price_at_predict` 已按 07-02 的 4:1 拆股复权、`price_t7` 仍是
+  未复权价 ⇒ 旧口径读成 +325% / +340%。与 `ic_diagnostics`（v0.45.19）、
+  `signal_archive.load_panel`（v0.45.321）是**同一个误解**。
+  **v0.45.326 之前本脚本的全部输出（含 `ml_expected_return_report.md` 的 697 条回放）
+  都是对着截断收益算的。**
 
 用法
 ----
@@ -48,21 +58,33 @@ sys.path.insert(0, str(ALPHAHIVE_DIR))
 # （`ALPHAHIVE_DIR` 是 `__file__` 派生）——不读 `ALPHA_HIVE_HOME`。改读
 # `PATHS.db`；`ALPHAHIVE_DIR` 本身保留，只喂上面的 `sys.path.insert`。
 from hive_logger import PATHS as _PATHS  # noqa: E402
+import ic_diagnostics as _icd  # noqa: E402  前瞻终点列唯一真相 FORWARD_CLOSE_COL
 DB_PATH = Path(_PATHS.db)
+
+
+def forward_close_col() -> str:
+    """真实 7 日收益的终点价列。**调用时**查 `ic_diagnostics.FORWARD_CLOSE_COL`，
+    不在模块层冻成常量——否则表改了这里不跟，测试也证明不了本脚本在读那张表。"""
+    return _icd.FORWARD_CLOSE_COL["t7"]
 
 
 def load_pairs(db_path: Path) -> List[Tuple[str, str, float, float, float]]:
     """(date, ticker, momentum_5d, crowding_score, 真实7日收益%)。
 
+    真实 7 日收益 = `(终点收盘价 / price_at_predict − 1) × 100`，终点列见
+    `forward_close_col()`（= close_t7）。**不是 price_t7**：那是 SL/TP 离场价，
+    见模块 docstring 的 v0.45.326 更正。
+
     v0.44.2 起把真实 `crowding.score` 一起取出来 —— RivalBee 不再写死 50.0，
     所以回放必须用真实拥挤度，否则测不出这次改动的效果。
     """
+    end_col = forward_close_col()
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         rows = con.execute(
-            """
+            f"""
             SELECT p.date, p.ticker, m.value AS mom, c.value AS crd,
-                   (p.price_t7 / p.price_at_predict - 1.0) * 100.0 AS ret
+                   (p.{end_col} / p.price_at_predict - 1.0) * 100.0 AS ret
             FROM predictions p
             JOIN signal_archive m
               ON m.date = p.date AND m.ticker = p.ticker
@@ -71,7 +93,7 @@ def load_pairs(db_path: Path) -> List[Tuple[str, str, float, float, float]]:
               ON c.date = p.date AND c.ticker = p.ticker
              AND c.signal = 'crowding.score'
             WHERE p.checked_t7 = 1
-              AND p.price_t7 IS NOT NULL
+              AND p.{end_col} IS NOT NULL
               AND p.price_at_predict > 0
             """
         ).fetchall()
@@ -206,6 +228,7 @@ def main() -> int:
 
     result = {
         "n_pairs": len(pairs),
+        "forward_close_col": forward_close_col(),
         "actual": _dist(rets),
         "old_pred": _dist(old),
         "v441_pred": _dist(v441),
@@ -241,6 +264,8 @@ def main() -> int:
     print("🐝 ML 预期收益修复 · 真实数据前后回放")
     print("━" * 78)
     print(f"  配对样本: {len(pairs)} 条（有 momentum_5d 且 T+7 已回填）")
+    print(f"  真实收益终点列: {result['forward_close_col']}（T+7 收盘价；price_t7 是 SL/TP 离场价，"
+          f"见 ic_diagnostics.FORWARD_CLOSE_COL）")
     print()
     print("【分布对照】单位：百分点")
     print(row("真实 7 日收益", result["actual"]))
@@ -270,9 +295,10 @@ def main() -> int:
     print()
     print("【两个输入信号各自的强度】")
     ic_c = result["ic_crowding_vs_forward"]
+    # v0.45.326：此处原写死「MEMORY 记载 crowding.adj_factor = −0.112, 3/4」——那是
+    # v0.45.321 之前 `signal_archive --analyze` 对着截断收益算的数，已整体作废。只留指针。
     print(f"  拥挤度 vs 未来 7 日收益 的 rank-IC = {ic_c:+.4f}"
-          f"   （MEMORY 记载 crowding.adj_factor = −0.112, 3/4 —— 47 个信号里"
-          f"仅 2 个达标之一）")
+          f"   （四口径判定以 signal_archive.py --analyze 的当期输出为准）")
     ic = result["ic_momentum_vs_forward"]
     print(f"  5 日动量 vs 未来 7 日收益 的 rank-IC = {ic:+.4f}")
     if ic < -0.02:
