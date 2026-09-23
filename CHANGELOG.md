@@ -5,6 +5,10 @@
 
 ---
 
+## [0.45.334] — 2026-09-23 — 占位（进行中：断开 GexRegimeModifier 对 rule_score 的 ±0.8 直接加减分（保留 RegimeWeightAdjuster 路由），登记世代边界）
+
+## [0.45.333] — 2026-09-23 — 占位（进行中：gamma/delta 卖权行权价选择器——对标 GEXBot 的水平地图（重定价扫描 zero gamma / 净 GEX majors / DEX / vanna·charm）+ 单腿/价差/宽跨候选 + 前向击穿账本）
+
 ## [0.45.332] — 2026-09-23 — 占位（进行中：ic_diagnostics._load_prices 批量下载静默丢标的——检测缺列/全 NaN、逐只重试一轮、覆盖率进 --benchmark 输出）
 
 ## [0.45.331] — 2026-09-23 — 占位（进行中：permuted_weekly_var docstring 与 ic_power_report 修正 2 的「并列压低置换方差」理由与精确结果 1/(n−1) 矛盾——复核并改正叙述）
