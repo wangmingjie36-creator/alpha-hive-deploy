@@ -495,14 +495,15 @@ class TestCallersReadTheResult:
             + "\n  ".join(bad))
 
     def test_scanner_sees_every_caller(self):
-        """正对照：CLI、GUI、reporter 上的委托方法三处都要被扫到。"""
+        """正对照：CLI 调用点与 reporter 上的委托方法都要被扫到。
+        （v0.45.316 前还有 GUI 的 `gui/interactions.py`，已随 gui/ 整体删除。）"""
         sites = {rel for rel, src in _production_sources()
                  for node in ast.walk(ast.parse(src))
                  if isinstance(node, ast.Call) and _callee_name(node) == "auto_commit_and_notify"}
-        assert {"alpha_hive_daily_report.py", "gui/interactions.py"} <= sites
+        assert "alpha_hive_daily_report.py" in sites
 
     def test_scanner_flags_a_discarded_result(self):
-        """有牙：v0.45.210 前 gui/interactions.py 的原句。"""
+        """有牙：v0.45.210 前 gui/interactions.py（v0.45.316 已删）的原句。"""
         src = ("reporter.auto_commit_and_notify(report)\n"
                "sync = reporter.auto_commit_and_notify(report)\n"
                "_p = reporter.auto_commit_and_notify(report).get('git_push')\n")

@@ -15,7 +15,6 @@ exclude:
   - "Makefile"
   - "*.sh"
   - "alpha-hive-daily-*.md"
-  - "CRON_SETUP_GUIDE.md"
   - "GMAIL_FALLBACK_SUMMARY.md"
   - "PHASE2_*.md"
   - "PHASE3_*.md"

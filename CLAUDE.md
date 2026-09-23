@@ -69,7 +69,7 @@
 历史改动**不在本文件维护**（v0.40.3 清理了此前 ~75 行 v0.10-0.19 时代的实现细节清单）：
 - 版本级摘要 → MEMORY.md 末尾「版本历史」表
 - 逐项细节 → `CHANGELOG.md`
-- 定时任务（daily-scan / weekly-optimizer / self-analysis / sample-accumulator）的调度时刻 → 以 `list_scheduled_tasks` 返回的 `nextRunAt` 为唯一真相，勿引用文档里的旧时刻
+- 定时任务（weekly-optimizer / monthly-self-analysis；每日扫描走 launchd `com.alpha.hive.daily`，不走 scheduled-tasks）的调度时刻 → 以 `list_scheduled_tasks` 返回的 `nextRunAt` 为唯一真相，勿引用文档里的旧时刻
 
 ## 核心组件指针（只记"在哪、归谁管"，不记参数值）
 

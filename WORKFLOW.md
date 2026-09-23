@@ -9,9 +9,7 @@
         ↓
 generate_deep_v2.py --no-llm     ← 生成 HTML 框架 + 数据图表
         ↓
-在 Claude Cowork 里手动推理写叙事   ← 用 Claude Max 订阅
-        ↓
-inject_v2.py                      ← 把叙事注入 HTML
+在 Claude Cowork 里手动推理写叙事   ← 用 Claude Max 订阅，直接写进 HTML
         ↓
 最终报告（deep-{TICKER}-{DATE}.html）
 ```
@@ -33,11 +31,8 @@ python generate_deep_v2.py --ticker NVDA --no-llm
 
 在本对话中，把需要分析的数据/章节交给 Claude 写叙事内容。
 
-### 第三步：注入叙事
-
-```bash
-python inject_v2.py --ticker NVDA --date 2026-03-12
-```
+> v0.45.316：原「第三步 `inject_v2.py` 注入叙事」已删除——该脚本路径写死在 Cowork VM 的
+> `/sessions/*/mnt/`、本机无法运行，且文档里的 `--ticker/--date` 参数它从未实现过。
 
 ---
 
@@ -46,7 +41,6 @@ python inject_v2.py --ticker NVDA --date 2026-03-12
 | 文件 | 版本 | 说明 |
 |------|------|------|
 | `generate_deep_v2.py` | v3.5 | HTML 模板生成器，含矛盾检测/链式推理 |
-| `inject_v2.py` | v1.1 | 叙事注入器，含质量门控 |
 | `analysis-{TICKER}-ml-{DATE}.json` | — | 每日蜂群数据源 |
 
 ## 版本更新历史（generate_deep_v2.py）

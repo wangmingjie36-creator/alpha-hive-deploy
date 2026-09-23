@@ -96,7 +96,64 @@ tests/ 下），且 `python -O` 会把它剥掉——一个会被剥掉的不变
 成功日志计数口径、`_sync_ghpages` 日志级别、`report_web_assets.py` 的
 `json.dumps()` 改造，逐段核对均与代码实际行为一致。
 
-## [0.45.316] — 2026-09-23 — 占位（进行中：删除审计 A 类死代码——GUI、NVDA 一次性脚本、旧 cron 调度、parallel_agent_runner 等 + 编排器空步骤）
+## [0.45.316] — 2026-09-23 — Removed：死代码审计 A 类清理——GUI 桌面应用、7 个 NVDA 一次性脚本、旧 cron 调度、parallel_agent_runner 等（删除文件共 7,978 行，其中非测试代码 6,725 行）；编排器三个调用不存在脚本的空步骤；8 个停用/过期定时任务
+
+用户要求「检查还有哪些不用的代码和脚本」，审计后用户选「A 全删」。
+
+### 审计方法（为什么这些判得死）
+从全部自动入口（launchd `com.alpha.hive.daily` → 编排器、启用中的 2 个 scheduled task、`alpha_hive_mcp.py`、
+GitHub Actions）沿 AST import 图求可达集，另把「模块名以字符串出现」（subprocess / 动态导入）也算作边。
+408 个模块：测试 219、生产可达 129、**不可达 60**。正对照：`queen_distiller`/`oracle_bee`/`ml_predictor` 等
+在跑的模块全部可达。60 个再逐个看 docstring、全仓字符串提及、memory/CLAUDE.md 是否登记为手动工具、日志 ——
+⚠️ 日志证据本身先过正对照：`queen_distiller` 日志 logger 名与模块名不一致（0 命中却必然在跑），所以
+「日志 0 次」不单独作证据。`close_correction` 静态不可达但属登记在案的手动工具，归「保留」。
+B 类（Telegram bot、回测/研究工具、已跑完的迁移脚本、编排器 `.bak`）与 C 类（experiments、备份恢复等）未动。
+
+### Removed（仓库内）
+- `gui/`（6 个文件）+ `alpha_hive_app.py`：3 月的像素蜂群桌面应用，无进程、无启动项。
+- NVDA 一次性分析脚本 7 个：`check_0520_options` / `check_0529_options` / `check_short_positions` /
+  `earnings_pc_history` / `ff6_cycle_history` / `iv_crush_analysis` / `oi_wall`（同 v0.45.309 那批）。
+- 旧 cron 调度：`scheduler.py` / `setup_cron.py` / `run_alpha_hive_daily.sh` / `CRON_SETUP_GUIDE.md`（调度早已换
+  launchd）。**佐证**：`tests/test_scheduler.py` 整个文件一直是 skip（「schedule 库不可用」）——它的测试从没跑过。
+- `parallel_agent_runner.py`（仓内注释早写着「未接入生产」）、`memory_retriever.py`（2 月，全仓零提及）、
+  `tradier_fetcher.py` + `TRADIER_INTEGRATION_GUIDE.md`（零导入者，本机无 Tradier key）。
+- `inject_v2.py`：WORKFLOW.md 把它列为深度报告第三步，**核实后仍判死**——路径写死在 Cowork VM 的
+  `/sessions/*/mnt/`，本机无法运行；文档写的 `--ticker/--date` 参数它从未实现；最后一份 `deep-*.html` 是 03-24。
+  WORKFLOW.md 同步去掉该步。
+- 测试：`test_scheduler.py` / `test_setup_cron_allowlist.py` / `test_parallel_agent_runner.py`。
+
+### Changed（仓库内）
+- `tests/test_paths_not_frozen_at_import.py`：`KNOWN`（子集语义）摘除 `gui/app.py`、`scheduler.py` 两项——
+  留着不会红，只会静默过期；删掉「不在管辖内」里 `scheduler.py` 那条说明。
+- `tests/test_git_failures_are_visible.py`：正对照里的 `gui/interactions.py` 调用点随 gui 删除，改为只要求
+  `alpha_hive_daily_report.py`（CLI 调用 + reporter 委托方法都在其中）。
+- `tests/test_no_fake_price.py`：`_EXCLUDE_DIRS` 去掉 `gui`；「祖先目录名在排除清单里」那条回归测试的示例目录由
+  `gui` 改为 `experiments` —— 只删排除项而不改示例，那条测试会**照样绿但不再测任何东西**。
+- `pyproject.toml` coverage omit 去掉 `alpha_hive_app.py`；`_config.yml` 去掉 `CRON_SETUP_GUIDE.md`。
+- `CLAUDE.md`：定时任务清单改为现存的两个，并注明每日扫描走 launchd。
+- 未改：`test_root_data_guard` / `test_report_deployer_whitelist` 里出现 `run_alpha_hive_daily.sh` /
+  `parallel_agent_runner.py` 的列表是**合成文件名样例**（测路径分类/白名单），不依赖文件存在；`PHASE2_*` 等历史文档。
+
+### 仓库外（不进 git，此处留痕）
+- **编排器** `~/.claude/scripts/alpha-hive-orchestrator.sh`（改前备份 `.bak-20260923_pre-v0.45.316`，`bash -n` 通过）：
+  - Step 4/5 原本 `run_step` 两个**从未存在**的脚本（`update_dashboard.py` / `auto_deploy.py`），靠 rc=2 走进
+    v0.45.66 的判断。**判断本身是活的、有价值的**（Step 2 没跑完 ⇒ ERROR「本轮网站不会更新」+ status 记 failed，
+    Step 6 告警读它），所以只删死调用、改为直接判 `STEP2_RC`。抽出该段在 `STEP2_RC=0/124` 下实跑：
+    `step4_dashboard` / `step5_github_deploy` 取值与原 rc=2 分支逐字相同；日志只去掉「xxx.py 不存在」半句，
+    且每天少两行「脚本不存在，跳过」WARN。
+  - Step 9（`pheromone_recorder.py`，同样从未存在，每天只记 `skipped`）整段删除；Step 6 告警按通用循环读
+    steps_result，不依赖该键。
+- `~/.claude/scripts/send-to-telegram.py` 与 `retired/` 目录移入废纸篓（可恢复）。
+- scheduled tasks 删除 8 个（SKILL.md 保留在盘上）：`alpha-hive-daily-scan`（与 launchd 重复的死任务）、
+  `alpha-hive-sample-accumulator`、`alpha-hive-health-check`、`v15-validation-review`、`sprint2-p1-reminder`、
+  `bear-hypothesis-backtest`、`post-fix-verification-2026-08-24`、`cloud-cboe-source-check-2026-09-14`。
+  ⚠️ `vktx-venture-enrollment` / `vktx-phase3-topline-data` 两个被权限分类器拦下，**未删**，待用户在 App 里手动删。
+
+### 验证
+- ruff 全仓通过；全套 **5252 passed**（排除已知红的 `TestCoverageHorizon`）。
+- 测试 ID 逐条对账：减少 23 = `test_parallel_agent_runner` 12 + `test_setup_cron_allowlist` 2 +
+  `test_pytestmark_placement` 按测试类参数化的 9 个用例（逐条核对全是被删的那 9 个类）；另少 1 个 skip =
+  一直 skip 的 `test_scheduler.py`。无意外丢失。
 
 ## [0.45.315] — 2026-09-23 — Removed：删除全部 Polymarket 代码（用户已停用）；OracleBee 融合分逐位不变，数据真实度去掉恒 0.7 的 Polymarket 通道（09-22 重算 96.7% → 97.6%）
 

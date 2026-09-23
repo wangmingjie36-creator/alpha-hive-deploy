@@ -33,7 +33,7 @@ ROOT = Path(__file__).parent.parent
 # `_repo_files._is_ours`（点号开头那道过滤）与「`__pycache__` 里没有 .py」覆盖，
 # 留在这里是**删掉也没有任何测试会红**的等价变异行。剩下的每一项都仍是
 # load-bearing 的：它们判的是「这段代码会不会进每日扫描」，而非「是不是垃圾目录」。
-_EXCLUDE_DIRS = {"tests", "experiments", "mcp-servers", "alpha_hive_bot", "gui"}
+_EXCLUDE_DIRS = {"tests", "experiments", "mcp-servers", "alpha_hive_bot"}
 
 # 反模式：price 类变量被赋值为 100.0 字面量（允许注释里出现）
 _PATTERNS = [
@@ -63,7 +63,7 @@ def _iter_prod_py(root=None):
     # 理由全文见 `tests/_repo_files.py`；本文件末尾那组测试是它的守卫。
     for p in own_python_files(root)[0]:
         # ⚠️ 判**相对** root 的路径段，不是 `p.parts`。按绝对路径判时，仓库被
-        # checkout 到的位置会改变覆盖面——放进任何叫 `gui`/`tests` 的目录，
+        # checkout 到的位置会改变覆盖面——放进任何叫 `experiments`/`tests` 的目录，
         # 整条守卫静默扫零个文件且照样是绿的（`test_exclude_dirs_are_matched
         # _relative_to_root` 钉这一点）。
         if any(part in _EXCLUDE_DIRS for part in p.relative_to(root).parts):
@@ -215,17 +215,17 @@ def test_exclude_dirs_are_matched_relative_to_root(tmp_path):
     """`_EXCLUDE_DIRS` 必须按**相对仓库根**的路径段判，不是绝对路径段。
 
     按绝对路径判时，仓库**被 checkout 到的位置**会改变守卫的覆盖面：
-    把仓库放进任何一个名叫 `gui` / `tests` / `experiments` 的目录，
+    把仓库放进任何一个名叫 `tests` / `experiments` 的目录，
     整条守卫就**静默地扫零个文件**，而它照样是绿的。
 
     变红的变异：把 `_iter_prod_py` 里的 `rel.parts` 写回 `p.parts`。
     """
-    root = tmp_path / "gui" / "checkout"      # 祖先目录叫 `gui`（在排除清单里）
+    root = tmp_path / "experiments" / "checkout"  # 祖先目录叫 `experiments`（在排除清单里）
     root.mkdir(parents=True)
     (root / "data_pipeline.py").write_text(_PATHOLOGY, encoding="utf-8")
     hits = _scan_violations(root)
     assert hits == ["data_pipeline.py:1: price = 100.0"], (
-        "仓库根的祖先目录叫 `gui`，整个守卫就扫不到任何文件了（绿，但是空跑）。"
+        "仓库根的祖先目录叫 `experiments`，整个守卫就扫不到任何文件了（绿，但是空跑）。"
         f"实际命中：{hits}")
 
 
