@@ -1206,6 +1206,9 @@ COHORT_SIGNAL_SCOPE: Dict[str, Tuple[str, ...]] = {
     # overval_bear / short_int_bear 不读板、没变——且它们是 bear.score 的上游，不在下游闭包里。
     # Bear 不进 final_score，final_score 的切分靠 ALWAYS_SLICED，与这里的范围无关
     "v0.45.288": ("bear.score", "bear.options_bear", "bear.insider_bear"),
+    # 09-18（v0.45.314 补登）：Queen 层 data_quality 源分类补登 4 个标签，只动
+    # data_real_pct → quality_factor；各蜂自身输出不变（同 v0.45.209）
+    "v0.45.314": (),
 }
 
 

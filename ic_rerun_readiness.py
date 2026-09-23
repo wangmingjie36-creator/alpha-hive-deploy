@@ -525,6 +525,22 @@ _COHORT_HISTORY = [
      "09-19、作废约 30 条。"
      "已知不做：不改 `MAX_ENTRIES` / 淘汰逻辑；不加新口径字段（`data_sources` 已是"
      "自记录标记）；Scout/Buzz 按设计的回落（Scout 无内幕金额时本来就走 SEC）不动。"),
+    ("2026-09-18", "v0.45.314",
+     "`QueenDistiller` 的 data_quality 源分类补登 4 个此前未分类（按契约记 0 分）的标签："
+     "成功标签 `peer_read`（RivalBee 读到 ChronosBee 真实分数，v0.45.151 引入）与 "
+     "`quiet`（BuzzBee：ApeWisdom 正常返回、不在前 100 = 真实低热度）进 `REAL_SOURCES`；"
+     "降级标签 `unreadable`（RivalBee）与 `failed`（ChronosBee 日历查询失败）进 "
+     "`PROXY_SOURCES`（同 v0.45.191/209 判据：未分类记 0 = 把降级升格成全废）。"
+     "改的是 `_apply_triple_penalty` 的 `data_real_pct` → `quality_factor` → `rule_score` "
+     "这条函数 ⇒ 按本表判据登记。 "
+     "**幅度如实读**：用 `.swarm_results_*.json` 全史 1696 行重放（重放器先对 977 行"
+     "不含已退役 `finviz_api` 标签的行复现存档 `data_real_pct`，逐位吻合），修前最低值 "
+     "84.2%，**没有任何一行低于 80% 的压缩线** ⇒ `quality_factor` 恒为 1.0，"
+     "`rule_score` 全史逐位不变。可见变化只在 `data_real_pct` 本身（09-22 均值 "
+     "91.4% → 96.7%，网站 hero「数据真实度」）。`unreadable`/`failed` 全史出现 0 次。 "
+     "**边界日期取 2026-09-18、与 v0.45.279/288 同日扩展同一标签，不新开空分区，"
+     "作废 0 条**（同 v0.45.191/209 对「改动前后逐位相同」的处置）。"
+     "未来影响：数据差的日子里，此前白扣的 ~5.3pp 不再把标的推过 80% 压缩线。"),
 ]
 
 # 达到 80% 功效所需的不重叠周数（30 只标的口径，实测见 experiments/ic_power_report.md）

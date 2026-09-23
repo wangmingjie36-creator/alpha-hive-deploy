@@ -5,7 +5,67 @@
 
 ---
 
-## [0.45.314] — 2026-09-23 — 占位（进行中：数据真实度把成功标签 `peer_read`/`quiet` 记 0 分，比失败还低——补登记 + 标签全覆盖守卫）
+## [0.45.314] — 2026-09-23 — Fixed：网站「数据真实度」把两个**成功**标签 `peer_read`/`quiet` 记 0 分（比 API 挂掉的 `fallback` 0.7 还低），常年白扣约 5.3pp；补登 4 个未分类标签 + AST 全覆盖守卫 + 扫描期观测点
+
+用户问「为什么网站准确率只有 91%」。先澄清：hero 区的 91% 是**数据真实度**，不是预测准确率
+（方向准确率在「准确率」页，52.1%，与 50% 无显著差异）。对 09-22 的 900 个通道（30 只 × 30）
+逐项拆解缺的 8.6pp：
+
+| 扣分 | 通道 | 标签 | 性质 |
+|---|---|---|---|
+| 3.33 | RivalBee `catalyst_quality` | `peer_read` | **漏登记**：成功读到 ChronosBee 真实分数 |
+| 2.00 | BuzzBee `reddit`（18 只） | `quiet` | **漏登记**：榜单正常、不在前 100 = 真实低热度 |
+| 1.00 | OracleBee `polymarket` | `unavailable` | 设计如此（无个股盘口） |
+| 2.00 | Scout `google_trends`/`seeking_alpha` | `proxy_*` | 本来就是代理 |
+| 0.26 | `short_interest`/`valuation` 各 4 只 | 降级 | 当天唯一真实降级 |
+
+根因：`QueenDistiller` 源分类注释早就写着「其他 (0.0)：未分类 — 表示遗漏了分类，应视为 Bug」，
+但**没有任何东西执行这句话**——`peer_read`（v0.45.151）、`quiet`（P1-1）在下游蜂里加了，
+上游两个集合没人同步，静默记 0。「单边规则」形状：成功（`peer_read`）与失败（`unreadable`）
+在这个指标上同为 0，分不开。
+
+### Fixed
+- `swarm_agents/queen_distiller.py`：`REAL_SOURCES` 加 `peer_read`、`quiet`；`PROXY_SOURCES` 加
+  `unreadable`（RivalBee 读不到 Chronos）、`failed`（ChronosBee 日历查询失败）——后两者同样未分类，
+  只是全史 0 次出现；按 v0.45.191/209 判据降级不该记 0（把「降级」升格成「全废」），与 `unavailable` 同档。
+
+### Added
+- **扫描期观测点**：`_apply_triple_penalty` 遇未分类标签打 warning，并写入结果 `dq_unclassified`
+  （逐标的输出同名字段）。仍按契约记 0 分——只让它**可见**，不改评分语义。
+- `tests/test_dq_label_classification.py`（11 条）：AST 枚举 `swarm_agents/*.py` + `real_data_sources.py`
+  能流进 `data_quality` 的全部字符串（关键字参数 / `"data_quality":` 键 / Name 解析到同函数赋值、
+  下标赋值，并跟进把它当位置参数传入的同模块函数），断言全部已分类；不透明表达式与
+  `EXPECTED_OPAQUE` **精确相等**（两头都会红）；`SENTINELS` 正面核对每条解析路径真的接上了；
+  变异自证（删一个已登记标签 / 合成新标签 / 不可解析表达式）；`NEVER_REACHES`（`error`/`N/A`）的
+  豁免前提（`valid_results` 滤 error）正面核对；运行期观测点两条。
+  - ⚠️ **初版是假绿**：Name 解析只看本函数时，BearBee 的 `data_sources["x"] = ...` 全在 `_check_*`
+    辅助方法里，**BearBee 的标签一个都没扫到**而「无未分类标签」照样通过——是 `SENTINELS` 的
+    `sec_api` 揪出来的，已改为跟进调用。
+  - **真变异**：把 `queen_distiller.py` 换回改动前的文件跑本测试 ⇒ 恰好报出 `peer_read`/`quiet`/
+    `failed`/`unreadable` 四个。
+
+### Changed
+- `ic_rerun_readiness._COHORT_HISTORY` 追加 `("2026-09-18", "v0.45.314", …)`；`signal_archive.COHORT_SIGNAL_SCOPE`
+  声明 `"v0.45.314": ()`（只动 Queen 层，同 v0.45.209）。
+  **幅度实测**：`.swarm_results_*.json` 全史 1696 行重放（重放器对 977 行不含已退役 `finviz_api` 的行
+  逐位复现存档 `data_real_pct`；另 719 行差异全部来自 `finviz_api`——它当年在 `REAL_SOURCES`、
+  07-07 后不再产生，当时记录无误），修前最低 84.2%，**无一行低于 80% 压缩线** ⇒ `rule_score` 全史
+  逐位不变 ⇒ 与 v0.45.279/288 同日扩展、不新开空分区，**作废 0 条**。
+
+### 效果
+- 09-22 用修后真实函数重算：数据真实度均值 **91.4% → 96.7%**（区间 96.0–97.0），未分类 0。
+  下次扫描起网站 hero 生效。剩余 ~3pp 是 Polymarket（设计性缺失）与两个代理通道，本就该扣。
+- 未来：数据差的日子里，这白扣的 5.3pp 不再把标的推过 80% 压缩线。
+
+### 未处理 / 已知不做
+- `polymarket=unavailable` 仍计 0.7 拉低真实度 1pp；降级横幅已把它当设计性缺失排除，真实度公式
+  未排除。二者口径不一致，但改它会动 30/30 标的的数字，属口径决定，留给用户。
+- 静态枚举看不到运行期拼接的标签——由扫描期 `dq_unclassified` 兜底。
+
+### 验证
+- ruff 全仓通过；全套 **5288 passed**（排除下一条）。
+- `test_economic_calendar.py::TestCoverageHorizon` 红，**`origin/main` 上同样红、与本改动无关**：
+  CPI/NFP 表只覆盖到 2026-12（剩 78/72 天 < 阈值 90），BLS 2027 日程尚未发布——设计内的定期提醒。
 
 ## [0.45.313] — 2026-09-22 — Fixed：第二轮 `/code-review high` 复检 v0.45.311 真实执行发现的严重回归——`deploy_static_to_ghpages` 早就缺"全部 hash-object 失败"守卫，会把 gh-pages 推成空树、日志却打印"部署成功"；顺带修 4 处伴生问题
 

@@ -56,17 +56,32 @@ class QueenDistiller:
     # PROXY_SOURCES (0.7)：降级/代理数据，仍有参考价值
     # 其他 (0.0)：未分类 — 表示遗漏了分类，应视为 Bug
     # → 新增 agent data_quality 值时，务必加入对应集合
+    # v0.45.314：上面这句契约此前没有任何东西在执行 —— `peer_read`（v0.45.151）与
+    # `quiet`（P1-1）两个**成功**标签漏登记，被记 0 分，比 API 挂掉的 `fallback`
+    # （0.7）还低，白扣网站「数据真实度」约 5.3pp。现在两道防线：
+    #   · 扫描期：`_apply_triple_penalty` 遇未分类标签打 warning 并写入 `dq_unclassified`
+    #   · 测试期：`tests/test_dq_label_classification.py` AST 枚举全部生产者的标签
     REAL_SOURCES = {
         "real", "yfinance", "options_api",
         "keyword", "llm_enhanced", "reddit_apewisdom",
         "newsapi",  # v0.40.0: Yahoo/AV 新闻主源（Finviz 已删除）
         "rule_only", "sec_api", "SEC直查",
         "loaded", "empty",  # ChronosBee: 日历查询成功但无事件（v0.45.32: catalysts.json 通道已移除）
+        # v0.45.314：RivalBee 成功读到 ChronosBee 的真实分数（v0.45.151 引入）
+        "peer_read",
+        # v0.45.314：BuzzBee —— ApeWisdom 榜单正常返回、该票不在前 100 = 真实低热度
+        # （与 "empty" 同理：查询成功、结果为空，是观测不是降级）
+        "quiet",
     }
     PROXY_SOURCES = {
         "proxy_volume", "proxy_momentum", "proxy_social",
         "pheromone_board", "unavailable",
         "fallback", "fallback_momentum", "default", "missing",  # 降级回退仍有参考价值
+        # v0.45.314：两个降级标签此前同样未分类（记 0 = 把「这一项降级」升格成
+        # 「这一项全废」，同 v0.45.191/209 的判据），与 "unavailable" 同档。
+        # 全史 1696 行台账里两者出现 0 次 ⇒ 对历史分数无影响。
+        "unreadable",  # RivalBee：ChronosBee 条目缺失或分数不可用
+        "failed",      # ChronosBee：yfinance 日历查询失败
     }
 
     # 不进方向**计票**的蜂（v0.45.212）。只拿掉计票里那一票：报告的 agent_breakdown、
@@ -460,15 +475,23 @@ class QueenDistiller:
 
         _qs_early = 0.0
         _tf_early = 0
+        dq_unclassified: List[str] = []
         for r in valid_results:
             _dq_e = r.get("data_quality", {})
             if isinstance(_dq_e, dict):
-                for v in _dq_e.values():
+                for _ch_e, v in _dq_e.items():
                     _tf_early += 1
                     if v in self.REAL_SOURCES:
                         _qs_early += 1.0
                     elif v in self.PROXY_SOURCES:
                         _qs_early += 0.7
+                    else:
+                        # v0.45.314：未分类 = 契约写明的 Bug，此前静默记 0 分
+                        dq_unclassified.append(f"{r.get('source', '?')}.{_ch_e}={v!r}")
+        if dq_unclassified:
+            _log.warning("%s data_quality 未分类标签（按 0 分计入 data_real_pct，"
+                         "应登记进 REAL_SOURCES/PROXY_SOURCES）: %s",
+                         ticker, ", ".join(dq_unclassified))
         data_real_pct = round(_qs_early / _tf_early * 100, 1) if _tf_early > 0 else 0.0
         data_real_pct = _safe_score(data_real_pct, 50.0, 0, 100, "data_real_pct")
 
@@ -555,6 +578,7 @@ class QueenDistiller:
             "dq_penalty_applied": dq_penalty_applied,
             "quality_factor": quality_factor,
             "data_real_pct": data_real_pct,
+            "dq_unclassified": dq_unclassified,
             "guard_penalty": guard_penalty,
             "guard_penalty_applied": guard_penalty_applied,
             "bear_strength": bear_strength,
@@ -1264,6 +1288,7 @@ class QueenDistiller:
             "pheromone_compact": self.board.compact_snapshot(ticker),
             "data_quality": dv["data_quality_summary"],
             "data_real_pct": tp["data_real_pct"],
+            "dq_unclassified": tp["dq_unclassified"],
             "dim_data_quality": dv["dim_data_quality"],
             # Phase 1: LLM 推理增强
             "distill_mode": llm["distill_mode"],
