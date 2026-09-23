@@ -16,7 +16,7 @@ v0.45.219：`test_thesis_break_schema.py` 用
 1. `home_absolute_paths`：家目录下的路径 —— `/Users/…`、`/home/…`，以及
    `~/…` 与 `Path.home() / …` 两种写法（v0.45.222 补：本仓生产代码就是这么写主 checkout 的，
    `alpha_hive_mcp.py` 的 `Path.home() / "Desktop" / "Alpha Hive"`、
-   `self_analyst.py` 等的 `expanduser("~/Desktop/Alpha Hive")`，测试照抄就漏）。
+   `self_analyst.py` 等曾经的 `expanduser("~/Desktop/Alpha Hive")`（数据根迁移阶段 5 前置已清），测试照抄就漏）。
    放行家目录下**按用户存放应用状态**的地方：点目录（`~/.claude`）与 `~/Library`，
    但 **`~/Library/Mobile Documents` 与 `~/Library/CloudStorage` 除外**（v0.45.224）——
    v0.45.222 写的是「`~/Library` 仓库不住那里」，本机实测
@@ -32,7 +32,7 @@ v0.45.219：`test_thesis_break_schema.py` 用
 ------------------------
 - `os.path.join("/", "Users", …)` 把前缀拆开写、`os.path.join(os.path.expanduser("~"), "Desktop")`
   —— 全仓（含生产代码）零处。
-- 测试 import 生产模块里写死主 checkout 的常量（如 `weekly_optimizer.ALPHAHIVE_DIR`）——
+- 测试 import 生产模块里写死主 checkout 的常量（如当年的 `weekly_optimizer.ALPHAHIVE_DIR`，数据根迁移阶段 5 前置起已改为默认 None 的数据根钩子）——
   字面量扫描看不见。v0.45.222 写「现有用到它的测试都 monkeypatch 了」，只 grep 了常量名。
   v0.45.224 用审计钩子按**后果**量：进程内读写主 checkout 的只有 import 期一次 `scandir`；
   但 `weekly_optimizer` 把主 checkout **插进了 `sys.path`**（全套 40 次、从不拿掉），

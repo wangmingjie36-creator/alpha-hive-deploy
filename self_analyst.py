@@ -21,53 +21,53 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-# ── 路径配置 ──────────────────────────────────────────────────────────────────
-# v0.10.1 修复：与 weekly_optimizer.py 同步 — VM 路径从硬编码旧 session
-# (keen-magical-wright) 改为 glob 动态扫描，任意 Cowork session 都能工作。
-ALPHAHIVE_DIR = Path(os.path.expanduser("~/Desktop/Alpha Hive"))
-import glob as _glob_mod
-_VM_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/Alpha Hive"), reverse=True)
-_VM_PATH = Path(_VM_SESSIONS[0]) if _VM_SESSIONS else Path("/sessions/keen-magical-wright/mnt/Alpha Hive")
-try:
-    if _VM_PATH.exists():
-        ALPHAHIVE_DIR = _VM_PATH
-except PermissionError:
-    pass
+# ── 路径配置：全部是数据，走 PATHS（调用时求值）（数据根迁移阶段 5 前置）──────
+# 此前 `ALPHAHIVE_DIR = ~/Desktop/Alpha Hive`（字面量 + Cowork VM 挂载点 glob），
+# `SNAPSHOTS_DIR` / `BRIEFS_DIR` 在 import 期冻成常量，完全不读 `ALPHA_HIVE_HOME`。
+# 数据根迁到 `~/alpha-hive-data` 后，它会继续读代码检出里被改名/过期的旧快照。
+#
+# 本文件里 `ALPHAHIVE_DIR` 的**全部**用途都是数据（输入 `report_snapshots/`、
+# 输出 `self_analysis_briefs/`），没有代码锚点用途 ⇒ 全改 `PATHS.home`。
+# 模块级名字保留为**覆盖钩子（默认 None）**，照 collect_data.py v0.45.263 的先例；
+# 调用时经 `_snapshots_dir()` / `_briefs_dir()` 解析。⚠️ 不要把解析结果缓存回
+# 模块级常量（tests/test_paths_not_frozen_at_import.py 盯着这一族）。
+#
+# 删掉的两段逻辑（理由同 weekly_optimizer.py 文件头「路径配置」）：
+#   · Cowork VM 挂载点 glob：VM 里本文件就在挂载点，`PATHS.home` 缺省值已解到同处。
+#   · `_best_snapshots_dir()`「两处 report_snapshots 谁 *.json 多选谁」：另一处
+#     （~/Desktop/深度分析报告/深度/report_snapshots）是停更旧目录；迁移后数据根
+#     一时缺文件时它会被静默选中。现在缺省只认 `<数据根>/report_snapshots`，
+#     读错地方会在「快照目录: <路径>」+「加载快照: 0 条」里直接看到。
+ALPHAHIVE_DIR = None   # 数据根覆盖钩子；None ⇒ `PATHS.home`
+SNAPSHOTS_DIR = None   # 覆盖钩子；None ⇒ `<数据根>/report_snapshots`
+BRIEFS_DIR = None      # 覆盖钩子；None ⇒ `<数据根>/self_analysis_briefs`
 
-_VM_DEEP_SESSIONS = sorted(_glob_mod.glob("/sessions/*/mnt/深度分析报告/深度"), reverse=True)
-_VM_DEEP_DIR = Path(_VM_DEEP_SESSIONS[0]) if _VM_DEEP_SESSIONS else Path("/sessions/keen-magical-wright/mnt/深度分析报告/深度")
-try:
-    OUTPUT_DIR = _VM_DEEP_DIR if _VM_DEEP_DIR.exists() else Path(
-        os.path.expanduser("~/Desktop/深度分析报告/深度"))
-except PermissionError:
-    OUTPUT_DIR = Path(os.path.expanduser("~/Desktop/深度分析报告/深度"))
 
-# v0.45.84 修复：与 weekly_optimizer.py 同步 —— "目录存在"不等于"目录还在更新"。
-# 旧逻辑只在 OUTPUT_DIR/report_snapshots 不存在时才回退，但生产扫描管线早已
-# 只往 ALPHAHIVE_DIR/report_snapshots 写入，前者会长期存在却停止更新，导致
-# 本脚本静默消费冻结的旧快照。改为取两个候选目录中 *.json 文件数更多的那个。
-def _best_snapshots_dir() -> Path:
-    candidates = []
-    for p in [ALPHAHIVE_DIR / "report_snapshots", OUTPUT_DIR / "report_snapshots"]:
-        try:
-            if p.exists():
-                n = len(list(p.glob("*.json")))
-                candidates.append((n, p))
-        except (OSError, PermissionError):
-            pass
-    if not candidates:
-        return ALPHAHIVE_DIR / "report_snapshots"  # 兜底（即使不存在）
-    candidates.sort(reverse=True)
-    return candidates[0][1]
-SNAPSHOTS_DIR = _best_snapshots_dir()
+def _data_dir() -> Path:
+    """数据根，**调用时求值**。`ALPHAHIVE_DIR` 钩子优先，否则 `PATHS.home`。"""
+    if ALPHAHIVE_DIR is not None:
+        return Path(ALPHAHIVE_DIR)
+    from hive_logger import PATHS
+    return PATHS.home
 
-BRIEFS_DIR    = ALPHAHIVE_DIR / "self_analysis_briefs"
+
+def _snapshots_dir() -> Path:
+    """`report_snapshots/`（数据，输入），调用时求值。"""
+    if SNAPSHOTS_DIR is not None:
+        return Path(SNAPSHOTS_DIR)
+    return _data_dir() / "report_snapshots"
+
+
+def _briefs_dir() -> Path:
+    """`self_analysis_briefs/`（数据，输出），调用时求值。"""
+    if BRIEFS_DIR is not None:
+        return Path(BRIEFS_DIR)
+    return _data_dir() / "self_analysis_briefs"
 
 # Agent 中文名映射
 AGENT_ZH = {
@@ -517,10 +517,11 @@ def main() -> None:
     args = parser.parse_args()
 
     print(f"\n🐝 Alpha Hive · self_analyst 启动")
-    print(f"   快照目录: {SNAPSHOTS_DIR}")
+    snapshots_dir = _snapshots_dir()
+    print(f"   快照目录: {snapshots_dir}")
 
     # 1. 加载快照
-    snaps = load_snapshots(SNAPSHOTS_DIR,
+    snaps = load_snapshots(snapshots_dir,
                            months_back=args.months,
                            ticker_filter=args.ticker)
     print(f"   加载快照: {len(snaps)} 条（T+7 已回填）")
@@ -553,10 +554,11 @@ def main() -> None:
     if args.out:
         out_path = Path(args.out)
     else:
-        BRIEFS_DIR.mkdir(parents=True, exist_ok=True)
+        briefs_dir = _briefs_dir()
+        briefs_dir.mkdir(parents=True, exist_ok=True)
         month_tag = datetime.now().strftime("%Y-%m")
         suffix    = f"-{args.ticker.upper()}" if args.ticker else ""
-        out_path  = BRIEFS_DIR / f"self_analysis_{month_tag}{suffix}.md"
+        out_path  = briefs_dir / f"self_analysis_{month_tag}{suffix}.md"
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(briefing, encoding="utf-8")

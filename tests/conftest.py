@@ -551,8 +551,11 @@ def pytest_collection_finish(session):
 def _isolate_weekly_optimizer_db(tmp_path, monkeypatch):
     """把 weekly_optimizer.PHEROMONE_DB_PATH 指向不存在的临时路径（v0.45.86）。
 
-    该常量不走 `_isolate_env` 的 ALPHA_HIVE_DB_PATH 隔离（weekly_optimizer.py
-    自己算 ALPHAHIVE_DIR，不读那个 env var）。v0.45.86 起 Track A 会用它
+    （数据根迁移阶段 5 前置起它是默认 None 的覆盖钩子，缺省经 `_pheromone_db_path()`
+    解析 `PATHS.db`，已会跟 `_isolate_env` 走；本夹具仍保留，因为测试依赖的是
+    「库**不存在**」这一语义，而沙箱里的库可能被同一测试的其他代码建出来。
+    此前该常量写死 `~/Desktop/Alpha Hive/pheromone.db`，完全不走隔离。）
+    v0.45.86 起 Track A 会用它
     覆盖快照的 T+7 价格（见 weekly_optimizer._load_close_t7_map）——测试
     构造的 (ticker,date) 在生产库里查无匹配，会被误判"没有干净价格"整批
     丢弃，而不是真的在测原本要测的语义。指向不存在的路径，让查表函数走
